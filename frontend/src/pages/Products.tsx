@@ -1,5 +1,5 @@
 // Products.tsx — 상품 원가표 관리 페이지
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, Fragment } from "react";
 import {
   fetchApi,
   uploadFile,
@@ -151,9 +151,8 @@ export default function Products() {
           </thead>
           <tbody>
             {products.map((p) => (
-              <>
+              <Fragment key={p.id}>
                 <tr
-                  key={p.id}
                   className="border-b hover:bg-gray-50 cursor-pointer"
                   onClick={() =>
                     setExpandedId(expandedId === p.id ? null : p.id)
@@ -245,7 +244,7 @@ export default function Products() {
                     </td>
                   </tr>
                 )}
-              </>
+              </Fragment>
             ))}
             {products.length === 0 && (
               <tr>
