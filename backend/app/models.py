@@ -5,7 +5,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, Date, ForeignKey, Integer, Numeric, String, Text, func
+from sqlalchemy import Boolean, DateTime, Date, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -197,7 +197,6 @@ class Product(Base):
         DateTime, server_default=func.now()
     )
 
-    orders: Mapped[list[Order]] = relationship(back_populates="product")
     inventory_records: Mapped[list[Inventory]] = relationship(
         back_populates="product"
     )
@@ -207,23 +206,82 @@ class Order(Base):
     """주문 (채널별 매출 데이터)"""
 
     __tablename__ = "orders"
+    __table_args__ = (
+        UniqueConstraint("channel_id", "order_number", "platform_product_id", name="uq_order_item"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id"), nullable=False)
-    product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), nullable=False)
+    product_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("product_master.id"), nullable=True
+    )
     order_number: Mapped[str] = mapped_column(String(100), nullable=False)
+    platform_product_id: Mapped[str] = mapped_column(String(100), nullable=False, default="")
+    platform_product_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     selling_price: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    shipping_cost: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(12, 2), nullable=True
+    )  # None이면 배송비 포함 상품
     order_date: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     status: Mapped[str] = mapped_column(
-        String(20), nullable=False, default="completed"
+        String(20), nullable=False, default="delivered"
     )
+    raw_data: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now()
     )
 
     channel: Mapped[Channel] = relationship(back_populates="orders")
-    product: Mapped[Product] = relationship(back_populates="orders")
+    product: Mapped[Optional[ProductMaster]] = relationship()
+
+
+class SyncLog(Base):
+    """동기화 실행 이력"""
+
+    __tablename__ = "sync_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id"), nullable=False)
+    sync_type: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="orders"
+    )  # orders / revenue / products
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="running"
+    )  # running / success / error / partial
+    records_synced: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    date_from: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True)
+    date_to: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now()
+    )
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    channel: Mapped[Channel] = relationship()
+
+
+class OAuthToken(Base):
+    """OAuth2 토큰 저장 (네이버/cafe24)"""
+
+    __tablename__ = "oauth_tokens"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    channel_id: Mapped[int] = mapped_column(
+        ForeignKey("channels.id"), unique=True, nullable=False
+    )
+    access_token: Mapped[str] = mapped_column(Text, nullable=False)
+    refresh_token: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    token_type: Mapped[str] = mapped_column(String(20), nullable=False, default="Bearer")
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+    channel: Mapped[Channel] = relationship()
 
 
 class Settlement(Base):

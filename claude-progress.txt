@@ -4,8 +4,8 @@
 
 ## 현재 상태
 - 날짜: 2026-04-01
-- 단계: Sprint 1 완료
-- 전체 진행률: 25%
+- 단계: Sprint 2 진행 중
+- 전체 진행률: 50%
 
 ## 완료된 작업
 ### Sprint 0
@@ -15,45 +15,68 @@
 - [x] 사이드바 레이아웃 + React Router (5개 페이지 골격)
 
 ### Sprint 1
-- [x] DB 스키마 확장: 9개 테이블 (product_master, product_channel_mapping, ad_costs, profit_report 추가)
-- [x] channels → 7개 계정 (Wing x2, 로켓그로스 x2, 로켓배송, 네이버, cafe24)
-- [x] Backend API: 상품 CRUD + 채널 매핑 + 엑셀 업로드/다운로드
-- [x] Frontend: 상품 원가표 관리 페이지 (등록/수정/삭제, 매핑, 엑셀)
+- [x] DB 스키마 확장: 9개 테이블
+- [x] channels → 7개 계정 시드
+- [x] Backend API: 상품 CRUD + 채널 매핑 + 엑셀
+- [x] Frontend: 상품 원가표 관리 페이지
+
+### Sprint 2 (진행 중)
+- [x] autoplan 리뷰 완료 (CEO + Design + Eng)
+- [x] config.py: 멀티 플랫폼 API 설정 관리
+- [x] clients/base.py: BaseChannelClient 인터페이스 + RawOrder
+- [x] clients/coupang.py: HMAC 클라이언트 (재시도, 멀티계정)
+- [x] clients/naver.py: OAuth2 + bcrypt 클라이언트
+- [x] clients/cafe24.py: OAuth2 code grant 클라이언트
+- [x] Order 모델 업데이트 (product_master FK, 3컬럼 unique, shipping_cost nullable)
+- [x] SyncLog + OAuthToken 모델 추가
+- [x] services/sync_service.py: 동기화 오케스트레이션 + auto-linking + concurrency guard
+- [x] services/ad_cost_reader.py: ad_data.db 읽기 전용 조회
+- [x] routers/orders.py: 주문 조회 + 순이익 요약 API
+- [x] routers/sync.py: 채널 동기화 트리거 API
+- [x] routers/ad_costs.py: 광고비 조회 API
+- [x] database.py: ad_data.db read-only engine 추가
+- [x] Frontend Orders.tsx: 순이익 카드 + SyncButton + 필터 + 테이블 + empty states
+- [x] .env 업데이트 (전체 채널 키 플레이스홀더)
 
 ## 현재 진행 중인 작업
-(없음)
+(없음 — Sprint 2 코딩 완료, 테스트 대기)
 
-## 다음에 할 작업 (Sprint 2)
-1. [ ] 쿠팡 API 연동 (Wing 2계정 + 로켓그로스 2계정)
-   - coupang_api_client.py 재사용 (ohi-ad-intelligence)
-2. [ ] 네이버 커머스 API 연동 (OAuth 2.0 + bcrypt)
-3. [ ] cafe24 API 연동 (OAuth 2.0)
-4. [ ] 로켓배송 엑셀 업로드 / ohi-ad-intelligence DB 연동
-5. [ ] 광고비 데이터 통합 (ad_costs 테이블)
+## 다음에 할 작업
+1. [ ] API 키 입력 후 실제 동기화 테스트
+2. [ ] /qa 실행 (브라우저 테스트)
+3. [ ] git commit + progress 갱신
 
-## Sprint Contract
-Sprint 1 완료. Sprint 2 (API 연동) 계획 수립 필요.
+## Sprint 3 계획
+1. [ ] 대시보드 (일별/주별/월별 매출 추이 차트)
+2. [ ] 상품별/채널별 이익률 자동 계산
+3. [ ] 자동 동기화 스케줄러
+4. [ ] 정산 관리 페이지
+
+## 순이익 공식 (확정)
+순이익 = 매출 - 원가 - 수수료 - 광고비 - 배송비 - VAT(10/110)
+* 배송비: 상품별로 포함/미포함 다름 (shipping_cost nullable)
+* 로켓배송(위탁): Sprint 2에서 이익 계산 제외 (매출만 표시)
 
 ## 채널 구조 (확정)
-| 채널 | 코드 | API |
-|------|------|-----|
-| 쿠팡 Wing #1 | COUPANG_WING1 | HMAC |
-| 쿠팡 Wing #2 | COUPANG_WING2 | HMAC |
-| 쿠팡 로켓그로스 #1 | COUPANG_RG1 | HMAC |
-| 쿠팡 로켓그로스 #2 | COUPANG_RG2 | HMAC |
-| 쿠팡 로켓배송 | COUPANG_ROCKET | 엑셀 |
-| 네이버 스마트스토어 | NAVER | OAuth2+bcrypt |
-| 자사몰 (cafe24) | CAFE24 | OAuth2 |
+| 채널 | 코드 | API | 클라이언트 |
+|------|------|-----|-----------|
+| 쿠팡 Wing #1 | COUPANG_WING1 | HMAC | CoupangClient |
+| 쿠팡 Wing #2 | COUPANG_WING2 | HMAC | CoupangClient |
+| 쿠팡 로켓그로스 #1 | COUPANG_RG1 | HMAC | CoupangClient |
+| 쿠팡 로켓그로스 #2 | COUPANG_RG2 | HMAC | CoupangClient |
+| 쿠팡 로켓배송 | COUPANG_ROCKET | 엑셀 | (업로드) |
+| 네이버 스마트스토어 | NAVER | OAuth2+bcrypt | NaverClient |
+| 자사몰 (cafe24) | CAFE24 | OAuth2 | Cafe24Client |
 
 ## 알려진 이슈 / 주의사항
 - Python 3.14 → SQLAlchemy 2.0.48 필수
 - models.py에 `from __future__ import annotations` 필수
-- ohi-ad-intelligence 프로그램 위치: /Users/jino/.../AI Program/ohi-ad-intelligence/
-  - coupang_api_client.py (HMAC 인증 코드 재사용 가능)
-  - ad_data.db (광고비 데이터)
+- ohi-ad-intelligence: ad_data.db (305MB, 읽기 전용)
+- 쿠팡 API 데이터 소스: ordersheets = 주문, revenue-history = 정산 (Sprint 3)
+- 전체 시스템 KST 전제
 
 ## 마지막 git commit
-04bda8c feat: Sprint 1 - 상품 원가표 + 채널 매핑 시스템
+20a2e61 chore: add gstack skill routing rules to CLAUDE.md
 
 ---
 # 사용 규칙:

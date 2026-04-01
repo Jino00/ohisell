@@ -62,3 +62,56 @@ export interface Product {
   updated_at: string;
   mappings: Mapping[];
 }
+
+// ── Order Types ──
+export interface OrderItem {
+  id: number;
+  channel_id: number;
+  channel_name: string;
+  product_id: number | null;
+  product_name: string | null;
+  order_number: string;
+  platform_product_id: string;
+  platform_product_name: string | null;
+  quantity: number;
+  selling_price: number;
+  shipping_cost: number | null;
+  order_date: string;
+  status: string;
+  created_at: string;
+}
+
+export interface OrderListResponse {
+  items: OrderItem[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface SyncResult {
+  channel_id: number;
+  channel_name: string;
+  status: string;
+  new_orders: number;
+  updated_orders: number;
+  errors: string[];
+}
+
+export interface SyncStatus {
+  channel_id: number;
+  channel_name: string;
+  last_sync: string | null;
+  status: string | null;
+  records_synced: number;
+}
+
+export interface ProfitSummary {
+  total_revenue: number;
+  total_cost: number;
+  total_commission: number;
+  total_ad_spend: number;
+  total_shipping: number;
+  total_vat: number;
+  net_profit: number;
+  order_count: number;
+}
