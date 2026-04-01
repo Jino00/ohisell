@@ -3,9 +3,9 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
-- 날짜: 2026-04-01
-- 단계: Sprint 2 진행 중
-- 전체 진행률: 50%
+- 날짜: 2026-04-02
+- 단계: Sprint 3 완료
+- 전체 진행률: 75%
 
 ## 완료된 작업
 ### Sprint 0
@@ -20,42 +20,51 @@
 - [x] Backend API: 상품 CRUD + 채널 매핑 + 엑셀
 - [x] Frontend: 상품 원가표 관리 페이지
 
-### Sprint 2 (진행 중)
-- [x] autoplan 리뷰 완료 (CEO + Design + Eng)
+### Sprint 2
 - [x] config.py: 멀티 플랫폼 API 설정 관리
-- [x] clients/base.py: BaseChannelClient 인터페이스 + RawOrder
-- [x] clients/coupang.py: HMAC 클라이언트 (재시도, 멀티계정)
-- [x] clients/naver.py: OAuth2 + bcrypt 클라이언트
-- [x] clients/cafe24.py: OAuth2 code grant 클라이언트
-- [x] Order 모델 업데이트 (product_master FK, 3컬럼 unique, shipping_cost nullable)
-- [x] SyncLog + OAuthToken 모델 추가
-- [x] services/sync_service.py: 동기화 오케스트레이션 + auto-linking + concurrency guard
-- [x] services/ad_cost_reader.py: ad_data.db 읽기 전용 조회
+- [x] clients/: CoupangClient (HMAC), NaverClient (OAuth2+bcrypt), Cafe24Client (OAuth2)
+- [x] Order 모델 (product_master FK, 3컬럼 unique, shipping_cost nullable)
+- [x] SyncLog + OAuthToken 모델
+- [x] sync_service.py: 동기화 오케스트레이션 + auto-linking
+- [x] ad_cost_reader.py: ad_data.db 읽기 전용 조회
 - [x] routers/orders.py: 주문 조회 + 순이익 요약 API
 - [x] routers/sync.py: 채널 동기화 트리거 API
 - [x] routers/ad_costs.py: 광고비 조회 API
-- [x] database.py: ad_data.db read-only engine 추가
-- [x] Frontend Orders.tsx: 순이익 카드 + SyncButton + 필터 + 테이블 + empty states
-- [x] .env 업데이트 (전체 채널 키 플레이스홀더)
+- [x] Frontend Orders.tsx: 순이익 카드 + SyncButton + 필터 + 테이블
+
+### Sprint 3
+- [x] profit_calculator.py: 순이익 계산 엔진 (광고비 포함, ad_data.db cross-DB 매칭)
+- [x] routers/dashboard.py: /trend, /kpi, /channel-breakdown, /product-ranking
+- [x] routers/settlements.py: 정산 CRUD + 엑셀 업로드
+- [x] scheduler_service.py: APScheduler (06:00 동기화, 06:30 이익 재계산)
+- [x] routers/scheduler.py: 상태/트리거/토글 API
+- [x] models.py: ProfitReport 업데이트, Settlement 확장, SchedulerState 신규
+- [x] orders.py 리팩터 → profit_calculator 위임
+- [x] Frontend Dashboard.tsx: KPI 카드 + Recharts 차트 (매출 추이, 채널별 비중, 상품 순위)
+- [x] Frontend Settlements.tsx: 정산 업로드 + 필터 + 테이블
+- [x] Frontend SchedulerStatus.tsx: 사이드바 자동 동기화 표시기
+- [x] QA: Products React key warning 수정
 
 ## 현재 진행 중인 작업
-(없음 — Sprint 2 코딩 완료, 테스트 대기)
+(없음 — Sprint 3 코딩 완료)
 
 ## 다음에 할 작업
 1. [ ] API 키 입력 후 실제 동기화 테스트
-2. [ ] /qa 실행 (브라우저 테스트)
-3. [ ] git commit + progress 갱신
+2. [ ] /qa 실행 (Sprint 3 브라우저 테스트)
+3. [ ] Sprint 4 계획
 
-## Sprint 3 계획
-1. [ ] 대시보드 (일별/주별/월별 매출 추이 차트)
-2. [ ] 상품별/채널별 이익률 자동 계산
-3. [ ] 자동 동기화 스케줄러
-4. [ ] 정산 관리 페이지
+## Sprint 4 후보
+1. [ ] 쿠팡 revenue-history API → 정산 자동 연동
+2. [ ] 알림 시스템 (이상 매출, 동기화 실패 등)
+3. [ ] 재고 관리 페이지 구현
+4. [ ] 엑셀 리포트 다운로드 (대시보드 → 엑셀)
+5. [ ] 사용자 인증 (로그인/세션)
 
 ## 순이익 공식 (확정)
 순이익 = 매출 - 원가 - 수수료 - 광고비 - 배송비 - VAT(10/110)
 * 배송비: 상품별로 포함/미포함 다름 (shipping_cost nullable)
-* 로켓배송(위탁): Sprint 2에서 이익 계산 제외 (매출만 표시)
+* 로켓배송(위탁): 이익 계산 제외 (매출만 표시)
+* 광고비: ad_data.db에서 option_id로 매칭 (cross-DB Python 레벨 조인)
 
 ## 채널 구조 (확정)
 | 채널 | 코드 | API | 클라이언트 |
@@ -68,15 +77,22 @@
 | 네이버 스마트스토어 | NAVER | OAuth2+bcrypt | NaverClient |
 | 자사몰 (cafe24) | CAFE24 | OAuth2 | Cafe24Client |
 
+## 기술 스택
+- Backend: FastAPI 0.115.12 + SQLAlchemy 2.0.48 + APScheduler 3.10.4
+- Frontend: React 19 + Vite 8 + TypeScript 5.9 + Tailwind CSS 4.2 + Recharts 2
+- DB: SQLite (12개 테이블)
+- Python 3.14
+
 ## 알려진 이슈 / 주의사항
 - Python 3.14 → SQLAlchemy 2.0.48 필수
 - models.py에 `from __future__ import annotations` 필수
 - ohi-ad-intelligence: ad_data.db (305MB, 읽기 전용)
-- 쿠팡 API 데이터 소스: ordersheets = 주문, revenue-history = 정산 (Sprint 3)
 - 전체 시스템 KST 전제
+- API 키 미입력 상태 (.env 플레이스홀더)
+- 스케줄러는 서버 시작 시 자동 활성화 (lifespan)
 
 ## 마지막 git commit
-20a2e61 chore: add gstack skill routing rules to CLAUDE.md
+c29b649 feat: Sprint 3 - 대시보드 + 이익률 계산 + 스케줄러 + 정산 관리
 
 ---
 # 사용 규칙:
