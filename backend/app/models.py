@@ -5,7 +5,10 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, Date, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, func
+from sqlalchemy import (
+    Boolean, DateTime, Date, ForeignKey, Integer, Numeric,
+    String, Text, UniqueConstraint, func,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -152,6 +155,12 @@ class ProfitReport(Base):
     """이익률 계산 결과 캐시"""
 
     __tablename__ = "profit_report"
+    __table_args__ = (
+        UniqueConstraint(
+            "product_id", "channel_id", "period_start", "period_end", "period_type",
+            name="uq_profit_report_period",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     product_id: Mapped[int] = mapped_column(
@@ -162,6 +171,9 @@ class ProfitReport(Base):
     )
     period_start: Mapped[datetime] = mapped_column(Date, nullable=False)
     period_end: Mapped[datetime] = mapped_column(Date, nullable=False)
+    period_type: Mapped[str] = mapped_column(
+        String(10), nullable=False, default="daily"
+    )
     gross_revenue: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
     cost_of_goods: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
     commission: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
@@ -292,11 +304,24 @@ class Settlement(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id"), nullable=False)
     settlement_date: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    settlement_period_start: Mapped[Optional[datetime]] = mapped_column(
+        Date, nullable=True
+    )
+    settlement_period_end: Mapped[Optional[datetime]] = mapped_column(
+        Date, nullable=True
+    )
     total_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
     commission: Mapped[Decimal] = mapped_column(
         Numeric(12, 2), nullable=False, default=0
     )
     net_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    order_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    shipping_fee: Mapped[Decimal] = mapped_column(
+        Numeric(12, 2), nullable=False, default=0
+    )
+    source: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="excel"
+    )
     memo: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now()
@@ -322,3 +347,22 @@ class Inventory(Base):
     )
 
     product: Mapped[Product] = relationship(back_populates="inventory_records")
+
+
+# ──────────────────────────────────────────────
+# 스케줄러 상태
+# ──────────────────────────────────────────────
+class SchedulerState(Base):
+    """스케줄러 작업 상태 영속 저장"""
+
+    __tablename__ = "scheduler_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    job_name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    cron_expression: Mapped[str] = mapped_column(String(50), nullable=False)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    last_run_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    next_run_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now()
+    )

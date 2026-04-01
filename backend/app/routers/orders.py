@@ -5,7 +5,6 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import and_, func
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -89,60 +88,58 @@ def profit_summary(
     """주문 기반 순이익 요약 (필터 적용)
 
     순이익 = 매출 - 원가 - 수수료 - 광고비 - 배송비 - VAT(10/110)
+    profit_calculator를 사용하여 광고비까지 포함한 정확한 계산 수행
     """
-    query = db.query(Order)
+    from app.database import get_ad_db
+    from app.services.profit_calculator import calculate_daily_trend
 
-    if channel_id:
-        query = query.filter(Order.channel_id == channel_id)
-    if date_from:
-        query = query.filter(Order.order_date >= datetime.fromisoformat(date_from))
-    if date_to:
-        dt = datetime.fromisoformat(date_to)
-        query = query.filter(Order.order_date < dt + timedelta(days=1))
+    if date_from is None:
+        df = (datetime.now() - timedelta(days=365)).date()
+    else:
+        df = datetime.fromisoformat(date_from).date()
 
-    orders = query.all()
-    if not orders:
-        return ProfitSummary()
+    if date_to is None:
+        dt = datetime.now().date()
+    else:
+        dt = datetime.fromisoformat(date_to).date()
 
-    # 채널별 수수료율 조회
-    channel_map = {c.id: c for c in db.query(Channel).all()}
-    product_map = {p.id: p for p in db.query(ProductMaster).all()}
+    # ad_data.db 세션
+    ad_db = None
+    gen = get_ad_db()
+    if gen is not None:
+        try:
+            ad_db = next(gen)
+        except StopIteration:
+            ad_db = None
 
-    total_revenue = Decimal("0")
-    total_cost = Decimal("0")
-    total_commission = Decimal("0")
-    total_shipping = Decimal("0")
+    try:
+        trend = calculate_daily_trend(db, ad_db, channel_id, df, dt)
 
-    for o in orders:
-        revenue = o.selling_price * o.quantity
-        total_revenue += revenue
+        if not trend:
+            return ProfitSummary()
 
-        # 원가 (매핑된 상품이 있는 경우)
-        if o.product_id and o.product_id in product_map:
-            total_cost += product_map[o.product_id].cost_price * o.quantity
+        total_revenue = sum(Decimal(p["revenue"]) for p in trend)
+        total_cost = sum(Decimal(p["cost"]) for p in trend)
+        total_commission = sum(Decimal(p["commission"]) for p in trend)
+        total_ad_spend = sum(Decimal(p["ad_spend"]) for p in trend)
+        total_shipping = sum(Decimal(p["shipping"]) for p in trend)
+        total_vat = sum(Decimal(p["vat"]) for p in trend)
+        net_profit = sum(Decimal(p["net_profit"]) for p in trend)
+        order_count = sum(p["order_count"] for p in trend)
 
-        # 수수료
-        ch = channel_map.get(o.channel_id)
-        if ch:
-            total_commission += revenue * ch.commission_rate / Decimal("100")
-
-        # 배송비 (None이면 0)
-        if o.shipping_cost:
-            total_shipping += o.shipping_cost
-
-    # VAT = 매출의 10/110
-    total_vat = total_revenue * Decimal("10") / Decimal("110")
-
-    # 순이익 (광고비는 별도 API에서 조회, 여기서는 0)
-    net_profit = total_revenue - total_cost - total_commission - total_shipping - total_vat
-
-    return ProfitSummary(
-        total_revenue=total_revenue,
-        total_cost=total_cost,
-        total_commission=total_commission,
-        total_ad_spend=Decimal("0"),  # ad_costs 라우터에서 별도 제공
-        total_shipping=total_shipping,
-        total_vat=total_vat,
-        net_profit=net_profit,
-        order_count=len(orders),
-    )
+        return ProfitSummary(
+            total_revenue=total_revenue,
+            total_cost=total_cost,
+            total_commission=total_commission,
+            total_ad_spend=total_ad_spend,
+            total_shipping=total_shipping,
+            total_vat=total_vat,
+            net_profit=net_profit,
+            order_count=order_count,
+        )
+    finally:
+        if ad_db is not None:
+            try:
+                ad_db.close()
+            except Exception:
+                pass

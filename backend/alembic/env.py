@@ -17,6 +17,7 @@ if config.config_file_name is not None:
 from app.models import (  # noqa: F401
     Channel, Product, Order, Settlement, Inventory,
     ProductMaster, ProductChannelMapping, AdCost, ProfitReport,
+    SyncLog, OAuthToken, SchedulerState,
 )
 from app.database import Base
 

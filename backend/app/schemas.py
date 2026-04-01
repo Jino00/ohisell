@@ -150,3 +150,104 @@ class ProfitSummary(BaseModel):
     total_vat: Decimal = Decimal("0")
     net_profit: Decimal = Decimal("0")
     order_count: int = 0
+
+
+# ── Dashboard ──
+class TrendPoint(BaseModel):
+    date: str
+    revenue: str
+    cost: str
+    commission: str
+    ad_spend: str
+    shipping: str
+    vat: str
+    net_profit: str
+    order_count: int
+
+
+class DashboardKPI(BaseModel):
+    total_revenue: str
+    net_profit: str
+    profit_rate: str
+    order_count: int
+    revenue_change_pct: Optional[float] = None
+    profit_change_pct: Optional[float] = None
+
+
+class ChannelSummaryRow(BaseModel):
+    channel_id: int
+    channel_name: str
+    revenue: str
+    cost: str
+    commission: str
+    ad_spend: str
+    net_profit: str
+    profit_rate: str
+    order_count: int
+
+
+class ProductProfitRow(BaseModel):
+    product_id: int
+    product_name: str
+    internal_sku: str
+    revenue: str
+    cost: str
+    commission: str
+    ad_spend: str
+    shipping: str
+    net_profit: str
+    profit_rate: str
+    quantity: int
+
+
+# ── Settlement ──
+class SettlementOut(BaseModel):
+    id: int
+    channel_id: int
+    channel_name: str = ""
+    settlement_date: str
+    settlement_period_start: Optional[str] = None
+    settlement_period_end: Optional[str] = None
+    total_amount: str
+    commission: str
+    net_amount: str
+    shipping_fee: str
+    order_count: Optional[int] = None
+    source: str
+    memo: Optional[str] = None
+
+    model_config = {"from_attributes": True}
+
+
+class SettlementListResponse(BaseModel):
+    items: list[SettlementOut]
+    total: int
+    page: int
+    page_size: int
+
+
+class SettlementUploadResult(BaseModel):
+    imported: int
+    skipped: int
+    errors: list[str]
+
+
+class SettlementSummary(BaseModel):
+    total_amount: str
+    total_commission: str
+    total_net: str
+    total_shipping_fee: str
+    count: int
+
+
+# ── Scheduler ──
+class SchedulerJobOut(BaseModel):
+    id: str
+    name: str
+    next_run_time: Optional[str] = None
+    is_enabled: bool
+
+
+class SchedulerStatusOut(BaseModel):
+    is_running: bool
+    jobs: list[SchedulerJobOut]

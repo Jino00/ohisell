@@ -1,5 +1,6 @@
 // Layout.tsx — 사이드바 + 메인 영역 레이아웃
 import { NavLink, Outlet } from "react-router-dom";
+import SchedulerStatus from "./SchedulerStatus";
 
 const NAV_ITEMS = [
   { to: "/", label: "대시보드", icon: "📊" },
@@ -36,6 +37,7 @@ export default function Layout() {
             </NavLink>
           ))}
         </nav>
+        <SchedulerStatus />
       </aside>
       <main className="flex-1 overflow-auto p-6">
         <Outlet />

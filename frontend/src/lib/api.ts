@@ -115,3 +115,99 @@ export interface ProfitSummary {
   net_profit: number;
   order_count: number;
 }
+
+// ── Dashboard Types (Sprint 3) ──
+export interface TrendItem {
+  date: string;
+  revenue: number;
+  cost: number;
+  commission: number;
+  ad_spend: number;
+  shipping: number;
+  vat: number;
+  net_profit: number;
+  order_count: number;
+}
+
+export interface KpiData {
+  total_revenue: number;
+  net_profit: number;
+  profit_rate: number;
+  order_count: number;
+  revenue_change_pct: number;
+  profit_change_pct: number;
+}
+
+export interface ChannelBreakdown {
+  channel_id: number;
+  channel_name: string;
+  revenue: number;
+  cost: number;
+  commission: number;
+  ad_spend: number;
+  net_profit: number;
+  profit_rate: number;
+  order_count: number;
+}
+
+export interface ProductRanking {
+  product_id: number;
+  product_name: string;
+  internal_sku: string;
+  revenue: number;
+  cost: number;
+  commission: number;
+  ad_spend: number;
+  shipping: number;
+  net_profit: number;
+  profit_rate: number;
+  quantity: number;
+}
+
+// ── Settlement Types (Sprint 3) ──
+export interface SettlementItem {
+  id: number;
+  channel_id: number;
+  channel_name: string;
+  settlement_date: string;
+  total_amount: number;
+  commission: number;
+  net_amount: number;
+  shipping_fee: number;
+  memo: string | null;
+  created_at: string;
+}
+
+export interface SettlementListResponse {
+  items: SettlementItem[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface SettlementSummary {
+  total_amount: number;
+  total_commission: number;
+  total_net: number;
+  total_shipping_fee: number;
+  count: number;
+}
+
+export interface UploadResult {
+  imported: number;
+  skipped: number;
+  errors: string[];
+}
+
+// ── Scheduler Types (Sprint 3) ──
+export interface SchedulerJob {
+  id: string;
+  name: string;
+  next_run_time: string | null;
+  is_enabled: boolean;
+}
+
+export interface SchedulerStatus {
+  is_running: boolean;
+  jobs: SchedulerJob[];
+}
