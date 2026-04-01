@@ -4,36 +4,56 @@
 
 ## 현재 상태
 - 날짜: 2026-04-01
-- 단계: Sprint 0 완료
-- 전체 진행률: 10%
+- 단계: Sprint 1 완료
+- 전체 진행률: 25%
 
 ## 완료된 작업
+### Sprint 0
 - [x] 프로젝트 초기 세팅 (CLAUDE.md, FEATURES.json 등)
 - [x] Backend: FastAPI + SQLAlchemy 2.0.48 + Alembic
-- [x] DB 스키마 v1: channels, products, orders, settlements, inventory (5개 테이블)
-- [x] 채널 시드 데이터: 자사몰(0%), 쿠팡(10.8%), 네이버(5.5%)
 - [x] Frontend: React + Vite + TypeScript + Tailwind CSS v4
 - [x] 사이드바 레이아웃 + React Router (5개 페이지 골격)
-- [x] scripts/init.sh (개발 서버 동시 시작)
+
+### Sprint 1
+- [x] DB 스키마 확장: 9개 테이블 (product_master, product_channel_mapping, ad_costs, profit_report 추가)
+- [x] channels → 7개 계정 (Wing x2, 로켓그로스 x2, 로켓배송, 네이버, cafe24)
+- [x] Backend API: 상품 CRUD + 채널 매핑 + 엑셀 업로드/다운로드
+- [x] Frontend: 상품 원가표 관리 페이지 (등록/수정/삭제, 매핑, 엑셀)
 
 ## 현재 진행 중인 작업
 (없음)
 
-## 다음에 할 작업
-1. [ ] Sprint 1 계획 수립 (/plan)
-2. [ ] 엑셀/CSV 업로드 기능 (주문 데이터 임포트)
-3. [ ] 매출/주문 대시보드 구현
-4. [ ] 상품별 수익성 분석
+## 다음에 할 작업 (Sprint 2)
+1. [ ] 쿠팡 API 연동 (Wing 2계정 + 로켓그로스 2계정)
+   - coupang_api_client.py 재사용 (ohi-ad-intelligence)
+2. [ ] 네이버 커머스 API 연동 (OAuth 2.0 + bcrypt)
+3. [ ] cafe24 API 연동 (OAuth 2.0)
+4. [ ] 로켓배송 엑셀 업로드 / ohi-ad-intelligence DB 연동
+5. [ ] 광고비 데이터 통합 (ad_costs 테이블)
 
-## Sprint Contract (현재 sprint 완료 기준)
-Sprint 0 완료. Sprint 1 계획 수립 필요.
+## Sprint Contract
+Sprint 1 완료. Sprint 2 (API 연동) 계획 수립 필요.
+
+## 채널 구조 (확정)
+| 채널 | 코드 | API |
+|------|------|-----|
+| 쿠팡 Wing #1 | COUPANG_WING1 | HMAC |
+| 쿠팡 Wing #2 | COUPANG_WING2 | HMAC |
+| 쿠팡 로켓그로스 #1 | COUPANG_RG1 | HMAC |
+| 쿠팡 로켓그로스 #2 | COUPANG_RG2 | HMAC |
+| 쿠팡 로켓배송 | COUPANG_ROCKET | 엑셀 |
+| 네이버 스마트스토어 | NAVER | OAuth2+bcrypt |
+| 자사몰 (cafe24) | CAFE24 | OAuth2 |
 
 ## 알려진 이슈 / 주의사항
-- Python 3.14 사용 중 → SQLAlchemy 2.0.48 필수 (2.0.40은 Union 호환 안 됨)
+- Python 3.14 → SQLAlchemy 2.0.48 필수
 - models.py에 `from __future__ import annotations` 필수
+- ohi-ad-intelligence 프로그램 위치: /Users/jino/.../AI Program/ohi-ad-intelligence/
+  - coupang_api_client.py (HMAC 인증 코드 재사용 가능)
+  - ad_data.db (광고비 데이터)
 
 ## 마지막 git commit
-4d45c01 feat: Sprint 0 - 개발 환경 세팅 완료
+04bda8c feat: Sprint 1 - 상품 원가표 + 채널 매핑 시스템
 
 ---
 # 사용 규칙:
