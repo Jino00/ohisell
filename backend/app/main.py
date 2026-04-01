@@ -2,6 +2,8 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.routers import channels, products
+
 app = FastAPI(title="ohisell API", version="0.1.0")
 
 app.add_middleware(
@@ -11,6 +13,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+app.include_router(channels.router)
+app.include_router(products.router)
 
 
 @app.get("/health")

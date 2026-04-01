@@ -14,7 +14,10 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-from app.models import Channel, Product, Order, Settlement, Inventory  # noqa: F401
+from app.models import (  # noqa: F401
+    Channel, Product, Order, Settlement, Inventory,
+    ProductMaster, ProductChannelMapping, AdCost, ProfitReport,
+)
 from app.database import Base
 
 target_metadata = Base.metadata
