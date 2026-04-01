@@ -4,28 +4,36 @@
 
 ## 현재 상태
 - 날짜: 2026-04-01
-- 단계: 초기 세팅
-- 전체 진행률: 0%
+- 단계: Sprint 0 완료
+- 전체 진행률: 10%
 
 ## 완료된 작업
-(없음 — 프로젝트 시작 전)
+- [x] 프로젝트 초기 세팅 (CLAUDE.md, FEATURES.json 등)
+- [x] Backend: FastAPI + SQLAlchemy 2.0.48 + Alembic
+- [x] DB 스키마 v1: channels, products, orders, settlements, inventory (5개 테이블)
+- [x] 채널 시드 데이터: 자사몰(0%), 쿠팡(10.8%), 네이버(5.5%)
+- [x] Frontend: React + Vite + TypeScript + Tailwind CSS v4
+- [x] 사이드바 레이아웃 + React Router (5개 페이지 골격)
+- [x] scripts/init.sh (개발 서버 동시 시작)
 
 ## 현재 진행 중인 작업
 (없음)
 
 ## 다음에 할 작업
-1. [ ] /plan으로 Sprint 0 시작
-2. [ ] FEATURES.json 작성
-3. [ ] 개발 환경 세팅
+1. [ ] Sprint 1 계획 수립 (/plan)
+2. [ ] 엑셀/CSV 업로드 기능 (주문 데이터 임포트)
+3. [ ] 매출/주문 대시보드 구현
+4. [ ] 상품별 수익성 분석
 
 ## Sprint Contract (현재 sprint 완료 기준)
-(Sprint 시작 후 여기에 기록)
+Sprint 0 완료. Sprint 1 계획 수립 필요.
 
 ## 알려진 이슈 / 주의사항
-(없음)
+- Python 3.14 사용 중 → SQLAlchemy 2.0.48 필수 (2.0.40은 Union 호환 안 됨)
+- models.py에 `from __future__ import annotations` 필수
 
 ## 마지막 git commit
-(없음 — 초기 상태)
+4d45c01 feat: Sprint 0 - 개발 환경 세팅 완료
 
 ---
 # 사용 규칙:
