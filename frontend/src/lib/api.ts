@@ -1,5 +1,5 @@
 // api.ts — Backend API 클라이언트
-const API_BASE = "http://localhost:8000";
+const API_BASE = import.meta.env.DEV ? "http://localhost:8000" : "";
 
 export async function fetchApi<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
