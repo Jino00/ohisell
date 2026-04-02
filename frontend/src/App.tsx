@@ -6,6 +6,7 @@ import Orders from "./pages/Orders";
 import Products from "./pages/Products";
 import InventoryPage from "./pages/InventoryPage";
 import Settlements from "./pages/Settlements";
+import Settings from "./pages/Settings";
 
 export default function App() {
   return (
@@ -17,6 +18,7 @@ export default function App() {
           <Route path="products" element={<Products />} />
           <Route path="inventory" element={<InventoryPage />} />
           <Route path="settlements" element={<Settlements />} />
+          <Route path="settings" element={<Settings />} />
         </Route>
       </Routes>
     </BrowserRouter>

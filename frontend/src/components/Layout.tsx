@@ -8,6 +8,7 @@ const NAV_ITEMS = [
   { to: "/products", label: "상품 관리", icon: "📦" },
   { to: "/inventory", label: "재고 관리", icon: "🏭" },
   { to: "/settlements", label: "정산 관리", icon: "💰" },
+  { to: "/settings", label: "설정", icon: "⚙️" },
 ];
 
 export default function Layout() {
