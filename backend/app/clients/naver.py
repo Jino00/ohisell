@@ -181,6 +181,12 @@ class NaverClient(BaseChannelClient):
                 product_id = str(po.get("productId", ""))
                 shipping_fee = Decimal(str(po.get("deliveryFeeAmount", 0)))
 
+                # 동일 주문+상품 중복 방지
+                detail_key = f"{order_id}_{product_id}"
+                if detail_key in seen_po_ids:
+                    continue
+                seen_po_ids.add(detail_key)
+
                 raw = RawOrder(
                     order_number=order_id,
                     platform_product_id=product_id,
