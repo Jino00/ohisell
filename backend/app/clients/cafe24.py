@@ -207,6 +207,7 @@ class Cafe24Client(BaseChannelClient):
             "end_date": date_to.isoformat(),
             "limit": 100,
             "offset": 0,
+            "embed": "items",
         }
 
         while True:
@@ -219,17 +220,45 @@ class Cafe24Client(BaseChannelClient):
                 break
 
             for item in orders_data:
-                for detail in item.get("items", [{}]):
+                items_list = item.get("items", [])
+                order_amount = item.get("actual_order_amount", {})
+                shipping_fee_str = order_amount.get("shipping_fee", "0")
+                shipping_fee = Decimal(str(shipping_fee_str).replace(",", ""))
+
+                if items_list:
+                    for detail in items_list:
+                        price_str = detail.get("product_price", detail.get("actual_price", "0"))
+                        # item_no로 고유 구분 (같은 주문에 같은 상품 여러 개 가능)
+                        product_no = str(detail.get("product_no", ""))
+                        item_no = str(detail.get("order_item_code", detail.get("item_no", "")))
+                        pid = f"{product_no}_{item_no}" if item_no else product_no
+                        raw = RawOrder(
+                            order_number=str(item.get("order_id", "")),
+                            platform_product_id=pid,
+                            platform_product_name=detail.get("product_name", ""),
+                            quantity=int(detail.get("quantity", 1)),
+                            selling_price=Decimal(str(price_str).replace(",", "")),
+                            shipping_cost=shipping_fee if shipping_fee else None,
+                            order_date=item.get("order_date", date_from.isoformat()),
+                            status=self._map_status(
+                                detail.get("order_status", item.get("order_status", ""))
+                            ),
+                            raw_data={"order": item, "item": detail},
+                        )
+                        all_orders.append(raw)
+                else:
+                    # items 없으면 주문 금액으로 1건 기록
+                    payment = order_amount.get("payment_amount", "0")
                     raw = RawOrder(
                         order_number=str(item.get("order_id", "")),
-                        platform_product_id=str(detail.get("product_no", "")),
-                        platform_product_name=detail.get("product_name", ""),
-                        quantity=int(detail.get("quantity", 1)),
-                        selling_price=Decimal(str(detail.get("product_price", 0))),
-                        shipping_cost=Decimal(str(item.get("shipping_fee", 0))) or None,
+                        platform_product_id="",
+                        platform_product_name="",
+                        quantity=1,
+                        selling_price=Decimal(str(payment).replace(",", "")),
+                        shipping_cost=shipping_fee if shipping_fee else None,
                         order_date=item.get("order_date", date_from.isoformat()),
                         status=self._map_status(item.get("order_status", "")),
-                        raw_data={"order": item, "item": detail},
+                        raw_data={"order": item},
                     )
                     all_orders.append(raw)
 
