@@ -228,14 +228,21 @@ class Cafe24Client(BaseChannelClient):
                 if items_list:
                     for detail in items_list:
                         price_str = detail.get("product_price", detail.get("actual_price", "0"))
-                        # item_no로 고유 구분 (같은 주문에 같은 상품 여러 개 가능)
+                        # variant_code = 상품+옵션 고유 ID (예: P00000UC000Y)
+                        variant = detail.get("variant_code", "")
                         product_no = str(detail.get("product_no", ""))
-                        item_no = str(detail.get("order_item_code", detail.get("item_no", "")))
-                        pid = f"{product_no}_{item_no}" if item_no else product_no
+                        pid = variant if variant else product_no
+
+                        # 상품명 + 옵션명 결합
+                        pname = detail.get("product_name", "")
+                        option_val = detail.get("option_value", "")
+                        if option_val:
+                            pname = f"{pname} [{option_val}]"
+
                         raw = RawOrder(
                             order_number=str(item.get("order_id", "")),
                             platform_product_id=pid,
-                            platform_product_name=detail.get("product_name", ""),
+                            platform_product_name=pname,
                             quantity=int(detail.get("quantity", 1)),
                             selling_price=Decimal(str(price_str).replace(",", "")),
                             shipping_cost=shipping_fee if shipping_fee else None,
