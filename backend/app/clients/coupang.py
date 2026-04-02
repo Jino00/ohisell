@@ -132,19 +132,25 @@ class CoupangClient(BaseChannelClient):
                     log.error("발주서 조회 실패 (날짜: %s): code=%s", day_str, code)
                     break
 
-                for item in result.get("data", []):
-                    raw = RawOrder(
-                        order_number=str(item.get("orderId", "")),
-                        platform_product_id=str(item.get("vendorItemId", "")),
-                        platform_product_name=item.get("vendorItemName", ""),
-                        quantity=int(item.get("shippingCount", 1)),
-                        selling_price=Decimal(str(item.get("orderPrice", 0))),
-                        shipping_cost=None,  # 쿠팡 발주서에 배송비 별도 필드 없음
-                        order_date=item.get("paidAt", day_str),
-                        status=self._map_status(item.get("status", "")),
-                        raw_data=item,
-                    )
-                    all_orders.append(raw)
+                for shipment in result.get("data", []):
+                    order_id = str(shipment.get("orderId", ""))
+                    paid_at = shipment.get("paidAt", day_str)
+                    status = self._map_status(shipment.get("status", ""))
+                    shipping_price = Decimal(str(shipment.get("shippingPrice", 0)))
+
+                    for oi in shipment.get("orderItems", []):
+                        raw = RawOrder(
+                            order_number=order_id,
+                            platform_product_id=str(oi.get("vendorItemId", "")),
+                            platform_product_name=oi.get("vendorItemName", ""),
+                            quantity=int(oi.get("shippingCount", 1)),
+                            selling_price=Decimal(str(oi.get("orderPrice", 0))),
+                            shipping_cost=shipping_price if shipping_price else None,
+                            order_date=paid_at,
+                            status=status,
+                            raw_data=shipment,
+                        )
+                        all_orders.append(raw)
 
                 if result.get("hasNext"):
                     next_token = result.get("nextToken", "")

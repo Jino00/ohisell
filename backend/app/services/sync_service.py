@@ -69,6 +69,16 @@ def _get_client_for_channel(channel: Channel, db: Session | None = None) -> Base
     return None
 
 
+def _is_coupang_order_for_channel(raw_data: dict, is_wing: bool) -> bool:
+    """쿠팡 주문이 Wing/RG 채널에 맞는지 shipmentType으로 판별"""
+    shipment_type = raw_data.get("shipmentType", "")
+    # THIRD_PARTY = 판매자 직배송 (Wing)
+    # GROWTH, COUPANG 등 = 쿠팡 물류 (로켓그로스)
+    if is_wing:
+        return shipment_type == "THIRD_PARTY"
+    return shipment_type != "THIRD_PARTY"
+
+
 def _auto_link_product(db: Session, order: Order) -> None:
     """주문의 platform_product_id로 상품 자동 매핑"""
     if order.product_id is not None:
@@ -160,6 +170,14 @@ def sync_channel_orders(
 
     try:
         raw_orders = client.fetch_orders(date_from, date_to)
+
+        # 쿠팡 Wing/RG 동일 API 키 → shipmentType으로 필터링
+        if channel.platform == "coupang" and raw_orders:
+            is_wing = "WING" in channel.code
+            raw_orders = [
+                r for r in raw_orders
+                if _is_coupang_order_for_channel(r.raw_data, is_wing)
+            ]
 
         for raw in raw_orders:
             existing = db.query(Order).filter(
