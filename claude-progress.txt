@@ -4,8 +4,8 @@
 
 ## 현재 상태
 - 날짜: 2026-04-02
-- 단계: Sprint 3 완료
-- 전체 진행률: 75%
+- 단계: Sprint 4A 완료
+- 전체 진행률: 85%
 
 ## 완료된 작업
 ### Sprint 0
@@ -45,20 +45,36 @@
 - [x] Frontend SchedulerStatus.tsx: 사이드바 자동 동기화 표시기
 - [x] QA: Products React key warning 수정
 
+### Sprint 4A
+- [x] cafe24 OAuth 4개 엔드포인트 (auth-url, callback, status, disconnect)
+- [x] cafe24 토큰 자동갱신 (on_token_refreshed 콜백 + proactive refresh 30분 간격)
+- [x] OAuthToken.refresh_token_expires_at 컬럼 + 마이그레이션
+- [x] Oracle Cloud 배포 (sellc.ohitech.co.kr, nginx + PM2 + certbot)
+- [x] GitHub 리포 생성 (Jino00/ohisell, private)
+- [x] profit_calculator 광고비 bleeding 버그 수정 (비례배분 → option_id 직접 매핑)
+- [x] 쿠팡 API 응답 파싱 수정 (orderItems 배열 내부 추출)
+- [x] 쿠팡 Wing/RG 중복 방지 (shipmentType 필터링)
+- [x] F-405 설정 페이지 (채널 연동 상태 + 동기화 관리)
+- [x] 전체 API 키 입력 완료 (.env)
+- [x] 실제 동기화 검증: Wing2 46건, Wing1 1건 (가격/상품ID 정상)
+
 ## 현재 진행 중인 작업
-(없음 — Sprint 3 코딩 완료)
+(없음 — Sprint 4A 완료)
 
 ## 다음에 할 작업
-1. [ ] API 키 입력 후 실제 동기화 테스트
-2. [ ] /qa 실행 (Sprint 3 브라우저 테스트)
-3. [ ] Sprint 4 계획
+### Sprint 4B
+1. [ ] 네이버 IP 등록 (Oracle IP 168.107.19.222) → API 테스트
+2. [ ] nginx IP 화이트리스트 또는 Basic Auth (보안)
+3. [ ] OAuth state CSRF 토큰화
+4. [ ] 서버에 ad_data.db 실제 파일 전송 (305MB)
+5. [ ] 첫 동기화 결과 플랫폼 대시보드와 수동 대사
 
-## Sprint 4 후보
-1. [ ] 쿠팡 revenue-history API → 정산 자동 연동
-2. [ ] 알림 시스템 (이상 매출, 동기화 실패 등)
-3. [ ] 재고 관리 페이지 구현
-4. [ ] 엑셀 리포트 다운로드 (대시보드 → 엑셀)
-5. [ ] 사용자 인증 (로그인/세션)
+### Sprint 5 후보
+1. [ ] 알림 시스템 (Telegram/Slack)
+2. [ ] 재고 관리 페이지 구현
+3. [ ] 엑셀 리포트 다운로드 (대시보드 → 엑셀)
+4. [ ] 사용자 인증 (로그인/세션)
+5. [ ] 쿠팡 revenue-history 정산 자동 연동
 
 ## 순이익 공식 (확정)
 순이익 = 매출 - 원가 - 수수료 - 광고비 - 배송비 - VAT(10/110)
@@ -67,32 +83,40 @@
 * 광고비: ad_data.db에서 option_id로 매칭 (cross-DB Python 레벨 조인)
 
 ## 채널 구조 (확정)
-| 채널 | 코드 | API | 클라이언트 |
-|------|------|-----|-----------|
-| 쿠팡 Wing #1 | COUPANG_WING1 | HMAC | CoupangClient |
-| 쿠팡 Wing #2 | COUPANG_WING2 | HMAC | CoupangClient |
-| 쿠팡 로켓그로스 #1 | COUPANG_RG1 | HMAC | CoupangClient |
-| 쿠팡 로켓그로스 #2 | COUPANG_RG2 | HMAC | CoupangClient |
-| 쿠팡 로켓배송 | COUPANG_ROCKET | 엑셀 | (업로드) |
-| 네이버 스마트스토어 | NAVER | OAuth2+bcrypt | NaverClient |
-| 자사몰 (cafe24) | CAFE24 | OAuth2 | Cafe24Client |
+| 채널 | 코드 | API | 클라이언트 | 동기화 상태 |
+|------|------|-----|-----------|------------|
+| 쿠팡 Wing #1 | COUPANG_WING1 | HMAC | CoupangClient | 1건 (오픽스) |
+| 쿠팡 Wing #2 | COUPANG_WING2 | HMAC | CoupangClient | 46건 (오하이테크) |
+| 쿠팡 로켓그로스 #1 | COUPANG_RG1 | HMAC | CoupangClient | 0건 |
+| 쿠팡 로켓그로스 #2 | COUPANG_RG2 | HMAC | CoupangClient | 0건 |
+| 쿠팡 로켓배송 | COUPANG_ROCKET | 엑셀 | (업로드) | - |
+| 네이버 스마트스토어 | NAVER | OAuth2+bcrypt | NaverClient | 0건 |
+| 자사몰 (cafe24) | CAFE24 | OAuth2 | Cafe24Client | 0건 |
+
+## 쿠팡 Wing/RG 구분 방식 (확정)
+- 동일 vendor_id → 동일 API 키
+- `shipmentType == "THIRD_PARTY"` → Wing (판매자 직배송)
+- `shipmentType != "THIRD_PARTY"` → 로켓그로스 (쿠팡 물류)
 
 ## 기술 스택
 - Backend: FastAPI 0.115.12 + SQLAlchemy 2.0.48 + APScheduler 3.10.4
 - Frontend: React 19 + Vite 8 + TypeScript 5.9 + Tailwind CSS 4.2 + Recharts 2
 - DB: SQLite (12개 테이블)
-- Python 3.14
+- Python 3.14 (로컬), 3.10 (서버)
+- 프로덕션: https://sellc.ohitech.co.kr (Oracle Cloud 168.107.19.222)
 
 ## 알려진 이슈 / 주의사항
 - Python 3.14 → SQLAlchemy 2.0.48 필수
 - models.py에 `from __future__ import annotations` 필수
 - ohi-ad-intelligence: ad_data.db (305MB, 읽기 전용)
 - 전체 시스템 KST 전제
-- API 키 미입력 상태 (.env 플레이스홀더)
+- 서버 ad_data.db: 0바이트 (실제 305MB 파일 전송 필요)
+- 프로덕션 API에 인증 없음 (보안 취약)
+- cafe24 OAuth state: 하드코딩 → CSRF 토큰 변경 필요
 - 스케줄러는 서버 시작 시 자동 활성화 (lifespan)
 
 ## 마지막 git commit
-c29b649 feat: Sprint 3 - 대시보드 + 이익률 계산 + 스케줄러 + 정산 관리
+202e1f9 fix: 쿠팡 API 응답 파싱 수정 + Wing/RG 중복 필터링
 
 ---
 # 사용 규칙:
