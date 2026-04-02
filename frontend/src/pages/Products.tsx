@@ -19,6 +19,7 @@ export default function Products() {
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [uploadMsg, setUploadMsg] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
+  const mappingFileRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
     const [p, c] = await Promise.all([
@@ -91,6 +92,23 @@ export default function Products() {
     if (fileRef.current) fileRef.current.value = "";
   }
 
+  async function handleMappingUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const result = await uploadFile("/api/products/upload-by-name", file);
+      setUploadMsg(
+        `상품 생성 ${result.products_created}건, 수정 ${result.products_updated}건, ` +
+        `매핑 ${result.mappings_created}건, 주문 연결 ${result.orders_linked}건` +
+          (result.errors?.length ? ` / 오류 ${result.errors.length}건` : "")
+      );
+      load();
+    } catch (err) {
+      setUploadMsg(`업로드 실패: ${err}`);
+    }
+    if (mappingFileRef.current) mappingFileRef.current.value = "";
+  }
+
   const fmt = (n: number) =>
     new Intl.NumberFormat("ko-KR").format(n);
 
@@ -112,7 +130,17 @@ export default function Products() {
             엑셀 다운로드
           </a>
           <label className="px-3 py-2 text-sm bg-orange-500 text-white rounded-md hover:bg-orange-600 cursor-pointer">
-            엑셀 업로드
+            원가 매핑 업로드
+            <input
+              ref={mappingFileRef}
+              type="file"
+              accept=".xlsx,.xls"
+              className="hidden"
+              onChange={handleMappingUpload}
+            />
+          </label>
+          <label className="px-3 py-2 text-sm bg-gray-500 text-white rounded-md hover:bg-gray-600 cursor-pointer">
+            SKU 업로드
             <input
               ref={fileRef}
               type="file"

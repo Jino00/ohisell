@@ -179,33 +179,28 @@ def download_mapping_template(db: Session = Depends(get_db)):
 
     wb = Workbook()
 
-    # 시트1: 상품 원가표 (사용자가 채울 부분)
+    # 시트1: 상품 원가표 (상품명 + 원가)
     ws1 = wb.active
     ws1.title = "상품 원가표"
-    ws1.append(["사내SKU", "상품명", "원가", "카테고리", "메모"])
-    # 고유 상품명 기반으로 후보 행 생성 (중복 제거)
+    ws1.append(["상품명", "원가"])
     seen_names: set[str] = set()
     for r in rows:
-        # 상품명에서 옵션 부분(콤마 이후) 제거하여 대표명 추출
-        base_name = r.platform_product_name.split(",")[0].strip() if r.platform_product_name else ""
-        if base_name and base_name not in seen_names:
-            seen_names.add(base_name)
-            ws1.append(["", base_name, "", "", ""])
+        name = r.platform_product_name or ""
+        # 쿠팡: 콤마 이후 옵션 제거하여 대표명
+        if r.code and r.code.startswith("COUPANG"):
+            name = name.split(",")[0].strip()
+        if name and name not in seen_names:
+            seen_names.add(name)
+            ws1.append([name, ""])
 
-    # 시트2: 채널 매핑 (주문 데이터에서 자동 채움, 사용자는 사내SKU만 입력)
+    # 시트2: 채널 매핑 (상품명 + 채널코드 + 채널상품ID)
     ws2 = wb.create_sheet("채널 매핑")
-    ws2.append([
-        "사내SKU", "채널코드", "채널상품번호", "채널상품명", "채널SKU", "판매가", "활성",
-    ])
+    ws2.append(["상품명", "채널코드", "채널상품ID"])
     for r in rows:
         ws2.append([
-            "",  # 사내SKU — 사용자가 채울 부분
+            "",  # 상품명 — 시트1과 동일한 상품명 입력
             r.code,
             r.platform_product_id,
-            r.platform_product_name,
-            "",  # 채널SKU
-            float(r.avg_price) if r.avg_price else 0,
-            "Y",
         ])
 
     # 시트3: 채널 목록 (참고용)
@@ -217,22 +212,20 @@ def download_mapping_template(db: Session = Depends(get_db)):
     # 스타일: 사용자가 채울 셀 강조
     from openpyxl.styles import PatternFill
     yellow = PatternFill(start_color="FFFFCC", end_color="FFFFCC", fill_type="solid")
-    for row in ws1.iter_rows(min_row=2, min_col=1, max_col=3):
+    # 시트1: 상품명+원가 전체 노란색
+    for row in ws1.iter_rows(min_row=2, min_col=1, max_col=2):
         for cell in row:
             cell.fill = yellow
+    # 시트2: 상품명만 노란색
     for row in ws2.iter_rows(min_row=2, min_col=1, max_col=1):
         for cell in row:
             cell.fill = yellow
 
-    # 열 너비 조정
-    ws1.column_dimensions["A"].width = 15
-    ws1.column_dimensions["B"].width = 50
-    ws1.column_dimensions["C"].width = 10
-    ws2.column_dimensions["A"].width = 15
-    ws2.column_dimensions["B"].width = 18
-    ws2.column_dimensions["C"].width = 18
-    ws2.column_dimensions["D"].width = 60
-    ws2.column_dimensions["F"].width = 12
+    ws1.column_dimensions["A"].width = 65
+    ws1.column_dimensions["B"].width = 12
+    ws2.column_dimensions["A"].width = 65
+    ws2.column_dimensions["B"].width = 20
+    ws2.column_dimensions["C"].width = 25
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -400,4 +393,132 @@ async def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_d
                 results["mappings_created"] += 1
 
     db.commit()
+    return results
+
+
+# ── 상품명 기반 원가 매핑 업로드 ──
+@router.post("/upload-by-name")
+async def upload_by_name(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    """상품명 기반 원가 매핑 엑셀 업로드
+
+    시트1 "상품 원가표": 상품명 | 원가
+    시트2 "채널 매핑": 상품명 | 채널코드 | 채널상품ID
+    """
+    if not file.filename.endswith((".xlsx", ".xls")):
+        raise HTTPException(400, "xlsx 파일만 업로드 가능합니다")
+
+    content = await file.read()
+    wb = load_workbook(io.BytesIO(content))
+
+    results = {
+        "products_created": 0,
+        "products_updated": 0,
+        "mappings_created": 0,
+        "mappings_updated": 0,
+        "orders_linked": 0,
+        "errors": [],
+    }
+
+    # ── 시트1: 상품 원가표 (상품명 → product_master) ──
+    name_to_product: dict[str, ProductMaster] = {}
+
+    if "상품 원가표" in wb.sheetnames:
+        ws1 = wb["상품 원가표"]
+        for row_idx, row in enumerate(ws1.iter_rows(min_row=2, values_only=True), start=2):
+            if not row[0]:
+                continue
+            name = str(row[0]).strip()
+            cost_raw = row[1] if len(row) > 1 else None
+            if not name:
+                continue
+
+            try:
+                cost = Decimal(str(cost_raw)) if cost_raw else Decimal("0")
+            except (InvalidOperation, ValueError):
+                results["errors"].append(f"시트1 행 {row_idx}: 원가 '{cost_raw}' 변환 실패")
+                continue
+
+            # 상품명으로 기존 product_master 검색
+            existing = db.query(ProductMaster).filter_by(product_name=name).first()
+            if existing:
+                existing.cost_price = cost
+                name_to_product[name] = existing
+                results["products_updated"] += 1
+            else:
+                # internal_sku 자동 생성: OHI-NNNN
+                max_sku = (
+                    db.query(ProductMaster.internal_sku)
+                    .filter(ProductMaster.internal_sku.like("OHI-%"))
+                    .order_by(ProductMaster.internal_sku.desc())
+                    .first()
+                )
+                if max_sku and max_sku[0]:
+                    try:
+                        num = int(max_sku[0].split("-")[1]) + 1
+                    except (IndexError, ValueError):
+                        num = 1
+                else:
+                    num = 1
+                new_sku = f"OHI-{num:04d}"
+
+                p = ProductMaster(
+                    internal_sku=new_sku,
+                    product_name=name,
+                    cost_price=cost,
+                )
+                db.add(p)
+                db.flush()  # ID 확보
+                name_to_product[name] = p
+                results["products_created"] += 1
+
+    # ── 시트2: 채널 매핑 (상품명 + 채널코드 + 채널상품ID) ──
+    if "채널 매핑" in wb.sheetnames:
+        ws2 = wb["채널 매핑"]
+        for row_idx, row in enumerate(ws2.iter_rows(min_row=2, values_only=True), start=2):
+            if not row[0] or not row[1] or not row[2]:
+                continue
+            name = str(row[0]).strip()
+            ch_code = str(row[1]).strip()
+            ch_pid = str(row[2]).strip()
+
+            # 상품명으로 product_master 찾기 (시트1에서 생성된 것 또는 기존 DB)
+            product = name_to_product.get(name)
+            if not product:
+                product = db.query(ProductMaster).filter_by(product_name=name).first()
+            if not product:
+                results["errors"].append(f"시트2 행 {row_idx}: 상품명 '{name[:30]}' 시트1에 없음")
+                continue
+
+            channel = db.query(Channel).filter_by(code=ch_code).first()
+            if not channel:
+                results["errors"].append(f"시트2 행 {row_idx}: 채널코드 '{ch_code}' 없음")
+                continue
+
+            existing_mapping = (
+                db.query(ProductChannelMapping)
+                .filter_by(
+                    product_id=product.id,
+                    channel_id=channel.id,
+                    channel_product_id=ch_pid,
+                )
+                .first()
+            )
+            if existing_mapping:
+                results["mappings_updated"] += 1
+            else:
+                db.add(ProductChannelMapping(
+                    product_id=product.id,
+                    channel_id=channel.id,
+                    channel_product_id=ch_pid,
+                    is_active=True,
+                ))
+                results["mappings_created"] += 1
+
+    db.commit()
+
+    # ── 미링크 주문 자동 연결 ──
+    from app.services.sync_service import relink_unlinked_orders
+    linked = relink_unlinked_orders(db)
+    results["orders_linked"] = linked
+
     return results
