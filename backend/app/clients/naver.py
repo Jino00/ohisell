@@ -2,6 +2,7 @@
 # IP 사전등록 필수, Access Token 별도 구현 필요
 from __future__ import annotations
 
+import base64
 import hashlib
 import logging
 import time
@@ -30,10 +31,10 @@ class NaverClient(BaseChannelClient):
         self._access_token = access_token
 
     def _generate_signature(self, client_id: str, client_secret: str, timestamp: int) -> str:
-        """네이버 커머스 API bcrypt 전자서명 생성"""
+        """네이버 커머스 API bcrypt 전자서명 생성 (bcrypt → base64 인코딩)"""
         password = f"{client_id}_{timestamp}"
         hashed = bcrypt.hashpw(password.encode("utf-8"), client_secret.encode("utf-8"))
-        return hashed.decode("utf-8")
+        return base64.b64encode(hashed).decode("utf-8")
 
     def _get_access_token(self) -> str | None:
         """OAuth2 Access Token 발급"""
@@ -94,6 +95,42 @@ class NaverClient(BaseChannelClient):
                 return None
         return None
 
+    def _request_post(self, path: str, body: dict) -> dict | None:
+        """POST JSON 요청"""
+        if not self._access_token:
+            self._get_access_token()
+        if not self._access_token:
+            return None
+
+        headers = {
+            "Authorization": f"Bearer {self._access_token}",
+            "Content-Type": "application/json",
+        }
+        url = f"{NAVER_API_BASE}{path}"
+
+        for attempt in range(MAX_RETRIES + 1):
+            try:
+                resp = requests.post(url, headers=headers, json=body, timeout=30)
+                if resp.status_code in (401, 403):
+                    if attempt == 0:
+                        self._get_access_token()
+                        headers["Authorization"] = f"Bearer {self._access_token}"
+                        continue
+                    log.error("네이버 API 인증 실패: %s", path)
+                    return None
+                if resp.status_code >= 500 and attempt < MAX_RETRIES:
+                    time.sleep(RETRY_BASE_DELAY * (2 ** attempt))
+                    continue
+                resp.raise_for_status()
+                return resp.json()
+            except requests.exceptions.RequestException as e:
+                if attempt < MAX_RETRIES:
+                    time.sleep(RETRY_BASE_DELAY * (2 ** attempt))
+                    continue
+                log.error("네이버 API 에러: %s — %s", url, e)
+                return None
+        return None
+
     def test_connection(self) -> dict:
         token = self._get_access_token()
         if token:
@@ -101,34 +138,62 @@ class NaverClient(BaseChannelClient):
         return {"status": "error", "message": "네이버 API 인증 실패"}
 
     def fetch_orders(self, date_from: date, date_to: date) -> list[RawOrder]:
-        """네이버 주문 조회 (lastChangedFrom ~ lastChangedTo)"""
-        path = "/v1/pay-order/seller/product-orders/last-changed-statuses"
+        """네이버 주문 조회 (24시간 제한 → 하루 단위 분할 → 상세 조회)"""
+        status_path = "/v1/pay-order/seller/product-orders/last-changed-statuses"
+        detail_path = "/v1/pay-order/seller/product-orders/query"
         all_orders: list[RawOrder] = []
+        seen_po_ids: set[str] = set()
+        po_id_batch: list[str] = []
 
-        params = {
-            "lastChangedFrom": f"{date_from.isoformat()}T00:00:00.000+09:00",
-            "lastChangedTo": f"{date_to.isoformat()}T23:59:59.999+09:00",
-        }
+        # 1단계: 하루씩 last-changed-statuses로 productOrderId 수집
+        current = date_from
+        while current <= date_to:
+            params = {
+                "lastChangedFrom": f"{current.isoformat()}T00:00:00.000+09:00",
+                "lastChangedTo": f"{current.isoformat()}T23:59:59.999+09:00",
+            }
+            result = self._request("GET", status_path, params)
+            if result:
+                for item in result.get("data", {}).get("lastChangeStatuses", []):
+                    po_id = item.get("productOrderId", "")
+                    if po_id and po_id not in seen_po_ids:
+                        seen_po_ids.add(po_id)
+                        po_id_batch.append(po_id)
+            current += timedelta(days=1)
+            time.sleep(0.2)
 
-        result = self._request("GET", path, params)
-        if not result:
+        if not po_id_batch:
+            log.info("네이버 주문 0건 (%s ~ %s)", date_from, date_to)
             return []
 
-        for item in result.get("data", {}).get("lastChangeStatuses", []):
-            product_order_id = item.get("productOrderId", "")
-            # 상세 조회 필요 시 별도 호출
-            raw = RawOrder(
-                order_number=str(item.get("orderId", product_order_id)),
-                platform_product_id=str(item.get("productId", "")),
-                platform_product_name=item.get("productName", ""),
-                quantity=int(item.get("quantity", 1)),
-                selling_price=Decimal(str(item.get("totalPaymentAmount", 0))),
-                shipping_cost=None,
-                order_date=item.get("lastChangedDate", date_from.isoformat()),
-                status=self._map_status(item.get("lastChangedType", "")),
-                raw_data=item,
-            )
-            all_orders.append(raw)
+        # 2단계: productOrderId 배치로 상세 조회 (최대 300건씩)
+        chunk_size = 300
+        for i in range(0, len(po_id_batch), chunk_size):
+            chunk = po_id_batch[i:i + chunk_size]
+            detail_result = self._request_post(detail_path, {"productOrderIds": chunk})
+            if not detail_result:
+                continue
+
+            for entry in detail_result.get("data", []):
+                po = entry.get("productOrder", {})
+                order_info = entry.get("order", {})
+                order_id = str(order_info.get("orderId", po.get("productOrderId", "")))
+                product_id = str(po.get("productId", ""))
+                shipping_fee = Decimal(str(po.get("deliveryFeeAmount", 0)))
+
+                raw = RawOrder(
+                    order_number=order_id,
+                    platform_product_id=product_id,
+                    platform_product_name=po.get("productName", ""),
+                    quantity=int(po.get("quantity", 1)),
+                    selling_price=Decimal(str(po.get("totalPaymentAmount", 0))),
+                    shipping_cost=shipping_fee if shipping_fee else None,
+                    order_date=order_info.get("paymentDate", date_from.isoformat()),
+                    status=self._map_status(po.get("productOrderStatus", "")),
+                    raw_data=entry,
+                )
+                all_orders.append(raw)
+            time.sleep(0.3)
 
         log.info("네이버 주문 %d건 수집 (%s ~ %s)", len(all_orders), date_from, date_to)
         return all_orders
