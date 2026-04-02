@@ -234,17 +234,27 @@ def calculate_channel_summary(
         rate = ch.commission_rate if ch else ZERO
         b["commission"] += revenue * rate / Decimal("100")
 
-    # 광고비를 채널별로 합산 (option_id → product → channel 매핑)
-    # 간단하게: ad_lookup의 전체 합을 채널 매출 비율로 배분
-    total_ad = sum(ad_lookup.values(), ZERO)
-    total_revenue_all = sum(b["revenue"] for b in by_channel.values())
+    # 광고비를 option_id → 주문의 채널로 직접 매핑 (bleeding 방지)
+    # 1) option_id별 광고비 합산
+    ad_by_option: dict[str, Decimal] = {}
+    for (oid, _), spend in ad_lookup.items():
+        ad_by_option[oid] = ad_by_option.get(oid, ZERO) + spend
+
+    # 2) option_id → channel_id 매핑 (주문 데이터 기반)
+    option_to_channel: dict[str, int] = {}
+    for o in orders:
+        if o.platform_product_id and o.platform_product_id not in option_to_channel:
+            option_to_channel[o.platform_product_id] = o.channel_id
+
+    # 3) 광고비를 해당 채널에 직접 할당
+    for oid, spend in ad_by_option.items():
+        cid = option_to_channel.get(oid)
+        if cid and cid in by_channel:
+            by_channel[cid]["ad_spend"] += spend
 
     result = []
     for cid, b in by_channel.items():
         ch = channel_map.get(cid)
-        # 광고비 비례 배분
-        if total_revenue_all > 0:
-            b["ad_spend"] = total_ad * b["revenue"] / total_revenue_all
         net = b["revenue"] - b["cost"] - b["commission"] - b["ad_spend"]
         rate_pct = (net / b["revenue"] * 100) if b["revenue"] > 0 else ZERO
 
@@ -325,12 +335,18 @@ def calculate_product_profit(
         if o.shipping_cost:
             b["shipping"] += o.shipping_cost
 
-        # 광고비 (option_id 기반)
-        if o.platform_product_id in ad_by_option:
-            # 주문 수량 기준 비례 배분은 복잡하므로 전체 할당
-            b["ad_spend"] += ad_by_option.get(o.platform_product_id, ZERO) / max(
-                sum(1 for oo in orders if oo.platform_product_id == o.platform_product_id), 1
-            )
+        # 광고비는 아래에서 option_id → product_id 매핑으로 일괄 할당
+
+    # option_id → product_id 매핑으로 광고비 직접 할당 (중복 방지)
+    option_to_product: dict[str, int] = {}
+    for o in orders:
+        if o.platform_product_id and o.product_id and o.platform_product_id not in option_to_product:
+            option_to_product[o.platform_product_id] = o.product_id
+
+    for oid, spend in ad_by_option.items():
+        pid = option_to_product.get(oid)
+        if pid and pid in by_product:
+            by_product[pid]["ad_spend"] += spend
 
     result = []
     for pid, b in by_product.items():
