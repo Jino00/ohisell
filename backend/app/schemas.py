@@ -240,6 +240,20 @@ class SettlementSummary(BaseModel):
     count: int
 
 
+# ── OAuth ──
+class OAuthAuthUrl(BaseModel):
+    auth_url: str
+    mall_id: str
+
+
+class OAuthStatus(BaseModel):
+    status: str  # connected / expired / not_connected
+    mall_id: Optional[str] = None
+    expires_at: Optional[str] = None
+    refresh_token_expires_at: Optional[str] = None
+    message: Optional[str] = None
+
+
 # ── Scheduler ──
 class SchedulerJobOut(BaseModel):
     id: str

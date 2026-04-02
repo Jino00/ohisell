@@ -7,12 +7,15 @@ from datetime import date, datetime, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+import threading
+
 from app.database import SessionLocal, get_ad_db
-from app.models import Channel, SchedulerState
+from app.models import Channel, OAuthToken, SchedulerState
 
 log = logging.getLogger(__name__)
 
 scheduler = BackgroundScheduler(timezone="Asia/Seoul")
+_cafe24_refresh_lock = threading.Lock()
 
 
 def _get_own_db_session():
@@ -91,11 +94,79 @@ def recalculate_profit_job():
                 pass
 
 
+def cafe24_proactive_refresh_job():
+    """cafe24 Access Token 만료 30분 전 자동 갱신"""
+    if not _cafe24_refresh_lock.acquire(blocking=False):
+        log.info("[스케줄러] cafe24 토큰 갱신 이미 진행 중, 스킵")
+        return
+
+    db = _get_own_db_session()
+    try:
+        from app.clients.cafe24 import Cafe24Client, _parse_cafe24_datetime
+        from app.config import get_cafe24_config
+
+        channel = db.query(Channel).filter(Channel.code == "CAFE24").first()
+        if not channel:
+            return
+
+        token_row = db.query(OAuthToken).filter(OAuthToken.channel_id == channel.id).first()
+        if not token_row or not token_row.refresh_token:
+            return
+
+        now = datetime.now()
+
+        # refresh token 만료 확인
+        if token_row.refresh_token_expires_at and token_row.refresh_token_expires_at <= now:
+            log.error("[스케줄러] cafe24 Refresh Token 만료! 재인증 필요")
+            return
+
+        # refresh token 만료 3일 전 경고
+        if token_row.refresh_token_expires_at:
+            days_left = (token_row.refresh_token_expires_at - now).days
+            if days_left <= 3:
+                log.warning("[스케줄러] cafe24 Refresh Token %d일 후 만료! 재인증 권장", days_left)
+
+        # access token이 30분 이상 남았으면 스킵
+        if token_row.expires_at and token_row.expires_at > now + timedelta(minutes=30):
+            return
+
+        # 토큰 갱신 실행
+        config = get_cafe24_config("CAFE24")
+        if not config:
+            return
+
+        def _on_refreshed(access_token, refresh_token, expires_at, refresh_expires_at):
+            token_row.access_token = access_token
+            token_row.refresh_token = refresh_token
+            token_row.expires_at = expires_at
+            token_row.refresh_token_expires_at = refresh_expires_at
+            db.commit()
+
+        client = Cafe24Client(
+            config,
+            access_token=token_row.access_token,
+            refresh_token=token_row.refresh_token,
+            on_token_refreshed=_on_refreshed,
+        )
+        new_token = client._refresh_access_token()
+        if new_token:
+            log.info("[스케줄러] cafe24 토큰 사전 갱신 완료")
+        else:
+            log.error("[스케줄러] cafe24 토큰 사전 갱신 실패")
+
+    except Exception as e:
+        log.exception("[스케줄러] cafe24_proactive_refresh 에러: %s", e)
+    finally:
+        db.close()
+        _cafe24_refresh_lock.release()
+
+
 def _ensure_default_states(db):
     """기본 스케줄러 상태 DB 레코드 생성"""
     defaults = [
         ("auto_sync_orders", "0 6 * * *"),
         ("auto_profit_calc", "30 6 * * *"),
+        ("cafe24_token_refresh", "*/30 * * * *"),
     ]
     for name, cron in defaults:
         existing = db.query(SchedulerState).filter(
@@ -122,6 +193,8 @@ def start_scheduler():
                 job_func = sync_all_channels_job
             elif state.job_name == "auto_profit_calc":
                 job_func = recalculate_profit_job
+            elif state.job_name == "cafe24_token_refresh":
+                job_func = cafe24_proactive_refresh_job
 
             if job_func:
                 try:

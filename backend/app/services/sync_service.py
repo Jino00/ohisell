@@ -44,10 +44,26 @@ def _get_client_for_channel(channel: Channel, db: Session | None = None) -> Base
         token_row = None
         if db:
             token_row = db.query(OAuthToken).filter(OAuthToken.channel_id == channel.id).first()
+
+        def _on_cafe24_token_refreshed(access_token, refresh_token, expires_at, refresh_expires_at):
+            """cafe24 토큰 갱신 시 DB 자동 업데이트"""
+            try:
+                if token_row:
+                    token_row.access_token = access_token
+                    token_row.refresh_token = refresh_token
+                    token_row.expires_at = expires_at
+                    token_row.refresh_token_expires_at = refresh_expires_at
+                    db.commit()
+                    log.info("cafe24 토큰 DB 업데이트 완료 (channel_id=%d)", channel.id)
+            except Exception as e:
+                log.error("cafe24 토큰 DB 업데이트 실패: %s", e)
+                raise
+
         return Cafe24Client(
             config,
             access_token=token_row.access_token if token_row else None,
             refresh_token=token_row.refresh_token if token_row else None,
+            on_token_refreshed=_on_cafe24_token_refreshed if db and token_row else None,
         )
 
     return None

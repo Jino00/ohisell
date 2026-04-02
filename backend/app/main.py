@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routers import ad_costs, channels, orders, products, sync
+from app.routers import ad_costs, channels, oauth, orders, products, sync
 from app.routers import dashboard, scheduler, settlements
 
 log = logging.getLogger(__name__)
@@ -50,6 +50,7 @@ app.include_router(ad_costs.router)
 app.include_router(dashboard.router)
 app.include_router(settlements.router)
 app.include_router(scheduler.router)
+app.include_router(oauth.router)
 
 
 @app.get("/health")
