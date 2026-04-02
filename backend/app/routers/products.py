@@ -151,6 +151,99 @@ def delete_mapping(
     db.commit()
 
 
+# ── 매핑 템플릿 다운로드 (주문 데이터 기반) ──
+@router.get("/mapping-template")
+def download_mapping_template(db: Session = Depends(get_db)):
+    """주문 데이터에서 채널별 상품 목록을 추출한 매핑 템플릿 엑셀"""
+    from app.models import Order
+    from sqlalchemy import func, distinct
+
+    # 채널별 고유 상품 집계
+    rows = (
+        db.query(
+            Channel.code,
+            Channel.name,
+            Order.platform_product_id,
+            Order.platform_product_name,
+            func.count(Order.id).label("order_count"),
+            func.round(func.avg(Order.selling_price), 0).label("avg_price"),
+        )
+        .join(Channel, Channel.id == Order.channel_id)
+        .filter(Order.platform_product_id != "")
+        .group_by(Channel.code, Order.platform_product_id)
+        .order_by(Channel.code, func.count(Order.id).desc())
+        .all()
+    )
+
+    channels = db.query(Channel).order_by(Channel.id).all()
+
+    wb = Workbook()
+
+    # 시트1: 상품 원가표 (사용자가 채울 부분)
+    ws1 = wb.active
+    ws1.title = "상품 원가표"
+    ws1.append(["사내SKU", "상품명", "원가", "카테고리", "메모"])
+    # 고유 상품명 기반으로 후보 행 생성 (중복 제거)
+    seen_names: set[str] = set()
+    for r in rows:
+        # 상품명에서 옵션 부분(콤마 이후) 제거하여 대표명 추출
+        base_name = r.platform_product_name.split(",")[0].strip() if r.platform_product_name else ""
+        if base_name and base_name not in seen_names:
+            seen_names.add(base_name)
+            ws1.append(["", base_name, "", "", ""])
+
+    # 시트2: 채널 매핑 (주문 데이터에서 자동 채움, 사용자는 사내SKU만 입력)
+    ws2 = wb.create_sheet("채널 매핑")
+    ws2.append([
+        "사내SKU", "채널코드", "채널상품번호", "채널상품명", "채널SKU", "판매가", "활성",
+    ])
+    for r in rows:
+        ws2.append([
+            "",  # 사내SKU — 사용자가 채울 부분
+            r.code,
+            r.platform_product_id,
+            r.platform_product_name,
+            "",  # 채널SKU
+            float(r.avg_price) if r.avg_price else 0,
+            "Y",
+        ])
+
+    # 시트3: 채널 목록 (참고용)
+    ws3 = wb.create_sheet("채널 목록")
+    ws3.append(["채널코드", "채널명", "플랫폼", "수수료율(%)"])
+    for ch in channels:
+        ws3.append([ch.code, ch.name, ch.platform, float(ch.commission_rate)])
+
+    # 스타일: 사용자가 채울 셀 강조
+    from openpyxl.styles import PatternFill
+    yellow = PatternFill(start_color="FFFFCC", end_color="FFFFCC", fill_type="solid")
+    for row in ws1.iter_rows(min_row=2, min_col=1, max_col=3):
+        for cell in row:
+            cell.fill = yellow
+    for row in ws2.iter_rows(min_row=2, min_col=1, max_col=1):
+        for cell in row:
+            cell.fill = yellow
+
+    # 열 너비 조정
+    ws1.column_dimensions["A"].width = 15
+    ws1.column_dimensions["B"].width = 50
+    ws1.column_dimensions["C"].width = 10
+    ws2.column_dimensions["A"].width = 15
+    ws2.column_dimensions["B"].width = 18
+    ws2.column_dimensions["C"].width = 18
+    ws2.column_dimensions["D"].width = 60
+    ws2.column_dimensions["F"].width = 12
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=ohisell_mapping_template.xlsx"},
+    )
+
+
 # ── 엑셀 다운로드 ──
 @router.get("/download")
 def download_excel(db: Session = Depends(get_db)):

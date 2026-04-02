@@ -100,6 +100,12 @@ export default function Products() {
         <h2 className="text-2xl font-bold text-gray-900">상품 원가표</h2>
         <div className="flex gap-2">
           <a
+            href={downloadUrl("/api/products/mapping-template")}
+            className="px-3 py-2 text-sm bg-purple-600 text-white rounded-md hover:bg-purple-700"
+          >
+            매핑 템플릿
+          </a>
+          <a
             href={downloadUrl("/api/products/download")}
             className="px-3 py-2 text-sm bg-green-600 text-white rounded-md hover:bg-green-700"
           >
