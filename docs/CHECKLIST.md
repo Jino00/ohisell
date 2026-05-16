@@ -1,25 +1,30 @@
-# CHECKLIST.md — 작업 체크리스트
-# Sprint 진행 중 Claude가 갱신합니다.
-# 새 세션 시작 시 claude-progress.txt와 함께 읽으세요.
+# CHECKLIST.md — 작업 체크리스트 (Sprint 4B-cafe24)
+# Sprint 진행 중 Claude가 갱신합니다. ✅완료 🔄진행중 ⏳대기
 
-## Sprint 0: 초기 세팅
-- [ ] CLAUDE.md 프로젝트명 입력
-- [ ] FEATURES.json 피처 목록 초안 작성
-- [ ] frontend/ 초기 구조 생성
-- [ ] backend/ 초기 구조 생성
-- [ ] scripts/init.sh 작성 및 테스트
-- [ ] /qa 실행 (Sprint Contract 기준 검증)
-- [ ] 초기 git commit
-- [ ] claude-progress.txt 갱신
+## Phase 1 — Sub-Agent (순수 함수)
+- ✅ SA1 Cafe24StatusMapper — 공식 enum + ^[A-Z]\d{2}$ prefix 폴백
+- ✅ SA2 Cafe24PaymentClassifier — market_id/pm/gateway → payment_type
+- ✅ SA3 CommissionResolver — 요율표 (kcp_transfer per-order, 미확인 보수 0.0385, 원단위)
+- ✅ SA4 ShippingResolver — cafe24 1,900/주문
+- ✅ /codex review — 2라운드 합의 PASS (P1-1/P1-2/P2-2 반영, P1-3 근거기각, P1-4 부분기각)
 
-## Sprint 1: [직접 입력]
-- [ ] docs/PLAN.md Sprint 1 버전으로 갱신
-- [ ] Sprint Contract 합의 (/plan 실행)
-- [ ] [피처 구현]
-- [ ] /qa 실행
-- [ ] /review 실행 (선택)
-- [ ] git commit + claude-progress.txt 갱신
+## Phase 2 — DB 마이그레이션
+- ✅ models.py: Order.payment_type, Order.commission_amount 추가
+- ✅ alembic revision a1c24f0b9d31 (orders 컬럼 2개) — 적용 완료 (head)
 
----
-## 완료된 Sprint
-(없음)
+## Phase 3 — Harness 배선
+- ✅ cafe24.py: _map_status 삭제 → normalize_status + classify + 라인배분
+- ✅ base.py: RawOrder.payment_type/commission_amount 추가
+- ✅ sync_service.py: 영속화 (create+update)
+
+## Phase 4 — profit_calculator
+- ✅ 매출 제외 status 필터 (cancelled/returned/pending) — 전 채널
+- ✅ cafe24: commission_amount 합산 + shipping 1,900 (channel_summary는 cafe24만)
+- ✅ 비-cafe24 회귀 없음 실측 확인 (네이버5.5%/쿠팡10.8% 정률 유지)
+- ✅ Phase 3/4 /codex review — 2라운드 합의 PASS
+
+## Phase 5 — 백필 + 검증
+- ✅ 백필 스크립트 (라인별 detail status, 매출포함 라인 배분, 잔여정산) — 212주문/242라인
+- ✅ QA before/after: 순이익 3,346,264 → 2,677,623 (구버전 19.5% 과대 교정)
+- ✅ failures.jsonl 기록
+- ⏳ git commit (Jino 확인 후)

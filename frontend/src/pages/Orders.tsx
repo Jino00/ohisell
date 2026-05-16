@@ -241,7 +241,7 @@ export default function Orders() {
           <div className="bg-white border rounded-lg p-4">
             <div className="text-sm text-gray-500">총 비용</div>
             <div className="text-xl font-bold text-gray-600">
-              ₩{formatKRW(summary.total_cost + summary.total_commission + summary.total_shipping + summary.total_vat)}
+              ₩{formatKRW(Number(summary.total_cost) + Number(summary.total_commission) + Number(summary.total_shipping) + Number(summary.total_vat))}
             </div>
             <div className="text-xs text-gray-400">원가+수수료+배송+VAT</div>
           </div>

@@ -239,6 +239,12 @@ class Order(Base):
     status: Mapped[str] = mapped_column(
         String(20), nullable=False, default="delivered"
     )
+    # 동기화 시 분류된 PG 결제유형 (예: naverpay_card, kcp_card, kakaopay)
+    payment_type: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    # 동기화 시 산출된 PG 수수료액 (profit_calculator는 합산만, 라인 단위)
+    commission_amount: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(12, 2), nullable=True
+    )
     raw_data: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now()

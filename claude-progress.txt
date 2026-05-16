@@ -3,9 +3,21 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
-- 날짜: 2026-04-02
-- 단계: Sprint 4A 완료
-- 전체 진행률: 85%
+- 날짜: 2026-05-16
+- 단계: Sprint 4B-cafe24 완료 (자사몰 순이익 정확화)
+- 전체 진행률: 88%
+
+## Sprint 4B-cafe24 완료 (2026-05-16) — 자사몰 순이익 정확화
+- [x] SA 4개(순수함수): Cafe24StatusMapper / PaymentClassifier / CommissionResolver / ShippingResolver
+- [x] DB: orders.payment_type + commission_amount (alembic a1c24f0b9d31, head)
+- [x] cafe24.py: 결제분류+공식수수료+배송비(한진1900/주문) 라인배분, _map_status 삭제
+- [x] profit_calculator: 취소/반품/입금전 전채널 제외 + cafe24 commission/shipping
+- [x] 백필 242라인 (라인별 detail status, 매출포함 라인 배분, 잔여정산)
+- [x] /codex review 2게이트 모두 2라운드 합의 PASS (대화형 검증)
+- 결과: cafe24 순이익 3,346,264→2,677,623 (구버전 19.5% 과대 교정)
+- 공식요율 확정: 네이버페이 영세 신용카드 1.870%(VAT포함), KCP/카카오/토스 3.5%(VAT별도×1.1), KCP가상계좌 330원정액, 네이버페이 무통장 min(1%,275)
+- 미커밋 (Jino 확인 후 commit 예정)
+- 후속: raw_data 10000자 잘림 제거(별도), 네이버 스마트스토어 정확화, 쿠팡
 
 ## 완료된 작업
 ### Sprint 0

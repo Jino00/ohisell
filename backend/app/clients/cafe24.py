@@ -13,6 +13,10 @@ from urllib.parse import urlencode
 import requests
 
 from app.clients.base import BaseChannelClient, RawOrder
+from app.services.cafe24_status_mapper import REVENUE_EXCLUDED, normalize_status
+from app.services.commission_resolver import PER_ORDER_TYPES, resolve as resolve_commission
+from app.services.payment_classifier import classify as classify_payment
+from app.services.shipping_resolver import per_order_shipping
 from app.config import Cafe24AccountConfig
 
 log = logging.getLogger(__name__)
@@ -219,53 +223,110 @@ class Cafe24Client(BaseChannelClient):
             if not orders_data:
                 break
 
+            ship_per_order = per_order_shipping("CAFE24")  # 한진택배 1,900원/주문
+
             for item in orders_data:
                 items_list = item.get("items", [])
                 order_amount = item.get("actual_order_amount", {})
-                shipping_fee_str = order_amount.get("shipping_fee", "0")
-                shipping_fee = Decimal(str(shipping_fee_str).replace(",", ""))
+
+                # 결제유형 분류 (주문 단위) — market_id/payment_method/gateway 조합
+                payment_type = classify_payment(item)
 
                 if items_list:
+                    # 라인별 매출/상태 산출 (수수료·배송비는 '매출 포함' 라인에만 배분)
+                    details: list[tuple[dict, int, Decimal, str]] = []
                     for detail in items_list:
-                        price_str = detail.get("product_price", detail.get("actual_price", "0"))
-                        # variant_code = 상품+옵션 고유 ID (예: P00000UC000Y)
+                        ps = detail.get("product_price", detail.get("actual_price", "0"))
+                        qty = int(detail.get("quantity", 1))
+                        rev = Decimal(str(ps).replace(",", "")) * qty
+                        st = normalize_status(
+                            detail.get("order_status", item.get("order_status", ""))
+                        )
+                        details.append((detail, qty, rev, st))
+
+                    incl = [i for i, d in enumerate(details) if d[3] not in REVENUE_EXCLUDED]
+                    incl_total = sum(details[i][2] for i in incl) or Decimal("0")
+
+                    # 출고(배송비)는 포함 라인이 있을 때만 발생. PER_ORDER 수수료는 포함총액 기준.
+                    ship_total = ship_per_order if incl else Decimal("0")
+                    order_fee = (
+                        resolve_commission(payment_type, incl_total)
+                        if (payment_type in PER_ORDER_TYPES and incl)
+                        else None
+                    )
+
+                    def _alloc(total: Decimal) -> dict[int, Decimal]:
+                        # 포함 라인에 매출 비례 배분, 잔여는 마지막 포함 라인 (합=total 보장)
+                        out: dict[int, Decimal] = {}
+                        acc = Decimal("0")
+                        for k, i in enumerate(incl):
+                            if k == len(incl) - 1:
+                                out[i] = total - acc
+                            else:
+                                v = (
+                                    (total * details[i][2] / incl_total).quantize(Decimal("1"))
+                                    if incl_total
+                                    else Decimal("0")
+                                )
+                                out[i] = v
+                                acc += v
+                        return out
+
+                    ship_alloc = _alloc(ship_total) if incl else {}
+                    fee_alloc = _alloc(order_fee) if (order_fee is not None) else None
+
+                    for idx, (detail, qty, line_rev, st) in enumerate(details):
                         variant = detail.get("variant_code", "")
                         product_no = str(detail.get("product_no", ""))
                         pid = variant if variant else product_no
 
-                        # 상품명 + 옵션명 결합
                         pname = detail.get("product_name", "")
                         option_val = detail.get("option_value", "")
                         if option_val:
                             pname = f"{pname} [{option_val}]"
 
+                        if st in REVENUE_EXCLUDED:
+                            line_commission = Decimal("0")
+                            line_ship = Decimal("0")
+                        elif fee_alloc is not None:
+                            line_commission = fee_alloc[idx]
+                            line_ship = ship_alloc[idx]
+                        else:
+                            line_commission = resolve_commission(payment_type, line_rev)
+                            line_ship = ship_alloc[idx]
+
                         raw = RawOrder(
                             order_number=str(item.get("order_id", "")),
                             platform_product_id=pid,
                             platform_product_name=pname,
-                            quantity=int(detail.get("quantity", 1)),
-                            selling_price=Decimal(str(price_str).replace(",", "")),
-                            shipping_cost=shipping_fee if shipping_fee else None,
+                            quantity=qty,
+                            selling_price=Decimal(str(
+                                detail.get("product_price", detail.get("actual_price", "0"))
+                            ).replace(",", "")),
+                            shipping_cost=line_ship,
                             order_date=item.get("order_date", date_from.isoformat()),
-                            status=self._map_status(
-                                detail.get("order_status", item.get("order_status", ""))
-                            ),
+                            status=st,
                             raw_data={"order": item, "item": detail},
+                            payment_type=payment_type,
+                            commission_amount=line_commission,
                         )
                         all_orders.append(raw)
                 else:
                     # items 없으면 주문 금액으로 1건 기록
                     payment = order_amount.get("payment_amount", "0")
+                    sell = Decimal(str(payment).replace(",", ""))
                     raw = RawOrder(
                         order_number=str(item.get("order_id", "")),
                         platform_product_id="",
                         platform_product_name="",
                         quantity=1,
-                        selling_price=Decimal(str(payment).replace(",", "")),
-                        shipping_cost=shipping_fee if shipping_fee else None,
+                        selling_price=sell,
+                        shipping_cost=ship_per_order,
                         order_date=item.get("order_date", date_from.isoformat()),
-                        status=self._map_status(item.get("order_status", "")),
+                        status=normalize_status(item.get("order_status", "")),
                         raw_data={"order": item},
+                        payment_type=payment_type,
+                        commission_amount=resolve_commission(payment_type, sell),
                     )
                     all_orders.append(raw)
 
@@ -276,17 +337,3 @@ class Cafe24Client(BaseChannelClient):
 
         log.info("cafe24 주문 %d건 수집 (%s ~ %s)", len(all_orders), date_from, date_to)
         return all_orders
-
-    @staticmethod
-    def _map_status(cafe24_status: str) -> str:
-        mapping = {
-            "N00": "confirmed",
-            "N10": "confirmed",
-            "N20": "shipped",
-            "N30": "delivered",
-            "N40": "delivered",
-            "C00": "cancelled",
-            "C10": "cancelled",
-            "R00": "returned",
-        }
-        return mapping.get(cafe24_status, cafe24_status.lower())

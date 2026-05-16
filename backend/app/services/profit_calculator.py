@@ -9,10 +9,19 @@ from sqlalchemy import and_, func, text
 from sqlalchemy.orm import Session
 
 from app.models import Channel, Order, ProductChannelMapping, ProductMaster
+from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
 
 log = logging.getLogger(__name__)
 
 ZERO = Decimal("0")
+
+
+def _line_commission(ch: Channel | None, o: Order, revenue: Decimal) -> Decimal:
+    """라인 수수료. cafe24는 동기화 시 산출된 commission_amount 사용, 그 외는 채널 정률."""
+    if ch and ch.code == "CAFE24":
+        return o.commission_amount if o.commission_amount is not None else ZERO
+    rate = ch.commission_rate if ch else ZERO
+    return revenue * rate / Decimal("100")
 
 
 # ──────────────────────────────────────────────
@@ -132,6 +141,8 @@ def calculate_daily_trend(
         ch = channel_map.get(o.channel_id)
         if ch and ch.channel_type == "consignment":
             continue
+        if o.status in REVENUE_EXCLUDED:  # 취소/반품/입금전 매출 제외
+            continue
 
         d = str(o.order_date.date()) if hasattr(o.order_date, "date") else str(o.order_date)[:10]
         if d not in daily:
@@ -154,9 +165,8 @@ def calculate_daily_trend(
         if o.product_id and o.product_id in product_map:
             bucket["cost"] += product_map[o.product_id].cost_price * o.quantity
 
-        # 수수료
-        rate = ch.commission_rate if ch else ZERO
-        bucket["commission"] += revenue * rate / Decimal("100")
+        # 수수료 (cafe24=산출액, 그 외=정률)
+        bucket["commission"] += _line_commission(ch, o, revenue)
 
         # 배송비
         if o.shipping_cost:
@@ -215,12 +225,14 @@ def calculate_channel_summary(
         ch = channel_map.get(o.channel_id)
         if ch and ch.channel_type == "consignment":
             continue
+        if o.status in REVENUE_EXCLUDED:  # 취소/반품/입금전 매출 제외
+            continue
 
         cid = o.channel_id
         if cid not in by_channel:
             by_channel[cid] = {
                 "revenue": ZERO, "cost": ZERO, "commission": ZERO,
-                "ad_spend": ZERO, "order_count": 0,
+                "ad_spend": ZERO, "shipping": ZERO, "order_count": 0,
             }
 
         b = by_channel[cid]
@@ -231,8 +243,10 @@ def calculate_channel_summary(
         if o.product_id and o.product_id in product_map:
             b["cost"] += product_map[o.product_id].cost_price * o.quantity
 
-        rate = ch.commission_rate if ch else ZERO
-        b["commission"] += revenue * rate / Decimal("100")
+        b["commission"] += _line_commission(ch, o, revenue)
+        # 배송비는 cafe24만 channel_summary에 반영 (기존 비-cafe24는 미포함 → 회귀 방지)
+        if ch and ch.code == "CAFE24" and o.shipping_cost:
+            b["shipping"] += o.shipping_cost
 
     # 광고비를 option_id → 주문의 채널로 직접 매핑 (bleeding 방지)
     # 1) option_id별 광고비 합산
@@ -255,7 +269,7 @@ def calculate_channel_summary(
     result = []
     for cid, b in by_channel.items():
         ch = channel_map.get(cid)
-        net = b["revenue"] - b["cost"] - b["commission"] - b["ad_spend"]
+        net = b["revenue"] - b["cost"] - b["commission"] - b["ad_spend"] - b["shipping"]
         rate_pct = (net / b["revenue"] * 100) if b["revenue"] > 0 else ZERO
 
         result.append({
@@ -265,6 +279,7 @@ def calculate_channel_summary(
             "cost": str(b["cost"]),
             "commission": str(b["commission"]),
             "ad_spend": str(b["ad_spend"]),
+            "shipping": str(b["shipping"]),
             "net_profit": str(net),
             "profit_rate": str(rate_pct.quantize(Decimal("0.01")) if isinstance(rate_pct, Decimal) else "0.00"),
             "order_count": b["order_count"],
@@ -313,6 +328,8 @@ def calculate_product_profit(
         ch = channel_map.get(o.channel_id)
         if ch and ch.channel_type == "consignment":
             continue
+        if o.status in REVENUE_EXCLUDED:  # 취소/반품/입금전 매출 제외
+            continue
 
         pid = o.product_id
         if pid not in by_product:
@@ -329,8 +346,7 @@ def calculate_product_profit(
         if pid in product_map:
             b["cost"] += product_map[pid].cost_price * o.quantity
 
-        rate = ch.commission_rate if ch else ZERO
-        b["commission"] += revenue * rate / Decimal("100")
+        b["commission"] += _line_commission(ch, o, revenue)
 
         if o.shipping_cost:
             b["shipping"] += o.shipping_cost

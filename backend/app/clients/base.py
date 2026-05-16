@@ -19,6 +19,9 @@ class RawOrder:
     order_date: str  # ISO format
     status: str
     raw_data: dict
+    # cafe24 전용 (다른 클라이언트는 None → sync가 그대로 저장, profit_calc는 cafe24만 사용)
+    payment_type: str | None = None
+    commission_amount: Decimal | None = None
 
 
 class BaseChannelClient(ABC):

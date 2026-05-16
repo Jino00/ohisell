@@ -194,6 +194,8 @@ def sync_channel_orders(
                 existing.shipping_cost = raw.shipping_cost
                 existing.status = raw.status
                 existing.platform_product_name = raw.platform_product_name
+                existing.payment_type = raw.payment_type
+                existing.commission_amount = raw.commission_amount
                 existing.raw_data = _truncate_raw_data(raw.raw_data)
                 _auto_link_product(db, existing)
                 updated_count += 1
@@ -208,6 +210,8 @@ def sync_channel_orders(
                     shipping_cost=raw.shipping_cost,
                     order_date=datetime.fromisoformat(raw.order_date) if isinstance(raw.order_date, str) else raw.order_date,
                     status=raw.status,
+                    payment_type=raw.payment_type,
+                    commission_amount=raw.commission_amount,
                     raw_data=_truncate_raw_data(raw.raw_data),
                 )
                 _auto_link_product(db, order)
