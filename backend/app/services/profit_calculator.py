@@ -23,6 +23,12 @@ _META_KEYWORDS = [
 ]
 _KEYWORD_ALIAS = {"샐카봉": "셀카봉"}
 
+# Naver SA 광고비 키워드 (sync_naver_sa_ad_costs.py의 PRODUCT_KEYWORDS와 동일 순서)
+_NAVER_SA_KEYWORDS = [
+    "지문방지", "강화유리", "종이질감", "사생활", "갤럭시탭", "아이패드", "아이폰",
+    "갤럭시", "셀카봉", "뮤패드", "케이스",
+]
+
 
 def _extract_product_keyword(name: str) -> str | None:
     for kw in _META_KEYWORDS:
@@ -31,9 +37,23 @@ def _extract_product_keyword(name: str) -> str | None:
     return None
 
 
+def _extract_naver_product_keyword(name: str) -> str | None:
+    for kw in _NAVER_SA_KEYWORDS:
+        if kw in (name or ""):
+            return kw
+    return None
+
+
 def _get_cafe24_channel_id(channel_map: dict) -> int | None:
     for cid, ch in channel_map.items():
         if ch.code == "CAFE24":
+            return cid
+    return None
+
+
+def _get_naver_channel_id(channel_map: dict) -> int | None:
+    for cid, ch in channel_map.items():
+        if ch.code == "NAVER":
             return cid
     return None
 
@@ -71,6 +91,41 @@ def _get_meta_ad_spend_by_keyword_day(
         {"cid": cafe24_channel_id, "since": date_from.isoformat(), "until": date_to.isoformat()},
     ).fetchall()
     return {(str(r[0])[5:], str(r[1])): Decimal(str(r[2])) for r in rows if r[2]}
+
+
+def _get_naver_sa_ad_spend_daily(
+    db: Session, naver_channel_id: int, date_from: date, date_to: date
+) -> dict[str, Decimal]:
+    """ad_costs → Naver SA 일별 총 광고비 {date_str: spend}"""
+    rows = db.execute(
+        text("""
+            SELECT ad_date, SUM(CAST(ad_spend AS REAL))
+            FROM ad_costs
+            WHERE channel_id = :cid AND source LIKE 'naver_sa:%'
+              AND ad_date >= :since AND ad_date <= :until
+            GROUP BY ad_date
+        """),
+        {"cid": naver_channel_id, "since": date_from.isoformat(), "until": date_to.isoformat()},
+    ).fetchall()
+    return {str(r[0]): Decimal(str(r[1])) for r in rows if r[1]}
+
+
+def _get_naver_sa_ad_spend_by_keyword_day(
+    db: Session, naver_channel_id: int, date_from: date, date_to: date
+) -> dict[tuple[str, str], Decimal]:
+    """ad_costs → Naver SA 키워드/일별 광고비 {(keyword, date_str): spend} (기타 제외)"""
+    rows = db.execute(
+        text("""
+            SELECT source, ad_date, SUM(CAST(ad_spend AS REAL))
+            FROM ad_costs
+            WHERE channel_id = :cid AND source LIKE 'naver_sa:%'
+              AND source != 'naver_sa:기타'
+              AND ad_date >= :since AND ad_date <= :until
+            GROUP BY source, ad_date
+        """),
+        {"cid": naver_channel_id, "since": date_from.isoformat(), "until": date_to.isoformat()},
+    ).fetchall()
+    return {(str(r[0])[9:], str(r[1])): Decimal(str(r[2])) for r in rows if r[2]}
 
 
 def _line_commission(ch: Channel | None, o: Order, revenue: Decimal) -> Decimal:
@@ -251,6 +306,14 @@ def calculate_daily_trend(
             if d in daily:
                 daily[d]["ad_spend"] += spend
 
+    # Naver SA 광고비 (ad_costs 테이블 — naver 채널 일별)
+    naver_id = _get_naver_channel_id(channel_map)
+    if naver_id and (channel_id is None or channel_id == naver_id):
+        naver_daily = _get_naver_sa_ad_spend_daily(db, naver_id, date_from, date_to)
+        for d, spend in naver_daily.items():
+            if d in daily:
+                daily[d]["ad_spend"] += spend
+
     # 정렬 후 반환
     result = []
     for d in sorted(daily.keys()):
@@ -343,6 +406,13 @@ def calculate_channel_summary(
         meta_daily = _get_meta_ad_spend_daily(db, cafe24_id, date_from, date_to)
         for spend in meta_daily.values():
             by_channel[cafe24_id]["ad_spend"] += spend
+
+    # Naver SA 광고비 직접 합산 (naver 채널 전체)
+    naver_id = _get_naver_channel_id(channel_map)
+    if naver_id and naver_id in by_channel:
+        naver_daily = _get_naver_sa_ad_spend_daily(db, naver_id, date_from, date_to)
+        for spend in naver_daily.values():
+            by_channel[naver_id]["ad_spend"] += spend
 
     result = []
     for cid, b in by_channel.items():
@@ -474,6 +544,40 @@ def calculate_product_profit(
                 if total == ZERO:
                     continue
                 for pid, prod_rev in kw_day_products.get((kw, d), {}).items():
+                    if pid in by_product:
+                        by_product[pid]["ad_spend"] += spend * prod_rev / total
+
+    # Naver SA 광고비 키워드 비례 배분 (네이버 스마트스토어 상품명 기반)
+    naver_id = _get_naver_channel_id(channel_map)
+    if naver_id:
+        naver_kw_day_spend = _get_naver_sa_ad_spend_by_keyword_day(db, naver_id, date_from, date_to)
+        if naver_kw_day_spend:
+            naver_kw_day_products: dict[tuple[str, str], dict[int, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
+            naver_kw_day_total: dict[tuple[str, str], Decimal] = defaultdict(Decimal)
+
+            for o in orders:
+                ch = channel_map.get(o.channel_id)
+                if not (ch and ch.code == "NAVER"):
+                    continue
+                if o.status in REVENUE_EXCLUDED:
+                    continue
+                if not o.product_id:
+                    continue
+                pm = product_map.get(o.product_id)
+                pname = (pm.product_name if pm else "") or (o.platform_product_name or "")
+                kw = _extract_naver_product_keyword(pname)
+                if not kw:
+                    continue
+                d = str(o.order_date.date()) if hasattr(o.order_date, "date") else str(o.order_date)[:10]
+                rev = o.selling_price * o.quantity
+                naver_kw_day_products[(kw, d)][o.product_id] += rev
+                naver_kw_day_total[(kw, d)] += rev
+
+            for (kw, d), spend in naver_kw_day_spend.items():
+                total = naver_kw_day_total.get((kw, d), ZERO)
+                if total == ZERO:
+                    continue
+                for pid, prod_rev in naver_kw_day_products.get((kw, d), {}).items():
                     if pid in by_product:
                         by_product[pid]["ad_spend"] += spend * prod_rev / total
 
