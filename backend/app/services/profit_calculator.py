@@ -17,9 +17,15 @@ ZERO = Decimal("0")
 
 
 def _line_commission(ch: Channel | None, o: Order, revenue: Decimal) -> Decimal:
-    """라인 수수료. cafe24는 동기화 시 산출된 commission_amount 사용, 그 외는 채널 정률."""
+    """라인 수수료. cafe24/naver는 동기화 시 산출된 commission_amount 사용, 그 외는 채널 정률."""
     if ch and ch.code == "CAFE24":
         return o.commission_amount if o.commission_amount is not None else ZERO
+    if ch and ch.code == "NAVER":
+        if o.commission_amount is not None:
+            return o.commission_amount
+        # commission_amount 없으면 채널 정률 폴백 (API 미지원 케이스 방어)
+        rate = ch.commission_rate if ch else ZERO
+        return revenue * rate / Decimal("100")
     rate = ch.commission_rate if ch else ZERO
     return revenue * rate / Decimal("100")
 

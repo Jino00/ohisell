@@ -187,6 +187,19 @@ class NaverClient(BaseChannelClient):
                     continue
                 seen_po_ids.add(detail_key)
 
+                # 네이버 API가 제공하는 실제 수수료 합산 (필드 부재 vs 명시적 0 구분)
+                _COMM_KEYS = (
+                    "paymentCommission",
+                    "saleCommission",
+                    "knowledgeShoppingSellingInterlockCommission",
+                    "channelCommission",
+                )
+                commission: Decimal | None = (
+                    Decimal(str(sum(po.get(k, 0) for k in _COMM_KEYS)))
+                    if any(k in po for k in _COMM_KEYS)
+                    else None
+                )
+
                 raw = RawOrder(
                     order_number=order_id,
                     platform_product_id=product_id,
@@ -196,6 +209,7 @@ class NaverClient(BaseChannelClient):
                     shipping_cost=shipping_fee if shipping_fee else None,
                     order_date=order_info.get("paymentDate", date_from.isoformat()),
                     status=self._map_status(po.get("productOrderStatus", "")),
+                    commission_amount=commission,
                     raw_data=entry,
                 )
                 all_orders.append(raw)
