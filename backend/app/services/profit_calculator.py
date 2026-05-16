@@ -5,6 +5,8 @@ import logging
 from datetime import date
 from decimal import Decimal
 
+from collections import defaultdict
+
 from sqlalchemy import and_, func, text
 from sqlalchemy.orm import Session
 
@@ -14,6 +16,61 @@ from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
 log = logging.getLogger(__name__)
 
 ZERO = Decimal("0")
+
+# Meta 광고비 키워드 (캠페인명 매칭용)
+_META_KEYWORDS = [
+    "지문방지필름", "골프필름", "버디필름", "강화유리", "셀카봉", "문캅스", "일미리케이스",
+]
+_KEYWORD_ALIAS = {"샐카봉": "셀카봉"}
+
+
+def _extract_product_keyword(name: str) -> str | None:
+    for kw in _META_KEYWORDS:
+        if kw in (name or ""):
+            return _KEYWORD_ALIAS.get(kw, kw)
+    return None
+
+
+def _get_cafe24_channel_id(channel_map: dict) -> int | None:
+    for cid, ch in channel_map.items():
+        if ch.code == "CAFE24":
+            return cid
+    return None
+
+
+def _get_meta_ad_spend_daily(
+    db: Session, cafe24_channel_id: int, date_from: date, date_to: date
+) -> dict[str, Decimal]:
+    """ad_costs → Meta 일별 총 광고비 {date_str: spend}"""
+    rows = db.execute(
+        text("""
+            SELECT ad_date, SUM(CAST(ad_spend AS REAL))
+            FROM ad_costs
+            WHERE channel_id = :cid AND source LIKE 'meta:%'
+              AND ad_date >= :since AND ad_date <= :until
+            GROUP BY ad_date
+        """),
+        {"cid": cafe24_channel_id, "since": date_from.isoformat(), "until": date_to.isoformat()},
+    ).fetchall()
+    return {str(r[0]): Decimal(str(r[1])) for r in rows if r[1]}
+
+
+def _get_meta_ad_spend_by_keyword_day(
+    db: Session, cafe24_channel_id: int, date_from: date, date_to: date
+) -> dict[tuple[str, str], Decimal]:
+    """ad_costs → Meta 키워드/일별 광고비 {(keyword, date_str): spend} (기타 제외)"""
+    rows = db.execute(
+        text("""
+            SELECT source, ad_date, SUM(CAST(ad_spend AS REAL))
+            FROM ad_costs
+            WHERE channel_id = :cid AND source LIKE 'meta:%'
+              AND source != 'meta:기타'
+              AND ad_date >= :since AND ad_date <= :until
+            GROUP BY source, ad_date
+        """),
+        {"cid": cafe24_channel_id, "since": date_from.isoformat(), "until": date_to.isoformat()},
+    ).fetchall()
+    return {(str(r[0])[5:], str(r[1])): Decimal(str(r[2])) for r in rows if r[2]}
 
 
 def _line_commission(ch: Channel | None, o: Order, revenue: Decimal) -> Decimal:
@@ -181,10 +238,18 @@ def calculate_daily_trend(
         # VAT
         bucket["vat"] += revenue * Decimal("10") / Decimal("110")
 
-    # 광고비 합산 (option_id 기반 → 날짜별 합산)
+    # 광고비 합산 (option_id 기반 — ad_data.db 연결 시 사용, 현재 비활성)
     for (oid, d_str), spend in ad_lookup.items():
         if d_str in daily:
             daily[d_str]["ad_spend"] += spend
+
+    # Meta 광고비 (ad_costs 테이블 — cafe24 키워드별 일별)
+    cafe24_id = _get_cafe24_channel_id(channel_map)
+    if cafe24_id and (channel_id is None or channel_id == cafe24_id):
+        meta_daily = _get_meta_ad_spend_daily(db, cafe24_id, date_from, date_to)
+        for d, spend in meta_daily.items():
+            if d in daily:
+                daily[d]["ad_spend"] += spend
 
     # 정렬 후 반환
     result = []
@@ -266,11 +331,18 @@ def calculate_channel_summary(
         if o.platform_product_id and o.platform_product_id not in option_to_channel:
             option_to_channel[o.platform_product_id] = o.channel_id
 
-    # 3) 광고비를 해당 채널에 직접 할당
+    # 3) 광고비를 해당 채널에 직접 할당 (ad_data.db 기반 — 현재 비활성)
     for oid, spend in ad_by_option.items():
         cid = option_to_channel.get(oid)
         if cid and cid in by_channel:
             by_channel[cid]["ad_spend"] += spend
+
+    # Meta 광고비 직접 합산 (cafe24 채널 전체)
+    cafe24_id = _get_cafe24_channel_id(channel_map)
+    if cafe24_id and cafe24_id in by_channel:
+        meta_daily = _get_meta_ad_spend_daily(db, cafe24_id, date_from, date_to)
+        for spend in meta_daily.values():
+            by_channel[cafe24_id]["ad_spend"] += spend
 
     result = []
     for cid, b in by_channel.items():
@@ -359,7 +431,7 @@ def calculate_product_profit(
 
         # 광고비는 아래에서 option_id → product_id 매핑으로 일괄 할당
 
-    # option_id → product_id 매핑으로 광고비 직접 할당 (중복 방지)
+    # option_id → product_id 매핑으로 광고비 직접 할당 (ad_data.db 기반 — 현재 비활성)
     option_to_product: dict[str, int] = {}
     for o in orders:
         if o.platform_product_id and o.product_id and o.platform_product_id not in option_to_product:
@@ -369,6 +441,41 @@ def calculate_product_profit(
         pid = option_to_product.get(oid)
         if pid and pid in by_product:
             by_product[pid]["ad_spend"] += spend
+
+    # Meta 광고비 키워드 비례 배분 (cafe24 상품명 기반)
+    cafe24_id = _get_cafe24_channel_id(channel_map)
+    if cafe24_id:
+        kw_day_spend = _get_meta_ad_spend_by_keyword_day(db, cafe24_id, date_from, date_to)
+        if kw_day_spend:
+            # 키워드/일/상품별 매출 집계 (비례 배분 기준)
+            kw_day_products: dict[tuple[str, str], dict[int, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
+            kw_day_total: dict[tuple[str, str], Decimal] = defaultdict(Decimal)
+
+            for o in orders:
+                ch = channel_map.get(o.channel_id)
+                if not (ch and ch.code == "CAFE24"):
+                    continue
+                if o.status in REVENUE_EXCLUDED:
+                    continue
+                if not o.product_id:
+                    continue
+                pm = product_map.get(o.product_id)
+                pname = (pm.product_name if pm else "") or (o.platform_product_name or "")
+                kw = _extract_product_keyword(pname)
+                if not kw:
+                    continue
+                d = str(o.order_date.date()) if hasattr(o.order_date, "date") else str(o.order_date)[:10]
+                rev = o.selling_price * o.quantity
+                kw_day_products[(kw, d)][o.product_id] += rev
+                kw_day_total[(kw, d)] += rev
+
+            for (kw, d), spend in kw_day_spend.items():
+                total = kw_day_total.get((kw, d), ZERO)
+                if total == ZERO:
+                    continue
+                for pid, prod_rev in kw_day_products.get((kw, d), {}).items():
+                    if pid in by_product:
+                        by_product[pid]["ad_spend"] += spend * prod_rev / total
 
     result = []
     for pid, b in by_product.items():
