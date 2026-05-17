@@ -94,6 +94,76 @@ def recalculate_profit_job():
                 pass
 
 
+def sync_naver_sa_ad_costs_job():
+    """Naver SA 광고비 어제치 자동 적재 (07:00 KST)"""
+    db = _get_own_db_session()
+    try:
+        from app.routers.ad_costs import _extract_naver_sa_keyword, _upsert_ad_cost
+        from app.services.naver_sa_ad_fetcher import fetch_campaign_daily_spend
+        from decimal import Decimal
+        from sqlalchemy import text
+
+        yesterday = date.today() - timedelta(days=1)
+        naver_row = db.execute(
+            text("SELECT id FROM channels WHERE code = 'NAVER' LIMIT 1")
+        ).fetchone()
+        if not naver_row:
+            log.error("[스케줄러] NAVER 채널 없음")
+            return
+        naver_id = naver_row[0]
+
+        campaigns = fetch_campaign_daily_spend(yesterday, yesterday)
+        agg: dict[tuple[str, str], Decimal] = {}
+        for c in campaigns:
+            kw = _extract_naver_sa_keyword(c["campaign_name"])
+            key = (c["date"], f"naver_sa:{kw}")
+            agg[key] = agg.get(key, Decimal("0")) + c["spend"]
+
+        for (dt_str, source), spend in agg.items():
+            _upsert_ad_cost(db, naver_id, date.fromisoformat(dt_str), spend, source)
+        db.commit()
+        log.info("[스케줄러] Naver SA 광고비 %d건 적재 완료 (%s)", len(agg), yesterday)
+    except Exception as e:
+        log.exception("[스케줄러] sync_naver_sa_ad_costs_job 에러: %s", e)
+    finally:
+        db.close()
+
+
+def sync_meta_ad_costs_job():
+    """Meta 광고비 어제치 자동 적재 (07:00 KST)"""
+    db = _get_own_db_session()
+    try:
+        from app.routers.ad_costs import _extract_meta_keyword, _upsert_ad_cost
+        from app.services.meta_ad_fetcher import fetch_campaign_daily_spend
+        from decimal import Decimal
+        from sqlalchemy import text
+
+        yesterday = date.today() - timedelta(days=1)
+        cafe24_row = db.execute(
+            text("SELECT id FROM channels WHERE code = 'CAFE24' LIMIT 1")
+        ).fetchone()
+        if not cafe24_row:
+            log.error("[스케줄러] CAFE24 채널 없음")
+            return
+        cafe24_id = cafe24_row[0]
+
+        campaigns = fetch_campaign_daily_spend(yesterday, yesterday)
+        agg: dict[tuple[str, str], Decimal] = {}
+        for c in campaigns:
+            kw = _extract_meta_keyword(c["campaign_name"])
+            key = (c["date"], f"meta:{kw}")
+            agg[key] = agg.get(key, Decimal("0")) + c["spend"]
+
+        for (dt_str, source), spend in agg.items():
+            _upsert_ad_cost(db, cafe24_id, date.fromisoformat(dt_str), spend, source)
+        db.commit()
+        log.info("[스케줄러] Meta 광고비 %d건 적재 완료 (%s)", len(agg), yesterday)
+    except Exception as e:
+        log.exception("[스케줄러] sync_meta_ad_costs_job 에러: %s", e)
+    finally:
+        db.close()
+
+
 def cafe24_proactive_refresh_job():
     """cafe24 Access Token 만료 30분 전 자동 갱신"""
     if not _cafe24_refresh_lock.acquire(blocking=False):
@@ -167,6 +237,8 @@ def _ensure_default_states(db):
         ("auto_sync_orders", "0 6 * * *"),
         ("auto_profit_calc", "30 6 * * *"),
         ("cafe24_token_refresh", "*/30 * * * *"),
+        ("sync_naver_sa_ad_costs", "0 7 * * *"),
+        ("sync_meta_ad_costs", "0 7 * * *"),
     ]
     for name, cron in defaults:
         existing = db.query(SchedulerState).filter(
@@ -195,6 +267,10 @@ def start_scheduler():
                 job_func = recalculate_profit_job
             elif state.job_name == "cafe24_token_refresh":
                 job_func = cafe24_proactive_refresh_job
+            elif state.job_name == "sync_naver_sa_ad_costs":
+                job_func = sync_naver_sa_ad_costs_job
+            elif state.job_name == "sync_meta_ad_costs":
+                job_func = sync_meta_ad_costs_job
 
             if job_func:
                 try:

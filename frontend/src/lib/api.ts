@@ -117,7 +117,7 @@ export interface ProfitSummary {
 }
 
 // ── Dashboard Types (Sprint 3) ──
-export interface TrendItem {
+export interface TrendItem extends Record<string, unknown> {
   date: string;
   revenue: number;
   cost: number;
@@ -129,7 +129,7 @@ export interface TrendItem {
   order_count: number;
 }
 
-export interface KpiData {
+export interface KpiData extends Record<string, unknown> {
   total_revenue: number;
   net_profit: number;
   profit_rate: number;
@@ -138,7 +138,7 @@ export interface KpiData {
   profit_change_pct: number;
 }
 
-export interface ChannelBreakdown {
+export interface ChannelBreakdown extends Record<string, unknown> {
   channel_id: number;
   channel_name: string;
   revenue: number;
@@ -150,7 +150,7 @@ export interface ChannelBreakdown {
   order_count: number;
 }
 
-export interface ProductRanking {
+export interface ProductRanking extends Record<string, unknown> {
   product_id: number;
   product_name: string;
   internal_sku: string;

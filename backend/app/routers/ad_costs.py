@@ -1,9 +1,10 @@
-# routers/ad_costs.py — 광고비 조회 + GFA CSV 업로드 API
+# routers/ad_costs.py — 광고비 조회 + GFA CSV 업로드 + SA/Meta 동기화 API
 from __future__ import annotations
 
 import csv
 import io
-from datetime import date
+import logging
+from datetime import date, timedelta
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
@@ -13,6 +14,49 @@ from sqlalchemy import text
 from app.database import get_ad_db, get_db
 from app.schemas import AdSpendByOption, AdSpendDaily
 from app.services.ad_cost_reader import get_ad_spend_by_option, get_daily_ad_spend
+
+log = logging.getLogger(__name__)
+
+# profit_calculator와 동일한 키워드 목록 (source 생성 기준)
+_NAVER_SA_KEYWORDS = [
+    "지문방지", "강화유리", "종이질감", "사생활", "갤럭시탭", "아이패드", "아이폰",
+    "갤럭시", "셀카봉", "뮤패드", "케이스",
+]
+_META_KEYWORDS = [
+    "지문방지필름", "골프필름", "버디필름", "강화유리", "셀카봉", "문캅스", "일미리케이스",
+]
+_KEYWORD_ALIAS = {"샐카봉": "셀카봉"}
+
+
+def _extract_naver_sa_keyword(campaign_name: str) -> str:
+    name = campaign_name or ""
+    for kw in _NAVER_SA_KEYWORDS:
+        if kw in name:
+            return kw
+    return "기타"
+
+
+def _extract_meta_keyword(campaign_name: str) -> str:
+    name = campaign_name or ""
+    for kw in _META_KEYWORDS:
+        if kw in name:
+            return _KEYWORD_ALIAS.get(kw, kw)
+    return "기타"
+
+
+def _upsert_ad_cost(db: Session, channel_id: int, ad_date: date, spend: Decimal, source: str) -> None:
+    """ad_costs 테이블에 특정 날짜/source 레코드를 delete+insert (멱등)."""
+    db.execute(
+        text("DELETE FROM ad_costs WHERE channel_id = :cid AND source = :src AND ad_date = :dt"),
+        {"cid": channel_id, "src": source, "dt": ad_date.isoformat()},
+    )
+    db.execute(
+        text("""
+            INSERT INTO ad_costs (channel_id, product_id, ad_date, ad_spend, ad_revenue, source, created_at)
+            VALUES (:cid, NULL, :dt, :spend, NULL, :src, datetime('now'))
+        """),
+        {"cid": channel_id, "dt": ad_date.isoformat(), "spend": str(spend), "src": source},
+    )
 
 router = APIRouter(prefix="/api/ad-costs", tags=["ad-costs"])
 
@@ -130,4 +174,113 @@ async def upload_gfa_csv(
         "skipped": skipped,
         "total_spend": int(total_spend),
         "dates": [r["date"].isoformat() for r in records],
+    }
+
+
+@router.post("/naver-sa/sync")
+def sync_naver_sa_ad_costs(
+    date_from: str = Query(default=None, description="YYYY-MM-DD (기본: 어제)"),
+    date_to: str = Query(default=None, description="YYYY-MM-DD (기본: 어제)"),
+    db: Session = Depends(get_db),
+):
+    """네이버 검색광고(SA) 캠페인별 일별 광고비 → ad_costs 저장.
+    source 형식: naver_sa:{키워드} 또는 naver_sa:기타
+    """
+    from app.services.naver_sa_ad_fetcher import fetch_campaign_daily_spend
+
+    yesterday = date.today() - timedelta(days=1)
+    d_from = date.fromisoformat(date_from) if date_from else yesterday
+    d_to = date.fromisoformat(date_to) if date_to else yesterday
+
+    naver_row = db.execute(
+        text("SELECT id FROM channels WHERE code = 'NAVER' LIMIT 1")
+    ).fetchone()
+    if not naver_row:
+        raise HTTPException(status_code=500, detail="NAVER 채널이 DB에 없습니다.")
+    naver_id = naver_row[0]
+
+    try:
+        campaigns = fetch_campaign_daily_spend(d_from, d_to)
+    except Exception as e:
+        log.error("Naver SA API 오류: %s", e)
+        raise HTTPException(status_code=502, detail=f"Naver SA API 오류: {e}")
+
+    if not campaigns:
+        return {"inserted": 0, "skipped": 0, "total_spend": 0, "dates": [], "message": "수집된 캠페인 없음"}
+
+    # 날짜×source 별 집계
+    agg: dict[tuple[str, str], Decimal] = {}
+    for c in campaigns:
+        kw = _extract_naver_sa_keyword(c["campaign_name"])
+        source = f"naver_sa:{kw}"
+        key = (c["date"], source)
+        agg[key] = agg.get(key, Decimal("0")) + c["spend"]
+
+    for (dt_str, source), spend in agg.items():
+        _upsert_ad_cost(db, naver_id, date.fromisoformat(dt_str), spend, source)
+
+    db.commit()
+
+    dates = sorted({k[0] for k in agg})
+    total = int(sum(agg.values()))
+    log.info("Naver SA 광고비 %d건 적재 (%s~%s) 총 %d원", len(agg), d_from, d_to, total)
+    return {
+        "inserted": len(agg),
+        "skipped": 0,
+        "total_spend": total,
+        "dates": dates,
+    }
+
+
+@router.post("/meta/sync")
+def sync_meta_ad_costs(
+    date_from: str = Query(default=None, description="YYYY-MM-DD (기본: 어제)"),
+    date_to: str = Query(default=None, description="YYYY-MM-DD (기본: 어제)"),
+    db: Session = Depends(get_db),
+):
+    """Meta 캠페인별 일별 광고비 → ad_costs 저장.
+    source 형식: meta:{키워드} 또는 meta:기타
+    """
+    from app.services.meta_ad_fetcher import fetch_campaign_daily_spend
+
+    yesterday = date.today() - timedelta(days=1)
+    d_from = date.fromisoformat(date_from) if date_from else yesterday
+    d_to = date.fromisoformat(date_to) if date_to else yesterday
+
+    cafe24_row = db.execute(
+        text("SELECT id FROM channels WHERE code = 'CAFE24' LIMIT 1")
+    ).fetchone()
+    if not cafe24_row:
+        raise HTTPException(status_code=500, detail="CAFE24 채널이 DB에 없습니다.")
+    cafe24_id = cafe24_row[0]
+
+    try:
+        campaigns = fetch_campaign_daily_spend(d_from, d_to)
+    except Exception as e:
+        log.error("Meta API 오류: %s", e)
+        raise HTTPException(status_code=502, detail=f"Meta API 오류: {e}")
+
+    if not campaigns:
+        return {"inserted": 0, "skipped": 0, "total_spend": 0, "dates": [], "message": "수집된 캠페인 없음"}
+
+    agg: dict[tuple[str, str], Decimal] = {}
+    for c in campaigns:
+        kw = _extract_meta_keyword(c["campaign_name"])
+        source = f"meta:{kw}"
+        key = (c["date"], source)
+        agg[key] = agg.get(key, Decimal("0")) + c["spend"]
+
+    for (dt_str, source), spend in agg.items():
+        _upsert_ad_cost(db, cafe24_id, date.fromisoformat(dt_str), spend, source)
+
+    db.commit()
+
+    dates = sorted({k[0] for k in agg})
+    total = int(sum(agg.values()))
+    log.info("Meta 광고비 %d건 적재 (%s~%s) 총 %d원", len(agg), d_from, d_to, total)
+    return {
+        "inserted": len(agg),
+        "skipped": 0,
+        "total_spend": total,
+        "dates": dates,
     }

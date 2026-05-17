@@ -22,13 +22,19 @@ router = APIRouter(prefix="/api/oauth", tags=["oauth"])
 # cafe24 OAuth callback 후 프론트엔드로 리다이렉트할 URL
 FRONTEND_BASE = os.getenv("FRONTEND_URL", "http://localhost:5173")
 
+# CAFE24_REDIRECT_URI 환경변수로 고정 callback URL 지정 (nginx 프록시 환경 필수)
+# 예: CAFE24_REDIRECT_URI=https://sellc.ohitech.co.kr/api/oauth/cafe24/callback
+_FIXED_REDIRECT_URI = os.getenv("CAFE24_REDIRECT_URI", "")
+
 
 def _get_cafe24_channel(db: Session) -> Channel | None:
     return db.query(Channel).filter(Channel.code == "CAFE24").first()
 
 
 def _get_redirect_uri(request: Request) -> str:
-    """요청 기반으로 callback URL 동적 생성"""
+    """callback URL 반환. CAFE24_REDIRECT_URI 환경변수가 있으면 그것을 우선 사용."""
+    if _FIXED_REDIRECT_URI:
+        return _FIXED_REDIRECT_URI
     return str(request.base_url).rstrip("/") + "/api/oauth/cafe24/callback"
 
 

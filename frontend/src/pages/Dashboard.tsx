@@ -286,16 +286,18 @@ export default function Dashboard() {
                   cx="50%"
                   cy="50%"
                   outerRadius={90}
-                  label={({ channel_name, revenue }: { channel_name: string; revenue: number }) =>
-                    `${channel_name} ${totalChannelRevenue > 0 ? ((revenue / totalChannelRevenue) * 100).toFixed(0) : 0}%`
-                  }
+                  label={(props) => {
+                    const name = String(props.name ?? "");
+                    const value = Number(props.value ?? 0);
+                    return `${name} ${totalChannelRevenue > 0 ? ((value / totalChannelRevenue) * 100).toFixed(0) : 0}%`;
+                  }}
                   labelLine={{ stroke: "#d1d5db" }}
                 >
                   {channels.map((_, i) => (
                     <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />
                   ))}
                 </Pie>
-                <Tooltip formatter={(v: number) => `${formatKRW(v)}원`} />
+                <Tooltip formatter={(v) => `${formatKRW(Number(v ?? 0))}원`} />
               </PieChart>
             </ResponsiveContainer>
           )}
@@ -317,7 +319,7 @@ export default function Dashboard() {
                   tick={{ fontSize: 12, fill: "#6b7280" }}
                   width={80}
                 />
-                <Tooltip formatter={(v: number) => `${v.toFixed(1)}%`} />
+                <Tooltip formatter={(v) => `${Number(v ?? 0).toFixed(1)}%`} />
                 <Bar dataKey="profit_rate" name="이익률" radius={[0, 4, 4, 0]}>
                   {channels.map((ch, i) => (
                     <Cell
