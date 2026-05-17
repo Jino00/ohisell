@@ -1,5 +1,5 @@
 // Settings.tsx — 채널 연동 상태 + 동기화 관리 페이지
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchApi } from "../lib/api";
 
 interface ChannelStatus {
@@ -71,12 +71,25 @@ function platformIcon(platform: string) {
   }
 }
 
+interface GfaUploadResult {
+  inserted: number;
+  skipped: number;
+  total_spend: number;
+  dates: string[];
+}
+
 export default function Settings() {
   const [channels, setChannels] = useState<ChannelStatus[]>([]);
   const [loading, setLoading] = useState(true);
   const [syncingId, setSyncingId] = useState<number | null>(null);
   const [syncResults, setSyncResults] = useState<Record<number, SyncResult>>({});
   const [syncAllLoading, setSyncAllLoading] = useState(false);
+
+  // GFA 업로드 상태
+  const [gfaUploading, setGfaUploading] = useState(false);
+  const [gfaResult, setGfaResult] = useState<GfaUploadResult | null>(null);
+  const [gfaError, setGfaError] = useState<string | null>(null);
+  const gfaFileRef = useRef<HTMLInputElement>(null);
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -139,6 +152,33 @@ export default function Settings() {
       fetchStatus();
     } catch {
       /* silent */
+    }
+  };
+
+  const handleGfaUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setGfaUploading(true);
+    setGfaResult(null);
+    setGfaError(null);
+
+    const formData = new FormData();
+    formData.append("file", file);
+
+    try {
+      const res = await fetch("/api/ad-costs/gfa/upload", {
+        method: "POST",
+        body: formData,
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "업로드 실패");
+      setGfaResult(data as GfaUploadResult);
+    } catch (err) {
+      setGfaError(err instanceof Error ? err.message : "업로드 중 오류 발생");
+    } finally {
+      setGfaUploading(false);
+      if (gfaFileRef.current) gfaFileRef.current.value = "";
     }
   };
 
@@ -283,6 +323,56 @@ export default function Settings() {
           </div>
         </div>
       )}
+
+      {/* GFA(ADVoost) 광고비 업로드 */}
+      <div>
+        <h2 className="text-sm font-semibold text-gray-700 mb-3">광고비 수동 업로드</h2>
+        <div className="bg-white border border-gray-200 rounded-lg p-4">
+          <div className="flex items-start justify-between">
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-lg">🟢</span>
+                <span className="font-medium text-gray-900">GFA · ADVoost 쇼핑</span>
+                <span className="px-2 py-0.5 text-xs rounded-full bg-gray-100 text-gray-600">CSV 업로드</span>
+              </div>
+              <div className="text-xs text-gray-500 mt-1">
+                cafe24 GFA 콘솔 → 보고서 → CSV 다운로드 후 업로드
+                <span className="ml-2 text-gray-400">파일명 예: theohi11_광고비 보고서_20260515_20260515.csv</span>
+              </div>
+            </div>
+            <div>
+              <input
+                ref={gfaFileRef}
+                type="file"
+                accept=".csv"
+                className="hidden"
+                onChange={handleGfaUpload}
+              />
+              <button
+                onClick={() => gfaFileRef.current?.click()}
+                disabled={gfaUploading}
+                className="px-3 py-1.5 text-xs bg-green-50 text-green-700 rounded-md hover:bg-green-100 disabled:opacity-50"
+              >
+                {gfaUploading ? "업로드 중..." : "CSV 업로드"}
+              </button>
+            </div>
+          </div>
+
+          {/* 업로드 결과 */}
+          {gfaResult && (
+            <div className="mt-3 text-xs px-3 py-2 rounded bg-green-50 text-green-700">
+              ✓ 저장 완료: {gfaResult.inserted}일치 광고비 적재 —
+              총 {gfaResult.total_spend.toLocaleString("ko-KR")}원
+              ({gfaResult.dates.join(", ")})
+            </div>
+          )}
+          {gfaError && (
+            <div className="mt-3 text-xs px-3 py-2 rounded bg-red-50 text-red-700">
+              오류: {gfaError}
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
