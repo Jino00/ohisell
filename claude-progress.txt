@@ -3,135 +3,101 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
-- 날짜: 2026-05-16
-- 단계: Sprint 4B-cafe24 완료 (자사몰 순이익 정확화)
-- 전체 진행률: 88%
+- 날짜: 2026-05-17
+- 단계: Sprint 4B-rocket-manual-revenue 완료 (로켓배송 수동 매출 입력)
+- 전체 진행률: 92%
 
-## Sprint 4B-cafe24 완료 (2026-05-16) — 자사몰 순이익 정확화
-- [x] SA 4개(순수함수): Cafe24StatusMapper / PaymentClassifier / CommissionResolver / ShippingResolver
-- [x] DB: orders.payment_type + commission_amount (alembic a1c24f0b9d31, head)
-- [x] cafe24.py: 결제분류+공식수수료+배송비(한진1900/주문) 라인배분, _map_status 삭제
-- [x] profit_calculator: 취소/반품/입금전 전채널 제외 + cafe24 commission/shipping
-- [x] 백필 242라인 (라인별 detail status, 매출포함 라인 배분, 잔여정산)
-- [x] /codex review 2게이트 모두 2라운드 합의 PASS (대화형 검증)
-- 결과: cafe24 순이익 3,346,264→2,677,623 (구버전 19.5% 과대 교정)
-- 공식요율 확정: 네이버페이 영세 신용카드 1.870%(VAT포함), KCP/카카오/토스 3.5%(VAT별도×1.1), KCP가상계좌 330원정액, 네이버페이 무통장 min(1%,275)
-- 미커밋 (Jino 확인 후 commit 예정)
-- 후속: raw_data 10000자 잘림 제거(별도), 네이버 스마트스토어 정확화, 쿠팡
+## Sprint 4B-rocket-manual-revenue 완료 (2026-05-17) — 로켓배송 수동 매출 입력
+- [x] ManualRevenue 모델 + alembic 마이그레이션 (3b94b7c55a1f)
+- [x] manual_revenue_service.py SA-1~4 (upsert/list/delete/daily집계)
+- [x] profit_calculator: 수동매출 매출-only 병합, net_profit 제외
+- [x] calculate_channel_summary: 수동매출 전용 채널 행 (net_profit=null, ad_spend 포함)
+- [x] routers/manual_revenue.py POST/GET/DELETE + main.py 등록
+- [x] Settings.tsx 입력 폼 + 내역 표 (KST 로컬 날짜, 삭제)
+- [x] ChannelBreakdown net_profit/profit_rate nullable 처리
+- [x] Dashboard.tsx 이익률 차트 null 채널 제외 (회색 처리)
+- [x] codex review 2라운드 PASS
+  - P2 수정: 수동매출 채널 ad_spend → AdCost 실제 합산
+  - P2 수정: KST 로컬 날짜 기본값
+  - P2 수정: ChannelBreakdown nullable 타입 + Dashboard null 처리
+- [x] git commit 27ffc1a
 
 ## 완료된 작업
 ### Sprint 0
-- [x] 프로젝트 초기 세팅 (CLAUDE.md, FEATURES.json 등)
+- [x] 프로젝트 초기 세팅
 - [x] Backend: FastAPI + SQLAlchemy 2.0.48 + Alembic
 - [x] Frontend: React + Vite + TypeScript + Tailwind CSS v4
-- [x] 사이드바 레이아웃 + React Router (5개 페이지 골격)
 
 ### Sprint 1
 - [x] DB 스키마 확장: 9개 테이블
-- [x] channels → 7개 계정 시드
 - [x] Backend API: 상품 CRUD + 채널 매핑 + 엑셀
 - [x] Frontend: 상품 원가표 관리 페이지
 
 ### Sprint 2
-- [x] config.py: 멀티 플랫폼 API 설정 관리
-- [x] clients/: CoupangClient (HMAC), NaverClient (OAuth2+bcrypt), Cafe24Client (OAuth2)
-- [x] Order 모델 (product_master FK, 3컬럼 unique, shipping_cost nullable)
-- [x] SyncLog + OAuthToken 모델
-- [x] sync_service.py: 동기화 오케스트레이션 + auto-linking
-- [x] ad_cost_reader.py: ad_data.db 읽기 전용 조회
-- [x] routers/orders.py: 주문 조회 + 순이익 요약 API
-- [x] routers/sync.py: 채널 동기화 트리거 API
-- [x] routers/ad_costs.py: 광고비 조회 API
-- [x] Frontend Orders.tsx: 순이익 카드 + SyncButton + 필터 + 테이블
+- [x] 멀티 플랫폼 API 클라이언트 (쿠팡 HMAC, 네이버 OAuth2, Cafe24 OAuth2)
+- [x] sync_service, ad_cost_reader, orders/sync/ad_costs 라우터
+- [x] Frontend Orders.tsx
 
 ### Sprint 3
-- [x] profit_calculator.py: 순이익 계산 엔진 (광고비 포함, ad_data.db cross-DB 매칭)
-- [x] routers/dashboard.py: /trend, /kpi, /channel-breakdown, /product-ranking
-- [x] routers/settlements.py: 정산 CRUD + 엑셀 업로드
-- [x] scheduler_service.py: APScheduler (06:00 동기화, 06:30 이익 재계산)
-- [x] routers/scheduler.py: 상태/트리거/토글 API
-- [x] models.py: ProfitReport 업데이트, Settlement 확장, SchedulerState 신규
-- [x] orders.py 리팩터 → profit_calculator 위임
-- [x] Frontend Dashboard.tsx: KPI 카드 + Recharts 차트 (매출 추이, 채널별 비중, 상품 순위)
-- [x] Frontend Settlements.tsx: 정산 업로드 + 필터 + 테이블
-- [x] Frontend SchedulerStatus.tsx: 사이드바 자동 동기화 표시기
-- [x] QA: Products React key warning 수정
+- [x] profit_calculator.py 핵심 엔진
+- [x] dashboard/settlements/scheduler 라우터
+- [x] Frontend Dashboard/Settlements/SchedulerStatus
 
 ### Sprint 4A
-- [x] cafe24 OAuth 4개 엔드포인트 (auth-url, callback, status, disconnect)
-- [x] cafe24 토큰 자동갱신 (on_token_refreshed 콜백 + proactive refresh 30분 간격)
-- [x] OAuthToken.refresh_token_expires_at 컬럼 + 마이그레이션
-- [x] Oracle Cloud 배포 (sellc.ohitech.co.kr, nginx + PM2 + certbot)
-- [x] GitHub 리포 생성 (Jino00/ohisell, private)
-- [x] profit_calculator 광고비 bleeding 버그 수정 (비례배분 → option_id 직접 매핑)
-- [x] 쿠팡 API 응답 파싱 수정 (orderItems 배열 내부 추출)
-- [x] 쿠팡 Wing/RG 중복 방지 (shipmentType 필터링)
-- [x] F-405 설정 페이지 (채널 연동 상태 + 동기화 관리)
-- [x] 전체 API 키 입력 완료 (.env)
-- [x] 실제 동기화 검증: Wing2 46건, Wing1 1건 (가격/상품ID 정상)
+- [x] cafe24 OAuth 4개 엔드포인트
+- [x] Oracle Cloud 배포 (sellc.ohitech.co.kr)
+- [x] GitHub 리포 (Jino00/ohisell)
+- [x] F-405 설정 페이지
 
-## 현재 진행 중인 작업
-(없음 — Sprint 4A 완료)
+### Sprint 4B-cafe24
+- [x] Cafe24 순이익 정확화 (결제분류+공식수수료+배송비)
+- [x] 결과: 19.5% 과대 교정
+
+### Sprint 4B-adcost
+- [x] Naver SA/Meta 광고비 자동 동기화
+- [x] GFA CSV + 쿠팡 XLSX 업로드
+- [x] 광고비 현황 투명성 강화
+
+### Sprint 4B-rocket-manual-revenue
+- [x] ManualRevenue 테이블 + 수동 입력 API
+- [x] profit_calculator 매출-only 병합
+- [x] Settings.tsx 입력 폼
+- [x] Dashboard null 처리
 
 ## 다음에 할 작업
-### Sprint 4B
-1. [ ] 네이버 IP 등록 (Oracle IP 168.107.19.222) → API 테스트
-2. [ ] nginx IP 화이트리스트 또는 Basic Auth (보안)
-3. [ ] OAuth state CSRF 토큰화
-4. [ ] 서버에 ad_data.db 실제 파일 전송 (305MB)
-5. [ ] 첫 동기화 결과 플랫폼 대시보드와 수동 대사
+### Sprint 4B 후속
+1. [ ] 네이버 IP 등록 (Oracle IP 168.107.19.222) → 네이버 스마트스토어 API 테스트
+2. [ ] 로켓배송 실제 매출 데이터 입력 (Settings 페이지 활용)
+3. [ ] 쿠팡 광고 XLSX 과거분 업로드
+4. [ ] nginx IP 화이트리스트 또는 Basic Auth (보안)
 
 ### Sprint 5 후보
 1. [ ] 알림 시스템 (Telegram/Slack)
-2. [ ] 재고 관리 페이지 구현
-3. [ ] 엑셀 리포트 다운로드 (대시보드 → 엑셀)
+2. [ ] 재고 관리 페이지
+3. [ ] 엑셀 리포트 다운로드
 4. [ ] 사용자 인증 (로그인/세션)
 5. [ ] 쿠팡 revenue-history 정산 자동 연동
 
 ## 순이익 공식 (확정)
 순이익 = 매출 - 원가 - 수수료 - 광고비 - 배송비 - VAT(10/110)
-* 배송비: 상품별로 포함/미포함 다름 (shipping_cost nullable)
-* 로켓배송(위탁): 이익 계산 제외 (매출만 표시)
-* 광고비: ad_data.db에서 option_id로 매칭 (cross-DB Python 레벨 조인)
+* 로켓배송(위탁): 수동매출만 표시, 순이익 "—"
+* 광고비: ad_data.db option_id 매칭 + ad_costs 테이블(XLSX 업로드분)
+* 수동매출: manual_revenue 테이블, (channel_id, revenue_date) 유니크
 
 ## 채널 구조 (확정)
-| 채널 | 코드 | API | 클라이언트 | 동기화 상태 |
-|------|------|-----|-----------|------------|
-| 쿠팡 Wing #1 | COUPANG_WING1 | HMAC | CoupangClient | 1건 (오픽스) |
-| 쿠팡 Wing #2 | COUPANG_WING2 | HMAC | CoupangClient | 46건 (오하이테크) |
-| 쿠팡 로켓그로스 #1 | COUPANG_RG1 | HMAC | CoupangClient | 0건 |
-| 쿠팡 로켓그로스 #2 | COUPANG_RG2 | HMAC | CoupangClient | 0건 |
-| 쿠팡 로켓배송 | COUPANG_ROCKET | 엑셀 | (업로드) | - |
-| 네이버 스마트스토어 | NAVER | OAuth2+bcrypt | NaverClient | 0건 |
-| 자사몰 (cafe24) | CAFE24 | OAuth2 | Cafe24Client | 0건 |
+| 채널 | 코드 | API |
+|------|------|-----|
+| 쿠팡 Wing #1 | COUPANG_WING1 | HMAC |
+| 쿠팡 Wing #2 | COUPANG_WING2 | HMAC |
+| 쿠팡 로켓그로스 #1 | COUPANG_RG1 | HMAC |
+| 쿠팡 로켓그로스 #2 | COUPANG_RG2 | HMAC |
+| 쿠팡 로켓배송 | COUPANG_ROCKET | 수동입력(manual_revenue) |
+| 네이버 스마트스토어 | NAVER | OAuth2 |
+| 자사몰 (cafe24) | CAFE24 | OAuth2 |
 
-## 쿠팡 Wing/RG 구분 방식 (확정)
-- 동일 vendor_id → 동일 API 키
-- `shipmentType == "THIRD_PARTY"` → Wing (판매자 직배송)
-- `shipmentType != "THIRD_PARTY"` → 로켓그로스 (쿠팡 물류)
-
-## 기술 스택
-- Backend: FastAPI 0.115.12 + SQLAlchemy 2.0.48 + APScheduler 3.10.4
-- Frontend: React 19 + Vite 8 + TypeScript 5.9 + Tailwind CSS 4.2 + Recharts 2
-- DB: SQLite (12개 테이블)
-- Python 3.14 (로컬), 3.10 (서버)
-- 프로덕션: https://sellc.ohitech.co.kr (Oracle Cloud 168.107.19.222)
-
-## 알려진 이슈 / 주의사항
-- Python 3.14 → SQLAlchemy 2.0.48 필수
-- models.py에 `from __future__ import annotations` 필수
-- ohi-ad-intelligence: ad_data.db (305MB, 읽기 전용)
-- 전체 시스템 KST 전제
-- 서버 ad_data.db: 0바이트 (실제 305MB 파일 전송 필요)
-- 프로덕션 API에 인증 없음 (보안 취약)
-- cafe24 OAuth state: 하드코딩 → CSRF 토큰 변경 필요
-- 스케줄러는 서버 시작 시 자동 활성화 (lifespan)
+## DB 마이그레이션 head
+- 3b94b7c55a1f (add_manual_revenue_table, 2026-05-17)
+- a1c24f0b9d31 (add_cafe24_payment_fields_to_orders)
 
 ## 마지막 git commit
-202e1f9 fix: 쿠팡 API 응답 파싱 수정 + Wing/RG 중복 필터링
-
----
-# 사용 규칙:
-# 새 세션 시작 → 이 파일 + git log --oneline -10 읽기
-# Sprint 완료 → 완료 항목 체크 + 다음 작업 업데이트 + git commit
-# 세션 종료 전 → 현재 상태 업데이트
+27ffc1a feat: 로켓배송 매출 수동 입력 (manual_revenue 테이블 + 대시보드 통합)
