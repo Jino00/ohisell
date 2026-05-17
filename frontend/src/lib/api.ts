@@ -150,6 +150,15 @@ export interface ChannelBreakdown extends Record<string, unknown> {
   order_count: number;
 }
 
+export interface ChannelTrendPoint extends Record<string, unknown> {
+  channel_id: number;
+  channel_name: string;
+  date: string;
+  revenue: number;
+  ad_spend: number;
+  net_profit: number | null;  // null = 수동매출/위탁 채널 (순이익 산정 불가)
+}
+
 export interface ProductRanking extends Record<string, unknown> {
   product_id: number;
   product_name: string;

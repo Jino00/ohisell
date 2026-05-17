@@ -11,11 +11,13 @@ from sqlalchemy.orm import Session
 from app.database import get_ad_db, get_db
 from app.schemas import (
     ChannelSummaryRow,
+    ChannelTrendPoint,
     DashboardKPI,
     ProductProfitRow,
     TrendPoint,
 )
 from app.services.profit_calculator import (
+    calculate_channel_daily_trend,
     calculate_channel_summary,
     calculate_daily_trend,
     calculate_product_profit,
@@ -188,6 +190,26 @@ def channel_breakdown(
 
     try:
         return calculate_channel_summary(db, ad_db, df, dt)
+    finally:
+        if ad_db is not None:
+            try:
+                ad_db.close()
+            except Exception:
+                pass
+
+
+@router.get("/trend-by-channel", response_model=list[ChannelTrendPoint])
+def trend_by_channel(
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """채널별 일자별 매출/광고비/순이익 추이"""
+    df, dt = _default_dates(date_from, date_to, "daily")
+    ad_db = _resolve_ad_db()
+
+    try:
+        return calculate_channel_daily_trend(db, ad_db, df, dt)
     finally:
         if ad_db is not None:
             try:

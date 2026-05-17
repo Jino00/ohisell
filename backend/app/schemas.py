@@ -186,6 +186,15 @@ class ChannelSummaryRow(BaseModel):
     order_count: int
 
 
+class ChannelTrendPoint(BaseModel):
+    channel_id: int
+    channel_name: str
+    date: str
+    revenue: str
+    ad_spend: str
+    net_profit: Optional[str]  # 수동매출/위탁 채널은 None
+
+
 class ProductProfitRow(BaseModel):
     product_id: int
     product_name: str

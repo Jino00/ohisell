@@ -1,9 +1,10 @@
 // Dashboard.tsx — 대시보드 페이지 (Sprint 3)
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ComposedChart,
   Bar,
   Line,
+  LineChart,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -20,6 +21,7 @@ import {
   type KpiData,
   type TrendItem,
   type ChannelBreakdown,
+  type ChannelTrendPoint,
   type ProductRanking,
 } from "../lib/api";
 
@@ -67,14 +69,44 @@ function parseList<T extends Record<string, unknown>>(items: T[]): T[] {
   return items.map(parseNumbers);
 }
 
+// 로컬(KST) 기준 YYYY-MM-DD — toISOString()의 UTC 변환 날짜 밀림 방지
+function toLocalYMD(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+// 브라우저 타임존과 무관하게 KST(Asia/Seoul) 달력 날짜의 자정 Date 반환
+function kstToday(): Date {
+  const ymd = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Seoul",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date()); // "YYYY-MM-DD"
+  const [y, m, d] = ymd.split("-").map(Number);
+  return new Date(y, m - 1, d);
+}
+
+// D-2: 어제 종료, 오늘 제외. N일 = 어제 끝, 어제 포함 과거 N일 (KST 기준).
+function quickRange(days: number) {
+  const to = kstToday();
+  to.setDate(to.getDate() - 1); // 어제 (KST)
+  const from = new Date(to);
+  from.setDate(from.getDate() - (days - 1));
+  return { from: toLocalYMD(from), to: toLocalYMD(to) };
+}
+
+const QUICK_PERIODS: { label: string; days: number }[] = [
+  { label: "어제", days: 1 },
+  { label: "7일", days: 7 },
+  { label: "14일", days: 14 },
+  { label: "30일", days: 30 },
+];
+
 function getDefaultDateRange() {
-  const to = new Date();
-  const from = new Date();
-  from.setDate(from.getDate() - 30);
-  return {
-    from: from.toISOString().split("T")[0],
-    to: to.toISOString().split("T")[0],
-  };
+  return quickRange(30);
 }
 
 function ChangeIndicator({ value }: { value: number | null | undefined }) {
@@ -106,6 +138,133 @@ function ChartTooltipContent({ active, payload, label }: any) {
   );
 }
 
+const TREND_LINE_COLORS = ["#3b82f6", "#22c55e", "#f59e0b", "#ef4444", "#8b5cf6", "#06b6d4", "#ec4899", "#6366f1"];
+const TOTAL_COLOR = "#111827";
+
+type MetricKey = "revenue" | "ad_spend" | "roas" | "net_profit";
+type ChartRow = { date: string } & Record<string, number | string | null>;
+
+// 채널별 추이 평탄 데이터를 지표별 차트 데이터로 피벗 (전체 라인 파생)
+function buildChannelChartData(
+  points: ChannelTrendPoint[],
+  metric: MetricKey,
+): { rows: ChartRow[]; series: string[] } {
+  const dates = Array.from(new Set(points.map((p) => p.date))).sort();
+  const channelNames: string[] = [];
+  for (const p of points) {
+    if (!channelNames.includes(p.channel_name)) channelNames.push(p.channel_name);
+  }
+  const idx = new Map<string, ChannelTrendPoint>();
+  for (const p of points) idx.set(`${p.date}__${p.channel_name}`, p);
+
+  const metricValue = (p: ChannelTrendPoint): number | null => {
+    if (metric === "revenue") return p.revenue;
+    if (metric === "ad_spend") return p.ad_spend;
+    if (metric === "net_profit") return p.net_profit;
+    return p.ad_spend > 0 ? (p.revenue / p.ad_spend) * 100 : null; // RoAS
+  };
+
+  const rows: ChartRow[] = dates.map((d) => {
+    const row: ChartRow = { date: d };
+    let sumRev = 0;
+    let sumAd = 0;
+    let sumNet = 0;
+    let hasNet = false;
+    for (const cn of channelNames) {
+      const p = idx.get(`${d}__${cn}`);
+      row[cn] = p ? metricValue(p) : null;
+      if (p) {
+        sumRev += p.revenue;
+        sumAd += p.ad_spend;
+        if (p.net_profit != null) {
+          sumNet += p.net_profit;
+          hasNet = true;
+        }
+      }
+    }
+    if (metric === "revenue") row["전체"] = sumRev;
+    else if (metric === "ad_spend") row["전체"] = sumAd;
+    else if (metric === "net_profit") row["전체"] = hasNet ? sumNet : null;
+    else row["전체"] = sumAd > 0 ? (sumRev / sumAd) * 100 : null; // RoAS
+    return row;
+  });
+
+  // 모든 값이 null인 series 제외 (예: 위탁 채널의 순이익/RoAS, 전체 포함)
+  const series = channelNames.filter((cn) => rows.some((r) => r[cn] != null));
+  if (rows.some((r) => r["전체"] != null)) series.push("전체");
+  return { rows, series };
+}
+
+function ChannelTrendChart({
+  title,
+  points,
+  metric,
+  unit,
+}: {
+  title: string;
+  points: ChannelTrendPoint[];
+  metric: MetricKey;
+  unit: "won" | "pct";
+}) {
+  const { rows, series } = useMemo(
+    () => buildChannelChartData(points, metric),
+    [points, metric],
+  );
+  const fmt = (v: number) =>
+    unit === "pct" ? `${v.toFixed(1)}%` : `${formatKRW(v)}원`;
+
+  return (
+    <div className="bg-white border rounded-lg p-4">
+      <h3 className="text-sm font-medium text-gray-700 mb-3">{title}</h3>
+      {rows.length === 0 ? (
+        <div className="h-64 flex items-center justify-center text-gray-400">
+          데이터가 없습니다
+        </div>
+      ) : (
+        <ResponsiveContainer width="100%" height={260}>
+          <LineChart data={rows}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+            <XAxis
+              dataKey="date"
+              tick={{ fontSize: 11, fill: "#9ca3af" }}
+              tickFormatter={(v: string) => {
+                const d = new Date(v);
+                return `${d.getMonth() + 1}/${d.getDate()}`;
+              }}
+            />
+            <YAxis
+              tick={{ fontSize: 11, fill: "#9ca3af" }}
+              tickFormatter={(v: number) =>
+                unit === "pct" ? `${v}%` : formatCompact(v)
+              }
+            />
+            <Tooltip
+              formatter={(v) => (v == null ? "-" : fmt(Number(v)))}
+            />
+            <Legend wrapperStyle={{ fontSize: 11 }} />
+            {series.map((s, i) => (
+              <Line
+                key={s}
+                type="monotone"
+                dataKey={s}
+                name={s}
+                stroke={
+                  s === "전체"
+                    ? TOTAL_COLOR
+                    : TREND_LINE_COLORS[i % TREND_LINE_COLORS.length]
+                }
+                strokeWidth={s === "전체" ? 2.5 : 1.5}
+                dot={{ r: 2 }}
+                connectNulls={false}
+              />
+            ))}
+          </LineChart>
+        </ResponsiveContainer>
+      )}
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const defaults = getDefaultDateRange();
   const [period, setPeriod] = useState<PeriodType>("daily");
@@ -115,6 +274,7 @@ export default function Dashboard() {
   const [kpi, setKpi] = useState<KpiData | null>(null);
   const [trend, setTrend] = useState<TrendItem[]>([]);
   const [channels, setChannels] = useState<ChannelBreakdown[]>([]);
+  const [channelTrend, setChannelTrend] = useState<ChannelTrendPoint[]>([]);
   const [products, setProducts] = useState<ProductRanking[]>([]);
   const [sortBy, setSortBy] = useState<SortBy>("revenue");
   const [loading, setLoading] = useState(true);
@@ -123,15 +283,17 @@ export default function Dashboard() {
     setLoading(true);
     try {
       const params = `date_from=${dateFrom}&date_to=${dateTo}`;
-      const [kpiData, trendData, channelData, productData] = await Promise.all([
+      const [kpiData, trendData, channelData, channelTrendData, productData] = await Promise.all([
         fetchApi<KpiData>(`/api/dashboard/kpi?${params}`),
         fetchApi<TrendItem[]>(`/api/dashboard/trend?period=${period}&${params}`),
         fetchApi<ChannelBreakdown[]>(`/api/dashboard/channel-breakdown?${params}`),
+        fetchApi<ChannelTrendPoint[]>(`/api/dashboard/trend-by-channel?${params}`),
         fetchApi<ProductRanking[]>(`/api/dashboard/product-ranking?${params}&sort_by=${sortBy}&limit=20`),
       ]);
       setKpi(parseNumbers(kpiData));
       setTrend(parseList(trendData));
       setChannels(parseList(channelData));
+      setChannelTrend(parseList(channelTrendData));
       setProducts(parseList(productData));
     } catch {
       // keep previous data on error
@@ -146,6 +308,25 @@ export default function Dashboard() {
   }, [fetchAll]);
 
   const totalChannelRevenue = channels.reduce((s, c) => s + c.revenue, 0);
+
+  // 기간 요약표 파생값 (D-1/D-6: RoAS·전체행 프론트 계산)
+  const sumRevenue = channels.reduce((s, c) => s + c.revenue, 0);
+  const sumAdSpend = channels.reduce((s, c) => s + c.ad_spend, 0);
+  const measurable = channels.filter((c) => c.net_profit != null);
+  const sumNet = measurable.reduce((s, c) => s + (c.net_profit ?? 0), 0);
+  const sumNetRevenue = measurable.reduce((s, c) => s + c.revenue, 0);
+  const totalRoas = sumAdSpend > 0 ? (sumRevenue / sumAdSpend) * 100 : null;
+  const totalRate = sumNetRevenue > 0 ? (sumNet / sumNetRevenue) * 100 : null;
+
+  const isActiveQuick = (days: number) => {
+    const r = quickRange(days);
+    return dateFrom === r.from && dateTo === r.to;
+  };
+  const applyQuick = (days: number) => {
+    const r = quickRange(days);
+    setDateFrom(r.from);
+    setDateTo(r.to);
+  };
 
   return (
     <div className="max-w-7xl mx-auto">
@@ -220,6 +401,92 @@ export default function Dashboard() {
           onChange={(e) => setDateTo(e.target.value)}
           className="border rounded-lg px-3 py-2 text-sm"
         />
+        <div className="flex bg-gray-100 rounded-lg p-0.5">
+          {QUICK_PERIODS.map((q) => (
+            <button
+              key={q.label}
+              onClick={() => applyQuick(q.days)}
+              className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
+                isActiveQuick(q.days)
+                  ? "bg-white shadow text-blue-700 font-medium"
+                  : "text-gray-600 hover:text-gray-900"
+              }`}
+            >
+              {q.label}
+            </button>
+          ))}
+        </div>
+        <span className="text-xs text-gray-400">어제 종료 · 오늘 제외</span>
+      </div>
+
+      {/* 기간 요약표 (D-1/D-6: RoAS·전체행 프론트 파생) */}
+      <div className="bg-white border rounded-lg overflow-hidden mb-6">
+        <h3 className="text-sm font-medium text-gray-700 px-4 py-3 border-b">기간 요약</h3>
+        {channels.length === 0 ? (
+          <div className="p-8 text-center text-gray-400">데이터가 없습니다</div>
+        ) : (
+          <table className="w-full">
+            <thead className="bg-gray-50">
+              <tr>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500">채널</th>
+                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500">매출</th>
+                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500">광고비</th>
+                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500">RoAS</th>
+                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500">순이익</th>
+                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500">이익률</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr className="border-t bg-blue-50 font-medium">
+                <td className="px-4 py-3 text-sm text-gray-900">전체</td>
+                <td className="px-4 py-3 text-sm text-right">{formatKRW(sumRevenue)}원</td>
+                <td className="px-4 py-3 text-sm text-right text-gray-600">{formatKRW(sumAdSpend)}원</td>
+                <td className="px-4 py-3 text-sm text-right">
+                  {totalRoas == null ? "—" : `${totalRoas.toFixed(0)}%`}
+                </td>
+                <td className="px-4 py-3 text-sm text-right">
+                  {totalRate == null ? "—" : `${formatKRW(sumNet)}원`}
+                </td>
+                <td className={`px-4 py-3 text-sm text-right ${totalRate == null ? "text-gray-400" : profitRateColor(totalRate)}`}>
+                  {totalRate == null ? "—" : `${totalRate.toFixed(1)}%`}
+                </td>
+              </tr>
+              {channels.map((c) => {
+                const roas = c.ad_spend > 0 ? (c.revenue / c.ad_spend) * 100 : null;
+                return (
+                  <tr key={c.channel_id} className="border-t hover:bg-gray-50">
+                    <td className="px-4 py-3 text-sm text-gray-900">{c.channel_name}</td>
+                    <td className="px-4 py-3 text-sm text-right font-medium">{formatKRW(c.revenue)}원</td>
+                    <td className="px-4 py-3 text-sm text-right text-gray-600">{formatKRW(c.ad_spend)}원</td>
+                    <td className="px-4 py-3 text-sm text-right text-gray-600">
+                      {roas == null ? "—" : `${roas.toFixed(0)}%`}
+                    </td>
+                    <td className="px-4 py-3 text-sm text-right">
+                      {c.net_profit == null ? (
+                        <span className="text-gray-400">—</span>
+                      ) : (
+                        <span className={c.net_profit >= 0 ? "text-green-600" : "text-red-600"}>
+                          {formatKRW(c.net_profit)}원
+                        </span>
+                      )}
+                    </td>
+                    <td className={`px-4 py-3 text-sm text-right ${c.profit_rate == null ? "text-gray-400" : profitRateColor(c.profit_rate)}`}>
+                      {c.profit_rate == null ? "—" : `${c.profit_rate.toFixed(1)}%`}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {/* 채널별 추이 4그래프 (D-3) */}
+      <div className="grid grid-cols-2 gap-6 mb-6">
+        <ChannelTrendChart title="채널별 매출 추이" points={channelTrend} metric="revenue" unit="won" />
+        <ChannelTrendChart title="채널별 광고비 추이" points={channelTrend} metric="ad_spend" unit="won" />
+        <ChannelTrendChart title="채널별 RoAS 추이" points={channelTrend} metric="roas" unit="pct" />
+        <ChannelTrendChart title="채널별 순이익 추이" points={channelTrend} metric="net_profit" unit="won" />
       </div>
 
       {/* Sales Trend Chart */}

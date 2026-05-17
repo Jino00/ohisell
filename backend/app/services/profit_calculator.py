@@ -695,3 +695,75 @@ def calculate_product_profit(
     sort_key = sort_by if sort_by in ("revenue", "net_profit", "profit_rate") else "revenue"
     result.sort(key=lambda x: Decimal(x[sort_key]), reverse=True)
     return result[:limit]
+
+
+def _get_channel_ad_spend_daily(
+    db: Session, channel_id: int, date_from: date, date_to: date
+) -> dict[str, Decimal]:
+    """ad_costs → 특정 채널의 일별 총 광고비 {date_str: spend} (XLSX 업로드분 포함)"""
+    rows = db.execute(
+        text("""
+            SELECT ad_date, SUM(CAST(ad_spend AS REAL))
+            FROM ad_costs
+            WHERE channel_id = :cid AND ad_date >= :since AND ad_date <= :until
+            GROUP BY ad_date
+        """),
+        {"cid": channel_id, "since": date_from.isoformat(), "until": date_to.isoformat()},
+    ).fetchall()
+    return {str(r[0]): Decimal(str(r[1])) for r in rows if r[1]}
+
+
+def calculate_channel_daily_trend(
+    db: Session, ad_db, date_from: date, date_to: date
+) -> list[dict]:
+    """채널별 일자별 매출/광고비/순이익 추이.
+
+    기존 calculate_daily_trend 엔진을 채널별로 호출해 조합한다 (엔진 회귀 위험 0).
+    위탁/수동매출 채널은 순이익 산정 불가 → net_profit=None.
+    위탁 채널은 주문이 없어 엔진이 ad_spend=0을 주므로, ad_costs(XLSX 업로드분)를
+    별도로 병합한다. 요약표(channel_summary)와 RoAS 일관성 유지.
+    """
+    channels = db.query(Channel).all()
+    result: list[dict] = []
+    for ch in channels:
+        daily = calculate_daily_trend(db, ad_db, ch.id, date_from, date_to)
+        is_consignment = ch.channel_type == "consignment"
+
+        # 위탁 채널: 엔진은 주문이 없어 ad_spend=0 → ad_costs 테이블에서 직접 병합
+        ch_ad_daily = (
+            _get_channel_ad_spend_daily(db, ch.id, date_from, date_to)
+            if is_consignment
+            else {}
+        )
+
+        seen_dates: set[str] = set()
+        for point in daily:
+            d = point["date"]
+            seen_dates.add(d)
+            ad_spend = Decimal(point["ad_spend"])
+            if is_consignment and d in ch_ad_daily:
+                ad_spend += ch_ad_daily[d]
+            result.append({
+                "channel_id": ch.id,
+                "channel_name": ch.name,
+                "date": d,
+                "revenue": point["revenue"],
+                "ad_spend": str(ad_spend),
+                "net_profit": None if is_consignment else point["net_profit"],
+            })
+
+        # 위탁 채널: 매출 없는 날에도 광고비가 있으면 ad-only 포인트 추가
+        # (요약표 기간 합산 RoAS와 추이 차트 합산 RoAS 일치 보장)
+        if is_consignment:
+            for d, spend in ch_ad_daily.items():
+                if d in seen_dates:
+                    continue
+                result.append({
+                    "channel_id": ch.id,
+                    "channel_name": ch.name,
+                    "date": d,
+                    "revenue": "0",
+                    "ad_spend": str(spend),
+                    "net_profit": None,
+                })
+    return result

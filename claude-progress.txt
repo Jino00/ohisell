@@ -4,8 +4,23 @@
 
 ## 현재 상태
 - 날짜: 2026-05-17
-- 단계: Sprint 4B-rocket-manual-revenue 완료 (로켓배송 수동 매출 입력)
-- 전체 진행률: 92%
+- 단계: Sprint 4B-dashboard-period-analysis 완료 (대시보드 기간별 분석)
+- 전체 진행률: 93%
+
+## Sprint 4B-dashboard-period-analysis 완료 (2026-05-17) — 대시보드 기간별 분석
+- [x] schemas.py ChannelTrendPoint (revenue/ad_spend str, net_profit Optional)
+- [x] profit_calculator.py calculate_channel_daily_trend SA (채널별 calculate_daily_trend 조합, 엔진 미변경)
+- [x] _get_channel_ad_spend_daily 헬퍼 (위탁 채널 ad_costs 일별 병합)
+- [x] dashboard.py GET /api/dashboard/trend-by-channel 라우터
+- [x] api.ts ChannelTrendPoint 타입
+- [x] Dashboard.tsx: 빠른기간 버튼(어제/7/14/30일, KST), 기간 요약표(전체행+채널별, RoAS 프론트파생), 채널별 추이 4그래프(매출/광고비/RoAS/순이익)
+- [x] codex review 2라운드 PASS
+  - P1 (위탁 주문 skip): by-design 합의 (엔진 일관성, D-4 회귀0 준수)
+  - P2 수정: 위탁 채널 ad_costs를 trend-by-channel에 병합 (요약표↔추이 RoAS 일관성)
+  - P2 수정: 전체 라인 all-null 시 series 제외
+  - P2 수정: quickRange 명시적 KST(Asia/Seoul)
+- [x] 브라우저 시각 검증 (4그래프 정상, 콘솔 에러 없음)
+- [ ] git commit (사용자 승인 대기)
 
 ## Sprint 4B-rocket-manual-revenue 완료 (2026-05-17) — 로켓배송 수동 매출 입력
 - [x] ManualRevenue 모델 + alembic 마이그레이션 (3b94b7c55a1f)
@@ -66,9 +81,10 @@
 
 ## 다음에 할 작업
 ### Sprint 4B 후속
-1. [ ] 네이버 IP 등록 (Oracle IP 168.107.19.222) → 네이버 스마트스토어 API 테스트
-2. [ ] 로켓배송 실제 매출 데이터 입력 (Settings 페이지 활용)
-3. [ ] 쿠팡 광고 XLSX 과거분 업로드
+1. [x] 네이버 IP 등록 (Oracle IP 168.107.19.222) — 완료
+2. [ ] 네이버 스마트스토어 API 실제 동기화 테스트
+3. [ ] 로켓배송 실제 매출 데이터 입력 (Settings 페이지 활용)
+4. [ ] 쿠팡 광고 XLSX 과거분 업로드
 4. [ ] nginx IP 화이트리스트 또는 Basic Auth (보안)
 
 ### Sprint 5 후보
