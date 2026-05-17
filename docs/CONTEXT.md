@@ -1,36 +1,29 @@
-# CONTEXT.md — 기술 결정 맥락 노트 (Sprint 4B-cafe24)
-# 왜 이런 기술/구조를 선택했는지 기록합니다.
+# CONTEXT — 기술 결정 맥락 (Sprint 4B-rocket-manual-revenue)
 
-## D-1. 추정 금지 — 모든 수수료/enum은 공식 문서로 확인
-- 네이버페이 요율: help.admin.pay.naver.com 공식 FAQ "주문형 가맹점 Npay 수수료"
-  (카페24가 공식 호스팅사로 명시됨 → 결제수단별 요율 적용)
-- KCP/카카오/토스 요율: cafe24 결제대행사 안내 이미지 (Jino 제공)
-- cafe24 payment_method/order_status enum: developers.cafe24.com 공식 API 문서
-- 이유: CLAUDE.md 추정 금지 원칙. 잘못된 요율은 순이익 전체를 왜곡
+## D-1. 가짜 Order를 만들지 않는다
+- 대시보드 매출/이익은 전부 `Order` 테이블에서 집계됨 (`calculate_daily_trend`)
+- 로켓배송 매출을 합성 Order로 넣으면 → 수수료/VAT 공식이 자동 적용되어 잘못된 순이익 산출
+- 확정 규칙 "로켓배송 = 매출만 표시, 이익 계산 제외"와 정면 충돌
+- → **전용 `manual_revenue` 테이블 + 집계 단계 병합**으로 결정
 
-## D-2. 식별은 payment_method 단독이 아니라 조합
-- 실측 결과 `card`가 KCP/카카오/토스/네이버페이 모두에 존재
-- 판별 키: market_id(NCHECKOUT=네이버페이) > payment_gateway_name(kakao/toss) > 기본 KCP
-- market_id/payment_method는 JSON 앞부분 → 10000자 잘림 무관 (백필 가능)
+## D-2. Settlement 테이블 재활용 안 함
+- Settlement는 "채널 정산금/수수료(기간 단위)" 용도 — 일별 매출 표시와 의미 불일치
+- 게다가 대시보드 집계(Order 기반)에 안 잡힘 → 재활용해도 화면에 안 보임
 
-## D-3. 수수료를 동기화 시점에 Order.commission_amount로 저장
-- 이유: profit_calculator가 잘린 raw_data를 재파싱하지 않도록. 계산기는 합산만.
-- SA(Classifier/Resolver)는 순수 함수, sync_service(Harness)가 호출·저장
+## D-3. 입력 필드는 "전체 매출" 1개뿐
+- 광고비는 이미 쿠팡 광고 XLSX 업로드 → AdCost 테이블로 자동 적재 중
+- 광고 전환 매출 등은 분석용일 뿐 순이익에 미반영 → 보관 불필요 (단순성 우선)
+- Jino 확인: "광고는 따로 업로드하니 전체 매출액만 받으면 됨"
 
-## D-4. 비-cafe24 채널 로직 불변
-- 쿠팡/네이버는 기존 channel.commission_rate 유지 → 회귀 방지
-- cafe24만 commission_amount 경로 사용 (channel.code 분기)
+## D-4. VAT 미차감
+- 로켓배송은 순이익 계산을 안 하므로 VAT 차감 의미 없음
+- 위탁이라 부가세 인식 주체가 셀러가 아닐 수 있음 → 입력값 그대로 표시가 가장 단순·일관
 
-## D-5. 배송비는 cafe24 데이터가 아닌 고정값
-- cafe24 shipping_fee는 고객청구분(무료배송이라 대부분 0)
-- 실제 우리 비용 = 한진택배 1,900원/주문 → ShippingResolver가 주문당 부과
-- 라인 여러 개여도 주문 1건 = 1,900원 (Jino 확인: 건당 고정)
+## D-5. 멱등 upsert
+- 같은 날짜를 다시 입력하면 덮어쓰기 (Unique(channel_id, revenue_date))
+- 광고 XLSX 업로드와 동일한 멱등 패턴 유지 (재입력 안전)
 
-## D-6. raw_data 10000자 잘림은 이번 범위 밖
-- 복합결제 금액 분해 불가 → 전체 라인매출 기준 근사 (~15건, 영향 미미)
-- sync 잘림 제거 + 결제필드 컬럼 추출은 후속 작업으로 분리 (스코프 절제)
-
-## 기술 스택 (변경 없음)
-- SQLAlchemy 2.0.48 + Alembic, Python 3.14(로컬)/3.10(서버)
-- models.py `from __future__ import annotations` 필수
-- 전체 KST 전제
+## 기술 스택 / 환경
+- alembic head: `a1c24f0b9d31` → 신규 마이그레이션 down_revision으로 사용
+- models.py: `from __future__ import annotations` 필수 (Python 3.14 + SQLAlchemy 2.0.48)
+- 채널: COUPANG_ROCKET (seed.py에 시드됨)

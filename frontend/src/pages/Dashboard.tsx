@@ -310,7 +310,7 @@ export default function Dashboard() {
             <div className="h-64 flex items-center justify-center text-gray-400">데이터가 없습니다</div>
           ) : (
             <ResponsiveContainer width="100%" height={260}>
-              <BarChart data={channels} layout="vertical">
+              <BarChart data={channels.filter((c) => c.profit_rate != null)} layout="vertical">
                 <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
                 <XAxis type="number" tick={{ fontSize: 12, fill: "#9ca3af" }} tickFormatter={(v: number) => `${v}%`} />
                 <YAxis
@@ -324,7 +324,7 @@ export default function Dashboard() {
                   {channels.map((ch, i) => (
                     <Cell
                       key={i}
-                      fill={ch.profit_rate >= 15 ? "#22c55e" : ch.profit_rate >= 5 ? "#f59e0b" : "#ef4444"}
+                      fill={ch.profit_rate == null ? "#d1d5db" : ch.profit_rate >= 15 ? "#22c55e" : ch.profit_rate >= 5 ? "#f59e0b" : "#ef4444"}
                     />
                   ))}
                 </Bar>

@@ -114,6 +114,17 @@ interface CoupangAdStatus {
   items: CoupangAdStatusItem[];
 }
 
+interface ManualRevenueRecord {
+  id: number;
+  channel_id: number;
+  channel_name: string;
+  revenue_date: string;
+  gross_revenue: string;
+  memo: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export default function Settings() {
   const [channels, setChannels] = useState<ChannelStatus[]>([]);
   const [loading, setLoading] = useState(true);
@@ -128,6 +139,16 @@ export default function Settings() {
   const [gfaStatus, setGfaStatus] = useState<GfaStatus | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
   const gfaFileRef = useRef<HTMLInputElement>(null);
+
+  // 수동 매출 입력 상태
+  const [rocketRecords, setRocketRecords] = useState<ManualRevenueRecord[]>([]);
+  const [rocketForm, setRocketForm] = useState(() => {
+    const d = new Date();
+    const localDate = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    return { date: localDate, amount: "", memo: "" };
+  });
+  const [rocketSaving, setRocketSaving] = useState(false);
+  const [rocketError, setRocketError] = useState<string | null>(null);
 
   // 쿠팡 광고비 업로드 상태
   const [coupangAdUploading, setCoupangAdUploading] = useState(false);
@@ -162,11 +183,65 @@ export default function Settings() {
     } catch { /* silent */ }
   }, []);
 
+  const fetchRocketRecords = useCallback(async () => {
+    const rocketCh = channels.find((c) => c.code === "COUPANG_ROCKET");
+    if (!rocketCh) return;
+    try {
+      const data = await fetchApi<ManualRevenueRecord[]>(
+        `/api/manual-revenue?channel_id=${rocketCh.channel_id}`
+      );
+      setRocketRecords(data);
+    } catch { /* silent */ }
+  }, [channels]);
+
   useEffect(() => {
     fetchStatus();
     fetchGfaStatus();
     fetchCoupangAdStatus();
   }, [fetchStatus, fetchGfaStatus, fetchCoupangAdStatus]);
+
+  useEffect(() => {
+    if (channels.length > 0) fetchRocketRecords();
+  }, [channels, fetchRocketRecords]);
+
+  const handleRocketSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const rocketCh = channels.find((c) => c.code === "COUPANG_ROCKET");
+    if (!rocketCh) return;
+    const amount = parseFloat(rocketForm.amount);
+    if (isNaN(amount) || amount <= 0) {
+      setRocketError("유효한 매출액을 입력해 주세요.");
+      return;
+    }
+    setRocketSaving(true);
+    setRocketError(null);
+    try {
+      await fetchApi("/api/manual-revenue", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          channel_id: rocketCh.channel_id,
+          revenue_date: rocketForm.date,
+          gross_revenue: amount,
+          memo: rocketForm.memo || null,
+        }),
+      });
+      setRocketForm((f) => ({ ...f, amount: "", memo: "" }));
+      fetchRocketRecords();
+    } catch {
+      setRocketError("저장 실패. 다시 시도해 주세요.");
+    } finally {
+      setRocketSaving(false);
+    }
+  };
+
+  const handleRocketDelete = async (id: number) => {
+    if (!confirm("삭제하시겠습니까?")) return;
+    try {
+      await fetchApi(`/api/manual-revenue/${id}`, { method: "DELETE" });
+      fetchRocketRecords();
+    } catch { /* silent */ }
+  };
 
   const handleSync = async (channelId: number) => {
     setSyncingId(channelId);
@@ -653,6 +728,92 @@ export default function Settings() {
             </div>
           )}
         </div>
+      </div>
+
+      {/* 로켓배송 매출 수동 입력 */}
+      <div className="bg-white rounded-xl border border-gray-200 p-6">
+        <h2 className="text-base font-semibold text-gray-800 mb-1">로켓배송 매출 수동 입력</h2>
+        <p className="text-xs text-gray-400 mb-4">
+          쿠팡 광고센터에서 확인한 일별 로켓배송 전체 매출액을 입력합니다.
+          순이익 계산은 제외되며 대시보드 매출에만 합산됩니다.
+        </p>
+
+        <form onSubmit={handleRocketSubmit} className="flex flex-wrap gap-2 mb-4">
+          <input
+            type="date"
+            value={rocketForm.date}
+            onChange={(e) => setRocketForm((f) => ({ ...f, date: e.target.value }))}
+            className="border border-gray-200 rounded px-2 py-1.5 text-sm"
+            required
+          />
+          <input
+            type="number"
+            value={rocketForm.amount}
+            onChange={(e) => setRocketForm((f) => ({ ...f, amount: e.target.value }))}
+            placeholder="전체 매출액 (원)"
+            className="border border-gray-200 rounded px-2 py-1.5 text-sm w-44"
+            min="1"
+            required
+          />
+          <input
+            type="text"
+            value={rocketForm.memo}
+            onChange={(e) => setRocketForm((f) => ({ ...f, memo: e.target.value }))}
+            placeholder="메모 (선택)"
+            className="border border-gray-200 rounded px-2 py-1.5 text-sm w-32"
+          />
+          <button
+            type="submit"
+            disabled={rocketSaving}
+            className="px-3 py-1.5 rounded text-sm font-medium bg-orange-500 text-white hover:bg-orange-600 disabled:opacity-50"
+          >
+            {rocketSaving ? "저장 중..." : "저장"}
+          </button>
+        </form>
+
+        {rocketError && (
+          <div className="text-xs px-3 py-2 mb-3 rounded bg-red-50 border border-red-100 text-red-700">
+            {rocketError}
+          </div>
+        )}
+
+        {rocketRecords.length > 0 && (
+          <table className="w-full text-xs border-collapse">
+            <thead>
+              <tr className="border-b border-gray-100 text-gray-400">
+                <th className="text-left pb-1.5 pr-4 font-medium">날짜</th>
+                <th className="text-right pb-1.5 pr-4 font-medium">매출액</th>
+                <th className="text-left pb-1.5 pr-4 font-medium">메모</th>
+                <th className="text-left pb-1.5 font-medium">수정일</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {rocketRecords.map((r) => (
+                <tr key={r.id} className="border-b border-gray-50 hover:bg-gray-50">
+                  <td className="py-1.5 pr-4">{r.revenue_date}</td>
+                  <td className="py-1.5 pr-4 text-right font-medium">
+                    {Number(r.gross_revenue).toLocaleString("ko-KR")}원
+                  </td>
+                  <td className="py-1.5 pr-4 text-gray-400">{r.memo ?? "-"}</td>
+                  <td className="py-1.5 text-gray-300">{r.updated_at.slice(0, 10)}</td>
+                  <td className="py-1.5 pl-3">
+                    <button
+                      onClick={() => handleRocketDelete(r.id)}
+                      className="text-red-400 hover:text-red-600 text-xs"
+                    >
+                      삭제
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+
+        {rocketRecords.length === 0 && (
+          <p className="text-xs text-gray-300">입력된 매출 내역이 없습니다.</p>
+        )}
       </div>
     </div>
   );

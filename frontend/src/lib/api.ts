@@ -145,8 +145,8 @@ export interface ChannelBreakdown extends Record<string, unknown> {
   cost: number;
   commission: number;
   ad_spend: number;
-  net_profit: number;
-  profit_rate: number;
+  net_profit: number | null;  // null = 수동매출 전용 채널 (순이익 계산 불가)
+  profit_rate: number | null;
   order_count: number;
 }
 

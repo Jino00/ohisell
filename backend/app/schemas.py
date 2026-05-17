@@ -181,8 +181,8 @@ class ChannelSummaryRow(BaseModel):
     cost: str
     commission: str
     ad_spend: str
-    net_profit: str
-    profit_rate: str
+    net_profit: Optional[str]  # 수동 매출 전용 채널은 None
+    profit_rate: Optional[str]
     order_count: int
 
 

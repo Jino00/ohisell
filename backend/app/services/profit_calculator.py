@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.models import Channel, Order, ProductChannelMapping, ProductMaster
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
+from app.services.manual_revenue_service import get_daily_manual_revenue
 
 log = logging.getLogger(__name__)
 
@@ -260,10 +261,13 @@ def calculate_daily_trend(
         query = query.filter(Order.channel_id == channel_id)
 
     orders = query.all()
-    if not orders:
+    channel_map, product_map = _build_channel_maps(db)
+
+    # 수동 매출이 있으면 주문이 없어도 계속 진행
+    manual_lookup = get_daily_manual_revenue(db, date_from, date_to, channel_id)
+    if not orders and not manual_lookup:
         return []
 
-    channel_map, product_map = _build_channel_maps(db)
     option_map = _get_option_id_map(db)
 
     # 모든 option_id 수집하여 광고비 일괄 조회
@@ -272,6 +276,7 @@ def calculate_daily_trend(
 
     # 날짜별 집계
     daily: dict[str, dict] = {}
+    manual_revenue_by_date: dict[str, Decimal] = {}  # 순이익 제외용 추적
     for o in orders:
         ch = channel_map.get(o.channel_id)
         if ch and ch.channel_type == "consignment":
@@ -335,11 +340,25 @@ def calculate_daily_trend(
             if d in daily:
                 daily[d]["ad_spend"] += spend
 
+    # 수동 매출 병합 (로켓배송 등 — 매출-only, 순이익은 미반영)
+    for (mr_ch_id, d), revenue in manual_lookup.items():
+        if channel_id is not None and mr_ch_id != channel_id:
+            continue
+        if d not in daily:
+            daily[d] = {
+                "revenue": ZERO, "cost": ZERO, "commission": ZERO,
+                "shipping": ZERO, "ad_spend": ZERO, "vat": ZERO, "order_count": 0,
+            }
+        daily[d]["revenue"] += revenue
+        manual_revenue_by_date[d] = manual_revenue_by_date.get(d, ZERO) + revenue
+
     # 정렬 후 반환
     result = []
     for d in sorted(daily.keys()):
         b = daily[d]
-        net = b["revenue"] - b["cost"] - b["commission"] - b["shipping"] - b["ad_spend"] - b["vat"]
+        # 수동 매출은 순이익 계산에서 제외 (매출만 표시)
+        mr = manual_revenue_by_date.get(d, ZERO)
+        net = (b["revenue"] - mr) - b["cost"] - b["commission"] - b["shipping"] - b["ad_spend"] - b["vat"]
         result.append({
             "date": d,
             "revenue": str(b["revenue"]),
@@ -366,10 +385,11 @@ def calculate_channel_summary(
         )
     )
     orders = query.all()
-    if not orders:
+    channel_map, product_map = _build_channel_maps(db)
+    manual_lookup_ch = get_daily_manual_revenue(db, date_from, date_to)
+    if not orders and not manual_lookup_ch:
         return []
 
-    channel_map, product_map = _build_channel_maps(db)
     option_map = _get_option_id_map(db)
     all_option_ids = list(set(o.platform_product_id for o in orders if o.platform_product_id))
     ad_lookup = _get_ad_spend_lookup(ad_db, date_from, date_to, all_option_ids)
@@ -438,6 +458,11 @@ def calculate_channel_summary(
         for spend in gfa_daily.values():
             by_channel[naver_id]["ad_spend"] += spend
 
+    # 수동 매출 채널 행 병합 (매출-only, 순이익 None)
+    manual_by_channel: dict[int, Decimal] = {}
+    for (mr_ch_id, _), revenue in manual_lookup_ch.items():
+        manual_by_channel[mr_ch_id] = manual_by_channel.get(mr_ch_id, ZERO) + revenue
+
     result = []
     for cid, b in by_channel.items():
         ch = channel_map.get(cid)
@@ -455,6 +480,45 @@ def calculate_channel_summary(
             "net_profit": str(net),
             "profit_rate": str(rate_pct.quantize(Decimal("0.01")) if isinstance(rate_pct, Decimal) else "0.00"),
             "order_count": b["order_count"],
+        })
+
+    # 수동 매출 채널의 기존 ad_costs 합산 (XLSX 업로드분 포함)
+    # by_channel에 없는 채널이라도 광고비는 ad_costs 테이블에 있을 수 있음 (P2 fix)
+    _manual_ch_ad: dict[int, Decimal] = {}
+    if manual_by_channel:
+        _manual_ch_ids = [c for c in manual_by_channel if c not in by_channel]
+        if _manual_ch_ids:
+            _ad_rows = db.execute(
+                text("""
+                    SELECT channel_id, SUM(CAST(ad_spend AS REAL))
+                    FROM ad_costs
+                    WHERE channel_id IN ({})
+                      AND ad_date >= :since AND ad_date <= :until
+                    GROUP BY channel_id
+                """.format(",".join(str(c) for c in _manual_ch_ids))),
+                {"since": date_from.isoformat(), "until": date_to.isoformat()},
+            ).fetchall()
+            for r in _ad_rows:
+                if r[1]:
+                    _manual_ch_ad[r[0]] = Decimal(str(r[1]))
+
+    # 수동 매출 채널은 순이익 null로 별도 행 추가 (by_channel에 없는 채널만)
+    for cid, total_rev in manual_by_channel.items():
+        if cid in by_channel:
+            continue  # 이미 Order 기반 집계에 포함됐으면 skip (중복 방지)
+        ch = channel_map.get(cid)
+        ch_ad_spend = _manual_ch_ad.get(cid, ZERO)
+        result.append({
+            "channel_id": cid,
+            "channel_name": ch.name if ch else "",
+            "revenue": str(total_rev),
+            "cost": "0",
+            "commission": "0",
+            "ad_spend": str(ch_ad_spend),
+            "shipping": "0",
+            "net_profit": None,  # 순이익 계산 불가 (매출-only)
+            "profit_rate": None,
+            "order_count": 0,
         })
 
     result.sort(key=lambda x: Decimal(x["revenue"]), reverse=True)

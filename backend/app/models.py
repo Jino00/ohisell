@@ -52,6 +52,7 @@ class Channel(Base):
         back_populates="channel"
     )
     ad_costs: Mapped[list[AdCost]] = relationship(back_populates="channel")
+    manual_revenues: Mapped[list[ManualRevenue]] = relationship(back_populates="channel")
 
 
 # ──────────────────────────────────────────────
@@ -354,6 +355,30 @@ class Inventory(Base):
     )
 
     product: Mapped[Product] = relationship(back_populates="inventory_records")
+
+
+# ──────────────────────────────────────────────
+# 수동 매출 입력 (로켓배송 등 API 미지원 채널)
+# ──────────────────────────────────────────────
+class ManualRevenue(Base):
+    """채널별 일별 수동 매출 입력 — (channel_id, revenue_date) 유니크 → 재입력 시 덮어쓰기"""
+
+    __tablename__ = "manual_revenue"
+    __table_args__ = (
+        UniqueConstraint("channel_id", "revenue_date", name="uq_manual_revenue_channel_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id"), nullable=False)
+    revenue_date: Mapped[datetime] = mapped_column(Date, nullable=False)
+    gross_revenue: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    memo: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+    channel: Mapped[Channel] = relationship(back_populates="manual_revenues")
 
 
 # ──────────────────────────────────────────────
