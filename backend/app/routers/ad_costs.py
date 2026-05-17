@@ -7,7 +7,7 @@ import logging
 from datetime import date, timedelta
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, UploadFile, File
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
@@ -95,8 +95,45 @@ def ad_spend_by_option(
     )
 
 
+@router.get("/gfa/status")
+def get_gfa_status(db: Session = Depends(get_db)):
+    """현재 DB에 적재된 GFA 광고비 현황 반환."""
+    row = db.execute(
+        text("""
+            SELECT MIN(ad_date), MAX(ad_date), COUNT(*), COALESCE(SUM(ad_spend), 0)
+            FROM ad_costs
+            WHERE source = 'gfa:쇼핑'
+        """)
+    ).fetchone()
+    if not row or row[0] is None:
+        return {"has_data": False, "date_from": None, "date_to": None, "days": 0, "total_spend": 0}
+    return {
+        "has_data": True,
+        "date_from": row[0],
+        "date_to": row[1],
+        "days": int(row[2]),
+        "total_spend": int(row[3]),
+    }
+
+
+def _recalc_profit_background(date_from: date, date_to: date) -> None:
+    """업로드된 날짜 범위의 이익을 백그라운드에서 재계산."""
+    from app.database import SessionLocal
+    from app.services.profit_calculator import calculate_daily_trend
+
+    db = SessionLocal()
+    try:
+        calculate_daily_trend(db, None, None, date_from, date_to)
+        log.info("GFA 업로드 후 이익 재계산 완료: %s ~ %s", date_from, date_to)
+    except Exception as e:
+        log.exception("GFA 업로드 후 이익 재계산 실패: %s", e)
+    finally:
+        db.close()
+
+
 @router.post("/gfa/upload")
 async def upload_gfa_csv(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
 ):
@@ -169,11 +206,20 @@ async def upload_gfa_csv(
     db.commit()
 
     total_spend = sum(r["spend"] for r in records)
+    date_from = min(r["date"] for r in records)
+    date_to = max(r["date"] for r in records)
+
+    # 업로드된 날짜 범위에 대해 이익 재계산 (백그라운드)
+    background_tasks.add_task(_recalc_profit_background, date_from, date_to)
+
     return {
         "inserted": inserted,
         "skipped": skipped,
         "total_spend": int(total_spend),
+        "date_from": date_from.isoformat(),
+        "date_to": date_to.isoformat(),
         "dates": [r["date"].isoformat() for r in records],
+        "recalculation_triggered": True,
     }
 
 

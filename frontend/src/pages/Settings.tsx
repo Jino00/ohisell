@@ -75,7 +75,18 @@ interface GfaUploadResult {
   inserted: number;
   skipped: number;
   total_spend: number;
+  date_from: string;
+  date_to: string;
   dates: string[];
+  recalculation_triggered: boolean;
+}
+
+interface GfaStatus {
+  has_data: boolean;
+  date_from: string | null;
+  date_to: string | null;
+  days: number;
+  total_spend: number;
 }
 
 export default function Settings() {
@@ -89,6 +100,7 @@ export default function Settings() {
   const [gfaUploading, setGfaUploading] = useState(false);
   const [gfaResult, setGfaResult] = useState<GfaUploadResult | null>(null);
   const [gfaError, setGfaError] = useState<string | null>(null);
+  const [gfaStatus, setGfaStatus] = useState<GfaStatus | null>(null);
   const gfaFileRef = useRef<HTMLInputElement>(null);
 
   const fetchStatus = useCallback(async () => {
@@ -102,7 +114,19 @@ export default function Settings() {
     }
   }, []);
 
-  useEffect(() => { fetchStatus(); }, [fetchStatus]);
+  const fetchGfaStatus = useCallback(async () => {
+    try {
+      const data = await fetchApi<GfaStatus>("/api/ad-costs/gfa/status");
+      setGfaStatus(data);
+    } catch {
+      /* silent */
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchStatus();
+    fetchGfaStatus();
+  }, [fetchStatus, fetchGfaStatus]);
 
   const handleSync = async (channelId: number) => {
     setSyncingId(channelId);
@@ -174,6 +198,7 @@ export default function Settings() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || "업로드 실패");
       setGfaResult(data as GfaUploadResult);
+      fetchGfaStatus();  // 적재 현황 즉시 갱신
     } catch (err) {
       setGfaError(err instanceof Error ? err.message : "업로드 중 오류 발생");
     } finally {
@@ -327,7 +352,8 @@ export default function Settings() {
       {/* GFA(ADVoost) 광고비 업로드 */}
       <div>
         <h2 className="text-sm font-semibold text-gray-700 mb-3">광고비 수동 업로드</h2>
-        <div className="bg-white border border-gray-200 rounded-lg p-4">
+        <div className="bg-white border border-gray-200 rounded-lg p-4 space-y-3">
+          {/* 헤더 + 업로드 버튼 */}
           <div className="flex items-start justify-between">
             <div>
               <div className="flex items-center gap-2">
@@ -353,21 +379,59 @@ export default function Settings() {
                 disabled={gfaUploading}
                 className="px-3 py-1.5 text-xs bg-green-50 text-green-700 rounded-md hover:bg-green-100 disabled:opacity-50"
               >
-                {gfaUploading ? "업로드 중..." : "CSV 업로드"}
+                {gfaUploading ? "처리 중..." : "CSV 업로드"}
               </button>
             </div>
           </div>
 
-          {/* 업로드 결과 */}
-          {gfaResult && (
-            <div className="mt-3 text-xs px-3 py-2 rounded bg-green-50 text-green-700">
-              ✓ 저장 완료: {gfaResult.inserted}일치 광고비 적재 —
-              총 {gfaResult.total_spend.toLocaleString("ko-KR")}원
-              ({gfaResult.dates.join(", ")})
+          {/* 현재 적재 현황 */}
+          {gfaStatus && (
+            <div className={`text-xs px-3 py-2 rounded border ${
+              gfaStatus.has_data
+                ? "bg-blue-50 border-blue-100 text-blue-700"
+                : "bg-gray-50 border-gray-100 text-gray-500"
+            }`}>
+              {gfaStatus.has_data ? (
+                <>
+                  <span className="font-medium">현재 적재된 GFA 데이터:</span>{" "}
+                  {gfaStatus.date_from} ~ {gfaStatus.date_to}
+                  <span className="mx-1 text-blue-400">·</span>
+                  {gfaStatus.days}일치
+                  <span className="mx-1 text-blue-400">·</span>
+                  총 {gfaStatus.total_spend.toLocaleString("ko-KR")}원
+                </>
+              ) : (
+                "아직 적재된 GFA 데이터가 없습니다."
+              )}
             </div>
           )}
-          {gfaError && (
-            <div className="mt-3 text-xs px-3 py-2 rounded bg-red-50 text-red-700">
+
+          {/* 업로드 진행 중 */}
+          {gfaUploading && (
+            <div className="text-xs px-3 py-2 rounded bg-yellow-50 border border-yellow-100 text-yellow-700">
+              CSV 파싱 중... 잠시 기다려 주세요.
+            </div>
+          )}
+
+          {/* 업로드 성공 결과 */}
+          {!gfaUploading && gfaResult && (
+            <div className="text-xs px-3 py-2 rounded bg-green-50 border border-green-100 text-green-700 space-y-1">
+              <div className="font-medium">
+                저장 완료 — {gfaResult.inserted}일치 ({gfaResult.date_from} ~ {gfaResult.date_to})
+              </div>
+              <div className="flex items-center gap-3 text-green-600">
+                <span>총 광고비: <span className="font-medium">{gfaResult.total_spend.toLocaleString("ko-KR")}원</span></span>
+                {gfaResult.skipped > 0 && <span className="text-yellow-600">건너뜀: {gfaResult.skipped}행</span>}
+                {gfaResult.recalculation_triggered && (
+                  <span className="px-1.5 py-0.5 rounded bg-green-100 text-green-700">이익 자동 재계산됨</span>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* 에러 */}
+          {!gfaUploading && gfaError && (
+            <div className="text-xs px-3 py-2 rounded bg-red-50 border border-red-100 text-red-700">
               오류: {gfaError}
             </div>
           )}
