@@ -128,6 +128,23 @@ def _get_naver_sa_ad_spend_by_keyword_day(
     return {(str(r[0])[9:], str(r[1])): Decimal(str(r[2])) for r in rows if r[2]}
 
 
+def _get_gfa_ad_spend_daily(
+    db: Session, naver_channel_id: int, date_from: date, date_to: date
+) -> dict[str, Decimal]:
+    """ad_costs → GFA(ADVoost) 일별 총 광고비 {date_str: spend}"""
+    rows = db.execute(
+        text("""
+            SELECT ad_date, SUM(CAST(ad_spend AS REAL))
+            FROM ad_costs
+            WHERE channel_id = :cid AND source = 'gfa:쇼핑'
+              AND ad_date >= :since AND ad_date <= :until
+            GROUP BY ad_date
+        """),
+        {"cid": naver_channel_id, "since": date_from.isoformat(), "until": date_to.isoformat()},
+    ).fetchall()
+    return {str(r[0]): Decimal(str(r[1])) for r in rows if r[1]}
+
+
 def _line_commission(ch: Channel | None, o: Order, revenue: Decimal) -> Decimal:
     """라인 수수료. cafe24/naver는 동기화 시 산출된 commission_amount 사용, 그 외는 채널 정률."""
     if ch and ch.code == "CAFE24":
@@ -306,11 +323,15 @@ def calculate_daily_trend(
             if d in daily:
                 daily[d]["ad_spend"] += spend
 
-    # Naver SA 광고비 (ad_costs 테이블 — naver 채널 일별)
+    # Naver SA + GFA 광고비 (ad_costs 테이블 — naver 채널 일별)
     naver_id = _get_naver_channel_id(channel_map)
     if naver_id and (channel_id is None or channel_id == naver_id):
         naver_daily = _get_naver_sa_ad_spend_daily(db, naver_id, date_from, date_to)
         for d, spend in naver_daily.items():
+            if d in daily:
+                daily[d]["ad_spend"] += spend
+        gfa_daily = _get_gfa_ad_spend_daily(db, naver_id, date_from, date_to)
+        for d, spend in gfa_daily.items():
             if d in daily:
                 daily[d]["ad_spend"] += spend
 
@@ -407,11 +428,14 @@ def calculate_channel_summary(
         for spend in meta_daily.values():
             by_channel[cafe24_id]["ad_spend"] += spend
 
-    # Naver SA 광고비 직접 합산 (naver 채널 전체)
+    # Naver SA + GFA 광고비 직접 합산 (naver 채널 전체)
     naver_id = _get_naver_channel_id(channel_map)
     if naver_id and naver_id in by_channel:
         naver_daily = _get_naver_sa_ad_spend_daily(db, naver_id, date_from, date_to)
         for spend in naver_daily.values():
+            by_channel[naver_id]["ad_spend"] += spend
+        gfa_daily = _get_gfa_ad_spend_daily(db, naver_id, date_from, date_to)
+        for spend in gfa_daily.values():
             by_channel[naver_id]["ad_spend"] += spend
 
     result = []
