@@ -89,6 +89,31 @@ interface GfaStatus {
   total_spend: number;
 }
 
+interface CoupangAdUploadResult {
+  vendor_id: string;
+  inserted: number;
+  skipped: number;
+  total_spend: number;
+  date_from: string;
+  date_to: string;
+  channel_summary: Record<string, number>;
+  recalculation_triggered: boolean;
+}
+
+interface CoupangAdStatusItem {
+  source: string;
+  channel_name: string;
+  date_from: string;
+  date_to: string;
+  days: number;
+  total_spend: number;
+}
+
+interface CoupangAdStatus {
+  has_data: boolean;
+  items: CoupangAdStatusItem[];
+}
+
 export default function Settings() {
   const [channels, setChannels] = useState<ChannelStatus[]>([]);
   const [loading, setLoading] = useState(true);
@@ -103,6 +128,14 @@ export default function Settings() {
   const [gfaStatus, setGfaStatus] = useState<GfaStatus | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
   const gfaFileRef = useRef<HTMLInputElement>(null);
+
+  // 쿠팡 광고비 업로드 상태
+  const [coupangAdUploading, setCoupangAdUploading] = useState(false);
+  const [coupangAdResult, setCoupangAdResult] = useState<CoupangAdUploadResult | null>(null);
+  const [coupangAdError, setCoupangAdError] = useState<string | null>(null);
+  const [coupangAdStatus, setCoupangAdStatus] = useState<CoupangAdStatus | null>(null);
+  const [isCoupangDragOver, setIsCoupangDragOver] = useState(false);
+  const coupangFileRef = useRef<HTMLInputElement>(null);
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -119,15 +152,21 @@ export default function Settings() {
     try {
       const data = await fetchApi<GfaStatus>("/api/ad-costs/gfa/status");
       setGfaStatus(data);
-    } catch {
-      /* silent */
-    }
+    } catch { /* silent */ }
+  }, []);
+
+  const fetchCoupangAdStatus = useCallback(async () => {
+    try {
+      const data = await fetchApi<CoupangAdStatus>("/api/ad-costs/coupang/status");
+      setCoupangAdStatus(data);
+    } catch { /* silent */ }
   }, []);
 
   useEffect(() => {
     fetchStatus();
     fetchGfaStatus();
-  }, [fetchStatus, fetchGfaStatus]);
+    fetchCoupangAdStatus();
+  }, [fetchStatus, fetchGfaStatus, fetchCoupangAdStatus]);
 
   const handleSync = async (channelId: number) => {
     setSyncingId(channelId);
@@ -229,6 +268,37 @@ export default function Settings() {
     setIsDragOver(false);
     const file = e.dataTransfer.files?.[0];
     if (file) uploadGfaFile(file);
+  };
+
+  const uploadCoupangAdFile = async (file: File) => {
+    if (!file.name.endsWith(".xlsx")) {
+      setCoupangAdError("xlsx 파일만 업로드 가능합니다.");
+      return;
+    }
+    setCoupangAdUploading(true);
+    setCoupangAdResult(null);
+    setCoupangAdError(null);
+    const formData = new FormData();
+    formData.append("file", file);
+    try {
+      const res = await fetch("/api/ad-costs/coupang/upload", { method: "POST", body: formData });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "업로드 실패");
+      setCoupangAdResult(data as CoupangAdUploadResult);
+      fetchCoupangAdStatus();
+    } catch (err) {
+      setCoupangAdError(err instanceof Error ? err.message : "업로드 중 오류 발생");
+    } finally {
+      setCoupangAdUploading(false);
+      if (coupangFileRef.current) coupangFileRef.current.value = "";
+    }
+  };
+
+  const handleCoupangAdDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsCoupangDragOver(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) uploadCoupangAdFile(file);
   };
 
   if (loading) {
@@ -477,6 +547,109 @@ export default function Settings() {
           {!gfaUploading && gfaError && (
             <div className="text-xs px-3 py-2 rounded bg-red-50 border border-red-100 text-red-700">
               오류: {gfaError}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* 쿠팡 광고비 업로드 */}
+      <div>
+        <div className="bg-white border border-gray-200 rounded-lg p-4 space-y-3">
+          {/* 헤더 */}
+          <div className="flex items-center gap-2">
+            <span className="text-lg">🟠</span>
+            <span className="font-medium text-gray-900">쿠팡 광고비</span>
+            <span className="px-2 py-0.5 text-xs rounded-full bg-gray-100 text-gray-600">XLSX 업로드</span>
+          </div>
+
+          {/* 드래그앤드롭 존 */}
+          <div
+            onDragOver={(e) => { e.preventDefault(); setIsCoupangDragOver(true); }}
+            onDragLeave={(e) => { e.preventDefault(); setIsCoupangDragOver(false); }}
+            onDrop={handleCoupangAdDrop}
+            onClick={() => !coupangAdUploading && coupangFileRef.current?.click()}
+            className={`
+              relative flex flex-col items-center justify-center gap-2
+              border-2 border-dashed rounded-lg px-6 py-8 cursor-pointer
+              transition-colors duration-150 select-none
+              ${coupangAdUploading
+                ? "border-gray-200 bg-gray-50 cursor-not-allowed"
+                : isCoupangDragOver
+                  ? "border-orange-400 bg-orange-50"
+                  : "border-gray-200 bg-gray-50 hover:border-orange-300 hover:bg-orange-50"
+              }
+            `}
+          >
+            <input
+              ref={coupangFileRef}
+              type="file"
+              accept=".xlsx"
+              className="hidden"
+              onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadCoupangAdFile(f); }}
+              disabled={coupangAdUploading}
+            />
+            {coupangAdUploading ? (
+              <>
+                <svg className="w-8 h-8 text-gray-300 animate-spin" viewBox="0 0 24 24" fill="none">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                </svg>
+                <p className="text-sm text-gray-500">처리 중...</p>
+              </>
+            ) : (
+              <>
+                <svg className={`w-8 h-8 transition-colors ${isCoupangDragOver ? "text-orange-400" : "text-gray-300"}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+                </svg>
+                <p className={`text-sm font-medium transition-colors ${isCoupangDragOver ? "text-orange-600" : "text-gray-500"}`}>
+                  {isCoupangDragOver ? "여기에 놓으세요" : "XLSX 파일을 드래그하거나 클릭해서 업로드"}
+                </p>
+                <p className="text-xs text-gray-400">
+                  쿠팡 Wing 광고센터 → 보고서 → 일별 광고그룹 성과 → XLSX 다운로드
+                  <span className="mx-1">·</span>
+                  {"{vendor_id}_pa_daily_adGroup_YYYYMMDD_YYYYMMDD.xlsx"}
+                </p>
+              </>
+            )}
+          </div>
+
+          {/* 현재 적재 현황 */}
+          {coupangAdStatus?.has_data && (
+            <div className="text-xs px-3 py-2 rounded border bg-blue-50 border-blue-100 text-blue-700 space-y-1">
+              <span className="font-medium">현재 적재된 쿠팡 광고비:</span>
+              {coupangAdStatus.items.map((item) => (
+                <div key={item.source} className="flex items-center gap-2">
+                  <span className="w-32 text-blue-500">{item.channel_name}</span>
+                  <span>{item.date_from} ~ {item.date_to} · {item.days}일치 · {item.total_spend.toLocaleString("ko-KR")}원</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* 업로드 성공 결과 */}
+          {!coupangAdUploading && coupangAdResult && (
+            <div className="text-xs px-3 py-2 rounded bg-green-50 border border-green-100 text-green-700 space-y-1">
+              <div className="font-medium">
+                저장 완료 ({coupangAdResult.date_from} ~ {coupangAdResult.date_to})
+              </div>
+              <div className="flex flex-wrap items-center gap-3 text-green-600">
+                <span>총 광고비: <span className="font-medium">{coupangAdResult.total_spend.toLocaleString("ko-KR")}원</span></span>
+                {Object.entries(coupangAdResult.channel_summary).map(([src, spend]) => (
+                  <span key={src} className="px-1.5 py-0.5 rounded bg-green-100">
+                    {src === "coupang_wing" ? "윙" : src === "coupang_rg" ? "로켓그로스" : "로켓배송"}: {spend.toLocaleString("ko-KR")}원
+                  </span>
+                ))}
+                {coupangAdResult.recalculation_triggered && (
+                  <span className="px-1.5 py-0.5 rounded bg-green-100">이익 자동 재계산됨</span>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* 에러 */}
+          {!coupangAdUploading && coupangAdError && (
+            <div className="text-xs px-3 py-2 rounded bg-red-50 border border-red-100 text-red-700">
+              오류: {coupangAdError}
             </div>
           )}
         </div>
