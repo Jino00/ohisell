@@ -179,7 +179,13 @@ def sync_channel_orders(
                 if _is_coupang_order_for_channel(r.raw_data, is_wing)
             ]
 
+        seen: set[tuple[str, str]] = set()  # 같은 배치 내 중복 방지
         for raw in raw_orders:
+            dedup_key = (raw.order_number, raw.platform_product_id)
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+
             existing = db.query(Order).filter(
                 and_(
                     Order.channel_id == channel_id,
@@ -216,6 +222,7 @@ def sync_channel_orders(
                 )
                 _auto_link_product(db, order)
                 db.add(order)
+                db.flush()  # 즉시 flush해서 다음 루프의 SELECT에 반영
                 new_count += 1
 
         db.commit()
@@ -227,10 +234,14 @@ def sync_channel_orders(
     except Exception as e:
         log.exception("동기화 에러 (channel=%s)", channel.name)
         errors.append(str(e))
-        sync_log.status = "error"
-        sync_log.error_message = str(e)
-        sync_log.completed_at = datetime.now()
-        db.commit()
+        try:
+            db.rollback()
+            sync_log.status = "error"
+            sync_log.error_message = str(e)[:500]
+            sync_log.completed_at = datetime.now()
+            db.commit()
+        except Exception:
+            pass  # sync_log 업데이트 실패해도 진행
 
     return {
         "channel_id": channel_id,
