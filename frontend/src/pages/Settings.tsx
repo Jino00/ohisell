@@ -101,6 +101,7 @@ export default function Settings() {
   const [gfaResult, setGfaResult] = useState<GfaUploadResult | null>(null);
   const [gfaError, setGfaError] = useState<string | null>(null);
   const [gfaStatus, setGfaStatus] = useState<GfaStatus | null>(null);
+  const [isDragOver, setIsDragOver] = useState(false);
   const gfaFileRef = useRef<HTMLInputElement>(null);
 
   const fetchStatus = useCallback(async () => {
@@ -179,10 +180,11 @@ export default function Settings() {
     }
   };
 
-  const handleGfaUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
+  const uploadGfaFile = async (file: File) => {
+    if (!file.name.endsWith(".csv")) {
+      setGfaError("CSV 파일만 업로드 가능합니다.");
+      return;
+    }
     setGfaUploading(true);
     setGfaResult(null);
     setGfaError(null);
@@ -198,13 +200,35 @@ export default function Settings() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || "업로드 실패");
       setGfaResult(data as GfaUploadResult);
-      fetchGfaStatus();  // 적재 현황 즉시 갱신
+      fetchGfaStatus();
     } catch (err) {
       setGfaError(err instanceof Error ? err.message : "업로드 중 오류 발생");
     } finally {
       setGfaUploading(false);
       if (gfaFileRef.current) gfaFileRef.current.value = "";
     }
+  };
+
+  const handleGfaUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) uploadGfaFile(file);
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragOver(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragOver(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragOver(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) uploadGfaFile(file);
   };
 
   if (loading) {
@@ -353,35 +377,62 @@ export default function Settings() {
       <div>
         <h2 className="text-sm font-semibold text-gray-700 mb-3">광고비 수동 업로드</h2>
         <div className="bg-white border border-gray-200 rounded-lg p-4 space-y-3">
-          {/* 헤더 + 업로드 버튼 */}
-          <div className="flex items-start justify-between">
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="text-lg">🟢</span>
-                <span className="font-medium text-gray-900">GFA · ADVoost 쇼핑</span>
-                <span className="px-2 py-0.5 text-xs rounded-full bg-gray-100 text-gray-600">CSV 업로드</span>
-              </div>
-              <div className="text-xs text-gray-500 mt-1">
-                cafe24 GFA 콘솔 → 보고서 → CSV 다운로드 후 업로드
-                <span className="ml-2 text-gray-400">파일명 예: theohi11_광고비 보고서_20260515_20260515.csv</span>
-              </div>
-            </div>
-            <div>
-              <input
-                ref={gfaFileRef}
-                type="file"
-                accept=".csv"
-                className="hidden"
-                onChange={handleGfaUpload}
-              />
-              <button
-                onClick={() => gfaFileRef.current?.click()}
-                disabled={gfaUploading}
-                className="px-3 py-1.5 text-xs bg-green-50 text-green-700 rounded-md hover:bg-green-100 disabled:opacity-50"
-              >
-                {gfaUploading ? "처리 중..." : "CSV 업로드"}
-              </button>
-            </div>
+          {/* 헤더 */}
+          <div className="flex items-center gap-2">
+            <span className="text-lg">🟢</span>
+            <span className="font-medium text-gray-900">GFA · ADVoost 쇼핑</span>
+            <span className="px-2 py-0.5 text-xs rounded-full bg-gray-100 text-gray-600">CSV 업로드</span>
+          </div>
+
+          {/* 드래그앤드롭 존 */}
+          <div
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+            onClick={() => !gfaUploading && gfaFileRef.current?.click()}
+            className={`
+              relative flex flex-col items-center justify-center gap-2
+              border-2 border-dashed rounded-lg px-6 py-8 cursor-pointer
+              transition-colors duration-150 select-none
+              ${gfaUploading
+                ? "border-gray-200 bg-gray-50 cursor-not-allowed"
+                : isDragOver
+                  ? "border-green-400 bg-green-50"
+                  : "border-gray-200 bg-gray-50 hover:border-green-300 hover:bg-green-50"
+              }
+            `}
+          >
+            <input
+              ref={gfaFileRef}
+              type="file"
+              accept=".csv"
+              className="hidden"
+              onChange={handleGfaUpload}
+              disabled={gfaUploading}
+            />
+            {gfaUploading ? (
+              <>
+                <svg className="w-8 h-8 text-gray-300 animate-spin" viewBox="0 0 24 24" fill="none">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                </svg>
+                <p className="text-sm text-gray-500">CSV 파싱 중...</p>
+              </>
+            ) : (
+              <>
+                <svg className={`w-8 h-8 transition-colors ${isDragOver ? "text-green-400" : "text-gray-300"}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+                </svg>
+                <p className={`text-sm font-medium transition-colors ${isDragOver ? "text-green-600" : "text-gray-500"}`}>
+                  {isDragOver ? "여기에 놓으세요" : "CSV 파일을 드래그하거나 클릭해서 업로드"}
+                </p>
+                <p className="text-xs text-gray-400">
+                  cafe24 GFA 콘솔 → 보고서 → CSV 다운로드
+                  <span className="mx-1">·</span>
+                  theohi11_광고비 보고서_YYYYMMDD_YYYYMMDD.csv
+                </p>
+              </>
+            )}
           </div>
 
           {/* 현재 적재 현황 */}
@@ -403,13 +454,6 @@ export default function Settings() {
               ) : (
                 "아직 적재된 GFA 데이터가 없습니다."
               )}
-            </div>
-          )}
-
-          {/* 업로드 진행 중 */}
-          {gfaUploading && (
-            <div className="text-xs px-3 py-2 rounded bg-yellow-50 border border-yellow-100 text-yellow-700">
-              CSV 파싱 중... 잠시 기다려 주세요.
             </div>
           )}
 
