@@ -767,3 +767,141 @@ def calculate_channel_daily_trend(
                     "net_profit": None,
                 })
     return result
+
+
+# ──────────────────────────────────────────────
+# 회사별 그룹핑 (Sprint 4B-company-grouping)
+# 엔진 미변경 — 채널 단위 산출 결과를 회사 > leaf 로 묶는 순수 함수
+# ──────────────────────────────────────────────
+
+
+def _classify_channel(ch: Channel) -> tuple[str, str, bool]:
+    """채널 → (회사, leaf 라벨, 순이익 산정가능 여부)"""
+    company = ch.company or "미지정"
+    code = ch.code or ""
+    if code.startswith("COUPANG"):
+        if ch.channel_type == "consignment":  # 로켓배송 (위탁/수동)
+            seg, has_profit = "쿠팡 로켓배송", False
+        else:  # 윙 / 로켓그로스
+            seg, has_profit = "쿠팡 로켓그로스·윙", True
+    elif code == "CAFE24":
+        seg, has_profit = "자사몰(cafe24)", True
+    elif code == "NAVER":
+        seg, has_profit = "네이버 스마트스토어", True
+    else:
+        seg, has_profit = ch.name, True
+    return company, f"{company} · {seg}", has_profit
+
+
+def get_channel_company_map(db: Session) -> dict[int, tuple[str, str, bool]]:
+    """{channel_id: (회사, leaf 라벨, has_profit)}"""
+    return {ch.id: _classify_channel(ch) for ch in db.query(Channel).all()}
+
+
+def _agg_block() -> dict:
+    return {
+        "revenue": ZERO, "ad_spend": ZERO, "order_count": 0,
+        "net_profit": ZERO, "measurable_rev": ZERO,
+    }
+
+
+def _add_net(block: dict, net: str | None, revenue: Decimal) -> None:
+    """집계 net은 '측정가능分 합' (기존 대시보드 의미론).
+    위탁(로켓배송 등 net None) 자식은 net/측정매출에 미반영 — 매출/광고비는
+    호출부에서 별도 누적됨. 측정가능 자식이 하나도 없을 때만 net/rate "—".
+    """
+    if net is None:
+        return
+    block["net_profit"] += Decimal(net)
+    block["measurable_rev"] += revenue
+
+
+def _finalize(kind: str, company: str | None, label: str, b: dict) -> dict:
+    if b["measurable_rev"] > 0:
+        net = b["net_profit"]
+        rate = (net / b["measurable_rev"] * 100).quantize(Decimal("0.01"))
+        net_s, rate_s = str(net), str(rate)
+    else:
+        net_s, rate_s = None, None  # 측정가능 매출 0 (예: 순수 로켓배송 leaf)
+    return {
+        "kind": kind,
+        "company": company,
+        "label": label,
+        "revenue": str(b["revenue"]),
+        "ad_spend": str(b["ad_spend"]),
+        "net_profit": net_s,
+        "profit_rate": rate_s,
+        "order_count": b["order_count"],
+    }
+
+
+def group_summary_by_company(
+    rows: list[dict], cmap: dict[int, tuple[str, str, bool]]
+) -> list[dict]:
+    """채널 요약 행 → [전체, 회사소계, leaf...] 계층 평탄 리스트.
+
+    rows: calculate_channel_summary 출력 (채널 단위, 엔진 미변경).
+    """
+    leaves: dict[str, dict] = {}
+    leaf_company: dict[str, str] = {}
+    companies: dict[str, dict] = {}
+    total = _agg_block()
+
+    for r in rows:
+        cid = r["channel_id"]
+        company, leaf_label, _ = cmap.get(cid, ("미지정", f"미지정 · {r['channel_name']}", True))
+        rev = Decimal(r["revenue"])
+
+        lb = leaves.setdefault(leaf_label, _agg_block())
+        leaf_company[leaf_label] = company
+        cb = companies.setdefault(company, _agg_block())
+
+        for blk in (lb, cb, total):
+            blk["revenue"] += rev
+            blk["ad_spend"] += Decimal(r["ad_spend"])
+            blk["order_count"] += r["order_count"]
+            _add_net(blk, r.get("net_profit"), rev)
+
+    out: list[dict] = [_finalize("total", None, "전체", total)]
+    # 회사 매출 desc, 회사 내 leaf 매출 desc
+    for company in sorted(companies, key=lambda c: companies[c]["revenue"], reverse=True):
+        out.append(_finalize("company", company, company, companies[company]))
+        c_leaves = [ll for ll, comp in leaf_company.items() if comp == company]
+        for ll in sorted(c_leaves, key=lambda x: leaves[x]["revenue"], reverse=True):
+            out.append(_finalize("leaf", company, ll, leaves[ll]))
+    return out
+
+
+def group_trend_by_company(
+    points: list[dict], cmap: dict[int, tuple[str, str, bool]]
+) -> list[dict]:
+    """채널별 일자 추이 → leaf 그룹 단위 일자 추이.
+
+    points: calculate_channel_daily_trend 출력 (채널 단위, 엔진 미변경).
+    """
+    agg: dict[tuple[str, str], dict] = {}
+    meta: dict[str, str] = {}  # leaf_label → company
+    for p in points:
+        cid = p["channel_id"]
+        company, leaf_label, _ = cmap.get(cid, ("미지정", f"미지정 · {p['channel_name']}", True))
+        meta[leaf_label] = company
+        key = (leaf_label, p["date"])
+        b = agg.setdefault(key, {"revenue": ZERO, "ad_spend": ZERO,
+                                 "net_profit": ZERO, "has_measurable": False})
+        b["revenue"] += Decimal(p["revenue"])
+        b["ad_spend"] += Decimal(p["ad_spend"])
+        if p.get("net_profit") is not None:
+            b["net_profit"] += Decimal(p["net_profit"])
+            b["has_measurable"] = True
+
+    out: list[dict] = []
+    for (leaf_label, d), b in agg.items():
+        out.append({
+            "group": leaf_label,
+            "company": meta[leaf_label],
+            "date": d,
+            "revenue": str(b["revenue"]),
+            "ad_spend": str(b["ad_spend"]),
+            "net_profit": str(b["net_profit"]) if b["has_measurable"] else None,
+        })
+    return out

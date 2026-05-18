@@ -20,8 +20,8 @@ import {
   fetchApi,
   type KpiData,
   type TrendItem,
-  type ChannelBreakdown,
-  type ChannelTrendPoint,
+  type GroupedSummaryRow,
+  type GroupedTrendPoint,
   type ProductRanking,
 } from "../lib/api";
 
@@ -144,20 +144,20 @@ const TOTAL_COLOR = "#111827";
 type MetricKey = "revenue" | "ad_spend" | "roas" | "net_profit";
 type ChartRow = { date: string } & Record<string, number | string | null>;
 
-// 채널별 추이 평탄 데이터를 지표별 차트 데이터로 피벗 (전체 라인 파생)
+// 그룹별 추이 평탄 데이터를 지표별 차트 데이터로 피벗 (전체 라인 파생)
 function buildChannelChartData(
-  points: ChannelTrendPoint[],
+  points: GroupedTrendPoint[],
   metric: MetricKey,
 ): { rows: ChartRow[]; series: string[] } {
   const dates = Array.from(new Set(points.map((p) => p.date))).sort();
   const channelNames: string[] = [];
   for (const p of points) {
-    if (!channelNames.includes(p.channel_name)) channelNames.push(p.channel_name);
+    if (!channelNames.includes(p.group)) channelNames.push(p.group);
   }
-  const idx = new Map<string, ChannelTrendPoint>();
-  for (const p of points) idx.set(`${p.date}__${p.channel_name}`, p);
+  const idx = new Map<string, GroupedTrendPoint>();
+  for (const p of points) idx.set(`${p.date}__${p.group}`, p);
 
-  const metricValue = (p: ChannelTrendPoint): number | null => {
+  const metricValue = (p: GroupedTrendPoint): number | null => {
     if (metric === "revenue") return p.revenue;
     if (metric === "ad_spend") return p.ad_spend;
     if (metric === "net_profit") return p.net_profit;
@@ -202,7 +202,7 @@ function ChannelTrendChart({
   unit,
 }: {
   title: string;
-  points: ChannelTrendPoint[];
+  points: GroupedTrendPoint[];
   metric: MetricKey;
   unit: "won" | "pct";
 }) {
@@ -273,8 +273,8 @@ export default function Dashboard() {
 
   const [kpi, setKpi] = useState<KpiData | null>(null);
   const [trend, setTrend] = useState<TrendItem[]>([]);
-  const [channels, setChannels] = useState<ChannelBreakdown[]>([]);
-  const [channelTrend, setChannelTrend] = useState<ChannelTrendPoint[]>([]);
+  const [channels, setChannels] = useState<GroupedSummaryRow[]>([]);
+  const [channelTrend, setChannelTrend] = useState<GroupedTrendPoint[]>([]);
   const [products, setProducts] = useState<ProductRanking[]>([]);
   const [sortBy, setSortBy] = useState<SortBy>("revenue");
   const [loading, setLoading] = useState(true);
@@ -286,8 +286,8 @@ export default function Dashboard() {
       const [kpiData, trendData, channelData, channelTrendData, productData] = await Promise.all([
         fetchApi<KpiData>(`/api/dashboard/kpi?${params}`),
         fetchApi<TrendItem[]>(`/api/dashboard/trend?period=${period}&${params}`),
-        fetchApi<ChannelBreakdown[]>(`/api/dashboard/channel-breakdown?${params}`),
-        fetchApi<ChannelTrendPoint[]>(`/api/dashboard/trend-by-channel?${params}`),
+        fetchApi<GroupedSummaryRow[]>(`/api/dashboard/channel-breakdown?${params}`),
+        fetchApi<GroupedTrendPoint[]>(`/api/dashboard/trend-by-channel?${params}`),
         fetchApi<ProductRanking[]>(`/api/dashboard/product-ranking?${params}&sort_by=${sortBy}&limit=20`),
       ]);
       setKpi(parseNumbers(kpiData));
@@ -307,16 +307,17 @@ export default function Dashboard() {
     return () => clearTimeout(timer);
   }, [fetchAll]);
 
-  const totalChannelRevenue = channels.reduce((s, c) => s + c.revenue, 0);
-
-  // 기간 요약표 파생값 (D-1/D-6: RoAS·전체행 프론트 계산)
-  const sumRevenue = channels.reduce((s, c) => s + c.revenue, 0);
-  const sumAdSpend = channels.reduce((s, c) => s + c.ad_spend, 0);
-  const measurable = channels.filter((c) => c.net_profit != null);
-  const sumNet = measurable.reduce((s, c) => s + (c.net_profit ?? 0), 0);
-  const sumNetRevenue = measurable.reduce((s, c) => s + c.revenue, 0);
-  const totalRoas = sumAdSpend > 0 ? (sumRevenue / sumAdSpend) * 100 : null;
-  const totalRate = sumNetRevenue > 0 ? (sumNet / sumNetRevenue) * 100 : null;
+  // 서버가 total/company/leaf 계층 행을 내려줌
+  const leafRows = channels.filter((c) => c.kind === "leaf");
+  const leafTotalRevenue = leafRows.reduce((s, c) => s + c.revenue, 0);
+  const roasOf = (rev: number, ad: number): number | null =>
+    ad > 0 ? (rev / ad) * 100 : null;
+  const shortLabel = (label: string) =>
+    label.includes(" · ") ? label.split(" · ").slice(1).join(" · ") : label;
+  const leafChart = leafRows.map((r) => ({ ...r, name: r.label }));
+  const leafPie = leafRows
+    .filter((r) => r.revenue > 0)
+    .map((r) => ({ ...r, name: shortLabel(r.label) }));
 
   const isActiveQuick = (days: number) => {
     const r = quickRange(days);
@@ -437,26 +438,24 @@ export default function Dashboard() {
               </tr>
             </thead>
             <tbody>
-              <tr className="border-t bg-blue-50 font-medium">
-                <td className="px-4 py-3 text-sm text-gray-900">전체</td>
-                <td className="px-4 py-3 text-sm text-right">{formatKRW(sumRevenue)}원</td>
-                <td className="px-4 py-3 text-sm text-right text-gray-600">{formatKRW(sumAdSpend)}원</td>
-                <td className="px-4 py-3 text-sm text-right">
-                  {totalRoas == null ? "—" : `${totalRoas.toFixed(0)}%`}
-                </td>
-                <td className="px-4 py-3 text-sm text-right">
-                  {totalRate == null ? "—" : `${formatKRW(sumNet)}원`}
-                </td>
-                <td className={`px-4 py-3 text-sm text-right ${totalRate == null ? "text-gray-400" : profitRateColor(totalRate)}`}>
-                  {totalRate == null ? "—" : `${totalRate.toFixed(1)}%`}
-                </td>
-              </tr>
-              {channels.map((c) => {
-                const roas = c.ad_spend > 0 ? (c.revenue / c.ad_spend) * 100 : null;
+              {channels.map((c, i) => {
+                const roas = roasOf(c.revenue, c.ad_spend);
+                const rowCls =
+                  c.kind === "total"
+                    ? "bg-blue-50 font-semibold"
+                    : c.kind === "company"
+                    ? "bg-gray-50 font-medium"
+                    : "hover:bg-gray-50";
+                const nameCls =
+                  c.kind === "leaf"
+                    ? "px-4 py-3 text-sm text-gray-600 pl-10"
+                    : "px-4 py-3 text-sm text-gray-900";
                 return (
-                  <tr key={c.channel_id} className="border-t hover:bg-gray-50">
-                    <td className="px-4 py-3 text-sm text-gray-900">{c.channel_name}</td>
-                    <td className="px-4 py-3 text-sm text-right font-medium">{formatKRW(c.revenue)}원</td>
+                  <tr key={`${c.kind}-${c.label}-${i}`} className={`border-t ${rowCls}`}>
+                    <td className={nameCls}>
+                      {c.kind === "leaf" ? shortLabel(c.label) : c.label}
+                    </td>
+                    <td className="px-4 py-3 text-sm text-right">{formatKRW(c.revenue)}원</td>
                     <td className="px-4 py-3 text-sm text-right text-gray-600">{formatKRW(c.ad_spend)}원</td>
                     <td className="px-4 py-3 text-sm text-right text-gray-600">
                       {roas == null ? "—" : `${roas.toFixed(0)}%`}
@@ -483,10 +482,10 @@ export default function Dashboard() {
 
       {/* 채널별 추이 4그래프 (D-3) */}
       <div className="grid grid-cols-2 gap-6 mb-6">
-        <ChannelTrendChart title="채널별 매출 추이" points={channelTrend} metric="revenue" unit="won" />
-        <ChannelTrendChart title="채널별 광고비 추이" points={channelTrend} metric="ad_spend" unit="won" />
-        <ChannelTrendChart title="채널별 RoAS 추이" points={channelTrend} metric="roas" unit="pct" />
-        <ChannelTrendChart title="채널별 순이익 추이" points={channelTrend} metric="net_profit" unit="won" />
+        <ChannelTrendChart title="그룹별 매출 추이" points={channelTrend} metric="revenue" unit="won" />
+        <ChannelTrendChart title="그룹별 광고비 추이" points={channelTrend} metric="ad_spend" unit="won" />
+        <ChannelTrendChart title="그룹별 RoAS 추이" points={channelTrend} metric="roas" unit="pct" />
+        <ChannelTrendChart title="그룹별 순이익 추이" points={channelTrend} metric="net_profit" unit="won" />
       </div>
 
       {/* Sales Trend Chart */}
@@ -540,31 +539,32 @@ export default function Dashboard() {
       <div className="grid grid-cols-2 gap-6 mb-6">
         {/* Channel Revenue Pie */}
         <div className="bg-white border rounded-lg p-4">
-          <h3 className="text-sm font-medium text-gray-700 mb-3">채널별 매출 비중</h3>
-          {channels.length === 0 ? (
+          <h3 className="text-sm font-medium text-gray-700 mb-3">그룹별 매출 비중</h3>
+          {leafPie.length === 0 ? (
             <div className="h-64 flex items-center justify-center text-gray-400">데이터가 없습니다</div>
           ) : (
             <ResponsiveContainer width="100%" height={260}>
               <PieChart>
                 <Pie
-                  data={channels}
+                  data={leafPie}
                   dataKey="revenue"
-                  nameKey="channel_name"
+                  nameKey="name"
                   cx="50%"
-                  cy="50%"
-                  outerRadius={90}
+                  cy="45%"
+                  outerRadius={80}
                   label={(props) => {
-                    const name = String(props.name ?? "");
                     const value = Number(props.value ?? 0);
-                    return `${name} ${totalChannelRevenue > 0 ? ((value / totalChannelRevenue) * 100).toFixed(0) : 0}%`;
+                    const pct = leafTotalRevenue > 0 ? (value / leafTotalRevenue) * 100 : 0;
+                    return pct >= 6 ? `${pct.toFixed(0)}%` : "";
                   }}
-                  labelLine={{ stroke: "#d1d5db" }}
+                  labelLine={false}
                 >
-                  {channels.map((_, i) => (
+                  {leafPie.map((_, i) => (
                     <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />
                   ))}
                 </Pie>
                 <Tooltip formatter={(v) => `${formatKRW(Number(v ?? 0))}원`} />
+                <Legend wrapperStyle={{ fontSize: 11 }} />
               </PieChart>
             </ResponsiveContainer>
           )}
@@ -572,23 +572,23 @@ export default function Dashboard() {
 
         {/* Channel Profit Rate Bar */}
         <div className="bg-white border rounded-lg p-4">
-          <h3 className="text-sm font-medium text-gray-700 mb-3">채널별 이익률</h3>
-          {channels.length === 0 ? (
+          <h3 className="text-sm font-medium text-gray-700 mb-3">그룹별 이익률</h3>
+          {leafChart.filter((c) => c.profit_rate != null).length === 0 ? (
             <div className="h-64 flex items-center justify-center text-gray-400">데이터가 없습니다</div>
           ) : (
             <ResponsiveContainer width="100%" height={260}>
-              <BarChart data={channels.filter((c) => c.profit_rate != null)} layout="vertical">
+              <BarChart data={leafChart.filter((c) => c.profit_rate != null)} layout="vertical">
                 <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
                 <XAxis type="number" tick={{ fontSize: 12, fill: "#9ca3af" }} tickFormatter={(v: number) => `${v}%`} />
                 <YAxis
                   type="category"
-                  dataKey="channel_name"
-                  tick={{ fontSize: 12, fill: "#6b7280" }}
-                  width={80}
+                  dataKey="name"
+                  tick={{ fontSize: 11, fill: "#6b7280" }}
+                  width={150}
                 />
                 <Tooltip formatter={(v) => `${Number(v ?? 0).toFixed(1)}%`} />
                 <Bar dataKey="profit_rate" name="이익률" radius={[0, 4, 4, 0]}>
-                  {channels.map((ch, i) => (
+                  {leafChart.filter((c) => c.profit_rate != null).map((ch, i) => (
                     <Cell
                       key={i}
                       fill={ch.profit_rate == null ? "#d1d5db" : ch.profit_rate >= 15 ? "#22c55e" : ch.profit_rate >= 5 ? "#f59e0b" : "#ef4444"}

@@ -138,25 +138,25 @@ export interface KpiData extends Record<string, unknown> {
   profit_change_pct: number;
 }
 
-export interface ChannelBreakdown extends Record<string, unknown> {
-  channel_id: number;
-  channel_name: string;
+// 회사 > leaf 계층 그룹 요약 (kind: total | company | leaf)
+export interface GroupedSummaryRow extends Record<string, unknown> {
+  kind: string;
+  company: string | null;
+  label: string;
   revenue: number;
-  cost: number;
-  commission: number;
   ad_spend: number;
-  net_profit: number | null;  // null = 수동매출 전용 채널 (순이익 계산 불가)
+  net_profit: number | null;  // null = 위탁(로켓배송) leaf/회사
   profit_rate: number | null;
   order_count: number;
 }
 
-export interface ChannelTrendPoint extends Record<string, unknown> {
-  channel_id: number;
-  channel_name: string;
+export interface GroupedTrendPoint extends Record<string, unknown> {
+  group: string;
+  company: string | null;
   date: string;
   revenue: number;
   ad_spend: number;
-  net_profit: number | null;  // null = 수동매출/위탁 채널 (순이익 산정 불가)
+  net_profit: number | null;  // null = 위탁(로켓배송) 그룹
 }
 
 export interface ProductRanking extends Record<string, unknown> {

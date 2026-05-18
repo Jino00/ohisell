@@ -32,6 +32,9 @@ class Channel(Base):
         String(20), nullable=False, default="marketplace"
     )  # marketplace / own / consignment
     account_label: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    company: Mapped[Optional[str]] = mapped_column(
+        String(50), nullable=True
+    )  # 회사 그룹핑 (개인회사 오픽스 / 주식회사 오하이테크 / 주식회사 오하이)
     commission_rate: Mapped[Decimal] = mapped_column(
         Numeric(5, 2), nullable=False, default=0
     )

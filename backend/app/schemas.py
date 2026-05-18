@@ -174,25 +174,24 @@ class DashboardKPI(BaseModel):
     profit_change_pct: Optional[float] = None
 
 
-class ChannelSummaryRow(BaseModel):
-    channel_id: int
-    channel_name: str
+class GroupedSummaryRow(BaseModel):
+    kind: str  # total | company | leaf
+    company: Optional[str]
+    label: str
     revenue: str
-    cost: str
-    commission: str
     ad_spend: str
-    net_profit: Optional[str]  # 수동 매출 전용 채널은 None
+    net_profit: Optional[str]  # 위탁(로켓배송) leaf/회사는 None
     profit_rate: Optional[str]
     order_count: int
 
 
-class ChannelTrendPoint(BaseModel):
-    channel_id: int
-    channel_name: str
+class GroupedTrendPoint(BaseModel):
+    group: str
+    company: Optional[str]
     date: str
     revenue: str
     ad_spend: str
-    net_profit: Optional[str]  # 수동매출/위탁 채널은 None
+    net_profit: Optional[str]
 
 
 class ProductProfitRow(BaseModel):

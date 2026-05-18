@@ -10,9 +10,9 @@ from sqlalchemy.orm import Session
 
 from app.database import get_ad_db, get_db
 from app.schemas import (
-    ChannelSummaryRow,
-    ChannelTrendPoint,
     DashboardKPI,
+    GroupedSummaryRow,
+    GroupedTrendPoint,
     ProductProfitRow,
     TrendPoint,
 )
@@ -21,6 +21,9 @@ from app.services.profit_calculator import (
     calculate_channel_summary,
     calculate_daily_trend,
     calculate_product_profit,
+    get_channel_company_map,
+    group_summary_by_company,
+    group_trend_by_company,
 )
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
@@ -178,18 +181,19 @@ def dashboard_kpi(
                 pass
 
 
-@router.get("/channel-breakdown", response_model=list[ChannelSummaryRow])
+@router.get("/channel-breakdown", response_model=list[GroupedSummaryRow])
 def channel_breakdown(
     date_from: Optional[date] = Query(None),
     date_to: Optional[date] = Query(None),
     db: Session = Depends(get_db),
 ):
-    """채널별 매출/이익 분석"""
+    """회사 > leaf 계층 그룹 요약 (전체/회사소계/leaf)"""
     df, dt = _default_dates(date_from, date_to, "daily")
     ad_db = _resolve_ad_db()
 
     try:
-        return calculate_channel_summary(db, ad_db, df, dt)
+        rows = calculate_channel_summary(db, ad_db, df, dt)
+        return group_summary_by_company(rows, get_channel_company_map(db))
     finally:
         if ad_db is not None:
             try:
@@ -198,18 +202,19 @@ def channel_breakdown(
                 pass
 
 
-@router.get("/trend-by-channel", response_model=list[ChannelTrendPoint])
+@router.get("/trend-by-channel", response_model=list[GroupedTrendPoint])
 def trend_by_channel(
     date_from: Optional[date] = Query(None),
     date_to: Optional[date] = Query(None),
     db: Session = Depends(get_db),
 ):
-    """채널별 일자별 매출/광고비/순이익 추이"""
+    """회사 leaf 그룹 단위 일자별 매출/광고비/순이익 추이"""
     df, dt = _default_dates(date_from, date_to, "daily")
     ad_db = _resolve_ad_db()
 
     try:
-        return calculate_channel_daily_trend(db, ad_db, df, dt)
+        pts = calculate_channel_daily_trend(db, ad_db, df, dt)
+        return group_trend_by_company(pts, get_channel_company_map(db))
     finally:
         if ad_db is not None:
             try:
