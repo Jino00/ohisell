@@ -385,6 +385,30 @@ class ManualRevenue(Base):
 
 
 # ──────────────────────────────────────────────
+# 쿠팡 광고 리포트 (XLSX 업로드 상세 지표)
+# ──────────────────────────────────────────────
+class CoupangAdReport(Base):
+    """쿠팡 pa_daily_keyword XLSX에서 추출한 날짜별 광고 성과 지표"""
+
+    __tablename__ = "coupang_ad_report"
+    __table_args__ = (
+        UniqueConstraint("report_date", "sell_type", "vendor_id", name="uq_coupang_ad_report"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    report_date: Mapped[datetime] = mapped_column(Date, nullable=False)
+    sell_type: Mapped[str] = mapped_column(String(10), nullable=False)  # 3P / 2P / Retail
+    vendor_id: Mapped[str] = mapped_column(String(20), nullable=False)
+    impressions: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    clicks: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    ad_spend: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    orders: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    sales_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    conversion_revenue: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+# ──────────────────────────────────────────────
 # 스케줄러 상태
 # ──────────────────────────────────────────────
 class SchedulerState(Base):

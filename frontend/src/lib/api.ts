@@ -220,3 +220,34 @@ export interface SchedulerStatus {
   is_running: boolean;
   jobs: SchedulerJob[];
 }
+
+// ── 쿠팡 광고 리포트 ──
+export interface CoupangAdReportRow {
+  sell_type: string;
+  impressions: number;
+  clicks: number;
+  ad_spend: number;
+  orders: number;
+  sales_qty: number;
+  conversion_revenue: number;
+  ctr: number;
+  cvr: number;
+  roas: number;
+}
+
+export interface CoupangAdReportResponse {
+  date_from: string;
+  date_to: string;
+  total: CoupangAdReportRow;
+  items: CoupangAdReportRow[];
+}
+
+export async function fetchCoupangAdReport(dateFrom: string, dateTo: string): Promise<CoupangAdReportResponse> {
+  return fetchApi<CoupangAdReportResponse>(
+    `/api/ads/coupang/report?date_from=${dateFrom}&date_to=${dateTo}`
+  );
+}
+
+export async function uploadCoupangAdReport(file: File) {
+  return uploadFile("/api/ads/coupang/upload", file);
+}
