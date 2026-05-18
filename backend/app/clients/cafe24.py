@@ -4,15 +4,20 @@ from __future__ import annotations
 
 import base64
 import logging
+import threading
 import time
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
 from urllib.parse import urlencode
 
 import requests
 
 from app.clients.base import BaseChannelClient, RawOrder
+
+# 단일 프로세스(PM2 1 워커 + APScheduler 동일 프로세스) 전제.
+# 멀티 워커 전환 시 Redis 분산 락으로 교체 필요.
+_CAFE24_REFRESH_LOCK = threading.Lock()
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED, normalize_status
 from app.services.commission_resolver import PER_ORDER_TYPES, resolve as resolve_commission
 from app.services.payment_classifier import classify as classify_payment
@@ -106,6 +111,7 @@ class Cafe24Client(BaseChannelClient):
         access_token: str | None = None,
         refresh_token: str | None = None,
         on_token_refreshed: Optional[Callable[[str, str, datetime | None, datetime | None], None]] = None,
+        token_reader: Optional[Callable[[], Tuple[Optional[str], Optional[str], Optional[datetime]]]] = None,
     ):
         self.mall_id = config.mall_id
         self.client_id = config.client_id
@@ -113,51 +119,75 @@ class Cafe24Client(BaseChannelClient):
         self._access_token = access_token
         self._refresh_token = refresh_token
         self._on_token_refreshed = on_token_refreshed
+        self._token_reader = token_reader  # () -> (refresh_token, access_token, expires_at)
         self._api_base = f"https://{self.mall_id}.cafe24api.com/api/v2"
 
     def _refresh_access_token(self) -> str | None:
-        """Refresh Token으로 Access Token 갱신"""
-        if not self._refresh_token:
-            log.error("cafe24 refresh token 없음")
-            return None
+        """Refresh Token으로 Access Token 갱신 — 전역 락으로 직렬화.
 
-        auth = base64.b64encode(f"{self.client_id}:{self.client_secret}".encode()).decode()
-        try:
-            resp = requests.post(
-                f"https://{self.mall_id}.cafe24api.com/api/v2/oauth/token",
-                headers={
-                    "Authorization": f"Basic {auth}",
-                    "Content-Type": "application/x-www-form-urlencoded",
-                },
-                data={
-                    "grant_type": "refresh_token",
-                    "refresh_token": self._refresh_token,
-                },
-                timeout=10,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            self._access_token = data.get("access_token")
-            new_refresh = data.get("refresh_token")
-            if new_refresh:
-                self._refresh_token = new_refresh
+        cafe24는 refresh 시 refresh_token을 회전시킨다. 락 없이 여러 경로가
+        동시에 refresh를 시도하면 한쪽이 이미 소비된 RT로 400 invalid_grant를
+        받아 토큰 체인이 파손된다. 따라서:
+        1) 전역 락(_CAFE24_REFRESH_LOCK) 획득 후 DB에서 최신 토큰을 재조회.
+        2) 대기 중 다른 스레드가 이미 갱신했고 access token이 유효하면 네트워크 skip.
+        3) 그 외 DB 최신 RT로 네트워크 refresh → on_token_refreshed로 저장.
+        """
+        with _CAFE24_REFRESH_LOCK:
+            # 락 획득 후 DB 최신 토큰 재조회 (다른 스레드가 이미 회전했을 수 있음)
+            if self._token_reader:
+                try:
+                    fresh_rt, fresh_access, fresh_expires_at = self._token_reader()
+                    if fresh_rt:
+                        self._refresh_token = fresh_rt
+                    now = datetime.now()
+                    if fresh_access and fresh_expires_at and fresh_expires_at > now + timedelta(minutes=1):
+                        # 이미 갱신된 유효 토큰 — 네트워크 호출 불필요
+                        self._access_token = fresh_access
+                        log.info("cafe24 토큰 이미 갱신됨 (락 대기 중 타 스레드 완료), 스킵")
+                        return self._access_token
+                except Exception as e:
+                    log.warning("cafe24 token_reader 실패 (무시하고 refresh 진행): %s", e)
 
-            expires_at = _parse_cafe24_datetime(data.get("expires_at"))
-            refresh_expires_at = _parse_cafe24_datetime(data.get("refresh_token_expires_at"))
+            if not self._refresh_token:
+                log.error("cafe24 refresh token 없음")
+                return None
 
-            # DB 업데이트 콜백 호출
-            if self._on_token_refreshed and self._access_token:
-                self._on_token_refreshed(
-                    self._access_token,
-                    self._refresh_token or "",
-                    expires_at,
-                    refresh_expires_at,
+            auth = base64.b64encode(f"{self.client_id}:{self.client_secret}".encode()).decode()
+            try:
+                resp = requests.post(
+                    f"https://{self.mall_id}.cafe24api.com/api/v2/oauth/token",
+                    headers={
+                        "Authorization": f"Basic {auth}",
+                        "Content-Type": "application/x-www-form-urlencoded",
+                    },
+                    data={
+                        "grant_type": "refresh_token",
+                        "refresh_token": self._refresh_token,
+                    },
+                    timeout=10,
                 )
+                resp.raise_for_status()
+                data = resp.json()
+                self._access_token = data.get("access_token")
+                new_refresh = data.get("refresh_token")
+                if new_refresh:
+                    self._refresh_token = new_refresh
 
-            return self._access_token
-        except Exception as e:
-            log.error("cafe24 토큰 갱신 실패: %s", e)
-            return None
+                expires_at = _parse_cafe24_datetime(data.get("expires_at"))
+                refresh_expires_at = _parse_cafe24_datetime(data.get("refresh_token_expires_at"))
+
+                if self._on_token_refreshed and self._access_token:
+                    self._on_token_refreshed(
+                        self._access_token,
+                        self._refresh_token or "",
+                        expires_at,
+                        refresh_expires_at,
+                    )
+
+                return self._access_token
+            except Exception as e:
+                log.error("cafe24 토큰 갱신 실패: %s", e)
+                return None
 
     def _request(self, method: str, path: str, params: dict | None = None) -> dict | None:
         if not self._access_token:
@@ -192,6 +222,28 @@ class Cafe24Client(BaseChannelClient):
                 log.error("cafe24 API 에러: %s — %s", url, e)
                 return None
         return None
+
+    def verify_connection(self) -> dict:
+        """access token 유효성 확인 — refresh 부작용 없음. /status 전용."""
+        if not self._access_token:
+            return {"status": "no_token"}
+        try:
+            resp = requests.get(
+                f"{self._api_base}/admin/store",
+                headers={
+                    "Authorization": f"Bearer {self._access_token}",
+                    "Content-Type": "application/json",
+                    "X-Cafe24-Api-Version": "2024-06-01",
+                },
+                timeout=5,
+            )
+            if resp.status_code == 200:
+                return {"status": "ok"}
+            if resp.status_code == 401:
+                return {"status": "token_invalid"}
+            return {"status": "error", "http_status": resp.status_code}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
 
     def test_connection(self) -> dict:
         if not self._access_token:

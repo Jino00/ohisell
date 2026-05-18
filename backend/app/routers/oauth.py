@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 
-from app.clients.cafe24 import build_cafe24_oauth_url, exchange_authorization_code
+from app.clients.cafe24 import Cafe24Client, build_cafe24_oauth_url, exchange_authorization_code
 from app.config import get_cafe24_config
 from app.database import get_db
 from app.models import Channel, OAuthToken
@@ -133,14 +133,27 @@ def get_cafe24_status(db: Session = Depends(get_db)):
             message="Refresh Token이 만료되었습니다. 재인증이 필요합니다.",
         )
 
-    # access token 만료 확인 (refresh로 갱신 가능하므로 connected)
-    status = "connected"
+    # access token이 아직 유효하면 라이브 검증 (refresh 부작용 없음)
+    access_expired = token_row.expires_at and token_row.expires_at <= now
+    if not access_expired and token_row.access_token:
+        probe = Cafe24Client(config, access_token=token_row.access_token).verify_connection()
+        if probe["status"] == "token_invalid":
+            return OAuthStatus(
+                status="degraded",
+                mall_id=config.mall_id,
+                expires_at=_fmt(token_row.expires_at),
+                refresh_token_expires_at=_fmt(token_row.refresh_token_expires_at),
+                message="Access Token이 유효하지 않습니다. 다음 API 호출 시 자동 갱신을 시도합니다.",
+            )
+        if probe["status"] == "error":
+            log.warning("cafe24 /status 라이브 검증 실패: %s", probe.get("message", probe.get("http_status")))
+
     message = None
-    if token_row.expires_at and token_row.expires_at <= now:
+    if access_expired:
         message = "Access Token 만료됨 — 다음 API 호출 시 자동 갱신됩니다"
 
     return OAuthStatus(
-        status=status,
+        status="connected",
         mall_id=config.mall_id,
         expires_at=_fmt(token_row.expires_at),
         refresh_token_expires_at=_fmt(token_row.refresh_token_expires_at),

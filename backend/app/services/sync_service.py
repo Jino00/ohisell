@@ -59,11 +59,17 @@ def _get_client_for_channel(channel: Channel, db: Session | None = None) -> Base
                 log.error("cafe24 토큰 DB 업데이트 실패: %s", e)
                 raise
 
+        def _cafe24_token_reader():
+            """_CAFE24_REFRESH_LOCK 획득 후 DB 최신 토큰 재조회용 콜백"""
+            db.refresh(token_row)
+            return (token_row.refresh_token, token_row.access_token, token_row.expires_at)
+
         return Cafe24Client(
             config,
             access_token=token_row.access_token if token_row else None,
             refresh_token=token_row.refresh_token if token_row else None,
             on_token_refreshed=_on_cafe24_token_refreshed if db and token_row else None,
+            token_reader=_cafe24_token_reader if db and token_row else None,
         )
 
     return None

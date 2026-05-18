@@ -7,15 +7,12 @@ from datetime import date, datetime, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-import threading
-
 from app.database import SessionLocal, get_ad_db
 from app.models import Channel, OAuthToken, SchedulerState
 
 log = logging.getLogger(__name__)
 
 scheduler = BackgroundScheduler(timezone="Asia/Seoul")
-_cafe24_refresh_lock = threading.Lock()
 
 
 def _get_own_db_session():
@@ -165,14 +162,14 @@ def sync_meta_ad_costs_job():
 
 
 def cafe24_proactive_refresh_job():
-    """cafe24 Access Token 만료 30분 전 자동 갱신"""
-    if not _cafe24_refresh_lock.acquire(blocking=False):
-        log.info("[스케줄러] cafe24 토큰 갱신 이미 진행 중, 스킵")
-        return
+    """cafe24 Access Token 만료 30분 전 자동 갱신.
 
+    동시성 직렬화는 cafe24.py의 _CAFE24_REFRESH_LOCK이 담당한다.
+    (로컬 락 제거 — sync 경로와 공통 단일 락으로 통합)
+    """
     db = _get_own_db_session()
     try:
-        from app.clients.cafe24 import Cafe24Client, _parse_cafe24_datetime
+        from app.clients.cafe24 import Cafe24Client
         from app.config import get_cafe24_config
 
         channel = db.query(Channel).filter(Channel.code == "CAFE24").first()
@@ -200,7 +197,6 @@ def cafe24_proactive_refresh_job():
         if token_row.expires_at and token_row.expires_at > now + timedelta(minutes=30):
             return
 
-        # 토큰 갱신 실행
         config = get_cafe24_config("CAFE24")
         if not config:
             return
@@ -212,11 +208,19 @@ def cafe24_proactive_refresh_job():
             token_row.refresh_token_expires_at = refresh_expires_at
             db.commit()
 
+        def _token_reader():
+            fresh = db.query(OAuthToken).filter(OAuthToken.channel_id == channel.id).first()
+            if fresh:
+                db.refresh(fresh)  # identity map 캐시 무효화 → DB 최신값 강제 로드
+                return (fresh.refresh_token, fresh.access_token, fresh.expires_at)
+            return (None, None, None)
+
         client = Cafe24Client(
             config,
             access_token=token_row.access_token,
             refresh_token=token_row.refresh_token,
             on_token_refreshed=_on_refreshed,
+            token_reader=_token_reader,
         )
         new_token = client._refresh_access_token()
         if new_token:
@@ -228,7 +232,6 @@ def cafe24_proactive_refresh_job():
         log.exception("[스케줄러] cafe24_proactive_refresh 에러: %s", e)
     finally:
         db.close()
-        _cafe24_refresh_lock.release()
 
 
 def _ensure_default_states(db):
