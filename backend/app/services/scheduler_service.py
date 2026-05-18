@@ -274,7 +274,12 @@ def start_scheduler():
 
             if job_func:
                 try:
-                    trigger = CronTrigger.from_crontab(state.cron_expression)
+                    # from_crontab는 timezone 미지정 시 서버 로컬 TZ(프로덕션=UTC)로
+                    # 폴백한다. 미리 만든 trigger를 add_job에 넘기면 스케줄러의
+                    # 기본 timezone이 적용되지 않으므로 KST를 명시한다.
+                    trigger = CronTrigger.from_crontab(
+                        state.cron_expression, timezone="Asia/Seoul"
+                    )
                     scheduler.add_job(
                         job_func,
                         trigger=trigger,
