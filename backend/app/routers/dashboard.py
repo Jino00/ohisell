@@ -11,6 +11,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.database import get_ad_db, get_db
+from app.models import Channel
 from app.routers.ad_costs import _extract_meta_keyword, _extract_naver_sa_keyword, _upsert_ad_cost
 
 log = logging.getLogger(__name__)
@@ -48,6 +49,24 @@ def _default_dates(
         else:
             date_from = date_to - timedelta(days=30)
     return date_from, date_to
+
+
+def _sync_orders_recent(db: Session) -> None:
+    """대시보드 조회 시 API 채널 주문 최근 7일치 최신화 (실패해도 조회는 계속)"""
+    from app.services.sync_service import sync_channel_orders
+    sync_to = date.today()
+    sync_from = sync_to - timedelta(days=6)
+    channels = db.query(Channel).filter(
+        Channel.api_type != "excel",
+        Channel.code != "COUPANG_ROCKET",
+    ).all()
+    for ch in channels:
+        try:
+            result = sync_channel_orders(db, ch.id, sync_from, sync_to)
+            if result.get("status") == "success":
+                log.info("주문 최신화: %s (신규 %s)", ch.name, result.get("new_orders"))
+        except Exception as e:
+            log.warning("주문 최신화 실패 (%s, 조회는 계속): %s", ch.name, e)
 
 
 def _sync_ad_costs_for_period(db: Session, date_from: date, date_to: date) -> None:
@@ -237,6 +256,7 @@ def channel_breakdown(
 ):
     """회사 > leaf 계층 그룹 요약 (전체/회사소계/leaf)"""
     df, dt = _default_dates(date_from, date_to, "daily")
+    _sync_orders_recent(db)
     _sync_ad_costs_for_period(db, df, dt)
     ad_db = _resolve_ad_db()
 
@@ -259,6 +279,7 @@ def trend_by_channel(
 ):
     """회사 leaf 그룹 단위 일자별 매출/광고비/순이익 추이"""
     df, dt = _default_dates(date_from, date_to, "daily")
+    _sync_orders_recent(db)
     _sync_ad_costs_for_period(db, df, dt)
     ad_db = _resolve_ad_db()
 
