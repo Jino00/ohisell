@@ -41,12 +41,12 @@
 ## Phase 5 — 검증
 - ✅ alembic upgrade/downgrade 로컬 검증
 - ✅ tsc/build, 브라우저 (Pie 라벨 깨짐 수정) 시각 검증
-- 🔄 codex 통합 1회 (medium, 마이그레이션만 high, 백그라운드)
+- ✅ codex 통합 (2라운드 PASS) 1회 (medium, 마이그레이션만 high, 백그라운드)
 
 ## Phase 6 — 배포
-- ⏳ 프로덕션 .backup 스냅샷(필수) → backend rsync → alembic upgrade → pm2 restart
-- ⏳ 정기 백업 cron (.backup 매일, N일 보관)
-- ⏳ 프로덕션 검증 + claude-progress.txt 갱신
+- ✅ 프로덕션 .backup 스냅샷(필수) → backend rsync → alembic upgrade → pm2 restart
+- ✅ 정기 백업 cron (.backup 매일, N일 보관)
+- ✅ 프로덕션 검증 + claude-progress.txt 갱신
 
 ## 완료 기준
 - 요약표/4그래프가 회사>leaf 구조, 합산 정확

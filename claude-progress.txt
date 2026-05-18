@@ -3,9 +3,23 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
-- 날짜: 2026-05-17
-- 단계: Sprint 4B-dashboard-period-analysis 완료 (대시보드 기간별 분석)
-- 전체 진행률: 93%
+- 날짜: 2026-05-18
+- 단계: Sprint 4B-company-grouping 완료 (대시보드 회사별 그룹핑) — 배포 완료
+- 전체 진행률: 94%
+
+## Sprint 4B-company-grouping 완료 (2026-05-18) — 대시보드 회사별 그룹핑
+- [x] channels.company 컬럼 + alembic c7d2e1f3a4b5 (batch, 롤백가능, 7채널 시드)
+- [x] 회사 매핑: 개인회사 오픽스(WING1/RG1) / 주식회사 오하이테크(WING2/RG2/ROCKET/CAFE24) / 주식회사 오하이(NAVER)
+- [x] profit_calculator 그룹핑 순수함수(엔진 미변경): get_channel_company_map, group_summary_by_company(전체>회사>leaf), group_trend_by_company
+- [x] net 의미론: 집계=측정가능분 합(숫자), 순수 로켓배송 leaf만 "—" (그룹핑前 의미론 복원)
+- [x] /channel-breakdown·/trend-by-channel 그룹 응답, GroupedSummaryRow/GroupedTrendPoint
+- [x] Dashboard.tsx 계층 테이블 + 4그래프 그룹라인 + Pie/Bar(라벨깨짐 수정)
+- [x] seed.py company 추가 + 기존행 backfill (fresh bootstrap P1 수정)
+- [x] codex 2라운드 PASS (P1 fresh bootstrap, P2-1 profit_rate 회귀 수정, P2-2 기각합의)
+- [x] git commit ee4244e + push
+- [x] 프로덕션 배포: .backup 스냅샷 → rsync → alembic upgrade(c7d2e1f3a4b5) → pm2 restart → 검증
+- [x] 정기백업 cron (매일 03:30KST .backup, 14일 보관) + daily_backup.sh
+- [x] DB 마이그레이션 head: c7d2e1f3a4b5
 
 ## Sprint 4B-dashboard-period-analysis 완료 (2026-05-17) — 대시보드 기간별 분석
 - [x] schemas.py ChannelTrendPoint (revenue/ad_spend str, net_profit Optional)
@@ -20,7 +34,10 @@
   - P2 수정: 전체 라인 all-null 시 series 제외
   - P2 수정: quickRange 명시적 KST(Asia/Seoul)
 - [x] 브라우저 시각 검증 (4그래프 정상, 콘솔 에러 없음)
-- [ ] git commit (사용자 승인 대기)
+- [x] git commit 789c828 + origin/main push
+- [x] 프로덕션 배포 (backend+frontend rsync, pm2 restart)
+- [x] 프로덕션 alembic upgrade head (3b94b7c55a1f — 이전 sprint 미적용분 해결)
+- [x] 프로덕션 검증 (sellc.ohitech.co.kr 4그래프 정상)
 
 ## Sprint 4B-rocket-manual-revenue 완료 (2026-05-17) — 로켓배송 수동 매출 입력
 - [x] ManualRevenue 모델 + alembic 마이그레이션 (3b94b7c55a1f)
