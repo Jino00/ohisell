@@ -51,7 +51,11 @@ def _default_dates(
 
 
 def _sync_ad_costs_for_period(db: Session, date_from: date, date_to: date) -> None:
-    """대시보드 조회 시 SA/Meta 광고비 최신화 (upsert — 실패해도 조회는 계속)"""
+    """대시보드 조회 시 SA/Meta 광고비 최신화 (upsert — 실패해도 조회는 계속)
+    API 호출 범위는 최근 7일로 제한 — 과거분은 스케줄러가 적재한 데이터를 그대로 사용.
+    """
+    sync_from = max(date_from, date_to - timedelta(days=6))
+    date_from, date_to = sync_from, date_to
     # 네이버 SA
     try:
         from app.services.naver_sa_ad_fetcher import fetch_campaign_daily_spend as _fetch_sa
