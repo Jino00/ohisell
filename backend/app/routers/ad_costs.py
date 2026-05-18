@@ -383,23 +383,50 @@ def get_coupang_ad_status(db: Session = Depends(get_db)):
     }
 
 
+def _detect_xlsx_format(headers: list) -> dict:
+    """헤더 행으로 쿠팡 광고 XLSX 포맷을 감지해 컬럼 인덱스 반환.
+
+    지원 포맷:
+      - pa_daily_keyword : 광고비=P(15), 노출수=N(13), 클릭수=O(14)
+      - pa_daily_adGroup : 광고비=L(11), 노출수/클릭수는 헤더 탐색
+    """
+    def _find(keyword: str) -> int:
+        for i, h in enumerate(headers):
+            if h and keyword in str(h):
+                return i
+        return -1
+
+    spend_idx = _find("광고비")
+    if spend_idx == -1:
+        spend_idx = 11  # fallback
+
+    return {
+        "spend":   spend_idx,
+        "impr":    _find("노출수"),
+        "clicks":  _find("클릭수"),
+        "orders":  _find("총 주문수(1일)") if _find("총 주문수(1일)") != -1 else _find("전환수"),
+        "qty":     _find("총 판매수량(1일)") if _find("총 판매수량(1일)") != -1 else _find("판매수량"),
+        "rev":     _find("총 전환매출액(1일)") if _find("총 전환매출액(1일)") != -1 else _find("전환매출액"),
+    }
+
+
 @router.post("/coupang/upload")
 async def upload_coupang_ad_xlsx(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
 ):
-    """쿠팡 광고비 일별 광고그룹 XLSX 업로드 → ad_costs 저장.
-    파일명 형식: {vendor_id}_pa_daily_adGroup_YYYYMMDD_YYYYMMDD.xlsx
+    """쿠팡 광고 XLSX 업로드 → ad_costs + coupang_ad_report 동시 저장.
+    파일명 형식: {vendor_id}_pa_daily_*.xlsx
     C열(판매방식): Retail=로켓배송, 3P=윙, 2P=로켓그로스
-    L열(광고비): 원 단위
+    포맷(adGroup/keyword)은 헤더 행에서 자동 감지.
     """
     if not file.filename or not file.filename.endswith(".xlsx"):
         raise HTTPException(status_code=400, detail="xlsx 파일만 업로드 가능합니다.")
 
     m = re.match(r"(A\d+)_", file.filename)
     if not m:
-        raise HTTPException(status_code=400, detail="파일명에서 vendor_id를 찾을 수 없습니다. 형식: {vendor_id}_pa_daily_adGroup_...")
+        raise HTTPException(status_code=400, detail="파일명에서 vendor_id를 찾을 수 없습니다. 형식: {vendor_id}_pa_daily_...")
     vendor_id = m.group(1)
 
     vendor_channel_map = _build_vendor_channel_map(db)
@@ -416,13 +443,25 @@ async def upload_coupang_ad_xlsx(
         raise HTTPException(status_code=422, detail=f"XLSX 파일을 열 수 없습니다: {e}")
 
     ws = wb.active
+    headers = [cell.value for cell in ws[1]]
+    col = _detect_xlsx_format(headers)
+    log.info("쿠팡 XLSX 포맷 감지: spend=%s impr=%s clicks=%s orders=%s qty=%s rev=%s",
+             col["spend"], col["impr"], col["clicks"], col["orders"], col["qty"], col["rev"])
+
+    # ad_costs 집계: (date, channel_id, source) → spend
     agg: dict[tuple[date, int, str], Decimal] = {}
+    # coupang_ad_report 집계: (date, sell_type) → metrics
+    report_agg: dict[tuple[date, str], dict] = {}
     skipped = 0
 
     for row in ws.iter_rows(min_row=2, values_only=True):
+        if not row or len(row) <= col["spend"]:
+            skipped += 1
+            continue
+
         date_raw = row[0]
-        sell_type = row[2]
-        spend_raw = row[11]
+        sell_type = str(row[2] or "").strip() if row[2] else None
+        spend_raw = row[col["spend"]]
 
         if not date_raw or not sell_type:
             skipped += 1
@@ -436,49 +475,99 @@ async def upload_coupang_ad_xlsx(
             continue
 
         spend = Decimal(str(spend_raw or 0))
-        if spend <= 0:
-            continue
 
         suffix = _SELL_TYPE_TO_CHANNEL_SUFFIX.get(sell_type)
         if suffix is None:
             skipped += 1
             continue
 
-        if suffix == "ROCKET":
-            channel_id = vendor_channel_map.get(("*", "ROCKET"))
-        else:
-            channel_id = vendor_channel_map.get((vendor_id, suffix))
+        # ── ad_costs 집계 (spend > 0 인 행만) ──
+        if spend > 0:
+            if suffix == "ROCKET":
+                channel_id = vendor_channel_map.get(("*", "ROCKET"))
+            else:
+                channel_id = vendor_channel_map.get((vendor_id, suffix))
 
-        if channel_id is None:
-            skipped += 1
-            continue
+            if channel_id is not None:
+                source = f"coupang_{suffix.lower()}"
+                key = (ad_date, channel_id, source)
+                agg[key] = agg.get(key, Decimal("0")) + spend
 
-        source = f"coupang_{suffix.lower()}"
-        key = (ad_date, channel_id, source)
-        agg[key] = agg.get(key, Decimal("0")) + spend
+        # ── coupang_ad_report 집계 (노출 지표가 있는 포맷만) ──
+        if col["impr"] != -1:
+            def _i(idx: int) -> int:
+                try:
+                    return int(row[idx] or 0) if idx != -1 and idx < len(row) else 0
+                except (TypeError, ValueError):
+                    return 0
 
-    if not agg:
-        raise HTTPException(status_code=422, detail="저장할 광고비 데이터가 없습니다. 파일 형식을 확인하세요.")
+            def _d(idx: int) -> Decimal:
+                try:
+                    return Decimal(str(row[idx] or 0)) if idx != -1 and idx < len(row) else Decimal("0")
+                except Exception:
+                    return Decimal("0")
 
+            rkey = (ad_date, sell_type)
+            if rkey not in report_agg:
+                report_agg[rkey] = {"impr": 0, "clicks": 0, "spend": Decimal("0"),
+                                     "orders": 0, "qty": 0, "rev": Decimal("0")}
+            g = report_agg[rkey]
+            g["impr"]   += _i(col["impr"])
+            g["clicks"] += _i(col["clicks"])
+            g["spend"]  += spend
+            g["orders"] += _i(col["orders"])
+            g["qty"]    += _i(col["qty"])
+            g["rev"]    += _d(col["rev"])
+
+    if not agg and not report_agg:
+        raise HTTPException(status_code=422, detail="저장할 광고 데이터가 없습니다. 파일 형식을 확인하세요.")
+
+    # ad_costs 저장
     for (ad_date, channel_id, source), spend in agg.items():
         _upsert_ad_cost(db, channel_id, ad_date, spend, source)
+
+    # coupang_ad_report 저장
+    if report_agg:
+        from app.models import CoupangAdReport
+        for (ad_date, sell_type), g in report_agg.items():
+            existing = db.query(CoupangAdReport).filter(
+                CoupangAdReport.report_date == ad_date,
+                CoupangAdReport.sell_type == sell_type,
+                CoupangAdReport.vendor_id == vendor_id,
+            ).first()
+            if existing:
+                existing.impressions = g["impr"]
+                existing.clicks = g["clicks"]
+                existing.ad_spend = g["spend"]
+                existing.orders = g["orders"]
+                existing.sales_qty = g["qty"]
+                existing.conversion_revenue = g["rev"]
+            else:
+                db.add(CoupangAdReport(
+                    report_date=ad_date, sell_type=sell_type, vendor_id=vendor_id,
+                    impressions=g["impr"], clicks=g["clicks"], ad_spend=g["spend"],
+                    orders=g["orders"], sales_qty=g["qty"], conversion_revenue=g["rev"],
+                ))
+
     db.commit()
 
-    date_from = min(k[0] for k in agg)
-    date_to = max(k[0] for k in agg)
+    date_from = min((k[0] for k in agg), default=min(k[0] for k in report_agg)) if agg else min(k[0] for k in report_agg)
+    date_to   = max((k[0] for k in agg), default=max(k[0] for k in report_agg)) if agg else max(k[0] for k in report_agg)
     dates = sorted({k[0].isoformat() for k in agg})
     total = int(sum(agg.values()))
     channel_summary: dict[str, int] = {}
     for (_, _, source), spend in agg.items():
         channel_summary[source] = channel_summary.get(source, 0) + int(spend)
 
-    background_tasks.add_task(_recalc_profit_background, date_from, date_to)
-    log.info("쿠팡 광고비 %s 적재 (%s~%s) 총 %d원", vendor_id, date_from, date_to, total)
+    if agg:
+        background_tasks.add_task(_recalc_profit_background, date_from, date_to)
+    log.info("쿠팡 광고 적재 %s (%s~%s) 광고비=%d원 리포트=%d건", vendor_id, date_from, date_to, total, len(report_agg))
     return {
         "vendor_id": vendor_id,
         "inserted": len(agg),
         "skipped": skipped,
         "total_spend": total,
+        "report_rows": len(report_agg),
         "date_from": date_from.isoformat(),
         "date_to": date_to.isoformat(),
         "dates": dates,

@@ -1,8 +1,7 @@
-// AdReport.tsx — 쿠팡 광고 리포트 (XLSX 업로드 + 기간별 성과 표)
-import { useState, useEffect, useRef } from "react";
+// AdReport.tsx — 쿠팡 광고 리포트 (기간별 성과 표)
+import { useState, useEffect } from "react";
 import {
   fetchCoupangAdReport,
-  uploadCoupangAdReport,
   type CoupangAdReportRow,
   type CoupangAdReportResponse,
 } from "../lib/api";
@@ -49,10 +48,6 @@ export default function AdReport() {
   const [report, setReport] = useState<CoupangAdReportResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [uploadMsg, setUploadMsg] = useState<string | null>(null);
-  const [uploading, setUploading] = useState(false);
-  const fileRef = useRef<HTMLInputElement>(null);
-
   async function load() {
     setLoading(true);
     setError(null);
@@ -67,23 +62,6 @@ export default function AdReport() {
   }
 
   useEffect(() => { load(); }, []);
-
-  async function handleUpload(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setUploading(true);
-    setUploadMsg(null);
-    try {
-      const res = await uploadCoupangAdReport(file);
-      setUploadMsg(`업로드 완료: ${res.upserted}건 저장 (${res.date_from} ~ ${res.date_to})`);
-      load();
-    } catch (e: any) {
-      setUploadMsg(`업로드 실패: ${e.message}`);
-    } finally {
-      setUploading(false);
-      if (fileRef.current) fileRef.current.value = "";
-    }
-  }
 
   function ReportRow({ row, isTotal }: { row: CoupangAdReportRow; isTotal?: boolean }) {
     return (
@@ -110,29 +88,8 @@ export default function AdReport() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-bold text-gray-900">쿠팡 광고 리포트</h1>
-        <div className="flex items-center gap-2">
-          <input
-            ref={fileRef}
-            type="file"
-            accept=".xlsx"
-            className="hidden"
-            onChange={handleUpload}
-          />
-          <button
-            onClick={() => fileRef.current?.click()}
-            disabled={uploading}
-            className="px-3 py-1.5 text-sm bg-orange-500 text-white rounded-md hover:bg-orange-600 disabled:opacity-50"
-          >
-            {uploading ? "업로드 중..." : "XLSX 업로드"}
-          </button>
-        </div>
+        <p className="text-xs text-gray-400">설정 페이지에서 XLSX 업로드 시 자동 저장됩니다.</p>
       </div>
-
-      {uploadMsg && (
-        <div className={`text-sm px-4 py-2 rounded-md ${uploadMsg.includes("실패") ? "bg-red-50 text-red-700" : "bg-green-50 text-green-700"}`}>
-          {uploadMsg}
-        </div>
-      )}
 
       {/* 기간 필터 */}
       <div className="bg-white rounded-lg border border-gray-200 p-4 flex items-center gap-4">
@@ -182,7 +139,7 @@ export default function AdReport() {
           <div className="p-8 text-center text-gray-400 text-sm">
             해당 기간에 광고 데이터가 없습니다.
             <br />
-            <span className="text-xs text-gray-400">쿠팡 광고 관리 → 리포트 → 키워드 리포트(pa_daily_keyword) XLSX를 업로드하세요.</span>
+            <span className="text-xs text-gray-400">설정 → 쿠팡 광고비 업로드에서 pa_daily_keyword XLSX를 업로드하세요.</span>
           </div>
         ) : (
           <div className="overflow-x-auto">
