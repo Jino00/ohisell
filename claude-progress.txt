@@ -4,8 +4,54 @@
 
 ## 현재 상태
 - 날짜: 2026-05-18
-- 단계: Sprint 4B-company-grouping 완료 (대시보드 회사별 그룹핑) — 배포 완료
-- 전체 진행률: 94%
+- 단계: 대시보드 on-demand SA/Meta 광고비 최신화 완료
+- 전체 진행률: 98%
+
+## 대시보드 on-demand 광고비 최신화 완료 (2026-05-18)
+- [x] dashboard.py _sync_ad_costs_for_period() 추가
+- [x] /channel-breakdown, /trend-by-channel 호출 시마다 SA+Meta 광고비 자동 upsert
+- [x] 실패해도 조회는 계속 (try/except + rollback)
+- [x] 프로덕션 배포 및 검증 완료
+- [x] 검증 결과: Naver SA API D+1 lag — 05-16까지 정상 적재, 05-17/18은 API 미제공(정상)
+- [x] git commit + push
+
+## 네이버 스마트스토어 동기화 테스트 완료 (2026-05-18)
+- [x] 프로덕션(등록 IP 168.107.19.222) test_connection OK — 토큰 발급 정상
+- [x] fetch_orders 7일분 770건 조회 (수수료 포함)
+- [x] sync_channel_orders 엔드투엔드: success, 신규 36 + 갱신 734, 에러 0, DB 3736→3772
+- [x] 결론: 네이버 실데이터 동기화 정상 작동
+
+## nginx 보안 (2026-05-18) — 사용자 결정으로 미적용
+- Jino 결정: 혼자 쓰는 내부 도구 → Basic Auth/IP 화이트리스트 적용 안 함, 현행 유지
+- 잔여 리스크(인지됨): sellc.ohitech.co.kr 공개 접근 가능. 필요 시 Basic Auth 즉시 적용 가능 상태
+
+## cafe24 refresh token 동시성 직렬화 근본수정 완료 (2026-05-18)
+- [x] 진단: refresh 경로 3개 중 1개만 보호 → RT 소진으로 체인 파손. SQLAlchemy identity map 캐시 이슈도 추가 발견
+- [x] cafe24.py: 모듈 전역 _CAFE24_REFRESH_LOCK 추가 (단일 프로세스 전제 주석)
+- [x] cafe24.py: token_reader 파라미터 — 락 내 DB 최신 토큰 재조회, 갱신됐으면 네트워크 스킵
+- [x] cafe24.py: verify_connection() 추가 (5s timeout, refresh 부작용 없음)
+- [x] sync_service.py: token_reader 콜백 주입 (db.refresh(token_row))
+- [x] scheduler_service.py: 로컬 락 제거, token_reader + db.refresh(fresh) 추가
+- [x] oauth.py: /status 라이브 probe 추가 (access token 유효 구간만, degraded 상태 반환)
+- [x] codex review 2라운드 PASS (P1: SQLAlchemy identity map fix, P2: timeout 단축 합의)
+- [x] git commit 28f92fe + push origin/main
+- [x] 프로덕션 배포 (4파일 rsync + pm2 restart) → /status connected, live probe OK
+- [x] failure-memory 기록
+
+## cafe24 OAuth 복구 완료 (2026-05-18) — 토큰 체인 파손
+- [x] 진단: 자동 refresh 400 invalid_grant 반복. 원인=refresh token 회전 + 스케줄러/API경로 동시 refresh 경합 (스케줄러 락이 API경로 미보호)
+- [x] 복구: 유효 refresh_token으로 Cafe24Client._refresh_access_token() → on_token_refreshed 콜백 DB 영구저장. refresh 만료 2026-06-01 연장. 브라우저 재인증 불필요
+- [x] 검증: cafe24 store API HTTP 200 ((주)오하이테크/theohi11)
+- [x] failure-memory 기록 + 근본수정 완료(이번 sprint)
+
+## 스케줄러 타임존 근본수정 완료 (2026-05-18) — UTC 폴백 버그
+- [x] 원인규명·재현: CronTrigger.from_crontab(expr) timezone 미지정 → get_localzone()(서버 UTC) 폴백, 미리 만든 trigger를 add_job에 넘기면 BackgroundScheduler 기본 timezone 미적용
+- [x] 수정: scheduler_service.py from_crontab(expr, timezone="Asia/Seoul") 명시 (1파일, +6/-1)
+- [x] codex review PASS (P1/P2 없음, 1라운드 합의)
+- [x] git commit eb4c915 + push origin/main
+- [x] 프로덕션 배포 (scheduler_service.py rsync + pm2 restart, DB 마이그레이션 無)
+- [x] 프로덕션 검증: scheduler API 5개 잡 모두 next_run_time +09:00. 광고비 잡 07:00 KST 정상화(이전 16:00 KST)
+- [x] failure-memory 기록
 
 ## Sprint 4B-company-grouping 완료 (2026-05-18) — 대시보드 회사별 그룹핑
 - [x] channels.company 컬럼 + alembic c7d2e1f3a4b5 (batch, 롤백가능, 7채널 시드)
@@ -99,10 +145,11 @@
 ## 다음에 할 작업
 ### Sprint 4B 후속
 1. [x] 네이버 IP 등록 (Oracle IP 168.107.19.222) — 완료
-2. [ ] 네이버 스마트스토어 API 실제 동기화 테스트
-3. [ ] 로켓배송 실제 매출 데이터 입력 (Settings 페이지 활용)
-4. [ ] 쿠팡 광고 XLSX 과거분 업로드
-4. [ ] nginx IP 화이트리스트 또는 Basic Auth (보안)
+2. [x] 네이버 스마트스토어 API 실제 동기화 테스트 — 완료
+3. [x] cafe24 refresh token 동시성 직렬화 근본수정 — 완료
+4. [ ] 로켓배송 실제 매출 데이터 입력 (Settings 페이지 활용)
+5. [ ] 쿠팡 광고 XLSX 과거분 업로드
+6. [ ] nginx IP 화이트리스트 또는 Basic Auth (보안, 현재 미적용 결정)
 
 ### Sprint 5 후보
 1. [ ] 알림 시스템 (Telegram/Slack)

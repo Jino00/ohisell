@@ -1,14 +1,19 @@
 # routers/dashboard.py — 대시보드 API (트렌드, KPI, 채널/상품 분석)
 from __future__ import annotations
 
+import logging
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.database import get_ad_db, get_db
+from app.routers.ad_costs import _extract_meta_keyword, _extract_naver_sa_keyword, _upsert_ad_cost
+
+log = logging.getLogger(__name__)
 from app.schemas import (
     DashboardKPI,
     GroupedSummaryRow,
@@ -43,6 +48,45 @@ def _default_dates(
         else:
             date_from = date_to - timedelta(days=30)
     return date_from, date_to
+
+
+def _sync_ad_costs_for_period(db: Session, date_from: date, date_to: date) -> None:
+    """대시보드 조회 시 SA/Meta 광고비 최신화 (upsert — 실패해도 조회는 계속)"""
+    # 네이버 SA
+    try:
+        from app.services.naver_sa_ad_fetcher import fetch_campaign_daily_spend as _fetch_sa
+        naver_row = db.execute(text("SELECT id FROM channels WHERE code='NAVER' LIMIT 1")).fetchone()
+        if naver_row:
+            agg: dict[tuple[str, str], Decimal] = {}
+            for c in _fetch_sa(date_from, date_to):
+                kw = _extract_naver_sa_keyword(c["campaign_name"])
+                key = (c["date"], f"naver_sa:{kw}")
+                agg[key] = agg.get(key, Decimal("0")) + c["spend"]
+            for (dt_str, source), spend in agg.items():
+                _upsert_ad_cost(db, naver_row[0], date.fromisoformat(dt_str), spend, source)
+            db.commit()
+            log.info("네이버 SA 광고비 최신화 완료 (%s ~ %s, %d건)", date_from, date_to, len(agg))
+    except Exception as e:
+        log.warning("네이버 SA 광고비 최신화 실패 (조회는 계속): %s", e)
+        db.rollback()
+
+    # Meta
+    try:
+        from app.services.meta_ad_fetcher import fetch_campaign_daily_spend as _fetch_meta
+        cafe24_row = db.execute(text("SELECT id FROM channels WHERE code='CAFE24' LIMIT 1")).fetchone()
+        if cafe24_row:
+            agg2: dict[tuple[str, str], Decimal] = {}
+            for c in _fetch_meta(date_from, date_to):
+                kw = _extract_meta_keyword(c["campaign_name"])
+                key = (c["date"], f"meta:{kw}")
+                agg2[key] = agg2.get(key, Decimal("0")) + c["spend"]
+            for (dt_str, source), spend in agg2.items():
+                _upsert_ad_cost(db, cafe24_row[0], date.fromisoformat(dt_str), spend, source)
+            db.commit()
+            log.info("Meta 광고비 최신화 완료 (%s ~ %s, %d건)", date_from, date_to, len(agg2))
+    except Exception as e:
+        log.warning("Meta 광고비 최신화 실패 (조회는 계속): %s", e)
+        db.rollback()
 
 
 def _get_ad_session(ad_db_gen=Depends(get_ad_db)):
@@ -189,6 +233,7 @@ def channel_breakdown(
 ):
     """회사 > leaf 계층 그룹 요약 (전체/회사소계/leaf)"""
     df, dt = _default_dates(date_from, date_to, "daily")
+    _sync_ad_costs_for_period(db, df, dt)
     ad_db = _resolve_ad_db()
 
     try:
@@ -210,6 +255,7 @@ def trend_by_channel(
 ):
     """회사 leaf 그룹 단위 일자별 매출/광고비/순이익 추이"""
     df, dt = _default_dates(date_from, date_to, "daily")
+    _sync_ad_costs_for_period(db, df, dt)
     ad_db = _resolve_ad_db()
 
     try:
