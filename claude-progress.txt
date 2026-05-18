@@ -4,8 +4,20 @@
 
 ## 현재 상태
 - 날짜: 2026-05-18
-- 단계: 대시보드 on-demand SA/Meta 광고비 최신화 완료
-- 전체 진행률: 98%
+- 단계: 쿠팡 광고 리포트 완료 (XLSX 통합 업로드)
+- 전체 진행률: 99%
+
+## Sprint 4B-coupang-ad-report 완료 (2026-05-18) — 쿠팡 광고 리포트
+- [x] CoupangAdReport 모델 + alembic 마이그레이션 (79c5bf56a7eb)
+- [x] coupang_report.py: GET /api/ads/coupang/report (기간별 sell_type 집계 + 전체합계, CTR/CVR/ROAS)
+- [x] ad_costs.py: _detect_xlsx_format() 헤더 자동 감지 (adGroup/keyword 포맷 모두 처리)
+- [x] ad_costs.py: XLSX 업로드 시 ad_costs + coupang_ad_report 동시 upsert
+- [x] AdReport.tsx: 기간 선택 + 성과 표 (판매방식별 + 전체합계)
+- [x] AdReport.tsx: 별도 업로드 버튼 제거 (설정 페이지 업로드로 통합)
+- [x] api.ts: CoupangAdReportRow/Response 타입 + fetchCoupangAdReport()
+- [x] 프로덕션 배포 + alembic upgrade head + pm2 restart
+- [x] API 검증: /api/ads/coupang/report 200 OK
+- [x] git commit 9832aea
 
 ## 대시보드 on-demand 광고비 최신화 완료 (2026-05-18)
 - [x] dashboard.py _sync_ad_costs_for_period() 추가
