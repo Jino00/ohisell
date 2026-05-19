@@ -482,7 +482,7 @@ def calculate_channel_summary(
         if cid not in by_channel:
             by_channel[cid] = {
                 "revenue": ZERO, "cost": ZERO, "commission": ZERO,
-                "ad_spend": ZERO, "shipping": ZERO, "order_count": 0,
+                "ad_spend": ZERO, "shipping": ZERO, "vat": ZERO, "order_count": 0,
             }
 
         b = by_channel[cid]
@@ -495,7 +495,8 @@ def calculate_channel_summary(
                 deliv = ZERO
             else:
                 seen_deliv.add(skey)
-        b["revenue"] += product_rev + deliv
+        revenue = product_rev + deliv
+        b["revenue"] += revenue
         b["order_count"] += 1
 
         if o.product_id and o.product_id in product_map:
@@ -507,6 +508,8 @@ def calculate_channel_summary(
         if skey not in seen_shipments:
             seen_shipments.add(skey)
             b["shipping"] += HANJIN_PER_SHIPMENT
+        # VAT — 표시 매출(상품+배송) 기준
+        b["vat"] += revenue * Decimal("10") / Decimal("110")
 
     # 광고비를 option_id → 주문의 채널로 직접 매핑 (bleeding 방지)
     # 1) option_id별 광고비 합산
@@ -551,7 +554,7 @@ def calculate_channel_summary(
     result = []
     for cid, b in by_channel.items():
         ch = channel_map.get(cid)
-        net = b["revenue"] - b["cost"] - b["commission"] - b["ad_spend"] - b["shipping"]
+        net = b["revenue"] - b["cost"] - b["commission"] - b["ad_spend"] - b["shipping"] - b["vat"]
         rate_pct = (net / b["revenue"] * 100) if b["revenue"] > 0 else ZERO
 
         result.append({
@@ -657,13 +660,15 @@ def calculate_product_profit(
         if pid not in by_product:
             by_product[pid] = {
                 "revenue": ZERO, "cost": ZERO, "commission": ZERO,
-                "ad_spend": ZERO, "shipping": ZERO, "quantity": 0,
+                "ad_spend": ZERO, "shipping": ZERO, "vat": ZERO, "quantity": 0,
             }
 
         b = by_product[pid]
         product_rev = o.selling_price * o.quantity
         b["revenue"] += product_rev  # 고객배송수입은 배송단위 배분으로 추가
         b["quantity"] += o.quantity
+        # VAT — 상품매출 기준 누적 (배송수입 VAT는 아래 alloc 단계에서 추가)
+        b["vat"] += product_rev * Decimal("10") / Decimal("110")
 
         if pid in product_map:
             b["cost"] += product_map[pid].cost_price * o.quantity
@@ -706,6 +711,8 @@ def calculate_product_profit(
         _alloc_to_lines(_g["lines"], HANJIN_PER_SHIPMENT, "shipping")
         if _g["deliv"]:
             _alloc_to_lines(_g["lines"], _g["deliv"], "revenue")
+            # 배송수입에 대한 VAT도 라인 비례 배분
+            _alloc_to_lines(_g["lines"], _g["deliv"] * Decimal("10") / Decimal("110"), "vat")
 
     # option_id → product_id 매핑으로 광고비 직접 할당 (ad_data.db 기반 — 현재 비활성)
     option_to_product: dict[str, int] = {}
@@ -792,7 +799,7 @@ def calculate_product_profit(
         p = product_map.get(pid)
         if not p:
             continue
-        net = b["revenue"] - b["cost"] - b["commission"] - b["ad_spend"] - b["shipping"]
+        net = b["revenue"] - b["cost"] - b["commission"] - b["ad_spend"] - b["shipping"] - b["vat"]
         rate_pct = (net / b["revenue"] * 100) if b["revenue"] > 0 else ZERO
 
         result.append({
