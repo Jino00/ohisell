@@ -1,6 +1,7 @@
 # profit_calculator.py — 핵심 이익률 계산 엔진
 from __future__ import annotations
 
+import json
 import logging
 from datetime import date
 from decimal import Decimal
@@ -160,6 +161,66 @@ def _line_commission(ch: Channel | None, o: Order, revenue: Decimal) -> Decimal:
     return revenue * rate / Decimal("100")
 
 
+# 한진택배 주문(배송) 1건당 판매자 지급액 — 전 채널 동일, 고객 결제 여부 무관
+HANJIN_PER_SHIPMENT = Decimal("1900")
+
+
+def _raw(o: Order) -> dict:
+    """Order.raw_data(Text JSON) → dict (실패 시 빈 dict)."""
+    rd = o.raw_data
+    if isinstance(rd, dict):
+        return rd
+    if isinstance(rd, str) and rd:
+        try:
+            parsed = json.loads(rd)
+            return parsed if isinstance(parsed, dict) else {}
+        except (ValueError, TypeError):
+            return {}
+    return {}
+
+
+def _shipment_key(ch: Channel | None, o: Order) -> tuple:
+    """물리 배송 1건 식별 — 한진 1,900 부과 단위 & 쿠팡 배송수입 dedup 단위.
+
+    NAVER: productOrder.packageNumber (1주문이 여러 패키지 가능 → 패키지=실배송)
+    COUPANG*: shipmentBoxId (배송박스 = 물리 배송)
+    그 외(CAFE24 등): order_number (주문=배송)
+    키가 비면 행 고유 sentinel — 서로 다른 주문이 한 배송으로 합쳐지는 것 방지.
+    """
+    code = (ch.code if ch else "") or ""
+    raw = _raw(o)
+    if code == "NAVER":
+        po = raw.get("productOrder")
+        sid = po.get("packageNumber") if isinstance(po, dict) else None
+    elif code.startswith("COUPANG"):
+        sid = raw.get("shipmentBoxId")
+    else:
+        sid = o.order_number
+    if sid in (None, "", 0, "0"):
+        sid = f"__row_{o.id}"  # 고유 fallback (합쳐짐 방지)
+    return (o.channel_id, str(sid))
+
+
+def _delivery_income(ch: Channel | None, o: Order) -> Decimal:
+    """고객이 결제한 배송비 = 매출 가산분 (수수료 미부과). 라인 단위 원본값.
+
+    NAVER deliveryFeeAmount: productOrder(패키지)별로 저장 → 라인 합 = 주문 총액 (정확).
+    COUPANG shippingPrice: shipment 단위 값이 박스 내 모든 라인에 복사돼 있음
+      → 호출부에서 _shipment_key로 배송 1회만 가산 (라인 합산 시 중복).
+    CAFE24/기타: 고객 무료배송이라 수입 0.
+    """
+    if not ch:
+        return ZERO
+    code = ch.code or ""
+    if code == "NAVER" or code.startswith("COUPANG"):
+        return o.shipping_cost or ZERO
+    return ZERO
+
+
+def _is_coupang(ch: Channel | None) -> bool:
+    return bool(ch and (ch.code or "").startswith("COUPANG"))
+
+
 # ──────────────────────────────────────────────
 # 내부 헬퍼
 # ──────────────────────────────────────────────
@@ -277,6 +338,8 @@ def calculate_daily_trend(
     # 날짜별 집계
     daily: dict[str, dict] = {}
     manual_revenue_by_date: dict[str, Decimal] = {}  # 순이익 제외용 추적
+    seen_shipments: set[tuple] = set()  # 배송(packageNumber/박스)당 1,900 1회
+    seen_deliv: set[tuple] = set()      # 쿠팡 배송수입 박스당 1회 (라인 복사 dedup)
     for o in orders:
         ch = channel_map.get(o.channel_id)
         if ch and ch.channel_type == "consignment":
@@ -297,7 +360,16 @@ def calculate_daily_trend(
             }
 
         bucket = daily[d]
-        revenue = o.selling_price * o.quantity
+        skey = _shipment_key(ch, o)
+        product_rev = o.selling_price * o.quantity
+        # 고객이 낸 배송비 → 매출 가산. 쿠팡은 박스값이 라인마다 복사돼 배송당 1회만.
+        deliv = _delivery_income(ch, o)
+        if deliv and _is_coupang(ch):
+            if skey in seen_deliv:
+                deliv = ZERO
+            else:
+                seen_deliv.add(skey)
+        revenue = product_rev + deliv
         bucket["revenue"] += revenue
         bucket["order_count"] += 1
 
@@ -305,14 +377,15 @@ def calculate_daily_trend(
         if o.product_id and o.product_id in product_map:
             bucket["cost"] += product_map[o.product_id].cost_price * o.quantity
 
-        # 수수료 (cafe24=산출액, 그 외=정률)
-        bucket["commission"] += _line_commission(ch, o, revenue)
+        # 수수료 — 상품매출 기준만 (배송비엔 수수료 미부과)
+        bucket["commission"] += _line_commission(ch, o, product_rev)
 
-        # 배송비
-        if o.shipping_cost:
-            bucket["shipping"] += o.shipping_cost
+        # 판매자 배송비 — 한진 1,900/물리배송(packageNumber·박스). 배송당 1회만.
+        if skey not in seen_shipments:
+            seen_shipments.add(skey)
+            bucket["shipping"] += HANJIN_PER_SHIPMENT
 
-        # VAT
+        # VAT — 표시 매출(상품+배송) 기준
         bucket["vat"] += revenue * Decimal("10") / Decimal("110")
 
     # 광고비 합산 (option_id 기반 — ad_data.db 연결 시 사용, 현재 비활성)
@@ -396,6 +469,8 @@ def calculate_channel_summary(
 
     # 채널별 집계
     by_channel: dict[int, dict] = {}
+    seen_shipments: set[tuple] = set()  # 배송(packageNumber/박스)당 1,900 1회
+    seen_deliv: set[tuple] = set()      # 쿠팡 배송수입 박스당 1회 (라인 복사 dedup)
     for o in orders:
         ch = channel_map.get(o.channel_id)
         if ch and ch.channel_type == "consignment":
@@ -411,17 +486,27 @@ def calculate_channel_summary(
             }
 
         b = by_channel[cid]
-        revenue = o.selling_price * o.quantity
-        b["revenue"] += revenue
+        skey = _shipment_key(ch, o)
+        product_rev = o.selling_price * o.quantity
+        # 고객이 낸 배송비 → 매출 가산. 쿠팡은 박스값이 라인마다 복사돼 배송당 1회만.
+        deliv = _delivery_income(ch, o)
+        if deliv and _is_coupang(ch):
+            if skey in seen_deliv:
+                deliv = ZERO
+            else:
+                seen_deliv.add(skey)
+        b["revenue"] += product_rev + deliv
         b["order_count"] += 1
 
         if o.product_id and o.product_id in product_map:
             b["cost"] += product_map[o.product_id].cost_price * o.quantity
 
-        b["commission"] += _line_commission(ch, o, revenue)
-        # 배송비는 cafe24만 channel_summary에 반영 (기존 비-cafe24는 미포함 → 회귀 방지)
-        if ch and ch.code == "CAFE24" and o.shipping_cost:
-            b["shipping"] += o.shipping_cost
+        # 수수료 — 상품매출 기준만 (배송비엔 수수료 미부과)
+        b["commission"] += _line_commission(ch, o, product_rev)
+        # 판매자 배송비 — 한진 1,900/물리배송(packageNumber·박스). 배송당 1회만.
+        if skey not in seen_shipments:
+            seen_shipments.add(skey)
+            b["shipping"] += HANJIN_PER_SHIPMENT
 
     # 광고비를 option_id → 주문의 채널로 직접 매핑 (bleeding 방지)
     # 1) option_id별 광고비 합산
@@ -558,8 +643,9 @@ def calculate_product_profit(
     for (oid, _), spend in ad_lookup.items():
         ad_by_option[oid] = ad_by_option.get(oid, ZERO) + spend
 
-    # 상품별 집계
+    # 상품별 집계 (배송비·고객배송수입은 배송 단위라 아래에서 라인 비례 배분)
     by_product: dict[int, dict] = {}
+    ship_groups: dict[tuple, dict] = {}
     for o in orders:
         ch = channel_map.get(o.channel_id)
         if ch and ch.channel_type == "consignment":
@@ -575,19 +661,51 @@ def calculate_product_profit(
             }
 
         b = by_product[pid]
-        revenue = o.selling_price * o.quantity
-        b["revenue"] += revenue
+        product_rev = o.selling_price * o.quantity
+        b["revenue"] += product_rev  # 고객배송수입은 배송단위 배분으로 추가
         b["quantity"] += o.quantity
 
         if pid in product_map:
             b["cost"] += product_map[pid].cost_price * o.quantity
 
-        b["commission"] += _line_commission(ch, o, revenue)
+        # 수수료 — 상품매출 기준만 (배송비엔 수수료 미부과)
+        b["commission"] += _line_commission(ch, o, product_rev)
 
-        if o.shipping_cost:
-            b["shipping"] += o.shipping_cost
+        # 배송 그룹 — 한진 1,900 & 고객배송수입을 라인 비례 배분
+        skey = _shipment_key(ch, o)
+        g = ship_groups.setdefault(skey, {"lines": [], "deliv": ZERO})
+        g["lines"].append((pid, product_rev))
+        dval = _delivery_income(ch, o)
+        if dval:
+            if _is_coupang(ch):
+                if g["deliv"] == ZERO:  # 박스값 라인 복사 → 최초 1회만 (first-wins)
+                    g["deliv"] = dval
+            else:
+                g["deliv"] += dval  # NAVER: 패키지별 라인 합 = 배송 총액
 
         # 광고비는 아래에서 option_id → product_id 매핑으로 일괄 할당
+
+    # 배송 1건당 한진 1,900 + 고객배송수입을 그룹 내 라인 매출 비례 배분 (합 보존)
+    def _alloc_to_lines(_lines: list, _amount: Decimal, _field: str) -> None:
+        _total = sum((rev for _, rev in _lines), ZERO)
+        _n = len(_lines)
+        _acc = ZERO
+        for _i, (_pid, _rev) in enumerate(_lines):
+            if _i == _n - 1:
+                _share = _amount - _acc  # 잔여 — 합 = _amount 보장
+            elif _total > 0:
+                _share = (_amount * _rev / _total).quantize(Decimal("1"))
+                _acc += _share
+            else:
+                _share = (_amount / _n).quantize(Decimal("1"))
+                _acc += _share
+            if _pid in by_product:
+                by_product[_pid][_field] += _share
+
+    for _g in ship_groups.values():
+        _alloc_to_lines(_g["lines"], HANJIN_PER_SHIPMENT, "shipping")
+        if _g["deliv"]:
+            _alloc_to_lines(_g["lines"], _g["deliv"], "revenue")
 
     # option_id → product_id 매핑으로 광고비 직접 할당 (ad_data.db 기반 — 현재 비활성)
     option_to_product: dict[str, int] = {}

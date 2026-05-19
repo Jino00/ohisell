@@ -1,78 +1,66 @@
-# PLAN — 로켓배송 매출 수동 입력
+# PLAN — 배송비 회계 재설계 (고객결제 vs 판매자부담 분리)
 
-> Sprint: 4B-rocket-manual-revenue
-> 작성: 2026-05-17 (Opus 계획)
-> 목적: 쿠팡 로켓배송(위탁) 채널의 일별 전체 매출을 수동 입력하여 대시보드에 반영
+> Sprint: 4B-shipping-accounting
+> 작성: 2026-05-19 (Opus 계획)
+> 목적: 채널마다 의미가 뒤섞인 `orders.shipping_cost`를 올바른 회계 모델로 통일
 
 ## 1. 배경 / Why
 
-- 로켓배송은 위탁판매라 API로 주문을 못 가져옴 (현재 주문 0건)
-- 쿠팡 광고센터에 매출 엑셀 다운로드 메뉴 없음 → 일별 화면 숫자를 수동 입력해야 함
-- 광고비는 이미 XLSX 업로드(AdCost)로 자동 적재 중 → **추가로 필요한 건 "전체 매출액" 1개뿐**
-- 확정 규칙: 로켓배송은 **순이익 계산 제외, 매출만 표시** (원가/수수료 데이터 없음)
+- 진단 결과 `orders.shipping_cost` 컬럼이 채널별 의미가 다름 (설계 결함):
+  - CAFE24 = `per_order_shipping("CAFE24")` 1,900 고정 (판매자 실비용, 고객 무료배송)
+  - NAVER = `deliveryFeeAmount` 선결제분 (고객이 낸 배송비, pass-through)
+  - COUPANG = `shippingPrice` (대부분 고객 부담)
+- `calculate_daily_trend`/`product_profit`는 전 채널 `o.shipping_cost`를 비용 차감
+  → NAVER/쿠팡은 고객이 낸 돈을 판매자 비용처럼 차감 (순이익 과소)
+- `calculate_channel_summary`는 CAFE24만 차감 → 4개 화면 순이익 불일치
+  (어제 NAVER 기준 92,500원 / 5월 누적 1,510,000원 차이)
+- NAVER 무료배송분은 실제 판매자가 한진택배비 부담하는데 데이터 없어 누락
 
-## 2. 확정 스펙
+## 2. 확정 모델 (Jino 결정)
 
-| 항목 | 내용 |
-|------|------|
-| 입력 | 날짜 + 전체 매출액 (1필드) |
-| 저장 | 신규 `manual_revenue` 테이블, (channel_id, revenue_date) 유니크 → 재입력 시 덮어쓰기 |
-| 표시 | 대시보드 매출에 합산, 광고비는 기존 AdCost대로, 순이익 "—" |
-| VAT | 미차감, 입력값 그대로 표시 |
-| UI | Settings 페이지에 입력 폼 + 입력 내역 표(수정/삭제) |
+- **매출 = 상품매출 + 고객이 낸 배송비** (NAVER 선결제분 / 쿠팡 shippingPrice)
+- **비용 += 1,900원 / 배송(주문 1건)**, 전 채널 동일 (한진택배 지급액, 항상 발생)
+- **수수료는 상품매출 기준만** — 배송비(고객결제분·1,900)에는 수수료 미부과
+- VAT: 표시 매출(상품+배송) 기준 10/110 유지 (가정 — Jino 미정 시 현행 공식 유지,
+  한국 부가세상 배송비도 과세 대상이므로 합리적 기본값. 정정 가능)
+- 1배송 = 주문번호 1건. 멀티라인 주문은 1,900을 1회만 계상 (NAVER 5월 152행/143주문 검증)
 
-## 3. 아키텍처 (Agent / Harness / SA)
+## 3. 설계 — 엔진 단독 변경 (DB 마이그레이션 無, 되돌리기 쉬움)
 
-```
-Agent: 로켓배송 매출 관리 (Settings 페이지 메뉴)
-│
-├── Harness H1 — 매출 입력/조회 흐름 (Router → SA)
-│     ├── SA-1 upsert_manual_revenue(db, channel_id, date, amount, memo)  [쓰기·멱등]
-│     ├── SA-2 list_manual_revenue(db, channel_id, from, to)              [읽기·목록]
-│     └── SA-3 delete_manual_revenue(db, channel_id, date)                [삭제]
-│
-└── Harness H2 — 대시보드 집계 병합 (기존 trend/breakdown 확장)
-      ├── SA-4 get_daily_manual_revenue(db, from, to, channel_id=None)    [읽기·일별 집계]
-      └── 기존 calculate_daily_trend / calculate_channel_summary
-            → H2가 SA-4 출력을 Order 기반 포인트에 "매출-only 라인"으로 주입
-              (revenue += 입력값, cost/commission/vat/net_profit 불변)
-```
+`o.shipping_cost`는 그대로 두고, `profit_calculator.py`에서 채널별로 해석:
 
-원칙 6 준수: SA는 서로 모름. H2(profit_calculator)가 SA-4 출력을 기존 집계에 주입하는 허브.
+| 채널 | delivery_income (매출 가산) | 판매자 배송비 (비용) |
+|------|------------------------------|----------------------|
+| NAVER | `o.shipping_cost` (선결제분, 무료=0) | 1,900 / 주문 |
+| COUPANG_* (위탁 제외) | `o.shipping_cost` (shippingPrice) | 1,900 / 주문 |
+| CAFE24 | 0 (고객 무료배송) | 1,900 / 주문 |
+| 기타 | 0 | 1,900 / 주문 |
 
-## 4. 구현 단위 (Sub-Agent 먼저 → Harness → Agent)
+- 수수료: `_line_commission`에 **상품매출만** 전달 (현행대로 — delivery_income 미포함)
+  → NAVER는 API commission_amount라 자동 만족, 정률 채널도 상품매출 기준 유지
+- net = (상품매출 + delivery_income) − 원가 − 수수료 − (1,900×배송) − 광고비 − VAT
 
-### Phase 1 — DB / Model
-- `models.py`: `ManualRevenue` 클래스 추가 (channel_id FK, revenue_date, gross_revenue, memo, created_at, updated_at, Unique(channel_id, revenue_date))
-- alembic 신규 마이그레이션 (down_revision = `a1c24f0b9d31`)
+### 변경 함수 (profit_calculator.py 1파일)
+1. 헬퍼 추가: `_delivery_income(ch, o)`, 상수 `HANJIN_PER_SHIPMENT = 1900`
+2. `calculate_daily_trend` — 라인 루프: revenue += product+delivery, 기존
+   `bucket["shipping"] += o.shipping_cost` 제거 → 주문번호 seen-set으로 1,900/주문 1회
+3. `calculate_channel_summary` — CAFE24-only 조건 제거, 전 채널 1,900/주문(seen-set),
+   revenue에 delivery_income 가산
+4. `calculate_product_profit` — 주문번호 단위 1,900을 라인 매출 비례 배분, delivery 가산
+5. `calculate_channel_daily_trend` — daily_trend 래핑이라 자동 반영 (확인만)
 
-### Phase 2 — SA (services)
-- 신규 `app/services/manual_revenue_service.py`: SA-1/2/3/4 (순수 함수, 단일 책임)
+## 4. 완료 기준
 
-### Phase 3 — Harness 통합
-- `profit_calculator.py`: `calculate_daily_trend` + `calculate_channel_summary`에 SA-4 출력 병합 (매출-only, 순이익 미반영)
+- 4개 화면(`/trend` `/kpi` `/channel-breakdown` `/trend-by-channel`) NAVER 순이익 일치
+- 선결제 주문: 매출에 고객배송비 포함, 비용 1,900/주문, 수수료엔 미포함
+- 무료배송 주문: 매출 가산 0, 비용 1,900/주문
+- 멀티라인 주문 배송비 1회만 계상 (중복 0)
+- CAFE24 회귀 0 (기존 1,900/주문 비용 동일, 매출 불변)
+- `/codex review` PASS (금액 로직 — 원칙 19 필수)
+- 프로덕션 실측: 어제 NAVER 4개 화면 동일 순이익 확인
 
-### Phase 4 — Router (Agent backend)
-- 신규 `app/routers/manual_revenue.py`: `POST` / `GET` / `DELETE`
-- `main.py`에 라우터 등록
+## 5. 범위 밖
 
-### Phase 5 — Frontend (Agent UI)
-- `Settings.tsx`: "로켓배송 매출 입력" 섹션 (날짜+금액 폼, 내역 표, 수정/삭제)
-
-### Phase 6 — 검증
-- 입력 → 대시보드 매출 반영 실측 확인
-- `/codex review` PASS
-
-## 5. 완료 기준
-
-- 날짜+금액 입력 → 저장 → 같은 날 재입력 시 덮어쓰기 동작
-- 대시보드 trend/channel-breakdown에 로켓배송 매출 표시, 순이익 "—"
-- 광고비는 기존 AdCost 그대로 (중복/누락 없음)
-- 입력 내역 수정/삭제 동작
-- codex review PASS
-
-## 6. 범위 밖 (이번 Sprint 제외)
-
-- 이미지/OCR 자동 인식 (수동 입력으로 확정)
-- 로켓배송 원가/수수료 계산 (데이터 없음, 영구 제외)
-- 다른 채널 수동 매출 입력 (테이블은 범용이나 UI는 로켓배송만)
+- DB 스키마 변경 / 재동기화 (엔진 단독 변경으로 회피)
+- 무료배송 한진단가 채널별 차등 (전 채널 1,900 확정)
+- VAT 배송비 분리 과세 (현행 공식 유지, 추후 정정 가능)
