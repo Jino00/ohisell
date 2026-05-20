@@ -156,6 +156,8 @@ class ProfitSummary(BaseModel):
 class TrendPoint(BaseModel):
     date: str
     revenue: str
+    product_revenue: str = "0"  # 제품매출 (selling_price × qty 합)
+    shipping_revenue: str = "0"  # 배송비매출 (고객결제 배송비)
     cost: str
     commission: str
     ad_spend: str
@@ -179,6 +181,8 @@ class GroupedSummaryRow(BaseModel):
     company: Optional[str]
     label: str
     revenue: str
+    product_revenue: str = "0"
+    shipping_revenue: str = "0"
     ad_spend: str
     net_profit: Optional[str]  # 위탁(로켓배송) leaf/회사는 None
     profit_rate: Optional[str]
@@ -190,6 +194,8 @@ class GroupedTrendPoint(BaseModel):
     company: Optional[str]
     date: str
     revenue: str
+    product_revenue: str = "0"
+    shipping_revenue: str = "0"
     ad_spend: str
     net_profit: Optional[str]
 
@@ -199,6 +205,8 @@ class ProductProfitRow(BaseModel):
     product_name: str
     internal_sku: str
     revenue: str
+    product_revenue: str = "0"
+    shipping_revenue: str = "0"
     cost: str
     commission: str
     ad_spend: str
@@ -216,10 +224,11 @@ class SettlementOut(BaseModel):
     settlement_date: str
     settlement_period_start: Optional[str] = None
     settlement_period_end: Optional[str] = None
-    total_amount: str
+    total_amount: str  # 정산총액 (제품정산 + 배송정산)
+    product_amount: str = "0"  # 제품정산 = total_amount - shipping_fee
     commission: str
     net_amount: str
-    shipping_fee: str
+    shipping_fee: str  # 배송정산
     order_count: Optional[int] = None
     source: str
     memo: Optional[str] = None

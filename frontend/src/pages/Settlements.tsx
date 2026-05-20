@@ -242,7 +242,7 @@ export default function Settlements() {
           <table className="w-full">
             <thead className="bg-gray-50">
               <tr>
-                {["정산일", "채널", "정산액", "수수료", "배송비", "순정산", ""].map((h) => (
+                {["정산일", "채널", "제품정산", "배송정산", "정산액", "수수료", "순정산", ""].map((h) => (
                   <th key={h} className="px-4 py-3 text-left text-xs font-medium text-gray-500">{h}</th>
                 ))}
               </tr>
@@ -250,7 +250,7 @@ export default function Settlements() {
             <tbody>
               {Array.from({ length: 5 }).map((_, i) => (
                 <tr key={i} className="border-t">
-                  {Array.from({ length: 7 }).map((_, j) => (
+                  {Array.from({ length: 8 }).map((_, j) => (
                     <td key={j} className="px-4 py-3">
                       <div className="h-4 bg-gray-200 rounded animate-pulse" style={{ width: `${50 + Math.random() * 40}%` }} />
                     </td>
@@ -270,23 +270,29 @@ export default function Settlements() {
               <tr>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500">정산일</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500">채널</th>
+                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500">제품정산</th>
+                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500">배송정산</th>
                 <th className="px-4 py-3 text-right text-xs font-medium text-gray-500">정산액</th>
                 <th className="px-4 py-3 text-right text-xs font-medium text-gray-500">수수료</th>
-                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500">배송비</th>
                 <th className="px-4 py-3 text-right text-xs font-medium text-gray-500">순정산</th>
                 <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 w-16"></th>
               </tr>
             </thead>
             <tbody>
-              {items.map((s) => (
+              {items.map((s) => {
+                const prodAmt = Number(s.product_amount ?? (s.total_amount - s.shipping_fee));
+                return (
                 <tr key={s.id} className="border-t hover:bg-gray-50">
                   <td className="px-4 py-3 text-sm text-gray-600 whitespace-nowrap">
                     {new Date(s.settlement_date).toLocaleDateString("ko-KR")}
                   </td>
                   <td className="px-4 py-3 text-sm text-gray-900">{s.channel_name}</td>
+                  <td className="px-4 py-3 text-sm text-right text-gray-700">{formatKRW(prodAmt)}원</td>
+                  <td className="px-4 py-3 text-sm text-right text-gray-500">
+                    {Number(s.shipping_fee) === 0 ? <span className="text-gray-300">—</span> : `${formatKRW(s.shipping_fee)}원`}
+                  </td>
                   <td className="px-4 py-3 text-sm text-right font-medium">{formatKRW(s.total_amount)}원</td>
                   <td className="px-4 py-3 text-sm text-right text-gray-600">{formatKRW(s.commission)}원</td>
-                  <td className="px-4 py-3 text-sm text-right text-gray-600">{formatKRW(s.shipping_fee)}원</td>
                   <td className={`px-4 py-3 text-sm text-right font-medium ${s.net_amount >= 0 ? "text-green-600" : "text-red-600"}`}>
                     {formatKRW(s.net_amount)}원
                   </td>
@@ -301,7 +307,8 @@ export default function Settlements() {
                     </button>
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
 

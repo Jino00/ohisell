@@ -25,7 +25,17 @@ router = APIRouter(prefix="/api/settlements", tags=["settlements"])
 
 
 def _settlement_to_out(s: Settlement, channel_name: str = "") -> SettlementOut:
-    """Settlement 모델 → SettlementOut 변환"""
+    """Settlement 모델 → SettlementOut 변환.
+
+    product_amount = total_amount - shipping_fee (제품정산 파생).
+    음수 방지 가드: shipping_fee가 total_amount 초과 시 0으로 클램프.
+    """
+    from decimal import Decimal as _D
+    tot = s.total_amount or _D("0")
+    ship = s.shipping_fee or _D("0")
+    prod = tot - ship
+    if prod < _D("0"):
+        prod = _D("0")
     return SettlementOut(
         id=s.id,
         channel_id=s.channel_id,
@@ -33,10 +43,11 @@ def _settlement_to_out(s: Settlement, channel_name: str = "") -> SettlementOut:
         settlement_date=str(s.settlement_date.date()) if hasattr(s.settlement_date, "date") else str(s.settlement_date)[:10],
         settlement_period_start=str(s.settlement_period_start) if s.settlement_period_start else None,
         settlement_period_end=str(s.settlement_period_end) if s.settlement_period_end else None,
-        total_amount=str(s.total_amount),
+        total_amount=str(tot),
+        product_amount=str(prod),
         commission=str(s.commission),
         net_amount=str(s.net_amount),
-        shipping_fee=str(s.shipping_fee),
+        shipping_fee=str(ship),
         order_count=s.order_count,
         source=s.source,
         memo=s.memo,

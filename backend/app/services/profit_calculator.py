@@ -351,6 +351,8 @@ def calculate_daily_trend(
         if d not in daily:
             daily[d] = {
                 "revenue": ZERO,
+                "product_revenue": ZERO,
+                "shipping_revenue": ZERO,
                 "cost": ZERO,
                 "commission": ZERO,
                 "shipping": ZERO,
@@ -370,6 +372,8 @@ def calculate_daily_trend(
             else:
                 seen_deliv.add(skey)
         revenue = product_rev + deliv
+        bucket["product_revenue"] += product_rev
+        bucket["shipping_revenue"] += deliv
         bucket["revenue"] += revenue
         bucket["order_count"] += 1
 
@@ -414,15 +418,18 @@ def calculate_daily_trend(
                 daily[d]["ad_spend"] += spend
 
     # 수동 매출 병합 (로켓배송 등 — 매출-only, 순이익은 미반영)
+    # 수동매출은 제품/배송 분리 불가 → product_revenue로 일괄 처리
     for (mr_ch_id, d), revenue in manual_lookup.items():
         if channel_id is not None and mr_ch_id != channel_id:
             continue
         if d not in daily:
             daily[d] = {
-                "revenue": ZERO, "cost": ZERO, "commission": ZERO,
+                "revenue": ZERO, "product_revenue": ZERO, "shipping_revenue": ZERO,
+                "cost": ZERO, "commission": ZERO,
                 "shipping": ZERO, "ad_spend": ZERO, "vat": ZERO, "order_count": 0,
             }
         daily[d]["revenue"] += revenue
+        daily[d]["product_revenue"] += revenue
         manual_revenue_by_date[d] = manual_revenue_by_date.get(d, ZERO) + revenue
 
     # 정렬 후 반환
@@ -435,6 +442,8 @@ def calculate_daily_trend(
         result.append({
             "date": d,
             "revenue": str(b["revenue"]),
+            "product_revenue": str(b["product_revenue"]),
+            "shipping_revenue": str(b["shipping_revenue"]),
             "cost": str(b["cost"]),
             "commission": str(b["commission"]),
             "ad_spend": str(b["ad_spend"]),
@@ -481,7 +490,8 @@ def calculate_channel_summary(
         cid = o.channel_id
         if cid not in by_channel:
             by_channel[cid] = {
-                "revenue": ZERO, "cost": ZERO, "commission": ZERO,
+                "revenue": ZERO, "product_revenue": ZERO, "shipping_revenue": ZERO,
+                "cost": ZERO, "commission": ZERO,
                 "ad_spend": ZERO, "shipping": ZERO, "vat": ZERO, "order_count": 0,
             }
 
@@ -496,6 +506,8 @@ def calculate_channel_summary(
             else:
                 seen_deliv.add(skey)
         revenue = product_rev + deliv
+        b["product_revenue"] += product_rev
+        b["shipping_revenue"] += deliv
         b["revenue"] += revenue
         b["order_count"] += 1
 
@@ -561,6 +573,8 @@ def calculate_channel_summary(
             "channel_id": cid,
             "channel_name": ch.name if ch else "",
             "revenue": str(b["revenue"]),
+            "product_revenue": str(b["product_revenue"]),
+            "shipping_revenue": str(b["shipping_revenue"]),
             "cost": str(b["cost"]),
             "commission": str(b["commission"]),
             "ad_spend": str(b["ad_spend"]),
@@ -600,6 +614,9 @@ def calculate_channel_summary(
             "channel_id": cid,
             "channel_name": ch.name if ch else "",
             "revenue": str(total_rev),
+            # 수동매출은 제품/배송 분리 불가 → product_revenue로 일괄
+            "product_revenue": str(total_rev),
+            "shipping_revenue": "0",
             "cost": "0",
             "commission": "0",
             "ad_spend": str(ch_ad_spend),
@@ -659,13 +676,15 @@ def calculate_product_profit(
         pid = o.product_id
         if pid not in by_product:
             by_product[pid] = {
-                "revenue": ZERO, "cost": ZERO, "commission": ZERO,
+                "revenue": ZERO, "product_revenue": ZERO, "shipping_revenue": ZERO,
+                "cost": ZERO, "commission": ZERO,
                 "ad_spend": ZERO, "shipping": ZERO, "vat": ZERO, "quantity": 0,
             }
 
         b = by_product[pid]
         product_rev = o.selling_price * o.quantity
-        b["revenue"] += product_rev  # 고객배송수입은 배송단위 배분으로 추가
+        b["product_revenue"] += product_rev
+        b["revenue"] += product_rev  # 고객배송수입은 배송단위 배분으로 아래에서 추가
         b["quantity"] += o.quantity
         # VAT — 상품매출 기준 누적 (배송수입 VAT는 아래 alloc 단계에서 추가)
         b["vat"] += product_rev * Decimal("10") / Decimal("110")
@@ -710,7 +729,9 @@ def calculate_product_profit(
     for _g in ship_groups.values():
         _alloc_to_lines(_g["lines"], HANJIN_PER_SHIPMENT, "shipping")
         if _g["deliv"]:
+            # 고객배송수입을 revenue와 shipping_revenue 양쪽에 동시 누적 (불변식: revenue = product + shipping)
             _alloc_to_lines(_g["lines"], _g["deliv"], "revenue")
+            _alloc_to_lines(_g["lines"], _g["deliv"], "shipping_revenue")
             # 배송수입에 대한 VAT도 라인 비례 배분
             _alloc_to_lines(_g["lines"], _g["deliv"] * Decimal("10") / Decimal("110"), "vat")
 
@@ -807,6 +828,8 @@ def calculate_product_profit(
             "product_name": p.product_name,
             "internal_sku": p.internal_sku,
             "revenue": str(b["revenue"]),
+            "product_revenue": str(b["product_revenue"]),
+            "shipping_revenue": str(b["shipping_revenue"]),
             "cost": str(b["cost"]),
             "commission": str(b["commission"]),
             "ad_spend": str(b["ad_spend"]),
@@ -873,6 +896,8 @@ def calculate_channel_daily_trend(
                 "channel_name": ch.name,
                 "date": d,
                 "revenue": point["revenue"],
+                "product_revenue": point.get("product_revenue", "0"),
+                "shipping_revenue": point.get("shipping_revenue", "0"),
                 "ad_spend": str(ad_spend),
                 "net_profit": None if is_consignment else point["net_profit"],
             })
@@ -888,6 +913,8 @@ def calculate_channel_daily_trend(
                     "channel_name": ch.name,
                     "date": d,
                     "revenue": "0",
+                    "product_revenue": "0",
+                    "shipping_revenue": "0",
                     "ad_spend": str(spend),
                     "net_profit": None,
                 })
@@ -925,7 +952,8 @@ def get_channel_company_map(db: Session) -> dict[int, tuple[str, str, bool]]:
 
 def _agg_block() -> dict:
     return {
-        "revenue": ZERO, "ad_spend": ZERO, "order_count": 0,
+        "revenue": ZERO, "product_revenue": ZERO, "shipping_revenue": ZERO,
+        "ad_spend": ZERO, "order_count": 0,
         "net_profit": ZERO, "measurable_rev": ZERO,
     }
 
@@ -953,6 +981,8 @@ def _finalize(kind: str, company: str | None, label: str, b: dict) -> dict:
         "company": company,
         "label": label,
         "revenue": str(b["revenue"]),
+        "product_revenue": str(b["product_revenue"]),
+        "shipping_revenue": str(b["shipping_revenue"]),
         "ad_spend": str(b["ad_spend"]),
         "net_profit": net_s,
         "profit_rate": rate_s,
@@ -981,8 +1011,12 @@ def group_summary_by_company(
         leaf_company[leaf_label] = company
         cb = companies.setdefault(company, _agg_block())
 
+        prod_rev = Decimal(r.get("product_revenue", "0"))
+        ship_rev = Decimal(r.get("shipping_revenue", "0"))
         for blk in (lb, cb, total):
             blk["revenue"] += rev
+            blk["product_revenue"] += prod_rev
+            blk["shipping_revenue"] += ship_rev
             blk["ad_spend"] += Decimal(r["ad_spend"])
             blk["order_count"] += r["order_count"]
             _add_net(blk, r.get("net_profit"), rev)
@@ -1011,9 +1045,12 @@ def group_trend_by_company(
         company, leaf_label, _ = cmap.get(cid, ("미지정", f"미지정 · {p['channel_name']}", True))
         meta[leaf_label] = company
         key = (leaf_label, p["date"])
-        b = agg.setdefault(key, {"revenue": ZERO, "ad_spend": ZERO,
+        b = agg.setdefault(key, {"revenue": ZERO, "product_revenue": ZERO,
+                                 "shipping_revenue": ZERO, "ad_spend": ZERO,
                                  "net_profit": ZERO, "has_measurable": False})
         b["revenue"] += Decimal(p["revenue"])
+        b["product_revenue"] += Decimal(p.get("product_revenue", "0"))
+        b["shipping_revenue"] += Decimal(p.get("shipping_revenue", "0"))
         b["ad_spend"] += Decimal(p["ad_spend"])
         if p.get("net_profit") is not None:
             b["net_profit"] += Decimal(p["net_profit"])
@@ -1026,6 +1063,8 @@ def group_trend_by_company(
             "company": meta[leaf_label],
             "date": d,
             "revenue": str(b["revenue"]),
+            "product_revenue": str(b["product_revenue"]),
+            "shipping_revenue": str(b["shipping_revenue"]),
             "ad_spend": str(b["ad_spend"]),
             "net_profit": str(b["net_profit"]) if b["has_measurable"] else None,
         })

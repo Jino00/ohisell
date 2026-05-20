@@ -344,15 +344,41 @@ export default function Orders() {
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500">상품명</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500">채널</th>
                 <th className="px-4 py-3 text-right text-xs font-medium text-gray-500">수량</th>
-                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500">가격</th>
+                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500">제품매출</th>
+                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500">배송비매출</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500">상태</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 text-gray-400">주문번호</th>
               </tr>
             </thead>
             <tbody>
-              {orders.map((o) => {
+              {(() => {
+                // 쿠팡 dedup: 동일 order_number(=shipmentBoxId 1개)에 라인이 N개면 shippingPrice가 라인마다 복사됨.
+                // 백엔드 _shipment_key dedup(first-wins)과 동일하게 첫 라인만 값 표시.
+                // 한정: 1 orderId가 N shipmentBoxId로 분할되는 케이스는 클라이언트가 raw_data 미접근이라
+                //   order_number 단위로만 dedup 가능. 실데이터(2026-04~) 0건이라 무영향. 발생 시
+                //   first-box만 표시되어 안전한 underestimate.
+                const seenCoupangBox = new Set<string>();
+                return orders.map((o) => {
                 const ch = channels.find((c) => c.id === o.channel_id);
                 const colorClass = CHANNEL_COLORS[ch?.platform || ""] || "bg-gray-100 text-gray-700";
+                // 제품매출 = selling_price × quantity (라인 단위)
+                const prodRev = Number(o.selling_price) * Number(o.quantity || 1);
+                // 배송비매출: NAVER(deliveryFeeAmount, 라인별 packageNumber)와 쿠팡(shippingPrice, 박스 단위)만 고객결제 매출.
+                // cafe24·기타는 shipping_cost가 판매자 비용이라 매출 아님.
+                const chCode = ch?.code || "";
+                const isNaver = chCode === "NAVER";
+                const isCoupang = chCode.startsWith("COUPANG");
+                let shipRev = 0;
+                if (isNaver) {
+                  shipRev = Number(o.shipping_cost ?? 0);  // NAVER 라인별 = 정확
+                } else if (isCoupang) {
+                  // 쿠팡: 같은 박스(order_number)의 첫 라인만 표시 (백엔드와 일관)
+                  const key = `${o.channel_id}:${o.order_number}`;
+                  if (!seenCoupangBox.has(key)) {
+                    seenCoupangBox.add(key);
+                    shipRev = Number(o.shipping_cost ?? 0);
+                  }
+                }
                 return (
                   <tr key={o.id} className="border-t hover:bg-gray-50">
                     <td className="px-4 py-3 text-sm text-gray-600 whitespace-nowrap">
@@ -367,14 +393,18 @@ export default function Orders() {
                       </span>
                     </td>
                     <td className="px-4 py-3 text-sm text-right text-gray-600">{o.quantity}</td>
-                    <td className="px-4 py-3 text-sm text-right font-medium">₩{formatKRW(o.selling_price)}</td>
+                    <td className="px-4 py-3 text-sm text-right font-medium">₩{formatKRW(prodRev)}</td>
+                    <td className="px-4 py-3 text-sm text-right text-gray-500">
+                      {shipRev === 0 ? <span className="text-gray-300">—</span> : `₩${formatKRW(shipRev)}`}
+                    </td>
                     <td className="px-4 py-3 text-sm text-gray-600">
                       {STATUS_LABELS[o.status] || o.status}
                     </td>
                     <td className="px-4 py-3 text-xs text-gray-400">{o.order_number}</td>
                   </tr>
                 );
-              })}
+                });
+              })()}
             </tbody>
           </table>
 

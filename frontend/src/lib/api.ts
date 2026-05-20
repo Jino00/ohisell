@@ -120,6 +120,8 @@ export interface ProfitSummary {
 export interface TrendItem extends Record<string, unknown> {
   date: string;
   revenue: number;
+  product_revenue?: number;  // 제품매출
+  shipping_revenue?: number; // 배송비매출
   cost: number;
   commission: number;
   ad_spend: number;
@@ -144,6 +146,8 @@ export interface GroupedSummaryRow extends Record<string, unknown> {
   company: string | null;
   label: string;
   revenue: number;
+  product_revenue?: number;
+  shipping_revenue?: number;
   ad_spend: number;
   net_profit: number | null;  // null = 위탁(로켓배송) leaf/회사
   profit_rate: number | null;
@@ -155,6 +159,8 @@ export interface GroupedTrendPoint extends Record<string, unknown> {
   company: string | null;
   date: string;
   revenue: number;
+  product_revenue?: number;
+  shipping_revenue?: number;
   ad_spend: number;
   net_profit: number | null;  // null = 위탁(로켓배송) 그룹
 }
@@ -164,6 +170,8 @@ export interface ProductRanking extends Record<string, unknown> {
   product_name: string;
   internal_sku: string;
   revenue: number;
+  product_revenue?: number;
+  shipping_revenue?: number;
   cost: number;
   commission: number;
   ad_spend: number;
@@ -180,6 +188,7 @@ export interface SettlementItem {
   channel_name: string;
   settlement_date: string;
   total_amount: number;
+  product_amount?: number;  // 제품정산 (= total_amount - shipping_fee)
   commission: number;
   net_amount: number;
   shipping_fee: number;

@@ -162,7 +162,10 @@ def dashboard_trend(
 
             if key not in grouped:
                 grouped[key] = {
-                    "revenue": Decimal("0"), "cost": Decimal("0"),
+                    "revenue": Decimal("0"),
+                    "product_revenue": Decimal("0"),
+                    "shipping_revenue": Decimal("0"),
+                    "cost": Decimal("0"),
                     "commission": Decimal("0"), "ad_spend": Decimal("0"),
                     "shipping": Decimal("0"), "vat": Decimal("0"),
                     "net_profit": Decimal("0"), "order_count": 0,
@@ -170,6 +173,8 @@ def dashboard_trend(
 
             g = grouped[key]
             g["revenue"] += Decimal(point["revenue"])
+            g["product_revenue"] += Decimal(point.get("product_revenue", "0"))
+            g["shipping_revenue"] += Decimal(point.get("shipping_revenue", "0"))
             g["cost"] += Decimal(point["cost"])
             g["commission"] += Decimal(point["commission"])
             g["ad_spend"] += Decimal(point["ad_spend"])
@@ -184,6 +189,8 @@ def dashboard_trend(
             result.append({
                 "date": key,
                 "revenue": str(g["revenue"]),
+                "product_revenue": str(g["product_revenue"]),
+                "shipping_revenue": str(g["shipping_revenue"]),
                 "cost": str(g["cost"]),
                 "commission": str(g["commission"]),
                 "ad_spend": str(g["ad_spend"]),

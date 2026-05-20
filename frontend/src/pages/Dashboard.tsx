@@ -106,7 +106,7 @@ const QUICK_PERIODS: { label: string; days: number }[] = [
 ];
 
 function getDefaultDateRange() {
-  return quickRange(30);
+  return quickRange(1);
 }
 
 function ChangeIndicator({ value }: { value: number | null | undefined }) {
@@ -430,7 +430,9 @@ export default function Dashboard() {
             <thead className="bg-gray-50">
               <tr>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500">채널</th>
-                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500">매출</th>
+                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500">제품매출</th>
+                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500">배송비매출</th>
+                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500">총매출</th>
                 <th className="px-4 py-3 text-right text-xs font-medium text-gray-500">광고비</th>
                 <th className="px-4 py-3 text-right text-xs font-medium text-gray-500">RoAS</th>
                 <th className="px-4 py-3 text-right text-xs font-medium text-gray-500">순이익</th>
@@ -450,10 +452,16 @@ export default function Dashboard() {
                   c.kind === "leaf"
                     ? "px-4 py-3 text-sm text-gray-600 pl-10"
                     : "px-4 py-3 text-sm text-gray-900";
+                const prodRev = Number(c.product_revenue ?? 0);
+                const shipRev = Number(c.shipping_revenue ?? 0);
                 return (
                   <tr key={`${c.kind}-${c.label}-${i}`} className={`border-t ${rowCls}`}>
                     <td className={nameCls}>
                       {c.kind === "leaf" ? shortLabel(c.label) : c.label}
+                    </td>
+                    <td className="px-4 py-3 text-sm text-right text-gray-700">{formatKRW(prodRev)}원</td>
+                    <td className="px-4 py-3 text-sm text-right text-gray-500">
+                      {shipRev === 0 ? <span className="text-gray-300">—</span> : `${formatKRW(shipRev)}원`}
                     </td>
                     <td className="px-4 py-3 text-sm text-right">{formatKRW(c.revenue)}원</td>
                     <td className="px-4 py-3 text-sm text-right text-gray-600">{formatKRW(c.ad_spend)}원</td>
@@ -624,7 +632,7 @@ export default function Dashboard() {
           <table className="w-full">
             <thead className="bg-gray-50">
               <tr>
-                {["순위", "상품명", "매출", "원가", "수수료", "광고비", "순이익", "이익률"].map((h) => (
+                {["순위", "상품명", "제품매출", "배송비매출", "총매출", "원가", "수수료", "광고비", "순이익", "이익률"].map((h) => (
                   <th key={h} className="px-4 py-3 text-left text-xs font-medium text-gray-500">{h}</th>
                 ))}
               </tr>
@@ -632,7 +640,7 @@ export default function Dashboard() {
             <tbody>
               {Array.from({ length: 5 }).map((_, i) => (
                 <tr key={i} className="border-t">
-                  {Array.from({ length: 8 }).map((_, j) => (
+                  {Array.from({ length: 10 }).map((_, j) => (
                     <td key={j} className="px-4 py-3">
                       <div className="h-4 bg-gray-200 rounded animate-pulse" style={{ width: `${50 + Math.random() * 40}%` }} />
                     </td>
@@ -649,7 +657,9 @@ export default function Dashboard() {
               <tr>
                 <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 w-12">순위</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500">상품명</th>
-                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500">매출</th>
+                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500">제품매출</th>
+                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500">배송비매출</th>
+                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500">총매출</th>
                 <th className="px-4 py-3 text-right text-xs font-medium text-gray-500">원가</th>
                 <th className="px-4 py-3 text-right text-xs font-medium text-gray-500">수수료</th>
                 <th className="px-4 py-3 text-right text-xs font-medium text-gray-500">광고비</th>
@@ -658,12 +668,19 @@ export default function Dashboard() {
               </tr>
             </thead>
             <tbody>
-              {products.map((p, idx) => (
+              {products.map((p, idx) => {
+                const prodRev = Number(p.product_revenue ?? 0);
+                const shipRev = Number(p.shipping_revenue ?? 0);
+                return (
                 <tr key={p.product_id} className="border-t hover:bg-gray-50">
                   <td className="px-4 py-3 text-center text-sm text-gray-500">{idx + 1}</td>
                   <td className="px-4 py-3 text-sm text-gray-900">
                     <div>{p.product_name}</div>
                     <div className="text-xs text-gray-400">{p.internal_sku}</div>
+                  </td>
+                  <td className="px-4 py-3 text-sm text-right text-gray-700">{formatKRW(prodRev)}원</td>
+                  <td className="px-4 py-3 text-sm text-right text-gray-500">
+                    {shipRev === 0 ? <span className="text-gray-300">—</span> : `${formatKRW(shipRev)}원`}
                   </td>
                   <td className="px-4 py-3 text-sm text-right font-medium">{formatKRW(p.revenue)}원</td>
                   <td className="px-4 py-3 text-sm text-right text-gray-600">{formatKRW(p.cost)}원</td>
@@ -676,7 +693,8 @@ export default function Dashboard() {
                     {p.profit_rate.toFixed(1)}%
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         )}
