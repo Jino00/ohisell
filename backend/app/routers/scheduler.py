@@ -48,11 +48,16 @@ def trigger_job(job_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail=f"작업을 찾을 수 없습니다: {job_id}")
 
     # 즉시 실행
-    from app.services.scheduler_service import recalculate_profit_job, sync_all_channels_job
+    from app.services.scheduler_service import (
+        recalculate_profit_job,
+        sync_all_channels_job,
+        sync_coupang_products_job,
+    )
 
     job_map = {
         "auto_sync_orders": sync_all_channels_job,
         "auto_profit_calc": recalculate_profit_job,
+        "sync_coupang_products": sync_coupang_products_job,
     }
 
     func = job_map.get(job_id)

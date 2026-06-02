@@ -51,6 +51,29 @@ def sync_all(body: SyncRequest | None = None, db: Session = Depends(get_db)):
     return results
 
 
+@router.post("/coupang-products")
+def sync_coupang_products(
+    refresh_inventory: bool = True,
+    max_products: int | None = None,
+    db: Session = Depends(get_db),
+):
+    """쿠팡 상품 마스터+채널매핑 동기화 (조망 결합축 적재).
+
+    트랙 D-8: 쿠팡 Open API는 서버 IP 화이트리스트 — 서버에서만 동작(로컬 403).
+    max_products: 계정별 상한(드라이런/부분동기화용). refresh_inventory: 재고/판매상태 새로고침.
+    """
+    from app.services.coupang.product_sync import sync_all_products, sync_account_products, PRODUCT_ACCOUNTS
+
+    if max_products is not None:
+        return [
+            sync_account_products(
+                db, key, refresh_inventory=refresh_inventory, max_products=max_products
+            )
+            for key in PRODUCT_ACCOUNTS
+        ]
+    return sync_all_products(db, refresh_inventory=refresh_inventory)
+
+
 @router.get("/status", response_model=list[SyncStatusOut])
 def sync_status(db: Session = Depends(get_db)):
     """채널별 마지막 동기화 상태"""

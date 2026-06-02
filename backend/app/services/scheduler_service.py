@@ -161,6 +161,43 @@ def sync_meta_ad_costs_job():
         db.close()
 
 
+def sync_coupang_products_job():
+    """쿠팡 상품 마스터+채널매핑 자동 동기화 (05:30 KST).
+
+    주문 자동동기화(06:00)·이익계산(06:30) 전에 실행해 상품마스터/매핑을 갱신한다
+    (주문 _auto_link_product가 최신 매핑을 쓰도록). 재고/판매상태도 함께 새로고침.
+    트랙 D-8: 호출은 서버 IP에서만 가능(로컬 403).
+    """
+    db = _get_own_db_session()
+    try:
+        from app.services.coupang.product_sync import sync_all_products
+
+        results = sync_all_products(db, refresh_inventory=True)
+        log.info("[스케줄러] 쿠팡 상품 동기화 결과: %s", results)
+
+        # 반환형 하드 에러(config_missing 등) 표면화 — sync는 raise 대신 dict로 반환하므로
+        # 여기서 감지해 raise해야 수동 트리거가 거짓 성공을 보고하지 않음(codex [P2] R2).
+        # (부분 실패 카운터 stats["errors"]는 예상 가능한 부분 성공이라 raise 대상 아님)
+        failed = [r for r in results if r.get("error")]
+        if failed:
+            raise RuntimeError(f"쿠팡 상품 동기화 실패 계정: {failed}")
+
+        state = db.query(SchedulerState).filter(
+            SchedulerState.job_name == "sync_coupang_products"
+        ).first()
+        if state:
+            state.last_run_at = datetime.now()
+            db.commit()
+    except Exception as e:
+        # cron 경로: APScheduler가 잡 예외를 관용(EVENT_JOB_ERROR, 스케줄러 생존).
+        # 수동 트리거 경로(scheduler/trigger): re-raise해야 trigger_job이 실패를
+        # 표면화(HTTP 500, last_run_at 미갱신)한다 — 거짓 성공 보고 방지(codex [P2]).
+        log.exception("[스케줄러] sync_coupang_products_job 에러: %s", e)
+        raise
+    finally:
+        db.close()
+
+
 def cafe24_proactive_refresh_job():
     """cafe24 Access Token 만료 30분 전 자동 갱신.
 
@@ -242,6 +279,7 @@ def _ensure_default_states(db):
         ("cafe24_token_refresh", "*/30 * * * *"),
         ("sync_naver_sa_ad_costs", "0 7 * * *"),
         ("sync_meta_ad_costs", "0 7 * * *"),
+        ("sync_coupang_products", "30 5 * * *"),
     ]
     for name, cron in defaults:
         existing = db.query(SchedulerState).filter(
@@ -274,6 +312,8 @@ def start_scheduler():
                 job_func = sync_naver_sa_ad_costs_job
             elif state.job_name == "sync_meta_ad_costs":
                 job_func = sync_meta_ad_costs_job
+            elif state.job_name == "sync_coupang_products":
+                job_func = sync_coupang_products_job
 
             if job_func:
                 try:
