@@ -409,6 +409,41 @@ class CoupangAdReport(Base):
 
 
 # ──────────────────────────────────────────────
+# 쿠팡 광고 옵션 그레인 (조망 결합축 — 광고측 옵션ID 보존)
+# ──────────────────────────────────────────────
+class CoupangAdOptionDaily(Base):
+    """쿠팡 광고 XLSX의 옵션ID 단위 일별 성과 — 광고⨝상품⨝주문 3자 조인 광고축.
+
+    트랙 D-9: coupang_ad_report(롤업)는 옵션ID를 버린다. 이 테이블이 옵션 그레인을 보존.
+    ad_option_id([8] 광고집행 옵션ID)로 비용·노출·클릭이, conv_option_id([10] 전환매출 옵션ID)로
+    매출·주문이 귀속된다. 둘은 보통 같지만 간접전환 시 갈릴 수 있어 분리 보존.
+    ad_option_id ⨝ coupang_product_item.vendor_item_id ⨝ Order.platform_product_id 로 조인.
+    """
+
+    __tablename__ = "coupang_ad_option_daily"
+    __table_args__ = (
+        UniqueConstraint(
+            "report_date", "vendor_id", "sell_type", "ad_option_id", "conv_option_id",
+            name="uq_coupang_ad_option_daily",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    report_date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)
+    vendor_id: Mapped[str] = mapped_column(String(20), nullable=False)
+    sell_type: Mapped[str] = mapped_column(String(10), nullable=False)  # 3P / 2P / Retail
+    ad_option_id: Mapped[str] = mapped_column(String(20), nullable=False, index=True)  # [8] 비용·노출 귀속
+    conv_option_id: Mapped[str] = mapped_column(String(20), nullable=False, index=True)  # [10] 매출·주문 귀속
+    impressions: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    clicks: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    ad_spend: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    orders: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    sales_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    conversion_revenue: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+# ──────────────────────────────────────────────
 # 쿠팡 상품 옵션 스냅샷 (조망 결합축)
 # ──────────────────────────────────────────────
 class CoupangProductItem(Base):

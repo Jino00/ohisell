@@ -407,6 +407,9 @@ def _detect_xlsx_format(headers: list) -> dict:
         "orders":  _find("총 주문수(1일)") if _find("총 주문수(1일)") != -1 else _find("전환수"),
         "qty":     _find("총 판매수량(1일)") if _find("총 판매수량(1일)") != -1 else _find("판매수량"),
         "rev":     _find("총 전환매출액(1일)") if _find("총 전환매출액(1일)") != -1 else _find("전환매출액"),
+        # 옵션ID 컬럼(keyword 포맷에만 존재 — adGroup 포맷은 -1) → 트랙 D-9 3자 조인 광고축
+        "ad_opt":   _find("광고집행 옵션"),       # 비용·노출·클릭 귀속 옵션ID
+        "conv_opt": _find("전환매출발생 옵션"),    # 매출·주문 귀속 옵션ID
     }
 
 
@@ -452,7 +455,34 @@ async def upload_coupang_ad_xlsx(
     agg: dict[tuple[date, int, str], Decimal] = {}
     # coupang_ad_report 집계: (date, sell_type) → metrics
     report_agg: dict[tuple[date, str], dict] = {}
+    # coupang_ad_option_daily 집계: (date, vendor_id, sell_type, ad_opt, conv_opt) → metrics (트랙 D-9)
+    opt_agg: dict[tuple, dict] = {}
+    has_opt = col["ad_opt"] != -1 and col["conv_opt"] != -1
     skipped = 0
+
+    def _cell_int(r: tuple, idx: int) -> int:
+        try:
+            return int(r[idx] or 0) if idx != -1 and idx < len(r) else 0
+        except (TypeError, ValueError):
+            return 0
+
+    def _cell_dec(r: tuple, idx: int) -> Decimal:
+        try:
+            return Decimal(str(r[idx] or 0)) if idx != -1 and idx < len(r) else Decimal("0")
+        except Exception:
+            return Decimal("0")
+
+    def _norm_opt(v):
+        """옵션ID 정규화: 94277472815.0 → '94277472815', 빈값('-'/None)은 None."""
+        if v is None:
+            return None
+        s = str(v).strip()
+        if s in ("", "-"):
+            return None
+        try:
+            return str(int(float(s)))
+        except (TypeError, ValueError):
+            return s
 
     for row in ws.iter_rows(min_row=2, values_only=True):
         if not row or len(row) <= col["spend"]:
@@ -495,29 +525,37 @@ async def upload_coupang_ad_xlsx(
 
         # ── coupang_ad_report 집계 (노출 지표가 있는 포맷만) ──
         if col["impr"] != -1:
-            def _i(idx: int) -> int:
-                try:
-                    return int(row[idx] or 0) if idx != -1 and idx < len(row) else 0
-                except (TypeError, ValueError):
-                    return 0
-
-            def _d(idx: int) -> Decimal:
-                try:
-                    return Decimal(str(row[idx] or 0)) if idx != -1 and idx < len(row) else Decimal("0")
-                except Exception:
-                    return Decimal("0")
-
             rkey = (ad_date, sell_type)
             if rkey not in report_agg:
                 report_agg[rkey] = {"impr": 0, "clicks": 0, "spend": Decimal("0"),
                                      "orders": 0, "qty": 0, "rev": Decimal("0")}
             g = report_agg[rkey]
-            g["impr"]   += _i(col["impr"])
-            g["clicks"] += _i(col["clicks"])
+            g["impr"]   += _cell_int(row, col["impr"])
+            g["clicks"] += _cell_int(row, col["clicks"])
             g["spend"]  += spend
-            g["orders"] += _i(col["orders"])
-            g["qty"]    += _i(col["qty"])
-            g["rev"]    += _d(col["rev"])
+            g["orders"] += _cell_int(row, col["orders"])
+            g["qty"]    += _cell_int(row, col["qty"])
+            g["rev"]    += _cell_dec(row, col["rev"])
+
+        # ── coupang_ad_option_daily 집계 (옵션ID 컬럼이 있는 keyword 포맷만, 트랙 D-9) ──
+        if has_opt:
+            ad_opt = _norm_opt(row[col["ad_opt"]] if col["ad_opt"] < len(row) else None)
+            conv_opt = _norm_opt(row[col["conv_opt"]] if col["conv_opt"] < len(row) else None)
+            if ad_opt or conv_opt:
+                # 한쪽만 있으면 동일 옵션으로 폴백(귀속축 결측 방지). 보통 둘은 같음.
+                ad_opt = ad_opt or conv_opt
+                conv_opt = conv_opt or ad_opt
+                okey = (ad_date, vendor_id, sell_type, ad_opt, conv_opt)
+                if okey not in opt_agg:
+                    opt_agg[okey] = {"impr": 0, "clicks": 0, "spend": Decimal("0"),
+                                     "orders": 0, "qty": 0, "rev": Decimal("0")}
+                o = opt_agg[okey]
+                o["impr"]   += _cell_int(row, col["impr"])
+                o["clicks"] += _cell_int(row, col["clicks"])
+                o["spend"]  += spend
+                o["orders"] += _cell_int(row, col["orders"])
+                o["qty"]    += _cell_int(row, col["qty"])
+                o["rev"]    += _cell_dec(row, col["rev"])
 
     if not agg and not report_agg:
         raise HTTPException(status_code=422, detail="저장할 광고 데이터가 없습니다. 파일 형식을 확인하세요.")
@@ -549,6 +587,26 @@ async def upload_coupang_ad_xlsx(
                     orders=g["orders"], sales_qty=g["qty"], conversion_revenue=g["rev"],
                 ))
 
+    # coupang_ad_option_daily 저장 (옵션 그레인 — 트랙 D-9 3자 조인 광고축)
+    # delete-then-insert: 이 업로드가 커버하는 (vendor_id, 등장 날짜) 범위의 기존 옵션 행을
+    # 먼저 제거 후 전량 삽입. 14일 전환 윈도우로 conv_option_id가 나중에 바뀌어 5-튜플 키가
+    # 달라질 때 옛 행이 stale로 남아 이중집계되는 것을 차단(codex P2). 같은 파일 재업로드 시엔
+    # 같은 날짜를 지우고 동일 재삽입하므로 멱등성 유지.
+    if opt_agg:
+        from app.models import CoupangAdOptionDaily
+        opt_dates = {od for (od, _vid, _st, _ad, _cv) in opt_agg}
+        db.query(CoupangAdOptionDaily).filter(
+            CoupangAdOptionDaily.vendor_id == vendor_id,
+            CoupangAdOptionDaily.report_date.in_(opt_dates),
+        ).delete(synchronize_session=False)
+        for (od, vid, st, ad_opt, conv_opt), o in opt_agg.items():
+            db.add(CoupangAdOptionDaily(
+                report_date=od, vendor_id=vid, sell_type=st,
+                ad_option_id=ad_opt, conv_option_id=conv_opt,
+                impressions=o["impr"], clicks=o["clicks"], ad_spend=o["spend"],
+                orders=o["orders"], sales_qty=o["qty"], conversion_revenue=o["rev"],
+            ))
+
     db.commit()
 
     date_from = min((k[0] for k in agg), default=min(k[0] for k in report_agg)) if agg else min(k[0] for k in report_agg)
@@ -561,13 +619,15 @@ async def upload_coupang_ad_xlsx(
 
     if agg:
         background_tasks.add_task(_recalc_profit_background, date_from, date_to)
-    log.info("쿠팡 광고 적재 %s (%s~%s) 광고비=%d원 리포트=%d건", vendor_id, date_from, date_to, total, len(report_agg))
+    log.info("쿠팡 광고 적재 %s (%s~%s) 광고비=%d원 리포트=%d건 옵션=%d건",
+             vendor_id, date_from, date_to, total, len(report_agg), len(opt_agg))
     return {
         "vendor_id": vendor_id,
         "inserted": len(agg),
         "skipped": skipped,
         "total_spend": total,
         "report_rows": len(report_agg),
+        "option_rows": len(opt_agg),
         "date_from": date_from.isoformat(),
         "date_to": date_to.isoformat(),
         "dates": dates,
