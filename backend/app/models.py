@@ -409,6 +409,47 @@ class CoupangAdReport(Base):
 
 
 # ──────────────────────────────────────────────
+# 쿠팡 상품 옵션 스냅샷 (조망 결합축)
+# ──────────────────────────────────────────────
+class CoupangProductItem(Base):
+    """쿠팡 상품 옵션(vendorItemId) 단위 조망 스냅샷 — 광고⨝주문⨝상품 결합축.
+
+    트랙 D-8: vendorItemId는 account(vendor_id) 귀속. product_sync가 계정별 upsert.
+    Order.platform_product_id(문자열 옵션ID)·광고 XLSX 옵션ID와 vendor_item_id로 조인.
+    """
+
+    __tablename__ = "coupang_product_item"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    vendor_item_id: Mapped[str] = mapped_column(
+        String(20), unique=True, nullable=False, index=True
+    )  # 옵션ID = 결합키
+    account_key: Mapped[str] = mapped_column(String(20), nullable=False)  # COUPANG_WING1 등
+    vendor_id: Mapped[str] = mapped_column(String(20), nullable=False)  # A01564720 등(소유 계정)
+    seller_product_id: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    seller_product_name: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+    item_name: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+    external_vendor_sku: Mapped[Optional[str]] = mapped_column(
+        String(100), nullable=True, index=True
+    )
+    sale_price: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, default=0)
+    supply_price: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)  # 공급가(원가성)
+    sale_agent_commission: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(7, 2), nullable=True
+    )  # 판매수수료%
+    max_buy_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 등록재고
+    amount_in_stock: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 실시간재고
+    on_sale: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)  # 판매상태
+    status_name: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)  # 승인완료 등
+    brand: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    category_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    synced_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+# ──────────────────────────────────────────────
 # 스케줄러 상태
 # ──────────────────────────────────────────────
 class SchedulerState(Base):
