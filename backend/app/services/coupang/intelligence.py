@@ -10,6 +10,7 @@
 # D-3: 시스템은 사실/지표 정리만 — 전략 추천 없음. 해석은 Jino 몫.
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 
@@ -27,6 +28,8 @@ from app.models import (
     ProductMaster,
 )
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
+
+log = logging.getLogger(__name__)
 
 _Z = Decimal("0")
 _Q4 = Decimal("0.0001")  # 비율(ROAS·CTR·반품률) 표시 자리수 — JSON 정리
@@ -230,7 +233,6 @@ def _cost_master(db: Session) -> dict[str, dict]:
     매핑)라 기존 회계엔진과 원가 원천이 일치한다. (라이브 진단: 옵션ID당 원가충돌 0건 확인)
     """
     products = {p.id: p for p in db.query(ProductMaster).all()}
-    out: dict[str, dict] = {}
     rows = (
         db.query(
             ProductChannelMapping.channel_product_id,
@@ -243,12 +245,27 @@ def _cost_master(db: Session) -> dict[str, dict]:
         )
         .all()
     )
+    # 옵션ID별 후보 수집 — 같은 옵션ID가 WING+RG 두 채널에 매핑되거나(같은 product) 재지정
+    # 이력으로 중복될 수 있다. 라이브 진단상 현재 원가충돌 0건이나, codex[P2] 견고성 지적
+    # 수용: 첫 행 임의채택 금지하고 결정적으로 고른다.
+    candidates: dict[str, list] = {}
     for cpid, pid in rows:
         pm = products.get(pid)
-        if pm is None:
-            continue
-        # setdefault: 같은 옵션ID가 WING+RG 두 채널에 매핑돼도 같은 product_id(원가충돌 0) — 첫 값 유지
-        out.setdefault(str(cpid), {"cost_price": pm.cost_price, "name": pm.product_name})
+        if pm is not None:
+            candidates.setdefault(str(cpid), []).append(pm)
+
+    out: dict[str, dict] = {}
+    for cpid, pms in candidates.items():
+        # 원가>0 보유 행 우선(0/None이 유효원가 가리지 않게). 동률이면 product_id 최소(결정적).
+        costed = [pm for pm in pms if pm.cost_price and pm.cost_price > 0]
+        chosen = min(costed or pms, key=lambda pm: pm.id)
+        distinct = {pm.cost_price for pm in costed}
+        if len(distinct) > 1:  # 서로 다른 실원가 충돌 — 임의판단 금지, 사실 경고(D-3)
+            log.warning(
+                "옵션ID %s 활성 쿠팡매핑이 서로 다른 원가 %s 보유 — product_id 최소(%s) 선택",
+                cpid, sorted(map(str, distinct)), chosen.id,
+            )
+        out[cpid] = {"cost_price": chosen.cost_price, "name": chosen.product_name}
     return out
 
 
