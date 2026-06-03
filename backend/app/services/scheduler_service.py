@@ -378,6 +378,33 @@ def sync_coupang_coupons_job():
         db.close()
 
 
+def sync_coupang_cs_job():
+    """쿠팡 CS 고객문의 자동 동기화 (06:05 KST) — 상품Q&A + CS이관 7일치 (P6). 트랙 D-8: 서버 IP에서만."""
+    db = _get_own_db_session()
+    try:
+        from app.services.coupang.cs_sync import sync_all_cs
+
+        results = sync_all_cs(db)
+        log.info("[스케줄러] 쿠팡 CS 동기화 결과: %s", results)
+
+        # codex[P2]: api_failures > 0이면 스케줄러 실패로 표면화(쿠폰 패턴 동일).
+        total_fail = results.get("total_api_failures", 0)
+        if total_fail > 0:
+            raise RuntimeError(f"쿠팡 CS 동기화 API 실패 {total_fail}건")
+
+        state = db.query(SchedulerState).filter(
+            SchedulerState.job_name == "sync_coupang_cs"
+        ).first()
+        if state:
+            state.last_run_at = datetime.now()
+            db.commit()
+    except Exception as e:
+        log.exception("[스케줄러] sync_coupang_cs_job 에러: %s", e)
+        raise
+    finally:
+        db.close()
+
+
 def cafe24_proactive_refresh_job():
     """cafe24 Access Token 만료 30분 전 자동 갱신.
 
@@ -466,6 +493,7 @@ def _ensure_default_states(db):
         ("sync_coupang_settlement", "50 5 * * *"),
         ("sync_coupang_rg_orders", "55 5 * * *"),
         ("sync_coupang_coupons", "0 6 * * *"),
+        ("sync_coupang_cs", "5 6 * * *"),
     ]
     for name, cron in defaults:
         existing = db.query(SchedulerState).filter(
@@ -512,6 +540,8 @@ def start_scheduler():
                 job_func = sync_coupang_rg_orders_job
             elif state.job_name == "sync_coupang_coupons":
                 job_func = sync_coupang_coupons_job
+            elif state.job_name == "sync_coupang_cs":
+                job_func = sync_coupang_cs_job
 
             if job_func:
                 try:

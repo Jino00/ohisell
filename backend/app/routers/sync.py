@@ -170,6 +170,18 @@ def sync_coupang_coupons(
     return sync_all_coupons(db, budget_months=budget_months)
 
 
+@router.post("/coupang-cs")
+def sync_coupang_cs(db: Session = Depends(get_db)):
+    """쿠팡 CS(고객문의) 동기화 — 상품 Q&A + CS이관 문의 7일치 (P6).
+
+    트랙 D-8: 쿠팡 Open API는 서버 IP 화이트리스트 — 서버에서만 동작(로컬 403).
+    결과: coupang_inquiry upsert + 미답변 현황 집계.
+    """
+    from app.services.coupang.cs_sync import sync_all_cs
+
+    return sync_all_cs(db)
+
+
 @router.get("/status", response_model=list[SyncStatusOut])
 def sync_status(db: Session = Depends(get_db)):
     """채널별 마지막 동기화 상태"""

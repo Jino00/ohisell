@@ -922,6 +922,41 @@ class CoupangCouponBudget(Base):
 
 
 # ──────────────────────────────────────────────
+# P6 CS — 고객문의 현황 (운영 보조)
+# ──────────────────────────────────────────────
+class CoupangInquiry(Base):
+    """쿠팡 고객문의 경량 적재 (P6 CS) — 미답변 현황 운영 지표.
+
+    명세: docs/references/10_coupang_cs_api_specs.md #1(상품Q&A) + #3(CS이관).
+    DB 그레인: (account_key, inquiry_type, inquiry_id) UNIQUE.
+    answered=False 건이 운영 지표 핵심. answered=True 건도 보존(이력).
+    """
+
+    __tablename__ = "coupang_inquiry"
+    __table_args__ = (
+        UniqueConstraint(
+            "account_key", "inquiry_type", "inquiry_id",
+            name="uq_coupang_inquiry",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    account_key: Mapped[str] = mapped_column(String(20), nullable=False)
+    vendor_id: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    inquiry_type: Mapped[str] = mapped_column(String(20), nullable=False)  # online / call_center
+    inquiry_id: Mapped[str] = mapped_column(String(30), nullable=False)
+    status: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)  # ANSWERED/NOANSWER 등
+    title: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    content: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    answered: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    inquired_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    synced_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+# ──────────────────────────────────────────────
 # 스케줄러 상태
 # ──────────────────────────────────────────────
 class SchedulerState(Base):
