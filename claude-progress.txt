@@ -4,9 +4,16 @@
 
 ## 현재 상태
 - 날짜: 2026-06-03
-- 단계: ★메가 프로젝트 P1~P4+P7+D-12/13/15 완료·prod 라이브 + **P5 쿠폰 코드완료(codex PASS 2R, prod 배포 대기)**. **6/7 페이즈(코드)**. 다음 P5 prod배포/P6/쓰기페이즈
-- 전체 진행률: P5 쿠폰/캐시백 읽기13 SA+Harness+DB3+소비자 완료, 로컬 격리 검증·codex PASS 2R. prod 배포(alembic f2a4c6e8b0d1)만 남음
-- 최신 커밋(main): db28742(D-15 phase② Wing내부API) ← 040a92d(D-15 progress) ← e46f20d ← … ⚠️ origin 미푸시(로컬 다수). P5는 미커밋(이 세션) → 커밋 예정
+- 단계: ★메가 프로젝트 P1~P5+P7+D-12/13/15 완료·**P5 쿠폰 prod 배포·라이브 실증 완료**. **6/7 페이즈**. 다음 P6/쓰기페이즈/RG조망편입
+- 전체 진행률: P5 쿠폰/캐시백 읽기13 prod 라이브 실증(WING2 쿠폰86·아이템305·D-8 결합 105/188·예산8·실패0·회계축불변). 남은 페이즈=P6
+- 최신 커밋(main): (P5 커밋 예정) ← db28742(D-15 phase② Wing내부API) ← 040a92d ← … ⚠️ origin 미푸시(로컬 다수). P5 prod scp 배포 완료(alembic f2a4c6e8b0d1)
+
+## P5 쿠폰/캐시백 — 완료(prod 배포·라이브 실증) (2026-06-03)
+- [x] 명세 /browse 공식 응답스키마 전수 → references/06 §E(읽기13). 게이트웨이 3종(fms code래핑·marketplace 직접·openapi 도서)
+- [x] SA coupons.py(읽기13+쓰기8stub) / DB 3테이블(CoupangCoupon·CouponItem D-8·CouponBudget) alembic f2a4c6e8b0d1 / Harness coupon_sync.py / 소비자 POST+스케줄러06:00+트리거+조회GET3
+- [x] codex PASS 2R: R1[P1×3]_fms_ok success무시·contract/budget stale위장·아이템EXPIRED미동기화+[P2]DETACHED제외 → 전부수정. R2 신규0
+- [x] ★prod 라이브 실증: WING2 쿠폰86(전부EXPIRED)·아이템305·D-8결합 105/188·예산8·errors0. 회계축 불변(revenue_fee 191). 롤백 ohisell.db.bak-p5coupon-20260603-132132
+- [x] ★원칙22: "쿠폰0건" 단정→라이브는 86개EXPIRED 실재. codex EXPIRED수정이 정확히 잡음(원래대로면 0건 오결론). 발견: 자유계약 예산=Int32max(무제한)
 
 ## D-15 쿠팡 API 전수 수집 — ✅ phase①② 모두 완료 (2026-06-03)
 - [x] 배경: 입고 API "없다" 단정 오류(공식만 보고)→Jino 지적. 해결: 전수 레퍼런스 확보(추정금지)

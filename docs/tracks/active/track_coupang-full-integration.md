@@ -118,7 +118,7 @@
 - [x] P2. 반품/취소/교환 도메인 (회계 순매출 정확화) — **완료(main f2f35b2, codex PASS, prod 배포·라이브 실증 2026-06-03)**. 아래 §7 참조.
 - [x] P3. 로켓그로스 도메인 (상품조회=사이즈, 로켓창고 재고, RG주문) — **읽기5 완료(main bf563c2+fcedbec, codex PASS, prod 배포·라이브 실증 2026-06-03)**. 쓰기2(생성/수정)·카테고리2 stub(쓰기페이즈/P6). 아래 §7 참조.
 - [x] P4. 정산 도메인 (매출내역=수수료 실측·지급내역=통장지급) — **완료(prod 배포·라이브 실증 2026-06-03)**. D-10/D-11 수수료 감사. 아래 §7 참조.
-- [x] P5. 쿠폰/캐시백 (쿠폰 운영 현황 — 보조축) — **읽기13 구현+쓰기8 stub 완료(codex PASS 2R, 로컬 격리 검증). prod 배포 대기**. 아래 §7 참조. (회계는 정산 P4가 진실 D-3 — 이건 운영 현황만)
+- [x] P5. 쿠폰/캐시백 (쿠폰 운영 현황 — 보조축) — **읽기13 구현+쓰기8 stub 완료(codex PASS 2R, prod 배포·라이브 실증 2026-06-03)**. 아래 §7 참조. (회계는 정산 P4가 진실 D-3 — 이건 운영 현황만)
 - [ ] P6. 물류센터·카테고리·브랜드·CS (보조)
 - [x] P7. 종합 조망 화면 결합 (옵션ID 결합 엔진 + 3축 뷰) — **완료(prod 배포·라이브 실증·시각확인 2026-06-03)**. 아래 §7 참조.
 
@@ -260,9 +260,12 @@ pages/   Products(확장)·Returns(신규)·InventoryPage(실재고)·Settlement
   - Harness `services/coupang/coupon_sync.py`: 즉시할인쿠폰 상태별 목록→쿠폰 upsert→각 쿠폰 아이템(옵션 결합)→item upsert / 계약서목록→예산현황(월별) upsert. 하드실패 표면화(_fms_ok).
   - 소비자 3경로+조회3: `POST /api/sync/coupang-coupons` + 스케줄러 잡 `sync_coupang_coupons`(06:00 KST) + 트리거맵 + `GET /api/coupons/{coupang-coupons,coupang-coupon-items,coupang-coupon-budgets}`.
   - codex PASS 2R: R1[P1×3]_fms_ok가 data.success 무시·contract/budget 호출부 None만 체크(stale 위장)·아이템 EXPIRED 미동기화(거짓 APPLIED 잔존)+[P2]DETACHED 제외 → 전부 수정(success 검증·_fms_ok 적용·EXPIRED/DETACHED 상태 추가). R2 PASS(신규 0).
-  - ⚠️ 다운로드쿠폰 목록 API 없음(명세 §E) → 자동 sync 제외(즉시할인쿠폰+예산/계약 중심). 현재 쿠폰 운영 0건(Wing 홈 확인) — 라이브 실증 시 빈 데이터 예상.
-  - ⚠️ **prod 배포 대기**: 쿠팡 API는 서버 IP에서만(D-8) → 라이브 실증은 서버 SSH 필요. alembic f2a4c6e8b0d1 prod 적용 필요.
-- 다음: §8 — P5 prod 배포 / P6 물류·CS+카테고리율 교차+RG카테고리 / 쓰기 페이즈(stub 채우기: RG 상품생성/수정 + products 17 + 쿠폰 쓰기8). RG 조망 편입(재고축·보관비 모델)은 별도.
+  - **★prod 배포·라이브 실증(원칙22, 쿠팡 API 실호출)**: alembic f2a4c6e8b0d1 prod 적용(18/11/16 cols)·pm2 재기동·65라우트. 라이브 sync errors 0·api_failures 0. **WING2 쿠폰 86·아이템 305 적재**(WING1 0). **D-8 결합축 쿠폰옵션 ⨝ 상품 105/188 옵션 매칭**. 예산 8행. 회계축 불변(revenue_fee 191 그대로 — P5는 운영현황만 D-3).
+  - **★원칙22 교정**: "쿠폰 운영 0건"이라 단정(Wing 홈 '진행중 0'만 보고)했으나 라이브는 WING2에 **86개 쿠폰(전부 EXPIRED)·305 옵션 적용** 실재. codex P1-3(EXPIRED 미동기화 지적) 수정이 정확히 이를 잡음 — 원래 STANDBY/APPLIED/PAUSED만 동기화했다면 0건 적재되어 '쿠폰 없음' 오결론날 뻔. 추정 금지+라이브 증거+codex 교차가 맞물린 사례.
+  - **발견(사실, D-3)**: 자유계약(NON_CONTRACT_BASED)은 예산현황 totalBudgetAmount=2147483647(Int32 max=무제한 sentinel). 사실 그대로 적재.
+  - ⚠️ 다운로드쿠폰 목록 API 없음(명세 §E) → 자동 sync 제외(즉시할인쿠폰+예산/계약 중심).
+  - 롤백: 서버 `ohisell.db.bak-p5coupon-20260603-132132`·`/tmp/rollback_p5`(6파일).
+- 다음: §8 — P6 물류·CS+카테고리율 교차+RG카테고리 / 쓰기 페이즈(stub 채우기: RG 상품생성/수정 + products 17 + 쿠폰 쓰기8). RG 조망 편입(재고축·보관비 모델)은 별도.
 
 ## 8. 다음 액션 (세션 넘어와도 여기부터)
 **P1+(A)+(B)+P2+P3+P4+P7 + D-12·D-13 모두 완료 + prod 배포·라이브 실증 완결(5/7 페이즈).** 3자 조인 + 순매출 차감 + 수수료 감사 + 종합조망 + 사이즈/CBM·로켓창고 재고·RG주문이 prod 실데이터로 작동. 스케줄러: 05:30 상품·05:35 RG사이즈·05:40 RG재고·05:45 반품·05:50 정산·05:55 RG주문 자동 갱신. 다음 후보(우선순위는 Jino와 정할 것):
