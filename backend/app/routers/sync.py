@@ -152,6 +152,24 @@ def sync_coupang_rg_orders(
     return sync_all_rg_orders(db, days=days)
 
 
+@router.post("/coupang-coupons")
+def sync_coupang_coupons(
+    budget_months: int = 3,
+    db: Session = Depends(get_db),
+):
+    """쿠팡 쿠폰 운영 현황 동기화 (즉시할인쿠폰+아이템+예산/계약 — P5).
+
+    트랙 D-8: 쿠팡 Open API는 서버 IP 화이트리스트 — 서버에서만 동작(로컬 403).
+    트랙 D-3: 운영 현황(사실)만. 실제 할인 비용 차감은 정산(P4)이 진실 — 이건 보조축.
+    즉시할인쿠폰 상태별 목록 → coupang_coupon, 각 쿠폰 아이템 → coupang_coupon_item(옵션 결합 D-8),
+    계약서+월별 예산 → coupang_coupon_budget. budget_months: 예산 조회 과거 개월수.
+    ⚠️ 다운로드쿠폰은 목록 API 없어 자동 sync 제외(명세 §E).
+    """
+    from app.services.coupang.coupon_sync import sync_all_coupons
+
+    return sync_all_coupons(db, budget_months=budget_months)
+
+
 @router.get("/status", response_model=list[SyncStatusOut])
 def sync_status(db: Session = Depends(get_db)):
     """채널별 마지막 동기화 상태"""

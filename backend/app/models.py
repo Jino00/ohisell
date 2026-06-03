@@ -808,6 +808,119 @@ class CoupangFeeChangeLog(Base):
     resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
+class CoupangCoupon(Base):
+    """쿠팡 쿠폰 운영 현황 (P5) — 즉시할인쿠폰(fms) + 다운로드쿠폰(marketplace) 통합, couponId 그레인.
+
+    명세: docs/references/06_coupang_coupon_api_specs.md §E #18·#15·#10.
+    coupon_kind=INSTANT(즉시할인, 판매가 직접 할인) / DOWNLOAD(고객 다운로드 쿠폰).
+    ★회계축 아님(D-3): 실제 셀러 부담 할인액은 정산(P4) revenue-history의 seller_discount_coupon에
+      이미 실측 차감됨(04 §3). 이 테이블은 "어떤 쿠폰이 진행중인가" 운영 현황만(보조).
+    grain=(account_key, coupon_kind, coupon_id). vendor_id 귀속(D-8).
+    """
+
+    __tablename__ = "coupang_coupon"
+    __table_args__ = (
+        UniqueConstraint(
+            "account_key", "coupon_kind", "coupon_id", name="uq_coupang_coupon"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    account_key: Mapped[str] = mapped_column(String(20), nullable=False)  # COUPANG_WING1 등
+    vendor_id: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    coupon_kind: Mapped[str] = mapped_column(String(12), nullable=False)  # INSTANT / DOWNLOAD
+    coupon_id: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    contract_id: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    promotion_name: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)  # 즉시=promotionName, 다운로드=title
+    status: Mapped[Optional[str]] = mapped_column(
+        String(20), nullable=True, index=True
+    )  # 즉시: STANDBY/APPLIED/PAUSED/EXPIRED/DETACHED, 다운로드: couponStatus
+    discount_type: Mapped[Optional[str]] = mapped_column(
+        String(30), nullable=True
+    )  # 즉시 type(RATE/FIXED_WITH_QUANTITY/PRICE), 다운로드 typeOfDiscount(RATE/PRICE)
+    discount: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)  # 할인율/할인액
+    max_discount_price: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+    start_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    end_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    wow_exclusive: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)  # 즉시: 와우회원 전용
+    applied_option_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 다운로드: 적용 옵션수
+    usage_amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)  # 다운로드: 사용량
+    synced_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class CoupangCouponItem(Base):
+    """쿠팡 즉시할인쿠폰 아이템 — 옵션(vendorItemId)별 쿠폰 적용 (P5, D-8 결합축).
+
+    명세: docs/references/06_coupang_coupon_api_specs.md §E #20·#17.
+    한 쿠폰(couponId)에 여러 옵션(vendorItemId)이 묶임. vendor_item_id ⨝ 광고·상품·주문·반품 동일축.
+    grain=(account_key, coupon_item_id). couponItemId가 전역 식별자.
+    """
+
+    __tablename__ = "coupang_coupon_item"
+    __table_args__ = (
+        UniqueConstraint(
+            "account_key", "coupon_item_id", name="uq_coupang_coupon_item"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    account_key: Mapped[str] = mapped_column(String(20), nullable=False)
+    vendor_id: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    coupon_item_id: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    coupon_id: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    vendor_item_id: Mapped[str] = mapped_column(
+        String(20), nullable=False, index=True
+    )  # 옵션ID = 결합키(D-8)
+    status: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)  # STANDBY/APPLIED/PAUSED/EXPIRED
+    start_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    end_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    synced_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class CoupangCouponBudget(Base):
+    """쿠팡 쿠폰 예산/계약 현황 (P5) — 계약서(#6) + 월별 예산(#4) 결합, (contract_id, target_month) 그레인.
+
+    명세: docs/references/06_coupang_coupon_api_specs.md §E #4·#6.
+    쿠폰 운영의 예산 토대(즉시할인쿠폰 분담율·월예산·사용액). 계약 메타(분담율·기간)도 함께 저장.
+    target_month 없는 계약 메타만 있는 행은 target_month='' 으로 적재(계약 자체 현황).
+    """
+
+    __tablename__ = "coupang_coupon_budget"
+    __table_args__ = (
+        UniqueConstraint(
+            "account_key", "contract_id", "target_month",
+            name="uq_coupang_coupon_budget",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    account_key: Mapped[str] = mapped_column(String(20), nullable=False)
+    vendor_id: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    contract_id: Mapped[str] = mapped_column(String(20), nullable=False)
+    target_month: Mapped[str] = mapped_column(String(7), nullable=False, default="")  # yyyy-MM 또는 ''(계약메타만)
+    # 예산현황(#4)
+    vendor_share_ratio: Mapped[Optional[Decimal]] = mapped_column(Numeric(7, 2), nullable=True)
+    total_budget_amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)
+    used_budget_amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)
+    # 계약 메타(#6)
+    vendor_contract_id: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    seller_share_ratio: Mapped[Optional[Decimal]] = mapped_column(Numeric(7, 2), nullable=True)
+    coupang_share_ratio: Mapped[Optional[Decimal]] = mapped_column(Numeric(7, 2), nullable=True)
+    contract_type: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)  # CONTRACT_BASED 등
+    contract_start: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    contract_end: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    synced_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 # ──────────────────────────────────────────────
 # 스케줄러 상태
 # ──────────────────────────────────────────────

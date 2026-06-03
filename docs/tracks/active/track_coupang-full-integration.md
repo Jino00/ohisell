@@ -118,7 +118,7 @@
 - [x] P2. 반품/취소/교환 도메인 (회계 순매출 정확화) — **완료(main f2f35b2, codex PASS, prod 배포·라이브 실증 2026-06-03)**. 아래 §7 참조.
 - [x] P3. 로켓그로스 도메인 (상품조회=사이즈, 로켓창고 재고, RG주문) — **읽기5 완료(main bf563c2+fcedbec, codex PASS, prod 배포·라이브 실증 2026-06-03)**. 쓰기2(생성/수정)·카테고리2 stub(쓰기페이즈/P6). 아래 §7 참조.
 - [x] P4. 정산 도메인 (매출내역=수수료 실측·지급내역=통장지급) — **완료(prod 배포·라이브 실증 2026-06-03)**. D-10/D-11 수수료 감사. 아래 §7 참조.
-- [ ] P5. 쿠폰/캐시백 (할인 비용)
+- [x] P5. 쿠폰/캐시백 (쿠폰 운영 현황 — 보조축) — **읽기13 구현+쓰기8 stub 완료(codex PASS 2R, 로컬 격리 검증). prod 배포 대기**. 아래 §7 참조. (회계는 정산 P4가 진실 D-3 — 이건 운영 현황만)
 - [ ] P6. 물류센터·카테고리·브랜드·CS (보조)
 - [x] P7. 종합 조망 화면 결합 (옵션ID 결합 엔진 + 3축 뷰) — **완료(prod 배포·라이브 실증·시각확인 2026-06-03)**. 아래 §7 참조.
 
@@ -253,7 +253,16 @@ pages/   Products(확장)·Returns(신규)·InventoryPage(실재고)·Settlement
   - **★prod 라이브 실증(원칙22, 쿠팡 API 실호출)**: 사이즈 855옵션 적재(cbm>0 785), 재고 784행(orderable>0 129·sold30d>0 12), RG주문 9건(paidAt KST 정규화). 결합축 RG재고⨝product_item(cbm>0) 777옵션. **codex#6 검증**: WING sale_agent_commission 201행 보존(안 덮음). **회계축 불변**: command-center revenue/fee/return/cost 전부 D-12 동일(순이익 차이는 광고 업로드분뿐 — P3 무영향).
   - 부수 사실(D-3): RG 상품목록(businessTypes=rocketGrowth)이 WING 마켓플레이스 목록에 없던 RG전용 855옵션 노출 → product_item 201→1056행. 실 vendorItemId 보유 정상 옵션(허수 아님). 보관비=정산 실측(P4)이 진실, CBM은 모델 토대(입고일 공식 API 없음, D-14).
   - 롤백: 서버 `ohisell.db.bak-p3rg-20260603-120204`.
-- 다음: §8 — P5 쿠폰 / P6 물류·CS+카테고리율 교차+RG카테고리 / 쓰기 페이즈(stub 채우기: RG 상품생성/수정 + products 17). RG 조망 편입(재고축·보관비 모델)은 별도.
+- **✅ P5 쿠폰/캐시백 읽기13 완료(2026-06-03, codex PASS 2R, 로컬 격리 검증 — prod 배포 대기)** — 쿠폰 운영 현황(보조축, 회계는 정산 P4가 진실 D-3):
+  - 명세: /browse 공식 응답 스키마 전수 수집 → docs/references/06 §E(읽기13 응답 스키마). 게이트웨이 3종(fms=code래핑·marketplace_openapi=직접반환·openapi=도서무관).
+  - SA `clients/coupang/coupons.py`(21): 읽기13 구현(예산#4·계약#5#6·즉시할인쿠폰목록#18/단건#15/아이템#16#17#20/주문별#19/요청상태#21·다운로드쿠폰#10#11·도서캐시백검색#2) + 쓰기8 stub(생성/파기 — 쓰기페이즈 dry_run). 페이징 1-based(#18)/0-based(#20) 구분. read_error 표면화.
+  - DB: `CoupangCoupon`(couponId 그레인, 즉시+다운로드 통합)·`CoupangCouponItem`(couponItemId/vendorItemId 그레인 D-8 결합축)·`CoupangCouponBudget`(contractId+targetMonth 그레인, 예산+계약메타) + alembic `f2a4c6e8b0d1`(로컬 적용·왕복 검증 3→0→3).
+  - Harness `services/coupang/coupon_sync.py`: 즉시할인쿠폰 상태별 목록→쿠폰 upsert→각 쿠폰 아이템(옵션 결합)→item upsert / 계약서목록→예산현황(월별) upsert. 하드실패 표면화(_fms_ok).
+  - 소비자 3경로+조회3: `POST /api/sync/coupang-coupons` + 스케줄러 잡 `sync_coupang_coupons`(06:00 KST) + 트리거맵 + `GET /api/coupons/{coupang-coupons,coupang-coupon-items,coupang-coupon-budgets}`.
+  - codex PASS 2R: R1[P1×3]_fms_ok가 data.success 무시·contract/budget 호출부 None만 체크(stale 위장)·아이템 EXPIRED 미동기화(거짓 APPLIED 잔존)+[P2]DETACHED 제외 → 전부 수정(success 검증·_fms_ok 적용·EXPIRED/DETACHED 상태 추가). R2 PASS(신규 0).
+  - ⚠️ 다운로드쿠폰 목록 API 없음(명세 §E) → 자동 sync 제외(즉시할인쿠폰+예산/계약 중심). 현재 쿠폰 운영 0건(Wing 홈 확인) — 라이브 실증 시 빈 데이터 예상.
+  - ⚠️ **prod 배포 대기**: 쿠팡 API는 서버 IP에서만(D-8) → 라이브 실증은 서버 SSH 필요. alembic f2a4c6e8b0d1 prod 적용 필요.
+- 다음: §8 — P5 prod 배포 / P6 물류·CS+카테고리율 교차+RG카테고리 / 쓰기 페이즈(stub 채우기: RG 상품생성/수정 + products 17 + 쿠폰 쓰기8). RG 조망 편입(재고축·보관비 모델)은 별도.
 
 ## 8. 다음 액션 (세션 넘어와도 여기부터)
 **P1+(A)+(B)+P2+P3+P4+P7 + D-12·D-13 모두 완료 + prod 배포·라이브 실증 완결(5/7 페이즈).** 3자 조인 + 순매출 차감 + 수수료 감사 + 종합조망 + 사이즈/CBM·로켓창고 재고·RG주문이 prod 실데이터로 작동. 스케줄러: 05:30 상품·05:35 RG사이즈·05:40 RG재고·05:45 반품·05:50 정산·05:55 RG주문 자동 갱신. 다음 후보(우선순위는 Jino와 정할 것):

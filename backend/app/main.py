@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.routers import ad_costs, channels, oauth, orders, products, sync
 from app.routers import dashboard, scheduler, settlements, manual_revenue
-from app.routers import coupang_report, overview
+from app.routers import coupang_report, overview, coupons
 
 log = logging.getLogger(__name__)
 
@@ -55,6 +55,7 @@ app.include_router(oauth.router)
 app.include_router(manual_revenue.router)
 app.include_router(coupang_report.router)
 app.include_router(overview.router)
+app.include_router(coupons.router)
 
 
 @app.get("/health")

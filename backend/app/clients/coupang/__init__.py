@@ -2,6 +2,7 @@
 # 하위호환: 기존 `from app.clients.coupang import CoupangClient` 그대로 작동.
 from app.clients.coupang._base import CoupangBaseClient
 from app.clients.coupang.channel import CoupangClient
+from app.clients.coupang.coupons import CoupangCouponClient
 from app.clients.coupang.exchanges import CoupangExchangeClient
 from app.clients.coupang.products import CoupangProductClient
 from app.clients.coupang.returns import CoupangReturnClient
@@ -16,4 +17,5 @@ __all__ = [
     "CoupangExchangeClient",
     "CoupangRocketGrowthClient",
     "CoupangSettlementClient",
+    "CoupangCouponClient",
 ]
