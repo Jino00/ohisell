@@ -45,7 +45,18 @@ class CoupangBaseClient:
             + ", signature=" + signature
         )
 
-    def _request(self, method: str, path: str, params: dict | None = None) -> dict | None:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        params: dict | None = None,
+        body: dict | None = None,
+    ) -> dict | None:
+        """쿠팡 Open API 호출. body는 POST/PUT용 JSON 페이로드(optional).
+
+        쿠팡 HMAC 서명은 datetime+method+path+query만 포함(body 제외)하므로
+        body 추가는 기존 GET 동작에 영향 없음(후방호환).
+        """
         now_utc = datetime.now(timezone.utc)
         datetime_str = now_utc.strftime("%y%m%d") + "T" + now_utc.strftime("%H%M%S") + "Z"
 
@@ -62,7 +73,9 @@ class CoupangBaseClient:
 
         for attempt in range(MAX_RETRIES + 1):
             try:
-                resp = requests.request(method, url, headers=headers, timeout=30)
+                resp = requests.request(
+                    method, url, headers=headers, json=body, timeout=30
+                )
                 if resp.status_code in (401, 403):
                     log.error("쿠팡 API 인증 실패 (%d): %s", resp.status_code, path)
                     return None

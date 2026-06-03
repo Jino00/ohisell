@@ -485,6 +485,95 @@ class CoupangProductItem(Base):
 
 
 # ──────────────────────────────────────────────
+# 쿠팡 반품/취소 (순매출 차감 회계축 — P2)
+# ──────────────────────────────────────────────
+class CoupangReturnItem(Base):
+    """쿠팡 반품/취소 옵션(vendorItemId) 단위 — 순매출 차감 결합축 (트랙 P2, D-3).
+
+    명세: docs/references/03_coupang_returns_api_specs.md
+    한 반품접수(receipt_id)에 여러 옵션이 포함되므로 (receipt_id, vendor_item_id) 그레인.
+    vendor_item_id ⨝ orders.platform_product_id 로 조인 → 순매출 = 매출 − (cancel_count × 단가).
+    withdrawn=True(반품철회)는 차감에서 제외. 시스템은 사실/지표 정리만(D-3, 전략판단 없음).
+    """
+
+    __tablename__ = "coupang_return_item"
+    __table_args__ = (
+        UniqueConstraint("receipt_id", "vendor_item_id", name="uq_coupang_return_item"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    receipt_id: Mapped[str] = mapped_column(
+        String(20), nullable=False, index=True
+    )  # 취소(반품)접수번호
+    vendor_item_id: Mapped[str] = mapped_column(
+        String(20), nullable=False, index=True
+    )  # 옵션ID = 결합키 (orders.platform_product_id 조인)
+    account_key: Mapped[str] = mapped_column(String(20), nullable=False)  # COUPANG_WING1 등
+    vendor_id: Mapped[str] = mapped_column(String(20), nullable=False)  # 소유 계정 (A01564720 등)
+    order_id: Mapped[str] = mapped_column(String(30), nullable=False, index=True)  # 주문번호
+    receipt_type: Mapped[str] = mapped_column(String(10), nullable=False)  # RETURN / CANCEL
+    receipt_status: Mapped[Optional[str]] = mapped_column(
+        String(30), nullable=True
+    )  # RETURNS_COMPLETED 등 진행상태
+    cancel_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 취소 수량(부분반품)
+    purchase_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 원 주문 수량
+    seller_product_id: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    seller_product_name: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+    vendor_item_name: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+    fault_by_type: Mapped[Optional[str]] = mapped_column(
+        String(20), nullable=True
+    )  # COUPANG/VENDOR/CUSTOMER/WMS/GENERAL
+    cancel_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    release_status: Mapped[Optional[str]] = mapped_column(String(2), nullable=True)  # Y/N/S
+    pre_refund: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)  # 선환불 여부
+    withdrawn: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )  # 반품철회 → 차감 제외
+    requested_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True, index=True
+    )  # 접수시간(createdAt)
+    modified_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    synced_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class CoupangExchange(Base):
+    """쿠팡 교환요청 — exchangeId 단위 운영 기록 (트랙 P2).
+
+    명세: docs/references/03_coupang_returns_api_specs.md §2.
+    교환은 순매출 차감 없음(상품 교체, 환불 아님 — 카탈로그 '회계 영향 작음'). 운영 가시성용.
+    """
+
+    __tablename__ = "coupang_exchange"
+    __table_args__ = (
+        UniqueConstraint("exchange_id", "vendor_item_id", name="uq_coupang_exchange"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    exchange_id: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    vendor_item_id: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    account_key: Mapped[str] = mapped_column(String(20), nullable=False)
+    vendor_id: Mapped[str] = mapped_column(String(20), nullable=False)
+    order_id: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    exchange_status: Mapped[Optional[str]] = mapped_column(
+        String(20), nullable=True
+    )  # RECEIPT/PROGRESS/SUCCESS/REJECT/CANCEL
+    order_delivery_status: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    refer_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)  # 접수경로
+    vendor_item_name: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+    exchange_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    requested_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True, index=True
+    )
+    synced_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+# ──────────────────────────────────────────────
 # 스케줄러 상태
 # ──────────────────────────────────────────────
 class SchedulerState(Base):

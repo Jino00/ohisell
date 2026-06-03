@@ -198,6 +198,42 @@ def sync_coupang_products_job():
         db.close()
 
 
+def sync_coupang_returns_job():
+    """쿠팡 반품/취소/교환 자동 동기화 (05:45 KST).
+
+    상품 동기화(05:30)·주문 동기화(06:00) 다음, 이익계산(06:30) 전에 실행해
+    순매출 차감(반품/취소) 사실을 갱신한다. 트랙 D-8: 호출은 서버 IP에서만(로컬 403).
+    트랙 D-3: 사실/지표 정리만 — 전략판단 없음.
+    """
+    db = _get_own_db_session()
+    try:
+        from app.services.coupang.returns_sync import sync_all_returns
+
+        results = sync_all_returns(db)
+        log.info("[스케줄러] 쿠팡 반품/교환 동기화 결과: %s", results)
+
+        # 반환형 하드 에러(config_missing 등) 표면화 — sync는 raise 대신 dict로 반환하므로
+        # 여기서 감지해 raise해야 수동 트리거가 거짓 성공을 보고하지 않음(codex [P2] R2 패턴).
+        # (부분 실패 카운터 stats["errors"]는 예상 가능한 부분 성공이라 raise 대상 아님)
+        failed = [r for r in results if r.get("error")]
+        if failed:
+            raise RuntimeError(f"쿠팡 반품 동기화 실패 계정: {failed}")
+
+        state = db.query(SchedulerState).filter(
+            SchedulerState.job_name == "sync_coupang_returns"
+        ).first()
+        if state:
+            state.last_run_at = datetime.now()
+            db.commit()
+    except Exception as e:
+        # cron 경로는 APScheduler가 관용(스케줄러 생존). 수동 트리거 경로는 re-raise로
+        # 실패 표면화(HTTP 500, last_run_at 미갱신) — 거짓 성공 보고 방지(codex [P2]).
+        log.exception("[스케줄러] sync_coupang_returns_job 에러: %s", e)
+        raise
+    finally:
+        db.close()
+
+
 def cafe24_proactive_refresh_job():
     """cafe24 Access Token 만료 30분 전 자동 갱신.
 
@@ -280,6 +316,7 @@ def _ensure_default_states(db):
         ("sync_naver_sa_ad_costs", "0 7 * * *"),
         ("sync_meta_ad_costs", "0 7 * * *"),
         ("sync_coupang_products", "30 5 * * *"),
+        ("sync_coupang_returns", "45 5 * * *"),
     ]
     for name, cron in defaults:
         existing = db.query(SchedulerState).filter(
@@ -314,6 +351,8 @@ def start_scheduler():
                 job_func = sync_meta_ad_costs_job
             elif state.job_name == "sync_coupang_products":
                 job_func = sync_coupang_products_job
+            elif state.job_name == "sync_coupang_returns":
+                job_func = sync_coupang_returns_job
 
             if job_func:
                 try:

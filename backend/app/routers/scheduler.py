@@ -52,12 +52,14 @@ def trigger_job(job_id: str, db: Session = Depends(get_db)):
         recalculate_profit_job,
         sync_all_channels_job,
         sync_coupang_products_job,
+        sync_coupang_returns_job,
     )
 
     job_map = {
         "auto_sync_orders": sync_all_channels_job,
         "auto_profit_calc": recalculate_profit_job,
         "sync_coupang_products": sync_coupang_products_job,
+        "sync_coupang_returns": sync_coupang_returns_job,
     }
 
     func = job_map.get(job_id)
