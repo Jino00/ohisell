@@ -74,6 +74,21 @@ def sync_coupang_products(
     return sync_all_products(db, refresh_inventory=refresh_inventory)
 
 
+@router.post("/coupang-returns")
+def sync_coupang_returns(
+    days: int = 35,
+    db: Session = Depends(get_db),
+):
+    """쿠팡 반품/취소/교환 동기화 (순매출 차감 회계축 적재).
+
+    트랙 D-8: 쿠팡 Open API는 서버 IP 화이트리스트 — 서버에서만 동작(로컬 403).
+    트랙 D-3: 사실/지표 정리만(전략판단 없음). days: 과거 동기화 기간(31일 윈도우로 자동 분할).
+    """
+    from app.services.coupang.returns_sync import sync_all_returns
+
+    return sync_all_returns(db, days=days)
+
+
 @router.get("/status", response_model=list[SyncStatusOut])
 def sync_status(db: Session = Depends(get_db)):
     """채널별 마지막 동기화 상태"""

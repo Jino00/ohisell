@@ -20,6 +20,15 @@ MAX_RETRIES = 3
 RETRY_BASE_DELAY = 2  # seconds
 
 
+class CoupangReadError(Exception):
+    """쿠팡 읽기 호출이 API 레벨에서 실패(None 반환·비200 코드)했음을 알리는 예외.
+
+    codex [P1]: 실패한 읽기를 '0건 성공'으로 위장하면(iterator가 조용히 break) 데이터가
+    stale인데도 스케줄러가 성공 보고한다(원칙 22). 페이징 iterator는 정상 빈 페이지(code 200,
+    data 없음)와 이 예외를 구분해, 하드 실패는 이 예외로 표면화하고 Harness가 집계·표면화한다.
+    """
+
+
 class CoupangBaseClient:
     """쿠팡 계정 1개에 대한 서명·요청 공통 베이스.
 
@@ -45,7 +54,18 @@ class CoupangBaseClient:
             + ", signature=" + signature
         )
 
-    def _request(self, method: str, path: str, params: dict | None = None) -> dict | None:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        params: dict | None = None,
+        body: dict | None = None,
+    ) -> dict | None:
+        """쿠팡 Open API 호출. body는 POST/PUT용 JSON 페이로드(optional).
+
+        쿠팡 HMAC 서명은 datetime+method+path+query만 포함(body 제외)하므로
+        body 추가는 기존 GET 동작에 영향 없음(후방호환).
+        """
         now_utc = datetime.now(timezone.utc)
         datetime_str = now_utc.strftime("%y%m%d") + "T" + now_utc.strftime("%H%M%S") + "Z"
 
@@ -62,7 +82,9 @@ class CoupangBaseClient:
 
         for attempt in range(MAX_RETRIES + 1):
             try:
-                resp = requests.request(method, url, headers=headers, timeout=30)
+                resp = requests.request(
+                    method, url, headers=headers, json=body, timeout=30
+                )
                 if resp.status_code in (401, 403):
                     log.error("쿠팡 API 인증 실패 (%d): %s", resp.status_code, path)
                     return None
