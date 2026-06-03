@@ -6,7 +6,13 @@
 - 날짜: 2026-06-03
 - 단계: ★메가 프로젝트 P1+(A)+(B)+P2+**P3(로켓그로스 읽기5)**+P4+P7+D-12+D-13 완료·prod 라이브 실증. **5/7 페이즈**. 다음 P5쿠폰/P6/쓰기페이즈/RG조망편입
 - 전체 진행률: 트랙 5/7 페이즈. P3 로켓그로스 읽기5(사이즈/CBM·로켓창고 재고·RG주문) prod 배포·라이브 실증 완료(사이즈 855옵션·재고 784행·RG주문 9건)
-- 최신 커밋(main): fcedbec(P3 codex[P2]fix) ← bf563c2(P3 로켓그로스 읽기5) ← 8065f2f(HANDOFF) ← 1cab53c(D-13 docs) ← … ⚠️ origin 미푸시(P3 2커밋 로컬, scp배포는 완료)
+- 최신 커밋(main): e46f20d(D-15 쿠폰21·배송환불12+카탈로그) ← 6516a88(D-15 카테고리·브랜드·물류·CS) ← fd0698c(P3 docs) ← fcedbec(P3 fix) ← bf563c2(P3) ← 8065f2f ← … ⚠️ origin 미푸시(로컬 다수), P3 scp배포 완료
+
+## D-15 쿠팡 API 전수 수집 — phase① 공식 API 100% 완료 (2026-06-03)
+- [x] 배경: 입고 API "없다" 단정 오류(공식만 보고)→Jino 지적. 해결: 전수 레퍼런스 확보(추정금지)
+- [x] phase①: 공식 100개 엔드포인트 전부 path·method·params·응답 수집 → references 02~11(신규 06쿠폰·07배송환불·08물류·09카테고리·10CS·11브랜드)
+- [x] 게이트웨이 5종 식별(seller_api·openapi·marketplace_openapi·fms·rg_open_api). 카탈로그01 전수인덱스 갱신. 메모리 coupang-two-api-surfaces
+- [ ] phase②: Wing 포털 내부 API 매핑(비공식·세션쿠키, 입고 등 공식에 없는 것) → 12번 문서. ★재로그인 필요
 
 ## P3 로켓그로스 도메인 읽기5 — 완료(prod 배포·라이브 실증) (2026-06-03)
 - [x] 명세 /browse 공식수집 → references/05 (9엔드포인트·사이즈 6등급·보관비 CBM 공식). 라이브 진단 diag_rg_probe.py
