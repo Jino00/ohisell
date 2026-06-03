@@ -119,12 +119,15 @@
 - **게이트웨이 패밀리**(서명은 _base HMAC 동일): seller_api(상품·카테고리·브랜드) · openapi(발주서·CS·[도서]캐시백·정산매출) · marketplace_openapi([다운로드쿠폰]·정산지급) · fms([즉시할인쿠폰]·예산/계약) · rg_open_api(로켓창고 재고·RG주문).
 - ⚠️ 쓰기(생성/수정/취소/파기) 본문 스키마는 구현 시 해당 article 재확인(추정 금지). 본 레퍼런스는 path·method·params·핵심 응답까지 권위.
 
-## ★ Wing 포털 내부 API (D-15 phase②) — 공식 문서에 없는 것
-- 공식 Open API에 **없지만** Wing 셀러포털(wing.coupang.com/tenants/*)이 쓰는 내부 API 존재(입고 등). 세션쿠키 인증·비공식. 네트워크 캡처로 매핑 → `12_coupang_wing_internal_apis.md`(별도, 재로그인 필요).
-- 예 확인됨: 입고 `GET /tenants/rfm-inbound/data/inbound/search`(shipment 타임스탬프·CBM·receivedQty). ⚠️ 비공식이라 사용은 건별 판단(D-14).
+## ★ Wing 포털 내부 API (D-15 phase② 완료 — 2026-06-03)
+- 공식 Open API에 **없지만** Wing 셀러포털(wing.coupang.com/tenants/*)이 쓰는 내부 API. 세션쿠키 인증·비공식.
+- **전수 매핑 완료** → `12_coupang_wing_internal_apis.md`. 13섹션, 60+ 엔드포인트 수집.
+- 주요 테넌트: `rfm-inbound`(입고) · `rfm-inventory`(재고건강) · `rfm`(RG홈) · `msf`(정산) · `sfl-portal`(반품/교환) · `seller-web`(상품) · `rfm-ss`(판매분석) · `cs`(문의) · `seller-price-management`(가격) · `seller-promotion-platform`(프로모션) · `hermes`(판매자점수) · `wing-account/cgf/finance`(계정/정산).
+- ★ 입고: `GET /tenants/rfm-inbound/data/inbound/search?pagingSize=10&pageIndex=0` — shipment 타임스탬프·CBM·receivedQty. 공식 불가 유일 소스. ⚠️ D-14 "공식 우선" — 사용 시 건별 판단.
 
 ## 미해결 / 다음 확정 필요
 - [x] ~~각 미사용 API의 정확한 path·파라미터·응답 스키마~~ → **공식 100개 전수 완료(02~11, D-15)**.
-- [ ] Wing 내부 API 전체 매핑(phase②, 재로그인 후) → 12번 문서.
+- [x] ~~Wing 내부 API 전체 매핑~~ → **12번 문서 완료 (D-15 phase②)**.
+- [ ] `msf/revenue-history-view` 서브API — 브라우저 크래시로 미수집. 필요 시 재수집.
 - [ ] 쓰기 API 본문 스키마(구현 시점 재확인).
 - [ ] 속도제한: rg_open_api 분당 50회 확인. 나머지 게이트웨이 한도는 미확정.
