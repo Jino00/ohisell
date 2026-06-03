@@ -1,6 +1,6 @@
 # 트랙: 쿠팡 API 전 기능 연결 + 종합 조망(Command Center)
 
-> 시작: 2026-06-02 · 상태: Active · 단계: P1+(A)+(B)+P2+P4+**P7**+**D-12(원가다리)**+**D-13(수수료 자기기준선)** 완료·prod 라이브(3자 조인+순매출 차감+수수료 감사 실작동+종합조망+순이익 원가 정확화). 4/7 페이즈. 다음 P3 로켓그로스 / P5 쿠폰 / P6 / 쓰기
+> 시작: 2026-06-02 · 상태: Active · 단계: P1+(A)+(B)+P2+**P3(로켓그로스 읽기5)**+P4+**P7**+**D-12**+**D-13** 완료·prod 라이브(3자 조인+순매출 차감+수수료 감사+종합조망+원가 정확화+사이즈/CBM·로켓창고 재고·RG주문). **5/7 페이즈**. 다음 P5 쿠폰 / P6 / 쓰기
 
 ## 1. 목표 (한 줄)
 오픽스의 판매현황을 회계·광고전략·상품전략까지 한눈에 조망하는 사령탑을 만들고, 그 토대로 쿠팡 Open API(윙+로켓그로스) 전 기능(읽기+쓰기)을 ohisell에 연결한다.
@@ -106,7 +106,7 @@
 - [ ] P0. 스코프 확정(완료) + 구조설계(Agent/Harness/SA) → Jino 승인
 - [x] P1. 상품 도메인 (읽기 결합축) — 명세수집→구현→codex PASS→격리 드라이런 검증→main 머지(a4afac7). 쓰기 17개는 stub(쓰기 페이즈). **✅ (B) 소비자 연결 + prod 배포·실sync 완료(2026-06-03)** — 아래 §7 참조.
 - [x] P2. 반품/취소/교환 도메인 (회계 순매출 정확화) — **완료(main f2f35b2, codex PASS, prod 배포·라이브 실증 2026-06-03)**. 아래 §7 참조.
-- [ ] P3. 로켓그로스 도메인 (상품조회=사이즈, 로켓창고 재고, RG주문)
+- [x] P3. 로켓그로스 도메인 (상품조회=사이즈, 로켓창고 재고, RG주문) — **읽기5 완료(main bf563c2+fcedbec, codex PASS, prod 배포·라이브 실증 2026-06-03)**. 쓰기2(생성/수정)·카테고리2 stub(쓰기페이즈/P6). 아래 §7 참조.
 - [x] P4. 정산 도메인 (매출내역=수수료 실측·지급내역=통장지급) — **완료(prod 배포·라이브 실증 2026-06-03)**. D-10/D-11 수수료 감사. 아래 §7 참조.
 - [ ] P5. 쿠폰/캐시백 (할인 비용)
 - [ ] P6. 물류센터·카테고리·브랜드·CS (보조)
@@ -233,13 +233,26 @@ pages/   Products(확장)·Returns(신규)·InventoryPage(실재고)·Settlement
   - 격리 결정적 검증: 합성 드리프트 주입→플래그, mode 플립(기준 10.5→9.99)에도 log 1 유지+컬럼 방향 갱신.
   - DB 마이그레이션 불필요(CoupangFeeChangeLog 컬럼 재사용). 롤백: ohisell.db.bak-d13fee-20260603-104240·/tmp/rollback_d13(서버).
   - 카테고리율 교차는 P6에서 2차 레이어로(D-13 명시).
-- 다음: §8 — P3 로켓그로스(사이즈·재고·RG주문) / P5 쿠폰 / P6 물류·CS+카테고리율 교차 / 쓰기 페이즈(stub 채우기).
+- **✅ P3 로켓그로스 도메인 읽기5 완료(2026-06-03, main bf563c2+fcedbec, prod 배포·라이브 실증)** — 사이즈·재고·RG주문(D-14):
+  - 명세: /browse 공식 수집 → docs/references/05(9엔드포인트 + 사이즈 6등급 + 보관비 CBM 공식). 라이브 진단 diag_rg_probe.py.
+  - SA `clients/coupang/rocketgrowth.py`: 읽기5 구현(상품조회 skuInfo·상품목록 businessTypes=rocketGrowth·로켓창고 재고·RG주문 목록/단건) + 쓰기2·카테고리2 stub. 두 게이트웨이(seller_api/rg_open_api), 하드실패 CoupangReadError.
+  - DB: coupang_product_item 사이즈 컬럼(w/l/h_mm·weight/net_weight_g·cbm) + 신규 coupang_rg_inventory·coupang_rg_order_item + alembic d5b7e9c1a3f2(로컬·prod 적용·왕복 검증).
+  - Harness 3: rg_size_sync(사이즈→CBM)·rg_inventory_sync·rg_order_sync(≤30일 윈도우·paidAt ms/ISO 정규화·단가필드 unitSalesPrice/salesPrice 방어).
+  - 소비자: POST /api/sync/coupang-rg-{sizes,inventory,orders} + 스케줄러 잡 3(05:35/40/55, _coupang_failed가 read_error도 감지) + 트리거맵.
+  - codex PASS 2R: R1[P2] rg_size_sync 단건조회 전부 실패가 success로 묻힘(stale 위장) → systemic 실패(sized·rg_products 0) 시 read_error 표면화. R2 PASS(신규이슈 0).
+  - **★prod 라이브 실증(원칙22, 쿠팡 API 실호출)**: 사이즈 855옵션 적재(cbm>0 785), 재고 784행(orderable>0 129·sold30d>0 12), RG주문 9건(paidAt KST 정규화). 결합축 RG재고⨝product_item(cbm>0) 777옵션. **codex#6 검증**: WING sale_agent_commission 201행 보존(안 덮음). **회계축 불변**: command-center revenue/fee/return/cost 전부 D-12 동일(순이익 차이는 광고 업로드분뿐 — P3 무영향).
+  - 부수 사실(D-3): RG 상품목록(businessTypes=rocketGrowth)이 WING 마켓플레이스 목록에 없던 RG전용 855옵션 노출 → product_item 201→1056행. 실 vendorItemId 보유 정상 옵션(허수 아님). 보관비=정산 실측(P4)이 진실, CBM은 모델 토대(입고일 공식 API 없음, D-14).
+  - 롤백: 서버 `ohisell.db.bak-p3rg-20260603-120204`.
+- 다음: §8 — P5 쿠폰 / P6 물류·CS+카테고리율 교차+RG카테고리 / 쓰기 페이즈(stub 채우기: RG 상품생성/수정 + products 17). RG 조망 편입(재고축·보관비 모델)은 별도.
 
 ## 8. 다음 액션 (세션 넘어와도 여기부터)
-**P1+(A)+(B)+P2+P4 모두 완료 + prod 배포·라이브 실증 완결.** 3자 조인(광고⨝상품⨝주문) + 순매출 차감(반품⨝주문) + 수수료 감사(매출내역 serviceFeeRatio↔등록율, D-10/D-11)가 prod 실데이터로 작동. 스케줄러: 05:30 상품·05:45 반품·05:50 정산 자동 갱신. 다음 후보(우선순위는 Jino와 정할 것 — "순서대로" 지침이면 P3):
-- **P3 로켓그로스 도메인** (트랙 페이즈 순서) — 상품조회=사이즈(보관비 원가)·로켓창고 재고·RG주문. clients/coupang/rocketgrowth.py(9 SA) 신규. 외부 API 명세 수집 필요(/browse) → Opus 권장.
-- **P7 종합 조망 화면(소비자)** — 3자 조인+순매출 차감 엔진을 실제 UI로(D-2 Command Center). 백엔드 결합엔진이 prod 라이브라 당겨올 만함. 단 D-6(백엔드 우선) 고려.
-- ~~수수료 감사 기준선 재검토~~ → **D-13으로 완료**(자기 정착율 기준선, prod 라이브). P6에서 카테고리율 2차 교차만 남음.
+**P1+(A)+(B)+P2+P3+P4+P7 + D-12·D-13 모두 완료 + prod 배포·라이브 실증 완결(5/7 페이즈).** 3자 조인 + 순매출 차감 + 수수료 감사 + 종합조망 + 사이즈/CBM·로켓창고 재고·RG주문이 prod 실데이터로 작동. 스케줄러: 05:30 상품·05:35 RG사이즈·05:40 RG재고·05:45 반품·05:50 정산·05:55 RG주문 자동 갱신. 다음 후보(우선순위는 Jino와 정할 것):
+- **P5 쿠폰/캐시백** (할인 비용) — coupons.py(21 SA). 셀러 부담 할인 비용 반영.
+- **P6 물류센터·카테고리·브랜드·CS** — ★수수료 감사 카테고리율 2차 교차(D-13 후속) + RG 카테고리 stub(#8·#9) 본 구현. category.py(6 SA).
+- **쓰기 페이즈** — RG 상품생성/수정(rocketgrowth.py stub) + products.py 17 stub + returns/exchanges 쓰기. ⚠️ dry_run 안전장치(D-1), product_write.py Harness.
+- **(선택) RG 조망 편입** — 로켓창고 재고축·보관비 CBM 모델을 intelligence.py/Command Center에 합류(현재 적재만 됨, 화면 미연결). 보관비는 정산 실측이 진실, CBM은 모델 지표(D-14).
+- ~~P3 로켓그로스~~ → **완료**(읽기5 prod 라이브). 쓰기2·카테고리2 stub만 남음(쓰기페이즈/P6).
+- ~~수수료 감사 기준선 재검토~~ → **D-13으로 완료**. P6에서 카테고리율 2차 교차만 남음.
 - (선택) 반품 커버리지 관찰: 현재 35일 13행. 교환 0(윈도우 내 없음 — exchangeItems 구조는 실데이터 등장 시 검증 필요). (사실 관찰만 — 전략판단은 Jino)
 - (선택) 광고 원가 커버리지 확대: D-12로 주문87%·매출내역94% 원가닿으나 광고집행옵션은 28%뿐(광고 옵션ID와 product_channel_mapping 교집합 작음). 광고측 매핑 보강 시 광고 ROI 정확화.
 

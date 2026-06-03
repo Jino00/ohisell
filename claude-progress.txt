@@ -4,9 +4,17 @@
 
 ## 현재 상태
 - 날짜: 2026-06-03
-- 단계: ★메가 프로젝트 P1+(A)+(B)+P2+P4+P7+D-12(원가다리)+**D-13(수수료 자기기준선)** 완료·prod 라이브 실증. 3자조인+순매출차감+수수료감사 실작동+종합조망+원가다리 prod 작동(4/7 페이즈). 다음 P3/P5/P6/쓰기
-- 전체 진행률: 트랙 4/7 페이즈 + D-12 원가개선 + D-13 수수료감사 실작동화 prod 배포·라이브 실증 완료
-- 최신 커밋(main, origin 동기화): 1cab53c(D-13 docs) ← 4dc9622(D-13 양방향dedup) ← 4f6ecfa(D-13 정규화) ← bdd0e10(D-13 자기기준선) ← 55a454a(D-12 교훈) ← f614fd3(D-12 fix) ← 4d13504(D-12 원가다리) ← a2bbd3a(P7) ← …
+- 단계: ★메가 프로젝트 P1+(A)+(B)+P2+**P3(로켓그로스 읽기5)**+P4+P7+D-12+D-13 완료·prod 라이브 실증. **5/7 페이즈**. 다음 P5쿠폰/P6/쓰기페이즈/RG조망편입
+- 전체 진행률: 트랙 5/7 페이즈. P3 로켓그로스 읽기5(사이즈/CBM·로켓창고 재고·RG주문) prod 배포·라이브 실증 완료(사이즈 855옵션·재고 784행·RG주문 9건)
+- 최신 커밋(main): fcedbec(P3 codex[P2]fix) ← bf563c2(P3 로켓그로스 읽기5) ← 8065f2f(HANDOFF) ← 1cab53c(D-13 docs) ← … ⚠️ origin 미푸시(P3 2커밋 로컬, scp배포는 완료)
+
+## P3 로켓그로스 도메인 읽기5 — 완료(prod 배포·라이브 실증) (2026-06-03)
+- [x] 명세 /browse 공식수집 → references/05 (9엔드포인트·사이즈 6등급·보관비 CBM 공식). 라이브 진단 diag_rg_probe.py
+- [x] SA rocketgrowth.py(읽기5+stub4) / DB 사이즈컬럼+신규테이블2(alembic d5b7e9c1a3f2) / Harness 3(size·inventory·order) / 소비자(엔드포인트3+잡3+트리거맵)
+- [x] 보관비 = CBM(w×l×h mm/1e9)×기간단가. 입고일 공식 API 없음(Wing 내부 API에만, Jino: 공식만 사용) → 보관비 실측은 정산(P4), CBM은 모델(D-14)
+- [x] codex PASS 2R: R1[P2] 단건조회 전부 실패 stale 위장 → systemic 시 read_error. R2 PASS
+- [x] ★prod 라이브 실증: 사이즈 855옵션(cbm 785)·재고 784행(sold30d>0 12)·RG주문 9건. WING 수수료 201행 보존(codex#6). 회계축 D-12 불변
+- [x] DB 마이그레이션 d5b7e9c1a3f2 prod 적용. 롤백: ohisell.db.bak-p3rg-20260603-120204
 
 ## D-13 수수료 감사 기준선 = 옵션 자기 정착율 — 완료(prod 배포·라이브 실증) (2026-06-03)
 - [x] 진단: saleAgentCommission 201옵션 전부 0 → 기존 _fee_audit 실제 비교 0건(감사 부재였음). 실측율 service_fee_ratio 84옵션 100%·안정
