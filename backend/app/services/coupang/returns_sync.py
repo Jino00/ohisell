@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session
@@ -18,17 +19,23 @@ from app.models import CoupangExchange, CoupangReturnItem
 log = logging.getLogger(__name__)
 
 RETURN_ACCOUNTS = ["COUPANG_WING1", "COUPANG_WING2"]
-_MAX_SPAN_DAYS = 31  # 반품 목록 조회 최대 조회기간(쿠팡 제약)
+# 라이브 실측(2026-06-03, 서버 프로브)으로 확정한 조회기간 제약:
+_RETURN_SPAN_DAYS = 31   # 반품/취소 목록(returnRequests): 최대 31일
+_SHORT_SPAN_DAYS = 7     # 반품철회·교환: "less then 7day" → 7일 윈도우(6일 차이)
+# 반품(cancelType=RETURN)은 status 파라미터 필수("OrderId can't be null if doesn't pass status").
+# 취소(CANCEL)는 status 미사용. 전 상태를 덮기 위해 status별 순회.
+RETURN_STATUSES = ["RU", "UC", "CC", "PR"]  # 출고중지요청·반품접수·반품완료·쿠팡확인요청
+_CALL_DELAY = 0.3  # 쿠팡 속도제한(429) 대응 — 호출 간 간격
 
 
-def _date_windows(days: int) -> list[tuple[str, str]]:
-    """오늘 기준 과거 days일을 ≤31일 윈도우들로 분할. 각 ("yyyy-MM-dd","yyyy-MM-dd")."""
+def _date_windows(days: int, max_span: int) -> list[tuple[str, str]]:
+    """오늘 기준 과거 days일을 ≤max_span일 윈도우들로 분할. 각 ("yyyy-MM-dd","yyyy-MM-dd")."""
     today = datetime.now().date()
     start = today - timedelta(days=max(days, 1))
     windows: list[tuple[str, str]] = []
     cursor = start
     while cursor <= today:
-        chunk_end = min(cursor + timedelta(days=_MAX_SPAN_DAYS - 1), today)
+        chunk_end = min(cursor + timedelta(days=max_span - 1), today)
         windows.append((cursor.strftime("%Y-%m-%d"), chunk_end.strftime("%Y-%m-%d")))
         cursor = chunk_end + timedelta(days=1)
     return windows
@@ -53,21 +60,29 @@ def _parse_dt(value) -> datetime | None:
 
 
 def _upsert_return_item(
-    db: Session, account_key: str, vendor_id: str, receipt: dict, item: dict
+    db: Session, account_key: str, vendor_id: str, receipt: dict, item: dict,
+    seen: dict | None = None,
 ) -> bool:
-    """반품 옵션 1건을 coupang_return_item에 upsert ((receipt_id, vendor_item_id) 기준)."""
+    """반품 옵션 1건을 coupang_return_item에 upsert ((receipt_id, vendor_item_id) 기준).
+
+    seen: per-run 캐시. 같은 (receipt_id, vendor_item_id)가 여러 status 쿼리·페이지에 중복
+    등장해도 동일 pending 객체를 재사용해 UNIQUE 충돌을 막는다(autoflush 타이밍 비의존).
+    """
     receipt_id = str(receipt.get("receiptId") or "")
     vii = str(item.get("vendorItemId") or "")
     if not receipt_id or not vii:
         return False
-    row = (
-        db.query(CoupangReturnItem)
-        .filter(
-            CoupangReturnItem.receipt_id == receipt_id,
-            CoupangReturnItem.vendor_item_id == vii,
+    key = (receipt_id, vii)
+    row = seen.get(key) if seen is not None else None
+    if row is None:
+        row = (
+            db.query(CoupangReturnItem)
+            .filter(
+                CoupangReturnItem.receipt_id == receipt_id,
+                CoupangReturnItem.vendor_item_id == vii,
+            )
+            .first()
         )
-        .first()
-    )
     if row is None:
         row = CoupangReturnItem(receipt_id=receipt_id, vendor_item_id=vii)
         db.add(row)
@@ -99,6 +114,8 @@ def _upsert_return_item(
     row.pre_refund = receipt.get("preRefund")
     row.requested_at = _parse_dt(receipt.get("createdAt"))
     row.modified_at = _parse_dt(receipt.get("modifiedAt"))
+    if seen is not None:
+        seen[key] = row
     return True
 
 
@@ -125,12 +142,14 @@ def _mark_withdrawn(db: Session, account_key: str, vendor_id: str, withdraw: dic
 
 
 def _upsert_exchange(
-    db: Session, account_key: str, vendor_id: str, exchange: dict
+    db: Session, account_key: str, vendor_id: str, exchange: dict,
+    seen: dict | None = None,
 ) -> int:
     """교환 1건의 아이템들을 coupang_exchange에 upsert. 적재된 옵션 행수 반환.
 
     exchangeItems[] 내부 구조가 명세상 미확정 → 방어적 추출(여러 후보 키 시도).
     vendorItemId를 못 찾으면 스킵+로그(추정 금지). 라이브에서 실제 구조 확인 후 보정.
+    seen: per-run 캐시 — (exchange_id, vendor_item_id) 중복 등장 시 UNIQUE 충돌 방지.
     """
     exchange_id = str(exchange.get("exchangeId") or "")
     order_id = str(exchange.get("orderId") or "")
@@ -148,14 +167,17 @@ def _upsert_exchange(
         if not vii:
             log.info("교환 %s 아이템에 vendorItemId 없음 → 스킵(라이브 구조 확인 필요)", exchange_id)
             continue
-        row = (
-            db.query(CoupangExchange)
-            .filter(
-                CoupangExchange.exchange_id == exchange_id,
-                CoupangExchange.vendor_item_id == vii,
+        key = (exchange_id, vii)
+        row = seen.get(key) if seen is not None else None
+        if row is None:
+            row = (
+                db.query(CoupangExchange)
+                .filter(
+                    CoupangExchange.exchange_id == exchange_id,
+                    CoupangExchange.vendor_item_id == vii,
+                )
+                .first()
             )
-            .first()
-        )
         if row is None:
             row = CoupangExchange(exchange_id=exchange_id, vendor_item_id=vii)
             db.add(row)
@@ -168,6 +190,8 @@ def _upsert_exchange(
         row.vendor_item_name = (item.get("vendorItemName") or "")[:300] or None
         row.exchange_count = item.get("quantity") or item.get("cancelCount")
         row.requested_at = _parse_dt(exchange.get("createdAt"))
+        if seen is not None:
+            seen[key] = row
         n += 1
     return n
 
@@ -188,32 +212,51 @@ def sync_account_returns(db: Session, account_key: str, *, days: int = 35) -> di
         "returns": 0, "cancels": 0, "items": 0,
         "withdrawn": 0, "exchanges": 0, "errors": 0, "api_failures": 0,
     }
-    windows = _date_windows(days)
+    # per-run 캐시: 같은 키가 여러 status 쿼리·페이지에 중복 등장해도 UNIQUE 충돌 방지.
+    seen_ret: dict = {}
+    seen_exc: dict = {}
 
-    for win_from, win_to in windows:
-        # 반품(RETURN) + 취소(CANCEL) 두 타입. CANCEL은 status·orderId 제외(쿠팡 제약).
-        for cancel_type in ("RETURN", "CANCEL"):
+    # ① 반품/취소 목록 (31일 윈도우). RETURN은 status별 순회(필수), CANCEL은 status 없이 1회.
+    for win_from, win_to in _date_windows(days, _RETURN_SPAN_DAYS):
+        for status in RETURN_STATUSES:
             try:
                 for receipt in ret_client.iter_return_requests(
-                    created_at_from=win_from, created_at_to=win_to, cancel_type=cancel_type
+                    created_at_from=win_from, created_at_to=win_to,
+                    cancel_type="RETURN", status=status,
                 ):
-                    rtype = receipt.get("receiptType") or cancel_type
-                    if rtype == "CANCEL":
-                        stats["cancels"] += 1
-                    else:
-                        stats["returns"] += 1
+                    stats["returns"] += 1
                     for item in receipt.get("returnItems", []) or []:
-                        if _upsert_return_item(db, account_key, vendor_id, receipt, item):
+                        if _upsert_return_item(db, account_key, vendor_id, receipt, item, seen_ret):
                             stats["items"] += 1
             except CoupangReadError:  # codex [P1]: API 하드실패는 stale 위장 금지 → 집계
-                log.exception("반품 목록 읽기 실패 %s %s~%s (%s)",
-                              account_key, win_from, win_to, cancel_type)
+                log.exception("반품 목록 읽기 실패 %s %s~%s RETURN/%s",
+                              account_key, win_from, win_to, status)
                 stats["api_failures"] += 1
-            except Exception:  # noqa: BLE001 — 한 윈도우 코드오류가 전체를 막지 않게
-                log.exception("반품 목록 동기화 오류 %s %s~%s (%s)",
-                              account_key, win_from, win_to, cancel_type)
+            except Exception:  # noqa: BLE001 — 한 호출 코드오류가 전체를 막지 않게
+                log.exception("반품 목록 오류 %s %s~%s RETURN/%s",
+                              account_key, win_from, win_to, status)
                 stats["errors"] += 1
+            time.sleep(_CALL_DELAY)
 
+        # 취소(CANCEL): status·orderId 제외(쿠팡 제약), 결제완료 단계 취소 포함.
+        try:
+            for receipt in ret_client.iter_return_requests(
+                created_at_from=win_from, created_at_to=win_to, cancel_type="CANCEL"
+            ):
+                stats["cancels"] += 1
+                for item in receipt.get("returnItems", []) or []:
+                    if _upsert_return_item(db, account_key, vendor_id, receipt, item, seen_ret):
+                        stats["items"] += 1
+        except CoupangReadError:
+            log.exception("취소 목록 읽기 실패 %s %s~%s", account_key, win_from, win_to)
+            stats["api_failures"] += 1
+        except Exception:  # noqa: BLE001
+            log.exception("취소 목록 오류 %s %s~%s", account_key, win_from, win_to)
+            stats["errors"] += 1
+        time.sleep(_CALL_DELAY)
+
+    # ② 반품철회 + 교환 (7일 윈도우 — 라이브 실측 'less then 7day').
+    for win_from, win_to in _date_windows(days, _SHORT_SPAN_DAYS):
         # 반품철회 → withdrawn 마킹 (차감 제외)
         try:
             for withdraw in ret_client.iter_return_withdraw(
@@ -224,8 +267,9 @@ def sync_account_returns(db: Session, account_key: str, *, days: int = 35) -> di
             log.exception("반품철회 읽기 실패 %s %s~%s", account_key, win_from, win_to)
             stats["api_failures"] += 1
         except Exception:  # noqa: BLE001
-            log.exception("반품철회 동기화 오류 %s %s~%s", account_key, win_from, win_to)
+            log.exception("반품철회 오류 %s %s~%s", account_key, win_from, win_to)
             stats["errors"] += 1
+        time.sleep(_CALL_DELAY)
 
         # 교환 (운영 기록 — 회계 차감 없음). createdAt 형식은 분초까지.
         try:
@@ -234,13 +278,14 @@ def sync_account_returns(db: Session, account_key: str, *, days: int = 35) -> di
             for exchange in exc_client.iter_exchange_requests(
                 created_at_from=ex_from, created_at_to=ex_to
             ):
-                stats["exchanges"] += _upsert_exchange(db, account_key, vendor_id, exchange)
+                stats["exchanges"] += _upsert_exchange(db, account_key, vendor_id, exchange, seen_exc)
         except CoupangReadError:
             log.exception("교환 읽기 실패 %s %s~%s", account_key, win_from, win_to)
             stats["api_failures"] += 1
         except Exception:  # noqa: BLE001
-            log.exception("교환 동기화 오류 %s %s~%s", account_key, win_from, win_to)
+            log.exception("교환 오류 %s %s~%s", account_key, win_from, win_to)
             stats["errors"] += 1
+        time.sleep(_CALL_DELAY)
 
     # 정상 동기화분은 먼저 커밋(좋은 데이터 보존), 그 후 하드 실패를 표면화.
     db.commit()
