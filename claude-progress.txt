@@ -4,9 +4,18 @@
 
 ## 현재 상태
 - 날짜: 2026-06-03
-- 단계: ★메가 프로젝트 P1+(A)+(B)+P2+P4+P7+**D-12(조망 순이익 원가 정확화)** 완료·prod 라이브 실증. 3자조인+순매출차감+수수료감사+종합조망+원가다리 prod 작동(4/7 페이즈). 다음 P3/P5/P6/쓰기/수수료기준선 재검토
-- 전체 진행률: 트랙 4/7 페이즈 + D-12 원가 개선 prod 배포·라이브 실증 완료
-- 최신 커밋(main, origin 동기화): f614fd3(D-12 fix) ← 4d13504(D-12 원가다리) ← a2bbd3a(P7) ← 1c70c3d(returns KST) ← 8abb607(P4) ← f2f35b2(P2) ← b786e11(B) ← 9a45eee(A) ← a4afac7(P1)
+- 단계: ★메가 프로젝트 P1+(A)+(B)+P2+P4+P7+D-12(원가다리)+**D-13(수수료 자기기준선)** 완료·prod 라이브 실증. 3자조인+순매출차감+수수료감사 실작동+종합조망+원가다리 prod 작동(4/7 페이즈). 다음 P3/P5/P6/쓰기
+- 전체 진행률: 트랙 4/7 페이즈 + D-12 원가개선 + D-13 수수료감사 실작동화 prod 배포·라이브 실증 완료
+- 최신 커밋(main, origin 동기화): 1cab53c(D-13 docs) ← 4dc9622(D-13 양방향dedup) ← 4f6ecfa(D-13 정규화) ← bdd0e10(D-13 자기기준선) ← 55a454a(D-12 교훈) ← f614fd3(D-12 fix) ← 4d13504(D-12 원가다리) ← a2bbd3a(P7) ← …
+
+## D-13 수수료 감사 기준선 = 옵션 자기 정착율 — 완료(prod 배포·라이브 실증) (2026-06-03)
+- [x] 진단: saleAgentCommission 201옵션 전부 0 → 기존 _fee_audit 실제 비교 0건(감사 부재였음). 실측율 service_fee_ratio 84옵션 100%·안정
+- [x] settlement_sync: _reauthor_commission·_fee_audit 제거. _audit_fee_baseline 신설(옵션 정착율 mode 기준선, 율 변동시 rate_drift 플래그·자동판단 금지·Jino 보고). 라우터/모델 docstring 갱신
+- [x] codex PASS 3R: R1[P2]결정적선택 R2[P2]플립멱등(정규화) R3[P2]정규화가 의미훼손→양방향 조회로 의미보존+멱등. R3 PASS
+- [x] ★라이브 실증(prod, 쿠팡 API 실호출): 84옵션(WING1 4+WING2 80) 실제 감사 rate_drift 0(진짜 비교 후). fee_options_checked 통계 확인. 조회 2엔드포인트 정상
+- [x] 격리 결정적 검증: 합성 드리프트 주입→플래그, mode 플립에도 log 1 유지+방향 갱신
+- [x] DB 마이그레이션 불필요(컬럼 재사용). 롤백: ohisell.db.bak-d13fee-20260603-104240·/tmp/rollback_d13(서버)
+- 카테고리율 교차는 P6에서 2차 레이어(D-13 명시)
 
 ## D-12 조망 순이익 원가 정확화 — 완료(prod 배포·라이브 실증) (2026-06-03)
 - [x] 라이브 진단(원칙22, backend/scripts/diag_coverage.py·diag_bridge.py): 원가 원천이 coupang_product_item.supply_price(실거래 0.6%)라 거의 빈값 → 내부 product_master.cost_price(89% 보유)에 product_channel_mapping(coupang,is_active) 다리로 118옵션(66%) 닿음(원가충돌 0)
