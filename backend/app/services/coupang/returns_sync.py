@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 
 from app.clients.coupang import CoupangExchangeClient, CoupangReturnClient
+from app.clients.coupang._base import CoupangReadError
 from app.config import get_coupang_config
 from app.models import CoupangExchange, CoupangReturnItem
 
@@ -70,6 +71,13 @@ def _upsert_return_item(
     if row is None:
         row = CoupangReturnItem(receipt_id=receipt_id, vendor_item_id=vii)
         db.add(row)
+    elif row.vendor_id and row.vendor_id != vendor_id:
+        # codex [P2]: vendorItemId는 D-8에서 전역유일·단일계정 소유로 라이브 검증됨.
+        # 기존 행의 계정이 바뀌면 = 전역유일 가정 위반 신호 → 경고(침묵 손상 방지, CoupangProductItem 패턴).
+        log.warning(
+            "반품 receiptId %s vendorItemId %s account 변경 감지 %s→%s (D-8 전역유일 위반 가능)",
+            receipt_id, vii, row.vendor_id, vendor_id,
+        )
     row.account_key = account_key
     row.vendor_id = vendor_id
     row.order_id = str(receipt.get("orderId") or "")
@@ -100,7 +108,12 @@ def _mark_withdrawn(db: Session, account_key: str, vendor_id: str, withdraw: dic
     if not cancel_id:
         return 0
     vii_list = [str(v) for v in (withdraw.get("vendorItemIds") or [])]
-    q = db.query(CoupangReturnItem).filter(CoupangReturnItem.receipt_id == cancel_id)
+    # codex [P2]: 철회 매칭을 현재 동기화 중인 계정(vendor_id)으로 스코프.
+    # vendorItemIds가 비어도 타계정 행을 마킹하지 않도록(receiptId 계정 간 충돌 방어).
+    q = db.query(CoupangReturnItem).filter(
+        CoupangReturnItem.receipt_id == cancel_id,
+        CoupangReturnItem.vendor_id == vendor_id,
+    )
     if vii_list:
         q = q.filter(CoupangReturnItem.vendor_item_id.in_(vii_list))
     count = 0
@@ -173,7 +186,7 @@ def sync_account_returns(db: Session, account_key: str, *, days: int = 35) -> di
     stats = {
         "account": account_key, "vendor_id": vendor_id,
         "returns": 0, "cancels": 0, "items": 0,
-        "withdrawn": 0, "exchanges": 0, "errors": 0,
+        "withdrawn": 0, "exchanges": 0, "errors": 0, "api_failures": 0,
     }
     windows = _date_windows(days)
 
@@ -192,8 +205,12 @@ def sync_account_returns(db: Session, account_key: str, *, days: int = 35) -> di
                     for item in receipt.get("returnItems", []) or []:
                         if _upsert_return_item(db, account_key, vendor_id, receipt, item):
                             stats["items"] += 1
-            except Exception:  # noqa: BLE001 — 한 윈도우 실패가 전체를 막지 않게
-                log.exception("반품 목록 동기화 실패 %s %s~%s (%s)",
+            except CoupangReadError:  # codex [P1]: API 하드실패는 stale 위장 금지 → 집계
+                log.exception("반품 목록 읽기 실패 %s %s~%s (%s)",
+                              account_key, win_from, win_to, cancel_type)
+                stats["api_failures"] += 1
+            except Exception:  # noqa: BLE001 — 한 윈도우 코드오류가 전체를 막지 않게
+                log.exception("반품 목록 동기화 오류 %s %s~%s (%s)",
                               account_key, win_from, win_to, cancel_type)
                 stats["errors"] += 1
 
@@ -203,8 +220,11 @@ def sync_account_returns(db: Session, account_key: str, *, days: int = 35) -> di
                 date_from=win_from, date_to=win_to
             ):
                 stats["withdrawn"] += _mark_withdrawn(db, account_key, vendor_id, withdraw)
+        except CoupangReadError:
+            log.exception("반품철회 읽기 실패 %s %s~%s", account_key, win_from, win_to)
+            stats["api_failures"] += 1
         except Exception:  # noqa: BLE001
-            log.exception("반품철회 동기화 실패 %s %s~%s", account_key, win_from, win_to)
+            log.exception("반품철회 동기화 오류 %s %s~%s", account_key, win_from, win_to)
             stats["errors"] += 1
 
         # 교환 (운영 기록 — 회계 차감 없음). createdAt 형식은 분초까지.
@@ -215,11 +235,22 @@ def sync_account_returns(db: Session, account_key: str, *, days: int = 35) -> di
                 created_at_from=ex_from, created_at_to=ex_to
             ):
                 stats["exchanges"] += _upsert_exchange(db, account_key, vendor_id, exchange)
+        except CoupangReadError:
+            log.exception("교환 읽기 실패 %s %s~%s", account_key, win_from, win_to)
+            stats["api_failures"] += 1
         except Exception:  # noqa: BLE001
-            log.exception("교환 동기화 실패 %s %s~%s", account_key, win_from, win_to)
+            log.exception("교환 동기화 오류 %s %s~%s", account_key, win_from, win_to)
             stats["errors"] += 1
 
+    # 정상 동기화분은 먼저 커밋(좋은 데이터 보존), 그 후 하드 실패를 표면화.
     db.commit()
+    # codex [P1]: 읽기 하드실패가 있으면 error로 표면화 → 스케줄러가 raise(거짓 성공 방지, 원칙22).
+    # (부분 코드오류 stats["errors"]는 예상 가능한 부분 실패라 raise 대상 아님)
+    if stats["api_failures"]:
+        stats["error"] = (
+            f"쿠팡 읽기 실패 {stats['api_failures']}건 "
+            "(IP화이트리스트/인증/네트워크 가능 — 데이터 stale 위험)"
+        )
     log.info("쿠팡 반품/교환 동기화 완료 %s: %s", account_key, stats)
     return stats
 

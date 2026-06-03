@@ -6,7 +6,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterator
 
-from app.clients.coupang._base import CoupangBaseClient
+from app.clients.coupang._base import CoupangBaseClient, CoupangReadError
 
 log = logging.getLogger(__name__)
 
@@ -81,8 +81,14 @@ class CoupangReturnClient(CoupangBaseClient):
                 next_token=next_token,
                 max_per_page=max_per_page,
             )
-            if not resp or str(resp.get("code")) not in ("200", "SUCCESS"):
-                break
+            # codex [P1]: 하드 실패(None=인증/네트워크, 비200=API에러)는 raise로 표면화.
+            # 정상 빈 페이지(code 200, data 없음)는 아래에서 자연 종료(stale 위장 방지).
+            if resp is None:
+                raise CoupangReadError(f"반품목록 읽기 실패(None): {self.vendor_id} {cancel_type}")
+            if str(resp.get("code")) not in ("200", "SUCCESS"):
+                raise CoupangReadError(
+                    f"반품목록 API 에러 code={resp.get('code')} msg={resp.get('message')}"
+                )
             for receipt in resp.get("data", []) or []:
                 yield receipt
             next_token = resp.get("nextToken") or ""
@@ -136,8 +142,12 @@ class CoupangReturnClient(CoupangBaseClient):
                 page_index=page_index,
                 size_per_page=size_per_page,
             )
-            if not resp or str(resp.get("code")) not in ("200", "SUCCESS"):
-                break
+            if resp is None:
+                raise CoupangReadError(f"반품철회 읽기 실패(None): {self.vendor_id}")
+            if str(resp.get("code")) not in ("200", "SUCCESS"):
+                raise CoupangReadError(
+                    f"반품철회 API 에러 code={resp.get('code')} msg={resp.get('message')}"
+                )
             for row in resp.get("data", []) or []:
                 yield row
             nxt = resp.get("nextPageIndex")

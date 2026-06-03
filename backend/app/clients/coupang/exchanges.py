@@ -6,7 +6,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterator
 
-from app.clients.coupang._base import CoupangBaseClient
+from app.clients.coupang._base import CoupangBaseClient, CoupangReadError
 
 log = logging.getLogger(__name__)
 
@@ -71,8 +71,12 @@ class CoupangExchangeClient(CoupangBaseClient):
                 next_token=next_token,
                 max_per_page=max_per_page,
             )
-            if not resp or str(resp.get("code")) not in ("200", "SUCCESS"):
-                break
+            if resp is None:
+                raise CoupangReadError(f"교환목록 읽기 실패(None): {self.vendor_id}")
+            if str(resp.get("code")) not in ("200", "SUCCESS"):
+                raise CoupangReadError(
+                    f"교환목록 API 에러 code={resp.get('code')} msg={resp.get('message')}"
+                )
             data = resp.get("data")
             # 교환 응답 data는 단건이면 Object, 목록이면 Array일 수 있어 정규화
             if isinstance(data, dict):
