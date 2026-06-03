@@ -4,9 +4,17 @@
 
 ## 현재 상태
 - 날짜: 2026-06-03
-- 단계: ★메가 프로젝트 P1+(A)+(B)+P2+P4+**P7 종합조망(Command Center)** 완료·prod 라이브 실증·시각확인 완결. 3자조인+순매출차감+수수료감사+종합조망 prod 작동(4/7 페이즈). 다음 P3/P5/P6/쓰기
-- 전체 진행률: 트랙 4/7 페이즈 prod 배포·라이브 실증 완료
-- 최신 커밋(main): P7 머지 예정 ← 1c70c3d(returns KST) ← 8abb607(P4) ← f2f35b2(P2) ← b786e11(B) ← 9a45eee(A) ← a4afac7(P1)
+- 단계: ★메가 프로젝트 P1+(A)+(B)+P2+P4+P7+**D-12(조망 순이익 원가 정확화)** 완료·prod 라이브 실증. 3자조인+순매출차감+수수료감사+종합조망+원가다리 prod 작동(4/7 페이즈). 다음 P3/P5/P6/쓰기/수수료기준선 재검토
+- 전체 진행률: 트랙 4/7 페이즈 + D-12 원가 개선 prod 배포·라이브 실증 완료
+- 최신 커밋(main, origin 동기화): f614fd3(D-12 fix) ← 4d13504(D-12 원가다리) ← a2bbd3a(P7) ← 1c70c3d(returns KST) ← 8abb607(P4) ← f2f35b2(P2) ← b786e11(B) ← 9a45eee(A) ← a4afac7(P1)
+
+## D-12 조망 순이익 원가 정확화 — 완료(prod 배포·라이브 실증) (2026-06-03)
+- [x] 라이브 진단(원칙22, backend/scripts/diag_coverage.py·diag_bridge.py): 원가 원천이 coupang_product_item.supply_price(실거래 0.6%)라 거의 빈값 → 내부 product_master.cost_price(89% 보유)에 product_channel_mapping(coupang,is_active) 다리로 118옵션(66%) 닿음(원가충돌 0)
+- [x] intelligence.py 읽기측 수정: _cost_master() 신설(profit_calculator._get_option_id_map 동일경로) → 원가 내부 cost_price 우선·없으면 coupang supply_price 폴백. 이름폴백에 정식상품명. cost_source·cost_internal/supply_options 표기. 중복매핑 결정적 처리(원가>0·product_id최소·충돌경고)
+- [x] codex PASS 2R: R1[P2]중복매핑 임의채택→결정적 합의, R2 PASS(해소확인·신규이슈0)
+- [x] ★라이브 실증(prod 8001): 매출/수수료/반품/광고 불변, 원가 0→468,313(142옵션:internal130+supply12) 반영, 순이익 2,526,368→2,058,055(과대계상 교정). 격리·라이브 수치 일치
+- [x] DB 마이그레이션 불필요(신규테이블 없음). 단일파일 scp 배포. 롤백: ohisell.db.bak-d12cost-20260603-095442·/tmp/intelligence.py.bak-d12(서버)
+- ⚠️ 별도 미결: 수수료 감사 기준선(saleAgentCommission 201옵션 전부 0=판매대행수수료, 카테고리 판매수수료 아님) → D-10/D-11 재검토 필요. 실측율 service_fee_ratio 100% 보유. Jino와 별도 논의 예정
 
 ## P7 종합조망 Command Center — 완료(prod 배포·라이브 실증·시각확인) (2026-06-03)
 - [x] 결합엔진 services/coupang/intelligence.py: 5소스(주문·광고·반품·수수료·상품마스터) vendor_item_id별 독립 GROUP BY 집계 후 dict merge(fan-out 방지). 각 소스 자기 날짜축 필터. orders는 platform=coupang만. 3축(회계·광고·상품) 파생
