@@ -95,12 +95,12 @@ def sync_coupang_settlement(
     months: int = 6,
     db: Session = Depends(get_db),
 ):
-    """쿠팡 정산(매출내역+지급내역) 동기화 + 수수료 감사 (회계 진짜 순이익 — D-10/D-11).
+    """쿠팡 정산(매출내역+지급내역) 동기화 + 수수료 감사 (회계 진짜 순이익 — D-13).
 
     트랙 D-8: 쿠팡 Open API는 서버 IP 화이트리스트 — 서버에서만 동작(로컬 403).
     트랙 D-3: 사실/지표 정리만(전략판단 없음). days: 매출내역 인식일 과거기간(7일 윈도우 분할),
-    months: 지급내역 인식월 수. 실측 serviceFeeRatio ≠ 등록 수수료율 시 권위 재확인 후
-    정당변동 자동갱신 or 이상 플래그(D-11).
+    months: 지급내역 인식월 수. 수수료 감사(D-13)=각 옵션 자기 정착 실측율(mode) 기준선 대비
+    율 변동 감지 → rate_drift 플래그(자동판단 금지, Jino 확인). stats fee_options_checked/fee_anomaly.
     """
     from app.services.coupang.settlement_sync import sync_all_settlement
 
