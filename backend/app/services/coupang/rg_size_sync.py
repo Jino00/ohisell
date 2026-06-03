@@ -141,6 +141,14 @@ def sync_account_rg_sizes(
         return stats
 
     db.commit()
+    # codex[P2]: 목록은 성공했는데 단건조회가 전부 실패(auth/IP/타임아웃/비200=systemic)면
+    # errors만 늘고 success로 보고돼 사이즈/CBM이 stale인 채 묻힌다(원칙22, stale 위장).
+    # 하나도 적재 못 했으면(systemic) read_error로 표면화 → 스케줄러가 실패로 인지.
+    # 부분 실패(일부만 실패)는 로그·stats로 가시화하고 잡은 통과(transient 관용, product_sync와 동일).
+    if stats["errors"] and stats["sized"] == 0 and stats["rg_products"] == 0:
+        stats["read_error"] = f"RG 단건조회 전부 실패({stats['errors']}건) — 사이즈/CBM stale"
+        log.error("RG 사이즈 동기화 단건조회 전부 실패 %s: %s", account_key, stats)
+        return stats
     log.info("RG 사이즈 동기화 완료 %s: %s", account_key, stats)
     return stats
 
