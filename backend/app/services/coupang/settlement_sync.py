@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func
+from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
 from app.clients.coupang import CoupangSettlementClient
@@ -185,29 +185,39 @@ def _upsert_revenue_fee(
 
 def _log_fee_change(
     db: Session, account_key: str, vendor_id: str, vii: str,
-    rate_lo: Decimal, rate_hi: Decimal, txn: dict, note: str,
+    baseline: Decimal, outlier: Decimal, txn: dict, note: str,
 ) -> None:
     """수수료 이상 1건(한 옵션의 두 율쌍)을 coupang_fee_change_log에 upsert (중복 방지).
 
-    D-13: dedup 키를 **정규화** — registered_ratio=두 율 중 작은 값(rate_lo), observed_ratio=큰
-    값(rate_hi). 기준선/이탈 역할은 note가 보존한다. codex[P2]: 시간이 지나 mode가 뒤집혀도
-    (예: 7.8기준→9.0기준) 같은 율쌍은 같은 키로 매핑돼 1행 유지(멱등). reauthored_ratio 미사용
-    (None; 카테고리율 교차 P6 여지). resolved는 기존값 유지(Jino 수동 판정 — 자동 판단 금지).
+    D-13: 컬럼은 **의미 보존** — registered_ratio=기준선(정착 mode), observed_ratio=이탈율
+    (API가 이 의미로 노출). dedup은 **양방향 조회**로 — 같은 옵션의 같은 율쌍이면 (baseline,
+    outlier) 순서가 뒤바뀌어 저장돼 있어도 찾아서 갱신한다. codex[P2]: 시간이 지나 mode가
+    뒤집혀도(7.8기준↔9.0기준) 1행만 유지하되, 컬럼엔 현재 방향(기준선/이탈)을 반영한다.
+    reauthored_ratio 미사용(None; 카테고리율 교차 P6 여지). resolved는 기존값 유지(자동 판단 금지).
     """
     row = (
         db.query(CoupangFeeChangeLog)
         .filter(
             CoupangFeeChangeLog.vendor_item_id == vii,
-            CoupangFeeChangeLog.observed_ratio == rate_hi,
-            CoupangFeeChangeLog.registered_ratio == rate_lo,
+            or_(
+                and_(
+                    CoupangFeeChangeLog.registered_ratio == baseline,
+                    CoupangFeeChangeLog.observed_ratio == outlier,
+                ),
+                and_(
+                    CoupangFeeChangeLog.registered_ratio == outlier,
+                    CoupangFeeChangeLog.observed_ratio == baseline,
+                ),
+            ),
         )
         .first()
     )
     if row is None:
-        row = CoupangFeeChangeLog(
-            vendor_item_id=vii, observed_ratio=rate_hi, registered_ratio=rate_lo
-        )
+        row = CoupangFeeChangeLog(vendor_item_id=vii)
         db.add(row)
+    # 현재 방향 반영(플립 시 갱신) — registered=기준선·observed=이탈
+    row.registered_ratio = baseline
+    row.observed_ratio = outlier
     row.account_key = account_key
     row.vendor_id = vendor_id
     row.reauthored_ratio = None
@@ -280,9 +290,9 @@ def _audit_fee_baseline(db: Session, account_key: str, vendor_id: str) -> dict:
                 "orderId": d["order_id"],
                 "recognitionDate": d["dmax"].isoformat() if d["dmax"] else None,
             }
-            # dedup 키는 정규화(작은율·큰율) — mode 플립에도 같은 율쌍 1행(codex[P2]). 역할은 note.
-            rate_lo, rate_hi = sorted((baseline["ratio"], d["ratio"]))
-            _log_fee_change(db, account_key, vendor_id, vii, rate_lo, rate_hi, txn, note)
+            # 의미 보존: baseline=기준선(mode)·outlier=이탈. dedup은 _log_fee_change가 양방향 조회로
+            # 처리(mode 플립에도 1행 유지·현재 방향 반영, codex[P2]).
+            _log_fee_change(db, account_key, vendor_id, vii, baseline["ratio"], d["ratio"], txn, note)
             stats["anomaly"] += 1
     return stats
 
