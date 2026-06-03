@@ -4,6 +4,7 @@ import SchedulerStatus from "./SchedulerStatus";
 
 const NAV_ITEMS = [
   { to: "/", label: "대시보드", icon: "📊" },
+  { to: "/command-center", label: "종합 조망", icon: "🎯" },
   { to: "/orders", label: "주문 관리", icon: "📋" },
   { to: "/products", label: "상품 관리", icon: "📦" },
   { to: "/inventory", label: "재고 관리", icon: "🏭" },

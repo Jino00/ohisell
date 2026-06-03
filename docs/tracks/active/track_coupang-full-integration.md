@@ -1,6 +1,6 @@
 # 트랙: 쿠팡 API 전 기능 연결 + 종합 조망(Command Center)
 
-> 시작: 2026-06-02 · 상태: Active · 단계: P1+(A)+(B)+P2+**P4** 완료·prod 라이브(3자 조인+순매출 차감+수수료 감사 실증). 다음 P3 로켓그로스 또는 P7 조망
+> 시작: 2026-06-02 · 상태: Active · 단계: P1+(A)+(B)+P2+P4+**P7** 완료·prod 라이브(3자 조인+순매출 차감+수수료 감사+**종합조망 Command Center** 실증·시각확인). 4/7 페이즈. 다음 P3 로켓그로스 / P5 쿠폰 / P6 / 쓰기
 
 ## 1. 목표 (한 줄)
 오픽스의 판매현황을 회계·광고전략·상품전략까지 한눈에 조망하는 사령탑을 만들고, 그 토대로 쿠팡 Open API(윙+로켓그로스) 전 기능(읽기+쓰기)을 ohisell에 연결한다.
@@ -83,7 +83,7 @@
 - [x] P4. 정산 도메인 (매출내역=수수료 실측·지급내역=통장지급) — **완료(prod 배포·라이브 실증 2026-06-03)**. D-10/D-11 수수료 감사. 아래 §7 참조.
 - [ ] P5. 쿠폰/캐시백 (할인 비용)
 - [ ] P6. 물류센터·카테고리·브랜드·CS (보조)
-- [ ] P7. 종합 조망 화면 결합 (옵션ID 결합 엔진 + 3축 뷰)
+- [x] P7. 종합 조망 화면 결합 (옵션ID 결합 엔진 + 3축 뷰) — **완료(prod 배포·라이브 실증·시각확인 2026-06-03)**. 아래 §7 참조.
 
 ## 5. 확정 아키텍처 (Agent / Harness / Sub-Agent — 변형 금지)
 
@@ -183,7 +183,15 @@ pages/   Products(확장)·Returns(신규)·InventoryPage(실재고)·Settlement
   - **★라이브 실측 보정(원칙22, 격리로 못 잡음)**: ①recognitionDateTo=오늘이면 400→윈도우 끝 어제로 ②등록율 0(product_sync 미설정)을 유효율 오인 false anomaly→registered<=0 비교불가 ③서버UTC↔KST 날짜경계→_kst_today.
   - **★prod 라이브 실증**: revenue_fee 191행(WING1 7·WING2 184)·payout 39행·실패0. 실측율 정상(옵션 94365168294=10.5% §4 일치), REFUND/SALE·RESERVE·음수정산 적재. 수수료 감사 anomaly 0(매칭 등록율 전부 실측 일치). 소비자 POST/GET 4경로 라이브 검증.
   - **관찰(사실, D-3)**: 실측율 보유 84옵션 중 등록율 매칭 4개뿐 — product_sync가 대부분 옵션의 등록 수수료율 미커버(P1 알려진 제약, 옵션 다수 vendorItemId null). 수수료 비교 토대 확대는 product_sync 커버리지 개선 필요(별도). 감사 메커니즘 자체는 작동.
-- 다음: §8 — P3 로켓그로스(사이즈·재고·RG주문) 또는 P7 종합조망 화면.
+- **✅ P7 종합 조망 Command Center 완료(2026-06-03, prod 배포·라이브 실증·시각확인)** — D-2 최종 목적 달성:
+  - 결합 엔진 `services/coupang/intelligence.py`: 5소스(주문·광고·반품·수수료·상품마스터)를 vendor_item_id별 **독립 GROUP BY 집계 후 dict merge**(fan-out 방지). 각 소스 자기 날짜축 필터(order_date·report_date·recognition_date·requested_at). orders는 platform='coupang'만. 3축(회계 순이익·광고 사실·상품 판매) 파생.
+  - 라우터 `routers/overview.py`: `GET /api/overview/command-center?from&to` → 3축 JSON(Decimal→str 직렬화, 기본 7일 KST).
+  - 프론트 `pages/CommandCenter.tsx`: 사이드바 "🎯 종합 조망" + 3축 탭 + 기간선택(어제/7/14/30일). D-3 사실/지표만(추천 없음).
+  - codex PASS **3R**: R1[P2×2] ① net_profit이 service_fee_vat 누락(쿠팡은 수수료+VAT 차감)→total_fee 합산·차감 ② orders 집계 status 미필터→취소/반품 매출부풀림+반품테이블 이중차감→REVENUE_EXCLUDED 적용. R2 합의. R3[이름폴백·비율quantize] 합의.
+  - **★라이브 실증(prod 실데이터, 원칙22)**: 회계 302옵션 매출295만·반품차감15만·수수료20만·광고7.6만·순이익252만(4~6월). 광고 ROAS 1.50. 합계 불변 검증. **시각확인**: 3축 탭 모두 정상 렌더(실상품명·원가미설정 amber·ROAS/CTR 표시).
+  - **이름 폴백**(실측 보정): master 커버리지 낮음(fee 84옵션 중 master교집합 4·order 862 중 9 — P1 제약, D-3 사실) → 마스터 없으면 주문/매출내역/반품의 상품명 폴백해 화면 유지. 둘 다 없으면 "(이름 미상)".
+  - **관찰(D-3 사실)**: 원가 0(반영 201/253옵션) — supply_price 빈값 다수(P1 제약). master∩거래옵션 교집합 작아 결합 표시 옵션 다수가 단일축. 결합 토대 확대는 product_sync 커버리지 개선 필요(별도).
+- 다음: §8 — P3 로켓그로스(사이즈·재고·RG주문) / P5 쿠폰 / P6 물류·CS / 쓰기 페이즈(stub 채우기).
 
 ## 8. 다음 액션 (세션 넘어와도 여기부터)
 **P1+(A)+(B)+P2+P4 모두 완료 + prod 배포·라이브 실증 완결.** 3자 조인(광고⨝상품⨝주문) + 순매출 차감(반품⨝주문) + 수수료 감사(매출내역 serviceFeeRatio↔등록율, D-10/D-11)가 prod 실데이터로 작동. 스케줄러: 05:30 상품·05:45 반품·05:50 정산 자동 갱신. 다음 후보(우선순위는 Jino와 정할 것 — "순서대로" 지침이면 P3):

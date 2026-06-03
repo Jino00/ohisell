@@ -4,9 +4,18 @@
 
 ## 현재 상태
 - 날짜: 2026-06-03
-- 단계: ★메가 프로젝트 P1+(A)+(B)+P2+**P4 정산(수수료 감사)** 완료·prod 라이브 실증 완결. 3자조인+순매출차감+수수료감사 prod 작동(3/7 페이즈). 다음 P3 로켓그로스 또는 P7 조망
-- 전체 진행률: 99% (기존 기능) / 트랙 3/7 페이즈 prod 배포·라이브 실증 완료. ⚠️ P4는 아직 main 커밋 전(워킹트리, prod엔 파일복사 배포됨)
-- 최신 커밋(main): f2f35b2 (P2 라이브보정) ← b786e11(B) ← 9a45eee(A) ← a4afac7(P1). **P4는 미커밋(커밋 시 사용자 승인 후)**
+- 단계: ★메가 프로젝트 P1+(A)+(B)+P2+P4+**P7 종합조망(Command Center)** 완료·prod 라이브 실증·시각확인 완결. 3자조인+순매출차감+수수료감사+종합조망 prod 작동(4/7 페이즈). 다음 P3/P5/P6/쓰기
+- 전체 진행률: 트랙 4/7 페이즈 prod 배포·라이브 실증 완료
+- 최신 커밋(main): P7 머지 예정 ← 1c70c3d(returns KST) ← 8abb607(P4) ← f2f35b2(P2) ← b786e11(B) ← 9a45eee(A) ← a4afac7(P1)
+
+## P7 종합조망 Command Center — 완료(prod 배포·라이브 실증·시각확인) (2026-06-03)
+- [x] 결합엔진 services/coupang/intelligence.py: 5소스(주문·광고·반품·수수료·상품마스터) vendor_item_id별 독립 GROUP BY 집계 후 dict merge(fan-out 방지). 각 소스 자기 날짜축 필터. orders는 platform=coupang만. 3축(회계·광고·상품) 파생
+- [x] 라우터 routers/overview.py: GET /api/overview/command-center?from&to (Decimal→str, 기본7일 KST). main.py 등록(58라우트)
+- [x] 프론트 CommandCenter.tsx + Layout 사이드바 🎯종합조망 + App 라우트 + api.ts 타입. tsc·vite 빌드 PASS
+- [x] codex PASS 3R: R1[P2×2] ①service_fee_vat 누락→total_fee 합산차감 ②orders status 미필터→REVENUE_EXCLUDED(취소/반품 이중차감 방지). R2 합의. R3[이름폴백·비율quantize] 합의
+- [x] ★라이브 실증(prod): 회계302옵션 매출295만·순이익252만·광고ROAS1.50. 합계불변. 시각확인 3축탭 정상렌더(실상품명·원가미설정amber·ROAS/CTR)
+- [x] 이름폴백: master 커버리지 낮음(fee∩master 4·order∩master 9, P1제약) → 주문/매출내역/반품 상품명 폴백
+- [x] DB 마이그레이션 불필요(신규 테이블 없음). prod 배포=intelligence.py·overview.py·main.py·frontend/dist scp. DB백업 ohisell.db.bak-20260603-p7overview
 - DB 마이그레이션 head: **c8f1a3b5d7e9** (로컬·prod 동일). P4는 신규 테이블 3개(coupang_revenue_fee·coupang_settlement_payout·coupang_fee_change_log)
 - prod DB 백업: 서버 ohisell.db.bak-20260603-p4settlement (+ p2returns·bsync). P4 코드 롤백: /tmp/rollback_P4(서버, 단 임시 — 영구보존 아님)
 - ⚠️ 쿠팡 API는 IP화이트리스트(트랙 D-8): 라이브 검증은 서버 SSH에서만. 로컬 403. 서버 uvicorn 포트=8001.

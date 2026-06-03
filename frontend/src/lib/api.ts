@@ -260,3 +260,77 @@ export async function fetchCoupangAdReport(dateFrom: string, dateTo: string): Pr
 export async function uploadCoupangAdReport(file: File) {
   return uploadFile("/api/ads/coupang/upload", file);
 }
+
+// ──────────────────────────────────────────────
+// 종합 조망 (Command Center) — P7. 금액은 백엔드가 문자열(Decimal)로 직렬화.
+// ──────────────────────────────────────────────
+export interface OverviewAccountRow {
+  vendor_item_id: string;
+  name: string;
+  revenue: string;
+  return_deduction: string;
+  service_fee: string;
+  service_fee_vat: string;
+  total_fee: string;
+  ad_spend: string;
+  cost: string;
+  has_cost: boolean;
+  net_profit: string;
+}
+export interface OverviewAdRow {
+  vendor_item_id: string;
+  name: string;
+  ad_spend: string;
+  impressions: number;
+  clicks: number;
+  conv_revenue: string;
+  roas: string | null;
+  ctr: string | null;
+}
+export interface OverviewProductRow {
+  vendor_item_id: string;
+  name: string;
+  order_count: number;
+  order_qty: number;
+  return_qty: number;
+  return_rate: string | null;
+  stock: number | null;
+  on_sale: boolean | null;
+  status_name: string | null;
+  sale_price: string;
+  in_master: boolean;
+}
+export interface OverviewResponse {
+  period: { from: string; to: string };
+  account: {
+    summary: {
+      revenue: string; return_deduction: string; service_fee: string;
+      service_fee_vat: string; total_fee: string; ad_spend: string;
+      cost: string; net_profit: string;
+      cost_covered_options: number; option_count: number;
+    };
+    by_option: OverviewAccountRow[];
+  };
+  ad: {
+    summary: {
+      ad_spend: string; impressions: number; clicks: number;
+      conv_revenue: string; roas: string | null;
+    };
+    by_option: OverviewAdRow[];
+  };
+  product: {
+    summary: {
+      option_count: number; order_count: number; order_qty: number; return_qty: number;
+    };
+    by_option: OverviewProductRow[];
+  };
+}
+
+export async function fetchCommandCenter(
+  from: string,
+  to: string
+): Promise<OverviewResponse> {
+  return fetchApi<OverviewResponse>(
+    `/api/overview/command-center?from=${from}&to=${to}`
+  );
+}

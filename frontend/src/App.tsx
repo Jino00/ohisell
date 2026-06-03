@@ -8,6 +8,7 @@ import InventoryPage from "./pages/InventoryPage";
 import Settlements from "./pages/Settlements";
 import Settings from "./pages/Settings";
 import AdReport from "./pages/AdReport";
+import CommandCenter from "./pages/CommandCenter";
 
 export default function App() {
   return (
@@ -15,6 +16,7 @@ export default function App() {
       <Routes>
         <Route element={<Layout />}>
           <Route index element={<Dashboard />} />
+          <Route path="command-center" element={<CommandCenter />} />
           <Route path="orders" element={<Orders />} />
           <Route path="products" element={<Products />} />
           <Route path="inventory" element={<InventoryPage />} />
