@@ -185,26 +185,27 @@ def _upsert_revenue_fee(
 
 def _log_fee_change(
     db: Session, account_key: str, vendor_id: str, vii: str,
-    baseline: Decimal, observed: Decimal, txn: dict, note: str,
+    rate_lo: Decimal, rate_hi: Decimal, txn: dict, note: str,
 ) -> None:
-    """수수료 이상 1건을 coupang_fee_change_log에 upsert (grain=vii+observed+baseline, 중복 방지).
+    """수수료 이상 1건(한 옵션의 두 율쌍)을 coupang_fee_change_log에 upsert (중복 방지).
 
-    D-13: 컬럼 재사용 — registered_ratio=옵션 자기 기준선(정착 실측율 mode), observed_ratio=이탈율.
-    reauthored_ratio는 미사용(None; 카테고리율 교차 P6에서 활용 여지). resolved는 항상 False
-    (자동 판단 금지 — Jino가 정당변동/과오청구 판정 후 수동 resolve).
+    D-13: dedup 키를 **정규화** — registered_ratio=두 율 중 작은 값(rate_lo), observed_ratio=큰
+    값(rate_hi). 기준선/이탈 역할은 note가 보존한다. codex[P2]: 시간이 지나 mode가 뒤집혀도
+    (예: 7.8기준→9.0기준) 같은 율쌍은 같은 키로 매핑돼 1행 유지(멱등). reauthored_ratio 미사용
+    (None; 카테고리율 교차 P6 여지). resolved는 기존값 유지(Jino 수동 판정 — 자동 판단 금지).
     """
     row = (
         db.query(CoupangFeeChangeLog)
         .filter(
             CoupangFeeChangeLog.vendor_item_id == vii,
-            CoupangFeeChangeLog.observed_ratio == observed,
-            CoupangFeeChangeLog.registered_ratio == baseline,
+            CoupangFeeChangeLog.observed_ratio == rate_hi,
+            CoupangFeeChangeLog.registered_ratio == rate_lo,
         )
         .first()
     )
     if row is None:
         row = CoupangFeeChangeLog(
-            vendor_item_id=vii, observed_ratio=observed, registered_ratio=baseline
+            vendor_item_id=vii, observed_ratio=rate_hi, registered_ratio=rate_lo
         )
         db.add(row)
     row.account_key = account_key
@@ -279,7 +280,9 @@ def _audit_fee_baseline(db: Session, account_key: str, vendor_id: str) -> dict:
                 "orderId": d["order_id"],
                 "recognitionDate": d["dmax"].isoformat() if d["dmax"] else None,
             }
-            _log_fee_change(db, account_key, vendor_id, vii, baseline["ratio"], d["ratio"], txn, note)
+            # dedup 키는 정규화(작은율·큰율) — mode 플립에도 같은 율쌍 1행(codex[P2]). 역할은 note.
+            rate_lo, rate_hi = sorted((baseline["ratio"], d["ratio"]))
+            _log_fee_change(db, account_key, vendor_id, vii, rate_lo, rate_hi, txn, note)
             stats["anomaly"] += 1
     return stats
 
