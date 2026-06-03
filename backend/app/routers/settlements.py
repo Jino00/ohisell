@@ -282,10 +282,13 @@ def coupang_fee_comparison(
     limit: int = Query(300, ge=1, le=1000),
     db: Session = Depends(get_db),
 ):
-    """쿠팡 옵션별 실측 판매수수료율(serviceFeeRatio) ↔ 등록율(sale_agent_commission) 비교 (D-10).
+    """쿠팡 옵션별 실측 판매수수료율(serviceFeeRatio) 목록 (D-10 → D-13).
 
-    실측은 옵션별 최근 매출내역 행의 service_fee_ratio, 등록율은 coupang_product_item.
-    사실 정리만(D-3) — 불일치 표시까지, 판단은 Jino. only_mismatch=True면 불일치만.
+    ⚠️ D-13: registered(sale_agent_commission)는 라이브에서 전부 0(판매대행 수수료라
+    카테고리 판매수수료 아님) → registered_ratio는 참고불가(항상 0·mismatch 항상 False).
+    실제 수수료 이상 감사는 옵션 자기기준선(정착 실측율) 방식으로 /coupang-fee-anomalies
+    (change_type=rate_drift)에서 수행한다. 이 엔드포인트는 옵션별 실측율 현황 표시용.
+    사실 정리만(D-3) — 판단은 Jino. only_mismatch=True면 (구)불일치만(현재 무의미).
     """
     from app.models import CoupangProductItem, CoupangRevenueFee
 
@@ -330,9 +333,11 @@ def coupang_fee_anomalies(
     include_resolved: bool = Query(False),
     db: Session = Depends(get_db),
 ):
-    """쿠팡 수수료율 감사 로그 (D-11). 미해소 이상(anomaly)=Jino 확인 대상.
+    """쿠팡 수수료율 감사 로그 (D-13 자기기준선). 미해소 이상=Jino 확인 대상.
 
-    change_type=legitimate(정당변동, 자동 갱신함) / anomaly(과오청구 의심, 자동 수용 안 함).
+    change_type=rate_drift: 한 옵션의 정착 실측율(기준선=registered_ratio)과 다른 율
+    (observed_ratio)이 기간 내 감지됨 = 율 변동/과오청구 의심. 자동 판단·자동 수용 안 함(D-3).
+    Jino가 정당변동/과오청구 판정 후 수동 resolve. (구 D-11 legitimate/anomaly·자동갱신 폐기.)
     """
     from app.models import CoupangFeeChangeLog
 

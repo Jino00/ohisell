@@ -1,9 +1,10 @@
-# settlement_sync.py — 쿠팡 정산 동기화 Harness (회계 진짜 순이익 — P4, D-10/D-11)
-# 흐름: 계정별 → [매출내역(7일 인식일 윈도우) → coupang_revenue_fee upsert + fee_audit] →
-#       [지급내역(월별) → coupang_settlement_payout upsert].
-# ★fee_audit(D-11): 실측 serviceFeeRatio ≠ 등록 sale_agent_commission 감지 → 권위 재확인(상품 API
-#   saleAgentCommission 재조회) → ① 등록율이 실제로 바뀜=정당변동→자동 갱신 ② 등록율 그대로인데
-#   실측만 다름=과오청구 의심→자동 수용 금지·이상 플래그·Jino 보고. (원칙22·원칙18-9·D-3)
+# settlement_sync.py — 쿠팡 정산 동기화 Harness (회계 진짜 순이익 — P4, D-13)
+# 흐름: 계정별 → [매출내역(7일 인식일 윈도우) → coupang_revenue_fee upsert] →
+#       [지급내역(월별) → coupang_settlement_payout upsert] → [수수료 자기기준선 감사].
+# ★수수료 감사(D-13, D-10/D-11 기준선 교체): saleAgentCommission(등록율)이 라이브에서 전부 0이라
+#   기준선으로 쓸 수 없음(판매대행 수수료, 카테고리 판매수수료 아님). → 기준선 = 각 옵션의 정착
+#   실측율(service_fee_ratio history mode). 한 옵션이 기간 내 여러 율을 보이면=변동/이상 →
+#   coupang_fee_change_log에 rate_drift 플래그 + Jino 보고. 자동 판단·자동 수용 금지(D-3·D-11 정신).
 # 트랙 D-8: vendor 2계정(WING1·WING2) 순회(RG 중복 불필요). 호출은 서버 IP에서만(로컬 403).
 from __future__ import annotations
 
@@ -13,14 +14,14 @@ from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.clients.coupang import CoupangProductClient, CoupangSettlementClient
+from app.clients.coupang import CoupangSettlementClient
 from app.clients.coupang._base import CoupangReadError
 from app.config import get_coupang_config
 from app.models import (
     CoupangFeeChangeLog,
-    CoupangProductItem,
     CoupangRevenueFee,
     CoupangSettlementPayout,
 )
@@ -182,134 +183,105 @@ def _upsert_revenue_fee(
     return True
 
 
-def _reauthor_commission(product_client, seller_product_id, vendor_item_id) -> Decimal | None:
-    """상품 API 재조회로 해당 옵션의 등록 판매수수료율(saleAgentCommission)을 권위 재확인. 실패 None.
-
-    D-11: 불일치 감지 시 '진짜 등록율'을 권위(상품 API)에서 다시 가져와 정당변동/이상을 가른다.
-    """
-    if not seller_product_id:
-        return None
-    try:
-        data = product_client.get_product(int(seller_product_id))
-    except (TypeError, ValueError):
-        return None
-    if not data:
-        return None
-    for it in data.get("items", []) or []:
-        if str(it.get("vendorItemId") or "") == str(vendor_item_id):
-            return _opt_dec(it.get("saleAgentCommission"))
-    return None
-
-
 def _log_fee_change(
     db: Session, account_key: str, vendor_id: str, vii: str,
-    registered: Decimal, observed: Decimal, reauthored: Decimal | None,
-    change_type: str, txn: dict, note: str, resolved: bool,
+    baseline: Decimal, observed: Decimal, txn: dict, note: str,
 ) -> None:
-    """수수료 불일치 1건을 coupang_fee_change_log에 upsert (grain=vii+observed+registered, 중복 방지)."""
+    """수수료 이상 1건을 coupang_fee_change_log에 upsert (grain=vii+observed+baseline, 중복 방지).
+
+    D-13: 컬럼 재사용 — registered_ratio=옵션 자기 기준선(정착 실측율 mode), observed_ratio=이탈율.
+    reauthored_ratio는 미사용(None; 카테고리율 교차 P6에서 활용 여지). resolved는 항상 False
+    (자동 판단 금지 — Jino가 정당변동/과오청구 판정 후 수동 resolve).
+    """
     row = (
         db.query(CoupangFeeChangeLog)
         .filter(
             CoupangFeeChangeLog.vendor_item_id == vii,
             CoupangFeeChangeLog.observed_ratio == observed,
-            CoupangFeeChangeLog.registered_ratio == registered,
+            CoupangFeeChangeLog.registered_ratio == baseline,
         )
         .first()
     )
     if row is None:
         row = CoupangFeeChangeLog(
-            vendor_item_id=vii, observed_ratio=observed, registered_ratio=registered
+            vendor_item_id=vii, observed_ratio=observed, registered_ratio=baseline
         )
         db.add(row)
     row.account_key = account_key
     row.vendor_id = vendor_id
-    row.reauthored_ratio = reauthored
-    row.change_type = change_type
+    row.reauthored_ratio = None
+    row.change_type = "rate_drift"
     row.order_id = str(txn.get("orderId") or "") or None
     row.recognition_date = _parse_date(txn.get("recognitionDate"))
     row.note = note
-    row.resolved = resolved
-    if resolved and row.resolved_at is None:
-        row.resolved_at = datetime.now()
+    # resolved는 기존 값 유지(Jino가 한번 resolve한 건 재감지로 되돌리지 않음). 신규는 모델 기본 False.
 
 
-def _fee_audit(
-    db: Session, account_key: str, vendor_id: str, item: dict, txn: dict,
-    product_client, audited: dict, reauth_cache: dict,
-) -> str | None:
-    """옵션 1건의 실측 수수료율 ↔ 등록율 감사 (D-11). 반환: 'legitimate'/'anomaly'/None(일치·비교불가).
+def _audit_fee_baseline(db: Session, account_key: str, vendor_id: str) -> dict:
+    """옵션 자기 기준선(정착 실측율) 감사 (D-13). saleAgentCommission(전부 0)을 기준선으로 못 쓰므로
+    각 옵션의 service_fee_ratio 이력에서 정착율(최빈 mode)을 기준선으로 삼고, 같은 옵션이 기간 내
+    다른 율을 보이면 = 변동/이상 → coupang_fee_change_log에 rate_drift 플래그(자동 판단 금지, Jino 보고).
 
-    codex [P1]: 분기 결과 캐시(audited)는 (vii, observed, registered) 단위 — vii만으로 캐싱하면
-    같은 옵션의 다른 불일치(12%정당 후 15%과오청구)가 캐시 히트로 오분류된다(안전장치 우회).
-    권위 재확인 API(reauth_cache)만 vii 단위로 캐시(상품 API는 옵션당 동일 결과 — 중복 호출 방지).
+    100% 커버(실측율은 옵션마다 있음). 멱등(grain vii+baseline+이탈율 — 재실행시 같은 행 갱신).
+    반환: {'options_checked', 'anomaly'}.
     """
-    vii = str(item.get("vendorItemId") or "")
-    observed = _opt_dec(item.get("serviceFeeRatio"))
-    if not vii or observed is None:
-        return None
-    pi = (
-        db.query(CoupangProductItem)
-        .filter(CoupangProductItem.vendor_item_id == vii)
-        .first()
-    )
-    if pi is None or pi.sale_agent_commission is None:
-        return None  # 등록율 없음(상품 미동기화 옵션) → 비교 불가
-    registered = _dec(pi.sale_agent_commission)
-    # ★라이브 실측 보정(원칙22): 등록율 0은 '수수료 0%'가 아니라 '미설정'(쿠팡 최소 4%).
-    # product_sync가 못 채운 옵션을 유효 등록율로 오인하면 false anomaly 양산 → 비교 불가 처리.
-    if registered <= 0:
-        return None
-    if abs(observed - registered) <= _RATIO_EPSILON:
-        return None  # 일치 — 정상
-
-    # 불일치 — 분기는 (vii, observed, registered)별, 권위 재확인 API는 vii 단위 캐시
-    cache_key = (vii, observed, registered)
-    if cache_key in audited:
-        return audited[cache_key]
-    if vii in reauth_cache:
-        reauthored = reauth_cache[vii]
-    else:
-        seller_pid = pi.seller_product_id or (
-            str(item.get("productId")) if item.get("productId") else None
+    rows = (
+        db.query(
+            CoupangRevenueFee.vendor_item_id,
+            CoupangRevenueFee.service_fee_ratio,
+            func.count(CoupangRevenueFee.id),
+            func.min(CoupangRevenueFee.recognition_date),
+            func.max(CoupangRevenueFee.recognition_date),
+            func.max(CoupangRevenueFee.order_id),
         )
-        reauthored = _reauthor_commission(product_client, seller_pid, vii)
-        reauth_cache[vii] = reauthored
-
-    if reauthored is not None and abs(reauthored - observed) <= _RATIO_EPSILON:
-        # ① 권위(상품 API)도 실측율과 같음 = 등록율이 실제로 바뀜 = 정당변동 → 자동 갱신
-        change_type = "legitimate"
-        note = (
-            f"등록율 {registered} → 권위 재확인 {reauthored}(=실측 {observed}). "
-            "정당 변동 — sale_agent_commission 자동 갱신."
+        .filter(
+            CoupangRevenueFee.account_key == account_key,
+            CoupangRevenueFee.service_fee_ratio.isnot(None),
         )
-        pi.sale_agent_commission = reauthored
-        resolved = True
-    else:
-        # ② 자동 수용 금지 — 이상 플래그(과오청구 의심), Jino 보고
-        change_type = "anomaly"
-        if reauthored is None:
-            note = (
-                f"등록율 {registered} vs 실측 {observed} 불일치. 권위 재확인 실패(상품 API 응답 없음) "
-                "— 자동 수용 보류, Jino 확인 필요."
-            )
-        elif abs(reauthored - registered) <= _RATIO_EPSILON:
-            note = (
-                f"등록율 {registered}=권위 재확인 {reauthored} 동일한데 실측만 {observed}. "
-                "과오청구 의심 — 자동 수용 금지, Jino 확인 필요."
-            )
-        else:
-            note = (
-                f"등록 {registered}·실측 {observed}·권위 재확인 {reauthored} 3값 불일치. "
-                "설명 안 됨 — 자동 수용 금지, Jino 확인 필요."
-            )
-        resolved = False
-
-    _log_fee_change(
-        db, account_key, vendor_id, vii, registered, observed, reauthored,
-        change_type, txn, note, resolved,
+        .group_by(
+            CoupangRevenueFee.vendor_item_id, CoupangRevenueFee.service_fee_ratio
+        )
+        .all()
     )
-    audited[cache_key] = change_type
-    return change_type
+    by_opt: dict[str, list[dict]] = {}
+    for vii, ratio, cnt, dmin, dmax, oid in rows:
+        r = _opt_dec(ratio)
+        if r is None:
+            continue
+        by_opt.setdefault(str(vii), []).append(
+            {"ratio": r, "count": int(cnt or 0), "dmin": dmin, "dmax": dmax, "order_id": oid}
+        )
+
+    stats = {"options_checked": 0, "anomaly": 0}
+    for vii, dist in by_opt.items():
+        stats["options_checked"] += 1
+        if len(dist) <= 1:
+            continue  # 단일 정착율 — 정상(기준선 확립). 자기기준선과 일치.
+
+        # 기준선 = 최빈(건수 desc). 동률이면 시작 이른 율(원래 정착), 그래도 동률이면 낮은 율(결정적).
+        def _bl_key(d: dict) -> tuple:
+            dmin_ord = d["dmin"].toordinal() if d["dmin"] else 10**9
+            return (-d["count"], dmin_ord, float(d["ratio"]))
+
+        baseline = min(dist, key=_bl_key)
+        for d in dist:
+            if d is baseline:
+                continue
+            if abs(d["ratio"] - baseline["ratio"]) <= _RATIO_EPSILON:
+                continue  # 부동오차 내 동일 — 변동 아님
+            note = (
+                f"옵션 {vii} 수수료율 변동 감지: 기준 {baseline['ratio']}%"
+                f"({baseline['count']}건, {baseline['dmin']}~{baseline['dmax']}) ↔ "
+                f"이탈 {d['ratio']}%({d['count']}건, {d['dmin']}~{d['dmax']}). "
+                "정당변동/과오청구 — 자동판단 금지, Jino 확인."
+            )
+            txn = {
+                "orderId": d["order_id"],
+                "recognitionDate": d["dmax"].isoformat() if d["dmax"] else None,
+            }
+            _log_fee_change(db, account_key, vendor_id, vii, baseline["ratio"], d["ratio"], txn, note)
+            stats["anomaly"] += 1
+    return stats
 
 
 def _upsert_payout(
@@ -379,20 +351,17 @@ def sync_account_settlement(
     if cfg is None:
         return {"account": account_key, "error": "config_missing"}
     settle_client = CoupangSettlementClient(cfg)
-    product_client = CoupangProductClient(cfg)
     vendor_id = cfg.vendor_id
     stats = {
         "account": account_key, "vendor_id": vendor_id,
         "txns": 0, "fee_items": 0, "payouts": 0,
-        "fee_legitimate": 0, "fee_anomaly": 0,
+        "fee_options_checked": 0, "fee_anomaly": 0,
         "errors": 0, "api_failures": 0,
     }
     seen_rev: dict = {}
     seen_pay: dict = {}
-    audited: dict = {}       # (vii, observed, registered) → change_type (분기 결과 캐시)
-    reauth_cache: dict = {}  # vendor_item_id → reauthored (권위 재확인 API 1회 캐시)
 
-    # ① 매출내역(7일 인식일 윈도우) → 적재 + 수수료 감사
+    # ① 매출내역(7일 인식일 윈도우) → 적재 (감사는 적재 완료 후 자기기준선 스윕으로 D-13)
     for win_from, win_to in _revenue_windows(days):
         try:
             for txn in settle_client.iter_revenue_history(
@@ -402,14 +371,6 @@ def sync_account_settlement(
                 for item in txn.get("items", []) or []:
                     if _upsert_revenue_fee(db, account_key, vendor_id, txn, item, seen_rev):
                         stats["fee_items"] += 1
-                    ct = _fee_audit(
-                        db, account_key, vendor_id, item, txn,
-                        product_client, audited, reauth_cache,
-                    )
-                    if ct == "legitimate":
-                        stats["fee_legitimate"] += 1
-                    elif ct == "anomaly":
-                        stats["fee_anomaly"] += 1
         except CoupangReadError:  # API 하드실패 — stale 위장 금지(원칙22)
             log.exception("매출내역 읽기 실패 %s %s~%s", account_key, win_from, win_to)
             stats["api_failures"] += 1
@@ -433,6 +394,16 @@ def sync_account_settlement(
             log.exception("지급내역 오류 %s %s", account_key, ym)
             stats["errors"] += 1
         time.sleep(_CALL_DELAY)
+
+    # ③ 수수료 자기기준선 감사(D-13) — 적재된 매출내역 전체(기존+이번분)에서 옵션별 정착율 확인.
+    #    autoflush로 이번 적재분 포함. 율 변동 옵션은 rate_drift 플래그(자동판단 금지, Jino 보고).
+    try:
+        audit = _audit_fee_baseline(db, account_key, vendor_id)
+        stats["fee_options_checked"] = audit["options_checked"]
+        stats["fee_anomaly"] = audit["anomaly"]
+    except Exception:  # noqa: BLE001 — 감사 실패가 적재분 커밋을 막지 않게
+        log.exception("수수료 자기기준선 감사 오류 %s", account_key)
+        stats["errors"] += 1
 
     # 정상 동기화분 먼저 커밋(좋은 데이터 보존), 그 후 하드 실패 표면화.
     db.commit()

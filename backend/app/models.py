@@ -691,14 +691,16 @@ class CoupangSettlementPayout(Base):
 
 
 class CoupangFeeChangeLog(Base):
-    """쿠팡 판매수수료율 불일치 감사 로그 (트랙 D-11 안전장치).
+    """쿠팡 판매수수료율 이상 감사 로그 (트랙 D-13 자기기준선; D-11 기준선 교체).
 
-    revenue-history serviceFeeRatio(실측) ≠ coupang_product_item.sale_agent_commission(등록율) 감지 시,
-    상품 API saleAgentCommission 권위 재확인 후 분기 기록:
-      change_type="legitimate" → 등록율이 실제로 바뀜(정당변동). sale_agent_commission 자동 갱신함.
-      change_type="anomaly"    → 등록율 그대로인데 실측만 다름(과오청구 의심). 자동 수용 금지·Jino 보고.
-    grain = (vendor_item_id, observed_ratio, registered_ratio) — 같은 불일치 조합은 1행(매일 재감지 중복 방지).
-    원칙22(라이브 권위 검증)·원칙18-9(피드백 루프)·D-3(시스템은 사실만, 판단은 Jino).
+    ⚠️ D-13: saleAgentCommission(등록율)이 라이브 전부 0(판매대행 수수료, 카테고리 판매수수료
+    아님)이라 기준선으로 못 씀. 새 방식 = 각 옵션의 정착 실측율(service_fee_ratio history mode)을
+    기준선으로, 같은 옵션이 기간 내 다른 율을 보이면 기록:
+      change_type="rate_drift" → 율 변동/과오청구 의심. 자동 판단·자동 수용 안 함, Jino 수동 판정.
+    컬럼 재사용: registered_ratio=기준선(정착율), observed_ratio=이탈율, reauthored_ratio=미사용(None;
+    카테고리율 교차 P6 여지). grain=(vendor_item_id, observed_ratio, registered_ratio) 멱등.
+    (구 D-11 legitimate·자동 sale_agent_commission 갱신·권위 재확인 로직은 폐기.)
+    원칙18-9(피드백 루프)·D-3(시스템은 사실만, 판단은 Jino).
     """
 
     __tablename__ = "coupang_fee_change_log"

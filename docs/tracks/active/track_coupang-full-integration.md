@@ -74,10 +74,13 @@
 - **범위**: intelligence.py 읽기측 조인만. 신규 테이블·마이그레이션·쿠팡 API 호출 없음. 기존 회계엔진과 원가 원천 일치(일관성).
 - Jino 승인 원문: "가장 성능이 좋은 선택" → product_master 우선 + supply_price 폴백.
 
-### (미결, D 아님) 수수료 감사 기준선 재검토 — saleAgentCommission 전부 0
-- **라이브 진단 사실**: `coupang_product_item.sale_agent_commission`이 201옵션 **전부 0**. saleAgentCommission=판매대행 수수료(직판 셀러 0), 카테고리 판매수수료 아님. → D-10/D-11 감사가 실측율을 0과 비교 = 유효 기준선 부재.
-- 실측율 `service_fee_ratio`는 84옵션 전부(100%) 보유 → 대안: 기간대비 실측율 변동 감지 등.
-- **D-10/D-11 확정 결정 건드림 → 임의 변경 금지. 원가 작업 후 Jino와 별도 재논의 예정.** (Jino: "이번엔 원가만, 수수료는 다음")
+### D-13. 수수료 감사 기준선 = 옵션 자기 정착율(self-baseline) — D-10/D-11 기준선 교체 (2026-06-03 Jino 승인)
+- **배경(라이브 진단, 원칙22)**: `coupang_product_item.sale_agent_commission`(D-10 기준선)이 201옵션 **전부 0**. saleAgentCommission=판매대행 수수료(직판 셀러 0), 카테고리 판매수수료 아님 → 기존 _fee_audit는 `registered<=0`에서 즉시 스킵 = **실제 비교 0건**(anomaly 0은 정상이 아니라 감사 부재였음). 대안 카테고리율도 category_id↔실측옵션 교집합 4/84뿐. 반면 실측율 `service_fee_ratio`는 84옵션 100%·시간적으로 완벽히 안정(2/3~5/30 변동 0, 값 7.8/6.4/10.5=공식율 일치).
+- **결정(기준선 교체)**: saleAgentCommission 기준선 **폐기**. 새 기준선 = **각 옵션의 정착 실측율(history mode)**. 한 옵션이 기간 내 여러 serviceFeeRatio를 보이면 = 율 변동/이상 → `coupang_fee_change_log`에 `change_type=rate_drift` 플래그 + Jino 보고. **자동 판단·자동 수용 금지**(D-3/D-11 안전정신 보존, 시스템은 사실만).
+- **커버리지**: 자기기준선 84/84(100%) vs 카테고리율 4/84(5%). 신규 API·매핑 불필요(이미 있는 service_fee_ratio만 사용). 구현=settlement_sync 읽기측(신규 테이블·마이그레이션 없음, CoupangFeeChangeLog 컬럼 재사용: registered_ratio=기준선·observed_ratio=이탈율).
+- **현재 상태**: 84옵션 전부 안정 → rate_drift 0(진짜 비교 후 0). 깨진 0비교가 아니라 실제 기준선 확립.
+- **카테고리율 교차는 P6에서 2차 레이어로 얹기**(헛수고 없음 — 자기기준선 위에 추가). D-10/D-11의 saleAgentCommission 재조회·자동갱신 로직은 폐기(_reauthor_commission·_fee_audit 제거).
+- Jino 승인 원문: "자기기준선 핵심, 카테고리율은 P6에서" 방향 승인("그래").
 
 ## 3. 사용자 원문 인용 (왜곡 방지)
 - "종합적으로 오픽스의 판매현황에 대한 조망을 하고 싶어. 회계뿐 아니라 광고 전략, 상품판매 전략등까지 말이야"
