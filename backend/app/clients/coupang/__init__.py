@@ -5,6 +5,7 @@ from app.clients.coupang.channel import CoupangClient
 from app.clients.coupang.exchanges import CoupangExchangeClient
 from app.clients.coupang.products import CoupangProductClient
 from app.clients.coupang.returns import CoupangReturnClient
+from app.clients.coupang.settlement import CoupangSettlementClient
 
 __all__ = [
     "CoupangBaseClient",
@@ -12,4 +13,5 @@ __all__ = [
     "CoupangProductClient",
     "CoupangReturnClient",
     "CoupangExchangeClient",
+    "CoupangSettlementClient",
 ]

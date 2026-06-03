@@ -3,9 +3,119 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
-- 날짜: 2026-05-18
-- 단계: 쿠팡 광고 리포트 완료 (XLSX 통합 업로드)
-- 전체 진행률: 99%
+- 날짜: 2026-06-03
+- 단계: ★메가 프로젝트 P1+(A)+(B)+P2+**P4 정산(수수료 감사)** 완료·prod 라이브 실증 완결. 3자조인+순매출차감+수수료감사 prod 작동(3/7 페이즈). 다음 P3 로켓그로스 또는 P7 조망
+- 전체 진행률: 99% (기존 기능) / 트랙 3/7 페이즈 prod 배포·라이브 실증 완료. ⚠️ P4는 아직 main 커밋 전(워킹트리, prod엔 파일복사 배포됨)
+- 최신 커밋(main): f2f35b2 (P2 라이브보정) ← b786e11(B) ← 9a45eee(A) ← a4afac7(P1). **P4는 미커밋(커밋 시 사용자 승인 후)**
+- DB 마이그레이션 head: **c8f1a3b5d7e9** (로컬·prod 동일). P4는 신규 테이블 3개(coupang_revenue_fee·coupang_settlement_payout·coupang_fee_change_log)
+- prod DB 백업: 서버 ohisell.db.bak-20260603-p4settlement (+ p2returns·bsync). P4 코드 롤백: /tmp/rollback_P4(서버, 단 임시 — 영구보존 아님)
+- ⚠️ 쿠팡 API는 IP화이트리스트(트랙 D-8): 라이브 검증은 서버 SSH에서만. 로컬 403. 서버 uvicorn 포트=8001.
+- ⚠️ 배포 교훈: macOS tar AppleDouble(._*)이 Linux alembic null-bytes 유발 → COPYFILE_DISABLE=1 tar --exclude=._* (Failure Memory 기록됨)
+
+## returns_sync KST 윈도우 경계 통일 — 완료(prod 파일복사·라이브 실증, 미커밋) (2026-06-03)
+- [x] 버그: returns_sync._date_windows가 datetime.now().date()(=prod UTC) 사용 → 05:45 KST cron 실행 시 KST 하루 전 날짜로 조회범위 1일 stale(데이터는 윈도우 중첩으로 다음 실행이 메우나 정확성 저하)
+- [x] 수정: settlement_sync와 동일 패턴 — _KST=ZoneInfo("Asia/Seoul")+_kst_today() 도입, _date_windows가 _kst_today() 사용. (product_sync는 날짜윈도우 조회 없어 무관 / channel.py:24는 연결테스트 프로브라 스코프 외)
+- [x] codex review PASS: [P1]/[P2] 0건. 잔여리스크 zoneinfo tzdata는 settlement_sync가 이미 prod 의존 → 일관
+- [x] ✅ prod 배포: returns_sync.py scp(원본 git HEAD 백업 returns_sync.py.bak-20260603-kst) → sha256 로컬=prod 일치(34ff9d21…) → pm2 restart ohisell-backend → startup complete·/docs HTTP200(public·localhost)
+- [x] ✅ ★라이브 실증(prod UTC서버, 원칙22): 배포 모듈 직접 import → _kst_today()=2026-06-03(tzdata 정상). cron 순간(20:45 UTC=05:45 KST) OLD 윈도우끝 06-03 vs NEW 06-04 = stale_by_days 1 실증. _date_windows last_to==_kst_today
+- [x] 미커밋(워킹트리). 커밋 시 P4와 함께 사용자 승인 후
+
+## P4 정산 도메인 (수수료 감사 D-10/D-11) — 완료(prod 배포·라이브 실증, 미커밋) (2026-06-03)
+- [x] 명세: 서버 라이브 프로브로 실응답 확정 → references/04 §6 (revenue-history=거래단위+items[]옵션중첩·token필수·인식일기준 / settlement-histories=JSON배열직접반환·인식월단위)
+- [x] SA: clients/coupang/settlement.py (get_revenue_history·iter·get_settlement_histories) + __init__ export
+- [x] DB: CoupangRevenueFee(옵션 그레인 serviceFeeRatio)·CoupangSettlementPayout(정산단위·bank PII제외)·CoupangFeeChangeLog(감사로그) + alembic c8f1a3b5d7e9
+- [x] Harness: services/coupang/settlement_sync.py — 매출내역 적재 + fee_audit(D-11): 실측≠등록 감지→권위 재확인(상품API saleAgentCommission)→정당변동 자동갱신 or 과오청구의심 anomaly 플래그+Jino보고
+- [x] 소비자 4경로: POST /api/sync/coupang-settlement·스케줄러 sync_coupang_settlement(05:50 KST)·UI트리거·조회3개(coupang-fees·fee-anomalies·payouts)
+- [x] codex PASS 3R: R1[P1×3]캐시키 vii단일→(vii,observed,registered)·settlement 에러dict위장·_dec silent0원 → 수정 → R2 PASS → R3[P2]TZ→KST 수용 → PASS
+- [x] ★라이브 실측 보정(원칙22): ①recognitionDateTo=오늘 400→윈도우 끝 어제 ②등록율0(product_sync 미설정) false anomaly→registered<=0 비교불가 ③서버UTC↔KST→_kst_today
+- [x] ✅ prod 배포: DB백업 → tar(COPYFILE_DISABLE) → alembic c8f1a3b5d7e9 → 앱로드57 → pm2재기동 → HTTP200. 핵심파일 prod=로컬 sha256 일치
+- [x] ✅ ★라이브 실증(prod): revenue_fee 191행·payout 39행·실패0. 실측율 정상(94365168294=10.5% §4일치), REFUND/SALE·RESERVE·음수정산. anomaly 0. POST/GET 4경로 라이브 검증
+- [x] 관찰(D-3 사실): 실측율 84옵션 중 등록율 매칭 4개뿐 — product_sync 등록수수료율 미커버(P1 제약). 감사 메커니즘은 작동, 비교 토대 확대는 product_sync 개선 필요(별도)
+
+## P2 반품/취소/교환 — 완료(main f2f35b2) (2026-06-03)
+- [x] 명세 /browse 공식수집 → docs/references/03_coupang_returns_api_specs.md (반품7+교환4, §2.5 라이브실측 보정)
+- [x] SA: clients/coupang/returns.py(7)·exchanges.py(4) + _base.py POST body + CoupangReadError
+- [x] DB: CoupangReturnItem(옵션 그레인 순매출차감)·CoupangExchange + alembic a3d7c9e1f2b4
+- [x] Harness: services/coupang/returns_sync.py (RETURN status별순회·CANCEL·31일/7일윈도우·철회마킹·교환·seen-cache·api_failures 표면화)
+- [x] 소비자 3경로: 스케줄러 sync_coupang_returns(05:45 KST)·UI트리거·POST /api/sync/coupang-returns
+- [x] codex PASS: R1[P1]읽기실패 0건위장→CoupangReadError·[P2]철회 vendor_id 스코프 → R2 합의 → R3(라이브보정 후)PASS
+- [x] ★라이브 실측 보정(원칙22): RETURN status필수(400)→RU/UC/CC/PR순회 / 교환·철회 7일제한(400)→7일윈도우 / UNIQUE중복→seen-cache
+- [x] ✅ prod 배포: DB백업 → tar(COPYFILE_DISABLE) → alembic a3d7c9e1f2b4 → 앱로드53 → pm2재기동 → HTTP200. 배포파일10개 prod=main sha256 일치
+- [x] ✅ ★라이브 실증(prod): 반품 13행(RETURN3·CANCEL10)·실패0. 반품⨝주문 10옵션 매칭(순매출차감 — 갤S24플러스 취소1/단가16900 실금액). 교환0(윈도우내 없음)
+
+## (B) product_sync 소비자 연결 + P1 prod 배포 — 완료(main b786e11) (2026-06-03)
+- [x] scheduler_service.py: sync_coupang_products_job (매일 05:30 KST, 주문동기화 06:00 전 매핑 갱신, refresh_inventory=True) + _ensure_default_states + start_scheduler 맵
+- [x] scheduler 라우터 trigger_job 맵 등록 (UI 수동실행)
+- [x] sync 라우터 POST /api/sync/coupang-products (refresh_inventory/max_products 옵션)
+- [x] codex PASS 3라운드: [P2] 잡 실패 삼킴 → (R1)403은 _base None반환(클라계층)이라 정정·부분동의→log후 re-raise → (R2)config_missing 반환형 미표면화 동의→failed-result 감지 raise → (R3)합의
+- [x] 로컬 검증: 앱로드 52라우트, 하드에러→RuntimeError 전파·정상(부분errors)→완주 단위확인
+- [x] ✅ prod 배포: 옛 단일 app/clients/coupang.py 제거 → P1 패키지(clients/coupang·services/coupang)+수정3파일 scp → 앱로드52 → pm2재기동 → status/도메인 HTTP200. 마이그레이션 불필요.
+- [x] ✅ 라이브 실sync(서버IP): WING1 26상품/55옵션·WING2 229상품/146옵션 = coupang_product_item 201행 적재, errors0. mappings0(SKU자동매칭 제약, 3자조인은 vendor_item_id 직결이라 무관)
+- [x] ✅ ★라이브 3자 조인 실증(원칙22, 현재 prod): 배포전 0 → 2자(광고⨝상품)35옵션·3자(광고⨝상품⨝주문)1옵션. 2자샘플 갤S23울트라(광고비1664/클릭4)·갤S22(전환매출14100). 3자샘플 갤S24(주문1·매출42300). 조망 결합엔진 prod 라이브 완결.
+
+## (A) 광고 옵션ID 보존 — 완료(main 9a45eee) (2026-06-02)
+- [x] models.py CoupangAdOptionDaily (옵션 그레인, UNIQUE 5키: report_date·vendor·sell_type·ad_option_id·conv_option_id)
+- [x] alembic 9b2e4f6a7c1d (테이블+인덱스) 로컬적용. **prod 미적용**
+- [x] ad_costs.py 파서: XLSX [8]광고집행 옵션ID·[10]전환매출 옵션ID 보존, 옵션 단위 집계, delete-then-insert(멱등+stale방지). 기존 coupang_ad_report(롤업)는 무변경
+- [x] codex PASS 2라운드: [P2] 재업로드 stale행 → delete-then-insert 합의·수정
+- [x] 로컬 완결검증: 실XLSX(A01564720 5/26~6/1) 196옵션 적재, 집계 원본76751 정확일치, 광고⨝상품 조인 금액흐름(31982/16900), 멱등성·stale제거 PASS
+- [x] ✅ prod 배포 완료(2026-06-02): 서버 P1조차 미배포(79c5bf56a7eb)였어 upgrade head가 P1+A 둘 다 적용(coupang_product_item 빈테이블도 체인상 생성·무해). DB백업(ohisell.db.bak-20260602-adopt) 후 models·ad_costs·마이그2개만 파일복사(P1 패키지는 의존없어 미전송), pm2 재기동, 라이브 status HTTP200·도메인200 검증. 서버 uvicorn 포트=8001. 다음 광고 XLSX 업로드부터 옵션 적재.
+- [x] ✅ prod 옵션 실적재 라이브 검증: 실제 XLSX를 prod 도메인 업로드(HTTP200) → coupang_ad_option_daily 196행·75옵션·광고비76751·전환115220 로컬과 100%일치. top옵션 95521813033(31982원). 광고축 옵션ID 보존 라이브 완결.
+- 참고: P1(상품 도메인) 코드(clients/coupang 패키지·product_sync)는 여전히 prod 미배포 — (B) 소비자 붙일 때 함께. prod DB엔 P1 테이블만 빈 채로 존재. (그래서 광고⨝상품 조인은 prod에서 아직 0 — P1 sync 배포 후 채워짐)
+
+## P1 상품 도메인 — 코드 구축 완료(로컬), codex/배포 전 (2026-06-02)
+- [x] 패키지 승격 clients/coupang/ (_base HMAC추출 · channel 기존동작보존 · products 22SA[읽기5구현·17stub]) — 기존 coupang.py 제거, import호환·앱로드(51라우트) 검증
+- [x] DB 테이블 coupang_product_item (vendor_item_id PK, account/vendor, seller_product_id, price/supply/commission, stock, on_sale, status, sku) + alembic 8a1f2c3d4e5b 로컬적용
+- [x] Harness services/coupang/product_sync.py (2계정 순회→iter목록→get단건→upsert + ProductChannelMapping 자동, refresh_inventory 옵션)
+- [x] 라이브 검증(서버 읽기전용): 상품20·옵션122 중 실vendorItemId 49, 주문⨝상품 4건 매칭. null옵션 정확히 스킵.
+- [x] /codex review 게이트 PASS: 1라운드 [P1]2건(옵션ID전역유일 부분기각+근거 / RG채널매핑 수용·수정) → 2라운드 해소확인+[P2]1건(매핑 product_id 재지정) 수정. 커밋 a4afac7 (브랜치 feat/coupang-p1-products, 미push)
+- [x] 격리 드라이런(서버 worktree불가→파일복사+DB복사본): 실제 product_sync 끝까지 동작. 15상품→44옵션 적재(라이브 재고100·판매상태), [P1#2] WING1+RG1 채널 인식, 라이브DB 무변경 확인. Python3.10 호환 확인.
+  - 발견: externalVendorSku 빈값 다수 → 매핑 자동생성 0(기존 매핑 2610건 존재). supply_price 0(원가는 product_master 의존).
+  - 서버엔 git 레포 없음(배포=파일복사). DATABASE_URL=sqlite:///./ohisell.db (서버 backend/ohisell.db 51MB)
+- [ ] 프로덕션 적용(검토 후): prod DB 마이그레이션 + 실 sync + main 머지 + 코드배포(pm2)
+
+## ★★★ 진행 중 메가 프로젝트 (트랙) — 세션 넘어와도 반드시 이어갈 것 ★★★
+- 트랙: docs/tracks/active/track_coupang-full-integration.md  ← 단일 진실 원천, 먼저 읽기
+- 목표: 쿠팡 Open API 100개 엔드포인트(읽기+쓰기 전부, 상품등록 포함)를 ohisell에 연결 → 종합 조망(Command Center: 회계+광고사실+상품현황)
+- 확정: D-1~D-7 (백엔드 우선→프론트, 시스템은 사실정리만·전략추천 없음, 광고는 XLSX업로드)
+- 아키텍처 확정: clients/coupang/*(SA 100) → services/coupang/*(Harness) → routers/pages
+- 현재: P0(설계·검증) 완료 → **P1 상품 도메인(22개) 명세수집·구축 착수 직전**
+- 참고: docs/references/01_coupang_api_full_catalog.md (100개 전수 카탈로그)
+
+## Sprint 4B-revenue-split 완료 (2026-05-20) — 제품매출/배송비매출 분리
+- [x] schemas.py: TrendPoint/GroupedSummaryRow/GroupedTrendPoint/ProductProfitRow에 product_revenue/shipping_revenue 추가. SettlementOut에 product_amount 파생
+- [x] profit_calculator.py 6함수 분리 누적 (불변식: product+shipping==revenue)
+  - calculate_daily_trend, calculate_channel_summary, calculate_product_profit
+  - calculate_channel_daily_trend, group_summary_by_company, group_trend_by_company
+- [x] product_profit: 배송수입 라인 비례 배분 + VAT 동시 배분
+- [x] dashboard.py: weekly/monthly grouping propagation
+- [x] settlements.py: product_amount = total_amount - shipping_fee (음수 가드)
+- [x] Dashboard.tsx: 기간 요약표·상품 랭킹 [제품매출 | 배송비매출 | 총매출] 3컬럼
+- [x] Settlements.tsx: [제품정산 | 배송정산 | 정산액] 3컬럼
+- [x] Orders.tsx: 채널별 처리 (cafe24=0, NAVER=라인별, 쿠팡=order_number dedup)
+- [x] codex review 3라운드:
+  - P2 (cafe24 shipping_cost 매출 표시): 수정 — 채널별 판정 추가
+  - P2 (쿠팡 라인별 복사 double-count): 수정 — order_number dedup
+  - P2 (1 orderId → N shipmentBoxId): 실데이터 0건, 현행 유지 합의 (Jino 결정)
+- [x] 로컬 검증: 64건 모두 불변식 통과 (NAVER 899,710+92,500=992,210)
+- [x] git commit 433d99a + 프로덕션 배포 + 검증 (7행 위배 0건)
+
+## Sprint 4B-vat-fix 완료 (2026-05-19) — VAT 4화면 일치
+- [x] calculate_channel_summary: vat 누적 + net_profit 차감 추가
+- [x] calculate_product_profit: vat 누적 + 배송수입 VAT 라인비례 배분 + net_profit 차감
+- [x] 로컬 검증: NAVER 2026-05-18 channel_summary = daily_trend = 138,495 완전 일치
+- [x] git commit 60674fa + 프로덕션 배포 + 검증
+- [x] failures.jsonl 기록
+
+## Sprint 4B-shipping-accounting 완료 (2026-05-19) — 배송비 회계 재설계
+- [x] _raw/_shipment_key/_delivery_income/_is_coupang 헬퍼 추가
+- [x] 매출 = 상품매출 + 고객결제 배송비(NAVER deliveryFeeAmount / 쿠팡 shippingPrice)
+- [x] 배송비용 = 한진 1,900 / 물리배송 1건 (NAVER packageNumber / 쿠팡 shipmentBoxId 단위)
+- [x] 수수료 = 상품매출 기준만 (배송비 제외)
+- [x] codex 2라운드 PASS (v3)
+- [x] 검증: NAVER 2026-05-18 4화면 매출/원가/수수료/배송비 완전 일치(992,210)
+- [x] git commit 4eb9d3d + 프로덕션 배포 + 검증
+- [x] failures.jsonl 기록
 
 ## Sprint 4B-coupang-ad-report 완료 (2026-05-18) — 쿠팡 광고 리포트
 - [x] CoupangAdReport 모델 + alembic 마이그레이션 (79c5bf56a7eb)
@@ -159,9 +269,13 @@
 1. [x] 네이버 IP 등록 (Oracle IP 168.107.19.222) — 완료
 2. [x] 네이버 스마트스토어 API 실제 동기화 테스트 — 완료
 3. [x] cafe24 refresh token 동시성 직렬화 근본수정 — 완료
-4. [ ] 로켓배송 실제 매출 데이터 입력 (Settings 페이지 활용)
-5. [ ] 쿠팡 광고 XLSX 과거분 업로드
-6. [ ] nginx IP 화이트리스트 또는 Basic Auth (보안, 현재 미적용 결정)
+4. [x] 배송비 회계 재설계 (4화면 일치) — 완료
+5. [x] VAT 4화면 일치 — 완료
+6. [x] 제품매출/배송비매출 분리 (4화면) — 완료 (433d99a)
+7. [ ] 쿠팡 광고비 누락 해결 (calculate_daily_trend가 위탁 채널 광고비 미집계 → 전사 순이익 과대) ★최우선
+8. [ ] 로켓배송 실제 매출 데이터 입력 (Settings 페이지 활용)
+9. [ ] 쿠팡 광고 XLSX 과거분 업로드
+10. [ ] nginx IP 화이트리스트 또는 Basic Auth (보안, 현재 미적용 결정)
 
 ### Sprint 5 후보
 1. [ ] 알림 시스템 (Telegram/Slack)
@@ -187,9 +301,14 @@
 | 네이버 스마트스토어 | NAVER | OAuth2 |
 | 자사몰 (cafe24) | CAFE24 | OAuth2 |
 
-## DB 마이그레이션 head
-- 3b94b7c55a1f (add_manual_revenue_table, 2026-05-17)
+## DB 마이그레이션 head (선형 체인, 검증됨 2026-06-02)
+- 79c5bf56a7eb (add_coupang_ad_report_table) ← HEAD
+- c7d2e1f3a4b5 (add_company_to_channels)
+- 3b94b7c55a1f (add_manual_revenue_table)
 - a1c24f0b9d31 (add_cafe24_payment_fields_to_orders)
+- e8f0d3882c59 (add_refresh_token_expires_at_to_oauth)
+- 1b60d8e50617 (sprint3_dashboard_scheduler_settlements)
+- 5e9fc0ecf187 (initial_schema_with_all_tables)
 
 ## 마지막 git commit
-27ffc1a feat: 로켓배송 매출 수동 입력 (manual_revenue 테이블 + 대시보드 통합)
+433d99a feat: 매출 분리 — 제품매출 / 배송비매출 (4화면 적용)

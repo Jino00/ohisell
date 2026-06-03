@@ -574,6 +574,166 @@ class CoupangExchange(Base):
 
 
 # ──────────────────────────────────────────────
+# 쿠팡 정산 도메인 (회계 진짜 순이익 — P4, D-10/D-11)
+# ──────────────────────────────────────────────
+class CoupangRevenueFee(Base):
+    """쿠팡 매출내역(revenue-history) 옵션 그레인 — 실제 적용 판매수수료율(serviceFeeRatio) 적재.
+
+    명세: docs/references/04_coupang_fees_map.md §6-1.
+    revenue-history는 거래(orderId) 단위 + items[] 옵션 중첩. 이 테이블은 옵션 1행으로 평탄화.
+    grain = (order_id, vendor_item_id, recognition_date, sale_type). saleType=SALE/REFUND 모두 포함
+    (REFUND는 음수 — 사실 그대로, D-3). service_fee_ratio ↔ coupang_product_item.sale_agent_commission
+    비교가 D-10/D-11 수수료 감사의 축. vendor_item_id ⨝ 광고·상품·주문·반품 동일 결합축(D-8).
+    delivery_fee_*는 주문(거래) 헤더값 — 한 주문의 모든 옵션 행에 반복(합산 시 order_id distinct).
+    """
+
+    __tablename__ = "coupang_revenue_fee"
+    __table_args__ = (
+        UniqueConstraint(
+            "order_id", "vendor_item_id", "recognition_date", "sale_type",
+            name="uq_coupang_revenue_fee",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    order_id: Mapped[str] = mapped_column(String(30), nullable=False, index=True)  # 주문번호
+    vendor_item_id: Mapped[str] = mapped_column(
+        String(20), nullable=False, index=True
+    )  # 옵션ID = 결합키
+    account_key: Mapped[str] = mapped_column(String(20), nullable=False)  # COUPANG_WING1 등
+    vendor_id: Mapped[str] = mapped_column(String(20), nullable=False)  # 소유 계정
+    sale_type: Mapped[str] = mapped_column(String(20), nullable=False)  # SALE / REFUND 등
+    sale_date: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True)  # 판매일
+    recognition_date: Mapped[Optional[datetime]] = mapped_column(
+        Date, nullable=True, index=True
+    )  # 매출 인식일(조회 기준)
+    settlement_date: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True)
+    final_settlement_date: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True)
+    product_id: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)  # sellerProductId
+    product_name: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+    vendor_item_name: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+    sale_price: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    sale_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    service_fee: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    service_fee_vat: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    service_fee_ratio: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(7, 2), nullable=True
+    )  # ★실제 적용 판매수수료율(%) — D-10/D-11 비교축
+    settlement_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    coupang_discount_coupon: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, default=0)
+    seller_discount_coupon: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, default=0)
+    downloadable_coupon: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, default=0)
+    courantee_fee: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, default=0)
+    store_fee_discount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, default=0)
+    external_seller_sku_code: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    # 배송비(주문 헤더 — 옵션 행에 반복, 합산 시 order_id distinct)
+    delivery_fee_amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+    delivery_fee_fee: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+    delivery_fee_ratio: Mapped[Optional[Decimal]] = mapped_column(Numeric(7, 2), nullable=True)
+    synced_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class CoupangSettlementPayout(Base):
+    """쿠팡 지급내역(settlement-histories) 정산 단위 — 주/월 통장 지급액·서비스이용료·차감.
+
+    명세: docs/references/04_coupang_fees_map.md §6-2. 응답은 JSON 배열 직접 반환(인식월 단위).
+    grain = (vendor_id, settlement_type, settlement_date, revenue_recognition_date_from,
+    revenue_recognition_date_to). sellerServiceFee(월 55k)·deductionAmount·finalAmount 회계 검증축.
+    bank 정보(예금주/은행/계좌)는 PII라 저장하지 않음(보안 원칙). D-3 사실 정리만.
+    """
+
+    __tablename__ = "coupang_settlement_payout"
+    __table_args__ = (
+        UniqueConstraint(
+            "vendor_id", "settlement_type", "settlement_date",
+            "revenue_recognition_date_from", "revenue_recognition_date_to",
+            name="uq_coupang_settlement_payout",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    account_key: Mapped[str] = mapped_column(String(20), nullable=False)
+    vendor_id: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    settlement_type: Mapped[str] = mapped_column(String(20), nullable=False)  # WEEKLY/MONTHLY 등
+    settlement_date: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True, index=True)
+    revenue_recognition_year_month: Mapped[Optional[str]] = mapped_column(String(7), nullable=True)
+    revenue_recognition_date_from: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True)
+    revenue_recognition_date_to: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True)
+    total_sale: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    service_fee: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    settlement_target_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    settlement_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    last_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    pending_released_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    seller_discount_coupon: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, default=0)
+    downloadable_coupon: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, default=0)
+    dedicated_delivery_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, default=0)
+    seller_service_fee: Mapped[Decimal] = mapped_column(
+        Numeric(12, 2), nullable=False, default=0
+    )  # 판매자 서비스이용료(월 55k)
+    courantee_fee: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, default=0)
+    courantee_customer_reward: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, default=0)
+    deduction_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    debt_of_last_week: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    final_amount: Mapped[Decimal] = mapped_column(
+        Numeric(14, 2), nullable=False, default=0
+    )  # 최종 지급액
+    store_fee_discount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, default=0)
+    status: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)  # DONE 등
+    synced_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class CoupangFeeChangeLog(Base):
+    """쿠팡 판매수수료율 불일치 감사 로그 (트랙 D-11 안전장치).
+
+    revenue-history serviceFeeRatio(실측) ≠ coupang_product_item.sale_agent_commission(등록율) 감지 시,
+    상품 API saleAgentCommission 권위 재확인 후 분기 기록:
+      change_type="legitimate" → 등록율이 실제로 바뀜(정당변동). sale_agent_commission 자동 갱신함.
+      change_type="anomaly"    → 등록율 그대로인데 실측만 다름(과오청구 의심). 자동 수용 금지·Jino 보고.
+    grain = (vendor_item_id, observed_ratio, registered_ratio) — 같은 불일치 조합은 1행(매일 재감지 중복 방지).
+    원칙22(라이브 권위 검증)·원칙18-9(피드백 루프)·D-3(시스템은 사실만, 판단은 Jino).
+    """
+
+    __tablename__ = "coupang_fee_change_log"
+    __table_args__ = (
+        UniqueConstraint(
+            "vendor_item_id", "observed_ratio", "registered_ratio",
+            name="uq_coupang_fee_change_log",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    vendor_item_id: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    account_key: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    vendor_id: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    registered_ratio: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(7, 2), nullable=True
+    )  # 감지 당시 DB 등록율(sale_agent_commission)
+    observed_ratio: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(7, 2), nullable=True
+    )  # 실측율(revenue-history serviceFeeRatio)
+    reauthored_ratio: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(7, 2), nullable=True
+    )  # 권위 재확인한 상품API saleAgentCommission
+    change_type: Mapped[str] = mapped_column(
+        String(20), nullable=False
+    )  # legitimate / anomaly
+    order_id: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)  # 감지된 거래
+    recognition_date: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True)
+    resolved: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    detected_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+# ──────────────────────────────────────────────
 # 스케줄러 상태
 # ──────────────────────────────────────────────
 class SchedulerState(Base):

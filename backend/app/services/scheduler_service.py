@@ -234,6 +234,39 @@ def sync_coupang_returns_job():
         db.close()
 
 
+def sync_coupang_settlement_job():
+    """쿠팡 정산(매출내역+지급내역) 자동 동기화 + 수수료 감사 (05:50 KST).
+
+    매출내역 serviceFeeRatio ↔ 등록 수수료율 비교(D-10), 불일치는 권위 재확인 후
+    정당변동 자동갱신 or 이상 플래그(D-11). 스케줄 잡은 최근 위주(매출 30일·지급 2개월),
+    전체 재적재는 수동 트리거(days/months 확대). 트랙 D-8: 서버 IP에서만. D-3: 사실 정리만.
+    """
+    db = _get_own_db_session()
+    try:
+        from app.services.coupang.settlement_sync import sync_all_settlement
+
+        results = sync_all_settlement(db, days=30, months=2)
+        log.info("[스케줄러] 쿠팡 정산 동기화 결과: %s", results)
+
+        # 반환형 하드 에러(config_missing/읽기 실패) 표면화 — 거짓 성공 방지(codex [P2] 패턴).
+        failed = [r for r in results if r.get("error")]
+        if failed:
+            raise RuntimeError(f"쿠팡 정산 동기화 실패 계정: {failed}")
+
+        state = db.query(SchedulerState).filter(
+            SchedulerState.job_name == "sync_coupang_settlement"
+        ).first()
+        if state:
+            state.last_run_at = datetime.now()
+            db.commit()
+    except Exception as e:
+        # cron 경로는 APScheduler가 관용. 수동 트리거 경로는 re-raise로 실패 표면화(거짓 성공 방지).
+        log.exception("[스케줄러] sync_coupang_settlement_job 에러: %s", e)
+        raise
+    finally:
+        db.close()
+
+
 def cafe24_proactive_refresh_job():
     """cafe24 Access Token 만료 30분 전 자동 갱신.
 
@@ -317,6 +350,7 @@ def _ensure_default_states(db):
         ("sync_meta_ad_costs", "0 7 * * *"),
         ("sync_coupang_products", "30 5 * * *"),
         ("sync_coupang_returns", "45 5 * * *"),
+        ("sync_coupang_settlement", "50 5 * * *"),
     ]
     for name, cron in defaults:
         existing = db.query(SchedulerState).filter(
@@ -353,6 +387,8 @@ def start_scheduler():
                 job_func = sync_coupang_products_job
             elif state.job_name == "sync_coupang_returns":
                 job_func = sync_coupang_returns_job
+            elif state.job_name == "sync_coupang_settlement":
+                job_func = sync_coupang_settlement_job
 
             if job_func:
                 try:

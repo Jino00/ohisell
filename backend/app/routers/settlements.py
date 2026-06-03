@@ -273,6 +273,117 @@ def settlement_summary(
     )
 
 
+# ──────────────────────────────────────────────
+# 쿠팡 정산 도메인 조회 (P4, D-10/D-11) — 사실/지표 정리만(D-3)
+# ──────────────────────────────────────────────
+@router.get("/coupang-fees")
+def coupang_fee_comparison(
+    only_mismatch: bool = Query(False),
+    limit: int = Query(300, ge=1, le=1000),
+    db: Session = Depends(get_db),
+):
+    """쿠팡 옵션별 실측 판매수수료율(serviceFeeRatio) ↔ 등록율(sale_agent_commission) 비교 (D-10).
+
+    실측은 옵션별 최근 매출내역 행의 service_fee_ratio, 등록율은 coupang_product_item.
+    사실 정리만(D-3) — 불일치 표시까지, 판단은 Jino. only_mismatch=True면 불일치만.
+    """
+    from app.models import CoupangProductItem, CoupangRevenueFee
+
+    # 옵션별 최근 매출내역 행(id 최대 ≈ 최근 적재)을 실측율 대표값으로
+    sub = (
+        db.query(func.max(CoupangRevenueFee.id))
+        .filter(CoupangRevenueFee.service_fee_ratio.isnot(None))
+        .group_by(CoupangRevenueFee.vendor_item_id)
+        .subquery()
+    )
+    rows = db.query(CoupangRevenueFee).filter(CoupangRevenueFee.id.in_(sub)).all()
+    pi_map = {pi.vendor_item_id: pi for pi in db.query(CoupangProductItem).all()}
+
+    result = []
+    for r in rows:
+        pi = pi_map.get(r.vendor_item_id)
+        registered = pi.sale_agent_commission if pi else None
+        observed = r.service_fee_ratio
+        # 등록율 0/None은 '미설정'(쿠팡 최소 4%) → 비교 불가, mismatch 아님(라이브 실측 보정)
+        reg_valid = registered is not None and Decimal(str(registered)) > 0
+        mismatch = (
+            reg_valid and observed is not None
+            and abs(Decimal(str(observed)) - Decimal(str(registered))) > Decimal("0.01")
+        )
+        if only_mismatch and not mismatch:
+            continue
+        result.append({
+            "vendor_item_id": r.vendor_item_id,
+            "vendor_item_name": r.vendor_item_name,
+            "account_key": r.account_key,
+            "observed_ratio": str(observed) if observed is not None else None,
+            "registered_ratio": str(registered) if registered is not None else None,
+            "mismatch": mismatch,
+            "recent_recognition_date": str(r.recognition_date) if r.recognition_date else None,
+        })
+    result.sort(key=lambda x: (not x["mismatch"], x["vendor_item_id"]))
+    return {"count": len(result), "items": result[:limit]}
+
+
+@router.get("/coupang-fee-anomalies")
+def coupang_fee_anomalies(
+    include_resolved: bool = Query(False),
+    db: Session = Depends(get_db),
+):
+    """쿠팡 수수료율 감사 로그 (D-11). 미해소 이상(anomaly)=Jino 확인 대상.
+
+    change_type=legitimate(정당변동, 자동 갱신함) / anomaly(과오청구 의심, 자동 수용 안 함).
+    """
+    from app.models import CoupangFeeChangeLog
+
+    q = db.query(CoupangFeeChangeLog).order_by(CoupangFeeChangeLog.detected_at.desc())
+    if not include_resolved:
+        q = q.filter(CoupangFeeChangeLog.resolved.is_(False))
+    rows = q.limit(500).all()
+    return [{
+        "vendor_item_id": r.vendor_item_id,
+        "change_type": r.change_type,
+        "registered_ratio": str(r.registered_ratio) if r.registered_ratio is not None else None,
+        "observed_ratio": str(r.observed_ratio) if r.observed_ratio is not None else None,
+        "reauthored_ratio": str(r.reauthored_ratio) if r.reauthored_ratio is not None else None,
+        "order_id": r.order_id,
+        "recognition_date": str(r.recognition_date) if r.recognition_date else None,
+        "resolved": r.resolved,
+        "note": r.note,
+        "detected_at": r.detected_at.isoformat() if r.detected_at else None,
+    } for r in rows]
+
+
+@router.get("/coupang-payouts")
+def coupang_payouts(
+    limit: int = Query(100, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    """쿠팡 지급내역(주/월 정산) 목록 — 서비스이용료·차감·최종지급액 사실 정리(D-3)."""
+    from app.models import CoupangSettlementPayout
+
+    rows = (
+        db.query(CoupangSettlementPayout)
+        .order_by(CoupangSettlementPayout.settlement_date.desc())
+        .limit(limit)
+        .all()
+    )
+    return [{
+        "account_key": r.account_key,
+        "vendor_id": r.vendor_id,
+        "settlement_type": r.settlement_type,
+        "settlement_date": str(r.settlement_date) if r.settlement_date else None,
+        "recognition_from": str(r.revenue_recognition_date_from) if r.revenue_recognition_date_from else None,
+        "recognition_to": str(r.revenue_recognition_date_to) if r.revenue_recognition_date_to else None,
+        "total_sale": str(r.total_sale),
+        "service_fee": str(r.service_fee),
+        "seller_service_fee": str(r.seller_service_fee),
+        "deduction_amount": str(r.deduction_amount),
+        "final_amount": str(r.final_amount),
+        "status": r.status,
+    } for r in rows]
+
+
 @router.delete("/{settlement_id}")
 def delete_settlement(
     settlement_id: int,

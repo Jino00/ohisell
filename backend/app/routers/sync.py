@@ -89,6 +89,24 @@ def sync_coupang_returns(
     return sync_all_returns(db, days=days)
 
 
+@router.post("/coupang-settlement")
+def sync_coupang_settlement(
+    days: int = 90,
+    months: int = 6,
+    db: Session = Depends(get_db),
+):
+    """쿠팡 정산(매출내역+지급내역) 동기화 + 수수료 감사 (회계 진짜 순이익 — D-10/D-11).
+
+    트랙 D-8: 쿠팡 Open API는 서버 IP 화이트리스트 — 서버에서만 동작(로컬 403).
+    트랙 D-3: 사실/지표 정리만(전략판단 없음). days: 매출내역 인식일 과거기간(7일 윈도우 분할),
+    months: 지급내역 인식월 수. 실측 serviceFeeRatio ≠ 등록 수수료율 시 권위 재확인 후
+    정당변동 자동갱신 or 이상 플래그(D-11).
+    """
+    from app.services.coupang.settlement_sync import sync_all_settlement
+
+    return sync_all_settlement(db, days=days, months=months)
+
+
 @router.get("/status", response_model=list[SyncStatusOut])
 def sync_status(db: Session = Depends(get_db)):
     """채널별 마지막 동기화 상태"""
