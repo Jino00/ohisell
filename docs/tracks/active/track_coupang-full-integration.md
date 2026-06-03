@@ -68,6 +68,17 @@
 - Claude 강권 사유(승인됨): 무조건 자동 수용은 쿠팡 과오청구를 시스템이 "정상"으로 처리해버리는 위험 → 거부.
 - Jino 승인 원문: "권위확인된 변동만 자동(Claude 강권)".
 
+### D-12. 조망 순이익 원가 = 내부 product_master.cost_price 다리 (2026-06-03 Jino 승인, 라이브 진단 근거)
+- **배경(라이브 진단, 원칙22)**: 결합 엔진(intelligence.py)이 원가를 `coupang_product_item.supply_price`에서 읽었으나 실거래 178옵션 중 **1옵션(0.6%)만 커버**(쿠팡 supplyPrice 94% 빈값 — 셀러 미입력). 반면 내부 `product_master.cost_price`는 894상품 중 **792(89%) 보유**, `product_channel_mapping`(coupang, is_active) 다리로 **실거래 118옵션(66%)에 닿음**(원가충돌 0).
+- **결정**: 조망 순이익 원가 조회를 **① 내부 product_master.cost_price 우선(다리=profit_calculator._get_option_id_map과 동일 경로) → ② 없으면 coupang supply_price 폴백**. 순이익 원가 반영 1→118+옵션. 이름도 동일 다리로 폴백(정식 상품명).
+- **범위**: intelligence.py 읽기측 조인만. 신규 테이블·마이그레이션·쿠팡 API 호출 없음. 기존 회계엔진과 원가 원천 일치(일관성).
+- Jino 승인 원문: "가장 성능이 좋은 선택" → product_master 우선 + supply_price 폴백.
+
+### (미결, D 아님) 수수료 감사 기준선 재검토 — saleAgentCommission 전부 0
+- **라이브 진단 사실**: `coupang_product_item.sale_agent_commission`이 201옵션 **전부 0**. saleAgentCommission=판매대행 수수료(직판 셀러 0), 카테고리 판매수수료 아님. → D-10/D-11 감사가 실측율을 0과 비교 = 유효 기준선 부재.
+- 실측율 `service_fee_ratio`는 84옵션 전부(100%) 보유 → 대안: 기간대비 실측율 변동 감지 등.
+- **D-10/D-11 확정 결정 건드림 → 임의 변경 금지. 원가 작업 후 Jino와 별도 재논의 예정.** (Jino: "이번엔 원가만, 수수료는 다음")
+
 ## 3. 사용자 원문 인용 (왜곡 방지)
 - "종합적으로 오픽스의 판매현황에 대한 조망을 하고 싶어. 회계뿐 아니라 광고 전략, 상품판매 전략등까지 말이야"
 - "광고리포트에 대해서는 사실만 정리하면 되지, 너가 추천할 필요는 없어. 너가 그런 일을 할 수 있는 능력은 없잖아?"

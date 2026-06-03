@@ -23,6 +23,8 @@ from app.models import (
     CoupangReturnItem,
     CoupangRevenueFee,
     Order,
+    ProductChannelMapping,
+    ProductMaster,
 )
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
 
@@ -219,6 +221,37 @@ def _product_master(db: Session) -> dict[str, dict]:
     return out
 
 
+def _cost_master(db: Session) -> dict[str, dict]:
+    """옵션ID(vendor_item_id) → 내부 product_master(원가·정식 상품명) 다리. (트랙 D-12)
+
+    원가는 coupang_product_item.supply_price(실거래 0.6% 커버)가 아니라 내부
+    product_master.cost_price(89% 보유)에 product_channel_mapping(coupang, is_active)으로
+    닿는다 — 실거래 66% 커버. profit_calculator._get_option_id_map과 **동일 경로**(is_active
+    매핑)라 기존 회계엔진과 원가 원천이 일치한다. (라이브 진단: 옵션ID당 원가충돌 0건 확인)
+    """
+    products = {p.id: p for p in db.query(ProductMaster).all()}
+    out: dict[str, dict] = {}
+    rows = (
+        db.query(
+            ProductChannelMapping.channel_product_id,
+            ProductChannelMapping.product_id,
+        )
+        .join(Channel, ProductChannelMapping.channel_id == Channel.id)
+        .filter(
+            Channel.platform == "coupang",
+            ProductChannelMapping.is_active.is_(True),
+        )
+        .all()
+    )
+    for cpid, pid in rows:
+        pm = products.get(pid)
+        if pm is None:
+            continue
+        # setdefault: 같은 옵션ID가 WING+RG 두 채널에 매핑돼도 같은 product_id(원가충돌 0) — 첫 값 유지
+        out.setdefault(str(cpid), {"cost_price": pm.cost_price, "name": pm.product_name})
+    return out
+
+
 # ──────────────────────────────────────────────
 # 결합 엔진 — 5소스 병합 + 3축 파생
 # ──────────────────────────────────────────────
@@ -226,9 +259,11 @@ def compute_command_center(db: Session, dfrom: date, dto: date) -> dict:
     """옵션ID 합집합을 키로 5소스를 병합해 3축(회계·광고·상품)을 파생.
 
     Decimal은 그대로 반환(라우터에서 str 직렬화). D-3: 사실/지표만, 추천 없음.
-    순이익은 결합 가능 범위만 — 원가(supply_price)는 빈값 많아 있으면 차감·없으면 미반영 표기.
+    순이익 원가는 내부 product_master.cost_price 우선(D-12), 없으면 coupang supply_price 폴백.
+    둘 다 없으면 미반영(has_cost=False)으로 표기.
     """
     master = _product_master(db)
+    cost_master = _cost_master(db)  # D-12: 내부 원가·정식상품명 다리
     orders = _agg_orders(db, dfrom, dto)
     ads = _agg_ads(db, dfrom, dto)
     returns = _agg_returns(db, dfrom, dto)
@@ -242,14 +277,15 @@ def compute_command_center(db: Session, dfrom: date, dto: date) -> dict:
 
     for vid in all_vids:
         m = master.get(vid, {})
+        cm = cost_master.get(vid, {})  # D-12: 내부 원가·정식상품명
         o = orders.get(vid, {})
         a = ads.get(vid, {})
         r = returns.get(vid, {})
         f = fees.get(vid, {})
-        # 이름 폴백: 마스터 → 주문 → 매출내역 → 반품 (master 커버리지 낮아도 화면이 살아있게)
+        # 이름 폴백: 쿠팡옵션명 → 내부 정식상품명 → 주문 → 매출내역 → 반품 (화면 유지)
         name = (
-            m.get("name") or o.get("name") or f.get("name") or r.get("name")
-            or "(이름 미상)"
+            m.get("name") or cm.get("name") or o.get("name") or f.get("name")
+            or r.get("name") or "(이름 미상)"
         )
 
         revenue = o.get("revenue", _Z)
@@ -262,11 +298,19 @@ def compute_command_center(db: Session, dfrom: date, dto: date) -> dict:
         total_fee = f.get("total_fee", _Z)  # 수수료+수수료VAT (쿠팡 실차감, codex[P2])
         ad_spend = a.get("spend", _Z)
 
-        # 원가(있으면) — 순판매수량(주문−반품)×공급가
+        # 원가 — D-12: 내부 product_master.cost_price 우선, 없으면 coupang supply_price 폴백.
+        # 단가는 순판매수량(주문−반품)에 적용. 0/None은 원가정보 없음으로 간주(미반영).
+        internal_cost = cm.get("cost_price")
         supply = m.get("supply_price")
         net_qty = order_qty - return_qty
-        if supply is not None:
-            cost = _f(supply) * net_qty
+        if internal_cost is not None and internal_cost > 0:
+            unit_cost, cost_source = _f(internal_cost), "internal"
+        elif supply is not None and supply > 0:
+            unit_cost, cost_source = _f(supply), "coupang_supply"
+        else:
+            unit_cost, cost_source = None, None
+        if unit_cost is not None:
+            cost = unit_cost * net_qty
             has_cost = True
         else:
             cost = _Z
@@ -279,7 +323,8 @@ def compute_command_center(db: Session, dfrom: date, dto: date) -> dict:
             "revenue": revenue, "return_deduction": return_deduction,
             "service_fee": service_fee, "service_fee_vat": service_fee_vat,
             "total_fee": total_fee, "ad_spend": ad_spend,
-            "cost": cost, "has_cost": has_cost, "net_profit": net_profit,
+            "cost": cost, "has_cost": has_cost, "cost_source": cost_source,
+            "net_profit": net_profit,
         })
 
         clicks = a.get("clicks", 0)
@@ -319,6 +364,8 @@ def compute_command_center(db: Session, dfrom: date, dto: date) -> dict:
         "cost": sum((x["cost"] for x in account_rows), _Z),
         "net_profit": sum((x["net_profit"] for x in account_rows), _Z),
         "cost_covered_options": sum(1 for x in account_rows if x["has_cost"]),
+        "cost_internal_options": sum(1 for x in account_rows if x["cost_source"] == "internal"),
+        "cost_supply_options": sum(1 for x in account_rows if x["cost_source"] == "coupang_supply"),
         "option_count": len(account_rows),
     }
     ad_spend_total = sum((x["ad_spend"] for x in ad_rows), _Z)
