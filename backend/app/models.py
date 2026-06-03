@@ -478,6 +478,79 @@ class CoupangProductItem(Base):
     status_name: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)  # 승인완료 등
     brand: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     category_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # 로켓그로스 사이즈(skuInfo) — 보관비 CBM 토대 (P3/D-14). RG 상품조회(#1)에서만 채워짐.
+    width_mm: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 너비(mm)
+    length_mm: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 길이(mm)
+    height_mm: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 높이(mm)
+    weight_g: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 중량(g)
+    net_weight_g: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 순중량(g)
+    cbm: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(12, 6), nullable=True
+    )  # 부피(m³) = w×l×h(mm)/1e9 — 보관비 단가 곱셈 기준
+    synced_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+# ──────────────────────────────────────────────
+# 쿠팡 로켓그로스 (재고·RG주문 — P3/D-14)
+# ──────────────────────────────────────────────
+class CoupangRgInventory(Base):
+    """로켓창고(쿠팡 풀필먼트) 옵션별 실재고 — 재고관리 + 결합축(D-8).
+
+    명세: docs/references/05_coupang_rocketgrowth_api_specs.md §3 (rg/inventory/summaries).
+    grain = vendor_item_id(옵션ID, 결합키). orderable_qty=주문가능 총수량, sold_30d=최근30일 판매수.
+    ⚠️ 입고일/보관경과일은 공식 API에 없음(D-14) → 보관비 실측은 정산(P4), CBM 모델은 별도지표.
+    """
+
+    __tablename__ = "coupang_rg_inventory"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    vendor_item_id: Mapped[str] = mapped_column(
+        String(20), unique=True, nullable=False, index=True
+    )  # 옵션ID = 결합키
+    account_key: Mapped[str] = mapped_column(String(20), nullable=False)  # COUPANG_WING1 등
+    vendor_id: Mapped[str] = mapped_column(String(20), nullable=False)  # 소유 계정
+    external_sku_id: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    orderable_qty: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 주문가능 총수량
+    sold_30d: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 최근30일 판매수량
+    synced_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class CoupangRgOrderItem(Base):
+    """로켓그로스 주문 — 옵션 그레인 (향후 RG 매출). 기존 Order와 분리(이중계산 방지, D-14).
+
+    명세: docs/references/05_coupang_rocketgrowth_api_specs.md §4·§5 (rg/orders).
+    grain = (order_id, vendor_item_id). vendor_item_id로 광고·상품·재고 동일 결합축(D-8).
+    ⚠️ 단가 필드 API 불일치(목록=unitSalesPrice, 단건=salesPrice) → Harness가 둘 다 방어.
+    현재 RG 매출 희소 — 결합엔진(intelligence) 편입은 RG 매출 본격화 시.
+    """
+
+    __tablename__ = "coupang_rg_order_item"
+    __table_args__ = (
+        UniqueConstraint("order_id", "vendor_item_id", name="uq_coupang_rg_order_item"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    order_id: Mapped[str] = mapped_column(String(30), nullable=False, index=True)  # RG 주문번호
+    vendor_item_id: Mapped[str] = mapped_column(
+        String(20), nullable=False, index=True
+    )  # 옵션ID = 결합키
+    account_key: Mapped[str] = mapped_column(String(20), nullable=False)  # COUPANG_WING1 등
+    vendor_id: Mapped[str] = mapped_column(String(20), nullable=False)  # 소유 계정
+    product_name: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+    sales_quantity: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 판매수량
+    unit_sales_price: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(12, 2), nullable=True
+    )  # 단가(unitSalesPrice|salesPrice)
+    currency: Mapped[Optional[str]] = mapped_column(String(8), nullable=True)  # KRW 등
+    paid_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True, index=True
+    )  # 결제일시(ms epoch/ISO → datetime 정규화)
     synced_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
     )

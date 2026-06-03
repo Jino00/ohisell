@@ -82,6 +82,19 @@
 - **카테고리율 교차는 P6에서 2차 레이어로 얹기**(헛수고 없음 — 자기기준선 위에 추가). D-10/D-11의 saleAgentCommission 재조회·자동갱신 로직은 폐기(_reauthor_commission·_fee_audit 제거).
 - Jino 승인 원문: "자기기준선 핵심, 카테고리율은 P6에서" 방향 승인("그래").
 
+### D-14. P3 로켓그로스 범위 = 읽기 5 구현 + 쓰기 2·카테고리 2 stub (2026-06-03 Jino 승인, 라이브 진단 근거)
+- **라이브 진단(원칙22, `backend/scripts/diag_rg_probe.py`, 읽기전용 GET)**: 트랙의 "RG 판매 0"과 실제 다름. **RG/하이브리드 상품 155개**(WING1 6 + WING2 149), **로켓창고 재고 431행+**(WING2는 프로브 20페이지 안전상한 초과 — 실제 더 많음), `inventoryDetails.totalOrderableQuantity` 실값 보유, **`salesCountMap.SALES_COUNT_LAST_THIRTY_DAYS > 0` 옵션 존재**(RG 최근 판매 일부 발생 = "판매 0"은 stale/RG매출 기준이었음). 사이즈(skuInfo) 부분 채움(WING1 표본 4/47·WING2 3/3). 전 행 vendorItemId 보유 → 결합축 D-8 직결.
+- **결정(범위)**: P3 = **읽기 5 SA 본 구현** + 쓰기 2·카테고리 2 stub. 트랙 D-7(쓰기 나중)·§4/§8(쓰기 페이즈 분리)·§5(category.py 별도 도메인) 준수.
+  - 읽기 5(구현): #1 상품조회(사이즈 skuInfo) · #2 상품목록 페이징(businessTypes=rocketGrowth) · #3 로켓창고 재고(summaries) · #4 RG주문 목록 · #5 RG주문 단건.
+  - 쓰기 2(stub): #6 상품생성 POST · #7 상품수정 PUT → **쓰기 페이즈**에서 product_write.py Harness + dry_run(D-1). 라이브 스토어 변경 위험·검증=오염이라 P3 제외.
+  - 카테고리 2(stub): #8 카테고리 메타 · #9 카테고리 목록(registrationType=RFM) → **P6 category.py 도메인**에서 본 구현(path가 category 도메인과 겹침).
+- **보관비 원가 = 공식까지 수집·계산(Jino 결정)**: skuInfo(width/length/height/weight)만 적재하는 데 그치지 않고, 쿠팡 로켓그로스 **보관료 수수료표(부피 구간·월 보관료율)를 /browse로 추가 수집**해 사이즈→월 보관비 원가까지 계산. ⚠️공식 확인 후만(추정 금지). 공식 미확인 시 사이즈만 적재하고 보관비는 보류(사실 표기). D-3(사실 정리만) 유지 — 보관비는 결정론적 계산값(전략 추천 아님).
+- **DB(P3 설계에서 확정)**: 사이즈는 기존 `coupang_product_item` 컬럼 추가 검토, 로켓창고 재고는 신규 테이블(옵션 그레인 totalOrderableQuantity·sold30d), RG주문은 신규 테이블 또는 기존 Order channel 구분. 결합엔진(intelligence.py)에 재고축·보관비 합류는 구현 시 D-N.
+- Jino 승인 원문: 9 SA 전부 리스크 설명 후 읽기5+stub 권장에 "그래"(2026-06-03). 보관비 "공식까지 수집·계산".
+- **보관비 공식 확보(Wing 로그인 fee-details)**: 보관비는 **사이즈 등급 아니라 CBM(부피) 기준**. CBM=width×length×height(mm)/10⁹. 1CBM/일 단가(누진): 1~30일 1,000·31~60일 2,000·61~120일 2,500·121~180일 3,500·181일+ 5,000원(VAT별도). 무료 프로모션(~2027.01.31): 그외 30일·의류/신발/악세서리 45일. (사이즈 6등급 XS~XL=입출고/배송용, 카테고리·판매가 의존). 상세 → references/05 §6.5.
+- **입고 정보 재확인(Jino 지시)**: 공식 Open API엔 입고일/보관경과일 **없음**(RG 9개·물류센터 8개 어디에도). 단 **Wing 내부 API**(`wing.coupang.com/tenants/rfm-inbound/data/inbound/search`, 세션쿠키·비공식·미문서화)엔 shipment 타임스탬프·receivedQty·CBM 등 입고 데이터 있음(네트워크 캡처로 실확인). **Jino 결정: 공식 API만 사용**(비공식 세션기반은 안정성·유지보수 이유로 배제). → 보관비 임철은 **정산 실측(P4)**이 정답, CBM 모델 추정은 별도 정보 지표(D-3 사실 분리, 순이익엔 정산만).
+- **RG 주문 저장(Jino 결정)**: 신규 테이블(옵션 그레인). 기존 Order 이중계산 위험 회피, RG 매출 본격화 시 결합엔진 편입.
+
 ## 3. 사용자 원문 인용 (왜곡 방지)
 - "종합적으로 오픽스의 판매현황에 대한 조망을 하고 싶어. 회계뿐 아니라 광고 전략, 상품판매 전략등까지 말이야"
 - "광고리포트에 대해서는 사실만 정리하면 되지, 너가 추천할 필요는 없어. 너가 그런 일을 할 수 있는 능력은 없잖아?"

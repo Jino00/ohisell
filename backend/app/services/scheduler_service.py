@@ -267,6 +267,92 @@ def sync_coupang_settlement_job():
         db.close()
 
 
+def _coupang_failed(results: list[dict]) -> list[dict]:
+    """RG 동기화 결과에서 하드 실패 추출 — config_missing(error)·읽기 실패(read_error) 모두.
+
+    거짓 성공 방지(원칙22·codex [P2] 패턴): CoupangReadError로 표면화된 read_error도 실패로 본다.
+    """
+    return [r for r in results if r.get("error") or r.get("read_error")]
+
+
+def sync_coupang_rg_sizes_job():
+    """로켓그로스 상품 사이즈 자동 동기화 (05:35 KST) — 보관비 CBM 토대(P3/D-14).
+
+    RG 상품조회 skuInfo → coupang_product_item 사이즈·cbm. 트랙 D-8: 서버 IP에서만.
+    """
+    db = _get_own_db_session()
+    try:
+        from app.services.coupang.rg_size_sync import sync_all_rg_sizes
+
+        results = sync_all_rg_sizes(db)
+        log.info("[스케줄러] 쿠팡 RG 사이즈 동기화 결과: %s", results)
+        failed = _coupang_failed(results)
+        if failed:
+            raise RuntimeError(f"쿠팡 RG 사이즈 동기화 실패 계정: {failed}")
+
+        state = db.query(SchedulerState).filter(
+            SchedulerState.job_name == "sync_coupang_rg_sizes"
+        ).first()
+        if state:
+            state.last_run_at = datetime.now()
+            db.commit()
+    except Exception as e:
+        log.exception("[스케줄러] sync_coupang_rg_sizes_job 에러: %s", e)
+        raise
+    finally:
+        db.close()
+
+
+def sync_coupang_rg_inventory_job():
+    """로켓창고 재고 자동 동기화 (05:40 KST) — 재고관리(P3/D-14). 트랙 D-8: 서버 IP에서만."""
+    db = _get_own_db_session()
+    try:
+        from app.services.coupang.rg_inventory_sync import sync_all_rg_inventory
+
+        results = sync_all_rg_inventory(db)
+        log.info("[스케줄러] 쿠팡 RG 재고 동기화 결과: %s", results)
+        failed = _coupang_failed(results)
+        if failed:
+            raise RuntimeError(f"쿠팡 RG 재고 동기화 실패 계정: {failed}")
+
+        state = db.query(SchedulerState).filter(
+            SchedulerState.job_name == "sync_coupang_rg_inventory"
+        ).first()
+        if state:
+            state.last_run_at = datetime.now()
+            db.commit()
+    except Exception as e:
+        log.exception("[스케줄러] sync_coupang_rg_inventory_job 에러: %s", e)
+        raise
+    finally:
+        db.close()
+
+
+def sync_coupang_rg_orders_job():
+    """로켓그로스 주문 자동 동기화 (05:55 KST) — 향후 RG 매출(P3/D-14). 트랙 D-8: 서버 IP에서만."""
+    db = _get_own_db_session()
+    try:
+        from app.services.coupang.rg_order_sync import sync_all_rg_orders
+
+        results = sync_all_rg_orders(db, days=30)
+        log.info("[스케줄러] 쿠팡 RG 주문 동기화 결과: %s", results)
+        failed = _coupang_failed(results)
+        if failed:
+            raise RuntimeError(f"쿠팡 RG 주문 동기화 실패 계정: {failed}")
+
+        state = db.query(SchedulerState).filter(
+            SchedulerState.job_name == "sync_coupang_rg_orders"
+        ).first()
+        if state:
+            state.last_run_at = datetime.now()
+            db.commit()
+    except Exception as e:
+        log.exception("[스케줄러] sync_coupang_rg_orders_job 에러: %s", e)
+        raise
+    finally:
+        db.close()
+
+
 def cafe24_proactive_refresh_job():
     """cafe24 Access Token 만료 30분 전 자동 갱신.
 
@@ -349,8 +435,11 @@ def _ensure_default_states(db):
         ("sync_naver_sa_ad_costs", "0 7 * * *"),
         ("sync_meta_ad_costs", "0 7 * * *"),
         ("sync_coupang_products", "30 5 * * *"),
+        ("sync_coupang_rg_sizes", "35 5 * * *"),
+        ("sync_coupang_rg_inventory", "40 5 * * *"),
         ("sync_coupang_returns", "45 5 * * *"),
         ("sync_coupang_settlement", "50 5 * * *"),
+        ("sync_coupang_rg_orders", "55 5 * * *"),
     ]
     for name, cron in defaults:
         existing = db.query(SchedulerState).filter(
@@ -389,6 +478,12 @@ def start_scheduler():
                 job_func = sync_coupang_returns_job
             elif state.job_name == "sync_coupang_settlement":
                 job_func = sync_coupang_settlement_job
+            elif state.job_name == "sync_coupang_rg_sizes":
+                job_func = sync_coupang_rg_sizes_job
+            elif state.job_name == "sync_coupang_rg_inventory":
+                job_func = sync_coupang_rg_inventory_job
+            elif state.job_name == "sync_coupang_rg_orders":
+                job_func = sync_coupang_rg_orders_job
 
             if job_func:
                 try:

@@ -53,6 +53,9 @@ def trigger_job(job_id: str, db: Session = Depends(get_db)):
         sync_all_channels_job,
         sync_coupang_products_job,
         sync_coupang_returns_job,
+        sync_coupang_rg_inventory_job,
+        sync_coupang_rg_orders_job,
+        sync_coupang_rg_sizes_job,
         sync_coupang_settlement_job,
     )
 
@@ -62,6 +65,9 @@ def trigger_job(job_id: str, db: Session = Depends(get_db)):
         "sync_coupang_products": sync_coupang_products_job,
         "sync_coupang_returns": sync_coupang_returns_job,
         "sync_coupang_settlement": sync_coupang_settlement_job,
+        "sync_coupang_rg_sizes": sync_coupang_rg_sizes_job,
+        "sync_coupang_rg_inventory": sync_coupang_rg_inventory_job,
+        "sync_coupang_rg_orders": sync_coupang_rg_orders_job,
     }
 
     func = job_map.get(job_id)

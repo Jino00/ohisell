@@ -107,6 +107,51 @@ def sync_coupang_settlement(
     return sync_all_settlement(db, days=days, months=months)
 
 
+@router.post("/coupang-rg-sizes")
+def sync_coupang_rg_sizes(
+    max_products: int | None = None,
+    db: Session = Depends(get_db),
+):
+    """로켓그로스 상품 사이즈 동기화 (보관비 CBM 토대 — P3/D-14).
+
+    트랙 D-8: 쿠팡 Open API는 서버 IP 화이트리스트 — 서버에서만 동작(로컬 403).
+    RG 상품조회 skuInfo(width/length/height_mm·weight_g) → coupang_product_item 사이즈·cbm 적재.
+    max_products: 계정별 상한(드라이런/부분동기화용).
+    """
+    from app.services.coupang.rg_size_sync import sync_all_rg_sizes, sync_account_rg_sizes, RG_ACCOUNTS
+
+    if max_products is not None:
+        return [sync_account_rg_sizes(db, key, max_products=max_products) for key in RG_ACCOUNTS]
+    return sync_all_rg_sizes(db)
+
+
+@router.post("/coupang-rg-inventory")
+def sync_coupang_rg_inventory(db: Session = Depends(get_db)):
+    """로켓창고 재고 동기화 (옵션별 주문가능수량·30일판매 — P3/D-14).
+
+    트랙 D-8: 쿠팡 Open API는 서버 IP 화이트리스트 — 서버에서만 동작(로컬 403).
+    rg/inventory/summaries → coupang_rg_inventory upsert. rg_open_api 분당 50회 제한.
+    """
+    from app.services.coupang.rg_inventory_sync import sync_all_rg_inventory
+
+    return sync_all_rg_inventory(db)
+
+
+@router.post("/coupang-rg-orders")
+def sync_coupang_rg_orders(
+    days: int = 30,
+    db: Session = Depends(get_db),
+):
+    """로켓그로스 주문 동기화 (향후 RG 매출 — P3/D-14). 기존 Order와 분리(이중계산 방지).
+
+    트랙 D-8: 쿠팡 Open API는 서버 IP 화이트리스트 — 서버에서만 동작(로컬 403).
+    rg/orders → coupang_rg_order_item. days: 과거 기간(30일 윈도우로 자동 분할).
+    """
+    from app.services.coupang.rg_order_sync import sync_all_rg_orders
+
+    return sync_all_rg_orders(db, days=days)
+
+
 @router.get("/status", response_model=list[SyncStatusOut])
 def sync_status(db: Session = Depends(get_db)):
     """채널별 마지막 동기화 상태"""
