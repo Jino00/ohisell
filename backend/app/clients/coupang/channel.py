@@ -35,58 +35,68 @@ class CoupangClient(CoupangBaseClient, BaseChannelClient):
             return {"status": "ok", "vendor_id": self.vendor_id}
         return {"status": "error", "vendor_id": self.vendor_id, "message": str(result)}
 
+    # 조회 대상 주문 상태 — DELIVERING 포함으로 당일 배송중 주문도 수집
+    _FETCH_STATUSES = ("FINAL_DELIVERY", "DELIVERING", "DEPARTURE", "INSTRUCT")
+
     def fetch_orders(self, date_from: date, date_to: date) -> list[RawOrder]:
         path = f"/v2/providers/openapi/apis/api/v4/vendors/{self.vendor_id}/ordersheets"
         all_orders: list[RawOrder] = []
+        seen: set[tuple[str, str]] = set()  # (order_id, vendorItemId) 중복 방지
 
         current = date_from
         while current <= date_to:
             day_str = current.strftime("%Y-%m-%d")
-            next_token = ""
 
-            while True:
-                params: dict = {
-                    "createdAtFrom": day_str,
-                    "createdAtTo": day_str,
-                    "status": "FINAL_DELIVERY",
-                }
-                if next_token:
-                    params["nextToken"] = next_token
+            for fetch_status in self._FETCH_STATUSES:
+                next_token = ""
+                while True:
+                    params: dict = {
+                        "createdAtFrom": day_str,
+                        "createdAtTo": day_str,
+                        "status": fetch_status,
+                    }
+                    if next_token:
+                        params["nextToken"] = next_token
 
-                result = self._request("GET", path, params)
-                if not result:
-                    break
+                    result = self._request("GET", path, params)
+                    if not result:
+                        break
 
-                code = result.get("code")
-                if str(code) != "200":
-                    log.error("발주서 조회 실패 (날짜: %s): code=%s", day_str, code)
-                    break
+                    code = result.get("code")
+                    if str(code) != "200":
+                        log.error("발주서 조회 실패 (날짜: %s, status: %s): code=%s", day_str, fetch_status, code)
+                        break
 
-                for shipment in result.get("data", []):
-                    order_id = str(shipment.get("orderId", ""))
-                    paid_at = shipment.get("paidAt", day_str)
-                    status = self._map_status(shipment.get("status", ""))
-                    shipping_price = Decimal(str(shipment.get("shippingPrice", 0)))
+                    for shipment in result.get("data", []):
+                        order_id = str(shipment.get("orderId", ""))
+                        paid_at = shipment.get("paidAt", day_str)
+                        status = self._map_status(shipment.get("status", ""))
+                        shipping_price = Decimal(str(shipment.get("shippingPrice", 0)))
 
-                    for oi in shipment.get("orderItems", []):
-                        raw = RawOrder(
-                            order_number=order_id,
-                            platform_product_id=str(oi.get("vendorItemId", "")),
-                            platform_product_name=oi.get("vendorItemName", ""),
-                            quantity=int(oi.get("shippingCount", 1)),
-                            selling_price=Decimal(str(oi.get("orderPrice", 0))),
-                            shipping_cost=shipping_price if shipping_price else None,
-                            order_date=paid_at,
-                            status=status,
-                            raw_data=shipment,
-                        )
-                        all_orders.append(raw)
+                        for oi in shipment.get("orderItems", []):
+                            vid = str(oi.get("vendorItemId", ""))
+                            key = (order_id, vid)
+                            if key in seen:
+                                continue
+                            seen.add(key)
+                            raw = RawOrder(
+                                order_number=order_id,
+                                platform_product_id=vid,
+                                platform_product_name=oi.get("vendorItemName", ""),
+                                quantity=int(oi.get("shippingCount", 1)),
+                                selling_price=Decimal(str(oi.get("orderPrice", 0))),
+                                shipping_cost=shipping_price if shipping_price else None,
+                                order_date=paid_at,
+                                status=status,
+                                raw_data=shipment,
+                            )
+                            all_orders.append(raw)
 
-                if result.get("hasNext"):
-                    next_token = result.get("nextToken", "")
-                else:
-                    break
-                time.sleep(0.5)
+                    if result.get("hasNext"):
+                        next_token = result.get("nextToken", "")
+                    else:
+                        break
+                    time.sleep(0.5)
 
             current += timedelta(days=1)
 
