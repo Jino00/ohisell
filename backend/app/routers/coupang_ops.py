@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_coupang_config
 from app.database import get_db
-from app.models import Channel, CoupangAdOptionDaily, CoupangProductItem, Order
+from app.models import Channel, CoupangAdOptionDaily, CoupangProductItem, CoupangRgOrderItem, Order
 from app.routers._coupang_write_http import handle_write as _handle_write
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
 from app.services.coupang import coupon_write, product_write
@@ -526,6 +526,11 @@ def sales_summary(
     if not target_codes:
         return {"summary": {}, "by_product": []}
 
+    # paid_at은 UTC 저장 → KST 기준 날짜 범위를 UTC로 변환
+    _UTC_OFFSET = timedelta(hours=9)
+    rg_start = start - _UTC_OFFSET   # KST 자정 → UTC 전날 15:00
+    rg_end = end - _UTC_OFFSET       # KST 23:59 → UTC 당일 14:59
+
     # ── 1. 주문 집계 (상품명·채널코드별) ──────────────────────────────
     order_rows = (
         db.query(
@@ -556,6 +561,36 @@ def sales_summary(
         })
         entry["revenue"] += _f(rev)
         entry["qty"] += int(qty or 0)
+
+    # ── 1b. RG 주문 집계 (coupang_rg_order_item) ─────────────────────
+    if target_codes:
+        rg_rows = (
+            db.query(
+                CoupangRgOrderItem.vendor_item_id,
+                func.max(CoupangRgOrderItem.product_name),
+                CoupangRgOrderItem.account_key,
+                func.sum(
+                    CoupangRgOrderItem.unit_sales_price * CoupangRgOrderItem.sales_quantity
+                ),
+                func.sum(CoupangRgOrderItem.sales_quantity),
+            )
+            .filter(
+                CoupangRgOrderItem.account_key.in_(target_codes),  # WING코드로 저장된 경우도 포함
+                CoupangRgOrderItem.paid_at >= rg_start,            # UTC 보정
+                CoupangRgOrderItem.paid_at <= rg_end,
+            )
+            .group_by(CoupangRgOrderItem.vendor_item_id, CoupangRgOrderItem.account_key)
+            .all()
+        )
+        for vid, rg_name, acc_key, rev, qty in rg_rows:
+            key = str(vid)
+            # coupang_rg_order_item은 RG 전용 테이블 → 채널타입 강제 로켓그로스
+            rg_ch = acc_key.replace("WING", "RG") if "RG" not in acc_key else acc_key
+            entry = order_by_vid.setdefault(key, {
+                "channel_code": rg_ch, "revenue": _Z, "qty": 0, "order_name": rg_name
+            })
+            entry["revenue"] += _f(rev)
+            entry["qty"] += int(qty or 0)
 
     # ── 2. 광고 집계 (옵션ID별) ──────────────────────────────────────
     # vendor_id(A01564720 등) → target channel 코드 매핑으로 필터
@@ -644,7 +679,7 @@ def sales_summary(
         e["ad_spend"] += ad["spend"]
         e["conv_revenue"] += ad["conv_revenue"]
 
-    # ── 5. 요약 합계: 원본 집계치 사용 (이름 없는 행 제외해도 요약은 정확하게 유지) ──
+    # ── 5. 요약 합계: 원본 집계치 사용 (RG 포함, 이름 없는 행 제외해도 요약 정확) ──
     total_rev = sum((_f(od["revenue"]) for od in order_by_vid.values()), _Z)
     total_spend = sum((_f(ad["spend"]) for ad in ad_by_vid.values()), _Z)
     total_conv = sum((_f(ad["conv_revenue"]) for ad in ad_by_vid.values()), _Z)
