@@ -139,6 +139,7 @@ export default function CoupangOps() {
     const excluded = colExcluded[col] ?? new Set<string>();
     const hasFilter = excluded.size > 0;
     const isOpen = openCol === col;
+    const isSorted = sortKey === col;
 
     function toggleVal(v: string) {
       setColExcluded((prev) => {
@@ -147,55 +148,49 @@ export default function CoupangOps() {
         return { ...prev, [col]: next };
       });
     }
-    function selectAll() {
-      setColExcluded((prev) => ({ ...prev, [col]: new Set() }));
-    }
-    function deselectAll() {
-      setColExcluded((prev) => ({ ...prev, [col]: new Set(vals) }));
-    }
+    function selectAll() { setColExcluded((prev) => ({ ...prev, [col]: new Set() })); }
+    function deselectAll() { setColExcluded((prev) => ({ ...prev, [col]: new Set(vals) })); }
 
     return (
       <th className={`px-3 py-2 text-${align} select-none`}>
-        <div className={`inline-flex items-center gap-1 ${align === "right" ? "justify-end" : ""} w-full`}>
+        <div className={`inline-flex items-center gap-0 ${align === "right" ? "justify-end" : ""} w-full`}>
+
+          {/* 정렬 버튼 — 라벨 전체 영역 클릭 */}
           <button
-            className="hover:text-gray-800 cursor-pointer"
+            className={`flex items-center gap-1 px-1.5 py-0.5 rounded hover:bg-gray-200 cursor-pointer transition-colors ${isSorted ? "text-blue-600 font-semibold" : "text-gray-500 hover:text-gray-800"}`}
             onClick={() => toggleSort(col as SortKey)}
+            title={isSorted ? (sortDir === "desc" ? "내림차순 정렬 중 — 클릭하면 오름차순" : "오름차순 정렬 중 — 클릭하면 내림차순") : "클릭하여 정렬"}
           >
             {label}
-            {sortKey === col ? (
-              <span className="ml-0.5 text-blue-500">{sortDir === "desc" ? "↓" : "↑"}</span>
-            ) : (
-              <span className="ml-0.5 text-gray-300">↕</span>
-            )}
+            <span className={`text-xs ml-0.5 ${isSorted ? "text-blue-500" : "text-gray-300"}`}>
+              {isSorted ? (sortDir === "desc" ? "↓" : "↑") : "↕"}
+            </span>
           </button>
-          {/* 필터 드롭다운 버튼 */}
+
+          {/* 필터 버튼 — 깔때기 아이콘으로 정렬 버튼과 명확히 구분 */}
           <div className="relative" ref={isOpen ? dropdownRef : undefined}>
             <button
               onClick={(e) => { e.stopPropagation(); setOpenCol(isOpen ? null : col); }}
-              className={`text-xs px-1 py-0.5 rounded transition-colors ${
+              className={`ml-1 text-xs px-1 py-0.5 rounded border transition-colors ${
                 hasFilter
-                  ? "bg-blue-500 text-white"
-                  : "text-gray-400 hover:text-gray-700 hover:bg-gray-200"
+                  ? "bg-blue-500 text-white border-blue-500"
+                  : "text-gray-400 border-gray-300 hover:text-gray-700 hover:bg-gray-100"
               }`}
               title="값 필터"
             >
-              ▼
+              {hasFilter ? "🔵" : "⊟"}
             </button>
             {isOpen && (
               <div
                 className="absolute top-full right-0 z-50 bg-white border border-gray-200 rounded-lg shadow-xl mt-1 w-44"
                 onClick={(e) => e.stopPropagation()}
               >
-                <div className="flex gap-2 px-3 py-2 border-b border-gray-100 text-xs">
-                  <button onClick={selectAll} className="text-blue-600 hover:underline">전체 선택</button>
-                  <span className="text-gray-300">|</span>
-                  <button onClick={deselectAll} className="text-blue-600 hover:underline">전체 해제</button>
-                  {hasFilter && (
-                    <>
-                      <span className="text-gray-300">|</span>
-                      <button onClick={selectAll} className="text-red-500 hover:underline">초기화</button>
-                    </>
-                  )}
+                <div className="flex gap-2 px-3 py-2 border-b border-gray-100 text-xs font-medium text-gray-600">
+                  값 필터
+                  <span className="ml-auto flex gap-2">
+                    <button onClick={selectAll} className="text-blue-600 hover:underline">전체</button>
+                    <button onClick={deselectAll} className="text-red-500 hover:underline">해제</button>
+                  </span>
                 </div>
                 <div className="max-h-52 overflow-y-auto py-1">
                   {vals.map((v) => (
@@ -203,12 +198,7 @@ export default function CoupangOps() {
                       key={v}
                       className="flex items-center gap-2 px-3 py-1.5 cursor-pointer hover:bg-gray-50 text-xs text-gray-700"
                     >
-                      <input
-                        type="checkbox"
-                        className="accent-blue-500"
-                        checked={!excluded.has(v)}
-                        onChange={() => toggleVal(v)}
-                      />
+                      <input type="checkbox" className="accent-blue-500" checked={!excluded.has(v)} onChange={() => toggleVal(v)} />
                       {v}
                     </label>
                   ))}
