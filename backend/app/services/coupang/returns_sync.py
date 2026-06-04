@@ -5,10 +5,10 @@
 # 트랙 D-3: 사실/지표 정리만 — 전략판단 없음.
 from __future__ import annotations
 
+from app.utils.kst import kst_now, kst_today
 import logging
 import time
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 
@@ -27,19 +27,18 @@ _SHORT_SPAN_DAYS = 7     # 반품철회·교환: "less then 7day" → 7일 윈�
 # 취소(CANCEL)는 status 미사용. 전 상태를 덮기 위해 status별 순회.
 RETURN_STATUSES = ["RU", "UC", "CC", "PR"]  # 출고중지요청·반품접수·반품완료·쿠팡확인요청
 _CALL_DELAY = 0.3  # 쿠팡 속도제한(429) 대응 — 호출 간 간격
-_KST = ZoneInfo("Asia/Seoul")  # 잡은 05:45 KST cron 실행, prod 서버 TZ=UTC →
 # datetime.now()(UTC)는 KST 기준 하루 전 날짜라 조회범위가 하루 stale. 경계는 KST로 명시
 # (settlement_sync._kst_today와 동일 패턴).
 
 
-def _kst_today():
+def kst_today():
     """KST 기준 오늘 date. 조회 윈도우 경계 계산용(서버 UTC ↔ KST 날짜 경계 어긋남 방지)."""
     return datetime.now(_KST).date()
 
 
 def _date_windows(days: int, max_span: int) -> list[tuple[str, str]]:
     """오늘(KST) 기준 과거 days일을 ≤max_span일 윈도우들로 분할. 각 ("yyyy-MM-dd","yyyy-MM-dd")."""
-    today = _kst_today()
+    today = kst_today()
     start = today - timedelta(days=max(days, 1))
     windows: list[tuple[str, str]] = []
     cursor = start

@@ -5,13 +5,13 @@
 # 트랙 D-8: 쿠팡 Open API는 서버 IP 화이트리스트 → 라이브 호출은 서버에서만(로컬 403).
 from __future__ import annotations
 
+from app.utils.kst import kst_now, kst_today
 import logging
 
 from typing import Any
 
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal, ROUND_HALF_UP
-from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
 from sqlalchemy import func
@@ -449,7 +449,6 @@ def w5_update_rg_product(
 # 운영 패널 — 매출 현황 (회사별·기간별·채널타입별)
 # ════════════════════════════════════════════════════════════════════
 
-_KST = ZoneInfo("Asia/Seoul")
 _Q2 = Decimal("0.01")
 _Z = Decimal("0")
 
@@ -479,12 +478,10 @@ def _vendor_to_channel(vendor_id: str) -> str:
     return "COUPANG_WING2"
 
 
-def _kst_today() -> date:
-    return datetime.now(_KST).date()
 
 
 def _date_range(days: int) -> tuple[date, date]:
-    today = _kst_today()
+    today = kst_today()
     if days == 0:
         return today, today                      # 오늘
     if days == 1:

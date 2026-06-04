@@ -4,10 +4,10 @@
 # D-3: 사실/지표만 — 추천 없음. Decimal은 문자열로 직렬화(금액 정밀도 보존, settlements 패턴).
 from __future__ import annotations
 
+from app.utils.kst import kst_now, kst_today
 import logging
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
@@ -19,7 +19,6 @@ log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/overview", tags=["overview"])
 
-_KST = ZoneInfo("Asia/Seoul")
 
 
 def _parse_date(s: str | None, default: date) -> date:

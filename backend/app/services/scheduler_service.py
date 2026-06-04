@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from app.utils.kst import kst_now, kst_today
 from datetime import date, datetime, timedelta
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -53,7 +54,7 @@ def sync_all_channels_job():
             SchedulerState.job_name == "auto_sync_orders"
         ).first()
         if state:
-            state.last_run_at = datetime.now()
+            state.last_run_at = kst_now()
             db.commit()
     except Exception as e:
         log.exception("[스케줄러] sync_all_channels_job 에러: %s", e)
@@ -68,7 +69,7 @@ def recalculate_profit_job():
     try:
         from app.services.profit_calculator import calculate_daily_trend
 
-        date_to = date.today()
+        date_to = kst_today()
         date_from = date_to - timedelta(days=7)
 
         result = calculate_daily_trend(db, ad_db, None, date_from, date_to)
@@ -78,7 +79,7 @@ def recalculate_profit_job():
             SchedulerState.job_name == "auto_profit_calc"
         ).first()
         if state:
-            state.last_run_at = datetime.now()
+            state.last_run_at = kst_now()
             db.commit()
     except Exception as e:
         log.exception("[스케줄러] recalculate_profit_job 에러: %s", e)
@@ -100,7 +101,7 @@ def sync_naver_sa_ad_costs_job():
         from decimal import Decimal
         from sqlalchemy import text
 
-        yesterday = date.today() - timedelta(days=1)
+        yesterday = kst_today() - timedelta(days=1)
         naver_row = db.execute(
             text("SELECT id FROM channels WHERE code = 'NAVER' LIMIT 1")
         ).fetchone()
@@ -135,7 +136,7 @@ def sync_meta_ad_costs_job():
         from decimal import Decimal
         from sqlalchemy import text
 
-        yesterday = date.today() - timedelta(days=1)
+        yesterday = kst_today() - timedelta(days=1)
         cafe24_row = db.execute(
             text("SELECT id FROM channels WHERE code = 'CAFE24' LIMIT 1")
         ).fetchone()
@@ -186,7 +187,7 @@ def sync_coupang_products_job():
             SchedulerState.job_name == "sync_coupang_products"
         ).first()
         if state:
-            state.last_run_at = datetime.now()
+            state.last_run_at = kst_now()
             db.commit()
     except Exception as e:
         # cron 경로: APScheduler가 잡 예외를 관용(EVENT_JOB_ERROR, 스케줄러 생존).
@@ -223,7 +224,7 @@ def sync_coupang_returns_job():
             SchedulerState.job_name == "sync_coupang_returns"
         ).first()
         if state:
-            state.last_run_at = datetime.now()
+            state.last_run_at = kst_now()
             db.commit()
     except Exception as e:
         # cron 경로는 APScheduler가 관용(스케줄러 생존). 수동 트리거 경로는 re-raise로
@@ -257,7 +258,7 @@ def sync_coupang_settlement_job():
             SchedulerState.job_name == "sync_coupang_settlement"
         ).first()
         if state:
-            state.last_run_at = datetime.now()
+            state.last_run_at = kst_now()
             db.commit()
     except Exception as e:
         # cron 경로는 APScheduler가 관용. 수동 트리거 경로는 re-raise로 실패 표면화(거짓 성공 방지).
@@ -294,7 +295,7 @@ def sync_coupang_rg_sizes_job():
             SchedulerState.job_name == "sync_coupang_rg_sizes"
         ).first()
         if state:
-            state.last_run_at = datetime.now()
+            state.last_run_at = kst_now()
             db.commit()
     except Exception as e:
         log.exception("[스케줄러] sync_coupang_rg_sizes_job 에러: %s", e)
@@ -319,7 +320,7 @@ def sync_coupang_rg_inventory_job():
             SchedulerState.job_name == "sync_coupang_rg_inventory"
         ).first()
         if state:
-            state.last_run_at = datetime.now()
+            state.last_run_at = kst_now()
             db.commit()
     except Exception as e:
         log.exception("[스케줄러] sync_coupang_rg_inventory_job 에러: %s", e)
@@ -344,7 +345,7 @@ def sync_coupang_rg_orders_job():
             SchedulerState.job_name == "sync_coupang_rg_orders"
         ).first()
         if state:
-            state.last_run_at = datetime.now()
+            state.last_run_at = kst_now()
             db.commit()
     except Exception as e:
         log.exception("[스케줄러] sync_coupang_rg_orders_job 에러: %s", e)
@@ -369,7 +370,7 @@ def sync_coupang_coupons_job():
             SchedulerState.job_name == "sync_coupang_coupons"
         ).first()
         if state:
-            state.last_run_at = datetime.now()
+            state.last_run_at = kst_now()
             db.commit()
     except Exception as e:
         log.exception("[스케줄러] sync_coupang_coupons_job 에러: %s", e)
@@ -396,7 +397,7 @@ def sync_coupang_cs_job():
             SchedulerState.job_name == "sync_coupang_cs"
         ).first()
         if state:
-            state.last_run_at = datetime.now()
+            state.last_run_at = kst_now()
             db.commit()
     except Exception as e:
         log.exception("[스케줄러] sync_coupang_cs_job 에러: %s", e)
@@ -424,7 +425,7 @@ def cafe24_proactive_refresh_job():
         if not token_row or not token_row.refresh_token:
             return
 
-        now = datetime.now()
+        now = kst_now()
 
         # refresh token 만료 확인
         if token_row.refresh_token_expires_at and token_row.refresh_token_expires_at <= now:

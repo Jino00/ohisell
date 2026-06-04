@@ -6,11 +6,11 @@
 # 트랙 D-8: vendor 2계정(WING1·WING2) 순회. 호출은 서버 IP에서만(로컬 403).
 from __future__ import annotations
 
+from app.utils.kst import kst_now, kst_today
 import logging
 import time
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 
@@ -29,12 +29,9 @@ _INSTANT_STATUSES = ["STANDBY", "APPLIED", "PAUSED", "EXPIRED", "DETACHED"]
 # 아이템 조회 상태 — 전 상태 스윕. EXPIRED 포함(codex[P1]: APPLIED 아이템이 API에서 EXPIRED로
 # 바뀌어도 DB에 APPLIED로 잔존 = 옵션이 할인중인 것처럼 거짓 표시 → couponItemId upsert로 갱신).
 _ITEM_STATUSES = ["STANDBY", "APPLIED", "PAUSED", "EXPIRED"]
-_KST = ZoneInfo("Asia/Seoul")
 _CALL_DELAY = 0.3  # 쿠팡 속도제한(429) 대응
 
 
-def _kst_today():
-    return datetime.now(_KST).date()
 
 
 def _dec(v) -> Decimal | None:
@@ -73,7 +70,7 @@ def _as_bool(v) -> bool | None:
 
 def _target_months(n: int) -> list[str]:
     """오늘(KST) 기준 과거 n개월의 'yyyy-MM'(이번 달 포함)."""
-    today = _kst_today()
+    today = kst_today()
     y, m = today.year, today.month
     out: list[str] = []
     for _ in range(max(n, 1)):

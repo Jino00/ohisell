@@ -1,6 +1,7 @@
 # routers/scheduler.py — 스케줄러 상태 및 제어 API
 from __future__ import annotations
 
+from app.utils.kst import kst_now, kst_today
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -80,7 +81,7 @@ def trigger_job(job_id: str, db: Session = Depends(get_db)):
 
     try:
         func()
-        state.last_run_at = datetime.now()
+        state.last_run_at = kst_now()
         db.commit()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"작업 실행 에러: {e}")

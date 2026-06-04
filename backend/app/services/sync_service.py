@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+from app.utils.kst import kst_now, kst_today
 from datetime import date, datetime, timedelta
 
 from sqlalchemy import and_
@@ -155,9 +156,9 @@ def sync_channel_orders(
         }
 
     if date_from is None:
-        date_from = date.today() - timedelta(days=7)
+        date_from = kst_today() - timedelta(days=7)
     if date_to is None:
-        date_to = date.today()
+        date_to = kst_today()
 
     # SyncLog 시작
     sync_log = SyncLog(
@@ -234,7 +235,7 @@ def sync_channel_orders(
         db.commit()
         sync_log.status = "success"
         sync_log.records_synced = new_count + updated_count
-        sync_log.completed_at = datetime.now()
+        sync_log.completed_at = kst_now()
         db.commit()
 
     except Exception as e:
@@ -244,7 +245,7 @@ def sync_channel_orders(
             db.rollback()
             sync_log.status = "error"
             sync_log.error_message = str(e)[:500]
-            sync_log.completed_at = datetime.now()
+            sync_log.completed_at = kst_now()
             db.commit()
         except Exception:
             pass  # sync_log 업데이트 실패해도 진행

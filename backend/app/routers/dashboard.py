@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from app.utils.kst import kst_now, kst_today
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Optional
@@ -40,7 +41,7 @@ def _default_dates(
 ) -> tuple[date, date]:
     """기간 파라미터 기본값 설정"""
     if date_to is None:
-        date_to = date.today()
+        date_to = kst_today()
     if date_from is None:
         if period == "weekly":
             date_from = date_to - timedelta(weeks=12)
@@ -54,7 +55,7 @@ def _default_dates(
 def _sync_orders_recent(db: Session) -> None:
     """대시보드 조회 시 API 채널 주문 최근 7일치 최신화 (실패해도 조회는 계속)"""
     from app.services.sync_service import sync_channel_orders
-    sync_to = date.today()
+    sync_to = kst_today()
     sync_from = sync_to - timedelta(days=6)
     channels = db.query(Channel).filter(
         Channel.api_type != "excel",

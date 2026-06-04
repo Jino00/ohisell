@@ -1,6 +1,7 @@
 # channels.py — 채널 목록 + 연동 상태 API
 from __future__ import annotations
 
+from app.utils.kst import kst_now, kst_today
 from datetime import datetime
 
 from fastapi import APIRouter, Depends
@@ -55,7 +56,7 @@ def channel_connection_status(db: Session = Depends(get_db)):
         if ch.platform == "cafe24":
             token_row = db.query(OAuthToken).filter(OAuthToken.channel_id == ch.id).first()
             if token_row:
-                now = datetime.utcnow()
+                now = kst_now()
                 if token_row.refresh_token_expires_at and token_row.refresh_token_expires_at <= now:
                     item["oauth_status"] = "expired"
                 else:

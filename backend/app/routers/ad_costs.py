@@ -6,6 +6,7 @@ import io
 import logging
 import os
 import re
+from app.utils.kst import kst_now, kst_today
 from datetime import date, timedelta
 from decimal import Decimal
 
@@ -236,7 +237,7 @@ def sync_naver_sa_ad_costs(
     """
     from app.services.naver_sa_ad_fetcher import fetch_campaign_daily_spend
 
-    yesterday = date.today() - timedelta(days=1)
+    yesterday = kst_today() - timedelta(days=1)
     d_from = date.fromisoformat(date_from) if date_from else yesterday
     d_to = date.fromisoformat(date_to) if date_to else yesterday
 
@@ -291,7 +292,7 @@ def sync_meta_ad_costs(
     """
     from app.services.meta_ad_fetcher import fetch_campaign_daily_spend
 
-    yesterday = date.today() - timedelta(days=1)
+    yesterday = kst_today() - timedelta(days=1)
     d_from = date.fromisoformat(date_from) if date_from else yesterday
     d_to = date.fromisoformat(date_to) if date_to else yesterday
 

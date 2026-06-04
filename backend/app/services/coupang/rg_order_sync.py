@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
+from app.utils.kst import kst_now, kst_today
 from decimal import Decimal
 
 from sqlalchemy.orm import Session
@@ -17,12 +18,11 @@ from app.models import CoupangRgOrderItem
 log = logging.getLogger(__name__)
 
 RG_ACCOUNTS = ["COUPANG_WING1", "COUPANG_WING2"]
-_KST = timezone(timedelta(hours=9))
+from zoneinfo import ZoneInfo as _ZI
+_KST = _ZI('Asia/Seoul')
 _MAX_WINDOW_DAYS = 30  # API 최대 조회 윈도우 (명세 §4)
 
 
-def _kst_today() -> datetime:
-    return datetime.now(_KST)
 
 
 def _dec(value) -> Decimal | None:
@@ -108,7 +108,7 @@ def sync_account_rg_orders(db: Session, account_key: str, *, days: int = 30) -> 
     stats = {"account": account_key, "vendor_id": cfg.vendor_id,
              "orders": 0, "items": 0, "windows": 0}
 
-    today = _kst_today()
+    today = kst_now()
     date_from = today - timedelta(days=days)
     try:
         for win_from, win_to in _windows(date_from, today):

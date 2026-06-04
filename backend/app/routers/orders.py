@@ -1,6 +1,7 @@
 # routers/orders.py — 주문 조회 API
 from __future__ import annotations
 
+from app.utils.kst import kst_now, kst_today
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
@@ -94,12 +95,12 @@ def profit_summary(
     from app.services.profit_calculator import calculate_daily_trend
 
     if date_from is None:
-        df = (datetime.now() - timedelta(days=365)).date()
+        df = (kst_now() - timedelta(days=365)).date()
     else:
         df = datetime.fromisoformat(date_from).date()
 
     if date_to is None:
-        dt = datetime.now().date()
+        dt = kst_now().date()
     else:
         dt = datetime.fromisoformat(date_to).date()
 

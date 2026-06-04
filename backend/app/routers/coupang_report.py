@@ -4,6 +4,7 @@ from __future__ import annotations
 import io
 import logging
 import re
+from app.utils.kst import kst_now, kst_today
 from datetime import date
 from decimal import Decimal
 from typing import Optional
@@ -154,7 +155,7 @@ def get_coupang_ad_report(
 ):
     """기간별 쿠팡 광고 성과 요약 (전체 합계 + 판매방식별 분류)."""
     if date_to is None:
-        date_to = date.today()
+        date_to = kst_today()
     if date_from is None:
         date_from = date_to.replace(day=1)  # 이번 달 1일
 

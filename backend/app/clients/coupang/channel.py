@@ -9,6 +9,7 @@ from decimal import Decimal
 
 from app.clients.base import BaseChannelClient, RawOrder
 from app.clients.coupang._base import CoupangBaseClient
+from app.utils.kst import kst_now
 
 log = logging.getLogger(__name__)
 
@@ -21,7 +22,7 @@ class CoupangClient(CoupangBaseClient, BaseChannelClient):
     """
 
     def test_connection(self) -> dict:
-        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        yesterday = (kst_now() - timedelta(days=1)).strftime("%Y-%m-%d")
         path = "/v2/providers/openapi/apis/api/v1/revenue-history"
         params = {
             "vendorId": self.vendor_id,

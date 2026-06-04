@@ -8,11 +8,11 @@
 # 트랙 D-8: vendor 2계정(WING1·WING2) 순회(RG 중복 불필요). 호출은 서버 IP에서만(로컬 403).
 from __future__ import annotations
 
+from app.utils.kst import kst_now, kst_today
 import logging
 import time
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
-from zoneinfo import ZoneInfo
 
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
@@ -33,11 +33,10 @@ SETTLEMENT_ACCOUNTS = ["COUPANG_WING1", "COUPANG_WING2"]
 _REVENUE_SPAN_DAYS = 7
 _RATIO_EPSILON = Decimal("0.01")  # 수수료율 부동 비교 허용오차
 _CALL_DELAY = 0.3  # 쿠팡 속도제한(429) 대응 — 호출 간 간격
-_KST = ZoneInfo("Asia/Seoul")  # codex [P2]: 잡은 05:50 KST 실행, prod 서버 TZ=UTC →
 # datetime.now()는 UTC날짜라 조회범위가 KST 기준 하루 stale. 조회 경계는 KST로 명시.
 
 
-def _kst_today():
+def kst_today():
     """KST 기준 오늘 date. 조회 윈도우 경계 계산용(서버 UTC ↔ KST 날짜 경계 어긋남 방지)."""
     return datetime.now(_KST).date()
 
@@ -83,7 +82,7 @@ def _revenue_windows(days: int, max_span: int = _REVENUE_SPAN_DAYS) -> list[tupl
     ★라이브 실측 보정(원칙22): recognitionDate(인식일)는 과거 시점이라 recognitionDateTo가
     오늘이면 쿠팡이 400 반환. 끝을 어제로 제한(오늘 인식 데이터는 어차피 거의 없음).
     """
-    today = _kst_today()
+    today = kst_today()
     end = today - timedelta(days=1)
     start = end - timedelta(days=max(days, 1))
     windows: list[tuple[str, str]] = []
@@ -97,7 +96,7 @@ def _revenue_windows(days: int, max_span: int = _REVENUE_SPAN_DAYS) -> list[tupl
 
 def _settlement_months(months: int) -> list[str]:
     """오늘(KST) 기준 과거 months개월의 'YYYY-MM' 목록(이번 달 포함)."""
-    today = _kst_today()
+    today = kst_today()
     y, m = today.year, today.month
     result: list[str] = []
     for _ in range(max(months, 1)):

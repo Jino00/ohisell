@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import logging
+from app.utils.kst import kst_now, kst_today
 from datetime import datetime, timezone
 from typing import Any
 
@@ -92,7 +93,7 @@ def _upsert_inquiry(
             set_={
                 "status": str(status)[:30] if status else None,
                 "answered": answered,
-                "synced_at": datetime.utcnow(),
+                "synced_at": kst_now(),
             },
         )
     )
