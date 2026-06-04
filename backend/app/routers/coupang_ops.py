@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_coupang_config
 from app.database import get_db
-from app.models import Channel, CoupangAdOptionDaily, CoupangProductItem, CoupangRgOrderItem, Order, ProductChannelMapping, ProductMaster
+from app.models import Channel, CoupangAdOptionDaily, CoupangProductItem, CoupangRevenueFee, CoupangRgOrderItem, Order, ProductChannelMapping, ProductMaster
 from app.routers._coupang_write_http import handle_write as _handle_write
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
 from app.services.coupang import coupon_write, product_write
@@ -452,7 +452,8 @@ def w5_update_rg_product(
 _Q2 = Decimal("0.01")
 _Q4 = Decimal("0.0001")
 _Z = Decimal("0")
-_WING_DELIVERY_COST = Decimal("1900")  # 판매자배송(Wing) 한건당 배송비(한진)
+_WING_DELIVERY_COST = Decimal("1900")   # 판매자배송(Wing) 한건당 배송비(한진)
+_DEFAULT_FEE_RATE   = Decimal("0.105")  # 수수료율 기본값 10.5% (정산 데이터 없는 옵션)
 
 # 쿠팡 채널코드 → (company_short, channel_type)
 _CHANNEL_META: dict[str, tuple[str, str]] = {
@@ -650,9 +651,27 @@ def sales_summary(
             "seller_name": r.seller_product_name,
             "item_name": r.item_name,
             "account_key": r.account_key,
-            "fee_rate": _f(r.sale_agent_commission) / Decimal("100") if r.sale_agent_commission else _Z,
         }
         for r in pi_rows
+    }
+
+    # ── 3a. 수수료율 조회 (coupang_revenue_fee.service_fee_ratio 옵션별 최신값) ──
+    fee_rows = (
+        db.query(
+            CoupangRevenueFee.vendor_item_id,
+            func.max(CoupangRevenueFee.service_fee_ratio),
+        )
+        .filter(
+            CoupangRevenueFee.vendor_item_id.in_(list(all_vids)),
+            CoupangRevenueFee.service_fee_ratio.isnot(None),
+            CoupangRevenueFee.service_fee_ratio > 0,
+        )
+        .group_by(CoupangRevenueFee.vendor_item_id)
+        .all()
+    ) if all_vids else []
+    fee_rate_map: dict[str, Decimal] = {
+        str(vid): _f(ratio) / Decimal("100")
+        for vid, ratio in fee_rows
     }
 
     # ── 3b. 원가 조회 (D-12: product_master via product_channel_mapping) ──
@@ -706,8 +725,8 @@ def sales_summary(
         rev = od["revenue"]
         qty = od["qty"]
         e["revenue"] += rev
-        # 수수료 = 매출 × 수수료율
-        fee_rate = pi_map.get(vid, {}).get("fee_rate", _Z)
+        # 수수료 = 매출 × 수수료율 (정산 데이터 기준, 없으면 기본값 10.5%)
+        fee_rate = fee_rate_map.get(vid, _DEFAULT_FEE_RATE)
         e["fee"] += (rev * fee_rate).quantize(_Q2, rounding=ROUND_HALF_UP)
         # 원가 = cost_price × 수량
         unit_cost = cost_map.get(vid, _Z)
