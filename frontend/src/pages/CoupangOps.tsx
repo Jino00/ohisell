@@ -199,15 +199,16 @@ export default function CoupangOps() {
             ) : (
               filtered.map((row, i) => (
                 <tr key={i} className="border-t border-gray-50 hover:bg-gray-50">
-                  <td className="px-4 py-2 max-w-[320px]">
-                    <div className="text-gray-900 text-sm truncate" title={row.product_name}>
+                  <td className="px-4 py-2 max-w-[380px]">
+                    <div
+                      className="text-gray-900 text-sm truncate"
+                      title={row.option_name ? `${row.product_name}, ${row.option_name}` : row.product_name}
+                    >
                       {row.product_name}
+                      {row.option_name && (
+                        <span className="text-gray-400">, {row.option_name}</span>
+                      )}
                     </div>
-                    {row.option_name && (
-                      <div className="text-xs text-gray-400 truncate mt-0.5" title={row.option_name}>
-                        {row.option_name}
-                      </div>
-                    )}
                   </td>
                   <td className="px-3 py-2 text-center">
                     <span
