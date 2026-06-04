@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -f claude-progress.txt ] && echo === 세션 시작 === && cat claude-progress.txt || echo 새 프로젝트"
+          }
+        ]
+      }
+    ]
+  }
+}

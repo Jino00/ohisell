@@ -5,8 +5,14 @@
 ## 프로젝트 개요
 - 이름: ohisell
 - 목적: 오하이가 판매중인 오픈쇼핑몰에서의 실적 관리
-- 상태: 계획 중
+- 상태: 운영 중 + 메가 프로젝트 진행
 - 시작일: 2026-04-01
+
+## ★ 진행 중 메가 프로젝트 (세션 시작 시 반드시 확인 — 기획 변형 금지)
+- **트랙: `docs/tracks/active/track_coupang-full-integration.md`** ← 단일 진실 원천
+- 쿠팡 Open API 100개 엔드포인트(읽기+쓰기 전부) 연결 → 종합 조망(Command Center).
+- 핵심 불변 결정: ① 백엔드 우선→프론트 ② 시스템은 사실/지표 정리만(전략 추천 금지) ③ 광고비는 XLSX 업로드(공식 API 없음) ④ 아키텍처 clients/coupang/*(SA)→services/coupang/*(Harness)→routers/pages.
+- 이 트랙을 무시하거나 변형해서 진행하지 말 것. 변경은 Jino 승인 후 트랙 파일에 D-N으로 기록.
 
 ## 기술 스택
 - Frontend: React + Vite + TypeScript + Tailwind CSS

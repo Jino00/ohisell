@@ -18,8 +18,9 @@
 - 고객-판매자 Q&A 조회.
 
 ## 2. 상품별 고객문의 답변 (#2) — ⚠️쓰기
-- `POST .../v4/vendors/{vendorId}/onlineInquiries/{inquiryId}/replies` · Path: inquiryId(O)·vendorId(O) · Body: `content`(O 답변내용)
-- inquiryId는 #1로 먼저 확인. 하나의 문의에 답변.
+- `POST .../v4/vendors/{vendorId}/onlineInquiries/{inquiryId}/replies` · Path: inquiryId(O)·vendorId(O)
+- **Body(2026-06-04 /browse 재수집, 추정금지)**: `content`(O 답변내용, 줄넘김 `\n`) · `vendorId`(O) · `replyBy`(O 응답자 셀러포탈 WING 아이디)
+- inquiryId는 #1로 먼저 확인. 하나의 문의에 답변. ⚠️ replyBy 필수(명세 첫 수집 때 누락 — content만 적혀있었음).
 
 ## 3. 쿠팡 고객센터 문의조회 (#3)
 - `GET .../v5/vendors/{vendorId}/callCenterInquiries` · Query: vendorId(O), `partnerCounselingStatus`(O 문의상태 NO_ANSWER 등), inquiryStartAt/EndAt(최대7일), pageSize/pageNum
@@ -27,10 +28,12 @@
 
 ## 4. 쿠팡 고객센터 문의답변 (#4) — ⚠️쓰기
 - `POST .../v4/vendors/{vendorId}/callCenterInquiries/{inquiryId}/replies` · Path vendorId(O)·inquiryId(O)
-- 상태가 '미답변'(inquiryStatus:progress, partnerTransferStatus:requestAnswer)일 때만 가능. 중복 답변 에러. ⚠️ 24시간 미답변 시 쿠팡 자동 처리→'답변완료' 전환되면 API 답변 불가(WING에서만).
+- **Body(2026-06-04 /browse 재수집, 추정금지)**: `vendorId`(O) · `inquiryId`(O) · `content`(O 답변내용, **최소2~최대1000자**, 줄넘김 `\n`) · `replyBy`(O 실사용자ID=WING ID) · `parentAnswerId`(O Number, **부모이관글 answerId** — 고객센터 문의조회 API의 answerId 입력)
+- 상태가 '미답변'(inquiryStatus:progress, partnerTransferStatus:requestAnswer)일 때만 가능. inquiryId·answerId는 #3 조회로 확인. 중복 답변 에러. ⚠️ 24시간 미답변 시 쿠팡 자동 처리→'답변완료' 전환되면 API 답변 불가(WING에서만). ⚠️ #2와 달리 parentAnswerId 추가 필수.
 
 ## 5. 쿠팡 고객센터 문의확인 (#5) — ⚠️쓰기
-- `POST .../v4/vendors/{vendorId}/callCenterInquiries/{inquiryId}/confirms` · Body: `confirmBy`(O 실사용자ID=WING ID)
+- `POST .../v4/vendors/{vendorId}/callCenterInquiries/{inquiryId}/confirms` · Path vendorId(O)·inquiryId(O)
+- **Body(2026-06-04 /browse 재수집)**: `confirmBy`(O 실사용자ID=WING ID, 업체 소속 사용자ID)
 - 쿠팡이 상담완료한 업체이관 건(미확인 TRANSFER) 확인 처리. 24시간 경과 시 불가.
 
 ## 6. 쿠팡 고객센터 문의 단건 조회 (#6)
