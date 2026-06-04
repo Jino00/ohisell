@@ -526,10 +526,10 @@ def sales_summary(
     if not target_codes:
         return {"summary": {}, "by_product": []}
 
-    # paid_at은 UTC 저장 → KST 기준 날짜 범위를 UTC로 변환
-    _UTC_OFFSET = timedelta(hours=9)
-    rg_start = start - _UTC_OFFSET   # KST 자정 → UTC 전날 15:00
-    rg_end = end - _UTC_OFFSET       # KST 23:59 → UTC 당일 14:59
+    # paid_at은 KST naive datetime으로 저장(_parse_paid_at에서 KST 변환 후 tzinfo 제거)
+    # → 날짜 범위(start/end)를 그대로 사용 (UTC 보정 불필요)
+    rg_start = start   # KST 00:00:00
+    rg_end = end       # KST 23:59:59
 
     # ── 1. 주문 집계 (상품명·채널코드별) ──────────────────────────────
     order_rows = (
