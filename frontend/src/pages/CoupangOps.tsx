@@ -50,6 +50,7 @@ export default function CoupangOps() {
   const [search, setSearch] = useState("");
   const [sortKey, setSortKey] = useState<SortKey>("revenue");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
+  const [hideZero, setHideZero] = useState<Set<string>>(new Set());
 
   const [data, setData] = useState<SalesSummary | null>(null);
   const [loading, setLoading] = useState(false);
@@ -89,6 +90,12 @@ export default function CoupangOps() {
       row.product_name.toLowerCase().includes(q) ||
       row.option_name.toLowerCase().includes(q);
     return matchCh && matchQ;
+  }).filter((row) => {
+    if (hideZero.has("revenue") && Number(row.revenue) === 0) return false;
+    if (hideZero.has("ad_spend") && Number(row.ad_spend) === 0) return false;
+    if (hideZero.has("conv_revenue") && Number(row.conv_revenue) === 0) return false;
+    if (hideZero.has("roas") && (row.roas == null || Number(row.roas) === 0)) return false;
+    return true;
   }).sort((a, b) => {
     const mul = sortDir === "desc" ? -1 : 1;
     if (sortKey === "product_name") {
@@ -168,9 +175,10 @@ export default function CoupangOps() {
       {/* ── 상품별 테이블 ── */}
       <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
         {/* 테이블 필터 헤더 */}
-        <div className="flex items-center gap-3 px-4 py-3 border-b border-gray-100 bg-gray-50">
+        <div className="flex items-center gap-3 px-4 py-3 border-b border-gray-100 bg-gray-50 flex-wrap">
           <span className="text-sm font-medium text-gray-700">상품별 현황</span>
-          <div className="flex gap-1 ml-2">
+          {/* 채널 필터 */}
+          <div className="flex gap-1">
             {CHANNEL_TYPES.map((ct) => (
               <button
                 key={ct}
@@ -184,6 +192,39 @@ export default function CoupangOps() {
                 {ct}
               </button>
             ))}
+          </div>
+          {/* 0 숨기기 토글 */}
+          <div className="flex gap-1 border-l border-gray-200 pl-3">
+            {(
+              [
+                { key: "revenue", label: "매출 0" },
+                { key: "ad_spend", label: "광고비 0" },
+                { key: "conv_revenue", label: "전환매출 0" },
+                { key: "roas", label: "RoAS 0" },
+              ] as { key: string; label: string }[]
+            ).map(({ key, label }) => {
+              const active = hideZero.has(key);
+              return (
+                <button
+                  key={key}
+                  onClick={() => {
+                    setHideZero((prev) => {
+                      const next = new Set(prev);
+                      active ? next.delete(key) : next.add(key);
+                      return next;
+                    });
+                  }}
+                  className={`px-2.5 py-1 rounded text-xs font-medium transition-colors ${
+                    active
+                      ? "bg-red-500 text-white"
+                      : "bg-white border border-gray-300 text-gray-500 hover:bg-gray-100"
+                  }`}
+                  title={active ? `${label} 행 숨기는 중 — 클릭하여 다시 표시` : `${label} 행 숨기기`}
+                >
+                  {active ? `${label} 숨김` : `${label}`}
+                </button>
+              );
+            })}
           </div>
           <input
             className="ml-auto border border-gray-300 rounded px-3 py-1.5 text-sm w-48"
