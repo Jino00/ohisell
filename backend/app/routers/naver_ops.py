@@ -1197,3 +1197,81 @@ def reject_exchange(req: ExchangeRejectRequest, dry_run: bool = Query(default=Tr
     if not result.get("ok"):
         _raise_naver_write_error("교환 거부", result)
     return {"dry_run": False, "action": "exchange_reject", "naver": result.get("data")}
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# N8. 상품 판매 상태 변경 (쓰기 — dry_run+confirm). 트랙 D-11.
+#   스펙: docs/references/15_naver_product_write_apis.md N8-2 (PUT change-status)
+#   범위: 판매중/품절/판매중지 3상태만. 가격 안 건드림(위험0). 오하이=원상품 단위 재고.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# 패널에 노출하는 안전한 3상태만 허용 (DELETE 등 시스템/위험 상태는 차단)
+_VALID_PRODUCT_STATUS_TYPES = {"SALE", "OUTOFSTOCK", "SUSPENSION"}
+_MAX_STOCK_QUANTITY = 99999999
+
+
+class ChangeProductStatusRequest(BaseModel):
+    origin_product_no: int
+    status_type: str
+    stock_quantity: int | None = None
+    sale_start_date: str = ""   # ISO8601(+09:00), 선택
+    sale_end_date: str = ""     # ISO8601(+09:00), 선택
+
+
+@router.put("/products/change-status")
+def change_product_status(req: ChangeProductStatusRequest, dry_run: bool = Query(default=True)):
+    """원상품 판매 상태 변경 (단건, 트랙 N8). dry_run=true(기본)면 전송 안 함.
+
+    전이 규칙(API센터 실측): SALE→OUTOFSTOCK은 재고 0됨, 품절·중지→SALE 전환 시 재고 필수,
+    재고 0이면 OUTOFSTOCK 유지. 가격(salePrice) 미전송 → 가격 손실 위험 0.
+    """
+    if req.origin_product_no <= 0:
+        raise HTTPException(status_code=400, detail="원상품번호 누락")
+    if req.status_type not in _VALID_PRODUCT_STATUS_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"허용되지 않은 판매상태 '{req.status_type}' (SALE/OUTOFSTOCK/SUSPENSION만 가능)",
+        )
+
+    # 재고 수량 결정 — 전이 규칙(API센터 실측) 반영 (codex P1-1/P2-1)
+    #  · SALE(재입고): 재고 필수, 0이면 네이버가 OUTOFSTOCK 유지 → 의도와 불일치라 1 이상 요구
+    #  · OUTOFSTOCK(품절): 재고 0 강제 (스펙: SALE→OUTOFSTOCK 시 재고 0됨)
+    #  · SUSPENSION(판매중지): 재고 불필요 → 입력 무시
+    stock: int | None
+    if req.status_type == "SALE":
+        if req.stock_quantity is None:
+            raise HTTPException(status_code=400, detail="판매중(SALE) 전환 시 재고 수량은 필수입니다")
+        if req.stock_quantity < 1:
+            raise HTTPException(status_code=400, detail="판매중(SALE) 전환 시 재고 수량은 1 이상이어야 합니다 (0이면 품절로 유지됨)")
+        if req.stock_quantity > _MAX_STOCK_QUANTITY:
+            raise HTTPException(status_code=400, detail=f"재고 수량은 {_MAX_STOCK_QUANTITY}를 넘을 수 없습니다")
+        stock = req.stock_quantity
+    elif req.status_type == "OUTOFSTOCK":
+        stock = 0
+    else:  # SUSPENSION
+        stock = None
+
+    body: dict = {"statusType": req.status_type}
+    if stock is not None:
+        body["stockQuantity"] = stock
+    if req.sale_start_date:
+        body["saleStartDate"] = _normalize_kst_datetime(req.sale_start_date, "판매 시작 일시")
+    if req.sale_end_date:
+        body["saleEndDate"] = _normalize_kst_datetime(req.sale_end_date, "판매 종료 일시")
+
+    would_send = {
+        "path": f"/v1/products/origin-products/{req.origin_product_no}/change-status",
+        "body": body,
+    }
+    if dry_run:
+        return {"dry_run": True, "action": "product_change_status", "would_send": would_send}
+    result = _get_naver_client().change_product_status(
+        req.origin_product_no,
+        req.status_type,
+        stock,
+        body.get("saleStartDate", ""),
+        body.get("saleEndDate", ""),
+    )
+    if not result.get("ok"):
+        _raise_naver_write_error("판매 상태 변경", result)
+    return {"dry_run": False, "action": "product_change_status", "naver": result.get("data")}

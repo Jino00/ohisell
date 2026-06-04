@@ -883,6 +883,33 @@ export function naverRejectExchange(
   });
 }
 
+// ── N8 상품 판매상태 변경 (트랙 D-11) ────────────────────────────
+// 판매중/품절/판매중지 3상태만. 가격(salePrice) 안 보냄 → 가격 손실 위험 0.
+// 위험 상태(DELETE 등)는 타입으로 차단 (codex P2-3).
+export type NaverProductStatus = "SALE" | "OUTOFSTOCK" | "SUSPENSION";
+
+export const NAVER_PRODUCT_STATUS_OPTIONS: { code: NaverProductStatus; label: string }[] = [
+  { code: "SALE", label: "판매중" },
+  { code: "OUTOFSTOCK", label: "품절" },
+  { code: "SUSPENSION", label: "판매중지" },
+];
+
+export function naverChangeProductStatus(
+  payload: {
+    origin_product_no: number;
+    status_type: NaverProductStatus;
+    stock_quantity?: number | null;
+    sale_start_date?: string;
+    sale_end_date?: string;
+  },
+  dryRun = true,
+): Promise<NaverWriteResult> {
+  return fetchApi<NaverWriteResult>(`/api/naver/ops/products/change-status?dry_run=${dryRun}`, {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+}
+
 // claimStatus 코드 → 한글 라벨 (표시용, 네이버 실측 enum)
 export const NAVER_CLAIM_STATUS_LABELS: Record<string, string> = {
   CANCEL_REQUEST: "취소 요청", CANCELING: "취소 처리중", CANCEL_DONE: "취소 완료", CANCEL_REJECT: "취소 철회",

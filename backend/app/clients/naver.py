@@ -838,6 +838,37 @@ class NaverClient(BaseChannelClient):
         path = f"/v1/pay-order/seller/product-orders/{product_order_id}/claim/exchange/reject"
         return self._request_write("POST", path, {"rejectExchangeReason": reject_exchange_reason})
 
+    # ── N8 상품 — 판매 상태 변경 (트랙 D-11) ──────────────────────
+    def change_product_status(
+        self,
+        origin_product_no: int,
+        status_type: str,
+        stock_quantity: int | None = None,
+        sale_start_date: str = "",
+        sale_end_date: str = "",
+    ) -> dict:
+        """원상품 판매 상태 변경 (PUT /v1/products/origin-products/{originProductNo}/change-status). 트랙 N8.
+
+        ★ 메서드는 PUT(주문 쓰기와 달리). 가격(salePrice) 안 받음 → 가격 손실 위험 0.
+        status_type: SALE(판매중)/OUTOFSTOCK(품절)/SUSPENSION(판매중지). 필수.
+        stock_quantity: 변경 재고 수량(<=99999999). 품절·중지→판매중(SALE) 전환 시 필수.
+        sale_start_date/sale_end_date: ISO8601(yyyy-MM-dd'T'HH:mm[:ss][.SSS]XXX), 선택.
+        반환: _request_write 결과 {ok, status, data, error}.
+        """
+        # 방어 심화(codex P2): 위험 상태(DELETE 등) 직접 호출 차단 — 라우터 우회 시 안전장치
+        if status_type not in {"SALE", "OUTOFSTOCK", "SUSPENSION"}:
+            return {"ok": False, "status": 400, "data": None,
+                    "error": f"허용되지 않은 판매상태 '{status_type}' (SALE/OUTOFSTOCK/SUSPENSION만 가능)"}
+        path = f"/v1/products/origin-products/{origin_product_no}/change-status"
+        body: dict = {"statusType": status_type}
+        if stock_quantity is not None:
+            body["stockQuantity"] = stock_quantity
+        if sale_start_date:
+            body["saleStartDate"] = sale_start_date
+        if sale_end_date:
+            body["saleEndDate"] = sale_end_date
+        return self._request_write("PUT", path, body)
+
     @staticmethod
     def _map_status(naver_status: str) -> str:
         mapping = {

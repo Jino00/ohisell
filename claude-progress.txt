@@ -3,10 +3,17 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
-- 날짜: 2026-06-04
-- 단계: ★네이버 **N7 클레임 전체 완료**(취소+반품+교환 12쓰기). 이번 세션 wave3 교환 5종(수거완료/재배송/보류/보류해제/거부, 전부 POST·경로 claim/exchange/*) + ⚖️섹션 EXCHANGE_REQUEST행 수거완료/거부/보류 + COLLECT_DONE행 재배송 + 교환보류해제 모달. prod **dry_run 라이브 실증**(5종 would_send 정확·부분입력 허용·검증400 5종·codex P1 0/P2 2 합의수정). 라이브 EXCHANGE_REQUEST 3·COLLECT_DONE 1 등 대기건 실쓰기는 실고객이라 Jino 결정(미실행). 다음 = N8 상품쓰기 또는 실 클레임처리.
-- 트랙: docs/tracks/active/track_naver-full-integration.md (N1~N6 완료, N7 전체 완료, N2 skip). 쓰기 스펙=docs/references/14. D-9(N6)·D-10(N7) 참조.
-- 최신 커밋(main): **ec69f3f** (fda6987 feat naver N3~N7 + ec69f3f chore 기록정리). ★N1~N7 코드 전부 prod scp 배포(라이브) + git 커밋 완료(2026-06-04). 워킹트리 클린.
+- 날짜: 2026-06-05
+- 단계: ★네이버 **N8 상품 판매상태 변경 완료**(prod 배포·dry_run 라이브 실증·codex pass). N1~N8 전부 완료(N2 skip). ★N8 = 판매상태 변경(change-status)만 — 옵션재고/가격/수정/등록 전부 제외(D-11, 위험). 이유: 오하이는 원상품 단위 재고(옵션 미사용, prod 1,202개 실측)+수정/등록 위험. change-status는 가격(salePrice) 안 받아 위험0. 다음 = (선택)실 클레임 처리 또는 트랙 마무리.
+- 트랙: docs/tracks/active/track_naver-full-integration.md (N1~N8 완료, N2 skip). 쓰기 스펙=docs/references/14(주문)·15(상품). D-9(N6)·D-10(N7)·D-11(N8) 참조.
+- 최신 커밋(main): **f74ead7**. ★N1~N7은 prod 배포+git 커밋 완료. ★N8(이번 세션)은 prod scp 배포 완료(라이브), **git 커밋 미실행**(Jino 지시 시). 워킹트리에 N8 변경분 + 메모리/트랙 갱신분 존재.
+
+## 🛍️ 네이버 N8 상품 판매상태 변경 (2026-06-05, prod dry_run 라이브 + codex pass)
+- 범위(D-11): 판매상태 변경(change-status)만. SALE(판매중)/OUTOFSTOCK(품절)/SUSPENSION(판매중지) 3상태. ★가격 안 건드림(위험0). 옵션재고(option-stock)·가격·수정·등록 전부 제외.
+- 스펙: PUT /v1/products/origin-products/{originProductNo}/change-status. body {statusType必, stockQuantity?, saleStartDate?, saleEndDate?}. 전이규칙: SALE→OUTOFSTOCK(재고0자동)/SUSPENSION, OUTOFSTOCK→SALE/SUSPENSION, SUSPENSION→SALE. 품절·중지→판매중 시 재고 필수. 스펙=docs/references/15 N8-2.
+- 파일: naver.py(change_product_status, ★PUT, 클라enum allowlist 방어), naver_ops.py(PUT /products/change-status, OUTOFSTOCK→재고0강제·SALE→재고≥1·dry_run기본), api.ts(naverChangeProductStatus PUT+NaverProductStatus union+NAVER_PRODUCT_STATUS_OPTIONS), NaverOps.tsx(🛍️ 상품행 [변경] 버튼+모달, NAVER_STATUS_TRANSITIONS로 현재상태별 유효전이만 노출).
+- codex review: 1차 P1×2(OUTOFSTOCK 재고0 미전송·CLOSE에 SALE 기본값)+P2×3(SALE+0허용·클라enum미검증·타입미좁힘) → 전부 합의수정(+전이규칙 위반까지 확장 강화) → 2차 **pass**.
+- ✅ prod dry_run 라이브 실증(2026-06-05, 실상품 13504079747): 7케이스 전부 통과(품절시 stockQuantity:0자동, SALE재고50 정확, SUSPENSION 재고없음, 검증400 4종[SALE재고누락/SALE재고0/DELETE차단/원번호0]). ★실쓰기(dry_run=false)는 실상품 노출/재고 변경이라 미실행 — Jino 결정.
 
 ## 📦 네이버 N6 발주/발송 처리 (2026-06-04, prod dry_run 라이브)
 - 파일: backend/app/clients/naver.py(confirm_orders/dispatch_orders/delay_order/fetch_pending_orders + _request_write[4xx 본문 surface]), backend/app/routers/naver_ops.py(GET /orders/pending, POST /orders/confirm|dispatch|delay, dry_run 기본 true), frontend api.ts+NaverOps.tsx(📦 섹션: 대기목록→선택→dry_run 모달→실행).

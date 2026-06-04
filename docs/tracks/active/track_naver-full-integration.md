@@ -68,6 +68,18 @@
   - **prod dry_run 라이브 실증**: 5종 would_send 정확(부분입력 허용 확인), 검증400 5종 OK. 라이브 EXCHANGE_REQUEST 3·COLLECT_DONE 1 존재 → 실쓰기 Jino 결정(미실행).
   - ★N7 클레임 전체(취소+반품+교환 12쓰기) 완료.
 
+### D-11. N8 상품 쓰기 = **판매 상태 변경(change-status) 하나만** (옵션재고·가격·수정·등록 전부 제외) (2026-06-05, Jino 지시)
+- **범위 축소 2단계 확정**:
+  1. Jino "그럼 수정과 쓰기는 활성화 시키지 말자 위험할 수도 있겠다" → "맞아": 상품 **수정(채널/원상품 수정)·등록 제외**(라이브 상품 손상/오등록 위험).
+  2. prod 상품구조 실측 후 Jino "그래": **옵션 재고 변경(option-stock)도 제외** → **판매 상태 변경만** 구현.
+- ✅ **구현: 판매 상태 변경** — `PUT /v1/products/origin-products/:originProductNo/change-status`
+  - 품절(`OUTOFSTOCK`, 재고0) / 재입고·재판매(`SALE`+stockQuantity) / 판매중지(`SUSPENSION`). 패널은 이 3개만 노출(DELETE 등 시스템상태 노출 금지).
+  - ★ **가격(salePrice)을 전혀 안 받음 → 가격 손실 위험 0**. 원상품(전체) 단위 재고/상태.
+- ❌ **옵션 재고 변경(option-stock) 제외 — prod 실측 근거(원칙 22)**: 오하이는 **원상품 단위 재고**(각 origin_product_no에 stock 1개, 변종은 group_product_no로 묶인 별도 원상품). 옵션별 재고 미사용. option-stock은 salePrice 필수(가격 위험)+복잡 → 불필요·위험으로 제외. (표본 1,202개 확인)
+- ❌ 가격·할인 UI / 상품 수정 / 상품 등록 / 멀티변경 / 삭제 — 전부 제외(위험). 향후 필요 시 Jino 재승인 후 별도 D-N.
+- **원칙 계승**: dry_run=true 기본(실쓰기는 Jino 건별), 스펙은 API센터 실측만(추측 금지). 스펙=[docs/references/15_naver_product_write_apis.md] N8-2.
+- **전이 규칙 검증 반영**: 품절→판매중 전환 시 stockQuantity 필수, SALE→OUTOFSTOCK은 재고0 자동, 재고0이면 OUTOFSTOCK 유지.
+
 ## 3. 페이즈 체크리스트
 읽기·사실 (패널 표시):
 - [x] **N1. 정산(일별)** — `/v1/pay-settle/settle/daily` 적재(naver_settlement_daily 테이블·alembic c3d5e7f9a1b2)·스케줄러(05:25)·패널 정산 섹션. prod 라이브 실증: 30일 정산 29,958,779 / 실측수수료 -1,304,731 (2026-06-04).
@@ -80,7 +92,7 @@
 쓰기·운영 (dry_run+confirm):
 - [x] **N6. 발주/발송 처리** — 발주확인/발송/발송지연 3종(전부 POST) + 라이브 미발송 조회. dry_run+confirm 이중확인. **prod dry_run 라이브 실증(2026-06-04)**: 발주확인 대기 14건 조회, confirm/dispatch/delay dry_run would_send 정확, 검증 400 동작. ★실제 쓰기(dry_run=false)는 미실행 — Jino와 함께 1건. 스펙=[docs/references/14_naver_order_write_apis.md](../../references/14_naver_order_write_apis.md). 상세 D-9.
 - [x] **N7. 클레임 (취소/반품/교환) — 전체 완료**(3파동 전부 prod 라이브). 클레임 조회·취소(승인/직접요청 2)·반품(승인/거부/보류/보류해제/직접요청 5)·교환(수거완료/재배송/보류/보류해제/거부 5). **prod 실증(2026-06-04)**: GET /claims 119건. 각 파동 dry_run would_send 정확·검증400 OK·codex 통과(wave3 P2 2건 합의 수정). 실쓰기는 라이브 대기건(RETURN_REQUEST 5·EXCHANGE_REQUEST 3 등) 존재하나 실고객·실환불이라 Jino 건별 결정(미실행). 스펙 전체=docs/references/14.
-- [ ] N8. 상품 쓰기 (등록/수정/재고/가격)
+- [x] **N8. 상품 쓰기 — 판매 상태 변경(change-status)만 — 완료** (옵션재고·가격·수정·등록 전부 제외, D-11). 품절/재입고(SALE+수량)/판매중지 3상태. 가격 안 건드림(위험0). dry_run+confirm. 오하이=원상품 단위 재고(옵션 미사용, prod 실측). 스펙=[docs/references/15_naver_product_write_apis.md](../../references/15_naver_product_write_apis.md) N8-2. **prod 배포·dry_run 라이브 실증(2026-06-05, 실상품 13504079747 7케이스 전부 통과)·codex 2차 pass**. 실쓰기(dry_run=false)는 실상품 영향이라 Jino 결정(미실행).
 
 ## 4. 공식 API 그룹 (v2.79.0, 2026-05-26 기준 — 출처 apicenter.commerce.naver.com)
 인증1 · API데이터솔루션(통계)5 · N배송(SKU)1 · 문의3 · 상품21 · 정산2 · 주문5 · 커머스솔루션4(N/A) · 판매자정보4
@@ -90,11 +102,11 @@
 - 운영 패널(NaverOps): 매출/이익/이익률 + GFA 광고비 업로드 + 검색광고 전환매출·RoAS(SA API 별도)
 
 ## 6. 현재 진행 단계
-- **N1~N6 완료**(N2 skip). N6 발주확인 **실제 쓰기 1건 검증 완료**(NOT_YET→OK).
-- **N7 클레임 전체 완료**(취소+반품+교환 3파동 전부 prod 라이브, dry_run+검증400, codex 통과). ★N7 12쓰기 전부 구현.
-- ★ 라이브 클레임 대기건(RETURN_REQUEST 5·EXCHANGE_REQUEST 3·COLLECT_DONE 1 등) — 실제 처리는 실고객·실환불이라 Jino 건별 결정 필요(미실행).
+- **N1~N8 완료**(N2 skip). ★트랙 사실상 완료 — 읽기 N1·N3·N4·N5 + 쓰기 N6(발주/발송)·N7(클레임 12)·N8(상품 판매상태).
+- **N8 완료**(2026-06-05): 판매상태 변경(change-status)만, prod 배포·dry_run 라이브 실증(7케이스)·codex 2차 pass. 가격 안 건드림(위험0). 옵션재고/가격/수정/등록은 D-11로 제외.
+- ★ 미실행(실고객·실데이터, Jino 건별 결정): 라이브 클레임 대기건(RETURN_REQUEST 5·EXCHANGE_REQUEST 3·COLLECT_DONE 1 등) + N8 판매상태 실쓰기(dry_run=false).
 
 ## 7. 다음 액션
-- **(선택) 실 클레임 처리**: 라이브 대기건 중 Jino가 건별 결정 시 dry_run=false 실행.
-- **N8 상품 쓰기** (등록/수정/재고/가격) — API센터 스펙 수집 후 동일 패턴.
-- ※ git 커밋 완료(2026-06-04, main ec69f3f): feat fda6987(naver N3~N7) + chore ec69f3f(기록정리). N1~N7 전부 prod 배포+커밋. 워킹트리 클린.
+- **(선택) 실 클레임/실 판매상태 처리**: Jino가 건별 결정 시 dry_run=false 실행.
+- **(선택) 트랙 완료 처리**: 남은 읽기 잔여(N1 commission-details/vat — 이익정밀화엔 불필요) 외 핵심 전부 완료 → completed/로 이동 검토.
+- **git 커밋**: N8(이번 세션)은 prod 배포 완료·git 미커밋. Jino 지시 시 커밋. (N1~N7은 main f74ead7까지 커밋 완료)

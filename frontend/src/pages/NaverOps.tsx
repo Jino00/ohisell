@@ -12,6 +12,7 @@ import {
   naverReleaseReturnHoldback, naverRequestReturn,
   naverApproveExchangeCollect, naverDispatchExchange, naverHoldbackExchange,
   naverReleaseExchangeHoldback, naverRejectExchange,
+  naverChangeProductStatus, NAVER_PRODUCT_STATUS_OPTIONS, type NaverProductStatus,
   NAVER_CANCEL_REASONS, NAVER_CLAIM_STATUS_LABELS,
   NAVER_RETURN_REASONS, NAVER_RETURN_HOLDBACK_TYPES, NAVER_COLLECT_DELIVERY_METHODS,
   type NaverSalesSummary, type NaverSalesProductRow, type GfaStatus,
@@ -20,6 +21,14 @@ import {
   type NaverPendingOrders, type NaverPendingOrder, type NaverWriteResult,
   type NaverDispatchItem, type NaverClaims,
 } from "../lib/api";
+
+// N8 판매상태 유효 전이 (API센터 실측 — 현재상태별 변경 가능 목표). 무효 전이는 네이버 400.
+const NAVER_STATUS_TRANSITIONS: Record<string, NaverProductStatus[]> = {
+  SALE: ["OUTOFSTOCK", "SUSPENSION"],
+  OUTOFSTOCK: ["SALE", "SUSPENSION"],
+  SUSPENSION: ["SALE"],
+};
+const NAVER_STATUS_LABEL: Record<string, string> = { SALE: "판매중", OUTOFSTOCK: "품절", SUSPENSION: "판매중지" };
 
 // 마지막 업로드일로부터 경과 일수 (로컬 기준). null이면 데이터 없음.
 function daysSince(dateStr: string | null | undefined): number | null {
@@ -611,6 +620,45 @@ export default function NaverOps() {
       () => naverReleaseExchangeHoldback(poid, false),
       `✅ 교환 보류 해제 완료`,
       () => loadClaims(claimsDays),
+    );
+  }
+
+  // ── N8 상품 판매상태 변경 (트랙 D-11) ──────────────────────────
+  // 모달: 원상품 단위로 판매중/품절/판매중지 전환. SALE(재입고)만 재고 입력.
+  const [statusModal, setStatusModal] = useState<{ originNo: number; name: string; status: string; stock: number | null } | null>(null);
+  const [csStatus, setCsStatus] = useState<NaverProductStatus>("OUTOFSTOCK");
+  const [csStock, setCsStock] = useState<string>("");
+
+  function openStatusModal(originNo: number, name: string, status: string, stock: number | null) {
+    const targets = NAVER_STATUS_TRANSITIONS[status] || [];
+    if (!targets.length) { setActionMsg(`현재 상태(${NAVER_STATUS_LABEL[status] || status})에서는 판매상태를 변경할 수 없습니다.`); return; }
+    setStatusModal({ originNo, name, status, stock });
+    setCsStatus(targets[0]);  // 현재 상태에서 유효한 첫 전이를 기본값으로
+    setCsStock(stock != null ? String(stock) : "");
+  }
+
+  function previewChangeStatus() {
+    if (!statusModal) return;
+    const { originNo, name } = statusModal;
+    const payload: { origin_product_no: number; status_type: NaverProductStatus; stock_quantity?: number } = {
+      origin_product_no: originNo,
+      status_type: csStatus,
+    };
+    if (csStatus === "SALE") {
+      const n = Number(csStock);
+      if (!csStock.trim() || !Number.isInteger(n) || n < 1) {
+        setActionMsg("판매중(재입고) 전환 시 재고 수량을 1 이상 정수로 입력하세요 (0이면 품절로 유지됨)."); return;
+      }
+      if (n > 99999999) { setActionMsg("재고 수량이 너무 큽니다 (최대 99,999,999)."); return; }
+      payload.stock_quantity = n;
+    }
+    setStatusModal(null);
+    runPreview(
+      `판매상태 변경 — ${name}`,
+      () => naverChangeProductStatus(payload, true),
+      () => naverChangeProductStatus(payload, false),
+      "✅ 판매상태 변경 완료",
+      () => loadProducts(productStatus),
     );
   }
 
@@ -1399,6 +1447,55 @@ export default function NaverOps() {
         </div>
       )}
 
+      {/* 판매상태 변경 모달 — 트랙 N8 (D-11) */}
+      {statusModal && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={() => setStatusModal(null)}>
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full p-5" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-lg font-bold mb-1">판매상태 변경</h3>
+            <p className="text-xs text-gray-500 mb-1 max-w-full truncate" title={statusModal.name}>{statusModal.name}</p>
+            <p className="text-xs text-gray-400 mb-3">
+              원상품번호 {statusModal.originNo} · 현재{" "}
+              {statusModal.status === "SALE" ? "판매중" : statusModal.status === "SUSPENSION" ? "판매중지" : statusModal.status === "OUTOFSTOCK" ? "품절" : statusModal.status}
+              {statusModal.stock != null ? ` · 재고 ${statusModal.stock.toLocaleString()}` : ""}
+            </p>
+            <label className="block text-xs text-gray-600 mb-1">변경할 상태</label>
+            <div className="flex gap-2 mb-3">
+              {(NAVER_STATUS_TRANSITIONS[statusModal.status] || []).map((code) => {
+                const o = NAVER_PRODUCT_STATUS_OPTIONS.find((x) => x.code === code)!;
+                return (
+                  <button
+                    key={code}
+                    onClick={() => setCsStatus(code)}
+                    className={`px-3 py-1.5 rounded text-sm font-medium ${csStatus === code ? "bg-indigo-600 text-white" : "bg-gray-100 text-gray-700 hover:bg-gray-200"}`}
+                  >{o.label}</button>
+                );
+              })}
+            </div>
+            {csStatus === "SALE" && (
+              <div className="mb-3">
+                <label className="block text-xs text-gray-600 mb-1">재고 수량 <span className="text-red-500">(판매중 전환 시 필수)</span></label>
+                <input
+                  type="number" min={0} max={99999999}
+                  value={csStock}
+                  onChange={(e) => setCsStock(e.target.value)}
+                  placeholder="예: 100"
+                  className="border border-gray-300 rounded px-2 py-1 text-sm w-full"
+                />
+              </div>
+            )}
+            <p className="text-xs text-gray-500 mb-4">
+              {csStatus === "OUTOFSTOCK" && "품절 처리 시 재고가 0으로 변경됩니다."}
+              {csStatus === "SUSPENSION" && "판매중지로 전환합니다."}
+              {csStatus === "SALE" && "판매중(재입고)으로 전환합니다. 가격은 변경하지 않습니다."}
+            </p>
+            <div className="flex justify-end gap-2">
+              <button onClick={() => setStatusModal(null)} className="px-4 py-2 rounded text-sm bg-gray-100 hover:bg-gray-200">취소</button>
+              <button onClick={previewChangeStatus} className="px-4 py-2 rounded text-sm font-medium bg-indigo-600 text-white hover:bg-indigo-700">미리보기 ›</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* dry-run 미리보기 모달 */}
       {preview && (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={() => !executing && setPreview(null)}>
@@ -1483,10 +1580,11 @@ export default function NaverOps() {
                     <th className="px-3 py-2 text-right">판매가</th>
                     <th className="px-3 py-2 text-right">재고</th>
                     <th className="px-3 py-2 text-center">상태</th>
+                    <th className="px-3 py-2 text-center">판매상태 변경</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
-                  {products.contents.flatMap(p => p.channel_products).map((cp) => (
+                  {products.contents.flatMap((p) => p.channel_products.map((cp) => ({ cp, originNo: p.origin_product_no }))).map(({ cp, originNo }) => (
                     <tr key={cp.channel_product_no} className="hover:bg-gray-50">
                       <td className="px-3 py-2 text-gray-500 text-xs">{cp.channel_product_no}</td>
                       <td className="px-3 py-2 font-medium max-w-xs truncate">{cp.name}</td>
@@ -1494,9 +1592,19 @@ export default function NaverOps() {
                       <td className="px-3 py-2 text-right">{cp.sale_price != null ? cp.sale_price.toLocaleString() + "원" : "-"}</td>
                       <td className="px-3 py-2 text-right">{cp.stock_quantity != null ? cp.stock_quantity.toLocaleString() : "-"}</td>
                       <td className="px-3 py-2 text-center">
-                        <span className={`px-2 py-0.5 rounded text-xs font-medium ${cp.status_type === "SALE" ? "bg-green-100 text-green-700" : cp.status_type === "CLOSE" ? "bg-yellow-100 text-yellow-700" : "bg-gray-100 text-gray-600"}`}>
-                          {cp.status_type === "SALE" ? "판매중" : cp.status_type === "SUSPENSION" ? "판매중지" : cp.status_type === "CLOSE" ? "품절" : cp.status_type}
+                        <span className={`px-2 py-0.5 rounded text-xs font-medium ${cp.status_type === "SALE" ? "bg-green-100 text-green-700" : cp.status_type === "OUTOFSTOCK" ? "bg-yellow-100 text-yellow-700" : "bg-gray-100 text-gray-600"}`}>
+                          {cp.status_type === "SALE" ? "판매중" : cp.status_type === "SUSPENSION" ? "판매중지" : cp.status_type === "OUTOFSTOCK" ? "품절" : cp.status_type === "CLOSE" ? "종료" : cp.status_type}
                         </span>
+                      </td>
+                      <td className="px-3 py-2 text-center">
+                        {NAVER_STATUS_TRANSITIONS[cp.status_type] ? (
+                          <button
+                            onClick={() => openStatusModal(originNo, cp.name, cp.status_type, cp.stock_quantity)}
+                            className="px-2 py-1 rounded text-xs font-medium bg-indigo-50 text-indigo-700 hover:bg-indigo-100"
+                          >변경 ›</button>
+                        ) : (
+                          <span className="text-gray-300 text-xs">—</span>
+                        )}
                       </td>
                     </tr>
                   ))}
