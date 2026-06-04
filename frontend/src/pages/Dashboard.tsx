@@ -336,7 +336,7 @@ export default function Dashboard() {
 
       {/* KPI Cards */}
       {loading && !kpi ? (
-        <div className="grid grid-cols-4 gap-4 mb-6">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 mb-6">
           {Array.from({ length: 4 }).map((_, i) => (
             <div key={i} className="bg-white border rounded-lg p-4">
               <div className="h-4 w-20 bg-gray-200 rounded animate-pulse mb-2" />
@@ -346,7 +346,7 @@ export default function Dashboard() {
           ))}
         </div>
       ) : kpi ? (
-        <div className="grid grid-cols-4 gap-4 mb-6">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 mb-6">
           <div className="bg-white border rounded-lg p-4">
             <div className="text-sm text-gray-500">총 매출</div>
             <div className="text-xl font-bold text-blue-600">{formatKRW(kpi.total_revenue)}원</div>
@@ -489,7 +489,7 @@ export default function Dashboard() {
       </div>
 
       {/* 채널별 추이 4그래프 (D-3) */}
-      <div className="grid grid-cols-2 gap-6 mb-6">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 lg:gap-6 mb-6">
         <ChannelTrendChart title="그룹별 매출 추이" points={channelTrend} metric="revenue" unit="won" />
         <ChannelTrendChart title="그룹별 광고비 추이" points={channelTrend} metric="ad_spend" unit="won" />
         <ChannelTrendChart title="그룹별 RoAS 추이" points={channelTrend} metric="roas" unit="pct" />
@@ -544,7 +544,7 @@ export default function Dashboard() {
       </div>
 
       {/* Two-column: Channel Pie + Channel Profit Bar */}
-      <div className="grid grid-cols-2 gap-6 mb-6">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 lg:gap-6 mb-6">
         {/* Channel Revenue Pie */}
         <div className="bg-white border rounded-lg p-4">
           <h3 className="text-sm font-medium text-gray-700 mb-3">그룹별 매출 비중</h3>

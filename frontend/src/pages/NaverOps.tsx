@@ -240,7 +240,7 @@ export default function NaverOps() {
   }
 
   return (
-    <div className="p-6 max-w-7xl mx-auto">
+    <div className="max-w-7xl mx-auto">
       <h1 className="text-2xl font-bold text-gray-900 mb-6">🛒 네이버 스마트스토어 운영 패널</h1>
 
       {/* 기간 선택 */}
