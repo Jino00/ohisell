@@ -67,6 +67,25 @@ export default function CoupangOps() {
   const [data, setData] = useState<SalesSummary | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  const [syncMsg, setSyncMsg] = useState<string | null>(null);
+
+  async function syncNow() {
+    setSyncing(true);
+    setSyncMsg(null);
+    try {
+      const API_BASE = import.meta.env.DEV ? "http://localhost:8000" : "";
+      const r = await fetch(`${API_BASE}/api/scheduler/trigger/auto_sync_orders`, { method: "POST" });
+      const d = await r.json();
+      setSyncMsg(d.detail ?? "동기화 완료");
+      // 3초 후 데이터 재조회
+      setTimeout(() => load(company, days), 3000);
+    } catch (e: any) {
+      setSyncMsg("동기화 실패: " + e.message);
+    } finally {
+      setSyncing(false);
+    }
+  }
 
   const load = useCallback(async (c: string, d: number) => {
     setLoading(true);
@@ -222,18 +241,32 @@ export default function CoupangOps() {
           <h2 className="text-xl font-bold text-gray-900">🔧 쿠팡 운영 패널</h2>
           {data && <p className="text-xs text-gray-400 mt-0.5">{data.period.from} ~ {data.period.to}</p>}
         </div>
-        <div className="flex gap-1">
-          {PERIODS.map((p) => (
-            <button
-              key={p.days}
-              onClick={() => setDays(p.days)}
-              className={`px-3 py-1.5 rounded text-sm font-medium ${
-                days === p.days ? "bg-blue-600 text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"
-              }`}
-            >
-              {p.label}
-            </button>
-          ))}
+        <div className="flex items-center gap-2">
+          <div className="flex gap-1">
+            {PERIODS.map((p) => (
+              <button
+                key={p.days}
+                onClick={() => setDays(p.days)}
+                className={`px-3 py-1.5 rounded text-sm font-medium ${
+                  days === p.days ? "bg-blue-600 text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                }`}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+          <button
+            onClick={syncNow}
+            disabled={syncing}
+            className="px-3 py-1.5 rounded text-sm font-medium bg-green-600 text-white hover:bg-green-700 disabled:opacity-50 flex items-center gap-1"
+            title="최신 주문 동기화 후 새로고침"
+          >
+            {syncing ? "동기화 중…" : "🔄 동기화"}
+          </button>
+          {syncMsg && <span className="text-xs text-gray-500">{syncMsg} (3초 후 갱신)</span>}
+          <span className="text-xs text-gray-400 border-l border-gray-200 pl-2">
+            ※ 쿠팡 API 약 1~2시간 지연 발생 가능
+          </span>
         </div>
       </div>
 

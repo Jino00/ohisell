@@ -36,8 +36,8 @@ class CoupangClient(CoupangBaseClient, BaseChannelClient):
             return {"status": "ok", "vendor_id": self.vendor_id}
         return {"status": "error", "vendor_id": self.vendor_id, "message": str(result)}
 
-    # 조회 대상 주문 상태 — DELIVERING 포함으로 당일 배송중 주문도 수집
-    _FETCH_STATUSES = ("FINAL_DELIVERY", "DELIVERING", "DEPARTURE", "INSTRUCT")
+    # 조회 대상 주문 상태 — ACCEPT(신규주문) 포함으로 당일 주문 전부 수집
+    _FETCH_STATUSES = ("FINAL_DELIVERY", "DELIVERING", "DEPARTURE", "INSTRUCT", "ACCEPT")
 
     def fetch_orders(self, date_from: date, date_to: date) -> list[RawOrder]:
         path = f"/v2/providers/openapi/apis/api/v4/vendors/{self.vendor_id}/ordersheets"
