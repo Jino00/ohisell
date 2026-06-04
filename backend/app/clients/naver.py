@@ -142,7 +142,8 @@ class NaverClient(BaseChannelClient):
         status_path = "/v1/pay-order/seller/product-orders/last-changed-statuses"
         detail_path = "/v1/pay-order/seller/product-orders/query"
         all_orders: list[RawOrder] = []
-        seen_po_ids: set[str] = set()
+        seen_po_ids: set[str] = set()       # 1단계: 수집한 productOrderId (배치 중복 방지)
+        emitted_po_ids: set[str] = set()    # 2단계: RawOrder로 내보낸 productOrderId (방어적 중복 방지)
         po_id_batch: list[str] = []
 
         # 1단계: 하루씩 last-changed-statuses로 productOrderId 수집
@@ -177,15 +178,18 @@ class NaverClient(BaseChannelClient):
             for entry in detail_result.get("data", []):
                 po = entry.get("productOrder", {})
                 order_info = entry.get("order", {})
-                order_id = str(order_info.get("orderId", po.get("productOrderId", "")))
-                product_id = str(po.get("productId", ""))
+                # 값이 None일 때 "None" 문자열이 그레인 키에 섞이지 않도록 `or` 폴백 사용.
+                product_order_id = str(po.get("productOrderId") or "")
+                order_id = str(order_info.get("orderId") or product_order_id or "")
+                product_id = str(po.get("productId") or "")
                 shipping_fee = Decimal(str(po.get("deliveryFeeAmount", 0)))
 
-                # 동일 주문+상품 중복 방지
-                detail_key = f"{order_id}_{product_id}"
-                if detail_key in seen_po_ids:
+                # productOrderId 단위로 1행씩 내보낸다. 같은 (주문, 상품)이 여러 productOrderId로
+                # 분할돼도(부분취소/부분배송) 각각 보존 → 수량·매출 누락 방지(트랙 N1·D-6).
+                # 1단계서 이미 productOrderId를 dedup하나, 상세 응답 중복에 대비해 방어적으로 한 번 더.
+                if product_order_id and product_order_id in emitted_po_ids:
                     continue
-                seen_po_ids.add(detail_key)
+                emitted_po_ids.add(product_order_id)
 
                 # 네이버 API가 제공하는 실제 수수료 합산 (필드 부재 vs 명시적 0 구분)
                 _COMM_KEYS = (
@@ -203,6 +207,7 @@ class NaverClient(BaseChannelClient):
                 raw = RawOrder(
                     order_number=order_id,
                     platform_product_id=product_id,
+                    platform_order_line_id=product_order_id,
                     platform_product_name=po.get("productName", ""),
                     quantity=int(po.get("quantity", 1)),
                     selling_price=Decimal(str(po.get("totalPaymentAmount", 0))),
@@ -257,6 +262,58 @@ class NaverClient(BaseChannelClient):
             page += 1
             time.sleep(0.2)
         log.info("네이버 일별 정산 %d건 수집 (%s ~ %s)", len(results), date_from, date_to)
+        return results
+
+    def fetch_case_settlement(self, date_from: date, date_to: date) -> list[dict]:
+        """건별 정산 내역 조회 (/v1/pay-settle/settle/case). 트랙 N1·D-6.
+
+        결제일(PAY_DATE) 기준 정산 확정(SETTLED) 건을 productOrderId 단위로 수집.
+        searchDate는 단일 날짜 → 결제일 하루씩 순회. 응답 금액 부호는 그대로 보존
+        (수수료는 음수 — 2026-06-04 라이브 프로브 확인).
+        매칭 키: order_id + product_id (PROD_ORDER만 상품 수수료, DELIVERY는 배송비).
+        """
+        path = "/v1/pay-settle/settle/case"
+        results: list[dict] = []
+        current = date_from
+        while current <= date_to:
+            page = 1
+            while True:
+                params = {
+                    "periodType": "SETTLE_CASEBYCASE_PAY_DATE",
+                    "settleDecisionType": "SETTLED",
+                    "searchDate": current.isoformat(),
+                    "pageNumber": page,
+                    "pageSize": 1000,
+                }
+                data = self._request("GET", path, params)
+                if not data:
+                    break
+                elements = data.get("elements", []) if isinstance(data, dict) else []
+                for e in elements:
+                    results.append({
+                        "product_order_id": str(e.get("productOrderId") or ""),
+                        "order_id": str(e.get("orderId") or ""),
+                        "product_id": str(e.get("productId")) if e.get("productId") else None,
+                        "product_order_type": e.get("productOrderType") or "",
+                        "settle_type": e.get("settleType"),
+                        "product_name": e.get("productName"),
+                        "pay_settle_amount": Decimal(str(e.get("paySettleAmount") or 0)),
+                        "total_pay_commission": Decimal(str(e.get("totalPayCommissionAmount") or 0)),
+                        "selling_interlock_commission": Decimal(str(e.get("sellingInterlockCommissionAmount") or 0)),
+                        "free_installment_commission": Decimal(str(e.get("freeInstallmentCommissionAmount") or 0)),
+                        "benefit_amount": Decimal(str(e.get("benefitSettleAmount") or 0)),
+                        "settle_expect_amount": Decimal(str(e.get("settleExpectAmount") or 0)),
+                        "pay_date": e.get("payDate"),
+                        "settle_expect_date": e.get("settleExpectDate"),
+                        "settle_complete_date": e.get("settleCompleteDate"),
+                    })
+                if len(elements) < 1000:
+                    break
+                page += 1
+                time.sleep(0.2)
+            current += timedelta(days=1)
+            time.sleep(0.15)
+        log.info("네이버 건별 정산 %d건 수집 (결제일 %s ~ %s)", len(results), date_from, date_to)
         return results
 
     @staticmethod

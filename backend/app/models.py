@@ -223,7 +223,13 @@ class Order(Base):
 
     __tablename__ = "orders"
     __table_args__ = (
-        UniqueConstraint("channel_id", "order_number", "platform_product_id", name="uq_order_item"),
+        # 그레인 = 채널 원자 주문라인. 네이버는 productOrderId까지 포함해야 같은 주문+상품이
+        # 2개 productOrderId로 분할될 때(부분취소/부분배송, 라이브 1.4%) 수량·매출이 누락되지 않는다.
+        # 쿠팡/cafe24는 (order, product)가 이미 원자 그레인 → line_id="" 유지(동작 불변).
+        UniqueConstraint(
+            "channel_id", "order_number", "platform_product_id", "platform_order_line_id",
+            name="uq_order_item",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -233,6 +239,10 @@ class Order(Base):
     )
     order_number: Mapped[str] = mapped_column(String(100), nullable=False)
     platform_product_id: Mapped[str] = mapped_column(String(100), nullable=False, default="")
+    # 채널 원자 주문라인 식별자 (네이버=productOrderId). 쿠팡/cafe24는 ""(빈값) — 그레인 분할 불필요.
+    platform_order_line_id: Mapped[str] = mapped_column(
+        String(40), nullable=False, default="", server_default=""
+    )
     platform_product_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     selling_price: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
@@ -979,6 +989,39 @@ class NaverSettlementDaily(Base):
     benefit_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)        # 혜택정산
     payholdback_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)    # 지급보류
     settle_method: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)                   # ACCOUNT/CHARGE_AMT
+    synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class NaverSettlementCase(Base):
+    """네이버 건별 정산 내역 (커머스 API /v1/pay-settle/settle/case, 트랙 N1·D-6).
+
+    productOrderId 그레인의 실측 수수료 — 이익 정밀화용. orders와 (order_id, product_id)로
+    매칭해 주문시점 예상 수수료를 실측 수수료로 교체(하이브리드 폴백).
+    수수료(commission) 필드는 네이버 응답 부호 그대로 보존(음수). 매칭 시 부호 반전.
+    """
+
+    __tablename__ = "naver_settlement_case"
+    __table_args__ = (
+        UniqueConstraint("product_order_id", name="uq_naver_settle_case"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    product_order_id: Mapped[str] = mapped_column(String(40), nullable=False)            # 상품주문번호(배송비/기타비용 번호 포함)
+    order_id: Mapped[str] = mapped_column(String(40), nullable=False, index=True)        # 주문번호 (매칭 키)
+    product_id: Mapped[Optional[str]] = mapped_column(String(40), nullable=True, index=True)  # 상품번호 (매칭 키, DELIVERY는 NULL)
+    product_order_type: Mapped[str] = mapped_column(String(20), nullable=False)          # PROD_ORDER/DELIVERY/EXTRAFEE/...
+    settle_type: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)        # NORMAL_SETTLE_ORIGINAL/...
+    product_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    pay_settle_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)         # 결제정산금액(기준)
+    total_pay_commission: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)      # 네이버페이 관리 수수료(음수)
+    selling_interlock_commission: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)  # 매출연동 수수료(음수)
+    free_installment_commission: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)   # 무이자할부 수수료(음수)
+    benefit_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)            # 혜택 정산금액
+    settle_expect_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)      # 정산예정금액(실측)
+    pay_date: Mapped[Optional[str]] = mapped_column(String(10), nullable=True, index=True)  # 결제일 (매칭/조회 그레인)
+    settle_expect_date: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    settle_complete_date: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 

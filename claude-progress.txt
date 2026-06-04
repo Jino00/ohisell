@@ -4,21 +4,72 @@
 
 ## 현재 상태
 - 날짜: 2026-06-04
-- 단계: ★쿠팡 운영 패널 sprint 완료 — 오늘/어제/7일/15일/30일 매출·광고·RoAS 현황 + Wing/RG/로켓배송 필터 + 컬럼 정렬/필터 + 🔄 동기화 버튼
-- 최신 커밋(main): **2756699** (ACCEPT 상태+동기화버튼). git push origin main 필요.
-- 알려진 제약: 쿠팡 ordersheets API 약 1~2시간 lag → 오늘 실시간은 Wing 포털과 차이 발생(불가피)
+- 단계: ★네이버 N1 완료(일별정산 + 건별정산 이익 정밀화) + N1·D-7 주문 분할 라인 버그 수정 prod 배포. 다음 = N2 통계 또는 자유.
+- 최신 커밋(main): **f8989af**. ★이익 정밀화 + D-7(productOrderId grain) 코드는 prod에 scp 배포됨(라이브 동작), 로컬 git은 uncommitted(커밋은 Jino 지시 시).
 
-## 🔧 쿠팡 운영 패널 sprint — 완료(prod 배포·라이브 실증) (2026-06-04)
-- [x] GET /api/coupang/ops/sales-summary: 회사별(오픽스/오하이테크)·기간별·채널타입별 집계
-- [x] 기간: 오늘/어제/7일/15일/30일 (오늘=days=0)
-- [x] Wing 주문 상태: FINAL_DELIVERY+DELIVERING+DEPARTURE+INSTRUCT+ACCEPT 전부 수집
-- [x] RG paid_at KST 저장 대응 + UTC 보정 제거
-- [x] 오늘 광고비: DB 최신 report_date 자동 사용 + 섹션 분리 표시
-- [x] 프론트: 상품명+옵션명 한줄 표시, 컬럼 정렬(↑↓), 엑셀식 값 필터 드롭다운(⊟)
-- [x] 🔄 동기화 버튼 (클릭→3초후 자동갱신)
-- [x] 전 백엔드 datetime → app/utils/kst.py (kst_now/kst_today) 통일 (12개 파일)
-- [x] 쿠팡 API 1~2시간 lag 확인 및 UI 안내 추가
+## 🛒 네이버 N1·D-7 주문 분할 productOrderId 버그 수정 (2026-06-04, prod 라이브)
+- 버그: fetch_orders가 같은(order,product)의 분할 productOrderId 2번째를 dedup-skip → 매출·수량 누락(1.4%). 수수료는 settle/case가 합산돼 실효율 왜곡(D-6과 충돌).
+- 수정(Option B): Order에 platform_order_line_id 추가→uq_order_item 4컬럼화(네이버=productOrderId, 쿠팡/cafe24="" 동작불변). naver.py productOrderId 단위 emit, sync_service dedup/lookup/insert + 호환브리지(레거시 빈 line_id 행 승격→이중적재 방지).
+- alembic f0a1b2c3d4e5(컬럼+백필+제약교체). codex review: P1(중복적재) 브리지+테스트로 수용, PG전제·P2테이블 기각, str(None) 수용. 회귀테스트 3개 통과.
+- ★prod 라이브(os.ohitech.co.kr:8001 pm2 ohisell-backend): 백필 4989/4990·비네이버영향0, 재동기화 신규20/갱신940, **분할 보존 18그룹(전 0)**·중복0·빈line_id 1, sales-summary 200(매출 33,433,810/이익 6,386,379/19.10%).
+- ★서버 alembic은 .venv/bin/alembic. 서비스 재시작 = pm2 restart ohisell-backend (포트 8001).
+- ★ 활성 트랙: docs/tracks/active/track_naver-full-integration.md (네이버 커머스 API 전기능, 읽기 N1~5→쓰기 N6~8). 쿠팡 트랙은 완료처리.
+
+## 🛒 네이버 N1·D-6 이익 정밀화 — 건별정산 실측 수수료 (2026-06-04, prod 라이브)
+- 전수조사: docs/references/13_naver_settlement_and_order_fee_fields.md (정산5+주문 API 수수료 필드 전부)
+- 건별정산 GET /v1/pay-settle/settle/case (productOrderId 그레인 실측 수수료). periodType=PAY_DATE(결제일)·settleDecisionType=SETTLED
+- ★라이브 프로브 확정: 수수료 필드 음수(totalPayCommission/sellingInterlock/freeInstallment) → 합산 후 -부호반전해 양수 fee. settleExpectAmount=paySettle+수수료+혜택 검산 일치
+- naver_settlement_case 테이블(alembic d4f6a8c0e2b3, prod 적용)·스케줄러 sync_naver_case_settlement(05:30, 결제일 45일)
+- POST /api/naver/ops/settlement/case/sync + sales-summary 하이브리드 매칭((order_id,product_id)→실측, 미정산=주문API 예상 폴백)
+- ★라이브 실증: 건별정산 3257건 적재. sales-summary 30일 실측1208/예상597라인(67%실측), 7일 실측66/예상434(최근 미정산 폴백 정확)
+- 패널: 수수료 카드 "실측 N·예상 M건" 배지 + 주석. fee_actual 상품별 플래그
+- codex review: P1×2(productOrderId중복·부분정산) 라이브 데이터로 검증(중복0/부분정산0)·기각, P2-2 IN청크 수정 합의
+- ★fetch_orders 분할 productOrderId 누락(1.4%) → **N1·D-7로 해결·prod 배포 완료**(위 D-7 블록 참조)
+- 다음: N2 통계 → N3 문의 → N4 상품조회 → N5 판매자/물류 → N6~8 쓰기. N1잔여(수수료상세·부가세)는 선택(이익엔 불필요)
+
+## 🛒 네이버 풀통합 트랙 N1 정산 — 완료 (2026-06-04, 커밋 f8989af)
+- 정산 scope 부여 확인(서버 프로브) → /v1/pay-settle/settle/daily 연동
+- naver_settlement_daily 테이블(alembic c3d5e7f9a1b2, prod 적용) · 스케줄러 05:25 자동
+- POST/GET /api/naver/ops/settlement + 패널 💰정산 섹션(카드+정산예정일표)
+- prod 라이브: 30일 정산 29,958,779 / 실측수수료 -1,304,731 / 혜택 -59,800
+- ★서버 alembic은 .venv/bin/alembic (python3 -m alembic 안 됨)
+- 다음: N1잔여(건별정산·수수료상세·부가세, 이익에 실측수수료 반영) → N2 통계 → N3 문의 → N4 상품조회 → N5 판매자/물류 → N6~8 쓰기
+
+## 🛒 네이버 검색광고 전환매출·RoAS (2026-06-04)
+- ★ 상품별 광고지표는 네이버 데이터로 불가(ad_costs.product_id=NULL, 광고가 키워드 단위). 쿠팡은 옵션ID 있어서 됐던 것. → 계정 합계 RoAS만(D-3 사실주의, 추정배분 금지)
+- 전환매출 출처: 네이버 SA API AD_CONVERSION 보고서(이 계정 전환추적 ON). purchase 액션만·직접+간접 합산
+- 저장: ad_costs source='naver_sa:conv', ad_spend=0/ad_revenue=전환매출 (광고비 중복합산 방지). 스케줄러 07:00 자동
+- ★ 네이버 전환보고서 ~15일만 보관 → RoAS 분모를 전환데이터 있는 날짜로 정렬(분자/분모 동일기간). 카드에 전환 반영기간 표시
+- RoAS=검색광고만(디스플레이 GFA는 전환추적 없어 제외). 라이브: 7일 1.92 / 30일 1.83
+
+## 🛒 네이버 디스플레이 광고비(GFA) — 수동 업로드 워크플로 (2026-06-04, 커밋 cecd1d5)
+- 알려진 제약: 쿠팡 ordersheets API 약 1~2시간 lag → 오늘 실시간은 Wing 포털과 차이(불가피)
+- 네이버 광고비: ad_costs.product_id=NULL → 요약 카드 총합만, 상품별 배분 없음
+
+## 🛒 네이버 디스플레이 광고비(GFA) — 수동 업로드 워크플로 (2026-06-04)
+- ★ GFA(디스플레이) 공식 API 없음(Jino 확인) → CSV 수동 업로드만 가능
+- 기존 인프라: POST /api/ad-costs/gfa/upload + GET /gfa/status (source='gfa:쇼핑', 채널=NAVER id6)
+- ★ CSV 파서 수정: 'ADVoost 쇼핑' 컬럼만 읽던 것 → '총비용' 우선(동영상 광고비 누락 방지). 5/19~6/3 16일치 등록 완료
+- 네이버 운영 패널에 GFA 신선도 배지(2일+ 비면 빨강) + 📤CSV 업로드 버튼 추가 → 공백 재발 방지
+- 운영: 네이버 광고주센터→보고서→광고비 보고서 CSV 다운 → 패널 업로드 버튼 (또는 Claude에 파일 전달)
+- 광고비 요약카드 = NAVER채널 전체(SA 검색 + GFA 디스플레이) 합산, 상품별 미배분
+
+## 🔧 쿠팡 운영 패널 sprint — 완료(prod 배포·라이브 실증·git push) (2026-06-04)
+- [x] GET /api/coupang/ops/sales-summary: 회사별·기간별·채널타입별 매출/이익 집계
+- [x] 기간: 오늘(days=0)/어제/7일/15일/30일. Wing 상태 5종 수집. RG paid_at KST.
+- [x] 이익 = 매출 − 수수료 − 원가 − 광고비 − 배송비(Wing 1900/건)
+- [x] 수수료 건별 실거래 대조(order_id 매칭, 미매칭 7.8% — 정산 실측 최빈값). saleAgentCommission=0이라 미사용
+- [x] 원가=product_master.cost_price(D-12 경로). 오늘광고비=최신 report_date 자동
+- [x] 프론트: 상품명+옵션명 한줄, 이익·이익률 컬럼, 정렬(↑↓)·엑셀식 값필터(⊟), 🔄동기화
+- [x] 전 백엔드 KST 통일: app/utils/kst.py (kst_now/kst_today) 12개 파일
 - 제약: ordersheets API lag으로 오늘 실시간 ≠ Wing 포털 (불가피)
+
+## 🛒 네이버 스마트스토어 운영 패널 — 계획 완료, 구현 대기 (2026-06-04)
+- 데이터 현황(확인됨): 네이버 주문 4975건(오늘까지 실시간)·SA광고 ad_costs 342건(어제까지)·PG수수료=orders.commission_amount·배송비=orders.shipping_cost
+- 쿠팡 대비 제외: 회사탭·채널필터(Wing/RG/로켓)·Wing1900배송비·RG테이블·정산매칭
+- 구성: 기간선택+🔄동기화 / 요약카드(매출·PG수수료·원가·광고비·배송비·이익·이익률) / 상품별테이블(정렬·필터)
+- 이익 = 매출 − commission_amount − 원가 − 광고비 − shipping_cost
+- 다음: ① 광고비-주문 매칭경로 점검(ad_costs.product_id) ② naver_ops.py ③ NaverOps.tsx ④ 메뉴/라우트 ⑤ 배포·검증
 
 ## P6 물류·카테고리·브랜드·CS — 완료(prod 배포·라이브 실증) (2026-06-04)
 - [x] SA 4개: logistics.py(8) / category.py(6+RG#8·#9 seller_api 경로) / brand.py(3) / cs.py(6)

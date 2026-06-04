@@ -186,9 +186,11 @@ def sync_channel_orders(
                 if _is_coupang_order_for_channel(r.raw_data, is_wing)
             ]
 
-        seen: set[tuple[str, str]] = set()  # 같은 배치 내 중복 방지
+        # 그레인 = (주문번호, 상품번호, 주문라인ID). 네이버는 line_id=productOrderId라
+        # 분할 주문라인을 각각 보존. 쿠팡/cafe24는 line_id="" → 동작 불변.
+        seen: set[tuple[str, str, str]] = set()  # 같은 배치 내 중복 방지
         for raw in raw_orders:
-            dedup_key = (raw.order_number, raw.platform_product_id)
+            dedup_key = (raw.order_number, raw.platform_product_id, raw.platform_order_line_id)
             if dedup_key in seen:
                 continue
             seen.add(dedup_key)
@@ -198,8 +200,26 @@ def sync_channel_orders(
                     Order.channel_id == channel_id,
                     Order.order_number == raw.order_number,
                     Order.platform_product_id == raw.platform_product_id,
+                    Order.platform_order_line_id == raw.platform_order_line_id,
                 )
             ).first()
+
+            # 마이그레이션 호환 브리지: line_id 백필이 못 채운 레거시 행(line_id="")이
+            # 남아 있고 지금 라인은 실제 line_id를 가졌다면, 새 행을 insert하지 말고
+            # 레거시 행을 승격(promote)한다 — 안 그러면 빈 line_id 행 + 새 행이 공존해
+            # 수량·매출이 이중 계산된다. 쿠팡/cafe24는 line_id=""이라 이 분기를 타지 않음.
+            if existing is None and raw.platform_order_line_id:
+                legacy = db.query(Order).filter(
+                    and_(
+                        Order.channel_id == channel_id,
+                        Order.order_number == raw.order_number,
+                        Order.platform_product_id == raw.platform_product_id,
+                        Order.platform_order_line_id == "",
+                    )
+                ).first()
+                if legacy is not None:
+                    legacy.platform_order_line_id = raw.platform_order_line_id
+                    existing = legacy
 
             if existing:
                 existing.quantity = raw.quantity
@@ -217,6 +237,7 @@ def sync_channel_orders(
                     channel_id=channel_id,
                     order_number=raw.order_number,
                     platform_product_id=raw.platform_product_id,
+                    platform_order_line_id=raw.platform_order_line_id,
                     platform_product_name=raw.platform_product_name,
                     quantity=raw.quantity,
                     selling_price=raw.selling_price,

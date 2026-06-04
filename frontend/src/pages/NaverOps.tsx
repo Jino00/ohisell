@@ -326,7 +326,15 @@ export default function NaverOps() {
       {s && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
           <SummaryCard label="총매출" value={won(s.revenue)} />
-          <SummaryCard label="PG수수료" value={won(s.fee)} />
+          <SummaryCard
+            label="수수료"
+            value={won(s.fee)}
+            sub={
+              s.fee_settled_lines + s.fee_est_lines > 0
+                ? `실측 ${s.fee_settled_lines} · 예상 ${s.fee_est_lines}건`
+                : "정산 실측+주문시점 예상"
+            }
+          />
           <SummaryCard label="원가" value={won(s.cost)} />
           <SummaryCard label="광고비" value={won(s.ad_spend)} sub="검색+디스플레이 · 상품별 미배분" />
           <SummaryCard label="배송비" value={won(s.shipping)} />
@@ -383,7 +391,8 @@ export default function NaverOps() {
             </tbody>
           </table>
           <div className="text-xs text-gray-400 px-3 py-2 border-t border-gray-100">
-            * 이익 = 매출 − PG수수료 − 원가 − 배송비 (광고비는 요약 카드에서 총합 차감)
+            * 이익 = 매출 − 수수료 − 원가 − 배송비 (광고비는 요약 카드에서 총합 차감)<br />
+            * 수수료 = 정산 완료분은 네이버 건별정산 <b>실측</b>, 미정산 최근 주문은 주문시점 <b>예상</b>(하이브리드)
           </div>
         </div>
       )}

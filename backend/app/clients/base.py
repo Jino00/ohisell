@@ -19,6 +19,8 @@ class RawOrder:
     order_date: str  # ISO format
     status: str
     raw_data: dict
+    # 채널 원자 주문라인 식별자 (네이버=productOrderId). 기본 ""(쿠팡/cafe24는 미사용 → 저장 그레인 불변)
+    platform_order_line_id: str = ""
     # cafe24 전용 (다른 클라이언트는 None → sync가 그대로 저장, profit_calc는 cafe24만 사용)
     payment_type: str | None = None
     commission_amount: Decimal | None = None

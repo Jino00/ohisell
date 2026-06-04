@@ -513,6 +513,29 @@ def sync_naver_settlement_job():
         db.close()
 
 
+def sync_naver_case_settlement_job():
+    """네이버 건별 정산(실측 수수료) 자동 적재 (트랙 N1·D-6, 05:30 KST). 결제일 기준 최근 45일."""
+    db = _get_own_db_session()
+    try:
+        from app.config import get_naver_config
+        from app.clients.naver import NaverClient
+        from app.routers.naver_ops import _upsert_case_settlement
+
+        cfg = get_naver_config("NAVER")
+        if not cfg:
+            log.error("[스케줄러] 네이버 설정 없음 — 건별 정산 동기화 건너뜀")
+            return
+        dto = kst_today()
+        dfrom = dto - timedelta(days=44)
+        rows = NaverClient(cfg).fetch_case_settlement(dfrom, dto)
+        n = _upsert_case_settlement(db, rows)
+        log.info("[스케줄러] 네이버 건별 정산 %d건 적재 완료 (결제일 %s~%s)", n, dfrom, dto)
+    except Exception as e:
+        log.exception("[스케줄러] sync_naver_case_settlement_job 에러: %s", e)
+    finally:
+        db.close()
+
+
 def _ensure_default_states(db):
     """기본 스케줄러 상태 DB 레코드 생성"""
     defaults = [
@@ -521,6 +544,7 @@ def _ensure_default_states(db):
         ("cafe24_token_refresh", "*/30 * * * *"),
         ("sync_naver_sa_ad_costs", "0 7 * * *"),
         ("sync_naver_settlement", "25 5 * * *"),
+        ("sync_naver_case_settlement", "30 5 * * *"),
         ("sync_meta_ad_costs", "0 7 * * *"),
         ("sync_coupang_products", "30 5 * * *"),
         ("sync_coupang_rg_sizes", "35 5 * * *"),
@@ -562,6 +586,8 @@ def start_scheduler():
                 job_func = sync_naver_sa_ad_costs_job
             elif state.job_name == "sync_naver_settlement":
                 job_func = sync_naver_settlement_job
+            elif state.job_name == "sync_naver_case_settlement":
+                job_func = sync_naver_case_settlement_job
             elif state.job_name == "sync_meta_ad_costs":
                 job_func = sync_meta_ad_costs_job
             elif state.job_name == "sync_coupang_products":

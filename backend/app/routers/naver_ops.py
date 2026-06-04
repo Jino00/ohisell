@@ -15,7 +15,15 @@ from sqlalchemy.orm import Session
 
 from app.config import get_naver_config
 from app.database import get_db
-from app.models import AdCost, Channel, NaverSettlementDaily, Order, ProductChannelMapping, ProductMaster
+from app.models import (
+    AdCost,
+    Channel,
+    NaverSettlementCase,
+    NaverSettlementDaily,
+    Order,
+    ProductChannelMapping,
+    ProductMaster,
+)
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
 from app.utils.kst import kst_today
 
@@ -60,9 +68,11 @@ def sales_summary(
     start = datetime.combine(dfrom, time.min)
     end   = datetime.combine(dto,   time.max)
 
-    # ── 1. 주문 집계 (platform_product_id별) ─────────────────────────
+    # ── 1. 주문 집계 (주문번호 + platform_product_id 라인 단위) ──────
+    # 라인 단위로 가져와야 건별 정산(order_id+product_id)과 매칭 가능. 이후 상품별 재집계.
     order_rows = (
         db.query(
+            Order.order_number,
             Order.platform_product_id,
             func.max(Order.platform_product_name),
             func.sum(Order.selling_price * Order.quantity),
@@ -78,7 +88,7 @@ def sales_summary(
             Order.order_date >= start,
             Order.order_date <= end,
         )
-        .group_by(Order.platform_product_id)
+        .group_by(Order.order_number, Order.platform_product_id)
         .all()
     )
 
@@ -143,7 +153,7 @@ def sales_summary(
         sa_conv_from = sa_conv_to = None
 
     # ── 3. 원가 조회 (product_channel_mapping → product_master) ───────
-    all_pids = {str(r[0]) for r in order_rows if r[0]}
+    all_pids = {str(r[1]) for r in order_rows if r[1]}
     cost_rows = (
         db.query(ProductChannelMapping.channel_product_id, ProductMaster.cost_price, ProductMaster.id)
         .join(ProductMaster, ProductChannelMapping.product_id == ProductMaster.id)
@@ -164,31 +174,99 @@ def sales_summary(
         if chosen:
             cost_map[pid] = _f(chosen)
 
-    # ── 4. 상품별 집계 ────────────────────────────────────────────────
-    by_product = []
-    total_rev = total_fee = total_cost = total_ship = _Z
+    # ── 3b. 실측 수수료 맵 (건별 정산 settle/case, D-6) ────────────────
+    # (order_id, product_id) → 실측 판매자부담 수수료(양수). PROD_ORDER만, 수수료 음수→부호반전.
+    # 같은 (order_id, product_id)에 productOrderId가 여럿이면 group_by sum으로 합산(라이브 표본
+    # 1.4%, 전부 동시정산이라 정확). 정산후취소 행은 음수 보정되어 sum 순효과로 반영된다.
+    # SQLite 변수 한계(구버전 999) 회피 — order_id IN을 청크로 분할 조회.
+    all_order_ids = list({str(r[0]) for r in order_rows if r[0]})
+    actual_fee_map: dict[tuple[str, str], Decimal] = {}
+    _CHUNK = 800
+    for i in range(0, len(all_order_ids), _CHUNK):
+        chunk = all_order_ids[i:i + _CHUNK]
+        case_rows = (
+            db.query(
+                NaverSettlementCase.order_id,
+                NaverSettlementCase.product_id,
+                func.sum(
+                    NaverSettlementCase.total_pay_commission
+                    + NaverSettlementCase.selling_interlock_commission
+                    + NaverSettlementCase.free_installment_commission
+                ),
+            )
+            .filter(
+                NaverSettlementCase.product_order_type == "PROD_ORDER",
+                NaverSettlementCase.order_id.in_(chunk),
+                NaverSettlementCase.product_id.isnot(None),
+            )
+            .group_by(NaverSettlementCase.order_id, NaverSettlementCase.product_id)
+            .all()
+        )
+        for oid, pid, comm_sum in case_rows:
+            if pid is None:
+                continue
+            # order_id 기준 청크라 같은 키는 한 청크에만 등장 — 누적도 안전.
+            key = (str(oid), str(pid))
+            actual_fee_map[key] = actual_fee_map.get(key, _Z) + (-_f(comm_sum))  # 음수 합 → 양수 fee
 
-    for pid, pname, rev, qty, commission, shipping in order_rows:
+    # ── 4. 라인 단위 매칭(실측/예상) → 상품별 집계 ────────────────────
+    prod_acc: dict[str, dict] = {}
+    total_rev = total_fee = total_cost = total_ship = _Z
+    settled_lines = 0   # 실측 수수료 적용 라인 수
+    est_lines = 0       # 주문API 예상 수수료 폴백 라인 수
+
+    for order_no, pid, pname, rev, qty, commission, shipping in order_rows:
+        pid_s     = str(pid)
         rev       = _f(rev)
         qty_      = int(qty or 0)
-        fee       = _f(commission)
         ship      = _f(shipping)
-        unit_cost = cost_map.get(str(pid), _Z)
+        # 하이브리드 폴백(D-6): 실측 있으면 실측, 없으면 주문API 예상 수수료.
+        # 주의: 같은 (order,product)에 분할 productOrderId가 있고 일부만 정산되면 실측이
+        # 미정산분을 가릴 수 있음(라이브 표본상 부분정산 0건). 발생 시 과소 추정.
+        actual    = actual_fee_map.get((str(order_no), pid_s))
+        if actual is not None:
+            fee = actual
+            settled_lines += 1
+        else:
+            fee = _f(commission)
+            est_lines += 1
+        unit_cost = cost_map.get(pid_s, _Z)
         cost      = unit_cost * qty_
-        profit    = rev - fee - cost - ship
 
         total_rev  += rev
         total_fee  += fee
         total_cost += cost
         total_ship += ship
 
+        acc = prod_acc.get(pid_s)
+        if acc is None:
+            acc = prod_acc[pid_s] = {
+                "name": pname or pid_s, "rev": _Z, "fee": _Z,
+                "cost": _Z, "ship": _Z, "settled": 0, "est": 0,
+            }
+        acc["rev"]  += rev
+        acc["fee"]  += fee
+        acc["cost"] += cost
+        acc["ship"] += ship
+        if actual is not None:
+            acc["settled"] += 1
+        else:
+            acc["est"] += 1
+        if pname and acc["name"] == pid_s:
+            acc["name"] = pname
+
+    by_product = []
+    for pid_s, acc in prod_acc.items():
+        rev = acc["rev"]
+        profit = rev - acc["fee"] - acc["cost"] - acc["ship"]
         by_product.append({
-            "product_name":  pname or str(pid),
-            "platform_id":   str(pid),
+            "product_name":  acc["name"],
+            "platform_id":   pid_s,
             "revenue":       str(rev.quantize(_Q2)),
-            "fee":           str(fee.quantize(_Q2)),
-            "cost":          str(cost.quantize(_Q2)),
-            "shipping":      str(ship.quantize(_Q2)),
+            "fee":           str(acc["fee"].quantize(_Q2)),
+            "fee_actual":    acc["est"] == 0 and acc["settled"] > 0,  # 전부 실측이면 True
+            "cost":          str(acc["cost"].quantize(_Q2)),
+            "shipping":      str(acc["ship"].quantize(_Q2)),
             "profit":        str(profit.quantize(_Q2)),
             "profit_rate":   str((profit / rev * 100).quantize(_Q2)) if rev else None,
         })
@@ -215,6 +293,8 @@ def sales_summary(
             "sa_roas":         sa_roas,
             "sa_conv_from":    sa_conv_from,
             "sa_conv_to":      sa_conv_to,
+            "fee_settled_lines": settled_lines,   # 실측 수수료 적용 주문라인 수 (D-6)
+            "fee_est_lines":     est_lines,       # 주문API 예상 수수료 폴백 라인 수
         },
         "by_product": by_product,
     }
@@ -331,3 +411,68 @@ def get_settlement(
             for r in rows
         ],
     }
+
+
+# ════════════════════════════════════════════════════════════════════
+# N1·D-6 이익 정밀화 — 건별 정산 (productOrderId별 실측 수수료)
+# ════════════════════════════════════════════════════════════════════
+
+def _upsert_case_settlement(db: Session, rows: list[dict]) -> int:
+    """건별 정산 행 upsert (product_order_id 그레인). 반환=반영 건수."""
+    n = 0
+    for r in rows:
+        poid = r.get("product_order_id")
+        if not poid:
+            continue
+        existing = (
+            db.query(NaverSettlementCase)
+            .filter(NaverSettlementCase.product_order_id == poid)
+            .first()
+        )
+        target = existing or NaverSettlementCase(product_order_id=poid)
+        target.order_id = r.get("order_id") or ""
+        target.product_id = r.get("product_id")
+        target.product_order_type = r.get("product_order_type") or ""
+        target.settle_type = r.get("settle_type")
+        target.product_name = r.get("product_name")
+        target.pay_settle_amount = r.get("pay_settle_amount") or _Z
+        target.total_pay_commission = r.get("total_pay_commission") or _Z
+        target.selling_interlock_commission = r.get("selling_interlock_commission") or _Z
+        target.free_installment_commission = r.get("free_installment_commission") or _Z
+        target.benefit_amount = r.get("benefit_amount") or _Z
+        target.settle_expect_amount = r.get("settle_expect_amount") or _Z
+        target.pay_date = r.get("pay_date")
+        target.settle_expect_date = r.get("settle_expect_date")
+        target.settle_complete_date = r.get("settle_complete_date")
+        if not existing:
+            db.add(target)
+        n += 1
+    db.commit()
+    return n
+
+
+@router.post("/settlement/case/sync")
+def sync_case_settlement(
+    days: int = Query(default=45, ge=1, le=365),
+    db: Session = Depends(get_db),
+):
+    """건별 정산(실측 수수료)을 결제일 기준 최근 days일 라이브 조회 → DB 적재 (트랙 N1·D-6).
+
+    결제일(PAY_DATE)·정산확정(SETTLED) 건만. 서버 IP 화이트리스트 필요.
+    재실행 시 upsert(정산 확정되며 갱신). 기본 45일(정산 지연 흡수).
+    """
+    cfg = get_naver_config(_NAVER_CONFIG_KEY)
+    if not cfg:
+        raise HTTPException(status_code=503, detail="네이버 설정 없음")
+
+    from app.clients.naver import NaverClient
+    dto = kst_today()
+    dfrom = dto - timedelta(days=days - 1)
+    try:
+        rows = NaverClient(cfg).fetch_case_settlement(dfrom, dto)
+    except Exception as e:
+        log.error("네이버 건별 정산 조회 실패: %s", e)
+        raise HTTPException(status_code=502, detail=f"네이버 건별 정산 API 오류: {e}")
+
+    n = _upsert_case_settlement(db, rows)
+    return {"synced": n, "date_from": str(dfrom), "date_to": str(dto)}

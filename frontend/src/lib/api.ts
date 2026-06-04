@@ -428,6 +428,7 @@ export interface NaverSalesSummaryData {
   profit: string; profit_rate: string | null;
   sa_conv_revenue: string; sa_ad_spend: string; sa_roas: string | null;
   sa_conv_from: string | null; sa_conv_to: string | null;
+  fee_settled_lines: number; fee_est_lines: number;  // 실측/예상 수수료 라인 수 (D-6)
 }
 
 export interface NaverSalesSummary {
@@ -441,6 +442,7 @@ export interface NaverSalesProductRow {
   product_name: string;
   platform_id: string;
   revenue: string; fee: string; cost: string;
+  fee_actual?: boolean;  // 수수료가 전부 정산 실측이면 true (D-6)
   shipping: string;
   profit: string; profit_rate: string | null;
 }
