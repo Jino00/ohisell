@@ -1,7 +1,6 @@
 // CoupangOps.tsx — 🔧 쿠팡 운영 패널
-// 회사(오픽스/오하이테크)·기간별 매출 현황 + 상품명별 상세 (채널타입 필터).
-// D-3: 사실/지표 정리만 — 전략 추천 없음.
-import { useState, useEffect, useCallback } from "react";
+// 회사·기간별 매출 현황 + 상품별 상세. 컬럼 필터(▼) 드롭다운으로 값 선택 표시/숨김.
+import { useState, useEffect, useCallback, useRef } from "react";
 import { fetchSalesSummary, type SalesSummary, type SalesProductRow } from "../lib/api";
 
 const COMPANIES = [
@@ -9,28 +8,36 @@ const COMPANIES = [
   { value: "오픽스", label: "오픽스" },
   { value: "오하이테크", label: "오하이테크" },
 ];
-
 const PERIODS = [
   { label: "어제", days: 1 },
   { label: "7일", days: 7 },
   { label: "15일", days: 15 },
   { label: "30일", days: 30 },
 ];
-
 const CHANNEL_TYPES = ["전체", "Wing", "로켓그로스", "로켓배송"] as const;
 type ChannelType = (typeof CHANNEL_TYPES)[number];
-
 type SortKey = "product_name" | "revenue" | "ad_spend" | "conv_revenue" | "roas";
 type SortDir = "asc" | "desc";
+type ColKey = "revenue" | "ad_spend" | "conv_revenue" | "roas";
 
 function won(s: string | null | undefined) {
   if (s == null) return "—";
   const n = Math.round(Number(s));
   return `${n.toLocaleString("ko-KR")}원`;
 }
-function roas(s: string | null | undefined) {
+function roasFmt(s: string | null | undefined) {
   if (s == null) return "—";
   return `${Number(s).toFixed(2)}x`;
+}
+function fmtVal(row: SalesProductRow, col: ColKey): string {
+  if (col === "revenue") return won(row.revenue);
+  if (col === "ad_spend") return won(row.ad_spend);
+  if (col === "conv_revenue") return won(row.conv_revenue);
+  return row.roas ? roasFmt(row.roas) : "—";
+}
+function numOf(s: string): number {
+  const n = Number(s.replace(/[^0-9.-]/g, ""));
+  return isNaN(n) ? 0 : n;
 }
 
 function SummaryCard({ label, value, sub }: { label: string; value: string; sub?: string }) {
@@ -50,7 +57,11 @@ export default function CoupangOps() {
   const [search, setSearch] = useState("");
   const [sortKey, setSortKey] = useState<SortKey>("revenue");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
-  const [hideZero, setHideZero] = useState<Set<string>>(new Set());
+
+  // 컬럼 필터: 제외할 값 집합 (비어있으면 전체 표시)
+  const [colExcluded, setColExcluded] = useState<Record<string, Set<string>>>({});
+  const [openCol, setOpenCol] = useState<string | null>(null);
+  const dropdownRef = useRef<HTMLDivElement>(null);
 
   const [data, setData] = useState<SalesSummary | null>(null);
   const [loading, setLoading] = useState(false);
@@ -61,6 +72,7 @@ export default function CoupangOps() {
     setError(null);
     try {
       setData(await fetchSalesSummary(c, d));
+      setColExcluded({});  // 데이터 바뀌면 필터 초기화
     } catch (e: any) {
       setError(e.message);
     } finally {
@@ -68,69 +80,164 @@ export default function CoupangOps() {
     }
   }, []);
 
+  useEffect(() => { load(company, days); }, [company, days, load]);
+
+  // 드롭다운 외부 클릭 시 닫기
   useEffect(() => {
-    load(company, days);
-  }, [company, days, load]);
+    function handler(e: MouseEvent) {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setOpenCol(null);
+      }
+    }
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
 
   function toggleSort(key: SortKey) {
     if (sortKey === key) setSortDir((d) => (d === "desc" ? "asc" : "desc"));
     else { setSortKey(key); setSortDir("desc"); }
   }
 
-  function SortIcon({ col }: { col: SortKey }) {
-    if (sortKey !== col) return <span className="ml-1 text-gray-300">↕</span>;
-    return <span className="ml-1 text-blue-500">{sortDir === "desc" ? "↓" : "↑"}</span>;
+  const allRows = data?.by_product ?? [];
+
+  // 컬럼별 unique 값 목록 (전체 데이터 기준)
+  function uniqueVals(col: ColKey): string[] {
+    const vals = [...new Set(allRows.map((r) => fmtVal(r, col)))];
+    return vals.sort((a, b) => numOf(a) - numOf(b));
   }
 
-  const filtered: SalesProductRow[] = (data?.by_product ?? []).filter((row) => {
-    const matchCh = channelFilter === "전체" || row.channel_type === channelFilter;
-    const q = search.toLowerCase();
-    const matchQ =
-      !q ||
-      row.product_name.toLowerCase().includes(q) ||
-      row.option_name.toLowerCase().includes(q);
-    return matchCh && matchQ;
-  }).filter((row) => {
-    if (hideZero.has("revenue") && Number(row.revenue) === 0) return false;
-    if (hideZero.has("ad_spend") && Number(row.ad_spend) === 0) return false;
-    if (hideZero.has("conv_revenue") && Number(row.conv_revenue) === 0) return false;
-    if (hideZero.has("roas") && (row.roas == null || Number(row.roas) === 0)) return false;
-    return true;
-  }).sort((a, b) => {
-    const mul = sortDir === "desc" ? -1 : 1;
-    if (sortKey === "product_name") {
-      return mul * (`${a.product_name},${a.option_name}`).localeCompare(`${b.product_name},${b.option_name}`, "ko");
+  // 필터 적용
+  const filtered = allRows
+    .filter((row) => {
+      const matchCh = channelFilter === "전체" || row.channel_type === channelFilter;
+      const q = search.toLowerCase();
+      const matchQ =
+        !q ||
+        row.product_name.toLowerCase().includes(q) ||
+        row.option_name.toLowerCase().includes(q);
+      return matchCh && matchQ;
+    })
+    .filter((row) => {
+      for (const [col, excluded] of Object.entries(colExcluded)) {
+        if (excluded.size > 0 && excluded.has(fmtVal(row, col as ColKey))) return false;
+      }
+      return true;
+    })
+    .sort((a, b) => {
+      const mul = sortDir === "desc" ? -1 : 1;
+      if (sortKey === "product_name")
+        return mul * `${a.product_name},${a.option_name}`.localeCompare(`${b.product_name},${b.option_name}`, "ko");
+      const av = Number(sortKey === "roas" ? (a.roas ?? 0) : a[sortKey]);
+      const bv = Number(sortKey === "roas" ? (b.roas ?? 0) : b[sortKey]);
+      return mul * (av - bv);
+    });
+
+  // 컬럼 헤더 (정렬 + 필터 드롭다운)
+  function ColHeader({ col, label, align = "right" }: { col: ColKey; label: string; align?: "left" | "right" }) {
+    const vals = uniqueVals(col);
+    const excluded = colExcluded[col] ?? new Set<string>();
+    const hasFilter = excluded.size > 0;
+    const isOpen = openCol === col;
+
+    function toggleVal(v: string) {
+      setColExcluded((prev) => {
+        const next = new Set(prev[col] ?? []);
+        next.has(v) ? next.delete(v) : next.add(v);
+        return { ...prev, [col]: next };
+      });
     }
-    const av = Number(sortKey === "roas" ? (a.roas ?? 0) : a[sortKey]);
-    const bv = Number(sortKey === "roas" ? (b.roas ?? 0) : b[sortKey]);
-    return mul * (av - bv);
-  });
+    function selectAll() {
+      setColExcluded((prev) => ({ ...prev, [col]: new Set() }));
+    }
+    function deselectAll() {
+      setColExcluded((prev) => ({ ...prev, [col]: new Set(vals) }));
+    }
+
+    return (
+      <th className={`px-3 py-2 text-${align} select-none`}>
+        <div className={`inline-flex items-center gap-1 ${align === "right" ? "justify-end" : ""} w-full`}>
+          <button
+            className="hover:text-gray-800 cursor-pointer"
+            onClick={() => toggleSort(col as SortKey)}
+          >
+            {label}
+            {sortKey === col ? (
+              <span className="ml-0.5 text-blue-500">{sortDir === "desc" ? "↓" : "↑"}</span>
+            ) : (
+              <span className="ml-0.5 text-gray-300">↕</span>
+            )}
+          </button>
+          {/* 필터 드롭다운 버튼 */}
+          <div className="relative" ref={isOpen ? dropdownRef : undefined}>
+            <button
+              onClick={(e) => { e.stopPropagation(); setOpenCol(isOpen ? null : col); }}
+              className={`text-xs px-1 py-0.5 rounded transition-colors ${
+                hasFilter
+                  ? "bg-blue-500 text-white"
+                  : "text-gray-400 hover:text-gray-700 hover:bg-gray-200"
+              }`}
+              title="값 필터"
+            >
+              ▼
+            </button>
+            {isOpen && (
+              <div
+                className="absolute top-full right-0 z-50 bg-white border border-gray-200 rounded-lg shadow-xl mt-1 w-44"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="flex gap-2 px-3 py-2 border-b border-gray-100 text-xs">
+                  <button onClick={selectAll} className="text-blue-600 hover:underline">전체 선택</button>
+                  <span className="text-gray-300">|</span>
+                  <button onClick={deselectAll} className="text-blue-600 hover:underline">전체 해제</button>
+                  {hasFilter && (
+                    <>
+                      <span className="text-gray-300">|</span>
+                      <button onClick={selectAll} className="text-red-500 hover:underline">초기화</button>
+                    </>
+                  )}
+                </div>
+                <div className="max-h-52 overflow-y-auto py-1">
+                  {vals.map((v) => (
+                    <label
+                      key={v}
+                      className="flex items-center gap-2 px-3 py-1.5 cursor-pointer hover:bg-gray-50 text-xs text-gray-700"
+                    >
+                      <input
+                        type="checkbox"
+                        className="accent-blue-500"
+                        checked={!excluded.has(v)}
+                        onChange={() => toggleVal(v)}
+                      />
+                      {v}
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </th>
+    );
+  }
 
   const s = data?.summary;
+  const activeFilters = Object.values(colExcluded).filter((s) => s.size > 0).length;
 
   return (
-    <div>
+    <div onClick={() => setOpenCol(null)}>
       {/* ── 헤더 ── */}
       <div className="flex items-center justify-between mb-4">
         <div>
           <h2 className="text-xl font-bold text-gray-900">🔧 쿠팡 운영 패널</h2>
-          {data && (
-            <p className="text-xs text-gray-400 mt-0.5">
-              {data.period.from} ~ {data.period.to}
-            </p>
-          )}
+          {data && <p className="text-xs text-gray-400 mt-0.5">{data.period.from} ~ {data.period.to}</p>}
         </div>
-
-        {/* 기간 버튼 */}
         <div className="flex gap-1">
           {PERIODS.map((p) => (
             <button
               key={p.days}
               onClick={() => setDays(p.days)}
               className={`px-3 py-1.5 rounded text-sm font-medium ${
-                days === p.days
-                  ? "bg-blue-600 text-white"
-                  : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                days === p.days ? "bg-blue-600 text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"
               }`}
             >
               {p.label}
@@ -140,15 +247,13 @@ export default function CoupangOps() {
       </div>
 
       {/* ── 회사 탭 ── */}
-      <div className="flex gap-1 mb-4 border-b border-gray-200 pb-0">
+      <div className="flex gap-1 mb-4 border-b border-gray-200">
         {COMPANIES.map((c) => (
           <button
             key={c.value}
             onClick={() => setCompany(c.value)}
             className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors ${
-              company === c.value
-                ? "border-blue-600 text-blue-700"
-                : "border-transparent text-gray-500 hover:text-gray-700"
+              company === c.value ? "border-blue-600 text-blue-700" : "border-transparent text-gray-500 hover:text-gray-700"
             }`}
           >
             {c.label}
@@ -156,76 +261,42 @@ export default function CoupangOps() {
         ))}
       </div>
 
-      {error && (
-        <div className="bg-red-50 text-red-700 rounded px-4 py-2 text-sm mb-4">{error}</div>
-      )}
+      {error && <div className="bg-red-50 text-red-700 rounded px-4 py-2 text-sm mb-4">{error}</div>}
 
       {/* ── 요약 카드 ── */}
       <div className="grid grid-cols-4 gap-3 mb-6">
         <SummaryCard label="총 매출" value={loading ? "…" : won(s?.revenue)} />
         <SummaryCard label="광고비" value={loading ? "…" : won(s?.ad_spend)} />
         <SummaryCard label="광고 전환 매출" value={loading ? "…" : won(s?.conv_revenue)} />
-        <SummaryCard
-          label="RoAS"
-          value={loading ? "…" : roas(s?.roas)}
-          sub={s?.roas ? "광고 전환매출 ÷ 광고비" : undefined}
-        />
+        <SummaryCard label="RoAS" value={loading ? "…" : roasFmt(s?.roas)} sub={s?.roas ? "광고 전환매출 ÷ 광고비" : undefined} />
       </div>
 
       {/* ── 상품별 테이블 ── */}
       <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
-        {/* 테이블 필터 헤더 */}
+        {/* 필터 바 */}
         <div className="flex items-center gap-3 px-4 py-3 border-b border-gray-100 bg-gray-50 flex-wrap">
           <span className="text-sm font-medium text-gray-700">상품별 현황</span>
-          {/* 채널 필터 */}
           <div className="flex gap-1">
             {CHANNEL_TYPES.map((ct) => (
               <button
                 key={ct}
                 onClick={() => setChannelFilter(ct)}
                 className={`px-2.5 py-1 rounded text-xs font-medium ${
-                  channelFilter === ct
-                    ? "bg-gray-800 text-white"
-                    : "bg-white border border-gray-300 text-gray-600 hover:bg-gray-100"
+                  channelFilter === ct ? "bg-gray-800 text-white" : "bg-white border border-gray-300 text-gray-600 hover:bg-gray-100"
                 }`}
               >
                 {ct}
               </button>
             ))}
           </div>
-          {/* 0 숨기기 토글 */}
-          <div className="flex gap-1 border-l border-gray-200 pl-3">
-            {(
-              [
-                { key: "revenue", label: "매출 0" },
-                { key: "ad_spend", label: "광고비 0" },
-                { key: "conv_revenue", label: "전환매출 0" },
-                { key: "roas", label: "RoAS 0" },
-              ] as { key: string; label: string }[]
-            ).map(({ key, label }) => {
-              const active = hideZero.has(key);
-              return (
-                <button
-                  key={key}
-                  onClick={() => {
-                    setHideZero((prev) => {
-                      const next = new Set(prev);
-                      active ? next.delete(key) : next.add(key);
-                      return next;
-                    });
-                  }}
-                  className={`px-2.5 py-1 rounded text-xs font-medium transition-colors ${
-                    active
-                      ? "bg-red-500 text-white"
-                      : "bg-white border border-gray-300 text-gray-500 hover:bg-gray-100"
-                  }`}
-                  title={active ? `${label} 행 숨기는 중 — 클릭하여 다시 표시` : `${label} 행 숨기기`}
-                >
-                  {active ? `${label} 숨김` : `${label}`}
-                </button>
-              );
-            })}
-          </div>
+          {activeFilters > 0 && (
+            <button
+              onClick={() => setColExcluded({})}
+              className="text-xs text-red-500 hover:underline border-l border-gray-200 pl-3"
+            >
+              필터 초기화 ({activeFilters}개 적용 중)
+            </button>
+          )}
           <input
             className="ml-auto border border-gray-300 rounded px-3 py-1.5 text-sm w-48"
             placeholder="상품명 검색…"
@@ -237,52 +308,32 @@ export default function CoupangOps() {
         <table className="w-full text-sm">
           <thead className="bg-gray-50 text-gray-500 text-xs border-b border-gray-100">
             <tr>
+              {/* 상품명 — 정렬만, 드롭다운 필터 없음 (값이 너무 다양) */}
               <th
                 className="px-4 py-2 text-left cursor-pointer hover:text-gray-800 select-none"
                 onClick={() => toggleSort("product_name")}
               >
-                상품명<SortIcon col="product_name" />
+                상품명
+                {sortKey === "product_name" ? (
+                  <span className="ml-0.5 text-blue-500">{sortDir === "desc" ? "↓" : "↑"}</span>
+                ) : (
+                  <span className="ml-0.5 text-gray-300">↕</span>
+                )}
               </th>
               <th className="px-3 py-2 text-center">채널</th>
-              <th
-                className="px-3 py-2 text-right cursor-pointer hover:text-gray-800 select-none"
-                onClick={() => toggleSort("revenue")}
-              >
-                총 매출<SortIcon col="revenue" />
-              </th>
-              <th
-                className="px-3 py-2 text-right cursor-pointer hover:text-gray-800 select-none"
-                onClick={() => toggleSort("ad_spend")}
-              >
-                광고비<SortIcon col="ad_spend" />
-              </th>
-              <th
-                className="px-3 py-2 text-right cursor-pointer hover:text-gray-800 select-none"
-                onClick={() => toggleSort("conv_revenue")}
-              >
-                광고 전환매출<SortIcon col="conv_revenue" />
-              </th>
-              <th
-                className="px-3 py-2 text-right cursor-pointer hover:text-gray-800 select-none"
-                onClick={() => toggleSort("roas")}
-              >
-                RoAS<SortIcon col="roas" />
-              </th>
+              <ColHeader col="revenue" label="총 매출" />
+              <ColHeader col="ad_spend" label="광고비" />
+              <ColHeader col="conv_revenue" label="광고 전환매출" />
+              <ColHeader col="roas" label="RoAS" />
             </tr>
           </thead>
           <tbody>
             {loading ? (
-              <tr>
-                <td colSpan={6} className="px-4 py-8 text-center text-gray-400">
-                  로딩 중…
-                </td>
-              </tr>
+              <tr><td colSpan={6} className="px-4 py-8 text-center text-gray-400">로딩 중…</td></tr>
             ) : filtered.length === 0 ? (
               <tr>
                 <td colSpan={6} className="px-4 py-8 text-center text-gray-400">
-                  {data?.by_product.length === 0
-                    ? "데이터 없음 — 동기화 후 조회하세요"
-                    : "검색 결과 없음"}
+                  {data?.by_product.length === 0 ? "데이터 없음 — 동기화 후 조회하세요" : "검색/필터 결과 없음"}
                 </td>
               </tr>
             ) : (
@@ -294,21 +345,15 @@ export default function CoupangOps() {
                       title={row.option_name ? `${row.product_name}, ${row.option_name}` : row.product_name}
                     >
                       {row.product_name}
-                      {row.option_name && (
-                        <span className="text-gray-400">, {row.option_name}</span>
-                      )}
+                      {row.option_name && <span className="text-gray-400">, {row.option_name}</span>}
                     </div>
                   </td>
                   <td className="px-3 py-2 text-center">
-                    <span
-                      className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${
-                        row.channel_type === "Wing"
-                          ? "bg-blue-50 text-blue-700"
-                          : row.channel_type === "로켓그로스"
-                          ? "bg-orange-50 text-orange-700"
-                          : "bg-purple-50 text-purple-700"
-                      }`}
-                    >
+                    <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${
+                      row.channel_type === "Wing" ? "bg-blue-50 text-blue-700"
+                      : row.channel_type === "로켓그로스" ? "bg-orange-50 text-orange-700"
+                      : "bg-purple-50 text-purple-700"
+                    }`}>
                       {row.channel_type}
                     </span>
                   </td>
@@ -317,20 +362,14 @@ export default function CoupangOps() {
                   <td className="px-3 py-2 text-right text-gray-600">{won(row.conv_revenue)}</td>
                   <td className="px-3 py-2 text-right">
                     {row.roas ? (
-                      <span
-                        className={
-                          Number(row.roas) >= 3
-                            ? "text-green-600 font-medium"
-                            : Number(row.roas) >= 1
-                            ? "text-gray-700"
-                            : "text-red-500"
-                        }
-                      >
-                        {roas(row.roas)}
+                      <span className={
+                        Number(row.roas) >= 3 ? "text-green-600 font-medium"
+                        : Number(row.roas) >= 1 ? "text-gray-700"
+                        : "text-red-500"
+                      }>
+                        {roasFmt(row.roas)}
                       </span>
-                    ) : (
-                      <span className="text-gray-300">—</span>
-                    )}
+                    ) : <span className="text-gray-300">—</span>}
                   </td>
                 </tr>
               ))
@@ -339,25 +378,15 @@ export default function CoupangOps() {
           {filtered.length > 0 && (
             <tfoot className="bg-gray-50 border-t border-gray-200 text-sm font-semibold">
               <tr>
-                <td className="px-4 py-2 text-gray-600" colSpan={2}>
-                  합계 ({filtered.length}개)
-                </td>
-                <td className="px-3 py-2 text-right">
-                  {won(String(filtered.reduce((a, r) => a + Number(r.revenue), 0)))}
-                </td>
-                <td className="px-3 py-2 text-right">
-                  {won(String(filtered.reduce((a, r) => a + Number(r.ad_spend), 0)))}
-                </td>
-                <td className="px-3 py-2 text-right">
-                  {won(String(filtered.reduce((a, r) => a + Number(r.conv_revenue), 0)))}
-                </td>
-                <td className="px-3 py-2 text-right">
-                  {(() => {
-                    const sp = filtered.reduce((a, r) => a + Number(r.ad_spend), 0);
-                    const cv = filtered.reduce((a, r) => a + Number(r.conv_revenue), 0);
-                    return sp ? `${(cv / sp).toFixed(2)}x` : "—";
-                  })()}
-                </td>
+                <td className="px-4 py-2 text-gray-600" colSpan={2}>합계 ({filtered.length}개)</td>
+                <td className="px-3 py-2 text-right">{won(String(filtered.reduce((a, r) => a + Number(r.revenue), 0)))}</td>
+                <td className="px-3 py-2 text-right">{won(String(filtered.reduce((a, r) => a + Number(r.ad_spend), 0)))}</td>
+                <td className="px-3 py-2 text-right">{won(String(filtered.reduce((a, r) => a + Number(r.conv_revenue), 0)))}</td>
+                <td className="px-3 py-2 text-right">{(() => {
+                  const sp = filtered.reduce((a, r) => a + Number(r.ad_spend), 0);
+                  const cv = filtered.reduce((a, r) => a + Number(r.conv_revenue), 0);
+                  return sp ? `${(cv / sp).toFixed(2)}x` : "—";
+                })()}</td>
               </tr>
             </tfoot>
           )}
