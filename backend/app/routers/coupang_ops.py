@@ -9,9 +9,12 @@ import logging
 
 from typing import Any
 
-from fastapi import APIRouter, Body, HTTPException, Path, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
+from sqlalchemy.orm import Session
 
 from app.config import get_coupang_config
+from app.database import get_db
+from app.models import CoupangProductItem
 from app.routers._coupang_write_http import handle_write as _handle_write
 from app.services.coupang import coupon_write, product_write
 
@@ -20,6 +23,32 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/coupang/ops", tags=["coupang-ops"])
 
 _DEFAULT_ACCOUNT = "COUPANG_WING2"  # 주 계정(Wing2). 옵션ID는 계정 귀속(D-8) → 정확한 계정 지정 필요.
+
+
+# ════════════════════════════════════════════════════════════════════
+# 운영 패널 — 상품 목록 조회 (DB, 쿠팡 API 호출 없음)
+# ════════════════════════════════════════════════════════════════════
+
+@router.get("/products/items")
+def list_product_items(db: Session = Depends(get_db)):
+    """운영 패널용 상품 목록. coupang_product_item DB에서 반환 (라이브 API 호출 없음)."""
+    rows = db.query(CoupangProductItem).order_by(
+        CoupangProductItem.account_key,
+        CoupangProductItem.item_name,
+    ).all()
+    return [
+        {
+            "vendor_item_id": r.vendor_item_id,
+            "item_name": r.item_name or "—",
+            "seller_product_name": r.seller_product_name or "—",
+            "account_key": r.account_key,
+            "sale_price": str(r.sale_price) if r.sale_price is not None else None,
+            "stock": r.amount_in_stock,
+            "on_sale": r.on_sale,
+            "status_name": r.status_name,
+        }
+        for r in rows
+    ]
 
 
 def _get_account(account_key: str = _DEFAULT_ACCOUNT):

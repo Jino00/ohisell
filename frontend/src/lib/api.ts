@@ -334,3 +334,56 @@ export async function fetchCommandCenter(
     `/api/overview/command-center?from=${from}&to=${to}`
   );
 }
+
+// ── 쿠팡 운영 패널 (CoupangOps) ──────────────────────────────────
+
+export interface ProductItem {
+  vendor_item_id: string;
+  item_name: string;
+  seller_product_name: string;
+  account_key: string;
+  sale_price: string | null;
+  stock: number | null;
+  on_sale: boolean | null;
+  status_name: string | null;
+}
+
+export type OpsResult = Record<string, unknown>;
+
+export function fetchProductItems(): Promise<ProductItem[]> {
+  return fetchApi<ProductItem[]>("/api/coupang/ops/products/items");
+}
+
+function opsGet(path: string, params: Record<string, string | number | boolean | undefined>): Promise<OpsResult> {
+  const q = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined) q.set(k, String(v));
+  }
+  return fetchApi<OpsResult>(`/api/coupang/ops${path}?${q.toString()}`, { method: "PUT" });
+}
+
+export function opsUpdateQuantity(vid: number, quantity: number, accountKey: string, dryRun: boolean, confirm?: string): Promise<OpsResult> {
+  return opsGet(`/products/items/${vid}/quantity`, { quantity, account_key: accountKey, dry_run: dryRun, confirm });
+}
+
+export function opsUpdatePrice(vid: number, price: number, accountKey: string, dryRun: boolean, confirm?: string): Promise<OpsResult> {
+  return opsGet(`/products/items/${vid}/price`, { price, account_key: accountKey, dry_run: dryRun, confirm });
+}
+
+export function opsUpdateBasePrice(vid: number, originalPrice: number, accountKey: string, dryRun: boolean, confirm?: string): Promise<OpsResult> {
+  return opsGet(`/products/items/${vid}/base-price`, { original_price: originalPrice, account_key: accountKey, dry_run: dryRun, confirm });
+}
+
+export function opsResumeSale(vid: number, accountKey: string, dryRun: boolean, confirm?: string): Promise<OpsResult> {
+  return opsGet(`/products/items/${vid}/sale/resume`, { account_key: accountKey, dry_run: dryRun, confirm });
+}
+
+export function opsStopSale(vid: number, accountKey: string, dryRun: boolean, confirm?: string): Promise<OpsResult> {
+  return opsGet(`/products/items/${vid}/sale/stop`, { account_key: accountKey, dry_run: dryRun, confirm });
+}
+
+export function opsExpireInstantCoupon(couponId: number, accountKey: string, dryRun: boolean, confirm?: string): Promise<OpsResult> {
+  const q = new URLSearchParams({ account_key: accountKey, dry_run: String(dryRun) });
+  if (confirm) q.set("confirm", confirm);
+  return fetchApi<OpsResult>(`/api/coupang/ops/coupons/instant/${couponId}/expire?${q.toString()}`, { method: "PUT" });
+}
