@@ -97,4 +97,4 @@
 ## 7. 다음 액션
 - **(선택) 실 클레임 처리**: 라이브 대기건 중 Jino가 건별 결정 시 dry_run=false 실행.
 - **N8 상품 쓰기** (등록/수정/재고/가격) — API센터 스펙 수집 후 동일 패턴.
-- ※ 로컬 git uncommitted (N1~N7 전부 prod scp 배포됨). 커밋은 Jino 지시 시(3단계).
+- ※ git 커밋 완료(2026-06-04, main ec69f3f): feat fda6987(naver N3~N7) + chore ec69f3f(기록정리). N1~N7 전부 prod 배포+커밋. 워킹트리 클린.

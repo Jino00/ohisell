@@ -6,7 +6,7 @@
 - 날짜: 2026-06-04
 - 단계: ★네이버 **N7 클레임 전체 완료**(취소+반품+교환 12쓰기). 이번 세션 wave3 교환 5종(수거완료/재배송/보류/보류해제/거부, 전부 POST·경로 claim/exchange/*) + ⚖️섹션 EXCHANGE_REQUEST행 수거완료/거부/보류 + COLLECT_DONE행 재배송 + 교환보류해제 모달. prod **dry_run 라이브 실증**(5종 would_send 정확·부분입력 허용·검증400 5종·codex P1 0/P2 2 합의수정). 라이브 EXCHANGE_REQUEST 3·COLLECT_DONE 1 등 대기건 실쓰기는 실고객이라 Jino 결정(미실행). 다음 = N8 상품쓰기 또는 실 클레임처리.
 - 트랙: docs/tracks/active/track_naver-full-integration.md (N1~N6 완료, N7 전체 완료, N2 skip). 쓰기 스펙=docs/references/14. D-9(N6)·D-10(N7) 참조.
-- 최신 커밋(main): **844bdcf**. ★N1~N7 코드 전부 prod scp 배포됨(라이브). 로컬 git uncommitted(커밋은 Jino 지시 시).
+- 최신 커밋(main): **ec69f3f** (fda6987 feat naver N3~N7 + ec69f3f chore 기록정리). ★N1~N7 코드 전부 prod scp 배포(라이브) + git 커밋 완료(2026-06-04). 워킹트리 클린.
 
 ## 📦 네이버 N6 발주/발송 처리 (2026-06-04, prod dry_run 라이브)
 - 파일: backend/app/clients/naver.py(confirm_orders/dispatch_orders/delay_order/fetch_pending_orders + _request_write[4xx 본문 surface]), backend/app/routers/naver_ops.py(GET /orders/pending, POST /orders/confirm|dispatch|delay, dry_run 기본 true), frontend api.ts+NaverOps.tsx(📦 섹션: 대기목록→선택→dry_run 모달→실행).
