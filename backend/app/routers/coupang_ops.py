@@ -655,24 +655,38 @@ def sales_summary(
         for r in pi_rows
     }
 
-    # ── 3a. 수수료율 조회 (coupang_revenue_fee.service_fee_ratio 옵션별 최신값) ──
-    fee_rows = (
-        db.query(
-            CoupangRevenueFee.vendor_item_id,
-            func.max(CoupangRevenueFee.service_fee_ratio),
+    # ── 3a. 수수료 직접 매칭 (orders.order_number ↔ coupang_revenue_fee.order_id) ──
+    # 기간 내 쿠팡 Wing 주문의 order_number 수집 (ORM으로 IN 처리)
+    order_nums = [
+        row[0] for row in (
+            db.query(Order.order_number)
+            .join(Channel, Order.channel_id == Channel.id)
+            .filter(
+                Channel.code.in_(target_codes),
+                Order.order_date >= start,
+                Order.order_date <= end,
+            )
+            .distinct()
+            .all()
         )
-        .filter(
-            CoupangRevenueFee.vendor_item_id.in_(list(all_vids)),
-            CoupangRevenueFee.service_fee_ratio.isnot(None),
-            CoupangRevenueFee.service_fee_ratio > 0,
+    ] if target_codes else []
+
+    # vendor_item_id별 실거래 수수료 합산 (order_number 매칭)
+    actual_fee_by_vid: dict[str, Decimal] = {}
+    if order_nums:
+        fee_matched = (
+            db.query(
+                CoupangRevenueFee.vendor_item_id,
+                func.sum(CoupangRevenueFee.service_fee),
+            )
+            .filter(CoupangRevenueFee.order_id.in_(list(order_nums)))
+            .group_by(CoupangRevenueFee.vendor_item_id)
+            .all()
         )
-        .group_by(CoupangRevenueFee.vendor_item_id)
-        .all()
-    ) if all_vids else []
-    fee_rate_map: dict[str, Decimal] = {
-        str(vid): _f(ratio) / Decimal("100")
-        for vid, ratio in fee_rows
-    }
+        actual_fee_by_vid = {str(vid): _f(fee) for vid, fee in fee_matched}
+
+    # 매칭 안 된 주문 — 기본율(최빈 수수료율 7.8%)로 추정 표시용 fee_rate_map 유지
+    fee_rate_map: dict[str, Decimal] = {}  # 직접 매칭 없는 옵션 추정용
 
     # ── 3b. 원가 조회 (D-12: product_master via product_channel_mapping) ──
     cost_rows = (
@@ -725,9 +739,12 @@ def sales_summary(
         rev = od["revenue"]
         qty = od["qty"]
         e["revenue"] += rev
-        # 수수료 = 매출 × 수수료율 (정산 데이터 기준, 없으면 기본값 10.5%)
-        fee_rate = fee_rate_map.get(vid, _DEFAULT_FEE_RATE)
-        e["fee"] += (rev * fee_rate).quantize(_Q2, rounding=ROUND_HALF_UP)
+        # 수수료: 실거래 정산 매칭 우선, 없으면 기본율(7.8%) 추정
+        if vid in actual_fee_by_vid:
+            e["fee"] += actual_fee_by_vid[vid]
+        else:
+            fee_rate = fee_rate_map.get(vid, _DEFAULT_FEE_RATE)
+            e["fee"] += (rev * fee_rate).quantize(_Q2, rounding=ROUND_HALF_UP)
         # 원가 = cost_price × 수량
         unit_cost = cost_map.get(vid, _Z)
         e["cost"] += unit_cost * qty
