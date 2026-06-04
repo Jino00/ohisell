@@ -9,13 +9,19 @@ import logging
 
 from typing import Any
 
+from datetime import date, datetime, time, timedelta
+from decimal import Decimal, ROUND_HALF_UP
+from zoneinfo import ZoneInfo
+
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.config import get_coupang_config
 from app.database import get_db
-from app.models import CoupangProductItem
+from app.models import Channel, CoupangAdOptionDaily, CoupangProductItem, Order
 from app.routers._coupang_write_http import handle_write as _handle_write
+from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
 from app.services.coupang import coupon_write, product_write
 
 log = logging.getLogger(__name__)
@@ -437,3 +443,225 @@ def w5_update_rg_product(
     return _handle_write(
         lambda: product_write.update_rg_product(cfg, body, dry_run=dry_run, confirm=confirm)
     )
+
+
+# ════════════════════════════════════════════════════════════════════
+# 운영 패널 — 매출 현황 (회사별·기간별·채널타입별)
+# ════════════════════════════════════════════════════════════════════
+
+_KST = ZoneInfo("Asia/Seoul")
+_Q2 = Decimal("0.01")
+_Z = Decimal("0")
+
+# 쿠팡 채널코드 → (company_short, channel_type)
+_CHANNEL_META: dict[str, tuple[str, str]] = {
+    "COUPANG_WING1":   ("오픽스",    "Wing"),
+    "COUPANG_WING2":   ("오하이테크", "Wing"),
+    "COUPANG_RG1":     ("오픽스",    "로켓그로스"),
+    "COUPANG_RG2":     ("오하이테크", "로켓그로스"),
+    "COUPANG_ROCKET":  ("오하이테크", "로켓배송"),
+}
+
+
+def _safe_cfg(code: str):
+    try:
+        return get_coupang_config(code)
+    except Exception:
+        return None
+
+
+# vendor_id(A01...) → channel_code (첫 번째 매칭)
+def _vendor_to_channel(vendor_id: str) -> str:
+    for code in _CHANNEL_META:
+        cfg = _safe_cfg(code)
+        if cfg and cfg.vendor_id == vendor_id:
+            return code
+    return "COUPANG_WING2"
+
+
+def _kst_today() -> date:
+    return datetime.now(_KST).date()
+
+
+def _date_range(days: int) -> tuple[date, date]:
+    today = _kst_today()
+    if days == 1:
+        d = today - timedelta(days=1)
+        return d, d
+    return today - timedelta(days=days - 1), today
+
+
+def _f(v) -> Decimal:
+    if v is None:
+        return _Z
+    return v if isinstance(v, Decimal) else Decimal(str(v))
+
+
+def _roas(spend: Decimal, conv: Decimal) -> str | None:
+    if not spend:
+        return None
+    return str((conv / spend).quantize(_Q2, rounding=ROUND_HALF_UP))
+
+
+@router.get("/sales-summary")
+def sales_summary(
+    company: str = Query(default="ALL", description="오픽스 | 오하이테크 | ALL"),
+    days: int = Query(default=7, ge=1, le=90),
+    db: Session = Depends(get_db),
+):
+    """쿠팡 채널 매출 현황 — 회사별·기간별·채널타입별 집계.
+
+    반환: summary(합계) + by_product(상품명별, channel_type 포함).
+    광고비·광고전환매출은 coupang_ad_option_daily + coupang_product_item 조인.
+    """
+    dfrom, dto = _date_range(days)
+    start = datetime.combine(dfrom, time.min)
+    end = datetime.combine(dto, time.max)
+
+    # 대상 채널코드 결정
+    target_codes = [
+        code for code, (comp, _) in _CHANNEL_META.items()
+        if company == "ALL" or comp == company
+    ]
+    if not target_codes:
+        return {"summary": {}, "by_product": []}
+
+    # ── 1. 주문 집계 (상품명·채널코드별) ──────────────────────────────
+    order_rows = (
+        db.query(
+            Order.platform_product_id,
+            func.max(Order.platform_product_name),
+            Channel.code,
+            func.sum(Order.selling_price * Order.quantity),
+            func.sum(Order.quantity),
+        )
+        .join(Channel, Order.channel_id == Channel.id)
+        .filter(
+            Channel.code.in_(target_codes),
+            Order.platform_product_id != "",
+            Order.status.notin_(tuple(REVENUE_EXCLUDED)),
+            Order.order_date >= start,
+            Order.order_date <= end,
+        )
+        .group_by(Order.platform_product_id, Channel.code)
+        .all()
+    )
+
+    # vid → {channel_code, revenue, qty, name(from order)}
+    order_by_vid: dict[str, dict] = {}
+    for vid, oname, ch_code, rev, qty in order_rows:
+        key = str(vid)
+        entry = order_by_vid.setdefault(key, {
+            "channel_code": ch_code, "revenue": _Z, "qty": 0, "order_name": oname
+        })
+        entry["revenue"] += _f(rev)
+        entry["qty"] += int(qty or 0)
+
+    # ── 2. 광고 집계 (옵션ID별) ──────────────────────────────────────
+    # vendor_id(A01564720 등) → target channel 코드 매핑으로 필터
+    target_vendor_ids = {
+        cfg.vendor_id
+        for code in target_codes
+        if (cfg := _safe_cfg(code)) is not None
+    }
+    ad_filter = (
+        [CoupangAdOptionDaily.vendor_id.in_(list(target_vendor_ids))]
+        if target_vendor_ids else []
+    )
+    ad_rows = (
+        db.query(
+            CoupangAdOptionDaily.ad_option_id,
+            CoupangAdOptionDaily.vendor_id,
+            func.sum(CoupangAdOptionDaily.ad_spend),
+            func.sum(CoupangAdOptionDaily.conversion_revenue),
+        )
+        .filter(
+            CoupangAdOptionDaily.report_date >= dfrom,
+            CoupangAdOptionDaily.report_date <= dto,
+            *ad_filter,
+        )
+        .group_by(CoupangAdOptionDaily.ad_option_id, CoupangAdOptionDaily.vendor_id)
+        .all()
+    )
+    ad_by_vid: dict[str, dict] = {
+        str(vid): {"vendor_id": vendor_id, "spend": _f(spend), "conv_revenue": _f(conv)}
+        for vid, vendor_id, spend, conv in ad_rows
+    }
+
+    # ── 3. 상품명 조회 (coupang_product_item) ─────────────────────────
+    all_vids = set(order_by_vid) | set(ad_by_vid)
+    pi_rows = (
+        db.query(CoupangProductItem.vendor_item_id,
+                 CoupangProductItem.seller_product_name,
+                 CoupangProductItem.item_name,
+                 CoupangProductItem.account_key)
+        .filter(CoupangProductItem.vendor_item_id.in_(list(all_vids)))
+        .all()
+    ) if all_vids else []
+    pi_map = {
+        str(r.vendor_item_id): {
+            "seller_name": r.seller_product_name,
+            "item_name": r.item_name,
+            "account_key": r.account_key,
+        }
+        for r in pi_rows
+    }
+
+    # ── 4. 상품명·채널타입 단위로 병합 ───────────────────────────────
+    # key = (product_label, channel_type)
+    merged: dict[tuple[str, str], dict] = {}
+
+    def _product_key(vid: str, ch_code: str) -> tuple[str, str]:
+        pi = pi_map.get(vid, {})
+        order_entry = order_by_vid.get(vid, {})
+        label = (
+            pi.get("seller_name")
+            or pi.get("item_name")
+            or order_entry.get("order_name")  # platform_product_name 폴백
+            or f"옵션{vid}"
+        )
+        _, ch_type = _CHANNEL_META.get(ch_code, ("—", "Wing"))
+        return label, ch_type
+
+    for vid, od in order_by_vid.items():
+        ch_code = od["channel_code"]
+        pk = _product_key(vid, ch_code)
+        e = merged.setdefault(pk, {"revenue": _Z, "ad_spend": _Z, "conv_revenue": _Z})
+        e["revenue"] += od["revenue"]
+
+    for vid, ad in ad_by_vid.items():
+        pi = pi_map.get(vid, {})
+        # pi.account_key 우선, 없으면 vendor_id로 역추적
+        ch_code = pi.get("account_key") or _vendor_to_channel(ad.get("vendor_id", ""))
+        pk = _product_key(vid, ch_code)
+        e = merged.setdefault(pk, {"revenue": _Z, "ad_spend": _Z, "conv_revenue": _Z})
+        e["ad_spend"] += ad["spend"]
+        e["conv_revenue"] += ad["conv_revenue"]
+
+    # ── 5. 최종 응답 구성 ─────────────────────────────────────────────
+    by_product = [
+        {
+            "product_name": pk[0],
+            "channel_type": pk[1],
+            "revenue": str(v["revenue"].quantize(_Q2)),
+            "ad_spend": str(v["ad_spend"].quantize(_Q2)),
+            "conv_revenue": str(v["conv_revenue"].quantize(_Q2)),
+            "roas": _roas(v["ad_spend"], v["conv_revenue"]),
+        }
+        for pk, v in sorted(merged.items(), key=lambda x: -x[1]["revenue"])
+    ]
+
+    total_rev = sum((v["revenue"] for v in merged.values()), _Z)
+    total_spend = sum((v["ad_spend"] for v in merged.values()), _Z)
+    total_conv = sum((v["conv_revenue"] for v in merged.values()), _Z)
+
+    return {
+        "period": {"from": str(dfrom), "to": str(dto)},
+        "summary": {
+            "revenue": str(total_rev.quantize(_Q2)),
+            "ad_spend": str(total_spend.quantize(_Q2)),
+            "conv_revenue": str(total_conv.quantize(_Q2)),
+            "roas": _roas(total_spend, total_conv),
+        },
+        "by_product": by_product,
+    }

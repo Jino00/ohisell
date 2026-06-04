@@ -335,7 +335,30 @@ export async function fetchCommandCenter(
   );
 }
 
-// ── 쿠팡 운영 패널 (CoupangOps) ──────────────────────────────────
+// ── 쿠팡 운영 패널 — 매출 현황 ───────────────────────────────────
+
+export interface SalesProductRow {
+  product_name: string;
+  channel_type: string;
+  revenue: string;
+  ad_spend: string;
+  conv_revenue: string;
+  roas: string | null;
+}
+
+export interface SalesSummary {
+  period: { from: string; to: string };
+  summary: { revenue: string; ad_spend: string; conv_revenue: string; roas: string | null };
+  by_product: SalesProductRow[];
+}
+
+export function fetchSalesSummary(company: string, days: number): Promise<SalesSummary> {
+  return fetchApi<SalesSummary>(
+    `/api/coupang/ops/sales-summary?company=${encodeURIComponent(company)}&days=${days}`
+  );
+}
+
+// ── 쿠팡 운영 패널 — 상품 목록·쓰기 ─────────────────────────────
 
 export interface ProductItem {
   vendor_item_id: string;
