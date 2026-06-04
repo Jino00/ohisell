@@ -312,7 +312,7 @@ export default function NaverOps() {
           <SummaryCard label="총매출" value={won(s.revenue)} />
           <SummaryCard label="PG수수료" value={won(s.fee)} />
           <SummaryCard label="원가" value={won(s.cost)} />
-          <SummaryCard label="광고비(SA)" value={won(s.ad_spend)} sub="상품별 미배분" />
+          <SummaryCard label="광고비" value={won(s.ad_spend)} sub="검색+디스플레이 · 상품별 미배분" />
           <SummaryCard label="배송비" value={won(s.shipping)} />
           <SummaryCard
             label="이익"
