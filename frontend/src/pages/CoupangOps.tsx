@@ -17,9 +17,9 @@ const PERIODS = [
 ];
 const CHANNEL_TYPES = ["전체", "Wing", "로켓그로스", "로켓배송"] as const;
 type ChannelType = (typeof CHANNEL_TYPES)[number];
-type SortKey = "product_name" | "revenue" | "ad_spend" | "conv_revenue" | "roas";
+type SortKey = "product_name" | "revenue" | "ad_spend" | "conv_revenue" | "roas" | "profit" | "profit_rate";
 type SortDir = "asc" | "desc";
-type ColKey = "revenue" | "ad_spend" | "conv_revenue" | "roas";
+type ColKey = "revenue" | "ad_spend" | "conv_revenue" | "roas" | "profit" | "profit_rate";
 
 function won(s: string | null | undefined) {
   if (s == null) return "—";
@@ -43,6 +43,8 @@ function fmtVal(row: SalesProductRow, col: ColKey): string {
   if (col === "revenue") return won(row.revenue);
   if (col === "ad_spend") return won(row.ad_spend);
   if (col === "conv_revenue") return won(row.conv_revenue);
+  if (col === "profit") return won(row.profit);
+  if (col === "profit_rate") return row.profit_rate ? pct(row.profit_rate) : "—";
   return row.roas ? roasFmt(row.roas) : "—";
 }
 function numOf(s: string): number {
@@ -156,8 +158,13 @@ export default function CoupangOps() {
       const mul = sortDir === "desc" ? -1 : 1;
       if (sortKey === "product_name")
         return mul * `${a.product_name},${a.option_name}`.localeCompare(`${b.product_name},${b.option_name}`, "ko");
-      const av = Number(sortKey === "roas" ? (a.roas ?? 0) : a[sortKey]);
-      const bv = Number(sortKey === "roas" ? (b.roas ?? 0) : b[sortKey]);
+      const getV = (r: SalesProductRow) => {
+        if (sortKey === "roas") return Number(r.roas ?? 0);
+        if (sortKey === "profit_rate") return Number(r.profit_rate ?? 0);
+        return Number((r as any)[sortKey] ?? 0);
+      };
+      const av = getV(a);
+      const bv = getV(b);
       return mul * (av - bv);
     });
 
@@ -406,14 +413,16 @@ export default function CoupangOps() {
               <ColHeader col="ad_spend" label="광고비" />
               <ColHeader col="conv_revenue" label="광고 전환매출" />
               <ColHeader col="roas" label="RoAS" />
+              <ColHeader col="profit" label="이익" />
+              <ColHeader col="profit_rate" label="이익률" />
             </tr>
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={6} className="px-4 py-8 text-center text-gray-400">로딩 중…</td></tr>
+              <tr><td colSpan={8} className="px-4 py-8 text-center text-gray-400">로딩 중…</td></tr>
             ) : filtered.length === 0 ? (
               <tr>
-                <td colSpan={6} className="px-4 py-8 text-center text-gray-400">
+                <td colSpan={8} className="px-4 py-8 text-center text-gray-400">
                   {data?.by_product.length === 0 ? "데이터 없음 — 동기화 후 조회하세요" : "검색/필터 결과 없음"}
                 </td>
               </tr>
@@ -452,6 +461,20 @@ export default function CoupangOps() {
                       </span>
                     ) : <span className="text-gray-300">—</span>}
                   </td>
+                  <td className="px-3 py-2 text-right font-medium">
+                    <span className={profitColor(row.profit)}>{won(row.profit)}</span>
+                  </td>
+                  <td className="px-3 py-2 text-right">
+                    {row.profit_rate ? (
+                      <span className={
+                        Number(row.profit_rate) >= 20 ? "text-blue-600 font-medium"
+                        : Number(row.profit_rate) >= 0 ? "text-gray-700"
+                        : "text-red-500"
+                      }>
+                        {pct(row.profit_rate)}
+                      </span>
+                    ) : <span className="text-gray-300">—</span>}
+                  </td>
                 </tr>
               ))
             )}
@@ -467,6 +490,15 @@ export default function CoupangOps() {
                   const sp = filtered.reduce((a, r) => a + Number(r.ad_spend), 0);
                   const cv = filtered.reduce((a, r) => a + Number(r.conv_revenue), 0);
                   return sp ? `${(cv / sp).toFixed(2)}x` : "—";
+                })()}</td>
+                <td className="px-3 py-2 text-right">{(() => {
+                  const p = filtered.reduce((a, r) => a + Number(r.profit), 0);
+                  return <span className={p >= 0 ? "text-blue-700" : "text-red-500"}>{won(String(p))}</span>;
+                })()}</td>
+                <td className="px-3 py-2 text-right">{(() => {
+                  const rev = filtered.reduce((a, r) => a + Number(r.revenue), 0);
+                  const p = filtered.reduce((a, r) => a + Number(r.profit), 0);
+                  return rev ? `${(p / rev * 100).toFixed(1)}%` : "—";
                 })()}</td>
               </tr>
             </tfoot>
