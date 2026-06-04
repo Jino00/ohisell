@@ -1,7 +1,19 @@
 // NaverOps.tsx — 🛒 네이버 스마트스토어 운영 패널
 // 기간별 매출 현황 + 상품별 상세 (쿠팡 패널 단순화 버전)
 import { useState, useEffect, useCallback, useRef } from "react";
-import { fetchNaverSalesSummary, type NaverSalesSummary, type NaverSalesProductRow } from "../lib/api";
+import {
+  fetchNaverSalesSummary, fetchGfaStatus, uploadGfaCsv,
+  type NaverSalesSummary, type NaverSalesProductRow, type GfaStatus,
+} from "../lib/api";
+
+// 마지막 업로드일로부터 경과 일수 (로컬 기준). null이면 데이터 없음.
+function daysSince(dateStr: string | null | undefined): number | null {
+  if (!dateStr) return null;
+  const d = new Date(dateStr + "T00:00:00");
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  return Math.round((today.getTime() - d.getTime()) / 86400000);
+}
 
 const PERIODS = [
   { label: "오늘", days: 0 },
@@ -113,6 +125,10 @@ export default function NaverOps() {
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [colFilters, setColFilters] = useState<Partial<Record<ColKey, Set<string>>>>({});
   const [openFilter, setOpenFilter] = useState<ColKey | null>(null);
+  const [gfa, setGfa] = useState<GfaStatus | null>(null);
+  const [gfaUploading, setGfaUploading] = useState(false);
+  const [gfaMsg, setGfaMsg] = useState<string | null>(null);
+  const gfaFileRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
     setLoading(true); setError(null);
@@ -125,7 +141,29 @@ export default function NaverOps() {
     }
   }, [days]);
 
+  const loadGfa = useCallback(async () => {
+    try { setGfa(await fetchGfaStatus()); } catch { /* silent */ }
+  }, []);
+
   useEffect(() => { load(); }, [load]);
+  useEffect(() => { loadGfa(); }, [loadGfa]);
+
+  async function handleGfaUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.name.endsWith(".csv")) { setGfaMsg("CSV 파일만 업로드 가능합니다."); return; }
+    setGfaUploading(true); setGfaMsg(null);
+    try {
+      const r = await uploadGfaCsv(file);
+      setGfaMsg(`✅ ${r.inserted}일치 등록 (${r.date_from}~${r.date_to}, 총 ${Number(r.total_spend).toLocaleString("ko-KR")}원)`);
+      await Promise.all([loadGfa(), load()]);
+    } catch (err) {
+      setGfaMsg(err instanceof Error ? err.message : "업로드 실패");
+    } finally {
+      setGfaUploading(false);
+      if (gfaFileRef.current) gfaFileRef.current.value = "";
+    }
+  }
 
   async function handleSync() {
     setSyncing(true);
@@ -232,6 +270,41 @@ export default function NaverOps() {
           </span>
         )}
       </div>
+
+      {/* 디스플레이(GFA) 광고비 신선도 배지 + 업로드 */}
+      {(() => {
+        const ago = daysSince(gfa?.date_to);
+        const stale = ago == null || ago >= 2;   // 어제(1일)까지는 정상(당일 데이터는 미제공)
+        return (
+          <div className={`flex flex-wrap items-center gap-3 mb-6 px-4 py-3 rounded-lg border ${
+            stale ? "border-red-300 bg-red-50" : "border-green-200 bg-green-50"
+          }`}>
+            <span className="text-sm font-medium text-gray-700">디스플레이 광고비(GFA)</span>
+            {gfa?.date_to ? (
+              <span className={`text-sm ${stale ? "text-red-600 font-semibold" : "text-green-700"}`}>
+                마지막 업로드: {gfa.date_to}
+                {ago != null && ago > 0 && ` (${ago}일 전)`}
+                {stale ? " ⚠️ 업데이트 필요" : " ✓ 최신"}
+              </span>
+            ) : (
+              <span className="text-sm text-red-600 font-semibold">데이터 없음 ⚠️ CSV 업로드 필요</span>
+            )}
+            <button
+              onClick={() => gfaFileRef.current?.click()}
+              disabled={gfaUploading}
+              className="ml-auto px-3 py-1.5 text-sm rounded-md bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
+            >{gfaUploading ? "업로드 중…" : "📤 CSV 업로드"}</button>
+            <input
+              ref={gfaFileRef} type="file" accept=".csv"
+              onChange={handleGfaUpload} className="hidden"
+            />
+            {gfaMsg && <span className="w-full text-xs text-gray-600">{gfaMsg}</span>}
+            <span className="w-full text-xs text-gray-400">
+              네이버 광고주센터 → 보고서 → 광고비 보고서 CSV 다운로드 후 업로드 (API 미제공으로 수동)
+            </span>
+          </div>
+        );
+      })()}
 
       {/* 요약 카드 */}
       {s && (

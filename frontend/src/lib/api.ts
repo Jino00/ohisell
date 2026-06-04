@@ -446,3 +446,20 @@ export interface NaverSalesProductRow {
 export function fetchNaverSalesSummary(days: number): Promise<NaverSalesSummary> {
   return fetchApi<NaverSalesSummary>(`/api/naver/ops/sales-summary?days=${days}`);
 }
+
+// ── GFA(디스플레이) 광고비 현황·업로드 ───────────────────────────
+export interface GfaStatus {
+  has_data: boolean;
+  date_from: string | null;
+  date_to: string | null;
+  days: number;
+  total_spend: number;
+}
+
+export function fetchGfaStatus(): Promise<GfaStatus> {
+  return fetchApi<GfaStatus>("/api/ad-costs/gfa/status");
+}
+
+export function uploadGfaCsv(file: File) {
+  return uploadFile("/api/ad-costs/gfa/upload", file);
+}
