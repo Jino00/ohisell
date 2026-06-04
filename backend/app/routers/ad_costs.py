@@ -140,9 +140,10 @@ async def upload_gfa_csv(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
 ):
-    """GFA(ADVoost) 광고비 CSV 업로드 → ad_costs 저장.
+    """GFA(디스플레이) 광고비 CSV 업로드 → ad_costs 저장 (source=gfa:쇼핑, 채널=NAVER).
     파일 형식: theohi11_광고비 보고서_YYYYMMDD_YYYYMMDD.csv
-    필수 컬럼: 기간(YYYY.MM.DD.), ADVoost 쇼핑(총비용)
+    필수 컬럼: 기간(YYYY.MM.DD.), 총비용(디스플레이 전체=ADVoost 쇼핑+동영상 조회 등).
+    총비용 없으면 ADVoost 쇼핑으로 폴백.
     """
     if not file.filename or not file.filename.endswith(".csv"):
         raise HTTPException(status_code=400, detail="CSV 파일만 업로드 가능합니다.")
@@ -173,7 +174,8 @@ async def upload_gfa_csv(
             skipped += 1
             continue
 
-        spend_str = (row.get("ADVoost 쇼핑") or row.get("총비용") or "0").strip().replace(",", "")
+        # 총비용 = 디스플레이 전체(ADVoost 쇼핑 + 동영상 조회 등). 동영상 광고비 누락 방지로 총비용 우선.
+        spend_str = (row.get("총비용") or row.get("ADVoost 쇼핑") or "0").strip().replace(",", "")
         try:
             spend = Decimal(spend_str)
         except Exception:
