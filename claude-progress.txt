@@ -4,8 +4,38 @@
 
 ## 현재 상태
 - 날짜: 2026-06-04
-- 단계: ★네이버 N1 완료(일별정산 + 건별정산 이익 정밀화) + N1·D-7 주문 분할 라인 버그 수정 prod 배포. 다음 = N2 통계 또는 자유.
-- 최신 커밋(main): **f8989af**. ★이익 정밀화 + D-7(productOrderId grain) 코드는 prod에 scp 배포됨(라이브 동작), 로컬 git은 uncommitted(커밋은 Jino 지시 시).
+- 단계: ★네이버 **N7 클레임 전체 완료**(취소+반품+교환 12쓰기). 이번 세션 wave3 교환 5종(수거완료/재배송/보류/보류해제/거부, 전부 POST·경로 claim/exchange/*) + ⚖️섹션 EXCHANGE_REQUEST행 수거완료/거부/보류 + COLLECT_DONE행 재배송 + 교환보류해제 모달. prod **dry_run 라이브 실증**(5종 would_send 정확·부분입력 허용·검증400 5종·codex P1 0/P2 2 합의수정). 라이브 EXCHANGE_REQUEST 3·COLLECT_DONE 1 등 대기건 실쓰기는 실고객이라 Jino 결정(미실행). 다음 = N8 상품쓰기 또는 실 클레임처리.
+- 트랙: docs/tracks/active/track_naver-full-integration.md (N1~N6 완료, N7 전체 완료, N2 skip). 쓰기 스펙=docs/references/14. D-9(N6)·D-10(N7) 참조.
+- 최신 커밋(main): **844bdcf**. ★N1~N7 코드 전부 prod scp 배포됨(라이브). 로컬 git uncommitted(커밋은 Jino 지시 시).
+
+## 📦 네이버 N6 발주/발송 처리 (2026-06-04, prod dry_run 라이브)
+- 파일: backend/app/clients/naver.py(confirm_orders/dispatch_orders/delay_order/fetch_pending_orders + _request_write[4xx 본문 surface]), backend/app/routers/naver_ops.py(GET /orders/pending, POST /orders/confirm|dispatch|delay, dry_run 기본 true), frontend api.ts+NaverOps.tsx(📦 섹션: 대기목록→선택→dry_run 모달→실행).
+- ★스펙: 발주확인/발송/발송지연 전부 POST (HANDOFF PUT 오기→API센터 실측 정정). confirm/dispatch 최대30, delay 단건(poid는 path).
+- 대기분류(prod raw_data 실측): PAYED+placeOrderStatus=NOT_YET=발주확인대기 / PAYED+OK=발송대기.
+- codex P2 4건 수정: delay would_send path+body분리·날짜 ISO8601정규화/검증·쓰기실패 구조화detail·발송UI deliveryMethod 노출.
+- ✅✅ 실제 쓰기 실증(2026-06-04): 발주확인 1건 dry_run=false → 네이버 success, NOT_YET→OK 이동 확인. 발송처리는 가짜송장 위험으로 dry_run만.
+
+## ⚖️ 네이버 N7 클레임 전체(취소+반품+교환) (2026-06-04, prod 라이브)
+- 3파동 계획(D-10): ①취소(완료) ②반품(완료) ③교환(완료). 각 파동 codex+배포. ★12쓰기 전부 완료.
+- wave1 취소: GET /claims(119건 라이브), POST /claims/cancel/approve(body없음), /claims/cancel/request{cancelReason enum,detail<=500,qty}. codex P1+2P2 수정.
+- wave2 반품(★이번 세션): POST /claims/return/approve(body없음)·/reject{rejectReturnReason 자유텍스트}·/holdback{holdbackClassType enum14+holdbackReturnDetailReason+extraReturnFeeAmount?}·/holdback/release(body없음)·/request{returnReason enum11+collectDeliveryMethod enum11+collectDeliveryCompany?+collectTrackingNumber?+returnQuantity?(생략=전체)}. 전부 dry_run 기본·단건 path.
+- 파일: naver.py(approve/reject/holdback/release/request_return 5메서드), naver_ops.py(/claims/return/* 5엔드포인트+enum/길이/수량 검증), api.ts(naver*Return 5함수+3 enum 상수), NaverOps.tsx(⚖️ RETURN_REQUEST행 승인/거부/보류 버튼+직접반품·보류해제 헤더 모달).
+- codex review: **P1 0 / P2 0** (반품 path/body·no-body null·camelCase·필수검증·선택생략 전부 확인).
+- prod 실증: 5종 dry_run would_send 정확, 검증400 6종(빈사유/잘못enum×3/음수비용/빈poid) OK. ★라이브 RETURN_REQUEST 5건 존재(실고객 반품요청) → 실승인/거부는 Jino 건별 결정(미실행).
+- 스펙 누적: docs/references/14 N7 wave2 (반품 5종, holdbackClassType/returnReason/deliveryMethod enum, API센터 실측. ★EXTRAFEEE 철자 원문대로).
+- wave3 교환(★이번 세션): POST /claims/exchange/collect/approve(body없음)·/dispatch{reDeliveryMethod?·Company?·TrackingNumber? 전부 선택}·/holdback{holdbackClassType(반품과 동일 enum)+holdbackExchangeDetailReason+extraExchangeFeeAmount?}·/holdback/release(body없음)·/reject{rejectExchangeReason 자유텍스트}. 경로 claim/exchange/*. naver.py 5메서드+naver_ops.py 5엔드포인트(반품 enum상수 재사용)+api.ts 5함수+NaverOps.tsx(EXCHANGE_REQUEST행 수거완료/거부/보류+COLLECT_DONE행 재배송+교환보류해제 헤더).
+- wave3 codex: P1 0 / P2 2 합의수정 — 재배송 DELIVERY 택배사+송장 XOR 강제 제거(스펙상 전 필드 선택, 추측금지), 모달 "택배 시 필수"→"(선택)". 스펙=docs/references/14 N7 wave3.
+- 다음: N8 상품쓰기 / 실 클레임처리(Jino 건별) / git 커밋(Jino 지시 시).
+
+## 🛒 네이버 D-8 운영패널 이익 회계 정확화 — 배송비 회계 + 공급가(VAT) 통일 (2026-06-04, prod 라이브)
+- ★범위: naver_ops.py sales-summary만. 메인 profit_calculator·쿠팡·cafe24 미변경(Jino 명시). 메인은 향후 별도.
+- 버그였던 것: 기존 패널이 고객배송비(deliveryFeeAmount=shipping_cost)를 비용으로 차감(부호 반대, 매출인데)·한진물류비 누락·VAT 미반영.
+- 수정: ①고객배송비→매출 가산 ②한진물류비 신설=packageNumber distinct 배송건×1900(NULLIF+COALESCE, 메인 엔진 동일기준) ③공급가 통일: 순이익=(상품매출+고객배송비−수수료−원가−한진물류비)÷1.1 − 광고비
+- ★VAT 상태(라이브 검색·Jino 확인): 매출/원가/한진물류비/수수료=VAT포함(÷1.1), 광고비=공급가(네이버광고 세금계산서 별도, 그대로). 부가세는 통과항목이라 공급가 통일이 정석
+- 표시: 전 금액 공급가 기준(매출−비용=이익 일관)+총매출에 VAT포함 병기. 카드 "배송비"→"물류비(한진)". 상품별=상품손익(매출−수수료−원가)÷1.1, 배송/물류/광고는 요약만
+- codex review: P1 0건(회계모델 전부 정확 확인). P2 packageNumber 빈문자열→NULLIF 합의
+- ★prod 라이브: 30일 매출(공급가)33,078,918(VAT포함36,386,810)/배송매출2,634,090/한진2,938,090(1701건)/이익6,683,743·20.21%. 검산 통과. 수정전 6,153,918·18.6%→+53만 정확
+- 메타: 쿠팡/cafe24 동일정확화는 채널별 수수료·광고비 VAT 미확인(쿠팡판매수수료·쿠팡/메타광고비·cafe24 PG) → 추정금지, 확인 후 별도
 
 ## 🛒 네이버 N1·D-7 주문 분할 productOrderId 버그 수정 (2026-06-04, prod 라이브)
 - 버그: fetch_orders가 같은(order,product)의 분할 productOrderId 2번째를 dedup-skip → 매출·수량 누락(1.4%). 수수료는 settle/case가 합산돼 실효율 왜곡(D-6과 충돌).

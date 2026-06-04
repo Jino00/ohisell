@@ -423,9 +423,15 @@ export function opsExpireInstantCoupon(couponId: number, accountKey: string, dry
 // ── 네이버 운영 패널 — 매출 현황 ─────────────────────────────────
 
 export interface NaverSalesSummaryData {
-  revenue: string; fee: string; cost: string;
-  ad_spend: string; shipping: string;
+  revenue: string;            // 공급가 매출(상품+배송)
+  revenue_vat_incl: string;   // VAT 포함(소비자 결제) 병기
+  product_revenue: string; delivery_revenue: string;  // 공급가 상품매출 / 고객배송비 매출
+  fee: string; cost: string;
+  ad_spend: string;           // 광고비(이미 공급가)
+  logistics: string;          // 한진 물류비(공급가)
+  shipment_count: number;     // 물리배송 건수(packageNumber)
   profit: string; profit_rate: string | null;
+  supply_basis?: boolean;     // 전 금액 공급가(VAT 제외) 기준
   sa_conv_revenue: string; sa_ad_spend: string; sa_roas: string | null;
   sa_conv_from: string | null; sa_conv_to: string | null;
   fee_settled_lines: number; fee_est_lines: number;  // 실측/예상 수수료 라인 수 (D-6)
@@ -441,9 +447,8 @@ export interface NaverSalesSummary {
 export interface NaverSalesProductRow {
   product_name: string;
   platform_id: string;
-  revenue: string; fee: string; cost: string;
+  revenue: string; fee: string; cost: string;  // 공급가(VAT 제외) 기준
   fee_actual?: boolean;  // 수수료가 전부 정산 실측이면 true (D-6)
-  shipping: string;
   profit: string; profit_rate: string | null;
 }
 
@@ -492,3 +497,399 @@ export function fetchNaverSettlement(days: number): Promise<NaverSettlement> {
 export function syncNaverSettlement(days: number): Promise<{ synced: number; date_from: string; date_to: string }> {
   return fetchApi(`/api/naver/ops/settlement/sync?days=${days}`, { method: "POST" });
 }
+
+export interface NaverInquiryRow {
+  inquiry_no: number;
+  category: string;
+  title: string;
+  inquiry_content: string;
+  inquiry_date: string;
+  answered: boolean;
+  answer_content: string;
+  answer_date: string;
+  order_id: string;
+  product_no: string;
+  product_name: string;
+  product_order_option: string;
+  customer_name: string;
+  customer_id: string;
+}
+export interface NaverInquiries {
+  period: { from: string; to: string };
+  total: number;
+  unanswered: number;
+  rows: NaverInquiryRow[];
+}
+export function fetchNaverInquiries(days: number, answered?: boolean): Promise<NaverInquiries> {
+  const p = answered === undefined ? "" : `&answered=${answered}`;
+  return fetchApi<NaverInquiries>(`/api/naver/ops/inquiries?days=${days}${p}`);
+}
+
+export interface NaverChannelProduct {
+  channel_product_no: number;
+  name: string;
+  status_type: string;
+  sale_price: number | null;
+  discounted_price: number | null;
+  stock_quantity: number | null;
+  category: string;
+  image_url: string;
+  reg_date: string;
+  modified_date: string;
+}
+
+export interface NaverProductItem {
+  origin_product_no: number;
+  group_product_no: number | null;
+  channel_products: NaverChannelProduct[];
+}
+
+export interface NaverProductList {
+  total_elements: number;
+  total_pages: number;
+  page: number;
+  contents: NaverProductItem[];
+}
+
+export function fetchNaverProducts(status?: string, page = 1, size = 500): Promise<NaverProductList> {
+  const p = status ? `&status=${status}` : "";
+  return fetchApi<NaverProductList>(`/api/naver/ops/products?page=${page}&size=${size}${p}`);
+}
+
+export interface NaverSellerChannel {
+  channel_no: number;
+  channel_type: string;
+  name: string;
+  url: string;
+  talktalk_id: string;
+}
+
+export interface NaverSellerInfo {
+  account_id: string;
+  account_uid: string;
+  grade: string;
+  channels: NaverSellerChannel[];
+}
+
+export function fetchNaverSellerInfo(): Promise<NaverSellerInfo> {
+  return fetchApi<NaverSellerInfo>("/api/naver/ops/seller");
+}
+
+// ── N6. 발주/발송 처리 (쓰기 — dry_run+confirm) ──────────────────────
+export interface NaverPendingOrder {
+  product_order_id: string;
+  order_id: string;
+  product_name: string;
+  quantity: number;
+  orderer_name: string;
+  receiver_name: string;
+  shipping_due_date: string;
+  expected_delivery_company: string;
+  expected_delivery_method: string;
+  package_number: string;
+  shipping_memo: string;
+  place_order_status: string;
+  order_date: string;
+}
+
+export interface NaverPendingOrders {
+  awaiting_place: NaverPendingOrder[];     // 발주확인 대기
+  awaiting_dispatch: NaverPendingOrder[];  // 발송 대기
+}
+
+export function fetchNaverPendingOrders(days = 14): Promise<NaverPendingOrders> {
+  return fetchApi<NaverPendingOrders>(`/api/naver/ops/orders/pending?days=${days}`);
+}
+
+// dry_run=true면 would_send만, false면 naver 응답
+export interface NaverWriteResult {
+  dry_run: boolean;
+  action: "confirm" | "dispatch" | "delay";
+  count?: number;
+  would_send?: Record<string, unknown>;
+  naver?: Record<string, unknown>;
+}
+
+export function naverConfirmOrders(productOrderIds: string[], dryRun = true): Promise<NaverWriteResult> {
+  return fetchApi<NaverWriteResult>(`/api/naver/ops/orders/confirm?dry_run=${dryRun}`, {
+    method: "POST",
+    body: JSON.stringify({ product_order_ids: productOrderIds }),
+  });
+}
+
+export interface NaverDispatchItem {
+  product_order_id: string;
+  delivery_method: string;
+  delivery_company_code?: string;
+  tracking_number?: string;
+  dispatch_date?: string;
+}
+
+export function naverDispatchOrders(items: NaverDispatchItem[], dryRun = true): Promise<NaverWriteResult> {
+  return fetchApi<NaverWriteResult>(`/api/naver/ops/orders/dispatch?dry_run=${dryRun}`, {
+    method: "POST",
+    body: JSON.stringify({ items }),
+  });
+}
+
+export function naverDelayOrder(
+  payload: {
+    product_order_id: string;
+    dispatch_due_date: string;
+    delayed_dispatch_reason: string;
+    dispatch_delayed_detailed_reason?: string;
+  },
+  dryRun = true,
+): Promise<NaverWriteResult> {
+  return fetchApi<NaverWriteResult>(`/api/naver/ops/orders/delay?dry_run=${dryRun}`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+// 택배사 코드 — 국내 주요 (전체는 API 문서, 그 외는 직접 입력)
+export const NAVER_DELIVERY_COMPANIES: { code: string; name: string }[] = [
+  { code: "CJGLS", name: "CJ대한통운" },
+  { code: "HANJIN", name: "한진택배" },
+  { code: "HYUNDAI", name: "롯데택배" },
+  { code: "KGB", name: "로젠택배" },
+  { code: "EPOST", name: "우체국택배" },
+  { code: "KDEXP", name: "경동택배" },
+  { code: "CVSNET", name: "GSPostbox택배" },
+  { code: "CUPARCEL", name: "CU편의점택배" },
+  { code: "DAESIN", name: "대신택배" },
+  { code: "NONGHYUP", name: "농협택배" },
+];
+
+// 배송방법 코드 — DELIVERY만 택배사+송장 필수
+export const NAVER_DELIVERY_METHODS: { code: string; name: string }[] = [
+  { code: "DELIVERY", name: "택배·등기·소포" },
+  { code: "DIRECT_DELIVERY", name: "직접 전달" },
+  { code: "QUICK_SVC", name: "퀵서비스" },
+  { code: "VISIT_RECEIPT", name: "방문 수령" },
+  { code: "NOTHING", name: "배송 없음" },
+];
+
+export const NAVER_DELAY_REASONS: { code: string; name: string }[] = [
+  { code: "PRODUCT_PREPARE", name: "상품 준비 중" },
+  { code: "CUSTOMER_REQUEST", name: "고객 요청" },
+  { code: "CUSTOM_BUILD", name: "주문 제작" },
+  { code: "RESERVED_DISPATCH", name: "예약 발송" },
+  { code: "OVERSEA_DELIVERY", name: "해외 배송" },
+  { code: "ETC", name: "기타" },
+];
+
+// ── N7. 클레임 (취소/반품/교환) — wave 1 취소 ──────────────────────
+export interface NaverClaim {
+  product_order_id: string;
+  order_id: string;
+  claim_type: string;     // CANCEL / RETURN / EXCHANGE
+  claim_status: string;   // CANCEL_REQUEST 등
+  last_changed_type: string;
+  product_order_status: string;
+  product_name: string;
+  quantity: number;
+  orderer_name: string;
+}
+
+export interface NaverClaims {
+  claims: NaverClaim[];
+}
+
+export function fetchNaverClaims(days = 14): Promise<NaverClaims> {
+  return fetchApi<NaverClaims>(`/api/naver/ops/claims?days=${days}`);
+}
+
+export function naverApproveCancel(productOrderId: string, dryRun = true): Promise<NaverWriteResult> {
+  return fetchApi<NaverWriteResult>(`/api/naver/ops/claims/cancel/approve?dry_run=${dryRun}`, {
+    method: "POST",
+    body: JSON.stringify({ product_order_id: productOrderId }),
+  });
+}
+
+export function naverRequestCancel(
+  payload: { product_order_id: string; cancel_reason: string; cancel_detailed_reason?: string; cancel_quantity?: number | null },
+  dryRun = true,
+): Promise<NaverWriteResult> {
+  return fetchApi<NaverWriteResult>(`/api/naver/ops/claims/cancel/request?dry_run=${dryRun}`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export const NAVER_CANCEL_REASONS: { code: string; name: string }[] = [
+  { code: "INTENT_CHANGED", name: "구매 의사 취소" },
+  { code: "COLOR_AND_SIZE", name: "색상 및 사이즈 변경" },
+  { code: "WRONG_ORDER", name: "다른 상품 잘못 주문" },
+  { code: "PRODUCT_UNSATISFIED", name: "서비스 불만족" },
+  { code: "DELAYED_DELIVERY", name: "배송 지연" },
+  { code: "SOLD_OUT", name: "상품 품절" },
+  { code: "INCORRECT_INFO", name: "상품 정보 상이" },
+];
+
+// ── N7 wave 2 반품 (Return) ──────────────────────────────────────
+// 반품 요청 사유 (requestReturnClaimReason enum, 실측)
+export const NAVER_RETURN_REASONS: { code: string; name: string }[] = [
+  { code: "INTENT_CHANGED", name: "구매 의사 취소" },
+  { code: "COLOR_AND_SIZE", name: "색상 및 사이즈 변경" },
+  { code: "WRONG_ORDER", name: "다른 상품 잘못 주문" },
+  { code: "PRODUCT_UNSATISFIED", name: "서비스 불만족" },
+  { code: "DELAYED_DELIVERY", name: "배송 지연" },
+  { code: "SOLD_OUT", name: "상품 품절" },
+  { code: "DROPPED_DELIVERY", name: "배송 누락" },
+  { code: "BROKEN", name: "상품 파손" },
+  { code: "INCORRECT_INFO", name: "상품 정보 상이" },
+  { code: "WRONG_DELIVERY", name: "오배송" },
+  { code: "WRONG_OPTION", name: "색상 등 다른 상품 잘못 배송" },
+];
+
+// 반품 보류 유형 (holdbackClassType enum, 실측 — ★EXTRAFEEE 철자 원문대로)
+export const NAVER_RETURN_HOLDBACK_TYPES: { code: string; name: string }[] = [
+  { code: "RETURN_DELIVERYFEE", name: "반품 배송비 청구" },
+  { code: "EXTRAFEEE", name: "추가 비용 청구" },
+  { code: "RETURN_DELIVERYFEE_AND_EXTRAFEEE", name: "반품 배송비 + 추가 비용 청구" },
+  { code: "RETURN_PRODUCT_NOT_DELIVERED", name: "반품 상품 미입고" },
+  { code: "ETC", name: "기타 사유" },
+  { code: "SELLER_CONFIRM_NEED", name: "판매자 확인 필요" },
+  { code: "PURCHASER_CONFIRM_NEED", name: "구매자 확인 필요" },
+  { code: "SELLER_REMIT", name: "판매자 직접 송금" },
+  { code: "ETC2", name: "기타" },
+];
+
+// 반품 수거 배송 방법 (deliveryMethod enum, 실측 — RETURN_* 포함)
+export const NAVER_COLLECT_DELIVERY_METHODS: { code: string; name: string }[] = [
+  { code: "DELIVERY", name: "택배·등기·소포" },
+  { code: "RETURN_DELIVERY", name: "일반 반품 택배" },
+  { code: "RETURN_DESIGNATED", name: "지정 반품 택배" },
+  { code: "RETURN_INDIVIDUAL", name: "직접 반송" },
+  { code: "VISIT_RECEIPT", name: "방문 수령" },
+  { code: "DIRECT_DELIVERY", name: "직접 전달" },
+  { code: "QUICK_SVC", name: "퀵서비스" },
+  { code: "NOTHING", name: "배송 없음" },
+];
+
+export function naverApproveReturn(productOrderId: string, dryRun = true): Promise<NaverWriteResult> {
+  return fetchApi<NaverWriteResult>(`/api/naver/ops/claims/return/approve?dry_run=${dryRun}`, {
+    method: "POST",
+    body: JSON.stringify({ product_order_id: productOrderId }),
+  });
+}
+
+export function naverRejectReturn(
+  productOrderId: string,
+  rejectReturnReason: string,
+  dryRun = true,
+): Promise<NaverWriteResult> {
+  return fetchApi<NaverWriteResult>(`/api/naver/ops/claims/return/reject?dry_run=${dryRun}`, {
+    method: "POST",
+    body: JSON.stringify({ product_order_id: productOrderId, reject_return_reason: rejectReturnReason }),
+  });
+}
+
+export function naverHoldbackReturn(
+  payload: {
+    product_order_id: string;
+    holdback_class_type: string;
+    holdback_return_detail_reason: string;
+    extra_return_fee_amount?: number | null;
+  },
+  dryRun = true,
+): Promise<NaverWriteResult> {
+  return fetchApi<NaverWriteResult>(`/api/naver/ops/claims/return/holdback?dry_run=${dryRun}`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function naverReleaseReturnHoldback(productOrderId: string, dryRun = true): Promise<NaverWriteResult> {
+  return fetchApi<NaverWriteResult>(`/api/naver/ops/claims/return/holdback/release?dry_run=${dryRun}`, {
+    method: "POST",
+    body: JSON.stringify({ product_order_id: productOrderId }),
+  });
+}
+
+export function naverRequestReturn(
+  payload: {
+    product_order_id: string;
+    return_reason: string;
+    collect_delivery_method: string;
+    collect_delivery_company?: string;
+    collect_tracking_number?: string;
+    return_quantity?: number | null;
+  },
+  dryRun = true,
+): Promise<NaverWriteResult> {
+  return fetchApi<NaverWriteResult>(`/api/naver/ops/claims/return/request?dry_run=${dryRun}`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+// ── N7 wave 3 교환 (Exchange) ────────────────────────────────────
+// 교환 보류 유형은 반품과 동일(NAVER_RETURN_HOLDBACK_TYPES 재사용),
+// 재배송 배송방법은 수거와 동일(NAVER_COLLECT_DELIVERY_METHODS 재사용).
+export function naverApproveExchangeCollect(productOrderId: string, dryRun = true): Promise<NaverWriteResult> {
+  return fetchApi<NaverWriteResult>(`/api/naver/ops/claims/exchange/collect/approve?dry_run=${dryRun}`, {
+    method: "POST",
+    body: JSON.stringify({ product_order_id: productOrderId }),
+  });
+}
+
+export function naverDispatchExchange(
+  payload: {
+    product_order_id: string;
+    re_delivery_method?: string;
+    re_delivery_company?: string;
+    re_delivery_tracking_number?: string;
+  },
+  dryRun = true,
+): Promise<NaverWriteResult> {
+  return fetchApi<NaverWriteResult>(`/api/naver/ops/claims/exchange/dispatch?dry_run=${dryRun}`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function naverHoldbackExchange(
+  payload: {
+    product_order_id: string;
+    holdback_class_type: string;
+    holdback_exchange_detail_reason: string;
+    extra_exchange_fee_amount?: number | null;
+  },
+  dryRun = true,
+): Promise<NaverWriteResult> {
+  return fetchApi<NaverWriteResult>(`/api/naver/ops/claims/exchange/holdback?dry_run=${dryRun}`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function naverReleaseExchangeHoldback(productOrderId: string, dryRun = true): Promise<NaverWriteResult> {
+  return fetchApi<NaverWriteResult>(`/api/naver/ops/claims/exchange/holdback/release?dry_run=${dryRun}`, {
+    method: "POST",
+    body: JSON.stringify({ product_order_id: productOrderId }),
+  });
+}
+
+export function naverRejectExchange(
+  productOrderId: string,
+  rejectExchangeReason: string,
+  dryRun = true,
+): Promise<NaverWriteResult> {
+  return fetchApi<NaverWriteResult>(`/api/naver/ops/claims/exchange/reject?dry_run=${dryRun}`, {
+    method: "POST",
+    body: JSON.stringify({ product_order_id: productOrderId, reject_exchange_reason: rejectExchangeReason }),
+  });
+}
+
+// claimStatus 코드 → 한글 라벨 (표시용, 네이버 실측 enum)
+export const NAVER_CLAIM_STATUS_LABELS: Record<string, string> = {
+  CANCEL_REQUEST: "취소 요청", CANCELING: "취소 처리중", CANCEL_DONE: "취소 완료", CANCEL_REJECT: "취소 철회",
+  RETURN_REQUEST: "반품 요청", EXCHANGE_REQUEST: "교환 요청", COLLECTING: "수거 처리중", COLLECT_DONE: "수거 완료",
+  EXCHANGE_REDELIVERING: "교환 재배송중", RETURN_DONE: "반품 완료", EXCHANGE_DONE: "교환 완료",
+  RETURN_REJECT: "반품 철회", EXCHANGE_REJECT: "교환 철회",
+  PURCHASE_DECISION_HOLDBACK: "구매확정 보류", PURCHASE_DECISION_REQUEST: "구매확정 요청",
+  PURCHASE_DECISION_HOLDBACK_RELEASE: "구매확정 보류해제",
+  ADMIN_CANCELING: "직권취소 처리중", ADMIN_CANCEL_DONE: "직권취소 완료", ADMIN_CANCEL_REJECT: "직권취소 철회",
+};

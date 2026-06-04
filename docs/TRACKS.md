@@ -1,7 +1,7 @@
 # TRACKS — 활성/완료 메가 프로젝트 인덱스
 
 ## 🟢 Active
-- [네이버 스마트스토어 커머스 API 전 기능 연결](tracks/active/track_naver-full-integration.md) — N1 정산 진행 중. 읽기(N1~5)→쓰기(N6~8). 정산 scope 확인 완료(2026-06-04).
+- [네이버 스마트스토어 커머스 API 전 기능 연결](tracks/active/track_naver-full-integration.md) — N1~N6 완료(N2 skip), N7 클레임 전체(취소+반품+교환 12쓰기) 완료(prod dry_run 라이브·codex 통과). 라이브 클레임 대기건 실처리는 Jino 결정 대기. 다음 N8 상품 쓰기.
 
 ## ⏸ Paused
 - (없음)

@@ -6,7 +6,7 @@ import base64
 import hashlib
 import logging
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import bcrypt
@@ -130,6 +130,56 @@ class NaverClient(BaseChannelClient):
                 log.error("네이버 API 에러: %s — %s", url, e)
                 return None
         return None
+
+    def _request_write(self, method: str, path: str, body: dict | None = None) -> dict:
+        """쓰기(발주/발송) 전용 요청. 4xx 비즈니스 에러 본문을 그대로 surface.
+
+        body=None이면 본문 없이 전송(requests가 json=None일 때 body 생략) — '본문 없음'
+        스펙(예: 취소 승인)을 정확히 따른다.
+
+        읽기용 _request/_request_post는 실패를 None으로 삼키지만, 쓰기는 네이버가
+        주는 실패 사유(예: 이미 발송됨·발주확인 안 됨)를 사용자에게 보여줘야 하므로
+        4xx에서는 재시도/삼키지 않고 {ok, status, data, error}로 반환한다.
+        5xx·네트워크 오류만 재시도.
+        반환: {"ok": bool, "status": int, "data": dict|None, "error": str|None}
+        """
+        if not self._access_token:
+            self._get_access_token()
+        if not self._access_token:
+            return {"ok": False, "status": 401, "data": None, "error": "네이버 토큰 발급 실패"}
+
+        url = f"{NAVER_API_BASE}{path}"
+        for attempt in range(MAX_RETRIES + 1):
+            headers = {
+                "Authorization": f"Bearer {self._access_token}",
+                "Content-Type": "application/json",
+            }
+            try:
+                resp = requests.request(method, url, headers=headers, json=body, timeout=30)
+                if resp.status_code == 401 and attempt == 0:
+                    self._get_access_token()  # 토큰 만료 1회 갱신 후 재시도
+                    continue
+                if resp.status_code >= 500 and attempt < MAX_RETRIES:
+                    time.sleep(RETRY_BASE_DELAY * (2 ** attempt))
+                    continue
+                try:
+                    payload = resp.json()
+                except ValueError:
+                    payload = {"raw": resp.text}
+                if 200 <= resp.status_code < 300:
+                    return {"ok": True, "status": resp.status_code, "data": payload, "error": None}
+                # 4xx 비즈니스 에러 — 네이버 메시지 surface (재시도/삼키지 않음)
+                msg = ""
+                if isinstance(payload, dict):
+                    msg = payload.get("message") or payload.get("invalidInputs") or str(payload)
+                return {"ok": False, "status": resp.status_code, "data": payload, "error": str(msg)}
+            except requests.exceptions.RequestException as e:
+                if attempt < MAX_RETRIES:
+                    time.sleep(RETRY_BASE_DELAY * (2 ** attempt))
+                    continue
+                log.error("네이버 쓰기 API 에러: %s — %s", url, e)
+                return {"ok": False, "status": 0, "data": None, "error": str(e)}
+        return {"ok": False, "status": 0, "data": None, "error": "재시도 초과"}
 
     def test_connection(self) -> dict:
         token = self._get_access_token()
@@ -315,6 +365,478 @@ class NaverClient(BaseChannelClient):
             time.sleep(0.15)
         log.info("네이버 건별 정산 %d건 수집 (결제일 %s ~ %s)", len(results), date_from, date_to)
         return results
+
+    def fetch_inquiries(
+        self,
+        date_from: date,
+        date_to: date,
+        answered: bool | None = None,
+    ) -> list[dict]:
+        """고객 문의 목록 조회 (/v1/pay-user/inquiries). 트랙 N3.
+
+        startSearchDate ~ endSearchDate 범위, 페이지네이션 자동 처리(size=200).
+        answered=None이면 전체, True이면 답변 완료, False이면 미답변.
+        """
+        path = "/v1/pay-user/inquiries"
+        results: list[dict] = []
+        page = 1
+        params: dict = {
+            "startSearchDate": date_from.isoformat(),
+            "endSearchDate": date_to.isoformat(),
+            "size": 200,
+            "page": page,
+        }
+        if answered is not None:
+            params["answered"] = str(answered).lower()
+
+        while True:
+            params["page"] = page
+            data = self._request("GET", path, params)
+            if not data:
+                break
+            content = data.get("content", []) if isinstance(data, dict) else []
+            for item in content:
+                results.append({
+                    "inquiry_no": item.get("inquiryNo"),
+                    "category": item.get("category") or "",
+                    "title": item.get("title") or "",
+                    "inquiry_content": item.get("inquiryContent") or "",
+                    "inquiry_date": item.get("inquiryRegistrationDateTime") or "",
+                    "answered": bool(item.get("answered")),
+                    "answer_content": item.get("answerContent") or "",
+                    "answer_date": item.get("answerRegistrationDateTime") or "",
+                    "order_id": item.get("orderId") or "",
+                    "product_no": item.get("productNo") or "",
+                    "product_name": item.get("productName") or "",
+                    "product_order_option": item.get("productOrderOption") or "",
+                    "customer_name": item.get("customerName") or "",
+                    "customer_id": item.get("customerId") or "",
+                })
+            total_pages = data.get("totalPages", 1) if isinstance(data, dict) else 1
+            if page >= total_pages:
+                break
+            page += 1
+            time.sleep(0.15)
+        log.info("네이버 고객 문의 %d건 수집 (%s ~ %s)", len(results), date_from, date_to)
+        return results
+
+    def search_products(
+        self,
+        status_types: list[str] | None = None,
+        keyword_type: str | None = None,
+        channel_product_nos: list[int] | None = None,
+        page: int = 1,
+        size: int = 500,
+    ) -> dict:
+        """상품 목록 조회 (POST /v1/products/search). 트랙 N4.
+
+        status_types: SALE, OUTOFSTOCK, SUSPENSION 등. None이면 전체.
+        반환: {totalElements, totalPages, page, contents}
+        """
+        body: dict = {"page": page, "size": size}
+        if status_types:
+            body["productStatusTypes"] = status_types
+        if keyword_type and channel_product_nos:
+            body["searchKeywordType"] = keyword_type
+            body["channelProductNos"] = channel_product_nos
+        data = self._request_post("/v1/products/search", body) or {}
+        return {
+            "total_elements": data.get("totalElements", 0),
+            "total_pages": data.get("totalPages", 1),
+            "page": data.get("page", page),
+            "contents": [
+                {
+                    "origin_product_no": item.get("originProductNo"),
+                    "group_product_no": item.get("groupProductNo"),
+                    "channel_products": [
+                        {
+                            "channel_product_no": cp.get("channelProductNo"),
+                            "name": cp.get("name") or "",
+                            "status_type": cp.get("statusType") or "",
+                            "sale_price": cp.get("salePrice"),
+                            "discounted_price": cp.get("discountedPrice"),
+                            "stock_quantity": cp.get("stockQuantity"),
+                            "category": cp.get("wholeCategoryName") or "",
+                            "image_url": (cp.get("representativeImage") or {}).get("url") or "",
+                            "reg_date": cp.get("regDate") or "",
+                            "modified_date": cp.get("modifiedDate") or "",
+                        }
+                        for cp in (item.get("channelProducts") or [])
+                    ],
+                }
+                for item in (data.get("contents") or [])
+            ],
+        }
+
+    def fetch_seller_info(self) -> dict:
+        """판매자 계정·채널 정보 조회 (N5). 트랙 N5.
+
+        계정: GET /v1/seller/account → accountId, grade
+        채널: GET /v1/seller/channels → channelNo, name, url
+        """
+        account = self._request("GET", "/v1/seller/account") or {}
+        channels = self._request("GET", "/v1/seller/channels") or []
+        return {
+            "account_id": account.get("accountId") or "",
+            "account_uid": account.get("accountUid") or "",
+            "grade": account.get("grade") or "",
+            "channels": [
+                {
+                    "channel_no": c.get("channelNo"),
+                    "channel_type": c.get("channelType") or "",
+                    "name": c.get("name") or "",
+                    "url": c.get("url") or "",
+                    "talktalk_id": c.get("talkTalkAccountId") or "",
+                }
+                for c in (channels if isinstance(channels, list) else [])
+            ],
+        }
+
+    def fetch_pending_orders(self, days: int = 14) -> dict:
+        """발주확인 대기·발송 대기 주문 라이브 조회 (트랙 N6, 라이브 조회 방식).
+
+        last-changed-statuses(최근 days일) → 상세 조회 → PAYED 건을 placeOrderStatus로 분류.
+        (prod raw_data 실측: PAYED+NOT_YET=발주확인 대기, PAYED+OK=발송 대기 — 원칙 22 라이브 증거)
+        ※ 변경상태 기반이라 days 창 밖 미발송 건은 누락 가능 → 창은 넉넉히(기본 14일).
+        반환: {"awaiting_place": [...], "awaiting_dispatch": [...]} (각 항목 dict).
+        """
+        status_path = "/v1/pay-order/seller/product-orders/last-changed-statuses"
+        detail_path = "/v1/pay-order/seller/product-orders/query"
+        today = datetime.now(timezone(timedelta(hours=9))).date()  # KST 기준 (서버 UTC 보정)
+        dfrom = today - timedelta(days=days - 1)
+
+        seen: set[str] = set()
+        po_ids: list[str] = []
+        current = dfrom
+        while current <= today:
+            params = {
+                "lastChangedFrom": f"{current.isoformat()}T00:00:00.000+09:00",
+                "lastChangedTo": f"{current.isoformat()}T23:59:59.999+09:00",
+            }
+            result = self._request("GET", status_path, params)
+            if result:
+                for item in result.get("data", {}).get("lastChangeStatuses", []):
+                    poid = item.get("productOrderId", "")
+                    if poid and poid not in seen:
+                        seen.add(poid)
+                        po_ids.append(poid)
+            current += timedelta(days=1)
+            time.sleep(0.2)
+
+        awaiting_place: list[dict] = []
+        awaiting_dispatch: list[dict] = []
+        emitted: set[str] = set()
+        for i in range(0, len(po_ids), 300):
+            chunk = po_ids[i:i + 300]
+            detail = self._request_post(detail_path, {"productOrderIds": chunk})
+            if not detail:
+                continue
+            for entry in detail.get("data", []):
+                po = entry.get("productOrder", {})
+                order_info = entry.get("order", {})
+                poid = str(po.get("productOrderId") or "")
+                if not poid or poid in emitted:
+                    continue
+                emitted.add(poid)
+                if po.get("productOrderStatus") != "PAYED":
+                    continue  # 결제완료(미발송)만 대상 — 배송중/취소/구매확정 제외
+                row = {
+                    "product_order_id": poid,
+                    "order_id": str(order_info.get("orderId") or ""),
+                    "product_name": po.get("productName") or "",
+                    "quantity": int(po.get("quantity", 1)),
+                    "orderer_name": order_info.get("ordererName") or "",
+                    "receiver_name": (po.get("shippingAddress") or {}).get("name") or "",
+                    "shipping_due_date": po.get("shippingDueDate") or "",
+                    "expected_delivery_company": po.get("expectedDeliveryCompany") or "",
+                    "expected_delivery_method": po.get("expectedDeliveryMethod") or "",
+                    "package_number": po.get("packageNumber") or "",
+                    "shipping_memo": po.get("shippingMemo") or "",
+                    "place_order_status": po.get("placeOrderStatus") or "",
+                    "order_date": order_info.get("orderDate") or "",
+                }
+                if po.get("placeOrderStatus") == "OK":
+                    awaiting_dispatch.append(row)
+                else:  # NOT_YET 등 — 발주확인 대기
+                    awaiting_place.append(row)
+            time.sleep(0.3)
+
+        log.info(
+            "네이버 미발송 주문 조회: 발주확인대기 %d / 발송대기 %d (%s ~ %s)",
+            len(awaiting_place), len(awaiting_dispatch), dfrom, today,
+        )
+        return {"awaiting_place": awaiting_place, "awaiting_dispatch": awaiting_dispatch}
+
+    def confirm_orders(self, product_order_ids: list[str]) -> dict:
+        """발주 확인 처리 (POST .../confirm). 최대 30건. 트랙 N6.
+
+        반환: _request_write 결과 {ok, status, data, error}.
+        """
+        return self._request_write(
+            "POST",
+            "/v1/pay-order/seller/product-orders/confirm",
+            {"productOrderIds": product_order_ids},
+        )
+
+    def dispatch_orders(self, items: list[dict]) -> dict:
+        """발송 처리 (POST .../dispatch). 최대 30건. 트랙 N6.
+
+        items: 이미 네이버 형식으로 구성된 dict 목록
+          [{productOrderId, deliveryMethod, deliveryCompanyCode, trackingNumber, dispatchDate}]
+        반환: _request_write 결과.
+        """
+        return self._request_write(
+            "POST",
+            "/v1/pay-order/seller/product-orders/dispatch",
+            {"dispatchProductOrders": items},
+        )
+
+    def delay_order(
+        self,
+        product_order_id: str,
+        dispatch_due_date: str,
+        delayed_dispatch_reason: str,
+        dispatch_delayed_detailed_reason: str,
+    ) -> dict:
+        """발송 지연 처리 (POST .../{productOrderId}/delay). 단건. 트랙 N6.
+
+        반환: _request_write 결과.
+        """
+        path = f"/v1/pay-order/seller/product-orders/{product_order_id}/delay"
+        return self._request_write(
+            "POST",
+            path,
+            {
+                "dispatchDueDate": dispatch_due_date,
+                "delayedDispatchReason": delayed_dispatch_reason,
+                "dispatchDelayedDetailedReason": dispatch_delayed_detailed_reason,
+            },
+        )
+
+    def fetch_claims(self, days: int = 14) -> dict:
+        """클레임(취소/반품/교환) 요청 건 라이브 조회 (트랙 N7). 읽기.
+
+        last-changed-statuses(최근 days)에서 claimStatus 있는 건 수집 → 상세로 상품명·주문자 보강.
+        같은 productOrderId가 여러 번 변경되면 최신(lastChangedDate) 유지.
+        claimStatus/claimType은 네이버 값 그대로 전달(추측 금지) — 처리대상 판별은 라우터/프론트.
+        반환: {"claims": [ {product_order_id, claim_type, claim_status, ...}, ... ]}
+        """
+        status_path = "/v1/pay-order/seller/product-orders/last-changed-statuses"
+        detail_path = "/v1/pay-order/seller/product-orders/query"
+        today = datetime.now(timezone(timedelta(hours=9))).date()
+        dfrom = today - timedelta(days=days - 1)
+
+        by_poid: dict[str, dict] = {}
+        current = dfrom
+        while current <= today:
+            params = {
+                "lastChangedFrom": f"{current.isoformat()}T00:00:00.000+09:00",
+                "lastChangedTo": f"{current.isoformat()}T23:59:59.999+09:00",
+            }
+            result = self._request("GET", status_path, params)
+            if result:
+                for item in result.get("data", {}).get("lastChangeStatuses", []):
+                    poid = item.get("productOrderId", "")
+                    cstatus = item.get("claimStatus")
+                    if not poid or not cstatus:
+                        continue  # 클레임 없는 일반 변경 제외
+                    # 최신 변경만 유지 (lastChangedDate 비교, 문자열 ISO는 사전식=시간순)
+                    prev = by_poid.get(poid)
+                    if prev and (item.get("lastChangedDate") or "") < (prev.get("_lcd") or ""):
+                        continue
+                    by_poid[poid] = {
+                        "product_order_id": poid,
+                        "order_id": item.get("orderId") or "",
+                        "claim_type": item.get("claimType") or "",
+                        "claim_status": cstatus,
+                        "last_changed_type": item.get("lastChangedType") or "",
+                        "product_order_status": item.get("productOrderStatus") or "",
+                        "_lcd": item.get("lastChangedDate") or "",
+                    }
+            current += timedelta(days=1)
+            time.sleep(0.2)
+
+        # 상세 보강 (상품명·주문자·수량)
+        poids = list(by_poid.keys())
+        for i in range(0, len(poids), 300):
+            chunk = poids[i:i + 300]
+            detail = self._request_post(detail_path, {"productOrderIds": chunk})
+            if not detail:
+                continue
+            for entry in detail.get("data", []):
+                po = entry.get("productOrder", {})
+                order_info = entry.get("order", {})
+                poid = str(po.get("productOrderId") or "")
+                row = by_poid.get(poid)
+                if not row:
+                    continue
+                row["product_name"] = po.get("productName") or ""
+                row["quantity"] = int(po.get("quantity", 1))
+                row["orderer_name"] = order_info.get("ordererName") or ""
+            time.sleep(0.3)
+
+        claims = []
+        for row in by_poid.values():
+            row.pop("_lcd", None)
+            row.setdefault("product_name", "")
+            row.setdefault("quantity", 0)
+            row.setdefault("orderer_name", "")
+            claims.append(row)
+        log.info("네이버 클레임 %d건 조회 (%s ~ %s)", len(claims), dfrom, today)
+        return {"claims": claims}
+
+    # ── N7 클레임 — 취소 (wave 1) ──────────────────────────────
+    def approve_cancel(self, product_order_id: str) -> dict:
+        """취소 요청 승인 (POST .../{poid}/claim/cancel/approve). 단건, body 없음. 트랙 N7."""
+        path = f"/v1/pay-order/seller/product-orders/{product_order_id}/claim/cancel/approve"
+        return self._request_write("POST", path, None)  # 스펙상 본문 없음 (codex P1)
+
+    def request_cancel(
+        self,
+        product_order_id: str,
+        cancel_reason: str,
+        cancel_detailed_reason: str = "",
+        cancel_quantity: int | None = None,
+    ) -> dict:
+        """취소 요청 (판매자 직접, POST .../{poid}/claim/cancel/request). 단건. 트랙 N7."""
+        path = f"/v1/pay-order/seller/product-orders/{product_order_id}/claim/cancel/request"
+        body: dict = {"cancelReason": cancel_reason}
+        if cancel_detailed_reason:
+            body["cancelDetailedReason"] = cancel_detailed_reason
+        if cancel_quantity is not None:
+            body["cancelQuantity"] = cancel_quantity
+        return self._request_write("POST", path, body)
+
+    # ── N7 클레임 — 반품 (wave 2) ──────────────────────────────
+    def approve_return(self, product_order_id: str) -> dict:
+        """반품 승인 (POST .../{poid}/claim/return/approve). 단건, body 없음. 트랙 N7 wave2."""
+        path = f"/v1/pay-order/seller/product-orders/{product_order_id}/claim/return/approve"
+        return self._request_write("POST", path, None)  # 스펙상 본문 없음
+
+    def reject_return(self, product_order_id: str, reject_return_reason: str) -> dict:
+        """반품 거부(철회) (POST .../{poid}/claim/return/reject). 단건. 트랙 N7 wave2.
+
+        reject_return_reason: 자유 텍스트 사유(enum 아님), 필수.
+        """
+        path = f"/v1/pay-order/seller/product-orders/{product_order_id}/claim/return/reject"
+        return self._request_write("POST", path, {"rejectReturnReason": reject_return_reason})
+
+    def holdback_return(
+        self,
+        product_order_id: str,
+        holdback_class_type: str,
+        holdback_return_detail_reason: str,
+        extra_return_fee_amount: int | None = None,
+    ) -> dict:
+        """반품 보류 (POST .../{poid}/claim/return/holdback). 단건. 트랙 N7 wave2.
+
+        holdback_class_type: 보류 유형 enum(RETURN_DELIVERYFEE 등), 필수.
+        holdback_return_detail_reason: 보류 상세 사유(자유 텍스트), 필수.
+        extra_return_fee_amount: 기타 반품 비용(선택).
+        """
+        path = f"/v1/pay-order/seller/product-orders/{product_order_id}/claim/return/holdback"
+        body: dict = {
+            "holdbackClassType": holdback_class_type,
+            "holdbackReturnDetailReason": holdback_return_detail_reason,
+        }
+        if extra_return_fee_amount is not None:
+            body["extraReturnFeeAmount"] = extra_return_fee_amount
+        return self._request_write("POST", path, body)
+
+    def release_return_holdback(self, product_order_id: str) -> dict:
+        """반품 보류 해제 (POST .../{poid}/claim/return/holdback/release). 단건, body 없음. 트랙 N7 wave2."""
+        path = f"/v1/pay-order/seller/product-orders/{product_order_id}/claim/return/holdback/release"
+        return self._request_write("POST", path, None)  # 스펙상 본문 없음
+
+    def request_return(
+        self,
+        product_order_id: str,
+        return_reason: str,
+        collect_delivery_method: str,
+        collect_delivery_company: str = "",
+        collect_tracking_number: str = "",
+        return_quantity: int | None = None,
+    ) -> dict:
+        """반품 요청 (판매자 직접, POST .../{poid}/claim/return/request). 단건. 트랙 N7 wave2.
+
+        return_reason: 클레임 요청 사유 enum(INTENT_CHANGED 등), 필수.
+        collect_delivery_method: 수거 배송 방법 enum(DELIVERY 등), 필수.
+        collect_delivery_company: 수거 택배사 코드(선택).
+        collect_tracking_number: 수거 송장 번호(선택).
+        return_quantity: 반품 수량(미입력 시 전체 수량 반품).
+        """
+        path = f"/v1/pay-order/seller/product-orders/{product_order_id}/claim/return/request"
+        body: dict = {
+            "returnReason": return_reason,
+            "collectDeliveryMethod": collect_delivery_method,
+        }
+        if collect_delivery_company:
+            body["collectDeliveryCompany"] = collect_delivery_company
+        if collect_tracking_number:
+            body["collectTrackingNumber"] = collect_tracking_number
+        if return_quantity is not None:
+            body["returnQuantity"] = return_quantity
+        return self._request_write("POST", path, body)
+
+    # ── N7 클레임 — 교환 (wave 3) ──────────────────────────────
+    def approve_exchange_collect(self, product_order_id: str) -> dict:
+        """교환 수거완료 (POST .../{poid}/claim/exchange/collect/approve). 단건, body 없음. 트랙 N7 wave3."""
+        path = f"/v1/pay-order/seller/product-orders/{product_order_id}/claim/exchange/collect/approve"
+        return self._request_write("POST", path, None)  # 스펙상 본문 없음
+
+    def dispatch_exchange(
+        self,
+        product_order_id: str,
+        re_delivery_method: str = "",
+        re_delivery_company: str = "",
+        re_delivery_tracking_number: str = "",
+    ) -> dict:
+        """교환 재배송 (POST .../{poid}/claim/exchange/dispatch). 단건. 트랙 N7 wave3.
+
+        body 필드는 전부 선택(API센터 실측 — BODY는 required지만 개별 필드는 optional).
+        """
+        path = f"/v1/pay-order/seller/product-orders/{product_order_id}/claim/exchange/dispatch"
+        body: dict = {}
+        if re_delivery_method:
+            body["reDeliveryMethod"] = re_delivery_method
+        if re_delivery_company:
+            body["reDeliveryCompany"] = re_delivery_company
+        if re_delivery_tracking_number:
+            body["reDeliveryTrackingNumber"] = re_delivery_tracking_number
+        return self._request_write("POST", path, body)
+
+    def holdback_exchange(
+        self,
+        product_order_id: str,
+        holdback_class_type: str,
+        holdback_exchange_detail_reason: str,
+        extra_exchange_fee_amount: int | None = None,
+    ) -> dict:
+        """교환 보류 (POST .../{poid}/claim/exchange/holdback). 단건. 트랙 N7 wave3.
+
+        holdback_class_type: 반품 보류와 동일 enum. 필드명만 Exchange (detail/extra).
+        """
+        path = f"/v1/pay-order/seller/product-orders/{product_order_id}/claim/exchange/holdback"
+        body: dict = {
+            "holdbackClassType": holdback_class_type,
+            "holdbackExchangeDetailReason": holdback_exchange_detail_reason,
+        }
+        if extra_exchange_fee_amount is not None:
+            body["extraExchangeFeeAmount"] = extra_exchange_fee_amount
+        return self._request_write("POST", path, body)
+
+    def release_exchange_holdback(self, product_order_id: str) -> dict:
+        """교환 보류 해제 (POST .../{poid}/claim/exchange/holdback/release). 단건, body 없음. 트랙 N7 wave3."""
+        path = f"/v1/pay-order/seller/product-orders/{product_order_id}/claim/exchange/holdback/release"
+        return self._request_write("POST", path, None)  # 스펙상 본문 없음
+
+    def reject_exchange(self, product_order_id: str, reject_exchange_reason: str) -> dict:
+        """교환 거부(철회) (POST .../{poid}/claim/exchange/reject). 단건. 트랙 N7 wave3.
+
+        reject_exchange_reason: 자유 텍스트 사유(enum 아님), 필수.
+        """
+        path = f"/v1/pay-order/seller/product-orders/{product_order_id}/claim/exchange/reject"
+        return self._request_write("POST", path, {"rejectExchangeReason": reject_exchange_reason})
 
     @staticmethod
     def _map_status(naver_status: str) -> str:
