@@ -419,3 +419,30 @@ export function opsExpireInstantCoupon(couponId: number, accountKey: string, dry
   if (confirm) q.set("confirm", confirm);
   return fetchApi<OpsResult>(`/api/coupang/ops/coupons/instant/${couponId}/expire?${q.toString()}`, { method: "PUT" });
 }
+
+// ── 네이버 운영 패널 — 매출 현황 ─────────────────────────────────
+
+export interface NaverSalesSummaryData {
+  revenue: string; fee: string; cost: string;
+  ad_spend: string; shipping: string;
+  profit: string; profit_rate: string | null;
+}
+
+export interface NaverSalesSummary {
+  period: { from: string; to: string };
+  ad_ref_date: string | null;
+  summary: NaverSalesSummaryData;
+  by_product: NaverSalesProductRow[];
+}
+
+export interface NaverSalesProductRow {
+  product_name: string;
+  platform_id: string;
+  revenue: string; fee: string; cost: string;
+  shipping: string;
+  profit: string; profit_rate: string | null;
+}
+
+export function fetchNaverSalesSummary(days: number): Promise<NaverSalesSummary> {
+  return fetchApi<NaverSalesSummary>(`/api/naver/ops/sales-summary?days=${days}`);
+}
