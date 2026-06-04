@@ -20,6 +20,9 @@ const PERIODS = [
 const CHANNEL_TYPES = ["전체", "Wing", "로켓그로스", "로켓배송"] as const;
 type ChannelType = (typeof CHANNEL_TYPES)[number];
 
+type SortKey = "product_name" | "revenue" | "ad_spend" | "conv_revenue" | "roas";
+type SortDir = "asc" | "desc";
+
 function won(s: string | null | undefined) {
   if (s == null) return "—";
   const n = Math.round(Number(s));
@@ -45,6 +48,8 @@ export default function CoupangOps() {
   const [days, setDays] = useState(7);
   const [channelFilter, setChannelFilter] = useState<ChannelType>("전체");
   const [search, setSearch] = useState("");
+  const [sortKey, setSortKey] = useState<SortKey>("revenue");
+  const [sortDir, setSortDir] = useState<SortDir>("desc");
 
   const [data, setData] = useState<SalesSummary | null>(null);
   const [loading, setLoading] = useState(false);
@@ -66,6 +71,16 @@ export default function CoupangOps() {
     load(company, days);
   }, [company, days, load]);
 
+  function toggleSort(key: SortKey) {
+    if (sortKey === key) setSortDir((d) => (d === "desc" ? "asc" : "desc"));
+    else { setSortKey(key); setSortDir("desc"); }
+  }
+
+  function SortIcon({ col }: { col: SortKey }) {
+    if (sortKey !== col) return <span className="ml-1 text-gray-300">↕</span>;
+    return <span className="ml-1 text-blue-500">{sortDir === "desc" ? "↓" : "↑"}</span>;
+  }
+
   const filtered: SalesProductRow[] = (data?.by_product ?? []).filter((row) => {
     const matchCh = channelFilter === "전체" || row.channel_type === channelFilter;
     const q = search.toLowerCase();
@@ -74,6 +89,14 @@ export default function CoupangOps() {
       row.product_name.toLowerCase().includes(q) ||
       row.option_name.toLowerCase().includes(q);
     return matchCh && matchQ;
+  }).sort((a, b) => {
+    const mul = sortDir === "desc" ? -1 : 1;
+    if (sortKey === "product_name") {
+      return mul * (`${a.product_name},${a.option_name}`).localeCompare(`${b.product_name},${b.option_name}`, "ko");
+    }
+    const av = Number(sortKey === "roas" ? (a.roas ?? 0) : a[sortKey]);
+    const bv = Number(sortKey === "roas" ? (b.roas ?? 0) : b[sortKey]);
+    return mul * (av - bv);
   });
 
   const s = data?.summary;
@@ -173,12 +196,37 @@ export default function CoupangOps() {
         <table className="w-full text-sm">
           <thead className="bg-gray-50 text-gray-500 text-xs border-b border-gray-100">
             <tr>
-              <th className="px-4 py-2 text-left">상품명</th>
+              <th
+                className="px-4 py-2 text-left cursor-pointer hover:text-gray-800 select-none"
+                onClick={() => toggleSort("product_name")}
+              >
+                상품명<SortIcon col="product_name" />
+              </th>
               <th className="px-3 py-2 text-center">채널</th>
-              <th className="px-3 py-2 text-right">총 매출</th>
-              <th className="px-3 py-2 text-right">광고비</th>
-              <th className="px-3 py-2 text-right">광고 전환매출</th>
-              <th className="px-3 py-2 text-right">RoAS</th>
+              <th
+                className="px-3 py-2 text-right cursor-pointer hover:text-gray-800 select-none"
+                onClick={() => toggleSort("revenue")}
+              >
+                총 매출<SortIcon col="revenue" />
+              </th>
+              <th
+                className="px-3 py-2 text-right cursor-pointer hover:text-gray-800 select-none"
+                onClick={() => toggleSort("ad_spend")}
+              >
+                광고비<SortIcon col="ad_spend" />
+              </th>
+              <th
+                className="px-3 py-2 text-right cursor-pointer hover:text-gray-800 select-none"
+                onClick={() => toggleSort("conv_revenue")}
+              >
+                광고 전환매출<SortIcon col="conv_revenue" />
+              </th>
+              <th
+                className="px-3 py-2 text-right cursor-pointer hover:text-gray-800 select-none"
+                onClick={() => toggleSort("roas")}
+              >
+                RoAS<SortIcon col="roas" />
+              </th>
             </tr>
           </thead>
           <tbody>
