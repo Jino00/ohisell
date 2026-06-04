@@ -255,20 +255,39 @@ export default function CoupangOps() {
       {error && <div className="bg-red-50 text-red-700 rounded px-4 py-2 text-sm mb-4">{error}</div>}
 
       {/* ── 요약 카드 ── */}
-      <div className="grid grid-cols-4 gap-3 mb-6">
-        <SummaryCard label="총 매출" value={loading ? "…" : won(s?.revenue)} />
-        <SummaryCard
-          label="광고비"
-          value={loading ? "…" : won(s?.ad_spend)}
-          sub={data?.ad_ref_date ? `${data.ad_ref_date} 기준 (최신 업로드)` : undefined}
-        />
-        <SummaryCard
-          label="광고 전환 매출"
-          value={loading ? "…" : won(s?.conv_revenue)}
-          sub={data?.ad_ref_date ? `${data.ad_ref_date} 기준` : undefined}
-        />
-        <SummaryCard label="RoAS" value={loading ? "…" : roasFmt(s?.roas)} sub={s?.roas ? "광고 전환매출 ÷ 광고비" : undefined} />
-      </div>
+      {data?.ad_ref_date ? (
+        /* 오늘 선택 + 광고 기준일이 다를 때 — 판매/광고 섹션 분리 */
+        <div className="mb-6 space-y-3">
+          {/* 오늘 판매 */}
+          <div>
+            <div className="text-xs text-gray-400 font-medium mb-1.5 px-0.5">
+              📦 오늘 판매 ({data.period.from})
+            </div>
+            <div className="grid grid-cols-1 gap-3">
+              <SummaryCard label="총 매출" value={loading ? "…" : won(s?.revenue)} />
+            </div>
+          </div>
+          {/* 최신 광고 (다른 날짜 기준) */}
+          <div>
+            <div className="text-xs text-gray-400 font-medium mb-1.5 px-0.5">
+              📣 광고 현황 ({data.ad_ref_date} 기준 — 최신 업로드)
+            </div>
+            <div className="grid grid-cols-3 gap-3">
+              <SummaryCard label="광고비" value={loading ? "…" : won(s?.ad_spend)} />
+              <SummaryCard label="광고 전환 매출" value={loading ? "…" : won(s?.conv_revenue)} />
+              <SummaryCard label="RoAS" value={loading ? "…" : roasFmt(s?.roas)} sub={s?.roas ? "광고 전환매출 ÷ 광고비" : undefined} />
+            </div>
+          </div>
+        </div>
+      ) : (
+        /* 어제·7일 등 — 동일 기간이므로 4개 카드 한 줄 */
+        <div className="grid grid-cols-4 gap-3 mb-6">
+          <SummaryCard label="총 매출" value={loading ? "…" : won(s?.revenue)} />
+          <SummaryCard label="광고비" value={loading ? "…" : won(s?.ad_spend)} />
+          <SummaryCard label="광고 전환 매출" value={loading ? "…" : won(s?.conv_revenue)} />
+          <SummaryCard label="RoAS" value={loading ? "…" : roasFmt(s?.roas)} sub={s?.roas ? "광고 전환매출 ÷ 광고비" : undefined} />
+        </div>
+      )}
 
       {/* ── 상품별 테이블 ── */}
       <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
