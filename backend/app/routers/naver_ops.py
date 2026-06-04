@@ -7,16 +7,23 @@ from __future__ import annotations
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 
-from fastapi import APIRouter, Depends, Query
+import logging
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.config import get_naver_config
 from app.database import get_db
-from app.models import AdCost, Channel, Order, ProductChannelMapping, ProductMaster
+from app.models import AdCost, Channel, NaverSettlementDaily, Order, ProductChannelMapping, ProductMaster
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
 from app.utils.kst import kst_today
 
+log = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/naver/ops", tags=["naver-ops"])
+
+_NAVER_CONFIG_KEY = "NAVER"
 
 _NAVER_CHANNEL_ID = 6
 _Q2 = Decimal("0.01")
@@ -210,4 +217,117 @@ def sales_summary(
             "sa_conv_to":      sa_conv_to,
         },
         "by_product": by_product,
+    }
+
+
+# ════════════════════════════════════════════════════════════════════
+# N1 정산 — 일별 정산 내역 (실측 수수료·정산금액)
+# ════════════════════════════════════════════════════════════════════
+
+def _upsert_settlement(db: Session, rows: list[dict]) -> int:
+    """일별 정산 행 upsert (settle_expect_date 그레인). 반환=반영 건수."""
+    n = 0
+    for r in rows:
+        ed = r.get("settle_expect_date")
+        if not ed:
+            continue
+        existing = (
+            db.query(NaverSettlementDaily)
+            .filter(NaverSettlementDaily.settle_expect_date == ed)
+            .first()
+        )
+        target = existing or NaverSettlementDaily(settle_expect_date=ed)
+        target.settle_basis_start = r.get("settle_basis_start")
+        target.settle_basis_end = r.get("settle_basis_end")
+        target.settle_complete_date = r.get("settle_complete_date")
+        target.settle_amount = r.get("settle_amount") or _Z
+        target.pay_settle_amount = r.get("pay_settle_amount") or _Z
+        target.commission_amount = r.get("commission_amount") or _Z
+        target.benefit_amount = r.get("benefit_amount") or _Z
+        target.payholdback_amount = r.get("payholdback_amount") or _Z
+        target.settle_method = r.get("settle_method")
+        if not existing:
+            db.add(target)
+        n += 1
+    db.commit()
+    return n
+
+
+@router.post("/settlement/sync")
+def sync_settlement(
+    days: int = Query(default=30, ge=1, le=365),
+    db: Session = Depends(get_db),
+):
+    """네이버 일별 정산 내역을 라이브 조회 → DB 적재 (트랙 N1).
+
+    정산 예정일 기준 최근 days일. 서버 IP 화이트리스트 필요(로컬은 권한오류 가능).
+    """
+    cfg = get_naver_config(_NAVER_CONFIG_KEY)
+    if not cfg:
+        raise HTTPException(status_code=503, detail="네이버 설정 없음")
+
+    from app.clients.naver import NaverClient
+    dto = kst_today()
+    dfrom = dto - timedelta(days=days - 1)
+    try:
+        rows = NaverClient(cfg).fetch_daily_settlement(dfrom, dto)
+    except Exception as e:
+        log.error("네이버 정산 조회 실패: %s", e)
+        raise HTTPException(status_code=502, detail=f"네이버 정산 API 오류: {e}")
+
+    n = _upsert_settlement(db, rows)
+    return {"synced": n, "date_from": str(dfrom), "date_to": str(dto)}
+
+
+@router.get("/settlement")
+def get_settlement(
+    days: int = Query(default=30, ge=1, le=365),
+    db: Session = Depends(get_db),
+):
+    """적재된 일별 정산 내역 + 합계 (정산 예정일 기준 최근 days일)."""
+    dto = kst_today()
+    dfrom = dto - timedelta(days=days - 1)
+    rows = (
+        db.query(NaverSettlementDaily)
+        .filter(
+            NaverSettlementDaily.settle_expect_date >= dfrom.isoformat(),
+            NaverSettlementDaily.settle_expect_date <= dto.isoformat(),
+        )
+        .order_by(NaverSettlementDaily.settle_expect_date.desc())
+        .all()
+    )
+
+    def _f(v) -> Decimal:
+        return v if isinstance(v, Decimal) else Decimal(str(v or 0))
+
+    t_settle = sum((_f(r.settle_amount) for r in rows), _Z)
+    t_pay = sum((_f(r.pay_settle_amount) for r in rows), _Z)
+    t_comm = sum((_f(r.commission_amount) for r in rows), _Z)
+    t_benefit = sum((_f(r.benefit_amount) for r in rows), _Z)
+    t_hold = sum((_f(r.payholdback_amount) for r in rows), _Z)
+
+    return {
+        "period": {"from": str(dfrom), "to": str(dto)},
+        "summary": {
+            "settle_amount": str(t_settle.quantize(_Q2)),
+            "pay_settle_amount": str(t_pay.quantize(_Q2)),
+            "commission_amount": str(t_comm.quantize(_Q2)),
+            "benefit_amount": str(t_benefit.quantize(_Q2)),
+            "payholdback_amount": str(t_hold.quantize(_Q2)),
+        },
+        "rows": [
+            {
+                "settle_expect_date": r.settle_expect_date,
+                "settle_basis_start": r.settle_basis_start,
+                "settle_basis_end": r.settle_basis_end,
+                "settle_complete_date": r.settle_complete_date,
+                "settle_amount": str(_f(r.settle_amount).quantize(_Q2)),
+                "pay_settle_amount": str(_f(r.pay_settle_amount).quantize(_Q2)),
+                "commission_amount": str(_f(r.commission_amount).quantize(_Q2)),
+                "benefit_amount": str(_f(r.benefit_amount).quantize(_Q2)),
+                "payholdback_amount": str(_f(r.payholdback_amount).quantize(_Q2)),
+                "settle_method": r.settle_method,
+            }
+            for r in rows
+        ],
     }

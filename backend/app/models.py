@@ -956,6 +956,33 @@ class CoupangInquiry(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class NaverSettlementDaily(Base):
+    """네이버 일별 정산 내역 (커머스 API /v1/pay-settle/settle/daily, 트랙 N1).
+
+    실측 정산금액·수수료 — 패널 정산 표시 + 이익 정밀화 다리(D-5).
+    DB 그레인: settle_expect_date UNIQUE (정산 예정일 1행).
+    """
+
+    __tablename__ = "naver_settlement_daily"
+    __table_args__ = (
+        UniqueConstraint("settle_expect_date", name="uq_naver_settle_daily"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    settle_basis_start: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    settle_basis_end: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    settle_expect_date: Mapped[str] = mapped_column(String(10), nullable=False, index=True)  # 정산 예정일
+    settle_complete_date: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    settle_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)        # 정산금액
+    pay_settle_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)     # 결제정산(기준)
+    commission_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)     # 수수료정산(음수)
+    benefit_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)        # 혜택정산
+    payholdback_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)    # 지급보류
+    settle_method: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)                   # ACCOUNT/CHARGE_AMT
+    synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 # ──────────────────────────────────────────────
 # 스케줄러 상태
 # ──────────────────────────────────────────────

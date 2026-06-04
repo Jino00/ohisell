@@ -3,7 +3,9 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import {
   fetchNaverSalesSummary, fetchGfaStatus, uploadGfaCsv,
+  fetchNaverSettlement, syncNaverSettlement,
   type NaverSalesSummary, type NaverSalesProductRow, type GfaStatus,
+  type NaverSettlement,
 } from "../lib/api";
 
 // 마지막 업로드일로부터 경과 일수 (로컬 기준). null이면 데이터 없음.
@@ -145,8 +147,22 @@ export default function NaverOps() {
     try { setGfa(await fetchGfaStatus()); } catch { /* silent */ }
   }, []);
 
+  const [settlement, setSettlement] = useState<NaverSettlement | null>(null);
+  const [settleSyncing, setSettleSyncing] = useState(false);
+  const loadSettlement = useCallback(async () => {
+    try { setSettlement(await fetchNaverSettlement(30)); } catch { /* silent */ }
+  }, []);
+  async function handleSettleSync() {
+    setSettleSyncing(true);
+    try {
+      await syncNaverSettlement(30);
+      await loadSettlement();
+    } catch { /* silent */ } finally { setSettleSyncing(false); }
+  }
+
   useEffect(() => { load(); }, [load]);
   useEffect(() => { loadGfa(); }, [loadGfa]);
+  useEffect(() => { loadSettlement(); }, [loadSettlement]);
 
   async function handleGfaUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -374,6 +390,62 @@ export default function NaverOps() {
       {!loading && data && sorted.length === 0 && (
         <p className="text-sm text-gray-500">해당 기간에 주문 데이터가 없습니다.</p>
       )}
+
+      {/* 💰 정산 내역 (실측, 정산예정일 기준 최근 30일) — 트랙 N1 */}
+      <div className="mt-8">
+        <div className="flex items-center gap-3 mb-3">
+          <h2 className="text-lg font-bold text-gray-900">💰 정산 내역 <span className="text-xs font-normal text-gray-400">(실측·정산예정일 기준)</span></h2>
+          <button
+            onClick={handleSettleSync}
+            disabled={settleSyncing}
+            className="px-3 py-1.5 text-sm rounded-md border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+          >{settleSyncing ? "동기화 중…" : "🔄 정산 동기화"}</button>
+        </div>
+
+        {settlement && settlement.rows.length > 0 ? (
+          <>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
+              <SummaryCard label="정산금액(30일)" value={won(settlement.summary.settle_amount)} highlight="blue" />
+              <SummaryCard label="실측 수수료" value={won(settlement.summary.commission_amount)} sub="네이버 정산 기준" highlight="red" />
+              <SummaryCard label="혜택정산" value={won(settlement.summary.benefit_amount)} />
+              <SummaryCard label="지급보류" value={won(settlement.summary.payholdback_amount)} />
+            </div>
+            <div className="overflow-x-auto rounded-lg border border-gray-200">
+              <table className="min-w-full bg-white text-sm">
+                <thead className="bg-gray-50 border-b border-gray-200">
+                  <tr>
+                    <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 whitespace-nowrap">정산예정일</th>
+                    <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 whitespace-nowrap">정산금액</th>
+                    <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 whitespace-nowrap">결제정산</th>
+                    <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 whitespace-nowrap">수수료</th>
+                    <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 whitespace-nowrap">혜택</th>
+                    <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 whitespace-nowrap">지급보류</th>
+                    <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 whitespace-nowrap">완료일</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {settlement.rows.map((r, i) => (
+                    <tr key={i} className="hover:bg-gray-50">
+                      <td className="px-3 py-2 whitespace-nowrap">{r.settle_expect_date}</td>
+                      <td className="px-3 py-2 text-right tabular-nums font-medium">{won(r.settle_amount)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums text-gray-500">{won(r.pay_settle_amount)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums text-red-600">{won(r.commission_amount)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums text-gray-500">{won(r.benefit_amount)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums text-gray-500">{won(r.payholdback_amount)}</td>
+                      <td className="px-3 py-2 whitespace-nowrap text-gray-400">{r.settle_complete_date || "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div className="text-xs text-gray-400 px-3 py-2 border-t border-gray-100">
+                * 네이버 커머스 API 실측 정산 (수수료·혜택은 차감되어 음수). 정산예정일 기준이라 주문일과 시점이 다릅니다.
+              </div>
+            </div>
+          </>
+        ) : (
+          <p className="text-sm text-gray-500">정산 데이터가 없습니다. "🔄 정산 동기화"를 눌러 불러오세요.</p>
+        )}
+      </div>
     </div>
   );
 }

@@ -218,6 +218,47 @@ class NaverClient(BaseChannelClient):
         log.info("네이버 주문 %d건 수집 (%s ~ %s)", len(all_orders), date_from, date_to)
         return all_orders
 
+    def fetch_daily_settlement(self, date_from: date, date_to: date) -> list[dict]:
+        """일별 정산 내역 조회 (/v1/pay-settle/settle/daily). 트랙 N1.
+
+        Returns 정규화 dict 목록 (정산예정일·정산금액·수수료(음수)·혜택·지급보류 등).
+        네이버 응답 amount는 부호 그대로 보존(수수료/혜택은 음수).
+        """
+        path = "/v1/pay-settle/settle/daily"
+        results: list[dict] = []
+        page = 1
+        while True:
+            params = {
+                "startDate": date_from.isoformat(),
+                "endDate": date_to.isoformat(),
+                "pageNumber": page,
+                "pageSize": 1000,
+            }
+            data = self._request("GET", path, params)
+            if not data:
+                break
+            elements = data.get("elements", []) if isinstance(data, dict) else []
+            for e in elements:
+                results.append({
+                    "settle_basis_start": e.get("settleBasisStartDate"),
+                    "settle_basis_end": e.get("settleBasisEndDate"),
+                    "settle_expect_date": e.get("settleExpectDate"),
+                    "settle_complete_date": e.get("settleCompleteDate"),
+                    "settle_amount": Decimal(str(e.get("settleAmount") or 0)),
+                    "pay_settle_amount": Decimal(str(e.get("paySettleAmount") or 0)),
+                    "commission_amount": Decimal(str(e.get("commissionSettleAmount") or 0)),
+                    "benefit_amount": Decimal(str(e.get("benefitSettleAmount") or 0)),
+                    "payholdback_amount": Decimal(str(e.get("payHoldbackAmount") or 0)),
+                    "settle_method": e.get("settleMethodType"),
+                })
+            # 페이지 크기 미만이면 종료 (네이버는 page 응답에 총건수 메타가 그룹마다 달라 방어적 처리)
+            if len(elements) < 1000:
+                break
+            page += 1
+            time.sleep(0.2)
+        log.info("네이버 일별 정산 %d건 수집 (%s ~ %s)", len(results), date_from, date_to)
+        return results
+
     @staticmethod
     def _map_status(naver_status: str) -> str:
         mapping = {

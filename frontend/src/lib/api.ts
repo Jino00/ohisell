@@ -465,3 +465,28 @@ export function fetchGfaStatus(): Promise<GfaStatus> {
 export function uploadGfaCsv(file: File) {
   return uploadFile("/api/ad-costs/gfa/upload", file);
 }
+
+// ── 네이버 정산 (N1) ─────────────────────────────────────────────
+export interface NaverSettlementRow {
+  settle_expect_date: string;
+  settle_basis_start: string | null;
+  settle_basis_end: string | null;
+  settle_complete_date: string | null;
+  settle_amount: string; pay_settle_amount: string;
+  commission_amount: string; benefit_amount: string; payholdback_amount: string;
+  settle_method: string | null;
+}
+export interface NaverSettlement {
+  period: { from: string; to: string };
+  summary: {
+    settle_amount: string; pay_settle_amount: string;
+    commission_amount: string; benefit_amount: string; payholdback_amount: string;
+  };
+  rows: NaverSettlementRow[];
+}
+export function fetchNaverSettlement(days: number): Promise<NaverSettlement> {
+  return fetchApi<NaverSettlement>(`/api/naver/ops/settlement?days=${days}`);
+}
+export function syncNaverSettlement(days: number): Promise<{ synced: number; date_from: string; date_to: string }> {
+  return fetchApi(`/api/naver/ops/settlement/sync?days=${days}`, { method: "POST" });
+}
