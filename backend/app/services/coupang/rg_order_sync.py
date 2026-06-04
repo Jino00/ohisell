@@ -91,11 +91,19 @@ def _upsert_order_item(
 
 
 def _windows(date_from: datetime, date_to: datetime):
-    """[from, to]를 ≤30일 윈도우로 분할 (yyyymmdd 문자열 쌍 yield)."""
+    """[from, to](양끝 포함)를 ≤30일 윈도우로 분할 (yyyymmdd 문자열 쌍 yield).
+
+    ★ RG 주문 API의 paidDateTo는 배타적(exclusive) — 해당일 00:00:00 기준이라
+    paidDateTo=X면 X일 당일 결제건이 0건으로 빠진다(라이브 실측 2026-06-05:
+    to=20260604→0건, to=20260605→06-04 22건). 따라서 끝날짜(win_end) 당일을
+    포함하려면 paidDateTo를 win_end+1일로 전달한다. span은 최대 30일 유지
+    (cur ~ cur+29일 → paidDateTo=cur+30일, 30일 span 라이브 통과 확인).
+    """
     cur = date_from
     while cur <= date_to:
         win_end = min(cur + timedelta(days=_MAX_WINDOW_DAYS - 1), date_to)
-        yield cur.strftime("%Y%m%d"), win_end.strftime("%Y%m%d")
+        # paidDateTo는 배타적 → win_end 당일을 포함하려면 +1일
+        yield cur.strftime("%Y%m%d"), (win_end + timedelta(days=1)).strftime("%Y%m%d")
         cur = win_end + timedelta(days=1)
 
 
