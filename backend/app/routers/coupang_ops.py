@@ -611,34 +611,45 @@ def sales_summary(
     # key = (product_label, channel_type)
     merged: dict[tuple[str, str], dict] = {}
 
-    def _product_key(vid: str, ch_code: str) -> tuple[str, str]:
+    def _resolve_name(vid: str) -> str | None:
+        """옵션ID로 상품명을 찾는다. 못 찾으면 None 반환 (테이블에서 제외)."""
         pi = pi_map.get(vid, {})
         order_entry = order_by_vid.get(vid, {})
-        label = (
+        return (
             pi.get("seller_name")
             or pi.get("item_name")
             or order_entry.get("order_name")  # platform_product_name 폴백
-            or f"옵션{vid}"
         )
-        _, ch_type = _CHANNEL_META.get(ch_code, ("—", "Wing"))
-        return label, ch_type
+
+    def _ch_type(ch_code: str) -> str:
+        return _CHANNEL_META.get(ch_code, ("—", "Wing"))[1]
 
     for vid, od in order_by_vid.items():
+        name = _resolve_name(vid)
+        if not name:
+            continue  # 이름 없는 행은 테이블에서 제외
         ch_code = od["channel_code"]
-        pk = _product_key(vid, ch_code)
+        pk = (name, _ch_type(ch_code))
         e = merged.setdefault(pk, {"revenue": _Z, "ad_spend": _Z, "conv_revenue": _Z})
         e["revenue"] += od["revenue"]
 
     for vid, ad in ad_by_vid.items():
+        name = _resolve_name(vid)
+        if not name:
+            continue  # 이름 모르는 구버전 옵션은 테이블에서 제외
         pi = pi_map.get(vid, {})
-        # pi.account_key 우선, 없으면 vendor_id로 역추적
         ch_code = pi.get("account_key") or _vendor_to_channel(ad.get("vendor_id", ""))
-        pk = _product_key(vid, ch_code)
+        pk = (name, _ch_type(ch_code))
         e = merged.setdefault(pk, {"revenue": _Z, "ad_spend": _Z, "conv_revenue": _Z})
         e["ad_spend"] += ad["spend"]
         e["conv_revenue"] += ad["conv_revenue"]
 
-    # ── 5. 최종 응답 구성 ─────────────────────────────────────────────
+    # ── 5. 요약 합계: 원본 집계치 사용 (이름 없는 행 제외해도 요약은 정확하게 유지) ──
+    total_rev = sum((_f(od["revenue"]) for od in order_by_vid.values()), _Z)
+    total_spend = sum((_f(ad["spend"]) for ad in ad_by_vid.values()), _Z)
+    total_conv = sum((_f(ad["conv_revenue"]) for ad in ad_by_vid.values()), _Z)
+
+    # ── 6. 최종 응답 ─────────────────────────────────────────────────
     by_product = [
         {
             "product_name": pk[0],
@@ -650,10 +661,6 @@ def sales_summary(
         }
         for pk, v in sorted(merged.items(), key=lambda x: -x[1]["revenue"])
     ]
-
-    total_rev = sum((v["revenue"] for v in merged.values()), _Z)
-    total_spend = sum((v["ad_spend"] for v in merged.values()), _Z)
-    total_conv = sum((v["conv_revenue"] for v in merged.values()), _Z)
 
     return {
         "period": {"from": str(dfrom), "to": str(dto)},
