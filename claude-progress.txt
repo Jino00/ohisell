@@ -4,10 +4,21 @@
 
 ## 현재 상태
 - 날짜: 2026-06-04
-- 날짜: 2026-06-04
-- 단계: ★메가 프로젝트 읽기 7/7 완료 + **쓰기 페이즈 W1~W5 전부 격리검증 완료**. 다음 = W1~W5 일괄 scp prod 배포 + read-back 교차 검증.
-- 전체 진행률: W5 — SA rocketgrowth.py stub2→구현(create/update_rg_product). Harness product_write.py 확장(create/update_rg_product, _rg_client). 2라우트 추가(총 22라우트). 격리 10건 PASS. codex W3b PASS(2R). 총 격리: W3a 43+W3b 21+W4 18+W5 10=92건. ⚠️ W1~W5 미커밋·미배포(이번 세션 일괄 배포 대상).
-- 최신 커밋(main): eaf7131(P6). ⚠️ W1~W5 로컬 워킹트리(미커밋). **★prod 배포 완료(2026-06-04)**. 108라우트 online. 롤백: ohisell.db.bak-write-w1w5-20260604-*. 다음 액션: codex W4·W5 교차검증 + git 커밋(W1~W5 일괄).
+- 단계: ★쿠팡 운영 패널 sprint 완료 — 오늘/어제/7일/15일/30일 매출·광고·RoAS 현황 + Wing/RG/로켓배송 필터 + 컬럼 정렬/필터 + 🔄 동기화 버튼
+- 최신 커밋(main): **2756699** (ACCEPT 상태+동기화버튼). git push origin main 필요.
+- 알려진 제약: 쿠팡 ordersheets API 약 1~2시간 lag → 오늘 실시간은 Wing 포털과 차이 발생(불가피)
+
+## 🔧 쿠팡 운영 패널 sprint — 완료(prod 배포·라이브 실증) (2026-06-04)
+- [x] GET /api/coupang/ops/sales-summary: 회사별(오픽스/오하이테크)·기간별·채널타입별 집계
+- [x] 기간: 오늘/어제/7일/15일/30일 (오늘=days=0)
+- [x] Wing 주문 상태: FINAL_DELIVERY+DELIVERING+DEPARTURE+INSTRUCT+ACCEPT 전부 수집
+- [x] RG paid_at KST 저장 대응 + UTC 보정 제거
+- [x] 오늘 광고비: DB 최신 report_date 자동 사용 + 섹션 분리 표시
+- [x] 프론트: 상품명+옵션명 한줄 표시, 컬럼 정렬(↑↓), 엑셀식 값 필터 드롭다운(⊟)
+- [x] 🔄 동기화 버튼 (클릭→3초후 자동갱신)
+- [x] 전 백엔드 datetime → app/utils/kst.py (kst_now/kst_today) 통일 (12개 파일)
+- [x] 쿠팡 API 1~2시간 lag 확인 및 UI 안내 추가
+- 제약: ordersheets API lag으로 오늘 실시간 ≠ Wing 포털 (불가피)
 
 ## P6 물류·카테고리·브랜드·CS — 완료(prod 배포·라이브 실증) (2026-06-04)
 - [x] SA 4개: logistics.py(8) / category.py(6+RG#8·#9 seller_api 경로) / brand.py(3) / cs.py(6)
