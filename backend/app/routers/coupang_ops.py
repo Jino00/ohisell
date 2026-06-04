@@ -453,7 +453,7 @@ _Q2 = Decimal("0.01")
 _Q4 = Decimal("0.0001")
 _Z = Decimal("0")
 _WING_DELIVERY_COST = Decimal("1900")   # 판매자배송(Wing) 한건당 배송비(한진)
-_DEFAULT_FEE_RATE   = Decimal("0.105")  # 수수료율 기본값 10.5% (정산 데이터 없는 옵션)
+_DEFAULT_FEE_RATE   = Decimal("0.078")  # 수수료율 기본값 7.8% (정산 실측 최빈값)
 
 # 쿠팡 채널코드 → (company_short, channel_type)
 _CHANNEL_META: dict[str, tuple[str, str]] = {
