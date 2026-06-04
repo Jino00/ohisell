@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterator
 
-from app.clients.coupang._base import CoupangBaseClient, CoupangReadError
+from app.clients.coupang._base import CoupangBaseClient, CoupangReadError, CoupangWriteError
 
 log = logging.getLogger(__name__)
 
@@ -269,31 +269,128 @@ class CoupangCouponClient(CoupangBaseClient):
         )
 
     # ════════════════════════════════════════════════
-    # 쓰기 8개 — stub (쓰기 페이즈에서 product_write.py 패턴 + dry_run 구현, D-1)
+    # W4 쓰기 구현 (트랙 D-16) — ⚠️ 라이브 실행자.
+    # ⚠️ 직접 호출 금지. 반드시 Harness(coupon_write.py)를 경유할 것.
+    # retry_transient=False (쓰기 재시도=중복 쿠폰 생성 위험). 모두 비동기: requestedId 반환.
+    # 게이트웨이별 응답 구조 다름 — 아래 헬퍼로 일관 판정:
+    #   fms: {code:200, data:{success:true/false, content:{requestedId}}} → _check_fms_write
+    #   marketplace_openapi: requestResultStatus=SUCCESS/FAIL → _check_mktpl_write
+    # #1·#3 [도서]캐시백 = 오픽스 무관(D-7) → stub 유지.
     # ════════════════════════════════════════════════
-    # ⚠️ 쓰기는 라이브 스토어 변경 → 쓰기 페이즈에서 dry_run 기본 + 명시 확인 게이트(트랙 §5).
-    #   본문 스키마는 구현 시점 각 article 재확인(추정 금지). 여기서는 시그니처만 예약.
 
-    def apply_book_cashback(self, **kwargs):  # #1 [도서]캐시백 적용 POST
-        raise NotImplementedError("쓰기 페이즈(dry_run) — coupons #1 도서캐시백 적용")
+    @staticmethod
+    def _check_fms_write(resp: dict | None, context: str) -> dict:
+        """fms 쿠폰 쓰기 응답 성공 판정. code=200 + data.success=True 둘 다 필요.
 
-    def delete_book_cashback(self, **kwargs):  # #3 [도서]캐시백 삭제 DELETE
-        raise NotImplementedError("쓰기 페이즈(dry_run) — coupons #3 도서캐시백 삭제")
+        fms는 HTTP 200이어도 data.success=false로 비동기 요청 실패를 알린다(읽기 _fms_ok 패턴).
+        요청 실패를 '비동기니까 나중에 확인'으로 삼키면 안 됨(원칙22) → 즉시 CoupangWriteError.
+        """
+        if resp is None:
+            raise CoupangWriteError(f"{context}: 응답 None(4xx/5xx·네트워크)")
+        code = str(resp.get("code") or "")
+        if code != "200":
+            # fms 응답 code는 Number=200만 성공(codex[P2] W4). "SUCCESS"는 seller_api 코드 — fms에서 불출현.
+            raise CoupangWriteError(f"{context}: fms 실패 code={code} msg={resp.get('message')}")
+        data = resp.get("data") or {}
+        if not data.get("success"):
+            raise CoupangWriteError(f"{context}: fms data.success=false — 비동기 요청 거부")
+        return resp
 
-    def create_download_coupon(self, **kwargs):  # #7 다운로드쿠폰 생성 POST
-        raise NotImplementedError("쓰기 페이즈(dry_run) — coupons #7 다운로드쿠폰 생성")
+    @staticmethod
+    def _check_mktpl_write(resp: dict | list | None, context: str) -> dict | list:
+        """marketplace_openapi 쿠폰 쓰기 응답 성공 판정. requestResultStatus=SUCCESS.
 
-    def create_download_coupon_items(self, **kwargs):  # #8 다운로드쿠폰 아이템 생성 PUT
-        raise NotImplementedError("쓰기 페이즈(dry_run) — coupons #8 다운로드쿠폰 아이템 생성")
+        파기(#9) 응답은 list, 생성/아이템(#7/#8) 응답은 dict — 두 형태 공통 처리.
+        """
+        if resp is None:
+            raise CoupangWriteError(f"{context}: 응답 None(4xx/5xx·네트워크)")
+        items = resp if isinstance(resp, list) else [resp]
+        fails = [i for i in items if i.get("requestResultStatus") != "SUCCESS"]
+        if fails:
+            msg = fails[0].get("errorMessage") or fails[0].get("requestResultStatus")
+            raise CoupangWriteError(f"{context}: requestResultStatus!=SUCCESS: {msg}")
+        return resp
 
-    def expire_download_coupon(self, **kwargs):  # #9 다운로드쿠폰 파기 POST
-        raise NotImplementedError("쓰기 페이즈(dry_run) — coupons #9 다운로드쿠폰 파기")
+    # ── [도서] 캐시백 (#1·#3) — D-7 자리만(오픽스 무관) ──
+    def apply_book_cashback(self, **kwargs):
+        raise NotImplementedError("[도서]캐시백은 오픽스 무관(D-7). Wing에서 직접 수행.")
 
-    def create_instant_coupon(self, **kwargs):  # #12 즉시할인쿠폰 생성 POST
-        raise NotImplementedError("쓰기 페이즈(dry_run) — coupons #12 즉시할인쿠폰 생성")
+    def delete_book_cashback(self, **kwargs):
+        raise NotImplementedError("[도서]캐시백은 오픽스 무관(D-7). Wing에서 직접 수행.")
 
-    def create_instant_coupon_items(self, **kwargs):  # #13 즉시할인쿠폰 아이템 생성 POST
-        raise NotImplementedError("쓰기 페이즈(dry_run) — coupons #13 즉시할인쿠폰 아이템 생성")
+    # ── 다운로드쿠폰 (#7·#8·#9) — marketplace_openapi gateway ──
+    def create_download_coupon(self, *, body: dict) -> dict | list:
+        """#7 다운로드쿠폰 생성 (POST, body 있음). 명세 06 W4 2026-06-04.
 
-    def expire_instant_coupon(self, **kwargs):  # #14 즉시할인쿠폰 파기 PUT
-        raise NotImplementedError("쓰기 페이즈(dry_run) — coupons #14 즉시할인쿠폰 파기")
+        body 필수: title, contractId, couponType='DOWNLOAD', startDate, endDate, userId, policies[].
+        응답: requestResultStatus=SUCCESS + body.couponId. 오류: FAIL.
+        """
+        resp = self._request(
+            "POST", f"{_MP_BASE}/coupons", body=body, retry_transient=False
+        )
+        return self._check_mktpl_write(resp, "다운로드쿠폰 생성")
+
+    def create_download_coupon_items(self, *, body: dict) -> dict | list:
+        """#8 다운로드쿠폰 아이템 생성 (PUT, body 있음). 명세 06 W4.
+
+        body 필수: couponItems[{couponId, userId, vendorItemIds[]}]. 옵션ID max 100개/호출.
+        응답: requestResultStatus=SUCCESS + body.couponId.
+        """
+        resp = self._request(
+            "PUT", f"{_MP_BASE}/coupon-items", body=body, retry_transient=False
+        )
+        return self._check_mktpl_write(resp, "다운로드쿠폰 아이템 생성")
+
+    def expire_download_coupon(self, *, body: dict) -> dict | list:
+        """#9 다운로드쿠폰 파기 (POST, body 있음). 명세 06 W4.
+
+        body 필수: expireCouponList[{couponId, reason='expired', userId}]. 비동기: requestTransactionId.
+        응답: list[{requestResultStatus, body:{couponId, requestTransactionId}, errorCode, errorMessage}].
+        """
+        resp = self._request(
+            "POST", f"{_MP_BASE}/coupons/expire", body=body, retry_transient=False
+        )
+        return self._check_mktpl_write(resp, "다운로드쿠폰 파기")
+
+    # ── 즉시할인쿠폰 (#12·#13·#14) — fms gateway ──
+    def create_instant_coupon(self, *, body: dict) -> dict:
+        """#12 즉시할인쿠폰 생성 (POST, body 있음). 명세 06 W4.
+
+        body 필수: contractId, name, maxDiscountPrice, discount, startAt, endAt, type(RATE/FIXED_WITH_QUANTITY/PRICE).
+        비동기: data.content.requestedId로 결과 확인(#21 요청상태).
+        응답: {code:200, data:{success:true, content:{requestedId}}}.
+        """
+        resp = self._request(
+            "POST",
+            f"{_FMS_BASE}/v2/vendors/{self.vendor_id}/coupon",
+            body=body,
+            retry_transient=False,
+        )
+        return self._check_fms_write(resp, "즉시할인쿠폰 생성")
+
+    def create_instant_coupon_items(self, *, coupon_id: int, vendor_item_ids: list) -> dict:
+        """#13 즉시할인쿠폰 아이템 생성 (POST, body 있음). 명세 06 W4.
+
+        vendor_item_ids: 쿠폰 적용 옵션ID 배열(max 10,000개/호출). 비동기: requestedId.
+        """
+        body = {"vendorItems": vendor_item_ids}
+        resp = self._request(
+            "POST",
+            f"{_FMS_BASE}/v1/vendors/{self.vendor_id}/coupons/{coupon_id}/items",
+            body=body,
+            retry_transient=False,
+        )
+        return self._check_fms_write(resp, f"즉시할인쿠폰 아이템 생성(coupon={coupon_id})")
+
+    def expire_instant_coupon(self, *, coupon_id: int) -> dict:
+        """#14 즉시할인쿠폰 파기 (PUT, body 없음, query action=expire). 명세 06 W4.
+
+        비동기: data.content.requestedId로 결과 확인(#21). 진행 중 아이템 추가가 있으면 실패.
+        """
+        resp = self._request(
+            "PUT",
+            f"{_FMS_BASE}/v1/vendors/{self.vendor_id}/coupons/{coupon_id}",
+            params={"action": "expire"},
+            retry_transient=False,
+        )
+        return self._check_fms_write(resp, f"즉시할인쿠폰 파기(coupon={coupon_id})")

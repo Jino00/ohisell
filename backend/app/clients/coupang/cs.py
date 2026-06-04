@@ -9,7 +9,14 @@ import logging
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 
-from app.clients.coupang._base import CoupangBaseClient, CoupangReadError
+from urllib.parse import quote
+
+from app.clients.coupang._base import (
+    CoupangBaseClient,
+    CoupangReadError,
+    CoupangWriteError,
+    check_write_response,
+)
 
 log = logging.getLogger(__name__)
 
@@ -20,9 +27,38 @@ _OPENAPI_V5_CC = "/v2/providers/openapi/apis/api/v5/vendors"
 _MAX_DAYS = 7  # CS API 최대 조회 기간
 
 
+# ── 쓰기 경로 빌더 (v4 — 단일 정의, SA 실행 + Harness dry-run 미리보기 공유, 트랙 D-16/W2) ──
+# ⚠️ 읽기는 v5, 쓰기는 v4. inquiry_id는 path segment quote(codex[P2] W1 패턴).
+def online_reply_path(vendor_id: str, inquiry_id: str) -> str:
+    """#2 상품별 고객문의 답변 경로."""
+    return f"{_OPENAPI_V4}/{vendor_id}/onlineInquiries/{quote(str(inquiry_id), safe='')}/replies"
+
+
+def cc_reply_path(vendor_id: str, inquiry_id: str) -> str:
+    """#4 쿠팡 고객센터 문의답변 경로."""
+    return f"{_OPENAPI_V4}/{vendor_id}/callCenterInquiries/{quote(str(inquiry_id), safe='')}/replies"
+
+
+def cc_confirm_path(vendor_id: str, inquiry_id: str) -> str:
+    """#5 쿠팡 고객센터 문의확인 경로."""
+    return f"{_OPENAPI_V4}/{vendor_id}/callCenterInquiries/{quote(str(inquiry_id), safe='')}/confirms"
+
+
 def _fmt_dt(dt: datetime) -> str:
     """yyyy-MM-dd'T'HH:mm:ss 형식으로 변환 (CS API 요구 형식)."""
     return dt.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def coerce_answer_id(value: int | str) -> int:
+    """parentAnswerId를 Number로 정규화 (명세 10 §4, codex[P2] W2).
+
+    공식 스키마가 Number이므로 int로 변환한다. 비숫자면 CoupangWriteError.
+    Harness(dry-run preview)와 SA(live)가 동일 값을 쓰도록 공유한다.
+    """
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        raise CoupangWriteError(f"parent_answer_id는 숫자(Number)여야 함: {value!r}")
 
 
 class CoupangCsClient(CoupangBaseClient):
@@ -160,21 +196,80 @@ class CoupangCsClient(CoupangBaseClient):
         return resp.get("data")
 
     # ════════════════════════════════════════════════
-    # 쓰기 stub — 쓰기 페이즈에서 dry_run + 본문스키마 재확인(D-1)
+    # 쓰기 구현 (트랙 D-16, W2) — ⚠️ 라이브 실행자(live executor).
+    # ⚠️ 직접 호출 금지. 반드시 Harness(services/coupang/cs_ops.py)를 경유할 것.
+    #    아래 메서드는 dry_run/confirm을 모른다(원칙18-1) — 호출 즉시 라이브(실제 고객에게 답변 전송).
+    #    dry_run 게이트·confirm 토큰은 Harness(_write_guard)가 담당(트랙 §5).
+    # 본문 스키마는 2026-06-04 /browse 재수집(명세 10 §2·4·5, 추정금지 D-1). 실패=CoupangWriteError(원칙22).
     # ════════════════════════════════════════════════
 
-    def reply_online_inquiry(self, *, inquiry_id: str, content: str) -> dict:
-        """#2 상품별 고객문의 답변 — stub(쓰기 페이즈)."""
-        raise NotImplementedError("쓰기 페이즈 — 고객문의 답변 미구현(D-1)")
+    @staticmethod
+    def _require(value: str, field: str) -> str:
+        """필수 문자열 필드 빈값 방어(명백한 실수 차단). 길이 등 상세는 쿠팡이 검증."""
+        v = (value or "").strip()
+        if not v:
+            raise CoupangWriteError(f"CS 쓰기 필수 필드 누락: {field}")
+        return v
 
-    def reply_call_center_inquiry(self, *, inquiry_id: str, content: str) -> dict:
-        """#4 쿠팡 고객센터 문의 답변 — stub(쓰기 페이즈).
-        ⚠️ 24시간 미답변 시 쿠팡 자동처리→답변 불가.
+    def reply_online_inquiry(self, *, inquiry_id: str, content: str, reply_by: str) -> dict:
+        """#2 상품별 고객문의 답변 (POST v4). 명세 10 §2.
+
+        Args:
+            inquiry_id: 답변할 문의 ID(#1 조회로 확인).
+            content: 답변 내용(줄넘김 \\n). 길이 제한은 쿠팡이 검증.
+            reply_by: 응답자 셀러포탈(WING) 아이디 — 필수.
+        Raises:
+            CoupangWriteError: 필수 누락 또는 답변 실패.
         """
-        raise NotImplementedError("쓰기 페이즈 — CS 문의 답변 미구현(D-1)")
+        self._require(content, "content")
+        self._require(reply_by, "reply_by")
+        body = {"content": content, "vendorId": self.vendor_id, "replyBy": reply_by}
+        resp = self._request(
+            "POST", online_reply_path(self.vendor_id, inquiry_id), body=body, retry_transient=False
+        )
+        return check_write_response(resp, f"상품 고객문의 답변(inquiry={inquiry_id})")
+
+    def reply_call_center_inquiry(
+        self, *, inquiry_id: str, content: str, reply_by: str, parent_answer_id: int | str
+    ) -> dict:
+        """#4 쿠팡 고객센터 문의 답변 (POST v4). 명세 10 §4.
+
+        ⚠️ 미답변(progress/requestAnswer) 상태만 가능. 24시간 미답변 시 자동처리→API 답변 불가.
+        Args:
+            inquiry_id: 상담번호(#3 조회로 확인).
+            content: 답변 내용(최소2~최대1000자, 줄넘김 \\n). 길이는 쿠팡이 검증.
+            reply_by: 실사용자ID(WING ID) — 필수.
+            parent_answer_id: 부모이관글 answerId(#3 조회의 answerId) — 필수.
+        Raises:
+            CoupangWriteError: 필수 누락 또는 답변 실패.
+        """
+        self._require(content, "content")
+        self._require(reply_by, "reply_by")
+        body = {
+            "vendorId": self.vendor_id,
+            "inquiryId": str(inquiry_id),
+            "content": content,
+            "replyBy": reply_by,
+            "parentAnswerId": coerce_answer_id(parent_answer_id),
+        }
+        resp = self._request(
+            "POST", cc_reply_path(self.vendor_id, inquiry_id), body=body, retry_transient=False
+        )
+        return check_write_response(resp, f"CS이관 문의 답변(inquiry={inquiry_id})")
 
     def confirm_call_center_inquiry(self, *, inquiry_id: str, confirm_by: str) -> dict:
-        """#5 쿠팡 고객센터 문의 확인 — stub(쓰기 페이즈).
-        ⚠️ 24시간 경과 시 불가. confirm_by=WING ID.
+        """#5 쿠팡 고객센터 문의 확인 (POST v4). 명세 10 §5.
+
+        ⚠️ 미확인(TRANSFER) 건 확인 처리. 24시간 경과 시 불가.
+        Args:
+            inquiry_id: 상담번호(#3 조회의 미확인 건).
+            confirm_by: 실사용자ID(WING ID) — 필수.
+        Raises:
+            CoupangWriteError: 필수 누락 또는 확인 실패.
         """
-        raise NotImplementedError("쓰기 페이즈 — CS 문의 확인 미구현(D-1)")
+        self._require(confirm_by, "confirm_by")
+        body = {"confirmBy": confirm_by}
+        resp = self._request(
+            "POST", cc_confirm_path(self.vendor_id, inquiry_id), body=body, retry_transient=False
+        )
+        return check_write_response(resp, f"CS이관 문의 확인(inquiry={inquiry_id})")

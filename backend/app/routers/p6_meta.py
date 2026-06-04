@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.config import get_coupang_config
 from app.database import get_db
 from app.models import CoupangInquiry
+from app.routers._coupang_write_http import handle_write as _handle_write
 
 log = logging.getLogger(__name__)
 
@@ -92,6 +93,83 @@ def get_courier_codes():
     from app.clients.coupang.logistics import COURIER_CODES
 
     return {"courier_codes": COURIER_CODES}
+
+
+# ── 물류 쓰기 (트랙 D-16, W1) — dry_run 기본. 라이브 실행은 dry_run=false & confirm 토큰 필요 ──
+# 공통 예외 핸들러 _handle_write는 _coupang_write_http.handle_write로 추출(상단 import).
+
+@router.post("/logistics/outbound-places")
+def create_outbound_place(
+    body: dict,
+    account_key: str = Query(default=_DEFAULT_ACCOUNT),
+    dry_run: bool = Query(default=True),
+    confirm: str | None = Query(default=None),
+):
+    """출고지 생성 (#2) — ⚠️쓰기. dry_run=true(기본)면 미리보기만."""
+    from app.services.coupang import logistics_ops
+
+    cfg = _get_account(account_key)
+    return _handle_write(
+        lambda: logistics_ops.create_outbound_place(
+            cfg, body, dry_run=dry_run, confirm=confirm
+        )
+    )
+
+
+@router.put("/logistics/outbound-places/{code}")
+def update_outbound_place(
+    code: str,
+    body: dict,
+    account_key: str = Query(default=_DEFAULT_ACCOUNT),
+    dry_run: bool = Query(default=True),
+    confirm: str | None = Query(default=None),
+):
+    """출고지 수정 (#3) — ⚠️쓰기. dry_run 기본."""
+    from app.services.coupang import logistics_ops
+
+    cfg = _get_account(account_key)
+    return _handle_write(
+        lambda: logistics_ops.update_outbound_place(
+            cfg, code, body, dry_run=dry_run, confirm=confirm
+        )
+    )
+
+
+@router.post("/logistics/return-places")
+def create_return_place(
+    body: dict,
+    account_key: str = Query(default=_DEFAULT_ACCOUNT),
+    dry_run: bool = Query(default=True),
+    confirm: str | None = Query(default=None),
+):
+    """반품지 생성 (#4) — ⚠️쓰기. dry_run 기본."""
+    from app.services.coupang import logistics_ops
+
+    cfg = _get_account(account_key)
+    return _handle_write(
+        lambda: logistics_ops.create_return_place(
+            cfg, body, dry_run=dry_run, confirm=confirm
+        )
+    )
+
+
+@router.put("/logistics/return-places/{return_center_code}")
+def update_return_place(
+    return_center_code: str,
+    body: dict,
+    account_key: str = Query(default=_DEFAULT_ACCOUNT),
+    dry_run: bool = Query(default=True),
+    confirm: str | None = Query(default=None),
+):
+    """반품지 수정 (#7) — ⚠️쓰기. dry_run 기본."""
+    from app.services.coupang import logistics_ops
+
+    cfg = _get_account(account_key)
+    return _handle_write(
+        lambda: logistics_ops.update_return_place(
+            cfg, return_center_code, body, dry_run=dry_run, confirm=confirm
+        )
+    )
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -286,3 +364,69 @@ def list_inquiries(
             for r in rows
         ],
     }
+
+
+# ── CS 쓰기 (트랙 D-16, W2) — dry_run 기본. ⚠️ 라이브 실행 시 실제 고객/문의에 전송 ──
+
+@router.post("/inquiries/online/{inquiry_id}/reply")
+def reply_online_inquiry(
+    inquiry_id: str,
+    body: dict,
+    account_key: str = Query(default=_DEFAULT_ACCOUNT),
+    dry_run: bool = Query(default=True),
+    confirm: str | None = Query(default=None),
+):
+    """상품별 고객문의 답변 (#2) — ⚠️쓰기. body: {content, replyBy}. dry_run 기본."""
+    from app.services.coupang import cs_ops
+
+    cfg = _get_account(account_key)
+    content = body.get("content") or ""
+    reply_by = body.get("replyBy") or body.get("reply_by") or ""
+    return _handle_write(
+        lambda: cs_ops.reply_online_inquiry(
+            cfg, inquiry_id, content, reply_by, dry_run=dry_run, confirm=confirm
+        )
+    )
+
+
+@router.post("/inquiries/call-center/{inquiry_id}/reply")
+def reply_call_center_inquiry(
+    inquiry_id: str,
+    body: dict,
+    account_key: str = Query(default=_DEFAULT_ACCOUNT),
+    dry_run: bool = Query(default=True),
+    confirm: str | None = Query(default=None),
+):
+    """쿠팡 고객센터 문의 답변 (#4) — ⚠️쓰기. body: {content, replyBy, parentAnswerId}. dry_run 기본."""
+    from app.services.coupang import cs_ops
+
+    cfg = _get_account(account_key)
+    content = body.get("content") or ""
+    reply_by = body.get("replyBy") or body.get("reply_by") or ""
+    parent_answer_id = body.get("parentAnswerId") or body.get("parent_answer_id")
+    return _handle_write(
+        lambda: cs_ops.reply_call_center_inquiry(
+            cfg, inquiry_id, content, reply_by, parent_answer_id,
+            dry_run=dry_run, confirm=confirm,
+        )
+    )
+
+
+@router.post("/inquiries/call-center/{inquiry_id}/confirm")
+def confirm_call_center_inquiry(
+    inquiry_id: str,
+    body: dict,
+    account_key: str = Query(default=_DEFAULT_ACCOUNT),
+    dry_run: bool = Query(default=True),
+    confirm: str | None = Query(default=None),
+):
+    """쿠팡 고객센터 문의 확인 (#5) — ⚠️쓰기. body: {confirmBy}. dry_run 기본."""
+    from app.services.coupang import cs_ops
+
+    cfg = _get_account(account_key)
+    confirm_by = body.get("confirmBy") or body.get("confirm_by") or ""
+    return _handle_write(
+        lambda: cs_ops.confirm_call_center_inquiry(
+            cfg, inquiry_id, confirm_by, dry_run=dry_run, confirm=confirm
+        )
+    )

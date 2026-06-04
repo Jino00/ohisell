@@ -7,7 +7,12 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterator
 
-from app.clients.coupang._base import CoupangBaseClient, CoupangReadError
+from app.clients.coupang._base import (
+    CoupangBaseClient,
+    CoupangReadError,
+    CoupangWriteValidationError,
+    check_write_response,
+)
 
 log = logging.getLogger(__name__)
 
@@ -179,15 +184,38 @@ class CoupangRocketGrowthClient(CoupangBaseClient):
         return resp.get("data")
 
     # ════════════════════════════════════════════════
-    # 쓰기 (stub — 쓰기 페이즈, product_write.py Harness + dry_run, 트랙 D-1·D-14)
+    # W5 쓰기 구현 (트랙 D-16) — ⚠️ 라이브 실행자.
+    # ⚠️ 직접 호출 금지. 반드시 Harness(product_write.py)를 경유할 것.
+    # RG 상품은 seller_api 동일 경로 + items[].rocketGrowthItemData.skuInfo 포함 body.
+    # retry_transient=False. require_code=True(명세 §6·§7 code 반환 보장).
     # ════════════════════════════════════════════════
-    def create_rg_product(self, payload: dict) -> dict | None:
-        """RG 상품 생성 POST .../seller-products (명세 §6). ⚠️라이브 스토어 등록 — 쓰기 페이즈."""
-        raise NotImplementedError("RG 상품 생성은 쓰기 페이즈(product_write.py + dry_run)에서 구현")
 
-    def update_rg_product(self, payload: dict) -> dict | None:
-        """RG 상품 수정 PUT .../seller-products (명세 §7). ⚠️라이브 스토어 수정 — 쓰기 페이즈."""
-        raise NotImplementedError("RG 상품 수정은 쓰기 페이즈(product_write.py + dry_run)에서 구현")
+    def create_rg_product(self, *, body: dict) -> dict:
+        """#6 RG 상품 생성 (POST, body 있음). 명세 05 §6 W5 2026-06-04.
+
+        경로·응답 구조는 products.py create_product(#9)와 동일(seller_api 패밀리).
+        body: 일반 상품 생성 body + items[].rocketGrowthItemData.skuInfo(필수).
+        반환: { code: SUCCESS/ERROR, data: sellerProductId }.
+        """
+        if not isinstance(body, dict):
+            raise CoupangWriteValidationError("RG 상품 생성: body는 dict여야 합니다")
+        resp = self._request(
+            "POST", f"{_SELLER_BASE}/seller-products", body=body, retry_transient=False
+        )
+        return check_write_response(resp, "RG 상품 생성", require_code=True)
+
+    def update_rg_product(self, *, body: dict) -> dict:
+        """#7 RG 상품 수정 (PUT, body 있음). 명세 05 §7 W5 2026-06-04.
+
+        경로·응답 구조는 products.py update_product(#11)과 동일(seller_api 패밀리).
+        body: 일반 상품 수정 body(sellerProductId 필수 포함) + items[].rocketGrowthItemData.
+        """
+        if not isinstance(body, dict):
+            raise CoupangWriteValidationError("RG 상품 수정: body는 dict여야 합니다")
+        resp = self._request(
+            "PUT", f"{_SELLER_BASE}/seller-products", body=body, retry_transient=False
+        )
+        return check_write_response(resp, "RG 상품 수정", require_code=True)
 
     # ════════════════════════════════════════════════
     # 카테고리 (stub — P6 category.py 도메인 소관, 트랙 D-14)

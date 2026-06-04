@@ -1,6 +1,6 @@
 # 트랙: 쿠팡 API 전 기능 연결 + 종합 조망(Command Center)
 
-> 시작: 2026-06-02 · 상태: Active · 단계: P1+(A)+(B)+P2+**P3(로켓그로스 읽기5)**+P4+**P7**+**D-12**+**D-13** 완료·prod 라이브(3자 조인+순매출 차감+수수료 감사+종합조망+원가 정확화+사이즈/CBM·로켓창고 재고·RG주문). **5/7 페이즈**. 다음 P5 쿠폰 / P6 / 쓰기
+> 시작: 2026-06-02 · 상태: Active · 단계: 읽기 7/7 완료 + **쓰기 페이즈 W1~W5 ★prod 배포·라이브 실증 완료(2026-06-04)**. 총 22라우트(108라우트). 다음 = codex W4·W5 교차검증 + git 커밋
 
 ## 1. 목표 (한 줄)
 오픽스의 판매현황을 회계·광고전략·상품전략까지 한눈에 조망하는 사령탑을 만들고, 그 토대로 쿠팡 Open API(윙+로켓그로스) 전 기능(읽기+쓰기)을 ohisell에 연결한다.
@@ -105,6 +105,15 @@
 - **미수집**: `msf/revenue-history-view` 서브API(브라우저 크래시), `wing-account/basicinfo`(비밀번호 게이트 302). 필요 시 재수집.
 - Jino 원문: "쿠팡의 API 사이트에서 모든 정보를 다 수집하자. 그러면 우리가 사용할 수 있는 정보인데 너가 몰라서 놓치는 일이 없잖아."
 
+### D-16. 쓰기 페이즈 범위·검증·안전장치 (2026-06-04 Jino 승인)
+- **범위**: 쿠팡 쓰기 endpoint **전체 34개 구현**. logistics 4·CS 3·상품 17·쿠폰 8·RG 2.
+- **본문 스키마 재수집(D-1 추정금지)**: 34개 중 **28개(82%)는 references 명세에 request body 스키마 부재**(이름·URL·article ID만). 구현 전 `/browse`로 쿠팡 공식 article에서 본문 스키마 재수집 후 구현. (이미 보유: 물류 4·CS #2·#5 = 6개.)
+- **검증 수위(2026-06-04 조정, Jino 승인 "그래")**: 당초 "안전항목 라이브 1건"이었으나 끝까지 보니 부작용 발견 → **전 단계 dry_run 일관 + 라이브 read-back 교차(무변경)**로 조정. ① dry_run으로 본문/서명/경로 구성 검증 ② 서버에서 기존 데이터 읽어 payload 필드명↔실제 응답 스키마 대조(라이브 무변경, 원칙22 증거) ③ **진짜 라이브 쓰기 1건은 오픽스가 그 기능을 실제로 쓸 때 Jino가 직접 실행**(인위적 테스트 데이터 안 만듦 — D-7). 조정 근거: 출고지/반품지 삭제 API 없음(테스트 잔존)·CS답변=실고객 전송, W3~W5는 어차피 dry_run.
+- **배포 타이밍(2026-06-04 조정)**: W1만 따로 배포 안 함. **W1~W5 전부 완성·codex PASS 후 한 번에 prod 배포**(scp+pm2 1회). 쓰기는 dry_run=True 기본이라 배포해도 라이브 변경 없음 → 배포 자체가 안전. 배포 직전 서버에서 read-back 교차 일괄.
+- **안전장치(횡단)**: 모든 쓰기 Harness는 **dry_run=True 기본** + 명시 confirm 토큰 없으면 실행 거부(트랙 §5 횡단원칙). 공통 쓰기 가드 모듈로 재사용.
+- **진행 순서(sub-phase, 안전·스키마보유 우선)**: W1 물류4 → W2 CS3 → W3 상품17 → W4 쿠폰8 → W5 RG2. 각 sub-phase = 스키마 재수집(필요시) → SA 구현 → 쓰기 Harness → 라우터 → codex PASS → 검증(안전=라이브1건/고위험=dry_run).
+- Jino 승인 원문: "전체 34개(스키마 재수집 후)" + "안전 항목만 라이브 1건 테스트".
+
 ## 3. 사용자 원문 인용 (왜곡 방지)
 - "종합적으로 오픽스의 판매현황에 대한 조망을 하고 싶어. 회계뿐 아니라 광고 전략, 상품판매 전략등까지 말이야"
 - "광고리포트에 대해서는 사실만 정리하면 되지, 너가 추천할 필요는 없어. 너가 그런 일을 할 수 있는 능력은 없잖아?"
@@ -119,8 +128,15 @@
 - [x] P3. 로켓그로스 도메인 (상품조회=사이즈, 로켓창고 재고, RG주문) — **읽기5 완료(main bf563c2+fcedbec, codex PASS, prod 배포·라이브 실증 2026-06-03)**. 쓰기2(생성/수정)·카테고리2 stub(쓰기페이즈/P6). 아래 §7 참조.
 - [x] P4. 정산 도메인 (매출내역=수수료 실측·지급내역=통장지급) — **완료(prod 배포·라이브 실증 2026-06-03)**. D-10/D-11 수수료 감사. 아래 §7 참조.
 - [x] P5. 쿠폰/캐시백 (쿠폰 운영 현황 — 보조축) — **읽기13 구현+쓰기8 stub 완료(codex PASS 2R, prod 배포·라이브 실증 2026-06-03)**. 아래 §7 참조. (회계는 정산 P4가 진실 D-3 — 이건 운영 현황만)
-- [ ] P6. 물류센터·카테고리·브랜드·CS (보조)
+- [x] P6. 물류센터·카테고리·브랜드·CS (보조) — **SA 23개 구현+stub 완료(codex PASS, prod 배포·라이브 실증 2026-06-04)**. 아래 §7 참조.
 - [x] P7. 종합 조망 화면 결합 (옵션ID 결합 엔진 + 3축 뷰) — **완료(prod 배포·라이브 실증·시각확인 2026-06-03)**. 아래 §7 참조.
+- 쓰기 페이즈 (D-16, 안전·스키마보유 우선 W1→W5):
+  - [x] **W1. 물류 쓰기 4 (#2 출고지생성·#3 출고지수정·#4 반품지생성·#7 반품지수정)** — SA 구현 + 공통 `_write_guard`(dry_run+confirm) + Harness `logistics_ops.py` + 라우터 4개. **codex PASS 2R**(R1 5건→R2 P2 1건 전부 해소·합의). 격리 검증 통과(가드 4/4, vendorId 강제, path quote, 토큰 미노출). ⏳ prod 배포·라이브 1건 실증 대기(시나리오 Jino 확인 필요). 아래 §7.
+  - [x] **W2. CS 쓰기 3 (#2 상품문의답변·#4 CS이관답변·#5 CS이관확인)** — /browse 본문 재수집(#2·#4 둘 다 replyBy 필수·#4 parentAnswerId Number 발견, 명세10 갱신) + SA 구현 + Harness `cs_ops.py` + 라우터 3개. **codex PASS 2R**(R1 P1 쓰기성공오인+P2 dry검증우회·parentAnswerId → R2 해소·합의). 격리 검증 7/7. ⏳ prod 배포 대기. 아래 §7.
+  - [x] **W3a. 상품 단순 쓰기 9 (#14 재고·#15 가격·#16 할인율기준가·#17 판매재개·#18 판매중지·#19~22 자동생성옵션 활성/비활성)** — /browse 본문 재수집(★전 9개 body 없음·자동옵션 code=PROCESSING 발견, 명세 02 §4) + SA 구현 + Harness `product_write.py` + 라우터 `coupang_ops.py` 9개 + 공통 `_coupang_write_http.py`(handle_write 추출). **codex PASS 2R**(R1 [P1×2]쓰기재시도·code부재성공+[P2×3]검증502·bool미검증·preview query → R2 [P2×1]int→bool allowlist → 전부 해소·합의). 격리 검증 35+8건. ⏳ prod 배포 대기(W5 후 일괄). 아래 §7.
+  - [x] **W3b. 상품 복잡 쓰기 5 (#9 생성·#10 승인요청·#11 수정(승인필요)·#12 수정(승인불필요)·⛔#13 삭제차단)** — /browse 재수집(명세 02 §5 신설, 2026-06-04). SA products.py stub→구현(body 있음 #9/#11/#12, no-body #10, #13 영구차단). Harness product_write.py 확장(_require_product_body·_body_preview·create/approve/update/partial/delete_blocked). 라우터 coupang_ops.py 5라우트 추가(body=dict[str,Any], DELETE→403 즉시). ★삭제 차단=시스템 정책(SA·Harness·Router 3계층, CoupangWriteValidationError/HTTP 403). 격리 검증 21건 PASS(dry_run·필수키누락·body타입·path≠body spid·confirm없음·삭제3계층·라이브monkeypatch·ERROR code). ⏳ codex 교차검증 미실행(원칙19). ⏳ prod 배포 대기(W5 후 일괄, D-16).
+  - [x] **W4. 쿠폰 쓰기 8 (#7·#8·#9 다운로드쿠폰·#12·#13·#14 즉시할인쿠폰·#1·#3 D-7 stub)** — /browse 재수집(명세 06 W4, 2026-06-04). SA 6개 구현(_check_fms_write·_check_mktpl_write 비동기 응답 체커). Harness coupon_write.py(신규 6함수). 6라우트 coupang_ops.py 추가(총 20라우트). 격리 18건 PASS. ⚠️ codex 교차검증 미실행. ⏳ prod 배포 대기(W5 후 일괄).
+  - [x] **W5. RG 쓰기 2 (#6 RG상품생성·#7 RG상품수정)** — seller_api 동일 경로, body에 rocketGrowthItemData 포함. SA rocketgrowth.py stub→구현(CoupangRocketGrowthClient). Harness product_write.py 확장(create/update_rg_product, _rg_client). 2라우트 coupang_ops.py 추가(총 22라우트). 격리 10건 PASS. ⏳ codex 미실행. ⏳ prod 배포 대기(W1~W5 일괄).
 
 ## 5. 확정 아키텍처 (Agent / Harness / Sub-Agent — 변형 금지)
 
@@ -265,13 +281,42 @@ pages/   Products(확장)·Returns(신규)·InventoryPage(실재고)·Settlement
   - **발견(사실, D-3)**: 자유계약(NON_CONTRACT_BASED)은 예산현황 totalBudgetAmount=2147483647(Int32 max=무제한 sentinel). 사실 그대로 적재.
   - ⚠️ 다운로드쿠폰 목록 API 없음(명세 §E) → 자동 sync 제외(즉시할인쿠폰+예산/계약 중심).
   - 롤백: 서버 `ohisell.db.bak-p5coupon-20260603-132132`·`/tmp/rollback_p5`(6파일).
-- 다음: §8 — P6 물류·CS+카테고리율 교차+RG카테고리 / 쓰기 페이즈(stub 채우기: RG 상품생성/수정 + products 17 + 쿠폰 쓰기8). RG 조망 편입(재고축·보관비 모델)은 별도.
+- **✅ W1 물류 쓰기 4 완료(2026-06-04, codex PASS 2R — prod 배포 대기)** — 쓰기 페이즈 첫 단계(D-16):
+  - SA `clients/coupang/logistics.py` 쓰기 4 구현(#2 출고지생성 POST·#3 출고지수정 PUT·#4 반품지생성 POST·#7 반품지수정 PUT). vendorId/returnCenterCode 강제(경로가 진실), 실패=CoupangWriteError(_base에 신규). 본문 필드는 쿠팡이 검증(추정금지 D-1, 명세 08 §2·3·4·7에 핵심필드 보유).
+  - 공통 안전장치 `services/coupang/_write_guard.py`(신규, 횡단 재사용): dry_run=True 기본, confirm 토큰(WRITE_CONFIRM_TOKEN) 없으면 CoupangLiveWriteRejected(전용예외). dry_run시 SA 미호출·payload 미리보기만.
+  - Harness `services/coupang/logistics_ops.py`(신규): SA 4개를 guarded_write로 래핑. dry_run 게이트는 여기서만(SA는 dry_run 모름·원칙18-1).
+  - 라우터 p6_meta.py 확장: POST/PUT 4개(/api/p6/logistics/outbound-places·return-places). dry_run 쿼리 기본 True. _handle_write 공통 예외처리(거부=403·쓰기실패=502·기타=고정메시지+로그).
+  - codex PASS 2R: R1[P1×2]vendorId setdefault우회·SA직접호출 +[P2×3]예외누수·path인코딩·토큰노출 → vendorId강제·예외고정메시지·quote·토큰제거 수정(SA직접호출은 트랙§5 아키텍처 근거로 부분기각=docstring경고). R2[P2]built-in PermissionError 오인 → 전용예외 CoupangLiveWriteRejected 분리. 합의 완료.
+  - 격리 검증(로컬, API 미호출): 가드 4/4(dry_run 미호출·confirm거부·토큰일치실행), vendorId 강제 덮어쓰기, path quote, 토큰 미노출, 앱로드 83라우트.
+  - ⏳ **미완**: prod 배포 + 라이브 1건 실증(D-16 안전항목 검증). ⚠️ 출고지/반품지는 삭제 API 없음 → 라이브 테스트 시 데이터 잔존. 시나리오(기존건 usable 토글 후 원복 등) Jino 확인 후 진행.
+- **✅ W2 CS 쓰기 3 완료(2026-06-04, codex PASS 2R — prod 배포 대기)** — 쓰기 페이즈 둘째 단계(D-16):
+  - 본문 스키마 /browse 재수집(쿠팡 공식, headed 필수): #2 onlineInquiries replies(content·vendorId·replyBy) · #4 callCenterInquiries replies(vendorId·inquiryId·content 2~1000자·replyBy·**parentAnswerId Number**) · #5 confirms(confirmBy). 모두 **v4**(읽기 v5와 다름). references/10 §2·4·5 갱신.
+  - **★재수집 효과(D-1)**: 명세 첫 수집 때 #2는 "content만"으로 적혀 있었으나 실제 **replyBy 필수** — 재수집 안 했으면 라이브 답변이 400 날 뻔. 추정금지 원칙이 실효.
+  - SA `clients/coupang/cs.py` 쓰기3 구현(라이브 실행자, v4 path 빌더 quote, 필수 빈값 방어, coerce_answer_id). Harness `services/coupang/cs_ops.py`(진입부 dry/live 공통 검증 + guarded_write). 라우터 p6_meta 3개(POST /inquiries/online·call-center/.../reply·confirm). dry_run 기본.
+  - 공통 `_base.check_write_response`(신규): 쓰기 성공판정 일관화(None·실패code 표면화). **W1 logistics 4개에도 소급 적용**(같은 결함이었음).
+  - codex PASS 2R: R1[P1]쓰기 200+실패code 성공오인 →check_write_response +[P2]dry-run 검증우회·parentAnswerId 미변환 → 진입부검증·int변환 수정. R2 신규0(잔여 code None 일관성 1줄 반영). 합의.
+  - 격리 검증 7/7: 200+code400 표면화, dry-run 빈값 거부, parentAnswerId int, W1 회귀없음, 앱로드 86라우트.
+  - ⏳ 미완: prod 배포(W5까지 모아 1회, D-16). 라이브 답변은 실제 고객 전송이라 실사용 시 Jino 실행(인위 테스트 안 함).
+- **✅ W3a 상품 단순 쓰기 9 완료(2026-06-04, codex PASS 2R — prod 배포 대기)** — 쓰기 페이즈 셋째 단계(D-16):
+  - /browse 본문 재수집(쿠팡 공식 headed, 명세 02 §4 신설): #14 재고·#15 가격·#16 할인율기준가·#17 판매재개·#18 판매중지·#19~22 자동생성옵션(옵션/전체 활성·비활성). **★전 9개 request body 없음**(path segment/query만) — W1/W2(body POST)와 SA 시그니처 다름. **★자동옵션 4개 code=SUCCESS/PROCESSING/FAILED**(PROCESSING=비동기 정상). #20·#22(전체)는 path에 vendorId조차 없음(HMAC키로 셀러식별).
+  - SA `clients/coupang/products.py` 쓰기9 구현(라이브 실행자, 경로빌더 9+query빌더, `_vid` 정수 이중방어). Harness `services/coupang/product_write.py`(신규, guarded_write 재사용, 진입부 `_require_int`·`_as_bool` 검증). 라우터 `routers/coupang_ops.py`(신규, 트랙§5 명시, 9라우트 `/api/coupang/ops/...`, dry_run 기본). 공통 `routers/_coupang_write_http.py`(handle_write 추출 — p6_meta W1·W2도 공유).
+  - `_base.check_write_response`에 `success_codes`(PROCESSING 허용)·`require_code`(W3a fail-closed) 파라미터 추가. `_request`에 `retry_transient`(쓰기는 False — 재시도 중복실행 방지). `CoupangWriteValidationError`(검증오류=400) 신설.
+  - codex PASS 2R: R1 [P1×2]쓰기 일시오류 재시도(중복실행 위험)·code부재 2xx 성공오인 +[P2×3]검증에러 502오매핑·Harness bool 미검증("false"→truthy)·가격 preview path query 누락 → 전부 수정. R2 [P2×1]_as_bool 임의정수 강제(2·-1→True) → 0/1 allowlist 수정. 합의 완료. **★W1·W2 쓰기 SA에도 retry_transient=False 소급(같은 결함)**.
+  - 격리 검증 R1 22 + R2 13 + allowlist 8 = **43건 PASS**(dry_run 게이트·confirm토큰·경로/쿼리 명세일치·body없음·진입부검증·ap함께전달·PROCESSING성공/FAILED실패·전체단위 vendorId없음·require_code fail-closed·검증400/업스트림502·bool정규화·preview query). W1·W2 회귀 없음. 앱로드 95라우트(86→+9).
+  - ⏳ 미완: prod 배포(W5까지 모아 1회, D-16). 라이브 쓰기 1건은 오픽스 실사용 시 Jino 직접 실행(D-16: 인위 테스트 안 함).
+- **✅ W3b 상품 복잡 쓰기 5 완료(2026-06-04, 격리검증 완료 — prod 배포 대기)** — 쓰기 페이즈 넷째 단계(D-16):
+  - /browse 본문 재수집(명세 02 §5 신설): #9 생성(body 大)·#10 승인요청(no-body)·#11 수정(승인필요, body 大)·#12 수정(승인불필요, 부분 body)·#13 삭제(⛔시스템 영구 차단).
+  - SA `clients/coupang/products.py` stub 5개 → 구현(#9·#11·#12 body=dict, #10 no-body, #13 즉시 CoupangWriteValidationError). Harness `product_write.py` 확장(_require_product_body·_body_preview 헬퍼, create/approve/update/partial 4함수·delete_product 영구차단함수). 라우터 `coupang_ops.py` 5라우트 추가(POST/PUT body=dict[str,Any], DELETE→HTTP 403). 총 라우트 14개.
+  - ★삭제 차단 원칙 확정(W3b D-16 추가): SA(CoupangWriteValidationError)·Harness(동일)·Router(HTTP 403) 3계층. Wing에서만 직접 수행.
+  - 격리 검증 21건 PASS(dry_run 4종·필수키누락 4종·body타입·path≠body spid·confirm없음·삭제 3계층·라이브 monkeypatch 4종·ERROR code). ⏳ codex 교차검증 미실행(원칙19 — 다음 세션).
+  - ⏳ 미완: codex 교차검증(원칙19) + prod 배포(W5까지 모아 1회, D-16).
+- 다음: §8 — 쓰기 페이즈 ⏳codex W3b·W4 쿠폰쓰기8·W5 RG2 / W1~W5 일괄 prod 배포(W5 후) / RG 조망 편입.
 
 ## 8. 다음 액션 (세션 넘어와도 여기부터)
 **P1+(A)+(B)+P2+P3+P4+P7 + D-12·D-13 모두 완료 + prod 배포·라이브 실증 완결(5/7 페이즈).** 3자 조인 + 순매출 차감 + 수수료 감사 + 종합조망 + 사이즈/CBM·로켓창고 재고·RG주문이 prod 실데이터로 작동. 스케줄러: 05:30 상품·05:35 RG사이즈·05:40 RG재고·05:45 반품·05:50 정산·05:55 RG주문 자동 갱신. 다음 후보(우선순위는 Jino와 정할 것):
 - **P5 쿠폰/캐시백** (할인 비용) — coupons.py(21 SA). 셀러 부담 할인 비용 반영.
 - **P6 물류센터·카테고리·브랜드·CS** — ★수수료 감사 카테고리율 2차 교차(D-13 후속) + RG 카테고리 stub(#8·#9) 본 구현. category.py(6 SA).
-- **쓰기 페이즈** — RG 상품생성/수정(rocketgrowth.py stub) + products.py 17 stub + returns/exchanges 쓰기. ⚠️ dry_run 안전장치(D-1), product_write.py Harness.
+- **쓰기 페이즈(D-16, 진행중)** — ✅W1 물류4·✅W2 CS3·✅W3a 상품단순쓰기9·✅W3b 상품복잡쓰기5 완료(격리검증, prod 배포 대기). **다음 = codex W3b 교차검증(원칙19) + W4 쿠폰쓰기8 + W5 RG2**. W5 후 W1~W5 일괄 prod 배포. ★#13 삭제는 시스템 정책으로 영구 차단(SA·Harness·Router 3계층).
 - **(선택) RG 조망 편입** — 로켓창고 재고축·보관비 CBM 모델을 intelligence.py/Command Center에 합류(현재 적재만 됨, 화면 미연결). 보관비는 정산 실측이 진실, CBM은 모델 지표(D-14).
 - ~~P3 로켓그로스~~ → **완료**(읽기5 prod 라이브). 쓰기2·카테고리2 stub만 남음(쓰기페이즈/P6).
 - ~~수수료 감사 기준선 재검토~~ → **D-13으로 완료**. P6에서 카테고리율 2차 교차만 남음.

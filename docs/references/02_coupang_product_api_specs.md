@@ -113,3 +113,114 @@
 
 - URL 패턴: `https://developers.coupangcorp.com/hc/ko/articles/{article}`
 - 쓰기 7개(생성·수정·삭제·수량/가격/할인가 변경·판매중지/재개)는 P1 패키지에 **stub 슬롯**만 두고, 실제 구현은 별도 쓰기 페이즈에서 dry_run 안전장치와 함께.
+
+---
+
+## 4. W3a 단순 쓰기 9개 본문 스키마 (쓰기 페이즈, /browse 재수집 2026-06-04, D-1 추정금지)
+
+> 수집일: 2026-06-04 · 출처: developers.coupangcorp.com (headed /browse 직접 확인)
+> ★**전 9개 request body 없음(`not require body`)** — 모든 변수는 path segment 또는 query string.
+> → W1/W2(body POST)와 SA 시그니처가 다름. guarded_write의 payload는 "변경 파라미터 미리보기"로 사용.
+> 게이트웨이: 전부 `seller_api` (`/v2/providers/seller_api/apis/api/v1/marketplace`). 옵션ID(vendorItemId) 발급(승인완료) 후 사용 가능.
+
+| # | 메서드 | HTTP | Path (마켓플레이스 base 이후) | params | body | 응답 code | API명 |
+|---|--------|:---:|------|------|:---:|------|------|
+| 14 | `update_item_quantity` | PUT | `/vendor-items/{vendorItemId}/quantities/{quantity}` | path: vendorItemId, quantity | 없음 | SUCCESS/ERROR | UPDATE_PRODUCT_QUANTITY_BY_ITEM |
+| 15 | `update_item_price` | PUT | `/vendor-items/{vendorItemId}/prices/{price}` | path: vendorItemId, price(10원단위); query: forceSalePriceUpdate(bool), apMinSalePrice(<price), apActive(bool) | 없음 | SUCCESS/ERROR | UPDATE_PRODUCT_PRICE_BY_ITEM |
+| 16 | `update_item_base_price` | PUT | `/vendor-items/{vendorItemId}/original-prices/{originalPrice}` | path: vendorItemId, originalPrice(0~,10원단위) | 없음 | SUCCESS/ERROR | UPDATE_PRODUCT_PRICE_INCL_DISCOUNT |
+| 17 | `resume_item_sale` | PUT | `/vendor-items/{vendorItemId}/sales/resume` | path: vendorItemId | 없음 | SUCCESS/ERROR | RESUME_PRODUCT_SALES_BY_ITEM |
+| 18 | `stop_item_sale` | PUT | `/vendor-items/{vendorItemId}/sales/stop` | path: vendorItemId | 없음 | SUCCESS/ERROR | STOP_PRODUCT_SALES_BY_ITEM |
+| 19 | `enable_auto_option_item` | POST | `/vendor-items/{vendorItemId}/auto-generated/opt-in` | path: vendorItemId | 없음 | **SUCCESS/PROCESSING/FAILED** | UPDATE_PRODUCT_UP_BUNDLING_OPT_IN |
+| 20 | `enable_auto_option_all` | POST | `/seller/auto-generated/opt-in` | 없음(셀러 단위, HMAC키로 식별) | 없음 | **SUCCESS/PROCESSING/FAILED** | UPDATE_SELLER_UP_BUNDLING_OPT_IN |
+| 21 | `disable_auto_option_item` | POST | `/vendor-items/{vendorItemId}/auto-generated/opt-out` | path: vendorItemId | 없음 | **SUCCESS/PROCESSING/FAILED** | UPDATE_PRODUCT_UP_BUNDLING_OPT_OUT |
+| 22 | `disable_auto_option_all` | POST | `/seller/auto-generated/opt-out` | 없음(셀러 단위) | 없음 | **SUCCESS/PROCESSING/FAILED** | UPDATE_SELLER_UP_BUNDLING_OPT_OUT |
+
+### 핵심 설계 함의 (구현 반영)
+- **body 없음** → SA는 path/query만 구성. `check_write_response`는 응답 code 검사로 성공판정(2xx면 _request가 body 반환).
+- **자동옵션 4개(#19~22)는 code=PROCESSING이 정상**(비동기 처리중). `check_write_response(success_codes=(...,"PROCESSING"))`로 PROCESSING을 실패 오판하지 않게 확장. 나머지 5개는 SUCCESS/ERROR.
+- **#15 가격변경 query**: `forceSalePriceUpdate=true`면 변경비율 제한(기존가 -50%~+100%) 해제. `apMinSalePrice`/`apActive`는 자동가격조정(반드시 함께 전달, apMinSalePrice<price). bool은 `"true"/"false"` 문자열로 직렬화(쿠팡 예시 일치).
+- **#15 제약**: 자동생성옵션 가격은 직접 수정 불가(기준 판매자옵션 가격으로 조정). 10원 단위, 1원 단위 불가 → 쿠팡이 검증(추정 강제 안 함, D-1). 우리는 정수·양수 기본 검증만.
+- **#20·#22 전체단위**: path에 vendorId조차 없음. HMAC access-key로 셀러 식별. → SA 시그니처에 vendor_item_id 없음.
+- 공통: 옵션ID 삭제/미발급(임시저장 null)이면 400. 모니터링 판매중지 상품은 #17 재개 불가(쿠팡 CS 경유).
+
+---
+
+## 5. W3b 복잡 쓰기 5개 본문 스키마 (쓰기 페이즈, /browse 재수집 2026-06-04, D-1 추정금지)
+
+> 수집일: 2026-06-04 · 출처: developers.coupangcorp.com (headed /browse 직접 확인)
+> #9·#11·#12 = **body 있음(JSON)**. #10·#13 = no body.
+> ⛔ **#13(삭제)는 시스템 정책으로 영구 차단** — SA·Harness·Router 3계층 모두 거부(Wing 직접 수행).
+> 게이트웨이: 전부 `seller_api` (`/v2/providers/seller_api/apis/api/v1/marketplace`).
+
+| # | 메서드 | HTTP | Path (마켓플레이스 base 이후) | body | 응답 code | API명 |
+|---|--------|:---:|------|:---:|------|------|
+| 9 | `create_product` | POST | `/seller-products` | **있음** | SUCCESS/ERROR | CREATE_PRODUCT |
+| 10 | `request_approval` | PUT | `/seller-products/{sellerProductId}/approvals` | 없음 | SUCCESS/ERROR | APPROVE_PRODUCT |
+| 11 | `update_product` | PUT | `/seller-products` | **있음** | SUCCESS/ERROR | UPDATE_PRODUCT |
+| 12 | `update_product_partial` | PUT | `/seller-products/{sellerProductId}/partial` | **있음(부분)** | SUCCESS/ERROR | UPDATE_PRODUCT_PARTIAL |
+| 13 | ~~`delete_product`~~ | DELETE | `/seller-products/{sellerProductId}` | 없음 | ⛔차단 | DELETE_PRODUCT |
+
+### #9 상품 생성 (CREATE_PRODUCT) — body 필수 키
+
+| 필드 | 필수 | 타입 | 설명 |
+|------|:---:|------|------|
+| sellerProductName | O | String | 등록상품명 (max 100자, 발주서용) |
+| vendorId | O | String | 판매자ID (Wing 확인) |
+| saleStartedAt | O | String | 판매시작일시 "yyyy-MM-dd'T'HH:mm:ss" |
+| saleEndedAt | O | String | 판매종료일시 (2099년까지 가능) |
+| deliveryMethod | O | String | SEQUENCIAL/COLD_FRESH/MAKE_ORDER/AGENT_BUY/VENDOR_DIRECT |
+| deliveryCompanyCode | O | String | 택배사 코드 |
+| deliveryChargeType | O | String | FREE/NOT_FREE/CHARGE_RECEIVED/CONDITIONAL_FREE |
+| deliveryCharge | O | Number | 기본배송비 |
+| freeShipOverAmount | O | Number | 조건부 무료배송 기준금액 (무료=0) |
+| deliveryChargeOnReturn | O | Number | 초도반품배송비 |
+| remoteAreaDeliverable | O | String | Y/N |
+| unionDeliveryType | O | String | UNION_DELIVERY/NOT_UNION_DELIVERY |
+| returnCenterCode | O | String | 반품지 센터코드 |
+| returnChargeName | O | String | 반품지명 |
+| companyContactNumber | O | String | 반품지 연락처 |
+| returnZipCode | O | String | 반품지 우편번호 |
+| returnAddress | O | String | 반품지 주소 |
+| returnAddressDetail | O | String | 반품지 주소 상세 |
+| returnCharge | O | Number | 반품배송비 |
+| outboundShippingPlaceCode | O | Number | 출고지 주소코드 (묶음배송 필수) |
+| vendorUserId | O | String | Wing 로그인 ID |
+| requested | O | Boolean | 자동승인요청 여부 (true=즉시 승인요청) |
+| items | O | List | 옵션 목록 (최대 200개) |
+| displayCategoryCode | | Number | 노출카테고리코드 (없으면 자동매칭) |
+
+**items[] 필수 필드**: itemName, originalPrice(할인율기준가), salePrice(판매가), maximumBuyCount(재고,max 99999), maximumBuyForPerson, maximumBuyForPersonPeriod, outboundShippingTimeDay, unitCount(단일=1), adultOnly(EVERYONE/ADULT_ONLY), taxType(TAX/FREE), parallelImported, overseasPurchased, pccNeeded, images(REPRESENTATION 필수), attributes(1개 이상), contents
+
+**응답**: `{ code: "SUCCESS/ERROR", message, data: { code: "SUCCESS/ERROR", data: sellerProductId(Long) } }`
+- ⚠️ HTTP 200 + code=ERROR 가능(속성 오류) → require_code=True로 fail-closed
+- ⚠️ 승인 후 자동 승인반려 가능 → 생성 후 상태 확인 권장
+
+### #10 상품 승인 요청 (APPROVE_PRODUCT) — no body
+
+- '임시저장' 상태에서만 가능. `requested=true`로 생성하면 자동이므로 별도 불필요.
+- 응답: `{ code: "SUCCESS/ERROR", message, data: sellerProductId_string }`
+
+### #11 상품 수정 승인필요 (UPDATE_PRODUCT) — body 필수 키
+
+- #9 create와 동일 body 구조 + **`sellerProductId`(필수, 상단)** + items[]에 `sellerProductItemId` 포함(수정) / 미포함(추가) / 제거(삭제)
+- `vendorId`, `items` 필수. 승인완료 후 반영(immediately 아님).
+- ⚠️ 승인완료 상품의 판매가·재고·판매상태·할인율기준가는 이 API가 아니라 #14~18 단순쓰기 사용.
+
+### #12 상품 수정 승인불필요 (UPDATE_PRODUCT_PARTIAL) — 부분 body
+
+- Path: `/seller-products/{sellerProductId}/partial` + body에도 `sellerProductId` 필수.
+- 수정 가능 필드(전부 선택): deliveryMethod, deliveryCompanyCode, deliveryChargeType, deliveryCharge, freeShipOverAmount, deliveryChargeOnReturn, remoteAreaDeliverable, unionDeliveryType, returnCenterCode, returnChargeName, companyContactNumber, returnZipCode, returnAddress, returnAddressDetail, returnCharge, outboundShippingPlaceCode, outboundShippingTimeDay, sameDayShipping, pccNeeded, extraInfoMessage
+- '임시저장·승인대기중' 상품은 수정 불가(쿠팡 400).
+- 응답: SUCCESS/ERROR
+
+### #13 상품 삭제 — ⛔ 시스템 정책으로 영구 차단
+
+- **이 시스템(ohisell)에서는 상품 삭제 불가.** SA·Harness·Router 3계층 모두 `CoupangWriteValidationError` / HTTP 403.
+- 삭제 조건(쿠팡 원칙): 승인대기 아니고 모든 옵션 판매중지 상태여야 가능 → 실수로 라이브 상품 삭제 방지를 위해 Wing에서만 허용.
+
+### 핵심 설계 함의
+
+- **body 있는 쓰기(#9·#11·#12)**: body dict는 Harness가 필수키 검증 후 SA에 전달. SA는 `_request(..., body=body)`로 JSON 전송.
+- **fail-closed**: 전부 `require_code=True` (명세가 code 반환 보장).
+- **retry 금지**: `retry_transient=False` (쓰기 재시도=중복실행 위험, D-16 공통).
+- **삭제 차단 영구화**: D-16 확정 결정. 시스템 정책 변경 없이는 복원 불가.
