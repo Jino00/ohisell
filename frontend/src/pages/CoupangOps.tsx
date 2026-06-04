@@ -9,6 +9,7 @@ const COMPANIES = [
   { value: "오하이테크", label: "오하이테크" },
 ];
 const PERIODS = [
+  { label: "오늘", days: 0 },
   { label: "어제", days: 1 },
   { label: "7일", days: 7 },
   { label: "15일", days: 15 },

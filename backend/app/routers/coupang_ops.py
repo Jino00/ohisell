@@ -485,9 +485,11 @@ def _kst_today() -> date:
 
 def _date_range(days: int) -> tuple[date, date]:
     today = _kst_today()
+    if days == 0:
+        return today, today                      # 오늘
     if days == 1:
         d = today - timedelta(days=1)
-        return d, d
+        return d, d                              # 어제
     return today - timedelta(days=days - 1), today
 
 
@@ -506,7 +508,7 @@ def _roas(spend: Decimal, conv: Decimal) -> str | None:
 @router.get("/sales-summary")
 def sales_summary(
     company: str = Query(default="ALL", description="오픽스 | 오하이테크 | ALL"),
-    days: int = Query(default=7, ge=1, le=90),
+    days: int = Query(default=7, ge=0, le=90),
     db: Session = Depends(get_db),
 ):
     """쿠팡 채널 매출 현황 — 회사별·기간별·채널타입별 집계.
