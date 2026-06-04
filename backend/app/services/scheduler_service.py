@@ -96,8 +96,8 @@ def sync_naver_sa_ad_costs_job():
     """Naver SA 광고비 어제치 자동 적재 (07:00 KST)"""
     db = _get_own_db_session()
     try:
-        from app.routers.ad_costs import _extract_naver_sa_keyword, _upsert_ad_cost
-        from app.services.naver_sa_ad_fetcher import fetch_campaign_daily_spend
+        from app.routers.ad_costs import _extract_naver_sa_keyword, _upsert_ad_cost, _upsert_ad_revenue, NAVER_SA_CONV_SOURCE
+        from app.services.naver_sa_ad_fetcher import fetch_campaign_daily_spend, fetch_daily_conversion_revenue
         from decimal import Decimal
         from sqlalchemy import text
 
@@ -119,8 +119,19 @@ def sync_naver_sa_ad_costs_job():
 
         for (dt_str, source), spend in agg.items():
             _upsert_ad_cost(db, naver_id, date.fromisoformat(dt_str), spend, source)
+
+        # 구매 전환매출(직접+간접) 적재 — RoAS용
+        conv_n = 0
+        try:
+            conv_daily = fetch_daily_conversion_revenue(yesterday, yesterday)
+            for dt_str, rev in conv_daily.items():
+                _upsert_ad_revenue(db, naver_id, date.fromisoformat(dt_str), rev, NAVER_SA_CONV_SOURCE)
+            conv_n = len(conv_daily)
+        except Exception as ce:
+            log.warning("[스케줄러] Naver SA 전환매출 적재 실패(광고비는 저장됨): %s", ce)
+
         db.commit()
-        log.info("[스케줄러] Naver SA 광고비 %d건 적재 완료 (%s)", len(agg), yesterday)
+        log.info("[스케줄러] Naver SA 광고비 %d건 + 전환매출 %d일 적재 완료 (%s)", len(agg), conv_n, yesterday)
     except Exception as e:
         log.exception("[스케줄러] sync_naver_sa_ad_costs_job 에러: %s", e)
     finally:

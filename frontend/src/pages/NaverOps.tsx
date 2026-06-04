@@ -324,6 +324,16 @@ export default function NaverOps() {
             value={s.profit_rate ? pct(s.profit_rate) : "—"}
             highlight={profitN >= 0 ? "blue" : "red"}
           />
+          <SummaryCard
+            label="검색광고 전환매출"
+            value={won(s.sa_conv_revenue)}
+            sub={s.sa_conv_from ? `구매·직접+간접 · ${s.sa_conv_from}~${s.sa_conv_to}` : "구매 기준(직접+간접)"}
+          />
+          <SummaryCard
+            label="검색광고 RoAS"
+            value={s.sa_roas ? `${Number(s.sa_roas).toFixed(2)}x` : "—"}
+            sub={s.sa_conv_from ? `전환매출÷광고비 · 전환 ${s.sa_conv_from}~${s.sa_conv_to}` : "디스플레이 제외"}
+          />
         </div>
       )}
 

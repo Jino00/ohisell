@@ -61,6 +61,24 @@ def _upsert_ad_cost(db: Session, channel_id: int, ad_date: date, spend: Decimal,
         {"cid": channel_id, "dt": ad_date.isoformat(), "spend": str(spend), "src": source},
     )
 
+def _upsert_ad_revenue(db: Session, channel_id: int, ad_date: date, revenue: Decimal, source: str) -> None:
+    """전환매출 전용 행 upsert. ad_spend=0(광고비 중복합산 방지), ad_revenue=전환매출."""
+    db.execute(
+        text("DELETE FROM ad_costs WHERE channel_id = :cid AND source = :src AND ad_date = :dt"),
+        {"cid": channel_id, "src": source, "dt": ad_date.isoformat()},
+    )
+    db.execute(
+        text("""
+            INSERT INTO ad_costs (channel_id, product_id, ad_date, ad_spend, ad_revenue, source, created_at)
+            VALUES (:cid, NULL, :dt, 0, :rev, :src, datetime('now'))
+        """),
+        {"cid": channel_id, "dt": ad_date.isoformat(), "rev": str(revenue), "src": source},
+    )
+
+
+# 검색광고 전환매출 전용 source (ad_spend=0, ad_revenue=구매 전환매출)
+NAVER_SA_CONV_SOURCE = "naver_sa:conv"
+
 router = APIRouter(prefix="/api/ad-costs", tags=["ad-costs"])
 
 
@@ -234,10 +252,10 @@ def sync_naver_sa_ad_costs(
     date_to: str = Query(default=None, description="YYYY-MM-DD (기본: 어제)"),
     db: Session = Depends(get_db),
 ):
-    """네이버 검색광고(SA) 캠페인별 일별 광고비 → ad_costs 저장.
-    source 형식: naver_sa:{키워드} 또는 naver_sa:기타
+    """네이버 검색광고(SA) 캠페인별 일별 광고비 + 구매 전환매출 → ad_costs 저장.
+    source 형식: naver_sa:{키워드}(광고비) / naver_sa:conv(전환매출, ad_spend=0)
     """
-    from app.services.naver_sa_ad_fetcher import fetch_campaign_daily_spend
+    from app.services.naver_sa_ad_fetcher import fetch_campaign_daily_spend, fetch_daily_conversion_revenue
 
     yesterday = kst_today() - timedelta(days=1)
     d_from = date.fromisoformat(date_from) if date_from else yesterday
@@ -270,15 +288,26 @@ def sync_naver_sa_ad_costs(
     for (dt_str, source), spend in agg.items():
         _upsert_ad_cost(db, naver_id, date.fromisoformat(dt_str), spend, source)
 
+    # 구매 전환매출(직접+간접) 일별 적재 — RoAS 산출용
+    conv_revenue = 0
+    try:
+        conv_daily = fetch_daily_conversion_revenue(d_from, d_to)
+        for dt_str, rev in conv_daily.items():
+            _upsert_ad_revenue(db, naver_id, date.fromisoformat(dt_str), rev, NAVER_SA_CONV_SOURCE)
+        conv_revenue = int(sum(conv_daily.values()))
+    except Exception as e:
+        log.warning("Naver SA 전환매출 적재 실패(광고비는 저장됨): %s", e)
+
     db.commit()
 
     dates = sorted({k[0] for k in agg})
     total = int(sum(agg.values()))
-    log.info("Naver SA 광고비 %d건 적재 (%s~%s) 총 %d원", len(agg), d_from, d_to, total)
+    log.info("Naver SA 광고비 %d건 + 전환매출 %d원 적재 (%s~%s) 총 %d원", len(agg), conv_revenue, d_from, d_to, total)
     return {
         "inserted": len(agg),
         "skipped": 0,
         "total_spend": total,
+        "conv_revenue": conv_revenue,
         "dates": dates,
     }
 

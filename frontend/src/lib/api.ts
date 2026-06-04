@@ -426,6 +426,8 @@ export interface NaverSalesSummaryData {
   revenue: string; fee: string; cost: string;
   ad_spend: string; shipping: string;
   profit: string; profit_rate: string | null;
+  sa_conv_revenue: string; sa_ad_spend: string; sa_roas: string | null;
+  sa_conv_from: string | null; sa_conv_to: string | null;
 }
 
 export interface NaverSalesSummary {

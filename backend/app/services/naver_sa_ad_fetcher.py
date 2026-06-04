@@ -26,6 +26,13 @@ COL_DATE = 0
 COL_CAMPAIGN_ID = 2
 COL_COST = 11
 
+# AD_CONVERSION 보고서 컬럼 인덱스 (13컬럼, 헤더 없음, TSV)
+# 0:일자 9:직접/간접 10:전환액션(purchase/add_to_cart) 11:전환수 12:전환매출액
+CONV_COL_DATE = 0
+CONV_COL_ACTION = 10
+CONV_COL_VALUE = 12
+CONV_PURCHASE_ACTION = "purchase"  # 실구매만 매출로 집계(장바구니 등 제외)
+
 
 def _headers(path: str) -> dict:
     ts = str(int(time.time() * 1000))
@@ -143,6 +150,74 @@ def fetch_campaign_daily_spend(date_from: date, date_to: date) -> list[dict]:
 
     except Exception as e:
         log.error("Naver SA API 조회 실패: %s", e)
+        raise
+
+
+def _list_reports_by_type(report_tp: str, date_from: date, date_to: date) -> list[dict]:
+    """/stat-reports에서 지정 타입(BUILT) 보고서를 날짜 범위로 필터링해 반환."""
+    resp = _get("/stat-reports")
+    resp.raise_for_status()
+    result = []
+    for rep in resp.json():
+        if rep.get("reportTp") != report_tp or rep.get("status") != "BUILT":
+            continue
+        stat_dt = rep.get("statDt", "")[:10]
+        try:
+            d = date.fromisoformat(stat_dt)
+        except ValueError:
+            continue
+        if date_from <= d <= date_to:
+            result.append({"date": stat_dt, "downloadUrl": rep["downloadUrl"]})
+    return result
+
+
+def fetch_daily_conversion_revenue(date_from: date, date_to: date) -> dict[str, Decimal]:
+    """AD_CONVERSION 보고서에서 일별 '구매' 전환매출(직접+간접 합산)을 반환.
+
+    Returns: {"YYYY-MM-DD": Decimal(전환매출액), ...}
+    장바구니 등 비구매 액션은 제외(CONV_PURCHASE_ACTION). 전환추적 미설정 계정은 빈 dict.
+    """
+    if not ACCESS_LICENSE or not SECRET_KEY_B64:
+        log.warning("Naver SA 자격증명 없음 — 전환매출 수집 건너뜀")
+        return {}
+
+    try:
+        reports = _list_reports_by_type("AD_CONVERSION", date_from, date_to)
+        if not reports:
+            log.warning("Naver SA: %s~%s AD_CONVERSION 보고서 없음", date_from, date_to)
+            return {}
+
+        seen_dates: set[str] = set()
+        daily: dict[str, Decimal] = {}
+        for rep in sorted(reports, key=lambda r: r["date"]):
+            if rep["date"] in seen_dates:
+                continue
+            seen_dates.add(rep["date"])
+
+            parsed = urlparse(rep["downloadUrl"])
+            params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
+            resp = _get("/report-download", params=params)
+            resp.raise_for_status()
+            content = resp.content.decode("utf-8-sig", errors="replace")
+            for line in content.strip().split("\n"):
+                cols = line.split("\t")
+                if len(cols) <= CONV_COL_VALUE:
+                    continue
+                if cols[CONV_COL_ACTION] != CONV_PURCHASE_ACTION:
+                    continue
+                try:
+                    raw_date = cols[CONV_COL_DATE]
+                    date_str = f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:8]}"
+                    value = Decimal(cols[CONV_COL_VALUE] or "0")
+                except (ValueError, IndexError):
+                    continue
+                daily[date_str] = daily.get(date_str, Decimal("0")) + value
+
+        log.info("Naver SA 전환매출 %d일치 수집 (%s~%s)", len(daily), date_from, date_to)
+        return daily
+
+    except Exception as e:
+        log.error("Naver SA 전환매출 조회 실패: %s", e)
         raise
 
 

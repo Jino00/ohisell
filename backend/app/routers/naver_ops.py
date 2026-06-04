@@ -98,6 +98,43 @@ def sales_summary(
         .scalar()
     )
 
+    # 검색광고(SA) RoAS — 디스플레이 제외(전환추적 없음).
+    # 네이버 전환 보고서는 최근 ~15일만 보관 → 전환데이터가 있는 날짜로만 분모를 맞춰
+    # 분자(전환매출)/분모(광고비)를 같은 기간으로 정렬(저평가 방지, 원칙 22).
+    conv_rows = (
+        db.query(AdCost.ad_date, AdCost.ad_revenue)
+        .filter(
+            AdCost.channel_id == _NAVER_CHANNEL_ID,
+            AdCost.source == "naver_sa:conv",
+            AdCost.ad_date >= ad_dfrom,
+            AdCost.ad_date <= ad_dto,
+        )
+        .all()
+    )
+    conv_dates = [r[0] for r in conv_rows]
+    sa_conv_revenue = sum((_f(r[1]) for r in conv_rows), _Z)
+
+    if conv_dates:
+        sa_ad_spend = _f(
+            db.query(func.sum(AdCost.ad_spend))
+            .filter(
+                AdCost.channel_id == _NAVER_CHANNEL_ID,
+                AdCost.source.like("naver_sa:%"),
+                AdCost.ad_date.in_(conv_dates),
+            )
+            .scalar()
+        )
+        sa_roas = (
+            str((sa_conv_revenue / sa_ad_spend).quantize(_Q2, rounding=ROUND_HALF_UP))
+            if sa_ad_spend else None
+        )
+        sa_conv_from = str(min(conv_dates))
+        sa_conv_to = str(max(conv_dates))
+    else:
+        sa_ad_spend = _Z
+        sa_roas = None
+        sa_conv_from = sa_conv_to = None
+
     # ── 3. 원가 조회 (product_channel_mapping → product_master) ───────
     all_pids = {str(r[0]) for r in order_rows if r[0]}
     cost_rows = (
@@ -166,6 +203,11 @@ def sales_summary(
             "shipping":     str(total_ship.quantize(_Q2)),
             "profit":       str(total_profit.quantize(_Q2)),
             "profit_rate":  str(profit_rate) if profit_rate is not None else None,
+            "sa_conv_revenue": str(sa_conv_revenue.quantize(_Q2)),
+            "sa_ad_spend":     str(sa_ad_spend.quantize(_Q2)),
+            "sa_roas":         sa_roas,
+            "sa_conv_from":    sa_conv_from,
+            "sa_conv_to":      sa_conv_to,
         },
         "by_product": by_product,
     }
