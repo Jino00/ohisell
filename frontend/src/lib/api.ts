@@ -337,21 +337,28 @@ export async function fetchCommandCenter(
 
 // ── 쿠팡 운영 패널 — 매출 현황 ───────────────────────────────────
 
-export interface SalesProductRow {
-  product_name: string;
-  option_name: string;
-  channel_type: string;
-  revenue: string;
-  ad_spend: string;
-  conv_revenue: string;
-  roas: string | null;
+export interface SalesSummaryData {
+  revenue: string; fee: string; cost: string;
+  ad_spend: string; shipping: string;
+  profit: string; profit_rate: string | null;
+  conv_revenue: string; roas: string | null;
 }
 
 export interface SalesSummary {
   period: { from: string; to: string };
   ad_ref_date: string | null;
-  summary: { revenue: string; ad_spend: string; conv_revenue: string; roas: string | null };
+  summary: SalesSummaryData;
   by_product: SalesProductRow[];
+}
+
+export interface SalesProductRow {
+  product_name: string;
+  option_name: string;
+  channel_type: string;
+  revenue: string; fee: string; cost: string;
+  ad_spend: string; shipping: string;
+  profit: string; profit_rate: string | null;
+  conv_revenue: string; roas: string | null;
 }
 
 export function fetchSalesSummary(company: string, days: number): Promise<SalesSummary> {

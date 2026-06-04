@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_coupang_config
 from app.database import get_db
-from app.models import Channel, CoupangAdOptionDaily, CoupangProductItem, CoupangRgOrderItem, Order
+from app.models import Channel, CoupangAdOptionDaily, CoupangProductItem, CoupangRgOrderItem, Order, ProductChannelMapping, ProductMaster
 from app.routers._coupang_write_http import handle_write as _handle_write
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
 from app.services.coupang import coupon_write, product_write
@@ -450,7 +450,9 @@ def w5_update_rg_product(
 # ════════════════════════════════════════════════════════════════════
 
 _Q2 = Decimal("0.01")
+_Q4 = Decimal("0.0001")
 _Z = Decimal("0")
+_WING_DELIVERY_COST = Decimal("1900")  # 판매자배송(Wing) 한건당 배송비(한진)
 
 # 쿠팡 채널코드 → (company_short, channel_type)
 _CHANNEL_META: dict[str, tuple[str, str]] = {
@@ -632,13 +634,14 @@ def sales_summary(
         for vid, vendor_id, spend, conv in ad_rows
     }
 
-    # ── 3. 상품명 조회 (coupang_product_item) ─────────────────────────
+    # ── 3. 상품명·수수료율 조회 (coupang_product_item) ───────────────────
     all_vids = set(order_by_vid) | set(ad_by_vid)
     pi_rows = (
         db.query(CoupangProductItem.vendor_item_id,
                  CoupangProductItem.seller_product_name,
                  CoupangProductItem.item_name,
-                 CoupangProductItem.account_key)
+                 CoupangProductItem.account_key,
+                 CoupangProductItem.sale_agent_commission)
         .filter(CoupangProductItem.vendor_item_id.in_(list(all_vids)))
         .all()
     ) if all_vids else []
@@ -647,9 +650,33 @@ def sales_summary(
             "seller_name": r.seller_product_name,
             "item_name": r.item_name,
             "account_key": r.account_key,
+            "fee_rate": _f(r.sale_agent_commission) / Decimal("100") if r.sale_agent_commission else _Z,
         }
         for r in pi_rows
     }
+
+    # ── 3b. 원가 조회 (D-12: product_master via product_channel_mapping) ──
+    cost_rows = (
+        db.query(ProductChannelMapping.channel_product_id, ProductMaster.cost_price, ProductMaster.id)
+        .join(ProductMaster, ProductChannelMapping.product_id == ProductMaster.id)
+        .join(Channel, ProductChannelMapping.channel_id == Channel.id)
+        .filter(
+            Channel.platform == "coupang",
+            ProductChannelMapping.is_active.is_(True),
+            ProductChannelMapping.channel_product_id.in_(list(all_vids)),
+        )
+        .all()
+    ) if all_vids else []
+    # 원가>0 우선, 동률이면 product_id 최소 (D-12 결정적 선택)
+    cost_candidates: dict[str, list] = {}
+    for cpid, cp, pid in cost_rows:
+        cost_candidates.setdefault(str(cpid), []).append((cp, pid))
+    cost_map: dict[str, Decimal] = {}
+    for vid, cands in cost_candidates.items():
+        costed = [(cp, pid) for cp, pid in cands if cp and cp > 0]
+        chosen_cost = min(costed or cands, key=lambda x: x[1])[0]
+        if chosen_cost:
+            cost_map[vid] = _f(chosen_cost)
 
     # ── 4. 상품명·채널타입 단위로 병합 ───────────────────────────────
     # key = (product_label, channel_type)
@@ -672,9 +699,22 @@ def sales_summary(
             continue
         product, option = names
         ch_code = od["channel_code"]
-        pk = (product, option, _ch_type(ch_code))
-        e = merged.setdefault(pk, {"revenue": _Z, "ad_spend": _Z, "conv_revenue": _Z})
-        e["revenue"] += od["revenue"]
+        ch_type = _ch_type(ch_code)
+        pk = (product, option, ch_type)
+        e = merged.setdefault(pk, {"revenue": _Z, "ad_spend": _Z, "conv_revenue": _Z,
+                                    "fee": _Z, "cost": _Z, "shipping": _Z})
+        rev = od["revenue"]
+        qty = od["qty"]
+        e["revenue"] += rev
+        # 수수료 = 매출 × 수수료율
+        fee_rate = pi_map.get(vid, {}).get("fee_rate", _Z)
+        e["fee"] += (rev * fee_rate).quantize(_Q2, rounding=ROUND_HALF_UP)
+        # 원가 = cost_price × 수량
+        unit_cost = cost_map.get(vid, _Z)
+        e["cost"] += unit_cost * qty
+        # 배송비 = Wing만 1,900원/건
+        if ch_type == "Wing":
+            e["shipping"] += _WING_DELIVERY_COST * qty
 
     for vid, ad in ad_by_vid.items():
         names = _resolve_names(vid)
@@ -684,37 +724,57 @@ def sales_summary(
         pi = pi_map.get(vid, {})
         ch_code = pi.get("account_key") or _vendor_to_channel(ad.get("vendor_id", ""))
         pk = (product, option, _ch_type(ch_code))
-        e = merged.setdefault(pk, {"revenue": _Z, "ad_spend": _Z, "conv_revenue": _Z})
+        e = merged.setdefault(pk, {"revenue": _Z, "ad_spend": _Z, "conv_revenue": _Z,
+                                    "fee": _Z, "cost": _Z, "shipping": _Z})
         e["ad_spend"] += ad["spend"]
         e["conv_revenue"] += ad["conv_revenue"]
 
-    # ── 5. 요약 합계: 원본 집계치 사용 (RG 포함, 이름 없는 행 제외해도 요약 정확) ──
-    total_rev = sum((_f(od["revenue"]) for od in order_by_vid.values()), _Z)
+    # ── 5. 요약 합계 ─────────────────────────────────────────────────
+    total_rev   = sum((_f(od["revenue"]) for od in order_by_vid.values()), _Z)
     total_spend = sum((_f(ad["spend"]) for ad in ad_by_vid.values()), _Z)
-    total_conv = sum((_f(ad["conv_revenue"]) for ad in ad_by_vid.values()), _Z)
+    total_conv  = sum((_f(ad["conv_revenue"]) for ad in ad_by_vid.values()), _Z)
+    total_fee   = sum((v["fee"]      for v in merged.values()), _Z)
+    total_cost  = sum((v["cost"]     for v in merged.values()), _Z)
+    total_ship  = sum((v["shipping"] for v in merged.values()), _Z)
+    total_profit = total_rev - total_fee - total_cost - total_spend - total_ship
+    profit_rate  = (total_profit / total_rev * 100).quantize(_Q2) if total_rev else None
+
+    def _profit(v: dict) -> Decimal:
+        return v["revenue"] - v["fee"] - v["cost"] - v["ad_spend"] - v["shipping"]
 
     # ── 6. 최종 응답 ─────────────────────────────────────────────────
-    by_product = [
-        {
+    by_product = []
+    for pk, v in sorted(merged.items(), key=lambda x: -x[1]["revenue"]):
+        profit = _profit(v)
+        rev = v["revenue"]
+        by_product.append({
             "product_name": pk[0],
-            "option_name": pk[1],       # item_name (옵션명)
+            "option_name": pk[1],
             "channel_type": pk[2],
-            "revenue": str(v["revenue"].quantize(_Q2)),
-            "ad_spend": str(v["ad_spend"].quantize(_Q2)),
+            "revenue":      str(v["revenue"].quantize(_Q2)),
+            "fee":          str(v["fee"].quantize(_Q2)),
+            "cost":         str(v["cost"].quantize(_Q2)),
+            "ad_spend":     str(v["ad_spend"].quantize(_Q2)),
+            "shipping":     str(v["shipping"].quantize(_Q2)),
+            "profit":       str(profit.quantize(_Q2)),
+            "profit_rate":  str((profit / rev * 100).quantize(_Q2)) if rev else None,
             "conv_revenue": str(v["conv_revenue"].quantize(_Q2)),
-            "roas": _roas(v["ad_spend"], v["conv_revenue"]),
-        }
-        for pk, v in sorted(merged.items(), key=lambda x: -x[1]["revenue"])
-    ]
+            "roas":         _roas(v["ad_spend"], v["conv_revenue"]),
+        })
 
     return {
         "period": {"from": str(dfrom), "to": str(dto)},
-        "ad_ref_date": ad_ref_date,   # 오늘 선택 시 실제 광고비 기준 날짜 (None이면 period와 동일)
+        "ad_ref_date": ad_ref_date,
         "summary": {
-            "revenue": str(total_rev.quantize(_Q2)),
-            "ad_spend": str(total_spend.quantize(_Q2)),
+            "revenue":      str(total_rev.quantize(_Q2)),
+            "fee":          str(total_fee.quantize(_Q2)),
+            "cost":         str(total_cost.quantize(_Q2)),
+            "ad_spend":     str(total_spend.quantize(_Q2)),
+            "shipping":     str(total_ship.quantize(_Q2)),
+            "profit":       str(total_profit.quantize(_Q2)),
+            "profit_rate":  str(profit_rate) if profit_rate is not None else None,
             "conv_revenue": str(total_conv.quantize(_Q2)),
-            "roas": _roas(total_spend, total_conv),
+            "roas":         _roas(total_spend, total_conv),
         },
         "by_product": by_product,
     }

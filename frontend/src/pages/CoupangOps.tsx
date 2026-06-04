@@ -30,6 +30,15 @@ function roasFmt(s: string | null | undefined) {
   if (s == null) return "—";
   return `${Number(s).toFixed(2)}x`;
 }
+function pct(s: string | null | undefined) {
+  if (s == null) return "—";
+  return `${Number(s).toFixed(1)}%`;
+}
+function profitColor(s: string | null | undefined) {
+  if (s == null) return "text-gray-900";
+  const n = Number(s);
+  return n > 0 ? "text-blue-700" : n < 0 ? "text-red-600" : "text-gray-500";
+}
 function fmtVal(row: SalesProductRow, col: ColKey): string {
   if (col === "revenue") return won(row.revenue);
   if (col === "ad_spend") return won(row.ad_spend);
@@ -296,8 +305,16 @@ export default function CoupangOps() {
             <div className="text-xs text-gray-400 font-medium mb-1.5 px-0.5">
               📦 오늘 판매 ({data.period.from})
             </div>
-            <div className="grid grid-cols-1 gap-3">
+            <div className="grid grid-cols-5 gap-3">
               <SummaryCard label="총 매출" value={loading ? "…" : won(s?.revenue)} />
+              <SummaryCard label="수수료" value={loading ? "…" : won(s?.fee)} />
+              <SummaryCard label="원가" value={loading ? "…" : won(s?.cost)} />
+              <SummaryCard label="배송비" value={loading ? "…" : won(s?.shipping)} sub="Wing 1,900원/건" />
+              <div className={`bg-white border-2 rounded-lg p-4 ${Number(s?.profit ?? 0) >= 0 ? "border-blue-200" : "border-red-200"}`}>
+                <div className="text-xs text-gray-500 mb-1">이익 (광고비 제외)</div>
+                <div className={`text-xl font-bold ${profitColor(s?.profit)}`}>{loading ? "…" : won(s?.profit)}</div>
+                {s?.profit_rate && <div className="text-xs mt-0.5 text-gray-400">이익률 {pct(s.profit_rate)}</div>}
+              </div>
             </div>
           </div>
           {/* 최신 광고 (다른 날짜 기준) */}
@@ -313,12 +330,25 @@ export default function CoupangOps() {
           </div>
         </div>
       ) : (
-        /* 어제·7일 등 — 동일 기간이므로 4개 카드 한 줄 */
-        <div className="grid grid-cols-4 gap-3 mb-6">
-          <SummaryCard label="총 매출" value={loading ? "…" : won(s?.revenue)} />
-          <SummaryCard label="광고비" value={loading ? "…" : won(s?.ad_spend)} />
-          <SummaryCard label="광고 전환 매출" value={loading ? "…" : won(s?.conv_revenue)} />
-          <SummaryCard label="RoAS" value={loading ? "…" : roasFmt(s?.roas)} sub={s?.roas ? "광고 전환매출 ÷ 광고비" : undefined} />
+        /* 어제·7일 등 — 동일 기간 */
+        <div className="mb-6 space-y-2">
+          <div className="grid grid-cols-6 gap-3">
+            <SummaryCard label="총 매출" value={loading ? "…" : won(s?.revenue)} />
+            <SummaryCard label="수수료" value={loading ? "…" : won(s?.fee)} />
+            <SummaryCard label="원가" value={loading ? "…" : won(s?.cost)} />
+            <SummaryCard label="광고비" value={loading ? "…" : won(s?.ad_spend)} />
+            <SummaryCard label="배송비" value={loading ? "…" : won(s?.shipping)} sub="Wing 1,900원/건" />
+            <div className={`bg-white border-2 rounded-lg p-4 ${Number(s?.profit ?? 0) >= 0 ? "border-blue-200" : "border-red-200"}`}>
+              <div className="text-xs text-gray-500 mb-1">이익</div>
+              <div className={`text-xl font-bold ${profitColor(s?.profit)}`}>{loading ? "…" : won(s?.profit)}</div>
+              {s?.profit_rate && <div className="text-xs mt-0.5 text-gray-400">이익률 {pct(s.profit_rate)}</div>}
+            </div>
+          </div>
+          <div className="grid grid-cols-3 gap-3">
+            <SummaryCard label="광고 전환 매출" value={loading ? "…" : won(s?.conv_revenue)} />
+            <SummaryCard label="RoAS" value={loading ? "…" : roasFmt(s?.roas)} sub={s?.roas ? "광고 전환매출 ÷ 광고비" : undefined} />
+            <div />
+          </div>
         </div>
       )}
 
