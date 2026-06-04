@@ -602,6 +602,16 @@ def sales_summary(
         [CoupangAdOptionDaily.vendor_id.in_(list(target_vendor_ids))]
         if target_vendor_ids else []
     )
+
+    # 오늘(days=0) 선택 시: 광고비 XLSX는 당일 업로드 전이므로 DB 최신 report_date 사용
+    ad_dfrom, ad_dto = dfrom, dto
+    ad_ref_date: str | None = None
+    if days == 0:
+        latest_ad = db.query(func.max(CoupangAdOptionDaily.report_date)).scalar()
+        if latest_ad:
+            ad_dfrom = ad_dto = latest_ad
+            ad_ref_date = str(latest_ad)
+
     ad_rows = (
         db.query(
             CoupangAdOptionDaily.ad_option_id,
@@ -610,8 +620,8 @@ def sales_summary(
             func.sum(CoupangAdOptionDaily.conversion_revenue),
         )
         .filter(
-            CoupangAdOptionDaily.report_date >= dfrom,
-            CoupangAdOptionDaily.report_date <= dto,
+            CoupangAdOptionDaily.report_date >= ad_dfrom,
+            CoupangAdOptionDaily.report_date <= ad_dto,
             *ad_filter,
         )
         .group_by(CoupangAdOptionDaily.ad_option_id, CoupangAdOptionDaily.vendor_id)
@@ -699,6 +709,7 @@ def sales_summary(
 
     return {
         "period": {"from": str(dfrom), "to": str(dto)},
+        "ad_ref_date": ad_ref_date,   # 오늘 선택 시 실제 광고비 기준 날짜 (None이면 period와 동일)
         "summary": {
             "revenue": str(total_rev.quantize(_Q2)),
             "ad_spend": str(total_spend.quantize(_Q2)),

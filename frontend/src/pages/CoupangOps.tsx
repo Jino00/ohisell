@@ -267,8 +267,16 @@ export default function CoupangOps() {
       {/* ── 요약 카드 ── */}
       <div className="grid grid-cols-4 gap-3 mb-6">
         <SummaryCard label="총 매출" value={loading ? "…" : won(s?.revenue)} />
-        <SummaryCard label="광고비" value={loading ? "…" : won(s?.ad_spend)} />
-        <SummaryCard label="광고 전환 매출" value={loading ? "…" : won(s?.conv_revenue)} />
+        <SummaryCard
+          label="광고비"
+          value={loading ? "…" : won(s?.ad_spend)}
+          sub={data?.ad_ref_date ? `${data.ad_ref_date} 기준 (최신 업로드)` : undefined}
+        />
+        <SummaryCard
+          label="광고 전환 매출"
+          value={loading ? "…" : won(s?.conv_revenue)}
+          sub={data?.ad_ref_date ? `${data.ad_ref_date} 기준` : undefined}
+        />
         <SummaryCard label="RoAS" value={loading ? "…" : roasFmt(s?.roas)} sub={s?.roas ? "광고 전환매출 ÷ 광고비" : undefined} />
       </div>
 

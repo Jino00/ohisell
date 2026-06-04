@@ -349,6 +349,7 @@ export interface SalesProductRow {
 
 export interface SalesSummary {
   period: { from: string; to: string };
+  ad_ref_date: string | null;
   summary: { revenue: string; ad_spend: string; conv_revenue: string; roas: string | null };
   by_product: SalesProductRow[];
 }
