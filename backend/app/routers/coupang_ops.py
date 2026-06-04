@@ -646,35 +646,35 @@ def sales_summary(
     # key = (product_label, channel_type)
     merged: dict[tuple[str, str], dict] = {}
 
-    def _resolve_name(vid: str) -> str | None:
-        """옵션ID로 상품명을 찾는다. 못 찾으면 None 반환 (테이블에서 제외)."""
+    def _resolve_names(vid: str) -> tuple[str, str] | None:
+        """옵션ID → (상품명, 옵션명). 상품명 없으면 None (테이블에서 제외)."""
         pi = pi_map.get(vid, {})
         order_entry = order_by_vid.get(vid, {})
-        return (
-            pi.get("seller_name")
-            or pi.get("item_name")
-            or order_entry.get("order_name")  # platform_product_name 폴백
-        )
+        product = pi.get("seller_name") or order_entry.get("order_name")
+        option = pi.get("item_name") or ""
+        return (product, option) if product else None
 
     def _ch_type(ch_code: str) -> str:
         return _CHANNEL_META.get(ch_code, ("—", "Wing"))[1]
 
     for vid, od in order_by_vid.items():
-        name = _resolve_name(vid)
-        if not name:
-            continue  # 이름 없는 행은 테이블에서 제외
+        names = _resolve_names(vid)
+        if not names:
+            continue
+        product, option = names
         ch_code = od["channel_code"]
-        pk = (name, _ch_type(ch_code))
+        pk = (product, option, _ch_type(ch_code))
         e = merged.setdefault(pk, {"revenue": _Z, "ad_spend": _Z, "conv_revenue": _Z})
         e["revenue"] += od["revenue"]
 
     for vid, ad in ad_by_vid.items():
-        name = _resolve_name(vid)
-        if not name:
-            continue  # 이름 모르는 구버전 옵션은 테이블에서 제외
+        names = _resolve_names(vid)
+        if not names:
+            continue
+        product, option = names
         pi = pi_map.get(vid, {})
         ch_code = pi.get("account_key") or _vendor_to_channel(ad.get("vendor_id", ""))
-        pk = (name, _ch_type(ch_code))
+        pk = (product, option, _ch_type(ch_code))
         e = merged.setdefault(pk, {"revenue": _Z, "ad_spend": _Z, "conv_revenue": _Z})
         e["ad_spend"] += ad["spend"]
         e["conv_revenue"] += ad["conv_revenue"]
@@ -688,7 +688,8 @@ def sales_summary(
     by_product = [
         {
             "product_name": pk[0],
-            "channel_type": pk[1],
+            "option_name": pk[1],       # item_name (옵션명)
+            "channel_type": pk[2],
             "revenue": str(v["revenue"].quantize(_Q2)),
             "ad_spend": str(v["ad_spend"].quantize(_Q2)),
             "conv_revenue": str(v["conv_revenue"].quantize(_Q2)),

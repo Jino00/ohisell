@@ -339,6 +339,7 @@ export async function fetchCommandCenter(
 
 export interface SalesProductRow {
   product_name: string;
+  option_name: string;
   channel_type: string;
   revenue: string;
   ad_spend: string;

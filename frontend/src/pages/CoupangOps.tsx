@@ -69,7 +69,10 @@ export default function CoupangOps() {
   const filtered: SalesProductRow[] = (data?.by_product ?? []).filter((row) => {
     const matchCh = channelFilter === "전체" || row.channel_type === channelFilter;
     const q = search.toLowerCase();
-    const matchQ = !q || row.product_name.toLowerCase().includes(q);
+    const matchQ =
+      !q ||
+      row.product_name.toLowerCase().includes(q) ||
+      row.option_name.toLowerCase().includes(q);
     return matchCh && matchQ;
   });
 
@@ -196,8 +199,15 @@ export default function CoupangOps() {
             ) : (
               filtered.map((row, i) => (
                 <tr key={i} className="border-t border-gray-50 hover:bg-gray-50">
-                  <td className="px-4 py-2 text-gray-900 max-w-[280px] truncate" title={row.product_name}>
-                    {row.product_name}
+                  <td className="px-4 py-2 max-w-[320px]">
+                    <div className="text-gray-900 text-sm truncate" title={row.product_name}>
+                      {row.product_name}
+                    </div>
+                    {row.option_name && (
+                      <div className="text-xs text-gray-400 truncate mt-0.5" title={row.option_name}>
+                        {row.option_name}
+                      </div>
+                    )}
                   </td>
                   <td className="px-3 py-2 text-center">
                     <span
