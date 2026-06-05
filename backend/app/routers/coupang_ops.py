@@ -678,7 +678,7 @@ def sales_summary(
         fee_matched = (
             db.query(
                 CoupangRevenueFee.vendor_item_id,
-                func.sum(CoupangRevenueFee.service_fee),
+                func.sum(CoupangRevenueFee.service_fee + CoupangRevenueFee.service_fee_vat),
             )
             .filter(CoupangRevenueFee.order_id.in_(list(order_nums)))
             .group_by(CoupangRevenueFee.vendor_item_id)
