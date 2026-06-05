@@ -4,9 +4,9 @@
 
 ## 현재 상태
 - 날짜: 2026-06-05
-- 단계: ★활성 트랙 = **쿠팡 RG 발송관제**(docs/tracks/active/track_coupang-rg-replenishment.md). **S3 완료 + prod 라이브 검증 성공(2026-06-05)** — 3/7. sales_velocity_estimator SA(읽기전용, 새테이블X). 평일/주말/휴일 일판매속도 추정 — D-6 신뢰도게이트(글로벌 구간 관측일 임계 넘으면 요일계수 자동 활성, 미달=collecting/1.0). 휴일=holidays.SouthKorea()(음력 포함). 데이터원=rg_order_item(TRUST_START 2026-06-04 이후만, 매출버그 이전 제외)+sold_30d/30 폴백. 라이브 GET /sales-velocity: trust_days=1→전부 collecting·옵션11 sold_30d폴백·없는옵션 None. codex 1차 차단(global 폴백 차원오류)→수정→2차 pass. 다음 = S4 replenishment_calc. ★코드 커밋 완료: S2=b8b6fa5, S3=0dd51f7(feat). prod엔 scp+restart+holidays설치 완료. HANDOFF: .claude/memory/HANDOFF_ohisell-coupang-rg-replenishment-S2_20260605.md
+- 단계: ★활성 트랙 = **쿠팡 RG 발송관제**(docs/tracks/active/track_coupang-rg-replenishment.md). **S4 완료 + codex pass + prod 라이브검증(DB사본) 성공(2026-06-05)** — 4/7. replenishment_calc SA(읽기전용, 새테이블X). 현재고+일판매속도(S3)+리드타임(S2)+목표 3일치(D-2 상한) → 권장 발송일·수량 역산. ★요일 인지 forward 투영(오늘부터 하루씩 segments[평일/주말/휴일]로 재고 차감 — S3 요일구분의 실사용). 안전재고=(p90−mean리드)×base_rate. status 4종(insufficient_data/well_stocked/ok/reorder_now🔴). D-7 정책: ①데이터 하나라도 없으면 보류 ②sold_30d/collecting/글로벌리드면 confidence=low ③목표 3일. codex 1차 차단 2건(B1 safety=0 off-by-one→_EPS하한, B2 horizon cap 교차/미교차 혼동→(days,crossed)반환)+nit2건(_UNSET 센티넬, factors누락→low) 수정→2차 pass. 라이브(DB사본 784행): insufficient773/ok5/reorder4/well2, trust_days=1이라 전부 low. ★배치역산·엔드포인트는 S5 Harness 책임(원칙18-7) — 이번엔 SA만. 다음 = S5 rg_replenishment Harness. ★코드 커밋: S2=b8b6fa5, S3=0dd51f7, S4=곧 feat 커밋. prod엔 SA scp+import OK(라우터 미연결이라 재시작 불필요). HANDOFF: .claude/memory/HANDOFF_ohisell-coupang-rg-replenishment-S3_20260605.md
 - 네이버 풀통합 트랙: 완료(active→completed 이동). 네이버 클레임 실처리 7건 완료(반품4+교환수거3). ★미처리 1건=정기용 교환 재배송(한진 송장 대기).
-- 최신 커밋(main): **0dd51f7**(RG 발송관제 S3 sales_velocity_estimator). 그 외 ae3a32a·b8b6fa5(S2), 3ede9cd(S1), fdc5492(RG주문 paidDateTo 버그수정). S3 문서(progress/TRACKS/track/HANDOFF)는 곧 docs 커밋.
+- 최신 커밋(main): **0b23c52**(S3 docs). 그 외 0dd51f7(S3 feat), ae3a32a·b8b6fa5(S2), fdc5492(RG주문 paidDateTo 버그수정). S4 코드+문서(progress/TRACKS/track)는 곧 커밋.
 
 ## ★쿠팡 RG 매출 누락 버그 수정 (2026-06-05, prod 배포 완료, 커밋 fdc5492)
 - 증상: 어제 오픽스 매출 시스템 159,300 vs 윙 480,400(3배 누락).
