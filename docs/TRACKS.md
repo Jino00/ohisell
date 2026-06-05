@@ -1,7 +1,7 @@
 # TRACKS — 활성/완료 메가 프로젝트 인덱스
 
 ## 🟢 Active
-- [쿠팡 RG 재고·발송 관제 (Replenishment)](tracks/active/track_coupang-rg-replenishment.md) — RG 현재고+일판매속도+입고 리드타임으로 "언제·몇 개 발송" 역산. 목표 FC재고 2~3일치. 1/7 (S1 입고동기화 완료+prod 라이브 검증 성공: 6건/47옵션, 리드타임 1.15~4.5일). D-14 수정(입고 Wing 내부 API 연결).
+- [쿠팡 RG 재고·발송 관제 (Replenishment)](tracks/active/track_coupang-rg-replenishment.md) — RG 현재고+일판매속도+입고 리드타임으로 "언제·몇 개 발송" 역산. 목표 FC재고 2~3일치. 3/7 (S1 입고동기화·S2 리드타임추정·S3 일판매속도추정[평일/주말/휴일 신뢰도게이트] 완료+prod 라이브 검증 성공). 다음 S4 replenishment_calc. D-14 수정(입고 Wing 내부 API 연결).
 
 ## ⏸ Paused
 - (없음)

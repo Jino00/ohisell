@@ -11,10 +11,12 @@
 - **D-2 (목표 재고 2~3일치)**: 쿠팡 FC 목표 보관량 = 약 2~3일치 판매량. 보관료·자본 효율 우선. 안전재고는 리드타임 변동성 흡수분만 최소로.
 - **D-3 (요일/휴일 점진 세분화)**: 판매속도 모델은 1단계 평일/주말 구분에서 시작, 데이터 누적에 따라 휴일·시즌까지 점진 세분화. "처음부터 완벽" 아님.
 - **D-4 (출력 성격)**: 시스템은 데이터 기반 "권장 발송수량·발송일"을 **지표로 제시**. 실제 발송 결정·실행은 Jino. (트랙 단위 운영 보조이며, 종합조망 D-2 '전략추천 금지'는 광고전략 맥락 — 본건은 운영 재고보충 역산값.)
+- **D-6 (판매속도 평일/주말/휴일 구분 — S3부터 도입 + 매일 고도화, 확정 2026-06-05)**: S3 sales_velocity_estimator에서 평일/주말/휴일 3구간 구분을 **처음부터 도입**한다(S7로 미루지 않음). 매일 아침 RG order sync로 일자별 판매를 **누적**하고, ★RG 매출버그 수정일(2026-06-04) 이후의 깨끗한 일자 데이터가 쌓일수록 정확도를 점진 고도화한다. 각 구간 추정에 **표본수(관측일수)·신뢰도(confidence)·source를 함께 표기**해 투명성을 유지(S2 폴백 패턴 계승). 휴일 판정은 한국 공휴일(음력 설·추석 포함)이라 `holidays` 라이브러리 사용. 표본 부족 구간은 폴백(옵션 구간→옵션 전체→글로벌 구간→sold_30d/30). D-3("평일/주말 시작→점진 세분화")의 구체 실행 결정.
 
 ## 사용자 원문 인용 (왜곡 방지)
 - "API로 연결하자. 창고보관료가 있기때문에 약 2~3일치의 재고만 보관하고 싶어. 그리고, 주말, 주중, 휴일등의 변수도 있기 때문에, 이런것들은 너가 계속 발전해나가면서 세분화시켜줘"
 - "각 아이템별 우리 사무실에서 발송 후 도착 및 판매시작 기간을 예측해서 매일매일 발송해야 하는 갯수와 발송 일자를 알려주면 … 매일매일 언제 발송해야 하는지, 몇개를 발송해야 하는지 알 수 있지 않을까?"
+- (S3 평일/주말/휴일, 2026-06-05) "그래, 이걸 너가 매일아침에 확인해서 계속 통계를 내고 정확도에 대해서 평일, 주말, 휴일에 대해서 구분해서 정확도를 고도화하자"
 
 ## 구조 (승인됨 2026-06-05)
 ```
@@ -36,7 +38,7 @@ UI: 상품별 현황(로켓그로스 탭) 컬럼 추가 — `현재고 | 최근 
 - [x] S0. 세션쿠키 인증 방식 실증 — **성공(2026-06-05)**. 아래 S0 결과 참조.
 - [x] S1. coupang_rg_inbound 테이블 + rg_inbound_sync SA — **완료 + prod 라이브 검증 성공(2026-06-05)**. 입고 6건/옵션 47개 적재, 리드타임 1.15~4.5일. 아래 S1 결과 참조.
 - [x] S2. lead_time_estimator SA — **완료 + prod 라이브 검증 성공(2026-06-05)**. 옵션별 리드타임 분포 + 글로벌 폴백. 아래 S2 결과 참조.
-- [ ] S3. sales_velocity_estimator SA (평일/주말)
+- [x] S3. sales_velocity_estimator SA (평일/주말/휴일) — **완료 + codex pass + prod 라이브 검증 성공(2026-06-05)**. 아래 S3 결과 참조.
 - [ ] S4. replenishment_calc SA
 - [ ] S5. rg_replenishment Harness 조합
 - [ ] S6. UI 컬럼(로켓그로스 탭) + 엔드포인트
@@ -81,10 +83,21 @@ UI: 상품별 현황(로켓그로스 탭) 컬럼 추가 — `현재고 | 최근 
 - **codex**: pass(차단 이슈 없음 — NULL제외·폴백·percentile 전부 요구 일치). 운영리스크(표본2 옵션 p90 약함) 언급했으나 D-3 점진세분화·source표기로 합의(변경 불필요).
 - **라이브 검증(prod GET /lead-times)**: global count=28·mean=2.16·p50=2.18·**p90=2.88**·min=0.99·max=4.5. 옵션 23개(0표본 1옵션 제외). source 분포 = global 18 / option 5 (DB 표본분포와 정확 일치: 표본1개 18옵션 폴백, 표본2개 5옵션 옵션추정). 표본2 옵션 예시 mean 1.67·p90 2.08.
 
-## 현재 진행 단계
-- 2026-06-05: **S2 완료 + prod 라이브 검증 성공**(글로벌 mean 2.16·p90 2.88일, 옵션23·source global18/option5). 다음 = S3 sales_velocity_estimator.
+## S3 결과 (2026-06-05) — 완료 + codex pass(1라운드 수정) + prod 라이브 검증 성공
+- **신규 파일**: `app/services/coupang/sales_velocity_estimator.py`(읽기전용 SA, 새 테이블·마이그레이션 없음). 데이터원 = rg_order_item(paid_at·sales_quantity 일자별 누적) + rg_inventory.sold_30d(폴백).
+- **요일 분류(D-6)**: `_classify_day` = 한국 공휴일(`holidays.SouthKorea()`, 음력 설·추석 포함, 선거일까지) 우선 → 토/일 weekend → 평일 weekday. requirements.txt에 `holidays==0.98`(MIT) 추가, prod .venv 설치 완료.
+- **신뢰도 게이트(D-6 핵심)**: 글로벌 구간 관측일 ≥ 임계(평일8/주말4/휴일2) → 그 구간 요일계수(factor=구간rate/전체rate) 활성(confidence="ok"), 미달 → factor=1.0(confidence="collecting"). 옵션 base_rate = 관측일≥14+판매>0 → order_item / sold_30d>0 → sold_30d/30 / 신뢰기간 실판매만 있음 → order_item_low(신상품 안전망) / 전무 → None.
+- **★신뢰 기준일 TRUST_START=2026-06-04**(RG 매출버그 수정일). 이전 일자 order_item은 paidDateTo 배타버그로 과소적재 → 신뢰표본 제외. `until=어제`(오늘 부분일 제외). 매일 sync로 깨끗한 일자 1일씩 누적 → 자동 고도화.
+- **codex**: 1차 차단이슈 1건 — estimate_sales_velocity의 global 폴백이 overall_rate(포트폴리오 전체속도)를 단일옵션 base_rate로 써 차원오류·S4 과발송 위험. **동의·수정**: global 폴백 제거(둘 다 없으면 None) + order_item_low 안전망 추가. → 2차 **pass**(비차단 docstring 권장도 반영).
+- **공개 API**: `estimate_sales_velocities(db, account_key=None)`(전체+글로벌, UI/검증) / `estimate_sales_velocity(db, vii, account_key=None)`(단일, S4 호출 — 원칙18-8 optional 입력). 엔드포인트 `GET /api/coupang/ops/sales-velocity`.
+- **라이브 검증(prod GET /sales-velocity)**: trust_days=1(06-04만, 06-05 오늘 제외) → segment_factors 전부 collecting/1.0(표본 임계 미달, 정상). 옵션 11개 base_source 전부 sold_30d(예: 옵션 8→0.267, 19→0.633). 없는옵션→None(글로벌 차원오류 제거 확인). global_daily_rate 23.0은 UI지표로만.
+- **self-verify(로컬+prod사본)**: 요일분류(음력 포함), 요일계수 임계 게이트, base_rate 폴백 체인(수동대조 일치), 없는옵션 None, order_item_low 안전망 전부 통과.
 
-## 다음 액션 (S3)
-- **S3 sales_velocity_estimator SA**: 일판매 속도 추정(D-3 평일/주말 구분 시작). 데이터원 = rg_order_sync(CoupangRgOrderItem, paid_at·sales_quantity). 옵션(vendor_item_id)별 일평균 판매수 산출 → 평일/주말 분리. ⚠️ RG 매출 희소 가능(rg_order_item 적재량 먼저 확인). 표본 부족 시 폴백(rg_inventory.sold_30d/30 활용 검토). lead_time_estimator와 동일 패턴(읽기전용 SA, optional account_key).
-- 그 다음 S4 replenishment_calc: 현재고(rg_inventory.orderable_qty) + 속도(S3) + 리드타임(S2 estimate_lead_time) + 목표 2~3일치(D-2) → 권장 발송수량·발송일 역산.
+## 현재 진행 단계
+- 2026-06-05: **S3 완료 + prod 라이브 검증 성공**(평일/주말/휴일 신뢰도 게이트, 현재 trust_days=1이라 전부 collecting·sold_30d 폴백, 매일 누적 고도화). 다음 = S4 replenishment_calc. 진행 3/7.
+
+## 다음 액션 (S4)
+- **S4 replenishment_calc SA**: 현재고(rg_inventory.orderable_qty) + 일판매속도(S3 estimate_sales_velocity, 요일별 segments) + 리드타임(S2 estimate_lead_time, mean·p90) + 목표 2~3일치(D-2) → 권장 발송수량·발송일 역산. 안전재고 = (p90 리드 − mean 리드)×일판매. ★S3 None(데이터 전무 옵션)·collecting 신뢰도를 어떻게 다룰지(보수적 처리 or 추천 보류) S4에서 결정. → 새 SA라 Opus 권장.
+- 그 다음 S5 Harness 조합(원칙18-6 정보유통 허브) / S6 UI 컬럼(로켓그로스 탭) + 엔드포인트 / S7 요일·휴일 세분화 지속.
 - 참고: 쿠키 만료 주기 측정 중(last_success 06-05 10:59~). 일일 sync 302 발생 시점 = 만료. D-5대로 잦으면 자동화 검토.
+- ★코드 커밋 완료: S2=b8b6fa5, S3=0dd51f7(feat). 문서는 docs 커밋. prod엔 scp+restart로 라이브 반영.
