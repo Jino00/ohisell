@@ -224,11 +224,67 @@ export default function CoupangOps() {
   const [rgLoading, setRgLoading] = useState(false);
   const [rgError, setRgError] = useState<string | null>(null);
 
+  // 광고 쿠키 설정 (advertising.coupang.com)
+  const [showAdSettings, setShowAdSettings] = useState(false);
+  const [adCurl, setAdCurl] = useState("");
+  const [adCookieStatus, setAdCookieStatus] = useState<{ configured: boolean; status: string; last_success_at: string | null; last_error: string | null } | null>(null);
+  const [adSaving, setAdSaving] = useState(false);
+  const [adSyncMsg, setAdSyncMsg] = useState<string | null>(null);
+
+  const API_BASE = import.meta.env.DEV ? "http://localhost:8000" : "";
+
   async function triggerSync() {
-    const API_BASE = import.meta.env.DEV ? "http://localhost:8000" : "";
     const r = await fetch(`${API_BASE}/api/scheduler/trigger/auto_sync_orders`, { method: "POST" });
     if (!r.ok) throw new Error(`sync failed: ${r.status}`);
     return r.json();
+  }
+
+  async function loadAdCookieStatus() {
+    try {
+      const r = await fetch(`${API_BASE}/api/coupang/ops/ad-cost/cookie/status`);
+      if (r.ok) setAdCookieStatus(await r.json());
+    } catch { /* 조용히 실패 */ }
+  }
+
+  async function saveAdCookie() {
+    if (!adCurl.trim()) return;
+    setAdSaving(true);
+    setAdSyncMsg(null);
+    try {
+      const r = await fetch(`${API_BASE}/api/coupang/ops/ad-cost/cookie`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ curl: adCurl }),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.detail || "저장 실패");
+      setAdSyncMsg("✅ 쿠키 저장 완료");
+      setAdCurl("");
+      await loadAdCookieStatus();
+    } catch (e: any) {
+      setAdSyncMsg("❌ " + e.message);
+    } finally {
+      setAdSaving(false);
+    }
+  }
+
+  async function syncAdCostNow() {
+    setAdSaving(true);
+    setAdSyncMsg(null);
+    try {
+      const r = await fetch(`${API_BASE}/api/coupang/ops/ad-cost/sync`, { method: "POST" });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.detail || "sync 실패");
+      if (data.error) throw new Error(data.error);
+      const vendors = data.vendors as Array<{ vendor_id: string; day_cost: number }>;
+      const total = vendors.reduce((s: number, v: { day_cost: number }) => s + v.day_cost, 0);
+      setAdSyncMsg(`✅ 오늘 광고비: ${total.toLocaleString("ko-KR")}원`);
+      await loadAdCookieStatus();
+    } catch (e: any) {
+      setAdSyncMsg("❌ " + e.message);
+    } finally {
+      setAdSaving(false);
+    }
   }
 
   async function syncNow() {
@@ -266,6 +322,7 @@ export default function CoupangOps() {
       try { await triggerSync(); } catch { /* sync 실패해도 기존 데이터 표시 */ }
       if (!cancelled) { setSyncing(false); load(company, days); }
     })();
+    loadAdCookieStatus();
     return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);  // 마운트 1회만
@@ -450,11 +507,77 @@ export default function CoupangOps() {
             {syncing ? "동기화 중…" : "🔄 동기화"}
           </button>
           {syncMsg && <span className="text-xs text-gray-500">{syncMsg} (3초 후 갱신)</span>}
+          <button
+            onClick={() => setShowAdSettings((v) => !v)}
+            className={`px-3 py-1.5 rounded text-sm font-medium border transition-colors ${
+              adCookieStatus?.status === "green" ? "border-green-400 text-green-700 bg-green-50 hover:bg-green-100"
+              : adCookieStatus?.status === "red" ? "border-red-400 text-red-700 bg-red-50 hover:bg-red-100"
+              : "border-gray-300 text-gray-600 bg-gray-50 hover:bg-gray-100"
+            }`}
+            title="광고비 쿠키 설정"
+          >
+            📣 광고쿠키 {adCookieStatus?.status === "green" ? "🟢" : adCookieStatus?.status === "red" ? "🔴" : "⬜"}
+          </button>
           <span className="text-xs text-gray-400 border-l border-gray-200 pl-2">
             ※ 쿠팡 API 약 1~2시간 지연 발생 가능
           </span>
         </div>
       </div>
+
+      {/* ── 광고 쿠키 설정 패널 ── */}
+      {showAdSettings && (
+        <div className="mb-4 bg-orange-50 border border-orange-200 rounded-lg p-4 text-sm">
+          <div className="flex items-center gap-2 mb-3">
+            <span className="font-semibold text-orange-800">📣 쿠팡 광고비 쿠키 설정</span>
+            <span className="text-xs text-gray-500">advertising.coupang.com 세션쿠키 — 매일 자정 자동 동기화</span>
+            {adCookieStatus && (
+              <span className={`ml-auto text-xs px-2 py-0.5 rounded-full font-medium ${
+                adCookieStatus.status === "green" ? "bg-green-100 text-green-700"
+                : adCookieStatus.status === "red" ? "bg-red-100 text-red-700"
+                : "bg-gray-100 text-gray-500"
+              }`}>
+                {adCookieStatus.status === "green" ? "🟢 정상"
+                  : adCookieStatus.status === "red" ? "🔴 만료"
+                  : adCookieStatus.configured ? "⬜ 미확인" : "⬜ 미설정"}
+                {adCookieStatus.last_success_at && (
+                  <span className="ml-1 text-gray-400">({adCookieStatus.last_success_at.slice(0, 10)})</span>
+                )}
+              </span>
+            )}
+          </div>
+          <div className="text-xs text-gray-500 mb-2">
+            1. advertising.coupang.com 광고 대시보드 접속 → DevTools Network → cost 요청 우클릭 → "Copy as cURL" → 아래 붙여넣기
+          </div>
+          <div className="flex gap-2">
+            <textarea
+              value={adCurl}
+              onChange={(e) => setAdCurl(e.target.value)}
+              placeholder="curl 'https://advertising.coupang.com/...' ..."
+              className="flex-1 h-16 px-3 py-2 text-xs border border-gray-300 rounded-lg font-mono resize-none focus:outline-none focus:ring-1 focus:ring-orange-400"
+            />
+            <div className="flex flex-col gap-1">
+              <button
+                onClick={saveAdCookie}
+                disabled={adSaving || !adCurl.trim()}
+                className="px-4 py-2 rounded text-xs font-medium bg-orange-600 text-white hover:bg-orange-700 disabled:opacity-50"
+              >
+                {adSaving ? "저장 중…" : "💾 저장"}
+              </button>
+              <button
+                onClick={syncAdCostNow}
+                disabled={adSaving || !adCookieStatus?.configured}
+                className="px-4 py-2 rounded text-xs font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
+              >
+                {adSaving ? "동기화 중…" : "🔄 지금 동기화"}
+              </button>
+            </div>
+          </div>
+          {adSyncMsg && <div className="mt-2 text-xs text-gray-700">{adSyncMsg}</div>}
+          {adCookieStatus?.last_error && (
+            <div className="mt-1 text-xs text-red-600">오류: {adCookieStatus.last_error}</div>
+          )}
+        </div>
+      )}
 
       {/* ── 회사 탭 ── */}
       <div className="flex gap-1 mb-4 border-b border-gray-200">
