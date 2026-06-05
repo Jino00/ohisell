@@ -41,7 +41,7 @@ UI: 상품별 현황(로켓그로스 탭) 컬럼 추가 — `현재고 | 최근 
 - [x] S3. sales_velocity_estimator SA (평일/주말/휴일) — **완료 + codex pass + prod 라이브 검증 성공(2026-06-05)**. 아래 S3 결과 참조.
 - [x] S4. replenishment_calc SA — **완료 + codex pass(1라운드 수정) + prod 라이브검증(DB사본) 성공(2026-06-05)**. 아래 S4 결과 참조.
 - [x] S5. rg_replenishment Harness 조합 — **완료 + codex pass(0블로킹) + prod 라이브 엔드포인트 검증 성공(2026-06-05)**. 아래 S5 결과 참조.
-- [ ] S6. UI 컬럼(로켓그로스 탭) + 프론트(엔드포인트는 S5에서 완료)
+- [x] S6. UI 컬럼(로켓그로스 탭) + 프론트 — **완료 + prod 라이브 배포(2026-06-05)**. 아래 S6 결과 참조.
 - [ ] S7. 요일/휴일 세분화 점진 개선 (지속)
 
 ## S0 실증 결과 (2026-06-05) — 성공
@@ -116,12 +116,16 @@ UI: 상품별 현황(로켓그로스 탭) 컬럼 추가 — `현재고 | 최근 
 ## 확정 결정사항 추가 (D-7)
 - **D-7 (S4 발송 역산 정책 — 확정 2026-06-05)**: ① 일판매속도·리드타임·현재고 중 하나라도 없으면 권장 보류(insufficient_data, Jino 수동). ② sold_30d/order_item_low 기반이거나 요일계수 collecting·글로벌리드 폴백이면 추천하되 confidence=low로 투명 표기. ③ 발송수량 목표는 D-2 "2~3일치"의 **상한 3일**(과소발송보다 품절 회피, 보관료는 3일이면 짧음). 안전재고는 (p90−mean)×일판매로 리드 변동성만 흡수(D-2 "최소"). Jino 원문: "그래"(①②③ 일괄 승인).
 
-## 현재 진행 단계
-- 2026-06-05: **S5 완료 + codex pass(0블로킹) + prod 라이브 엔드포인트 검증 성공**. rg_replenishment Harness가 3 SA를 배치로 1회씩 산출·옵션별 주입(등가성 784/784 라이브 대조 PASS). `GET /replenishment-plan` 라이브. 진행 5/7. 다음 = S6 UI 컬럼(로켓그로스 탭) + 프론트.
+## S6 결과 (2026-06-05) — 완료 + prod 라이브 배포
+- **수정 파일**: `rg_replenishment.py`(CoupangProductItem LEFT 조인으로 item_name 1회 조회 → items에 주입), `frontend/src/lib/api.ts`(ReplenishmentPlan/Item 타입 + fetchReplenishmentPlan()), `frontend/src/pages/CoupangOps.tsx`(RgReplenishmentSection 컴포넌트 + channelFilter=로켓그로스 시 표시).
+- **UI 구성**: 로켓그로스 탭 선택 시 발송관제 섹션이 테이블 위에 나타남. 상단 summary 배지(즉시발송🔴·정상🟢·여유🔵·부족⬜·저신뢰). 컬럼: 상품명(item_name·vendor_item_id) | 상태 | 현재고 | 일판매 | 리드타임(p90) | 며칠치 | 권장발송일 | 권장수량. 기본=발송필요(reorder_now+ok)만 / 전체보기 토글.
+- **라이브 검증**: item_name 필드 정상 반환(784건, reorder_now 4건 상품명 확인 — 예: "2개입 아이폰15"). prod 배포 = rg_replenishment.py scp + pm2 restart + frontend dist 배포. 커밋 ddcd666.
 
-## 다음 액션 (S6)
-- **S6 UI 컬럼**: 로켓그로스 탭에 `현재고 | 최근 일판매 | 리드타임(추정) | 며칠치 남음 | 권장 발송일·수량` 컬럼 추가. 데이터원 = `GET /api/coupang/ops/replenishment-plan`(S5 완료, Harness 경유). status별 시각 구분(reorder_now🔴·ok·well_stocked·insufficient_data 회색), confidence=low 표기. 정렬 기본 = 긴급도(이미 백엔드 sort). → 프론트 작업이라 Sonnet 가능(설계 확정됨).
-- 이후 S7 요일/휴일 세분화 지속 개선(D-6 — 데이터 더 쌓인 후 옵션별 요일 구분 자동 승격).
+## 현재 진행 단계
+- 2026-06-05: **S6 완료 + prod 라이브 배포**. 로켓그로스 탭에 발송관제 섹션 UI 완성. 진행 6/7. 다음 = S7 요일/휴일 세분화 지속 개선(데이터 더 쌓인 후).
+
+## 다음 액션 (S7)
+- **S7 요일/휴일 세분화 지속 개선(D-6)**: 매일 RG order sync로 깨끗한 일자 누적 → 임계(평일8/주말4/휴일2) 넘으면 요일계수 자동 활성(약 2~3주 후 평일계수부터). 별도 코딩 없이 sales_velocity_estimator가 자동 승격.
 - 참고: 쿠키 만료 주기 측정 중. 일일 sync 302 발생 시점 = 만료. D-5대로 잦으면 자동화 검토.
-- ★코드 커밋: S2=b8b6fa5, S3=0dd51f7, S4=0a3b496(feat). S5는 곧 feat 커밋(rg_replenishment.py + 라우터). prod엔 scp+restart로 라이브 반영 완료.
+- ★코드 커밋: S2=b8b6fa5, S3=0dd51f7, S4=0a3b496, S5=cd16ddc(feat)+bf4e41f(docs), S6=ddcd666(feat).
 - 참고(후속 후보): S5 등가성 계약 committed 회귀 테스트(codex nit, 현재는 라이브 self-verify로 대체). pytest 인프라 도입 시 함께.

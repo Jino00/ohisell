@@ -4,9 +4,9 @@
 
 ## 현재 상태
 - 날짜: 2026-06-05
-- 단계: ★활성 트랙 = **쿠팡 RG 발송관제**(docs/tracks/active/track_coupang-rg-replenishment.md). **S5 완료 + codex pass(0블로킹) + prod 라이브 엔드포인트 검증 성공(2026-06-05)** — 5/7. rg_replenishment Harness(읽기전용, 새테이블X, 원칙18-6 정보유통 허브). estimate_sales_velocities·estimate_lead_times·_load_inventory를 **각 1회** 산출 → 옵션별 calc_replenishment(current_stock=·velocity=·lead_time= 주입)로 배치 역산(N×전체스캔 제거, 원칙18-8). 모집단=rg_inventory 보유 옵션. ★등가성 계약: 배치 주입 결과 = calc 미주입(_UNSET, 단일 SA 직접호출)과 정확히 동일 — 어댑터 2곳(_velocity_for: 글로벌 segment_factors·trust_days 병합[안 붙이면 confidence 강제 low 오판], base_source none→None / _lead_for: 입고표본0 옵션은 배치 options에 없음→글로벌 폴백 재현). 엔드포인트 GET /api/coupang/ops/replenishment-plan?account_key=&target_days=(Harness 경유, 원칙18-7). codex: No blocking(1차 pass), nit3건(①등가성 회귀테스트 부재=부분수용·라이브 self-verify로 대체 ②_sort_key int-only=하드닝 ③_summarize 미지status=유지). self-verify(prod DB사본 784): build_plan items vs calc(_UNSET) 전수대조 불일치0(배치==단일). 라이브(GET): 784건 summary reorder4/ok5/well2/insufficient773/low_conf11, sort monotonic. 다음 = S6 UI 컬럼(로켓그로스 탭)+프론트. ★코드 커밋: S2=b8b6fa5, S3=0dd51f7, S4=0a3b496, S5=곧 feat. prod scp+restart 완료. HANDOFF: .claude/memory/HANDOFF_ohisell-coupang-rg-replenishment-S4_20260605.md
+- 단계: ★활성 트랙 = **쿠팡 RG 발송관제**(docs/tracks/active/track_coupang-rg-replenishment.md). **S6 완료 + prod 라이브 배포(2026-06-05)** — 6/7. 로켓그로스 탭에 발송관제 섹션 UI 완성(RgReplenishmentSection). item_name CoupangProductItem 1회 조인·784건 정상. status 배지(즉시발송🔴·정상🟢·여유🔵·부족⬜·저신뢰), 컬럼(상품명|현재고|일판매|리드타임|며칠치|권장발송일|수량), 기본=발송필요만+전체보기 토글. 다음=S7 요일/휴일 세분화 자동 고도화(데이터 누적 대기, 별도 코딩 없음). ★코드 커밋: S2=b8b6fa5, S3=0dd51f7, S4=0a3b496, S5=cd16ddc+bf4e41f, S6=ddcd666. HANDOFF: .claude/memory/HANDOFF_ohisell-coupang-rg-replenishment-S5_20260605.md
 - 네이버 풀통합 트랙: 완료(active→completed 이동). 네이버 클레임 실처리 7건 완료(반품4+교환수거3). ★미처리 1건=정기용 교환 재배송(한진 송장 대기).
-- 최신 커밋(main): **49d99bd**(S4 docs), 0a3b496(S4 feat), 0b23c52·0dd51f7(S3), ae3a32a·b8b6fa5(S2), fdc5492(RG주문 paidDateTo 버그수정). S5 코드+문서(progress/TRACKS/track)는 곧 커밋.
+- 최신 커밋(main): **ddcd666**(S6 feat), bf4e41f(S5 docs), cd16ddc(S5 feat), 49d99bd(S4 docs), 0a3b496(S4 feat).
 
 ## ★쿠팡 RG 매출 누락 버그 수정 (2026-06-05, prod 배포 완료, 커밋 fdc5492)
 - 증상: 어제 오픽스 매출 시스템 159,300 vs 윙 480,400(3배 누락).
