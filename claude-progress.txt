@@ -14,7 +14,11 @@
   ② CoupangOps 마운트 sync = 검토→변경불필요(이미 타깃 sync, 전체 realtime은 네이버+Meta 불필요 지연).
   ③ realtime sync 속도: SQLite WAL+busy_timeout=30s+synchronous=NORMAL(database.py) + _run_orders 6채널 직렬→병렬. 8스레드 동시쓰기 락0 검증.
 - ★realtime 주문 sync 치명버그 발견·수정(커밋 f24262a): _run_orders가 sync_channel_orders(dict 반환)를 r.new_orders(속성)로 접근 → 'dict' has no attribute 'new_orders'로 **기존부터 전 채널 실패**. 이전 세션이 channel_errors 6을 로컬 IP화이트리스트로 오진했으나 실제 이 버그라 prod에서도 주문sync 한번도 안됨. status==success 판정+.get()으로 수정. 라이브 검증: channel_errors 0, 1189건 sync. (Failure Memory 기록)
-- ★현재 광고쿠키 만료중(403) — 배너 정상 표시. Jino가 advertising.coupang.com cURL 재붙여넣기 필요(설정 패널/배너 CTA).
+- ★★광고쿠키 "잦은 만료" 근본원인 규명(2026-06-05, 커밋 b1c8c4f+704a52e): advertising.coupang.com=Akamai 봇매니저. ①prod 데이터센터 IP=403 차단(residential IP만 통과). ②curl 쿠키 재생=1회용(첫 성공 직후 토큰 회전·무효화→로그인 튕김). 이전 "TTL 수일~1주일/IP화이트리스트"는 오진(Failure Memory). → 해법: fetch를 Jino Mac에서 **실제 브라우저(Playwright 영속 프로필)** 로 실행, 숫자만 prod로 push.
+  - prod(배포완료): POST /api/coupang/ops/ad-cost/ingest(토큰 X-Ingest-Token=AD_INGEST_TOKEN env, secrets.compare_digest+검증), ad_cost_sync.ingest_ad_cost, cookie_status staleness(age_hours/stale, 26h), realtime sync에서 _run_coupang_ad 제거, 배너 status==red||stale 트리거.
+  - 로컬(코드완료, ★Jino 1회 로그인 필요): tools/ad_cost_browser_fetcher.py(login+run), tools/requirements-local.txt(playwright, Mac venv에 설치완료+chromium), launchd plist, README. codex review 2라운드 반영.
+  - ★남은 Jino 작업: ①cd backend && ./.venv/bin/python ../tools/ad_cost_browser_fetcher.py login (로그인) ②run으로 검증 ③launchd 등록. (curl ad_cost_local_fetcher.py는 1회용 폐기)
+  - 현재 prod 오늘 광고비 78,601원 적재됨(curl 1회 성공분), 배너 해제 상태. 브라우저 페처 셋업 전까지 자동 갱신 안 됨.
 - 최신 커밋(main): realtime버그수정 + **4432836**(배너+동시성+병렬화), 8a9eddf(실시간sync), ddcd666(S6 feat).
 
 ## ★쿠팡 RG 매출 누락 버그 수정 (2026-06-05, prod 배포 완료, 커밋 fdc5492)
