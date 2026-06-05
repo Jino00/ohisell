@@ -568,6 +568,85 @@ class CoupangRgOrderItem(Base):
 
 
 # ──────────────────────────────────────────────
+# 쿠팡 RG 입고(inbound) — 발송→판매개시 리드타임 (트랙 RG-Replenishment S1, D-1)
+# ──────────────────────────────────────────────
+class CoupangRgInbound(Base):
+    """로켓그로스 FC 입고 — 옵션 그레인. 발송→판매개시 리드타임 산출의 원천(트랙 D-1).
+
+    출처: Wing 내부 API GET wing.coupang.com/tenants/rfm-inbound/data/inbound/search (세션쿠키).
+    공식 Open API엔 입고 엔드포인트 없음(전수확인) → 이 기능 한해 Wing 내부 API 사용(D-1).
+    grain = (account_key, inbound_id, vendor_item_id). 입고 1건(inbound_id)에 여러 옵션 포함.
+    ★리드타임 = shipment_created_at(statusId 3=발송) → stowing_at(statusId 7=판매개시).
+    입고건 식별자 필드명은 라이브 실응답으로 확정(raw_json 보관 → 파싱 미세조정). 표본 적음(반년 6건).
+    """
+
+    __tablename__ = "coupang_rg_inbound"
+    __table_args__ = (
+        UniqueConstraint(
+            "account_key", "inbound_id", "vendor_item_id", name="uq_coupang_rg_inbound"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    account_key: Mapped[str] = mapped_column(String(20), nullable=False)  # COUPANG_WING1 등
+    inbound_id: Mapped[str] = mapped_column(String(40), nullable=False, index=True)  # 입고건 식별자
+    vendor_id: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)  # 소유 계정
+    vendor_item_id: Mapped[str] = mapped_column(
+        String(20), nullable=False, index=True
+    )  # 옵션ID = 결합키(D-8)
+    sku_id: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    cached_sku_name: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+    requested_qty: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 발송 요청수량
+    received_qty: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # FC 입고수량
+    stowed_qty: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 적치(판매가능)수량
+    shipment_created_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True
+    )  # statusId 3 = 발송시점
+    stowing_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True, index=True
+    )  # statusId 7 = 판매개시
+    lead_time_days: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(5, 2), nullable=True
+    )  # 파생: stowing - shipment (일)
+    inbound_created_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True
+    )  # 입고 생성일(content.createdAt)
+    raw_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 옵션 원본(스키마 진화 대비)
+    synced_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class CoupangWingCookie(Base):
+    """Wing 내부 API 세션쿠키 시크릿 — 계정별 (트랙 D-5, S1-b).
+
+    Wing 내부 API는 셀러 로그인 세션쿠키 인증. Jino가 UI에 cURL 통째 붙여넣으면 쿠키/xsrf 추출·저장.
+    ⚠️ 세션쿠키=민감정보 → cookie_blob·xsrf_token은 Fernet 암호문으로 저장(평문·로그 노출 금지).
+    last_success_at = 일일 sync 성공 시각 = 쿠키 만료 측정기(302/401 발생 = 만료, status=red).
+    D-5: 수동 붙여넣기로 시작 + 만료주기 측정 → 잦으면 자동화 추가.
+    """
+
+    __tablename__ = "coupang_wing_cookie"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    account_key: Mapped[str] = mapped_column(
+        String(20), unique=True, nullable=False, index=True
+    )  # COUPANG_WING1 등
+    cookie_blob: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # Fernet 암호문(쿠키 전체)
+    xsrf_token: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # Fernet 암호문(x-xsrf-token)
+    status: Mapped[str] = mapped_column(
+        String(12), nullable=False, server_default="unknown"
+    )  # green/red/unknown
+    last_error: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+    last_saved_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)  # 쿠키 저장 시각
+    last_success_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True
+    )  # 마지막 sync 성공(=만료 측정)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+# ──────────────────────────────────────────────
 # 쿠팡 반품/취소 (순매출 차감 회계축 — P2)
 # ──────────────────────────────────────────────
 class CoupangReturnItem(Base):

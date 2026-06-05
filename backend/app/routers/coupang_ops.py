@@ -19,10 +19,11 @@ from sqlalchemy.orm import Session
 
 from app.config import get_coupang_config
 from app.database import get_db
-from app.models import Channel, CoupangAdOptionDaily, CoupangProductItem, CoupangRevenueFee, CoupangRgOrderItem, Order, ProductChannelMapping, ProductMaster
+from app.models import Channel, CoupangAdOptionDaily, CoupangProductItem, CoupangRevenueFee, CoupangRgInbound, CoupangRgOrderItem, Order, ProductChannelMapping, ProductMaster
 from app.routers._coupang_write_http import handle_write as _handle_write
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
-from app.services.coupang import coupon_write, product_write
+from app.services.coupang import coupon_write, product_write, rg_inbound_sync
+from app.utils.crypto import CookieCryptoError
 
 log = logging.getLogger(__name__)
 
@@ -813,4 +814,72 @@ def sales_summary(
             "roas":         _roas(total_spend, total_conv),
         },
         "by_product": by_product,
+    }
+
+
+# ════════════════════════════════════════════════
+# RG 입고(inbound) — Wing 세션쿠키 (트랙 RG-Replenishment S1, D-1/D-5)
+# 라우터는 rg_inbound_sync Harness만 호출(원칙 18-7). 쿠키 민감값은 응답에 노출 안 함.
+# ════════════════════════════════════════════════
+@router.post("/inbound/cookie")
+def save_inbound_cookie(
+    body: dict[str, Any] = Body(...), db: Session = Depends(get_db)
+):
+    """Wing 세션쿠키 저장 — body {account_key, curl}. cURL 통째 붙여넣기 → 쿠키·xsrf 추출·Fernet 암호화.
+
+    account_key 미지정 시 COUPANG_WING1. parse 실패·암호화키 부재는 400. 저장 직후 status=unknown."""
+    account_key = (body.get("account_key") or "COUPANG_WING1").strip()
+    curl = body.get("curl") or body.get("cookie") or ""
+    try:
+        return rg_inbound_sync.save_cookie(db, account_key, curl)
+    except (ValueError, CookieCryptoError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/inbound/cookie/status")
+def inbound_cookie_status(db: Session = Depends(get_db)):
+    """계정별 쿠키 설정·상태(🟢green/🔴red/unknown/none) + 마지막 저장·성공 시각(만료 측정)."""
+    return {"accounts": rg_inbound_sync.cookie_status(db)}
+
+
+@router.post("/inbound/sync")
+def trigger_inbound_sync(
+    account_key: str | None = Query(None), db: Session = Depends(get_db)
+):
+    """입고 동기화 즉시 실행(수동 트리거). account_key 지정 시 단일, 미지정 시 전 계정."""
+    if account_key:
+        results = [rg_inbound_sync.sync_account_inbound(db, account_key)]
+    else:
+        results = rg_inbound_sync.sync_all_inbound(db)
+    return {"results": results}
+
+
+@router.get("/inbound")
+def list_inbound(
+    db: Session = Depends(get_db), limit: int = Query(100, ge=1, le=500)
+):
+    """적재된 입고 이력 조회(확인/디버그용). 최신 판매개시(stowing) 순."""
+    rows = (
+        db.query(CoupangRgInbound)
+        .order_by(CoupangRgInbound.stowing_at.desc())
+        .limit(limit)
+        .all()
+    )
+    return {
+        "count": len(rows),
+        "items": [
+            {
+                "account_key": r.account_key,
+                "inbound_id": r.inbound_id,
+                "vendor_item_id": r.vendor_item_id,
+                "sku_name": r.cached_sku_name,
+                "requested_qty": r.requested_qty,
+                "received_qty": r.received_qty,
+                "stowed_qty": r.stowed_qty,
+                "shipment_created_at": r.shipment_created_at.isoformat() if r.shipment_created_at else None,
+                "stowing_at": r.stowing_at.isoformat() if r.stowing_at else None,
+                "lead_time_days": float(r.lead_time_days) if r.lead_time_days is not None else None,
+            }
+            for r in rows
+        ],
     }

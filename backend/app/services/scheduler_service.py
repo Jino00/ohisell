@@ -365,6 +365,31 @@ def sync_coupang_rg_orders_job():
         db.close()
 
 
+def sync_coupang_rg_inbound_job():
+    """Wing 입고 자동 동기화 (05:20 KST) — RG 발송관제 리드타임(트랙 D-1). 세션쿠키 인증.
+
+    ⚠️ 쿠키 만료(auth_expired)·미설정(cookie_missing)은 fail-soft(정상 운영상태) → raise 안 함.
+    SA가 cookie row status=red로 표시(D-5: 만료 측정). 예상치 못한 예외만 raise."""
+    db = _get_own_db_session()
+    try:
+        from app.services.coupang.rg_inbound_sync import sync_all_inbound
+
+        results = sync_all_inbound(db)
+        log.info("[스케줄러] 쿠팡 RG 입고 동기화 결과: %s", results)
+
+        state = db.query(SchedulerState).filter(
+            SchedulerState.job_name == "sync_coupang_rg_inbound"
+        ).first()
+        if state:
+            state.last_run_at = kst_now()
+            db.commit()
+    except Exception as e:
+        log.exception("[스케줄러] sync_coupang_rg_inbound_job 에러: %s", e)
+        raise
+    finally:
+        db.close()
+
+
 def sync_coupang_coupons_job():
     """쿠팡 쿠폰 운영 현황 자동 동기화 (06:00 KST) — 즉시할인쿠폰+예산/계약(P5). 트랙 D-8: 서버 IP에서만."""
     db = _get_own_db_session()
@@ -546,6 +571,7 @@ def _ensure_default_states(db):
         ("sync_naver_settlement", "25 5 * * *"),
         ("sync_naver_case_settlement", "30 5 * * *"),
         ("sync_meta_ad_costs", "0 7 * * *"),
+        ("sync_coupang_rg_inbound", "20 5 * * *"),
         ("sync_coupang_products", "30 5 * * *"),
         ("sync_coupang_rg_sizes", "35 5 * * *"),
         ("sync_coupang_rg_inventory", "40 5 * * *"),
@@ -602,6 +628,8 @@ def start_scheduler():
                 job_func = sync_coupang_rg_inventory_job
             elif state.job_name == "sync_coupang_rg_orders":
                 job_func = sync_coupang_rg_orders_job
+            elif state.job_name == "sync_coupang_rg_inbound":
+                job_func = sync_coupang_rg_inbound_job
             elif state.job_name == "sync_coupang_coupons":
                 job_func = sync_coupang_coupons_job
             elif state.job_name == "sync_coupang_cs":

@@ -7,6 +7,7 @@ from app.clients.coupang.channel import CoupangClient
 from app.clients.coupang.coupons import CoupangCouponClient
 from app.clients.coupang.cs import CoupangCsClient
 from app.clients.coupang.exchanges import CoupangExchangeClient
+from app.clients.coupang.inbound import CoupangInboundClient
 from app.clients.coupang.logistics import CoupangLogisticsClient
 from app.clients.coupang.products import CoupangProductClient
 from app.clients.coupang.returns import CoupangReturnClient
@@ -21,6 +22,7 @@ __all__ = [
     "CoupangCouponClient",
     "CoupangCsClient",
     "CoupangExchangeClient",
+    "CoupangInboundClient",
     "CoupangLogisticsClient",
     "CoupangProductClient",
     "CoupangReturnClient",
