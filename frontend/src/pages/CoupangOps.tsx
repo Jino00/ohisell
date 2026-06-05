@@ -1,6 +1,7 @@
 // CoupangOps.tsx — 🔧 쿠팡 운영 패널
 // 회사·기간별 매출 현황 + 상품별 상세. 컬럼 필터(▼) 드롭다운으로 값 선택 표시/숨김.
 import { useState, useEffect, useCallback, useRef } from "react";
+import { useSearchParams } from "react-router-dom";
 import { fetchSalesSummary, fetchReplenishmentPlan, type SalesSummary, type SalesProductRow, type ReplenishmentPlan } from "../lib/api";
 
 const COMPANIES = [
@@ -225,7 +226,9 @@ export default function CoupangOps() {
   const [rgError, setRgError] = useState<string | null>(null);
 
   // 광고 쿠키 설정 (advertising.coupang.com)
-  const [showAdSettings, setShowAdSettings] = useState(false);
+  // 전역 만료 배너 CTA(?adcookie=open)로 진입하면 패널 자동 펼침
+  const [searchParams] = useSearchParams();
+  const [showAdSettings, setShowAdSettings] = useState(searchParams.get("adcookie") === "open");
   const [adCurl, setAdCurl] = useState("");
   const [adCookieStatus, setAdCookieStatus] = useState<{ configured: boolean; status: string; last_success_at: string | null; last_error: string | null } | null>(null);
   const [adSaving, setAdSaving] = useState(false);

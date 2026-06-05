@@ -17,6 +17,20 @@ export function syncRealtime(): Promise<Record<string, unknown>> {
   return fetchApi("/api/sync/realtime", { method: "POST" });
 }
 
+// ── 쿠팡 광고비 쿠키 상태 (전역 만료 경고용) ──
+export interface AdCostCookieStatus {
+  account: string;
+  configured: boolean;
+  status: string; // green | red | unknown | none
+  last_saved_at: string | null;
+  last_success_at: string | null;
+  last_error: string | null;
+}
+
+export function getAdCostCookieStatus(): Promise<AdCostCookieStatus> {
+  return fetchApi<AdCostCookieStatus>("/api/coupang/ops/ad-cost/cookie/status");
+}
+
 export async function uploadFile(path: string, file: File) {
   const form = new FormData();
   form.append("file", file);

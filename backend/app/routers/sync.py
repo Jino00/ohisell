@@ -198,21 +198,34 @@ def sync_realtime(db: Session = Depends(get_db)):
 
     results: dict = {}
 
-    def _run_orders():
+    def _sync_one_channel(ch_id: int) -> tuple[int, int]:
+        """단일 채널 주문 sync — 채널별 독립 세션(스레드 안전). (new_or_updated, error수) 반환."""
         _db = SessionLocal()
         try:
-            channels = _db.query(Channel).filter(Channel.api_type != "excel").all()
-            ok, err = 0, 0
-            for ch in channels:
-                try:
-                    r = sync_channel_orders(_db, ch.id, None, None)
-                    ok += r.new_orders + r.updated_orders
-                except Exception as e:
-                    log.warning("realtime: 주문 sync 실패 ch=%s: %s", ch.id, e)
-                    err += 1
-            return {"new_or_updated": ok, "channel_errors": err}
+            r = sync_channel_orders(_db, ch_id, None, None)
+            return r.new_orders + r.updated_orders, 0
+        except Exception as e:
+            log.warning("realtime: 주문 sync 실패 ch=%s: %s", ch_id, e)
+            return 0, 1
         finally:
             _db.close()
+
+    def _run_orders():
+        # 채널 목록만 짧게 조회 후 세션 닫고, 각 채널은 병렬(느린 네트워크 fetch 겹침).
+        # 채널별 DB 쓰기는 SQLite busy_timeout으로 직렬 대기(database.py 하드닝).
+        _db = SessionLocal()
+        try:
+            ch_ids = [c.id for c in _db.query(Channel).filter(Channel.api_type != "excel").all()]
+        finally:
+            _db.close()
+        if not ch_ids:
+            return {"new_or_updated": 0, "channel_errors": 0}
+        ok, err = 0, 0
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, len(ch_ids))) as cex:
+            for o, e in cex.map(_sync_one_channel, ch_ids):
+                ok += o
+                err += e
+        return {"new_or_updated": ok, "channel_errors": err}
 
     def _run_coupang_ad():
         _db = SessionLocal()

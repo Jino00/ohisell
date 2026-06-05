@@ -2,8 +2,9 @@
 // 데스크탑: 고정 사이드바. 모바일(<md): 햄버거 → 슬라이드 드로어.
 // 대시보드(전체)를 부모 메뉴로 두고, 채널별 운영(쿠팡·스마트스토어)을 접이식 자식으로 묶음.
 import { useEffect, useState } from "react";
-import { NavLink, Outlet, useLocation } from "react-router-dom";
+import { Link, NavLink, Outlet, useLocation } from "react-router-dom";
 import SchedulerStatus from "./SchedulerStatus";
+import { getAdCostCookieStatus, type AdCostCookieStatus } from "../lib/api";
 
 // 대시보드 하위 채널별 운영 패널 (접이식)
 const DASHBOARD_CHILDREN = [
@@ -33,11 +34,26 @@ export default function Layout() {
   const childActive = DASHBOARD_CHILDREN.some((c) => location.pathname === c.to);
   const [open, setOpen] = useState(childActive || location.pathname === "/");
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [adCookie, setAdCookie] = useState<AdCostCookieStatus | null>(null);
 
   // 채널 페이지로 직접 진입하면 그룹을 자동으로 펼침
   useEffect(() => {
     if (childActive) setOpen(true);
   }, [childActive]);
+
+  // 광고쿠키 만료 감지 — 페이지 진입/이동마다 재확인.
+  // 접속 시 realtime sync가 만료(302)를 감지해 status를 red로 바꾸므로, 6초 뒤 한 번 더 확인.
+  useEffect(() => {
+    let cancelled = false;
+    const fetchStatus = () => {
+      getAdCostCookieStatus()
+        .then((s) => { if (!cancelled) setAdCookie(s); })
+        .catch(() => { /* 조용히 실패 — 배너만 미표시 */ });
+    };
+    fetchStatus();
+    const t = setTimeout(fetchStatus, 6000);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [location.pathname]);
 
   // 경로 이동 시 모바일 드로어 닫기
   useEffect(() => {
@@ -136,6 +152,24 @@ export default function Layout() {
           </button>
           <span className="text-base font-bold text-gray-900">ohisell</span>
         </header>
+
+        {/* 광고쿠키 만료 전역 경고 — 어느 페이지에 있든 보임 (광고비 0원 집계 방지) */}
+        {adCookie?.status === "red" && (
+          <div className="flex items-center gap-3 bg-red-600 text-white px-4 py-2 text-sm">
+            <span className="font-semibold shrink-0">🔴 쿠팡 광고비 수집 중단</span>
+            <span className="text-red-100 min-w-0 truncate">
+              광고 쿠키가 만료됐습니다 — 갱신 전까지 광고비가 0원으로 집계됩니다
+              {adCookie.last_success_at && ` (마지막 수집 ${adCookie.last_success_at.slice(0, 10)})`}.
+            </span>
+            <Link
+              to="/coupang-ops?adcookie=open"
+              className="ml-auto shrink-0 bg-white text-red-700 font-medium px-3 py-1 rounded hover:bg-red-50"
+            >
+              광고쿠키 갱신 →
+            </Link>
+          </div>
+        )}
+
         <main className="flex-1 overflow-auto p-4 md:p-6">
           <Outlet />
         </main>
