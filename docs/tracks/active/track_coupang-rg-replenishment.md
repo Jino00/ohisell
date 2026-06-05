@@ -35,7 +35,7 @@ UI: 상품별 현황(로켓그로스 탭) 컬럼 추가 — `현재고 | 최근 
 ## 체크리스트
 - [x] S0. 세션쿠키 인증 방식 실증 — **성공(2026-06-05)**. 아래 S0 결과 참조.
 - [x] S1. coupang_rg_inbound 테이블 + rg_inbound_sync SA — **완료 + prod 라이브 검증 성공(2026-06-05)**. 입고 6건/옵션 47개 적재, 리드타임 1.15~4.5일. 아래 S1 결과 참조.
-- [ ] S2. lead_time_estimator SA
+- [x] S2. lead_time_estimator SA — **완료 + prod 라이브 검증 성공(2026-06-05)**. 옵션별 리드타임 분포 + 글로벌 폴백. 아래 S2 결과 참조.
 - [ ] S3. sales_velocity_estimator SA (평일/주말)
 - [ ] S4. replenishment_calc SA
 - [ ] S5. rg_replenishment Harness 조합
@@ -73,9 +73,18 @@ UI: 상품별 현황(로켓그로스 탭) 컬럼 추가 — `현재고 | 최근 
 - **리드타임 실측**(발송 statusId3 → 판매개시 statusId7): 1.15·2.18·4.5일 등. shipAt/stowAt/req·recv·stow 수량 전부 실데이터 정상.
 - 스키마 일치: shipmentStatusHistory=dict("_N", statusId 숫자), skuDetails=list, plannedSku.{vendorItemId,skuId,requestedQty,cachedSkuName} + receivedQty/stowedQty. 전부 파싱 코드와 일치.
 
-## 현재 진행 단계
-- 2026-06-05: **S1 완료 + prod 라이브 검증 성공**(입고 6건/47옵션, 리드타임 1.15~4.5일). 다음 = S2 lead_time_estimator.
+## S2 결과 (2026-06-05) — 완료 + codex pass + prod 라이브 검증 성공
+- **신규 파일**: `app/services/coupang/lead_time_estimator.py`(읽기전용 SA, 새 테이블·마이그레이션 없음). `_percentile`(numpy 미의존 선형보간), `_summarize`((lead,stowing) 표본→count·mean·p50·p90·min·max·latest), `estimate_lead_times`(전체+글로벌), `estimate_lead_time(vii)`(단일, S4가 호출 — 원칙18-8 optional 입력).
+- **수정 파일**: `routers/coupang_ops.py`(import estimator + `GET /api/coupang/ops/lead-times` 검증/UI 엔드포인트. read-only라 SA 직접 호출=원칙18-7 조회 예외).
+- **폴백 정책(라이브 사실 기반)**: 옵션 표본 ≥ MIN_SAMPLES(=2) → 옵션 추정(source="option"), 미만 → 글로벌 분포 폴백(source="global"), 글로벌도 없으면 제외/None. 라이브 실측 옵션당 표본 1~2개라 글로벌이 주력.
+- **안전재고(D-2)**: mean=기대 리드, p90=보수적 리드(변동성 흡수). S4 replenishment_calc가 둘 다 사용 예정.
+- **codex**: pass(차단 이슈 없음 — NULL제외·폴백·percentile 전부 요구 일치). 운영리스크(표본2 옵션 p90 약함) 언급했으나 D-3 점진세분화·source표기로 합의(변경 불필요).
+- **라이브 검증(prod GET /lead-times)**: global count=28·mean=2.16·p50=2.18·**p90=2.88**·min=0.99·max=4.5. 옵션 23개(0표본 1옵션 제외). source 분포 = global 18 / option 5 (DB 표본분포와 정확 일치: 표본1개 18옵션 폴백, 표본2개 5옵션 옵션추정). 표본2 옵션 예시 mean 1.67·p90 2.08.
 
-## 다음 액션 (S2)
-- **S2 lead_time_estimator SA**: coupang_rg_inbound에서 옵션(vendor_item_id)별 발송→판매개시 리드타임 분포 산출(평균·p50·p90·표본수·최근값). 표본 적음(입고 6건) → 옵션 표본 부족 시 전체 평균 폴백. D-2(목표 2~3일치) 안전재고에 리드타임 변동성(1.15~4.5일, 큰 편차) 반영. lead_time_days NULL(미판매개시 입고)은 분포에서 제외.
-- 참고: 쿠키 만료 주기는 이번 last_success_at(2026-06-05 10:59)부터 측정 시작. 다음 일일 sync(05:20) 302 발생 시점 = 만료. D-5대로 잦으면 자동화 검토.
+## 현재 진행 단계
+- 2026-06-05: **S2 완료 + prod 라이브 검증 성공**(글로벌 mean 2.16·p90 2.88일, 옵션23·source global18/option5). 다음 = S3 sales_velocity_estimator.
+
+## 다음 액션 (S3)
+- **S3 sales_velocity_estimator SA**: 일판매 속도 추정(D-3 평일/주말 구분 시작). 데이터원 = rg_order_sync(CoupangRgOrderItem, paid_at·sales_quantity). 옵션(vendor_item_id)별 일평균 판매수 산출 → 평일/주말 분리. ⚠️ RG 매출 희소 가능(rg_order_item 적재량 먼저 확인). 표본 부족 시 폴백(rg_inventory.sold_30d/30 활용 검토). lead_time_estimator와 동일 패턴(읽기전용 SA, optional account_key).
+- 그 다음 S4 replenishment_calc: 현재고(rg_inventory.orderable_qty) + 속도(S3) + 리드타임(S2 estimate_lead_time) + 목표 2~3일치(D-2) → 권장 발송수량·발송일 역산.
+- 참고: 쿠키 만료 주기 측정 중(last_success 06-05 10:59~). 일일 sync 302 발생 시점 = 만료. D-5대로 잦으면 자동화 검토.

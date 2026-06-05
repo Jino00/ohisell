@@ -4,7 +4,7 @@
 
 ## 현재 상태
 - 날짜: 2026-06-05
-- 단계: ★활성 트랙 = **쿠팡 RG 발송관제**(docs/tracks/active/track_coupang-rg-replenishment.md). **S1 완료 + prod 라이브 검증 성공(2026-06-05)** — 1/7. 입고 6건/옵션 47개 적재, 리드타임 실측 1.15~4.5일, inbound_id=shipmentId 확정, 쿠키 status=green(만료 측정 시작). 커밋 3ede9cd(코드). 다음 = S2 lead_time_estimator. HANDOFF: .claude/memory/HANDOFF_ohisell-coupang-rg-replenishment-S0_20260605.md
+- 단계: ★활성 트랙 = **쿠팡 RG 발송관제**(docs/tracks/active/track_coupang-rg-replenishment.md). **S2 완료 + prod 라이브 검증 성공(2026-06-05)** — 2/7. lead_time_estimator SA(읽기전용, 새테이블X). 라이브 GET /lead-times: global mean 2.16·p90 2.88일, 옵션23, source global18/option5(DB표본분포 일치). codex pass. 다음 = S3 sales_velocity_estimator. ⚠️ S2 코드 미커밋(워킹트리, Jino 지시 시 커밋). prod엔 scp+pm2 restart 완료. HANDOFF: .claude/memory/HANDOFF_ohisell-coupang-rg-replenishment-S1_20260605.md
 - 네이버 풀통합 트랙: 완료(active→completed 이동). 네이버 클레임 실처리 7건 완료(반품4+교환수거3). ★미처리 1건=정기용 교환 재배송(한진 송장 대기).
 - 최신 커밋(main): **fdc5492**(RG주문 paidDateTo 버그수정). 그 외 19fe4e9(N8), 78f3837(네이버트랙완료). RG 발송관제 트랙/메모리/HANDOFF는 워킹트리에 미커밋(문서뿐, Jino 지시 시 커밋).
 
