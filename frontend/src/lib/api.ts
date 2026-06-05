@@ -367,6 +367,46 @@ export function fetchSalesSummary(company: string, days: number): Promise<SalesS
   );
 }
 
+// ── 쿠팡 RG 발송관제 ──────────────────────────────────────────────
+
+export interface ReplenishmentItem {
+  vendor_item_id: string;
+  item_name: string;
+  status: "reorder_now" | "ok" | "well_stocked" | "insufficient_data";
+  confidence?: "ok" | "low";
+  reason?: string;
+  current_stock?: number;
+  daily_base_rate?: number;
+  lead_p90?: number;
+  days_to_safety?: number;
+  ship_by_date?: string | null;
+  recommend_qty?: number;
+}
+
+export interface ReplenishmentSummary {
+  total: number;
+  reorder_now: number;
+  ok: number;
+  well_stocked: number;
+  insufficient_data: number;
+  low_confidence: number;
+}
+
+export interface ReplenishmentPlan {
+  generated_at: string;
+  account_key: string | null;
+  target_days: number;
+  trust_days: number;
+  summary: ReplenishmentSummary;
+  items: ReplenishmentItem[];
+}
+
+export function fetchReplenishmentPlan(targetDays = 3): Promise<ReplenishmentPlan> {
+  return fetchApi<ReplenishmentPlan>(
+    `/api/coupang/ops/replenishment-plan?target_days=${targetDays}`
+  );
+}
+
 // ── 쿠팡 운영 패널 — 상품 목록·쓰기 ─────────────────────────────
 
 export interface ProductItem {

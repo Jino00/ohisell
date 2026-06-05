@@ -16,7 +16,7 @@ from datetime import date
 
 from sqlalchemy.orm import Session
 
-from app.models import CoupangRgInventory
+from app.models import CoupangProductItem, CoupangRgInventory
 from app.services.coupang.lead_time_estimator import estimate_lead_times
 from app.services.coupang.replenishment_calc import DEFAULT_TARGET_DAYS, calc_replenishment
 from app.services.coupang.sales_velocity_estimator import estimate_sales_velocities
@@ -120,6 +120,14 @@ def build_replenishment_plan(
     lead_times = estimate_lead_times(db, account_key)
     inventory = _load_inventory(db, account_key)
 
+    # item_name 1회 조회 (UI 표시용 — 없으면 vendor_item_id 그대로)
+    name_rows = (
+        db.query(CoupangProductItem.vendor_item_id, CoupangProductItem.item_name)
+        .filter(CoupangProductItem.vendor_item_id.in_(list(inventory.keys())))
+        .all()
+    )
+    item_names: dict[str, str | None] = {str(r[0]): r[1] for r in name_rows}
+
     items: list[dict] = []
     for vii, stock in inventory.items():
         velocity = _velocity_for(vii, velocities)
@@ -132,6 +140,7 @@ def build_replenishment_plan(
             velocity=velocity,
             lead_time=lead,
         )
+        result["item_name"] = item_names.get(vii) or vii
         items.append(result)
 
     items.sort(key=_sort_key)

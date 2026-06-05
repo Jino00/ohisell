@@ -1,7 +1,7 @@
 // CoupangOps.tsx — 🔧 쿠팡 운영 패널
 // 회사·기간별 매출 현황 + 상품별 상세. 컬럼 필터(▼) 드롭다운으로 값 선택 표시/숨김.
 import { useState, useEffect, useCallback, useRef } from "react";
-import { fetchSalesSummary, type SalesSummary, type SalesProductRow } from "../lib/api";
+import { fetchSalesSummary, fetchReplenishmentPlan, type SalesSummary, type SalesProductRow, type ReplenishmentPlan } from "../lib/api";
 
 const COMPANIES = [
   { value: "ALL", label: "전체" },
@@ -52,6 +52,144 @@ function numOf(s: string): number {
   return isNaN(n) ? 0 : n;
 }
 
+// ── RG 발송관제 섹션 ─────────────────────────────────────────────
+
+const STATUS_META: Record<string, { label: string; badge: string; row: string }> = {
+  reorder_now:      { label: "🔴 즉시발송", badge: "bg-red-100 text-red-700",     row: "bg-red-50" },
+  ok:               { label: "🟢 정상",     badge: "bg-green-100 text-green-700", row: "" },
+  well_stocked:     { label: "🔵 여유",     badge: "bg-blue-100 text-blue-700",   row: "" },
+  insufficient_data:{ label: "⬜ 데이터부족", badge: "bg-gray-100 text-gray-500",  row: "" },
+};
+
+function RgReplenishmentSection({
+  plan, loading, error,
+}: {
+  plan: ReplenishmentPlan | null;
+  loading: boolean;
+  error: string | null;
+}) {
+  const [showAll, setShowAll] = useState(false);
+
+  if (error) {
+    return (
+      <div className="mb-4 bg-red-50 text-red-700 rounded px-4 py-2 text-sm">
+        발송관제 로드 실패: {error}
+      </div>
+    );
+  }
+
+  const actionItems = plan?.items.filter(
+    (it) => it.status === "reorder_now" || it.status === "ok"
+  ) ?? [];
+  const displayItems = showAll ? (plan?.items ?? []) : actionItems;
+
+  return (
+    <div className="mb-6 bg-white border border-gray-200 rounded-lg overflow-hidden">
+      {/* 헤더 */}
+      <div className="px-4 py-3 border-b border-gray-100 bg-orange-50 flex items-center gap-3">
+        <span className="text-sm font-semibold text-orange-800">📦 RG 발송관제</span>
+        {plan && (
+          <>
+            <span className="text-xs text-gray-500">기준일 {plan.generated_at} · {plan.target_days}일치 목표 · 데이터 {plan.trust_days}일분 누적</span>
+            <div className="ml-auto flex gap-2 text-xs">
+              <span className="px-2 py-0.5 rounded bg-red-100 text-red-700">즉시발송 {plan.summary.reorder_now}</span>
+              <span className="px-2 py-0.5 rounded bg-green-100 text-green-700">정상 {plan.summary.ok}</span>
+              <span className="px-2 py-0.5 rounded bg-blue-100 text-blue-700">여유 {plan.summary.well_stocked}</span>
+              <span className="px-2 py-0.5 rounded bg-gray-100 text-gray-500">부족 {plan.summary.insufficient_data}</span>
+              {plan.summary.low_confidence > 0 && (
+                <span className="px-2 py-0.5 rounded bg-yellow-100 text-yellow-700">저신뢰 {plan.summary.low_confidence}</span>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+
+      {loading ? (
+        <div className="px-4 py-6 text-center text-gray-400 text-sm">발송관제 로딩 중…</div>
+      ) : !plan || actionItems.length === 0 ? (
+        <div className="px-4 py-6 text-center text-gray-400 text-sm">
+          {plan ? "발송 필요 항목 없음 (데이터 누적 중…)" : "데이터 없음"}
+        </div>
+      ) : (
+        <>
+          <table className="w-full text-sm">
+            <thead className="bg-gray-50 text-gray-500 text-xs border-b border-gray-100">
+              <tr>
+                <th className="px-4 py-2 text-left">상품명</th>
+                <th className="px-3 py-2 text-center">상태</th>
+                <th className="px-3 py-2 text-right">현재고</th>
+                <th className="px-3 py-2 text-right">일판매</th>
+                <th className="px-3 py-2 text-right">리드타임</th>
+                <th className="px-3 py-2 text-right">며칠치</th>
+                <th className="px-3 py-2 text-center">권장 발송일</th>
+                <th className="px-3 py-2 text-right">권장 수량</th>
+              </tr>
+            </thead>
+            <tbody>
+              {displayItems.map((it) => {
+                const meta = STATUS_META[it.status] ?? STATUS_META.insufficient_data;
+                return (
+                  <tr key={it.vendor_item_id} className={`border-t border-gray-50 hover:bg-gray-50 ${meta.row}`}>
+                    <td className="px-4 py-2 max-w-[320px]">
+                      <div className="truncate text-gray-900" title={it.item_name}>{it.item_name}</div>
+                      <div className="text-xs text-gray-400">{it.vendor_item_id}</div>
+                    </td>
+                    <td className="px-3 py-2 text-center">
+                      <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${meta.badge}`}>
+                        {meta.label}
+                      </span>
+                      {it.confidence === "low" && (
+                        <span className="ml-1 text-xs text-yellow-600 font-medium">저신뢰</span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2 text-right font-medium">
+                      {it.current_stock != null ? `${it.current_stock.toLocaleString("ko-KR")}개` : "—"}
+                    </td>
+                    <td className="px-3 py-2 text-right text-gray-600">
+                      {it.daily_base_rate != null ? `${it.daily_base_rate.toFixed(2)}/일` : "—"}
+                    </td>
+                    <td className="px-3 py-2 text-right text-gray-600">
+                      {it.lead_p90 != null ? `${it.lead_p90.toFixed(1)}일` : "—"}
+                    </td>
+                    <td className="px-3 py-2 text-right">
+                      {it.days_to_safety != null ? (
+                        <span className={it.days_to_safety <= 3 ? "text-red-600 font-semibold" : it.days_to_safety <= 7 ? "text-orange-500" : "text-gray-700"}>
+                          {it.days_to_safety}일
+                        </span>
+                      ) : "—"}
+                    </td>
+                    <td className="px-3 py-2 text-center">
+                      {it.ship_by_date ? (
+                        <span className={it.status === "reorder_now" ? "text-red-600 font-semibold" : "text-gray-700"}>
+                          {it.ship_by_date}
+                        </span>
+                      ) : "—"}
+                    </td>
+                    <td className="px-3 py-2 text-right font-medium">
+                      {it.recommend_qty != null && it.recommend_qty > 0
+                        ? `${it.recommend_qty.toLocaleString("ko-KR")}개`
+                        : "—"}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          <div className="px-4 py-2 border-t border-gray-100 flex items-center justify-between text-xs text-gray-400">
+            <span>{showAll ? `전체 ${plan.items.length}개` : `발송 필요 ${actionItems.length}개 (데이터 부족 ${plan.summary.insufficient_data}개 숨김)`}</span>
+            <button
+              onClick={() => setShowAll((v) => !v)}
+              className="text-blue-500 hover:underline"
+            >
+              {showAll ? "발송 필요만 보기" : "전체 보기"}
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function SummaryCard({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
     <div className="bg-white border border-gray-200 rounded-lg p-4">
@@ -80,6 +218,11 @@ export default function CoupangOps() {
   const [error, setError] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState<string | null>(null);
+
+  // 발송관제 (로켓그로스 탭 전용)
+  const [rgPlan, setRgPlan] = useState<ReplenishmentPlan | null>(null);
+  const [rgLoading, setRgLoading] = useState(false);
+  const [rgError, setRgError] = useState<string | null>(null);
 
   async function syncNow() {
     setSyncing(true);
@@ -112,6 +255,17 @@ export default function CoupangOps() {
   }, []);
 
   useEffect(() => { load(company, days); }, [company, days, load]);
+
+  // 로켓그로스 탭 선택 시 발송관제 플랜 로드
+  useEffect(() => {
+    if (channelFilter !== "로켓그로스") return;
+    setRgLoading(true);
+    setRgError(null);
+    fetchReplenishmentPlan(3)
+      .then(setRgPlan)
+      .catch((e: Error) => setRgError(e.message))
+      .finally(() => setRgLoading(false));
+  }, [channelFilter]);
 
   // 드롭다운 외부 클릭 시 닫기
   useEffect(() => {
@@ -357,6 +511,11 @@ export default function CoupangOps() {
             <div />
           </div>
         </div>
+      )}
+
+      {/* ── RG 발송관제 (로켓그로스 탭 전용) ── */}
+      {channelFilter === "로켓그로스" && (
+        <RgReplenishmentSection plan={rgPlan} loading={rgLoading} error={rgError} />
       )}
 
       {/* ── 상품별 테이블 ── */}
