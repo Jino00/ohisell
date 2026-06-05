@@ -8,7 +8,7 @@ import hmac
 import logging
 import os
 import time
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from urllib.parse import urlparse, parse_qs
 
@@ -69,13 +69,18 @@ def list_ad_reports(date_from: date, date_to: date) -> list[dict]:
     for rep in all_reports:
         if rep.get("reportTp") != "AD" or rep.get("status") != "BUILT":
             continue
-        stat_dt = rep.get("statDt", "")[:10]  # YYYY-MM-DD
+        # statDt는 UTC: "2026-06-03T15:00:00Z" = KST 2026-06-04 00:00
+        # T15:00 이상이면 KST 날짜는 UTC날짜 +1일
+        stat_dt_raw = rep.get("statDt", "")
+        stat_dt_utc = stat_dt_raw[:10]
         try:
-            d = date.fromisoformat(stat_dt)
+            d_utc = date.fromisoformat(stat_dt_utc)
         except ValueError:
             continue
-        if date_from <= d <= date_to:
-            result.append({"date": stat_dt, "downloadUrl": rep["downloadUrl"], "reportJobId": rep["reportJobId"]})
+        time_part = stat_dt_raw[11:16] if len(stat_dt_raw) > 10 else "00:00"
+        d_kst = d_utc + timedelta(days=1) if time_part >= "15:00" else d_utc
+        if date_from <= d_kst <= date_to:
+            result.append({"date": d_kst.isoformat(), "downloadUrl": rep["downloadUrl"], "reportJobId": rep["reportJobId"]})
 
     return result
 
@@ -161,13 +166,16 @@ def _list_reports_by_type(report_tp: str, date_from: date, date_to: date) -> lis
     for rep in resp.json():
         if rep.get("reportTp") != report_tp or rep.get("status") != "BUILT":
             continue
-        stat_dt = rep.get("statDt", "")[:10]
+        stat_dt_raw = rep.get("statDt", "")
+        stat_dt_utc = stat_dt_raw[:10]
         try:
-            d = date.fromisoformat(stat_dt)
+            d_utc = date.fromisoformat(stat_dt_utc)
         except ValueError:
             continue
-        if date_from <= d <= date_to:
-            result.append({"date": stat_dt, "downloadUrl": rep["downloadUrl"]})
+        time_part = stat_dt_raw[11:16] if len(stat_dt_raw) > 10 else "00:00"
+        d_kst = d_utc + timedelta(days=1) if time_part >= "15:00" else d_utc
+        if date_from <= d_kst <= date_to:
+            result.append({"date": d_kst.isoformat(), "downloadUrl": rep["downloadUrl"]})
     return result
 
 
