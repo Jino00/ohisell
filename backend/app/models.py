@@ -618,6 +618,29 @@ class CoupangRgInbound(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+# ──────────────────────────────────────────────
+# 쿠팡 광고비 일별 (advertising.coupang.com Wing 내부 API)
+# ──────────────────────────────────────────────
+class CoupangAdCostDaily(Base):
+    """advertising.coupang.com /marketing/cmg-api/report/cost 응답 — 일별 광고비.
+
+    day_cost: 해당 날짜의 광고비(원). month_cost: 해당 월 누적(참고용).
+    vendor_id: adNodeId(예: '104438581'). account_key: COUPANG_ADS1 등.
+    """
+
+    __tablename__ = "coupang_ad_cost_daily"
+    __table_args__ = (
+        UniqueConstraint("cost_date", "vendor_id", name="uq_coupang_ad_cost_daily"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    cost_date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)
+    vendor_id: Mapped[str] = mapped_column(String(30), nullable=False)
+    day_cost: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    month_cost: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 class CoupangWingCookie(Base):
     """Wing 내부 API 세션쿠키 시크릿 — 계정별 (트랙 D-5, S1-b).
 

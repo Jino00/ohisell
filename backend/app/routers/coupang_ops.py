@@ -22,7 +22,7 @@ from app.database import get_db
 from app.models import Channel, CoupangAdOptionDaily, CoupangProductItem, CoupangRevenueFee, CoupangRgInbound, CoupangRgOrderItem, Order, ProductChannelMapping, ProductMaster
 from app.routers._coupang_write_http import handle_write as _handle_write
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
-from app.services.coupang import coupon_write, lead_time_estimator, product_write, rg_inbound_sync, rg_replenishment, sales_velocity_estimator
+from app.services.coupang import ad_cost_sync, coupon_write, lead_time_estimator, product_write, rg_inbound_sync, rg_replenishment, sales_velocity_estimator
 from app.utils.crypto import CookieCryptoError
 
 log = logging.getLogger(__name__)
@@ -928,3 +928,40 @@ def get_replenishment_plan(
     속도·리드타임을 각 1회 산출해 옵션별 calc에 주입(원칙 18-8). 단순 조회가 아니라 3개 SA를
     가로지르는 오케스트레이션이므로 rg_replenishment Harness를 경유한다(원칙 18-7)."""
     return rg_replenishment.build_replenishment_plan(db, account_key, target_days=target_days)
+
+
+# ════════════════════════════════════════════════
+# 쿠팡 광고비 — advertising.coupang.com Wing 내부 API (S0 실증 2026-06-05)
+# ════════════════════════════════════════════════
+@router.post("/ad-cost/cookie")
+def save_ad_cookie(
+    body: dict[str, Any] = Body(...), db: Session = Depends(get_db)
+):
+    """advertising.coupang.com 세션쿠키 저장 — body {curl}. cURL 통째 붙여넣기 → 쿠키 추출·Fernet 암호화."""
+    curl = body.get("curl") or body.get("cookie") or ""
+    try:
+        return ad_cost_sync.save_cookie(db, curl)
+    except (ValueError, CookieCryptoError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/ad-cost/cookie/status")
+def ad_cookie_status(db: Session = Depends(get_db)):
+    """광고 쿠키 설정·상태(🟢green/🔴red/unknown/none)."""
+    return ad_cost_sync.cookie_status(db)
+
+
+@router.post("/ad-cost/sync")
+def trigger_ad_cost_sync(db: Session = Depends(get_db)):
+    """광고비 즉시 sync (수동 트리거)."""
+    return ad_cost_sync.sync_ad_cost(db)
+
+
+@router.get("/ad-cost")
+def get_ad_cost(
+    db: Session = Depends(get_db),
+    start: date = Query(..., description="시작일 YYYY-MM-DD"),
+    end: date = Query(..., description="종료일 YYYY-MM-DD"),
+):
+    """날짜 범위 광고비 조회 (일별 합산)."""
+    return {"costs": ad_cost_sync.get_ad_cost_range(db, start, end)}

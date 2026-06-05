@@ -398,6 +398,23 @@ def sync_coupang_rg_inbound_job():
         db.close()
 
 
+def sync_coupang_ad_cost_job():
+    """쿠팡 광고비 자동 동기화 (자정 00:10 KST) — advertising.coupang.com Wing 내부 API.
+
+    쿠키 만료·미설정은 fail-soft(status red 표시). 예상치 못한 예외만 raise."""
+    db = _get_own_db_session()
+    try:
+        from app.services.coupang.ad_cost_sync import sync_ad_cost
+
+        result = sync_ad_cost(db)
+        log.info("[스케줄러] 쿠팡 광고비 동기화 결과: %s", result)
+    except Exception as e:
+        log.exception("[스케줄러] sync_coupang_ad_cost_job 에러: %s", e)
+        raise
+    finally:
+        db.close()
+
+
 def sync_coupang_coupons_job():
     """쿠팡 쿠폰 운영 현황 자동 동기화 (06:00 KST) — 즉시할인쿠폰+예산/계약(P5). 트랙 D-8: 서버 IP에서만."""
     db = _get_own_db_session()
@@ -588,6 +605,7 @@ def _ensure_default_states(db):
         ("sync_coupang_rg_orders", "0 */2 * * *"),
         ("sync_coupang_coupons", "0 6 * * *"),
         ("sync_coupang_cs", "5 6 * * *"),
+        ("sync_coupang_ad_cost", "10 0 * * *"),
     ]
     for name, cron in defaults:
         existing = db.query(SchedulerState).filter(
@@ -642,6 +660,8 @@ def start_scheduler():
                 job_func = sync_coupang_coupons_job
             elif state.job_name == "sync_coupang_cs":
                 job_func = sync_coupang_cs_job
+            elif state.job_name == "sync_coupang_ad_cost":
+                job_func = sync_coupang_ad_cost_job
 
             if job_func:
                 try:
