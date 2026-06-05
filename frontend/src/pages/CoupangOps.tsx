@@ -239,6 +239,11 @@ export default function CoupangOps() {
     return r.json();
   }
 
+  async function triggerAdCostSync() {
+    const r = await fetch(`${API_BASE}/api/coupang/ops/ad-cost/sync`, { method: "POST" });
+    return r.json(); // fail-soft: 오류여도 조용히 무시
+  }
+
   async function loadAdCookieStatus() {
     try {
       const r = await fetch(`${API_BASE}/api/coupang/ops/ad-cost/cookie/status`);
@@ -291,9 +296,10 @@ export default function CoupangOps() {
     setSyncing(true);
     setSyncMsg(null);
     try {
-      await triggerSync();
+      await Promise.all([triggerSync(), triggerAdCostSync().catch(() => {})]);
       setSyncMsg("동기화 완료");
-      await load(company, days);  // sync 완료 즉시 재조회
+      await load(company, days);
+      await loadAdCookieStatus();
     } catch (e: any) {
       setSyncMsg("동기화 실패: " + e.message);
     } finally {
@@ -319,10 +325,9 @@ export default function CoupangOps() {
     let cancelled = false;
     setSyncing(true);
     (async () => {
-      try { await triggerSync(); } catch { /* sync 실패해도 기존 데이터 표시 */ }
-      if (!cancelled) { setSyncing(false); load(company, days); }
+      try { await Promise.all([triggerSync(), triggerAdCostSync().catch(() => {})]); } catch { /* sync 실패해도 기존 데이터 표시 */ }
+      if (!cancelled) { setSyncing(false); load(company, days); loadAdCookieStatus(); }
     })();
-    loadAdCookieStatus();
     return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);  // 마운트 1회만
