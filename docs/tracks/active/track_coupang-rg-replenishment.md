@@ -40,8 +40,8 @@ UI: 상품별 현황(로켓그로스 탭) 컬럼 추가 — `현재고 | 최근 
 - [x] S2. lead_time_estimator SA — **완료 + prod 라이브 검증 성공(2026-06-05)**. 옵션별 리드타임 분포 + 글로벌 폴백. 아래 S2 결과 참조.
 - [x] S3. sales_velocity_estimator SA (평일/주말/휴일) — **완료 + codex pass + prod 라이브 검증 성공(2026-06-05)**. 아래 S3 결과 참조.
 - [x] S4. replenishment_calc SA — **완료 + codex pass(1라운드 수정) + prod 라이브검증(DB사본) 성공(2026-06-05)**. 아래 S4 결과 참조.
-- [ ] S5. rg_replenishment Harness 조합
-- [ ] S6. UI 컬럼(로켓그로스 탭) + 엔드포인트
+- [x] S5. rg_replenishment Harness 조합 — **완료 + codex pass(0블로킹) + prod 라이브 엔드포인트 검증 성공(2026-06-05)**. 아래 S5 결과 참조.
+- [ ] S6. UI 컬럼(로켓그로스 탭) + 프론트(엔드포인트는 S5에서 완료)
 - [ ] S7. 요일/휴일 세분화 점진 개선 (지속)
 
 ## S0 실증 결과 (2026-06-05) — 성공
@@ -102,15 +102,26 @@ UI: 상품별 현황(로켓그로스 탭) 컬럼 추가 — `현재고 | 최근 
 - **라이브 검증(prod DB사본)**: 재고 784행 → insufficient 773(판매신호 전무, 결정① 정직 보류) / ok 5 / reorder_now 4 / well_stocked 2. trust_days=1이라 confidence 전부 low(결정②). 수동 검산 일치(예: 옵션 95521944483 재고0·sold30 19→base0.633·safety0.5·즉시발송·qty5 / 95521944481 재고12→qty2 rounding까지 대조). B1/B2 수정 후 분포 동일·safety>0 케이스 d2safe<d2zero 정상.
 - **self-verify**: 합성입력 단위검증(안전재고·forward투영·발송일·수량·status전이·confidence) + codex 지적 엣지(safety=0, day-120 교차, factors 누락) 전부 통과.
 
+## S5 결과 (2026-06-05) — 완료 + codex pass(0블로킹) + prod 라이브 엔드포인트 검증 성공
+- **신규 파일**: `app/services/coupang/rg_replenishment.py`(Harness — 정보유통 허브, 원칙18-6, 읽기전용·새 테이블 없음).
+- **수정 파일**: `routers/coupang_ops.py`(import rg_replenishment + `GET /api/coupang/ops/replenishment-plan?account_key=&target_days=` 엔드포인트 — Harness 경유, 원칙18-7. 3 SA 가로지르는 오케스트레이션이라 조회예외 아님).
+- **배치 역산(원칙18-8)**: `estimate_sales_velocities`·`estimate_lead_times`·`_load_inventory`를 **각 1회** 산출 → 옵션별 `calc_replenishment(current_stock=, velocity=, lead_time= 주입)`. 셋 다 주입 시 calc는 DB 미접근(_UNSET 분기 스킵) → N×전체스캔 제거. 모집단=rg_inventory 보유 옵션(orderable_qty NULL은 None 주입).
+- **★등가성 계약(이 Harness의 핵심)**: 배치 주입 결과 = calc_replenishment 미주입(_UNSET, 단일 SA 직접 호출) 결과와 **정확히 동일**. 단일↔배치 SA 출력 형태 차이 2곳을 어댑터가 메움:
+  - `_velocity_for`: 배치 `options[vii]`엔 `segment_factors`·`trust_days`가 없음(단일 함수는 반환 직전 붙임). 안 붙이면 calc `_confidence`가 강제 low로 오판 → 글로벌 factors 병합. `base_source=='none'`이면 None(단일과 동일 규칙).
+  - `_lead_for`: 입고 표본 0개 옵션은 배치 `options`에 부재 → 단일 함수의 글로벌 폴백(`source='global'`)을 Harness가 재현(글로벌도 없으면 None).
+- **codex review**: **No blocking issues**(2차 없이 1차 pass). 5개 등가성 지점 독립 검증 확인(velocity/lead 어댑터, orderable_qty=None 등가, vendor_item_id unique로 dict collapse 없음, account_key 필터 일관성). nit 3건 — ①등가성 회귀 테스트 부재(부분수용: 프로젝트가 committed 테스트 없는 라이브 self-verify 컨벤션·784/784 라이브 대조로 계약 확인, pytest 인프라는 S5 범위밖→후속 후보) ②`_sort_key` int-only(수용·하드닝: (int,float) 허용·bool 배제) ③`_summarize` 미지status 누락(유지: status 닫힌집합 4종).
+- **self-verify(prod DB사본 784행)**: build_replenishment_plan items 784건을 옵션별 `calc_replenishment(_UNSET)`와 전수 대조 → **불일치 0건(배치==단일)**. status 정렬 단조 확인.
+- **라이브 검증(prod GET /replenishment-plan)**: HTTP 200, 784건. summary={reorder_now 4·ok 5·well_stocked 2·insufficient_data 773·low_confidence 11}(S4 DB사본 분포와 일치). lead_global p90=2.88, sort monotonic=True. S4 샘플 옵션 95521944483(stock0·base0.633·qty5) 라이브 재현. ★실 프로덕션 HTTP 경로 증거(원칙22, DB사본 아님).
+
 ## 확정 결정사항 추가 (D-7)
 - **D-7 (S4 발송 역산 정책 — 확정 2026-06-05)**: ① 일판매속도·리드타임·현재고 중 하나라도 없으면 권장 보류(insufficient_data, Jino 수동). ② sold_30d/order_item_low 기반이거나 요일계수 collecting·글로벌리드 폴백이면 추천하되 confidence=low로 투명 표기. ③ 발송수량 목표는 D-2 "2~3일치"의 **상한 3일**(과소발송보다 품절 회피, 보관료는 3일이면 짧음). 안전재고는 (p90−mean)×일판매로 리드 변동성만 흡수(D-2 "최소"). Jino 원문: "그래"(①②③ 일괄 승인).
 
 ## 현재 진행 단계
-- 2026-06-05: **S4 완료 + codex pass + prod 라이브검증(DB사본) 성공**(요일 인지 forward 투영, insufficient/ok/reorder_now/well_stocked 4-status, 현재 데이터 희소로 대부분 insufficient·전부 low). 다음 = S5 rg_replenishment Harness. 진행 4/7.
+- 2026-06-05: **S5 완료 + codex pass(0블로킹) + prod 라이브 엔드포인트 검증 성공**. rg_replenishment Harness가 3 SA를 배치로 1회씩 산출·옵션별 주입(등가성 784/784 라이브 대조 PASS). `GET /replenishment-plan` 라이브. 진행 5/7. 다음 = S6 UI 컬럼(로켓그로스 탭) + 프론트.
 
-## 다음 액션 (S5)
-- **S5 rg_replenishment Harness**: SA들(rg_inbound_sync·rg_inventory_sync·rg_order_sync·lead_time_estimator·sales_velocity_estimator·replenishment_calc)을 묶는 정보유통 허브(원칙18-6). ★배치 역산: `estimate_sales_velocities`·`estimate_lead_times`를 각 1회 산출 → 옵션별 `calc_replenishment(..., velocity=, lead_time=, current_stock=)` 주입(N×전체스캔 방지, 원칙18-8). 데이터 없는 옵션은 velocity=None/lead=None 명시 주입(_UNSET 아님)으로 재계산 없이 insufficient 처리. 모집단=현재고(rg_inventory) 보유 옵션. → 새 Harness라 Opus 권장.
-- 이후 S6 UI 컬럼(로켓그로스 탭: 현재고|일판매|리드타임|며칠치|권장발송일·수량) + 엔드포인트(Harness 경유), S7 요일/휴일 세분화 지속 개선.
-- 그 다음 S5 Harness 조합(원칙18-6 정보유통 허브) / S6 UI 컬럼(로켓그로스 탭) + 엔드포인트 / S7 요일·휴일 세분화 지속.
-- 참고: 쿠키 만료 주기 측정 중(last_success 06-05 10:59~). 일일 sync 302 발생 시점 = 만료. D-5대로 잦으면 자동화 검토.
-- ★코드 커밋 완료: S2=b8b6fa5, S3=0dd51f7(feat). 문서는 docs 커밋. prod엔 scp+restart로 라이브 반영.
+## 다음 액션 (S6)
+- **S6 UI 컬럼**: 로켓그로스 탭에 `현재고 | 최근 일판매 | 리드타임(추정) | 며칠치 남음 | 권장 발송일·수량` 컬럼 추가. 데이터원 = `GET /api/coupang/ops/replenishment-plan`(S5 완료, Harness 경유). status별 시각 구분(reorder_now🔴·ok·well_stocked·insufficient_data 회색), confidence=low 표기. 정렬 기본 = 긴급도(이미 백엔드 sort). → 프론트 작업이라 Sonnet 가능(설계 확정됨).
+- 이후 S7 요일/휴일 세분화 지속 개선(D-6 — 데이터 더 쌓인 후 옵션별 요일 구분 자동 승격).
+- 참고: 쿠키 만료 주기 측정 중. 일일 sync 302 발생 시점 = 만료. D-5대로 잦으면 자동화 검토.
+- ★코드 커밋: S2=b8b6fa5, S3=0dd51f7, S4=0a3b496(feat). S5는 곧 feat 커밋(rg_replenishment.py + 라우터). prod엔 scp+restart로 라이브 반영 완료.
+- 참고(후속 후보): S5 등가성 계약 committed 회귀 테스트(codex nit, 현재는 라이브 self-verify로 대체). pytest 인프라 도입 시 함께.
