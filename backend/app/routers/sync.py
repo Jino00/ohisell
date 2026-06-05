@@ -199,11 +199,17 @@ def sync_realtime(db: Session = Depends(get_db)):
     results: dict = {}
 
     def _sync_one_channel(ch_id: int) -> tuple[int, int]:
-        """단일 채널 주문 sync — 채널별 독립 세션(스레드 안전). (new_or_updated, error수) 반환."""
+        """단일 채널 주문 sync — 채널별 독립 세션(스레드 안전). (new_or_updated, error수) 반환.
+
+        sync_channel_orders는 dict 반환(속성 아님). status!=success는 채널 에러로 집계.
+        """
         _db = SessionLocal()
         try:
             r = sync_channel_orders(_db, ch_id, None, None)
-            return r.new_orders + r.updated_orders, 0
+            if r.get("status") == "success":
+                return r.get("new_orders", 0) + r.get("updated_orders", 0), 0
+            log.warning("realtime: 주문 sync 비성공 ch=%s: %s", ch_id, r.get("errors"))
+            return 0, 1
         except Exception as e:
             log.warning("realtime: 주문 sync 실패 ch=%s: %s", ch_id, e)
             return 0, 1
