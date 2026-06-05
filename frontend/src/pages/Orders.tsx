@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   fetchApi,
+  syncRealtime,
   type Channel,
   type OrderItem,
   type OrderListResponse,
@@ -112,6 +113,8 @@ export default function Orders() {
   useEffect(() => {
     fetchApi<Channel[]>("/api/channels").then(setChannels).catch(() => {});
     fetchApi<SyncStatus[]>("/api/sync/status").then(setSyncStatuses).catch(() => {});
+    // 마운트 시 실시간 동기화 (fail-soft)
+    syncRealtime().catch(() => {});
   }, []);
 
   useEffect(() => {

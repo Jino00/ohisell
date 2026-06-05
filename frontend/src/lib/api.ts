@@ -13,6 +13,10 @@ export async function fetchApi<T>(path: string, options?: RequestInit): Promise<
   return res.json();
 }
 
+export function syncRealtime(): Promise<Record<string, unknown>> {
+  return fetchApi("/api/sync/realtime", { method: "POST" });
+}
+
 export async function uploadFile(path: string, file: File) {
   const form = new FormData();
   form.append("file", file);

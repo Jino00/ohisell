@@ -20,6 +20,7 @@ import {
   type NaverProductList, type NaverSellerInfo,
   type NaverPendingOrders, type NaverPendingOrder, type NaverWriteResult,
   type NaverDispatchItem, type NaverClaims,
+  syncRealtime,
 } from "../lib/api";
 
 // N8 판매상태 유효 전이 (API센터 실측 — 현재상태별 변경 가능 목표). 무효 전이는 네이버 400.
@@ -662,7 +663,8 @@ export default function NaverOps() {
     );
   }
 
-  useEffect(() => { load(); }, [load]);
+  // 마운트 시 실시간 동기화 후 데이터 로드 (fail-soft)
+  useEffect(() => { syncRealtime().catch(() => {}).then(() => load()); }, []);
   useEffect(() => { loadGfa(); }, [loadGfa]);
   useEffect(() => { loadSettlement(); }, [loadSettlement]);
   useEffect(() => { loadInquiries(inquiryDays); }, [loadInquiries, inquiryDays]);

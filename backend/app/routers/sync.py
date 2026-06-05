@@ -3,9 +3,14 @@ from __future__ import annotations
 
 from datetime import date
 
+import concurrent.futures
+import logging
+
 from fastapi import APIRouter, Depends
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
+
+log = logging.getLogger(__name__)
 
 from app.database import get_db
 from app.models import Channel, SyncLog
@@ -180,6 +185,135 @@ def sync_coupang_cs(db: Session = Depends(get_db)):
     from app.services.coupang.cs_sync import sync_all_cs
 
     return sync_all_cs(db)
+
+
+@router.post("/realtime")
+def sync_realtime(db: Session = Depends(get_db)):
+    """접속/새로고침 시 호출 — 모든 실시간 데이터를 병렬로 동기화.
+
+    포함: 전체 채널 주문 · 쿠팡 광고비 · 네이버 SA 광고비 · Meta 광고비
+    각 항목은 독립적으로 fail-soft(오류 발생 시 해당 항목만 error 표시, 나머지 계속).
+    """
+    from app.database import SessionLocal
+
+    results: dict = {}
+
+    def _run_orders():
+        _db = SessionLocal()
+        try:
+            channels = _db.query(Channel).filter(Channel.api_type != "excel").all()
+            ok, err = 0, 0
+            for ch in channels:
+                try:
+                    r = sync_channel_orders(_db, ch.id, None, None)
+                    ok += r.new_orders + r.updated_orders
+                except Exception as e:
+                    log.warning("realtime: 주문 sync 실패 ch=%s: %s", ch.id, e)
+                    err += 1
+            return {"new_or_updated": ok, "channel_errors": err}
+        finally:
+            _db.close()
+
+    def _run_coupang_ad():
+        _db = SessionLocal()
+        try:
+            from app.services.coupang.ad_cost_sync import sync_ad_cost
+            return sync_ad_cost(_db)
+        except Exception as e:
+            log.warning("realtime: 쿠팡 광고비 sync 실패: %s", e)
+            return {"error": str(e)}
+        finally:
+            _db.close()
+
+    def _run_naver_sa():
+        _db = SessionLocal()
+        try:
+            from datetime import timedelta
+            from decimal import Decimal
+            from sqlalchemy import text
+            from app.utils.kst import kst_today
+            from app.routers.ad_costs import _extract_naver_sa_keyword, _upsert_ad_cost, _upsert_ad_revenue, NAVER_SA_CONV_SOURCE
+            from app.services.naver_sa_ad_fetcher import fetch_campaign_daily_spend, fetch_daily_conversion_revenue
+
+            yesterday = kst_today() - timedelta(days=1)
+            naver_row = _db.execute(text("SELECT id FROM channels WHERE code='NAVER' LIMIT 1")).fetchone()
+            if not naver_row:
+                return {"error": "NAVER 채널 없음"}
+            naver_id = naver_row[0]
+
+            campaigns = fetch_campaign_daily_spend(yesterday, yesterday)
+            agg: dict = {}
+            for c in campaigns:
+                kw = _extract_naver_sa_keyword(c["campaign_name"])
+                key = (c["date"], f"naver_sa:{kw}")
+                agg[key] = agg.get(key, Decimal("0")) + c["spend"]
+
+            for (dt_str, source), spend in agg.items():
+                from datetime import date as date_cls
+                _upsert_ad_cost(_db, naver_id, date_cls.fromisoformat(dt_str), spend, source)
+
+            try:
+                conv_daily = fetch_daily_conversion_revenue(yesterday, yesterday)
+                for dt_str, rev in conv_daily.items():
+                    from datetime import date as date_cls
+                    _upsert_ad_revenue(_db, naver_id, date_cls.fromisoformat(dt_str), rev, NAVER_SA_CONV_SOURCE)
+            except Exception as ce:
+                log.warning("realtime: Naver SA 전환매출 실패: %s", ce)
+
+            _db.commit()
+            return {"date": str(yesterday), "inserted": len(agg), "total_spend": int(sum(agg.values()))}
+        except Exception as e:
+            log.warning("realtime: 네이버 SA sync 실패: %s", e)
+            return {"error": str(e)}
+        finally:
+            _db.close()
+
+    def _run_meta():
+        _db = SessionLocal()
+        try:
+            from datetime import timedelta
+            from decimal import Decimal
+            from sqlalchemy import text
+            from app.utils.kst import kst_today
+            from app.routers.ad_costs import _extract_meta_keyword, _upsert_ad_cost
+            from app.services.meta_ad_fetcher import fetch_campaign_daily_spend
+
+            yesterday = kst_today() - timedelta(days=1)
+            cafe24_row = _db.execute(text("SELECT id FROM channels WHERE code='CAFE24' LIMIT 1")).fetchone()
+            if not cafe24_row:
+                return {"skipped": "CAFE24 채널 없음"}
+            cafe24_id = cafe24_row[0]
+
+            campaigns = fetch_campaign_daily_spend(yesterday, yesterday)
+            agg: dict = {}
+            for c in campaigns:
+                kw = _extract_meta_keyword(c["campaign_name"])
+                key = (c["date"], f"meta:{kw}")
+                agg[key] = agg.get(key, Decimal("0")) + c["spend"]
+
+            for (dt_str, source), spend in agg.items():
+                from datetime import date as date_cls
+                _upsert_ad_cost(_db, cafe24_id, date_cls.fromisoformat(dt_str), spend, source)
+            _db.commit()
+            return {"date": str(yesterday), "inserted": len(agg), "total_spend": int(sum(agg.values()))}
+        except Exception as e:
+            log.warning("realtime: Meta sync 실패: %s", e)
+            return {"error": str(e)}
+        finally:
+            _db.close()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
+        f_orders = ex.submit(_run_orders)
+        f_coupang_ad = ex.submit(_run_coupang_ad)
+        f_naver_sa = ex.submit(_run_naver_sa)
+        f_meta = ex.submit(_run_meta)
+        results["orders"] = f_orders.result()
+        results["coupang_ad"] = f_coupang_ad.result()
+        results["naver_sa"] = f_naver_sa.result()
+        results["meta"] = f_meta.result()
+
+    log.info("realtime sync 완료: %s", results)
+    return results
 
 
 @router.get("/status", response_model=list[SyncStatusOut])

@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import {
   fetchCommandCenter,
+  syncRealtime,
   type OverviewResponse,
 } from "../lib/api";
 
@@ -50,6 +51,7 @@ export default function CommandCenter() {
   const [data, setData] = useState<OverviewResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [syncing, setSyncing] = useState(false);
 
   async function load() {
     setLoading(true);
@@ -62,8 +64,16 @@ export default function CommandCenter() {
       setLoading(false);
     }
   }
-  useEffect(() => {
+
+  async function syncAndLoad() {
+    setSyncing(true);
+    try { await syncRealtime(); } catch { /* fail-soft */ }
+    setSyncing(false);
     load();
+  }
+
+  useEffect(() => {
+    syncAndLoad();
   }, []);
 
   function applyQuick(days: number) {
@@ -80,11 +90,21 @@ export default function CommandCenter() {
 
   return (
     <div>
-      <div className="mb-4">
-        <h1 className="text-2xl font-bold text-gray-900">🎯 종합 조망</h1>
-        <p className="text-sm text-gray-500">
-          쿠팡 옵션ID 결합 — 회계·광고·상품 한눈에 (사실/지표만, 해석은 직접)
-        </p>
+      <div className="mb-4 flex items-start justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">🎯 종합 조망</h1>
+          <p className="text-sm text-gray-500">
+            쿠팡 옵션ID 결합 — 회계·광고·상품 한눈에 (사실/지표만, 해석은 직접)
+          </p>
+        </div>
+        <button
+          onClick={syncAndLoad}
+          disabled={syncing}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+        >
+          <span className={syncing ? "animate-spin" : ""}>🔄</span>
+          {syncing ? "동기화 중…" : "새로고침"}
+        </button>
       </div>
 
       {/* 기간 선택 */}

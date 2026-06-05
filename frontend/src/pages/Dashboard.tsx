@@ -18,6 +18,7 @@ import {
 } from "recharts";
 import {
   fetchApi,
+  syncRealtime,
   type KpiData,
   type TrendItem,
   type GroupedSummaryRow,
@@ -278,6 +279,7 @@ export default function Dashboard() {
   const [products, setProducts] = useState<ProductRanking[]>([]);
   const [sortBy, setSortBy] = useState<SortBy>("revenue");
   const [loading, setLoading] = useState(true);
+  const [syncing, setSyncing] = useState(false);
 
   const fetchAll = useCallback(async () => {
     setLoading(true);
@@ -301,6 +303,17 @@ export default function Dashboard() {
       setLoading(false);
     }
   }, [dateFrom, dateTo, period, sortBy]);
+
+  const syncAndRefresh = useCallback(async () => {
+    setSyncing(true);
+    try { await syncRealtime(); } catch { /* fail-soft */ }
+    setSyncing(false);
+    fetchAll();
+  }, [fetchAll]);
+
+  // 접속/마운트 시 1회 실시간 동기화 후 데이터 로드
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { syncAndRefresh(); }, []);
 
   useEffect(() => {
     const timer = setTimeout(fetchAll, 300);
@@ -332,7 +345,17 @@ export default function Dashboard() {
   return (
     <div className="max-w-7xl mx-auto">
       {/* Header */}
-      <h2 className="text-2xl font-bold text-gray-900 mb-6">대시보드</h2>
+      <div className="flex items-center justify-between mb-6">
+        <h2 className="text-2xl font-bold text-gray-900">대시보드</h2>
+        <button
+          onClick={syncAndRefresh}
+          disabled={syncing}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+        >
+          <span className={syncing ? "animate-spin" : ""}>🔄</span>
+          {syncing ? "동기화 중…" : "새로고침"}
+        </button>
+      </div>
 
       {/* KPI Cards */}
       {loading && !kpi ? (

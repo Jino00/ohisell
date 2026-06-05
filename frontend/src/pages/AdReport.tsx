@@ -2,6 +2,7 @@
 import { useState, useEffect } from "react";
 import {
   fetchCoupangAdReport,
+  syncRealtime,
   type CoupangAdReportRow,
   type CoupangAdReportResponse,
 } from "../lib/api";
@@ -48,6 +49,8 @@ export default function AdReport() {
   const [report, setReport] = useState<CoupangAdReportResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [syncing, setSyncing] = useState(false);
+
   async function load() {
     setLoading(true);
     setError(null);
@@ -61,7 +64,14 @@ export default function AdReport() {
     }
   }
 
-  useEffect(() => { load(); }, []);
+  async function syncAndLoad() {
+    setSyncing(true);
+    try { await syncRealtime(); } catch { /* fail-soft */ }
+    setSyncing(false);
+    load();
+  }
+
+  useEffect(() => { syncAndLoad(); }, []);
 
   function ReportRow({ row, isTotal }: { row: CoupangAdReportRow; isTotal?: boolean }) {
     return (
@@ -88,7 +98,17 @@ export default function AdReport() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-bold text-gray-900">쿠팡 광고 리포트</h1>
-        <p className="text-xs text-gray-400">설정 페이지에서 XLSX 업로드 시 자동 저장됩니다.</p>
+        <div className="flex items-center gap-3">
+          <p className="text-xs text-gray-400">설정 페이지에서 XLSX 업로드 시 자동 저장됩니다.</p>
+          <button
+            onClick={syncAndLoad}
+            disabled={syncing}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+          >
+            <span className={syncing ? "animate-spin" : ""}>🔄</span>
+            {syncing ? "동기화 중…" : "새로고침"}
+          </button>
+        </div>
       </div>
 
       {/* 기간 필터 */}
