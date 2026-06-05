@@ -34,7 +34,7 @@ UI: 상품별 현황(로켓그로스 탭) 컬럼 추가 — `현재고 | 최근 
 
 ## 체크리스트
 - [x] S0. 세션쿠키 인증 방식 실증 — **성공(2026-06-05)**. 아래 S0 결과 참조.
-- [x] S1. coupang_rg_inbound 테이블 + rg_inbound_sync SA — **코드+codex pass 완료(2026-06-05)**. ⚠️라이브 검증 대기(Jino 쿠키). 아래 S1 결과 참조.
+- [x] S1. coupang_rg_inbound 테이블 + rg_inbound_sync SA — **완료 + prod 라이브 검증 성공(2026-06-05)**. 입고 6건/옵션 47개 적재, 리드타임 1.15~4.5일. 아래 S1 결과 참조.
 - [ ] S2. lead_time_estimator SA
 - [ ] S3. sales_velocity_estimator SA (평일/주말)
 - [ ] S4. replenishment_calc SA
@@ -66,9 +66,16 @@ UI: 상품별 현황(로켓그로스 탭) 컬럼 추가 — `현재고 | 최근 
 - **self-verify(로컬)**: 마이그레이션 적용, import, 암호화 왕복, cURL 파싱, 리드타임 계산, 스키마 방어, fail-soft rollback, 라우터 4개 전부 통과.
 - **codex**: 1차 needs-changes(stale 위장·statusId 문자열·rollback 통계·skuDetails 방어·중복인덱스) → 6건 반영 → **2차 pass**.
 
-## 현재 진행 단계
-- 2026-06-05: **S1 코드 완료 + codex pass**. ⚠️아직 prod 미배포·라이브 미검증(원칙22). 다음 = prod 배포 + Jino 쿠키로 라이브 검증.
+## S1 라이브 검증 결과 (2026-06-05) — 성공
+- prod 배포: cryptography 설치 + `COOKIE_ENC_KEY`(prod 신규키) .env 추가 + `alembic upgrade head`(테이블 2개 생성) + 코드 8파일 scp + pm2 restart. 커밋 `3ede9cd`(main).
+- **inbound_id 실필드명 = `shipmentId`** 확정(예 '1063738045171253249'). content[0] 키엔 id/inboundId 없음 → 방어적 후보키의 `shipmentId`가 안정 포착(fallback 미사용). 코드 수정 불필요.
+- 엔드포인트 라이브: `POST /inbound/cookie` 200 → `POST /inbound/sync` 200 = **입고 6건 / 옵션 47개 적재**(한 shipmentId당 평균 8옵션). 쿠키 status=green, last_success_at 기록(=만료 측정 시작).
+- **리드타임 실측**(발송 statusId3 → 판매개시 statusId7): 1.15·2.18·4.5일 등. shipAt/stowAt/req·recv·stow 수량 전부 실데이터 정상.
+- 스키마 일치: shipmentStatusHistory=dict("_N", statusId 숫자), skuDetails=list, plannedSku.{vendorItemId,skuId,requestedQty,cachedSkuName} + receivedQty/stowedQty. 전부 파싱 코드와 일치.
 
-## 다음 액션 (S1 라이브 검증 → S2)
-- **S1 라이브 검증(즉시)**: ① prod에 cryptography 설치 + `COOKIE_ENC_KEY` 신규키를 prod .env에 추가 ② prod `alembic upgrade head` ③ 코드 scp + pm2 restart ④ Jino가 Wing 입고페이지에서 'Copy as cURL' → `POST /inbound/cookie` 저장 ⑤ `POST /inbound/sync` → 200 + 입고 6건 적재 + **실응답으로 inbound_id 실제 필드명 확정**(필요시 _inbound_id 후보키 보강) + 리드타임 값 검증.
-- **S2 (라이브 검증 후)**: lead_time_estimator SA — coupang_rg_inbound에서 옵션별 발송→판매개시 리드타임 분포(평균·p50·p90, 표본수). 표본 적으니(반년 6건) 전체 평균 폴백 + 표본 누적 개선.
+## 현재 진행 단계
+- 2026-06-05: **S1 완료 + prod 라이브 검증 성공**(입고 6건/47옵션, 리드타임 1.15~4.5일). 다음 = S2 lead_time_estimator.
+
+## 다음 액션 (S2)
+- **S2 lead_time_estimator SA**: coupang_rg_inbound에서 옵션(vendor_item_id)별 발송→판매개시 리드타임 분포 산출(평균·p50·p90·표본수·최근값). 표본 적음(입고 6건) → 옵션 표본 부족 시 전체 평균 폴백. D-2(목표 2~3일치) 안전재고에 리드타임 변동성(1.15~4.5일, 큰 편차) 반영. lead_time_days NULL(미판매개시 입고)은 분포에서 제외.
+- 참고: 쿠키 만료 주기는 이번 last_success_at(2026-06-05 10:59)부터 측정 시작. 다음 일일 sync(05:20) 302 발생 시점 = 만료. D-5대로 잦으면 자동화 검토.
