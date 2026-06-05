@@ -22,7 +22,7 @@ from app.database import get_db
 from app.models import Channel, CoupangAdOptionDaily, CoupangProductItem, CoupangRevenueFee, CoupangRgInbound, CoupangRgOrderItem, Order, ProductChannelMapping, ProductMaster
 from app.routers._coupang_write_http import handle_write as _handle_write
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
-from app.services.coupang import coupon_write, product_write, rg_inbound_sync
+from app.services.coupang import coupon_write, lead_time_estimator, product_write, rg_inbound_sync
 from app.utils.crypto import CookieCryptoError
 
 log = logging.getLogger(__name__)
@@ -883,3 +883,17 @@ def list_inbound(
             for r in rows
         ],
     }
+
+
+# ──────────────────────────────────────────────
+# RG 리드타임 추정 (트랙 RG-Replenishment S2) — 읽기 전용 SA 직접 호출(원칙 18-7 조회 예외)
+# ──────────────────────────────────────────────
+@router.get("/lead-times")
+def get_lead_times(
+    db: Session = Depends(get_db),
+    account_key: str | None = Query(None, description="특정 셀러계정만(미지정=전체)"),
+):
+    """옵션별 발송→판매개시 리드타임 분포 + 글로벌 분포(검증/UI용).
+
+    옵션 표본 부족 시 글로벌 폴백(source 필드로 구분). S4 replenishment_calc가 estimate_lead_time() 사용."""
+    return lead_time_estimator.estimate_lead_times(db, account_key)
