@@ -22,7 +22,7 @@ from app.database import get_db
 from app.models import Channel, CoupangAdOptionDaily, CoupangProductItem, CoupangRevenueFee, CoupangRgInbound, CoupangRgOrderItem, Order, ProductChannelMapping, ProductMaster
 from app.routers._coupang_write_http import handle_write as _handle_write
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
-from app.services.coupang import coupon_write, lead_time_estimator, product_write, rg_inbound_sync
+from app.services.coupang import coupon_write, lead_time_estimator, product_write, rg_inbound_sync, sales_velocity_estimator
 from app.utils.crypto import CookieCryptoError
 
 log = logging.getLogger(__name__)
@@ -897,3 +897,18 @@ def get_lead_times(
 
     옵션 표본 부족 시 글로벌 폴백(source 필드로 구분). S4 replenishment_calc가 estimate_lead_time() 사용."""
     return lead_time_estimator.estimate_lead_times(db, account_key)
+
+
+# ──────────────────────────────────────────────
+# RG 일판매속도 추정 (트랙 RG-Replenishment S3, D-3·D-6) — 읽기 전용 SA 직접 호출(원칙 18-7 조회 예외)
+# ──────────────────────────────────────────────
+@router.get("/sales-velocity")
+def get_sales_velocity(
+    db: Session = Depends(get_db),
+    account_key: str | None = Query(None, description="특정 셀러계정만(미지정=전체)"),
+):
+    """옵션별 일판매속도(평일/주말/휴일 구간) + 글로벌 요일계수(검증/UI용).
+
+    base_rate = order_item(관측일 충분) → sold_30d/30 폴백. 요일계수는 신뢰도 게이트(표본 임계 넘으면
+    자동 승격, 그 전엔 collecting·factor 1.0). S4 replenishment_calc가 estimate_sales_velocity() 사용."""
+    return sales_velocity_estimator.estimate_sales_velocities(db, account_key)
