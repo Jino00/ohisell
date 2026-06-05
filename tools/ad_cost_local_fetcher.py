@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# ⚠️ 폐기(DEPRECATED): curl 재생은 1회용(첫 성공 직후 세션 토큰 회전·무효화 → 로그인 튕김).
+#    실측 후 ad_cost_browser_fetcher.py(Playwright 실제 브라우저)로 대체. 이 파일은 진단 기록용 보존.
 # ad_cost_local_fetcher.py — 쿠팡 광고비를 Jino Mac(residential IP)에서 fetch → prod로 push.
 #
 # 왜 로컬에서?: advertising.coupang.com은 Akamai가 데이터센터(prod) IP를 차단(403).
@@ -147,10 +149,9 @@ def fetch_and_push() -> int:
         log.error("응답 JSON 파싱 실패: %s", e)
         return 1
 
-    # 롤링 갱신: 이번 응답이 회전시킨 쿠키(resp.cookies)만 원본 위에 덮어씀 (codex P1).
-    # get_dict()로 전체 jar를 평탄화하면 도메인 충돌 시 엉뚱한 _abck/bm_sv를 저장할 수 있음.
-    merged = {**cookies, **resp.cookies.get_dict()}
-    write_private(cookie_path, "; ".join(f"{k}={v}" for k, v in merged.items()))
+    # ⚠️ 롤링 회전 비활성(실측): 응답의 새 AWSALB를 저장해 재사용하면 2차 호출이 Keycloak
+    # 로그인으로 튕김(스티키니스 붕괴 추정). 브라우저가 발급한 원본 쿠키(특히 AWSALB)를
+    # 그대로 유지하는 편이 안정적 → 쿠키 파일을 갱신하지 않는다. 만료 시 새 cURL을 import.
 
     # 응답 키 중 설정된 vendor_id만 채택 (메타데이터 키가 가짜 vendor로 새는 것 방지, codex P2).
     wanted = {str(v) for v in cfg["vendor_ids"]}

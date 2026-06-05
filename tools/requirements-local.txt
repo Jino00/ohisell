@@ -1,0 +1,4 @@
+# 로컬(Jino Mac) 광고비 페처 의존성 — prod에는 설치 불필요.
+# 설치:  pip install -r tools/requirements-local.txt  &&  python -m playwright install chromium
+requests>=2.31.0
+playwright>=1.60.0
