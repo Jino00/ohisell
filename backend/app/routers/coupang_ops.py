@@ -22,7 +22,7 @@ from app.database import get_db
 from app.models import Channel, CoupangAdOptionDaily, CoupangProductItem, CoupangRevenueFee, CoupangRgInbound, CoupangRgOrderItem, Order, ProductChannelMapping, ProductMaster
 from app.routers._coupang_write_http import handle_write as _handle_write
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
-from app.services.coupang import coupon_write, lead_time_estimator, product_write, rg_inbound_sync, sales_velocity_estimator
+from app.services.coupang import coupon_write, lead_time_estimator, product_write, rg_inbound_sync, rg_replenishment, sales_velocity_estimator
 from app.utils.crypto import CookieCryptoError
 
 log = logging.getLogger(__name__)
@@ -912,3 +912,19 @@ def get_sales_velocity(
     base_rate = order_item(관측일 충분) → sold_30d/30 폴백. 요일계수는 신뢰도 게이트(표본 임계 넘으면
     자동 승격, 그 전엔 collecting·factor 1.0). S4 replenishment_calc가 estimate_sales_velocity() 사용."""
     return sales_velocity_estimator.estimate_sales_velocities(db, account_key)
+
+
+# ──────────────────────────────────────────────
+# RG 발송관제 계획 (트랙 RG-Replenishment S5) — Harness 경유(원칙 18-7, 3 SA 오케스트레이션)
+# ──────────────────────────────────────────────
+@router.get("/replenishment-plan")
+def get_replenishment_plan(
+    db: Session = Depends(get_db),
+    account_key: str | None = Query(None, description="특정 셀러계정만(미지정=전체)"),
+    target_days: int = Query(3, ge=1, le=14, description="FC 목표 보관 일수(D-2: 2~3일치, 기본 3)"),
+):
+    """현재고 보유 옵션 전체의 권장 발송일·수량(배치 역산) + status별 집계.
+
+    속도·리드타임을 각 1회 산출해 옵션별 calc에 주입(원칙 18-8). 단순 조회가 아니라 3개 SA를
+    가로지르는 오케스트레이션이므로 rg_replenishment Harness를 경유한다(원칙 18-7)."""
+    return rg_replenishment.build_replenishment_plan(db, account_key, target_days=target_days)
