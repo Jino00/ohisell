@@ -20,6 +20,9 @@ log = logging.getLogger(__name__)
 
 _KST = ZoneInfo("Asia/Seoul")
 _ADS_ACCOUNT = "COUPANG_ADS1"
+# 로컬 페처가 이 시간(h) 이상 push 안 하면 stale → 전역 배너 경고.
+# Mac 야간 off(최대 ~12h) 오탐 방지 위해 26h(하루 초과)로 설정.
+_STALE_HOURS = 26
 _ADS_URL = "https://advertising.coupang.com/marketing/cmg-api/report/cost"
 # S0 실증 vendor IDs — 응답 키로 자동 수집하므로 하드코딩 불필요.
 # 단, Payload에 넣을 parentNodes는 저장된 vendor_ids 사용.
@@ -63,11 +66,23 @@ def save_cookie(db: Session, curl_or_cookie: str) -> dict:
 
 
 def cookie_status(db: Session) -> dict:
-    """쿠키 설정·상태 요약 (민감값 미포함)."""
+    """쿠키 설정·상태 요약 (민감값 미포함).
+
+    로컬 페처 아키텍처(Akamai로 prod 직접 fetch 불가): 광고비는 Jino Mac 로컬 페처가
+    ingest로 push. last_success_at = 마지막 push 시각. stale=push가 _STALE_HOURS 초과로
+    끊김(페처 다운) → 전역 배너. age_hours/stale은 배너 트리거에 사용.
+    """
     row = _cookie_row(db)
     if row is None:
         return {"account": _ADS_ACCOUNT, "configured": False, "status": "none",
-                "last_saved_at": None, "last_success_at": None, "last_error": None}
+                "last_saved_at": None, "last_success_at": None, "last_error": None,
+                "age_hours": None, "stale": False}
+    age_hours = None
+    stale = False
+    if row.last_success_at:
+        # kst_now()·last_success_at 모두 naive KST(utils/kst.py). 시계 스큐 음수만 0으로 클램프.
+        age_hours = max(0.0, round((kst_now() - row.last_success_at).total_seconds() / 3600, 1))
+        stale = age_hours > _STALE_HOURS
     return {
         "account": _ADS_ACCOUNT,
         "configured": bool(row.cookie_blob),
@@ -75,6 +90,8 @@ def cookie_status(db: Session) -> dict:
         "last_saved_at": row.last_saved_at.isoformat() if row.last_saved_at else None,
         "last_success_at": row.last_success_at.isoformat() if row.last_success_at else None,
         "last_error": row.last_error,
+        "age_hours": age_hours,
+        "stale": stale,
     }
 
 
@@ -199,6 +216,38 @@ def sync_ad_cost(db: Session) -> dict:
     _mark_cookie(db, status="green", error=None, success=True)
     log.info("광고비 sync 완료: %s %s", today, stats["vendors"])
     return stats
+
+
+# ════════════════════════════════════════════════
+# 로컬 페처 인제스트 (Akamai 우회 — prod 직접 fetch 불가, D-5 보강)
+# ════════════════════════════════════════════════
+def ingest_ad_cost(db: Session, cost_date: date, vendors: list[dict]) -> dict:
+    """로컬 페처(Jino Mac, residential IP)가 보낸 광고비 숫자를 upsert.
+
+    advertising.coupang.com은 Akamai가 데이터센터 IP를 차단 → prod 직접 fetch 불가.
+    Jino Mac에서 fetch(201)한 결과만 받아 적재. 성공 시 status=green + last_success(=heartbeat,
+    배너 staleness 기준). vendors: [{"vendor_id","day_cost","month_cost"}].
+    """
+    n = 0
+    for v in vendors:
+        vid = str(v.get("vendor_id") or "").strip()
+        if not vid:
+            continue
+        _upsert_cost(db, cost_date, vid,
+                     int(v.get("day_cost") or 0), int(v.get("month_cost") or 0))
+        n += 1
+    db.commit()
+    # 상태 행 보장(로컬 아키텍처에선 prod에 cookie_blob 없을 수 있음) — heartbeat용.
+    row = _cookie_row(db)
+    if row is None:
+        row = CoupangWingCookie(account_key=_ADS_ACCOUNT)
+        db.add(row)
+    row.status = "green"
+    row.last_error = None
+    row.last_success_at = kst_now()
+    db.commit()
+    log.info("광고비 ingest: %s vendors=%d", cost_date, n)
+    return {"date": str(cost_date), "ingested": n}
 
 
 # ════════════════════════════════════════════════

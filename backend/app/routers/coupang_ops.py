@@ -13,7 +13,9 @@ from typing import Any
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
+import os
+
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Path, Query
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -955,6 +957,47 @@ def ad_cookie_status(db: Session = Depends(get_db)):
 def trigger_ad_cost_sync(db: Session = Depends(get_db)):
     """광고비 즉시 sync (수동 트리거)."""
     return ad_cost_sync.sync_ad_cost(db)
+
+
+@router.post("/ad-cost/ingest")
+def ingest_ad_cost(
+    body: dict[str, Any] = Body(...),
+    x_ingest_token: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """로컬 페처(Jino Mac, residential IP) → 광고비 숫자 인제스트.
+
+    advertising.coupang.com은 Akamai가 데이터센터 IP 차단 → prod 직접 fetch 불가.
+    인증: X-Ingest-Token 헤더 == 환경변수 AD_INGEST_TOKEN. body {date, vendors:[...]}.
+    """
+    import secrets as _secrets
+
+    expected = os.getenv("AD_INGEST_TOKEN", "").strip()
+    # 상수시간 비교(codex P2). 미설정·불일치 모두 동일한 401(서버 설정 상태 비노출).
+    if not expected or not x_ingest_token or not _secrets.compare_digest(x_ingest_token.strip(), expected):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    try:
+        cost_date = date.fromisoformat(str(body.get("date")))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="date(YYYY-MM-DD) 필요")
+    raw = body.get("vendors")
+    if not isinstance(raw, list) or not raw:
+        raise HTTPException(status_code=400, detail="vendors[] 필요")
+    # 검증: vendor_id 존재, 비용은 음수 아닌 정수(malformed → 400, codex P2)
+    vendors: list[dict] = []
+    for v in raw:
+        if not isinstance(v, dict) or not str(v.get("vendor_id") or "").strip():
+            raise HTTPException(status_code=400, detail="vendor_id 필요")
+        try:
+            day_cost = int(v.get("day_cost") or 0)
+            month_cost = int(v.get("month_cost") or 0)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="비용은 정수여야 함")
+        if day_cost < 0 or month_cost < 0:
+            raise HTTPException(status_code=400, detail="비용은 음수일 수 없음")
+        vendors.append({"vendor_id": str(v["vendor_id"]).strip(),
+                        "day_cost": day_cost, "month_cost": month_cost})
+    return ad_cost_sync.ingest_ad_cost(db, cost_date, vendors)
 
 
 @router.get("/ad-cost")

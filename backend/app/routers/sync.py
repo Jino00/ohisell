@@ -191,8 +191,12 @@ def sync_coupang_cs(db: Session = Depends(get_db)):
 def sync_realtime(db: Session = Depends(get_db)):
     """접속/새로고침 시 호출 — 모든 실시간 데이터를 병렬로 동기화.
 
-    포함: 전체 채널 주문 · 쿠팡 광고비 · 네이버 SA 광고비 · Meta 광고비
+    포함: 전체 채널 주문 · 네이버 SA 광고비 · Meta 광고비
     각 항목은 독립적으로 fail-soft(오류 발생 시 해당 항목만 error 표시, 나머지 계속).
+
+    ⚠️ 쿠팡 광고비는 여기서 fetch하지 않는다 — advertising.coupang.com은 Akamai가
+    데이터센터(prod) IP를 차단(403). 광고비는 Jino Mac 로컬 페처가 residential IP로
+    fetch해 POST /ad-cost/ingest로 push한다(ad_cost_local_fetcher.py).
     """
     from app.database import SessionLocal
 
@@ -232,17 +236,6 @@ def sync_realtime(db: Session = Depends(get_db)):
                 ok += o
                 err += e
         return {"new_or_updated": ok, "channel_errors": err}
-
-    def _run_coupang_ad():
-        _db = SessionLocal()
-        try:
-            from app.services.coupang.ad_cost_sync import sync_ad_cost
-            return sync_ad_cost(_db)
-        except Exception as e:
-            log.warning("realtime: 쿠팡 광고비 sync 실패: %s", e)
-            return {"error": str(e)}
-        finally:
-            _db.close()
 
     def _run_naver_sa():
         _db = SessionLocal()
@@ -321,15 +314,15 @@ def sync_realtime(db: Session = Depends(get_db)):
         finally:
             _db.close()
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
         f_orders = ex.submit(_run_orders)
-        f_coupang_ad = ex.submit(_run_coupang_ad)
         f_naver_sa = ex.submit(_run_naver_sa)
         f_meta = ex.submit(_run_meta)
         results["orders"] = f_orders.result()
-        results["coupang_ad"] = f_coupang_ad.result()
         results["naver_sa"] = f_naver_sa.result()
         results["meta"] = f_meta.result()
+        # 쿠팡 광고비는 로컬 페처(ad_cost_local_fetcher.py)가 ingest로 push (Akamai 우회)
+        results["coupang_ad"] = {"note": "via local fetcher ingest"}
 
     log.info("realtime sync 완료: %s", results)
     return results

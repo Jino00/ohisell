@@ -25,6 +25,8 @@ export interface AdCostCookieStatus {
   last_saved_at: string | null;
   last_success_at: string | null;
   last_error: string | null;
+  age_hours: number | null; // 마지막 push 이후 경과(로컬 페처 heartbeat)
+  stale: boolean;           // push 끊김(페처 다운) — 배너 트리거
 }
 
 export function getAdCostCookieStatus(): Promise<AdCostCookieStatus> {

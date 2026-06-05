@@ -153,12 +153,13 @@ export default function Layout() {
           <span className="text-base font-bold text-gray-900">ohisell</span>
         </header>
 
-        {/* 광고쿠키 만료 전역 경고 — 어느 페이지에 있든 보임 (광고비 0원 집계 방지) */}
-        {adCookie?.status === "red" && (
+        {/* 광고쿠키 수집 중단 전역 경고 — 어느 페이지에 있든 보임 (광고비 stale 방지) */}
+        {/* 로컬 페처(Jino Mac)가 끊기면 stale, prod 직접 fetch 실패 시 red. 둘 다 갱신 필요 */}
+        {(adCookie?.status === "red" || adCookie?.stale) && (
           <div className="flex items-center gap-3 bg-red-600 text-white px-4 py-2 text-sm">
             <span className="font-semibold shrink-0">🔴 쿠팡 광고비 수집 중단</span>
             <span className="text-red-100 min-w-0 truncate">
-              광고 쿠키가 만료됐습니다 — 갱신 전까지 광고비가 0원으로 집계됩니다
+              광고비 수집이 멈췄습니다 — 로컬 페처/쿠키 확인 필요
               {adCookie.last_success_at && ` (마지막 수집 ${adCookie.last_success_at.slice(0, 10)})`}.
             </span>
             <Link

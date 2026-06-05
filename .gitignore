@@ -11,3 +11,5 @@ build/
 
 # 로컬 DB 백업 (마이그레이션 안전장치, 커밋 금지)
 backend/ohisell.db.bak.*
+tools/*.log
+.ohisell_ad_*
