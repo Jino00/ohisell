@@ -224,16 +224,20 @@ export default function CoupangOps() {
   const [rgLoading, setRgLoading] = useState(false);
   const [rgError, setRgError] = useState<string | null>(null);
 
+  async function triggerSync() {
+    const API_BASE = import.meta.env.DEV ? "http://localhost:8000" : "";
+    const r = await fetch(`${API_BASE}/api/scheduler/trigger/auto_sync_orders`, { method: "POST" });
+    if (!r.ok) throw new Error(`sync failed: ${r.status}`);
+    return r.json();
+  }
+
   async function syncNow() {
     setSyncing(true);
     setSyncMsg(null);
     try {
-      const API_BASE = import.meta.env.DEV ? "http://localhost:8000" : "";
-      const r = await fetch(`${API_BASE}/api/scheduler/trigger/auto_sync_orders`, { method: "POST" });
-      const d = await r.json();
-      setSyncMsg(d.detail ?? "동기화 완료");
-      // 3초 후 데이터 재조회
-      setTimeout(() => load(company, days), 3000);
+      await triggerSync();
+      setSyncMsg("동기화 완료");
+      await load(company, days);  // sync 완료 즉시 재조회
     } catch (e: any) {
       setSyncMsg("동기화 실패: " + e.message);
     } finally {
@@ -246,13 +250,25 @@ export default function CoupangOps() {
     setError(null);
     try {
       setData(await fetchSalesSummary(c, d));
-      setColExcluded({});  // 데이터 바뀌면 필터 초기화
+      setColExcluded({});
     } catch (e: any) {
       setError(e.message);
     } finally {
       setLoading(false);
     }
   }, []);
+
+  // 페이지 접속 시 자동 sync → 완료 후 데이터 로드
+  useEffect(() => {
+    let cancelled = false;
+    setSyncing(true);
+    (async () => {
+      try { await triggerSync(); } catch { /* sync 실패해도 기존 데이터 표시 */ }
+      if (!cancelled) { setSyncing(false); load(company, days); }
+    })();
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);  // 마운트 1회만
 
   useEffect(() => { load(company, days); }, [company, days, load]);
 

@@ -33,7 +33,7 @@ def _get_own_ad_session():
 
 
 def sync_all_channels_job():
-    """전체 API 채널 주문 자동 동기화 (스케줄러 작업)"""
+    """전체 API 채널 주문 자동 동기화 (스케줄러 작업) — Wing + RG 포함"""
     db = _get_own_db_session()
     try:
         from app.services.sync_service import sync_channel_orders
@@ -48,6 +48,14 @@ def sync_all_channels_job():
                 )
             except Exception as e:
                 log.error("[스케줄러] 채널 %s 동기화 에러: %s", ch.name, e)
+
+        # RG 주문도 함께 동기화 (Wing과 매출 일치를 위해)
+        try:
+            from app.services.coupang.rg_order_sync import sync_all_rg_orders
+            rg_results = sync_all_rg_orders(db, days=3)
+            log.info("[스케줄러] RG 주문 동기화 완료: %s", rg_results)
+        except Exception as e:
+            log.error("[스케줄러] RG 주문 동기화 에러: %s", e)
 
         # 실행 시각 기록
         state = db.query(SchedulerState).filter(
@@ -577,7 +585,7 @@ def _ensure_default_states(db):
         ("sync_coupang_rg_inventory", "40 5 * * *"),
         ("sync_coupang_returns", "45 5 * * *"),
         ("sync_coupang_settlement", "50 5 * * *"),
-        ("sync_coupang_rg_orders", "55 5 * * *"),
+        ("sync_coupang_rg_orders", "0 */2 * * *"),
         ("sync_coupang_coupons", "0 6 * * *"),
         ("sync_coupang_cs", "5 6 * * *"),
     ]
