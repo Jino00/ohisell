@@ -45,7 +45,7 @@ def save_cookie(db: Session, curl_or_cookie: str) -> dict:
     """
     from app.clients.coupang.inbound import parse_curl_cookies
 
-    cookie, _xsrf = parse_curl_cookies(curl_or_cookie)
+    cookie, _xsrf = parse_curl_cookies(curl_or_cookie, require_xsrf=False)
     if not cookie:
         raise ValueError("쿠키를 추출할 수 없습니다. cURL 전체를 붙여넣으세요.")
     enc_cookie = encrypt_secret(cookie)
@@ -144,8 +144,13 @@ def sync_ad_cost(db: Session) -> dict:
     }
     headers = {
         "Content-Type": "application/json",
+        "Accept": "application/json, text/plain, */*",
         "Cookie": cookie,
-        "User-Agent": "Mozilla/5.0",
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/148.0.0.0 Safari/537.36"
+        ),
         "Referer": "https://advertising.coupang.com/marketing/dashboard/sales",
         "Origin": "https://advertising.coupang.com",
     }

@@ -33,11 +33,12 @@ class WingReadError(Exception):
     """Wing 입고 API 읽기 실패(네트워크·5xx·JSON 파싱 실패). fail-soft 대상(인증 실패와 구분)."""
 
 
-def parse_curl_cookies(curl: str) -> tuple[str, str]:
+def parse_curl_cookies(curl: str, *, require_xsrf: bool = True) -> tuple[str, str]:
     """브라우저 'Copy as cURL'(또는 쿠키 문자열) → (cookie_header, xsrf_token).
 
     -H 'cookie: ...'/-b '...'에서 쿠키 추출. x-xsrf-token 헤더 우선, 없으면 쿠키의 XSRF-TOKEN
     값 사용(S0 실측: 둘이 동일). 쿠키만 통째 붙여넣은 경우도 허용. 추출 실패 시 ValueError.
+    require_xsrf=False: xsrf 없어도 ("", "") 대신 (cookie, "") 반환 — 광고 API용.
     """
     if not curl or not curl.strip():
         raise ValueError("빈 입력 — cURL 또는 쿠키 문자열을 붙여넣어 주세요")
@@ -65,7 +66,7 @@ def parse_curl_cookies(curl: str) -> tuple[str, str]:
     if not xsrf:
         mc = re.search(r"XSRF-TOKEN=([^;]+)", cookie)
         xsrf = mc.group(1).strip() if mc else ""
-    if not xsrf:
+    if not xsrf and require_xsrf:
         raise ValueError("x-xsrf-token을 찾지 못했습니다(헤더·XSRF-TOKEN 쿠키 모두 없음)")
     return cookie, xsrf
 
