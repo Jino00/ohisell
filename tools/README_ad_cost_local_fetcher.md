@@ -13,21 +13,34 @@
 상태로 시작한다. 반면 SSO 원천인 `KEYCLOAK_SESSION`(xauth.coupang.com)은 **12시간**
 살아있고, **SSO 재발급을 할 때마다 다시 12h로 갱신**된다.
 
-→ **해법: 매 run이 keycloak 세션으로 aid를 자동 재발급한다.** WING 로그인 시작 URL로
+→ **해법: aid 만료 시 keycloak 세션으로 aid를 자동 재발급한다.** WING 로그인 시작 URL로
 진입하면 keycloak authorize(Akamai JS 챌린지 ~16초)를 거쳐 비번 없이 callback → aid
 재발급. 이 SSO 경로는 **headful(창)에서만 통과**한다(headless는 xauth Akamai가
-Access Denied로 차단). 매시 run이 keycloak을 12h로 갱신하므로, Mac이 켜져 매시 도는 한
-**재로그인은 사실상 불필요**(keycloak이 만료될 틈이 없음).
+Access Denied로 차단).
+
+### 운영 모델: "버튼 트리거" (2026-06-06 전환)
+매시 자동 fetch는 headful 창이 매시 뜨고(SSO 필수) Mac을 밤새 켜야 keycloak 12h가 유지되는
+부담이 있었다. 그래서 **"대시보드 버튼을 누를 때만 갱신"**으로 바꿨다. Mac에는 가벼운
+**poll 데몬**이 상주하며(15s마다 prod에 갱신 요청만 확인 — 창 안 뜸), 버튼을 누른 경우에만
+headful fetch(창 ~20초)를 한다.
 
 ```
-Jino Mac (실제 브라우저=headful, residential IP)       prod (sellc.ohitech.co.kr)
-  ad_cost_browser_fetcher.py  (launchd 매시, headful)
-   ├─ storage_state 로드 → 대시보드 fetch 시도
-   ├─ aid 만료(1h)면 → WING 로그인 URL → keycloak SSO 재발급(~16s) → 새 aid+keycloak 12h
-   ├─ page.evaluate fetch report/cost (201)  ──push 숫자──▶  POST /ad-cost/ingest
-   └─ keycloak도 만료 시만 'login' 재실행 안내                 └─ CoupangAdCostDaily upsert
-                                                                  status=green/last_success
+[쿠팡 운영페이지 '📣 광고비 갱신' 버튼]            prod (sellc.ohitech.co.kr)
+        │ 클릭                                       POST /ad-cost/request-refresh
+        ▼                                            → refresh_requested_at = now
+  (Mac poll 데몬, 15s마다 GET refresh-status)        ◀──── 플래그 확인(창 안 뜸)
+        │ requested=true 감지
+        ▼  flock 획득 → POST refresh-claim(원자적 소비)
+  headful 브라우저: fetch report/cost (201)
+   ├─ aid 만료면 → WING 로그인 URL → keycloak SSO 재발급(~16s)
+   ├─ keycloak도 만료면 → 같은 창에서 로그인 대기(아침 첫 클릭이 로그인 겸함)
+   └─ push 숫자 ──────────────────────────────▶  POST /ad-cost/ingest
+                                                  → coupang_ad_cost_daily upsert
+        대시보드는 last_success_at 갱신을 폴링(최대 215s)해 "오늘 광고비" 리로드
 ```
+
+평소엔 창이 전혀 안 뜬다. 버튼을 누른 그 한 번만 ~20초 창이 떴다 닫힌다.
+일별 광고비는 쿠팡 운영페이지 헤더 "오늘 광고비"에 표시된다(coupang_ad_cost_daily).
 
 ## 1회 설정
 
@@ -58,32 +71,36 @@ cd backend && ./.venv/bin/pip install -r ../tools/requirements-local.txt
 cd backend && ./.venv/bin/python ../tools/ad_cost_browser_fetcher.py login
 # 뜬 브라우저에서 advertising.coupang.com 로그인 → 대시보드 보이면 자동 감지·저장(창 닫지 말 것)
 ```
-이후 매시 run이 keycloak 세션을 12h로 갱신하므로 재로그인은 거의 불필요하다. keycloak도
-만료된 경우(Mac이 12h 이상 꺼져 있었던 등)만 run 로그에 "세션 만료 — keycloak 세션도
-만료. login 재실행" + 대시보드 배너가 뜨고, 그때 (4)만 다시 실행하면 된다.
+버튼 트리거 방식에서는 보통 **아침 첫 클릭이 로그인을 겸한다**(세션 만료 시 버튼이 띄운
+창에서 로그인하면 그대로 fetch 진행). 별도 login은 최초 1회나 문제 발생 시에만.
 
-### (5) 수동 1회 실행 확인
+### (5) 수동 1회 실행 확인 (선택)
 ```
-./.venv/bin/python ../tools/ad_cost_browser_fetcher.py
+./.venv/bin/python ../tools/ad_cost_browser_fetcher.py        # run: 1회 fetch·push
+./.venv/bin/python ../tools/ad_cost_browser_fetcher.py poll   # poll: 상주 데몬(데몬 동작 확인용)
 # 로그 ~/.ohisell_ad_fetcher.log 에 "성공: ... push ..." 확인
 ```
 
-### (6) launchd 등록 (매시 자동)
+### (6) launchd 등록 (상주 poll 데몬)
 `com.ohisell.adcost.plist`의 `__PYTHON__`(backend/.venv/bin/python3),
 `__SCRIPT__`(tools/ad_cost_browser_fetcher.py 절대경로), `__HOME__`을 치환 후:
 ```
+launchctl unload ~/Library/LaunchAgents/com.ohisell.adcost.plist 2>/dev/null  # 기존 매시 데몬 내림
 cp tools/com.ohisell.adcost.plist ~/Library/LaunchAgents/com.ohisell.adcost.plist
 launchctl load ~/Library/LaunchAgents/com.ohisell.adcost.plist
+launchctl list | grep ohisell   # 가동 확인
 ```
+plist는 `poll` 인자 + `KeepAlive`(죽으면 자동 재시작)로 상주 데몬을 띄운다.
 
 ## 운영 메모
-- **세션 유지**: 매시 run의 SSO 재발급이 keycloak을 12h로 갱신 → Mac이 켜져 매시 도는 한
-  재로그인 불필요. keycloak까지 만료된 경우만 "세션 만료 — keycloak 세션도 만료" → (4)만 다시.
-- **창이 매시 뜬다**: SSO 재발급이 headful 필수라 run마다 Chrome 창이 ~20초 떴다 닫힌다
-  (aid 살아있어 재발급 불필요한 경우는 더 짧음). 거슬리면 launchd 주기를 늘릴 것
-  (광고비는 일 누적값이라 2~3시간 간격도 충분).
+- **버튼 트리거**: 쿠팡 운영페이지 "📣 광고비 갱신" 버튼을 누를 때만 fetch한다. 평소 데몬은
+  15s마다 prod에 갱신 요청만 확인(창 안 뜸). 버튼 누른 그 한 번만 ~20초 창이 떴다 닫힌다.
+- **아침 첫 클릭 = 로그인**: Mac을 밤새 꺼서 keycloak(12h)이 만료됐으면, 아침 첫 버튼 클릭이
+  띄운 창에서 로그인하면 된다(최대 180s 대기). 이후 클릭은 창만 잠깐 뜨고 자동.
+- **세션 갱신**: fetch 1회가 keycloak을 12h로 다시 갱신 → 낮 동안 추가 클릭은 로그인 불필요.
 - **배너**: prod 대시보드는 status=red 또는 마지막 push 26h 초과(stale)면 전역 빨간 배너로 알림.
-- **Mac 상주 필요**: Mac이 꺼져 있으면 그 시간 동안 push 안 됨(데이터는 마지막 값 유지).
+- **Mac 상주 필요**: Mac이 꺼져 있으면 버튼을 눌러도 데몬이 못 받는다(데이터는 마지막 값 유지).
+- **데몬 로그**: `~/.ohisell_ad_fetcher.log`. launchd stdout/err: `~/.ohisell_ad_fetcher.launchd.log`.
 
 ## 참고: curl 방식(ad_cost_local_fetcher.py)은 1회용으로 폐기
 같은 디렉터리의 `ad_cost_local_fetcher.py`는 curl 재생 방식이라 1회만 동작한다(위 근거).
