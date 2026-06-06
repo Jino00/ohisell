@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -151,13 +152,26 @@ def _push(cfg: dict, data: dict) -> int:
     return 0
 
 
-def _fetch(page, cfg: dict):
-    """대시보드 이동 후 same-origin fetch. 반환: res dict 또는 None(로그아웃)."""
+def _fetch(page, cfg: dict, retries: int = 2):
+    """대시보드 이동 후 same-origin fetch. 반환: res dict 또는 None(로그아웃).
+
+    쿠팡 봇 감지(Spoofing chunk)가 가끔 'Failed to fetch'로 순간 차단하므로
+    evaluate를 짧은 간격으로 retries회 재시도한다. 마지막 시도도 실패하면 예외 전파.
+    """
     page.goto(DASH_URL, wait_until="domcontentloaded", timeout=40000)
     page.wait_for_timeout(2500)  # Akamai JS 센서·세션 안정화
     if _is_logged_out(page.url):
         return None
-    return page.evaluate(_FETCH_JS, _payload(cfg))
+    last_exc = None
+    for attempt in range(1, retries + 1):
+        try:
+            return page.evaluate(_FETCH_JS, _payload(cfg))
+        except Exception as e:
+            last_exc = e
+            if attempt < retries:
+                log.warning("fetch 일시 실패(%d/%d) 재시도: %s", attempt, retries, str(e)[:80])
+                page.wait_for_timeout(2500)
+    raise last_exc
 
 
 def _sso_refresh(page, timeout_s: int = 45) -> bool:
@@ -186,6 +200,31 @@ def _sso_refresh(page, timeout_s: int = 45) -> bool:
     return False
 
 
+def _login_wait_loop(page, ctx, cfg: dict, state: str, wait_secs: int):
+    """열린 page에서 사용자 로그인을 자동 감지(report/cost 201). 성공 시 state 저장 후
+    파싱된 data dict 반환, 시간초과/창닫힘/파싱실패 시 None."""
+    waited = 0
+    while waited < wait_secs:
+        try:
+            page.wait_for_timeout(5000)
+            waited += 5
+            if _is_logged_out(page.url):
+                continue
+            res = page.evaluate(_FETCH_JS, _payload(cfg))
+        except Exception as e:
+            if "closed" in str(e).lower():
+                log.error("브라우저 창이 닫혔습니다 — 로그인 미완료(창을 닫지 말고 로그인만 하세요).")
+                return None
+            continue
+        if res.get("status") == 201:
+            _save_state(ctx, state)
+            try:
+                return json.loads(res.get("body") or "")
+            except (ValueError, TypeError):
+                return None
+    return None
+
+
 def cmd_login(cfg: dict, wait_secs: int = 600) -> int:
     """헤드풀 창을 열고 로그인을 자동 감지(report/cost 201) → storage_state 저장 + 첫 push.
 
@@ -200,26 +239,7 @@ def cmd_login(cfg: dict, wait_secs: int = 600) -> int:
         try:
             page = ctx.new_page()
             page.goto(DASH_URL, wait_until="domcontentloaded", timeout=40000)
-            waited = 0
-            while waited < wait_secs:
-                try:
-                    page.wait_for_timeout(5000)
-                    waited += 5
-                    if _is_logged_out(page.url):
-                        continue
-                    res = page.evaluate(_FETCH_JS, _payload(cfg))
-                except Exception as e:
-                    if "closed" in str(e).lower():
-                        log.error("브라우저 창이 닫혔습니다 — 로그인 미완료(창을 닫지 말고 로그인만 하세요).")
-                        break
-                    continue
-                if res.get("status") == 201:
-                    try:
-                        ok_data = json.loads(res.get("body") or "")
-                    except (ValueError, TypeError):
-                        ok_data = None
-                    _save_state(ctx, state)
-                    break
+            ok_data = _login_wait_loop(page, ctx, cfg, state, wait_secs)
         finally:
             ctx.close()
             browser.close()
@@ -230,7 +250,9 @@ def cmd_login(cfg: dict, wait_secs: int = 600) -> int:
     return _push(cfg, ok_data)  # 첫 데이터 즉시 push
 
 
-def cmd_run(cfg: dict) -> int:
+def _run_with_lock(cfg: dict, login_wait_secs: int = 0) -> int:
+    """세션 파일 확인 + flock(동시 실행 방지) 후 _do_run. login_wait_secs>0이면 keycloak
+    만료 시 같은 창에서 로그인 대기(버튼 트리거 경로용)."""
     state = os.path.expanduser(cfg["state_file"])
     if not Path(state).is_file():
         log.error("세션 파일 없음 — 먼저 'login' 실행: %s", state)
@@ -245,15 +267,21 @@ def cmd_run(cfg: dict) -> int:
         os.close(lock_fd)
         return 0
     try:
-        return _do_run(cfg, state)
+        return _do_run(cfg, state, login_wait_secs=login_wait_secs)
     finally:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         os.close(lock_fd)
 
 
-def _do_run(cfg: dict, state: str) -> int:
+def cmd_run(cfg: dict) -> int:
+    """스케줄/수동 1회 실행 — keycloak 만료 시 로그인 대기 없이 fail-fast."""
+    return _run_with_lock(cfg, login_wait_secs=0)
+
+
+def _do_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
     # aid는 발급+1h 절대 만료라 매 run이 SSO 재발급을 거친다. SSO 재발급은 headful 필수
     # (headless는 xauth Akamai 차단). config "headless"는 무시(호환 위해 키만 유지).
+    # login_wait_secs>0(버튼 트리거): keycloak도 만료면 같은 창에서 로그인 대기 후 fetch.
     res = None
     try:
         with sync_playwright() as p:
@@ -271,6 +299,21 @@ def _do_run(cfg: dict, state: str) -> int:
                         if res is not None and res.get("status") == 201:
                             _save_state(ctx, state)  # 재fetch 후 회전 쿠키 최종 보존
                         log.info("SSO 재발급 완료 — fetch 재시도")
+                    elif login_wait_secs > 0:
+                        # keycloak도 만료 → 같은 창에서 수동 로그인 대기(버튼 트리거, 아침 첫 클릭)
+                        log.info("keycloak 만료 — 창에서 로그인하세요(자동 감지, 최대 %d초).", login_wait_secs)
+                        try:
+                            page.goto(DASH_URL, wait_until="domcontentloaded", timeout=40000)
+                        except Exception:
+                            pass
+                        ok_data = _login_wait_loop(page, ctx, cfg, state, login_wait_secs)
+                        if ok_data is None:
+                            log.error("로그인 시간 초과/취소 — 갱신 취소.")
+                            return 1
+                        log.info("로그인 완료 — fetch")
+                        res = _fetch(page, cfg)
+                        if res is not None and res.get("status") == 201:
+                            _save_state(ctx, state)
                     else:
                         log.error("세션 만료 — keycloak 세션도 만료. 'login' 재실행 필요.")
                         return 1
@@ -302,10 +345,67 @@ def _do_run(cfg: dict, state: str) -> int:
     return _push(cfg, data)
 
 
+_POLL_INTERVAL_S = 15      # 데몬이 갱신 요청을 확인하는 간격(창 안 뜸, 가벼운 GET)
+_LOGIN_WAIT_S = 180        # 버튼 클릭 시 keycloak 만료면 로그인 대기 한도
+
+
+def _prod_refresh_status(cfg: dict) -> dict:
+    r = requests.get(
+        cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/ad-cost/refresh-status",
+        timeout=15,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def _prod_claim(cfg: dict) -> dict:
+    r = requests.post(
+        cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/ad-cost/refresh-claim",
+        headers={"X-Ingest-Token": cfg["ingest_token"]},
+        timeout=15,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def cmd_poll(cfg: dict) -> int:
+    """상주 데몬 — 갱신 요청을 주기적으로 확인하고, 요청이 있을 때만 headful fetch.
+
+    평소엔 가벼운 GET만(창 안 뜸). 대시보드 버튼이 요청을 set하면 claim 후 fetch 1회.
+    keycloak 만료 시 같은 창에서 로그인 대기(아침 첫 클릭이 로그인을 겸함).
+    """
+    state = os.path.expanduser(cfg["state_file"])
+    interval = int(cfg.get("poll_interval_s", _POLL_INTERVAL_S))
+    log.info("폴 데몬 시작 — %ds 간격으로 갱신 요청 확인(창은 요청 시에만 뜸).", interval)
+    while True:
+        try:
+            st = _prod_refresh_status(cfg)
+            if st.get("requested"):
+                claim = _prod_claim(cfg)
+                if claim.get("claimed"):
+                    log.info("갱신 요청 감지 — fetch 시작")
+                    if not Path(state).is_file():
+                        cmd_login(cfg)          # 세션 없음 → 로그인부터(첫 데이터 push 포함)
+                    else:
+                        _run_with_lock(cfg, login_wait_secs=_LOGIN_WAIT_S)
+        except requests.RequestException as e:
+            log.warning("폴 확인 실패(네트워크): %s", str(e)[:80])
+        except Exception as e:  # noqa: BLE001 — 데몬은 어떤 오류에도 죽지 않는다
+            log.error("폴 루프 오류: %s", str(e)[:160])
+        time.sleep(interval)
+
+
 def main() -> None:
     cfg = load_config()
-    if len(sys.argv) >= 2 and sys.argv[1] == "login":
+    arg = sys.argv[1] if len(sys.argv) >= 2 else ""
+    if arg == "login":
         sys.exit(cmd_login(cfg))
+    if arg == "poll":
+        try:
+            sys.exit(cmd_poll(cfg))
+        except KeyboardInterrupt:
+            log.info("폴 데몬 종료")
+            sys.exit(0)
     sys.exit(cmd_run(cfg))
 
 

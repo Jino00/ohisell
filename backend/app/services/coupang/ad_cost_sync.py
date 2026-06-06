@@ -251,6 +251,53 @@ def ingest_ad_cost(db: Session, cost_date: date, vendors: list[dict]) -> dict:
 
 
 # ════════════════════════════════════════════════
+# 갱신 트리거 (대시보드 버튼 → Mac 페처 데몬, "볼 때만 클릭" 방식)
+# ════════════════════════════════════════════════
+def request_refresh(db: Session) -> dict:
+    """대시보드 '광고비 갱신' 버튼 → 갱신 요청 플래그 set. Mac 페처가 다음 폴링에서 소비."""
+    row = _cookie_row(db)
+    if row is None:
+        row = CoupangWingCookie(account_key=_ADS_ACCOUNT)
+        db.add(row)
+    row.refresh_requested_at = kst_now()
+    db.commit()
+    return {"requested": True, "requested_at": row.refresh_requested_at.isoformat()}
+
+
+def refresh_status(db: Session) -> dict:
+    """갱신 요청/완료 상태. 대시보드(버튼 후 폴링)·Mac 페처(요청 확인) 공용.
+
+    requested=요청 대기 중. last_success_at=마지막 push(버튼 후 이 값이 올라가면 갱신 완료).
+    """
+    row = _cookie_row(db)
+    if row is None:
+        return {"requested": False, "requested_at": None, "last_success_at": None,
+                "status": "none", "last_error": None}
+    return {
+        "requested": row.refresh_requested_at is not None,
+        "requested_at": row.refresh_requested_at.isoformat() if row.refresh_requested_at else None,
+        "last_success_at": row.last_success_at.isoformat() if row.last_success_at else None,
+        "status": row.status,
+        "last_error": row.last_error,
+    }
+
+
+def claim_refresh(db: Session) -> dict:
+    """Mac 페처가 갱신 요청을 '소비'(플래그 clear)하고 작업 시작. 중복 트리거/루프 방지.
+
+    claimed=True면 요청이 있었고 지금 clear됨 → 페처가 headful fetch 진행. False면 요청 없음.
+    claim 후 fetch가 실패(예: 로그인 필요)해도 플래그는 이미 clear라 창이 반복해 뜨지 않는다.
+    """
+    row = _cookie_row(db)
+    if row is None or row.refresh_requested_at is None:
+        return {"claimed": False, "requested_at": None}
+    requested_at = row.refresh_requested_at.isoformat()
+    row.refresh_requested_at = None
+    db.commit()
+    return {"claimed": True, "requested_at": requested_at}
+
+
+# ════════════════════════════════════════════════
 # 조회 헬퍼
 # ════════════════════════════════════════════════
 def get_ad_cost_range(db: Session, start: date, end: date) -> list[dict]:

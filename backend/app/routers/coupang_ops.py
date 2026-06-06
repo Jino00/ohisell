@@ -1000,6 +1000,36 @@ def ingest_ad_cost(
     return ad_cost_sync.ingest_ad_cost(db, cost_date, vendors)
 
 
+@router.post("/ad-cost/request-refresh")
+def request_ad_cost_refresh(db: Session = Depends(get_db)):
+    """대시보드 '광고비 갱신' 버튼 → 갱신 요청 플래그 set.
+
+    광고비는 Akamai로 prod 직접 fetch 불가 → Jino Mac 페처가 가져온다. 이 플래그를 보고
+    Mac 데몬이 다음 폴링에서 headful fetch를 1회 수행한다("볼 때만 클릭" 방식).
+    """
+    return ad_cost_sync.request_refresh(db)
+
+
+@router.get("/ad-cost/refresh-status")
+def ad_cost_refresh_status(db: Session = Depends(get_db)):
+    """갱신 요청/완료 상태. 대시보드(버튼 후 폴링)·Mac 페처(요청 확인) 공용."""
+    return ad_cost_sync.refresh_status(db)
+
+
+@router.post("/ad-cost/refresh-claim")
+def claim_ad_cost_refresh(
+    x_ingest_token: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """Mac 페처가 갱신 요청을 소비(플래그 clear)하고 작업 시작. 토큰 인증(ingest와 동일)."""
+    import secrets as _secrets
+
+    expected = os.getenv("AD_INGEST_TOKEN", "").strip()
+    if not expected or not x_ingest_token or not _secrets.compare_digest(x_ingest_token.strip(), expected):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    return ad_cost_sync.claim_refresh(db)
+
+
 @router.get("/ad-cost")
 def get_ad_cost(
     db: Session = Depends(get_db),

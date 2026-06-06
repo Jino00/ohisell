@@ -666,6 +666,9 @@ class CoupangWingCookie(Base):
     last_success_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime, nullable=True
     )  # 마지막 sync 성공(=만료 측정)
+    # 대시보드 "광고비 갱신" 버튼이 set, Mac 페처 데몬이 claim(=None)으로 소비.
+    # 이 값이 있으면 다음 폴링에서 페처가 headful fetch를 1회 수행한다(버튼 트리거 방식).
+    refresh_requested_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
