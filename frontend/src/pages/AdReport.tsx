@@ -3,8 +3,6 @@ import { useState, useEffect } from "react";
 import {
   fetchCoupangAdReport,
   syncRealtime,
-  requestAdCostRefresh,
-  getAdCostRefreshStatus,
   type CoupangAdReportRow,
   type CoupangAdReportResponse,
 } from "../lib/api";
@@ -52,8 +50,6 @@ export default function AdReport() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
-  const [adRefreshing, setAdRefreshing] = useState(false);
-  const [adRefreshMsg, setAdRefreshMsg] = useState<string | null>(null);
 
   async function load() {
     setLoading(true);
@@ -73,35 +69,6 @@ export default function AdReport() {
     try { await syncRealtime(); } catch { /* fail-soft */ }
     setSyncing(false);
     load();
-  }
-
-  // 광고비 "지금 갱신" — Jino Mac 페처를 깨워 쿠팡 광고비를 즉시 가져온다.
-  // request-refresh로 요청 → Mac 데몬이 fetch·push → last_success_at 변화를 폴링해 완료 감지.
-  async function refreshAdCostNow() {
-    setAdRefreshing(true);
-    setAdRefreshMsg("Mac에서 광고비 가져오는 중… (~20초, 첫 갱신이면 Mac 로그인 창 확인)");
-    try {
-      const baseline = (await getAdCostRefreshStatus()).last_success_at;
-      await requestAdCostRefresh();
-      const deadline = Date.now() + 75000; // 75초(SSO 재발급/로그인 여유)
-      let done = false;
-      while (Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 3000));
-        const st = await getAdCostRefreshStatus();
-        if (st.last_success_at && st.last_success_at !== baseline) { done = true; break; }
-      }
-      if (done) {
-        setAdRefreshMsg("✅ 광고비 갱신 완료");
-        await load();
-        setTimeout(() => setAdRefreshMsg(null), 4000);
-      } else {
-        setAdRefreshMsg("⚠️ Mac 응답 없음 — Mac이 켜져 있는지, 첫 갱신이면 로그인 창을 확인하세요.");
-      }
-    } catch (e: any) {
-      setAdRefreshMsg("갱신 요청 실패: " + (e?.message || ""));
-    } finally {
-      setAdRefreshing(false);
-    }
   }
 
   useEffect(() => { syncAndLoad(); }, []);
@@ -132,15 +99,7 @@ export default function AdReport() {
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-bold text-gray-900">쿠팡 광고 리포트</h1>
         <div className="flex items-center gap-3">
-          <button
-            onClick={refreshAdCostNow}
-            disabled={adRefreshing}
-            title="Jino Mac에서 쿠팡 광고비를 지금 가져옵니다(~20초). Mac이 켜져 있어야 합니다."
-            className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50"
-          >
-            <span className={adRefreshing ? "animate-spin" : ""}>📣</span>
-            {adRefreshing ? "광고비 갱신 중…" : "광고비 갱신"}
-          </button>
+          <p className="text-xs text-gray-400">설정 페이지에서 XLSX 업로드 시 자동 저장됩니다.</p>
           <button
             onClick={syncAndLoad}
             disabled={syncing}
@@ -151,11 +110,6 @@ export default function AdReport() {
           </button>
         </div>
       </div>
-      {adRefreshMsg && (
-        <div className="text-sm text-gray-600 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
-          {adRefreshMsg}
-        </div>
-      )}
 
       {/* 기간 필터 */}
       <div className="bg-white rounded-lg border border-gray-200 p-4 flex items-center gap-4">

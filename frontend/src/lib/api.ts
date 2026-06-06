@@ -52,6 +52,14 @@ export function getAdCostRefreshStatus(): Promise<AdCostRefreshStatus> {
   return fetchApi<AdCostRefreshStatus>("/api/coupang/ops/ad-cost/refresh-status");
 }
 
+// 일별 광고비(coupang_ad_cost_daily, Mac 페처가 채움) 날짜 범위 조회.
+export function getCoupangAdCostDaily(
+  start: string,
+  end: string,
+): Promise<{ costs: { date: string; day_cost: number }[] }> {
+  return fetchApi(`/api/coupang/ops/ad-cost?start=${start}&end=${end}`);
+}
+
 export async function uploadFile(path: string, file: File) {
   const form = new FormData();
   form.append("file", file);

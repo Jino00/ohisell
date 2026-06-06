@@ -15,6 +15,7 @@
 #   실행(스케줄): python3 ad_cost_browser_fetcher.py          # headless fetch→push (launchd 매시)
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import json
 import logging
@@ -250,6 +251,28 @@ def cmd_login(cfg: dict, wait_secs: int = 600) -> int:
     return _push(cfg, ok_data)  # 첫 데이터 즉시 push
 
 
+@contextlib.contextmanager
+def _try_fetch_lock():
+    """비차단 flock. yield True(획득)/False(이미 사용 중). 종료 시 해제.
+
+    버튼 트리거 경로에서 claim 전에 락을 잡아, 락 경합으로 요청이 유실되는 것을 막는다
+    (codex P2). 락을 못 잡으면 claim하지 않고 요청을 prod에 남겨 다음 폴에서 처리.
+    """
+    lock_fd = os.open(str(LOCK_PATH), os.O_WRONLY | os.O_CREAT, 0o600)
+    acquired = False
+    try:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            acquired = True
+        except OSError:
+            acquired = False
+        yield acquired
+    finally:
+        if acquired:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
 def _run_with_lock(cfg: dict, login_wait_secs: int = 0) -> int:
     """세션 파일 확인 + flock(동시 실행 방지) 후 _do_run. login_wait_secs>0이면 keycloak
     만료 시 같은 창에서 로그인 대기(버튼 트리거 경로용)."""
@@ -257,20 +280,11 @@ def _run_with_lock(cfg: dict, login_wait_secs: int = 0) -> int:
     if not Path(state).is_file():
         log.error("세션 파일 없음 — 먼저 'login' 실행: %s", state)
         return 2
-
-    # 동시 실행 방지(flock, 프로세스 종료 시 자동 해제)
-    lock_fd = os.open(str(LOCK_PATH), os.O_WRONLY | os.O_CREAT, 0o600)
-    try:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        log.warning("다른 실행이 진행 중 — 이번 호출 건너뜀")
-        os.close(lock_fd)
-        return 0
-    try:
+    with _try_fetch_lock() as acquired:
+        if not acquired:
+            log.warning("다른 실행이 진행 중 — 이번 호출 건너뜀")
+            return 0
         return _do_run(cfg, state, login_wait_secs=login_wait_secs)
-    finally:
-        fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        os.close(lock_fd)
 
 
 def cmd_run(cfg: dict) -> int:
@@ -384,17 +398,23 @@ def cmd_poll(cfg: dict) -> int:
         try:
             st = _prod_refresh_status(cfg)
             if st.get("requested"):
-                # 쿨다운 중이면 claim하지 않고 보류 — 요청은 prod에 남아 다음 폴에서 처리.
-                # (claim 후 스킵하면 요청 유실되므로, claim 전에 쿨다운 검사)
+                # 쿨다운/락은 claim '전에' 검사 — claim 후 스킵하면 요청이 유실되므로(codex P2).
+                # 둘 중 하나라도 막히면 claim하지 않고 요청을 prod에 남겨 다음 폴에서 처리.
                 if time.monotonic() - last_fetch < cooldown:
                     log.info("fetch 쿨다운 중 — 요청 보류(다음 폴에서 처리)")
-                elif _prod_claim(cfg).get("claimed"):
-                    last_fetch = time.monotonic()
-                    log.info("갱신 요청 감지 — fetch 시작")
-                    if not Path(state).is_file():
-                        cmd_login(cfg)          # 세션 없음 → 로그인부터(첫 데이터 push 포함)
-                    else:
-                        _run_with_lock(cfg, login_wait_secs=_LOGIN_WAIT_S)
+                else:
+                    with _try_fetch_lock() as acquired:
+                        if not acquired:
+                            log.info("다른 fetch 진행 중 — 요청 보류(다음 폴에서 처리)")
+                        elif _prod_claim(cfg).get("claimed"):
+                            last_fetch = time.monotonic()
+                            log.info("갱신 요청 감지 — fetch 시작")
+                            if not Path(state).is_file():
+                                # 세션 없음 → 로그인부터. 대기는 UI 폴링 윈도우(215s) 안인
+                                # _LOGIN_WAIT_S로 맞춤 — 기본 600s면 UI가 먼저 포기(codex P2).
+                                cmd_login(cfg, wait_secs=_LOGIN_WAIT_S)
+                            else:
+                                _do_run(cfg, state, login_wait_secs=_LOGIN_WAIT_S)  # 락 보유 중
         except requests.RequestException as e:
             log.warning("폴 확인 실패(네트워크): %s", str(e)[:80])
         except Exception as e:  # noqa: BLE001 — 데몬은 어떤 오류에도 죽지 않는다

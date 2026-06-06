@@ -2,7 +2,13 @@
 // 회사·기간별 매출 현황 + 상품별 상세. 컬럼 필터(▼) 드롭다운으로 값 선택 표시/숨김.
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
-import { fetchSalesSummary, fetchReplenishmentPlan, type SalesSummary, type SalesProductRow, type ReplenishmentPlan } from "../lib/api";
+import { fetchSalesSummary, fetchReplenishmentPlan, getCoupangAdCostDaily, requestAdCostRefresh, getAdCostRefreshStatus, type SalesSummary, type SalesProductRow, type ReplenishmentPlan } from "../lib/api";
+
+// 오늘 날짜(KST) YYYY-MM-DD
+function isoKSTDate(): string {
+  const kst = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Seoul" }));
+  return `${kst.getFullYear()}-${String(kst.getMonth() + 1).padStart(2, "0")}-${String(kst.getDate()).padStart(2, "0")}`;
+}
 
 const COMPANIES = [
   { value: "ALL", label: "전체" },
@@ -233,6 +239,8 @@ export default function CoupangOps() {
   const [adCookieStatus, setAdCookieStatus] = useState<{ configured: boolean; status: string; last_success_at: string | null; last_error: string | null } | null>(null);
   const [adSaving, setAdSaving] = useState(false);
   const [adSyncMsg, setAdSyncMsg] = useState<string | null>(null);
+  const [todayAdCost, setTodayAdCost] = useState<number | null>(null);  // 오늘 라이브 광고비(coupang_ad_cost_daily)
+  const [adRefreshing, setAdRefreshing] = useState(false);
 
   const API_BASE = import.meta.env.DEV ? "http://localhost:8000" : "";
 
@@ -240,11 +248,6 @@ export default function CoupangOps() {
     const r = await fetch(`${API_BASE}/api/scheduler/trigger/auto_sync_orders`, { method: "POST" });
     if (!r.ok) throw new Error(`sync failed: ${r.status}`);
     return r.json();
-  }
-
-  async function triggerAdCostSync() {
-    const r = await fetch(`${API_BASE}/api/coupang/ops/ad-cost/sync`, { method: "POST" });
-    return r.json(); // fail-soft: 오류여도 조용히 무시
   }
 
   async function loadAdCookieStatus() {
@@ -276,22 +279,43 @@ export default function CoupangOps() {
     }
   }
 
-  async function syncAdCostNow() {
-    setAdSaving(true);
-    setAdSyncMsg(null);
+  // 오늘 라이브 광고비(coupang_ad_cost_daily, Mac 페처가 채움) 로드.
+  async function loadTodayAdCost() {
     try {
-      const r = await fetch(`${API_BASE}/api/coupang/ops/ad-cost/sync`, { method: "POST" });
-      const data = await r.json();
-      if (!r.ok) throw new Error(data.detail || "sync 실패");
-      if (data.error) throw new Error(data.error);
-      const vendors = data.vendors as Array<{ vendor_id: string; day_cost: number }>;
-      const total = vendors.reduce((s: number, v: { day_cost: number }) => s + v.day_cost, 0);
-      setAdSyncMsg(`✅ 오늘 광고비: ${total.toLocaleString("ko-KR")}원`);
-      await loadAdCookieStatus();
+      const today = isoKSTDate();
+      const { costs } = await getCoupangAdCostDaily(today, today);
+      const total = costs.reduce((s, c) => s + (c.day_cost || 0), 0);
+      setTodayAdCost(costs.length ? total : null);
+    } catch { /* 조용히 실패 */ }
+  }
+
+  // "광고비 갱신" — Jino Mac 페처를 깨워 오늘 쿠팡 광고비를 즉시 가져온다(Akamai로 prod 직접 fetch 불가).
+  // request-refresh → Mac 데몬이 fetch·push → last_success_at 변화를 폴링해 완료 감지 → 오늘 광고비 리로드.
+  async function refreshAdCostNow() {
+    setAdRefreshing(true);
+    setAdSyncMsg("Mac에서 광고비 가져오는 중… (~20초, 첫 갱신이면 Mac 로그인 창 확인)");
+    try {
+      const baseline = (await getAdCostRefreshStatus()).last_success_at;
+      await requestAdCostRefresh();
+      const deadline = Date.now() + 215000; // 215초 — 데몬 로그인 대기(180s)+fetch 여유까지 커버
+      let done = false;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 3000));
+        const st = await getAdCostRefreshStatus();
+        if (st.last_success_at && st.last_success_at !== baseline) { done = true; break; }
+      }
+      if (done) {
+        await loadTodayAdCost();
+        await loadAdCookieStatus();
+        setAdSyncMsg("✅ 광고비 갱신 완료");
+        setTimeout(() => setAdSyncMsg(null), 4000);
+      } else {
+        setAdSyncMsg("⚠️ Mac 응답 없음 — Mac이 켜져 있는지, 첫 갱신이면 로그인 창을 확인하세요.");
+      }
     } catch (e: any) {
-      setAdSyncMsg("❌ " + e.message);
+      setAdSyncMsg("❌ 갱신 요청 실패: " + (e?.message || ""));
     } finally {
-      setAdSaving(false);
+      setAdRefreshing(false);
     }
   }
 
@@ -299,10 +323,11 @@ export default function CoupangOps() {
     setSyncing(true);
     setSyncMsg(null);
     try {
-      await Promise.all([triggerSync(), triggerAdCostSync().catch(() => {})]);
+      await triggerSync();
       setSyncMsg("동기화 완료");
       await load(company, days);
       await loadAdCookieStatus();
+      await loadTodayAdCost();
     } catch (e: any) {
       setSyncMsg("동기화 실패: " + e.message);
     } finally {
@@ -328,8 +353,8 @@ export default function CoupangOps() {
     let cancelled = false;
     setSyncing(true);
     (async () => {
-      try { await Promise.all([triggerSync(), triggerAdCostSync().catch(() => {})]); } catch { /* sync 실패해도 기존 데이터 표시 */ }
-      if (!cancelled) { setSyncing(false); load(company, days); loadAdCookieStatus(); }
+      try { await triggerSync(); } catch { /* sync 실패해도 기존 데이터 표시 */ }
+      if (!cancelled) { setSyncing(false); load(company, days); loadAdCookieStatus(); loadTodayAdCost(); }
     })();
     return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -515,6 +540,22 @@ export default function CoupangOps() {
             {syncing ? "동기화 중…" : "🔄 동기화"}
           </button>
           {syncMsg && <span className="text-xs text-gray-500">{syncMsg} (3초 후 갱신)</span>}
+          {/* 오늘 라이브 광고비 + 즉시 갱신(버튼 클릭 시 Mac 페처가 가져옴) */}
+          <span className="text-sm text-gray-600 border-l border-gray-200 pl-2">
+            오늘 광고비{" "}
+            <span className="font-semibold text-gray-900">
+              {todayAdCost == null ? "—" : `${todayAdCost.toLocaleString("ko-KR")}원`}
+            </span>
+          </span>
+          <button
+            onClick={refreshAdCostNow}
+            disabled={adRefreshing}
+            className="px-3 py-1.5 rounded text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 flex items-center gap-1"
+            title="Jino Mac에서 오늘 광고비를 지금 가져옵니다(~20초). Mac이 켜져 있어야 합니다."
+          >
+            {adRefreshing ? "갱신 중…" : "📣 광고비 갱신"}
+          </button>
+          {adSyncMsg && <span className="text-xs text-gray-500">{adSyncMsg}</span>}
           <button
             onClick={() => setShowAdSettings((v) => !v)}
             className={`px-3 py-1.5 rounded text-sm font-medium border transition-colors ${
@@ -522,9 +563,9 @@ export default function CoupangOps() {
               : adCookieStatus?.status === "red" ? "border-red-400 text-red-700 bg-red-50 hover:bg-red-100"
               : "border-gray-300 text-gray-600 bg-gray-50 hover:bg-gray-100"
             }`}
-            title="광고비 쿠키 설정"
+            title="광고비 쿠키 설정(레거시)"
           >
-            📣 광고쿠키 {adCookieStatus?.status === "green" ? "🟢" : adCookieStatus?.status === "red" ? "🔴" : "⬜"}
+            ⚙️ {adCookieStatus?.status === "green" ? "🟢" : adCookieStatus?.status === "red" ? "🔴" : "⬜"}
           </button>
           <span className="text-xs text-gray-400 border-l border-gray-200 pl-2">
             ※ 쿠팡 API 약 1~2시간 지연 발생 가능
@@ -572,11 +613,12 @@ export default function CoupangOps() {
                 {adSaving ? "저장 중…" : "💾 저장"}
               </button>
               <button
-                onClick={syncAdCostNow}
-                disabled={adSaving || !adCookieStatus?.configured}
+                onClick={refreshAdCostNow}
+                disabled={adRefreshing}
+                title="Jino Mac에서 오늘 광고비를 지금 가져옵니다(~20초). Mac이 켜져 있어야 합니다."
                 className="px-4 py-2 rounded text-xs font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
               >
-                {adSaving ? "동기화 중…" : "🔄 지금 동기화"}
+                {adRefreshing ? "갱신 중…" : "📣 광고비 갱신"}
               </button>
             </div>
           </div>
