@@ -32,6 +32,12 @@ LOG_PATH = Path(os.path.expanduser("~/.ohisell_ad_fetcher.log"))
 LOCK_PATH = Path(os.path.expanduser("~/.ohisell_ad_fetcher.lock"))
 DEFAULT_STATE = os.path.expanduser("~/.ohisell_ad_state.json")
 DASH_URL = "https://advertising.coupang.com/marketing/dashboard/sales?_cap_client=WING"
+# aid 쿠키 만료(발급+1h 절대) 시 keycloak 세션(12h)으로 재발급하는 SSO 시작 URL(WING).
+# 진입 → xauth.coupang.com keycloak authorize → 세션 살아있으면 비번 없이 callback → aid 재발급.
+SSO_LOGIN_URL = (
+    "https://advertising.coupang.com/user/login?_cap_client=WING"
+    "&returnUrl=%2Fmarketing%2Fdashboard%2Fsales%3F_cap_client%3DWING"
+)
 KST = ZoneInfo("Asia/Seoul")
 
 logging.basicConfig(
@@ -85,6 +91,23 @@ def _is_logged_out(url: str) -> bool:
     return any(x in u for x in ("login", "/auth", "sso", "signin"))
 
 
+def _is_auth_expired(res) -> bool:
+    """fetch 결과가 aid 만료(세션 인증 실패) 신호인지. SSO 재발급을 트리거할지 판단.
+
+    None(로그인 페이지 리다이렉트) / 401·403 / 200이지만 본문이 로그인 HTML —
+    모두 aid 만료다. keycloak 세션이 아직 살아 있으면 재발급으로 회복 가능하다.
+    """
+    if res is None:
+        return True
+    status = res.get("status")
+    if status in (401, 403):
+        return True
+    if status == 200:
+        body = (res.get("body") or "").lower()
+        return any(x in body for x in ("login", "signin", "kccontext"))
+    return False
+
+
 def _save_state(context, path: str) -> None:
     """storage_state(세션쿠키 포함)를 0600으로 저장."""
     context.storage_state(path=path)
@@ -135,6 +158,32 @@ def _fetch(page, cfg: dict):
     if _is_logged_out(page.url):
         return None
     return page.evaluate(_FETCH_JS, _payload(cfg))
+
+
+def _sso_refresh(page, timeout_s: int = 45) -> bool:
+    """aid 만료 시 keycloak 세션으로 aid를 재발급한다(비번 입력 없음).
+
+    WING 로그인 시작 URL → keycloak authorize(Akamai JS 챌린지 ~16초) → callback → 대시보드.
+    headful에서만 통과(headless는 xauth Akamai가 Access Denied로 차단). 성공 시 True.
+    keycloak 세션(12h)도 만료됐으면 로그인 폼에 머물러 False.
+    """
+    try:
+        page.goto(SSO_LOGIN_URL, wait_until="domcontentloaded", timeout=40000)
+    except Exception as e:
+        log.error("SSO 재발급 goto 오류: %s", str(e)[:120])
+        return False
+    waited = 0
+    while waited < timeout_s:
+        page.wait_for_timeout(2000)
+        waited += 2
+        try:
+            u = page.url
+        except Exception:
+            continue  # 네비게이션 중
+        if "/marketing/dashboard" in u and not _is_logged_out(u):
+            page.wait_for_timeout(1500)  # aid 쿠키 안정화
+            return True
+    return False
 
 
 def cmd_login(cfg: dict, wait_secs: int = 600) -> int:
@@ -203,16 +252,29 @@ def cmd_run(cfg: dict) -> int:
 
 
 def _do_run(cfg: dict, state: str) -> int:
-    headless = bool(cfg.get("headless", True))
+    # aid는 발급+1h 절대 만료라 매 run이 SSO 재발급을 거친다. SSO 재발급은 headful 필수
+    # (headless는 xauth Akamai 차단). config "headless"는 무시(호환 위해 키만 유지).
     res = None
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=headless)
+            browser = p.chromium.launch(headless=False)
             ctx = browser.new_context(storage_state=state)
             try:
                 page = ctx.new_page()
                 res = _fetch(page, cfg)
-                if res is not None and res.get("status") == 201:
+                if _is_auth_expired(res):
+                    # aid 만료(None/401/403/로그인HTML) → keycloak 세션으로 SSO 재발급
+                    log.info("aid 만료 — keycloak 세션으로 SSO 재발급 시도")
+                    if _sso_refresh(page):
+                        _save_state(ctx, state)  # keycloak 12h 갱신분 즉시 보존
+                        res = _fetch(page, cfg)
+                        if res is not None and res.get("status") == 201:
+                            _save_state(ctx, state)  # 재fetch 후 회전 쿠키 최종 보존
+                        log.info("SSO 재발급 완료 — fetch 재시도")
+                    else:
+                        log.error("세션 만료 — keycloak 세션도 만료. 'login' 재실행 필요.")
+                        return 1
+                elif res.get("status") == 201:
                     _save_state(ctx, state)  # 회전된 세션쿠키 갱신
             finally:
                 ctx.close()

@@ -26,7 +26,7 @@ _STALE_HOURS = 26
 _ADS_URL = "https://advertising.coupang.com/marketing/cmg-api/report/cost"
 # S0 실증 vendor IDs — 응답 키로 자동 수집하므로 하드코딩 불필요.
 # 단, Payload에 넣을 parentNodes는 저장된 vendor_ids 사용.
-_DEFAULT_VENDOR_IDS = ["104438581", "104964791"]
+_DEFAULT_VENDOR_IDS = ["104438581", "104997005"]
 
 
 # ════════════════════════════════════════════════
