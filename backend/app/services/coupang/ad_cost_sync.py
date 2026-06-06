@@ -285,16 +285,20 @@ def refresh_status(db: Session) -> dict:
 def claim_refresh(db: Session) -> dict:
     """Mac 페처가 갱신 요청을 '소비'(플래그 clear)하고 작업 시작. 중복 트리거/루프 방지.
 
-    claimed=True면 요청이 있었고 지금 clear됨 → 페처가 headful fetch 진행. False면 요청 없음.
+    원자적 조건부 UPDATE(refresh_requested_at IS NOT NULL인 행만 NULL로)로 처리해,
+    데몬이 둘 이상 동시에 돌아도 정확히 한쪽만 claimed=True(rowcount=1)가 된다(codex P2).
     claim 후 fetch가 실패(예: 로그인 필요)해도 플래그는 이미 clear라 창이 반복해 뜨지 않는다.
     """
-    row = _cookie_row(db)
-    if row is None or row.refresh_requested_at is None:
-        return {"claimed": False, "requested_at": None}
-    requested_at = row.refresh_requested_at.isoformat()
-    row.refresh_requested_at = None
+    from sqlalchemy import update
+
+    res = db.execute(
+        update(CoupangWingCookie)
+        .where(CoupangWingCookie.account_key == _ADS_ACCOUNT)
+        .where(CoupangWingCookie.refresh_requested_at.isnot(None))
+        .values(refresh_requested_at=None)
+    )
     db.commit()
-    return {"claimed": True, "requested_at": requested_at}
+    return {"claimed": (res.rowcount or 0) > 0}
 
 
 # ════════════════════════════════════════════════

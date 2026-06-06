@@ -347,6 +347,7 @@ def _do_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
 
 _POLL_INTERVAL_S = 15      # 데몬이 갱신 요청을 확인하는 간격(창 안 뜸, 가벼운 GET)
 _LOGIN_WAIT_S = 180        # 버튼 클릭 시 keycloak 만료면 로그인 대기 한도
+_MIN_FETCH_INTERVAL_S = 45  # fetch(창) 최소 간격 — 외부 요청 폭주로 창 스팸 방지(codex P2)
 
 
 def _prod_refresh_status(cfg: dict) -> dict:
@@ -376,13 +377,19 @@ def cmd_poll(cfg: dict) -> int:
     """
     state = os.path.expanduser(cfg["state_file"])
     interval = int(cfg.get("poll_interval_s", _POLL_INTERVAL_S))
-    log.info("폴 데몬 시작 — %ds 간격으로 갱신 요청 확인(창은 요청 시에만 뜸).", interval)
+    cooldown = int(cfg.get("min_fetch_interval_s", _MIN_FETCH_INTERVAL_S))
+    last_fetch = 0.0  # time.monotonic 기준. 쿨다운 내 요청은 claim 보류(요청 보존).
+    log.info("폴 데몬 시작 — %ds 간격 확인, fetch 최소간격 %ds(창은 요청 시에만 뜸).", interval, cooldown)
     while True:
         try:
             st = _prod_refresh_status(cfg)
             if st.get("requested"):
-                claim = _prod_claim(cfg)
-                if claim.get("claimed"):
+                # 쿨다운 중이면 claim하지 않고 보류 — 요청은 prod에 남아 다음 폴에서 처리.
+                # (claim 후 스킵하면 요청 유실되므로, claim 전에 쿨다운 검사)
+                if time.monotonic() - last_fetch < cooldown:
+                    log.info("fetch 쿨다운 중 — 요청 보류(다음 폴에서 처리)")
+                elif _prod_claim(cfg).get("claimed"):
+                    last_fetch = time.monotonic()
                     log.info("갱신 요청 감지 — fetch 시작")
                     if not Path(state).is_file():
                         cmd_login(cfg)          # 세션 없음 → 로그인부터(첫 데이터 push 포함)

@@ -33,6 +33,25 @@ export function getAdCostCookieStatus(): Promise<AdCostCookieStatus> {
   return fetchApi<AdCostCookieStatus>("/api/coupang/ops/ad-cost/cookie/status");
 }
 
+// ── 쿠팡 광고비 "버튼 트리거" 갱신 (Akamai로 prod 직접 fetch 불가 → Jino Mac 페처가 가져옴) ──
+// 버튼 클릭 → request-refresh로 요청 플래그 set → Mac 데몬이 감지·fetch·push →
+// refresh-status의 last_success_at가 올라가면 갱신 완료.
+export interface AdCostRefreshStatus {
+  requested: boolean;
+  requested_at: string | null;
+  last_success_at: string | null;
+  status: string; // green | red | unknown | none
+  last_error: string | null;
+}
+
+export function requestAdCostRefresh(): Promise<{ requested: boolean; requested_at: string }> {
+  return fetchApi("/api/coupang/ops/ad-cost/request-refresh", { method: "POST" });
+}
+
+export function getAdCostRefreshStatus(): Promise<AdCostRefreshStatus> {
+  return fetchApi<AdCostRefreshStatus>("/api/coupang/ops/ad-cost/refresh-status");
+}
+
 export async function uploadFile(path: string, file: File) {
   const form = new FormData();
   form.append("file", file);
