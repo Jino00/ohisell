@@ -783,8 +783,8 @@ def sales_summary(
         if fb_spend:
             total_spend = fb_spend
             total_conv = fb_conv
-            if ad_ref_date is None:
-                ad_ref_date = "report/SALES"
+            # ad_ref_date는 건드리지 않는다 — 프론트가 비-null이면 'today-only/최신업로드'
+            # 레이아웃으로 분기(CoupangOps.tsx). 폴백은 같은 기간 일반 카드에 투명 반영(codex P2).
 
     total_fee   = sum((v["fee"]      for v in merged.values()), _Z)
     total_cost  = sum((v["cost"]     for v in merged.values()), _Z)
