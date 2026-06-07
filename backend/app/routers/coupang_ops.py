@@ -773,18 +773,24 @@ def sales_summary(
     total_spend = sum((_f(ad["spend"]) for ad in ad_by_vid.values()), _Z)
     total_conv  = sum((_f(ad["conv_revenue"]) for ad in ad_by_vid.values()), _Z)
 
-    # 광고비 폴백: XLSX(CoupangAdOptionDaily)가 해당 기간에 없으면(미업로드) →
-    # report/SALES 확정값(coupang_ad_cost_daily)으로 카드 광고비·전환매출 대체.
-    # 이 테이블은 오픽스(advertiser) 단위라 company가 오픽스/ALL일 때만 적용(오하이테크는 미수집).
-    if total_spend == _Z and company in ("ALL", "오픽스"):
-        fb_rows = ad_cost_sync.get_ad_cost_range(db, dfrom, dto)
-        fb_spend = sum((Decimal(str(r["day_cost"])) for r in fb_rows), _Z)
-        fb_conv = sum((Decimal(str(r.get("conv_sales") or 0)) for r in fb_rows), _Z)
-        if fb_spend:
-            total_spend = fb_spend
-            total_conv = fb_conv
-            # ad_ref_date는 건드리지 않는다 — 프론트가 비-null이면 'today-only/최신업로드'
-            # 레이아웃으로 분기(CoupangOps.tsx). 폴백은 같은 기간 일반 카드에 투명 반영(codex P2).
+    # 광고비 폴백(날짜별): XLSX(CoupangAdOptionDaily)가 '없는 날짜'만 report/SALES
+    # 확정값(coupang_ad_cost_daily)으로 보강. XLSX 있는 날은 그대로(상품별 표와 일관).
+    # days=0(오늘=최신 XLSX 특수처리)은 제외. coupang_ad_cost_daily는 오픽스 단위→오픽스/ALL만.
+    # ad_ref_date는 건드리지 않는다 — 비-null이면 프론트가 today-only 레이아웃으로 분기(codex P2).
+    if days != 0 and company in ("ALL", "오픽스"):
+        xlsx_dates = {
+            r[0] for r in db.query(CoupangAdOptionDaily.report_date)
+            .filter(
+                CoupangAdOptionDaily.report_date >= ad_dfrom,
+                CoupangAdOptionDaily.report_date <= ad_dto,
+                *ad_filter,
+            ).distinct().all()
+        }
+        for r in ad_cost_sync.get_ad_cost_range(db, dfrom, dto):
+            if date.fromisoformat(r["date"]) in xlsx_dates:
+                continue  # 그날은 XLSX 사용(상품별 분해 보존)
+            total_spend += Decimal(str(r["day_cost"]))
+            total_conv += Decimal(str(r.get("conv_sales") or 0))
 
     total_fee   = sum((v["fee"]      for v in merged.values()), _Z)
     total_cost  = sum((v["cost"]     for v in merged.values()), _Z)
