@@ -253,11 +253,18 @@ def _sso_refresh(page, timeout_s: int = 45) -> bool:
     headful에서만 통과(headless는 xauth Akamai가 Access Denied로 차단). 성공 시 True.
     keycloak 세션(12h)도 만료됐으면 로그인 폼에 머물러 False.
     """
+    # 로그인페이지에서 곧장 SSO_LOGIN_URL로 goto하면 클라이언트 리다이렉트가
+    # 진행 중이라 net::ERR_ABORTED가 난다. 빈 페이지로 리셋 후 이동(프로브에서 검증).
+    try:
+        page.goto("about:blank", timeout=10000)
+    except Exception:
+        pass
     try:
         page.goto(SSO_LOGIN_URL, wait_until="domcontentloaded", timeout=40000)
     except Exception as e:
-        log.error("SSO 재발급 goto 오류: %s", str(e)[:120])
-        return False
+        # ERR_ABORTED는 리다이렉트로 인한 중단일 수 있음 — 바로 실패로 보지 말고
+        # 아래 URL 폴링 루프로 진입해 대시보드 착지 여부를 확인한다.
+        log.warning("SSO goto 경고(폴링으로 확인): %s", str(e)[:120])
     waited = 0
     while waited < timeout_s:
         page.wait_for_timeout(2000)
