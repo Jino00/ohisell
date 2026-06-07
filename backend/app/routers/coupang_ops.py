@@ -772,6 +772,20 @@ def sales_summary(
     total_rev   = sum((_f(od["revenue"]) for od in order_by_vid.values()), _Z)
     total_spend = sum((_f(ad["spend"]) for ad in ad_by_vid.values()), _Z)
     total_conv  = sum((_f(ad["conv_revenue"]) for ad in ad_by_vid.values()), _Z)
+
+    # 광고비 폴백: XLSX(CoupangAdOptionDaily)가 해당 기간에 없으면(미업로드) →
+    # report/SALES 확정값(coupang_ad_cost_daily)으로 카드 광고비·전환매출 대체.
+    # 이 테이블은 오픽스(advertiser) 단위라 company가 오픽스/ALL일 때만 적용(오하이테크는 미수집).
+    if total_spend == _Z and company in ("ALL", "오픽스"):
+        fb_rows = ad_cost_sync.get_ad_cost_range(db, dfrom, dto)
+        fb_spend = sum((Decimal(str(r["day_cost"])) for r in fb_rows), _Z)
+        fb_conv = sum((Decimal(str(r.get("conv_sales") or 0)) for r in fb_rows), _Z)
+        if fb_spend:
+            total_spend = fb_spend
+            total_conv = fb_conv
+            if ad_ref_date is None:
+                ad_ref_date = "report/SALES"
+
     total_fee   = sum((v["fee"]      for v in merged.values()), _Z)
     total_cost  = sum((v["cost"]     for v in merged.values()), _Z)
     total_ship  = sum((v["shipping"] for v in merged.values()), _Z)
@@ -976,10 +990,33 @@ def ingest_ad_cost(
     # 상수시간 비교(codex P2). 미설정·불일치 모두 동일한 401(서버 설정 상태 비노출).
     if not expected or not x_ingest_token or not _secrets.compare_digest(x_ingest_token.strip(), expected):
         raise HTTPException(status_code=401, detail="unauthorized")
+
+    # 신규 경로: report/SALES 날짜별 확정값 — body {days:[{date,ad_spend,conv_sales}]}.
+    days_raw = body.get("days")
+    if isinstance(days_raw, list) and days_raw:
+        days: list[dict] = []
+        for d in days_raw:
+            if not isinstance(d, dict):
+                raise HTTPException(status_code=400, detail="days[] 항목은 객체여야 함")
+            try:
+                day_date = date.fromisoformat(str(d.get("date")))
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="days[].date(YYYY-MM-DD) 필요")
+            try:
+                ad_spend = int(d.get("ad_spend") or 0)
+                conv_sales = int(d.get("conv_sales") or 0)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="ad_spend/conv_sales는 정수여야 함")
+            if ad_spend < 0 or conv_sales < 0:
+                raise HTTPException(status_code=400, detail="값은 음수일 수 없음")
+            days.append({"date": day_date, "ad_spend": ad_spend, "conv_sales": conv_sales})
+        return ad_cost_sync.ingest_ad_cost_days(db, days)
+
+    # 구 경로(back-compat): report/cost 단일일 vendors[].
     try:
         cost_date = date.fromisoformat(str(body.get("date")))
     except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="date(YYYY-MM-DD) 필요")
+        raise HTTPException(status_code=400, detail="date(YYYY-MM-DD) 또는 days[] 필요")
     raw = body.get("vendors")
     if not isinstance(raw, list) or not raw:
         raise HTTPException(status_code=400, detail="vendors[] 필요")

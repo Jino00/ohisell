@@ -27,6 +27,9 @@ _ADS_URL = "https://advertising.coupang.com/marketing/cmg-api/report/cost"
 # S0 실증 vendor IDs — 응답 키로 자동 수집하므로 하드코딩 불필요.
 # 단, Payload에 넣을 parentNodes는 저장된 vendor_ids 사용.
 _DEFAULT_VENDOR_IDS = ["104438581", "104997005"]
+# report/SALES(vendor 합계 일별 확정) 정규행 키. 날짜당 이 키 1행으로 교체 →
+# 옛 report/cost per-campaign 스냅샷 행과 중복합산 방지.
+_SALES_KEY = "ADV_SALES"
 
 
 # ════════════════════════════════════════════════
@@ -250,6 +253,42 @@ def ingest_ad_cost(db: Session, cost_date: date, vendors: list[dict]) -> dict:
     return {"date": str(cost_date), "ingested": n}
 
 
+def ingest_ad_cost_days(db: Session, days: list[dict]) -> dict:
+    """report/SALES 기반 날짜별 확정 광고비 적재(Mac 페처가 최근 N일치 push).
+
+    각 날짜는 정규행 1개(_SALES_KEY)로 '교체'한다 — 해당 날짜 기존 행(옛 report/cost
+    per-campaign 스냅샷 포함)을 전부 삭제 후 삽입. 같은 날짜를 다시 받으면 확정치로 교정.
+    days: [{"date": date, "ad_spend": int, "conv_sales": int}].
+    """
+    n = 0
+    for d in days:
+        cost_date = d["date"]
+        db.query(CoupangAdCostDaily).filter(
+            CoupangAdCostDaily.cost_date == cost_date
+        ).delete(synchronize_session=False)
+        db.add(CoupangAdCostDaily(
+            cost_date=cost_date,
+            vendor_id=_SALES_KEY,
+            day_cost=int(d["ad_spend"]),
+            conv_sales=int(d["conv_sales"]),
+            month_cost=0,
+            synced_at=kst_now(),
+        ))
+        n += 1
+    db.commit()
+    # heartbeat green(배너 staleness 기준) — ingest_ad_cost와 동일.
+    row = _cookie_row(db)
+    if row is None:
+        row = CoupangWingCookie(account_key=_ADS_ACCOUNT)
+        db.add(row)
+    row.status = "green"
+    row.last_error = None
+    row.last_success_at = kst_now()
+    db.commit()
+    log.info("광고비 ingest(SALES): days=%d", n)
+    return {"ingested_days": n}
+
+
 # ════════════════════════════════════════════════
 # 갱신 트리거 (대시보드 버튼 → Mac 페처 데몬, "볼 때만 클릭" 방식)
 # ════════════════════════════════════════════════
@@ -312,6 +351,7 @@ def get_ad_cost_range(db: Session, start: date, end: date) -> list[dict]:
         db.query(
             CoupangAdCostDaily.cost_date,
             sqlfunc.sum(CoupangAdCostDaily.day_cost).label("day_cost"),
+            sqlfunc.sum(CoupangAdCostDaily.conv_sales).label("conv_sales"),
         )
         .filter(
             CoupangAdCostDaily.cost_date >= start,
@@ -321,4 +361,8 @@ def get_ad_cost_range(db: Session, start: date, end: date) -> list[dict]:
         .order_by(CoupangAdCostDaily.cost_date)
         .all()
     )
-    return [{"date": str(r.cost_date), "day_cost": int(r.day_cost)} for r in rows]
+    return [
+        {"date": str(r.cost_date), "day_cost": int(r.day_cost),
+         "conv_sales": int(r.conv_sales or 0)}
+        for r in rows
+    ]

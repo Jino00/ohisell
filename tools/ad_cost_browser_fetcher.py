@@ -22,7 +22,7 @@ import logging
 import os
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -55,6 +55,23 @@ _FETCH_JS = """async (payload) => {
   const t = setTimeout(() => ctrl.abort(), 25000);
   try {
     const r = await fetch('https://advertising.coupang.com/marketing/cmg-api/report/cost', {
+      method: 'POST',
+      headers: {'content-type': 'application/json', 'accept': 'application/json, text/plain, */*'},
+      body: JSON.stringify(payload),
+      credentials: 'include',
+      signal: ctrl.signal,
+    });
+    return { status: r.status, body: await r.text() };
+  } finally { clearTimeout(t); }
+}"""
+
+# report/SALES — 날짜 범위 받아 날짜별 확정 광고비/전환매출 반환(과거일만, 오늘 제외).
+# payload {start,end} epoch ms. 응답 {result:{<날짜epoch>:{DELIVERED_AD_COST,AD_ATTRIBUTED_SALES,...}}}.
+_SALES_FETCH_JS = """async (payload) => {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 25000);
+  try {
+    const r = await fetch('https://advertising.coupang.com/marketing/cmg-api/report/SALES', {
       method: 'POST',
       headers: {'content-type': 'application/json', 'accept': 'application/json, text/plain, */*'},
       body: JSON.stringify(payload),
@@ -151,6 +168,60 @@ def _push(cfg: dict, data: dict) -> int:
     log.info("성공: %s push %s → %s", today,
              [(v["vendor_id"], v["day_cost"]) for v in vendors], info)
     return 0
+
+
+def _sales_payload(cfg: dict) -> dict:
+    """report/SALES 날짜 범위(최근 N일, 기본 7) — KST 기준 epoch ms {start,end}."""
+    days = int(cfg.get("sales_days", 7))
+    now = datetime.now(KST)
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    start = midnight - timedelta(days=days - 1)
+    end = midnight + timedelta(days=1)  # 오늘 자정+1일(상한, report/SALES는 오늘 제외 반환)
+    return {"start": int(start.timestamp() * 1000), "end": int(end.timestamp() * 1000)}
+
+
+def _push_sales(cfg: dict, sales_body: str) -> None:
+    """report/SALES 응답 → 과거 확정일(오늘 제외) days[] 로 prod ingest push.
+
+    실패해도 report/cost(오늘) push 결과에 영향 없음 — best-effort 보강.
+    """
+    try:
+        data = json.loads(sales_body or "")
+    except (ValueError, TypeError):
+        log.warning("report/SALES JSON 파싱 실패 — 과거일 갱신 건너뜀")
+        return
+    result = data.get("result", data) if isinstance(data, dict) else {}
+    today = datetime.now(KST).date()
+    days = []
+    for epoch_ms, m in (result or {}).items():
+        if not isinstance(m, dict):
+            continue
+        try:
+            d = datetime.fromtimestamp(int(epoch_ms) / 1000, KST).date()
+        except (ValueError, TypeError, OverflowError):
+            continue
+        if d >= today:  # 오늘은 report/cost(running)이 담당 — 덮어쓰지 않음
+            continue
+        days.append({
+            "date": d.isoformat(),
+            "ad_spend": int(m.get("DELIVERED_AD_COST") or 0),
+            "conv_sales": int(m.get("AD_ATTRIBUTED_SALES") or 0),
+        })
+    if not days:
+        log.info("report/SALES: 갱신할 과거 확정일 없음")
+        return
+    try:
+        pr = requests.post(
+            cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/ad-cost/ingest",
+            json={"days": days},
+            headers={"X-Ingest-Token": cfg["ingest_token"]},
+            timeout=20,
+        )
+        pr.raise_for_status()
+    except requests.RequestException as e:
+        log.warning("report/SALES push 실패(무시): %s", str(e)[:120])
+        return
+    log.info("확정일 push: %s", [(d["date"], d["ad_spend"]) for d in days])
 
 
 def _fetch(page, cfg: dict, retries: int = 2):
@@ -297,6 +368,7 @@ def _do_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
     # (headless는 xauth Akamai 차단). config "headless"는 무시(호환 위해 키만 유지).
     # login_wait_secs>0(버튼 트리거): keycloak도 만료면 같은 창에서 로그인 대기 후 fetch.
     res = None
+    sales_body = None  # report/SALES 응답(과거 확정일) — 성공 시 _push_sales로 보강
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=False)
@@ -333,6 +405,13 @@ def _do_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
                         return 1
                 elif res.get("status") == 201:
                     _save_state(ctx, state)  # 회전된 세션쿠키 갱신
+                # report/cost 성공 시, 같은 인증 세션으로 report/SALES(과거 확정일)도 1회 수집
+                if res is not None and res.get("status") == 201:
+                    try:
+                        _sr = page.evaluate(_SALES_FETCH_JS, _sales_payload(cfg))
+                        sales_body = _sr.get("body") if _sr else None
+                    except Exception as e:
+                        log.warning("report/SALES fetch 실패(무시): %s", str(e)[:100])
             finally:
                 ctx.close()
                 browser.close()
@@ -356,7 +435,10 @@ def _do_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
     except (ValueError, TypeError) as e:
         log.error("응답 JSON 파싱 실패: %s", e)
         return 1
-    return _push(cfg, data)
+    rc = _push(cfg, data)              # 오늘 running(헤더 "오늘 광고비")
+    if sales_body:
+        _push_sales(cfg, sales_body)    # 과거 확정일(어제 등) — best-effort
+    return rc
 
 
 _POLL_INTERVAL_S = 15      # 데몬이 갱신 요청을 확인하는 간격(창 안 뜸, 가벼운 GET)

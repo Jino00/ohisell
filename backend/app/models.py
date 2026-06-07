@@ -622,10 +622,14 @@ class CoupangRgInbound(Base):
 # 쿠팡 광고비 일별 (advertising.coupang.com Wing 내부 API)
 # ──────────────────────────────────────────────
 class CoupangAdCostDaily(Base):
-    """advertising.coupang.com /marketing/cmg-api/report/cost 응답 — 일별 광고비.
+    """advertising.coupang.com 광고 리포트 응답 — 일별 확정 광고비.
 
-    day_cost: 해당 날짜의 광고비(원). month_cost: 해당 월 누적(참고용).
-    vendor_id: adNodeId(예: '104438581'). account_key: COUPANG_ADS1 등.
+    day_cost: 해당 날짜 확정 광고비(원, report/SALES DELIVERED_AD_COST).
+    conv_sales: 해당 날짜 광고전환매출(원, report/SALES AD_ATTRIBUTED_SALES). ROAS=conv_sales/day_cost.
+    month_cost: 구 report/cost 잔재(참고용). vendor_id: advertiser/adNodeId 키.
+
+    적재 소스: Mac 페처가 report/SALES로 최근 7일 날짜별 확정값을 받아 ingest.
+    같은 날짜를 다시 받으면 확정치로 교정(과거 partial 스냅샷 대체).
     """
 
     __tablename__ = "coupang_ad_cost_daily"
@@ -637,6 +641,7 @@ class CoupangAdCostDaily(Base):
     cost_date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)
     vendor_id: Mapped[str] = mapped_column(String(30), nullable=False)
     day_cost: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    conv_sales: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     month_cost: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
