@@ -127,7 +127,7 @@ function RgReplenishmentSection({
                 <th className="px-3 py-2 text-right">현재고</th>
                 <th className="px-3 py-2 text-right">일판매</th>
                 <th className="px-3 py-2 text-right">리드타임</th>
-                <th className="px-3 py-2 text-right">며칠치</th>
+                <th className="px-3 py-2 text-right">판매가능일</th>
                 <th className="px-3 py-2 text-center">권장 발송일</th>
                 <th className="px-3 py-2 text-right">권장 수량</th>
               </tr>
