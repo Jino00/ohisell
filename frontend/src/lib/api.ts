@@ -449,9 +449,11 @@ export interface ReplenishmentPlan {
   items: ReplenishmentItem[];
 }
 
-export function fetchReplenishmentPlan(targetDays = 7): Promise<ReplenishmentPlan> {
+export function fetchReplenishmentPlan(company = "ALL", targetDays = 7): Promise<ReplenishmentPlan> {
+  // company가 ALL이면 전체 계정, 아니면 그 회사의 RG 재고 계정으로 백엔드가 필터.
+  const companyParam = company && company !== "ALL" ? `&company=${encodeURIComponent(company)}` : "";
   return fetchApi<ReplenishmentPlan>(
-    `/api/coupang/ops/replenishment-plan?target_days=${targetDays}`
+    `/api/coupang/ops/replenishment-plan?target_days=${targetDays}${companyParam}`
   );
 }
 

@@ -371,16 +371,18 @@ export default function CoupangOps() {
 
   useEffect(() => { load(company, days); }, [company, days, load]);
 
-  // 로켓그로스 탭 선택 시 발송관제 플랜 로드
+  // 로켓그로스 탭 선택 시 발송관제 플랜 로드 (회사 탭 필터 반영)
   useEffect(() => {
     if (channelFilter !== "로켓그로스") return;
+    let cancelled = false;  // codex P2: 회사 탭 빠른 전환 시 옛 응답이 새 응답 덮어쓰는 레이스 방지
     setRgLoading(true);
     setRgError(null);
-    fetchReplenishmentPlan(7)
-      .then(setRgPlan)
-      .catch((e: Error) => setRgError(e.message))
-      .finally(() => setRgLoading(false));
-  }, [channelFilter]);
+    fetchReplenishmentPlan(company, 7)
+      .then((p) => { if (!cancelled) setRgPlan(p); })
+      .catch((e: Error) => { if (!cancelled) setRgError(e.message); })
+      .finally(() => { if (!cancelled) setRgLoading(false); });
+    return () => { cancelled = true; };
+  }, [channelFilter, company]);
 
   // 드롭다운 외부 클릭 시 닫기
   useEffect(() => {

@@ -467,6 +467,14 @@ _CHANNEL_META: dict[str, tuple[str, str]] = {
     "COUPANG_ROCKET":  ("오하이테크", "로켓배송"),
 }
 
+# 회사 → RG 재고가 적재된 셀러 계정(account_key). RG 재고/입고는 셀러 WING 계정 단위로
+# 동기화되므로(실측: CoupangRgInventory.account_key ∈ {COUPANG_WING1, COUPANG_WING2}),
+# 발송관제 회사 필터는 그 회사의 Wing 계정으로 변환한다. _CHANNEL_META에서 파생(단일 진실원천).
+_RG_WING_PAIRS = [(comp, code) for code, (comp, ch_type) in _CHANNEL_META.items() if ch_type == "Wing"]
+_RG_ACCOUNT_BY_COMPANY: dict[str, str] = dict(_RG_WING_PAIRS)
+# codex P2: 한 회사에 Wing 계정이 2개면 dict가 조용히 덮어써 매핑이 모호해짐 → 1대1 단언.
+assert len(_RG_ACCOUNT_BY_COMPANY) == len(_RG_WING_PAIRS), "한 회사에 Wing 계정 2개 — RG 계정 매핑 모호"
+
 
 def _safe_cfg(code: str):
     try:
@@ -943,12 +951,18 @@ def get_sales_velocity(
 def get_replenishment_plan(
     db: Session = Depends(get_db),
     account_key: str | None = Query(None, description="특정 셀러계정만(미지정=전체)"),
+    company: str | None = Query(None, description="회사 필터(오픽스/오하이테크/ALL). account_key보다 우선 — RG 재고 적재 계정으로 변환."),
     target_days: int = Query(7, ge=1, le=14, description="FC 목표 보관 일수(D-9: 1주일치, 기본 7)"),
 ):
     """현재고 보유 옵션 전체의 권장 발송일·수량(배치 역산) + status별 집계.
 
     속도·리드타임을 각 1회 산출해 옵션별 calc에 주입(원칙 18-8). 단순 조회가 아니라 3개 SA를
-    가로지르는 오케스트레이션이므로 rg_replenishment Harness를 경유한다(원칙 18-7)."""
+    가로지르는 오케스트레이션이므로 rg_replenishment Harness를 경유한다(원칙 18-7).
+    company가 오면(ALL 제외) 그 회사의 RG 재고 적재 계정으로 변환해 account_key를 덮어쓴다."""
+    if company and company not in ("ALL", "전체"):
+        # codex P2 fail-closed: 미지의 회사명이면 매칭 계정 없음(__unknown__)→빈 결과.
+        # 필터를 명시 요청했는데 전체를 노출하지 않는다(전체는 company 미지정/ALL일 때만).
+        account_key = _RG_ACCOUNT_BY_COMPANY.get(company, "__unknown__")
     return rg_replenishment.build_replenishment_plan(db, account_key, target_days=target_days)
 
 
