@@ -177,7 +177,8 @@ def _load_client(db: Session, account_key: str) -> CoupangWingRgSettlementClient
     if row.status == "red":
         raise WingAuthError(f"{account_key} Wing 쿠키 만료(status=red) — 재등록 필요")
     cookie = decrypt_secret(row.cookie_blob)
-    xsrf = row.xsrf_token or ""
+    # xsrf_token은 Fernet 암호화 저장(inbound_sync.py:176 동일 패턴). 복호화 필수.
+    xsrf = decrypt_secret(row.xsrf_token) if row.xsrf_token else ""
     return CoupangWingRgSettlementClient(cookie_header=cookie, xsrf_token=xsrf)
 
 

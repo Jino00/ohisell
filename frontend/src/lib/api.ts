@@ -347,6 +347,16 @@ export interface OverviewProductRow {
   sale_price: string;
   in_master: boolean;
 }
+export interface RgSettlementByAccount {
+  account_key: string;
+  total: string;
+  sale_fee: string;
+  fulfillment: string;
+  storage: string;
+  return_fee: string;
+  other: string;
+}
+
 export interface OverviewResponse {
   period: { from: string; to: string };
   account: {
@@ -370,6 +380,10 @@ export interface OverviewResponse {
       option_count: number; order_count: number; order_qty: number; return_qty: number;
     };
     by_option: OverviewProductRow[];
+  };
+  rg_settlement?: {
+    summary: { total: string; has_data: boolean; note: string };
+    by_account: RgSettlementByAccount[];
   };
 }
 

@@ -5,6 +5,7 @@ import {
   fetchCommandCenter,
   syncRealtime,
   type OverviewResponse,
+  type RgSettlementByAccount,
 } from "../lib/api";
 
 function isoKST(d: Date): string {
@@ -184,10 +185,44 @@ function Card({ label, value, sub }: { label: string; value: string; sub?: strin
   );
 }
 
+function RgSettlementCard({ data }: { data: OverviewResponse }) {
+  const rg = data.rg_settlement;
+  if (!rg) return null;
+  if (!rg.summary.has_data) {
+    return (
+      <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-4">
+        <span className="text-sm text-amber-700">🚧 RG 정산 비용(미반영) — 데이터 없음 (sync 필요)</span>
+      </div>
+    );
+  }
+  return (
+    <div className="bg-orange-50 border border-orange-200 rounded-lg p-4 mb-4">
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-sm font-semibold text-orange-800">⚠️ RG 정산 비용 (미반영 — Phase 1 대조 지표)</span>
+        <span className="text-base font-bold text-orange-900">{won(rg.summary.total)}</span>
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+        {rg.by_account.map((a: RgSettlementByAccount) => (
+          <div key={a.account_key} className="bg-white rounded border border-orange-100 p-2 text-xs">
+            <div className="font-medium text-gray-700 mb-1">{a.account_key}</div>
+            <div className="flex justify-between"><span className="text-gray-500">판매수수료</span><span>{won(a.sale_fee)}</span></div>
+            <div className="flex justify-between"><span className="text-gray-500">풀필먼트</span><span>{won(a.fulfillment)}</span></div>
+            <div className="flex justify-between"><span className="text-gray-500">보관비</span><span>{won(a.storage)}</span></div>
+            <div className="flex justify-between"><span className="text-gray-500">반품비</span><span>{won(a.return_fee)}</span></div>
+            <div className="flex justify-between font-semibold border-t border-orange-100 mt-1 pt-1"><span>합계</span><span>{won(a.total)}</span></div>
+          </div>
+        ))}
+      </div>
+      <p className="text-xs text-orange-600 mt-2">* 순이익에 미포함(Phase 2에서 반영 예정)</p>
+    </div>
+  );
+}
+
 function AccountView({ data }: { data: OverviewResponse }) {
   const s = data.account.summary;
   return (
     <>
+      <RgSettlementCard data={data} />
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
         <Card label="매출" value={won(s.revenue)} />
         <Card label="반품 차감" value={won(s.return_deduction)} />

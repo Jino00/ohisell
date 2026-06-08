@@ -23,6 +23,7 @@ from app.models import (
     CoupangProductItem,
     CoupangReturnItem,
     CoupangRevenueFee,
+    CoupangRgSettlementFee,
     Order,
     ProductChannelMapping,
     ProductMaster,
@@ -205,6 +206,37 @@ def _agg_fees(db: Session, dfrom: date, dto: date) -> dict[str, dict]:
     }
 
 
+def _agg_rg_settlement_fees(db: Session, dfrom: date, dto: date) -> dict[str, dict]:
+    """RG 정산 수수료를 account_key별·fee_type별로 집계. D-6/D-7: 대조(reconciliation) 뷰용.
+
+    날짜 필터: recognition_date_from과 recognition_date_to가 [dfrom, dto]와 겹치는 행.
+    겹침 조건 = recognition_date_from <= dto AND recognition_date_to >= dfrom.
+    반환: {account_key: {fee_type: amount, ..., "total": Decimal}}
+    """
+    rows = (
+        db.query(
+            CoupangRgSettlementFee.account_key,
+            CoupangRgSettlementFee.fee_type,
+            func.sum(CoupangRgSettlementFee.amount),
+        )
+        .filter(
+            CoupangRgSettlementFee.recognition_date_from <= dto,
+            CoupangRgSettlementFee.recognition_date_to >= dfrom,
+        )
+        .group_by(
+            CoupangRgSettlementFee.account_key,
+            CoupangRgSettlementFee.fee_type,
+        )
+        .all()
+    )
+    result: dict[str, dict] = {}
+    for account_key, fee_type, amount in rows:
+        entry = result.setdefault(account_key, {"total": _Z})
+        entry[fee_type] = _f(amount)
+        entry["total"] = entry["total"] + _f(amount)
+    return result
+
+
 def _product_master(db: Session) -> dict[str, dict]:
     """상품 옵션 마스터 — 이름·가격·등록수수료율·재고·원가성 공급가. 조망 베이스."""
     out: dict[str, dict] = {}
@@ -285,6 +317,7 @@ def compute_command_center(db: Session, dfrom: date, dto: date) -> dict:
     ads = _agg_ads(db, dfrom, dto)
     returns = _agg_returns(db, dfrom, dto)
     fees = _agg_fees(db, dfrom, dto)
+    rg_fees = _agg_rg_settlement_fees(db, dfrom, dto)  # D-6/D-7: 대조 뷰용
 
     all_vids = set(master) | set(orders) | set(ads) | set(returns) | set(fees)
 
@@ -401,9 +434,33 @@ def compute_command_center(db: Session, dfrom: date, dto: date) -> dict:
         "return_qty": sum(x["return_qty"] for x in product_rows),
     }
 
+    # D-6/D-7: RG 정산 비용 대조(reconciliation) 뷰 — net_profit 불변, 독립 섹션.
+    rg_total = sum((v["total"] for v in rg_fees.values()), _Z)
+    rg_by_account = [
+        {
+            "account_key": ak,
+            "total": v["total"],
+            "sale_fee": v.get("sale_fee", _Z),
+            "fulfillment": v.get("fulfillment", _Z),
+            "storage": v.get("storage", _Z),
+            "return_fee": v.get("return_shipping", _Z) + v.get("return_handling", _Z),
+            "other": v.get("warehousing", _Z) + v.get("ad_sales", _Z),
+        }
+        for ak, v in sorted(rg_fees.items())
+    ]
+    rg_settlement = {
+        "summary": {
+            "total": rg_total,
+            "has_data": len(rg_fees) > 0,
+            "note": "RG 정산 비용(미반영) — Phase1 대조 지표. net_profit에 미포함(D-6).",
+        },
+        "by_account": rg_by_account,
+    }
+
     return {
         "period": {"from": dfrom.isoformat(), "to": dto.isoformat()},
         "account": {"summary": account_sum, "by_option": account_rows},
         "ad": {"summary": ad_sum, "by_option": ad_rows},
         "product": {"summary": product_sum, "by_option": product_rows},
+        "rg_settlement": rg_settlement,
     }

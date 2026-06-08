@@ -398,6 +398,31 @@ def sync_coupang_rg_inbound_job():
         db.close()
 
 
+def sync_coupang_rg_settlement_job():
+    """RG 정산 수수료 자동 동기화 (05:30 KST) — 윙 내부 API(status/api). D-10: 매출인식일 기준.
+
+    쿠키 만료(WingAuthError)는 fail-soft(status red). 예상치 못한 예외만 raise."""
+    db = _get_own_db_session()
+    try:
+        from app.services.coupang.rg_settlement_sync import sync_rg_settlement, RG_ACCOUNTS
+
+        for account_key in RG_ACCOUNTS:
+            result = sync_rg_settlement(db, account_key)
+            log.info("[스케줄러] RG 정산 sync (%s): %s", account_key, result)
+
+        state = db.query(SchedulerState).filter(
+            SchedulerState.job_name == "sync_coupang_rg_settlement"
+        ).first()
+        if state:
+            state.last_run_at = kst_now()
+            db.commit()
+    except Exception as e:
+        log.exception("[스케줄러] sync_coupang_rg_settlement_job 에러: %s", e)
+        raise
+    finally:
+        db.close()
+
+
 def sync_coupang_ad_cost_job():
     """쿠팡 광고비 자동 동기화 (자정 00:10 KST) — advertising.coupang.com Wing 내부 API.
 
@@ -597,6 +622,7 @@ def _ensure_default_states(db):
         ("sync_naver_case_settlement", "30 5 * * *"),
         ("sync_meta_ad_costs", "0 7 * * *"),
         ("sync_coupang_rg_inbound", "20 5 * * *"),
+        ("sync_coupang_rg_settlement", "30 5 * * *"),
         ("sync_coupang_products", "30 5 * * *"),
         ("sync_coupang_rg_sizes", "35 5 * * *"),
         ("sync_coupang_rg_inventory", "40 5 * * *"),
@@ -656,6 +682,8 @@ def start_scheduler():
                 job_func = sync_coupang_rg_orders_job
             elif state.job_name == "sync_coupang_rg_inbound":
                 job_func = sync_coupang_rg_inbound_job
+            elif state.job_name == "sync_coupang_rg_settlement":
+                job_func = sync_coupang_rg_settlement_job
             elif state.job_name == "sync_coupang_coupons":
                 job_func = sync_coupang_coupons_job
             elif state.job_name == "sync_coupang_cs":
