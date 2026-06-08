@@ -62,7 +62,7 @@
 - [x] **S1. CoupangWingRgSettlementClient SA** — `status/api`(주별 정산리포트, 매출인식일 기준 D-10) 래퍼. 세션쿠키+xsrf (inbound.py 패턴). 방어적 파싱(D-13). profit-status 보조. ★body 실측(2026-06-09): {startDate, endDate, searchDateType:"SALES"(매출인식일)/"PAYMENT"(정산일)}.
 - [x] **S2. CoupangRgSettlementFee 모델 + 마이그레이션** — grain=(account_key×recognition_date_from×recognition_date_to×fee_type). **판매수수료(B)+풀필먼트(J) 둘 다**(D-9). 음수(취소/환급) 허용. alembic g1h2i3j4k5l6.
 - [x] **S3. rg_settlement_sync Harness** — status/api 수집·파싱(D-8)·적재 + fail-soft(302→🔴). **fixture 테스트(D-12) 14/14 PASS**: 파싱·부호·집계·dedup·누락필드 방어.
-- [ ] **S4. 대조 뷰 노출(D-6/D-7)** — compute_command_center에 'RG 정산 비용(미반영)' 독립 지표(account_key별). net_profit **불변**. 광고비는 표시만(D-11). API/프론트. scheduler 등록.
+- [x] **S4. 대조 뷰 노출(D-6/D-7)** — compute_command_center에 'RG 정산 비용(미반영)' 독립 지표(account_key별). net_profit **불변**. 광고비는 표시만(D-11). API/프론트. scheduler 등록. codex P2×2 수정(rg_settlement.py 미커밋 + xsrf decrypt). 커밋 e7cb99f.
 ### Phase 2 — net_profit 플립 (규칙 잠근 뒤 정확 반영)
 - [ ] **S5. 회계 규칙 최종 잠금 + 엑셀 스키마 실증** — basis(D-10)·dedup(D-11) 코드 확정 + 종류별 리포트 엑셀 컬럼(vendor_item_id 유무) 확인(윙 로그인). ★S6 전제(Codex #9: 조기 확인).
 - [ ] **S6. 옵션 단위 수집** — download-list/api + 비동기 엑셀 폴링·파싱 → CoupangRgSettlementFee에 vendor_item_id 추가. Σ(옵션)==계정총액 검산. fixture 테스트.
@@ -72,11 +72,11 @@
 ## 현재 진행 단계
 - 2026-06-08: discovery 완료 + 계획서 + **plan-eng-review + Codex 외부검증 통과**. 구현 착수 전.
 - 2026-06-09: **S1~S3 완료**. status/api body 실측(searchDateType SALES/PAYMENT). fixture 테스트 14/14 PASS.
-- 2026-06-09: **codex review 완료**. P1×2(Alembic multi-head 수정 → down_revision=b2d4f6082ace ✅, 날짜변환 P1은 S0 라이브 증거로 기각), P2 수용(date.today→kst_now().date() ✅). 14/14 PASS 재확인.
+- 2026-06-09: **S4 완료**. intelligence.py _agg_rg_settlement_fees()+rg_settlement 독립섹션. scheduler sync_coupang_rg_settlement_job 05:30 KST. 프론트 RgSettlementCard(계정별 대조 카드). codex P2×2 수정(rg_settlement.py 미커밋 + xsrf decrypt_secret 누락). 커밋 e7cb99f. Phase 1(S1~S4) 코드 완료. **prod self-verify 미실시**.
 
 ## 다음 액션
-- **S4**: compute_command_center에 'RG 정산 비용(미반영)' 독립 지표(net_profit 불변) + API/프론트 + scheduler 등록.
-- prod self-verify: SSH 후 마이그레이션 적용 → sync_rg_settlement 수동 호출 → DB 확인.
+- **prod self-verify (최우선)**: SSH → `alembic upgrade head` → `sync_rg_settlement("COUPANG_WING1")` 수동 호출 → DB + 프론트 종합조망 RG 카드 확인.
+- **S5**: 회계 규칙 최종 잠금 + 엑셀 스키마 실증(vendor_item_id 유무).
 
 ## GSTACK REVIEW REPORT
 
