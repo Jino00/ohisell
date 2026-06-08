@@ -138,7 +138,16 @@ function RgReplenishmentSection({
                 return (
                   <tr key={it.vendor_item_id} className={`border-t border-gray-50 hover:bg-gray-50 ${meta.row}`}>
                     <td className="px-4 py-2 max-w-[320px]">
-                      <div className="truncate text-gray-900" title={it.item_name}>{it.item_name}</div>
+                      <div
+                        className="truncate text-gray-900"
+                        title={it.product_name ? `${it.product_name}, ${it.item_name}` : it.item_name}
+                      >
+                        {it.product_name ? (
+                          <>{it.product_name}<span className="text-gray-400">, {it.item_name}</span></>
+                        ) : (
+                          it.item_name
+                        )}
+                      </div>
                       <div className="text-xs text-gray-400">{it.vendor_item_id}</div>
                     </td>
                     <td className="px-3 py-2 text-center">

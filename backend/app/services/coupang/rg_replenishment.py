@@ -120,13 +120,20 @@ def build_replenishment_plan(
     lead_times = estimate_lead_times(db, account_key)
     inventory = _load_inventory(db, account_key)
 
-    # item_name 1회 조회 (UI 표시용 — 없으면 vendor_item_id 그대로)
+    # 상품명·옵션명 1회 조회 (UI 표시용 — 메인 테이블과 동일하게 '상품명 + 옵션명').
+    # product_name=seller_product_name, item_name=옵션명. 둘 다 없으면 vendor_item_id 폴백.
     name_rows = (
-        db.query(CoupangProductItem.vendor_item_id, CoupangProductItem.item_name)
+        db.query(
+            CoupangProductItem.vendor_item_id,
+            CoupangProductItem.seller_product_name,
+            CoupangProductItem.item_name,
+        )
         .filter(CoupangProductItem.vendor_item_id.in_(list(inventory.keys())))
         .all()
     )
-    item_names: dict[str, str | None] = {str(r[0]): r[1] for r in name_rows}
+    names: dict[str, tuple[str | None, str | None]] = {
+        str(r[0]): (r[1], r[2]) for r in name_rows
+    }
 
     items: list[dict] = []
     for vii, stock in inventory.items():
@@ -140,7 +147,9 @@ def build_replenishment_plan(
             velocity=velocity,
             lead_time=lead,
         )
-        result["item_name"] = item_names.get(vii) or vii
+        product_name, option_name = names.get(vii, (None, None))
+        result["product_name"] = product_name           # 상품명(없으면 None → 프론트가 옵션명만 표시)
+        result["item_name"] = option_name or vii         # 옵션명(없으면 옵션ID 폴백)
         items.append(result)
 
     items.sort(key=_sort_key)

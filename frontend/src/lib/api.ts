@@ -418,6 +418,7 @@ export function fetchSalesSummary(company: string, days: number): Promise<SalesS
 
 export interface ReplenishmentItem {
   vendor_item_id: string;
+  product_name?: string | null;
   item_name: string;
   status: "reorder_now" | "ok" | "well_stocked" | "insufficient_data";
   confidence?: "ok" | "low";
