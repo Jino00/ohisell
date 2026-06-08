@@ -15,7 +15,7 @@ from decimal import Decimal, ROUND_HALF_UP
 
 import os
 
-from fastapi import APIRouter, Body, Depends, Header, HTTPException, Path, Query
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, Header, HTTPException, Path, Query, Request
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -1041,6 +1041,57 @@ def ingest_ad_cost(
         vendors.append({"vendor_id": str(v["vendor_id"]).strip(),
                         "day_cost": day_cost, "month_cost": month_cost})
     return ad_cost_sync.ingest_ad_cost(db, cost_date, vendors)
+
+
+@router.post("/ad-cost/option-ingest")
+async def ingest_ad_cost_option(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    x_ingest_token: str | None = Header(default=None),
+    x_report_filename: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """로컬 페처 → 옵션×일별 광고비 XLSX(Billboard 보고서) 바이트 인제스트.
+
+    advertising.coupang.com Billboard 보고서는 옵션ID×일별 광고비의 유일한 소스(레퍼런스 16).
+    Akamai 차단으로 prod 직접 다운로드 불가 → Jino Mac 페처가 받아 바이트로 push.
+    인증: X-Ingest-Token == AD_INGEST_TOKEN. 파일명은 X-Report-Filename 헤더(vendor_id 추출용).
+    기존 수동 업로드와 동일 파서(ad_costs.ingest_coupang_ad_xlsx_content)를 재사용한다.
+    """
+    import secrets as _secrets
+
+    from app.routers.ad_costs import ingest_coupang_ad_xlsx_content, _recalc_profit_background
+
+    expected = os.getenv("AD_INGEST_TOKEN", "").strip()
+    if not expected or not x_ingest_token or not _secrets.compare_digest(x_ingest_token.strip(), expected):
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+    filename = (x_report_filename or "").strip()
+    if not filename:
+        raise HTTPException(status_code=400, detail="X-Report-Filename 헤더 필요({vendor_id}_pa_daily_*.xlsx)")
+
+    # 크기 상한(codex P2): 토큰 인증이지만 방어적으로 과대 본문 거부(메모리 폭주 차단).
+    # 옵션 보고서 XLSX는 보통 ~150KB. Content-Length 선검사 + 스트림 누적 한도(헤더 없거나
+    # 거짓이어도 초과 즉시 중단 — 전체를 메모리에 올리기 전에 차단).
+    _MAX = 30 * 1024 * 1024
+    clen = request.headers.get("content-length")
+    if clen and clen.isdigit() and int(clen) > _MAX:
+        raise HTTPException(status_code=413, detail="본문 과대(최대 30MB)")
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > _MAX:
+            raise HTTPException(status_code=413, detail="본문 과대(최대 30MB)")
+        chunks.append(chunk)
+    content = b"".join(chunks)
+    if not content:
+        raise HTTPException(status_code=400, detail="빈 본문 — xlsx 바이트 필요")
+
+    result, recalc_from, recalc_to = ingest_coupang_ad_xlsx_content(content, filename, db)
+    if recalc_from and recalc_to:
+        background_tasks.add_task(_recalc_profit_background, recalc_from, recalc_to)
+    return result
 
 
 @router.post("/ad-cost/request-refresh")

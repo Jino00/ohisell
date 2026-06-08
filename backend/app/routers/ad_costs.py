@@ -445,21 +445,20 @@ def _detect_xlsx_format(headers: list) -> dict:
     }
 
 
-@router.post("/coupang/upload")
-async def upload_coupang_ad_xlsx(
-    background_tasks: BackgroundTasks,
-    file: UploadFile = File(...),
-    db: Session = Depends(get_db),
-):
-    """쿠팡 광고 XLSX 업로드 → ad_costs + coupang_ad_report 동시 저장.
-    파일명 형식: {vendor_id}_pa_daily_*.xlsx
-    C열(판매방식): Retail=로켓배송, 3P=윙, 2P=로켓그로스
-    포맷(adGroup/keyword)은 헤더 행에서 자동 감지.
+def ingest_coupang_ad_xlsx_content(
+    content: bytes, filename: str, db: Session
+) -> tuple[dict, date | None, date | None]:
+    """쿠팡 광고 XLSX 바이트 → ad_costs + coupang_ad_report + coupang_ad_option_daily 적재.
+
+    수동 업로드 엔드포인트와 토큰 인증 자동 ingest(coupang_ops)가 공유하는 단일 파서(SA).
+    반환: (public_result, recalc_from, recalc_to). 이익 재계산 범위는 호출자가 스케줄(여기선 DB 커밋만).
+    재계산 불필요(광고비 행 없음) 시 recalc_from/to=None (codex P2 — private 키 누출 방지).
+    파일명 형식: {vendor_id}_pa_daily_*.xlsx. 포맷(adGroup/keyword)은 헤더 행에서 자동 감지.
     """
-    if not file.filename or not file.filename.endswith(".xlsx"):
+    if not filename or not filename.endswith(".xlsx"):
         raise HTTPException(status_code=400, detail="xlsx 파일만 업로드 가능합니다.")
 
-    m = re.match(r"(A\d+)_", file.filename)
+    m = re.match(r"(A\d+)_", filename)
     if not m:
         raise HTTPException(status_code=400, detail="파일명에서 vendor_id를 찾을 수 없습니다. 형식: {vendor_id}_pa_daily_...")
     vendor_id = m.group(1)
@@ -471,7 +470,6 @@ async def upload_coupang_ad_xlsx(
     except ImportError:
         raise HTTPException(status_code=500, detail="openpyxl 패키지가 설치되지 않았습니다.")
 
-    content = await file.read()
     try:
         wb = openpyxl.load_workbook(io.BytesIO(content))
     except Exception as e:
@@ -649,11 +647,9 @@ async def upload_coupang_ad_xlsx(
     for (_, _, source), spend in agg.items():
         channel_summary[source] = channel_summary.get(source, 0) + int(spend)
 
-    if agg:
-        background_tasks.add_task(_recalc_profit_background, date_from, date_to)
     log.info("쿠팡 광고 적재 %s (%s~%s) 광고비=%d원 리포트=%d건 옵션=%d건",
              vendor_id, date_from, date_to, total, len(report_agg), len(opt_agg))
-    return {
+    result = {
         "vendor_id": vendor_id,
         "inserted": len(agg),
         "skipped": skipped,
@@ -664,5 +660,26 @@ async def upload_coupang_ad_xlsx(
         "date_to": date_to.isoformat(),
         "dates": dates,
         "channel_summary": channel_summary,
-        "recalculation_triggered": True,
+        "recalculation_triggered": bool(agg),
     }
+    return result, (date_from if agg else None), (date_to if agg else None)
+
+
+@router.post("/coupang/upload")
+async def upload_coupang_ad_xlsx(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    """쿠팡 광고 XLSX 수동 업로드 → 파서(SA) 호출 + 이익 재계산 스케줄.
+
+    파일명 형식: {vendor_id}_pa_daily_*.xlsx
+    C열(판매방식): Retail=로켓배송, 3P=윙, 2P=로켓그로스
+    """
+    if not file.filename or not file.filename.endswith(".xlsx"):
+        raise HTTPException(status_code=400, detail="xlsx 파일만 업로드 가능합니다.")
+    content = await file.read()
+    result, recalc_from, recalc_to = ingest_coupang_ad_xlsx_content(content, file.filename, db)
+    if recalc_from and recalc_to:
+        background_tasks.add_task(_recalc_profit_background, recalc_from, recalc_to)
+    return result

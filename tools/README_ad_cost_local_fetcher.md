@@ -53,9 +53,15 @@ prod `.env`에 `AD_INGEST_TOKEN=<토큰>` 추가 후 백엔드 reload. (이미 �
   "prod_base_url": "https://sellc.ohitech.co.kr",
   "ingest_token": "<prod와 동일 토큰>",
   "vendor_ids": [104438581, 104997005],
+  "ad_vendor_code": "A01564720",
+  "sales_days": 7,
   "state_file": "/Users/jino/.ohisell_ad_state.json"
 }
 ```
+- `ad_vendor_code`(**옵션 보고서 필수**): 광고 보고서 vendor 코드(오픽스=`A01564720`). 미설정 시
+  옵션×일별 보고서 적재를 **건너뜀**(잘못된 vendor 귀속 방지, fail-closed). `vendor_ids`(광고노드 숫자ID)와 다름.
+- `sales_days`: report/SALES·옵션 보고서가 받는 최근 일수(기본 7, 어제까지).
+
 세션은 `state_file`(Playwright storage_state, 세션쿠키 포함)에 저장된다(0600). 영속
 프로필을 쓰지 않는 이유: Playwright 영속 프로필은 세션쿠키를 컨텍스트 종료 시 버리기 때문.
 `"headless"` 키는 무시된다 — run은 SSO 재발급을 위해 항상 headful이다.

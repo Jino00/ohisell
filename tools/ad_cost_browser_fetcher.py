@@ -15,6 +15,7 @@
 #   실행(스케줄): python3 ad_cost_browser_fetcher.py          # headless fetch→push (launchd 매시)
 from __future__ import annotations
 
+import base64
 import contextlib
 import fcntl
 import json
@@ -79,6 +80,75 @@ _SALES_FETCH_JS = """async (payload) => {
       signal: ctrl.signal,
     });
     return { status: r.status, body: await r.text() };
+  } finally { clearTimeout(t); }
+}"""
+
+
+# ── Billboard 보고서(옵션×일별 광고비) — 레퍼런스 16 ─────────────────────────
+# 옵션ID×일별 광고비의 유일한 소스. report/SALES(vendor합계)·report/cost(오늘)와 별개.
+# 흐름: getCampaignList → requestReport(daily/keyword) → reportList 폴링 → excel-report 다운로드.
+GRAPHQL_URL = "https://advertising.coupang.com/marketing-reporting/v2/graphql"
+EXCEL_REPORT_URL = "https://advertising.coupang.com/marketing-reporting/v2/api/excel-report?id="
+OPTION_LAST_PATH = Path(os.path.expanduser("~/.ohisell_ad_option_last"))  # 일1회 마커(KST date)
+
+_Q_CAMPAIGNS = (
+    "query GetCampaignListInBillboard($startDate: Int!, $endDate: Int!, $reportType: ReportType!) {\n"
+    "  getCampaignList(\n    startDate: $startDate\n    endDate: $endDate\n    reportType: $reportType\n"
+    "  ) {\n    id\n    name\n    __typename\n  }\n}\n"
+)
+_M_REQUEST_REPORT = (
+    "mutation ($startDate: Int!, $endDate: Int!, $campaignIds: [ID], $reportType: ReportType!, "
+    "$dateGroup: DateGroup!, $granularity: Granularity, $excludeIfNoClickCount: Boolean) {\n"
+    "  requestReport(\n    data: {startDate: $startDate, endDate: $endDate, campaignIds: $campaignIds, "
+    "reportType: $reportType, dateGroup: $dateGroup, granularity: $granularity, "
+    "excludeIfNoClickCount: $excludeIfNoClickCount}\n  ) {\n    ...ReportRequest\n    __typename\n  }\n}\n\n"
+    "fragment ReportRequest on ReportRequest {\n  id\n  requestDate\n  startDate\n  endDate\n  reportType\n"
+    "  dateGroup\n  granularity\n  excludeIfNoClickCount\n  campaignName\n  campaignCount\n  status\n"
+    "  isLargeReport\n  schedule {\n    scheduleType\n    title\n    __typename\n  }\n  __typename\n}\n"
+)
+_Q_REPORT_LIST = (
+    "query ($reportType: ReportType!, $page: Int!, $pageSize: Int!, $duration: Int!, "
+    "$onlyScheduledReport: Boolean) {\n  reportList(\n    data: {reportType: $reportType, page: $page, "
+    "pageSize: $pageSize, duration: $duration, onlyScheduledReport: $onlyScheduledReport}\n  ) {\n"
+    "    ...ReportList\n    __typename\n  }\n}\n\nfragment ReportList on ReportList {\n  page\n  pageSize\n"
+    "  total\n  duration\n  onlyScheduledReport\n  reports {\n    id\n    requestDate\n    startDate\n"
+    "    endDate\n    reportType\n    dateGroup\n    granularity\n    excludeIfNoClickCount\n"
+    "    campaignName\n    campaignCount\n    status\n    isLargeReport\n    schedule {\n      title\n"
+    "      scheduleType\n      createDay\n      requestDate\n      expireAt\n      __typename\n    }\n"
+    "    __typename\n  }\n  __typename\n}\n"
+)
+
+# same-origin GraphQL POST(배열 배치 형태로 전송 — 캡처와 동일).
+_GQL_JS = """async (payload) => {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 30000);
+  try {
+    const r = await fetch('https://advertising.coupang.com/marketing-reporting/v2/graphql', {
+      method: 'POST',
+      headers: {'content-type': 'application/json', 'accept': 'application/json'},
+      body: JSON.stringify(payload),
+      credentials: 'include',
+      signal: ctrl.signal,
+    });
+    return { status: r.status, body: await r.text() };
+  } finally { clearTimeout(t); }
+}"""
+
+# excel-report 다운로드 → arrayBuffer → base64(바이너리 안전). 파이썬에서 decode.
+_DL_JS = """async (url) => {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 60000);
+  try {
+    const r = await fetch(url, { credentials: 'include', signal: ctrl.signal });
+    if (!r.ok) return { status: r.status, b64: null };
+    const buf = await r.arrayBuffer();
+    const bytes = new Uint8Array(buf);
+    let bin = '';
+    const CH = 0x8000;
+    for (let i = 0; i < bytes.length; i += CH) {
+      bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+    }
+    return { status: r.status, b64: btoa(bin) };
   } finally { clearTimeout(t); }
 }"""
 
@@ -222,6 +292,171 @@ def _push_sales(cfg: dict, sales_body: str) -> None:
         log.warning("report/SALES push 실패(무시): %s", str(e)[:120])
         return
     log.info("확정일 push: %s", [(d["date"], d["ad_spend"]) for d in days])
+
+
+def _gql(page, payload: list) -> dict | None:
+    """GraphQL POST(배열 배치) → 첫 응답의 data dict. 실패 시 None."""
+    try:
+        res = page.evaluate(_GQL_JS, payload)
+    except Exception as e:
+        log.warning("GraphQL evaluate 실패: %s", str(e)[:100])
+        return None
+    if not res or res.get("status") not in (200, 201):
+        log.warning("GraphQL status=%s body=%s", res and res.get("status"), (res or {}).get("body", "")[:120])
+        return None
+    try:
+        parsed = json.loads(res.get("body") or "")
+    except (ValueError, TypeError):
+        return None
+    item = parsed[0] if isinstance(parsed, list) and parsed else parsed
+    if isinstance(item, dict) and item.get("errors"):
+        log.warning("GraphQL errors: %s", str(item["errors"])[:160])
+    return item.get("data") if isinstance(item, dict) else None
+
+
+def _option_window(cfg: dict) -> tuple[int, int]:
+    """옵션 보고서 날짜 범위(최근 N일, 어제까지) — YYYYMMDD 정수 (start, end)."""
+    days = int(cfg.get("sales_days", 7))
+    today = datetime.now(KST).date()
+    end = today - timedelta(days=1)            # 어제(오늘은 미확정 → 제외)
+    start = end - timedelta(days=days - 1)
+    return int(start.strftime("%Y%m%d")), int(end.strftime("%Y%m%d"))
+
+
+def _fetch_option_report(page, cfg: dict, poll_timeout_s: int = 150):
+    """Billboard 보고서(옵션×일별 keyword XLSX)를 생성·폴링·다운로드 → (filename, bytes)|None.
+
+    레퍼런스 16. 인증된 page에서 same-origin 호출. 실패해도 None 반환(메인 push에 무영향).
+    """
+    start_i, end_i = _option_window(cfg)
+    # 1) 캠페인 목록
+    data = _gql(page, [{
+        "operationName": "GetCampaignListInBillboard",
+        "variables": {"startDate": start_i, "endDate": end_i, "reportType": "pa"},
+        "query": _Q_CAMPAIGNS,
+    }])
+    campaigns = (data or {}).get("getCampaignList") if data else None
+    if not campaigns:
+        log.warning("옵션보고서: 캠페인 목록 없음 — 건너뜀")
+        return None
+    campaign_ids = [str(c["id"]) for c in campaigns if c.get("id")]
+
+    # 2) 보고서 생성 요청
+    data = _gql(page, [{
+        "variables": {
+            "reportType": "pa", "startDate": start_i, "endDate": end_i,
+            "dateGroup": "daily", "granularity": "keyword",
+            "excludeIfNoClickCount": True, "campaignIds": campaign_ids,
+        },
+        "query": _M_REQUEST_REPORT,
+    }])
+    req = (data or {}).get("requestReport") if data else None
+    report_id = str(req["id"]) if req and req.get("id") else None
+    if not report_id:
+        log.warning("옵션보고서: requestReport id 없음 — 건너뜀")
+        return None
+    log.info("옵션보고서 요청 id=%s (%s~%s, 캠페인 %d개, status=%s)",
+             report_id, start_i, end_i, len(campaign_ids), req.get("status"))
+
+    # 3) 완료 폴링
+    waited = 0
+    completed = False
+    while waited < poll_timeout_s:
+        page.wait_for_timeout(3000)
+        waited += 3
+        data = _gql(page, [{
+            "variables": {"reportType": "pa", "page": 1, "pageSize": 20,
+                          "duration": 90, "onlyScheduledReport": False},
+            "query": _Q_REPORT_LIST,
+        }])
+        reports = ((data or {}).get("reportList") or {}).get("reports") if data else None
+        mine = next((r for r in (reports or []) if str(r.get("id")) == report_id), None)
+        if mine and str(mine.get("status")).lower() == "completed":
+            completed = True
+            break
+    if not completed:
+        log.warning("옵션보고서: %ds 내 완료 안됨(id=%s) — 건너뜀", poll_timeout_s, report_id)
+        return None
+
+    # 4) 다운로드
+    try:
+        dl = page.evaluate(_DL_JS, EXCEL_REPORT_URL + report_id)
+    except Exception as e:
+        log.warning("옵션보고서 다운로드 실패: %s", str(e)[:100])
+        return None
+    if not dl or not dl.get("b64"):
+        log.warning("옵션보고서 다운로드 본문 없음 status=%s", dl and dl.get("status"))
+        return None
+    try:
+        content = base64.b64decode(dl["b64"])
+    except Exception:
+        return None
+    # xlsx 매직바이트 검증(codex P2): 세션 만료 시 HTML 로그인 페이지가 올 수 있음 → zip(PK) 아니면 거부.
+    if content[:4] != b"PK\x03\x04":
+        log.warning("옵션보고서 응답이 xlsx(zip)가 아님(세션 만료 가능) — 건너뜀: head=%r", content[:16])
+        return None
+    # 파일명: {vendor}_pa_daily_keyword_{start}_{end}.xlsx (파서 vendor_id 추출용).
+    # vendor_ids는 광고노드ID(숫자)지만 파서는 'A로 시작' 파일명 필요 → 설정 ad_vendor_code 필수.
+    # fail-closed(codex P1): 미설정 시 잘못된 vendor 귀속을 막기 위해 적재하지 않는다.
+    vendor_code = str(cfg.get("ad_vendor_code") or "").strip()
+    if not vendor_code:
+        log.error("ad_vendor_code 설정 누락 — 옵션보고서 적재 중단(잘못된 vendor 귀속 방지). "
+                  "~/.ohisell_ad_fetcher.json에 \"ad_vendor_code\":\"A01564720\" 추가 필요.")
+        return None
+    filename = f"{vendor_code}_pa_daily_keyword_{start_i}_{end_i}.xlsx"
+    log.info("옵션보고서 다운로드 완료: %s (%d bytes)", filename, len(content))
+    return filename, content
+
+
+def _push_option_xlsx(cfg: dict, filename: str, content: bytes) -> bool:
+    """옵션 XLSX 바이트 → prod option-ingest push(토큰 인증). 성공 시에만 True.
+
+    실패 시 False 반환 → 호출자가 오늘 마커를 set하지 않아 다음 run에서 재시도(codex P1).
+    """
+    try:
+        pr = requests.post(
+            cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/ad-cost/option-ingest",
+            data=content,
+            headers={
+                "X-Ingest-Token": cfg["ingest_token"],
+                "X-Report-Filename": filename,
+                "Content-Type": "application/octet-stream",
+            },
+            timeout=60,
+        )
+        pr.raise_for_status()
+    except requests.RequestException as e:
+        log.warning("옵션보고서 push 실패(다음 run 재시도): %s", str(e)[:140])
+        return False
+    try:
+        info = pr.json()
+    except ValueError:
+        info = pr.text[:120]
+    log.info("옵션보고서 push 성공: %s", info)
+    return True
+
+
+def _option_marker(cfg: dict) -> str:
+    """마커 값 = 오늘(KST)|vendor_code|prod_base — 설정/대상이 바뀌면 재실행(codex P2)."""
+    today = datetime.now(KST).date().isoformat()
+    vendor_code = str(cfg.get("ad_vendor_code") or "A01564720")
+    base = cfg.get("prod_base_url", "").rstrip("/")
+    return f"{today}|{vendor_code}|{base}"
+
+
+def _option_due_today(cfg: dict) -> bool:
+    """옵션 보고서를 오늘·이 대상으로 아직 안 받았으면 True(일 1회 게이트)."""
+    try:
+        return OPTION_LAST_PATH.read_text(encoding="utf-8").strip() != _option_marker(cfg)
+    except OSError:
+        return True
+
+
+def _mark_option_done(cfg: dict) -> None:
+    try:
+        OPTION_LAST_PATH.write_text(_option_marker(cfg), encoding="utf-8")
+    except OSError:
+        pass
 
 
 def _fetch(page, cfg: dict, retries: int = 2):
@@ -376,6 +611,7 @@ def _do_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
     # login_wait_secs>0(버튼 트리거): keycloak도 만료면 같은 창에서 로그인 대기 후 fetch.
     res = None
     sales_body = None  # report/SALES 응답(과거 확정일) — 성공 시 _push_sales로 보강
+    option_payload = None  # (filename, bytes) — Billboard 옵션×일별 보고서(일 1회)
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=False)
@@ -419,6 +655,12 @@ def _do_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
                         sales_body = _sr.get("body") if _sr else None
                     except Exception as e:
                         log.warning("report/SALES fetch 실패(무시): %s", str(e)[:100])
+                    # 옵션×일별 Billboard 보고서 — 하루 1회만(생성·폴링 비용). best-effort.
+                    if _option_due_today(cfg):
+                        try:
+                            option_payload = _fetch_option_report(page, cfg)
+                        except Exception as e:
+                            log.warning("옵션보고서 수집 실패(무시): %s", str(e)[:100])
             finally:
                 ctx.close()
                 browser.close()
@@ -445,6 +687,10 @@ def _do_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
     rc = _push(cfg, data)              # 오늘 running(헤더 "오늘 광고비")
     if sales_body:
         _push_sales(cfg, sales_body)    # 과거 확정일(어제 등) — best-effort
+    if option_payload:
+        fn, content = option_payload
+        if _push_option_xlsx(cfg, fn, content):  # 옵션×일별(상품별 광고비) — best-effort
+            _mark_option_done(cfg)      # 성공 push 시에만 마커 → 실패 시 다음 run 재시도(codex P1)
     return rc
 
 
