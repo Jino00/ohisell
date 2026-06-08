@@ -26,14 +26,23 @@ RG_ACCOUNTS = ["COUPANG_WING1", "COUPANG_WING2"]
 
 # status/api 응답 → fee_type 매핑 (D-9: 판매수수료+풀필먼트 포함)
 # key=응답 필드명, value=(fee_type, 부호: 1=비용[양수저장], -1=환급[음수저장])
+#
+# ★D-10 라이브 확정(2026-06-09, 원칙22 — WING1 06-01~07 리포트가 레퍼런스 17 §7과 정확 일치):
+#   풀필먼트 전체비용(J) = 배송비(fulfillment) + 입출고비(warehousing) + 보관비(storage).
+#   → totalFulfillmentFeeDeductionAmount 는 "풀필먼트 합계"가 아니라 **배송비(delivery)뿐**.
+#     검산: ful=130,599 + ware=75,489 + stor=168 = J 206,256 (레퍼런스와 ±0). 세 값은 서로
+#     독립이라 합산해도 이중계상 아님.
+#   비용 인식 basis = **발생비용(f)** — 이월(g)은 totalCarryOverSettlementDeductionAmount /
+#     pastDeductedCfsFeeDetails 등 별도 필드로 분리돼 있고 아래 7개 컴포넌트엔 섞이지 않는다.
+#     즉 우리가 적재하는 값은 해당 인식기간 gross 발생분이며 f-g(이월조정)·최종지급액이 아님(D-10 충족).
 _FEE_FIELD_MAP: dict[str, tuple[str, int]] = {
     "totalTakeRateAmountWithVat": ("sale_fee", 1),           # 판매수수료(B, VAT포함)
-    "totalFulfillmentFeeDeductionAmount": ("fulfillment", 1), # 풀필먼트 비용(J) 합계
-    "totalStorageFeeDeductionAmount": ("storage", 1),         # 보관비
-    "totalWarehousingFeeDeductionAmount": ("warehousing", 1), # 입출고비
+    "totalFulfillmentFeeDeductionAmount": ("delivery", 1),    # ★배송비(풀필먼트 J의 배송 컴포넌트)
+    "totalStorageFeeDeductionAmount": ("storage", 1),         # 보관비(풀필먼트 J 컴포넌트)
+    "totalWarehousingFeeDeductionAmount": ("warehousing", 1), # 입출고비(풀필먼트 J 컴포넌트)
     "totalCreturnReverseShippingFeeDeductionAmount": ("return_shipping", 1),  # 반품배송비
     "totalVreturnHandlingFeeDeductionAmount": ("return_handling", 1),          # 반출처리비
-    "totalAdSalesDeductionAmount": ("ad_sales", 1),           # 광고비(D-11: dedup 대상, 표시만)
+    "totalAdSalesDeductionAmount": ("ad_sales", 1),           # 광고비(d)(D-11: dedup 대상, 표시만)
 }
 
 # 정산주기 최대 조회 주 수 (폭주 방지)

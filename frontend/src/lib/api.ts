@@ -351,10 +351,13 @@ export interface RgSettlementByAccount {
   account_key: string;
   total: string;
   sale_fee: string;
-  fulfillment: string;
-  storage: string;
+  fulfillment: string;   // 풀필먼트(J) = 배송+입출고+보관 (D-10 라이브 검증)
+  delivery: string;      // 풀필먼트 세부 — 배송비
+  warehousing: string;   // 풀필먼트 세부 — 입출고비
+  storage: string;       // 풀필먼트 세부 — 보관비
   return_fee: string;
-  other: string;
+  ad_sales: string;      // D-11 광고비(d), 표시만(중복주의)
+  other: string;         // reconcile 잔액(정상=0, legacy/미지 fee_type)
 }
 
 export interface OverviewResponse {
@@ -382,7 +385,11 @@ export interface OverviewResponse {
     by_option: OverviewProductRow[];
   };
   rg_settlement?: {
-    summary: { total: string; has_data: boolean; note: string };
+    summary: {
+      total: string; has_data: boolean; note: string;
+      ad_settlement?: string;        // D-11 RG정산 광고비(정본)
+      ad_xlsx_rg_overlap?: string;   // D-11 광고비 XLSX RG(2P)분(플립 시 제외 대상)
+    };
     by_account: RgSettlementByAccount[];
   };
 }

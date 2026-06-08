@@ -206,14 +206,22 @@ function RgSettlementCard({ data }: { data: OverviewResponse }) {
           <div key={a.account_key} className="bg-white rounded border border-orange-100 p-2 text-xs">
             <div className="font-medium text-gray-700 mb-1">{a.account_key}</div>
             <div className="flex justify-between"><span className="text-gray-500">판매수수료</span><span>{won(a.sale_fee)}</span></div>
-            <div className="flex justify-between"><span className="text-gray-500">풀필먼트</span><span>{won(a.fulfillment)}</span></div>
-            <div className="flex justify-between"><span className="text-gray-500">보관비</span><span>{won(a.storage)}</span></div>
+            <div className="flex justify-between"><span className="text-gray-500">풀필먼트(배송·입출고·보관)</span><span>{won(a.fulfillment)}</span></div>
             <div className="flex justify-between"><span className="text-gray-500">반품비</span><span>{won(a.return_fee)}</span></div>
+            <div className="flex justify-between"><span className="text-gray-500">광고비<span className="text-orange-400">*</span></span><span>{won(a.ad_sales)}</span></div>
+            {Number(a.other) !== 0 && (
+              <div className="flex justify-between text-red-600"><span>기타(미매핑)</span><span>{won(a.other)}</span></div>
+            )}
             <div className="flex justify-between font-semibold border-t border-orange-100 mt-1 pt-1"><span>합계</span><span>{won(a.total)}</span></div>
           </div>
         ))}
       </div>
-      <p className="text-xs text-orange-600 mt-2">* 순이익에 미포함(Phase 2에서 반영 예정)</p>
+      {rg.summary.ad_xlsx_rg_overlap && Number(rg.summary.ad_xlsx_rg_overlap) > 0 && (
+        <div className="text-xs text-orange-700 mt-2 bg-orange-100 rounded px-2 py-1">
+          ⚠️ 중복구간: 광고비 XLSX RG(2P) {won(rg.summary.ad_xlsx_rg_overlap)} ↔ RG정산 광고비 {won(rg.summary.ad_settlement ?? '0')} — Phase 2 플립 시 2P분 제외(D-11)
+        </div>
+      )}
+      <p className="text-xs text-orange-600 mt-2">순이익에 미포함(Phase 2에서 반영 예정). <span className="text-orange-400">*</span>광고비는 RG정산 정본 — 광고비 XLSX의 RG(2P)분과 중복 주의(D-11).</p>
     </div>
   );
 }

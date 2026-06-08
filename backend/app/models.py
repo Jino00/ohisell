@@ -1146,9 +1146,11 @@ class CoupangRgSettlementFee(Base):
     D-10: 날짜 기준=매출인식일(recognition_date_from/to). D-11: 광고비 dedup 광고비 출처 구분.
     grain=(account_key, recognition_date_from, recognition_date_to, fee_type).
     Phase 1: 계정 단위 대조뷰용(vendor_item_id 없음). Phase 2(S6): vendor_item_id 컬럼 추가.
-    amount: 발생비용(f, D-10). 취소/환급은 음수 허용(D-9).
-    fee_type: 'sale_fee'(판매수수료B), 'fulfillment'(풀필먼트J), 'storage'(보관비),
-              'return'(반품비), 'other'(기타). raw_type: API 원본 항목명.
+    amount: 발생비용(f, D-10 — 이월 g 별도필드, 컴포넌트엔 미혼입). 취소/환급은 음수 허용(D-9).
+    fee_type(D-10 라이브 확정 2026-06-09): 'sale_fee'(판매수수료B),
+      풀필먼트(J) 3컴포넌트=‘delivery’(배송비)·'warehousing'(입출고비)·'storage'(보관비),
+      'return_shipping'·'return_handling'(반품), 'ad_sales'(광고비d, D-11 dedup 표시만).
+      raw_type: API 원본 항목명. ★'delivery'=totalFulfillmentFeeDeductionAmount(배송비뿐, 합계 아님).
     """
 
     __tablename__ = "coupang_rg_settlement_fee"

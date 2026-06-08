@@ -237,6 +237,79 @@ def _agg_rg_settlement_fees(db: Session, dfrom: date, dto: date) -> dict[str, di
     return result
 
 
+# ──────────────────────────────────────────────
+# D-11 광고비 dedup 규칙 (라이브 확정 2026-06-09)
+# ──────────────────────────────────────────────
+# RG 광고비 정본 = RG정산 ad_sales(totalAdSalesDeductionAmount). 광고비 XLSX(CoupangAdOptionDaily)의
+# sell_type='2P'(=로켓그로스, ad_costs._SELL_TYPE_TO_CHANNEL_SUFFIX에서 확정: 3P=윙·2P=RG·Retail=로켓배송)가
+# 동일한 RG 광고비를 담는다 → net_profit 플립(Phase2/S7) 시 2P분을 net_profit 광고비에서 제외해
+# RG정산 ad_sales와의 이중계상을 차단한다. Phase1(대조뷰)에선 제외하지 않고 표시·검산만 한다(D-11).
+RG_AD_SELL_TYPE = "2P"  # 광고 XLSX 판매방식 코드: 2P=로켓그로스(RG)
+
+
+def rg_ad_spend_to_exclude(ad_rows) -> Decimal:
+    """D-11 순수규칙: (sell_type, ad_spend) 행들에서 RG(2P) 광고비 합을 반환.
+
+    net_profit 플립(Phase2) 시 이 금액을 광고비 차감에서 제외한다(RG정산 ad_sales가 정본).
+    순수 함수라 DB 없이 fixture 테스트 가능(D-12). DB 래퍼는 _agg_rg_ad_overlap.
+    sell_type은 ad_costs 적재 시 이미 strip되지만(ad_costs.py), 순수함수 계약 견고성 위해 한 번 더 정규화.
+    ★Phase2(S7) 플립 전 검산 필요(Codex S5 지적4b): RG정산 recognition_date와 광고 XLSX report_date가
+      같은 business basis인지 — 현재 표시(Phase1)는 동일 [dfrom,dto] 윈도우 기준 단순 겹침.
+    """
+    return sum(
+        (_f(spend) for sell_type, spend in ad_rows
+         if (sell_type or "").strip() == RG_AD_SELL_TYPE),
+        _Z,
+    )
+
+
+def _rg_account_breakdown(account_key: str, v: dict) -> dict:
+    """RG 정산 계정별 대조 카드 브레이크다운(D-6/D-7). 라인합+other == total 보장.
+
+    풀필먼트(J)=배송(delivery)+입출고(warehousing)+보관(storage) (D-10 라이브 확정).
+    reconcile guard(Codex S5 지적1): 표시 컴포넌트 합과 DB total 차이를 'other'로 노출 —
+    legacy 'fulfillment'·미지/미래 fee_type이 있어도 silent drop·중복 없이 가시화. 정상=0.
+    """
+    sale_fee = v.get("sale_fee", _Z)
+    fulfillment = v.get("delivery", _Z) + v.get("warehousing", _Z) + v.get("storage", _Z)
+    return_fee = v.get("return_shipping", _Z) + v.get("return_handling", _Z)
+    ad_sales = v.get("ad_sales", _Z)
+    total = v.get("total", _Z)
+    other = total - (sale_fee + fulfillment + return_fee + ad_sales)
+    if other != _Z:
+        log.warning("RG 정산 %s: 미매핑 fee_type 잔액 %s (legacy/스키마 변동 의심)", account_key, other)
+    return {
+        "account_key": account_key,
+        "total": total,
+        "sale_fee": sale_fee,
+        "fulfillment": fulfillment,
+        "delivery": v.get("delivery", _Z),
+        "warehousing": v.get("warehousing", _Z),
+        "storage": v.get("storage", _Z),
+        "return_fee": return_fee,
+        "ad_sales": ad_sales,          # D-11: 광고비(d), 표시만(중복주의)
+        "other": other,                # reconcile 잔액(정상=0)
+    }
+
+
+def _agg_rg_ad_overlap(db: Session, dfrom: date, dto: date) -> Decimal:
+    """D-11: 기간 내 광고비 XLSX의 RG(2P) 광고비 합 — RG정산 ad_sales와 겹치는 구간.
+
+    Phase1=표시/검산용(net_profit 불변), Phase2(S7)=net_profit 광고비에서 제외 대상.
+    """
+    # func.trim: 적재 시 이미 strip되지만(ad_costs.py), DB 레벨에서도 공백 방어(Codex S5 지적4a).
+    rows = (
+        db.query(CoupangAdOptionDaily.sell_type, CoupangAdOptionDaily.ad_spend)
+        .filter(
+            CoupangAdOptionDaily.report_date >= dfrom,
+            CoupangAdOptionDaily.report_date <= dto,
+            func.trim(CoupangAdOptionDaily.sell_type) == RG_AD_SELL_TYPE,
+        )
+        .all()
+    )
+    return rg_ad_spend_to_exclude(rows)
+
+
 def _product_master(db: Session) -> dict[str, dict]:
     """상품 옵션 마스터 — 이름·가격·등록수수료율·재고·원가성 공급가. 조망 베이스."""
     out: dict[str, dict] = {}
@@ -435,24 +508,22 @@ def compute_command_center(db: Session, dfrom: date, dto: date) -> dict:
     }
 
     # D-6/D-7: RG 정산 비용 대조(reconciliation) 뷰 — net_profit 불변, 독립 섹션.
+    # ★D-10 라이브 확정(2026-06-09): 풀필먼트(J) = 배송비(delivery)+입출고비(warehousing)+보관비(storage).
+    #   세 컴포넌트를 fulfillment 한 그룹으로 묶어 표시(레퍼런스 17 §7 검산 일치). 라인 합 = total로 reconcile.
+    #   ad_sales(광고비 d)는 D-11 dedup 대상 — Phase1은 표시만(net_profit 미반영, ad_costs 2P와 중복주의).
     rg_total = sum((v["total"] for v in rg_fees.values()), _Z)
-    rg_by_account = [
-        {
-            "account_key": ak,
-            "total": v["total"],
-            "sale_fee": v.get("sale_fee", _Z),
-            "fulfillment": v.get("fulfillment", _Z),
-            "storage": v.get("storage", _Z),
-            "return_fee": v.get("return_shipping", _Z) + v.get("return_handling", _Z),
-            "other": v.get("warehousing", _Z) + v.get("ad_sales", _Z),
-        }
-        for ak, v in sorted(rg_fees.items())
-    ]
+    rg_by_account = [_rg_account_breakdown(ak, v) for ak, v in sorted(rg_fees.items())]
+    # D-11: 광고비 dedup 표시 — RG정산 ad_sales(정본) vs 광고비 XLSX RG(2P)분(중복구간).
+    rg_ad_settlement = sum((v.get("ad_sales", _Z) for v in rg_fees.values()), _Z)
+    rg_ad_xlsx_overlap = _agg_rg_ad_overlap(db, dfrom, dto)
     rg_settlement = {
         "summary": {
             "total": rg_total,
             "has_data": len(rg_fees) > 0,
             "note": "RG 정산 비용(미반영) — Phase1 대조 지표. net_profit에 미포함(D-6).",
+            # D-11 dedup: 플립 시 ad_costs RG(2P)분을 제외(RG정산 ad_sales 정본).
+            "ad_settlement": rg_ad_settlement,      # RG정산 광고비(정본)
+            "ad_xlsx_rg_overlap": rg_ad_xlsx_overlap,  # 광고비 XLSX의 RG(2P)분(플립 시 제외 대상)
         },
         "by_account": rg_by_account,
     }
