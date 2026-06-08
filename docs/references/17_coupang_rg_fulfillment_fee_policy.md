@@ -4,6 +4,19 @@
 > 트랙: track_coupang-rg-replenishment 후속(회계 정확화). D-2 회계축·D-3(사실 정리).
 > ⚠️ 금액은 수시 변동. 공식 진실원천 = 쿠팡 윙 판매자센터 로켓그로스 요금 페이지.
 
+## 8. ★S5 status/api 필드 라이브 확정 (2026-06-09, 원칙22 — WING1 50필드 응답 캡처)
+- **`totalFulfillmentFeeDeductionAmount` = 배송비(delivery)뿐**, "풀필먼트 합계"가 아님. 14개 리포트 전수 확인 +
+  06-01~07 리포트가 §7 검산과 정확 일치: 배송 130,599(=ful) + 입출고 75,489(=warehousing) + 보관 168(=storage) = J 206,256.
+  → **풀필먼트 J = delivery + warehousing + storage** (세 값 독립, 합산해도 이중계상 아님).
+- **발생비용(f) basis 확정**: 이월(g)은 별도필드(`totalCarryOverSettlementDeductionAmount`,
+  `pastDeductedCfsFeeDetails`, `totalPastCfsDeductionAmount`)로 분리 — 우리가 적재하는 7개 컴포넌트엔 미혼입.
+  즉 적재값은 인식기간 gross 발생분(D-10 충족, f−g·최종지급액 아님).
+- **status/api에 vendor_item_id 없음 재확인**: 50필드 전부 정산주기별 집계(옵션단위 귀속 불가) → 옵션단위는 S6 종류별 엑셀 필요.
+- **profit-status/search, download-list/api는 status/api와 body 스키마 다름**(같은 body로 호출 시 HTTP 500).
+  → 추정 금지(원칙22): 실제 요청을 브라우저 DevTools에서 캡처해야 함(S5 엑셀 실증 진행).
+- **코드 반영(커밋 2c410c9)**: fee_type 'fulfillment'→'delivery' 리네임(alembic h2i3j4k5l6m7 UPDATE, stale 방지).
+  D-11 광고비 dedup 규칙 코드화(sell_type='2P'=RG, RG정산 ad_sales 정본 → Phase2 플립 시 제외). codex 3R pass.
+
 ## 0. 핵심 문제 (왜 이 작업이 필요한가)
 - 우리 종합조망 순이익은 **판매수수료 + 판매수수료 VAT(`total_fee`)만** 차감(intelligence.py `_agg_fees`).
 - 오픽스 RG 90개 판매의 수수료(입출고비·배송비·보관비·반품비·RG서비스이용료)는 **전혀 안 들어감**.

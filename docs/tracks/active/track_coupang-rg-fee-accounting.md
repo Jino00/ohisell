@@ -64,7 +64,11 @@
 - [x] **S3. rg_settlement_sync Harness** — status/api 수집·파싱(D-8)·적재 + fail-soft(302→🔴). **fixture 테스트(D-12) 14/14 PASS**: 파싱·부호·집계·dedup·누락필드 방어.
 - [x] **S4. 대조 뷰 노출(D-6/D-7)** — compute_command_center에 'RG 정산 비용(미반영)' 독립 지표(account_key별). net_profit **불변**. 광고비는 표시만(D-11). API/프론트. scheduler 등록. codex P2×2 수정(rg_settlement.py 미커밋 + xsrf decrypt). 커밋 e7cb99f.
 ### Phase 2 — net_profit 플립 (규칙 잠근 뒤 정확 반영)
-- [ ] **S5. 회계 규칙 최종 잠금 + 엑셀 스키마 실증** — basis(D-10)·dedup(D-11) 코드 확정 + 종류별 리포트 엑셀 컬럼(vendor_item_id 유무) 확인(윙 로그인). ★S6 전제(Codex #9: 조기 확인).
+- [~] **S5. 회계 규칙 최종 잠금 + 엑셀 스키마 실증** — ★코드 잠금 완료(커밋 2c410c9, codex 3R pass, fixture 22/22, prod 라이브 reconcile 검증). 엑셀 실증(vendor_item_id 유무)은 윙 로그인 진행 중.
+  - **D-10 라이브 확정(원칙22)**: totalFulfillmentFeeDeductionAmount=배송비(delivery)뿐 → fee_type 'fulfillment'→'delivery' 리네임(alembic h2i3j4k5l6m7 UPDATE). 풀필먼트 J=배송+입출고+보관(레퍼런스17 §7 검산 일치). 발생비용(f) 기준(이월 g 별도필드, 미혼입). searchDateType=SALES.
+  - **D-11 코드화**: RG정산 ad_sales 정본, 광고비 XLSX sell_type='2P'(RG)분 Phase2 플립 시 제외(rg_ad_spend_to_exclude+_agg_rg_ad_overlap). Phase1 표시만. 현재 prod 2P행 0개(겹침 없음).
+  - **reconcile guard(codex 지적1)**: _rg_account_breakdown other=total−라인합, legacy/미지 fee_type 가시화. **net_profit 불변(D-6)**.
+  - **남은 것**: 종류별 엑셀(입출고·배송비 등)에 vendor_item_id 컬럼 유무 확인 → S6 옵션단위 수집 전제. download-list/api body 실측(현재 500) 캡처 필요.
 - [ ] **S6. 옵션 단위 수집** — download-list/api + 비동기 엑셀 폴링·파싱 → CoupangRgSettlementFee에 vendor_item_id 추가. Σ(옵션)==계정총액 검산. fixture 테스트.
 - [ ] **S7. net_profit 플립 + 광고비 dedup 차단 + 모델(A) 감사** — by_option·account_sum에 RG 비용 반영(대조→권위), ad_costs RG분 제외/대체(D-11), 치수→등급 모델 과오청구 감사(D-4). (선택/후속)
 - 각 Sprint: self-verify(라이브 prod) + fixture 테스트(D-12, 머니코드) + codex review pass (원칙19).
@@ -72,11 +76,16 @@
 ## 현재 진행 단계
 - 2026-06-08: discovery 완료 + 계획서 + **plan-eng-review + Codex 외부검증 통과**. 구현 착수 전.
 - 2026-06-09: **S1~S3 완료**. status/api body 실측(searchDateType SALES/PAYMENT). fixture 테스트 14/14 PASS.
-- 2026-06-09: **S4 완료**. intelligence.py _agg_rg_settlement_fees()+rg_settlement 독립섹션. scheduler sync_coupang_rg_settlement_job 05:30 KST. 프론트 RgSettlementCard(계정별 대조 카드). codex P2×2 수정(rg_settlement.py 미커밋 + xsrf decrypt_secret 누락). 커밋 e7cb99f. Phase 1(S1~S4) 코드 완료. **prod self-verify 미실시**.
+- 2026-06-09: **S4 완료**. intelligence.py _agg_rg_settlement_fees()+rg_settlement 독립섹션. scheduler sync_coupang_rg_settlement_job 05:30 KST. 프론트 RgSettlementCard(계정별 대조 카드). codex P2×2 수정. 커밋 e7cb99f. Phase 1(S1~S4) 코드 완료.
+- 2026-06-09: **★Phase 1 prod self-verify 완료 (라이브 증거, 원칙22)**. prod(sellc.ohitech.co.kr, PM2 ohisell-backend:8001)에 마이그레이션 g1h2i3j4k5l6 적용 → CoupangRgSettlementFee 테이블 생성. WING1·WING2 sync 각 98행 status=ok. 종합조망 API rg_settlement 섹션 라이브 200, RgSettlementCard 라이브 렌더(WING1 412,156 + WING2 13,295, **순이익 불변=D-6 확정**). 프론트 dist 배포(index-D79z1Lve.js).
+  - **★코드 검증 결과 (원칙22 정정)**: status/api 스키마·body가 라이브와 정확히 일치(S0 실측 옳았음). 조사 중 "스키마 틀림" 잠정 단정은 내 직접호출 body 오류였고 정산현황 탭 실제호출 캡처로 정정.
+  - **★발견 1 — Wing 쿠키 httpOnly 누락**: 라이브 302 원인=document.cookie엔 httpOnly 세션쿠키(CGSID_PARTNERADMINWEB·JSESSIONID·sxSessionId) 없음. JS·CDP 둘 다 못 읽음 → DevTools "Copy as cURL" 등록이 유일 경로(광고비/RG입고와 동일 parse_curl_cookies). failures.jsonl 기록.
+  - **★발견 2 — 종합조망 500 버그(기존)**: overview.py:56 `datetime.now(_KST)` _KST 미정의 NameError(커밋 a2bbd3a부터 존재, 라이브 미검증 방치). `kst_today()`로 수정, codex review PASS, 라이브 200. failures.jsonl 기록.
+  - **★발견 3 — S4 모델 미커밋**: models.py(CoupangRgSettlementFee)+__init__.py(export)가 e7cb99f에서 누락돼 로컬 미커밋(prod엔 scp로 반영됨). overview.py 수정과 함께 커밋 예정.
 
 ## 다음 액션
-- **prod self-verify (최우선)**: SSH → `alembic upgrade head` → `sync_rg_settlement("COUPANG_WING1")` 수동 호출 → DB + 프론트 종합조망 RG 카드 확인.
-- **S5**: 회계 규칙 최종 잠금 + 엑셀 스키마 실증(vendor_item_id 유무).
+- **(커밋 대기)** models.py + __init__.py(S4 모델 누락분) + overview.py(_KST 버그픽스) 커밋. 프론트 dist 이미 prod 배포됨.
+- **S5**: 회계 규칙 최종 잠금 + 엑셀 스키마 실증(vendor_item_id 유무). ★status/api 응답에 vendor_item_id 없음 확인(주기별 집계뿐) → 옵션단위는 S6 download-list/api 엑셀 필요.
 
 ## GSTACK REVIEW REPORT
 
