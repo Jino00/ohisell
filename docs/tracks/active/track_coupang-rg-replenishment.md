@@ -114,7 +114,8 @@ UI: 상품별 현황(로켓그로스 탭) 컬럼 추가 — `현재고 | 최근 
 - **라이브 검증(prod GET /replenishment-plan)**: HTTP 200, 784건. summary={reorder_now 4·ok 5·well_stocked 2·insufficient_data 773·low_confidence 11}(S4 DB사본 분포와 일치). lead_global p90=2.88, sort monotonic=True. S4 샘플 옵션 95521944483(stock0·base0.633·qty5) 라이브 재현. ★실 프로덕션 HTTP 경로 증거(원칙22, DB사본 아님).
 
 ## 확정 결정사항 추가 (D-7)
-- **D-7 (S4 발송 역산 정책 — 확정 2026-06-05)**: ① 일판매속도·리드타임·현재고 중 하나라도 없으면 권장 보류(insufficient_data, Jino 수동). ② sold_30d/order_item_low 기반이거나 요일계수 collecting·글로벌리드 폴백이면 추천하되 confidence=low로 투명 표기. ③ 발송수량 목표는 D-2 "2~3일치"의 **상한 3일**(과소발송보다 품절 회피, 보관료는 3일이면 짧음). 안전재고는 (p90−mean)×일판매로 리드 변동성만 흡수(D-2 "최소"). Jino 원문: "그래"(①②③ 일괄 승인).
+- **D-7 (S4 발송 역산 정책 — 확정 2026-06-05)**: ① 일판매속도·리드타임·현재고 중 하나라도 없으면 권장 보류(insufficient_data, Jino 수동). ② sold_30d/order_item_low 기반이거나 요일계수 collecting·글로벌리드 폴백이면 추천하되 confidence=low로 투명 표기. ③ 발송수량 목표는 D-2 "2~3일치"의 **상한 3일**(과소발송보다 품절 회피, 보관료는 3일이면 짧음). 안전재고는 (p90−mean)×일판매로 리드 변동성만 흡수(D-2 "최소"). Jino 원문: "그래"(①②③ 일괄 승인). **※ D-9로 목표일수 변경됨(3→7).**
+- **D-9 (재고 목표 1주일치 — 확정 2026-06-08, D-2·D-7③ 변경)**: FC 목표 보관량을 **7일치**로 상향(기존 D-2 "2~3일치"·D-7③ "상한 3일"에서 변경). 발송수량 산정 기준 target_days=3→7. 효과: 권장 발송수량 약 2배↑, 발송 빈도↓·품절 리스크↓, 대신 FC 보관 재고·보관료↑(Jino가 트레이드오프 인지하고 결정). 안전재고 공식((p90−mean)×일판매)은 불변. 구현: replenishment_calc.DEFAULT_TARGET_DAYS=7, 엔드포인트 Query 기본 7, 프론트 fetchReplenishmentPlan(7). Jino 원문: **"우리의 재고 목표를 1주일치로 잡자"**.
 
 ## S6 결과 (2026-06-05) — 완료 + prod 라이브 배포
 - **수정 파일**: `rg_replenishment.py`(CoupangProductItem LEFT 조인으로 item_name 1회 조회 → items에 주입), `frontend/src/lib/api.ts`(ReplenishmentPlan/Item 타입 + fetchReplenishmentPlan()), `frontend/src/pages/CoupangOps.tsx`(RgReplenishmentSection 컴포넌트 + channelFilter=로켓그로스 시 표시).

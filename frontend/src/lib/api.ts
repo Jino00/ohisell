@@ -449,7 +449,7 @@ export interface ReplenishmentPlan {
   items: ReplenishmentItem[];
 }
 
-export function fetchReplenishmentPlan(targetDays = 3): Promise<ReplenishmentPlan> {
+export function fetchReplenishmentPlan(targetDays = 7): Promise<ReplenishmentPlan> {
   return fetchApi<ReplenishmentPlan>(
     `/api/coupang/ops/replenishment-plan?target_days=${targetDays}`
   );

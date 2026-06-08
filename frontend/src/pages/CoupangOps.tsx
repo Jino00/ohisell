@@ -376,7 +376,7 @@ export default function CoupangOps() {
     if (channelFilter !== "로켓그로스") return;
     setRgLoading(true);
     setRgError(null);
-    fetchReplenishmentPlan(3)
+    fetchReplenishmentPlan(7)
       .then(setRgPlan)
       .catch((e: Error) => setRgError(e.message))
       .finally(() => setRgLoading(false));

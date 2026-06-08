@@ -943,7 +943,7 @@ def get_sales_velocity(
 def get_replenishment_plan(
     db: Session = Depends(get_db),
     account_key: str | None = Query(None, description="특정 셀러계정만(미지정=전체)"),
-    target_days: int = Query(3, ge=1, le=14, description="FC 목표 보관 일수(D-2: 2~3일치, 기본 3)"),
+    target_days: int = Query(7, ge=1, le=14, description="FC 목표 보관 일수(D-9: 1주일치, 기본 7)"),
 ):
     """현재고 보유 옵션 전체의 권장 발송일·수량(배치 역산) + status별 집계.
 
