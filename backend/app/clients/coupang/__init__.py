@@ -12,6 +12,7 @@ from app.clients.coupang.logistics import CoupangLogisticsClient
 from app.clients.coupang.products import CoupangProductClient
 from app.clients.coupang.returns import CoupangReturnClient
 from app.clients.coupang.rocketgrowth import CoupangRocketGrowthClient
+from app.clients.coupang.rg_settlement import CoupangWingRgSettlementClient
 from app.clients.coupang.settlement import CoupangSettlementClient
 
 __all__ = [
@@ -28,4 +29,5 @@ __all__ = [
     "CoupangReturnClient",
     "CoupangRocketGrowthClient",
     "CoupangSettlementClient",
+    "CoupangWingRgSettlementClient",
 ]

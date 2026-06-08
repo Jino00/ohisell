@@ -53,7 +53,7 @@ def command_center(
     광고: 비용·노출·클릭·전환매출·ROAS·CTR (사실, D-3).
     상품: 주문수·반품률·재고·판매상태.
     """
-    today = datetime.now(_KST).date()
+    today = kst_today()
     dto = _parse_date(to, today)
     dfrom = _parse_date(from_, dto - timedelta(days=6))
     if dfrom > dto:

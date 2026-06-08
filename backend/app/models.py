@@ -1137,6 +1137,42 @@ class NaverSettlementCase(Base):
 
 
 # ──────────────────────────────────────────────
+# RG 정산 수수료 (트랙 RG-Fee-Accounting S2)
+# ──────────────────────────────────────────────
+class CoupangRgSettlementFee(Base):
+    """쿠팡 로켓그로스(RG) 정산 수수료 — 윙 내부 API(status/api) 수집.
+
+    D-1: 수집 소스=윙 내부 API(세션쿠키). D-9: 판매수수료(B)+풀필먼트(J) 둘 다.
+    D-10: 날짜 기준=매출인식일(recognition_date_from/to). D-11: 광고비 dedup 광고비 출처 구분.
+    grain=(account_key, recognition_date_from, recognition_date_to, fee_type).
+    Phase 1: 계정 단위 대조뷰용(vendor_item_id 없음). Phase 2(S6): vendor_item_id 컬럼 추가.
+    amount: 발생비용(f, D-10). 취소/환급은 음수 허용(D-9).
+    fee_type: 'sale_fee'(판매수수료B), 'fulfillment'(풀필먼트J), 'storage'(보관비),
+              'return'(반품비), 'other'(기타). raw_type: API 원본 항목명.
+    """
+
+    __tablename__ = "coupang_rg_settlement_fee"
+    __table_args__ = (
+        UniqueConstraint(
+            "account_key", "recognition_date_from", "recognition_date_to", "fee_type",
+            name="uq_coupang_rg_settlement_fee",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    account_key: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    recognition_date_from: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)
+    recognition_date_to: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)
+    fee_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    raw_type: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    synced_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+# ──────────────────────────────────────────────
 # 스케줄러 상태
 # ──────────────────────────────────────────────
 class SchedulerState(Base):
