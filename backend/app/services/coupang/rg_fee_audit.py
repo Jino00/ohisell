@@ -65,10 +65,11 @@ def _load_fees(
     )
     if account_key:
         q = q.filter(CoupangRgSettlementFee.account_key == account_key)
+    # overlap 의미(codex P2): 정산주기가 조회범위에 일부라도 걸치면 포함(경계 row 누락 방지).
     if date_from:
-        q = q.filter(CoupangRgSettlementFee.recognition_date_from >= date_from)
+        q = q.filter(CoupangRgSettlementFee.recognition_date_to >= date_from)
     if date_to:
-        q = q.filter(CoupangRgSettlementFee.recognition_date_to <= date_to)
+        q = q.filter(CoupangRgSettlementFee.recognition_date_from <= date_to)
     q = q.group_by(
         CoupangRgSettlementFee.vendor_item_id, CoupangRgSettlementFee.fee_type
     )
@@ -80,11 +81,15 @@ def _load_fees(
 
 def _load_qty(
     db: Session, account_key: str | None, date_from: date | None, date_to: date | None
-) -> dict[str, int]:
-    """옵션ID → 판매수량 합. 정산 기간과 정합되게 paid_at 기준 필터."""
+) -> dict[str, dict[str, int]]:
+    """옵션ID → {qty: 판매수량 합, orders: 주문수(distinct order_id)}. paid_at 기준 필터.
+
+    배송비는 합포장 시 주문당 1회(codex P2) → 배송 정규화는 orders, 입출고(수량당)는 qty 사용.
+    """
     q = db.query(
         CoupangRgOrderItem.vendor_item_id,
         func.sum(CoupangRgOrderItem.sales_quantity),
+        func.count(func.distinct(CoupangRgOrderItem.order_id)),
     )
     if account_key:
         q = q.filter(CoupangRgOrderItem.account_key == account_key)
@@ -93,7 +98,10 @@ def _load_qty(
     if date_to:
         q = q.filter(func.date(CoupangRgOrderItem.paid_at) <= date_to)
     q = q.group_by(CoupangRgOrderItem.vendor_item_id)
-    return {str(vii): int(total or 0) for vii, total in q.all()}
+    return {
+        str(vii): {"qty": int(qty or 0), "orders": int(orders or 0)}
+        for vii, qty, orders in q.all()
+    }
 
 
 def build_fee_audit(
@@ -117,10 +125,13 @@ def build_fee_audit(
         d = dims.get(vii, {})
         delivery = fee_by_type.get("delivery")
         warehousing = fee_by_type.get("warehousing")
-        q = qty.get(vii)
+        oq = qty.get(vii, {})
+        q = oq.get("qty")
+        orders = oq.get("orders")
         anomaly = detect_fee_anomalies(
             d.get("width_mm"), d.get("length_mm"), d.get("height_mm"), d.get("weight_g"),
-            delivery_amount=delivery, warehousing_amount=warehousing, quantity=q,
+            delivery_amount=delivery, warehousing_amount=warehousing,
+            quantity=q, order_count=orders,
         )
         items.append({
             "vendor_item_id": vii,
@@ -131,6 +142,7 @@ def build_fee_audit(
             "charged_delivery": delivery,
             "charged_warehousing": warehousing,
             "quantity": q,
+            "order_count": orders,
             **anomaly,
         })
 

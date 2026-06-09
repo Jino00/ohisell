@@ -107,6 +107,18 @@ def test_account_grain_rows_excluded(db):
     assert all(it["vendor_item_id"] != "" for it in out["items"])
 
 
+def test_date_range_overlap_includes_boundary_period(db):
+    # codex P2-2 회귀: 정산주기(04-01~04-05)가 조회범위(04-02~04-10)에 일부 걸침 → 포함돼야.
+    _add_item(db, "700", 227, 126, 20, 137)
+    _add_fee(db, "700", "delivery", 1900, dfrom=date(2026, 4, 1), dto=date(2026, 4, 5))
+    _add_order(db, "700", 1, paid=datetime(2026, 4, 3))
+    db.commit()
+    out = build_fee_audit(db, "COUPANG_WING1", date_from=date(2026, 4, 2), date_to=date(2026, 4, 10))
+    # 포함관계 필터였다면 from(04-01)<date_from(04-02)이라 드롭됐을 것 → overlap이라 포함.
+    assert out["summary"]["total_options"] == 1
+    assert out["items"][0]["charged_delivery"] == 1900
+
+
 def test_net_profit_untouched_readonly(db):
     # D-17: 읽기 전용. 감사 후 정산비용 row 금액 불변.
     _add_item(db, "600", 227, 126, 20, 137)

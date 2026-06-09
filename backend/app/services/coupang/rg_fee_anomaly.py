@@ -25,15 +25,20 @@ def detect_fee_anomalies(
     delivery_amount: float | None,
     warehousing_amount: float | None,
     quantity: int | None,
+    order_count: int | None = None,
 ) -> dict:
     """이상치 플래그 + 근거 수치 반환.
+
+    정규화(codex P2): 배송비는 합포장 시 **주문당 1회** → order_count로 나눔(주문당 단가).
+      입출고비는 **수량당** → quantity로 나눔. order_count 미지정 시 quantity로 폴백.
+    배송 floor·입출고 floor 모두 각 부과단위(주문당·수량당)와 정합.
 
     플래그:
       missing_dims        치수 미측정 → 감사 불가
       oversize            '초과'(입고 불가 사이즈) 분류 — 데이터 점검
       unit_unknown        수량 없음/0 → 단가 정규화 불가(과오청구 단정 금지)
       below_floor         단가 < 우리 사이즈 최소금액 → 데이터/사이즈 과대등록 의심
-      size_mismatch_high  배송 단가가 우리 사이즈 최소금액의 2배+ AND 큰 등급에 정합
+      size_mismatch_high  배송 주문당 단가가 우리 사이즈 최소금액의 2배+ AND 큰 등급에 정합
                           → 과대측정/과오청구 의심(정확 금액표로 확인 필요). floor는 최소치라
                           1~1.x배는 정상 가능 → 배수 임계로 오탐 억제.
     """
@@ -61,20 +66,22 @@ def detect_fee_anomalies(
 
     floor = expected_fee_floor(size_type) or {}
     our_idx = SIZE_TYPES.index(size_type)
+    # 배송비는 주문당(합포장) → 주문수로 정규화. 미지정 시 수량 폴백(보수적).
+    delivery_divisor = order_count if order_count and order_count > 0 else quantity
 
     if delivery_amount is not None:
-        per_unit_delivery = delivery_amount / quantity
-        result["per_unit_delivery"] = round(per_unit_delivery, 2)
-        implied = implied_size_from_delivery(per_unit_delivery)
+        per_order_delivery = delivery_amount / delivery_divisor
+        result["per_unit_delivery"] = round(per_order_delivery, 2)
+        implied = implied_size_from_delivery(per_order_delivery)
         result["implied_size_delivery"] = implied
         floor_delivery = floor.get("delivery")
-        if floor_delivery is not None and per_unit_delivery < floor_delivery:
+        if floor_delivery is not None and per_order_delivery < floor_delivery:
             flags.append("below_floor")
         elif (
             implied is not None
             and SIZE_TYPES.index(implied) > our_idx
             and floor_delivery is not None
-            and per_unit_delivery >= floor_delivery * _DELIVERY_OVERCHARGE_MULTIPLE
+            and per_order_delivery >= floor_delivery * _DELIVERY_OVERCHARGE_MULTIPLE
         ):
             # 우리 등급보다 큰 사이즈에 정합 + 최소금액 2배+ → 과대측정/과오청구 의심
             flags.append("size_mismatch_high")

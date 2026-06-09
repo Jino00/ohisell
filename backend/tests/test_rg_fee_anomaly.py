@@ -35,6 +35,18 @@ def test_size_mismatch_high_overcharge_suspect():
     assert "size_mismatch_high" in r["flags"]
 
 
+def test_copackable_multiqty_no_false_below_floor():
+    # codex P2-1 회귀: 극소형 3개를 1주문에 합포장 판매 → 배송비 1회(1900) 청구.
+    # 배송은 order_count(1)로 정규화해야 함. quantity(3)로 나누면 633<floor → 오탐 below_floor.
+    r = detect_fee_anomalies(
+        227, 126, 20, 137,
+        delivery_amount=1900, warehousing_amount=3300, quantity=3, order_count=1,
+    )
+    assert r["per_unit_delivery"] == 1900  # 주문당 1회 (3으로 안 나눔)
+    assert "below_floor" not in r["flags"]
+    assert r["per_unit_warehousing"] == 1100  # 입출고는 수량당 (3300/3)
+
+
 def test_below_floor_flag():
     # 중형(합 110cm) 치수인데 배송비 단가 1000 → 중형 floor 2100 미달 → below_floor
     r = detect_fee_anomalies(500, 400, 200, 6000, delivery_amount=1000, warehousing_amount=500, quantity=1)
