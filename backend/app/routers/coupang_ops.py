@@ -1207,3 +1207,45 @@ async def upload_rg_settlement_xlsx(
         return rg_settlement_sync.ingest_settlement_xlsx(db, account_key, content)
     except WingReadError as e:
         raise HTTPException(status_code=422, detail=f"엑셀 파싱 실패: {e}")
+
+
+# ════════════════════════════════════════════════════════════════════
+# RG 정산 자동 다운로드 + 적재 (S6-auto — Wing 세션쿠키 필요)
+# ════════════════════════════════════════════════════════════════════
+
+@router.post("/rg/settlement/auto-download")
+def auto_download_rg_settlement(
+    account_key: str = Query(
+        default=None,
+        description="미지정 시 모든 RG 계정(COUPANG_WING1/2) 순차 실행",
+    ),
+    db: Session = Depends(get_db),
+):
+    """S6-auto: DB 정산 기간별 × 종류별 엑셀 자동 생성 요청·폴링·다운로드·적재.
+
+    Wing 세션쿠키(CGSID_PARTNERADMINWEB 등)가 DB에 저장되어 있어야 동작.
+    account_key 미지정 시 모든 RG 계정 순차 실행.
+    반환: {results: [{account_key, requested, completed, ingested, errors, status}]}
+    """
+    try:
+        if account_key:
+            if account_key not in rg_settlement_sync.RG_ACCOUNTS:
+                raise HTTPException(status_code=400, detail=f"지원하지 않는 account_key: {account_key}")
+            cfg = get_coupang_config(account_key)
+            if not cfg or not cfg.vendor_id:
+                raise HTTPException(status_code=400, detail=f"{account_key} vendor_id 설정 없음")
+            result = rg_settlement_sync.auto_download_and_ingest(db, account_key, cfg.vendor_id)
+            return {"results": [result]}
+        else:
+            vendor_id_map: dict[str, str] = {}
+            for ak in rg_settlement_sync.RG_ACCOUNTS:
+                cfg = get_coupang_config(ak)
+                if cfg and cfg.vendor_id:
+                    vendor_id_map[ak] = cfg.vendor_id
+            results = rg_settlement_sync.auto_download_all(db, vendor_id_map)
+            return {"results": results}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception("S6-auto 실행 오류")
+        raise HTTPException(status_code=500, detail=f"S6-auto 오류: {e}")

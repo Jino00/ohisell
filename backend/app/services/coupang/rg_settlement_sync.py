@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import logging
+import time
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
@@ -16,7 +17,10 @@ import openpyxl
 from sqlalchemy.orm import Session
 
 from app.clients.coupang.inbound import WingAuthError, WingReadError, parse_curl_cookies
-from app.clients.coupang.rg_settlement import CoupangWingRgSettlementClient
+from app.clients.coupang.rg_settlement import (
+    CONFIRMED_SELLER_REPORT_TYPES,
+    CoupangWingRgSettlementClient,
+)
 from app.models import CoupangRgSettlementFee, CoupangWingCookie
 from app.utils.crypto import decrypt_secret
 from app.utils.kst import kst_now
@@ -623,3 +627,188 @@ def ingest_settlement_xlsx(db: Session, account_key: str, content: bytes) -> dic
         "sheets_skipped": parsed["sheets_skipped"],
         "status": "ok",
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# S6-auto: 엑셀 자동 다운로드 + 적재
+# ═══════════════════════════════════════════════════════════════════════
+
+_POLL_INTERVAL_SEC = 10   # 폴링 간격
+_POLL_TIMEOUT_SEC = 300   # 최대 대기 5분
+
+
+def auto_download_and_ingest(
+    db: Session,
+    account_key: str,
+    vendor_id: str,
+    *,
+    poll_timeout: int = _POLL_TIMEOUT_SEC,
+) -> dict:
+    """S6-auto: DB의 정산 기간별 × 종류별 엑셀 자동 다운로드 → 옵션 단위 적재.
+
+    1. DB에서 (account_key, vendor_item_id="") 계정 row의 distinct 정산 기간 조회
+    2. 각 기간 × CONFIRMED_SELLER_REPORT_TYPES 조합으로 request-download/api 호출
+    3. download-list/api 폴링 → COMPLETED 확인
+    4. download/api/v2 → S3 URL → 엑셀 다운로드 → ingest_settlement_xlsx
+    반환: {account_key, requested, completed, ingested, errors, status}
+    """
+    # P2-a(codex): auth 실패는 per-account error로 반환(전체 abort 방지).
+    try:
+        client = _load_client(db, account_key)
+    except WingAuthError as e:
+        return {"account_key": account_key, "requested": 0, "completed": 0,
+                "ingested": 0, "errors": [str(e)], "status": "auth_error"}
+
+    # ── 1. DB에서 정산 기간 조회 ─────────────────────────────────────────
+    periods_q = (
+        db.query(
+            CoupangRgSettlementFee.recognition_date_from,
+            CoupangRgSettlementFee.recognition_date_to,
+        )
+        .filter(
+            CoupangRgSettlementFee.account_key == account_key,
+            CoupangRgSettlementFee.vendor_item_id == "",
+        )
+        .distinct()
+        .all()
+    )
+    if not periods_q:
+        log.info("S6-auto: 정산 기간 없음(status/api 먼저 실행 필요) account_key=%s", account_key)
+        return {"account_key": account_key, "requested": 0, "completed": 0,
+                "ingested": 0, "errors": [], "status": "no_periods"}
+
+    # ── 2. 엑셀 생성 요청 ────────────────────────────────────────────────
+    # P1(codex): 각 요청에 고유한 request_time_ms 사용(같은 값 → 서버가 duplicate 처리).
+    # P2-b(codex): duplicate 시 기존 요청이 24h 이전에 만들어졌을 수 있으므로
+    #              poll_from_ms를 24h 전으로 넓혀 search window 안에 포함시킴.
+    base_ms = int(time.time() * 1000)
+    poll_from_ms = base_ms - 24 * 3600 * 1000  # 24시간 전부터 검색
+
+    requested: list[dict] = []
+    errors: list[str] = []
+
+    req_idx = 0
+    for period_from, period_to in periods_q:
+        group_key = f"{vendor_id}-{period_from}-{period_to}"
+        for report_type in CONFIRMED_SELLER_REPORT_TYPES:
+            # 요청마다 1ms씩 증가 → 모두 고유한 requestTime
+            req_time_ms = base_ms + req_idx
+            req_idx += 1
+            try:
+                resp = client.request_download(
+                    seller_report_type=report_type,
+                    settlement_group_keys=[group_key],
+                    request_time_ms=req_time_ms,
+                )
+                request_id = resp.get("requestId", "")
+                if resp.get("duplicateRequest"):
+                    log.info("S6-auto: 중복 요청(기존 항목 폴링) %s / %s", report_type, group_key)
+                requested.append({
+                    "request_id": request_id,
+                    "report_type": report_type,
+                    "period_from": period_from,
+                    "period_to": period_to,
+                    "group_key": group_key,
+                })
+                log.info("S6-auto: 요청 완료 %s / %s → %s", report_type, group_key, request_id)
+            except WingAuthError as e:
+                # P2-c(codex): 세션 만료 → cookie red 표시(sync_rg_settlement 패턴 동일).
+                _mark_red(db, account_key)
+                msg = f"세션 만료(cookie red 처리) {report_type}/{group_key}: {e}"
+                log.warning("S6-auto: %s", msg)
+                errors.append(msg)
+                break  # 쿠키 만료 시 남은 요청도 실패 → 루프 탈출
+            except WingReadError as e:
+                msg = f"request_download 실패 {report_type}/{group_key}: {e}"
+                log.warning("S6-auto: %s", msg)
+                errors.append(msg)
+
+    if not requested:
+        return {"account_key": account_key, "requested": 0, "completed": 0,
+                "ingested": 0, "errors": errors, "status": "all_failed"}
+
+    # ── 3. 폴링 → COMPLETED 확인 ─────────────────────────────────────────
+    pending_ids = {r["request_id"] for r in requested if r["request_id"]}
+    completed_items: dict[str, dict] = {}  # request_id → download-list 항목
+    deadline = time.time() + poll_timeout
+    # poll_to: 가장 마지막 req_time + timeout + 여유(1min)
+    poll_to_ms = base_ms + req_idx + poll_timeout * 1000 + 60_000
+
+    while time.time() < deadline and len(completed_items) < len(pending_ids):
+        try:
+            items = client.get_download_list(
+                request_time_from_ms=poll_from_ms,
+                request_time_to_ms=poll_to_ms,
+            )
+        except WingAuthError as e:
+            _mark_red(db, account_key)
+            errors.append(f"폴링 중 세션 만료(cookie red): {e}")
+            break
+        except WingReadError as e:
+            log.warning("S6-auto: download-list 폴링 실패: %s", e)
+            break
+
+        for item in items:
+            rid = item.get("requestId", "")
+            if rid in pending_ids and item.get("downloadStatus") == "COMPLETED":
+                completed_items[rid] = item
+
+        remaining = pending_ids - set(completed_items)
+        if remaining:
+            log.info("S6-auto: 폴링 대기 중 %d/%d ...", len(completed_items), len(pending_ids))
+            time.sleep(_POLL_INTERVAL_SEC)
+
+    timed_out = [r["request_id"] for r in requested if r["request_id"] not in completed_items]
+    if timed_out:
+        for rid in timed_out:
+            errors.append(f"download timeout requestId={rid}")
+        log.warning("S6-auto: %d개 timeout", len(timed_out))
+
+    # ── 4. 다운로드 + 적재 ───────────────────────────────────────────────
+    ingested = 0
+    for req in requested:
+        rid = req["request_id"]
+        item = completed_items.get(rid)
+        if not item:
+            continue
+        try:
+            url = client.get_download_url(request_time_ms=item["requestTime"])
+            xlsx_bytes = client.download_excel_bytes(url)
+            ingest_result = ingest_settlement_xlsx(db, account_key, xlsx_bytes)
+            # P2-d(codex): 0행 적재(모든 시트 skip/empty) → error로 기록.
+            upserted = ingest_result.get("upserted", 0)
+            if upserted == 0:
+                msg = f"0행 적재(시트 파싱 실패 또는 empty) {req['report_type']}/{req['group_key']}: {ingest_result.get('sheets_skipped')}"
+                log.warning("S6-auto: %s", msg)
+                errors.append(msg)
+            else:
+                ingested += 1
+                log.info("S6-auto: 적재 완료 %s / %s (%d행)", req["report_type"], req["group_key"], upserted)
+        except WingAuthError as e:
+            _mark_red(db, account_key)
+            errors.append(f"다운로드 중 세션 만료(cookie red): {e}")
+        except (WingReadError, Exception) as e:
+            msg = f"다운로드/적재 실패 {req['report_type']}/{req['group_key']}: {e}"
+            log.warning("S6-auto: %s", msg)
+            errors.append(msg)
+
+    status = "ok" if not errors else ("partial" if ingested > 0 else "failed")
+    log.info("S6-auto 완료: %s — 요청 %d / 완료 %d / 적재 %d / 오류 %d",
+             account_key, len(requested), len(completed_items), ingested, len(errors))
+    return {
+        "account_key": account_key,
+        "requested": len(requested),
+        "completed": len(completed_items),
+        "ingested": ingested,
+        "errors": errors,
+        "status": status,
+    }
+
+
+def auto_download_all(db: Session, vendor_id_map: dict[str, str]) -> list[dict]:
+    """모든 RG 계정 S6-auto 실행. vendor_id_map: {account_key: vendor_id}."""
+    return [
+        auto_download_and_ingest(db, ak, vendor_id_map[ak])
+        for ak in RG_ACCOUNTS
+        if ak in vendor_id_map
+    ]
