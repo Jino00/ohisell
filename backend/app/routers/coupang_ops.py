@@ -808,6 +808,31 @@ def sales_summary(
     total_profit = total_rev - total_fee - total_cost - total_spend - total_ship
     profit_rate  = (total_profit / total_rev * 100).quantize(_Q2) if total_rev else None
 
+    # 광고비 제외 이익 — '오늘' 분리 레이아웃 카드용. days=0이면 광고비가 어제(최신 XLSX)
+    # 종일치라, 오늘 매출에서 그걸 빼면 의미가 없다 → 광고비를 아예 제외한 이익을 따로 제공.
+    profit_excl_ad = total_rev - total_fee - total_cost - total_ship
+    profit_rate_excl_ad = (
+        (profit_excl_ad / total_rev * 100).quantize(_Q2) if total_rev else None
+    )
+
+    # 원가·수수료 데이터 완성도(매출가중, 0~1). 오늘은 정산·매핑 지연으로 낮음(프론트 표기용).
+    #   cost_coverage  : 원가 매핑(product_channel_mapping) 보유 매출 비율
+    #   fee_actual_ratio: 실측 정산수수료(coupang_revenue_fee) 매칭 매출 비율(나머지는 7.8% 추정)
+    rev_named = _Z
+    rev_costed = _Z
+    rev_fee_actual = _Z
+    for _vid, _od in order_by_vid.items():
+        if not _resolve_names(_vid):
+            continue
+        _rev = _od["revenue"]
+        rev_named += _rev
+        if cost_map.get(_vid):
+            rev_costed += _rev
+        if _vid in actual_fee_by_vid:
+            rev_fee_actual += _rev
+    cost_coverage = float(rev_costed / rev_named) if rev_named else 1.0
+    fee_actual_ratio = float(rev_fee_actual / rev_named) if rev_named else 1.0
+
     def _profit(v: dict) -> Decimal:
         return v["revenue"] - v["fee"] - v["cost"] - v["ad_spend"] - v["shipping"]
 
@@ -842,6 +867,10 @@ def sales_summary(
             "shipping":     str(total_ship.quantize(_Q2)),
             "profit":       str(total_profit.quantize(_Q2)),
             "profit_rate":  str(profit_rate) if profit_rate is not None else None,
+            "profit_excl_ad": str(profit_excl_ad.quantize(_Q2)),
+            "profit_rate_excl_ad": str(profit_rate_excl_ad) if profit_rate_excl_ad is not None else None,
+            "cost_coverage": round(cost_coverage, 4),
+            "fee_actual_ratio": round(fee_actual_ratio, 4),
             "conv_revenue": str(total_conv.quantize(_Q2)),
             "roas":         _roas(total_spend, total_conv),
         },

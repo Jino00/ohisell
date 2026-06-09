@@ -58,6 +58,16 @@ function numOf(s: string): number {
   const n = Number(s.replace(/[^0-9.-]/g, ""));
   return isNaN(n) ? 0 : n;
 }
+// 수수료 카드 부가표기 — 실측 정산수수료 매칭 비율(나머지는 7.8% 추정).
+function feeSub(ratio: number | null | undefined): string | undefined {
+  if (ratio == null || ratio >= 0.999) return undefined;
+  return ratio <= 0.001 ? "추정 7.8% (정산 전)" : `${Math.round((1 - ratio) * 100)}% 추정`;
+}
+// 원가 카드 부가표기 — 원가 매핑 보유 매출 비율(미설정분은 0으로 빠져 이익 과대).
+function costSub(cov: number | null | undefined): string | undefined {
+  if (cov == null || cov >= 0.999) return undefined;
+  return `${Math.round(cov * 100)}% 반영 (일부 원가 미설정)`;
+}
 
 // ── RG 발송관제 섹션 ─────────────────────────────────────────────
 
@@ -668,13 +678,13 @@ export default function CoupangOps() {
             </div>
             <div className="grid grid-cols-5 gap-3">
               <SummaryCard label="총 매출" value={loading ? "…" : won(s?.revenue)} />
-              <SummaryCard label="수수료" value={loading ? "…" : won(s?.fee)} />
-              <SummaryCard label="원가" value={loading ? "…" : won(s?.cost)} />
+              <SummaryCard label="수수료" value={loading ? "…" : won(s?.fee)} sub={feeSub(s?.fee_actual_ratio)} />
+              <SummaryCard label="원가" value={loading ? "…" : won(s?.cost)} sub={costSub(s?.cost_coverage)} />
               <SummaryCard label="배송비" value={loading ? "…" : won(s?.shipping)} sub="Wing 1,900원/건" />
-              <div className={`bg-white border-2 rounded-lg p-4 ${Number(s?.profit ?? 0) >= 0 ? "border-blue-200" : "border-red-200"}`}>
+              <div className={`bg-white border-2 rounded-lg p-4 ${Number(s?.profit_excl_ad ?? 0) >= 0 ? "border-blue-200" : "border-red-200"}`}>
                 <div className="text-xs text-gray-500 mb-1">이익 (광고비 제외)</div>
-                <div className={`text-xl font-bold ${profitColor(s?.profit)}`}>{loading ? "…" : won(s?.profit)}</div>
-                {s?.profit_rate && <div className="text-xs mt-0.5 text-gray-400">이익률 {pct(s.profit_rate)}</div>}
+                <div className={`text-xl font-bold ${profitColor(s?.profit_excl_ad)}`}>{loading ? "…" : won(s?.profit_excl_ad)}</div>
+                {s?.profit_rate_excl_ad && <div className="text-xs mt-0.5 text-gray-400">이익률 {pct(s.profit_rate_excl_ad)}</div>}
               </div>
             </div>
           </div>
@@ -695,8 +705,8 @@ export default function CoupangOps() {
         <div className="mb-6 space-y-2">
           <div className="grid grid-cols-6 gap-3">
             <SummaryCard label="총 매출" value={loading ? "…" : won(s?.revenue)} />
-            <SummaryCard label="수수료" value={loading ? "…" : won(s?.fee)} />
-            <SummaryCard label="원가" value={loading ? "…" : won(s?.cost)} />
+            <SummaryCard label="수수료" value={loading ? "…" : won(s?.fee)} sub={feeSub(s?.fee_actual_ratio)} />
+            <SummaryCard label="원가" value={loading ? "…" : won(s?.cost)} sub={costSub(s?.cost_coverage)} />
             <SummaryCard label="광고비" value={loading ? "…" : won(s?.ad_spend)} />
             <SummaryCard label="배송비" value={loading ? "…" : won(s?.shipping)} sub="Wing 1,900원/건" />
             <div className={`bg-white border-2 rounded-lg p-4 ${Number(s?.profit ?? 0) >= 0 ? "border-blue-200" : "border-red-200"}`}>
