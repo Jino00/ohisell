@@ -4,8 +4,15 @@
 
 ## 현재 상태
 - 날짜: 2026-06-09
-- ★★RG 수수료 회계 **S6-auto 완료(자동 엑셀 다운로드)**(2026-06-09, main 커밋 e9554bc, codex 3R pass). 트랙 8/8 코드 완료(prod self-verify 미완). 다음: prod 자동 다운로드 self-verify(쿠키 확인 후) + scheduler 등록 + S8(선택).
-  - Wing 3단계: request-download/api→download-list/api 폴링→download/api/v2→S3 GET. 고유 requestTime(P1), per-account auth error(P2-a), 24h poll window(P2-b), _mark_red mid-flow(P2-c), 0행 ingest error(P2-d). POST /api/coupang/ops/rg/settlement/auto-download. codex 3R(1R P1·P2×2→2R P2×2→3R pass).
+- ★★RG 수수료 회계 트랙 **전부 완료(S1~S8, 운영 단계)**. 이번 세션: S6-auto prod self-verify + scheduler 등록 + **S8 과오청구 감사** 신규.
+- ★★**S8 과오청구 감사 완료**(main 커밋 7de358a+00a8525, codex 1R pass[P1 0·P2 2 수용], fixture 32, prod 라이브 self-verify).
+  - **사이즈표 라이브 확보**: Wing fee-details(로그인, browse 쿠키피커 import) → 레퍼런스 17 §7. 세변합(cm)+무게(kg) 6등급, 둘 다 충족·하나라도 초과시 상위 채택.
+  - **구조(D-17)**: SA1 classify_size_type + SA2 expected_fee_floor + SA3 detect_fee_anomalies(배송 주문당·입출고 수량당) → Harness rg_fee_audit → GET /api/coupang/ops/rg/fee-audit. **읽기전용·net_profit 불변**.
+  - **★설계 결정**: 쿠팡 정확 계산기 **복제 안 함**(fragile 머니코드·오탐 회피, D-4·D-5). 사이즈 분류(결정적)+이상치 스크리닝(사람 검토 신호).
+  - **codex 1R**: P1 0, P2 2 수용+회귀테스트(배송 order_count 정규화·날짜 overlap).
+  - **★prod self-verify(원칙22)**: 22옵션 15플래그(size_mismatch_high 4=극소형 폰케이스 배송 3,800~4,050=floor 2.8배·below_floor 2·unit_unknown 9). order_count 정규화 라이브 확인.
+- ★★**S6-auto self-verify + scheduler**(커밋 db48d04). auto-download: WING1 28/28→9·WING2 28/28→10적재 인증정상. job 06:15 KST 등록. CATEGORY_TR만 시트명 미매핑 0행(무영향).
+- (이전) ★★S6-auto 구현(e9554bc, codex 3R). Wing 3단계 request→폴링→S3 GET.
 - (이전) ★★RG 수수료 회계 **S7 완료(net_profit 플립 — Phase 2 핵심)**(2026-06-09, main 커밋 0ec96cf+a58a9e1, codex 2R pass, fixture 12/12, prod 라이브 self-verify). 트랙 7/8(S6-auto·S8 후속).
   - **공식(D-16)**: `net_profit = net_profit_pre_rg − rg_total` — 계정 RG 정산 총액 **전액 차감**(광고 포함). 순수함수 apply_rg_net_profit_flip + 5 브리지필드(net_profit_pre_rg·rg_settlement_total·rg_ad_settlement·rg_non_ad_deducted·rg_flip_status enum applied_full/not_applied_no_data). by_option net_profit 불변(D-14, 계정 단위 차감).
   - **★D-15→D-16 전환(핵심)**: 처음 D-15(광고 제외 non-ad 차감)로 구현·배포했으나, **/browse 라이브 조사**로 RG 광고비가 광고센터 PA 보고서(pa_daily XLSX 출처=마켓플레이스 3P/윙 광고)에 없고 RG 정산에만 존재함을 확인(prod 광고 XLSX 2P 전기간 0행 실증, RG 정산 ad_sales=80,754). → D-15는 RG 광고 누락 → **전액 차감 D-16**으로 개정(Jino 결정). rg_total 전부 정산 basis라 basis 불일치 없음(D-15보다 단순).
