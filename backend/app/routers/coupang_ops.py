@@ -826,7 +826,7 @@ def sales_summary(
             continue
         _rev = _od["revenue"]
         rev_named += _rev
-        if cost_map.get(_vid):
+        if _vid in cost_map:  # 매핑 보유 여부(키 존재). cost_map은 >0만 적재되나 의도 명시.
             rev_costed += _rev
         if _vid in actual_fee_by_vid:
             rev_fee_actual += _rev
