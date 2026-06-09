@@ -4,7 +4,9 @@
 
 ## 현재 상태
 - 날짜: 2026-06-09
-- ★★RG 수수료 회계 **S7 완료(net_profit 플립 — Phase 2 핵심)**(2026-06-09, main 커밋 0ec96cf+a58a9e1, codex 2R pass, fixture 12/12, prod 라이브 self-verify). 트랙 7/8(S6-auto·S8 후속).
+- ★★RG 수수료 회계 **S6-auto 완료(자동 엑셀 다운로드)**(2026-06-09, main 커밋 e9554bc, codex 3R pass). 트랙 8/8 코드 완료(prod self-verify 미완). 다음: prod 자동 다운로드 self-verify(쿠키 확인 후) + scheduler 등록 + S8(선택).
+  - Wing 3단계: request-download/api→download-list/api 폴링→download/api/v2→S3 GET. 고유 requestTime(P1), per-account auth error(P2-a), 24h poll window(P2-b), _mark_red mid-flow(P2-c), 0행 ingest error(P2-d). POST /api/coupang/ops/rg/settlement/auto-download. codex 3R(1R P1·P2×2→2R P2×2→3R pass).
+- (이전) ★★RG 수수료 회계 **S7 완료(net_profit 플립 — Phase 2 핵심)**(2026-06-09, main 커밋 0ec96cf+a58a9e1, codex 2R pass, fixture 12/12, prod 라이브 self-verify). 트랙 7/8(S6-auto·S8 후속).
   - **공식(D-16)**: `net_profit = net_profit_pre_rg − rg_total` — 계정 RG 정산 총액 **전액 차감**(광고 포함). 순수함수 apply_rg_net_profit_flip + 5 브리지필드(net_profit_pre_rg·rg_settlement_total·rg_ad_settlement·rg_non_ad_deducted·rg_flip_status enum applied_full/not_applied_no_data). by_option net_profit 불변(D-14, 계정 단위 차감).
   - **★D-15→D-16 전환(핵심)**: 처음 D-15(광고 제외 non-ad 차감)로 구현·배포했으나, **/browse 라이브 조사**로 RG 광고비가 광고센터 PA 보고서(pa_daily XLSX 출처=마켓플레이스 3P/윙 광고)에 없고 RG 정산에만 존재함을 확인(prod 광고 XLSX 2P 전기간 0행 실증, RG 정산 ad_sales=80,754). → D-15는 RG 광고 누락 → **전액 차감 D-16**으로 개정(Jino 결정). rg_total 전부 정산 basis라 basis 불일치 없음(D-15보다 단순).
   - **codex 2R(원칙19)**: D-15 1R(Low 2: 주석·UI), D-16 2R(3건: UI 부호버그 환급 −-300원·stale주석·overlap경고 수용). 미래 2P>0 겹침 가드(ad_xlsx_rg_overlap>0 → log.warning).
