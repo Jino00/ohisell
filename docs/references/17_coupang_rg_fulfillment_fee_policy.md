@@ -17,6 +17,15 @@
 - **코드 반영(커밋 2c410c9)**: fee_type 'fulfillment'→'delivery' 리네임(alembic h2i3j4k5l6m7 UPDATE, stale 방지).
   D-11 광고비 dedup 규칙 코드화(sell_type='2P'=RG, RG정산 ad_sales 정본 → Phase2 플립 시 제외). codex 3R pass.
 
+### 8-1. ★S5 종류별 엑셀 실증 (2026-06-09, 오픽스 WAREHOUSING_SHIPPING 엑셀 — S6 전제 확정)
+- 파일: `A01564720-WAREHOUSING_SHIPPING-ko-*.xlsx`(윙 로켓그로스 정산현황 → 상세보기 → 입출고·배송비 엑셀).
+- **2층 구조**: ① 상단 요약(정산주기 종료일·합계·세액·최종비용) ② 하단 **주문/SKU 단위 상세**(헤더 row7, 26컬럼).
+- **★vendor_item_id 있음(S6 가능 확정)**: 상세 컬럼 = 정산유형·정산주기·세금계산서발행월·발생일(배송완료일)·**매출인식일**·거래유형·주문ID·배송ID·주문일·등록상품ID·**옵션ID(=vendor_item_id)**·SKU ID·등록상품명·옵션명·단품판매가·카테고리·개별포장사이즈·물류센터·판매수량·단품기준구매수량·옵션유형·입출고비(VAT별도: 발생비용A·할인가B·할인적용가A−B)·비고.
+- **시트=비용종류별**(입출고비/배송비 2시트). 오픽스 1주(정산주기 06-07): 입출고 62행·배송 62행, 각 고유 옵션ID 4개.
+- **★검산 완전 일치(원칙22)**: Σ옵션 **할인적용가(A−B)** = 요약 「합계」 = status/api 컴포넌트(VAT前). 입출고: Σ(A−B)=68,625 = 요약 입출고비합계 68,625; +세액 6,864 = 최종 75,489 = **status/api totalWarehousingFeeDeductionAmount(75,489)**. 배송도 동일 구조.
+- **★S6 회계 규칙(중요)**: 옵션 귀속 cost = **할인적용가(A−B)** 사용(발생비용 A=gross 할인前은 status/api와 불일치 100,650≠68,625). VAT는 요약 세액으로 별도 gross-up. fee_type별 엑셀 분리 다운로드(8종).
+- **다운로드 흐름**: 정산현황 행 「엑셀 다운로드 요청」(비동기 생성) → 우측상단 「정산관리 엑셀 다운로드 목록」에서 받음(download-list/api). 파일명=`{vendor_id}-{REPORT_TYPE}-ko-{uuid}.xlsx`. REPORT_TYPE 예: WAREHOUSING_SHIPPING(입출고·배송비).
+
 ## 0. 핵심 문제 (왜 이 작업이 필요한가)
 - 우리 종합조망 순이익은 **판매수수료 + 판매수수료 VAT(`total_fee`)만** 차감(intelligence.py `_agg_fees`).
 - 오픽스 RG 90개 판매의 수수료(입출고비·배송비·보관비·반품비·RG서비스이용료)는 **전혀 안 들어감**.

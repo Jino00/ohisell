@@ -64,12 +64,12 @@
 - [x] **S3. rg_settlement_sync Harness** — status/api 수집·파싱(D-8)·적재 + fail-soft(302→🔴). **fixture 테스트(D-12) 14/14 PASS**: 파싱·부호·집계·dedup·누락필드 방어.
 - [x] **S4. 대조 뷰 노출(D-6/D-7)** — compute_command_center에 'RG 정산 비용(미반영)' 독립 지표(account_key별). net_profit **불변**. 광고비는 표시만(D-11). API/프론트. scheduler 등록. codex P2×2 수정(rg_settlement.py 미커밋 + xsrf decrypt). 커밋 e7cb99f.
 ### Phase 2 — net_profit 플립 (규칙 잠근 뒤 정확 반영)
-- [~] **S5. 회계 규칙 최종 잠금 + 엑셀 스키마 실증** — ★코드 잠금 완료(커밋 2c410c9, codex 3R pass, fixture 22/22, prod 라이브 reconcile 검증). 엑셀 실증(vendor_item_id 유무)은 윙 로그인 진행 중.
-  - **D-10 라이브 확정(원칙22)**: totalFulfillmentFeeDeductionAmount=배송비(delivery)뿐 → fee_type 'fulfillment'→'delivery' 리네임(alembic h2i3j4k5l6m7 UPDATE). 풀필먼트 J=배송+입출고+보관(레퍼런스17 §7 검산 일치). 발생비용(f) 기준(이월 g 별도필드, 미혼입). searchDateType=SALES.
+- [x] **S5. 회계 규칙 최종 잠금 + 엑셀 스키마 실증** — ✅ 완료(2026-06-09, 커밋 2c410c9+6bcff4d, codex 3R pass, fixture 22/22, prod 라이브 reconcile 검증).
+  - **D-10 라이브 확정(원칙22)**: totalFulfillmentFeeDeductionAmount=배송비(delivery)뿐 → fee_type 'fulfillment'→'delivery' 리네임(alembic h2i3j4k5l6m7 UPDATE). 풀필먼트 J=배송+입출고+보관(레퍼런스17 §7 검산 일치). status/api 컴포넌트=할인적용가(A−B)+VAT(실청구), 이월 g 별도필드. searchDateType=SALES.
   - **D-11 코드화**: RG정산 ad_sales 정본, 광고비 XLSX sell_type='2P'(RG)분 Phase2 플립 시 제외(rg_ad_spend_to_exclude+_agg_rg_ad_overlap). Phase1 표시만. 현재 prod 2P행 0개(겹침 없음).
   - **reconcile guard(codex 지적1)**: _rg_account_breakdown other=total−라인합, legacy/미지 fee_type 가시화. **net_profit 불변(D-6)**.
-  - **남은 것**: 종류별 엑셀(입출고·배송비 등)에 vendor_item_id 컬럼 유무 확인 → S6 옵션단위 수집 전제. download-list/api body 실측(현재 500) 캡처 필요.
-- [ ] **S6. 옵션 단위 수집** — download-list/api + 비동기 엑셀 폴링·파싱 → CoupangRgSettlementFee에 vendor_item_id 추가. Σ(옵션)==계정총액 검산. fixture 테스트.
+  - **★엑셀 실증 완료(레퍼런스17 §8-1)**: 종류별 엑셀(WAREHOUSING_SHIPPING)에 **옵션ID(vendor_item_id) per 주문 존재** → S6 옵션단위 수집 **가능**. 매출인식일·주문ID·SKU·발생비용(A)/할인적용가(A−B) 포함. **검산 완전일치**: Σ옵션 할인적용가(A−B)=요약합계=status/api(VAT前). ★S6 규칙=옵션 cost는 **할인적용가(A−B)** 사용(gross A 아님), VAT 별도 gross-up.
+- [ ] **S6. 옵션 단위 수집** — 종류별 엑셀 비동기 생성·다운로드·파싱 → CoupangRgSettlementFee에 vendor_item_id 추가. ★실증완료(§8-1): 엑셀 2층(요약+SKU상세), 옵션ID·매출인식일·할인적용가(A−B) per 주문. **옵션 cost=할인적용가(A−B)+VAT gross-up**(발생비용 A 아님). Σ(옵션 A−B)==요약합계==status/api(VAT前) 검산. 파일명={vendor_id}-{REPORT_TYPE}-ko-{uuid}.xlsx. download-list/api body는 status/api와 다름(실제 캡처 필요). fixture 테스트(D-12).
 - [ ] **S7. net_profit 플립 + 광고비 dedup 차단 + 모델(A) 감사** — by_option·account_sum에 RG 비용 반영(대조→권위), ad_costs RG분 제외/대체(D-11), 치수→등급 모델 과오청구 감사(D-4). (선택/후속)
 - 각 Sprint: self-verify(라이브 prod) + fixture 테스트(D-12, 머니코드) + codex review pass (원칙19).
 
@@ -82,10 +82,11 @@
   - **★발견 1 — Wing 쿠키 httpOnly 누락**: 라이브 302 원인=document.cookie엔 httpOnly 세션쿠키(CGSID_PARTNERADMINWEB·JSESSIONID·sxSessionId) 없음. JS·CDP 둘 다 못 읽음 → DevTools "Copy as cURL" 등록이 유일 경로(광고비/RG입고와 동일 parse_curl_cookies). failures.jsonl 기록.
   - **★발견 2 — 종합조망 500 버그(기존)**: overview.py:56 `datetime.now(_KST)` _KST 미정의 NameError(커밋 a2bbd3a부터 존재, 라이브 미검증 방치). `kst_today()`로 수정, codex review PASS, 라이브 200. failures.jsonl 기록.
   - **★발견 3 — S4 모델 미커밋**: models.py(CoupangRgSettlementFee)+__init__.py(export)가 e7cb99f에서 누락돼 로컬 미커밋(prod엔 scp로 반영됨). overview.py 수정과 함께 커밋 예정.
+- 2026-06-09: **★S5 완료(코드 잠금 + 엑셀 실증)**. 커밋 2c410c9(코드)+6bcff4d(docs). D-10: fulfillment=배송비 라이브 확정(원칙22), fee_type 리네임(alembic h2i3j4k5l6m7), 발생f basis. D-11: 광고비 dedup 규칙 코드화(2P↔ad_sales). reconcile guard. codex 3R pass, fixture 22/22, prod 마이그레이션+배포+라이브 reconcile OK, net_profit 불변(D-6). **엑셀 실증(§8-1)**: WAREHOUSING_SHIPPING 엑셀에 옵션ID(vendor_item_id) per 주문 존재→S6 가능. Σ옵션 할인적용가(A−B)=요약=status/api 완전 검산. S6 규칙=할인적용가(A−B)+VAT.
 
 ## 다음 액션
-- **(커밋 대기)** models.py + __init__.py(S4 모델 누락분) + overview.py(_KST 버그픽스) 커밋. 프론트 dist 이미 prod 배포됨.
-- **S5**: 회계 규칙 최종 잠금 + 엑셀 스키마 실증(vendor_item_id 유무). ★status/api 응답에 vendor_item_id 없음 확인(주기별 집계뿐) → 옵션단위는 S6 download-list/api 엑셀 필요.
+- **S6 착수(다음 세션)**: 종류별 엑셀 비동기 생성·다운로드·파싱 Harness. ① download-list/api 실제 body 캡처(현재 500) ② 엑셀 폴링·다운로드(GET excel-report?id= 류) ③ 파서: 2층 엑셀에서 옵션ID×매출인식일×할인적용가(A−B) 추출, fee_type별(WAREHOUSING_SHIPPING 등 8종) ④ CoupangRgSettlementFee에 vendor_item_id 컬럼 추가(마이그레이션) ⑤ Σ(옵션)==status/api 검산 + VAT gross-up ⑥ fixture 테스트. 샘플 엑셀=~/Downloads/A01564720-WAREHOUSING_SHIPPING-ko-*.xlsx.
+- **S7(후속)**: net_profit 플립 + 광고비 dedup 차단(D-11) + 모델(A) 감사.
 
 ## GSTACK REVIEW REPORT
 
