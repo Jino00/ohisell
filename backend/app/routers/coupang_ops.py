@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 from app.clients.coupang.inbound import WingReadError
 from app.config import get_coupang_config
 from app.database import get_db
-from app.models import Channel, CoupangAdCostDaily, CoupangAdOptionDaily, CoupangProductItem, CoupangRevenueFee, CoupangRgInbound, CoupangRgOrderItem, Order, ProductChannelMapping, ProductMaster
+from app.models import Channel, CoupangAdCostDaily, CoupangAdOptionDaily, CoupangProductItem, CoupangRevenueFee, CoupangRgInbound, CoupangRgOrderItem, CoupangRgSettlementFee, Order, ProductChannelMapping, ProductMaster
 from app.routers._coupang_write_http import handle_write as _handle_write
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
 from app.services.coupang import ad_cost_sync, coupon_write, lead_time_estimator, product_write, rg_fee_audit, rg_inbound_sync, rg_replenishment, rg_settlement_sync, sales_velocity_estimator
@@ -518,6 +518,69 @@ def _roas(spend: Decimal, conv: Decimal) -> str | None:
     return str((conv / spend).quantize(_Q2, rounding=ROUND_HALF_UP))
 
 
+def _rg_fulfillment_per_unit(
+    db: Session, account_keys: list[str]
+) -> tuple[dict[str, Decimal], Decimal]:
+    """옵션별 RG 풀필먼트(배송+입출고) 건당 단가 추정.
+
+    = Σ(정산 옵션단위 delivery+warehousing) / Σ(같은 정산 날짜범위 RG 판매수량).
+    ★배경(라이브 확정): RG는 판매수수료(CATEGORY_TR 라이브=7.8%) 외에 풀필먼트비가 매출의
+    ~16%인데, 운영 패널이 RG 배송비를 0으로 둬 통째로 누락 → RG 이익 과대. 옵션별 실측 단가로
+    보강한다. 오늘 주문은 아직 미정산이라 과거 실측 단가를 적용(=추정, 0보다 정확).
+    반환: ({vid: 건당단가}, 계정 평균 폴백 단가). 데이터 없으면 ({}, 0).
+    """
+    if not account_keys:
+        return {}, _Z
+    _ff_filter = (
+        CoupangRgSettlementFee.account_key.in_(account_keys),
+        CoupangRgSettlementFee.vendor_item_id.isnot(None),  # codex P2: null 명시 제외
+        CoupangRgSettlementFee.vendor_item_id != "",
+        CoupangRgSettlementFee.fee_type.in_(["delivery", "warehousing"]),
+    )
+    ff_rows = (
+        db.query(CoupangRgSettlementFee.vendor_item_id, func.sum(CoupangRgSettlementFee.amount))
+        .filter(*_ff_filter)
+        .group_by(CoupangRgSettlementFee.vendor_item_id)
+        .all()
+    )
+    ff_by_vid = {str(v): _f(a) for v, a in ff_rows if a}
+    if not ff_by_vid:
+        return {}, _Z
+    d_from, d_to = (
+        db.query(
+            func.min(CoupangRgSettlementFee.recognition_date_from),
+            func.max(CoupangRgSettlementFee.recognition_date_to),
+        )
+        .filter(*_ff_filter)
+        .first()
+    )
+    qty_by_vid: dict[str, int] = {}
+    if d_from and d_to:
+        q_rows = (
+            db.query(CoupangRgOrderItem.vendor_item_id, func.sum(CoupangRgOrderItem.sales_quantity))
+            .filter(
+                CoupangRgOrderItem.account_key.in_(account_keys),
+                func.date(CoupangRgOrderItem.paid_at) >= d_from.isoformat(),
+                func.date(CoupangRgOrderItem.paid_at) <= d_to.isoformat(),
+            )
+            .group_by(CoupangRgOrderItem.vendor_item_id)
+            .all()
+        )
+        qty_by_vid = {str(v): int(q or 0) for v, q in q_rows}
+    per_unit: dict[str, Decimal] = {}
+    tot_ff, tot_qty = _Z, 0
+    for vid, ff in ff_by_vid.items():
+        q = qty_by_vid.get(vid, 0)
+        if q > 0:
+            per_unit[vid] = (ff / Decimal(q)).quantize(_Q2)
+            tot_ff += ff
+            tot_qty += q
+    fallback = (tot_ff / Decimal(tot_qty)).quantize(_Q2) if tot_qty else _Z
+    if ff_by_vid and tot_qty == 0:  # codex P2: 수수료는 있는데 수량 0 → 폴백 0으로 RG 풀필먼트 소실 경고
+        log.warning("RG 풀필먼트 단가 산출 실패(정산 옵션 수수료는 있으나 RG 수량 0): %s", account_keys)
+    return per_unit, fallback
+
+
 @router.get("/sales-summary")
 def sales_summary(
     company: str = Query(default="ALL", description="오픽스 | 오하이테크 | ALL"),
@@ -724,6 +787,12 @@ def sales_summary(
         if chosen_cost:
             cost_map[vid] = _f(chosen_cost)
 
+    # ── 3c. RG 풀필먼트 건당 단가(배송+입출고 실측, 옵션별) ──────────────
+    # RG는 판매수수료(7.8%) 외 풀필먼트비가 매출 ~16%인데 패널이 0으로 누락 → 실측 단가로 보강.
+    rg_acct_keys = [c for c in target_codes if c in ("COUPANG_WING1", "COUPANG_WING2")]
+    rg_ff_per_unit, rg_ff_fallback = _rg_fulfillment_per_unit(db, rg_acct_keys)
+    rg_fulfillment_total = _Z
+
     # ── 4. 상품명·채널타입 단위로 병합 ───────────────────────────────
     # key = (product_label, channel_type)
     merged: dict[tuple[str, str], dict] = {}
@@ -761,9 +830,13 @@ def sales_summary(
         # 원가 = cost_price × 수량
         unit_cost = cost_map.get(vid, _Z)
         e["cost"] += unit_cost * qty
-        # 배송비 = Wing만 1,900원/건
+        # 물류비: Wing=한진 1,900원/건. 로켓그로스=RG 풀필먼트(배송+입출고) 옵션별 실측 단가×수량.
         if ch_type == "Wing":
             e["shipping"] += _WING_DELIVERY_COST * qty
+        elif ch_type == "로켓그로스":
+            ff_cost = rg_ff_per_unit.get(vid, rg_ff_fallback) * qty
+            e["shipping"] += ff_cost
+            rg_fulfillment_total += ff_cost
 
     for vid, ad in ad_by_vid.items():
         names = _resolve_names(vid)
@@ -891,6 +964,7 @@ def sales_summary(
             "fee_actual_ratio": round(fee_actual_ratio, 4),
             "ad_today": str(ad_today.quantize(_Q2)) if ad_today is not None else None,
             "ad_today_synced_at": ad_today_synced_at,
+            "rg_fulfillment": str(rg_fulfillment_total.quantize(_Q2)),
             "conv_revenue": str(total_conv.quantize(_Q2)),
             "roas":         _roas(total_spend, total_conv),
         },

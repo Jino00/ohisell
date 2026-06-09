@@ -68,6 +68,11 @@ function costSub(cov: number | null | undefined): string | undefined {
   if (cov == null || cov >= 0.999) return undefined;
   return `${Math.round(cov * 100)}% 반영 (일부 원가 미설정)`;
 }
+// 배송·물류비 카드 부가표기 — Wing 한진 1,900/건 + RG 풀필먼트(배송+입출고) 실측.
+function shipSub(rgFf: string | null | undefined): string {
+  const v = rgFf ? numOf(rgFf) : 0;
+  return v > 0 ? `Wing 1,900/건 + RG 풀필먼트 ${won(rgFf)}` : "Wing 1,900원/건";
+}
 // 오늘 광고비 카드 부가표기 — 마지막 fetch 시각(KST). 광고센터 누적은 실시간이라
 // 마지막 갱신 이후 격차가 생긴다 → 갱신 버튼으로 최신화 안내(실시간 오인 방지).
 function adTodaySub(synced: string | null | undefined): string {
@@ -687,7 +692,7 @@ export default function CoupangOps() {
               <SummaryCard label="총 매출" value={loading ? "…" : won(s?.revenue)} />
               <SummaryCard label="수수료" value={loading ? "…" : won(s?.fee)} sub={feeSub(s?.fee_actual_ratio)} />
               <SummaryCard label="원가" value={loading ? "…" : won(s?.cost)} sub={costSub(s?.cost_coverage)} />
-              <SummaryCard label="배송비" value={loading ? "…" : won(s?.shipping)} sub="Wing 1,900원/건" />
+              <SummaryCard label="배송·물류비" value={loading ? "…" : won(s?.shipping)} sub={shipSub(s?.rg_fulfillment)} />
               <div className={`bg-white border-2 rounded-lg p-4 ${Number(s?.profit_excl_ad ?? 0) >= 0 ? "border-blue-200" : "border-red-200"}`}>
                 <div className="text-xs text-gray-500 mb-1">이익 (광고비 제외)</div>
                 <div className={`text-xl font-bold ${profitColor(s?.profit_excl_ad)}`}>{loading ? "…" : won(s?.profit_excl_ad)}</div>
@@ -727,7 +732,7 @@ export default function CoupangOps() {
             <SummaryCard label="수수료" value={loading ? "…" : won(s?.fee)} sub={feeSub(s?.fee_actual_ratio)} />
             <SummaryCard label="원가" value={loading ? "…" : won(s?.cost)} sub={costSub(s?.cost_coverage)} />
             <SummaryCard label="광고비" value={loading ? "…" : won(s?.ad_spend)} />
-            <SummaryCard label="배송비" value={loading ? "…" : won(s?.shipping)} sub="Wing 1,900원/건" />
+            <SummaryCard label="배송·물류비" value={loading ? "…" : won(s?.shipping)} sub={shipSub(s?.rg_fulfillment)} />
             <div className={`bg-white border-2 rounded-lg p-4 ${Number(s?.profit ?? 0) >= 0 ? "border-blue-200" : "border-red-200"}`}>
               <div className="text-xs text-gray-500 mb-1">이익</div>
               <div className={`text-xl font-bold ${profitColor(s?.profit)}`}>{loading ? "…" : won(s?.profit)}</div>
