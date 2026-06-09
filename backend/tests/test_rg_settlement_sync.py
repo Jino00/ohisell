@@ -325,3 +325,310 @@ def test_rg_breakdown_legacy_fulfillment_surfaces_in_other():
     assert b["other"] == Decimal("777")        # legacy 잔액 가시화(silent drop·중복 없음)
     # 라인합 + other == total
     assert b["sale_fee"] + b["fulfillment"] + b["return_fee"] + b["ad_sales"] + b["other"] == b["total"]
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# S6 — 옵션 단위 엑셀 파서 테스트 (D-12 머니코드 fixture)
+# ═══════════════════════════════════════════════════════════════════════
+# 합성 엑셀로 파싱·집계·검산·시트매핑·정규화·컬럼위치독립성을 검증.
+# 실제 샘플 엑셀(A01564720-WAREHOUSING_SHIPPING)은 §8-1 라이브 self-verify로 별도 확인(원칙22).
+import io
+import openpyxl
+from app.services.coupang.rg_settlement_sync import (
+    parse_settlement_xlsx,
+    ingest_settlement_xlsx,
+    _norm_option_id,
+    _parse_excel_date,
+)
+from app.models import Base, CoupangRgSettlementFee
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+
+def _write_sheet(ws, title, fee_label, rows, *, cost_col=25, summary_sum=None, summary_period=None):
+    """실제 종류별 엑셀 구조 재현.
+    row2 제목 / row3 요약헤더 / row4 요약데이터 / row7 메인헤더 / row8 서브헤더 / row9+ 상세.
+    rows: list of (oid, rec_date_str, period_end_str, A, B, AB). period_end_str=""면 상세 종료일 빈칸.
+    cost_col: '할인적용가(A-B)' 컬럼 위치(시트별 다름 → 위치 독립성 테스트용).
+    summary_sum: 요약합계 강제값(None=Σ상세 일치). mismatch 케이스용.
+    summary_period: 요약 종료일 강제값(None=rows[0] 종료일). 상세 종료일 fallback 테스트용.
+    """
+    ws.cell(2, 1, title)
+    # 요약 (row3 헤더, row4 데이터)
+    ws.cell(3, 1, "정산주기(종료일)"); ws.cell(3, 2, f"{fee_label} 합계")
+    ws.cell(3, 3, "세액"); ws.cell(3, 4, "최종비용")
+    sum_ab = sum(r[5] for r in rows) if summary_sum is None else summary_sum
+    tax = round(sum_ab * 0.1)
+    pend = summary_period if summary_period is not None else (rows[0][2] if rows else "2026-06-07")
+    ws.cell(4, 1, pend); ws.cell(4, 2, sum_ab); ws.cell(4, 3, tax); ws.cell(4, 4, sum_ab + tax)
+    # 상세 메인헤더 (row7)
+    ws.cell(7, 2, "정산주기(종료일)"); ws.cell(7, 5, "매출인식일"); ws.cell(7, 11, "옵션ID")
+    ws.cell(7, cost_col - 2, f"{fee_label} (VAT 별도)")  # 병합 메인 라벨
+    # 서브헤더 (row8): 발생비용A / 할인가B / 할인적용가(A-B)
+    ws.cell(8, cost_col - 2, "발생비용(A)"); ws.cell(8, cost_col - 1, "할인가(B)")
+    ws.cell(8, cost_col, "할인적용가(A-B)")
+    # 상세 데이터 (row9+)
+    for i, (oid, rec, pe, A, B, AB) in enumerate(rows):
+        rr = 9 + i
+        ws.cell(rr, 2, pe); ws.cell(rr, 5, rec); ws.cell(rr, 11, oid)
+        ws.cell(rr, cost_col - 2, A); ws.cell(rr, cost_col - 1, B); ws.cell(rr, cost_col, AB)
+
+
+def _build_xlsx(sheet_specs):
+    """sheet_specs: list of (sheet_name, fee_label, rows[, cost_col, summary_sum, summary_period]). → bytes."""
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    for spec in sheet_specs:
+        name, fee_label, rows = spec[0], spec[1], spec[2]
+        cost_col = spec[3] if len(spec) > 3 else 25
+        summary_sum = spec[4] if len(spec) > 4 else None
+        summary_period = spec[5] if len(spec) > 5 else None
+        ws = wb.create_sheet(name)
+        _write_sheet(ws, f"{fee_label} 정산 내역", fee_label, rows,
+                     cost_col=cost_col, summary_sum=summary_sum, summary_period=summary_period)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+# 입출고비: 같은 옵션 2행(합산 검증) + 다른 옵션 1행. 배송비: 컬럼 위치 다름(cost_col=24).
+_WH_ROWS = [
+    ("95521944483", "2026-06-04", "2026-06-07", 3300, 1050, 2250),
+    ("95521944483", "2026-06-04", "2026-06-07", 1650, 525, 1125),  # 같은 옵션 → 합산 3375
+    ("95521944484", "2026-06-05", "2026-06-07", 1650, 525, 1125),
+]
+_DEL_ROWS = [
+    ("95521944483", "2026-06-04", "2026-06-07", 2200, 0, 2200),
+    ("95521944484", "2026-06-05", "2026-06-07", 2200, 225, 1975),
+]
+
+
+def _db():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    return sessionmaker(bind=engine)()
+
+
+# ─── 정규화 헬퍼 ──────────────────────────────────────
+def test_norm_option_id_float():
+    assert _norm_option_id(95521944483.0) == "95521944483"
+
+def test_norm_option_id_dash_empty():
+    assert _norm_option_id("-") == ""
+    assert _norm_option_id("") == ""
+    assert _norm_option_id(None) == ""
+
+def test_norm_option_id_str():
+    assert _norm_option_id(" 95521944483 ") == "95521944483"
+
+def test_parse_excel_date_str():
+    assert _parse_excel_date("2026-06-07") == date(2026, 6, 7)
+
+def test_parse_excel_date_bad():
+    assert _parse_excel_date("not-a-date") is None
+    assert _parse_excel_date(None) is None
+
+
+# ─── 파서 집계·검산 ───────────────────────────────────
+def test_parse_xlsx_two_sheets_fee_type_map():
+    content = _build_xlsx([("입출고비", "쿠팡풀필먼트서비스(CFS) 입출고비", _WH_ROWS),
+                           ("배송비", "쿠팡풀필먼트서비스(CFS) 배송비", _DEL_ROWS, 24)])
+    parsed = parse_settlement_xlsx(content)
+    by_type = {s["fee_type"]: s for s in parsed["sheets"]}
+    assert set(by_type) == {"warehousing", "delivery"}
+    assert parsed["sheets_skipped"] == []
+
+def test_parse_xlsx_same_option_summed():
+    """같은 옵션 2행 → 합산(3375). 집계 grain=(옵션ID, 정산주기끝)."""
+    content = _build_xlsx([("입출고비", "입출고비", _WH_ROWS)])
+    s = parse_settlement_xlsx(content)["sheets"][0]
+    assert s["options"][("95521944483", date(2026, 6, 7))] == Decimal("3375")
+    assert s["options"][("95521944484", date(2026, 6, 7))] == Decimal("1125")
+    assert len(s["options"]) == 2  # 고유 옵션 2개
+
+def test_parse_xlsx_reconcile_match():
+    content = _build_xlsx([("입출고비", "입출고비", _WH_ROWS)])
+    s = parse_settlement_xlsx(content)["sheets"][0]
+    assert s["sum_detail"] == Decimal("4500")  # 2250+1125+1125
+    assert s["reconcile"]["match"] is True
+    assert s["reconcile"]["diff"] == Decimal("0")
+
+def test_parse_xlsx_reconcile_mismatch_flagged():
+    """요약합계를 Σ상세와 다르게 → match=False (검산 가드, 원칙22)."""
+    content = _build_xlsx([("입출고비", "입출고비", _WH_ROWS, 25, 9999)])
+    s = parse_settlement_xlsx(content)["sheets"][0]
+    assert s["reconcile"]["match"] is False
+    assert s["reconcile"]["diff"] == Decimal("4500") - Decimal("9999")
+
+def test_parse_xlsx_column_position_independence():
+    """배송비처럼 cost 컬럼 위치가 달라도(col24) 헤더명 매핑으로 정상 파싱."""
+    content = _build_xlsx([("배송비", "배송비", _DEL_ROWS, 24)])
+    s = parse_settlement_xlsx(content)["sheets"][0]
+    assert s["fee_type"] == "delivery"
+    assert s["options"][("95521944483", date(2026, 6, 7))] == Decimal("2200")
+    assert s["sum_detail"] == Decimal("4175")  # 2200+1975
+
+def test_parse_xlsx_unknown_sheet_skipped():
+    """미지 시트명 → skip(중단 안 함, D-13)."""
+    content = _build_xlsx([("입출고비", "입출고비", _WH_ROWS),
+                           ("알수없는시트", "기타", _WH_ROWS)])
+    parsed = parse_settlement_xlsx(content)
+    assert [s["fee_type"] for s in parsed["sheets"]] == ["warehousing"]
+    assert parsed["sheets_skipped"] == ["알수없는시트"]
+
+
+# ─── ingest DB upsert (in-memory) ─────────────────────
+def test_ingest_creates_option_rows():
+    db = _db()
+    content = _build_xlsx([("입출고비", "입출고비", _WH_ROWS),
+                           ("배송비", "배송비", _DEL_ROWS, 24)])
+    res = ingest_settlement_xlsx(db, "COUPANG_WING1", content)
+    assert res["status"] == "ok"
+    # 입출고 옵션 2 + 배송 옵션 2 = 4 upsert
+    assert res["upserted"] == 4
+    rows = db.query(CoupangRgSettlementFee).all()
+    assert len(rows) == 4
+    assert all(r.vendor_item_id != "" for r in rows)
+    wh = db.query(CoupangRgSettlementFee).filter_by(
+        fee_type="warehousing", vendor_item_id="95521944483").one()
+    assert wh.amount == Decimal("3375")  # 합산값(VAT前)
+
+def test_ingest_coexists_with_account_row():
+    """status/api 계정 row(vendor_item_id='')와 옵션 row 공존 — 서로 안 덮어씀.
+    + _resolve_period_start가 계정 row의 from을 차용(grain 정합)."""
+    db = _db()
+    db.add(CoupangRgSettlementFee(
+        account_key="COUPANG_WING1", recognition_date_from=date(2026, 6, 1),
+        recognition_date_to=date(2026, 6, 7), fee_type="warehousing",
+        vendor_item_id="", raw_type="totalWarehousingFeeDeductionAmount",
+        amount=Decimal("75489")))  # status/api VAT후
+    db.commit()
+    content = _build_xlsx([("입출고비", "입출고비", _WH_ROWS)])
+    ingest_settlement_xlsx(db, "COUPANG_WING1", content)
+    # 계정 row 불변
+    acct = db.query(CoupangRgSettlementFee).filter_by(
+        fee_type="warehousing", vendor_item_id="").one()
+    assert acct.amount == Decimal("75489")
+    # 옵션 row from = 계정 row from(2026-06-01) 차용 (폴백 -6d 아님)
+    opt = db.query(CoupangRgSettlementFee).filter_by(
+        fee_type="warehousing", vendor_item_id="95521944483").one()
+    assert opt.recognition_date_from == date(2026, 6, 1)
+    assert opt.recognition_date_to == date(2026, 6, 7)
+
+def test_ingest_idempotent_upsert():
+    """같은 엑셀 두 번 ingest → 중복 행 없음(upsert)."""
+    db = _db()
+    content = _build_xlsx([("입출고비", "입출고비", _WH_ROWS)])
+    ingest_settlement_xlsx(db, "COUPANG_WING1", content)
+    ingest_settlement_xlsx(db, "COUPANG_WING1", content)
+    rows = db.query(CoupangRgSettlementFee).filter_by(fee_type="warehousing").all()
+    assert len(rows) == 2  # 고유 옵션 2개만(중복 없음)
+
+def test_ingest_period_start_fallback():
+    """status/api 계정 row 없으면 주별 폴백(period_end-6d)."""
+    db = _db()
+    content = _build_xlsx([("입출고비", "입출고비", _WH_ROWS)])
+    ingest_settlement_xlsx(db, "COUPANG_WING1", content)
+    opt = db.query(CoupangRgSettlementFee).filter_by(
+        fee_type="warehousing", vendor_item_id="95521944484").one()
+    assert opt.recognition_date_to == date(2026, 6, 7)
+    assert opt.recognition_date_from == date(2026, 6, 1)  # 6/7 - 6d
+
+def test_ingest_empty_when_all_unknown():
+    db = _db()
+    content = _build_xlsx([("알수없는시트", "기타", _WH_ROWS)])
+    res = ingest_settlement_xlsx(db, "COUPANG_WING1", content)
+    assert res["status"] == "empty"
+    assert res["upserted"] == 0
+
+
+# ─── codex 리뷰 반영(원칙19) ──────────────────────────
+def test_ingest_snapshot_replace_removes_stale_option():
+    """재업로드 시 이번 엑셀에 없는 옵션 row 삭제(codex P2 snapshot replace)."""
+    db = _db()
+    ingest_settlement_xlsx(db, "COUPANG_WING1", _build_xlsx([("입출고비", "입출고비", _WH_ROWS)]))
+    # 둘째 업로드: ...483만 남고 ...484 사라짐
+    rows2 = [("95521944483", "2026-06-04", "2026-06-07", 1650, 525, 1125)]
+    ingest_settlement_xlsx(db, "COUPANG_WING1", _build_xlsx([("입출고비", "입출고비", rows2)]))
+    opts = db.query(CoupangRgSettlementFee).filter(
+        CoupangRgSettlementFee.fee_type == "warehousing",
+        CoupangRgSettlementFee.vendor_item_id != "").all()
+    assert {o.vendor_item_id for o in opts} == {"95521944483"}  # 484 제거됨
+    assert db.query(CoupangRgSettlementFee).filter_by(
+        fee_type="warehousing", vendor_item_id="95521944483").one().amount == Decimal("1125")
+
+def test_agg_rg_settlement_excludes_option_rows():
+    """대조뷰 집계는 계정 row(vendor_item_id='')만 — 옵션 row 이중계상 차단(codex P1)."""
+    from app.services.coupang.intelligence import _agg_rg_settlement_fees
+    db = _db()
+    db.add(CoupangRgSettlementFee(
+        account_key="COUPANG_WING1", recognition_date_from=date(2026, 6, 1),
+        recognition_date_to=date(2026, 6, 7), fee_type="warehousing", vendor_item_id="",
+        raw_type="totalWarehousingFeeDeductionAmount", amount=Decimal("75489")))  # 계정 VAT후
+    db.add(CoupangRgSettlementFee(
+        account_key="COUPANG_WING1", recognition_date_from=date(2026, 6, 1),
+        recognition_date_to=date(2026, 6, 7), fee_type="warehousing", vendor_item_id="95521944483",
+        raw_type="xlsx:입출고비", amount=Decimal("21375")))  # 옵션 VAT前
+    db.commit()
+    agg = _agg_rg_settlement_fees(db, date(2026, 6, 1), date(2026, 6, 7))
+    # 계정 row만(75489), 옵션 row(21375) 미합산
+    assert agg["COUPANG_WING1"]["warehousing"] == Decimal("75489")
+    assert agg["COUPANG_WING1"]["total"] == Decimal("75489")
+
+
+# ─── codex 2R 반영(원칙19) ────────────────────────────
+def test_ingest_same_fee_type_multiple_sheets_merged():
+    """같은 fee_type 시트 2개(반품 회수비+재입고비→return_shipping) → 병합 합산, 삭제 충돌 없음(codex 2R-P1)."""
+    db = _db()
+    rows_a = [("111", "2026-06-04", "2026-06-07", 1000, 0, 1000)]
+    rows_b = [("111", "2026-06-04", "2026-06-07", 500, 0, 500)]  # 같은 옵션·기간
+    content = _build_xlsx([("반품 회수비", "반품 회수비", rows_a),
+                           ("반품 재입고비", "반품 재입고비", rows_b)])
+    ingest_settlement_xlsx(db, "COUPANG_WING1", content)
+    opt = db.query(CoupangRgSettlementFee).filter_by(
+        fee_type="return_shipping", vendor_item_id="111").one()
+    assert opt.amount == Decimal("1500")  # 1000+500 병합(둘째 시트가 첫째 삭제 안 함)
+
+def test_ingest_empty_detail_sheet_still_snapshots():
+    """상세 0건이지만 요약 period_end 있는 시트 → 기존 옵션 snapshot replace(codex 2R-P2)."""
+    db = _db()
+    ingest_settlement_xlsx(db, "COUPANG_WING1", _build_xlsx([("입출고비", "입출고비", _WH_ROWS)]))
+    assert db.query(CoupangRgSettlementFee).filter(
+        CoupangRgSettlementFee.fee_type == "warehousing",
+        CoupangRgSettlementFee.vendor_item_id != "").count() > 0
+    # 상세 0건 + 요약(period_end 2026-06-07) 시트 재업로드 → 옵션 전삭제
+    ingest_settlement_xlsx(db, "COUPANG_WING1", _build_xlsx([("입출고비", "입출고비", [])]))
+    assert db.query(CoupangRgSettlementFee).filter(
+        CoupangRgSettlementFee.fee_type == "warehousing",
+        CoupangRgSettlementFee.vendor_item_id != "").count() == 0
+
+
+# ─── codex 3R 반영(원칙19) ────────────────────────────
+def test_ingest_detail_no_period_uses_summary_fallback():
+    """상세 종료일 없으면 요약 period로 fallback insert(데이터 손실 방지, codex 3R-P1)."""
+    db = _db()
+    rows = [("222", "2026-06-04", "", 1000, 0, 1000)]  # 상세 종료일 빈칸
+    content = _build_xlsx([("입출고비", "입출고비", rows, 25, None, "2026-06-07")])  # 요약 종료일만
+    ingest_settlement_xlsx(db, "COUPANG_WING1", content)
+    opt = db.query(CoupangRgSettlementFee).filter_by(
+        fee_type="warehousing", vendor_item_id="222").one()  # insert됨(손실 없음)
+    assert opt.recognition_date_to == date(2026, 6, 7)  # 요약으로 fallback
+    assert opt.amount == Decimal("1000")
+
+def test_ingest_vs_status_api_merged_by_fee_type():
+    """같은 fee_type 여러 시트 → vs_status_api는 fee_type+period 합계 기준(codex 3R-P2, false mismatch 방지)."""
+    db = _db()
+    # status/api 계정 row: return_shipping 최종 1650 = (1000+500)*1.1
+    db.add(CoupangRgSettlementFee(
+        account_key="COUPANG_WING1", recognition_date_from=date(2026, 6, 1),
+        recognition_date_to=date(2026, 6, 7), fee_type="return_shipping", vendor_item_id="",
+        raw_type="status/api", amount=Decimal("1650")))
+    db.commit()
+    rows_a = [("111", "2026-06-04", "2026-06-07", 1000, 0, 1000)]  # 시트A final 1100
+    rows_b = [("111", "2026-06-04", "2026-06-07", 500, 0, 500)]    # 시트B final 550
+    content = _build_xlsx([("반품 회수비", "반품 회수비", rows_a),
+                           ("반품 재입고비", "반품 재입고비", rows_b)])
+    res = ingest_settlement_xlsx(db, "COUPANG_WING1", content)
+    vs = [s["vs_status_api"] for s in res["sheets"]]
+    assert all(v is not None and v["match"] for v in vs)  # 합계 1650 == 계정 1650
+    assert vs[0]["summary_final"] == Decimal("1650")  # 1100+550 합계(시트별 아님)

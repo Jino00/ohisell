@@ -14,17 +14,19 @@ from datetime import date, datetime, time, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 
 import os
+import re
 
-from fastapi import APIRouter, BackgroundTasks, Body, Depends, Header, HTTPException, Path, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, File, Header, HTTPException, Path, Query, Request, UploadFile
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.clients.coupang.inbound import WingReadError
 from app.config import get_coupang_config
 from app.database import get_db
 from app.models import Channel, CoupangAdOptionDaily, CoupangProductItem, CoupangRevenueFee, CoupangRgInbound, CoupangRgOrderItem, Order, ProductChannelMapping, ProductMaster
 from app.routers._coupang_write_http import handle_write as _handle_write
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
-from app.services.coupang import ad_cost_sync, coupon_write, lead_time_estimator, product_write, rg_inbound_sync, rg_replenishment, sales_velocity_estimator
+from app.services.coupang import ad_cost_sync, coupon_write, lead_time_estimator, product_write, rg_inbound_sync, rg_replenishment, rg_settlement_sync, sales_velocity_estimator
 from app.utils.crypto import CookieCryptoError
 
 log = logging.getLogger(__name__)
@@ -1146,3 +1148,62 @@ def get_ad_cost(
 ):
     """날짜 범위 광고비 조회 (일별 합산)."""
     return {"costs": ad_cost_sync.get_ad_cost_range(db, start, end)}
+
+
+# ════════════════════════════════════════════════════════════════════
+# RG 정산 옵션 단위 수집 (S6 — 종류별 엑셀 수동 업로드, D-2)
+# ════════════════════════════════════════════════════════════════════
+def _vendor_id_to_account_key(vendor_id: str) -> str | None:
+    """파일명 vendor_id(예 A01564720) → account_key(COUPANG_WING1/2). env {ACK}_VENDOR_ID 비교."""
+    for ak in rg_settlement_sync.RG_ACCOUNTS:
+        cfg = get_coupang_config(ak)
+        if cfg and cfg.vendor_id == vendor_id:
+            return ak
+    return None
+
+
+@router.post("/rg/settlement/upload-xlsx")
+async def upload_rg_settlement_xlsx(
+    file: UploadFile = File(...),
+    account_key: str | None = Query(default=None, description="미지정 시 파일명 vendor_id로 자동 매핑"),
+    db: Session = Depends(get_db),
+):
+    """RG 종류별 정산 엑셀(WAREHOUSING_SHIPPING 등) 수동 업로드 → 옵션 단위 적재(S6, D-2).
+
+    파일명 형식: {vendor_id}-{REPORT_TYPE}-ko-{uuid}.xlsx (예 A01564720-WAREHOUSING_SHIPPING-ko-*.xlsx).
+    account_key 미지정 시 파일명 vendor_id로 자동 매핑(COUPANG_WING1/2).
+    옵션 cost=할인적용가(A-B) VAT前(§8-1). 검산: Σ상세==요약합계, 요약최종 vs status/api 계정 row.
+    자동 다운로드(download-list/api)는 후속(S6-auto, body 캡처 필요). 현재는 수동 업로드 경로.
+    """
+    filename = file.filename or ""
+    if not filename.lower().endswith(".xlsx"):
+        raise HTTPException(status_code=400, detail="xlsx 파일만 업로드 가능합니다.")
+    _vid_match = re.match(r"(A\d+)-", filename)
+    if account_key is None:
+        if not _vid_match:
+            raise HTTPException(
+                status_code=400,
+                detail="파일명에서 vendor_id를 찾을 수 없습니다. account_key를 지정하거나 "
+                       "{vendor_id}-{REPORT_TYPE}-ko-*.xlsx 형식을 사용하세요.",
+            )
+        account_key = _vendor_id_to_account_key(_vid_match.group(1))
+        if account_key is None:
+            raise HTTPException(status_code=400, detail=f"vendor_id {_vid_match.group(1)}에 해당하는 계정 설정이 없습니다.")
+    elif _vid_match is not None:
+        # account_key 명시 + 파일명에 vendor_id 존재 → 일치 검증(codex P2: 계정 오배치 방지).
+        # 미등록 vendor_id(mapped is None)도 reject — 둘 다 있는데 매핑 안 되면 오배치 위험.
+        mapped = _vendor_id_to_account_key(_vid_match.group(1))
+        if mapped != account_key:
+            raise HTTPException(
+                status_code=400,
+                detail=f"지정한 account_key({account_key})와 파일명 vendor_id({_vid_match.group(1)}"
+                       f"→{mapped or '미등록'})가 일치하지 않습니다.",
+            )
+    if account_key not in rg_settlement_sync.RG_ACCOUNTS:
+        raise HTTPException(status_code=400, detail=f"지원하지 않는 account_key: {account_key}")
+
+    content = await file.read()
+    try:
+        return rg_settlement_sync.ingest_settlement_xlsx(db, account_key, content)
+    except WingReadError as e:
+        raise HTTPException(status_code=422, detail=f"엑셀 파싱 실패: {e}")

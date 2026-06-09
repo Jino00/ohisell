@@ -1144,9 +1144,17 @@ class CoupangRgSettlementFee(Base):
 
     D-1: 수집 소스=윙 내부 API(세션쿠키). D-9: 판매수수료(B)+풀필먼트(J) 둘 다.
     D-10: 날짜 기준=매출인식일(recognition_date_from/to). D-11: 광고비 dedup 광고비 출처 구분.
-    grain=(account_key, recognition_date_from, recognition_date_to, fee_type).
-    Phase 1: 계정 단위 대조뷰용(vendor_item_id 없음). Phase 2(S6): vendor_item_id 컬럼 추가.
+    grain=(account_key, recognition_date_from, recognition_date_to, fee_type, vendor_item_id).
+    ★vendor_item_id(S6, D-2): 옵션 단위 입자도. 두 출처가 공존한다 —
+      - 계정 단위(status/api 수집, Phase 1): vendor_item_id='' (빈문자열 sentinel).
+      - 옵션 단위(종류별 엑셀 수집, S6): vendor_item_id=실제 옵션ID.
+      빈문자열 sentinel을 쓰는 이유: SQLite/Postgres 모두 unique 제약에서 NULL은 distinct로
+      취급돼 중복을 막지 못함 → ''로 채워 grain·upsert·검산을 안정화(원칙22 라이브 안정성).
+    ★검산(§8-1): 같은 (account, from, to, fee_type)에서 Σ(옵션 row amount, VAT前 할인적용가 A−B)
+      == 계정 row의 엑셀 요약합계(VAT前). 계정 row(status/api) amount는 VAT후(최종비용)라
+      Σ옵션(VAT前) + 요약세액 == 계정 row 가 성립(VAT gross-up). S7 net_profit 플립 시 사용.
     amount: 발생비용(f, D-10 — 이월 g 별도필드, 컴포넌트엔 미혼입). 취소/환급은 음수 허용(D-9).
+      옵션 row(S6)는 **할인적용가(A−B), VAT前** (발생비용 A=gross 아님, status/api와 불일치 회피).
     fee_type(D-10 라이브 확정 2026-06-09): 'sale_fee'(판매수수료B),
       풀필먼트(J) 3컴포넌트=‘delivery’(배송비)·'warehousing'(입출고비)·'storage'(보관비),
       'return_shipping'·'return_handling'(반품), 'ad_sales'(광고비d, D-11 dedup 표시만).
@@ -1156,7 +1164,8 @@ class CoupangRgSettlementFee(Base):
     __tablename__ = "coupang_rg_settlement_fee"
     __table_args__ = (
         UniqueConstraint(
-            "account_key", "recognition_date_from", "recognition_date_to", "fee_type",
+            "account_key", "recognition_date_from", "recognition_date_to",
+            "fee_type", "vendor_item_id",
             name="uq_coupang_rg_settlement_fee",
         ),
     )
@@ -1166,6 +1175,8 @@ class CoupangRgSettlementFee(Base):
     recognition_date_from: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)
     recognition_date_to: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)
     fee_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    # 옵션 단위 입자도(S6). 계정 단위(status/api)='', 옵션 단위(엑셀)=옵션ID. NOT NULL+default=''.
+    vendor_item_id: Mapped[str] = mapped_column(String(30), nullable=False, server_default="", default="", index=True)
     raw_type: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
     synced_at: Mapped[datetime] = mapped_column(

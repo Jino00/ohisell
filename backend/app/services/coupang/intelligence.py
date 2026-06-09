@@ -212,6 +212,11 @@ def _agg_rg_settlement_fees(db: Session, dfrom: date, dto: date) -> dict[str, di
     날짜 필터: recognition_date_from과 recognition_date_to가 [dfrom, dto]와 겹치는 행.
     겹침 조건 = recognition_date_from <= dto AND recognition_date_to >= dfrom.
     반환: {account_key: {fee_type: amount, ..., "total": Decimal}}
+
+    ★vendor_item_id=="" 가드(S6, codex P1): 계정 단위 대조뷰는 status/api 계정 row(sentinel '',
+      VAT후)만 집계한다. S6 옵션 row(vendor_item_id=옵션ID, VAT前 A-B)는 같은 (account,기간,fee_type)에
+      공존하므로 필터하지 않으면 VAT후+VAT前이 합산돼 비용이 과대계상된다. 옵션 row는 S7 net_profit
+      플립에서 별도 reader로 사용. (검산: Σ옵션(VAT前)+요약세액 == 계정 row(VAT후).)
     """
     rows = (
         db.query(
@@ -222,6 +227,7 @@ def _agg_rg_settlement_fees(db: Session, dfrom: date, dto: date) -> dict[str, di
         .filter(
             CoupangRgSettlementFee.recognition_date_from <= dto,
             CoupangRgSettlementFee.recognition_date_to >= dfrom,
+            CoupangRgSettlementFee.vendor_item_id == "",  # 계정 row만(옵션 row 이중계상 차단)
         )
         .group_by(
             CoupangRgSettlementFee.account_key,
