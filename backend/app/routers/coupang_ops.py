@@ -26,7 +26,7 @@ from app.database import get_db
 from app.models import Channel, CoupangAdOptionDaily, CoupangProductItem, CoupangRevenueFee, CoupangRgInbound, CoupangRgOrderItem, Order, ProductChannelMapping, ProductMaster
 from app.routers._coupang_write_http import handle_write as _handle_write
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
-from app.services.coupang import ad_cost_sync, coupon_write, lead_time_estimator, product_write, rg_inbound_sync, rg_replenishment, rg_settlement_sync, sales_velocity_estimator
+from app.services.coupang import ad_cost_sync, coupon_write, lead_time_estimator, product_write, rg_fee_audit, rg_inbound_sync, rg_replenishment, rg_settlement_sync, sales_velocity_estimator
 from app.utils.crypto import CookieCryptoError
 
 log = logging.getLogger(__name__)
@@ -1249,3 +1249,22 @@ def auto_download_rg_settlement(
     except Exception as e:
         log.exception("S6-auto 실행 오류")
         raise HTTPException(status_code=500, detail=f"S6-auto 오류: {e}")
+
+
+@router.get("/rg/fee-audit")
+def get_rg_fee_audit(
+    db: Session = Depends(get_db),
+    account_key: str | None = Query(None, description="특정 RG 계정만(미지정=전체)"),
+    company: str | None = Query(None, description="회사 필터(오픽스/오하이테크/ALL) — account_key보다 우선"),
+    date_from: date | None = Query(None, description="매출인식일 시작(미지정=전체)"),
+    date_to: date | None = Query(None, description="매출인식일 종료(미지정=전체)"),
+):
+    """S8: RG 청구액 과오청구 감사 — 옵션별 치수→예상 사이즈 유형 vs 실청구 정합성 스크리닝.
+
+    SA1(분류)·SA2(floor)·SA3(이상치)를 rg_fee_audit Harness가 가로질러 호출(원칙 18-7).
+    읽기 전용·net_profit 불변(D-17). 플래그는 사람 검토 신호이지 과오청구 확정 아님(D-5).
+    반환: {generated_at·account_key·기간·summary·items·disclaimer}.
+    """
+    if company and company not in ("ALL", "전체"):
+        account_key = _RG_ACCOUNT_BY_COMPANY.get(company, "__unknown__")
+    return rg_fee_audit.build_fee_audit(db, account_key, date_from=date_from, date_to=date_to)
