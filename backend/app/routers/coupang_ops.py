@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 from app.clients.coupang.inbound import WingReadError
 from app.config import get_coupang_config
 from app.database import get_db
-from app.models import Channel, CoupangAdOptionDaily, CoupangProductItem, CoupangRevenueFee, CoupangRgInbound, CoupangRgOrderItem, Order, ProductChannelMapping, ProductMaster
+from app.models import Channel, CoupangAdCostDaily, CoupangAdOptionDaily, CoupangProductItem, CoupangRevenueFee, CoupangRgInbound, CoupangRgOrderItem, Order, ProductChannelMapping, ProductMaster
 from app.routers._coupang_write_http import handle_write as _handle_write
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
 from app.services.coupang import ad_cost_sync, coupon_write, lead_time_estimator, product_write, rg_fee_audit, rg_inbound_sync, rg_replenishment, rg_settlement_sync, sales_velocity_estimator
@@ -812,10 +812,19 @@ def sales_summary(
     # 옵션별 XLSX(total_spend)는 익일만 존재하므로 '광고 현황' 카드는 오늘 총액을 메인으로 쓴다.
     # coupang_ad_cost_daily는 오픽스 광고계정 단위(L790 기존 폴백과 동일 전제) → 오픽스/ALL만 제공.
     # 오늘 전환매출·RoAS는 미확정(conv_sales는 익일 확정)이라 프론트가 '익일 확정'으로 표기.
+    # ★stale 주의: ad_today는 Mac 페처가 마지막 fetch한 시점(synced_at)의 스냅샷이다.
+    # 광고센터 '오늘 누적광고비'는 실시간으로 계속 쌓이므로, 마지막 갱신 이후 격차가 생긴다
+    # (라이브 확인: 09:41 fetch 23,105 vs 16시대 누적 ~88,574). 프론트에 synced_at을 함께
+    # 노출해 '실시간'으로 오인하지 않게 하고, '광고비 갱신' 버튼으로 재fetch하도록 안내한다.
     ad_today: Decimal | None = None
+    ad_today_synced_at: str | None = None
     if days == 0 and company in ("ALL", "오픽스"):
         _today_rows = ad_cost_sync.get_ad_cost_range(db, dfrom, dto)
         ad_today = sum((Decimal(str(r["day_cost"])) for r in _today_rows), _Z)
+        _synced = db.query(func.max(CoupangAdCostDaily.synced_at)).filter(
+            CoupangAdCostDaily.cost_date == dfrom
+        ).scalar()
+        ad_today_synced_at = _synced.isoformat() if _synced else None
 
     # 광고비 제외 이익 — '오늘' 분리 레이아웃 카드용. days=0이면 광고비가 어제(최신 XLSX)
     # 종일치라, 오늘 매출에서 그걸 빼면 의미가 없다 → 광고비를 아예 제외한 이익을 따로 제공.
@@ -881,6 +890,7 @@ def sales_summary(
             "cost_coverage": round(cost_coverage, 4),
             "fee_actual_ratio": round(fee_actual_ratio, 4),
             "ad_today": str(ad_today.quantize(_Q2)) if ad_today is not None else None,
+            "ad_today_synced_at": ad_today_synced_at,
             "conv_revenue": str(total_conv.quantize(_Q2)),
             "roas":         _roas(total_spend, total_conv),
         },

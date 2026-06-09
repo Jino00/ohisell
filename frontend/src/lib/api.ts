@@ -420,7 +420,7 @@ export interface SalesSummaryData {
   profit: string; profit_rate: string | null;
   profit_excl_ad?: string; profit_rate_excl_ad?: string | null;
   cost_coverage?: number; fee_actual_ratio?: number;
-  ad_today?: string | null;
+  ad_today?: string | null; ad_today_synced_at?: string | null;
   conv_revenue: string; roas: string | null;
 }
 

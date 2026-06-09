@@ -68,6 +68,13 @@ function costSub(cov: number | null | undefined): string | undefined {
   if (cov == null || cov >= 0.999) return undefined;
   return `${Math.round(cov * 100)}% 반영 (일부 원가 미설정)`;
 }
+// 오늘 광고비 카드 부가표기 — 마지막 fetch 시각(KST). 광고센터 누적은 실시간이라
+// 마지막 갱신 이후 격차가 생긴다 → 갱신 버튼으로 최신화 안내(실시간 오인 방지).
+function adTodaySub(synced: string | null | undefined): string {
+  if (!synced) return "‘광고비 갱신’으로 최신화";
+  const hhmm = synced.slice(11, 16);  // naive KST ISO → HH:MM
+  return `${hhmm} 갱신 기준 · 버튼으로 최신화`;
+}
 
 // ── RG 발송관제 섹션 ─────────────────────────────────────────────
 
@@ -697,7 +704,7 @@ export default function CoupangOps() {
               <SummaryCard
                 label="광고비 (오늘)"
                 value={loading ? "…" : (s?.ad_today != null ? won(s.ad_today) : "익일 확정")}
-                sub={`어제(${data.ad_ref_date}) ${won(s?.ad_spend)}`}
+                sub={s?.ad_today != null ? adTodaySub(s?.ad_today_synced_at) : `어제(${data.ad_ref_date}) ${won(s?.ad_spend)}`}
               />
               <SummaryCard
                 label="광고 전환 매출"
