@@ -198,8 +198,12 @@ function RgSettlementCard({ data }: { data: OverviewResponse }) {
   return (
     <div className="bg-orange-50 border border-orange-200 rounded-lg p-4 mb-4">
       <div className="flex items-center justify-between mb-2">
-        <span className="text-sm font-semibold text-orange-800">⚠️ RG 정산 비용 (미반영 — Phase 1 대조 지표)</span>
-        <span className="text-base font-bold text-orange-900">{won(rg.summary.total)}</span>
+        <span className="text-sm font-semibold text-orange-800">✅ RG 정산 비용 — 순이익 반영됨 (계정 단위, 광고 제외)</span>
+        <span className="text-right">
+          {/* 헤드라인 = 실제 순이익 차감액(광고 제외). total/광고는 보조(Codex S7 Low1). */}
+          <span className="text-base font-bold text-orange-900">−{won(rg.summary.non_ad_deducted ?? rg.summary.total)}</span>
+          <span className="block text-xs text-orange-500">정산총액 {won(rg.summary.total)} (광고 {won(rg.summary.ad_settlement ?? '0')} 별도)</span>
+        </span>
       </div>
       <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
         {rg.by_account.map((a: RgSettlementByAccount) => (
@@ -216,12 +220,13 @@ function RgSettlementCard({ data }: { data: OverviewResponse }) {
           </div>
         ))}
       </div>
-      {rg.summary.ad_xlsx_rg_overlap && Number(rg.summary.ad_xlsx_rg_overlap) > 0 && (
-        <div className="text-xs text-orange-700 mt-2 bg-orange-100 rounded px-2 py-1">
-          ⚠️ 중복구간: 광고비 XLSX RG(2P) {won(rg.summary.ad_xlsx_rg_overlap)} ↔ RG정산 광고비 {won(rg.summary.ad_settlement ?? '0')} — Phase 2 플립 시 2P분 제외(D-11)
-        </div>
-      )}
-      <p className="text-xs text-orange-600 mt-2">순이익에 미포함(Phase 2에서 반영 예정). <span className="text-orange-400">*</span>광고비는 RG정산 정본 — 광고비 XLSX의 RG(2P)분과 중복 주의(D-11).</p>
+      <div className="text-xs text-orange-700 mt-2 bg-orange-100 rounded px-2 py-1">
+        정산주기 기준(부분 윈도우도 주기 전액). 광고비 {won(rg.summary.ad_settlement ?? '0')}는 광고 XLSX(2P)로 이미 순이익 반영 → settlement 광고는 미차감(D-15).
+      </div>
+      <p className="text-xs text-orange-600 mt-2">
+        ✅ 순이익에 반영됨(계정 단위, 광고 제외 RG 비용만 차감, D-14/D-15).
+        <span className="text-orange-400"> *</span>RG 광고비는 광고 XLSX(2P) 정본으로 1회만 반영 — settlement 광고는 표시·검산용(미차감).
+      </p>
     </div>
   );
 }
@@ -237,7 +242,15 @@ function AccountView({ data }: { data: OverviewResponse }) {
         <Card label="수수료(+VAT)" value={won(s.total_fee)} />
         <Card label="광고비" value={won(s.ad_spend)} />
         <Card label="원가" value={won(s.cost)} sub={`원가반영 ${s.cost_covered_options}/${s.option_count}옵션`} />
-        <Card label="순이익" value={won(s.net_profit)} sub="매출−반품−수수료−광고−원가" />
+        <Card
+          label="순이익"
+          value={won(s.net_profit)}
+          sub={
+            s.rg_flip_status === "applied_non_ad"
+              ? `플립전 ${won(s.net_profit_pre_rg ?? "0")} − RG비용(광고제외) ${won(s.rg_non_ad_deducted ?? "0")}`
+              : "매출−반품−수수료−광고−원가 (RG 정산 데이터 없음)"
+          }
+        />
       </div>
       <table className="w-full text-sm bg-white rounded-lg border border-gray-200">
         <thead>

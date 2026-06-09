@@ -368,6 +368,12 @@ export interface OverviewResponse {
       service_fee_vat: string; total_fee: string; ad_spend: string;
       cost: string; net_profit: string;
       cost_covered_options: number; option_count: number;
+      // S7(D-14/D-15): RG 정산 비용 net_profit 플립 브리지 필드(계정 단위, non-ad 차감)
+      net_profit_pre_rg?: string;     // 플립 전 순이익(XLSX 2P 광고비 포함)
+      rg_settlement_total?: string;   // 계정 RG 총액(VAT後, 표시)
+      rg_ad_settlement?: string;      // RG정산 광고비(표시·검산, 미차감)
+      rg_non_ad_deducted?: string;    // ★net_profit에서 실제 차감된 광고 제외 RG 비용
+      rg_flip_status?: 'applied_non_ad' | 'not_applied_no_data';
     };
     by_option: OverviewAccountRow[];
   };
@@ -387,8 +393,10 @@ export interface OverviewResponse {
   rg_settlement?: {
     summary: {
       total: string; has_data: boolean; note: string;
-      ad_settlement?: string;        // D-11 RG정산 광고비(정본)
-      ad_xlsx_rg_overlap?: string;   // D-11 광고비 XLSX RG(2P)분(플립 시 제외 대상)
+      flip_status?: 'applied_non_ad' | 'not_applied_no_data';  // S7 플립 상태
+      non_ad_deducted?: string;      // S7 net_profit에서 실제 차감된 광고 제외 RG 비용
+      ad_settlement?: string;        // D-11 RG정산 광고비(표시·검산, 미차감)
+      ad_xlsx_rg_overlap?: string;   // D-11 광고비 XLSX RG(2P)분(자릿수 대조용)
     };
     by_account: RgSettlementByAccount[];
   };
