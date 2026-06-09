@@ -11,7 +11,7 @@ from collections import defaultdict
 from sqlalchemy import and_, func, text
 from sqlalchemy.orm import Session
 
-from app.models import Channel, Order, ProductChannelMapping, ProductMaster
+from app.models import Channel, CoupangRgSettlementFee, Order, ProductChannelMapping, ProductMaster
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
 from app.services.manual_revenue_service import get_daily_manual_revenue
 
@@ -297,6 +297,34 @@ def _calc_line(
         "vat": vat,
         "net_profit": net_profit,
     }
+
+
+# ──────────────────────────────────────────────
+# RG 정산 수수료 조회 (dashboard B안 — KPI/채널요약 반영용)
+# ──────────────────────────────────────────────
+
+
+def get_rg_total_by_account(db: Session, date_from: date, date_to: date) -> dict[str, Decimal]:
+    """RG 정산 총액을 account_key별로 반환 (KPI·channel-breakdown 차감용).
+
+    intelligence._agg_rg_settlement_fees와 같은 overlap 필터·vendor_item_id="" 가드 적용.
+    반환: {"COUPANG_WING1": Decimal, "COUPANG_WING2": Decimal, ...}
+    데이터 없으면 빈 dict → 차감 no-op.
+    """
+    rows = (
+        db.query(
+            CoupangRgSettlementFee.account_key,
+            func.sum(CoupangRgSettlementFee.amount),
+        )
+        .filter(
+            CoupangRgSettlementFee.recognition_date_from <= date_to,
+            CoupangRgSettlementFee.recognition_date_to >= date_from,
+            CoupangRgSettlementFee.vendor_item_id == "",
+        )
+        .group_by(CoupangRgSettlementFee.account_key)
+        .all()
+    )
+    return {ak: Decimal(str(amt or 0)) for ak, amt in rows}
 
 
 # ──────────────────────────────────────────────

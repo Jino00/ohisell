@@ -29,6 +29,7 @@ from app.services.profit_calculator import (
     calculate_daily_trend,
     calculate_product_profit,
     get_channel_company_map,
+    get_rg_total_by_account,
     group_summary_by_company,
     group_trend_by_company,
 )
@@ -226,6 +227,11 @@ def dashboard_kpi(
         rev = sum(Decimal(p["revenue"]) for p in current)
         net = sum(Decimal(p["net_profit"]) for p in current)
         orders = sum(p["order_count"] for p in current)
+
+        # RG 정산 수수료 차감 (B안: KPI 기간 합산)
+        rg_by_account = get_rg_total_by_account(db, df, dt)
+        net -= sum(rg_by_account.values(), Decimal("0"))
+
         rate = (net / rev * 100) if rev > 0 else Decimal("0")
 
         # 이전 기간 (동일 길이)
@@ -236,6 +242,10 @@ def dashboard_kpi(
 
         prev_rev = sum(Decimal(p["revenue"]) for p in prev)
         prev_net = sum(Decimal(p["net_profit"]) for p in prev)
+
+        # 이전 기간 RG 차감
+        rg_prev = get_rg_total_by_account(db, prev_from, prev_to)
+        prev_net -= sum(rg_prev.values(), Decimal("0"))
 
         rev_change = float((rev - prev_rev) / prev_rev * 100) if prev_rev > 0 else None
         profit_change = float((net - prev_net) / prev_net * 100) if prev_net > 0 else None
@@ -270,6 +280,16 @@ def channel_breakdown(
 
     try:
         rows = calculate_channel_summary(db, ad_db, df, dt)
+
+        # RG 정산 수수료 차감 (B안: account_key=채널code로 매핑)
+        rg_by_account = get_rg_total_by_account(db, df, dt)
+        if rg_by_account:
+            ch_map = {ch.id: ch for ch in db.query(Channel).all()}
+            for row in rows:
+                ch = ch_map.get(row["channel_id"])
+                if ch and ch.code in rg_by_account and row["net_profit"] is not None:
+                    row["net_profit"] = str(Decimal(row["net_profit"]) - rg_by_account[ch.code])
+
         return group_summary_by_company(rows, get_channel_company_map(db))
     finally:
         if ad_db is not None:
