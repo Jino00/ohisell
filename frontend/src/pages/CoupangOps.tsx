@@ -688,15 +688,27 @@ export default function CoupangOps() {
               </div>
             </div>
           </div>
-          {/* 최신 광고 (다른 날짜 기준) */}
+          {/* 광고 현황 — 광고비는 오늘 실시간(일자단위), 전환·RoAS·옵션내역은 익일 확정 */}
           <div>
             <div className="text-xs text-gray-400 font-medium mb-1.5 px-0.5">
-              📣 광고 현황 ({data.ad_ref_date} 기준 — 최신 업로드)
+              📣 광고 현황 (광고비=오늘 실시간 · 전환매출/RoAS는 익일 확정)
             </div>
             <div className="grid grid-cols-3 gap-3">
-              <SummaryCard label="광고비" value={loading ? "…" : won(s?.ad_spend)} />
-              <SummaryCard label="광고 전환 매출" value={loading ? "…" : won(s?.conv_revenue)} />
-              <SummaryCard label="RoAS" value={loading ? "…" : roasFmt(s?.roas)} sub={s?.roas ? "광고 전환매출 ÷ 광고비" : undefined} />
+              <SummaryCard
+                label="광고비 (오늘)"
+                value={loading ? "…" : (s?.ad_today != null ? won(s.ad_today) : "익일 확정")}
+                sub={`어제(${data.ad_ref_date}) ${won(s?.ad_spend)}`}
+              />
+              <SummaryCard
+                label="광고 전환 매출"
+                value={loading ? "…" : "익일 확정"}
+                sub={`어제(${data.ad_ref_date}) ${won(s?.conv_revenue)}`}
+              />
+              <SummaryCard
+                label="RoAS"
+                value={loading ? "…" : "익일 확정"}
+                sub={s?.roas ? `어제(${data.ad_ref_date}) ${roasFmt(s.roas)}` : undefined}
+              />
             </div>
           </div>
         </div>

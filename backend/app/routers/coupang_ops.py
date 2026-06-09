@@ -808,6 +808,15 @@ def sales_summary(
     total_profit = total_rev - total_fee - total_cost - total_spend - total_ship
     profit_rate  = (total_profit / total_rev * 100).quantize(_Q2) if total_rev else None
 
+    # 오늘 실시간 광고비(일자 단위, coupang_ad_cost_daily=report/SALES, Mac 페처). days=0 전용.
+    # 옵션별 XLSX(total_spend)는 익일만 존재하므로 '광고 현황' 카드는 오늘 총액을 메인으로 쓴다.
+    # coupang_ad_cost_daily는 오픽스 광고계정 단위(L790 기존 폴백과 동일 전제) → 오픽스/ALL만 제공.
+    # 오늘 전환매출·RoAS는 미확정(conv_sales는 익일 확정)이라 프론트가 '익일 확정'으로 표기.
+    ad_today: Decimal | None = None
+    if days == 0 and company in ("ALL", "오픽스"):
+        _today_rows = ad_cost_sync.get_ad_cost_range(db, dfrom, dto)
+        ad_today = sum((Decimal(str(r["day_cost"])) for r in _today_rows), _Z)
+
     # 광고비 제외 이익 — '오늘' 분리 레이아웃 카드용. days=0이면 광고비가 어제(최신 XLSX)
     # 종일치라, 오늘 매출에서 그걸 빼면 의미가 없다 → 광고비를 아예 제외한 이익을 따로 제공.
     profit_excl_ad = total_rev - total_fee - total_cost - total_ship
@@ -871,6 +880,7 @@ def sales_summary(
             "profit_rate_excl_ad": str(profit_rate_excl_ad) if profit_rate_excl_ad is not None else None,
             "cost_coverage": round(cost_coverage, 4),
             "fee_actual_ratio": round(fee_actual_ratio, 4),
+            "ad_today": str(ad_today.quantize(_Q2)) if ad_today is not None else None,
             "conv_revenue": str(total_conv.quantize(_Q2)),
             "roas":         _roas(total_spend, total_conv),
         },
