@@ -4,7 +4,12 @@
 
 ## 현재 상태
 - 날짜: 2026-06-09
-- ★★RG 수수료 회계 **S6-core 완료(옵션 단위 수집)**(2026-06-09, main 커밋 d637bd6, codex 4R pass, fixture 44/44, prod 라이브 self-verify). 트랙 6/7.
+- ★★RG 수수료 회계 **S7 완료(net_profit 플립 — Phase 2 핵심)**(2026-06-09, main 커밋 0ec96cf+a58a9e1, codex 2R pass, fixture 12/12, prod 라이브 self-verify). 트랙 7/8(S6-auto·S8 후속).
+  - **공식(D-16)**: `net_profit = net_profit_pre_rg − rg_total` — 계정 RG 정산 총액 **전액 차감**(광고 포함). 순수함수 apply_rg_net_profit_flip + 5 브리지필드(net_profit_pre_rg·rg_settlement_total·rg_ad_settlement·rg_non_ad_deducted·rg_flip_status enum applied_full/not_applied_no_data). by_option net_profit 불변(D-14, 계정 단위 차감).
+  - **★D-15→D-16 전환(핵심)**: 처음 D-15(광고 제외 non-ad 차감)로 구현·배포했으나, **/browse 라이브 조사**로 RG 광고비가 광고센터 PA 보고서(pa_daily XLSX 출처=마켓플레이스 3P/윙 광고)에 없고 RG 정산에만 존재함을 확인(prod 광고 XLSX 2P 전기간 0행 실증, RG 정산 ad_sales=80,754). → D-15는 RG 광고 누락 → **전액 차감 D-16**으로 개정(Jino 결정). rg_total 전부 정산 basis라 basis 불일치 없음(D-15보다 단순).
+  - **codex 2R(원칙19)**: D-15 1R(Low 2: 주석·UI), D-16 2R(3건: UI 부호버그 환급 −-300원·stale주석·overlap경고 수용). 미래 2P>0 겹침 가드(ad_xlsx_rg_overlap>0 → log.warning).
+  - **★prod 라이브 self-verify(원칙22)**: net_profit **2,706,189.80 → 2,045,586.80**(rg_total 660,603 전액 차감, 광고 45,375 포함). 등식 pre−total==np·감소액==rg_total·flip_status=applied_full·overlap=0·RG0윈도우 불변 전부 통과. 마이그레이션 없음(테이블 불변), scp+rsync+pm2 restart 완료.
+- (이전) ★★RG 수수료 회계 **S6-core 완료(옵션 단위 수집)**(2026-06-09, main 커밋 d637bd6, codex 4R pass, fixture 44/44, prod 라이브 self-verify). 트랙 6/7.
   - **모델**: CoupangRgSettlementFee grain에 vendor_item_id 추가(계정 row=''sentinel·옵션 row=실제ID, SQLite NULL-distinct 회피). alembic i3j4k5l6m7n8(batch_alter·unique 갱신·기존 row '' backfill—동작 불변). prod 196행 backfill 완료.
   - **파서(Harness, D-8)**: 종류별 엑셀(WAREHOUSING_SHIPPING 등) 시트명→fee_type(입출고비→warehousing·배송비→delivery), **헤더명 기반 동적 컬럼 매핑**(2층 헤더 row7+row8·시트별 위치 다름: 입출고 col25·배송 col24). 옵션 cost=**할인적용가(A−B) VAT前**(§8-1). 검산 Σ상세==요약합계.
   - **ingest**: fee_type 단위 병합(같은 fee_type 여러 시트 합산) + snapshot replace(delete-once·종료일 fallback) + 검산2(요약최종 vs status/api, fee_type+period 합계).

@@ -81,7 +81,7 @@
   - **codex 4R(원칙19)**: 1R 4건(이중계상 P1·stale·vendor검증·마이그가시성)→수용/해결. 2R 3건(같은fee_type삭제충돌 P1·snapshot빈시트·미등록vendor)→수용. 3R 2건(종료일fallback 데이터손실 P1·vs_status_api false mismatch)→수용. 4R pass(남은 P1/P2 없음).
   - **★prod 라이브 self-verify(원칙22)**: 샘플 엑셀 업로드 8행, **vs_status_api 완전 일치**(warehousing 75,489==status/api·delivery 130,599==status/api, diff 0). **net_profit 불변 517,949→517,949**(D-6). 대조뷰 other=0. 재업로드 idempotent(snapshot replace).
 - [ ] **S6-auto. 자동 엑셀 다운로드** — download-list/api 실제 body 캡처(DevTools, status/api와 스키마 다름 HTTP 500) → 비동기 생성요청·폴링·다운로드 → ingest_settlement_xlsx 재사용. 8종 fee_type 전체 다운로드. scheduler 등록. (블로커: body 캡처 Jino 제공 대기)
-- [ ] **S7. net_profit 플립 (계정 단위, D-14) + 광고비 dedup 차단** — account_sum.net_profit에서 계정 RG 총액(status/api, VAT後) 차감 + 명시적 브리지 필드. ad_costs RG(2P)분 제외/RG정산 ad_sales 정본(D-11). by_option은 표시 유지. basis 검증(Codex S5 지적4b: RG recognition_date↔광고XLSX report_date 정합) 선행. fixture 테스트(D-12) + codex review + prod self-verify. **모델 감사는 S8로 분리**. (계획서: docs/PLAN_S7_net_profit_flip.md)
+- [x] **S7. net_profit 플립 (계정 단위, D-14/D-16)** — ✅ 완료(2026-06-09, 커밋 0ec96cf+a58a9e1, codex 2R pass, fixture 12/12, prod 라이브 self-verify). account_sum.net_profit에서 계정 RG 총액(status/api, VAT後) **전액 차감**(D-16). 순수함수 `apply_rg_net_profit_flip` + 5 브리지필드(net_profit_pre_rg·rg_settlement_total·rg_ad_settlement·rg_non_ad_deducted·rg_flip_status enum applied_full/not_applied_no_data). by_option 불변. **★D-15→D-16 전환(/browse 라이브 조사)**: RG 광고비가 광고센터 PA 보고서엔 없고 RG 정산에만 존재(prod 2P 0행 실증) → non-ad 차감(D-15)은 RG 광고 누락 → 전액 차감(D-16). 미래 2P>0 겹침 가드(log.warning). **prod self-verify: net_profit 2,706,189.80→2,045,586.80(전액 660,603 차감, 광고 45,375 포함), 등식·회귀·overlap=0 전부 통과**. **모델 감사는 S8로 분리**. (계획서: docs/PLAN_S7_net_profit_flip.md)
 - [ ] **S8. 모델(A) 과오청구 감사 (D-4, 분리)** — 치수→사이즈등급 모델로 쿠팡 RG 청구액 사전예측·교차검증. (선택/후속)
 - 각 Sprint: self-verify(라이브 prod) + fixture 테스트(D-12, 머니코드) + codex review pass (원칙19).
 
@@ -96,10 +96,13 @@
   - **★발견 3 — S4 모델 미커밋**: models.py(CoupangRgSettlementFee)+__init__.py(export)가 e7cb99f에서 누락돼 로컬 미커밋(prod엔 scp로 반영됨). overview.py 수정과 함께 커밋 예정.
 - 2026-06-09: **★S5 완료(코드 잠금 + 엑셀 실증)**. 커밋 2c410c9(코드)+6bcff4d(docs). D-10: fulfillment=배송비 라이브 확정(원칙22), fee_type 리네임(alembic h2i3j4k5l6m7), 발생f basis. D-11: 광고비 dedup 규칙 코드화(2P↔ad_sales). reconcile guard. codex 3R pass, fixture 22/22, prod 마이그레이션+배포+라이브 reconcile OK, net_profit 불변(D-6). **엑셀 실증(§8-1)**: WAREHOUSING_SHIPPING 엑셀에 옵션ID(vendor_item_id) per 주문 존재→S6 가능. Σ옵션 할인적용가(A−B)=요약=status/api 완전 검산. S6 규칙=할인적용가(A−B)+VAT.
 - 2026-06-09: **★S6-core 완료(옵션 단위 수집)**. 커밋 d637bd6. 모델 vendor_item_id grain(alembic i3j4k5l6m7n8) + 엑셀 파서(헤더명 동적매핑·2층헤더·시트별 위치 다름) + ingest(fee_type 병합·snapshot replace·종료일 fallback·검산2) + 수동 업로드 라우터 + 이중계상 가드(대조뷰 vendor_item_id='' 필터). codex 4R pass(1R 4건·2R 3건·3R 2건 수용, 4R 클린). fixture 44/44. **prod 라이브 self-verify(원칙22): 업로드 8행, vs_status_api 완전일치(75,489·130,599 diff 0), net_profit 불변 517,949, 대조뷰 other=0**. S6-auto(자동 다운로드)는 download-list/api body 캡처 대기.
+- 2026-06-09: **★S7 완료(net_profit 플립, Phase 2 핵심)**. 커밋 0ec96cf(D-15 non-ad)+a58a9e1(D-16 전액 차감). **D-15→D-16 전환의 핵심은 /browse 라이브 조사**: 광고센터(advertising.coupang.com /reports/pa)가 pa_daily XLSX 출처=마켓플레이스(3P/윙) 광고이고, RG 광고비(80,754)는 거기 없고 RG 정산에만 존재(prod 광고 2P 전기간 0행, coupang_ad_option_daily·coupang_ad_report 양쪽). → D-15(광고 제외 차감)는 RG 광고 누락 → **전액 차감 D-16**. codex 2R(1R Low2 수용·2R 3건 수용: UI 부호버그·stale주석·overlap경고). fixture 12/12. **prod 라이브 self-verify(원칙22): net_profit 2,706,189.80→2,045,586.80(rg_total 660,603 전액 차감, 광고 45,375 포함), 등식 pre−total==np·감소액==rg_total·flip_status=applied_full·overlap=0·RG0윈도우 불변 전부 통과**. 마이그레이션 없음(테이블 불변).
 
 ## 다음 액션
 - **S6-auto(자동 다운로드)**: download-list/api 실제 body 캡처(DevTools Copy-as-cURL, status/api와 스키마 다름) → 비동기 엑셀 생성요청·폴링·다운로드 → 기존 `ingest_settlement_xlsx` 재사용. 8종 fee_type 전체. scheduler 등록. **블로커=body 캡처(Jino 제공)**. 캡처 전까지는 수동 업로드(`POST /api/coupang/ops/rg/settlement/upload-xlsx`)로 운용 가능.
-- **S7(후속)**: net_profit 플립(옵션 row VAT gross-up 반영) + 광고비 dedup 차단(D-11) + 모델(A) 감사. 옵션 row(vendor_item_id!='')를 net_profit 권위 소스로 승격.
+- **S8(선택/후속)**: 모델(A) 과오청구 감사 — 치수→사이즈등급 모델로 RG 청구액 사전예측·교차검증.
+- **D-16 잔존 리스크 감시**: 광고센터에서 RG상품 검색광고를 돌려 광고 XLSX에 2P가 생기면(현재 0) `ad_xlsx_rg_overlap>0` log.warning 발화 → RG 광고 이중계상 가능성 재검토.
+- **TODOS.md(D4)**: dashboard.py/profit_calculator.py 쿠팡 순이익은 S7 RG 반영 안 됨(command-center와 화면 차이) — 후속.
 
 ## GSTACK REVIEW REPORT
 
