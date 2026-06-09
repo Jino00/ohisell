@@ -423,6 +423,39 @@ def sync_coupang_rg_settlement_job():
         db.close()
 
 
+def auto_download_rg_settlement_job():
+    """RG 정산 엑셀 자동 다운로드·적재 (06:15 KST) — Wing 3단계(request→poll→S3 GET).
+
+    WAREHOUSING_SHIPPING(입출고·배송비) 옵션 단위 적재. 이미 적재된 기간은 idempotent.
+    쿠키 만료(WingAuthError)는 fail-soft(per-account error 반환). 예상치 못한 예외만 raise."""
+    db = _get_own_db_session()
+    try:
+        from app.services.coupang.rg_settlement_sync import auto_download_all, RG_ACCOUNTS
+
+        vendor_id_map = {}
+        import os
+        vendor_id_map["COUPANG_WING1"] = os.environ.get("COUPANG_WING1_VENDOR_ID", "")
+        vendor_id_map["COUPANG_WING2"] = os.environ.get("COUPANG_WING2_VENDOR_ID", "")
+
+        results = auto_download_all(db, vendor_id_map)
+        for r in results:
+            log.info("[스케줄러] RG 엑셀 자동 다운로드 (%s): requested=%s completed=%s ingested=%s errors=%d",
+                     r.get("account_key"), r.get("requested"), r.get("completed"),
+                     r.get("ingested"), len(r.get("errors", [])))
+
+        state = db.query(SchedulerState).filter(
+            SchedulerState.job_name == "auto_download_rg_settlement"
+        ).first()
+        if state:
+            state.last_run_at = kst_now()
+            db.commit()
+    except Exception as e:
+        log.exception("[스케줄러] auto_download_rg_settlement_job 에러: %s", e)
+        raise
+    finally:
+        db.close()
+
+
 def sync_coupang_ad_cost_job():
     """쿠팡 광고비 자동 동기화 (자정 00:10 KST) — advertising.coupang.com Wing 내부 API.
 
@@ -623,6 +656,7 @@ def _ensure_default_states(db):
         ("sync_meta_ad_costs", "0 7 * * *"),
         ("sync_coupang_rg_inbound", "20 5 * * *"),
         ("sync_coupang_rg_settlement", "30 5 * * *"),
+        ("auto_download_rg_settlement", "15 6 * * *"),
         ("sync_coupang_products", "30 5 * * *"),
         ("sync_coupang_rg_sizes", "35 5 * * *"),
         ("sync_coupang_rg_inventory", "40 5 * * *"),
@@ -684,6 +718,8 @@ def start_scheduler():
                 job_func = sync_coupang_rg_inbound_job
             elif state.job_name == "sync_coupang_rg_settlement":
                 job_func = sync_coupang_rg_settlement_job
+            elif state.job_name == "auto_download_rg_settlement":
+                job_func = auto_download_rg_settlement_job
             elif state.job_name == "sync_coupang_coupons":
                 job_func = sync_coupang_coupons_job
             elif state.job_name == "sync_coupang_cs":
