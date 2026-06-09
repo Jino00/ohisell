@@ -4,7 +4,15 @@
 
 ## 현재 상태
 - 날짜: 2026-06-09
-- ★★RG 수수료 회계 **S5 코드 잠금 완료**(2026-06-09, main 커밋 2c410c9, codex 3R pass, fixture 22/22, prod 라이브 reconcile 검증):
+- ★★RG 수수료 회계 **S6-core 완료(옵션 단위 수집)**(2026-06-09, main 커밋 d637bd6, codex 4R pass, fixture 44/44, prod 라이브 self-verify). 트랙 6/7.
+  - **모델**: CoupangRgSettlementFee grain에 vendor_item_id 추가(계정 row=''sentinel·옵션 row=실제ID, SQLite NULL-distinct 회피). alembic i3j4k5l6m7n8(batch_alter·unique 갱신·기존 row '' backfill—동작 불변). prod 196행 backfill 완료.
+  - **파서(Harness, D-8)**: 종류별 엑셀(WAREHOUSING_SHIPPING 등) 시트명→fee_type(입출고비→warehousing·배송비→delivery), **헤더명 기반 동적 컬럼 매핑**(2층 헤더 row7+row8·시트별 위치 다름: 입출고 col25·배송 col24). 옵션 cost=**할인적용가(A−B) VAT前**(§8-1). 검산 Σ상세==요약합계.
+  - **ingest**: fee_type 단위 병합(같은 fee_type 여러 시트 합산) + snapshot replace(delete-once·종료일 fallback) + 검산2(요약최종 vs status/api, fee_type+period 합계).
+  - **이중계상 가드(codex P1)**: 대조뷰 _agg_rg_settlement_fees에 vendor_item_id="" 필터 → 옵션 row 적재해도 net_profit 불변(D-6).
+  - **라우터**: POST /api/coupang/ops/rg/settlement/upload-xlsx(수동, vendor_id 자동매핑+불일치 reject). **S6-auto(자동 다운로드)=download-list/api body 캡처 대기(후속)**.
+  - **codex 4R(원칙19)**: 1R 4건·2R 3건·3R 2건 전부 수용, 4R 클린.
+  - **★prod 라이브 self-verify(원칙22)**: 업로드 8행, **vs_status_api 완전일치**(75,489·130,599 diff 0), **net_profit 불변 517,949**, 대조뷰 other=0, 재업로드 idempotent. 마이그레이션+scp+pm2 restart 완료.
+- (이전) ★★RG 수수료 회계 **S5 코드 잠금 완료**(2026-06-09, main 커밋 2c410c9, codex 3R pass, fixture 22/22, prod 라이브 reconcile 검증):
   - **D-10 라이브 확정(원칙22, WING1 50필드 응답 캡처)**: `totalFulfillmentFeeDeductionAmount`=배송비(delivery)뿐(풀필먼트 합계 아님). 14리포트 전수+06-01~07이 레퍼런스17 §7 검산 정확일치(배송130,599+입출고75,489+보관168=J206,256, 세 값 독립→합산해도 이중계상 아님). 발생비용(f) basis 확정(이월 g는 totalCarryOverSettlementDeductionAmount 등 별도필드, 7개 컴포넌트엔 미혼입). searchDateType=SALES.
   - **코드**: fee_type 'fulfillment'→'delivery' 리네임(alembic h2i3j4k5l6m7 UPDATE, stale 방지) + 모델/intelligence/sync 주석정정. 풀필먼트 J=delivery+warehousing+storage 그룹표시.
   - **D-11 dedup 코드화**: RG 광고비=`CoupangAdOptionDaily(sell_type='2P')`↔RG정산 `ad_sales` 겹침. RG정산 정본 → Phase2 플립 시 2P분 제외(rg_ad_spend_to_exclude 순수함수+_agg_rg_ad_overlap, func.trim 방어). Phase1 표시만. **현재 prod 2P행 0개(3P만)→겹침 없음**.

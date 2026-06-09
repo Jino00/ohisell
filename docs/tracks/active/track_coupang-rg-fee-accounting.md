@@ -69,7 +69,15 @@
   - **D-11 코드화**: RG정산 ad_sales 정본, 광고비 XLSX sell_type='2P'(RG)분 Phase2 플립 시 제외(rg_ad_spend_to_exclude+_agg_rg_ad_overlap). Phase1 표시만. 현재 prod 2P행 0개(겹침 없음).
   - **reconcile guard(codex 지적1)**: _rg_account_breakdown other=total−라인합, legacy/미지 fee_type 가시화. **net_profit 불변(D-6)**.
   - **★엑셀 실증 완료(레퍼런스17 §8-1)**: 종류별 엑셀(WAREHOUSING_SHIPPING)에 **옵션ID(vendor_item_id) per 주문 존재** → S6 옵션단위 수집 **가능**. 매출인식일·주문ID·SKU·발생비용(A)/할인적용가(A−B) 포함. **검산 완전일치**: Σ옵션 할인적용가(A−B)=요약합계=status/api(VAT前). ★S6 규칙=옵션 cost는 **할인적용가(A−B)** 사용(gross A 아님), VAT 별도 gross-up.
-- [ ] **S6. 옵션 단위 수집** — 종류별 엑셀 비동기 생성·다운로드·파싱 → CoupangRgSettlementFee에 vendor_item_id 추가. ★실증완료(§8-1): 엑셀 2층(요약+SKU상세), 옵션ID·매출인식일·할인적용가(A−B) per 주문. **옵션 cost=할인적용가(A−B)+VAT gross-up**(발생비용 A 아님). Σ(옵션 A−B)==요약합계==status/api(VAT前) 검산. 파일명={vendor_id}-{REPORT_TYPE}-ko-{uuid}.xlsx. download-list/api body는 status/api와 다름(실제 캡처 필요). fixture 테스트(D-12).
+- [x] **S6. 옵션 단위 수집** — ✅ 완료(2026-06-09, 커밋 d637bd6, codex 4R pass, fixture 44/44, prod 라이브 self-verify). **S6-core(파서·모델·수동업로드·검산) 완료, S6-auto(자동 다운로드)는 후속**(download-list/api body 캡처 필요).
+  - **모델**: CoupangRgSettlementFee grain에 vendor_item_id 추가(계정 row=''sentinel, 옵션 row=실제ID). alembic i3j4k5l6m7n8(batch_alter, unique 갱신, 기존 row '' backfill—동작 불변). prod 196행 '' backfill 완료.
+  - **파서(Harness, D-8)**: 시트명→fee_type(입출고비→warehousing·배송비→delivery 등 8종), **헤더명 기반 동적 컬럼 매핑**(2층 헤더 row7+row8, 시트별 컬럼 위치 다름 대응—입출고 col25·배송 col24). 옵션 cost=**할인적용가(A−B) VAT前**(§8-1). 집계 grain=(옵션ID, 정산주기끝). 검산 Σ상세==요약합계.
+  - **ingest**: fee_type 단위 병합(같은 fee_type 여러 시트 합산) + snapshot replace(delete-once, 종료일 fallback) + 검산2(요약최종 vs status/api 계정 row, fee_type+period 합계 기준).
+  - **이중계상 가드(codex P1)**: 대조뷰 _agg_rg_settlement_fees에 vendor_item_id="" 필터 → 옵션 row 적재해도 계정 대조뷰·net_profit 불변(D-6).
+  - **라우터**: POST /api/coupang/ops/rg/settlement/upload-xlsx(수동, vendor_id 자동매핑+불일치 reject).
+  - **codex 4R(원칙19)**: 1R 4건(이중계상 P1·stale·vendor검증·마이그가시성)→수용/해결. 2R 3건(같은fee_type삭제충돌 P1·snapshot빈시트·미등록vendor)→수용. 3R 2건(종료일fallback 데이터손실 P1·vs_status_api false mismatch)→수용. 4R pass(남은 P1/P2 없음).
+  - **★prod 라이브 self-verify(원칙22)**: 샘플 엑셀 업로드 8행, **vs_status_api 완전 일치**(warehousing 75,489==status/api·delivery 130,599==status/api, diff 0). **net_profit 불변 517,949→517,949**(D-6). 대조뷰 other=0. 재업로드 idempotent(snapshot replace).
+- [ ] **S6-auto. 자동 엑셀 다운로드** — download-list/api 실제 body 캡처(DevTools, status/api와 스키마 다름 HTTP 500) → 비동기 생성요청·폴링·다운로드 → ingest_settlement_xlsx 재사용. 8종 fee_type 전체 다운로드. scheduler 등록. (블로커: body 캡처 Jino 제공 대기)
 - [ ] **S7. net_profit 플립 + 광고비 dedup 차단 + 모델(A) 감사** — by_option·account_sum에 RG 비용 반영(대조→권위), ad_costs RG분 제외/대체(D-11), 치수→등급 모델 과오청구 감사(D-4). (선택/후속)
 - 각 Sprint: self-verify(라이브 prod) + fixture 테스트(D-12, 머니코드) + codex review pass (원칙19).
 
@@ -83,10 +91,11 @@
   - **★발견 2 — 종합조망 500 버그(기존)**: overview.py:56 `datetime.now(_KST)` _KST 미정의 NameError(커밋 a2bbd3a부터 존재, 라이브 미검증 방치). `kst_today()`로 수정, codex review PASS, 라이브 200. failures.jsonl 기록.
   - **★발견 3 — S4 모델 미커밋**: models.py(CoupangRgSettlementFee)+__init__.py(export)가 e7cb99f에서 누락돼 로컬 미커밋(prod엔 scp로 반영됨). overview.py 수정과 함께 커밋 예정.
 - 2026-06-09: **★S5 완료(코드 잠금 + 엑셀 실증)**. 커밋 2c410c9(코드)+6bcff4d(docs). D-10: fulfillment=배송비 라이브 확정(원칙22), fee_type 리네임(alembic h2i3j4k5l6m7), 발생f basis. D-11: 광고비 dedup 규칙 코드화(2P↔ad_sales). reconcile guard. codex 3R pass, fixture 22/22, prod 마이그레이션+배포+라이브 reconcile OK, net_profit 불변(D-6). **엑셀 실증(§8-1)**: WAREHOUSING_SHIPPING 엑셀에 옵션ID(vendor_item_id) per 주문 존재→S6 가능. Σ옵션 할인적용가(A−B)=요약=status/api 완전 검산. S6 규칙=할인적용가(A−B)+VAT.
+- 2026-06-09: **★S6-core 완료(옵션 단위 수집)**. 커밋 d637bd6. 모델 vendor_item_id grain(alembic i3j4k5l6m7n8) + 엑셀 파서(헤더명 동적매핑·2층헤더·시트별 위치 다름) + ingest(fee_type 병합·snapshot replace·종료일 fallback·검산2) + 수동 업로드 라우터 + 이중계상 가드(대조뷰 vendor_item_id='' 필터). codex 4R pass(1R 4건·2R 3건·3R 2건 수용, 4R 클린). fixture 44/44. **prod 라이브 self-verify(원칙22): 업로드 8행, vs_status_api 완전일치(75,489·130,599 diff 0), net_profit 불변 517,949, 대조뷰 other=0**. S6-auto(자동 다운로드)는 download-list/api body 캡처 대기.
 
 ## 다음 액션
-- **S6 착수(다음 세션)**: 종류별 엑셀 비동기 생성·다운로드·파싱 Harness. ① download-list/api 실제 body 캡처(현재 500) ② 엑셀 폴링·다운로드(GET excel-report?id= 류) ③ 파서: 2층 엑셀에서 옵션ID×매출인식일×할인적용가(A−B) 추출, fee_type별(WAREHOUSING_SHIPPING 등 8종) ④ CoupangRgSettlementFee에 vendor_item_id 컬럼 추가(마이그레이션) ⑤ Σ(옵션)==status/api 검산 + VAT gross-up ⑥ fixture 테스트. 샘플 엑셀=~/Downloads/A01564720-WAREHOUSING_SHIPPING-ko-*.xlsx.
-- **S7(후속)**: net_profit 플립 + 광고비 dedup 차단(D-11) + 모델(A) 감사.
+- **S6-auto(자동 다운로드)**: download-list/api 실제 body 캡처(DevTools Copy-as-cURL, status/api와 스키마 다름) → 비동기 엑셀 생성요청·폴링·다운로드 → 기존 `ingest_settlement_xlsx` 재사용. 8종 fee_type 전체. scheduler 등록. **블로커=body 캡처(Jino 제공)**. 캡처 전까지는 수동 업로드(`POST /api/coupang/ops/rg/settlement/upload-xlsx`)로 운용 가능.
+- **S7(후속)**: net_profit 플립(옵션 row VAT gross-up 반영) + 광고비 dedup 차단(D-11) + 모델(A) 감사. 옵션 row(vendor_item_id!='')를 net_profit 권위 소스로 승격.
 
 ## GSTACK REVIEW REPORT
 
