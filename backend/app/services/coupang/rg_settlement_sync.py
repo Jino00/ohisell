@@ -44,7 +44,7 @@ _FEE_FIELD_MAP: dict[str, tuple[str, int]] = {
     "totalWarehousingFeeDeductionAmount": ("warehousing", 1), # 입출고비(풀필먼트 J 컴포넌트)
     "totalCreturnReverseShippingFeeDeductionAmount": ("return_shipping", 1),  # 반품배송비
     "totalVreturnHandlingFeeDeductionAmount": ("return_handling", 1),          # 반출처리비
-    "totalAdSalesDeductionAmount": ("ad_sales", 1),           # 광고비(d)(D-11: dedup 대상, 표시만)
+    "totalAdSalesDeductionAmount": ("ad_sales", 1),           # 광고비(d)(D-16: net_profit 전액 차감 포함, RG 광고는 정산 전용)
 }
 
 # 정산주기 최대 조회 주 수 (폭주 방지)

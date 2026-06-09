@@ -1157,7 +1157,7 @@ class CoupangRgSettlementFee(Base):
       옵션 row(S6)는 **할인적용가(A−B), VAT前** (발생비용 A=gross 아님, status/api와 불일치 회피).
     fee_type(D-10 라이브 확정 2026-06-09): 'sale_fee'(판매수수료B),
       풀필먼트(J) 3컴포넌트=‘delivery’(배송비)·'warehousing'(입출고비)·'storage'(보관비),
-      'return_shipping'·'return_handling'(반품), 'ad_sales'(광고비d, D-11 dedup 표시만).
+      'return_shipping'·'return_handling'(반품), 'ad_sales'(광고비d, D-16 net_profit 전액 차감 포함).
       raw_type: API 원본 항목명. ★'delivery'=totalFulfillmentFeeDeductionAmount(배송비뿐, 합계 아님).
     """
 

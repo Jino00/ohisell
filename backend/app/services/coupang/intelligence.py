@@ -244,22 +244,23 @@ def _agg_rg_settlement_fees(db: Session, dfrom: date, dto: date) -> dict[str, di
 
 
 # ──────────────────────────────────────────────
-# D-11(개정 D-15) 광고비 dedup 규칙 (S7 라이브 확정 2026-06-09)
+# D-16 광고비 처리 규칙 (S7 /browse 라이브 확정 2026-06-09, D-11/D-15 개정)
 # ──────────────────────────────────────────────
-# ★D-15(S7, D-11 개정): RG 광고비 정본 = 광고비 XLSX(CoupangAdOptionDaily) sell_type='2P'(=로켓그로스).
-# 이 2P 광고비는 이미 net_profit_pre_rg에 들어있고, 그게 정본이다(report_date basis로 net_profit
-# 나머지와 정합). net_profit 플립(S7)은 settlement ad_sales를 차감하지 않는다 → 광고는 XLSX 2P로
-# 1회만 반영, 이중계상 원천 차단. settlement ad_sales(totalAdSalesDeductionAmount)는 표시·자릿수
-# 대조용일 뿐(차감 안 함). (구 D-11 "settlement ad_sales 정본·Phase2에 2P 제외"는 basis 불일치로
-# 폐기 — 트랙 D-15 참조.) sell_type 코드: 3P=윙·2P=RG·Retail=로켓배송(ad_costs 확정).
+# ★D-16(S7): RG 광고비는 RG 정산(totalAdSalesDeductionAmount)에만 있고, 업로드되는 광고 XLSX
+# (CoupangAdOptionDaily, 광고센터 PA 보고서 pa_daily)에는 안 잡힌다 — 광고센터는 마켓플레이스(3P/윙)
+# 검색·디스플레이 광고 플랫폼이고 RG 광고는 별개 청구(prod 광고 XLSX 2P 0행 라이브 실증). 따라서
+# net_profit 플립(S7)은 광고 포함 rg_total을 전액 차감한다(D-16). settlement ad_sales는 표시·검산용.
+# 아래 RG(2P) 합산 헬퍼는 광고센터에서 RG상품 검색광고를 돌릴 경우의 미래 겹침 감시용일 뿐(현재 0).
+# sell_type 코드: 3P=윙·2P=RG·Retail=로켓배송(ad_costs 확정).
 RG_AD_SELL_TYPE = "2P"  # 광고 XLSX 판매방식 코드: 2P=로켓그로스(RG)
 
 
 def rg_ad_spend_to_exclude(ad_rows) -> Decimal:
     """순수규칙: (sell_type, ad_spend) 행들에서 RG(2P) 광고비 합을 반환.
 
-    ★D-15(S7): net_profit 플립은 광고를 차감하지 않으므로(XLSX 2P가 정본·미차감) 이 값은
-    '제외/차감'에 쓰지 않는다 — settlement ad_sales와의 자릿수 대조·표시 목적의 합산 보조다.
+    ★D-16(S7): 광고 XLSX에는 RG 광고가 없으므로(광고센터 PA 보고서 미포함, 라이브 확정) 이 값은
+    현재 0이며 net_profit 차감엔 안 쓴다 — 미래에 광고센터에서 RG상품 검색광고를 돌려 PA 2P가
+    생길 경우의 겹침 감시·자릿수 대조용 보조다.
     순수 함수라 DB 없이 fixture 테스트 가능(D-12). DB 래퍼는 _agg_rg_ad_overlap.
     sell_type은 ad_costs 적재 시 이미 strip되지만(ad_costs.py), 순수함수 계약 견고성 위해 한 번 더 정규화.
     """
@@ -300,27 +301,26 @@ def _rg_account_breakdown(account_key: str, v: dict) -> dict:
 
 
 def apply_rg_net_profit_flip(
-    net_profit_pre_rg: Decimal, rg_non_ad_deducted: Decimal
+    net_profit_pre_rg: Decimal, rg_deducted: Decimal
 ) -> Decimal:
-    """D-15(S7): 종합조망 순이익에 RG 정산 비용을 반영(플립). 광고 제외 비용만 차감한다.
+    """D-16(S7): 종합조망 순이익에 RG 정산 비용을 반영(플립). 정산 총액을 전액 차감한다.
 
-    공식: net_profit_new = net_profit_pre_rg − rg_non_ad_deducted
-    여기서 rg_non_ad_deducted = rg_total − rg_ad_settlement (판매수수료+풀필먼트+반품, 광고 제외).
+    공식: net_profit_new = net_profit_pre_rg − rg_deducted (= rg_total, 광고 포함).
 
-    RG 광고비는 이미 net_profit_pre_rg 안에 광고 XLSX(2P)로 들어있는 게 정본이므로(D-15),
-    settlement ad_sales는 차감하지 않는다(표시·검산만) → 광고 이중계상 원천 차단.
-    add-back·게이트·basis 매칭 불필요. 음수 환급주기(rg_non_ad_deducted<0)도 부호 그대로
-    가산되어 환급이 정확히 반영된다. 순수 함수라 DB 없이 fixture 테스트 가능(D-12).
+    D-16(/browse 라이브 조사): RG 광고비는 광고센터 PA 보고서에 안 잡히고 RG 정산에만 존재하므로
+    (prod 2P 0행 실증), 광고 포함 rg_total을 전액 차감해야 net_profit에 반영된다. rg_total은
+    전부 정산 basis라 basis 불일치 없음. 음수 환급주기(rg_deducted<0)도 부호 그대로 가산되어
+    환급이 정확히 반영된다. 순수 함수라 DB 없이 fixture 테스트 가능(D-12).
     """
-    return net_profit_pre_rg - rg_non_ad_deducted
+    return net_profit_pre_rg - rg_deducted
 
 
 def _agg_rg_ad_overlap(db: Session, dfrom: date, dto: date) -> Decimal:
-    """기간 내 광고비 XLSX의 RG(2P) 광고비 합 — RG정산 ad_sales와의 자릿수 대조용.
+    """기간 내 광고비 XLSX의 RG(2P) 광고비 합 — 미래 이중계상 겹침 감시용.
 
-    ★D-15(S7): 표시·검산용(net_profit 불변·미차감). 광고는 XLSX 2P가 정본으로 이미
-    net_profit_pre_rg에 1회 반영됨 → settlement에선 차감하지 않는다(이중계상 차단).
-    이 값은 settlement ad_sales와 큰 괴리가 있는지 보는 데이터 이슈 신호일 뿐.
+    ★D-16(S7): RG 광고는 광고센터 PA 보고서(이 XLSX)에 안 잡히고 RG 정산에만 있어(라이브 실증)
+    플립은 rg_total을 전액 차감한다. 이 값은 정상=0 — 광고센터에서 RG상품 검색광고를 돌려 PA 2P가
+    생기면 정산 ad_sales와 겹쳐 이중계상 위험이 되므로 그 신호를 감시한다(0이 아니면 호출부에서 경고).
     """
     # func.trim: 적재 시 이미 strip되지만(ad_costs.py), DB 레벨에서도 공백 방어(Codex S5 지적4a).
     rows = (
@@ -532,47 +532,56 @@ def compute_command_center(db: Session, dfrom: date, dto: date) -> dict:
         "return_qty": sum(x["return_qty"] for x in product_rows),
     }
 
-    # D-6/D-7: RG 정산 비용 대조(reconciliation) 뷰 — net_profit 불변, 독립 섹션.
+    # RG 정산 비용 집계 + 계정별 대조(reconciliation) 브레이크다운.
     # ★D-10 라이브 확정(2026-06-09): 풀필먼트(J) = 배송비(delivery)+입출고비(warehousing)+보관비(storage).
     #   세 컴포넌트를 fulfillment 한 그룹으로 묶어 표시(레퍼런스 17 §7 검산 일치). 라인 합 = total로 reconcile.
-    #   ad_sales(광고비 d)는 D-11 dedup 대상 — Phase1은 표시만(net_profit 미반영, ad_costs 2P와 중복주의).
+    #   ad_sales(광고비 d)는 D-16에서 net_profit 전액 차감에 포함됨(RG 광고는 정산 전용, 광고센터 미포함).
     rg_total = sum((v["total"] for v in rg_fees.values()), _Z)
     rg_by_account = [_rg_account_breakdown(ak, v) for ak, v in sorted(rg_fees.items())]
-    # D-11: 광고비 dedup 표시 — RG정산 ad_sales(정본) vs 광고비 XLSX RG(2P)분(중복구간).
     rg_ad_settlement = sum((v.get("ad_sales", _Z) for v in rg_fees.values()), _Z)
+    # D-16 미래 겹침 감시(Codex S7): 정상=0. 0이 아니면 광고센터에서 RG상품 검색광고를 돌려 PA 2P가
+    #   생긴 것 → rg_total 전액 차감(정산 광고 포함)과 XLSX 2P(net_profit에 이미 반영)가 이중계상될 수 있음.
     rg_ad_xlsx_overlap = _agg_rg_ad_overlap(db, dfrom, dto)
+    if rg_ad_xlsx_overlap != _Z:
+        log.warning(
+            "RG 광고 이중계상 위험(D-16): 광고 XLSX 2P=%s 발생 — 정산 ad_sales=%s와 겹칠 수 있음. "
+            "D-16(전액 차감)은 2P=0 전제 → 재검토 필요(트랙 D-16 잔존 리스크).",
+            rg_ad_xlsx_overlap, rg_ad_settlement,
+        )
 
-    # ─── S7(D-14/D-15): net_profit 플립 — 계정 단위 RG 비용을 헤드라인 순이익에 반영 ───
-    # D-15: 광고 제외 RG 비용만 차감(rg_total − rg_ad_settlement). RG 광고비는 이미
-    #   account_sum["net_profit"]에 광고 XLSX(2P)로 들어있는 게 정본 → settlement ad_sales는
-    #   차감 안 함(표시·검산만). 이중계상 원천 차단, basis 매칭/게이트 불필요.
+    # ─── S7(D-14/D-16): net_profit 플립 — 계정 단위 RG 정산 총액 전액 차감 ───
+    # ★D-16(D-15 개정, /browse 라이브 조사 2026-06-09): RG 광고비는 광고센터 PA 보고서(pa_daily XLSX,
+    #   advertising.coupang.com /reports/pa = 마켓플레이스 광고)에 안 잡히고 RG 정산에만 존재
+    #   (prod 광고 XLSX 2P 0행 실증) → 광고 포함 rg_total 전액 차감해야 net_profit에 반영된다.
+    #   rg_total은 전부 정산 basis라 basis 불일치 없음(D-15 non-ad 차감보다 단순·정확). 2P=0이라
+    #   이중계상 없음. (구 D-15 "광고 제외 차감"은 RG 광고가 XLSX 2P에 있다는 틀린 전제 → 폐기.)
     # D-14: 차감은 summary(account_sum) 레벨만. by_option net_profit은 운영지표로 불변.
-    # 5개 브리지 필드로 감사가능하게 노출. 회귀 가드: RG 데이터 0이면 rg_total=0 → 플립 no-op(불변).
-    rg_non_ad_deducted = rg_total - rg_ad_settlement
-    account_sum["net_profit_pre_rg"] = account_sum["net_profit"]  # 대조 기준선(XLSX 2P 광고비 포함)
-    account_sum["rg_settlement_total"] = rg_total                 # 계정 RG 총액(VAT後, 표시)
-    account_sum["rg_ad_settlement"] = rg_ad_settlement            # RG정산 광고비(표시·검산, 미차감)
-    account_sum["rg_non_ad_deducted"] = rg_non_ad_deducted        # ★실제 차감액(광고 제외)
+    # 회귀 가드: RG 데이터 0이면 rg_total=0 → 플립 no-op(불변).
+    account_sum["net_profit_pre_rg"] = account_sum["net_profit"]  # 대조 기준선(플립 전)
+    account_sum["rg_settlement_total"] = rg_total                 # ★전액 차감액(VAT後, 광고 포함)
+    account_sum["rg_ad_settlement"] = rg_ad_settlement            # 표시: 전액 중 광고분(D-16 라이브 조사)
+    account_sum["rg_non_ad_deducted"] = rg_total - rg_ad_settlement  # 표시: 전액 중 광고 제외분(브레이크다운)
     account_sum["net_profit"] = apply_rg_net_profit_flip(
-        account_sum["net_profit"], rg_non_ad_deducted
+        account_sum["net_profit"], rg_total
     )
     # status enum(Codex #6): money basis 명시. 불리언 안 씀.
-    account_sum["rg_flip_status"] = "applied_non_ad" if len(rg_fees) > 0 else "not_applied_no_data"
+    account_sum["rg_flip_status"] = "applied_full" if len(rg_fees) > 0 else "not_applied_no_data"
 
     rg_settlement = {
         "summary": {
             "total": rg_total,
             "has_data": len(rg_fees) > 0,
             "note": (
-                "RG 정산 비용 반영됨(Phase2/S7, 계정 단위 non-ad 차감, D-14/D-15). "
-                "광고비는 광고 XLSX(2P)로 이미 net_profit에 반영 — settlement 광고는 표시만(미차감). "
+                "RG 정산 비용 반영됨(Phase2/S7, 계정 단위 전액 차감, D-14/D-16). "
+                "RG 광고비는 광고센터 PA 보고서에 없고 정산에만 있어 전액(광고 포함) 차감(라이브 조사). "
                 "정산주기 기준(부분 윈도우도 주기 전액)."
             ),
-            "flip_status": "applied_non_ad" if len(rg_fees) > 0 else "not_applied_no_data",
-            "non_ad_deducted": rg_non_ad_deducted,   # ★net_profit에서 실제 차감된 광고 제외 RG 비용
-            # D-11 dedup: 광고는 settlement에서 미차감(D-15) → XLSX 2P 정본.
-            "ad_settlement": rg_ad_settlement,      # RG정산 광고비(표시·검산, 미차감)
-            "ad_xlsx_rg_overlap": rg_ad_xlsx_overlap,  # 광고비 XLSX의 RG(2P)분(자릿수 대조용)
+            "flip_status": "applied_full" if len(rg_fees) > 0 else "not_applied_no_data",
+            "deducted": rg_total,                    # ★net_profit에서 실제 차감된 RG 총액(광고 포함)
+            "non_ad_deducted": rg_total - rg_ad_settlement,  # 표시: 전액 중 광고 제외분(브레이크다운)
+            # D-16: RG 광고는 정산 전용(광고센터 미포함) → 전액 차감에 포함.
+            "ad_settlement": rg_ad_settlement,      # RG정산 광고비(전액 중 광고분)
+            "ad_xlsx_rg_overlap": rg_ad_xlsx_overlap,  # 광고비 XLSX의 RG(2P)분(현재 0, 미래 겹침 감시용)
         },
         "by_account": rg_by_account,
     }

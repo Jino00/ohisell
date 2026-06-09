@@ -368,12 +368,12 @@ export interface OverviewResponse {
       service_fee_vat: string; total_fee: string; ad_spend: string;
       cost: string; net_profit: string;
       cost_covered_options: number; option_count: number;
-      // S7(D-14/D-15): RG 정산 비용 net_profit 플립 브리지 필드(계정 단위, non-ad 차감)
-      net_profit_pre_rg?: string;     // 플립 전 순이익(XLSX 2P 광고비 포함)
-      rg_settlement_total?: string;   // 계정 RG 총액(VAT後, 표시)
-      rg_ad_settlement?: string;      // RG정산 광고비(표시·검산, 미차감)
-      rg_non_ad_deducted?: string;    // ★net_profit에서 실제 차감된 광고 제외 RG 비용
-      rg_flip_status?: 'applied_non_ad' | 'not_applied_no_data';
+      // S7(D-14/D-16): RG 정산 비용 net_profit 플립 브리지 필드(계정 단위, 전액 차감)
+      net_profit_pre_rg?: string;     // 플립 전 순이익
+      rg_settlement_total?: string;   // ★net_profit에서 실제 차감된 RG 총액(VAT後, 광고 포함)
+      rg_ad_settlement?: string;      // 표시: 전액 중 광고분(D-16 라이브 조사)
+      rg_non_ad_deducted?: string;    // 표시: 전액 중 광고 제외 브레이크다운
+      rg_flip_status?: 'applied_full' | 'not_applied_no_data';
     };
     by_option: OverviewAccountRow[];
   };
@@ -393,10 +393,11 @@ export interface OverviewResponse {
   rg_settlement?: {
     summary: {
       total: string; has_data: boolean; note: string;
-      flip_status?: 'applied_non_ad' | 'not_applied_no_data';  // S7 플립 상태
-      non_ad_deducted?: string;      // S7 net_profit에서 실제 차감된 광고 제외 RG 비용
-      ad_settlement?: string;        // D-11 RG정산 광고비(표시·검산, 미차감)
-      ad_xlsx_rg_overlap?: string;   // D-11 광고비 XLSX RG(2P)분(자릿수 대조용)
+      flip_status?: 'applied_full' | 'not_applied_no_data';  // S7 플립 상태(D-16)
+      deducted?: string;             // ★S7 net_profit에서 실제 차감된 RG 총액(광고 포함)
+      non_ad_deducted?: string;      // 표시: 전액 중 광고 제외 브레이크다운
+      ad_settlement?: string;        // D-16 RG정산 광고비(전액 중 광고분)
+      ad_xlsx_rg_overlap?: string;   // 광고비 XLSX RG(2P)분(현재 0, 미래 겹침 감시용)
     };
     by_account: RgSettlementByAccount[];
   };
