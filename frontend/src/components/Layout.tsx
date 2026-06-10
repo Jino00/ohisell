@@ -4,7 +4,7 @@
 import { useEffect, useState } from "react";
 import { Link, NavLink, Outlet, useLocation } from "react-router-dom";
 import SchedulerStatus from "./SchedulerStatus";
-import { getAdCostCookieStatus, type AdCostCookieStatus } from "../lib/api";
+import { getAdCostCookieStatus, requestAdCostRefresh, type AdCostCookieStatus } from "../lib/api";
 
 // 대시보드 하위 채널별 운영 패널 (접이식)
 const DASHBOARD_CHILDREN = [
@@ -35,6 +35,26 @@ export default function Layout() {
   const [open, setOpen] = useState(childActive || location.pathname === "/");
   const [mobileOpen, setMobileOpen] = useState(false);
   const [adCookie, setAdCookie] = useState<AdCostCookieStatus | null>(null);
+  const [adRefreshing, setAdRefreshing] = useState(false);
+  const [adRefreshMsg, setAdRefreshMsg] = useState<string | null>(null);
+
+  // 배너 '지금 갱신' — stale(쿠키 정상, Mac 페처 지연)일 때 실제 갱신 요청.
+  // request_refresh 플래그 set → Mac 데몬이 다음 폴링(~20초)에서 fetch·push. 12초 뒤 상태 재확인.
+  async function handleAdRefresh() {
+    setAdRefreshing(true);
+    setAdRefreshMsg(null);
+    try {
+      await requestAdCostRefresh();
+      setAdRefreshMsg("갱신 요청됨 — Mac 페처가 켜져 있으면 ~20초 후 반영됩니다.");
+      setTimeout(() => {
+        getAdCostCookieStatus().then(setAdCookie).catch(() => { /* 무시 */ });
+      }, 12000);
+    } catch {
+      setAdRefreshMsg("갱신 요청 실패 — 쿠키 재설정이 필요할 수 있습니다.");
+    } finally {
+      setAdRefreshing(false);
+    }
+  }
 
   // 채널 페이지로 직접 진입하면 그룹을 자동으로 펼침
   useEffect(() => {
@@ -159,15 +179,31 @@ export default function Layout() {
           <div className="flex items-center gap-3 bg-red-600 text-white px-4 py-2 text-sm">
             <span className="font-semibold shrink-0">🔴 쿠팡 광고비 수집 중단</span>
             <span className="text-red-100 min-w-0 truncate">
-              광고비 수집이 멈췄습니다 — 로컬 페처/쿠키 확인 필요
-              {adCookie.last_success_at && ` (마지막 수집 ${adCookie.last_success_at.slice(0, 10)})`}.
+              {adRefreshMsg ?? (
+                <>
+                  광고비 수집이 멈췄습니다 — {adCookie.status === "red" ? "쿠키 만료(재설정 필요)" : "로컬 페처 확인 필요"}
+                  {adCookie.last_success_at && ` (마지막 수집 ${adCookie.last_success_at.slice(0, 10)})`}.
+                </>
+              )}
             </span>
-            <Link
-              to="/coupang-ops?adcookie=open"
-              className="ml-auto shrink-0 bg-white text-red-700 font-medium px-3 py-1 rounded hover:bg-red-50"
-            >
-              광고쿠키 갱신 →
-            </Link>
+            {adCookie.status === "red" ? (
+              // 쿠키 만료 → 재설정 폼으로 (Mac이 fetch해도 인증 실패하므로 갱신 요청 무의미)
+              <Link
+                to="/coupang-ops?adcookie=open"
+                className="ml-auto shrink-0 bg-white text-red-700 font-medium px-3 py-1 rounded hover:bg-red-50"
+              >
+                쿠키 다시 설정 →
+              </Link>
+            ) : (
+              // stale(쿠키 정상, 페처 지연) → 실제 갱신 요청
+              <button
+                onClick={handleAdRefresh}
+                disabled={adRefreshing}
+                className="ml-auto shrink-0 bg-white text-red-700 font-medium px-3 py-1 rounded hover:bg-red-50 disabled:opacity-60"
+              >
+                {adRefreshing ? "요청 중…" : "지금 갱신 →"}
+              </button>
+            )}
           </div>
         )}
 
