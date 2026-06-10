@@ -3,8 +3,19 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
-- 날짜: 2026-06-09
-- ★★RG 수수료 회계 트랙 **전부 완료(S1~S8, 운영 단계)**. 이번 세션: S6-auto prod self-verify + scheduler 등록 + **S8 과오청구 감사** 신규.
+- 날짜: 2026-06-10
+- ★★**RG 정산 sale_fee 2배 버그 수정 완료**(local 커밋 931a66f, codex 2R pass, fixture 49, prod 양계정 self-verify).
+  - **근본원인(라이브 확정)**: status/api가 한 기간에 가지급70%+확정30% 설치분 리포트 2개 반환. fee_type별 노출 다름:
+    take_rate(판매수수료)만 기간 총액을 양쪽에 '동일값' 반복(102,950=102,950) → 기존 코드가 합산해서 2배(205,900)
+    → net_profit 과다차감. 풀필먼트·보관·입출고·반출처리는 가지급 full·확정 0(합산=full), ad_sales는 70/30 분할(합산=총액).
+  - **수정**: rg_settlement_sync.py `_parse_status_response` — 설치분 충돌 시 **sale_fee 한정 동일값 dedupe**, 그 외 합산.
+    (codex P2: 전역 dedupe는 우연한 50/50 분할 과소계상 위험 → sale_fee 한정. WING2 라이브로 '다른 필드는 안 반복' 확정.)
+  - **권위검산**: 매출−환불−Σ지급액=실차감. 06-01~07 309,206=102,950(판매수수료)+206,256(풀필먼트) 일치(공식 명세서).
+  - **prod self-verify**: WING1 sale_fee 232,468→120,662, WING2 42,608→34,811. net_profit 2,446,159→2,471,672
+    (WING1 +88,097, WING2는 stale 해소로 보관·반출 비용 완전포착되어 더 정확해짐[하향]). 양계정 쿠키 재등록(browse 추출).
+  - **남은 것**: 없음(양계정 교정). 별도 task: save_settlement_cookie xsrf 미암호화(rg_inbound_sync.save_cookie는 정상).
+  - failures.jsonl 기록(원칙22 교훈: 06-01~07[ad=0]만 보고 일반화→ad는 분할, WING2는 보관/반출 큰 영역. 한 케이스 일반화 함정).
+- (이전) ★★RG 수수료 회계 트랙 **전부 완료(S1~S8, 운영 단계)**. S6-auto prod self-verify + scheduler 등록 + **S8 과오청구 감사** 신규.
 - ★★**S8 과오청구 감사 완료**(main 커밋 7de358a+00a8525, codex 1R pass[P1 0·P2 2 수용], fixture 32, prod 라이브 self-verify).
   - **사이즈표 라이브 확보**: Wing fee-details(로그인, browse 쿠키피커 import) → 레퍼런스 17 §7. 세변합(cm)+무게(kg) 6등급, 둘 다 충족·하나라도 초과시 상위 채택.
   - **구조(D-17)**: SA1 classify_size_type + SA2 expected_fee_floor + SA3 detect_fee_anomalies(배송 주문당·입출고 수량당) → Harness rg_fee_audit → GET /api/coupang/ops/rg/fee-audit. **읽기전용·net_profit 불변**.
