@@ -130,29 +130,36 @@ def test_negative_amounts_preserved():
     assert fee_map["delivery"] == Decimal("1000")
 
 
-# ─── dedup 테스트 (70%+30% 분할정산 합산) ───────────────
-
-_FIXTURE_SPLIT = {
+# ─── 설치분(가지급70%+확정30%) dedup 테스트 ───────────────
+# ★라이브 실측(2026-06-10, WING1·WING2 양 계정, 원칙22): 한 기간에 settlementRatio 70/30
+#   설치분 리포트가 2개 온다. settlementRatio는 '지급액' 분할일 뿐, fee_type별 노출이 다르다:
+#   take_rate만 기간 총액을 양쪽에 '동일값' 반복(102,950=102,950), 나머지(풀필먼트·보관·입출고·
+#   반출처리)는 가지급분 full·확정분 0, ad_sales는 70/30 분할. 따라서 take_rate를 합산하면
+#   이중계상(2배=205,900 버그). 정답: sale_fee 한정으로 동일값이면 1회만 계상(dedupe), 그 외는 합산.
+#   공식 정산명세서 판매수수료=102,950과 일치.
+_FIXTURE_INSTALLMENTS = {
     "settlementStatusReports": [
         {
-            "settlementPeriodStartDate": "2026-04-05T15:00:00Z",
-            "settlementPeriodEndDate": "2026-04-11T15:00:00Z",
+            "settlementRatio": 70,  # 가지급
+            "settlementPeriodStartDate": "2026-05-31T15:00:00Z",  # → KST 2026-06-01
+            "settlementPeriodEndDate": "2026-06-06T15:00:00Z",    # → KST 2026-06-07
             "settlementStatusReportDetail": {
-                "totalTakeRateAmountWithVat": 1000,
-                "totalFulfillmentFeeDeductionAmount": 500,
-                "totalStorageFeeDeductionAmount": 0,
-                "totalWarehousingFeeDeductionAmount": 0,
+                "totalTakeRateAmountWithVat": 102950,             # 기간 총액
+                "totalFulfillmentFeeDeductionAmount": 130599,      # full(이 설치분에 귀속)
+                "totalStorageFeeDeductionAmount": 168,
+                "totalWarehousingFeeDeductionAmount": 75489,
                 "totalCreturnReverseShippingFeeDeductionAmount": 0,
                 "totalVreturnHandlingFeeDeductionAmount": 0,
                 "totalAdSalesDeductionAmount": 0,
             }
         },
         {
-            "settlementPeriodStartDate": "2026-04-05T15:00:00Z",  # 같은 기간, 30% 분
-            "settlementPeriodEndDate": "2026-04-11T15:00:00Z",
+            "settlementRatio": 30,  # 확정 — take_rate 반복, 풀필먼트 0
+            "settlementPeriodStartDate": "2026-05-31T15:00:00Z",
+            "settlementPeriodEndDate": "2026-06-06T15:00:00Z",
             "settlementStatusReportDetail": {
-                "totalTakeRateAmountWithVat": 428,
-                "totalFulfillmentFeeDeductionAmount": 214,
+                "totalTakeRateAmountWithVat": 102950,             # 동일값 반복(분할 아님)
+                "totalFulfillmentFeeDeductionAmount": 0,
                 "totalStorageFeeDeductionAmount": 0,
                 "totalWarehousingFeeDeductionAmount": 0,
                 "totalCreturnReverseShippingFeeDeductionAmount": 0,
@@ -164,12 +171,143 @@ _FIXTURE_SPLIT = {
 }
 
 
-def test_split_settlement_aggregated():
-    rows = _parse_status_response(_FIXTURE_SPLIT, "COUPANG_WING1")
+def test_installment_reports_deduped_not_summed():
+    """가지급70%+확정30% 설치분은 dedupe(합산 금지). take_rate 2배 버그 회귀 가드."""
+    rows = _parse_status_response(_FIXTURE_INSTALLMENTS, "COUPANG_WING1")
     fee_map = {r.fee_type: r.amount for r in rows}
-    # 70% + 30% 합산
-    assert fee_map["sale_fee"] == Decimal("1428")
-    assert fee_map["delivery"] == Decimal("714")
+    # ★합산(205,900) 아님 — 공식 명세서 판매수수료 102,950과 일치
+    assert fee_map["sale_fee"] == Decimal("102950")
+    assert fee_map["sale_fee"] != Decimal("205900")  # 2배 버그 명시적 가드
+    # 풀필먼트: full(한쪽)+0(다른쪽) → full 채택
+    assert fee_map["delivery"] == Decimal("130599")
+    assert fee_map["warehousing"] == Decimal("75489")
+    assert fee_map["storage"] == Decimal("168")
+
+
+def test_installment_dedup_preserves_negative_refund():
+    """설치분 dedup이 음수 환급 부호를 보존(절대값 최대 채택)."""
+    fixture = {
+        "settlementStatusReports": [
+            {
+                "settlementPeriodStartDate": "2026-05-03T15:00:00Z",
+                "settlementPeriodEndDate": "2026-05-09T15:00:00Z",
+                "settlementStatusReportDetail": {
+                    "totalTakeRateAmountWithVat": -500,  # 환급(음수)
+                    "totalFulfillmentFeeDeductionAmount": 0,
+                    "totalStorageFeeDeductionAmount": 0,
+                    "totalWarehousingFeeDeductionAmount": 0,
+                    "totalCreturnReverseShippingFeeDeductionAmount": 0,
+                    "totalVreturnHandlingFeeDeductionAmount": 0,
+                    "totalAdSalesDeductionAmount": 0,
+                },
+            },
+            {
+                "settlementPeriodStartDate": "2026-05-03T15:00:00Z",  # 같은 기간 설치분
+                "settlementPeriodEndDate": "2026-05-09T15:00:00Z",
+                "settlementStatusReportDetail": {
+                    "totalTakeRateAmountWithVat": -500,  # 동일 음수 반복
+                    "totalFulfillmentFeeDeductionAmount": 0,
+                    "totalStorageFeeDeductionAmount": 0,
+                    "totalWarehousingFeeDeductionAmount": 0,
+                    "totalCreturnReverseShippingFeeDeductionAmount": 0,
+                    "totalVreturnHandlingFeeDeductionAmount": 0,
+                    "totalAdSalesDeductionAmount": 0,
+                },
+            },
+        ]
+    }
+    rows = _parse_status_response(fixture, "COUPANG_WING1")
+    fee_map = {r.fee_type: r.amount for r in rows}
+    assert fee_map["sale_fee"] == Decimal("-500")  # 합산(-1000) 아님, 부호 보존
+
+
+def test_installment_ad_sales_split_summed():
+    """광고비(ad_sales)는 설치분 간 '다른값'으로 70/30 분할 노출 → 합산해야 기간 총액(라이브 실측).
+
+    ★take_rate(동일값=반복총액)와 달리 ad_sales는 설치분마다 값이 다름(16,510 vs 7,076).
+    동일값만 dedupe하고 다른값은 합산하므로 ad는 23,586으로 정확히 합산된다.
+    같은 fixture에서 take_rate(동일값)는 dedupe(1회)됨을 함께 검증.
+    """
+    fixture = {
+        "settlementStatusReports": [
+            {
+                "settlementRatio": 70,
+                "settlementPeriodStartDate": "2026-03-22T15:00:00Z",
+                "settlementPeriodEndDate": "2026-03-28T15:00:00Z",
+                "settlementStatusReportDetail": {
+                    "totalTakeRateAmountWithVat": 3321,            # 동일값(반복 총액)
+                    "totalFulfillmentFeeDeductionAmount": 6270,     # full
+                    "totalStorageFeeDeductionAmount": 219,
+                    "totalWarehousingFeeDeductionAmount": 3630,
+                    "totalCreturnReverseShippingFeeDeductionAmount": 0,
+                    "totalVreturnHandlingFeeDeductionAmount": 0,
+                    "totalAdSalesDeductionAmount": 16510,           # 70% 분할
+                },
+            },
+            {
+                "settlementRatio": 30,
+                "settlementPeriodStartDate": "2026-03-22T15:00:00Z",
+                "settlementPeriodEndDate": "2026-03-28T15:00:00Z",
+                "settlementStatusReportDetail": {
+                    "totalTakeRateAmountWithVat": 3321,            # 동일값 반복
+                    "totalFulfillmentFeeDeductionAmount": 0,
+                    "totalStorageFeeDeductionAmount": 0,
+                    "totalWarehousingFeeDeductionAmount": 0,
+                    "totalCreturnReverseShippingFeeDeductionAmount": 0,
+                    "totalVreturnHandlingFeeDeductionAmount": 0,
+                    "totalAdSalesDeductionAmount": 7076,            # 30% 분할
+                },
+            },
+        ]
+    }
+    rows = _parse_status_response(fixture, "COUPANG_WING1")
+    fee_map = {r.fee_type: r.amount for r in rows}
+    assert fee_map["sale_fee"] == Decimal("3321")     # 동일값 → dedupe(합산 6642 아님)
+    assert fee_map["ad_sales"] == Decimal("23586")    # 다른값 → 합산(16510+7076)
+    assert fee_map["delivery"] == Decimal("6270")     # full+0 → 합산=full
+    assert fee_map["warehousing"] == Decimal("3630")
+    assert fee_map["storage"] == Decimal("219")
+
+
+def test_installment_nonsalefee_equal_values_summed_not_deduped():
+    """dedupe는 sale_fee에만 적용(codex P2). 비-sale_fee가 우연히 동일값이어도 합산(과소계상 방지).
+
+    ★sale_fee만 '반복 총액'이 라이브로 입증됨. ad_sales 등이 우연히 같은 값(예: 50/50 분할 1000+1000)
+    이면 전역 dedupe는 1000으로 과소계상하지만, sale_fee 한정 규칙은 2000으로 정확히 합산한다.
+    """
+    fixture = {
+        "settlementStatusReports": [
+            {
+                "settlementPeriodStartDate": "2026-03-22T15:00:00Z",
+                "settlementPeriodEndDate": "2026-03-28T15:00:00Z",
+                "settlementStatusReportDetail": {
+                    "totalTakeRateAmountWithVat": 0,
+                    "totalFulfillmentFeeDeductionAmount": 0,
+                    "totalStorageFeeDeductionAmount": 0,
+                    "totalWarehousingFeeDeductionAmount": 0,
+                    "totalCreturnReverseShippingFeeDeductionAmount": 0,
+                    "totalVreturnHandlingFeeDeductionAmount": 0,
+                    "totalAdSalesDeductionAmount": 1000,   # 우연히 동일값(50/50 가정)
+                },
+            },
+            {
+                "settlementPeriodStartDate": "2026-03-22T15:00:00Z",
+                "settlementPeriodEndDate": "2026-03-28T15:00:00Z",
+                "settlementStatusReportDetail": {
+                    "totalTakeRateAmountWithVat": 0,
+                    "totalFulfillmentFeeDeductionAmount": 0,
+                    "totalStorageFeeDeductionAmount": 0,
+                    "totalWarehousingFeeDeductionAmount": 0,
+                    "totalCreturnReverseShippingFeeDeductionAmount": 0,
+                    "totalVreturnHandlingFeeDeductionAmount": 0,
+                    "totalAdSalesDeductionAmount": 1000,   # 동일값
+                },
+            },
+        ]
+    }
+    rows = _parse_status_response(fixture, "COUPANG_WING1")
+    fee_map = {r.fee_type: r.amount for r in rows}
+    assert fee_map["ad_sales"] == Decimal("2000")  # 비-sale_fee 동일값 → 합산(dedupe 1000 아님)
 
 
 # ─── 누락 필드 방어 테스트 (D-13) ──────────────────────
@@ -632,3 +770,60 @@ def test_ingest_vs_status_api_merged_by_fee_type():
     vs = [s["vs_status_api"] for s in res["sheets"]]
     assert all(v is not None and v["match"] for v in vs)  # 합계 1650 == 계정 1650
     assert vs[0]["summary_final"] == Decimal("1650")  # 1100+550 합계(시트별 아님)
+
+
+# ─── 쿠키 저장↔로드 정합 (2026-06-10 xsrf raw저장 버그 회귀) ──────────────────
+# save_settlement_cookie(dead code)가 xsrf를 raw로 저장 → _load_client의 decrypt_secret(xsrf)와
+# 어긋나 로드 시 CookieCryptoError 크래시. 함수 제거 후 저장은 rg_inbound_sync.save_cookie 단일
+# 경로. 이 테스트는 정상 경로가 xsrf를 암호화 라운드트립하는지 + raw 저장이 _load_client에서
+# 실패하는지(=암호화 계약)를 못박는다.
+from cryptography.fernet import Fernet
+from app.services.coupang.rg_inbound_sync import save_cookie
+from app.services.coupang.rg_settlement_sync import _load_client
+from app.models import CoupangWingCookie
+from app.utils.crypto import decrypt_secret, CookieCryptoError
+
+_CURL = (
+    "curl 'https://wing.coupang.com/tenants/rfm/v2/settlements/status/api' "
+    "-H 'x-xsrf-token: tok-XSRF-9z8y7x' "
+    "-H 'cookie: XSRF-TOKEN=tok-XSRF-9z8y7x; SESSION=sess-abc; bm_sv=zzz'"
+)
+
+
+def test_save_cookie_to_load_client_roundtrips_xsrf(monkeypatch):
+    """정상 경로: save_cookie 저장 → _load_client 로드가 xsrf/cookie를 원본대로 복원(크래시 없음)."""
+    monkeypatch.setenv("COOKIE_ENC_KEY", Fernet.generate_key().decode())
+    db = _db()
+
+    save_cookie(db, "COUPANG_WING1", _CURL)
+
+    row = db.query(CoupangWingCookie).filter_by(account_key="COUPANG_WING1").first()
+    assert row is not None
+    # 저장은 평문 아님(암호문) — raw 저장 회귀 차단
+    assert row.xsrf_token != "tok-XSRF-9z8y7x"
+    assert row.cookie_blob != "XSRF-TOKEN=tok-XSRF-9z8y7x; SESSION=sess-abc; bm_sv=zzz"
+    # 복호화하면 원본
+    assert decrypt_secret(row.xsrf_token) == "tok-XSRF-9z8y7x"
+
+    # _load_client가 예외 없이 원본을 복원해 클라이언트에 주입
+    client = _load_client(db, "COUPANG_WING1")
+    assert client.xsrf == "tok-XSRF-9z8y7x"
+    assert "SESSION=sess-abc" in client.cookie
+
+
+def test_load_client_rejects_raw_unencrypted_xsrf(monkeypatch):
+    """회귀: xsrf를 raw(평문)로 저장하면 _load_client가 CookieCryptoError로 표면화(암호화 계약).
+
+    과거 save_settlement_cookie가 정확히 이렇게 raw 저장 → 로드 크래시였다. 평문 저장 경로가
+    다시 생기면 이 테스트가 깨져 알린다.
+    """
+    monkeypatch.setenv("COOKIE_ENC_KEY", Fernet.generate_key().decode())
+    db = _db()
+
+    save_cookie(db, "COUPANG_WING1", _CURL)  # cookie_blob은 정상 암호화
+    row = db.query(CoupangWingCookie).filter_by(account_key="COUPANG_WING1").first()
+    row.xsrf_token = "tok-XSRF-9z8y7x"  # ← raw로 덮어쓰기(과거 버그 재현)
+    db.commit()
+
+    with pytest.raises(CookieCryptoError):
+        _load_client(db, "COUPANG_WING1")

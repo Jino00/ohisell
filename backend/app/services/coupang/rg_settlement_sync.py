@@ -147,14 +147,29 @@ def _parse_status_response(data: dict, account_key: str) -> list[CoupangRgSettle
             if key not in seen_keys:
                 seen_keys.add(key)
                 all_rows.append(row)
-            # 같은 period에 70%+30% 분할정산 레코드가 2개 오는 경우 — 합산
+            # ★같은 기간에 가지급(70%)+확정(30%) 설치분 리포트가 2개 온다(라이브 확정 2026-06-10,
+            #   WING1, 원칙22). settlementRatio는 '지급액' 분할일 뿐, 수수료 필드는 fee_type마다
+            #   설치분 노출 방식이 다르다(라이브 실측):
+            #     - 판매수수료(take_rate): 기간 총액을 양쪽에 '동일값' 반복(예: 102,950=102,950).
+            #       → 합산하면 2배 이중계상(net_profit 과다차감 버그). 동일값은 반복 총액이라 1회만 계상.
+            #     - 풀필먼트(배송/입출고/보관): 가지급분에 full·확정분 0 → 합산=full(정상).
+            #     - 광고비(ad_sales): 70/30 등으로 '분할' 노출(예: 16,510 vs 7,076) → 합산해야 기간 총액.
+            #   원칙: 설치분 간 '동일값'이면 반복 총액 → 1회 계상(dedupe), '다른값'이면 분할/누적 → 합산.
+            #   (동일값 dedupe가 필요한 건 현재 take_rate뿐. 나머지는 full+0 또는 분할이라 합산이 옳다.)
             else:
                 for existing in all_rows:
                     if (existing.account_key == row.account_key
                             and existing.recognition_date_from == row.recognition_date_from
                             and existing.recognition_date_to == row.recognition_date_to
                             and existing.fee_type == row.fee_type):
-                        existing.amount += row.amount
+                        # dedupe는 라이브로 '반복 총액'이 입증된 sale_fee에만 적용(codex P2 수용).
+                        # sale_fee가 설치분에 동일값으로 오면 기간 총액 반복이므로 1회만 계상(2배 버그 차단).
+                        # 그 외 fee_type(풀필먼트=full+0, ad_sales=분할)은 항상 합산(기존 동작 유지) —
+                        # 증거 없는 전역 dedupe는 우연한 동일분할(예: 50/50)에서 과소계상 위험이 있다.
+                        if existing.fee_type == "sale_fee" and row.amount == existing.amount:
+                            pass  # 반복 총액 → dedupe(추가 안 함)
+                        else:
+                            existing.amount += row.amount   # 분할/누적/풀필먼트 → 합산
                         break
 
     return all_rows
