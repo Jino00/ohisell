@@ -27,26 +27,28 @@
 - **D-3 (머니룰, S4)**: RG 순이익 = **RG 매출 − RG 원가 − RG 정산수수료(전액)**. 기존 D-16(RG 정산 전액차감)과 일관되게 맞물림. RG 매출 편입 시 net_profit 재설계 필수 — fixture 머니코드 테스트(원칙 코드아키텍처).
 - **D-4**: command-center에 **account 파라미터**(계정별 분리 뷰). 쿠팡 대시보드(계정별)와 1:1 비교의 전제.
 - **D-5**: 잔차(3P·RG 각 ~4%)는 계산 버그가 아니라 **상태 신선도**(동기화 이후 취소/반품). S6에서 재동기화/차감 정합으로 해소.
+- **D-9 (S3/S4 머니룰 basis)**: RG 매출은 **주문일(paid_at)** 기준(쿠팡 판매분석과 일치), RG 정산수수료(rg_total)는 **정산인식일** 기준(D-16, 정산은 판매보다 수주 지연). net_profit은 둘을 한 윈도우에서 합산하므로 **단기 윈도우에선 RG 순이익이 낙관적**(매출 전액 인식·정산 일부만 차감). 장기·정산완료 구간에선 수렴. 이는 계산 버그가 아니라 **소스별 날짜축 차이**(D-16 "정산주기 기준" 카브아웃과 동류). 매출 일치(사용자 1차 목표)는 정확. net_profit 정밀 정렬은 향후 과제(정산-주문 매칭 시).
 
 ### 사용자 원문 인용 (왜곡 방지)
 - "가장 큰 문제는 쿠팡에서 나오는 매출과 광고 숫자와 너가 만들어내는 매출과 광고 숫자가 전혀 매칭이 안 된다... 정확하게 맞출 수 있는 방법을... 일단은 오픽스만 먼저 확인을 해 보자"
 - (구조 제안에 대해) "그래" → 7-sprint 구조 + D-3 머니룰 방향 승인.
 - "근본적으로 모든 문제를 해결해"
 
-## 4. 체크리스트 (1/7)
+## 4. 체크리스트 (4/7)
 - [x] **S1** 계정 분리 뷰 — command-center account 파라미터(오픽스/오하이테크) ✅ 커밋 5998ef5. prod self-verify(오픽스 매출 2,354,700·광고 1,228,685 쿠팡 일치)·등가성 OK·102 tests·codex 2R pass. D-7: orders는 법인(company) 단위 채널 매핑(불변식 견고). D-8: fees/returns/RG정산은 account_key 컬럼 직접 필터(orphan 0).
-- [ ] **S2** orderPrice×quantity 2중계상 버그 수정 (qty>1)
-- [ ] **S3** RG 매출 편입 — CoupangRgOrderItem → 매출 합산 (net_profit 격리 유지)
-- [ ] **S4** net_profit 머니룰 재설계 — RG 매출·원가·정산 정합(D-16 개정), fixture
+- [x] **S2** orderPrice×quantity 2중계상 버그 수정 (qty>1) ✅ 커밋 850acbd. 매출=Σ(selling_price)(라인총액). prod self-verify 오하이 5,114,380→4,804,180(310,200 제거)·오픽스 불변. 103 tests·codex 1R pass(0). 평행버그 profit_calculator는 task_a9695785 플래그(naver도 영향).
+- [x] **S3** RG 매출 편입 — CoupangRgOrderItem → 매출 합산. _agg_rg_orders + _merge_rg_orders(vendor_item_id 가산). summary revenue_rg/revenue_3p. prod 오픽스 6/1~6/11 매출 5,121,400(3P 2,354,700+RG 2,766,700) — 쿠팡 4,901,500 대비 +4.5%(stale 취소분, S6). **52% 갭 해소.**
+- [x] **S4** net_profit 머니룰 — net = 3P_net + (RG_rev − RG_cost − rg_total) (D-3). RG 원가는 cost_master(내부원가 12/14옵션) 반영. rg_total 전액차감 유지(D-16). net_profit_basis 페이로드 명시(D-9 날짜축). fixture 6(D-3 공식·동일vid가산·반품차감 3P단가·계정분리). codex 2R pass(P1#1 unit_price 보존·P1#2 투명화 수용).
 - [ ] **S5** 광고 전수 자동화 — 전 기간 커버리지 + "전체 광고상품"
 - [ ] **S6** 매출 신선도 — 취소·반품 재동기화/차감 정합
 - [ ] **S7** 정합성 검산 대시보드 — 쿠팡 vs 우리 자동 대조(회귀 방지)
 
 ## 5. 현재 진행 단계
-- 2026-06-14: S1 완료·커밋(5998ef5, 미배포 — 배포는 체크포인트에서 배치). **다음 = S2 orderPrice×quantity 2중계상 버그**.
+- 2026-06-14: S1·S2 커밋(5998ef5·850acbd). S3·S4 완료(커밋 예정, 미배포). 자매버그 profit_calculator(task_a9695785)도 작업트리에 수정+테스트 들어옴(채널별 _line_revenue) — 별도 커밋. **다음 = S5 광고 전수 자동화**.
 
 ## 6. 다음 액션
-- S2: channel.py L88 `selling_price=orderPrice`(이미 라인총액=salesPrice×shippingCount)인데 intelligence `_agg_orders`가 `Σ(selling_price×quantity)`로 또 곱함 → qty>1에서 2~3배. 수정안: 매출 = Σ(selling_price)(이미 라인총액). 단 unit_price(반품차감 추정용 평균단가)는 매출/수량 유지. prod qty>1: 오하이 6건·오픽스 1건. fixture로 qty>1 케이스 가드.
+- S5: 광고 커버리지 — 현재 광고 XLSX가 5/26~6/11만 적재. 전 기간 자동 적재 + 쿠팡 "전체 집행광고비"(1,290,273)와 "집행광고비"(1,228,430, 우리 일치)의 6.2만 차이=상품검색광고 외 광고상품 수집 여부 조사. (광고는 공식 API 없음 — XLSX/GraphQL 자동화, 레퍼런스 16.)
+- 배포: S1~S4 backend 변경을 prod scp + pm2 restart (체크포인트). 프론트 계정 선택 UI는 별도.
 
 ## 7. 핵심 파일
 | 파일 | 역할 |

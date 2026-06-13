@@ -24,6 +24,7 @@ from app.models import (
     CoupangProductItem,
     CoupangReturnItem,
     CoupangRevenueFee,
+    CoupangRgOrderItem,
     CoupangRgSettlementFee,
     Order,
     ProductChannelMapping,
@@ -146,6 +147,68 @@ def _agg_orders(db: Session, dfrom: date, dto: date,
             "name": name,
         }
     return out
+
+
+def _agg_rg_orders(db: Session, dfrom: date, dto: date,
+                   account_key: str | None = None) -> dict[str, dict]:
+    """로켓그로스(RG) 주문을 옵션ID별 집계. 매출=Σ(unit_sales_price×sales_quantity), paid_at 기준.
+
+    ★S3(트랙 reconciliation D-2): RG 매출은 이미 CoupangRgOrderItem로 수집되나 종합조망 매출에
+    미편입이었다(라이브 진단: 오픽스 6/1~6/11 쿠팡 판매분석 4,901,500 중 절반이 RG인데 우리는
+    3P만). 이 SA가 RG 매출을 옵션ID(vendor_item_id, 동일 결합축 D-8)로 집계해 compute_command_center가
+    orders(Wing 3P)에 병합한다. account_key 컬럼 직접 필터(계정 분리, S1과 동일 도메인).
+    RG 단가 필드는 적재 시 unit_sales_price로 정규화됨(목록 unitSalesPrice/단건 salesPrice, D-8).
+    RG 반품·수수료·광고는 CoupangRevenueFee/AdOptionDaily에 없고 RG 정산(rg_total)에만 있어
+    net_profit summary 플립에서 차감된다(중복 없음). RG 원가는 cost_master(내부원가) 경유 반영.
+    """
+    start = datetime.combine(dfrom, time.min)
+    end = datetime.combine(dto, time.max)
+    q = (
+        db.query(
+            CoupangRgOrderItem.vendor_item_id,
+            func.sum(CoupangRgOrderItem.unit_sales_price * CoupangRgOrderItem.sales_quantity),
+            func.sum(CoupangRgOrderItem.sales_quantity),
+            func.count(CoupangRgOrderItem.id),
+            func.max(CoupangRgOrderItem.product_name),
+        )
+        .filter(CoupangRgOrderItem.paid_at >= start, CoupangRgOrderItem.paid_at <= end)
+    )
+    if account_key is not None:
+        q = q.filter(CoupangRgOrderItem.account_key == account_key)
+    rows = q.group_by(CoupangRgOrderItem.vendor_item_id).all()
+    out: dict[str, dict] = {}
+    for vid, rev, qty, cnt, name in rows:
+        r = _f(rev)
+        out[str(vid)] = {"revenue": r, "qty": int(qty or 0),
+                         "order_count": int(cnt or 0), "name": name}
+    return out
+
+
+def _merge_rg_orders(orders: dict[str, dict], rg_orders: dict[str, dict]) -> Decimal:
+    """RG 주문 매출을 orders(Wing 3P) dict에 옵션ID로 병합(가산). 반환=병합된 RG 매출 총액.
+
+    같은 vendor_item_id가 3P·RG 양쪽에 있으면 매출·수량 가산(이중계상 아님 — 서로 다른 판매경로).
+    by_option·summary 모두 RG 포함하게 되어 summary==Σby_option 일관성 유지(S3). D-14 개정:
+    RG 매출 미집계 전제가 이 트랙 D-2로 변경됨(by_option도 RG 반영).
+
+    ★unit_price는 절대 재계산하지 않는다(Codex S3 P1#1): unit_price는 반품차감(return_deduction)
+    추정에만 쓰이는데 반품(CoupangReturnItem)은 3P 전용이다. RG 매출을 섞어 평균단가를 바꾸면
+    같은 vid를 3P·RG 둘 다 파는 경우 3P 반품차감이 RG 판매에 오염된다. 3P 단가(_agg_orders가 설정)를
+    그대로 둔다. RG 단독 vid는 unit_price 키가 없지만(merge 루프가 sale_price로 폴백) RG 반품은
+    CoupangReturnItem에 없어 return_qty=0 → return_deduction=0이라 무관하다."""
+    rg_total_rev = _Z
+    for vid, rg in rg_orders.items():
+        rg_total_rev += rg["revenue"]
+        o = orders.get(vid)
+        if o is None:
+            o = {"revenue": _Z, "qty": 0, "order_count": 0, "name": rg.get("name")}
+            orders[vid] = o
+        o["revenue"] = o.get("revenue", _Z) + rg["revenue"]
+        o["qty"] = o.get("qty", 0) + rg["qty"]
+        o["order_count"] = o.get("order_count", 0) + rg["order_count"]
+        o["name"] = o.get("name") or rg.get("name")
+        # unit_price는 의도적으로 건드리지 않음 — 3P 단가 보존(위 docstring, Codex P1#1).
+    return rg_total_rev
 
 
 def _agg_ads(db: Session, dfrom: date, dto: date,
@@ -499,6 +562,9 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
     master = _product_master(db, acc["account_key"])
     cost_master = _cost_master(db)  # D-12: 내부 원가·정식상품명 다리(vid 키 룩업 — all_vids에 안 들어가 계정필터 불필요)
     orders = _agg_orders(db, dfrom, dto, acc["channel_ids"])
+    # S3(D-2): RG 매출 편입 — CoupangRgOrderItem을 옵션ID로 orders에 병합. summary·by_option 모두 RG 포함.
+    rg_orders = _agg_rg_orders(db, dfrom, dto, acc["account_key"])
+    rg_revenue = _merge_rg_orders(orders, rg_orders)
     ads = _agg_ads(db, dfrom, dto, acc["vendor_id"])
     returns = _agg_returns(db, dfrom, dto, acc["account_key"])
     fees = _agg_fees(db, dfrom, dto, acc["account_key"])
@@ -603,6 +669,16 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
         "cost_supply_options": sum(1 for x in account_rows if x["cost_source"] == "coupang_supply"),
         "option_count": len(account_rows),
     }
+    # S3(D-2): 매출 중 로켓그로스(RG) 편입분 표시 — 쿠팡 판매분석(3P+RG)과 1:1 대조용.
+    account_sum["revenue_rg"] = rg_revenue
+    account_sum["revenue_3p"] = account_sum["revenue"] - rg_revenue
+    # S4(D-9, Codex S3 P1#2): net_profit 날짜축 명시 — 오인 방지(투명화). 매출은 주문일 기준이라
+    # 쿠팡 판매분석과 일치하나, RG 정산차감(rg_total)은 정산인식일 기준(판매보다 지연)이라 단기
+    # 윈도우 RG 순이익은 낙관적(매출 전액 인식·정산 일부만 차감), 장기·정산완료 구간에서 수렴.
+    account_sum["net_profit_basis"] = (
+        "mixed: revenue=order-date(paid_at), rg_settlement_deduction=recognition-date(lags). "
+        "RG net_profit optimistic on short windows; converges over closed periods (D-9)."
+    )
     ad_spend_total = sum((x["ad_spend"] for x in ad_rows), _Z)
     ad_conv_total = sum((x["conv_revenue"] for x in ad_rows), _Z)
     ad_sum = {
