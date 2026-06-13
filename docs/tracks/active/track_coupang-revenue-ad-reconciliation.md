@@ -33,8 +33,8 @@
 - (구조 제안에 대해) "그래" → 7-sprint 구조 + D-3 머니룰 방향 승인.
 - "근본적으로 모든 문제를 해결해"
 
-## 4. 체크리스트 (0/7)
-- [ ] **S1** 계정 분리 뷰 — command-center account 파라미터(오픽스/오하이테크)
+## 4. 체크리스트 (1/7)
+- [x] **S1** 계정 분리 뷰 — command-center account 파라미터(오픽스/오하이테크) ✅ 커밋 5998ef5. prod self-verify(오픽스 매출 2,354,700·광고 1,228,685 쿠팡 일치)·등가성 OK·102 tests·codex 2R pass. D-7: orders는 법인(company) 단위 채널 매핑(불변식 견고). D-8: fees/returns/RG정산은 account_key 컬럼 직접 필터(orphan 0).
 - [ ] **S2** orderPrice×quantity 2중계상 버그 수정 (qty>1)
 - [ ] **S3** RG 매출 편입 — CoupangRgOrderItem → 매출 합산 (net_profit 격리 유지)
 - [ ] **S4** net_profit 머니룰 재설계 — RG 매출·원가·정산 정합(D-16 개정), fixture
@@ -43,10 +43,10 @@
 - [ ] **S7** 정합성 검산 대시보드 — 쿠팡 vs 우리 자동 대조(회귀 방지)
 
 ## 5. 현재 진행 단계
-- 2026-06-14: 구조 승인 완료(Jino "그래"). 트랙 생성. **다음 = S1 계획서 작성**.
+- 2026-06-14: S1 완료·커밋(5998ef5, 미배포 — 배포는 체크포인트에서 배치). **다음 = S2 orderPrice×quantity 2중계상 버그**.
 
 ## 6. 다음 액션
-- S1 계획: command-center(`compute_command_center`)·라우터(overview)·집계함수(`_agg_orders`/`_agg_ads`/`_agg_fees`/`_agg_returns`)에 account(vendor) 필터를 어떻게 주입할지 설계. 계정 식별: orders=channel_id, 광고=vendor_id, RG=vendor_id, 상품=CoupangProductItem.account_key/vendor_id. 매핑 환경변수 COUPANG_WING1_VENDOR_ID(A01564720 오픽스)·COUPANG_WING2_VENDOR_ID(A01029796 오하이테크).
+- S2: channel.py L88 `selling_price=orderPrice`(이미 라인총액=salesPrice×shippingCount)인데 intelligence `_agg_orders`가 `Σ(selling_price×quantity)`로 또 곱함 → qty>1에서 2~3배. 수정안: 매출 = Σ(selling_price)(이미 라인총액). 단 unit_price(반품차감 추정용 평균단가)는 매출/수량 유지. prod qty>1: 오하이 6건·오픽스 1건. fixture로 qty>1 케이스 가드.
 
 ## 7. 핵심 파일
 | 파일 | 역할 |

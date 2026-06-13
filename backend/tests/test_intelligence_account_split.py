@@ -159,6 +159,21 @@ def test_unknown_account_empty(seeded):
     assert s["total_fee"] == _Z
 
 
+def test_qty_gt1_no_double_count(db):
+    """S2: selling_price=orderPrice(라인총액)인 qty>1 주문은 ×수량 곱하면 안 됨(2중계상).
+
+    raw 실증: salesPrice 16,900 × 수량 2 = orderPrice 33,800. 매출 = 33,800 (67,600 아님)."""
+    _ch(db, 1, "COUPANG_WING1", "개인회사 오픽스")
+    _product(db, "V1", "COUPANG_WING1")
+    _order(db, 1, "O1", "V1", 33800, qty=2)   # orderPrice(라인총액) 33,800, 수량 2
+    _order(db, 1, "O2", "V1", 16900, qty=1)   # 단건 16,900
+    db.commit()
+    s = _sum(db, "COUPANG_WING1")["account"]["summary"]
+    assert s["revenue"] == Decimal("50700")   # 33,800 + 16,900 (NOT 33,800*2+16,900=84,500)
+    p = _sum(db, "COUPANG_WING1")["product"]["summary"]
+    assert p["order_qty"] == 3                  # 수량은 그대로 2+1
+
+
 def test_vendor_id_fallback_no_env(seeded, monkeypatch):
     """env(COUPANG_WING1_VENDOR_ID) 미설정 시 상품 스냅샷 vendor_id로 폴백 → 광고 여전히 격리(Codex P2)."""
     monkeypatch.delenv("COUPANG_WING1_VENDOR_ID", raising=False)

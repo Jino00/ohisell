@@ -98,7 +98,14 @@ def _resolve_account(db: Session, account_key: str | None) -> dict:
 # ──────────────────────────────────────────────
 def _agg_orders(db: Session, dfrom: date, dto: date,
                 channel_ids: list[int] | None = None) -> dict[str, dict]:
-    """쿠팡 채널 주문을 옵션ID별 집계. 매출=Σ(selling_price×quantity), 단가=매출/수량.
+    """쿠팡 채널 주문을 옵션ID별 집계. 매출=Σ(selling_price), 단가=매출/수량.
+
+    ★S2(2중계상 버그 수정, 라이브 확정 2026-06-14): 쿠팡 적재 시 selling_price=orderPrice인데
+    orderPrice는 이미 라인총액(salesPrice×shippingCount)이다(raw 실증: salesPrice 16,900×수량 2
+    =orderPrice 33,800). 따라서 매출은 Σ(selling_price)이며 ×quantity를 곱하면 안 된다(곱하면
+    qty>1 주문에서 2~3배 부풀림). 단가(unit_price)=매출/수량으로 가중평균 단가가 나와 반품차감
+    추정(unit_price×반품수량)도 정확해진다. (네이버 totalPaymentAmount도 라인총액 — profit_calculator의
+    평행 2중계상은 별도 surface, channel.py 적재 의미 채널별 상이: cafe24만 단가.)
 
     codex[P2]: 취소/반품/입금전(REVENUE_EXCLUDED) 주문은 매출에서 제외 — 기존 profit_calculator와
     동일 기준. 안 거르면 ① 매출 부풀림 ② coupang_return_item에서 또 차감 = 이중차감.
@@ -110,7 +117,7 @@ def _agg_orders(db: Session, dfrom: date, dto: date,
     q = (
         db.query(
             Order.platform_product_id,
-            func.sum(Order.selling_price * Order.quantity),
+            func.sum(Order.selling_price),  # selling_price=orderPrice=라인총액(이미 ×수량) — S2
             func.sum(Order.quantity),
             func.count(Order.id),
             func.max(Order.platform_product_name),
