@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 
@@ -53,17 +54,60 @@ def _f(v) -> Decimal:
 
 
 # ──────────────────────────────────────────────
+# 계정 분리(S1, 트랙 reconciliation D-4): 계정 키 → 소스별 필터 도출 SA
+# ──────────────────────────────────────────────
+def _resolve_account(db: Session, account_key: str | None) -> dict:
+    """계정 키(COUPANG_WING1=오픽스/COUPANG_WING2=오하이테크) → 소스별 필터 값.
+
+    ★소스마다 계정 식별 키가 다르다(라이브 확정 2026-06-14):
+      매출=channel_id(Channel.code==account_key) · 광고·상품=vendor_id(A01564720 등) ·
+      RG정산·반품·매출내역=account_key(세 테이블 모두 account_key 컬럼 보유 — 직접 필터, 상품마스터
+      조인 불필요 → orphan vendor_item_id 누락 0).
+    한 곳에서 모두 도출해 각 집계 SA에 optional 주입한다(원칙18-6 정보유통 허브).
+
+    account_key가 None이면 전부 None 반환 → 각 SA가 WHERE를 안 붙임 → 전체 합산(기존 동작 불변,
+    등가성 계약). 알 수 없는 account_key면 채널/벤더 빈집합 → 빈 결과(예외 대신 빈 뷰).
+    """
+    if account_key is None:
+        return {"channel_ids": None, "vendor_id": None, "account_key": None}
+    # 매출: 같은 법인(company)의 모든 쿠팡 채널로 매핑. fees/returns/RG정산이 account_key(법인 단위
+    #   Wing키)로 필터되는 것과 orders 도메인을 맞춰 sum(계정)==전체 불변식을 견고하게 보장한다
+    #   (Codex S1 P1#2). 현재 orders는 Wing 3P(채널 WING1/WING2)만 있고 RG/ROCKET 채널은 0행이라
+    #   수치는 Channel.code 단독 매핑과 동일하지만, ROCKET/RG 주문이 생겨도 불변식이 안 깨진다.
+    #   RG 매출은 S3에서 CoupangRgOrderItem로 별도 편입(orders 테이블엔 RG 없음 → 이중계상 없음).
+    company = (db.query(Channel.company)
+               .filter(Channel.code == account_key, Channel.platform == "coupang")
+               .scalar())
+    channel_ids = ([cid for (cid,) in
+                    db.query(Channel.id).filter(Channel.platform == "coupang",
+                                                Channel.company == company).all()]
+                   if company else [])
+    # 광고·상품: vendor_id. env(COUPANG_WING1_VENDOR_ID) 우선, 없으면 상품 스냅샷에서 도출.
+    # ★account 지정 시 vendor_id는 항상 비-None 문자열로 둔다(None은 "전체"와 과부하). 미해결이면
+    #   "" sentinel → 광고 SA가 vendor_id=="" 필터(실데이터 매칭 0)로 빈집합 반환(전체 누수 차단).
+    vendor_id = os.getenv(f"{account_key}_VENDOR_ID")
+    if not vendor_id:
+        row = (db.query(CoupangProductItem.vendor_id)
+               .filter(CoupangProductItem.account_key == account_key).first())
+        vendor_id = row[0] if row else ""
+    return {"channel_ids": channel_ids, "vendor_id": vendor_id, "account_key": account_key}
+
+
+# ──────────────────────────────────────────────
 # 소스별 기간 집계 (각 SA는 vendor_item_id 키 dict 반환 — 단독 GROUP BY, fan-out 없음)
 # ──────────────────────────────────────────────
-def _agg_orders(db: Session, dfrom: date, dto: date) -> dict[str, dict]:
+def _agg_orders(db: Session, dfrom: date, dto: date,
+                channel_ids: list[int] | None = None) -> dict[str, dict]:
     """쿠팡 채널 주문을 옵션ID별 집계. 매출=Σ(selling_price×quantity), 단가=매출/수량.
 
     codex[P2]: 취소/반품/입금전(REVENUE_EXCLUDED) 주문은 매출에서 제외 — 기존 profit_calculator와
     동일 기준. 안 거르면 ① 매출 부풀림 ② coupang_return_item에서 또 차감 = 이중차감.
+
+    S1: channel_ids 주면 해당 채널만(계정 분리). None이면 전체 쿠팡 채널(기존 동작 불변).
     """
     start = datetime.combine(dfrom, time.min)
     end = datetime.combine(dto, time.max)
-    rows = (
+    q = (
         db.query(
             Order.platform_product_id,
             func.sum(Order.selling_price * Order.quantity),
@@ -79,9 +123,10 @@ def _agg_orders(db: Session, dfrom: date, dto: date) -> dict[str, dict]:
             Order.order_date >= start,
             Order.order_date <= end,
         )
-        .group_by(Order.platform_product_id)
-        .all()
     )
+    if channel_ids is not None:
+        q = q.filter(Order.channel_id.in_(channel_ids))
+    rows = q.group_by(Order.platform_product_id).all()
     out: dict[str, dict] = {}
     for vid, revenue, qty, cnt, name in rows:
         rev = _f(revenue)
@@ -96,9 +141,12 @@ def _agg_orders(db: Session, dfrom: date, dto: date) -> dict[str, dict]:
     return out
 
 
-def _agg_ads(db: Session, dfrom: date, dto: date) -> dict[str, dict]:
+def _agg_ads(db: Session, dfrom: date, dto: date,
+             vendor_id: str | None = None) -> dict[str, dict]:
     """광고 옵션 일별을 옵션ID별 집계. D-9: 비용·노출·클릭은 ad_option_id 귀속,
-    매출·주문은 conv_option_id 귀속(간접전환 대비 분리). 같은 옵션이면 한 행에 합쳐짐."""
+    매출·주문은 conv_option_id 귀속(간접전환 대비 분리). 같은 옵션이면 한 행에 합쳐짐.
+
+    S1: vendor_id 주면 해당 계정 광고만(계정 분리). None이면 전체(기존 동작 불변)."""
     out: dict[str, dict] = {}
 
     def _row(vid: str) -> dict:
@@ -108,7 +156,7 @@ def _agg_ads(db: Session, dfrom: date, dto: date) -> dict[str, dict]:
              "conv_revenue": _Z, "ad_orders": 0, "ad_qty": 0},
         )
 
-    cost_rows = (
+    cost_q = (
         db.query(
             CoupangAdOptionDaily.ad_option_id,
             func.sum(CoupangAdOptionDaily.ad_spend),
@@ -117,16 +165,17 @@ def _agg_ads(db: Session, dfrom: date, dto: date) -> dict[str, dict]:
         )
         .filter(CoupangAdOptionDaily.report_date >= dfrom,
                 CoupangAdOptionDaily.report_date <= dto)
-        .group_by(CoupangAdOptionDaily.ad_option_id)
-        .all()
     )
+    if vendor_id is not None:
+        cost_q = cost_q.filter(CoupangAdOptionDaily.vendor_id == vendor_id)
+    cost_rows = cost_q.group_by(CoupangAdOptionDaily.ad_option_id).all()
     for vid, spend, imp, clk in cost_rows:
         b = _row(vid)
         b["spend"] += _f(spend)
         b["impressions"] += int(imp or 0)
         b["clicks"] += int(clk or 0)
 
-    conv_rows = (
+    conv_q = (
         db.query(
             CoupangAdOptionDaily.conv_option_id,
             func.sum(CoupangAdOptionDaily.conversion_revenue),
@@ -135,9 +184,10 @@ def _agg_ads(db: Session, dfrom: date, dto: date) -> dict[str, dict]:
         )
         .filter(CoupangAdOptionDaily.report_date >= dfrom,
                 CoupangAdOptionDaily.report_date <= dto)
-        .group_by(CoupangAdOptionDaily.conv_option_id)
-        .all()
     )
+    if vendor_id is not None:
+        conv_q = conv_q.filter(CoupangAdOptionDaily.vendor_id == vendor_id)
+    conv_rows = conv_q.group_by(CoupangAdOptionDaily.conv_option_id).all()
     for vid, conv_rev, ords, qty in conv_rows:
         b = _row(vid)
         b["conv_revenue"] += _f(conv_rev)
@@ -146,11 +196,14 @@ def _agg_ads(db: Session, dfrom: date, dto: date) -> dict[str, dict]:
     return out
 
 
-def _agg_returns(db: Session, dfrom: date, dto: date) -> dict[str, dict]:
-    """반품/취소를 옵션ID별 집계. withdrawn=False(철회 제외)만. 사실=반품 수량·건수."""
+def _agg_returns(db: Session, dfrom: date, dto: date,
+                account_key: str | None = None) -> dict[str, dict]:
+    """반품/취소를 옵션ID별 집계. withdrawn=False(철회 제외)만. 사실=반품 수량·건수.
+
+    S1: account_key 주면 해당 계정만(계정 분리, account_key 컬럼 직접 필터). None이면 전체(불변)."""
     start = datetime.combine(dfrom, time.min)
     end = datetime.combine(dto, time.max)
-    rows = (
+    q = (
         db.query(
             CoupangReturnItem.vendor_item_id,
             func.sum(CoupangReturnItem.cancel_count),
@@ -162,9 +215,10 @@ def _agg_returns(db: Session, dfrom: date, dto: date) -> dict[str, dict]:
             CoupangReturnItem.requested_at >= start,
             CoupangReturnItem.requested_at <= end,
         )
-        .group_by(CoupangReturnItem.vendor_item_id)
-        .all()
     )
+    if account_key is not None:
+        q = q.filter(CoupangReturnItem.account_key == account_key)
+    rows = q.group_by(CoupangReturnItem.vendor_item_id).all()
     return {
         str(vid): {
             "return_qty": int(cancel or 0),
@@ -175,10 +229,13 @@ def _agg_returns(db: Session, dfrom: date, dto: date) -> dict[str, dict]:
     }
 
 
-def _agg_fees(db: Session, dfrom: date, dto: date) -> dict[str, dict]:
+def _agg_fees(db: Session, dfrom: date, dto: date,
+             account_key: str | None = None) -> dict[str, dict]:
     """매출내역(실측수수료)을 옵션ID별 집계. recognition_date 기준. SALE/REFUND 모두 포함
-    (service_fee·sale_amount는 REFUND가 음수로 저장 — 사실 그대로 합산, D-3)."""
-    rows = (
+    (service_fee·sale_amount는 REFUND가 음수로 저장 — 사실 그대로 합산, D-3).
+
+    S1: account_key 주면 해당 계정만(계정 분리, account_key 컬럼 직접 필터). None이면 전체(불변)."""
+    q = (
         db.query(
             CoupangRevenueFee.vendor_item_id,
             func.sum(CoupangRevenueFee.service_fee),
@@ -189,9 +246,10 @@ def _agg_fees(db: Session, dfrom: date, dto: date) -> dict[str, dict]:
         )
         .filter(CoupangRevenueFee.recognition_date >= dfrom,
                 CoupangRevenueFee.recognition_date <= dto)
-        .group_by(CoupangRevenueFee.vendor_item_id)
-        .all()
     )
+    if account_key is not None:
+        q = q.filter(CoupangRevenueFee.account_key == account_key)
+    rows = q.group_by(CoupangRevenueFee.vendor_item_id).all()
     # codex[P2]: 쿠팡 정산은 service_fee + service_fee_vat 둘 다 차감 → total_fee로 합산.
     return {
         str(vid): {
@@ -206,8 +264,11 @@ def _agg_fees(db: Session, dfrom: date, dto: date) -> dict[str, dict]:
     }
 
 
-def _agg_rg_settlement_fees(db: Session, dfrom: date, dto: date) -> dict[str, dict]:
+def _agg_rg_settlement_fees(db: Session, dfrom: date, dto: date,
+                            account_key: str | None = None) -> dict[str, dict]:
     """RG 정산 수수료를 account_key별·fee_type별로 집계. D-6/D-7: 대조(reconciliation) 뷰용.
+
+    S1: account_key 주면 해당 계정만(계정 분리). None이면 전체(기존 동작 불변).
 
     날짜 필터: recognition_date_from과 recognition_date_to가 [dfrom, dto]와 겹치는 행.
     겹침 조건 = recognition_date_from <= dto AND recognition_date_to >= dfrom.
@@ -228,6 +289,8 @@ def _agg_rg_settlement_fees(db: Session, dfrom: date, dto: date) -> dict[str, di
             CoupangRgSettlementFee.recognition_date_from <= dto,
             CoupangRgSettlementFee.recognition_date_to >= dfrom,
             CoupangRgSettlementFee.vendor_item_id == "",  # 계정 row만(옵션 row 이중계상 차단)
+            *([CoupangRgSettlementFee.account_key == account_key]
+              if account_key is not None else []),
         )
         .group_by(
             CoupangRgSettlementFee.account_key,
@@ -315,30 +378,40 @@ def apply_rg_net_profit_flip(
     return net_profit_pre_rg - rg_deducted
 
 
-def _agg_rg_ad_overlap(db: Session, dfrom: date, dto: date) -> Decimal:
+def _agg_rg_ad_overlap(db: Session, dfrom: date, dto: date,
+                       vendor_id: str | None = None) -> Decimal:
     """기간 내 광고비 XLSX의 RG(2P) 광고비 합 — 미래 이중계상 겹침 감시용.
 
     ★D-16(S7): RG 광고는 광고센터 PA 보고서(이 XLSX)에 안 잡히고 RG 정산에만 있어(라이브 실증)
     플립은 rg_total을 전액 차감한다. 이 값은 정상=0 — 광고센터에서 RG상품 검색광고를 돌려 PA 2P가
     생기면 정산 ad_sales와 겹쳐 이중계상 위험이 되므로 그 신호를 감시한다(0이 아니면 호출부에서 경고).
+
+    S1: vendor_id 주면 해당 계정만(계정 분리). None이면 전체(기존 동작 불변).
     """
     # func.trim: 적재 시 이미 strip되지만(ad_costs.py), DB 레벨에서도 공백 방어(Codex S5 지적4a).
-    rows = (
+    q = (
         db.query(CoupangAdOptionDaily.sell_type, CoupangAdOptionDaily.ad_spend)
         .filter(
             CoupangAdOptionDaily.report_date >= dfrom,
             CoupangAdOptionDaily.report_date <= dto,
             func.trim(CoupangAdOptionDaily.sell_type) == RG_AD_SELL_TYPE,
         )
-        .all()
     )
-    return rg_ad_spend_to_exclude(rows)
+    if vendor_id is not None:
+        q = q.filter(CoupangAdOptionDaily.vendor_id == vendor_id)
+    return rg_ad_spend_to_exclude(q.all())
 
 
-def _product_master(db: Session) -> dict[str, dict]:
-    """상품 옵션 마스터 — 이름·가격·등록수수료율·재고·원가성 공급가. 조망 베이스."""
+def _product_master(db: Session, account_key: str | None = None) -> dict[str, dict]:
+    """상품 옵션 마스터 — 이름·가격·등록수수료율·재고·원가성 공급가. 조망 베이스.
+
+    S1: account_key 주면 해당 계정 옵션만(계정 분리 — all_vids 합집합이 계정으로 한정됨).
+    None이면 전체(기존 동작 불변)."""
     out: dict[str, dict] = {}
-    for p in db.query(CoupangProductItem).all():
+    q = db.query(CoupangProductItem)
+    if account_key is not None:
+        q = q.filter(CoupangProductItem.account_key == account_key)
+    for p in q.all():
         out[str(p.vendor_item_id)] = {
             "name": p.item_name or p.seller_product_name,
             "sale_price": _f(p.sale_price),
@@ -402,20 +475,27 @@ def _cost_master(db: Session) -> dict[str, dict]:
 # ──────────────────────────────────────────────
 # 결합 엔진 — 5소스 병합 + 3축 파생
 # ──────────────────────────────────────────────
-def compute_command_center(db: Session, dfrom: date, dto: date) -> dict:
+def compute_command_center(db: Session, dfrom: date, dto: date,
+                           account: str | None = None) -> dict:
     """옵션ID 합집합을 키로 5소스를 병합해 3축(회계·광고·상품)을 파생.
 
     Decimal은 그대로 반환(라우터에서 str 직렬화). D-3: 사실/지표만, 추천 없음.
     순이익 원가는 내부 product_master.cost_price 우선(D-12), 없으면 coupang supply_price 폴백.
     둘 다 없으면 미반영(has_cost=False)으로 표기.
+
+    S1(트랙 reconciliation D-4): account(COUPANG_WING1=오픽스/COUPANG_WING2=오하이테크) 주면
+    해당 계정만 집계(계정 분리 뷰). None이면 전체 합산(기존 동작 불변, 등가성 계약).
+    account를 _resolve_account로 소스별 필터(channel_ids·vendor_id·account_key·vendor_item_ids)로
+    풀어 각 집계 SA에 optional 주입한다(원칙18-6 허브). 매출은 현재 Wing 3P만 — RG 매출은 S3 편입.
     """
-    master = _product_master(db)
-    cost_master = _cost_master(db)  # D-12: 내부 원가·정식상품명 다리
-    orders = _agg_orders(db, dfrom, dto)
-    ads = _agg_ads(db, dfrom, dto)
-    returns = _agg_returns(db, dfrom, dto)
-    fees = _agg_fees(db, dfrom, dto)
-    rg_fees = _agg_rg_settlement_fees(db, dfrom, dto)  # D-6/D-7: 대조 뷰용
+    acc = _resolve_account(db, account)
+    master = _product_master(db, acc["account_key"])
+    cost_master = _cost_master(db)  # D-12: 내부 원가·정식상품명 다리(vid 키 룩업 — all_vids에 안 들어가 계정필터 불필요)
+    orders = _agg_orders(db, dfrom, dto, acc["channel_ids"])
+    ads = _agg_ads(db, dfrom, dto, acc["vendor_id"])
+    returns = _agg_returns(db, dfrom, dto, acc["account_key"])
+    fees = _agg_fees(db, dfrom, dto, acc["account_key"])
+    rg_fees = _agg_rg_settlement_fees(db, dfrom, dto, acc["account_key"])  # D-6/D-7: 대조 뷰용
 
     all_vids = set(master) | set(orders) | set(ads) | set(returns) | set(fees)
 
@@ -541,7 +621,7 @@ def compute_command_center(db: Session, dfrom: date, dto: date) -> dict:
     rg_ad_settlement = sum((v.get("ad_sales", _Z) for v in rg_fees.values()), _Z)
     # D-16 미래 겹침 감시(Codex S7): 정상=0. 0이 아니면 광고센터에서 RG상품 검색광고를 돌려 PA 2P가
     #   생긴 것 → rg_total 전액 차감(정산 광고 포함)과 XLSX 2P(net_profit에 이미 반영)가 이중계상될 수 있음.
-    rg_ad_xlsx_overlap = _agg_rg_ad_overlap(db, dfrom, dto)
+    rg_ad_xlsx_overlap = _agg_rg_ad_overlap(db, dfrom, dto, acc["vendor_id"])
     if rg_ad_xlsx_overlap != _Z:
         log.warning(
             "RG 광고 이중계상 위험(D-16): 광고 XLSX 2P=%s 발생 — 정산 ad_sales=%s와 겹칠 수 있음. "
@@ -586,8 +666,11 @@ def compute_command_center(db: Session, dfrom: date, dto: date) -> dict:
         "by_account": rg_by_account,
     }
 
+    period = {"from": dfrom.isoformat(), "to": dto.isoformat()}
+    if account is not None:
+        period["account"] = account  # 계정 분리 뷰일 때만 명시. account=None은 기존 응답 형태 보존(등가성, Codex S1 P1#1).
     return {
-        "period": {"from": dfrom.isoformat(), "to": dto.isoformat()},
+        "period": period,
         "account": {"summary": account_sum, "by_option": account_rows},
         "ad": {"summary": ad_sum, "by_option": ad_rows},
         "product": {"summary": product_sum, "by_option": product_rows},

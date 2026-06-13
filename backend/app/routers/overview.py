@@ -41,10 +41,17 @@ def _jsonify(v):
     return v
 
 
+# S1(트랙 reconciliation D-4): 허용 계정 — 쿠팡 대시보드(계정별)와 1:1 비교용.
+_VALID_ACCOUNTS = {"COUPANG_WING1", "COUPANG_WING2"}  # 오픽스 / 오하이테크
+
+
 @router.get("/command-center")
 def command_center(
     from_: str | None = Query(None, alias="from"),
     to: str | None = Query(None),
+    account: str | None = Query(
+        None, description="계정 필터: COUPANG_WING1(오픽스)·COUPANG_WING2(오하이테크). 생략=전체 합산."
+    ),
     db: Session = Depends(get_db),
 ):
     """옵션ID 결합 엔진으로 3축 조망 반환. 기본 기간=최근 7일(KST).
@@ -52,11 +59,17 @@ def command_center(
     회계: 옵션별 매출−반품차감−실측수수료−광고비−원가=순이익(원가 있으면).
     광고: 비용·노출·클릭·전환매출·ROAS·CTR (사실, D-3).
     상품: 주문수·반품률·재고·판매상태.
+    S1: account 주면 계정별 분리 뷰. 생략 시 전체 합산(기존 동작 불변).
     """
     today = kst_today()
     dto = _parse_date(to, today)
     dfrom = _parse_date(from_, dto - timedelta(days=6))
     if dfrom > dto:
         raise HTTPException(status_code=422, detail="from이 to보다 늦습니다")
-    result = compute_command_center(db, dfrom, dto)
+    if account is not None and account not in _VALID_ACCOUNTS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"잘못된 account: {account} (허용: {', '.join(sorted(_VALID_ACCOUNTS))} 또는 생략)",
+        )
+    result = compute_command_center(db, dfrom, dto, account)
     return _jsonify(result)
