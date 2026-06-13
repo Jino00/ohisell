@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 import openpyxl
 from sqlalchemy.orm import Session
 
-from app.clients.coupang.inbound import WingAuthError, WingReadError, parse_curl_cookies
+from app.clients.coupang.inbound import WingAuthError, WingReadError
 from app.clients.coupang.rg_settlement import (
     CONFIRMED_SELLER_REPORT_TYPES,
     CoupangWingRgSettlementClient,
@@ -176,26 +176,13 @@ def _parse_status_response(data: dict, account_key: str) -> list[CoupangRgSettle
 
 
 # ═══════════════════════════════════════════
-# 쿠키 CRUD (rg_inbound_sync 패턴 재사용)
+# 쿠키 로드 (저장은 rg_inbound_sync.save_cookie 단일 경로)
 # ═══════════════════════════════════════════
-
-def save_settlement_cookie(db: Session, account_key: str, curl_text: str) -> CoupangWingCookie:
-    """cURL 붙여넣기 → 쿠키 암호화 저장. parse_curl_cookies + encrypt_secret 재사용."""
-    from app.utils.crypto import encrypt_secret
-    cookie, xsrf = parse_curl_cookies(curl_text)
-    enc_blob = encrypt_secret(cookie)
-    row = db.query(CoupangWingCookie).filter_by(account_key=account_key).first()
-    if row is None:
-        row = CoupangWingCookie(account_key=account_key)
-        db.add(row)
-    row.cookie_blob = enc_blob
-    row.xsrf_token = xsrf
-    row.status = "green"
-    row.last_updated_at = kst_now()
-    db.commit()
-    db.refresh(row)
-    return row
-
+# ★쿠키 저장은 rg_inbound_sync.save_cookie 하나로만 한다(같은 CoupangWingCookie 테이블 공유).
+#   과거 이 파일에 save_settlement_cookie가 있었으나 xsrf를 raw로 저장 → _load_client의
+#   decrypt_secret(xsrf)와 어긋나 로드 시 CookieCryptoError로 크래시(2026-06-10 take_rate 조사 중
+#   발견, dead code였음). 두 writer가 같은 테이블에 다르게 쓰던 drift라 함수를 제거했다.
+#   여기에 두 번째 쿠키 writer를 다시 추가하지 말 것 — 저장은 save_cookie로 통일(원칙18 중복 금지).
 
 def _load_client(db: Session, account_key: str) -> CoupangWingRgSettlementClient:
     """DB에서 쿠키 로드·복호화 → CoupangWingRgSettlementClient 반환.
