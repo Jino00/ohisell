@@ -3,6 +3,22 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
+- 날짜: 2026-06-14
+- ★★★**신규 트랙: 쿠팡 매출·광고 정합성** (docs/tracks/active/track_coupang-revenue-ad-reconciliation.md, **4/7**).
+  - 문제: 종합조망 매출·광고가 쿠팡 대시보드와 "전혀 안 맞음". 라이브 진단(오픽스 6/1~6/11): 광고는 0.02% 일치,
+    매출은 RG 누락 52%·계정 합산·orderPrice 2중계상이 주범.
+  - **S1~S4 완료·prod 배포·라이브 검증**(커밋 5998ef5·850acbd·78dad33·b5236ad·12da4d2):
+    S1 계정 분리(account=COUPANG_WING1/WING2, _resolve_account, 법인 단위 채널매핑·account_key 직접필터).
+    S2 orderPrice×quantity 2중계상 제거(매출=Σ(selling_price)). S3 RG 매출 편입(_agg_rg_orders+_merge_rg_orders,
+    CoupangRgOrderItem→매출). S4 net_profit D-3(= 3P_net + RG_rev − RG_cost − rg_total, net_profit_basis 명시).
+    자매: profit_calculator 채널별 _line_revenue(쿠팡·네이버 2중계상, task_a9695785).
+  - **라이브**: 오픽스 account=WING1 매출 5,121,400(3P 2,354,700+RG 2,766,700)·전체 5,455,000(배포전 2,701,500).
+    121 tests·codex 전 sprint pass. 쿠팡 4,901,500 대비 +4.5%(stale 취소분=S6).
+  - **남은 것(의사결정 필요)**: S5 광고 전수 자동화(공식 API 없음, 5/26~6/11만 적재 / 전체 vs 집행 6.2만 조사),
+    S6 매출 신선도(취소·반품 재동기화 3.6% 잔차), S7 정합성 검산 대시보드(프론트, 쿠팡 봇차단으로 자동대조 제한).
+  - HANDOFF 직전 작업(아래)은 RG sale_fee 2배 — 완료됨.
+
+## (이전) 상태
 - 날짜: 2026-06-10
 - ★★**RG 정산 sale_fee 2배 버그 수정 완료**(local 커밋 931a66f, codex 2R pass, fixture 49, prod 양계정 self-verify).
   - **근본원인(라이브 확정)**: status/api가 한 기간에 가지급70%+확정30% 설치분 리포트 2개 반환. fee_type별 노출 다름:
