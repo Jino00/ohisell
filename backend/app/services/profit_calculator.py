@@ -221,6 +221,20 @@ def _is_coupang(ch: Channel | None) -> bool:
     return bool(ch and (ch.code or "").startswith("COUPANG"))
 
 
+def _line_revenue(ch: Channel | None, o: Order) -> Decimal:
+    """라인 상품매출(총액). selling_price 의미가 채널마다 달라 여기서 통일한다.
+
+    - 쿠팡(channel.py: orderPrice=salesPrice×shippingCount)·네이버(totalPaymentAmount):
+      적재값이 이미 라인총액 → selling_price 그대로. ×수량하면 2~3배 2중계상.
+    - cafe24(product_price)·기타/미지정: 단가 → ×수량.
+    트랙 track_coupang-revenue-ad-reconciliation S2. _delivery_income과 동일 채널 판별.
+    """
+    code = (ch.code if ch else "") or ""
+    if code == "NAVER" or code.startswith("COUPANG"):
+        return o.selling_price
+    return o.selling_price * o.quantity
+
+
 # ──────────────────────────────────────────────
 # 내부 헬퍼
 # ──────────────────────────────────────────────
@@ -391,7 +405,7 @@ def calculate_daily_trend(
 
         bucket = daily[d]
         skey = _shipment_key(ch, o)
-        product_rev = o.selling_price * o.quantity
+        product_rev = _line_revenue(ch, o)
         # 고객이 낸 배송비 → 매출 가산. 쿠팡은 박스값이 라인마다 복사돼 배송당 1회만.
         deliv = _delivery_income(ch, o)
         if deliv and _is_coupang(ch):
@@ -525,7 +539,7 @@ def calculate_channel_summary(
 
         b = by_channel[cid]
         skey = _shipment_key(ch, o)
-        product_rev = o.selling_price * o.quantity
+        product_rev = _line_revenue(ch, o)
         # 고객이 낸 배송비 → 매출 가산. 쿠팡은 박스값이 라인마다 복사돼 배송당 1회만.
         deliv = _delivery_income(ch, o)
         if deliv and _is_coupang(ch):
@@ -710,7 +724,7 @@ def calculate_product_profit(
             }
 
         b = by_product[pid]
-        product_rev = o.selling_price * o.quantity
+        product_rev = _line_revenue(ch, o)
         b["product_revenue"] += product_rev
         b["revenue"] += product_rev  # 고객배송수입은 배송단위 배분으로 아래에서 추가
         b["quantity"] += o.quantity
@@ -797,7 +811,7 @@ def calculate_product_profit(
                 if not kw:
                     continue
                 d = str(o.order_date.date()) if hasattr(o.order_date, "date") else str(o.order_date)[:10]
-                rev = o.selling_price * o.quantity
+                rev = _line_revenue(ch, o)
                 kw_day_products[(kw, d)][o.product_id] += rev
                 kw_day_total[(kw, d)] += rev
 
@@ -831,7 +845,7 @@ def calculate_product_profit(
                 if not kw:
                     continue
                 d = str(o.order_date.date()) if hasattr(o.order_date, "date") else str(o.order_date)[:10]
-                rev = o.selling_price * o.quantity
+                rev = _line_revenue(ch, o)
                 naver_kw_day_products[(kw, d)][o.product_id] += rev
                 naver_kw_day_total[(kw, d)] += rev
 
