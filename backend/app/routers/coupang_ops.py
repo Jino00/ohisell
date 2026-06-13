@@ -615,7 +615,7 @@ def sales_summary(
             Order.platform_product_id,
             func.max(Order.platform_product_name),
             Channel.code,
-            func.sum(Order.selling_price * Order.quantity),
+            func.sum(Order.selling_price),  # selling_price=orderPrice=라인총액(이미 ×수량) — 2중계상 방지(S2)
             func.sum(Order.quantity),
         )
         .join(Channel, Order.channel_id == Channel.id)

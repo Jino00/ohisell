@@ -81,7 +81,7 @@ def sales_summary(
             Order.order_number,
             Order.platform_product_id,
             func.max(Order.platform_product_name),
-            func.sum(Order.selling_price * Order.quantity),
+            func.sum(Order.selling_price),  # selling_price=totalPaymentAmount=라인총액(이미 ×수량) — 2중계상 방지(S2)
             func.sum(Order.quantity),
             func.sum(Order.commission_amount),
             func.sum(Order.shipping_cost),
