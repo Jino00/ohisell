@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.services.coupang.intelligence import compute_command_center
+from app.services.coupang.revenue_reconcile import reconcile_revenue
 
 log = logging.getLogger(__name__)
 
@@ -72,4 +73,32 @@ def command_center(
             detail=f"잘못된 account: {account} (허용: {', '.join(sorted(_VALID_ACCOUNTS))} 또는 생략)",
         )
     result = compute_command_center(db, dfrom, dto, account)
+    return _jsonify(result)
+
+
+@router.get("/revenue-reconcile")
+def revenue_reconcile(
+    from_: str | None = Query(None, alias="from"),
+    to: str | None = Query(None),
+    account: str | None = Query(
+        None, description="계정 필터: COUPANG_WING1(오픽스)·COUPANG_WING2(오하이테크). 생략=전체 합산."
+    ),
+    db: Session = Depends(get_db),
+):
+    """우리 매출(revenue_3p/rg) vs 쿠팡 공식 GMV(vendor-summary) 닫힌일 드리프트% 대조.
+
+    Wing 세션 자동화 트랙 S2. 읽기전용(net_profit 등 종합조망 값 불변). 닫힌 과거일만 비교(D-3).
+    드리프트% = (우리−쿠팡)/쿠팡. 사실·지표만(D-2). 기본 기간=최근 7일(KST).
+    """
+    today = kst_today()
+    dto = _parse_date(to, today)
+    dfrom = _parse_date(from_, dto - timedelta(days=6))
+    if dfrom > dto:
+        raise HTTPException(status_code=422, detail="from이 to보다 늦습니다")
+    if account is not None and account not in _VALID_ACCOUNTS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"잘못된 account: {account} (허용: {', '.join(sorted(_VALID_ACCOUNTS))} 또는 생략)",
+        )
+    result = reconcile_revenue(db, dfrom, dto, account)
     return _jsonify(result)

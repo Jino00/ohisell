@@ -695,6 +695,37 @@ class CoupangWingCookie(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class CoupangVendorSummaryDaily(Base):
+    """쿠팡 Wing 판매분석(vendor-summary) 공식 GMV — 일별×등록유형 (Wing 세션 자동화 트랙 S2, D-5).
+
+    소스: m-wing.coupang.com /tenants/rfm-ss/api/business-insight/vendor-summary (ref 18).
+    Mac 헤드풀 페처(tools/wing_browser_fetcher.py)가 브라우저측 fetch → prod push → 여기 적재.
+    백엔드 requests 직접 호출 금지(cf_clearance 재생 불가, D-5) — ingest 수신 전용.
+
+    grain: (summary_date, account_key, registration_type). registration_type:
+      NORMAL=3P 마켓플레이스 / RFM=로켓그로스(RG) (ref 18). gmv=원 단위(쿠팡 공식 매출).
+    용도: revenue_reconcile Harness가 우리 revenue_3p/revenue_rg와 닫힌일 드리프트% 대조(읽기전용).
+    같은 날짜를 다시 받으면 확정치로 교체(snapshot upsert) — 준실시간 lastRefresh로 회전.
+    """
+
+    __tablename__ = "coupang_vendor_summary_daily"
+    __table_args__ = (
+        UniqueConstraint(
+            "summary_date", "account_key", "registration_type",
+            name="uq_coupang_vendor_summary_daily",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    summary_date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)
+    account_key: Mapped[str] = mapped_column(String(20), nullable=False, index=True)  # 로그인 계정(COUPANG_WING1 등)
+    registration_type: Mapped[str] = mapped_column(String(10), nullable=False)  # NORMAL(3P) / RFM(RG)
+    gmv: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 쿠팡 공식 GMV(원)
+    units_sold: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 판매수량
+    last_refresh: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)  # 쿠팡 lastRefreshTimestamp
+    synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 # ──────────────────────────────────────────────
 # 쿠팡 반품/취소 (순매출 차감 회계축 — P2)
 # ──────────────────────────────────────────────

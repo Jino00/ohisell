@@ -26,7 +26,7 @@ from app.database import get_db
 from app.models import Channel, CoupangAdCostDaily, CoupangAdOptionDaily, CoupangProductItem, CoupangRevenueFee, CoupangRgInbound, CoupangRgOrderItem, CoupangRgSettlementFee, Order, ProductChannelMapping, ProductMaster
 from app.routers._coupang_write_http import handle_write as _handle_write
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
-from app.services.coupang import ad_cost_sync, coupon_write, lead_time_estimator, product_write, rg_fee_audit, rg_inbound_sync, rg_replenishment, rg_settlement_sync, sales_velocity_estimator
+from app.services.coupang import ad_cost_sync, coupon_write, lead_time_estimator, product_write, rg_fee_audit, rg_inbound_sync, rg_replenishment, rg_settlement_sync, sales_velocity_estimator, vendor_summary_sync
 from app.utils.crypto import CookieCryptoError
 
 log = logging.getLogger(__name__)
@@ -1276,6 +1276,97 @@ def get_ad_cost(
 ):
     """날짜 범위 광고비 조회 (일별 합산)."""
     return {"costs": ad_cost_sync.get_ad_cost_range(db, start, end)}
+
+
+# ════════════════════════════════════════════════════════════════════
+# Wing 판매분석 vendor-summary 인제스트/갱신 (Wing 세션 자동화 트랙 S2, D-4/D-5)
+# ════════════════════════════════════════════════════════════════════
+def _require_ingest_token(x_ingest_token: str | None) -> None:
+    """X-Ingest-Token == AD_INGEST_TOKEN 상수시간 검증(광고 ingest와 동일 토큰·인프라). 실패=401."""
+    import secrets as _secrets
+
+    expected = os.getenv("AD_INGEST_TOKEN", "").strip()
+    if not expected or not x_ingest_token or not _secrets.compare_digest(x_ingest_token.strip(), expected):
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+
+_VS_TYPES = {"NORMAL", "RFM"}  # ref 18: NORMAL=3P / RFM=RG
+# 허용 계정(codex P2): account=None 대조가 저장된 모든 계정 official을 합산하므로, 오타 account_key가
+# "전체" 합계를 오염시키되 계정 필터 뷰엔 안 보이는 사각 방지. command-center 허용 집합과 동일.
+_VS_ACCOUNTS = {"COUPANG_WING1", "COUPANG_WING2"}
+
+
+@router.post("/wing/vendor-summary/ingest")
+def ingest_wing_vendor_summary(
+    body: dict[str, Any] = Body(...),
+    x_ingest_token: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """Wing 페처(Jino Mac, residential IP) → 쿠팡 공식 판매분석 GMV 인제스트(D-5).
+
+    cf_clearance 재생 불가로 prod 직접 fetch 금지 → Mac 페처가 브라우저측 fetch한 결과만 적재.
+    인증: X-Ingest-Token == AD_INGEST_TOKEN. body {account_key, days:[{date, registration_type,
+    gmv, units_sold, last_refresh?}]}. registration_type∈{NORMAL,RFM}(ref 18).
+    """
+    _require_ingest_token(x_ingest_token)
+
+    account_key = str(body.get("account_key") or "").strip()
+    if account_key not in _VS_ACCOUNTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"account_key는 {', '.join(sorted(_VS_ACCOUNTS))} 중 하나여야 함",
+        )
+    days_raw = body.get("days")
+    if not isinstance(days_raw, list) or not days_raw:
+        raise HTTPException(status_code=400, detail="days[] 필요")
+
+    rows: list[dict] = []
+    for d in days_raw:
+        if not isinstance(d, dict):
+            raise HTTPException(status_code=400, detail="days[] 항목은 객체여야 함")
+        try:
+            day_date = date.fromisoformat(str(d.get("date")))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="days[].date(YYYY-MM-DD) 필요")
+        rt = str(d.get("registration_type") or "")
+        if rt not in _VS_TYPES:
+            raise HTTPException(status_code=400, detail="registration_type은 NORMAL/RFM")
+        try:
+            gmv = int(d.get("gmv") or 0)
+            units_sold = int(d.get("units_sold") or 0)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="gmv/units_sold는 정수여야 함")
+        if gmv < 0 or units_sold < 0:
+            raise HTTPException(status_code=400, detail="값은 음수일 수 없음")
+        last_refresh = d.get("last_refresh")
+        rows.append({
+            "date": day_date, "registration_type": rt,
+            "gmv": gmv, "units_sold": units_sold,
+            "last_refresh": str(last_refresh) if last_refresh is not None else None,
+        })
+    return vendor_summary_sync.ingest_vendor_summary(db, account_key, rows)
+
+
+@router.post("/wing/vendor-summary/request-refresh")
+def request_wing_vendor_summary_refresh(db: Session = Depends(get_db)):
+    """UI '판매분석 갱신' 버튼 → 갱신 요청 플래그 set. Wing 페처 데몬이 다음 폴링에서 소비."""
+    return vendor_summary_sync.request_refresh(db)
+
+
+@router.get("/wing/vendor-summary/refresh-status")
+def wing_vendor_summary_refresh_status(db: Session = Depends(get_db)):
+    """갱신 요청/완료 상태. UI(버튼 후 폴링)·Wing 페처(요청 확인) 공용."""
+    return vendor_summary_sync.refresh_status(db)
+
+
+@router.post("/wing/vendor-summary/refresh-claim")
+def claim_wing_vendor_summary_refresh(
+    x_ingest_token: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """Wing 페처가 갱신 요청을 소비(플래그 clear). 토큰 인증(ingest와 동일)."""
+    _require_ingest_token(x_ingest_token)
+    return vendor_summary_sync.claim_refresh(db)
 
 
 # ════════════════════════════════════════════════════════════════════

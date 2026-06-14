@@ -7,13 +7,18 @@
 #   - curl/requests 쿠키 재생은 "1회용"(cf_clearance 갱신 불가) → 실제 브라우저가 챌린지를 풀어 세션을 살려둬야 함.
 #   - vendor-summary는 모바일 UA 필수(ref 18). cf_clearance가 UA에 바인딩되므로 로그인·fetch 모두 같은 모바일 UA로 수행.
 #
-# 런타임 경계 (D-4): 이 파일은 Mac 로컬 헤드풀 프로세스다. 백엔드는 호출하지 않는다.
-#   S1(현재): 로그인 + vendor-summary fetch·파싱·로그 출력(라이브 검증). prod push 없음.
-#   S2(예정): 파싱 결과를 prod ingest로 push + launchd poll 데몬(com.ohisell.wing)으로 상주화.
+# 런타임 경계 (D-4): 이 파일은 Mac 로컬 헤드풀 프로세스다. 백엔드는 호출하지 않는다(push만).
+#   S1: 로그인 + vendor-summary fetch·파싱·로그 출력(라이브 검증).
+#   S2(현재): 파싱 결과를 prod ingest로 push(account_key·prod_base_url·ingest_token 설정 시) +
+#     launchd poll 데몬(com.ohisell.wing)으로 상주화. push 미설정이면 S1처럼 로그 출력만(하위호환).
 #
 # 사용:
 #   1회 로그인:  backend/.venv/bin/python3 tools/wing_browser_fetcher.py login   # 창에서 Wing 로그인(자동 감지)
-#   실행(검증):  backend/.venv/bin/python3 tools/wing_browser_fetcher.py          # state 로드 → fetch → 3P/RG GMV 출력
+#   실행(1회):   backend/.venv/bin/python3 tools/wing_browser_fetcher.py          # state 로드 → fetch → push
+#   상주 데몬:   backend/.venv/bin/python3 tools/wing_browser_fetcher.py poll      # launchd(com.ohisell.wing)
+#
+# 설정 파일 ~/.ohisell_wing_fetcher.json (push용):
+#   {"account_key":"COUPANG_WING1","prod_base_url":"https://sellc.ohitech.co.kr","ingest_token":"<AD_INGEST_TOKEN>","vs_days":7}
 from __future__ import annotations
 
 import contextlib
@@ -22,10 +27,12 @@ import json
 import logging
 import os
 import sys
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import requests
 from playwright.sync_api import sync_playwright
 
 CONFIG_PATH = Path(os.path.expanduser("~/.ohisell_wing_fetcher.json"))
@@ -76,9 +83,10 @@ _VS_FETCH_JS = """async (args) => {
 
 
 def load_config() -> dict:
-    """설정 로드. S1은 state_file만 필수(로그인/검증). prod_base_url·ingest_token은 S2 push에서 사용.
+    """설정 로드. state_file만 필수(로그인/검증). prod push(S2)는 account_key·prod_base_url·ingest_token.
 
-    설정 파일이 없으면 기본값으로 동작(로그인·검증에는 prod 정보 불필요).
+    설정 파일이 없으면 기본값으로 동작(로그인·검증에는 prod 정보 불필요). push 3종이 다 있으면
+    fetch 성공 후 prod ingest로 push한다(없으면 S1처럼 로그 출력만 — 하위호환).
     """
     cfg: dict = {}
     if CONFIG_PATH.is_file():
@@ -89,6 +97,11 @@ def load_config() -> dict:
             cfg = {}
     cfg.setdefault("state_file", DEFAULT_STATE)
     return cfg
+
+
+def _push_configured(cfg: dict) -> bool:
+    """prod push에 필요한 3종(account_key·prod_base_url·ingest_token)이 모두 있으면 True."""
+    return bool(cfg.get("account_key") and cfg.get("prod_base_url") and cfg.get("ingest_token"))
 
 
 def _vs_payload(cfg: dict) -> dict:
@@ -150,9 +163,9 @@ def _save_state(context, path: str) -> None:
 
 
 def _summarize(body: str) -> dict | None:
-    """vendor-summary 응답 → {dates:{date:{NORMAL,RFM}}, gmv_3p, gmv_rg, total_gmv}. 실패 시 None.
+    """vendor-summary 응답 → {dates:{date:{rt:{gmv,units}}}, gmv_3p, gmv_rg, total_gmv}. 실패 시 None.
 
-    saleSummaryByDate[].gmv를 registrationType(NORMAL=3P / RFM=RG)별로 합산(ref 18).
+    saleSummaryByDate[].gmv/unitsSold를 registrationType(NORMAL=3P / RFM=RG)별로 합산(ref 18).
     """
     try:
         data = json.loads(body or "")
@@ -161,7 +174,7 @@ def _summarize(body: str) -> dict | None:
     rows = data.get("saleSummaryByDate") if isinstance(data, dict) else None
     if not isinstance(rows, list):
         return None
-    dates: dict[str, dict[str, float]] = {}
+    dates: dict[str, dict[str, dict[str, float]]] = {}
     gmv_3p = gmv_rg = 0.0
     for r in rows:
         if not isinstance(r, dict):
@@ -169,8 +182,10 @@ def _summarize(body: str) -> dict | None:
         d = str(r.get("date") or "")
         rt = str(r.get("registrationType") or "")
         gmv = float(r.get("gmv") or 0)
-        dates.setdefault(d, {}).setdefault(rt, 0.0)
-        dates[d][rt] += gmv
+        units = float(r.get("unitsSold") or 0)
+        cell = dates.setdefault(d, {}).setdefault(rt, {"gmv": 0.0, "units": 0.0})
+        cell["gmv"] += gmv
+        cell["units"] += units
         if rt == "NORMAL":
             gmv_3p += gmv
         elif rt == "RFM":
@@ -217,7 +232,52 @@ def _log_summary(tag: str, summ: dict, payload: dict) -> None:
     for d in sorted(summ["dates"]):
         rt = summ["dates"][d]
         log.info("    %s | 3P=%s · RG=%s", d,
-                 f"{rt.get('NORMAL', 0):,.0f}", f"{rt.get('RFM', 0):,.0f}")
+                 f"{rt.get('NORMAL', {}).get('gmv', 0):,.0f}",
+                 f"{rt.get('RFM', {}).get('gmv', 0):,.0f}")
+
+
+def _push(cfg: dict, summ: dict) -> int:
+    """파싱 요약 → prod ingest로 push(닫힌일×등록유형 GMV/수량). 0=성공, 1=실패(best-effort).
+
+    body: {account_key, days:[{date, registration_type(NORMAL|RFM), gmv, units_sold, last_refresh}]}.
+    push 미설정(account_key 등 누락)이면 호출되지 않음(_do_run에서 게이트). 금액은 원 단위 정수.
+    """
+    days = []
+    last_refresh = summ.get("last_refresh")
+    for d in sorted(summ.get("dates", {})):
+        for rt, vals in summ["dates"][d].items():
+            if rt not in ("NORMAL", "RFM"):
+                continue
+            days.append({
+                "date": d,
+                "registration_type": rt,
+                "gmv": int(round(vals.get("gmv", 0))),
+                "units_sold": int(round(vals.get("units", 0))),
+                "last_refresh": last_refresh,
+            })
+    if not days:
+        log.warning("push할 날짜 데이터 없음 — 건너뜀")
+        return 1
+    try:
+        pr = requests.post(
+            cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/wing/vendor-summary/ingest",
+            json={"account_key": cfg["account_key"], "days": days},
+            headers={"X-Ingest-Token": cfg["ingest_token"]},
+            timeout=20,
+        )
+    except requests.RequestException as e:
+        log.error("prod push 네트워크 오류: %s", e)
+        return 1
+    if pr.status_code != 200:
+        log.error("prod push 실패 HTTP %s — %s", pr.status_code, pr.text[:160])
+        return 1
+    try:
+        info = pr.json()
+    except ValueError:
+        info = pr.text[:120]
+    log.info("vendor-summary push 성공: account=%s days=%d → %s",
+             cfg["account_key"], len(days), info)
+    return 0
 
 
 def _login_wait_loop(page, ctx, cfg: dict, state: str, wait_secs: int):
@@ -266,6 +326,8 @@ def cmd_login(cfg: dict, wait_secs: int = 600) -> int:
     summ = _summarize(res.get("body") or "")
     if summ:
         _log_summary("[login]", summ, _vs_payload(cfg))
+        if _push_configured(cfg):
+            return _push(cfg, summ)   # 첫 데이터 즉시 push
     return 0
 
 
@@ -336,6 +398,8 @@ def _do_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
         log.error("vendor-summary 파싱 실패 — 응답 형태 변경 의심: %s", (res.get("body") or "")[:160])
         return 1
     _log_summary("[run]", summ, _vs_payload(cfg))
+    if _push_configured(cfg):
+        return _push(cfg, summ)   # push 성공이 heartbeat(prod staleness 기준)
     return 0
 
 
@@ -352,11 +416,81 @@ def cmd_run(cfg: dict) -> int:
         return _do_run(cfg, state, login_wait_secs=0)
 
 
+_POLL_INTERVAL_S = 15       # 갱신 요청 확인 간격(창 안 뜸, 가벼운 GET)
+_LOGIN_WAIT_S = 180         # 세션 만료 시 헤드풀 창 로그인 대기 한도
+_MIN_FETCH_INTERVAL_S = 45  # fetch(창) 최소 간격 — 요청 폭주로 창 스팸 방지(광고 패턴)
+
+
+def _prod_refresh_status(cfg: dict) -> dict:
+    r = requests.get(
+        cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/wing/vendor-summary/refresh-status",
+        timeout=15,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def _prod_claim(cfg: dict) -> dict:
+    r = requests.post(
+        cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/wing/vendor-summary/refresh-claim",
+        headers={"X-Ingest-Token": cfg["ingest_token"]},
+        timeout=15,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def cmd_poll(cfg: dict) -> int:
+    """상주 데몬(별도 plist com.ohisell.wing, D-5) — 갱신 요청이 있을 때만 headful fetch.
+
+    평소엔 가벼운 GET만(창 안 뜸). UI '판매분석 갱신' 버튼이 요청을 set하면 claim 후 fetch 1회+push.
+    세션 만료 시 같은 창에서 로그인 대기(아침 첫 클릭이 로그인 겸함, 광고 페처 패턴 D-1).
+    push 미설정이면 데몬은 무의미하므로 fail-fast.
+    """
+    if not _push_configured(cfg):
+        log.error("poll 데몬엔 account_key·prod_base_url·ingest_token 필요 — 설정 누락.")
+        return 2
+    state = os.path.expanduser(cfg["state_file"])
+    interval = int(cfg.get("poll_interval_s", _POLL_INTERVAL_S))
+    cooldown = int(cfg.get("min_fetch_interval_s", _MIN_FETCH_INTERVAL_S))
+    last_fetch = 0.0
+    log.info("Wing 폴 데몬 시작 — %ds 간격 확인, fetch 최소간격 %ds(창은 요청 시에만 뜸).", interval, cooldown)
+    while True:
+        try:
+            st = _prod_refresh_status(cfg)
+            if st.get("requested"):
+                # 쿨다운/락은 claim '전에' 검사 — claim 후 스킵하면 요청 유실(광고 패턴 codex P2).
+                if time.monotonic() - last_fetch < cooldown:
+                    log.info("fetch 쿨다운 중 — 요청 보류(다음 폴에서 처리)")
+                else:
+                    with _try_fetch_lock() as acquired:
+                        if not acquired:
+                            log.info("다른 fetch 진행 중 — 요청 보류(다음 폴에서 처리)")
+                        elif _prod_claim(cfg).get("claimed"):
+                            last_fetch = time.monotonic()
+                            log.info("갱신 요청 감지 — fetch 시작")
+                            if not Path(state).is_file():
+                                cmd_login(cfg, wait_secs=_LOGIN_WAIT_S)
+                            else:
+                                _do_run(cfg, state, login_wait_secs=_LOGIN_WAIT_S)  # 락 보유 중
+        except requests.RequestException as e:
+            log.warning("폴 확인 실패(네트워크): %s", str(e)[:80])
+        except Exception as e:  # noqa: BLE001 — 데몬은 어떤 오류에도 죽지 않는다
+            log.error("폴 루프 오류: %s", str(e)[:160])
+        time.sleep(interval)
+
+
 def main() -> None:
     cfg = load_config()
     arg = sys.argv[1] if len(sys.argv) >= 2 else ""
     if arg == "login":
         sys.exit(cmd_login(cfg))
+    if arg == "poll":
+        try:
+            sys.exit(cmd_poll(cfg))
+        except KeyboardInterrupt:
+            log.info("폴 데몬 종료")
+            sys.exit(0)
     sys.exit(cmd_run(cfg))
 
 

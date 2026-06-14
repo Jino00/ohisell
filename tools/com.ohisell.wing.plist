@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- launchd: 쿠팡 Wing 판매분석(vendor-summary) 페처를 "상주 poll 데몬"으로 실행 (Jino Mac). -->
+<!-- 광고 데몬(com.ohisell.adcost)과 별도 프로세스·별도 storage_state (D-5: 도메인·세션·방어체계 분리). -->
+<!-- 버튼 트리거 방식: 평소엔 15s마다 prod에 갱신요청만 확인(창 안 뜸), -->
+<!-- 종합조망 '판매분석 갱신' 버튼(S3)을 누른 경우에만 headful fetch+push(창 ~20초). -->
+<!-- 설치:  cp tools/com.ohisell.wing.plist ~/Library/LaunchAgents/ -->
+<!--        launchctl unload ~/Library/LaunchAgents/com.ohisell.wing.plist 2>/dev/null -->
+<!--        launchctl load ~/Library/LaunchAgents/com.ohisell.wing.plist -->
+<!-- 코드 변경 후 재배포:  launchctl kickstart -k gui/$(id -u)/com.ohisell.wing -->
+<!-- 경로(python/스크립트)는 설치 전 실제 경로로 치환되어야 함. ~/.ohisell_wing_fetcher.json에 -->
+<!-- account_key·prod_base_url·ingest_token 설정 필수(없으면 poll 데몬 fail-fast). -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.ohisell.wing</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/jino/Library/Mobile Documents/com~apple~CloudDocs/1Personal/AI Program/Ohiselling/backend/.venv/bin/python3</string>
+    <string>/Users/jino/Library/Mobile Documents/com~apple~CloudDocs/1Personal/AI Program/Ohiselling/tools/wing_browser_fetcher.py</string>
+    <string>poll</string>
+  </array>
+  <!-- 상주 데몬: 죽으면 자동 재시작(crash·네트워크 끊김·Mac sleep 복귀 대비). -->
+  <key>KeepAlive</key>
+  <true/>
+  <key>RunAtLoad</key>
+  <true/>
+  <!-- 재시작 폭주 방지: 비정상 종료 시 최소 10초 후 재기동. -->
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/jino/.ohisell_wing_fetcher.launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/jino/.ohisell_wing_fetcher.launchd.log</string>
+</dict>
+</plist>
