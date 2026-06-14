@@ -161,11 +161,57 @@ def _is_auth_expired(res) -> bool:
     return False
 
 
-def _save_state(context, path: str) -> None:
-    """storage_state(세션쿠키 포함)를 0600으로 저장."""
+def _save_state(context, path: str, *, cdp: bool = False) -> None:
+    """storage_state(세션쿠키 포함)를 0600으로 저장. CDP 모드에서는 Chrome이 세션을 보관하므로 no-op."""
+    if cdp:
+        return
     context.storage_state(path=path)
     with contextlib.suppress(OSError):
         os.chmod(path, 0o600)
+
+
+def _cdp_mode(cfg: dict) -> bool:
+    """설정에 cdp_port가 있으면 CDP(실제 Chrome) 모드."""
+    return bool(cfg.get("cdp_port"))
+
+
+@contextlib.contextmanager
+def _chrome(p, cfg: dict, state: str, *, load_state: bool = True):
+    """브라우저 세션 컨텍스트 매니저.
+
+    CDP 모드(cdp_port 설정 시): 실제 Chrome에 연결 → Akamai 핑거프린트 없음.
+    레거시 모드: Playwright Chromium 새로 실행(기존 동작).
+
+    yield (page, ctx, save_fn):
+        save_fn() — CDP 모드는 no-op, 레거시는 storage_state 저장.
+    """
+    cdp = _cdp_mode(cfg)
+    if cdp:
+        port = int(cfg.get("cdp_port", 9222))
+        browser = p.chromium.connect_over_cdp(f"http://localhost:{port}")
+        ctx = browser.contexts[0] if browser.contexts else browser.new_context(user_agent=_UA)
+        page = ctx.new_page()
+        try:
+            yield page, ctx, lambda: None  # Chrome이 세션 보관 → save no-op
+        finally:
+            with contextlib.suppress(Exception):
+                page.close()
+            with contextlib.suppress(Exception):
+                browser.close()  # disconnect only, Chrome 자체는 유지
+    else:
+        browser = p.chromium.launch(headless=False)
+        kw: dict = {"user_agent": _UA}
+        if load_state and os.path.exists(state):
+            kw["storage_state"] = state
+        ctx = browser.new_context(**kw)
+        page = ctx.new_page()
+        try:
+            yield page, ctx, lambda: _save_state(ctx, state)
+        finally:
+            with contextlib.suppress(Exception):
+                ctx.close()
+            with contextlib.suppress(Exception):
+                browser.close()
 
 
 def _summarize(body: str) -> dict | None:
@@ -286,7 +332,7 @@ def _push(cfg: dict, summ: dict) -> int:
     return 0
 
 
-def _login_wait_loop(page, ctx, cfg: dict, state: str, wait_secs: int):
+def _login_wait_loop(page, ctx, cfg: dict, state: str, wait_secs: int, *, cdp: bool = False):
     """열린 page에서 사용자 로그인을 자동 감지(vendor-summary 200). 성공 시 state 저장 후 res 반환."""
     waited = 0
     while waited < wait_secs:
@@ -302,29 +348,26 @@ def _login_wait_loop(page, ctx, cfg: dict, state: str, wait_secs: int):
                 return None
             continue
         if _is_success(res):
-            _save_state(ctx, state)
+            _save_state(ctx, state, cdp=cdp)
             return res
     return None
 
 
 def cmd_login(cfg: dict, wait_secs: int = 600) -> int:
-    """헤드풀 창(모바일 UA)을 열고 Wing 로그인을 자동 감지(vendor-summary 200) → state 저장 + 첫 파싱.
+    """로그인 세션 초기화 + 자동 감지(vendor-summary 200) → state 저장 + 첫 파싱.
 
-    사용자는 뜬 창에서 wing.coupang.com에 로그인만 하면 됨(Enter 불필요).
+    CDP 모드: Chrome의 새 탭에서 wing.coupang.com 열고 로그인 감지.
+    레거시 모드: Playwright Chromium 헤드풀 창(모바일 UA) 새로 실행.
     """
     state = os.path.expanduser(cfg["state_file"])
-    log.info("로그인 브라우저(모바일 UA)를 엽니다 — wing.coupang.com에 로그인하세요(자동 감지, 최대 %d초).", wait_secs)
+    cdp = _cdp_mode(cfg)
+    mode_label = "Chrome(CDP)" if cdp else "Playwright Chromium(모바일 UA)"
+    log.info("[login] %s 실행 — wing.coupang.com에 로그인하세요(자동 감지, 최대 %d초).", mode_label, wait_secs)
     res = None
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)
-        ctx = browser.new_context(user_agent=_UA)
-        try:
-            page = ctx.new_page()
+        with _chrome(p, cfg, state, load_state=False) as (page, ctx, _save):
             page.goto(DASH_URL, wait_until="domcontentloaded", timeout=40000)
-            res = _login_wait_loop(page, ctx, cfg, state, wait_secs)
-        finally:
-            ctx.close()
-            browser.close()
+            res = _login_wait_loop(page, ctx, cfg, state, wait_secs, cdp=cdp)
     if res is None:
         log.error("제한 시간 내 로그인 감지 실패 — 다시 시도하세요.")
         return 1
@@ -360,35 +403,29 @@ def _do_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
 
     S1: prod push 없음(파싱 결과 로그 출력으로 라이브 검증). 세션 만료 회복 흐름은 라이브 실측 대상.
     """
+    cdp = _cdp_mode(cfg)
     res = None
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=False)
-            ctx = browser.new_context(storage_state=state, user_agent=_UA)
-            try:
-                page = ctx.new_page()
+            with _chrome(p, cfg, state) as (page, ctx, save):
                 res = _fetch_vendor_summary(page, cfg)
                 if _is_auth_expired(res):
-                    # 세션 만료 의심 → 대시보드 재진입으로 Cloudflare 챌린지 자동해소 후 1회 재시도.
-                    # (Wing의 무재로그인 재발급 가능 여부는 라이브 실측 대상 — 추정 금지.)
+                    # 세션 만료 의심 → 대시보드 재진입으로 챌린지 자동해소 후 1회 재시도.
                     log.info("세션 만료 의심 — 대시보드 재진입 후 재fetch 시도")
                     res2 = _fetch_vendor_summary(page, cfg)
                     if _is_success(res2):
-                        _save_state(ctx, state)  # 회전 쿠키 보존
+                        save()  # 회전 쿠키 보존 (CDP: no-op)
                         res = res2
                     elif login_wait_secs > 0:
                         log.info("자동 회복 실패 — 창에서 로그인하세요(자동 감지, 최대 %d초).", login_wait_secs)
                         with contextlib.suppress(Exception):
                             page.goto(DASH_URL, wait_until="domcontentloaded", timeout=40000)
-                        relogin = _login_wait_loop(page, ctx, cfg, state, login_wait_secs)
+                        relogin = _login_wait_loop(page, ctx, cfg, state, login_wait_secs, cdp=cdp)
                         res = relogin if relogin is not None else res2
                     else:
                         res = res2
                 elif _is_success(res):
-                    _save_state(ctx, state)  # 회전된 세션쿠키 갱신
-            finally:
-                ctx.close()
-                browser.close()
+                    save()  # 회전된 세션쿠키 갱신 (CDP: no-op)
     except Exception as e:  # noqa: BLE001
         log.error("브라우저 fetch 오류: %s", e)
         return 1
@@ -749,7 +786,7 @@ def _rg_session_ok(page) -> bool:
     return isinstance(data, dict) and "settlementStatusReports" in data
 
 
-def _rg_login_wait(page, ctx, state: str, secs: int) -> bool:
+def _rg_login_wait(page, ctx, state: str, secs: int, *, cdp: bool = False) -> bool:
     """정산 페이지에서 사용자 로그인 자동 감지(status/api 200). 성공 시 state 저장. (데몬 회복 경로)"""
     waited = 0
     while waited < secs:
@@ -757,7 +794,7 @@ def _rg_login_wait(page, ctx, state: str, secs: int) -> bool:
             page.wait_for_timeout(5000)
             waited += 5
             if _rg_session_ok(page):
-                _save_state(ctx, state)
+                _save_state(ctx, state, cdp=cdp)
                 return True
         except Exception as e:  # noqa: BLE001
             if "closed" in str(e).lower():
@@ -782,13 +819,11 @@ def _do_rg_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
     max_periods = int(cfg.get("rg_max_periods", 1))   # P1: 최근 1주(dup 모호성 회피)
     poll_timeout = int(cfg.get("rg_poll_timeout_s", _RG_POLL_TIMEOUT_S))
 
+    cdp = _cdp_mode(cfg)
     pushed = failed = 0
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=False)
-            ctx = browser.new_context(storage_state=state, user_agent=_UA)
-            try:
-                page = ctx.new_page()
+            with _chrome(p, cfg, state) as (page, ctx, save):
                 page.goto(RG_DASH_URL, wait_until="domcontentloaded", timeout=40000)
                 page.wait_for_timeout(3500)   # Cloudflare/Akamai JS 챌린지 안정화
                 if not _rg_session_ok(page):
@@ -796,11 +831,11 @@ def _do_rg_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
                         log.error("RG: 세션 만료(정산 status/api 미응답). 'login' 또는 데몬 로그인 필요.")
                         return 1
                     log.info("RG: 세션 만료 — 창에서 로그인하세요(자동 감지, 최대 %d초).", login_wait_secs)
-                    if not _rg_login_wait(page, ctx, state, login_wait_secs):
+                    if not _rg_login_wait(page, ctx, state, login_wait_secs, cdp=cdp):
                         log.error("RG: 로그인 감지 실패.")
                         return 1
                 else:
-                    _save_state(ctx, state)   # 세션 유효 → 회전 쿠키 보존
+                    save()  # 세션 유효 → 회전 쿠키 보존 (CDP: no-op)
 
                 try:
                     periods = _rg_enumerate_group_keys(page, cfg, vendor_id)
@@ -829,10 +864,7 @@ def _do_rg_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
                             pushed += 1
                         else:
                             failed += 1
-                _save_state(ctx, state)   # 회전 쿠키 보존
-            finally:
-                ctx.close()
-                browser.close()
+                save()  # 회전 쿠키 보존 (CDP: no-op)
     except Exception as e:  # noqa: BLE001 — 브라우저 오류는 1로 보고(데몬은 죽지 않음)
         log.error("RG 브라우저 실행 오류: %s", e)
         return 1
@@ -853,11 +885,53 @@ def cmd_rg(cfg: dict) -> int:
         return _do_rg_run(cfg, state, login_wait_secs=0)
 
 
+def cmd_chrome(cfg: dict) -> int:
+    """CDP용 전용 Chrome 인스턴스 실행(--remote-debugging-port).
+
+    Wing 자동화 전용 프로필 사용 → 기존 Chrome과 충돌 없음.
+    실행 후 브라우저에서 쿠팡 로그인 → 'login' 명령으로 세션 감지.
+
+    설정 키(~/.ohisell_wing_fetcher.json):
+        cdp_port       : CDP 포트 번호 (기본 9222)
+        cdp_profile    : Chrome 프로필 경로 (기본 ~/.ohisell_wing_chrome)
+    """
+    import subprocess
+
+    port = int(cfg.get("cdp_port", 9222))
+    profile = os.path.expanduser(cfg.get("cdp_profile", "~/.ohisell_wing_chrome"))
+    chrome_bin = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    if not os.path.exists(chrome_bin):
+        log.error("Chrome을 찾을 수 없습니다: %s", chrome_bin)
+        return 1
+    os.makedirs(profile, exist_ok=True)
+    proc = subprocess.Popen(
+        [
+            chrome_bin,
+            f"--remote-debugging-port={port}",
+            f"--user-data-dir={profile}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "https://wing.coupang.com",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    log.info(
+        "Chrome 실행됨 (PID %d, CDP port %d, 프로필 %s)\n"
+        "  1. 브라우저에서 쿠팡 계정으로 로그인\n"
+        "  2. 완료 후: python3 wing_browser_fetcher.py login",
+        proc.pid, port, profile,
+    )
+    return 0
+
+
 def main() -> None:
     cfg = load_config()
     arg = sys.argv[1] if len(sys.argv) >= 2 else ""
     if arg == "login":
         sys.exit(cmd_login(cfg))
+    if arg == "chrome":
+        sys.exit(cmd_chrome(cfg))
     if arg == "rg":
         sys.exit(cmd_rg(cfg))
     if arg == "poll":
