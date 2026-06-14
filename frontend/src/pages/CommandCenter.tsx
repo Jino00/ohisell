@@ -1,6 +1,6 @@
 // CommandCenter.tsx — 🎯 종합 조망 (P7, D-2). 옵션ID 결합 엔진의 3축(회계·광고·상품) 뷰.
 // D-3: 시스템은 사실/지표 정리만 — 전략 추천 없음. 해석은 Jino 몫.
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   fetchCommandCenter,
   syncRealtime,
@@ -62,15 +62,20 @@ export default function CommandCenter() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
+  // 요청 순서 가드(codex S7 P1): 계정/기간을 빠르게 바꾸면 이전 요청이 늦게 도착해
+  // 새 선택 화면에 엉뚱한 계정 데이터를 렌더할 수 있다. 검산(reconciliation) 도구라
+  // '다른 계정 숫자 표시'는 막으려는 실패 그 자체 → 최신 요청 응답만 반영한다.
+  const reqSeq = useRef(0);
 
   // 단일 fetch 코어 — from/to/account를 명시 인자로 받아 stale state 회피.
   function doFetch(f: string, t: string, acc: string) {
+    const seq = ++reqSeq.current;
     setLoading(true);
     setError(null);
     fetchCommandCenter(f, t, acc)
-      .then(setData)
-      .catch((e) => setError(e.message))
-      .finally(() => setLoading(false));
+      .then((d) => { if (seq === reqSeq.current) setData(d); })
+      .catch((e) => { if (seq === reqSeq.current) setError(e.message); })
+      .finally(() => { if (seq === reqSeq.current) setLoading(false); });
   }
 
   function load() {

@@ -412,7 +412,7 @@ export async function fetchCommandCenter(
   to: string,
   account?: string  // COUPANG_WING1|COUPANG_WING2 — 생략/"ALL"=전체(S1, 정합성 트랙)
 ): Promise<OverviewResponse> {
-  const acc = account && account !== "ALL" ? `&account=${account}` : "";
+  const acc = account && account !== "ALL" ? `&account=${encodeURIComponent(account)}` : "";
   return fetchApi<OverviewResponse>(
     `/api/overview/command-center?from=${from}&to=${to}${acc}`
   );
