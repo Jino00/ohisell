@@ -20,6 +20,10 @@ log = logging.getLogger(__name__)
 
 MAX_RAW_DATA_SIZE = 10_000  # 10KB
 
+# 죽은 'running' SyncLog 회수 임계. 정상 동기화는 수분 내 끝나므로 이보다 오래 'running'이면
+# 크래시/타임아웃/프로세스 강제종료로 except가 못 돌아 영구히 남은 stale 락으로 본다(task_f1f36f02).
+STALE_RUNNING_TIMEOUT = timedelta(minutes=30)
+
 
 def _get_client_for_channel(channel: Channel, db: Session | None = None) -> BaseChannelClient | None:
     """채널의 api_type에 따라 적절한 클라이언트 반환"""
@@ -196,11 +200,34 @@ def sync_channel_orders(
             "errors": ["엑셀 전용 채널입니다. 엑셀 업로드를 사용하세요."],
         }
 
-    # 동시 실행 방지
-    running = db.query(SyncLog).filter(
+    # 동시 실행 방지 — 단, stale 'running' 락은 자동 회수.
+    # 동기화가 크래시/타임아웃/프로세스 강제종료되면 아래 except가 실행되지 못해 SyncLog가
+    # 'running'으로 영구히 남아 채널의 모든 향후 동기화를 영구 차단한다(라이브 발견 2026-06-14,
+    # task_f1f36f02). 정상 동기화는 수분 내 끝나므로 started_at이 STALE_RUNNING_TIMEOUT 이상
+    # 경과한 'running'은 죽은 락으로 보고 'error'로 회수한 뒤 새 동기화를 진행한다.
+    # started_at은 아래에서 kst_now()로 기록하므로 비교 단위(KST)가 일치한다.
+    now = kst_now()
+    running_logs = db.query(SyncLog).filter(
         and_(SyncLog.channel_id == channel_id, SyncLog.status == "running")
-    ).first()
-    if running:
+    ).all()
+    # started_at 미기록(None)도 죽은 락으로 간주(정상 생성이면 항상 기록됨).
+    stale = [r for r in running_logs
+             if r.started_at is None or (now - r.started_at) >= STALE_RUNNING_TIMEOUT]
+    active = [r for r in running_logs if r not in stale]
+    if stale:
+        # 죽은 락은 관찰 즉시 전부 회수(.first()만 정리하면 잔존 락이 다음 시도를 또 막는다).
+        # 차단 여부와 무관하게 정리해 누적을 막는다.
+        for r in stale:
+            r.status = "error"
+            r.error_message = ((r.error_message or "") + " [stale running auto-reclaimed]")[:500]
+            r.completed_at = now
+        db.commit()
+        log.warning(
+            "[sync] 채널 %d stale 'running' SyncLog %d건 회수(ids=%s) — 영구 차단 해소.",
+            channel_id, len(stale), [r.id for r in stale],
+        )
+    if active:
+        # 진짜 진행 중인 락이 하나라도 남아 있으면 차단(동시 실행 방지).
         return {
             "channel_id": channel_id,
             "channel_name": channel.name,
@@ -222,13 +249,16 @@ def sync_channel_orders(
     if date_to is None:
         date_to = kst_today()
 
-    # SyncLog 시작
+    # SyncLog 시작. started_at을 kst_now()로 명시 기록 — server_default(func.now())는 UTC라
+    # KST인 completed_at·stale 비교(kst_now)와 9시간 어긋난다(라이브 확인 2026-06-14). 미기록 시
+    # 모든 running 락이 ~9h 전으로 보여 동시 실행 방지가 무력화되므로 반드시 명시한다.
     sync_log = SyncLog(
         channel_id=channel_id,
         sync_type="orders",
         status="running",
         date_from=date_from,
         date_to=date_to,
+        started_at=kst_now(),
     )
     db.add(sync_log)
     db.commit()

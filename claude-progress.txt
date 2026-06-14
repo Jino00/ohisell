@@ -18,7 +18,11 @@
     사라지고 Order.status가 stale로 남아 매출 과다였음. `_reconcile_absent_orders`(쿠팡만·전체조회성공·grace10일·
     블라스트캡30%·활성만→cancelled) + 윈도우 7→30일 + fetch 완전성 플래그. 라이브 적용: 오픽스 4건·오하이 1건
     cancelled. 오픽스 6/1~6/11 3P매출 2,354,700→2,300,000(잔차 85,700→31,000, 3.6%→1.4%). codex 2R pass·fixture 9.
-    별도버그: stuck 'running' SyncLog가 동기화 영구차단(task_f1f36f02 플래그).
+    별도버그: stuck 'running' SyncLog가 동기화 영구차단(task_f1f36f02) — **2026-06-14 수정 완료**:
+      sync_service.py STALE_RUNNING_TIMEOUT(30min) 회수 가드 + started_at=kst_now() KST통일
+      + 마이그레이션 j4k5l6m7n8o9(기존 UTC running 일괄 회수). fixture 5(test_sync_stale_running_lock.py)
+      +전체 143 그린. codex 2R(P1-2 마이그로 해소, P1-1 레이스는 Jino 결정으로 후속 task_dd560245 보류).
+      미커밋 — Jino 커밋/배포 지시 대기.
   - **현재 정합도**: 오픽스 6/1~6/11 매출 3P 98.6%(2,300,000 vs 쿠팡 2,269,000)·전체 96.6%(5,066,700 vs 4,901,500,
     나머지는 RG 주문 stale[별도 sync]). 광고는 적재값 0.02% 일치(커버리지=S5).
   - **남은 것(의사결정 필요)**: S5 광고 전수 자동화(공식 API 없음, 5/26~6/11만 적재 / 전체 vs 집행 6.2만 조사),
