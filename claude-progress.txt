@@ -4,9 +4,13 @@
 
 ## 현재 상태
 - 날짜: 2026-06-14
-- ★★★**활성 트랙: Wing 세션 자동화 — S0 완료(1/6)** (docs/tracks/active/track_wing-session-automation.md).
-  - S0: 구조 확정·승인(Jino "그래"). **D-4 런타임 2분리**(Mac 헤드풀 페처 push만 ↔ 백엔드 ingest만), **D-5 vendor-summary/RG는 브라우저측 fetch**(cf_clearance 재생불가 → 백엔드 requests 금지)·**별도 데몬 com.ohisell.wing**(광고 aid/keycloak ↔ Wing cf_clearance 세션 격리). 계획서=docs/PLAN_wing-session-automation.md.
-  - 다음=S1 `tools/wing_browser_fetcher.py`(광고 페처 복제)·헤드풀 로그인·vendor-summary 브라우저측 fetch 라이브 실측(SSO/cf_clearance 갱신 흐름 미지수, 추정 금지). 권장: /model sonnet 구현.
+- ★★★**활성 트랙: Wing 세션 자동화 — S1 완료(2/6)** (docs/tracks/active/track_wing-session-automation.md). 커밋 eae19d9.
+  - S0: 구조 확정·승인(Jino "그래"). D-4 런타임 2분리(Mac 헤드풀 페처 push만 ↔ 백엔드 ingest만), D-5 vendor-summary/RG는 브라우저측 fetch·별도 데몬 com.ohisell.wing. 계획서=docs/PLAN_wing-session-automation.md.
+  - **S1: `tools/wing_browser_fetcher.py`(광고 페처 복제, 모바일 UA, storage_state) 라이브 검증 완료.** login→state 저장, run 재로드→vendor-summary 200→3P/RG 파싱.
+    **★D-6 라이브 실측**: 모바일 UA로 로그인하면 Wing이 **m-wing.coupang.com**으로 라우팅 → vendor-summary를 절대호스트 wing.coupang.com으로 부르면 **브라우저 CORS 차단**. 반드시 location.origin(m-wing)+경로로 same-origin 호출. XSRF-TOKEN→x-xsrf-token 더블서브밋.
+    **교차검증(원칙22)**: 페처 6/8~6/13 GMV 3P 1,693,230·RG 1,786,500 = ref18 수동 cURL과 원단위 일치. codex review PASS.
+    미관측: 세션 만료→회복(만료 강제 불가). 현재 폴백=만료 시 대시보드 재진입 1회→수동 로그인 대기.
+  - 다음=S2: 백엔드 vendor-summary ingest+store SA + revenue_reconcile Harness(닫힌일 드리프트%, net_profit 불변) + 페처 prod push 배선 + launchd 데몬 com.ohisell.wing 등록. 권장 /model sonnet.
 - ★★★**(완료) 트랙: 쿠팡 매출·광고 정합성 — 완료·completed/ 마감** (docs/tracks/completed/track_coupang-revenue-ad-reconciliation.md).
   - 옵션30일 후속 + **vendor-summary 프로브로 매출 정합 라이브 1:1 입증**(6/8~6/13 우리 vs 쿠팡공식 GMV: 3P +1.8%·RG +7.4%, 전부 문서화 잔차 D-5/D-11, 신규버그 0 → 트랙 원래 목표 "매출 쿠팡과 맞춤" 달성·증명). ref 18 신설.
   - 자동대조(드리프트 감시)는 Wing 세션 freshness 필요(cf_clearance·단명) → **신규 트랙 "Wing 세션 자동화"로 분리**(track_wing-session-automation.md, ⚠️구조 스캐폴딩만, 코딩 전). 광고 페처 헤드풀 패턴 복제로 vendor-summary 자동대조 + RG정산 S6-auto 동시 해결. 다음 세션: 구조 승인→Opus 계획→S1.
