@@ -1150,11 +1150,16 @@ def ingest_ad_cost(
             try:
                 ad_spend = int(d.get("ad_spend") or 0)
                 conv_sales = int(d.get("conv_sales") or 0)
+                # S5a/D-15: all_cost = ALL_DELIVERED_AD_COST(전체). None(미제공)은 그대로 전달 →
+                # ingest가 폴백+카운트(머니필드 가시성, codex P2-2). 구 페처는 키 없음 → None.
+                _raw_all = d.get("all_cost")
+                all_cost = int(_raw_all) if _raw_all is not None else None
             except (TypeError, ValueError):
-                raise HTTPException(status_code=400, detail="ad_spend/conv_sales는 정수여야 함")
-            if ad_spend < 0 or conv_sales < 0:
+                raise HTTPException(status_code=400, detail="ad_spend/conv_sales/all_cost는 정수여야 함")
+            if ad_spend < 0 or conv_sales < 0 or (all_cost is not None and all_cost < 0):
                 raise HTTPException(status_code=400, detail="값은 음수일 수 없음")
-            days.append({"date": day_date, "ad_spend": ad_spend, "conv_sales": conv_sales})
+            days.append({"date": day_date, "ad_spend": ad_spend,
+                         "all_cost": all_cost, "conv_sales": conv_sales})
         return ad_cost_sync.ingest_ad_cost_days(db, days)
 
     # 구 경로(back-compat): report/cost 단일일 vendors[].

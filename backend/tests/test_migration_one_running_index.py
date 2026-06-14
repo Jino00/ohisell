@@ -24,6 +24,9 @@ from app.utils.kst import kst_now
 
 _INDEX = "uq_sync_log_one_running_per_channel"
 _PREV_REV = "j4k5l6m7n8o9"
+# 이 테스트가 검증하는 마이그레이션. "head"가 아니라 이 리비전을 타깃해야 이후 추가된
+# 마이그레이션(예: l6m7n8o9p0q1 all_day_cost)이 create_all 스키마와 컬럼 충돌하지 않는다.
+_TARGET_REV = "k5l6m7n8o9p0"
 
 
 def _alembic_cfg(db_path: str) -> Config:
@@ -72,7 +75,7 @@ def test_upgrade_creates_partial_unique_index(at_prev_revision):
     """j4 → head 업그레이드가 partial unique index를 생성한다(running만 대상, UNIQUE)."""
     engine, path = at_prev_revision
     assert _index_sql(engine) is None  # 업그레이드 전엔 없음
-    command.upgrade(_alembic_cfg(path), "head")
+    command.upgrade(_alembic_cfg(path), _TARGET_REV)
     sql = _index_sql(engine)
     assert sql is not None, "인덱스가 생성되지 않음"
     assert "status = 'running'" in sql, f"partial WHERE 절 누락: {sql}"
@@ -98,7 +101,7 @@ def test_upgrade_reclaims_duplicate_running_keeping_max_id(at_prev_revision):
             "SELECT MAX(id) FROM sync_log WHERE status='running'"
         )).scalar()
 
-    command.upgrade(_alembic_cfg(path), "head")
+    command.upgrade(_alembic_cfg(path), _TARGET_REV)
 
     with engine.connect() as c:
         running = c.execute(text(
@@ -121,7 +124,7 @@ def test_index_enforces_after_upgrade(at_prev_revision):
     """업그레이드 후 같은 채널 running 2건 INSERT는 인덱스가 막는다(IntegrityError)."""
     engine, path = at_prev_revision
     _seed_channel(engine, 1)
-    command.upgrade(_alembic_cfg(path), "head")
+    command.upgrade(_alembic_cfg(path), _TARGET_REV)
     s = sessionmaker(bind=engine)()
     s.add(SyncLog(channel_id=1, sync_type="orders", status="running", started_at=kst_now()))
     s.commit()
@@ -136,9 +139,9 @@ def test_downgrade_drops_index_and_upgrade_recreates(at_prev_revision):
     """downgrade는 인덱스를 제거하고, 재업그레이드는 다시 생성한다(라운드트립 무오류)."""
     engine, path = at_prev_revision
     cfg = _alembic_cfg(path)
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, _TARGET_REV)
     assert _index_sql(engine) is not None
     command.downgrade(cfg, "-1")
     assert _index_sql(engine) is None, "downgrade 후 인덱스가 남아있음"
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, _TARGET_REV)
     assert _index_sql(engine) is not None, "재업그레이드 후 인덱스 없음"

@@ -241,8 +241,12 @@ def _push(cfg: dict, data: dict) -> int:
 
 
 def _sales_payload(cfg: dict) -> dict:
-    """report/SALES 날짜 범위(최근 N일, 기본 7) — KST 기준 epoch ms {start,end}."""
-    days = int(cfg.get("sales_days", 7))
+    """report/SALES 날짜 범위(최근 N일, 기본 30) — KST 기준 epoch ms {start,end}.
+
+    S5b/D-13: 7→30일. report/SALES는 단일 POST(저비용)이고 날짜당 1행 교체(idempotent)라
+    윈도우를 넓혀도 안전. 긴 outage도 30일 내 자가복구 + 과거(5/x) 자연 백필.
+    """
+    days = int(cfg.get("sales_days", 30))
     now = datetime.now(KST)
     midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
     start = midnight - timedelta(days=days - 1)
@@ -274,7 +278,8 @@ def _push_sales(cfg: dict, sales_body: str) -> None:
             continue
         days.append({
             "date": d.isoformat(),
-            "ad_spend": int(m.get("DELIVERED_AD_COST") or 0),
+            "ad_spend": int(m.get("DELIVERED_AD_COST") or 0),       # 집행(PA)
+            "all_cost": int(m.get("ALL_DELIVERED_AD_COST") or 0),   # 전체(비-PA 포함, S5a/D-15)
             "conv_sales": int(m.get("AD_ATTRIBUTED_SALES") or 0),
         })
     if not days:
@@ -315,8 +320,12 @@ def _gql(page, payload: list) -> dict | None:
 
 
 def _option_window(cfg: dict) -> tuple[int, int]:
-    """옵션 보고서 날짜 범위(최근 N일, 어제까지) — YYYYMMDD 정수 (start, end)."""
-    days = int(cfg.get("sales_days", 7))
+    """옵션 보고서 날짜 범위(최근 N일, 어제까지) — YYYYMMDD 정수 (start, end).
+
+    S5b/D-13: sales_days(report/SALES, 30)와 디커플 — Billboard 보고서 생성·폴링은 무거우므로
+    option_days(기본 7)로 별도 관리. 옵션×일별은 per-product breakdown용(커버리지 핵심 아님).
+    """
+    days = int(cfg.get("option_days", 7))
     today = datetime.now(KST).date()
     end = today - timedelta(days=1)            # 어제(오늘은 미확정 → 제외)
     start = end - timedelta(days=days - 1)

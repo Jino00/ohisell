@@ -378,6 +378,7 @@ export interface OverviewResponse {
       rg_ad_settlement?: string;      // 표시: 전액 중 광고분(D-16 라이브 조사)
       rg_non_ad_deducted?: string;    // 표시: 전액 중 광고 제외 브레이크다운
       rg_flip_status?: 'applied_full' | 'not_applied_no_data';
+      ad_nonpa_deducted?: string;     // S5a/D-15: 비-PA(전체−집행) net_profit 추가 차감분
     };
     by_option: OverviewAccountRow[];
   };
@@ -385,6 +386,11 @@ export interface OverviewResponse {
     summary: {
       ad_spend: string; impressions: number; clicks: number;
       conv_revenue: string; roas: string | null;
+      // S5a/D-15: report/SALES vendor-level 권위값(쿠팡 광고센터 0.02% 일치). ad_spend는 옵션 rollup.
+      ad_confirmed_pa?: string;       // 집행(DELIVERED, 상품검색광고/PA)
+      ad_confirmed_total?: string;    // 전체(ALL_DELIVERED, 비-PA 포함)
+      ad_confirmed_nonpa?: string;    // 비-PA(전체−집행) = net_profit 추가 차감
+      ad_basis?: string;
     };
     by_option: OverviewAdRow[];
   };

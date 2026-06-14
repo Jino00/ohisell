@@ -717,6 +717,38 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
         "conv_revenue": ad_conv_total,
         "roas": _ratio(ad_conv_total, ad_spend_total),
     }
+
+    # ─── S5a(D-15): 비-PA 광고비 — 전체(ALL) 전환, 계정 단위 net_profit 차감 ───
+    # report/SALES(권위값, 쿠팡 [광고센터] 0.02% 일치)의 ALL_DELIVERED − DELIVERED = 비-PA
+    # (브랜드/디스플레이 등). 비-PA는 옵션 귀속 불가(계정 단위) → RG 플립과 동일하게 account_sum만
+    # 조정하고 by_option(ad_rows)은 운영 ROAS 지표로 불변(D-14 패턴).
+    # ★게이트(codex P1): ad_cost_daily(ADV_SALES)는 '광고주(advertiser) 단위'(현재 오픽스 A01564720
+    #   전용)이고 계정 미태깅(get_ad_cost_totals에 계정 필터 없음). 따라서 '활동 프록시'가 아니라
+    #   '계정 식별'로 게이트한다 — ① account=None(전체): 오픽스가 유일 광고주 → 전액 적용.
+    #   ② 특정 계정: 그 계정 vendor가 광고주 vendor(오픽스)일 때만. WING2 등 타 계정엔 절대 미적용
+    #   (구 'ad_spend_total>0' 프록시는 비-PA만 있는 윈도우 누락 + WING2 옵션PA 생기면 오적용 — 둘 다 결함).
+    #   광고주 vendor는 COUPANG_AD_VENDOR_ID → COUPANG_WING1_VENDOR_ID → "A01564720"(라이브 확정) 순.
+    #   회귀가드: 데이터0 → nonpa=0 불변.
+    from app.services.coupang import ad_cost_sync as _adcost
+    _ad_vendor = (os.getenv("COUPANG_AD_VENDOR_ID")
+                  or os.getenv("COUPANG_WING1_VENDOR_ID") or "A01564720")
+    _apply_nonpa = account is None or acc["vendor_id"] == _ad_vendor
+    _conf = (_adcost.get_ad_cost_totals(db, dfrom, dto)
+             if _apply_nonpa else {"pa": 0, "total": 0, "nonpa": 0})
+    _nonpa = _f(_conf["nonpa"])
+    ad_sum["ad_confirmed_pa"] = _f(_conf["pa"])        # 집행(report/SALES DELIVERED, vendor-level)
+    ad_sum["ad_confirmed_total"] = _f(_conf["total"])  # 전체(report/SALES ALL_DELIVERED)
+    ad_sum["ad_confirmed_nonpa"] = _nonpa              # 비-PA(전체−집행) = net_profit 추가 차감분
+    ad_sum["ad_basis"] = (
+        "ad_spend=option-level PA rollup(per-product breakdown). "
+        "ad_confirmed_*=report/SALES vendor-level(쿠팡 광고센터 0.02% 일치, 정합 대조용). "
+        "net_profit은 전체(집행+비-PA) 차감 — 비-PA는 광고주 계정에만 추가 차감(by_option 불변, D-15)."
+    )
+    # 감사 체인(codex P2-1): net_profit_pre_nonpa(옵션합) → −비-PA → net_profit_pre_rg → −RG → net_profit.
+    account_sum["net_profit_pre_nonpa"] = account_sum["net_profit"]  # 계정 조정(비-PA·RG) 전 = 옵션합
+    account_sum["ad_nonpa_deducted"] = _nonpa
+    account_sum["net_profit"] -= _nonpa
+
     product_sum = {
         "option_count": len(product_rows),
         "order_count": sum(x["order_count"] for x in product_rows),
@@ -749,7 +781,9 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
     #   이중계상 없음. (구 D-15 "광고 제외 차감"은 RG 광고가 XLSX 2P에 있다는 틀린 전제 → 폐기.)
     # D-14: 차감은 summary(account_sum) 레벨만. by_option net_profit은 운영지표로 불변.
     # 회귀 가드: RG 데이터 0이면 rg_total=0 → 플립 no-op(불변).
-    account_sum["net_profit_pre_rg"] = account_sum["net_profit"]  # 대조 기준선(플립 전)
+    # 대조 기준선(RG 플립 전). ★주의(codex P2-1): 이 값은 '비-PA 차감 후·RG 차감 전'이다
+    #   (옵션합=net_profit_pre_nonpa, 비-PA 차감 후=net_profit_pre_rg). 감사 시 체인 구분.
+    account_sum["net_profit_pre_rg"] = account_sum["net_profit"]
     account_sum["rg_settlement_total"] = rg_total                 # ★전액 차감액(VAT後, 광고 포함)
     account_sum["rg_ad_settlement"] = rg_ad_settlement            # 표시: 전액 중 광고분(D-16 라이브 조사)
     account_sum["rg_non_ad_deducted"] = rg_total - rg_ad_settlement  # 표시: 전액 중 광고 제외분(브레이크다운)

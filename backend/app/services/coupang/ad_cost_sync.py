@@ -130,6 +130,8 @@ def _upsert_cost(db: Session, cost_date: date, vendor_id: str,
         row = CoupangAdCostDaily(cost_date=cost_date, vendor_id=vendor_id)
         db.add(row)
     row.day_cost = day_cost
+    # 오늘 running(report/cost)은 PA day_cost만 → 전체=집행으로 둠(비-PA는 확정일 SALES에만, S5a).
+    row.all_day_cost = day_cost
     row.month_cost = month_cost
     row.synced_at = kst_now()
 
@@ -258,23 +260,45 @@ def ingest_ad_cost_days(db: Session, days: list[dict]) -> dict:
 
     각 날짜는 정규행 1개(_SALES_KEY)로 '교체'한다 — 해당 날짜 기존 행(옛 report/cost
     per-campaign 스냅샷 포함)을 전부 삭제 후 삽입. 같은 날짜를 다시 받으면 확정치로 교정.
-    days: [{"date": date, "ad_spend": int, "conv_sales": int}].
+    days: [{"date": date, "ad_spend": int(집행/DELIVERED), "conv_sales": int, "all_cost"?: int|None(전체/ALL)}].
+    S5a/D-15: all_cost = ALL_DELIVERED_AD_COST(전체, 비-PA 포함). None(미제공) 시 ad_spend 폴백(하위호환, 비-PA=0).
+    가드: 전체<집행이면 데이터 이상 → 전체=집행으로 클램프(비-PA 음수 방지).
+    ★머니필드 가시성(codex P2-2): 미제공/클램프를 카운트·로그(필드 깨짐 시 조용히 비-PA=0 되는 것 감지).
     """
     n = 0
+    all_cost_missing = 0   # all_cost 미제공(None) — 구 페처/필드 누락
+    all_cost_clamped = 0   # 전체<집행으로 클램프 — API 필드 이상(예: ALL_DELIVERED=0)
     for d in days:
         cost_date = d["date"]
+        ad_spend = int(d["ad_spend"])
+        raw_all = d.get("all_cost")
+        if raw_all is None:
+            all_cost = ad_spend
+            all_cost_missing += 1
+        else:
+            all_cost = int(raw_all)
+            if all_cost < ad_spend:  # 전체≥집행 불변식(비-PA≥0) — 이상 데이터 방어
+                all_cost = ad_spend
+                all_cost_clamped += 1
         db.query(CoupangAdCostDaily).filter(
             CoupangAdCostDaily.cost_date == cost_date
         ).delete(synchronize_session=False)
         db.add(CoupangAdCostDaily(
             cost_date=cost_date,
             vendor_id=_SALES_KEY,
-            day_cost=int(d["ad_spend"]),
+            day_cost=ad_spend,
+            all_day_cost=all_cost,
             conv_sales=int(d["conv_sales"]),
             month_cost=0,
             synced_at=kst_now(),
         ))
         n += 1
+    if all_cost_missing or all_cost_clamped:
+        log.warning(
+            "광고비 ingest(SALES): all_cost 이상 — missing=%d clamped=%d / days=%d "
+            "(비-PA가 조용히 0 처리됨, 페처 ALL_DELIVERED_AD_COST 필드 점검 필요)",
+            all_cost_missing, all_cost_clamped, n,
+        )
     db.commit()
     # heartbeat green(배너 staleness 기준) — ingest_ad_cost와 동일.
     row = _cookie_row(db)
@@ -286,7 +310,8 @@ def ingest_ad_cost_days(db: Session, days: list[dict]) -> dict:
     row.last_success_at = kst_now()
     db.commit()
     log.info("광고비 ingest(SALES): days=%d", n)
-    return {"ingested_days": n}
+    return {"ingested_days": n, "all_cost_missing": all_cost_missing,
+            "all_cost_clamped": all_cost_clamped}
 
 
 # ════════════════════════════════════════════════
@@ -344,13 +369,14 @@ def claim_refresh(db: Session) -> dict:
 # 조회 헬퍼
 # ════════════════════════════════════════════════
 def get_ad_cost_range(db: Session, start: date, end: date) -> list[dict]:
-    """날짜 범위 광고비 조회. 날짜별 vendor_id 합산."""
+    """날짜 범위 광고비 조회. 날짜별 vendor_id 합산. (S5a: all_day_cost=전체 포함)"""
     from sqlalchemy import func as sqlfunc
 
     rows = (
         db.query(
             CoupangAdCostDaily.cost_date,
             sqlfunc.sum(CoupangAdCostDaily.day_cost).label("day_cost"),
+            sqlfunc.sum(CoupangAdCostDaily.all_day_cost).label("all_day_cost"),
             sqlfunc.sum(CoupangAdCostDaily.conv_sales).label("conv_sales"),
         )
         .filter(
@@ -363,6 +389,35 @@ def get_ad_cost_range(db: Session, start: date, end: date) -> list[dict]:
     )
     return [
         {"date": str(r.cost_date), "day_cost": int(r.day_cost),
+         "all_day_cost": int(r.all_day_cost or r.day_cost),
          "conv_sales": int(r.conv_sales or 0)}
         for r in rows
     ]
+
+
+def get_ad_cost_totals(db: Session, start: date, end: date) -> dict:
+    """확정일(report/SALES, _SALES_KEY) 광고비 합계 — 집행(PA)·전체(ALL)·비-PA. (S5a/D-15)
+
+    command-center 정합성: report/SALES는 쿠팡 [광고센터]와 0.02% 일치하는 권위값.
+    오늘 running(per-vendor 행)은 확정 아니므로 제외(vendor_id==_SALES_KEY만).
+    pa=Σday_cost(DELIVERED), total=Σall_day_cost(ALL_DELIVERED), nonpa=max(0,total-pa).
+    """
+    from sqlalchemy import func as sqlfunc
+
+    row = (
+        db.query(
+            sqlfunc.coalesce(sqlfunc.sum(CoupangAdCostDaily.day_cost), 0),
+            sqlfunc.coalesce(sqlfunc.sum(CoupangAdCostDaily.all_day_cost), 0),
+        )
+        .filter(
+            CoupangAdCostDaily.vendor_id == _SALES_KEY,
+            CoupangAdCostDaily.cost_date >= start,
+            CoupangAdCostDaily.cost_date <= end,
+        )
+        .one()
+    )
+    pa = int(row[0] or 0)
+    total = int(row[1] or 0)
+    if total < pa:  # 전체≥집행 불변식 방어(이상 데이터)
+        total = pa
+    return {"pa": pa, "total": total, "nonpa": total - pa}

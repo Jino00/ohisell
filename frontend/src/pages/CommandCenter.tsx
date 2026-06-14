@@ -224,6 +224,7 @@ function Card({ label, value, sub }: { label: string; value: string; sub?: strin
 // 시스템은 사실/지표만(D-3) — 일치/불일치 판정은 Jino가 옆 화면과 눈으로 대조한다.
 function ReconciliationCard({ data }: { data: OverviewResponse }) {
   const s = data.account.summary;
+  const a = data.ad.summary;
   const Row = ({ label, value, hint, gross }: { label: string; value: string; hint: string; gross?: boolean }) => (
     <div className="flex items-baseline justify-between py-1.5 border-b border-indigo-100 last:border-0">
       <div>
@@ -248,12 +249,14 @@ function ReconciliationCard({ data }: { data: OverviewResponse }) {
         </div>
         <div>
           <div className="text-xs font-medium text-indigo-500 mb-1 mt-3 md:mt-0">광고 (쿠팡 [광고센터])</div>
-          <Row label="집행 광고비" value={s.ad_spend} hint="광고센터 · 집행 광고비(상품검색광고)" />
+          <Row label="전체 광고비 (ALL)" value={a.ad_confirmed_total ?? s.ad_spend} hint="광고센터 · 전체 광고비(비-PA 포함) · net_profit 차감 기준" />
+          <Row label="ㄴ 집행 (상품검색광고/PA)" value={a.ad_confirmed_pa ?? s.ad_spend} hint="광고센터 · 집행 광고비(DELIVERED)" />
+          <Row label="ㄴ 비-PA (브랜드/디스플레이)" value={a.ad_confirmed_nonpa ?? "0"} hint="전체−집행 · net_profit에 추가 차감 반영(D-15)" />
         </div>
       </div>
       <p className="text-xs text-indigo-600 mt-2 bg-indigo-100 rounded px-2 py-1">
         RG 매출은 주문 API 기준 <b>gross(취소 미차감)</b> — 쿠팡 판매분석의 net과 ~5% 차이는 기준 차이이며 계산 오류 아님(D-11).
-        광고는 <b>상품검색광고</b>만 — 쿠팡 "전체 광고비"엔 비-상품검색 광고상품이 더 포함될 수 있음(S5).
+        광고비는 쿠팡 <b>"전체 광고비"(ALL)</b>로 순이익에서 차감 — 집행(상품검색광고)+비-PA(브랜드/디스플레이)로 분해 표시(D-15).
       </p>
     </div>
   );
@@ -319,7 +322,13 @@ function AccountView({ data }: { data: OverviewResponse }) {
         <Card label="매출" value={won(s.revenue)} />
         <Card label="반품 차감" value={won(s.return_deduction)} />
         <Card label="수수료(+VAT)" value={won(s.total_fee)} />
-        <Card label="광고비" value={won(s.ad_spend)} />
+        <Card
+          label="광고비"
+          value={won(s.ad_spend)}
+          sub={Number(s.ad_nonpa_deducted ?? "0") > 0
+            ? `+비-PA ${won(s.ad_nonpa_deducted ?? "0")}(계정 단위, 순이익 차감)`
+            : undefined}
+        />
         <Card label="원가" value={won(s.cost)} sub={`원가반영 ${s.cost_covered_options}/${s.option_count}옵션`} />
         <Card
           label="순이익"
