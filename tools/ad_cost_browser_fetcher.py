@@ -322,17 +322,20 @@ def _gql(page, payload: list) -> dict | None:
 def _option_window(cfg: dict) -> tuple[int, int]:
     """옵션 보고서 날짜 범위(최근 N일, 어제까지) — YYYYMMDD 정수 (start, end).
 
-    S5b/D-13: sales_days(report/SALES, 30)와 디커플 — Billboard 보고서 생성·폴링은 무거우므로
-    option_days(기본 7)로 별도 관리. 옵션×일별은 per-product breakdown용(커버리지 핵심 아님).
+    D-13 후속(2026-06-14): option_days 기본 7→30. 순이익의 PA 광고비(`ad_spend`)는
+    옵션 소스(CoupangAdOptionDaily)에서 차감되는데 7일이면 8~30일차 PA 차감이 누락돼
+    순이익이 과대였다(비-PA는 30일 report/SALES로 이미 차감). 30일로 맞춰 PA 커버리지를
+    비-PA(sales_days 30)와 정렬한다. Billboard 보고서 생성은 무거우나 일1회(_option_due_today)
+    게이트라 비용 제한적 + _do_run이 메인 push 후에 수행해 UI 블록 없음.
     """
-    days = int(cfg.get("option_days", 7))
+    days = int(cfg.get("option_days", 30))
     today = datetime.now(KST).date()
     end = today - timedelta(days=1)            # 어제(오늘은 미확정 → 제외)
     start = end - timedelta(days=days - 1)
     return int(start.strftime("%Y%m%d")), int(end.strftime("%Y%m%d"))
 
 
-def _fetch_option_report(page, cfg: dict, poll_timeout_s: int = 150):
+def _fetch_option_report(page, cfg: dict, poll_timeout_s: int = 300):
     """Billboard 보고서(옵션×일별 keyword XLSX)를 생성·폴링·다운로드 → (filename, bytes)|None.
 
     레퍼런스 16. 인증된 page에서 same-origin 호출. 실패해도 None 반환(메인 push에 무영향).
@@ -619,8 +622,8 @@ def _do_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
     # (headless는 xauth Akamai 차단). config "headless"는 무시(호환 위해 키만 유지).
     # login_wait_secs>0(버튼 트리거): keycloak도 만료면 같은 창에서 로그인 대기 후 fetch.
     res = None
-    sales_body = None  # report/SALES 응답(과거 확정일) — 성공 시 _push_sales로 보강
     option_payload = None  # (filename, bytes) — Billboard 옵션×일별 보고서(일 1회)
+    main_rc: int | None = None  # 메인(report/cost) push 결과 — 컨텍스트 안에서 수행(옵션보고서보다 먼저)
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=False)
@@ -657,19 +660,37 @@ def _do_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
                         return 1
                 elif res.get("status") == 201:
                     _save_state(ctx, state)  # 회전된 세션쿠키 갱신
-                # report/cost 성공 시, 같은 인증 세션으로 report/SALES(과거 확정일)도 1회 수집
+                # 인증 성공(201) 시: 메인(report/cost)+SALES를 먼저 push해 UI를 즉시 unblock한 뒤,
+                # 무거운 옵션×일별 Billboard 보고서(일1회·최대 300s)를 받는다. 옵션보고서를 먼저
+                # 받으면 그 폴링 시간만큼 사용자 버튼(유일 경로)이 지연돼 UI 폴링 윈도우를 초과한다.
                 if res is not None and res.get("status") == 201:
                     try:
-                        _sr = page.evaluate(_SALES_FETCH_JS, _sales_payload(cfg))
-                        sales_body = _sr.get("body") if _sr else None
-                    except Exception as e:
-                        log.warning("report/SALES fetch 실패(무시): %s", str(e)[:100])
-                    # 옵션×일별 Billboard 보고서 — 하루 1회만(생성·폴링 비용). best-effort.
-                    if _option_due_today(cfg):
+                        data = json.loads(res.get("body") or "")
+                    except (ValueError, TypeError) as e:
+                        log.error("응답 JSON 파싱 실패: %s", e)
+                        data = None
+                    # 파싱 실패면 SALES·옵션 둘 다 스킵(세션 상태 의심·codex P2-1).
+                    if data is not None:
+                        main_rc = _push(cfg, data)  # 오늘 running(헤더 "오늘 광고비") — UI 대기값
+                        # report/SALES(과거 확정일·30일) — 메인과 독립(별도 fetch)이라 파싱 성공이면
+                        # main_rc 무관하게 수행(오늘 running이 아직 없어도 어제 백필은 유효). best-effort:
+                        # 예외가 이미 성공한 메인 결과를 뒤엎지 않도록 감싼다(codex P2-2 — push가
+                        # 컨텍스트 안으로 이동해 생긴 새 실패모드 차단).
                         try:
-                            option_payload = _fetch_option_report(page, cfg)
+                            _sr = page.evaluate(_SALES_FETCH_JS, _sales_payload(cfg))
+                            sales_body = _sr.get("body") if _sr else None
+                            if sales_body:
+                                _push_sales(cfg, sales_body)
                         except Exception as e:
-                            log.warning("옵션보고서 수집 실패(무시): %s", str(e)[:100])
+                            log.warning("report/SALES 수집/push 실패(무시): %s", str(e)[:100])
+                        # 무거운 옵션×일별 Billboard 보고서(최대 300s·일1회): 메인 push 성공(0) 시에만.
+                        # 메인 실패면(특히 prod 네트워크 불가) 옵션 fetch+push도 무의미 → 300s 낭비 방지
+                        # (codex P2-1). 과거 데이터라 다음 성공 run에서 따라잡힘(_option_due_today 일1회 게이트).
+                        if main_rc == 0 and _option_due_today(cfg):
+                            try:
+                                option_payload = _fetch_option_report(page, cfg)
+                            except Exception as e:
+                                log.warning("옵션보고서 수집 실패(무시): %s", str(e)[:100])
             finally:
                 ctx.close()
                 browser.close()
@@ -688,19 +709,15 @@ def _do_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
         else:
             log.error("fetch 비정상 status=%s — %s", status, body[:160].replace("\n", " "))
         return 1
-    try:
-        data = json.loads(res.get("body") or "")
-    except (ValueError, TypeError) as e:
-        log.error("응답 JSON 파싱 실패: %s", e)
-        return 1
-    rc = _push(cfg, data)              # 오늘 running(헤더 "오늘 광고비")
-    if sales_body:
-        _push_sales(cfg, sales_body)    # 과거 확정일(어제 등) — best-effort
+    # 옵션보고서 push(컨텍스트 밖 — 바이트는 확보됨). best-effort, 성공 시에만 마커.
     if option_payload:
         fn, content = option_payload
-        if _push_option_xlsx(cfg, fn, content):  # 옵션×일별(상품별 광고비) — best-effort
+        if _push_option_xlsx(cfg, fn, content):  # 옵션×일별(상품별 광고비)
             _mark_option_done(cfg)      # 성공 push 시에만 마커 → 실패 시 다음 run 재시도(codex P1)
-    return rc
+    if main_rc is None:
+        log.error("메인 push 누락(응답 JSON 파싱 실패) — 갱신 실패 처리.")
+        return 1
+    return main_rc
 
 
 _POLL_INTERVAL_S = 15      # 데몬이 갱신 요청을 확인하는 간격(창 안 뜸, 가벼운 GET)
