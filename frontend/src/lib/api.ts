@@ -368,6 +368,10 @@ export interface OverviewResponse {
       service_fee_vat: string; total_fee: string; ad_spend: string;
       cost: string; net_profit: string;
       cost_covered_options: number; option_count: number;
+      // S3/S7(정합성 트랙): 매출 분해 — 쿠팡 판매분석 수동 대조용. revenue = revenue_3p + revenue_rg.
+      revenue_3p?: string;            // 마켓플레이스(Wing) 3P 매출
+      revenue_rg?: string;            // 로켓그로스 매출(gross·취소 미차감, D-11)
+      net_profit_basis?: string;      // 순이익 날짜축 설명(D-9 투명화)
       // S7(D-14/D-16): RG 정산 비용 net_profit 플립 브리지 필드(계정 단위, 전액 차감)
       net_profit_pre_rg?: string;     // 플립 전 순이익
       rg_settlement_total?: string;   // ★net_profit에서 실제 차감된 RG 총액(VAT後, 광고 포함)
@@ -405,10 +409,12 @@ export interface OverviewResponse {
 
 export async function fetchCommandCenter(
   from: string,
-  to: string
+  to: string,
+  account?: string  // COUPANG_WING1|COUPANG_WING2 — 생략/"ALL"=전체(S1, 정합성 트랙)
 ): Promise<OverviewResponse> {
+  const acc = account && account !== "ALL" ? `&account=${account}` : "";
   return fetchApi<OverviewResponse>(
-    `/api/overview/command-center?from=${from}&to=${to}`
+    `/api/overview/command-center?from=${from}&to=${to}${acc}`
   );
 }
 

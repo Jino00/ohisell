@@ -22,7 +22,11 @@
       sync_service.py STALE_RUNNING_TIMEOUT(30min) 회수 가드 + started_at=kst_now() KST통일
       + 마이그레이션 j4k5l6m7n8o9(기존 UTC running 일괄 회수). fixture 5(test_sync_stale_running_lock.py)
       +전체 143 그린. codex 2R(P1-2 마이그로 해소, P1-1 레이스는 Jino 결정으로 후속 task_dd560245 보류).
-      미커밋 — Jino 커밋/배포 지시 대기.
+      **커밋 c424b1b→main push + prod 배포·라이브 검증 완료(2026-06-14)**: os.ohitech.co.kr
+      ohisell-backend(:8001, workers1). DB백업→scp(sync_service.py)→alembic upgrade head
+      (i3j4k5l6m7n8→j4k5l6m7n8o9)→pm2 restart. **prod에 실제 stale 행 있었음**: id=1214 channel_id=3
+      (쿠팡 로켓그로스 계정1, started_at 2026-06-08, 6일째 차단) → 회수(error). 라이브: POST
+      /api/sync/channel/3 status=success(이전엔 '이미 동기화 진행 중' 차단), 새 started_at KST 확인.
   - **현재 정합도**: 오픽스 6/1~6/11 매출 3P 98.6%(2,300,000 vs 쿠팡 2,269,000)·전체 96.6%(5,066,700 vs 4,901,500,
     나머지는 RG 주문 stale[별도 sync]). 광고는 적재값 0.02% 일치(커버리지=S5).
   - **남은 것(의사결정 필요)**: S5 광고 전수 자동화(공식 API 없음, 5/26~6/11만 적재 / 전체 vs 집행 6.2만 조사),

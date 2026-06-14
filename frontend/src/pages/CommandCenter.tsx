@@ -38,6 +38,14 @@ const QUICK = [
   { label: "30일", days: 30 },
 ];
 
+// S7(정합성 트랙 D-4): 계정별 분리 뷰 — 쿠팡 대시보드(계정별)와 1:1 대조의 전제.
+// account_key는 env 매핑(WING1=오픽스 개인회사, WING2=오하이테크). 생략/ALL=전체(법인 합산).
+const ACCOUNTS = [
+  { value: "ALL", label: "전체" },
+  { value: "COUPANG_WING1", label: "오픽스" },
+  { value: "COUPANG_WING2", label: "오하이테크" },
+];
+
 export default function CommandCenter() {
   const today = isoKST(new Date());
   const ago = (n: number) => {
@@ -48,29 +56,32 @@ export default function CommandCenter() {
 
   const [from, setFrom] = useState(ago(7));
   const [to, setTo] = useState(today);
+  const [account, setAccount] = useState("ALL");
   const [axis, setAxis] = useState<Axis>("account");
   const [data, setData] = useState<OverviewResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
 
-  async function load() {
+  // 단일 fetch 코어 — from/to/account를 명시 인자로 받아 stale state 회피.
+  function doFetch(f: string, t: string, acc: string) {
     setLoading(true);
     setError(null);
-    try {
-      setData(await fetchCommandCenter(from, to));
-    } catch (e: any) {
-      setError(e.message);
-    } finally {
-      setLoading(false);
-    }
+    fetchCommandCenter(f, t, acc)
+      .then(setData)
+      .catch((e) => setError(e.message))
+      .finally(() => setLoading(false));
+  }
+
+  function load() {
+    doFetch(from, to, account);
   }
 
   async function syncAndLoad() {
     setSyncing(true);
     try { await syncRealtime(); } catch { /* fail-soft */ }
     setSyncing(false);
-    load();
+    doFetch(from, to, account);
   }
 
   useEffect(() => {
@@ -81,12 +92,13 @@ export default function CommandCenter() {
     const f = ago(days);
     setFrom(f);
     setTo(today);
-    setLoading(true);
-    setError(null);
-    fetchCommandCenter(f, today)
-      .then(setData)
-      .catch((e) => setError(e.message))
-      .finally(() => setLoading(false));
+    doFetch(f, today, account);
+  }
+
+  // 계정 전환 시 즉시 재조회(현재 기간 유지).
+  function applyAccount(acc: string) {
+    setAccount(acc);
+    doFetch(from, to, acc);
   }
 
   return (
@@ -140,6 +152,24 @@ export default function CommandCenter() {
         </button>
       </div>
 
+      {/* 계정 선택 (S7, D-4) — 쿠팡 대시보드(계정별)와 1:1 대조 */}
+      <div className="flex items-center gap-2 mb-4 flex-wrap">
+        <span className="text-xs text-gray-400">계정</span>
+        {ACCOUNTS.map((a) => (
+          <button
+            key={a.value}
+            onClick={() => applyAccount(a.value)}
+            className={`px-3 py-1 text-sm rounded-md border ${
+              account === a.value
+                ? "bg-blue-600 text-white border-blue-600"
+                : "bg-white text-gray-700 border-gray-300 hover:bg-gray-100"
+            }`}
+          >
+            {a.label}
+          </button>
+        ))}
+      </div>
+
       {/* 축 탭 */}
       <div className="flex gap-1 mb-4 border-b border-gray-200">
         {([
@@ -181,6 +211,45 @@ function Card({ label, value, sub }: { label: string; value: string; sub?: strin
       <div className="text-xs text-gray-500">{label}</div>
       <div className="text-lg font-bold text-gray-900">{value}</div>
       {sub && <div className="text-xs text-gray-400">{sub}</div>}
+    </div>
+  );
+}
+
+// S7(정합성 트랙 D-1·D-11): 매출·광고 분해 검산 패널 — 쿠팡 Wing 대시보드와 수동 1:1 대조용.
+// 시스템은 사실/지표만(D-3) — 일치/불일치 판정은 Jino가 옆 화면과 눈으로 대조한다.
+function ReconciliationCard({ data }: { data: OverviewResponse }) {
+  const s = data.account.summary;
+  const Row = ({ label, value, hint, gross }: { label: string; value: string; hint: string; gross?: boolean }) => (
+    <div className="flex items-baseline justify-between py-1.5 border-b border-indigo-100 last:border-0">
+      <div>
+        <span className="text-sm text-gray-700">{label}</span>
+        {gross && <span className="ml-1 text-xs text-indigo-400">(gross·취소 미차감)</span>}
+        <div className="text-xs text-gray-400">{hint}</div>
+      </div>
+      <span className="text-sm font-semibold text-gray-900 tabular-nums">{won(value)}</span>
+    </div>
+  );
+  return (
+    <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-4 mb-4">
+      <div className="text-sm font-semibold text-indigo-800 mb-2">
+        📊 매출·광고 정합성 검산 — 쿠팡 Wing 대시보드와 수동 대조
+      </div>
+      <div className="grid md:grid-cols-2 gap-x-6">
+        <div>
+          <div className="text-xs font-medium text-indigo-500 mb-1">매출 (쿠팡 [판매분석])</div>
+          <Row label="매출 합계 (3P+RG)" value={s.revenue} hint="판매분석 · 전체 매출" />
+          <Row label="ㄴ 마켓플레이스 3P" value={s.revenue_3p ?? "0"} hint="판매분석 · 마켓플레이스" />
+          <Row label="ㄴ 로켓그로스 RG" value={s.revenue_rg ?? "0"} hint="판매분석 · 로켓그로스" gross />
+        </div>
+        <div>
+          <div className="text-xs font-medium text-indigo-500 mb-1 mt-3 md:mt-0">광고 (쿠팡 [광고센터])</div>
+          <Row label="집행 광고비" value={s.ad_spend} hint="광고센터 · 집행 광고비(상품검색광고)" />
+        </div>
+      </div>
+      <p className="text-xs text-indigo-600 mt-2 bg-indigo-100 rounded px-2 py-1">
+        RG 매출은 주문 API 기준 <b>gross(취소 미차감)</b> — 쿠팡 판매분석의 net과 ~5% 차이는 기준 차이이며 계산 오류 아님(D-11).
+        광고는 <b>상품검색광고</b>만 — 쿠팡 "전체 광고비"엔 비-상품검색 광고상품이 더 포함될 수 있음(S5).
+      </p>
     </div>
   );
 }
@@ -239,6 +308,7 @@ function AccountView({ data }: { data: OverviewResponse }) {
   const s = data.account.summary;
   return (
     <>
+      <ReconciliationCard data={data} />
       <RgSettlementCard data={data} />
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
         <Card label="매출" value={won(s.revenue)} />
