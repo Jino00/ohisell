@@ -44,7 +44,8 @@
 - [ ] **S7** 정합성 검산 대시보드 — 쿠팡 vs 우리 자동 대조(회귀 방지)
 
 ## 5. 현재 진행 단계
-- 2026-06-14: **S1~S4 완료·커밋·prod 배포·라이브 검증 완료**. 커밋 5998ef5(S1)·850acbd(S2)·78dad33(S3/S4)·b5236ad(자매 profit_calculator). prod 배포(intelligence.py·overview.py·profit_calculator.py scp + pm2 restart). **라이브 검증**: 오픽스 account=WING1 매출 5,121,400(3P+RG)·전체 5,455,000(배포전 2,701,500). 121 tests·codex 전 sprint pass. **핵심 매출 불일치(RG 52%·2중계상·계정합산) 구조적 해소 완료.** **다음 = S5 광고 전수 자동화**(공식 API 없음 — 의사결정 필요).
+- 2026-06-14: **S1~S4 완료·커밋·prod 배포·라이브 검증 완료**. 커밋 5998ef5(S1)·850acbd(S2)·78dad33(S3/S4)·b5236ad(자매 profit_calculator). prod 배포(intelligence.py·overview.py·profit_calculator.py scp + pm2 restart). **라이브 검증**: 오픽스 account=WING1 매출 5,121,400(3P+RG)·전체 5,455,000(배포전 2,701,500). 121 tests·codex 전 sprint pass. **핵심 매출 불일치(RG 52%·2중계상·계정합산) 구조적 해소 완료.**
+- 2026-06-14(추가): **S2 라우터 보완 커밋 441c458 + prod 배포·라이브 검증 완료**. coupang_ops·naver_ops `/sales-summary` 2중계상 제거(codex 누락 surface 적발). os.ohitech.co.kr `ohisell-backend` 백업→scp 2파일→pm2 restart(#114 online). 라이브: naver /sales-summary 200(revenue 84,921,172/90d)·coupang 200(3,705,660). prod DB 실증 naver 142,858,460→95,016,510(Δ47.84M)·coupang 8,774,720→8,430,720(Δ344K). **다음 = S5 광고 전수 자동화**(공식 API 없음 — 의사결정 필요).
 
 ## 6. 다음 액션
 - S5: 광고 커버리지 — 현재 광고 XLSX가 5/26~6/11만 적재. 전 기간 자동 적재 + 쿠팡 "전체 집행광고비"(1,290,273)와 "집행광고비"(1,228,430, 우리 일치)의 6.2만 차이=상품검색광고 외 광고상품 수집 여부 조사. (광고는 공식 API 없음 — XLSX/GraphQL 자동화, 레퍼런스 16.)
