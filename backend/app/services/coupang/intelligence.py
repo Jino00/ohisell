@@ -267,10 +267,13 @@ def _agg_ads(db: Session, dfrom: date, dto: date,
 
 
 def _agg_returns(db: Session, dfrom: date, dto: date,
-                account_key: str | None = None) -> dict[str, dict]:
+                account_key: str | None = None,
+                channel_ids: list[int] | None = None) -> dict[str, dict]:
     """반품/취소를 옵션ID별 집계. withdrawn=False(철회 제외)만. 사실=반품 수량·건수.
 
-    S1: account_key 주면 해당 계정만(계정 분리, account_key 컬럼 직접 필터). None이면 전체(불변)."""
+    S1: account_key 주면 해당 계정만(계정 분리, account_key 컬럼 직접 필터). None이면 전체(불변).
+    S6(D-12): channel_ids 주면 그 채널 도메인에서 status로 매출제외된 주문라인의 반품행은 제외
+    (reconcile-by-absence와 return_deduction 이중차감 방지). _agg_orders와 동일 도메인으로 대칭."""
     start = datetime.combine(dfrom, time.min)
     end = datetime.combine(dto, time.max)
     q = (
@@ -288,6 +291,32 @@ def _agg_returns(db: Session, dfrom: date, dto: date,
     )
     if account_key is not None:
         q = q.filter(CoupangReturnItem.account_key == account_key)
+    # S6 상호배타(D-12, 머니룰): status가 매출제외(REVENUE_EXCLUDED)된 주문라인의 반품행은 뺀다.
+    # reconcile-by-absence가 '전체취소' 주문을 status=cancelled로 매출에서 제외(권위)하므로,
+    # return_deduction(=unit_price×return_qty)이 또 차감하면 같은 취소를 2번 빼는 이중계상이 된다
+    # (라이브 확정 2026-06-14: 사라진 주문 전부 반품테이블 존재). '부분반품'은 주문이 쿠팡
+    # ordersheets에서 안 사라져 status 활성으로 남으므로 제외 대상이 아니라 여기서 계속 담당한다.
+    # 불변식: return_deduction은 '매출에 잡힌(status 활성) 주문'의 반품에만 적용된다.
+    # 상관(codex P1/P2): _agg_orders의 도메인 규칙을 그대로 미러해, '같은 도메인'에서 같은 주문·라인이
+    # 매출제외(REVENUE_EXCLUDED)된 경우에만 억제 → 매출제외↔반품차감이 대칭(이중차감 0, fail-open 0).
+    #   - Channel.platform=='coupang' (+ channel_ids is not None이면 channel_id IN channel_ids):
+    #     _agg_orders와 동일 채널 범위. None=전체뷰는 전체 쿠팡(등가성: 계정합==전체).
+    #     (Channel.code==account_key는 company 다채널 도메인보다 좁아 RG가 orders 편입 시 비대칭 →
+    #      이중차감 재발 위험. codex R2 권고대로 _agg_orders 도메인으로 대칭화.)
+    #   - platform_product_id == vendor_item_id: 옵션ID 라인 단위(반품 grain과 정렬). vid 전역 UNIQUE.
+    excluded_q = (
+        db.query(Order.id)
+        .join(Channel, Order.channel_id == Channel.id)
+        .filter(
+            Channel.platform == "coupang",
+            Order.order_number == CoupangReturnItem.order_id,
+            Order.platform_product_id == CoupangReturnItem.vendor_item_id,
+            Order.status.in_(tuple(REVENUE_EXCLUDED)),
+        )
+    )
+    if channel_ids is not None:
+        excluded_q = excluded_q.filter(Order.channel_id.in_(channel_ids))
+    q = q.filter(~excluded_q.exists())
     rows = q.group_by(CoupangReturnItem.vendor_item_id).all()
     return {
         str(vid): {
@@ -566,7 +595,7 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
     rg_orders = _agg_rg_orders(db, dfrom, dto, acc["account_key"])
     rg_revenue = _merge_rg_orders(orders, rg_orders)
     ads = _agg_ads(db, dfrom, dto, acc["vendor_id"])
-    returns = _agg_returns(db, dfrom, dto, acc["account_key"])
+    returns = _agg_returns(db, dfrom, dto, acc["account_key"], acc["channel_ids"])
     fees = _agg_fees(db, dfrom, dto, acc["account_key"])
     rg_fees = _agg_rg_settlement_fees(db, dfrom, dto, acc["account_key"])  # D-6/D-7: 대조 뷰용
 
