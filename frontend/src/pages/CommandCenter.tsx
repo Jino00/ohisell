@@ -3,8 +3,12 @@
 import { useState, useEffect, useRef } from "react";
 import {
   fetchCommandCenter,
+  fetchRevenueReconcile,
+  requestWingVendorSummaryRefresh,
+  getWingVendorSummaryRefreshStatus,
   syncRealtime,
   type OverviewResponse,
+  type RevenueReconcile,
   type RgSettlementByAccount,
 } from "../lib/api";
 
@@ -59,23 +63,70 @@ export default function CommandCenter() {
   const [account, setAccount] = useState("ALL");
   const [axis, setAxis] = useState<Axis>("account");
   const [data, setData] = useState<OverviewResponse | null>(null);
+  const [reconcile, setReconcile] = useState<RevenueReconcile | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
+  // 판매분석(vendor-summary) "갱신 버튼" 상태 — 광고비 버튼과 동일 패턴.
+  const [salesRefreshing, setSalesRefreshing] = useState(false);
+  const [salesRefreshMsg, setSalesRefreshMsg] = useState<string | null>(null);
   // 요청 순서 가드(codex S7 P1): 계정/기간을 빠르게 바꾸면 이전 요청이 늦게 도착해
   // 새 선택 화면에 엉뚱한 계정 데이터를 렌더할 수 있다. 검산(reconciliation) 도구라
   // '다른 계정 숫자 표시'는 막으려는 실패 그 자체 → 최신 요청 응답만 반영한다.
   const reqSeq = useRef(0);
+  // 갱신 버튼 완료 시점에 "현재" 선택을 다시 읽기 위한 ref — 클로저로 캡처한 stale
+  // from/to/account로 재조회해 현재 화면을 덮어쓰는 버그 회피(codex S3 P1).
+  const selRef = useRef({ from, to, account });
 
   // 단일 fetch 코어 — from/to/account를 명시 인자로 받아 stale state 회피.
+  // 종합조망(command-center)과 매출 정합성(revenue-reconcile)을 같은 seq로 병렬 조회한다.
   function doFetch(f: string, t: string, acc: string) {
     const seq = ++reqSeq.current;
+    selRef.current = { from: f, to: t, account: acc }; // 최신 선택 기록(갱신 완료 후 재조회용)
     setLoading(true);
     setError(null);
+    // 이전 계정/기간의 드리프트 카드 잔상 제거 — 검산 surface라 stale 표시는 정확성 버그(codex S3 P1).
+    setReconcile(null);
     fetchCommandCenter(f, t, acc)
       .then((d) => { if (seq === reqSeq.current) setData(d); })
       .catch((e) => { if (seq === reqSeq.current) setError(e.message); })
       .finally(() => { if (seq === reqSeq.current) setLoading(false); });
+    // reconcile은 보조 지표 — 실패해도 종합조망 본체는 막지 않는다(fail-soft).
+    fetchRevenueReconcile(f, t, acc)
+      .then((r) => { if (seq === reqSeq.current) setReconcile(r); })
+      .catch(() => { if (seq === reqSeq.current) setReconcile(null); });
+  }
+
+  // "판매분석 갱신" — Mac Wing 데몬(com.ohisell.wing)을 깨워 쿠팡 공식 GMV를 즉시 가져온다
+  // (cf_clearance로 prod 직접 fetch 불가). request-refresh → 데몬 fetch·push →
+  // last_success_at 변화를 폴링해 완료 감지 → reconcile 리로드.
+  async function refreshSalesAnalysisNow() {
+    setSalesRefreshing(true);
+    setSalesRefreshMsg("Mac에서 판매분석 가져오는 중… (~20초, 첫 갱신이면 Mac 로그인 창 확인)");
+    try {
+      const baseline = (await getWingVendorSummaryRefreshStatus()).last_success_at;
+      await requestWingVendorSummaryRefresh();
+      const deadline = Date.now() + 215000; // 215초 — 데몬 로그인 대기(180s)+fetch 여유까지 커버
+      let done = false;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 3000));
+        const st = await getWingVendorSummaryRefreshStatus();
+        if (st.last_success_at && st.last_success_at !== baseline) { done = true; break; }
+      }
+      if (done) {
+        // 대기 중 사용자가 계정/기간을 바꿨을 수 있음 → 현재 선택(selRef)으로 재조회(codex S3 P1).
+        const sel = selRef.current;
+        doFetch(sel.from, sel.to, sel.account);
+        setSalesRefreshMsg("✅ 판매분석 갱신 완료");
+        setTimeout(() => setSalesRefreshMsg(null), 4000);
+      } else {
+        setSalesRefreshMsg("⚠️ Mac 응답 없음 — Mac이 켜져 있는지, 첫 갱신이면 로그인 창을 확인하세요.");
+      }
+    } catch (e: any) {
+      setSalesRefreshMsg("❌ 갱신 요청 실패: " + (e?.message || ""));
+    } finally {
+      setSalesRefreshing(false);
+    }
   }
 
   function load() {
@@ -201,7 +252,15 @@ export default function CommandCenter() {
 
       {data && !loading && (
         <>
-          {axis === "account" && <AccountView data={data} />}
+          {axis === "account" && (
+            <AccountView
+              data={data}
+              reconcile={reconcile}
+              onRefreshSales={refreshSalesAnalysisNow}
+              salesRefreshing={salesRefreshing}
+              salesRefreshMsg={salesRefreshMsg}
+            />
+          )}
           {axis === "ad" && <AdView data={data} />}
           {axis === "product" && <ProductView data={data} />}
         </>
@@ -262,6 +321,141 @@ function ReconciliationCard({ data }: { data: OverviewResponse }) {
   );
 }
 
+// S3(Wing 세션 자동화 트랙): 쿠팡 공식 GMV(판매분석 vendor-summary) 자동 대조 — 드리프트%.
+// 우리 매출(revenue_3p/rg) vs 쿠팡 공식 GMV를 닫힌 과거일 기준으로 비교(D-3). 사실·지표만(D-2) —
+// 일치/불일치 판정·전략 추천 없음. 임계 색상은 사실의 크기 강조일 뿐. 권위값은 계정 지정+완전 적재일 때만(D-7).
+function RevenueDriftCard({
+  reconcile,
+  onRefresh,
+  refreshing,
+  msg,
+}: {
+  reconcile: RevenueReconcile | null;
+  onRefresh: () => void;
+  refreshing: boolean;
+  msg: string | null;
+}) {
+  // 드리프트% 포맷 — official 0이면 백엔드가 null로 준다.
+  const pctFmt = (p: string | null): string => {
+    if (p == null) return "—";
+    const v = Number(p);
+    const sign = v > 0 ? "+" : "";
+    return `${sign}${v.toFixed(2)}%`;
+  };
+  // 임계 색상(사실 크기 강조, 추천 아님): |드리프트|<5% 회색, 5~10% 주황, ≥10% 빨강.
+  const pctColor = (p: string | null): string => {
+    if (p == null) return "text-gray-400";
+    const a = Math.abs(Number(p));
+    if (a >= 10) return "text-red-600";
+    if (a >= 5) return "text-amber-600";
+    return "text-gray-700";
+  };
+
+  // 권위/참고치 라벨(D-7): 집계(account 없음) 또는 부분 적재면 "참고치", 계정 지정+완전 적재면 "권위값".
+  const acc = reconcile?.period.account;
+  const complete = reconcile?.coverage?.complete ?? false;
+  const isReference = !acc || !complete;
+
+  const RefreshButton = (
+    <button
+      onClick={onRefresh}
+      disabled={refreshing}
+      className="flex items-center gap-1.5 px-2.5 py-1 text-xs bg-violet-600 text-white rounded-md hover:bg-violet-700 disabled:opacity-50"
+    >
+      <span className={refreshing ? "animate-spin" : ""}>🔄</span>
+      {refreshing ? "갱신 중…" : "판매분석 갱신"}
+    </button>
+  );
+
+  return (
+    <div className="bg-violet-50 border border-violet-200 rounded-lg p-4 mb-4">
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-sm font-semibold text-violet-800">
+          🔬 매출 자동 대조 — 쿠팡 공식 GMV(판매분석) vs 우리 매출
+        </span>
+        {RefreshButton}
+      </div>
+
+      {msg && (
+        <div className="text-xs text-violet-700 bg-violet-100 rounded px-2 py-1 mb-2">{msg}</div>
+      )}
+
+      {!reconcile && <p className="text-xs text-violet-500">불러오는 중…</p>}
+
+      {reconcile && !reconcile.has_closed_days && (
+        <p className="text-xs text-violet-600">
+          {reconcile.note}
+        </p>
+      )}
+
+      {reconcile && reconcile.has_closed_days && !reconcile.has_official && (
+        <p className="text-xs text-violet-600">
+          쿠팡 공식 판매분석 데이터가 없습니다 — 위 <b>'판매분석 갱신'</b> 버튼으로 Mac 페처가 가져오게 하세요.
+          (닫힌 과거일 {reconcile.period.from} ~ {reconcile.period.closed_through} 기준)
+        </p>
+      )}
+
+      {reconcile && reconcile.has_official && reconcile.official && reconcile.ours && reconcile.drift && (
+        <>
+          <div className="flex items-center gap-2 mb-1.5">
+            <span
+              className={`text-xs font-medium px-1.5 py-0.5 rounded ${
+                isReference
+                  ? "bg-amber-100 text-amber-700"
+                  : "bg-emerald-100 text-emerald-700"
+              }`}
+            >
+              {isReference ? "참고치" : "권위값"}
+            </span>
+            <span className="text-xs text-gray-500">
+              닫힌 과거일 {reconcile.period.from} ~ {reconcile.period.closed_through}
+              {reconcile.coverage && ` · 적재 ${reconcile.coverage.days_with_data}/${reconcile.coverage.expected_days}일`}
+              {!acc && " · 계정 전체(집계)"}
+            </span>
+          </div>
+
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-violet-500 border-b border-violet-200">
+                <th className="py-1 font-medium">구분</th>
+                <th className="py-1 text-right font-medium">우리 매출</th>
+                <th className="py-1 text-right font-medium">쿠팡 공식 GMV</th>
+                <th className="py-1 text-right font-medium">차이</th>
+                <th className="py-1 text-right font-medium">드리프트%</th>
+              </tr>
+            </thead>
+            <tbody className="tabular-nums">
+              {([
+                ["마켓플레이스 3P", reconcile.ours.revenue_3p, reconcile.official.gmv_3p, reconcile.drift.abs_3p, reconcile.drift.pct_3p],
+                ["로켓그로스 RG", reconcile.ours.revenue_rg, reconcile.official.gmv_rg, reconcile.drift.abs_rg, reconcile.drift.pct_rg],
+                ["합계", reconcile.ours.revenue_total, reconcile.official.gmv_total, reconcile.drift.abs_total, reconcile.drift.pct_total],
+              ] as [string, string, number, string, string | null][]).map(([label, ours, official, abs, pct], i, arr) => (
+                <tr key={label} className={`border-b border-violet-100 ${i === arr.length - 1 ? "font-semibold" : ""}`}>
+                  <td className="py-1.5 text-gray-700">{label}</td>
+                  <td className="py-1.5 text-right text-gray-900">{won(ours)}</td>
+                  <td className="py-1.5 text-right text-gray-900">{won(String(official))}</td>
+                  <td className="py-1.5 text-right text-gray-500">{won(abs)}</td>
+                  <td className={`py-1.5 text-right font-semibold ${pctColor(pct)}`}>{pctFmt(pct)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+
+          <p className="text-xs text-violet-600 mt-2 bg-violet-100 rounded px-2 py-1">
+            드리프트% = (우리−쿠팡)/쿠팡 · 닫힌 과거일만 대조(당일 제외, D-3) · 사실·지표만(D-2).
+            {isReference && (
+              <b> ⚠ 참고치 — 권위 판정은 계정 지정(오픽스/오하이테크) + 완전 적재일 때만(D-7).</b>
+            )}
+            <span className="block mt-0.5 text-violet-500">
+              알려진 잔차: 3P 잔여 stale 취소(D-5), RG gross-vs-net(우리 gross·쿠팡 net, D-11) — 계산 오류 아님.
+            </span>
+          </p>
+        </>
+      )}
+    </div>
+  );
+}
+
 function RgSettlementCard({ data }: { data: OverviewResponse }) {
   const rg = data.rg_settlement;
   if (!rg) return null;
@@ -312,11 +506,29 @@ function RgSettlementCard({ data }: { data: OverviewResponse }) {
   );
 }
 
-function AccountView({ data }: { data: OverviewResponse }) {
+function AccountView({
+  data,
+  reconcile,
+  onRefreshSales,
+  salesRefreshing,
+  salesRefreshMsg,
+}: {
+  data: OverviewResponse;
+  reconcile: RevenueReconcile | null;
+  onRefreshSales: () => void;
+  salesRefreshing: boolean;
+  salesRefreshMsg: string | null;
+}) {
   const s = data.account.summary;
   return (
     <>
       <ReconciliationCard data={data} />
+      <RevenueDriftCard
+        reconcile={reconcile}
+        onRefresh={onRefreshSales}
+        refreshing={salesRefreshing}
+        msg={salesRefreshMsg}
+      />
       <RgSettlementCard data={data} />
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
         <Card label="매출" value={won(s.revenue)} />

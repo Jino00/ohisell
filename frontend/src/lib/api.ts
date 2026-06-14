@@ -52,6 +52,61 @@ export function getAdCostRefreshStatus(): Promise<AdCostRefreshStatus> {
   return fetchApi<AdCostRefreshStatus>("/api/coupang/ops/ad-cost/refresh-status");
 }
 
+// ── 쿠팡 매출 정합성 자동 대조 (Wing 세션 자동화 트랙 S2/S3) ──
+// 우리 매출(revenue_3p/rg) vs 쿠팡 공식 GMV(판매분석 vendor-summary)의 닫힌일 드리프트%.
+// 읽기전용(net_profit 불변). Decimal은 백엔드에서 문자열, GMV/일수는 숫자, pct는 official 0이면 null.
+export interface RevenueReconcile {
+  period: { from: string; to: string; closed_through: string | null; account?: string };
+  has_closed_days: boolean;
+  has_official: boolean;
+  coverage: { expected_days: number; days_with_data: number; complete: boolean } | null;
+  official: {
+    gmv_3p: number;
+    gmv_rg: number;
+    gmv_total: number;
+    days_with_data: number;
+    last_refresh: string | null;
+  } | null;
+  ours: { revenue_3p: string; revenue_rg: string; revenue_total: string } | null;
+  drift: {
+    abs_3p: string; abs_rg: string; abs_total: string;
+    pct_3p: string | null; pct_rg: string | null; pct_total: string | null;
+  } | null;
+  note: string;
+}
+
+// account "ALL"(또는 생략)이면 파라미터 미전달(전체 합산·참고치). reconcile API는 COUPANG_WING1/2만 허용.
+export function fetchRevenueReconcile(
+  from: string,
+  to: string,
+  account?: string,
+): Promise<RevenueReconcile> {
+  const params = new URLSearchParams({ from, to });
+  if (account && account !== "ALL") params.set("account", account);
+  return fetchApi<RevenueReconcile>(`/api/overview/revenue-reconcile?${params.toString()}`);
+}
+
+// ── Wing 판매분석(vendor-summary) "갱신 버튼" — 광고비 버튼과 동일 패턴 ──
+// 클릭 → request-refresh 플래그 set → Mac Wing 데몬(com.ohisell.wing)이 fetch·push →
+// refresh-status의 last_success_at가 올라가면 갱신 완료.
+export interface WingVendorSummaryRefreshStatus {
+  requested: boolean;
+  requested_at: string | null;
+  last_success_at: string | null;
+  status: string; // green | red | unknown | none
+  last_error: string | null;
+}
+
+export function requestWingVendorSummaryRefresh(): Promise<{ requested: boolean; requested_at: string }> {
+  return fetchApi("/api/coupang/ops/wing/vendor-summary/request-refresh", { method: "POST" });
+}
+
+export function getWingVendorSummaryRefreshStatus(): Promise<WingVendorSummaryRefreshStatus> {
+  return fetchApi<WingVendorSummaryRefreshStatus>(
+    "/api/coupang/ops/wing/vendor-summary/refresh-status",
+  );
+}
+
 // 일별 광고비(coupang_ad_cost_daily, Mac 페처가 채움) 날짜 범위 조회.
 export function getCoupangAdCostDaily(
   start: string,
