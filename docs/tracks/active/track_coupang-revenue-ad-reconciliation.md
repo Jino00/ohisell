@@ -59,6 +59,7 @@
 - [x] **S7** 정합성 검산 대시보드 — 종합조망 프론트에 **계정 선택기**(전체/오픽스/오하이테크 → COUPANG_WING1/WING2)+**매출·광고 정합성 검산 패널**(3P/RG/광고 분해, 쿠팡 [판매분석]·[광고센터] 어느 화면과 대조하는지 명시). RG는 gross(취소 미차감, D-11) 라벨·안내문. 커밋 234241c(프론트 본체, 병렬세션 커밋에 휩쓸려 번들됨)+3489779(codex 수정). `frontend/src/lib/api.ts`(account 파라미터+encodeURIComponent+revenue_3p/rg/net_profit_basis 타입)·`CommandCenter.tsx`(ACCOUNTS·doFetch 시퀀스가드·applyAccount·ReconciliationCard). codex 2R pass(P1 요청순서 race→reqSeq useRef 가드·P2 인코딩, revenue_3p/rg `?? "0"` 확인). tsc 빌드 통과. **라이브 self-verify**(원칙22): prod nginx dist 배포(rsync)→ `https://sellc.ohitech.co.kr/command-center` 패널·분해·계정선택기 렌더, 전체 06/08~06/14 매출 3,846,160=3P 1,927,460+RG 1,918,700(검산 일치)·광고 930,493. account 토글 시 `account=COUPANG_WING1` 요청 200. 쿠팡 자동대조는 봇차단으로 미구현(수동 대조 패널로 대체).
 
 ## 5. 현재 진행 단계
+- 2026-06-14(운영 후속): **옵션 보고서 윈도우 7→30일 확대 + _do_run 재정렬 — 커밋 d9b57fc·데몬 재배포·라이브 검증 완료**. 의도: net_profit의 PA 광고비(`ad_spend`)가 `CoupangAdOptionDaily`(옵션 소스)에서 차감되는데 옵션 윈도우가 7일이라 8~30일차 PA 누락→순이익 과대였음(HANDOFF §5 알려진 한계). 30일로 확대해 PA 커버리지를 비-PA(sales_days 30)와 정렬. 페처 `_option_window` 기본 7→30, `_fetch_option_report` poll_timeout 150→300s. **★_do_run 재정렬(핵심)**: 페처는 launchd poll 데몬 단일 경로(대시보드 버튼이 유일 fetch 트리거)인데 기존엔 무거운 옵션 보고서(최대 300s)를 받은 뒤에야 메인 report/cost를 push → 버튼 UI(폴링 윈도우 ~215s) 블록. 메인+SALES push를 옵션 fetch 보다 먼저 수행하도록 재정렬. **codex 2R pass**(R1 [P2-1] 옵션 fetch를 data 파싱성공+main_rc==0 게이트, SALES는 파싱성공만 게이트해 과거백필 보존 / R1 [P2-2] SALES fetch+push try/except로 best-effort 보존 — 재정렬로 push가 컨텍스트 안으로 이동해 생긴 새 실패모드 차단 / R2 신규 0). **★라이브 발견·복구(원칙22)**: prod에서 `all_day_cost>day_cost` 0일 확인 → stale 데몬(S5 미재시작, 구 코드가 ALL_DELIVERED 미전송)이 13:00·14:00 버튼클릭으로 6/9~6/13 비-PA 갭을 ingest clobber(`ad_cost_sync.py:274` all_cost None→all=day)로 지웠음. 데몬 재시작(신코드)+풀 트리거 fetch로 복구. **라이브 self-verify**: 옵션 30일 보고서 실적재(1579행·30일·05-15~06-13, 재정렬 로그순서 메인15:55:38→SALES15:55:39→옵션15:55:48 확인)·비-PA 65,677 복원(6/9~6/13)·감사체인 `pre_nonpa 1,939,487−65,677=pre_rg 1,873,810=net_profit` 정확·**기존 미커버 PA구간 5/16~6/5 ad_spend 317,532 차감 확인(확대 효과 실증)**. → HANDOFF §5 알려진 한계 해소.
 - 2026-06-14: **S5 완료·prod 배포·라이브 검증(7/7 — 트랙 코드 작업 완료)**. 커밋 1346b55(pathspec). 배포: prod DB 백업→백엔드 5파일 scp→alembic upgrade(k5l6m7n8o9p0→l6m7n8o9p0q1)→pm2 restart ohisell-backend(#119)→프론트 build+rsync dist(index-fRxRtNZU.js). **라이브 self-verify(원칙22)**: ①Phase1(배포직후) 마이그 백필 all=day→비-PA 0·net_profit 불변(안전 롤아웃) ②페처 수동 run으로 ALL_DELIVERED push+30일 백필(커버리지 13→29일, 5/16~6/13) ③Phase2 prod: all_day_cost>day_cost 6/9~6/13 diag정확일치(비-PA 65,677)·command-center API 오픽스 6/9~6/13 `pre_nonpa 1,939,487−비-PA 65,677=pre_rg 1,873,810=net_profit`(감사체인 정확)·**WING2 ad_nonpa_deducted=0(계정게이트 라이브 확인)**·공개 URL page200+공개API nonpa=65,677. codex 2R pass·167 tests. **트랙 핵심 목표(매출·광고·순이익 정합) 전부 해소.**
 
 - 2026-06-14: **S1~S4 완료·커밋·prod 배포·라이브 검증 완료**. 커밋 5998ef5(S1)·850acbd(S2)·78dad33(S3/S4)·b5236ad(자매 profit_calculator). prod 배포(intelligence.py·overview.py·profit_calculator.py scp + pm2 restart). **라이브 검증**: 오픽스 account=WING1 매출 5,121,400(3P+RG)·전체 5,455,000(배포전 2,701,500). 121 tests·codex 전 sprint pass. **핵심 매출 불일치(RG 52%·2중계상·계정합산) 구조적 해소 완료.**
@@ -69,8 +70,11 @@
 - 2026-06-14(추가): **S7 정합성 검산 대시보드 완료·prod 배포·라이브 검증(6/7)**. 종합조망 프론트에 계정 선택기+매출·광고 분해 검산 패널(수동 대조). 커밋 234241c(본체)+3489779(codex 수정). codex 2R pass·tsc 통과. nginx dist rsync 배포→라이브 패널 렌더(전체 매출 3,846,160=3P 1,927,460+RG 1,918,700, 광고 930,493)·account 토글 200. **⚠️원칙20 — 본 트랙에 병렬 세션 동시작업(D-12·SyncLog 커밋)으로 내 staged 프론트가 병렬 커밋 234241c에 휩쓸림(코드 유실 없음, Jino 인지). pathspec 커밋으로 이후 격리.** **다음 = S5 광고 전수 자동화(유일 잔여, 공식 API 없음 — 의사결정 필요).**
 
 ## 6. 다음 액션
-- S5: 광고 커버리지 — 현재 광고 XLSX가 5/26~6/11만 적재. 전 기간 자동 적재 + 쿠팡 "전체 집행광고비"(1,290,273)와 "집행광고비"(1,228,430, 우리 일치)의 6.2만 차이=상품검색광고 외 광고상품 수집 여부 조사. (광고는 공식 API 없음 — XLSX/GraphQL 자동화, 레퍼런스 16.)
-- 배포: S1~S4 backend 변경을 prod scp + pm2 restart (체크포인트). 프론트 계정 선택 UI는 별도.
+- 트랙 핵심 목표(매출·광고·순이익 정합) + 옵션 30일 후속까지 전부 해소. **운영 단계**.
+- (선택·비긴급) 쿠팡 자동 대조 — 현재 수동 검산 패널. 봇차단 리스크(레퍼런스 16, Jino 플래그) → **구현 전 라이브 읽기전용 조사·접근법 Jino 승인 필수**(추측 구현 금지).
+- (선택) WING2(오하이테크) 광고 시작 시 계정별 광고 fetch 별도 설계.
+- 신규 작업 없으면 트랙 completed/ 이동 + TRACKS.md 갱신.
+- **운영 주의**: 페처 코드 변경 후 반드시 `launchctl kickstart -k gui/$(id -u)/com.ohisell.adcost`로 데몬 재시작(상주 데몬은 메모리 코드라 미재시작 시 stale — 본 세션 비-PA erasure의 근본 원인).
 
 ## 7. 핵심 파일
 | 파일 | 역할 |

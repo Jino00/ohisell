@@ -4,7 +4,13 @@
 
 ## 현재 상태
 - 날짜: 2026-06-14
-- ★★★**트랙: 쿠팡 매출·광고 정합성 — 7/7 코드 완료(운영 단계)** (docs/tracks/active/track_coupang-revenue-ad-reconciliation.md).
+- ★★★**트랙: 쿠팡 매출·광고 정합성 — 7/7 + 옵션30일 후속 완료(운영 단계)** (docs/tracks/active/track_coupang-revenue-ad-reconciliation.md).
+  - **옵션 보고서 7→30일 + _do_run 재정렬·데몬 재배포·라이브 검증(커밋 d9b57fc)**: net_profit PA 광고비(ad_spend)가
+    CoupangAdOptionDaily에서 차감되는데 옵션 7일이라 8~30일차 PA 누락→과대. 30일로 PA 커버리지를 비-PA(30일)와 정렬.
+    재정렬=페처(launchd poll 데몬 단일경로)가 무거운 옵션보고서 전에 메인+SALES push해 버튼 UI(215s 윈도우) 블록 방지.
+    codex 2R pass(P2-1 옵션 main_rc==0 게이트·P2-2 SALES try/except). ★라이브 발견: stale 데몬(S5 미재시작)이
+    비-PA 갭 clobber(ingest all_cost None→all=day) → 데몬 재시작+풀트리거로 복구. 라이브: 옵션30일 1579행·비-PA 65,677
+    복원·감사체인 정확·미커버 PA구간 5/16~6/5 ad_spend 317,532 차감 실증. **운영주의: 페처 변경 후 launchctl kickstart -k 필수.**
   - **S5 완료·prod 배포·라이브 검증(커밋 1346b55)**: 비-PA 전체(ALL)전환 D-15 + 커버리지30일 D-13.
     비-PA=report/SALES ALL_DELIVERED−DELIVERED(같은 응답·봇리스크0). all_day_cost 컬럼+alembic l6m7n8o9p0q1.
     계정식별 게이트로 net_profit−=비-PA(계정단위·by_option 불변·RG플립 패턴). 페처 ALL push+sales_days 7→30(백필 5/16~).
