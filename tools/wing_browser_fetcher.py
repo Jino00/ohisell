@@ -603,6 +603,7 @@ RG_REQUEST_DOWNLOAD_PATH = "/tenants/rfm/v2/settlements/request-download/api"
 RG_DOWNLOAD_LIST_PATH = "/tenants/rfm/v2/settlements/download-list/api"
 RG_DOWNLOAD_V2_PATH = "/tenants/rfm/v2/settlements/download/api/v2"
 RG_UPLOAD_PATH = "/api/coupang/ops/rg/settlement/upload-xlsx"
+RG_PRODUCT_SIZE_UPLOAD_PATH = "/api/coupang/ops/rg/product-size/upload-xlsx"
 # 전체 sellerReportType 목록 (ExcelModal.js i18n에서 확보, 2026-06-15 라이브 API 검증 완료).
 # 파서 검증 완료: WAREHOUSING_SHIPPING(입출고/배송비). 나머지 8종은 API 200 확인·파서 미구현.
 # 설정 파일 rg_report_types로 override 가능.
@@ -753,7 +754,11 @@ def _rg_download_one(page, group_key: str, report_type: str, req_time_ms: int, p
 
 
 def _rg_push_xlsx(cfg: dict, url: str, report_type: str, group_key: str) -> int:
-    """S3에서 xlsx GET(무인증·24h) → prod 업로드(기존 ingest 재사용). 0=성공/1=실패."""
+    """S3에서 xlsx GET(무인증·24h) → prod 업로드. 0=성공/1=실패.
+
+    PRODUCT_SIZE_COMPARISON: 실측 사이즈 전용 엔드포인트로 push.
+    나머지: 기존 정산 ingest 엔드포인트 사용.
+    """
     try:
         r = requests.get(url, timeout=90)
         r.raise_for_status()
@@ -762,12 +767,20 @@ def _rg_push_xlsx(cfg: dict, url: str, report_type: str, group_key: str) -> int:
         return 1
     content = r.content
     filename = url.split("?", 1)[0].rsplit("/", 1)[-1] or f"{report_type}.xlsx"
+
+    if report_type == "PRODUCT_SIZE_COMPARISON":
+        upload_path = RG_PRODUCT_SIZE_UPLOAD_PATH
+        params = {"source_group_key": group_key}
+    else:
+        upload_path = RG_UPLOAD_PATH
+        # account_key 명시(codex P1#3): S3 경로 파일명에만 의존하지 않고 설정 계정으로 직접 지정.
+        #   백엔드는 명시 account_key와 파일명 vendor_id 일치도 검증(WING1↔A01564720) → 오배치도 차단.
+        params = {"account_key": cfg["account_key"]}
+
     try:
         pr = requests.post(
-            cfg["prod_base_url"].rstrip("/") + RG_UPLOAD_PATH,
-            # account_key 명시(codex P1#3): S3 경로 파일명에만 의존하지 않고 설정 계정으로 직접 지정.
-            #   백엔드는 명시 account_key와 파일명 vendor_id 일치도 검증(WING1↔A01564720) → 오배치도 차단.
-            params={"account_key": cfg["account_key"]},
+            cfg["prod_base_url"].rstrip("/") + upload_path,
+            params=params,
             files={"file": (filename, content, _XLSX_MIME)},
             headers={"X-Ingest-Token": cfg["ingest_token"]},
             timeout=60,

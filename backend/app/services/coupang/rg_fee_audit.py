@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.models import (
     CoupangProductItem,
+    CoupangProductSize,
     CoupangRgOrderItem,
     CoupangRgSettlementFee,
 )
@@ -79,6 +80,16 @@ def _load_fees(
     return out
 
 
+def _load_coupang_sizes(db: Session) -> dict[str, str]:
+    """옵션ID → 쿠팡 실측 사이즈 등급. 배치 1회 조회(원칙 18-8).
+
+    쿠팡이 물류센터에서 측정한 값이 과금 기준 → anomaly 판단 최우선.
+    없으면 호출자가 등록 치수 기반 분류로 폴백.
+    """
+    rows = db.query(CoupangProductSize.vendor_item_id, CoupangProductSize.size_type).all()
+    return {str(r[0]): r[1] for r in rows}
+
+
 def _load_qty(
     db: Session, account_key: str | None, date_from: date | None, date_to: date | None
 ) -> dict[str, dict[str, int]]:
@@ -119,6 +130,8 @@ def build_fee_audit(
     dims = _load_dims(db, account_key)
     fees = _load_fees(db, account_key, date_from, date_to)
     qty = _load_qty(db, account_key, date_from, date_to)
+    # 쿠팡 실측 사이즈 배치 로드 — 과금 기준이므로 anomaly 판단 최우선(원칙 18-8)
+    coupang_sizes = _load_coupang_sizes(db)
 
     items: list[dict] = []
     for vii, fee_by_type in fees.items():
@@ -132,6 +145,7 @@ def build_fee_audit(
             d.get("width_mm"), d.get("length_mm"), d.get("height_mm"), d.get("weight_g"),
             delivery_amount=delivery, warehousing_amount=warehousing,
             quantity=q, order_count=orders,
+            coupang_size_type=coupang_sizes.get(vii),
         )
         items.append({
             "vendor_item_id": vii,

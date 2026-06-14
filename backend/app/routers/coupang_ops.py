@@ -26,7 +26,7 @@ from app.database import get_db
 from app.models import Channel, CoupangAdCostDaily, CoupangAdOptionDaily, CoupangProductItem, CoupangRevenueFee, CoupangRgInbound, CoupangRgOrderItem, CoupangRgSettlementFee, Order, ProductChannelMapping, ProductMaster
 from app.routers._coupang_write_http import handle_write as _handle_write
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
-from app.services.coupang import ad_cost_sync, coupon_write, lead_time_estimator, product_write, rg_fee_audit, rg_inbound_sync, rg_replenishment, rg_settlement_sync, sales_velocity_estimator, vendor_summary_sync
+from app.services.coupang import ad_cost_sync, coupon_write, lead_time_estimator, product_write, rg_fee_audit, rg_inbound_sync, rg_product_size_sync, rg_replenishment, rg_settlement_sync, sales_velocity_estimator, vendor_summary_sync
 from app.utils.crypto import CookieCryptoError
 
 log = logging.getLogger(__name__)
@@ -1519,3 +1519,48 @@ def get_rg_fee_audit(
     if company and company not in ("ALL", "전체"):
         account_key = _RG_ACCOUNT_BY_COMPANY.get(company, "__unknown__")
     return rg_fee_audit.build_fee_audit(db, account_key, date_from=date_from, date_to=date_to)
+
+
+@router.post("/rg/product-size/upload-xlsx")
+async def upload_product_size_xlsx(
+    file: UploadFile = File(...),
+    source_group_key: str | None = Query(default=None, description="출처 정산주기(예 A01564720-2026-06-08-2026-06-14)"),
+    x_ingest_token: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """쿠팡 PRODUCT_SIZE_COMPARISON XLSX 업로드 → coupang_product_size upsert.
+
+    Wing 페처가 자동 push 하거나 수동 업로드 가능. 인증: X-Ingest-Token 필수.
+    """
+    _require_ingest_token(x_ingest_token)
+    filename = file.filename or ""
+    if not filename.lower().endswith(".xlsx"):
+        raise HTTPException(status_code=400, detail="xlsx 파일만 업로드 가능합니다.")
+    content = await file.read()
+    result = rg_product_size_sync.ingest_product_size(db, content, source_group_key=source_group_key)
+    return result
+
+
+@router.get("/rg/product-size")
+def get_product_size(
+    vendor_item_id: str | None = Query(None, description="특정 옵션ID 조회(미지정=전체)"),
+    db: Session = Depends(get_db),
+):
+    """DB에 저장된 쿠팡 실측 사이즈 조회."""
+    from app.models import CoupangProductSize
+    q = db.query(CoupangProductSize)
+    if vendor_item_id:
+        q = q.filter(CoupangProductSize.vendor_item_id == vendor_item_id)
+    rows = q.all()
+    return [
+        {
+            "vendor_item_id": r.vendor_item_id,
+            "size_type": r.size_type,
+            "product_name": r.product_name,
+            "option_name": r.option_name,
+            "source_group_key": r.source_group_key,
+            "synced_at": r.synced_at.isoformat() if r.synced_at else None,
+        }
+        for r in rows
+    ]
+

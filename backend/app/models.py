@@ -1235,6 +1235,35 @@ class CoupangRgSettlementFee(Base):
 
 
 # ──────────────────────────────────────────────
+# 쿠팡 RG 상품별 실측 사이즈 (PRODUCT_SIZE_COMPARISON 보고서)
+# ──────────────────────────────────────────────
+class CoupangProductSize(Base):
+    """쿠팡 물류센터 실측 사이즈 — Wing PRODUCT_SIZE_COMPARISON XLSX 수집.
+
+    쿠팡이 입고 후 물류센터에서 실제 측정한 사이즈 등급을 저장.
+    이 값이 배송비·입출고비 과금 기준이므로 anomaly 판단도 이 값 우선.
+    grain=vendor_item_id (옵션 단위). 정산주기별 upsert(최신 덮어쓰기).
+    """
+
+    __tablename__ = "coupang_product_size"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    vendor_item_id: Mapped[str] = mapped_column(String(30), nullable=False, unique=True, index=True)
+    seller_product_id: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    sku_id: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    product_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    option_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    # 쿠팡 측정 사이즈 등급 (극소형·소형·중형·대형1·대형2·특대형)
+    size_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    # 수집 출처 정산주기 (group_key: A01564720-2026-06-08-2026-06-14)
+    source_group_key: Mapped[Optional[str]] = mapped_column(String(60), nullable=True)
+    synced_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+# ──────────────────────────────────────────────
 # 스케줄러 상태
 # ──────────────────────────────────────────────
 class SchedulerState(Base):

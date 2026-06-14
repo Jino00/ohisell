@@ -26,6 +26,7 @@ def detect_fee_anomalies(
     warehousing_amount: float | None,
     quantity: int | None,
     order_count: int | None = None,
+    coupang_size_type: str | None = None,
 ) -> dict:
     """이상치 플래그 + 근거 수치 반환.
 
@@ -42,10 +43,12 @@ def detect_fee_anomalies(
                           → 과대측정/과오청구 의심(정확 금액표로 확인 필요). floor는 최소치라
                           1~1.x배는 정상 가능 → 배수 임계로 오탐 억제.
     """
-    size_type = classify_size_type(width_mm, length_mm, height_mm, weight_g)
+    # 쿠팡 실측 사이즈가 있으면 우선 사용(과금 기준). 없으면 등록 치수로 분류(폴백).
+    size_type = coupang_size_type or classify_size_type(width_mm, length_mm, height_mm, weight_g)
     flags: list[str] = []
     result: dict = {
         "size_type": size_type,
+        "size_source": "coupang_measured" if coupang_size_type else "registered_dims",
         "per_unit_delivery": None,
         "per_unit_warehousing": None,
         "floor": expected_fee_floor(size_type),
@@ -78,12 +81,14 @@ def detect_fee_anomalies(
         if floor_delivery is not None and per_order_delivery < floor_delivery:
             flags.append("below_floor")
         elif (
-            implied is not None
+            coupang_size_type is None  # 쿠팡 실측값 있으면 스킵 — 실측값이 과금 기준
+            and implied is not None
             and SIZE_TYPES.index(implied) > our_idx
             and floor_delivery is not None
             and per_order_delivery >= floor_delivery * _DELIVERY_OVERCHARGE_MULTIPLE
         ):
-            # 우리 등급보다 큰 사이즈에 정합 + 최소금액 2배+ → 과대측정/과오청구 의심
+            # 쿠팡 실측 사이즈 미수집 + 배송비가 우리 등급보다 큰 사이즈에 정합 + 2배+
+            # → 과대측정 의심. 쿠팡 실측값이 있으면 그 값이 과금 기준이므로 이 추정 불필요.
             flags.append("size_mismatch_high")
 
     if warehousing_amount is not None:
