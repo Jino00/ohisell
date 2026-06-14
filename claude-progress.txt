@@ -4,7 +4,7 @@
 
 ## 현재 상태
 - 날짜: 2026-06-14
-- ★★★**신규 트랙: 쿠팡 매출·광고 정합성** (docs/tracks/active/track_coupang-revenue-ad-reconciliation.md, **4/7**).
+- ★★★**신규 트랙: 쿠팡 매출·광고 정합성** (docs/tracks/active/track_coupang-revenue-ad-reconciliation.md, **5/7**).
   - 문제: 종합조망 매출·광고가 쿠팡 대시보드와 "전혀 안 맞음". 라이브 진단(오픽스 6/1~6/11): 광고는 0.02% 일치,
     매출은 RG 누락 52%·계정 합산·orderPrice 2중계상이 주범.
   - **S1~S4 완료·prod 배포·라이브 검증**(커밋 5998ef5·850acbd·78dad33·b5236ad·12da4d2):
@@ -29,6 +29,16 @@
       /api/sync/channel/3 status=success(이전엔 '이미 동기화 진행 중' 차단), 새 started_at KST 확인.
   - **현재 정합도**: 오픽스 6/1~6/11 매출 3P 98.6%(2,300,000 vs 쿠팡 2,269,000)·전체 96.6%(5,066,700 vs 4,901,500,
     나머지는 RG 주문 stale[별도 sync]). 광고는 적재값 0.02% 일치(커버리지=S5).
+  - **S6-보완 D-12(이중차감) 완료·배포·라이브검증**(커밋 4cc2adc, 2026-06-14 본 세션): 병렬 세션이 S6 base
+    reconcile(c0a94ad)를 커밋·배포했으나, reconcile가 취소주문을 status=cancelled로 매출제외하는데 같은 취소가
+    coupang_return_item에도 있어 command-center `return_deduction`이 또 차감 = **이중차감**(prod 라이브 활성이었음).
+    수정: `_agg_returns`가 `_agg_orders`와 동일 channel 도메인에서 status로 매출제외된 주문라인(order_number+
+    vendor_item_id)의 반품행을 NOT EXISTS로 제외(전체취소=status권위·부분반품=return_deduction담당, 상호배타).
+    codex 3R pass(account·라인 상관 누락→수용, Channel.code==account_key fail-open→채널도메인 대칭화→해소).
+    fixture 7·145 tests·음성체크. **prod 동일스냅샷 self-verify(WING1)**: return_deduction 108,830→80,053
+    (−28,776 이중차감 제거)·cost +7,701(취소라인 net_qty 정상화)·**net_profit 3,515,271→3,536,346(+21,075 과소계상
+    교정)**·revenue/RG 불변. 영향 surface=command-center 1곳(routers/sales-summary·profit_calculator는 반품차감 없음).
+    **원칙22 교훈**: 라이브 syncing prod에서 시간차 before/after는 동기화로 오염(첫 측정 −236k는 오염값) → 동일 스냅샷 toggle로 격리해야 정확.
   - **남은 것(의사결정 필요)**: S5 광고 전수 자동화(공식 API 없음, 5/26~6/11만 적재 / 전체 vs 집행 6.2만 조사),
     S7 정합성 검산 대시보드(프론트, 쿠팡 봇차단으로 자동대조 제한).
   - HANDOFF 직전 작업(아래)은 RG sale_fee 2배 — 완료됨.
