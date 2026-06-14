@@ -6,8 +6,8 @@ from decimal import Decimal
 from typing import Optional
 
 from sqlalchemy import (
-    Boolean, DateTime, Date, ForeignKey, Integer, Numeric,
-    String, Text, UniqueConstraint, func,
+    Boolean, DateTime, Date, ForeignKey, Index, Integer, Numeric,
+    String, Text, UniqueConstraint, func, text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -272,6 +272,20 @@ class SyncLog(Base):
     """동기화 실행 이력"""
 
     __tablename__ = "sync_log"
+
+    # channel별 'running' 1건만 허용하는 partial unique index — 동시 동기화 방지의
+    # check-then-create 레이스를 DB 레벨로 막는다(Codex 교차검증 2026-06-14 P1, task_dd560245).
+    # status!='running' 행(success/error/partial)은 인덱스 대상이 아니라 채널당 무제한 누적 가능.
+    # SQLite·PostgreSQL 둘 다 partial index 지원 → dialect별 where 절 모두 명시.
+    __table_args__ = (
+        Index(
+            "uq_sync_log_one_running_per_channel",
+            "channel_id",
+            unique=True,
+            sqlite_where=text("status = 'running'"),
+            postgresql_where=text("status = 'running'"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id"), nullable=False)

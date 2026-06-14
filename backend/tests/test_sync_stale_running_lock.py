@@ -68,28 +68,41 @@ def test_stale_running_lock_reclaimed(db):
     assert db.get(SyncLog, log_id).status != "running"
 
 
-def test_multiple_stale_locks_all_reclaimed(db):
-    """stale 락이 여러 개면 전부 회수(.first()만으로는 잔존 락이 다음 시도를 또 막음)."""
-    _ch(db)
-    a = _running_log(db, age=STALE_RUNNING_TIMEOUT + timedelta(minutes=5))
-    b = _running_log(db, age=STALE_RUNNING_TIMEOUT + timedelta(minutes=10))
-    db.commit()
-    result = sync_channel_orders(db, 1)
-    assert _BLOCKED_MSG not in result["errors"]
-    assert db.get(SyncLog, a).status != "running"
-    assert db.get(SyncLog, b).status != "running"
+# NOTE(2026-06-14, task_dd560245): channel별 'running' 1건을 강제하는 partial unique index
+# (uq_sync_log_one_running_per_channel)가 추가되면서, 같은 채널에 'running' 2건이 공존하는
+# 시나리오(과거 "stale 여러 개"·"stale+fresh 공존")는 DB 레벨에서 물리적으로 불가능해졌다.
+# 따라서 아래 두 테스트는 회수 루프의 다건 처리 대신, unique index와의 상호작용을 검증하도록
+# 갱신했다. 단건 stale 회수는 test_stale_running_lock_reclaimed가 그대로 커버한다.
+# (인덱스 자체는 test_sync_one_running_per_channel_lock.py에서 검증.)
 
 
-def test_stale_and_fresh_coexist_blocks(db):
-    """stale 1개 + 정상 1개 공존 → 정상 락이 있으므로 차단(거짓 진행 방지). stale은 회수."""
+def test_stale_reclaim_unblocks_new_sync_under_unique_index(db, monkeypatch):
+    """죽은 'running' 락 회수 후 새 동기화가 unique index 아래서도 정상 INSERT된다.
+    회수(status='error')가 새 INSERT보다 먼저 commit되므로 partial unique index와 충돌하지 않는다
+    — reclaim-before-insert 순서가 깨지면 IntegrityError로 동기화가 막힌다."""
     _ch(db)
     stale = _running_log(db, age=STALE_RUNNING_TIMEOUT + timedelta(minutes=5))
+    db.commit()
+    monkeypatch.setattr(sync_service, "_get_client_for_channel", lambda ch, db: _StubClient())
+    result = sync_channel_orders(db, 1)
+    assert result["status"] == "success"          # unique index 위반 없이 완주
+    assert _BLOCKED_MSG not in result["errors"]
+    assert db.get(SyncLog, stale).status != "running"   # 죽은 락 회수됨
+    # 새 동기화는 running→success로 끝나 채널에 'running'이 남지 않는다(중복 running 0건).
+    assert db.query(SyncLog).filter(SyncLog.status == "running").count() == 0
+
+
+def test_fresh_lock_blocks_without_inserting_new_log(db):
+    """진짜 진행 중(fresh) 락이 있으면 INSERT 시도 전에 차단 — 새 SyncLog가 생기지 않는다.
+    차단이 INSERT보다 먼저 일어나 unique index를 건드리지 않고 고아 running 행도 안 남긴다."""
+    _ch(db)
     fresh = _running_log(db, age=timedelta(minutes=1))
     db.commit()
     result = sync_channel_orders(db, 1)
     assert _BLOCKED_MSG in result["errors"]
     assert db.get(SyncLog, fresh).status == "running"   # 정상 락 불변
-    assert db.get(SyncLog, stale).status != "running"   # 죽은 락은 정리
+    # 차단은 INSERT 전이므로 새 행이 추가되지 않는다(running 여전히 1건).
+    assert db.query(SyncLog).count() == 1
 
 
 class _StubClient:

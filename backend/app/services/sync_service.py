@@ -7,6 +7,7 @@ from app.utils.kst import kst_now, kst_today
 from datetime import date, datetime, timedelta
 
 from sqlalchemy import and_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.clients.base import BaseChannelClient, RawOrder
@@ -261,7 +262,22 @@ def sync_channel_orders(
         started_at=kst_now(),
     )
     db.add(sync_log)
-    db.commit()
+    # 레이스 패자 처리(Codex P1, task_dd560245): 위 가드 SELECT↔이 INSERT는 비원자적이라
+    # 같은 channel_id로 동시 요청 2건이 모두 "running 없음"을 읽고 둘 다 여기 도달할 수 있다.
+    # partial unique index(uq_sync_log_one_running_per_channel)가 두 번째 INSERT를 거부하므로
+    # IntegrityError를 잡아 패자는 차단 메시지로 반환한다. stale 회수는 위에서 이미 commit돼
+    # 정상 흐름(승자)에선 충돌하지 않는다.
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        log.info("[sync] 채널 %d 동시 동기화 INSERT 충돌 — 레이스 패자 차단.", channel_id)
+        return {
+            "channel_id": channel_id,
+            "channel_name": channel.name,
+            "status": "error",
+            "errors": ["이미 동기화가 진행 중입니다"],
+        }
 
     new_count = 0
     updated_count = 0
