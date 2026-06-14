@@ -55,7 +55,7 @@
 - 데이터 흐름: WingBrowserFetcher가 세션 유지 → 브라우저측에서 vendor-summary fetch / RG XLSX download → **prod push** → 백엔드 ingest 저장 → revenue_reconcile이 우리 값과 비교 → 검산 패널에 "쿠팡 공식 GMV + 드리프트%" 노출.
 - **계층 배치 주의(D-4/D-5)**: vendor_summary는 백엔드 `requests` client가 아님(cf_clearance 재생 불가). 호출은 Mac 페처 브라우저측, 백엔드는 ingest 수신만.
 
-## 5. 체크리스트 (4/6 — S3 완료, prod 라이브 브라우저 검증 포함)
+## 5. 체크리스트 (5/6 — S4 완료, CDP 모드 전환 + RG 자동수집 prod 라이브 검증)
 - [x] **S0 구조 승인(Jino) + Opus 계획서** — 구조 확정(D-4/D-5), 계획서 `docs/PLAN_wing-session-automation.md`
 - [x] **S1 WingBrowserFetcher(헤드풀 세션) — 라이브 검증 완료** (커밋 eae19d9). login/run 동작, vendor-summary 200·3P/RG 파싱이 ref 18과 원단위 일치(D-6). codex review PASS.
 - [x] **S2 — 완료·codex PASS·183 테스트 그린·prod 라이브 self-verify 완료** (커밋 e2c2560):
@@ -67,13 +67,15 @@
   - 프론트 `frontend/src/lib/api.ts`(fetchRevenueReconcile + requestWingVendorSummaryRefresh/getWingVendorSummaryRefreshStatus + 타입) + `frontend/src/pages/CommandCenter.tsx`(회계축 `RevenueDriftCard`: 쿠팡 공식 GMV 3P/RG + 드리프트% 테이블 + D-7 참고치/권위값 라벨 + D-2 임계 색상[<5% 회색·5~10% 주황·≥10% 빨강, 추천 없음] + '판매분석 갱신' 버튼[광고 패턴 복제]).
   - codex 대화 2R: P1 2건 수정(① doFetch 시작 시 `setReconcile(null)`로 이전 계정 드리프트 잔상 제거 ② `selRef`로 갱신완료 후 stale 클로저 인자 회피 — 둘 다 line66 reqSeq 가드와 같은 검산 surface 정합성 원칙). round2 findings none.
   - **★prod 라이브 self-verify(원칙22, 2026-06-14)**: `npm run build`(dist index-Wu_C9ezR.js)→`rsync -az --delete frontend/dist/ → prod nginx`. prod 서빙 해시 일치 확인. browse로 `/command-center` 오픽스(WING1) 선택→**RevenueDriftCard 라이브 렌더**: 권위값 라벨·닫힌 과거일 6/8~6/13·적재 6/6일·3P 우리 1,724,230/공식 1,693,230/+1.83%·RG 1,918,700/1,786,500/+7.40%·합계 3,642,930/3,479,730/+4.69%(=ref18 원단위), 콘솔 에러 0. reconcile API 라이브 official complete=true.
-- [ ] **S4 RG정산 자동수집(S6-auto) 흡수** (D-8, 3 Phase):
-  - [~] S4-P1 페처 RG 다운로드 흐름 이식(status/api 주기열거→request-download→download-list 폴링→download/api/v2→S3 GET→기존 `/rg/settlement/upload-xlsx` push) + `rg` CLI. **코드 완료·컴파일 OK. de-risk 라이브 실측만 미완(Akamai 일시차단)** — WAREHOUSING_SHIPPING 1종 end-to-end는 Akamai-free 창에서.
-  - [x] S4-P2 트리거 **코드 완료·191 테스트 그린·codex 3R PASS**: RG 새로고침 플래그(`rg_request/refresh_status/claim_refresh`+heartbeat, vendor-summary 미러, 상태행 COUPANG_WING_RG) + 라우터 3종(`/wing/rg-settlement/{request-refresh,refresh-status,refresh-claim}`) + 데몬 `cmd_poll` RG 분기(온디맨드 claim + 새벽 일일예약 rg_daily_hour) + **upload-xlsx 토큰 인증 추가(C, 회계 보호)**. codex P1 3건 수정(데몬 RG 미소비·dup 오기간·account_key 명시)·P2 1건 근거수용. 세션감지=정산 status/api(`_rg_session_ok`).
-  - [ ] S4-P3 prod 배포 + 라이브 self-verify(P1 라이브 실측과 함께, Akamai-free 창).
+- [x] **S4 RG정산 자동수집(S6-auto) 흡수 — 완료·prod 라이브 self-verify** (커밋 509a075+9037817):
+  - [x] S4-P0 **CDP 모드 전환(Akamai 영구 우회)** (커밋 9037817): `_chrome()` 컨텍스트 매니저(cdp_port 설정 시 실제 Chrome `connect_over_cdp`, 미설정 시 레거시 Playwright 하위호환) + `cmd_chrome`(전용 프로필 Chrome 실행) + `_save_state cdp=True` no-op + `_login_wait_loop/_rg_login_wait` cdp 파라미터 전파. **★Akamai Access Denied 문제 근본 해결** — Playwright Chromium 핑거프린트 대신 실제 Chrome 세션 재사용. 설정 `cdp_port=9222·cdp_profile=~/.ohisell_wing_chrome`.
+  - [x] S4-P1 페처 RG 다운로드 흐름 이식(status/api 주기열거→request-download→download-list 폴링→download/api/v2→S3 GET→기존 `/rg/settlement/upload-xlsx` push) + `rg` CLI. **★prod 라이브 self-verify(원칙22)**: 정산주기 `A01564720-2026-06-08-2026-06-14` → push upserted=10·입출고비 120,375·배송비 206,075·검산 diff=0.
+  - [x] S4-P2 트리거 **코드 완료·191 테스트 그린·codex 3R PASS**: RG 새로고침 플래그 + 라우터 3종 + 데몬 RG 분기 + upload-xlsx 토큰 인증.
+  - [x] S4-P3 prod 배포 + self-verify: `upload-xlsx` 무토큰→**401** ✅, `rg-settlement/refresh-status`→**200** ✅. 데몬 복원·일일예약 자동 트리거 확인.
 - [ ] 각 Sprint: codex 교차검증 + prod 라이브 self-verify(원칙22)
 
 ## 6. 현재 진행 단계
+- 2026-06-14 **S4 완료(5/6)** — CDP 모드 전환(Akamai 영구 우회) + RG 정산 자동수집 prod 라이브 self-verify 완료. 커밋 509a075(S4-P1/P2) + 9037817(CDP). 데몬 com.ohisell.wing 복원·일일예약 자동 트리거 동작 확인.
 - 2026-06-14 **S4-P2 완료(코드+191테스트+codex 3R PASS)·S4-P1 코드완료/라이브 실측만 보류**:
   - S4-P2: 백엔드 RG 새로고침 플래그(`rg_settlement_sync` 끝 `rg_request/refresh_status/claim_refresh`+`rg_mark_heartbeat`, 상태행 `COUPANG_WING_RG`) + 라우터 `/api/coupang/ops/wing/rg-settlement/{request-refresh,refresh-status,refresh-claim}` + 데몬 `cmd_poll` RG 분기(온디맨드 claim + 새벽 일일예약) + `upload-xlsx` **X-Ingest-Token 인증 추가**(회계 보호, 프론트 무영향). 페처 세션감지=정산 `status/api`(`_rg_session_ok`/`_rg_login_wait`).
   - **codex 대화 3R PASS(원칙19)**: R1 P1 2건(데몬 RG 미소비·dup 오기간 업로드) 수정, R2 P1 1건(account_key 명시) 수정+P2 1건(claim-before-success) 근거수용, R3 클린. 191 테스트 그린(신규 RG 8: 서비스 6+HTTP 2).
@@ -90,8 +92,7 @@
 - **미관측**(S1과 동일): 세션 만료→회복 경로(데몬 수명 중 실측). cf_clearance 단명 → 만료 시 headful 로그인 대기 폴백. UI '갱신' 버튼의 실제 데몬 round-trip(215s 폴링)은 라이브 클릭 미실측(reconcile API·렌더는 라이브 확인).
 
 ## 7. 다음 액션
-- **S4-P1 라이브 de-risk 재개(쿨다운 후, 이상적 내일 아침)**: ① 잔여 chromium kill(`pkill -f ms-playwright/chromium`) ② 데몬 중지 확인(이미 bootout) ③ `backend/.venv/bin/python3 tools/wing_browser_fetcher.py login`(창에서 Wing 로그인, Akamai 안 막히면 성공) ④ `… rg` 실행 → 정산 페이지 same-origin status/api 200·다운로드·prod push·옵션 적재 검증(WAREHOUSING_SHIPPING). ⑤ 성공 시 데몬 복원(`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ohisell.wing.plist`) + 코드 커밋 + codex.
-- **S4-P2(라이브 검증 후)**: RG 새로고침 플래그 백엔드(vendor-summary 미러: request-refresh/refresh-status/refresh-claim) + 데몬 cmd_poll에 RG 분기(새벽 예약 + 온디맨드 claim). VM 미사용(D-8).
-- **S4-P3**: codex 교차검증 + prod 라이브 self-verify + docs.
-- (선택) UI '판매분석 갱신' 버튼 라이브 클릭 round-trip 실측(데몬 깨우기→215s 폴링→last_success_at 상승→reconcile 리로드).
-- 참고: `frontend/src/pages/CommandCenter.tsx`(RevenueDriftCard)·`frontend/src/lib/api.ts`, ref 18, `tools/wing_browser_fetcher.py`·`tools/com.ohisell.wing.plist`, `backend/app/services/coupang/{vendor_summary_sync,revenue_reconcile}.py`, `backend/app/routers/{coupang_ops,overview}.py`.
+- **S5**: 나머지 7종 sellerReportType 코드명 수집 → `CONFIRMED_SELLER_REPORT_TYPES` 확장 + RG 새로고침 UI 버튼(RevenueDriftCard) 추가.
+- **S6**: (선택) git origin push + RG수수료 S8 size_mismatch_high 4건 + RG발송관제 S7.
+- CDP 모드 주의: Wing Chrome(`cmd_chrome`)이 켜져 있어야 데몬이 CDP 연결 가능. Mac 재부팅 시 `python3 tools/wing_browser_fetcher.py chrome` 먼저 실행 후 `login`.
+- 참고: `tools/wing_browser_fetcher.py`·`tools/com.ohisell.wing.plist`, `~/.ohisell_wing_fetcher.json`(cdp_port/cdp_profile), `backend/app/services/coupang/{vendor_summary_sync,revenue_reconcile,rg_settlement_sync}.py`, `backend/app/routers/coupang_ops.py`.
