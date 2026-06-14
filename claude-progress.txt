@@ -4,7 +4,9 @@
 
 ## 현재 상태
 - 날짜: 2026-06-14
-- ★★★**활성 트랙: Wing 세션 자동화 — S2 코드 완료(2.5/6), prod 라이브 검증만 남음** (docs/tracks/active/track_wing-session-automation.md). S2 코드 미커밋(스테이징됨), 배포 시 커밋.
+- ★★★**활성 트랙: Wing 세션 자동화 — S2 완료(3/6), prod 라이브 검증 포함** (docs/tracks/active/track_wing-session-automation.md). 커밋 e2c2560.
+  - ★**prod 라이브 self-verify 완료(원칙22)**: prod 배포(백업→6파일 scp→alembic m7n8o9p0q1r2→PM2 #120)→페처 push 14행→`GET /revenue-reconcile?from=2026-06-08&to=2026-06-13&account=COUPANG_WING1` official 3P 1,693,230·RG 1,786,500(=ref18)·드리프트 +1.83%·+7.40%(=ref18 +1.8%·+7.4%)·complete=true. net_profit 불변(2,294,339). 데몬 com.ohisell.wing 설치→request-refresh→자동 claim→fetch→push 사이클 라이브 동작.
+  - 다음=S3: 종합조망 검산 패널에 "쿠팡 공식 GMV(3P/RG)+드리프트%" 컬럼 + '판매분석 갱신' 버튼(백엔드 준비됨). 프론트 작업 → /model sonnet 권장.
   - S0: 구조 확정·승인. D-4 런타임 2분리(Mac 헤드풀 페처 push만 ↔ 백엔드 ingest만), D-5 vendor-summary는 브라우저측 fetch·별도 데몬 com.ohisell.wing. S1(커밋 eae19d9): 페처 라이브 검증·D-6(m-wing CORS).
   - **S2 코드 전부 완료·codex PASS·183 테스트 그린(로컬):**
     - 백엔드: 모델 `CoupangVendorSummaryDaily` + alembic `m7n8o9p0q1r2`(head) + ingest SA `vendor_summary_sync.py`(snapshot upsert·3P(NORMAL)/RG(RFM) GMV 합계·heartbeat/refresh) + Harness `revenue_reconcile.py`(닫힌일 드리프트%·**net_profit 불변 읽기전용**·D-7 커버리지/권위) + 라우터(ingest토큰·refresh 3종 `/api/coupang/ops/wing/vendor-summary/*`·조회 `GET /api/overview/revenue-reconcile`).

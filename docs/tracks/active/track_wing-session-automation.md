@@ -47,25 +47,24 @@
 - 데이터 흐름: WingBrowserFetcher가 세션 유지 → 브라우저측에서 vendor-summary fetch / RG XLSX download → **prod push** → 백엔드 ingest 저장 → revenue_reconcile이 우리 값과 비교 → 검산 패널에 "쿠팡 공식 GMV + 드리프트%" 노출.
 - **계층 배치 주의(D-4/D-5)**: vendor_summary는 백엔드 `requests` client가 아님(cf_clearance 재생 불가). 호출은 Mac 페처 브라우저측, 백엔드는 ingest 수신만.
 
-## 5. 체크리스트 (2.5/6 — S2 코드 완료·prod 라이브 검증만 남음)
+## 5. 체크리스트 (3/6 — S2 완료, prod 라이브 검증 포함)
 - [x] **S0 구조 승인(Jino) + Opus 계획서** — 구조 확정(D-4/D-5), 계획서 `docs/PLAN_wing-session-automation.md`
 - [x] **S1 WingBrowserFetcher(헤드풀 세션) — 라이브 검증 완료** (커밋 eae19d9). login/run 동작, vendor-summary 200·3P/RG 파싱이 ref 18과 원단위 일치(D-6). codex review PASS.
-- [~] **S2 — 코드 완료·codex PASS·183 테스트 그린, prod 라이브 self-verify만 남음(Jino 손 필요)**:
-  - [x] 백엔드 ingest+store SA `vendor_summary_sync.py`(snapshot upsert·3P/RG 합계·heartbeat/refresh) + 모델 `CoupangVendorSummaryDaily` + alembic `m7n8o9p0q1r2`(head).
-  - [x] `revenue_reconcile.py` Harness(닫힌일 드리프트%, 커버리지·권위 D-7, **net_profit 불변·읽기전용**). 라우터: ingest(토큰)·request-refresh·refresh-status·refresh-claim(토큰) `/api/coupang/ops/wing/vendor-summary/*` + 조회 `GET /api/overview/revenue-reconcile`.
-  - [x] 페처 `wing_browser_fetcher.py` prod push 배선(`_push`·`_push_configured` 게이트)·units 캡처·`cmd_poll` 데몬·plist `tools/com.ohisell.wing.plist`. codex PASS(지적0).
-  - [x] 테스트: `test_vendor_summary_reconcile.py`(11, 머니/드리프트/커버리지) + `test_vendor_summary_http.py`(5, HTTP 라운드트립). codex 대화 3R 합의(P1 2건 수정·P2 2건 근거기각·account_key 검증 추가).
-  - [ ] **prod 라이브 self-verify(원칙22 게이트)**: 백엔드 prod 배포(alembic upgrade+PM2 재시작) → 페처 설정(~/.ohisell_wing_fetcher.json) → 헤드풀 Wing 로그인(Jino) → 데몬 등록(com.ohisell.wing) → 갱신 트리거→push→reconcile가 ref18 드리프트(3P+1.8%·RG+7.4%) 재현.
-- [ ] S3 검산 패널 UI에 "쿠팡 공식 GMV + 드리프트%" 컬럼 (request-refresh 버튼은 백엔드 준비됨)
+- [x] **S2 — 완료·codex PASS·183 테스트 그린·prod 라이브 self-verify 완료** (커밋 e2c2560):
+  - 백엔드 ingest+store SA `vendor_summary_sync.py` + 모델 `CoupangVendorSummaryDaily` + alembic `m7n8o9p0q1r2`(head) + `revenue_reconcile.py` Harness(닫힌일 드리프트%, D-7 커버리지·권위, **net_profit 불변·읽기전용**) + 라우터(`/api/coupang/ops/wing/vendor-summary/*` ingest·refresh 3종, `GET /api/overview/revenue-reconcile`).
+  - 페처 `wing_browser_fetcher.py` push 배선(`_push`·게이트)·units 캡처·`cmd_poll` 데몬·plist `tools/com.ohisell.wing.plist`. codex PASS(지적0).
+  - 테스트 16(reconcile 11 + http 5). codex 대화 3R 합의(P1 2건 수정·P2 2건 근거기각·account_key 검증).
+  - **★prod 라이브 self-verify(원칙22, 2026-06-14)**: prod DB 백업→백엔드 6파일 scp→`alembic upgrade head`(l6m7n8o9p0q1→m7n8o9p0q1r2, 테이블 생성)→PM2 재시작(#120). 페처(S1 세션 유효) run→**push 14행(7일×2유형)**→prod ingest. **`GET /revenue-reconcile?from=2026-06-08&to=2026-06-13&account=COUPANG_WING1`: official 3P 1,693,230·RG 1,786,500(=ref18 원단위), ours 3P 1,724,230·RG 1,918,700(=ref18), 드리프트 +1.83%·+7.40%(=ref18 +1.8%·+7.4%), coverage complete=true.** command-center net_profit 불변(2,294,339 반환·읽기전용 확인). 데몬 com.ohisell.wing 설치·로드→request-refresh→**자동 claim→headful fetch→push 사이클 라이브 동작**(last_success 18:28→18:29 진행, status green).
+- [ ] S3 검산 패널 UI에 "쿠팡 공식 GMV + 드리프트%" 컬럼 (request-refresh 버튼·reconcile API 백엔드 준비 완료)
 - [ ] S4 RG정산 자동수집(S6-auto) 흡수
 - [ ] 각 Sprint: codex 교차검증 + prod 라이브 self-verify(원칙22)
 
 ## 6. 현재 진행 단계
-- 2026-06-14 S2: **코드 전부 완료·codex PASS·183 테스트 그린(로컬).** 백엔드(모델+alembic+ingest SA+reconcile Harness+라우터) + 페처(push+poll 데몬+plist). reconcile은 읽기전용(net_profit 불변, 테스트로 입증). HTTP 라운드트립(TestClient 격리DB)으로 토큰401·account_key400·ingest저장·reconcile read-back(official GMV·complete·Decimal직렬화)·refresh트리거/claim 검증.
-- **남은 게이트 = prod 라이브 self-verify(원칙22, Jino 손 필요)**: ① 백엔드를 prod(sellc.ohitech.co.kr)에 배포(rsync/scp + `alembic upgrade head` + PM2 `ohisell-backend` 재시작) ② Mac 페처 설정 `~/.ohisell_wing_fetcher.json`에 `{account_key:"COUPANG_WING1", prod_base_url:"https://sellc.ohitech.co.kr", ingest_token:<AD_INGEST_TOKEN>}` ③ 헤드풀 Wing 로그인(`wing_browser_fetcher.py login`) ④ 데몬 설치(`cp tools/com.ohisell.wing.plist ~/Library/LaunchAgents/` → load) ⑤ request-refresh→push→`GET /api/overview/revenue-reconcile?account=COUPANG_WING1`이 ref18 드리프트 재현 확인.
-- **미관측**(S1과 동일): 세션 만료→회복 경로(데몬 수명 중 실측). `_do_run`/`cmd_poll`은 만료 시 헤드풀 로그인 대기 폴백(광고 패턴 차용).
+- 2026-06-14 **S2 완료(3/6)** — 코드+prod 라이브 self-verify 전부 통과. 자동 대조 파이프라인 가동:
+  Wing 페처(헤드풀 세션) → request-refresh 버튼 → com.ohisell.wing 데몬 claim → headful fetch → prod push → ingest → revenue_reconcile(닫힌일 드리프트%). ref18(3P+1.8%·RG+7.4%) 자동 재현. net_profit 불변.
+- 운영 상태: prod 백엔드 #120, 데몬 com.ohisell.wing 로드(15s 폴, 창은 요청 시만). 페처 설정 `~/.ohisell_wing_fetcher.json`(광고 설정의 base+token 재사용+account_key=COUPANG_WING1). prod DB 백업=`ohisell.db.backup_wingS2_20260614_092642`.
+- **미관측**(S1과 동일): 세션 만료→회복 경로(데몬 수명 중 실측). cf_clearance 단명 → 만료 시 headful 로그인 대기 폴백.
 
 ## 7. 다음 액션
-- **prod 배포 + 라이브 self-verify**(위 §6 게이트 ①~⑤) → 확인되면 S2 완료(3/6) 마킹. 코드는 아직 미커밋(스테이징됨) — 배포 시 커밋.
-- 이후 S3: 종합조망 검산 패널에 "쿠팡 공식 GMV(3P/RG)+드리프트%" 컬럼 + '판매분석 갱신' 버튼(→ POST request-refresh, 백엔드 이미 준비). 임계 초과 시각 강조(사실 표시만, D-2).
-- 참고: ref 18(vendor-summary), `tools/wing_browser_fetcher.py`(페처·push·poll), `tools/com.ohisell.wing.plist`(데몬), `backend/app/services/coupang/{vendor_summary_sync,revenue_reconcile}.py`, `backend/app/routers/{coupang_ops,overview}.py`.
+- **S3**: 종합조망 검산 패널에 "쿠팡 공식 GMV(3P/RG)+드리프트%" 컬럼 + '판매분석 갱신' 버튼(→ POST `/api/coupang/ops/wing/vendor-summary/request-refresh`, 백엔드 준비됨). 드리프트 임계 초과 시각 강조(사실 표시만, D-2). 부분/집계(complete=false) 시 "참고치" 라벨(D-7). 프론트 `CommandCenter.tsx`에 ReconciliationCard 확장.
+- 참고: ref 18(vendor-summary), `tools/wing_browser_fetcher.py`·`tools/com.ohisell.wing.plist`, `backend/app/services/coupang/{vendor_summary_sync,revenue_reconcile}.py`, `backend/app/routers/{coupang_ops,overview}.py`. reconcile API 응답형태=§위 라이브 JSON.
