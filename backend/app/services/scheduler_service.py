@@ -39,12 +39,17 @@ def sync_all_channels_job():
         from app.services.sync_service import sync_channel_orders
 
         channels = db.query(Channel).filter(Channel.api_type != "excel").all()
+        # S6(트랙 D-10): 윈도우 7→30일. 취소는 주문 후 수일~수주 뒤 발생 → 7일이면 놓침.
+        # 넓은 윈도우 + reconcile-by-absence로 사라진(취소) 주문을 cancelled 처리(매출 stale 제거).
+        _to = kst_today()
+        _from = _to - timedelta(days=30)
         for ch in channels:
             try:
-                result = sync_channel_orders(db, ch.id)
+                result = sync_channel_orders(db, ch.id, date_from=_from, date_to=_to)
                 log.info(
-                    "[스케줄러] 채널 %s 동기화 완료: %s (신규: %s)",
+                    "[스케줄러] 채널 %s 동기화 완료: %s (신규: %s, 취소반영: %s)",
                     ch.name, result.get("status"), result.get("new_orders"),
+                    result.get("reconciled_cancelled"),
                 )
             except Exception as e:
                 log.error("[스케줄러] 채널 %s 동기화 에러: %s", ch.name, e)

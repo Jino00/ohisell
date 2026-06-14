@@ -43,6 +43,10 @@ class CoupangClient(CoupangBaseClient, BaseChannelClient):
         path = f"/v2/providers/openapi/apis/api/v4/vendors/{self.vendor_id}/ordersheets"
         all_orders: list[RawOrder] = []
         seen: set[tuple[str, str]] = set()  # (order_id, vendorItemId) 중복 방지
+        # ★완전성 신호(S6, Codex P1#1): 상태/일/페이지 조회 중 하나라도 실패하면 False.
+        # reconcile-by-absence는 이 플래그가 True(전 스윕 성공)일 때만 실행 — 부분조회로
+        # 멀쩡한 주문을 거짓취소(매출 0)하는 사고 방지. 매 호출 시작 시 True로 리셋.
+        self.last_fetch_complete = True
 
         current = date_from
         while current <= date_to:
@@ -61,11 +65,13 @@ class CoupangClient(CoupangBaseClient, BaseChannelClient):
 
                     result = self._request("GET", path, params)
                     if not result:
+                        self.last_fetch_complete = False  # 조회 실패 → 부분조회(S6 reconcile 차단)
                         break
 
                     code = result.get("code")
                     if str(code) != "200":
                         log.error("발주서 조회 실패 (날짜: %s, status: %s): code=%s", day_str, fetch_status, code)
+                        self.last_fetch_complete = False  # 비200 → 부분조회(S6 reconcile 차단)
                         break
 
                     for shipment in result.get("data", []):

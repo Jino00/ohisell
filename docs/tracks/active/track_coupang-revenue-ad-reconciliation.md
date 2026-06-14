@@ -34,13 +34,13 @@
 - (구조 제안에 대해) "그래" → 7-sprint 구조 + D-3 머니룰 방향 승인.
 - "근본적으로 모든 문제를 해결해"
 
-## 4. 체크리스트 (4/7)
+## 4. 체크리스트 (5/7)
 - [x] **S1** 계정 분리 뷰 — command-center account 파라미터(오픽스/오하이테크) ✅ 커밋 5998ef5. prod self-verify(오픽스 매출 2,354,700·광고 1,228,685 쿠팡 일치)·등가성 OK·102 tests·codex 2R pass. D-7: orders는 법인(company) 단위 채널 매핑(불변식 견고). D-8: fees/returns/RG정산은 account_key 컬럼 직접 필터(orphan 0).
 - [x] **S2** orderPrice×quantity 2중계상 버그 수정 (qty>1) ✅ 커밋 850acbd. 매출=Σ(selling_price)(라인총액). prod self-verify 오하이 5,114,380→4,804,180(310,200 제거)·오픽스 불변. 103 tests·codex 1R pass(0). 평행버그 profit_calculator는 task_a9695785(b5236ad, 채널별 _line_revenue 헬퍼·5 site, naver도 영향). **S2-라우터(추가)**: codex 교차리뷰가 누락 2 surface 적발 — `coupang_ops.py:618`·`naver_ops.py:84` `/sales-summary`도 동일 2중계상. 단일채널 집계라 `func.sum(selling_price)`로 직접 수정. 라이브: coupang 1,435,300→1,395,500(Δ39,800)·naver 63,770,420→21,990,820(Δ41.78M, ×수량 64% 과다). cafe24 단가 보존(Δ0). 백엔드 전수 grep=잔여 surface 0. 124 tests·codex 2R pass(P1 0). D-9(머니룰): selling_price 의미 채널별 상이(cafe24=단가, 쿠팡/네이버=라인총액) → 헬퍼/단일채널 직접수정으로 통일.
 - [x] **S3** RG 매출 편입 — CoupangRgOrderItem → 매출 합산. _agg_rg_orders + _merge_rg_orders(vendor_item_id 가산). summary revenue_rg/revenue_3p. prod 오픽스 6/1~6/11 매출 5,121,400(3P 2,354,700+RG 2,766,700) — 쿠팡 4,901,500 대비 +4.5%(stale 취소분, S6). **52% 갭 해소.** ⚠️**RG 이중집계 가드(codex P2, 잠재)**: `coupang_ops /sales-summary`는 `orders`(전 coupang 코드)+`coupang_rg_order_item`을 둘 다 합산. 현재 `orders`에 RG행 0건(WING만)이라 비활성이나, 향후 generic sync가 RG를 `orders`로 적재하면 이중집계. **RG 매출 출처 권위를 단일화**(orders에서 COUPANG_RG* 제외 또는 RG는 rg_order_item만)할 것 — S3 후속 가드.
 - [x] **S4** net_profit 머니룰 — net = 3P_net + (RG_rev − RG_cost − rg_total) (D-3). RG 원가는 cost_master(내부원가 12/14옵션) 반영. rg_total 전액차감 유지(D-16). net_profit_basis 페이로드 명시(D-9 날짜축). fixture 6(D-3 공식·동일vid가산·반품차감 3P단가·계정분리). codex 2R pass(P1#1 unit_price 보존·P1#2 투명화 수용).
 - [ ] **S5** 광고 전수 자동화 — 전 기간 커버리지 + "전체 광고상품"
-- [ ] **S6** 매출 신선도 — 취소·반품 재동기화/차감 정합
+- [x] **S6** 매출 신선도 — reconcile-by-absence + 윈도우 7→30일. 라이브 확정(D-10): 취소주문은 쿠팡 활성 ordersheets에서 사라지고(fetch CANCEL 미조회) 취소접수 없는 취소도 있어 Order.status가 stale→매출 과다. 오픽스 6/1~6/11 잔차 3건 중 1건 반품상쇄·2건(37,800) 순수 stale 확인. `_reconcile_absent_orders`(쿠팡만·**전체조회 성공 시만**[fetch_orders last_fetch_complete]·**grace 10일 inset**[createdAt≤paidAt 경계]·블라스트캡 30%·활성만→cancelled). 스케줄러 윈도우 30일. fixture 9·codex 2R pass(P1#1 부분조회 게이트·P1#2 grace, 잔여 P2 가상계좌 마진→grace 10). 다음 동기화가 stale 취소 자동 제거.
 - [ ] **S7** 정합성 검산 대시보드 — 쿠팡 vs 우리 자동 대조(회귀 방지)
 
 ## 5. 현재 진행 단계

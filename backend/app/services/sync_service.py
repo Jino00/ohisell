@@ -112,6 +112,68 @@ def _truncate_raw_data(raw: dict) -> str | None:
         return None
 
 
+# 매출에 잡히는 활성 주문상태. 취소 시 쿠팡 활성 ordersheets에서 사라짐(S6 reconcile 대상).
+_ACTIVE_ORDER_STATUSES = ("delivered", "confirmed", "shipped")
+
+
+def _reconcile_absent_orders(
+    db: Session, channel_id: int, platform: str,
+    date_from: date, date_to: date, fetched_ids: set[str],
+    *, fetch_complete: bool = True, grace_days: int = 0,
+) -> int:
+    """S6 reconcile-by-absence: 윈도우 내 DB엔 활성인데 쿠팡 전체조회에 없는 주문을 cancelled 처리.
+
+    취소된 주문은 쿠팡 활성 ordersheets에서 사라지고 취소접수(반품 API)도 없을 수 있어(라이브 확정
+    2026-06-14, 트랙 D-10) Order.status가 stale(delivered/confirmed)로 남아 매출이 과다계상된다.
+    전체조회가 성공한 윈도우에서 누락된 활성주문 = 쿠팡에서 사라짐 = 취소로 본다.
+
+    안전장치(거짓취소 방지):
+    - 쿠팡 채널만(disappearance 동작 라이브 확정). 타 채널은 조회 시맨틱이 달라 제외.
+    - **fetch_complete=False면 건너뜀**(Codex P1#1): fetch_orders가 상태/일/페이지 일부라도 실패하면
+      부분 목록이라 멀쩡한 주문을 거짓취소할 수 있음 → 전 스윕 성공 시에만 실행.
+    - fetched_ids 비어있으면 건너뜀(전체조회 0건 → mass-cancel 위험).
+    - **grace_days inset(Codex P1#2)**: fetch는 createdAt 필터, reconcile는 order_date(=paidAt) 필터.
+      createdAt ≤ paidAt이므로 하한을 grace만큼 올리면(예 7일) 후보의 createdAt이 항상 fetch 윈도우
+      안에 들어와 경계 거짓취소(가상계좌 등 결제지연)를 제거. 롤링 윈도우라 커버리지 손실 미미.
+    - 블라스트 반경 캡: 윈도우 활성주문의 30%(최소 5건) 초과 누락이면 부분조회 실패 의심 → 중단.
+    - 활성상태만 변경(cancelled/returned/pending은 불변), order_date 윈도우 내만.
+    반환: cancelled 처리한 건수.
+    """
+    if platform != "coupang" or not fetched_ids or not fetch_complete:
+        return 0
+    eff_from = date_from + timedelta(days=grace_days)
+    if eff_from > date_to:
+        return 0
+    win_start = datetime.combine(eff_from, datetime.min.time())
+    win_end = datetime.combine(date_to, datetime.max.time())
+    candidates = (
+        db.query(Order)
+        .filter(
+            Order.channel_id == channel_id,
+            Order.order_date >= win_start,
+            Order.order_date <= win_end,
+            Order.status.in_(_ACTIVE_ORDER_STATUSES),
+        )
+        .all()
+    )
+    absent = [o for o in candidates if o.order_number not in fetched_ids]
+    if not absent:
+        return 0
+    cap = max(5, int(len(candidates) * 0.3))
+    if len(absent) > cap:
+        log.warning(
+            "[reconcile] 채널 %s 윈도우 %s~%s 사라진 활성주문 %d건 > 캡 %d(활성 %d) — "
+            "조회 불완전 의심, 취소처리 건너뜀(거짓취소 방지).",
+            channel_id, date_from, date_to, len(absent), cap, len(candidates),
+        )
+        return 0
+    for o in absent:
+        o.status = "cancelled"
+    log.info("[reconcile] 채널 %s 사라진 주문 %d건 cancelled(윈도우 %s~%s).",
+             channel_id, len(absent), date_from, date_to)
+    return len(absent)
+
+
 def sync_channel_orders(
     db: Session,
     channel_id: int,
@@ -173,6 +235,7 @@ def sync_channel_orders(
 
     new_count = 0
     updated_count = 0
+    reconciled_cancelled = 0
     errors: list[str] = []
 
     try:
@@ -253,6 +316,20 @@ def sync_channel_orders(
                 db.flush()  # 즉시 flush해서 다음 루프의 SELECT에 반영
                 new_count += 1
 
+        # S6 reconcile-by-absence: 쿠팡에서 사라진(취소) 주문을 cancelled 처리(트랙 D-10).
+        # raw_orders는 위에서 채널 필터(wing/rg) 완료된 목록 → 전체조회 성공 시 fetched_ids로 사용.
+        # fetch_complete=클라이언트 완전성 플래그(부분조회면 reconcile 차단, Codex P1#1).
+        # grace_days=10: createdAt vs paidAt 경계 거짓취소 방지(Codex P1#2). 근거 — 활성(결제완료)
+        # 주문의 created→paid 간격은 카드=즉시, 가상계좌=입금기한(쿠팡 최대 7일) 내 또는 자동취소.
+        # 즉 활성주문의 최대 간격 ≤7일 → 마진 포함 10일이면 후보의 createdAt이 항상 fetch 윈도우 안.
+        # (쿠팡이 가상계좌 기한을 10일 초과로 늘리면 재검토 — 트랙 D-10.)
+        fetched_ids = {r.order_number for r in raw_orders}
+        reconciled_cancelled = _reconcile_absent_orders(
+            db, channel_id, channel.platform, date_from, date_to, fetched_ids,
+            fetch_complete=getattr(client, "last_fetch_complete", False),
+            grace_days=10,
+        )
+
         db.commit()
         sync_log.status = "success"
         sync_log.records_synced = new_count + updated_count
@@ -277,6 +354,7 @@ def sync_channel_orders(
         "status": sync_log.status,
         "new_orders": new_count,
         "updated_orders": updated_count,
+        "reconciled_cancelled": reconciled_cancelled,
         "errors": errors,
     }
 
