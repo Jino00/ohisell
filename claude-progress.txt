@@ -27,6 +27,23 @@
       (i3j4k5l6m7n8→j4k5l6m7n8o9)→pm2 restart. **prod에 실제 stale 행 있었음**: id=1214 channel_id=3
       (쿠팡 로켓그로스 계정1, started_at 2026-06-08, 6일째 차단) → 회수(error). 라이브: POST
       /api/sync/channel/3 status=success(이전엔 '이미 동기화 진행 중' 차단), 새 started_at KST 확인.
+    - **후속 레이스 하드닝 task_dd560245 — 2026-06-14 본 세션 완료·커밋·prod 배포·라이브검증 완료**:
+      커밋 8b4f81e→main push. 배포(sellc.ohitech.co.kr ohisell-backend:8001): DB백업→scp 3파일
+      (sync_service.py·models.py·migration)→alembic upgrade head(j4k5l6m7n8o9→k5l6m7n8o9p0)→pm2 reload.
+      **prod 라이브**: 인덱스 실제 생성 확인(...WHERE status='running'), prod running 0건(cleanup no-op),
+      POST /api/sync/channel/3 status=success·errors=[](try/except 해피패스 무손상)·새 로그 started_at KST.
+      check-then-create 레이스(SELECT↔INSERT 비원자 → 동시요청 2건 둘 다 시작 가능)를 DB 레벨로 차단.
+      ① models.py SyncLog.__table_args__에 partial unique index `uq_sync_log_one_running_per_channel`
+         = sync_log(channel_id) WHERE status='running'(sqlite_where+postgresql_where 둘 다).
+      ② sync_service.py 새 running INSERT db.commit()을 try/except IntegrityError로 감싸 → 충돌 시
+         rollback + {"status":"error","errors":["이미 동기화가 진행 중입니다"]}(레이스 패자). stale 회수는
+         INSERT 전 commit돼 승자는 충돌 안 함.
+      ③ 마이그레이션 k5l6m7n8o9p0(down_rev j4k5l6m7n8o9): dup running cleanup(MAX(id) 채널당 1건 유지·
+         나머지 error 회수) → partial index 생성. maintenance-mode 전제 docstring 명시(PG 이전 시 advisory lock).
+      테스트: test_sync_one_running_per_channel_lock.py(4·인덱스+레이스패자), test_migration_one_running_index.py
+      (4·alembic cleanup/index/enforce/downgrade), 기존 stale 테스트 2건 신규 불변식에 맞게 갱신.
+      **전체 153 그린·단일 head·prod DB 사본 j4→head 라이브검증(원본 불변)**. codex review GATE=PASS(P1 0,
+      P2 2 수용: P2-1→마이그 테스트 추가, P2-2→maintenance-mode 문서화).
   - **현재 정합도**: 오픽스 6/1~6/11 매출 3P 98.6%(2,300,000 vs 쿠팡 2,269,000)·전체 96.6%(5,066,700 vs 4,901,500,
     나머지는 RG 주문 stale[별도 sync]). 광고는 적재값 0.02% 일치(커버리지=S5).
   - **S6-보완 D-12(이중차감) 완료·배포·라이브검증**(커밋 4cc2adc, 2026-06-14 본 세션): 병렬 세션이 S6 base
