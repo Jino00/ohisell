@@ -6,6 +6,8 @@ import {
   fetchRevenueReconcile,
   requestWingVendorSummaryRefresh,
   getWingVendorSummaryRefreshStatus,
+  requestWingRgSettlementRefresh,
+  getWingRgSettlementRefreshStatus,
   syncRealtime,
   type OverviewResponse,
   type RevenueReconcile,
@@ -70,6 +72,9 @@ export default function CommandCenter() {
   // 판매분석(vendor-summary) "갱신 버튼" 상태 — 광고비 버튼과 동일 패턴.
   const [salesRefreshing, setSalesRefreshing] = useState(false);
   const [salesRefreshMsg, setSalesRefreshMsg] = useState<string | null>(null);
+  // RG 정산 "갱신 버튼" 상태 — vendor-summary 갱신 버튼과 동일 패턴.
+  const [rgRefreshing, setRgRefreshing] = useState(false);
+  const [rgRefreshMsg, setRgRefreshMsg] = useState<string | null>(null);
   // 요청 순서 가드(codex S7 P1): 계정/기간을 빠르게 바꾸면 이전 요청이 늦게 도착해
   // 새 선택 화면에 엉뚱한 계정 데이터를 렌더할 수 있다. 검산(reconciliation) 도구라
   // '다른 계정 숫자 표시'는 막으려는 실패 그 자체 → 최신 요청 응답만 반영한다.
@@ -126,6 +131,35 @@ export default function CommandCenter() {
       setSalesRefreshMsg("❌ 갱신 요청 실패: " + (e?.message || ""));
     } finally {
       setSalesRefreshing(false);
+    }
+  }
+
+  // "RG 정산 갱신" — Mac Wing 데몬(com.ohisell.wing)이 RG 정산 XLSX를 다운로드·push.
+  async function refreshRgSettlementNow() {
+    setRgRefreshing(true);
+    setRgRefreshMsg("Mac에서 RG 정산 가져오는 중… (~30초)");
+    try {
+      const baseline = (await getWingRgSettlementRefreshStatus()).last_success_at;
+      await requestWingRgSettlementRefresh();
+      const deadline = Date.now() + 215000;
+      let done = false;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 3000));
+        const st = await getWingRgSettlementRefreshStatus();
+        if (st.last_success_at && st.last_success_at !== baseline) { done = true; break; }
+      }
+      if (done) {
+        const sel = selRef.current;
+        doFetch(sel.from, sel.to, sel.account);
+        setRgRefreshMsg("✅ RG 정산 갱신 완료");
+        setTimeout(() => setRgRefreshMsg(null), 4000);
+      } else {
+        setRgRefreshMsg("⚠️ Mac 응답 없음 — Mac이 켜져 있는지 확인하세요.");
+      }
+    } catch (e: any) {
+      setRgRefreshMsg("❌ 갱신 요청 실패: " + (e?.message || ""));
+    } finally {
+      setRgRefreshing(false);
     }
   }
 
@@ -259,6 +293,9 @@ export default function CommandCenter() {
               onRefreshSales={refreshSalesAnalysisNow}
               salesRefreshing={salesRefreshing}
               salesRefreshMsg={salesRefreshMsg}
+              onRefreshRg={refreshRgSettlementNow}
+              rgRefreshing={rgRefreshing}
+              rgRefreshMsg={rgRefreshMsg}
             />
           )}
           {axis === "ad" && <AdView data={data} />}
@@ -456,21 +493,47 @@ function RevenueDriftCard({
   );
 }
 
-function RgSettlementCard({ data }: { data: OverviewResponse }) {
+function RgSettlementCard({
+  data,
+  onRefresh,
+  refreshing,
+  msg,
+}: {
+  data: OverviewResponse;
+  onRefresh: () => void;
+  refreshing: boolean;
+  msg: string | null;
+}) {
   const rg = data.rg_settlement;
+  const RefreshButton = (
+    <button
+      onClick={onRefresh}
+      disabled={refreshing}
+      className="flex items-center gap-1.5 px-2.5 py-1 text-xs bg-orange-600 text-white rounded-md hover:bg-orange-700 disabled:opacity-50"
+    >
+      <span className={refreshing ? "animate-spin" : ""}>🔄</span>
+      {refreshing ? "갱신 중…" : "RG 정산 갱신"}
+    </button>
+  );
   if (!rg) return null;
   if (!rg.summary.has_data) {
     return (
-      <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-4">
-        <span className="text-sm text-amber-700">🚧 RG 정산 비용(미반영) — 데이터 없음 (sync 필요)</span>
+      <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-4 flex items-center justify-between">
+        <span className="text-sm text-amber-700">🚧 RG 정산 비용(미반영) — 데이터 없음</span>
+        {RefreshButton}
       </div>
     );
   }
   return (
     <div className="bg-orange-50 border border-orange-200 rounded-lg p-4 mb-4">
+      {msg && (
+        <div className="text-xs text-orange-700 bg-orange-100 rounded px-2 py-1 mb-2">{msg}</div>
+      )}
       <div className="flex items-center justify-between mb-2">
         <span className="text-sm font-semibold text-orange-800">✅ RG 정산 비용 — 순이익 반영됨 (계정 단위, 전액 차감)</span>
-        <span className="text-right">
+        <div className="flex items-center gap-2">
+          {RefreshButton}
+          <span className="text-right">
           {/* 헤드라인 = 실제 순이익 차감액 = RG 정산 총액(광고 포함, D-16). 부호 인식(Codex): 양수=차감(−), 음수=환급(+). */}
           {(() => {
             const d = Number(rg.summary.deducted ?? rg.summary.total);
@@ -478,7 +541,8 @@ function RgSettlementCard({ data }: { data: OverviewResponse }) {
             return <span className="text-base font-bold text-orange-900">{sign}{won(String(Math.abs(d)))}{d < 0 ? " (환급)" : ""}</span>;
           })()}
           <span className="block text-xs text-orange-500">광고 {won(rg.summary.ad_settlement ?? '0')} 포함 · 광고제외 {won(rg.summary.non_ad_deducted ?? '0')}</span>
-        </span>
+          </span>
+        </div>
       </div>
       <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
         {rg.by_account.map((a: RgSettlementByAccount) => (
@@ -512,12 +576,18 @@ function AccountView({
   onRefreshSales,
   salesRefreshing,
   salesRefreshMsg,
+  onRefreshRg,
+  rgRefreshing,
+  rgRefreshMsg,
 }: {
   data: OverviewResponse;
   reconcile: RevenueReconcile | null;
   onRefreshSales: () => void;
   salesRefreshing: boolean;
   salesRefreshMsg: string | null;
+  onRefreshRg: () => void;
+  rgRefreshing: boolean;
+  rgRefreshMsg: string | null;
 }) {
   const s = data.account.summary;
   return (
@@ -529,7 +599,7 @@ function AccountView({
         refreshing={salesRefreshing}
         msg={salesRefreshMsg}
       />
-      <RgSettlementCard data={data} />
+      <RgSettlementCard data={data} onRefresh={onRefreshRg} refreshing={rgRefreshing} msg={rgRefreshMsg} />
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
         <Card label="매출" value={won(s.revenue)} />
         <Card label="반품 차감" value={won(s.return_deduction)} />

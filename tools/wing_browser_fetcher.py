@@ -603,7 +603,20 @@ RG_REQUEST_DOWNLOAD_PATH = "/tenants/rfm/v2/settlements/request-download/api"
 RG_DOWNLOAD_LIST_PATH = "/tenants/rfm/v2/settlements/download-list/api"
 RG_DOWNLOAD_V2_PATH = "/tenants/rfm/v2/settlements/download/api/v2"
 RG_UPLOAD_PATH = "/api/coupang/ops/rg/settlement/upload-xlsx"
-# 기본 다운로드 대상 — 파서 검증 완료 1종(ref17 §8-1). 나머지 7종 코드명 확보 후 확장(D-8).
+# 전체 sellerReportType 목록 (ExcelModal.js i18n에서 확보, 2026-06-15 라이브 API 검증 완료).
+# 파서 검증 완료: WAREHOUSING_SHIPPING(입출고/배송비). 나머지 8종은 API 200 확인·파서 미구현.
+# 설정 파일 rg_report_types로 override 가능.
+CONFIRMED_SELLER_REPORT_TYPES = [
+    "CATEGORY_TR",             # 판매수수료 리포트
+    "WAREHOUSING_SHIPPING",    # 입출고/배송비 리포트 (파서 구현)
+    "STORAGE_FEE",             # 보관비 리포트
+    "INVENTORY_COMPENSATION",  # 재고 손실 보상 리포트
+    "BARCODE_LABELING_FEE",    # 부가서비스비 리포트
+    "PRODUCT_SIZE_COMPARISON", # 상품별 사이즈 리포트
+    "CRETURN_PICKUP_RESTOCKING", # 반품 회수/재입고 비용 리포트
+    "VRETURN_HANDLING",        # 반출비 리포트
+    "VRETURN_SHIPPING",        # 반출 배송 서비스비 리포트
+]
 RG_REPORT_TYPES_DEFAULT = ["WAREHOUSING_SHIPPING"]
 _RG_POLL_INTERVAL_S = 8       # download-list 폴링 간격
 _RG_POLL_TIMEOUT_S = 300      # 생성 완료 최대 대기(5분)

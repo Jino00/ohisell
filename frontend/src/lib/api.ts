@@ -107,6 +107,25 @@ export function getWingVendorSummaryRefreshStatus(): Promise<WingVendorSummaryRe
   );
 }
 
+// ── Wing RG 정산 "갱신 버튼" — vendor-summary 갱신 버튼과 동일 패턴 ──
+export interface WingRgSettlementRefreshStatus {
+  requested: boolean;
+  requested_at: string | null;
+  last_success_at: string | null;
+  status: string; // green | red | unknown | none
+  last_error: string | null;
+}
+
+export function requestWingRgSettlementRefresh(): Promise<{ requested: boolean; requested_at: string }> {
+  return fetchApi("/api/coupang/ops/wing/rg-settlement/request-refresh", { method: "POST" });
+}
+
+export function getWingRgSettlementRefreshStatus(): Promise<WingRgSettlementRefreshStatus> {
+  return fetchApi<WingRgSettlementRefreshStatus>(
+    "/api/coupang/ops/wing/rg-settlement/refresh-status",
+  );
+}
+
 // 일별 광고비(coupang_ad_cost_daily, Mac 페처가 채움) 날짜 범위 조회.
 export function getCoupangAdCostDaily(
   start: string,
