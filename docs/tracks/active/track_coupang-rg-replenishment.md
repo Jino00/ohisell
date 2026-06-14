@@ -127,6 +127,7 @@ UI: 상품별 현황(로켓그로스 탭) 컬럼 추가 — `현재고 | 최근 
 
 ## 다음 액션 (S7)
 - **S7 요일/휴일 세분화 지속 개선(D-6)**: 매일 RG order sync로 깨끗한 일자 누적 → 임계(평일8/주말4/휴일2) 넘으면 요일계수 자동 활성(약 2~3주 후 평일계수부터). 별도 코딩 없이 sales_velocity_estimator가 자동 승격.
+- **★2026-06-15 라이브 점검(prod GET /sales-velocity)**: trust_days=11. 게이트 정상 작동 확인(고장 아님) — weekday sample_days 7/min 8(1일 부족)·weekend 3/4·holiday 1/2, 전부 collecting·factor=1.0. **평일계수는 다음 깨끗한 평일 1회 누적 시 자동 승격 임박**. 코딩 불필요, 데이터 누적만 대기.
 - 참고: 쿠키 만료 주기 측정 중. 일일 sync 302 발생 시점 = 만료. D-5대로 잦으면 자동화 검토.
 - ★코드 커밋: S2=b8b6fa5, S3=0dd51f7, S4=0a3b496, S5=cd16ddc(feat)+bf4e41f(docs), S6=ddcd666(feat).
 - 참고(후속 후보): S5 등가성 계약 committed 회귀 테스트(codex nit, 현재는 라이브 self-verify로 대체). pytest 인프라 도입 시 함께.
