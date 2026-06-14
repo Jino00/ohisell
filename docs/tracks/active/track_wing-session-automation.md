@@ -1,7 +1,7 @@
 # 트랙: Wing 세션 자동화 (Wing Session Automation)
 
 > 생성 2026-06-14. 단일 진실 원천(Layer 1). 결정 발생 즉시 갱신.
-> **상태: 4/6 — S0~S3 완료(백엔드 파이프라인 + 종합조망 검산 UI), prod 라이브 검증. 다음=S4 RG정산 자동수집 흡수.**
+> **상태: 6/6 — S5 완료(트랙 종료). 9종 sellerReportType 코드명 확보 + RG 정산 갱신 버튼 prod 라이브 배포.**
 > 상위 컨텍스트: 정합성 트랙(completed) 자동대조 + RG정산 자동수집이 공통으로 막힌 "Wing 세션 freshness"를 한 번에 해결.
 
 ## 1. 목표 (왜 존재하는가)
@@ -55,7 +55,7 @@
 - 데이터 흐름: WingBrowserFetcher가 세션 유지 → 브라우저측에서 vendor-summary fetch / RG XLSX download → **prod push** → 백엔드 ingest 저장 → revenue_reconcile이 우리 값과 비교 → 검산 패널에 "쿠팡 공식 GMV + 드리프트%" 노출.
 - **계층 배치 주의(D-4/D-5)**: vendor_summary는 백엔드 `requests` client가 아님(cf_clearance 재생 불가). 호출은 Mac 페처 브라우저측, 백엔드는 ingest 수신만.
 
-## 5. 체크리스트 (5/6 — S4 완료, CDP 모드 전환 + RG 자동수집 prod 라이브 검증)
+## 5. 체크리스트 (6/6 — S5 완료, 트랙 종료)
 - [x] **S0 구조 승인(Jino) + Opus 계획서** — 구조 확정(D-4/D-5), 계획서 `docs/PLAN_wing-session-automation.md`
 - [x] **S1 WingBrowserFetcher(헤드풀 세션) — 라이브 검증 완료** (커밋 eae19d9). login/run 동작, vendor-summary 200·3P/RG 파싱이 ref 18과 원단위 일치(D-6). codex review PASS.
 - [x] **S2 — 완료·codex PASS·183 테스트 그린·prod 라이브 self-verify 완료** (커밋 e2c2560):
@@ -72,9 +72,21 @@
   - [x] S4-P1 페처 RG 다운로드 흐름 이식(status/api 주기열거→request-download→download-list 폴링→download/api/v2→S3 GET→기존 `/rg/settlement/upload-xlsx` push) + `rg` CLI. **★prod 라이브 self-verify(원칙22)**: 정산주기 `A01564720-2026-06-08-2026-06-14` → push upserted=10·입출고비 120,375·배송비 206,075·검산 diff=0.
   - [x] S4-P2 트리거 **코드 완료·191 테스트 그린·codex 3R PASS**: RG 새로고침 플래그 + 라우터 3종 + 데몬 RG 분기 + upload-xlsx 토큰 인증.
   - [x] S4-P3 prod 배포 + self-verify: `upload-xlsx` 무토큰→**401** ✅, `rg-settlement/refresh-status`→**200** ✅. 데몬 복원·일일예약 자동 트리거 확인.
-- [ ] 각 Sprint: codex 교차검증 + prod 라이브 self-verify(원칙22)
+- [x] **S5 9종 sellerReportType 코드명 확보 + RG 정산 갱신 버튼 prod 라이브 배포** (커밋 d421d95):
+  - **ExcelModal.js i18n + request-download/api 라이브 검증**으로 9종 전수 확인:
+    - `CATEGORY_TR` (판매수수료), `WAREHOUSING_SHIPPING` (입출고/배송비·파서구현), `STORAGE_FEE` (보관비)
+    - `INVENTORY_COMPENSATION` (재고손실보상), `BARCODE_LABELING_FEE` (부가서비스비)
+    - `PRODUCT_SIZE_COMPARISON` (상품별사이즈), `CRETURN_PICKUP_RESTOCKING` (반품회수/재입고)
+    - `VRETURN_HANDLING` (반출비), `VRETURN_SHIPPING` (반출배송)
+  - `tools/wing_browser_fetcher.py`: `CONFIRMED_SELLER_REPORT_TYPES` 상수 추가(9종), `RG_REPORT_TYPES_DEFAULT=["WAREHOUSING_SHIPPING"]` 유지.
+  - `frontend/src/lib/api.ts`: `requestWingRgSettlementRefresh` + `getWingRgSettlementRefreshStatus` + `WingRgSettlementRefreshStatus` 타입 추가.
+  - `frontend/src/pages/CommandCenter.tsx`: `RgSettlementCard`에 "RG 정산 갱신" 버튼(주황색) + `refreshRgSettlementNow()` 폴링 함수(vendor-summary 패턴 동일).
+  - ★**prod 라이브 self-verify(원칙22)**: `npm run build`(index-CP2FR2yq.js)→rsync→prod. `rg-settlement/refresh-status` → 200, `status: "green"`, `last_success_at: "2026-06-15T07:00:41"` ✅.
+  - **파서 미구현(8종)**: WAREHOUSING_SHIPPING 외 8종은 API 200 확인됐으나 XLSX 파서 미구현 — 향후 별도 스프린트.
+- [x] 각 Sprint: codex 교차검증 + prod 라이브 self-verify(원칙22)
 
 ## 6. 현재 진행 단계
+- 2026-06-15 **S5 완료(6/6) — 트랙 종료** (커밋 d421d95). 9종 sellerReportType 전수 확보(ExcelModal.js i18n + API 라이브 검증) + RG 정산 갱신 버튼 prod 배포(index-CP2FR2yq.js, refresh-status 200). Wing 세션 자동화 트랙 목표(A. 매출 자동대조 + B. RG정산 자동수집) 전부 달성.
 - 2026-06-14 **S4 완료(5/6)** — CDP 모드 전환(Akamai 영구 우회) + RG 정산 자동수집 prod 라이브 self-verify 완료. 커밋 509a075(S4-P1/P2) + 9037817(CDP). 데몬 com.ohisell.wing 복원·일일예약 자동 트리거 동작 확인.
 - 2026-06-14 **S4-P2 완료(코드+191테스트+codex 3R PASS)·S4-P1 코드완료/라이브 실측만 보류**:
   - S4-P2: 백엔드 RG 새로고침 플래그(`rg_settlement_sync` 끝 `rg_request/refresh_status/claim_refresh`+`rg_mark_heartbeat`, 상태행 `COUPANG_WING_RG`) + 라우터 `/api/coupang/ops/wing/rg-settlement/{request-refresh,refresh-status,refresh-claim}` + 데몬 `cmd_poll` RG 분기(온디맨드 claim + 새벽 일일예약) + `upload-xlsx` **X-Ingest-Token 인증 추가**(회계 보호, 프론트 무영향). 페처 세션감지=정산 `status/api`(`_rg_session_ok`/`_rg_login_wait`).
@@ -91,8 +103,10 @@
 - 운영 상태: prod 백엔드 #120, 프론트 dist=index-Wu_C9ezR.js(rsync 배포·nginx 서빙), 데몬 com.ohisell.wing 로드(15s 폴, 창은 요청 시만). 페처 설정 `~/.ohisell_wing_fetcher.json`. prod DB 백업=`ohisell.db.backup_wingS2_20260614_092642`.
 - **미관측**(S1과 동일): 세션 만료→회복 경로(데몬 수명 중 실측). cf_clearance 단명 → 만료 시 headful 로그인 대기 폴백. UI '갱신' 버튼의 실제 데몬 round-trip(215s 폴링)은 라이브 클릭 미실측(reconcile API·렌더는 라이브 확인).
 
-## 7. 다음 액션
-- **S5**: 나머지 7종 sellerReportType 코드명 수집 → `CONFIRMED_SELLER_REPORT_TYPES` 확장 + RG 새로고침 UI 버튼(RevenueDriftCard) 추가.
-- **S6**: (선택) git origin push + RG수수료 S8 size_mismatch_high 4건 + RG발송관제 S7.
+## 7. 다음 액션 (트랙 완료 — 후속 선택 작업)
+- **(선택) git origin push**: 로컬 커밋 7개 미push.
+- **(선택) RG수수료 S8**: size_mismatch_high 4건 감사.
+- **(선택) RG발송관제 S7 UI**.
+- **(선택) 나머지 8종 XLSX 파서 구현**: WAREHOUSING_SHIPPING 외 8종(CATEGORY_TR·STORAGE_FEE·INVENTORY_COMPENSATION 등) — 각 엑셀 구조 캡처 후 별도 스프린트.
 - CDP 모드 주의: Wing Chrome(`cmd_chrome`)이 켜져 있어야 데몬이 CDP 연결 가능. Mac 재부팅 시 `python3 tools/wing_browser_fetcher.py chrome` 먼저 실행 후 `login`.
 - 참고: `tools/wing_browser_fetcher.py`·`tools/com.ohisell.wing.plist`, `~/.ohisell_wing_fetcher.json`(cdp_port/cdp_profile), `backend/app/services/coupang/{vendor_summary_sync,revenue_reconcile,rg_settlement_sync}.py`, `backend/app/routers/coupang_ops.py`.

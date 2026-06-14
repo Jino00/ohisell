@@ -3,179 +3,38 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
-- 날짜: 2026-06-14
-- ★★★**활성 트랙: Wing 세션 자동화 — S3 완료(4/6), prod 라이브 브라우저 검증 포함** (docs/tracks/active/track_wing-session-automation.md). 커밋 d047d84(코드).
-  - ★**S3 검산 패널 UI 완료·codex 2R PASS·build green·prod 라이브 검증(원칙22)**: 프론트 `frontend/src/lib/api.ts`(fetchRevenueReconcile + Wing refresh 2종 + 타입) + `frontend/src/pages/CommandCenter.tsx`(회계축 `RevenueDriftCard`: 쿠팡 공식 GMV 3P/RG·드리프트% 테이블·D-7 참고치/권위값 라벨·D-2 임계 색상[<5%회색·5~10%주황·≥10%빨강]·'판매분석 갱신' 버튼[광고 패턴 복제, selRef로 현재선택 재조회]). `npm run build`(dist index-Wu_C9ezR.js)→`rsync → prod nginx`(서빙 해시 일치)→browse `/command-center` 오픽스(WING1)→**RevenueDriftCard 라이브 렌더 확인**(권위값·적재6/6일·3P+1.83%·RG+7.40%·합계+4.69%=ref18, 콘솔에러0). codex P1 2건 수정(setReconcile(null) 잔상제거·selRef stale 클로저 회피).
-  - 다음=S4: RG정산 자동수집(S6-auto) 흡수 — Wing 페처 브라우저측 download → prod push(기존 업로드 ingest 재사용, D-5). RG수수료 트랙은 코드 8/8 완료·운영단계 → 자동 다운로드 배선만.
-  - ★**S2(커밋 e2c2560) prod 라이브 self-verify(원칙22)**: prod 배포(alembic m7n8o9p0q1r2→PM2 #120)→페처 push 14행→reconcile official 3P 1,693,230·RG 1,786,500(=ref18)·드리프트 +1.83%·+7.40%·complete=true. net_profit 불변(2,294,339). 데몬 com.ohisell.wing 자동 claim→fetch→push 사이클 동작.
-  - S0: 구조 확정·승인. D-4 런타임 2분리(Mac 헤드풀 페처 push만 ↔ 백엔드 ingest만), D-5 vendor-summary는 브라우저측 fetch·별도 데몬 com.ohisell.wing. S1(커밋 eae19d9): 페처 라이브 검증·D-6(m-wing CORS).
-  - **S2 코드 전부 완료·codex PASS·183 테스트 그린(로컬):**
-    - 백엔드: 모델 `CoupangVendorSummaryDaily` + alembic `m7n8o9p0q1r2`(head) + ingest SA `vendor_summary_sync.py`(snapshot upsert·3P(NORMAL)/RG(RFM) GMV 합계·heartbeat/refresh) + Harness `revenue_reconcile.py`(닫힌일 드리프트%·**net_profit 불변 읽기전용**·D-7 커버리지/권위) + 라우터(ingest토큰·refresh 3종 `/api/coupang/ops/wing/vendor-summary/*`·조회 `GET /api/overview/revenue-reconcile`).
-    - 페처: `wing_browser_fetcher.py`에 `_push`(prod ingest)·units 캡처·`_push_configured` 게이트·`cmd_poll` 데몬 + plist `tools/com.ohisell.wing.plist`(광고 plist 복제).
-    - 테스트: `test_vendor_summary_reconcile.py`(11) + `test_vendor_summary_http.py`(5, TestClient 격리DB 라운드트립). **codex 대화 3R 합의**: P1(부분 적재·집계 권위) 2건 수정, P2(request-refresh 무토큰·idempotency) 2건 근거기각(광고 패턴 parity·flock 직렬화), account_key 검증 추가.
-    - ★**D-7**(트랙): 드리프트는 닫힌 윈도우 전 날짜 적재 시만 권위(날짜 그레인 커버리지). **집계(account=None)는 항상 비권위**(ours=전계정·official=적재계정만). 정합 판정은 계정 지정(WING1/2)으로만.
-  - **남은 게이트 = prod 라이브 self-verify(원칙22, Jino 손 필요)**: ① 백엔드 prod(sellc.ohitech.co.kr) 배포(rsync + `alembic upgrade head` + PM2 재시작) ② 페처 설정 `~/.ohisell_wing_fetcher.json`{account_key:"COUPANG_WING1",prod_base_url,ingest_token=AD_INGEST_TOKEN} ③ 헤드풀 Wing 로그인 ④ 데몬 설치(com.ohisell.wing) ⑤ request-refresh→push→reconcile가 ref18 드리프트(3P+1.8%·RG+7.4%) 재현.
-  - **운영주의**: 페처/데몬 코드 변경 후 `launchctl kickstart -k gui/$(id -u)/com.ohisell.wing` = 배포(미재시작=stale, 광고 페처 교훈).
-- ★★★**(완료) 트랙: 쿠팡 매출·광고 정합성 — 완료·completed/ 마감** (docs/tracks/completed/track_coupang-revenue-ad-reconciliation.md).
-  - 옵션30일 후속 + **vendor-summary 프로브로 매출 정합 라이브 1:1 입증**(6/8~6/13 우리 vs 쿠팡공식 GMV: 3P +1.8%·RG +7.4%, 전부 문서화 잔차 D-5/D-11, 신규버그 0 → 트랙 원래 목표 "매출 쿠팡과 맞춤" 달성·증명). ref 18 신설.
-  - 자동대조(드리프트 감시)는 Wing 세션 freshness 필요(cf_clearance·단명) → **신규 트랙 "Wing 세션 자동화"로 분리**(track_wing-session-automation.md, ⚠️구조 스캐폴딩만, 코딩 전). 광고 페처 헤드풀 패턴 복제로 vendor-summary 자동대조 + RG정산 S6-auto 동시 해결. 다음 세션: 구조 승인→Opus 계획→S1.
-- ★★★**(이전) 트랙: 쿠팡 매출·광고 정합성 — 7/7 + 옵션30일 후속 완료** (구 active 경로, 이제 completed/).
-  - **옵션 보고서 7→30일 + _do_run 재정렬·데몬 재배포·라이브 검증(커밋 d9b57fc)**: net_profit PA 광고비(ad_spend)가
-    CoupangAdOptionDaily에서 차감되는데 옵션 7일이라 8~30일차 PA 누락→과대. 30일로 PA 커버리지를 비-PA(30일)와 정렬.
-    재정렬=페처(launchd poll 데몬 단일경로)가 무거운 옵션보고서 전에 메인+SALES push해 버튼 UI(215s 윈도우) 블록 방지.
-    codex 2R pass(P2-1 옵션 main_rc==0 게이트·P2-2 SALES try/except). ★라이브 발견: stale 데몬(S5 미재시작)이
-    비-PA 갭 clobber(ingest all_cost None→all=day) → 데몬 재시작+풀트리거로 복구. 라이브: 옵션30일 1579행·비-PA 65,677
-    복원·감사체인 정확·미커버 PA구간 5/16~6/5 ad_spend 317,532 차감 실증. **운영주의: 페처 변경 후 launchctl kickstart -k 필수.**
-  - **S5 완료·prod 배포·라이브 검증(커밋 1346b55)**: 비-PA 전체(ALL)전환 D-15 + 커버리지30일 D-13.
-    비-PA=report/SALES ALL_DELIVERED−DELIVERED(같은 응답·봇리스크0). all_day_cost 컬럼+alembic l6m7n8o9p0q1.
-    계정식별 게이트로 net_profit−=비-PA(계정단위·by_option 불변·RG플립 패턴). 페처 ALL push+sales_days 7→30(백필 5/16~).
-    codex 2R pass(P1 게이트→계정식별). 167 tests. 라이브: 오픽스 6/9~6/13 비-PA 65,677 반영·감사체인 정확·WING2 미적용.
-- ★★★**(이전 5/7 시점) 신규 트랙: 쿠팡 매출·광고 정합성** (docs/tracks/active/track_coupang-revenue-ad-reconciliation.md, **5/7**).
-  - 문제: 종합조망 매출·광고가 쿠팡 대시보드와 "전혀 안 맞음". 라이브 진단(오픽스 6/1~6/11): 광고는 0.02% 일치,
-    매출은 RG 누락 52%·계정 합산·orderPrice 2중계상이 주범.
-  - **S1~S4 완료·prod 배포·라이브 검증**(커밋 5998ef5·850acbd·78dad33·b5236ad·12da4d2):
-    S1 계정 분리(account=COUPANG_WING1/WING2, _resolve_account, 법인 단위 채널매핑·account_key 직접필터).
-    S2 orderPrice×quantity 2중계상 제거(매출=Σ(selling_price)). S3 RG 매출 편입(_agg_rg_orders+_merge_rg_orders,
-    CoupangRgOrderItem→매출). S4 net_profit D-3(= 3P_net + RG_rev − RG_cost − rg_total, net_profit_basis 명시).
-    자매: profit_calculator 채널별 _line_revenue(쿠팡·네이버 2중계상, task_a9695785).
-  - **라이브**: 오픽스 account=WING1 매출 5,121,400(3P 2,354,700+RG 2,766,700)·전체 5,455,000(배포전 2,701,500).
-    121 tests·codex 전 sprint pass. 쿠팡 4,901,500 대비 +4.5%(stale 취소분=S6).
-  - **S6 완료·배포·라이브 적용**(커밋 c0a94ad): reconcile-by-absence — 취소된 주문이 쿠팡 활성 ordersheets에서
-    사라지고 Order.status가 stale로 남아 매출 과다였음. `_reconcile_absent_orders`(쿠팡만·전체조회성공·grace10일·
-    블라스트캡30%·활성만→cancelled) + 윈도우 7→30일 + fetch 완전성 플래그. 라이브 적용: 오픽스 4건·오하이 1건
-    cancelled. 오픽스 6/1~6/11 3P매출 2,354,700→2,300,000(잔차 85,700→31,000, 3.6%→1.4%). codex 2R pass·fixture 9.
-    별도버그: stuck 'running' SyncLog가 동기화 영구차단(task_f1f36f02) — **2026-06-14 수정 완료**:
-      sync_service.py STALE_RUNNING_TIMEOUT(30min) 회수 가드 + started_at=kst_now() KST통일
-      + 마이그레이션 j4k5l6m7n8o9(기존 UTC running 일괄 회수). fixture 5(test_sync_stale_running_lock.py)
-      +전체 143 그린. codex 2R(P1-2 마이그로 해소, P1-1 레이스는 Jino 결정으로 후속 task_dd560245 보류).
-      **커밋 c424b1b→main push + prod 배포·라이브 검증 완료(2026-06-14)**: os.ohitech.co.kr
-      ohisell-backend(:8001, workers1). DB백업→scp(sync_service.py)→alembic upgrade head
-      (i3j4k5l6m7n8→j4k5l6m7n8o9)→pm2 restart. **prod에 실제 stale 행 있었음**: id=1214 channel_id=3
-      (쿠팡 로켓그로스 계정1, started_at 2026-06-08, 6일째 차단) → 회수(error). 라이브: POST
-      /api/sync/channel/3 status=success(이전엔 '이미 동기화 진행 중' 차단), 새 started_at KST 확인.
-    - **후속 레이스 하드닝 task_dd560245 — 2026-06-14 본 세션 완료·커밋·prod 배포·라이브검증 완료**:
-      커밋 8b4f81e→main push. 배포(sellc.ohitech.co.kr ohisell-backend:8001): DB백업→scp 3파일
-      (sync_service.py·models.py·migration)→alembic upgrade head(j4k5l6m7n8o9→k5l6m7n8o9p0)→pm2 reload.
-      **prod 라이브**: 인덱스 실제 생성 확인(...WHERE status='running'), prod running 0건(cleanup no-op),
-      POST /api/sync/channel/3 status=success·errors=[](try/except 해피패스 무손상)·새 로그 started_at KST.
-      check-then-create 레이스(SELECT↔INSERT 비원자 → 동시요청 2건 둘 다 시작 가능)를 DB 레벨로 차단.
-      ① models.py SyncLog.__table_args__에 partial unique index `uq_sync_log_one_running_per_channel`
-         = sync_log(channel_id) WHERE status='running'(sqlite_where+postgresql_where 둘 다).
-      ② sync_service.py 새 running INSERT db.commit()을 try/except IntegrityError로 감싸 → 충돌 시
-         rollback + {"status":"error","errors":["이미 동기화가 진행 중입니다"]}(레이스 패자). stale 회수는
-         INSERT 전 commit돼 승자는 충돌 안 함.
-      ③ 마이그레이션 k5l6m7n8o9p0(down_rev j4k5l6m7n8o9): dup running cleanup(MAX(id) 채널당 1건 유지·
-         나머지 error 회수) → partial index 생성. maintenance-mode 전제 docstring 명시(PG 이전 시 advisory lock).
-      테스트: test_sync_one_running_per_channel_lock.py(4·인덱스+레이스패자), test_migration_one_running_index.py
-      (4·alembic cleanup/index/enforce/downgrade), 기존 stale 테스트 2건 신규 불변식에 맞게 갱신.
-      **전체 153 그린·단일 head·prod DB 사본 j4→head 라이브검증(원본 불변)**. codex review GATE=PASS(P1 0,
-      P2 2 수용: P2-1→마이그 테스트 추가, P2-2→maintenance-mode 문서화).
-  - **현재 정합도**: 오픽스 6/1~6/11 매출 3P 98.6%(2,300,000 vs 쿠팡 2,269,000)·전체 96.6%(5,066,700 vs 4,901,500,
-    나머지는 RG 주문 stale[별도 sync]). 광고는 적재값 0.02% 일치(커버리지=S5).
-  - **S6-보완 D-12(이중차감) 완료·배포·라이브검증**(커밋 4cc2adc, 2026-06-14 본 세션): 병렬 세션이 S6 base
-    reconcile(c0a94ad)를 커밋·배포했으나, reconcile가 취소주문을 status=cancelled로 매출제외하는데 같은 취소가
-    coupang_return_item에도 있어 command-center `return_deduction`이 또 차감 = **이중차감**(prod 라이브 활성이었음).
-    수정: `_agg_returns`가 `_agg_orders`와 동일 channel 도메인에서 status로 매출제외된 주문라인(order_number+
-    vendor_item_id)의 반품행을 NOT EXISTS로 제외(전체취소=status권위·부분반품=return_deduction담당, 상호배타).
-    codex 3R pass(account·라인 상관 누락→수용, Channel.code==account_key fail-open→채널도메인 대칭화→해소).
-    fixture 7·145 tests·음성체크. **prod 동일스냅샷 self-verify(WING1)**: return_deduction 108,830→80,053
-    (−28,776 이중차감 제거)·cost +7,701(취소라인 net_qty 정상화)·**net_profit 3,515,271→3,536,346(+21,075 과소계상
-    교정)**·revenue/RG 불변. 영향 surface=command-center 1곳(routers/sales-summary·profit_calculator는 반품차감 없음).
-    **원칙22 교훈**: 라이브 syncing prod에서 시간차 before/after는 동기화로 오염(첫 측정 −236k는 오염값) → 동일 스냅샷 toggle로 격리해야 정확.
-  - **남은 것(의사결정 필요)**: S5 광고 전수 자동화(공식 API 없음, 5/26~6/11만 적재 / 전체 vs 집행 6.2만 조사),
-    S7 정합성 검산 대시보드(프론트, 쿠팡 봇차단으로 자동대조 제한).
-  - HANDOFF 직전 작업(아래)은 RG sale_fee 2배 — 완료됨.
+- 날짜: 2026-06-15
+- ★★★**Wing 세션 자동화 트랙 S5 완료(6/6) — 트랙 종료** (docs/tracks/active/track_wing-session-automation.md).
 
-## (이전) 상태
-- 날짜: 2026-06-10
-- ★★**RG 정산 sale_fee 2배 버그 수정 완료**(local 커밋 931a66f, codex 2R pass, fixture 49, prod 양계정 self-verify).
-  - **근본원인(라이브 확정)**: status/api가 한 기간에 가지급70%+확정30% 설치분 리포트 2개 반환. fee_type별 노출 다름:
-    take_rate(판매수수료)만 기간 총액을 양쪽에 '동일값' 반복(102,950=102,950) → 기존 코드가 합산해서 2배(205,900)
-    → net_profit 과다차감. 풀필먼트·보관·입출고·반출처리는 가지급 full·확정 0(합산=full), ad_sales는 70/30 분할(합산=총액).
-  - **수정**: rg_settlement_sync.py `_parse_status_response` — 설치분 충돌 시 **sale_fee 한정 동일값 dedupe**, 그 외 합산.
-    (codex P2: 전역 dedupe는 우연한 50/50 분할 과소계상 위험 → sale_fee 한정. WING2 라이브로 '다른 필드는 안 반복' 확정.)
-  - **권위검산**: 매출−환불−Σ지급액=실차감. 06-01~07 309,206=102,950(판매수수료)+206,256(풀필먼트) 일치(공식 명세서).
-  - **prod self-verify**: WING1 sale_fee 232,468→120,662, WING2 42,608→34,811. net_profit 2,446,159→2,471,672
-    (WING1 +88,097, WING2는 stale 해소로 보관·반출 비용 완전포착되어 더 정확해짐[하향]). 양계정 쿠키 재등록(browse 추출).
-  - **남은 것**: 없음(양계정 교정). 별도 task: save_settlement_cookie xsrf 미암호화(rg_inbound_sync.save_cookie는 정상).
-  - failures.jsonl 기록(원칙22 교훈: 06-01~07[ad=0]만 보고 일반화→ad는 분할, WING2는 보관/반출 큰 영역. 한 케이스 일반화 함정).
-- (이전) ★★RG 수수료 회계 트랙 **전부 완료(S1~S8, 운영 단계)**. S6-auto prod self-verify + scheduler 등록 + **S8 과오청구 감사** 신규.
-- ★★**S8 과오청구 감사 완료**(main 커밋 7de358a+00a8525, codex 1R pass[P1 0·P2 2 수용], fixture 32, prod 라이브 self-verify).
-  - **사이즈표 라이브 확보**: Wing fee-details(로그인, browse 쿠키피커 import) → 레퍼런스 17 §7. 세변합(cm)+무게(kg) 6등급, 둘 다 충족·하나라도 초과시 상위 채택.
-  - **구조(D-17)**: SA1 classify_size_type + SA2 expected_fee_floor + SA3 detect_fee_anomalies(배송 주문당·입출고 수량당) → Harness rg_fee_audit → GET /api/coupang/ops/rg/fee-audit. **읽기전용·net_profit 불변**.
-  - **★설계 결정**: 쿠팡 정확 계산기 **복제 안 함**(fragile 머니코드·오탐 회피, D-4·D-5). 사이즈 분류(결정적)+이상치 스크리닝(사람 검토 신호).
-  - **codex 1R**: P1 0, P2 2 수용+회귀테스트(배송 order_count 정규화·날짜 overlap).
-  - **★prod self-verify(원칙22)**: 22옵션 15플래그(size_mismatch_high 4=극소형 폰케이스 배송 3,800~4,050=floor 2.8배·below_floor 2·unit_unknown 9). order_count 정규화 라이브 확인.
-- ★★**S6-auto self-verify + scheduler**(커밋 db48d04). auto-download: WING1 28/28→9·WING2 28/28→10적재 인증정상. job 06:15 KST 등록. CATEGORY_TR만 시트명 미매핑 0행(무영향).
-- (이전) ★★S6-auto 구현(e9554bc, codex 3R). Wing 3단계 request→폴링→S3 GET.
-- (이전) ★★RG 수수료 회계 **S7 완료(net_profit 플립 — Phase 2 핵심)**(2026-06-09, main 커밋 0ec96cf+a58a9e1, codex 2R pass, fixture 12/12, prod 라이브 self-verify). 트랙 7/8(S6-auto·S8 후속).
-  - **공식(D-16)**: `net_profit = net_profit_pre_rg − rg_total` — 계정 RG 정산 총액 **전액 차감**(광고 포함). 순수함수 apply_rg_net_profit_flip + 5 브리지필드(net_profit_pre_rg·rg_settlement_total·rg_ad_settlement·rg_non_ad_deducted·rg_flip_status enum applied_full/not_applied_no_data). by_option net_profit 불변(D-14, 계정 단위 차감).
-  - **★D-15→D-16 전환(핵심)**: 처음 D-15(광고 제외 non-ad 차감)로 구현·배포했으나, **/browse 라이브 조사**로 RG 광고비가 광고센터 PA 보고서(pa_daily XLSX 출처=마켓플레이스 3P/윙 광고)에 없고 RG 정산에만 존재함을 확인(prod 광고 XLSX 2P 전기간 0행 실증, RG 정산 ad_sales=80,754). → D-15는 RG 광고 누락 → **전액 차감 D-16**으로 개정(Jino 결정). rg_total 전부 정산 basis라 basis 불일치 없음(D-15보다 단순).
-  - **codex 2R(원칙19)**: D-15 1R(Low 2: 주석·UI), D-16 2R(3건: UI 부호버그 환급 −-300원·stale주석·overlap경고 수용). 미래 2P>0 겹침 가드(ad_xlsx_rg_overlap>0 → log.warning).
-  - **★prod 라이브 self-verify(원칙22)**: net_profit **2,706,189.80 → 2,045,586.80**(rg_total 660,603 전액 차감, 광고 45,375 포함). 등식 pre−total==np·감소액==rg_total·flip_status=applied_full·overlap=0·RG0윈도우 불변 전부 통과. 마이그레이션 없음(테이블 불변), scp+rsync+pm2 restart 완료.
-- (이전) ★★RG 수수료 회계 **S6-core 완료(옵션 단위 수집)**(2026-06-09, main 커밋 d637bd6, codex 4R pass, fixture 44/44, prod 라이브 self-verify). 트랙 6/7.
-  - **모델**: CoupangRgSettlementFee grain에 vendor_item_id 추가(계정 row=''sentinel·옵션 row=실제ID, SQLite NULL-distinct 회피). alembic i3j4k5l6m7n8(batch_alter·unique 갱신·기존 row '' backfill—동작 불변). prod 196행 backfill 완료.
-  - **파서(Harness, D-8)**: 종류별 엑셀(WAREHOUSING_SHIPPING 등) 시트명→fee_type(입출고비→warehousing·배송비→delivery), **헤더명 기반 동적 컬럼 매핑**(2층 헤더 row7+row8·시트별 위치 다름: 입출고 col25·배송 col24). 옵션 cost=**할인적용가(A−B) VAT前**(§8-1). 검산 Σ상세==요약합계.
-  - **ingest**: fee_type 단위 병합(같은 fee_type 여러 시트 합산) + snapshot replace(delete-once·종료일 fallback) + 검산2(요약최종 vs status/api, fee_type+period 합계).
-  - **이중계상 가드(codex P1)**: 대조뷰 _agg_rg_settlement_fees에 vendor_item_id="" 필터 → 옵션 row 적재해도 net_profit 불변(D-6).
-  - **라우터**: POST /api/coupang/ops/rg/settlement/upload-xlsx(수동, vendor_id 자동매핑+불일치 reject). **S6-auto(자동 다운로드)=download-list/api body 캡처 대기(후속)**.
-  - **codex 4R(원칙19)**: 1R 4건·2R 3건·3R 2건 전부 수용, 4R 클린.
-  - **★prod 라이브 self-verify(원칙22)**: 업로드 8행, **vs_status_api 완전일치**(75,489·130,599 diff 0), **net_profit 불변 517,949**, 대조뷰 other=0, 재업로드 idempotent. 마이그레이션+scp+pm2 restart 완료.
-- (이전) ★★RG 수수료 회계 **S5 코드 잠금 완료**(2026-06-09, main 커밋 2c410c9, codex 3R pass, fixture 22/22, prod 라이브 reconcile 검증):
-  - **D-10 라이브 확정(원칙22, WING1 50필드 응답 캡처)**: `totalFulfillmentFeeDeductionAmount`=배송비(delivery)뿐(풀필먼트 합계 아님). 14리포트 전수+06-01~07이 레퍼런스17 §7 검산 정확일치(배송130,599+입출고75,489+보관168=J206,256, 세 값 독립→합산해도 이중계상 아님). 발생비용(f) basis 확정(이월 g는 totalCarryOverSettlementDeductionAmount 등 별도필드, 7개 컴포넌트엔 미혼입). searchDateType=SALES.
-  - **코드**: fee_type 'fulfillment'→'delivery' 리네임(alembic h2i3j4k5l6m7 UPDATE, stale 방지) + 모델/intelligence/sync 주석정정. 풀필먼트 J=delivery+warehousing+storage 그룹표시.
-  - **D-11 dedup 코드화**: RG 광고비=`CoupangAdOptionDaily(sell_type='2P')`↔RG정산 `ad_sales` 겹침. RG정산 정본 → Phase2 플립 시 2P분 제외(rg_ad_spend_to_exclude 순수함수+_agg_rg_ad_overlap, func.trim 방어). Phase1 표시만. **현재 prod 2P행 0개(3P만)→겹침 없음**.
-  - **reconcile guard(codex 지적1)**: _rg_account_breakdown other=total−라인합(legacy/미지 fee_type 가시화, log.warning). 카드 라인합+other≡total.
-  - **prod 라이브검증**: 마이그레이션 적용(fulfillment 28행→delivery, stale 0). 종합조망 reconcile OK(WING1 total492,301·WING2 168,302, other=0). **net_profit 불변(D-6, rg_fees는 net_profit 경로 미관여)**. 프론트 dist 배포(index-DpBH3q2l.js).
-  - **codex 대화형(원칙19)**: 3R. 지적1(legacy 이중계상)→마이그레이션+reconcile guard 수용. 지적4a(sell_type 정규화)→strip+func.trim 수용. 지적4b(basis 정합)→S7 이연(Phase1 표시만).
-  - **★엑셀 실증 완료(S5 종료, 레퍼런스17 §8-1)**: 오픽스 WAREHOUSING_SHIPPING 엑셀 분석. **2층 구조**(요약+주문/SKU 상세). **옵션ID(vendor_item_id) per 주문 존재 → S6 옵션단위 수집 가능 확정**. 상세 컬럼=매출인식일·주문ID·배송ID·등록상품ID·옵션ID·SKU ID·옵션명·물류센터·판매수량·입출고/배송비(발생비용A·할인가B·할인적용가A−B). **검산 완전일치(원칙22)**: Σ옵션 **할인적용가(A−B)**=요약합계(입출고 68,625)=status/api(VAT前); +세액=최종비용=status/api값(75,489). **★S6 회계규칙=옵션 cost는 할인적용가(A−B) 사용**(발생비용A=gross 100,650은 불일치), VAT 별도 gross-up. 시트=비용종류별(입출고비/배송비). 다운로드=비동기(엑셀 다운로드 요청→정산관리 엑셀 다운로드 목록). 파일명={vendor_id}-{REPORT_TYPE}-ko-{uuid}.xlsx.
-  - **★S5 전체 완료. 트랙 5/7. 다음=S6 옵션단위 수집**(download-list/api body 캡처+엑셀 폴링/파싱+vendor_item_id 컬럼 마이그레이션+Σ검산). 샘플=~/Downloads/A01564720-WAREHOUSING_SHIPPING-ko-*.xlsx. 브라우저 핸드오프 데몬 불안정→직접다운로드/Copy-as-cURL 채택(failures.jsonl 기록).
-- 날짜: 2026-06-09(이전)
-- ★★RG 수수료 회계 Phase 1 prod self-verify 완료(2026-06-09, 라이브증거 원칙22): prod=sellc.ohitech.co.kr(SSH config 추가함, PM2 ohisell-backend:8001, 경로 ~/ohisell). 마이그레이션 g1h2i3j4k5l6 적용→coupang_rg_settlement_fee 테이블 생성. **WING1·WING2 sync 각 98행 status=ok**. 종합조망 API(/api/overview/command-center) rg_settlement 섹션 라이브 200, **RgSettlementCard 라이브 렌더**(WING1 412,156+WING2 13,295, ★순이익 불변=D-6 확정). 프론트 dist 배포(index-D79z1Lve.js, rsync).
-  ★코드 정정(원칙22): status/api 스키마·body가 라이브와 정확히 일치(S0 실측 옳았음). 조사 중 "스키마 틀림" 잠정단정은 내 직접호출 body 오류—정산현황 탭 실제호출 캡처로 정정.
-  ★발견1 Wing쿠키 httpOnly: 라이브 302 원인=document.cookie엔 httpOnly 세션쿠키(CGSID_PARTNERADMINWEB·JSESSIONID·sxSessionId) 없음. JS·CDP 못읽음→DevTools "Copy as cURL" 등록이 유일경로(광고비/RG입고와 동일 parse_curl_cookies). failures.jsonl 기록.
-  ★발견2 종합조망 500 기존버그: overview.py:56 datetime.now(_KST) _KST 미정의 NameError(커밋 a2bbd3a부터, 라이브 미검증 방치). kst_today()로 수정, codex review PASS, 라이브200. failures.jsonl 기록.
-  ★발견3 S4 모델 미커밋: models.py(CoupangRgSettlementFee)+__init__.py(export) e7cb99f 누락→로컬 미커밋(prod엔 scp반영됨).
-  ★S6 전제 확인: status/api 응답에 vendor_item_id 없음(주기별 집계뿐)→옵션단위는 S6 download-list/api 엑셀 필요.
-  **다음=① models.py+__init__.py+overview.py 커밋(Jino 승인 대기) ② S5(회계규칙 잠금+엑셀스키마 실증).**
-- ★RG 발송관제 회사필터 버그픽스(2026-06-08, main 커밋 772a232, codex PASS): Jino 지적="오픽스 탭인데 오하이테크 상품(뮤패드 등)이 보임". 원인=RG 발송관제가 회사 탭(오픽스/오하이테크) 무시하고 전 계정 혼합표시(프론트가 account_key 없이 호출). RG 재고 분포 실측: COUPANG_WING1(오픽스)=31 / COUPANG_WING2(오하이테크)=753 → 784 중 753이 오하이테크였음. ★RG 재고는 셀러 Wing 계정 단위 적재(RG1/RG2 아님). 수정: coupang_ops _RG_ACCOUNT_BY_COMPANY(_CHANNEL_META Wing항목 파생, 회사→Wing계정) + 엔드포인트 company 파라미터→account_key 변환, 프론트 fetchReplenishmentPlan(company,7)+effect deps. codex P2 3건 수용=①미지회사 fail-closed(__unknown__→0건) ②Wing 1대1 assert ③회사전환 레이스 cancelled플래그. 라이브: 오픽스31·오하이테크753·ALL784·Opix(미지)0, UI 뮤패드 제거 확인. 커밋 772a232. 빌드 index-DikHsobf.js.
-- ★RG 재고 목표 1주일치로 변경(2026-06-08, main 커밋 aef26fc, D-9): Jino "우리의 재고 목표를 1주일치로 잡자" → target_days 3→7. 변경처 4곳: replenishment_calc.DEFAULT_TARGET_DAYS=7, 엔드포인트 Query 기본7, api.ts/CoupangOps fetchReplenishmentPlan(7). 트랙 D-2(2~3일치)·D-7③(상한3일) 변경, D-9로 기록(원문인용). 효과=권장수량 ~2배↑(아이폰16 5→8개), 보관료↑/품절↓ 트레이드오프 Jino 인지. calc 알고리즘·안전재고 공식 불변(target_days는 기존 파라미터)→codex 재리뷰 생략(trivial 설정). 라이브검증: prod 기본 target_days=7·수량증가·UI 헤더 "7일치 목표". 배포=백엔드 2파일 scp+reload, 프론트 dist rsync(번들 index-cjQxkjp1.js).
-- ★RG 발송관제 UI 보강(2026-06-08, main 커밋 b33cd42, codex review PASS): 로켓그로스 탭 발송관제 테이블의 상품명 컬럼을 메인 테이블처럼 **"상품명, 옵션명"**으로 통일(이전엔 옵션명만=item_name). 수정 3파일: rg_replenishment.py(build_replenishment_plan이 seller_product_name도 1회조회→product_name 반환, 등가성계약 불변=표시필드만), api.ts(ReplenishmentItem.product_name), CoupangOps.tsx(상품명 진하게+옵션명 회색, product_name 없으면 옵션명만 fallback). prod 배포(scp+reload+dist rsync, 새 번들 index-Qkgyf2Nu.js). 라이브검증=API product_name 777/784 반환+UI 캡처 정상. ★발견성 이슈(Jino "안보인다")=발송관제가 로켓그로스 탭 전용이라 전체/오픽스 탭에선 숨김(트랙 S6 설계). 더 노출할지(전체탭 항상표시 등)는 보류—Jino 결정 대기. ★세션중 iCloud Drive 권한(EPERM) 회수→전체디스크접근에 claude 항목 켜고 복구(재시작 불필요). docs/TRACKS.md RG 5/7→6/7 동기화.
-- ★★★상품별(옵션×일별) 광고비 "완전 자동화" 완성·prod 배포·라이브검증(2026-06-08, codex pass 3라운드): **수동 XLSX 업로드 제거.** 그동안 sales-summary by_product의 ad_spend가 전부 0이었던 이유=옵션×일별 광고비가 수동업로드 XLSX(CoupangAdOptionDaily)에만 있었음. ★정찰(tools/ad_endpoint_capture.py, Jino 인터랙티브 캡처 2회): 옵션×일별을 주는 화면 JSON API는 **없음**(report/SALES=vendor합계, report/id=광고그룹별[자동타기팅은 한 그룹에 다수옵션], tableMetric product_sales=기간합계). 유일 소스=**Billboard 보고서 다운로드 XLSX**. ★역설계 흐름(레퍼런스 16): advertising.coupang.com **GraphQL** getCampaignList→requestReport(reportType:pa,dateGroup:daily,granularity:keyword,campaignIds 9개)→reportList 폴링(completed)→**GET /marketing-reporting/v2/api/excel-report?id=** xlsx바이트. 날짜=YYYYMMDD 정수. ★구현: 페처(ad_cost_browser_fetcher.py)에 _fetch_option_report 추가(인증세션 same-origin fetch, btoa base64 다운로드), 하루1회 마커(~/.ohisell_ad_option_last, date|vendor|backend). 백엔드 파서 추출 ingest_coupang_ad_xlsx_content(튜플반환 (result,recalc_from,recalc_to)) — 수동업로드+신규 토큰인증 POST /api/coupang/ops/ad-cost/option-ingest(X-Report-Filename 헤더, 스트림 30MB캡) 공유. 마이그레이션 없음(CoupangAdOptionDaily 기존). ★codex 3라운드: P1 2건(push실패시 마커 set 안함, vendor fail-closed)+P2 6건 → 6수정·1기각(getCampaignList 페이지네이션 없음, 캡처실측)·2보류(단일페이지 폴링=최신top·단일마커=단일배포). **내가만든 P1(return dict→tuple 리팩터시 return{} 안바꿔 unreachable, 로컬테스트는 수정전코드라 통과=원칙22)도 codex가 잡음**. ★라이브E2E: 페처1회실행→옵션 562행 push성공→prod sales-summary **86상품중 39개 ad_spend>0**(이전 전부0), 합계542,037 ROAS2.26. 데이터검증=XLSX일별합 vs report/SALES ±8~24원(0.02%미만 일치). ★설정: ~/.ohisell_ad_fetcher.json에 ad_vendor_code:"A01564720" 추가(fail-closed 필수키). Mac데몬 새코드 재시작(PID가동). Failure Memory 2건.
-- 날짜: 2026-06-07
-- ★★★광고비 "report/SALES 확정값 자동화" 완성·prod 배포·라이브검증(2026-06-07, main 커밋 404951c+6f34ba0+aeefebd, codex pass[P2 1건 합의·수정]): **"어제 광고비 0/부정확" 근본해결.** 원인=기존 페처가 부르던 report/cost는 날짜파라미터 없이 day/month 누적만 줌 → 캡처순간 스냅샷을 date=오늘로 저장, 확정치 갱신 안됨(어제 06-06을 34,002로 박제, 실제 콘솔 120,989=3.5배 차이). 요약카드는 XLSX(CoupangAdOptionDaily)만 읽는데 04~06일 미업로드라 0. ★해법: **POST /marketing/cmg-api/report/SALES**(payload {start,end} epoch ms) 발견 → 날짜별 DELIVERED_AD_COST/AD_ATTRIBUTED_SALES 확정값(콘솔 100% 일치 검증). 페처가 report/cost(오늘 running, 헤더 유지)+report/SALES(최근7일 과거 확정일) 둘 다 호출 → days[] ingest(ad_cost_sync.ingest_ad_cost_days, 날짜별 정규행 _SALES_KEY로 교체=옛 스냅샷 대체). coupang_ad_cost_daily에 conv_sales 컬럼(Alembic b2d4f6082ace, 조건부=테이블생성 체인구멍도 보강). sales-summary: XLSX 없으면 이 확정값으로 광고비·전환매출·ROAS 폴백(오픽스/ALL만, ad_ref_date 손대지않음=codex P2). ★범위=Vendor(오픽스) 합계만(Jino 승인). 상품별 광고비 컬럼·오하이테크 광고계정은 범위밖. ★SSO 하드닝: about:blank 리셋으로 ERR_ABORTED 해결. ★라이브검증: prod sales-summary 어제 광고비=**120,989**·전환매출 222,900·ROAS 1.84(콘솔 일치). Mac데몬 재시작(새코드, PID가동). Failure Memory 2건.
-- ★★★광고비 "버튼 트리거 갱신" 완성·prod 배포·라이브검증(2026-06-06, main 커밋 2b76e1e+6cb2df2, codex pass 4라운드): 매시 자동 fetch(창 매시 뜸+Mac 밤샘 부담)를 **"쿠팡 운영페이지 버튼 누를 때만 갱신"**으로 전환(Jino 결정). 구조: prod DB 플래그 refresh_requested_at(Alembic a1c3e5079bdf) + 엔드포인트 3개(request-refresh/refresh-status/refresh-claim[원자적,토큰인증]) + Mac **poll 상주데몬**(15s GET 확인=창0, 요청시만 headful fetch) + 쿠팡운영페이지 헤더 "오늘 광고비(라이브)"+📣갱신버튼(request→215s폴링→리로드). keycloak 만료시 같은창 로그인폴백(아침 첫클릭=로그인겸함). lock-before-claim+fetch쿨다운45s. ★codex P1교훈: 페처는 coupang_ad_cost_daily에 넣는데 AdReport/CommandCenter 광고비는 XLSX기반(ad_costs/coupang_ad_report) 별테이블 — 버튼은 일별데이터 실제표시처(CoupangOps)로. ★배포완료: 백엔드 scp+alembic upgrade head(prod a1c3e5079bdf)+pm2 reload, 프론트 build+rsync, Mac launchd poll데몬 교체(pid가동). ★라이브E2E: 버튼흐름 재현→데몬18s fetch→오늘광고비 34,002원 갱신 확인. 평소 창0. Failure Memory 2건.
-- ★★광고비 페처 "매시 만료" 근본해결(2026-06-06, main 커밋 16bb2b3, codex pass, 라이브검증): 어제 "가동중" 인계는 실은 11h 중단이었음(원칙22 — 로그인 직후 1h 윈도우 3회 성공을 라이브 지속으로 오판). 쿠키 expires 직접 측정 → **aid=발급+정확히 1h 절대만료**(fetch로 회전 안 됨), **KEYCLOAK_SESSION=12h**. 해법: aid 만료 시 WING 로그인 URL(/user/login?_cap_client=WING)→keycloak authorize(xauth)→비번없이 callback→aid 재발급(~16s). **headful 필수**(headless는 xauth Akamai Access Denied 차단). 매 SSO 재발급이 keycloak도 12h 갱신 → Mac 매시 가동시 **재로그인 사실상 불필요**. 코드: _sso_refresh()+_is_auth_expired()(401/403/200-login-HTML도 트리거). run은 headful 고정(config headless 키 무시). ★옛 인계 교정: "며칠~몇주 세션유지/headless 기본/창 안뜸"은 전부 틀림 — 이제 매시 Chrome 창 ~20초 뜸(거슬리면 launchd 주기 2~3h로↑, 광고비는 일누적값). backend _DEFAULT_VENDOR_IDS 104964791→104997005 정정(죽은 curl경로용). Failure Memory 기록. 라이브: prod status=green, 06-06 광고비 push.
-- 단계: ★활성 트랙 = **쿠팡 RG 발송관제**(docs/tracks/active/track_coupang-rg-replenishment.md). **S6 완료 + prod 라이브 배포(2026-06-05)** — 6/7. 다음=S7 요일/휴일 세분화(데이터 누적 대기). ★코드 커밋: S2=b8b6fa5, S3=0dd51f7, S4=0a3b496, S5=cd16ddc+bf4e41f, S6=ddcd666.
-- ★광고비 자동 sync 완료(2026-06-05, 커밋 88f0ebf+535f2e0): advertising.coupang.com Wing 내부 API — POST /marketing/cmg-api/report/cost. CoupangAdCostDaily 테이블, ad_cost_sync SA, 매일 자정+접속시+동기화버튼 자동 sync. 헤더 "📣 광고쿠키 🟢/🔴/⬜" 버튼으로 cURL 붙여넣기 설정. 쿠키 미설정 시 fail-soft(광고비 0 유지).
-- ★Wing vs 우리 매출 차이 원인 확인(2026-06-05): status 문제 아님 — Wing 판매분석 스냅샷 지연 때문. 우리가 더 자주 sync해 Wing보다 최신 주문 먼저 반영. 몇 시간 후 일치함.
-- 네이버 풀통합 트랙: 완료(active→completed 이동). 네이버 클레임 실처리 7건 완료(반품4+교환수거3). ★미처리 1건=정기용 교환 재배송(한진 송장 대기).
-- ★실시간 자동 sync 완료(2026-06-05, 커밋 8a9eddf): POST /api/sync/realtime — 주문·쿠팡광고·네이버SA·Meta 4개 병렬(ThreadPoolExecutor) fail-soft. Dashboard·AdReport·CommandCenter·NaverOps·Orders 마운트+새로고침 버튼. Naver SA UTC→KST 변환 버그 수정.
-- ★HANDOFF §6 후속 3건 완료+prod 배포·라이브검증(2026-06-05, 커밋 4432836+f24262a):
-  ① 광고쿠키 적시알림(D안): Layout.tsx 전역 빨간 배너 — status=red면 모든 페이지 상단 "광고비 수집 중단+갱신 CTA(?adcookie=open)". getAdCostCookieStatus 헬퍼. (완전 자동 A안=헤드리스 로그인은 Akamai/2FA/ToS 리스크로 기각, keep-alive는 절대만료 증거로 배제)
-  ② CoupangOps 마운트 sync = 검토→변경불필요(이미 타깃 sync, 전체 realtime은 네이버+Meta 불필요 지연).
-  ③ realtime sync 속도: SQLite WAL+busy_timeout=30s+synchronous=NORMAL(database.py) + _run_orders 6채널 직렬→병렬. 8스레드 동시쓰기 락0 검증.
-- ★realtime 주문 sync 치명버그 발견·수정(커밋 f24262a): _run_orders가 sync_channel_orders(dict 반환)를 r.new_orders(속성)로 접근 → 'dict' has no attribute 'new_orders'로 **기존부터 전 채널 실패**. 이전 세션이 channel_errors 6을 로컬 IP화이트리스트로 오진했으나 실제 이 버그라 prod에서도 주문sync 한번도 안됨. status==success 판정+.get()으로 수정. 라이브 검증: channel_errors 0, 1189건 sync. (Failure Memory 기록)
-- ★★광고쿠키 "잦은 만료" 근본원인 규명(2026-06-05, 커밋 b1c8c4f+704a52e): advertising.coupang.com=Akamai 봇매니저. ①prod 데이터센터 IP=403 차단(residential IP만 통과). ②curl 쿠키 재생=1회용(첫 성공 직후 토큰 회전·무효화→로그인 튕김). 이전 "TTL 수일~1주일/IP화이트리스트"는 오진(Failure Memory). → 해법: fetch를 Jino Mac에서 **실제 브라우저(Playwright 영속 프로필)** 로 실행, 숫자만 prod로 push.
-  - prod(배포완료): POST /api/coupang/ops/ad-cost/ingest(토큰 X-Ingest-Token=AD_INGEST_TOKEN env, secrets.compare_digest+검증), ad_cost_sync.ingest_ad_cost, cookie_status staleness(age_hours/stale, 26h), realtime sync에서 _run_coupang_ad 제거, 배너 status==red||stale 트리거.
-  - 로컬(★완료·가동중): tools/ad_cost_browser_fetcher.py — Playwright storage_state 방식(영속프로필은 세션쿠키 종료시 버려서 storage_state로 전환). login(201 자동감지)+run(state 로드→fetch→회전state 재저장). 연속3회 run 성공 검증(curl 1회용 해소). **launchd com.ohisell.adcost 매시 등록완료, RunAtLoad 즉시실행 성공**. prod green/stale=false. Mac 설정 ~/.ohisell_ad_fetcher.json(state_file=~/.ohisell_ad_state.json), playwright+chromium Mac venv 설치완료. README/launchd plist 갱신.
-  - ★운영: 세션 끊기면(며칠~몇주) run 로그 "세션 만료" + 대시보드 stale 배너 → Jino가 `login` 1회 재실행. Mac 꺼지면 그 시간 push 중단(데이터 마지막값 유지). headless 기본(창 안뜸).
-  - ★실패한 접근 기록: curl 재생=1회용(토큰 회전 무효화), Chrome 디스크쿠키 이식=인증쿠키가 메모리에만 있어 불가, Playwright 영속프로필=세션쿠키 종료시 소실. → storage_state가 정답.
-  - 커밋: b1c8c4f(prod ingest+배너), 704a52e(브라우저페처 초안), +storage_state fix. 현재 prod 오늘 광고비 91,212원(89,837+1,375) 적재·자동갱신중.
-- 최신 커밋(main): realtime버그수정 + **4432836**(배너+동시성+병렬화), 8a9eddf(실시간sync), ddcd666(S6 feat).
+  ### S5 완료 내용 (커밋 d421d95)
+  - **9종 sellerReportType 전수 확보**: ExcelModal.js i18n 파싱 + request-download/api 라이브 검증(HTTP 200 확인).
+    - CATEGORY_TR(판매수수료), WAREHOUSING_SHIPPING(파서구현), STORAGE_FEE, INVENTORY_COMPENSATION,
+      BARCODE_LABELING_FEE, PRODUCT_SIZE_COMPARISON, CRETURN_PICKUP_RESTOCKING, VRETURN_HANDLING, VRETURN_SHIPPING
+    - `tools/wing_browser_fetcher.py`에 `CONFIRMED_SELLER_REPORT_TYPES` 상수 추가
+  - **RG 정산 갱신 버튼**: `CommandCenter.tsx`의 `RgSettlementCard`에 주황 버튼 추가.
+    - 폴링 패턴: requestWingRgSettlementRefresh → getWingRgSettlementRefreshStatus 3초 폴링(최대 215초) → doFetch.
+    - `frontend/src/lib/api.ts`: WingRgSettlementRefreshStatus 타입 + refresh 함수 2개 추가.
+  - **★prod 라이브 self-verify(원칙22)**: build(index-CP2FR2yq.js)→rsync→prod.
+    - `rg-settlement/refresh-status` → 200, status="green", last_success_at="2026-06-15T07:00:41" ✅
 
-## ★쿠팡 RG 매출 누락 버그 수정 (2026-06-05, prod 배포 완료, 커밋 fdc5492)
-- 증상: 어제 오픽스 매출 시스템 159,300 vs 윙 480,400(3배 누락).
-- 원인: RG주문 API paidDateTo 배타적(끝날짜 당일 제외). rg_order_sync._windows가 window1 끝=어제로 분할→어제 RG 전량 누락.
-- 수정: paidDateTo=win_end+1일(span 최대30일 유지). 검증: 수정후 어제 RG 23건/388,700, sales-summary 497,300(윙과 일치). Failure Memory 기록.
+  ### 트랙 달성 현황
+  - (A) 매출 자동 대조: RevenueDriftCard(종합조망 회계축), 판매분석 갱신 버튼 ✅
+  - (B) RG 정산 자동 수집: rg CLI + 데몬 07시 예약 + RG 정산 갱신 버튼 ✅
+  - 9종 sellerReportType 확보(파서=WAREHOUSING_SHIPPING 1종만, 나머지 8종 미구현) ✅
 
-## ★쿠팡 RG 발송관제 트랙 (2026-06-05 시작, S0 완료)
-- 목표: RG 현재고+일판매속도+입고 리드타임으로 "언제·몇 개 발송" 역산. FC 목표재고 2~3일치.
-- 구조(승인): Agent 쿠팡RG관제 → Harness rg_replenishment → SA 6개(rg_inbound_sync★신규, rg_inventory_sync, rg_order_sync, lead_time_estimator★, sales_velocity_estimator★, replenishment_calc★). UI=로켓그로스 탭 컬럼(현재고|일판매|리드타임|며칠치|권장발송일·수량).
-- D-1 입고=Wing내부API 연결(D-14 수정). D-2 목표 2~3일치. D-3 평일/주말→점진세분화. D-4 지표제시(실행은 Jino). D-5 쿠키 수동붙여넣기 시작+측정→필요시 자동화.
-- ★S0 실증: GET wing.coupang.com/tenants/rfm-inbound/data/inbound/search, 전체쿠키+x-xsrf-token 헤더→prod서버 200/68KB(Akamai봇쿠키 불필요, IP비귀속 확인). 리드타임=shipmentStatusHistory statusId3(발송)→7(판매개시), 실측1~4.5일. 입고이력 6건.
-- 다음 S1: 테이블 coupang_rg_inbound + 쿠키 시크릿저장(설정칸,cURL→쿠키추출) + rg_inbound_sync SA(일일,302시 fail-soft+🔴) + codex.
+  ### 테스트: 191 그린. alembic head=m7n8o9p0q1r2(변경 없음).
 
-## 네이버 (이전 트랙, 완료)
-- N1~N8 완료(N2 skip). 읽기+쓰기(발주/발송·클레임·판매상태변경) 전부 prod·codex pass. 트랙 completed/ 이동.
-- 클레임 실처리 7건 완료. 미처리: 정기용 교환재배송(product_order_id 2026052876140291, 한진 송장 대기).
+  ### prod 운영 상태
+  - 백엔드 PM2 ohisell-backend(online), DB=SQLite
+  - 프론트 dist=index-CP2FR2yq.js(nginx), RevenueDriftCard + RG 정산 갱신 버튼 라이브
+  - 데몬 com.ohisell.wing: running, 15s 폴, 07시 RG 일일예약
+  - Wing Chrome(CDP): port 9222, 프로필 ~/.ohisell_wing_chrome
+
+## 다음 할 일 (선택)
+- git origin push (로컬 커밋 7개 미push)
+- RG수수료 S8 size_mismatch_high 4건 감사
+- RG발송관제 S7 UI
+- 나머지 8종 XLSX 파서 구현
+
+## 새 세션 시작 프롬프트
+.claude/memory/HANDOFF_ohisell-wing-session-automation-S5done_20260615.md 읽고 이어서 작업해줘
