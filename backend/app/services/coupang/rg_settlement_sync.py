@@ -814,3 +814,87 @@ def auto_download_all(db: Session, vendor_id_map: dict[str, str]) -> list[dict]:
         for ak in RG_ACCOUNTS
         if ak in vendor_id_map
     ]
+
+
+# ════════════════════════════════════════════════════════════════════
+# S4-P2: RG 정산 자동 다운로드 갱신 트리거·heartbeat (트랙 D-8)
+# ════════════════════════════════════════════════════════════════════
+# Wing 페처(별도 데몬 com.ohisell.wing, D-5)가 RG 정산 엑셀을 브라우저측 다운로드 → prod push하는
+# 트리거. vendor_summary_sync 패턴을 그대로 미러링(상태행=CoupangWingCookie KV)하되 account_key를
+# 분리해 판매분석(COUPANG_WING_VS)·광고와 섞지 않는다(D-5 세션/상태 분리 원칙).
+#   - request_refresh: UI 버튼/스케줄 → 요청 플래그 set
+#   - refresh_status:  UI 폴링·페처 데몬 공용(요청 여부 + 마지막 push 시각)
+#   - claim_refresh:   페처가 요청 소비(원자적 조건부 UPDATE)
+#   - mark_heartbeat:  업로드(push) 성공 시 last_success_at 갱신(라우터 경계에서 호출 — 머니코드 불변)
+_RG_STATE_ACCOUNT = "COUPANG_WING_RG"
+# RG 정산은 주 단위 → 30일 무push까지 stale 아님(주간 캐던스 + Mac 야간 off 오탐 방지).
+_RG_STALE_HOURS = 30 * 24
+
+
+def _rg_state_row(db: Session) -> CoupangWingCookie | None:
+    return (
+        db.query(CoupangWingCookie)
+        .filter(CoupangWingCookie.account_key == _RG_STATE_ACCOUNT)
+        .first()
+    )
+
+
+def _rg_ensure_state_row(db: Session) -> CoupangWingCookie:
+    row = _rg_state_row(db)
+    if row is None:
+        row = CoupangWingCookie(account_key=_RG_STATE_ACCOUNT)
+        db.add(row)
+    return row
+
+
+def rg_mark_heartbeat(db: Session) -> None:
+    """RG 엑셀 push(업로드) 성공 시각 갱신(staleness·스케줄 중복방지 기준). 라우터가 ingest 성공 후 호출."""
+    row = _rg_ensure_state_row(db)
+    row.status = "green"
+    row.last_error = None
+    row.last_success_at = kst_now()
+    db.commit()
+
+
+def rg_request_refresh(db: Session) -> dict:
+    """UI 'RG 정산 갱신' 버튼/스케줄 → 갱신 요청 플래그 set. Wing 페처 데몬이 다음 폴링에서 소비."""
+    row = _rg_ensure_state_row(db)
+    row.refresh_requested_at = kst_now()
+    db.commit()
+    return {"requested": True, "requested_at": row.refresh_requested_at.isoformat()}
+
+
+def rg_refresh_status(db: Session) -> dict:
+    """RG 갱신 요청/완료 상태. UI(버튼 후 폴링)·Wing 페처(요청 확인) 공용. 민감값 없음."""
+    row = _rg_state_row(db)
+    if row is None:
+        return {"requested": False, "requested_at": None, "last_success_at": None,
+                "status": "none", "last_error": None, "age_hours": None, "stale": False}
+    age_hours = None
+    stale = False
+    if row.last_success_at:
+        age_hours = max(0.0, round((kst_now() - row.last_success_at).total_seconds() / 3600, 1))
+        stale = age_hours > _RG_STALE_HOURS
+    return {
+        "requested": row.refresh_requested_at is not None,
+        "requested_at": row.refresh_requested_at.isoformat() if row.refresh_requested_at else None,
+        "last_success_at": row.last_success_at.isoformat() if row.last_success_at else None,
+        "status": row.status,
+        "last_error": row.last_error,
+        "age_hours": age_hours,
+        "stale": stale,
+    }
+
+
+def rg_claim_refresh(db: Session) -> dict:
+    """Wing 페처가 RG 갱신 요청을 '소비'(플래그 clear). 원자적 조건부 UPDATE(광고/vendor-summary 패턴)."""
+    from sqlalchemy import update
+
+    res = db.execute(
+        update(CoupangWingCookie)
+        .where(CoupangWingCookie.account_key == _RG_STATE_ACCOUNT)
+        .where(CoupangWingCookie.refresh_requested_at.isnot(None))
+        .values(refresh_requested_at=None)
+    )
+    db.commit()
+    return {"claimed": (res.rowcount or 0) > 0}

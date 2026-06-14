@@ -827,3 +827,71 @@ def test_load_client_rejects_raw_unencrypted_xsrf(monkeypatch):
 
     with pytest.raises(CookieCryptoError):
         _load_client(db, "COUPANG_WING1")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# S4-P2 — RG 정산 자동 다운로드 갱신 트리거·heartbeat (D-8)
+# ═══════════════════════════════════════════════════════════════════════
+from app.services.coupang.rg_settlement_sync import (
+    rg_request_refresh,
+    rg_refresh_status,
+    rg_claim_refresh,
+    rg_mark_heartbeat,
+    _RG_STATE_ACCOUNT,
+)
+
+
+def test_rg_refresh_status_initial_none():
+    """상태행 없으면 requested=False·status='none'(빈 DB 안전)."""
+    db = _db()
+    st = rg_refresh_status(db)
+    assert st["requested"] is False
+    assert st["status"] == "none"
+    assert st["last_success_at"] is None
+    assert st["stale"] is False
+
+
+def test_rg_request_refresh_sets_flag():
+    """request_refresh → 플래그 set → status가 requested=True 반영."""
+    db = _db()
+    r = rg_request_refresh(db)
+    assert r["requested"] is True and r["requested_at"]
+    st = rg_refresh_status(db)
+    assert st["requested"] is True
+    assert st["requested_at"] is not None
+
+
+def test_rg_claim_refresh_atomic_once():
+    """claim은 요청 있을 때 1회만 claimed=True, 이후 False(원자적 소비·중복 fetch 방지)."""
+    db = _db()
+    rg_request_refresh(db)
+    assert rg_claim_refresh(db)["claimed"] is True
+    assert rg_claim_refresh(db)["claimed"] is False   # 두 번째는 이미 clear됨
+    assert rg_refresh_status(db)["requested"] is False
+
+
+def test_rg_claim_without_request_is_false():
+    """요청 없이 claim하면 claimed=False(유실 없음)."""
+    db = _db()
+    assert rg_claim_refresh(db)["claimed"] is False
+
+
+def test_rg_mark_heartbeat_green_and_success_at():
+    """heartbeat → status green + last_success_at 기록(stale=False)."""
+    db = _db()
+    rg_mark_heartbeat(db)
+    st = rg_refresh_status(db)
+    assert st["status"] == "green"
+    assert st["last_success_at"] is not None
+    assert st["stale"] is False
+    assert st["age_hours"] is not None and st["age_hours"] >= 0
+
+
+def test_rg_state_isolated_from_vendor_summary():
+    """RG 상태행은 vendor-summary(COUPANG_WING_VS)와 다른 account_key로 분리(D-5)."""
+    from app.services.coupang import vendor_summary_sync as vss
+    db = _db()
+    rg_request_refresh(db)
+    # vendor-summary refresh_status는 RG 요청에 오염되지 않아야 함
+    assert vss.refresh_status(db)["requested"] is False
+    assert _RG_STATE_ACCOUNT != vss._VS_ACCOUNT

@@ -106,3 +106,26 @@ def test_refresh_trigger_claim_flow(client):
                           headers={"X-Ingest-Token": _TOKEN})
     assert claimed.status_code == 200 and claimed.json()["claimed"] is True
     assert client.get("/api/coupang/ops/wing/vendor-summary/refresh-status").json()["requested"] is False
+
+
+# ── RG 정산 자동 다운로드 (S4-P2) ──
+def test_rg_settlement_upload_requires_token(client):
+    """회계(net_profit 소스) 변경 엔드포인트 → 토큰 없으면 401(파일 파싱 전 차단)."""
+    r = client.post(
+        "/api/coupang/ops/rg/settlement/upload-xlsx",
+        files={"file": ("A01564720-WAREHOUSING_SHIPPING-ko-x.xlsx", b"dummy",
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+    assert r.status_code == 401
+
+
+def test_rg_settlement_refresh_trigger_claim_flow(client):
+    """request-refresh(무토큰 UI) → status requested=True → claim(토큰) → requested=False. (vendor-summary 미러)"""
+    base = "/api/coupang/ops/wing/rg-settlement"
+    assert client.get(f"{base}/refresh-status").json()["requested"] is False
+    assert client.post(f"{base}/request-refresh").status_code == 200
+    assert client.get(f"{base}/refresh-status").json()["requested"] is True
+    assert client.post(f"{base}/refresh-claim").status_code == 401          # 토큰 필요
+    claimed = client.post(f"{base}/refresh-claim", headers={"X-Ingest-Token": _TOKEN})
+    assert claimed.status_code == 200 and claimed.json()["claimed"] is True
+    assert client.get(f"{base}/refresh-status").json()["requested"] is False

@@ -1369,6 +1369,31 @@ def claim_wing_vendor_summary_refresh(
     return vendor_summary_sync.claim_refresh(db)
 
 
+# ── RG 정산 자동 다운로드 갱신 트리거 (Wing 세션 자동화 트랙 S4-P2, D-8) ──
+# vendor-summary와 동일 메커니즘이되 상태행 분리(COUPANG_WING_RG). 페처 데몬이 claim 후
+# 정산 엑셀 브라우저측 다운로드 → /rg/settlement/upload-xlsx 로 push(기존 ingest 재사용).
+@router.post("/wing/rg-settlement/request-refresh")
+def request_wing_rg_settlement_refresh(db: Session = Depends(get_db)):
+    """UI 'RG 정산 갱신' 버튼/스케줄 → 갱신 요청 플래그 set. Wing 페처 데몬이 다음 폴링에서 소비."""
+    return rg_settlement_sync.rg_request_refresh(db)
+
+
+@router.get("/wing/rg-settlement/refresh-status")
+def wing_rg_settlement_refresh_status(db: Session = Depends(get_db)):
+    """RG 정산 갱신 요청/완료 상태. UI(버튼 후 폴링)·Wing 페처(요청 확인) 공용."""
+    return rg_settlement_sync.rg_refresh_status(db)
+
+
+@router.post("/wing/rg-settlement/refresh-claim")
+def claim_wing_rg_settlement_refresh(
+    x_ingest_token: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """Wing 페처가 RG 갱신 요청을 소비(플래그 clear). 토큰 인증(ingest와 동일)."""
+    _require_ingest_token(x_ingest_token)
+    return rg_settlement_sync.rg_claim_refresh(db)
+
+
 # ════════════════════════════════════════════════════════════════════
 # RG 정산 옵션 단위 수집 (S6 — 종류별 엑셀 수동 업로드, D-2)
 # ════════════════════════════════════════════════════════════════════
@@ -1385,15 +1410,19 @@ def _vendor_id_to_account_key(vendor_id: str) -> str | None:
 async def upload_rg_settlement_xlsx(
     file: UploadFile = File(...),
     account_key: str | None = Query(default=None, description="미지정 시 파일명 vendor_id로 자동 매핑"),
+    x_ingest_token: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    """RG 종류별 정산 엑셀(WAREHOUSING_SHIPPING 등) 수동 업로드 → 옵션 단위 적재(S6, D-2).
+    """RG 종류별 정산 엑셀(WAREHOUSING_SHIPPING 등) 업로드 → 옵션 단위 적재(S6, D-2).
 
     파일명 형식: {vendor_id}-{REPORT_TYPE}-ko-{uuid}.xlsx (예 A01564720-WAREHOUSING_SHIPPING-ko-*.xlsx).
     account_key 미지정 시 파일명 vendor_id로 자동 매핑(COUPANG_WING1/2).
     옵션 cost=할인적용가(A-B) VAT前(§8-1). 검산: Σ상세==요약합계, 요약최종 vs status/api 계정 row.
-    자동 다운로드(download-list/api)는 후속(S6-auto, body 캡처 필요). 현재는 수동 업로드 경로.
+    **인증(S4-P2)**: X-Ingest-Token 필수 — prod 회계(net_profit 소스) 변경 엔드포인트이므로
+    무인증 외부 POST로 데이터 오염을 막는다(vendor-summary ingest와 동일 토큰). Mac 페처 자동 push·
+    수동 업로드(curl/스크립트) 모두 헤더에 토큰 포함. (프론트에서는 호출하지 않음 — UI 무영향.)
     """
+    _require_ingest_token(x_ingest_token)
     filename = file.filename or ""
     if not filename.lower().endswith(".xlsx"):
         raise HTTPException(status_code=400, detail="xlsx 파일만 업로드 가능합니다.")
@@ -1423,9 +1452,12 @@ async def upload_rg_settlement_xlsx(
 
     content = await file.read()
     try:
-        return rg_settlement_sync.ingest_settlement_xlsx(db, account_key, content)
+        result = rg_settlement_sync.ingest_settlement_xlsx(db, account_key, content)
     except WingReadError as e:
         raise HTTPException(status_code=422, detail=f"엑셀 파싱 실패: {e}")
+    # S4-P2: 자동 다운로드(Mac 페처 push)·수동 업로드 모두 freshness 갱신(스케줄 중복방지·상태표시).
+    rg_settlement_sync.rg_mark_heartbeat(db)
+    return result
 
 
 # ════════════════════════════════════════════════════════════════════

@@ -13,7 +13,7 @@
   즉 적재값은 인식기간 gross 발생분(D-10 충족, f−g·최종지급액 아님).
 - **status/api에 vendor_item_id 없음 재확인**: 50필드 전부 정산주기별 집계(옵션단위 귀속 불가) → 옵션단위는 S6 종류별 엑셀 필요.
 - **profit-status/search, download-list/api는 status/api와 body 스키마 다름**(같은 body로 호출 시 HTTP 500).
-  → 추정 금지(원칙22): 실제 요청을 브라우저 DevTools에서 캡처해야 함(S5 엑셀 실증 진행).
+  → 추정 금지(원칙22): 실제 요청을 브라우저 DevTools에서 캡처해야 함. **★2026-06-14 캡처·검증 완료 → §8-2 참조(블로커 해소).**
 - **코드 반영(커밋 2c410c9)**: fee_type 'fulfillment'→'delivery' 리네임(alembic h2i3j4k5l6m7 UPDATE, stale 방지).
   D-11 광고비 dedup 규칙 코드화(sell_type='2P'=RG, RG정산 ad_sales 정본 → Phase2 플립 시 제외). codex 3R pass.
 
@@ -25,6 +25,21 @@
 - **★검산 완전 일치(원칙22)**: Σ옵션 **할인적용가(A−B)** = 요약 「합계」 = status/api 컴포넌트(VAT前). 입출고: Σ(A−B)=68,625 = 요약 입출고비합계 68,625; +세액 6,864 = 최종 75,489 = **status/api totalWarehousingFeeDeductionAmount(75,489)**. 배송도 동일 구조.
 - **★S6 회계 규칙(중요)**: 옵션 귀속 cost = **할인적용가(A−B)** 사용(발생비용 A=gross 할인前은 status/api와 불일치 100,650≠68,625). VAT는 요약 세액으로 별도 gross-up. fee_type별 엑셀 분리 다운로드(8종).
 - **다운로드 흐름**: 정산현황 행 「엑셀 다운로드 요청」(비동기 생성) → 우측상단 「정산관리 엑셀 다운로드 목록」에서 받음(download-list/api). 파일명=`{vendor_id}-{REPORT_TYPE}-ko-{uuid}.xlsx`. REPORT_TYPE 예: WAREHOUSING_SHIPPING(입출고·배송비).
+
+### 8-2. ★S6-auto 다운로드 API 라이브 캡처·검증 완료 (2026-06-14, 원칙22 — 오픽스 WING1 DevTools 3요청+응답 전수 캡처)
+3요청 전부 **현재 코드(`clients/coupang/rg_settlement.py`) body·응답 필드명과 정확히 일치** → 기존 "HTTP 500 블로커"는 stale 라벨이었고 코드가 실제로는 맞았음(라이브 확정). host=`wing.coupang.com`(데스크톱), UA=iPhone, same-origin, `x-xsrf-token`=XSRF-TOKEN 쿠키 더블서브밋.
+
+1. **POST `/tenants/rfm/v2/settlements/request-download/api`** (엑셀 생성요청)
+   - body: `{"sellerReportType":"WAREHOUSING_SHIPPING","requestTime":"<unix_ms 문자열, 내가 정함>","settlementGroupKeys":["A01564720-2026-06-08-2026-06-14"],"locale":"ko"}`
+   - settlementGroupKey 형식 = `{vendorId}-{from}-{to}`(YYYY-MM-DD, 주 단위). 응답: `{requestId, vendorId, ...}`.
+2. **POST `/tenants/rfm/v2/settlements/download-list/api`** (생성목록 폴링)
+   - body: `{"requestTimeFrom":"<unix_ms>","requestTimeTo":"<unix_ms>"}` (UI는 ~2h 창; 우리 코드는 더 넓게 OK).
+   - 응답=list: `[{vendorId, requestTime, requestedSettlementGroupKeys(null 가능), downloadStatus("PENDING"|"COMPLETED"), requestId, sellerReportType, recognitionDateFrom/To(null 가능)}]`. **완료판정=downloadStatus=="COMPLETED"**, 매칭=requestId, v2 호출키=requestTime.
+3. **POST `/tenants/rfm/v2/settlements/download/api/v2`** (S3 주소 취득)
+   - body: `{"requestTime":"<완료항목 requestTime>","locale":"ko"}`. 응답: `{"url":"<S3 presigned>","vendorId":"A01564720"}`.
+   - S3 url: `rfm-common-prod.s3.ap-northeast-2.amazonaws.com/settlements/seller-report-download-v2/{vendorId}-{REPORT_TYPE}-ko-{uuid}.xlsx`. **`X-Amz-SignedHeaders=host`+`X-Amz-Expires=86400` → 인증헤더 없이 평범한 GET, 24h 유효**(어느 IP에서나 다운 가능 → prod도 직접 다운 가능, 단 만료 race 회피하려면 Mac이 받아 push 권장).
+- **미검증(원칙22)**: 위는 Jino 데스크톱 Chrome(cf_clearance, wing.coupang.com)에서 확인. **우리 Playwright 페처**(판매분석은 m-wing 착지)에서 정산 페이지가 어느 origin에 착지하는지·same-origin fetch 200 여부는 S4 구현 시 라이브 실측 대상. `location.origin+경로`로 호출하면 호스트 자동 대응.
+- **8종 sellerReportType 중 2종 확정**(WAREHOUSING_SHIPPING·CATEGORY_TR), 나머지 6종 코드명 미수집(드롭다운: 판매수수료·입출고/배송비·보관비·반품 회수/재입고·반출비·반출 배송 서비스비·재고 손실 보상·부가서비스비).
 
 ## 0. 핵심 문제 (왜 이 작업이 필요한가)
 - 우리 종합조망 순이익은 **판매수수료 + 판매수수료 VAT(`total_fee`)만** 차감(intelligence.py `_agg_fees`).
