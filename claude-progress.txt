@@ -4,7 +4,12 @@
 
 ## 현재 상태
 - 날짜: 2026-06-14
-- ★★★**신규 트랙: 쿠팡 매출·광고 정합성** (docs/tracks/active/track_coupang-revenue-ad-reconciliation.md, **5/7**).
+- ★★★**트랙: 쿠팡 매출·광고 정합성 — 7/7 코드 완료(운영 단계)** (docs/tracks/active/track_coupang-revenue-ad-reconciliation.md).
+  - **S5 완료·prod 배포·라이브 검증(커밋 1346b55)**: 비-PA 전체(ALL)전환 D-15 + 커버리지30일 D-13.
+    비-PA=report/SALES ALL_DELIVERED−DELIVERED(같은 응답·봇리스크0). all_day_cost 컬럼+alembic l6m7n8o9p0q1.
+    계정식별 게이트로 net_profit−=비-PA(계정단위·by_option 불변·RG플립 패턴). 페처 ALL push+sales_days 7→30(백필 5/16~).
+    codex 2R pass(P1 게이트→계정식별). 167 tests. 라이브: 오픽스 6/9~6/13 비-PA 65,677 반영·감사체인 정확·WING2 미적용.
+- ★★★**(이전 5/7 시점) 신규 트랙: 쿠팡 매출·광고 정합성** (docs/tracks/active/track_coupang-revenue-ad-reconciliation.md, **5/7**).
   - 문제: 종합조망 매출·광고가 쿠팡 대시보드와 "전혀 안 맞음". 라이브 진단(오픽스 6/1~6/11): 광고는 0.02% 일치,
     매출은 RG 누락 52%·계정 합산·orderPrice 2중계상이 주범.
   - **S1~S4 완료·prod 배포·라이브 검증**(커밋 5998ef5·850acbd·78dad33·b5236ad·12da4d2):
