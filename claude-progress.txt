@@ -4,7 +4,10 @@
 
 ## 현재 상태
 - 날짜: 2026-06-14
-- ★★★**트랙: 쿠팡 매출·광고 정합성 — 7/7 + 옵션30일 후속 완료(운영 단계)** (docs/tracks/active/track_coupang-revenue-ad-reconciliation.md).
+- ★★★**트랙: 쿠팡 매출·광고 정합성 — 완료·completed/ 마감** (docs/tracks/completed/track_coupang-revenue-ad-reconciliation.md).
+  - 옵션30일 후속 + **vendor-summary 프로브로 매출 정합 라이브 1:1 입증**(6/8~6/13 우리 vs 쿠팡공식 GMV: 3P +1.8%·RG +7.4%, 전부 문서화 잔차 D-5/D-11, 신규버그 0 → 트랙 원래 목표 "매출 쿠팡과 맞춤" 달성·증명). ref 18 신설.
+  - 자동대조(드리프트 감시)는 Wing 세션 freshness 필요(cf_clearance·단명) → **신규 트랙 "Wing 세션 자동화"로 분리**(track_wing-session-automation.md, ⚠️구조 스캐폴딩만, 코딩 전). 광고 페처 헤드풀 패턴 복제로 vendor-summary 자동대조 + RG정산 S6-auto 동시 해결. 다음 세션: 구조 승인→Opus 계획→S1.
+- ★★★**(이전) 트랙: 쿠팡 매출·광고 정합성 — 7/7 + 옵션30일 후속 완료** (구 active 경로, 이제 completed/).
   - **옵션 보고서 7→30일 + _do_run 재정렬·데몬 재배포·라이브 검증(커밋 d9b57fc)**: net_profit PA 광고비(ad_spend)가
     CoupangAdOptionDaily에서 차감되는데 옵션 7일이라 8~30일차 PA 누락→과대. 30일로 PA 커버리지를 비-PA(30일)와 정렬.
     재정렬=페처(launchd poll 데몬 단일경로)가 무거운 옵션보고서 전에 메인+SALES push해 버튼 UI(215s 윈도우) 블록 방지.
