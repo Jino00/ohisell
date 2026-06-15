@@ -10,7 +10,7 @@ CHANNELS = [
         "channel_type": "marketplace",
         "account_label": "Wing 3P #1",
         "company": "개인회사 오픽스",
-        "commission_rate": 10.8,
+        "commission_rate": 7.8,  # 3P 실측 판매수수료율(폴백). 실측은 coupang_revenue_fee 우선(D-E)
         "api_type": "hmac",
         "api_config_key": "COUPANG_WING1",
     },
@@ -21,7 +21,7 @@ CHANNELS = [
         "channel_type": "marketplace",
         "account_label": "Wing 3P #2",
         "company": "주식회사 오하이테크",
-        "commission_rate": 10.8,
+        "commission_rate": 7.8,  # 3P 실측 판매수수료율(폴백). 실측은 coupang_revenue_fee 우선(D-E)
         "api_type": "hmac",
         "api_config_key": "COUPANG_WING2",
     },

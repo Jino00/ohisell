@@ -13,6 +13,10 @@ from sqlalchemy.orm import Session
 
 from app.models import Channel, CoupangRgSettlementFee, Order, ProductChannelMapping, ProductMaster
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
+from app.services.coupang.revenue_fee_source import (
+    COUPANG_3P_CODES,
+    actual_fee_by_order_option,
+)
 from app.services.manual_revenue_service import get_daily_manual_revenue
 
 log = logging.getLogger(__name__)
@@ -147,8 +151,17 @@ def _get_gfa_ad_spend_daily(
     return {str(r[0]): Decimal(str(r[1])) for r in rows if r[1]}
 
 
-def _line_commission(ch: Channel | None, o: Order, revenue: Decimal) -> Decimal:
-    """라인 수수료. cafe24/naver는 동기화 시 산출된 commission_amount 사용, 그 외는 채널 정률."""
+def _line_commission(
+    ch: Channel | None,
+    o: Order,
+    revenue: Decimal,
+    actual_fee: dict[tuple[str, str], Decimal] | None = None,
+) -> Decimal:
+    """라인 수수료. 채널별 실측 우선:
+    - cafe24/naver: 동기화 시 산출된 commission_amount.
+    - 쿠팡 3P(WING1/2): 실측 차감 수수료(service_fee+VAT=total_fee) 우선, 없으면 7.8%×VAT 폴백(D-A/D-E).
+    - 그 외(쿠팡 RG/로켓·미지정): 채널 정률.
+    actual_fee = (account_key, order_id, vendor_item_id)→total_fee 룩업(원칙18-6 Harness 주입). None이면 폴백."""
     if ch and ch.code == "CAFE24":
         return o.commission_amount if o.commission_amount is not None else ZERO
     if ch and ch.code == "NAVER":
@@ -157,8 +170,32 @@ def _line_commission(ch: Channel | None, o: Order, revenue: Decimal) -> Decimal:
         # commission_amount 없으면 채널 정률 폴백 (API 미지원 케이스 방어)
         rate = ch.commission_rate if ch else ZERO
         return revenue * rate / Decimal("100")
+    # 쿠팡 3P(WING1/2): 실측 차감 수수료 우선, 없으면 정률(7.8%)×수수료VAT(×11/10) 폴백 (D-A/D-E)
+    if ch and ch.code in COUPANG_3P_CODES:
+        if actual_fee is not None:
+            # ch.code = 3P account_key → 계정 스코프 명시(codex P1 #2): 교차계정 합산 방지
+            key = (str(ch.code), str(o.order_number), str(o.platform_product_id))
+            hit = actual_fee.get(key)
+            if hit is not None:
+                return hit
+        rate = ch.commission_rate if ch else ZERO  # DB값 7.8 (폴백 정률, D-E)
+        return revenue * rate / Decimal("100") * Decimal("11") / Decimal("10")
     rate = ch.commission_rate if ch else ZERO
     return revenue * rate / Decimal("100")
+
+
+def _coupang_3p_actual_fee(
+    db: Session, orders: list[Order], channel_map: dict[int, Channel]
+) -> dict[tuple[str, str], Decimal]:
+    """3P(WING1/2) 주문번호 집합의 실측 차감 수수료 룩업을 1회 생성(원칙18-6/8 허브 주입).
+
+    각 집계 함수가 라인 루프 전에 한 번 호출해 _line_commission에 주입 → N×스캔 제거."""
+    oids = {
+        o.order_number
+        for o in orders
+        if (c := channel_map.get(o.channel_id)) and c.code in COUPANG_3P_CODES
+    }
+    return actual_fee_by_order_option(db, oids)
 
 
 # 한진택배 주문(배송) 1건당 판매자 지급액 — 전 채널 동일, 고객 결제 여부 무관
@@ -365,6 +402,7 @@ def calculate_daily_trend(
 
     orders = query.all()
     channel_map, product_map = _build_channel_maps(db)
+    actual_fee = _coupang_3p_actual_fee(db, orders, channel_map)  # 쿠팡3P 실측수수료(D-A)
 
     # 수동 매출이 있으면 주문이 없어도 계속 진행
     manual_lookup = get_daily_manual_revenue(db, date_from, date_to, channel_id)
@@ -424,7 +462,7 @@ def calculate_daily_trend(
             bucket["cost"] += product_map[o.product_id].cost_price * o.quantity
 
         # 수수료 — 상품매출 기준만 (배송비엔 수수료 미부과)
-        bucket["commission"] += _line_commission(ch, o, product_rev)
+        bucket["commission"] += _line_commission(ch, o, product_rev, actual_fee)
 
         # 판매자 배송비 — 한진 1,900/물리배송(packageNumber·박스). 배송당 1회만.
         if skey not in seen_shipments:
@@ -510,6 +548,7 @@ def calculate_channel_summary(
     )
     orders = query.all()
     channel_map, product_map = _build_channel_maps(db)
+    actual_fee = _coupang_3p_actual_fee(db, orders, channel_map)  # 쿠팡3P 실측수수료(D-A)
     manual_lookup_ch = get_daily_manual_revenue(db, date_from, date_to)
     if not orders and not manual_lookup_ch:
         return []
@@ -557,7 +596,7 @@ def calculate_channel_summary(
             b["cost"] += product_map[o.product_id].cost_price * o.quantity
 
         # 수수료 — 상품매출 기준만 (배송비엔 수수료 미부과)
-        b["commission"] += _line_commission(ch, o, product_rev)
+        b["commission"] += _line_commission(ch, o, product_rev, actual_fee)
         # 판매자 배송비 — 한진 1,900/물리배송(packageNumber·박스). 배송당 1회만.
         if skey not in seen_shipments:
             seen_shipments.add(skey)
@@ -697,6 +736,7 @@ def calculate_product_profit(
         return []
 
     channel_map, product_map = _build_channel_maps(db)
+    actual_fee = _coupang_3p_actual_fee(db, orders, channel_map)  # 쿠팡3P 실측수수료(D-A)
     all_option_ids = list(set(o.platform_product_id for o in orders if o.platform_product_id))
     ad_lookup = _get_ad_spend_lookup(ad_db, date_from, date_to, all_option_ids)
 
@@ -735,7 +775,7 @@ def calculate_product_profit(
             b["cost"] += product_map[pid].cost_price * o.quantity
 
         # 수수료 — 상품매출 기준만 (배송비엔 수수료 미부과)
-        b["commission"] += _line_commission(ch, o, product_rev)
+        b["commission"] += _line_commission(ch, o, product_rev, actual_fee)
 
         # 배송 그룹 — 한진 1,900 & 고객배송수입을 라인 비례 배분
         skey = _shipment_key(ch, o)

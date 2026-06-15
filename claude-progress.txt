@@ -3,8 +3,25 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
-- 날짜: 2026-06-15 (후속 정리 세션)
-- ★**직전 HANDOFF §6 후속 4항목 순서대로 처리 완료** (코드변경 0·전부 docs·origin push 완료 6d89957). HANDOFF=`.claude/memory/HANDOFF_ohisell-followup-cleanup_20260615.md`.
+- 날짜: 2026-06-15 (★구 대시보드 쿠팡 3P 수수료 실측화 세션)
+- ★★**구 대시보드 쿠팡 3P 판매수수료 10.8% 플레이스홀더 제거 → 실측화 (커밋 b4848ec, feat/coupang-3p-fee-actualization, ⚠️prod 미배포)**.
+  - **근본원인**: 회계 엔진 2개 평행 공존. 구 Dashboard.tsx(첫화면 `/`)=profit_calculator=하드코딩 10.8% / 종합조망 CommandCenter=intelligence.py=실측. 모든 수수료 정비가 신 엔진에만 적용, 구 엔진은 한 번도 정렬 안 됨 → 10.8% 좀비가 첫 화면에 잔존. **두 엔진은 중복 아님(범위 다름: 구=전채널 시계열, 신=쿠팡 스냅샷)** → 은퇴(A) 아닌 **실측 배선(B)**으로 결정(Jino 승인).
+  - **구현(PLAN_coupang-3p-fee-actualization.md, D-A~E)**: 신규 SA `services/coupang/revenue_fee_source.py`(`actual_fee_by_order_option` → (account_key,order_id,vendor_item_id)→total_fee=service_fee+service_fee_vat, 종합조망 _agg_fees와 동일 정의=SoT). `profit_calculator._line_commission` 3P 분기: **실측 있으면 실측, 없으면(미정산) 7.8%×11/10(=8.58%) 폴백**. 3집계함수(daily_trend·channel_summary·product_profit)에 룩업 1회 주입(원칙18-6/8). seed WING1/2 10.8→7.8 + alembic `o9p0q1r2s3t4`. **스코프=WING1/2(3P)만**, RG/로켓/네이버/카페24·판매자VAT·한진배송 **불변(D-C/D-D)**.
+  - **codex 2R PASS**(원칙19 대화형): P1 #2 수용(룩업 키에 account_key — 교차계정 합산 방지), P1 #1 기각(REFUND 음수는 models.py 계약+운영 _agg_fees 라이브 diff0, SoT 일치 근거 — codex 동의).
+  - **테스트 15신규+206 전체 그린**. **prod 사본 self-verify(원칙22)**: [A]3함수+종합조망 무오류 [B]WING2 3월 구10.8%→신8.49%(실측) [C]**실측보유 192라인 불일치 0** [D]비-3P 불변. 실측 데이터는 과거(3월) 풍부·최근(6월) 희박→최근은 7.8% 폴백 주효과.
+  - **다음**: Jino 배포 결정(prod alembic upgrade + PM2 ohisell-backend 재시작, 프론트 무변경). 미배포=feat 브랜치 로컬 커밋.
+- (이전) ★**BEP ROAS 산출 + 프라이버시 필름 원가 prod 등록 (코드변경 0·prod DB 데이터만)**.
+  - **BEP ROAS (옵션 95520869251, 판매가 14,100·수수료 7.8%·운송비 1,900·원가 4,001 VAT포함)**: 공급가기준(부가세 정확·쿠팡 ROAS 정의 일치) **약 222%** 권장 / 종합조망 현금기준 약 202%.
+  - **원가 등록**: product_master id=896(원가 4,001, sku=OHI-PRIV-FINGER-FILM-16230183613) + 상품 16230183613 **72옵션 전부** 매핑(신규67+기존정확5). 라이브 검증(원칙22): `_cost_master` 72/72→4,001, 종합조망 account.by_option 판매9옵션 cost=4,001×수량·cost_source=internal. 가역적(master+매핑 삭제로 원복).
+  - **★중요 발견(수수료 출처)**: 채널 commission_rate **10.8%는 seed.py Sprint0/1 하드코딩 플레이스홀더**(카테고리 근거 없음). 쿠팡 API saleAgentCommission 전부 0, 정산 실측 service_fee_ratio=**7.8%(174건)·6.4·10.5(10.8 0건)**. 종합조망 net_profit은 10.8% 안 씀(실측 service_fee 사용)·구 profit_calculator만 10.8% 사용. **Jino 지시: 10.8%→7.8% 정비는 나중에**(머니로직·Opus+계획+codex). 미해결 갭: 정산無 옵션은 종합조망에서 수수료=0·운송비 미차감(원가만 반영됨).
+- (이전) ★**ofix ↔ 쿠팡 Wing·Ads 정합성 3축 라이브 재검증 완료 (코드변경 0)**. 원칙22: stale 발견→직접 최신화 후 권위값 판정.
+  - **매출 3P(Wing GMV)**: ofix 1,715,890 = 쿠팡 1,715,890 → **0.00% 완벽 일치** ✅ (WING1, 6/9~6/14 6/6 완전커버리지).
+  - **매출 RG(Wing GMV)**: ofix 1,875,500 vs 쿠팡 1,743,300 → +7.58%(+132,200) = **D-11 기지 잔차(gross/net)**, 직전(6/8~6/13 +7.40%)과 동일 설명, 신규문제 아님.
+  - **광고비(Ads 확정)**: 6/8~6/14 전영업일 쿠팡 확정값 원단위 일치 ✅. 6/14 미확정(25,461·conv0)→재로그인 후 fetch로 **확정 154,129(conv 528,630)** 갱신.
+  - **RG 정산수수료(Wing)**: 오늘 07:00 fresh, 내부검산 diff0 일치 ✅.
+  - 복구한 것: vendor-summary stale(6/14누락)→수동 `wing_browser_fetcher.py run`로 6/6 적재 / 광고 세션 만료(keycloak)→`ad_cost_browser_fetcher.py login` 재로그인+세션저장(~/.ohisell_ad_state.json)→`run`로 확정일·옵션보고서 push.
+  - 미해결(참고): WING2(오하이테크) 페처 미설정→공식GMV 0적재(우리측 3P 83,600 소액). 두 데몬 08:06~09:33 일시 네트워크 실패(prod 정상).
+- (이전) ★**직전 HANDOFF §6 후속 4항목 순서대로 처리 완료** (코드변경 0·전부 docs·origin push 완료 6d89957). HANDOFF=`.claude/memory/HANDOFF_ohisell-followup-cleanup_20260615.md`.
   - ① 트랙 정리: Wing 자동화 트랙(6/6) → completed/ 이동, TRACKS.md 4/6 stale 수정 (커밋 6b06121).
   - ② RG수수료 S8 라이브 재감사: size_mismatch_high **4→1건**(실측 자동수집 해소). 남은 1건(아이패드미니필름 91313543029) **Jino 결정=자동해제 대기**.
   - ③ RG발송관제 S7 라이브 점검: trust_days 11, 게이트 정상(weekday 7/8 승격 임박), 코딩 불필요.
