@@ -3,8 +3,15 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
-- 날짜: 2026-06-15 (★구 대시보드 쿠팡 3P 수수료 실측화 세션)
-- ★★**구 대시보드 쿠팡 3P 판매수수료 10.8% 플레이스홀더 제거 → 실측화 (커밋 b4848ec, feat/coupang-3p-fee-actualization, ⚠️prod 미배포)**.
+- 날짜: 2026-06-15 (★두 회계 엔진 순이익 정의 통일 세션 — 3P 수수료 실측화 후속)
+- ★★**두 엔진(구 대시보드·종합조망) 순이익 정의 통일 — prod 배포 완료 (커밋 ab1ec81, main push)**.
+  - **배경**: 직전 3P 수수료 실측화 후 남은 갭 2건(Jino "잡아줘"). Gap1 RG 10.8%=비-이슈(RG 주문 Order테이블 0건→_line_commission 죽은 경로). Gap2가 진짜.
+  - **Gap2 발견**: 권위 엔진 종합조망 net_profit이 **판매자VAT(rev×10/110≈9%)+한진배송비를 누락**해 과대평가(2주 3P ~570k). 구 대시보드는 둘 다 차감 → 두 화면 불일치 핵심 원인.
+  - **Jino 결정(통일 방향)**: ① 판매자 VAT = **둘 다 미차감**(매입세액공제 상쇄되는 통과분, 구 대시보드에서 제거). ② 한진 배송비 = **둘 다 차감**(3P 실비용, 종합조망에 추가). VAT-제외 정규화(C안)는 미채택.
+  - **구현**: 구 대시보드 `profit_calculator` 3개 net 공식에서 `−vat` 제거. 종합조망 `intelligence`에 `_agg_seller_shipping_3p`(한진 1,900/물리배송, 구 대시보드 `_shipment_key`·`HANJIN` 재사용=SoT) → 계정 단위 차감(비-PA·RG 플립과 동일 패턴, by_option 불변 D-14). **3P(COUPANG_3P_CODES=WING1/2)만**, RG/로켓 자동 0.
+  - **codex 2R PASS**(원칙19): P1 수용(한진을 consignment 아닌 COUPANG_3P_CODES로 명시 제한 — RG marketplace 오부과 방지). 테스트 6신규+212 전체 그린.
+  - **prod 사본+라이브 self-verify(원칙22)**: 구 대시보드 net에서 VAT 2,389,445 미차감 확인 / 종합조망 한진 WING1 349,600(184건)·WING2 45,600(24건) 차감, net=pre_shipping−한진 체인 ✓ / 라이브 command-center 동일 확인. 배포=백엔드 2파일 scp+PM2 재시작(프론트·마이그레이션 무).
+- (이전) ★★**구 대시보드 쿠팡 3P 판매수수료 10.8% 플레이스홀더 제거 → 실측화 (커밋 136393b, prod 배포 완료·alembic o9p0q1r2s3t4)**.
   - **근본원인**: 회계 엔진 2개 평행 공존. 구 Dashboard.tsx(첫화면 `/`)=profit_calculator=하드코딩 10.8% / 종합조망 CommandCenter=intelligence.py=실측. 모든 수수료 정비가 신 엔진에만 적용, 구 엔진은 한 번도 정렬 안 됨 → 10.8% 좀비가 첫 화면에 잔존. **두 엔진은 중복 아님(범위 다름: 구=전채널 시계열, 신=쿠팡 스냅샷)** → 은퇴(A) 아닌 **실측 배선(B)**으로 결정(Jino 승인).
   - **구현(PLAN_coupang-3p-fee-actualization.md, D-A~E)**: 신규 SA `services/coupang/revenue_fee_source.py`(`actual_fee_by_order_option` → (account_key,order_id,vendor_item_id)→total_fee=service_fee+service_fee_vat, 종합조망 _agg_fees와 동일 정의=SoT). `profit_calculator._line_commission` 3P 분기: **실측 있으면 실측, 없으면(미정산) 7.8%×11/10(=8.58%) 폴백**. 3집계함수(daily_trend·channel_summary·product_profit)에 룩업 1회 주입(원칙18-6/8). seed WING1/2 10.8→7.8 + alembic `o9p0q1r2s3t4`. **스코프=WING1/2(3P)만**, RG/로켓/네이버/카페24·판매자VAT·한진배송 **불변(D-C/D-D)**.
   - **codex 2R PASS**(원칙19 대화형): P1 #2 수용(룩업 키에 account_key — 교차계정 합산 방지), P1 #1 기각(REFUND 음수는 models.py 계약+운영 _agg_fees 라이브 diff0, SoT 일치 근거 — codex 동의).
