@@ -518,7 +518,9 @@ def calculate_daily_trend(
         b = daily[d]
         # 수동 매출은 순이익 계산에서 제외 (매출만 표시)
         mr = manual_revenue_by_date.get(d, ZERO)
-        net = (b["revenue"] - mr) - b["cost"] - b["commission"] - b["shipping"] - b["ad_spend"] - b["vat"]
+        # VAT 미차감 — 두 엔진(구 대시보드·종합조망) 순이익 정의 통일(Jino 2026-06-15).
+        # 판매자 VAT는 매입세액공제로 상당부분 상쇄되는 통과분 → 순이익에서 제외(과다차감 회피).
+        net = (b["revenue"] - mr) - b["cost"] - b["commission"] - b["shipping"] - b["ad_spend"]
         result.append({
             "date": d,
             "revenue": str(b["revenue"]),
@@ -647,7 +649,8 @@ def calculate_channel_summary(
     result = []
     for cid, b in by_channel.items():
         ch = channel_map.get(cid)
-        net = b["revenue"] - b["cost"] - b["commission"] - b["ad_spend"] - b["shipping"] - b["vat"]
+        # VAT 미차감 — 두 엔진 순이익 정의 통일(Jino 2026-06-15, 통과분 제외).
+        net = b["revenue"] - b["cost"] - b["commission"] - b["ad_spend"] - b["shipping"]
         rate_pct = (net / b["revenue"] * 100) if b["revenue"] > 0 else ZERO
 
         result.append({
@@ -902,7 +905,8 @@ def calculate_product_profit(
         p = product_map.get(pid)
         if not p:
             continue
-        net = b["revenue"] - b["cost"] - b["commission"] - b["ad_spend"] - b["shipping"] - b["vat"]
+        # VAT 미차감 — 두 엔진 순이익 정의 통일(Jino 2026-06-15, 통과분 제외).
+        net = b["revenue"] - b["cost"] - b["commission"] - b["ad_spend"] - b["shipping"]
         rate_pct = (net / b["revenue"] * 100) if b["revenue"] > 0 else ZERO
 
         result.append({

@@ -174,6 +174,18 @@ def test_end_to_end_daily_trend_actual_vs_fallback(db):
     assert D(by_date["2026-06-06"]["commission"]) == D("858.00")
 
 
+def test_daily_trend_net_excludes_vat(db):
+    # Jino 2026-06-15: 구 대시보드 순이익에서 판매자 VAT(rev×10/110) 미차감으로 통일.
+    wing = _seed_channel(db, "COUPANG_WING1", "7.8")
+    _seed_order(db, wing, "ORDV", "V1", "10000", day=5)  # 실측 없음 → 폴백 858, 배송 1건(1,900)
+    db.commit()
+    trend = calculate_daily_trend(db, None, wing, date(2026, 6, 1), date(2026, 6, 30))
+    r = {x["date"]: x for x in trend}["2026-06-05"]
+    # net = 매출10000 − 원가0 − 수수료858 − 배송1900 − 광고0  (VAT 미차감)
+    assert D(r["net_profit"]) == D("10000") - D("858") - D("1900")
+    assert D(r["net_profit"]) == D("7242")  # VAT 차감 시였다면 6332.91 — VAT 빠졌음 확인
+
+
 def test_end_to_end_naver_uses_commission_amount(db):
     naver = _seed_channel(db, "NAVER", "5.5")
     db.add(Order(

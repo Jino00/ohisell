@@ -211,6 +211,43 @@ def _merge_rg_orders(orders: dict[str, dict], rg_orders: dict[str, dict]) -> Dec
     return rg_total_rev
 
 
+def _agg_seller_shipping_3p(db: Session, dfrom: date, dto: date,
+                            channel_ids: list[int] | None = None) -> Decimal:
+    """쿠팡 3P 판매자 배송비(한진 1,900/물리배송) 합계 — 계정 단위 net_profit 차감용.
+
+    구 대시보드는 차감하나 종합조망은 누락했던 3P 실비용(Jino 2026-06-15 통일 결정).
+    3P(판매자배송)에서만 발생 — RG/로켓은 쿠팡 풀필먼트라 Order 테이블에 행이 없어 자동 0.
+    ★구 대시보드 profit_calculator._shipment_key(배송 dedup=shipmentBoxId)·HANJIN_PER_SHIPMENT(단가)
+      를 그대로 재사용(SoT 단일 정의). 매출 기준과 동일하게 REVENUE_EXCLUDED·위탁은 제외(_agg_orders 정합).
+    channel_ids 주면 해당 계정만(없으면 전체 쿠팡). 데이터 없으면 0(회귀 가드)."""
+    from app.services.profit_calculator import _shipment_key, HANJIN_PER_SHIPMENT
+    from app.services.coupang.revenue_fee_source import COUPANG_3P_CODES
+    start = datetime.combine(dfrom, time.min)
+    end = datetime.combine(dto, time.max)
+    chmap = {c.id: c for c in db.query(Channel).filter(Channel.platform == "coupang").all()}
+    q = (
+        db.query(Order)
+        .join(Channel, Order.channel_id == Channel.id)
+        .filter(
+            Channel.platform == "coupang",
+            Order.status.notin_(tuple(REVENUE_EXCLUDED)),
+            Order.order_date >= start,
+            Order.order_date <= end,
+        )
+    )
+    if channel_ids is not None:
+        q = q.filter(Order.channel_id.in_(channel_ids))
+    seen: set = set()
+    for o in q.all():
+        ch = chmap.get(o.channel_id)
+        # ★3P(판매자배송) 채널만 — RG/로켓은 쿠팡 풀필먼트라 판매자 한진비 없음(codex P1).
+        #   RG 채널은 marketplace 타입이라 consignment 필터로는 안 걸러짐 → 3P 코드로 명시 제한.
+        if not (ch and ch.code in COUPANG_3P_CODES):
+            continue
+        seen.add(_shipment_key(ch, o))
+    return HANJIN_PER_SHIPMENT * len(seen)
+
+
 def _agg_ads(db: Session, dfrom: date, dto: date,
              vendor_id: str | None = None) -> dict[str, dict]:
     """광고 옵션 일별을 옵션ID별 집계. D-9: 비용·노출·클릭은 ad_option_id 귀속,
@@ -792,6 +829,15 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
     )
     # status enum(Codex #6): money basis 명시. 불리언 안 씀.
     account_sum["rg_flip_status"] = "applied_full" if len(rg_fees) > 0 else "not_applied_no_data"
+
+    # ─── 3P 판매자 배송비(한진 1,900/물리배송) — 계정 단위 최종 차감 ───
+    # 구 대시보드는 차감하나 종합조망은 누락했던 3P 실비용(Jino 2026-06-15). VAT는 양쪽 미차감으로 통일.
+    # 3P(판매자배송)만 발생, RG/로켓=쿠팡 풀필먼트라 Order rows 0 → 자동 0(회귀 가드).
+    # D-14 패턴: 계정 단위(summary)만 차감, by_option(account_rows) 운영지표 불변. 구 대시보드와 동일 SoT 단가/dedup.
+    account_sum["net_profit_pre_shipping"] = account_sum["net_profit"]
+    _seller_shipping = _agg_seller_shipping_3p(db, dfrom, dto, acc["channel_ids"])
+    account_sum["seller_shipping_3p"] = _seller_shipping
+    account_sum["net_profit"] -= _seller_shipping
 
     rg_settlement = {
         "summary": {
