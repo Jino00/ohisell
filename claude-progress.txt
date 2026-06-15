@@ -3,8 +3,13 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
-- 날짜: 2026-06-15
-- ★★★**Wing 세션 자동화 트랙 S5 완료(6/6) — 트랙 종료** (docs/tracks/active/track_wing-session-automation.md).
+- 날짜: 2026-06-15 (후속 정리 세션)
+- ★**직전 HANDOFF §6 후속 4항목 순서대로 처리 완료** (코드변경 0·전부 docs·origin push 완료 6d89957). HANDOFF=`.claude/memory/HANDOFF_ohisell-followup-cleanup_20260615.md`.
+  - ① 트랙 정리: Wing 자동화 트랙(6/6) → completed/ 이동, TRACKS.md 4/6 stale 수정 (커밋 6b06121).
+  - ② RG수수료 S8 라이브 재감사: size_mismatch_high **4→1건**(실측 자동수집 해소). 남은 1건(아이패드미니필름 91313543029) **Jino 결정=자동해제 대기**.
+  - ③ RG발송관제 S7 라이브 점검: trust_days 11, 게이트 정상(weekday 7/8 승격 임박), 코딩 불필요.
+  - ④ 8종 XLSX 파서: **보류 권장**(라이브 샘플 부재·돈 영향 없음 D-14·8 미니스프린트) — Jino 결정 대기.
+- (이전) ★★★**Wing 세션 자동화 트랙 S5 완료(6/6) — 트랙 종료** (docs/tracks/completed/track_wing-session-automation.md).
 
   ### S5 완료 내용 (커밋 d421d95)
   - **9종 sellerReportType 전수 확보**: ExcelModal.js i18n 파싱 + request-download/api 라이브 검증(HTTP 200 확인).
