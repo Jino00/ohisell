@@ -167,13 +167,28 @@ paymentSearchType=COMPLETE             # 정산상태(완료)
 - 정산 = `/scm/settlement/general/purchase/account` SSR → DOM/HTML 파싱(계산서 grain).
 - 인증=쿠키, Akamai 방어 → 헤드풀 CDP 페처(D-1).
 
-**S2에서 라이브 확인 필요(추측 금지):**
-1. `searchDateType` 가능값 전체(WAREHOUSING_PLAN_DATE 외 발주일 등) — 매출 인식일(D-3) 그레인 확정용.
-2. list 응답의 페이지네이션 메타(총건수·totalPages) 위치 → 전체 수집 루프 설계.
-3. **발주 금액 VAT 포함 여부** (sumOfOrderAmount vs 정산 공급가액 대조).
-4. 정산 계산서 ↔ 발주 PO 매핑(`입고상세내역` 링크가 호출하는 엔드포인트) — 발주↔정산 드리프트(D-5) 연결용.
-5. SKU 단위 금액이 필요하면(D-2 SKU 그레인) 발주 상세 `/scm/purchase/order/get/{seq}` DOM 파싱 or 별도 SKU API 탐색.
-6. 정산 `size` 상향(10→대량)·페이지 루프 가능 여부.
+### 6-1. S2 사전 라이브 확인 — 6건 중 5건 해결 (2026-06-17, 전부 page-context fetch, 추측 0)
+**★수집 방법 확정**: XHR 캡처 대신 **브라우저 page-context `fetch(path,{credentials:"include"})`**로 전체 JSON 수신
+(세션 쿠키 자동, same-origin, 8000자 잘림 없음). `tools/rocket_supplier_recon.py`에 헬퍼화 가능. 정산 SSR만 DOM.
+
+1. **[해결] `searchDateType` 가능값 = 2종**: `WAREHOUSING_PLAN_DATE`(입고예정일) · **발주일**(드롭다운 실측).
+   → **D-3 매출(발주 시점 인식)은 발주일 기준 조회**. (발주일 enum 코드값은 S2 첫 캡처 시 확정 — 드롭다운 선택→검색.)
+2. **[해결] 페이지네이션**: 응답 outer `body`에 `currentPage·lastPageNumber·totalRecordSize·pageSize`.
+   예: 2026-04-01~07-17 입고예정일 윈도우 = 620건/13페이지. → **`page=1..lastPageNumber` 루프 수집**.
+3. **[해결] 발주/입고 금액 = VAT 포함(gross)**. 계산서별 Σ`sumOfReceivingAmount` = 정산 **지급예정금액**(gross) 일치(4/5 정확):
+   `30025494→561,900` `30015106→224,880` `30015105→698,985` `29991328→1,216,100` (=각 공급가액+VAT).
+   → 종합조망 매출/순이익은 **gross 발주금액**(sumOfOrderAmount). 정산 공급가액은 net(VAT 별도).
+4. **[해결] 계산서↔PO 매핑 = list 안에 내장**: PO 필드 **`vendorPaymentList:[{vendorPaymentInfoSeq, documentStatus}]`**.
+   `vendorPaymentInfoSeq` = **계산서번호**(정산 화면 grain·`vendorPaymentInfoSeq` 파라미터와 동일).
+   관계: **1 계산서 ↔ N PO**(묶음 정산) **AND 1 PO ↔ N 계산서**(부분 정산 가능, list라서). 발주↔정산 드리프트(D-5) 이 키로 연결.
+   ⚠ 부분정산 사례 30003353: 단일 PO 134001752 입고 2,375,980 vs 계산서 gross 1,211,980 → PO가 복수 계산서로 분할. S2 reconcile 시 vendorPaymentList 다중성·documentStatus 처리 주의.
+5. **[미해결·선택] SKU 단위 금액**: list는 `skuCount`·`firstSkuName`만(PO 집계). SKU 그레인 필요 시 발주 상세
+   `/scm/purchase/order/get/{seq}`(SSR HTML) DOM 파싱 필요. **머니수학(D-3/D-4)은 PO grain으로 충분 → S2 기본범위 제외**, SKU 분석 요구 시 후속.
+6. **[해결] 정산/발주 list `size` 고정**: `size=200` 줘도 `pageSize=50` 유지(무시) → 페이지 루프 필수.
+
+### 6-2. 보너스 관측
+- list 응답에 `bulkQuery`(원시 SQL `eoupang.purchase_order`)·`piiFields`(mdId/mdName)·`queryValues` 노출(수집엔 불필요, 무시).
+- 발주일시(KST) = `createdAt`(UTC)+9h 검증 일치(예: 15:34:32 KST = 06:34:32Z).
 
 ---
 

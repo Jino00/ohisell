@@ -230,6 +230,43 @@ def cmd_dom(url_kw="settlement") -> int:
     return 0
 
 
+def cmd_fetch(path) -> int:
+    """★S2 수집방법: 브라우저 page-context fetch(credentials:include)로 전체 JSON 수신.
+    세션 쿠키 자동·same-origin·잘림 없음. 예:
+      dom 보다 우선. path = /po-web/app/purchase-order/list?page=1&searchDateType=...&searchStartDate=...
+    """
+    import websocket
+    ws_url = None
+    for t in _pages():
+        if "supplier.coupang.com" in t.get("url", ""):
+            ws_url = t["webSocketDebuggerUrl"]
+            break
+    if not ws_url:
+        print("supplier 페이지 없음(로그인 필요)", file=sys.stderr)
+        return 1
+    ws = websocket.create_connection(ws_url, suppress_origin=True, max_size=None)
+    mid = [0]
+
+    def call(m, p=None):
+        mid[0] += 1
+        ws.send(json.dumps({"id": mid[0], "method": m, "params": p or {}}))
+        while True:
+            x = json.loads(ws.recv())
+            if x.get("id") == mid[0]:
+                return x
+
+    call("Runtime.enable")
+    expr = 'fetch(%s,{credentials:"include"}).then(r=>r.text())' % json.dumps(path)
+    r = call("Runtime.evaluate", {"expression": expr, "awaitPromise": True, "returnByValue": True})
+    val = r.get("result", {}).get("result", {}).get("value")
+    ws.close()
+    if val is None:
+        print("fetch 실패:", json.dumps(r)[:400], file=sys.stderr)
+        return 1
+    print(val)
+    return 0
+
+
 def main():
     arg = sys.argv[1] if len(sys.argv) >= 2 else ""
     if arg == "chrome":
@@ -238,7 +275,12 @@ def main():
         sys.exit(cmd_capture())
     if arg == "dom":
         sys.exit(cmd_dom(sys.argv[2] if len(sys.argv) >= 3 else "settlement"))
-    print("usage: rocket_supplier_recon.py [chrome|capture|dom [urlkw]]", file=sys.stderr)
+    if arg == "fetch":
+        if len(sys.argv) < 3:
+            print("usage: ... fetch <path>", file=sys.stderr)
+            sys.exit(2)
+        sys.exit(cmd_fetch(sys.argv[2]))
+    print("usage: rocket_supplier_recon.py [chrome|capture|dom [urlkw]|fetch <path>]", file=sys.stderr)
     sys.exit(2)
 
 

@@ -18,7 +18,12 @@
   - ①발주+②납품 = **`GET /po-web/app/purchase-order/list` JSON 1개**(`sumOfOrderAmount`/`sumOfReceivingAmount`, grain=발주 PO `purchaseOrderSeq`). 발주↔납품 드리프트는 row 내 즉시 계산.
   - ③정산 = **`GET /scm/settlement/general/purchase/account` 폼-GET SSR HTML**(JSON 아님 → DOM/HTML 파싱, grain=계산서번호, 공급가액+VAT=지급예정금액).
   - 인증=쿠키, **Akamai 봇방어 존재 → 헤드풀 CDP 페처 필수**(D-1 확인). 호스트=supplier.coupang.com 단일.
-  - S2 미확인 6건(searchDateType 가능값·페이지네이션·발주VAT포함여부·계산서↔PO매핑·SKU그레인·정산size상향) = ref20 §6.
+  - S2 사전확인 6건 중 5건 해결(ref20 §6-1, 전부 page-context fetch·추측0):
+    ① searchDateType={입고예정일,발주일} → 매출은 발주일 기준 ② 페이지네이션=page 루프·pageSize 고정50(size무시)
+    ③ **발주/입고금액=VAT포함(gross)=정산 지급예정금액(4/5 정확일치)**, 정산 공급가액=net
+    ④ **계산서↔PO 매핑=list 내장** `vendorPaymentList[].vendorPaymentInfoSeq`=계산서번호(1계산서↔N PO·1PO↔N계산서 부분정산)
+    ⑤ SKU단위금액=발주상세 SSR(선택·머니수학은 PO grain 충분, S2 제외) ⑥ size 고정.
+  - **★수집방법 확정**: XHR캡처 대신 브라우저 page-context `fetch(path,{credentials:include})`로 전체 JSON(8000자 잘림 없음). 정산만 DOM.
 - **D-1 데이터 소스 = supplier.coupang.com** (쿠팡 1P 공급사 포털). Wing 헤드풀 CDP 페처 패턴 재활용 후보.
 - **D-2 3단계 추적**: ① 발주(PO) ② 납품(입고 공급가) ③ 정산(매입확정·지급). 단계 간 차이(드리프트)도 표시.
 - **D-3 매출 = 쿠팡이 발주한 금액(발주 시점 인식)**. (3P=GMV, RG=GMV와 다른 1P 고유 기준.)
@@ -51,7 +56,8 @@
 - **S1 정찰 완료(2026-06-17, 1/N)**. 발주/납품/정산 3단계 데이터 소스·형태 라이브 실측 → ref 20 + D-9 기록. 증거: `docs/references/data/20_rocket_1p_settlement_dom_sample.json`.
 - 정찰 도구 보존: `tools/rocket_supplier_recon.py`(원시 CDP Network 도청 + DOM 스크레이프, Playwright/Origin/SSR 우회법 코드화).
 
-## 다음 액션 (S2 — 데이터 모델 + 수집 SA)
-1. **S2 착수 전 라이브 확인 6건**(ref20 §6): searchDateType 가능값·list 페이지네이션 메타·발주금액 VAT포함여부·계산서↔PO매핑 엔드포인트·SKU그레인 필요성·정산 size 상향.
-2. 데이터 모델 확정: 발주/납품(PO grain) 테이블 + 정산(계산서 grain) 테이블 + alembic.
-3. 수집 SA `clients/coupang/rocket_supplier.py`(list JSON) + 정산 SSR 파서(DOM/HTML). → 그다음 S3 헤드풀 CDP 페처.
+## 다음 액션 (S2 — 데이터 모델 + 수집 SA, 사전확인 완료)
+1. (선택) 발주일 enum 코드값 1건 확정(드롭다운 발주일 선택→검색 1회 캡처). 나머지 사전확인은 완료(ref20 §6-1).
+2. 데이터 모델 확정: **발주/납품 = PO grain 테이블**(purchaseOrderSeq PK, sumOfOrder/Receiving/ConfirmedAmount[gross], vendorPaymentList=계산서매핑) + **정산 = 계산서 grain 테이블**(vendorPaymentInfoSeq PK, 공급가액net·VAT·지급예정gross·작성/지급일) + alembic.
+3. 수집 SA `clients/coupang/rocket_supplier.py`: **page-context fetch 방식**(list page=1..lastPageNumber 루프) + 정산 SSR DOM 파서. → S3 헤드풀 CDP 페처(launchd).
+4. 머니수학: 매출=Σgross 발주금액(발주일 기준), 순이익=매출−원가(product_master)−광고. 발주↔정산 드리프트=vendorPaymentInfoSeq 조인(부분정산 다중성 주의).
