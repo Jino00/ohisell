@@ -120,6 +120,23 @@ function RgReplenishmentSection({
         {plan && (
           <>
             <span className="text-xs text-gray-500">기준일 {plan.generated_at} · {plan.target_days}일치 목표 · 데이터 {plan.trust_days}일분 누적</span>
+            {plan.in_transit_meta && (
+              plan.in_transit_meta.fresh ? (
+                <span
+                  className="text-xs px-2 py-0.5 rounded bg-emerald-100 text-emerald-700"
+                  title={`마지막 입고 동기화 ${plan.in_transit_meta.last_fetch_at ?? "—"} · 유효재고 = 현재고 + 발송중`}
+                >
+                  🚚 발송중 최신 · 총 {(plan.in_transit_meta.total_in_transit_qty ?? 0).toLocaleString("ko-KR")}개
+                </span>
+              ) : (
+                <span
+                  className="text-xs px-2 py-0.5 rounded bg-amber-100 text-amber-700"
+                  title="Wing 쿠키 만료 — 발송중 수량을 0으로 취급(보수적). 입고 쿠키 갱신 필요."
+                >
+                  ⚠️ 발송중 데이터 만료(0 취급)
+                </span>
+              )
+            )}
             <div className="ml-auto flex gap-2 text-xs">
               <span className="px-2 py-0.5 rounded bg-red-100 text-red-700">즉시발송 {plan.summary.reorder_now}</span>
               <span className="px-2 py-0.5 rounded bg-green-100 text-green-700">정상 {plan.summary.ok}</span>
@@ -147,6 +164,8 @@ function RgReplenishmentSection({
                 <th className="px-4 py-2 text-left">상품명</th>
                 <th className="px-3 py-2 text-center">상태</th>
                 <th className="px-3 py-2 text-right">현재고</th>
+                <th className="px-3 py-2 text-right">발송중</th>
+                <th className="px-3 py-2 text-right">유효재고</th>
                 <th className="px-3 py-2 text-right">일판매</th>
                 <th className="px-3 py-2 text-right">리드타임</th>
                 <th className="px-3 py-2 text-right">판매가능일</th>
@@ -182,6 +201,20 @@ function RgReplenishmentSection({
                     </td>
                     <td className="px-3 py-2 text-right font-medium">
                       {it.current_stock != null ? `${it.current_stock.toLocaleString("ko-KR")}개` : "—"}
+                    </td>
+                    <td className="px-3 py-2 text-right text-gray-600">
+                      {/* 발송중은 유효재고가 있는(=추천 역산된) 행에서만 표시 — insufficient 행은 유효재고가 비므로 일관되게 "—"(P2-1 정합). */}
+                      {it.effective_stock != null && it.in_transit_qty != null && it.in_transit_qty > 0 ? (
+                        <span
+                          className="text-sky-600"
+                          title={it.expected_stowing_at ? `판매개시 예정 ${it.expected_stowing_at}` : "발송중(판매개시 전)"}
+                        >
+                          +{it.in_transit_qty.toLocaleString("ko-KR")}개
+                        </span>
+                      ) : "—"}
+                    </td>
+                    <td className="px-3 py-2 text-right font-medium" title="유효재고 = 현재고 + 발송중 (추천 수량 역산 기준)">
+                      {it.effective_stock != null ? `${it.effective_stock.toLocaleString("ko-KR")}개` : "—"}
                     </td>
                     <td className="px-3 py-2 text-right text-gray-600">
                       {it.daily_base_rate != null ? `${it.daily_base_rate.toFixed(2)}/일` : "—"}

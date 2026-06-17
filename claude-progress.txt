@@ -3,6 +3,13 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
+- 날짜: 2026-06-19 (★RG 발송관제 트랙 — "RG 완료" 정의 확정[D-18] + S6.5 UI 정합 완료·prod 배포)
+- ★★**RG 발송관제 트랙: D-18 완료 정의 + S6.5 UI 정합 완료** — 트랙 `docs/tracks/active/track_coupang-rg-replenishment.md`.
+  - **D-18 "RG 완료" 정의 확정(Jino "그래")**: 보류 축=수요신호 부족(848/857 무판매), 리드타임 아님. 완료=실제 판매 옵션(sparse+active 9개) 발송 정확성. **게이트 3개**: ① UI 정합(완료) ② P4 백테스트(대기) ③ 정직성 회귀. S9/S10 예측타워는 D-17 보류 유지. 완료 후 트랙=active→maintenance(데이터 누적 자동 고도화).
+  - **S6.5 UI 정합 완료(게이트 ①)**: 프론트만(api.ts·CoupangOps.tsx). 로켓그로스 탭에 `발송중·유효재고` 컬럼 + 발송중 신선도 배지(🚚 최신/⚠️ 만료). 백엔드는 P3에서 effective_stock 이미 반영했으나 프론트 미사용이던 것 노출.
+  - **적대검증 Claude 서브 GATE PASS(P1 0, codex 미사용=Jino 지시)** + **prod 라이브 self-verify**: rsync 배포(해시 index-Bhrr9H-n.js) → /browse 로켓그로스 탭 라이브 = 🚚 총464개 배지 + 정합 1:1(옵션 95521944483 현재고1+발송중40=유효재고41). 콘솔에러0.
+  - **다음**: P4 백테스트(게이트 ②) — /model opus 구조설계(fill-rate·과잉재고일수 검증 루프, 9 신호옵션 대상)→Jino 승인→Sonnet 구현→적대검증. ★미커밋(S6.5 코드+트랙+progress) — Jino 커밋 지시 대기.
+- ─────────────────────────────────────────────
 - 날짜: 2026-06-17 (★로켓배송 1P 트랙 — S4 종합조망 편입 Harness 완료, 4/6)
 - ★★**쿠팡 로켓배송(1P) 트랙 S4 종합조망 편입 완료 (4/6)** — 트랙 `docs/tracks/active/track_coupang-rocket-1p.md`. (codex 게이트 6/19 대기 중 진행, Jino 승인)
   - **신규 Harness** `backend/app/services/coupang/rocket_intelligence.py` `compute_rocket_overview(db, dfrom, dto, vendor_id=None)`: 1P는 PO그레인(vendor_item_id 없음)이라 옵션그레인 `compute_command_center`에 병합 불가 → **별도 1P 채널 블록**(D-11, 읽기전용·3P/RG net_profit 불변·additive).

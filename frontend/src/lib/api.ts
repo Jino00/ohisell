@@ -544,6 +544,10 @@ export interface ReplenishmentItem {
   confidence?: "ok" | "low";
   reason?: string;
   current_stock?: number;
+  in_transit_qty?: number;          // 발송중(아직 판매개시 안 된 파이프라인 물량, D-13)
+  in_transit_fresh?: boolean;       // 발송중 수치가 신선한 쿠키 기반인지(stale면 0 취급)
+  effective_stock?: number;         // 유효재고 = 현재고 + 발송중 (추천 역산 기준)
+  expected_stowing_at?: string | null;  // 발송중 물량 판매개시 예정일
   daily_base_rate?: number;
   lead_p90?: number;
   days_to_safety?: number;
@@ -560,11 +564,18 @@ export interface ReplenishmentSummary {
   low_confidence: number;
 }
 
+export interface ReplenishmentInTransitMeta {
+  fresh?: boolean;                  // 발송중 데이터가 신선한 Wing 쿠키 기반인지(만료 시 false)
+  last_fetch_at?: string | null;    // 마지막 입고 sync 성공 시각
+  total_in_transit_qty?: number;    // 전체 발송중 합계
+}
+
 export interface ReplenishmentPlan {
   generated_at: string;
   account_key: string | null;
   target_days: number;
   trust_days: number;
+  in_transit_meta?: ReplenishmentInTransitMeta;
   summary: ReplenishmentSummary;
   items: ReplenishmentItem[];
 }

@@ -44,6 +44,8 @@ UI: 상품별 현황(로켓그로스 탭) 컬럼 추가 — `현재고 | 최근 
 - [x] S6. UI 컬럼(로켓그로스 탭) + 프론트 — **완료 + prod 라이브 배포(2026-06-05)**. 아래 S6 결과 참조.
 - [ ] S7. 요일/휴일 세분화 점진 개선 (지속)
 - [x] **S8. demand_classifier SA (ADI/CV² 4분면 + X1 버킷) — 완료 + Claude 서브 적대검증 PASS(codex 한도소진 대체) + prod 라이브 self-verify(2026-06-18, 커밋 2f2d85d).** 아래 S8 결과 참조.
+- [x] **S6.5. UI 정합 (D-18 완료 게이트 ①) — 완료 + Claude 서브 적대검증 GATE PASS + prod 라이브 self-verify(2026-06-19).** 아래 S6.5 결과 참조.
+- [ ] **P4. 백테스트 (D-18 완료 게이트 ②)** — 파는 옵션 fill-rate·과잉재고일수 검증 루프. Opus 설계 대기.
 
 ## S0 실증 결과 (2026-06-05) — 성공
 - **엔드포인트**: `GET https://wing.coupang.com/tenants/rfm-inbound/data/inbound/search?pagingSize=10&pageIndex=0` (GET, body 없음).
@@ -195,6 +197,13 @@ UI: 상품별 현황(로켓그로스 탭) 컬럼 추가 — `현재고 | 최근 
 - **D-16 (D-9 재정의: cadence=7, safety는 newsvendor — 확정 2026-06-18, X7 승격)**: `target_days=7`을 **검토주기 R=7일(cadence)**로 재정의. 목표재고 safety는 D-12 newsvendor 분위수가 담당(역할 분리). API 파라미터 `target_days`→`review_period_days=7`로 리네임. Jino 원문: "시작하자".
 - **D-17 (S9/S10 예측 타워 보류 — 데이터 누적 대기, 확정 2026-06-18)**: S8 라이브 진단 결과 예측가능(sparse+active)=**9옵션/857(1.05%)**, zero_signal 848(99%). S9(sba_forecaster)·S10(newsvendor)을 **지금 구축하지 않고 보류**. 근거: ① 9옵션에 NBD/newsvendor 머니리스크 지는 ROI 부족 ② 848 zero_signal은 예측문제 아닌 시간/커버리지 문제(데이터 누적이 해법) ③ in-transit(P3 완료)이 현 단계 핵심가치. **S8이 자동 계기판** — 매일 RG sync로 sparse/active 옵션 수가 늘면(`GET /demand-class` summary.by_bucket로 관측) 그때 S9/S10 재개. **D-14·D-15의 실행순서(③예측 ④newsvendor)는 보류, ①in-transit·②진단은 완료.** Jino 결정: "B: 보류·데이터 누적 대기".
 
+- **D-18 ("RG 완료" 정의 확정 — 2026-06-19, Jino "그래")**: 보류 축은 리드타임이 아니라 **수요신호 부족**(848/857 무판매=보충 불필요)임을 라이브 코드로 재확인. 리드타임은 신뢰 가능(현재 평균과 큰 차 없음) → Phase1 `replenishment_calc`가 **파는 옵션(현재 sparse+active 9개)에 대해 이미 발송일·수량 산출 중**. 따라서 RG 트랙 "완료"는 예측 타워(S9/S10)가 아니라 **실제 판매 옵션의 발송 정확성·정합·검증**으로 정의. **완료 게이트 3개**:
+  - **① UI 정합 (S6.5)**: 백엔드는 P3에서 `유효재고=현재고+발송중`을 추천 계산에 이미 반영(replenishment_calc.py L156)하고 `in_transit_qty·effective_stock·in_transit_meta`를 응답에 담아 보내지만 **프론트가 미사용**(grep 0건) → 로켓그로스 탭에 `발송중·유효재고` 컬럼 + `fresh`(쿠키 신선도) 배지 추가. Jino가 "왜 이 수량인지(현재고+발송중)"를 화면에서 추적 가능해야 함.
+  - **② P4 백테스트**: "추천이 좋다"를 자기평가 아닌 데이터로 증명(원칙3·14). 파는 옵션(9개+자동 승격분)에 대해 과거 N일 발송추천 재현→실제 판매 대조→**fill-rate(품절 회피율)·과잉재고일수** 산출. 848 zero_signal은 신호0이라 백테스트 대상 아님(자연 제외).
+  - **③ 정직성 회귀**: 9옵션 confidence 정확 + 848 insufficient_data 정직 유지(라이브 회귀 0).
+  - **완료 후 트랙 상태 = `active → maintenance`(데이터 누적 자동 고도화: S7 요일계수·S8 버킷 승격·D-17 재개 트리거, 코드 0).** `completed/` 이동은 S9/S10 보류 표기 때문에 보류하고 "maintenance(데이터 대기)"로 유지.
+  - **권장 순서**: ① UI 정합(저위험·즉시 신뢰↑) → ② P4 백테스트(Opus 설계→Sonnet 구현→적대검증). Jino 원문: "그래".
+
 ## S8 결과 (2026-06-18) — 완료 + Claude 서브 적대검증 PASS + prod 라이브 self-verify
 - **신규 파일**: `app/services/coupang/demand_classifier.py`(읽기전용 SA, 새 테이블 없음). 순수함수 `_adi`/`_cv2_nonzero`/`_classify`/`_bucket`/`_classify_series` + 로더 `_load_daily_series`(옵션별 일별 qty 0포함)·`_load_inventory_options`(전체 모집단 vii→sold_30d) + 공개 `classify_demand(db,account_key)`·`classify_demand_one(db,vii,account_key)`(원칙18-8 등가).
 - **머니 수학(Jino 승인 ①~④)**: ADI=관측일÷nonzero일 / CV²=(nonzero수량 모집단std÷mean)²(0인날 제외·ddof=0) / 컷 1.32·0.49(>=포함) → smooth·erratic·intermittent·lumpy / unknown 게이트 nonzero<2 / X1 버킷 zero_signal(0)·sparse(1~6)·active(≥7). 리딩제로=전구간 카운트+게이트로 노이즈 차단(진단 전용·돈 무영향).
@@ -203,6 +212,14 @@ UI: 상품별 현황(로켓그로스 탭) 컬럼 추가 — `현재고 | 최근 
 - **적대검증(codex 한도소진 Jun19 → Claude 서브 대체, 원칙19)**: GATE PASS. P1 0건. 머니수학·경계포함성·batch↔single 등가성·엣지(빈윈도우·미존재옵션·NULL qty·tz) 전부 손검증. P2 3건 advisory(계정간 vii=전역unique라 안전·자매SA 동일관례 / NULL qty→0 정상 / 빈윈도우 fixture 부재 저위험) — 진단전용이라 미잠금.
 - **★prod 라이브 self-verify(원칙22)**: scp 2파일+PM2 restart(online·새 테이블/프론트 무). `GET /demand-class` 200 → **857옵션 / 신뢰 13일**: by_bucket zero_signal 848·sparse 5·active 4 / by_class unknown 851·intermittent 4·smooth 2. 라이브 머니수학 검증례: 95521944481(13/13일 ADI1.0 CV²0.359→smooth)·95521944484(9일 ADI1.444 CV²0.189→intermittent)·95501699184(6일 sparse ADI2.167 CV²0.469→intermittent). unknown 정직 표기 확인.
 - **★진단 함의(X1·D-14 정직성)**: 예측가능(sparse+active)=**9옵션(1.05%)**. S9/S10 예측 타워는 현재 9옵션만 도달 → Jino 전략판단(지금 짓기 vs 데이터 누적 대기). zero_signal 848은 시간/커버리지 문제이지 예측문제 아님(설계상 insufficient 유지가 정답).
+
+## S6.5 결과 (2026-06-19) — 완료 + Claude 서브 적대검증 GATE PASS + prod 라이브 self-verify
+- **수정 파일(프론트만, 백엔드 무변경)**: `frontend/src/lib/api.ts`(`ReplenishmentItem`에 `in_transit_qty·in_transit_fresh·effective_stock·expected_stowing_at`, `ReplenishmentPlan`에 `in_transit_meta?{fresh,last_fetch_at,total_in_transit_qty}`), `frontend/src/pages/CoupangOps.tsx`(`RgReplenishmentSection` — 헤더 발송중 신선도 배지[🚚 최신·총N개 / ⚠️ 만료(0 취급)], 테이블 `발송중·유효재고` 컬럼).
+- **배경**: 백엔드는 P3에서 `effective_stock=현재고+발송중`을 추천 역산에 이미 반영(replenishment_calc.py L156)하고 응답에 담아 보냈으나 **프론트가 미사용**(grep 0건) → 화면엔 현재고만 보여 추천 수량 근거 추적 불가. 이번에 노출.
+- **적대검증(codex 미사용=Jino 지시 → Claude 서브 code-reviewer, 원칙19)**: **GATE PASS, P1 0건.** 최대 의심점=stale 모순(배지 "0 취급" vs `effective_stock=현재고+발송중` 무조건 합산)을 라이브 코드 경로로 추적 → **무해 확정**: stale 시 `estimate_in_transit`이 `options={}·total=0` 반환 → `_in_transit_for`→None → `it_qty=0` → `effective_stock=현재고`. X5 freshness-gate가 수량 레벨에서 0 보장. 필드명 글자단위 일치·insufficient 행 "—" 안전. **P2-1 수정 반영**: insufficient 행에서 "발송중 +N개"만 보이고 "유효재고 —"로 비는 시각 불일치 → 발송중 셀을 `effective_stock != null`일 때만 표시(insufficient는 둘 다 "—" 일관). P2-2(현재고==유효재고 중복 표시)·P2-3(per-item in_transit_fresh 데드필드)은 UX nit, 후속.
+- **로컬 self-verify**: `tsc --noEmit` 0 에러 · `npm run build` 성공.
+- **★prod 라이브 self-verify(원칙22)**: `rsync -az --delete dist/`(서빙 해시 `index-Bhrr9H-n.js` 로컬 빌드 일치, nginx 재시작 불필요) → `/browse`로 `https://sellc.ohitech.co.kr/coupang-ops` 로켓그로스 탭 라이브 렌더 확인. 헤더 배지 **🚚 발송중 최신·총 464개**(API `in_transit_meta.fresh=True·total=464` 재현), 컬럼 `현재고·발송중·유효재고` 표시, **데이터 정합 1:1**: 옵션 95521944483 현재고 1개+발송중 +40개=유효재고 41개(qty 17), 95521944484 0+30=30, 95501699184 9+—=9(발송중 없으면 유효재고=현재고), 즉시발송행 0+—=0. 콘솔 에러 0. 증거 스크린샷 `/tmp/rg_replenishment_live.png`.
+- **남은 완료 게이트(D-18)**: ② P4 백테스트(Opus 설계 대기), ③ 정직성 회귀(라이브 summary 즉시발송3·정상7·부족843 정상, 9 신호옵션만 추천 — 회귀 0 확인).
 
 ## 다음 액션 (Phase 2 — S9/S10 보류 확정 D-17)
 - **✅ 전략판단 완료(2026-06-18)**: Jino "B: 보류·데이터 누적 대기" → **S9/S10 보류(D-17)**. Phase 2의 즉효 산출물 = in-transit(P3 완료) + S8 진단 계기판.
