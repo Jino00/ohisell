@@ -3,7 +3,18 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
-- 날짜: 2026-06-17 (★로켓배송 1P 트랙 — S2 백엔드 완료, 커밋 직후)
+- 날짜: 2026-06-17 (★로켓배송 1P 트랙 — S3 헤드풀 CDP 페처 완료, 커밋 직후)
+- ★★**쿠팡 로켓배송(1P) 트랙 S3 헤드풀 CDP 페처 완료 (3/6)** — 트랙 `docs/tracks/active/track_coupang-rocket-1p.md`.
+  - **페처** `tools/rocket_supplier_fetcher.py`: wing CDP 패턴 복제, 단일 계정 오하이테크(`A01029796`). 커맨드 `chrome`/`login`/`run`. **런타임경계 D-1 — 백엔드 변경 0**(도구는 수집·push만).
+    - **발주 수집**: page-context `fetch('/po-web/app/purchase-order/list?...searchDateType=PURCHASE_ORDER_DATE')` JSON → `_page_meta`로 lastPageNumber까지 루프 → raw 페이지 배열 → `POST /rocket/po/ingest`.
+    - **정산 수집**: `fetch`한 SSR HTML → JS `DOMParser`로 '계산서번호' 헤더 `<table>` rows 추출 → invoice 단위 dedup·진행가드·page 루프 → `POST /rocket/settlement/ingest {vendor_id, rows}`.
+  - **데몬** `tools/com.ohisell.rocket.plist`: **Option A 시간예약형**(Jino 승인) — `StartCalendarInterval` 매일 08:00 KST `run` 1회(상주 poll 아님). 1P 데이터 느리게 변함(발주 때때로·정산 주 단위).
+  - **설정** `~/.ohisell_rocket_fetcher.json`: prod_base_url·ingest_token(=AD_INGEST_TOKEN wing과 공유)·vendor_id·po_days/settle_days=90(트레일링, per-row upsert라 멱등안전).
+  - **★라이브 self-verify(원칙22)**: 살아있는 supplier Chrome(9223)로 발주 14페이지/651건·정산 DOMParser 107건(빈결과 플레이스홀더 1행=백엔드가 invoice_seq≤0 드롭) 라이브 수집 → **로컬 백엔드 e2e**(S2 마이그레이션 로컬 DB)로 push→파싱→upsert 전체경로 확인. 머니검산 **지급예정=공급가+VAT diff=0.00**·재실행 **멱등 651/107 불변**·PO↔정산 vendor_payment_seqs 매핑 579/651.
+  - ⚠ **codex review·prod 배포·launchd 설치 전부 보류**: OpenAI quota(6/19 06:42 리셋). **prod 백엔드 S2 미배포** → 페처 prod 향하면 404 → launchd 설치는 prod 배포 후. 선커밋(Jino 승인·self-verify 완료).
+  - **다음**: (6/19 quota후)`/codex review`(S2+S3) → pass면 prod 배포(scp+alembic+pm2)+launchd 설치+prod 라이브 self-verify+git push → S4 종합조망 Harness(매출=Σgross발주[발주일KST]−원가−광고, 발주↔정산 드리프트) → S5 프론트(D-10 2축+갱신버튼).
+- ─────────────────────────────────────────────
+- 날짜: 2026-06-17 (★로켓배송 1P 트랙 — S2 백엔드 완료)
 - ★★**쿠팡 로켓배송(1P) 트랙 S2 데이터모델+수집SA 완료 (2/6)** — 트랙 `docs/tracks/active/track_coupang-rocket-1p.md`.
   - **모델 2종**(`backend/app/models.py`): `CoupangRocketPurchaseOrder`(PO grain, purchase_order_seq PK, sum_of_order/receiving/vendor_confirmed_amount[gross], po_created_at=발주일UTC, `vendor_payment_seqs` JSON=계산서매핑) + `CoupangRocketSettlement`(계산서 grain, invoice_seq PK, supply_amount net·vat·payment_amount gross). alembic `p0q1r2s3t4u5`(head, upgrade/downgrade 검증·테이블2+인덱스7).
   - **순수 파서 SA** `clients/coupang/rocket_supplier.py`: `parse_purchase_order_list`(envelope body.body 이중중첩)+`parse_settlement_rows`(헤더명 동적매핑 D-13·콤마/"-"/ISO 방어변환)+`extract_page_meta`. HTTP 없음(런타임경계 D-1).

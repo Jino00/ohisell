@@ -1,6 +1,6 @@
 # 트랙: 쿠팡 로켓배송(1P) 종합조망 편입
 
-> 생성: 2026-06-15 · 상태: 🟢 Active (2/6, S2 완료) · 계정: 주식회사 오하이테크
+> 생성: 2026-06-15 · 상태: 🟢 Active (3/6, S3 완료) · 계정: 주식회사 오하이테크
 > 단일 진실 원천. 이 파일을 무시·변형하지 말 것. 변경은 Jino 승인 후 D-N으로 기록.
 
 ## 목표 (한 줄)
@@ -51,19 +51,19 @@
 ## 체크리스트
 - [x] **S1 정찰(spike)**: supplier.coupang.com 라이브 실측 완료(2026-06-17). 발주/납품/정산 3단계 데이터 소스·형태 확보 → **ref `docs/references/20_coupang_rocket_1p_recon.md`**.
 - [x] **S2 데이터 모델 + 수집 SA + 적재/마이그레이션**(2026-06-17): 모델 2종(`CoupangRocketPurchaseOrder` PO grain·`CoupangRocketSettlement` 계산서 grain, PO에 `vendor_payment_seqs` JSON) + alembic `p0q1r2s3t4u5`(head, upgrade/downgrade 검증) + 순수 파서 SA `clients/coupang/rocket_supplier.py`(헤더명 동적매핑·방어적) + ingest Harness `services/coupang/rocket_supplier_sync.py`(snapshot upsert 멱등·읽기전용) + 라우터 `POST /api/coupang/ops/rocket/{po,settlement}/ingest`(X-Ingest-Token). 테스트 18개+전체 267 통과(머니검산 gross=net+VAT·멱등·방어파싱). ⚠codex review는 OpenAI quota 소진으로 보류(6/19 06:42 리셋 후 실행 예정).
-- [ ] S3 헤드풀 CDP 페처(supplier.coupang.com) + prod push 배선 + launchd 데몬
+- [x] **S3 헤드풀 CDP 페처(supplier.coupang.com) + prod push 배선 + launchd 데몬**(2026-06-17): `tools/rocket_supplier_fetcher.py`(wing CDP 패턴 복제, 단일 계정 오하이테크 `A01029796`). 커맨드 `chrome`/`login`/`run`. PO 수집=page-context `fetch` JSON page=1..lastPageNumber 루프(`searchDateType=PURCHASE_ORDER_DATE`) → `/rocket/po/ingest`. 정산 수집=`fetch`한 SSR HTML을 JS `DOMParser`로 `<table>`(계산서번호 헤더) rows 추출·invoice 단위 dedup·진행가드·page 루프 → `/rocket/settlement/ingest`. **백엔드 변경 0**(런타임경계 D-1 — 도구는 수집·push만, 파싱은 S2 백엔드). 데몬=`tools/com.ohisell.rocket.plist`(**Option A 시간예약형**, `StartCalendarInterval` 매일 08:00 KST `run` 1회, Jino 승인). 설정=`~/.ohisell_rocket_fetcher.json`(prod_base_url·ingest_token[=AD_INGEST_TOKEN 공유]·vendor_id·po_days/settle_days=90 트레일링·per-row upsert라 멱등안전). **★라이브 self-verify(원칙22)**: 살아있는 supplier Chrome(9223)→발주 14페이지/651건·정산 DOMParser 107건(빈결과 플레이스홀더 1행은 백엔드 파서가 invoice_seq≤0으로 드롭) 라이브 수집 → **로컬 백엔드 e2e**(S2 마이그레이션 적용 로컬 DB)로 push→파싱→upsert 전체경로 확인(머니검산 지급예정=공급가+VAT diff=0.00·재실행 멱등 651/107 불변·PO↔정산 vendor_payment_seqs 매핑 579/651). ⚠codex review·**prod 배포·launchd 설치는 보류**(6/19 quota 리셋 후 codex→prod 배포 시 동시). 온디맨드 '갱신' 버튼은 S5.
 - [ ] S4 종합조망 편입: 1P 매출(발주)·순이익(발주−원가−광고) Harness + 발주↔정산 드리프트
 - [ ] S5 프론트: 종합조망 로켓배송 뷰/축 + 갱신 버튼
 - [ ] S6 prod 라이브 self-verify + codex + 배포
 (스프린트 수는 S1 정찰 결과로 확정)
 
 ## 현재 진행 단계
-- **S2 완료(2026-06-17, 2/N)**. 데이터 모델 2종 + alembic + 순수 파서 SA + ingest Harness + 라우터. 테스트 18개+전체 267 통과. 발주일 enum=`PURCHASE_ORDER_DATE` 라이브 확정. D-10(메뉴 2축 분리) 기록.
-- ⚠ **codex review 보류**: OpenAI usage limit(6/19 06:42 리셋). 원칙19 게이트는 quota 풀린 뒤 PR 전 실행. Jino 승인하에 선커밋(테스트 green·자기검토 완료).
-- S1 정찰 도구 보존: `tools/rocket_supplier_recon.py`. 증거: `docs/references/data/20_rocket_1p_settlement_dom_sample.json`.
+- **S3 완료(2026-06-17, 3/6)**. `tools/rocket_supplier_fetcher.py`(헤드풀 CDP 페처) + `tools/com.ohisell.rocket.plist`(시간예약형 데몬). 백엔드 변경 0. 라이브 수집(발주 651·정산 107) + 로컬 백엔드 e2e(머니검산 diff=0.00·멱등) self-verify 완료. 설정 `~/.ohisell_rocket_fetcher.json` 생성(ingest_token=wing 공유).
+- **S2 완료(2026-06-17, 2/6)**. 데이터 모델 2종 + alembic + 순수 파서 SA + ingest Harness + 라우터. 테스트 18개+전체 267 통과. 발주일 enum=`PURCHASE_ORDER_DATE`. D-10(메뉴 2축 분리).
+- ⚠ **codex review·prod 배포·launchd 설치 전부 보류**: OpenAI usage limit(6/19 06:42 리셋). 원칙19 게이트는 quota 풀린 뒤 실행. **prod 백엔드엔 S2 미배포** → 페처를 prod로 향하면 404, 따라서 launchd 설치/로드는 prod 배포 후. Jino 승인하에 S2·S3 선커밋(self-verify 완료).
+- 보존 도구: `tools/rocket_supplier_recon.py`(정찰). 증거: `docs/references/data/20_rocket_1p_settlement_dom_sample.json`.
 
 ## 다음 액션
-1. **(quota 리셋 후 6/19) `/codex review`** — S2 diff 교차검증. pass면 push, fail이면 대화형 반영(원칙19).
-2. **S3 헤드풀 CDP 페처**(supplier.coupang.com): `tools/rocket_supplier_recon.py` page-context fetch 패턴 → 페처화(발주 list page 루프 `searchDateType=PURCHASE_ORDER_DATE` + 정산 DOM rows) → `/api/coupang/ops/rocket/{po,settlement}/ingest`로 push → launchd 데몬(wing 패턴). 쿠키/Akamai 단명 주의.
-3. **S4 종합조망 편입 Harness**: 매출=Σgross 발주금액(발주일 KST=po_created_at+9h 기준)−원가(product_master)−광고. 발주↔정산 드리프트=vendor_payment_seqs 조인(부분정산 다중성 주의). 읽기전용 패턴.
-4. **S5 프론트(D-10)**: 돈축=종합조망 1P / 운영축=재고·발송 관제(발주→입고 진행). S6 prod self-verify+codex+배포.
+1. **(quota 리셋 후 6/19) `/codex review`** — S2+S3 diff 교차검증(원칙19). pass면 ① prod 배포(scp 모델/라우터/services/마이그레이션 + `alembic upgrade head` + `pm2 restart ohisell-backend`) ② launchd 설치(`cp tools/com.ohisell.rocket.plist ~/Library/LaunchAgents/` + load) ③ prod 라이브 self-verify(페처 run→prod 두 테이블 적재 확인) ④ git push. fail이면 대화형 반영.
+2. **S4 종합조망 편입 Harness**: 매출=Σgross 발주금액(발주일 KST=po_created_at+9h 기준)−원가(product_master)−광고. 발주↔정산 드리프트=vendor_payment_seqs 조인(부분정산 다중성 주의). 읽기전용 패턴.
+3. **S5 프론트(D-10)**: 돈축=종합조망 1P / 운영축=재고·발송 관제(발주→입고 진행) + 온디맨드 '갱신' 버튼(refresh 엔드포인트 3종 추가). S6 prod self-verify+codex+배포.
