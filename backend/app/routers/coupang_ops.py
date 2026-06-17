@@ -26,7 +26,7 @@ from app.database import get_db
 from app.models import Channel, CoupangAdCostDaily, CoupangAdOptionDaily, CoupangProductItem, CoupangRevenueFee, CoupangRgInbound, CoupangRgOrderItem, CoupangRgSettlementFee, Order, ProductChannelMapping, ProductMaster
 from app.routers._coupang_write_http import handle_write as _handle_write
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
-from app.services.coupang import ad_cost_sync, coupon_write, demand_classifier, in_transit_estimator, lead_time_estimator, product_write, rg_fee_audit, rg_inbound_sync, rg_product_size_sync, rg_replenishment, rg_settlement_sync, rocket_supplier_sync, sales_velocity_estimator, vendor_summary_sync
+from app.services.coupang import ad_cost_sync, coupon_write, demand_classifier, in_transit_estimator, lead_time_estimator, product_write, rg_fee_audit, rg_inbound_sync, rg_product_size_sync, rg_replenishment, rg_settlement_sync, replenishment_backtest, rocket_supplier_sync, sales_velocity_estimator, vendor_summary_sync
 from app.utils.crypto import CookieCryptoError
 
 log = logging.getLogger(__name__)
@@ -1113,6 +1113,27 @@ def get_demand_class(
     smooth/erratic/intermittent/lumpy + unknown(표본<2). 버킷=zero_signal/sparse/active.
     summary.by_bucket로 "예측(S9)이 살릴 수 있는 옵션 모집단" 크기를 정직하게 측정(X1)."""
     return demand_classifier.classify_demand(db, account_key)
+
+
+@router.get("/replenishment-backtest")
+def get_replenishment_backtest(
+    db: Session = Depends(get_db),
+    account_key: str | None = Query(None, description="특정 셀러계정만(미지정=전체)"),
+    train_min_days: int = Query(7, ge=1, le=30, description="cutoff별 최소 학습 달력일수"),
+    protection_mode: str = Query("full", description="보호구간: full(p90리드+검토주기≈10일) / lead_only(p90리드≈3일, 얇은 데이터용)"),
+    review_period: int = Query(7, ge=1, le=14, description="검토주기 R(D-16 cadence, 목표재고 target_days)"),
+):
+    """파는 옵션 발송추천 정책의 과거 적정성 walk-forward 백테스트(읽기전용, D-18 게이트②).
+
+    과거 시점 D까지로 산정한 목표재고 S(라이브 compute_target_level 공유) vs D 이후 보호구간 실제수요 A.
+    옵션별 fill-rate(품절 회피율)·평균 과잉재고일수·valid_windows. sold_30d 배제(과거 복원 불가, D-결정-B).
+    데이터 얇으면 summary.indicative_only=true(원칙22 은폐 금지). 다중 SA 가로지르므로 Harness 경유(원칙18-7)."""
+    return replenishment_backtest.run_backtest(
+        db, account_key,
+        train_min_days=train_min_days,
+        protection_mode=protection_mode,
+        review_period=review_period,
+    )
 
 
 # ════════════════════════════════════════════════

@@ -42,6 +42,23 @@ _UNSET = object()  # "미주입"과 "계산했으나 데이터 없음(None)"을 
 
 
 # ════════════════════════════════════════════════
+# 목표재고 정책 (단일 진실 원천 — _calc와 P4 백테스트가 공유, plan-eng-review A1)
+# ════════════════════════════════════════════════
+def compute_target_level(
+    base_rate: float, mean_lead: float, p90_lead: float, target_days: int
+) -> tuple[float, float]:
+    """주문상한(order-up-to) 목표재고 S 와 안전재고를 산출(순수함수).
+
+    안전재고 = max(0, (p90리드 − mean리드) × 대표일판매) — 리드 변동성 흡수분만(D-2 "최소").
+    S = target_days × 대표일판매 + 안전재고 (target_days = D-16 review_period=7).
+    ★_calc(라이브 발송 역산)와 replenishment_backtest._score_window(P4 검증)가 둘 다 이 함수를 호출 →
+      백테스트가 '실제 프로덕션 정책'과 동일 공식을 검증함을 보장(DRY, 공식 분기 방지).
+    반환: (target_level, safety_stock)."""
+    safety_stock = max(0.0, (p90_lead - mean_lead) * base_rate)
+    return target_days * base_rate + safety_stock, safety_stock
+
+
+# ════════════════════════════════════════════════
 # forward 투영 헬퍼 (요일 인지)
 # ════════════════════════════════════════════════
 def _days_until_below(
@@ -155,8 +172,8 @@ def _calc(
     # D-13 유효재고: 현재고 + 발송중(fresh일 때만 합산).
     effective_stock = current_stock + in_transit_qty
 
-    # 안전재고 = (p90 − mean) × 대표일판매. 리드 변동성 흡수분만(D-2).
-    safety_stock = max(0.0, (p90_lead - mean_lead) * base_rate)
+    # 목표재고·안전재고 = 단일 진실 원천 compute_target_level(백테스트와 동일 공식, plan-eng-review A1).
+    target_level, safety_stock = compute_target_level(base_rate, mean_lead, p90_lead, target_days)
 
     days_to_safety, safety_crossed = _days_until_below(effective_stock, segments, safety_stock, today)
     days_to_zero, _ = _days_until_below(effective_stock, segments, 0.0, today)
@@ -197,8 +214,7 @@ def _calc(
     actual_ship = today if urgent else ship_by
     arrival_offset = (actual_ship - today).days + lead_days
     proj_at_arrival = _stock_after_days(effective_stock, segments, today, arrival_offset)
-    target_level = target_days * base_rate + safety_stock
-    qty = math.ceil(target_level - proj_at_arrival)
+    qty = math.ceil(target_level - proj_at_arrival)  # target_level=compute_target_level(상단 단일 산출)
     qty = max(0, qty)
 
     return {

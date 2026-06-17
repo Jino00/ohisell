@@ -1,6 +1,6 @@
 # 트랙: 쿠팡 RG 재고·발송 관제 (Replenishment)
 
-> 시작일: 2026-06-05 · 상태: 🟢 Active
+> 시작일: 2026-06-05 · 상태: 🟢 Active → 🔧 Maintenance (2026-06-19, D-18 3/3 충족 = 실용적 완료. 신규코딩0·데이터 자동고도화. S9/S10 D-17 보류라 completed/ 미이동)
 > 단일 진실 원천. 이 트랙을 무시·변형해서 진행하지 말 것. 변경은 Jino 승인 후 D-N으로 기록.
 
 ## 목표 (한 줄)
@@ -45,7 +45,7 @@ UI: 상품별 현황(로켓그로스 탭) 컬럼 추가 — `현재고 | 최근 
 - [ ] S7. 요일/휴일 세분화 점진 개선 (지속)
 - [x] **S8. demand_classifier SA (ADI/CV² 4분면 + X1 버킷) — 완료 + Claude 서브 적대검증 PASS(codex 한도소진 대체) + prod 라이브 self-verify(2026-06-18, 커밋 2f2d85d).** 아래 S8 결과 참조.
 - [x] **S6.5. UI 정합 (D-18 완료 게이트 ①) — 완료 + Claude 서브 적대검증 GATE PASS + prod 라이브 self-verify(2026-06-19).** 아래 S6.5 결과 참조.
-- [ ] **P4. 백테스트 (D-18 완료 게이트 ②)** — 파는 옵션 fill-rate·과잉재고일수 검증 루프. Opus 설계 대기.
+- [x] **P4. 백테스트 (D-18 완료 게이트 ②) — 완료 + plan-eng-review PASS + Claude 서브 적대검증 GATE PASS + prod 라이브 self-verify(2026-06-19).** 아래 P4 결과 참조.
 
 ## S0 실증 결과 (2026-06-05) — 성공
 - **엔드포인트**: `GET https://wing.coupang.com/tenants/rfm-inbound/data/inbound/search?pagingSize=10&pageIndex=0` (GET, body 없음).
@@ -220,6 +220,23 @@ UI: 상품별 현황(로켓그로스 탭) 컬럼 추가 — `현재고 | 최근 
 - **로컬 self-verify**: `tsc --noEmit` 0 에러 · `npm run build` 성공.
 - **★prod 라이브 self-verify(원칙22)**: `rsync -az --delete dist/`(서빙 해시 `index-Bhrr9H-n.js` 로컬 빌드 일치, nginx 재시작 불필요) → `/browse`로 `https://sellc.ohitech.co.kr/coupang-ops` 로켓그로스 탭 라이브 렌더 확인. 헤더 배지 **🚚 발송중 최신·총 464개**(API `in_transit_meta.fresh=True·total=464` 재현), 컬럼 `현재고·발송중·유효재고` 표시, **데이터 정합 1:1**: 옵션 95521944483 현재고 1개+발송중 +40개=유효재고 41개(qty 17), 95521944484 0+30=30, 95501699184 9+—=9(발송중 없으면 유효재고=현재고), 즉시발송행 0+—=0. 콘솔 에러 0. 증거 스크린샷 `/tmp/rg_replenishment_live.png`.
 - **남은 완료 게이트(D-18)**: ② P4 백테스트(Opus 설계 대기), ③ 정직성 회귀(라이브 summary 즉시발송3·정상7·부족843 정상, 9 신호옵션만 추천 — 회귀 0 확인).
+- **커밋**: `ea4202c`(feat, 프론트2+문서2). prod엔 dist rsync 선배포됨(미추적 dist).
+
+## P4 결과 (2026-06-19) — 완료 + plan-eng-review PASS + Claude 서브 적대검증 GATE PASS + prod 라이브 self-verify
+- **계획서**: `docs/PLAN_rg-replenishment-p4-backtest.md`(계획+맥락+체크리스트+검토리포트). plan-eng-review VERDICT PASS(자동결정, codex 미사용=Jino 지시).
+- **신규 파일**: `app/services/coupang/replenishment_backtest.py`(Harness `run_backtest` + 순수함수 `_score_window`·`_base_rate_asof`, 읽기전용·머니 무영향). `tests/test_replenishment_backtest.py`(14개).
+- **수정 파일**: `replenishment_calc.py`(plan-eng-review **A1**: `compute_target_level` 순수함수 추출 → `_calc`와 백테스트가 **동일 목표재고 공식** 공유 = 백테스트가 '실제 프로덕션 정책' 검증. 무행동 등가, 회귀 0). `routers/coupang_ops.py`(`GET /replenishment-backtest`).
+- **핵심 설계(원칙22 정직성)**: 과거 재고 스냅샷 없음(rg_inventory onupdate 덮어씀) → 재고 깊이 replay 불가 → **target-vs-demand**(과거 D까지 학습 목표재고 S vs D 이후 보호구간 실제수요 A). **D-결정-B**: sold_30d는 현재 스냅샷이라 과거 복원 불가 → `_base_rate_asof(sold30=None)` order_item-only. base_source=="order_item" 옵션=프로덕션 동일 예측, sold_30d 의존 옵션=base 부족 skip(self-resolving). walk-forward·fill-rate(품절 회피율)·과잉재고일수·valid_windows(은폐 금지).
+- **구현 중 단순화**: 백테스트는 day-by-day 소진 시뮬 안 함 → 세그먼트 계수 불필요 → S3 `_compute_context` **as_of 리팩터 불필요**로 판명. 순수 `_option_base_rate`+`demand_classifier._load_daily_series`(날짜별 슬라이스) 재사용. **S3 무변경 = 등가성 리스크 0**.
+- **적대검증(Claude 서브, codex 미사용)**: **GATE PASS, P1 0.** 오라클(FLAT fill1.0·over5.0 / SPIKE fill0.727·stockout3)을 워크포워드 인덱싱과 함께 독립 재계산 일치. 누설·경계(A==S 비품절)·머니식·None가드 견고. **P2 4건 전부 반영**(자동결정): P2-1 full 모드 S(R커버) vs H(R+L노출) 비대칭=구조적 보수 → methodology note로 "lead_only가 정책-정합" 명시 / P2-2 정적 S-vs-A=예측적정성 프록시(발송정확도 아님) note / P2-3 `_calc`↔`compute_target_level` 직접 회귀 1줄 / P2-4 모집단 분모 `inventory_options_total` 추가.
+- **테스트**: 14개(compute_target_level oracle·_score_window 경계·_base_rate_asof·walk-forward FLAT/SPIKE/incomplete/full/insufficient·_calc 공유 회귀). 전체 **289 그린**.
+- **★prod 라이브 self-verify(원칙22)**: 백엔드 3파일 scp+pm2 restart(online). **⚠cross-track 오염 복구**: 로컬 coupang_ops.py에 미배포 rocket-1p import가 딸려가 첫 import 크래시 → import 테스트가 pm2 restart 앞이라 구 프로세스 무중단 → 마지막 prod 커밋(2f2d85d)에서 prod-형상 재구성+backtest 델타만 얹어 복구(failures.jsonl 기록). `GET /replenishment-backtest`: **lead_only 9옵션 채점(=S8 sparse+active 9 일치)·5 covered·10 valid·mean_fill 0.90·과잉 5.16일·모집단 855 정직표기·indicative false**, 옵션 95521944483 fill0.5(품절1)·valid0 옵션 fill=None(허위100% 금지). full horizon12→valid0·indicative True(얇은데이터 정직). 기존 replenishment-plan/demand-class 200(회귀0).
+- **D-18 게이트 3/3 충족**: ①UI정합(S6.5)·②P4백테스트·③정직성회귀 전부 완료 → **트랙 maintenance 전환**(아래).
+
+## ★ 트랙 상태: RG "완료"(D-18) → maintenance (2026-06-19)
+- **D-18 정의 3개 게이트 전부 충족** → RG 발송관제는 **실용적 완료**. 파는 옵션(현 9개)의 발송일·수량이 라이브 동작 + UI 정합(발송중·유효재고) + 백테스트로 검증(fill 0.90).
+- **maintenance 의미**: 신규 코딩 0. 데이터 누적으로 자동 고도화 — S7(요일계수 임계 승격)·S8(zero_signal→sparse 버킷 전환)·P4(valid_windows 증가로 indicative→결론). `completed/` 이동은 **S9/S10 예측타워가 D-17 보류**라 보류(예측 모집단이 의미있게 늘면 재개) → active 유지하되 라벨 maintenance.
+- **재개 트리거**: `GET /demand-class` sparse+active가 수십 옵션으로 증가 → S9(sba_forecaster)→S10(newsvendor)→S12 재개(D-17). `GET /replenishment-backtest` total_valid_windows 증가 → fill-rate로 정책 미세조정(서비스수준 99% 튜닝, D-12).
 
 ## 다음 액션 (Phase 2 — S9/S10 보류 확정 D-17)
 - **✅ 전략판단 완료(2026-06-18)**: Jino "B: 보류·데이터 누적 대기" → **S9/S10 보류(D-17)**. Phase 2의 즉효 산출물 = in-transit(P3 완료) + S8 진단 계기판.

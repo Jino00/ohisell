@@ -3,12 +3,14 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
-- 날짜: 2026-06-19 (★RG 발송관제 트랙 — "RG 완료" 정의 확정[D-18] + S6.5 UI 정합 완료·prod 배포)
-- ★★**RG 발송관제 트랙: D-18 완료 정의 + S6.5 UI 정합 완료** — 트랙 `docs/tracks/active/track_coupang-rg-replenishment.md`.
-  - **D-18 "RG 완료" 정의 확정(Jino "그래")**: 보류 축=수요신호 부족(848/857 무판매), 리드타임 아님. 완료=실제 판매 옵션(sparse+active 9개) 발송 정확성. **게이트 3개**: ① UI 정합(완료) ② P4 백테스트(대기) ③ 정직성 회귀. S9/S10 예측타워는 D-17 보류 유지. 완료 후 트랙=active→maintenance(데이터 누적 자동 고도화).
-  - **S6.5 UI 정합 완료(게이트 ①)**: 프론트만(api.ts·CoupangOps.tsx). 로켓그로스 탭에 `발송중·유효재고` 컬럼 + 발송중 신선도 배지(🚚 최신/⚠️ 만료). 백엔드는 P3에서 effective_stock 이미 반영했으나 프론트 미사용이던 것 노출.
-  - **적대검증 Claude 서브 GATE PASS(P1 0, codex 미사용=Jino 지시)** + **prod 라이브 self-verify**: rsync 배포(해시 index-Bhrr9H-n.js) → /browse 로켓그로스 탭 라이브 = 🚚 총464개 배지 + 정합 1:1(옵션 95521944483 현재고1+발송중40=유효재고41). 콘솔에러0.
-  - **다음**: P4 백테스트(게이트 ②) — /model opus 구조설계(fill-rate·과잉재고일수 검증 루프, 9 신호옵션 대상)→Jino 승인→Sonnet 구현→적대검증. ★미커밋(S6.5 코드+트랙+progress) — Jino 커밋 지시 대기.
+- 날짜: 2026-06-19 (★★RG 발송관제 트랙 — D-18 3/3 충족 = 실용적 완료 → Maintenance 전환)
+- ★★**RG 발송관제 트랙 완료(D-18 게이트 3/3) → Maintenance** — 트랙 `docs/tracks/active/track_coupang-rg-replenishment.md`.
+  - **D-18 "RG 완료" 정의(Jino "그래")**: 보류 축=수요신호 부족(848/857 무판매)이지 리드타임 아님. 완료=실제 판매 옵션(sparse+active 9개) 발송 정확성. 게이트 ①UI정합 ②P4백테스트 ③정직성회귀 **전부 충족**. S9/S10 예측타워는 D-17 보류 유지(completed/ 미이동, maintenance 라벨).
+  - **S6.5 UI 정합(게이트 ①)**: 프론트(api.ts·CoupangOps.tsx) 발송중·유효재고 컬럼+신선도 배지. prod rsync(index-Bhrr9H-n.js) + /browse 라이브 정합 1:1(95521944483 현재고1+발송중40=유효재고41). 커밋 ea4202c.
+  - **P4 백테스트(게이트 ②)**: 신규 `replenishment_backtest.py`(walk-forward, target-vs-demand, 읽기전용) + plan-eng-review A1로 `compute_target_level` 공유추출(replenishment_calc, 백테스트가 라이브 정책 검증) + `GET /replenishment-backtest`. 데이터 제약(과거 재고 스냅샷 없음)→재고 replay 불가→목표재고 S vs 보호구간 실제수요 A. sold_30d 배제(D-결정-B). plan-eng-review PASS + Claude 서브 적대검증 GATE PASS(P1 0, P2 4건 반영) + 테스트 14개/전체 289 그린.
+  - **prod 라이브 self-verify**: 백엔드 3파일 배포. ⚠cross-track 오염(로컬 coupang_ops.py에 미배포 rocket import 딸려감)→import 테스트가 pm2 앞이라 무중단→2f2d85d에서 prod-형상 재구성 복구(failures.jsonl). `GET /replenishment-backtest` lead_only 9옵션·5covered·10valid·**mean_fill 0.90**·과잉5.16·모집단855·indicative false / full horizon12 valid0(얇은데이터 정직). 기존 replenishment-plan/demand-class 200(회귀0).
+  - **Maintenance 의미**: 신규코딩0, 데이터 누적 자동 고도화(S7 요일계수·S8 버킷승격·P4 윈도우증가). 재개=demand-class sparse+active 수십개로 증가 시 S9(sba_forecaster)→S10(newsvendor)→S12(D-17 트리거).
+  - **★미커밋**: 백엔드 4파일(backtest+calc추출+router+tests)+PLAN+트랙+TRACKS+progress. Jino 커밋/push 지시 대기(prod엔 이미 배포됨).
 - ─────────────────────────────────────────────
 - 날짜: 2026-06-17 (★로켓배송 1P 트랙 — S4 종합조망 편입 Harness 완료, 4/6)
 - ★★**쿠팡 로켓배송(1P) 트랙 S4 종합조망 편입 완료 (4/6)** — 트랙 `docs/tracks/active/track_coupang-rocket-1p.md`. (codex 게이트 6/19 대기 중 진행, Jino 승인)
