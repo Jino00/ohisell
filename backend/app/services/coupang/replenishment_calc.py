@@ -4,7 +4,10 @@
 # 설계 결정(Jino 승인 2026-06-05):
 #   ① 속도(S3) None 또는 리드타임(S2) None → status=insufficient_data, 추천 보류(정직, Jino 수동).
 #   ② base_source가 sold_30d/order_item_low거나 요일계수 collecting이면 추천은 하되 confidence=low.
-#   ③ 발송수량 목표일수 = 3일(D-2 "2~3일치"의 상한 — 과소발송보다 품절 회피, 보관료는 3일이면 짧음).
+#   ③ 발송수량 목표일수 = 7일(D-9 1주일치, D-16 review_period_days=cadence).
+# Phase 2 추가 (D-13·D-15, 2026-06-18):
+#   ④ 유효재고 = 현재고 + 발송중(in_transit_qty). in_transit 주입 시 유효재고 기준으로 역산(중복발송 방지).
+#   ⑤ D-16: target_days → review_period_days(cadence=7), 의미 분리(safety는 newsvendor가 담당, Phase 2 S10).
 # 핵심: S3 segments(평일/주말/휴일 예상 일판매)로 오늘부터 하루씩 재고를 깎는 "요일 인지 forward 투영"
 #       → 단순 평균 나눗셈이 아니라 실제 요일 믹스를 반영(S3 작업의 실사용 지점).
 # 안전재고 = (p90리드 − mean리드) × 대표일판매 (리드 변동성 흡수분만, D-2 "최소로").
@@ -30,7 +33,8 @@ log = logging.getLogger(__name__)
 # ════════════════════════════════════════════════
 # 상수
 # ════════════════════════════════════════════════
-DEFAULT_TARGET_DAYS = 7  # D-9(2026-06-08): 목표 재고 1주일치(기존 D-2 2~3일치에서 변경). 발송수량 산정 기준 일수.
+DEFAULT_TARGET_DAYS = 7  # D-9/D-16(2026-06-08/18): cadence(검토주기) 7일. review_period_days와 동의어(리네임 예정, S10).
+DEFAULT_REVIEW_PERIOD_DAYS = DEFAULT_TARGET_DAYS  # D-16 alias: target_days→review_period_days.
 HORIZON_CAP = 120  # forward 투영 최대 일수(일판매 매우 작아도 무한루프 방지). 초과 시 well_stocked.
 _EPS = 0.0001  # 소진 판정 epsilon. threshold 0(safety=0)도 '재고 ≤0'을 정확히 잡도록 하한.
 
@@ -113,8 +117,15 @@ def _calc(
     lead: dict | None,
     target_days: int,
     today: date,
+    *,
+    in_transit_qty: int = 0,
+    expected_stowing_at: str | None = None,
+    in_transit_fresh: bool = False,
 ) -> dict:
-    """순수 계산(조회 분리). 입력이 부족하면 insufficient_data."""
+    """순수 계산(조회 분리). 입력이 부족하면 insufficient_data.
+
+    in_transit_qty: 발송중(아직 판매개시 안 된) 수량(D-13). fresh면 유효재고에 합산.
+    유효재고 = current_stock + in_transit_qty → 이 값으로 소진일·발송일·수량을 역산(중복발송 방지)."""
     # ① 데이터 전무 → 추천 보류(정직).
     if current_stock is None:
         return {"vendor_item_id": vii, "status": "insufficient_data", "reason": "no_inventory"}
@@ -124,6 +135,7 @@ def _calc(
             "status": "insufficient_data",
             "reason": "no_velocity",
             "current_stock": current_stock,
+            "in_transit_qty": in_transit_qty,
         }
     if lead is None:
         return {
@@ -131,6 +143,7 @@ def _calc(
             "status": "insufficient_data",
             "reason": "no_lead_time",
             "current_stock": current_stock,
+            "in_transit_qty": in_transit_qty,
         }
 
     base_rate = float(velocity["base_rate"])  # velocity가 not None이면 base_source != none → >0
@@ -139,16 +152,23 @@ def _calc(
     p90_lead = float(lead["p90"])
     lead_days = math.ceil(p90_lead)  # 보수적: 발송일 산정·도착 투영에 p90(올림) 사용
 
+    # D-13 유효재고: 현재고 + 발송중(fresh일 때만 합산).
+    effective_stock = current_stock + in_transit_qty
+
     # 안전재고 = (p90 − mean) × 대표일판매. 리드 변동성 흡수분만(D-2).
     safety_stock = max(0.0, (p90_lead - mean_lead) * base_rate)
 
-    days_to_safety, safety_crossed = _days_until_below(current_stock, segments, safety_stock, today)
-    days_to_zero, _ = _days_until_below(current_stock, segments, 0.0, today)
+    days_to_safety, safety_crossed = _days_until_below(effective_stock, segments, safety_stock, today)
+    days_to_zero, _ = _days_until_below(effective_stock, segments, 0.0, today)
 
     confidence = _confidence(velocity, lead)
     base = {
         "vendor_item_id": vii,
         "current_stock": current_stock,
+        "in_transit_qty": in_transit_qty,
+        "in_transit_fresh": in_transit_fresh,
+        "expected_stowing_at": expected_stowing_at,
+        "effective_stock": effective_stock,
         "daily_base_rate": round(base_rate, 3),
         "base_source": velocity["base_source"],
         "segments": {s: round(segments[s], 3) for s in SEGMENTS},
@@ -173,9 +193,10 @@ def _calc(
 
     # 권장 수량 = 목표레벨 − (실제 발송분 도착 시점의 투영 재고).
     #   목표레벨 = target_days × 일판매 + 안전재고. 급한 경우 오늘 발송 → 도착이 마감보다 늦어 투영재고↓(품절) → 수량↑.
+    #   투영 기준 = 유효재고(현재고+발송중). 발송중은 이미 파이프라인에 있으므로 새 발송 수량에서 빠진다.
     actual_ship = today if urgent else ship_by
     arrival_offset = (actual_ship - today).days + lead_days
-    proj_at_arrival = _stock_after_days(current_stock, segments, today, arrival_offset)
+    proj_at_arrival = _stock_after_days(effective_stock, segments, today, arrival_offset)
     target_level = target_days * base_rate + safety_stock
     qty = math.ceil(target_level - proj_at_arrival)
     qty = max(0, qty)
@@ -200,12 +221,16 @@ def calc_replenishment(
     current_stock=_UNSET,
     velocity=_UNSET,
     lead_time=_UNSET,
+    in_transit=_UNSET,
 ) -> dict:
     """단일 옵션 권장 발송 역산 (S5 Harness가 호출 — 원칙 18-8 optional 입력 설계).
 
-    velocity/lead_time/current_stock를 미리 받으면 재계산 생략(Harness가 배치로 1회 산출해 주입).
+    velocity/lead_time/current_stock/in_transit를 미리 받으면 재계산 생략(Harness가 배치로 1회 산출해 주입).
     ★주입값으로 명시적 None을 넘기면 "계산했으나 데이터 없음"으로 해석(재계산 안 함) — _UNSET(미주입)과 구분.
-    미주입 시 각 SA를 직접 호출. 반환은 status별 dict(insufficient_data/well_stocked/ok/reorder_now)."""
+    in_transit: {in_transit_qty, expected_stowing_at, fresh} 또는 None(미수집·stale).
+    미주입 시 in_transit_qty=0(차감 없음, 보수적). 반환은 status별 dict."""
+    from app.services.coupang.in_transit_estimator import estimate_in_transit_one
+
     vii = str(vendor_item_id)
     today = kst_today()
     if current_stock is _UNSET:
@@ -214,7 +239,21 @@ def calc_replenishment(
         velocity = estimate_sales_velocity(db, vii, account_key)
     if lead_time is _UNSET:
         lead_time = estimate_lead_time(db, vii, account_key)
-    return _calc(vii, current_stock, velocity, lead_time, target_days, today)
+    if in_transit is _UNSET:
+        lead_p90 = float(lead_time["p90"]) if lead_time else 3.0
+        lead_mean = float(lead_time["mean"]) if lead_time else 2.16
+        in_transit = estimate_in_transit_one(
+            db, vii, account_key, lead_p90_days=lead_p90, lead_mean_days=lead_mean
+        )
+    it_qty = int(in_transit["in_transit_qty"]) if in_transit else 0
+    it_stow = in_transit.get("expected_stowing_at") if in_transit else None
+    it_fresh = bool(in_transit.get("fresh")) if in_transit else False
+    return _calc(
+        vii, current_stock, velocity, lead_time, target_days, today,
+        in_transit_qty=it_qty,
+        expected_stowing_at=it_stow,
+        in_transit_fresh=it_fresh,
+    )
 
 
 # 참고: 전체 옵션 배치 역산(속도·리드타임 1회 산출 후 옵션별 주입)은 3개 SA를 가로지르는

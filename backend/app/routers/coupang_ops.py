@@ -26,7 +26,7 @@ from app.database import get_db
 from app.models import Channel, CoupangAdCostDaily, CoupangAdOptionDaily, CoupangProductItem, CoupangRevenueFee, CoupangRgInbound, CoupangRgOrderItem, CoupangRgSettlementFee, Order, ProductChannelMapping, ProductMaster
 from app.routers._coupang_write_http import handle_write as _handle_write
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
-from app.services.coupang import ad_cost_sync, coupon_write, lead_time_estimator, product_write, rg_fee_audit, rg_inbound_sync, rg_product_size_sync, rg_replenishment, rg_settlement_sync, sales_velocity_estimator, vendor_summary_sync
+from app.services.coupang import ad_cost_sync, coupon_write, in_transit_estimator, lead_time_estimator, product_write, rg_fee_audit, rg_inbound_sync, rg_product_size_sync, rg_replenishment, rg_settlement_sync, sales_velocity_estimator, vendor_summary_sync
 from app.utils.crypto import CookieCryptoError
 
 log = logging.getLogger(__name__)
@@ -1089,6 +1089,18 @@ def get_replenishment_plan(
         # 필터를 명시 요청했는데 전체를 노출하지 않는다(전체는 company 미지정/ALL일 때만).
         account_key = _RG_ACCOUNT_BY_COMPANY.get(company, "__unknown__")
     return rg_replenishment.build_replenishment_plan(db, account_key, target_days=target_days)
+
+
+@router.get("/in-transit")
+def get_in_transit(
+    db: Session = Depends(get_db),
+    account_key: str | None = Query(None, description="특정 셀러계정만(미지정=전체)"),
+):
+    """옵션별 발송중(in-transit) 수량 + 판매개시 예정일 조회(읽기전용, X5 freshness-gate 포함).
+
+    D-13: 유효재고=현재고+발송중. X5: last_success_at <2일=fresh(차감), stale=차감 스킵+배지.
+    검증 엔드포인트 — Wing 입고관리 화면 수치와 대조 가능(필름 100·버디 0 등)."""
+    return in_transit_estimator.estimate_in_transit(db, account_key)
 
 
 # ════════════════════════════════════════════════

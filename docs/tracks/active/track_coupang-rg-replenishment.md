@@ -123,7 +123,69 @@ UI: 상품별 현황(로켓그로스 탭) 컬럼 추가 — `현재고 | 최근 
 - **라이브 검증**: item_name 필드 정상 반환(784건, reorder_now 4건 상품명 확인 — 예: "2개입 아이폰15"). prod 배포 = rg_replenishment.py scp + pm2 restart + frontend dist 배포. 커밋 ddcd666.
 
 ## 현재 진행 단계
-- 2026-06-05: **S6 완료 + prod 라이브 배포**. 로켓그로스 탭에 발송관제 섹션 UI 완성. 진행 6/7. 다음 = S7 요일/휴일 세분화 지속 개선(데이터 더 쌓인 후).
+- 2026-06-05: **S6 완료 + prod 라이브 배포**. 로켓그로스 탭에 발송관제 섹션 UI 완성. 진행 6/7. (S7=데이터 누적 자동 승격.)
+- **2026-06-16: Phase 2 착수 결정 (예측 고도화 + in-transit). 아래 "Phase 2" 섹션 참조. 다음 세션 = Opus 구조설계부터.**
+
+## Phase 2 — 예측 고도화 + in-transit 통합 (착수 결정 2026-06-16)
+> 배경: 3축 조사 완료(레퍼런스 `docs/references/19_rg-replenishment-forecasting-research.md`). 진단 = ① in-transit(발송중 물량) 화면 부재 ② 예측이 단순 평균(sold_30d/30)이라 prod 855옵션 중 **98.6%가 insufficient_data**(대부분 간헐 수요인데 통계모델 없음). Jino "바로 진행하자".
+
+### D-10 (예측 엔진 교체 = 간헐 수요 통계모델 — 확정 2026-06-16)
+- 단순 평균 → **Croston 계열(SBA/TSB)** 로 교체. 활발한 간헐 SKU=SBA(Syntetos-Boylan 2005), 단종의심=TSB(Teunter 2011), 핵심(잘 팔림)=SES/ETS+ROP. SKU 분류는 ADI/CV² 사분면(컷 1.32/0.49).
+- 오픈소스 **Nixtla `statsforecast`**(SBA·TSB 내장) 활용 — 직접 구현 회피(채택 전 LICENSE 확인). 목표재고는 **newsvendor 분위수**(z·σ 안전재고는 간헐=비정규라 왜곡) 방향.
+- D-3 준수: 발송수량=결정론적 계산값(예측+정책)이지 전략추천 아님.
+
+### D-11 (in-transit = Wing 내부 API 사용 — D-14(전역트랙) 재검토·확정 2026-06-16)
+- "발송했는데 아직 적치 안 된 물량"은 **공식 Open API에 없음** → Wing 내부 API `rfm-inbound`만 제공. 과발송 방지의 핵심이라 **사용 확정**.
+- 근거: Wing 세션 자동화 트랙(완료, Akamai 우회 헤드풀 페처)이 이미 prod에서 RG 정산 수수료를 같은 방식으로 수집 중 → **검증된 페처에 rfm-inbound 한 줄 추가**(신규 위험 낮음). Jino 원문: "그래. 쓰자."
+- `coupang_rg_inbound`는 이미 적재 구조 있음(현재 6/5이 마지막·조망 미연동) → 정기 수집 배선 + 발송관제 화면에 "발송중 X개·도착예정 ○일" 컬럼 차감 반영.
+
+### D-12 (목표재고 정책 = newsvendor 분위수, 서비스수준 다이얼 — 확정 2026-06-17)
+- 목표재고를 **수요 분포의 서비스수준 분위수**(newsvendor critical fractile)로 산출한다. 기존 S4의 `target_days×base_rate + (p90−mean)×base_rate` 안전재고 공식을 대체.
+- **우리가 정하는 것 = 재고%(결과)가 아니라 "품절 허용 정도"(서비스수준) 하나.** 그 다이얼을 높게 잡으면 시스템이 **상품별 최적 재고%를 자동 산출**한다(전부 100%↑, 안정상품 ≈110%·들쭉날쭉상품 200~250% 식으로 수요 분포에 따라 자동). **모든 상품에 동일한 단일 %(예 105%)는 한쪽 과잉·한쪽 품절이라 채택 안 함.**
+- **시작값 = 서비스수준 99%**(보충 100주기 중 약 99번 품절 없음 ≈ 품절 사실상 0). 정직성(원칙22): "품절 100%-0"은 롱테일 때문에 무한재고라 불가 → 실무 최적은 "사실상 0" 지점.
+- **최적화 수순**: 운영하며 P4 백테스트가 "품절≈0 + 과잉 최소"인 진짜 최적 서비스수준을 데이터로 찾음 → 99% 미세조정. 실제 품절·보관·반품비 누적 후 **비용기반 newsvendor(CF=Cu/(Cu+Co))로 전환**.
+- D-3/D-4 준수: 분위수 목표는 결정론적 계산값(예측 분포+서비스수준)이지 전략추천 아님.
+- Jino 원문: "나는 100% 이상의 품절이 안날 최적의 숫자로 가고 싶은데" / (서비스수준 99% 시작·상품별 자동·백테스트 최적화 제안에) "그러자".
+
+### D-13 (발송중 물량 = 유효재고 반영, 판매개시 갭 포함 — 확정 2026-06-17)
+- 발송관제 역산의 재고 기준을 **유효재고 = 현재고(orderable) + 발송중(곧 판매개시될 물량)** 으로 변경(중복 발송 방지).
+- **발송중 수량(옵션별) = Σ(입고생성 − 판매개시)** (아직 판매개시 안 된 파이프라인 물량). Wing 입고관리 화면 수량박스로 실증(예: 필름건 입고생성100·판매개시0 → 발송중 100 / 버디필름건 입고생성60·판매개시60 → 발송중 0).
+- **발송중 물량의 판매개시 예정일 = 카드 "도착예정일"(=물류센터 도착) + 실측(도착→판매개시) 갭.** 카드 도착예정일은 FC 받는 날일 뿐 판매개시(적치)는 검수 후라 더 늦음(실증: 도착 6/13 10:57 → 판매개시 6/13 19:51). 도착예정일만 쓰면 판매개시 과소예측 → 갭을 더함. Jino 원문: "판매개시 갭을 더해야지".
+- 데이터원: `coupang_rg_inbound`(rfm-inbound, 단계별 ms 타임스탬프 + 입고생성/입고중/판매개시 수량). 생애주기 실증(이미지 툴팁): 입고생성완료→배송중→물류센터도착→입고처리중→**판매개시**.
+
+### 구조 확정 (2026-06-17, Jino 승인 "그러자")
+```
+[Agent] 쿠팡 RG 재고·발송 관제 (로켓그로스 탭, 단일 조망)
+  └─[Harness] rg_replenishment (정보 유통 허브 · 원칙18-6, 배치 1회 산출→옵션별 주입 18-8)
+        ├─[SA] demand_classifier      ★신규 P0 — 옵션별 ADI/CV² → smooth·erratic·intermittent·lumpy
+        ├─[SA] sba_forecaster         ★신규 P1 — statsforecast(SBA/TSB/SES, Apache-2.0✓) → 일수요 평균+분위수
+        ├─[SA] sales_velocity_estimator  기존 S3 — 평일/주말/휴일 요일계수(곱셈 보정만 유지)
+        ├─[SA] lead_time_estimator    기존 S2 — 발송→판매개시 리드타임 평균/p90 (변경 없음)
+        ├─[SA] in_transit_estimator   ★신규 P3 — coupang_rg_inbound → 옵션별 발송중 수량+판매개시 예정
+        ├─     _load_inventory        기존 — 현재고
+        └─[SA] replenishment_calc     기존 S4(개선) — 유효재고+수요분포 → newsvendor 분위수 목표 → 발송일·수량
+  [수집] wing_browser_fetcher.py ──rfm-inbound 추가──▶ rg_inbound_sync(S1·기존) ──▶ coupang_rg_inbound
+```
+- 신규 SA 3개(demand_classifier·sba_forecaster·in_transit_estimator)만 추가. 기존 S2 무변경, S3 요일계수만 유지, S4는 유효재고+newsvendor로 개선.
+- 리드타임은 D-10 SBA/TSB 대상 아님(수요만) — 실측 평균/p90 유지(Jino 확정).
+
+### Phase 2 로드맵 (단순→고도화, ref 19 §4)
+- [ ] P0. 855옵션 ADI/CV² 분류 (핵심 vs 간헐/lumpy)
+- [ ] P1. 예측 엔진 SBA 교체 (statsforecast) — 지금 "예측 불가" 다수가 발송 신호 획득
+- [ ] P2. newsvendor 분위수 목표재고 (품절비용 vs 보관/반품비로 CF)
+- [ ] P3. in-transit 통합 — Wing 페처 rfm-inbound 정기수집 + 화면 차감
+- [ ] P4. 백테스트 루프 (fill-rate·품절·과잉재고 검증)
+- [ ] P5(선택). LightGBM 글로벌+분위수 (데이터 충분·ROI 검증 후)
+- **목표 한눈 조망**: P1+P3 후 옵션별 [현재고·발송중·판매속도·소진예상일·언제몇개발송·보관비리스크] 로켓그로스 탭 단일 화면.
+
+### 다음 세션 시작점
+- /model opus → Phase 2 구조설계(Agent/Harness/SA 도표): 신규 SA(demand_classifier, sba_forecaster), 기존 SA(sales_velocity·lead_time) 관계, in-transit 수집 SA/페처 배선, calc/Harness 변경점 → Jino 승인 → 계획서 → Sonnet 구현 → codex.
+
+## 확정 결정사항 추가 (D-14~D-16, 2026-06-18 Jino 승인 "시작하자")
+
+- **D-14 (예측 ROI 정직화 + 진단 버킷팅 선행 — 확정 2026-06-18, X1 승격)**: SBA/TSB는 "판매신호 0" 옵션을 살릴 수 없다(Croston도 nonzero 필요). 예측 전 **855옵션을 zero-signal / sparse-but-nonzero / active로 버킷팅**(진단 S8a 선행). 예측은 sparse 집합만 적용. zero-signal은 설계상 insufficient 유지. **단기(11일) 데이터에선 즉효 범위 제한적임을 명시** — 데이터 누적 시 확대. Jino 원문: "시작하자"(X1·X4·X7 일괄 승인).
+- **D-15 (in-transit 스프린트 순서 최우선 — 확정 2026-06-18, X4 승격)**: in-transit(Wing rfm-inbound 기반 발송중 수량)을 **첫 스프린트**로 앞당긴다. 데이터 이미 적재(`coupang_rg_inbound`)·Wing 화면으로 검증가능·중복발송 즉시 방지 > 예측 타워. 새 실행 순서: **① in-transit → ② S8 진단/분류 → ③ S9 예측 → ④ S10 newsvendor → ⑤ S12 백테스트.** Jino 원문: "시작하자".
+- **D-16 (D-9 재정의: cadence=7, safety는 newsvendor — 확정 2026-06-18, X7 승격)**: `target_days=7`을 **검토주기 R=7일(cadence)**로 재정의. 목표재고 safety는 D-12 newsvendor 분위수가 담당(역할 분리). API 파라미터 `target_days`→`review_period_days=7`로 리네임. Jino 원문: "시작하자".
 
 ## 다음 액션 (S7)
 - **S7 요일/휴일 세분화 지속 개선(D-6)**: 매일 RG order sync로 깨끗한 일자 누적 → 임계(평일8/주말4/휴일2) 넘으면 요일계수 자동 활성(약 2~3주 후 평일계수부터). 별도 코딩 없이 sales_velocity_estimator가 자동 승격.

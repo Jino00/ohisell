@@ -17,6 +17,7 @@ from datetime import date
 from sqlalchemy.orm import Session
 
 from app.models import CoupangProductItem, CoupangRgInventory
+from app.services.coupang.in_transit_estimator import estimate_in_transit
 from app.services.coupang.lead_time_estimator import estimate_lead_times
 from app.services.coupang.replenishment_calc import DEFAULT_TARGET_DAYS, calc_replenishment
 from app.services.coupang.sales_velocity_estimator import estimate_sales_velocities
@@ -59,6 +60,20 @@ def _velocity_for(vii: str, velocities: dict) -> dict | None:
         **est,
         "segment_factors": velocities["segment_factors"],
         "trust_days": velocities["trust_days"],
+    }
+
+
+def _in_transit_for(vii: str, in_transits: dict) -> dict | None:
+    """배치 estimate_in_transit → 옵션 vii의 in_transit 주입값.
+
+    stale이거나 해당 옵션 in-transit 없으면 None(calc가 in_transit_qty=0으로 처리)."""
+    opt = in_transits["options"].get(vii)
+    if opt is None:
+        return None
+    return {
+        "in_transit_qty": opt["in_transit_qty"],
+        "expected_stowing_at": opt.get("expected_stowing_at"),
+        "fresh": in_transits.get("fresh", False),
     }
 
 
@@ -120,6 +135,14 @@ def build_replenishment_plan(
     lead_times = estimate_lead_times(db, account_key)
     inventory = _load_inventory(db, account_key)
 
+    # in-transit 배치 산출(1회). 글로벌 리드타임으로 X6 만료·판매개시 예정 계산(원칙 18-8).
+    lead_global = lead_times.get("global") or {}
+    in_transits = estimate_in_transit(
+        db, account_key,
+        lead_p90_days=float(lead_global.get("p90", 3.0)),
+        lead_mean_days=float(lead_global.get("mean", 2.16)),
+    )
+
     # 상품명·옵션명 1회 조회 (UI 표시용 — 메인 테이블과 동일하게 '상품명 + 옵션명').
     # product_name=seller_product_name, item_name=옵션명. 둘 다 없으면 vendor_item_id 폴백.
     name_rows = (
@@ -139,13 +162,15 @@ def build_replenishment_plan(
     for vii, stock in inventory.items():
         velocity = _velocity_for(vii, velocities)
         lead = _lead_for(vii, lead_times)
-        # 셋 다 주입 → calc는 DB 미접근(_UNSET 분기 스킵). 데이터 없는 옵션은 None 주입으로 재계산 없음.
+        in_transit = _in_transit_for(vii, in_transits)
+        # 넷 다 주입 → calc는 DB 미접근(_UNSET 분기 스킵). 데이터 없는 옵션은 None 주입으로 재계산 없음.
         result = calc_replenishment(
             db, vii, account_key,
             target_days=target_days,
             current_stock=stock,
             velocity=velocity,
             lead_time=lead,
+            in_transit=in_transit,
         )
         product_name, option_name = names.get(vii, (None, None))
         result["product_name"] = product_name           # 상품명(없으면 None → 프론트가 옵션명만 표시)
@@ -166,6 +191,11 @@ def build_replenishment_plan(
             "global_daily_rate": velocities.get("global_daily_rate"),
         },
         "lead_global": lead_times.get("global"),
+        "in_transit_meta": {
+            "fresh": in_transits.get("fresh"),
+            "last_fetch_at": in_transits.get("last_fetch_at"),
+            "total_in_transit_qty": in_transits.get("total_in_transit_qty", 0),
+        },
         "summary": _summarize(items),
         "items": items,
     }
