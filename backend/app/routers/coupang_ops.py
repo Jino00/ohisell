@@ -26,7 +26,7 @@ from app.database import get_db
 from app.models import Channel, CoupangAdCostDaily, CoupangAdOptionDaily, CoupangProductItem, CoupangRevenueFee, CoupangRgInbound, CoupangRgOrderItem, CoupangRgSettlementFee, Order, ProductChannelMapping, ProductMaster
 from app.routers._coupang_write_http import handle_write as _handle_write
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
-from app.services.coupang import ad_cost_sync, coupon_write, in_transit_estimator, lead_time_estimator, product_write, rg_fee_audit, rg_inbound_sync, rg_product_size_sync, rg_replenishment, rg_settlement_sync, sales_velocity_estimator, vendor_summary_sync
+from app.services.coupang import ad_cost_sync, coupon_write, demand_classifier, in_transit_estimator, lead_time_estimator, product_write, rg_fee_audit, rg_inbound_sync, rg_product_size_sync, rg_replenishment, rg_settlement_sync, sales_velocity_estimator, vendor_summary_sync
 from app.utils.crypto import CookieCryptoError
 
 log = logging.getLogger(__name__)
@@ -1101,6 +1101,18 @@ def get_in_transit(
     D-13: 유효재고=현재고+발송중. X5: last_success_at <2일=fresh(차감), stale=차감 스킵+배지.
     검증 엔드포인트 — Wing 입고관리 화면 수치와 대조 가능(필름 100·버디 0 등)."""
     return in_transit_estimator.estimate_in_transit(db, account_key)
+
+
+@router.get("/demand-class")
+def get_demand_class(
+    db: Session = Depends(get_db),
+    account_key: str | None = Query(None, description="특정 셀러계정만(미지정=전체)"),
+):
+    """옵션별 수요 형태 분류(ADI/CV² 4분면) + X1 진단 버킷 조회(읽기전용, S8 D-14).
+
+    smooth/erratic/intermittent/lumpy + unknown(표본<2). 버킷=zero_signal/sparse/active.
+    summary.by_bucket로 "예측(S9)이 살릴 수 있는 옵션 모집단" 크기를 정직하게 측정(X1)."""
+    return demand_classifier.classify_demand(db, account_key)
 
 
 # ════════════════════════════════════════════════
