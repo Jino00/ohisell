@@ -1285,6 +1285,33 @@ def ingest_rocket_settlement(
     return rocket_supplier_sync.ingest_settlements(db, vendor_id, rows)
 
 
+@router.post("/rocket/po-detail/ingest")
+def ingest_rocket_po_detail(
+    body: dict[str, Any] = Body(...),
+    x_ingest_token: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """로켓배송(1P) 발주상세 per-SKU DOM rows(Table[7]) push → 파싱 → 해당 PO snapshot replace(S4.5a).
+
+    body: {"purchase_order_seq": 134342890, "vendor_id": "A01029796", "rows": [[셀...], ...]}.
+    rows = 발주상세 SSR Table[7] DOM(헤더·SKU·합계행 혼재). vendor_id는 계정축(DOM에 없어 주입).
+    """
+    _check_ingest_token(x_ingest_token)
+    try:
+        po_seq = int(body.get("purchase_order_seq"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="purchase_order_seq(정수) 필요")
+    if po_seq <= 0:
+        raise HTTPException(status_code=400, detail="purchase_order_seq(>0) 필요")
+    vendor_id = str(body.get("vendor_id") or "").strip()
+    if not vendor_id:
+        raise HTTPException(status_code=400, detail="vendor_id 필요")
+    rows = body.get("rows")
+    if not isinstance(rows, list) or not rows:
+        raise HTTPException(status_code=400, detail="rows[] 필요")
+    return rocket_supplier_sync.ingest_po_items(db, po_seq, vendor_id, rows)
+
+
 @router.post("/ad-cost/option-ingest")
 async def ingest_ad_cost_option(
     request: Request,

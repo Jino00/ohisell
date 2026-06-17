@@ -1314,6 +1314,42 @@ class CoupangRocketPurchaseOrder(Base):
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class CoupangRocketPurchaseOrderItem(Base):
+    """쿠팡 로켓배송(1P) 발주상세 per-SKU 라인아이템 — supplier 발주상세 (트랙 rocket-1p, S4.5a/D-13).
+
+    소스: GET /scm/purchase/order/get/{seq} SSR HTML의 Table[7](ref 20b §2). 1PO=N SKU(최대 50).
+    런타임 경계(D-1): Mac 헤드풀 페처가 DOM Table[7] rows 추출 → raw push → 파서(위치 기반) 정규화 → 적재.
+    grain: (purchase_order_seq, product_number). 같은 PO 재수신 시 **snapshot replace**(해당 PO 전 행
+      삭제 후 재삽입 — SKU 제거 반영, 멱등). 자연키 불완전성 회피.
+
+    용도(D-12→D-13): PO그레인(CoupangRocketPurchaseOrder)은 multi-SKU(61%) 원가분해 불가 →
+      per-SKU 수량으로 1P net_profit cost 산정(S4.5c). cost = Σ(order_qty × product_master.cost_price
+      [상품번호→internal_sku 매핑, S4.5b RocketProductCostMap]). 발주상세의 매입가는 쿠팡→우리 **매출**(원가 아님).
+    금액(gross, ref 20b §2 검산): unit_purchase_price×order_qty = line_order_amount = line_supply_amount + line_vat.
+    """
+
+    __tablename__ = "coupang_rocket_purchase_order_item"
+    __table_args__ = (
+        UniqueConstraint("purchase_order_seq", "product_number", name="uq_rocket_po_item"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    purchase_order_seq: Mapped[int] = mapped_column(Integer, nullable=False, index=True)  # ↔PO grain
+    vendor_id: Mapped[str] = mapped_column(String(20), nullable=False, index=True)  # 계정축(페처 주입)
+    line_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 발주상세 순번
+    product_number: Mapped[str] = mapped_column(String(30), nullable=False, index=True)  # ★상품번호=브리지 키
+    barcode: Mapped[Optional[str]] = mapped_column(String(40), nullable=True, index=True)  # EAN 또는 R-내부코드
+    product_name: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+    purchase_type: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)  # 일반매입/직매입
+    order_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 발주수량(원가 산정용)
+    # 금액(gross/net, 원 단위) — 쿠팡→우리 매입(매출), 우리 원가 아님(원가는 product_master)
+    unit_purchase_price: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)  # 매입 단가
+    line_order_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)  # 라인 발주금액(gross)
+    line_supply_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)  # 라인 공급가(net)
+    line_vat: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)  # 라인 세액
+    synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 class CoupangRocketSettlement(Base):
     """쿠팡 로켓배송(1P) 매입 정산 — supplier.coupang.com 매입정산 (트랙 rocket-1p, D-9).
 

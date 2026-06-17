@@ -12,7 +12,11 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
-from app.models import CoupangRocketPurchaseOrder, CoupangRocketSettlement
+from app.models import (
+    CoupangRocketPurchaseOrder,
+    CoupangRocketPurchaseOrderItem,
+    CoupangRocketSettlement,
+)
 from app.clients.coupang import rocket_supplier as rs
 from app.services.coupang import rocket_supplier_sync as sync
 
@@ -207,3 +211,117 @@ def test_ingest_settlement(db):
     # 멱등
     sync.ingest_settlements(db, "A01029796", _SETTLE_ROWS)
     assert db.query(CoupangRocketSettlement).count() == 3
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 발주상세 per-SKU (S4.5a, D-13) — 라이브 DOM 실측 fixture (ref 20b, PO 134342890)
+# ═══════════════════════════════════════════════════════════════════
+# Table[7] rows = JS DOMParser가 td/th innerText로 추출(병합셀로 행마다 셀 수 다름).
+#   헤더 3행(7·2·10셀, th) + SKU 데이터행(13셀) + 연속행(5셀) + 합계행(8셀). per-SKU는 13셀행만.
+#   금액 검산: 매입가(unit)×발주수량 = 발주금액(line, gross), 발주금액 = 공급가액(line) + 세액(line).
+_PO_DETAIL_ROWS = [
+    ["", "상품번호", "바코드", "매입유형", "수량", "금액", "제조(수입)일자 유통(소비)기한 생산년도"],
+    ["공급가", "발주금액"],
+    ["상품명", "면세여부", "발주수량", "업체납품가능수량", "매입가", "공급가액", "세액부가세", "매입가", "공급가액", "세액부가세"],
+    ["1", "37350957", "8809465525057 오하이 지문방지 풀커버 저반사 매트 액정보호필름 전면 3매+내부 3매 +option+ 갤럭시 Z폴드5 ::",
+     "일반매입 과세", "1", "1", "12,000", "10,909", "1,091", "12,000", "10,909", "1,091", ""],
+    ["", "", "", "", ""],
+    ["2", "50342949", "8800252590227 오하이 풀커버 강화유리 액정보호필름2개 + EZ툴 제공, 아이폰16프로",
+     "일반매입 과세", "89", "89", "10,740", "9,764", "976", "955,860", "868,996", "86,864", ""],
+    ["", "", "", "", ""],
+    ["3", "63408012", "R237867070002 오하이 일미리 맥세이프 케이스 1mm 투명 아이폰 16프로",
+     "직매입 과세", "2", "2", "10,080", "9,164", "916", "20,160", "18,328", "1,832", ""],
+    ["", "", "", "", ""],
+    ["4", "63427931", "R237867090004 오하이 일미리 맥세이프 케이스 1mm PC 하드 케이스 투명 아이폰 16플러스",
+     "직매입 과세", "1", "1", "10,080", "9,164", "916", "10,080", "9,164", "916", ""],
+    ["", "", "", "", ""],
+    ["합계", "93", "93", "", "998,100", "907,397", "90,703", ""],
+    ["", "", "", ""],
+]
+
+
+def test_parse_po_items_count_and_skips_headers_totals():
+    # 13셀 SKU 데이터행만 추출(헤더 3행·연속 5셀행·합계 8셀행 제외)
+    items = rs.parse_po_item_rows(_PO_DETAIL_ROWS)
+    assert len(items) == 4
+
+
+def test_parse_po_items_fields():
+    items = rs.parse_po_item_rows(_PO_DETAIL_ROWS)
+    it = items[1]  # SKU 50342949
+    assert it["line_no"] == 2
+    assert it["product_number"] == "50342949"
+    assert it["barcode"] == "8800252590227"
+    assert it["product_name"].startswith("오하이 풀커버 강화유리")
+    assert it["purchase_type"] == "일반매입 과세"
+    assert it["order_qty"] == 89
+    assert it["unit_purchase_price"] == Decimal("10740")  # 쿠팡→우리 매입 단가(gross)
+    assert it["line_order_amount"] == Decimal("955860")    # line gross
+    assert it["line_supply_amount"] == Decimal("868996")   # net
+    assert it["line_vat"] == Decimal("86864")
+
+
+def test_parse_po_items_money_checksums():
+    # ★머니 검산: 매입가×발주수량=발주금액(line), 발주금액=공급가액+세액
+    for it in rs.parse_po_item_rows(_PO_DETAIL_ROWS):
+        assert it["unit_purchase_price"] * it["order_qty"] == it["line_order_amount"]
+        assert it["line_order_amount"] == it["line_supply_amount"] + it["line_vat"]
+
+
+def test_parse_po_items_barcode_internal_code():
+    # 바코드가 EAN(숫자)가 아닌 내부코드(R-prefix)도 첫 토큰으로 분리
+    items = rs.parse_po_item_rows(_PO_DETAIL_ROWS)
+    assert items[2]["barcode"] == "R237867070002"
+    assert items[2]["product_name"].startswith("오하이 일미리")
+
+
+def test_parse_po_items_total_qty_matches_summary():
+    # Σ발주수량 = 합계행(93)
+    items = rs.parse_po_item_rows(_PO_DETAIL_ROWS)
+    assert sum(it["order_qty"] for it in items) == 93
+
+
+def test_parse_po_items_empty_and_garbage():
+    assert rs.parse_po_item_rows([]) == []
+    assert rs.parse_po_item_rows([["합계", "93"], ["", ""]]) == []
+    # 상품번호가 숫자 아닌 행은 스킵(헤더 방어)
+    assert rs.parse_po_item_rows([["1", "ABC", "x", "y", "1", "1", "1", "1", "1", "1", "1", "1", ""]]) == []
+
+
+# ═══ 발주상세 ingest Harness (snapshot replace) ═══
+def test_ingest_po_items_snapshot_replace(db):
+    r = sync.ingest_po_items(db, 134342890, "A01029796", _PO_DETAIL_ROWS)
+    assert r == {"ingested": 4, "purchase_order_seq": 134342890}
+    assert db.query(CoupangRocketPurchaseOrderItem).count() == 4
+    it = (
+        db.query(CoupangRocketPurchaseOrderItem)
+        .filter_by(purchase_order_seq=134342890, product_number="50342949")
+        .one()
+    )
+    assert it.vendor_id == "A01029796"
+    assert it.order_qty == 89
+    assert it.line_order_amount == Decimal("955860")
+    # 멱등: 같은 PO 재수신 시 snapshot replace(중복 누적 없이 4건 유지)
+    sync.ingest_po_items(db, 134342890, "A01029796", _PO_DETAIL_ROWS)
+    assert db.query(CoupangRocketPurchaseOrderItem).count() == 4
+
+
+def test_ingest_po_items_replace_drops_removed_skus(db):
+    sync.ingest_po_items(db, 134342890, "A01029796", _PO_DETAIL_ROWS)
+    # SKU 1개만 남은 갱신본 재수신 → 이전 4건 삭제 후 1건만
+    shrunk = [
+        _PO_DETAIL_ROWS[0],
+        ["1", "50342949", "8800252590227 오하이 풀커버", "일반매입 과세",
+         "89", "89", "10,740", "9,764", "976", "955,860", "868,996", "86,864", ""],
+    ]
+    sync.ingest_po_items(db, 134342890, "A01029796", shrunk)
+    assert db.query(CoupangRocketPurchaseOrderItem).count() == 1
+
+
+def test_ingest_po_items_isolated_per_po(db):
+    sync.ingest_po_items(db, 134342890, "A01029796", _PO_DETAIL_ROWS)
+    sync.ingest_po_items(db, 999999999, "A01029796", _PO_DETAIL_ROWS)
+    # 다른 PO 재수신은 자기 PO만 replace(타 PO 불변)
+    sync.ingest_po_items(db, 999999999, "A01029796", _PO_DETAIL_ROWS)
+    assert db.query(CoupangRocketPurchaseOrderItem).filter_by(purchase_order_seq=134342890).count() == 4
+    assert db.query(CoupangRocketPurchaseOrderItem).filter_by(purchase_order_seq=999999999).count() == 4

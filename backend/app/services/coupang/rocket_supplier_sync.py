@@ -14,7 +14,11 @@ import logging
 from sqlalchemy.orm import Session
 
 from app.clients.coupang import rocket_supplier as parser
-from app.models import CoupangRocketPurchaseOrder, CoupangRocketSettlement
+from app.models import (
+    CoupangRocketPurchaseOrder,
+    CoupangRocketPurchaseOrderItem,
+    CoupangRocketSettlement,
+)
 from app.utils.kst import kst_now
 
 log = logging.getLogger(__name__)
@@ -111,3 +115,47 @@ def ingest_settlements(db: Session, vendor_id: str, rows: list[list]) -> dict:
     db.commit()
     log.info("rocket settlement ingest: vendor=%s records=%d", vendor_id, len(recs))
     return {"ingested": len(recs)}
+
+
+# ════════════════════════════════════════════════
+# 발주상세 per-SKU ingest (S4.5a, D-13) — snapshot replace
+# ════════════════════════════════════════════════
+def ingest_po_items(db: Session, purchase_order_seq: int, vendor_id: str, rows: list[list]) -> dict:
+    """Mac 페처가 보낸 발주상세 Table[7] DOM rows → 파싱 → 해당 PO **snapshot replace**.
+
+    rows: 발주상세 DOM(헤더·SKU·합계행 혼재). 위치 기반 파서가 SKU 행만 추출.
+    vendor_id: 계정축(발주상세 DOM엔 거래처 없어 별도 주입, 정산 ingest와 동일).
+    멱등: 같은 purchase_order_seq의 기존 라인아이템 전부 삭제 후 재삽입(SKU 제거 반영, 누적 방지).
+    반환: {ingested(SKU 수), purchase_order_seq}.
+    """
+    recs = parser.parse_po_item_rows(rows)
+    # snapshot replace: 이 PO의 기존 라인 삭제(타 PO 불변) → 재삽입.
+    #   ORM 로드 후 delete + flush(동일 세션 재적재 시 identity-map 충돌 회피, per-PO N≤50 소량).
+    existing = (
+        db.query(CoupangRocketPurchaseOrderItem)
+        .filter(CoupangRocketPurchaseOrderItem.purchase_order_seq == purchase_order_seq)
+        .all()
+    )
+    for old in existing:
+        db.delete(old)
+    db.flush()
+    now = kst_now()
+    for rec in recs:
+        db.add(CoupangRocketPurchaseOrderItem(
+            purchase_order_seq=purchase_order_seq,
+            vendor_id=vendor_id,
+            line_no=rec["line_no"],
+            product_number=rec["product_number"],
+            barcode=rec["barcode"] or None,
+            product_name=rec["product_name"],
+            purchase_type=rec["purchase_type"],
+            order_qty=rec["order_qty"],
+            unit_purchase_price=rec["unit_purchase_price"],
+            line_order_amount=rec["line_order_amount"],
+            line_supply_amount=rec["line_supply_amount"],
+            line_vat=rec["line_vat"],
+            synced_at=now,
+        ))
+    db.commit()
+    log.info("rocket PO 발주상세 ingest: po=%d vendor=%s skus=%d", purchase_order_seq, vendor_id, len(recs))
+    return {"ingested": len(recs), "purchase_order_seq": purchase_order_seq}

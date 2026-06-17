@@ -211,3 +211,68 @@ def parse_settlement_rows(rows: list[list[str]]) -> list[dict]:
             "second_payment_amount": _to_dec(cell(row, "second_payment_amount")),
         })
     return records
+
+
+# ════════════════════════════════════════════════
+# 발주상세 per-SKU 파서 (S4.5a, D-13) — 위치 기반(병합셀로 헤더명 매핑 불가)
+# ════════════════════════════════════════════════
+# 소스: GET /scm/purchase/order/get/{seq} SSR HTML의 Table[7](ref 20b §2 라이브 실측).
+#   헤더 3행이 rowspan/colspan 병합 + 매입가/공급가액/세액 컬럼 2벌(단가/라인) → 헤더명 매핑 불가.
+#   대신 SKU 데이터행(13셀)의 위치가 안정적(검산으로 확정): 순번·상품번호·바코드+상품명·매입유형·
+#   발주수량·업체납품가능수량·매입가(단가)·공급가액(단가)·세액(단가)·발주금액(라인)·공급가액(라인)·세액(라인)·제조일자.
+# SKU 행 식별: len>=12 AND row[0](순번)·row[1](상품번호) 모두 숫자.
+#   → 헤더 3행(셀수 7·2·10 또는 첫셀 비숫자)·연속행(5셀)·합계행(첫셀 '합계')을 전부 배제.
+_PO_ITEM_COL = {
+    "line_no": 0,           # 순번
+    "product_number": 1,    # 상품번호(1P 카탈로그 — S4.5b 브리지 키)
+    "barcode_name": 2,      # "바코드 상품명"(첫 토큰=바코드)
+    "purchase_type": 3,     # 매입유형(일반매입/직매입 + 과세)
+    "order_qty": 4,         # 발주수량
+    "unit_purchase_price": 6,   # 매입가(단가, gross=쿠팡 지급 단가)
+    "line_order_amount": 9,     # 발주금액(라인, gross)
+    "line_supply_amount": 10,   # 공급가액(라인, net)
+    "line_vat": 11,             # 세액(라인, 부가세)
+}
+
+
+def _is_digits(s: Any) -> bool:
+    t = str(s or "").strip().replace(",", "")
+    return t.isdigit() and t != ""
+
+
+def parse_po_item_rows(rows: list[list[str]]) -> list[dict]:
+    """발주상세 Table[7] DOM rows → per-SKU 라인아이템 레코드[].
+
+    rows = JS DOMParser가 추출한 셀 텍스트 배열(헤더/연속/합계행 혼재). 위치 기반(헤더 병합셀).
+    SKU 행 = len>=12 AND 순번·상품번호 모두 숫자. 바코드는 셀 첫 토큰(EAN 숫자 또는 R-내부코드).
+    머니 검산(soft): 매입가×발주수량 ≠ 발주금액이면 warning(드롭 안 함 — 수집은 보존, 검증은 reconcile).
+    """
+    records: list[dict] = []
+    for row in rows or []:
+        if not isinstance(row, (list, tuple)) or len(row) < 12:
+            continue
+        if not (_is_digits(row[0]) and _is_digits(row[1])):
+            continue  # 헤더·합계·연속행 방어
+        barcode_name = str(row[_PO_ITEM_COL["barcode_name"]] or "").strip()
+        barcode, _, name = barcode_name.partition(" ")
+        rec = {
+            "line_no": _to_int(row[_PO_ITEM_COL["line_no"]]),
+            "product_number": str(row[_PO_ITEM_COL["product_number"]] or "").strip(),
+            "barcode": barcode.strip(),
+            "product_name": name.strip() or None,
+            "purchase_type": str(row[_PO_ITEM_COL["purchase_type"]] or "").strip() or None,
+            "order_qty": _to_int(row[_PO_ITEM_COL["order_qty"]]),
+            "unit_purchase_price": _to_dec(row[_PO_ITEM_COL["unit_purchase_price"]]),
+            "line_order_amount": _to_dec(row[_PO_ITEM_COL["line_order_amount"]]),
+            "line_supply_amount": _to_dec(row[_PO_ITEM_COL["line_supply_amount"]]),
+            "line_vat": _to_dec(row[_PO_ITEM_COL["line_vat"]]),
+        }
+        expected = rec["unit_purchase_price"] * rec["order_qty"]
+        if rec["order_qty"] > 0 and rec["unit_purchase_price"] > 0 and expected != rec["line_order_amount"]:
+            log.warning(
+                "rocket 발주상세 검산 불일치(상품번호=%s): 단가%s×수량%d=%s ≠ 발주금액%s",
+                rec["product_number"], rec["unit_purchase_price"], rec["order_qty"],
+                expected, rec["line_order_amount"],
+            )
+        records.append(rec)
+    return records

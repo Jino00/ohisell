@@ -3,6 +3,13 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
+- 날짜: 2026-06-18 (★로켓배송 1P 트랙 — S4.5a 발주상세 per-SKU 수집 완료)
+- ★**쿠팡 로켓배송(1P) 트랙 S4.5a 완료** — 트랙 `docs/tracks/active/track_coupang-rocket-1p.md`(4/6, S4.5a 서브스프린트). RG 발송관제 트랙 완료(maintenance)로 우선순위 해제→1P 돈 축 재개(Jino "S4.5a 착수").
+  - **구현**: 위치 기반 파서 `parse_po_item_rows`(발주상세 Table[7] 병합셀 헤더 → 13셀 SKU행만: len>=12 AND 순번·상품번호 숫자) + 모델 `CoupangRocketPurchaseOrderItem`(grain (po_seq, product_number), 상품번호=S4.5b 브리지키) + alembic `q1r2s3t4u5v6`(head, 라운드트립 OK) + ingest `ingest_po_items`(PO별 snapshot replace=load+delete+flush·멱등) + 라우터 `POST /rocket/po-detail/ingest` + 페처 확장(`_FETCH_PO_DETAIL_JS` 헤더토큰 테이블선택·`_collect_and_push_po_details` 최근45일·캡80·Akamai 리로드 재무장).
+  - **검증**: 테스트 9개+전체 **298 통과**. e2e self-verify(원칙22): 라이브 DOM(ref20b PO 134342890)→JS선택→파서→ingest→DB. SKU4·전라인 검산OK·Σ수량93·Σ발주금액998,100(합계 일치)·멱등·라우터 401/400/200.
+  - **미push·codex 보류**: S2+S3+S4+S4.5a 묶음, 6/19 06:42 quota 리셋 후 `/codex review`→prod 배포(scp+alembic+pm2)+launchd+push. prod 미배포(로컬 검증만).
+  - **다음**: S4.5b 원가 브리지(`RocketProductCostMap` product_number→internal_sku + 미매핑목록 + 이름유사도 제안) → S4.5c 원가 결합(net_profit has_cost=true).
+- ─────────────────────────────────────────────
 - 날짜: 2026-06-19 (★★RG 발송관제 트랙 — D-18 3/3 충족 = 실용적 완료 → Maintenance 전환)
 - ★★**RG 발송관제 트랙 완료(D-18 게이트 3/3) → Maintenance** — 트랙 `docs/tracks/active/track_coupang-rg-replenishment.md`.
   - **D-18 "RG 완료" 정의(Jino "그래")**: 보류 축=수요신호 부족(848/857 무판매)이지 리드타임 아님. 완료=실제 판매 옵션(sparse+active 9개) 발송 정확성. 게이트 ①UI정합 ②P4백테스트 ③정직성회귀 **전부 충족**. S9/S10 예측타워는 D-17 보류 유지(completed/ 미이동, maintenance 라벨).

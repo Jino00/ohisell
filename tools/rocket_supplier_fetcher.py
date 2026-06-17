@@ -34,7 +34,7 @@ import logging
 import os
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from urllib.parse import urlencode
@@ -49,12 +49,14 @@ LOCK_PATH = Path(os.path.expanduser("~/.ohisell_rocket_fetcher.lock"))
 SUPPLIER_ORIGIN = "https://supplier.coupang.com"
 PO_LIST_PATH = "/po-web/app/purchase-order/list"               # 발주+납품 JSON (ref20 §3)
 SETTLEMENT_PATH = "/scm/settlement/general/purchase/account"   # 정산 SSR HTML (ref20 §4)
+PO_DETAIL_PATH = "/scm/purchase/order/get"                     # 발주상세 per-SKU SSR HTML (ref20b, S4.5a)
 
 KST = ZoneInfo("Asia/Seoul")
 
-# prod ingest 엔드포인트(S2 라우터, 무변경)
+# prod ingest 엔드포인트(S2/S4.5a 라우터, 무변경)
 PO_INGEST_PATH = "/api/coupang/ops/rocket/po/ingest"
 SETTLEMENT_INGEST_PATH = "/api/coupang/ops/rocket/settlement/ingest"
+PO_DETAIL_INGEST_PATH = "/api/coupang/ops/rocket/po-detail/ingest"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -109,6 +111,37 @@ _FETCH_SETTLEMENT_JS = r"""async (args) => {
   } finally { clearTimeout(t); }
 }"""
 
+# 발주상세 SSR HTML GET(S4.5a) — fetch한 HTML을 DOMParser로 파싱해 per-SKU <table>(헤더에
+# '상품번호'·'발주금액'·'매입가' 토큰을 모두 가진 표=ref20b Table[7])의 rows를 추출. 인덱스 대신
+# 헤더 토큰으로 선택(테이블 순서 변동 방어). 인자=[path]. 반환 {status, rows:[[셀...],...], looksLogin}.
+_FETCH_PO_DETAIL_JS = r"""async (args) => {
+  const [path] = args;
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 25000);
+  try {
+    const r = await fetch(path, { credentials: 'include', signal: ctrl.signal });
+    const html = await r.text();
+    const lower = html.toLowerCase();
+    const looksLogin = (lower.includes('login') || lower.includes('signin')) &&
+                       (lower.includes('password') || lower.includes('passport'));
+    let rows = [];
+    try {
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+      const tables = [...doc.querySelectorAll('table')];
+      for (const tb of tables) {
+        const trs = [...tb.querySelectorAll('tr')].map(tr =>
+          [...tr.querySelectorAll('td,th')].map(td => td.innerText.trim().replace(/\s+/g, ' ')));
+        const flat = trs.flat().join('|');
+        if (flat.indexOf('상품번호') >= 0 && flat.indexOf('발주금액') >= 0 && flat.indexOf('매입가') >= 0) {
+          rows = trs;
+          break;
+        }
+      }
+    } catch (e) { /* 파싱 실패 시 rows=[] */ }
+    return { status: r.status, rows, looksLogin };
+  } finally { clearTimeout(t); }
+}"""
+
 
 # ════════════════════════════════════════════════════════════════════
 # 설정 / 락
@@ -128,6 +161,10 @@ def load_config() -> dict:
     cfg.setdefault("settle_days", 90)
     cfg.setdefault("po_max_pages", 100)
     cfg.setdefault("settle_max_pages", 100)
+    # 발주상세 per-SKU 수집(S4.5a): 최근 po_detail_days 발주만, po_detail_max건 캡(런타임 바운드).
+    cfg.setdefault("collect_po_detail", True)
+    cfg.setdefault("po_detail_days", 45)
+    cfg.setdefault("po_detail_max", 80)
     return cfg
 
 
@@ -361,6 +398,113 @@ def _collect_settlement_rows(page, cfg: dict) -> list[list]:
 
 
 # ════════════════════════════════════════════════════════════════════
+# 발주상세 per-SKU 수집 (S4.5a) — 최근 PO만, 캡, PO별 fetch→push. Akamai stale 시 오리진 리로드 재무장.
+# ════════════════════════════════════════════════════════════════════
+def _po_detail_targets(pages: list[dict], cfg: dict) -> list[int]:
+    """수집한 발주 페이지에서 발주상세 대상 PO seq 선정(최근 po_detail_days·po_detail_max건, 최신순)."""
+    days = int(cfg.get("po_detail_days", 45))
+    cap = int(cfg.get("po_detail_max", 80))
+    cutoff = datetime.now(KST).date() - timedelta(days=days)
+    rows: list[tuple[str, int]] = []  # (createdAt[:10], seq) — created desc 정렬용
+    seen: set[int] = set()
+    for payload in pages or []:
+        outer = (payload or {}).get("body") or {}
+        if not isinstance(outer, dict):
+            continue
+        for po in (outer.get("body") or []):
+            if not isinstance(po, dict):
+                continue
+            seq = po.get("purchaseOrderSeq")
+            if seq is None or int(seq) in seen:
+                continue
+            created = str(po.get("createdAt") or "")[:10]
+            try:
+                cdate = date.fromisoformat(created) if created else None
+            except ValueError:
+                cdate = None
+            if cdate is not None and cdate < cutoff:
+                continue  # 윈도우 밖(오래된 발주) — 상세 생략
+            seen.add(int(seq))
+            rows.append((created, int(seq)))
+    rows.sort(reverse=True)  # 최신 발주 우선
+    return [seq for _, seq in rows[:cap]]
+
+
+def _fetch_po_detail_rows(page, po_seq: int):
+    """발주상세 한 건 fetch → per-SKU 테이블 rows. 반환 (rows|None, status). None=비정상/로그인/빈테이블."""
+    path = f"{PO_DETAIL_PATH}/{po_seq}"
+    res = _eval_retry(page, _FETCH_PO_DETAIL_JS, [path])
+    status = (res or {}).get("status")
+    if status != 200 or (res or {}).get("looksLogin"):
+        return None, status
+    rows = (res or {}).get("rows") or []
+    return (rows if rows else None), status
+
+
+def _collect_and_push_po_details(page, cfg: dict, pages: list[dict]) -> tuple[int, int]:
+    """대상 PO별 발주상세 fetch→push. Akamai stale("Failed to fetch"/비200) 시 오리진 리로드 1회 재무장.
+
+    pages: 이미 수집한 발주 list 페이지들(대상 PO seq 선정용). 발주/정산 push와 독립.
+    반환 (pushed, failed). 연속 실패 다수면 세션 의심 → 조기 종료(발주/정산 push는 이미 별도 완료).
+    """
+    targets = _po_detail_targets(pages or [], cfg)
+    if not targets:
+        log.info("발주상세: 대상 PO 0건 — 건너뜀")
+        return 0, 0
+    log.info("발주상세 수집 대상 %d건(최근 %d일·캡 %d)", len(targets), cfg.get("po_detail_days"), cfg.get("po_detail_max"))
+    pushed = 0
+    failed = 0
+    consec_fail = 0
+    for seq in targets:
+        rows = None
+        for attempt in (1, 2):
+            try:
+                rows, status = _fetch_po_detail_rows(page, seq)
+            except Exception as e:  # noqa: BLE001 — Akamai stale 등 일시 실패
+                rows, status = None, str(e)[:60]
+            if rows is not None:
+                break
+            if attempt == 1:
+                # Akamai 센서 재무장(ref20b §1): 오리진 리로드 후 재시도
+                with contextlib.suppress(Exception):
+                    _goto_origin(page)
+        if rows is None:
+            failed += 1
+            consec_fail += 1
+            log.warning("발주상세 PO=%d 실패(status=%s)", seq, status)
+            if consec_fail >= 5:
+                log.error("발주상세 연속 실패 5건 — 세션 의심, 상세 수집 조기 종료")
+                break
+            continue
+        consec_fail = 0
+        if _push_po_items(cfg, seq, rows) == 0:
+            pushed += 1
+        else:
+            failed += 1
+        page.wait_for_timeout(400)  # 폴라이트 간격
+    log.info("발주상세 완료 — push %d건 / 실패 %d건", pushed, failed)
+    return pushed, failed
+
+
+def _push_po_items(cfg: dict, po_seq: int, rows: list[list]) -> int:
+    """발주상세 per-SKU DOM rows → prod ingest(PO별 snapshot replace). 0=성공/1=실패."""
+    try:
+        pr = requests.post(
+            cfg["prod_base_url"].rstrip("/") + PO_DETAIL_INGEST_PATH,
+            json={"purchase_order_seq": po_seq, "vendor_id": cfg["vendor_id"], "rows": rows},
+            headers={"X-Ingest-Token": cfg["ingest_token"]},
+            timeout=60,
+        )
+    except requests.RequestException as e:
+        log.error("발주상세 push PO=%d 네트워크 오류: %s", po_seq, e)
+        return 1
+    if pr.status_code != 200:
+        log.error("발주상세 push PO=%d 실패 HTTP %s — %s", po_seq, pr.status_code, pr.text[:200])
+        return 1
+    return 0
+
+
+# ════════════════════════════════════════════════════════════════════
 # prod push
 # ════════════════════════════════════════════════════════════════════
 def _push_po(cfg: dict, pages: list[dict]) -> int:
@@ -439,14 +583,22 @@ def _do_run(cfg: dict) -> int:
                 except Exception as e:  # noqa: BLE001 — 정산 실패는 발주 push를 막지 않음
                     log.error("정산 수집 실패(발주는 계속 push): %s", e)
                     settle_rows = []
+                # 발주 push 먼저(상세는 PO 적재 후가 안전·드리프트 무관) → 그다음 발주상세
+                rc_po = _push_po(cfg, pages)
+                rc_st = _push_settlement(cfg, settle_rows)
+                detail_failed = 0
+                if cfg.get("collect_po_detail", True):
+                    try:
+                        _, detail_failed = _collect_and_push_po_details(page, cfg, pages)
+                    except Exception as e:  # noqa: BLE001 — 상세 실패는 발주/정산 push를 무효화하지 않음
+                        log.error("발주상세 수집 실패(발주/정산은 push됨): %s", e)
+                        detail_failed = -1
     except Exception as e:  # noqa: BLE001 — 브라우저/수집 오류
         log.error("브라우저 수집 오류: %s", e)
         return 1
 
-    rc_po = _push_po(cfg, pages)
-    rc_st = _push_settlement(cfg, settle_rows)
-    rc = 0 if (rc_po == 0 and rc_st == 0) else 1
-    log.info("run 완료 — 발주 push rc=%d / 정산 push rc=%d", rc_po, rc_st)
+    rc = 0 if (rc_po == 0 and rc_st == 0 and detail_failed <= 0) else 1
+    log.info("run 완료 — 발주 push rc=%d / 정산 push rc=%d / 발주상세 실패=%d", rc_po, rc_st, detail_failed)
     return rc
 
 
