@@ -17,7 +17,10 @@ from app.database import Base
 from app.models import (
     CoupangAdReport,
     CoupangRocketPurchaseOrder,
+    CoupangRocketPurchaseOrderItem,
     CoupangRocketSettlement,
+    ProductMaster,
+    RocketProductCostMap,
 )
 from app.services.coupang.rocket_intelligence import (
     ROCKET_AD_SELL_TYPE,
@@ -149,3 +152,101 @@ def test_vendor_id_filter(db):
     r = compute_rocket_overview(db, *WIN, vendor_id=VID)
     assert r["revenue"] == Decimal(100000)
     assert r["period"]["vendor_id"] == VID
+
+
+# ═══════════════════════════════════════════════════════════════════
+# ⑤ 원가 결합 (S4.5c, D-13) — _rocket_cost via compute_rocket_overview
+# ═══════════════════════════════════════════════════════════════════
+def _master(db, sku, cost, name="x"):
+    db.add(ProductMaster(internal_sku=sku, product_name=name, cost_price=Decimal(str(cost))))
+
+
+def _item(db, po_seq, pn, qty, line_amt, *, vendor_id=VID):
+    db.add(CoupangRocketPurchaseOrderItem(
+        purchase_order_seq=po_seq, vendor_id=vendor_id, line_no=1,
+        product_number=pn, order_qty=qty,
+        unit_purchase_price=Decimal(str(line_amt)) / qty if qty else Decimal(0),
+        line_order_amount=Decimal(str(line_amt)),
+        line_supply_amount=Decimal(str(line_amt)), line_vat=Decimal(0)))
+
+
+def _map(db, pn, sku=None, status="confirmed"):
+    db.add(RocketProductCostMap(product_number=pn, internal_sku=sku, status=status))
+
+
+def test_cost_confirmed_mapping_reduces_net_profit(db):
+    # PO1(발주 100000) 발주상세 1 SKU(수량 10) → 매핑 OHI-1(원가 3000) → 원가 30000
+    _po(db, 1, 100000, datetime(2026, 6, 5, 3, 0, 0), qty=10)
+    _item(db, 1, "PN-1", 10, 100000)
+    _master(db, "OHI-1", 3000)
+    _map(db, "PN-1", "OHI-1")
+    _ad(db, date(2026, 6, 5), 8000)
+    db.commit()
+    r = compute_rocket_overview(db, *WIN)
+    assert r["has_cost"] is True
+    assert r["cost"] == Decimal(30000)        # 10 × 3000
+    assert r["net_profit"] == Decimal(62000)  # 100000 − 8000 − 30000
+    cc = r["cost_coverage"]
+    assert cc["coverage_pct"] == Decimal("1.0000")  # 전 매출분 매핑됨
+    assert cc["pos_without_detail_count"] == 0
+
+
+def test_cost_partial_coverage_is_transparent(db):
+    # PO1: 발주상세 2 SKU — 하나만 매핑(60000분), 하나 미매핑(40000분). PO2: 발주상세 미수집.
+    _po(db, 1, 100000, datetime(2026, 6, 5, 3, 0, 0), qty=10)
+    _po(db, 2, 50000, datetime(2026, 6, 6, 3, 0, 0), qty=5)  # 발주상세 없음
+    _item(db, 1, "PN-A", 6, 60000)
+    _item(db, 1, "PN-B", 4, 40000)
+    _master(db, "OHI-A", 2000)
+    _map(db, "PN-A", "OHI-A")  # PN-B는 미매핑
+    db.commit()
+    r = compute_rocket_overview(db, *WIN)
+    assert r["cost"] == Decimal(12000)  # 6 × 2000 (PN-A만)
+    cc = r["cost_coverage"]
+    # 분모 = 전체 발주 150000, 해결분 = 60000(PN-A confirmed) → 0.4
+    assert cc["coverage_pct"] == Decimal("0.4000")
+    assert cc["unmapped_order_amount"] == Decimal(40000)   # PN-B
+    assert cc["unmapped_sku_count"] == 1
+    assert cc["pos_without_detail_count"] == 1             # PO2 발주상세 미수집
+    assert r["net_profit"] == Decimal(138000)              # 150000 − 0 − 12000
+
+
+def test_cost_ignored_is_resolved_zero_cost(db):
+    # ignored SKU = 원가 0(결정된 제외)이지만 커버리지엔 해결분으로 포함
+    _po(db, 1, 50000, datetime(2026, 6, 5, 3, 0, 0), qty=5)
+    _item(db, 1, "PN-FREE", 5, 50000)
+    _map(db, "PN-FREE", status="ignored")
+    db.commit()
+    r = compute_rocket_overview(db, *WIN)
+    assert r["has_cost"] is True
+    assert r["cost"] == _Z
+    cc = r["cost_coverage"]
+    assert cc["coverage_pct"] == Decimal("1.0000")  # ignored도 해결분
+    assert cc["ignored_order_amount"] == Decimal(50000)
+    assert cc["unmapped_order_amount"] == _Z
+
+
+def test_cost_no_mapping_behaves_like_s4(db):
+    # 발주상세/매핑 전혀 없음 → S4와 동일(has_cost=False, cost=0)
+    _po(db, 1, 100000, datetime(2026, 6, 5, 3, 0, 0))
+    _ad(db, date(2026, 6, 5), 8000)
+    db.commit()
+    r = compute_rocket_overview(db, *WIN)
+    assert r["has_cost"] is False
+    assert r["cost"] == _Z
+    assert r["net_profit"] == Decimal(92000)
+    # 분모(발주 100000)>0·해결분 0 → 0/100000 = 0.0000 (None 아님). 매출 0일 때만 None.
+    assert r["cost_coverage"]["coverage_pct"] == Decimal("0.0000")
+
+
+def test_cost_window_isolation(db):
+    # 윈도우 밖 PO의 발주상세는 원가에 포함 안 됨
+    _po(db, 1, 100000, datetime(2026, 6, 5, 3, 0, 0), qty=10)
+    _po(db, 2, 999999, datetime(2026, 5, 1, 3, 0, 0), qty=10)  # 5월(윈도우 밖)
+    _item(db, 1, "PN-1", 10, 100000)
+    _item(db, 2, "PN-1", 10, 999999)  # 윈도우 밖 PO → 제외돼야
+    _master(db, "OHI-1", 3000)
+    _map(db, "PN-1", "OHI-1")
+    db.commit()
+    r = compute_rocket_overview(db, *WIN)
+    assert r["cost"] == Decimal(30000)  # PO1만 (PO2 5월 제외)

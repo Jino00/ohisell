@@ -3,6 +3,13 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
+- 날짜: 2026-06-18 (★로켓배송 1P 트랙 — S4.5c 원가 결합 완료 = S4.5 원가 아크 종료)
+- ★**쿠팡 로켓배송(1P) 트랙 S4.5c 완료** — 트랙 `docs/tracks/active/track_coupang-rocket-1p.md`(4/6). net_profit에 원가 반영(has_cost=true 전환, D-12 해소).
+  - **구현(D-13)**: `rocket_intelligence` SA ④ `_rocket_cost`(발주상세 per-SKU `CoupangRocketPurchaseOrderItem` → `RocketProductCostMap`[상품번호→internal_sku] → `product_master.cost_price` 조인, confirmed만 가산·ignored=원가0, 발주일 KST 윈도우=매출 SA 동일필터, 원칙18-8 매출출력 주입) + `compute_rocket_overview` net_profit=매출−광고−**원가**, has_cost=매핑 1건이라도 결정 시 True(0건이면 S4 동작 보존 False) + ★`cost_coverage` 블록(coverage_pct=resolved[confirmed+ignored]/window 총발주[미수집 PO 분모 포함]·unmapped_order_amount·pos_without_detail_count·SKU 카운트, 원칙22 투명화).
+  - **검증**: 테스트 5+전체 **314 통과**. 실 로컬 DB e2e(원칙22): PO 134342890(발주일 KST 6/16) confirm 전 has_cost=False(S4 보존)→PN 50342949→OHI-0001(실 cost 1691) 매핑 후 **cost=1691×89=150,499 정확**·coverage 0.4055(955,860/2,357,290)·unmapped 42,240(3 SKU)·pos_without_detail 5·net_profit=2,357,290−150,499=2,206,791. 정리 0행 복원.
+  - **미push·codex 보류**: S2+S3+S4+S4.5a+S4.5b+**S4.5c** 묶음, 6/19 06:42 quota 리셋 후 codex→prod 배포+push.
+  - **다음**: S5 프론트(종합조망 1P 뷰 cost/has_cost/cost_coverage + 원가 매핑 관리 UI + 갱신 버튼).
+- ─────────────────────────────────────────────
 - 날짜: 2026-06-18 (★로켓배송 1P 트랙 — S4.5b 원가 브리지 매핑 완료)
 - ★**쿠팡 로켓배송(1P) 트랙 S4.5b 완료** — 트랙 `docs/tracks/active/track_coupang-rocket-1p.md`(4/6, S4.5b 서브스프린트).
   - **구현(D-13/A1, net_profit 불변·매핑만)**: 모델 `RocketProductCostMap`(grain=product_number unique → `product_master.internal_sku`, status confirmed|ignored, match_method·barcode·product_name 캐시·note) + alembic `r2s3t4u5v6w7`(head, 라운드트립 OK) + **순수 SA** `suggest_skus`(difflib SequenceMatcher 이름유사도, DB·HTTP 無) + **Harness** `services/coupang/rocket_cost_map.py`(`list_unmapped` 발주상세에 있으나 매핑無 상품번호 집계[총발주수량·등장PO수·대표명/바코드]+제안 / `list_mappings` 확정목록+cost_price 조인 / `upsert_mapping` internal_sku 검증·멱등·라벨캐시·ignored 원가제외 / `delete_mapping`) + 라우터 4종 `GET/POST/DELETE /api/coupang/ops/rocket/cost-map[*]`(사용자 CRUD·ingest 토큰 불필요·products 패턴).
