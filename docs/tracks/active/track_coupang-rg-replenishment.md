@@ -193,6 +193,7 @@ UI: 상품별 현황(로켓그로스 탭) 컬럼 추가 — `현재고 | 최근 
 - **D-14 (예측 ROI 정직화 + 진단 버킷팅 선행 — 확정 2026-06-18, X1 승격)**: SBA/TSB는 "판매신호 0" 옵션을 살릴 수 없다(Croston도 nonzero 필요). 예측 전 **855옵션을 zero-signal / sparse-but-nonzero / active로 버킷팅**(진단 S8a 선행). 예측은 sparse 집합만 적용. zero-signal은 설계상 insufficient 유지. **단기(11일) 데이터에선 즉효 범위 제한적임을 명시** — 데이터 누적 시 확대. Jino 원문: "시작하자"(X1·X4·X7 일괄 승인).
 - **D-15 (in-transit 스프린트 순서 최우선 — 확정 2026-06-18, X4 승격)**: in-transit(Wing rfm-inbound 기반 발송중 수량)을 **첫 스프린트**로 앞당긴다. 데이터 이미 적재(`coupang_rg_inbound`)·Wing 화면으로 검증가능·중복발송 즉시 방지 > 예측 타워. 새 실행 순서: **① in-transit → ② S8 진단/분류 → ③ S9 예측 → ④ S10 newsvendor → ⑤ S12 백테스트.** Jino 원문: "시작하자".
 - **D-16 (D-9 재정의: cadence=7, safety는 newsvendor — 확정 2026-06-18, X7 승격)**: `target_days=7`을 **검토주기 R=7일(cadence)**로 재정의. 목표재고 safety는 D-12 newsvendor 분위수가 담당(역할 분리). API 파라미터 `target_days`→`review_period_days=7`로 리네임. Jino 원문: "시작하자".
+- **D-17 (S9/S10 예측 타워 보류 — 데이터 누적 대기, 확정 2026-06-18)**: S8 라이브 진단 결과 예측가능(sparse+active)=**9옵션/857(1.05%)**, zero_signal 848(99%). S9(sba_forecaster)·S10(newsvendor)을 **지금 구축하지 않고 보류**. 근거: ① 9옵션에 NBD/newsvendor 머니리스크 지는 ROI 부족 ② 848 zero_signal은 예측문제 아닌 시간/커버리지 문제(데이터 누적이 해법) ③ in-transit(P3 완료)이 현 단계 핵심가치. **S8이 자동 계기판** — 매일 RG sync로 sparse/active 옵션 수가 늘면(`GET /demand-class` summary.by_bucket로 관측) 그때 S9/S10 재개. **D-14·D-15의 실행순서(③예측 ④newsvendor)는 보류, ①in-transit·②진단은 완료.** Jino 결정: "B: 보류·데이터 누적 대기".
 
 ## S8 결과 (2026-06-18) — 완료 + Claude 서브 적대검증 PASS + prod 라이브 self-verify
 - **신규 파일**: `app/services/coupang/demand_classifier.py`(읽기전용 SA, 새 테이블 없음). 순수함수 `_adi`/`_cv2_nonzero`/`_classify`/`_bucket`/`_classify_series` + 로더 `_load_daily_series`(옵션별 일별 qty 0포함)·`_load_inventory_options`(전체 모집단 vii→sold_30d) + 공개 `classify_demand(db,account_key)`·`classify_demand_one(db,vii,account_key)`(원칙18-8 등가).
@@ -203,9 +204,10 @@ UI: 상품별 현황(로켓그로스 탭) 컬럼 추가 — `현재고 | 최근 
 - **★prod 라이브 self-verify(원칙22)**: scp 2파일+PM2 restart(online·새 테이블/프론트 무). `GET /demand-class` 200 → **857옵션 / 신뢰 13일**: by_bucket zero_signal 848·sparse 5·active 4 / by_class unknown 851·intermittent 4·smooth 2. 라이브 머니수학 검증례: 95521944481(13/13일 ADI1.0 CV²0.359→smooth)·95521944484(9일 ADI1.444 CV²0.189→intermittent)·95501699184(6일 sparse ADI2.167 CV²0.469→intermittent). unknown 정직 표기 확인.
 - **★진단 함의(X1·D-14 정직성)**: 예측가능(sparse+active)=**9옵션(1.05%)**. S9/S10 예측 타워는 현재 9옵션만 도달 → Jino 전략판단(지금 짓기 vs 데이터 누적 대기). zero_signal 848은 시간/커버리지 문제이지 예측문제 아님(설계상 insufficient 유지가 정답).
 
-## 다음 액션 (Phase 2 — S9 이후, ★Jino 전략판단 대기)
-- **★ S8 진단이 던진 질문**: 예측가능 9옵션(1.05%)뿐. **(A) S9/S10 지금 진행**(9옵션 즉시 개선+인프라 선구축, 데이터 누적되며 자동 확대) vs **(B) 보류**(데이터 더 쌓고 in-transit[완료]가 현 단계 핵심가치) vs **(C) 백테스트 S12 먼저**(9옵션으로 99% 서비스수준 ROI 선검증). Jino 결정 후 트랙 D-N 기록.
-- (보류 시) 데이터 누적만 대기 — S8/S3는 매일 sync로 자동 고도화(zero_signal→sparse 전환은 판매 발생으로 자동).
+## 다음 액션 (Phase 2 — S9/S10 보류 확정 D-17)
+- **✅ 전략판단 완료(2026-06-18)**: Jino "B: 보류·데이터 누적 대기" → **S9/S10 보류(D-17)**. Phase 2의 즉효 산출물 = in-transit(P3 완료) + S8 진단 계기판.
+- **재개 트리거**: `GET /api/coupang/ops/demand-class` summary.by_bucket의 sparse+active 옵션 수가 의미있게 증가(예: 수십 옵션)하면 S9(sba_forecaster 직접구현)→S10(newsvendor NBD R=7·99%)→S12(백테스트) 재개. 매일 RG sync로 zero_signal→sparse 자동 전환.
+- (보류 중) 별도 코딩 0 — S8/S3가 데이터 누적으로 자동 고도화.
 - **쿠키 만료 주기 측정 중** (D-5 참고): 일일 sync 302 발생 시점 = 만료 기준일 갱신 필요.
 
 ## 다음 액션 (S7 — 자동 승격 대기)
