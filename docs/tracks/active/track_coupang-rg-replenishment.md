@@ -173,7 +173,10 @@ UI: 상품별 현황(로켓그로스 탭) 컬럼 추가 — `현재고 | 최근 
 - [ ] P0. 855옵션 ADI/CV² 분류 (핵심 vs 간헐/lumpy)
 - [ ] P1. 예측 엔진 SBA 교체 (statsforecast) — 지금 "예측 불가" 다수가 발송 신호 획득
 - [ ] P2. newsvendor 분위수 목표재고 (품절비용 vs 보관/반품비로 CF)
-- [ ] P3. in-transit 통합 — Wing 페처 rfm-inbound 정기수집 + 화면 차감
+- [x] **P3. in-transit 통합 — in_transit_estimator SA + Harness 배선 + 유효재고 반영 (완료 2026-06-18, 커밋 e487f85)**
+  - X5 freshness-gate(last_success_at <2일=fresh) · X6 만료(p90+7일) · D-13 유효재고=현재고+발송중
+  - 검증 엔드포인트: GET /api/coupang/ops/in-transit (fresh=False, 쿠키 갱신 시 자동 반영)
+  - fixture 12개 신규, prod self-verify 완료 (쿠키 만료=stale 차단 정상)
 - [ ] P4. 백테스트 루프 (fill-rate·품절·과잉재고 검증)
 - [ ] P5(선택). LightGBM 글로벌+분위수 (데이터 충분·ROI 검증 후)
 - **목표 한눈 조망**: P1+P3 후 옵션별 [현재고·발송중·판매속도·소진예상일·언제몇개발송·보관비리스크] 로켓그로스 탭 단일 화면.

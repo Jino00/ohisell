@@ -3,7 +3,27 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
-- 날짜: 2026-06-15 (★두 회계 엔진 순이익 정의 통일 세션 — 3P 수수료 실측화 후속)
+- 날짜: 2026-06-18 (★RG 발송관제 Phase 2 — in-transit 스프린트 완료, 커밋 e487f85)
+- ★★**Phase 2 P3 in-transit 통합 완료** (커밋 e487f85, prod 배포). D-14~D-16 트랙 승격(X1·X4·X7 Jino 승인 "시작하자").
+  - **신규 `in_transit_estimator.py` SA**: `coupang_rg_inbound` → 옵션별 발송중 수량+판매개시 예정. X5 freshness-gate(last_success_at <2일=fresh, stale=차감 스킵). X6 만료(stowing_at 설정=완료, p90+7일 초과=phantom 제거). D-13 발송중=Σ(requested-stowed).
+  - **`rg_replenishment.py` Harness**: in_transit 배치 1회 산출 → 옵션별 주입(원칙18-8). 반환에 `in_transit_meta` 추가.
+  - **`replenishment_calc.py`**: 유효재고=현재고+발송중. 신규 필드 `in_transit_qty`·`effective_stock`·`in_transit_fresh`·`expected_stowing_at`.
+  - **라우터**: `GET /api/coupang/ops/in-transit` 검증 엔드포인트.
+  - **prod self-verify**: in_transit_meta 정상 반환. 쿠키 만료→stale→차감 스킵(X5 정상). 쿠키 갱신 시 자동 반영 구조 확인.
+  - **fixture 12개 신규, 224 전체 그린**.
+  - **★주의**: Wing 쿠키 만료 중(last_success_at=2026-06-10). in-transit 실반영하려면 Jino가 Wing cURL 재붙여넣기 필요(`POST /api/coupang/ops/inbound/cookie`).
+  - **다음**: S8 demand_classifier SA (ADI/CV² 버킷팅 — D-14 진단 선행).
+
+- (이전) 날짜: 2026-06-17 (★RG 발송관제 Phase 2 — 구조설계+계획서 세션, 코드 0줄)
+- ★★**RG 발송관제 Phase 2 구조 승인 + 계획서 작성 완료** (코드 변경 0·docs만). 트랙 `docs/tracks/active/track_coupang-rg-replenishment.md`, 계획서 `docs/PLAN_rg-replenishment-phase2.md`.
+  - **대화로 확정한 4결정(트랙 D-10~D-13)**: D-10 수요예측 SBA/TSB(statsforecast Apache-2.0 라이선스 확인✓, 리드타임은 대상 아님) / D-11 in-transit Wing rfm-inbound API / **D-12 목표재고=newsvendor 서비스수준 분위수, 시작 99%**(단일 % 금지·상품별 자동 100%↑·백테스트로 최적화) / **D-13 유효재고=현재고+발송중(=Σ입고생성−판매개시), 판매개시 예정=도착예정일+(도착→판매개시)갭**.
+  - **Jino 핵심 발화**: "발송 후 판매시작까지 기간도 고려"→이미 리드타임 정의가 발송→판매개시(STOWING)임을 이미지 툴팁으로 실증 / "100% 이상 품절 안날 최적 숫자로"→서비스수준 다이얼(99% 시작)이 상품별 최적%를 자동 산출하는 방식으로 합의("그러자") / "판매개시 갭을 더해야지".
+  - **확정 구조**: 신규 SA 3개(demand_classifier P0·sba_forecaster P1·in_transit_estimator P3) + 기존 S2 무변경·S3 요일계수 유지·S4 유효재고+newsvendor 개선 + wing_browser_fetcher에 rfm-inbound 배선. 스프린트 S8~S13(P0~P5).
+  - **/plan-eng-review 완료(2026-06-17)**: 검토 5건(R1~R5)+아웃사이드 보이스 8건(X1~X8) 전부 PLAN 반영. codex 한도소진(Jun19)→Claude 서브에이전트 대체. 핵심 개정: R1 statsforecast→직접구현(콜드스타트 회피), X2 부트스트랩→NBD 모수분포(11일 표본 꼬리 모델링), X4 **in-transit 첫 스프린트로 재배치**, X6 in-transit 종료의미(취소/분실 만료), X7 D-9→검토주기 R=7.
+  - **★Jino 확인 대기 3건(다음 세션 첫 작업)**: X1(예측 ROI 정직화·진단버킷팅 선행)·X4(in-transit 우선)·X7(D-9 재정의) → 동의 시 트랙 D-14~D-16 승격.
+  - **다음**: Jino 확인 → /model sonnet → **in-transit 스프린트부터** 구현 → codex/Claude 서브 → prod self-verify(필름100·버디0 화면 대조). **아직 코드 0줄.**
+  - HANDOFF: `.claude/memory/HANDOFF_ohisell-replenishment-phase2-plan-reviewed_20260617.md`
+- (이전) 날짜: 2026-06-15 (★두 회계 엔진 순이익 정의 통일 세션 — 3P 수수료 실측화 후속)
 - ★★**두 엔진(구 대시보드·종합조망) 순이익 정의 통일 — prod 배포 완료 (커밋 ab1ec81, main push)**.
   - **배경**: 직전 3P 수수료 실측화 후 남은 갭 2건(Jino "잡아줘"). Gap1 RG 10.8%=비-이슈(RG 주문 Order테이블 0건→_line_commission 죽은 경로). Gap2가 진짜.
   - **Gap2 발견**: 권위 엔진 종합조망 net_profit이 **판매자VAT(rev×10/110≈9%)+한진배송비를 누락**해 과대평가(2주 3P ~570k). 구 대시보드는 둘 다 차감 → 두 화면 불일치 핵심 원인.
@@ -66,4 +86,4 @@
 - 나머지 8종 XLSX 파서 구현
 
 ## 새 세션 시작 프롬프트
-.claude/memory/HANDOFF_ohisell-wing-session-automation-S5done_20260615.md 읽고 이어서 작업해줘
+.claude/memory/HANDOFF_ohisell-replenishment-phase2-plan-reviewed_20260617.md 읽고 이어서 작업해줘
