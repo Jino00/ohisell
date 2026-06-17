@@ -6,7 +6,7 @@ from decimal import Decimal
 from typing import Optional
 
 from sqlalchemy import (
-    Boolean, DateTime, Date, ForeignKey, Index, Integer, Numeric,
+    JSON, Boolean, DateTime, Date, ForeignKey, Index, Integer, Numeric,
     String, Text, UniqueConstraint, func, text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -1261,6 +1261,88 @@ class CoupangProductSize(Base):
         DateTime, server_default=func.now(), onupdate=func.now()
     )
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+# ──────────────────────────────────────────────
+# 쿠팡 로켓배송(1P) 발주/납품/정산 (supplier.coupang.com — 트랙 rocket-1p S2)
+# ──────────────────────────────────────────────
+class CoupangRocketPurchaseOrder(Base):
+    """쿠팡 로켓배송(1P) 발주(PO) — supplier.coupang.com 발주현황 (트랙 rocket-1p, D-9).
+
+    소스: GET /po-web/app/purchase-order/list JSON(ref 20). 발주(①)+납품(②) 한 row에 공존.
+    런타임 경계(D-1): supplier는 Akamai 봇방어 → 백엔드 requests 직접 호출 금지.
+      Mac 헤드풀 CDP 페처가 page-context fetch(발주일=PURCHASE_ORDER_DATE)로 page 루프 수집 →
+      raw JSON push → 백엔드 파서(clients/coupang/rocket_supplier.py)가 정규화 → 여기 적재.
+    grain: purchase_order_seq(발주 PK). 같은 PO 재수신 시 확정치로 교체(snapshot upsert).
+
+    금액(D-9 §6-1 ③: 발주/입고금액 = VAT 포함 gross):
+      sum_of_order_amount = 발주금액(쿠팡이 발주한 금액) = D-3 매출 기준(발주일 인식).
+      sum_of_receiving_amount = 실제 입고(납품)금액 → 발주↔납품 드리프트(D-5)는 row 내 비교.
+      sum_of_vendor_confirmed_amount = 거래처(우리) 확인금액.
+    vendor_payment_seqs(D-9 §6-1 ④): 이 PO에 매핑된 계산서번호(vendorPaymentInfoSeq) 리스트.
+      관계 1PO↔N계산서(부분정산)·1계산서↔N PO(묶음). 발주↔정산 드리프트 조인키. JSON 저장.
+    D-10: po_created_at(발주일)·status·receiving = 운영축(재고·발송 관제), order_amount = 돈축(종합조망).
+      한 테이블이 양축을 다 먹임 — 메뉴 분리는 프론트 슬라이스(S5).
+    """
+
+    __tablename__ = "coupang_rocket_purchase_order"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    purchase_order_seq: Mapped[int] = mapped_column(Integer, unique=True, nullable=False, index=True)
+    vendor_id: Mapped[str] = mapped_column(String(20), nullable=False, index=True)  # A01029796(계정축)
+    # 금액 3종 (gross, 원 단위)
+    sum_of_order_amount: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # ★발주=D-3 매출
+    sum_of_receiving_amount: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 납품(입고)
+    sum_of_vendor_confirmed_amount: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # 수량 3종
+    order_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    receiving_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    vendor_confirmed_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # 상태/물류 (운영축)
+    purchase_order_status: Mapped[Optional[str]] = mapped_column(String(20), nullable=True, index=True)
+    purchase_order_status_description: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    purchase_type: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    center_code: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    center_name: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    first_sku_name: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+    sku_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # 날짜 (po_created_at=발주일 UTC=매출 인식일, D-3)
+    po_created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+    expected_delivery_date: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # 계산서 매핑(↔정산 드리프트 조인키) — vendorPaymentInfoSeq 리스트
+    vendor_payment_seqs: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class CoupangRocketSettlement(Base):
+    """쿠팡 로켓배송(1P) 매입 정산 — supplier.coupang.com 매입정산 (트랙 rocket-1p, D-9).
+
+    소스: GET /scm/settlement/general/purchase/account 폼-GET SSR HTML(JSON 아님 → DOM 파싱, ref 20).
+    런타임 경계(D-1): Mac 헤드풀 페처가 DOM 테이블 추출 → raw rows push → 백엔드 파서 정규화 → 적재.
+    grain: invoice_seq(계산서번호=vendorPaymentInfoSeq). 1계산서↔N PO(묶음 정산). snapshot upsert.
+
+    금액(D-9 §6-1 ③): supply_amount=공급가액(net, VAT前), vat=부가가치세,
+      payment_amount=지급예정금액(gross=공급+VAT, 검산 일치). 종합조망 매출은 gross 발주금액 사용,
+      정산은 발주↔정산 드리프트(D-5) 표현용(vendor_payment_seqs 조인). 별도 비용라인 아님(D-5).
+    """
+
+    __tablename__ = "coupang_rocket_settlement"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    invoice_seq: Mapped[int] = mapped_column(Integer, unique=True, nullable=False, index=True)
+    vendor_id: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    supply_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)  # 공급가(net)
+    vat: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)  # 부가세
+    payment_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)  # 지급예정(gross)
+    issue_date: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True, index=True)  # 작성일
+    payment_date: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True)  # 지급일
+    tax_invoice_confirmed_date: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True)  # 세금계산서 확정일
+    settlement_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)  # 정산유형(입고 등)
+    bill_issue_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)  # 발행유형(역발행 등)
+    tax_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)  # 과세유형
+    first_payment_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)  # 1차지급액
+    second_payment_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)  # 2차지급액
+    synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
 # ──────────────────────────────────────────────

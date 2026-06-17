@@ -3,8 +3,20 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
-- 날짜: 2026-06-17 (★로켓배송 1P 트랙 — S1 정찰 완료, 미커밋)
-- ★★**쿠팡 로켓배송(1P) 종합조망 트랙 S1 정찰 완료 (1/N)** — supplier.coupang.com 라이브 실측(추측 0, 원칙22).
+- 날짜: 2026-06-17 (★로켓배송 1P 트랙 — S2 백엔드 완료, 커밋 직후)
+- ★★**쿠팡 로켓배송(1P) 트랙 S2 데이터모델+수집SA 완료 (2/6)** — 트랙 `docs/tracks/active/track_coupang-rocket-1p.md`.
+  - **모델 2종**(`backend/app/models.py`): `CoupangRocketPurchaseOrder`(PO grain, purchase_order_seq PK, sum_of_order/receiving/vendor_confirmed_amount[gross], po_created_at=발주일UTC, `vendor_payment_seqs` JSON=계산서매핑) + `CoupangRocketSettlement`(계산서 grain, invoice_seq PK, supply_amount net·vat·payment_amount gross). alembic `p0q1r2s3t4u5`(head, upgrade/downgrade 검증·테이블2+인덱스7).
+  - **순수 파서 SA** `clients/coupang/rocket_supplier.py`: `parse_purchase_order_list`(envelope body.body 이중중첩)+`parse_settlement_rows`(헤더명 동적매핑 D-13·콤마/"-"/ISO 방어변환)+`extract_page_meta`. HTTP 없음(런타임경계 D-1).
+  - **ingest Harness** `services/coupang/rocket_supplier_sync.py`: `ingest_purchase_orders(pages)`+`ingest_settlements(vendor_id, rows)` snapshot per-row upsert(멱등·읽기전용·net_profit 불변).
+  - **라우터** `POST /api/coupang/ops/rocket/{po,settlement}/ingest`(X-Ingest-Token=AD_INGEST_TOKEN 재사용·상수시간비교). S3 페처가 push할 대상.
+  - **테스트** `tests/test_rocket_supplier.py` 18개 + 전체 267 통과. 머니검산 gross=net+VAT·멱등·헤더순서무관·방어파싱.
+  - **발주일 enum 라이브 확정**: `searchDateType=PURCHASE_ORDER_DATE`(발주일, 매출기준) vs `WAREHOUSING_PLAN_DATE`(입고예정). Ant Select 드롭다운 XHR.open 후킹 캡처(추측0).
+  - **D-10 메뉴 2축 분리**(Jino 승인): 돈축=종합조망(1P 매출·순이익·드리프트) / 운영축=재고·발송관제(발주→입고 진행). S2 모델 불변·S5 프론트 분기.
+  - ⚠ **codex review 보류**: OpenAI usage limit(6/19 06:42 리셋). Jino 승인하에 선커밋(원칙19 게이트는 quota 풀린 뒤 PR 전 실행).
+  - **다음**: (6/19 quota후)`/codex review` → S3 헤드풀 CDP 페처(supplier, launchd) → S4 종합조망 Harness(매출=Σgross발주[발주일KST]−원가−광고, 발주↔정산 드리프트=vendor_payment_seqs조인) → S5 프론트.
+- ─────────────────────────────────────────────
+- 날짜: 2026-06-17 (★로켓배송 1P 트랙 — S1 정찰)
+- ★**S1 정찰 완료 (1/N)** — supplier.coupang.com 라이브 실측(추측 0, 원칙22).
   - **3단계 데이터 소스 확정(D-9, ref `docs/references/20_coupang_rocket_1p_recon.md`)**:
     - ①발주+②납품 = **`GET /po-web/app/purchase-order/list` JSON 1개**. row당 `sumOfOrderAmount`(발주=D-3매출)·`sumOfReceivingAmount`(납품)·`sumOfVendorConfirmedAmount`. grain=발주 `purchaseOrderSeq`. 발주↔납품 드리프트 row 내 즉시계산. 쿼리 searchDateType=WAREHOUSING_PLAN_DATE+날짜범위+센터.
     - ③정산 = **`GET /scm/settlement/general/purchase/account` 폼-GET SSR HTML**(JSON 아님). grain=계산서번호. 컬럼: 공급가액·부가가치세·지급예정금액(=공급가+VAT 검산일치)·작성/지급일자·세금계산서확정일·1/2차지급액. 지급일=작성+약2개월.

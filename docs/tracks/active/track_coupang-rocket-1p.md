@@ -1,6 +1,6 @@
 # 트랙: 쿠팡 로켓배송(1P) 종합조망 편입
 
-> 생성: 2026-06-15 · 상태: 🟢 Active (0/N) · 계정: 주식회사 오하이테크
+> 생성: 2026-06-15 · 상태: 🟢 Active (2/6, S2 완료) · 계정: 주식회사 오하이테크
 > 단일 진실 원천. 이 파일을 무시·변형하지 말 것. 변경은 Jino 승인 후 D-N으로 기록.
 
 ## 목표 (한 줄)
@@ -14,12 +14,17 @@
 - 1P는 판매 모델이 3P/RG와 완전히 다름(판매자 주문 없음·쿠팡 풀필먼트·한진배송 없음).
 
 ## 확정 결정사항 (D-N)
+- **D-10 (메뉴 2축 분리 — 2026-06-17, Jino 승인)**: 화면을 **돈 축**과 **운영 축** 두 메뉴로 분리.
+  - **돈 축 = 종합조망(Command Center)**: 채널별(3P/RG/1P) 매출·순이익·정산 드리프트(회고적, "얼마 벌었나").
+  - **운영 축 = 재고·발송 관제**: RG 보충발송 추천 + 재고/in-transit + **1P 발주→거래처확인→입고 진행상태**(행동지향, "뭘 언제 보내고 채울까"). RG 발송관제 트랙으로 흡수.
+  - ★**S2 데이터 모델 불변**: 로켓배송 list API 1개가 양축에 다 쓰임(`sumOfOrderAmount`+정산=돈축 / `purchaseOrderStatus`·`sumOfReceivingAmount`=운영축). 메뉴 분리는 **S5 프론트에서 슬라이스 분기**, 백엔드 PO/정산 테이블은 공유.
+  - 원문 인용: "이 쿠팡의 재고 파악 및 발송 관련은 별도의 메뉴로 빼는게 좋겠다, 그치?"
 - **D-9 (S1 정찰 실측 — 2026-06-17, ref 20)**: 3단계 데이터 소스 라이브 확정.
   - ①발주+②납품 = **`GET /po-web/app/purchase-order/list` JSON 1개**(`sumOfOrderAmount`/`sumOfReceivingAmount`, grain=발주 PO `purchaseOrderSeq`). 발주↔납품 드리프트는 row 내 즉시 계산.
   - ③정산 = **`GET /scm/settlement/general/purchase/account` 폼-GET SSR HTML**(JSON 아님 → DOM/HTML 파싱, grain=계산서번호, 공급가액+VAT=지급예정금액).
   - 인증=쿠키, **Akamai 봇방어 존재 → 헤드풀 CDP 페처 필수**(D-1 확인). 호스트=supplier.coupang.com 단일.
-  - S2 사전확인 6건 중 5건 해결(ref20 §6-1, 전부 page-context fetch·추측0):
-    ① searchDateType={입고예정일,발주일} → 매출은 발주일 기준 ② 페이지네이션=page 루프·pageSize 고정50(size무시)
+  - S2 사전확인 **6건 전부 해결**(ref20 §6-1, 추측0):
+    ① searchDateType={`WAREHOUSING_PLAN_DATE`(입고예정일), **`PURCHASE_ORDER_DATE`(발주일)**} → **매출은 `PURCHASE_ORDER_DATE` 기준**(코드값 라이브 캡처 확정 2026-06-17, XHR.open 후킹) ② 페이지네이션=page 루프·pageSize 고정50(size무시)
     ③ **발주/입고금액=VAT포함(gross)=정산 지급예정금액(4/5 정확일치)**, 정산 공급가액=net
     ④ **계산서↔PO 매핑=list 내장** `vendorPaymentList[].vendorPaymentInfoSeq`=계산서번호(1계산서↔N PO·1PO↔N계산서 부분정산)
     ⑤ SKU단위금액=발주상세 SSR(선택·머니수학은 PO grain 충분, S2 제외) ⑥ size 고정.
@@ -45,7 +50,7 @@
 
 ## 체크리스트
 - [x] **S1 정찰(spike)**: supplier.coupang.com 라이브 실측 완료(2026-06-17). 발주/납품/정산 3단계 데이터 소스·형태 확보 → **ref `docs/references/20_coupang_rocket_1p_recon.md`**.
-- [ ] S2 데이터 모델 확정 + 수집 SA(clients/coupang/rocket_supplier.py 등) + 적재 테이블/마이그레이션
+- [x] **S2 데이터 모델 + 수집 SA + 적재/마이그레이션**(2026-06-17): 모델 2종(`CoupangRocketPurchaseOrder` PO grain·`CoupangRocketSettlement` 계산서 grain, PO에 `vendor_payment_seqs` JSON) + alembic `p0q1r2s3t4u5`(head, upgrade/downgrade 검증) + 순수 파서 SA `clients/coupang/rocket_supplier.py`(헤더명 동적매핑·방어적) + ingest Harness `services/coupang/rocket_supplier_sync.py`(snapshot upsert 멱등·읽기전용) + 라우터 `POST /api/coupang/ops/rocket/{po,settlement}/ingest`(X-Ingest-Token). 테스트 18개+전체 267 통과(머니검산 gross=net+VAT·멱등·방어파싱). ⚠codex review는 OpenAI quota 소진으로 보류(6/19 06:42 리셋 후 실행 예정).
 - [ ] S3 헤드풀 CDP 페처(supplier.coupang.com) + prod push 배선 + launchd 데몬
 - [ ] S4 종합조망 편입: 1P 매출(발주)·순이익(발주−원가−광고) Harness + 발주↔정산 드리프트
 - [ ] S5 프론트: 종합조망 로켓배송 뷰/축 + 갱신 버튼
@@ -53,11 +58,12 @@
 (스프린트 수는 S1 정찰 결과로 확정)
 
 ## 현재 진행 단계
-- **S1 정찰 완료(2026-06-17, 1/N)**. 발주/납품/정산 3단계 데이터 소스·형태 라이브 실측 → ref 20 + D-9 기록. 증거: `docs/references/data/20_rocket_1p_settlement_dom_sample.json`.
-- 정찰 도구 보존: `tools/rocket_supplier_recon.py`(원시 CDP Network 도청 + DOM 스크레이프, Playwright/Origin/SSR 우회법 코드화).
+- **S2 완료(2026-06-17, 2/N)**. 데이터 모델 2종 + alembic + 순수 파서 SA + ingest Harness + 라우터. 테스트 18개+전체 267 통과. 발주일 enum=`PURCHASE_ORDER_DATE` 라이브 확정. D-10(메뉴 2축 분리) 기록.
+- ⚠ **codex review 보류**: OpenAI usage limit(6/19 06:42 리셋). 원칙19 게이트는 quota 풀린 뒤 PR 전 실행. Jino 승인하에 선커밋(테스트 green·자기검토 완료).
+- S1 정찰 도구 보존: `tools/rocket_supplier_recon.py`. 증거: `docs/references/data/20_rocket_1p_settlement_dom_sample.json`.
 
-## 다음 액션 (S2 — 데이터 모델 + 수집 SA, 사전확인 완료)
-1. (선택) 발주일 enum 코드값 1건 확정(드롭다운 발주일 선택→검색 1회 캡처). 나머지 사전확인은 완료(ref20 §6-1).
-2. 데이터 모델 확정: **발주/납품 = PO grain 테이블**(purchaseOrderSeq PK, sumOfOrder/Receiving/ConfirmedAmount[gross], vendorPaymentList=계산서매핑) + **정산 = 계산서 grain 테이블**(vendorPaymentInfoSeq PK, 공급가액net·VAT·지급예정gross·작성/지급일) + alembic.
-3. 수집 SA `clients/coupang/rocket_supplier.py`: **page-context fetch 방식**(list page=1..lastPageNumber 루프) + 정산 SSR DOM 파서. → S3 헤드풀 CDP 페처(launchd).
-4. 머니수학: 매출=Σgross 발주금액(발주일 기준), 순이익=매출−원가(product_master)−광고. 발주↔정산 드리프트=vendorPaymentInfoSeq 조인(부분정산 다중성 주의).
+## 다음 액션
+1. **(quota 리셋 후 6/19) `/codex review`** — S2 diff 교차검증. pass면 push, fail이면 대화형 반영(원칙19).
+2. **S3 헤드풀 CDP 페처**(supplier.coupang.com): `tools/rocket_supplier_recon.py` page-context fetch 패턴 → 페처화(발주 list page 루프 `searchDateType=PURCHASE_ORDER_DATE` + 정산 DOM rows) → `/api/coupang/ops/rocket/{po,settlement}/ingest`로 push → launchd 데몬(wing 패턴). 쿠키/Akamai 단명 주의.
+3. **S4 종합조망 편입 Harness**: 매출=Σgross 발주금액(발주일 KST=po_created_at+9h 기준)−원가(product_master)−광고. 발주↔정산 드리프트=vendor_payment_seqs 조인(부분정산 다중성 주의). 읽기전용 패턴.
+4. **S5 프론트(D-10)**: 돈축=종합조망 1P / 운영축=재고·발송 관제(발주→입고 진행). S6 prod self-verify+codex+배포.

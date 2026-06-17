@@ -26,7 +26,7 @@ from app.database import get_db
 from app.models import Channel, CoupangAdCostDaily, CoupangAdOptionDaily, CoupangProductItem, CoupangRevenueFee, CoupangRgInbound, CoupangRgOrderItem, CoupangRgSettlementFee, Order, ProductChannelMapping, ProductMaster
 from app.routers._coupang_write_http import handle_write as _handle_write
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
-from app.services.coupang import ad_cost_sync, coupon_write, demand_classifier, in_transit_estimator, lead_time_estimator, product_write, rg_fee_audit, rg_inbound_sync, rg_product_size_sync, rg_replenishment, rg_settlement_sync, sales_velocity_estimator, vendor_summary_sync
+from app.services.coupang import ad_cost_sync, coupon_write, demand_classifier, in_transit_estimator, lead_time_estimator, product_write, rg_fee_audit, rg_inbound_sync, rg_product_size_sync, rg_replenishment, rg_settlement_sync, rocket_supplier_sync, sales_velocity_estimator, vendor_summary_sync
 from app.utils.crypto import CookieCryptoError
 
 log = logging.getLogger(__name__)
@@ -1209,6 +1209,59 @@ def ingest_ad_cost(
         vendors.append({"vendor_id": str(v["vendor_id"]).strip(),
                         "day_cost": day_cost, "month_cost": month_cost})
     return ad_cost_sync.ingest_ad_cost(db, cost_date, vendors)
+
+
+# ════════════════════════════════════════════════
+# 쿠팡 로켓배송(1P) supplier.coupang.com ingest (트랙 rocket-1p S2, D-9)
+# ────────────────────────────────────────────────
+# 런타임 경계(D-1): supplier는 Akamai 봇방어 → 백엔드 직접 fetch 불가.
+#   Mac 헤드풀 CDP 페처(S3)가 수집 → 아래로 raw push(X-Ingest-Token=AD_INGEST_TOKEN 재사용).
+# ════════════════════════════════════════════════
+def _check_ingest_token(x_ingest_token: str | None) -> None:
+    """X-Ingest-Token 상수시간 비교(ad-cost/ingest 패턴 재사용). 미설정·불일치 모두 401."""
+    import secrets as _secrets
+
+    expected = os.getenv("AD_INGEST_TOKEN", "").strip()
+    if not expected or not x_ingest_token or not _secrets.compare_digest(x_ingest_token.strip(), expected):
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+
+@router.post("/rocket/po/ingest")
+def ingest_rocket_po(
+    body: dict[str, Any] = Body(...),
+    x_ingest_token: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """로켓배송(1P) 발주 list 페이지(raw JSON) push → 파싱 → snapshot upsert(멱등).
+
+    body: {"pages": [<발주 list API 한 페이지 raw JSON>, ...]}. 페처가 page=1..lastPageNumber 수집.
+    """
+    _check_ingest_token(x_ingest_token)
+    pages = body.get("pages")
+    if not isinstance(pages, list) or not pages:
+        raise HTTPException(status_code=400, detail="pages[] 필요")
+    return rocket_supplier_sync.ingest_purchase_orders(db, pages)
+
+
+@router.post("/rocket/settlement/ingest")
+def ingest_rocket_settlement(
+    body: dict[str, Any] = Body(...),
+    x_ingest_token: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """로켓배송(1P) 정산 DOM rows(헤더 포함) push → 파싱 → snapshot upsert(멱등).
+
+    body: {"vendor_id": "A01029796", "rows": [[헤더셀...], [데이터셀...], ...]}.
+    vendor_id는 계정축(정산 row엔 거래처명만 있어 별도 주입).
+    """
+    _check_ingest_token(x_ingest_token)
+    vendor_id = str(body.get("vendor_id") or "").strip()
+    if not vendor_id:
+        raise HTTPException(status_code=400, detail="vendor_id 필요")
+    rows = body.get("rows")
+    if not isinstance(rows, list) or not rows:
+        raise HTTPException(status_code=400, detail="rows[] 필요")
+    return rocket_supplier_sync.ingest_settlements(db, vendor_id, rows)
 
 
 @router.post("/ad-cost/option-ingest")

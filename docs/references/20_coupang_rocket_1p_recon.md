@@ -171,8 +171,10 @@ paymentSearchType=COMPLETE             # 정산상태(완료)
 **★수집 방법 확정**: XHR 캡처 대신 **브라우저 page-context `fetch(path,{credentials:"include"})`**로 전체 JSON 수신
 (세션 쿠키 자동, same-origin, 8000자 잘림 없음). `tools/rocket_supplier_recon.py`에 헬퍼화 가능. 정산 SSR만 DOM.
 
-1. **[해결] `searchDateType` 가능값 = 2종**: `WAREHOUSING_PLAN_DATE`(입고예정일) · **발주일**(드롭다운 실측).
-   → **D-3 매출(발주 시점 인식)은 발주일 기준 조회**. (발주일 enum 코드값은 S2 첫 캡처 시 확정 — 드롭다운 선택→검색.)
+1. **[해결·코드값 확정] `searchDateType` 가능값 = 2종**: `WAREHOUSING_PLAN_DATE`(입고예정일) · **`PURCHASE_ORDER_DATE`(발주일)**.
+   → **D-3 매출(발주 시점 인식)은 `searchDateType=PURCHASE_ORDER_DATE` 기준 조회**.
+   ★발주일 enum 코드값 라이브 캡처 확정(2026-06-17, S2 진입 시): Ant Select 드롭다운에서 발주일 선택→검색 1회의
+     XHR URL에서 `searchDateType=PURCHASE_ORDER_DATE` 실측(fetch 아닌 **XMLHttpRequest** 사용 — 캡처는 XHR.open 후킹). 추측 0(원칙22).
 2. **[해결] 페이지네이션**: 응답 outer `body`에 `currentPage·lastPageNumber·totalRecordSize·pageSize`.
    예: 2026-04-01~07-17 입고예정일 윈도우 = 620건/13페이지. → **`page=1..lastPageNumber` 루프 수집**.
 3. **[해결] 발주/입고 금액 = VAT 포함(gross)**. 계산서별 Σ`sumOfReceivingAmount` = 정산 **지급예정금액**(gross) 일치(4/5 정확):
