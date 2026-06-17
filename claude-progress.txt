@@ -3,6 +3,14 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
+- 날짜: 2026-06-18 (★RG 발송관제 Phase 2 — S8 demand_classifier 완료, 커밋 2f2d85d)
+- ★★**Phase 2 S8 demand_classifier 완료 + prod 라이브 self-verify** (커밋 2f2d85d, prod 배포·미push).
+  - **신규 `demand_classifier.py` SA**: 옵션별 일판매 시계열 → ADI(관측일÷nonzero일)·CV²((nonzero수량 모집단std÷mean)²·0인날 제외) → 4분면(smooth/erratic/intermittent/lumpy, 컷 1.32·0.49 >=포함). unknown 게이트 nonzero<2. X1 버킷 zero_signal(0)·sparse(1~6)·active(≥7).
+  - **`GET /api/coupang/ops/demand-class`**: 읽기전용 검증 엔드포인트(summary.by_bucket = forecasting 도달범위).
+  - **fixture 25개**(경계값·oracle 손계산·등가성), 전체 249 그린.
+  - **적대검증**: codex 한도소진(Jun19) → Claude 서브에이전트 대체(원칙19) → **GATE PASS**(P1 0·P2 3 advisory·진단전용 미잠금).
+  - **★prod 라이브 self-verify(원칙22)**: 857옵션/13일 → **zero_signal 848(99%)·sparse 5·active 4 → 예측가능 9옵션(1.05%)**. unknown 851·intermittent 4·smooth 2. 라이브 머니수학 검증례 통과.
+  - **★진단 함의(X1 정직성)**: S9/S10 예측 타워는 현재 9옵션만 도달. **다음=Jino 전략판단**: (A)S9/S10 지금 vs (B)데이터 누적 대기 vs (C)백테스트 S12 선검증.
 - 날짜: 2026-06-18 (★RG 발송관제 Phase 2 — in-transit 스프린트 완료, 커밋 e487f85)
 - ★★**Phase 2 P3 in-transit 통합 완료** (커밋 e487f85, prod 배포). D-14~D-16 트랙 승격(X1·X4·X7 Jino 승인 "시작하자").
   - **신규 `in_transit_estimator.py` SA**: `coupang_rg_inbound` → 옵션별 발송중 수량+판매개시 예정. X5 freshness-gate(last_success_at <2일=fresh, stale=차감 스킵). X6 만료(stowing_at 설정=완료, p90+7일 초과=phantom 제거). D-13 발송중=Σ(requested-stowed).

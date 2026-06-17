@@ -43,6 +43,7 @@ UI: 상품별 현황(로켓그로스 탭) 컬럼 추가 — `현재고 | 최근 
 - [x] S5. rg_replenishment Harness 조합 — **완료 + codex pass(0블로킹) + prod 라이브 엔드포인트 검증 성공(2026-06-05)**. 아래 S5 결과 참조.
 - [x] S6. UI 컬럼(로켓그로스 탭) + 프론트 — **완료 + prod 라이브 배포(2026-06-05)**. 아래 S6 결과 참조.
 - [ ] S7. 요일/휴일 세분화 점진 개선 (지속)
+- [x] **S8. demand_classifier SA (ADI/CV² 4분면 + X1 버킷) — 완료 + Claude 서브 적대검증 PASS(codex 한도소진 대체) + prod 라이브 self-verify(2026-06-18, 커밋 2f2d85d).** 아래 S8 결과 참조.
 
 ## S0 실증 결과 (2026-06-05) — 성공
 - **엔드포인트**: `GET https://wing.coupang.com/tenants/rfm-inbound/data/inbound/search?pagingSize=10&pageIndex=0` (GET, body 없음).
@@ -123,7 +124,9 @@ UI: 상품별 현황(로켓그로스 탭) 컬럼 추가 — `현재고 | 최근 
 - **라이브 검증**: item_name 필드 정상 반환(784건, reorder_now 4건 상품명 확인 — 예: "2개입 아이폰15"). prod 배포 = rg_replenishment.py scp + pm2 restart + frontend dist 배포. 커밋 ddcd666.
 
 ## 현재 진행 단계
-- 2026-06-18: **P3 in-transit 완료 + prod self-verify 완료(커밋 e487f85)**. Wing 쿠키 갱신(last_success_at 2026-06-17) → sync 18입고/134아이템 → in-transit API fresh=true·48옵션·464개 정상 반환. Phase 2 P0(S8 demand_classifier ADI/CV² 버킷팅) 착수 대기.
+- 2026-06-18: **S8 demand_classifier 완료 + prod 라이브 self-verify(커밋 2f2d85d)**. ADI/CV² 4분면 + X1 버킷 SA + `GET /demand-class` 배포. fixture 25개·전체 249 그린. Claude 서브 적대검증 GATE PASS(P1 0·P2 3 advisory·codex 한도소진 대체).
+  - **★진단 결과(X1 정직성 — Jino 전략판단 대기)**: prod 857옵션 / 신뢰 13일(06-04~06-16) → **zero_signal 848(99.0%) · sparse 5 · active 4 → 예측가능(sparse+active) 9옵션(1.05%)**. 수요형태 unknown 851·intermittent 4·smooth 2. **즉, S9/S10 예측 타워는 현재 9옵션만 도달**. X1이 예측한 "단기 데이터에선 즉효 범위 제한적"이 라이브로 확인됨 → **S9/S10 지금 짓기 vs 데이터 누적 대기** 판단 필요.
+- 2026-06-18: P3 in-transit 완료 + prod self-verify 완료(커밋 e487f85). Wing 쿠키 갱신 → in-transit fresh=true·48옵션·464개.
 - 2026-06-05: **S6 완료 + prod 라이브 배포**. 로켓그로스 탭에 발송관제 섹션 UI 완성. 진행 6/7. (S7=데이터 누적 자동 승격.)
 - **2026-06-16: Phase 2 착수 결정 (예측 고도화 + in-transit). 아래 "Phase 2" 섹션 참조. 다음 세션 = Opus 구조설계부터.**
 
@@ -191,13 +194,18 @@ UI: 상품별 현황(로켓그로스 탭) 컬럼 추가 — `현재고 | 최근 
 - **D-15 (in-transit 스프린트 순서 최우선 — 확정 2026-06-18, X4 승격)**: in-transit(Wing rfm-inbound 기반 발송중 수량)을 **첫 스프린트**로 앞당긴다. 데이터 이미 적재(`coupang_rg_inbound`)·Wing 화면으로 검증가능·중복발송 즉시 방지 > 예측 타워. 새 실행 순서: **① in-transit → ② S8 진단/분류 → ③ S9 예측 → ④ S10 newsvendor → ⑤ S12 백테스트.** Jino 원문: "시작하자".
 - **D-16 (D-9 재정의: cadence=7, safety는 newsvendor — 확정 2026-06-18, X7 승격)**: `target_days=7`을 **검토주기 R=7일(cadence)**로 재정의. 목표재고 safety는 D-12 newsvendor 분위수가 담당(역할 분리). API 파라미터 `target_days`→`review_period_days=7`로 리네임. Jino 원문: "시작하자".
 
-## 다음 액션 (S8 — Phase 2 P0)
+## S8 결과 (2026-06-18) — 완료 + Claude 서브 적대검증 PASS + prod 라이브 self-verify
+- **신규 파일**: `app/services/coupang/demand_classifier.py`(읽기전용 SA, 새 테이블 없음). 순수함수 `_adi`/`_cv2_nonzero`/`_classify`/`_bucket`/`_classify_series` + 로더 `_load_daily_series`(옵션별 일별 qty 0포함)·`_load_inventory_options`(전체 모집단 vii→sold_30d) + 공개 `classify_demand(db,account_key)`·`classify_demand_one(db,vii,account_key)`(원칙18-8 등가).
+- **머니 수학(Jino 승인 ①~④)**: ADI=관측일÷nonzero일 / CV²=(nonzero수량 모집단std÷mean)²(0인날 제외·ddof=0) / 컷 1.32·0.49(>=포함) → smooth·erratic·intermittent·lumpy / unknown 게이트 nonzero<2 / X1 버킷 zero_signal(0)·sparse(1~6)·active(≥7). 리딩제로=전구간 카운트+게이트로 노이즈 차단(진단 전용·돈 무영향).
+- **엔드포인트**: `GET /api/coupang/ops/demand-class`(읽기전용=원칙18-7 예외). summary.by_bucket로 forecasting 도달범위 측정.
+- **테스트**: fixture 25개(ADI/CV² 경계값·lumpy 0.574/erratic 0.64 oracle·unknown·버킷·집계·등가성). 전체 249 그린.
+- **적대검증(codex 한도소진 Jun19 → Claude 서브 대체, 원칙19)**: GATE PASS. P1 0건. 머니수학·경계포함성·batch↔single 등가성·엣지(빈윈도우·미존재옵션·NULL qty·tz) 전부 손검증. P2 3건 advisory(계정간 vii=전역unique라 안전·자매SA 동일관례 / NULL qty→0 정상 / 빈윈도우 fixture 부재 저위험) — 진단전용이라 미잠금.
+- **★prod 라이브 self-verify(원칙22)**: scp 2파일+PM2 restart(online·새 테이블/프론트 무). `GET /demand-class` 200 → **857옵션 / 신뢰 13일**: by_bucket zero_signal 848·sparse 5·active 4 / by_class unknown 851·intermittent 4·smooth 2. 라이브 머니수학 검증례: 95521944481(13/13일 ADI1.0 CV²0.359→smooth)·95521944484(9일 ADI1.444 CV²0.189→intermittent)·95501699184(6일 sparse ADI2.167 CV²0.469→intermittent). unknown 정직 표기 확인.
+- **★진단 함의(X1·D-14 정직성)**: 예측가능(sparse+active)=**9옵션(1.05%)**. S9/S10 예측 타워는 현재 9옵션만 도달 → Jino 전략판단(지금 짓기 vs 데이터 누적 대기). zero_signal 848은 시간/커버리지 문제이지 예측문제 아님(설계상 insufficient 유지가 정답).
 
-- **★ S8 demand_classifier SA (ADI/CV² 버킷팅 — D-14 선행 진단)**:
-  - 855옵션 → zero-signal / sparse-but-nonzero / active 3버킷 분류
-  - ADI(평균 수요 간격) > 1.32 + CV² > 0.49 → intermittent/lumpy / 나머지 → smooth/erratic
-  - 분류 결과를 S9 예측 모집단 제한에 사용 (zero-signal은 insufficient 유지)
-  - 구현: `app/services/coupang/demand_classifier.py` + 검증 엔드포인트 + 진단 보고
+## 다음 액션 (Phase 2 — S9 이후, ★Jino 전략판단 대기)
+- **★ S8 진단이 던진 질문**: 예측가능 9옵션(1.05%)뿐. **(A) S9/S10 지금 진행**(9옵션 즉시 개선+인프라 선구축, 데이터 누적되며 자동 확대) vs **(B) 보류**(데이터 더 쌓고 in-transit[완료]가 현 단계 핵심가치) vs **(C) 백테스트 S12 먼저**(9옵션으로 99% 서비스수준 ROI 선검증). Jino 결정 후 트랙 D-N 기록.
+- (보류 시) 데이터 누적만 대기 — S8/S3는 매일 sync로 자동 고도화(zero_signal→sparse 전환은 판매 발생으로 자동).
 - **쿠키 만료 주기 측정 중** (D-5 참고): 일일 sync 302 발생 시점 = 만료 기준일 갱신 필요.
 
 ## 다음 액션 (S7 — 자동 승격 대기)
