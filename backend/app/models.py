@@ -1381,6 +1381,36 @@ class CoupangRocketSettlement(Base):
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class RocketProductCostMap(Base):
+    """쿠팡 로켓배송(1P) 원가 브리지 — 발주상세 상품번호 → product_master.internal_sku (트랙 rocket-1p, S4.5b/D-13).
+
+    배경(ref 20b §3): 1P 발주상세의 상품번호/바코드는 우리 원가 마스터(product_master, 3P/RG 카탈로그)에
+      0건 매칭(1P supplier 카탈로그 ≠ 3P Wing 카탈로그). 자동 조인 불가 → 일회성 수동 브리지 테이블 신설(A1).
+    grain: product_number(1P 발주상세 상품번호, CoupangRocketPurchaseOrderItem.product_number와 동일 키). unique.
+    용도(S4.5c): net_profit cost = Σ(po_item.order_qty × product_master.cost_price[internal_sku=이 매핑]).
+      이 테이블은 product_number ↔ internal_sku 연결만 — cost_price는 product_master가 정본(회계 일관성, D-13).
+    status:
+      'confirmed' = internal_sku 채워짐 → 원가 산정 대상.
+      'ignored'   = internal_sku 비움(원가 제외: 샘플/증정/원가 없음). 미매핑 목록에서 제외(재제안 방지).
+    읽기전용 원칙 외(이 테이블은 사용자 확정 입력) — 단 종합조망 net_profit은 S4.5c에서만 결합(S4.5b는 매핑만).
+    """
+
+    __tablename__ = "rocket_product_cost_map"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    product_number: Mapped[str] = mapped_column(String(30), unique=True, nullable=False, index=True)  # ★브리지 키
+    internal_sku: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, index=True)  # → product_master.internal_sku
+    status: Mapped[str] = mapped_column(String(12), nullable=False, default="confirmed")  # confirmed | ignored
+    match_method: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)  # manual | suggested
+    barcode: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)  # 발주상세 캐시(라벨/감사)
+    product_name: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)  # 발주상세 캐시(라벨/감사)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+
 # ──────────────────────────────────────────────
 # 스케줄러 상태
 # ──────────────────────────────────────────────

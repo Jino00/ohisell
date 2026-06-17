@@ -26,7 +26,7 @@ from app.database import get_db
 from app.models import Channel, CoupangAdCostDaily, CoupangAdOptionDaily, CoupangProductItem, CoupangRevenueFee, CoupangRgInbound, CoupangRgOrderItem, CoupangRgSettlementFee, Order, ProductChannelMapping, ProductMaster
 from app.routers._coupang_write_http import handle_write as _handle_write
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
-from app.services.coupang import ad_cost_sync, coupon_write, demand_classifier, in_transit_estimator, lead_time_estimator, product_write, rg_fee_audit, rg_inbound_sync, rg_product_size_sync, rg_replenishment, rg_settlement_sync, replenishment_backtest, rocket_supplier_sync, sales_velocity_estimator, vendor_summary_sync
+from app.services.coupang import ad_cost_sync, coupon_write, demand_classifier, in_transit_estimator, lead_time_estimator, product_write, rg_fee_audit, rg_inbound_sync, rg_product_size_sync, rg_replenishment, rg_settlement_sync, replenishment_backtest, rocket_cost_map, rocket_supplier_sync, sales_velocity_estimator, vendor_summary_sync
 from app.utils.crypto import CookieCryptoError
 
 log = logging.getLogger(__name__)
@@ -1310,6 +1310,65 @@ def ingest_rocket_po_detail(
     if not isinstance(rows, list) or not rows:
         raise HTTPException(status_code=400, detail="rows[] 필요")
     return rocket_supplier_sync.ingest_po_items(db, po_seq, vendor_id, rows)
+
+
+# ════════════════════════════════════════════════
+# 로켓배송(1P) 원가 브리지 매핑 (트랙 rocket-1p S4.5b, D-13)
+# ────────────────────────────────────────────────
+# 사용자 확정 입력(프론트 S5) — 발주상세 상품번호 → product_master.internal_sku.
+#   ingest 토큰 불필요(products/manual-revenue와 동일 사용자 CRUD). net_profit 결합은 S4.5c.
+# ════════════════════════════════════════════════
+@router.get("/rocket/cost-map/unmapped")
+def rocket_cost_map_unmapped(
+    vendor_id: str | None = Query(None, description="계정 필터(미설정=전체)"),
+    limit: int = Query(200, ge=0, le=1000),
+    suggest: bool = Query(True, description="이름유사도 제안 포함(느림). False=목록만."),
+    db: Session = Depends(get_db),
+):
+    """발주상세에 있으나 원가 매핑 없는 상품번호 + 이름유사도 제안(상위 3).
+
+    각 항목: product_number·대표명·바코드·총 발주수량·등장 PO 수·suggestions[internal_sku/score].
+    """
+    return rocket_cost_map.list_unmapped(db, vendor_id=vendor_id, limit=limit, suggest=suggest)
+
+
+@router.get("/rocket/cost-map")
+def rocket_cost_map_list(db: Session = Depends(get_db)):
+    """확정/제외(ignored) 매핑 전체 목록 — internal_sku 현재 cost_price 조인."""
+    return rocket_cost_map.list_mappings(db)
+
+
+@router.post("/rocket/cost-map")
+def rocket_cost_map_upsert(
+    body: dict[str, Any] = Body(...),
+    db: Session = Depends(get_db),
+):
+    """상품번호 → internal_sku 매핑 확정(멱등 upsert).
+
+    body: {"product_number","internal_sku"(confirmed시 필수),"status"(confirmed|ignored, 기본 confirmed),
+           "match_method"(manual|suggested, 기본 manual),"note"}.
+    'ignored' = 원가 제외(샘플/증정). 검증 실패(없는 internal_sku 등)는 422.
+    """
+    pn = str(body.get("product_number") or "").strip()
+    if not pn:
+        raise HTTPException(status_code=400, detail="product_number 필요")
+    try:
+        return rocket_cost_map.upsert_mapping(
+            db,
+            product_number=pn,
+            internal_sku=body.get("internal_sku"),
+            status=str(body.get("status") or "confirmed"),
+            match_method=str(body.get("match_method") or "manual"),
+            note=body.get("note"),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+@router.delete("/rocket/cost-map/{product_number}")
+def rocket_cost_map_delete(product_number: str, db: Session = Depends(get_db)):
+    """매핑 삭제(상품번호를 다시 미매핑으로). 없으면 deleted=0."""
+    return rocket_cost_map.delete_mapping(db, product_number)
 
 
 @router.post("/ad-cost/option-ingest")

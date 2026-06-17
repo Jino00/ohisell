@@ -325,3 +325,137 @@ def test_ingest_po_items_isolated_per_po(db):
     sync.ingest_po_items(db, 999999999, "A01029796", _PO_DETAIL_ROWS)
     assert db.query(CoupangRocketPurchaseOrderItem).filter_by(purchase_order_seq=134342890).count() == 4
     assert db.query(CoupangRocketPurchaseOrderItem).filter_by(purchase_order_seq=999999999).count() == 4
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 원가 브리지 매핑 (S4.5b, D-13) — RocketProductCostMap
+# ═══════════════════════════════════════════════════════════════════
+from decimal import Decimal as _D
+
+from app.models import ProductMaster, RocketProductCostMap
+from app.services.coupang import rocket_cost_map as cmap
+
+
+def _seed_masters(db):
+    db.add_all([
+        ProductMaster(internal_sku="OHI-0001",
+                      product_name="오하이 풀커버 강화유리 액정보호필름2개 아이폰16프로",
+                      cost_price=_D("3200")),
+        ProductMaster(internal_sku="OHI-0002",
+                      product_name="오하이 일미리 맥세이프 케이스 1mm 투명 아이폰 16프로",
+                      cost_price=_D("4100")),
+        ProductMaster(internal_sku="OHI-0003",
+                      product_name="전혀 다른 상품 무선 충전기",
+                      cost_price=_D("9000")),
+    ])
+    db.commit()
+
+
+# ─── 순수 SA: 이름 유사도 ───
+def test_suggest_skus_ranks_by_name_similarity():
+    cands = [
+        {"internal_sku": "OHI-0001", "product_name": "오하이 풀커버 강화유리 액정보호필름2개 아이폰16프로", "cost_price": _D("3200")},
+        {"internal_sku": "OHI-0003", "product_name": "전혀 다른 상품 무선 충전기", "cost_price": _D("9000")},
+    ]
+    out = cmap.suggest_skus("오하이 풀커버 강화유리 액정보호필름2개 + EZ툴 제공, 아이폰16프로", cands, top_n=2)
+    assert out[0]["internal_sku"] == "OHI-0001"  # 가장 유사한 후보가 1위
+    assert out[0]["score"] > out[1]["score"]
+    assert 0.0 <= out[0]["score"] <= 1.0
+
+
+def test_suggest_skus_empty_inputs():
+    assert cmap.suggest_skus("", [{"internal_sku": "X", "product_name": "x"}]) == []
+    assert cmap.suggest_skus("이름있음", []) == []
+
+
+# ─── Harness: 미매핑 목록 ───
+def test_list_unmapped_excludes_mapped_and_includes_suggestions(db):
+    _seed_masters(db)
+    sync.ingest_po_items(db, 134342890, "A01029796", _PO_DETAIL_ROWS)  # 4 SKU
+    # 하나는 미리 확정 매핑 → 미매핑 목록에서 제외돼야
+    cmap.upsert_mapping(db, "50342949", internal_sku="OHI-0001")
+
+    res = cmap.list_unmapped(db, vendor_id="A01029796")
+    pns = {it["product_number"] for it in res["items"]}
+    assert "50342949" not in pns          # 확정된 건 제외
+    assert res["total_unmapped"] == 3     # 4 - 1
+    # 발주수량 큰 순 정렬 보장(50342949 제외 후 최다 = 37350957? qty 1; 모두 소량) — 집계 필드 검증
+    top = res["items"][0]
+    assert "total_order_qty" in top and "po_count" in top
+    assert isinstance(top["suggestions"], list)
+
+
+def test_list_unmapped_vendor_filter_and_no_suggest(db):
+    _seed_masters(db)
+    sync.ingest_po_items(db, 134342890, "A01029796", _PO_DETAIL_ROWS)
+    sync.ingest_po_items(db, 555, "OTHERVENDOR", _PO_DETAIL_ROWS)
+    res = cmap.list_unmapped(db, vendor_id="A01029796", suggest=False)
+    # vendor 필터: A01029796만 집계되지만 product_number는 동일(같은 fixture) → po_count는 자기 vendor PO만
+    by_pn = {it["product_number"]: it for it in res["items"]}
+    assert by_pn["50342949"]["po_count"] == 1  # OTHERVENDOR PO는 제외
+    assert by_pn["50342949"]["suggestions"] == []  # suggest=False
+
+
+# ─── Harness: 확정/검증 ───
+def test_upsert_mapping_confirmed_validates_master(db):
+    _seed_masters(db)
+    sync.ingest_po_items(db, 134342890, "A01029796", _PO_DETAIL_ROWS)
+    out = cmap.upsert_mapping(db, "50342949", internal_sku="OHI-0001")
+    assert out["status"] == "confirmed"
+    assert out["internal_sku"] == "OHI-0001"
+    assert out["cost_price"] == _D("3200")
+    # 라벨 캐시: 발주상세 product_name 자동 채움
+    row = db.query(RocketProductCostMap).filter_by(product_number="50342949").one()
+    assert row.product_name and "풀커버" in row.product_name
+    # 멱등 upsert(중복 행 없음)
+    cmap.upsert_mapping(db, "50342949", internal_sku="OHI-0002")
+    assert db.query(RocketProductCostMap).filter_by(product_number="50342949").count() == 1
+    assert db.query(RocketProductCostMap).filter_by(product_number="50342949").one().internal_sku == "OHI-0002"
+
+
+def test_upsert_mapping_rejects_unknown_sku(db):
+    with pytest.raises(ValueError):
+        cmap.upsert_mapping(db, "50342949", internal_sku="OHI-9999")  # product_master에 없음
+
+
+def test_upsert_mapping_confirmed_requires_sku(db):
+    with pytest.raises(ValueError):
+        cmap.upsert_mapping(db, "50342949", internal_sku=None, status="confirmed")
+
+
+def test_upsert_mapping_ignored_excludes_from_unmapped(db):
+    _seed_masters(db)
+    sync.ingest_po_items(db, 134342890, "A01029796", _PO_DETAIL_ROWS)
+    out = cmap.upsert_mapping(db, "63408012", status="ignored", note="샘플")
+    assert out["status"] == "ignored"
+    assert out["internal_sku"] is None  # 원가 제외
+    res = cmap.list_unmapped(db, suggest=False)
+    assert "63408012" not in {it["product_number"] for it in res["items"]}  # 재제안 방지
+
+
+def test_upsert_mapping_invalid_status(db):
+    with pytest.raises(ValueError):
+        cmap.upsert_mapping(db, "50342949", internal_sku="OHI-0001", status="bogus")
+
+
+# ─── Harness: 목록/삭제 ───
+def test_list_mappings_joins_cost_price(db):
+    _seed_masters(db)
+    sync.ingest_po_items(db, 134342890, "A01029796", _PO_DETAIL_ROWS)
+    cmap.upsert_mapping(db, "50342949", internal_sku="OHI-0001")
+    res = cmap.list_mappings(db)
+    assert res["count"] == 1
+    m = res["mappings"][0]
+    assert m["product_number"] == "50342949"
+    assert m["cost_price"] == _D("3200")  # 현재 product_master cost_price 조인
+
+
+def test_delete_mapping_restores_unmapped(db):
+    _seed_masters(db)
+    sync.ingest_po_items(db, 134342890, "A01029796", _PO_DETAIL_ROWS)
+    cmap.upsert_mapping(db, "50342949", internal_sku="OHI-0001")
+    assert cmap.delete_mapping(db, "50342949") == {"product_number": "50342949", "deleted": 1}
+    res = cmap.list_unmapped(db, suggest=False)
+    assert "50342949" in {it["product_number"] for it in res["items"]}  # 다시 미매핑
+    # 없는 것 삭제 = deleted 0
+    assert cmap.delete_mapping(db, "50342949")["deleted"] == 0
