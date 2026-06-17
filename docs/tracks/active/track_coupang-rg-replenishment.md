@@ -123,6 +123,7 @@ UI: 상품별 현황(로켓그로스 탭) 컬럼 추가 — `현재고 | 최근 
 - **라이브 검증**: item_name 필드 정상 반환(784건, reorder_now 4건 상품명 확인 — 예: "2개입 아이폰15"). prod 배포 = rg_replenishment.py scp + pm2 restart + frontend dist 배포. 커밋 ddcd666.
 
 ## 현재 진행 단계
+- 2026-06-18: **P3 in-transit 완료 + prod self-verify 완료(커밋 e487f85)**. Wing 쿠키 갱신(last_success_at 2026-06-17) → sync 18입고/134아이템 → in-transit API fresh=true·48옵션·464개 정상 반환. Phase 2 P0(S8 demand_classifier ADI/CV² 버킷팅) 착수 대기.
 - 2026-06-05: **S6 완료 + prod 라이브 배포**. 로켓그로스 탭에 발송관제 섹션 UI 완성. 진행 6/7. (S7=데이터 누적 자동 승격.)
 - **2026-06-16: Phase 2 착수 결정 (예측 고도화 + in-transit). 아래 "Phase 2" 섹션 참조. 다음 세션 = Opus 구조설계부터.**
 
@@ -190,7 +191,16 @@ UI: 상품별 현황(로켓그로스 탭) 컬럼 추가 — `현재고 | 최근 
 - **D-15 (in-transit 스프린트 순서 최우선 — 확정 2026-06-18, X4 승격)**: in-transit(Wing rfm-inbound 기반 발송중 수량)을 **첫 스프린트**로 앞당긴다. 데이터 이미 적재(`coupang_rg_inbound`)·Wing 화면으로 검증가능·중복발송 즉시 방지 > 예측 타워. 새 실행 순서: **① in-transit → ② S8 진단/분류 → ③ S9 예측 → ④ S10 newsvendor → ⑤ S12 백테스트.** Jino 원문: "시작하자".
 - **D-16 (D-9 재정의: cadence=7, safety는 newsvendor — 확정 2026-06-18, X7 승격)**: `target_days=7`을 **검토주기 R=7일(cadence)**로 재정의. 목표재고 safety는 D-12 newsvendor 분위수가 담당(역할 분리). API 파라미터 `target_days`→`review_period_days=7`로 리네임. Jino 원문: "시작하자".
 
-## 다음 액션 (S7)
+## 다음 액션 (S8 — Phase 2 P0)
+
+- **★ S8 demand_classifier SA (ADI/CV² 버킷팅 — D-14 선행 진단)**:
+  - 855옵션 → zero-signal / sparse-but-nonzero / active 3버킷 분류
+  - ADI(평균 수요 간격) > 1.32 + CV² > 0.49 → intermittent/lumpy / 나머지 → smooth/erratic
+  - 분류 결과를 S9 예측 모집단 제한에 사용 (zero-signal은 insufficient 유지)
+  - 구현: `app/services/coupang/demand_classifier.py` + 검증 엔드포인트 + 진단 보고
+- **쿠키 만료 주기 측정 중** (D-5 참고): 일일 sync 302 발생 시점 = 만료 기준일 갱신 필요.
+
+## 다음 액션 (S7 — 자동 승격 대기)
 - **S7 요일/휴일 세분화 지속 개선(D-6)**: 매일 RG order sync로 깨끗한 일자 누적 → 임계(평일8/주말4/휴일2) 넘으면 요일계수 자동 활성(약 2~3주 후 평일계수부터). 별도 코딩 없이 sales_velocity_estimator가 자동 승격.
 - **★2026-06-15 라이브 점검(prod GET /sales-velocity)**: trust_days=11. 게이트 정상 작동 확인(고장 아님) — weekday sample_days 7/min 8(1일 부족)·weekend 3/4·holiday 1/2, 전부 collecting·factor=1.0. **평일계수는 다음 깨끗한 평일 1회 누적 시 자동 승격 임박**. 코딩 불필요, 데이터 누적만 대기.
 - 참고: 쿠키 만료 주기 측정 중. 일일 sync 302 발생 시점 = 만료. D-5대로 잦으면 자동화 검토.

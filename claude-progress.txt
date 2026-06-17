@@ -11,7 +11,7 @@
   - **라우터**: `GET /api/coupang/ops/in-transit` 검증 엔드포인트.
   - **prod self-verify**: in_transit_meta 정상 반환. 쿠키 만료→stale→차감 스킵(X5 정상). 쿠키 갱신 시 자동 반영 구조 확인.
   - **fixture 12개 신규, 224 전체 그린**.
-  - **★주의**: Wing 쿠키 만료 중(last_success_at=2026-06-10). in-transit 실반영하려면 Jino가 Wing cURL 재붙여넣기 필요(`POST /api/coupang/ops/inbound/cookie`).
+  - **★Wing 쿠키 갱신 완료(2026-06-18)**: Jino cURL 붙여넣기 → POST /api/coupang/ops/inbound/cookie → sync 18입고/134아이템 → **prod GET /in-transit: fresh=true, 48옵션, total 464개** (원칙22 라이브 검증 완료).
   - **다음**: S8 demand_classifier SA (ADI/CV² 버킷팅 — D-14 진단 선행).
 
 - (이전) 날짜: 2026-06-17 (★RG 발송관제 Phase 2 — 구조설계+계획서 세션, 코드 0줄)
