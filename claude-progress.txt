@@ -3,6 +3,18 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
+- 날짜: 2026-06-17 (★로켓배송 1P 트랙 — S4 종합조망 편입 Harness 완료, 4/6)
+- ★★**쿠팡 로켓배송(1P) 트랙 S4 종합조망 편입 완료 (4/6)** — 트랙 `docs/tracks/active/track_coupang-rocket-1p.md`. (codex 게이트 6/19 대기 중 진행, Jino 승인)
+  - **신규 Harness** `backend/app/services/coupang/rocket_intelligence.py` `compute_rocket_overview(db, dfrom, dto, vendor_id=None)`: 1P는 PO그레인(vendor_item_id 없음)이라 옵션그레인 `compute_command_center`에 병합 불가 → **별도 1P 채널 블록**(D-11, 읽기전용·3P/RG net_profit 불변·additive).
+    - SA `_agg_rocket_revenue`: Σ`sum_of_order_amount`(gross), **발주일 KST(`po_created_at`+9h) 윈도우**(매출 D-3). no_date_po_count 투명화.
+    - SA `_agg_rocket_ad`: `coupang_ad_report` `sell_type='Retail'`(로켓배송) ad_spend 합(D-4, 계정단위·옵션귀속 불필요). 1P 광고 vendor_id 라이브 미관측(로컬 Retail 0행)이라 sell_type로 식별(추정 금지).
+    - SA `_agg_rocket_drift`: PO `vendor_payment_seqs`→**distinct invoice_seq** 집합→Σ`payment_amount`. 발주−정산 드리프트(부분정산 1PO↔N계산서 중복제거). **참고치**(정산 지연·윈도우밖 PO 포함 시 과대, note 명시).
+  - **net_profit = 매출 − 광고, cost 미반영(has_cost=false, D-12)**: PO 61% multi-SKU(651중 400, 최대50SKU)라 PO그레인 원가분해 불가 → 정확 원가는 발주상세(per-SKU SSR) 수집 후속(S4.5). 원칙22(미검증 net_profit 확정값 금지).
+  - **신규 라우터** `GET /api/overview/rocket-overview?from&to` (단일 계정 오하이테크, env `COUPANG_ROCKET_VENDOR_ID` override·기본 None=전체). 기존 command-center/revenue-reconcile 응답 불변.
+  - **★라이브 e2e self-verify(원칙22)**: 로컬 DB 651PO·107정산 3/1~6/30 → 매출 **183,713,857**(raw `SUM(order_amount)` 일치)·qty 17,181·po 651·광고 **0.00**(Retail 0행 정직)·net_profit=매출(원가0·광고0)·drift settled **148,721,781**(distinct 103계산서). drift>전체정산(147,022,513) 모순 검증→**미매핑 4건이 음수환급(−1,699,268)** 이라 수학검산 정확일치(147,022,513+1,699,268). 단위테스트 8개+전체 **275 통과**.
+  - ⚠ **codex review·prod 배포 보류**: OpenAI quota(6/19 06:42 리셋). codex는 **S2+S3+S4** 묶음 리뷰. prod 미배포 → rocket-overview는 로컬에서만 검증. 미커밋(Jino 승인 후 선커밋 예정).
+  - **다음**: (6/19 quota후) `/codex review`(S2+S3+S4) → pass면 prod 배포(scp+alembic+pm2)+launchd+prod self-verify(rocket-overview)+push → **S4.5 발주상세 per-SKU 원가**(net_profit cost 반영, has_cost=true 전환) → S5 프론트(D-10 2축, rocket-overview 소비).
+- ─────────────────────────────────────────────
 - 날짜: 2026-06-17 (★로켓배송 1P 트랙 — S3 헤드풀 CDP 페처 완료, 커밋 직후)
 - ★★**쿠팡 로켓배송(1P) 트랙 S3 헤드풀 CDP 페처 완료 (3/6)** — 트랙 `docs/tracks/active/track_coupang-rocket-1p.md`.
   - **페처** `tools/rocket_supplier_fetcher.py`: wing CDP 패턴 복제, 단일 계정 오하이테크(`A01029796`). 커맨드 `chrome`/`login`/`run`. **런타임경계 D-1 — 백엔드 변경 0**(도구는 수집·push만).

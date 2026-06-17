@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from app.utils.kst import kst_now, kst_today
 import logging
+import os
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
@@ -15,6 +16,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.services.coupang.intelligence import compute_command_center
 from app.services.coupang.revenue_reconcile import reconcile_revenue
+from app.services.coupang.rocket_intelligence import compute_rocket_overview
 
 log = logging.getLogger(__name__)
 
@@ -101,4 +103,29 @@ def revenue_reconcile(
             detail=f"잘못된 account: {account} (허용: {', '.join(sorted(_VALID_ACCOUNTS))} 또는 생략)",
         )
     result = reconcile_revenue(db, dfrom, dto, account)
+    return _jsonify(result)
+
+
+# 로켓배송(1P) 단일 계정 = 오하이테크(D-6). env override 가능, 미설정이면 None(전체 Retail/PO).
+_ROCKET_VENDOR_ID = os.getenv("COUPANG_ROCKET_VENDOR_ID") or None
+
+
+@router.get("/rocket-overview")
+def rocket_overview(
+    from_: str | None = Query(None, alias="from"),
+    to: str | None = Query(None),
+    db: Session = Depends(get_db),
+):
+    """로켓배송(1P) 돈 축 종합조망 블록 — 매출(발주)·광고·순이익·발주↔정산 드리프트.
+
+    트랙 rocket-1p S4(D-11/D-12). 1P는 PO그레인이라 옵션그레인 command-center와 별도 블록.
+    읽기전용(3P/RG 종합조망 값 불변). 매출=Σ발주 gross(발주일 KST). net_profit=매출−광고로
+    cost 미반영(has_cost=false, D-12: PO 61% multi-SKU 원가분해 불가, 발주상세 수집 후속). 기본 기간=최근 7일(KST).
+    """
+    today = kst_today()
+    dto = _parse_date(to, today)
+    dfrom = _parse_date(from_, dto - timedelta(days=6))
+    if dfrom > dto:
+        raise HTTPException(status_code=422, detail="from이 to보다 늦습니다")
+    result = compute_rocket_overview(db, dfrom, dto, _ROCKET_VENDOR_ID)
     return _jsonify(result)
