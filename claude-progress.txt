@@ -3,6 +3,16 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
+- 날짜: 2026-06-17 (★로켓배송 1P 트랙 — S1 정찰 완료, 미커밋)
+- ★★**쿠팡 로켓배송(1P) 종합조망 트랙 S1 정찰 완료 (1/N)** — supplier.coupang.com 라이브 실측(추측 0, 원칙22).
+  - **3단계 데이터 소스 확정(D-9, ref `docs/references/20_coupang_rocket_1p_recon.md`)**:
+    - ①발주+②납품 = **`GET /po-web/app/purchase-order/list` JSON 1개**. row당 `sumOfOrderAmount`(발주=D-3매출)·`sumOfReceivingAmount`(납품)·`sumOfVendorConfirmedAmount`. grain=발주 `purchaseOrderSeq`. 발주↔납품 드리프트 row 내 즉시계산. 쿼리 searchDateType=WAREHOUSING_PLAN_DATE+날짜범위+센터.
+    - ③정산 = **`GET /scm/settlement/general/purchase/account` 폼-GET SSR HTML**(JSON 아님). grain=계산서번호. 컬럼: 공급가액·부가가치세·지급예정금액(=공급가+VAT 검산일치)·작성/지급일자·세금계산서확정일·1/2차지급액. 지급일=작성+약2개월.
+    - 인증=쿠키, **Akamai 봇방어(POST /C_A8aP/… sensor) → 헤드풀 CDP 페처 필수(D-1확인)**. 호스트=supplier.coupang.com 단일.
+  - **정찰 도구 `tools/rocket_supplier_recon.py` 코드화**: chrome/capture(원시 CDP Network 도청)/dom(SSR DOM 추출). ★함정3종 우회: Playwright connect_over_cdp는 기존페이지 response 못받음→원시CDP ws 직접도청 / ws Origin헤더 403→suppress_origin=True / navigation문서 getResponseBody 빈본문→Runtime.evaluate DOM. **dom 명령 라이브 self-verify 통과(정산 테이블 정확추출)**.
+  - **증거**: `docs/references/data/20_rocket_1p_settlement_dom_sample.json`(정산 10건).
+  - **다음=S2**: 데이터모델(발주PO/정산계산서 2테이블+alembic)+수집SA(clients/coupang/rocket_supplier.py JSON + 정산 SSR파서). ★S2 착수 전 라이브확인 6건(ref20 §6): searchDateType 가능값·list페이지네이션·발주VAT포함여부·계산서↔PO매핑엔드포인트·SKU그레인필요성·정산size상향.
+- ─────────────────────────────────────────────
 - 날짜: 2026-06-18 (★RG 발송관제 Phase 2 — S8 demand_classifier 완료, 커밋 2f2d85d)
 - ★★**Phase 2 S8 demand_classifier 완료 + prod 라이브 self-verify** (커밋 2f2d85d, prod 배포·미push).
   - **신규 `demand_classifier.py` SA**: 옵션별 일판매 시계열 → ADI(관측일÷nonzero일)·CV²((nonzero수량 모집단std÷mean)²·0인날 제외) → 4분면(smooth/erratic/intermittent/lumpy, 컷 1.32·0.49 >=포함). unknown 게이트 nonzero<2. X1 버킷 zero_signal(0)·sparse(1~6)·active(≥7).

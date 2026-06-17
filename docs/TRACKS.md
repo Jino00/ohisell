@@ -1,8 +1,9 @@
 # TRACKS — 활성/완료 메가 프로젝트 인덱스
 
 ## 🟢 Active
+- [쿠팡 로켓배송(1P) 종합조망 편입](tracks/active/track_coupang-rocket-1p.md) — 오하이테크 1P(supplier.coupang.com) 발주·납품·정산 수집→종합조망. 매출=발주, 순이익=발주−원가−광고(D-1~8). **★2026-06-17 S1 정찰 완료(1/N)**: 라이브 실측(ref20+D-9) — ①발주+②납품=`/po-web/app/purchase-order/list` JSON 1개(sumOfOrder/ReceivingAmount), ③정산=`/scm/settlement/general/purchase/account` SSR HTML(계산서 grain, 공급가+VAT=지급예정). Akamai방어→헤드풀 CDP 페처 필수. 다음=S2(데이터모델+수집SA, 착수 전 라이브확인 6건). 2026-06-15 생성.
 - [쿠팡 RG 수수료 회계 자동화](tracks/active/track_coupang-rg-fee-accounting.md) — RG 판매 실청구 수수료(입출고·배송·보관·판매수수료 등)를 윙 내부 API로 옵션 단위 자동수집→종합조망 순이익 반영. **8/8 코드 완료**(S1~S4 대조뷰, S5 회계규칙 잠금, S6-core/auto 옵션단위수집·자동다운로드+scheduler 06:15, S7 net_profit 전액차감 플립(D-16), **S8 과오청구 감사**(사이즈 분류+이상치 스크리닝, GET /rg/fee-audit, prod 22옵션 15플래그)). 전 Sprint prod self-verify 완료. **운영 단계**. ★2026-06-15 라이브 감사: size_mismatch_high **1건**(아이패드미니필름 91313543029, 등록 극소형 60.5cm vs 배송청구 대형1 3배, 실측값 미확보) — Jino 결정 **자동해제 대기**(다음 입고 PRODUCT_SIZE_COMPARISON 수집 시 자동 판가름, 코드변경 없음). 후속(선택): 감사 프론트 UI(미정).
-- [쿠팡 RG 재고·발송 관제 (Replenishment)](tracks/active/track_coupang-rg-replenishment.md) — RG 현재고+일판매속도+입고 리드타임으로 "언제·몇 개 발송" 역산. 목표 FC재고 2~3일치. 6/7 (S1 입고동기화·S2 리드타임추정·S3 일판매속도추정[평일/주말/휴일 신뢰도게이트]·S4 발송역산[요일인지 forward투영·4-status]·S5 rg_replenishment Harness[배치역산·등가성 784/784 라이브 PASS·GET /replenishment-plan]·S6 UI 컬럼[로켓그로스 탭 발송관제 섹션, 커밋 ddcd666] 완료+codex pass+prod 라이브검증·배포 성공). 다음 S7 요일/휴일 세분화 지속 개선(데이터 누적 대기). D-14 수정(입고 Wing 내부 API 연결).
+- [쿠팡 RG 재고·발송 관제 (Replenishment)](tracks/active/track_coupang-rg-replenishment.md) — RG 현재고+판매속도+리드타임으로 "언제·몇 개 발송" 역산. **Phase 1(S1~S6) 완료·prod 라이브**(GET /replenishment-plan, 로켓그로스 탭 UI). **★2026-06-16 Phase 2 착수**: 3축 조사(ref 19) 진단=예측 단순평균이라 855옵션 98.6% insufficient_data + in-transit 부재. **D-10 예측 SBA/TSB(statsforecast Apache-2.0✓)·D-11 in-transit Wing API·D-12 newsvendor 분위수(서비스수준 99% 시작)·D-13 유효재고=현재고+발송중(판매개시갭)**. **★2026-06-17 구조 승인 + 계획서 작성(`docs/PLAN_rg-replenishment-phase2.md`, S8~S13)**. 신규 SA 3개(demand_classifier·sba_forecaster·in_transit_estimator). 다음=(선택)plan-eng-review→Sonnet S8(P0 분류).
 
 ## ⏸ Paused
 - (없음)
