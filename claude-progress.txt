@@ -3,15 +3,12 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
-- 날짜: 2026-06-19 (★D-18 판매유형별 쿠팡 총비용 S1~S5 전부 완료 + prod 배포·self-verify 완료 — codex review 대기)
-- ★**D-18 판매유형별 쿠팡 총비용 구현 완료 (트랙 full-integration D-18, 커밋 dff0692+e189d75)**
-  - **S1**: `backend/app/services/coupang/commission_vat_resolver.py` — 3P/2P 판매수수료+VAT 캐스케이드(실측▸옵션율×1.1▸기본 7.8%×1.1). fixture 10/10.
-  - **S2**: `backend/app/services/coupang/rg_cost_reader.py` — 2P 정산 옵션 그레인 reader + compute_2p_cost(보관=account-level, RG광고=rate 추정). fixture 10/10.
-  - **S3**: `backend/app/services/coupang/coupang_seller_cost.py` — Harness compute_batch(배치주입, N+1 방지).
-  - **S4**: `backend/app/routers/coupang_ops.py` 컷오버 — fee=판매유형별쿠팡총비용(병행출력 후 컷오버), RG shipping 제거(풀필먼트=fee에 포함), legacy 삭제.
-  - **S5**: `frontend/src/pages/CoupangOps.tsx` — "수수료"→"쿠팡 비용", shipSub 업데이트.
-  - **prod self-verify(원칙22)**: Wing fee=13,299(≈8.58% 정확)·RG fee=158,886(풀필먼트포함)·shipping=0·신규버그 없음 ✓.
-  - **다음**: `/codex review` (원칙19 게이트 — 계획서 S5 마지막 체크 `codex review(원칙19)` 미완료).
+- 날짜: 2026-06-19 (★D-18 판매유형별 쿠팡 총비용 **완전 완료** — codex PASS + P2-1 수정 + prod self-verify ✓)
+- ★**D-18 판매유형별 쿠팡 총비용 전체 완료 (커밋 dff0692+e189d75+e9af139+85ccd12, prod 배포)**
+  - S1~S5 구현 완료 (이전 세션).
+  - **codex review(원칙19) PASS**: P2-1 수정(service_fee_ratio DB=퍼센트(10.5)→resolver=/100→소수(0.105) 변환 누락, 커밋 85ccd12), P2-2 기각(계획서§4: 정산 storage 옵션 단위 합산 허용).
+  - **최종 prod self-verify(원칙22)**: Wing(3P) fee=8.58%·RG(2P) fee=풀필먼트포함·shipping=0 ✓.
+  - **다음**: 다음 D 작업 (트랙 `track_coupang-full-integration.md` 확인).
 - ─────────────────────────────────────────────
 - 날짜: 2026-06-19 (★RG 재고 in-transit 유령 버그픽스 — 커밋 cfe06e7, prod 배포·검증 완료)
 - ★**RG 발송중(in-transit) 유령 중복 계상 버그 수정 (트랙 D-20)** — Jino "확인해봐".

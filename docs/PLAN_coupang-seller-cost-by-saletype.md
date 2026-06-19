@@ -75,14 +75,14 @@ Agent  ── sales-summary 라우터 + 프론트 "쿠팡 비용/물류비/이�
 - [x] S3 Harness + sales-summary 병행출력(fee_legacy/fee_new) + 배치주입 (2026-06-19)
 - [x] S4 prod 병행검증(계정 닫힌윈도우 대조) → 컷오버 + shipping 풀필먼트 제거 + legacy 삭제 (2026-06-19)
 - [x] S5 프론트 "쿠팡 비용" 라벨 + 물류비 설명 업데이트 (2026-06-19)
-- [ ] codex review(원칙19)
+- [x] codex review(원칙19) — PASS (P2-1 수정: service_fee_ratio /100 변환, P2-2 기각: 계획서§4근거, 2026-06-19)
 
 ## GSTACK REVIEW REPORT
 
 | Review | Trigger | Why | Runs | Status | Findings |
 |--------|---------|-----|------|--------|----------|
 | CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | — | — |
-| Codex Review | `/codex review` | Independent 2nd opinion | 0 | deferred | 구현 후 게이트(원칙19) |
+| Codex Review | `/codex review` | Independent 2nd opinion | 1 | pass | P2-1 수정(service_fee_ratio /100), P2-2 기각(계획서§4), 2026-06-19 |
 | Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | issues_folded | 8 findings (4 P1·3 P2·1 P3), 전부 plan 반영 |
 | Design Review | `/plan-design-review` | UI/UX gaps | 0 | — | S5 프론트 시 선택 |
 | DX Review | `/plan-devex-review` | Developer experience gaps | 0 | — | — |
