@@ -58,20 +58,20 @@ function numOf(s: string): number {
   const n = Number(s.replace(/[^0-9.-]/g, ""));
   return isNaN(n) ? 0 : n;
 }
-// 수수료 카드 부가표기 — 실측 정산수수료 매칭 비율(나머지는 7.8% 추정).
+// 쿠팡 비용 카드 부가표기 — D-18 판매유형별 쿠팡 총비용
+// 3P(Wing): 판매수수료+VAT / 2P(RG): 판매수수료+VAT+풀필먼트+RG광고
 function feeSub(ratio: number | null | undefined): string | undefined {
-  if (ratio == null || ratio >= 0.999) return undefined;
-  return ratio <= 0.001 ? "추정 7.8% (정산 전)" : `${Math.round((1 - ratio) * 100)}% 추정`;
+  if (ratio == null || ratio >= 0.999) return "Wing 수수료+VAT · RG 수수료+풀필먼트+광고";
+  return ratio <= 0.001 ? "정산 전 — 추정 포함" : `정산 ${Math.round(ratio * 100)}% · 나머지 추정`;
 }
 // 원가 카드 부가표기 — 원가 매핑 보유 매출 비율(미설정분은 0으로 빠져 이익 과대).
 function costSub(cov: number | null | undefined): string | undefined {
   if (cov == null || cov >= 0.999) return undefined;
   return `${Math.round(cov * 100)}% 반영 (일부 원가 미설정)`;
 }
-// 배송·물류비 카드 부가표기 — Wing 한진 1,900/건 + RG 풀필먼트(배송+입출고) 실측.
-function shipSub(rgFf: string | null | undefined): string {
-  const v = rgFf ? numOf(rgFf) : 0;
-  return v > 0 ? `Wing 1,900/건 + RG 풀필먼트 ${won(rgFf)}` : "Wing 1,900원/건";
+// 배송·물류비 카드 부가표기 — Wing 한진 1,900/건 (RG 풀필먼트는 쿠팡 비용에 포함됨, D-18)
+function shipSub(_rgFf: string | null | undefined): string {
+  return "Wing 한진 1,900원/건 (RG 풀필먼트는 쿠팡 비용에 포함)";
 }
 // 오늘 광고비 카드 부가표기 — 마지막 fetch 시각(KST). 광고센터 누적은 실시간이라
 // 마지막 갱신 이후 격차가 생긴다 → 갱신 버튼으로 최신화 안내(실시간 오인 방지).
@@ -525,7 +525,7 @@ export default function CoupangOps() {
             </div>
             <div className="grid grid-cols-5 gap-3">
               <SummaryCard label="총 매출" value={loading ? "…" : won(s?.revenue)} />
-              <SummaryCard label="수수료" value={loading ? "…" : won(s?.fee)} sub={feeSub(s?.fee_actual_ratio)} />
+              <SummaryCard label="쿠팡 비용" value={loading ? "…" : won(s?.fee)} sub={feeSub(s?.fee_actual_ratio)} />
               <SummaryCard label="원가" value={loading ? "…" : won(s?.cost)} sub={costSub(s?.cost_coverage)} />
               <SummaryCard label="배송·물류비" value={loading ? "…" : won(s?.shipping)} sub={shipSub(s?.rg_fulfillment)} />
               <div className={`bg-white border-2 rounded-lg p-4 ${Number(s?.profit_excl_ad ?? 0) >= 0 ? "border-blue-200" : "border-red-200"}`}>

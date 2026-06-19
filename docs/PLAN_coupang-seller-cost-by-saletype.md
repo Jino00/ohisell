@@ -74,7 +74,7 @@ Agent  ── sales-summary 라우터 + 프론트 "쿠팡 비용/물류비/이�
 - [x] S2 권위 분해 공유 리더 추출 + 미정산 추정(보관 account-level·RG광고 비율) + fixture (10/10 pass, 2026-06-19)
 - [x] S3 Harness + sales-summary 병행출력(fee_legacy/fee_new) + 배치주입 (2026-06-19)
 - [x] S4 prod 병행검증(계정 닫힌윈도우 대조) → 컷오버 + shipping 풀필먼트 제거 + legacy 삭제 (2026-06-19)
-- [ ] S5 프론트 쿠팡비용/물류비 카드 + basis 배지
+- [x] S5 프론트 "쿠팡 비용" 라벨 + 물류비 설명 업데이트 (2026-06-19)
 - [ ] codex review(원칙19)
 
 ## GSTACK REVIEW REPORT
