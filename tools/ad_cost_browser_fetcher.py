@@ -577,6 +577,76 @@ def cmd_login(cfg: dict, wait_secs: int = 600) -> int:
     return _push(cfg, ok_data)  # 첫 데이터 즉시 push
 
 
+_KEYCHAIN_SERVICE = "ohisell-coupang-ad"  # security add-generic-password -s 이 값
+
+
+def _keychain_get(account: str) -> str | None:
+    """macOS Keychain에서 비밀번호를 읽는다(평문 저장·로그·git 없음).
+
+    사전 등록(사용자가 1회):
+      security add-generic-password -U -s ohisell-coupang-ad -a <아이디> -w
+    실패(미등록/잠김) 시 None → 호출부는 수동 로그인으로 폴백.
+    """
+    if not account:
+        return None
+    try:
+        r = subprocess.run(
+            ["security", "find-generic-password", "-s", _KEYCHAIN_SERVICE, "-a", account, "-w"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode == 0:
+            pw = r.stdout.strip()
+            return pw or None
+        return None
+    except Exception as e:  # noqa: BLE001
+        log.warning("Keychain 조회 실패(무시): %s", str(e)[:80])
+        return None
+
+
+def _has_2fa_challenge(page) -> bool:
+    """로그인 제출 후 SMS 2FA/인증번호 단계가 떴는지 감지(자동화 불가 → 사람 호출)."""
+    try:
+        html = page.content().lower()
+    except Exception:
+        return False
+    # 본문에 인증번호 입력/SMS 단계 키워드가 '보이는' 상태인지 대략 판별
+    for kw in ("인증번호", "verification code", "otp", "휴대폰으로 전송", "문자로 전송"):
+        if kw in html:
+            return True
+    return False
+
+
+def _try_auto_login(page, cfg: dict) -> bool:
+    """keycloak 로그인 폼에 Keychain 자격증명을 자동입력·제출한다.
+
+    반환 True  = 제출 성공(2FA 없음) → 호출부가 _login_wait_loop로 201 대기.
+    반환 False = 자격증명 없음 / 2FA 발생 / 폼 못 찾음 → 호출부가 수동 로그인 폴백.
+    비밀번호는 메모리에서만 쓰고 로그에 남기지 않는다.
+    """
+    login_id = cfg.get("ad_login_id")
+    if not login_id:
+        return False
+    pw = _keychain_get(login_id)
+    if not pw:
+        log.info("Keychain 자격증명 없음 — 수동 로그인 폴백.")
+        return False
+    try:
+        # keycloak 폼 안정화 대기
+        page.wait_for_selector("#username, input[name=username]", timeout=15000)
+        page.fill("#username", login_id)
+        page.fill("#password", pw)
+        page.click("#kc-login")
+        page.wait_for_timeout(5000)  # 제출 후 리다이렉트/챌린지 안정화
+        if _has_2fa_challenge(page):
+            log.warning("자동 로그인 후 2FA(인증번호) 단계 — 자동화 불가, 사람 호출.")
+            return False
+        log.info("자동 로그인 제출 완료 — 결과 대기.")
+        return True
+    except Exception as e:  # noqa: BLE001
+        log.warning("자동 로그인 실패(수동 폴백): %s", str(e)[:100])
+        return False
+
+
 def _notify_mac(title: str, message: str, sound: str = "Glass") -> None:
     """macOS 네이티브 알림(+소리)을 띄운다 — 자동 복구가 실패해 사람 개입이 필요할 때.
 
@@ -660,14 +730,18 @@ def _do_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
                             _save_state(ctx, state)  # 재fetch 후 회전 쿠키 최종 보존
                         log.info("SSO 재발급 완료 — fetch 재시도")
                     elif login_wait_secs > 0:
-                        # keycloak도 만료 → 같은 창에서 수동 로그인 대기(버튼 트리거, 아침 첫 클릭)
-                        log.info("keycloak 만료 — 창에서 로그인하세요(자동 감지, 최대 %d초).", login_wait_secs)
-                        _notify_mac("쿠팡 광고 로그인 필요",
-                                    "세션이 만료됐습니다. 방금 열린 창에서 쿠팡 광고에 로그인하세요(3분 내).")
-                        try:
-                            page.goto(DASH_URL, wait_until="domcontentloaded", timeout=40000)
-                        except Exception:
-                            pass
+                        # keycloak도 만료 → ① Keychain 자동 로그인 시도 → ② 안 되면 수동 대기.
+                        # 현재 로그인 폼(xauth keycloak)에서 자동입력. 2FA/미등록이면 사람 호출.
+                        auto_ok = _try_auto_login(page, cfg)
+                        if not auto_ok:
+                            log.info("keycloak 만료 — 창에서 로그인하세요(자동 감지, 최대 %d초).", login_wait_secs)
+                            _notify_mac("쿠팡 광고 로그인 필요",
+                                        "자동 로그인 불가(2FA/미등록). 방금 열린 창에서 쿠팡 광고에 로그인하세요(3분 내).")
+                            try:
+                                page.goto(DASH_URL, wait_until="domcontentloaded", timeout=40000)
+                            except Exception:
+                                pass
+                        # 자동·수동 모두 report/cost 201 도달을 _login_wait_loop가 감지.
                         ok_data = _login_wait_loop(page, ctx, cfg, state, login_wait_secs)
                         if ok_data is None:
                             log.error("로그인 시간 초과/취소 — 갱신 취소.")
