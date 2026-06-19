@@ -21,6 +21,7 @@ import fcntl
 import json
 import logging
 import os
+import subprocess
 import sys
 import time
 from datetime import datetime, timedelta
@@ -576,6 +577,24 @@ def cmd_login(cfg: dict, wait_secs: int = 600) -> int:
     return _push(cfg, ok_data)  # 첫 데이터 즉시 push
 
 
+def _notify_mac(title: str, message: str, sound: str = "Glass") -> None:
+    """macOS 네이티브 알림(+소리)을 띄운다 — 자동 복구가 실패해 사람 개입이 필요할 때.
+
+    로그인은 어차피 이 Mac에서 해야 하므로 알림도 같은 화면에 띄우는 게 가장 빠르다.
+    osascript는 로컬 전용·자격증명 불필요. 실패해도 데몬 흐름에 영향 주지 않는다(best-effort).
+    """
+    try:
+        safe_t = title.replace('"', "'")
+        safe_m = message.replace('"', "'")
+        subprocess.run(
+            ["osascript", "-e",
+             f'display notification "{safe_m}" with title "{safe_t}" sound name "{sound}"'],
+            timeout=10, check=False,
+        )
+    except Exception as e:  # noqa: BLE001 — 알림 실패가 데몬을 멈추면 안 됨
+        log.warning("macOS 알림 실패(무시): %s", str(e)[:80])
+
+
 @contextlib.contextmanager
 def _try_fetch_lock():
     """비차단 flock. yield True(획득)/False(이미 사용 중). 종료 시 해제.
@@ -643,6 +662,8 @@ def _do_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
                     elif login_wait_secs > 0:
                         # keycloak도 만료 → 같은 창에서 수동 로그인 대기(버튼 트리거, 아침 첫 클릭)
                         log.info("keycloak 만료 — 창에서 로그인하세요(자동 감지, 최대 %d초).", login_wait_secs)
+                        _notify_mac("쿠팡 광고 로그인 필요",
+                                    "세션이 만료됐습니다. 방금 열린 창에서 쿠팡 광고에 로그인하세요(3분 내).")
                         try:
                             page.goto(DASH_URL, wait_until="domcontentloaded", timeout=40000)
                         except Exception:
@@ -650,6 +671,8 @@ def _do_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
                         ok_data = _login_wait_loop(page, ctx, cfg, state, login_wait_secs)
                         if ok_data is None:
                             log.error("로그인 시간 초과/취소 — 갱신 취소.")
+                            _notify_mac("쿠팡 광고 로그인 미완료",
+                                        "시간 초과로 광고비 갱신이 취소됐습니다. 대시보드에서 '광고비 갱신'을 다시 누르세요.")
                             return 1
                         log.info("로그인 완료 — fetch")
                         res = _fetch(page, cfg)

@@ -39,31 +39,26 @@ echo "==> 의존성 설치 (requests==$REQUESTS_PIN, playwright==$PLAYWRIGHT_PIN
 echo "==> playwright chromium 확인/설치"
 "$LOCAL_VENV/bin/playwright" install chromium >/dev/null 2>&1 || true
 
-# 4. 페처 스크립트를 iCloud 소스 → 로컬로 복사(데몬은 로컬 사본을 실행).
-echo "==> 페처 스크립트 복사 → $LOCAL_TOOLS"
-declare -a FETCHERS=(ad_cost_browser_fetcher.py wing_browser_fetcher.py rocket_supplier_fetcher.py)
-for f in "${FETCHERS[@]}"; do
-  cp -f "$REPO_TOOLS/$f" "$LOCAL_TOOLS/$f"
-  echo "    $f"
-done
-
-# 5. plist 템플릿(__PYTHON__/__SCRIPT__)을 로컬 경로로 렌더 → ~/Library/LaunchAgents 설치 + reload.
+# 4+5. 페처 스크립트 복사 + plist 렌더/설치/reload.
+# macOS 기본 bash는 3.2 → 연관배열(declare -A) 미지원. name:script 쌍을 공백 구분 문자열로.
+echo "==> 페처 복사 + plist 설치"
 LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
 mkdir -p "$LAUNCH_AGENTS"
 UID_NUM="$(id -u)"
-declare -A SCRIPT_OF=(
-  [adcost]=ad_cost_browser_fetcher.py
-  [wing]=wing_browser_fetcher.py
-  [rocket]=rocket_supplier_fetcher.py
-)
-for name in adcost wing rocket; do
+for pair in "adcost:ad_cost_browser_fetcher.py" "wing:wing_browser_fetcher.py" "rocket:rocket_supplier_fetcher.py"; do
+  name="${pair%%:*}"
+  script="${pair##*:}"
+  cp -f "$REPO_TOOLS/$script" "$LOCAL_TOOLS/$script"
+  echo "    $script 복사"
   tmpl="$REPO_TOOLS/com.ohisell.$name.plist"
   [ -f "$tmpl" ] || { echo "    (템플릿 없음: $name)"; continue; }
   dest="$LAUNCH_AGENTS/com.ohisell.$name.plist"
   sed -e "s#__PYTHON__#$LOCAL_VENV/bin/python3#g" \
-      -e "s#__SCRIPT__#$LOCAL_TOOLS/${SCRIPT_OF[$name]}#g" \
+      -e "s#__SCRIPT__#$LOCAL_TOOLS/$script#g" \
+      -e "s#__HOME__#$HOME#g" \
       "$tmpl" > "$dest"
   launchctl bootout "gui/$UID_NUM/com.ohisell.$name" 2>/dev/null || true
+  sleep 2  # bootout 완료 대기 — 너무 빠른 bootstrap은 레이스로 '미로드' 실패함
   launchctl bootstrap "gui/$UID_NUM" "$dest" 2>/dev/null || launchctl load "$dest" 2>/dev/null || true
   echo "    com.ohisell.$name → 설치+reload"
 done

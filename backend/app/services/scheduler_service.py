@@ -689,7 +689,10 @@ def _ensure_default_states(db):
         ("sync_coupang_coupons", "0 6 * * *"),
         ("sync_coupang_cs", "5 6 * * *"),
         ("sync_coupang_ad_cost", "10 0 * * *"),
-        ("request_ad_cost_refresh", "0 10-20 * * *"),
+        # 03:00 야간 브릿지 추가 — keycloak 세션(~12h)이 밤사이 만료되는 빈틈 제거.
+        # 20:00(마지막 주간 갱신)→03:00=7h, 03:00→10:00=7h, 둘 다 <12h라 세션이 끊기지 않는다.
+        # 03:00에 Mac이 깨어 있어야 페처가 갱신 처리(pmset repeat wakeorpoweron 02:58 필요).
+        ("request_ad_cost_refresh", "0 3,10-20 * * *"),
     ]
     for name, cron in defaults:
         existing = db.query(SchedulerState).filter(
