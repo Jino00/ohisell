@@ -3,6 +3,8 @@
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from app.services.coupang.in_transit_estimator import (
     EXPIRY_BUFFER_DAYS,
     _in_transit_for_row,
@@ -177,3 +179,102 @@ def test_realworld_film100_buddy0():
 
     assert result["options"].get("FILM", {}).get("in_transit_qty") == 100
     assert "BUDDY" not in result["options"]
+
+
+# ────────────────────────────────────
+# X5 freshness-gate: 쿠키 status 인지 (실 DB 세션)
+# 버그: 만료(red) 쿠키여도 last_success_at만 < 2일이면 fresh로 통과 → 판매개시 놓친
+#       stale 입고를 발송중으로 중복 계상(유효재고 유령). 라이브 vii 95536607339(6/19) 재현.
+# ────────────────────────────────────
+
+@pytest.fixture
+def db_session():
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from app.database import Base
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    s = sessionmaker(bind=engine)()
+    yield s
+    s.close()
+
+
+def _cookie(db, account_key, *, status, last_success_at):
+    from app.models import CoupangWingCookie
+    db.add(CoupangWingCookie(
+        account_key=account_key, cookie_blob="x", xsrf_token="x",
+        status=status, last_success_at=last_success_at,
+    ))
+
+
+def _inbound(db, *, account_key="COUPANG_WING1", inbound_id, vii,
+             requested_qty=100, stowed_qty=None, stowing_at=None, shipment_created_at=None):
+    from app.models import CoupangRgInbound
+    db.add(CoupangRgInbound(
+        account_key=account_key, inbound_id=inbound_id, vendor_item_id=vii,
+        requested_qty=requested_qty, stowed_qty=stowed_qty, stowing_at=stowing_at,
+        shipment_created_at=shipment_created_at,
+    ))
+
+
+def test_freshness_red_cookie_recent_success_not_fresh(db_session):
+    """버그 재현: status=red여도 last_success_at가 2일 이내면 과거엔 fresh로 통과했다.
+    만료된 쿠키 = sync 중단 = 판매개시 전환 놓침 → 신뢰 불가 → fresh=False여야 한다."""
+    from app.services.coupang.in_transit_estimator import _fetch_freshness
+    recent = NOW - timedelta(days=1)  # 2일 이내 = 시간만 보면 'fresh'
+    _cookie(db_session, "COUPANG_WING1", status="red", last_success_at=recent)
+    _cookie(db_session, "COUPANG_WING2", status="red", last_success_at=NOW - timedelta(days=9))
+    db_session.commit()
+
+    with patch("app.services.coupang.in_transit_estimator.kst_now", return_value=NOW):
+        fresh, last_fetch = _fetch_freshness(db_session, None)
+
+    assert fresh is False                       # red → 차감 스킵(안전 방향)
+    assert last_fetch == recent.isoformat()     # 표시용 last_fetch는 그대로 노출
+
+
+def test_freshness_green_cookie_recent_is_fresh(db_session):
+    """status=green + 2일 이내 → fresh=True (정상 차감)."""
+    from app.services.coupang.in_transit_estimator import _fetch_freshness
+    recent = NOW - timedelta(days=1)
+    _cookie(db_session, "COUPANG_WING1", status="green", last_success_at=recent)
+    db_session.commit()
+
+    with patch("app.services.coupang.in_transit_estimator.kst_now", return_value=NOW):
+        fresh, last_fetch = _fetch_freshness(db_session, None)
+
+    assert fresh is True
+    assert last_fetch == recent.isoformat()
+
+
+def test_freshness_green_but_stale_age_not_fresh(db_session):
+    """status=green이라도 last_success_at가 2일 초과면 fresh=False (기존 X5 유지)."""
+    from app.services.coupang.in_transit_estimator import _fetch_freshness
+    old = NOW - timedelta(days=3)
+    _cookie(db_session, "COUPANG_WING1", status="green", last_success_at=old)
+    db_session.commit()
+
+    with patch("app.services.coupang.in_transit_estimator.kst_now", return_value=NOW):
+        fresh, _ = _fetch_freshness(db_session, None)
+
+    assert fresh is False
+
+
+def test_red_cookie_skips_phantom_in_transit(db_session):
+    """엔드투엔드 라이브 재현(vii 95536607339): 쿠키 red + 판매개시 놓친 입고(stowed=None,
+    stowing_at=None, requested=100) → 발송중 중복 계상하지 않는다(options 비어야 함)."""
+    recent = NOW - timedelta(days=1)
+    _cookie(db_session, "COUPANG_WING1", status="red", last_success_at=recent)
+    _cookie(db_session, "COUPANG_WING2", status="red", last_success_at=NOW - timedelta(days=9))
+    _inbound(db_session, inbound_id="1070255256631250944", vii="95536607339",
+             requested_qty=100, stowed_qty=None, stowing_at=None,
+             shipment_created_at=NOW - timedelta(days=3))
+    db_session.commit()
+
+    with patch("app.services.coupang.in_transit_estimator.kst_now", return_value=NOW):
+        result = estimate_in_transit(db_session)
+
+    assert result["fresh"] is False
+    assert result["options"] == {}              # 유령 100 차감 안 됨
+    assert result["total_in_transit_qty"] == 0

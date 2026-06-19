@@ -33,27 +33,42 @@ RG_ACCOUNTS = ["COUPANG_WING1", "COUPANG_WING2"]
 # X5 freshness-gate
 # ════════════════════════════════════════════════
 def _fetch_freshness(db: Session, account_key: str | None) -> tuple[bool, str | None]:
-    """CoupangWingCookie.last_success_at → (fresh, last_fetch_at_iso).
+    """CoupangWingCookie (status·last_success_at) → (fresh, last_fetch_at_iso).
 
     fresh=True이면 in-transit 차감 적용. False면 차감 스킵(과발송 편향=품절회피 우선, D-12).
     입고 이벤트는 본래 희소(반년 6건)라 inbound 행 나이로 판정하지 않음(X5).
-    account_key=None이면 WING1/WING2 중 더 최신 값 사용."""
+    account_key=None이면 WING1/WING2 중 더 최신 값 사용.
+
+    ★fresh 판정은 status=='green' 계정만 인정한다(원칙22 교훈, 2026-06-19 vii 95536607339 버그).
+    쿠키 만료(red)/미검증(unknown)이면 sync가 멈춰 판매개시(stowing) 전환을 놓치는데,
+    last_success_at만으로 판정하면 만료 직후 ~2일간 stale 입고가 'fresh'로 통과해
+    이미 현재고(orderable_qty)에 흡수된 물량을 발송중으로 중복 계상한다.
+    표시용 last_fetch_at은 status 무관 가장 최근 성공값을 노출(UI 배지)."""
     keys = [account_key] if account_key else RG_ACCOUNTS
-    latest: datetime | None = None
+    latest_any: datetime | None = None      # 표시용: status 무관 가장 최근 성공
+    latest_green: datetime | None = None     # 판정용: green 계정만
     for key in keys:
         row = (
-            db.query(CoupangWingCookie.last_success_at)
+            db.query(CoupangWingCookie.last_success_at, CoupangWingCookie.status)
             .filter(CoupangWingCookie.account_key == key)
-            .scalar()
+            .first()
         )
-        if row and (latest is None or row > latest):
-            latest = row
-    if latest is None:
-        return False, None
+        if not row:
+            continue
+        last_success, status = row
+        if not last_success:
+            continue
+        if latest_any is None or last_success > latest_any:
+            latest_any = last_success
+        if status == "green" and (latest_green is None or last_success > latest_green):
+            latest_green = last_success
+    if latest_green is None:
+        # green 계정 없음 → 신뢰 불가, 차감 스킵. 표시용 last_fetch는 있으면 노출.
+        return False, latest_any.isoformat() if latest_any else None
     now = kst_now()
-    age_days = (now - latest).total_seconds() / 86400
+    age_days = (now - latest_green).total_seconds() / 86400
     fresh = age_days < FRESHNESS_THRESHOLD_DAYS
-    return fresh, latest.isoformat()
+    return fresh, latest_green.isoformat()
 
 
 # ════════════════════════════════════════════════
