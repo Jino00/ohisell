@@ -220,14 +220,20 @@ def compute_2p_cost(
         comm_basis = r.basis
 
     # ── 2. fulfillment (입출고+배송) ─────────────────────────────────
-    if settled and (settled.get("delivery", _Z) > _Z or settled.get("warehousing", _Z) > _Z):
-        # 정산 옵션 행은 VAT前(A-B) → × 1.1
+    # 정산 총액을 그대로 쓰면 정산 기간 전체분이 조회 기간 매출에 얹혀 과대계상됨
+    # (e.g. 6/8~6/14 40개분 총액 → 6/13~6/19 8개 매출에 적용 → 71% fee).
+    # ff_per_unit(정산 기반 단가) × 현재 qty를 항상 우선 사용한다.
+    unit = ff_per_unit if ff_per_unit > _Z else ff_fallback
+    if unit > _Z:
+        fulfillment = (unit * Decimal(qty)).quantize(_Q2, ROUND_HALF_UP)
+        ff_basis: FulfillBasis = "per_unit_estimate"
+    elif settled and (settled.get("delivery", _Z) > _Z or settled.get("warehousing", _Z) > _Z):
+        # ff_per_unit·폴백 모두 없을 때만 settled 총액 폴백 (신규 옵션 최초 정산분)
         ff_pre_vat = settled.get("delivery", _Z) + settled.get("warehousing", _Z)
         fulfillment = (ff_pre_vat * _VAT_MULT).quantize(_Q2, ROUND_HALF_UP)
-        ff_basis: FulfillBasis = "settled"
+        ff_basis = "settled"
     else:
-        unit = ff_per_unit if ff_per_unit > _Z else ff_fallback
-        fulfillment = (unit * qty).quantize(_Q2, ROUND_HALF_UP)
+        fulfillment = _Z
         ff_basis = "per_unit_estimate"
 
     # ── 3. storage (보관) ────────────────────────────────────────────
