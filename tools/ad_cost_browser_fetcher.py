@@ -603,25 +603,33 @@ def _keychain_get(account: str) -> str | None:
         return None
 
 
-def _has_2fa_challenge(page) -> bool:
-    """로그인 제출 후 SMS 2FA/인증번호 단계가 떴는지 감지(자동화 불가 → 사람 호출)."""
+def _otp_input_visible(page) -> bool:
+    """제출 후 '보이는' OTP/인증번호 입력칸이 있는지 — 진짜 2FA 단계 판별.
+
+    대시보드 본문에도 '인증번호' 글자가 있어 전체 HTML 키워드 스캔은 오탐한다(검증서 확인).
+    실제 2FA는 인증 페이지에 '보이는' 입력 필드가 생긴다 → 그것만 신뢰한다.
+    """
     try:
-        html = page.content().lower()
+        return bool(page.evaluate("""() => {
+            const els = Array.from(document.querySelectorAll('input'));
+            return els.some(e => {
+                const hint = ((e.placeholder||'') + ' ' + (e.name||'') + ' ' + (e.id||'')).toLowerCase();
+                const vis = e.offsetParent !== null;  // 화면에 보임
+                return vis && (hint.includes('인증') || hint.includes('otp')
+                       || hint.includes('verification') || hint.includes('code'));
+            });
+        }"""))
     except Exception:
         return False
-    # 본문에 인증번호 입력/SMS 단계 키워드가 '보이는' 상태인지 대략 판별
-    for kw in ("인증번호", "verification code", "otp", "휴대폰으로 전송", "문자로 전송"):
-        if kw in html:
-            return True
-    return False
 
 
-def _try_auto_login(page, cfg: dict) -> bool:
+def _try_auto_login(page, cfg: dict, settle_s: int = 25) -> bool:
     """keycloak 로그인 폼에 Keychain 자격증명을 자동입력·제출한다.
 
-    반환 True  = 제출 성공(2FA 없음) → 호출부가 _login_wait_loop로 201 대기.
-    반환 False = 자격증명 없음 / 2FA 발생 / 폼 못 찾음 → 호출부가 수동 로그인 폴백.
-    비밀번호는 메모리에서만 쓰고 로그에 남기지 않는다.
+    성공 판정 = '대시보드 착지'(URL). 인증 페이지에 머무르면 OTP 입력칸 유무로
+    2FA(사람 호출) vs 로그인 실패를 구분. 비밀번호는 메모리에서만 쓰고 로그에 안 남긴다.
+    반환 True  = 대시보드 착지(자동 로그인 성공).
+    반환 False = 자격증명 없음 / 2FA / 폼 못 찾음 / 실패 → 호출부가 수동 폴백.
     """
     login_id = cfg.get("ad_login_id")
     if not login_id:
@@ -631,17 +639,28 @@ def _try_auto_login(page, cfg: dict) -> bool:
         log.info("Keychain 자격증명 없음 — 수동 로그인 폴백.")
         return False
     try:
-        # keycloak 폼 안정화 대기
         page.wait_for_selector("#username, input[name=username]", timeout=15000)
         page.fill("#username", login_id)
         page.fill("#password", pw)
         page.click("#kc-login")
-        page.wait_for_timeout(5000)  # 제출 후 리다이렉트/챌린지 안정화
-        if _has_2fa_challenge(page):
+        # 제출 후 keycloak→callback→대시보드 리다이렉트 체인을 URL 폴링으로 대기.
+        waited = 0
+        while waited < settle_s:
+            page.wait_for_timeout(2000)
+            waited += 2
+            try:
+                u = page.url
+            except Exception:
+                continue
+            if "/marketing/dashboard" in u and not _is_logged_out(u):
+                log.info("자동 로그인 성공 — 대시보드 착지.")
+                return True
+        # 대시보드 미착지 → 2FA인지 단순 실패인지 구분(알림 문구용)
+        if _otp_input_visible(page):
             log.warning("자동 로그인 후 2FA(인증번호) 단계 — 자동화 불가, 사람 호출.")
-            return False
-        log.info("자동 로그인 제출 완료 — 결과 대기.")
-        return True
+        else:
+            log.warning("자동 로그인 실패(대시보드 미착지) — 수동 폴백.")
+        return False
     except Exception as e:  # noqa: BLE001
         log.warning("자동 로그인 실패(수동 폴백): %s", str(e)[:100])
         return False
