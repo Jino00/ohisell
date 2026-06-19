@@ -805,7 +805,8 @@ def sales_summary(
             .group_by(CoupangRevenueFee.vendor_item_id)
             .all()
         )
-        ratio_by_vid = {str(vid): _f(r) for vid, r in ratio_rows if r}
+        # service_fee_ratio는 DB에 퍼센트값(e.g. 7.80)으로 저장 → /100으로 소수 변환
+        ratio_by_vid = {str(vid): (_f(r) / Decimal("100")) for vid, r in ratio_rows if r}
 
     # RG 정산 옵션 그레인 (vendor_item_id != "", VAT前 A-B) — 공유 리더
     settled_option_costs = _rg_reader.load_settled_option_costs(
