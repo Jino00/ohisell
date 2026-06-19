@@ -1,36 +1,32 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- launchd: 쿠팡 로켓배송(1P) supplier 페처를 "시간예약형"으로 실행 (Jino Mac, 트랙 rocket-1p S3). -->
-<!-- Option A(Jino 승인 2026-06-17): 1P 데이터는 느리게 변함(발주 때때로·정산 주 단위) → 상주 poll 대신 -->
-<!--   매일 08:00 KST(=Mac 로컬시각) 'run' 1회. 살아있는 전용 Chrome(CDP 9223)에 연결→발주+정산 수집→prod push. -->
-<!-- 광고/Wing 데몬과 별도 프로세스·별도 Chrome 프로필(~/.ohisell_supplier_chrome) — 도메인·세션 분리. -->
-<!-- 온디맨드 '갱신' 버튼은 S5(프론트)에서 refresh 엔드포인트 3종과 함께 추가. -->
-<!-- 설치:  cp tools/com.ohisell.rocket.plist ~/Library/LaunchAgents/ -->
-<!--        launchctl unload ~/Library/LaunchAgents/com.ohisell.rocket.plist 2>/dev/null -->
-<!--        launchctl load ~/Library/LaunchAgents/com.ohisell.rocket.plist -->
-<!-- 즉시 1회 실행(테스트):  launchctl kickstart -k gui/$(id -u)/com.ohisell.rocket -->
-<!-- 경로(python/스크립트)는 설치 전 실제 경로로 치환되어야 함. ~/.ohisell_rocket_fetcher.json에 -->
-<!-- prod_base_url·ingest_token·vendor_id 설정 필수(없으면 run fail-fast). -->
+<!-- launchd: 쿠팡 로켓배송(1P) supplier 페처 — poll 데몬 (Jino Mac, 트랙 rocket-1p S5).
+     S3에서 시간예약형(StartCalendarInterval 08:00)이었으나 S5 UI 갱신 버튼 지원을 위해
+     상주 poll 모드로 전환(Wing 페처 패턴 복제).
+     poll 커맨드: 30초마다 /rocket/refresh-status 폴링 → 요청 시 claim → run.
+     또한 last_success_at 23h 초과 시 자동 run(일별 정기 수집 — 기존 08:00 역할 대체).
+     광고/Wing 데몬과 별도 프로세스·별도 Chrome 프로필(~/.ohisell_supplier_chrome).
+
+     설치:  cp tools/com.ohisell.rocket.plist ~/Library/LaunchAgents/
+            launchctl unload ~/Library/LaunchAgents/com.ohisell.rocket.plist 2>/dev/null
+            launchctl load ~/Library/LaunchAgents/com.ohisell.rocket.plist
+     즉시 1회 실행(테스트):  launchctl kickstart -k gui/$(id -u)/com.ohisell.rocket
+     경로(python/스크립트)는 설치 전 실제 경로로 확인(아래 경로는 Jino Mac 기준). -->
 <plist version="1.0">
 <dict>
   <key>Label</key>
   <string>com.ohisell.rocket</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/jino/Library/Mobile Documents/com~apple~CloudDocs/1Personal/AI Program/Ohiselling/backend/.venv/bin/python3</string>
-    <string>/Users/jino/Library/Mobile Documents/com~apple~CloudDocs/1Personal/AI Program/Ohiselling/tools/rocket_supplier_fetcher.py</string>
-    <string>run</string>
+    <string>__PYTHON__</string>
+    <string>__SCRIPT__</string>
+    <string>poll</string>
   </array>
-  <!-- 시간예약형: 매일 08:00(Mac 로컬=KST) 1회 실행. 상주 아님(KeepAlive 없음). -->
-  <key>StartCalendarInterval</key>
-  <dict>
-    <key>Hour</key>
-    <integer>8</integer>
-    <key>Minute</key>
-    <integer>0</integer>
-  </dict>
-  <!-- 로드 시 즉시 실행 안 함(예약 시각에만). -->
+  <!-- 상주 데몬: 종료되면 launchd가 재시작. -->
+  <key>KeepAlive</key>
+  <true/>
+  <!-- 로드 즉시 시작. -->
   <key>RunAtLoad</key>
-  <false/>
+  <true/>
   <key>StandardOutPath</key>
   <string>/Users/jino/.ohisell_rocket_fetcher.launchd.log</string>
   <key>StandardErrorPath</key>

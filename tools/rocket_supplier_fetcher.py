@@ -599,11 +599,55 @@ def _do_run(cfg: dict) -> int:
 
     rc = 0 if (rc_po == 0 and rc_st == 0 and detail_failed <= 0) else 1
     log.info("run 완료 — 발주 push rc=%d / 정산 push rc=%d / 발주상세 실패=%d", rc_po, rc_st, detail_failed)
+    # 성공 시 last_success_at 갱신 (UI 폴링 완료 감지용)
+    if rc == 0 and _push_configured(cfg):
+        try:
+            requests.post(
+                cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/rocket/fetch-success",
+                timeout=10,
+            )
+        except Exception:  # noqa: BLE001
+            pass
     return rc
 
 
+def _prod_rocket_refresh_status(cfg: dict) -> dict:
+    """백엔드 rocket refresh-status 폴링."""
+    try:
+        r = requests.get(
+            cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/rocket/refresh-status",
+            timeout=10,
+        )
+        return r.json() if r.status_code == 200 else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _prod_rocket_claim(cfg: dict) -> dict:
+    """백엔드 rocket refresh-claim — 요청 플래그 clear."""
+    try:
+        r = requests.post(
+            cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/rocket/refresh-claim",
+            timeout=10,
+        )
+        return r.json() if r.status_code == 200 else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _prod_rocket_mark_success(cfg: dict) -> None:
+    """실행 완료 시 last_success_at 갱신 (직접 DB가 아닌 전용 엔드포인트로).
+    현재는 별도 엔드포인트 없으므로 ingest 성공 자체가 last_push_at 역할. 추후 확장 시 사용."""
+
+
 def cmd_run(cfg: dict) -> int:
-    """1회 실행(락으로 동시 실행 방지). 세션 없으면 _do_run 내부에서 fail-fast."""
+    """1회 실행(락으로 동시 실행 방지). UI 갱신 요청이 있으면 claim 후 실행."""
+    # UI '갱신' 버튼 요청 확인(push 설정 있을 때만 — 로컬 테스트는 claim 불필요)
+    if _push_configured(cfg):
+        st = _prod_rocket_refresh_status(cfg)
+        if st.get("requested"):
+            _prod_rocket_claim(cfg)
+            log.info("UI 갱신 요청 소비 — 즉시 실행")
     with _try_fetch_lock() as acquired:
         if not acquired:
             log.warning("다른 실행이 진행 중 — 이번 호출 건너뜀")
@@ -680,6 +724,70 @@ def cmd_chrome(cfg: dict) -> int:
     return 0
 
 
+def cmd_poll(cfg: dict, interval: int = 30) -> int:
+    """상주 poll 데몬 — UI '갱신' 요청 감지 + 일별 1회 자동 실행.
+
+    ① 30초마다 /rocket/refresh-status 폴링 → 요청 있으면 claim → run.
+    ② last_success_at이 23시간 이상 오래됐으면 자동 run (일별 정기 수집).
+    launchd KeepAlive 데몬으로 실행. plist: com.ohisell.rocket.plist.
+    """
+    import time as _time
+
+    if not _push_configured(cfg):
+        log.error("poll엔 prod_base_url·ingest_token·vendor_id 설정 필요.")
+        return 2
+
+    _DAILY_HOURS = 23  # 이 시간 이상 성공 없으면 자동 run
+    last_run_at: float = 0.0  # epoch seconds
+    # 자가복구: 연속 폴링 실패가 쌓이면 종료 → launchd가 fresh 재기동(광고/Wing 페처 패턴).
+    # sleep/wake 후 소켓 고착 자동 해소. 30s 간격 × 10 ≈ 5분.
+    _MAX_CONSECUTIVE_FAILS = 10
+    fails = 0
+
+    log.info("[poll] 시작 — 30초마다 갱신 요청 체크 + 23시간 마다 자동 실행")
+    while True:
+        try:
+            st = _prod_rocket_refresh_status(cfg)
+            fails = 0
+            needs_run = False
+
+            # UI 버튼 요청
+            if st.get("requested"):
+                claimed = _prod_rocket_claim(cfg).get("claimed", False)
+                if claimed:
+                    log.info("[poll] UI 갱신 요청 소비 → 즉시 실행")
+                    needs_run = True
+
+            # 일별 정기 실행 (마지막 성공 23h 초과)
+            if not needs_run:
+                now = _time.time()
+                suc_iso = st.get("last_success_at")
+                if suc_iso:
+                    import datetime as _dt
+                    suc_epoch = _dt.datetime.fromisoformat(suc_iso).timestamp()
+                    if (now - suc_epoch) > _DAILY_HOURS * 3600:
+                        log.info("[poll] last_success_at %s → 23h 초과 → 자동 실행", suc_iso)
+                        needs_run = True
+                elif (now - last_run_at) > _DAILY_HOURS * 3600:
+                    # 아직 성공 기록 없음 → 24h 이상 실행 안 했으면 1회
+                    log.info("[poll] last_success_at 없음 → 첫 자동 실행")
+                    needs_run = True
+
+            if needs_run:
+                rc = cmd_run(cfg)
+                last_run_at = _time.time()
+                log.info("[poll] run 완료 rc=%d", rc)
+
+        except Exception as e:  # noqa: BLE001
+            fails += 1
+            log.warning("[poll] 폴링 오류(계속) %d/%d: %s", fails, _MAX_CONSECUTIVE_FAILS, e)
+            if fails >= _MAX_CONSECUTIVE_FAILS:
+                log.error("[poll] 연속 %d회 실패 — 프로세스 종료(launchd가 fresh로 재기동).", fails)
+                return 1
+
+        _time.sleep(interval)
+
+
 def main() -> None:
     cfg = load_config()
     arg = sys.argv[1] if len(sys.argv) >= 2 else "run"
@@ -689,7 +797,9 @@ def main() -> None:
         sys.exit(cmd_login(cfg))
     if arg in ("run", ""):
         sys.exit(cmd_run(cfg))
-    print("usage: rocket_supplier_fetcher.py [chrome|login|run]", file=sys.stderr)
+    if arg == "poll":
+        sys.exit(cmd_poll(cfg))
+    print("usage: rocket_supplier_fetcher.py [chrome|login|run|poll]", file=sys.stderr)
     sys.exit(2)
 
 

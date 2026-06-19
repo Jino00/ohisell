@@ -462,6 +462,9 @@ def cmd_run(cfg: dict) -> int:
 _POLL_INTERVAL_S = 15       # 갱신 요청 확인 간격(창 안 뜸, 가벼운 GET)
 _LOGIN_WAIT_S = 180         # 세션 만료 시 헤드풀 창 로그인 대기 한도
 _MIN_FETCH_INTERVAL_S = 45  # fetch(창) 최소 간격 — 요청 폭주로 창 스팸 방지(광고 패턴)
+# 자가복구: 연속 네트워크 실패가 쌓이면 종료 → launchd가 fresh 재기동(광고 페처 패턴).
+# sleep/wake 후 소켓 고착(fresh Python은 성공해도 장기 프로세스만 'Max retries') 자동 해소.
+_MAX_CONSECUTIVE_NET_FAILS = 20  # 15s 간격 × 20 ≈ 5분
 
 
 def _prod_refresh_status(cfg: dict) -> dict:
@@ -526,9 +529,11 @@ def cmd_poll(cfg: dict) -> int:
     rg_done_date = None                                     # 오늘 일일 실행 완료 표시(KST date)
     log.info("Wing 폴 데몬 시작 — %ds 간격 확인, fetch 최소간격 %ds. RG 일일예약 %02d시·간격 %ds(창은 요청 시에만 뜸).",
              interval, cooldown, rg_daily_hour, rg_cooldown)
+    net_fails = 0  # 연속 네트워크 실패 카운터(vendor-summary 폴 기준) — 성공 시 리셋
     while True:
         try:
             st = _prod_refresh_status(cfg)
+            net_fails = 0
             if st.get("requested"):
                 # 쿨다운/락은 claim '전에' 검사 — claim 후 스킵하면 요청 유실(광고 패턴 codex P2).
                 if time.monotonic() - last_fetch < cooldown:
@@ -545,7 +550,11 @@ def cmd_poll(cfg: dict) -> int:
                             else:
                                 _do_run(cfg, state, login_wait_secs=_LOGIN_WAIT_S)  # 락 보유 중
         except requests.RequestException as e:
-            log.warning("폴 확인 실패(네트워크): %s", str(e)[:80])
+            net_fails += 1
+            log.warning("폴 확인 실패(네트워크) %d/%d: %s", net_fails, _MAX_CONSECUTIVE_NET_FAILS, str(e)[:80])
+            if net_fails >= _MAX_CONSECUTIVE_NET_FAILS:
+                log.error("연속 %d회 네트워크 실패 — 프로세스 종료(launchd가 fresh로 재기동).", net_fails)
+                return 1
         except Exception as e:  # noqa: BLE001 — 데몬은 어떤 오류에도 죽지 않는다
             log.error("폴 루프 오류: %s", str(e)[:160])
 

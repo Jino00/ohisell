@@ -15,8 +15,8 @@
   <string>com.ohisell.wing</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/jino/Library/Mobile Documents/com~apple~CloudDocs/1Personal/AI Program/Ohiselling/backend/.venv/bin/python3</string>
-    <string>/Users/jino/Library/Mobile Documents/com~apple~CloudDocs/1Personal/AI Program/Ohiselling/tools/wing_browser_fetcher.py</string>
+    <string>__PYTHON__</string>
+    <string>__SCRIPT__</string>
     <string>poll</string>
   </array>
   <!-- 상주 데몬: 죽으면 자동 재시작(crash·네트워크 끊김·Mac sleep 복귀 대비). -->

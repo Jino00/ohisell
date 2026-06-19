@@ -723,6 +723,10 @@ def _do_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
 _POLL_INTERVAL_S = 15      # 데몬이 갱신 요청을 확인하는 간격(창 안 뜸, 가벼운 GET)
 _LOGIN_WAIT_S = 180        # 버튼 클릭 시 keycloak 만료면 로그인 대기 한도
 _MIN_FETCH_INTERVAL_S = 45  # fetch(창) 최소 간격 — 외부 요청 폭주로 창 스팸 방지(codex P2)
+# 자가복구: 연속 네트워크 실패가 이만큼 쌓이면 프로세스를 종료한다. launchd KeepAlive가
+# fresh 프로세스로 재기동 → Mac sleep/wake 후 옛 인터페이스에 묶인 소켓 고착을 자동 해소.
+# (장기 실행 프로세스는 fresh Python이 성공해도 계속 'Max retries' 실패하는 macOS 현상.)
+_MAX_CONSECUTIVE_NET_FAILS = 20  # 15s 간격 × 20 ≈ 5분
 
 
 def _prod_refresh_status(cfg: dict) -> dict:
@@ -755,9 +759,11 @@ def cmd_poll(cfg: dict) -> int:
     cooldown = int(cfg.get("min_fetch_interval_s", _MIN_FETCH_INTERVAL_S))
     last_fetch = 0.0  # time.monotonic 기준. 쿨다운 내 요청은 claim 보류(요청 보존).
     log.info("폴 데몬 시작 — %ds 간격 확인, fetch 최소간격 %ds(창은 요청 시에만 뜸).", interval, cooldown)
+    net_fails = 0  # 연속 네트워크 실패 카운터 — 성공 시 0으로 리셋(자가복구 게이트)
     while True:
         try:
             st = _prod_refresh_status(cfg)
+            net_fails = 0
             if st.get("requested"):
                 # 쿨다운/락은 claim '전에' 검사 — claim 후 스킵하면 요청이 유실되므로(codex P2).
                 # 둘 중 하나라도 막히면 claim하지 않고 요청을 prod에 남겨 다음 폴에서 처리.
@@ -777,7 +783,11 @@ def cmd_poll(cfg: dict) -> int:
                             else:
                                 _do_run(cfg, state, login_wait_secs=_LOGIN_WAIT_S)  # 락 보유 중
         except requests.RequestException as e:
-            log.warning("폴 확인 실패(네트워크): %s", str(e)[:80])
+            net_fails += 1
+            log.warning("폴 확인 실패(네트워크) %d/%d: %s", net_fails, _MAX_CONSECUTIVE_NET_FAILS, str(e)[:80])
+            if net_fails >= _MAX_CONSECUTIVE_NET_FAILS:
+                log.error("연속 %d회 네트워크 실패 — 프로세스 종료(launchd가 fresh로 재기동).", net_fails)
+                return 1
         except Exception as e:  # noqa: BLE001 — 데몬은 어떤 오류에도 죽지 않는다
             log.error("폴 루프 오류: %s", str(e)[:160])
         time.sleep(interval)
