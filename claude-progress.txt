@@ -3,6 +3,32 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
+- 날짜: 2026-06-19 (★D-18 판매유형별 쿠팡 총비용 S1~S5 전부 완료 + prod 배포·self-verify 완료 — codex review 대기)
+- ★**D-18 판매유형별 쿠팡 총비용 구현 완료 (트랙 full-integration D-18, 커밋 dff0692+e189d75)**
+  - **S1**: `backend/app/services/coupang/commission_vat_resolver.py` — 3P/2P 판매수수료+VAT 캐스케이드(실측▸옵션율×1.1▸기본 7.8%×1.1). fixture 10/10.
+  - **S2**: `backend/app/services/coupang/rg_cost_reader.py` — 2P 정산 옵션 그레인 reader + compute_2p_cost(보관=account-level, RG광고=rate 추정). fixture 10/10.
+  - **S3**: `backend/app/services/coupang/coupang_seller_cost.py` — Harness compute_batch(배치주입, N+1 방지).
+  - **S4**: `backend/app/routers/coupang_ops.py` 컷오버 — fee=판매유형별쿠팡총비용(병행출력 후 컷오버), RG shipping 제거(풀필먼트=fee에 포함), legacy 삭제.
+  - **S5**: `frontend/src/pages/CoupangOps.tsx` — "수수료"→"쿠팡 비용", shipSub 업데이트.
+  - **prod self-verify(원칙22)**: Wing fee=13,299(≈8.58% 정확)·RG fee=158,886(풀필먼트포함)·shipping=0·신규버그 없음 ✓.
+  - **다음**: `/codex review` (원칙19 게이트 — 계획서 S5 마지막 체크 `codex review(원칙19)` 미완료).
+- ─────────────────────────────────────────────
+- 날짜: 2026-06-19 (★RG 재고 in-transit 유령 버그픽스 — 커밋 cfe06e7, prod 배포·검증 완료)
+- ★**RG 발송중(in-transit) 유령 중복 계상 버그 수정 (트랙 D-20)** — Jino "확인해봐".
+  - **증상**: /inventory vii 95536607339 = 현재고 91·발송중 100·**유효재고 191(유령 +100)**.
+  - **근본원인**: `in_transit_estimator._fetch_freshness`가 쿠키 status 무시·`last_success_at` 나이(2일)만으로 fresh 판정. WING1 쿠키 만료(red, 6-17 16:54) 후 sync 중단→입고 1070255256631250944 판매개시(6-18 08:36) 놓침. 마지막 성공 2일내라 stale 입고가 fresh 통과 → Open API 현재고(orderable_qty=91, synced 6-18 20:40)가 이미 흡수한 100을 재계상.
+  - **수정**: fresh는 `status=='green'` 계정만 인정(red/unknown=차감 스킵, 안전방향 D-12). last_fetch_at은 status무관 최근성공 노출. estimate_in_transit_one 동일 적용.
+  - **검증**: 회귀 4건(`test_in_transit_estimator` 16/16). **prod 라이브: effective_stock 191→91·in_transit_fresh true→false·API 200(935 items)** (원칙22). scp+pm2 reload 배포, 파일 해시 MATCH.
+  - **운영 후속**: Wing 쿠키 갱신(`POST /api/coupang/ops/inbound/cookie`) 시 status green→in-transit 정상 재개+판매개시 stowing_at 포착(유령 영구 해소). 현재 양쪽 쿠키 red라 전 옵션 in-transit=0(안전).
+  - **미push**: 커밋 cfe06e7 origin 미반영(HEAD 1 ahead). prod는 scp 배포 완료.
+- ─────────────────────────────────────────────
+- 날짜: 2026-06-18 (★로켓배송 1P 트랙 — S5 프론트 완료 = 5/6)
+- ★**쿠팡 로켓배송(1P) 트랙 S5 완료** — 트랙 `docs/tracks/active/track_coupang-rocket-1p.md`(5/6).
+  - **구현**: 종합조망 🚀 로켓배송 1P 탭(`RocketView` 컴포넌트 ~200줄). 4카드(매출/광고/원가/순이익)+커버리지 배지(<100%=amber·100%=emerald)+드리프트 카드+**원가 매핑 관리 UI**(accordion lazy-load: unmapped 제안 클릭 confirm/ignored + confirmed 목록 + delete). **갱신 버튼** = Wing poll 패턴 복제(`/rocket/request-refresh` POST → `last_success_at` 30s 폴링, 180s timeout). `api.ts` 7개 함수+5개 타입 추가. 백엔드: `rocket_supplier_sync.py` state 함수군 + `coupang_ops.py` 4종 엔드포인트(request-refresh/refresh-status/refresh-claim/fetch-success). 페처: `cmd_poll` 추가 + `com.ohisell.rocket.plist` KeepAlive poll 데몬 전환(08:00 예약형→상주).
+  - **검증**: 테스트 **314 통과** + 빌드 `dist/assets/index-C4uDjVY3.js` 성공.
+  - **미push·codex 보류**: S2+S3+S4+S4.5a+S4.5b+S4.5c+**S5** 묶음, 6/19 06:42 quota 리셋 후 codex→prod 배포+push.
+  - **다음**: 6/19 `/codex review`(S2~S5) → prod 배포(scp+alembic[q1r2s3t4u5v6·r2s3t4u5v6w7]+pm2+rsync dist)+launchd reload→자동 poll 갱신 self-verify+push. 그 후 운영: 원가 매핑 채우기(커버리지% 상승).
+- ─────────────────────────────────────────────
 - 날짜: 2026-06-18 (★로켓배송 1P 트랙 — S4.5c 원가 결합 완료 = S4.5 원가 아크 종료)
 - ★**쿠팡 로켓배송(1P) 트랙 S4.5c 완료** — 트랙 `docs/tracks/active/track_coupang-rocket-1p.md`(4/6). net_profit에 원가 반영(has_cost=true 전환, D-12 해소).
   - **구현(D-13)**: `rocket_intelligence` SA ④ `_rocket_cost`(발주상세 per-SKU `CoupangRocketPurchaseOrderItem` → `RocketProductCostMap`[상품번호→internal_sku] → `product_master.cost_price` 조인, confirmed만 가산·ignored=원가0, 발주일 KST 윈도우=매출 SA 동일필터, 원칙18-8 매출출력 주입) + `compute_rocket_overview` net_profit=매출−광고−**원가**, has_cost=매핑 1건이라도 결정 시 True(0건이면 S4 동작 보존 False) + ★`cost_coverage` 블록(coverage_pct=resolved[confirmed+ignored]/window 총발주[미수집 PO 분모 포함]·unmapped_order_amount·pos_without_detail_count·SKU 카운트, 원칙22 투명화).
