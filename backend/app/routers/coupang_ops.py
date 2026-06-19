@@ -26,7 +26,7 @@ from app.database import get_db
 from app.models import Channel, CoupangAdCostDaily, CoupangAdOptionDaily, CoupangProductItem, CoupangRevenueFee, CoupangRgInbound, CoupangRgOrderItem, CoupangRgSettlementFee, Order, ProductChannelMapping, ProductMaster
 from app.routers._coupang_write_http import handle_write as _handle_write
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
-from app.services.coupang import ad_cost_sync, coupon_write, demand_classifier, in_transit_estimator, lead_time_estimator, product_write, rg_fee_audit, rg_inbound_sync, rg_product_size_sync, rg_replenishment, rg_settlement_sync, replenishment_backtest, rocket_cost_map, rocket_supplier_sync, sales_velocity_estimator, vendor_summary_sync
+from app.services.coupang import ad_cost_sync, coupon_write, coupang_seller_cost as _seller_cost_harness, demand_classifier, in_transit_estimator, lead_time_estimator, product_write, rg_fee_audit, rg_inbound_sync, rg_product_size_sync, rg_replenishment, rg_settlement_sync, replenishment_backtest, rocket_cost_map, rocket_supplier_sync, rg_cost_reader as _rg_reader, sales_velocity_estimator, vendor_summary_sync
 from app.utils.crypto import CookieCryptoError
 
 log = logging.getLogger(__name__)
@@ -791,7 +791,59 @@ def sales_summary(
     # RG는 판매수수료(7.8%) 외 풀필먼트비가 매출 ~16%인데 패널이 0으로 누락 → 실측 단가로 보강.
     rg_acct_keys = [c for c in target_codes if c in ("COUPANG_WING1", "COUPANG_WING2")]
     rg_ff_per_unit, rg_ff_fallback = _rg_fulfillment_per_unit(db, rg_acct_keys)
-    rg_fulfillment_total = _Z
+
+    # ── 3d. D-18 판매유형별 쿠팡 총비용 — 배치 로드 (N+1 방지) ─────────
+    # service_fee_ratio: 3P 캐스케이드 step2용 (실측 없는 옵션의 옵션별 율)
+    ratio_by_vid: dict[str, Decimal] = {}
+    if order_nums:
+        ratio_rows = (
+            db.query(
+                CoupangRevenueFee.vendor_item_id,
+                func.max(CoupangRevenueFee.service_fee_ratio),
+            )
+            .filter(CoupangRevenueFee.order_id.in_(list(order_nums)))
+            .group_by(CoupangRevenueFee.vendor_item_id)
+            .all()
+        )
+        ratio_by_vid = {str(vid): _f(r) for vid, r in ratio_rows if r}
+
+    # RG 정산 옵션 그레인 (vendor_item_id != "", VAT前 A-B) — 공유 리더
+    settled_option_costs = _rg_reader.load_settled_option_costs(
+        db, dfrom, dto, rg_acct_keys
+    )
+    # 계정 단위 보관료 (per-unit 배분 불가, coverage 표기용)
+    account_storage_map = _rg_reader.load_account_storage(db, dfrom, dto, rg_acct_keys)
+    # 닫힌 윈도우 RG광고 비율 (미정산 추정)
+    rg_ad_rate_map = _rg_reader.load_rg_ad_rate(db, dfrom, dto, rg_acct_keys)
+    # RG광고 이중계상 감시 (정상=0)
+    from app.services.coupang.intelligence import _agg_rg_ad_overlap
+    _rg_ad_overlap = _agg_rg_ad_overlap(db, dfrom, dto)
+
+    # vid → account_key (pi_map 기반 배치)
+    account_by_vid = {vid: d.get("account_key", "") for vid, d in pi_map.items()}
+
+    # vid → ch_type (order_by_vid 기반, _ch_type은 step4에서 정의되므로 인라인)
+    ch_type_by_vid: dict[str, str] = {
+        vid: _CHANNEL_META.get(od["channel_code"], ("—", "Wing"))[1]
+        for vid, od in order_by_vid.items()
+    }
+
+    # ── 3e. D-18 Harness 실행 (배치) ─────────────────────────────────
+    seller_cost_by_vid = _seller_cost_harness.compute_batch(
+        list(order_by_vid.keys()),
+        ch_type_by_vid=ch_type_by_vid,
+        revenue_by_vid={vid: _f(od["revenue"]) for vid, od in order_by_vid.items()},
+        qty_by_vid={vid: od["qty"] for vid, od in order_by_vid.items()},
+        account_by_vid=account_by_vid,
+        actual_fee_by_vid=actual_fee_by_vid,
+        ratio_by_vid=ratio_by_vid,
+        settled_option=settled_option_costs,
+        ff_per_unit=rg_ff_per_unit,
+        ff_fallback=rg_ff_fallback,
+        account_storage=account_storage_map,
+        ad_rate=rg_ad_rate_map,
+        overlap_rg_ad=_rg_ad_overlap,
+    )
 
     # ── 4. 상품명·채널타입 단위로 병합 ───────────────────────────────
     # key = (product_label, channel_type)
@@ -821,22 +873,20 @@ def sales_summary(
         rev = od["revenue"]
         qty = od["qty"]
         e["revenue"] += rev
-        # 수수료: 실거래 정산 매칭 우선, 없으면 기본율(7.8%) 추정
-        if vid in actual_fee_by_vid:
+        # 수수료(D-18): 판매유형별 쿠팡 총비용 — Harness 우선, 없으면 legacy 7.8% 폴백
+        sc = seller_cost_by_vid.get(vid)
+        if sc is not None:
+            e["fee"] += sc.seller_cost
+        elif vid in actual_fee_by_vid:
             e["fee"] += actual_fee_by_vid[vid]
         else:
-            fee_rate = fee_rate_map.get(vid, _DEFAULT_FEE_RATE)
-            e["fee"] += (rev * fee_rate).quantize(_Q2, rounding=ROUND_HALF_UP)
+            e["fee"] += (rev * _DEFAULT_FEE_RATE).quantize(_Q2, rounding=ROUND_HALF_UP)
         # 원가 = cost_price × 수량
         unit_cost = cost_map.get(vid, _Z)
         e["cost"] += unit_cost * qty
-        # 물류비: Wing=한진 1,900원/건. 로켓그로스=RG 풀필먼트(배송+입출고) 옵션별 실측 단가×수량.
+        # 물류비: Wing=한진 1,900원/건. RG=풀필먼트는 fee(D-18)에 포함 → 0.
         if ch_type == "Wing":
             e["shipping"] += _WING_DELIVERY_COST * qty
-        elif ch_type == "로켓그로스":
-            ff_cost = rg_ff_per_unit.get(vid, rg_ff_fallback) * qty
-            e["shipping"] += ff_cost
-            rg_fulfillment_total += ff_cost
 
     for vid, ad in ad_by_vid.items():
         names = _resolve_names(vid)
@@ -964,7 +1014,7 @@ def sales_summary(
             "fee_actual_ratio": round(fee_actual_ratio, 4),
             "ad_today": str(ad_today.quantize(_Q2)) if ad_today is not None else None,
             "ad_today_synced_at": ad_today_synced_at,
-            "rg_fulfillment": str(rg_fulfillment_total.quantize(_Q2)),
+            "rg_fulfillment": "0.00",  # D-18 컷오버: 풀필먼트는 fee에 내장됨
             "conv_revenue": str(total_conv.quantize(_Q2)),
             "roas":         _roas(total_spend, total_conv),
         },
@@ -1369,6 +1419,34 @@ def rocket_cost_map_upsert(
 def rocket_cost_map_delete(product_number: str, db: Session = Depends(get_db)):
     """매핑 삭제(상품번호를 다시 미매핑으로). 없으면 deleted=0."""
     return rocket_cost_map.delete_mapping(db, product_number)
+
+
+# ════════════════════════════════════════════════
+# 로켓배송(1P) 페처 갱신 트리거 (S5 UI 버튼, Wing 패턴 복제)
+# ════════════════════════════════════════════════
+@router.post("/rocket/request-refresh")
+def rocket_request_refresh(db: Session = Depends(get_db)):
+    """UI '로켓 갱신' 버튼 → 갱신 요청 플래그 set. 페처가 다음 실행에서 소비."""
+    return rocket_supplier_sync.request_rocket_refresh(db)
+
+
+@router.get("/rocket/refresh-status")
+def rocket_refresh_status_endpoint(db: Session = Depends(get_db)):
+    """갱신 요청/완료 상태 폴링용."""
+    return rocket_supplier_sync.rocket_refresh_status(db)
+
+
+@router.post("/rocket/refresh-claim")
+def rocket_refresh_claim(db: Session = Depends(get_db)):
+    """로켓 페처가 갱신 요청을 소비(플래그 clear)."""
+    return rocket_supplier_sync.claim_rocket_refresh(db)
+
+
+@router.post("/rocket/fetch-success")
+def rocket_fetch_success(db: Session = Depends(get_db)):
+    """로켓 페처 실행 완료 시 last_success_at 갱신(UI 폴링 완료 감지용)."""
+    rocket_supplier_sync.mark_rocket_fetch_success(db)
+    return {"ok": True}
 
 
 @router.post("/ad-cost/option-ingest")
