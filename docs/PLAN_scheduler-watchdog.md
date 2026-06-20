@@ -190,7 +190,11 @@ Mac(S5):
   - 테스트 `test_scheduler_listener.py`(6: 매핑·last_run_at 보존·절단·폴백 + 삼킴 reraise[prod3.10/로컬3.9 skip]). 로컬 22 passed/1 skipped.
   - **codex R2 PASS**: R1 [P1](recalculate_profit 스탬프 제거했으나 except 미정렬→거짓 ok) 수용·수정 → R2 clean. ★교훈: 계획의 삼킴잡 목록(6)이 recalculate_profit 누락 → 실제 except 전수감사로 20잡 전부 raise 확인.
   - **Verify(PENDING, 원칙22 §6)**: prod 배포 후 ① 실잡 성공→last_status=ok ② 고의 raise→error+last_error ③ /health failed(S4 필요). 미배포 상태(prod models.py도 함께 배포).
-- [ ] **T4 (P1)** — routers — scheduler_health Harness + GET /health(running·missing·sanitized·healthy)
+- [~] **T4 (P1)** — 코드+테스트+codex PASS(커밋 ced07f7), ⚠️prod 배포+라이브검증 PENDING(S3와 함께)
+  - `app/services/scheduler_health.py`: build_health(순수)·compute_interval_seconds(순수, cron 2발화 diff)·compute_scheduler_health(I/O 경계). WATCHDOG_JOBS 14종. `_sanitize_error`(예외 마지막 1줄≤200자, 전체 traceback DB만).
+  - `GET /api/scheduler/health`(항상 200, healthy:bool) + SchedulerHealthOut/SchedulerJobVerdictOut(response_model이 last_error 차단).
+  - 테스트 14개(interval 일배치86400/2시간7200/30분1800/불량0, sanitize 3, build_health: ok·failed+요약·stale·미등록·DB결손·정지·disabled무해·never_succeeded). 로컬 37 passed/1 skipped.
+  - **codex S4 PASS**(P1 0). P2 2건: #1 sanitize=PLAN 설계(class+짧은msg) 유지·기각, #2 불규칙cron=현 allowlist(균등주기·KST무DST) 무관·가정 주석 보강.
 - [ ] **T5 (P2)** — tools — Mac 워치독 폴 모드 + launchd KeepAlive + 디바운스 + 집계 알림
 - [ ] **T6 (P3, TODO)** — 서버측 푸시 알림 채널(Mac-off 공백)
 
@@ -198,7 +202,7 @@ Mac(S5):
 - [x] S1 마이그레이션(로컬→prod PRAGMA) — codex pass ✅ 커밋 7d5d846, prod rev s3t4u5v6w7x8
 - [x] S2 evaluator + 단위테스트 — codex pass ✅ (bc7677a, 17 테스트)
 - [~] S3 리스너 + 삼킴잡 정렬 + DRY — 코드+codex R2 PASS(0d0553f), prod 배포+라이브검증 PENDING
-- [ ] S4 Harness + /health — codex pass
+- [~] S4 Harness + /health — 코드+codex PASS(ced07f7), prod 배포+라이브검증 PENDING(S3와 함께)
 - [ ] S5 Mac 워치독 폴 — codex pass
 - [ ] 라이브 self-verify 1~9 통과
 - [ ] failures.jsonl / claude-progress.txt / 트랙 D-N 기록

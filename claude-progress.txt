@@ -3,6 +3,18 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
+- 날짜: 2026-06-20 (★워치독(=revenue-wing-truth S5b) **S4 코드 완료** — health Harness + /health, ⚠️prod 미배포)
+- ★**워치독 S4 코드 완료(4/5, 브랜치 `feat/scheduler-watchdog`, 커밋 ced07f7, 미머지·⚠️prod 미배포)**: PLAN T4.
+  - `app/services/scheduler_health.py`(Harness, 읽기전용 SA 허브, 머니로직 미접촉):
+    · `build_health`(순수): SchedulerState 유사객체 주입 → missing_jobs(DB결손 OR 스케줄러 running·enabled인데 미등록)·5버킷(failed/stale/never_succeeded/disabled)·healthy 판정(disabled 제외, 그외 비정상이면 False).
+    · `compute_interval_seconds`(순수): cron→CronTrigger 2발화 diff(일배치86400/2시간7200/30분1800/불량0). KST 무DST·균등주기 가정(주석 명시).
+    · `compute_scheduler_health`(I/O 경계): db.query(SchedulerState in WATCHDOG_JOBS)+scheduler.get_jobs() → build_health.
+    · WATCHDOG_JOBS 14종 allowlist(critical-only, 계획§3). `_sanitize_error`(예외 마지막 1줄≤200자만, 전체 traceback DB만 — 누출 방지).
+  - `routers/scheduler.py`: `GET /api/scheduler/health`(항상 HTTP200, body healthy:bool). schemas SchedulerHealthOut/SchedulerJobVerdictOut(response_model이 last_error 필드 부재로 누출 차단).
+  - 테스트 `test_scheduler_health.py` 14개. 로컬 37 passed/1 skipped(3.9, 순수코어라 app 미임포트).
+  - **codex S4 PASS**(P1 0건). P2 2건 대화형 검증: #1 sanitize=PLAN 설계(class+짧은msg) 유지·기각(잔여리스크 인정, 내부 단일테넌트·메시지=결과문자열·200자 bound), #2 불규칙cron 오판=현 allowlist 전부 균등주기·KST무DST라 무관·가정 주석으로 보강(향후 요일/월간 잡 추가 시 재검토).
+  - ⚠️**PENDING(원칙22 §6)**: S3+S4 함께 prod 배포(scp: models.py+scheduler_service.py+routers/scheduler.py+schemas.py+services/scheduler_health.py+services/scheduler_watchdog.py, pm2 restart)+라이브검증 ①실잡 성공→ok ②고의 raise→error+/health failed ③scheduler.running=False 모사→healthy=False·missing ④머니불변. **다음 = prod 배포·라이브검증(Jino 승인) → S5(Mac 폴)**. 재개: "PLAN_scheduler-watchdog S3+S4 prod 배포".
+- ─────────────────────────────────────────────
 - 날짜: 2026-06-20 (★워치독(=revenue-wing-truth S5b) **S3 코드 완료** — 리스너 배선 + 삼킴잡 정렬, ⚠️prod 미배포)
 - ★**워치독 S3 코드 완료(3/5, 브랜치 `feat/scheduler-watchdog`, 커밋 0d0553f, 미머지·⚠️prod 미배포)**: PLAN T3.
   - `scheduler_service.py`: `_job_state_listener`(SA①)+`add_listener`(EXECUTED|ERROR|MISSED) — cron 잡 결과를 SchedulerState에 중앙 기록. `_apply_job_event`(매핑 순수 mutation 분리, 단위테스트 가능). EXECUTED→last_run_at=now·ok, ERROR→error+last_error[:2000](last_run_at 보존), MISSED→missed. 콜백 예외 격리.
