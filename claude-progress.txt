@@ -3,8 +3,15 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
-- 날짜: 2026-06-20 (★워치독(=revenue-wing-truth S5b) **S4 코드 완료** — health Harness + /health, ⚠️prod 미배포)
-- ★**워치독 S4 코드 완료(4/5, 브랜치 `feat/scheduler-watchdog`, 커밋 ced07f7, 미머지·⚠️prod 미배포)**: PLAN T4.
+- 날짜: 2026-06-20 (★워치독(=revenue-wing-truth S5b) **S3+S4 prod 배포+라이브검증 완료** — /health 가동)
+- ★**워치독 S3+S4 prod 배포+라이브검증 완료(4/5, 브랜치 `feat/scheduler-watchdog`, ced07f7+a722aa9, 미머지)**: PLAN T3·T4.
+  - 배포: 6파일 scp(models/schemas/scheduler_service/scheduler_watchdog/scheduler_health/routers.scheduler)+pm2 restart(online). 백업 `/home/ubuntu/ohisell_bak/watchdog_20260620_102611`(롤백용). import precheck OK·3.10.12.
+  - 라이브검증(원칙22 §6, 전부 PASS): ①컬럼 존재 ②실리스너+실DB 셀프테스트 executed→ok ③고의 raise(boom)→error+last_error·last_run_at(성공) 보존 + 워치드잡 DB error 주입→`/health` failed 버킷·error_summary 마지막1줄만(traceback 미누출)→원복 ④**라이브 첫 `/health`가 returns/settlement를 stale ~16.9일로 즉시 포착 = 6/4 침묵 사고 회귀봉인 라이브 입증** ⑤scheduler.running=False 모사→healthy=False ⑧머니불변(revenue-reconcile·/status 200 무회귀).
+  - ★실측 부산물(워치독 범위 밖, Jino 보고): returns/settlement 17일째 성공0(미해소 의심), naver/meta/cs never_succeeded(listener 미배포 기간 영향 — 오늘 5~7시 cron부터 수렴 예정).
+  - failures.jsonl: 셀프테스트 TZ misfire(prod UTC vs scheduler KST) 기록 — 라이브코드 정상·테스트 하니스 버그(원칙22 교훈).
+  - **다음 = S5(Mac 워치독 폴 모드 + launchd KeepAlive + 디바운스 + 집계 _notify_mac, PLAN T5)**. 재개: "PLAN_scheduler-watchdog S5".
+- ─────────────────────────────────────────────
+- (이전) 워치독 S4 코드 완료(커밋 ced07f7): PLAN T4.
   - `app/services/scheduler_health.py`(Harness, 읽기전용 SA 허브, 머니로직 미접촉):
     · `build_health`(순수): SchedulerState 유사객체 주입 → missing_jobs(DB결손 OR 스케줄러 running·enabled인데 미등록)·5버킷(failed/stale/never_succeeded/disabled)·healthy 판정(disabled 제외, 그외 비정상이면 False).
     · `compute_interval_seconds`(순수): cron→CronTrigger 2발화 diff(일배치86400/2시간7200/30분1800/불량0). KST 무DST·균등주기 가정(주석 명시).

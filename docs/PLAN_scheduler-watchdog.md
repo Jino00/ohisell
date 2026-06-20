@@ -185,7 +185,7 @@ Mac(S5):
   - Verify: ✅ 로컬 upgrade/downgrade 왕복 + PRAGMA, ✅ prod upgrade(rev s3t4u5v6w7x8)+PRAGMA 3컬럼, ✅ prod API 200 무회귀, codex GATE PASS
 - [x] **T2 (P1)** — services — staleness_evaluator 순수함수 + 5-state 단위테스트 ✅ (커밋 bc7677a)
   - `app/services/scheduler_watchdog.py`(evaluate_job/evaluate_staleness, I/O 0) + 17 테스트. created_at 입력 추가(never_succeeded 첫 주기 유예). codex PASS(P2×2 우선순위·경계 테스트 반영).
-- [~] **T3 (P1)** — 코드+테스트+codex 완료(커밋 0d0553f), ⚠️prod 배포+라이브검증 PENDING(S4와 함께 권장)
+- [x] **T3 (P1)** — 코드+테스트+codex 완료(0d0553f), ✅**prod 배포+라이브검증 완료(2026-06-20)** — §6.2 ok·§6.3 error 라이브 실증.
   - `_job_state_listener`+`add_listener`(EXECUTED|ERROR|MISSED) + `_apply_job_event`(순수 mutation 분리) + 삼킴잡 **7종** re-raise 정렬(계획의 6 + ★codex P1로 추가된 `recalculate_profit_job`) + 인라인 스탬프 13개 제거 + 라우터 수동트리거 status 정리.
   - 테스트 `test_scheduler_listener.py`(6: 매핑·last_run_at 보존·절단·폴백 + 삼킴 reraise[prod3.10/로컬3.9 skip]). 로컬 22 passed/1 skipped.
   - **codex R2 PASS**: R1 [P1](recalculate_profit 스탬프 제거했으나 except 미정렬→거짓 ok) 수용·수정 → R2 clean. ★교훈: 계획의 삼킴잡 목록(6)이 recalculate_profit 누락 → 실제 except 전수감사로 20잡 전부 raise 확인.
@@ -195,17 +195,30 @@ Mac(S5):
   - `GET /api/scheduler/health`(항상 200, healthy:bool) + SchedulerHealthOut/SchedulerJobVerdictOut(response_model이 last_error 차단).
   - 테스트 14개(interval 일배치86400/2시간7200/30분1800/불량0, sanitize 3, build_health: ok·failed+요약·stale·미등록·DB결손·정지·disabled무해·never_succeeded). 로컬 37 passed/1 skipped.
   - **codex S4 PASS**(P1 0). P2 2건: #1 sanitize=PLAN 설계(class+짧은msg) 유지·기각, #2 불규칙cron=현 allowlist(균등주기·KST무DST) 무관·가정 주석 보강.
+  - ✅**prod 배포+라이브검증 완료(2026-06-20)** — 아래 §6 결과 참조.
 - [ ] **T5 (P2)** — tools — Mac 워치독 폴 모드 + launchd KeepAlive + 디바운스 + 집계 알림
 - [ ] **T6 (P3, TODO)** — 서버측 푸시 알림 채널(Mac-off 공백)
 
 ## 12. 체크리스트
 - [x] S1 마이그레이션(로컬→prod PRAGMA) — codex pass ✅ 커밋 7d5d846, prod rev s3t4u5v6w7x8
 - [x] S2 evaluator + 단위테스트 — codex pass ✅ (bc7677a, 17 테스트)
-- [~] S3 리스너 + 삼킴잡 정렬 + DRY — 코드+codex R2 PASS(0d0553f), prod 배포+라이브검증 PENDING
-- [~] S4 Harness + /health — 코드+codex PASS(ced07f7), prod 배포+라이브검증 PENDING(S3와 함께)
+- [x] S3 리스너 + 삼킴잡 정렬 + DRY — 코드+codex R2 PASS(0d0553f), ✅prod 배포+라이브검증 완료(2026-06-20)
+- [x] S4 Harness + /health — 코드+codex PASS(ced07f7), ✅prod 배포+라이브검증 완료(2026-06-20)
 - [ ] S5 Mac 워치독 폴 — codex pass
-- [ ] 라이브 self-verify 1~9 통과
-- [ ] failures.jsonl / claude-progress.txt / 트랙 D-N 기록
+- [x] 라이브 self-verify 1~9 통과 — ✅ §6.1~6.9 prod 실증(아래)
+- [~] failures.jsonl(✅TZ misfire 기록) / claude-progress.txt(✅) / 트랙 D-N 기록
+
+### 라이브 검증 결과 (2026-06-20, S3+S4 prod 배포 후 — 원칙22)
+- 배포: 6파일 scp(models/schemas/scheduler_service/scheduler_watchdog/scheduler_health/routers.scheduler)+pm2 restart. 백업 `/home/ubuntu/ohisell_bak/watchdog_20260620_102611`.
+- §6.1 ✅ prod `scheduler_state`에 last_status/last_error/last_status_at 존재.
+- §6.2 ✅ 실 리스너+실 prod DB 셀프테스트: EVENT_JOB_EXECUTED → last_status=ok, last_run_at 세팅.
+- §6.3 ✅ 고의 raise(boom-12345) → last_status=error, last_error 기록, last_run_at(마지막 성공) 보존.
+  ✅ 워치드 잡(sync_coupang_cs) DB error 주입 → 라이브 `/health` `failed` 버킷 노출, error_summary=마지막 1줄만(traceback 미누출), 검증 후 원복(NULL).
+- §6.4/6.7 ✅ **라이브 `/health`가 첫 호출에서 sync_coupang_returns·sync_coupang_settlement를 stale(~16.9일)로 포착** — 이게 워치독을 만든 6/4 침묵 사고 그 자체. 회귀 봉인 라이브 입증.
+- §6.5 ✅ scheduler.running=False 모사(FakeStopped) → healthy=False·scheduler_running=False.
+- §6.8 ✅ 머니 불변: `/api/overview/revenue-reconcile` 200·정상 GMV, `/api/scheduler/status` 200(기존 무회귀). 워치독은 scheduler_state만 write.
+- §6.9 ✅ sanitized — 응답에 'Traceback'/'File' 없음, response_model에 last_error 필드 부재.
+- ★실측 부산물(워치독 범위 밖, Jino 보고용): returns/settlement가 17일째 성공 0(고친 줄 알았던 사고가 미해소 가능성), naver_settlement/case/sa·meta·cs는 never_succeeded(단 listener 미배포 기간 영향 — 오늘 5~7시 cron부터 실제 ok/error/stale로 수렴 예정).
 
 ## GSTACK REVIEW REPORT
 
