@@ -1425,6 +1425,10 @@ class SchedulerState(Base):
     is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     last_run_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     next_run_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # 워치독(스케줄러 잡 실패 탐지) — S1 추가. last_run_at=마지막 '성공' 의미 유지(D-F).
+    last_status: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)  # ok|error|missed
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 마지막 에러 traceback(≤2000자)
+    last_status_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)  # 마지막 상태 기록 시각(성공/실패 무관)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now()
     )

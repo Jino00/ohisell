@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- launchd: 스케줄러 워치독 폴 데몬 (Jino Mac, S5b S5). -->
+<!-- prod GET /api/scheduler/health를 30분마다 폴 → 비정상(정지/미등록/failed/stale/never)이면 -->
+<!-- Mac 네이티브 알림(집계 1회·6h 디바운스). 브라우저/쿠키 없음 = 가벼운 JSON 폴러. -->
+<!-- 설치: install_local_runtime.sh가 렌더/bootstrap (경로 치환). -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.ohisell.scheduler-watchdog</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__PYTHON__</string>
+    <string>__SCRIPT__</string>
+    <string>poll</string>
+  </array>
+  <!-- 상주 데몬: 죽으면 자동 재시작(crash·네트워크 끊김·Mac sleep 복귀 대비). -->
+  <key>KeepAlive</key>
+  <true/>
+  <key>RunAtLoad</key>
+  <true/>
+  <!-- 재시작 폭주 방지: 비정상 종료 시 최소 30초 후 재기동(폴러는 30분 주기라 여유롭게). -->
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>StandardOutPath</key>
+  <string>__HOME__/.ohisell_watchdog.launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/.ohisell_watchdog.launchd.log</string>
+</dict>
+</plist>

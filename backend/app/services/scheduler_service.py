@@ -5,6 +5,11 @@ import logging
 from app.utils.kst import kst_now, kst_today
 from datetime import date, datetime, timedelta
 
+from apscheduler.events import (
+    EVENT_JOB_ERROR,
+    EVENT_JOB_EXECUTED,
+    EVENT_JOB_MISSED,
+)
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -30,6 +35,63 @@ def _get_own_ad_session():
         return next(gen)
     except StopIteration:
         return None
+
+
+def _job_state_listener(event):
+    """APScheduler 이벤트 → SchedulerState 상태 기록 (워치독 SA①, cron 경로 전 잡 자동 포착).
+
+    데코레이터가 아닌 add_listener로 cron 실행 전체를 한 곳에서 포착한다(codex: 리스너>데코레이터).
+    수동 트리거(routers/scheduler.py)는 이 리스너를 안 거치고 직접 HTTP 500으로 실패 표면화.
+    last_run_at은 '마지막 성공' 의미 → EVENT_JOB_EXECUTED(예외 없이 반환)에만 갱신.
+    삼키는 잡들은 S3에서 외부 except를 re-raise로 정렬해 EVENT_JOB_ERROR로 표면화한다.
+    콜백 자체 예외는 격리 — 콜백이 죽어도 잡/스케줄러는 살아야 한다.
+    """
+    try:
+        job_name = getattr(event, "job_id", None)
+        if not job_name:
+            return
+        db = SessionLocal()
+        try:
+            state = db.query(SchedulerState).filter(
+                SchedulerState.job_name == job_name
+            ).first()
+            if state is None:
+                return
+            _apply_job_event(
+                state,
+                event.code,
+                kst_now(),
+                traceback=getattr(event, "traceback", None),
+                exception=getattr(event, "exception", None),
+            )
+            db.commit()
+        finally:
+            db.close()
+    except Exception:
+        log.exception("[워치독] 리스너 콜백 에러(격리)")
+
+
+def _apply_job_event(state, code, now, *, traceback=None, exception=None):
+    """이벤트 종류에 따라 SchedulerState 필드를 갱신한다(순수 mutation, DB I/O 없음 — 테스트용).
+
+    last_run_at은 EXECUTED(성공)에만 갱신 → error/missed에서는 마지막 성공 시각이 보존된다
+    (staleness_evaluator가 '마지막 성공' 기준으로 stale을 판정하기 위함).
+    """
+    MAX_ERR = 2000
+    if code == EVENT_JOB_EXECUTED:
+        state.last_run_at = now  # 마지막 성공 시각
+        state.last_status = "ok"
+        state.last_error = None
+        state.last_status_at = now
+    elif code == EVENT_JOB_ERROR:
+        # last_run_at은 건드리지 않음(마지막 성공 보존). traceback 잘라 저장(API는 sanitize).
+        tb = traceback or (str(exception) if exception is not None else "")
+        state.last_status = "error"
+        state.last_error = (tb or "")[:MAX_ERR]
+        state.last_status_at = now
+    elif code == EVENT_JOB_MISSED:
+        state.last_status = "missed"
+        state.last_status_at = now
 
 
 def sync_all_channels_job():
@@ -62,15 +124,9 @@ def sync_all_channels_job():
         except Exception as e:
             log.error("[스케줄러] RG 주문 동기화 에러: %s", e)
 
-        # 실행 시각 기록
-        state = db.query(SchedulerState).filter(
-            SchedulerState.job_name == "auto_sync_orders"
-        ).first()
-        if state:
-            state.last_run_at = kst_now()
-            db.commit()
     except Exception as e:
         log.exception("[스케줄러] sync_all_channels_job 에러: %s", e)
+        raise  # 삼킴 정렬(S5b): EVENT_JOB_ERROR/HTTP500로 실패 표면화(16일 침묵 사고 방지)
     finally:
         db.close()
 
@@ -88,14 +144,9 @@ def recalculate_profit_job():
         result = calculate_daily_trend(db, ad_db, None, date_from, date_to)
         log.info("[스케줄러] 이익률 재계산 완료: %d일치 데이터", len(result))
 
-        state = db.query(SchedulerState).filter(
-            SchedulerState.job_name == "auto_profit_calc"
-        ).first()
-        if state:
-            state.last_run_at = kst_now()
-            db.commit()
     except Exception as e:
         log.exception("[스케줄러] recalculate_profit_job 에러: %s", e)
+        raise  # 삼킴 정렬(S5b): 인라인 스탬프 제거 후 reraise 없으면 실패도 EXECUTED→거짓 ok(codex P1)
     finally:
         db.close()
         if ad_db is not None:
@@ -147,6 +198,7 @@ def sync_naver_sa_ad_costs_job():
         log.info("[스케줄러] Naver SA 광고비 %d건 + 전환매출 %d일 적재 완료 (%s)", len(agg), conv_n, yesterday)
     except Exception as e:
         log.exception("[스케줄러] sync_naver_sa_ad_costs_job 에러: %s", e)
+        raise  # 삼킴 정렬(S5b): EVENT_JOB_ERROR/HTTP500로 실패 표면화
     finally:
         db.close()
 
@@ -182,6 +234,7 @@ def sync_meta_ad_costs_job():
         log.info("[스케줄러] Meta 광고비 %d건 적재 완료 (%s)", len(agg), yesterday)
     except Exception as e:
         log.exception("[스케줄러] sync_meta_ad_costs_job 에러: %s", e)
+        raise  # 삼킴 정렬(S5b): EVENT_JOB_ERROR/HTTP500로 실패 표면화
     finally:
         db.close()
 
@@ -207,12 +260,6 @@ def sync_coupang_products_job():
         if failed:
             raise RuntimeError(f"쿠팡 상품 동기화 실패 계정: {failed}")
 
-        state = db.query(SchedulerState).filter(
-            SchedulerState.job_name == "sync_coupang_products"
-        ).first()
-        if state:
-            state.last_run_at = kst_now()
-            db.commit()
     except Exception as e:
         # cron 경로: APScheduler가 잡 예외를 관용(EVENT_JOB_ERROR, 스케줄러 생존).
         # 수동 트리거 경로(scheduler/trigger): re-raise해야 trigger_job이 실패를
@@ -244,12 +291,6 @@ def sync_coupang_returns_job():
         if failed:
             raise RuntimeError(f"쿠팡 반품 동기화 실패 계정: {failed}")
 
-        state = db.query(SchedulerState).filter(
-            SchedulerState.job_name == "sync_coupang_returns"
-        ).first()
-        if state:
-            state.last_run_at = kst_now()
-            db.commit()
     except Exception as e:
         # cron 경로는 APScheduler가 관용(스케줄러 생존). 수동 트리거 경로는 re-raise로
         # 실패 표면화(HTTP 500, last_run_at 미갱신) — 거짓 성공 보고 방지(codex [P2]).
@@ -278,12 +319,6 @@ def sync_coupang_settlement_job():
         if failed:
             raise RuntimeError(f"쿠팡 정산 동기화 실패 계정: {failed}")
 
-        state = db.query(SchedulerState).filter(
-            SchedulerState.job_name == "sync_coupang_settlement"
-        ).first()
-        if state:
-            state.last_run_at = kst_now()
-            db.commit()
     except Exception as e:
         # cron 경로는 APScheduler가 관용. 수동 트리거 경로는 re-raise로 실패 표면화(거짓 성공 방지).
         log.exception("[스케줄러] sync_coupang_settlement_job 에러: %s", e)
@@ -315,12 +350,6 @@ def sync_coupang_rg_sizes_job():
         if failed:
             raise RuntimeError(f"쿠팡 RG 사이즈 동기화 실패 계정: {failed}")
 
-        state = db.query(SchedulerState).filter(
-            SchedulerState.job_name == "sync_coupang_rg_sizes"
-        ).first()
-        if state:
-            state.last_run_at = kst_now()
-            db.commit()
     except Exception as e:
         log.exception("[스케줄러] sync_coupang_rg_sizes_job 에러: %s", e)
         raise
@@ -340,12 +369,6 @@ def sync_coupang_rg_inventory_job():
         if failed:
             raise RuntimeError(f"쿠팡 RG 재고 동기화 실패 계정: {failed}")
 
-        state = db.query(SchedulerState).filter(
-            SchedulerState.job_name == "sync_coupang_rg_inventory"
-        ).first()
-        if state:
-            state.last_run_at = kst_now()
-            db.commit()
     except Exception as e:
         log.exception("[스케줄러] sync_coupang_rg_inventory_job 에러: %s", e)
         raise
@@ -365,12 +388,6 @@ def sync_coupang_rg_orders_job():
         if failed:
             raise RuntimeError(f"쿠팡 RG 주문 동기화 실패 계정: {failed}")
 
-        state = db.query(SchedulerState).filter(
-            SchedulerState.job_name == "sync_coupang_rg_orders"
-        ).first()
-        if state:
-            state.last_run_at = kst_now()
-            db.commit()
     except Exception as e:
         log.exception("[스케줄러] sync_coupang_rg_orders_job 에러: %s", e)
         raise
@@ -390,12 +407,6 @@ def sync_coupang_rg_inbound_job():
         results = sync_all_inbound(db)
         log.info("[스케줄러] 쿠팡 RG 입고 동기화 결과: %s", results)
 
-        state = db.query(SchedulerState).filter(
-            SchedulerState.job_name == "sync_coupang_rg_inbound"
-        ).first()
-        if state:
-            state.last_run_at = kst_now()
-            db.commit()
     except Exception as e:
         log.exception("[스케줄러] sync_coupang_rg_inbound_job 에러: %s", e)
         raise
@@ -415,12 +426,6 @@ def sync_coupang_rg_settlement_job():
             result = sync_rg_settlement(db, account_key)
             log.info("[스케줄러] RG 정산 sync (%s): %s", account_key, result)
 
-        state = db.query(SchedulerState).filter(
-            SchedulerState.job_name == "sync_coupang_rg_settlement"
-        ).first()
-        if state:
-            state.last_run_at = kst_now()
-            db.commit()
     except Exception as e:
         log.exception("[스케줄러] sync_coupang_rg_settlement_job 에러: %s", e)
         raise
@@ -448,12 +453,6 @@ def auto_download_rg_settlement_job():
                      r.get("account_key"), r.get("requested"), r.get("completed"),
                      r.get("ingested"), len(r.get("errors", [])))
 
-        state = db.query(SchedulerState).filter(
-            SchedulerState.job_name == "auto_download_rg_settlement"
-        ).first()
-        if state:
-            state.last_run_at = kst_now()
-            db.commit()
     except Exception as e:
         log.exception("[스케줄러] auto_download_rg_settlement_job 에러: %s", e)
         raise
@@ -508,12 +507,6 @@ def sync_coupang_coupons_job():
         if failed:
             raise RuntimeError(f"쿠팡 쿠폰 동기화 실패 계정: {failed}")
 
-        state = db.query(SchedulerState).filter(
-            SchedulerState.job_name == "sync_coupang_coupons"
-        ).first()
-        if state:
-            state.last_run_at = kst_now()
-            db.commit()
     except Exception as e:
         log.exception("[스케줄러] sync_coupang_coupons_job 에러: %s", e)
         raise
@@ -535,12 +528,6 @@ def sync_coupang_cs_job():
         if total_fail > 0:
             raise RuntimeError(f"쿠팡 CS 동기화 API 실패 {total_fail}건")
 
-        state = db.query(SchedulerState).filter(
-            SchedulerState.job_name == "sync_coupang_cs"
-        ).first()
-        if state:
-            state.last_run_at = kst_now()
-            db.commit()
     except Exception as e:
         log.exception("[스케줄러] sync_coupang_cs_job 에러: %s", e)
         raise
@@ -617,6 +604,7 @@ def cafe24_proactive_refresh_job():
 
     except Exception as e:
         log.exception("[스케줄러] cafe24_proactive_refresh 에러: %s", e)
+        raise  # 삼킴 정렬(S5b): EVENT_JOB_ERROR로 표면화(워치독 allowlist 제외지만 일관성)
     finally:
         db.close()
 
@@ -640,6 +628,7 @@ def sync_naver_settlement_job():
         log.info("[스케줄러] 네이버 일별 정산 %d건 적재 완료 (%s~%s)", n, dfrom, dto)
     except Exception as e:
         log.exception("[스케줄러] sync_naver_settlement_job 에러: %s", e)
+        raise  # 삼킴 정렬(S5b): EVENT_JOB_ERROR/HTTP500로 실패 표면화
     finally:
         db.close()
 
@@ -663,6 +652,7 @@ def sync_naver_case_settlement_job():
         log.info("[스케줄러] 네이버 건별 정산 %d건 적재 완료 (결제일 %s~%s)", n, dfrom, dto)
     except Exception as e:
         log.exception("[스케줄러] sync_naver_case_settlement_job 에러: %s", e)
+        raise  # 삼킴 정렬(S5b): EVENT_JOB_ERROR/HTTP500로 실패 표면화
     finally:
         db.close()
 
@@ -775,6 +765,12 @@ def start_scheduler():
                     log.error("스케줄러 작업 등록 실패 (%s): %s", state.job_name, e)
     finally:
         db.close()
+
+    # 워치독 SA① — 잡 실행 결과를 SchedulerState에 중앙 기록(인라인 스탬핑 대체).
+    scheduler.add_listener(
+        _job_state_listener,
+        EVENT_JOB_EXECUTED | EVENT_JOB_ERROR | EVENT_JOB_MISSED,
+    )
 
     scheduler.start()
     log.info("스케줄러 시작됨")

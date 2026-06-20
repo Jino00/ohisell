@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import SchedulerState
-from app.schemas import SchedulerJobOut, SchedulerStatusOut
+from app.schemas import SchedulerHealthOut, SchedulerJobOut, SchedulerStatusOut
 from app.services.scheduler_service import scheduler
 
 router = APIRouter(prefix="/api/scheduler", tags=["scheduler"])
@@ -39,6 +39,18 @@ def scheduler_status(db: Session = Depends(get_db)):
         ))
 
     return SchedulerStatusOut(is_running=is_running, jobs=jobs)
+
+
+@router.get("/health", response_model=SchedulerHealthOut)
+def scheduler_health(db: Session = Depends(get_db)):
+    """워치독 헬스 — 필수 잡의 실패/stale/미등록/스케줄러 정지를 1급 신호로 노출(S5b S4).
+
+    HTTP는 항상 200, body의 healthy:bool로 판정한다(Mac 페처가 폴링). 에러는 sanitized 한 줄
+    요약만 노출하고 전체 traceback은 DB에만 남긴다(누출 방지). 읽기 전용·머니로직 불변.
+    """
+    from app.services.scheduler_health import compute_scheduler_health
+
+    return compute_scheduler_health(db, scheduler, kst_now())
 
 
 @router.post("/trigger/{job_id}")
@@ -83,7 +95,13 @@ def trigger_job(job_id: str, db: Session = Depends(get_db)):
 
     try:
         func()
-        state.last_run_at = kst_now()
+        # 수동 트리거 성공 — 워치독 상태도 정리한다(cron 경로는 리스너가 담당, S5b).
+        # 직전 cron 실패의 stale 'error'가 남아 evaluator가 거짓 'failed'로 보지 않게.
+        now = kst_now()
+        state.last_run_at = now
+        state.last_status = "ok"
+        state.last_error = None
+        state.last_status_at = now
         db.commit()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"작업 실행 에러: {e}")
