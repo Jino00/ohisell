@@ -4,12 +4,13 @@
 
 ## 현재 상태
 - 날짜: 2026-06-20 (★트랙 revenue-wing-truth **S4 구현 완료** — net_profit 매출기준 정산화, 라인그레인)
-- ★**S4 구현 완료(브랜치 `feat/revenue-wing-truth-s4`, 미머지)**: Jino 결정 B(net_profit 매출기준→쿠팡 정산 실지급). 라인 그레인 가산보정.
+- ★**S4 완료·main 머지(커밋 78751ac~d759833)**: Jino 결정 B(net_profit 매출기준→쿠팡 정산 실지급). 라인 그레인 가산보정.
   - SA `settlement_revenue_source.settlement_net_by_line`((order_id,vid)→net=ΣSALE−ΣREFUND) + Harness `settlement_revenue_adjust`(compute_line_adjustment 순수 + 계정별 독립합산 등가성) + intelligence 배선(net_profit_pre_nonpa 직후 +보정, by_option 불변 D-14).
   - **codex review**: 1차 [P1]×2(① 성숙 그레인 주문번호→라인 ② 반품 도메인 이중차감) 수용→라인그레인 재설계, [P2] REFUND 부호 prod 음수0 확인. 2차 검토중.
   - **prod 라이브 검증**: WING1 6/6~6/20 정산 82라인 매칭, adjustment=0(우리 net==정산 net 정확일치)→net_profit 불변(무회귀). 메커니즘 정상.
   - 테스트: SA6+Harness10+회귀56 통과. 미성숙(최근~8일 정산지연)·비3P·데이터0=보정0 폴백.
-  - **다음 = codex 2차 PASS 확인 → 브랜치 main 머지(Jino 승인) → S5(launchd 상주화)**. 재개: "track_revenue-wing-truth S5".
+  - **codex 2차 PASS** + P2×2 반영 완료 → **main 머지 완료**(미push). **다음 = S5(launchd 상주화)**. 재개: "track_revenue-wing-truth S5".
+  - ★결론: 수수료·원가는 이미 Wing 정합(8.58%·100%매핑), 매출은 S2(표시=Wing GMV)+S4(net_profit=정산)로 이중 정합. 현 윈도우 보정=0(주문기반=정산 일치).
 - ─────────────────────────────────────────────
 - 날짜: 2026-06-20 (★트랙 revenue-wing-truth **S3 완료** — 반품/정산 동기화 16일 중단 회귀 수정)
 - ★**S3 완료(취소 신선도)**: 근본원인=`returns_sync.py`·`settlement_sync.py`가 6/4~6/20(16일) 매일 `_KST` NameError로 죽어 3P 취소/반품 신선도·정산 누락(커밋 a2bbd3a 잔재, overview.py는 6/9 수정했으나 이 둘은 놓침). 수정=깨진 로컬 `kst_today()` 삭제(import된 정상함수). prod scp+pm2 restart+수동트리거 라이브검증(returns WING1 반품6/취소18·settlement 137txns·**에러0**), codex PASS([P1/P2] 0건), failures.jsonl 기록. **커밋 `8fd4349`(브랜치 `fix/coupang-returns-settlement-kst-regression`, 미머지)**.
