@@ -40,8 +40,10 @@ from zoneinfo import ZoneInfo
 import requests
 from playwright.sync_api import sync_playwright
 
-CONFIG_PATH = Path(os.path.expanduser("~/.ohisell_wing_fetcher.json"))
-LOG_PATH = Path(os.path.expanduser("~/.ohisell_wing_fetcher.log"))
+# 다계정 지원(D-7): OHISELL_WING_CONFIG로 config 경로 override → 오하이테크(WING2) 별도 인스턴스.
+# 미설정 시 기존 경로(하위호환).
+CONFIG_PATH = Path(os.path.expanduser(os.getenv("OHISELL_WING_CONFIG", "~/.ohisell_wing_fetcher.json")))
+LOG_PATH = Path(os.path.expanduser(os.getenv("OHISELL_WING_LOG", "~/.ohisell_wing_fetcher.log")))
 LOCK_PATH = Path(os.path.expanduser("~/.ohisell_wing_fetcher.lock"))
 DEFAULT_STATE = os.path.expanduser("~/.ohisell_wing_state.json")
 
