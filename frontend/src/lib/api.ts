@@ -485,6 +485,23 @@ export interface OverviewResponse {
     };
     by_account: RgSettlementByAccount[];
   };
+  // S2(트랙 revenue-wing-truth, D-1/D-9 A안): 닫힌 과거일 정본 매출(Wing GMV) 오버레이.
+  // 읽기전용 — account.summary.revenue·net_profit 불변. 닫힌일=Wing 정본, 당일=주문기반.
+  revenue_canonical?: {
+    applicable: boolean;          // 윈도우에 닫힌 과거일 존재
+    closed_through: string | null;
+    coverage: { expected_days: number; days_with_data: number; complete: boolean; last_refresh: string | null } | null;
+    summary: {
+      canonical_3p: string; canonical_rg: string; canonical_total: string;
+      closed_3p: string; closed_rg: string; open_3p: string; open_rg: string;
+      our_closed_3p: string; our_closed_rg: string;
+      factor_3p: string; factor_rg: string;
+      wing_used: boolean;          // true=Wing GMV로 실제 정본화(complete). false=주문기반 폴백
+      apportion_residual: string;  // 옵션 귀속 잔차(정상=0)
+    };
+    by_option: Record<string, string>;
+    note: string;
+  };
 }
 
 export async function fetchCommandCenter(
@@ -639,6 +656,122 @@ export function opsExpireInstantCoupon(couponId: number, accountKey: string, dry
   const q = new URLSearchParams({ account_key: accountKey, dry_run: String(dryRun) });
   if (confirm) q.set("confirm", confirm);
   return fetchApi<OpsResult>(`/api/coupang/ops/coupons/instant/${couponId}/expire?${q.toString()}`, { method: "PUT" });
+}
+
+// ──────────────────────────────────────────────
+// 로켓배송(1P) — 돈 축 종합조망 블록 (트랙 rocket-1p S4/S4.5)
+// ──────────────────────────────────────────────
+export interface RocketCostCoverage {
+  has_cost: boolean;
+  cost: string;                       // Decimal → string
+  coverage_pct: number;               // resolved / window_total (0~1)
+  detail_order_amount: string;        // 발주상세 수집된 금액
+  unmapped_order_amount: string;      // 발주상세 있으나 매핑 無 금액
+  confirmed_sku_count: number;
+  ignored_sku_count: number;
+  unmapped_sku_count: number;
+  pos_with_detail_count: number;
+  pos_without_detail_count: number;   // 발주상세 미수집 PO 수
+  note: string;
+}
+
+export interface RocketOverview {
+  period: { from: string; to: string; vendor_id?: string };
+  channel: string;                    // "COUPANG_ROCKET"
+  revenue: string;                    // 발주 gross (Decimal → string)
+  receiving_amount: string;           // 납품 gross
+  order_qty: number;
+  po_count: number;
+  no_date_po_count: number;
+  ad_spend: string;
+  cost: string;
+  has_cost: boolean;
+  net_profit: string;
+  net_profit_basis: string;
+  cost_coverage: RocketCostCoverage;
+  drift: {
+    settled_amount: string;           // Decimal → string (발주↔정산 대조)
+    drift_amount: string;
+    drift_pct: string | null;
+    settlement_invoice_count: number;
+    note: string;
+  };
+}
+
+export function fetchRocketOverview(from: string, to: string): Promise<RocketOverview> {
+  return fetchApi<RocketOverview>(`/api/overview/rocket-overview?from=${from}&to=${to}`);
+}
+
+// ── 로켓배송(1P) 원가 매핑 (S4.5b) ──
+export interface RocketUnmappedItem {
+  product_number: string;
+  product_name: string | null;
+  barcode: string | null;
+  total_order_qty: number;
+  po_count: number;
+  suggestions: { internal_sku: string; score: number; product_name: string; cost_price: number | null }[];
+}
+
+export interface RocketMappingItem {
+  product_number: string;
+  internal_sku: string;
+  status: "confirmed" | "ignored";
+  match_method: string;
+  product_name: string | null;
+  barcode: string | null;
+  note: string | null;
+  cost_price: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export function fetchRocketCostMapUnmapped(
+  limit = 200, suggest = true,
+): Promise<RocketUnmappedItem[]> {
+  return fetchApi<RocketUnmappedItem[]>(
+    `/api/coupang/ops/rocket/cost-map/unmapped?limit=${limit}&suggest=${suggest}`,
+  );
+}
+
+export function fetchRocketCostMap(): Promise<RocketMappingItem[]> {
+  return fetchApi<RocketMappingItem[]>("/api/coupang/ops/rocket/cost-map");
+}
+
+export function upsertRocketCostMap(body: {
+  product_number: string;
+  internal_sku?: string;
+  status?: "confirmed" | "ignored";
+  match_method?: string;
+  note?: string;
+}): Promise<RocketMappingItem> {
+  return fetchApi<RocketMappingItem>("/api/coupang/ops/rocket/cost-map", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function deleteRocketCostMap(productNumber: string): Promise<{ deleted: number }> {
+  return fetchApi<{ deleted: number }>(
+    `/api/coupang/ops/rocket/cost-map/${encodeURIComponent(productNumber)}`,
+    { method: "DELETE" },
+  );
+}
+
+// ── 로켓배송(1P) 갱신 버튼 (S5, Wing 패턴 복제) ──
+export interface RocketRefreshStatus {
+  requested: boolean;
+  requested_at: string | null;
+  last_success_at: string | null;
+  status: string;
+  last_error: string | null;
+}
+
+export function requestRocketRefresh(): Promise<{ requested: boolean; requested_at: string }> {
+  return fetchApi("/api/coupang/ops/rocket/request-refresh", { method: "POST" });
+}
+
+export function getRocketRefreshStatus(): Promise<RocketRefreshStatus> {
+  return fetchApi<RocketRefreshStatus>("/api/coupang/ops/rocket/refresh-status");
 }
 
 // ── 네이버 운영 패널 — 매출 현황 ─────────────────────────────────

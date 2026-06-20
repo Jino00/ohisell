@@ -8,10 +8,20 @@ import {
   getWingVendorSummaryRefreshStatus,
   requestWingRgSettlementRefresh,
   getWingRgSettlementRefreshStatus,
+  fetchRocketOverview,
+  requestRocketRefresh,
+  getRocketRefreshStatus,
+  fetchRocketCostMapUnmapped,
+  fetchRocketCostMap,
+  upsertRocketCostMap,
+  deleteRocketCostMap,
   syncRealtime,
   type OverviewResponse,
   type RevenueReconcile,
   type RgSettlementByAccount,
+  type RocketOverview,
+  type RocketUnmappedItem,
+  type RocketMappingItem,
 } from "../lib/api";
 
 function isoKST(d: Date): string {
@@ -35,7 +45,7 @@ function ratioPct(s: string | null): string {
   return `${(Number(s) * 100).toFixed(2)}%`;
 }
 
-type Axis = "account" | "ad" | "product";
+type Axis = "account" | "ad" | "product" | "rocket";
 
 const QUICK = [
   { label: "어제", days: 1 },
@@ -75,6 +85,10 @@ export default function CommandCenter() {
   // RG 정산 "갱신 버튼" 상태 — vendor-summary 갱신 버튼과 동일 패턴.
   const [rgRefreshing, setRgRefreshing] = useState(false);
   const [rgRefreshMsg, setRgRefreshMsg] = useState<string | null>(null);
+  // 로켓배송(1P) 종합조망 블록
+  const [rocket, setRocket] = useState<RocketOverview | null>(null);
+  const [rocketRefreshing, setRocketRefreshing] = useState(false);
+  const [rocketRefreshMsg, setRocketRefreshMsg] = useState<string | null>(null);
   // 요청 순서 가드(codex S7 P1): 계정/기간을 빠르게 바꾸면 이전 요청이 늦게 도착해
   // 새 선택 화면에 엉뚱한 계정 데이터를 렌더할 수 있다. 검산(reconciliation) 도구라
   // '다른 계정 숫자 표시'는 막으려는 실패 그 자체 → 최신 요청 응답만 반영한다.
@@ -100,6 +114,10 @@ export default function CommandCenter() {
     fetchRevenueReconcile(f, t, acc)
       .then((r) => { if (seq === reqSeq.current) setReconcile(r); })
       .catch(() => { if (seq === reqSeq.current) setReconcile(null); });
+    // 로켓배송(1P) 블록 — 계정 무관(오하이테크 단일 계정, D-6), fail-soft.
+    fetchRocketOverview(f, t)
+      .then((r) => { if (seq === reqSeq.current) setRocket(r); })
+      .catch(() => { if (seq === reqSeq.current) setRocket(null); });
   }
 
   // "판매분석 갱신" — Mac Wing 데몬(com.ohisell.wing)을 깨워 쿠팡 공식 GMV를 즉시 가져온다
@@ -160,6 +178,36 @@ export default function CommandCenter() {
       setRgRefreshMsg("❌ 갱신 요청 실패: " + (e?.message || ""));
     } finally {
       setRgRefreshing(false);
+    }
+  }
+
+  // "로켓 갱신" — Mac 로켓 페처(com.ohisell.rocket poll 데몬)를 깨워 발주/정산을 즉시 가져온다.
+  // Wing 판매분석 갱신과 동일 패턴.
+  async function refreshRocketNow() {
+    setRocketRefreshing(true);
+    setRocketRefreshMsg("Mac에서 로켓배송 발주/정산 가져오는 중… (~30초)");
+    try {
+      const baseline = (await getRocketRefreshStatus()).last_success_at;
+      await requestRocketRefresh();
+      const deadline = Date.now() + 180000; // 180초
+      let done = false;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 5000));
+        const st = await getRocketRefreshStatus();
+        if (st.last_success_at && st.last_success_at !== baseline) { done = true; break; }
+      }
+      if (done) {
+        const sel = selRef.current;
+        doFetch(sel.from, sel.to, sel.account);
+        setRocketRefreshMsg("✅ 로켓배송 갱신 완료");
+        setTimeout(() => setRocketRefreshMsg(null), 4000);
+      } else {
+        setRocketRefreshMsg("⚠️ Mac 응답 없음 — Mac이 켜져 있는지, Chrome(CDP 9223)이 실행 중인지 확인하세요.");
+      }
+    } catch (e: any) {
+      setRocketRefreshMsg("❌ 갱신 요청 실패: " + (e?.message || ""));
+    } finally {
+      setRocketRefreshing(false);
     }
   }
 
@@ -266,6 +314,7 @@ export default function CommandCenter() {
           ["account", "💰 회계 (순이익)"],
           ["ad", "📈 광고 (사실)"],
           ["product", "📦 상품 (판매)"],
+          ["rocket", "🚀 로켓배송 1P"],
         ] as [Axis, string][]).map(([key, label]) => (
           <button
             key={key}
@@ -300,6 +349,16 @@ export default function CommandCenter() {
           )}
           {axis === "ad" && <AdView data={data} />}
           {axis === "product" && <ProductView data={data} />}
+          {axis === "rocket" && (
+            <RocketView
+              data={rocket}
+              from={from}
+              to={to}
+              onRefresh={refreshRocketNow}
+              refreshing={rocketRefreshing}
+              refreshMsg={rocketRefreshMsg}
+            />
+          )}
         </>
       )}
     </div>
@@ -570,6 +629,51 @@ function RgSettlementCard({
   );
 }
 
+// S2(트랙 revenue-wing-truth, D-1/D-9 A안): 정본 매출 카드 — 닫힌 과거일 매출을 Wing 판매분석
+// GMV(net)로 표시(정본). 우리 주문기반(추정)과의 차이는 취소분(gross−net). 읽기전용 — 아래 회계
+// 표·순이익은 주문기반 그대로(정밀 정합은 S4). wing_used=false(폴백/부분/집계)면 안내만.
+function CanonicalRevenueCard({ data }: { data: OverviewResponse }) {
+  const rc = data.revenue_canonical;
+  if (!rc || !rc.applicable) return null;
+  const s = rc.summary;
+  const wingUsed = s.wing_used;
+  const gap = Number(s.our_closed_3p) + Number(s.our_closed_rg)
+    - Number(s.closed_3p) - Number(s.closed_rg);
+  return (
+    <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-4 mb-4">
+      <div className="text-sm font-semibold text-emerald-800 mb-2">
+        🎯 정본 매출 — 닫힌 과거일 = Wing 판매분석 GMV{rc.closed_through ? ` (~${rc.closed_through})` : ""}
+      </div>
+      {wingUsed ? (
+        <>
+          <div className="grid grid-cols-3 gap-3">
+            <div className="bg-white rounded-lg border border-emerald-200 p-3">
+              <div className="text-xs text-emerald-600 mb-1">정본 매출 합계 (3P+RG)</div>
+              <div className="text-lg font-bold text-emerald-900 tabular-nums">{won(s.canonical_total)}</div>
+            </div>
+            <div className="bg-white rounded-lg border border-gray-200 p-3">
+              <div className="text-xs text-gray-500 mb-1">ㄴ 마켓플레이스 3P</div>
+              <div className="text-sm font-semibold text-gray-900 tabular-nums">{won(s.canonical_3p)}</div>
+            </div>
+            <div className="bg-white rounded-lg border border-gray-200 p-3">
+              <div className="text-xs text-gray-500 mb-1">ㄴ 로켓그로스 RG</div>
+              <div className="text-sm font-semibold text-gray-900 tabular-nums">{won(s.canonical_rg)}</div>
+            </div>
+          </div>
+          <p className="text-xs text-emerald-700 mt-2 bg-emerald-100 rounded px-2 py-1">
+            닫힌 과거일 매출은 <b>Wing 실제(net)</b>로 표시(정본, D-1/A안). 우리 주문기반(추정, 취소포함){" "}
+            {won(String(Number(s.our_closed_3p) + Number(s.our_closed_rg)))}와의 차이{" "}
+            <b>{won(String(gap))}</b>는 취소분(gross−net). 아래 회계 표·순이익은 주문기반 그대로(정밀 정합 후속, S4).
+            {rc.coverage ? ` · Wing 적재 ${rc.coverage.days_with_data}/${rc.coverage.expected_days}일(완전).` : ""}
+          </p>
+        </>
+      ) : (
+        <p className="text-xs text-emerald-700 bg-emerald-100 rounded px-2 py-1">{rc.note}</p>
+      )}
+    </div>
+  );
+}
+
 function AccountView({
   data,
   reconcile,
@@ -600,8 +704,9 @@ function AccountView({
         msg={salesRefreshMsg}
       />
       <RgSettlementCard data={data} onRefresh={onRefreshRg} refreshing={rgRefreshing} msg={rgRefreshMsg} />
+      <CanonicalRevenueCard data={data} />
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
-        <Card label="매출" value={won(s.revenue)} />
+        <Card label="매출 (주문기반·추정)" value={won(s.revenue)} sub={data.revenue_canonical?.summary.wing_used ? "닫힌일 정본은 위 🎯 정본 매출 참조" : undefined} />
         <Card label="반품 차감" value={won(s.return_deduction)} />
         <Card label="수수료(+VAT)" value={won(s.total_fee)} />
         <Card
@@ -755,5 +860,297 @@ function ProductView({ data }: { data: OverviewResponse }) {
         </tbody>
       </table>
     </>
+  );
+}
+
+// ──────────────────────────────────────────────
+// 로켓배송(1P) 탭 — 돈 축 종합조망 블록 (S5, D-10/D-11)
+// ──────────────────────────────────────────────
+function RocketView({
+  data,
+  from,
+  to,
+  onRefresh,
+  refreshing,
+  refreshMsg,
+}: {
+  data: RocketOverview | null;
+  from: string;
+  to: string;
+  onRefresh: () => void;
+  refreshing: boolean;
+  refreshMsg: string | null;
+}) {
+  const [unmapped, setUnmapped] = useState<RocketUnmappedItem[] | null>(null);
+  const [mappings, setMappings] = useState<RocketMappingItem[] | null>(null);
+  const [mapLoading, setMapLoading] = useState(false);
+  const [mapTab, setMapTab] = useState<"unmapped" | "confirmed">("unmapped");
+  const [mapMsg, setMapMsg] = useState<string | null>(null);
+  const [mapLoaded, setMapLoaded] = useState(false);
+
+  function loadCostMap() {
+    setMapLoading(true);
+    Promise.all([
+      fetchRocketCostMapUnmapped(200, true),
+      fetchRocketCostMap(),
+    ]).then(([u, m]) => {
+      setUnmapped(u);
+      setMappings(m);
+    }).catch((e) => setMapMsg("매핑 로드 실패: " + e.message))
+      .finally(() => setMapLoading(false));
+  }
+
+  function openMap() {
+    if (!mapLoaded) { setMapLoaded(true); loadCostMap(); }
+  }
+
+  async function doConfirm(item: RocketUnmappedItem, sku: string) {
+    setMapMsg(null);
+    try {
+      await upsertRocketCostMap({ product_number: item.product_number, internal_sku: sku, status: "confirmed", match_method: "suggested" });
+      setMapMsg(`✅ ${item.product_number} → ${sku} 확정`);
+      loadCostMap();
+    } catch (e: any) {
+      setMapMsg("❌ 확정 실패: " + (e?.message || ""));
+    }
+  }
+
+  async function doIgnore(productNumber: string) {
+    setMapMsg(null);
+    try {
+      await upsertRocketCostMap({ product_number: productNumber, status: "ignored" });
+      setMapMsg(`⏭ ${productNumber} 제외(ignored) 처리`);
+      loadCostMap();
+    } catch (e: any) {
+      setMapMsg("❌ 제외 실패: " + (e?.message || ""));
+    }
+  }
+
+  async function doDelete(productNumber: string) {
+    setMapMsg(null);
+    try {
+      await deleteRocketCostMap(productNumber);
+      setMapMsg(`🗑 ${productNumber} 매핑 삭제`);
+      loadCostMap();
+    } catch (e: any) {
+      setMapMsg("❌ 삭제 실패: " + (e?.message || ""));
+    }
+  }
+
+  const cov = data?.cost_coverage;
+  const covPct = cov ? Math.round(cov.coverage_pct * 100) : null;
+
+  return (
+    <div>
+      {/* 헤더 + 갱신 버튼 */}
+      <div className="flex items-center justify-between mb-3">
+        <div>
+          <span className="text-sm font-semibold text-gray-700">🚀 로켓배송(1P) — 오하이테크 발주 돈 축</span>
+          <span className="ml-2 text-xs text-gray-400">{from} ~ {to}</span>
+        </div>
+        <button
+          onClick={onRefresh}
+          disabled={refreshing}
+          className="flex items-center gap-1.5 px-2.5 py-1 text-xs bg-sky-600 text-white rounded-md hover:bg-sky-700 disabled:opacity-50"
+        >
+          <span className={refreshing ? "animate-spin" : ""}>🔄</span>
+          {refreshing ? "갱신 중…" : "로켓 갱신"}
+        </button>
+      </div>
+
+      {refreshMsg && (
+        <div className="text-xs text-sky-700 bg-sky-50 border border-sky-200 rounded px-2 py-1 mb-3">{refreshMsg}</div>
+      )}
+
+      {!data && (
+        <div className="text-sm text-gray-500 bg-gray-50 border border-gray-200 rounded-lg p-4 mb-3">
+          로켓배송(1P) 데이터 없음 — 위 '로켓 갱신' 버튼으로 Mac 페처가 가져오게 하거나, prod 배포 후 사용 가능합니다.
+        </div>
+      )}
+
+      {data && (
+        <>
+          {/* 순이익 요약 카드 */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+            <Card label="매출(발주 gross)" value={won(data.revenue)} sub={`발주 ${num(data.po_count)}건 / 수량 ${num(data.order_qty)}`} />
+            <Card label="광고비" value={won(data.ad_spend)} sub="Retail 계정단위(D-4)" />
+            <Card
+              label="원가"
+              value={data.has_cost ? won(data.cost) : "—"}
+              sub={
+                data.has_cost
+                  ? covPct !== null ? `커버리지 ${covPct}%${covPct < 100 ? " ⚠ 부분반영" : ""}` : undefined
+                  : "원가 미반영(has_cost=false)"
+              }
+            />
+            <Card
+              label="순이익"
+              value={won(data.net_profit)}
+              sub={data.has_cost && covPct !== null && covPct < 100
+                ? `⚠ 원가 ${covPct}% 반영 — 과대 가능(원칙22)`
+                : data.has_cost ? "매출−광고−원가" : "매출−광고(원가 미반영)"}
+            />
+          </div>
+
+          {/* 커버리지 배지 */}
+          {data.has_cost && cov && (
+            <div className={`rounded-lg border p-3 mb-4 text-xs ${covPct !== null && covPct < 100 ? "bg-amber-50 border-amber-200 text-amber-800" : "bg-emerald-50 border-emerald-200 text-emerald-800"}`}>
+              <div className="font-semibold mb-1">
+                📊 원가 커버리지 {covPct !== null ? `${covPct}%` : "—"}
+                {covPct !== null && covPct < 100 && " — ⚠ net_profit 원가 과소반영(순이익 과대 가능, 원칙22)"}
+              </div>
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-x-4 gap-y-0.5 text-gray-700">
+                <span>발주상세 수집금액: <b>{won(cov.detail_order_amount)}</b></span>
+                <span>미매핑 금액: <b>{won(cov.unmapped_order_amount)}</b></span>
+                <span>미수집 PO: <b>{num(cov.pos_without_detail_count)}건</b></span>
+                <span>확정 SKU: <b>{num(cov.confirmed_sku_count)}</b></span>
+                <span>제외(ignored): <b>{num(cov.ignored_sku_count)}</b></span>
+                <span>미매핑 SKU: <b>{num(cov.unmapped_sku_count)}</b></span>
+              </div>
+              {covPct !== null && covPct < 100 && (
+                <p className="mt-1 text-amber-700">아래 '원가 매핑 관리'에서 미매핑 상품번호를 확정하면 커버리지가 올라갑니다.</p>
+              )}
+            </div>
+          )}
+
+          {/* 발주↔정산 드리프트 */}
+          <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-3 mb-4 text-xs">
+            <div className="font-semibold text-indigo-800 mb-1">📋 발주↔정산 드리프트</div>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-x-4 gap-y-0.5 text-gray-700">
+              <span>발주(gross): <b>{won(data.revenue)}</b></span>
+              <span>정산합계: <b>{won(data.drift.settled_amount)}</b></span>
+              <span>차이: <b>{won(data.drift.drift_amount)}</b></span>
+              <span>드리프트%: <b>{data.drift.drift_pct != null ? `${(Number(data.drift.drift_pct) * 100).toFixed(2)}%` : "—"}</b></span>
+            </div>
+            <div className="text-indigo-600 mt-1">{data.drift.note}</div>
+          </div>
+
+          {/* 원가 매핑 관리 패널 */}
+          <div className="bg-white border border-gray-200 rounded-lg">
+            <div
+              className="flex items-center justify-between px-4 py-2 cursor-pointer select-none hover:bg-gray-50"
+              onClick={openMap}
+            >
+              <span className="text-sm font-semibold text-gray-700">🔗 원가 매핑 관리 (발주상품번호 → SKU)</span>
+              <span className="text-xs text-gray-400">{mapLoaded ? "새로고침↑" : "클릭해서 열기"}</span>
+            </div>
+
+            {mapLoaded && (
+              <div className="border-t border-gray-100 p-4">
+                <div className="flex gap-2 mb-3">
+                  <button
+                    onClick={() => setMapTab("unmapped")}
+                    className={`px-3 py-1 text-xs rounded-md border ${mapTab === "unmapped" ? "bg-amber-600 text-white border-amber-600" : "bg-white text-gray-600 border-gray-300 hover:bg-gray-50"}`}
+                  >
+                    미매핑 {unmapped ? `(${unmapped.length})` : ""}
+                  </button>
+                  <button
+                    onClick={() => setMapTab("confirmed")}
+                    className={`px-3 py-1 text-xs rounded-md border ${mapTab === "confirmed" ? "bg-emerald-600 text-white border-emerald-600" : "bg-white text-gray-600 border-gray-300 hover:bg-gray-50"}`}
+                  >
+                    확정/제외 {mappings ? `(${mappings.length})` : ""}
+                  </button>
+                  <button onClick={loadCostMap} disabled={mapLoading} className="px-2 py-1 text-xs text-gray-500 hover:text-gray-700 disabled:opacity-50">
+                    {mapLoading ? "⟳" : "새로고침"}
+                  </button>
+                </div>
+
+                {mapMsg && (
+                  <div className="text-xs mb-2 px-2 py-1 rounded bg-gray-50 border border-gray-200 text-gray-700">{mapMsg}</div>
+                )}
+
+                {mapTab === "unmapped" && unmapped && (
+                  unmapped.length === 0 ? (
+                    <p className="text-xs text-gray-400">미매핑 상품번호 없음 — 발주상세 수집 후 다시 확인하세요.</p>
+                  ) : (
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="text-left text-gray-400 border-b border-gray-100">
+                          <th className="py-1 pr-2">상품번호</th>
+                          <th className="py-1 pr-2">상품명</th>
+                          <th className="py-1 pr-2 text-right">발주수량</th>
+                          <th className="py-1">제안(상위 3) / 액션</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {unmapped.map((item) => (
+                          <tr key={item.product_number} className="border-b border-gray-50 hover:bg-gray-50">
+                            <td className="py-1.5 pr-2 text-gray-700 font-mono">{item.product_number}</td>
+                            <td className="py-1.5 pr-2 text-gray-600 max-w-xs truncate">{item.product_name || "—"}</td>
+                            <td className="py-1.5 pr-2 text-right text-gray-500">{num(item.total_order_qty)}</td>
+                            <td className="py-1.5">
+                              <div className="flex flex-wrap gap-1">
+                                {item.suggestions.map((s) => (
+                                  <button
+                                    key={s.internal_sku}
+                                    onClick={() => doConfirm(item, s.internal_sku)}
+                                    className="px-1.5 py-0.5 text-xs bg-blue-50 text-blue-700 border border-blue-200 rounded hover:bg-blue-100"
+                                    title={`${s.product_name} / 원가 ${s.cost_price?.toLocaleString() ?? "미설정"}원 / 유사도 ${(s.score * 100).toFixed(0)}%`}
+                                  >
+                                    {s.internal_sku} ({(s.score * 100).toFixed(0)}%)
+                                  </button>
+                                ))}
+                                <button
+                                  onClick={() => doIgnore(item.product_number)}
+                                  className="px-1.5 py-0.5 text-xs bg-gray-100 text-gray-500 border border-gray-200 rounded hover:bg-gray-200"
+                                >
+                                  제외
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )
+                )}
+
+                {mapTab === "confirmed" && mappings && (
+                  mappings.length === 0 ? (
+                    <p className="text-xs text-gray-400">확정/제외된 매핑 없음</p>
+                  ) : (
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="text-left text-gray-400 border-b border-gray-100">
+                          <th className="py-1 pr-2">상품번호</th>
+                          <th className="py-1 pr-2">internal_sku</th>
+                          <th className="py-1 pr-2">상태</th>
+                          <th className="py-1 pr-2 text-right">원가</th>
+                          <th className="py-1">삭제</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {mappings.map((m) => (
+                          <tr key={m.product_number} className="border-b border-gray-50 hover:bg-gray-50">
+                            <td className="py-1.5 pr-2 text-gray-700 font-mono">{m.product_number}</td>
+                            <td className="py-1.5 pr-2 text-gray-600">{m.internal_sku}</td>
+                            <td className="py-1.5 pr-2">
+                              <span className={`px-1.5 py-0.5 rounded text-xs ${m.status === "confirmed" ? "bg-emerald-100 text-emerald-700" : "bg-gray-100 text-gray-500"}`}>
+                                {m.status === "confirmed" ? "확정" : "제외"}
+                              </span>
+                            </td>
+                            <td className="py-1.5 pr-2 text-right text-gray-500">
+                              {m.cost_price != null ? `${m.cost_price.toLocaleString()}원` : "미설정"}
+                            </td>
+                            <td className="py-1.5">
+                              <button
+                                onClick={() => doDelete(m.product_number)}
+                                className="px-1.5 py-0.5 text-xs text-red-500 border border-red-200 rounded hover:bg-red-50"
+                              >
+                                삭제
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )
+                )}
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </div>
   );
 }
