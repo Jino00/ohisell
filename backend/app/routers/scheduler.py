@@ -83,7 +83,13 @@ def trigger_job(job_id: str, db: Session = Depends(get_db)):
 
     try:
         func()
-        state.last_run_at = kst_now()
+        # 수동 트리거 성공 — 워치독 상태도 정리한다(cron 경로는 리스너가 담당, S5b).
+        # 직전 cron 실패의 stale 'error'가 남아 evaluator가 거짓 'failed'로 보지 않게.
+        now = kst_now()
+        state.last_run_at = now
+        state.last_status = "ok"
+        state.last_error = None
+        state.last_status_at = now
         db.commit()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"작업 실행 에러: {e}")
