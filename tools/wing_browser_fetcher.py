@@ -962,6 +962,148 @@ def cmd_chrome(cfg: dict) -> int:
     return 0
 
 
+def _cdp_alive(port: int) -> bool:
+    """CDP 디버깅 엔드포인트가 응답하면 True (/json/version HTTP 프로브).
+
+    TCP LISTEN만 보면 행(hang)·기동중 Chrome을 살아있다 오판할 수 있어
+    실제 CDP 응답을 확인한다.
+    """
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/json/version", timeout=3
+        ) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
+def _profile_chrome_alive(profile: str) -> bool:
+    """프로필 디렉터리를 점유 중인 살아있는 Chrome이 있는지 — SingletonLock PID 생존 확인.
+
+    CDP가 행(hang)이거나 기동 중이라 _cdp_alive가 거짓이어도, Chrome 프로세스가
+    user-data-dir를 점유 중이면 lock 청소·중복 launch가 프로필을 손상시킨다(codex P2#1).
+    Chrome의 SingletonLock 심볼릭링크 타깃은 'hostname-PID' 형식 → 끝 PID로 생존 판정.
+    """
+    lock = os.path.join(profile, "SingletonLock")
+    try:
+        target = os.readlink(lock)  # 예: "Jino-MacBookPro.local-19029"
+    except OSError:
+        return False  # 링크 없음 = 점유 없음
+    try:
+        pid = int(target.rsplit("-", 1)[-1])  # 호스트명에 '-' 있어도 마지막만
+    except ValueError:
+        return False
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)  # 시그널 0 = 존재만 확인
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass  # 타유저 소유(우리 Chrome은 동일 유저) → 점유 단정 말고 cmdline으로 검증(codex R3)
+    # PID 생존만으론 부족 — 크래시 후 PID 재사용(무관 프로세스)·타호스트/유저 lock이면
+    # 무한 adopt로 크래시 복구가 무력화된다(codex R2 P2). 그 PID의 cmdline에 이 프로필
+    # user-data-dir가 있어야만 "우리 Chrome 점유"로 인정. 불일치면 stale → 청소·재기동.
+    import subprocess
+
+    try:
+        cmdline = subprocess.run(
+            ["ps", "-o", "command=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=3,
+        ).stdout
+    except Exception:
+        return False  # cmdline 확인 불가 → 안전하게 stale 취급(청소·재기동 허용)
+    return f"--user-data-dir={profile}" in cmdline
+
+
+def cmd_chrome_supervise(cfg: dict) -> int:
+    """CDP Chrome을 launchd KeepAlive로 상주화하기 위한 포그라운드 supervisor.
+
+    launchd가 "이 프로세스의 수명 = Chrome 수명"으로 보도록 block한다(재부팅/종료/
+    크래시 시 자동 복구 = D-4). cmd_chrome은 Popen 후 즉시 리턴해 KeepAlive와 호환
+    불가하므로 별도 명령으로 분리.
+
+    동작:
+      1) 이미 CDP가 응답하면(수동/이전 Chrome 점유) → 죽을 때까지 adopt(대기) 후 종료.
+         → launchd가 fresh 재기동 시 (1)이 거짓이면 (3)으로 자기 소유 Chrome 기동.
+      2) 살아있는 Chrome이 없으면 stale SingletonLock 청소(크래시 잔재 → 기동 실패 방지).
+      3) Chrome을 포그라운드 자식으로 launch하고 proc.wait()로 수명 동안 block.
+    종료(return) → launchd가 ThrottleInterval 후 재기동.
+    """
+    import signal
+    import subprocess
+    import time
+
+    port = int(cfg.get("cdp_port", 9222))
+    profile = os.path.expanduser(cfg.get("cdp_profile", "~/.ohisell_wing_chrome"))
+    chrome_bin = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    if not os.path.exists(chrome_bin):
+        log.error("Chrome을 찾을 수 없습니다: %s", chrome_bin)
+        return 1
+
+    # 1) 기존 Chrome adopt — CDP 응답이거나(정상) 프로필 lock PID 생존이면(CDP 행 포함,
+    #    codex P2#1) 우리가 띄우지 않은 Chrome이 점유 중 → 죽을 때까지 대기. 둘 다 죽어야
+    #    (2)의 lock 청소·launch로 진입한다(중복 실행에 의한 프로필 손상 방지).
+    if _cdp_alive(port) or _profile_chrome_alive(profile):
+        log.info(
+            "기존 Chrome 점유 감지(CDP=%s, profile_lock=%s) — adopt, 종료 감지까지 대기.",
+            _cdp_alive(port), _profile_chrome_alive(profile),
+        )
+        while _cdp_alive(port) or _profile_chrome_alive(profile):
+            time.sleep(15)
+        log.info("기존 Chrome 종료 감지 — supervisor 종료(launchd 재기동).")
+        return 0
+
+    # 2) stale SingletonLock 청소(살아있는 Chrome 없음 확인됨 → 크래시 잔재 안전 제거).
+    for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+        lock = os.path.join(profile, name)
+        with contextlib.suppress(OSError):
+            if os.path.islink(lock) or os.path.exists(lock):
+                os.unlink(lock)
+    os.makedirs(profile, exist_ok=True)
+
+    # 3) Chrome을 포그라운드 자식으로 launch하고 수명 동안 block.
+    log.info("CDP Chrome 기동 (port %d, profile %s)", port, profile)
+    proc = subprocess.Popen(
+        [
+            chrome_bin,
+            f"--remote-debugging-port={port}",
+            f"--user-data-dir={profile}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "https://wing.coupang.com",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    # launchd가 bootout/kickstart로 SIGTERM 보낼 때 자식 Chrome도 함께 정리.
+    # Chrome 종료를 확정한 뒤(최대 10초 대기, 미응답 시 SIGKILL) supervisor가 빠진다
+    # — 안 그러면 launchd 재시작 시 다음 supervisor가 죽어가는 구 Chrome을 adopt(codex P2#2).
+    def _terminate(signum, _frame):
+        log.info("시그널 %d 수신 — Chrome(PID %d) 종료 대기.", signum, proc.pid)
+        with contextlib.suppress(Exception):
+            proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except Exception:
+            log.warning("Chrome SIGTERM 무응답 — SIGKILL.")
+            with contextlib.suppress(Exception):
+                proc.kill()
+            with contextlib.suppress(Exception):
+                proc.wait(timeout=5)
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, _terminate)
+    signal.signal(signal.SIGINT, _terminate)
+
+    rc = proc.wait()
+    log.info("Chrome 종료(rc=%s) — supervisor 종료(launchd 재기동).", rc)
+    return 0
+
+
 def main() -> None:
     cfg = load_config()
     arg = sys.argv[1] if len(sys.argv) >= 2 else ""
@@ -969,6 +1111,8 @@ def main() -> None:
         sys.exit(cmd_login(cfg))
     if arg == "chrome":
         sys.exit(cmd_chrome(cfg))
+    if arg == "chrome-supervise":
+        sys.exit(cmd_chrome_supervise(cfg))
     if arg == "rg":
         sys.exit(cmd_rg(cfg))
     if arg == "poll":

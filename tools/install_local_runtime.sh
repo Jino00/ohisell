@@ -45,7 +45,9 @@ echo "==> 페처 복사 + plist 설치"
 LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
 mkdir -p "$LAUNCH_AGENTS"
 UID_NUM="$(id -u)"
-for pair in "adcost:ad_cost_browser_fetcher.py" "wing:wing_browser_fetcher.py" "rocket:rocket_supplier_fetcher.py"; do
+# wing-chrome = 같은 wing 스크립트를 'chrome-supervise' 인자로 도는 별도 launchd 잡
+# (CDP Chrome 9222 상주화, S5a). cp는 멱등(동일 파일), plist만 별도 렌더.
+for pair in "adcost:ad_cost_browser_fetcher.py" "wing:wing_browser_fetcher.py" "wing-chrome:wing_browser_fetcher.py" "rocket:rocket_supplier_fetcher.py"; do
   name="${pair%%:*}"
   script="${pair##*:}"
   cp -f "$REPO_TOOLS/$script" "$LOCAL_TOOLS/$script"
@@ -57,10 +59,32 @@ for pair in "adcost:ad_cost_browser_fetcher.py" "wing:wing_browser_fetcher.py" "
       -e "s#__SCRIPT__#$LOCAL_TOOLS/$script#g" \
       -e "s#__HOME__#$HOME#g" \
       "$tmpl" > "$dest"
+  # 리로드 검증용 구 잡 PID 캡처(label은 list의 3번째 컬럼).
+  _old_pid="$(launchctl list 2>/dev/null | awk -v n="com.ohisell.$name" '$3==n{print $1}')"
   launchctl bootout "gui/$UID_NUM/com.ohisell.$name" 2>/dev/null || true
-  sleep 2  # bootout 완료 대기 — 너무 빠른 bootstrap은 레이스로 '미로드' 실패함
+  # bootout 완료 대기 — 고정 sleep은 느린 SIGTERM 핸들러(wing-chrome는 Chrome 종료를
+  # 최대 10초 기다림)와 레이스로 bootstrap이 '미로드'로 조용히 실패한다. 잡이 실제로
+  # 사라질 때까지(launchctl print 실패) 최대 25초 폴링.
+  for _i in $(seq 1 25); do
+    launchctl print "gui/$UID_NUM/com.ohisell.$name" >/dev/null 2>&1 || break
+    sleep 1
+  done
+  # 25초 후에도 잔존 = bootout 실패 → 강제 1회 더(레이스/멈춤 잡 방어).
+  if launchctl print "gui/$UID_NUM/com.ohisell.$name" >/dev/null 2>&1; then
+    launchctl bootout "gui/$UID_NUM/com.ohisell.$name" 2>/dev/null || true
+    sleep 3
+  fi
   launchctl bootstrap "gui/$UID_NUM" "$dest" 2>/dev/null || launchctl load "$dest" 2>/dev/null || true
-  echo "    com.ohisell.$name → 설치+reload"
+  sleep 1
+  _new_pid="$(launchctl list 2>/dev/null | awk -v n="com.ohisell.$name" '$3==n{print $1}')"
+  # 성공 = 잡이 로드돼 있고 PID가 갱신됨(구 잡 잔존이면 PID 동일 → 실패). 이전에 미로드면
+  # _old_pid가 비어 어떤 로드든 성공. 구 잡이 그대로 살아있는 silent stale-deploy 차단(codex R3).
+  if launchctl print "gui/$UID_NUM/com.ohisell.$name" >/dev/null 2>&1 \
+     && { [ -z "$_old_pid" ] || [ "$_new_pid" != "$_old_pid" ]; }; then
+    echo "    com.ohisell.$name → 설치+reload (pid ${_old_pid:-none}→${_new_pid:-?})"
+  else
+    echo "    com.ohisell.$name → ⚠️ reload 실패(구 잡 잔존 가능, pid=${_new_pid:-?}) — 수동: launchctl bootout gui/$UID_NUM/com.ohisell.$name && launchctl bootstrap gui/$UID_NUM $dest"
+  fi
 done
 
 echo "==> 완료. 데몬 3종이 로컬 런타임($LOCAL_VENV)으로 기동됨."
