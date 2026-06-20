@@ -185,8 +185,11 @@ Mac(S5):
   - Verify: ✅ 로컬 upgrade/downgrade 왕복 + PRAGMA, ✅ prod upgrade(rev s3t4u5v6w7x8)+PRAGMA 3컬럼, ✅ prod API 200 무회귀, codex GATE PASS
 - [x] **T2 (P1)** — services — staleness_evaluator 순수함수 + 5-state 단위테스트 ✅ (커밋 bc7677a)
   - `app/services/scheduler_watchdog.py`(evaluate_job/evaluate_staleness, I/O 0) + 17 테스트. created_at 입력 추가(never_succeeded 첫 주기 유예). codex PASS(P2×2 우선순위·경계 테스트 반영).
-- [ ] **T3 (P1)** — services — add_listener 콜백 + 삼킴잡 6종 re-raise 정렬 + 인라인 스탬핑 제거
-  - Verify: 통합테스트 raise→error, 삼킴잡 전체실패→error
+- [~] **T3 (P1)** — 코드+테스트+codex 완료(커밋 0d0553f), ⚠️prod 배포+라이브검증 PENDING(S4와 함께 권장)
+  - `_job_state_listener`+`add_listener`(EXECUTED|ERROR|MISSED) + `_apply_job_event`(순수 mutation 분리) + 삼킴잡 **7종** re-raise 정렬(계획의 6 + ★codex P1로 추가된 `recalculate_profit_job`) + 인라인 스탬프 13개 제거 + 라우터 수동트리거 status 정리.
+  - 테스트 `test_scheduler_listener.py`(6: 매핑·last_run_at 보존·절단·폴백 + 삼킴 reraise[prod3.10/로컬3.9 skip]). 로컬 22 passed/1 skipped.
+  - **codex R2 PASS**: R1 [P1](recalculate_profit 스탬프 제거했으나 except 미정렬→거짓 ok) 수용·수정 → R2 clean. ★교훈: 계획의 삼킴잡 목록(6)이 recalculate_profit 누락 → 실제 except 전수감사로 20잡 전부 raise 확인.
+  - **Verify(PENDING, 원칙22 §6)**: prod 배포 후 ① 실잡 성공→last_status=ok ② 고의 raise→error+last_error ③ /health failed(S4 필요). 미배포 상태(prod models.py도 함께 배포).
 - [ ] **T4 (P1)** — routers — scheduler_health Harness + GET /health(running·missing·sanitized·healthy)
 - [ ] **T5 (P2)** — tools — Mac 워치독 폴 모드 + launchd KeepAlive + 디바운스 + 집계 알림
 - [ ] **T6 (P3, TODO)** — 서버측 푸시 알림 채널(Mac-off 공백)
@@ -194,7 +197,7 @@ Mac(S5):
 ## 12. 체크리스트
 - [x] S1 마이그레이션(로컬→prod PRAGMA) — codex pass ✅ 커밋 7d5d846, prod rev s3t4u5v6w7x8
 - [x] S2 evaluator + 단위테스트 — codex pass ✅ (bc7677a, 17 테스트)
-- [ ] S3 리스너 + 삼킴잡 정렬 + DRY — codex pass
+- [~] S3 리스너 + 삼킴잡 정렬 + DRY — 코드+codex R2 PASS(0d0553f), prod 배포+라이브검증 PENDING
 - [ ] S4 Harness + /health — codex pass
 - [ ] S5 Mac 워치독 폴 — codex pass
 - [ ] 라이브 self-verify 1~9 통과

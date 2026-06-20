@@ -3,6 +3,14 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
+- 날짜: 2026-06-20 (★워치독(=revenue-wing-truth S5b) **S3 코드 완료** — 리스너 배선 + 삼킴잡 정렬, ⚠️prod 미배포)
+- ★**워치독 S3 코드 완료(3/5, 브랜치 `feat/scheduler-watchdog`, 커밋 0d0553f, 미머지·⚠️prod 미배포)**: PLAN T3.
+  - `scheduler_service.py`: `_job_state_listener`(SA①)+`add_listener`(EXECUTED|ERROR|MISSED) — cron 잡 결과를 SchedulerState에 중앙 기록. `_apply_job_event`(매핑 순수 mutation 분리, 단위테스트 가능). EXECUTED→last_run_at=now·ok, ERROR→error+last_error[:2000](last_run_at 보존), MISSED→missed. 콜백 예외 격리.
+  - 삼킴잡 **7종** outer except re-raise 정렬(계획 6 + ★codex P1로 추가 `recalculate_profit_job`). 인라인 last_run_at 스탬프 13개 제거(리스너 중앙화). 라우터 수동트리거 성공 시 status 정리.
+  - 테스트 `test_scheduler_listener.py` 6개(+watchdog 17). 로컬 22 passed/1 skipped(삼킴 reraise는 prod3.10, 로컬3.9 Pydantic X|None skip).
+  - **codex R2 PASS**: R1 [P1](recalculate_profit 스탬프 제거했으나 except 미정렬→거짓 ok 회귀) 수용·수정 → R2 clean. ★교훈(원칙22): 계획의 삼킴잡 목록 맹신 말고 실제 except 전수감사(20잡 전부 raise 확인).
+  - ⚠️**PENDING(원칙22 §6)**: prod 배포(scp+pm2, models.py 포함)+라이브검증 ① 실잡 성공→ok ② 고의 raise→error. 전체 health failed 검증은 S4(/health) 필요. **다음 = S4(scheduler_health Harness + GET /api/scheduler/health) → S3+S4 함께 prod 배포·라이브검증**. 재개: "PLAN_scheduler-watchdog S4".
+- ─────────────────────────────────────────────
 - 날짜: 2026-06-20 (★워치독(=revenue-wing-truth S5b) **S2 완료** — staleness_evaluator 순수함수)
 - ★**워치독 S2 완료(2/5, 브랜치 `feat/scheduler-watchdog`, 커밋 bc7677a, 미머지·미push)**: PLAN_scheduler-watchdog T2.
   - `backend/app/services/scheduler_watchdog.py`(SA②, I/O 0): evaluate_job/evaluate_staleness. 5-state 우선순위 disabled > failed(error/missed) > never_succeeded > stale(>1.5×주기) > ok. ★계획 대비 정합: `created_at` 입력 추가(never_succeeded 첫 주기 유예로 갓등록 잡 헛알림 방지), interval 불명(0) 시 stale 미판정.
