@@ -58,6 +58,9 @@ def settlement_net_by_line(
         )
         .filter(
             CoupangRevenueFee.account_key.in_(keys),
+            # SALE/REFUND만 합산(codex P2): 다른 sale_type 잡음이 향후 들어와도 net에 안 섞이게
+            # 명시(현 prod=SALE·REFUND 2종뿐, 라이브 확정). REFUND는 위 signed에서 부호 반전.
+            CoupangRevenueFee.sale_type.in_(("SALE", "REFUND")),
             CoupangRevenueFee.sale_date.isnot(None),
             CoupangRevenueFee.sale_date >= dfrom,
             CoupangRevenueFee.sale_date <= dto,

@@ -48,6 +48,9 @@ def compute_line_adjustment(
 ) -> dict:
     """정산∩active 라인만 스왑. 보정 = Σ(settlement_net(L) − our_net_rev(L)).
 
+    ★unit_price_by_vid 키 = vendor_item_id 단독(account 무관): vid는 전역 유니크(D-8, 라이브
+    확정 — 같은 vid가 2계정에 존재 0건)라 계정별/전체 호출이 같은 단가를 쓴다 → 등가성 보존(codex P2).
+
     정산에만 있고 active 아닌 라인(취소·미동기)은 스킵(매출 미반영). active만 있고 미정산 라인은
     스킵(폴백). 반환 {adjustment, matured_lines, settlement_net_matured, our_net_rev_matured}.
     """
