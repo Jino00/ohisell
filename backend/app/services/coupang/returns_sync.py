@@ -27,13 +27,9 @@ _SHORT_SPAN_DAYS = 7     # 반품철회·교환: "less then 7day" → 7일 윈�
 # 취소(CANCEL)는 status 미사용. 전 상태를 덮기 위해 status별 순회.
 RETURN_STATUSES = ["RU", "UC", "CC", "PR"]  # 출고중지요청·반품접수·반품완료·쿠팡확인요청
 _CALL_DELAY = 0.3  # 쿠팡 속도제한(429) 대응 — 호출 간 간격
-# datetime.now()(UTC)는 KST 기준 하루 전 날짜라 조회범위가 하루 stale. 경계는 KST로 명시
-# (settlement_sync._kst_today와 동일 패턴).
-
-
-def kst_today():
-    """KST 기준 오늘 date. 조회 윈도우 경계 계산용(서버 UTC ↔ KST 날짜 경계 어긋남 방지)."""
-    return datetime.now(_KST).date()
+# 날짜 경계는 KST로 통일 — kst_today()(app.utils.kst, 위에서 import)가 서버 UTC↔KST
+# 날짜 경계 어긋남을 방지한다. (과거 로컬 재정의가 미정의 _KST를 참조해 NameError로
+# 동기화가 6/4~6/20 중단된 회귀를 제거 — 커밋 a2bbd3a 잔재, failures.jsonl 2026-06-20.)
 
 
 def _date_windows(days: int, max_span: int) -> list[tuple[str, str]]:

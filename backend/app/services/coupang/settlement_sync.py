@@ -33,12 +33,9 @@ SETTLEMENT_ACCOUNTS = ["COUPANG_WING1", "COUPANG_WING2"]
 _REVENUE_SPAN_DAYS = 7
 _RATIO_EPSILON = Decimal("0.01")  # 수수료율 부동 비교 허용오차
 _CALL_DELAY = 0.3  # 쿠팡 속도제한(429) 대응 — 호출 간 간격
-# datetime.now()는 UTC날짜라 조회범위가 KST 기준 하루 stale. 조회 경계는 KST로 명시.
-
-
-def kst_today():
-    """KST 기준 오늘 date. 조회 윈도우 경계 계산용(서버 UTC ↔ KST 날짜 경계 어긋남 방지)."""
-    return datetime.now(_KST).date()
+# 날짜 경계는 KST로 통일 — kst_today()(app.utils.kst, 위에서 import)가 서버 UTC↔KST
+# 날짜 경계 어긋남을 방지한다. (과거 로컬 재정의가 미정의 _KST를 참조해 NameError로
+# 정산 동기화가 6/4~6/20 중단된 회귀를 제거 — 커밋 a2bbd3a 잔재, failures.jsonl 2026-06-20.)
 
 
 def _dec(v) -> Decimal:
