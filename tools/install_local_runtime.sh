@@ -63,5 +63,24 @@ for pair in "adcost:ad_cost_browser_fetcher.py" "wing:wing_browser_fetcher.py" "
   echo "    com.ohisell.$name → 설치+reload"
 done
 
-echo "==> 완료. 데몬 3종이 로컬 런타임($LOCAL_VENV)으로 기동됨."
+# 6. 스케줄러 워치독 폴 데몬(S5b S5) — 별도 블록(loop 미수정 → main의 wing-chrome 추가와 머지 안전).
+#    브라우저/플레이라이트 불필요(requests만). prod /api/scheduler/health 폴 → 비정상 시 Mac 알림.
+echo "==> 스케줄러 워치독 폴 설치"
+WD_SCRIPT="scheduler_watchdog_poll.py"
+cp -f "$REPO_TOOLS/$WD_SCRIPT" "$LOCAL_TOOLS/$WD_SCRIPT"
+echo "    $WD_SCRIPT 복사"
+WD_TMPL="$REPO_TOOLS/com.ohisell.scheduler-watchdog.plist"
+if [ -f "$WD_TMPL" ]; then
+  WD_DEST="$LAUNCH_AGENTS/com.ohisell.scheduler-watchdog.plist"
+  sed -e "s#__PYTHON__#$LOCAL_VENV/bin/python3#g" \
+      -e "s#__SCRIPT__#$LOCAL_TOOLS/$WD_SCRIPT#g" \
+      -e "s#__HOME__#$HOME#g" \
+      "$WD_TMPL" > "$WD_DEST"
+  launchctl bootout "gui/$UID_NUM/com.ohisell.scheduler-watchdog" 2>/dev/null || true
+  sleep 2
+  launchctl bootstrap "gui/$UID_NUM" "$WD_DEST" 2>/dev/null || launchctl load "$WD_DEST" 2>/dev/null || true
+  echo "    com.ohisell.scheduler-watchdog → 설치+reload"
+fi
+
+echo "==> 완료. 데몬이 로컬 런타임($LOCAL_VENV)으로 기동됨."
 echo "    상태: launchctl list | grep com.ohisell"
