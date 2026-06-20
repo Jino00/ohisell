@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import SchedulerState
-from app.schemas import SchedulerJobOut, SchedulerStatusOut
+from app.schemas import SchedulerHealthOut, SchedulerJobOut, SchedulerStatusOut
 from app.services.scheduler_service import scheduler
 
 router = APIRouter(prefix="/api/scheduler", tags=["scheduler"])
@@ -39,6 +39,18 @@ def scheduler_status(db: Session = Depends(get_db)):
         ))
 
     return SchedulerStatusOut(is_running=is_running, jobs=jobs)
+
+
+@router.get("/health", response_model=SchedulerHealthOut)
+def scheduler_health(db: Session = Depends(get_db)):
+    """워치독 헬스 — 필수 잡의 실패/stale/미등록/스케줄러 정지를 1급 신호로 노출(S5b S4).
+
+    HTTP는 항상 200, body의 healthy:bool로 판정한다(Mac 페처가 폴링). 에러는 sanitized 한 줄
+    요약만 노출하고 전체 traceback은 DB에만 남긴다(누출 방지). 읽기 전용·머니로직 불변.
+    """
+    from app.services.scheduler_health import compute_scheduler_health
+
+    return compute_scheduler_health(db, scheduler, kst_now())
 
 
 @router.post("/trigger/{job_id}")

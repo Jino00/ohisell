@@ -282,3 +282,24 @@ class SchedulerJobOut(BaseModel):
 class SchedulerStatusOut(BaseModel):
     is_running: bool
     jobs: list[SchedulerJobOut]
+
+
+# ── Scheduler watchdog health (S5b S4) ──
+class SchedulerJobVerdictOut(BaseModel):
+    job_name: str
+    state: str  # ok|disabled|failed|never_succeeded|stale
+    age_sec: Optional[float] = None
+    reason: str
+    # 실패 잡 한 줄 요약(예외 클래스+메시지). 전체 traceback은 DB에만(누출 방지).
+    error_summary: Optional[str] = None
+
+
+class SchedulerHealthOut(BaseModel):
+    healthy: bool
+    scheduler_running: bool
+    missing_jobs: list[str]
+    failed: list[SchedulerJobVerdictOut]
+    stale: list[SchedulerJobVerdictOut]
+    never_succeeded: list[SchedulerJobVerdictOut]
+    disabled: list[SchedulerJobVerdictOut]
+    as_of: str
