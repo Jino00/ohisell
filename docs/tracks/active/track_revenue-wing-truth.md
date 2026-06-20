@@ -1,6 +1,6 @@
 # 트랙: 대시보드 숫자를 Wing 실제와 일치 (매출 정본화)
 
-> 생성 2026-06-20 · 상태: Active (0/N) · 트리거: Jino "너가 보여주는 매출/광고/수수료/원가가 미덥지 않다 → 실제(Wing)와 같을 때까지 조정"
+> 생성 2026-06-20 · 상태: Active (S2·S3·S4·S5a 완료, S5b 보류) · 트리거: Jino "너가 보여주는 매출/광고/수수료/원가가 미덥지 않다 → 실제(Wing)와 같을 때까지 조정"
 
 ## 목표 (한 줄)
 종합조망/운영패널의 매출·광고비·수수료·원가를 **Wing 실제 숫자와 일치**시켜 신뢰 가능하게 한다. 닫힌 과거일은 Wing이 진실의 원천.
@@ -69,7 +69,8 @@
   - **잔여**: 프론트 CommandCenter.tsx에 정본 매출 표시(닫힌일=Wing, 라벨 '정본/추정', 당일 주문기반). 커밋(현재 미커밋·prod 직접배포 상태).
 - [x] **S3 — 취소 반영(당일/실시간) — 완료(2026-06-20)**: 근본원인=반품/취소·정산 자동동기화가 6/4~6/20(16일) 매일 `_KST` NameError로 중단(커밋 a2bbd3a 잔재, overview.py는 6/9 수정했으나 returns_sync·settlement_sync 누락). 수정=깨진 로컬 `kst_today()` 삭제(import된 정상함수 사용). prod 배포·재시작·수동트리거 라이브검증(returns WING1 반품6/취소18·settlement 137txns·에러0), codex PASS. 커밋 `8fd4349`(브랜치 fix/coupang-returns-settlement-kst-regression). **RG**: 주문 API에 status/취소 필드 부재 라이브확정 → RG net은 Wing GMV(S2)가 유일 소스. **잔여 인사이트(D-10)**: 6/16 +56,700 갭은 reconcile-by-absence·returns API 둘 다 안 거치는 cross-surface 차이 → S2 Wing-canonical이 구조적 정답(A안 재검증). 당일/오픈윈도우는 Wing 발행 전이라 gross 추정 불가피.
 - [x] **S4 — 순이익 매출기준 정산화 — 완료(2026-06-20, main 머지)**: 조사 결과 수수료(실측 8.58%)·원가(170/170 매핑)는 이미 Wing 정합. 매출 소스 충돌(6/8 정산 360,300 vs Wing판매분석 348,200)에 **Jino 결정 B**(net_profit 매출기준→쿠팡 정산 실지급). **라인 그레인 가산보정** 구현(SA `settlement_net_by_line` + Harness `compute_line_adjustment` + intelligence 배선, by_option 불변 D-14). **codex 2R**: 1차 [P1]×2(성숙 그레인·반품 도메인) 수용→라인그레인 재설계, 2차 PASS + [P2]×2(sale_type 필터·vid유니크 주석) 반영. 테스트 SA6+Harness10+회귀56. **prod 라이브검증**: WING1 82정산라인 매칭·adjustment=0(우리 net==정산 net 정확일치)→net_profit 불변(무회귀). main 머지(커밋 78751ac~d759833).
-- [ ] **S5 — CDP Chrome launchd 상주화(D-4)**: 9222 Chrome을 launchd로 관리(재부팅/종료 자동 복구) → Wing 수집 무중단.
+- [x] **S5a — CDP Chrome launchd 상주화(D-4) — 완료(2026-06-20, 브랜치 `feat/wing-chrome-launchd-s5a`, 커밋 ae6e07f, 미머지)**: 9222 Chrome을 launchd 잡 `com.ohisell.wing-chrome`로 관리(재부팅/종료/크래시 자동 복구) → Wing 수집 무중단. 신규 `cmd_chrome_supervise`(Chrome 포그라운드 자식 proc.wait block → launchd가 수명 인식, 기존 Chrome adopt/없으면 stale lock 청소 후 launch, SIGTERM wait-then-kill) + plist(KeepAlive+RunAtLoad+Throttle10s) + installer(wing-chrome 추가·bootout 폴링·PID 갱신 리로드 검증). poll 데몬(com.ohisell.wing)은 connect_over_cdp attach만 → 독립 공존. **codex 4R clean PASS**(R1 P2×2·R2 P2×1·R3 P2×2 전부 수용·R4 무지적). **라이브 검증(원칙22)**: Chrome SIGKILL→proc.wait rc=-9 즉시감지→launchd 재기동→lock청소→fresh Chrome→CDP 자동복구(세션유지·리스너1). installer 4잡 PID갱신 안정로드. ★Chrome CDP 콜드스타트 ~90s(포트는 즉시 LISTEN, /json/version은 완전초기화 후) — 검증 폴 창 주의, 기능 무관.
+- [ ] **S5b — 반품/정산 cron 잡 self-heal/알림 (보류, Jino "S5a만 먼저")**: `SchedulerState`에 last_status/last_error 없어 cron 실패 silent(16일 사고 구조원인). ⚠️**background task가 별도 브랜치 `feat/scheduler-watchdog`에 S1 시작**(커밋 7d5d846: last_status/last_error/last_status_at 컬럼+alembic). prod DB 스키마 변경 동반. S5a 라이브 안정 후 착수 결정.
 - [x] codex review(원칙19) — S3 PASS, S4 2R PASS(1차 P1×2 수용·2차 P2×2 반영).
 
 ## D-11~D-13 (S4 설계 확정, Jino 2026-06-20)
@@ -100,16 +101,17 @@ Agent: 종합조망 net_profit (intelligence.py / command-center)
 - **RG**: `rg/orders` 라이브 응답에 status/취소/반품 필드 전무(orderId·orderItems·paidAt·vendorId만). RG 전용 취소 API도 명세 부재 → RG net은 Wing GMV(RFM, S2)가 유일 소스.
 - **운영 빈틈**: 반품/정산 잡은 cron 등록돼 있으나 실패해도 조용히 죽음(last_run_at만 stale). 추후 self-heal/알림 보강 후보(S5 인접).
 
-## 현재 진행 단계 (2026-06-20 S4 완료 시점)
-- **S2(매출 정본화)·S3(취소 신선도)·S4(순이익 매출기준 정산화) 전부 완료·main 머지.** prod 동작 중.
-- 미push(로컬 main만 앞섬). S5(launchd 상주화)만 잔여.
-- ★핵심 결론: Jino가 의심한 **수수료·원가는 이미 Wing 실측과 정합**(8.58%·100% 매핑). **매출은 S2(닫힌일=Wing GMV 표시)+S4(net_profit=정산 실지급)로 이중 정합**. 현 윈도우 정산 라인 보정=0(주문기반이 이미 정산과 일치).
+## 현재 진행 단계 (2026-06-20 S5a 완료 시점)
+- **S2·S3·S4 완료·main 머지 + S5a(CDP Chrome launchd 상주화) 완료**(브랜치 `feat/wing-chrome-launchd-s5a`, 커밋 ae6e07f, 미머지·미push). prod/로컬 데몬 동작 중.
+- S5b(잡 self-heal/알림)만 보류(Jino "S5a만 먼저"). background가 `feat/scheduler-watchdog`에 S1 시작해 둠.
+- ★핵심 결론: Jino가 의심한 **수수료·원가는 이미 Wing 실측과 정합**(8.58%·100% 매핑). **매출은 S2(닫힌일=Wing GMV 표시)+S4(net_profit=정산 실지급)로 이중 정합**. **S5a로 Wing 수집 인프라(CDP Chrome) 무중단화** → 닫힌일 정본화가 데이터 신선도 끊김 없이 유지(6/15~6/20 5일 정지 사고 재발 방지).
 
 ## 다음 액션 (다음 세션 시작 시)
 1. 이 트랙 파일 + claude-progress + 최신 HANDOFF 읽기.
-2. (선택) 로컬 main push: `git push origin main`(Jino 요청 시).
-3. **S5 착수**: CDP Chrome 9222 launchd 상주화 + 반품/정산 cron 잡 self-heal/알림(background task `쿠팡 동기화 잡 실패 무탐지 알림`과 통합 가능) → Wing 수집·동기화 무중단.
-4. (관찰) 정산 성숙 후 adjustment≠0 케이스 모니터(정산이 우리보다 취소 더 잡는 날) — 메커니즘 라이브 효과 확인.
+2. **S5a 브랜치 머지 결정**(Jino 승인): `feat/wing-chrome-launchd-s5a`(ae6e07f) → main. S3·S4와 동일 패턴.
+3. (선택) 로컬 main push: `git push origin main`(Jino 요청 시).
+4. **S5b 착수 결정**(Jino): `feat/scheduler-watchdog`(S1 컬럼 추가 7d5d846) 이어서 — cron 잡 실패 표면화(last_status/last_error 기록)+stale 탐지/알림. prod alembic 동반.
+5. (관찰) 정산 성숙 후 adjustment≠0 케이스 모니터 — S4 메커니즘 라이브 효과.
 
 ## 참고
 - 페처: `tools/wing_browser_fetcher.py`(CDP cmd_chrome), config `~/.ohisell_wing_fetcher.json`(cdp_port 9222).
