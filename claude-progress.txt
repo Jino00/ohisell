@@ -3,6 +3,31 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
+- 날짜: 2026-06-20 (★워치독(=revenue-wing-truth S5b) **S2 완료** — staleness_evaluator 순수함수)
+- ★**워치독 S2 완료(2/5, 브랜치 `feat/scheduler-watchdog`, 커밋 bc7677a, 미머지·미push)**: PLAN_scheduler-watchdog T2.
+  - `backend/app/services/scheduler_watchdog.py`(SA②, I/O 0): evaluate_job/evaluate_staleness. 5-state 우선순위 disabled > failed(error/missed) > never_succeeded > stale(>1.5×주기) > ok. ★계획 대비 정합: `created_at` 입력 추가(never_succeeded 첫 주기 유예로 갓등록 잡 헛알림 방지), interval 불명(0) 시 stale 미판정.
+  - 17 단위테스트(stale ±1·정확경계, error/missed·failed>never_succeeded·disabled 최우선 override, never_succeeded 유예/불명/정확경계, interval0 skip, 배치 순서). 로컬 3.9 통과.
+  - **codex PASS**: P2×2(failed>never_succeeded 우선순위·never_succeeded 정확경계 명시 테스트) 반영.
+  - **다음 = S3(prod 터치 — add_listener 리스너 배선 + 삼킴잡 6종 re-raise 정렬 + 14× 인라인 스탬핑 제거, scheduler_service.py 코어)**. 재개: "PLAN_scheduler-watchdog S3". ⚠️prod 배포+고의 raise 라이브검증 동반 → 신중.
+- ─────────────────────────────────────────────
+- 날짜: 2026-06-20 (★트랙 revenue-wing-truth **S5a 완료·main 머지** — CDP Chrome 9222 launchd 상주화)
+- ★**S5a 완료(브랜치 `feat/wing-chrome-launchd-s5a`, 커밋 ae6e07f+3520c13, ★main 머지됨 3520c13, 미push)**: Wing 수집용 실Chrome(9222)이 수동실행이라 재부팅/종료 시 멈춤(6/15~6/20 5일 정지) → launchd로 무중단화.
+  - `tools/wing_browser_fetcher.py` +`cmd_chrome_supervise`(Chrome 포그라운드 자식 proc.wait block → launchd가 수명 인식; cmd_chrome은 Popen 즉시리턴이라 KeepAlive 비호환) + adopt(기존Chrome 점유 시 대기)/없으면 stale SingletonLock 청소 후 launch + SIGTERM wait10s→kill. `_profile_chrome_alive`(SingletonLock PID+cmdline `--user-data-dir` 검증).
+  - 신규 plist `tools/com.ohisell.wing-chrome.plist`(KeepAlive+RunAtLoad+Throttle10s). poll 데몬(com.ohisell.wing)은 connect_over_cdp attach만 → 독립 공존.
+  - `install_local_runtime.sh`: wing-chrome 추가 + bootout 잡소멸 폴링(느린 SIGTERM 레이스 방지) + 잡 PID갱신 리로드 검증(silent stale-deploy 차단).
+  - **codex 4R clean PASS**: R1 P2×2(프로필lock 가드·SIGTERM wait)·R2 P2(PID 재사용 cmdline 가드)·R3 P2×2(PermissionError fallthrough·installer PID검증) 전부 수용 → R4 무지적.
+  - **라이브 검증(원칙22)**: Chrome SIGKILL→proc.wait rc=-9 즉시감지→launchd 재기동→lock청소→fresh Chrome→CDP 자동복구(세션유지·리스너1). installer 4잡 PID갱신 안정로드.
+  - ★Chrome CDP 콜드스타트 ~90s(포트는 즉시 LISTEN, /json/version은 완전초기화 후 응답) — 검증 폴 창 90s+ 필요, 기능엔 무관(supervisor=proc.wait+lock 기반). failures.jsonl 3건 기록.
+  - **다음 = S5a 브랜치 머지 결정(Jino) → S5b(feat/scheduler-watchdog 이어서, 잡 self-heal/알림)**. 재개: "track_revenue-wing-truth S5b" 또는 "PLAN_scheduler-watchdog S2".
+- ─────────────────────────────────────────────
+- 날짜: 2026-06-20 (★신규 트랙 스케줄러 워치독 **S1 완료** — scheduler_state 워치독 컬럼 3개)
+- ★**워치독 S1 완료(1/5, 커밋 7d5d846, 브랜치 feat/scheduler-watchdog, 미push)**: 잡 무알림 사각지대 제거(revenue-wing-truth D-10 returns/settlement 16일 침묵 사고 발단).
+  - models.py SchedulerState: last_status(String16)·last_error(Text)·last_status_at(DateTime) 전부 nullable. last_run_at='마지막 성공' 의미 유지(D-F).
+  - alembic `s3t4u5v6w7x8`(down=r2s3t4u5v6w7, 단일 head). SQLite ADD COLUMN 네이티브.
+  - **검증(원칙22)**: 로컬 upgrade/downgrade 왕복+PRAGMA, codex review GATE PASS(P1/P2 0건, advisory 1=env.py render_as_batch 미설정→downgrade만 영향, upgrade 무관), **prod upgrade(DB백업 후) rev s3t4u5v6w7x8·PRAGMA 3컬럼·공개 API /api/scheduler/status HTTP200 무회귀**.
+  - 계획서=docs/PLAN_scheduler-watchdog.md(단일 진실 원천). **다음=S2(staleness_evaluator 순수함수 5-state+단위테스트, 독립착수 가능)**. 재개: "PLAN_scheduler-watchdog S2".
+  - ⚠️ prod backend models.py 미배포(S3 리스너 배선 시 함께 배포) — 현재 ORM은 추가 컬럼 무시하므로 안전.
+- ─────────────────────────────────────────────
 - 날짜: 2026-06-20 (★트랙 revenue-wing-truth **S4 구현 완료** — net_profit 매출기준 정산화, 라인그레인)
 - ★**S4 완료·main 머지(커밋 78751ac~d759833)**: Jino 결정 B(net_profit 매출기준→쿠팡 정산 실지급). 라인 그레인 가산보정.
   - SA `settlement_revenue_source.settlement_net_by_line`((order_id,vid)→net=ΣSALE−ΣREFUND) + Harness `settlement_revenue_adjust`(compute_line_adjustment 순수 + 계정별 독립합산 등가성) + intelligence 배선(net_profit_pre_nonpa 직후 +보정, by_option 불변 D-14).
