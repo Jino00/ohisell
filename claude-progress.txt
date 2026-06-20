@@ -12,7 +12,10 @@
   - **공백(D-5)**: 오하이테크(ch2)·RG 다계정 Wing 미수집(현재 WING1만), RG 취소 status 없음.
   - **검증 완료(2026-06-20)**: 오픽스 3P(WING1 NORMAL)+RG(WING1 RFM) 일별 대조 — 우리≥Wing, 차이=취소분(16,900 배수)=gross vs net. RG는 status 없어 net 계산 불가→A 유일정답. Wing 데이터 6/19까지 신선(CDP Chrome 9222 재기동).
   - **D-8 스코프 축소**: 오하이테크 2P/3P 무시(거의 없음), 매출=1P 로켓배송(별도 트랙). WING2 수집 불필요(2FA 블로커 무의미).
-  - **다음 = S2 구현**: 닫힌 과거일 매출=Wing GMV 정본 표시(WING1 NORMAL 3P + RFM RG). 백엔드 sales-summary/overview 머니로직 변경. 트랙 `track_revenue-wing-truth.md` 참조. 재개: "track_revenue-wing-truth S2 구현".
+  - **D-9 A안 확정**: 닫힌 과거일 표시매출=Wing GMV 정본, **net_profit·기존 revenue 불변**(읽기전용 오버레이). 순이익 정밀정합=S4.
+  - **S2-pre 완료(2026-06-20)**: 원가 누락 10옵션(398,370/30일) 충전 — prod 멱등 스크립트 `backend/scripts/fill_missing_costs_20260620.py`(백업 backup_costs_20260620_015053.json). 버디필름 10/20/30장=2,151/4,131/6,111(신규 master 1)·EZ툴 프라이버시 4,880·3D풀커버 2,400 + 기존 오매핑 1건(4,400→4,131) 교정. 재진단 누락 0/0.
+  - **S2 백엔드 완료(2026-06-20)**: `revenue_canonical.py`(Harness, 윈도우분할·최대잔여법 배분·complete게이트·폴백) + command-center `revenue_canonical` 가산 블록 + 테스트 14. **codex PASS**(P1#1 미래윈도우·P1#2 잔차0·P2#3 부분적재폴백 수정). **prod 라이브검증**: WING1 6/13~6/19 canonical=Wing GMV 정확, 잔차0, net_profit/revenue 불변, 집계뷰 폴백. ★prod 직접배포(pm2)·**미커밋**.
+  - **다음 = S2 프론트(CommandCenter.tsx 정본매출 표시) → 커밋 → S3(취소 신선도)/S4(수수료·원가 정합)/S5(launchd)**. 재개: "track_revenue-wing-truth S2 프론트".
 - ★**광고비 페처 안정화 완료(별도, 커밋 8793f4e·03b8fc3·54b73e9·6531af4)**: iCloud 추방 회피(로컬 런타임 `~/.ohisell`)+자가복구+야간 세션유지(03시 cron+pmset 02:58)+macOS 알림+자동로그인(Keychain, 라이브 검증). 빈틈 사실상 0.
 - ─────────────────────────────────────────────
 - 날짜: 2026-06-19 (★D-18 판매유형별 쿠팡 총비용 **완전 완료** — codex PASS + P2-1 수정 + prod self-verify ✓)

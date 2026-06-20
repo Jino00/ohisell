@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.services.coupang.intelligence import compute_command_center
+from app.services.coupang.revenue_canonical import compute_canonical_revenue
 from app.services.coupang.revenue_reconcile import reconcile_revenue
 from app.services.coupang.rocket_intelligence import compute_rocket_overview
 
@@ -75,6 +76,9 @@ def command_center(
             detail=f"잘못된 account: {account} (허용: {', '.join(sorted(_VALID_ACCOUNTS))} 또는 생략)",
         )
     result = compute_command_center(db, dfrom, dto, account)
+    # S2(트랙 revenue-wing-truth D-1/D-9 A안): 닫힌 과거일 정본 매출(Wing GMV) 오버레이.
+    # 읽기전용 가산 블록 — net_profit·account.summary.revenue 등 기존 값 불변(회귀 0).
+    result["revenue_canonical"] = compute_canonical_revenue(db, dfrom, dto, account)
     return _jsonify(result)
 
 
