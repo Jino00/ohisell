@@ -3,7 +3,15 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
-- 날짜: 2026-06-20 (★워치독(=revenue-wing-truth S5b) **S3+S4 prod 배포+라이브검증 완료** — /health 가동)
+- 날짜: 2026-06-20 (★워치독(=revenue-wing-truth S5b) **S5 완료 — 미니트랙 5/5 전부 완료**)
+- ★**워치독 S5 완료 = S5b 미니트랙 전부 완료(5/5, 브랜치 `feat/scheduler-watchdog`, 커밋 7ba0e02)**: PLAN T5.
+  - `tools/scheduler_watchdog_poll.py`(독립 경량 데몬, 원칙8/18 — ad_cost 페처와 분리): prod /api/scheduler/health 30분 폴 → 비정상 시 _notify_mac 집계 단일 알림. 6h 디바운스·해소 prune·기동 알림·연속 net실패(3h) 'prod 도달불가' 1회 알림·데몬 불사. _problem_keys/_summarize/_maybe_notify 순수분리.
+  - `com.ohisell.scheduler-watchdog.plist`(KeepAlive). install_local_runtime.sh 별도 블록(loop 뒤 추가=main wing-chrome 머지 안전). 6 테스트(로컬 43 passed/1 skipped).
+  - codex S5 PASS(P1 0). P2 2건 수용(_load_cfg 오버라이드 독립화·_notify_mac 하드닝).
+  - ✅**라이브 §6.6**: launchd 데몬(PID 75949, **수동 설치 — 풀 installer 미실행으로 S5a wing-chrome 보호**) 기동→prod 폴→집계 알림+기동 알림 발화. once 디바운스 확인.
+  - ⚠️**브랜치 분기 주의**: feat/scheduler-watchdog는 main의 S5a(wing-chrome) 미포함. 머지 시 install_local_runtime.sh는 loop 영역(main)+워치독 블록(branch) 자동 병합 예상(충돌 회피 설계). **다음 = (선택) feat/scheduler-watchdog↔main 머지 + push(Jino 요청 시)**. 미니트랙 자체는 완료.
+- ─────────────────────────────────────────────
+- (이전) 날짜: 2026-06-20 (★워치독 S3+S4 prod 배포+라이브검증 완료 — /health 가동)
 - ★**워치독 S3+S4 prod 배포+라이브검증 완료(4/5, 브랜치 `feat/scheduler-watchdog`, ced07f7+a722aa9, 미머지)**: PLAN T3·T4.
   - 배포: 6파일 scp(models/schemas/scheduler_service/scheduler_watchdog/scheduler_health/routers.scheduler)+pm2 restart(online). 백업 `/home/ubuntu/ohisell_bak/watchdog_20260620_102611`(롤백용). import precheck OK·3.10.12.
   - 라이브검증(원칙22 §6, 전부 PASS): ①컬럼 존재 ②실리스너+실DB 셀프테스트 executed→ok ③고의 raise(boom)→error+last_error·last_run_at(성공) 보존 + 워치드잡 DB error 주입→`/health` failed 버킷·error_summary 마지막1줄만(traceback 미누출)→원복 ④**라이브 첫 `/health`가 returns/settlement를 stale ~16.9일로 즉시 포착 = 6/4 침묵 사고 회귀봉인 라이브 입증** ⑤scheduler.running=False 모사→healthy=False ⑧머니불변(revenue-reconcile·/status 200 무회귀).

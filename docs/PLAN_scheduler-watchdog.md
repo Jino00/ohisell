@@ -196,7 +196,10 @@ Mac(S5):
   - 테스트 14개(interval 일배치86400/2시간7200/30분1800/불량0, sanitize 3, build_health: ok·failed+요약·stale·미등록·DB결손·정지·disabled무해·never_succeeded). 로컬 37 passed/1 skipped.
   - **codex S4 PASS**(P1 0). P2 2건: #1 sanitize=PLAN 설계(class+짧은msg) 유지·기각, #2 불규칙cron=현 allowlist(균등주기·KST무DST) 무관·가정 주석 보강.
   - ✅**prod 배포+라이브검증 완료(2026-06-20)** — 아래 §6 결과 참조.
-- [ ] **T5 (P2)** — tools — Mac 워치독 폴 모드 + launchd KeepAlive + 디바운스 + 집계 알림
+- [x] **T5 (P2)** — tools — Mac 워치독 폴 데몬 + launchd KeepAlive + 디바운스 + 집계 알림 ✅ (커밋 7ba0e02)
+  - `tools/scheduler_watchdog_poll.py`(독립 경량 데몬, ad_cost 페처와 분리) + `com.ohisell.scheduler-watchdog.plist`(KeepAlive) + install_local_runtime.sh 별도 블록(loop 미접촉=main wing-chrome 머지 안전). 6 테스트.
+  - codex S5 PASS(P1 0). P2 2건 수용: #1 _load_cfg 오버라이드 독립화(prod_url 의존 버그), #2 _notify_mac 백슬래시/개행 하드닝.
+  - ✅**라이브(원칙22 §6.6)**: launchd 데몬(PID 75949) 기동→prod /health 폴→집계 단일 알림+기동 알림 발화. 6h 디바운스 확인.
 - [ ] **T6 (P3, TODO)** — 서버측 푸시 알림 채널(Mac-off 공백)
 
 ## 12. 체크리스트
@@ -204,7 +207,7 @@ Mac(S5):
 - [x] S2 evaluator + 단위테스트 — codex pass ✅ (bc7677a, 17 테스트)
 - [x] S3 리스너 + 삼킴잡 정렬 + DRY — 코드+codex R2 PASS(0d0553f), ✅prod 배포+라이브검증 완료(2026-06-20)
 - [x] S4 Harness + /health — 코드+codex PASS(ced07f7), ✅prod 배포+라이브검증 완료(2026-06-20)
-- [ ] S5 Mac 워치독 폴 — codex pass
+- [x] S5 Mac 워치독 폴 — 코드+codex PASS(7ba0e02), ✅launchd 데몬 라이브 가동·집계 알림 발화
 - [x] 라이브 self-verify 1~9 통과 — ✅ §6.1~6.9 prod 실증(아래)
 - [~] failures.jsonl(✅TZ misfire 기록) / claude-progress.txt(✅) / 트랙 D-N 기록
 
