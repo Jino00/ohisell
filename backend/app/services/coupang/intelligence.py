@@ -796,7 +796,7 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
     # Wing GMV)과 분리 — net_profit 매출기준만 정산화(D-12). RG플립/비-PA/배송비 차감 전에 적용(3P 매출축).
     _settle_adj = settlement_revenue_adjustment(db, dfrom, dto, acc, unit_price_by_vid)
     account_sum["settlement_revenue_adjustment"] = _settle_adj["adjustment"]
-    account_sum["settlement_matured_days"] = _settle_adj["matured_days"]
+    account_sum["settlement_matured_lines"] = _settle_adj["matured_lines"]
     account_sum["settlement_net_matured"] = _settle_adj["settlement_net_matured"]
     account_sum["net_profit"] += _settle_adj["adjustment"]
 
