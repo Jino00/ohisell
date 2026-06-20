@@ -67,19 +67,27 @@
   - **codex review(원칙19) PASS**: P1#1(미래윈도우 open_start 클램프)·P1#2(Σby_option 최대잔여법 정수 won 배분, 잔차 0)·P2#3(부분적재 시 정본화 보류·complete일 때만, 집계뷰 폴백) 3건 수정.
   - **prod 라이브 검증(원칙22)**: WING1 6/13~6/19 canonical=Wing GMV 정확(3P 2,155,350·RG 2,136,240·합 4,291,590), apportion_residual=0, Σby_option==canonical, net_profit/revenue 불변. 집계뷰(account=None) wing_used=False 폴백.
   - **잔여**: 프론트 CommandCenter.tsx에 정본 매출 표시(닫힌일=Wing, 라벨 '정본/추정', 당일 주문기반). 커밋(현재 미커밋·prod 직접배포 상태).
-- [ ] **S3 — 취소 반영(당일/실시간)**: 3P 주문 `cancelled` 상태 동기화 신선도 개선(6/16 미동기 사례). RG 취소 소스 조사(취소/반품 API).
+- [x] **S3 — 취소 반영(당일/실시간) — 완료(2026-06-20)**: 근본원인=반품/취소·정산 자동동기화가 6/4~6/20(16일) 매일 `_KST` NameError로 중단(커밋 a2bbd3a 잔재, overview.py는 6/9 수정했으나 returns_sync·settlement_sync 누락). 수정=깨진 로컬 `kst_today()` 삭제(import된 정상함수 사용). prod 배포·재시작·수동트리거 라이브검증(returns WING1 반품6/취소18·settlement 137txns·에러0), codex PASS. 커밋 `8fd4349`(브랜치 fix/coupang-returns-settlement-kst-regression). **RG**: 주문 API에 status/취소 필드 부재 라이브확정 → RG net은 Wing GMV(S2)가 유일 소스. **잔여 인사이트(D-10)**: 6/16 +56,700 갭은 reconcile-by-absence·returns API 둘 다 안 거치는 cross-surface 차이 → S2 Wing-canonical이 구조적 정답(A안 재검증). 당일/오픈윈도우는 Wing 발행 전이라 gross 추정 불가피.
 - [ ] **S4 — 수수료·원가 정합**: 매출 정본화 후 수수료(D-18 판매유형별)·원가가 Wing 정산과 맞는지 재검증.
 - [ ] **S5 — CDP Chrome launchd 상주화(D-4)**: 9222 Chrome을 launchd로 관리(재부팅/종료 자동 복구) → Wing 수집 무중단.
-- [ ] codex review(원칙19) — 머니로직 변경분.
+- [x] codex review(원칙19) — S3 머니로직 변경분 PASS([P1]/[P2] 0건).
 
-## 현재 진행 단계 (2026-06-20 세션 종료 시점)
-- 진단 완료 + 사용자 결정(A) 확보 + Wing 수집 복구(6/19까지) + 오픽스 검증(취소 빼면 일치 확인).
-- 코드 변경 0줄(매출 로직). 트랙만 생성.
+## D-10 (S3 라이브 확정, 2026-06-20) — 취소 신선도 원인·구조
+- **취소가 우리 숫자에 반영되는 3경로**: ① reconcile-by-absence(전체주문 취소 시 active 조회에서 사라짐→`Order.status='cancelled'`, sync_service 30일 윈도우+grace_days=10) ② returns/cancel API(`returnRequests`, `coupang_return_item.cancel_count`, 매출 계산 시 차감) ③ Wing 판매분석 GMV(S2 canonical, net).
+- **6/4~6/20 중단 사고**: ②(returns)·정산 동기화가 `_KST` NameError로 16일 죽음 → 3P 취소 신선도 누락. 수정·복구·라이브검증 완료(S3).
+- **cross-surface 잔여 갭**: 일부 취소(6/16 +56,700)는 ①(여전히 active 조회에 보임)·②(returns 기록 없음) 둘 다 안 거치고 **Wing 판매분석에만** net으로 존재. → 닫힌일은 S2 Wing-canonical로 이미 정확. **당일/오픈윈도우는 Wing 발행 전이라 net 추정 불가 → gross 추정 유지(불가피)**.
+- **RG**: `rg/orders` 라이브 응답에 status/취소/반품 필드 전무(orderId·orderItems·paidAt·vendorId만). RG 전용 취소 API도 명세 부재 → RG net은 Wing GMV(RFM, S2)가 유일 소스.
+- **운영 빈틈**: 반품/정산 잡은 cron 등록돼 있으나 실패해도 조용히 죽음(last_run_at만 stale). 추후 self-heal/알림 보강 후보(S5 인접).
+
+## 현재 진행 단계 (2026-06-20 S3 완료 시점)
+- S2(매출 정본화 A안) 완료·머지 + **S3(취소 신선도) 완료**: 16일 죽은 반품/정산 동기화 복구(커밋 8fd4349, 브랜치 미머지), RG 취소 소스 라이브 조사 종결.
+- prod는 수정 코드로 이미 동작 중(scp+pm2 restart). 브랜치 `fix/coupang-returns-settlement-kst-regression` 미머지(Jino 승인 후 main 머지).
 
 ## 다음 액션 (다음 세션 시작 시)
-1. 이 트랙 파일 + claude-progress 읽기.
-2. **S1 착수**: Wing 페처 다계정 수집(오하이테크 3P + RG 계정) — 먼저 계정/vendor 매핑 라이브 확인(추측 금지).
-3. CDP Chrome(9222)이 떠 있는지 확인(`lsof -iTCP:9222`), 없으면 `wing_browser_fetcher.py chrome` 먼저.
+1. 이 트랙 파일 + claude-progress + 최신 HANDOFF 읽기.
+2. S3 브랜치 main 머지(Jino 승인 시) `git checkout main && git merge --ff-only fix/coupang-returns-settlement-kst-regression`.
+3. **S4 착수**: 매출 정본화 후 수수료(D-18 판매유형별)·원가가 Wing 정산과 맞는지 재검증(순이익 정밀 정합). 이제 정산 동기화 복구됐으니 비교 가능.
+4. (선택) S5: CDP Chrome 9222 + 반품/정산 잡 self-heal launchd 상주화.
 
 ## 참고
 - 페처: `tools/wing_browser_fetcher.py`(CDP cmd_chrome), config `~/.ohisell_wing_fetcher.json`(cdp_port 9222).

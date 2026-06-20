@@ -3,6 +3,12 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
+- 날짜: 2026-06-20 (★트랙 revenue-wing-truth **S3 완료** — 반품/정산 동기화 16일 중단 회귀 수정)
+- ★**S3 완료(취소 신선도)**: 근본원인=`returns_sync.py`·`settlement_sync.py`가 6/4~6/20(16일) 매일 `_KST` NameError로 죽어 3P 취소/반품 신선도·정산 누락(커밋 a2bbd3a 잔재, overview.py는 6/9 수정했으나 이 둘은 놓침). 수정=깨진 로컬 `kst_today()` 삭제(import된 정상함수). prod scp+pm2 restart+수동트리거 라이브검증(returns WING1 반품6/취소18·settlement 137txns·**에러0**), codex PASS([P1/P2] 0건), failures.jsonl 기록. **커밋 `8fd4349`(브랜치 `fix/coupang-returns-settlement-kst-regression`, 미머지)**.
+  - **RG 취소 조사 종결**: `rg/orders` 라이브 응답에 status/취소 필드 전무 → RG net은 Wing GMV(S2 canonical) 유일 소스(D-10).
+  - **cross-surface 인사이트(D-10)**: 6/16 +56,700 갭은 reconcile-by-absence·returns API 둘 다 안 거치고 Wing 판매분석에만 존재 → 닫힌일은 S2가 이미 정확, 당일은 gross 추정 불가피. A안 재검증.
+  - **다음 = S3 브랜치 머지(Jino 승인) → S4(수수료·원가 정합, 이제 정산 동기화 복구돼 비교 가능) → S5(launchd 상주화)**. 재개: "track_revenue-wing-truth S4".
+- ─────────────────────────────────────────────
 - 날짜: 2026-06-20 (★신규 트랙 "대시보드 숫자를 Wing 실제와 일치" 생성 + 광고비 페처 안정화 완료)
 - ★**신규 트랙 `docs/tracks/active/track_revenue-wing-truth.md` (0/N)** — Jino "매출/광고/수수료/원가 미덥지 않다 → Wing과 맞을 때까지 조정".
   - **결정 A(확정)**: 닫힌 과거일 매출 정본 = Wing 판매분석 GMV(net). 우리 주문합산은 당일 추정용.
