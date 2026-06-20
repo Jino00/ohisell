@@ -68,9 +68,30 @@
   - **prod 라이브 검증(원칙22)**: WING1 6/13~6/19 canonical=Wing GMV 정확(3P 2,155,350·RG 2,136,240·합 4,291,590), apportion_residual=0, Σby_option==canonical, net_profit/revenue 불변. 집계뷰(account=None) wing_used=False 폴백.
   - **잔여**: 프론트 CommandCenter.tsx에 정본 매출 표시(닫힌일=Wing, 라벨 '정본/추정', 당일 주문기반). 커밋(현재 미커밋·prod 직접배포 상태).
 - [x] **S3 — 취소 반영(당일/실시간) — 완료(2026-06-20)**: 근본원인=반품/취소·정산 자동동기화가 6/4~6/20(16일) 매일 `_KST` NameError로 중단(커밋 a2bbd3a 잔재, overview.py는 6/9 수정했으나 returns_sync·settlement_sync 누락). 수정=깨진 로컬 `kst_today()` 삭제(import된 정상함수 사용). prod 배포·재시작·수동트리거 라이브검증(returns WING1 반품6/취소18·settlement 137txns·에러0), codex PASS. 커밋 `8fd4349`(브랜치 fix/coupang-returns-settlement-kst-regression). **RG**: 주문 API에 status/취소 필드 부재 라이브확정 → RG net은 Wing GMV(S2)가 유일 소스. **잔여 인사이트(D-10)**: 6/16 +56,700 갭은 reconcile-by-absence·returns API 둘 다 안 거치는 cross-surface 차이 → S2 Wing-canonical이 구조적 정답(A안 재검증). 당일/오픈윈도우는 Wing 발행 전이라 gross 추정 불가피.
-- [ ] **S4 — 수수료·원가 정합**: 매출 정본화 후 수수료(D-18 판매유형별)·원가가 Wing 정산과 맞는지 재검증.
+- [~] **S4 — 순이익 매출기준 정산화 (진행중, 2026-06-20 착수)**: 조사 결과 수수료(실측 8.58%·`actual_fee_by_order_option`)·원가(6/1~6/13 ch1 170/170 매핑)는 이미 Wing 정합. **남은 충돌=매출 소스**: 성숙 정산일 6/7·9·10은 우리=Wing GMV=정산 완벽, but **6/8은 우리=정산=360,300 vs Wing 판매분석 GMV=348,200(−12,100)** — 정산(쿠팡 실지급 기준)이 우리와 일치, Wing 판매분석만 net 차감. **Jino 결정 B**: net_profit 매출기준을 정산으로 전환.
 - [ ] **S5 — CDP Chrome launchd 상주화(D-4)**: 9222 Chrome을 launchd로 관리(재부팅/종료 자동 복구) → Wing 수집 무중단.
 - [x] codex review(원칙19) — S3 머니로직 변경분 PASS([P1]/[P2] 0건).
+
+## D-11~D-13 (S4 설계 확정, Jino 2026-06-20)
+- **D-11 (성숙 판정 — 라인 그레인, codex P1#2 반영)**: 성숙 = `coupang_revenue_fee`에 **그 옵션라인 `(order_id, vendor_item_id)`이 존재**(쿠팡이 정산 인식). 정산∩active 라인만 스왑. 미정산 라인(최근 ~8일 정산지연)·정산만 있고 active 아닌 라인(취소·미동기)은 폴백/스킵. **주문번호 단위 일자 게이트는 부분 옵션 정산을 오판**해 라인 그레인으로 정정(한 주문 옵션 2개 중 1개만 정산된 경우 정산된 옵션만 정확히 스왑).
+- **D-12 (표시와 분리 — 가산 보정 패턴)**: net_profit **매출기준만** 정산화. 화면 '🎯 정본 매출'=Wing GMV(S2) **유지**(둘 다 표기, S2 D-9 A안 불번복). 구현=계정·일자 단위 **읽기전용 가산 보정**(RG플립 `apply_rg_net_profit_flip`·S2 canonical과 동일: by_option 불변·summary만 조정). 공식: `net_profit_S4 = net_profit_current + Σ_성숙일(settlement_net_day − current_net_revenue_day)`, where current_net_revenue_day = Σactive selling_price − returns. ★성숙일은 정산 net이 이미 취소 반영 → 그 일자 returns 차감을 보정에 포함(이중차감 방지).
+- **D-13 (범위)**: 3P(WING1·WING2, NORMAL)만 정산화. RG는 정산구조 상이(rg_settlement_fee, D-16 플립 별도) → RG 매출=Wing GMV(S2) 유지.
+- **미해결(구현 중 확정)**: 원가 상호작용 — 정산 REFUND(취소)분의 원가도 빼야 net 정확. 현행 `_agg_returns`가 원가까지 빼는지 라이브 확인 후 보정식에 반영.
+
+## S4 구조 (레고, D-11~D-13) — 구현 완료(라인 그레인)
+```
+Agent: 종합조망 net_profit (intelligence.py / command-center)
+  └ Harness: settlement_revenue_adjust — 계정별 독립 산출·합산(등가성), 라인 그레인 가산보정
+       ├ SA: settlement_revenue_source.settlement_net_by_line — coupang_revenue_fee →
+       │     (order_id, vid)별 net=Σ(SALE)−Σ(REFUND) sale_amount (REFUND 양수 미러)
+       ├ _active_revenue_by_line — active 주문라인 (order_number, vid)→매출
+       ├ _return_qty_by_line — 라인별 반품 cancel_count(되돌림용)
+       └ compute_line_adjustment(순수) — 정산∩active 라인만: Σ(settle_net − (active_rev − unit×qty))
+```
+- **구현 커밋**(브랜치 `feat/revenue-wing-truth-s4`): SA(8fd…) + Harness/배선 + 라인그레인 정정(`8e4aad2`).
+- **테스트**: SA 6 + Harness 10(부분옵션정산·반품되돌림·미동기스킵·등가성) + 회귀 intelligence 56 통과.
+- **codex review**: 1차 [P1]×2(성숙 그레인·반품 도메인) 수용→라인그레인 재설계, [P2](REFUND 부호) prod 음수0 확인. 2차 검토 진행.
+- **prod 라이브 검증(원칙22)**: WING1 6/6~6/20 정산 82라인 매칭, **adjustment=0**(우리 주문기반 net==정산 net 정확 일치) → net_profit 불변(무회귀). 미성숙(6/12+)은 폴백. 메커니즘 정상, 향후 괴리 시 자동 보정.
 
 ## D-10 (S3 라이브 확정, 2026-06-20) — 취소 신선도 원인·구조
 - **취소가 우리 숫자에 반영되는 3경로**: ① reconcile-by-absence(전체주문 취소 시 active 조회에서 사라짐→`Order.status='cancelled'`, sync_service 30일 윈도우+grace_days=10) ② returns/cancel API(`returnRequests`, `coupang_return_item.cancel_count`, 매출 계산 시 차감) ③ Wing 판매분석 GMV(S2 canonical, net).
