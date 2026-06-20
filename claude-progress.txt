@@ -10,7 +10,9 @@
   - **라이브 검증(D-3)**: 오픽스(ch1)=WING1, 취소 없는 날 정확히 일치(6/13·15·19 +0). 차이=취소(일부 상태 미동기).
   - **Wing 수집 복구(D-4)**: CDP Chrome 9222가 6/15부터 안 떠서 수집 중단 → 재기동(`wing_browser_fetcher.py chrome`), 6/19까지 신선. ★launchd 상주화 필요(S5).
   - **공백(D-5)**: 오하이테크(ch2)·RG 다계정 Wing 미수집(현재 WING1만), RG 취소 status 없음.
-  - **다음**: S1 Wing 다계정 수집(계정/vendor 매핑 라이브 확인부터).
+  - **검증 완료(2026-06-20)**: 오픽스 3P(WING1 NORMAL)+RG(WING1 RFM) 일별 대조 — 우리≥Wing, 차이=취소분(16,900 배수)=gross vs net. RG는 status 없어 net 계산 불가→A 유일정답. Wing 데이터 6/19까지 신선(CDP Chrome 9222 재기동).
+  - **D-8 스코프 축소**: 오하이테크 2P/3P 무시(거의 없음), 매출=1P 로켓배송(별도 트랙). WING2 수집 불필요(2FA 블로커 무의미).
+  - **다음 = S2 구현**: 닫힌 과거일 매출=Wing GMV 정본 표시(WING1 NORMAL 3P + RFM RG). 백엔드 sales-summary/overview 머니로직 변경. 트랙 `track_revenue-wing-truth.md` 참조. 재개: "track_revenue-wing-truth S2 구현".
 - ★**광고비 페처 안정화 완료(별도, 커밋 8793f4e·03b8fc3·54b73e9·6531af4)**: iCloud 추방 회피(로컬 런타임 `~/.ohisell`)+자가복구+야간 세션유지(03시 cron+pmset 02:58)+macOS 알림+자동로그인(Keychain, 라이브 검증). 빈틈 사실상 0.
 - ─────────────────────────────────────────────
 - 날짜: 2026-06-19 (★D-18 판매유형별 쿠팡 총비용 **완전 완료** — codex PASS + P2-1 수정 + prod self-verify ✓)
