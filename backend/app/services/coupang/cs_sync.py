@@ -21,7 +21,14 @@ CS_ACCOUNTS = ["COUPANG_WING1", "COUPANG_WING2"]
 
 log = logging.getLogger(__name__)
 
-_INQUIRY_DAYS = 7  # CS API 최대 조회 기간
+_INQUIRY_DAYS = 7  # 요청 일수(클라이언트가 end-start≤6일로 cap, cs._MAX_DAYS)
+
+# partnerCounselingStatus 유효 enum — 라이브 실측(원칙22, 2026-06-20): 그 외 값
+# (COMPLETE/ANSWER_COMPLETE/PROGRESS/ALL)은 쿠팡이 code=500 internal error 반환.
+_VALID_CC_STATUSES = frozenset({"NO_ANSWER", "ANSWER", "TRANSFER", "NONE"})
+# CS이관 동기화 조회 상태: 미답변(NO_ANSWER) + 답변완료(ANSWER) 갱신.
+# ★과거 "COMPLETE"(무효)가 17일간 code=500 유발 → CS 동기화 부분 실패.
+_CC_QUERY_STATUSES = ("NO_ANSWER", "ANSWER")
 
 
 def _build_client(account: CoupangAccountConfig) -> CoupangCsClient:
@@ -136,10 +143,10 @@ def sync_cs(
         api_failures.append(f"online:{e}")
         db.rollback()
 
-    # ── #3 쿠팡 고객센터 문의 (CS이관) — NO_ANSWER 우선, 이후 COMPLETE 상태도 조회 ──────
+    # ── #3 쿠팡 고객센터 문의 (CS이관) — NO_ANSWER 우선, 이후 ANSWER(답변완료)도 조회 ──────
     # codex[P2]: NO_ANSWER만 조회하면 이미 답변된 건이 DB에 unanswered=False로 남음(stale).
-    # NO_ANSWER로 현재 미답변을 upsert하고, 추가로 답변 완료 건(COMPLETE)도 가져와 answered 갱신.
-    for cs_status in ("NO_ANSWER", "COMPLETE"):
+    # NO_ANSWER로 현재 미답변을 upsert하고, 추가로 답변완료 건(ANSWER)도 가져와 answered 갱신.
+    for cs_status in _CC_QUERY_STATUSES:
         try:
             for row in client.iter_call_center_inquiries(status=cs_status, days=days):
                 _upsert_inquiry(

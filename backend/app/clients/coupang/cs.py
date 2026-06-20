@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterator
-from datetime import datetime, timedelta, timezone
+from datetime import date, timedelta
 
 from urllib.parse import quote
+
+from app.utils.kst import kst_today
 
 from app.clients.coupang._base import (
     CoupangBaseClient,
@@ -24,7 +26,10 @@ _OPENAPI_V5 = "/v2/providers/openapi/apis/api/v5/vendors"
 _OPENAPI_V4 = "/v2/providers/openapi/apis/api/v4/vendors"
 _OPENAPI_V5_CC = "/v2/providers/openapi/apis/api/v5/vendors"
 
-_MAX_DAYS = 7  # CS API 최대 조회 기간
+_MAX_DAYS = 6  # CS API 조회범위: end-start ≤ 6일. 라이브 실측(원칙22): days=7(06-13~06-20,
+# 7일차이)→ onlineInquiries 400 "time interval needs to be less than or equal to 7 days,
+# pattern should be yyyy-MM-dd"·callCenterInquiries code=500. days=6 → 둘 다 200.
+# 쿠팡이 inclusive로 세어 "≤7일"=실제 end-start≤6(returns 철회·교환과 동일 패턴, ref03).
 
 
 # ── 쓰기 경로 빌더 (v4 — 단일 정의, SA 실행 + Harness dry-run 미리보기 공유, 트랙 D-16/W2) ──
@@ -44,9 +49,11 @@ def cc_confirm_path(vendor_id: str, inquiry_id: str) -> str:
     return f"{_OPENAPI_V4}/{vendor_id}/callCenterInquiries/{quote(str(inquiry_id), safe='')}/confirms"
 
 
-def _fmt_dt(dt: datetime) -> str:
-    """yyyy-MM-dd'T'HH:mm:ss 형식으로 변환 (CS API 요구 형식)."""
-    return dt.strftime("%Y-%m-%dT%H:%M:%S")
+def _fmt_date(d: date) -> str:
+    """yyyy-MM-dd 형식 — CS 리스트 API(onlineInquiries·callCenterInquiries)는 날짜만
+    받는다(공식 스펙 예: inquiryStartAt=2019-06-25). 과거 datetime(T시각) 전송이
+    onlineInquiries 400·callCenterInquiries 500을 유발해 CS 동기화가 전수 실패했다."""
+    return d.strftime("%Y-%m-%d")
 
 
 def coerce_answer_id(value: int | str) -> int:
@@ -89,9 +96,8 @@ class CoupangCsClient(CoupangBaseClient):
             문의 dict.
         """
         days = min(days, _MAX_DAYS)
-        now = datetime.now(timezone.utc)
-        end = now
-        start = now - timedelta(days=days)
+        end = kst_today()  # 날짜 경계 KST 통일(코드베이스 표준), CS API는 yyyy-MM-dd만 허용
+        start = end - timedelta(days=days)
 
         path = f"{_OPENAPI_V5}/{self.vendor_id}/onlineInquiries"
         page_num = 1
@@ -102,8 +108,8 @@ class CoupangCsClient(CoupangBaseClient):
                 params={
                     "vendorId": self.vendor_id,
                     "answeredType": answered_type,
-                    "inquiryStartAt": _fmt_dt(start),
-                    "inquiryEndAt": _fmt_dt(end),
+                    "inquiryStartAt": _fmt_date(start),
+                    "inquiryEndAt": _fmt_date(end),
                     "pageSize": page_size,
                     "pageNum": page_num,
                 },
@@ -145,9 +151,8 @@ class CoupangCsClient(CoupangBaseClient):
             문의 dict.
         """
         days = min(days, _MAX_DAYS)
-        now = datetime.now(timezone.utc)
-        end = now
-        start = now - timedelta(days=days)
+        end = kst_today()  # 날짜 경계 KST 통일(코드베이스 표준), CS API는 yyyy-MM-dd만 허용
+        start = end - timedelta(days=days)
 
         path = f"{_OPENAPI_V5_CC}/{self.vendor_id}/callCenterInquiries"
         page_num = 1
@@ -158,8 +163,8 @@ class CoupangCsClient(CoupangBaseClient):
                 params={
                     "vendorId": self.vendor_id,
                     "partnerCounselingStatus": status,
-                    "inquiryStartAt": _fmt_dt(start),
-                    "inquiryEndAt": _fmt_dt(end),
+                    "inquiryStartAt": _fmt_date(start),
+                    "inquiryEndAt": _fmt_date(end),
                     "pageSize": page_size,
                     "pageNum": page_num,
                 },
