@@ -31,6 +31,7 @@ from app.models import (
     ProductMaster,
 )
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
+from app.services.coupang.settlement_revenue_adjust import settlement_revenue_adjustment
 
 log = logging.getLogger(__name__)
 
@@ -641,6 +642,9 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
     account_rows: list[dict] = []
     ad_rows: list[dict] = []
     product_rows: list[dict] = []
+    # S4(D-11~D-13): 정산화 보정의 반품차감 되돌림이 파이프라인과 일치하도록 vid별 단가 수집
+    # (line 단가 = o.unit_price 우선, 없으면 master sale_price 폴백 — return_deduction과 동일 소스).
+    unit_price_by_vid: dict[str, Decimal] = {}
 
     for vid in all_vids:
         m = master.get(vid, {})
@@ -660,6 +664,7 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
         unit_price = o.get("unit_price", _Z) or m.get("sale_price", _Z)
         return_qty = r.get("return_qty", 0)
         return_deduction = unit_price * return_qty  # 추정(평균단가×반품수량)
+        unit_price_by_vid[vid] = unit_price  # S4: 정산화 보정의 반품 되돌림용(동일 단가)
         service_fee = f.get("service_fee", _Z)
         service_fee_vat = f.get("service_fee_vat", _Z)
         total_fee = f.get("total_fee", _Z)  # 수수료+수수료VAT (쿠팡 실차감, codex[P2])
@@ -781,8 +786,20 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
         "ad_confirmed_*=report/SALES vendor-level(쿠팡 광고센터 0.02% 일치, 정합 대조용). "
         "net_profit은 전체(집행+비-PA) 차감 — 비-PA는 광고주 계정에만 추가 차감(by_option 불변, D-15)."
     )
-    # 감사 체인(codex P2-1): net_profit_pre_nonpa(옵션합) → −비-PA → net_profit_pre_rg → −RG → net_profit.
-    account_sum["net_profit_pre_nonpa"] = account_sum["net_profit"]  # 계정 조정(비-PA·RG) 전 = 옵션합
+    # 감사 체인: net_profit_pre_nonpa(옵션합) → +정산화보정(S4) → −비-PA → net_profit_pre_rg → −RG → net_profit.
+    account_sum["net_profit_pre_nonpa"] = account_sum["net_profit"]  # 계정 조정 전 = 옵션합
+
+    # ─── S4(D-11~D-13): net_profit 매출기준 정산화 — 계정 단위 가산 보정 ───
+    # 성숙 정산일(그 날 active 주문 전부 정산 인식)은 매출기준을 쿠팡 정산(실지급, SALE−REFUND)으로
+    # 교체한다. 보정 = Σ_성숙일(settlement_net − our_net_rev). 미성숙/비-3P/데이터0 → 0(불변, 회귀가드).
+    # D-14 패턴: summary(account_sum)만 조정, by_option(account_rows) 운영지표 불변. 화면 '정본매출'(S2
+    # Wing GMV)과 분리 — net_profit 매출기준만 정산화(D-12). RG플립/비-PA/배송비 차감 전에 적용(3P 매출축).
+    _settle_adj = settlement_revenue_adjustment(db, dfrom, dto, acc, unit_price_by_vid)
+    account_sum["settlement_revenue_adjustment"] = _settle_adj["adjustment"]
+    account_sum["settlement_matured_days"] = _settle_adj["matured_days"]
+    account_sum["settlement_net_matured"] = _settle_adj["settlement_net_matured"]
+    account_sum["net_profit"] += _settle_adj["adjustment"]
+
     account_sum["ad_nonpa_deducted"] = _nonpa
     account_sum["net_profit"] -= _nonpa
 
