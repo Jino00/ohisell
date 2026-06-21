@@ -294,6 +294,14 @@ class SchedulerJobVerdictOut(BaseModel):
     error_summary: Optional[str] = None
 
 
+class SchedulerCookieVerdictOut(BaseModel):
+    account_key: str
+    state: str  # stale
+    age_days: Optional[float] = None
+    status: Optional[str] = None  # green|red|unknown
+    reason: str
+
+
 class SchedulerHealthOut(BaseModel):
     healthy: bool
     scheduler_running: bool
@@ -302,4 +310,6 @@ class SchedulerHealthOut(BaseModel):
     stale: list[SchedulerJobVerdictOut]
     never_succeeded: list[SchedulerJobVerdictOut]
     disabled: list[SchedulerJobVerdictOut]
+    # fail-soft 잡(RG 정산·광고)의 쿠키 만료 직접 감시 — 며칠째 성공 못 한 쿠키.
+    cookies_stale: list[SchedulerCookieVerdictOut] = []
     as_of: str

@@ -27,9 +27,17 @@ def test_problem_keys_collects_all_buckets():
         "failed": [{"job_name": "b"}],
         "stale": [{"job_name": "c"}],
         "never_succeeded": [{"job_name": "d"}],
+        "cookies_stale": [{"account_key": "COUPANG_WING1"}],
     }
     keys = set(wp._problem_keys(h))
-    assert keys == {"scheduler_down", "missing:a", "failed:b", "stale:c", "never_succeeded:d"}
+    assert keys == {"scheduler_down", "missing:a", "failed:b", "stale:c",
+                    "never_succeeded:d", "cookie:COUPANG_WING1"}
+
+
+def test_problem_keys_cookie_stale_only():
+    h = {"scheduler_running": True, "missing_jobs": [], "failed": [], "stale": [],
+         "never_succeeded": [], "cookies_stale": [{"account_key": "COUPANG_WING2"}]}
+    assert wp._problem_keys(h) == ["cookie:COUPANG_WING2"]
 
 
 # ── _summarize ─────────────────────────────────────────────────────────────

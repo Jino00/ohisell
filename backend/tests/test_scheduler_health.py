@@ -15,6 +15,13 @@ from app.services.scheduler_health import (
 NOW = datetime(2026, 6, 20, 12, 0, 0)
 
 
+class _FakeCookie:
+    def __init__(self, **kw):
+        self.account_key = kw["account_key"]
+        self.status = kw.get("status", "red")
+        self.last_success_at = kw.get("last_success_at")
+
+
 class _FakeState:
     """SchedulerState 유사 객체(duck-typed)."""
 
@@ -167,3 +174,33 @@ def test_build_health_never_succeeded():
     h = build_health(["a"], states, {"a"}, True, NOW)
     assert h["healthy"] is False
     assert len(h["never_succeeded"]) == 1
+
+
+# ── 쿠키 freshness 통합(build_health) ───────────────────────────────────────
+def test_build_health_stale_cookie_breaks_health():
+    from datetime import timedelta
+    states = [_FakeState(job_name="a")]
+    cookies = [
+        _FakeCookie(account_key="COUPANG_WING1", last_success_at=NOW - timedelta(days=11)),  # stale
+        _FakeCookie(account_key="COUPANG_WING_RG", last_success_at=NOW - timedelta(days=1)),  # ok
+    ]
+    h = build_health(["a"], states, {"a"}, True, NOW, cookies=cookies)
+    assert h["healthy"] is False
+    assert len(h["cookies_stale"]) == 1
+    assert h["cookies_stale"][0]["account_key"] == "COUPANG_WING1"
+
+
+def test_build_health_fresh_cookies_keep_health():
+    from datetime import timedelta
+    states = [_FakeState(job_name="a")]
+    cookies = [_FakeCookie(account_key="X", last_success_at=NOW - timedelta(days=1))]
+    h = build_health(["a"], states, {"a"}, True, NOW, cookies=cookies)
+    assert h["healthy"] is True
+    assert h["cookies_stale"] == []
+
+
+def test_build_health_no_cookies_arg_defaults_empty():
+    states = [_FakeState(job_name="a")]
+    h = build_health(["a"], states, {"a"}, True, NOW)
+    assert h["cookies_stale"] == []
+    assert h["healthy"] is True

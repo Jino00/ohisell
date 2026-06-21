@@ -82,5 +82,59 @@ def evaluate_staleness(jobs: Sequence[JobSnapshot], now: datetime) -> list[JobVe
     return [evaluate_job(job, now) for job in jobs]
 
 
+# ── 쿠키 freshness (SA, 순수) ─────────────────────────────────────────────
+# fail-soft 잡(RG 정산·광고 등)은 쿠키 만료를 에러로 안 띄우고 조용히 넘어가 워치독이 'ok'로 오판한다
+# (2026-06-10 RG 정산 11일 동결 사고). 그래서 잡 상태와 별개로 '쿠키가 며칠째 성공 못 했나'를 직접 본다.
+COOKIE_STALE_DAYS = 3.0  # 마지막 성공 후 이 일수를 넘기면 stale. 세션쿠키 단명 깜빡임은 관용, 지속 실패만.
+
+
+class CookieSnapshot(TypedDict, total=False):
+    account_key: str
+    status: Optional[str]  # green | red | unknown
+    last_success_at: Optional[datetime]
+
+
+class CookieVerdict(TypedDict):
+    account_key: str
+    state: str  # 'stale'
+    age_days: Optional[float]
+    status: Optional[str]
+    reason: str
+
+
+def evaluate_cookie_freshness(
+    cookies: Sequence[CookieSnapshot], now: datetime, stale_days: float = COOKIE_STALE_DAYS
+) -> list[CookieVerdict]:
+    """마지막 성공이 stale_days를 넘긴 쿠키만 반환(=비정상). 한 번도 성공 못 한 쿠키는 제외.
+
+    한 번도 성공 못 한 쿠키(last_success_at=None)는 미설정/미사용으로 보고 노이즈 제외 —
+    '쓰던 게 멈춘 것'만 잡는다(allowlist 불필요, 자동 스코프). 현재 status(red/green)의
+    단명 깜빡임에 의존하지 않고 '며칠째 성공 못 함'으로 지속 실패를 판정한다.
+    """
+    out: list[CookieVerdict] = []
+    now_n = _to_naive(now)  # aware/naive 혼재 시 TypeError 방어(codex P1) — 워치독은 안 죽어야 함.
+    for c in cookies:
+        ls = _to_naive(c.get("last_success_at"))
+        if ls is None:
+            continue
+        age_days = (now_n - ls).total_seconds() / 86400.0
+        if age_days > stale_days:
+            out.append({
+                "account_key": c.get("account_key", "?"),
+                "state": "stale",
+                "age_days": age_days,
+                "status": c.get("status"),
+                "reason": f"마지막 성공 {age_days:.1f}일 전 (> {int(stale_days)}일)",
+            })
+    return out
+
+
 def _verdict(name: str, state: str, age: Optional[float], reason: str) -> JobVerdict:
     return {"job_name": name, "state": state, "age_sec": age, "reason": reason}
+
+
+def _to_naive(dt: Optional[datetime]) -> Optional[datetime]:
+    """tzinfo 있으면 제거(시스템 관례=naive KST). aware/naive 혼재 빼기 크래시 방어."""
+    if dt is not None and dt.tzinfo is not None:
+        return dt.replace(tzinfo=None)
+    return dt

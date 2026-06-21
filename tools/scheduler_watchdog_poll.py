@@ -120,6 +120,9 @@ def _problem_keys(health: dict) -> list[str]:
     for bucket in ("failed", "stale", "never_succeeded"):
         for v in health.get(bucket, []) or []:
             keys.append(f"{bucket}:{v.get('job_name', '?')}")
+    # 쿠키 만료(fail-soft 잡이 조용히 멈추는 사고) — account_key 단위.
+    for c in health.get("cookies_stale", []) or []:
+        keys.append(f"cookie:{c.get('account_key', '?')}")
     return keys
 
 
@@ -135,6 +138,7 @@ def _summarize(keys: list[str]) -> str:
         "failed": "실패",
         "stale": "지연(stale)",
         "never_succeeded": "성공기록없음",
+        "cookie": "쿠키만료",
     }
     parts = []
     for kind, names in groups.items():

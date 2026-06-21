@@ -6,12 +6,14 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from app.services.scheduler_watchdog import (
+    COOKIE_STALE_DAYS,
     STALE_MULTIPLIER,
     STATE_DISABLED,
     STATE_FAILED,
     STATE_NEVER_SUCCEEDED,
     STATE_OK,
     STATE_STALE,
+    evaluate_cookie_freshness,
     evaluate_job,
     evaluate_staleness,
 )
@@ -174,3 +176,56 @@ def test_evaluate_staleness_batch_preserves_order_and_classifies_each():
         STATE_STALE,
         STATE_DISABLED,
     ]
+
+
+# ── 쿠키 freshness (fail-soft 잡 쿠키 만료 직접 감시) ────────────────────────
+def _cookie(**kw):
+    base = {"account_key": "COUPANG_WING1", "status": "red",
+            "last_success_at": NOW - timedelta(days=11)}
+    base.update(kw)
+    return base
+
+
+def test_cookie_stale_when_last_success_old():
+    v = evaluate_cookie_freshness([_cookie(last_success_at=NOW - timedelta(days=11))], NOW)
+    assert len(v) == 1
+    assert v[0]["account_key"] == "COUPANG_WING1"
+    assert v[0]["state"] == "stale"
+    assert v[0]["age_days"] > 10
+
+
+def test_cookie_fresh_within_threshold_is_ok():
+    # 2일 전 성공 < 3일 임계 → 비정상 아님(빈 목록).
+    v = evaluate_cookie_freshness([_cookie(last_success_at=NOW - timedelta(days=2))], NOW)
+    assert v == []
+
+
+def test_cookie_never_succeeded_excluded():
+    # 한 번도 성공 못 함(None) = 미설정/미사용 → 노이즈 제외.
+    v = evaluate_cookie_freshness([_cookie(last_success_at=None)], NOW)
+    assert v == []
+
+
+def test_cookie_boundary_just_over_threshold():
+    over = NOW - timedelta(days=COOKIE_STALE_DAYS, seconds=60)
+    under = NOW - timedelta(days=COOKIE_STALE_DAYS, seconds=-60)
+    assert len(evaluate_cookie_freshness([_cookie(last_success_at=over)], NOW)) == 1
+    assert evaluate_cookie_freshness([_cookie(last_success_at=under)], NOW) == []
+
+
+def test_cookie_only_stale_ones_returned():
+    cks = [
+        _cookie(account_key="A", last_success_at=NOW - timedelta(days=11)),  # stale
+        _cookie(account_key="B", last_success_at=NOW - timedelta(days=1)),   # ok
+        _cookie(account_key="C", last_success_at=None),                       # 제외
+    ]
+    v = evaluate_cookie_freshness(cks, NOW)
+    assert [x["account_key"] for x in v] == ["A"]
+
+
+def test_cookie_aware_naive_mixed_does_not_crash():
+    # codex P1: now naive, last_success_at aware(UTC+9) 혼재여도 크래시 없이 stale 판정.
+    from datetime import timezone
+    aware = (NOW - timedelta(days=11)).replace(tzinfo=timezone.utc)
+    v = evaluate_cookie_freshness([_cookie(last_success_at=aware)], NOW)
+    assert len(v) == 1 and v[0]["state"] == "stale"

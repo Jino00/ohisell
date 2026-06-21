@@ -16,6 +16,7 @@ from app.services.scheduler_watchdog import (
     STATE_FAILED,
     STATE_NEVER_SUCCEEDED,
     STATE_STALE,
+    evaluate_cookie_freshness,
     evaluate_staleness,
 )
 
@@ -43,6 +44,14 @@ WATCHDOG_JOBS: tuple[str, ...] = (
 
 # 에러 요약 최대 길이 — sanitized 한 줄(전체 traceback은 DB에만, codex #12 누출 방지).
 _ERR_SUMMARY_MAX = 200
+
+# 쿠키 freshness 감시 대상 — 돈에 직결되는 fail-soft 잡의 쿠키만(codex P2: 전체 감시 시 폐기/회전
+# 쿠키가 영구 stale 노이즈). WING1/WING2=RG 정산(net_profit), ADS1=쿠팡 광고비(net_profit).
+WATCHDOG_COOKIES: tuple[str, ...] = (
+    "COUPANG_WING1",
+    "COUPANG_WING2",
+    "COUPANG_ADS1",
+)
 
 
 def compute_interval_seconds(cron_expression: str) -> float:
@@ -104,12 +113,15 @@ def build_health(
     registered_job_names: set[str],
     scheduler_running: bool,
     now: datetime,
+    cookies: Iterable[Any] = (),
 ) -> dict:
     """워치독 판정 코어(순수: DB/스케줄러 미접촉 — 인자로 받은 스냅샷만 사용).
 
     states: SchedulerState 유사 객체(.job_name/.is_enabled/.cron_expression/.last_run_at/
             .last_status/.last_status_at/.created_at/.last_error). registered_job_names:
-            현재 APScheduler에 등록된 잡 id 집합. 반환 dict는 그대로 API 응답이 된다.
+            현재 APScheduler에 등록된 잡 id 집합. cookies: CoupangWingCookie 유사 객체
+            (.account_key/.status/.last_success_at) — fail-soft 잡의 쿠키 만료를 직접 감시.
+            반환 dict는 그대로 API 응답이 된다.
     """
     by_name = {getattr(s, "job_name", None): s for s in states}
 
@@ -163,6 +175,17 @@ def build_health(
         elif state_name == STATE_DISABLED:
             disabled.append(dict(v))
 
+    # 쿠키 freshness — fail-soft 잡(RG 정산·광고)이 쿠키 만료로 조용히 멈춘 걸 직접 잡는다.
+    cookie_snaps = [
+        {
+            "account_key": getattr(c, "account_key", "?"),
+            "status": getattr(c, "status", None),
+            "last_success_at": getattr(c, "last_success_at", None),
+        }
+        for c in cookies
+    ]
+    cookies_stale = evaluate_cookie_freshness(cookie_snaps, now)
+
     # disabled는 정상(노이즈 제외) — healthy 판정에서 무시. 그 외 어떤 비정상이라도 healthy=False.
     healthy = (
         scheduler_running
@@ -170,6 +193,7 @@ def build_health(
         and not failed
         and not stale
         and not never_succeeded
+        and not cookies_stale
     )
 
     return {
@@ -180,6 +204,7 @@ def build_health(
         "stale": stale,
         "never_succeeded": never_succeeded,
         "disabled": disabled,
+        "cookies_stale": cookies_stale,
         "as_of": now.isoformat(),
     }
 
@@ -189,7 +214,8 @@ def compute_scheduler_health(db, scheduler, now: datetime) -> dict:
 
     읽기 전용. 머니로직 미접촉. 라우터(GET /api/scheduler/health)가 호출한다.
     """
-    from app.models import SchedulerState  # 지연 임포트(순수 코어를 app 의존 없이 테스트하기 위함)
+    # 지연 임포트(순수 코어를 app 의존 없이 테스트하기 위함)
+    from app.models import CoupangWingCookie, SchedulerState
 
     running = bool(getattr(scheduler, "running", False))
     registered: set[str] = set()
@@ -204,4 +230,9 @@ def compute_scheduler_health(db, scheduler, now: datetime) -> dict:
         .filter(SchedulerState.job_name.in_(WATCHDOG_JOBS))
         .all()
     )
-    return build_health(WATCHDOG_JOBS, states, registered, running, now)
+    cookies = (
+        db.query(CoupangWingCookie)
+        .filter(CoupangWingCookie.account_key.in_(WATCHDOG_COOKIES))
+        .all()
+    )
+    return build_health(WATCHDOG_JOBS, states, registered, running, now, cookies=cookies)
