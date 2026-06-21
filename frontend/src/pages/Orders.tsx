@@ -235,7 +235,7 @@ export default function Orders() {
 
       {/* Profit summary cards */}
       {summary && summary.order_count > 0 && (
-        <div className="grid grid-cols-3 gap-4 mb-6">
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 mb-6">
           <div className="bg-white border rounded-lg p-4">
             <div className="text-sm text-gray-500">총 매출</div>
             <div className="text-xl font-bold text-blue-600">₩{formatKRW(summary.total_revenue)}</div>
@@ -314,7 +314,8 @@ export default function Orders() {
       {/* Loading skeleton */}
       {loading && (
         <div className="bg-white border rounded-lg overflow-hidden">
-          <table className="w-full">
+          <div className="overflow-x-auto">
+          <table className="min-w-full">
             <thead className="bg-gray-50">
               <tr>
                 {["날짜", "상품명", "채널", "수량", "가격", "상태", "주문번호"].map((h) => (
@@ -334,13 +335,15 @@ export default function Orders() {
               ))}
             </tbody>
           </table>
+          </div>
         </div>
       )}
 
       {/* Orders table */}
       {!loading && orders.length > 0 && (
         <div className="bg-white border rounded-lg overflow-hidden">
-          <table className="w-full">
+          <div className="overflow-x-auto">
+          <table className="min-w-full">
             <thead className="bg-gray-50">
               <tr>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500">날짜</th>
@@ -410,6 +413,7 @@ export default function Orders() {
               })()}
             </tbody>
           </table>
+          </div>
 
           {/* Pagination */}
           {totalPages > 1 && (

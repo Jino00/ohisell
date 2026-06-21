@@ -1558,7 +1558,7 @@ export default function NaverOps() {
           <p className="text-sm text-gray-500">로딩 중…</p>
         ) : products ? (
           <>
-            <div className="grid grid-cols-3 gap-3 mb-4">
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-4">
               <div className="bg-blue-50 rounded p-3 text-center">
                 <p className="text-xs text-gray-500">전체 상품</p>
                 <p className="text-xl font-bold text-blue-700">{products.total_elements.toLocaleString()}</p>
@@ -1624,7 +1624,7 @@ export default function NaverOps() {
         <h2 className="text-lg font-bold text-gray-900 mb-4">🏪 판매자 정보</h2>
         {sellerInfo ? (
           <div className="space-y-3">
-            <div className="grid grid-cols-3 gap-3">
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
               <div className="bg-gray-50 rounded p-3">
                 <p className="text-xs text-gray-500">계정 ID</p>
                 <p className="font-medium">{sellerInfo.account_id}</p>

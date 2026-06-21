@@ -510,7 +510,8 @@ function RevenueDriftCard({
             </span>
           </div>
 
-          <table className="w-full text-sm">
+          <div className="overflow-x-auto">
+          <table className="min-w-full text-sm">
             <thead>
               <tr className="text-left text-violet-500 border-b border-violet-200">
                 <th className="py-1 font-medium">구분</th>
@@ -536,6 +537,7 @@ function RevenueDriftCard({
               ))}
             </tbody>
           </table>
+          </div>
 
           <p className="text-xs text-violet-600 mt-2 bg-violet-100 rounded px-2 py-1">
             드리프트% = (우리−쿠팡)/쿠팡 · 닫힌 과거일만 대조(당일 제외, D-3) · 사실·지표만(D-2).
@@ -646,7 +648,7 @@ function CanonicalRevenueCard({ data }: { data: OverviewResponse }) {
       </div>
       {wingUsed ? (
         <>
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
             <div className="bg-white rounded-lg border border-emerald-200 p-3">
               <div className="text-xs text-emerald-600 mb-1">정본 매출 합계 (3P+RG)</div>
               <div className="text-lg font-bold text-emerald-900 tabular-nums">{won(s.canonical_total)}</div>
@@ -727,7 +729,8 @@ function AccountView({
           }
         />
       </div>
-      <table className="w-full text-sm bg-white rounded-lg border border-gray-200">
+      <div className="overflow-x-auto">
+      <table className="min-w-full text-sm bg-white rounded-lg border border-gray-200">
         <thead>
           <tr className="text-left text-gray-500 border-b border-gray-200">
             <th className="px-3 py-2">옵션 / 상품</th>
@@ -760,6 +763,7 @@ function AccountView({
           ))}
         </tbody>
       </table>
+      </div>
     </>
   );
 }
@@ -775,7 +779,8 @@ function AdView({ data }: { data: OverviewResponse }) {
         <Card label="전환매출" value={won(s.conv_revenue)} />
         <Card label="ROAS" value={ratioX(s.roas)} />
       </div>
-      <table className="w-full text-sm bg-white rounded-lg border border-gray-200">
+      <div className="overflow-x-auto">
+      <table className="min-w-full text-sm bg-white rounded-lg border border-gray-200">
         <thead>
           <tr className="text-left text-gray-500 border-b border-gray-200">
             <th className="px-3 py-2">옵션 / 상품</th>
@@ -806,6 +811,7 @@ function AdView({ data }: { data: OverviewResponse }) {
             ))}
         </tbody>
       </table>
+      </div>
     </>
   );
 }
@@ -820,7 +826,8 @@ function ProductView({ data }: { data: OverviewResponse }) {
         <Card label="판매 수량" value={num(s.order_qty)} />
         <Card label="반품 수량" value={num(s.return_qty)} />
       </div>
-      <table className="w-full text-sm bg-white rounded-lg border border-gray-200">
+      <div className="overflow-x-auto">
+      <table className="min-w-full text-sm bg-white rounded-lg border border-gray-200">
         <thead>
           <tr className="text-left text-gray-500 border-b border-gray-200">
             <th className="px-3 py-2">옵션 / 상품</th>
@@ -859,6 +866,7 @@ function ProductView({ data }: { data: OverviewResponse }) {
           ))}
         </tbody>
       </table>
+      </div>
     </>
   );
 }
@@ -1063,7 +1071,8 @@ function RocketView({
                   unmapped.length === 0 ? (
                     <p className="text-xs text-gray-400">미매핑 상품번호 없음 — 발주상세 수집 후 다시 확인하세요.</p>
                   ) : (
-                    <table className="w-full text-xs">
+                    <div className="overflow-x-auto">
+                    <table className="min-w-full text-xs">
                       <thead>
                         <tr className="text-left text-gray-400 border-b border-gray-100">
                           <th className="py-1 pr-2">상품번호</th>
@@ -1102,6 +1111,7 @@ function RocketView({
                         ))}
                       </tbody>
                     </table>
+                    </div>
                   )
                 )}
 
@@ -1109,7 +1119,8 @@ function RocketView({
                   mappings.length === 0 ? (
                     <p className="text-xs text-gray-400">확정/제외된 매핑 없음</p>
                   ) : (
-                    <table className="w-full text-xs">
+                    <div className="overflow-x-auto">
+                    <table className="min-w-full text-xs">
                       <thead>
                         <tr className="text-left text-gray-400 border-b border-gray-100">
                           <th className="py-1 pr-2">상품번호</th>
@@ -1144,6 +1155,7 @@ function RocketView({
                         ))}
                       </tbody>
                     </table>
+                    </div>
                   )
                 )}
               </div>

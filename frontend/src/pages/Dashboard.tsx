@@ -449,7 +449,8 @@ export default function Dashboard() {
         {channels.length === 0 ? (
           <div className="p-8 text-center text-gray-400">데이터가 없습니다</div>
         ) : (
-          <table className="w-full">
+          <div className="overflow-x-auto">
+          <table className="min-w-full">
             <thead className="bg-gray-50">
               <tr>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500">채널</th>
@@ -508,6 +509,7 @@ export default function Dashboard() {
               })}
             </tbody>
           </table>
+          </div>
         )}
       </div>
 
@@ -652,7 +654,8 @@ export default function Dashboard() {
         </div>
 
         {loading && products.length === 0 ? (
-          <table className="w-full">
+          <div className="overflow-x-auto">
+          <table className="min-w-full">
             <thead className="bg-gray-50">
               <tr>
                 {["순위", "상품명", "제품매출", "배송비매출", "총매출", "원가", "수수료", "광고비", "순이익", "이익률"].map((h) => (
@@ -672,10 +675,12 @@ export default function Dashboard() {
               ))}
             </tbody>
           </table>
+          </div>
         ) : products.length === 0 ? (
           <div className="p-8 text-center text-gray-400">상품 데이터가 없습니다</div>
         ) : (
-          <table className="w-full">
+          <div className="overflow-x-auto">
+          <table className="min-w-full">
             <thead className="bg-gray-50">
               <tr>
                 <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 w-12">순위</th>
@@ -720,6 +725,7 @@ export default function Dashboard() {
               })}
             </tbody>
           </table>
+          </div>
         )}
       </div>
     </div>

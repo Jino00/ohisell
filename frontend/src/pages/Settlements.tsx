@@ -188,7 +188,7 @@ export default function Settlements() {
 
       {/* Summary cards */}
       {summary && summary.count > 0 && (
-        <div className="grid grid-cols-3 gap-4 mb-6">
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 mb-6">
           <div className="bg-white border rounded-lg p-4">
             <div className="text-sm text-gray-500">총 매출</div>
             <div className="text-xl font-bold text-blue-600">{formatKRW(summary.total_amount)}원</div>
@@ -239,7 +239,8 @@ export default function Settlements() {
       {/* Loading skeleton */}
       {loading && (
         <div className="bg-white border rounded-lg overflow-hidden">
-          <table className="w-full">
+          <div className="overflow-x-auto">
+          <table className="min-w-full">
             <thead className="bg-gray-50">
               <tr>
                 {["정산일", "채널", "제품정산", "배송정산", "정산액", "수수료", "순정산", ""].map((h) => (
@@ -259,13 +260,15 @@ export default function Settlements() {
               ))}
             </tbody>
           </table>
+          </div>
         </div>
       )}
 
       {/* Data table */}
       {!loading && items.length > 0 && (
         <div className="bg-white border rounded-lg overflow-hidden">
-          <table className="w-full">
+          <div className="overflow-x-auto">
+          <table className="min-w-full">
             <thead className="bg-gray-50">
               <tr>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500">정산일</th>
@@ -311,6 +314,7 @@ export default function Settlements() {
               })}
             </tbody>
           </table>
+          </div>
 
           {/* Pagination */}
           {totalPages > 1 && (

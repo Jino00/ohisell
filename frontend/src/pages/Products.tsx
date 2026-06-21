@@ -172,7 +172,8 @@ export default function Products() {
 
       {/* 상품 테이블 */}
       <div className="bg-white rounded-lg border">
-        <table className="w-full text-sm">
+        <div className="overflow-x-auto">
+        <table className="min-w-full text-sm">
           <thead>
             <tr className="border-b bg-gray-50">
               <th className="text-left px-4 py-3 font-medium text-gray-600">SKU</th>
@@ -243,7 +244,8 @@ export default function Products() {
                       {p.mappings.length === 0 ? (
                         <p className="text-gray-400 text-sm">매핑 없음</p>
                       ) : (
-                        <table className="w-full text-xs">
+                        <div className="overflow-x-auto">
+                        <table className="min-w-full text-xs">
                           <thead>
                             <tr className="text-gray-500">
                               <th className="text-left py-1">채널</th>
@@ -274,6 +276,7 @@ export default function Products() {
                             ))}
                           </tbody>
                         </table>
+                        </div>
                       )}
                     </td>
                   </tr>
@@ -289,6 +292,7 @@ export default function Products() {
             )}
           </tbody>
         </table>
+        </div>
       </div>
 
       {/* 모달 */}
