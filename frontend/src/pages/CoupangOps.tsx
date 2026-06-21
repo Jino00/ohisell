@@ -81,6 +81,28 @@ function adTodaySub(synced: string | null | undefined): string {
   return `${hhmm} 갱신 기준 · 버튼으로 최신화`;
 }
 
+// RoAS/이익률 색상 — 테이블·모바일 카드 공용(단일 출처).
+function roasClass(s: string | null | undefined): string {
+  if (s == null) return "text-gray-300";
+  const n = Number(s);
+  return n >= 3 ? "text-green-600 font-medium" : n >= 1 ? "text-gray-700" : "text-red-500";
+}
+function rateClass(s: string | null | undefined): string {
+  if (s == null) return "text-gray-300";
+  const n = Number(s);
+  return n >= 20 ? "text-blue-600 font-medium" : n >= 0 ? "text-gray-700" : "text-red-500";
+}
+
+// 모바일 카드용 지표 셀 — 라벨 + 값(우측정렬 숫자). 테이블이 좁은 화면에서 잘리는 문제 대체.
+function StatCell({ label, value, valueClass }: { label: string; value: string; valueClass?: string }) {
+  return (
+    <div className="min-w-0">
+      <div className="text-[10px] text-gray-400 mb-0.5 break-keep">{label}</div>
+      <div className={`text-xs tabular-nums break-keep ${valueClass ?? "text-gray-800"}`}>{value}</div>
+    </div>
+  );
+}
+
 function SummaryCard({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
     <div className="bg-white border border-gray-200 rounded-lg p-3 sm:p-4">
@@ -295,6 +317,16 @@ export default function CoupangOps() {
       const bv = getV(b);
       return mul * (av - bv);
     });
+
+  // 합계(테이블 tfoot + 모바일 카드 공용) — 단일 출처로 중복 제거.
+  const totals = {
+    revenue: filtered.reduce((a, r) => a + Number(r.revenue), 0),
+    ad_spend: filtered.reduce((a, r) => a + Number(r.ad_spend), 0),
+    conv_revenue: filtered.reduce((a, r) => a + Number(r.conv_revenue), 0),
+    profit: filtered.reduce((a, r) => a + Number(r.profit), 0),
+  };
+  const totalRoas = totals.ad_spend ? `${(totals.conv_revenue / totals.ad_spend).toFixed(2)}x` : "—";
+  const totalRate = totals.revenue ? `${((totals.profit / totals.revenue) * 100).toFixed(1)}%` : "—";
 
   // 컬럼 헤더 (정렬 + 필터 드롭다운)
   function ColHeader({ col, label, align = "right" }: { col: ColKey; label: string; align?: "left" | "right" }) {
@@ -608,14 +640,41 @@ export default function CoupangOps() {
               필터 초기화 ({activeFilters}개 적용 중)
             </button>
           )}
+          {/* 모바일 정렬 — 카드 뷰엔 컬럼 헤더가 없어 별도 정렬 컨트롤 제공(데스크톱은 헤더 클릭).
+              방향(↓/↑)은 토글 버튼으로 가시화 — select만으론 데스크톱에서 바뀐 방향이 숨겨짐(codex). */}
+          <div className="md:hidden flex items-center gap-1">
+            <select
+              className="border border-gray-300 rounded px-2 py-1.5 text-xs bg-white"
+              value={sortKey}
+              onChange={(e) => setSortKey(e.target.value as SortKey)}
+              aria-label="정렬 기준"
+            >
+              <option value="revenue">매출순</option>
+              <option value="profit">이익순</option>
+              <option value="profit_rate">이익률순</option>
+              <option value="ad_spend">광고비순</option>
+              <option value="conv_revenue">전환매출순</option>
+              <option value="roas">RoAS순</option>
+            </select>
+            <button
+              onClick={() => setSortDir((d) => (d === "desc" ? "asc" : "desc"))}
+              className="px-2 py-1.5 rounded border border-gray-300 text-xs text-gray-600 bg-white hover:bg-gray-100"
+              aria-label={sortDir === "desc" ? "내림차순(클릭하여 오름차순)" : "오름차순(클릭하여 내림차순)"}
+              title={sortDir === "desc" ? "내림차순" : "오름차순"}
+            >
+              {sortDir === "desc" ? "↓" : "↑"}
+            </button>
+          </div>
           <input
-            className="ml-auto border border-gray-300 rounded px-3 py-1.5 text-sm w-48"
+            className="w-full sm:w-48 sm:ml-auto border border-gray-300 rounded px-3 py-1.5 text-sm"
             placeholder="상품명 검색…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
         </div>
 
+        {/* 데스크톱·태블릿: 테이블 (모바일은 아래 카드 리스트로 대체) */}
+        <div className="hidden md:block overflow-x-auto">
         <table className="w-full text-sm">
           <thead className="bg-gray-50 text-gray-500 text-xs border-b border-gray-100">
             <tr>
@@ -706,27 +765,70 @@ export default function CoupangOps() {
             <tfoot className="bg-gray-50 border-t border-gray-200 text-sm font-semibold">
               <tr>
                 <td className="px-4 py-2 text-gray-600" colSpan={2}>합계 ({filtered.length}개)</td>
-                <td className="px-3 py-2 text-right">{won(String(filtered.reduce((a, r) => a + Number(r.revenue), 0)))}</td>
-                <td className="px-3 py-2 text-right">{won(String(filtered.reduce((a, r) => a + Number(r.ad_spend), 0)))}</td>
-                <td className="px-3 py-2 text-right">{won(String(filtered.reduce((a, r) => a + Number(r.conv_revenue), 0)))}</td>
-                <td className="px-3 py-2 text-right">{(() => {
-                  const sp = filtered.reduce((a, r) => a + Number(r.ad_spend), 0);
-                  const cv = filtered.reduce((a, r) => a + Number(r.conv_revenue), 0);
-                  return sp ? `${(cv / sp).toFixed(2)}x` : "—";
-                })()}</td>
-                <td className="px-3 py-2 text-right">{(() => {
-                  const p = filtered.reduce((a, r) => a + Number(r.profit), 0);
-                  return <span className={p >= 0 ? "text-blue-700" : "text-red-500"}>{won(String(p))}</span>;
-                })()}</td>
-                <td className="px-3 py-2 text-right">{(() => {
-                  const rev = filtered.reduce((a, r) => a + Number(r.revenue), 0);
-                  const p = filtered.reduce((a, r) => a + Number(r.profit), 0);
-                  return rev ? `${(p / rev * 100).toFixed(1)}%` : "—";
-                })()}</td>
+                <td className="px-3 py-2 text-right">{won(String(totals.revenue))}</td>
+                <td className="px-3 py-2 text-right">{won(String(totals.ad_spend))}</td>
+                <td className="px-3 py-2 text-right">{won(String(totals.conv_revenue))}</td>
+                <td className="px-3 py-2 text-right">{totalRoas}</td>
+                <td className="px-3 py-2 text-right">
+                  <span className={totals.profit >= 0 ? "text-blue-700" : "text-red-500"}>{won(String(totals.profit))}</span>
+                </td>
+                <td className="px-3 py-2 text-right">{totalRate}</td>
               </tr>
             </tfoot>
           )}
         </table>
+        </div>
+
+        {/* 모바일: 상품 카드 리스트 (테이블이 좁은 화면에서 잘리는 문제 대체) */}
+        <div className="md:hidden">
+          {loading ? (
+            <div className="px-4 py-8 text-center text-gray-400 text-sm">로딩 중…</div>
+          ) : filtered.length === 0 ? (
+            <div className="px-4 py-8 text-center text-gray-400 text-sm">
+              {data?.by_product.length === 0 ? "데이터 없음 — 동기화 후 조회하세요" : "검색/필터 결과 없음"}
+            </div>
+          ) : (
+            <ul className="divide-y divide-gray-100">
+              {filtered.map((row) => (
+                <li key={`${row.product_name}|${row.option_name}|${row.channel_type}`} className="px-4 py-3">
+                  <div className="flex items-start justify-between gap-2 mb-2">
+                    <div className="text-sm text-gray-900 leading-snug break-keep">
+                      {row.product_name}
+                      {row.option_name && <span className="text-gray-400">, {row.option_name}</span>}
+                    </div>
+                    <span className={`shrink-0 inline-block px-2 py-0.5 rounded text-xs font-medium ${
+                      row.channel_type === "Wing" ? "bg-blue-50 text-blue-700"
+                      : row.channel_type === "로켓그로스" ? "bg-orange-50 text-orange-700"
+                      : "bg-purple-50 text-purple-700"
+                    }`}>{row.channel_type}</span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-x-3 gap-y-2">
+                    <StatCell label="총 매출" value={won(row.revenue)} valueClass="text-gray-900 font-medium" />
+                    <StatCell label="광고비" value={won(row.ad_spend)} />
+                    <StatCell label="광고 전환매출" value={won(row.conv_revenue)} />
+                    <StatCell label="RoAS" value={row.roas ? roasFmt(row.roas) : "—"} valueClass={roasClass(row.roas)} />
+                    <StatCell label="이익" value={won(row.profit)} valueClass={`font-medium ${profitColor(row.profit)}`} />
+                    <StatCell label="이익률" value={row.profit_rate ? pct(row.profit_rate) : "—"} valueClass={rateClass(row.profit_rate)} />
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+          {filtered.length > 0 && (
+            <div className="px-4 py-3 bg-gray-50 border-t border-gray-200">
+              <div className="text-xs font-semibold text-gray-600 mb-2">합계 ({filtered.length}개)</div>
+              <div className="grid grid-cols-3 gap-x-3 gap-y-2">
+                <StatCell label="총 매출" value={won(String(totals.revenue))} valueClass="text-gray-900 font-semibold" />
+                <StatCell label="광고비" value={won(String(totals.ad_spend))} valueClass="font-semibold" />
+                <StatCell label="광고 전환매출" value={won(String(totals.conv_revenue))} valueClass="font-semibold" />
+                <StatCell label="RoAS" value={totalRoas} valueClass="font-semibold text-gray-800" />
+                <StatCell label="이익" value={won(String(totals.profit))} valueClass={`font-semibold ${totals.profit >= 0 ? "text-blue-700" : "text-red-500"}`} />
+                <StatCell label="이익률" value={totalRate} valueClass="font-semibold text-gray-800" />
+              </div>
+            </div>
+          )}
+        </div>
+
         <div className="px-4 py-2 text-xs text-gray-400 border-t border-gray-100">
           {filtered.length}개 표시 / 전체 {data?.by_product.length ?? 0}개
         </div>
