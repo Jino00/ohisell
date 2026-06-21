@@ -83,10 +83,10 @@ function adTodaySub(synced: string | null | undefined): string {
 
 function SummaryCard({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
-    <div className="bg-white border border-gray-200 rounded-lg p-4">
-      <div className="text-xs text-gray-500 mb-1">{label}</div>
-      <div className="text-xl font-bold text-gray-900">{value}</div>
-      {sub && <div className="text-xs text-gray-400 mt-0.5">{sub}</div>}
+    <div className="bg-white border border-gray-200 rounded-lg p-3 sm:p-4">
+      <div className="text-xs text-gray-500 mb-1 break-keep">{label}</div>
+      <div className="text-base sm:text-xl font-bold text-gray-900 tabular-nums break-keep">{value}</div>
+      {sub && <div className="text-[11px] sm:text-xs text-gray-400 mt-0.5 break-keep leading-tight">{sub}</div>}
     </div>
   );
 }
@@ -380,12 +380,12 @@ export default function CoupangOps() {
   return (
     <div onClick={() => setOpenCol(null)}>
       {/* ── 헤더 ── */}
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
         <div>
           <h2 className="text-xl font-bold text-gray-900">🔧 쿠팡 운영 패널</h2>
           {data && <p className="text-xs text-gray-400 mt-0.5">{data.period.from} ~ {data.period.to}</p>}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <div className="flex gap-1">
             {PERIODS.map((p) => (
               <button
@@ -435,7 +435,7 @@ export default function CoupangOps() {
           >
             ⚙️ {adCookieStatus?.status === "green" ? "🟢" : adCookieStatus?.status === "red" ? "🔴" : "⬜"}
           </button>
-          <span className="text-xs text-gray-400 border-l border-gray-200 pl-2">
+          <span className="hidden sm:inline text-xs text-gray-400 border-l border-gray-200 pl-2">
             ※ 쿠팡 API 약 1~2시간 지연 발생 가능
           </span>
         </div>
@@ -523,15 +523,15 @@ export default function CoupangOps() {
             <div className="text-xs text-gray-400 font-medium mb-1.5 px-0.5">
               📦 오늘 판매 ({data.period.from})
             </div>
-            <div className="grid grid-cols-5 gap-3">
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2 sm:gap-3">
               <SummaryCard label="총 매출" value={loading ? "…" : won(s?.revenue)} />
               <SummaryCard label="쿠팡 비용" value={loading ? "…" : won(s?.fee)} sub={feeSub(s?.fee_actual_ratio)} />
               <SummaryCard label="원가" value={loading ? "…" : won(s?.cost)} sub={costSub(s?.cost_coverage)} />
               <SummaryCard label="배송·물류비" value={loading ? "…" : won(s?.shipping)} sub={shipSub(s?.rg_fulfillment)} />
-              <div className={`bg-white border-2 rounded-lg p-4 ${Number(s?.profit_excl_ad ?? 0) >= 0 ? "border-blue-200" : "border-red-200"}`}>
-                <div className="text-xs text-gray-500 mb-1">이익 (광고비 제외)</div>
-                <div className={`text-xl font-bold ${profitColor(s?.profit_excl_ad)}`}>{loading ? "…" : won(s?.profit_excl_ad)}</div>
-                {s?.profit_rate_excl_ad && <div className="text-xs mt-0.5 text-gray-400">이익률 {pct(s.profit_rate_excl_ad)}</div>}
+              <div className={`bg-white border-2 rounded-lg p-3 sm:p-4 ${Number(s?.profit_excl_ad ?? 0) >= 0 ? "border-blue-200" : "border-red-200"}`}>
+                <div className="text-xs text-gray-500 mb-1 break-keep">이익 (광고비 제외)</div>
+                <div className={`text-base sm:text-xl font-bold tabular-nums break-keep ${profitColor(s?.profit_excl_ad)}`}>{loading ? "…" : won(s?.profit_excl_ad)}</div>
+                {s?.profit_rate_excl_ad && <div className="text-[11px] sm:text-xs mt-0.5 text-gray-400">이익률 {pct(s.profit_rate_excl_ad)}</div>}
               </div>
             </div>
           </div>
@@ -540,7 +540,7 @@ export default function CoupangOps() {
             <div className="text-xs text-gray-400 font-medium mb-1.5 px-0.5">
               📣 광고 현황 (광고비=오늘 실시간 · 전환매출/RoAS는 익일 확정)
             </div>
-            <div className="grid grid-cols-3 gap-3">
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 sm:gap-3">
               <SummaryCard
                 label="광고비 (오늘)"
                 value={loading ? "…" : (s?.ad_today != null ? won(s.ad_today) : "익일 확정")}
@@ -562,22 +562,22 @@ export default function CoupangOps() {
       ) : (
         /* 어제·7일 등 — 동일 기간 */
         <div className="mb-6 space-y-2">
-          <div className="grid grid-cols-6 gap-3">
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 sm:gap-3">
             <SummaryCard label="총 매출" value={loading ? "…" : won(s?.revenue)} />
             <SummaryCard label="수수료" value={loading ? "…" : won(s?.fee)} sub={feeSub(s?.fee_actual_ratio)} />
             <SummaryCard label="원가" value={loading ? "…" : won(s?.cost)} sub={costSub(s?.cost_coverage)} />
             <SummaryCard label="광고비" value={loading ? "…" : won(s?.ad_spend)} />
             <SummaryCard label="배송·물류비" value={loading ? "…" : won(s?.shipping)} sub={shipSub(s?.rg_fulfillment)} />
-            <div className={`bg-white border-2 rounded-lg p-4 ${Number(s?.profit ?? 0) >= 0 ? "border-blue-200" : "border-red-200"}`}>
-              <div className="text-xs text-gray-500 mb-1">이익</div>
-              <div className={`text-xl font-bold ${profitColor(s?.profit)}`}>{loading ? "…" : won(s?.profit)}</div>
-              {s?.profit_rate && <div className="text-xs mt-0.5 text-gray-400">이익률 {pct(s.profit_rate)}</div>}
+            <div className={`bg-white border-2 rounded-lg p-3 sm:p-4 ${Number(s?.profit ?? 0) >= 0 ? "border-blue-200" : "border-red-200"}`}>
+              <div className="text-xs text-gray-500 mb-1 break-keep">이익</div>
+              <div className={`text-base sm:text-xl font-bold tabular-nums break-keep ${profitColor(s?.profit)}`}>{loading ? "…" : won(s?.profit)}</div>
+              {s?.profit_rate && <div className="text-[11px] sm:text-xs mt-0.5 text-gray-400">이익률 {pct(s.profit_rate)}</div>}
             </div>
           </div>
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 sm:gap-3">
             <SummaryCard label="광고 전환 매출" value={loading ? "…" : won(s?.conv_revenue)} />
             <SummaryCard label="RoAS" value={loading ? "…" : roasFmt(s?.roas)} sub={s?.roas ? "광고 전환매출 ÷ 광고비" : undefined} />
-            <div />
+            <div className="hidden sm:block" />
           </div>
         </div>
       )}
