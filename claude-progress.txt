@@ -3,7 +3,16 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
-- 날짜: 2026-06-20 (★워치독(=revenue-wing-truth S5b) **S5 완료 — 미니트랙 5/5 전부 완료**)
+- 날짜: 2026-06-22 (★오하이테크 광고 트랙 **S3 상주 자동화 완료·라이브 e2e 검증** — 트랙 거의 완료)
+- ★**오하이테크(1P) 광고비 수집 S3 완료(트랙 `docs/tracks/active/track_coupang-ohitech-ad.md`, D-11)**: 전용 포트 9224 상주 Chrome(launchd `com.ohisell.ohitech-chrome` KeepAlive self-heal) + 버튼-poll 데몬(`com.ohisell.ohitech-ad`, 60s 버튼 + 23h 일별) + 백엔드 4엔드포인트(`/rocket/ad-cost/{request-refresh,refresh-status,refresh-claim,fetch-success}`) + 프론트 '광고비 갱신' 버튼(rocket-overview). 커밋 `2f92620`+`be5ffd3`(feat `feat/ohitech-ad-cost`, **미push·미머지**).
+  - ★**포트 9223→9224 개정(D-11, Jino 승인)**: 라이브 9223은 rocket·wing2가 수동 공유 중(9222=WING1 상주) → ohitech 상주화하면 충돌→오벤더 push 위험 → 전용 9224.
+  - 백엔드 테스트 +4(전체 **439 passed**). 페처 compile+ruff clean. 프론트 build OK.
+  - Claude 적대적 리뷰(codex quota 6/26): **P1 라이브 config cdp_port 9223 고정→9224 직접 갱신**(setdefault 무력 교훈, failures.jsonl 기록), P2 TZ 명시KST 비교·adopt 영구정지 8분 알림·실패 가시성(rc2/401 _notify_mac) 반영. 요청유실 자동re-request는 스팸 회피로 기각.
+  - ✅**라이브 e2e(원칙22, 전부 PASS)**: ①백엔드 7/7 라운드트립(원자claim·토큰401·소비) ②수동9223 Chrome 은퇴→9224 상주 3초 기동(외과적 설치 — WING1/rocket/adcost 미접촉) ③run 29일 push(5/24~6/21, 22,431,687) ④heartbeat last_success green ⑤**버튼 라운드트립**(request→poll 60s 감지→claim→run→push→소비, rc0) ⑥머니패스 rocket-overview ad_spend 3,393,330·net_profit 5,107,684 ⑦**self-heal**(SIGKILL→3초 복구). prod 백업 `/home/ubuntu/ohisell_bak/ohitech_s3_20260622_130228`.
+  - ⚠️잔존: ①Chrome 기동 직후 첫 run 1회 false '세션만료' 알림 가능(다음 poll 자동복구) ②세션 완전만료 시 Jino 9224 창 1회 로그인(D-7) ③feat 미push·미머지.
+  - **다음 = (git) feat 머지·push(Jino 결정) → 6/26 codex 사후리뷰 → (Phase2) 옵션단위 Billboard.**
+- ─────────────────────────────────────────────
+- (이전) 날짜: 2026-06-20 (★워치독(=revenue-wing-truth S5b) **S5 완료 — 미니트랙 5/5 전부 완료**)
 - ★**워치독 S5 완료 = S5b 미니트랙 전부 완료(5/5, 브랜치 `feat/scheduler-watchdog`, 커밋 7ba0e02)**: PLAN T5.
   - `tools/scheduler_watchdog_poll.py`(독립 경량 데몬, 원칙8/18 — ad_cost 페처와 분리): prod /api/scheduler/health 30분 폴 → 비정상 시 _notify_mac 집계 단일 알림. 6h 디바운스·해소 prune·기동 알림·연속 net실패(3h) 'prod 도달불가' 1회 알림·데몬 불사. _problem_keys/_summarize/_maybe_notify 순수분리.
   - `com.ohisell.scheduler-watchdog.plist`(KeepAlive). install_local_runtime.sh 별도 블록(loop 뒤 추가=main wing-chrome 머지 안전). 6 테스트(로컬 43 passed/1 skipped).
