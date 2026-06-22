@@ -26,7 +26,7 @@ from app.database import get_db
 from app.models import Channel, CoupangAdCostDaily, CoupangAdOptionDaily, CoupangProductItem, CoupangRevenueFee, CoupangRgInbound, CoupangRgOrderItem, CoupangRgSettlementFee, Order, ProductChannelMapping, ProductMaster
 from app.routers._coupang_write_http import handle_write as _handle_write
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
-from app.services.coupang import ad_cost_sync, coupon_write, coupang_seller_cost as _seller_cost_harness, demand_classifier, in_transit_estimator, lead_time_estimator, product_write, rg_fee_audit, rg_inbound_sync, rg_product_size_sync, rg_replenishment, rg_settlement_sync, replenishment_backtest, rocket_cost_map, rocket_supplier_sync, rg_cost_reader as _rg_reader, sales_velocity_estimator, vendor_summary_sync
+from app.services.coupang import ad_cost_sync, coupon_write, coupang_seller_cost as _seller_cost_harness, demand_classifier, in_transit_estimator, lead_time_estimator, ohitech_ad_sync, product_write, rg_fee_audit, rg_inbound_sync, rg_product_size_sync, rg_replenishment, rg_settlement_sync, replenishment_backtest, rocket_cost_map, rocket_supplier_sync, rg_cost_reader as _rg_reader, sales_velocity_estimator, vendor_summary_sync
 from app.utils.crypto import CookieCryptoError
 
 log = logging.getLogger(__name__)
@@ -1334,6 +1334,27 @@ def ingest_rocket_settlement(
     if not isinstance(rows, list) or not rows:
         raise HTTPException(status_code=400, detail="rows[] 필요")
     return rocket_supplier_sync.ingest_settlements(db, vendor_id, rows)
+
+
+@router.post("/rocket/ad-cost/ingest")
+def ingest_rocket_ad_cost(
+    body: dict[str, Any] = Body(...),
+    x_ingest_token: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """오하이테크(1P 로켓배송) 일별 광고비 push → coupang_ad_report(Retail) upsert(멱등).
+
+    body: {"vendor_id": "A01029796", "days": [{"date":"YYYY-MM-DD","ad_spend":<전체>,"conv_sales":<…>}, ...]}.
+    ad_spend=ALL_DELIVERED_AD_COST(전체, D-10) → _agg_rocket_ad가 1P 순이익에서 차감. 트랙 D-8/D-9/D-10.
+    """
+    _check_ingest_token(x_ingest_token)
+    vendor_id = str(body.get("vendor_id") or "").strip()
+    if not vendor_id:
+        raise HTTPException(status_code=400, detail="vendor_id 필요")
+    days = body.get("days")
+    if not isinstance(days, list) or not days:
+        raise HTTPException(status_code=400, detail="days[] 필요")
+    return ohitech_ad_sync.ingest_ohitech_ad_cost(db, vendor_id, days)
 
 
 @router.post("/rocket/po-detail/ingest")
