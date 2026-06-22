@@ -39,15 +39,17 @@
 - [x] S1c: **prod 배포 + 라이브 e2e 검증 완료(2026-06-22, 원칙22)**. 2파일 scp(coupang_ops·ohitech_ad_sync)+env `COUPANG_ROCKET_VENDOR_ID=A01029796`+pm2 restart(online·백업 ohitech_20260622_121550). 페처 run→29일 push(5/24~6/21). **라이브 증거**: rocket-overview `period 6/16~6/22 vendor A01029796`, ad_spend **0→3,393,330**(=윈도우내 푸시행 정확합·이중계상0), net_profit **8,501,014→5,107,684**(−3,393,330 정확). **리뷰 P1① 실증**: 선존재 Retail/A01029796 행 1건(5/18, impressions>0=PA수동업로드 흔적, 5/19생성)=윈도우 밖·무영향, vendor스코프로 안전. feat `feat/ohitech-ad-cost`(75f3844+3a9f1d9, 미push·미머지).
   - **배포 체크리스트**: ① prod env **`COUPANG_ROCKET_VENDOR_ID=A01029796`** 설정(리뷰 P1② — 차감 vendor 스코프 고정, 타 벤더 stray Retail 무시) ② A01029796 PA-XLSX 수동업로드 금지(리뷰 P1①) ③ 배포 후 `python3 tools/ohitech_ad_fetcher.py`(run) 1회 → coupang_ad_report Retail 적재 → GET /api/overview/rocket-overview 광고≠0·순이익 차감 확인.
   - **리뷰 상태**: ⚠codex quota 초과(리셋 6/26). **Claude 적대적 리뷰 완료** — P2③(사일런트 동결)·P2④(0클로버) 수정 커밋 3a9f1d9, P1①②는 vendor 스코프+docstring 제약으로 해소. 6/26 codex 사후리뷰 권장.
-- [ ] S3: CDP Chrome 상주화(chrome-supervise + launchd com.ohisell.ohitech-chrome, 9223) + 세션만료 워치독
+- [x] **S3: 상주 자동화 완료·라이브 검증(2026-06-22, 원칙22)** — 전용 포트 9224(D-11) + chrome-supervise(launchd `com.ohisell.ohitech-chrome`, KeepAlive self-heal) + 버튼-poll(`com.ohisell.ohitech-ad`, poll: 버튼 claim + 23h 자동) + 백엔드 4엔드포인트(`/rocket/ad-cost/{request-refresh,refresh-status,refresh-claim,fetch-success}`) + 프론트 '광고비 갱신' 버튼(rocket-overview). 커밋 `2f92620`(feat, 미push). **라이브 증거**: ①백엔드 7/7 라운드트립(원자claim·토큰401·소비) ②수동9223 Chrome 은퇴→9224 상주 3초 기동 ③run end-to-end 29일 push(5/24~6/21, 22,431,687) ④heartbeat last_success green ⑤**버튼 라운드트립**(request→poll 60s 감지→claim→run→push→소비) ⑥머니패스 rocket-overview ad_spend 3,393,330·net_profit 5,107,684 ⑦**self-heal**(SIGKILL→3초 복구). Claude 적대적리뷰 P1(config 9223→9224 갱신)·P2(TZ KST·adopt정지알림·실패가시성) 반영. codex 사후리뷰 6/26.
+  - ⚠️**잔존**: ① Chrome 기동 직후 첫 run은 리다이렉트 전환으로 1회 false '세션만료' 알림 가능(다음 poll 자동복구) ② 세션 완전만료 시 Jino가 9224 창에서 1회 로그인(D-7, 불가피) ③ feat `feat/ohitech-ad-cost` 미push·미머지(Jino 결정).
 - [x] 라이브 검증: 수집값=화면 1:1(4,039,603)·순이익 반영(0→3,393,330 차감) 확인
-- [ ] (Phase 2) 상품별 옵션 단위 광고비 표시
+- [ ] (Phase 2) 상품별 옵션 단위 광고비 표시(Billboard 리포트)
+- [ ] (선택) 세션만료 워치독 — 현재 run의 `_notify_mac`(만료·rc2·401 알림)로 표면화. 별도 쿠키 freshness 워치독은 Phase1.5 보류.
 
 ## 현재 진행 단계
-**S1+S2 완료·prod 배포·라이브 e2e 검증 끝(2026-06-22).** 오하이테크 광고비가 1P 순이익에 실제 반영됨(누락 해소). 단 **수집은 아직 수동**: ① Mac 실제 Chrome(9223, 별도 프로필)이 떠 있고 로그인돼 있어야 함 ② `python3 tools/ohitech_ad_fetcher.py`(run) 수동 1회. **상주 자동화(S3) 미구현** → 지금은 Chrome 닫히거나 세션 만료 시 멈춤. feat 브랜치 미push·미머지.
+**S1+S2+S3 완료·prod 배포·라이브 e2e 검증 끝(2026-06-22).** 오하이테크 광고비가 1P 순이익에 반영(누락 해소)되고, **수집이 무중단 자동화**됨: 전용 포트 9224 상주 Chrome(launchd KeepAlive self-heal) + 버튼-poll 데몬(`com.ohisell.ohitech-ad`, 60s 폴 버튼 + 23h 일별 자동). 종합조망 '광고비 갱신' 버튼으로 즉시 갱신. Mac launchd 2잡 설치·가동 확인(외과적 설치 — WING1/rocket/adcost 미접촉). 백엔드 prod 배포(백업 `/home/ubuntu/ohisell_bak/ohitech_s3_20260622_130228`). **남은 단발 개입은 세션 완전만료 시 9224 창 1회 로그인뿐(D-7).** feat 브랜치 미push·미머지.
 
 ## 다음 액션
-1. **S3 상주화**: `chrome-supervise` 명령(wing-chrome 패턴 복제) + launchd `com.ohisell.ohitech-chrome`(9223) + run을 주기 실행(스케줄 또는 버튼-poll). 세션 만료 워치독(쿠키 freshness — 기존 scheduler_watchdog에 ADS2 추가 검토). → 무중단 자동수집.
-2. **(git) feat `feat/ohitech-ad-cost` → main 머지·push** (Jino 결정). prod는 이미 이 코드 실행 중(scp) — 레포 정합 위해 머지 권장.
-3. **(6/26) codex 사후리뷰** — quota 리셋 후.
-4. (Phase 2) 상품별 옵션 단위 광고비 표시.
+1. **(git) feat `feat/ohitech-ad-cost` → main 머지·push** (Jino 결정). prod는 이미 이 코드 실행 중(scp) — 레포 정합 위해 머지 권장.
+2. **(6/26) codex 사후리뷰** — quota 리셋 후 `/codex review`(feat 대비 main).
+3. (관찰) 첫 run false-만료 알림 빈도 — 잦으면 cmd_run에 1회 재시도 추가 검토.
+4. (Phase 2) 상품별 옵션 단위 광고비 표시(Billboard 리포트).
