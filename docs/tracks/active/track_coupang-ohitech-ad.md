@@ -29,14 +29,20 @@
 - [x] **라이브 실측: API=화면 1:1(3,997,206)** ← Mac 세션 재생 성공
 - [x] S1a: 신규 페처 스캐폴딩 `tools/ohitech_ad_fetcher.py`(CDP 방식, 오픽스 무수정) + config + 실제 Chrome(9223) 기동
 - [x] S1 라이브 세션 확보: Jino 오하이테크 로그인(실제 Chrome 9223) + report/SALES 소스 라이브 검증(D-9, 3,997,206 일치)
-- [ ] S1b: 페처 `run` — report/SALES fetch→일별 파싱(PA·전체·전환)→prod push (오픽스 _push_sales 재사용)
-- [ ] S2: 백엔드 — 오하이테크 일별 광고비 ingest 엔드포인트 → coupang_ad_report(sell_type='Retail', vendor='A01029796') → _agg_rocket_ad 자동합산(D-10 전체값)
+- [x] S1b: 페처 `run` — report/SALES fetch→일별 파싱(전체/PA/전환)→prod push. fetch+파싱 **라이브검증**(29일·최근7일 4,039,603 일치)
+- [x] S2: 백엔드 — `ohitech_ad_sync.ingest_ohitech_ad_cost` + `POST /api/coupang/ops/rocket/ad-cost/ingest` → coupang_ad_report(Retail, A01029796) upsert. 테스트 6 + 전체 435 통과. 통합점검: `_agg_rocket_ad`/`overview._ROCKET_VENDOR_ID`(unset|A01029796)와 정합.
+- [x] S1c: **prod 배포 + 라이브 e2e 검증 완료(2026-06-22, 원칙22)**. 2파일 scp(coupang_ops·ohitech_ad_sync)+env `COUPANG_ROCKET_VENDOR_ID=A01029796`+pm2 restart(online·백업 ohitech_20260622_121550). 페처 run→29일 push(5/24~6/21). **라이브 증거**: rocket-overview `period 6/16~6/22 vendor A01029796`, ad_spend **0→3,393,330**(=윈도우내 푸시행 정확합·이중계상0), net_profit **8,501,014→5,107,684**(−3,393,330 정확). **리뷰 P1① 실증**: 선존재 Retail/A01029796 행 1건(5/18, impressions>0=PA수동업로드 흔적, 5/19생성)=윈도우 밖·무영향, vendor스코프로 안전. feat `feat/ohitech-ad-cost`(75f3844+3a9f1d9, 미push·미머지).
+  - **배포 체크리스트**: ① prod env **`COUPANG_ROCKET_VENDOR_ID=A01029796`** 설정(리뷰 P1② — 차감 vendor 스코프 고정, 타 벤더 stray Retail 무시) ② A01029796 PA-XLSX 수동업로드 금지(리뷰 P1①) ③ 배포 후 `python3 tools/ohitech_ad_fetcher.py`(run) 1회 → coupang_ad_report Retail 적재 → GET /api/overview/rocket-overview 광고≠0·순이익 차감 확인.
+  - **리뷰 상태**: ⚠codex quota 초과(리셋 6/26). **Claude 적대적 리뷰 완료** — P2③(사일런트 동결)·P2④(0클로버) 수정 커밋 3a9f1d9, P1①②는 vendor 스코프+docstring 제약으로 해소. 6/26 codex 사후리뷰 권장.
 - [ ] S3: CDP Chrome 상주화(chrome-supervise + launchd com.ohisell.ohitech-chrome, 9223) + 세션만료 워치독
-- [ ] 라이브 검증: 수집값=화면 1:1, 순이익 반영 확인
+- [x] 라이브 검증: 수집값=화면 1:1(4,039,603)·순이익 반영(0→3,393,330 차감) 확인
 - [ ] (Phase 2) 상품별 옵션 단위 광고비 표시
 
 ## 현재 진행 단계
-데이터 경로 라이브 검증 완료(D-3/D-5). 다음=S1(페처) 설계·구현.
+**S1+S2 완료·prod 배포·라이브 e2e 검증 끝(2026-06-22).** 오하이테크 광고비가 1P 순이익에 실제 반영됨(누락 해소). 단 **수집은 아직 수동**: ① Mac 실제 Chrome(9223, 별도 프로필)이 떠 있고 로그인돼 있어야 함 ② `python3 tools/ohitech_ad_fetcher.py`(run) 수동 1회. **상주 자동화(S3) 미구현** → 지금은 Chrome 닫히거나 세션 만료 시 멈춤. feat 브랜치 미push·미머지.
 
 ## 다음 액션
-S1: ad_cost_browser_fetcher(또는 신규 tool)를 오하이테크 getVendorAdPerformance 일별 수집으로 확장. 계정별 storage_state 분리(오픽스 세션 불간섭). 외부 연동이라 구조 설계→승인→구현.
+1. **S3 상주화**: `chrome-supervise` 명령(wing-chrome 패턴 복제) + launchd `com.ohisell.ohitech-chrome`(9223) + run을 주기 실행(스케줄 또는 버튼-poll). 세션 만료 워치독(쿠키 freshness — 기존 scheduler_watchdog에 ADS2 추가 검토). → 무중단 자동수집.
+2. **(git) feat `feat/ohitech-ad-cost` → main 머지·push** (Jino 결정). prod는 이미 이 코드 실행 중(scp) — 레포 정합 위해 머지 권장.
+3. **(6/26) codex 사후리뷰** — quota 리셋 후.
+4. (Phase 2) 상품별 옵션 단위 광고비 표시.
