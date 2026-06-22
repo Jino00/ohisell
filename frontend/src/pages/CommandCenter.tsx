@@ -11,6 +11,8 @@ import {
   fetchRocketOverview,
   requestRocketRefresh,
   getRocketRefreshStatus,
+  requestOhitechAdRefresh,
+  getOhitechAdRefreshStatus,
   fetchRocketCostMapUnmapped,
   fetchRocketCostMap,
   upsertRocketCostMap,
@@ -89,6 +91,9 @@ export default function CommandCenter() {
   const [rocket, setRocket] = useState<RocketOverview | null>(null);
   const [rocketRefreshing, setRocketRefreshing] = useState(false);
   const [rocketRefreshMsg, setRocketRefreshMsg] = useState<string | null>(null);
+  // 오하이테크(1P) 광고비 "갱신 버튼" 상태 (S3, D-11) — 로켓 갱신과 동일 패턴, 별도 페처.
+  const [ohitechAdRefreshing, setOhitechAdRefreshing] = useState(false);
+  const [ohitechAdRefreshMsg, setOhitechAdRefreshMsg] = useState<string | null>(null);
   // 요청 순서 가드(codex S7 P1): 계정/기간을 빠르게 바꾸면 이전 요청이 늦게 도착해
   // 새 선택 화면에 엉뚱한 계정 데이터를 렌더할 수 있다. 검산(reconciliation) 도구라
   // '다른 계정 숫자 표시'는 막으려는 실패 그 자체 → 최신 요청 응답만 반영한다.
@@ -208,6 +213,37 @@ export default function CommandCenter() {
       setRocketRefreshMsg("❌ 갱신 요청 실패: " + (e?.message || ""));
     } finally {
       setRocketRefreshing(false);
+    }
+  }
+
+  // "광고비 갱신" — Mac 오하이테크 광고 페처(com.ohisell.ohitech-ad poll 데몬)를 깨워 광고비를
+  // 즉시 가져온다(Akamai로 prod 직접 fetch 불가, D-4). 완료되면 로켓 종합조망을 리로드해
+  // ad_spend·net_profit 반영분을 보여준다. 로켓/Wing 갱신과 동일 패턴(트랙 D-11).
+  async function refreshOhitechAdNow() {
+    setOhitechAdRefreshing(true);
+    setOhitechAdRefreshMsg("Mac에서 오하이테크 광고비 가져오는 중… (~수초, 첫 갱신이면 Chrome 로그인 확인)");
+    try {
+      const baseline = (await getOhitechAdRefreshStatus()).last_success_at;
+      await requestOhitechAdRefresh();
+      const deadline = Date.now() + 180000; // 180초
+      let done = false;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 5000));
+        const st = await getOhitechAdRefreshStatus();
+        if (st.last_success_at && st.last_success_at !== baseline) { done = true; break; }
+      }
+      if (done) {
+        const sel = selRef.current;
+        doFetch(sel.from, sel.to, sel.account);
+        setOhitechAdRefreshMsg("✅ 광고비 갱신 완료");
+        setTimeout(() => setOhitechAdRefreshMsg(null), 4000);
+      } else {
+        setOhitechAdRefreshMsg("⚠️ Mac 응답 없음 — Mac이 켜져 있는지, Chrome(CDP 9224)이 실행 중인지 확인하세요.");
+      }
+    } catch (e: any) {
+      setOhitechAdRefreshMsg("❌ 갱신 요청 실패: " + (e?.message || ""));
+    } finally {
+      setOhitechAdRefreshing(false);
     }
   }
 
@@ -357,6 +393,9 @@ export default function CommandCenter() {
               onRefresh={refreshRocketNow}
               refreshing={rocketRefreshing}
               refreshMsg={rocketRefreshMsg}
+              onRefreshAd={refreshOhitechAdNow}
+              adRefreshing={ohitechAdRefreshing}
+              adRefreshMsg={ohitechAdRefreshMsg}
             />
           )}
         </>
@@ -881,6 +920,9 @@ function RocketView({
   onRefresh,
   refreshing,
   refreshMsg,
+  onRefreshAd,
+  adRefreshing,
+  adRefreshMsg,
 }: {
   data: RocketOverview | null;
   from: string;
@@ -888,6 +930,9 @@ function RocketView({
   onRefresh: () => void;
   refreshing: boolean;
   refreshMsg: string | null;
+  onRefreshAd: () => void;
+  adRefreshing: boolean;
+  adRefreshMsg: string | null;
 }) {
   const [unmapped, setUnmapped] = useState<RocketUnmappedItem[] | null>(null);
   const [mappings, setMappings] = useState<RocketMappingItem[] | null>(null);
@@ -956,18 +1001,32 @@ function RocketView({
           <span className="text-sm font-semibold text-gray-700">🚀 로켓배송(1P) — 오하이테크 발주 돈 축</span>
           <span className="ml-2 text-xs text-gray-400">{from} ~ {to}</span>
         </div>
-        <button
-          onClick={onRefresh}
-          disabled={refreshing}
-          className="flex items-center gap-1.5 px-2.5 py-1 text-xs bg-sky-600 text-white rounded-md hover:bg-sky-700 disabled:opacity-50"
-        >
-          <span className={refreshing ? "animate-spin" : ""}>🔄</span>
-          {refreshing ? "갱신 중…" : "로켓 갱신"}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={onRefreshAd}
+            disabled={adRefreshing}
+            title="Jino Mac에서 오하이테크 광고비를 지금 가져옵니다(~수초). Mac·Chrome(CDP 9224)이 켜져 있어야 합니다."
+            className="flex items-center gap-1.5 px-2.5 py-1 text-xs bg-amber-600 text-white rounded-md hover:bg-amber-700 disabled:opacity-50"
+          >
+            <span className={adRefreshing ? "animate-spin" : ""}>📣</span>
+            {adRefreshing ? "갱신 중…" : "광고비 갱신"}
+          </button>
+          <button
+            onClick={onRefresh}
+            disabled={refreshing}
+            className="flex items-center gap-1.5 px-2.5 py-1 text-xs bg-sky-600 text-white rounded-md hover:bg-sky-700 disabled:opacity-50"
+          >
+            <span className={refreshing ? "animate-spin" : ""}>🔄</span>
+            {refreshing ? "갱신 중…" : "로켓 갱신"}
+          </button>
+        </div>
       </div>
 
       {refreshMsg && (
         <div className="text-xs text-sky-700 bg-sky-50 border border-sky-200 rounded px-2 py-1 mb-3">{refreshMsg}</div>
+      )}
+      {adRefreshMsg && (
+        <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1 mb-3">{adRefreshMsg}</div>
       )}
 
       {!data && (

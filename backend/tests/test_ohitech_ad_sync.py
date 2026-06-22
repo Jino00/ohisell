@@ -94,3 +94,53 @@ def test_skips_bad_rows(db):
 def test_empty_days(db):
     r = ingest_ohitech_ad_cost(db, VID, [])
     assert r["upserted"] == 0 and r["date_from"] is None
+
+
+# ── S3 버튼-poll: 갱신 트리거 / heartbeat (rocket/adcost 패턴) ──
+def test_refresh_status_none_when_no_row(db):
+    """상태행 없으면 requested=False·last_success_at=None (UI 초기 baseline)."""
+    from app.services.coupang.ohitech_ad_sync import refresh_status
+
+    st = refresh_status(db)
+    assert st["requested"] is False
+    assert st["last_success_at"] is None
+    assert st["status"] == "none"
+
+
+def test_request_then_claim_consumes_flag(db):
+    """request_refresh가 플래그 set → claim 1회만 소비(원자적), 재claim은 False."""
+    from app.services.coupang.ohitech_ad_sync import (
+        claim_refresh,
+        refresh_status,
+        request_refresh,
+    )
+
+    r = request_refresh(db)
+    assert r["requested"] is True and r["requested_at"]
+    assert refresh_status(db)["requested"] is True
+
+    assert claim_refresh(db)["claimed"] is True       # 첫 claim 소비
+    assert refresh_status(db)["requested"] is False    # 플래그 clear됨
+    assert claim_refresh(db)["claimed"] is False       # 요청 없으면 미소비(중복 방지)
+
+
+def test_mark_fetch_success_bumps_last_success(db):
+    """mark_fetch_success → last_success_at 갱신·status green (UI 완료 감지 기준)."""
+    from app.services.coupang.ohitech_ad_sync import mark_fetch_success, refresh_status
+
+    assert refresh_status(db)["last_success_at"] is None
+    mark_fetch_success(db)
+    st = refresh_status(db)
+    assert st["last_success_at"] is not None
+    assert st["status"] == "green"
+
+
+def test_refresh_state_row_isolated_from_rocket(db):
+    """오하이테크 광고 상태행은 로켓 발주(COUPANG_ROCKET_FETCHER)와 다른 account_key — 독립."""
+    from app.models import CoupangWingCookie
+    from app.services.coupang.ohitech_ad_sync import request_refresh
+
+    request_refresh(db)
+    keys = [r.account_key for r in db.query(CoupangWingCookie).all()]
+    assert "COUPANG_OHITECH_AD" in keys
+    assert "COUPANG_ROCKET_FETCHER" not in keys  # 로켓 행을 건드리지 않음

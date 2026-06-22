@@ -14,10 +14,16 @@
 # 적재 (트랙 D-8ⓑ): 일별 adCostSum → coupang_ad_report(sell_type='Retail', vendor_id='A01029796').
 #   → rocket_intelligence._agg_rocket_ad가 자동 합산 → 1P 로켓배송 순이익 반영.
 #
+# 상주화 (S3, 트랙 D-11): 전용 포트 9224 + launchd KeepAlive(9223은 rocket/wing2와 충돌).
+#   - com.ohisell.ohitech-chrome.plist → chrome-supervise(Chrome 상주, self-heal)
+#   - com.ohisell.ohitech-ad.plist     → poll(버튼 갱신 감지 + 일별 자동 run)
+#
 # 사용:
-#   Chrome 기동:  python3 ohitech_ad_fetcher.py chrome     # 실제 Chrome 띄움 → Jino가 직접 로그인
-#   쿼리 캡처:    python3 ohitech_ad_fetcher.py capture     # getVendorAdPerformance 라이브 캡처(S1b 블로커)
-#   실행(S1b):    python3 ohitech_ad_fetcher.py             # headless fetch→push (구현 예정)
+#   Chrome 기동:    python3 ohitech_ad_fetcher.py chrome            # 실제 Chrome 띄움 → Jino 직접 로그인
+#   Chrome 상주:    python3 ohitech_ad_fetcher.py chrome-supervise  # launchd가 호출(포그라운드 block)
+#   쿼리 캡처:      python3 ohitech_ad_fetcher.py capture           # (구버전 GraphQL 캡처, D-9 이후 불필요)
+#   1회 실행:       python3 ohitech_ad_fetcher.py run               # report/SALES fetch→push→heartbeat
+#   상주 데몬:      python3 ohitech_ad_fetcher.py poll              # launchd가 호출(버튼-poll + 일별)
 from __future__ import annotations
 
 import contextlib
@@ -45,7 +51,9 @@ CAPTURE_PATH = Path(os.path.expanduser("~/.ohisell_ohitech_ad_capture.json"))
 DASH_URL = "https://advertising.coupang.com/marketing/dashboard/sales?_cap_client=WING"
 GRAPHQL_URL = "https://advertising.coupang.com/marketing-reporting/v2/graphql"
 CHROME_BIN = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-DEFAULT_CDP_PORT = 9223  # 오픽스 WING(9222)과 분리(D-7/D-8')
+# 전용 포트 9224 (트랙 D-11): 9222=WING1(launchd 상주), 9223=rocket/wing2 수동 공유.
+# 9223에 launchd 상주화하면 rocket/wing2와 영구 충돌(엉뚱한 세션 attach→오벤더 push) → 9224 전용.
+DEFAULT_CDP_PORT = 9224
 DEFAULT_CDP_PROFILE = os.path.expanduser("~/.ohisell_ohitech_chrome")
 KST = ZoneInfo("Asia/Seoul")
 
@@ -70,6 +78,9 @@ def load_config() -> dict:
     cfg.setdefault("ad_vendor_code", "A01029796")          # coupang_ad_report.vendor_id
     cfg.setdefault("cdp_port", DEFAULT_CDP_PORT)
     cfg.setdefault("cdp_profile", DEFAULT_CDP_PROFILE)
+    cfg.setdefault("poll_interval_s", 60)        # poll: refresh-status 확인 주기
+    cfg.setdefault("min_fetch_interval_s", 60)   # poll: 연속 fetch 최소 간격(해머링 방지)
+    cfg.setdefault("daily_run_hours", 23)        # poll: 마지막 성공 N시간 초과 시 자동 run(일별)
     return cfg
 
 
@@ -85,6 +96,41 @@ def _cdp_alive(port: int) -> bool:
             return r.status == 200
     except Exception:  # noqa: BLE001
         return False
+
+
+def _profile_chrome_alive(profile: str) -> bool:
+    """프로필을 점유 중인 살아있는 Chrome이 있는지 — SingletonLock PID 생존+cmdline 확인.
+
+    CDP가 행(hang)/기동 중이라 _cdp_alive가 거짓이어도 Chrome이 user-data-dir을 점유 중이면
+    lock 청소·중복 launch가 프로필을 손상시킨다(wing 페처 codex 교훈 복제). SingletonLock
+    심볼릭링크 타깃 'hostname-PID'의 PID 생존 + 그 PID cmdline에 이 프로필이 있어야만 점유 인정
+    (PID 재사용·타프로필 오인 방지).
+    """
+    lock = os.path.join(profile, "SingletonLock")
+    try:
+        target = os.readlink(lock)  # 예: "Jino-MacBookPro.local-19029"
+    except OSError:
+        return False
+    try:
+        pid = int(target.rsplit("-", 1)[-1])
+    except ValueError:
+        return False
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    try:
+        cmdline = subprocess.run(
+            ["ps", "-o", "command=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=3,
+        ).stdout
+    except Exception:  # noqa: BLE001
+        return False
+    return f"--user-data-dir={profile}" in cmdline
 
 
 def _notify_mac(title: str, message: str, sound: str = "Glass") -> None:
@@ -314,6 +360,45 @@ def _push_days(cfg: dict, days: list[dict]) -> int:
     return 0
 
 
+def _prod_base(cfg: dict) -> str:
+    return cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/rocket/ad-cost"
+
+
+def _prod_refresh_status(cfg: dict) -> dict:
+    """prod 갱신 요청/완료 상태(GET, 토큰 불필요). poll이 요청·last_success_at 확인."""
+    r = requests.get(_prod_base(cfg) + "/refresh-status", timeout=15)
+    r.raise_for_status()
+    return r.json()
+
+
+def _prod_claim(cfg: dict) -> dict:
+    """갱신 요청을 원자적으로 소비(POST, 토큰). claimed=True면 이 데몬이 처리권 획득."""
+    r = requests.post(
+        _prod_base(cfg) + "/refresh-claim",
+        headers={"X-Ingest-Token": cfg["ingest_token"]},
+        timeout=15,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def _mark_fetch_success(cfg: dict) -> None:
+    """run 성공 후 prod last_success_at 갱신(best-effort — 머니데이터는 이미 push됨).
+
+    실패해도 run은 성공으로 둔다(heartbeat용일 뿐). UI 버튼 폴링이 완료를 감지하는 신호.
+    """
+    try:
+        r = requests.post(
+            _prod_base(cfg) + "/fetch-success",
+            headers={"X-Ingest-Token": cfg["ingest_token"]},
+            timeout=15,
+        )
+        if r.status_code != 200:
+            log.warning("fetch-success 비200(무시): %s %s", r.status_code, r.text[:120])
+    except requests.RequestException as e:
+        log.warning("fetch-success 네트워크 오류(무시): %s", str(e)[:120])
+
+
 def cmd_run(cfg: dict) -> int:
     """report/SALES fetch(오하이테크 세션) → 일별 파싱 → prod push(coupang_ad_report Retail). D-9/D-10.
 
@@ -353,9 +438,182 @@ def cmd_run(cfg: dict) -> int:
         _notify_mac("오하이테크 광고 수집 실패", "report/SALES 응답 비정상(세션 만료 가능) — Chrome 창에서 재로그인 확인.")
         return 1
     if not days:
+        # 세션은 정상이나 확정 과거일 없음 → 성공으로 처리(heartbeat 갱신: UI 완료 감지).
         log.info("report/SALES: 갱신할 과거 확정일 없음")
+        _mark_fetch_success(cfg)
         return 0
-    return _push_days(cfg, days)
+    rc = _push_days(cfg, days)
+    if rc == 0:
+        _mark_fetch_success(cfg)  # push 성공 → UI 폴링이 last_success_at 변화로 완료 감지
+    return rc
+
+
+def cmd_chrome_supervise(cfg: dict) -> int:
+    """CDP Chrome을 launchd KeepAlive로 상주화하는 포그라운드 supervisor (S3, 트랙 D-11).
+
+    launchd가 "이 프로세스 수명 = Chrome 수명"으로 인식하도록 block한다(재부팅/종료/크래시
+    자동 복구). cmd_chrome은 Popen 후 즉시 리턴해 KeepAlive와 호환 불가하므로 별도 명령.
+    wing 페처(com.ohisell.wing-chrome) 패턴 복제 — 9224 전용 포트·프로필(D-11 충돌 회피).
+
+    동작: ① 기존 Chrome 점유 시(CDP 응답 or 프로필 lock 생존) adopt 후 종료까지 대기
+          ② 살아있는 Chrome 없으면 stale SingletonLock 청소
+          ③ Chrome을 포그라운드 자식으로 launch하고 proc.wait()로 수명 동안 block.
+    SIGTERM/INT 수신 시 자식 Chrome도 정리 후 종료(다음 supervisor가 죽어가는 Chrome adopt 방지).
+    """
+    import signal
+    import time as _time
+
+    port = int(cfg["cdp_port"])
+    profile = os.path.expanduser(cfg["cdp_profile"])
+    if not os.path.exists(CHROME_BIN):
+        log.error("Chrome을 찾을 수 없습니다: %s", CHROME_BIN)
+        return 1
+
+    # ① 기존 Chrome adopt — 우리가 띄우지 않은 Chrome이 점유 중이면 종료까지 대기.
+    #   ★주의(리뷰 P2): 같은 프로필을 다른 포트(9223 수동 Chrome 등)가 점유하면 우리 포트(9224)
+    #   CDP는 죽었는데 프로필 lock은 살아 있어 영영 9224 Chrome을 못 띄운다(사일런트 정지).
+    #   이 상태가 지속되면 8분 후 1회 알림(사람이 수동 Chrome 종료하도록).
+    if _cdp_alive(port) or _profile_chrome_alive(profile):
+        log.info("기존 Chrome 점유 감지(CDP=%s, lock=%s) — adopt, 종료 감지까지 대기.",
+                 _cdp_alive(port), _profile_chrome_alive(profile))
+        waited = 0
+        alerted = False
+        while _cdp_alive(port) or _profile_chrome_alive(profile):
+            _time.sleep(15)
+            waited += 15
+            if not alerted and waited >= 480 and _profile_chrome_alive(profile) and not _cdp_alive(port):
+                _notify_mac("오하이테크 광고 Chrome 정지",
+                            f"다른 Chrome이 오하이테크 프로필을 점유 중 — 포트 {port} 상주 불가. "
+                            "수동 Chrome(9223 등) 종료 필요.")
+                alerted = True
+        log.info("기존 Chrome 종료 감지 — supervisor 종료(launchd 재기동).")
+        return 0
+
+    # ② stale SingletonLock 청소(살아있는 Chrome 없음 확인됨 → 크래시 잔재 안전 제거).
+    for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+        lock = os.path.join(profile, name)
+        with contextlib.suppress(OSError):
+            if os.path.islink(lock) or os.path.exists(lock):
+                os.unlink(lock)
+    os.makedirs(profile, exist_ok=True)
+
+    # ③ Chrome을 포그라운드 자식으로 launch하고 수명 동안 block.
+    log.info("CDP Chrome 기동 (port %d, profile %s)", port, profile)
+    proc = subprocess.Popen(
+        [CHROME_BIN, f"--remote-debugging-port={port}", f"--user-data-dir={profile}",
+         "--no-first-run", "--no-default-browser-check", DASH_URL],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+    def _terminate(signum, _frame):
+        log.info("시그널 %d 수신 — Chrome(PID %d) 종료 대기.", signum, proc.pid)
+        with contextlib.suppress(Exception):
+            proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except Exception:  # noqa: BLE001
+            log.warning("Chrome SIGTERM 무응답 — SIGKILL.")
+            with contextlib.suppress(Exception):
+                proc.kill()
+            with contextlib.suppress(Exception):
+                proc.wait(timeout=5)
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, _terminate)
+    signal.signal(signal.SIGINT, _terminate)
+    rc = proc.wait()
+    log.info("Chrome 종료(rc=%s) — supervisor 종료(launchd 재기동).", rc)
+    return 0
+
+
+def cmd_poll(cfg: dict) -> int:
+    """상주 poll 데몬 — '광고비 갱신' 버튼 요청 감지 + 일별 자동 실행 (S3, 트랙 D-11).
+
+    ① poll_interval_s마다 prod refresh-status 확인 → requested면 claim(소비) 후 run.
+    ② last_success_at이 daily_run_hours 초과면 자동 run(버튼 안 눌러도 하루 1회 신선도 유지).
+    run은 _try_lock 하에 수행(수동 run과 충돌 방지). 광고비는 prod 직접 fetch 불가(D-4)라
+    이 데몬이 유일한 갱신 경로. launchd KeepAlive(com.ohisell.ohitech-ad.plist).
+    연속 네트워크 실패가 쌓이면 종료 → launchd가 fresh 재기동(sleep/wake 소켓 고착 해소).
+    """
+    import time as _time
+
+    interval = int(cfg.get("poll_interval_s", 60))
+    cooldown = int(cfg.get("min_fetch_interval_s", 60))
+    daily_hours = int(cfg.get("daily_run_hours", 23))
+    _MAX_FAILS = 10
+    last_fetch = 0.0   # time.monotonic — 해머링 방지 쿨다운
+    last_auto = 0.0    # time.time — last_success_at 없을 때 자동실행 디바운스
+    net_fails = 0
+    auth_alerted = False  # claim 401 알림 디바운스(성공 claim 시 해제) — 토큰 불일치 스팸 방지
+    log.info("[poll] 시작 — %ds 간격 갱신요청 확인 + %dh 자동실행(버튼/일별), 포트 %s",
+             interval, daily_hours, cfg.get("cdp_port"))
+    while True:
+        try:
+            st = _prod_refresh_status(cfg)
+            net_fails = 0
+            trigger = None  # "button" | "daily"
+            if st.get("requested"):
+                trigger = "button"
+            else:
+                suc = st.get("last_success_at")
+                if suc:
+                    # last_success_at은 prod가 naive KST(kst_now)로 기록 → KST로 명시 해석해 비교
+                    # (Mac 로컬 TZ에 의존하지 않도록, 리뷰 P2 — TZ 휴리스틱 제거).
+                    try:
+                        suc_dt = datetime.fromisoformat(suc)
+                        if suc_dt.tzinfo is None:
+                            suc_dt = suc_dt.replace(tzinfo=KST)
+                        age_s = (datetime.now(KST) - suc_dt).total_seconds()
+                    except (ValueError, TypeError):
+                        age_s = daily_hours * 3600 + 1  # 파싱 실패 → 자동 실행 유도
+                    if age_s > daily_hours * 3600:
+                        trigger = "daily"
+                elif (_time.time() - last_auto) > daily_hours * 3600:
+                    trigger = "daily"  # 성공 기록 없음 → 첫 자동 실행
+
+            if trigger:
+                if _time.monotonic() - last_fetch < cooldown:
+                    log.info("[poll] 쿨다운 중 — %s 보류(다음 폴에서 처리)", trigger)
+                else:
+                    with _try_lock() as acquired:
+                        if not acquired:
+                            log.info("[poll] 다른 실행 진행 중 — 보류")
+                        else:
+                            proceed = True
+                            if trigger == "button":
+                                # claim 실패 = 요청 없음/타 데몬 선점 → run 스킵(요청 유실 방지).
+                                # claim이 raise(401 등)하면 아래 except가 처리. 200이면 인증 정상.
+                                proceed = _prod_claim(cfg).get("claimed", False)
+                                auth_alerted = False
+                                if not proceed:
+                                    log.info("[poll] claim 미획득 — 보류")
+                            if proceed:
+                                last_fetch = _time.monotonic()
+                                last_auto = _time.time()
+                                log.info("[poll] %s 트리거 → run", trigger)
+                                rc = cmd_run(cfg)
+                                log.info("[poll] run 완료 rc=%d", rc)
+                                # 실패 가시성(리뷰 P3): rc==1(세션만료)은 cmd_run이 이미 알림.
+                                # rc==2=수집 Chrome 미응답 → 사일런트 정지 방지 위해 알림.
+                                if rc == 2:
+                                    _notify_mac("오하이테크 광고 수집 불가",
+                                                f"수집용 Chrome(CDP {cfg.get('cdp_port')}) 미응답 — 상주 Chrome 잡 확인.")
+        except requests.RequestException as e:
+            net_fails += 1
+            _status = getattr(getattr(e, "response", None), "status_code", None)
+            if _status == 401 and not auth_alerted:
+                log.error("[poll] 인증 실패(401) — ingest_token이 prod와 불일치.")
+                _notify_mac("오하이테크 광고 인증 실패",
+                            "ingest_token 불일치 — ~/.ohisell_ohitech_ad.json 토큰 확인.")
+                auth_alerted = True
+            log.warning("[poll] refresh-status 실패(네트워크) %d/%d: %s",
+                        net_fails, _MAX_FAILS, str(e)[:80])
+            if net_fails >= _MAX_FAILS:
+                log.error("[poll] 연속 %d회 네트워크 실패 — 종료(launchd fresh 재기동).", net_fails)
+                return 1
+        except Exception as e:  # noqa: BLE001 — 데몬은 어떤 오류에도 죽지 않는다
+            log.error("[poll] 루프 오류(계속): %s", str(e)[:160])
+        _time.sleep(interval)
 
 
 def main() -> None:
@@ -363,6 +621,14 @@ def main() -> None:
     arg = sys.argv[1] if len(sys.argv) >= 2 else ""
     if arg == "chrome":  # Chrome 기동은 락 불필요(즉시 리턴)
         sys.exit(cmd_chrome(cfg))
+    if arg == "chrome-supervise":  # 포그라운드 block(launchd 상주) — 락 불필요(별 프로세스)
+        sys.exit(cmd_chrome_supervise(cfg))
+    if arg == "poll":  # 상주 데몬 — 락은 run마다 내부에서 획득(전체 점유 금지)
+        try:
+            sys.exit(cmd_poll(cfg))
+        except KeyboardInterrupt:
+            log.info("폴 데몬 종료")
+            sys.exit(0)
     with _try_lock() as acquired:
         if not acquired:
             log.warning("다른 실행이 진행 중 — 이번 호출 건너뜀")

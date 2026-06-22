@@ -47,7 +47,9 @@ mkdir -p "$LAUNCH_AGENTS"
 UID_NUM="$(id -u)"
 # wing-chrome = 같은 wing 스크립트를 'chrome-supervise' 인자로 도는 별도 launchd 잡
 # (CDP Chrome 9222 상주화, S5a). cp는 멱등(동일 파일), plist만 별도 렌더.
-for pair in "adcost:ad_cost_browser_fetcher.py" "wing:wing_browser_fetcher.py" "wing-chrome:wing_browser_fetcher.py" "rocket:rocket_supplier_fetcher.py"; do
+# ohitech-chrome/ohitech-ad = 오하이테크 광고 수집(S3, 트랙 D-11): 같은 ohitech 스크립트를
+#   chrome-supervise(9224 상주)·poll(버튼-poll+일별)로 도는 두 잡. cp 멱등(동일 파일).
+for pair in "adcost:ad_cost_browser_fetcher.py" "wing:wing_browser_fetcher.py" "wing-chrome:wing_browser_fetcher.py" "rocket:rocket_supplier_fetcher.py" "ohitech-chrome:ohitech_ad_fetcher.py" "ohitech-ad:ohitech_ad_fetcher.py"; do
   name="${pair%%:*}"
   script="${pair##*:}"
   cp -f "$REPO_TOOLS/$script" "$LOCAL_TOOLS/$script"

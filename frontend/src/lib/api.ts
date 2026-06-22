@@ -774,6 +774,25 @@ export function getRocketRefreshStatus(): Promise<RocketRefreshStatus> {
   return fetchApi<RocketRefreshStatus>("/api/coupang/ops/rocket/refresh-status");
 }
 
+// ── 오하이테크(1P) 광고비 갱신 버튼 (S3, 트랙 D-11 — adcost/rocket 패턴) ──
+// 광고비는 Akamai로 prod 직접 fetch 불가(D-4) → Jino Mac poll 데몬이 가져옴. 버튼 클릭 →
+// request-refresh 플래그 set → 데몬이 claim·fetch·push → refresh-status.last_success_at 변화로 완료 감지.
+export interface OhitechAdRefreshStatus {
+  requested: boolean;
+  requested_at: string | null;
+  last_success_at: string | null;
+  status: string;
+  last_error: string | null;
+}
+
+export function requestOhitechAdRefresh(): Promise<{ requested: boolean; requested_at: string }> {
+  return fetchApi("/api/coupang/ops/rocket/ad-cost/request-refresh", { method: "POST" });
+}
+
+export function getOhitechAdRefreshStatus(): Promise<OhitechAdRefreshStatus> {
+  return fetchApi<OhitechAdRefreshStatus>("/api/coupang/ops/rocket/ad-cost/refresh-status");
+}
+
 // ── 네이버 운영 패널 — 매출 현황 ─────────────────────────────────
 
 export interface NaverSalesSummaryData {

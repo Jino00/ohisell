@@ -18,6 +18,11 @@
 
 - **D-9 데이터 소스 정정(2026-06-22, 라이브 1:1 재검증 — 원칙22)**: 실제 매출성장 페이지가 쓰는 소스는 D-3의 `getVendorAdPerformance`(marketing-reporting/v2/graphql)가 **아니라** **`POST advertising.coupang.com/marketing/cmg-api/report/SALES`** — **오픽스 페처와 동일 엔드포인트**(session-scoped, payload `{start,end}` epoch ms). 응답 일별 `DELIVERED_AD_COST`(집행/PA)·`ALL_DELIVERED_AD_COST`(전체, 비-PA 포함)·`AD_ATTRIBUTED_SALES`(전환매출). **오하이테크 세션 직접호출 검증(2026.06.15~21)**: Σ집행PA=**3,997,206**(화면 집행광고비 일치)·Σ전체=**4,039,603**(화면 전체집행 일치)·Σ전환=**9,953,220**(화면 일치). getVendorAdPerformance는 직전 세션의 검증용 대체경로였음. → **S1b = 오픽스 `_sales_payload`/`_push_sales` 파싱 재사용**(getVendorAdPerformance 불필요). 캡처본 `~/.ohisell_ohitech_ad_capture.json`.
 - **D-10 net_profit 차감액 = 전체(ALL_DELIVERED_AD_COST) 권장(S2 결정 대기)**: 1P 순이익 차감은 오하이테크가 실제 지불하는 **전체 집행 광고비(비-PA 포함, 4,039,603)**가 경제적으로 정확(3P/RG도 비-PA 차감). `_agg_rocket_ad`가 `coupang_ad_report.ad_spend`(sell_type='Retail')만 읽으므로 Retail 행 ad_spend=전체값 저장. PA/전체 둘 다 페처가 수집해 S2에서 확정.
+- **D-11 S3 상주화 방식 — 포트 개정 + 버튼-poll(2026-06-22, Jino 결정·라이브 충돌 해소, 원칙22)**:
+  - **포트 9223→9224 개정(D-8' 번복, Jino 승인)**: 라이브 조사 결과 9223은 이미 **rocket(supplier 발주/정산, `~/.ohisell_supplier_chrome`)·wing2(오픽스2, `~/.ohisell_wing2_chrome`)가 수동 공유** 중(9222=WING1만 launchd 상주). ohitech를 9223에 launchd 상주화하면 영구 점유→rocket/wing2가 엉뚱한 세션에 attach→오벤더 데이터 push 위험. → **오하이테크 전용 포트 9224**(별도 프로필 `~/.ohisell_ohitech_chrome` 유지). config `cdp_port` 9223→9224, `DEFAULT_CDP_PORT` 9224.
+  - **상주 방식(Jino 선택 '전용 9224 + 상주 Chrome')**: WING1 패턴 복제 — `chrome-supervise`(adopt→stale lock 청소→포그라운드 launch→signal정리) + `com.ohisell.ohitech-chrome.plist`(KeepAlive·RunAtLoad·ThrottleInterval). 검증된 self-heal 패턴.
+  - **트리거(Jino 선택 '버튼-poll')**: D-8ⓒ의 스케줄 1회성을 폐기하고 **상주 poll 데몬**(adcost/rocket 패턴) — 30초 폴 `refresh-status`→요청 시 claim→run + last_success 23h 초과 시 자동 run. `com.ohisell.ohitech-ad.plist`(poll). → 백엔드 refresh-status/claim/request 엔드포인트 + 프론트 '광고비 갱신' 버튼(rocket-overview) 신규 배선 필요.
+  - **세션만료 신호**: 기존 cmd_run의 `_notify_mac`(로그인HTML/비201/일별맵아님 시 알림) 유지. 별도 쿠키 freshness 워치독은 Phase1.5로 보류.
 
 ## 사용자 원문 인용
 - "2P 로켓그로스, 3P 판매자배송은 오픽스에서만 운영, 광고도 진행중이야. 그리고 오하이테크는 1P로켓배송만을 운영중이어서 광고도 로켓배송만 운영되고 있어"

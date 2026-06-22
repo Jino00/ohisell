@@ -22,11 +22,15 @@ from decimal import Decimal, InvalidOperation
 
 from sqlalchemy.orm import Session
 
-from app.models import CoupangAdReport
+from app.models import CoupangAdReport, CoupangWingCookie
+from app.utils.kst import kst_now
 
 log = logging.getLogger("ohitech_ad_sync")
 
 _SELL_TYPE = "Retail"  # 1P 로켓배송 (rocket_intelligence.ROCKET_AD_SELL_TYPE와 일치)
+# 갱신 트리거/heartbeat 상태행 식별자(coupang_wing_cookie 재사용 — rocket/adcost 패턴).
+# 오픽스 광고(COUPANG_ADS)·로켓 발주(COUPANG_ROCKET_FETCHER)와 분리 → 독립 버튼·독립 만료측정.
+_OHITECH_AD_ACCOUNT = "COUPANG_OHITECH_AD"
 
 
 def _to_date(v) -> date | None:
@@ -109,3 +113,71 @@ def ingest_ohitech_ad_cost(db: Session, vendor_id: str, days: list[dict]) -> dic
     log.info("오하이테크 광고비 적재 %s Retail %d건 (%s~%s, skip=%d)",
              vendor_id, upserted, result["date_from"], result["date_to"], skipped)
     return result
+
+
+# ════════════════════════════════════════════════
+# 오하이테크 광고 페처 갱신 트리거 / heartbeat (S3 버튼-poll, rocket/adcost 패턴 복제)
+#   - UI '광고비 갱신' 버튼이 refresh_requested_at set → Mac poll 데몬이 claim(소비) → fetch·push.
+#   - run 성공 시 mark_fetch_success → last_success_at 갱신 → UI 폴링이 완료 감지(baseline 변화).
+#   - 광고비는 prod 직접 fetch 불가(Akamai, D-4) → 이 버튼-poll이 유일한 갱신 경로.
+# ════════════════════════════════════════════════
+def _state_row(db: Session):
+    return (
+        db.query(CoupangWingCookie)
+        .filter(CoupangWingCookie.account_key == _OHITECH_AD_ACCOUNT)
+        .first()
+    )
+
+
+def _ensure_state_row(db: Session):
+    row = _state_row(db)
+    if row is None:
+        row = CoupangWingCookie(account_key=_OHITECH_AD_ACCOUNT)
+        db.add(row)
+    return row
+
+
+def request_refresh(db: Session) -> dict:
+    """UI '광고비 갱신' 버튼 → 갱신 요청 플래그 set. Mac poll 데몬이 다음 폴에서 소비."""
+    row = _ensure_state_row(db)
+    row.refresh_requested_at = kst_now()
+    db.commit()
+    return {"requested": True, "requested_at": row.refresh_requested_at.isoformat()}
+
+
+def refresh_status(db: Session) -> dict:
+    """갱신 요청/완료 상태. UI 폴링·페처 소비 공용(민감값 없음)."""
+    row = _state_row(db)
+    if row is None:
+        return {"requested": False, "requested_at": None, "last_success_at": None,
+                "status": "none", "last_error": None}
+    return {
+        "requested": row.refresh_requested_at is not None,
+        "requested_at": row.refresh_requested_at.isoformat() if row.refresh_requested_at else None,
+        "last_success_at": row.last_success_at.isoformat() if row.last_success_at else None,
+        "status": row.status,
+        "last_error": row.last_error,
+    }
+
+
+def claim_refresh(db: Session) -> dict:
+    """페처가 갱신 요청을 '소비'(플래그 clear). 원자적 조건부 UPDATE(중복 claim 방지)."""
+    from sqlalchemy import update
+
+    res = db.execute(
+        update(CoupangWingCookie)
+        .where(CoupangWingCookie.account_key == _OHITECH_AD_ACCOUNT)
+        .where(CoupangWingCookie.refresh_requested_at.isnot(None))
+        .values(refresh_requested_at=None)
+    )
+    db.commit()
+    return {"claimed": (res.rowcount or 0) > 0}
+
+
+def mark_fetch_success(db: Session) -> None:
+    """페처 run 성공 시 last_success_at 갱신(UI 폴링 완료 감지 + poll 23h 자동실행 기준)."""
+    row = _ensure_state_row(db)
+    row.last_success_at = kst_now()
+    row.status = "green"
+    row.last_error = None
+    db.commit()

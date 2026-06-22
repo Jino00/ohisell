@@ -1471,6 +1471,44 @@ def rocket_fetch_success(db: Session = Depends(get_db)):
     return {"ok": True}
 
 
+# ════════════════════════════════════════════════
+# 오하이테크(1P 로켓배송) 광고비 페처 갱신 트리거 (S3 버튼-poll, adcost/rocket 패턴)
+#   광고비는 Akamai로 prod 직접 fetch 불가(D-4) → Mac CDP 페처(poll 데몬)가 가져온다.
+#   '광고비 갱신' 버튼 → request-refresh → 데몬이 다음 폴에서 claim → fetch·push → fetch-success.
+# ════════════════════════════════════════════════
+@router.post("/rocket/ad-cost/request-refresh")
+def ohitech_ad_request_refresh(db: Session = Depends(get_db)):
+    """UI '광고비 갱신' 버튼 → 갱신 요청 플래그 set. 페처가 다음 폴에서 소비."""
+    return ohitech_ad_sync.request_refresh(db)
+
+
+@router.get("/rocket/ad-cost/refresh-status")
+def ohitech_ad_refresh_status(db: Session = Depends(get_db)):
+    """갱신 요청/완료 상태. 대시보드(버튼 후 폴링)·Mac 페처(요청 확인) 공용."""
+    return ohitech_ad_sync.refresh_status(db)
+
+
+@router.post("/rocket/ad-cost/refresh-claim")
+def ohitech_ad_refresh_claim(
+    x_ingest_token: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """Mac 페처가 갱신 요청을 소비(플래그 clear)하고 작업 시작. 토큰 인증(ingest와 동일)."""
+    _check_ingest_token(x_ingest_token)
+    return ohitech_ad_sync.claim_refresh(db)
+
+
+@router.post("/rocket/ad-cost/fetch-success")
+def ohitech_ad_fetch_success(
+    x_ingest_token: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """페처 run 완료 시 last_success_at 갱신(UI 폴링 완료 감지용). 토큰 인증."""
+    _check_ingest_token(x_ingest_token)
+    ohitech_ad_sync.mark_fetch_success(db)
+    return {"ok": True}
+
+
 @router.post("/ad-cost/option-ingest")
 async def ingest_ad_cost_option(
     request: Request,

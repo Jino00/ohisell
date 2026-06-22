@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- launchd: 오하이테크(1P 로켓배송) 광고비 페처 "상주 poll 데몬" (S3, 트랙 ohitech-ad D-11). -->
+<!-- 버튼-poll 방식: 평소엔 60s마다 prod refresh-status만 확인(창 안 뜸), 종합조망의 '광고비 갱신' -->
+<!--   버튼을 누르면 claim 후 CDP Chrome(9224)에 attach해 report/SALES fetch→push(~수초). -->
+<!--   또한 마지막 성공 23h 초과 시 자동 run(버튼 안 눌러도 하루 1회 신선도 유지). -->
+<!-- 광고비는 prod 직접 fetch 불가(Akamai, D-4) → 이 데몬이 유일한 갱신 경로. -->
+<!-- CDP Chrome은 com.ohisell.ohitech-chrome(9224)가 상주시킴 — 이 데몬은 attach만 함(독립·공존). -->
+<!-- 설치:  tools/install_local_runtime.sh 실행(placeholder 치환·bootstrap 자동). -->
+<!-- 즉시 1회 테스트:  launchctl kickstart -k gui/$(id -u)/com.ohisell.ohitech-ad -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.ohisell.ohitech-ad</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__PYTHON__</string>
+    <string>__SCRIPT__</string>
+    <string>poll</string>
+  </array>
+  <!-- 상주 데몬: 죽으면 자동 재시작(crash·네트워크 끊김·Mac sleep 복귀 대비). -->
+  <key>KeepAlive</key>
+  <true/>
+  <key>RunAtLoad</key>
+  <true/>
+  <!-- 재시작 폭주 방지: 비정상 종료 시 최소 10초 후 재기동. -->
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>StandardOutPath</key>
+  <string>__HOME__/.ohisell_ohitech_ad.launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/.ohisell_ohitech_ad.launchd.log</string>
+</dict>
+</plist>
