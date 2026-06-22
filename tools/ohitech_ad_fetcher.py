@@ -251,22 +251,32 @@ def _sales_payload(cfg: dict) -> dict:
 
 
 def _parse_sales_days(sales_body: str) -> list[dict] | None:
-    """report/SALES 응답 → 과거 확정일(오늘 제외) days[]. ad_spend=전체(ALL_DELIVERED, D-10). 실패 시 None."""
+    """report/SALES 응답 → 과거 확정일(오늘 제외) days[]. ad_spend=전체(ALL_DELIVERED, D-10).
+
+    실패(None) 판정 — 사일런트 동결 차단(리뷰 P2③, 원칙22): JSON 파싱 실패, 또는 응답이
+    SALES 일별맵이 아님(epoch 키 0개 = 세션만료 200·인증/에러 envelope). cmd_run이 None을 받으면
+    알림 후 실패 처리한다(빈 [] 를 '갱신 없음'으로 오인해 exit 0 하던 사일런트 실패를 막음).
+    필드 부재 날짜 skip(리뷰 P2④): ALL_DELIVERED_AD_COST 키가 없는 날은 0으로 덮어쓰지 않고 건너뜀.
+    """
     try:
         data = json.loads(sales_body or "")
     except (ValueError, TypeError):
         return None
-    result = data.get("result", data) if isinstance(data, dict) else {}
+    result = data.get("result", data) if isinstance(data, dict) else None
+    if not isinstance(result, dict):
+        return None  # 일별맵 구조 아님 → 실패(인증/에러 envelope)
     today = datetime.now(KST).date()
     days = []
-    for epoch_ms, m in (result or {}).items():
-        if not isinstance(m, dict):
-            continue
+    saw_epoch = False
+    for epoch_ms, m in result.items():
         try:
             d = datetime.fromtimestamp(int(epoch_ms) / 1000, KST).date()
         except (ValueError, TypeError, OverflowError):
+            continue  # epoch 키가 아님
+        saw_epoch = True
+        if not isinstance(m, dict) or d >= today:  # 오늘은 미확정 → 제외
             continue
-        if d >= today:  # 오늘은 미확정 → 제외
+        if "ALL_DELIVERED_AD_COST" not in m:  # 필드 부재 → skip(0 클로버 방지, P2④)
             continue
         days.append({
             "date": d.isoformat(),
@@ -274,6 +284,8 @@ def _parse_sales_days(sales_body: str) -> list[dict] | None:
             "pa_cost": int(m.get("DELIVERED_AD_COST") or 0),       # 집행(PA) — 참고/검산용
             "conv_sales": int(m.get("AD_ATTRIBUTED_SALES") or 0),
         })
+    if not saw_epoch:
+        return None  # epoch 키 0개 = SALES 일별맵 아님 → 실패(세션만료/에러, P2③)
     return days
 
 
@@ -336,7 +348,9 @@ def cmd_run(cfg: dict) -> int:
         return 1
     days = _parse_sales_days(body)
     if days is None:
-        log.error("report/SALES JSON 파싱 실패 — 갱신 취소.")
+        # SALES 일별맵 아님(세션만료 200/인증 envelope) — 사일런트 동결 차단(리뷰 P2③).
+        log.error("report/SALES 응답이 유효한 SALES 데이터 아님(세션 만료 가능) — 갱신 실패.")
+        _notify_mac("오하이테크 광고 수집 실패", "report/SALES 응답 비정상(세션 만료 가능) — Chrome 창에서 재로그인 확인.")
         return 1
     if not days:
         log.info("report/SALES: 갱신할 과거 확정일 없음")

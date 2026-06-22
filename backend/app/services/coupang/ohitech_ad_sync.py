@@ -8,6 +8,12 @@
 # 머니룰(D-10): ad_spend = ALL_DELIVERED_AD_COST(전체, 비-PA 포함). 3P/RG net_profit과 동일하게
 #   실제 지불 총액을 차감(intelligence.py:763-783 비-PA 추가차감과 일관). report/SALES는 impressions/
 #   clicks/orders/sales_qty를 주지 않으므로 0. conversion_revenue = AD_ATTRIBUTED_SALES.
+#
+# ★클로버 방지(리뷰 P1①②): coupang_ad_report는 PA-XLSX 업로더(coupang_report.py·ad_costs.py)도
+#   같은 (report_date,'Retail',vendor_id) 키에 쓸 수 있다(last-writer-wins). 안전장치 2겹:
+#   ① 차감은 vendor 스코프 — prod env COUPANG_ROCKET_VENDOR_ID='A01029796'로 _agg_rocket_ad가
+#      이 vendor만 합산(타 벤더 stray Retail 행 무시). ② **A01029796 계정은 PA-XLSX 수동 업로드 금지**
+#      (이 fetcher의 ALL_DELIVERED 값을 PA-only로 덮어써 순이익을 과대화). 1P 광고는 이 경로가 단일 소스.
 from __future__ import annotations
 
 import logging
