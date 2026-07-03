@@ -9,13 +9,28 @@ import {
   fetchConnectionMap,
   fetchMappingCoverage,
   updateMapping,
+  fetchPnlReconciliation,
   type ConnectionMap,
   type ConnCell,
   type ChannelCoverage,
   type MappingIngestResult,
+  type PnlReconciliation,
+  type PnlSkuRow,
 } from "../lib/api";
 
 const fmt = (n: number) => new Intl.NumberFormat("ko-KR").format(n);
+const won = (s: string) => `${fmt(Math.round(Number(s)))}원`;
+
+function isoKST(d: Date): string {
+  const kst = new Date(d.toLocaleString("en-US", { timeZone: "Asia/Seoul" }));
+  return `${kst.getFullYear()}-${String(kst.getMonth() + 1).padStart(2, "0")}-${String(kst.getDate()).padStart(2, "0")}`;
+}
+
+const PNL_ACCOUNTS = [
+  { value: "", label: "전체" },
+  { value: "COUPANG_WING1", label: "오픽스" },
+  { value: "COUPANG_WING2", label: "오하이테크" },
+];
 
 type Tab = "map" | "pnl";
 
@@ -32,7 +47,7 @@ export default function ProductConnectionMap() {
           통합 손익
         </TabBtn>
       </div>
-      {tab === "map" ? <ConnectionMapTab /> : <PnlPlaceholder />}
+      {tab === "map" ? <ConnectionMapTab /> : <PnlTab />}
     </div>
   );
 }
@@ -501,13 +516,133 @@ function AddEditor({
 }
 
 // ─────────────────────────────────────────────────────────────
-// 탭2: 통합 손익 (S5 자리표시)
+// 탭2: 통합 손익 (S5, D-12 — GET /api/products/pnl-reconciliation)
 // ─────────────────────────────────────────────────────────────
-function PnlPlaceholder() {
+function PnlTab() {
+  const today = isoKST(new Date());
+  const ago = (n: number) => {
+    const d = new Date();
+    d.setDate(d.getDate() - (n - 1));
+    return isoKST(d);
+  };
+
+  const [from, setFrom] = useState(ago(7));
+  const [to, setTo] = useState(today);
+  const [account, setAccount] = useState("");
+  const [data, setData] = useState<PnlReconciliation | null>(null);
+  const [skuNames, setSkuNames] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState("");
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [ledgerOpen, setLedgerOpen] = useState(false);
+
+  const load = useCallback(async (f: string, t: string, acc: string) => {
+    setLoading(true);
+    setErr("");
+    try {
+      const result = await fetchPnlReconciliation(f, t, acc || undefined);
+      setData(result);
+      setLedgerOpen(!result.summary.trustworthy);
+      // 상품명 조인 — 손익 숫자 표시를 막지 않도록 실패는 무시(원칙: degrade gracefully).
+      try {
+        const map = await fetchConnectionMap();
+        const names: Record<string, string> = {};
+        for (const r of map.rows) names[r.internal_sku] = r.product_name;
+        setSkuNames(names);
+      } catch {
+        setSkuNames({});
+      }
+    } catch (e) {
+      setErr(`불러오기 실패: ${e}`);
+      setData(null);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    load(from, to, account);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function applyFilters(f: string, t: string, acc: string) {
+    setFrom(f);
+    setTo(t);
+    setAccount(acc);
+    load(f, t, acc);
+  }
+
   return (
-    <div className="bg-white rounded-lg border p-8 text-center text-gray-400 text-sm">
-      통합 손익 조망은 S5에서 구현됩니다.
-      <div className="text-xs mt-1">GET /api/products/pnl-reconciliation 소비 (컴포넌트 보존·SKU행·잔차 투명화)</div>
+    <div>
+      <div className="flex items-center gap-2 mb-4 flex-wrap">
+        <input
+          type="date"
+          value={from}
+          onChange={(e) => applyFilters(e.target.value, to, account)}
+          className="px-2 py-1 text-sm border border-gray-300 rounded-md"
+        />
+        <span className="text-gray-400">~</span>
+        <input
+          type="date"
+          value={to}
+          onChange={(e) => applyFilters(from, e.target.value, account)}
+          className="px-2 py-1 text-sm border border-gray-300 rounded-md"
+        />
+        <select
+          value={account}
+          onChange={(e) => applyFilters(from, to, e.target.value)}
+          className="px-2 py-1 text-sm border border-gray-300 rounded-md"
+        >
+          {PNL_ACCOUNTS.map((a) => (
+            <option key={a.value} value={a.value}>
+              {a.label}
+            </option>
+          ))}
+        </select>
+      </div>
+      {account && (
+        <div className="mb-3 text-xs text-gray-500">
+          계정 선택 시 네이버·자사몰 손익은 제외됩니다(계정 단위는 쿠팡만 대조).
+        </div>
+      )}
+
+      {err && (
+        <div className="mb-3 p-3 bg-red-50 text-red-800 rounded-md text-sm">
+          {err}
+          <button onClick={() => setErr("")} className="ml-2 text-red-600 underline">
+            닫기
+          </button>
+        </div>
+      )}
+
+      {loading && <div className="p-8 text-center text-gray-400 text-sm">불러오는 중…</div>}
+
+      {!loading && data && (
+        <>
+          {!data.summary.trustworthy && (
+            <div className="mb-3 p-3 bg-amber-50 text-amber-800 rounded-md text-sm">
+              ⚠️ 원장 불균형 — SKU 손익 표시 불가. 아래 대조원장에서 diff≠0 컴포넌트를 확인하세요.
+            </div>
+          )}
+
+          <PnlSummaryCards summary={data.summary} />
+
+          {data.summary.trustworthy && (
+            <PnlSkuTable
+              rows={data.by_sku}
+              names={skuNames}
+              expanded={expanded}
+              onToggle={(sku) => setExpanded(expanded === sku ? null : sku)}
+            />
+          )}
+
+          <PnlLedgerPanel
+            ledger={data.ledger}
+            open={ledgerOpen}
+            onToggle={() => setLedgerOpen(!ledgerOpen)}
+          />
+        </>
+      )}
     </div>
   );
 }
