@@ -349,6 +349,43 @@ def test_rg_sale_fee_option_rows_attributed_to_sku(db):
     assert _conserved(comp)
 
 
+# ─────────────────────────────────────────────────────────────
+# T5: 날짜기준 명시(date_basis) + partial_period_settlement 경고 (D-10)
+# ─────────────────────────────────────────────────────────────
+def test_date_basis_present_per_component(db):
+    _ch(db, 1, "COUPANG_WING1")
+    db.add(Order(channel_id=1, order_number="O1", platform_product_id="V1",
+                 quantity=1, selling_price=Decimal("1000"), order_date=OD, status="delivered"))
+    db.commit()
+    result = compute_pnl_reconciliation(db, *WIN, account="COUPANG_WING1")
+    # 각 컴포넌트가 자기 날짜기준을 명시(교차검증 시 각 소스 기준으로 대조, D-10)
+    for c in result["ledger"]["components"]:
+        assert c.get("date_basis"), (c["channel"], c["component"])
+    assert "order_date" in _component(result, "coupang_3p", "revenue")["date_basis"]
+    assert "paid_at" in _component(result, "coupang_rg", "revenue")["date_basis"]
+    assert "po_created" in _component(result, "coupang_1p", "revenue")["date_basis"]
+
+
+def test_partial_period_settlement_warning(db):
+    """RG 정산 주기가 조회 윈도우에 완전 포함 안 되면 경고(일할 배분 안 함, codex #10)."""
+    _ch(db, 1, "COUPANG_WING1")
+    # 정산 주기 5/28~6/3 → 윈도우 6/1~6/30 시작 경계를 넘어 걸침(부분 포함)
+    _rg_fee(db, "COUPANG_WING1", "warehousing", "", "1000",
+            frm=date(2026, 5, 28), to=date(2026, 6, 3))
+    db.commit()
+    result = compute_pnl_reconciliation(db, *WIN, account="COUPANG_WING1")
+    warns = result["ledger"]["warnings"]
+    assert any(w["type"] == "partial_period_settlement" for w in warns)
+
+    # 완전 포함(6/8~6/14)이면 경고 없음
+    db.query(CoupangRgSettlementFee).delete()
+    _rg_fee(db, "COUPANG_WING1", "warehousing", "", "1000",
+            frm=date(2026, 6, 8), to=date(2026, 6, 14))
+    db.commit()
+    result2 = compute_pnl_reconciliation(db, *WIN, account="COUPANG_WING1")
+    assert not any(w["type"] == "partial_period_settlement" for w in result2["ledger"]["warnings"])
+
+
 def test_rg_settlement_fee_absent_is_zero(db):
     """RG 정산 데이터 없으면 settlement_fee 컴포넌트 0, 보존 유지(회귀 가드)."""
     _ch(db, 1, "COUPANG_WING1")

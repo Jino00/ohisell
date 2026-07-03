@@ -155,6 +155,30 @@ def _agg_rocket_by_sku(db: Session, dfrom: date, dto: date,
 
 _MARKETPLACE_PLATFORMS = ("naver", "cafe24")
 
+# ── 컴포넌트별 날짜 기준(D-10): 교차검증은 각 소스 엔진의 그 기준·그 창으로 대조한다 ──
+# 소스마다 날짜축이 다르므로(3P 주문일 vs 1P 발주일 vs RG 정산 인식기간) 원장에 명시해 오인 방지.
+_DATE_BASIS: dict[tuple[str, str], str] = {
+    ("coupang_3p", "revenue"): "order_date (주문일, KST)",
+    ("coupang_rg", "revenue"): "paid_at (RG 주문 결제일)",
+    ("coupang_rg", "settlement_fee"): "recognition period overlap (정산 인식기간 중첩)",
+    ("coupang", "commission"): "recognition_date (매출내역 인식일)",
+    ("coupang", "ad"): "report_date (광고 리포트일)",
+    ("coupang", "cost"): "order_date (매출 순수량 기준)",
+    ("coupang", "return_deduction"): "return requested_at (반품 요청일)",
+    ("coupang", "net_profit"): "mixed (매출=주문일, RG정산/비-PA=인식일 — net_profit_basis 참조)",
+    ("coupang_1p", "revenue"): "po_created_at (발주일, KST)",
+    ("coupang_1p", "cost"): "po_created_at (발주일, KST)",
+    ("coupang_1p", "ad"): "report_date (Retail 광고 리포트일)",
+    ("coupang_1p", "net_profit"): "po_created_at (발주일, KST) + 광고 report_date",
+}
+
+
+def _date_basis(channel: str, component: str) -> str:
+    """컴포넌트 날짜 기준. 마켓플레이스(naver/cafe24)는 전부 order_date."""
+    if channel in _MARKETPLACE_PLATFORMS:
+        return "order_date (주문일)"
+    return _DATE_BASIS.get((channel, component), "order_date")
+
 
 # ──────────────────────────────────────────────
 # SA-1/3 (네이버/cafe24): 라인 매출·수수료·원가 → internal_sku (권위 엔진과 동일 헬퍼 D4)
@@ -374,6 +398,11 @@ def compute_pnl_reconciliation(db: Session, dfrom: date, dto: date,
                     {unmapped_key: blk["unmapped"][comp]},
                 ))
 
+    # 컴포넌트별 날짜기준 명시(D-10) — 교차검증 시 각 소스 기준으로 대조.
+    for c in components:
+        c["date_basis"] = _date_basis(c["channel"], c["component"])
+
+    warnings = _ledger_warnings(db, dfrom, dto, acc["account_key"])
     conservation_ok = all(c["conservation_ok"] for c in components)
     period = {"from": dfrom.isoformat(), "to": dto.isoformat()}
     if account is not None:
@@ -384,5 +413,36 @@ def compute_pnl_reconciliation(db: Session, dfrom: date, dto: date,
             "components": components,
             "conservation_ok": conservation_ok,
             "sku_conflicts": sorted(sku_conflicts),  # 옵션ID→복수 internal_sku(무결성 결손)
+            "warnings": warnings,
         },
     }
+
+
+def _ledger_warnings(db: Session, dfrom: date, dto: date,
+                     account_key: str | None) -> list[dict]:
+    """원장 경고. partial_period_settlement(D-10/codex #10): RG 정산 주기가 조회 윈도우에
+    완전 포함되지 않으면(경계 걸침) 경고. 일할 배분은 하지 않고(임의 배분 금지) 사실만 표면화 —
+    부분 주기 정산이 net_profit/settlement_fee를 과대/과소로 보이게 할 수 있음을 알린다."""
+    from app.models import CoupangRgSettlementFee
+    q = db.query(CoupangRgSettlementFee).filter(
+        CoupangRgSettlementFee.recognition_date_from <= dto,
+        CoupangRgSettlementFee.recognition_date_to >= dfrom,
+        (CoupangRgSettlementFee.recognition_date_from < dfrom)
+        | (CoupangRgSettlementFee.recognition_date_to > dto),
+    )
+    if account_key is not None:
+        q = q.filter(CoupangRgSettlementFee.account_key == account_key)
+    partials = q.all()
+    warnings: list[dict] = []
+    if partials:
+        periods = sorted({(r.recognition_date_from.isoformat(),
+                           r.recognition_date_to.isoformat()) for r in partials})
+        warnings.append({
+            "type": "partial_period_settlement",
+            "detail": (
+                "RG 정산 주기가 조회 윈도우 경계에 걸침(부분 포함). 일할 배분 안 함 — "
+                "settlement_fee/net_profit이 부분 주기만큼 낙관/비관적일 수 있음(D-10)."
+            ),
+            "periods": periods,
+        })
+    return warnings
