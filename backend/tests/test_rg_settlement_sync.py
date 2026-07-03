@@ -714,6 +714,81 @@ def test_agg_rg_settlement_excludes_option_rows():
     assert agg["COUPANG_WING1"]["total"] == Decimal("75489")
 
 
+# ─── S3 트랙 D3(grain 파라미터화) — IRON RULE 회귀 + 옵션 grain 신규 ────
+def test_agg_rg_settlement_default_grain_is_account_unchanged():
+    """IRON RULE: grain 미지정 시 기존 account 동작과 완전 동일(회귀 가드)."""
+    from app.services.coupang.intelligence import _agg_rg_settlement_fees
+    db = _db()
+    db.add(CoupangRgSettlementFee(
+        account_key="COUPANG_WING1", recognition_date_from=date(2026, 6, 1),
+        recognition_date_to=date(2026, 6, 7), fee_type="warehousing", vendor_item_id="",
+        raw_type="totalWarehousingFeeDeductionAmount", amount=Decimal("75489")))
+    db.add(CoupangRgSettlementFee(
+        account_key="COUPANG_WING1", recognition_date_from=date(2026, 6, 1),
+        recognition_date_to=date(2026, 6, 7), fee_type="warehousing", vendor_item_id="95521944483",
+        raw_type="xlsx:입출고비", amount=Decimal("21375")))
+    db.commit()
+    default_call = _agg_rg_settlement_fees(db, date(2026, 6, 1), date(2026, 6, 7))
+    explicit_account = _agg_rg_settlement_fees(db, date(2026, 6, 1), date(2026, 6, 7), grain="account")
+    assert default_call == explicit_account == {
+        "COUPANG_WING1": {"warehousing": Decimal("75489"), "total": Decimal("75489")}
+    }
+
+
+def test_agg_rg_settlement_option_grain_excludes_account_rows():
+    """grain='option'은 옵션 row(vendor_item_id≠'')만 — 계정 row(sentinel '') 미포함."""
+    from app.services.coupang.intelligence import _agg_rg_settlement_fees
+    db = _db()
+    db.add(CoupangRgSettlementFee(
+        account_key="COUPANG_WING1", recognition_date_from=date(2026, 6, 1),
+        recognition_date_to=date(2026, 6, 7), fee_type="warehousing", vendor_item_id="",
+        raw_type="totalWarehousingFeeDeductionAmount", amount=Decimal("75489")))
+    db.add(CoupangRgSettlementFee(
+        account_key="COUPANG_WING1", recognition_date_from=date(2026, 6, 1),
+        recognition_date_to=date(2026, 6, 7), fee_type="warehousing", vendor_item_id="95521944483",
+        raw_type="xlsx:입출고비", amount=Decimal("21375")))
+    db.add(CoupangRgSettlementFee(
+        account_key="COUPANG_WING1", recognition_date_from=date(2026, 6, 1),
+        recognition_date_to=date(2026, 6, 7), fee_type="sale_fee", vendor_item_id="95521944483",
+        raw_type="xlsx:판매수수료", amount=Decimal("5000")))
+    db.commit()
+    agg = _agg_rg_settlement_fees(db, date(2026, 6, 1), date(2026, 6, 7), grain="option")
+    assert agg == {
+        "COUPANG_WING1": {
+            "95521944483": {
+                "warehousing": Decimal("21375"),
+                "sale_fee": Decimal("5000"),
+                "total": Decimal("26375"),
+            }
+        }
+    }
+
+
+def test_agg_rg_settlement_option_grain_account_filter():
+    """grain='option' + account_key 필터 조합(계정 분리 불변식 유지)."""
+    from app.services.coupang.intelligence import _agg_rg_settlement_fees
+    db = _db()
+    db.add(CoupangRgSettlementFee(
+        account_key="COUPANG_WING1", recognition_date_from=date(2026, 6, 1),
+        recognition_date_to=date(2026, 6, 7), fee_type="warehousing", vendor_item_id="A1",
+        raw_type="xlsx:입출고비", amount=Decimal("100")))
+    db.add(CoupangRgSettlementFee(
+        account_key="COUPANG_WING2", recognition_date_from=date(2026, 6, 1),
+        recognition_date_to=date(2026, 6, 7), fee_type="warehousing", vendor_item_id="B1",
+        raw_type="xlsx:입출고비", amount=Decimal("200")))
+    db.commit()
+    agg = _agg_rg_settlement_fees(db, date(2026, 6, 1), date(2026, 6, 7),
+                                  account_key="COUPANG_WING1", grain="option")
+    assert agg == {"COUPANG_WING1": {"A1": {"warehousing": Decimal("100"), "total": Decimal("100")}}}
+
+
+def test_agg_rg_settlement_invalid_grain_raises():
+    from app.services.coupang.intelligence import _agg_rg_settlement_fees
+    db = _db()
+    with pytest.raises(ValueError):
+        _agg_rg_settlement_fees(db, date(2026, 6, 1), date(2026, 6, 7), grain="bogus")
+
+
 # ─── codex 2R 반영(원칙19) ────────────────────────────
 def test_ingest_same_fee_type_multiple_sheets_merged():
     """같은 fee_type 시트 2개(반품 회수비+재입고비→return_shipping) → 병합 합산, 삭제 충돌 없음(codex 2R-P1)."""

@@ -48,6 +48,20 @@ S1 신규 매핑 적재 Harness(엑셀 파서+라벨 리졸버+upsert+무결성 
 ### D-6 — 매핑 테이블에 sell_type(3P/RG/1P) 컬럼 보강
 `product_channel_mapping`에 `sell_type` 컬럼을 **추가**한다. D-2에 따라 vendor_id만으로는 3P/RG 구분 불가하므로, Harness3(통합 손익)의 채널별 집계 시 sell_type이 반드시 필요.
 - Jino 확인: 추천안(추가) 승인.
+- (정정 2026-07-03/S3 조사): 실제로는 `sell_type`이 `product_channel_mapping`이 아니라 `channels` 테이블에 추가됨(마이그레이션 `t4u5v6w7x8y9`). 취지(3P/RG 구분)는 동일하게 충족.
+
+### D-7 — 1P(로켓배송) 옵션↔internal_sku 브리지는 RocketProductCostMap을 정본으로 사용
+S3 설계 중 발견: `product_channel_mapping`(S1, ROCKET 채널 388행)과 `RocketProductCostMap`(rocket-1p 트랙, product_number→internal_sku)이 **동일 목적의 매핑을 각자 따로** 가지고 있어 값이 갈릴 경우 돈 안전 문제가 됨. S3의 1P 매출·원가 조인은 `RocketProductCostMap`을 정본으로 쓰고, `product_channel_mapping`의 ROCKET 행은 조인에 쓰지 않는다. 두 값이 다른 옵션은 자동 병합/수정하지 않고 리포트로만 표면화.
+- 근거: `RocketProductCostMap`은 이미 1P net_profit 원가계산(rocket-1p 트랙 S4.5c)에 검증되어 쓰이는 확정 입력. `product_channel_mapping`의 ROCKET 행은 엑셀 적재 직후로 아직 라이브 검증 이력 없음.
+- Jino 확인: 추천안(RocketProductCostMap 유지) 승인.
+
+### D-8~D-11 — S3 대조원장 우선 재구성 (codex outside-voice 흡수, plan-eng-review 2026-07-03)
+S3 계획을 codex 리뷰(gpt-5.5) 15건 흡수 후 **reconciliation-first**로 재작성(계획서 `docs/PLAN_product-connection-map-s3.md` v2). Jino 확인: D6 "대조원장 우선으로 재작성" 승인.
+- **D-8 (RG 의미 명시)**: 현재 command_center는 RG 정산을 옵션 net에서 빼고 summary에서만 차감(플립 D-16). S3는 RG 옵션 수수료를 SKU행에 귀속(신규 지표)하되, 원장에서 `Σ(RG 옵션 귀속)+RG_vat_residual+RG_unmapped == 계정 RG 플립 총액`으로 대조. 새 지표를 만들되 기존 총액과 화해.
+- **D-9 (VAT 기준)**: RG 옵션행=VAT前(A−B), 계정행=VAT後. SKU 귀속 시 gross-up, 잔차는 `rg_vat_residual` 버킷으로 원장 노출(반올림 은폐 금지).
+- **D-10 (날짜 기준)**: 채널별 날짜 기준을 원장에 명시(3P주문일/3P수수료 인식일/RG paid_at/RG정산 기간중첩/1P발주일/1P광고 리포트일). 교차검증은 각 소스 엔진의 그 기준·그 창으로 대조. 부분기간 RG정산은 `partial_period_settlement` 경고(일할 배분 안 함).
+- **D-11 (계정 스코프)**: `/api/products/pnl-reconciliation` 엔드포인트는 `account` 파라미터 필수. 미지정=전 계정 계약(계정별 원장 배열 반환).
+- **보존 법칙(트랙 정의)**: 채널·컴포넌트마다 `Σ(SKU 귀속) + Σ(잔차 버킷) == 기존 권위 엔진 계정 소계`가 정확 성립해야 원장 통과(tolerance 아님). 잔차 버킷: unmapped_3p/rg/1p/naver/cafe24 · account_adjustments(정산매출조정·non-PA광고·RG플립잔차·판매자배송) · rg_vat_residual · naver_cafe24_shipping · account_only_ad(1P광고 등).
 
 ## 🔎 라이브 실측 (2026-07-03, 원칙22 — 착수 근거)
 DB: `backend/ohisell.db` (dev), 엑셀: `.../15. 기획/상품 리스트/ohisell_mapping_template.xlsx`(899행)
@@ -89,7 +103,7 @@ DB: `backend/ohisell.db` (dev), 엑셀: `.../15. 기획/상품 리스트/ohisell
 - [x] S0 정찰·구조 확정·트랙 생성 (2026-07-03)
 - [x] S1 Harness1 매핑 적재 (엑셀 파서 + 라벨 리졸버 + upsert + 무결성 검사) (2026-07-03)
 - [x] S2 Harness2 매출 조인/백필 + 커버리지 리포트 (2026-07-03)
-- [ ] S3 Harness3 통합 손익 조망 (SA 4종 + 조합)
+- [x] S3 Harness3 통합 손익 조망 (대조원장 우선, T1~T7 전부 완료 2026-07-03) — 백엔드 완성·배포 게이트 PASS
 - [ ] S4 화면 C 탭1 연관맵 관리 UI
 - [ ] S5 화면 C 탭2 통합 손익 UI
 - [ ] S6 오픽스 매핑 결손 보강(엑셀 소스 갱신) + prod 배포·라이브 self-verify
@@ -112,9 +126,21 @@ DB: `backend/ohisell.db` (dev), 엑셀: `.../15. 기획/상품 리스트/ohisell
 - 테스트 6개 추가(전체 461 passed). **라이브 self-verify**: dev DB에서 계산한 미매핑 옵션ID 수가 S0 실측치와 완전 일치(NAVER 35·CAFE24 1) — S0/S1/S2 세 시점의 데이터가 서로 교차검증됨. WING1(오픽스) 커버리지 0%는 알려진 매핑결손(D-1 참고)과 일치, 새 버그 아님.
 - **codex review 완료(gate PASS, P1 0건)**: P2 3건 중 2건 반영(① `unmapped_order_options` 50건 캡을 API 계약에서 숨기지 않도록 `limit` 쿼리파라미터 추가 ② `platform_product_id=""` 주문이 coverage=1.0으로 은폐되는 문제를 `blank_option_id_orders` 필드로 별도 노출), N+1 쿼리 최적화 1건은 현재 규모(채널 7개·주문 최대 1,300여 건)에서 실익 없다고 판단해 기각.
 
+## S3 진행 기록 (2026-07-03)
+- **T1+T2**(커밋 f4526e4): `_agg_rg_settlement_fees(grain=)` 파라미터화 + 재사용 밑줄함수 5개 characterization 회귀. `_cost_master`는 internal_sku 미노출 발견.
+- **T3**(커밋 d22aa0f): 신규 `backend/app/services/product_pnl.py` — 대조원장 Harness 3a + SA 5종. 채널·컴포넌트별 보존 법칙(Σ SKU귀속+Σ잔차==권위 엔진 계정소계) 정확 성립. 권위 엔진(compute_command_center·compute_rocket_overview) 소비, 잔차 독립계산. 대조: 쿠팡 3P/RG매출·수수료·광고·원가·반품차감·net_profit(계정조정4종) + 1P 매출/원가/광고/net_profit + 네이버·cafe24 product_revenue/수수료/원가. **codex review [P1]×3 수용**(충돌vid→잔차·1P vendor D-2공유 잠금·marketplace product_revenue 라벨), [P2] ignored_1p 이연. 테스트 9개, 전체 486 passed.
+
+## S3 완료 기록 (T4~T7, 2026-07-03)
+- **T4**(91b9ec1): RG 옵션수수료 VAT前(A−B) ×1.1 gross-up SKU 귀속 + 잔차 2종(rg_account_only_fees·rg_vat_grossup_gap). Σ(옵션귀속)+rg_unmapped+잔차2==rg_total. codex [P1](sale_fee 옵션도 귀속)·[P2](잔차 분리) 수용.
+- **T5**(82998a2): 컴포넌트별 date_basis 명시 + partial_period_settlement 경고(일할 배분 안 함). 채널별 순수량 원가는 이미 충족.
+- **T6**(dac734f): 라우터 GET /api/products/pnl-reconciliation(account 계약 {WING1,WING2}, Decimal→str) + Harness 3b SKU행(net_profit_allocated_only·reconciled_net_profit·account_adjustment_residual). codex [P1](account allow-list)·[P2](불균형 시 reconciled 유지+trustworthy) 수용. product_pnl 지연 임포트로 앱 로드 순환 데드락 해소.
+- **T7 배포 게이트 PASS**(원칙22): dev DB 사본(orders 3/1~4/15, 1600건·광고562·로켓PO651·RG 0) 실검증 — 전 계정(None/WING1/WING2) conservation_ok=True·전 컴포넌트 diff=0, 엔진 대조 완전 일치(net_profit/3p_rev/1p_rev==command_center/rocket_overview). None reconciled=72,162,843(쿠팡 1.02M+1P 51.4M+네이버/cafe24 19.7M)·by_sku=318. WING1 by_sku=0=오픽스 매핑결손(D-1, S6 몫). 1P revenue 51.4M은 alloc=0(dev DB에 RocketProductCostMap 없어 전액 잔차, 커버리지 갭 정상 표면화). 테스트 총 20개(S3 신규), 전체 493 passed.
+
 ## 📍 현재 진행 단계
-S1+S2 완료·커밋·PR. 다음: PR 머지 후 S3(통합 손익 조망 Harness) 착수.
+S1+S2 main 머지(PR #1). **S3 백엔드 완료**(T1~T7, 대조원장+VAT+날짜+라우터+3b, 배포 게이트 PASS). 백엔드 미머지(브랜치 claude/reverent-poitras-89cf7d, f4526e4~dac734f). 다음: **S4/S5 프론트(화면 C 탭1 연관맵·탭2 통합손익 UI)**. 또는 Jino 결정 시 S3 백엔드 PR·머지.
 
 ## ▶️ 다음 액션
-1. S1 계획 상세화(엑셀 컬럼 정규화 규칙·upsert 멱등 계약·무결성 리포트 스키마·sell_type 마이그레이션) → /plan-eng-review.
-2. ~~착수 전 확인~~ (완료: D-5 대체·D-6 sell_type 추가)
+1. ~~S3 백엔드(T1~T7)~~ **완료**(대조원장+VAT+날짜+라우터+3b, 배포 게이트 PASS, 493 passed).
+2. **S4/S5 프론트(화면 C)**: 탭1 연관맵 관리(내부옵션×채널 그리드·인라인 편집·커버리지/충돌 배지·엑셀 업로드) + 탭2 통합 손익(GET /api/products/pnl-reconciliation 소비 — 컴포넌트 보존 표시·SKU행·잔차 투명화). Opus 구조설계 권장.
+3. **S6**: 오픽스(WING1/RG1) 매핑 결손 보강(T7에서 WING1 by_sku=0 재확인) + prod 배포·라이브 self-verify.
+4. (git) S3 백엔드 PR·머지는 Jino 결정 — 현재 브랜치 claude/reverent-poitras-89cf7d(f4526e4~dac734f, 미push).
