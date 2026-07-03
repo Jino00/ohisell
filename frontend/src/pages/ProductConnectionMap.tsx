@@ -758,3 +758,88 @@ function PnlSkuTable({
     </div>
   );
 }
+
+function PnlLedgerPanel({
+  ledger,
+  open,
+  onToggle,
+}: {
+  ledger: PnlReconciliation["ledger"];
+  open: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <div className="bg-white rounded-lg border">
+      <button
+        onClick={onToggle}
+        className="w-full flex items-center justify-between px-4 py-3 text-sm font-medium text-gray-700 hover:bg-gray-50"
+      >
+        <span>
+          대조원장 상세 {open ? "접기" : "보기"}
+          <span
+            className={`ml-2 text-xs px-2 py-0.5 rounded ${
+              ledger.conservation_ok ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700"
+            }`}
+          >
+            {ledger.conservation_ok ? "균형" : "불균형"}
+          </span>
+        </span>
+        <span className="text-gray-400">{open ? "▲" : "▼"}</span>
+      </button>
+      {open && (
+        <div className="border-t px-4 py-3">
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-xs mb-3">
+              <thead>
+                <tr className="text-gray-500">
+                  <th className="text-left py-1 pr-3">채널</th>
+                  <th className="text-left py-1 pr-3">컴포넌트</th>
+                  <th className="text-right py-1 pr-3">권위 총액</th>
+                  <th className="text-right py-1 pr-3">SKU 귀속</th>
+                  <th className="text-right py-1 pr-3">잔차 합</th>
+                  <th className="text-right py-1">diff</th>
+                </tr>
+              </thead>
+              <tbody>
+                {ledger.components.map((c, i) => {
+                  const residualSum = Object.values(c.residuals).reduce(
+                    (a, v) => a + Number(v),
+                    0,
+                  );
+                  const diffNonZero = Number(c.conservation_diff) !== 0;
+                  return (
+                    <tr key={i} className={diffNonZero ? "bg-red-50" : ""}>
+                      <td className="py-0.5 pr-3">{c.channel}</td>
+                      <td className="py-0.5 pr-3">{c.component}</td>
+                      <td className="py-0.5 pr-3 text-right">{won(c.authoritative_total)}</td>
+                      <td className="py-0.5 pr-3 text-right">{won(c.allocated_to_sku)}</td>
+                      <td className="py-0.5 pr-3 text-right">{won(String(residualSum))}</td>
+                      <td className={`py-0.5 text-right ${diffNonZero ? "text-red-600 font-medium" : ""}`}>
+                        {won(c.conservation_diff)}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          {ledger.sku_conflicts.length > 0 && (
+            <div className="mb-2 text-xs">
+              <span className="text-red-600 font-medium">채널옵션ID 충돌 {ledger.sku_conflicts.length}건: </span>
+              <span className="text-gray-600 font-mono">{ledger.sku_conflicts.join(", ")}</span>
+            </div>
+          )}
+
+          {ledger.warnings.length > 0 && (
+            <div className="text-xs text-amber-700">
+              {ledger.warnings.map((w, i) => (
+                <div key={i}>⚠ {JSON.stringify(w)}</div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
