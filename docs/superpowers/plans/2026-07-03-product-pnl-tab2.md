@@ -74,7 +74,7 @@ export function fetchPnlReconciliation(
 
 - [ ] **Step 2: 타입체크로 검증**
 
-Run: `cd frontend && npx tsc --noEmit`
+Run: `cd frontend && npx tsc -b --noEmit`
 Expected: 에러 없음(0 errors) — 이 시점엔 아직 아무도 새 타입/함수를 사용하지 않으므로 unused-export 경고는 없다(export이므로 unused 취급 안 됨).
 
 - [ ] **Step 3: Commit**
@@ -286,7 +286,7 @@ function PnlTab() {
 
 - [ ] **Step 4: 타입체크(아직 하위 컴포넌트 미정의 — 의도적 실패 확인)**
 
-Run: `cd frontend && npx tsc --noEmit`
+Run: `cd frontend && npx tsc -b --noEmit`
 Expected: FAIL — `PnlSummaryCards`, `PnlSkuTable`, `PnlLedgerPanel`이 정의되지 않았다는 에러(`Cannot find name 'PnlSummaryCards'` 등). 이 실패를 확인하고 다음 태스크로 진행한다(하위 컴포넌트는 Task 3~4에서 추가).
 
 - [ ] **Step 5: Commit**
@@ -429,7 +429,7 @@ function PnlSkuTable({
 
 - [ ] **Step 3: 타입체크**
 
-Run: `cd frontend && npx tsc --noEmit`
+Run: `cd frontend && npx tsc -b --noEmit`
 Expected: `PnlLedgerPanel`을 찾을 수 없다는 에러만 남는다(Task 4에서 추가 예정). `PnlSummaryCards`/`PnlSkuTable` 관련 에러는 사라져야 함.
 
 - [ ] **Step 4: Commit**
@@ -539,7 +539,7 @@ function PnlLedgerPanel({
 
 - [ ] **Step 2: 타입체크 — 전체 통과 확인**
 
-Run: `cd frontend && npx tsc --noEmit`
+Run: `cd frontend && npx tsc -b --noEmit`
 Expected: PASS(0 errors). `PnlPlaceholder`는 삭제됐으므로 참조가 남아있으면 이 시점에 에러로 드러난다.
 
 - [ ] **Step 3: ESLint**
