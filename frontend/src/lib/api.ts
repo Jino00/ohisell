@@ -282,6 +282,53 @@ export interface MappingIngestResult {
   label_mismatches: string[];
 }
 
+// ── 통합 손익 대조원장 (트랙 S5, GET /api/products/pnl-reconciliation) ──
+// 금액 필드는 백엔드가 Decimal→str로 직렬화(_pnl_jsonify)하므로 전부 string.
+export interface PnlComponent {
+  channel: string;
+  component: string;
+  authoritative_total: string;
+  allocated_to_sku: string;
+  allocated_by_sku: Record<string, string>;
+  residuals: Record<string, string>;
+  conservation_diff: string;
+  conservation_ok: boolean;
+  date_basis: string;
+}
+export interface PnlLedgerWarning {
+  [key: string]: unknown;
+}
+export interface PnlSkuRow {
+  internal_sku: string;
+  channels: Record<string, Record<string, string>>;
+  net_profit_allocated_only: string;
+}
+export interface PnlReconciliation {
+  period: { from: string; to: string; account?: string };
+  ledger: {
+    components: PnlComponent[];
+    conservation_ok: boolean;
+    sku_conflicts: string[];
+    warnings: PnlLedgerWarning[];
+  };
+  by_sku: PnlSkuRow[];
+  summary: {
+    reconciled_net_profit: string;
+    net_profit_allocated_total: string;
+    account_adjustment_residual: string;
+    trustworthy: boolean;
+  };
+}
+export function fetchPnlReconciliation(
+  from: string,
+  to: string,
+  account?: string,
+): Promise<PnlReconciliation> {
+  const params = new URLSearchParams({ from, to });
+  if (account) params.set("account", account);
+  return fetchApi<PnlReconciliation>(`/api/products/pnl-reconciliation?${params.toString()}`);
+}
+
 // ── Order Types ──
 export interface OrderItem {
   id: number;

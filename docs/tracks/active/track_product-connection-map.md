@@ -110,7 +110,7 @@ DB: `backend/ohisell.db` (dev), 엑셀: `.../15. 기획/상품 리스트/ohisell
 - [x] S2 Harness2 매출 조인/백필 + 커버리지 리포트 (2026-07-03)
 - [x] S3 Harness3 통합 손익 조망 (대조원장 우선, T1~T7 전부 완료 2026-07-03) — 백엔드 완성·배포 게이트 PASS·main 머지(PR #2)
 - [x] S4 화면 C 탭1 연관맵 관리 UI (2026-07-03) — 백엔드(매트릭스 조회+인라인 편집)+프론트+codex PASS+라이브검증
-- [ ] S5 화면 C 탭2 통합 손익 UI
+- [x] S5 화면 C 탭2 통합 손익 UI (2026-07-03) — 프론트 구현+라이브 브라우저 검증 완료
 - [ ] S6 오픽스 매핑 결손 보강(엑셀 소스 갱신) + prod 배포·라이브 self-verify
 
 ## S1 완료 기록 (2026-07-03)
@@ -148,12 +148,30 @@ DB: `backend/ohisell.db` (dev), 엑셀: `.../15. 기획/상품 리스트/ohisell
 - **검증**: 신규 테스트 12개, 전체 **505 passed**·ruff·tsc·vite build clean. **라이브(원칙22, 실 dev DB 894상품)**: total_products=894·conflict_option_count=46(=S1 무결성 채널ID중복 46건 정확 일치)·sell_type 7채널 정확·q/limit 정상.
 - 브랜치 `claude/peaceful-herschel-ea7fe6`(28772f0~), **미push·미머지**(S4 PR은 Jino 결정).
 
+## S5 완료 기록 (2026-07-03)
+
+**코드**: `frontend/src/pages/ProductConnectionMap.tsx` 탭2 "통합 손익" — 필터바(기간 date input ×2·계정 select 전체/오픽스/오하이테크)+`PnlSummaryCards`(계정 순익·SKU 귀속 순익 합·미배분 잔차)+`PnlSkuTable`(행 클릭 시 채널×컴포넌트 확장)+`PnlLedgerPanel`(대조원장 상세 토글, warnings·sku_conflicts 노출). 커밋 bbd876d·0f0cd4f·31fdb46·59bc195. tsc/lint/build 전부 clean(코딩 단계 self-check, 이번 세션 재확인 안 함 — Task 1~4 산출물).
+
+**라이브 브라우저 검증 환경**: 이 워크트리(`inspiring-babbage-137afd`)에 `backend/.venv` 신규 생성(python3.11.15, 기존 없었음)+`requirements.txt` 설치. dev DB는 main 워크트리의 `backend/ohisell.db`를 복사(alembic head `t4u5v6w7x8y9`, 마이그레이션 불필요·이미 head). `.claude/launch.json` 신규 생성(backend uvicorn :8000 + frontend vite :5173). `preview_start`/`preview_screenshot`/`preview_snapshot`/`preview_network`/`preview_console_logs`/`preview_click`/`preview_fill`/`preview_eval`로 실제 클릭 구동.
+
+**dev DB 데이터 특성(원칙22, 있는 그대로 기록)**: `orders` 테이블 주문일 범위=2026-03-01~2026-04-15(1,600건), 오늘 날짜(2026-07-03) 기준 "최근 7일" 기본값 윈도우(6/27~7/3)에는 실주문 데이터가 없어 0원으로 렌더됨 — 이는 버그가 아니라 dev DB의 실제 상태. 실데이터 검증을 위해 날짜 필터를 4/1~4/15로 수동 변경해 관측.
+
+**Step 3 체크리스트 5항목 관측 결과**:
+
+1. **최근 7일 기본값 자동 로드 + PnlSummaryCards 3장 + 콘솔 에러 없음** — 확인. 진입 시 날짜 input이 2026.06.27~2026.07.03으로 자동 채워짐, 3장 카드(계정 순익/SKU 귀속 순익 합/미배분 잔차) 렌더(이 윈도우엔 데이터 없어 0원/0원/0원이지만 정상 렌더). `preview_console_logs`(level=all) 세션 전체에 걸쳐 **로그 0건**(에러 없음).
+2. **PnlSkuTable 행 표시 또는 경고 배너, 둘 중 하나 관측** — 확인(행 표시 쪽). 4/1~4/15·전체 계정 윈도우에서 SKU 행 다수 렌더(계정 순익 37,775,046원/SKU 귀속 12,480,904원/미배분 잔차 25,294,142원, 상품명·내부코드·순익 컬럼). **경고 배너(`⚠️ 원장 불균형 — SKU 손익 표시 불가`, `data.summary.trustworthy===false` 게이트)는 관측 못함** — dev DB 전체 주문 기간(3/1~4/15)에 대해 계정 None/WING1/WING2 조합을 curl로 전수 스캔한 결과 `conservation_ok`가 예외 없이 always true였음(unfalsifiable in current dev DB). 코드 경로 자체는 `ProductConnectionMap.tsx:622-624`에 존재 확인(라인 리뷰로 존재만 확인, 라이브 트리거는 못함).
+3. **계정 드롭다운 전환 시 네트워크 쿼리스트링 변화** — 확인. `preview_network`로 실제 요청 URL 캡처: `GET /api/products/pnl-reconciliation?from=2026-04-01&to=2026-04-15`(전체, account 파라미터 없음) → `...&account=COUPANG_WING1`(오픽스) → `...&account=COUPANG_WING2`(오하이테크), 전부 200 OK. 응답값도 계정별로 실제로 달랐음(오픽스 계정순익 177,100원 vs 오하이테크 194,160원/SKU귀속 214,060원/잔차 **-19,900원**[음수 잔차 실제 관측] vs 전체 37,775,046원).
+4. **SKU 행 클릭 → 확장 패널 → 채널별 컴포넌트 분해** — 확인. OHI-0497 행 클릭 시 인라인 확장되어 `cafe24: product_revenue/commission/cost`, `naver: product_revenue/commission/cost` 6행이 채널·컴포넌트·금액 테이블로 렌더됨.
+5. **"대조원장 상세 보기" 클릭 → 컴포넌트 테이블 펼침 + conservation_diff≠0 빨간 배경 강조** — **부분 확인**. 펼침 자체는 확인(채널×컴포넌트별 권위총액/SKU귀속/잔차합/diff 12행 테이블 렌더, "균형" 초록 배지, 채널옵션ID 충돌 3건 경고 텍스트도 실제 렌더 확인). **빨간 배경 강조는 관측 못함** — 위와 동일한 이유로 이 dev DB엔 diff≠0 행이 존재하지 않음(전 기간·전 계정 스캔 결과 diff는 항상 0). 소스 코드 확인(`ProductConnectionMap.tsx:809-819`): `diffNonZero = Number(c.conservation_diff) !== 0` → `bg-red-50` 행 클래스 + `text-red-600 font-medium` diff 셀, 로직은 존재하나 이 데이터셋으로는 트리거 불가능(unfalsifiable in current dev DB).
+
+**결론**: 5항목 중 1·2(행 렌더 쪽)·3·4는 라이브로 완전 관측. 2(경고 배너 쪽)와 5(빨간 강조)는 코드 존재는 확인했으나 현재 dev DB가 항상 균형 상태라 라이브 트리거 불가 — 원칙22에 따라 "관측했다"고 쓰지 않음.
+
 ## 📍 현재 진행 단계
-S1+S2(PR #1)·S3 백엔드(PR #2) main 머지 완료. **S4 화면 C 탭1 연관맵 관리 UI 완료**(백엔드+프론트+codex PASS+라이브검증, 브랜치 미머지). 다음: S5 통합손익 UI 또는 S4 PR 머지(Jino 결정).
+S1+S2(PR #1)·S3 백엔드(PR #2) main 머지 완료. **S4 화면 C 탭1 연관맵 관리 UI 완료**(백엔드+프론트+codex PASS+라이브검증, 브랜치 미머지). **S5 화면 C 탭2 통합 손익 UI 완료**(프론트+라이브 브라우저 검증, 균형 케이스만 관측·불균형 케이스는 unfalsifiable). 다음: S6(오픽스 매핑 결손 보강) 또는 S4/S5 PR 머지(Jino 결정).
 
 ## ▶️ 다음 액션
-1. ~~S3 백엔드~~·~~S4 탭1 UI~~ **완료**.
-2. (git) **S4 PR·머지**는 Jino 결정 — 브랜치 `claude/peaceful-herschel-ea7fe6`.
-3. **S5 화면 C 탭2 통합 손익 UI**: `GET /api/products/pnl-reconciliation` 소비(컴포넌트 보존 표시·SKU행·잔차 투명화·trustworthy). PnlPlaceholder 대체.
-4. **S6**: 오픽스(WING1/RG1) 매핑 결손 보강(T7 WING1 by_sku=0) + prod 배포·라이브 self-verify.
+1. ~~S3 백엔드~~·~~S4 탭1 UI~~·~~S5 탭2 UI~~ **완료**.
+2. (git) **S4/S5 PR·머지**는 Jino 결정 — 브랜치 `claude/peaceful-herschel-ea7fe6`(S4)·이 세션 브랜치(S5 확인 필요).
+3. **S6**: 오픽스(WING1/RG1) 매핑 결손 보강(T7 WING1 by_sku=0) + prod 배포·라이브 self-verify.
+4. (선택) S5 불균형/경고배너 경로는 dev DB로 트리거 불가 — 필요 시 fixture 데이터를 의도적으로 불균형 상태로 만들어 별도 검증하거나, unit/component 테스트로 커버.
 5. (정리) 머지 완료된 워크트리 `reverent-poitras-89cf7d`·`upbeat-lamport-86c720` 정리 대상(Jino 확인 후).

@@ -9,13 +9,28 @@ import {
   fetchConnectionMap,
   fetchMappingCoverage,
   updateMapping,
+  fetchPnlReconciliation,
   type ConnectionMap,
   type ConnCell,
   type ChannelCoverage,
   type MappingIngestResult,
+  type PnlReconciliation,
+  type PnlSkuRow,
 } from "../lib/api";
 
 const fmt = (n: number) => new Intl.NumberFormat("ko-KR").format(n);
+const won = (s: string) => `${fmt(Math.round(Number(s)))}원`;
+
+function isoKST(d: Date): string {
+  const kst = new Date(d.toLocaleString("en-US", { timeZone: "Asia/Seoul" }));
+  return `${kst.getFullYear()}-${String(kst.getMonth() + 1).padStart(2, "0")}-${String(kst.getDate()).padStart(2, "0")}`;
+}
+
+const PNL_ACCOUNTS = [
+  { value: "", label: "전체" },
+  { value: "COUPANG_WING1", label: "오픽스" },
+  { value: "COUPANG_WING2", label: "오하이테크" },
+];
 
 type Tab = "map" | "pnl";
 
@@ -32,7 +47,7 @@ export default function ProductConnectionMap() {
           통합 손익
         </TabBtn>
       </div>
-      {tab === "map" ? <ConnectionMapTab /> : <PnlPlaceholder />}
+      {tab === "map" ? <ConnectionMapTab /> : <PnlTab />}
     </div>
   );
 }
@@ -501,13 +516,330 @@ function AddEditor({
 }
 
 // ─────────────────────────────────────────────────────────────
-// 탭2: 통합 손익 (S5 자리표시)
+// 탭2: 통합 손익 (S5, D-12 — GET /api/products/pnl-reconciliation)
 // ─────────────────────────────────────────────────────────────
-function PnlPlaceholder() {
+function PnlTab() {
+  const today = isoKST(new Date());
+  const ago = (n: number) => {
+    const d = new Date();
+    d.setDate(d.getDate() - (n - 1));
+    return isoKST(d);
+  };
+
+  const [from, setFrom] = useState(ago(7));
+  const [to, setTo] = useState(today);
+  const [account, setAccount] = useState("");
+  const [data, setData] = useState<PnlReconciliation | null>(null);
+  const [skuNames, setSkuNames] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState("");
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [ledgerOpen, setLedgerOpen] = useState(false);
+
+  const load = useCallback(async (f: string, t: string, acc: string) => {
+    setLoading(true);
+    setErr("");
+    try {
+      const result = await fetchPnlReconciliation(f, t, acc || undefined);
+      setData(result);
+      setLedgerOpen(!result.summary.trustworthy);
+      // 상품명 조인 — 손익 숫자 표시를 막지 않도록 실패는 무시(원칙: degrade gracefully).
+      try {
+        const map = await fetchConnectionMap();
+        const names: Record<string, string> = {};
+        for (const r of map.rows) names[r.internal_sku] = r.product_name;
+        setSkuNames(names);
+      } catch {
+        setSkuNames({});
+      }
+    } catch (e) {
+      setErr(`불러오기 실패: ${e}`);
+      setData(null);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    load(from, to, account);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function applyFilters(f: string, t: string, acc: string) {
+    setFrom(f);
+    setTo(t);
+    setAccount(acc);
+    load(f, t, acc);
+  }
+
   return (
-    <div className="bg-white rounded-lg border p-8 text-center text-gray-400 text-sm">
-      통합 손익 조망은 S5에서 구현됩니다.
-      <div className="text-xs mt-1">GET /api/products/pnl-reconciliation 소비 (컴포넌트 보존·SKU행·잔차 투명화)</div>
+    <div>
+      <div className="flex items-center gap-2 mb-4 flex-wrap">
+        <input
+          type="date"
+          value={from}
+          onChange={(e) => applyFilters(e.target.value, to, account)}
+          className="px-2 py-1 text-sm border border-gray-300 rounded-md"
+        />
+        <span className="text-gray-400">~</span>
+        <input
+          type="date"
+          value={to}
+          onChange={(e) => applyFilters(from, e.target.value, account)}
+          className="px-2 py-1 text-sm border border-gray-300 rounded-md"
+        />
+        <select
+          value={account}
+          onChange={(e) => applyFilters(from, to, e.target.value)}
+          className="px-2 py-1 text-sm border border-gray-300 rounded-md"
+        >
+          {PNL_ACCOUNTS.map((a) => (
+            <option key={a.value} value={a.value}>
+              {a.label}
+            </option>
+          ))}
+        </select>
+      </div>
+      {account && (
+        <div className="mb-3 text-xs text-gray-500">
+          계정 선택 시 네이버·자사몰 손익은 제외됩니다(계정 단위는 쿠팡만 대조).
+        </div>
+      )}
+
+      {err && (
+        <div className="mb-3 p-3 bg-red-50 text-red-800 rounded-md text-sm">
+          {err}
+          <button onClick={() => setErr("")} className="ml-2 text-red-600 underline">
+            닫기
+          </button>
+        </div>
+      )}
+
+      {loading && <div className="p-8 text-center text-gray-400 text-sm">불러오는 중…</div>}
+
+      {!loading && data && (
+        <>
+          {!data.summary.trustworthy && (
+            <div className="mb-3 p-3 bg-amber-50 text-amber-800 rounded-md text-sm">
+              ⚠️ 원장 불균형 — SKU 손익 표시 불가. 아래 대조원장에서 diff≠0 컴포넌트를 확인하세요.
+            </div>
+          )}
+
+          <PnlSummaryCards summary={data.summary} />
+
+          {data.summary.trustworthy && (
+            <PnlSkuTable
+              rows={data.by_sku}
+              names={skuNames}
+              expanded={expanded}
+              onToggle={(sku) => setExpanded(expanded === sku ? null : sku)}
+            />
+          )}
+
+          <PnlLedgerPanel
+            ledger={data.ledger}
+            open={ledgerOpen}
+            onToggle={() => setLedgerOpen(!ledgerOpen)}
+          />
+        </>
+      )}
+    </div>
+  );
+}
+
+function PnlSummaryCards({
+  summary,
+}: {
+  summary: PnlReconciliation["summary"];
+}) {
+  const residual = Number(summary.account_adjustment_residual);
+  return (
+    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
+      <div className="bg-white rounded-lg border p-4">
+        <div className="text-xs text-gray-500 mb-1">계정 순익(권위)</div>
+        <div className="text-xl font-bold text-gray-900">{won(summary.reconciled_net_profit)}</div>
+      </div>
+      <div className="bg-white rounded-lg border p-4">
+        <div className="text-xs text-gray-500 mb-1">SKU 귀속 순익 합</div>
+        <div className="text-xl font-bold text-gray-900">{won(summary.net_profit_allocated_total)}</div>
+      </div>
+      <div
+        className="bg-white rounded-lg border p-4"
+        title="미매핑 옵션 + 계정 단위 조정(RG 플립·비-PA 광고·정산 매출조정 등). 안분하지 않음."
+      >
+        <div className="text-xs text-gray-500 mb-1">미배분 잔차</div>
+        <div className={`text-xl font-bold ${residual !== 0 ? "text-amber-600" : "text-gray-900"}`}>
+          {won(summary.account_adjustment_residual)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PnlSkuTable({
+  rows,
+  names,
+  expanded,
+  onToggle,
+}: {
+  rows: PnlSkuRow[];
+  names: Record<string, string>;
+  expanded: string | null;
+  onToggle: (sku: string) => void;
+}) {
+  if (rows.length === 0) {
+    return (
+      <div className="bg-white rounded-lg border p-8 text-center text-gray-400 text-sm mb-4">
+        표시할 SKU 손익이 없습니다.
+      </div>
+    );
+  }
+  return (
+    <div className="bg-white rounded-lg border overflow-x-auto mb-4">
+      <table className="min-w-full text-sm">
+        <thead>
+          <tr className="border-b bg-gray-50">
+            <th className="text-left px-3 py-2 font-medium text-gray-600">상품명</th>
+            <th className="text-left px-3 py-2 font-medium text-gray-600">내부코드</th>
+            <th className="text-right px-3 py-2 font-medium text-gray-600">순익(SKU 귀속)</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => {
+            const net = Number(r.net_profit_allocated_only);
+            const isOpen = expanded === r.internal_sku;
+            return (
+              <tr key={r.internal_sku}>
+                <td colSpan={3} className="p-0">
+                  <button
+                    onClick={() => onToggle(r.internal_sku)}
+                    className="w-full flex border-b hover:bg-gray-50 text-left"
+                  >
+                    <div className="px-3 py-2 flex-1">{names[r.internal_sku] || r.internal_sku}</div>
+                    <div className="px-3 py-2 font-mono text-gray-500 w-40">{r.internal_sku}</div>
+                    <div
+                      className={`px-3 py-2 text-right font-medium w-40 ${
+                        net < 0 ? "text-red-600" : "text-gray-900"
+                      }`}
+                    >
+                      {won(r.net_profit_allocated_only)}
+                    </div>
+                  </button>
+                  {isOpen && (
+                    <div className="px-3 py-2 bg-gray-50 border-b">
+                      <table className="min-w-full text-xs">
+                        <thead>
+                          <tr className="text-gray-500">
+                            <th className="text-left py-1 pr-3">채널</th>
+                            <th className="text-left py-1 pr-3">컴포넌트</th>
+                            <th className="text-right py-1">금액</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {Object.entries(r.channels).flatMap(([channel, comps]) =>
+                            Object.entries(comps).map(([comp, amt]) => (
+                              <tr key={`${channel}-${comp}`}>
+                                <td className="py-0.5 pr-3 text-gray-600">{channel}</td>
+                                <td className="py-0.5 pr-3 text-gray-600">{comp}</td>
+                                <td className="py-0.5 text-right">{won(amt)}</td>
+                              </tr>
+                            )),
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function PnlLedgerPanel({
+  ledger,
+  open,
+  onToggle,
+}: {
+  ledger: PnlReconciliation["ledger"];
+  open: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <div className="bg-white rounded-lg border">
+      <button
+        onClick={onToggle}
+        className="w-full flex items-center justify-between px-4 py-3 text-sm font-medium text-gray-700 hover:bg-gray-50"
+      >
+        <span>
+          대조원장 상세 {open ? "접기" : "보기"}
+          <span
+            className={`ml-2 text-xs px-2 py-0.5 rounded ${
+              ledger.conservation_ok ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700"
+            }`}
+          >
+            {ledger.conservation_ok ? "균형" : "불균형"}
+          </span>
+        </span>
+        <span className="text-gray-400">{open ? "▲" : "▼"}</span>
+      </button>
+      {open && (
+        <div className="border-t px-4 py-3">
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-xs mb-3">
+              <thead>
+                <tr className="text-gray-500">
+                  <th className="text-left py-1 pr-3">채널</th>
+                  <th className="text-left py-1 pr-3">컴포넌트</th>
+                  <th className="text-right py-1 pr-3">권위 총액</th>
+                  <th className="text-right py-1 pr-3">SKU 귀속</th>
+                  <th className="text-right py-1 pr-3">잔차 합</th>
+                  <th className="text-right py-1">diff</th>
+                </tr>
+              </thead>
+              <tbody>
+                {ledger.components.map((c, i) => {
+                  const residualSum = Object.values(c.residuals).reduce(
+                    (a, v) => a + Number(v),
+                    0,
+                  );
+                  const diffNonZero = Number(c.conservation_diff) !== 0;
+                  return (
+                    <tr key={i} className={diffNonZero ? "bg-red-50" : ""}>
+                      <td className="py-0.5 pr-3">{c.channel}</td>
+                      <td className="py-0.5 pr-3">{c.component}</td>
+                      <td className="py-0.5 pr-3 text-right">{won(c.authoritative_total)}</td>
+                      <td className="py-0.5 pr-3 text-right">{won(c.allocated_to_sku)}</td>
+                      <td className="py-0.5 pr-3 text-right">{won(String(residualSum))}</td>
+                      <td className={`py-0.5 text-right ${diffNonZero ? "text-red-600 font-medium" : ""}`}>
+                        {won(c.conservation_diff)}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          {ledger.sku_conflicts.length > 0 && (
+            <div className="mb-2 text-xs">
+              <span className="text-red-600 font-medium">채널옵션ID 충돌 {ledger.sku_conflicts.length}건: </span>
+              <span className="text-gray-600 font-mono">{ledger.sku_conflicts.join(", ")}</span>
+            </div>
+          )}
+
+          {ledger.warnings.length > 0 && (
+            <div className="text-xs text-amber-700">
+              {ledger.warnings.map((w, i) => (
+                <div key={i}>⚠ {JSON.stringify(w)}</div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
