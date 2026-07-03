@@ -13,6 +13,7 @@ CHANNELS = [
         "commission_rate": 7.8,  # 3P 실측 판매수수료율(폴백). 실측은 coupang_revenue_fee 우선(D-E)
         "api_type": "hmac",
         "api_config_key": "COUPANG_WING1",
+        "sell_type": "3P",
     },
     {
         "name": "쿠팡 Wing 계정2",
@@ -24,6 +25,7 @@ CHANNELS = [
         "commission_rate": 7.8,  # 3P 실측 판매수수료율(폴백). 실측은 coupang_revenue_fee 우선(D-E)
         "api_type": "hmac",
         "api_config_key": "COUPANG_WING2",
+        "sell_type": "3P",
     },
     {
         "name": "쿠팡 로켓그로스 계정1",
@@ -35,6 +37,7 @@ CHANNELS = [
         "commission_rate": 10.8,
         "api_type": "hmac",
         "api_config_key": "COUPANG_RG1",
+        "sell_type": "RG",
     },
     {
         "name": "쿠팡 로켓그로스 계정2",
@@ -46,6 +49,7 @@ CHANNELS = [
         "commission_rate": 10.8,
         "api_type": "hmac",
         "api_config_key": "COUPANG_RG2",
+        "sell_type": "RG",
     },
     {
         "name": "쿠팡 로켓배송",
@@ -58,6 +62,7 @@ CHANNELS = [
         "api_type": "excel",
         "api_config_key": None,
         "memo": "위탁판매 — 광고리포트 엑셀 or ohi-ad-intelligence DB 연동",
+        "sell_type": "1P",
     },
     {
         "name": "네이버 스마트스토어",
@@ -91,10 +96,13 @@ def seed_channels():
             exists = db.query(Channel).filter_by(code=ch["code"]).first()
             if not exists:
                 db.add(Channel(**ch))
-            elif ch.get("company") and exists.company != ch["company"]:
-                # 기존행 company 누락/변경 시 backfill (fresh bootstrap에서
-                # 마이그레이션 UPDATE가 빈 테이블에 no-op 된 경우 복구)
-                exists.company = ch["company"]
+            else:
+                if ch.get("company") and exists.company != ch["company"]:
+                    # 기존행 company 누락/변경 시 backfill (fresh bootstrap에서
+                    # 마이그레이션 UPDATE가 빈 테이블에 no-op 된 경우 복구)
+                    exists.company = ch["company"]
+                if ch.get("sell_type") and exists.sell_type != ch["sell_type"]:
+                    exists.sell_type = ch["sell_type"]
         db.commit()
         count = db.query(Channel).count()
         print(f"Channels: {count}개 등록됨")

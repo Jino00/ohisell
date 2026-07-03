@@ -56,8 +56,24 @@ class MappingOut(BaseModel):
     channel_sku: Optional[str] = None
     selling_price: Decimal
     is_active: bool
+    mapping_source: str = "auto_sync"
 
     model_config = {"from_attributes": True}
+
+
+# ── 상품 연관맵 엑셀 마스터 적재 (상품 연관맵 트랙 S1) ──
+class MappingIngestResult(BaseModel):
+    products_created: int
+    products_updated: int
+    mappings_created: int
+    mappings_updated: int
+    mappings_conflicted: int
+    orders_linked: int
+    unknown_labels: list[str] = []
+    duplicate_product_names: list[str] = []
+    duplicate_channel_ids: list[str] = []
+    mapping_conflicts: list[str] = []
+    label_mismatches: list[str] = []
 
 
 class ProductOut(BaseModel):
