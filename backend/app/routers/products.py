@@ -15,7 +15,14 @@ from app.schemas import (
     ProductOut,
     MappingCreate,
     MappingOut,
+    MappingIngestResult,
+    ChannelCoverageOut,
+    UnmappedOption,
 )
+from app.services.product_mapping_ingest import ingest_master_sheet
+from app.services.mapping_coverage import compute_mapping_coverage
+
+_COVERAGE_UNMAPPED_LIMIT = 50  # 응답 payload 상한(채널당). 나머지는 truncated 카운트로만 표기.
 
 router = APIRouter(prefix="/api/products", tags=["products"])
 
@@ -33,6 +40,7 @@ def _product_to_out(p: ProductMaster) -> ProductOut:
                 channel_sku=m.channel_sku,
                 selling_price=m.selling_price,
                 is_active=m.is_active,
+                mapping_source=m.mapping_source,
             )
         )
     return ProductOut(
@@ -380,122 +388,67 @@ async def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_d
     return results
 
 
-# ── 상품명 기반 원가 매핑 업로드 (통합 1시트) ──
-@router.post("/upload-by-name")
+# ── 상품 연관맵 마스터 엑셀 업로드 (D-5: 옛 롱포맷 upload-by-name을 대체) ──
+@router.post("/upload-by-name", response_model=MappingIngestResult)
 async def upload_by_name(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    """통합 엑셀 업로드: 상품명 | 원가 | 채널명 | 채널코드 | 상품ID"""
+    """마스터 엑셀("원가 매핑" 시트, 1행=옵션 1개, 채널명 마커+옵션ID 블록) 업로드.
+
+    상품 연관맵 트랙 S1: docs/tracks/active/track_product-connection-map.md D-1~D-6.
+    """
     if not file.filename.endswith((".xlsx", ".xls")):
         raise HTTPException(400, "xlsx 파일만 업로드 가능합니다")
 
     content = await file.read()
     wb = load_workbook(io.BytesIO(content))
-    ws = wb.active
+    ws = wb["원가 매핑"] if "원가 매핑" in wb.sheetnames else wb.active
 
-    results = {
-        "products_created": 0,
-        "products_updated": 0,
-        "mappings_created": 0,
-        "mappings_updated": 0,
-        "orders_linked": 0,
-        "errors": [],
-    }
-
-    name_to_product: dict[str, ProductMaster] = {}
-    next_sku_num = 1
-
-    # 기존 최대 SKU 번호 조회
-    max_sku = (
-        db.query(ProductMaster.internal_sku)
-        .filter(ProductMaster.internal_sku.like("OHI-%"))
-        .order_by(ProductMaster.internal_sku.desc())
-        .first()
+    result = ingest_master_sheet(db, ws)
+    return MappingIngestResult(
+        products_created=result.products_created,
+        products_updated=result.products_updated,
+        mappings_created=result.mappings_created,
+        mappings_updated=result.mappings_updated,
+        mappings_conflicted=result.mappings_conflicted,
+        orders_linked=result.orders_linked,
+        unknown_labels=result.integrity.unknown_labels,
+        duplicate_product_names=result.integrity.duplicate_product_names,
+        duplicate_channel_ids=result.integrity.duplicate_channel_ids,
+        mapping_conflicts=result.integrity.mapping_conflicts,
+        label_mismatches=result.integrity.label_mismatches,
     )
-    if max_sku and max_sku[0]:
-        try:
-            next_sku_num = int(max_sku[0].split("-")[1]) + 1
-        except (IndexError, ValueError):
-            pass
 
-    for row_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
-        if not row or not row[0]:
-            continue
 
-        name = str(row[0]).strip()
-        cost_raw = row[1] if len(row) > 1 else None
-        # 채널명(row[2])은 참고용, 채널코드(row[3])와 상품ID(row[4])가 핵심
-        ch_code = str(row[3]).strip() if len(row) > 3 and row[3] else ""
-        ch_pid = str(row[4]).strip() if len(row) > 4 and row[4] else ""
+# ── 상품 연관맵 커버리지 리포트 (상품 연관맵 트랙 S2) ──
+@router.get("/mapping-coverage", response_model=list[ChannelCoverageOut])
+def mapping_coverage(
+    limit: int = _COVERAGE_UNMAPPED_LIMIT, db: Session = Depends(get_db)
+):
+    """채널별 매핑 보유율 + 주문에는 있으나 연관맵에 없는 옵션ID 목록.
 
-        if not name:
-            continue
-
-        # ── 상품 upsert (같은 상품명 = 같은 상품) ──
-        product = name_to_product.get(name)
-        if not product:
-            product = db.query(ProductMaster).filter_by(product_name=name).first()
-
-        if product:
-            # 원가 업데이트 (값이 있을 때만)
-            if cost_raw:
-                try:
-                    product.cost_price = Decimal(str(cost_raw))
-                except (InvalidOperation, ValueError):
-                    results["errors"].append(f"행 {row_idx}: 원가 '{cost_raw}' 변환 실패")
-            if name not in name_to_product:
-                name_to_product[name] = product
-                results["products_updated"] += 1
-        else:
-            try:
-                cost = Decimal(str(cost_raw)) if cost_raw else Decimal("0")
-            except (InvalidOperation, ValueError):
-                results["errors"].append(f"행 {row_idx}: 원가 '{cost_raw}' 변환 실패")
-                continue
-
-            new_sku = f"OHI-{next_sku_num:04d}"
-            next_sku_num += 1
-
-            product = ProductMaster(
-                internal_sku=new_sku,
-                product_name=name,
-                cost_price=cost,
+    상품 연관맵 트랙 S2: docs/tracks/active/track_product-connection-map.md.
+    주문↔마스터 백필 자체는 S1 업로드 시 relink_unlinked_orders로 이미 수행됨 — 이 엔드포인트는
+    현재 커버리지 상태를 조회만 한다(부작용 없음).
+    `limit`: 채널당 미매핑 옵션ID 응답 개수(기본 50). truncated 필드로 잘린 만큼을 알 수 있고,
+    나머지가 필요하면 limit을 키워 재요청(codex P2: API 계약에서 긴 꼬리를 숨기지 않도록).
+    """
+    limit = max(0, min(limit, 5000))
+    coverages = compute_mapping_coverage(db)
+    out = []
+    for c in coverages:
+        shown = c.unmapped_order_options[:limit]
+        out.append(
+            ChannelCoverageOut(
+                channel_id=c.channel_id,
+                channel_code=c.channel_code,
+                channel_name=c.channel_name,
+                mapped_option_count=c.mapped_option_count,
+                order_option_count=c.order_option_count,
+                order_option_coverage=c.order_option_coverage,
+                unmapped_order_options=[UnmappedOption(**o) for o in shown],
+                unmapped_order_options_truncated=len(c.unmapped_order_options) - len(shown),
+                total_orders=c.total_orders,
+                unlinked_orders=c.unlinked_orders,
+                blank_option_id_orders=c.blank_option_id_orders,
             )
-            db.add(product)
-            db.flush()
-            name_to_product[name] = product
-            results["products_created"] += 1
-
-        # ── 채널 매핑 ──
-        if ch_code and ch_pid:
-            channel = db.query(Channel).filter_by(code=ch_code).first()
-            if not channel:
-                results["errors"].append(f"행 {row_idx}: 채널코드 '{ch_code}' 없음")
-                continue
-
-            existing_mapping = (
-                db.query(ProductChannelMapping)
-                .filter_by(
-                    product_id=product.id,
-                    channel_id=channel.id,
-                    channel_product_id=ch_pid,
-                )
-                .first()
-            )
-            if existing_mapping:
-                results["mappings_updated"] += 1
-            else:
-                db.add(ProductChannelMapping(
-                    product_id=product.id,
-                    channel_id=channel.id,
-                    channel_product_id=ch_pid,
-                    is_active=True,
-                ))
-                results["mappings_created"] += 1
-
-    db.commit()
-
-    # ── 미링크 주문 자동 연결 ──
-    from app.services.sync_service import relink_unlinked_orders
-    linked = relink_unlinked_orders(db)
-    results["orders_linked"] = linked
-
-    return results
+        )
+    return out

@@ -103,6 +103,10 @@ def _maybe_upsert_mapping(db: Session, channel: Channel, detail: dict, item: dic
             product_id=master.id, channel_id=channel.id, channel_product_id=vii
         )
         db.add(mapping)
+    elif mapping.mapping_source == "excel_master":
+        # 상품 연관맵 트랙 D-6: 엑셀 마스터가 진실원천인 매핑은 SKU 매칭 자동동기화가
+        # 덮어쓰지 않는다(스케줄러 주기마다 조용히 재배정되는 회귀 방지).
+        return False
     mapping.product_id = master.id  # [P2] 기존 매핑도 현재 매칭 master로 재지정(stale 방지)
     mapping.channel_product_name = (item.get("itemName") or "")[:200]
     mapping.channel_sku = sku

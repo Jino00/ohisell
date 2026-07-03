@@ -45,6 +45,9 @@ class Channel(Base):
         String(50), nullable=True
     )  # .env 키 접두사
     memo: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    sell_type: Mapped[Optional[str]] = mapped_column(
+        String(10), nullable=True
+    )  # 3P / RG / 1P (네이버·cafe24는 None). 상품 연관맵 트랙 D-2/D-6
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now()
     )
@@ -113,6 +116,9 @@ class ProductChannelMapping(Base):
         Numeric(12, 2), nullable=False, default=0
     )
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    mapping_source: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="auto_sync"
+    )  # excel_master(엑셀 마스터 진실원천) / auto_sync(쿠팡 상품동기화 자동생성). 상품 연관맵 트랙 D-6
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now()
     )

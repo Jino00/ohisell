@@ -56,8 +56,44 @@ class MappingOut(BaseModel):
     channel_sku: Optional[str] = None
     selling_price: Decimal
     is_active: bool
+    mapping_source: str = "auto_sync"
 
     model_config = {"from_attributes": True}
+
+
+# ── 상품 연관맵 엑셀 마스터 적재 (상품 연관맵 트랙 S1) ──
+class MappingIngestResult(BaseModel):
+    products_created: int
+    products_updated: int
+    mappings_created: int
+    mappings_updated: int
+    mappings_conflicted: int
+    orders_linked: int
+    unknown_labels: list[str] = []
+    duplicate_product_names: list[str] = []
+    duplicate_channel_ids: list[str] = []
+    mapping_conflicts: list[str] = []
+    label_mismatches: list[str] = []
+
+
+# ── 상품 연관맵 커버리지 리포트 (상품 연관맵 트랙 S2) ──
+class UnmappedOption(BaseModel):
+    option_id: str
+    order_count: int
+
+
+class ChannelCoverageOut(BaseModel):
+    channel_id: int
+    channel_code: str
+    channel_name: str
+    mapped_option_count: int
+    order_option_count: int
+    order_option_coverage: float
+    unmapped_order_options: list[UnmappedOption]
+    unmapped_order_options_truncated: int  # 응답에서 잘라낸 나머지 건수(0=전부 포함)
+    total_orders: int
+    unlinked_orders: int
+    blank_option_id_orders: int  # 옵션ID 자체가 없는 주문(coverage=1.0이어도 문제 있을 수 있음)
 
 
 class ProductOut(BaseModel):
