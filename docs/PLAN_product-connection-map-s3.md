@@ -130,22 +130,10 @@ GET /api/products/pnl-reconciliation?from&to&account
   - codex review(원칙19): [P1]×3 수용 — ①충돌 vid는 SKU 귀속 안 하고 잔차로(임의선택이 권위
     _cost_master와 어긋남) ②1P vendor=acc["vendor_id"](D-2 회사공유 vendor) 잠금 테스트 ③마켓
     컴포넌트명 product_revenue(권위 revenue=product+shipping 정직 분리). [P2] ignored_1p 이연.
-- [ ] **T4 (P1, human: ~3h / CC: ~20min)** — product_pnl.py — RG 옵션수수료 VAT gross-up + rg_vat_residual
-  - Surfaced by: D-9 + codex #2·#3 (VAT前/後·RG 의미)
-  - Files: `backend/app/services/product_pnl.py`
-  - Verify: `Σ(RG옵션귀속)+rg_vat_residual+rg_unmapped == 계정 RG 플립 총액`
-- [ ] **T5 (P2, human: ~3h / CC: ~20min)** — product_pnl.py — 날짜기준 명시 + 부분기간 경고 + SA-2 채널별 순수량 원가
-  - Surfaced by: D-10 + codex #6·#9·#10
-  - Files: `backend/app/services/product_pnl.py`
-  - Verify: 채널별 날짜기준 원장 컬럼, `partial_period_settlement` 플래그, 원가=단가×채널별 순수량
-- [ ] **T6 (P1, human: ~2h / CC: ~15min)** — routers — `GET /api/products/pnl-reconciliation`(account 필수) + 분리 필드
-  - Surfaced by: D-11 + codex #12·#14
-  - Files: `backend/app/routers/products.py`, `backend/app/schemas.py`
-  - Verify: net_profit_allocated_only·account_adjustment_residual·reconciled_net_profit 분리, account 파라미터 계약
-- [ ] **T7 (P1, human: ~2h / CC: ~15min)** — verify — dev DB 라이브 self-verify(원칙22)
-  - Surfaced by: 검증 §3
-  - Files: (검증 스크립트)
-  - Verify: 실제 계정·기간 원장 균형 + 기존 command-center/rocket-overview 총액 정확 대조, 불균형 시 배포 금지
+- [x] **T4** — RG 옵션수수료 VAT gross-up(×1.1) + 명시 잔차 2종(rg_account_only_fees·rg_vat_grossup_gap) ✅ 커밋 91b9ec1. codex [P1][P2] 수용(sale_fee 옵션 귀속·잔차 분리).
+- [x] **T5** — date_basis 명시 + partial_period_settlement 경고 ✅ 커밋 82998a2. 순수량 원가는 이미 충족(3P/RG=net_qty, 마켓=status 제외).
+- [x] **T6** — 라우터 GET /api/products/pnl-reconciliation(account 계약) + 3b SKU행(net_profit_allocated_only·reconciled_net_profit·account_adjustment_residual) ✅ 커밋 dac734f. codex [P1] account allow-list {WING1,WING2}·[P2] 불균형 시 reconciled 유지 수용. 순환 임포트 지연 해소.
+- [x] **T7** — dev DB 라이브 self-verify ✅ **배포 게이트 PASS**. 실데이터(3/1~4/15) 전 계정 conservation_ok=True·전 컴포넌트 diff=0, 엔진 대조 완전 일치(net_profit/3p_rev/1p_rev == cc/ro). None reconciled=72,162,843·by_sku=318. WING1 by_sku=0=오픽스 매핑결손(D-1). (교훈: 첫 검증 스크립트가 aggregate reconciled를 cc.net_profit로 잘못 단정→정정.)
 
 ## GSTACK REVIEW REPORT
 

@@ -103,7 +103,7 @@ DB: `backend/ohisell.db` (dev), 엑셀: `.../15. 기획/상품 리스트/ohisell
 - [x] S0 정찰·구조 확정·트랙 생성 (2026-07-03)
 - [x] S1 Harness1 매핑 적재 (엑셀 파서 + 라벨 리졸버 + upsert + 무결성 검사) (2026-07-03)
 - [x] S2 Harness2 매출 조인/백필 + 커버리지 리포트 (2026-07-03)
-- [🔄] S3 Harness3 통합 손익 조망 (대조원장 우선, T1~T7) — T1·T2·**T3 완료**(대조원장 3a, 커밋 d22aa0f), T4~T7 진행중
+- [x] S3 Harness3 통합 손익 조망 (대조원장 우선, T1~T7 전부 완료 2026-07-03) — 백엔드 완성·배포 게이트 PASS
 - [ ] S4 화면 C 탭1 연관맵 관리 UI
 - [ ] S5 화면 C 탭2 통합 손익 UI
 - [ ] S6 오픽스 매핑 결손 보강(엑셀 소스 갱신) + prod 배포·라이브 self-verify
@@ -130,13 +130,17 @@ DB: `backend/ohisell.db` (dev), 엑셀: `.../15. 기획/상품 리스트/ohisell
 - **T1+T2**(커밋 f4526e4): `_agg_rg_settlement_fees(grain=)` 파라미터화 + 재사용 밑줄함수 5개 characterization 회귀. `_cost_master`는 internal_sku 미노출 발견.
 - **T3**(커밋 d22aa0f): 신규 `backend/app/services/product_pnl.py` — 대조원장 Harness 3a + SA 5종. 채널·컴포넌트별 보존 법칙(Σ SKU귀속+Σ잔차==권위 엔진 계정소계) 정확 성립. 권위 엔진(compute_command_center·compute_rocket_overview) 소비, 잔차 독립계산. 대조: 쿠팡 3P/RG매출·수수료·광고·원가·반품차감·net_profit(계정조정4종) + 1P 매출/원가/광고/net_profit + 네이버·cafe24 product_revenue/수수료/원가. **codex review [P1]×3 수용**(충돌vid→잔차·1P vendor D-2공유 잠금·marketplace product_revenue 라벨), [P2] ignored_1p 이연. 테스트 9개, 전체 486 passed.
 
+## S3 완료 기록 (T4~T7, 2026-07-03)
+- **T4**(91b9ec1): RG 옵션수수료 VAT前(A−B) ×1.1 gross-up SKU 귀속 + 잔차 2종(rg_account_only_fees·rg_vat_grossup_gap). Σ(옵션귀속)+rg_unmapped+잔차2==rg_total. codex [P1](sale_fee 옵션도 귀속)·[P2](잔차 분리) 수용.
+- **T5**(82998a2): 컴포넌트별 date_basis 명시 + partial_period_settlement 경고(일할 배분 안 함). 채널별 순수량 원가는 이미 충족.
+- **T6**(dac734f): 라우터 GET /api/products/pnl-reconciliation(account 계약 {WING1,WING2}, Decimal→str) + Harness 3b SKU행(net_profit_allocated_only·reconciled_net_profit·account_adjustment_residual). codex [P1](account allow-list)·[P2](불균형 시 reconciled 유지+trustworthy) 수용. product_pnl 지연 임포트로 앱 로드 순환 데드락 해소.
+- **T7 배포 게이트 PASS**(원칙22): dev DB 사본(orders 3/1~4/15, 1600건·광고562·로켓PO651·RG 0) 실검증 — 전 계정(None/WING1/WING2) conservation_ok=True·전 컴포넌트 diff=0, 엔진 대조 완전 일치(net_profit/3p_rev/1p_rev==command_center/rocket_overview). None reconciled=72,162,843(쿠팡 1.02M+1P 51.4M+네이버/cafe24 19.7M)·by_sku=318. WING1 by_sku=0=오픽스 매핑결손(D-1, S6 몫). 1P revenue 51.4M은 alloc=0(dev DB에 RocketProductCostMap 없어 전액 잔차, 커버리지 갭 정상 표면화). 테스트 총 20개(S3 신규), 전체 493 passed.
+
 ## 📍 현재 진행 단계
-S1+S2 main 머지(PR #1). S3 **T1·T2·T3 완료**(대조원장 3a 배포 게이트 통과). 다음: **T4**(RG 옵션수수료 VAT gross-up + rg_vat_residual) → T5(날짜기준·채널별 순수량 원가) → T6(라우터 + 3b SKU행) → T7(dev DB 라이브 self-verify).
+S1+S2 main 머지(PR #1). **S3 백엔드 완료**(T1~T7, 대조원장+VAT+날짜+라우터+3b, 배포 게이트 PASS). 백엔드 미머지(브랜치 claude/reverent-poitras-89cf7d, f4526e4~dac734f). 다음: **S4/S5 프론트(화면 C 탭1 연관맵·탭2 통합손익 UI)**. 또는 Jino 결정 시 S3 백엔드 PR·머지.
 
 ## ▶️ 다음 액션
-1. ~~/plan-eng-review~~ 완료(D1~D6 + codex 15건 → 계획서 v2 재작성, D-8~D-11 승격).
-2. 승인 후 /model sonnet 구현 순서:
-   - characterization 회귀테스트(재사용 밑줄함수 5개 의미 고정) + `_agg_rg_settlement_fees(grain=)` 파라미터화(D3, IRON RULE 회귀).
-   - Harness 3a 대조원장(SA-1~5, 잔차 버킷, 보존 법칙) → 3b SKU행(원장 균형 후).
-   - 라우터 `GET /api/products/pnl-reconciliation`(account 필수, D-11).
-   - 보존 법칙 유닛 + dev DB 라이브 self-verify(기존 엔진 총액 정확 대조) → codex review.
+1. ~~S3 백엔드(T1~T7)~~ **완료**(대조원장+VAT+날짜+라우터+3b, 배포 게이트 PASS, 493 passed).
+2. **S4/S5 프론트(화면 C)**: 탭1 연관맵 관리(내부옵션×채널 그리드·인라인 편집·커버리지/충돌 배지·엑셀 업로드) + 탭2 통합 손익(GET /api/products/pnl-reconciliation 소비 — 컴포넌트 보존 표시·SKU행·잔차 투명화). Opus 구조설계 권장.
+3. **S6**: 오픽스(WING1/RG1) 매핑 결손 보강(T7에서 WING1 by_sku=0 재확인) + prod 배포·라이브 self-verify.
+4. (git) S3 백엔드 PR·머지는 Jino 결정 — 현재 브랜치 claude/reverent-poitras-89cf7d(f4526e4~dac734f, 미push).
