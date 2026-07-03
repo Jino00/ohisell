@@ -11,6 +11,7 @@ import AdReport from "./pages/AdReport";
 import CommandCenter from "./pages/CommandCenter";
 import CoupangOps from "./pages/CoupangOps";
 import NaverOps from "./pages/NaverOps";
+import ProductConnectionMap from "./pages/ProductConnectionMap";
 
 export default function App() {
   return (
@@ -23,6 +24,7 @@ export default function App() {
           <Route path="naver-ops" element={<NaverOps />} />
           <Route path="orders" element={<Orders />} />
           <Route path="products" element={<Products />} />
+          <Route path="product-connection-map" element={<ProductConnectionMap />} />
           <Route path="inventory" element={<InventoryPage />} />
           <Route path="settlements" element={<Settlements />} />
           <Route path="settings" element={<Settings />} />
