@@ -1,0 +1,347 @@
+# product_pnl.py — 상품 연관맵 S3(Harness 3): 통합 손익 조망 — 대조원장 우선(reconciliation-first)
+# 트랙: docs/tracks/active/track_product-connection-map.md (D-7~D-11) / 계획: docs/PLAN_product-connection-map-s3.md
+#
+# 핵심(D-6): 옵션(SKU)별 손익표를 먼저 만들지 않는다. "돈이 사라지지 않음"을 증명하는
+#   대조원장(reconciliation ledger)을 먼저 만든다. 채널·컴포넌트마다 보존 법칙
+#     Σ(SKU 귀속) + Σ(잔차 버킷) == 기존 권위 엔진 계정 소계   (정확 성립, tolerance 아님)
+#   이 성립해야만 SKU 행을 신뢰(원장 균형 후에만 노출). 불균형이면 조인/기준 버그 표면화.
+#
+# 재사용(D1): intelligence._agg_* / compute_command_center·compute_rocket_overview를 권위 기준으로
+#   소비(재구축 안 함). SA는 vid/line을 internal_sku로 재귀속만 신규. 잔차 버킷은 독립 계산 →
+#   보존 법칙이 tautology가 아니라 실제 조인 버그를 잡는다.
+from __future__ import annotations
+
+import logging
+from datetime import date, datetime, time
+from decimal import Decimal
+
+from sqlalchemy.orm import Session
+
+from app.models import (
+    Channel, CoupangRocketPurchaseOrderItem, Order, ProductChannelMapping,
+    ProductMaster, RocketProductCostMap,
+)
+from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
+from app.services.coupang.intelligence import (
+    _agg_orders, _agg_rg_orders, _resolve_account, compute_command_center,
+)
+from app.services.coupang.rocket_intelligence import (
+    _kst_window_utc, compute_rocket_overview,
+)
+from app.services.profit_calculator import _line_commission, _line_revenue
+
+log = logging.getLogger(__name__)
+
+_Z = Decimal("0")
+
+
+# ──────────────────────────────────────────────
+# SA: 옵션ID(vendor_item_id) → internal_sku 다리 (쿠팡 활성 매핑, 결정적)
+# ──────────────────────────────────────────────
+def _resolve_vid_sku(db: Session) -> tuple[dict[str, str], set[str]]:
+    """쿠팡(platform=coupang) is_active 매핑에서 {channel_product_id(vid): internal_sku}.
+
+    ★충돌 vid는 SKU 귀속하지 않는다(codex T3 P1#1, D-7 no-auto-merge). 한 vid가 서로 다른
+    internal_sku 여러 개에 매핑되면(무결성 결손) 임의 선택이 권위 엔진 _cost_master(cost>0 우선
+    선택)와 달라 SKU별 돈 귀속이 틀어진다(총합 보존은 통과해도). 따라서 충돌 vid는 vid_sku에서
+    제외 → _partition_by_sku가 미매핑 잔차로 보낸다(어느 SKU로도 안 셈, 사실만 표면화). 충돌
+    목록은 conflicts로 별도 리포트. T2 발견: _cost_master는 internal_sku를 노출하지 않으므로
+    여기서 product_channel_mapping을 직접 조회한다.
+    """
+    products = {p.id: p.internal_sku for p in db.query(ProductMaster).all()}
+    rows = (
+        db.query(ProductChannelMapping.channel_product_id, ProductChannelMapping.product_id)
+        .join(Channel, ProductChannelMapping.channel_id == Channel.id)
+        .filter(Channel.platform == "coupang", ProductChannelMapping.is_active.is_(True))
+        .all()
+    )
+    candidates: dict[str, set[int]] = {}
+    for vid, pid in rows:
+        if products.get(pid):  # internal_sku 존재(빈값/None 매핑 제외)
+            candidates.setdefault(str(vid), set()).add(pid)
+    vid_sku: dict[str, str] = {}
+    conflicts: set[str] = set()
+    for vid, pids in candidates.items():
+        skus = {products[pid] for pid in pids}
+        if len(skus) > 1:
+            conflicts.add(vid)  # 서로 다른 internal_sku 충돌 → SKU 귀속 안 함(잔차로, 사실 표면화)
+            continue
+        vid_sku[vid] = next(iter(skus))  # 단일 internal_sku(중복 매핑이어도 동일 SKU)
+    return vid_sku, conflicts
+
+
+# ──────────────────────────────────────────────
+# SA-5: 대조 순수함수 — allocated + Σ잔차 == authoritative 검증(보존 법칙)
+# ──────────────────────────────────────────────
+def _reconcile_component(channel: str, component: str, authoritative_total: Decimal,
+                         allocated_by_sku: dict[str, Decimal],
+                         residuals: dict[str, Decimal]) -> dict:
+    """한 채널·컴포넌트의 대조원장 행. 보존 법칙 성립 여부를 diff로 판정(정확=0)."""
+    allocated = sum(allocated_by_sku.values(), _Z)
+    residual = sum(residuals.values(), _Z)
+    diff = authoritative_total - (allocated + residual)
+    return {
+        "channel": channel,
+        "component": component,
+        "authoritative_total": authoritative_total,
+        "allocated_to_sku": allocated,           # SKU 귀속 총합(보존 법칙 항)
+        "allocated_by_sku": allocated_by_sku,    # internal_sku별 분해(3b SKU행 소스)
+        "residuals": residuals,
+        "conservation_diff": diff,        # 정상=0. ≠0이면 조인/기준 버그
+        "conservation_ok": diff == _Z,
+    }
+
+
+def _dec(v) -> Decimal:
+    """None/숫자 → Decimal(0). 집계 폴백."""
+    if v is None:
+        return _Z
+    return v if isinstance(v, Decimal) else Decimal(str(v))
+
+
+# ──────────────────────────────────────────────
+# SA-1/2 (1P): 발주상세 라인 → internal_sku 매출·원가 (rocket _rocket_cost 조인 미러)
+# ──────────────────────────────────────────────
+def _agg_rocket_by_sku(db: Session, dfrom: date, dto: date,
+                       vendor_id: str | None) -> dict:
+    """1P 발주상세를 internal_sku로 집계(SA). rocket_intelligence._rocket_cost와 동일 조인·윈도우.
+
+    반환: alloc_rev(sku별 Σline_order_amount)·alloc_cost(sku별 Σqty×cost_price[confirmed+master])·
+      unmapped_rev(매핑/마스터 없는 라인 매출)·detail_total(발주상세 라인 합).
+    ★원가는 status='confirmed'+master 존재만 가산(엔진과 동일). 매출은 sku+master 있으면 귀속,
+      없으면 unmapped_rev(confirmed인데 master 없는 경우도 엔진처럼 미해결로 처리).
+    """
+    from sqlalchemy import select
+
+    from app.models import CoupangRocketPurchaseOrder
+    start, end = _kst_window_utc(dfrom, dto)
+    seq_subq = select(CoupangRocketPurchaseOrder.purchase_order_seq).where(
+        CoupangRocketPurchaseOrder.po_created_at >= start,
+        CoupangRocketPurchaseOrder.po_created_at <= end,
+    )
+    if vendor_id is not None:
+        seq_subq = seq_subq.where(CoupangRocketPurchaseOrder.vendor_id == vendor_id)
+    Item = CoupangRocketPurchaseOrderItem
+    rows = (
+        db.query(Item.order_qty, Item.line_order_amount, RocketProductCostMap.status,
+                 RocketProductCostMap.internal_sku, ProductMaster.cost_price)
+        .outerjoin(RocketProductCostMap, RocketProductCostMap.product_number == Item.product_number)
+        .outerjoin(ProductMaster, ProductMaster.internal_sku == RocketProductCostMap.internal_sku)
+        .filter(Item.purchase_order_seq.in_(seq_subq))
+        .all()
+    )
+    alloc_rev: dict[str, Decimal] = {}
+    alloc_cost: dict[str, Decimal] = {}
+    unmapped_rev = _Z
+    detail_total = _Z
+    for qty, line_amt, status, sku, cost_price in rows:
+        line_amt = _dec(line_amt)
+        detail_total += line_amt
+        if sku and cost_price is not None:  # 매핑+마스터 존재 → SKU 귀속
+            alloc_rev[sku] = alloc_rev.get(sku, _Z) + line_amt
+            if status == "confirmed":       # 원가는 confirmed만(엔진과 동일)
+                alloc_cost[sku] = alloc_cost.get(sku, _Z) + _dec(cost_price) * int(qty or 0)
+        else:
+            unmapped_rev += line_amt
+    return {"alloc_rev": alloc_rev, "alloc_cost": alloc_cost,
+            "unmapped_rev": unmapped_rev, "detail_total": detail_total}
+
+
+_MARKETPLACE_PLATFORMS = ("naver", "cafe24")
+
+
+# ──────────────────────────────────────────────
+# SA-1/3 (네이버/cafe24): 라인 매출·수수료·원가 → internal_sku (권위 엔진과 동일 헬퍼 D4)
+# ──────────────────────────────────────────────
+def _agg_marketplace_by_sku(db: Session, dfrom: date, dto: date) -> dict:
+    """네이버/cafe24 주문을 platform×internal_sku로 집계(SA). 광고/배송은 계정단위라 제외(원장 잔차).
+
+    ★권위 엔진(profit_calculator.calculate_channel_summary)과 동일한 _line_revenue·_line_commission·
+      원가(product_id→ProductMaster.cost_price×qty)·REVENUE_EXCLUDED·consignment 제외를 그대로 써서
+      product_revenue/commission/cost가 구성상 일치한다(재구축 아님). product_id→internal_sku로 그룹,
+      product_id 없으면 미매핑 잔차(codex #5: product_id는 product_master.id지 internal_sku 아님 — id로 조인).
+    반환: {platform: {"alloc": {sku:{revenue,commission,cost}}, "unmapped": {...}, "total": {...}}}
+    """
+    start = datetime.combine(dfrom, time.min)
+    end = datetime.combine(dto, time.max)
+    rows = (
+        db.query(Order, Channel, ProductMaster)
+        .join(Channel, Order.channel_id == Channel.id)
+        .outerjoin(ProductMaster, Order.product_id == ProductMaster.id)
+        .filter(
+            Channel.platform.in_(_MARKETPLACE_PLATFORMS),
+            Channel.channel_type != "consignment",
+            Order.status.notin_(tuple(REVENUE_EXCLUDED)),
+            Order.order_date >= start,
+            Order.order_date <= end,
+        )
+        .all()
+    )
+    out: dict[str, dict] = {}
+    for o, ch, pm in rows:
+        plat = out.setdefault(ch.platform, {"alloc": {}, "unmapped": _zero_triplet(),
+                                            "total": _zero_triplet()})
+        product_rev = _line_revenue(ch, o)
+        commission = _line_commission(ch, o, product_rev, None)  # 네이버/cafe24=commission_amount(D4)
+        cost = (pm.cost_price * o.quantity) if pm is not None else _Z
+        plat["total"]["product_revenue"] += product_rev
+        plat["total"]["commission"] += commission
+        plat["total"]["cost"] += cost
+        if pm is not None:  # product_id → internal_sku 귀속
+            b = plat["alloc"].setdefault(pm.internal_sku, _zero_triplet())
+            b["product_revenue"] += product_rev
+            b["commission"] += commission
+            b["cost"] += cost
+        else:               # product_id 없음/미매칭 → 미매핑 잔차
+            plat["unmapped"]["product_revenue"] += product_rev
+            plat["unmapped"]["commission"] += commission
+            plat["unmapped"]["cost"] += cost
+    return out
+
+
+def _zero_triplet() -> dict[str, Decimal]:
+    return {"product_revenue": _Z, "commission": _Z, "cost": _Z}
+
+
+def _partition_by_sku(per_vid: dict[str, Decimal], vid_sku: dict[str, str],
+                      ) -> tuple[dict[str, Decimal], Decimal]:
+    """vid별 금액을 internal_sku 귀속분과 미매핑 잔차로 분할. 반환=(sku별 합, 미매핑 합)."""
+    allocated: dict[str, Decimal] = {}
+    unmapped = _Z
+    for vid, amount in per_vid.items():
+        sku = vid_sku.get(str(vid))
+        if sku is None:
+            unmapped += amount
+        else:
+            allocated[sku] = allocated.get(sku, _Z) + amount
+    return allocated, unmapped
+
+
+# ──────────────────────────────────────────────
+# Harness 3a: 대조원장
+# ──────────────────────────────────────────────
+def compute_pnl_reconciliation(db: Session, dfrom: date, dto: date,
+                               account: str | None = None) -> dict:
+    """통합 손익 대조원장(3a). 채널·컴포넌트마다 보존 법칙을 검증한다.
+
+    account(COUPANG_WING1 등) 주면 해당 계정만(계정 분리). None이면 전체(라우터 T6가 계정 필수화).
+    권위 엔진(compute_command_center)을 대조 기준으로 소비하고, 잔차 버킷을 독립 계산해 균형 증명.
+    """
+    acc = _resolve_account(db, account)
+    vid_sku, sku_conflicts = _resolve_vid_sku(db)
+    cc = compute_command_center(db, dfrom, dto, account)
+    cc_sum = cc["account"]["summary"]
+
+    components: list[dict] = []
+
+    # ── 쿠팡 3P 매출: revenue_3p = Σ _agg_orders(3P만) ──
+    orders_3p = _agg_orders(db, dfrom, dto, acc["channel_ids"])
+    rev_3p_by_vid = {vid: o["revenue"] for vid, o in orders_3p.items()}
+    alloc_rev, unmapped_rev = _partition_by_sku(rev_3p_by_vid, vid_sku)
+    components.append(_reconcile_component(
+        "coupang_3p", "revenue", cc_sum["revenue_3p"], alloc_rev,
+        {"unmapped_coupang": unmapped_rev},
+    ))
+
+    # ── 쿠팡 RG 매출: revenue_rg = Σ _agg_rg_orders ──
+    rg_orders = _agg_rg_orders(db, dfrom, dto, acc["account_key"])
+    rev_rg_by_vid = {vid: o["revenue"] for vid, o in rg_orders.items()}
+    alloc_rg, unmapped_rg = _partition_by_sku(rev_rg_by_vid, vid_sku)
+    components.append(_reconcile_component(
+        "coupang_rg", "revenue", cc_sum["revenue_rg"], alloc_rg,
+        {"unmapped_coupang": unmapped_rg},
+    ))
+
+    # ── 쿠팡 per-vid 컴포넌트: command_center by_option 행을 소비(권위 per-vid 값) ──
+    # by_option[vid]는 3P+RG 병합 매출·3P 실측 수수료·옵션 광고·순수량 원가·반품차감을 담는다.
+    # 각 값을 그대로 재귀속하므로 Σ == cc_sum[field]가 자명 성립(권위 값 소비, 재계산 아님).
+    cc_by_option = cc["account"]["by_option"]
+    for component, field, auth in [
+        ("commission", "total_fee", cc_sum["total_fee"]),
+        ("ad", "ad_spend", cc_sum["ad_spend"]),
+        ("cost", "cost", cc_sum["cost"]),
+        ("return_deduction", "return_deduction", cc_sum["return_deduction"]),
+    ]:
+        by_vid = {row["vendor_item_id"]: row[field] for row in cc_by_option}
+        alloc, unmapped = _partition_by_sku(by_vid, vid_sku)
+        components.append(_reconcile_component(
+            "coupang", component, auth, alloc, {"unmapped_coupang": unmapped},
+        ))
+
+    # ── 쿠팡 net_profit: 옵션 순익(by_option) + 계정 단위 조정 버킷 ──
+    # 권위 체인(command_center): final net_profit = Σby_option net_profit(=pre_nonpa)
+    #   + settlement_revenue_adjustment − ad_nonpa_deducted − rg_settlement_total − seller_shipping_3p.
+    # 옵션 순익은 SKU 귀속/미매핑으로 분할, 계정 조정 4종은 옵션 귀속 불가라 1급 잔차 버킷(부호 유지).
+    np_by_vid = {row["vendor_item_id"]: row["net_profit"] for row in cc_by_option}
+    alloc_np, unmapped_np = _partition_by_sku(np_by_vid, vid_sku)
+    components.append(_reconcile_component(
+        "coupang", "net_profit", cc_sum["net_profit"], alloc_np,
+        {
+            "unmapped_coupang": unmapped_np,
+            "settlement_revenue_adjustment": cc_sum["settlement_revenue_adjustment"],
+            "account_only_ad_nonpa": -cc_sum["ad_nonpa_deducted"],
+            "rg_settlement_flip": -cc_sum["rg_settlement_total"],
+            "seller_shipping_3p": -cc_sum["seller_shipping_3p"],
+        },
+    ))
+
+    # ── 1P(로켓배송): 별도 엔진(compute_rocket_overview) + RocketProductCostMap 브리지 ──
+    # 옵션그레인 by_option이 없어(PO그레인) 별도 채널 블록.
+    # ★1P vendor 스코프(codex T3 P1#2): acc["vendor_id"]로 스코프한다. D-2 확정사실 — vendor_id는
+    #   회사별로 WING·RG·ROCKET에 공유(오하이테크 A01029796 = WING2/RG2/ROCKET 동일). 따라서
+    #   ohitech 계정(WING2/RG2/ROCKET/None)은 acc["vendor_id"]가 곧 1P vendor라 정확 스코프되고,
+    #   ofix 계정(A01564720)은 로켓 PO가 없어 0(회귀 가드). 이 등가는 test_1p_included_for_ohitech_account로 고정.
+    ro = compute_rocket_overview(db, dfrom, dto, acc["vendor_id"])
+    rk = _agg_rocket_by_sku(db, dfrom, dto, acc["vendor_id"])
+    pos_without_detail = ro["revenue"] - rk["detail_total"]  # 발주상세 미수집 PO 매출분
+    components.append(_reconcile_component(
+        "coupang_1p", "revenue", ro["revenue"], rk["alloc_rev"],
+        {"unmapped_1p": rk["unmapped_rev"], "pos_without_detail": pos_without_detail},
+    ))
+    components.append(_reconcile_component(
+        "coupang_1p", "cost", ro["cost"], rk["alloc_cost"], {},
+    ))
+    components.append(_reconcile_component(
+        "coupang_1p", "ad", ro["ad_spend"], {},   # 1P 광고=Retail 계정단위(옵션 귀속 불가)
+        {"account_only_ad": ro["ad_spend"]},
+    ))
+    alloc_np_1p = {sku: rev - rk["alloc_cost"].get(sku, _Z)
+                   for sku, rev in rk["alloc_rev"].items()}
+    components.append(_reconcile_component(
+        "coupang_1p", "net_profit", ro["net_profit"], alloc_np_1p,
+        {
+            "unmapped_1p": rk["unmapped_rev"],
+            "pos_without_detail": pos_without_detail,
+            "account_only_ad": -ro["ad_spend"],
+        },
+    ))
+
+    # ── 네이버/cafe24: 라인 헬퍼 재사용, product_id→internal_sku 그룹(광고·배송은 Phase2 잔차) ──
+    # 계정 파라미터는 쿠팡 전용이라 마켓플레이스는 account 지정 시 제외(계정 인식 엔진 정합, D-11).
+    # ★컴포넌트명은 product_revenue(codex T3 P1#3): 권위 엔진 calculate_channel_summary의 revenue는
+    #   product_revenue+shipping_revenue인데 여기 authoritative는 _line_revenue(=product 매출)만이라
+    #   'revenue'로 부르면 배송/수동매출과 대조가 어긋난다. 동일 헬퍼·필터라 product_revenue/commission/
+    #   cost는 권위 엔진 소계와 구성상 일치. 배송매출·광고·수동매출은 T3 스코프 밖(T5/Phase2, 계획 §5).
+    if account is None:
+        mkt = _agg_marketplace_by_sku(db, dfrom, dto)
+        for plat, blk in sorted(mkt.items()):
+            unmapped_key = f"unmapped_{plat}"
+            for comp in ("product_revenue", "commission", "cost"):
+                alloc = {sku: v[comp] for sku, v in blk["alloc"].items()}
+                components.append(_reconcile_component(
+                    plat, comp, blk["total"][comp], alloc,
+                    {unmapped_key: blk["unmapped"][comp]},
+                ))
+
+    conservation_ok = all(c["conservation_ok"] for c in components)
+    period = {"from": dfrom.isoformat(), "to": dto.isoformat()}
+    if account is not None:
+        period["account"] = account
+    return {
+        "period": period,
+        "ledger": {
+            "components": components,
+            "conservation_ok": conservation_ok,
+            "sku_conflicts": sorted(sku_conflicts),  # 옵션ID→복수 internal_sku(무결성 결손)
+        },
+    }
