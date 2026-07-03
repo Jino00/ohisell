@@ -184,6 +184,101 @@ export interface Product {
   mappings: Mapping[];
 }
 
+// ── 상품 연결맵 (트랙 S4, D-12) ──
+export interface ConnCell {
+  mapping_id: number;
+  channel_product_id: string;
+  channel_product_name: string | null;
+  channel_sku: string | null;
+  selling_price: number;
+  is_active: boolean;
+  mapping_source: string; // excel_master | manual | auto_sync
+  conflict: boolean;
+}
+export interface ConnChannel {
+  channel_id: number;
+  channel_code: string;
+  channel_name: string;
+  platform: string;
+  sell_type: string | null; // 3P | RG | 1P | null
+}
+export interface ConnRow {
+  product_id: number;
+  internal_sku: string;
+  product_name: string;
+  cost_price: number;
+  cells: Record<string, ConnCell[]>; // channel_id(문자열) → 셀 목록
+  mapped_channel_count: number;
+  has_conflict: boolean;
+}
+export interface ConnectionMap {
+  channels: ConnChannel[];
+  rows: ConnRow[];
+  total_products: number;
+  shown_products: number;
+  conflict_option_count: number;
+}
+
+export function fetchConnectionMap(q?: string, limit?: number): Promise<ConnectionMap> {
+  const params = new URLSearchParams();
+  if (q) params.set("q", q);
+  if (limit != null) params.set("limit", String(limit));
+  const qs = params.toString();
+  return fetchApi<ConnectionMap>(`/api/products/connection-map${qs ? `?${qs}` : ""}`);
+}
+
+// 단일 매핑 인라인 편집(부분 갱신). 옵션ID 충돌 시 409 → Error throw.
+export interface MappingPatch {
+  channel_product_id?: string;
+  channel_product_name?: string | null;
+  channel_sku?: string | null;
+  selling_price?: number;
+  is_active?: boolean;
+}
+export function updateMapping(
+  productId: number,
+  mappingId: number,
+  patch: MappingPatch,
+): Promise<Mapping> {
+  return fetchApi<Mapping>(`/api/products/${productId}/mappings/${mappingId}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+}
+
+// ── 매핑 커버리지(트랙 S2) — 연결맵 화면 상단 배지 ──
+export interface ChannelCoverage {
+  channel_id: number;
+  channel_code: string;
+  channel_name: string;
+  mapped_option_count: number;
+  order_option_count: number;
+  order_option_coverage: number; // 0~1
+  unmapped_order_options: { option_id: string; order_count: number }[];
+  unmapped_order_options_truncated: number;
+  total_orders: number;
+  unlinked_orders: number;
+  blank_option_id_orders: number;
+}
+export function fetchMappingCoverage(limit = 50): Promise<ChannelCoverage[]> {
+  return fetchApi<ChannelCoverage[]>(`/api/products/mapping-coverage?limit=${limit}`);
+}
+
+// 연결맵 마스터 엑셀 업로드 결과(무결성 배지 포함)
+export interface MappingIngestResult {
+  products_created: number;
+  products_updated: number;
+  mappings_created: number;
+  mappings_updated: number;
+  mappings_conflicted: number;
+  orders_linked: number;
+  unknown_labels: string[];
+  duplicate_product_names: string[];
+  duplicate_channel_ids: string[];
+  mapping_conflicts: string[];
+  label_mismatches: string[];
+}
+
 // ── Order Types ──
 export interface OrderItem {
   id: number;

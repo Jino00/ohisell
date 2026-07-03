@@ -48,6 +48,11 @@ S1 신규 매핑 적재 Harness(엑셀 파서+라벨 리졸버+upsert+무결성 
 ### D-6 — 매핑 테이블에 sell_type(3P/RG/1P) 컬럼 보강
 `product_channel_mapping`에 `sell_type` 컬럼을 **추가**한다. D-2에 따라 vendor_id만으로는 3P/RG 구분 불가하므로, Harness3(통합 손익)의 채널별 집계 시 sell_type이 반드시 필요.
 - Jino 확인: 추천안(추가) 승인.
+
+### D-12 — 화면 C = 새 전용 메뉴 "상품 연결맵" (기존 Products.tsx 유지)
+화면 C는 **새 메뉴 "상품 연결맵"** 전용 페이지로 신설한다. 탭1(연관맵 매트릭스: 내부옵션 행×채널 열·커버리지/충돌 배지·인라인 편집·엑셀 업로드) + 탭2(통합 손익: `GET /api/products/pnl-reconciliation` 소비). 기존 `Products.tsx`(상품 원가표, 상품 중심 리스트)는 **유지**하되, 두 화면의 중복 항목인 **'연관맵 마스터 업로드' 버튼은 새 페이지로 이관**해 진입점을 단일화(D-5 진실원천 분열 방지 정신).
+- S4 백엔드 신규 2종: `GET /api/products/connection-map`(매트릭스 조회 SA, 읽기전용) + `PATCH /api/products/{pid}/mappings/{mid}`(단일 인라인 편집, 옵션ID 유일성 가드). POST 매핑추가·DELETE·upload-by-name·mapping-coverage는 재사용.
+- Jino 확인(2026-07-03): 새 메뉴 신설 승인.
 - (정정 2026-07-03/S3 조사): 실제로는 `sell_type`이 `product_channel_mapping`이 아니라 `channels` 테이블에 추가됨(마이그레이션 `t4u5v6w7x8y9`). 취지(3P/RG 구분)는 동일하게 충족.
 
 ### D-7 — 1P(로켓배송) 옵션↔internal_sku 브리지는 RocketProductCostMap을 정본으로 사용

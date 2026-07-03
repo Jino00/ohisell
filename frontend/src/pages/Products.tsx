@@ -19,7 +19,6 @@ export default function Products() {
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [uploadMsg, setUploadMsg] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
-  const mappingFileRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
     const [p, c] = await Promise.all([
@@ -92,31 +91,6 @@ export default function Products() {
     if (fileRef.current) fileRef.current.value = "";
   }
 
-  async function handleMappingUpload(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    try {
-      const result = await uploadFile("/api/products/upload-by-name", file);
-      const issueCount =
-        (result.unknown_labels?.length || 0) +
-        (result.duplicate_product_names?.length || 0) +
-        (result.duplicate_channel_ids?.length || 0) +
-        (result.mapping_conflicts?.length || 0) +
-        (result.label_mismatches?.length || 0);
-      setUploadMsg(
-        `상품 생성 ${result.products_created}건, 수정 ${result.products_updated}건, ` +
-        `매핑 ${result.mappings_created}건, 주문 연결 ${result.orders_linked}건` +
-          (result.mappings_conflicted ? ` / 충돌 ${result.mappings_conflicted}건(기존 매핑 유지)` : "") +
-          (issueCount ? ` / 확인 필요 ${issueCount}건(콘솔 참고)` : "")
-      );
-      if (issueCount) console.warn("매핑 적재 무결성 이슈", result);
-      load();
-    } catch (err) {
-      setUploadMsg(`업로드 실패: ${err}`);
-    }
-    if (mappingFileRef.current) mappingFileRef.current.value = "";
-  }
-
   const fmt = (n: number) =>
     new Intl.NumberFormat("ko-KR").format(n);
 
@@ -137,19 +111,6 @@ export default function Products() {
           >
             엑셀 다운로드
           </a>
-          <label
-            className="px-3 py-2 text-sm bg-orange-500 text-white rounded-md hover:bg-orange-600 cursor-pointer"
-            title='마스터 엑셀 업로드 — "원가 매핑" 시트, 1행=옵션 1개, 채널별 옵션ID 컬럼 포맷'
-          >
-            연관맵 마스터 업로드
-            <input
-              ref={mappingFileRef}
-              type="file"
-              accept=".xlsx,.xls"
-              className="hidden"
-              onChange={handleMappingUpload}
-            />
-          </label>
           <label className="px-3 py-2 text-sm bg-gray-500 text-white rounded-md hover:bg-gray-600 cursor-pointer">
             SKU 업로드
             <input
