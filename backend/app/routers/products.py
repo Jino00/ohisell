@@ -16,8 +16,13 @@ from app.schemas import (
     MappingCreate,
     MappingOut,
     MappingIngestResult,
+    ChannelCoverageOut,
+    UnmappedOption,
 )
 from app.services.product_mapping_ingest import ingest_master_sheet
+from app.services.mapping_coverage import compute_mapping_coverage
+
+_COVERAGE_UNMAPPED_LIMIT = 50  # 응답 payload 상한(채널당). 나머지는 truncated 카운트로만 표기.
 
 router = APIRouter(prefix="/api/products", tags=["products"])
 
@@ -411,3 +416,39 @@ async def upload_by_name(file: UploadFile = File(...), db: Session = Depends(get
         mapping_conflicts=result.integrity.mapping_conflicts,
         label_mismatches=result.integrity.label_mismatches,
     )
+
+
+# ── 상품 연관맵 커버리지 리포트 (상품 연관맵 트랙 S2) ──
+@router.get("/mapping-coverage", response_model=list[ChannelCoverageOut])
+def mapping_coverage(
+    limit: int = _COVERAGE_UNMAPPED_LIMIT, db: Session = Depends(get_db)
+):
+    """채널별 매핑 보유율 + 주문에는 있으나 연관맵에 없는 옵션ID 목록.
+
+    상품 연관맵 트랙 S2: docs/tracks/active/track_product-connection-map.md.
+    주문↔마스터 백필 자체는 S1 업로드 시 relink_unlinked_orders로 이미 수행됨 — 이 엔드포인트는
+    현재 커버리지 상태를 조회만 한다(부작용 없음).
+    `limit`: 채널당 미매핑 옵션ID 응답 개수(기본 50). truncated 필드로 잘린 만큼을 알 수 있고,
+    나머지가 필요하면 limit을 키워 재요청(codex P2: API 계약에서 긴 꼬리를 숨기지 않도록).
+    """
+    limit = max(0, min(limit, 5000))
+    coverages = compute_mapping_coverage(db)
+    out = []
+    for c in coverages:
+        shown = c.unmapped_order_options[:limit]
+        out.append(
+            ChannelCoverageOut(
+                channel_id=c.channel_id,
+                channel_code=c.channel_code,
+                channel_name=c.channel_name,
+                mapped_option_count=c.mapped_option_count,
+                order_option_count=c.order_option_count,
+                order_option_coverage=c.order_option_coverage,
+                unmapped_order_options=[UnmappedOption(**o) for o in shown],
+                unmapped_order_options_truncated=len(c.unmapped_order_options) - len(shown),
+                total_orders=c.total_orders,
+                unlinked_orders=c.unlinked_orders,
+                blank_option_id_orders=c.blank_option_id_orders,
+            )
+        )
+    return out

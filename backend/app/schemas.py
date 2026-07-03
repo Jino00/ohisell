@@ -76,6 +76,26 @@ class MappingIngestResult(BaseModel):
     label_mismatches: list[str] = []
 
 
+# ── 상품 연관맵 커버리지 리포트 (상품 연관맵 트랙 S2) ──
+class UnmappedOption(BaseModel):
+    option_id: str
+    order_count: int
+
+
+class ChannelCoverageOut(BaseModel):
+    channel_id: int
+    channel_code: str
+    channel_name: str
+    mapped_option_count: int
+    order_option_count: int
+    order_option_coverage: float
+    unmapped_order_options: list[UnmappedOption]
+    unmapped_order_options_truncated: int  # 응답에서 잘라낸 나머지 건수(0=전부 포함)
+    total_orders: int
+    unlinked_orders: int
+    blank_option_id_orders: int  # 옵션ID 자체가 없는 주문(coverage=1.0이어도 문제 있을 수 있음)
+
+
 class ProductOut(BaseModel):
     id: int
     internal_sku: str

@@ -88,7 +88,7 @@ DB: `backend/ohisell.db` (dev), 엑셀: `.../15. 기획/상품 리스트/ohisell
 ## ☑️ 체크리스트
 - [x] S0 정찰·구조 확정·트랙 생성 (2026-07-03)
 - [x] S1 Harness1 매핑 적재 (엑셀 파서 + 라벨 리졸버 + upsert + 무결성 검사) (2026-07-03)
-- [ ] S2 Harness2 매출 조인/백필 + 커버리지 리포트
+- [x] S2 Harness2 매출 조인/백필 + 커버리지 리포트 (2026-07-03)
 - [ ] S3 Harness3 통합 손익 조망 (SA 4종 + 조합)
 - [ ] S4 화면 C 탭1 연관맵 관리 UI
 - [ ] S5 화면 C 탭2 통합 손익 UI
@@ -105,8 +105,15 @@ DB: `backend/ohisell.db` (dev), 엑셀: `.../15. 기획/상품 리스트/ohisell
 - 실제 dev DB(`backend/ohisell.db`)는 스키마 마이그레이션만 적용(백업 `ohisell.db.bak_pre_s1`), 실데이터 엑셀 업로드는 아직 미실행(검증은 throwaway 사본으로 수행).
 - **codex review(원칙19) 완료**: [P1] 블록라벨 고정 시 미스타이핑된 후속 행이 조용히 잘못된 채널로 귀속될 수 있는 갭 발견 → `MasterRow.label_mismatches`+`IntegrityReport.label_mismatches` 추가해 수정(불일치 행은 해당 블록 ID를 귀속시키지 않고 표면화만). 라이브 재검증 결과 실제 엑셀은 라벨이 열 전체 상수라 불일치 0건, 카운트 불변. 나머지 [P1](충돌 시 배치 전체 커밋 차단 권고)·[P2]×2(레거시 응답계약·downgrade batch_alter)는 트랙 D-1/D-5 승인 설계 및 기존 코드베이스 컨벤션과의 정합을 근거로 기각(대화 기록·근거는 세션 로그 참고). 테스트 16개로 갱신, 전체 455 passed.
 
+## S2 완료 기록 (2026-07-03)
+- 주문↔마스터 백필: 신규 코드 불필요 — S1 ingest가 이미 `sync_service.relink_unlinked_orders`를 호출해 처리.
+- 신규 `backend/app/services/mapping_coverage.py::compute_mapping_coverage` — 채널별 매핑수·주문에서 관측된 옵션ID 수·매핑 안 된 옵션ID 목록(주문건수 포함)·미연결 주문수를 집계하는 순수 조회 SA(부작용 없음).
+- 신규 라우터 `GET /api/products/mapping-coverage`(응답 채널당 상위 50건만, 초과분은 `unmapped_order_options_truncated`로 표기 — no silent caps).
+- 테스트 6개 추가(전체 461 passed). **라이브 self-verify**: dev DB에서 계산한 미매핑 옵션ID 수가 S0 실측치와 완전 일치(NAVER 35·CAFE24 1) — S0/S1/S2 세 시점의 데이터가 서로 교차검증됨. WING1(오픽스) 커버리지 0%는 알려진 매핑결손(D-1 참고)과 일치, 새 버그 아님.
+- **codex review 완료(gate PASS, P1 0건)**: P2 3건 중 2건 반영(① `unmapped_order_options` 50건 캡을 API 계약에서 숨기지 않도록 `limit` 쿼리파라미터 추가 ② `platform_product_id=""` 주문이 coverage=1.0으로 은폐되는 문제를 `blank_option_id_orders` 필드로 별도 노출), N+1 쿼리 최적화 1건은 현재 규모(채널 7개·주문 최대 1,300여 건)에서 실익 없다고 판단해 기각.
+
 ## 📍 현재 진행 단계
-S1 완료(코드+테스트 16개+라이브 self-verify+codex review 대화 완료, P1 1건 수정 반영). 전체 스위트 455 passed. 아직 커밋 안 함(main 레포 `feat/ohitech-ad-cost` 브랜치, S1 파일들은 unstaged). 다음: Jino 커밋/PR 여부 결정 → S2(매출 조인/백필) 착수, 또는 실제 dev DB에 엑셀 실업로드.
+S1+S2 완료·커밋·PR. 다음: PR 머지 후 S3(통합 손익 조망 Harness) 착수.
 
 ## ▶️ 다음 액션
 1. S1 계획 상세화(엑셀 컬럼 정규화 규칙·upsert 멱등 계약·무결성 리포트 스키마·sell_type 마이그레이션) → /plan-eng-review.
