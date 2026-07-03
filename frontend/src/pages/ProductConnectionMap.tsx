@@ -646,3 +646,115 @@ function PnlTab() {
     </div>
   );
 }
+
+function PnlSummaryCards({
+  summary,
+}: {
+  summary: PnlReconciliation["summary"];
+}) {
+  const residual = Number(summary.account_adjustment_residual);
+  return (
+    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
+      <div className="bg-white rounded-lg border p-4">
+        <div className="text-xs text-gray-500 mb-1">계정 순익(권위)</div>
+        <div className="text-xl font-bold text-gray-900">{won(summary.reconciled_net_profit)}</div>
+      </div>
+      <div className="bg-white rounded-lg border p-4">
+        <div className="text-xs text-gray-500 mb-1">SKU 귀속 순익 합</div>
+        <div className="text-xl font-bold text-gray-900">{won(summary.net_profit_allocated_total)}</div>
+      </div>
+      <div
+        className="bg-white rounded-lg border p-4"
+        title="미매핑 옵션 + 계정 단위 조정(RG 플립·비-PA 광고·정산 매출조정 등). 안분하지 않음."
+      >
+        <div className="text-xs text-gray-500 mb-1">미배분 잔차</div>
+        <div className={`text-xl font-bold ${residual !== 0 ? "text-amber-600" : "text-gray-900"}`}>
+          {won(summary.account_adjustment_residual)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PnlSkuTable({
+  rows,
+  names,
+  expanded,
+  onToggle,
+}: {
+  rows: PnlSkuRow[];
+  names: Record<string, string>;
+  expanded: string | null;
+  onToggle: (sku: string) => void;
+}) {
+  if (rows.length === 0) {
+    return (
+      <div className="bg-white rounded-lg border p-8 text-center text-gray-400 text-sm mb-4">
+        표시할 SKU 손익이 없습니다.
+      </div>
+    );
+  }
+  return (
+    <div className="bg-white rounded-lg border overflow-x-auto mb-4">
+      <table className="min-w-full text-sm">
+        <thead>
+          <tr className="border-b bg-gray-50">
+            <th className="text-left px-3 py-2 font-medium text-gray-600">상품명</th>
+            <th className="text-left px-3 py-2 font-medium text-gray-600">내부코드</th>
+            <th className="text-right px-3 py-2 font-medium text-gray-600">순익(SKU 귀속)</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => {
+            const net = Number(r.net_profit_allocated_only);
+            const isOpen = expanded === r.internal_sku;
+            return (
+              <tr key={r.internal_sku}>
+                <td colSpan={3} className="p-0">
+                  <button
+                    onClick={() => onToggle(r.internal_sku)}
+                    className="w-full flex border-b hover:bg-gray-50 text-left"
+                  >
+                    <div className="px-3 py-2 flex-1">{names[r.internal_sku] || r.internal_sku}</div>
+                    <div className="px-3 py-2 font-mono text-gray-500 w-40">{r.internal_sku}</div>
+                    <div
+                      className={`px-3 py-2 text-right font-medium w-40 ${
+                        net < 0 ? "text-red-600" : "text-gray-900"
+                      }`}
+                    >
+                      {won(r.net_profit_allocated_only)}
+                    </div>
+                  </button>
+                  {isOpen && (
+                    <div className="px-3 py-2 bg-gray-50 border-b">
+                      <table className="min-w-full text-xs">
+                        <thead>
+                          <tr className="text-gray-500">
+                            <th className="text-left py-1 pr-3">채널</th>
+                            <th className="text-left py-1 pr-3">컴포넌트</th>
+                            <th className="text-right py-1">금액</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {Object.entries(r.channels).flatMap(([channel, comps]) =>
+                            Object.entries(comps).map(([comp, amt]) => (
+                              <tr key={`${channel}-${comp}`}>
+                                <td className="py-0.5 pr-3 text-gray-600">{channel}</td>
+                                <td className="py-0.5 pr-3 text-gray-600">{comp}</td>
+                                <td className="py-0.5 text-right">{won(amt)}</td>
+                              </tr>
+                            )),
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
