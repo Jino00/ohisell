@@ -194,6 +194,43 @@ def test_patch_404_for_missing(client):
     assert r.status_code == 404
 
 
+def test_add_mapping_marks_manual_and_guards_duplicate(client):
+    tc, s = client
+    # 새 옵션ID로 p1에 수동 추가 → mapping_source='manual'(codex P1: 자동동기화 clobber 방지)
+    r = tc.post(
+        f"/api/products/{s['p1']}/mappings",
+        json={"channel_id": s["naver"], "channel_product_id": "NEW-1", "selling_price": "100"},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["mapping_source"] == "manual"
+    # 같은 옵션ID를 p2에 추가하려 하면 이중귀속 → 409
+    r2 = tc.post(
+        f"/api/products/{s['p2']}/mappings",
+        json={"channel_id": s["naver"], "channel_product_id": "NEW-1", "selling_price": "100"},
+    )
+    assert r2.status_code == 409, r2.text
+
+
+def test_patch_reactivation_uniqueness_guard(client):
+    tc, s = client
+    # p2에 naver 'TMP'(active·유일) 추가
+    add = tc.post(
+        f"/api/products/{s['p2']}/mappings",
+        json={"channel_id": s["naver"], "channel_product_id": "TMP", "selling_price": "1"},
+    )
+    assert add.status_code == 201
+    mid = add.json()["id"]
+    # 비활성화하면서 옵션ID를 p1이 쓰는 'NAV-1'로 변경 — 비활성이라 가드 통과(200)
+    r1 = tc.patch(
+        f"/api/products/{s['p2']}/mappings/{mid}",
+        json={"is_active": False, "channel_product_id": "NAV-1"},
+    )
+    assert r1.status_code == 200, r1.text
+    # 재활성화 시도 → NAV-1이 p1에 active로 존재 → 이중귀속 409(codex P1 #1)
+    r2 = tc.patch(f"/api/products/{s['p2']}/mappings/{mid}", json={"is_active": True})
+    assert r2.status_code == 409, r2.text
+
+
 # ── 자동동기화 가드: manual 매핑 보호 ──
 def test_auto_sync_skips_manual_mapping(db):
     s = _seed(db)

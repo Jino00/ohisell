@@ -10,7 +10,10 @@ export async function fetchApi<T>(path: string, options?: RequestInit): Promise<
     const detail = await res.text();
     throw new Error(`API error ${res.status}: ${detail}`);
   }
-  return res.json();
+  // 204 No Content(예: DELETE) 또는 빈 본문은 res.json()이 던지므로 undefined로 처리.
+  if (res.status === 204) return undefined as T;
+  const text = await res.text();
+  return (text ? JSON.parse(text) : undefined) as T;
 }
 
 export function syncRealtime(): Promise<Record<string, unknown>> {
