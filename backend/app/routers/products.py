@@ -1,14 +1,18 @@
 # products.py — 상품 원가표 CRUD + 채널 매핑 + 엑셀 업로드/다운로드
 import io
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from fastapi.responses import StreamingResponse
 from openpyxl import Workbook, load_workbook
 from sqlalchemy.orm import Session, joinedload
 
 from app.database import get_db
 from app.models import ProductMaster, ProductChannelMapping, Channel
+from app.utils.kst import kst_today
+# compute_pnl_reconciliation은 엔드포인트 내부에서 지연 임포트한다 — 앱 로드 시
+# product_pnl→profit_calculator/intelligence 임포트 체인이 라우터 등록과 순환을 이뤄 데드락하는 것 회피.
 from app.schemas import (
     ProductCreate,
     ProductUpdate,
@@ -164,7 +168,7 @@ def delete_mapping(
 def download_mapping_template(db: Session = Depends(get_db)):
     """주문 데이터에서 채널별 상품 목록을 추출한 매핑 템플릿 엑셀"""
     from app.models import Order
-    from sqlalchemy import func, distinct
+    from sqlalchemy import func
 
     # 채널별 고유 상품 집계
     rows = (
@@ -452,3 +456,64 @@ def mapping_coverage(
             )
         )
     return out
+
+
+# ── 통합 손익 대조원장 (S3 T6, D-11) ──────────────────────────
+# ★법인 단위 Wing 계정키만 허용(codex T6 P1, overview.py와 동일 계약): _resolve_account는 company로
+#   풀어 그 법인의 3P/RG/1P를 모두 스코프하고, RG 정산/수수료/반품 테이블은 account_key==WING1/2로
+#   저장된다(RG1/RG2/ROCKET로는 저장 안 함). RG1/ROCKET을 넘기면 RG 정산이 0으로 누락돼 과소 손익.
+#   오픽스=WING1(3P+RG), 오하이테크=WING2(3P+RG+1P). 생략=전 계정 합산(네이버/cafe24 포함).
+_PNL_VALID_ACCOUNTS = {"COUPANG_WING1", "COUPANG_WING2"}
+
+
+def _pnl_parse_date(s: str | None, default):
+    if not s:
+        return default
+    try:
+        return datetime.strptime(s, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"잘못된 날짜 형식: {s} (YYYY-MM-DD)")
+
+
+def _pnl_jsonify(v):
+    """Decimal → str(정밀도 보존, 머니), 중첩 dict/list 재귀. 다른 라우터(_jsonify)와 동일 규칙."""
+    if isinstance(v, Decimal):
+        return str(v)
+    if isinstance(v, dict):
+        return {k: _pnl_jsonify(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_pnl_jsonify(x) for x in v]
+    return v
+
+
+@router.get("/pnl-reconciliation")
+def pnl_reconciliation(
+    from_: str | None = Query(None, alias="from"),
+    to: str | None = Query(None),
+    account: str | None = Query(
+        None,
+        description=("계정 필터(D-11): COUPANG_WING1(오픽스)·COUPANG_WING2(오하이테크) — 법인 단위 "
+                     "키(3P+RG+1P 전부 스코프). 생략=전 계정 합산(네이버/cafe24 포함)."),
+    ),
+    db: Session = Depends(get_db),
+):
+    """통합 손익 대조원장(reconciliation-first). 기본 기간=최근 7일(KST).
+
+    ledger: 채널·컴포넌트별 보존 법칙(Σ SKU귀속+Σ잔차==권위 엔진 계정소계). conservation_ok가
+    false면 조인/기준 버그로 SKU행 신뢰 불가 → by_sku는 빈 배열(원장 균형 후에만 노출, D-6).
+    by_sku: internal_sku 행(채널 분해 + net_profit_allocated_only=SKU 귀속 순익).
+    summary: reconciled_net_profit(엔진 총액) / account_adjustment_residual(미매핑+계정조정, 안분 안 함).
+    """
+    today = kst_today()
+    dto = _pnl_parse_date(to, today)
+    dfrom = _pnl_parse_date(from_, dto - timedelta(days=6))
+    if dfrom > dto:
+        raise HTTPException(status_code=422, detail="from이 to보다 늦습니다")
+    if account is not None and account not in _PNL_VALID_ACCOUNTS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"잘못된 account: {account} (허용: {', '.join(sorted(_PNL_VALID_ACCOUNTS))} 또는 생략)",
+        )
+    from app.services.product_pnl import compute_pnl_reconciliation  # 지연 임포트(순환 회피)
+    result = compute_pnl_reconciliation(db, dfrom, dto, account)
+    return _pnl_jsonify(result)

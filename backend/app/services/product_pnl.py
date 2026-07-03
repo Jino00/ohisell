@@ -404,6 +404,13 @@ def compute_pnl_reconciliation(db: Session, dfrom: date, dto: date,
 
     warnings = _ledger_warnings(db, dfrom, dto, acc["account_key"])
     conservation_ok = all(c["conservation_ok"] for c in components)
+    # Harness 3b: SKU 행은 원장 균형 후에만 노출(불균형이면 SKU 손익 신뢰 불가, D-6). 단 summary의
+    # reconciled_net_profit(권위 엔진 총액)은 SKU 귀속과 무관하게 유효하므로 불균형이어도 유지한다
+    # (codex T6 P2 — 총액까지 0으로 지우면 대조 대상을 잃고 UI가 '총액 0' 오해). trustworthy로 신뢰도 표기.
+    by_sku, summary = _build_sku_rows(components)
+    summary["trustworthy"] = conservation_ok
+    if not conservation_ok:
+        by_sku = []  # SKU 행만 숨김. summary.reconciled_net_profit은 엔진 총액이라 유지.
     period = {"from": dfrom.isoformat(), "to": dto.isoformat()}
     if account is not None:
         period["account"] = account
@@ -415,7 +422,57 @@ def compute_pnl_reconciliation(db: Session, dfrom: date, dto: date,
             "sku_conflicts": sorted(sku_conflicts),  # 옵션ID→복수 internal_sku(무결성 결손)
             "warnings": warnings,
         },
+        "by_sku": by_sku,
+        "summary": summary,
     }
+
+
+# ──────────────────────────────────────────────
+# Harness 3b: SKU 행(옵션 손익) — 원장 균형 후에만
+# ──────────────────────────────────────────────
+# net_profit_allocated_only에 들어가는 순익 기여 컴포넌트(부호). 계정조정(RG플립·비-PA·정산화·
+# 판매자배송)은 SKU 귀속 불가라 제외 — account_adjustment_residual로만 표기(codex #14, 안분 금지).
+_NET_CONTRIB: dict[tuple[str, str], int] = {
+    ("coupang", "net_profit"): 1,
+    ("coupang_1p", "net_profit"): 1,
+    ("naver", "product_revenue"): 1, ("naver", "commission"): -1, ("naver", "cost"): -1,
+    ("cafe24", "product_revenue"): 1, ("cafe24", "commission"): -1, ("cafe24", "cost"): -1,
+}
+
+
+def _build_sku_rows(components: list[dict]) -> tuple[list[dict], dict]:
+    """대조원장 컴포넌트를 internal_sku 행으로 피벗(3b).
+
+    각 SKU 행: 채널별 컴포넌트 분해 + net_profit_allocated_only(SKU 귀속 순익, 계정조정 제외).
+    summary: reconciled_net_profit(계정 단위 엔진 총액=Σ net_profit 컴포넌트 authoritative) ·
+      net_profit_allocated_total(Σ SKU 귀속 순익) · account_adjustment_residual(둘의 차 —
+      미매핑+계정조정, 안분하지 않고 참고치로만, codex #14).
+    """
+    rows: dict[str, dict] = {}
+    for c in components:
+        ch, comp = c["channel"], c["component"]
+        contrib = _NET_CONTRIB.get((ch, comp), 0)
+        for sku, amt in c["allocated_by_sku"].items():
+            row = rows.setdefault(sku, {"internal_sku": sku, "channels": {},
+                                        "net_profit_allocated_only": _Z})
+            row["channels"].setdefault(ch, {})[comp] = amt
+            if contrib:
+                row["net_profit_allocated_only"] += contrib * amt
+    by_sku = sorted(rows.values(), key=lambda r: r["net_profit_allocated_only"], reverse=True)
+
+    # 계정 단위 화해: reconciled = Σ net_profit 기여 컴포넌트 authoritative(엔진 총액, 계정조정 포함).
+    reconciled = _Z
+    for c in components:
+        w = _NET_CONTRIB.get((c["channel"], c["component"]), 0)
+        if w:
+            reconciled += w * c["authoritative_total"]
+    allocated_total = sum((r["net_profit_allocated_only"] for r in by_sku), _Z)
+    summary = {
+        "reconciled_net_profit": reconciled,        # 계정 단위에서만 의미(= 엔진 총액)
+        "net_profit_allocated_total": allocated_total,
+        "account_adjustment_residual": reconciled - allocated_total,  # 미매핑+계정조정(안분 안 함)
+    }
+    return by_sku, summary
 
 
 def _ledger_warnings(db: Session, dfrom: date, dto: date,

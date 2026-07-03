@@ -386,6 +386,96 @@ def test_partial_period_settlement_warning(db):
     assert not any(w["type"] == "partial_period_settlement" for w in result2["ledger"]["warnings"])
 
 
+# ─────────────────────────────────────────────────────────────
+# T6: Harness 3b SKU행 — net_profit_allocated_only·reconciled·account_adjustment_residual 분리
+# ─────────────────────────────────────────────────────────────
+def test_sku_rows_net_profit_split(db):
+    _ch(db, 1, "COUPANG_WING1")
+    _pm(db, 10, "OHI-0001", cost=Decimal("3000"))
+    _map(db, 10, 1, "V1")
+    _prod(db, "V1")
+    db.add(Order(channel_id=1, order_number="O1", platform_product_id="V1",
+                 quantity=2, selling_price=Decimal("33800"), order_date=OD, status="delivered"))
+    db.add(CoupangRevenueFee(
+        order_id="O1", vendor_item_id="V1", recognition_date=date(2026, 6, 6),
+        sale_type="SALE", account_key="COUPANG_WING1", vendor_id="A01564720",
+        service_fee=Decimal("780"), service_fee_vat=Decimal("78")))
+    # 계정 조정(RG 플립) — SKU에 안 붙는 잔차
+    _rg_fee(db, "COUPANG_WING1", "sale_fee", "", "50000")
+    db.commit()
+
+    result = compute_pnl_reconciliation(db, *WIN, account="COUPANG_WING1")
+    ccs = compute_command_center(db, *WIN, account="COUPANG_WING1")["account"]["summary"]
+
+    # 3b는 원장 균형 후에만
+    assert result["ledger"]["conservation_ok"] is True
+    rows = result["by_sku"]
+    row = next(r for r in rows if r["internal_sku"] == "OHI-0001")
+    # SKU 귀속 순익 = command_center by_option net_profit(V1) — 계정조정 제외
+    assert row["net_profit_allocated_only"] == _component(
+        result, "coupang", "net_profit")["allocated_by_sku"]["OHI-0001"]
+    # 채널 분해 존재
+    assert "coupang_3p" in row["channels"]
+
+    summ = result["summary"]
+    # 계정 단위 화해: reconciled_net_profit == 엔진 총액(command_center net_profit, RG 플립 반영)
+    assert summ["reconciled_net_profit"] == ccs["net_profit"]
+    # account_adjustment_residual = reconciled − Σ(SKU 귀속 순익) (미매핑+계정조정, 안분 안 함)
+    sku_net_sum = sum((r["net_profit_allocated_only"] for r in rows), _Z)
+    assert summ["account_adjustment_residual"] == summ["reconciled_net_profit"] - sku_net_sum
+
+
+# ─────────────────────────────────────────────────────────────
+# T6: 라우터 GET /api/products/pnl-reconciliation (account 파라미터 D-11 + Decimal→str)
+# ─────────────────────────────────────────────────────────────
+def test_pnl_reconciliation_endpoint():
+    from fastapi.testclient import TestClient
+    from sqlalchemy.pool import StaticPool
+    from app.main import app
+    from app.database import Base, get_db
+
+    # StaticPool + 단일 커넥션 in-memory (요청/시드가 같은 DB 공유, 기존 라우터 테스트 패턴)
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False},
+                           poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    TS = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+    s = TS()
+    s.add(Channel(id=1, name="w", code="COUPANG_WING1", platform="coupang", company="ofix"))
+    s.add(ProductMaster(id=10, internal_sku="OHI-0001", product_name="p", cost_price=Decimal("3000")))
+    s.add(ProductChannelMapping(product_id=10, channel_id=1, channel_product_id="V1",
+                                selling_price=Decimal("10000"), is_active=True))
+    s.add(Order(channel_id=1, order_number="O1", platform_product_id="V1", quantity=1,
+                selling_price=Decimal("10000"), order_date=OD, status="delivered"))
+    s.commit()
+    s.close()
+
+    def _override():
+        db = TS()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    app.dependency_overrides[get_db] = _override
+    try:
+        client = TestClient(app)
+        r = client.get("/api/products/pnl-reconciliation",
+                       params={"from": "2026-06-01", "to": "2026-06-30", "account": "COUPANG_WING1"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["ledger"]["conservation_ok"] is True
+        # Decimal이 str로 직렬화(머니 정밀도)
+        comp = next(c for c in body["ledger"]["components"]
+                    if c["channel"] == "coupang_3p" and c["component"] == "revenue")
+        assert Decimal(comp["authoritative_total"]) == Decimal("10000")  # str 직렬화(스케일 무관)
+        assert isinstance(comp["authoritative_total"], str)
+        # 잘못된 account → 422
+        bad = client.get("/api/products/pnl-reconciliation", params={"account": "NOPE"})
+        assert bad.status_code == 422
+    finally:
+        app.dependency_overrides.clear()
+
+
 def test_rg_settlement_fee_absent_is_zero(db):
     """RG 정산 데이터 없으면 settlement_fee 컴포넌트 0, 보존 유지(회귀 가드)."""
     _ch(db, 1, "COUPANG_WING1")
