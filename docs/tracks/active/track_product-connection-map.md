@@ -103,7 +103,7 @@ DB: `backend/ohisell.db` (dev), 엑셀: `.../15. 기획/상품 리스트/ohisell
 - [x] S0 정찰·구조 확정·트랙 생성 (2026-07-03)
 - [x] S1 Harness1 매핑 적재 (엑셀 파서 + 라벨 리졸버 + upsert + 무결성 검사) (2026-07-03)
 - [x] S2 Harness2 매출 조인/백필 + 커버리지 리포트 (2026-07-03)
-- [ ] S3 Harness3 통합 손익 조망 (SA 4종 + 조합)
+- [🔄] S3 Harness3 통합 손익 조망 (대조원장 우선, T1~T7) — T1·T2·**T3 완료**(대조원장 3a, 커밋 d22aa0f), T4~T7 진행중
 - [ ] S4 화면 C 탭1 연관맵 관리 UI
 - [ ] S5 화면 C 탭2 통합 손익 UI
 - [ ] S6 오픽스 매핑 결손 보강(엑셀 소스 갱신) + prod 배포·라이브 self-verify
@@ -126,8 +126,12 @@ DB: `backend/ohisell.db` (dev), 엑셀: `.../15. 기획/상품 리스트/ohisell
 - 테스트 6개 추가(전체 461 passed). **라이브 self-verify**: dev DB에서 계산한 미매핑 옵션ID 수가 S0 실측치와 완전 일치(NAVER 35·CAFE24 1) — S0/S1/S2 세 시점의 데이터가 서로 교차검증됨. WING1(오픽스) 커버리지 0%는 알려진 매핑결손(D-1 참고)과 일치, 새 버그 아님.
 - **codex review 완료(gate PASS, P1 0건)**: P2 3건 중 2건 반영(① `unmapped_order_options` 50건 캡을 API 계약에서 숨기지 않도록 `limit` 쿼리파라미터 추가 ② `platform_product_id=""` 주문이 coverage=1.0으로 은폐되는 문제를 `blank_option_id_orders` 필드로 별도 노출), N+1 쿼리 최적화 1건은 현재 규모(채널 7개·주문 최대 1,300여 건)에서 실익 없다고 판단해 기각.
 
+## S3 진행 기록 (2026-07-03)
+- **T1+T2**(커밋 f4526e4): `_agg_rg_settlement_fees(grain=)` 파라미터화 + 재사용 밑줄함수 5개 characterization 회귀. `_cost_master`는 internal_sku 미노출 발견.
+- **T3**(커밋 d22aa0f): 신규 `backend/app/services/product_pnl.py` — 대조원장 Harness 3a + SA 5종. 채널·컴포넌트별 보존 법칙(Σ SKU귀속+Σ잔차==권위 엔진 계정소계) 정확 성립. 권위 엔진(compute_command_center·compute_rocket_overview) 소비, 잔차 독립계산. 대조: 쿠팡 3P/RG매출·수수료·광고·원가·반품차감·net_profit(계정조정4종) + 1P 매출/원가/광고/net_profit + 네이버·cafe24 product_revenue/수수료/원가. **codex review [P1]×3 수용**(충돌vid→잔차·1P vendor D-2공유 잠금·marketplace product_revenue 라벨), [P2] ignored_1p 이연. 테스트 9개, 전체 486 passed.
+
 ## 📍 현재 진행 단계
-S1+S2 main 머지 완료(PR #1). S3 계획서 v2 완료 + **/plan-eng-review + codex outside-voice 통과**(`docs/PLAN_product-connection-map-s3.md`). codex 15건 흡수 → **reconciliation-first 재구성**(D-8~D-11). 다음: Jino 최종 승인 후 구현.
+S1+S2 main 머지(PR #1). S3 **T1·T2·T3 완료**(대조원장 3a 배포 게이트 통과). 다음: **T4**(RG 옵션수수료 VAT gross-up + rg_vat_residual) → T5(날짜기준·채널별 순수량 원가) → T6(라우터 + 3b SKU행) → T7(dev DB 라이브 self-verify).
 
 ## ▶️ 다음 액션
 1. ~~/plan-eng-review~~ 완료(D1~D6 + codex 15건 → 계획서 v2 재작성, D-8~D-11 승격).

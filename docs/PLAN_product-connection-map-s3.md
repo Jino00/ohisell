@@ -123,10 +123,13 @@ GET /api/products/pnl-reconciliation?from&to&account
   - Surfaced by: D1 + codex #13 (밑줄함수 의미 고정)
   - Files: `backend/tests/test_intelligence_characterization.py`(신규)
   - Verify: `_agg_orders`·`_agg_rg_orders`·`_agg_ads`·`_cost_master`·`_agg_fees` 반환 grain·필터 의미 고정
-- [ ] **T3 (P1, human: ~1d / CC: ~40min)** — product_pnl.py — Harness 3a 대조원장 + SA-1~5 + 잔차 버킷
+- [x] **T3 (P1, human: ~1d / CC: ~40min)** — product_pnl.py — Harness 3a 대조원장 + SA-1~5 + 잔차 버킷 ✅ 2026-07-03
   - Surfaced by: D6 + codex #1·#4·#7·#8·#11 (보존법칙·잔차)
-  - Files: `backend/app/services/product_pnl.py`(신규)
-  - Verify: 보존법칙 유닛(allocated+잔차==authoritative 정확)
+  - Files: `backend/app/services/product_pnl.py`(신규, 커밋 d22aa0f)
+  - Verify: 보존법칙 유닛 9개(3P·RG·per-vid·net_profit+조정4종·1P·마켓·충돌·전체균형), 전체 486 passed
+  - codex review(원칙19): [P1]×3 수용 — ①충돌 vid는 SKU 귀속 안 하고 잔차로(임의선택이 권위
+    _cost_master와 어긋남) ②1P vendor=acc["vendor_id"](D-2 회사공유 vendor) 잠금 테스트 ③마켓
+    컴포넌트명 product_revenue(권위 revenue=product+shipping 정직 분리). [P2] ignored_1p 이연.
 - [ ] **T4 (P1, human: ~3h / CC: ~20min)** — product_pnl.py — RG 옵션수수료 VAT gross-up + rg_vat_residual
   - Surfaced by: D-9 + codex #2·#3 (VAT前/後·RG 의미)
   - Files: `backend/app/services/product_pnl.py`
