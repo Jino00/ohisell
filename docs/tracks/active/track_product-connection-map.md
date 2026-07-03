@@ -137,10 +137,11 @@ DB: `backend/ohisell.db` (dev), 엑셀: `.../15. 기획/상품 리스트/ohisell
 - **T7 배포 게이트 PASS**(원칙22): dev DB 사본(orders 3/1~4/15, 1600건·광고562·로켓PO651·RG 0) 실검증 — 전 계정(None/WING1/WING2) conservation_ok=True·전 컴포넌트 diff=0, 엔진 대조 완전 일치(net_profit/3p_rev/1p_rev==command_center/rocket_overview). None reconciled=72,162,843(쿠팡 1.02M+1P 51.4M+네이버/cafe24 19.7M)·by_sku=318. WING1 by_sku=0=오픽스 매핑결손(D-1, S6 몫). 1P revenue 51.4M은 alloc=0(dev DB에 RocketProductCostMap 없어 전액 잔차, 커버리지 갭 정상 표면화). 테스트 총 20개(S3 신규), 전체 493 passed.
 
 ## 📍 현재 진행 단계
-S1+S2 main 머지(PR #1). **S3 백엔드 완료**(T1~T7, 대조원장+VAT+날짜+라우터+3b, 배포 게이트 PASS). 백엔드 미머지(브랜치 claude/reverent-poitras-89cf7d, f4526e4~dac734f). 다음: **S4/S5 프론트(화면 C 탭1 연관맵·탭2 통합손익 UI)**. 또는 Jino 결정 시 S3 백엔드 PR·머지.
+S1+S2 main 머지(PR #1, `3e3624a`). **S3 백엔드 main 머지 완료**(PR #2 `f7fc0c5`, T1~T7 대조원장+VAT+날짜+라우터+3b, 배포 게이트 PASS·493 passed 라이브 재검증 2026-07-03). 작업 브랜치 `claude/peaceful-herschel-ea7fe6`를 main으로 ff 갱신 → S3 코드 보유. 다음: **S4 프론트(화면 C 탭1 연관맵 관리 UI)** 착수 — 설계 확정 중.
 
 ## ▶️ 다음 액션
-1. ~~S3 백엔드(T1~T7)~~ **완료**(대조원장+VAT+날짜+라우터+3b, 배포 게이트 PASS, 493 passed).
-2. **S4/S5 프론트(화면 C)**: 탭1 연관맵 관리(내부옵션×채널 그리드·인라인 편집·커버리지/충돌 배지·엑셀 업로드) + 탭2 통합 손익(GET /api/products/pnl-reconciliation 소비 — 컴포넌트 보존 표시·SKU행·잔차 투명화). Opus 구조설계 권장.
-3. **S6**: 오픽스(WING1/RG1) 매핑 결손 보강(T7에서 WING1 by_sku=0 재확인) + prod 배포·라이브 self-verify.
-4. (git) S3 백엔드 PR·머지는 Jino 결정 — 현재 브랜치 claude/reverent-poitras-89cf7d(f4526e4~dac734f, 미push).
+1. ~~S3 백엔드(T1~T7)~~ **완료·머지**(PR #2 `f7fc0c5`, 배포 게이트 PASS, 493 passed).
+2. **S4 화면 C 탭1 연관맵 관리 UI**(진행 중): 내부옵션×채널 그리드·인라인 편집·커버리지/충돌 배지·엑셀 업로드. Opus 구조설계 → Jino 승인 → 구현.
+3. **S5 화면 C 탭2 통합 손익 UI**: `GET /api/products/pnl-reconciliation` 소비(컴포넌트 보존 표시·SKU행·잔차 투명화·trustworthy).
+4. **S6**: 오픽스(WING1/RG1) 매핑 결손 보강(T7 WING1 by_sku=0) + prod 배포·라이브 self-verify.
+5. (정리) 머지 완료된 워크트리 `reverent-poitras-89cf7d`·`upbeat-lamport-86c720` 정리 대상(Jino 확인 후).
