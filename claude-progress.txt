@@ -3,7 +3,17 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
-- 날짜: 2026-06-22 (★오하이테크 광고 트랙 **S3 상주 자동화 완료·라이브 e2e 검증** — 트랙 거의 완료)
+- 날짜: 2026-07-03 (★상품 연관맵 트랙 **S3 백엔드 전부 완료 T1~T7 · 배포 게이트 PASS**)
+- ★**상품 연관맵 S3(통합 손익 대조원장) 백엔드 완료**(트랙 `docs/tracks/active/track_product-connection-map.md`, 계획 `docs/PLAN_product-connection-map-s3.md`). 브랜치 `claude/reverent-poitras-89cf7d`(f4526e4~dac734f, 미push·미머지).
+  - **핵심**: reconciliation-first — SKU 손익표보다 대조원장 먼저. 채널·컴포넌트마다 보존 법칙 Σ(SKU귀속)+Σ(잔차)==권위 엔진(compute_command_center·compute_rocket_overview) 계정소계 정확 성립(D-5, tolerance 아님).
+  - 신규 `backend/app/services/product_pnl.py`(Harness 3a 대조원장 + 3b SKU행 + SA 다수). 라우터 `GET /api/products/pnl-reconciliation`(account {WING1,WING2}, Decimal→str).
+  - T1/T2(f4526e4): grain 파라미터화+characterization. T3(d22aa0f): 대조원장 3a(3P/RG/1P/네이버/cafe24·계정조정4종·충돌→잔차). T4(91b9ec1): RG 옵션수수료 ×1.1 VAT gross-up+잔차2종. T5(82998a2): date_basis+partial_period 경고. T6(dac734f): 라우터+3b(net_profit_allocated_only·reconciled·account_adjustment_residual).
+  - **codex review 매 태스크(원칙19)**: T3 [P1]×3·T4 [P1][P2]·T6 [P1][P2] 전부 대화형 수용. 순환 임포트(products.py→product_pnl top-level) 지연 임포트로 해소(failures.jsonl 기록).
+  - ✅**T7 배포 게이트 PASS(원칙22)**: dev DB 사본(orders 3/1~4/15 1600건·광고562·로켓PO651·RG 0) 실검증 — 전 계정 conservation_ok=True·전 컴포넌트 diff=0, 엔진 대조 완전 일치. None reconciled=72,162,843·by_sku=318. WING1 by_sku=0=오픽스 매핑결손(D-1). S3 신규 테스트 20개, **전체 493 passed·ruff clean**.
+  - ⚠️venv는 이 워크트리에 없음 — upbeat-lamport-86c720 워크트리 venv(python3.11) 재사용.
+  - **다음 = S4/S5 프론트(화면 C, Opus 구조설계) · S6 오픽스 매핑 결손 보강 · (git) Jino 결정 시 백엔드 PR·머지.**
+- ─────────────────────────────────────────────
+- (이전) 날짜: 2026-06-22 (★오하이테크 광고 트랙 **S3 상주 자동화 완료·라이브 e2e 검증** — 트랙 거의 완료)
 - ★**오하이테크(1P) 광고비 수집 S3 완료(트랙 `docs/tracks/active/track_coupang-ohitech-ad.md`, D-11)**: 전용 포트 9224 상주 Chrome(launchd `com.ohisell.ohitech-chrome` KeepAlive self-heal) + 버튼-poll 데몬(`com.ohisell.ohitech-ad`, 60s 버튼 + 23h 일별) + 백엔드 4엔드포인트(`/rocket/ad-cost/{request-refresh,refresh-status,refresh-claim,fetch-success}`) + 프론트 '광고비 갱신' 버튼(rocket-overview). 커밋 `2f92620`+`be5ffd3`(feat `feat/ohitech-ad-cost`, **미push·미머지**).
   - ★**포트 9223→9224 개정(D-11, Jino 승인)**: 라이브 9223은 rocket·wing2가 수동 공유 중(9222=WING1 상주) → ohitech 상주화하면 충돌→오벤더 push 위험 → 전용 9224.
   - 백엔드 테스트 +4(전체 **439 passed**). 페처 compile+ruff clean. 프론트 build OK.
