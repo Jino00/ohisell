@@ -18,13 +18,19 @@ from app.schemas import (
     ProductUpdate,
     ProductOut,
     MappingCreate,
+    MappingUpdate,
     MappingOut,
     MappingIngestResult,
     ChannelCoverageOut,
     UnmappedOption,
+    ConnCell,
+    ConnChannel,
+    ConnRow,
+    ConnectionMapOut,
 )
 from app.services.product_mapping_ingest import ingest_master_sheet
 from app.services.mapping_coverage import compute_mapping_coverage
+from app.services.product_connection_map import build_connection_map
 
 _COVERAGE_UNMAPPED_LIMIT = 50  # 응답 payload 상한(채널당). 나머지는 truncated 카운트로만 표기.
 
@@ -145,6 +151,67 @@ def add_mapping(
         channel_sku=m.channel_sku,
         selling_price=m.selling_price,
         is_active=m.is_active,
+    )
+
+
+@router.patch("/{product_id}/mappings/{mapping_id}", response_model=MappingOut)
+def update_mapping(
+    product_id: int,
+    mapping_id: int,
+    data: MappingUpdate,
+    db: Session = Depends(get_db),
+):
+    """단일 매핑 인라인 편집(상품 연관맵 트랙 S4, D-12).
+
+    옵션ID 변경 시 유일성 가드: 같은 채널에서 다른 상품이 이미 그 옵션ID를 active로
+    갖고 있으면 409(매출·원가 이중귀속 방지). 수동 편집한 매핑은 mapping_source='manual'로
+    표시해 쿠팡 상품 자동동기화가 덮어쓰지 않게 한다(회귀 방지, product_sync 가드와 짝).
+    """
+    m = (
+        db.query(ProductChannelMapping)
+        .filter_by(id=mapping_id, product_id=product_id)
+        .first()
+    )
+    if not m:
+        raise HTTPException(404, "매핑을 찾을 수 없습니다")
+
+    fields = data.model_dump(exclude_unset=True)
+    new_cpid = fields.get("channel_product_id")
+    if new_cpid is not None and new_cpid != m.channel_product_id:
+        if not new_cpid.strip():
+            raise HTTPException(422, "채널옵션ID는 비울 수 없습니다")
+        clash = (
+            db.query(ProductChannelMapping)
+            .filter(
+                ProductChannelMapping.channel_id == m.channel_id,
+                ProductChannelMapping.channel_product_id == new_cpid,
+                ProductChannelMapping.product_id != product_id,
+                ProductChannelMapping.is_active.is_(True),
+            )
+            .first()
+        )
+        if clash:
+            raise HTTPException(
+                409,
+                f"채널옵션ID '{new_cpid}'는 이미 다른 상품(id={clash.product_id})에 매핑돼 있습니다",
+            )
+
+    for k, v in fields.items():
+        setattr(m, k, v)
+    m.mapping_source = "manual"  # 수동 편집 → 자동동기화 clobber 방지(D-12)
+    db.commit()
+    db.refresh(m)
+    ch = db.query(Channel).get(m.channel_id)
+    return MappingOut(
+        id=m.id,
+        channel_id=m.channel_id,
+        channel_name=ch.name if ch else None,
+        channel_product_id=m.channel_product_id,
+        channel_product_name=m.channel_product_name,
+        channel_sku=m.channel_sku,
+        selling_price=m.selling_price,
+        is_active=m.is_active,
+        mapping_source=m.mapping_source,
     )
 
 
@@ -456,6 +523,63 @@ def mapping_coverage(
             )
         )
     return out
+
+
+# ── 상품 연결맵 매트릭스 (내부옵션×채널, 트랙 S4 D-12) ──
+@router.get("/connection-map", response_model=ConnectionMapOut)
+def connection_map(
+    q: str | None = Query(None, description="internal_sku·상품명 부분일치 필터"),
+    limit: int | None = Query(None, description="반환 행 상한(생략=전체). total_products로 잘림 확인"),
+    db: Session = Depends(get_db),
+):
+    """내부옵션(행) × 채널(열) 매트릭스 + 채널옵션ID 충돌 표면화(읽기전용, 부작용 없음).
+
+    상품 연관맵 트랙 S4: docs/tracks/active/track_product-connection-map.md D-12.
+    커버리지 배지는 별도 GET /mapping-coverage(S2)를 함께 소비한다.
+    """
+    cmap = build_connection_map(db, q=q, limit=limit)
+    return ConnectionMapOut(
+        channels=[
+            ConnChannel(
+                channel_id=c.channel_id,
+                channel_code=c.channel_code,
+                channel_name=c.channel_name,
+                platform=c.platform,
+                sell_type=c.sell_type,
+            )
+            for c in cmap.channels
+        ],
+        rows=[
+            ConnRow(
+                product_id=r.product_id,
+                internal_sku=r.internal_sku,
+                product_name=r.product_name,
+                cost_price=r.cost_price,
+                cells={
+                    cid: [
+                        ConnCell(
+                            mapping_id=cell.mapping_id,
+                            channel_product_id=cell.channel_product_id,
+                            channel_product_name=cell.channel_product_name,
+                            channel_sku=cell.channel_sku,
+                            selling_price=cell.selling_price,
+                            is_active=cell.is_active,
+                            mapping_source=cell.mapping_source,
+                            conflict=cell.conflict,
+                        )
+                        for cell in cells
+                    ]
+                    for cid, cells in r.cells.items()
+                },
+                mapped_channel_count=r.mapped_channel_count,
+                has_conflict=r.has_conflict,
+            )
+            for r in cmap.rows
+        ],
+        total_products=cmap.total_products,
+        shown_products=cmap.shown_products,
+        conflict_option_count=cmap.conflict_option_count,
+    )
 
 
 # ── 통합 손익 대조원장 (S3 T6, D-11) ──────────────────────────

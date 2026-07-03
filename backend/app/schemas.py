@@ -61,6 +61,53 @@ class MappingOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+# 단일 매핑 인라인 편집(상품 연관맵 트랙 S4, D-12) — 전부 optional(부분 갱신)
+class MappingUpdate(BaseModel):
+    channel_product_id: Optional[str] = None
+    channel_product_name: Optional[str] = None
+    channel_sku: Optional[str] = None
+    selling_price: Optional[Decimal] = None
+    is_active: Optional[bool] = None
+
+
+# ── 상품 연결맵 매트릭스(내부옵션×채널, 트랙 S4 D-12) ──
+class ConnCell(BaseModel):
+    mapping_id: int
+    channel_product_id: str
+    channel_product_name: Optional[str] = None
+    channel_sku: Optional[str] = None
+    selling_price: Decimal
+    is_active: bool
+    mapping_source: str
+    conflict: bool
+
+
+class ConnChannel(BaseModel):
+    channel_id: int
+    channel_code: str
+    channel_name: str
+    platform: str
+    sell_type: Optional[str] = None
+
+
+class ConnRow(BaseModel):
+    product_id: int
+    internal_sku: str
+    product_name: str
+    cost_price: Decimal
+    cells: dict[int, list[ConnCell]]  # channel_id → 셀 목록(JSON에선 키가 문자열)
+    mapped_channel_count: int
+    has_conflict: bool
+
+
+class ConnectionMapOut(BaseModel):
+    channels: list[ConnChannel]
+    rows: list[ConnRow]
+    total_products: int
+    shown_products: int
+    conflict_option_count: int
+
+
 # ── 상품 연관맵 엑셀 마스터 적재 (상품 연관맵 트랙 S1) ──
 class MappingIngestResult(BaseModel):
     products_created: int
