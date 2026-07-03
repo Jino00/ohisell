@@ -108,8 +108,8 @@ DB: `backend/ohisell.db` (dev), 엑셀: `.../15. 기획/상품 리스트/ohisell
 - [x] S0 정찰·구조 확정·트랙 생성 (2026-07-03)
 - [x] S1 Harness1 매핑 적재 (엑셀 파서 + 라벨 리졸버 + upsert + 무결성 검사) (2026-07-03)
 - [x] S2 Harness2 매출 조인/백필 + 커버리지 리포트 (2026-07-03)
-- [x] S3 Harness3 통합 손익 조망 (대조원장 우선, T1~T7 전부 완료 2026-07-03) — 백엔드 완성·배포 게이트 PASS
-- [ ] S4 화면 C 탭1 연관맵 관리 UI
+- [x] S3 Harness3 통합 손익 조망 (대조원장 우선, T1~T7 전부 완료 2026-07-03) — 백엔드 완성·배포 게이트 PASS·main 머지(PR #2)
+- [x] S4 화면 C 탭1 연관맵 관리 UI (2026-07-03) — 백엔드(매트릭스 조회+인라인 편집)+프론트+codex PASS+라이브검증
 - [ ] S5 화면 C 탭2 통합 손익 UI
 - [ ] S6 오픽스 매핑 결손 보강(엑셀 소스 갱신) + prod 배포·라이브 self-verify
 
@@ -141,12 +141,19 @@ DB: `backend/ohisell.db` (dev), 엑셀: `.../15. 기획/상품 리스트/ohisell
 - **T6**(dac734f): 라우터 GET /api/products/pnl-reconciliation(account 계약 {WING1,WING2}, Decimal→str) + Harness 3b SKU행(net_profit_allocated_only·reconciled_net_profit·account_adjustment_residual). codex [P1](account allow-list)·[P2](불균형 시 reconciled 유지+trustworthy) 수용. product_pnl 지연 임포트로 앱 로드 순환 데드락 해소.
 - **T7 배포 게이트 PASS**(원칙22): dev DB 사본(orders 3/1~4/15, 1600건·광고562·로켓PO651·RG 0) 실검증 — 전 계정(None/WING1/WING2) conservation_ok=True·전 컴포넌트 diff=0, 엔진 대조 완전 일치(net_profit/3p_rev/1p_rev==command_center/rocket_overview). None reconciled=72,162,843(쿠팡 1.02M+1P 51.4M+네이버/cafe24 19.7M)·by_sku=318. WING1 by_sku=0=오픽스 매핑결손(D-1, S6 몫). 1P revenue 51.4M은 alloc=0(dev DB에 RocketProductCostMap 없어 전액 잔차, 커버리지 갭 정상 표면화). 테스트 총 20개(S3 신규), 전체 493 passed.
 
+## S4 완료 기록 (2026-07-03)
+- **백엔드**: 신규 SA `backend/app/services/product_connection_map.py`(`build_connection_map` — 내부옵션×채널 매트릭스 + 채널옵션ID 충돌 표면화, 읽기전용) + `GET /api/products/connection-map`(q·limit, total_products로 잘림 표면화) + `PATCH /api/products/{pid}/mappings/{mid}`(단일 인라인 편집). 유일성 헬퍼 `_active_option_clash`로 POST 추가·PATCH 편집·재활성화 전부 이중귀속 가드(409). 수동 편집/추가는 `mapping_source='manual'` → `product_sync.py::_maybe_upsert_mapping` 가드가 excel_master+manual 보호(자동동기화 clobber 방지).
+- **프론트**: 새 메뉴 '상품 연결맵'(`/product-connection-map`, `frontend/src/pages/ProductConnectionMap.tsx`) — 탭1 매트릭스(셀 인라인 편집/추가/삭제·충돌 빨강 배지·provenance 태그·채널별 커버리지) + 탭2 통합손익 자리(S5). Products.tsx의 중복 '연관맵 마스터 업로드' 버튼 제거(D-12). `fetchApi` 204/빈본문 처리(삭제 버그 해소).
+- **codex review(원칙19)**: 1R FAIL [P1]×2(재활성화 유일성 미검사·'+' 추가가 auto_sync로 가드 우회)+[P2](204 파싱). 3건 전부 수용·수정 → 2R **PASS**(잔여 0). 테스트 +2.
+- **검증**: 신규 테스트 12개, 전체 **505 passed**·ruff·tsc·vite build clean. **라이브(원칙22, 실 dev DB 894상품)**: total_products=894·conflict_option_count=46(=S1 무결성 채널ID중복 46건 정확 일치)·sell_type 7채널 정확·q/limit 정상.
+- 브랜치 `claude/peaceful-herschel-ea7fe6`(28772f0~), **미push·미머지**(S4 PR은 Jino 결정).
+
 ## 📍 현재 진행 단계
-S1+S2 main 머지(PR #1, `3e3624a`). **S3 백엔드 main 머지 완료**(PR #2 `f7fc0c5`, T1~T7 대조원장+VAT+날짜+라우터+3b, 배포 게이트 PASS·493 passed 라이브 재검증 2026-07-03). 작업 브랜치 `claude/peaceful-herschel-ea7fe6`를 main으로 ff 갱신 → S3 코드 보유. 다음: **S4 프론트(화면 C 탭1 연관맵 관리 UI)** 착수 — 설계 확정 중.
+S1+S2(PR #1)·S3 백엔드(PR #2) main 머지 완료. **S4 화면 C 탭1 연관맵 관리 UI 완료**(백엔드+프론트+codex PASS+라이브검증, 브랜치 미머지). 다음: S5 통합손익 UI 또는 S4 PR 머지(Jino 결정).
 
 ## ▶️ 다음 액션
-1. ~~S3 백엔드(T1~T7)~~ **완료·머지**(PR #2 `f7fc0c5`, 배포 게이트 PASS, 493 passed).
-2. **S4 화면 C 탭1 연관맵 관리 UI**(진행 중): 내부옵션×채널 그리드·인라인 편집·커버리지/충돌 배지·엑셀 업로드. Opus 구조설계 → Jino 승인 → 구현.
-3. **S5 화면 C 탭2 통합 손익 UI**: `GET /api/products/pnl-reconciliation` 소비(컴포넌트 보존 표시·SKU행·잔차 투명화·trustworthy).
+1. ~~S3 백엔드~~·~~S4 탭1 UI~~ **완료**.
+2. (git) **S4 PR·머지**는 Jino 결정 — 브랜치 `claude/peaceful-herschel-ea7fe6`.
+3. **S5 화면 C 탭2 통합 손익 UI**: `GET /api/products/pnl-reconciliation` 소비(컴포넌트 보존 표시·SKU행·잔차 투명화·trustworthy). PnlPlaceholder 대체.
 4. **S6**: 오픽스(WING1/RG1) 매핑 결손 보강(T7 WING1 by_sku=0) + prod 배포·라이브 self-verify.
 5. (정리) 머지 완료된 워크트리 `reverent-poitras-89cf7d`·`upbeat-lamport-86c720` 정리 대상(Jino 확인 후).
