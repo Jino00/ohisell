@@ -402,42 +402,64 @@ def _agg_fees(db: Session, dfrom: date, dto: date,
 
 
 def _agg_rg_settlement_fees(db: Session, dfrom: date, dto: date,
-                            account_key: str | None = None) -> dict[str, dict]:
-    """RG 정산 수수료를 account_key별·fee_type별로 집계. D-6/D-7: 대조(reconciliation) 뷰용.
+                            account_key: str | None = None,
+                            grain: str = "account") -> dict[str, dict]:
+    """RG 정산 수수료를 집계. D-6/D-7: 대조(reconciliation) 뷰용. D3(S3 트랙): grain 파라미터화.
 
     S1: account_key 주면 해당 계정만(계정 분리). None이면 전체(기존 동작 불변).
 
     날짜 필터: recognition_date_from과 recognition_date_to가 [dfrom, dto]와 겹치는 행.
     겹침 조건 = recognition_date_from <= dto AND recognition_date_to >= dfrom.
-    반환: {account_key: {fee_type: amount, ..., "total": Decimal}}
 
-    ★vendor_item_id=="" 가드(S6, codex P1): 계정 단위 대조뷰는 status/api 계정 row(sentinel '',
-      VAT후)만 집계한다. S6 옵션 row(vendor_item_id=옵션ID, VAT前 A-B)는 같은 (account,기간,fee_type)에
-      공존하므로 필터하지 않으면 VAT후+VAT前이 합산돼 비용이 과대계상된다. 옵션 row는 S7 net_profit
-      플립에서 별도 reader로 사용. (검산: Σ옵션(VAT前)+요약세액 == 계정 row(VAT후).)
+    grain="account"(기본값, 기존 동작 불변 — IRON RULE 회귀테스트 대상):
+      계정 단위 대조뷰. status/api 계정 row(sentinel vendor_item_id='', VAT後)만 집계.
+      반환: {account_key: {fee_type: amount, ..., "total": Decimal}}
+      ★S6 옵션 row(vendor_item_id=옵션ID, VAT前 A-B)는 같은 (account,기간,fee_type)에 공존하므로
+        필터하지 않으면 VAT後+VAT前이 합산돼 비용이 과대계상된다(codex S1 P1).
+
+    grain="option"(신규, S3 트랙 D3/D-9): 옵션 단위. S6 옵션 row(vendor_item_id≠'', VAT前 A-B)만 집계.
+      반환: {account_key: {vendor_item_id: {fee_type: amount, ..., "total": Decimal}}}
+      ★VAT前 값이므로 계정 row(VAT後)와 직접 비교 불가 — 호출부가 gross-up 후 대조(모델 §8-1,
+        Σ옵션(VAT前)+요약세액 == 계정 row(VAT後)). 이 함수는 원값(VAT前)만 반환, gross-up은 호출부 책임.
     """
+    if grain not in ("account", "option"):
+        raise ValueError(f"_agg_rg_settlement_fees: unknown grain {grain!r}")
+    is_option = grain == "option"
+    vendor_item_filter = (
+        CoupangRgSettlementFee.vendor_item_id != ""
+        if is_option
+        else CoupangRgSettlementFee.vendor_item_id == ""
+    )
+    group_cols = [CoupangRgSettlementFee.account_key, CoupangRgSettlementFee.fee_type]
+    if is_option:
+        group_cols.insert(1, CoupangRgSettlementFee.vendor_item_id)
     rows = (
         db.query(
             CoupangRgSettlementFee.account_key,
+            *([CoupangRgSettlementFee.vendor_item_id] if is_option else []),
             CoupangRgSettlementFee.fee_type,
             func.sum(CoupangRgSettlementFee.amount),
         )
         .filter(
             CoupangRgSettlementFee.recognition_date_from <= dto,
             CoupangRgSettlementFee.recognition_date_to >= dfrom,
-            CoupangRgSettlementFee.vendor_item_id == "",  # 계정 row만(옵션 row 이중계상 차단)
+            vendor_item_filter,
             *([CoupangRgSettlementFee.account_key == account_key]
               if account_key is not None else []),
         )
-        .group_by(
-            CoupangRgSettlementFee.account_key,
-            CoupangRgSettlementFee.fee_type,
-        )
+        .group_by(*group_cols)
         .all()
     )
     result: dict[str, dict] = {}
-    for account_key, fee_type, amount in rows:
-        entry = result.setdefault(account_key, {"total": _Z})
+    if is_option:
+        for acct, vid, fee_type, amount in rows:
+            acct_entry = result.setdefault(acct, {})
+            opt_entry = acct_entry.setdefault(vid, {"total": _Z})
+            opt_entry[fee_type] = _f(amount)
+            opt_entry["total"] = opt_entry["total"] + _f(amount)
+        return result
+    for acct, fee_type, amount in rows:
+        entry = result.setdefault(acct, {"total": _Z})
         entry[fee_type] = _f(amount)
         entry["total"] = entry["total"] + _f(amount)
     return result
