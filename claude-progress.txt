@@ -3,8 +3,14 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
-- 날짜: 2026-07-03 (★상품 연관맵 트랙 **S3 백엔드 전부 완료 T1~T7 · 배포 게이트 PASS**)
-- ★**상품 연관맵 S3(통합 손익 대조원장) 백엔드 완료**(트랙 `docs/tracks/active/track_product-connection-map.md`, 계획 `docs/PLAN_product-connection-map-s3.md`). 브랜치 `claude/reverent-poitras-89cf7d`(f4526e4~dac734f, 미push·미머지).
+- 날짜: 2026-07-03 (★상품 연관맵 트랙 **S3 백엔드 main 머지(PR #2) + S4 탭1 연관맵 관리 UI 완료**)
+- ★**S3 백엔드 main 머지 완료(PR #2 `f7fc0c5`)** + **S4 화면 C 탭1 연관맵 관리 UI 완료**(백엔드+프론트, 브랜치 `claude/peaceful-herschel-ea7fe6` 미push·미머지, 커밋 28772f0~68aa136).
+  - **S4 백엔드**: 신규 SA `product_connection_map.py`(`build_connection_map` 내부옵션×채널 매트릭스+충돌 표면화) + `GET /api/products/connection-map`(q·limit) + `PATCH /api/products/{pid}/mappings/{mid}`(인라인 편집). 헬퍼 `_active_option_clash`로 POST 추가·PATCH 편집·재활성화 이중귀속 가드(409). 수동 경로 mapping_source='manual'+product_sync 가드 확장(자동동기화 clobber 방지).
+  - **S4 프론트**: 새 메뉴 '상품 연결맵'(`/product-connection-map`, `ProductConnectionMap.tsx`) 탭1 매트릭스(인라인 편집/추가/삭제·충돌 배지·provenance·커버리지)+탭2 손익 자리(S5). D-12로 Products.tsx 중복 업로드 버튼 이관. fetchApi 204 처리.
+  - **codex 2R PASS**(1R [P1]×2+[P2] 전부 수용·수정). 테스트 +12(전체 **505 passed**·ruff·tsc·vite clean). 라이브(실 dev DB 894상품): conflict_option_count=46=S1 무결성 일치.
+  - **다음 = S5 통합손익 UI(PnlPlaceholder 대체) · S6 오픽스 매핑 보강·prod 배포 · (git) Jino 결정 시 S4 PR·머지.**
+- ─────────────────────────────────────────────
+- (이전) ★**상품 연관맵 S3(통합 손익 대조원장) 백엔드 완료**(계획 `docs/PLAN_product-connection-map-s3.md`). 원래 브랜치 `claude/reverent-poitras-89cf7d`(f4526e4~dac734f) → PR #2로 main 머지됨.
   - **핵심**: reconciliation-first — SKU 손익표보다 대조원장 먼저. 채널·컴포넌트마다 보존 법칙 Σ(SKU귀속)+Σ(잔차)==권위 엔진(compute_command_center·compute_rocket_overview) 계정소계 정확 성립(D-5, tolerance 아님).
   - 신규 `backend/app/services/product_pnl.py`(Harness 3a 대조원장 + 3b SKU행 + SA 다수). 라우터 `GET /api/products/pnl-reconciliation`(account {WING1,WING2}, Decimal→str).
   - T1/T2(f4526e4): grain 파라미터화+characterization. T3(d22aa0f): 대조원장 3a(3P/RG/1P/네이버/cafe24·계정조정4종·충돌→잔차). T4(91b9ec1): RG 옵션수수료 ×1.1 VAT gross-up+잔차2종. T5(82998a2): date_basis+partial_period 경고. T6(dac734f): 라우터+3b(net_profit_allocated_only·reconciled·account_adjustment_residual).
