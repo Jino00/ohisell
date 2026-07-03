@@ -291,6 +291,76 @@ def test_1p_scope_by_shared_vendor_ohitech_vs_ofix(db):
 
 
 # ─────────────────────────────────────────────────────────────
+# T4: RG 옵션수수료 VAT gross-up(×1.1) SKU 귀속 + rg_vat_residual (D-8/D-9)
+# ─────────────────────────────────────────────────────────────
+def _rg_fee(db, acct, ft, vid, amount, frm=date(2026, 6, 1), to=date(2026, 6, 30)):
+    db.add(CoupangRgSettlementFee(
+        account_key=acct, recognition_date_from=frm, recognition_date_to=to,
+        fee_type=ft, vendor_item_id=vid, amount=Decimal(amount)))
+
+
+def test_rg_settlement_fee_vat_grossup_conservation(db):
+    _ch(db, 1, "COUPANG_WING1")
+    _pm(db, 10, "OHI-0001")
+    _map(db, 10, 1, "V1")
+    _prod(db, "V1")
+    # 옵션 row(VAT前 A−B): V1(매핑) 입출고 10000, V9(미매핑) 입출고 2000
+    _rg_fee(db, "COUPANG_WING1", "warehousing", "V1", "10000")
+    _rg_fee(db, "COUPANG_WING1", "warehousing", "V9", "2000")
+    # 계정 row(VAT後, vendor_item_id=''): 입출고 13200(=(10000+2000)×1.1), ad_sales 5000(옵션 없음)
+    _rg_fee(db, "COUPANG_WING1", "warehousing", "", "13200")
+    _rg_fee(db, "COUPANG_WING1", "ad_sales", "", "5000")
+    db.commit()
+
+    result = compute_pnl_reconciliation(db, *WIN, account="COUPANG_WING1")
+    ccs = compute_command_center(db, *WIN, account="COUPANG_WING1")["account"]["summary"]
+
+    comp = _component(result, "coupang_rg", "settlement_fee")
+    # 권위 = 계정 RG 플립 총액(VAT後) = 13200 + 5000 = 18200
+    assert comp["authoritative_total"] == ccs["rg_settlement_total"] == Decimal("18200")
+    # V1 귀속 = 10000 × 1.1(gross-up) = 11000
+    assert comp["allocated_by_sku"]["OHI-0001"] == Decimal("11000")
+    # V9 미매핑 = 2000 × 1.1 = 2200
+    assert comp["residuals"]["rg_unmapped"] == Decimal("2200")
+    # ad_sales(옵션 row 없음) 5000 → 계정전용 잔차
+    assert comp["residuals"]["rg_account_only_fees"] == Decimal("5000")
+    # 입출고 gross-up gap = 13200 − (12000×1.1) = 0 (정상)
+    assert comp["residuals"]["rg_vat_grossup_gap"] == Decimal("0")
+    assert _conserved(comp)
+    assert comp["conservation_ok"] is True
+
+
+def test_rg_sale_fee_option_rows_attributed_to_sku(db):
+    """codex T4 P1: 판매수수료(sale_fee)도 엑셀 옵션 row가 있으면 SKU 귀속(입출고 전용 아님).
+    ×1.1이 틀리거나 already-VAT row가 섞이면 rg_vat_grossup_gap이 0이 아니게 되어 표면화."""
+    _ch(db, 1, "COUPANG_WING1")
+    _pm(db, 10, "OHI-0001")
+    _map(db, 10, 1, "V1")
+    _prod(db, "V1")
+    _rg_fee(db, "COUPANG_WING1", "sale_fee", "V1", "20000")   # 판매수수료 옵션 row(VAT前)
+    _rg_fee(db, "COUPANG_WING1", "sale_fee", "", "22000")     # 계정 row(VAT後=20000×1.1)
+    db.commit()
+
+    result = compute_pnl_reconciliation(db, *WIN, account="COUPANG_WING1")
+    comp = _component(result, "coupang_rg", "settlement_fee")
+    assert comp["allocated_by_sku"]["OHI-0001"] == Decimal("22000")  # 20000×1.1, SKU 귀속
+    assert comp["residuals"]["rg_account_only_fees"] == Decimal("0")  # 계정전용 없음
+    assert comp["residuals"]["rg_vat_grossup_gap"] == Decimal("0")   # ×1.1 정확
+    assert _conserved(comp)
+
+
+def test_rg_settlement_fee_absent_is_zero(db):
+    """RG 정산 데이터 없으면 settlement_fee 컴포넌트 0, 보존 유지(회귀 가드)."""
+    _ch(db, 1, "COUPANG_WING1")
+    db.commit()
+    result = compute_pnl_reconciliation(db, *WIN, account="COUPANG_WING1")
+    comp = _component(result, "coupang_rg", "settlement_fee")
+    assert comp["authoritative_total"] == _Z
+    assert comp["allocated_by_sku"] == {}
+    assert _conserved(comp)
+
+
+# ─────────────────────────────────────────────────────────────
 # T3-6: 네이버/cafe24 — _line_revenue/_line_commission 재사용, product_id→internal_sku 그룹
 # ─────────────────────────────────────────────────────────────
 def test_marketplace_naver_cafe24_conservation(db):

@@ -23,7 +23,8 @@ from app.models import (
 )
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
 from app.services.coupang.intelligence import (
-    _agg_orders, _agg_rg_orders, _resolve_account, compute_command_center,
+    _agg_orders, _agg_rg_orders, _agg_rg_settlement_fees, _resolve_account,
+    compute_command_center,
 )
 from app.services.coupang.rocket_intelligence import (
     _kst_window_utc, compute_rocket_overview,
@@ -33,6 +34,11 @@ from app.services.profit_calculator import _line_commission, _line_revenue
 log = logging.getLogger(__name__)
 
 _Z = Decimal("0")
+# RG 정산 옵션수수료 VAT gross-up 계수(D-9). 옵션 row=VAT前 할인적용가(A−B), 계정 row=VAT後.
+# 한국 부가세 10% → ×1.1(rg_settlement_sync.py:301 "Σ상세(A−B)+요약세액==status/api VAT後",
+# 필드명 totalTakeRateAmountWithVat 등 WithVat=VAT포함). 입출고/배송/보관만 옵션 row 존재,
+# 판매수수료·ad_sales는 계정 전용 → gross-up 대상 아님(rg_vat_residual로 흡수).
+_RG_VAT_GROSSUP = Decimal("1.1")
 
 
 # ──────────────────────────────────────────────
@@ -283,6 +289,41 @@ def compute_pnl_reconciliation(db: Session, dfrom: date, dto: date,
             "rg_settlement_flip": -cc_sum["rg_settlement_total"],
             "seller_shipping_3p": -cc_sum["seller_shipping_3p"],
         },
+    ))
+
+    # ── 쿠팡 RG 정산수수료: 옵션수수료 VAT gross-up SKU 귀속 + 명시 잔차 2종 (T4, D-8/D-9) ──
+    # 신규 지표: RG 옵션수수료(VAT前 A−B)를 SKU에 귀속(×1.1 gross-up)하되, 계정 RG 플립 총액(VAT後,
+    # net_profit 실차감값)과 화해. ★옵션 row 있는 fee_type은 어느 것이든 SKU 귀속(codex T4 P1 —
+    # 입출고뿐 아니라 판매수수료·반품·보관도 엑셀 옵션 row가 있으면 귀속됨. rg_settlement_sync 참조).
+    # ★잔차를 2종으로 분리(codex T4 P2 — 단일 plug는 ×1.1 오류·과귀속을 숨김):
+    #   rg_account_only_fees = 옵션 row 없는 fee_type(예: ad_sales)의 계정 VAT後 총액(정상 귀속불가분).
+    #   rg_vat_grossup_gap   = 옵션 row 있는 fee_type의 (계정VAT後 − Σ옵션×1.1). 정상 ≈0(반올림).
+    #                          ×1.1이 틀리거나 already-VAT row가 섞이면 여기서 터져 감사 가능.
+    # 보존: Σ(옵션귀속)+rg_unmapped+rg_account_only_fees+rg_vat_grossup_gap == rg_total (정확).
+    # net_profit 컴포넌트의 rg_settlement_flip(계정단위)은 불변 — 별도 신규 지표(D-8 화해).
+    rg_opt = _agg_rg_settlement_fees(db, dfrom, dto, acc["account_key"], grain="option")
+    rg_acct = _agg_rg_settlement_fees(db, dfrom, dto, acc["account_key"], grain="account")
+    rg_fee_by_vid: dict[str, Decimal] = {}
+    opt_ft_sum: dict[str, Decimal] = {}        # fee_type별 Σ옵션(VAT前 A−B)
+    for acct_opts in rg_opt.values():          # {account_key: {vid: {fee_type:amt, "total":Σ}}}
+        for vid, fees in acct_opts.items():
+            rg_fee_by_vid[vid] = rg_fee_by_vid.get(vid, _Z) + fees["total"] * _RG_VAT_GROSSUP
+            for ft, amt in fees.items():
+                if ft != "total":
+                    opt_ft_sum[ft] = opt_ft_sum.get(ft, _Z) + amt
+    alloc_rgfee, unmapped_rgfee = _partition_by_sku(rg_fee_by_vid, vid_sku)
+    acct_ft_sum: dict[str, Decimal] = {}       # fee_type별 Σ계정(VAT後)
+    for acct_fees in rg_acct.values():          # {account_key: {fee_type:amt, "total":Σ}}
+        for ft, amt in acct_fees.items():
+            if ft != "total":
+                acct_ft_sum[ft] = acct_ft_sum.get(ft, _Z) + amt
+    rg_account_only = sum((amt for ft, amt in acct_ft_sum.items() if not opt_ft_sum.get(ft)), _Z)
+    rg_vat_gap = sum((acct_ft_sum.get(ft, _Z) - opt_ft_sum[ft] * _RG_VAT_GROSSUP
+                      for ft in opt_ft_sum), _Z)
+    components.append(_reconcile_component(
+        "coupang_rg", "settlement_fee", cc_sum["rg_settlement_total"], alloc_rgfee,
+        {"rg_unmapped": unmapped_rgfee, "rg_account_only_fees": rg_account_only,
+         "rg_vat_grossup_gap": rg_vat_gap},
     ))
 
     # ── 1P(로켓배송): 별도 엔진(compute_rocket_overview) + RocketProductCostMap 브리지 ──
