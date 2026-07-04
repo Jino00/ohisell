@@ -3,7 +3,12 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
-- 날짜: 2026-07-04 (★상품 연관맵 트랙 **S1~S5 전부 main 머지 완료(PR #1~#4)** + **워크트리/브랜치 정리 완료**)
+- 날짜: 2026-07-04 (★상품 연관맵 트랙 **S6a prod 배포+라이브 self-verify 완료 — 실운영 버그 발견·즉시 수정**)
+- ★**상품 연관맵 S6a 완료**: prod(sellc.ohitech.co.kr, git 비관리·scp 배포)가 6/22 이후 이 트랙(S1~S5) 전체 미배포 상태였음을 발견 → 스코프드 배포(Jino 결정, 다른 트랙은 안 건드림). 절차: prod 백업(`/home/ubuntu/ohisell_bak/product-connection-map_20260704_045139`) → 신규/변경 백엔드 11개 파일 scp(`main`에서 직접 추출·sha256 전수 검증 — 로컬 워킹트리가 다른 브랜치라 최초 4개가 stale 배포됐다가 재확인 후 정정) → `alembic upgrade head`(`t4u5v6w7x8y9`, additive만) → pm2 재시작 → 프론트 `npm run build`+rsync dist.
+  - **★라이브 self-verify 중 실운영 버그 발견(원칙22)**: `GET /api/products/pnl-reconciliation`에서 `coupang net_profit`만 `conservation_ok=False`(diff=`3E-21`, 순환소수 나눗셈이 SKU분해 합산 vs 계정전체 합산 경로에서 정밀도 차이를 남김) → `summary.trustworthy=False`로 오판 → **SKU행 531건 전체가 화면에서 숨겨짐**(실사용 버그). Jino 승인 받아 즉시 수정: 백엔드 `_reconcile_component`를 원 단위(0.01) quantize 판정으로 변경(`c3dae2a`, main 직접 push) + 프론트 `ProductConnectionMap.tsx`의 빨강강조 로직도 raw diff 대신 백엔드 `conservation_ok` 사용하도록 동시 수정(`0f879ec`, 같은 근본원인의 프론트 인스턴스 — 사전 리뷰에서 dev DB로는 트리거 불가능해 unfalsifiable이던 케이스가 prod 라이브로 실제 관측됨). 재배포 후 재검증: 불균형 0건·SKU 531건 정상 노출. 테스트 507 passed(신규 2개 회귀).
+  - 남은 것 = **S6b**(오픽스 WING1/RG1 매핑 결손 보강 — Jino 갱신 마스터 엑셀 필요, 코드 작업 아님). 이 트랙의 코드 작업은 사실상 전부 완료.
+- ─────────────────────────────────────────────
+- (이전) 날짜: 2026-07-04 (★상품 연관맵 트랙 **S1~S5 전부 main 머지 완료(PR #1~#4)** + **워크트리/브랜치 정리 완료**)
 - ★**상품 연관맵 S1~S5 전부 main 머지**: PR #1(S1 `3e3624a`)·PR #2(S3 백엔드 `f7fc0c5`)·PR #3(S4 탭1 UI `89846d5`)·PR #4(S5 탭2 통합손익 UI `7c35941`, squash, 2026-07-03). 로컬 main = `7c35941`(origin/main과 동기화 완료).
   - **S5(탭2 통합손익 UI)**: `GET /api/products/pnl-reconciliation`(S3 백엔드 무변경) 소비 프론트. `frontend/src/lib/api.ts`(타입4+`fetchPnlReconciliation`)+`ProductConnectionMap.tsx` 4컴포넌트(PnlTab·PnlSummaryCards·PnlSkuTable 행확장·PnlLedgerPanel 대조원장). codex GATE PASS(P1 0·P2 0)+서브에이전트 4중 리뷰+라이브 self-verify(균형 케이스만 관측·불균형/빨강강조는 dev DB always 균형이라 unfalsifiable, 원칙22).
   - **★워크트리/브랜치 정리(2026-07-04)**: 로컬 main을 origin/main(`7c35941`)로 fast-forward + 손상 ref `inspiring-babbage-137afd 2` 제거 + 워크트리 `upbeat-lamport-86c720`(stale 미커밋 폐기·PR#2에 접힘)·`inspiring-babbage-137afd`(S5 머지 완료) 제거 + 머지 완료 로컬 브랜치 5개(elated-nightingale·cranky-tharp·reverent-poitras·peaceful-herschel·upbeat-lamport) 삭제. 유지: `inspiring-babbage-137afd` 브랜치(문서 갭 흡수 후 삭제 예정)·`nice-goldstine-1e4029`(별도 cafe24 미머지).
