@@ -34,6 +34,7 @@ from app.services.profit_calculator import _line_commission, _line_revenue
 log = logging.getLogger(__name__)
 
 _Z = Decimal("0")
+_WON = Decimal("0.01")  # 원 단위 잔차 판정 스케일(D5 회귀: 순환소수 나눗셈이 만드는 20+자리 소수 잡음 흡수용)
 # RG 정산 옵션수수료 VAT gross-up 계수(D-9). 옵션 row=VAT前 할인적용가(A−B), 계정 row=VAT後.
 # 한국 부가세 10% → ×1.1(rg_settlement_sync.py:301 "Σ상세(A−B)+요약세액==status/api VAT後",
 # 필드명 totalTakeRateAmountWithVat 등 WithVat=VAT포함). 입출고/배송/보관만 옵션 row 존재,
@@ -82,7 +83,13 @@ def _resolve_vid_sku(db: Session) -> tuple[dict[str, str], set[str]]:
 def _reconcile_component(channel: str, component: str, authoritative_total: Decimal,
                          allocated_by_sku: dict[str, Decimal],
                          residuals: dict[str, Decimal]) -> dict:
-    """한 채널·컴포넌트의 대조원장 행. 보존 법칙 성립 여부를 diff로 판정(정확=0)."""
+    """한 채널·컴포넌트의 대조원장 행. 보존 법칙 성립 여부를 diff로 판정(원 단위=0).
+
+    ★raw diff는 저장·표시용으로 그대로 둔다(투명성). 판정(conservation_ok)만 원 단위(0.01)로
+    quantize 후 0과 비교한다 — return_deduction 등 나눗셈(단가=매출/수량)이 만드는 순환소수가
+    합산 경로(SKU별 분해 vs 계정 전체)에 따라 소수점 20여 자리에서 흔적(예: 3E-21)을 남겨
+    실제로는 완전히 균형인 컴포넌트가 conservation_ok=False로 오판되는 것을 막는다. 원 미만
+    금액은 KRW에 존재하지 않으므로 이 반올림이 진짜 누락을 가리는 tolerance가 아니다(D5 취지 유지)."""
     allocated = sum(allocated_by_sku.values(), _Z)
     residual = sum(residuals.values(), _Z)
     diff = authoritative_total - (allocated + residual)
@@ -93,8 +100,8 @@ def _reconcile_component(channel: str, component: str, authoritative_total: Deci
         "allocated_to_sku": allocated,           # SKU 귀속 총합(보존 법칙 항)
         "allocated_by_sku": allocated_by_sku,    # internal_sku별 분해(3b SKU행 소스)
         "residuals": residuals,
-        "conservation_diff": diff,        # 정상=0. ≠0이면 조인/기준 버그
-        "conservation_ok": diff == _Z,
+        "conservation_diff": diff,        # 정상=0(±0.01 미만 순환소수 잔여 가능). ≠0이면 조인/기준 버그
+        "conservation_ok": diff.quantize(_WON) == _Z,
     }
 
 

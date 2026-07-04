@@ -580,3 +580,26 @@ def test_whole_ledger_conservation_and_empty_window(db):
     assert full["ledger"]["conservation_ok"] is True
     for c in full["ledger"]["components"]:
         assert c["conservation_ok"] is True, (c["channel"], c["component"])
+
+
+# ─── 원 단위 판정(라이브 발견, 2026-07-04): 순환소수 나눗셈 잔여 오판 방지 ───
+def test_reconcile_component_tolerates_repeating_decimal_noise():
+    """prod 라이브에서 실제 관측: unit_price=매출/수량 나눗셈이 만드는 순환소수가 SKU별 분해
+    경로와 계정 전체 합산 경로에서 다른 정밀도로 잘려 diff=3E-21 같은 원 미만 잔여를 남긴다.
+    이건 진짜 돈 누락이 아니라 Decimal 정밀도 흔적 — conservation_ok는 원 단위(0.01)로
+    판정해야 하고, raw conservation_diff는 투명성을 위해 그대로 보존한다."""
+    from app.services.product_pnl import _reconcile_component
+    authoritative = Decimal("6735174.176470588235294117650")  # 실제 prod 관측치(순환소수)
+    allocated_by_sku = {"OHI-0001": Decimal("6735174.176470588235294117647")}  # 21번째 자리 차이
+    row = _reconcile_component("coupang", "net_profit", authoritative, allocated_by_sku, {})
+    assert row["conservation_diff"] == Decimal("3E-21")  # raw diff는 그대로 노출(투명성)
+    assert row["conservation_ok"] is True  # 원 단위론 완전 균형 — 오판 아님
+
+
+def test_reconcile_component_still_catches_real_won_level_gap():
+    """원 단위 미만 반올림 허용이 진짜 1원 이상 누락까지 가려서는 안 된다(D5 회귀 가드)."""
+    from app.services.product_pnl import _reconcile_component
+    row = _reconcile_component("coupang", "revenue", Decimal("1000.00"),
+                               {"OHI-0001": Decimal("998.00")}, {})  # 2원 누락(잔차 0건)
+    assert row["conservation_ok"] is False
+    assert row["conservation_diff"] == Decimal("2.00")
