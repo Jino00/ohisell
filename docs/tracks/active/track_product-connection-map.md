@@ -111,7 +111,15 @@ DB: `backend/ohisell.db` (dev), 엑셀: `.../15. 기획/상품 리스트/ohisell
 - [x] S3 Harness3 통합 손익 조망 (대조원장 우선, T1~T7 전부 완료 2026-07-03) — 백엔드 완성·배포 게이트 PASS·main 머지(PR #2)
 - [x] S4 화면 C 탭1 연관맵 관리 UI (2026-07-03) — 백엔드(매트릭스 조회+인라인 편집)+프론트+codex PASS+라이브검증
 - [x] S5 화면 C 탭2 통합 손익 UI (2026-07-03) — 프론트 구현+라이브 브라우저 검증+codex PASS·main 머지(PR #4 `7c35941`)
-- [ ] S6 오픽스 매핑 결손 보강(엑셀 소스 갱신) + prod 배포·라이브 self-verify
+- [x] S6a prod 배포 + 라이브 self-verify (2026-07-04) — 오픽스 매핑 결손 보강은 별도(S6b, 엑셀 소스 대기)
+- [ ] S6b 오픽스(WING1/RG1) 매핑 결손 보강 — Jino 갱신 마스터 엑셀 대기(코드 작업 아님, 데이터 소스 문제)
+
+## S6a 완료 기록 (2026-07-04) — prod 배포 + 라이브 self-verify + 실운영 버그 발견·수정
+- **배경**: prod는 git 비관리(scp 배포), 6/22(오하이테크 광고 S3) 이후 이 트랙(S1~S5) 전체가 미배포 상태였음(intelligence.py 등 최근 mtime 6/20~6/22 확인). 이번 트랙만 스코프드 배포(Jino 결정).
+- **배포 절차**: prod 백업(`/home/ubuntu/ohisell_bak/product-connection-map_20260704_045139`, app/+DB+dist) → 신규/변경 백엔드 11개 파일 scp(`main` 커밋에서 직접 추출, sha256 체크섬 전수 일치 확인 — 로컬 워킹트리가 다른 브랜치라 최초 4개 파일이 stale 버전으로 잘못 배포됐다가 재확인 후 정정) → `alembic upgrade head`(`s3t4u5v6w7x8`→`t4u5v6w7x8y9`, additive 컬럼만) → pm2 재시작(0 unstable restarts, "Application startup complete") → 프론트 `npm run build`+rsync dist.
+- **라이브 self-verify(원칙22, 실 prod 데이터)**: `GET /api/products/mapping-coverage`·`/connection-map`·`/pnl-reconciliation` 전부 200, 실제 6월 매출·수수료·광고·원가 데이터로 응답(오픽스 WING1 mapped_option_count=168, 3P매출 6,514,790원 등 실측치).
+- **★실운영 버그 발견·즉시 수정**: `/pnl-reconciliation?from=2026-06-01&to=2026-06-30`에서 `coupang net_profit` 컴포넌트만 `conservation_ok=False`(diff=`3E-21`) — `unit_price=매출/수량` 나눗셈이 만드는 순환소수가 SKU별 분해 합산 경로와 계정 전체 합산 경로에서 정밀도 차이를 만들어, 실제로는 완전히 균형인데 `summary.trustworthy=False`로 오판 → **SKU 행 531건 전체가 화면에서 숨겨지는 실사용 버그**. 원인 파악 후 Jino 승인 받아 즉시 수정: `_reconcile_component`의 `conservation_ok` 판정을 원 단위(`Decimal("0.01")`)로 quantize 후 비교(raw `conservation_diff`는 투명성 위해 그대로 보존, 진짜 1원 이상 누락은 회귀테스트로 여전히 검출 확인). 커밋 `c3dae2a`(main 직접 push, PR 없음 — 라이브 버그 긴급수정). 테스트 2개 추가(507 passed). 재배포 후 재검증: 같은 6월 창에서 `conservation_ok=True`·`trustworthy=True`·SKU 행 531건 정상 노출.
+- **미검증**: 브라우저로 화면 직접 확인은 안 함(API 레벨 라이브 검증만). 필요 시 `/product-connection-map` 실제 클릭 확인 권장.
 
 ## S1 완료 기록 (2026-07-03)
 - 신규 `backend/app/services/product_mapping_ingest.py` — Harness(`ingest_master_sheet`) + 4 SA(엑셀 파서·라벨 리졸버·상품/매핑 upsert·무결성 검사).
@@ -167,11 +175,11 @@ DB: `backend/ohisell.db` (dev), 엑셀: `.../15. 기획/상품 리스트/ohisell
 **결론**: 5항목 중 1·2(행 렌더 쪽)·3·4는 라이브로 완전 관측. 2(경고 배너 쪽)와 5(빨간 강조)는 코드 존재는 확인했으나 현재 dev DB가 항상 균형 상태라 라이브 트리거 불가 — 원칙22에 따라 "관측했다"고 쓰지 않음.
 
 ## 📍 현재 진행 단계
-S1+S2(PR #1)·S3 백엔드(PR #2)·S4 탭1(PR #3)·**S5 탭2 통합 손익 UI(PR #4, squash merge `7c35941`, 2026-07-03)** 전부 main 머지 완료. S5는 codex review(gpt-5.x, `codex exec` 경로) **GATE PASS(P1 0·P2 0)** + Claude 서브에이전트 4중 리뷰(spec·코드품질·통합) 통과 + 라이브 브라우저 검증(균형 케이스만 관측·불균형 경로는 unfalsifiable). 다음: S6(오픽스 매핑 결손 보강).
+S1~S5 전부 main 머지(PR #1~#4) + **S6a prod 배포·라이브 self-verify 완료(2026-07-04)**. prod가 이 트랙 전체(6/22 이후 미배포 상태)를 스코프드로 따라잡음 + 라이브에서 실운영 버그(순환소수→conservation_ok 오판→SKU행 은폐) 발견·즉시 수정(`c3dae2a`, main 직접 push). 다음: S6b(오픽스 매핑 결손, 데이터 대기) — 이 트랙의 코드 작업은 사실상 전부 완료.
 
 ## ▶️ 다음 액션
-1. ~~S3 백엔드~~·~~S4 탭1 UI~~·~~S5 탭2 UI(PR #4 머지)~~ **완료**.
-2. **S6**: 오픽스(WING1/RG1) 매핑 결손 보강(T7 WING1 by_sku=0) + prod 배포·라이브 self-verify.
-3. (후속·비블로킹) 대조원장 diff 반올림 표시 이슈 — `won()`의 `Math.round` 때문에 `conservation_diff`가 `0.4`처럼 1원 미만이면 셀엔 `0원`으로 보이면서도 diff≠0 게이트는 빨강 강조를 켜서 "0원인데 빨강" 모순 표시 가능. 실 dev DB에선 diff 항상 0이라 미발생. 실불균형 데이터 등장 시 그 셀만 원문 문자열/소수 표기로 교체. (codex·Claude 양쪽 리뷰 공통 지적)
-4. (선택) S5 불균형/경고배너 경로는 dev DB로 트리거 불가 — 필요 시 fixture 데이터를 의도적으로 불균형 상태로 만들어 별도 검증하거나, unit/component 테스트로 커버.
+1. ~~S3 백엔드~~·~~S4 탭1 UI~~·~~S5 탭2 UI~~·~~S6a prod 배포·라이브 self-verify~~ **완료**.
+2. **S6b(유일한 남은 항목, 코드 아님)**: 오픽스(WING1/RG1) 매핑 결손 보강 — Jino가 갱신된 마스터 엑셀(WING1/RG1 20건보다 많은 매핑) 제공 시 `/product-connection-map` 화면에서 업로드하면 끝. 코드 변경 불필요.
+3. (해결됨 2026-07-04) 대조원장 diff 반올림 표시 이슈로 지적됐던 것과 같은 계열의 버그가 **백엔드에서 실제로 발생**(프론트 `won()` 표시 문제가 아니라 `conservation_ok` 판정 자체가 순환소수로 오판) — `_reconcile_component` 원 단위 quantize로 수정 완료(S6a 기록 참고). 프론트 `won()` 표시 쪽 이슈는 여전히 이론상 남아있으나(빨강 강조가 diff의 raw 부호로 결정되는지 quantize된 값으로 결정되는지 프론트 코드 재확인 필요) 백엔드가 이제 원 단위 미만을 conservation_ok=True로 정상 처리하므로 실사용 영향은 낮아짐.
+4. (선택) S5 불균형/경고배너 경로 fixture 테스트는 여전히 미비 — 필요 시 추가.
 5. ~~(정리) 머지 완료 워크트리·브랜치 정리~~ **완료(2026-07-04)**: 로컬 main을 origin/main(`7c35941`, S5 머지)로 동기화 + 손상 ref `inspiring-babbage-137afd 2` 제거 + 워크트리 `upbeat-lamport-86c720`·`inspiring-babbage-137afd` 제거 + 머지 완료 로컬 브랜치 5개(elated-nightingale·cranky-tharp·reverent-poitras·peaceful-herschel·upbeat-lamport) 삭제. 이 문서 갱신(§5 문서 갭 흡수)은 별도 docs 브랜치→main.

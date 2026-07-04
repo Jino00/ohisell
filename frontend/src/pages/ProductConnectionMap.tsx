@@ -806,7 +806,7 @@ function PnlLedgerPanel({
                     (a, v) => a + Number(v),
                     0,
                   );
-                  const diffNonZero = Number(c.conservation_diff) !== 0;
+                  const diffNonZero = !c.conservation_ok;
                   return (
                     <tr key={i} className={diffNonZero ? "bg-red-50" : ""}>
                       <td className="py-0.5 pr-3">{c.channel}</td>
