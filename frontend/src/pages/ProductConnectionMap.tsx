@@ -91,6 +91,12 @@ function ConnectionMapTab() {
   const [editing, setEditing] = useState<{ productId: number; mapping: ConnCell } | null>(null);
   const [adding, setAdding] = useState<{ productId: number; channelId: number } | null>(null);
 
+  // 미매핑 옵션ID 목록 펼침 + "이 옵션을 연결" 대상 선택(온라인 매핑 보강용)
+  const [openCoverage, setOpenCoverage] = useState<number | null>(null);
+  const [pendingAttach, setPendingAttach] = useState<
+    { channelId: number; optionId: string; orderCount: number } | null
+  >(null);
+
   const load = useCallback(async (query: string) => {
     setLoading(true);
     setErr("");
@@ -179,6 +185,7 @@ function ConnectionMapTab() {
         body: JSON.stringify(add),
       });
       setAdding(null);
+      setPendingAttach(null);
       load(q);
     } catch (e) {
       setErr(`${e}`);
@@ -270,6 +277,73 @@ function ConnectionMapTab() {
         </div>
       )}
 
+      {/* 미매핑 옵션ID 펼침 패널 — 채널 헤더의 "미매핑 N" 클릭 시 표시 */}
+      {openCoverage !== null &&
+        (() => {
+          const cov = covByChannel.get(openCoverage);
+          const ch = map?.channels.find((c) => c.channel_id === openCoverage);
+          if (!cov || !ch) return null;
+          return (
+            <div className="mb-3 p-3 bg-amber-50 border border-amber-200 rounded-md text-sm">
+              <div className="flex items-center justify-between mb-2">
+                <span className="font-medium text-amber-900">
+                  {ch.channel_name} 미매핑 옵션ID
+                </span>
+                <button onClick={() => setOpenCoverage(null)} className="text-amber-700 underline text-xs">
+                  닫기
+                </button>
+              </div>
+              {cov.unmapped_order_options.length === 0 ? (
+                <div className="text-gray-500 text-xs">미매핑 옵션이 없습니다.</div>
+              ) : (
+                <ul className="space-y-1">
+                  {cov.unmapped_order_options.map((opt) => (
+                    <li
+                      key={opt.option_id}
+                      className="flex items-center justify-between gap-2 bg-white rounded px-2 py-1 border"
+                    >
+                      <span className="font-mono text-xs">{opt.option_id}</span>
+                      <span className="text-[11px] text-gray-500">주문 {opt.order_count}건</span>
+                      <button
+                        onClick={() => {
+                          setPendingAttach({
+                            channelId: openCoverage,
+                            optionId: opt.option_id,
+                            orderCount: opt.order_count,
+                          });
+                          setOpenCoverage(null);
+                        }}
+                        className="text-[11px] bg-amber-600 text-white rounded px-2 py-0.5 hover:bg-amber-700"
+                      >
+                        연결할 상품 찾기
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {cov.unmapped_order_options_truncated > 0 && (
+                <div className="mt-2 text-[11px] text-gray-500">
+                  그 외 {cov.unmapped_order_options_truncated}건 더 있음(표시 생략)
+                </div>
+              )}
+            </div>
+          );
+        })()}
+
+      {/* 옵션ID 연결 대상 선택 안내 */}
+      {pendingAttach && (
+        <div className="mb-3 p-3 bg-green-50 border border-green-300 rounded-md text-sm text-green-800 flex flex-wrap items-center justify-between gap-2">
+          <span>
+            옵션 <b className="font-mono">{pendingAttach.optionId}</b>(주문 {pendingAttach.orderCount}건)을
+            연결할 상품을 아래 표에서 찾아 해당 채널 열의{" "}
+            <b>"↳ 이 옵션 연결"</b> 버튼을 누르세요. 위 검색창으로 상품명·내부코드를 좁혀보세요.
+          </span>
+          <button onClick={() => setPendingAttach(null)} className="text-green-700 underline text-xs">
+            취소
+          </button>
+        </div>
+      )}
+
       {/* 매트릭스 */}
       <div className="bg-white rounded-lg border overflow-x-auto">
         {loading || !map ? (
@@ -300,9 +374,19 @@ function ConnectionMapTab() {
                       {cov && (
                         <div className="font-normal text-[10px] text-gray-400 mt-0.5">
                           매핑 {cov.mapped_option_count} · 미매핑{" "}
-                          <span className={cov.unmapped_order_options.length ? "text-amber-600" : ""}>
-                            {cov.unmapped_order_options.length + cov.unmapped_order_options_truncated}
-                          </span>
+                          {cov.unmapped_order_options.length + cov.unmapped_order_options_truncated > 0 ? (
+                            <button
+                              onClick={() =>
+                                setOpenCoverage(openCoverage === ch.channel_id ? null : ch.channel_id)
+                              }
+                              className="text-amber-600 underline hover:text-amber-800"
+                              title="미매핑 옵션ID 목록 보기"
+                            >
+                              {cov.unmapped_order_options.length + cov.unmapped_order_options_truncated}
+                            </button>
+                          ) : (
+                            <span>0</span>
+                          )}
                         </div>
                       )}
                     </th>
@@ -349,9 +433,25 @@ function ConnectionMapTab() {
                           adding.productId === r.product_id &&
                           adding.channelId === ch.channel_id ? (
                             <AddEditor
+                              initialOptionId={
+                                pendingAttach && pendingAttach.channelId === ch.channel_id
+                                  ? pendingAttach.optionId
+                                  : undefined
+                              }
                               onSave={(v) => addMapping({ channel_id: ch.channel_id, ...v })}
                               onCancel={() => setAdding(null)}
                             />
+                          ) : pendingAttach && pendingAttach.channelId === ch.channel_id ? (
+                            <button
+                              onClick={() => {
+                                setEditing(null);
+                                setAdding({ productId: r.product_id, channelId: ch.channel_id });
+                              }}
+                              className="text-[11px] text-green-700 bg-green-100 hover:bg-green-200 rounded px-1.5 py-0.5 self-start font-medium"
+                              title={`옵션 ${pendingAttach.optionId} 연결`}
+                            >
+                              ↳ 이 옵션 연결
+                            </button>
                           ) : (
                             <button
                               onClick={() => {
@@ -472,13 +572,15 @@ function CellEditor({
 }
 
 function AddEditor({
+  initialOptionId,
   onSave,
   onCancel,
 }: {
+  initialOptionId?: string;
   onSave: (v: { channel_product_id: string; selling_price: number }) => void;
   onCancel: () => void;
 }) {
-  const [cpid, setCpid] = useState("");
+  const [cpid, setCpid] = useState(initialOptionId || "");
   const [price, setPrice] = useState("");
   return (
     <div className="flex flex-col gap-1 p-1.5 border border-green-300 rounded bg-green-50 min-w-[8rem]">
