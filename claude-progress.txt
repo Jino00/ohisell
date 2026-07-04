@@ -3,12 +3,14 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
-- 날짜: 2026-07-03 (★상품 연관맵 트랙 **S3 백엔드 main 머지(PR #2) + S4 탭1 연관맵 관리 UI 완료**)
-- ★**S3 백엔드 main 머지 완료(PR #2 `f7fc0c5`)** + **S4 화면 C 탭1 연관맵 관리 UI 완료**(백엔드+프론트, 브랜치 `claude/peaceful-herschel-ea7fe6` 미push·미머지, 커밋 28772f0~68aa136).
-  - **S4 백엔드**: 신규 SA `product_connection_map.py`(`build_connection_map` 내부옵션×채널 매트릭스+충돌 표면화) + `GET /api/products/connection-map`(q·limit) + `PATCH /api/products/{pid}/mappings/{mid}`(인라인 편집). 헬퍼 `_active_option_clash`로 POST 추가·PATCH 편집·재활성화 이중귀속 가드(409). 수동 경로 mapping_source='manual'+product_sync 가드 확장(자동동기화 clobber 방지).
-  - **S4 프론트**: 새 메뉴 '상품 연결맵'(`/product-connection-map`, `ProductConnectionMap.tsx`) 탭1 매트릭스(인라인 편집/추가/삭제·충돌 배지·provenance·커버리지)+탭2 손익 자리(S5). D-12로 Products.tsx 중복 업로드 버튼 이관. fetchApi 204 처리.
-  - **codex 2R PASS**(1R [P1]×2+[P2] 전부 수용·수정). 테스트 +12(전체 **505 passed**·ruff·tsc·vite clean). 라이브(실 dev DB 894상품): conflict_option_count=46=S1 무결성 일치.
-  - **다음 = S5 통합손익 UI(PnlPlaceholder 대체) · S6 오픽스 매핑 보강·prod 배포 · (git) Jino 결정 시 S4 PR·머지.**
+- 날짜: 2026-07-04 (★상품 연관맵 트랙 **S1~S5 전부 main 머지 완료(PR #1~#4)** + **워크트리/브랜치 정리 완료**)
+- ★**상품 연관맵 S1~S5 전부 main 머지**: PR #1(S1 `3e3624a`)·PR #2(S3 백엔드 `f7fc0c5`)·PR #3(S4 탭1 UI `89846d5`)·PR #4(S5 탭2 통합손익 UI `7c35941`, squash, 2026-07-03). 로컬 main = `7c35941`(origin/main과 동기화 완료).
+  - **S5(탭2 통합손익 UI)**: `GET /api/products/pnl-reconciliation`(S3 백엔드 무변경) 소비 프론트. `frontend/src/lib/api.ts`(타입4+`fetchPnlReconciliation`)+`ProductConnectionMap.tsx` 4컴포넌트(PnlTab·PnlSummaryCards·PnlSkuTable 행확장·PnlLedgerPanel 대조원장). codex GATE PASS(P1 0·P2 0)+서브에이전트 4중 리뷰+라이브 self-verify(균형 케이스만 관측·불균형/빨강강조는 dev DB always 균형이라 unfalsifiable, 원칙22).
+  - **★워크트리/브랜치 정리(2026-07-04)**: 로컬 main을 origin/main(`7c35941`)로 fast-forward + 손상 ref `inspiring-babbage-137afd 2` 제거 + 워크트리 `upbeat-lamport-86c720`(stale 미커밋 폐기·PR#2에 접힘)·`inspiring-babbage-137afd`(S5 머지 완료) 제거 + 머지 완료 로컬 브랜치 5개(elated-nightingale·cranky-tharp·reverent-poitras·peaceful-herschel·upbeat-lamport) 삭제. 유지: `inspiring-babbage-137afd` 브랜치(문서 갭 흡수 후 삭제 예정)·`nice-goldstine-1e4029`(별도 cafe24 미머지).
+  - **§5 문서 갭 흡수**: inspiring-babbage 사후 문서커밋(f14ac2b, S5 PR#4 머지 기록 6줄)을 트랙 파일에 반영 → 이 docs 브랜치(`claude/docs-s5-merge-sync`)로 main 반영.
+  - **다음 = S6 오픽스(WING1/RG1) 매핑 결손 보강(T7 WING1 by_sku=0)·prod 배포·라이브 self-verify. + inspiring-babbage 브랜치 정리(문서 흡수 머지 후).**
+- ─────────────────────────────────────────────
+- (이전) ★**S3 백엔드 main 머지(PR #2 `f7fc0c5`) + S4 탭1 연관맵 관리 UI 완료**: 신규 SA `product_connection_map.py`(`build_connection_map` 내부옵션×채널 매트릭스+충돌 표면화) + `GET /api/products/connection-map` + `PATCH /api/products/{pid}/mappings/{mid}`. 새 메뉴 '상품 연결맵'(`/product-connection-map`) 탭1 매트릭스+탭2 손익 자리. codex 2R PASS, 테스트 505 passed.
 - ─────────────────────────────────────────────
 - (이전) ★**상품 연관맵 S3(통합 손익 대조원장) 백엔드 완료**(계획 `docs/PLAN_product-connection-map-s3.md`). 원래 브랜치 `claude/reverent-poitras-89cf7d`(f4526e4~dac734f) → PR #2로 main 머지됨.
   - **핵심**: reconciliation-first — SKU 손익표보다 대조원장 먼저. 채널·컴포넌트마다 보존 법칙 Σ(SKU귀속)+Σ(잔차)==권위 엔진(compute_command_center·compute_rocket_overview) 계정소계 정확 성립(D-5, tolerance 아님).

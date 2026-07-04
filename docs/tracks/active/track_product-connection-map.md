@@ -110,7 +110,7 @@ DB: `backend/ohisell.db` (dev), 엑셀: `.../15. 기획/상품 리스트/ohisell
 - [x] S2 Harness2 매출 조인/백필 + 커버리지 리포트 (2026-07-03)
 - [x] S3 Harness3 통합 손익 조망 (대조원장 우선, T1~T7 전부 완료 2026-07-03) — 백엔드 완성·배포 게이트 PASS·main 머지(PR #2)
 - [x] S4 화면 C 탭1 연관맵 관리 UI (2026-07-03) — 백엔드(매트릭스 조회+인라인 편집)+프론트+codex PASS+라이브검증
-- [x] S5 화면 C 탭2 통합 손익 UI (2026-07-03) — 프론트 구현+라이브 브라우저 검증 완료
+- [x] S5 화면 C 탭2 통합 손익 UI (2026-07-03) — 프론트 구현+라이브 브라우저 검증+codex PASS·main 머지(PR #4 `7c35941`)
 - [ ] S6 오픽스 매핑 결손 보강(엑셀 소스 갱신) + prod 배포·라이브 self-verify
 
 ## S1 완료 기록 (2026-07-03)
@@ -167,11 +167,11 @@ DB: `backend/ohisell.db` (dev), 엑셀: `.../15. 기획/상품 리스트/ohisell
 **결론**: 5항목 중 1·2(행 렌더 쪽)·3·4는 라이브로 완전 관측. 2(경고 배너 쪽)와 5(빨간 강조)는 코드 존재는 확인했으나 현재 dev DB가 항상 균형 상태라 라이브 트리거 불가 — 원칙22에 따라 "관측했다"고 쓰지 않음.
 
 ## 📍 현재 진행 단계
-S1+S2(PR #1)·S3 백엔드(PR #2) main 머지 완료. **S4 화면 C 탭1 연관맵 관리 UI 완료**(백엔드+프론트+codex PASS+라이브검증, 브랜치 미머지). **S5 화면 C 탭2 통합 손익 UI 완료**(프론트+라이브 브라우저 검증, 균형 케이스만 관측·불균형 케이스는 unfalsifiable). 다음: S6(오픽스 매핑 결손 보강) 또는 S4/S5 PR 머지(Jino 결정).
+S1+S2(PR #1)·S3 백엔드(PR #2)·S4 탭1(PR #3)·**S5 탭2 통합 손익 UI(PR #4, squash merge `7c35941`, 2026-07-03)** 전부 main 머지 완료. S5는 codex review(gpt-5.x, `codex exec` 경로) **GATE PASS(P1 0·P2 0)** + Claude 서브에이전트 4중 리뷰(spec·코드품질·통합) 통과 + 라이브 브라우저 검증(균형 케이스만 관측·불균형 경로는 unfalsifiable). 다음: S6(오픽스 매핑 결손 보강).
 
 ## ▶️ 다음 액션
-1. ~~S3 백엔드~~·~~S4 탭1 UI~~·~~S5 탭2 UI~~ **완료**.
-2. (git) **S4/S5 PR·머지**는 Jino 결정 — 브랜치 `claude/peaceful-herschel-ea7fe6`(S4)·이 세션 브랜치(S5 확인 필요).
-3. **S6**: 오픽스(WING1/RG1) 매핑 결손 보강(T7 WING1 by_sku=0) + prod 배포·라이브 self-verify.
+1. ~~S3 백엔드~~·~~S4 탭1 UI~~·~~S5 탭2 UI(PR #4 머지)~~ **완료**.
+2. **S6**: 오픽스(WING1/RG1) 매핑 결손 보강(T7 WING1 by_sku=0) + prod 배포·라이브 self-verify.
+3. (후속·비블로킹) 대조원장 diff 반올림 표시 이슈 — `won()`의 `Math.round` 때문에 `conservation_diff`가 `0.4`처럼 1원 미만이면 셀엔 `0원`으로 보이면서도 diff≠0 게이트는 빨강 강조를 켜서 "0원인데 빨강" 모순 표시 가능. 실 dev DB에선 diff 항상 0이라 미발생. 실불균형 데이터 등장 시 그 셀만 원문 문자열/소수 표기로 교체. (codex·Claude 양쪽 리뷰 공통 지적)
 4. (선택) S5 불균형/경고배너 경로는 dev DB로 트리거 불가 — 필요 시 fixture 데이터를 의도적으로 불균형 상태로 만들어 별도 검증하거나, unit/component 테스트로 커버.
-5. (정리) 머지 완료된 워크트리 `reverent-poitras-89cf7d`·`upbeat-lamport-86c720` 정리 대상(Jino 확인 후).
+5. ~~(정리) 머지 완료 워크트리·브랜치 정리~~ **완료(2026-07-04)**: 로컬 main을 origin/main(`7c35941`, S5 머지)로 동기화 + 손상 ref `inspiring-babbage-137afd 2` 제거 + 워크트리 `upbeat-lamport-86c720`·`inspiring-babbage-137afd` 제거 + 머지 완료 로컬 브랜치 5개(elated-nightingale·cranky-tharp·reverent-poitras·peaceful-herschel·upbeat-lamport) 삭제. 이 문서 갱신(§5 문서 갭 흡수)은 별도 docs 브랜치→main.
