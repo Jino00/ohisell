@@ -13,3 +13,5 @@ build/
 backend/ohisell.db.bak.*
 tools/*.log
 .ohisell_ad_*
+
+.venv-test/

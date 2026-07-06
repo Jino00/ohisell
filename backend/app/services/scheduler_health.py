@@ -31,6 +31,7 @@ WATCHDOG_JOBS: tuple[str, ...] = (
     "sync_naver_settlement",
     "sync_naver_case_settlement",
     "sync_naver_sa_ad_costs",
+    "sync_naver_ad_daily",
     "sync_meta_ad_costs",
     "sync_coupang_products",
     "sync_coupang_rg_sizes",

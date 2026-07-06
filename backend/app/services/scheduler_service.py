@@ -203,6 +203,45 @@ def sync_naver_sa_ad_costs_job():
         db.close()
 
 
+def sync_naver_ad_daily_job():
+    """네이버 SA 일별 광고성과(naver_ad_daily) 수집 + BEP 산출 (07:30 KST).
+
+    최근 3일 창(리포트 사후 정정 반영, snapshot 교체 멱등). 07:00 ad_costs sync 이후 실행
+    (어제 AD/AD_CONVERSION 리포트 BUILT 보장). BEP는 매핑×원가×정산 실효율로 재산출.
+    네이버 SA 광고 최적화 트랙 P0.
+    """
+    db = _get_own_db_session()
+    try:
+        from app.services.naver_ad.ad_daily_ingest import ingest_ad_daily
+        from app.services.naver_ad.bep_calculator import calculate_bep
+
+        end = kst_today() - timedelta(days=1)
+        start = end - timedelta(days=2)  # 3일 창(사후 정정 흡수)
+        ing = ingest_ad_daily(db, start, end)
+        bep = calculate_bep(db)
+        log.info("[스케줄러] naver_ad_daily 적재 %s + BEP %s", ing, bep)
+    except Exception as e:
+        log.exception("[스케줄러] sync_naver_ad_daily_job 에러: %s", e)
+        raise  # 삼킴 정렬(S5b): cron 경로 EVENT_JOB_ERROR로 표면화
+    finally:
+        db.close()
+
+
+def snapshot_naver_ad_hourly_job():
+    """네이버 SA 시간별 캠페인 스냅샷 (매시간, 당일 누적). 빠른 루프(D-NAO-4) 데이터 기반."""
+    db = _get_own_db_session()
+    try:
+        from app.services.naver_ad.hourly_snapshot import snapshot_hourly
+
+        result = snapshot_hourly(db)
+        log.info("[스케줄러] naver_ad hourly snapshot: %s", result)
+    except Exception as e:
+        log.exception("[스케줄러] snapshot_naver_ad_hourly_job 에러: %s", e)
+        raise
+    finally:
+        db.close()
+
+
 def sync_meta_ad_costs_job():
     """Meta 광고비 어제치 자동 적재 (07:00 KST)"""
     db = _get_own_db_session()
@@ -664,6 +703,8 @@ def _ensure_default_states(db):
         ("auto_profit_calc", "30 6 * * *"),
         ("cafe24_token_refresh", "*/30 * * * *"),
         ("sync_naver_sa_ad_costs", "0 7 * * *"),
+        ("sync_naver_ad_daily", "30 7 * * *"),      # 네이버 SA 일별 성과+BEP (트랙 P0)
+        ("snapshot_naver_ad_hourly", "5 * * * *"),  # 네이버 SA 시간별 스냅샷 (빠른 루프)
         ("sync_naver_settlement", "25 5 * * *"),
         ("sync_naver_case_settlement", "30 5 * * *"),
         ("sync_meta_ad_costs", "0 7 * * *"),
@@ -713,6 +754,10 @@ def start_scheduler():
                 job_func = cafe24_proactive_refresh_job
             elif state.job_name == "sync_naver_sa_ad_costs":
                 job_func = sync_naver_sa_ad_costs_job
+            elif state.job_name == "sync_naver_ad_daily":
+                job_func = sync_naver_ad_daily_job
+            elif state.job_name == "snapshot_naver_ad_hourly":
+                job_func = snapshot_naver_ad_hourly_job
             elif state.job_name == "sync_naver_settlement":
                 job_func = sync_naver_settlement_job
             elif state.job_name == "sync_naver_case_settlement":

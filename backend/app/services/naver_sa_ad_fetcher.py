@@ -33,6 +33,25 @@ CONV_COL_ACTION = 10
 CONV_COL_VALUE = 12
 CONV_PURCHASE_ACTION = "purchase"  # 실구매만 매출로 집계(장바구니 등 제외)
 
+# ── 키워드/그룹 grain 상세 컬럼 인덱스 (recon 확정, docs/references/21) ──
+# AD 보고서(14컬럼): 위 COL_* 재사용 + 아래. avg_rank = rank_sum / imp.
+COL_ADGROUP_ID = 3
+COL_KEYWORD_ID = 4  # nkw-... / "-"(쇼핑=그룹 단위)
+COL_DEVICE = 8      # M/P
+COL_IMP = 9
+COL_CLK = 10
+COL_RANK_SUM = 12
+KEYWORD_NONE = "-"  # 쇼핑/브랜드 등 키워드 없음 sentinel → 저장 시 ""
+
+# AD_CONVERSION 보고서(13컬럼) 상세 컬럼
+CONV_COL_CAMPAIGN = 2
+CONV_COL_ADGROUP = 3
+CONV_COL_KEYWORD = 4
+CONV_COL_DIRINDIR = 9  # "1"=직접 / "2"=간접
+CONV_COL_CNT = 11
+
+_RETRY_STATUS = {429, 500, 502, 503, 504}
+
 
 def _headers(path: str) -> dict:
     ts = str(int(time.time() * 1000))
@@ -49,7 +68,30 @@ def _headers(path: str) -> dict:
 
 
 def _get(path: str, params: dict | None = None) -> requests.Response:
-    return requests.get(BASE_URL + path, headers=_headers(path), params=params, timeout=30)
+    """SA API GET. rate limit(429)·일시 5xx는 지수 백오프 재시도(최대 3회).
+
+    GET는 멱등이라 재시도 안전. 4xx(인증·잘못된 요청)는 즉시 반환(재시도 무의미).
+    """
+    last: requests.Response | None = None
+    for attempt in range(3):
+        resp = requests.get(BASE_URL + path, headers=_headers(path), params=params, timeout=30)
+        if resp.status_code not in _RETRY_STATUS:
+            return resp
+        last = resp
+        wait = 2 ** attempt  # 1s, 2s, 4s
+        log.warning("Naver SA %s %d — %ds 후 재시도(%d/3)", path, resp.status_code, wait, attempt + 1)
+        time.sleep(wait)
+    return last  # type: ignore[return-value]
+
+
+def _download_tsv(download_url: str) -> list[list[str]]:
+    """report-download URL을 다운로드해 TSV를 컬럼 리스트의 리스트로 반환(공통 헬퍼)."""
+    parsed = urlparse(download_url)
+    params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
+    resp = _get("/report-download", params=params)
+    resp.raise_for_status()
+    content = resp.content.decode("utf-8-sig", errors="replace")
+    return [line.split("\t") for line in content.strip().split("\n") if line]
 
 
 def get_campaigns() -> dict[str, str]:
@@ -227,6 +269,189 @@ def fetch_daily_conversion_revenue(date_from: date, date_to: date) -> dict[str, 
     except Exception as e:
         log.error("Naver SA 전환매출 조회 실패: %s", e)
         raise
+
+
+def get_campaign_types() -> dict[str, str]:
+    """캠페인 ID → campaignTp(WEB_SITE/SHOPPING/BRAND_SEARCH) 매핑 반환."""
+    resp = _get("/ncc/campaigns")
+    resp.raise_for_status()
+    return {c["nccCampaignId"]: c.get("campaignTp", "") for c in resp.json()}
+
+
+def get_campaigns_full() -> list[dict]:
+    """캠페인 전체 정보 반환: [{campaign_id, name, campaign_type, daily_budget}]."""
+    resp = _get("/ncc/campaigns")
+    resp.raise_for_status()
+    return [{
+        "campaign_id": c["nccCampaignId"],
+        "name": c.get("name", ""),
+        "campaign_type": c.get("campaignTp", ""),
+        "daily_budget": c.get("dailyBudget"),
+    } for c in resp.json()]
+
+
+_STATS_FIELDS = '["impCnt","clkCnt","salesAmt","ccnt","convAmt"]'
+
+
+def fetch_campaign_stats(
+    campaign_ids: list[str],
+    *,
+    date_preset: str = "today",
+    time_range: str | None = None,
+) -> list[dict]:
+    """캠페인별 /stats 집계(당일 누적 등) — 명명 필드(id 단수 반복 호출).
+
+    date_preset="today"면 당일 누적(빠른 루프용). time_range 주면 그 범위. /stats는 id 단수만
+    데이터 반환(ids 복수는 빈 응답, 실측). salesAmt=비용(원, AD리포트 cost와 정합 실증).
+
+    Returns: [{"campaign_id","imp","clk","cost","conv_cnt","conv_amt"}, ...] (데이터 있는 캠페인만).
+    """
+    if not ACCESS_LICENSE or not SECRET_KEY_B64:
+        log.warning("Naver SA 자격증명 없음 — /stats 수집 건너뜀")
+        return []
+    out: list[dict] = []
+    for cid in campaign_ids:
+        params = {"id": cid, "fields": _STATS_FIELDS}
+        if time_range:
+            params["timeRange"] = time_range
+        else:
+            params["datePreset"] = date_preset
+        resp = _get("/stats", params)
+        if resp.status_code != 200:
+            log.warning("Naver SA /stats %s %d", cid, resp.status_code)
+            continue
+        data = resp.json().get("data") or []
+        if not data:
+            continue
+        d = data[0]
+        out.append({
+            "campaign_id": cid,
+            "imp": _safe_int(d.get("impCnt", 0)),
+            "clk": _safe_int(d.get("clkCnt", 0)),
+            "cost": _safe_int(d.get("salesAmt", 0)),
+            "conv_cnt": _safe_int(d.get("ccnt", 0)),
+            "conv_amt": _safe_int(d.get("convAmt", 0)),
+        })
+    return out
+
+
+def _safe_int(v) -> int:
+    try:
+        return int(v)
+    except (ValueError, TypeError):
+        return 0
+
+
+def _row_date_iso(raw: str) -> str | None:
+    """YYYYMMDD → YYYY-MM-DD. 실패 시 None."""
+    if len(raw) != 8 or not raw.isdigit():
+        return None
+    return f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}"
+
+
+def fetch_ad_performance_daily(date_from: date, date_to: date) -> list[dict]:
+    """AD 보고서에서 (일자×캠페인×광고그룹×키워드) grain 성과를 집계 반환.
+
+    소재(ad)·기기(M/P)는 롤업 합산. keyword_id="-"(쇼핑/브랜드)는 "" sentinel로 정규화
+    → 쇼핑은 그룹 단위로 집계됨. avg_rank는 rank_sum/imp로 소비측에서 계산.
+    컬럼 실측 근거: docs/references/21. 순수 함수(HTTP만, DB 없음).
+
+    Returns:
+        [{"date","campaign_id","adgroup_id","keyword_id","imp","clk","cost","rank_sum"}, ...]
+    """
+    if not ACCESS_LICENSE or not SECRET_KEY_B64:
+        log.warning("Naver SA 자격증명 없음 — AD 성과 수집 건너뜀")
+        return []
+
+    reports = list_ad_reports(date_from, date_to)
+    if not reports:
+        log.warning("Naver SA: %s~%s AD 보고서 없음", date_from, date_to)
+        return []
+
+    agg: dict[tuple, dict] = {}
+    seen_dates: set[str] = set()
+    for rep in sorted(reports, key=lambda r: r["date"]):
+        if rep["date"] in seen_dates:
+            continue
+        seen_dates.add(rep["date"])
+        for cols in _download_tsv(rep["downloadUrl"]):
+            if len(cols) <= COL_RANK_SUM:
+                continue
+            d = _row_date_iso(cols[COL_DATE])
+            if d is None:
+                continue
+            kw = cols[COL_KEYWORD_ID]
+            keyword_id = "" if kw == KEYWORD_NONE else kw
+            key = (d, cols[COL_CAMPAIGN_ID], cols[COL_ADGROUP_ID], keyword_id)
+            row = agg.get(key)
+            if row is None:
+                row = {"date": d, "campaign_id": cols[COL_CAMPAIGN_ID],
+                       "adgroup_id": cols[COL_ADGROUP_ID], "keyword_id": keyword_id,
+                       "imp": 0, "clk": 0, "cost": 0, "rank_sum": 0}
+                agg[key] = row
+            row["imp"] += _safe_int(cols[COL_IMP])
+            row["clk"] += _safe_int(cols[COL_CLK])
+            row["cost"] += _safe_int(cols[COL_COST])
+            row["rank_sum"] += _safe_int(cols[COL_RANK_SUM])
+
+    log.info("Naver SA AD 성과 %d행 집계 (%s~%s)", len(agg), date_from, date_to)
+    return list(agg.values())
+
+
+def fetch_conversion_daily(date_from: date, date_to: date) -> list[dict]:
+    """AD_CONVERSION 보고서에서 (일자×캠페인×광고그룹×키워드) grain 전환을 집계 반환.
+
+    구매(purchase)만 집계(장바구니 제외). 직접(col9="1")/간접(col9="2") 분리.
+    keyword_id="-"는 "" sentinel. avg_rank 조인 키는 fetch_ad_performance_daily와 동일.
+
+    Returns:
+        [{"date","campaign_id","adgroup_id","keyword_id",
+          "conv_direct_cnt","conv_indirect_cnt","conv_direct_amt","conv_indirect_amt"}, ...]
+    """
+    if not ACCESS_LICENSE or not SECRET_KEY_B64:
+        log.warning("Naver SA 자격증명 없음 — 전환 수집 건너뜀")
+        return []
+
+    reports = _list_reports_by_type("AD_CONVERSION", date_from, date_to)
+    if not reports:
+        log.warning("Naver SA: %s~%s AD_CONVERSION 보고서 없음", date_from, date_to)
+        return []
+
+    agg: dict[tuple, dict] = {}
+    seen_dates: set[str] = set()
+    for rep in sorted(reports, key=lambda r: r["date"]):
+        if rep["date"] in seen_dates:
+            continue
+        seen_dates.add(rep["date"])
+        for cols in _download_tsv(rep["downloadUrl"]):
+            if len(cols) <= CONV_COL_VALUE:
+                continue
+            if cols[CONV_COL_ACTION] != CONV_PURCHASE_ACTION:
+                continue
+            d = _row_date_iso(cols[CONV_COL_DATE])
+            if d is None:
+                continue
+            kw = cols[CONV_COL_KEYWORD]
+            keyword_id = "" if kw == KEYWORD_NONE else kw
+            key = (d, cols[CONV_COL_CAMPAIGN], cols[CONV_COL_ADGROUP], keyword_id)
+            row = agg.get(key)
+            if row is None:
+                row = {"date": d, "campaign_id": cols[CONV_COL_CAMPAIGN],
+                       "adgroup_id": cols[CONV_COL_ADGROUP], "keyword_id": keyword_id,
+                       "conv_direct_cnt": 0, "conv_indirect_cnt": 0,
+                       "conv_direct_amt": 0, "conv_indirect_amt": 0}
+                agg[key] = row
+            cnt = _safe_int(cols[CONV_COL_CNT])
+            amt = _safe_int(cols[CONV_COL_VALUE])
+            if cols[CONV_COL_DIRINDIR] == "2":  # 간접
+                row["conv_indirect_cnt"] += cnt
+                row["conv_indirect_amt"] += amt
+            else:  # 직접("1") 및 기타
+                row["conv_direct_cnt"] += cnt
+                row["conv_direct_amt"] += amt
+
+    log.info("Naver SA 전환 %d행 집계 (%s~%s)", len(agg), date_from, date_to)
+    return list(agg.values())
 
 
 def extract_keyword(campaign_name: str, known_keywords: list[str]) -> str | None:

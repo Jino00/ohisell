@@ -1438,3 +1438,215 @@ class SchedulerState(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now()
     )
+
+
+# ══════════════════════════════════════════════════════════════════
+# 네이버 SA 광고 최적화 트랙 (track_naver-ad-optimization, D-NAO)
+# 계획서 docs/PLAN_naver-ad-optimization.md §2 데이터 모델.
+# grain/컬럼 실측 근거: docs/references/21_naver_sa_stat_report_recon.md
+# ══════════════════════════════════════════════════════════════════
+class NaverAdDaily(Base):
+    """네이버 SA 일별 광고 성과 — 통합 grain (D-NAO 계획서 §2).
+
+    grain: (ad_date, campaign_id, adgroup_id, keyword_id).
+      파워링크(WEB_SITE): keyword_id = nkw-... (키워드 단위).
+      쇼핑(SHOPPING)·브랜드검색: keyword_id = '' sentinel (그룹 단위, AD 리포트 col4='-').
+      기기(M/P)는 P0에서 롤업 합산(device 분리는 P1). '' sentinel = SQLite NULL-distinct 회피.
+    소스: /stat-reports AD(imp/clk/cost/rank_sum) + AD_CONVERSION(직접1/간접2 전환수·매출) 조인.
+    avg_rank = rank_sum / imp (0 노출이면 미정의). cost/conv_amt = 원 단위(VAT 별도).
+    같은 날짜 재수집 시 확정치로 교체(snapshot upsert). D-NAO-9: 키워드 단위 일 판단은
+    통계적 불가(0.88클릭/일) → 이 테이블은 누적 저장용, 판단은 7~30일 창 풀링.
+    """
+
+    __tablename__ = "naver_ad_daily"
+    __table_args__ = (
+        UniqueConstraint(
+            "ad_date", "campaign_id", "adgroup_id", "keyword_id",
+            name="uq_naver_ad_daily",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ad_date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)
+    campaign_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    campaign_type: Mapped[str] = mapped_column(String(20), nullable=False, default="")  # WEB_SITE/SHOPPING/BRAND_SEARCH
+    adgroup_id: Mapped[str] = mapped_column(String(50), nullable=False, default="")
+    keyword_id: Mapped[str] = mapped_column(String(50), nullable=False, default="")  # nkw-... / '' (쇼핑 그룹 단위)
+    imp: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    clk: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cost: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 원, VAT 별도
+    rank_sum: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # avg_rank = rank_sum/imp
+    conv_direct_cnt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 직접전환 수
+    conv_indirect_cnt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 간접전환 수
+    conv_direct_amt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 직접전환 매출(원)
+    conv_indirect_amt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 간접전환 매출(원)
+    synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class NaverProductBep(Base):
+    """네이버 상품별 손익분기 ROAS — 자동 산출 (D-NAO-8, 계획서 §2).
+
+    grain: (channel_id, channel_product_id). 네이버(ch6) 상품 단위.
+    소스: product_channel_mapping.selling_price × product_master.cost_price ×
+      실효 수수료율(naver_settlement_daily) → 공헌이익 → bep_roas = 판매가/공헌이익.
+    target_roas = bep_roas × 공격성 배수(안전1.3/표준1.15/공격1.05, D-NAO-2).
+    has_cost=False = 원가 미입력 상품(bep 미산출, 목록 노출용). 매일 재산출(snapshot 교체).
+    참고 메모리: bep-roas-calculation-structure.
+    """
+
+    __tablename__ = "naver_product_bep"
+    __table_args__ = (
+        UniqueConstraint("channel_id", "channel_product_id", name="uq_naver_product_bep"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id"), nullable=False, index=True)
+    channel_product_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    product_master_id: Mapped[Optional[int]] = mapped_column(ForeignKey("product_master.id"), nullable=True)
+    product_name: Mapped[str] = mapped_column(String(300), nullable=False, default="")
+    selling_price: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    cost_price: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    commission_rate: Mapped[Decimal] = mapped_column(Numeric(6, 4), nullable=False, default=0)  # 실효 수수료율(0~1)
+    logistics_cost: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)  # 물류비(원)
+    contribution_margin: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)  # 공헌이익(VAT후)
+    bep_roas: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4), nullable=True)  # 손익분기 ROAS(배수), 공헌이익<=0이면 None
+    aggressiveness: Mapped[str] = mapped_column(String(12), nullable=False, default="standard")  # safe/standard/aggressive
+    target_roas: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4), nullable=True)  # bep_roas × 공격성 배수
+    has_cost: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    calculated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class NaverCampaignSettings(Base):
+    """캠페인별 관리 주체·모드 (D-NAO-13). 진단·리포트는 전 캠페인, 제안·실행은 optimizer='ours'만.
+
+    optimizer: none(수동, 기본)/ours(스마트스토어 직접)/mop(MOP 소유, 우리는 손 안 댐).
+    한 캠페인 두 옵티마이저 동시 관리 금지 — execution_harness가 쓰기 직전 재검증.
+    """
+
+    __tablename__ = "naver_campaign_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    campaign_id: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
+    optimizer: Mapped[str] = mapped_column(String(8), nullable=False, default="none")  # none/ours/mop
+    mode: Mapped[Optional[str]] = mapped_column(String(12), nullable=True)  # growth/recovery/launch/defense
+    target_roas_override: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4), nullable=True)
+    memo: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class NaverHourlySnapshot(Base):
+    """시간별 캠페인 스냅샷 — 빠른 루프(관찰·페이싱) (D-NAO-4, 계획서 §2). 7일 롤링 보관.
+
+    grain: (ad_date, campaign_id, snapshot_hour). 매시간 누적 지표(cost/clk/imp)를 스냅샷.
+    소진율·페이싱·이상감지(P4)용. 직접 쓰기 금지(관찰만).
+    """
+
+    __tablename__ = "naver_hourly_snapshot"
+    __table_args__ = (
+        UniqueConstraint("ad_date", "campaign_id", "snapshot_hour", name="uq_naver_hourly_snapshot"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    snapshot_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)  # 수집 시각(KST)
+    ad_date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)  # 대상 날짜(오늘)
+    snapshot_hour: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 0~23 KST
+    campaign_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    campaign_type: Mapped[str] = mapped_column(String(20), nullable=False, default="")
+    cost: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 당일 누적 비용
+    clk: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    imp: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    daily_budget: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 소진율 계산용
+    synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class NaverChangeLog(Base):
+    """변경 1건 전건 기록 — 쓰기 유일 초크포인트 + 피드백 루프 (D-NAO-12/14, 계획서 §2).
+
+    predicted_*(실행 전 estimate) vs actual_*(D+7/14 실측) → outcome 판정 → 학습 환류.
+    action 예: add_negative_keyword / update_bid / update_budget. outcome:
+    improved/declined/neutral/executed(검증전). P0에서는 스키마만(쓰기는 P3).
+    """
+
+    __tablename__ = "naver_change_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    changed_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
+    entity_type: Mapped[str] = mapped_column(String(20), nullable=False, default="")  # campaign/adgroup/keyword
+    entity_id: Mapped[str] = mapped_column(String(50), nullable=False, default="")
+    campaign_id: Mapped[str] = mapped_column(String(50), nullable=False, default="", index=True)
+    action: Mapped[str] = mapped_column(String(40), nullable=False)
+    before_value: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    after_value: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    rationale: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 3소스 근거 요약
+    predicted_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # estimate 예측(클릭·비용·전환)
+    verify_date: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True)  # D+7/14 검증 예정일
+    actual_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 실측 결과
+    outcome: Mapped[Optional[str]] = mapped_column(String(12), nullable=True)  # improved/declined/neutral/executed
+    proposal_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+
+class NaverProposal(Base):
+    """제안 1건 (D-NAO 계획서 §2). 진단→제안 카드→Slack→(승인)→change_log.
+
+    type 예: negative_keyword/bid_up/bid_down/budget/new_setup. status:
+    pending/approved/rejected/expired. P0에서는 스키마만(생성은 P2).
+    """
+
+    __tablename__ = "naver_proposals"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
+    proposal_type: Mapped[str] = mapped_column(String(24), nullable=False)
+    target_type: Mapped[str] = mapped_column(String(20), nullable=False, default="")  # campaign/adgroup/keyword
+    target_id: Mapped[str] = mapped_column(String(50), nullable=False, default="")
+    campaign_id: Mapped[str] = mapped_column(String(50), nullable=False, default="", index=True)
+    rationale: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 무엇을/왜 3근거
+    expected_effect: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 예상효과
+    status: Mapped[str] = mapped_column(String(12), nullable=False, default="pending", index=True)
+    slack_ts: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    executed_change_log_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+
+class NaverKeywordCandidate(Base):
+    """발굴 키워드 후보 (D-NAO-10, 계획서 §2). keywordstool/쿠팡이식/검색어리포트 → 탐색 → 판정.
+
+    P0에서는 스키마만(발굴은 P4).
+    """
+
+    __tablename__ = "naver_keyword_candidates"
+    __table_args__ = (
+        UniqueConstraint("keyword", "source", name="uq_naver_keyword_candidate"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    keyword: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    source: Mapped[str] = mapped_column(String(20), nullable=False)  # keywordstool/coupang/search_term
+    monthly_volume: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 월 검색량
+    competition: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)  # 경쟁도
+    explore_started_at: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True)  # 탐색 투입일
+    explore_result_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 탐색 성적
+    verdict: Mapped[Optional[str]] = mapped_column(String(12), nullable=True)  # promote/reject/pending
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class NaverLearningState(Base):
+    """자율학습 파라미터 상태 (D-NAO-14, 계획서 §3.5). verify_harness가 유일 쓰기 주체.
+
+    scope: campaign/keyword_type/global. metric 예: proposal_accuracy/estimate_bias/
+    conv_delay/discovery_winrate/hour_weight/bep_accuracy. P0에서는 스키마만(환류는 P3/P5).
+    학습 경계: 파라미터만 조정, 가드레일 상수·권한 단계는 학습 대상 아님.
+    """
+
+    __tablename__ = "naver_learning_state"
+    __table_args__ = (
+        UniqueConstraint("scope", "scope_key", "metric", name="uq_naver_learning_state"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    scope: Mapped[str] = mapped_column(String(16), nullable=False)  # campaign/keyword_type/global
+    scope_key: Mapped[str] = mapped_column(String(60), nullable=False, default="")  # 상황버킷 키
+    metric: Mapped[str] = mapped_column(String(30), nullable=False)
+    sample_n: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    current_value: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 4), nullable=True)
+    confidence: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 4), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
