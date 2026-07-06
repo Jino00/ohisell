@@ -180,6 +180,29 @@ def test_calculate_bep_dedupes_duplicate_channel_product_id(db):
     assert row.has_cost is True and float(row.cost_price) == 5000  # 원가 있는 매핑 선택
 
 
+def test_calculate_bep_dedup_tiebreak_deterministic_when_both_have_cost(db):
+    """양쪽 매핑 모두 원가가 있어도(라이브 실측: 네이버 옵션 1개=기기 variant SKU 여러개,
+    원가 항상 동일) product_id 최솟값으로 결정적 선택 — 재실행해도 같은 SKU 유지."""
+    db.add(Channel(id=6, name="네이버", code="NAVER", platform="naver", commission_rate=Decimal("5.5")))
+    db.add(ProductMaster(id=10, internal_sku="s10", product_name="기기A", cost_price=Decimal("4353")))
+    db.add(ProductMaster(id=11, internal_sku="s11", product_name="기기B", cost_price=Decimal("4353")))
+    db.add(ProductChannelMapping(product_id=11, channel_id=6, channel_product_id="600",
+                                 selling_price=Decimal("0"), is_active=True))
+    db.add(ProductChannelMapping(product_id=10, channel_id=6, channel_product_id="600",
+                                 selling_price=Decimal("0"), is_active=True))
+    db.add(Order(channel_id=6, order_number="o2", platform_product_id="600",
+                 selling_price=Decimal("15900"), quantity=1, order_date=kst_now()))
+    db.add(NaverSettlementDaily(settle_expect_date="2026-07-01", settle_amount=Decimal("100"),
+                                pay_settle_amount=Decimal("105"), commission_amount=Decimal("-5")))
+    db.commit()
+    res1 = bep_calculator.calculate_bep(db)
+    row1 = db.query(NaverProductBep).one()
+    res2 = bep_calculator.calculate_bep(db)  # 재실행
+    row2 = db.query(NaverProductBep).one()
+    assert res1["rows"] == 1 and res2["rows"] == 1
+    assert row1.product_master_id == row2.product_master_id == 10  # 최솟값 product_id로 고정
+
+
 def test_ingest_ad_daily_snapshot_replace(db):
     rows = [
         {"ad_date": "2026-07-05", "campaign_id": "cmp-01", "campaign_type": "WEB_SITE",

@@ -97,10 +97,12 @@ def calculate_bep(db: Session, *, aggressiveness: str = "standard") -> dict:
     mappings = db.query(ProductChannelMapping).filter(
         ProductChannelMapping.channel_id == NAVER_CHANNEL_ID,
         ProductChannelMapping.is_active.is_(True),
-    ).all()
+    ).order_by(ProductChannelMapping.product_id).all()
 
-    # 같은 channel_product_id에 중복 매핑 존재(라이브 22건) → UNIQUE(channel,cpid) 제약.
-    # cpid당 1개로 dedupe: 원가 있는 매핑 우선(BEP 산출 가능), 동률이면 먼저 것.
+    # 같은 channel_product_id에 중복 매핑 존재(라이브 22건, 실측: 네이버 옵션 1개가 기기
+    # variant별 SKU 여러 개에 매핑된 경우 — 원가는 항상 동일해 금액에는 영향 없음).
+    # cpid당 1개로 dedupe: 원가 있는 매핑 우선(BEP 산출 가능), 동률이면 product_id 최솟값
+    # (위 order_by로 고정) → 재실행해도 같은 SKU가 결정적으로 선택됨.
     best: dict[str, ProductChannelMapping] = {}
     for m in mappings:
         cur = best.get(m.channel_product_id)
