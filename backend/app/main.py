@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.routers import ad_costs, channels, oauth, orders, products, sync
 from app.routers import dashboard, scheduler, settlements, manual_revenue
 from app.routers import coupang_report, overview, coupons, p6_meta, coupang_ops, naver_ops
+from app.routers import naver_ad
 
 log = logging.getLogger(__name__)
 
@@ -59,6 +60,7 @@ app.include_router(coupons.router)
 app.include_router(p6_meta.router)
 app.include_router(coupang_ops.router)
 app.include_router(naver_ops.router)
+app.include_router(naver_ad.router)
 
 
 @app.get("/health")
