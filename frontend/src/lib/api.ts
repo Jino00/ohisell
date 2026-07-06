@@ -1438,3 +1438,123 @@ export const NAVER_CLAIM_STATUS_LABELS: Record<string, string> = {
   PURCHASE_DECISION_HOLDBACK_RELEASE: "구매확정 보류해제",
   ADMIN_CANCELING: "직권취소 처리중", ADMIN_CANCEL_DONE: "직권취소 완료", ADMIN_CANCEL_REJECT: "직권취소 철회",
 };
+
+// ── 네이버 SA 광고 리포트 (P1, track_naver-ad-optimization) ──
+export interface NaverAdKpis {
+  imp: number;
+  clk: number;
+  cost: number;
+  rank_sum: number;
+  conv_direct_cnt: number;
+  conv_indirect_cnt: number;
+  conv_direct_amt: number;
+  conv_indirect_amt: number;
+  conv_cnt: number;
+  conv_amt: number;
+  ctr: number | null;
+  cpc: number | null;
+  avg_rank: number | null;
+  roas_naver: number | null;
+  roas_direct: number | null;
+}
+
+export interface NaverAdRoas3Col {
+  cost: number;
+  naver: { revenue: number; roas: number | null };
+  direct: { revenue: number; roas: number | null };
+  actual_order: { revenue: number; roas: number | null; order_count: number; note: string };
+}
+
+export interface NaverAdTrendRow extends NaverAdKpis {
+  ad_date: string;
+}
+
+export interface NaverAdDrilldownRow extends NaverAdKpis {
+  ad_date?: string;
+  campaign_id?: string;
+  campaign_type?: string;
+  adgroup_id?: string;
+  keyword_id?: string;
+}
+
+export interface NaverAdHourlyRow {
+  hour: number;
+  cost: number;
+  clk: number;
+  imp: number;
+}
+
+export interface NaverAdCompare {
+  period: { from: string; to: string };
+  kpis: NaverAdKpis;
+  roas_3col: NaverAdRoas3Col;
+  deltas_pct: Record<string, number | null>;
+}
+
+export interface NaverAdReport {
+  period: { from: string; to: string };
+  grain: string;
+  kpis: NaverAdKpis;
+  roas_3col: NaverAdRoas3Col;
+  trend: NaverAdTrendRow[];
+  rows: NaverAdDrilldownRow[] | NaverAdHourlyRow[];
+  hourly_meta?: { ad_date: string | null; total_cost: number };
+  compare?: NaverAdCompare;
+}
+
+export type NaverAdGrain = "date" | "campaign" | "adgroup" | "keyword" | "hour";
+
+export function fetchNaverAdReport(params: {
+  dateFrom: string;
+  dateTo: string;
+  grain: NaverAdGrain;
+  compareFrom?: string;
+  compareTo?: string;
+  campaignId?: string;
+}): Promise<NaverAdReport> {
+  const q = new URLSearchParams({
+    date_from: params.dateFrom,
+    date_to: params.dateTo,
+    grain: params.grain,
+  });
+  if (params.compareFrom) q.set("compare_from", params.compareFrom);
+  if (params.compareTo) q.set("compare_to", params.compareTo);
+  if (params.campaignId) q.set("campaign_id", params.campaignId);
+  return fetchApi<NaverAdReport>(`/api/naver/ad/report?${q.toString()}`);
+}
+
+export interface NaverAdBepRow {
+  channel_product_id: string;
+  product_master_id: number | null;
+  product_name: string | null;
+  selling_price: number | null;
+  cost_price: number | null;
+  commission_rate: number | null;
+  logistics_cost: number | null;
+  contribution_margin: number | null;
+  bep_roas: number | null;
+  aggressiveness: string | null;
+  target_roas: number | null;
+  has_cost: boolean;
+}
+
+export interface NaverAdBepList {
+  total: number;
+  actionable: number;
+  rows: NaverAdBepRow[];
+}
+
+export function fetchNaverAdBep(params?: {
+  onlyActionable?: boolean;
+  sort?: "bep_roas" | "target_roas" | "selling_price" | "contribution_margin";
+  desc?: boolean;
+  limit?: number;
+}): Promise<NaverAdBepList> {
+  const q = new URLSearchParams();
+  if (params?.onlyActionable) q.set("only_actionable", "true");
+  if (params?.sort) q.set("sort", params.sort);
+  if (params?.desc) q.set("desc", "true");
+  if (params?.limit) q.set("limit", String(params.limit));
+  const qs = q.toString();
+  return fetchApi<NaverAdBepList>(`/api/naver/ad/bep${qs ? `?${qs}` : ""}`);
+}

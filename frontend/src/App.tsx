@@ -12,6 +12,7 @@ import CommandCenter from "./pages/CommandCenter";
 import CoupangOps from "./pages/CoupangOps";
 import NaverOps from "./pages/NaverOps";
 import ProductConnectionMap from "./pages/ProductConnectionMap";
+import NaverAdReport from "./pages/NaverAdReport";
 
 export default function App() {
   return (
@@ -29,6 +30,7 @@ export default function App() {
           <Route path="settlements" element={<Settlements />} />
           <Route path="settings" element={<Settings />} />
           <Route path="ad-report" element={<AdReport />} />
+          <Route path="naver-ad" element={<NaverAdReport />} />
         </Route>
       </Routes>
     </BrowserRouter>

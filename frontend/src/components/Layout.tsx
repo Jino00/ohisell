@@ -21,6 +21,7 @@ const NAV_ITEMS = [
   { to: "/inventory", label: "재고 관리", icon: "🏭" },
   { to: "/settlements", label: "정산 관리", icon: "💰" },
   { to: "/ad-report", label: "광고 리포트", icon: "📈" },
+  { to: "/naver-ad", label: "네이버 광고", icon: "🟢" },
   { to: "/settings", label: "설정", icon: "⚙️" },
 ];
 
