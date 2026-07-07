@@ -174,7 +174,7 @@ def run_daily(db, *, lookback_days=15) -> dict:
 - [x] ✅ 라이브 검증(원칙22): prod DB 스크래치 사본(`cmp-a001-01-000000010206612` 카나리) → `optimizer='ours'` 세팅 → `run_daily()` 실행 → 159건 제안 실제 생성·저장 확인, 재실행 시 dedup 정상(generated=0), 계정 브리프 싱글톤 정상. **1차 라이브검증에서 실운영 버그 발견·즉시 수정**(starving_winners에 고정 목표순위 rank estimate 오적용 → bid_down 역전, `_RANK_ESTIMATE_BOARDS`로 수정). freshness 게이트·slack no-op(env 미설정) 정상 동작.
 - [x] ✅ codex review(원칙19): `667ad8f..HEAD` 스코프 리뷰 — P1 2건·P2 5건 발견. **4건 동의·즉시수정**(campaign target_roas_override 계산 미반영·보드 의미와 반대 방향 제안 미차단·slack 실패가 stage_status에 반영 안 됨·dedup key에 campaign_id 누락), **1건은 부분동의·의도적 연기**(freshness 부분적재 탐지 — 이상탐지 로직 필요해 D-S3-c 스코프와 겹침, 임의 임계값 도입은 추정 금지 원칙 위반). **2차 라이브 재검증 중 자체 발견**(codex 지적 아님): estimate_performance 연결 후 실제 호출해보니 400 "invalid collections size" — 이분탐색으로 원인 확정(네이버 입찰가는 70~100,000원 **10원 단위만 유효**, `affordable_ceiling`이 계산한 임의 정수는 전부 거부됨) → 10원 단위 내림+클램프로 수정(`docs/references/23` §4). 재검증: 159건 전부 유효 입찰가·굶는승자 27/27 정상 bid_up·예측클릭 159/159 연결. 회귀테스트 9개 추가, 전체 스위트 626 passed.
 - [x] ✅ prod 배포(sha256 scp·pm2 restart): 7개 파일 배포(bid_simulator·proposal_writer·proposal_pipeline·slack_notifier 신규 + fetcher·scheduler_service·routers/naver_ad.py 수정), sha256 전수 일치 확인. pm2 재시작 후 `/api/naver/ad/proposals`·`/campaign-settings`·`/diagnosis` 전부 200 확인, 에러 로그 클린. 스케줄러에 `generate_naver_proposals`(08:00 KST) 등록 확인(`next_run_time` API로 실측). **실제 prod 캠페인은 optimizer='ours'로 전환하지 않음**(스크래치 사본에서만 카나리 테스트 — 관찰모드 개시는 별도 운영 결정, Jino 몫).
-- [ ] ⏳ 트랙·progress 갱신·커밋
+- [x] ✅ 트랙·progress 갱신·커밋 (`79921db`)
 
 ### S3b — 프론트
 - [ ] ⏳ "최적화 콘솔" 탭 + 2섹션(제안 카드·optimizer 패널)
