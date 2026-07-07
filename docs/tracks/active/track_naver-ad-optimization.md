@@ -103,7 +103,11 @@
 ## 다음 액션
 
 1. **15일 데이터 축적 후 베이스라인 재대조** — naver_ad_daily 실단위 표본이 아직 짧아(현재 3~4일치) 원 베이스라인(30/4/16/42%)과 정확히 안 맞음(정상, 데이터 성숙도 문제). 매일 크론 축적 1~2주 후 재확인(별도 작업 불요, 확인만).
-2. **P2-S3 착수**: bid_simulator(D-NAO-19)·budget_allocator·proposal_writer·Slack·콘솔 제안카드/optimizer 패널. 착수 전 campaign_target_resolver "②쇼핑 상품BEP 연결" 필요성 재검토.
+2. **P2-S3 착수**: bid_simulator(D-NAO-19)·budget_allocator·proposal_writer·Slack·콘솔 제안카드/optimizer 패널. **계획서 작성 완료 → `docs/PLAN_naver-ad-P2-S3.md`**(SA 시그니처·체크리스트·라이브 프로브 절차 포함). 착수 = S3a 백엔드부터.
+   - **D-S3-a (2026-07-07 Jino 승인)**: S3 분할 = S3a 백엔드 → S3b 프론트(S2 동일 패턴, 단계별 라이브 검증).
+   - **D-S3-b (2026-07-07 Jino 승인)**: campaign_target_resolver ②(쇼핑 캠페인/그룹↔상품BEP 연결) **보류 유지** — 계정 기본 target_roas로 제안(관찰 모드 충분, 제안에 target 근거 라벨 부착). ②는 확정 소스(/ncc/ads 소재-상품 연결 or ShoppingProduct master-report) 확보 시 P3+ 별도. 이름 추정 매칭 금지.
+   - **D-S3-c (2026-07-07 Jino 승인, plan-eng-review codex 과빌드 지적 반영 — D-NAO 스코프 축소)**: 관찰 모드 S3 = **얇게**. S3a/b는 **bid_simulator(D-NAO-19) + proposal_writer + slack**만. **budget_allocator(marginal ROAS)와 경량 이상피드는 S3c로 연기**(폐기 아님). 근거: ①marginal ROAS는 집계 데이터로 인과≠상관 분리 불가(사전학습 intermittent-demand-short-history) ②이상피드는 원래 "본격 P4" ③학습 루프 1·2는 실행 원료 필요라 관찰 중 휴면 — 무거운 기계보다 제안 품질 증명이 먼저. bid_simulator는 D-NAO-19라 유지(핵심).
+   - **plan-eng-review 결과(2026-07-07, codex ready)**: codex 외부목소리 20건 + 자체 7건. 계획서 전면 개정 반영 완료(`docs/PLAN_naver-ad-P2-S3.md`). 핵심 정정: ⓐ `NaverProposal`에 `predicted_json` 컬럼 없음→expected_effect(Text)에 저장·구조화는 P3 change_log ⓑ daily_budget 소스는 이미 존재(`get_campaigns_full()` dailyBudget + hourly_snapshot)→프로브 불요, 관건은 staleness(S3c) ⓒ device 롤업 합산인데 estimate는 device 필요→지배기기 가정+라벨 ⓓ CVR×AOV→보정 클릭당매출÷target_roas(대수 동일·단순) ⓔ freshness 게이트(07:30 실패 시 stale 제안 금지) ⓕ as_of=마지막 완결 KST일 ⓖ slack_ts는 incoming webhook 미반환→best-effort ⓗ 첫 제안서=계정 브리프 결정적 싱글톤 ⓘ 완료기준 경계 정정(카나리 'ours' 세팅 후 검증).
 3. (선택) 판매가 커버리지 개선: 미주문 196상품 BEP 위해 네이버 상품 API 가격 동기화 검토 → actionable BEP 500+.
 4. 브랜치 push 여부 Jino 결정 필요(이 트랙 전체 커밋 미push 누적).
 5. **트랙 파일 정리**: 이 파일과 `docs/PLAN_naver-ad-optimization.md`가 메인 워크트리에 untracked로만 존재 — 적절한 브랜치에 커밋해 정리(Jino 결정: 어느 워크트리/브랜치에 귀속시킬지).
