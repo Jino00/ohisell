@@ -30,11 +30,12 @@ def hourly_rows(
 
     ad_date 미지정 시 on_or_before 이하 최신 스냅샷 날짜 사용(없으면 전체 최신).
     누적→증분: 캠페인별 시각 오름차순 정렬 후 직전 기록과 차분(첫 기록은 그 값). 시간대별 합산.
-    반환: {ad_date, rows:[{hour, cost, clk, imp}...](0~23 오름차순), total_cost}.
+    반환: {ad_date, rows:[{hour, cost, clk, imp}...](0~23 오름차순), total_cost, clamped}.
+    clamped=누적 감소(리셋/재적재 이상치)로 0-클램프된 횟수 — 0이면 정상, >0이면 데이터 이상 신호.
     """
     target = ad_date or _latest_ad_date(db, on_or_before)
     if target is None:
-        return {"ad_date": None, "rows": [], "total_cost": 0}
+        return {"ad_date": None, "rows": [], "total_cost": 0, "clamped": 0}
 
     q = db.query(
         NaverHourlySnapshot.campaign_id,
@@ -53,11 +54,14 @@ def hourly_rows(
 
     # 시간대별 증분 합산
     by_hour: dict[int, dict[str, int]] = {}
+    clamped = 0  # 누적 감소(리셋/재적재 이상치) 발생 횟수 — 데이터 이상 가시화(원칙22)
     for records in per_campaign.values():
         records.sort(key=lambda x: x[0])  # 시각 오름차순
         prev = (0, 0, 0)  # (cost, clk, imp) 누적 직전값
         for hour, cost, clk, imp in records:
-            # 누적 감소(리셋/재적재 이상치)는 0으로 클램프
+            # 누적 감소는 0으로 클램프(음수 증분 방지) — 발생 시 clamped 카운트에 반영
+            if cost < prev[0] or clk < prev[1] or imp < prev[2]:
+                clamped += 1
             inc_cost = max(0, cost - prev[0])
             inc_clk = max(0, clk - prev[1])
             inc_imp = max(0, imp - prev[2])
@@ -69,4 +73,4 @@ def hourly_rows(
 
     rows = [{"hour": h, **by_hour[h]} for h in sorted(by_hour)]
     total_cost = sum(r["cost"] for r in rows)
-    return {"ad_date": target.isoformat(), "rows": rows, "total_cost": total_cost}
+    return {"ad_date": target.isoformat(), "rows": rows, "total_cost": total_cost, "clamped": clamped}

@@ -1,6 +1,6 @@
 // NaverAdReport.tsx — 네이버 SA 광고 리포트 (P1, track_naver-ad-optimization)
 // 필터바(기간+비교) + KPI 8칸(+증감%) + 듀얼차트(광고비/ROAS) + 드릴다운 탭 + 3열 ROAS + BEP 표
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ResponsiveContainer,
   ComposedChart,
@@ -107,8 +107,10 @@ export default function NaverAdReport() {
   const [bep, setBep] = useState<NaverAdBepList | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const reqSeq = useRef(0);
 
   async function load() {
+    const mySeq = ++reqSeq.current;
     setLoading(true);
     setError(null);
     try {
@@ -119,11 +121,13 @@ export default function NaverAdReport() {
         compareFrom: compareOn && compareFrom ? compareFrom : undefined,
         compareTo: compareOn && compareTo ? compareTo : undefined,
       });
+      if (mySeq !== reqSeq.current) return; // 응답이 늦게 도착한 stale 요청 — 최신 상태만 반영(레이스 방지)
       setReport(data);
     } catch (e: any) {
+      if (mySeq !== reqSeq.current) return;
       setError(e.message);
     } finally {
-      setLoading(false);
+      if (mySeq === reqSeq.current) setLoading(false);
     }
   }
 
@@ -266,6 +270,16 @@ export default function NaverAdReport() {
           ) : isHourlyRows(report.rows, grain) ? (
             <table className="w-full">
               <thead>
+                {report.hourly_meta?.ad_date && (
+                  <tr>
+                    <th colSpan={4} className="px-4 py-2 text-xs font-normal text-gray-400 text-left bg-amber-50 border-b border-amber-100">
+                      {report.hourly_meta.ad_date} 하루치 표시 — 조회 기간과 무관하게 최신(또는 종료일 이하 최신) 하루만 보여줍니다
+                      {report.hourly_meta.clamped > 0 && (
+                        <span className="ml-2 text-amber-600">· 데이터 이상 {report.hourly_meta.clamped}건 감지(누적 감소 보정됨)</span>
+                      )}
+                    </th>
+                  </tr>
+                )}
                 <tr className="bg-gray-50 border-b border-gray-200">
                   <th className="px-4 py-2.5 text-xs font-medium text-gray-500 text-left">시간대</th>
                   <th className="px-4 py-2.5 text-xs font-medium text-gray-500 text-right">노출수</th>
@@ -306,7 +320,7 @@ export default function NaverAdReport() {
                       {grain === "date" ? r.ad_date
                         : grain === "campaign" ? `${r.campaign_id} (${r.campaign_type})`
                         : grain === "adgroup" ? `${r.campaign_id} / ${r.adgroup_id}`
-                        : `${r.adgroup_id} / ${r.keyword_id}`}
+                        : r.keyword_id ? `${r.adgroup_id} / ${r.keyword_id}` : `${r.adgroup_id} (키워드 없음 — 쇼핑검색 등)`}
                     </td>
                     <td className="px-4 py-2 text-sm border-b border-gray-100 text-right tabular-nums">{fmt(r.imp)}</td>
                     <td className="px-4 py-2 text-sm border-b border-gray-100 text-right tabular-nums">{fmt(r.clk)}</td>

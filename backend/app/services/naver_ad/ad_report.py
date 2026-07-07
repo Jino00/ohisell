@@ -87,7 +87,7 @@ def build_report(
     elif grain == "hour":
         hp = hourly_pacing.hourly_rows(db, on_or_before=date_to, campaign_filter=campaign_filter)
         rows = hp["rows"]
-        hourly_meta = {"ad_date": hp["ad_date"], "total_cost": hp["total_cost"]}
+        hourly_meta = {"ad_date": hp["ad_date"], "total_cost": hp["total_cost"], "clamped": hp["clamped"]}
     else:
         rows = metrics_aggregator.aggregate(
             db, date_from, date_to, grain=grain, campaign_filter=campaign_filter

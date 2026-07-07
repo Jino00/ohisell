@@ -1498,7 +1498,7 @@ export interface NaverAdReport {
   roas_3col: NaverAdRoas3Col;
   trend: NaverAdTrendRow[];
   rows: NaverAdDrilldownRow[] | NaverAdHourlyRow[];
-  hourly_meta?: { ad_date: string | null; total_cost: number };
+  hourly_meta?: { ad_date: string | null; total_cost: number; clamped: number };
   compare?: NaverAdCompare;
 }
 

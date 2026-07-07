@@ -136,11 +136,24 @@ def test_hourly_pacing_cumulative_to_incremental(db):
     assert by_hour[10]["cost"] == 500   # 3500-3000
     assert res["total_cost"] == 4000
     assert res["ad_date"] == D.isoformat()
+    assert res["clamped"] == 0  # 정상 누적 증가만 있었음
+
+
+def test_hourly_pacing_clamps_and_flags_cumulative_reset(db):
+    # 캠페인A: 8시 3000 → 9시 1000(리셋/재적재 이상치, 누적 감소) → 클램프 0 + clamped 카운트 반영
+    for h, c in [(8, 3000), (9, 1000)]:
+        db.add(NaverHourlySnapshot(snapshot_at=kst_now(), ad_date=D, snapshot_hour=h,
+                                   campaign_id="A", cost=c, clk=1, imp=10))
+    db.commit()
+    res = hourly_pacing.hourly_rows(db, ad_date=D)
+    by_hour = {r["hour"]: r for r in res["rows"]}
+    assert by_hour[9]["cost"] == 0  # 음수 증분은 0으로 클램프
+    assert res["clamped"] == 1  # 이상치 발생 1건이 가시화됨(원칙22)
 
 
 def test_hourly_pacing_empty(db):
     res = hourly_pacing.hourly_rows(db, ad_date=D)
-    assert res["rows"] == [] and res["total_cost"] == 0
+    assert res["rows"] == [] and res["total_cost"] == 0 and res["clamped"] == 0
 
 
 def test_build_report_3col_roas(db):
