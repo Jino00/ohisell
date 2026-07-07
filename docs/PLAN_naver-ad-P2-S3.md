@@ -163,7 +163,8 @@ def run_daily(db, *, lookback_days=15) -> dict:
   - 계층 베이지안 수축(키워드→그룹→캠페인→계정, pseudo-count=`LOW_CLICK_THRESHOLD`(10) 재사용) + `affordable_ceiling`(RPC÷target_roas, division/음수 guard) + `simulate_bid`(economic_ceiling·rank_bid 중 낮은 쪽, direction up/down/hold, `estimate` 묶음dict 부분실패 대응 capability_flags, is_new_or_growth는 라벨만·계산 무영향 D-NAO-20). 변경게이트(D-NAO-19-②)는 여기서 실행 안 함 — rationale 근거는 proposal_writer(T3) 몫. 단위테스트 13개(`test_naver_bid_simulator.py`) — 전체 스위트 577 passed.
 - [x] ✅ `proposal_writer.py` (build[optimizer 필터·target 라벨·negative 라벨·dedup]·persist·account_brief_singleton) + 단위테스트
   - `build()`: bleeding_keywords/starving_winners/shopping_group_bep(bid_sims 있을 때만 bid_up/bid_down, economic_ceiling<=0인 keyword grain은 negative_keyword로 격상) + exclusion_candidates(diagnosis만으로 negative_keyword, "전환귀속 없음" 정직 라벨) — optimizer='ours' 캠페인만(D-NAO-13), target_roas 근거는 `_TargetLabelCache`로 캠페인당 1회만 조회(N+1 방지). sim 없거나 direction='hold'면 제안 생성 안 함(억지 제안 방지). `persist()`: (proposal_type,target_id,status=pending) dedup check-then-insert. `account_brief_singleton()`: 달력일 1회 결정적 재사용(재실행해도 중복 없음, codex #17). 단위테스트 11개(`test_naver_proposal_writer.py`) — 전체 스위트 588 passed.
-- [ ] ⏳ `slack_notifier.py` (no-op 폴백·slack_ts best-effort·타임아웃·재시도) + 단위테스트
+- [x] ✅ `slack_notifier.py` (no-op 폴백·slack_ts best-effort·타임아웃·재시도) + 단위테스트
+  - `notify(proposals, *, webhook_url=None)`: env `NAVER_SLACK_WEBHOOK_URL` 미설정 시 no-op(D-NAO-21, 정상 경로), 제안 0건도 no-op(발송 스킵). 200 응답이면 JSON에 `ts` 있으면 채택·없으면 None(best-effort, codex #15 — incoming webhook은 대개 'ok'만 반환). 5xx/네트워크 예외는 지수 백오프 3회 재시도 후 실패 반환(예외 전파 안 함, harness가 흐름 계속 진행 가능). 단위테스트 7개(`test_naver_slack_notifier.py`) — 전체 스위트 595 passed.
 - [ ] ⏳ `proposal_pipeline.py` (freshness 게이트·as_of·precompute·단계상태·만료) + 통합테스트
 - [ ] ⏳ cron `generate_naver_proposals` 08:00 등록
 - [ ] ⏳ Router 2개(proposals·campaign-settings+전환로깅) + **TestClient HTTP 왕복(500 재발방지)**
