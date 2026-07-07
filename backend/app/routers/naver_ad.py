@@ -22,6 +22,7 @@ router = APIRouter(prefix="/api/naver/ad", tags=["naver-ad"])
 
 _VALID_GRAINS = metrics_aggregator.GRAINS + ("hour",)
 _MAX_RANGE_DAYS = 180  # 과도한 범위 방지(리포트는 최근 위주)
+_MAX_DIAGNOSIS_RANGE_DAYS = 30  # 진단 창은 최근 위주(다기간 비교는 harness 내부에서 30일 고정 사용)
 
 
 @router.get("/report")
