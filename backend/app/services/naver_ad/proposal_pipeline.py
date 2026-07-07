@@ -73,19 +73,22 @@ def _precompute_aggregates(db: Session, date_from: date, date_to: date) -> dict:
     return {"group": group_agg, "campaign": campaign_agg, "account": account_agg}
 
 
-def _collect_bid_sim_candidates(boards: dict) -> list[tuple[str, str, str, dict]]:
-    """진단 보드에서 bid_simulator 대상 행을 (target_type, target_id, campaign_id, row) 튜플로 수집.
+_RANK_ESTIMATE_BOARDS = {"bleeding_keywords", "shopping_group_bep"}  # 아래 라이브검증 주석 참조
+
+
+def _collect_bid_sim_candidates(boards: dict) -> list[tuple[str, str, str, dict, str]]:
+    """진단 보드에서 bid_simulator 대상 행을 (target_type, target_id, campaign_id, row, board) 튜플로 수집.
 
     exclusion_candidates(검색어)는 bid_simulator 대상이 아님(입찰가 없는 미등록 검색어 —
     proposal_writer가 진단 사실만으로 negative_keyword를 직접 만든다).
     """
-    out: list[tuple[str, str, str, dict]] = []
+    out: list[tuple[str, str, str, dict, str]] = []
     for row in boards.get("bleeding_keywords", []) or []:
-        out.append(("keyword", row["keyword_id"], row["campaign_id"], row))
+        out.append(("keyword", row["keyword_id"], row["campaign_id"], row, "bleeding_keywords"))
     for row in boards.get("starving_winners", []) or []:
-        out.append(("keyword", row["keyword_id"], row["campaign_id"], row))
+        out.append(("keyword", row["keyword_id"], row["campaign_id"], row, "starving_winners"))
     for row in boards.get("shopping_group_bep", []) or []:
-        out.append(("adgroup", row["adgroup_id"], row["campaign_id"], row))
+        out.append(("adgroup", row["adgroup_id"], row["campaign_id"], row, "shopping_group_bep"))
     return out
 
 
@@ -119,13 +122,22 @@ def compute_bid_sims(db: Session, diag: dict, date_from: date, as_of: date) -> d
     target_roas = Decimal(str(diag["account_target_roas"]))
     agg = _precompute_aggregates(db, date_from, as_of)
 
-    target_ids = [tid for _, tid, _, _ in candidates]
+    target_ids = [tid for _, tid, _, _, _ in candidates]
     bid_amts = dict(
         db.query(NaverEntity.entity_id, NaverEntity.bid_amt)
         .filter(NaverEntity.entity_id.in_(target_ids)).all()
     )
 
-    keyword_ids = [tid for ttype, tid, _, _ in candidates if ttype == "keyword"]
+    # ⚠️ 라이브검증(2026-07-07, 원칙22)에서 발견: starving_winners(성과 좋은데 저노출 —
+    # 육성 의도, D-NAO-18)에 고정 목표순위(position=2) rank_bid를 적용하면, 이미 그
+    # 순위보다 잘 나오는 고성과 키워드는 "지금보다 낮은 입찰로도 순위2는 유지된다"는
+    # 계산이 나와 bid_down을 추천해버림(성장 의도와 정반대). starving_winners는 rank
+    # estimate를 아예 조회하지 않고 economic_ceiling(수익 여력 기반 상한)만으로 판단—
+    # 고ROAS 키워드는 ceiling이 현재 입찰보다 높아 자연히 bid_up으로 이어진다.
+    keyword_ids = [
+        tid for ttype, tid, _, _, board in candidates
+        if ttype == "keyword" and board in _RANK_ESTIMATE_BOARDS
+    ]
     try:
         rank_by_kw = _fetch_rank_estimates(keyword_ids)
     except Exception as e:  # noqa: BLE001 — estimate 실패는 저하만, 파이프라인 중단 아님
@@ -133,7 +145,7 @@ def compute_bid_sims(db: Session, diag: dict, date_from: date, as_of: date) -> d
         rank_by_kw = {}
 
     bid_sims: dict[tuple[str, str], dict] = {}
-    for target_type, target_id, campaign_id, row in candidates:
+    for target_type, target_id, campaign_id, row, board in candidates:
         keyword_row = {
             "clk": row.get("clk", 0), "conv_amt": row.get("conv_amt", 0),
             "bid_amt": bid_amts.get(target_id),
@@ -147,7 +159,7 @@ def compute_bid_sims(db: Session, diag: dict, date_from: date, as_of: date) -> d
             group_agg = agg["group"].get(row.get("adgroup_id"), {"clk": 0, "conv_amt": 0})
 
         estimate = None
-        if target_type == "keyword" and target_id in rank_by_kw:
+        if board in _RANK_ESTIMATE_BOARDS and target_id in rank_by_kw:
             estimate = {
                 "rank_bid": rank_by_kw[target_id],
                 "rank_position": _TARGET_RANK_POSITION,

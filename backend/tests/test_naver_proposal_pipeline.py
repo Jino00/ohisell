@@ -104,6 +104,34 @@ def test_run_daily_full_happy_path_generates_proposal(db, monkeypatch):
     assert db.query(NaverProposal).filter(NaverProposal.proposal_type == "account_brief").count() == 1
 
 
+def test_run_daily_starving_winner_never_gets_bid_down_from_rank_estimate(db, monkeypatch):
+    """라이브검증(2026-07-07) 회귀 재현: 이미 목표순위보다 잘 나오는 고ROAS 저노출 키워드에
+    고정 목표순위(position=2) rank_bid를 적용하면 bid_down이 나와 육성 의도(D-NAO-18)와
+    정반대로 뒤집힌다. starving_winners는 rank estimate를 아예 조회하지 않아야 한다."""
+    _seed_bep(db)
+    db.add(NaverCampaignSettings(campaign_id="cmp1", optimizer="ours"))
+    # 현재 입찰가 100원인데도 클릭당매출이 매우 높은(=경제성 상한이 훨씬 큰) 저노출 승자.
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-star", campaign_id="cmp1",
+                        campaign_type="WEB_SITE", name="굶는승자", status="on", bid_amt=100))
+    # 15일 창 전체에 클릭 1건뿐(굶는승자 조건 avg_daily_clk<1) + 매우 높은 전환매출.
+    _row(db, AS_OF, "cmp1", "WEB_SITE", "grp1", "nkw-star", 500, 1, 1000, direct=100_000)
+    db.commit()
+
+    queried_ids = []
+
+    def fake_avg_pos_bid(device, items):
+        queried_ids.extend(it["key"] for it in items)
+        return [{"keyword": "굶는승자", "position": 2, "nccKeywordId": it["key"], "bid": 50} for it in items]
+
+    monkeypatch.setattr(proposal_pipeline.fetcher, "estimate_average_position_bid", fake_avg_pos_bid)
+
+    out = proposal_pipeline.run_daily(db)
+    assert "nkw-star" not in queried_ids  # starving_winners는 rank estimate 대상에서 제외
+
+    saved = db.query(NaverProposal).filter(NaverProposal.target_id == "nkw-star").one()
+    assert saved.proposal_type == "bid_up"  # economic_ceiling만으로 판단 → 고ROAS라 인상 추천
+
+
 def test_run_daily_rank_estimate_failure_degrades_not_crashes(db, monkeypatch):
     _seed_bep(db)
     db.add(NaverCampaignSettings(campaign_id="cmp1", optimizer="ours"))
