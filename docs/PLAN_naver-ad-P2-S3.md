@@ -157,7 +157,8 @@ def run_daily(db, *, lookback_days=15) -> dict:
 ## 4. 체크리스트 (✅완료 🔄진행 ⏳대기)
 
 ### S3a — 백엔드 (bid_simulator + proposal + slack + harness)
-- [ ] ⏳ estimate 라이브 프로브 → fetcher 2함수(자격증명 함수내 읽기·device) + 실측 스펙 `docs/references/23_naver_sa_estimate_recon.md`
+- [x] ✅ estimate 라이브 프로브 → fetcher 2함수(자격증명 함수내 읽기·device) + 실측 스펙 `docs/references/23_naver_sa_estimate_recon.md`
+  - `estimate_average_position_bid(device, items)`(POST `/estimate/average-position-bid/id`, position 1~4만 유효·회당 200캡) / `estimate_performance(items)`(POST `/estimate/performance-bulk`, 키워드 **텍스트** 전용·회당 200캡, 클릭/노출/비용만·전환 없음) — 둘 다 200 초과 시 내부 자동 청크 분할(무언 truncation 없음). 자격증명은 `_estimate_post`가 호출 시점에 `os.getenv`로 새로 읽음(기존 모듈 top-level 캡처 재사용 안 함, codex #19). 라이브 실측: position 5부터 400, performance bids 101부터 400, 두 배치 상한 모두 200(250건 요청 시 400 확인). 단위테스트 6개(`test_naver_sa_estimate.py`) — 전체 스위트 564 passed.
 - [ ] ⏳ `bid_simulator.py` (pooled_rpc·affordable_ceiling[division guard]·simulate_bid[device 가정 라벨·capability]) + 단위테스트
 - [ ] ⏳ `proposal_writer.py` (build[optimizer 필터·target 라벨·negative 라벨·dedup]·persist·account_brief_singleton) + 단위테스트
 - [ ] ⏳ `slack_notifier.py` (no-op 폴백·slack_ts best-effort·타임아웃·재시도) + 단위테스트

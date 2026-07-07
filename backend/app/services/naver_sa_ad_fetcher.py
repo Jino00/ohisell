@@ -686,3 +686,93 @@ def extract_keyword(campaign_name: str, known_keywords: list[str]) -> str | None
         if kw.lower() in name_lower:
             return kw
     return None
+
+
+# ── estimate API (P2-S3 T1, docs/references/23 라이브 실측 확정) ──
+# 배치 상한·유효값 범위는 추측이 아니라 실제 400 응답으로 확정한 값(원칙: 추정 금지).
+_ESTIMATE_AVG_POS_MAX_ITEMS = 200   # 실측: 201개부터 400 "exceeded limit of '200'"
+_ESTIMATE_VALID_POSITIONS = (1, 2, 3, 4)  # 실측: position 5부터 400 "must be lower than 5"
+_ESTIMATE_PERFORMANCE_MAX_BIDS = 100      # 실측: /estimate/performance/{id} bids 101개부터 400
+_ESTIMATE_PERFORMANCE_BULK_MAX_ITEMS = 200  # 실측: /estimate/performance-bulk items 201개부터 400
+
+
+def _estimate_post(path: str, body: dict) -> requests.Response:
+    """estimate 전용 POST. 자격증명은 호출 시점에 os.getenv로 새로 읽어 기존 모듈
+    top-level 캡처(ACCESS_LICENSE 등)를 재사용하지 않는다(import-time 캡처 심화 금지, codex #19).
+    429/5xx는 읽기전용 추정 호출이라 재시도해도 부작용 없음 — 기존 _get과 동일 backoff."""
+    access_license = os.getenv("NAVER_SA_ACCESS_LICENSE", "")
+    secret_key = os.getenv("NAVER_SA_SECRET_KEY", "")
+    customer_id = os.getenv("NAVER_SA_CUSTOMER_ID", CUSTOMER_ID)
+    if not access_license or not secret_key:
+        log.warning("Naver SA 자격증명 없음 — estimate 호출 건너뜀: %s", path)
+        raise RuntimeError("Naver SA 자격증명 없음 — NAVER_SA_ACCESS_LICENSE/NAVER_SA_SECRET_KEY 확인")
+
+    last: requests.Response | None = None
+    for attempt in range(3):
+        ts = str(int(time.time() * 1000))
+        sig = base64.b64encode(
+            hmac.new(secret_key.encode("utf-8"), f"{ts}.POST.{path}".encode(), hashlib.sha256).digest()
+        ).decode()
+        headers = {
+            "X-Timestamp": ts, "X-API-KEY": access_license,
+            "X-Signature": sig, "X-Customer": str(customer_id),
+        }
+        resp = requests.post(BASE_URL + path, headers=headers, json=body, timeout=30)
+        if resp.status_code not in _RETRY_STATUS:
+            return resp
+        last = resp
+        wait = 2 ** attempt
+        log.warning("Naver SA estimate %s %d — %ds 후 재시도(%d/3)", path, resp.status_code, wait, attempt + 1)
+        time.sleep(wait)
+    return last  # type: ignore[return-value]
+
+
+def estimate_average_position_bid(device: str, items: list[dict]) -> list[dict]:
+    """평균 노출순위별 필요 입찰가 추정. POST /estimate/average-position-bid/id.
+
+    items: [{"key": nccKeywordId, "position": 1~4}]. **position은 1~4만 유효**(그 밖의 값은 호출측
+    책임 — 이 함수는 검증 없이 그대로 전달, bid_simulator가 진단 avg_rank를 clamp해서 넘겨야 함).
+    회당 최대 200개(실측, docs/references/23) — 초과분은 이 함수가 내부적으로 청크 분할해 전량
+    처리하고 청크 수를 로그로 남긴다(무언 truncation 금지). device: "MOBILE"/"PC"/"BOTH".
+
+    Returns: [{"keyword","position","nccKeywordId","bid"}, ...] (전체 items 순서 무관, 소비측은
+    nccKeywordId+position으로 재매칭).
+    """
+    if not items:
+        return []
+    n_chunks = (len(items) + _ESTIMATE_AVG_POS_MAX_ITEMS - 1) // _ESTIMATE_AVG_POS_MAX_ITEMS
+    out: list[dict] = []
+    for i in range(0, len(items), _ESTIMATE_AVG_POS_MAX_ITEMS):
+        chunk = items[i:i + _ESTIMATE_AVG_POS_MAX_ITEMS]
+        if n_chunks > 1:
+            log.info("Naver SA average-position-bid 배치 %d/%d (%d건)", i // _ESTIMATE_AVG_POS_MAX_ITEMS + 1, n_chunks, len(chunk))
+        resp = _estimate_post("/estimate/average-position-bid/id", {"device": device, "items": chunk})
+        resp.raise_for_status()
+        out.extend(resp.json().get("estimate", []))
+    return out
+
+
+def estimate_performance(items: list[dict]) -> list[dict]:
+    """키워드×입찰가별 클릭/노출/비용 추정(전환 아님 — clicks/impressions/cost만).
+    POST /estimate/performance-bulk.
+
+    items: [{"keyword": str(키워드 **텍스트**, nccKeywordId 아님 — bulk 엔드포인트는 텍스트 전용,
+    실측 docs/references/23), "bid": int, "keywordplus": bool, "device": "MOBILE"|"PC"|"BOTH"}].
+    호출측(bid_simulator)이 nccKeywordId→keyword 텍스트 매핑을 미리 준비해야 함.
+    회당 최대 200개(실측) — 초과분은 내부 청크 분할 전량 처리(무언 truncation 금지).
+
+    Returns: [{"keyword","bid","device","keywordplus","clicks","impressions","cost"}, ...].
+    expected_effect 계산 시 clicks × 우리 RPC로 매출 추정(전환 데이터 자체는 없음).
+    """
+    if not items:
+        return []
+    n_chunks = (len(items) + _ESTIMATE_PERFORMANCE_BULK_MAX_ITEMS - 1) // _ESTIMATE_PERFORMANCE_BULK_MAX_ITEMS
+    out: list[dict] = []
+    for i in range(0, len(items), _ESTIMATE_PERFORMANCE_BULK_MAX_ITEMS):
+        chunk = items[i:i + _ESTIMATE_PERFORMANCE_BULK_MAX_ITEMS]
+        if n_chunks > 1:
+            log.info("Naver SA performance-bulk 배치 %d/%d (%d건)", i // _ESTIMATE_PERFORMANCE_BULK_MAX_ITEMS + 1, n_chunks, len(chunk))
+        resp = _estimate_post("/estimate/performance-bulk", {"items": chunk})
+        resp.raise_for_status()
+        out.extend(resp.json().get("items", []))
+    return out
