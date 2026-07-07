@@ -63,14 +63,16 @@ Ohi 광고 Agent > 네이버광고팀
 - **완료 기준**: sellc.ohitech.co.kr/naver-ad 라이브에서 최근 30일 실데이터 표시, API 수치와 1:1 대조 PASS
 - ※ 프론트 .tsx 수정 후 /qa, fetchJson 패턴 준수(AI_office PR#41 교훈)
 
-### P2 — 진단 엔진 + 최적화 콘솔 (읽기 전용)
-- account_diagnosis_sa: 출혈(BEP 미달×비용순)/굶는 승자/확장버킷/제외후보(EXPKEYWORD 전환0+비용)/죽은키워드/악순환·학습불능 감지 — 판정 기준은 쿠팡 스킬 이식(다기간 비교, 모수 게이트: 키워드 7~30일 창+풀링)
-- proposal_writer_sa: 제안 카드(무엇을/왜 3근거/예상효과) → naver_proposals + Slack 발송
-- 콘솔 UI: 진단 4보드 + 제안 카드(버튼은 disabled) + 이상 피드
-- **완료 기준**: 매일 06시 진단·제안이 자동 생성되어 대시보드+Slack 도착, 2주 관찰 운전 개시. 첫 제안서에 "확장버킷·출혈30·승자4" 실측 진단 포함 확인.
+### P2 — 진단 엔진 + 최적화 콘솔 (읽기 전용) — 구조 확정 2026-07-07 (S1→S2→S3, D-NAO-16~20 반영)
+- **P2-S1 데이터 기반**: ①naver_entity 테이블+entity_sync_harness(cron 일1회) — /ncc campaigns·adgroups + master-reports Keyword 덤프 → 이름·상태·부모·등록 인벤토리(진단카드 가독성+죽은키워드 위생의 전제) ②naver_search_term_daily 테이블+수집 — SHOPPINGKEYWORD_DETAIL(매일 BUILT 실측, GET만)+EXPKEYWORD(POST 생성) ③**과거 데이터 백필(D-NAO-17)** — API 최대 소급 실측 후 적재 ④campaign_target_resolver_sa — 목표 ROAS: settings.override > (쇼핑) 상품BEP 연결 > 계정 기본값(BEP 매출가중) ⑤keywordstool 월검색량(3단 분류 입력). Alembic 신규 테이블 2개.
+  - 완료 기준(라이브): 등록 키워드 인벤토리(~4,936) 적재·검색어 데이터 적재 확인·백필 가능 범위 실측 보고.
+- **P2-S2 진단 엔진**: account_diagnosis_sa — 출혈(BEP 미달×비용순)/승자·굶는 승자/확장버킷(WEB_SITE&keyword_id='')/제외후보(검색어 전환0+비용)/**키워드 3단 분류(판정가능·육성후보·정리, D-NAO-18)**/악순환·학습불능 감지. 판정 기준은 쿠팡 스킬 이식(다기간 비교: 7일 추세+30일 수준, 모수 게이트 D-NAO-9, MOP 최적화불가 조건→판정유보). GET /naver-ad/diagnosis(라이브 계산) + 콘솔 진단 보드 UI.
+  - 완료 기준(라이브): 실측 베이스라인 재현 — 확장버킷 42%·출혈 30개·굶는 승자 4개·쇼핑 16그룹 미달이 보드에 잡히는지 대조.
+- **P2-S3 시뮬·제안·발송**: bid_simulator_sa(estimate 일괄 시뮬, **D-NAO-19 산식**: min(경제성 상한[풀링 CVR], 목표순위 입찰), 신규/육성은 **100% 진입 D-NAO-20**) + budget_allocator_sa(한계수익=MOP Budget Sensitivity 대응, D-NAO-1 확장 편향 구현) + proposal_writer_sa(3근거·예상효과=시뮬 근거·dedup·쿨다운·**optimizer='ours'만** D-NAO-13) + slack_notifier_sa(env webhook, 미설정 시 no-op+로그) + 콘솔: 제안 카드(버튼 disabled)+캠페인 optimizer 패널+경량 이상 피드(hourly_snapshot 소진율 단순규칙 — 본격 파수꾼은 P4). cron: 07:30 적재 후 08:00 진단·제안 체인.
+  - 완료 기준(라이브): 매일 08시 진단·제안 자동 생성 → 대시보드(+Slack 연결 시 도착), 첫 제안서에 "확장버킷·출혈30·승자4" 실측 진단 + S26 런칭 투자 질문 포함 → 2주 관찰 운전 개시.
 
 ### P3 — Confirm 실행 + 검증 루프
-- sa_writer_sa: 제외키워드 POST → 키워드 입찰 PUT → 그룹/캠페인 예산 PUT 순 단계 개방. 실행 전 estimate 예측 저장(predicted_*)
+- sa_writer_sa: 제외키워드 POST → **정지·재개(status ON/OFF, D-NAO-16 — 완전 가역이라 예산보다 안전)** → 키워드 입찰 PUT → 그룹/캠페인 예산 PUT 순 단계 개방. 실행 전 estimate 예측 저장(predicted_*)
 - 승인 경로: Slack(모델주도 해석, 원칙23-A — 키워드 게이트 금지) + 콘솔 버튼
 - naver_verify_harness: D+7/14 실측→outcome 판정→Slack 성적 보고
 - 가드레일 하드코딩: 일예산 상한 불가침·±15%·BEP 미달 증액 금지·미검증 유형 무조건 승인
