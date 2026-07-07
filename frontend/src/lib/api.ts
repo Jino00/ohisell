@@ -1558,3 +1558,100 @@ export function fetchNaverAdBep(params?: {
   const qs = q.toString();
   return fetchApi<NaverAdBepList>(`/api/naver/ad/bep${qs ? `?${qs}` : ""}`);
 }
+
+// ── 네이버 SA 광고 진단 보드 (P2-S2, track_naver-ad-optimization) ──
+export interface NaverAdDiagnosisKeywordRow {
+  campaign_id: string;
+  adgroup_id: string;
+  keyword_id: string;
+  imp: number;
+  clk: number;
+  cost: number;
+  conv_amt: number;
+  roas_naver: number | null;
+  roas_corrected: number | null;
+  avg_daily_clk?: number;
+}
+
+export interface NaverAdDiagnosisExpansionBucket {
+  cost: number;
+  clk: number;
+  imp: number;
+  conv_amt: number;
+  roas_naver: number | null;
+  roas_corrected: number | null;
+  web_site_total_cost: number;
+  cost_share: number | null;
+}
+
+export interface NaverAdDiagnosisShoppingGroupRow {
+  campaign_id: string;
+  adgroup_id: string;
+  cost: number;
+  conv_amt: number;
+  roas_naver: number | null;
+  roas_corrected: number | null;
+}
+
+export interface NaverAdDiagnosisExclusionCandidateRow {
+  campaign_id: string;
+  adgroup_id: string;
+  search_term: string;
+  source: string;
+  cost: number;
+  clk: number;
+  imp: number;
+}
+
+export interface NaverAdDiagnosisKeywordTriage {
+  total: number;
+  judgeable: number;
+  growth_candidate: number;
+  dead: number;
+  volume_unchecked: number;
+}
+
+export interface NaverAdDiagnosisViciousCycleRow {
+  campaign_id: string;
+  recent_roas_corrected: number | null;
+  prior_roas_corrected: number | null;
+  recent_daily_clk: number;
+  prior_daily_clk: number;
+}
+
+export interface NaverAdDiagnosisBoards {
+  bleeding_keywords: NaverAdDiagnosisKeywordRow[];
+  starving_winners: NaverAdDiagnosisKeywordRow[];
+  expansion_bucket: NaverAdDiagnosisExpansionBucket;
+  shopping_group_bep: NaverAdDiagnosisShoppingGroupRow[];
+  exclusion_candidates: NaverAdDiagnosisExclusionCandidateRow[];
+  keyword_triage: NaverAdDiagnosisKeywordTriage;
+  vicious_cycle: NaverAdDiagnosisViciousCycleRow[];
+}
+
+export interface NaverAdDiagnosis {
+  window: { date_from: string; date_to: string };
+  correction_factor: {
+    factor: number;
+    source: string;
+    window_from?: string;
+    window_to?: string;
+    window_revenue?: number;
+    window_conv_amt?: number;
+  };
+  account_bep_roas: number | null;
+  account_target_roas: number | null;
+  error?: string;
+  boards: NaverAdDiagnosisBoards | null;
+}
+
+export function fetchNaverAdDiagnosis(params?: {
+  dateFrom?: string;
+  dateTo?: string;
+}): Promise<NaverAdDiagnosis> {
+  const q = new URLSearchParams();
+  if (params?.dateFrom) q.set("date_from", params.dateFrom);
+  if (params?.dateTo) q.set("date_to", params.dateTo);
+  const qs = q.toString();
+  return fetchApi<NaverAdDiagnosis>(`/api/naver/ad/diagnosis${qs ? `?${qs}` : ""}`);
+}
