@@ -1,0 +1,82 @@
+# Track: 네이버 SA 광고 최적화 시스템 (우리판 MOP)
+
+- 생성: 2026-07-07 (설계 대화 세션, Jino 구조 승인 "그래")
+- 상태: 🟢 Active — 2/6 (**P0+P1 완료·prod 배포·라이브 검증**, P2 대기)
+- 계획서: `docs/PLAN_naver-ad-optimization.md`
+- 대시보드 위치: sellC (sellc.ohitech.co.kr = 이 repo frontend)
+
+## 목표 (한 줄)
+
+네이버 SA 광고(월 ~2,200만 집행)를 매일 관찰→진단→제안→실행→검증하는 학습 루프로 운영하여, **광고 이익을 극대화** — 낭비 제거(효율↑)와 승자 확장·신규 발굴(매출↑)을 동시에.
+
+> Jino 원문 (2026-07-06): "우리의 목표는 광고 비용을 낮춰서 광고효율을 높이는 것보다 광고 캠페인의 효율화를 통해서 매출을 높이면서 광고효율을 동시에 높이는 어려운 목표를 가지고 가고 싶거든. 내 생각에는 광고 키워드의 최적화가 가장 중요한 요인이라고 생각이 되."
+
+## 확정 결정사항 (D-NAO)
+
+- **D-NAO-1 목표함수 = 광고 매출 극대화, 안전선 = 이익.** (2026-07-07 개정, Jino 원문: "목표는 광고 매출 극대화도 같이 포함해줘. 이익 극대화와 배치되어 보이지만 그래도 그게 궁극적인 목표이거든.") 공식화: **한계 ROAS ≥ BEP×공격성 배수를 지키는 한 매출(전환매출)을 최대로 키운다.** 즉 이익이 안 나는 확장은 금지(안전선), 이익이 나는 확장은 멈추지 않음(궁극 목표). 동률 상황(이익 비슷한 두 선택지)에서는 항상 매출 큰 쪽 선택 — 시스템의 기본 성향은 확장 편향. ROAS 최대화(→지출 축소·매출 희생)는 명시적으로 목표가 아님.
+- **D-NAO-2 Jino 다이얼은 2개뿐**: ①총 일예산 상한 ②공격성(안전 BEP×1.3 / 표준 ×1.15 / 공격 ×1.05). 캠페인별 목표 ROAS는 BEP에서 자동 산출. 캠페인 모드: 성장/회복/런칭(기간 한정 BEP 미달 허용, S26류)/방어.
+- **D-NAO-3 갱신·조정 빈도** (Jino 원문: "매시간 데이터 갱신을 하고 입찰 조정 빈도도 하루에 5회 이상으로 필요한만큼"): 데이터 수집=매시간. 입찰 조정=①시간대 가중치(bidWeight 168칸, 서버가 매시간 자동 적용=일 24회 효과) ②조건발동식 트리거(소진 이상·순위 이탈·CPC 급등 시 즉시, 정시 스케줄 아님) ③전환(ROAS) 기반 판단만 일~주 단위(간접전환 지연 귀속 때문).
+- **D-NAO-4 두 루프 분리**: 빠른 루프(시간 단위)=관찰·제어(클릭·비용·순위 즉시지표만). 느린 루프(일~주)=학습·전략(키워드 추가/제외·입찰 방향). MOP 실측 근거: Pro도 목표입찰 판단은 "최근 7일 평균" 비교.
+- **D-NAO-5 권한 3단계**: 관찰(제안만 2~4주)→반자동(Confirm 승인 후 실행)→자율(가드레일 내). **신규 캠페인 생성·캠페인 재구축·예산 상한 인상은 영구 Confirm 게이트.** 가드레일: 일예산 상한 불가침·변경폭 ±15%·BEP 미달 증액 금지·신규 유형 액션 무조건 승인.
+- **D-NAO-6 대시보드 = sellC 신규 페이지 3개**: ①광고 리포트(MOP report/campaign 레이아웃 차용: 기간+비교기간, KPI 8칸, 듀얼차트, 드릴다운 탭) ②최적화 콘솔(진단 4보드+제안 카드+변경이력 성적표+이상 피드) ③키워드 랩(발굴 후보·탐색 성과·시간대 히트맵).
+- **D-NAO-7 진짜 ROAS 3열 병기** — 네이버 convAmt(직+간접)는 과대. 라이브 실증: 동일 7일(06/29~07/05) 네이버 API 387% vs MOP 화면 139% (전환매출 2,060만 vs 796만, 2.6배). 대시보드에 ①네이버 기준 ②직접전환만 ③실주문 대조(ohisell.db orders 조인)를 항상 나란히.
+- **D-NAO-8 BEP 자동 산출** — product_master 원가(네이버 매핑 735개 중 673개=92% 입력) + 판매가 + 수수료로 상품별 BEP ROAS 계산 → 캠페인별 목표 자동. (Jino: "sellc 프로그램에 이미 각 제품의 원가는 모두 입력이 되어 있어")
+- **D-NAO-9 키워드 판단 단위** — 실측: 키워드당 일평균 0.88클릭 → 키워드 단위 일일 판단은 통계적 불가. 7~30일 창 + 유사 키워드 그룹 풀링. 계정/캠페인 단위(일 600클릭)만 일 단위 신호 인정.
+- **D-NAO-10 신규 세팅(무풍지대)** — 판매 중인데 광고 없는 상품 자동 서칭(상품목록−광고소재 대조), 특히 "광고 없이 팔리는 상품"(CVR 기검증) 우선. 초기 세팅은 쿠팡 검증 공식(평균CPC×0.5, 소액, 14일 판정) 이식. 영구 Confirm.
+- **D-NAO-11 재구축은 최후 수단** — "어질러짐"(키워드 과다·확장 출혈)은 리모델링(정리·재배분)으로. "진짜 망가짐"(소진율<30% 지속·학습불능·악순환)만 재구축 진단서 발행 → 새 캠페인 소액 병행→2주 비교→점진 이관→구 캠페인 OFF. 일괄 갈아엎기 금지(품질지수 이력 자산 보존).
+- **D-NAO-12 실행 아키텍처** — 100% VM headless (화면·브라우저 불필요, 전 기능 REST 확인). 쓰기는 naver_execution_harness 단일 초크포인트 + naver_change_log 전건 기록. 인터페이스=Slack(제안·승인) + sellC 대시보드(관찰).
+- **D-NAO-13 캠페인 관리 주체 선택 (MOP 공존)** — (Jino 원문 2026-07-07: "내가 원하는 캠페인만 선택해서 돌릴 수 있는 기능", "스마트스토어와 MOP의 선택을 줘서 MOP는 끄고 스마트스토어 광고에서는 계속 돌아가게도 하고 둘다 끌 수도 있게 자율성을 주자.") 대시보드에서 **캠페인별 관리 주체(optimizer) 선택**: `우리(스마트스토어 직접)` / `MOP` / `없음(수동)`. **기본값=없음.** 상태별 동작: ①우리=제안+실행 ②MOP=우리는 손 안 댐(진단·리포트만, MOP가 소유) ③없음=아무 자동화도 안 함. 진단·리포트·이상 알림은 상태 무관 전 캠페인(읽기는 무해). **핵심 제약: 한 캠페인을 두 옵티마이저가 동시 관리 금지** — 우리 시스템은 MOP를 프로그램적으로 끌 수 없으므로(별도 SaaS), "우리"로 지정 시 Jino가 MOP 콘솔에서 해당 캠페인을 꺼야 함. **충돌 안전장치**: 우리가 안 한 입찰 변경이 change_log 대조로 감지되면("우리" 캠페인인데 외부 변경 발생) → "MOP가 아직 켜져 있을 수 있음" 경고 알림. 강제 지점=execution_harness가 쓰기 직전 optimizer=='우리' 하드 체크(제안 단계와 이중). 운영 효과: 캠페인 1~2개만 "우리"로 카나리→실적 보고 확대. 캠페인별 모드(성장/회복/런칭/방어)·목표 오버라이드도 같은 패널.
+- **D-NAO-14 자율학습 (경험 축적 → 점점 발전)** — (Jino 원문 2026-07-07: "우리의 경험이 쌓이면서 자율학습이 되어서 점점 발전되게도 할 수 있지?") 단발성 규칙엔진이 아니라 **피드백 루프로 스스로 정확해지는** 시스템. 축적·환류 대상 6가지: ①제안 정확도(change_log predicted vs actual D+7/14 → 제안유형×상황별 성공률 → 신뢰가중치 조정, 쿠팡 스킬 "제안 정확도 학습 5항목" 이식) ②estimate 보정(네이버 예측 클릭·비용 vs 실측 → 캠페인/키워드타입별 계통오차 학습 → 향후 예측 교정) ③전환지연 실측(쿠팡 D+14 차용상수 → 우리 네이버 실데이터로 대체) ④키워드 이식 승률(쿠팡 승자→네이버 실제 성공률 학습) ⑤시간대 패턴(168칸이 주차 누적으로 정교화) ⑥BEP 정확도(수수료·물류비 실측 반영). **정직 경계(원칙22/24)**: 이건 통계·규칙 기반 학습(검증된 outcome 누적 + 임계값 자동 조정)이지 모델 자체 재학습이 아님 — 능력에 천장 있음. 피드백 신호(ROAS)는 지연·노이즈 → 학습은 **가드레일 범위 내에서만** 파라미터 조정. **결정적 규칙: 자율학습은 제안 "품질"을 높일 뿐 "권한"을 스스로 넓히지 않음** — 권한 확대(D-NAO-5 3단계)는 영구히 사람 게이트. 시스템 정확도는 change_log 성적표로 상시 공개. 향후 AI Office 인지 트랙(diary·skill_library·SOUL) 연동 시 직원 페르소나의 반성적 학습으로 확장 가능(별도 트랙).
+
+- **D-NAO-15 P1 스코프 분리 = 리포트 코어만, 캠페인 관리 패널은 P2로 이관** (2026-07-07, Jino 승인 "그래"). 이유: 관리 패널의 핵심인 캠페인별 optimizer(우리/MOP/없음, D-NAO-13) 지정은 이를 **소비하는 주체가 P2(진단·제안)·P3(실행)에 있어** 지금 만들면 DB 저장만 되는 실효 없는 컨트롤(원칙14 검증 불가). 진짜 설계(모드 동작·충돌 감지)도 P2 스펙 의존 → 지금 만들면 재작업 위험. 리포트는 실데이터로 지금 완결 검증 가능. `naver_campaign_settings` 테이블은 P0에서 이미 생성됨(P2 추가 비용 작음). **P1 백엔드 구조**: Router `naver_ad.py`(`GET /report` Harness경유 · `GET /bep` CRUD직접) → Harness `ad_report.build_report`(3열 ROAS 계산·정보허브) → SA `metrics_aggregator`(naver_ad_daily grain집계)+`actual_revenue`(실주문 매출, naver_ops sales-summary 로직 재사용)+`hourly_pacing`. **3열 ROAS 중 '실주문 대조'는 주문이 캠페인 미귀속이라 계정 총계 전용**(드릴다운 행은 네이버·직접 2열).
+
+## 실측 베이스라인 (2026-07-06~07 라이브, 원칙22)
+
+- 규모: 광고비 일평균 74만 → **월 환산 ~2,230만** (연 2.7억 페이스). 일 ~600클릭.
+- 구성: 쇼핑검색 63% / 파워링크 37% / 브랜드검색 0. 캠페인 43개.
+- ROAS(네이버 convAmt 기준): 30일 388%, 일별 313~427% 안정. **단 MOP 기준 139%** (D-NAO-7).
+- 파워링크: 등록 키워드 4,936개, 클릭 발생 676개, 일10클릭+ 0개. 죽은 키워드 4,260개(노출 미미=위생 문제). **키워드확장('-') 버킷 = 파워링크 비용의 42%(147만/15일), ROAS 97~146% 전 캠페인 출혈** ← 최대 단일 레버.
+- 출혈 키워드 30개(71만/15일): 맥세이프카드지갑 20%·폴드7필름 0%·골프악세사리 0% 등. S26 계열은 런칭 투자 여부 Jino 판단 필요.
+- 굶는 승자 4개(4.6만/15일): 갤럭시S26지문방지필름 960% 등.
+- 쇼핑검색: 갤럭시_지문방지 캠페인 내부 16그룹 BEP 미달(최근 15일, S22울트라 112%~), 승자 Z폴드4 295%·아이폰14프로 284%.
+
+## 데이터 품질 이슈 (P0 recon으로 정정 — 2026-07-07, 원칙22)
+
+- ~~1. ad_costs 6/13 정지~~ / ~~2. orders(NAVER) 4/15 정지~~ → **둘 다 유령**. 라이브 prod DB는 ad_costs naver_sa 최신 7/05·orders(NAVER) 최신 7/06으로 정상. 계획서가 조회한 건 stale 로컬 dev DB(6/13·4/15에서 멈춘 사본)였음. **"죽은 sync 수리" 작업 삭제.** (상세: `docs/references/21_naver_sa_stat_report_recon.md`)
+3. 주문 테이블 commission_amount=0 (수수료는 정산 데이터에서) → BEP는 naver_settlement_daily 실효 수수료율 사용.
+4. stat-reports는 라이브에서 AD·AD_CONVERSION·SHOPPINGKEYWORD_DETAIL(+CONV) 각 16일치 매일 자동 BUILT 확인. **naver_ad_daily는 AD+AD_CONVERSION 2개만으로 충분**(EXPKEYWORD POST 불필요).
+
+## 체크리스트
+
+- [x] **P0 수집 파이프라인 (완료 2026-07-07·prod 배포·라이브 검증)**: 신규 8테이블 마이그레이션(`u5v6w7x8y9z0`, prod head) + fetcher 확장(AD/AD_CONVERSION 키워드·그룹 grain·직간접 분리·/stats·429 백오프) + report_collector_sa + ad_daily_ingest Harness + bep_calculator_sa + hourly_snapshot + cron 2개(`sync_naver_ad_daily` 07:30·`snapshot_naver_ad_hourly` :05, APScheduler 등록 확인). **죽은 sync는 유령이었음(prod 정상, stale 로컬 DB 오판)**. 테스트 9신규+전체508 pass. **라이브: naver_ad_daily 3788행(7/05 cost 858,719=prod ad_costs 정확일치·직간접전환 분리·파워링크3050+쇼핑738) / naver_product_bep 706행(497 actionable bep_roas, 실효수수료율 4.17%) / hourly 43캠페인**. 상세 recon: `docs/references/21`. ⚠️미해결: 판매가는 orders 실거래가에서 도출(매핑 selling_price 전부 0) → 196개 미주문 상품은 BEP 산출 불가(actionable 497<500, 총행 706≥500). 7/06 데이터는 07:30 크론에 자동 적재(네이버 리포트가 오전 생성).
+- [x] **P1 광고 리포트 페이지 (완료 2026-07-07·prod 배포·라이브 검증)**: 백엔드(Router `naver_ad.py` `GET /report`·`GET /bep` + Harness `ad_report.build_report` 3열ROAS + SA 3개) + 프론트 `/naver-ad`(필터바 기간+비교·KPI 8칸+증감%·듀얼차트 광고비/ROAS·드릴다운 5탭 날짜/캠페인/그룹/키워드/시간대·3열 ROAS·BEP 표). **D-NAO-15 스코프대로 읽기 전용**. 테스트 23 pass, tsc clean. **라이브 검증(원칙22)**: prod report/bep 실호출(7/06 cost 792,483 등 P0 수치와 정확 일치)+SSH터널로 프론트 브라우저 실측(KPI·3열ROAS·차트·5개 드릴다운 탭·BEP 표 전부 실데이터 렌더 확인). **Claude 적대적 리뷰**(codex 한도 소진 대체, 원칙19 폴백): P1(프론트 request race — 탭 빠르게 전환 시 stale 응답이 최신 위에 덮어써짐) 수정(reqSeq 가드) + P2 3건 수정(hourly_pacing 클램프 카운트 가시화·hour탭 ad_date 배너·keyword_id 공백 표시 개선). 커밋 `a3b1ddc`(P1 WIP)+`573ffa4`(리뷰 반영), prod 재배포·재검증 완료. **D-NAO-15 참조**.
+- [ ] **P2 진단 엔진 + 콘솔**: 출혈/승자/확장버킷/제외후보 자동 진단 + 제안 카드(읽기전용) + Slack 발송
+- [ ] **P3 Confirm 실행**: 제외키워드→입찰→예산 순 개방 + change_log + D+7/14 검증 루프
+- [ ] **P4 파수꾼+키워드랩**: 매시간 이상감지·페이싱 + keywordstool 발굴 + 시간대 가중치
+- [ ] **P5 고도화**: 무풍지대 신규 세팅 + 재구축 진단 + 예측정확도 보정 + 자율 확대
+
+## 현재 진행 단계
+
+**P0+P1 완료·최종 검증까지 끝(2026-07-07).** prod(sellc, port 8001) 배포·라이브 검증 끝. alembic head `u5v6w7x8y9z0`(P1은 신규 테이블 없음, 스키마 무변경).
+- ✅ **07:30 daily 크론 자율 발화 목격(원칙22)**: naver_ad_daily 7/04~7/06 전부 `synced_at=2026-07-07 07:30:01`(7/06 신규 1969행·cost 792,483 포함, 3일 창 재적재). 미개입 witness.
+- ✅ **BEP dedup 수정 라이브 검증**: 07:30 크론 자체 셀프리뷰 발견 P2(중복 cpid 타이브레이크 비결정성 → product_id 최솟값 order_by 고정) 수정·배포(커밋 `3e20f1e`)·07:30 자율 재산출에서 706행 전부 distinct cpid 확인(`calculated_at=07:30:02`). 실측: 22건 중복 cpid는 네이버 옵션1개=기기 variant SKU 다수(원가 항상 동일→금액 불변, 상품명만 안정화).
+- ✅ **P1 리포트 코어 백엔드+프론트 완료·prod 배포·라이브 검증**(2026-07-07 오전, 병렬세션 WIP를 이 세션이 이어받아 마무리). 백엔드 5파일 sha256 검증 scp 배포+pm2 재시작, 프론트 npm build+rsync(`/home/ubuntu/ohisell/frontend/dist`). SSH 터널(localhost:8000→prod:8001)로 로컬 vite dev서버를 prod 데이터에 붙여 브라우저 실측(KPI 8칸·3열ROAS·듀얼차트·5개 드릴다운 탭·BEP 표 전부 렌더 확인, CORS는 `allow_origins=["http://localhost:5173"]`라 포트 5173 고정 필요).
+- ✅ **codex review**: OpenAI 한도 소진(재시도 ~14:46 KST, P1 착수 시점에도 여전히 소진 상태) → 트랙 폴백 규칙대로 Claude 적대 리뷰로 대체(원칙19). P0에서 P2 1건 수정, P1에서 P1(request race)+P2 3건 수정(아래 체크리스트 참조).
+- ⚠️ **prod 사고·복구(failures.jsonl)**: codex 대체 테스트 위해 공유 venv에 pytest/httpx 임시설치→uninstall 시 anyio도 제거되어 ohisell-backend ~2분 크래시루프. `pip install -r requirements.txt`+pm2 restart로 복구. 재발방지=격리 스크래치 venv 사용.
+- 코드: 브랜치 `claude/admiring-solomon-b4f056`(`3fae154` P0 → `3e20f1e` dedup fix → `a3b1ddc` P1 WIP → `573ffa4` P1 리뷰반영, 미push).
+- ⚠️ **트랙/계획서 파일이 이 브랜치가 아니라 메인 워크트리(Ohiselling 루트, `feat/ohitech-ad-cost` 브랜치)에 untracked 상태로만 존재했음** — 원칙20/21 위반 소지(여러 워크트리 병행 세션 흔적). 이번 세션에서 발견해 갱신함. 향후 커밋·정리 필요(아래 다음 액션).
+
+## 다음 액션
+
+1. **P2 진단 엔진 착수**: 출혈/승자/확장버킷/제외후보 자동 진단 + 제안 카드(읽기전용) + Slack 발송. D-NAO-13(optimizer 선택 패널)도 여기서 함께.
+2. (선택) 판매가 커버리지 개선: 미주문 196상품 BEP 위해 네이버 상품 API 가격 동기화 검토 → actionable BEP 500+.
+3. **트랙 파일 정리**: 이 파일과 `docs/PLAN_naver-ad-optimization.md`가 메인 워크트리에 untracked로만 존재 — 적절한 브랜치에 커밋해 정리(Jino 결정: 어느 워크트리/브랜치에 귀속시킬지).
+4. 브랜치 push 여부(Jino 결정).
+
+## 참고 자료 (맥락)
+
+- **SA API 능력 실증**: 인증 HMAC-SHA256 (기존 `backend/app/services/naver_sa_ad_fetcher.py` 재사용 가능, 키는 backend/.env NAVER_SA_*). 확인된 엔드포인트: /stats(ror·convAmt·crto·avgRnk, datePreset·timeIncrement·breakdown), /stat-reports(AD·AD_CONVERSION·**EXPKEYWORD**·SHOPPINGKEYWORD_DETAIL 등), /master-reports(Keyword·ShoppingProduct 등 엔티티 덤프), /keywordstool(연관키워드+검색량+경쟁도), /estimate(average-position-bid·exposure-minimum-bid·performance, 입찰가 100개 일괄 시뮬), /ncc/* CRUD(캠페인·그룹·키워드·제외키워드), criterion bidWeight(TIME_WEEKLY_TARGET 50~500%), /billing/bizmoney. 스펙 원문: github naver/searchad-apidoc gh-pages assets/json/*.json
+- **MOP 레퍼런스** (support.mop.co.kr 실측): Basic=일별 갱신·입찰 조정 일 5회 미만 / Pro=시간별·5회+ / Rank Target만 5분. 목표입찰=최근 7일 평균 비교(Avg.Rank/ROAS/CPA 중 1개). 최적화 불가 조건(3일 무소진·일 100원 이하 등)·"빈번한 키워드/소재 변경 비권장" → 가드레일로 이식. 모듈: SA/SPA Bid Opt·Anomaly·Budget Sensitivity(=한계수익)·Competition(DEA)·Spend Pacing·Attribution·Creative Efficiency. 구조: 애드써클(광고주)>유닛(매체×캠페인×전환값1)=우리 Agent>Harness 대응.
+- **쿠팡 이식 자산**: `~/.claude/skills/ohi-ad-learning-loop/` — 4단계 루프(REVIEW→ANALYZE→PROPOSE→MONITOR), Bayesian CPC·Kelly·Thompson·HMM·Marginal ROAS, 악순환 감지, 개입vs관찰 기준, option_change_log 패턴.
+- **네이버 vs 쿠팡 차이**: 수동 입찰 변경에 학습 리셋 페널티 없음(실시간 경매·차순위 과금), estimate로 실행 전 시뮬 가능, keywordstool로 발굴 가능 — 쿠팡보다 자동화 친화적.
+- 기존 sellC 자산: NaverOps.tsx 이익회계(공급가 기준: (매출+배송비−수수료−원가−물류비)÷1.1−광고비), AdReport.tsx(쿠팡 전용 표), routers/naver_ops.py·ad_costs.py·dashboard.py.
