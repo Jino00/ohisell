@@ -3,6 +3,10 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
+- 날짜: 2026-07-07 (★네이버 광고 트랙 **P2 설계 검증·완전 확정 — 코드 0줄, 순수 설계 세션**)
+- ★**P2 설계 확정**: Jino 검증 대화(MOP 기대 8항목·CPC 산식·자율학습 대조)로 D-NAO-16~21 + 학습 루프 7 확정, P2 구조 승인(S1 데이터기반 → S2 진단엔진 → S3 시뮬·제안·Slack). 초안이 계획서 승인 로직에서 이탈했던 5개(bid_simulator·budget_allocator·악순환 감지·EXPKEYWORD 제외후보·MOP 가드레일)를 대화 중 자가 발견·복원. docs 커밋 7개(`2cbeb36`~`d29f6dc`, 미push). 정본=`docs/tracks/active/track_naver-ad-optimization.md`(D-NAO-1~21)+`docs/PLAN_naver-ad-optimization.md`(§P2 S1/S2/S3 완료기준·§3.5 루프 1~7).
+- 다음 = **P2-S1 구현**(`/model sonnet`, admiring-solomon-b4f056 워크트리 고정): naver_entity+entity_sync → naver_search_term_daily(EXPKEYWORD POST+SHOPPINGKEYWORD_DETAIL) → 백필(한도 실측 먼저) → campaign_target_resolver → keywordstool 검색량. HANDOFF=`~/.claude/projects/...-Ohiselling/memory/HANDOFF_ohisell-naver-ad-P2-design-done_20260707.md`.
+- ─────────────────────────────────────────────
 - 날짜: 2026-07-07 (★네이버 SA 광고 최적화 트랙 **P0+P1 완료 — prod 배포·라이브 검증, P2 대기**)
 - ★**네이버 광고 P1 완료**: 병렬세션이 만든 P1 백엔드 WIP(`a3b1ddc`, 22테스트 통과·미배포)를 이 세션이 이어받아 마무리. prod scp 배포(라우터+하니스+SA 5파일 sha256 검증)+pm2 재시작 → `GET /api/naver/ad/report`·`/bep` 실호출로 라이브 검증(7/06 cost 792,483 등 P0 수치와 정확 일치). 프론트 `/naver-ad` 신규 페이지(필터바 기간+비교·KPI 8칸+증감%·듀얼차트 광고비/ROAS·드릴다운 5탭 날짜/캠페인/그룹/키워드/시간대·3열 ROAS 대조·BEP 표) 작성 → SSH 터널(localhost:8000→prod:8001)로 로컬 vite dev서버를 prod 데이터에 붙여 브라우저 실측 검증(전 탭·차트·배너 렌더 확인, CORS는 `allow_origins=["http://localhost:5173"]`라 포트 고정 필요했음).
   - **Claude 적대적 리뷰**(codex OpenAI 한도 소진 → 원칙19 폴백): [P1] 프론트 request race 발견·수정(그레인 탭을 빠르게 전환하면 늦게 도착한 stale 응답이 최신 탭 위에 덮어써질 수 있었음 → `reqSeq` 요청순번 가드로 방지) + [P2] 3건(hourly_pacing 누적감소 클램프를 `clamped` 카운트로 가시화[원칙22: 데이터 이상 침묵 금지]·hour 그레인이 조회 기간과 무관하게 최신 하루만 보여준다는 사실을 배너로 노출·keyword_id 공백[쇼핑검색 등 실제 데이터 특성]일 때 "그룹ID /" 트레일링 슬래시 대신 명시 문구). 커밋 `573ffa4`. 신규 clamped 테스트 포함 naver_ad 23 pass·tsc clean. 백엔드 재배포+재검증 완료.
