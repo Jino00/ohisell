@@ -454,6 +454,228 @@ def fetch_conversion_daily(date_from: date, date_to: date) -> list[dict]:
     return list(agg.values())
 
 
+def get_adgroups(campaign_id: str) -> list[dict]:
+    """캠페인의 광고그룹 목록 (P2-S1 entity_sync). 실측(docs/references/22): 필드 확정.
+
+    Returns: [{"adgroup_id","campaign_id","name","status","user_lock","bid_amt"}, ...]
+    """
+    resp = _get("/ncc/adgroups", {"nccCampaignId": campaign_id})
+    resp.raise_for_status()
+    return [{
+        "adgroup_id": a["nccAdgroupId"],
+        "campaign_id": a["nccCampaignId"],
+        "name": a.get("name", ""),
+        "status": a.get("status", ""),
+        "user_lock": bool(a.get("userLock", False)),
+        "bid_amt": a.get("bidAmt"),
+    } for a in resp.json()]
+
+
+def get_keywords(adgroup_id: str) -> list[dict]:
+    """광고그룹의 키워드 목록 (P2-S1 entity_sync, WEB_SITE만 호출 — SHOPPING은 개별 키워드 무의미,
+    실측: 계정 전체 등록 키워드 90,379건 중 90,150건이 WEB_SITE 소속, docs/references/22).
+
+    Returns: [{"keyword_id","adgroup_id","keyword","status","user_lock","bid_amt"}, ...]
+    """
+    resp = _get("/ncc/keywords", {"nccAdgroupId": adgroup_id})
+    resp.raise_for_status()
+    return [{
+        "keyword_id": k["nccKeywordId"],
+        "adgroup_id": k["nccAdgroupId"],
+        "keyword": k.get("keyword", ""),
+        "status": k.get("status", ""),
+        "user_lock": bool(k.get("userLock", False)),
+        "bid_amt": k.get("bidAmt"),
+    } for k in resp.json()]
+
+
+def create_expkeyword_report(stat_date: date) -> dict:
+    """EXPKEYWORD(파워링크 확장검색어) 리포트 생성 요청 — 자동 생성 안 됨(실측, docs/references/22).
+
+    POST /stat-reports {"reportTp":"EXPKEYWORD","statDt": YYYYMMDD}. 즉시 BUILT 아님(REGIST/RUNNING
+    → 폴링 필요). 반환: {"reportJobId","status", ...}(생성 응답 원본).
+    """
+    resp = requests.post(
+        BASE_URL + "/stat-reports",
+        headers=_headers("/stat-reports"),
+        json={"reportTp": "EXPKEYWORD", "statDt": stat_date.strftime("%Y%m%d")},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def get_report_job(report_job_id: int | str) -> dict:
+    """생성한 리포트 잡 상태 조회 (폴링용). status: REGIST/RUNNING/BUILT/NONE/ERROR."""
+    resp = _get(f"/stat-reports/{report_job_id}")
+    resp.raise_for_status()
+    return resp.json()
+
+
+def list_report_jobs(report_tp: str) -> list[dict]:
+    """/stat-reports 전체 목록 중 지정 타입만 반환 (상태 무관 — 중복생성 방지용 조회)."""
+    resp = _get("/stat-reports")
+    resp.raise_for_status()
+    return [rep for rep in resp.json() if rep.get("reportTp") == report_tp]
+
+
+# SHOPPINGKEYWORD_DETAIL/EXPKEYWORD 보고서 컬럼(16열, 실측 확정 docs/references/22):
+#   0일자 1고객ID 2캠페인 3그룹 4검색어(텍스트) 5소재 6비즈채널 7·8(미상,불필요)
+#   9(품목/상품 식별자, 미상·불필요) 10기기(M/P) 11노출수 12클릭수 13비용 14순위합 15(미상)
+ST_COL_DATE = 0
+ST_COL_CAMPAIGN = 2
+ST_COL_ADGROUP = 3
+ST_COL_SEARCH_TERM = 4
+ST_COL_IMP = 11
+ST_COL_CLK = 12
+ST_COL_COST = 13
+ST_COL_RANK_SUM = 14
+
+
+def fetch_search_term_daily(report_tp: str, date_from: date, date_to: date) -> list[dict]:
+    """SHOPPINGKEYWORD_DETAIL 또는 EXPKEYWORD 보고서를 (일자×캠페인×그룹×검색어) grain으로 집계.
+
+    SHOPPINGKEYWORD_DETAIL은 매일 자동 BUILT(16일 보관, GET만). EXPKEYWORD는 자동 생성 안 되므로
+    사전에 create_expkeyword_report로 생성+대기 후 호출해야 함(이 함수는 이미 BUILT된 리포트만 조회).
+    컬럼 실측: docs/references/22(prod naver_ad_daily 동일 adgroup·날짜 합계 대조, imp/clk 정확
+    일치·cost 1원 오차).
+
+    Returns: [{"date","campaign_id","adgroup_id","search_term","imp","clk","cost","rank_sum"}, ...]
+    """
+    if not ACCESS_LICENSE or not SECRET_KEY_B64:
+        log.warning("Naver SA 자격증명 없음 — 검색어 리포트 수집 건너뜀")
+        return []
+
+    reports = _list_reports_by_type(report_tp, date_from, date_to)
+    if not reports:
+        log.warning("Naver SA: %s~%s %s 보고서 없음", date_from, date_to, report_tp)
+        return []
+
+    agg: dict[tuple, dict] = {}
+    seen_dates: set[str] = set()
+    for rep in sorted(reports, key=lambda r: r["date"]):
+        if rep["date"] in seen_dates:
+            continue
+        seen_dates.add(rep["date"])
+        for cols in _download_tsv(rep["downloadUrl"]):
+            if len(cols) <= ST_COL_RANK_SUM:
+                continue
+            d = _row_date_iso(cols[ST_COL_DATE])
+            if d is None:
+                continue
+            key = (d, cols[ST_COL_CAMPAIGN], cols[ST_COL_ADGROUP], cols[ST_COL_SEARCH_TERM])
+            row = agg.get(key)
+            if row is None:
+                row = {"date": d, "campaign_id": cols[ST_COL_CAMPAIGN],
+                       "adgroup_id": cols[ST_COL_ADGROUP], "search_term": cols[ST_COL_SEARCH_TERM],
+                       "imp": 0, "clk": 0, "cost": 0, "rank_sum": 0}
+                agg[key] = row
+            row["imp"] += _safe_int(cols[ST_COL_IMP])
+            row["clk"] += _safe_int(cols[ST_COL_CLK])
+            row["cost"] += _safe_int(cols[ST_COL_COST])
+            row["rank_sum"] += _safe_int(cols[ST_COL_RANK_SUM])
+
+    log.info("Naver SA %s 검색어 %d행 집계 (%s~%s)", report_tp, len(agg), date_from, date_to)
+    return list(agg.values())
+
+
+_STATS_BACKFILL_MAX_DAYS = 730  # 실측(원칙22): "데이터는 최근 730일 이내 기간에서만 조회 가능"
+_STATS_BACKFILL_CHUNK_DAYS = 90  # 실측: timeIncrement=1은 호출당 92일 한도(안전마진 90일)
+_BACKFILL_FIELDS = '["impCnt","clkCnt","salesAmt","ccnt","convAmt"]'
+
+
+def fetch_campaign_daily_backfill(campaign_id: str, date_from: date, date_to: date) -> list[dict]:
+    """캠페인 단위 일별 성과 소급 조회(/stats timeRange, D-NAO-17 백필).
+
+    실측 한도(docs/references/22): 오늘로부터 최근 730일까지만 조회 가능, 1회 호출당 daily
+    breakdown(timeIncrement=1)은 최대 92일 — 92일 미만 청크(90일)로 분할 호출.
+    stat-reports(16일 보관)보다 훨씬 긴 창이지만 캠페인 grain만 지원(그룹/키워드 세부 불가).
+
+    Returns: [{"date","campaign_id","imp","clk","cost","conv_cnt","conv_amt"}, ...]
+    """
+    if not ACCESS_LICENSE or not SECRET_KEY_B64:
+        log.warning("Naver SA 자격증명 없음 — 백필 건너뜀")
+        return []
+
+    earliest = date.today() - timedelta(days=_STATS_BACKFILL_MAX_DAYS - 1)
+    if date_from < earliest:
+        log.info("Naver SA 백필 %s: 요청 시작일 %s → API 한도로 %s로 조정", campaign_id, date_from, earliest)
+        date_from = earliest
+    if date_from > date_to:
+        return []
+
+    out: list[dict] = []
+    cur = date_from
+    while cur <= date_to:
+        chunk_end = min(cur + timedelta(days=_STATS_BACKFILL_CHUNK_DAYS - 1), date_to)
+        params = {
+            "id": campaign_id,
+            "fields": _BACKFILL_FIELDS,
+            "timeRange": f'{{"since":"{cur.isoformat()}","until":"{chunk_end.isoformat()}"}}',
+        }
+        resp = _get("/stats", params)
+        if resp.status_code != 200:
+            log.warning("Naver SA 백필 %s %s~%s 실패: %d %s", campaign_id, cur, chunk_end, resp.status_code, resp.text[:200])
+            cur = chunk_end + timedelta(days=1)
+            continue
+        for d in resp.json().get("data") or []:
+            out.append({
+                "date": d["dateStart"],
+                "campaign_id": campaign_id,
+                "imp": _safe_int(d.get("impCnt", 0)),
+                "clk": _safe_int(d.get("clkCnt", 0)),
+                "cost": _safe_int(d.get("salesAmt", 0)),
+                "conv_cnt": _safe_int(d.get("ccnt", 0)),
+                "conv_amt": _safe_int(d.get("convAmt", 0)),
+            })
+        cur = chunk_end + timedelta(days=1)
+    return out
+
+
+_KEYWORDSTOOL_BATCH = 5  # 실측 문서(ncc-keywordstool.json): hintKeywords 최대 5개/호출
+
+
+def _parse_qc(v: str) -> int:
+    """'<10' 등 검색량 문자열 → 정수(하한 sentinel 5)."""
+    v = (v or "").strip()
+    if v.startswith("<"):
+        return 5
+    try:
+        return int(v)
+    except ValueError:
+        return 0
+
+
+def fetch_keyword_volumes(keywords: list[str]) -> dict[str, dict]:
+    """키워드 목록의 월검색량(PC+Mobile)·경쟁도를 keywordstool로 조회(5개씩 배치).
+
+    Returns: {keyword: {"monthly_volume": int, "competition": str|None}, ...}
+    (요청 키워드와 정확히 일치하는 relKeyword만 채택 — 응답에 연관 확장 키워드도 섞여 나옴)
+    """
+    if not ACCESS_LICENSE or not SECRET_KEY_B64:
+        log.warning("Naver SA 자격증명 없음 — keywordstool 조회 건너뜀")
+        return {}
+
+    wanted = {kw.replace(" ", "").lower() for kw in keywords}
+    out: dict[str, dict] = {}
+    for i in range(0, len(keywords), _KEYWORDSTOOL_BATCH):
+        batch = keywords[i:i + _KEYWORDSTOOL_BATCH]
+        params = {"hintKeywords": ",".join(batch), "showDetail": 1}
+        resp = _get("/keywordstool", params)
+        if resp.status_code != 200:
+            log.warning("keywordstool 실패 %s: %d %s", batch, resp.status_code, resp.text[:200])
+            continue
+        for item in resp.json().get("keywordList", []) or []:
+            rel = (item.get("relKeyword") or "")
+            if rel.replace(" ", "").lower() not in wanted:
+                continue
+            vol = _parse_qc(item.get("monthlyPcQcCnt", "0")) + _parse_qc(item.get("monthlyMobileQcCnt", "0"))
+            out[rel] = {"monthly_volume": vol, "competition": item.get("compIdx")}
+
+    log.info("keywordstool: 요청 %d개 중 %d개 매칭", len(keywords), len(out))
+    return out
+
+
 def extract_keyword(campaign_name: str, known_keywords: list[str]) -> str | None:
     """캠페인명에서 알려진 상품 키워드를 추출한다."""
     name_lower = campaign_name.lower()

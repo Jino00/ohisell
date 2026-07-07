@@ -1650,3 +1650,76 @@ class NaverLearningState(Base):
     current_value: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 4), nullable=True)
     confidence: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 4), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+# ══════════════════════════════════════════════════════════════════
+# P2-S1 데이터 기반 (계획서 §P2-S1, D-NAO-16~21 실행 전제)
+# 실측 근거: docs/references/22_naver_sa_p2s1_recon.md
+# ══════════════════════════════════════════════════════════════════
+class NaverEntity(Base):
+    """네이버 SA 광고 엔티티 인벤토리 — 이름·상태·계층 (P2-S1).
+
+    grain: (entity_type, entity_id). entity_type: campaign/adgroup/keyword.
+    keyword 행은 **WEB_SITE(파워링크) 캠페인 소속만** 동기화 대상 — 원칙22 실측(2026-07-07):
+    /ncc/keywords 전체 등록 키워드는 WEB_SITE 90,150 · SHOPPING 33 · BRAND_SEARCH 196
+    (트랙 파일의 "파워링크 4,936개"는 최근 16일 AD 리포트에 노출이 찍힌 키워드 수 — 등록
+    전체가 아니었음. 이 격차 자체가 D-NAO-18 죽은키워드 위생의 실제 스케일을 보여줌).
+    SHOPPING은 AD 리포트에서 keyword_id='-'(그룹 단위)로만 집계되어 개별 키워드 진단 대상이
+    아니므로 keyword 행 동기화 제외(campaign·adgroup 행은 전 유형 동기화).
+    status는 userLock(true=OFF)+엔티티 status를 병합해 on/off/deleted로 정규화.
+    monthly_volume/competition은 keywordstool 조회 결과(저클릭 키워드 대상, 선택적 갱신).
+    """
+
+    __tablename__ = "naver_entity"
+    __table_args__ = (
+        UniqueConstraint("entity_type", "entity_id", name="uq_naver_entity"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    entity_type: Mapped[str] = mapped_column(String(10), nullable=False, index=True)  # campaign/adgroup/keyword
+    entity_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    parent_id: Mapped[str] = mapped_column(String(50), nullable=False, default="")  # adgroup→campaign_id / keyword→adgroup_id
+    campaign_id: Mapped[str] = mapped_column(String(50), nullable=False, default="", index=True)  # 전 행 공통(조인 편의)
+    campaign_type: Mapped[str] = mapped_column(String(20), nullable=False, default="")  # WEB_SITE/SHOPPING/BRAND_SEARCH
+    name: Mapped[str] = mapped_column(String(300), nullable=False, default="")  # 캠페인/그룹명 또는 키워드 텍스트
+    status: Mapped[str] = mapped_column(String(10), nullable=False, default="on")  # on/off/deleted
+    bid_amt: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 그룹 기본가·키워드 개별입찰
+    monthly_volume: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # keywordstool PC+Mobile 합
+    competition: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)  # low/mid/high
+    volume_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class NaverSearchTermDaily(Base):
+    """검색어 단위 일별 성과 — 쇼핑 SHOPPINGKEYWORD_DETAIL + 파워링크 EXPKEYWORD (P2-S1).
+
+    grain: (ad_date, campaign_id, adgroup_id, search_term, source). 등록 키워드가 아닌
+    **실제 검색된 텍스트**(쇼핑=상품 노출을 유발한 검색어, 파워링크=확장검색('-') 버킷이
+    매칭한 검색어) — D-NAO-18③ 확장버킷 검색어 승격(성과 좋은 검색어를 정식 키워드로
+    등록)의 원료.
+    컬럼 실측(원칙22, docs/references/22): SHOPPINGKEYWORD_DETAIL 16컬럼 중 imp=col11·
+    clk=col12·cost=col13(±1원 반올림)·rank_sum=col14 확정(prod naver_ad_daily 동일
+    adgroup·동일 날짜 합계 대조: imp/clk 정확 일치, cost 1원 오차). EXPKEYWORD는 자동
+    생성 안 됨 → POST /stat-reports로 생성 후 폴링(report_collector가 수행). avg_rank =
+    rank_sum/imp.
+    """
+
+    __tablename__ = "naver_search_term_daily"
+    __table_args__ = (
+        UniqueConstraint(
+            "ad_date", "campaign_id", "adgroup_id", "search_term", "source",
+            name="uq_naver_search_term_daily",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ad_date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)
+    campaign_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    adgroup_id: Mapped[str] = mapped_column(String(50), nullable=False, default="")
+    search_term: Mapped[str] = mapped_column(String(300), nullable=False, default="")
+    source: Mapped[str] = mapped_column(String(20), nullable=False)  # shopping/expkeyword
+    imp: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    clk: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cost: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    rank_sum: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

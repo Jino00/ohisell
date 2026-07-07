@@ -242,6 +242,53 @@ def snapshot_naver_ad_hourly_job():
         db.close()
 
 
+def sync_naver_entity_job():
+    """네이버 SA 엔티티(캠페인/그룹/키워드) 인벤토리 동기화 (07:35 KST, P2-S1)."""
+    db = _get_own_db_session()
+    try:
+        from app.services.naver_ad.entity_sync import sync_entities
+
+        result = sync_entities(db)
+        log.info("[스케줄러] naver_entity sync: %s", result)
+    except Exception as e:
+        log.exception("[스케줄러] sync_naver_entity_job 에러: %s", e)
+        raise
+    finally:
+        db.close()
+
+
+def sync_naver_search_term_job():
+    """네이버 SA 검색어 단위 성과 수집 (07:40 KST, P2-S1). 최근 3일 창(사후정정 흡수)."""
+    db = _get_own_db_session()
+    try:
+        from app.services.naver_ad.search_term_ingest import ingest_search_term_daily
+
+        end = kst_today() - timedelta(days=1)
+        start = end - timedelta(days=2)
+        result = ingest_search_term_daily(db, start, end)
+        log.info("[스케줄러] naver_search_term_daily ingest: %s", result)
+    except Exception as e:
+        log.exception("[스케줄러] sync_naver_search_term_job 에러: %s", e)
+        raise
+    finally:
+        db.close()
+
+
+def sync_naver_keyword_volume_job():
+    """저클릭 키워드 월검색량 갱신 (주1회, D-NAO-18 3단분류 입력)."""
+    db = _get_own_db_session()
+    try:
+        from app.services.naver_ad.keyword_volume_sync import sync_keyword_volumes
+
+        result = sync_keyword_volumes(db)
+        log.info("[스케줄러] keyword_volume_sync: %s", result)
+    except Exception as e:
+        log.exception("[스케줄러] sync_naver_keyword_volume_job 에러: %s", e)
+        raise
+    finally:
+        db.close()
+
+
 def sync_meta_ad_costs_job():
     """Meta 광고비 어제치 자동 적재 (07:00 KST)"""
     db = _get_own_db_session()
@@ -705,6 +752,9 @@ def _ensure_default_states(db):
         ("sync_naver_sa_ad_costs", "0 7 * * *"),
         ("sync_naver_ad_daily", "30 7 * * *"),      # 네이버 SA 일별 성과+BEP (트랙 P0)
         ("snapshot_naver_ad_hourly", "5 * * * *"),  # 네이버 SA 시간별 스냅샷 (빠른 루프)
+        ("sync_naver_entity", "35 7 * * *"),        # 엔티티 인벤토리 동기화 (트랙 P2-S1)
+        ("sync_naver_search_term", "40 7 * * *"),   # 검색어 단위 성과 수집 (트랙 P2-S1)
+        ("sync_naver_keyword_volume", "0 9 * * 0"), # 저클릭 키워드 월검색량 (주1회, 일요일)
         ("sync_naver_settlement", "25 5 * * *"),
         ("sync_naver_case_settlement", "30 5 * * *"),
         ("sync_meta_ad_costs", "0 7 * * *"),
@@ -758,6 +808,12 @@ def start_scheduler():
                 job_func = sync_naver_ad_daily_job
             elif state.job_name == "snapshot_naver_ad_hourly":
                 job_func = snapshot_naver_ad_hourly_job
+            elif state.job_name == "sync_naver_entity":
+                job_func = sync_naver_entity_job
+            elif state.job_name == "sync_naver_search_term":
+                job_func = sync_naver_search_term_job
+            elif state.job_name == "sync_naver_keyword_volume":
+                job_func = sync_naver_keyword_volume_job
             elif state.job_name == "sync_naver_settlement":
                 job_func = sync_naver_settlement_job
             elif state.job_name == "sync_naver_case_settlement":
