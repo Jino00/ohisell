@@ -294,6 +294,64 @@ def test_build_growth_candidates_capped_at_growth_proposal_cap(db, monkeypatch):
     assert len(out) == 2  # 캡(2)에서 멈춤 — 나머지 3건은 다음 회차로 이월(생성 자체를 안 함)
 
 
+# ── budget_allocator + anomaly_feed 연동 (듀얼모드 스프린트 Phase 3, D-NAO-22-③/④) ──
+def _budget_signal(**overrides):
+    row = {"campaign_id": "cmp-ours", "campaign_type": "WEB_SITE", "daily_budget": 10000,
+           "cost": 10000, "hour": 14, "growth_candidate_count": 3, "total_gap": 900}
+    row.update(overrides)
+    return row
+
+
+def test_build_budget_signal_produces_budget_up(db):
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis()
+
+    out = proposal_writer.build(db, diagnosis, budget_signals=[_budget_signal()], as_of=AS_OF)
+    assert len(out) == 1
+    assert out[0]["proposal_type"] == "budget_up"
+    assert out[0]["target_type"] == "campaign"
+    assert out[0]["target_id"] == "cmp-ours"
+    assert "인과추정 없음" in out[0]["expected_effect"]
+
+
+def test_build_budget_signal_skips_non_ours_campaign(db):
+    db.add(NaverCampaignSettings(campaign_id="cmp-none", optimizer="none"))
+    db.commit()
+    diagnosis = _diagnosis()
+
+    out = proposal_writer.build(
+        db, diagnosis, budget_signals=[_budget_signal(campaign_id="cmp-none")], as_of=AS_OF,
+    )
+    assert out == []
+
+
+def test_build_anomaly_spend_proposal_ignores_ours_filter(db):
+    """anomaly_feed는 진단 성격이라 optimizer 무관(전 캠페인 대상) — cmp-settings가 아예 없어도 생성돼야 함."""
+    diagnosis = _diagnosis()
+    anomalies = {"spend": [{"campaign_id": "cmp-any", "as_of": "2026-07-06", "prior_date": "2026-07-05",
+                             "cost_today": 50000, "cost_prior": 5000, "ratio": 10.0, "kind": "spike"}]}
+
+    out = proposal_writer.build(db, diagnosis, anomalies=anomalies, as_of=AS_OF)
+    assert len(out) == 1
+    assert out[0]["proposal_type"] == "anomaly"
+    assert "급증" in out[0]["rationale"]
+
+
+def test_build_anomaly_freshness_only_when_partial(db):
+    diagnosis = _diagnosis()
+    not_partial = {"freshness": {"partial": False, "as_of": "2026-07-06", "as_of_count": 10,
+                                  "baseline_avg": 10.0, "ratio": 1.0, "reason": "정상"}}
+    out = proposal_writer.build(db, diagnosis, anomalies=not_partial, as_of=AS_OF)
+    assert out == []
+
+    partial = {"freshness": {"partial": True, "as_of": "2026-07-06", "as_of_count": 2,
+                              "baseline_avg": 10.0, "ratio": 0.2, "reason": "부분적재 의심"}}
+    out2 = proposal_writer.build(db, diagnosis, anomalies=partial, as_of=AS_OF)
+    assert len(out2) == 1
+    assert out2[0]["proposal_type"] == "anomaly_freshness"
+
+
 def test_account_brief_singleton_new_day_creates_new_row(db):
     diagnosis = _diagnosis()
     yesterday_brief = NaverProposal(

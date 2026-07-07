@@ -13,6 +13,9 @@ from app.services.naver_ad import campaign_target_resolver, growth_sweeper
 
 _NEGATIVE = "negative_keyword"
 _GROWTH_BID_UP = "growth_bid_up"
+_BUDGET_UP = "budget_up"
+_ANOMALY = "anomaly"
+_ANOMALY_FRESHNESS = "anomaly_freshness"
 
 # 보드 의미상 허용되는 방향(codex 지적, 라이브검증 후속): starving_winners(육성 의도, D-NAO-18)는
 # bid_up만, bleeding_keywords/shopping_group_bep(손실 축소 의도)는 bid_down만 허용한다.
@@ -146,9 +149,75 @@ def _negative_keyword_from_exclusion(row: dict, campaign_id: str) -> dict:
     }
 
 
+def _budget_proposal(signal: dict, target_label: dict) -> dict:
+    """budget_allocator 신호(D-NAO-22-③) → budget_up 제안. 실행은 영구 Confirm(D-NAO-5 —
+    예산 상한 인상은 신규 캠페인·재구축과 동급 게이트). marginal ROAS 인과추정은 하지
+    않는다(D-S3-c 연기 사유 유지, 추정 금지) — "예산 캡이 이미 소진됐고 그 안에 이익보장
+    잔존 볼륨이 실측으로 확인됐다"는 사실만 제공."""
+    rationale = (
+        f"[budget_allocator] 일예산 {signal['daily_budget']}원 소진(누적 {signal['cost']}원, "
+        f"{signal['hour']}시 기준) — 동일 캠페인 내 이익보장 성장후보 {signal['growth_candidate_count']}건 "
+        f"존재(합산 입찰여력 gap={signal['total_gap']}원). target_roas 근거={target_label['source']}"
+        + (f"({target_label['target_roas']})" if target_label.get("target_roas") is not None else "")
+        + "."
+    )
+    return {
+        "proposal_type": _BUDGET_UP,
+        "target_type": "campaign",
+        "target_id": signal["campaign_id"],
+        "campaign_id": signal["campaign_id"],
+        "rationale": rationale,
+        "expected_effect": (
+            "예산 증액 후보 — marginal ROAS 인과추정 없음(추정 금지 원칙, D-S3-c 연기사유 유지). "
+            "잠재 신호(성장후보 gap 합계)만 제공, 실제 효과는 승인 후 D+7/14 실측 필요."
+        ),
+        "status": "pending",
+    }
+
+
+def _anomaly_spend_proposal(item: dict) -> dict:
+    """anomaly_feed 소진 급변 신호 → 정보성 제안(D-3, 실행 대상 아님). 전 캠페인 대상
+    (진단 성격이라 D-NAO-13 optimizer='ours' 제한 예외 — account_diagnosis 보드와 동일 취급).
+
+    "오늘/어제" 대신 실제 ISO 날짜(item["as_of"]/["prior_date"])를 쓴다 — anomaly_feed는
+    run_daily의 as_of(확정치 어제)로 호출되므로 "오늘"이라 쓰면 실제로는 어제 데이터인데
+    오늘로 오인될 수 있다(codex 지적, 정직 경계).
+    """
+    kind_label = "급증" if item["kind"] == "spike" else "급감"
+    return {
+        "proposal_type": _ANOMALY,
+        "target_type": "campaign",
+        "target_id": item["campaign_id"],
+        "campaign_id": item["campaign_id"],
+        "rationale": (
+            f"[anomaly_feed] 소진 {kind_label} — {item['as_of']} {item['cost_today']}원 vs "
+            f"{item['prior_date']} {item['cost_prior']}원(비율 {item['ratio']})."
+        ),
+        "expected_effect": "정보성 신호 — 실행 대상 아님.",
+        "status": "pending",
+    }
+
+
+def _anomaly_freshness_proposal(freshness: dict) -> dict:
+    """anomaly_feed 부분적재 신호(S3a codex 연기분 해소) → 계정 레벨 정보성 제안."""
+    return {
+        "proposal_type": _ANOMALY_FRESHNESS,
+        "target_type": "account",
+        "target_id": "",
+        "campaign_id": "",
+        "rationale": (
+            f"[anomaly_feed] 부분적재 의심 — as_of={freshness['as_of']} 행수={freshness['as_of_count']} "
+            f"(최근 평균 {freshness['baseline_avg']}행 대비 {freshness['ratio']}). {freshness['reason']}."
+        ),
+        "expected_effect": "정보성 신호 — 실행 대상 아님.",
+        "status": "pending",
+    }
+
+
 def build(
     db: Session, diagnosis: dict, *, bid_sims: dict | None = None,
-    growth_candidates: list[dict] | None = None, growth_sims: dict | None = None, as_of: date,
+    growth_candidates: list[dict] | None = None, growth_sims: dict | None = None,
+    budget_signals: list[dict] | None = None, anomalies: dict | None = None, as_of: date,
 ) -> list[dict]:
     """진단 보드 + bid_simulator 결과 → 제안 후보 목록(아직 미저장, dict 리스트).
 
@@ -158,11 +227,17 @@ def build(
       bid_simulator 결과 — proposal_pipeline.compute_growth_sims()가 그대로 전달. 진단
       보드(diagnosis["boards"])와 별도 소스라 형태가 달라(gap/economic_ceiling 등) 전용
       빌더(_growth_proposal)로 처리한다.
+    budget_signals: budget_allocator 신호(D-NAO-22-③, Phase3) —
+      proposal_pipeline.compute_budget_signals() 반환값. optimizer='ours'만 제안 생성.
+    anomalies: anomaly_feed 신호(경량, Phase3) — {"freshness": {...}|None, "spend": [...]}.
+      진단 성격(D-3, 사실 정리)이라 optimizer 무관 전 캠페인 대상(diagnosis 보드와 동일 취급).
     optimizer='ours' 캠페인만 대상(D-NAO-13) — 그 외(none/mop)는 진단엔 나와도 제안 없음.
     """
     bid_sims = bid_sims or {}
     growth_candidates = growth_candidates or []
     growth_sims = growth_sims or {}
+    budget_signals = budget_signals or []
+    anomalies = anomalies or {}
     boards = diagnosis.get("boards") or {}
     ours = _ours_campaign_ids(db)
     labels = _TargetLabelCache(db)
@@ -223,6 +298,23 @@ def build(
         if p:
             proposals.append(p)
             growth_created += 1
+
+    # budget_allocator(D-NAO-22-③, Phase3): 예산 상한 인상은 D-NAO-5 영구 Confirm 게이트 —
+    # 소진 캠페인 수 자체가 자연히 적어(전체 캠페인의 극히 일부만 캡에 도달) 별도 캡 불필요.
+    for s in budget_signals:
+        cid = s["campaign_id"]
+        if cid not in ours:
+            continue
+        proposals.append(_budget_proposal(s, labels.get(cid)))
+
+    # anomaly_feed(경량, Phase3): 진단 성격이라 diagnosis 보드와 동일하게 전 캠페인 대상
+    # (optimizer 무관) — D-3 사실 정리, 실행 없음.
+    for item in anomalies.get("spend") or []:
+        proposals.append(_anomaly_spend_proposal(item))
+
+    freshness = anomalies.get("freshness")
+    if freshness and freshness.get("partial"):
+        proposals.append(_anomaly_freshness_proposal(freshness))
 
     return proposals
 

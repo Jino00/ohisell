@@ -11,7 +11,8 @@ from sqlalchemy.pool import StaticPool
 
 from app.database import Base
 from app.models import (
-    NaverAdDaily, NaverCampaignSettings, NaverEntity, NaverProductBep, NaverProposal, Order,
+    NaverAdDaily, NaverCampaignSettings, NaverEntity, NaverHourlySnapshot, NaverProductBep,
+    NaverProposal, Order,
 )
 from app.services.naver_ad import proposal_pipeline
 from app.utils.kst import kst_today
@@ -94,6 +95,7 @@ def test_run_daily_full_happy_path_generates_proposal(db, monkeypatch):
     out = proposal_pipeline.run_daily(db)
     assert out["stage_status"] == {
         "freshness": "ok", "diagnosis": "ok", "bid_simulator": "ok", "growth_sweeper": "ok",
+        "budget_allocator": "ok", "anomaly_feed": "ok",
         "proposal_writer": "ok", "slack": "ok", "expiry": "ok",
     }
     assert out["generated"] >= 1
@@ -339,6 +341,106 @@ def test_compute_growth_sims_respects_estimate_budget(db, monkeypatch):
     assert len(queried) == 2  # estimate API 콜도 예산만큼만
 
 
+# ── budget_allocator + anomaly_feed 연동 (듀얼모드 스프린트 Phase 3, D-NAO-22-③/④) ──
+def _hourly_snapshot(campaign_id, cost, daily_budget, ad_date, hour=10, campaign_type="WEB_SITE"):
+    return NaverHourlySnapshot(
+        snapshot_at=datetime.combine(ad_date, datetime.min.time()).replace(hour=hour),
+        ad_date=ad_date, snapshot_hour=hour, campaign_id=campaign_id, campaign_type=campaign_type,
+        cost=cost, clk=0, imp=0, daily_budget=daily_budget,
+    )
+
+
+def test_run_daily_generates_budget_up_when_exhausted_and_growth_exists(db, monkeypatch):
+    """예산 소진(오늘 hourly_snapshot) + growth_sweeper 잔존볼륨(어제 확정치) 동시 충족 시
+    budget_up 제안 생성 — compute_growth_sims의 all_candidates를 재사용(estimate 재조회 없음)."""
+    _seed_bep(db)
+    db.add(NaverCampaignSettings(campaign_id="cmp1", optimizer="ours"))
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-grow", campaign_id="cmp1",
+                        campaign_type="WEB_SITE", name="성장후보", status="on", bid_amt=70))
+    _row(db, AS_OF, "cmp1", "WEB_SITE", "grp1", "nkw-grow", 1000, 100, 5000, direct=1_000_000)
+    db.add(Order(channel_id=6, platform_product_id="cp-1", order_number="ORD-2",
+                  order_date=AS_OF, status="정상", selling_price=Decimal("990000")))
+    # 오늘(kst_today()) 실시간 예산 소진 스냅샷 — budget_allocator는 as_of(어제)가 아니라 오늘 기준.
+    db.add(_hourly_snapshot("cmp1", cost=10000, daily_budget=10000, ad_date=kst_today()))
+    db.commit()
+
+    monkeypatch.setattr(
+        proposal_pipeline.fetcher, "estimate_average_position_bid",
+        lambda device, items: [{"nccKeywordId": it["key"], "bid": 100_000} for it in items],
+    )
+
+    out = proposal_pipeline.run_daily(db)
+    assert out["stage_status"]["budget_allocator"] == "ok"
+    saved = db.query(NaverProposal).filter(NaverProposal.proposal_type == "budget_up").all()
+    assert len(saved) == 1
+    assert saved[0].target_id == "cmp1"
+    assert "인과추정 없음" in saved[0].expected_effect
+    assert "일예산 10000원 소진" in saved[0].rationale
+
+
+def test_run_daily_no_budget_up_when_not_exhausted(db, monkeypatch):
+    _seed_bep(db)
+    db.add(NaverCampaignSettings(campaign_id="cmp1", optimizer="ours"))
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-grow", campaign_id="cmp1",
+                        campaign_type="WEB_SITE", name="성장후보", status="on", bid_amt=70))
+    _row(db, AS_OF, "cmp1", "WEB_SITE", "grp1", "nkw-grow", 1000, 100, 5000, direct=1_000_000)
+    db.add(Order(channel_id=6, platform_product_id="cp-1", order_number="ORD-2",
+                  order_date=AS_OF, status="정상", selling_price=Decimal("990000")))
+    db.add(_hourly_snapshot("cmp1", cost=100, daily_budget=10000, ad_date=kst_today()))  # 미소진
+    db.commit()
+
+    monkeypatch.setattr(
+        proposal_pipeline.fetcher, "estimate_average_position_bid",
+        lambda device, items: [{"nccKeywordId": it["key"], "bid": 100_000} for it in items],
+    )
+
+    out = proposal_pipeline.run_daily(db)
+    assert db.query(NaverProposal).filter(NaverProposal.proposal_type == "budget_up").count() == 0
+
+
+def test_run_daily_generates_anomaly_spend_spike_proposal(db, monkeypatch):
+    _seed_bep(db)
+    db.add(NaverCampaignSettings(campaign_id="cmp1", optimizer="ours"))
+    _row(db, AS_OF - timedelta(days=1), "cmp1", "WEB_SITE", "grp1", "nkw-1", 100, 10, 1000, direct=2000)
+    _row(db, AS_OF, "cmp1", "WEB_SITE", "grp1", "nkw-1", 500, 50, 10000, direct=20000)  # 10배 급증
+    db.commit()
+
+    monkeypatch.setattr(
+        proposal_pipeline.fetcher, "estimate_average_position_bid",
+        lambda device, items: [{"nccKeywordId": it["key"], "bid": 300} for it in items],
+    )
+
+    out = proposal_pipeline.run_daily(db)
+    assert out["stage_status"]["anomaly_feed"] == "ok"
+    saved = db.query(NaverProposal).filter(NaverProposal.proposal_type == "anomaly").all()
+    assert len(saved) == 1
+    assert saved[0].target_id == "cmp1"
+    assert "급증" in saved[0].rationale
+
+
+def test_run_daily_generates_anomaly_freshness_proposal(db, monkeypatch):
+    """S3a codex 연기분 해소 — row_count>0(기존 freshness_gate 통과)이라도 baseline 대비
+    너무 적으면(부분적재 의심) anomaly_freshness 정보성 제안이 생성돼야 한다."""
+    _seed_bep(db)
+    db.add(NaverCampaignSettings(campaign_id="cmp1", optimizer="ours"))
+    for i in range(7):
+        for kw in range(10):
+            _row(db, AS_OF - timedelta(days=i + 1), "cmp1", "WEB_SITE", "grp1", f"nkw-{kw}", 10, 1, 100)
+    for kw in range(2):  # 오늘은 10개 중 2개만(부분적재)
+        _row(db, AS_OF, "cmp1", "WEB_SITE", "grp1", f"nkw-{kw}", 10, 1, 100)
+    db.commit()
+
+    monkeypatch.setattr(
+        proposal_pipeline.fetcher, "estimate_average_position_bid",
+        lambda device, items: [{"nccKeywordId": it["key"], "bid": 300} for it in items],
+    )
+
+    out = proposal_pipeline.run_daily(db)
+    saved = db.query(NaverProposal).filter(NaverProposal.proposal_type == "anomaly_freshness").all()
+    assert len(saved) == 1
+    assert "부분적재 의심" in saved[0].rationale
+
+
 def test_run_daily_rank_estimate_failure_degrades_not_crashes(db, monkeypatch):
     _seed_bep(db)
     db.add(NaverCampaignSettings(campaign_id="cmp1", optimizer="ours"))
@@ -363,7 +465,8 @@ def test_run_daily_proposal_writer_failure_isolated_other_stages_still_run(db, m
     _row(db, AS_OF, "cmp1", "WEB_SITE", "grp1", "nkw-1", 500, 50, 10000, direct=1000)
     db.commit()
 
-    def boom(db_, diagnosis_dict, *, bid_sims=None, growth_candidates=None, growth_sims=None, as_of=None):
+    def boom(db_, diagnosis_dict, *, bid_sims=None, growth_candidates=None, growth_sims=None,
+             budget_signals=None, anomalies=None, as_of=None):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(proposal_pipeline.proposal_writer, "build", boom)

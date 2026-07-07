@@ -16,7 +16,8 @@ from sqlalchemy.orm import Session
 from app.models import NaverAdDaily, NaverEntity, NaverProposal
 from app.services import naver_sa_ad_fetcher as fetcher
 from app.services.naver_ad import (
-    bid_simulator, campaign_target_resolver, diagnosis, growth_sweeper, proposal_writer, slack_notifier,
+    anomaly_feed, bid_simulator, budget_allocator, campaign_target_resolver, diagnosis, growth_sweeper,
+    proposal_writer, slack_notifier,
 )
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.utils.kst import kst_today
@@ -288,7 +289,9 @@ def compute_growth_sims(
     전 활성 키워드(~89K)를 로컬 스윕(growth_sweeper.find_growth_candidates, API 無)한 뒤,
     갭 상위 ESTIMATE_BUDGET개만 estimate(외부 API)로 실측(계획서 §4-Phase2 — 전수 estimate
     금지). 반환: {"candidates": [상위 후보...], "sims": {("keyword", target_id): simulate_bid()
-    결과}} — proposal_writer.build의 growth_candidates/growth_sims 인자에 그대로 전달.
+    결과}, "all_candidates": [ours 필터·예산 슬라이스 전 전체 후보...]}. "candidates"/"sims"는
+    proposal_writer.build의 growth_candidates/growth_sims 인자로, "all_candidates"는 estimate
+    재조회 없이 갭 정보만 필요한 budget_allocator(Phase 3)로 전달한다.
 
     agg: 반드시 WEB_SITE로 스코프된 집계여야 한다(codex 지적 — compute_bid_sims용 전체 캠페인
     유형 집계를 그대로 재사용하면 SHOPPING/BRAND_SEARCH 매출이 계정 prior에 섞여, 클릭이 전혀
@@ -308,7 +311,7 @@ def compute_growth_sims(
     ours = proposal_writer._ours_campaign_ids(db)
     top = [c for c in all_candidates if c["campaign_id"] in ours][:growth_sweeper.ESTIMATE_BUDGET]
     if not top:
-        return {"candidates": [], "sims": {}}
+        return {"candidates": [], "sims": {}, "all_candidates": all_candidates}
 
     keyword_ids = [c["keyword_id"] for c in top]
     try:
@@ -346,7 +349,35 @@ def compute_growth_sims(
     # 2차 패스 — compute_bid_sims와 동일 공통 헬퍼(codex 회귀 이력 있는 경로, 단일 구현 재사용).
     _fill_predicted_clicks(db, sims, call_inputs, agg, correction_factor)
 
-    return {"candidates": top, "sims": sims}
+    return {"candidates": top, "sims": sims, "all_candidates": all_candidates}
+
+
+def compute_budget_signals(
+    db: Session, growth_all_candidates: list[dict], *, today: date | None = None,
+) -> list[dict]:
+    """budget_allocator Phase 3(D-NAO-22-③) — 오늘(실시간) 예산 소진 + growth_sweeper
+    잔존 볼륨을 결합. estimate 재조회 없음(순수 로컬 계산, growth_all_candidates 재사용).
+
+    growth_all_candidates: compute_growth_sims()["all_candidates"](ours 필터·예산 슬라이스 전
+    전체 후보) — 실제 예산 후보는 proposal_writer.build가 ours로 다시 걸러 대상을 좁힌다
+    (diagnosis 보드와 동일 패턴 — 신호 산출은 전 캠페인, 제안 생성만 ours 한정, D-NAO-13).
+    today: hourly_snapshot은 "당일 실시간 누적"이라 as_of(어제, 확정치)가 아니라 오늘 기준으로
+    판단해야 한다 — 미지정 시 kst_today()(단독 호출·테스트에서 override 가능).
+    """
+    today = today if today is not None else kst_today()
+    return budget_allocator.find_budget_expansion_signals(db, today, growth_candidates=growth_all_candidates)
+
+
+def compute_anomalies(db: Session, as_of: date) -> dict:
+    """anomaly_feed Phase 3(경량, D-NAO-22-④ 앞부분) — freshness 부분적재 + 소진 급변.
+
+    판정만 하고 액션 없음(D-3) — proposal_writer가 정보성 제안(anomaly/anomaly_freshness)으로
+    변환해 콘솔·Slack에 노출한다. 반환: {"freshness": {...}, "spend": [...]}.
+    """
+    return {
+        "freshness": anomaly_feed.freshness_partial_load(db, as_of),
+        "spend": anomaly_feed.spend_anomalies(db, as_of),
+    }
 
 
 def _expire_stale_pending(db: Session) -> int:
@@ -412,7 +443,7 @@ def run_daily(db: Session, *, lookback_days: int = 15) -> dict:
     else:
         result["stage_status"]["bid_simulator"] = "skipped"
 
-    growth: dict = {"candidates": [], "sims": {}}
+    growth: dict = {"candidates": [], "sims": {}, "all_candidates": []}
     if diag and diag.get("boards") is not None:
         try:
             growth = compute_growth_sims(db, diag, date_from, as_of, agg=web_site_agg)
@@ -424,12 +455,31 @@ def run_daily(db: Session, *, lookback_days: int = 15) -> dict:
     else:
         result["stage_status"]["growth_sweeper"] = "skipped"
 
+    budget_signals: list[dict] = []
+    try:
+        budget_signals = compute_budget_signals(db, growth.get("all_candidates") or [])
+        result["stage_status"]["budget_allocator"] = "ok"
+    except Exception as e:  # noqa: BLE001 — 예산 신호 실패는 저하만, 나머지 단계는 계속 진행
+        log.exception("proposal_pipeline budget_allocator 단계 실패: %s", e)
+        result["stage_status"]["budget_allocator"] = "failed"
+        result["errors"].append(f"budget_allocator: {e}")
+
+    anomalies: dict = {"freshness": None, "spend": []}
+    try:
+        anomalies = compute_anomalies(db, as_of)
+        result["stage_status"]["anomaly_feed"] = "ok"
+    except Exception as e:  # noqa: BLE001
+        log.exception("proposal_pipeline anomaly_feed 단계 실패: %s", e)
+        result["stage_status"]["anomaly_feed"] = "failed"
+        result["errors"].append(f"anomaly_feed: {e}")
+
     proposal_summaries: list[dict] = []
     if diag and diag.get("boards") is not None:
         try:
             candidates = proposal_writer.build(
                 db, diag, bid_sims=bid_sims,
-                growth_candidates=growth["candidates"], growth_sims=growth["sims"], as_of=as_of,
+                growth_candidates=growth["candidates"], growth_sims=growth["sims"],
+                budget_signals=budget_signals, anomalies=anomalies, as_of=as_of,
             )
             saved = proposal_writer.persist(db, candidates)
             proposal_writer.account_brief_singleton(db, diag, as_of)
