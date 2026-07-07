@@ -50,6 +50,27 @@ def test_affordable_ceiling_division_guard_zero_rpc():
     assert sim.affordable_ceiling(Decimal("-100"), Decimal("5")) == 0
 
 
+def test_affordable_ceiling_rounds_down_to_valid_bid_increment():
+    """라이브검증(T8, 2026-07-07): 네이버 입찰가는 10원 단위만 유효(그 외 400 거부) —
+    임의 정수(예: 1025원)를 그대로 반환하면 estimate/실제 입찰 등록에서 전부 거부당한다."""
+    # rpc=5125, target_roas=5 → raw ceiling=1025원 → 10원 단위 내림 = 1020원
+    assert sim.affordable_ceiling(Decimal("5125"), Decimal("5")) == 1020
+    # rpc=613*5=3065, target_roas=5 → raw ceiling=613원 → 내림 610원
+    assert sim.affordable_ceiling(Decimal("3065"), Decimal("5")) == 610
+
+
+def test_affordable_ceiling_below_min_bid_returns_zero_not_rounded_up():
+    """내림 결과가 최소입찰가(70원) 미만이면 70원으로 올리지 않고 0(입찰 근거 없음)을 반환
+    — 보수적 상한 원칙 유지(수익성 없는데 억지로 최소가를 추천하지 않음)."""
+    # rpc=650, target_roas=10 → raw ceiling=65원 → 10원 단위 내림해도 60원(<70) → 0
+    assert sim.affordable_ceiling(Decimal("650"), Decimal("10")) == 0
+
+
+def test_affordable_ceiling_clamps_to_max_bid():
+    # rpc가 극단적으로 커도 100,000원 상한을 넘지 않는다(실측 유효 상한).
+    assert sim.affordable_ceiling(Decimal("50_000_000"), Decimal("1")) == 100_000
+
+
 def test_affordable_ceiling_rejects_invalid_target_roas():
     with pytest.raises(ValueError):
         sim.affordable_ceiling(Decimal("5000"), Decimal("0"))

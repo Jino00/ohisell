@@ -59,3 +59,19 @@
 3. **배치 상한 200(both endpoints), performance bids는 100** — fetcher가 내부적으로 청크 분할해 전량 처리하고 청크 수를 로그로 남긴다(무언 truncation 금지, 계획서 원칙).
 4. **429/5xx는 기존 `_get`과 동일한 지수 백오프 재시도**(POST도 안전 — estimate는 읽기전용 추정 호출이라 재시도해도 부작용 없음).
 5. **자격증명은 호출 시점에 `os.getenv`로 새로 읽음** — 기존 모듈 top-level 캡처 패턴(`ACCESS_LICENSE` 등)을 새 estimate 함수에서 재사용하지 않고 별도 헬퍼로 분리(codex #19, import-time 캡처 심화 금지).
+
+## 4. 입찰가 유효 규격 — T8 라이브검증(2026-07-07) 확정
+
+`/estimate/performance-bulk` 호출 중 서로 다른 키워드×입찰가 조합을 배치로 넣었더니 캡(200)
+미만인데도 400 `"invalid collections size"`가 발생 — 이분탐색으로 원인을 역추적한 결과:
+
+- **입찰가는 70~100,000원 범위, 10원 단위만 유효.** 70·80·100·1000·1030·2000은 200 OK,
+  71·73·75·79·1024·1025·1026(10 배수 아님)은 400. 69원 이하는 명시적으로
+  `"bid price (unit: KRW). valid range: 70~100,000"` 메시지 반환, 10 배수가 아닌 값은
+  더 모호한 `"invalid collections size"`로 거부됨(같은 검증 실패의 다른 메시지로 추정).
+- **bid_simulator.affordable_ceiling이 이 규격을 몰라 임의 정수(예: 613/760/1025원)를
+  계산해 반환하던 버그**가 있었음 — 이 값을 그대로 estimate_performance나 향후 P3 실제
+  입찰 등록에 넘기면 100% 거부당한다. `affordable_ceiling`을 10원 단위 내림 + [70,100000]
+  클램프하도록 수정(내림 결과가 70원 미만이면 0 반환 — 최소입찰가조차 못 미치는 수익성).
+- **average-position-bid가 반환하는 `rank_bid`는 이미 유효 규격을 만족**(실측: 920/1090원
+  등 전부 10 배수) — Naver 자체 계산값이라 이쪽은 추가 보정 불필요.

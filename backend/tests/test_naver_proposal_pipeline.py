@@ -104,6 +104,88 @@ def test_run_daily_full_happy_path_generates_proposal(db, monkeypatch):
     assert db.query(NaverProposal).filter(NaverProposal.proposal_type == "account_brief").count() == 1
 
 
+def test_run_daily_uses_campaign_target_roas_override_not_account_default(db, monkeypatch):
+    """codex 지적(라이브검증 후속): 계정 기본 target_roas(=2.5, 낮음)로는 출혈 판정되는
+    키워드도, 캠페인에 훨씬 높은 override(=100)가 걸려 있으면 그 override로 economic_ceiling이
+    계산돼야 한다 — override가 rationale 라벨에만 쓰이고 계산에 반영 안 되던 버그의 회귀테스트."""
+    _seed_bep(db)
+    db.add(NaverCampaignSettings(campaign_id="cmp1", optimizer="ours", target_roas_override=Decimal("100")))
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-1", campaign_id="cmp1",
+                        campaign_type="WEB_SITE", name="출혈키워드", status="on", bid_amt=500))
+    _row(db, AS_OF, "cmp1", "WEB_SITE", "grp1", "nkw-1", 500, 50, 10000, direct=1000)
+    db.commit()
+
+    monkeypatch.setattr(
+        proposal_pipeline.fetcher, "estimate_average_position_bid",
+        lambda device, items: [{"nccKeywordId": it["key"], "bid": 300} for it in items],
+    )
+    captured_target_roas = {}
+    original = proposal_pipeline.campaign_target_resolver.resolve_target_roas
+
+    def spy(db_, campaign_id):
+        result = original(db_, campaign_id)
+        captured_target_roas[campaign_id] = result
+        return result
+
+    monkeypatch.setattr(proposal_pipeline.campaign_target_resolver, "resolve_target_roas", spy)
+
+    proposal_pipeline.run_daily(db)
+    assert captured_target_roas["cmp1"] == {"target_roas": Decimal("100"), "source": "override"}
+
+
+def test_run_daily_slack_failure_reflected_as_failed_stage(db, monkeypatch):
+    """codex 지적: slack_notifier.notify()가 예외 없이 {"sent": False, "reason": "HTTP 500..."}를
+    반환해도 run_daily는 그 반환값을 확인해 stage_status를 failed로 남겨야 한다."""
+    _seed_bep(db)
+    db.add(NaverCampaignSettings(campaign_id="cmp1", optimizer="ours"))
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-1", campaign_id="cmp1",
+                        campaign_type="WEB_SITE", name="출혈키워드", status="on", bid_amt=500))
+    _row(db, AS_OF, "cmp1", "WEB_SITE", "grp1", "nkw-1", 500, 50, 10000, direct=1000)
+    db.commit()
+
+    monkeypatch.setattr(
+        proposal_pipeline.fetcher, "estimate_average_position_bid",
+        lambda device, items: [{"nccKeywordId": it["key"], "bid": 300} for it in items],
+    )
+    monkeypatch.setattr(
+        proposal_pipeline.slack_notifier, "notify",
+        lambda proposals: {"sent": False, "reason": "HTTP 500: server error", "slack_ts": None, "proposal_count": len(proposals)},
+    )
+
+    out = proposal_pipeline.run_daily(db)
+    assert out["stage_status"]["slack"] == "failed"
+    assert any("slack:" in e for e in out["errors"])
+
+
+def test_run_daily_wires_performance_estimate_into_expected_effect(db, monkeypatch):
+    """codex 지적: estimate_performance가 파이프라인에서 전혀 연결 안 돼 expected_effect가
+    항상 '미조회'였다 — 확정된 recommended_bid로 performance-bulk를 호출해 예측클릭을 채운다."""
+    _seed_bep(db)
+    db.add(NaverCampaignSettings(campaign_id="cmp1", optimizer="ours"))
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-1", campaign_id="cmp1",
+                        campaign_type="WEB_SITE", name="출혈키워드", status="on", bid_amt=500))
+    _row(db, AS_OF, "cmp1", "WEB_SITE", "grp1", "nkw-1", 500, 50, 10000, direct=1000)
+    db.commit()
+
+    monkeypatch.setattr(
+        proposal_pipeline.fetcher, "estimate_average_position_bid",
+        lambda device, items: [{"nccKeywordId": it["key"], "bid": 300} for it in items],
+    )
+    perf_calls = []
+
+    def fake_perf(items):
+        perf_calls.extend(items)
+        return [{"keyword": it["keyword"], "bid": it["bid"], "clicks": 42, "impressions": 999, "cost": 1234}
+                for it in items]
+
+    monkeypatch.setattr(proposal_pipeline.fetcher, "estimate_performance", fake_perf)
+
+    proposal_pipeline.run_daily(db)
+    assert any(c["keyword"] == "출혈키워드" for c in perf_calls)
+    saved = db.query(NaverProposal).filter(NaverProposal.target_id == "nkw-1").one()
+    assert "추정클릭 42" in saved.expected_effect
+
+
 def test_run_daily_starving_winner_never_gets_bid_down_from_rank_estimate(db, monkeypatch):
     """라이브검증(2026-07-07) 회귀 재현: 이미 목표순위보다 잘 나오는 고ROAS 저노출 키워드에
     고정 목표순위(position=2) rank_bid를 적용하면 bid_down이 나와 육성 의도(D-NAO-18)와

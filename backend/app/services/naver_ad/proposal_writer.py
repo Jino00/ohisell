@@ -13,6 +13,17 @@ from app.services.naver_ad import campaign_target_resolver
 
 _NEGATIVE = "negative_keyword"
 
+# 보드 의미상 허용되는 방향(codex 지적, 라이브검증 후속): starving_winners(육성 의도, D-NAO-18)는
+# bid_up만, bleeding_keywords/shopping_group_bep(손실 축소 의도)는 bid_down만 허용한다.
+# rank estimate를 걸러도(proposal_pipeline._RANK_ESTIMATE_BOARDS) economic_ceiling 자체가
+# 표본이 얇을 때 계층 수축으로 board 의도와 반대 방향을 낼 수 있어(라이브검증 실측) 여기서
+# 한 번 더 막는다 — negative_keyword 격상(경제성 상한<=0)은 보드 무관하게 항상 허용.
+_ALLOWED_DIRECTIONS = {
+    "bleeding_keywords": {"down"},
+    "starving_winners": {"up"},
+    "shopping_group_bep": {"down"},
+}
+
 
 def _ours_campaign_ids(db: Session) -> set[str]:
     """optimizer='ours' 캠페인 ID 집합(D-NAO-13 — 제안 대상은 이 캠페인만)."""
@@ -45,7 +56,10 @@ def _bid_proposal(
     건너뛴다(다음 08:00에 재시도 — 억지로 부정확한 제안을 만들지 않음).
     sim.direction='hold'는 변경 불필요라 제안하지 않는다.
     economic_ceiling<=0(수익성 있는 입찰가 자체가 없음)이고 target_type='keyword'면
-    bid_down 대신 negative_keyword로 격상(계속 낮은 입찰을 제안해봐야 무의미).
+    bid_down 대신 negative_keyword로 격상(계속 낮은 입찰을 제안해봐야 무의미) — 이 격상은
+    보드 무관하게 항상 허용. 격상되지 않은 bid_up/bid_down은 보드가 허용하는 방향
+    (_ALLOWED_DIRECTIONS)과 일치해야 한다 — 표본이 얇은 키워드는 계층 수축으로 보드 의도와
+    반대 방향이 나올 수 있어(라이브검증 실측), 그런 경우 억지로 제안하지 않고 건너뛴다.
     """
     if sim is None:
         return None
@@ -55,6 +69,8 @@ def _bid_proposal(
     if sim["economic_ceiling"] <= 0 and target_type == "keyword":
         proposal_type = _NEGATIVE
     else:
+        if sim["direction"] not in _ALLOWED_DIRECTIONS.get(board_name, {"up", "down"}):
+            return None
         proposal_type = f"bid_{sim['direction']}"  # bid_up / bid_down
 
     rationale = (
@@ -149,8 +165,11 @@ def build(db: Session, diagnosis: dict, *, bid_sims: dict | None = None, as_of: 
 
 
 def persist(db: Session, proposals: list[dict]) -> list[NaverProposal]:
-    """제안 후보를 naver_proposals에 저장. dedup: 같은 (proposal_type, target_id)로
-    status='pending'이 이미 있으면 skip(트랜잭션 내 check-then-insert).
+    """제안 후보를 naver_proposals에 저장. dedup: 같은 (proposal_type, target_type,
+    campaign_id, target_id)로 status='pending'이 이미 있으면 skip(트랜잭션 내
+    check-then-insert). campaign_id를 빼면 서로 다른 캠페인의 동일 검색어
+    negative_keyword 제안이 충돌한다(codex 지적, 라이브검증 후속 — search_term은
+    캠페인마다 같은 문자열이 반복될 수 있음).
 
     단일 08:00 크론 가정 — 동시성/재시도 하드닝(DB 유니크 인덱스)은 P3(계획서 명시 연기).
     """
@@ -158,6 +177,8 @@ def persist(db: Session, proposals: list[dict]) -> list[NaverProposal]:
     for p in proposals:
         exists = db.query(NaverProposal).filter(
             NaverProposal.proposal_type == p["proposal_type"],
+            NaverProposal.target_type == p["target_type"],
+            NaverProposal.campaign_id == p["campaign_id"],
             NaverProposal.target_id == p["target_id"],
             NaverProposal.status == "pending",
         ).first()

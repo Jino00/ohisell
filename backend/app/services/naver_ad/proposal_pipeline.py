@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.models import NaverAdDaily, NaverEntity, NaverProposal
 from app.services import naver_sa_ad_fetcher as fetcher
-from app.services.naver_ad import bid_simulator, diagnosis, proposal_writer, slack_notifier
+from app.services.naver_ad import bid_simulator, campaign_target_resolver, diagnosis, proposal_writer, slack_notifier
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.utils.kst import kst_today
 
@@ -112,6 +112,11 @@ def compute_bid_sims(db: Session, diag: dict, date_from: date, as_of: date) -> d
     반환: {(target_type, target_id): simulate_bid() 결과, ...} — proposal_writer.build의
     bid_sims 인자에 그대로 전달. rank estimate 조회가 실패해도 economic_ceiling만으로
     계속 진행(부분 저하, 예외로 전체를 막지 않음).
+
+    target_roas는 캠페인별로 해석한다(campaign_target_resolver.resolve_target_roas —
+    override > 계정 기본값, D-S3-b). 라이브검증(2026-07-07, 원칙22)에서 발견: 계정 단일
+    target_roas만 쓰면 `/campaign-settings`의 target_roas_override가 rationale 라벨에만
+    보이고 실제 입찰 계산에는 반영되지 않아 override 기능이 사실상 죽어있었다(codex 지적).
     """
     boards = diag["boards"]
     candidates = _collect_bid_sim_candidates(boards)
@@ -119,8 +124,17 @@ def compute_bid_sims(db: Session, diag: dict, date_from: date, as_of: date) -> d
         return {}
 
     correction_factor = Decimal(str(diag["correction_factor"]["factor"]))
-    target_roas = Decimal(str(diag["account_target_roas"]))
     agg = _precompute_aggregates(db, date_from, as_of)
+    target_roas_cache: dict[str, Decimal] = {}
+
+    def _target_roas_for(campaign_id: str) -> Decimal:
+        if campaign_id not in target_roas_cache:
+            resolved = campaign_target_resolver.resolve_target_roas(db, campaign_id)
+            target_roas_cache[campaign_id] = (
+                resolved["target_roas"] if resolved["target_roas"] is not None
+                else Decimal(str(diag["account_target_roas"]))
+            )
+        return target_roas_cache[campaign_id]
 
     target_ids = [tid for _, tid, _, _, _ in candidates]
     bid_amts = dict(
@@ -144,6 +158,8 @@ def compute_bid_sims(db: Session, diag: dict, date_from: date, as_of: date) -> d
         log.warning("proposal_pipeline: average-position-bid 조회 실패(rank_bid 없이 진행): %s", e)
         rank_by_kw = {}
 
+    # 1차 패스 — recommended_bid까지만 확정(성과 estimate는 아직 없음, rank_bid만 반영).
+    call_inputs: dict[tuple[str, str], dict] = {}
     bid_sims: dict[tuple[str, str], dict] = {}
     for target_type, target_id, campaign_id, row, board in candidates:
         keyword_row = {
@@ -166,11 +182,60 @@ def compute_bid_sims(db: Session, diag: dict, date_from: date, as_of: date) -> d
                 "device": "MOBILE",
             }
 
+        target_roas = _target_roas_for(campaign_id)
+        call_inputs[(target_type, target_id)] = {
+            "keyword_row": keyword_row, "group_agg": group_agg, "campaign_agg": campaign_agg,
+            "target_roas": target_roas, "estimate": estimate,
+        }
         bid_sims[(target_type, target_id)] = bid_simulator.simulate_bid(
             keyword_row, target_roas,
             group_agg=group_agg, campaign_agg=campaign_agg, account_agg=agg["account"],
             correction_factor=correction_factor, estimate=estimate,
         )
+
+    # 2차 패스 — 확정된 recommended_bid로 성과(예측클릭) estimate를 조회해 expected_effect를
+    # 채운다(codex 지적: 이전엔 이 경로가 전혀 연결 안 돼 expected_effect가 항상 "미조회").
+    # performance-bulk는 키워드 텍스트 전용(T1 실측) — nccKeywordId→텍스트 매핑 필요.
+    perf_targets = [
+        (ttype, tid) for (ttype, tid), sim in bid_sims.items()
+        if ttype == "keyword" and sim["recommended_bid"] > 0
+    ]
+    if perf_targets:
+        names = dict(
+            db.query(NaverEntity.entity_id, NaverEntity.name)
+            .filter(NaverEntity.entity_id.in_([tid for _, tid in perf_targets])).all()
+        )
+        perf_items = [
+            {"keyword": names[tid], "bid": bid_sims[(ttype, tid)]["recommended_bid"],
+             "keywordplus": False, "device": "MOBILE"}
+            for ttype, tid in perf_targets if names.get(tid)
+        ]
+        try:
+            perf_results = fetcher.estimate_performance(perf_items) if perf_items else []
+        except Exception as e:  # noqa: BLE001 — 성과 estimate 실패도 저하만, 파이프라인 중단 아님
+            log.warning("proposal_pipeline: performance-bulk 조회 실패(예측클릭 없이 진행): %s", e)
+            perf_results = []
+        # (keyword 텍스트, bid) 조합으로 매칭 — 요청 자체가 이 조합으로 유일하게 식별됨.
+        clicks_by_key = {(r["keyword"], r["bid"]): r.get("clicks") for r in perf_results}
+
+        for ttype, tid in perf_targets:
+            name = names.get(tid)
+            if name is None:
+                continue
+            recommended_bid = bid_sims[(ttype, tid)]["recommended_bid"]
+            predicted_clicks = clicks_by_key.get((name, recommended_bid))
+            if predicted_clicks is None:
+                continue
+            inputs = call_inputs[(ttype, tid)]
+            estimate = dict(inputs["estimate"] or {})
+            estimate["predicted_clicks"] = predicted_clicks
+            estimate.setdefault("device", "MOBILE")
+            bid_sims[(ttype, tid)] = bid_simulator.simulate_bid(
+                inputs["keyword_row"], inputs["target_roas"],
+                group_agg=inputs["group_agg"], campaign_agg=inputs["campaign_agg"],
+                account_agg=agg["account"], correction_factor=correction_factor, estimate=estimate,
+            )
+
     return bid_sims
 
 
@@ -248,8 +313,15 @@ def run_daily(db: Session, *, lookback_days: int = 15) -> dict:
         result["stage_status"]["proposal_writer"] = "skipped"
 
     try:
-        slack_notifier.notify(proposal_summaries)
-        result["stage_status"]["slack"] = "ok"  # no-op/전송성공/제안0건 모두 정상 흐름(예외만 failed)
+        notify_result = slack_notifier.notify(proposal_summaries)
+        # no_webhook/no_proposals는 정상 no-op(D-NAO-21) — 그 외 reason(5xx/네트워크 등
+        # 실제 발송 실패)은 stage_status에 반영해야 한다(codex 지적 — 이전엔 예외만 잡고
+        # notify()의 반환값 자체를 무시해 실패가 "ok"로 보고됐다).
+        if notify_result["sent"] or notify_result["reason"] in ("no_webhook", "no_proposals"):
+            result["stage_status"]["slack"] = "ok"
+        else:
+            result["stage_status"]["slack"] = "failed"
+            result["errors"].append(f"slack: {notify_result['reason']}")
     except Exception as e:  # noqa: BLE001
         log.exception("proposal_pipeline slack 단계 실패: %s", e)
         result["stage_status"]["slack"] = "failed"

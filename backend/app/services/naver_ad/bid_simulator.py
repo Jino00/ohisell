@@ -12,6 +12,14 @@ from app.services.naver_ad.account_diagnosis import LOW_CLICK_THRESHOLD
 _Q4 = Decimal("0.0001")
 _SHRINK_K = Decimal(str(LOW_CLICK_THRESHOLD))  # 10 — D-NAO-9 저클릭 게이트와 동일 상수(계층 수축 강도)
 
+# 라이브검증(2026-07-07, T8, 원칙22): /estimate/performance-bulk가 "invalid collections size"로
+# 거부한 입찰가를 역추적해 확정 — 네이버 SA 입찰가는 70~100,000원, **10원 단위만 유효**
+# (71/73/1024/1025 등 10 배수가 아니면 400, 69원 이하는 range 오류). affordable_ceiling이
+# 계산한 임의 정수를 그대로 추천하면 estimate/실제 입찰 등록 모두에서 거부당한다.
+_MIN_BID = 70
+_MAX_BID = 100_000
+_BID_INCREMENT = 10
+
 
 def _level_rpc(clk: int, conv_amt: int, prior: Decimal) -> Decimal:
     """관측 RPC(conv_amt/clk)를 상위 prior로 수축(경험적 베이즈, pseudo-count=_SHRINK_K).
@@ -49,13 +57,22 @@ def affordable_ceiling(rpc_corrected: Decimal, target_roas: Decimal) -> int:
     필요가 없다(계획서 §3.2 확정, codex #6/#8의 AOV 소스 불명 문제를 이 단순화로 해소).
     target_roas<=0은 호출측 설정 오류(ValueError). rpc_corrected<=0(매출 실적 없음)은 division
     guard — 0원 반환(입찰 근거 없음 = 인상 불가 신호, 예외 아님).
+
+    결과는 실측 확정 유효 입찰가 규격(70~100,000원, 10원 단위)으로 내림 반올림한다 — 그렇지
+    않으면 estimate 호출과 실제 입찰 등록 양쪽에서 거부당한다(라이브검증, docs/references/23).
+    내림 결과가 최소입찰가(70원) 미만이면 그 입찰가로는 프로필상 이미 수익성이 없다는 뜻이라
+    0을 반환(70원으로 올림 강제하지 않음 — 보수적 상한 원칙 유지).
     """
     if target_roas <= 0:
         raise ValueError(f"target_roas는 0보다 커야 함: {target_roas}")
     if rpc_corrected <= 0:
         return 0
     ceiling = rpc_corrected / target_roas
-    return int(ceiling.to_integral_value(rounding=ROUND_DOWN))  # 원 단위 내림(보수적 상한)
+    ceiling_int = int(ceiling.to_integral_value(rounding=ROUND_DOWN))
+    rounded = (ceiling_int // _BID_INCREMENT) * _BID_INCREMENT  # 10원 단위 내림
+    if rounded < _MIN_BID:
+        return 0
+    return min(rounded, _MAX_BID)
 
 
 def simulate_bid(

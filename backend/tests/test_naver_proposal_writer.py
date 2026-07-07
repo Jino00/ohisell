@@ -73,6 +73,36 @@ def test_build_bleeding_keyword_produces_bid_down(db):
     assert "target_roas 근거=" in out[0]["rationale"]
 
 
+def test_build_bleeding_keyword_wrong_direction_skipped(db):
+    """codex 지적(라이브검증 후속): bleeding_keywords는 bid_down만 허용 — 표본이 얇아
+    계층 수축으로 direction='up'이 나오면 억지 제안 대신 건너뛴다."""
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis(bleeding_keywords=[_bleeding_row()])
+
+    out = proposal_writer.build(
+        db, diagnosis, bid_sims={("keyword", "nkw-1"): _sim(direction="up", ceiling=500, recommended=500)},
+        as_of=AS_OF,
+    )
+    assert out == []
+
+
+def test_build_starving_winner_wrong_direction_skipped(db):
+    """codex 지적: starving_winners는 bid_up만 허용 — direction='down'이면 건너뛴다
+    (rank estimate를 걸러도 economic_ceiling 자체가 표본이 얇아 down이 나올 수 있음)."""
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    row = {"campaign_id": "cmp-ours", "adgroup_id": "grp-1", "keyword_id": "nkw-2",
+           "cost": 5000, "clk": 3, "conv_amt": 50_000, "roas_corrected": 10.0, "avg_daily_clk": 0.1}
+    diagnosis = _diagnosis(starving_winners=[row])
+
+    out = proposal_writer.build(
+        db, diagnosis, bid_sims={("keyword", "nkw-2"): _sim(direction="down", ceiling=50, recommended=50)},
+        as_of=AS_OF,
+    )
+    assert out == []
+
+
 def test_build_bleeding_keyword_zero_ceiling_escalates_to_negative(db):
     db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
     db.commit()
@@ -138,6 +168,20 @@ def test_persist_dedups_existing_pending_same_type_and_target(db):
     saved = proposal_writer.persist(db, candidates)
     assert saved == []
     assert db.query(NaverProposal).filter(NaverProposal.target_id == "nkw-1").count() == 1
+
+
+def test_persist_dedup_scoped_by_campaign_not_cross_campaign(db):
+    """codex 지적(라이브검증 후속): search_term 같은 target_id가 다른 캠페인에도 나올 수
+    있음 — campaign_id를 dedup key에서 빼면 서로 다른 캠페인의 제안이 충돌한다."""
+    db.add(NaverProposal(proposal_type="negative_keyword", target_type="search_term", target_id="같은검색어",
+                          campaign_id="cmp-a", status="pending"))
+    db.commit()
+
+    candidates = [{"proposal_type": "negative_keyword", "target_type": "search_term", "target_id": "같은검색어",
+                   "campaign_id": "cmp-b", "rationale": "r", "expected_effect": "e", "status": "pending"}]
+    saved = proposal_writer.persist(db, candidates)
+    assert len(saved) == 1  # 다른 캠페인이라 dedup 대상 아님 — 정상 저장
+    assert db.query(NaverProposal).filter(NaverProposal.target_id == "같은검색어").count() == 2
 
 
 def test_persist_allows_new_target_and_allows_after_previous_resolved(db):
