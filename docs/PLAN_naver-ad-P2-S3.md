@@ -169,7 +169,8 @@ def run_daily(db, *, lookback_days=15) -> dict:
   - `run_daily()`: freshness 게이트(naver_ad_daily에 as_of=어제 행 존재 확인, 없으면 즉시 스킵) → diagnosis → `compute_bid_sims`(group/campaign/account aggregate 1회 precompute + `estimate_average_position_bid` 라이브 조회, 실패해도 economic_ceiling만으로 저하 진행) → proposal_writer(build+persist+account_brief_singleton, 커밋) → slack_notifier → `_expire_stale_pending`(14일 초과 pending→expired). 6단계 각각 독립 try/except로 격리 — 한 단계 실패해도 stage_status에 `failed` 기록하고 나머지는 계속 진행. **알려진 단순화**: SHOPPING adgroup 대상은 그룹 하위 키워드 grain이 없어 group_agg=campaign_agg로 근사(3단 계층 대신 2단, 정교화 여지 — T5 코멘트로 명시). 목표순위는 진단 보드에 avg_rank가 아직 없어 고정값 position=2 사용(P3+ 정교화 여지). 통합테스트 8개(`test_naver_proposal_pipeline.py`) — 전체 스위트 603 passed.
 - [x] ✅ cron `generate_naver_proposals` 08:00 등록
   - `generate_naver_proposals_job()`(scheduler_service.py) → `proposal_pipeline.run_daily()` 호출, 기존 잡들과 동일 패턴(자체 DB세션·예외 로깅 후 raise·finally close). `_ensure_default_states` 기본값 `("generate_naver_proposals", "0 8 * * *")` + `start_scheduler`의 job_name→job_func 매핑 추가. 07:30/07:35/07:40 수집 이후 실행, freshness 게이트는 run_daily 내부가 재확인. 전체 스위트 603 passed(회귀 없음, 순수 배선이라 신규 테스트 없음 — 다른 naver 잡들과 동일 컨벤션).
-- [ ] ⏳ Router 2개(proposals·campaign-settings+전환로깅) + **TestClient HTTP 왕복(500 재발방지)**
+- [x] ✅ Router 2개(proposals·campaign-settings+전환로깅) + **TestClient HTTP 왕복(500 재발방지)**
+  - `GET /api/naver/ad/proposals`(status/campaign_id/date 필터, 최신순), `GET/PUT /api/naver/ad/campaign-settings`(optimizer/mode/override upsert, optimizer 실제 전환 시에만 `naver_change_log`에 경량 기록 — codex #16). 광고 API 쓰기 없음, 우리 설정 테이블만(D-NAO-13). TestClient HTTP 왕복테스트 13개(`test_naver_ad_proposals_router.py`, P2-S2 500 사고 재발방지 원칙) — 전체 스위트 616 passed.
 - [ ] ⏳ 라이브 검증(원칙22): prod DB 스크래치 사본 → **카나리 1~2 캠페인 optimizer='ours' 세팅(스크립트)** → harness 실행 → 제안 생성·저장 확인 / prod 배포(sha256 scp·pm2) → 08:00 자율 발화 or 수동 → `naver_proposals` 실적재 SQL 확인 / freshness 게이트·slack no-op 확인
 - [ ] ⏳ codex review(원칙19) → 트랙·progress 갱신·커밋
 

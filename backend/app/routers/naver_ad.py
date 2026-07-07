@@ -1,18 +1,22 @@
-# naver_ad.py — 네이버 SA 광고 리포트 라우터 (P1/P2-S2, track_naver-ad-optimization)
-# GET /api/naver/ad/report     — 광고 리포트(KPI·3열 ROAS·드릴다운·시계열), ad_report Harness 경유.
-# GET /api/naver/ad/bep        — 상품별 BEP 목록(단순 read, CRUD 직접).
-# GET /api/naver/ad/diagnosis  — 진단 보드(출혈/승자/확장버킷/쇼핑BEP/제외후보/3단분류/악순환),
+# naver_ad.py — 네이버 SA 광고 리포트 라우터 (P1/P2-S2/P2-S3, track_naver-ad-optimization)
+# GET /api/naver/ad/report            — 광고 리포트(KPI·3열 ROAS·드릴다운·시계열), ad_report Harness 경유.
+# GET /api/naver/ad/bep               — 상품별 BEP 목록(단순 read, CRUD 직접).
+# GET /api/naver/ad/diagnosis         — 진단 보드(출혈/승자/확장버킷/쇼핑BEP/제외후보/3단분류/악순환),
 #   diagnosis Harness 경유(P2-S2). D-NAO-15/D-3: 전부 읽기 전용 — 제안·쓰기 없음.
+# GET /api/naver/ad/proposals         — 제안 카드 목록(P2-S3, naver_proposals 단순 read).
+# GET/PUT /api/naver/ad/campaign-settings — optimizer/mode/override 조회·설정(P2-S3, 전환 시
+#   naver_change_log에 경량 기록). 광고 API 쓰기는 아님 — 우리 시스템 내부 설정만(D-NAO-13).
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import NaverProductBep
+from app.models import NaverCampaignSettings, NaverChangeLog, NaverProductBep, NaverProposal
 from app.services.naver_ad import metrics_aggregator
 from app.services.naver_ad.ad_report import build_report
 from app.services.naver_ad.diagnosis import build_diagnosis
@@ -139,3 +143,131 @@ def diagnosis(
         raise HTTPException(400, f"조회 범위는 최대 {_MAX_DIAGNOSIS_RANGE_DAYS}일입니다")
 
     return build_diagnosis(db, date_from, date_to)
+
+
+# ══════════════════════════════════════════════════════════════════
+# P2-S3 — 제안 카드·캠페인 optimizer 설정 (관찰 모드, D-3: 읽기전용 제안만)
+# ══════════════════════════════════════════════════════════════════
+_PROPOSAL_STATUSES = {"pending", "approved", "rejected", "expired"}
+_MAX_PROPOSAL_RANGE_DAYS = 90
+
+
+def _serialize_proposal(p: NaverProposal) -> dict:
+    return {
+        "id": p.id,
+        "created_at": p.created_at.isoformat() if p.created_at else None,
+        "proposal_type": p.proposal_type,
+        "target_type": p.target_type,
+        "target_id": p.target_id,
+        "campaign_id": p.campaign_id,
+        "rationale": p.rationale,
+        "expected_effect": p.expected_effect,
+        "status": p.status,
+        "slack_ts": p.slack_ts,
+        "executed_change_log_id": p.executed_change_log_id,
+    }
+
+
+@router.get("/proposals")
+def proposals(
+    status: str | None = Query(None, description="pending|approved|rejected|expired"),
+    date_from: date | None = Query(None, description="created_at 시작일(KST 달력일 경계)"),
+    date_to: date | None = Query(None, description="created_at 종료일(포함)"),
+    campaign_id: str | None = Query(None, description="특정 캠페인만 필터"),
+    limit: int = Query(200, ge=1, le=1000),
+    db: Session = Depends(get_db),
+):
+    """제안 카드 목록(콘솔) — naver_proposals 단순 read, 최신순."""
+    if status is not None and status not in _PROPOSAL_STATUSES:
+        raise HTTPException(400, f"status는 {sorted(_PROPOSAL_STATUSES)} 중 하나여야 합니다")
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(400, "date_from은 date_to보다 이후일 수 없습니다")
+    if date_from and date_to and (date_to - date_from).days > _MAX_PROPOSAL_RANGE_DAYS:
+        raise HTTPException(400, f"조회 범위는 최대 {_MAX_PROPOSAL_RANGE_DAYS}일입니다")
+
+    q = db.query(NaverProposal)
+    if status:
+        q = q.filter(NaverProposal.status == status)
+    if campaign_id:
+        q = q.filter(NaverProposal.campaign_id == campaign_id)
+    if date_from:
+        q = q.filter(NaverProposal.created_at >= datetime.combine(date_from, datetime.min.time()))
+    if date_to:
+        q = q.filter(NaverProposal.created_at < datetime.combine(date_to + timedelta(days=1), datetime.min.time()))
+    rows = q.order_by(NaverProposal.created_at.desc()).limit(limit).all()
+    return {"rows": [_serialize_proposal(p) for p in rows]}
+
+
+_VALID_OPTIMIZERS = {"none", "ours", "mop"}
+_VALID_MODES = {"growth", "recovery", "launch", "defense"}
+
+
+class CampaignSettingsIn(BaseModel):
+    campaign_id: str
+    optimizer: str
+    mode: str | None = None
+    target_roas_override: float | None = None
+    memo: str | None = None
+
+
+def _serialize_settings(s: NaverCampaignSettings) -> dict:
+    return {
+        "campaign_id": s.campaign_id,
+        "optimizer": s.optimizer,
+        "mode": s.mode,
+        "target_roas_override": _num(s.target_roas_override),
+        "memo": s.memo,
+        "updated_at": s.updated_at.isoformat() if s.updated_at else None,
+    }
+
+
+@router.get("/campaign-settings")
+def campaign_settings_list(
+    campaign_id: str | None = Query(None, description="특정 캠페인만 필터"),
+    db: Session = Depends(get_db),
+):
+    """캠페인별 optimizer/mode/override 조회(최적화 콘솔 패널 로드)."""
+    q = db.query(NaverCampaignSettings)
+    if campaign_id:
+        q = q.filter(NaverCampaignSettings.campaign_id == campaign_id)
+    rows = q.order_by(NaverCampaignSettings.campaign_id).all()
+    return {"rows": [_serialize_settings(r) for r in rows]}
+
+
+@router.put("/campaign-settings")
+def campaign_settings_put(body: CampaignSettingsIn, db: Session = Depends(get_db)):
+    """optimizer/mode/override upsert. optimizer가 실제로 바뀌면 naver_change_log에 경량
+    전환 기록(누가/언제는 API 호출 자체·changed_at 서버타임이 근거, 전후 값만 저장 — codex #16).
+    이 엔드포인트는 우리 시스템 설정 테이블만 쓴다 — 네이버 광고 API에 쓰기 요청 없음(D-NAO-13).
+    """
+    if body.optimizer not in _VALID_OPTIMIZERS:
+        raise HTTPException(400, f"optimizer는 {sorted(_VALID_OPTIMIZERS)} 중 하나여야 합니다")
+    if body.mode is not None and body.mode not in _VALID_MODES:
+        raise HTTPException(400, f"mode는 {sorted(_VALID_MODES)} 중 하나여야 합니다")
+
+    settings = db.query(NaverCampaignSettings).filter(
+        NaverCampaignSettings.campaign_id == body.campaign_id
+    ).first()
+    before_optimizer = settings.optimizer if settings else "none"
+
+    if settings is None:
+        settings = NaverCampaignSettings(campaign_id=body.campaign_id, optimizer=body.optimizer)
+        db.add(settings)
+    settings.optimizer = body.optimizer
+    settings.mode = body.mode
+    settings.target_roas_override = (
+        Decimal(str(body.target_roas_override)) if body.target_roas_override is not None else None
+    )
+    settings.memo = body.memo
+
+    if before_optimizer != body.optimizer:
+        db.add(NaverChangeLog(
+            entity_type="campaign", entity_id=body.campaign_id, campaign_id=body.campaign_id,
+            action="optimizer_change",
+            before_value=before_optimizer, after_value=body.optimizer,
+            rationale="콘솔 PUT /campaign-settings",
+        ))
+
+    db.commit()
+    db.refresh(settings)
+    return _serialize_settings(settings)
