@@ -22,6 +22,7 @@ import {
   type NaverAdHourlyRow,
 } from "../lib/api";
 import NaverAdDiagnosisBoard from "./NaverAdDiagnosisBoard";
+import NaverAdOptimizationConsole from "./NaverAdOptimizationConsole";
 
 function isoKST(d: Date): string {
   const kst = new Date(d.toLocaleString("en-US", { timeZone: "Asia/Seoul" }));
@@ -95,13 +96,14 @@ function drilldownKey(row: NaverAdDrilldownRow | NaverAdHourlyRow, grain: NaverA
   return `${parts}#${index}`;
 }
 
-const TOP_TABS: { key: "report" | "diagnosis"; label: string }[] = [
+const TOP_TABS: { key: "report" | "diagnosis" | "console"; label: string }[] = [
   { key: "report", label: "리포트" },
   { key: "diagnosis", label: "진단 보드" },
+  { key: "console", label: "최적화 콘솔" },
 ];
 
 export default function NaverAdReport() {
-  const [view, setView] = useState<"report" | "diagnosis">("report");
+  const [view, setView] = useState<"report" | "diagnosis" | "console">("report");
   const today = isoKST(new Date());
   const [dateFrom, setDateFrom] = useState(daysAgo(6));
   const [dateTo, setDateTo] = useState(today);
@@ -174,6 +176,8 @@ export default function NaverAdReport() {
 
       {view === "diagnosis" ? (
         <NaverAdDiagnosisBoard />
+      ) : view === "console" ? (
+        <NaverAdOptimizationConsole />
       ) : (
       <>
       {/* 필터바 */}

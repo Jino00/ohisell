@@ -3,7 +3,17 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
-- 날짜: 2026-07-07 (★네이버 광고 트랙 **P2-S3a 백엔드 완료 — prod 배포·라이브 검증·codex review**)
+- 날짜: 2026-07-07 밤 (★네이버 광고 트랙 **듀얼모드 스프린트 Phase 1 완료 — S3b 최적화 콘솔 프론트, codex review 반영**)
+- ★**Phase 1(S3b 콘솔) 완료**: `NaverAdOptimizationConsole.tsx` 신규 + `NaverAdReport.tsx` "최적화 콘솔" 3번째 탭. ①제안 카드(status 필터·실행버튼 disabled=관찰모드) ②캠페인 optimizer/모드/**공격성 다이얼**(안전×1.30/표준×1.15/공격×1.05 — 클릭 시 `account_bep_roas×배수`를 `target_roas_override`로 계산 후 PUT, 라벨이 아니라 `campaign_target_resolver` 실계산에 반영). `api.ts`에 타입 4종+fetch 3종 추가. **라이브 e2e(원칙22)**: 스크래치 DB(`Base.metadata.create_all`+수기 시드, prod 미접촉)로 백엔드(8000)+프론트(5173) 기동 → 브라우저에서 공격성 다이얼 클릭→저장 → `resolve_target_roas()` 직접 호출로 override가 실제 소비됨을 코드 레벨 확인, optimizer 전환 시 `naver_change_log` 기록도 확인. **codex review(원칙19, `codex exec`) 4건 전부 즉시수정**: memo 삭제 버그(PUT이 항상 memo=null 전송)·proposals reqSeq 누락(status 탭 레이스)·override NaN/음수 미검증·행별 저장상태 레이스(단일 scalar savingId) — 전부 수정 후 브라우저 재검증. tsc/build 통과, 전체 pytest 626 passed(회귀 없음, 이번 Phase는 프론트 전용이라 백엔드 신규 테스트 없음). 문서(트랙·PLAN·TRACKS) 갱신, 미커밋. **다음 = Phase 2 growth_sweeper.**
+- ─────────────────────────────────────────────
+- (이전) 날짜: 2026-07-07 밤 (★네이버 광고 트랙 **듀얼모드 완성 스프린트 확정 — D-NAO-22/23, 코드 0줄, Phase 1 착수 대기**)
+- ★**MOP Pro 벤치마크 → 듀얼모드 스프린트 확정**: MOP(LG CNS) support 문서 4관점 병렬 정독 + Jino 계정 라이브 대시보드 실측(MOP 4단 엔진: 수집→러닝[매일 ML모델 재생성]→플래닝→플라이트 자동집행) → 벤치마크 `great-hertz-9fd2c8` 워크트리 `docs/references/24_mop_pro_competitor_benchmark.md` 저장(비교 기준=Pro, Jino 확정). 대조 결과 우리 구현은 방어 7:공격 1 → **Jino 지시(원문): "나는 수익성 방어에도 강하고 볼륨 성장기에도 강하기를 원해" / "빠진것도 모두 처음부터 완성해줘" / "학습하고 개선되는 자동 구조도 모두 가지고 있지?" / "이 방향이 바뀌지 않도록... 이전 세션 handoff 내용도 지금 구성된 작업 완료한 뒤에 진행"**.
+  - **D-NAO-22**(4조각: 전수스윕·모드다이얼·예산신호·조건발동+실행골격) + **D-NAO-23**(학습루프 2·3·5 즉시 구현+루프1 성적표 인프라, D-NAO-1 개정 없음 — 이익률은 극대화 대상이 아니라 공격성 다이얼 하한) 트랙 기록 완료.
+  - **실행 계획 = `docs/PLAN_naver-ad-S3b-dual-mode.md` 6-Phase**: ①S3b 콘솔(제안카드+optimizer/모드/공격성 다이얼) ②growth_sweeper(전 키워드 이익보장 볼륨 스윕) ③budget_allocator+anomaly_feed ④trigger_watch(조건발동) ⑤execution_harness 골격+change_log(기본 OFF) ⑥learning_loops. 매 Phase: 전체 pytest+codex review+트랙 갱신+라이브 검증.
+  - **직전 HANDOFF(S3a) 잔여 항목은 전부 Phase 6 완료 후 승계 큐로 재배열**(계획서 §5: 관찰모드 개시 결정·15일 베이스라인 재대조·push 결정·트랙파일 귀속 정리 등).
+  - ⚠️ **새 세션 필독 순서: 트랙 파일 → `PLAN_naver-ad-S3b-dual-mode.md` → §7 체크리스트에서 이어서. 방향 임의 변경 금지.**
+- ─────────────────────────────────────────────
+- (이전) 날짜: 2026-07-07 (★네이버 광고 트랙 **P2-S3a 백엔드 완료 — prod 배포·라이브 검증·codex review**)
 - ★**P2-S3a 완료**: T1~T8 전체(estimate fetcher·bid_simulator·proposal_writer·slack_notifier·proposal_pipeline harness·cron 08:00·라우터 2개). **라이브검증(원칙22) 중 실운영 버그 2건 자체 발견**: ①starving_winners(육성 의도)에 고정 목표순위 rank estimate 적용 시 이미 순위보다 잘 나오는 고ROAS 키워드가 bid_down으로 뒤집힘 → rank estimate 대상을 bleeding_keywords/shopping_group_bep로 한정해 수정 ②estimate_performance 연결 시도 중 400 "invalid collections size" → 이분탐색으로 네이버 입찰가가 **70~100,000원 10원 단위만 유효**함을 확정, bid_simulator가 임의 정수를 반환하던 버그를 10원 단위 내림+클램프로 수정. **codex review(667ad8f..HEAD)**: P1 2건·P2 5건 중 4건 동의 즉시수정(campaign target_roas_override 계산 미반영·보드 의미 역행 방향 미차단·slack 실패 stage_status 미반영·dedup key campaign_id 누락), 1건 의도적 연기(freshness 부분적재 탐지 — D-S3-c 이상피드 스코프와 통합, 근거 없는 임계값 도입은 추정 금지 위반).
   - **카나리 라이브검증**: prod DB 스크래치 사본에서 실제 캠페인(`cmp-a001-01-000000010206612`) `optimizer='ours'` 세팅 → harness 실행 → 159건 제안 실제 생성(전부 유효 입찰가), 굶는승자 27/27 정상 bid_up, 예측클릭 159/159 연결, 재실행 시 dedup 정상(generated=0). **실제 prod 캠페인은 미전환**(스크래치 사본에서만 테스트 — 관찰모드 개시는 별도 운영 결정, Jino 몫).
   - **prod 배포**: sha256 scp 7파일(bid_simulator·proposal_writer·proposal_pipeline·slack_notifier 신규 + fetcher·scheduler_service·routers/naver_ad.py 수정) + pm2 재시작. `/proposals`·`/campaign-settings`·`/diagnosis` 전부 200, 에러로그 클린, 스케줄러 `generate_naver_proposals`(08:00 KST) 등록 확인(API로 next_run_time 실측).

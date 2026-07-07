@@ -1655,3 +1655,83 @@ export function fetchNaverAdDiagnosis(params?: {
   const qs = q.toString();
   return fetchApi<NaverAdDiagnosis>(`/api/naver/ad/diagnosis${qs ? `?${qs}` : ""}`);
 }
+
+// ── 네이버 SA 광고 최적화 콘솔 (P2-S3b, track_naver-ad-optimization) ──
+export interface NaverAdProposal {
+  id: number;
+  created_at: string | null;
+  proposal_type: string;
+  target_type: string;
+  target_id: string;
+  campaign_id: string;
+  rationale: string | null;
+  expected_effect: string | null;
+  status: string;
+  slack_ts: string | null;
+  executed_change_log_id: number | null;
+}
+
+export interface NaverAdProposalList {
+  rows: NaverAdProposal[];
+}
+
+export function fetchNaverAdProposals(params?: {
+  status?: string;
+  dateFrom?: string;
+  dateTo?: string;
+  campaignId?: string;
+  limit?: number;
+}): Promise<NaverAdProposalList> {
+  const q = new URLSearchParams();
+  if (params?.status) q.set("status", params.status);
+  if (params?.dateFrom) q.set("date_from", params.dateFrom);
+  if (params?.dateTo) q.set("date_to", params.dateTo);
+  if (params?.campaignId) q.set("campaign_id", params.campaignId);
+  if (params?.limit) q.set("limit", String(params.limit));
+  const qs = q.toString();
+  return fetchApi<NaverAdProposalList>(`/api/naver/ad/proposals${qs ? `?${qs}` : ""}`);
+}
+
+export type NaverAdOptimizer = "none" | "ours" | "mop";
+export type NaverAdCampaignMode = "growth" | "recovery" | "launch" | "defense";
+
+export interface NaverAdCampaignSettings {
+  campaign_id: string;
+  optimizer: NaverAdOptimizer;
+  mode: NaverAdCampaignMode | null;
+  target_roas_override: number | null;
+  memo: string | null;
+  updated_at: string | null;
+}
+
+export interface NaverAdCampaignSettingsList {
+  rows: NaverAdCampaignSettings[];
+}
+
+export function fetchNaverCampaignSettings(params?: {
+  campaignId?: string;
+}): Promise<NaverAdCampaignSettingsList> {
+  const q = new URLSearchParams();
+  if (params?.campaignId) q.set("campaign_id", params.campaignId);
+  const qs = q.toString();
+  return fetchApi<NaverAdCampaignSettingsList>(`/api/naver/ad/campaign-settings${qs ? `?${qs}` : ""}`);
+}
+
+export function putNaverCampaignSettings(body: {
+  campaignId: string;
+  optimizer: NaverAdOptimizer;
+  mode?: NaverAdCampaignMode | null;
+  targetRoasOverride?: number | null;
+  memo?: string | null;
+}): Promise<NaverAdCampaignSettings> {
+  return fetchApi<NaverAdCampaignSettings>("/api/naver/ad/campaign-settings", {
+    method: "PUT",
+    body: JSON.stringify({
+      campaign_id: body.campaignId,
+      optimizer: body.optimizer,
+      mode: body.mode ?? null,
+      target_roas_override: body.targetRoasOverride ?? null,
+      memo: body.memo ?? null,
+    }),
+  });
+}
