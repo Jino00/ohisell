@@ -1,7 +1,7 @@
 # Track: 네이버 SA 광고 최적화 시스템 (우리판 MOP)
 
 - 생성: 2026-07-07 (설계 대화 세션, Jino 구조 승인 "그래")
-- 상태: 🟢 Active — 2/6 (**P0+P1 완료**, P2-S1 완료·P2-S2 백엔드+프론트 완료, prod 배포 대기)
+- 상태: 🟢 Active — 2/6 (**P0+P1 완료**, P2-S1 완료·P2-S2 백엔드+프론트 완료·전체 prod 배포 완료)
 - 계획서: `docs/PLAN_naver-ad-optimization.md`
 - 대시보드 위치: sellC (sellc.ohitech.co.kr = 이 repo frontend)
 
@@ -70,13 +70,14 @@
     - **D-NAO-17 백필 한도 확정(미확인 해소)**: `/stats`는 최근 730일까지, 호출당 92일 청크 한도(에러 메시지로 명문화, 추측 아님). 캠페인 grain만 가능(그룹/키워드 세부 불가).
     - **⚠️미해결**: `campaign_target_resolver`의 "②쇼핑 상품BEP 연결" 단계는 미구현 — 캠페인/그룹↔상품 연결 데이터 소스가 없어 override→계정기본값 2단만 동작. 이름 기반 추정 매칭은 금전 판단 근거로 약해 시도 안 함(추정 금지). **S2 착수 전 재검토 필요**.
     - 상세: `docs/references/22_naver_sa_p2s1_recon.md`. 커밋(admiring-solomon-b4f056, 미push).
-  - [x] P2-S2 진단 엔진 (백엔드+프론트 완료 2026-07-07): `account_diagnosis.py`(SA, 보드 7개 — 출혈/굶는승자/확장버킷/쇼핑그룹BEP/제외후보/3단분류/악순환) + `diagnosis.py`(Harness, D-NAO-21 보정계수+계정BEP/목표ROAS 조립) + `GET /api/naver/ad/diagnosis`. 테스트 19신규(전체558 pass). 프론트: `NaverAdDiagnosisBoard.tsx`(신규) — `NaverAdReport.tsx`에 "리포트"/"진단 보드" 탭으로 통합, 보드 7개 전부 시각화. prod DB 스크래치 사본으로 로컬 라이브 렌더링 확인(원칙22). **prod 배포는 아직**.
+  - [x] P2-S2 진단 엔진 (백엔드+프론트 완료 2026-07-07): `account_diagnosis.py`(SA, 보드 7개 — 출혈/굶는승자/확장버킷/쇼핑그룹BEP/제외후보/3단분류/악순환) + `diagnosis.py`(Harness, D-NAO-21 보정계수+계정BEP/목표ROAS 조립) + `GET /api/naver/ad/diagnosis`. 테스트 19신규(전체558 pass). 프론트: `NaverAdDiagnosisBoard.tsx`(신규) — `NaverAdReport.tsx`에 "리포트"/"진단 보드" 탭으로 통합, 보드 7개 전부 시각화. prod DB 스크래치 사본으로 로컬 라이브 렌더링 확인(원칙22). **prod 배포 완료**(아래 참조).
     - **버그 발견·즉시 수정(라이브 검증 중, 원칙22)**: 보정계수를 고정 30일 창으로 계산하면 naver_ad_daily 실단위 데이터(P0는 7/04 개시라 3일치뿐)와 30일치 실주문매출이 창이 어긋나 계수가 9.57(터무니없음)로 왜곡됨 → `earliest_real_data_date`로 실데이터 존재 구간에 양쪽을 맞춰 재계산(1.118로 정상화). 테스트 2개 추가.
     - **잠재 버그 선제 수정**: `campaign_backfill`의 sentinel 행(`adgroup_id='__backfill__'`, D-NAO-17)이 실단위 P0 행과 같은 날짜에 공존하면 `metrics_aggregator`(P1 리포트도 공유) 합계가 이중계상됨 — 아직 backfill 미실행(prod 0건)이라 무증상이었으나 향후 실행 대비 필터 추가. `vicious_cycle_flags`는 트렌드 판단에 backfill 데이터가 필요(D-NAO-17 취지)하므로 단순 제외 대신 날짜별 실단위 우선·backfill 보충 병합으로 이중계상만 제거.
     - **라이브 검증(prod 스냅샷 읽기전용, 원칙22)**: prod DB scp로 로컬 복사 후 실행 — 파이프라인 전체가 실제로 동작함을 확인(보드 7개 전부 값 산출). **베이스라인 정확 재현(30/4/16/42%)은 아직 미달성** — naver_ad_daily가 3일치뿐이라(원 베이스라인은 네이버 API 직접 15일 recon) 표본이 짧아 값이 다름(출혈208·굶는승자40·쇼핑65그룹·확장28.7%). 코드 결함이 아니라 데이터 성숙도 문제 — 크론이 매일 쌓이면서 15일 창이 채워지면 자연 수렴 예상, 재확인 필요.
     - **prod 배포 완료(2026-07-07) + 배포 중 실운영 버그 발견·즉시 수정(원칙22)**: 첫 배포에서 `GET /diagnosis` 500 에러 — 라우터에 `_MAX_DIAGNOSIS_RANGE_DAYS` 상수를 실제로 정의하지 않은 채(편집 도구 재시도 과정에서 누락) 참조만 남아 있었음. SA/harness 단위테스트는 라우터 레이어를 안 거쳐서 못 잡았음 — **라우터 HTTP 왕복 테스트(`test_naver_ad_diagnosis_router.py`, TestClient) 4개 신규 추가**로 재발 방지, 상수 추가 후 재배포·`curl` 200 확인. 전체 558 pass. sha256 검증 scp, pm2 재시작, 에러 로그 클린 확인.
     - **콘솔 진단 보드 UI(프론트) 완료(2026-07-07, 같은 날 이어서)**: `NaverAdDiagnosisBoard.tsx` 신규 — `NaverAdReport.tsx`에 탭으로 통합(리포트/진단 보드), api.ts에 타입+`fetchNaverAdDiagnosis` 추가. `npx tsc -b --noEmit` 통과, `npm run build` 통과. prod DB 스크래치 사본으로 로컬 백엔드(8000)+프론트 dev(5173) 라이브 기동 → 브라우저로 7개 보드 전부 실데이터 렌더링 확인(원칙22, 콘솔 에러 없음). **아직 prod 미배포**(백엔드 커밋 2개 + 이번 프론트 커밋 1개, 총 미push).
-    - **남은 작업**: 프론트 포함 전체 prod 배포, 15일 데이터 축적 후 베이스라인 재대조.
+    - **프론트 prod 배포 완료(2026-07-07, 같은 날 이어서)**: `npm run build` → prod `dist` 백업(`dist.bak_naver-ad-diag_20260707`) 후 rsync 교체. 라이브 확인: `curl` index.html 200·신규 해시 번들(`index-DT0x4F89.js`) 서빙 확인, `GET /api/naver/ad/diagnosis` 200, 번들 내 "진단 보드"/"굶는 승자" 문자열 포함 확인(원칙22 — 실제 서빙 파일 검증). 백엔드는 이미 배포돼 있어 pm2 재시작 불요(정적파일 교체만).
+    - **남은 작업**: 15일 데이터 축적 후 베이스라인 재대조(별도 작업 불요, 크론이 매일 쌓임 — 확인만).
   - [ ] P2-S3 시뮬·제안·발송: bid_simulator(D-NAO-19) + budget_allocator(한계수익) + proposal_writer + Slack + 제안카드·optimizer 패널·경량 이상피드 — 완료기준: 매일 08:00 자동 진단·제안, 첫 제안서에 실측 진단+S26 질문 → 2주 관찰 개시
 - [ ] **P3 Confirm 실행**: 제외키워드→입찰→예산 순 개방 + change_log + D+7/14 검증 루프
 - [ ] **P4 파수꾼+키워드랩**: 매시간 이상감지·페이싱 + keywordstool 발굴 + 시간대 가중치
@@ -97,14 +98,14 @@
 
 - ✅ **P2-S1 데이터 기반 완료(2026-07-07, admiring-solomon-b4f056 워크트리)**: 위 체크리스트 항목 참조. prod 배포·라이브 검증·`_headers` POST 서명 버그 발견 즉시 수정까지 완료. 상세 `docs/references/22`.
 
-- ✅ **P2-S2 콘솔 진단 보드 UI(프론트) 완료(2026-07-07, 같은 날 이어서, admiring-solomon-b4f056 워크트리)**: 위 체크리스트 항목 참조. 커밋 `5559e62`(미push).
+- ✅ **P2-S2 콘솔 진단 보드 UI(프론트) 완료 + prod 배포 완료(2026-07-07, 같은 날 이어서, admiring-solomon-b4f056 워크트리)**: 위 체크리스트 항목 참조. 커밋 3개(`5559e62` UI 구현, `92fc7ff` 트랙 갱신, 이후 배포 자체는 코드 커밋 아님 — scp/rsync만), 전부 미push. **P2-S2 완전 종료**.
 
 ## 다음 액션
 
-1. **P2-S2 프론트 포함 전체 prod 배포** — 백엔드는 이미 배포됨(위 체크리스트), 이번 프론트 커밋은 아직 미배포. `npm run build` + rsync dist로 배포.
-2. **15일 데이터 축적 후 베이스라인 재대조** — naver_ad_daily 실단위 표본이 아직 짧아(현재 3~4일치) 원 베이스라인(30/4/16/42%)과 정확히 안 맞음(정상, 데이터 성숙도 문제). 매일 크론 축적 1~2주 후 재확인.
-3. campaign_target_resolver의 "②쇼핑 상품BEP 연결" 미구현 재검토(캠페인/그룹↔상품 연결 데이터 소스 확보 방법 — S3 착수 전 필요성 판단, 현재는 계정 기본값만으로 진단 동작 확인됨).
-4. (선택) 판매가 커버리지 개선: 미주문 196상품 BEP 위해 네이버 상품 API 가격 동기화 검토 → actionable BEP 500+.
+1. **15일 데이터 축적 후 베이스라인 재대조** — naver_ad_daily 실단위 표본이 아직 짧아(현재 3~4일치) 원 베이스라인(30/4/16/42%)과 정확히 안 맞음(정상, 데이터 성숙도 문제). 매일 크론 축적 1~2주 후 재확인(별도 작업 불요, 확인만).
+2. **P2-S3 착수**: bid_simulator(D-NAO-19)·budget_allocator·proposal_writer·Slack·콘솔 제안카드/optimizer 패널. 착수 전 campaign_target_resolver "②쇼핑 상품BEP 연결" 필요성 재검토.
+3. (선택) 판매가 커버리지 개선: 미주문 196상품 BEP 위해 네이버 상품 API 가격 동기화 검토 → actionable BEP 500+.
+4. 브랜치 push 여부 Jino 결정 필요(이 트랙 전체 커밋 미push 누적).
 5. **트랙 파일 정리**: 이 파일과 `docs/PLAN_naver-ad-optimization.md`가 메인 워크트리에 untracked로만 존재 — 적절한 브랜치에 커밋해 정리(Jino 결정: 어느 워크트리/브랜치에 귀속시킬지).
 6. 브랜치 push 여부(Jino 결정, 이번 세션 코드 커밋 포함).
 
