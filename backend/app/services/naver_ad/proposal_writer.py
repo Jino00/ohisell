@@ -9,19 +9,23 @@ from datetime import date, datetime
 from sqlalchemy.orm import Session
 
 from app.models import NaverCampaignSettings, NaverProposal
-from app.services.naver_ad import campaign_target_resolver
+from app.services.naver_ad import campaign_target_resolver, growth_sweeper
 
 _NEGATIVE = "negative_keyword"
+_GROWTH_BID_UP = "growth_bid_up"
 
 # 보드 의미상 허용되는 방향(codex 지적, 라이브검증 후속): starving_winners(육성 의도, D-NAO-18)는
 # bid_up만, bleeding_keywords/shopping_group_bep(손실 축소 의도)는 bid_down만 허용한다.
 # rank estimate를 걸러도(proposal_pipeline._RANK_ESTIMATE_BOARDS) economic_ceiling 자체가
 # 표본이 얇을 때 계층 수축으로 board 의도와 반대 방향을 낼 수 있어(라이브검증 실측) 여기서
 # 한 번 더 막는다 — negative_keyword 격상(경제성 상한<=0)은 보드 무관하게 항상 허용.
+# growth_sweeper(D-NAO-22-①, Phase2)도 같은 원칙 — 전수 스윕 후보라 성장 의도 반대(down/hold)는
+# 만들지 않는다(_ALLOWED_DIRECTIONS에 신규 유형 등록 필수, 계획서 §6 가드레일).
 _ALLOWED_DIRECTIONS = {
     "bleeding_keywords": {"down"},
     "starving_winners": {"up"},
     "shopping_group_bep": {"down"},
+    "growth_sweeper": {"up"},
 }
 
 
@@ -91,6 +95,40 @@ def _bid_proposal(
     }
 
 
+def _growth_proposal(candidate: dict, sim: dict | None, target_label: dict) -> dict | None:
+    """growth_sweeper 후보 1건(D-NAO-22-①) + bid_simulator 결과 → growth_bid_up 제안.
+
+    sim 없음(harness가 이번 회차 estimate/시뮬을 못 만든 경우)이거나 direction이
+    "up"이 아니면(_ALLOWED_DIRECTIONS["growth_sweeper"]) 건너뛴다 — 표본이 얇은 후보는
+    계층 수축으로 성장 의도와 반대 방향이 나올 수 있어(_bid_proposal과 동일 원칙), 억지로
+    제안하지 않는다. D-NAO-20 스톱로스 절대액을 rationale에 부착(정직 경계: 이번 회차엔
+    실행/집행 게이트가 아니라 정보 노출만 — Phase 5 execution_harness가 실제 집행 시 강제).
+    """
+    if sim is None or sim["direction"] not in _ALLOWED_DIRECTIONS["growth_sweeper"]:
+        return None
+
+    stop_loss_amount = sim["recommended_bid"] * growth_sweeper.STOP_LOSS_CLICK_MULTIPLE
+    rationale = (
+        f"[growth_sweeper] 갭={candidate['gap']}원(경제성상한={candidate['economic_ceiling']}원 "
+        f"vs 현재입찰={candidate['current_bid']}원) clk={candidate['clk']}"
+        + (" (저클릭 표본)" if candidate.get("sample_thin") else "")
+        + f" — 시뮬 근거={sim['basis']}, 추천입찰={sim['recommended_bid']}원, "
+        f"target_roas 근거={target_label['source']}"
+        + (f"({target_label['target_roas']})" if target_label.get("target_roas") is not None else "")
+        + f". D-NAO-20 스톱로스={stop_loss_amount}원"
+        f"(무전환 {growth_sweeper.STOP_LOSS_CLICK_MULTIPLE}클릭 상당 지출 도달 시 재검토 신호)."
+    )
+    return {
+        "proposal_type": _GROWTH_BID_UP,
+        "target_type": "keyword",
+        "target_id": candidate["keyword_id"],
+        "campaign_id": candidate["campaign_id"],
+        "rationale": rationale,
+        "expected_effect": sim["expected_effect_text"],
+        "status": "pending",
+    }
+
+
 def _negative_keyword_from_exclusion(row: dict, campaign_id: str) -> dict:
     """확장버킷 비용상위 검색어 → 제외후보 제안(전환귀속 없음 — '비용/볼륨 후보' 정직 라벨,
     exclusion_candidates 보드 자체가 전환 데이터 없이 비용순만 제공하므로 그 경계를 그대로 전달)."""
@@ -108,14 +146,23 @@ def _negative_keyword_from_exclusion(row: dict, campaign_id: str) -> dict:
     }
 
 
-def build(db: Session, diagnosis: dict, *, bid_sims: dict | None = None, as_of: date) -> list[dict]:
+def build(
+    db: Session, diagnosis: dict, *, bid_sims: dict | None = None,
+    growth_candidates: list[dict] | None = None, growth_sims: dict | None = None, as_of: date,
+) -> list[dict]:
     """진단 보드 + bid_simulator 결과 → 제안 후보 목록(아직 미저장, dict 리스트).
 
     bid_sims: {(target_type, target_id): simulate_bid() 반환값, ...} — harness가 미리
       계산해 전달(재조회 금지). 없는 (target_type,target_id)는 그 회차엔 제안 건너뜀.
+    growth_candidates/growth_sims: growth_sweeper 갭 상위 후보(D-NAO-22-①, Phase2)와 그
+      bid_simulator 결과 — proposal_pipeline.compute_growth_sims()가 그대로 전달. 진단
+      보드(diagnosis["boards"])와 별도 소스라 형태가 달라(gap/economic_ceiling 등) 전용
+      빌더(_growth_proposal)로 처리한다.
     optimizer='ours' 캠페인만 대상(D-NAO-13) — 그 외(none/mop)는 진단엔 나와도 제안 없음.
     """
     bid_sims = bid_sims or {}
+    growth_candidates = growth_candidates or []
+    growth_sims = growth_sims or {}
     boards = diagnosis.get("boards") or {}
     ours = _ours_campaign_ids(db)
     labels = _TargetLabelCache(db)
@@ -160,6 +207,22 @@ def build(db: Session, diagnosis: dict, *, bid_sims: dict | None = None, as_of: 
         if cid not in ours:
             continue
         proposals.append(_negative_keyword_from_exclusion(row, cid))
+
+    # growth_sweeper(D-NAO-22-①): 후보는 이미 gap 내림차순(find_growth_candidates) — 상위부터
+    # 채택해 GROWTH_PROPOSAL_CAP에서 멈춘다(탐색 예산 총액 캡의 count 기반 대체, growth_sweeper
+    # 모듈 docstring 참조). skip된(sim 없음/direction 불일치) 후보는 캡을 소비하지 않는다.
+    growth_created = 0
+    for c in growth_candidates:
+        if growth_created >= growth_sweeper.GROWTH_PROPOSAL_CAP:
+            break
+        cid = c["campaign_id"]
+        if cid not in ours:
+            continue
+        sim = growth_sims.get(("keyword", c["keyword_id"]))
+        p = _growth_proposal(c, sim, labels.get(cid))
+        if p:
+            proposals.append(p)
+            growth_created += 1
 
     return proposals
 

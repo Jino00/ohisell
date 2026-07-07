@@ -93,7 +93,7 @@ def test_run_daily_full_happy_path_generates_proposal(db, monkeypatch):
 
     out = proposal_pipeline.run_daily(db)
     assert out["stage_status"] == {
-        "freshness": "ok", "diagnosis": "ok", "bid_simulator": "ok",
+        "freshness": "ok", "diagnosis": "ok", "bid_simulator": "ok", "growth_sweeper": "ok",
         "proposal_writer": "ok", "slack": "ok", "expiry": "ok",
     }
     assert out["generated"] >= 1
@@ -214,6 +214,100 @@ def test_run_daily_starving_winner_never_gets_bid_down_from_rank_estimate(db, mo
     assert saved.proposal_type == "bid_up"  # economic_ceiling만으로 판단 → 고ROAS라 인상 추천
 
 
+# ── growth_sweeper 연동 (듀얼모드 스프린트 Phase 2, D-NAO-22-①) ──
+def test_run_daily_generates_growth_bid_up_for_underbid_healthy_keyword(db, monkeypatch):
+    """예외 보드(출혈/굶는승자)에 안 걸리는 건강한 키워드도 현재 입찰이 경제성 상한보다
+    훨씬 낮으면 growth_sweeper 전수 스윕이 잡아 growth_bid_up을 만든다."""
+    _seed_bep(db)
+    db.add(NaverCampaignSettings(campaign_id="cmp1", optimizer="ours"))
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-grow", campaign_id="cmp1",
+                        campaign_type="WEB_SITE", name="성장후보", status="on", bid_amt=70))
+    # avg_daily_clk=100/15≈6.67(굶는승자 아님) + 높은 전환매출(출혈 아님) + 최저입찰가(70원)로
+    # 방치돼 갭이 크게 벌어진 상태. D-NAO-21 보정계수(실주문매출÷네이버convAmt)가 이 keyword의
+    # 과대 convAmt(100만원)를 상쇄하지 않도록 실주문(Order)도 같은 규모로 맞춰 factor≈1 유지
+    # (그렇지 않으면 factor가 과소해져 economic_ceiling이 0에 가까워짐 — 실측 함정, ref D-NAO-21).
+    _row(db, AS_OF, "cmp1", "WEB_SITE", "grp1", "nkw-grow", 1000, 100, 5000, direct=1_000_000)
+    db.add(Order(channel_id=6, platform_product_id="cp-1", order_number="ORD-2",
+                  order_date=AS_OF, status="정상", selling_price=Decimal("990000")))
+    db.commit()
+
+    monkeypatch.setattr(
+        proposal_pipeline.fetcher, "estimate_average_position_bid",
+        lambda device, items: [{"nccKeywordId": it["key"], "bid": 100_000} for it in items],
+    )
+
+    out = proposal_pipeline.run_daily(db)
+    assert out["stage_status"]["growth_sweeper"] == "ok"
+    saved = db.query(NaverProposal).filter(
+        NaverProposal.target_id == "nkw-grow", NaverProposal.proposal_type == "growth_bid_up",
+    ).all()
+    assert len(saved) == 1
+    assert "D-NAO-20 스톱로스=" in saved[0].rationale
+    assert "갭=" in saved[0].rationale
+
+
+def test_growth_sweeper_agg_excludes_other_campaign_types(db, monkeypatch):
+    """codex 지적(리뷰 발견, 라이브검증 없음): growth_sweeper는 WEB_SITE 전용인데
+    compute_bid_sims용 전체-캠페인유형 집계를 그대로 넘기면, 클릭이 전혀 없는 WEB_SITE
+    신규 키워드가 SHOPPING 매출로 부풀려진 계정 prior를 그대로 물려받아 근거 없는
+    growth_bid_up이 나올 수 있다. run_daily이 growth_sweeper에는 WEB_SITE로 스코프된
+    별도 집계를 넘겨야 한다."""
+    _seed_bep(db)
+    db.add(NaverCampaignSettings(campaign_id="cmp1", optimizer="ours"))
+    # SHOPPING 캠페인에 막대한 클릭·매출(계정 전체 집계엔 잡히지만 WEB_SITE 스코프에선 0이어야 함).
+    _row(db, AS_OF, "cmp-shop", "SHOPPING", "grp-shop", "", 100_000, 10_000, 5_000_000, direct=50_000_000)
+    # WEB_SITE 키워드는 등록만 돼 있고 naver_ad_daily에 단 1행도 없음(클릭 0).
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-cold", campaign_id="cmp1",
+                        campaign_type="WEB_SITE", name="콜드스타트", status="on", bid_amt=70))
+    # D-NAO-21 보정계수를 1에 가깝게 유지 — 그렇지 않으면 factor가 과소해져 ceiling이 스코프
+    # 버그와 무관하게 0으로 눌려 이 테스트가 실제로는 아무것도 검증하지 못하게 된다.
+    db.add(Order(channel_id=6, platform_product_id="cp-1", order_number="ORD-2",
+                  order_date=AS_OF, status="정상", selling_price=Decimal("45000000")))
+    db.commit()
+
+    monkeypatch.setattr(
+        proposal_pipeline.fetcher, "estimate_average_position_bid",
+        lambda device, items: [{"nccKeywordId": it["key"], "bid": 100_000} for it in items],
+    )
+
+    out = proposal_pipeline.run_daily(db)
+    assert out["stage_status"]["growth_sweeper"] == "ok"
+    saved = db.query(NaverProposal).filter(
+        NaverProposal.target_id == "nkw-cold", NaverProposal.proposal_type == "growth_bid_up",
+    ).all()
+    assert saved == []  # WEB_SITE 스코프에선 계정 전체 클릭이 0 — 부트스트랩 게이트가 막아야 함
+
+
+def test_compute_growth_sims_respects_estimate_budget(db, monkeypatch):
+    """전수(89K) estimate 금지 — 갭 상위 ESTIMATE_BUDGET개만 rank estimate 조회 대상(계획서 §4-Phase2)."""
+    monkeypatch.setattr(proposal_pipeline.growth_sweeper, "ESTIMATE_BUDGET", 2)
+
+    _seed_bep(db)
+    db.add(NaverCampaignSettings(campaign_id="cmp1", optimizer="ours"))
+    for i in range(5):
+        db.add(NaverEntity(entity_type="keyword", entity_id=f"nkw-g{i}", campaign_id="cmp1",
+                            campaign_type="WEB_SITE", name=f"kw{i}", status="on", bid_amt=10))
+        _row(db, AS_OF, "cmp1", "WEB_SITE", "grp1", f"nkw-g{i}", 1000, 100, 1000, direct=100_000 + i * 1000)
+    # 보정계수를 1에 가깝게 유지(위 test_run_daily_generates_growth_bid_up_for_underbid_healthy_keyword
+    # 와 동일 이유, D-NAO-21) — 그렇지 않으면 ceiling이 0으로 눌려 후보 자체가 안 나온다.
+    db.add(Order(channel_id=6, platform_product_id="cp-1", order_number="ORD-2",
+                  order_date=AS_OF, status="정상", selling_price=Decimal("500000")))
+    db.commit()
+
+    queried: list[str] = []
+
+    def fake_avg_pos_bid(device, items):
+        queried.extend(it["key"] for it in items)
+        return [{"nccKeywordId": it["key"], "bid": 100} for it in items]
+
+    monkeypatch.setattr(proposal_pipeline.fetcher, "estimate_average_position_bid", fake_avg_pos_bid)
+
+    diag = proposal_pipeline.diagnosis.build_diagnosis(db, D_FROM, AS_OF)
+    result = proposal_pipeline.compute_growth_sims(db, diag, D_FROM, AS_OF)
+    assert len(result["candidates"]) == 2  # ESTIMATE_BUDGET=2로 상한
+    assert len(queried) == 2  # estimate API 콜도 예산만큼만
+
+
 def test_run_daily_rank_estimate_failure_degrades_not_crashes(db, monkeypatch):
     _seed_bep(db)
     db.add(NaverCampaignSettings(campaign_id="cmp1", optimizer="ours"))
@@ -238,7 +332,7 @@ def test_run_daily_proposal_writer_failure_isolated_other_stages_still_run(db, m
     _row(db, AS_OF, "cmp1", "WEB_SITE", "grp1", "nkw-1", 500, 50, 10000, direct=1000)
     db.commit()
 
-    def boom(db_, diagnosis_dict, *, bid_sims=None, as_of=None):
+    def boom(db_, diagnosis_dict, *, bid_sims=None, growth_candidates=None, growth_sims=None, as_of=None):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(proposal_pipeline.proposal_writer, "build", boom)

@@ -212,6 +212,88 @@ def test_account_brief_singleton_created_once_per_day(db):
     assert db.query(NaverProposal).filter(NaverProposal.proposal_type == "account_brief").count() == 1
 
 
+# ── growth_sweeper 연동 (듀얼모드 스프린트 Phase 2, D-NAO-22-①) ──
+def _growth_candidate(**overrides):
+    row = {"keyword_id": "nkw-growth", "campaign_id": "cmp-ours", "adgroup_id": "grp-1",
+           "current_bid": 100, "economic_ceiling": 500, "gap": 400, "clk": 100, "conv_amt": 100_000,
+           "sample_thin": False}
+    row.update(overrides)
+    return row
+
+
+def test_build_growth_candidate_produces_growth_bid_up(db):
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis()
+
+    out = proposal_writer.build(
+        db, diagnosis,
+        growth_candidates=[_growth_candidate()],
+        growth_sims={("keyword", "nkw-growth"): _sim(direction="up", ceiling=500, recommended=470)},
+        as_of=AS_OF,
+    )
+    assert len(out) == 1
+    assert out[0]["proposal_type"] == "growth_bid_up"
+    assert out[0]["target_type"] == "keyword"
+    assert out[0]["target_id"] == "nkw-growth"
+    assert "D-NAO-20 스톱로스=" in out[0]["rationale"]
+    assert "갭=400원" in out[0]["rationale"]
+
+
+def test_build_growth_candidate_skips_non_ours_campaign(db):
+    db.add(NaverCampaignSettings(campaign_id="cmp-none", optimizer="none"))
+    db.commit()
+    diagnosis = _diagnosis()
+
+    out = proposal_writer.build(
+        db, diagnosis,
+        growth_candidates=[_growth_candidate(campaign_id="cmp-none")],
+        growth_sims={("keyword", "nkw-growth"): _sim(direction="up")},
+        as_of=AS_OF,
+    )
+    assert out == []
+
+
+def test_build_growth_candidate_wrong_direction_skipped(db):
+    """growth_sweeper는 up만 허용 — 표본이 얇아 계층 수축으로 down/hold가 나오면 건너뜀."""
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis()
+
+    out = proposal_writer.build(
+        db, diagnosis,
+        growth_candidates=[_growth_candidate()],
+        growth_sims={("keyword", "nkw-growth"): _sim(direction="hold")},
+        as_of=AS_OF,
+    )
+    assert out == []
+
+
+def test_build_growth_candidate_no_sim_skipped(db):
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis()
+
+    out = proposal_writer.build(
+        db, diagnosis, growth_candidates=[_growth_candidate()], growth_sims={}, as_of=AS_OF,
+    )
+    assert out == []
+
+
+def test_build_growth_candidates_capped_at_growth_proposal_cap(db, monkeypatch):
+    from app.services.naver_ad import growth_sweeper
+    monkeypatch.setattr(growth_sweeper, "GROWTH_PROPOSAL_CAP", 2)
+
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis()
+    candidates = [_growth_candidate(keyword_id=f"nkw-{i}") for i in range(5)]
+    sims = {("keyword", f"nkw-{i}"): _sim(direction="up") for i in range(5)}
+
+    out = proposal_writer.build(db, diagnosis, growth_candidates=candidates, growth_sims=sims, as_of=AS_OF)
+    assert len(out) == 2  # 캡(2)에서 멈춤 — 나머지 3건은 다음 회차로 이월(생성 자체를 안 함)
+
+
 def test_account_brief_singleton_new_day_creates_new_row(db):
     diagnosis = _diagnosis()
     yesterday_brief = NaverProposal(
