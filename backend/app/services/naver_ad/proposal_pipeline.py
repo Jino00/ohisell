@@ -302,7 +302,11 @@ def compute_growth_sims(
     all_candidates = growth_sweeper.find_growth_candidates(
         db, date_from, as_of, correction_factor=correction_factor, agg=agg, target_roas_for=target_roas_for,
     )
-    top = all_candidates[:growth_sweeper.ESTIMATE_BUDGET]
+    # optimizer='ours'가 아닌 캠페인은 proposal_writer.build가 어차피 걸러내지만(D-NAO-13),
+    # 여기서 먼저 걸러야 한다(codex 지적) — 안 그러면 갭이 큰 non-ours 캠페인이 상위 예산
+    # 슬롯을 다 차지해, 진짜 대상(ours)인 후보가 예산 밖으로 밀려 estimate조차 못 받는다.
+    ours = proposal_writer._ours_campaign_ids(db)
+    top = [c for c in all_candidates if c["campaign_id"] in ours][:growth_sweeper.ESTIMATE_BUDGET]
     if not top:
         return {"candidates": [], "sims": {}}
 

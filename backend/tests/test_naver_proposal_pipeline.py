@@ -278,6 +278,37 @@ def test_growth_sweeper_agg_excludes_other_campaign_types(db, monkeypatch):
     assert saved == []  # WEB_SITE 스코프에선 계정 전체 클릭이 0 — 부트스트랩 게이트가 막아야 함
 
 
+def test_compute_growth_sims_filters_non_ours_before_estimate_budget(db, monkeypatch):
+    """codex 지적(2차 리뷰): non-ours 캠페인의 갭이 커도 estimate 예산 슬롯을 차지하면 안 됨 —
+    ours 캠페인 후보가 예산 밖으로 밀려 estimate조차 못 받는 사태를 막는다."""
+    monkeypatch.setattr(proposal_pipeline.growth_sweeper, "ESTIMATE_BUDGET", 1)
+
+    _seed_bep(db)
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.add(NaverCampaignSettings(campaign_id="cmp-none", optimizer="none"))
+    # non-ours: 훨씬 큰 갭(더 낮은 입찰가) — ESTIMATE_BUDGET=1이면 ours보다 먼저 슬롯을 차지할 것.
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-none", campaign_id="cmp-none",
+                        campaign_type="WEB_SITE", name="비대상", status="on", bid_amt=10))
+    _row(db, AS_OF, "cmp-none", "WEB_SITE", "grp1", "nkw-none", 1000, 100, 5000, direct=1_000_000)
+    # ours: 갭은 더 작지만 실제 제안 대상.
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-ours", campaign_id="cmp-ours",
+                        campaign_type="WEB_SITE", name="대상", status="on", bid_amt=500))
+    _row(db, AS_OF, "cmp-ours", "WEB_SITE", "grp2", "nkw-ours", 1000, 100, 5000, direct=1_000_000)
+    db.add(Order(channel_id=6, platform_product_id="cp-1", order_number="ORD-2",
+                  order_date=AS_OF, status="정상", selling_price=Decimal("47000000")))
+    db.commit()
+
+    monkeypatch.setattr(
+        proposal_pipeline.fetcher, "estimate_average_position_bid",
+        lambda device, items: [{"nccKeywordId": it["key"], "bid": 100_000} for it in items],
+    )
+
+    diag = proposal_pipeline.diagnosis.build_diagnosis(db, D_FROM, AS_OF)
+    result = proposal_pipeline.compute_growth_sims(db, diag, D_FROM, AS_OF)
+    ids = [c["keyword_id"] for c in result["candidates"]]
+    assert ids == ["nkw-ours"]  # non-ours(nkw-none)는 갭이 더 커도 예산에서 배제됨
+
+
 def test_compute_growth_sims_respects_estimate_budget(db, monkeypatch):
     """전수(89K) estimate 금지 — 갭 상위 ESTIMATE_BUDGET개만 rank estimate 조회 대상(계획서 §4-Phase2)."""
     monkeypatch.setattr(proposal_pipeline.growth_sweeper, "ESTIMATE_BUDGET", 2)
