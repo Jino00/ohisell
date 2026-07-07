@@ -3,7 +3,14 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
-- 날짜: 2026-07-07 (★네이버 광고 트랙 **P2-S1 데이터 기반 구현 완료 — prod 배포·라이브 검증**)
+- 날짜: 2026-07-07 (★네이버 광고 트랙 **P2-S3a 백엔드 완료 — prod 배포·라이브 검증·codex review**)
+- ★**P2-S3a 완료**: T1~T8 전체(estimate fetcher·bid_simulator·proposal_writer·slack_notifier·proposal_pipeline harness·cron 08:00·라우터 2개). **라이브검증(원칙22) 중 실운영 버그 2건 자체 발견**: ①starving_winners(육성 의도)에 고정 목표순위 rank estimate 적용 시 이미 순위보다 잘 나오는 고ROAS 키워드가 bid_down으로 뒤집힘 → rank estimate 대상을 bleeding_keywords/shopping_group_bep로 한정해 수정 ②estimate_performance 연결 시도 중 400 "invalid collections size" → 이분탐색으로 네이버 입찰가가 **70~100,000원 10원 단위만 유효**함을 확정, bid_simulator가 임의 정수를 반환하던 버그를 10원 단위 내림+클램프로 수정. **codex review(667ad8f..HEAD)**: P1 2건·P2 5건 중 4건 동의 즉시수정(campaign target_roas_override 계산 미반영·보드 의미 역행 방향 미차단·slack 실패 stage_status 미반영·dedup key campaign_id 누락), 1건 의도적 연기(freshness 부분적재 탐지 — D-S3-c 이상피드 스코프와 통합, 근거 없는 임계값 도입은 추정 금지 위반).
+  - **카나리 라이브검증**: prod DB 스크래치 사본에서 실제 캠페인(`cmp-a001-01-000000010206612`) `optimizer='ours'` 세팅 → harness 실행 → 159건 제안 실제 생성(전부 유효 입찰가), 굶는승자 27/27 정상 bid_up, 예측클릭 159/159 연결, 재실행 시 dedup 정상(generated=0). **실제 prod 캠페인은 미전환**(스크래치 사본에서만 테스트 — 관찰모드 개시는 별도 운영 결정, Jino 몫).
+  - **prod 배포**: sha256 scp 7파일(bid_simulator·proposal_writer·proposal_pipeline·slack_notifier 신규 + fetcher·scheduler_service·routers/naver_ad.py 수정) + pm2 재시작. `/proposals`·`/campaign-settings`·`/diagnosis` 전부 200, 에러로그 클린, 스케줄러 `generate_naver_proposals`(08:00 KST) 등록 확인(API로 next_run_time 실측).
+  - 테스트 68개 신규(전체 626 passed). 코드: 브랜치 `claude/admiring-solomon-b4f056`, 커밋 `667ad8f`(계획서)~`3cae9a2`(codex+라이브검증 수정), 전부 미push. 상세: `docs/PLAN_naver-ad-P2-S3.md`·`docs/references/23`(estimate API + 입찰가 규격).
+  - 다음 = **P2-S3b 프론트**(최적화 콘솔 탭) → S3c(예산·이상, 연기분).
+- ─────────────────────────────────────────────
+- (이전) 날짜: 2026-07-07 (★네이버 광고 트랙 **P2-S1 데이터 기반 구현 완료 — prod 배포·라이브 검증**)
 - ★**P2-S1 완료**: 신규 2테이블(`naver_entity`·`naver_search_term_daily`, migration `v6w7x8y9z0a1`) + 5개 서비스 모듈(entity_sync·search_term_ingest·campaign_backfill·campaign_target_resolver·keyword_volume_sync) + fetcher 확장 + cron 3개. 테스트 9신규(전체539 pass). prod 배포(백업→migration→scp sha256검증→pm2재시작)+실제 1회 실행으로 라이브 검증.
   - **⚠️실측으로 트랙 추정치 정정**: 파워링크 등록 키워드 "4,936개"는 최근 16일 노출분이었고 등록 전체는 **90,150개**(18배) — 죽은키워드 스케일이 예상보다 훨씬 큼.
   - **라이브 결과**: naver_entity campaign 43(off14·on29)/adgroup 990(off216·on774)/keyword 90,150(WEB_SITE만, off876·on89,274) — 사전 정찰과 정확 일치. search_term shopping 39,153행 적재.

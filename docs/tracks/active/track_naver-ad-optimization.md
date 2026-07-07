@@ -79,6 +79,9 @@
     - **프론트 prod 배포 완료(2026-07-07, 같은 날 이어서)**: `npm run build` → prod `dist` 백업(`dist.bak_naver-ad-diag_20260707`) 후 rsync 교체. 라이브 확인: `curl` index.html 200·신규 해시 번들(`index-DT0x4F89.js`) 서빙 확인, `GET /api/naver/ad/diagnosis` 200, 번들 내 "진단 보드"/"굶는 승자" 문자열 포함 확인(원칙22 — 실제 서빙 파일 검증). 백엔드는 이미 배포돼 있어 pm2 재시작 불요(정적파일 교체만).
     - **남은 작업**: 15일 데이터 축적 후 베이스라인 재대조(별도 작업 불요, 크론이 매일 쌓임 — 확인만).
   - [ ] P2-S3 시뮬·제안·발송: bid_simulator(D-NAO-19) + budget_allocator(한계수익) + proposal_writer + Slack + 제안카드·optimizer 패널·경량 이상피드 — 완료기준: 매일 08:00 자동 진단·제안, 첫 제안서에 실측 진단+S26 질문 → 2주 관찰 개시
+    - [x] **P2-S3a 백엔드 완료(2026-07-07·prod 배포·라이브 검증·codex review)**: T1~T8 전체 — estimate API 연동(fetcher, 라이브 실측 docs/references/23) + bid_simulator(계층 베이지안 RPC 풀링·economic_ceiling·rank_target) + proposal_writer(dedup·target 라벨·negative 라벨) + slack_notifier(no-op 폴백) + proposal_pipeline harness(freshness 게이트·aggregate precompute·단계격리·만료) + cron 08:00 등록 + 라우터 2개(`GET /proposals`·`GET/PUT /campaign-settings`) + TestClient 왕복테스트. **라이브검증 중 실운영 버그 2건 자체 발견·즉시수정**: ①starving_winners에 고정 목표순위 rank estimate 오적용→bid_down 역전(육성의도 정반대) ②estimate_performance 실제 연결 후 400 발견→네이버 입찰가는 **70~100,000원 10원 단위만 유효**(bid_simulator가 임의 정수 반환하던 버그, 10원 단위 내림+클램프로 수정). **codex review(667ad8f..HEAD)**: P1 2건·P2 5건 중 4건 동의 즉시수정(campaign target_roas_override 계산 미반영·보드 의미 역행 방향 미차단·slack 실패 stage_status 미반영·dedup key campaign_id 누락), 1건 의도적 연기(freshness 부분적재 탐지→D-S3-c 이상피드 스코프와 통합). 카나리 라이브검증: 159건 제안 생성·전부 유효 입찰가·굶는승자 27/27 정상 bid_up·예측클릭 159/159 연결·재실행 dedup 정상. 테스트 68개 신규, 전체 스위트 626 passed. prod 배포(sha256 scp+pm2), 실제 캠페인은 optimizer='ours' 미전환(관찰모드 개시는 별도 운영 결정). 상세: `docs/PLAN_naver-ad-P2-S3.md` 체크리스트.
+    - [ ] P2-S3b 프론트(최적화 콘솔 탭) — 다음 스프린트
+    - [ ] P2-S3c 예산·이상(D-S3-c 연기분) — S3b 이후, 관찰 검증 후
 - [ ] **P3 Confirm 실행**: 제외키워드→입찰→예산 순 개방 + change_log + D+7/14 검증 루프
 - [ ] **P4 파수꾼+키워드랩**: 매시간 이상감지·페이싱 + keywordstool 발굴 + 시간대 가중치
 - [ ] **P5 고도화**: 무풍지대 신규 세팅 + 재구축 진단 + 예측정확도 보정 + 자율 확대
@@ -100,10 +103,14 @@
 
 - ✅ **P2-S2 콘솔 진단 보드 UI(프론트) 완료 + prod 배포 완료(2026-07-07, 같은 날 이어서, admiring-solomon-b4f056 워크트리)**: 위 체크리스트 항목 참조. 커밋 3개(`5559e62` UI 구현, `92fc7ff` 트랙 갱신, 이후 배포 자체는 코드 커밋 아님 — scp/rsync만), 전부 미push. **P2-S2 완전 종료**.
 
+- ✅ **P2-S3a 백엔드 완료 + prod 배포 완료(2026-07-07, 새 세션, admiring-solomon-b4f056 워크트리)**: T1~T8 전체 구현(estimate fetcher·bid_simulator·proposal_writer·slack_notifier·proposal_pipeline harness·cron·라우터 2개), 위 체크리스트 항목 참조. **라이브검증(원칙22) 중 실운영 버그 2건 자체 발견**(starving_winners rank estimate 역전, 네이버 입찰가 10원 단위 규격) — 둘 다 즉시 수정·재검증. **codex review(원칙19) 4건 반영**(target_roas_override 미반영·보드 방향 미차단·slack 상태 미반영·dedup 스코프). 카나리 캠페인(`cmp-a001-01-000000010206612`, 스크래치 사본에서만) 159건 제안 실제 생성 확인. prod 배포(sha256 scp 7파일+pm2 재시작), `/proposals`·`/campaign-settings`·`/diagnosis` 전부 200, 스케줄러에 `generate_naver_proposals`(08:00 KST) 등록 확인. **실제 prod 캠페인은 optimizer='ours'로 전환하지 않음**(관찰모드 개시는 별도 운영 결정, Jino 몫). 테스트 68개 신규, 전체 626 passed. 코드: 브랜치 `claude/admiring-solomon-b4f056`, 커밋 `667ad8f`(계획서)~`3cae9a2`(codex+라이브검증 수정), 전부 미push.
+
 ## 다음 액션
 
 1. **15일 데이터 축적 후 베이스라인 재대조** — naver_ad_daily 실단위 표본이 아직 짧아(현재 3~4일치) 원 베이스라인(30/4/16/42%)과 정확히 안 맞음(정상, 데이터 성숙도 문제). 매일 크론 축적 1~2주 후 재확인(별도 작업 불요, 확인만).
-2. **P2-S3 착수**: bid_simulator(D-NAO-19)·budget_allocator·proposal_writer·Slack·콘솔 제안카드/optimizer 패널. **계획서 작성 완료 → `docs/PLAN_naver-ad-P2-S3.md`**(SA 시그니처·체크리스트·라이브 프로브 절차 포함). 착수 = S3a 백엔드부터.
+2. **P2-S3b 착수(프론트)**: `docs/PLAN_naver-ad-P2-S3.md` §3.5/체크리스트 참조 — "최적화 콘솔" 탭(제안 카드·optimizer 패널), `api.ts` 타입+fetch 3종. S3a 백엔드는 완료·배포 끝(위 참조).
+3. **관찰모드 개시 결정(Jino)**: S3a 백엔드는 준비 완료 — 실제 캠페인에 `optimizer='ours'`를 세팅해 08:00 자동 제안을 받기 시작할지는 별도 운영 결정. 세팅 전까지는 매일 08:00 크론이 돌아도 제안 0건(정상).
+4. **S3c(예산·이상)**: D-S3-c 연기분(budget_allocator·경량 이상피드) — S3b 이후, 관찰 검증 후 착수.
    - **D-S3-a (2026-07-07 Jino 승인)**: S3 분할 = S3a 백엔드 → S3b 프론트(S2 동일 패턴, 단계별 라이브 검증).
    - **D-S3-b (2026-07-07 Jino 승인)**: campaign_target_resolver ②(쇼핑 캠페인/그룹↔상품BEP 연결) **보류 유지** — 계정 기본 target_roas로 제안(관찰 모드 충분, 제안에 target 근거 라벨 부착). ②는 확정 소스(/ncc/ads 소재-상품 연결 or ShoppingProduct master-report) 확보 시 P3+ 별도. 이름 추정 매칭 금지.
    - **D-S3-c (2026-07-07 Jino 승인, plan-eng-review codex 과빌드 지적 반영 — D-NAO 스코프 축소)**: 관찰 모드 S3 = **얇게**. S3a/b는 **bid_simulator(D-NAO-19) + proposal_writer + slack**만. **budget_allocator(marginal ROAS)와 경량 이상피드는 S3c로 연기**(폐기 아님). 근거: ①marginal ROAS는 집계 데이터로 인과≠상관 분리 불가(사전학습 intermittent-demand-short-history) ②이상피드는 원래 "본격 P4" ③학습 루프 1·2는 실행 원료 필요라 관찰 중 휴면 — 무거운 기계보다 제안 품질 증명이 먼저. bid_simulator는 D-NAO-19라 유지(핵심).
