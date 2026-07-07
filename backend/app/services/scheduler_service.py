@@ -289,6 +289,27 @@ def sync_naver_keyword_volume_job():
         db.close()
 
 
+def generate_naver_proposals_job():
+    """네이버 SA 제안 자동 생성 — 진단→시뮬→제안→Slack (08:00 KST, 트랙 P2-S3 관찰모드).
+
+    07:30/07:35/07:40 데이터 수집(naver_ad_daily/entity/search_term) 이후 실행. run_daily
+    내부에서 freshness 게이트가 수집 성공 여부를 다시 확인해 stale이면 자체적으로 스킵한다
+    (이 잡은 그 결과를 로그만 남긴다 — 부분 실패도 정상 흐름, run_daily 자체가 던지는
+    예외만 여기서 표면화).
+    """
+    db = _get_own_db_session()
+    try:
+        from app.services.naver_ad.proposal_pipeline import run_daily
+
+        result = run_daily(db)
+        log.info("[스케줄러] naver proposal_pipeline: %s", result)
+    except Exception as e:
+        log.exception("[스케줄러] generate_naver_proposals_job 에러: %s", e)
+        raise
+    finally:
+        db.close()
+
+
 def sync_meta_ad_costs_job():
     """Meta 광고비 어제치 자동 적재 (07:00 KST)"""
     db = _get_own_db_session()
@@ -755,6 +776,7 @@ def _ensure_default_states(db):
         ("sync_naver_entity", "35 7 * * *"),        # 엔티티 인벤토리 동기화 (트랙 P2-S1)
         ("sync_naver_search_term", "40 7 * * *"),   # 검색어 단위 성과 수집 (트랙 P2-S1)
         ("sync_naver_keyword_volume", "0 9 * * 0"), # 저클릭 키워드 월검색량 (주1회, 일요일)
+        ("generate_naver_proposals", "0 8 * * *"),  # 네이버 SA 제안 자동생성(진단→시뮬→제안→Slack, 트랙 P2-S3)
         ("sync_naver_settlement", "25 5 * * *"),
         ("sync_naver_case_settlement", "30 5 * * *"),
         ("sync_meta_ad_costs", "0 7 * * *"),
@@ -814,6 +836,8 @@ def start_scheduler():
                 job_func = sync_naver_search_term_job
             elif state.job_name == "sync_naver_keyword_volume":
                 job_func = sync_naver_keyword_volume_job
+            elif state.job_name == "generate_naver_proposals":
+                job_func = generate_naver_proposals_job
             elif state.job_name == "sync_naver_settlement":
                 job_func = sync_naver_settlement_job
             elif state.job_name == "sync_naver_case_settlement":
