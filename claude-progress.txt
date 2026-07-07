@@ -3,7 +3,16 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
-- 날짜: 2026-07-07 (★네이버 광고 트랙 **P2 설계 검증·완전 확정 — 코드 0줄, 순수 설계 세션**)
+- 날짜: 2026-07-07 (★네이버 광고 트랙 **P2-S1 데이터 기반 구현 완료 — prod 배포·라이브 검증**)
+- ★**P2-S1 완료**: 신규 2테이블(`naver_entity`·`naver_search_term_daily`, migration `v6w7x8y9z0a1`) + 5개 서비스 모듈(entity_sync·search_term_ingest·campaign_backfill·campaign_target_resolver·keyword_volume_sync) + fetcher 확장 + cron 3개. 테스트 9신규(전체539 pass). prod 배포(백업→migration→scp sha256검증→pm2재시작)+실제 1회 실행으로 라이브 검증.
+  - **⚠️실측으로 트랙 추정치 정정**: 파워링크 등록 키워드 "4,936개"는 최근 16일 노출분이었고 등록 전체는 **90,150개**(18배) — 죽은키워드 스케일이 예상보다 훨씬 큼.
+  - **라이브 결과**: naver_entity campaign 43(off14·on29)/adgroup 990(off216·on774)/keyword 90,150(WEB_SITE만, off876·on89,274) — 사전 정찰과 정확 일치. search_term shopping 39,153행 적재.
+  - **버그 발견·즉시 수정**: `_headers()`가 서명 문자열에 `.GET.` 하드코딩 → POST(EXPKEYWORD 생성)가 403 invalid-signature. `method` 파라미터 추가로 수정·재배포·재검증(EXPKEYWORD 생성 200 확인).
+  - **D-NAO-17 백필 한도 확정**: `/stats`는 최근 730일까지, 호출당 92일 청크(에러 메시지로 명문화).
+  - **⚠️미해결**: campaign_target_resolver "②쇼핑 상품BEP 연결" 미구현(캠페인↔상품 연결 데이터 없음, 추정 매칭 시도 안 함) — S2 착수 전 재검토.
+  - 상세: `docs/references/22_naver_sa_p2s1_recon.md`. 커밋(admiring-solomon-b4f056, 미push). 다음=**P2-S2 진단 엔진**.
+- ─────────────────────────────────────────────
+- (이전) 날짜: 2026-07-07 (★네이버 광고 트랙 **P2 설계 검증·완전 확정 — 코드 0줄, 순수 설계 세션**)
 - ★**P2 설계 확정**: Jino 검증 대화(MOP 기대 8항목·CPC 산식·자율학습 대조)로 D-NAO-16~21 + 학습 루프 7 확정, P2 구조 승인(S1 데이터기반 → S2 진단엔진 → S3 시뮬·제안·Slack). 초안이 계획서 승인 로직에서 이탈했던 5개(bid_simulator·budget_allocator·악순환 감지·EXPKEYWORD 제외후보·MOP 가드레일)를 대화 중 자가 발견·복원. docs 커밋 7개(`2cbeb36`~`d29f6dc`, 미push). 정본=`docs/tracks/active/track_naver-ad-optimization.md`(D-NAO-1~21)+`docs/PLAN_naver-ad-optimization.md`(§P2 S1/S2/S3 완료기준·§3.5 루프 1~7).
 - 다음 = **P2-S1 구현**(`/model sonnet`, admiring-solomon-b4f056 워크트리 고정): naver_entity+entity_sync → naver_search_term_daily(EXPKEYWORD POST+SHOPPINGKEYWORD_DETAIL) → 백필(한도 실측 먼저) → campaign_target_resolver → keywordstool 검색량. HANDOFF=`~/.claude/projects/...-Ohiselling/memory/HANDOFF_ohisell-naver-ad-P2-design-done_20260707.md`.
 - ─────────────────────────────────────────────

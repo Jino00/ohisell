@@ -79,6 +79,26 @@
 - 전체 파워링크 저클릭 후보(수천 건) × 5개/콜은 호출량이 크므로 `keyword_volume_sync`는
   30일 누적 클릭 10 미만 키워드만 대상으로 스코프 한정(1회 실행 `limit` 파라미터로 추가 제한).
 
+## 4.5 prod 라이브 실행 결과 (2026-07-07, 원칙22)
+
+- 백업(`~/ohisell_bak/ohisell_20260707_165445.db`, `backend_naver_p2s1_20260707_165445`) →
+  migration(`v6w7x8y9z0a1`, additive) → 코드 배포(sha256 전수 검증) → pm2 재시작 → 수동 1회 실행.
+- **naver_entity 실측**: campaign 43(off 14·on 29, PAUSED 반영) / adgroup 990(off 216·on 774) /
+  **keyword 90,150**(off 876·on 89,274) — §1의 사전 실측과 정확히 일치.
+- **naver_search_term_daily**: shopping 39,153행(2026-07-04~06, 3일치) 적재 확인.
+- **버그 발견·즉시 수정(원칙22)**: `create_expkeyword_report`(POST)가 기존 `_headers(path)`를
+  그대로 재사용 → 이 함수가 서명 문자열에 `.GET.`을 **하드코딩**하고 있어 POST인데 GET으로
+  서명 → `403 invalid-signature`. 최초 라이브 실행 시 발견(2건 요청 실패 로그). `_headers`에
+  `method` 파라미터 추가(`_get`는 그대로 GET 유지, POST 콜만 `method="POST"` 전달)로 수정 후
+  재배포·재검증 — EXPKEYWORD 생성 200 REGIST 확인. (참고: 이 조사 중 "계정 전체 403"처럼
+  보인 순간이 있었으나 원인은 별개 — 진단 스크립트가 `app.database`를 임포트하지 않아
+  `load_dotenv()`가 안 돌아 자격증명이 빈 문자열이었을 뿐, 실제 계정 차단은 아니었음.)
+- cron 3개 정상 등록 확인(`scheduler_state` 조회): `sync_naver_entity`(07:35)·
+  `sync_naver_search_term`(07:40)·`sync_naver_keyword_volume`(일요일 09:00).
+- EXPKEYWORD는 생성 요청만 확인(REGIST) — BUILT까지의 실제 소요시간은 이번 세션에서
+  미관측(비동기 생성, 다음 크론들이 자기치유 방식으로 수집). 다음 세션에서 실제 다운로드까지
+  1회 확인 권장.
+
 ## 5. 설계 반영 (구현 완료, P2-S1)
 
 - `naver_entity`(campaign/adgroup/keyword, WEB_SITE keyword-only) — upsert 방식(전체

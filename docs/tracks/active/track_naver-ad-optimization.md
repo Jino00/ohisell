@@ -1,7 +1,7 @@
 # Track: 네이버 SA 광고 최적화 시스템 (우리판 MOP)
 
 - 생성: 2026-07-07 (설계 대화 세션, Jino 구조 승인 "그래")
-- 상태: 🟢 Active — 2/6 (**P0+P1 완료·prod 배포·라이브 검증**, P2 대기)
+- 상태: 🟢 Active — 2/6 (**P0+P1 완료**, P2-S1 완료·P2-S2 대기)
 - 계획서: `docs/PLAN_naver-ad-optimization.md`
 - 대시보드 위치: sellC (sellc.ohitech.co.kr = 이 repo frontend)
 
@@ -63,7 +63,13 @@
 - [x] **P0 수집 파이프라인 (완료 2026-07-07·prod 배포·라이브 검증)**: 신규 8테이블 마이그레이션(`u5v6w7x8y9z0`, prod head) + fetcher 확장(AD/AD_CONVERSION 키워드·그룹 grain·직간접 분리·/stats·429 백오프) + report_collector_sa + ad_daily_ingest Harness + bep_calculator_sa + hourly_snapshot + cron 2개(`sync_naver_ad_daily` 07:30·`snapshot_naver_ad_hourly` :05, APScheduler 등록 확인). **죽은 sync는 유령이었음(prod 정상, stale 로컬 DB 오판)**. 테스트 9신규+전체508 pass. **라이브: naver_ad_daily 3788행(7/05 cost 858,719=prod ad_costs 정확일치·직간접전환 분리·파워링크3050+쇼핑738) / naver_product_bep 706행(497 actionable bep_roas, 실효수수료율 4.17%) / hourly 43캠페인**. 상세 recon: `docs/references/21`. ⚠️미해결: 판매가는 orders 실거래가에서 도출(매핑 selling_price 전부 0) → 196개 미주문 상품은 BEP 산출 불가(actionable 497<500, 총행 706≥500). 7/06 데이터는 07:30 크론에 자동 적재(네이버 리포트가 오전 생성).
 - [x] **P1 광고 리포트 페이지 (완료 2026-07-07·prod 배포·라이브 검증)**: 백엔드(Router `naver_ad.py` `GET /report`·`GET /bep` + Harness `ad_report.build_report` 3열ROAS + SA 3개) + 프론트 `/naver-ad`(필터바 기간+비교·KPI 8칸+증감%·듀얼차트 광고비/ROAS·드릴다운 5탭 날짜/캠페인/그룹/키워드/시간대·3열 ROAS·BEP 표). **D-NAO-15 스코프대로 읽기 전용**. 테스트 23 pass, tsc clean. **라이브 검증(원칙22)**: prod report/bep 실호출(7/06 cost 792,483 등 P0 수치와 정확 일치)+SSH터널로 프론트 브라우저 실측(KPI·3열ROAS·차트·5개 드릴다운 탭·BEP 표 전부 실데이터 렌더 확인). **Claude 적대적 리뷰**(codex 한도 소진 대체, 원칙19 폴백): P1(프론트 request race — 탭 빠르게 전환 시 stale 응답이 최신 위에 덮어써짐) 수정(reqSeq 가드) + P2 3건 수정(hourly_pacing 클램프 카운트 가시화·hour탭 ad_date 배너·keyword_id 공백 표시 개선). 커밋 `a3b1ddc`(P1 WIP)+`573ffa4`(리뷰 반영), prod 재배포·재검증 완료. **D-NAO-15 참조**.
 - [ ] **P2 진단 엔진 + 콘솔** (구조 승인 2026-07-07, S1→S2→S3 순차):
-  - [ ] P2-S1 데이터 기반: naver_entity(이름·인벤토리) + naver_search_term_daily(EXPKEYWORD·SHOPPINGKEYWORD_DETAIL) + 백필(D-NAO-17) + campaign_target_resolver + keywordstool 검색량
+  - [x] **P2-S1 데이터 기반 (완료 2026-07-07·prod 배포·라이브 검증)**: 신규 2테이블 마이그레이션(`v6w7x8y9z0a1`) + `entity_sync`(upsert, 볼륨필드 보존·stale는 status='deleted') + `search_term_ingest`(shopping/expkeyword) + `campaign_backfill`(sentinel grain) + `campaign_target_resolver`(override→account_default) + `keyword_volume_sync`(keywordstool, 저클릭 대상) + fetcher 확장(get_adgroups/get_keywords/create_expkeyword_report/fetch_search_term_daily/fetch_campaign_daily_backfill/fetch_keyword_volumes) + cron 3개(`sync_naver_entity` 07:35·`sync_naver_search_term` 07:40·`sync_naver_keyword_volume` 주1회 일 09:00). 테스트 9신규+전체539 pass.
+    - **⚠️실측으로 트랙 추정치 정정**: 파워링크 등록 키워드는 "4,936개"가 아니라 **90,150개**(18배 — 4,936은 최근 16일 노출 발생분이었고, 등록 전체엔 노출 이력 없는 키워드가 훨씬 많음. D-NAO-18 죽은키워드 스케일이 예상보다 큼).
+    - **라이브 실측(원칙22)**: naver_entity — campaign 43(off 14·on 29) / adgroup 990(off 216·on 774) / keyword 90,150(off 876·on 89,274, WEB_SITE만) — 사전 정찰과 정확 일치. naver_search_term_daily shopping 39,153행(3일치) 적재 확인.
+    - **버그 발견·즉시 수정**: `_headers()`가 서명 문자열에 `.GET.`을 하드코딩해 POST(EXPKEYWORD 생성)가 403 invalid-signature로 실패 → `method` 파라미터 추가로 수정, 재배포 후 EXPKEYWORD 생성 200 확인.
+    - **D-NAO-17 백필 한도 확정(미확인 해소)**: `/stats`는 최근 730일까지, 호출당 92일 청크 한도(에러 메시지로 명문화, 추측 아님). 캠페인 grain만 가능(그룹/키워드 세부 불가).
+    - **⚠️미해결**: `campaign_target_resolver`의 "②쇼핑 상품BEP 연결" 단계는 미구현 — 캠페인/그룹↔상품 연결 데이터 소스가 없어 override→계정기본값 2단만 동작. 이름 기반 추정 매칭은 금전 판단 근거로 약해 시도 안 함(추정 금지). **S2 착수 전 재검토 필요**.
+    - 상세: `docs/references/22_naver_sa_p2s1_recon.md`. 커밋(admiring-solomon-b4f056, 미push).
   - [ ] P2-S2 진단 엔진: account_diagnosis_sa(쿠팡 판정 이식·출혈/승자/확장버킷/제외후보/3단분류/악순환) + GET /diagnosis + 콘솔 보드 — 완료기준: 실측 베이스라인 재현
   - [ ] P2-S3 시뮬·제안·발송: bid_simulator(D-NAO-19) + budget_allocator(한계수익) + proposal_writer + Slack + 제안카드·optimizer 패널·경량 이상피드 — 완료기준: 매일 08:00 자동 진단·제안, 첫 제안서에 실측 진단+S26 질문 → 2주 관찰 개시
 - [ ] **P3 Confirm 실행**: 제외키워드→입찰→예산 순 개방 + change_log + D+7/14 검증 루프
@@ -83,12 +89,15 @@
 
 - ✅ **P2 구조 승인 완료(2026-07-07 오후, Jino "그래")**: 설계 검증 대화(MOP 기대 8항목 대조·CPC 산식·자율학습 대조)를 거쳐 **D-NAO-16~20 전부 확정** + 학습 루프 7 추가. 검증 대화 성과: 초안이 계획서 §1 승인 로직에서 이탈한 5개(bid_simulator·budget_allocator 누락 / 판정 로직 쿠팡 스킬 이식 대신 신규 발명 / 악순환·학습불능 감지 누락 / 제외후보 EXPKEYWORD 정의 격하 / MOP 가드레일 이식 흐릿) 자가 발견·복원 + 정지·재개 액션 갭·저클릭 육성·CPC 산식·100% 진입을 대화로 확정. **확정 구조 = P2-S1 데이터 기반(naver_entity 이름 동기화+검색어 수집 EXPKEYWORD/SHOPPINGKEYWORD_DETAIL+백필 D-NAO-17+campaign_target_resolver+keywordstool 검색량) → P2-S2 진단 엔진(쿠팡 스킬 판정 이식·3단 분류 D-NAO-18·악순환 포함) → P2-S3 시뮬·제안·Slack(bid_simulator D-NAO-19+budget_allocator+proposal_writer+콘솔 UI+optimizer 패널)**. 신규 테이블 2개(naver_entity·naver_search_term_daily). ✅ **잔여 결정 2건도 확정(같은 날)**: ①보정계수 적용+양쪽 병기(D-NAO-21) ②Slack은 S3 착수 시 URL 수령(그 전 no-op). **설계 완전 확정 — P2-S1 구현 착수 가능 상태.**
 
+- ✅ **P2-S1 데이터 기반 완료(2026-07-07, admiring-solomon-b4f056 워크트리)**: 위 체크리스트 항목 참조. prod 배포·라이브 검증·`_headers` POST 서명 버그 발견 즉시 수정까지 완료. 상세 `docs/references/22`.
+
 ## 다음 액션
 
-1. **P2-S1 데이터 기반 구현 착수** (구조 승인 완료, /model sonnet 권장): naver_entity+entity_sync → naver_search_term_daily(EXPKEYWORD POST+SHOPPINGKEYWORD_DETAIL) → 백필(한도 실측 먼저, D-NAO-17) → campaign_target_resolver → keywordstool 검색량. 완료 기준: 인벤토리 ~4,936 적재·검색어 적재·백필 범위 보고. 계획서 §P2-S1 참조.
-2. (선택) 판매가 커버리지 개선: 미주문 196상품 BEP 위해 네이버 상품 API 가격 동기화 검토 → actionable BEP 500+.
-3. **트랙 파일 정리**: 이 파일과 `docs/PLAN_naver-ad-optimization.md`가 메인 워크트리에 untracked로만 존재 — 적절한 브랜치에 커밋해 정리(Jino 결정: 어느 워크트리/브랜치에 귀속시킬지).
-4. 브랜치 push 여부(Jino 결정).
+1. **P2-S2 진단 엔진 구현 착수** (/model sonnet): account_diagnosis_sa(쿠팡 판정 이식) → GET /diagnosis → 콘솔 보드. 완료기준: 실측 베이스라인 재현(확장버킷42%·출혈30·굶는승자4·쇼핑16그룹). 착수 전 EXPKEYWORD 다운로드 1회 확인(BUILT 후 컬럼 레이아웃이 SHOPPINGKEYWORD_DETAIL과 동일한지 재검증, docs/references/22 §2 각주) 권장.
+2. campaign_target_resolver의 "②쇼핑 상품BEP 연결" 미구현 재검토(캠페인/그룹↔상품 연결 데이터 소스 확보 방법 — S2 진단에 필요한지 먼저 판단).
+3. (선택) 판매가 커버리지 개선: 미주문 196상품 BEP 위해 네이버 상품 API 가격 동기화 검토 → actionable BEP 500+.
+4. **트랙 파일 정리**: 이 파일과 `docs/PLAN_naver-ad-optimization.md`가 메인 워크트리에 untracked로만 존재 — 적절한 브랜치에 커밋해 정리(Jino 결정: 어느 워크트리/브랜치에 귀속시킬지).
+5. 브랜치 push 여부(Jino 결정, 이번 세션 코드 커밋 포함).
 
 ## 참고 자료 (맥락)
 

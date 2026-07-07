@@ -53,11 +53,13 @@ CONV_COL_CNT = 11
 _RETRY_STATUS = {429, 500, 502, 503, 504}
 
 
-def _headers(path: str) -> dict:
+def _headers(path: str, method: str = "GET") -> dict:
+    """HMAC 서명 헤더. 서명 문자열은 실제 HTTP 메서드와 반드시 일치해야 함(실측: POST에
+    'GET'으로 서명하면 signature invalid 403 — Naver는 시그니처의 메서드를 검증)."""
     ts = str(int(time.time() * 1000))
     secret = SECRET_KEY_B64.encode("utf-8")
     sig = base64.b64encode(
-        hmac.new(secret, f"{ts}.GET.{path}".encode(), hashlib.sha256).digest()
+        hmac.new(secret, f"{ts}.{method}.{path}".encode(), hashlib.sha256).digest()
     ).decode()
     return {
         "X-Timestamp": ts,
@@ -279,7 +281,7 @@ def get_campaign_types() -> dict[str, str]:
 
 
 def get_campaigns_full() -> list[dict]:
-    """캠페인 전체 정보 반환: [{campaign_id, name, campaign_type, daily_budget}]."""
+    """캠페인 전체 정보 반환: [{campaign_id, name, campaign_type, daily_budget, status}]."""
     resp = _get("/ncc/campaigns")
     resp.raise_for_status()
     return [{
@@ -287,6 +289,7 @@ def get_campaigns_full() -> list[dict]:
         "name": c.get("name", ""),
         "campaign_type": c.get("campaignTp", ""),
         "daily_budget": c.get("dailyBudget"),
+        "status": c.get("status", ""),
     } for c in resp.json()]
 
 
@@ -497,7 +500,7 @@ def create_expkeyword_report(stat_date: date) -> dict:
     """
     resp = requests.post(
         BASE_URL + "/stat-reports",
-        headers=_headers("/stat-reports"),
+        headers=_headers("/stat-reports", method="POST"),
         json={"reportTp": "EXPKEYWORD", "statDt": stat_date.strftime("%Y%m%d")},
         timeout=30,
     )
