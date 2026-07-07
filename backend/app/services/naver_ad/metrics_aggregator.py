@@ -2,6 +2,10 @@
 # 역할(SA): 기간·grain·캠페인 필터를 받아 naver_ad_daily를 집계한 rows + 계정 총계 KPI 반환.
 #   파생지표(CTR·CPC·avg_rank·ROAS네이버·ROAS직접)는 합산 후 Python에서 계산(정밀도·0분모 안전).
 # 순수 쿼리 SA: naver_ad_daily만 읽음(다른 소스 모름). 3열 중 실주문 대조는 actual_revenue SA 소관.
+# P2-S2에서 발견: campaign_backfill의 sentinel 행(adgroup_id='__backfill__')은 캠페인grain
+#   전용(D-NAO-17) — 실단위 P0 행과 같은 날짜에 공존하면 이 SA의 합계가 이중계상된다.
+#   실행 전(2026-07-07 기준 prod 0건)엔 무영향이지만 향후 backfill 실행 시 P1 리포트·P2
+#   진단 모두가 이 SA를 거치므로 여기서 한 번에 제외한다.
 from __future__ import annotations
 
 from decimal import Decimal, ROUND_HALF_UP
@@ -11,6 +15,7 @@ from sqlalchemy import func as sqlfunc
 from sqlalchemy.orm import Session
 
 from app.models import NaverAdDaily
+from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 
 # grain → 그룹 기준 컬럼 (hour grain은 hourly_pacing SA 소관, 여기서 제외)
 _GRAIN_COLS = {
@@ -78,6 +83,7 @@ def aggregate(
     base = db.query(NaverAdDaily).filter(
         NaverAdDaily.ad_date >= date_from,
         NaverAdDaily.ad_date <= date_to,
+        NaverAdDaily.adgroup_id != BACKFILL_SENTINEL_ADGROUP,
     )
     if campaign_filter:
         base = base.filter(NaverAdDaily.campaign_id == campaign_filter)

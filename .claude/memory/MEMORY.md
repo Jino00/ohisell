@@ -1,4 +1,5 @@
 - [LESSONS_LEARNED](LESSONS_LEARNED.md) — Python 3.14 + SQLAlchemy 호환성 이슈 기록
+- [HANDOFF_ohisell-naver-ad-P2-S1-done_20260707](HANDOFF_ohisell-naver-ad-P2-S1-done_20260707.md) — ★네이버 광고 트랙 P2-S1(데이터 기반) 구현+prod 배포+라이브 검증 완료. 신규 2테이블+5서비스+cron3개, 테스트9신규(539 pass). 실측: 파워링크 등록키워드 4,936→**90,150개**(18배) 정정. `_headers` POST서명 버그 발견·수정. campaign_target_resolver 상품BEP연결 단계 미구현(S2 전 재검토). 다음=P2-S2 진단엔진.
 - [HANDOFF_ohisell-followup-cleanup_20260615](HANDOFF_ohisell-followup-cleanup_20260615.md) — ★후속 정리. ①Wing트랙 completed/이동(TRACKS 4/6 stale수정) ②RG수수료 S8 라이브재감사 size_mismatch_high 4→1건(Jino:자동해제대기) ③RG발송관제 S7 라이브점검(trust_days11·게이트정상·평일7/8승격임박) ④8종파서 보류권장. 코드변경0(전부 docs)·push완료. 다음=④ Jino결정 대기.
 - [HANDOFF_ohisell-wing-session-automation-S4done_20260614](HANDOFF_ohisell-wing-session-automation-S4done_20260614.md) — ★Wing 세션 자동화 S4 완료(5/6). CDP 모드 전환(Akamai 영구 우회·실제 Chrome connect_over_cdp)·RG 정산 자동수집 prod 라이브(upserted=10·diff=0)·데몬 복원. 다음=S5 나머지 7종 코드명+RG 갱신 UI 버튼.
 - [HANDOFF_ohisell-wing-session-automation-S3_20260614](HANDOFF_ohisell-wing-session-automation-S3_20260614.md) — Wing 세션 자동화 S3 완료(4/6). RevenueDriftCard prod 라이브 ref18 재현. (S4에서 완료됨)

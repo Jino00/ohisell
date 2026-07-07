@@ -1,10 +1,11 @@
-# naver_ad.py — 네이버 SA 광고 리포트 라우터 (P1, track_naver-ad-optimization)
-# GET /api/naver/ad/report — 광고 리포트(KPI·3열 ROAS·드릴다운·시계열), ad_report Harness 경유.
-# GET /api/naver/ad/bep    — 상품별 BEP 목록(단순 read, CRUD 직접).
-# D-NAO-15: P1은 리포트 코어만(캠페인 관리 패널은 P2). 읽기 전용 — 광고 계정 쓰기 없음.
+# naver_ad.py — 네이버 SA 광고 리포트 라우터 (P1/P2-S2, track_naver-ad-optimization)
+# GET /api/naver/ad/report     — 광고 리포트(KPI·3열 ROAS·드릴다운·시계열), ad_report Harness 경유.
+# GET /api/naver/ad/bep        — 상품별 BEP 목록(단순 read, CRUD 직접).
+# GET /api/naver/ad/diagnosis  — 진단 보드(출혈/승자/확장버킷/쇼핑BEP/제외후보/3단분류/악순환),
+#   diagnosis Harness 경유(P2-S2). D-NAO-15/D-3: 전부 읽기 전용 — 제안·쓰기 없음.
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -14,6 +15,8 @@ from app.database import get_db
 from app.models import NaverProductBep
 from app.services.naver_ad import metrics_aggregator
 from app.services.naver_ad.ad_report import build_report
+from app.services.naver_ad.diagnosis import build_diagnosis
+from app.utils.kst import kst_today
 
 router = APIRouter(prefix="/api/naver/ad", tags=["naver-ad"])
 
@@ -112,3 +115,26 @@ def bep_list(
         "actionable": actionable,
         "rows": [_serialize_bep(r) for r in rows],
     }
+
+
+@router.get("/diagnosis")
+def diagnosis(
+    date_to: date = Query(None, description="진단 기준일(기본=오늘). 보드별 창은 harness가 자체 결정"),
+    date_from: date = Query(None, description="키워드 보드(출혈·승자·확장버킷·쇼핑BEP) 창 시작일(기본=date_to-14, 15일 창)"),
+    db: Session = Depends(get_db),
+):
+    """네이버 광고 진단 보드 — 출혈/굶는승자/확장버킷/쇼핑그룹BEP/제외후보/3단분류/악순환.
+
+    D-NAO-21 보정계수(직전 30일 고정)는 harness 내부에서 항상 계산. date_from/date_to는
+    출혈·승자·확장버킷·쇼핑BEP 보드의 실적 창만 조절(기본 15일 — 실측 베이스라인과 동일 창).
+    """
+    if date_to is None:
+        date_to = kst_today()
+    if date_from is None:
+        date_from = date_to - timedelta(days=14)
+    if date_from > date_to:
+        raise HTTPException(400, "date_from은 date_to보다 이후일 수 없습니다")
+    if (date_to - date_from).days > _MAX_DIAGNOSIS_RANGE_DAYS:
+        raise HTTPException(400, f"조회 범위는 최대 {_MAX_DIAGNOSIS_RANGE_DAYS}일입니다")
+
+    return build_diagnosis(db, date_from, date_to)
