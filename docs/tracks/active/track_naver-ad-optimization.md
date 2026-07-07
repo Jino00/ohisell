@@ -40,6 +40,8 @@
 
 - **D-NAO-20 신규/육성 키워드 = 100% 진입 + 타이트 감시 (쿠팡 ×0.5 공식 폐기, D-NAO-19-④ 개정)** (2026-07-07, Jino 원문: "쿠팡과 달리 네이버는 변경폭의 제한이 없잖아? 그리고 굳이 처음에 50%로 들어가지 말고 처음부터 100%로 들어가고 그 성과를 좀 더 타이트하게 보는 방향으로 하자"). **①진입가 = D-NAO-19 본산식을 첫날부터 그대로**: min(경제성 상한[풀링 CVR 기반], estimate 목표순위 필요입찰) — ×0.5 할인 없음. 근거: 네이버 차순위 과금에서 진입가≠지불가(언더비딩은 돈을 아끼는 게 아니라 노출만 굶겨 판정을 늦춤·차순위 경매에서 진짜 가치 입찰이 우세 전략), 판정 속도=데이터 속도. 쿠팡 ×0.5는 학습리셋 페널티+시장가 불가시 환경의 산물 — 네이버엔 둘 다 없음(변경 페널티 없음+estimate 실측 가능). **②리스크는 입찰 할인이 아니라 감시로 관리**: 이벤트 드리븐 조기 판정 게이트(노출→클릭→CTR 모수 차는 즉시 통과/폐기 판정, 매일 스캔, 14일=대기가 아닌 최대 데드라인) + **키워드당 스톱로스 절대액**(무전환 지출 상한 도달 시 자동 인하/중단 제안) + **탐색 예산 총액 캡**(동시 육성 최대 손실 상계) + 조기 폐기 대칭(노출 충분+CTR 바닥=즉시 아웃). ROAS 게이트만 전환 성숙(m(d)≥0.8, 루프3) 대기 — 간접전환 미성숙 키워드 억울한 사망 방지. **③변경폭 가드레일 스코프 분리**: 육성/신규 트랙은 ±15%/회 비적용(소액 구간에서 무의미, 절대액 캡이 실질 안전장치) — 단 기존 운영 키워드의 자율 단계 ±15%(D-NAO-5)는 유지(플랫폼 제약이 아니라 폭주 방지용 우리 안전핀).
 
+- **D-NAO-21 진단 판정 보정계수 = 적용 + 양쪽 병기** (2026-07-07, Jino 선택 "적용 + 양쪽 병기 (권장)"). 네이버 convAmt는 실주문 대비 ~2.6배 과대(D-NAO-7 실증) → 진단 판정은 **보정된 목표(target_roas × 보정계수)** 기준. 보정계수 = 최근 30일 실주문매출 ÷ 네이버 convAmt(계정 단위, 매일 자동 갱신, actual_revenue SA 재사용). 진단 카드에는 보정 전·후 양쪽 병기(왜곡 방지). P2는 제안만 생성(읽기전용)이라 리스크 없음. Slack 연결은 S3 착수 시점에 webhook URL 수령(그 전까지 slack_notifier no-op).
+
 ## 실측 베이스라인 (2026-07-06~07 라이브, 원칙22)
 
 - 규모: 광고비 일평균 74만 → **월 환산 ~2,230만** (연 2.7억 페이스). 일 ~600클릭.
@@ -79,11 +81,11 @@
 - 코드: 브랜치 `claude/admiring-solomon-b4f056`(`3fae154` P0 → `3e20f1e` dedup fix → `a3b1ddc` P1 WIP → `573ffa4` P1 리뷰반영, 미push).
 - ⚠️ **트랙/계획서 파일이 이 브랜치가 아니라 메인 워크트리(Ohiselling 루트, `feat/ohitech-ad-cost` 브랜치)에 untracked 상태로만 존재했음** — 원칙20/21 위반 소지(여러 워크트리 병행 세션 흔적). 이번 세션에서 발견해 갱신함. 향후 커밋·정리 필요(아래 다음 액션).
 
-- ✅ **P2 구조 승인 완료(2026-07-07 오후, Jino "그래")**: 설계 검증 대화(MOP 기대 8항목 대조·CPC 산식·자율학습 대조)를 거쳐 **D-NAO-16~20 전부 확정** + 학습 루프 7 추가. 검증 대화 성과: 초안이 계획서 §1 승인 로직에서 이탈한 5개(bid_simulator·budget_allocator 누락 / 판정 로직 쿠팡 스킬 이식 대신 신규 발명 / 악순환·학습불능 감지 누락 / 제외후보 EXPKEYWORD 정의 격하 / MOP 가드레일 이식 흐릿) 자가 발견·복원 + 정지·재개 액션 갭·저클릭 육성·CPC 산식·100% 진입을 대화로 확정. **확정 구조 = P2-S1 데이터 기반(naver_entity 이름 동기화+검색어 수집 EXPKEYWORD/SHOPPINGKEYWORD_DETAIL+백필 D-NAO-17+campaign_target_resolver+keywordstool 검색량) → P2-S2 진단 엔진(쿠팡 스킬 판정 이식·3단 분류 D-NAO-18·악순환 포함) → P2-S3 시뮬·제안·Slack(bid_simulator D-NAO-19+budget_allocator+proposal_writer+콘솔 UI+optimizer 패널)**. 신규 테이블 2개(naver_entity·naver_search_term_daily). ⏳ **잔여 결정 2건(S1 착수 비블로킹)**: ①판정 보정계수(실주문÷네이버 convAmt — 적용+병기 권장 vs 병기만) ②Slack webhook URL(S3 전까지만 필요, 미설정 시 no-op).
+- ✅ **P2 구조 승인 완료(2026-07-07 오후, Jino "그래")**: 설계 검증 대화(MOP 기대 8항목 대조·CPC 산식·자율학습 대조)를 거쳐 **D-NAO-16~20 전부 확정** + 학습 루프 7 추가. 검증 대화 성과: 초안이 계획서 §1 승인 로직에서 이탈한 5개(bid_simulator·budget_allocator 누락 / 판정 로직 쿠팡 스킬 이식 대신 신규 발명 / 악순환·학습불능 감지 누락 / 제외후보 EXPKEYWORD 정의 격하 / MOP 가드레일 이식 흐릿) 자가 발견·복원 + 정지·재개 액션 갭·저클릭 육성·CPC 산식·100% 진입을 대화로 확정. **확정 구조 = P2-S1 데이터 기반(naver_entity 이름 동기화+검색어 수집 EXPKEYWORD/SHOPPINGKEYWORD_DETAIL+백필 D-NAO-17+campaign_target_resolver+keywordstool 검색량) → P2-S2 진단 엔진(쿠팡 스킬 판정 이식·3단 분류 D-NAO-18·악순환 포함) → P2-S3 시뮬·제안·Slack(bid_simulator D-NAO-19+budget_allocator+proposal_writer+콘솔 UI+optimizer 패널)**. 신규 테이블 2개(naver_entity·naver_search_term_daily). ✅ **잔여 결정 2건도 확정(같은 날)**: ①보정계수 적용+양쪽 병기(D-NAO-21) ②Slack은 S3 착수 시 URL 수령(그 전 no-op). **설계 완전 확정 — P2-S1 구현 착수 가능 상태.**
 
 ## 다음 액션
 
-1. **P2 진단 엔진 착수**: 출혈/승자/확장버킷/제외후보 자동 진단 + 제안 카드(읽기전용) + Slack 발송. D-NAO-13(optimizer 선택 패널)도 여기서 함께.
+1. **P2-S1 데이터 기반 구현 착수** (구조 승인 완료, /model sonnet 권장): naver_entity+entity_sync → naver_search_term_daily(EXPKEYWORD POST+SHOPPINGKEYWORD_DETAIL) → 백필(한도 실측 먼저, D-NAO-17) → campaign_target_resolver → keywordstool 검색량. 완료 기준: 인벤토리 ~4,936 적재·검색어 적재·백필 범위 보고. 계획서 §P2-S1 참조.
 2. (선택) 판매가 커버리지 개선: 미주문 196상품 BEP 위해 네이버 상품 API 가격 동기화 검토 → actionable BEP 500+.
 3. **트랙 파일 정리**: 이 파일과 `docs/PLAN_naver-ad-optimization.md`가 메인 워크트리에 untracked로만 존재 — 적절한 브랜치에 커밋해 정리(Jino 결정: 어느 워크트리/브랜치에 귀속시킬지).
 4. 브랜치 push 여부(Jino 결정).
