@@ -120,6 +120,26 @@ def test_spend_no_prior_data_excluded(db):
     assert out == []
 
 
+def test_spend_absolute_floor_suppresses_tiny_campaign_noise(db):
+    """F2b 1-a⑤(D-NAO-26): 초소액 캠페인의 비율 급변은 노이즈 — 트랙 관찰사례(77원→606원,
+    7.87배)를 재현. 절대액 floor 미만이면(양쪽 다) ratio가 임계값을 넘어도 플래그하지 않는다."""
+    _row(db, AS_OF - timedelta(days=1), "cmp1", 77)
+    _row(db, AS_OF, "cmp1", 606)  # 7.87배 — floor 없으면 spike로 잡혔을 케이스
+    db.commit()
+    out = anomaly_feed.spend_anomalies(db, AS_OF)
+    assert out == []
+
+
+def test_spend_absolute_floor_still_flags_when_either_side_large(db):
+    """한쪽이라도 floor 이상이면(완전 중단처럼 실질적 사건) 여전히 플래그한다."""
+    _row(db, AS_OF - timedelta(days=1), "cmp1", 10000)
+    _row(db, AS_OF, "cmp1", 50)  # today는 floor 미만이지만 prior가 커서 실질적 급감
+    db.commit()
+    out = anomaly_feed.spend_anomalies(db, AS_OF)
+    assert len(out) == 1
+    assert out[0]["kind"] == "drop"
+
+
 def test_spend_within_normal_range_not_flagged(db):
     _row(db, AS_OF - timedelta(days=1), "cmp1", 10000)
     _row(db, AS_OF, "cmp1", 12000)  # 1.2배 — 정상 변동

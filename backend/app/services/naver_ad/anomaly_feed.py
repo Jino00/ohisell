@@ -28,6 +28,13 @@ FRESHNESS_MIN_RATIO = Decimal("0.5")
 SPEND_SPIKE_RATIO = Decimal("2")
 SPEND_DROP_RATIO = Decimal("0.5")
 
+# 절대액 floor(F2b 1-a⑤, D-NAO-26) — 비율만 보면 초소액 캠페인(예: 77원→606원, 7.87배)이
+# "급증"으로 오탐돼 Slack 노이즈가 됨(트랙 파일 실관찰). 양쪽(cost_today, cost_prior) 모두
+# 이 값 미만이면 비율이 아무리 커도 노이즈로 보고 건너뛴다 — 한쪽이라도 이 값 이상이면
+# (예: 완전 중단처럼 실질적 사건) 여전히 플래그한다. 초기 상수 — 관찰모드 개시 전 튜닝 대상
+# (계획서 트랙 1-a⑤ "튜닝 후보" 기록), 관측된 노이즈 사례(606원)를 확실히 걸러내는 값으로 시작.
+SPEND_ANOMALY_MIN_ABS = 1000
+
 
 def _real_daily_cost_by_campaign(db: Session, ad_date: date) -> dict[str, int]:
     """특정일 캠페인별 실단위(비-backfill) cost 합계."""
@@ -117,6 +124,8 @@ def spend_anomalies(db: Session, as_of: date) -> list[dict]:
         cost_prior = prior_cost.get(cid, 0)
         if cost_prior <= 0:
             continue
+        if cost_today < SPEND_ANOMALY_MIN_ABS and cost_prior < SPEND_ANOMALY_MIN_ABS:
+            continue  # 절대액 floor(F2b 1-a⑤) — 양쪽 다 초소액이면 비율 노이즈로 판단
         ratio = (Decimal(cost_today) / Decimal(cost_prior)).quantize(_Q4)
         if ratio >= SPEND_SPIKE_RATIO:
             kind = "spike"
