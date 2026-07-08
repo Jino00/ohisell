@@ -113,18 +113,19 @@
 
 **정직 경계**: E1a 페르소나·지혜=로컬 상수/로컬 성적표(Ava 실 SOUL·지혜는 E1b pull). 실행 의존 채점은 E2 연기(관찰모드 미실행). 브리핑 밖 수치 인용 금지 프롬프트 + 스키마 강제(원칙19 환각 방어) + no silent cap(절삭 시 로깅).
 
-### 데이터 (additive 마이그레이션 1개)
-- `naver_expert_review`: id, created_at, `as_of`(Date), `proposal_id`(Int nullable FK naver_proposals.id — null=하루 총평), `verdict`(str16: agree/partial/reject/commentary), `confidence`(Numeric nullable), `reasoning`(Text), `checkable_prediction`(Text nullable — 반대 시 필수), `pred_target_type`/`pred_target_id`(str nullable), `pred_metric`(str nullable)/`pred_direction`(str nullable up/down), `verify_date`(Date nullable=as_of+7/+14), `outcome`(str12 nullable: correct/wrong/unverifiable/pending), `model`(str), `source`(str: local/ava). UniqueConstraint(as_of, proposal_id) 멱등.
-- 성적표: 기존 `NaverLearningState` 재사용(scope="expert", scope_key=pred 유형, metric="prediction_accuracy") — 채점된 예측만 롤업.
+### 데이터 (additive 마이그레이션 1개, 2테이블 — codex 아웃사이드 보이스 반영)
+- **`naver_expert_review_run`** (배치 run 원장, run당 1행): id, `as_of`(Date, **index**), `model`, `prompt_version`, `briefing_hash`, `raw`(Text — claude 원응답), `usage_json`, `status`(ok/degraded/skipped/failed), `created_at`. → run_id로 verdict를 묶어 provenance·프롬프트버전·재실행 이력 보존(codex: 단일테이블 혼재·history 소실 방지). 재실행=새 run(덮어쓰기 아님).
+- **`naver_expert_review`** (평결 child): id, `run_id`(FK run), `as_of`(Date), `proposal_id`(Int nullable FK naver_proposals.id — null=하루 총평, run의 child라 NULL-dedup 문제 없음), `verdict`(str20: agree/partial/reject/**insufficient_evidence**/commentary — codex: 관찰모드 "판단 불가" 정직 평결 추가), `confidence`(Numeric nullable), `reasoning`(Text), `checkable_prediction`(Text nullable — **기각 시에도 선택**, codex: 억지 예측 방지), `pred_target_type`/`pred_target_id`(str nullable), `pred_metric`/`pred_direction`(nullable), `verify_date`(Date nullable=as_of+7/+14, **index**), `outcome`(str12 nullable: correct/wrong/unverifiable/pending), `source`(str: local/ava). verdict/outcome/source는 모듈 상수(C2).
+- 성적표: 기존 `NaverLearningState` 재사용(scope="expert", metric="prediction_accuracy") — 채점된 예측만 롤업. **콘솔 노출은 정직 라벨**(codex): sample_n 표시, 임계 미달 시 "표본 축적 중(참고용)" — 정확도%를 competence 신호로 헤드라인 금지.
 
 ### SA (단일 책임)
 - **SA1 `expert_briefing_builder.build(db, as_of) -> dict`** [결정적, LLM 아님]: 오늘 pending NaverProposal 전체 + 진단보드 요약 + forecast 예측vs실측 최근 롤업 + 최근 trigger 이벤트 + 현재 로컬 성적표 요약 조립(+E1b: Ava 지혜). 페르소나는 여기 안 넣음. 토큰가드: 상한 초과 시 오래된 컨텍스트부터 절삭+로깅. 결정적(같은 입력→같은 브리핑).
-- **SA2 `ava_reviewer.review(briefing, *, invoke=_invoke_claude, model="opus") -> dict`**: 브리핑→스키마 지시(제안별 verdict 배열 + 총평, 반대 시 checkable_prediction 필수)→`invoke`(주입경계: 기본=실 claude, 테스트=가짜). 반환 {verdicts[], commentary, raw, usage}, 스키마 검증(위반 시 1회 재시도 후 실패 기록, 조작 금지). 페르소나(system)=E1a 로컬 Ava 상수 / E1b pull.
-- **어댑터 `_invoke_claude(prompt, system, schema, model, timeout)`** [claude_cli.py 린 포팅, cost_guard 미포함]: `[which("claude"), "--print", "--output-format", "json", "--model", model, "--system-prompt", system]` + 프롬프트 stdin + `env`에서 ANTHROPIC_API_KEY 제거 + cwd=/tmp + 재시도(t→×1.5→×2). stdout→`json["result"]`→regex로 JSON 추출. 신규 `app/services/naver_ad/expert_llm.py`.
-- **SA3 `expert_ledger`**: `record(db, as_of, review)` 평결 저장(멱등)[+E1b observe push] / `grade_due_predictions(db, today)` verify_date<=today & pending 행을 pred_target 엔티티 실성과(naver_ad_daily/forecast_scorer 재사용)와 대조→outcome 설정 + 성적표 upsert.
+- **SA2 `ava_reviewer.review(briefing, *, invoke=_invoke_claude, model="opus") -> dict`**: 브리핑→스키마 지시(제안별 verdict 배열[agree/partial/reject/insufficient_evidence] + 총평; checkable_prediction은 선택)→`invoke`(주입경계: 기본=실 claude, 테스트=가짜). 반환 {verdicts[], commentary, raw, usage}. **강한 스키마 검증**(codex): 누락/중복/여분 proposal_id·무효 verdict·commentary↔proposal 혼동 전부 거부, 위반 시 1회 재시도 후 degraded 기록(조작·환각 보정 금지). 페르소나(system)=E1a 로컬 Ava 상수(charter 충실 stub) / E1b 실 Ava SOUL pull.
+- **어댑터 `_invoke_claude(prompt, system, schema, model, timeout)`** [claude_cli.py 린 포팅, cost_guard 미포함]: `[which("claude"), "--print", "--output-format", "json", "--model", model, "--system-prompt", system]` + 프롬프트 stdin + `env`에서 ANTHROPIC_API_KEY 제거 + cwd=/tmp + 재시도(t→×1.5→×2). stdout→`json["result"]`→regex로 JSON 추출. 신규 `app/services/naver_ad/expert_llm.py`(C1: 파일 상단에 출처 주석 — AI_office `backend/app/utils/claude_cli.py`의 린 포팅).
+- **SA3 `expert_ledger`**: `record(db, as_of, review)` 평결 저장(멱등; 총평 행은 A1 delete-then-insert dedup)[+E1b observe push] / `grade_due_predictions(db, today)` verify_date<=today & pending 행을 pred_target 엔티티 실성과(naver_ad_daily/forecast_scorer 재사용)와 대조→outcome 설정 + 성적표 upsert. **⚠️C3 자문 경계 불변식**: 이 SA(및 E1a 전체)는 `naver_expert_review`에만 쓰고 `NaverProposal.status`·실행상태는 **절대 건드리지 않는다**(D-3 관찰모드, 전문가는 자문일 뿐) — 경계 테스트로 강제. **정직 노트**: prod 이력 ~4일이라 초기 다수 예측이 `unverifiable`로 채점됨(설계대로, 데이터 축적되며 성숙).
 
 ### Harness `expert_desk.run_daily(db, *, today=None)` [learning_loops식 단계격리]
-stage1 grade_due_predictions → stage2 briefing_builder.build(as_of=kst_today()) → stage3 ava_reviewer.review(주입경계) → stage4 expert_ledger.record. 각 단계 독립 try/except, stage_status/errors.
+stage1 grade_due_predictions → stage2 briefing_builder.build(as_of=kst_today()) → **stage2.5 빈 제안 가드(A2): pending 0건이면 stage3 skip(claude 미호출, stage_status=skipped)** → stage3 ava_reviewer.review(주입경계) → stage4 expert_ledger.record. 각 단계 독립 try/except, stage_status/errors.
 
 ### 배선
 - 크론: scheduler_service `generate_expert_desk`(`5 8 * * *`, 08:00 proposal 직후).
@@ -135,13 +136,36 @@ stage1 grade_due_predictions → stage2 briefing_builder.build(as_of=kst_today()
 prod 사본 실제안으로 (가짜 reviewer) e2e[브리핑→평결배열→ledger→라우터/콘솔, 스키마위반 0] + grade_due_predictions 채점 단위테스트(예측→outcome→성적표) + 전 SA/harness TDD + codex review pass. 실 claude 어댑터는 CLI 설치·인증 호스트에서 1콜 왕복 스모크(별도, E1a 코드 무의존).
 
 ### Task 순서 (각 T: TDD RED→GREEN → codex review → 커밋 → 트랙/§7 즉시 갱신)
-- **T1** 마이그레이션 + `NaverExpertReview` 모델 + 모델 테스트
-- **T2** `expert_briefing_builder` + 테스트(결정성·토큰가드)
-- **T3** `expert_llm._invoke_claude` 린 어댑터 + `ava_reviewer`(주입경계) + 테스트(가짜 invoke·스키마검증·재시도)
-- **T4** `expert_ledger`(record + grade_due_predictions) + 테스트(멱등·채점·성적표)
-- **T5** `expert_desk` 하네스 + 테스트(단계격리)
+- **T1** 마이그레이션(2테이블: `naver_expert_review_run` + `naver_expert_review`) + 모델(verdict/outcome/source 상수, `verify_date`·`as_of` index) + 모델 테스트(run↔verdict FK, 재실행=새 run 이력보존)
+- **T2** `expert_briefing_builder` + 테스트(**결정성**·**토큰캡 절삭+로깅**; forecast 롤업·trigger 조회 recent-N 바운드)
+- **T3** `expert_llm._invoke_claude` 린 어댑터(출처 주석) + `ava_reviewer`(주입경계) + 테스트(가짜 invoke·**스키마위반→1회재시도→degraded 조작금지**)
+- **T4** `expert_ledger`(record + grade_due_predictions) + 테스트(**총평 dedup A1**·record 멱등·**grade 4-outcome correct/wrong/unverifiable/pending유지+멱등**·성적표 upsert·**자문경계 C3: NaverProposal 무변경**)
+- **T5** `expert_desk` 하네스 + 테스트(단계격리·**빈제안 skip A2**)
 - **T6** 라우터 GET /expert-reviews + /proposals 조인 + 테스트
 - **T7** 크론 08:05 등록
 - **T8** 프론트 배지 + Ava 패널(tsc/build)
 - **T9** prod 사본 e2e(가짜 reviewer) + codex review + 트랙/§7 갱신
-- (T10 E1b, 별도) ava_client pull/push + 실 어댑터 스모크 — AI_office쪽 준비 후
+- (T10 E1b, 별도) ava_client pull/push + 실 어댑터 스모크 + **[→EVAL] reviewer 프롬프트 품질 eval**(실 claude 붙는 시점) — AI_office쪽 준비 후
+
+### plan-eng-review 반영 (2026-07-08, auto-proceed 권장안)
+A1(총평 dedup→run테이블로 해소)·C3(자문경계 불변식, P1)·A2(빈제안 skip)·C1/C2(어댑터 출처주석·enum상수)·P1(verify_date index)·테스트 갭(4-outcome·스키마위반·결정성·토큰캡·경계) 전부 위 데이터/SA/하네스/Task에 접힘. **NOT in scope**: E1b(Ava 연동)·E2(위임 게이트)·실 claude eval — 순서상 뒤. **What already exists(재사용)**: 하네스 패턴=learning_loops / claude 어댑터=AI_office claude_cli.py / 성적표=NaverLearningState / 예측채점 패턴=forecast_scorer / 제안=NaverProposal+proposal_pipeline / 크론=scheduler_service / 콘솔=NaverAdOptimizationConsole. **병렬화**: T1→T2·T3·T4(모델 확정 후 3 SA 병렬)→T5(조합)→T6·T8(라우터/프론트 병렬)→T7→T9. **Failure modes**: claude 타임아웃(재시도+degraded)·스키마위반(재시도→미저장, 조작금지)·빈브리핑(skip)·grade 실측결측(unverifiable, 침묵 아님).
+
+### codex 아웃사이드 보이스 반영 (2026-07-08)
+**즉시 반영**: ①`insufficient_evidence` 평결(관찰모드 "판단 불가" 정직) ②checkable_prediction 기각 시에도 선택(억지 예측 방지) ③2테이블(run 원장 + verdict child) — provenance·프롬프트버전·재실행 이력 ④강한 스키마 검증(누락/중복/여분 proposal_id·verdict 무효 거부) ⑤성적표 정직 라벨(sample_n, "표본 축적 중") ⑥라우터 조인=**as_of 최근 완료 run**의 평결(최신 의미 명시) ⑦데이터 경계 노트=브리핑은 내 광고지표만(계정 자격증명 無), Max OAuth로 내 Claude 세션에 감(이 세션과 동일 경계) ⑧모델 정확 id·CLI-크론 신뢰성(세션만료/PATH/인터랙티브 프롬프트)은 **E1b 실 claude 붙는 시점 헬스체크로 실측**(E1a는 가짜라 무관). **부분 기각(근거 명시)**: codex "prod 4일이라 LLM 검토 전체를 F0b 후로 연기" → **성적표 과신 우려는 수용(위 ⑤로 약화)**, 그러나 **검토+총평 자체는 유지** — 근거: (a) Jino 명시 의도 D-NAO-25 "전문가와 논의하며 운영"=정량 성적표가 아니라 정성 논의 파트너가 1차 가치, (b) E1b 지혜 축적의 episodic 재료를 지금부터 쌓아야 실행 시작 시점에 이력 존재. 성적표는 데이터 축적되며 성숙(정직 라벨로 허위신호 차단). **이 부분 기각은 Jino 확인 대상**(아래 대화 참조).
+
+## GSTACK REVIEW REPORT
+
+| Review | Trigger | Why | Runs | Status | Findings |
+|--------|---------|-----|------|--------|----------|
+| CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | — | — |
+| Codex Review | `/codex review` | Independent 2nd opinion | 1 | issues_found | 다수(대부분 접힘) |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | issues_open | 10 issues, 0 critical gaps |
+| Design Review | `/plan-design-review` | UI/UX gaps | 0 | — | — |
+| DX Review | `/plan-devex-review` | Developer experience gaps | 0 | — | — |
+
+- **CODEX:** run-table·insufficient_evidence·optional-prediction·honest-scorecard·강한 스키마검증 접힘. LLM 검토 전면 연기는 기각(Jino 의도 + E1b 지혜 episodic 재료 축적 근거).
+- **CROSS-MODEL:** Claude(A1/A2/C1-C3/P1)와 codex는 A1(총평 dedup)·정직 게이트에서 합치. codex가 run-table·insufficient_evidence·성적표 과신 우려를 추가로 발굴 → 반영.
+- **VERDICT:** ENG CLEARED (auto-proceed per Jino) — E1a 구현 착수 가능(§8 T1~T9, Sonnet). 예약된 되돌릴 수 있는 스코프 결정 1건.
+
+**UNRESOLVED DECISIONS:**
+- E1a LLM 검토 스코프: 검토+총평+약화된 성적표로 **진행**(Jino "auto-proceed" 자동결정). codex는 실행/prod 이력 축적(F0b) 전까지 LLM 검토 연기를 주장 — **되돌릴 수 있음**, 지금 연기하려면 알려주세요.
