@@ -5,6 +5,7 @@
 # 조작·환각 보정은 절대 하지 않는다 — 검증 실패 응답을 "고쳐서" 통과시키지 않는다.
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 
@@ -30,6 +31,7 @@ _PER_PROPOSAL_VERDICTS = tuple(v for v in NAVER_EXPERT_VERDICTS if v != "comment
 _REVIEW_TIMEOUT_S = 120
 _REVIEW_MODEL = "opus"
 _MAX_ATTEMPTS = 2  # 1회 시도 + 스키마 위반 시 1회 재시도(PLAN §8)
+_PROMPT_VERSION = "v1"  # 프롬프트 구조 바뀌면 올린다 — run 원장 provenance(T1)
 
 _RESPONSE_SCHEMA = {
     "type": "object",
@@ -59,9 +61,17 @@ _RESPONSE_SCHEMA = {
 
 
 def review(briefing: dict, *, invoke=_invoke_claude, model: str = _REVIEW_MODEL) -> dict:
-    """브리핑을 검토해 평결을 생성. 반환: {verdicts, commentary, raw, usage, status, error}."""
+    """브리핑을 검토해 평결을 생성.
+
+    반환: {verdicts, commentary, raw, usage, status, error, model, prompt_version, briefing_hash}.
+    model/prompt_version/briefing_hash는 T4 expert_ledger.record가 run 원장(provenance)을
+    채우는 데 쓴다 — record(db, as_of, review) 시그니처가 review 하나만 받으므로 여기서 실어보낸다.
+    """
     expected_ids = [p["id"] for p in briefing.get("pending_proposals", [])]
     prompt = _build_prompt(briefing, expected_ids)
+    briefing_hash = hashlib.sha256(
+        json.dumps(briefing, ensure_ascii=False, sort_keys=True, default=str).encode()
+    ).hexdigest()
 
     result: dict = {}
     error: str | None = None
@@ -77,6 +87,9 @@ def review(briefing: dict, *, invoke=_invoke_claude, model: str = _REVIEW_MODEL)
                 "usage": result.get("usage", {}),
                 "status": "ok",
                 "error": None,
+                "model": model,
+                "prompt_version": _PROMPT_VERSION,
+                "briefing_hash": briefing_hash,
             }
         log.warning("ava_reviewer: 스키마 위반(%d/%d회 시도) — %s", attempt, _MAX_ATTEMPTS, error)
 
@@ -88,6 +101,9 @@ def review(briefing: dict, *, invoke=_invoke_claude, model: str = _REVIEW_MODEL)
         "usage": result.get("usage", {}),
         "status": "degraded",
         "error": error,
+        "model": model,
+        "prompt_version": _PROMPT_VERSION,
+        "briefing_hash": briefing_hash,
     }
 
 

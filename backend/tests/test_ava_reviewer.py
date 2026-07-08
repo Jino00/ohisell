@@ -184,6 +184,48 @@ def test_review_with_no_pending_proposals_accepts_empty_verdicts():
     assert result["verdicts"] == []
 
 
+def test_review_includes_model_prompt_version_and_briefing_hash_for_ledger():
+    """T4 expert_ledger.record가 run 원장을 채우려면 review()가 이 3개를 반환해야 한다."""
+    invoke = _invoke_returning(_valid_response([10, 20]))
+
+    result = ava_reviewer.review(BRIEFING_2_PROPOSALS, invoke=invoke, model="opus")
+
+    assert result["model"] == "opus"
+    assert result["prompt_version"] == ava_reviewer._PROMPT_VERSION
+    assert isinstance(result["briefing_hash"], str) and len(result["briefing_hash"]) > 0
+
+
+def test_review_briefing_hash_is_deterministic_for_same_briefing():
+    invoke1 = _invoke_returning(_valid_response([10, 20]))
+    invoke2 = _invoke_returning(_valid_response([10, 20]))
+
+    r1 = ava_reviewer.review(BRIEFING_2_PROPOSALS, invoke=invoke1)
+    r2 = ava_reviewer.review(BRIEFING_2_PROPOSALS, invoke=invoke2)
+
+    assert r1["briefing_hash"] == r2["briefing_hash"]
+
+
+def test_review_briefing_hash_differs_for_different_briefing():
+    invoke1 = _invoke_returning(_valid_response([10, 20]))
+    invoke2 = _invoke_returning(_valid_response([10]))
+
+    r1 = ava_reviewer.review(BRIEFING_2_PROPOSALS, invoke=invoke1)
+    r2 = ava_reviewer.review({"pending_proposals": [{"id": 10}]}, invoke=invoke2)
+
+    assert r1["briefing_hash"] != r2["briefing_hash"]
+
+
+def test_review_degraded_result_also_includes_model_and_briefing_hash():
+    bad = _valid_response([10])  # 20 누락 → degraded
+    invoke = _invoke_returning(bad)
+
+    result = ava_reviewer.review(BRIEFING_2_PROPOSALS, invoke=invoke, model="opus")
+
+    assert result["status"] == "degraded"
+    assert result["model"] == "opus"
+    assert isinstance(result["briefing_hash"], str) and len(result["briefing_hash"]) > 0
+
+
 def test_review_calls_invoke_with_ava_persona_and_schema():
     captured = {}
 
