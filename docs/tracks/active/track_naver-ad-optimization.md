@@ -1,7 +1,7 @@
 # Track: 네이버 SA 광고 최적화 시스템 (우리판 MOP)
 
 - 생성: 2026-07-07 (설계 대화 세션, Jino 구조 승인 "그래")
-- 상태: 🟢 Active — P0~P2-S3a 완료, **듀얼모드 완성 스프린트(S3b~) 6-Phase 전부 완료(2026-07-08) + prod 실데이터(89K) 일괄 재검증 완료(2026-07-08)**. 다음=승계 큐(관찰모드 개시 등 Jino 결정 대기).
+- 상태: 🟢 Active — P0~P2-S3a 완료, 듀얼모드 완성 스프린트(S3b~) 6-Phase 완료, **예측·전문가 스프린트(F0~F2+E1a) 전체 코드 완료 + prod 실배포 완료(2026-07-08, main 병합·push·마이그레이션4개·크론4개 가동 중)**. 다음=F0b 캠페인 백필(별도 세션)/E1b(AI_office 별도 프로젝트)/E2(Jino 결정 대기).
 - 계획서: `docs/PLAN_naver-ad-optimization.md`
 - 대시보드 위치: sellC (sellc.ohitech.co.kr = 이 repo frontend)
 
@@ -179,14 +179,14 @@
 
 - ✅ **예측·전문가 스프린트 E1a T8 완료(2026-07-09, admiring-solomon-b4f056, Sonnet 구현)**: `GET /expert-scorecard` 신규(T6 놓친 부분 발견·보강) + 프론트 평결 배지+Ava 검토 패널. **codex review**: P1 0건, P2 2건 반영(scope_key 필터 누락, 정직라벨 순서). **라이브 검증**: 스크래치DB+미니앱+실 vite dev서버로 브라우저 렌더링 확인(배지 3종·총평·정직라벨 정상, 콘솔에러 0). tsc 통과. 테스트 5개. pytest 896→901. 커밋 `b76091d`. **다음 = T9 prod 사본 e2e(E1a 최종 태스크)**.
 
-- ✅✅ **예측·전문가 스프린트 E1a 전체(T1~T9) 완료(2026-07-09, admiring-solomon-b4f056, Sonnet 구현)**: T9 prod 사본 e2e — prod DB scp 사본에 미배포 마이그레이션 4개 적용(F0/F1/F2/E1a, 즉시 원복) → **prod에 NaverProposal 0건 발견**(proposal_pipeline이 prod에 한 번도 배포된 적 없음, F0b 필요성 재확인) → 89K 재검증과 동일 원칙으로 `proposal_pipeline.run_daily`를 먼저 실행해 **실제 prod 광고데이터로 실제안 2건 생성** → 그 위에 `expert_desk.run_daily(가짜 reviewer)` 4단계 전부 ok, 평결 3행, **스키마위반 0** → 라우터 3개(`/proposals`·`/expert-reviews`·`/expert-scorecard`) 실데이터 curl 검증 전부 정확. 검증 후 사본 즉시 삭제. **E1a 코드 전체(T1~T9)가 이 브랜치에 완성**: 신규 테이블 2개·SA 4개(briefing_builder/expert_llm/ava_reviewer/expert_ledger)·Harness 1개(expert_desk)·라우터 3개·크론 1개·프론트 배지+패널. codex review는 T1~T8 매 태스크에서 누적 실행(P1 다수 발견·전부 수정), T9은 신규 코드 없어 추가 리뷰 불필요. pytest 808→901(E1a 전체 93개 신규).
+- ✅✅ **예측·전문가 스프린트 E1a 전체(T1~T9) + F0b(배포) 완료(2026-07-08, admiring-solomon-b4f056, Sonnet 구현, Jino "모두 진행해줘" 승인)**: 브랜치를 main에 fast-forward merge(89커밋, 무충돌) → origin push → **prod 실배포**: DB 백업 → 신규/변경 파일 58개(F0/F1/F2/듀얼모드+E1a — **prod가 4개 마이그레이션 뒤처져 이 전부가 한 번도 배포된 적 없었음을 발견**) tar 패키징 배포+sha256 전수검증(1차 시도서 27개 파일이 bash while-read+ssh stdin충돌로 조용히 누락된 것 발견·재전송, macOS tar AppleDouble 사이드카가 alembic 파싱을 깨던 것도 발견·정리 — 둘 다 failures.jsonl 기록) → 마이그레이션 4개 실prod DB 적용 → pm2 재시작(신규 크론 4개 정상등록 확인) → 프론트 빌드+rsync. **라이브 self-verify(외부 HTTPS)**: 신규 엔드포인트 3개 200 확인. **prod 실제 pending 제안 1건 발견**(`account_brief`, 기존 D-3 관찰모드 데이터 — 새로 생성한 것 아님). 이 실제안으로 prod 사본에서 `expert_desk.run_daily(가짜 reviewer)` 실행: 4단계 전부 ok, 평결 2행(agree+commentary), **스키마위반 0**, C3경계 재확인. 검증 후 사본 즉시 삭제. **E1a 코드 전체(T1~T9)+F0b(배포) 완료**: 신규 테이블 2개·SA 4개·Harness 1개·라우터 3개·크론 1개·프론트 배지+패널, prod에 실배포+가동 중. codex review는 T1~T8 매 태스크에서 누적 실행(P1 다수 발견·전부 수정), T9/F0b는 신규 코드 없어 추가 리뷰 불필요. pytest 808→901(E1a 전체 93개 신규, 회귀 0).
 
 ## 다음 액션
 
-> **★2026-07-09 개정(E1a 전체 완료 — 다음은 Jino 결정 대기)**: 새 세션은 **이 트랙 → `docs/PLAN_naver-ad-forecast-expert.md` 순으로 필독**. **E1a(T1~T9) 코드 100% 완료**(위 참조) — 브랜치 `claude/admiring-solomon-b4f056`, 로컬 다수 커밋 **미push**. **Jino 결정 필요 항목들**:
-> 1. **미push 커밋 origin push 여부**(현재 이 브랜치 전체가 로컬에만 있음).
-> 2. **F0b**: prod에 캠페인 백필 + F0~E1a 마이그레이션 4개 실배포 + 라이브 self-verify — E1a가 매일 08:05 실제로 돌려면 필수 선행. T9에서 "prod NaverProposal 0건" 재확인됨(프론트/백엔드 다 준비됐지만 prod cron이 실제 제안을 만든 적이 없음).
-> 3. **E1b**: Ava 연동(ava_client wisdom pull + observe push) + 실 claude 어댑터 스모크 — AI_office쪽 별도 세션 작업 필요(Ava 지혜/SOUL read 엔드포인트·인증·CORS 신설).
+> **★2026-07-08 개정(E1a 전체 + F0b 배포 완료 — 남은 건 데이터 백필+E1b+E2)**: 새 세션은 **이 트랙 → `docs/PLAN_naver-ad-forecast-expert.md` 순으로 필독**. **E1a(T1~T9) 코드 100% 완료 + prod 실배포 완료**(위 참조) — main에 병합·origin push 완료, prod가 매일 08:00/07:50/08:05/08:10 크론으로 실제 돌아가는 중. **남은 항목**:
+> 1. **F0b 잔여 — prod 캠페인 180일 백필**: F0a와 동일 작업(`campaign_backfill`)을 prod 실DB에 실행해야 forecast_engine 캠페인 grain 모델이 `fallback`을 벗어남(현재는 이력 짧아 fallback 정상). 별도 세션.
+> 2. **E1b**: Ava 연동(ava_client wisdom pull + observe push) + 실 claude 어댑터 스모크 — **AI_office는 다른 레포/프로젝트**, 이 세션에서 불가. AI_office쪽 별도 세션 필요(Ava 지혜/SOUL read 엔드포인트·인증·CORS 신설).
+> 3. **E2**: 부분 게이트 — "반자동 전환 결정"과 동기, Jino 결정 대기.
 > 4. **E2**: 부분 게이트(반자동 전환 결정과 동기, 보류 중).
 > 방향 임의 변경 금지 — 위 4개 중 어느 것부터 할지는 Jino가 정한다.
 > (이전) 2026-07-08 밤 개정(F1 완료 + F2 착수 승인 D-NAO-26): F2a grain 확장부터 시작 — **완료됨(위 참조)**.
