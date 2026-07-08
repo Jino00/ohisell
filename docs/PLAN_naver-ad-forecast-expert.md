@@ -65,11 +65,11 @@
 - 배선 ⓐⓑⓒ 각각 fix 전/후 차등 테스트(듀얼모드 스프린트 검증 패턴 재사용).
 - **완료기준**: 89K 스케일 성능(사본 재검증 패턴) + 배선 3곳 차등 테스트 + ⓒ는 리플레이 시뮬로 오탐률 개선을 수치로 확인(Phase 4 때 200캠페인 리플레이 하네스 재사용).
 
-### E1 — expert_desk 조언자 모드
-- briefing_builder: 진단·제안배치·트리거·성적표·예측vs실측 → 구조화 브리핑(토큰 예산 상한 명시).
-- expert_reviewer: 페르소나+브리핑 → 제안별 구조화 평결 JSON(스키마 강제). 시스템과 의견 불일치 시 근거 필수(원칙19 형식).
-- expert_ledger + 콘솔 "전문가 데스크" 뷰(제안 카드에 평결 병기 + 전문가 성적표).
-- **완료기준**: prod 사본 실제안으로 평결 생성 e2e + ledger 기록 + 콘솔 렌더 + 평결 스키마 위반 0.
+### E1 — expert_desk 조언자 모드 (D-NAO-30/31 반영)
+- briefing_builder: 진단·오늘 pending 제안 **전체**·트리거·성적표·예측vs실측 → 구조화 브리핑(결정적, LLM 아님).
+- expert_reviewer: 페르소나(system-prompt)+브리핑 → **claude -p 배치 1콜** → 평결 배열 JSON(제안별 {동의/부분동의/기각+근거} + 시스템 전체 하루 총평 1건). 스키마는 프롬프트로 강제·응답에서 추출. 시스템과 불일치 시 근거 필수(원칙19). **LLM 호출은 주입가능 경계**로 격리(로컬 claude 없이도 하네스·ledger·콘솔 전부 TDD, 실제 어댑터만 CLI 설치처에서 실측). 모델=Opus.
+- expert_ledger: naver_expert_review 기록 + NaverLearningState 성적표 upsert + 콘솔 "전문가 데스크" 뷰(제안 카드 평결 배지 + 성적표).
+- **완료기준**: prod 사본 실제안으로 (가짜 reviewer) e2e + ledger 기록 + 콘솔 렌더 + 평결 스키마 위반 0. 실제 claude -p 어댑터는 CLI 설치·인증된 호스트에서 별도 실측(1콜 왕복 + 평결 배열 파싱 성공).
 
 ### E2 — 부분 게이트 배선 (보류 게이트: 반자동 전환과 동기)
 - `expert_delegated_types` 위임 스위치(Jino 전용 UI) + execution_harness `OPEN_ACTIONS` 연동.
@@ -83,7 +83,7 @@
 
 ## §6 미확정 (착수 시 실측/결정 — 추정 금지)
 
-1. ~~LLM 호출 경로: 백엔드에서 Anthropic API 직호출~~ **확정(D-NAO-30, 2026-07-08)**: Anthropic API 직호출 대신 `claude -p`(CLI non-interactive print mode)를 서브프로세스로 호출 — **ANTHROPIC_API_KEY 불필요**. 남은 미확정: 정확한 CLI 플래그(구조화 출력/JSON 스키마 강제 방식)는 공식 문서 확인 후 결정(추정 금지), 서브프로세스 동시성·타임아웃·재시도, 배포 호스트(sellc.ohitech.co.kr)의 claude CLI 설치·인증 상태.
+1. ~~LLM 호출 경로: 백엔드에서 Anthropic API 직호출~~ **확정(D-NAO-30/31, 2026-07-08)**: `claude -p` 서브프로세스 호출, **ANTHROPIC_API_KEY 불필요**. 레퍼런스=AI_office `backend/app/utils/claude_cli.py`(프로덕션 검증). 확정 호출식: `[claude, "--print", "--output-format", "json", "--model", "opus", "--system-prompt", persona]` + **프롬프트 stdin**(ARG_MAX 회피) + `cwd=/tmp` + 인증은 `env`에서 `ANTHROPIC_API_KEY` 제거(OAuth Max plan). 구조화출력=스키마를 프롬프트에 붙이고 응답 `["result"]`에서 regex로 JSON 추출(`--json-schema` 플래그 없음). **배치**: 오늘 제안 전체를 1콜에 담아 평결 배열 수신(하루 1~2콜). **모델=최고(Opus)**. 남은 실측: 배포 호스트(sellc)에 claude 설치·로그인·PATH, 정확한 `--model` 문자열.
 2. 게이트 임계값 초기 상수 — F1 백테스트로 실측 후 확정.
 3. 전문가 페르소나 이름·톤 — Jino 결정(재미 요소).
 4. 브리핑 토큰 예산 — E1 착수 시 실측.
