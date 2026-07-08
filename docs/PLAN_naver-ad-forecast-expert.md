@@ -96,7 +96,10 @@
   - **완료기준② 실측**: 29개 on캠페인 전체 모델 일일 재생성 0.078초(크론 07:50 여유 충분).
   - **codex review(원칙19)**: 1건[P1] "backfill fetcher가 timeIncrement 미지정→집계 응답 우려" — **반박·기각**: 이 함수는 F1 이전 P2-S1 스프린트에서 이미 실측 문서화됨(`docs/references/22`, 92일 청크 한도 자체가 daily breakdown 전제)+F0a 라이브 백필이 정확히 43캠페인×180일=7,740행(요청 범위와 1:1, 집계됐다면 ~43행이어야 함)을 반환해 일별 그레인이 실제로 정상 작동함을 실측으로 반증. 후속 대화 라운드는 codex 사용한도 소진(OpenAI 12:39 재시도 안내)으로 진행 불가 — 트랙 폴백 규칙대로 이 반박은 Claude 자체 판단으로 기록(재개 시 재확인 가능). 1건[P2] "campaign_backfill 삭제범위가 응답 날짜만 커버→무활동일 stale sentinel 잔존" — **동의·즉시수정**: forecast_engine이 이 함수를 매일 재실행하며 위험이 실사용 경로로 노출됐기 때문. 삭제조건을 요청 전체 [date_from,date_to]로 확장, fix전 상태로 되돌려 회귀 재현 확인 후 재적용(원칙14), 이 SA의 첫 단위테스트 3개 신규 추가. 최종 762 passed.
   - 코드: 브랜치 `claude/admiring-solomon-b4f056`, 커밋 `a1deb28`(F1 코어)+`178a2fa`(codex fix). **다음 = F2 grain 확장 + 배선 3곳.**
-- [ ] F2 grain 확장 + 배선 ⓐⓑⓒ + 89K 재검증 (+ 트랙 1-a ④⑤ 처리)
+- [ ] **F2 grain 확장 + 배선 ⓐⓑⓒ + 89K 재검증 (+ 트랙 1-a ④⑤)** — 착수 승인 D-NAO-26(2026-07-08, Jino "F2a→F2b 분할"+"Sonnet 전환"). **스키마 변경 없음**(grain 컬럼 기존 존재).
+  - [x] **F2a grain 확장** — 완료(2026-07-08, Sonnet, TDD). 신규 `forecast_source.py`(순수 reader SA, grain→시계열 소싱 단일화) → forecast_gate/model_builder/scorer `grain=="campaign"` 하드코딩 제거·파라미터화 → forecast_engine이 NaverEntity(status='on') 활성 adgroup·keyword까지 순회. 소스: campaign=sentinel(`__backfill__`), adgroup=실P0 adgroup별 일합산(sentinel 제외), keyword=실P0 keyword별(WEB_SITE만). **codex review(D-NAO-27)**: P1 2건·P2 1건 — 부모-자식 status 캐스케이드 누락(즉시수정, entity_sync.py 실측으로 실버그 확인)·빈 scope_key 방어+keyword 중복합산 누락(즉시수정)·NaverAdDaily adgroup_id/keyword_id 인덱스 부재로 인한 N+1 스케일 위험(스키마 변경이라 F2a 범위 밖, 89K 재검증에서 실측 후 처리로 의도적 이연). 코드: 커밋 `f91bfc7`(F2a 코어)+`ba46a17`(codex fix). pytest 762→779 passed. **다음 = F2b.**
+  - [ ] **F2b 배선 3곳 + 1-a④⑤**: ⓐ proposal_pipeline `compute_forecast_evidence`→proposal_writer optional 주입(rationale 병기만, 입찰산식 불변) / ⓑ budget_allocator `find_pre_exhaustion_signals`(pred_cost≥budget 미소진 사전경보, 인과추정無·정보성) / ⓒ trigger_watch 예측곡선 페이싱(hourly_pattern×pred_cost, 선형 폴백) + 1-a④ 당일 가드 + 1-a⑤ anomaly_feed 절대액 floor. fix전/후 차등 테스트 → codex review → 커밋.
+  - [ ] **89K 재검증**(F2b 후): prod DB 스크래치 사본 재확보→forecast 마이그레이션 적용→전 grain 엔진+배선 3곳 실규모 실행(crash/perf/오탐률, Phase4 리플레이 패턴).
 - [ ] E1 expert_desk 조언자 모드 + 콘솔 뷰 + codex review
 - [ ] F0b prod 백필 + 배포 + 라이브 self-verify (원칙22)
 - [ ] E2 부분 게이트 (보류 — 반자동 전환 결정과 동기)
