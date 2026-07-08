@@ -181,14 +181,15 @@
 
 - ✅✅ **예측·전문가 스프린트 E1a 전체(T1~T9) + F0b(배포) 완료(2026-07-08, admiring-solomon-b4f056, Sonnet 구현, Jino "모두 진행해줘" 승인)**: 브랜치를 main에 fast-forward merge(89커밋, 무충돌) → origin push → **prod 실배포**: DB 백업 → 신규/변경 파일 58개(F0/F1/F2/듀얼모드+E1a — **prod가 4개 마이그레이션 뒤처져 이 전부가 한 번도 배포된 적 없었음을 발견**) tar 패키징 배포+sha256 전수검증(1차 시도서 27개 파일이 bash while-read+ssh stdin충돌로 조용히 누락된 것 발견·재전송, macOS tar AppleDouble 사이드카가 alembic 파싱을 깨던 것도 발견·정리 — 둘 다 failures.jsonl 기록) → 마이그레이션 4개 실prod DB 적용 → pm2 재시작(신규 크론 4개 정상등록 확인) → 프론트 빌드+rsync. **라이브 self-verify(외부 HTTPS)**: 신규 엔드포인트 3개 200 확인. **prod 실제 pending 제안 1건 발견**(`account_brief`, 기존 D-3 관찰모드 데이터 — 새로 생성한 것 아님). 이 실제안으로 prod 사본에서 `expert_desk.run_daily(가짜 reviewer)` 실행: 4단계 전부 ok, 평결 2행(agree+commentary), **스키마위반 0**, C3경계 재확인. 검증 후 사본 즉시 삭제. **E1a 코드 전체(T1~T9)+F0b(배포) 완료**: 신규 테이블 2개·SA 4개·Harness 1개·라우터 3개·크론 1개·프론트 배지+패널, prod에 실배포+가동 중. codex review는 T1~T8 매 태스크에서 누적 실행(P1 다수 발견·전부 수정), T9/F0b는 신규 코드 없어 추가 리뷰 불필요. pytest 808→901(E1a 전체 93개 신규, 회귀 0).
 
+- ✅ **D-NAO-33 F0b 잔여 — prod 캠페인 180일 백필 완료(2026-07-08, 이어지는 세션, Sonnet)**: F0a와 동일 작업(`campaign_backfill.backfill_campaign_daily`)을 prod 실DB에 직접 실행(스크래치 아님 — prod 서버 SSH 접속, `.venv` 인터프리터로 실 prod `ohisell.db`에 대해 실행, 실제 네이버 `/stats` API 호출). **사전 백업**: `sellc.ohitech.co.kr:/home/ubuntu/ohisell_bak/naver-ad-campaign-backfill_20260708_115522/ohisell.db.pre-campaign-backfill`. 실행 전 확인: prod sentinel 행 0건, P0 실단위 이력 2026-07-04~07-07(4일)뿐 — 위 D-NAO-29 관찰과 일치. **결과: 43캠페인·7,740행·2026-01-09~07-07(180일)·cost합 80,335,231원** — F0a 스크래치 실행과 완전 일치(같은 기간의 실 네이버 API 이력이므로 예상대로). **완료기준 둘 다 충족**: ①`metrics_aggregator.aggregate`로 07-04~07-07 실단위 집계를 백필 전/후 비교 → `IDENTICAL=True`(sentinel 필터가 prod 실DB에서도 정상 작동, 이중계상 없음) ②겹치는 10일(06-28~07-07) 재백필 → sentinel 행 수 7,740 그대로 유지(`IDEMPOTENT=True`, 중복 없음). 임시 실행 스크립트는 prod에 남기지 않고 검증 직후 삭제. **F0b 완전 종결** — forecast_engine 캠페인 grain 모델이 다음 크론(07:50)부터 `fallback`을 벗어날 조건 충족(30,916 스코프 중 campaign grain 29개가 캠페인 sentinel 이력을 갖게 됨).
+
 ## 다음 액션
 
-> **★2026-07-08 개정(E1a 전체 + F0b 배포 완료 — 남은 건 데이터 백필+E1b+E2)**: 새 세션은 **이 트랙 → `docs/PLAN_naver-ad-forecast-expert.md` 순으로 필독**. **E1a(T1~T9) 코드 100% 완료 + prod 실배포 완료**(위 참조) — main에 병합·origin push 완료, prod가 매일 08:00/07:50/08:05/08:10 크론으로 실제 돌아가는 중. **남은 항목**:
-> 1. **F0b 잔여 — prod 캠페인 180일 백필**: F0a와 동일 작업(`campaign_backfill`)을 prod 실DB에 실행해야 forecast_engine 캠페인 grain 모델이 `fallback`을 벗어남(현재는 이력 짧아 fallback 정상). 별도 세션.
-> 2. **E1b**: Ava 연동(ava_client wisdom pull + observe push) + 실 claude 어댑터 스모크 — **AI_office는 다른 레포/프로젝트**, 이 세션에서 불가. AI_office쪽 별도 세션 필요(Ava 지혜/SOUL read 엔드포인트·인증·CORS 신설).
-> 3. **E2**: 부분 게이트 — "반자동 전환 결정"과 동기, Jino 결정 대기.
-> 4. **E2**: 부분 게이트(반자동 전환 결정과 동기, 보류 중).
-> 방향 임의 변경 금지 — 위 4개 중 어느 것부터 할지는 Jino가 정한다.
+> **★2026-07-08 개정(F0b 완전 종결 — 남은 건 E1b+E2뿐)**: 새 세션은 **이 트랙 → `docs/PLAN_naver-ad-forecast-expert.md` 순으로 필독**. **E1a(T1~T9) 코드 100% 완료 + prod 실배포 완료 + F0b 캠페인 백필 완료**(위 D-NAO-33 참조) — main에 병합·origin push 완료, prod가 매일 08:00/07:50/08:05/08:10 크론으로 실제 돌아가는 중, 캠페인 grain 이력도 이제 prod에 존재. **남은 항목**:
+> 1. **E1b**: Ava 연동(ava_client wisdom pull + observe push) + 실 claude 어댑터 스모크 — **AI_office는 다른 레포/프로젝트**, 이 세션에서 불가. AI_office쪽 별도 세션 필요(Ava 지혜/SOUL read 엔드포인트·인증·CORS 신설).
+> 2. **E2**: 부분 게이트 — "반자동 전환 결정"과 동기, Jino 결정 대기.
+> 방향 임의 변경 금지 — 위 2개 중 어느 것부터 할지는 Jino가 정한다.
+> (이전) 2026-07-08 F0b 잔여(prod 캠페인 백필) — **완료됨(위 D-NAO-33 참조)**.
 > (이전) 2026-07-08 밤 개정(F1 완료 + F2 착수 승인 D-NAO-26): F2a grain 확장부터 시작 — **완료됨(위 참조)**.
 > (이전) 2026-07-07 밤 개정(D-NAO-22/23): 듀얼모드 스프린트 — **Phase 1~6 전부 완료(2026-07-08) + prod 89K 재검증 완료.**
 
