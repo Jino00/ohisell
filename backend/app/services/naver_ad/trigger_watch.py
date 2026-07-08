@@ -32,8 +32,8 @@ log = logging.getLogger(__name__)
 _Q2 = Decimal("0.01")
 _Q4 = Decimal("0.0001")
 
-_PROPOSAL_TYPE_PACING = "trigger_pacing"
-_PROPOSAL_TYPE_CPC = "trigger_cpc_spike"
+PROPOSAL_TYPE_PACING = "trigger_pacing"
+PROPOSAL_TYPE_CPC = "trigger_cpc_spike"
 
 # 페이싱 이탈 배수 — anomaly_feed.SPEND_SPIKE_RATIO/SPEND_DROP_RATIO(Phase3, codex review
 # 통과 완료)와 동일한 "사람이 한 번 볼 만큼 크게 움직였다"는 상식적 배수(2배/절반) 전례를
@@ -313,7 +313,7 @@ def _pacing_proposal(item: dict) -> dict:
         f"기대페이스={item['expected_pace']}(예측곡선 있으면 그걸, 없으면 선형폴백), 배수={item['ratio']})."
     )
     return {
-        "proposal_type": _PROPOSAL_TYPE_PACING,
+        "proposal_type": PROPOSAL_TYPE_PACING,
         "target_type": "campaign", "target_id": item["campaign_id"], "campaign_id": item["campaign_id"],
         "rationale": rationale,
         "expected_effect": (
@@ -331,7 +331,7 @@ def _cpc_proposal(item: dict) -> dict:
         f"CPC={item['baseline_cpc']}원(배수={item['ratio']}, 클릭 {item['clk']})."
     )
     return {
-        "proposal_type": _PROPOSAL_TYPE_CPC,
+        "proposal_type": PROPOSAL_TYPE_CPC,
         "target_type": "campaign", "target_id": item["campaign_id"], "campaign_id": item["campaign_id"],
         "rationale": rationale,
         "expected_effect": (
@@ -354,8 +354,8 @@ def run_hourly(db: Session, *, ad_date: date | None = None) -> dict:
     cpc = find_cpc_spikes(db, ad_date)
 
     candidates: list[tuple[str, dict, Callable[[dict], dict]]] = (
-        [(_PROPOSAL_TYPE_PACING, item, _pacing_proposal) for item in pacing]
-        + [(_PROPOSAL_TYPE_CPC, item, _cpc_proposal) for item in cpc]
+        [(PROPOSAL_TYPE_PACING, item, _pacing_proposal) for item in pacing]
+        + [(PROPOSAL_TYPE_CPC, item, _cpc_proposal) for item in cpc]
     )
 
     recent = _recent_trigger_keys(db, {(pt, item["campaign_id"]) for pt, item, _ in candidates}, now)
