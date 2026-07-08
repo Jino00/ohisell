@@ -22,9 +22,17 @@ def daily_series(db: Session, *, grain: str, scope_key: str, date_from: date, da
 
     campaign: campaign_backfill sentinel 행(그 캠페인 전체 집계의 유일한 소스, 정직 경계).
     adgroup: 해당 adgroup_id의 P0 실단위 행(키워드별로 흩어진 행)을 날짜별로 합산.
-    keyword: 해당 keyword_id의 P0 실단위 행 — WEB_SITE만 keyword_id가 실제값이라 자연히
-      한정된다(SHOPPING/BRAND_SEARCH는 keyword_id='' sentinel, models.py NaverAdDaily 참조).
+    keyword: 해당 keyword_id의 P0 실단위 행(여러 캠페인/그룹에 걸쳐 있어도 날짜별 합산) —
+      WEB_SITE만 keyword_id가 실제값이라 자연히 한정된다(SHOPPING/BRAND_SEARCH는 keyword_id=''
+      sentinel, models.py NaverAdDaily 참조).
+
+    scope_key=''는 어떤 grain에서도 유효한 스코프가 아니다(campaign_id는 항상 값이 있고,
+    adgroup/keyword의 ''는 SHOPPING/BRAND_SEARCH 그룹단위 sentinel과 충돌한다 — codex review
+    지적, F2a) — 명시적으로 거부한다.
     """
+    if not scope_key:
+        raise ValueError("scope_key는 빈 문자열일 수 없음(sentinel과 충돌)")
+
     if grain == "campaign":
         rows = db.query(NaverAdDaily).filter(
             NaverAdDaily.campaign_id == scope_key,
@@ -54,10 +62,13 @@ def daily_series(db: Session, *, grain: str, scope_key: str, date_from: date, da
             NaverAdDaily.keyword_id == scope_key,
             NaverAdDaily.ad_date >= date_from, NaverAdDaily.ad_date <= date_to,
         ).all()
-        return {
-            r.ad_date: {"clk": r.clk, "cost": r.cost, "conv_amt": r.conv_direct_amt + r.conv_indirect_amt}
-            for r in rows
-        }
+        series: dict[date, dict] = defaultdict(lambda: {"clk": 0, "cost": 0, "conv_amt": 0})
+        for r in rows:
+            entry = series[r.ad_date]
+            entry["clk"] += r.clk
+            entry["cost"] += r.cost
+            entry["conv_amt"] += r.conv_direct_amt + r.conv_indirect_amt
+        return dict(series)
 
     raise ValueError(f"F2는 campaign/adgroup/keyword grain만 지원: {grain}")
 

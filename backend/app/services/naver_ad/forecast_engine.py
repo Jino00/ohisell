@@ -24,11 +24,31 @@ REFRESH_WINDOW_DAYS = 16
 
 
 def _active_scopes(db: Session) -> list[tuple[str, str]]:
-    """status='on'인 campaign·adgroup·keyword 엔티티를 (grain, scope_key) 목록으로."""
-    rows = db.query(NaverEntity.entity_type, NaverEntity.entity_id).filter(
-        NaverEntity.entity_type.in_(("campaign", "adgroup", "keyword")), NaverEntity.status == "on",
+    """status='on'인 campaign·adgroup·keyword 엔티티를 (grain, scope_key) 목록으로.
+
+    entity_sync.py는 부모-자식 status를 캐스케이드하지 않는다(네이버 API가 캠페인/그룹/키워드
+    상태를 각자 독립적으로 보고) — 캠페인이 꺼져도 자식 adgroup/keyword가 개별 status='on'으로
+    남을 수 있다(codex review 지적, F2a). 여기서 부모 체인(campaign→adgroup→keyword)이 전부
+    on인 경우만 예측 대상으로 삼는다.
+    """
+    rows = db.query(
+        NaverEntity.entity_type, NaverEntity.entity_id, NaverEntity.parent_id, NaverEntity.status,
+    ).filter(
+        NaverEntity.entity_type.in_(("campaign", "adgroup", "keyword")),
     ).all()
-    return [(r[0], r[1]) for r in rows]
+
+    on_campaigns = {r[1] for r in rows if r[0] == "campaign" and r[3] == "on"}
+    on_adgroups = {r[1] for r in rows if r[0] == "adgroup" and r[3] == "on" and r[2] in on_campaigns}
+
+    scopes: list[tuple[str, str]] = []
+    for entity_type, entity_id, parent_id, status in rows:
+        if entity_type == "campaign" and status == "on":
+            scopes.append(("campaign", entity_id))
+        elif entity_type == "adgroup" and entity_id in on_adgroups:
+            scopes.append(("adgroup", entity_id))
+        elif entity_type == "keyword" and status == "on" and parent_id in on_adgroups:
+            scopes.append(("keyword", entity_id))
+    return scopes
 
 
 def run_daily(db: Session, *, today: date | None = None) -> dict:

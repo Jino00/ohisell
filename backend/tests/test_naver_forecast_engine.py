@@ -75,14 +75,47 @@ def test_run_daily_includes_adgroup_and_keyword_scopes(db, monkeypatch):
     monkeypatch.setattr(forecast_engine, "backfill_campaign_daily", _noop_backfill)
     db.add(NaverEntity(entity_type="campaign", entity_id="cmp-1", campaign_id="cmp-1",
                         campaign_type="WEB_SITE", name="캠페인", status="on"))
-    db.add(NaverEntity(entity_type="adgroup", entity_id="adg-1", campaign_id="cmp-1",
-                        campaign_type="WEB_SITE", name="그룹", status="on"))
-    db.add(NaverEntity(entity_type="adgroup", entity_id="adg-off", campaign_id="cmp-1",
-                        campaign_type="WEB_SITE", name="꺼진그룹", status="off"))
-    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-1", campaign_id="cmp-1",
-                        campaign_type="WEB_SITE", name="키워드", status="on"))
+    db.add(NaverEntity(entity_type="adgroup", entity_id="adg-1", parent_id="cmp-1",
+                        campaign_id="cmp-1", campaign_type="WEB_SITE", name="그룹", status="on"))
+    db.add(NaverEntity(entity_type="adgroup", entity_id="adg-off", parent_id="cmp-1",
+                        campaign_id="cmp-1", campaign_type="WEB_SITE", name="꺼진그룹", status="off"))
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-1", parent_id="adg-1",
+                        campaign_id="cmp-1", campaign_type="WEB_SITE", name="키워드", status="on"))
     db.commit()
 
     result = forecast_engine.run_daily(db, today=TODAY)
 
     assert result["model_builder"]["campaigns"] == 3  # cmp-1 + adg-1 + nkw-1(꺼진 adg-off 제외)
+
+
+def test_run_daily_excludes_children_of_paused_campaign(db, monkeypatch):
+    """codex review(F2a): 부모 캠페인이 꺼지면 자식 adgroup/keyword가 개별적으로 status='on'
+    이어도(entity_sync.py는 부모-자식 status를 캐스케이드하지 않음) 순회 대상에서 제외해야 한다."""
+    monkeypatch.setattr(forecast_engine, "backfill_campaign_daily", _noop_backfill)
+    db.add(NaverEntity(entity_type="campaign", entity_id="cmp-off", campaign_id="cmp-off",
+                        campaign_type="WEB_SITE", name="꺼진캠페인", status="off"))
+    db.add(NaverEntity(entity_type="adgroup", entity_id="adg-orphan", parent_id="cmp-off",
+                        campaign_id="cmp-off", campaign_type="WEB_SITE", name="죽은부모의그룹", status="on"))
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-orphan", parent_id="adg-orphan",
+                        campaign_id="cmp-off", campaign_type="WEB_SITE", name="죽은그룹의키워드", status="on"))
+    db.commit()
+
+    result = forecast_engine.run_daily(db, today=TODAY)
+
+    assert result["model_builder"]["campaigns"] == 0
+
+
+def test_run_daily_excludes_keyword_whose_adgroup_is_off(db, monkeypatch):
+    """adgroup 자체가 off면 캠페인이 on이어도 그 밑의 on 키워드는 제외해야 한다."""
+    monkeypatch.setattr(forecast_engine, "backfill_campaign_daily", _noop_backfill)
+    db.add(NaverEntity(entity_type="campaign", entity_id="cmp-1", campaign_id="cmp-1",
+                        campaign_type="WEB_SITE", name="캠페인", status="on"))
+    db.add(NaverEntity(entity_type="adgroup", entity_id="adg-off", parent_id="cmp-1",
+                        campaign_id="cmp-1", campaign_type="WEB_SITE", name="꺼진그룹", status="off"))
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-orphan", parent_id="adg-off",
+                        campaign_id="cmp-1", campaign_type="WEB_SITE", name="키워드", status="on"))
+    db.commit()
+
+    result = forecast_engine.run_daily(db, today=TODAY)
+
+    assert result["model_builder"]["campaigns"] == 1  # cmp-1만

@@ -86,6 +86,24 @@ def test_daily_series_rejects_unsupported_grain(db):
         forecast_source.daily_series(db, grain="account", scope_key="acc-1", date_from=YESTERDAY, date_to=YESTERDAY)
 
 
+def test_daily_series_rejects_empty_scope_key(db):
+    """codex review(F2a): scope_key=''는 어떤 grain에서도 진짜 스코프가 아니라
+    SHOPPING/BRAND_SEARCH keyword_id sentinel과 충돌할 수 있어 명시적으로 막는다."""
+    with pytest.raises(ValueError):
+        forecast_source.daily_series(db, grain="keyword", scope_key="", date_from=YESTERDAY, date_to=YESTERDAY)
+
+
+def test_daily_series_keyword_sums_duplicate_rows_same_date(db):
+    """같은 (date, keyword_id) 조합이 여러 캠페인/그룹에 걸쳐 있어도 마지막 값이 아니라 합산해야 한다."""
+    _row(db, ad_date=YESTERDAY, campaign_id="cmp-1", adgroup_id=ADGROUP, keyword_id="nkw-shared", clk=10, cost=100)
+    _row(db, ad_date=YESTERDAY, campaign_id="cmp-2", adgroup_id="adg-2", keyword_id="nkw-shared", clk=20, cost=200)
+    db.commit()
+
+    series = forecast_source.daily_series(db, grain="keyword", scope_key="nkw-shared", date_from=YESTERDAY, date_to=YESTERDAY)
+
+    assert series[YESTERDAY] == {"clk": 30, "cost": 300, "conv_amt": 0}
+
+
 def test_active_days_counts_dates_with_positive_cost(db):
     _row(db, ad_date=TODAY - timedelta(days=3), adgroup_id=BACKFILL_SENTINEL_ADGROUP, cost=1000)
     _row(db, ad_date=TODAY - timedelta(days=2), adgroup_id=BACKFILL_SENTINEL_ADGROUP, cost=0)
