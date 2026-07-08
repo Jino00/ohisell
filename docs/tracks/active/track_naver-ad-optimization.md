@@ -1,7 +1,7 @@
 # Track: 네이버 SA 광고 최적화 시스템 (우리판 MOP)
 
 - 생성: 2026-07-07 (설계 대화 세션, Jino 구조 승인 "그래")
-- 상태: 🟢 Active — P0~P2-S3a 완료, **듀얼모드 완성 스프린트(S3b~) 6-Phase 전부 완료(2026-07-08)**. 다음=승계 큐(관찰모드 개시 등 Jino 결정 대기).
+- 상태: 🟢 Active — P0~P2-S3a 완료, **듀얼모드 완성 스프린트(S3b~) 6-Phase 전부 완료(2026-07-08) + prod 실데이터(89K) 일괄 재검증 완료(2026-07-08)**. 다음=승계 큐(관찰모드 개시 등 Jino 결정 대기).
 - 계획서: `docs/PLAN_naver-ad-optimization.md`
 - 대시보드 위치: sellC (sellc.ohitech.co.kr = 이 repo frontend)
 
@@ -92,6 +92,9 @@
       - [x] **Phase 5 — execution_harness 골격 + change_log(완료 2026-07-08, admiring-solomon-b4f056)**: 신규 마이그레이션(`w7x8y9z0a1b2`, additive — `naver_change_log`에 `dry_run`/`executed_at` 컬럼) + `naver_execution_harness.py`(신규 Harness, 쓰기 유일 초크포인트) — 정보성 유형 거부→`status=='approved'` 하드체크(D-NAO-5)→재실행 방지→`optimizer=='ours'` 실행직전 재검증(D-NAO-13)→`OPEN_ACTIONS`(D-NAO-16 개방순서, 이번 스프린트 항상 빈 집합)로 dry_run 강제→change_log 전건 기록. 실제 네이버 쓰기 API 함수는 미구현(요청 스펙 미실측, 추정 금지). codex review 2라운드 — 1건[High] 지적(승인게이트+재실행방지 누락) 즉시수정, 1건[Low] 독스트링 명확화, 잔여 동시성 지적은 `proposal_writer.persist()`의 기존 "단일크론 가정" 전례와 동일 스코프 판단으로 이번 Phase 제외(호출하는 크론/라우터 자체가 아직 없음). 테스트 20신규, 680→700 pass. 마이그레이션은 기존 스키마 재현+ALTER TABLE 직접검증으로 additive 확인. **다음 = Phase 6 learning_loops.**
       - [x] **Phase 6 — learning_loops(완료 2026-07-08, admiring-solomon-b4f056, 스프린트 마지막 Phase)**: 신규 SA 4개(estimate_calibrator·conversion_maturity·hourly_pattern·proposal_scoreboard) + Harness `learning_loops.py` + 마이그레이션(`x8y9z0a1b2c3`, 신규 테이블 2개 additive) — 위 체크리스트 항목 참조. `bid_simulator.simulate_bid`에 learning_state 소비 배선(표시전용, 입찰계산 불변). **정직 경계 2건**: ①conversion_maturity 실곡선은 이번 세션 적립 시작이라 몇 주 후에나 산출(메커니즘만 완성) ②이번 세션 prod DB 사본 미확보로 라이브 실데이터 검증 못 함(단위테스트만, 다음 세션 재검증 필요). codex review 2라운드 — [High] 2건(KST 타임존 버그, 전/후 비교창 길이 불일치) 즉시수정 + [Medium] 1건(dry_run 롤업 누락) 즉시수정 + 1건(hourly_pattern 백필 멱등성) 대화형 반론 후 동의(호출자 없어 이번 스코프 제외). 테스트 37신규, 700→738 pass. **듀얼모드 완성 스프린트 6-Phase 전부 완료.**
       - [x] **Phase 6 완료 후 → 직전 HANDOFF 승계 큐 진행**(계획서 §5: 관찰모드 개시 결정·베이스라인 재대조·push 결정·트랙파일 귀속 정리 등) — 아래 "다음 액션" §2 참조, 다음 세션 진행 대상.
+      - [x] **prod 실데이터(89K) 일괄 재검증 완료(2026-07-08, admiring-solomon-b4f056, 1-c 승계 큐 해소)**: prod DB(`sellc.ohitech.co.kr:/home/ubuntu/ohisell/backend/ohisell.db`, 130MB) scp 읽기전용 사본 → additive 마이그레이션(`w7x8y9z0a1b2`·`x8y9z0a1b2c3`) 스크래치 사본에 적용(0.2s, prod head는 여전히 `v6w7x8y9z0a1`) → Phase 2~6 파이프라인을 **실규모 데이터**(naver_entity 91,183 / search_term 49,726 / ad_daily 7,538 / hourly 1,462)에 구동. **prod 원본 무접촉**(사본만 조작·기록). estimate API는 backend/.env 크리덴셜 부재로 문서화된 graceful-degrade 경로로 자동 강등(네트워크 無) — happy-path는 이미 S3a 라이브(159건)로 검증됨.
+        - **결과 전부 정상(원칙22 실증)**: ①run_daily 3.33s·9단계 전부 ok·에러 0(89K 스케일 crash·perf 문제 없음) ②trigger_watch(7/08 당일 intraday)=0건 정상·(7/07 마감일)=underpace 36건 ③learning_loops 4루프 전부 ok(conversion_maturity 4행 적립·hourly_pattern 23칸 fold·learning_state 23행 기록, 다만 곡선/성적표는 데이터 축적 대기로 빈 값=설계대로) ④anomaly_feed 급증2·급감2 실제 산출.
+        - **실데이터에서만 드러난 관찰 2건(합성 테스트 미포착, 전부 저위험 — 정보성·쓰기 無·ours 캠페인 0개)**: ⓐ **trigger_watch를 마감된 과거일에 돌리면 underpace 대량 발생**(7/07 hour23 기준 36건) — 프로덕션은 당일 intraday(:07)만 돌아 무관(7/08=0)하나, 자정 넘긴 지연 크론 시 스팸 소지 → Slack 배선 시 "당일만" 가드 재확인 가치 ⓑ **anomaly_feed 비율 임계값에 절대액 하한 없음** — 77원→606원(7.87배) 같은 초소액 캠페인이 "급증" 플래그 → Slack 노이즈 소지, 절대액 floor 추가 검토(관찰모드 개시 전 튜닝 후보). 둘 다 블로킹 버그 아님 → 다음 액션 1-a에 이연 기록.
 - [ ] **P3 Confirm 실행**: 제외키워드→입찰→예산 순 개방 + change_log + D+7/14 검증 루프
 - [ ] **P4 파수꾼+키워드랩**: 매시간 이상감지·페이싱 + keywordstool 발굴 + 시간대 가중치
 - [ ] **P5 고도화**: 무풍지대 신규 세팅 + 재구축 진단 + 예측정확도 보정 + 자율 확대
@@ -142,9 +145,9 @@
 > **★2026-07-07 밤 개정(D-NAO-22/23)**: 새 세션은 **이 트랙 → `docs/PLAN_naver-ad-S3b-dual-mode.md` 순으로 필독** 후 아래 1번부터. 방향 임의 변경 금지(Jino: "이 방향이 바뀌지 않도록", "세션이 바껴도 잊지 않도록 항상 확인하고 세션 시작해"). **★Phase 1~6 전부 완료(2026-07-08) — 듀얼모드 완성 스프린트 종료. 다음은 승계 큐(아래 2번) — 전부 Jino 결정 필요 항목.**
 
 1. ~~듀얼모드 완성 스프린트 Phase 1~6 순차 구현~~ **전부 완료**(`docs/PLAN_naver-ad-S3b-dual-mode.md` §4·§7): S3b콘솔→growth_sweeper→budget_allocator+anomaly_feed→trigger_watch→execution_harness골격+change_log→learning_loops, 6개 전부 완료(테스트 626→738, codex review 매 Phase 통과).
-1-a. **다음 세션 이관 필요(스프린트 전체에서 이연된 항목, 실행 배선 시점에 재검토)**: ①trigger_watch hourly_snapshot 신선도 게이트 부재 ②execution_harness 동시성(레이스) 하드닝 미적용 ③hourly_pattern 백필/재생 시 멱등성 미보장(3건 전부 "호출자/실행경로가 아직 없어 무해"가 공통 사유 — 실제 배선 전엔 안전).
+1-a. **다음 세션 이관 필요(스프린트 전체에서 이연된 항목, 실행 배선 시점에 재검토)**: ①trigger_watch hourly_snapshot 신선도 게이트 부재 ②execution_harness 동시성(레이스) 하드닝 미적용 ③hourly_pattern 백필/재생 시 멱등성 미보장(3건 전부 "호출자/실행경로가 아직 없어 무해"가 공통 사유 — 실제 배선 전엔 안전). **④(prod 재검증 신규) trigger_watch "당일만" 가드 재확인** — 마감 과거일에 돌면 underpace 대량 오발생(실증 36건), 프로덕션 intraday에선 무관하나 자정넘김/지연 크론 방어 필요. **⑤(prod 재검증 신규) anomaly_feed 절대액 floor 추가** — 비율 임계값만 있어 초소액(77원→606원) 캠페인이 "급증" 오발생, Slack 노이즈. ④⑤ 전부 정보성·쓰기 無라 현재 무해 — 관찰모드/Slack 배선 시점에 튜닝.
 1-b. **conversion_maturity 실곡선 재확인**: 이번 세션 적립 시작(스냅샷 0일째) — MATURITY_DAYS(21)+MIN_COHORTS_FOR_CURVE(3)를 채우려면 몇 주 매일 크론이 돌아야 함. 확인만 하면 됨(별도 작업 불요, 크론이 매일 쌓임 — P2-S2 베이스라인 재대조와 동일 패턴).
-1-c. **prod DB 사본 라이브 검증 미실시**: 이번 세션은 네트워크/SSH 접근 없이 로컬 워크트리에서만 작업 — Phase 6(학습값 실계수/실곡선/실지수)뿐 아니라 Phase 2·3·4의 "89K 실규모 미실시"도 여전히 누적 잔여. **다음 세션에서 prod DB 사본 확보 시 스프린트 전체 일괄 재검증 권장.**
+1-c. ~~**prod DB 사본 라이브 검증 미실시**~~ **완료(2026-07-08)** — prod DB 사본으로 Phase 2~6 전 파이프라인을 89K 실규모에 구동, 전 단계 정상(crash·perf 문제 없음, 상세 위 "현재 진행 단계" prod 재검증 항목). 잔여=①estimate happy-path 실규모(크리덴셜 필요, S3a 라이브 159건으로 대체 검증됨) ②학습 곡선/성적표 실값(크론 축적 수주 대기, 메커니즘은 실데이터로 검증됨).
 2. **직전 HANDOFF(S3a) 승계 큐** (계획서 §5, Phase 6 완료로 진행 가능해짐 — 순서만 뒤로 미뤄뒀던 것, 삭제 아님): ①관찰모드 개시 결정(Jino, optimizer='ours' 카나리 — MOP A/B 대조 포함) ②15일 축적 후 베이스라인 재대조 ③~~브랜치 push 여부~~ **완료(2026-07-08, Jino "push하자" 지시)** — `claude/admiring-solomon-b4f056` origin에 push 완료(19 커밋, `667ad8f..c1fb8fd`, Phase 1~6 전체 포함). push 직전 워크트리 HEAD가 detached 상태였음을 발견(같은 커밋 c1fb8fd를 가리켜 데이터 손실 없음) — 브랜치로 checkout 후 push. ④트랙/계획서 파일 귀속 정리 ⑤campaign_target_resolver ②(D-S3-b 보류 유지) ⑥첫 제안서에 S26 런칭 질문.
    - **D-S3-a (2026-07-07 Jino 승인)**: S3 분할 = S3a 백엔드 → S3b 프론트(S2 동일 패턴, 단계별 라이브 검증).
    - **D-S3-b (2026-07-07 Jino 승인)**: campaign_target_resolver ②(쇼핑 캠페인/그룹↔상품BEP 연결) **보류 유지** — 계정 기본 target_roas로 제안(관찰 모드 충분, 제안에 target 근거 라벨 부착). ②는 확정 소스(/ncc/ads 소재-상품 연결 or ShoppingProduct master-report) 확보 시 P3+ 별도. 이름 추정 매칭 금지.
