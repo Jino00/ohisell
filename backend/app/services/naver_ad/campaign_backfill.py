@@ -41,14 +41,18 @@ def backfill_campaign_daily(
             r["campaign_type"] = c.get("campaign_type", "")
         all_rows.extend(rows)
 
-    dates = sorted({date.fromisoformat(r["date"]) for r in all_rows})
-    campaign_ids = sorted({r["campaign_id"] for r in all_rows})
-    if dates and campaign_ids:
+    # 삭제 범위는 "응답에 실제로 있던 날짜"가 아니라 요청한 전체 [date_from, date_to]로 잡는다
+    # (codex review 지적 — 응답에 없던 날짜, 즉 API가 무활동일을 생략한 경우 이전 실행의
+    # sentinel 행이 그대로 남아있으면 forecast_gate 활동일 비율이 stale 데이터로 오염된다).
+    requested_campaign_ids = sorted({c["campaign_id"] for c in campaigns})
+    if requested_campaign_ids:
         db.execute(delete(NaverAdDaily).where(
-            NaverAdDaily.ad_date.in_(dates),
-            NaverAdDaily.campaign_id.in_(campaign_ids),
+            NaverAdDaily.ad_date >= date_from, NaverAdDaily.ad_date <= date_to,
+            NaverAdDaily.campaign_id.in_(requested_campaign_ids),
             NaverAdDaily.adgroup_id == BACKFILL_SENTINEL_ADGROUP,
         ))
+
+    dates = sorted({date.fromisoformat(r["date"]) for r in all_rows})
 
     now = kst_now()
     for r in all_rows:
