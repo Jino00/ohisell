@@ -175,9 +175,11 @@
 
 - ✅ **예측·전문가 스프린트 E1a T6 완료(2026-07-09, admiring-solomon-b4f056, Sonnet 구현)**: `GET /expert-reviews` 신규 + `/proposals`에 `expert_verdict` 조인(최근 완료 run 평결). **codex review: 진짜 P1 1건** — "as_of 최근 완료 run" 스펙인데 정렬이 run.id에만 의존해 백필 시나리오에서 오판 가능 → as_of 우선 정렬로 수정. P2 1건 반영(limit 노출), P2 1건(인덱스)은 스코프 밖 보류. 테스트 11개. pytest 884→896. 커밋 `90825f7`. **다음 = T7 크론 등록**.
 
+- ✅ **예측·전문가 스프린트 E1a T7 완료(2026-07-09, admiring-solomon-b4f056, Sonnet 구현)**: `generate_expert_desk_job`(08:05) 크론 등록. **codex review**: [P1] 08:00 제안생성이 늦으면 그날 신규 제안 일부를 놓칠 수 있다는 지적 → 검토해보니 유실이 아니라 지연(다음날 자동 재포함) — 08:05는 계획서 승인값이라 임의 변경 안 하고 트레이드오프만 docstring 명시. P2 1건(가독성) 반영. 커밋 `c107617`. **다음 = T8 프론트**.
+
 ## 다음 액션
 
-> **★2026-07-09 개정(E1a T6 완료 — T7부터 계속)**: 새 세션은 **이 트랙 → `docs/PLAN_naver-ad-forecast-expert.md`(특히 §8 E1a task 분해) 순으로 필독**. F2 전부 완료. E1 설계 확정·Jino 구조 승인 완료(전문가=AI_office 기존직원 Ava 재사용, 검토는 ohisell claude -p 배치 1콜). **T1~T6(마이그레이션+모델·briefing_builder·expert_llm+ava_reviewer·expert_ledger·expert_desk 하네스·라우터) 완료**(위 참조). **다음 구현 대상 = E1a T7(크론 08:05 등록: scheduler_service `generate_expert_desk`, `5 8 * * *`)부터**(§8 순서, 구현=**Sonnet**). E1a는 ohisell 자족(AI_office·실 claude 무의존, 주입경계 TDD)이라 계속 진행 가능. E1b(Ava 연동)는 AI_office쪽 별도 작업 후. 방향 임의 변경 금지. 브랜치 `claude/admiring-solomon-b4f056` — 로컬 커밋 다수 미push, docs 갱신 커밋됨.
+> **★2026-07-09 개정(E1a T7 완료 — T8부터 계속)**: 새 세션은 **이 트랙 → `docs/PLAN_naver-ad-forecast-expert.md`(특히 §8 E1a task 분해) 순으로 필독**. F2 전부 완료. E1 설계 확정·Jino 구조 승인 완료(전문가=AI_office 기존직원 Ava 재사용, 검토는 ohisell claude -p 배치 1콜). **T1~T7(마이그레이션+모델·briefing_builder·expert_llm+ava_reviewer·expert_ledger·expert_desk 하네스·라우터·크론) 완료**(위 참조). **다음 구현 대상 = E1a T8(프론트: NaverAdOptimizationConsole.tsx에 제안 카드 평결 배지(✓/⚠/✗) + "Ava의 검토" 패널(총평+성적표))부터**(§8 순서, 구현=**Sonnet**, tsc/build 확인 필수). E1a는 ohisell 자족(AI_office·실 claude 무의존)이라 계속 진행 가능. E1b(Ava 연동)는 AI_office쪽 별도 작업 후. 방향 임의 변경 금지. 브랜치 `claude/admiring-solomon-b4f056` — 로컬 커밋 다수 미push, docs 갱신 커밋됨.
 > (이전) 2026-07-08 밤 개정(F1 완료 + F2 착수 승인 D-NAO-26): F2a grain 확장부터 시작 — **완료됨(위 참조)**.
 > (이전) 2026-07-07 밤 개정(D-NAO-22/23): 듀얼모드 스프린트 — **Phase 1~6 전부 완료(2026-07-08) + prod 89K 재검증 완료.**
 
