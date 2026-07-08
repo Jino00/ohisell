@@ -1830,3 +1830,58 @@ class NaverForecastDaily(Base):
     mape_conv_amt: Mapped[Optional[Decimal]] = mapped_column(Numeric(8, 4), nullable=True)
     scored_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+# ══════════════════════════════════════════════════════════════════
+# 예측·전문가 스프린트 E1a — expert_desk 조언자 모드 (D-NAO-30/31/32,
+# docs/PLAN_naver-ad-forecast-expert.md §8)
+# ══════════════════════════════════════════════════════════════════
+NAVER_EXPERT_VERDICTS = ("agree", "partial", "reject", "insufficient_evidence", "commentary")
+NAVER_EXPERT_OUTCOMES = ("correct", "wrong", "unverifiable", "pending")
+NAVER_EXPERT_SOURCES = ("local", "ava")
+NAVER_EXPERT_RUN_STATUSES = ("ok", "degraded", "skipped", "failed")
+
+
+class NaverExpertReviewRun(Base):
+    """전문가(Ava) 배치 검토 1콜 = 1행(run 원장). 매일 08:05 pending 제안 전체를 묶어 배치
+    검토(D-NAO-30) — verdict를 run_id로 이 원장에 묶어 provenance·프롬프트버전·재실행 이력을
+    보존한다(codex 아웃사이드 보이스 반영). 재실행은 같은 as_of라도 새 run(덮어쓰기 아님).
+    """
+
+    __tablename__ = "naver_expert_review_run"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    as_of: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)
+    model: Mapped[str] = mapped_column(String(30), nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(20), nullable=False)
+    briefing_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    raw: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # claude 원응답(감사용)
+    usage_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="ok")  # NAVER_EXPERT_RUN_STATUSES
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class NaverExpertReview(Base):
+    """전문가 평결 1건(run의 child). proposal_id NULL = 하루 총평(run당 1행이라 여러 run에
+    걸쳐 NULL이 중복돼도 문제없음). checkable_prediction은 기각(reject) 평결에도 붙일 수
+    있는 선택 필드(억지 예측 방지, codex 반영). C3 자문 경계: 이 테이블은 전문가의 의견을
+    기록할 뿐 NaverProposal.status나 실행 상태를 절대 건드리지 않는다(D-3 관찰모드).
+    """
+
+    __tablename__ = "naver_expert_review"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[int] = mapped_column(Integer, ForeignKey("naver_expert_review_run.id"), nullable=False, index=True)
+    as_of: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)
+    proposal_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("naver_proposals.id"), nullable=True)
+    verdict: Mapped[str] = mapped_column(String(24), nullable=False)  # NAVER_EXPERT_VERDICTS (max: insufficient_evidence=21자)
+    confidence: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 4), nullable=True)
+    reasoning: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    checkable_prediction: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    pred_target_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    pred_target_id: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    pred_metric: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    pred_direction: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    verify_date: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True, index=True)
+    outcome: Mapped[Optional[str]] = mapped_column(String(12), nullable=True)  # NAVER_EXPERT_OUTCOMES
+    source: Mapped[str] = mapped_column(String(10), nullable=False, default="local")  # NAVER_EXPERT_SOURCES
