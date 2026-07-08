@@ -3,7 +3,10 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
-- 날짜: 2026-07-08 (★네이버 광고 트랙 **듀얼모드 6-Phase 전부 완료·push + prod 실데이터(89K) 일괄 재검증 완료(승계 큐 1-c 해소)**)
+- 날짜: 2026-07-08 (★네이버 광고 트랙 **D-NAO-24/25 확정 + 예측·전문가 스프린트 구조 승인·계획서 완성** — 같은 날 fable 설계 세션)
+- ★**예측·전문가 스프린트 설계 완료(코드 0줄)**: MOP 대시보드 관찰 대화에서 Jino 지시 2건 → **D-NAO-24**(MOP식 일일 예측 모델층 이식 — "클릭을 키운다는 전제"로 선구축, 모델 개수 무제한·게이트가 유일한 문지기. 라이브 실측 근거: MOP도 30,250 키워드에 모델 40개=캠페인급 grain) + **D-NAO-25**(24시간 전문가 에이전트, (b) 부분 게이트 지향 — 위임 스위치는 영구 Jino, 판단 전건 기록→성적표로 "37년 경력"을 축적 구조로 실현). 구조 승인("진행하자") → 계획서 `docs/PLAN_naver-ad-forecast-expert.md`(F0 백필→F1 캠페인 grain 코어→F2 grain 확장+배선3곳→E1 조언자→E2 부분게이트[보류]). 미확정 4건 §6(ANTHROPIC_API_KEY 등). **다음 = Sonnet 새 세션에서 F0a부터 구현**(트랙→계획서 필독).
+- ─────────────────────────────────────────────
+- (이전) 날짜: 2026-07-08 (★네이버 광고 트랙 **듀얼모드 6-Phase 전부 완료·push + prod 실데이터(89K) 일괄 재검증 완료(승계 큐 1-c 해소)**)
 - ★**prod 89K 실데이터 재검증 완료(원칙22, 1-c 승계 큐)**: 워크트리가 엉뚱한 브랜치(`claude/amazing-dhawan-cdbb5a`=상품연관맵)에 체크아웃돼 있던 걸 발견 → `claude/admiring-solomon-b4f056`(HEAD `c969303`, origin 일치)로 복구(데이터 손실 0). prod DB(`sellc.ohitech.co.kr`, 130MB) scp 읽기전용 사본에 additive 마이그레이션(`w7x8y9z0a1b2`·`x8y9z0a1b2c3`) 적용 후 **Phase 2~6 파이프라인을 실규모(naver_entity 91,183/search_term 49,726/ad_daily 7,538/hourly 1,462)에 구동 — prod 원본 무접촉**. 전 단계 정상(run_daily 3.33s·9단계 ok·crash·perf 문제 없음, trigger_watch 당일=0 정상, learning_loops 4루프 ok·실데이터 적립). estimate happy-path는 크리덴셜 부재로 degrade(S3a 라이브 159건으로 대체 검증). **실데이터 관찰 2건(저위험·정보성·쓰기無)**: ⓐtrigger_watch 마감과거일 underpace 대량(당일 intraday 무관) ⓑanomaly_feed 절대액 floor 부재로 초소액 오발생 → 트랙 다음액션 1-a ④⑤로 이연(관찰모드/Slack 배선 시 튜닝). 상세=`docs/tracks/active/track_naver-ad-optimization.md`.
 - ─────────────────────────────────────────────
 - (이전) 날짜: 2026-07-08 (★네이버 광고 트랙 **듀얼모드 스프린트 Phase 3 완료 — budget_allocator+anomaly_feed, codex review 2건 반영**)

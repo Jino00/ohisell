@@ -99,6 +99,7 @@
       - [x] **prod 실데이터(89K) 일괄 재검증 완료(2026-07-08, admiring-solomon-b4f056, 1-c 승계 큐 해소)**: prod DB(`sellc.ohitech.co.kr:/home/ubuntu/ohisell/backend/ohisell.db`, 130MB) scp 읽기전용 사본 → additive 마이그레이션(`w7x8y9z0a1b2`·`x8y9z0a1b2c3`) 스크래치 사본에 적용(0.2s, prod head는 여전히 `v6w7x8y9z0a1`) → Phase 2~6 파이프라인을 **실규모 데이터**(naver_entity 91,183 / search_term 49,726 / ad_daily 7,538 / hourly 1,462)에 구동. **prod 원본 무접촉**(사본만 조작·기록). estimate API는 backend/.env 크리덴셜 부재로 문서화된 graceful-degrade 경로로 자동 강등(네트워크 無) — happy-path는 이미 S3a 라이브(159건)로 검증됨.
         - **결과 전부 정상(원칙22 실증)**: ①run_daily 3.33s·9단계 전부 ok·에러 0(89K 스케일 crash·perf 문제 없음) ②trigger_watch(7/08 당일 intraday)=0건 정상·(7/07 마감일)=underpace 36건 ③learning_loops 4루프 전부 ok(conversion_maturity 4행 적립·hourly_pattern 23칸 fold·learning_state 23행 기록, 다만 곡선/성적표는 데이터 축적 대기로 빈 값=설계대로) ④anomaly_feed 급증2·급감2 실제 산출.
         - **실데이터에서만 드러난 관찰 2건(합성 테스트 미포착, 전부 저위험 — 정보성·쓰기 無·ours 캠페인 0개)**: ⓐ **trigger_watch를 마감된 과거일에 돌리면 underpace 대량 발생**(7/07 hour23 기준 36건) — 프로덕션은 당일 intraday(:07)만 돌아 무관(7/08=0)하나, 자정 넘긴 지연 크론 시 스팸 소지 → Slack 배선 시 "당일만" 가드 재확인 가치 ⓑ **anomaly_feed 비율 임계값에 절대액 하한 없음** — 77원→606원(7.87배) 같은 초소액 캠페인이 "급증" 플래그 → Slack 노이즈 소지, 절대액 floor 추가 검토(관찰모드 개시 전 튜닝 후보). 둘 다 블로킹 버그 아님 → 다음 액션 1-a에 이연 기록.
+- [ ] **예측·전문가 스프린트 (D-NAO-24/25, 구조 승인 2026-07-08 "진행하자", 계획서 `docs/PLAN_naver-ad-forecast-expert.md`)**: F0 캠페인 백필(백테스트 원료) → F1 forecast_engine 코어(캠페인 grain, 게이트+일일 재생성+scorer 자동강등) → F2 grain 확장(그룹·키워드, 모델 수 무제한)+배선 3곳(proposal 예측축·budget 사전신호·trigger 예측곡선 페이싱) → E1 expert_desk 조언자(브리핑→LLM 평결→원장→콘솔) → E2 부분 게이트(보류: 반자동 전환과 동기). 미확정 4건은 계획서 §6(ANTHROPIC_API_KEY 등).
 - [ ] **P3 Confirm 실행**: 제외키워드→입찰→예산 순 개방 + change_log + D+7/14 검증 루프
 - [ ] **P4 파수꾼+키워드랩**: 매시간 이상감지·페이싱 + keywordstool 발굴 + 시간대 가중치
 - [ ] **P5 고도화**: 무풍지대 신규 세팅 + 재구축 진단 + 예측정확도 보정 + 자율 확대
@@ -146,7 +147,8 @@
 
 ## 다음 액션
 
-> **★2026-07-07 밤 개정(D-NAO-22/23)**: 새 세션은 **이 트랙 → `docs/PLAN_naver-ad-S3b-dual-mode.md` 순으로 필독** 후 아래 1번부터. 방향 임의 변경 금지(Jino: "이 방향이 바뀌지 않도록", "세션이 바껴도 잊지 않도록 항상 확인하고 세션 시작해"). **★Phase 1~6 전부 완료(2026-07-08) — 듀얼모드 완성 스프린트 종료. 다음은 승계 큐(아래 2번) — 전부 Jino 결정 필요 항목.**
+> **★2026-07-08 개정(D-NAO-24/25)**: 새 세션은 **이 트랙 → `docs/PLAN_naver-ad-forecast-expert.md` 순으로 필독**. 다음 구현 대상 = **예측·전문가 스프린트 F0부터**(구조 승인 완료, 방향 임의 변경 금지). 승계 큐(아래 2번, 관찰모드 개시 등 Jino 결정 항목)는 직교 — 병행 가능.
+> (이전) 2026-07-07 밤 개정(D-NAO-22/23): 듀얼모드 스프린트 — **Phase 1~6 전부 완료(2026-07-08) + prod 89K 재검증 완료.**
 
 1. ~~듀얼모드 완성 스프린트 Phase 1~6 순차 구현~~ **전부 완료**(`docs/PLAN_naver-ad-S3b-dual-mode.md` §4·§7): S3b콘솔→growth_sweeper→budget_allocator+anomaly_feed→trigger_watch→execution_harness골격+change_log→learning_loops, 6개 전부 완료(테스트 626→738, codex review 매 Phase 통과).
 1-a. **다음 세션 이관 필요(스프린트 전체에서 이연된 항목, 실행 배선 시점에 재검토)**: ①trigger_watch hourly_snapshot 신선도 게이트 부재 ②execution_harness 동시성(레이스) 하드닝 미적용 ③hourly_pattern 백필/재생 시 멱등성 미보장(3건 전부 "호출자/실행경로가 아직 없어 무해"가 공통 사유 — 실제 배선 전엔 안전). **④(prod 재검증 신규) trigger_watch "당일만" 가드 재확인** — 마감 과거일에 돌면 underpace 대량 오발생(실증 36건), 프로덕션 intraday에선 무관하나 자정넘김/지연 크론 방어 필요. **⑤(prod 재검증 신규) anomaly_feed 절대액 floor 추가** — 비율 임계값만 있어 초소액(77원→606원) 캠페인이 "급증" 오발생, Slack 노이즈. ④⑤ 전부 정보성·쓰기 無라 현재 무해 — 관찰모드/Slack 배선 시점에 튜닝.
