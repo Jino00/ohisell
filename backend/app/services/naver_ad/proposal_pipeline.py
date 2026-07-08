@@ -13,7 +13,7 @@ from decimal import Decimal
 from sqlalchemy import func as sqlfunc
 from sqlalchemy.orm import Session
 
-from app.models import NaverAdDaily, NaverEntity, NaverLearningState, NaverProposal
+from app.models import NaverAdDaily, NaverEntity, NaverForecastDaily, NaverLearningState, NaverProposal
 from app.services import naver_sa_ad_fetcher as fetcher
 from app.services.naver_ad import (
     anomaly_feed, bid_simulator, budget_allocator, campaign_target_resolver, diagnosis, growth_sweeper,
@@ -395,6 +395,33 @@ def compute_pre_exhaustion_signals(db: Session, *, today: date | None = None) ->
     return budget_allocator.find_pre_exhaustion_signals(db, today)
 
 
+def compute_forecast_evidence(
+    db: Session, targets: list[tuple[str, str]], *, today: date | None = None,
+) -> dict[tuple[str, str], dict]:
+    """F2b ⓐ(D-NAO-26) — targets((target_type,target_id) 목록, keyword/adgroup grain만)에
+    대해 오늘자 예측(pred_clk/cost/conv_amt)을 배치 조회해 proposal_writer.build의
+    forecast_data 인자로 그대로 전달. 입찰 산식(D-NAO-19)에는 관여하지 않는다 — rationale
+    병기만(정직 경계). keyword/adgroup은 이미 NaverForecastDaily 1행=1일=1스코프라
+    forecast_source의 daily_series 집계가 불필요, 이 테이블을 직접 배치 조회한다.
+
+    없는 조합(예측 없음, fallback/미가동)은 반환 dict에 아예 없음.
+    """
+    today = today if today is not None else kst_today()
+    if not targets:
+        return {}
+    targets_set = set(targets)
+    grains = {t for t, _ in targets}
+    scope_keys = {sid for _, sid in targets}
+    rows = db.query(NaverForecastDaily).filter(
+        NaverForecastDaily.grain.in_(grains), NaverForecastDaily.scope_key.in_(scope_keys),
+        NaverForecastDaily.target_date == today,
+    ).all()
+    return {
+        (r.grain, r.scope_key): {"pred_clk": r.pred_clk, "pred_cost": r.pred_cost, "pred_conv_amt": r.pred_conv_amt}
+        for r in rows if (r.grain, r.scope_key) in targets_set
+    }
+
+
 def compute_anomalies(db: Session, as_of: date) -> dict:
     """anomaly_feed Phase 3(경량, D-NAO-22-④ 앞부분) — freshness 부분적재 + 소진 급변.
 
@@ -505,11 +532,18 @@ def run_daily(db: Session, *, lookback_days: int = 15) -> dict:
     proposal_summaries: list[dict] = []
     if diag and diag.get("boards") is not None:
         try:
+            forecast_targets = list(bid_sims.keys()) + list(growth["sims"].keys())
+            try:
+                forecast_data = compute_forecast_evidence(db, forecast_targets)
+            except Exception as e:  # noqa: BLE001 — 예측 병기는 저하만, 제안 생성 자체는 계속 진행
+                log.warning("proposal_pipeline forecast_evidence 조회 실패(예측 없이 진행): %s", e)
+                forecast_data = {}
+
             candidates = proposal_writer.build(
                 db, diag, bid_sims=bid_sims,
                 growth_candidates=growth["candidates"], growth_sims=growth["sims"],
                 budget_signals=budget_signals, pre_exhaustion_signals=pre_exhaustion_signals,
-                anomalies=anomalies, as_of=as_of,
+                forecast_data=forecast_data, anomalies=anomalies, as_of=as_of,
             )
             saved = proposal_writer.persist(db, candidates)
             proposal_writer.account_brief_singleton(db, diag, as_of)

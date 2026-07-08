@@ -54,9 +54,20 @@ class _TargetLabelCache:
         return self._cache[campaign_id]
 
 
+def _forecast_evidence_suffix(forecast: dict | None) -> str:
+    """예측치(F2b ⓐ, D-NAO-26)가 있으면 rationale에 병기할 문구 — 없으면 빈 문자열(정직 경계,
+    fallback/미가동 타겟에 억지로 예측을 만들지 않음). 입찰 산식(D-NAO-19)에는 관여하지 않는다."""
+    if forecast is None:
+        return ""
+    return (
+        f" 예측(오늘): clk={forecast['pred_clk']}, cost={forecast['pred_cost']}원, "
+        f"conv_amt={forecast['pred_conv_amt']}원."
+    )
+
+
 def _bid_proposal(
     row: dict, sim: dict | None, campaign_id: str, target_id: str, *,
-    target_type: str, target_label: dict, board_name: str,
+    target_type: str, target_label: dict, board_name: str, forecast: dict | None = None,
 ) -> dict | None:
     """진단 보드 1행 + bid_simulator 결과 → bid_up/bid_down/negative_keyword 제안 1건.
 
@@ -87,6 +98,7 @@ def _bid_proposal(
         f"target_roas 근거={target_label['source']}"
         + (f"({target_label['target_roas']})" if target_label.get("target_roas") is not None else "")
         + "."
+        + _forecast_evidence_suffix(forecast)
     )
     return {
         "proposal_type": proposal_type,
@@ -99,7 +111,9 @@ def _bid_proposal(
     }
 
 
-def _growth_proposal(candidate: dict, sim: dict | None, target_label: dict) -> dict | None:
+def _growth_proposal(
+    candidate: dict, sim: dict | None, target_label: dict, *, forecast: dict | None = None,
+) -> dict | None:
     """growth_sweeper 후보 1건(D-NAO-22-①) + bid_simulator 결과 → growth_bid_up 제안.
 
     sim 없음(harness가 이번 회차 estimate/시뮬을 못 만든 경우)이거나 direction이
@@ -121,6 +135,7 @@ def _growth_proposal(candidate: dict, sim: dict | None, target_label: dict) -> d
         + (f"({target_label['target_roas']})" if target_label.get("target_roas") is not None else "")
         + f". D-NAO-20 스톱로스={stop_loss_amount}원"
         f"(무전환 {growth_sweeper.STOP_LOSS_CLICK_MULTIPLE}클릭 상당 지출 도달 시 재검토 신호)."
+        + _forecast_evidence_suffix(forecast)
     )
     return {
         "proposal_type": _GROWTH_BID_UP,
@@ -242,7 +257,7 @@ def build(
     db: Session, diagnosis: dict, *, bid_sims: dict | None = None,
     growth_candidates: list[dict] | None = None, growth_sims: dict | None = None,
     budget_signals: list[dict] | None = None, pre_exhaustion_signals: list[dict] | None = None,
-    anomalies: dict | None = None, as_of: date,
+    forecast_data: dict | None = None, anomalies: dict | None = None, as_of: date,
 ) -> list[dict]:
     """진단 보드 + bid_simulator 결과 → 제안 후보 목록(아직 미저장, dict 리스트).
 
@@ -259,6 +274,10 @@ def build(
       달라(pred_cost/pred_gap, 이미 소진된 게 아니라 오늘 예측이 초과) 전용 빌더로 처리.
       정보성(anomaly와 동일 취급, 실행 대상 아님)이나 대상은 optimizer='ours'로 제한한다
       (budget_signals와 동일 성격 — 이 시스템이 관리하는 캠페인에 대한 예산 신호이므로).
+    forecast_data: {(target_type, target_id): {"pred_clk","pred_cost","pred_conv_amt"}, ...}(F2b ⓐ,
+      D-NAO-26) — proposal_pipeline.compute_forecast_evidence() 반환값. bid_up/bid_down/
+      growth_bid_up rationale에 예측치를 병기만 한다(입찰 산식 D-NAO-19 불변). 없는 타겟은
+      예측 없음(fallback/미가동)이라 병기하지 않는다(정직 경계).
     anomalies: anomaly_feed 신호(경량, Phase3) — {"freshness": {...}|None, "spend": [...]}.
       진단 성격(D-3, 사실 정리)이라 optimizer 무관 전 캠페인 대상(diagnosis 보드와 동일 취급).
     optimizer='ours' 캠페인만 대상(D-NAO-13) — 그 외(none/mop)는 진단엔 나와도 제안 없음.
@@ -268,6 +287,7 @@ def build(
     growth_sims = growth_sims or {}
     budget_signals = budget_signals or []
     pre_exhaustion_signals = pre_exhaustion_signals or []
+    forecast_data = forecast_data or {}
     anomalies = anomalies or {}
     boards = diagnosis.get("boards") or {}
     ours = _ours_campaign_ids(db)
@@ -282,7 +302,8 @@ def build(
         target_id = row["keyword_id"]
         sim = bid_sims.get(("keyword", target_id))
         p = _bid_proposal(row, sim, cid, target_id, target_type="keyword",
-                           target_label=labels.get(cid), board_name="bleeding_keywords")
+                           target_label=labels.get(cid), board_name="bleeding_keywords",
+                           forecast=forecast_data.get(("keyword", target_id)))
         if p:
             proposals.append(p)
 
@@ -293,7 +314,8 @@ def build(
         target_id = row["keyword_id"]
         sim = bid_sims.get(("keyword", target_id))
         p = _bid_proposal(row, sim, cid, target_id, target_type="keyword",
-                           target_label=labels.get(cid), board_name="starving_winners")
+                           target_label=labels.get(cid), board_name="starving_winners",
+                           forecast=forecast_data.get(("keyword", target_id)))
         if p:
             proposals.append(p)
 
@@ -304,7 +326,8 @@ def build(
         target_id = row["adgroup_id"]
         sim = bid_sims.get(("adgroup", target_id))
         p = _bid_proposal(row, sim, cid, target_id, target_type="adgroup",
-                           target_label=labels.get(cid), board_name="shopping_group_bep")
+                           target_label=labels.get(cid), board_name="shopping_group_bep",
+                           forecast=forecast_data.get(("adgroup", target_id)))
         if p:
             proposals.append(p)
 
@@ -325,7 +348,7 @@ def build(
         if cid not in ours:
             continue
         sim = growth_sims.get(("keyword", c["keyword_id"]))
-        p = _growth_proposal(c, sim, labels.get(cid))
+        p = _growth_proposal(c, sim, labels.get(cid), forecast=forecast_data.get(("keyword", c["keyword_id"])))
         if p:
             proposals.append(p)
             growth_created += 1

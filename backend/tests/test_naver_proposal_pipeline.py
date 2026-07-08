@@ -438,6 +438,61 @@ def test_run_daily_generates_budget_pre_exhaustion_proposal(db, monkeypatch):
     assert "실행 대상 아님" in saved[0].expected_effect
 
 
+def test_compute_forecast_evidence_looks_up_by_grain_and_scope_key(db):
+    """F2b ⓐ: keyword/adgroup grain 예측을 (target_type,target_id) 목록으로 배치 조회."""
+    db.add(NaverForecastDaily(
+        target_date=kst_today(), grain="keyword", scope_key="nkw-1",
+        pred_clk=40, pred_cost=90000, pred_conv_amt=15000,
+    ))
+    db.add(NaverForecastDaily(
+        target_date=kst_today(), grain="adgroup", scope_key="adg-other",  # targets에 없음 — 제외
+        pred_clk=1, pred_cost=1, pred_conv_amt=0,
+    ))
+    db.commit()
+
+    out = proposal_pipeline.compute_forecast_evidence(db, [("keyword", "nkw-1"), ("adgroup", "adg-1")])
+    assert out == {("keyword", "nkw-1"): {"pred_clk": 40, "pred_cost": 90000, "pred_conv_amt": 15000}}
+
+
+def test_compute_forecast_evidence_empty_targets_returns_empty(db):
+    assert proposal_pipeline.compute_forecast_evidence(db, []) == {}
+
+
+def test_run_daily_passes_forecast_evidence_to_proposal_writer(db, monkeypatch):
+    """F2b ⓐ 통합: run_daily이 bid_sims/growth_sims 대상의 예측을 조회해 proposal_writer.build에 넘긴다."""
+    _seed_bep(db)
+    db.add(NaverCampaignSettings(campaign_id="cmp1", optimizer="ours"))
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-grow", campaign_id="cmp1",
+                        campaign_type="WEB_SITE", name="성장후보", status="on", bid_amt=70))
+    _row(db, AS_OF, "cmp1", "WEB_SITE", "grp1", "nkw-grow", 1000, 100, 5000, direct=1_000_000)
+    db.add(Order(channel_id=6, platform_product_id="cp-1", order_number="ORD-2",
+                  order_date=AS_OF, status="정상", selling_price=Decimal("990000")))
+    db.add(NaverForecastDaily(
+        target_date=kst_today(), grain="keyword", scope_key="nkw-grow",
+        pred_clk=45, pred_cost=95000, pred_conv_amt=18000,
+    ))
+    db.commit()
+
+    monkeypatch.setattr(
+        proposal_pipeline.fetcher, "estimate_average_position_bid",
+        lambda device, items: [{"nccKeywordId": it["key"], "bid": 100_000} for it in items],
+    )
+
+    captured = {}
+    real_build = proposal_pipeline.proposal_writer.build
+
+    def _spy_build(*args, **kwargs):
+        captured.update(kwargs)
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(proposal_pipeline.proposal_writer, "build", _spy_build)
+
+    proposal_pipeline.run_daily(db)
+    assert captured.get("forecast_data", {}).get(("keyword", "nkw-grow")) == {
+        "pred_clk": 45, "pred_cost": 95000, "pred_conv_amt": 18000,
+    }
+
+
 def test_run_daily_generates_anomaly_spend_spike_proposal(db, monkeypatch):
     _seed_bep(db)
     db.add(NaverCampaignSettings(campaign_id="cmp1", optimizer="ours"))
@@ -506,7 +561,7 @@ def test_run_daily_proposal_writer_failure_isolated_other_stages_still_run(db, m
     db.commit()
 
     def boom(db_, diagnosis_dict, *, bid_sims=None, growth_candidates=None, growth_sims=None,
-             budget_signals=None, pre_exhaustion_signals=None, anomalies=None, as_of=None):
+             budget_signals=None, pre_exhaustion_signals=None, forecast_data=None, anomalies=None, as_of=None):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(proposal_pipeline.proposal_writer, "build", boom)

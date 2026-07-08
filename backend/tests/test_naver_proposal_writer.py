@@ -73,6 +73,37 @@ def test_build_bleeding_keyword_produces_bid_down(db):
     assert "target_roas 근거=" in out[0]["rationale"]
 
 
+def test_build_bleeding_keyword_appends_forecast_evidence_when_available(db):
+    """F2b ⓐ(D-NAO-26): 예측치가 있으면 rationale/expected_effect에 병기만(입찰산식 불변)."""
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis(bleeding_keywords=[_bleeding_row()])
+    forecast_data = {("keyword", "nkw-1"): {"pred_clk": 40, "pred_cost": 90000, "pred_conv_amt": 15000}}
+
+    out = proposal_writer.build(
+        db, diagnosis, bid_sims={("keyword", "nkw-1"): _sim(direction="down")},
+        forecast_data=forecast_data, as_of=AS_OF,
+    )
+    assert len(out) == 1
+    assert "예측(오늘)" in out[0]["rationale"]
+    assert "clk=40" in out[0]["rationale"]
+    assert "cost=90000원" in out[0]["rationale"]
+
+
+def test_build_bleeding_keyword_no_forecast_evidence_when_unavailable(db):
+    """예측 없는(fallback/미가동) 타겟은 억지로 예측 텍스트를 붙이지 않는다(정직 경계)."""
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis(bleeding_keywords=[_bleeding_row()])
+
+    out = proposal_writer.build(
+        db, diagnosis, bid_sims={("keyword", "nkw-1"): _sim(direction="down")},
+        forecast_data={}, as_of=AS_OF,
+    )
+    assert len(out) == 1
+    assert "예측(오늘)" not in out[0]["rationale"]
+
+
 def test_build_bleeding_keyword_wrong_direction_skipped(db):
     """codex 지적(라이브검증 후속): bleeding_keywords는 bid_down만 허용 — 표본이 얇아
     계층 수축으로 direction='up'이 나오면 억지 제안 대신 건너뛴다."""
@@ -238,6 +269,23 @@ def test_build_growth_candidate_produces_growth_bid_up(db):
     assert out[0]["target_id"] == "nkw-growth"
     assert "D-NAO-20 스톱로스=" in out[0]["rationale"]
     assert "갭=400원" in out[0]["rationale"]
+
+
+def test_build_growth_candidate_appends_forecast_evidence_when_available(db):
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis()
+    forecast_data = {("keyword", "nkw-growth"): {"pred_clk": 120, "pred_cost": 45000, "pred_conv_amt": 90000}}
+
+    out = proposal_writer.build(
+        db, diagnosis,
+        growth_candidates=[_growth_candidate()],
+        growth_sims={("keyword", "nkw-growth"): _sim(direction="up", ceiling=500, recommended=470)},
+        forecast_data=forecast_data, as_of=AS_OF,
+    )
+    assert len(out) == 1
+    assert "예측(오늘)" in out[0]["rationale"]
+    assert "conv_amt=90000원" in out[0]["rationale"]
 
 
 def test_build_growth_candidate_skips_non_ours_campaign(db):
