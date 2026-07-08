@@ -350,6 +350,26 @@ def run_naver_learning_loops_job():
         db.close()
 
 
+def run_naver_forecast_engine_job():
+    """네이버 SA 캠페인 grain 예측 엔진 (07:50 KST, entity/search_term 수집 이후·제안 08:00 이전, F1).
+
+    ①최근 16일 캠페인 시계열 재백필(campaign_backfill 재사용, 신선도 유지) ②오늘 예측 생성
+    (forecast_model_builder) ③어제 예측 채점+자동강등(forecast_scorer) — harness가 단계격리로
+    조합 실행하므로 이 잡은 결과를 로그만 남긴다(learning_loops와 동일 원칙).
+    """
+    db = _get_own_db_session()
+    try:
+        from app.services.naver_ad.forecast_engine import run_daily
+
+        result = run_daily(db)
+        log.info("[스케줄러] naver forecast_engine: %s", result["stage_status"])
+    except Exception as e:
+        log.exception("[스케줄러] run_naver_forecast_engine_job 에러: %s", e)
+        raise
+    finally:
+        db.close()
+
+
 def sync_meta_ad_costs_job():
     """Meta 광고비 어제치 자동 적재 (07:00 KST)"""
     db = _get_own_db_session()
@@ -817,6 +837,7 @@ def _ensure_default_states(db):
         ("sync_naver_entity", "35 7 * * *"),        # 엔티티 인벤토리 동기화 (트랙 P2-S1)
         ("sync_naver_search_term", "40 7 * * *"),   # 검색어 단위 성과 수집 (트랙 P2-S1)
         ("sync_naver_keyword_volume", "0 9 * * 0"), # 저클릭 키워드 월검색량 (주1회, 일요일)
+        ("run_naver_forecast_engine", "50 7 * * *"),  # 캠페인 grain 예측엔진(게이트→모델→채점, F1)
         ("generate_naver_proposals", "0 8 * * *"),  # 네이버 SA 제안 자동생성(진단→시뮬→제안→Slack, 트랙 P2-S3)
         ("run_naver_learning_loops", "10 8 * * *"),  # 학습루프 4종(성적표·예측편향·전환성숙·시간대분포, 트랙 P6)
         ("sync_naver_settlement", "25 5 * * *"),
@@ -880,6 +901,8 @@ def start_scheduler():
                 job_func = sync_naver_search_term_job
             elif state.job_name == "sync_naver_keyword_volume":
                 job_func = sync_naver_keyword_volume_job
+            elif state.job_name == "run_naver_forecast_engine":
+                job_func = run_naver_forecast_engine_job
             elif state.job_name == "generate_naver_proposals":
                 job_func = generate_naver_proposals_job
             elif state.job_name == "run_naver_learning_loops":

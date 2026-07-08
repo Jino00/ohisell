@@ -1768,3 +1768,65 @@ class NaverSearchTermDaily(Base):
     cost: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     rank_sum: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+# ══════════════════════════════════════════════════════════════════
+# 예측·전문가 스프린트 F1 — forecast_engine (D-NAO-24, docs/PLAN_naver-ad-forecast-expert.md §3)
+# ══════════════════════════════════════════════════════════════════
+class NaverForecastModel(Base):
+    """예측 모델 원장 — grain별(계정/캠페인/그룹/키워드, F1은 campaign만) 게이트·성능 상태.
+
+    gate_status: active(모델 가동)/fallback(데이터 부족, 예측 생략)/demoted(scorer가 최근
+    성적 불량으로 강등, demoted_until까지 쿨다운 — forecast_gate.evaluate()가 쿨다운 중엔
+    재평가로 즉시 덮어쓰지 않음). params_json = 모델 계수 스냅샷(최근 추세 지수감쇠 레벨,
+    재현·감사용 — 모델 자체는 매일 재생성이라 다음날엔 값이 갱신됨. 요일 계절성은 백테스트
+    실증으로 v1에서 제외, forecast_model_builder.py 모듈 docstring 참조).
+    """
+
+    __tablename__ = "naver_forecast_model"
+    __table_args__ = (
+        UniqueConstraint("grain", "scope_key", name="uq_naver_forecast_model"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    grain: Mapped[str] = mapped_column(String(16), nullable=False)  # account/campaign/adgroup/keyword
+    scope_key: Mapped[str] = mapped_column(String(60), nullable=False, index=True)
+    gate_status: Mapped[str] = mapped_column(String(16), nullable=False, default="fallback")
+    sample_days: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 게이트 판정에 쓰인 최근 활동일수
+    recent_mape: Mapped[Optional[Decimal]] = mapped_column(Numeric(8, 4), nullable=True)  # 최근 스코어링 롤업(scorer 기록)
+    demoted_until: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True)  # 강등 쿨다운 만료일
+    params_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    trained_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class NaverForecastDaily(Base):
+    """일별 예측치 + 익일 백필된 실측·오차 (forecast_scorer의 원료이자 산출물).
+
+    grain별(scope_key) target_date 하루 앞선 예측을 forecast_model_builder가 기록하고,
+    다음날 forecast_scorer가 actual_*/mape_* 컬럼을 백필한다(생성 시엔 NULL). conv_amt는
+    D-NAO-21 보정계수 미적용 원값(네이버 직+간접 합산) — 진단 화면의 보정 로직과는 별개
+    파이프라인이라 이 테이블에서 보정을 적용하지 않는다(정직 경계, 추정 금지).
+    """
+
+    __tablename__ = "naver_forecast_daily"
+    __table_args__ = (
+        UniqueConstraint("target_date", "grain", "scope_key", name="uq_naver_forecast_daily"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    target_date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)
+    grain: Mapped[str] = mapped_column(String(16), nullable=False)
+    scope_key: Mapped[str] = mapped_column(String(60), nullable=False, index=True)
+    pred_clk: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    pred_cost: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    pred_cpc: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
+    pred_conv_amt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    actual_clk: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    actual_cost: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    actual_conv_amt: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    mape_clk: Mapped[Optional[Decimal]] = mapped_column(Numeric(8, 4), nullable=True)
+    mape_cost: Mapped[Optional[Decimal]] = mapped_column(Numeric(8, 4), nullable=True)
+    mape_conv_amt: Mapped[Optional[Decimal]] = mapped_column(Numeric(8, 4), nullable=True)
+    scored_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
