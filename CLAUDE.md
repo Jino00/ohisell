@@ -9,10 +9,12 @@
 - 시작일: 2026-04-01
 
 ## ★ 진행 중 메가 프로젝트 (세션 시작 시 반드시 확인 — 기획 변형 금지)
-- **트랙: `docs/tracks/active/track_coupang-full-integration.md`** ← 단일 진실 원천
-- 쿠팡 Open API 100개 엔드포인트(읽기+쓰기 전부) 연결 → 종합 조망(Command Center).
-- 핵심 불변 결정: ① 백엔드 우선→프론트 ② 시스템은 사실/지표 정리만(전략 추천 금지) ③ 광고비는 XLSX 업로드(공식 API 없음) ④ 아키텍처 clients/coupang/*(SA)→services/coupang/*(Harness)→routers/pages.
+- **단일 진입점: `docs/TRACKS.md`** — 활성 트랙 인덱스를 먼저 읽을 것.
+- **현재 주력 트랙: `docs/tracks/active/track_naver-ad-optimization.md`** (네이버 SA 광고 최적화 — 우리판 MOP, 확정 결정 D-NAO-1~25 누적).
+  - 듀얼모드 6-Phase 완료(2026-07-08) + prod 89K 재검증 완료. **다음 구현 = 예측·전문가 스프린트: `docs/PLAN_naver-ad-forecast-expert.md` 필독 후 F0부터** (D-NAO-24 예측 모델층·D-NAO-25 전문가 에이전트).
+  - 이 트랙 작업은 브랜치 `claude/admiring-solomon-b4f056`(워크트리 admiring-solomon-b4f056)에서만. 작업 전 `git branch --show-current`로 브랜치 일치 확인(2026-07-08 브랜치 뒤바뀜 사고 재발 방지).
 - 이 트랙을 무시하거나 변형해서 진행하지 말 것. 변경은 Jino 승인 후 트랙 파일에 D-N으로 기록.
+- (쿠팡 full-integration 트랙은 완료됨 — `docs/TRACKS.md` Completed 참조.)
 
 ## 기술 스택
 - Frontend: React + Vite + TypeScript + Tailwind CSS
