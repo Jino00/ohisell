@@ -83,7 +83,7 @@
 
 ## §6 미확정 (착수 시 실측/결정 — 추정 금지)
 
-1. **LLM 호출 경로**: 백엔드에서 Anthropic API 직호출 권장 — `ANTHROPIC_API_KEY` 백엔드 .env 필요(Jino 제공). 모델·호출당 비용은 착수 시 실측 후 일일 비용 상한 설정.
+1. ~~LLM 호출 경로: 백엔드에서 Anthropic API 직호출~~ **확정(D-NAO-30, 2026-07-08)**: Anthropic API 직호출 대신 `claude -p`(CLI non-interactive print mode)를 서브프로세스로 호출 — **ANTHROPIC_API_KEY 불필요**. 남은 미확정: 정확한 CLI 플래그(구조화 출력/JSON 스키마 강제 방식)는 공식 문서 확인 후 결정(추정 금지), 서브프로세스 동시성·타임아웃·재시도, 배포 호스트(sellc.ohitech.co.kr)의 claude CLI 설치·인증 상태.
 2. 게이트 임계값 초기 상수 — F1 백테스트로 실측 후 확정.
 3. 전문가 페르소나 이름·톤 — Jino 결정(재미 요소).
 4. 브리핑 토큰 예산 — E1 착수 시 실측.

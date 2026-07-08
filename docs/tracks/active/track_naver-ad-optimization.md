@@ -58,6 +58,8 @@
 
 - **D-NAO-29 89K 재검증 완료 — F2 전체 완결(코드+실규모 검증)** (2026-07-08, Sonnet). prod DB scp 읽기전용 사본(`sellc.ohitech.co.kr:/home/ubuntu/ohisell/backend/ohisell.db`) 확보 → additive 마이그레이션 3개 적용(alembic.ini 임시 포인팅 트릭, F0a 세션과 동일 절차) → forecast_engine+배선3곳(proposal_pipeline/budget_allocator/trigger_watch) 실규모 실행. **크래시 0건**. **F2a codex P1(의도적 이연) 실측 종결**: `_active_scopes` 부모체인 캐스케이드 필터가 실제로 동작(NaverEntity on 90,364개 중 부모까지 전부 on인 30,916개만 통과 — campaign 29·adgroup 451·keyword 30,436, 나머지는 부모 off인 고아 엔티티). N+1 우려됐던 `forecast_engine.run_daily`가 30,916 스코프에서 **46.7초**(일일크론 07:50 예산 내 여유) — **인덱스 추가 불필요로 결론, 이연 항목 종결**. model_builder 30,916개 전부 `fallback`(정직 경계 — prod 실DB는 P0 이력 4일뿐 + 캠페인 sentinel 백필이 F0a 세션에서 별도 스크래치 DB에만 실행돼 prod엔 미반영, F0b가 이 배포를 담당). 배선 3곳(budget_allocator/trigger_watch/compute_forecast_evidence) 전부 예측 부재 상태에서 정상 no-op(오탐 0건). 검증 직후 스크래치 사본 즉시 삭제(prod 미변경, 원칙22). **F2(grain 확장+배선 3곳) — 코드+실규모 검증 전부 완료.**
 
+- **D-NAO-30 E1 LLM 호출 경로 확정 — Anthropic API 직호출 대신 claude CLI(-p) 사용** (2026-07-08, Jino 원문: "우리는 anthropic_API key를 사용하지 않고 claude cli -P 를 사용할꺼야."). 계획서 §6 미확정#1("백엔드 Anthropic API 직호출 권장, ANTHROPIC_API_KEY 필요")을 대체 — **ANTHROPIC_API_KEY 불필요**, `expert_reviewer` SA가 백엔드에서 `claude -p`(non-interactive print mode)를 서브프로세스로 호출해 평결을 받는 방식으로 확정. E1 착수 전 준비물이던 ANTHROPIC_API_KEY 요건 해소(대신 백엔드 호스트에 claude CLI 설치+로그인 필요 — API 키가 아니라 Claude Code 세션 인증). **미확정(E1 설계 세션에서 확정 필요)**: claude CLI 정확한 `-p`/구조화출력(JSON 스키마 강제) 플래그는 공식 문서 확인 후 결정(추정 금지) — CLI 서브프로세스 호출 시 동시성·타임아웃·재시도 처리, 백엔드 배포 호스트(sellc.ohitech.co.kr)에 claude CLI 설치·인증 상태 확인 필요. 이 D-N은 "무엇으로 호출하는가"만 확정 — E1 전체 Agent/Harness/SA 구조는 아직 설계 전(원칙18 순서: 대화→구조설계→Jino 승인→Opus 계획→Sonnet 구현 그대로 따를 것).
+
 ## 실측 베이스라인 (2026-07-06~07 라이브, 원칙22)
 
 - 규모: 광고비 일평균 74만 → **월 환산 ~2,230만** (연 2.7억 페이스). 일 ~600클릭.
