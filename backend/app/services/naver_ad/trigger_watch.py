@@ -1,0 +1,320 @@
+# trigger_watch.py — trigger_watch Harness (듀얼모드 스프린트 Phase 4, D-NAO-3-②/D-NAO-22-④ 뒷부분)
+# 역할: snapshot_naver_ad_hourly(매시 :05) 직후 실행되는 조건발동 즉시 알림. 08:00 정시
+#   proposal_pipeline(느린 루프, D-NAO-4 "학습·전략")과 분리된 빠른 루프("관찰·제어") —
+#   이 harness는 사실을 감지해 즉시 알릴 뿐 입찰/예산 방향을 결정하지 않는다(그건 느린 루프의
+#   몫, D-NAO-4). 알림 자체는 정보성 NaverProposal(target_type="campaign", D-3)로 남아
+#   콘솔·Slack에 노출된다. SA간 직접 호출 금지(원칙18) — 이 harness가 hourly_pacing(SA
+#   재사용)·proposal_writer(제안 저장은 여기서 직접, 스키마만 공유)·slack_notifier를 조합한다.
+#
+# ⚠️ 순위 이탈(원래 D-NAO-3-② 스펙의 3번째 트리거)은 이번 Phase에서 구현하지 않는다 —
+#   naver_hourly_snapshot은 cost/clk/imp만 수집하고 avg_rank(rank_sum/imp)는 일별
+#   stat-report 파일(AD 리포트)에서만 나온다(hourly_snapshot.py/hourly_pacing.py 확인,
+#   docs/references/21). 실시간 순위 데이터가 수집되지 않아 즉시감지가 불가능함을 Jino에게
+#   확인(2026-07-08) — 소진 이상 + CPC 급등만 이번 스코프로 진행하기로 결정. 순위 이탈은
+#   트랙 "다음 액션"에 재검토 항목으로 남긴다(hourly_snapshot에 rank_sum 필드 추가 검토).
+from __future__ import annotations
+
+import logging
+from datetime import date, datetime, timedelta
+from decimal import Decimal
+from typing import Callable
+
+from sqlalchemy import func as sqlfunc
+from sqlalchemy.orm import Session
+
+from app.models import NaverAdDaily, NaverHourlySnapshot, NaverProposal
+from app.services.naver_ad import slack_notifier
+from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
+from app.utils.kst import kst_now, kst_today
+
+log = logging.getLogger(__name__)
+
+_Q2 = Decimal("0.01")
+_Q4 = Decimal("0.0001")
+
+_PROPOSAL_TYPE_PACING = "trigger_pacing"
+_PROPOSAL_TYPE_CPC = "trigger_cpc_spike"
+
+# 페이싱 이탈 배수 — anomaly_feed.SPEND_SPIKE_RATIO/SPEND_DROP_RATIO(Phase3, codex review
+# 통과 완료)와 동일한 "사람이 한 번 볼 만큼 크게 움직였다"는 상식적 배수(2배/절반) 전례를
+# 그대로 재사용한다(자의적 신규 상수 발명 대신 기존 승인 임계값 재사용). 실제 페이스(당일
+# 누적소진÷일예산) vs 이론적 선형 페이스(경과시간÷24h) 비율로 판정.
+PACE_OVERPACE_RATIO = Decimal("2")
+PACE_UNDERPACE_RATIO = Decimal("0.5")
+_MIN_HOUR_FOR_UNDERPACE = 12  # 오전 중엔 안 써도 정상 페이스라 오탐 방지(정오 이후만 underpace 판정)
+
+# CPC 급등 — 이번 시간 순증분 CPC vs 최근 7일(anomaly_feed.FRESHNESS_BASELINE_LOOKBACK_DAYS와
+# 동일 전례) 같은 캠페인의 평균 CPC. 배수도 anomaly_feed와 동일(2배) 재사용.
+CPC_SPIKE_LOOKBACK_DAYS = 7
+CPC_SPIKE_RATIO = Decimal("2")
+_MIN_CLICKS_FOR_CPC = 5  # 소수 클릭 표본의 CPC는 노이즈(1클릭 고가=오탐) — D-NAO-9 모수게이트 정신 재사용
+
+# 쿨다운 — 같은 (proposal_type, campaign_id) 재알림 최소 간격(알림 피로 방지, D-NAO-19-②
+# "빈번한 변경 비권장" 정신을 재알림 빈도에 적용). MOP Pro 실측(docs/references/24,
+# "Pro=시간별·5회+"=일 5회 이상 조정)을 알림 빈도 상한으로 채택 — 24h/5회=4.8h, 보수적으로
+# 반올림한 5시간(그 이상 잦은 재알림은 경쟁 벤치마크 최고빈도보다도 잦아 "알림 피로"로 판단,
+# 자의적 상수 아님).
+TRIGGER_COOLDOWN_HOURS = 5
+
+
+def _latest_snapshot_rows(db: Session, ad_date: date) -> list[NaverHourlySnapshot]:
+    """캠페인별 당일 최신 시각 스냅샷 1행(budget_allocator._latest_hourly_rows와 동일 로직 —
+    SA간 직접 참조 금지(원칙18-6)에 따라 harness 전용으로 별도 구현, 로직은 의도적으로 중복)."""
+    sub = (
+        db.query(
+            NaverHourlySnapshot.campaign_id,
+            sqlfunc.max(NaverHourlySnapshot.snapshot_hour).label("latest_hour"),
+        )
+        .filter(NaverHourlySnapshot.ad_date == ad_date)
+        .group_by(NaverHourlySnapshot.campaign_id)
+        .subquery()
+    )
+    return (
+        db.query(NaverHourlySnapshot)
+        .join(
+            sub,
+            (NaverHourlySnapshot.campaign_id == sub.c.campaign_id)
+            & (NaverHourlySnapshot.snapshot_hour == sub.c.latest_hour),
+        )
+        .filter(NaverHourlySnapshot.ad_date == ad_date)
+        .all()
+    )
+
+
+def find_pacing_anomalies(db: Session, ad_date: date) -> list[dict]:
+    """daily_budget이 설정된 캠페인 중 페이싱(경과시간 대비 소진 속도)이 정상 범위를 벗어난 것.
+
+    expected_pace = 스냅샷 실제 경과시간(snapshot_at의 시:분)÷24h(그 시각까지 "정상"이라면
+    선형으로 이만큼 썼어야 함) — codex 지적: snapshot_hour(정수 시각)만 쓰고 +1로 시간이
+    "완료"됐다고 가정하면, 예를 들어 10:07에 수집된 스냅샷이 실제 경과 10.12/24h가 아니라
+    11/24h로 계산돼 overpace 판정이 늦어지고 underpace 판정이 약해진다 — snapshot_at의 분
+    단위까지 반영해 실제 경과시간으로 계산한다.
+    actual_pace = 당일 누적cost/daily_budget. ratio=actual/expected. overpace(≥2배)는 이 속도로
+    가면 예산이 하루 중 일찍 소진될 수 있다는 신호, underpace(정오 이후·≤0.5배)는 예산을
+    다 못 쓸 수 있다는 신호 — 둘 다 원인은 판단하지 않는다(추정 금지, 사실만 알림).
+    반환: [{campaign_id, ad_date, hour, cost, daily_budget, actual_pace, expected_pace, ratio, kind}],
+    |ratio-1| 내림차순.
+    """
+    rows = _latest_snapshot_rows(db, ad_date)
+    out = []
+    for r in rows:
+        if r.daily_budget is None or r.daily_budget <= 0:
+            continue
+        elapsed_minutes = r.snapshot_at.hour * 60 + r.snapshot_at.minute
+        expected_pace = Decimal(elapsed_minutes) / Decimal(24 * 60)
+        if expected_pace <= 0:
+            continue  # 자정 직후(경과 0분)는 비교 불가 — 다음 시간대에 재판정
+        actual_pace = Decimal(r.cost) / Decimal(r.daily_budget)
+        ratio = (actual_pace / expected_pace).quantize(_Q4)
+        if ratio >= PACE_OVERPACE_RATIO:
+            kind = "overpace"
+        elif r.snapshot_hour >= _MIN_HOUR_FOR_UNDERPACE and ratio <= PACE_UNDERPACE_RATIO:
+            kind = "underpace"
+        else:
+            continue
+        out.append({
+            "campaign_id": r.campaign_id, "ad_date": ad_date.isoformat(), "hour": r.snapshot_hour,
+            "cost": r.cost, "daily_budget": r.daily_budget,
+            "actual_pace": float(actual_pace.quantize(_Q4)), "expected_pace": float(expected_pace.quantize(_Q4)),
+            "ratio": float(ratio), "kind": kind,
+        })
+    out.sort(key=lambda x: abs(x["ratio"] - 1), reverse=True)
+    return out
+
+
+def _current_hour_increment_by_campaign(db: Session, ad_date: date) -> dict[str, dict]:
+    """캠페인별 당일 최신 시각의 순증분(cost/clk) — 스냅샷은 누적치라 직전 기록시각과 차분.
+
+    hourly_pacing.hourly_rows()의 누적→증분 변환과 동일 원칙(직전 기록이 없으면 0에서부터
+    증가한 것으로 간주, codex 지적 — 당일 기록이 1개뿐인 캠페인을 통째로 제외하면 하루의
+    첫 스냅샷 시간대가 항상 누락된다). 전체 하루가 아니라 "가장 최근 한 걸음"만 필요해
+    여기서 별도 경량 구현(원칙18-6, SA간 직접 참조 금지) — 클램프(누적 감소 방지)는 동일 적용.
+    """
+    rows = (
+        db.query(NaverHourlySnapshot)
+        .filter(NaverHourlySnapshot.ad_date == ad_date)
+        .order_by(NaverHourlySnapshot.campaign_id, NaverHourlySnapshot.snapshot_hour)
+        .all()
+    )
+    by_campaign: dict[str, list[NaverHourlySnapshot]] = {}
+    for r in rows:
+        by_campaign.setdefault(r.campaign_id, []).append(r)
+
+    out: dict[str, dict] = {}
+    for cid, records in by_campaign.items():
+        latest = records[-1]
+        prev_cost, prev_clk = (records[-2].cost, records[-2].clk) if len(records) >= 2 else (0, 0)
+        inc_cost = max(0, latest.cost - prev_cost)
+        inc_clk = max(0, latest.clk - prev_clk)
+        out[cid] = {"hour": latest.snapshot_hour, "cost": inc_cost, "clk": inc_clk}
+    return out
+
+
+def find_cpc_spikes(
+    db: Session, ad_date: date, *, lookback_days: int = CPC_SPIKE_LOOKBACK_DAYS,
+) -> list[dict]:
+    """캠페인별 이번 시간 순증분 CPC vs 최근 lookback_days일 실측 평균 CPC(naver_ad_daily).
+
+    베이스라인은 추정이 아니라 실측 합계(sum(cost)/sum(clk)) — 표본 클릭이 너무 적으면
+    (_MIN_CLICKS_FOR_CPC 미만) 노이즈로 보고 건너뛴다(D-NAO-9 모수게이트 정신).
+    반환: [{campaign_id, ad_date, hour, current_cpc, baseline_cpc, ratio, clk}], ratio 내림차순.
+    """
+    increments = _current_hour_increment_by_campaign(db, ad_date)
+    if not increments:
+        return []
+
+    window_from = ad_date - timedelta(days=lookback_days)
+    window_to = ad_date - timedelta(days=1)
+    baseline_rows = (
+        db.query(
+            NaverAdDaily.campaign_id,
+            sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.cost), 0),
+            sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.clk), 0),
+        )
+        .filter(
+            NaverAdDaily.ad_date >= window_from, NaverAdDaily.ad_date <= window_to,
+            NaverAdDaily.adgroup_id != BACKFILL_SENTINEL_ADGROUP,
+        )
+        .group_by(NaverAdDaily.campaign_id)
+        .all()
+    )
+    baseline_cpc = {
+        cid: Decimal(cost) / Decimal(clk) for cid, cost, clk in baseline_rows if clk and clk > 0
+    }
+
+    out = []
+    for cid, inc in increments.items():
+        if inc["clk"] < _MIN_CLICKS_FOR_CPC:
+            continue
+        base = baseline_cpc.get(cid)
+        if base is None or base <= 0:
+            continue
+        current_cpc = Decimal(inc["cost"]) / Decimal(inc["clk"])
+        ratio = (current_cpc / base).quantize(_Q4)
+        if ratio < CPC_SPIKE_RATIO:
+            continue
+        out.append({
+            "campaign_id": cid, "ad_date": ad_date.isoformat(), "hour": inc["hour"],
+            "current_cpc": float(current_cpc.quantize(_Q2)), "baseline_cpc": float(base.quantize(_Q2)),
+            "ratio": float(ratio), "clk": inc["clk"],
+        })
+    out.sort(key=lambda x: x["ratio"], reverse=True)
+    return out
+
+
+def _recent_trigger_keys(
+    db: Session, keys: set[tuple[str, str]], now: datetime,
+) -> set[tuple[str, str]]:
+    """keys(=(proposal_type, campaign_id) 후보 전체) 중 TRIGGER_COOLDOWN_HOURS 이내 이미
+    알림된 조합을 1회 배치 쿼리로 조회(codex 지적 — 후보마다 개별 쿼리하면 캠페인 수만큼
+    N+1이 된다).
+
+    status 무관(pending/expired 상관없이) 최근 생성 여부만 본다 — proposal_writer.persist의
+    pending-only dedup과 달리, 이건 "실행 대기 중복 방지"가 아니라 "알림 피로 방지"라 시간
+    기반 쿨다운이 맞는 판단 기준이다.
+
+    ⚠️ NaverProposal.created_at은 server_default=func.now()라 DB 서버(SQLite=UTC, Postgres=
+    세션 타임존)의 시각을 쓴다 — kst_now() 기준 cutoff와 그대로 비교하면 KST(UTC+9) 오프셋만큼
+    어긋나 쿨다운이 사실상 무력화된다(실측 확인). 이 harness가 만드는 제안은 아래 run_hourly가
+    created_at을 kst_now()로 명시적으로 채워 넣어 자체 일관성을 맞춘다(다른 harness의
+    server_default 기반 created_at 관례는 건드리지 않음, 이 쿨다운 비교 전용 스코프).
+    """
+    if not keys:
+        return set()
+    cutoff = now - timedelta(hours=TRIGGER_COOLDOWN_HOURS)
+    proposal_types = {k[0] for k in keys}
+    campaign_ids = {k[1] for k in keys}
+    rows = db.query(NaverProposal.proposal_type, NaverProposal.campaign_id).filter(
+        NaverProposal.proposal_type.in_(proposal_types),
+        NaverProposal.campaign_id.in_(campaign_ids),
+        NaverProposal.created_at >= cutoff,
+    ).all()
+    return {(pt, cid) for pt, cid in rows if (pt, cid) in keys}
+
+
+def _pacing_proposal(item: dict) -> dict:
+    kind_label = "과속(예산 조기소진 우려)" if item["kind"] == "overpace" else "저속(예산 소진 지연)"
+    rationale = (
+        f"[trigger_watch] 페이싱 이탈 {kind_label} — {item['ad_date']} {item['hour']}시 기준 "
+        f"소진 {item['cost']}원/{item['daily_budget']}원(실제페이스={item['actual_pace']}, "
+        f"이론선형페이스={item['expected_pace']}, 배수={item['ratio']})."
+    )
+    return {
+        "proposal_type": _PROPOSAL_TYPE_PACING,
+        "target_type": "campaign", "target_id": item["campaign_id"], "campaign_id": item["campaign_id"],
+        "rationale": rationale,
+        "expected_effect": (
+            "정보성 신호 — 실행 대상 아님(빠른 루프 관찰, D-NAO-4). "
+            "입찰/예산 방향 결정은 08:00 느린 루프(growth_sweeper/budget_allocator) 소관."
+        ),
+        "status": "pending",
+    }
+
+
+def _cpc_proposal(item: dict) -> dict:
+    rationale = (
+        f"[trigger_watch] CPC 급등 — {item['ad_date']} {item['hour']}시 이번시간 "
+        f"CPC={item['current_cpc']}원 vs 최근 {CPC_SPIKE_LOOKBACK_DAYS}일 평균 "
+        f"CPC={item['baseline_cpc']}원(배수={item['ratio']}, 클릭 {item['clk']})."
+    )
+    return {
+        "proposal_type": _PROPOSAL_TYPE_CPC,
+        "target_type": "campaign", "target_id": item["campaign_id"], "campaign_id": item["campaign_id"],
+        "rationale": rationale,
+        "expected_effect": (
+            "정보성 신호 — 실행 대상 아님(빠른 루프 관찰, D-NAO-4). "
+            "입찰 방향 결정은 08:00 느린 루프(bid_simulator) 소관."
+        ),
+        "status": "pending",
+    }
+
+
+def run_hourly(db: Session, *, ad_date: date | None = None) -> dict:
+    """매시 :05 snapshot_naver_ad_hourly_job 직후 실행 — 페이싱 이탈 + CPC 급등 감지 →
+    쿨다운 통과분만 즉시 제안 생성 + Slack. 순위 이탈은 이번 스코프 제외(모듈 docstring 참조).
+    """
+    now = kst_now()
+    ad_date = ad_date or kst_today()
+
+    pacing = find_pacing_anomalies(db, ad_date)
+    cpc = find_cpc_spikes(db, ad_date)
+
+    candidates: list[tuple[str, dict, Callable[[dict], dict]]] = (
+        [(_PROPOSAL_TYPE_PACING, item, _pacing_proposal) for item in pacing]
+        + [(_PROPOSAL_TYPE_CPC, item, _cpc_proposal) for item in cpc]
+    )
+
+    recent = _recent_trigger_keys(db, {(pt, item["campaign_id"]) for pt, item, _ in candidates}, now)
+    proposals: list[dict] = []
+    cooled_down = 0
+    for proposal_type, item, builder in candidates:
+        if (proposal_type, item["campaign_id"]) in recent:
+            cooled_down += 1
+            continue
+        proposals.append(builder(item))
+
+    saved: list[NaverProposal] = []
+    try:
+        for p in proposals:
+            obj = NaverProposal(created_at=now, **p)  # _within_cooldown과 동일 시계(kst_now) 고정
+            db.add(obj)
+            saved.append(obj)
+        db.flush()
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    notify_result = {"sent": False, "reason": "no_proposals", "slack_ts": None, "proposal_count": 0}
+    if proposals:
+        try:
+            notify_result = slack_notifier.notify(proposals)
+        except Exception as e:  # noqa: BLE001 — slack 실패는 저하만, 제안 저장은 이미 끝남
+            log.exception("trigger_watch slack 발송 실패: %s", e)
+
+    result = {
+        "ad_date": ad_date.isoformat(), "pacing_anomalies": len(pacing), "cpc_spikes": len(cpc),
+        "cooled_down": cooled_down, "generated": len(saved), "slack": notify_result,
+    }
+    log.info("trigger_watch run_hourly: %s", result)
+    return result

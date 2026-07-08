@@ -242,6 +242,25 @@ def snapshot_naver_ad_hourly_job():
         db.close()
 
 
+def trigger_watch_job():
+    """네이버 SA 조건발동 즉시 알림 — 페이싱 이탈 + CPC 급등 (매시 :07, 스냅샷 :05 직후).
+
+    빠른 루프(D-NAO-4 관찰·제어) — 정시 08:00 proposal_pipeline(느린 루프)과 무관하게
+    독립 실행. 순위 이탈은 실시간 데이터 부재로 이번 스코프 제외(trigger_watch.py 참조).
+    """
+    db = _get_own_db_session()
+    try:
+        from app.services.naver_ad.trigger_watch import run_hourly
+
+        result = run_hourly(db)
+        log.info("[스케줄러] naver trigger_watch: %s", result)
+    except Exception as e:
+        log.exception("[스케줄러] trigger_watch_job 에러: %s", e)
+        raise
+    finally:
+        db.close()
+
+
 def sync_naver_entity_job():
     """네이버 SA 엔티티(캠페인/그룹/키워드) 인벤토리 동기화 (07:35 KST, P2-S1)."""
     db = _get_own_db_session()
@@ -773,6 +792,7 @@ def _ensure_default_states(db):
         ("sync_naver_sa_ad_costs", "0 7 * * *"),
         ("sync_naver_ad_daily", "30 7 * * *"),      # 네이버 SA 일별 성과+BEP (트랙 P0)
         ("snapshot_naver_ad_hourly", "5 * * * *"),  # 네이버 SA 시간별 스냅샷 (빠른 루프)
+        ("trigger_watch", "7 * * * *"),             # 조건발동 즉시알림(페이싱·CPC급등, 트랙 P4)
         ("sync_naver_entity", "35 7 * * *"),        # 엔티티 인벤토리 동기화 (트랙 P2-S1)
         ("sync_naver_search_term", "40 7 * * *"),   # 검색어 단위 성과 수집 (트랙 P2-S1)
         ("sync_naver_keyword_volume", "0 9 * * 0"), # 저클릭 키워드 월검색량 (주1회, 일요일)
@@ -830,6 +850,8 @@ def start_scheduler():
                 job_func = sync_naver_ad_daily_job
             elif state.job_name == "snapshot_naver_ad_hourly":
                 job_func = snapshot_naver_ad_hourly_job
+            elif state.job_name == "trigger_watch":
+                job_func = trigger_watch_job
             elif state.job_name == "sync_naver_entity":
                 job_func = sync_naver_entity_job
             elif state.job_name == "sync_naver_search_term":
