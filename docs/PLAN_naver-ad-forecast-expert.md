@@ -90,7 +90,7 @@
 
 ## §7 체크리스트
 
-- [ ] F0a 로컬 사본 캠페인 백필(백테스트 원료)
+- [x] **F0a 로컬 사본 캠페인 백필(백테스트 원료) — 완료 2026-07-08 (admiring-solomon-b4f056)**: prod DB scp 읽기전용 사본(스크래치, prod 원본 무접촉) → additive 마이그레이션 2개 적용(alembic.ini 임시 포인팅→git checkout으로 즉시 원복, 이 워크트리엔 dotenv override=False라 alembic만 별도 처리 필요했음) → `campaign_backfill.backfill_campaign_daily` 실제 네이버 `/stats` API로 180일 백필(43캠페인, 2026-01-09~07-07, 7,740행, cost합 80,335,231원 — SHOPPING 29캠페인/53.2M, WEB_SITE 12캠페인/27.2M, BRAND_SEARCH 2캠페인/0원). **완료기준 둘 다 충족**: ①실단위 기존 리포트 수치(07-04~07-07, `metrics_aggregator.aggregate`) 백필 전/후 byte-identical(sentinel 필터 정상 작동, 이중계상 없음) ②겹치는 10일 구간 재백필로 멱등 교체 확인(재실행 후에도 총 7,740행 유지, 중복 없음). 전체 pytest 738 passed(회귀 0, 코드 변경 없이 기존 SA만 실행). 이 워크트리에 backend/.env 없어 메인 워크트리에서 복사(NAVER 크리덴셜, gitignored·미커밋).
 - [ ] F1 forecast_engine 코어 + 백테스트 + codex review
 - [ ] F2 grain 확장 + 배선 ⓐⓑⓒ + 89K 재검증 (+ 트랙 1-a ④⑤ 처리)
 - [ ] E1 expert_desk 조언자 모드 + 콘솔 뷰 + codex review

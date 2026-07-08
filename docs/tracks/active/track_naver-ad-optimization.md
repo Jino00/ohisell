@@ -145,9 +145,11 @@
 
 - ✅ **듀얼모드 스프린트 Phase 6 완료(2026-07-08, 같은 날 이어서, admiring-solomon-b4f056) — 6-Phase 스프린트 전체 완료**: 신규 SA 4개+Harness `learning_loops.py`+마이그레이션(`x8y9z0a1b2c3`) — 위 체크리스트 항목 참조. codex review 2라운드(High 2건 즉시수정+Medium 1건 즉시수정+1건 대화형 반론 합의). 테스트 37신규, 700→738 pass. **정직 경계**: conversion_maturity 실곡선·전체 학습값의 prod 실데이터 라이브 검증은 이번 세션 prod DB 사본 미확보로 미실시(다음 세션 과제, 원칙22). **다음 = Phase 6 완료 후 승계 큐(트랙 §5, S3a HANDOFF 잔여 항목) — Jino 결정 필요 항목들.**
 
+- ✅ **예측·전문가 스프린트 F0a 완료(2026-07-08, 같은 날 이어서, admiring-solomon-b4f056)**: prod DB scp 읽기전용 사본(스크래치, prod 원본 무접촉) → additive 마이그레이션 2개 적용(`w7x8y9z0a1b2`·`x8y9z0a1b2c3`, alembic.ini를 임시로 스크래치 경로에 포인팅 후 git checkout으로 즉시 원복 — 이 워크트리엔 backend/.env 부재라 메인 워크트리에서 복사, gitignored·미커밋) → `campaign_backfill.backfill_campaign_daily`로 실제 네이버 `/stats` API 180일 백필: **43캠페인·7,740행·2026-01-09~07-07·cost합 80,335,231원**(SHOPPING 29캠페인 53.2M · WEB_SITE 12캠페인 27.2M · BRAND_SEARCH 2캠페인 0원). **완료기준 2개 다 충족**: ①실단위 기존 리포트 수치(07-04~07-07, `metrics_aggregator.aggregate`) 백필 전/후 byte-identical(sentinel 필터로 이중계상 없음 확인) ②겹치는 10일 재백필로 멱등 교체 확인(재실행 후에도 총 7,740행 유지). 전체 pytest 738 passed(코드 변경 없이 기존 SA만 실행 — 회귀 0). 상세: `docs/PLAN_naver-ad-forecast-expert.md` §7. **다음 = F1 forecast_engine 코어**(캠페인 grain 모델+게이트+scorer, 이 백필 데이터가 walk-forward 백테스트 원료).
+
 ## 다음 액션
 
-> **★2026-07-08 개정(D-NAO-24/25)**: 새 세션은 **이 트랙 → `docs/PLAN_naver-ad-forecast-expert.md` 순으로 필독**. 다음 구현 대상 = **예측·전문가 스프린트 F0부터**(구조 승인 완료, 방향 임의 변경 금지). 승계 큐(아래 2번, 관찰모드 개시 등 Jino 결정 항목)는 직교 — 병행 가능.
+> **★2026-07-08 개정(F0a 완료)**: 새 세션은 **이 트랙 → `docs/PLAN_naver-ad-forecast-expert.md` 순으로 필독**. 다음 구현 대상 = **F1 forecast_engine 코어**(F0a에서 확보한 43캠페인×180일 백필 데이터로 walk-forward 백테스트, 나이브 베이스라인 대비 우위 확인 + codex review, 방향 임의 변경 금지). 승계 큐(아래 2번, 관찰모드 개시 등 Jino 결정 항목)는 직교 — 병행 가능.
 > (이전) 2026-07-07 밤 개정(D-NAO-22/23): 듀얼모드 스프린트 — **Phase 1~6 전부 완료(2026-07-08) + prod 89K 재검증 완료.**
 
 1. ~~듀얼모드 완성 스프린트 Phase 1~6 순차 구현~~ **전부 완료**(`docs/PLAN_naver-ad-S3b-dual-mode.md` §4·§7): S3b콘솔→growth_sweeper→budget_allocator+anomaly_feed→trigger_watch→execution_harness골격+change_log→learning_loops, 6개 전부 완료(테스트 626→738, codex review 매 Phase 통과).
