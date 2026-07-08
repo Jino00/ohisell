@@ -350,6 +350,31 @@ def run_naver_learning_loops_job():
         db.close()
 
 
+def generate_expert_desk_job():
+    """전문가(Ava) 검토 데스크 — E1a expert_desk.run_daily (08:05 KST, generate_naver_proposals
+    08:00 직후, 계획서 §8). AI_office·실 claude 무의존(E1a 자족) — invoke 인자를 넘기지 않아
+    ava_reviewer 기본값인 실 claude CLI 어댑터가 그대로 쓰인다. 각 단계는 expert_desk 자체가
+    격리하므로(learning_loops와 동일 원칙) 이 잡은 그 결과를 로그만 남긴다.
+
+    codex review 발견(2026-07-09, P1 논의): generate_naver_proposals(08:00)가 5분 안에 커밋을
+    못 마치면 이 잡이 그날 새로 생성된 제안 일부를 놓칠 수 있다(briefing_builder가 그 시점의
+    pending 전체를 읽음). 단, 유실이 아니라 지연이다 — 놓친 제안은 여전히 pending이라 다음날
+    08:05에 자동으로 재포함된다. 08:05는 계획서에 명시된 값(Jino 승인)이라 이 태스크에서
+    임의로 바꾸지 않음 — 실측 runtime 확인 후 필요시 조정 대상(추정 금지).
+    """
+    db = _get_own_db_session()
+    try:
+        from app.services.naver_ad.expert_desk import run_daily
+
+        result = run_daily(db)
+        log.info("[스케줄러] naver expert_desk: %s", result["stage_status"])
+    except Exception as e:
+        log.exception("[스케줄러] generate_expert_desk_job 에러: %s", e)
+        raise
+    finally:
+        db.close()
+
+
 def run_naver_forecast_engine_job():
     """네이버 SA 캠페인 grain 예측 엔진 (07:50 KST, entity/search_term 수집 이후·제안 08:00 이전, F1).
 
@@ -839,6 +864,7 @@ def _ensure_default_states(db):
         ("sync_naver_keyword_volume", "0 9 * * 0"), # 저클릭 키워드 월검색량 (주1회, 일요일)
         ("run_naver_forecast_engine", "50 7 * * *"),  # 캠페인 grain 예측엔진(게이트→모델→채점, F1)
         ("generate_naver_proposals", "0 8 * * *"),  # 네이버 SA 제안 자동생성(진단→시뮬→제안→Slack, 트랙 P2-S3)
+        ("generate_expert_desk", "5 8 * * *"),  # 전문가(Ava) 검토 데스크(E1a, PLAN §8)
         ("run_naver_learning_loops", "10 8 * * *"),  # 학습루프 4종(성적표·예측편향·전환성숙·시간대분포, 트랙 P6)
         ("sync_naver_settlement", "25 5 * * *"),
         ("sync_naver_case_settlement", "30 5 * * *"),
@@ -907,6 +933,8 @@ def start_scheduler():
                 job_func = generate_naver_proposals_job
             elif state.job_name == "run_naver_learning_loops":
                 job_func = run_naver_learning_loops_job
+            elif state.job_name == "generate_expert_desk":
+                job_func = generate_expert_desk_job
             elif state.job_name == "sync_naver_settlement":
                 job_func = sync_naver_settlement_job
             elif state.job_name == "sync_naver_case_settlement":
