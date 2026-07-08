@@ -1654,6 +1654,49 @@ class NaverLearningState(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
+class NaverConversionMaturitySnapshot(Base):
+    """전환 성숙곡선 원료 적립 (D-NAO-14 학습루프3, Phase 6). naver_ad_daily는 upsert라 이력이
+    안 남아(모델 docstring 참조) 이 테이블이 매일 "ad_date로부터 며칠째(days_since)에 얼마가
+    찍혀 있었는지"를 별도 적립한다. grain: (ad_date, days_since) — 같은 ad_date라도 오늘 관측한
+    days_since 값은 매일 1씩 증가하며 새 행으로 쌓인다(덮어쓰지 않음, 축적 자체가 목적).
+    """
+
+    __tablename__ = "naver_conversion_maturity_snapshot"
+    __table_args__ = (
+        UniqueConstraint("ad_date", "days_since", name="uq_naver_conv_maturity_snapshot"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ad_date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)
+    days_since: Mapped[int] = mapped_column(Integer, nullable=False)
+    direct_amt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    indirect_amt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_amt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    snapshot_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class NaverHourlyPatternHistory(Base):
+    """요일×시간(168칸) 성과 분포 무기한 누적 (D-NAO-14 학습루프5, Phase 6). naver_hourly_snapshot
+    은 7일 롤링 삭제(hourly_snapshot.py _RETAIN_DAYS)라 여러 주 누적이 불가능 — 이 테이블이
+    매일 전날의 시간대별 순증분(hourly_pacing 계산)을 요일×시간 버킷에 무기한 합산한다.
+    grain: (weekday, hour). weekday=Python date.weekday()(0=월~6=일).
+    """
+
+    __tablename__ = "naver_hourly_pattern_history"
+    __table_args__ = (
+        UniqueConstraint("weekday", "hour", name="uq_naver_hourly_pattern_history"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    weekday: Mapped[int] = mapped_column(Integer, nullable=False)
+    hour: Mapped[int] = mapped_column(Integer, nullable=False)
+    clk_sum: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cost_sum: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    sample_days: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_folded_date: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
 # ══════════════════════════════════════════════════════════════════
 # P2-S1 데이터 기반 (계획서 §P2-S1, D-NAO-16~21 실행 전제)
 # 실측 근거: docs/references/22_naver_sa_p2s1_recon.md

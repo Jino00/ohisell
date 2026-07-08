@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session
 
@@ -20,6 +20,10 @@ from app.models import NaverCampaignSettings, NaverChangeLog, NaverProposal
 from app.utils.kst import kst_now
 
 log = logging.getLogger(__name__)
+
+# D+14 검증 예정일(D-NAO-14 "D+7/14 실측" · proposal_pipeline._PROPOSAL_EXPIRY_DAYS와 동일
+# 하한 채택) — proposal_scoreboard(Phase 6 루프1)가 이 날짜 이후 실측 대조를 수행한다.
+VERIFY_DAYS = 14
 
 
 class OptimizerGuardError(Exception):
@@ -128,6 +132,7 @@ def execute(db: Session, proposal_id: int, *, dry_run: bool = True, now: datetim
         campaign_id=proposal.campaign_id, action=action,
         rationale=proposal.rationale, predicted_json=proposal.expected_effect,
         proposal_id=proposal.id, dry_run=effective_dry_run, executed_at=now,
+        verify_date=(now + timedelta(days=VERIFY_DAYS)).date(),
     )
     db.add(log_entry)
     db.flush()

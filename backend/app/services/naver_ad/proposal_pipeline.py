@@ -13,7 +13,7 @@ from decimal import Decimal
 from sqlalchemy import func as sqlfunc
 from sqlalchemy.orm import Session
 
-from app.models import NaverAdDaily, NaverEntity, NaverProposal
+from app.models import NaverAdDaily, NaverEntity, NaverLearningState, NaverProposal
 from app.services import naver_sa_ad_fetcher as fetcher
 from app.services.naver_ad import (
     anomaly_feed, bid_simulator, budget_allocator, campaign_target_resolver, diagnosis, growth_sweeper,
@@ -137,9 +137,22 @@ def _make_target_roas_resolver(db: Session, diag: dict):
     return _resolve
 
 
+def _read_estimate_bias_learning_state(db: Session, scope_key: str) -> dict | None:
+    """estimate_calibrator(Phase 6 학습루프2)가 축적한 편향계수를 읽어 bid_simulator에 전달할
+    learning_state 묶음으로 변환. 회당 1회만 조회(N+1 방지) — 없으면 None(미보정, 정상 상태:
+    estimate_calibrator가 아직 한 번도 못 돌았거나 모수게이트 미달인 초기 상태)."""
+    row = db.query(NaverLearningState).filter(
+        NaverLearningState.scope == "keyword_type", NaverLearningState.scope_key == scope_key,
+        NaverLearningState.metric == "estimate_bias",
+    ).first()
+    if row is None or row.current_value is None:
+        return None
+    return {"estimate_bias": {"factor": row.current_value, "confidence": row.confidence}}
+
+
 def _fill_predicted_clicks(
     db: Session, sims: dict[tuple[str, str], dict], call_inputs: dict[tuple[str, str], dict],
-    agg: dict, correction_factor: Decimal,
+    agg: dict, correction_factor: Decimal, *, learning_state: dict | None = None,
 ) -> None:
     """확정된 recommended_bid로 performance-bulk를 조회해 예측클릭을 채워 sims를 in-place 갱신.
 
@@ -189,7 +202,7 @@ def _fill_predicted_clicks(
             inputs["keyword_row"], inputs["target_roas"],
             group_agg=inputs["group_agg"], campaign_agg=inputs["campaign_agg"],
             account_agg=agg["account"], correction_factor=correction_factor, estimate=estimate,
-            is_new_or_growth=inputs.get("is_new_or_growth", False),
+            learning_state=learning_state, is_new_or_growth=inputs.get("is_new_or_growth", False),
         )
 
 
@@ -276,7 +289,9 @@ def compute_bid_sims(db: Session, diag: dict, date_from: date, as_of: date, *, a
 
     # 2차 패스 — 확정된 recommended_bid로 성과(예측클릭) estimate를 조회해 expected_effect를
     # 채운다(codex 지적: 이전엔 이 경로가 전혀 연결 안 돼 expected_effect가 항상 "미조회").
-    _fill_predicted_clicks(db, bid_sims, call_inputs, agg, correction_factor)
+    # learning_state: estimate_calibrator(Phase 6 루프2) 편향계수 — 예측클릭 표시만 보정.
+    learning_state = _read_estimate_bias_learning_state(db, growth_sweeper.WEB_SITE)
+    _fill_predicted_clicks(db, bid_sims, call_inputs, agg, correction_factor, learning_state=learning_state)
 
     return bid_sims
 
@@ -347,7 +362,8 @@ def compute_growth_sims(
         )
 
     # 2차 패스 — compute_bid_sims와 동일 공통 헬퍼(codex 회귀 이력 있는 경로, 단일 구현 재사용).
-    _fill_predicted_clicks(db, sims, call_inputs, agg, correction_factor)
+    learning_state = _read_estimate_bias_learning_state(db, growth_sweeper.WEB_SITE)
+    _fill_predicted_clicks(db, sims, call_inputs, agg, correction_factor, learning_state=learning_state)
 
     return {"candidates": top, "sims": sims, "all_candidates": all_candidates}
 

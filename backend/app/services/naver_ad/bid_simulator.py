@@ -95,8 +95,12 @@ def simulate_bid(
       취급하지 않음, codex #11):
       {"rank_bid": int|None, "rank_position": int|None, "device": str|None,
        "predicted_clicks": int|None}. None 전체를 넘기면 estimate 완전 미조회로 처리.
-    learning_state: 예약 파라미터(P3+ 학습 환류가 target_roas 등을 조정할 자리, D-NAO-14 —
-      S3는 optional 읽기 자리만 확보, 계산에 사용하지 않음).
+    learning_state: {"estimate_bias": {"factor": Decimal, "confidence": Decimal}} (Phase 6
+      학습루프2, D-NAO-14) — factor=실측/예측 클릭 비율(estimate_calibrator 산출). estimate의
+      predicted_clicks에 곱해 expected_effect_text의 "예상매출" 표시만 보정한다 —
+      recommended_bid/economic_ceiling 계산에는 관여하지 않는다(학습은 제안 "품질"만 높이고
+      권한을 넓히지 않는다는 D-NAO-14 경계 — 입찰 자체는 여전히 RPC/target_roas 산식만 따름).
+      None이거나 factor<=0이면 미보정(원본 predicted_clicks 그대로).
     is_new_or_growth: D-NAO-20(신규/육성 100% 진입, 쿠팡의 ×0.5 변경페널티는 네이버엔 적용 안 함)
       라벨만 부착 — 계산 분기 없음, 표기 목적.
 
@@ -128,9 +132,16 @@ def simulate_bid(
     device_note = f"기기가정={device}(지배기기)" if device else "기기가정 없음(estimate 미조회)"
     predicted_clicks = estimate.get("predicted_clicks")
     if predicted_clicks is not None:
-        predicted_revenue = (Decimal(predicted_clicks) * rpc_corrected).quantize(_Q4)
+        bias = (learning_state or {}).get("estimate_bias") or {}
+        bias_factor = bias.get("factor")
+        calibrated = (
+            (Decimal(predicted_clicks) * bias_factor).quantize(_Q4)
+            if bias_factor is not None and bias_factor > 0 else Decimal(predicted_clicks)
+        )
+        predicted_revenue = (calibrated * rpc_corrected).quantize(_Q4)
+        bias_note = f", 학습보정계수={bias_factor}(estimate_calibrator)" if bias_factor is not None and bias_factor > 0 else ""
         expected_effect_text = (
-            f"추정클릭 {predicted_clicks} × 보정RPC {rpc_corrected}원 ≈ 예상매출 {predicted_revenue}원"
+            f"추정클릭 {predicted_clicks}{bias_note} × 보정RPC {rpc_corrected}원 ≈ 예상매출 {predicted_revenue}원"
             f"(estimate는 클릭/비용만 반환·전환 아님 — 가정 기반 범위, false precision 아님) {device_note}"
         )
     else:

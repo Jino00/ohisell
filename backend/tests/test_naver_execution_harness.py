@@ -1,6 +1,8 @@
 # test_naver_execution_harness.py — 듀얼모드 스프린트 Phase 5 naver_execution_harness 단위테스트
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -92,6 +94,7 @@ def test_execute_dry_run_records_change_log(db, proposal_type, expected_action):
     assert log_entry.campaign_id == "cmp1"
     assert log_entry.proposal_id == p.id
     assert log_entry.predicted_json == "테스트 예상효과"
+    assert log_entry.verify_date == (log_entry.executed_at.date() + timedelta(days=14))
 
     db.refresh(p)
     assert p.executed_change_log_id == log_entry.id

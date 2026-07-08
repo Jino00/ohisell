@@ -142,6 +142,35 @@ def test_simulate_bid_expected_effect_text_uses_predicted_clicks():
     assert "전환 아님" in out["expected_effect_text"]  # false precision 방지 문구
 
 
+def test_simulate_bid_applies_estimate_bias_from_learning_state():
+    """Phase 6 학습루프2 — learning_state의 estimate_bias factor가 predicted_revenue
+    표시에만 반영되고 recommended_bid/economic_ceiling은 그대로여야 한다."""
+    base = sim.simulate_bid(**_base_kwargs(
+        estimate={"rank_bid": 400, "predicted_clicks": 100, "device": "MOBILE"},
+    ))
+    biased = sim.simulate_bid(**_base_kwargs(
+        estimate={"rank_bid": 400, "predicted_clicks": 100, "device": "MOBILE"},
+        learning_state={"estimate_bias": {"factor": Decimal("2"), "confidence": Decimal("1")}},
+    ))
+    assert biased["recommended_bid"] == base["recommended_bid"]
+    assert biased["economic_ceiling"] == base["economic_ceiling"]
+    assert "학습보정계수=2" in biased["expected_effect_text"]
+    assert "학습보정계수" not in base["expected_effect_text"]
+
+
+def test_simulate_bid_ignores_nonpositive_or_missing_bias_factor():
+    out_none = sim.simulate_bid(**_base_kwargs(
+        estimate={"rank_bid": 400, "predicted_clicks": 100, "device": "MOBILE"},
+        learning_state={"estimate_bias": {"factor": None, "confidence": None}},
+    ))
+    out_zero = sim.simulate_bid(**_base_kwargs(
+        estimate={"rank_bid": 400, "predicted_clicks": 100, "device": "MOBILE"},
+        learning_state={"estimate_bias": {"factor": Decimal("0"), "confidence": Decimal("1")}},
+    ))
+    assert "학습보정계수" not in out_none["expected_effect_text"]
+    assert "학습보정계수" not in out_zero["expected_effect_text"]
+
+
 def test_simulate_bid_is_new_or_growth_label_only_no_math_change():
     base = sim.simulate_bid(**_base_kwargs(estimate={"rank_bid": 400}))
     labeled = sim.simulate_bid(**_base_kwargs(estimate={"rank_bid": 400}, is_new_or_growth=True))

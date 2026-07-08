@@ -329,6 +329,27 @@ def generate_naver_proposals_job():
         db.close()
 
 
+def run_naver_learning_loops_job():
+    """네이버 SA 학습루프 4종 일괄 실행(08:10 KST, generate_naver_proposals 08:00 직후, 트랙 P6).
+
+    proposal_scoreboard(제안 정확도)·estimate_calibrator(예측편향)·conversion_maturity(전환
+    성숙곡선)·hourly_pattern(요일×시간 분포) — learning_loops harness가 단계격리로 조합
+    실행하므로 이 잡은 그 결과를 로그만 남긴다(harness 자체는 예외를 던지지 않음, 각 루프
+    실패는 stage_status로만 표면화 — proposal_pipeline과 동일 원칙).
+    """
+    db = _get_own_db_session()
+    try:
+        from app.services.naver_ad.learning_loops import run_all
+
+        result = run_all(db)
+        log.info("[스케줄러] naver learning_loops: %s", result["stage_status"])
+    except Exception as e:
+        log.exception("[스케줄러] run_naver_learning_loops_job 에러: %s", e)
+        raise
+    finally:
+        db.close()
+
+
 def sync_meta_ad_costs_job():
     """Meta 광고비 어제치 자동 적재 (07:00 KST)"""
     db = _get_own_db_session()
@@ -797,6 +818,7 @@ def _ensure_default_states(db):
         ("sync_naver_search_term", "40 7 * * *"),   # 검색어 단위 성과 수집 (트랙 P2-S1)
         ("sync_naver_keyword_volume", "0 9 * * 0"), # 저클릭 키워드 월검색량 (주1회, 일요일)
         ("generate_naver_proposals", "0 8 * * *"),  # 네이버 SA 제안 자동생성(진단→시뮬→제안→Slack, 트랙 P2-S3)
+        ("run_naver_learning_loops", "10 8 * * *"),  # 학습루프 4종(성적표·예측편향·전환성숙·시간대분포, 트랙 P6)
         ("sync_naver_settlement", "25 5 * * *"),
         ("sync_naver_case_settlement", "30 5 * * *"),
         ("sync_meta_ad_costs", "0 7 * * *"),
@@ -860,6 +882,8 @@ def start_scheduler():
                 job_func = sync_naver_keyword_volume_job
             elif state.job_name == "generate_naver_proposals":
                 job_func = generate_naver_proposals_job
+            elif state.job_name == "run_naver_learning_loops":
+                job_func = run_naver_learning_loops_job
             elif state.job_name == "sync_naver_settlement":
                 job_func = sync_naver_settlement_job
             elif state.job_name == "sync_naver_case_settlement":

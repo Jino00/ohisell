@@ -1,7 +1,7 @@
 # Track: 네이버 SA 광고 최적화 시스템 (우리판 MOP)
 
 - 생성: 2026-07-07 (설계 대화 세션, Jino 구조 승인 "그래")
-- 상태: 🟢 Active — 2/6 (**P0+P1 완료**, P2-S1 완료·P2-S2 백엔드+프론트 완료·전체 prod 배포 완료)
+- 상태: 🟢 Active — P0~P2-S3a 완료, **듀얼모드 완성 스프린트(S3b~) 6-Phase 전부 완료(2026-07-08)**. 다음=승계 큐(관찰모드 개시 등 Jino 결정 대기).
 - 계획서: `docs/PLAN_naver-ad-optimization.md`
 - 대시보드 위치: sellC (sellc.ohitech.co.kr = 이 repo frontend)
 
@@ -90,8 +90,8 @@
       - [x] **Phase 3 — budget_allocator + anomaly_feed(완료 2026-07-08, admiring-solomon-b4f056, 구 S3c 흡수)**: `budget_allocator.py`(SA) — 오늘 실시간(hourly_snapshot) 예산 소진(cost≥daily_budget, 실측 비교) && growth_sweeper 잔존볼륨(재조회 없이 재사용) 결합 → `budget_up`(Confirm 게이트, marginal ROAS 인과추정 없음). `anomaly_feed.py`(SA, 경량) — freshness 부분적재(S3a codex 연기분 해소)+소진 급변(2배/0.5배) → `anomaly`/`anomaly_freshness`(정보성). codex review에서 2건 발견·즉시수정(완전중단 캠페인 누락·"오늘/어제" 하드코딩→ISO날짜) — 둘 다 fix전/후 차등테스트로 회귀 재현 검증. 2라운드 이슈없음. 스크래치 카나리(3,000건+예산소진+급증 캠페인)로 신호 산출·재실행 dedup 확인. 테스트 643→666. 상세: `docs/PLAN_naver-ad-S3b-dual-mode.md` §7.
       - [x] **Phase 4 — trigger_watch(완료 2026-07-08, admiring-solomon-b4f056)**: 신규 Harness `trigger_watch.py` — 페이싱 이탈(daily_budget 대비 실제경과시간 기준 소진속도, overpace≥2배/underpace 정오이후·≤0.5배)+CPC 급등(이번시간 순증분 CPC vs naver_ad_daily 7일 실측평균, ≥2배) 감지 → 정보성 제안(`trigger_pacing`/`trigger_cpc_spike`)+Slack, 재알림 쿨다운(5시간, MOP Pro "시간별·5회+" 실측 근거). 스케줄러 매시 :07(스냅샷 :05 직후) 등록. **순위 이탈은 hourly_snapshot에 rank 데이터가 없어(avg_rank는 일별 stat-report 전용) 이번 스코프 제외 — Jino 사전 확인(AskUserQuestion, "소진+CPC만 우선") 후 진행**, hourly_snapshot rank_sum 필드 추가는 향후 재검토. codex review 2라운드 3건 수정(경과시간 정수반올림→분단위 정밀화, 당일 첫스냅샷 증분 스킵→0기준 증분으로 통일, 쿨다운 N+1→배치쿼리) + 1건 대화형 반론 후 동의(스냅샷 신선도 게이트는 Phase4 정확성엔 무관·Phase5 백로그로 이연). 테스트 13신규, 전체 666→680 pass. **라이브 검증(리플레이 시뮬, 원칙22)**: 200개 합성 캠페인(정상197+이상3) 20시간 리플레이 — 오탐 0/197, 이상 3/3 정확 검출, 쿨다운 억제·재개·재실행dedup 전부 확인. 89K 실규모 검증은 미실시(Phase2·3과 동일 한계). 코드: 브랜치 `claude/admiring-solomon-b4f056`, 커밋 예정. **다음 = Phase 5 execution_harness골격+change_log.**
       - [x] **Phase 5 — execution_harness 골격 + change_log(완료 2026-07-08, admiring-solomon-b4f056)**: 신규 마이그레이션(`w7x8y9z0a1b2`, additive — `naver_change_log`에 `dry_run`/`executed_at` 컬럼) + `naver_execution_harness.py`(신규 Harness, 쓰기 유일 초크포인트) — 정보성 유형 거부→`status=='approved'` 하드체크(D-NAO-5)→재실행 방지→`optimizer=='ours'` 실행직전 재검증(D-NAO-13)→`OPEN_ACTIONS`(D-NAO-16 개방순서, 이번 스프린트 항상 빈 집합)로 dry_run 강제→change_log 전건 기록. 실제 네이버 쓰기 API 함수는 미구현(요청 스펙 미실측, 추정 금지). codex review 2라운드 — 1건[High] 지적(승인게이트+재실행방지 누락) 즉시수정, 1건[Low] 독스트링 명확화, 잔여 동시성 지적은 `proposal_writer.persist()`의 기존 "단일크론 가정" 전례와 동일 스코프 판단으로 이번 Phase 제외(호출하는 크론/라우터 자체가 아직 없음). 테스트 20신규, 680→700 pass. 마이그레이션은 기존 스키마 재현+ALTER TABLE 직접검증으로 additive 확인. **다음 = Phase 6 learning_loops.**
-      - [ ] Phase 6 — learning_loops(estimate 보정·전환성숙·시간대 즉시 + 제안 성적표 인프라)
-      - [ ] Phase 6 완료 후 → **직전 HANDOFF 승계 큐 진행**(계획서 §5: 관찰모드 개시 결정·베이스라인 재대조·push 결정·트랙파일 귀속 정리 등)
+      - [x] **Phase 6 — learning_loops(완료 2026-07-08, admiring-solomon-b4f056, 스프린트 마지막 Phase)**: 신규 SA 4개(estimate_calibrator·conversion_maturity·hourly_pattern·proposal_scoreboard) + Harness `learning_loops.py` + 마이그레이션(`x8y9z0a1b2c3`, 신규 테이블 2개 additive) — 위 체크리스트 항목 참조. `bid_simulator.simulate_bid`에 learning_state 소비 배선(표시전용, 입찰계산 불변). **정직 경계 2건**: ①conversion_maturity 실곡선은 이번 세션 적립 시작이라 몇 주 후에나 산출(메커니즘만 완성) ②이번 세션 prod DB 사본 미확보로 라이브 실데이터 검증 못 함(단위테스트만, 다음 세션 재검증 필요). codex review 2라운드 — [High] 2건(KST 타임존 버그, 전/후 비교창 길이 불일치) 즉시수정 + [Medium] 1건(dry_run 롤업 누락) 즉시수정 + 1건(hourly_pattern 백필 멱등성) 대화형 반론 후 동의(호출자 없어 이번 스코프 제외). 테스트 37신규, 700→738 pass. **듀얼모드 완성 스프린트 6-Phase 전부 완료.**
+      - [x] **Phase 6 완료 후 → 직전 HANDOFF 승계 큐 진행**(계획서 §5: 관찰모드 개시 결정·베이스라인 재대조·push 결정·트랙파일 귀속 정리 등) — 아래 "다음 액션" §2 참조, 다음 세션 진행 대상.
 - [ ] **P3 Confirm 실행**: 제외키워드→입찰→예산 순 개방 + change_log + D+7/14 검증 루프
 - [ ] **P4 파수꾼+키워드랩**: 매시간 이상감지·페이싱 + keywordstool 발굴 + 시간대 가중치
 - [ ] **P5 고도화**: 무풍지대 신규 세팅 + 재구축 진단 + 예측정확도 보정 + 자율 확대
@@ -135,13 +135,17 @@
 
 - ✅ **듀얼모드 스프린트 Phase 5 완료(2026-07-08, 같은 날 이어서, admiring-solomon-b4f056)**: `naver_execution_harness.py`(신규 Harness)+마이그레이션(`w7x8y9z0a1b2`) — 위 체크리스트 항목 참조. codex review에서 [High] 승인게이트+재실행방지 누락 지적 → 즉시수정(`ProposalNotApprovedError`/`AlreadyExecutedError`). 테스트 20신규, 680→700 pass. 실제 쓰기 API는 미구현(추정 금지, 별도 스프린트) — 이 harness를 호출하는 크론/라우터도 아직 없음(콘솔 실행버튼 계속 disabled). **다음 = Phase 6 learning_loops(마지막 Phase).**
 
+- ✅ **듀얼모드 스프린트 Phase 6 완료(2026-07-08, 같은 날 이어서, admiring-solomon-b4f056) — 6-Phase 스프린트 전체 완료**: 신규 SA 4개+Harness `learning_loops.py`+마이그레이션(`x8y9z0a1b2c3`) — 위 체크리스트 항목 참조. codex review 2라운드(High 2건 즉시수정+Medium 1건 즉시수정+1건 대화형 반론 합의). 테스트 37신규, 700→738 pass. **정직 경계**: conversion_maturity 실곡선·전체 학습값의 prod 실데이터 라이브 검증은 이번 세션 prod DB 사본 미확보로 미실시(다음 세션 과제, 원칙22). **다음 = Phase 6 완료 후 승계 큐(트랙 §5, S3a HANDOFF 잔여 항목) — Jino 결정 필요 항목들.**
+
 ## 다음 액션
 
-> **★2026-07-07 밤 개정(D-NAO-22/23)**: 새 세션은 **이 트랙 → `docs/PLAN_naver-ad-S3b-dual-mode.md` 순으로 필독** 후 아래 1번부터. 방향 임의 변경 금지(Jino: "이 방향이 바뀌지 않도록", "세션이 바껴도 잊지 않도록 항상 확인하고 세션 시작해"). **Phase 1~5 완료(2026-07-08) — 다음은 Phase 6 learning_loops(마지막 Phase).**
+> **★2026-07-07 밤 개정(D-NAO-22/23)**: 새 세션은 **이 트랙 → `docs/PLAN_naver-ad-S3b-dual-mode.md` 순으로 필독** 후 아래 1번부터. 방향 임의 변경 금지(Jino: "이 방향이 바뀌지 않도록", "세션이 바껴도 잊지 않도록 항상 확인하고 세션 시작해"). **★Phase 1~6 전부 완료(2026-07-08) — 듀얼모드 완성 스프린트 종료. 다음은 승계 큐(아래 2번) — 전부 Jino 결정 필요 항목.**
 
-1. **듀얼모드 완성 스프린트 Phase 1~6 순차 구현** (`docs/PLAN_naver-ad-S3b-dual-mode.md` §4·§7): ~~S3b콘솔~~(Phase 1 완료) → ~~growth_sweeper~~(Phase 2 완료) → ~~budget_allocator+anomaly_feed~~(Phase 3 완료) → ~~trigger_watch~~(Phase 4 완료) → ~~execution_harness골격+change_log~~(Phase 5 완료) → **learning_loops(다음, 마지막 Phase)**. 매 Phase: 전체 pytest+codex review+트랙 갱신+라이브 검증(원칙22).
-1-a. **Phase 6 착수 시 반영 필요(이전 Phase에서 이연된 항목)**: ①trigger_watch hourly_snapshot 신선도 게이트 부재(Phase4→Phase5 이연했으나 Phase5는 execute()를 호출하는 크론/라우터를 만들지 않아 아직도 실질 영향 없음 — 실제 실행 배선 시점에 재검토) ②execution_harness의 동시성(레이스) 하드닝은 여전히 미적용(호출자가 아직 없어 무해, 실행 배선 시 DB 유니크 제약 검토).
-2. **Phase 6 완료 후 → 직전 HANDOFF(S3a) 승계 큐** (계획서 §5, 순서만 뒤로 — 삭제 아님): ①관찰모드 개시 결정(Jino, optimizer='ours' 카나리 — MOP A/B 대조 포함) ②15일 축적 후 베이스라인 재대조 ③브랜치 push 여부(Jino) ④트랙/계획서 파일 귀속 정리 ⑤campaign_target_resolver ②(D-S3-b 보류 유지) ⑥첫 제안서에 S26 런칭 질문.
+1. ~~듀얼모드 완성 스프린트 Phase 1~6 순차 구현~~ **전부 완료**(`docs/PLAN_naver-ad-S3b-dual-mode.md` §4·§7): S3b콘솔→growth_sweeper→budget_allocator+anomaly_feed→trigger_watch→execution_harness골격+change_log→learning_loops, 6개 전부 완료(테스트 626→738, codex review 매 Phase 통과).
+1-a. **다음 세션 이관 필요(스프린트 전체에서 이연된 항목, 실행 배선 시점에 재검토)**: ①trigger_watch hourly_snapshot 신선도 게이트 부재 ②execution_harness 동시성(레이스) 하드닝 미적용 ③hourly_pattern 백필/재생 시 멱등성 미보장(3건 전부 "호출자/실행경로가 아직 없어 무해"가 공통 사유 — 실제 배선 전엔 안전).
+1-b. **conversion_maturity 실곡선 재확인**: 이번 세션 적립 시작(스냅샷 0일째) — MATURITY_DAYS(21)+MIN_COHORTS_FOR_CURVE(3)를 채우려면 몇 주 매일 크론이 돌아야 함. 확인만 하면 됨(별도 작업 불요, 크론이 매일 쌓임 — P2-S2 베이스라인 재대조와 동일 패턴).
+1-c. **prod DB 사본 라이브 검증 미실시**: 이번 세션은 네트워크/SSH 접근 없이 로컬 워크트리에서만 작업 — Phase 6(학습값 실계수/실곡선/실지수)뿐 아니라 Phase 2·3·4의 "89K 실규모 미실시"도 여전히 누적 잔여. **다음 세션에서 prod DB 사본 확보 시 스프린트 전체 일괄 재검증 권장.**
+2. **직전 HANDOFF(S3a) 승계 큐** (계획서 §5, Phase 6 완료로 진행 가능해짐 — 순서만 뒤로 미뤄뒀던 것, 삭제 아님): ①관찰모드 개시 결정(Jino, optimizer='ours' 카나리 — MOP A/B 대조 포함) ②15일 축적 후 베이스라인 재대조 ③브랜치 push 여부(Jino) ④트랙/계획서 파일 귀속 정리 ⑤campaign_target_resolver ②(D-S3-b 보류 유지) ⑥첫 제안서에 S26 런칭 질문.
    - **D-S3-a (2026-07-07 Jino 승인)**: S3 분할 = S3a 백엔드 → S3b 프론트(S2 동일 패턴, 단계별 라이브 검증).
    - **D-S3-b (2026-07-07 Jino 승인)**: campaign_target_resolver ②(쇼핑 캠페인/그룹↔상품BEP 연결) **보류 유지** — 계정 기본 target_roas로 제안(관찰 모드 충분, 제안에 target 근거 라벨 부착). ②는 확정 소스(/ncc/ads 소재-상품 연결 or ShoppingProduct master-report) 확보 시 P3+ 별도. 이름 추정 매칭 금지.
    - **D-S3-c (2026-07-07 Jino 승인, plan-eng-review codex 과빌드 지적 반영 — D-NAO 스코프 축소)**: 관찰 모드 S3 = **얇게**. S3a/b는 **bid_simulator(D-NAO-19) + proposal_writer + slack**만. **budget_allocator(marginal ROAS)와 경량 이상피드는 S3c로 연기**(폐기 아님). 근거: ①marginal ROAS는 집계 데이터로 인과≠상관 분리 불가(사전학습 intermittent-demand-short-history) ②이상피드는 원래 "본격 P4" ③학습 루프 1·2는 실행 원료 필요라 관찰 중 휴면 — 무거운 기계보다 제안 품질 증명이 먼저. bid_simulator는 D-NAO-19라 유지(핵심).
