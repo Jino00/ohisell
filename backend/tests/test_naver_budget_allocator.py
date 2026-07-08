@@ -141,6 +141,16 @@ def test_pre_exhaustion_excludes_campaign_without_forecast(db):
     assert out == []
 
 
+def test_pre_exhaustion_excludes_when_forecast_equals_budget(db):
+    """codex review(F2b): pred_cost==daily_budget은 '초과'가 아니라 '딱 맞음' — 사전경보 아님."""
+    db.add(_snap("cmp1", 10, cost=3000, daily_budget=10000))
+    db.add(_forecast("cmp1", pred_cost=10000))  # 정확히 예산과 같음
+    db.commit()
+
+    out = budget_allocator.find_pre_exhaustion_signals(db, AS_OF)
+    assert out == []
+
+
 def test_pre_exhaustion_sorted_by_pred_gap_descending(db):
     db.add(_snap("cmp-small-gap", 10, cost=1000, daily_budget=10000))
     db.add(_forecast("cmp-small-gap", pred_cost=10500))

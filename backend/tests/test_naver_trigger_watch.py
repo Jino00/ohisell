@@ -28,9 +28,9 @@ def db():
         s.close()
 
 
-def _snap(campaign_id, hour, cost, clk=0, daily_budget=None, ad_date=AD_DATE):
+def _snap(campaign_id, hour, cost, clk=0, daily_budget=None, ad_date=AD_DATE, minute=0):
     return NaverHourlySnapshot(
-        snapshot_at=datetime.combine(ad_date, datetime.min.time()).replace(hour=hour),
+        snapshot_at=datetime.combine(ad_date, datetime.min.time()).replace(hour=hour, minute=minute),
         ad_date=ad_date, snapshot_hour=hour, campaign_id=campaign_id,
         campaign_type="WEB_SITE", cost=cost, clk=clk, imp=0, daily_budget=daily_budget,
     )
@@ -95,6 +95,16 @@ def test_pacing_skips_non_today_ad_date(db):
     assert out == []
 
 
+def test_pacing_accepts_explicit_today_to_avoid_midnight_race(db):
+    """codex review(F2b): 자정 경계에서 kst_today()를 함수 내부에서 재계산하면 호출자가 이미
+    확정한 '오늘'과 어긋날 레이스가 있다 — 명시적 today를 받으면 그 값을 신뢰해야 한다."""
+    future = AD_DATE + timedelta(days=1)  # 실제 kst_today()와는 다르지만, 호출자가 today로 확정
+    db.add(_snap("cmp1", 10, cost=10000, daily_budget=10000, ad_date=future))
+    db.commit()
+    out = trigger_watch.find_pacing_anomalies(db, future, today=future)
+    assert len(out) == 1
+
+
 # ── find_pacing_anomalies: 예측곡선 (F2b ⓒ, D-NAO-26) ──
 def _forecast(campaign_id, pred_cost, target_date=AD_DATE):
     return NaverForecastDaily(
@@ -106,21 +116,63 @@ def _forecast(campaign_id, pred_cost, target_date=AD_DATE):
 def test_pacing_uses_forecast_curve_when_available(db):
     """예측(pred_cost)과 hourly_pattern 지출분포가 모두 있으면 선형 대신 곡선 기대치를 쓴다.
 
-    weekday(AD_DATE)의 0~10시 누적비율=25%(1000/4000). pred_cost=10000 → 기대소진=2500원,
-    daily_budget=10000이니 expected_pace=25%. 실제소진=9000원(90%) → 배수=3.6배(overpace).
-    선형모델이었다면 10시=41.7% 기대라 배수=2.16배로도 이미 overpace였겠지만, 이 테스트는
-    곡선이 실제로 다른(더 낮은) expected_pace를 냈다는 걸 배수 차이로 간접 검증한다.
+    codex review(F2b): 곡선도 선형처럼 분 단위로 보간해야 한다(정각에 그 시간 몫을 전부
+    반영하면 정밀도가 낮음) — 9시까지 누적비율=0%, 10시까지=25%(1000/4000). 10:30(반쯤
+    지남) 스냅샷이면 기대비율=0% + (25%-0%)×0.5=12.5%. pred_cost=10000 → 기대소진=1250원,
+    daily_budget=10000이니 expected_pace=12.5%.
     """
     weekday = AD_DATE.weekday()
     db.add(NaverHourlyPatternHistory(weekday=weekday, hour=10, clk_sum=0, cost_sum=1000, sample_days=1))
     db.add(NaverHourlyPatternHistory(weekday=weekday, hour=14, clk_sum=0, cost_sum=3000, sample_days=1))
     db.add(_forecast("cmp1", pred_cost=10000))
-    db.add(_snap("cmp1", 10, cost=9000, daily_budget=10000))
+    db.add(_snap("cmp1", 10, cost=9000, daily_budget=10000, minute=30))
     db.commit()
 
     out = trigger_watch.find_pacing_anomalies(db, AD_DATE)
     assert len(out) == 1
-    assert out[0]["expected_pace"] == pytest.approx(0.25)  # 곡선 기대치(선형이었다면 0.4167)
+    assert out[0]["expected_pace"] == pytest.approx(0.125)  # 곡선 보간 기대치(선형이었다면 0.4375)
+
+
+def test_pacing_curve_at_start_of_hour_uses_prior_hour_cumulative_only(db):
+    """정각(minute=0)이면 이번 시간 몫은 아직 하나도 안 지났으니 이전 시간까지 누적치만 써야 한다.
+
+    hourly_pattern 관측이 14시 셀 하나뿐이면(그 이전 시간은 관측 0) 14:00 정각의 기대비율은
+    0이어야 한다 — 보간 없이 그 시간 전체를 반영했다면(구현 전) 기대비율=100%로 계산돼
+    실제 10%(1000/10000) 소진이 오히려 underpace(오후·저배수)로 오탐됐을 것.
+    """
+    weekday = AD_DATE.weekday()
+    db.add(NaverHourlyPatternHistory(weekday=weekday, hour=14, clk_sum=0, cost_sum=1000, sample_days=1))
+    db.add(_forecast("cmp1", pred_cost=10000))
+    db.add(_snap("cmp1", 14, cost=1000, daily_budget=10000, minute=0))
+    db.commit()
+
+    out = trigger_watch.find_pacing_anomalies(db, AD_DATE)
+    assert out == []  # expected_pace=0(보간) → 자정 직후와 동일하게 비교 불가(스킵)
+
+
+def test_pacing_hourly_pattern_lookup_is_batched_not_n_plus_1(db, monkeypatch):
+    """codex review(F2b): 캠페인이 여러 개여도 hourly_pattern 조회는 시간대별로 캐시돼야 한다."""
+    weekday = AD_DATE.weekday()
+    db.add(NaverHourlyPatternHistory(weekday=weekday, hour=10, clk_sum=0, cost_sum=1000, sample_days=1))
+    db.add(NaverHourlyPatternHistory(weekday=weekday, hour=14, clk_sum=0, cost_sum=3000, sample_days=1))
+    for cid in ("cmp1", "cmp2", "cmp3"):
+        db.add(_forecast(cid, pred_cost=10000))
+        db.add(_snap(cid, 10, cost=9000, daily_budget=10000, minute=30))
+    db.commit()
+
+    calls = {"count": 0}
+    real_fn = trigger_watch.hourly_pattern.expected_cost_fraction
+
+    def _counting(db_, *, weekday, hour):
+        calls["count"] += 1
+        return real_fn(db_, weekday=weekday, hour=hour)
+
+    monkeypatch.setattr(trigger_watch.hourly_pattern, "expected_cost_fraction", _counting)
+
+    trigger_watch.find_pacing_anomalies(db, AD_DATE)
+    # 3개 캠페인이 전부 같은 (weekday, hour=10)이므로 hour 9·10 두 값만 캐시되면 충분(2회) —
+    # 캐시 없이 캠페인마다 2회씩(hour, hour-1) 쿼리했다면 6회가 됐을 것.
+    assert calls["count"] == 2
 
 
 def test_pacing_falls_back_to_linear_without_forecast(db):

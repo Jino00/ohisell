@@ -90,10 +90,20 @@ def _linear_expected_pace(snapshot_at: datetime) -> Decimal:
 
 
 def _curve_expected_pace(
-    forecasts: dict[str, int], campaign_id: str, daily_budget: int, weekday: int, hour: int, db: Session,
+    forecasts: dict[str, int], campaign_id: str, daily_budget: int, snapshot_at: datetime,
+    fraction_at: Callable[[int], "Decimal | None"],
 ) -> Decimal | None:
     """예측곡선(F2b ⓒ, D-NAO-26) — hourly_pattern의 요일별 지출분포 누적비율×오늘 예측(pred_cost)을
     daily_budget에 대한 비율로 환산. 선형모델(균등 소진 가정)보다 실제 소진 곡선에 가까운 기대치.
+
+    codex review(F2b) 지적 반영: 정각(hour:00)에 그 시간 몫을 전부 반영하면(=hour까지의
+    누적비율을 그대로 씀) _linear_expected_pace(분 단위 반영)보다 정밀도가 낮다 — 이전
+    시간까지의 누적비율(hour-1)과 이번 시간까지의 누적비율(hour) 사이를 분 단위로 선형
+    보간한다(hour=0이면 이전 시간이 없으니 0).
+
+    fraction_at: hourly_pattern.expected_cost_fraction(weekday=고정, hour=인자)를 감싼
+    캐시 함수 — 호출자(find_pacing_anomalies)가 캠페인마다 같은 (weekday, hour) 조합을
+    반복 쿼리하지 않도록 메모이즈해서 넘긴다(codex 지적, N+1 방지).
 
     campaign에 오늘자 예측이 없거나(fallback/미가동) hourly_pattern이 그 요일 데이터가 아직
     없으면(초기 상태) None — 호출자가 _linear_expected_pace로 폴백한다(추정 금지, 데이터 없이
@@ -102,13 +112,19 @@ def _curve_expected_pace(
     pred_cost = forecasts.get(campaign_id)
     if pred_cost is None:
         return None
-    fraction = hourly_pattern.expected_cost_fraction(db, weekday=weekday, hour=hour)
-    if fraction is None:
+    hour = snapshot_at.hour
+    frac_curr = fraction_at(hour)
+    if frac_curr is None:
         return None
-    return (fraction * Decimal(pred_cost) / Decimal(daily_budget)).quantize(_Q4)
+    frac_prev = fraction_at(hour - 1) if hour > 0 else Decimal(0)
+    if frac_prev is None:
+        frac_prev = Decimal(0)
+    minute_fraction = Decimal(snapshot_at.minute) / Decimal(60)
+    interpolated = frac_prev + (frac_curr - frac_prev) * minute_fraction
+    return (interpolated * Decimal(pred_cost) / Decimal(daily_budget)).quantize(_Q4)
 
 
-def find_pacing_anomalies(db: Session, ad_date: date) -> list[dict]:
+def find_pacing_anomalies(db: Session, ad_date: date, *, today: date | None = None) -> list[dict]:
     """daily_budget이 설정된 캠페인 중 페이싱(경과시간 대비 소진 속도)이 정상 범위를 벗어난 것.
 
     expected_pace: 오늘자 캠페인 grain 예측(forecast_model_builder pred_cost)과 hourly_pattern
@@ -120,12 +136,16 @@ def find_pacing_anomalies(db: Session, ad_date: date) -> list[dict]:
     반환: [{campaign_id, ad_date, hour, cost, daily_budget, actual_pace, expected_pace, ratio, kind}],
     |ratio-1| 내림차순.
 
-    당일 가드(F2b 1-a④): ad_date가 오늘(kst_today())이 아니면 빈 목록을 반환한다 — 마감된
-    과거일에 이 함수를 돌리면(리플레이/백테스트 등) 그날은 이미 끝났는데도 "아직 못 썼다"는
-    underpace가 대량 오발생한다(실측). 이 harness는 라이브 관찰 전용(D-NAO-4 빠른 루프)이라
-    과거일 재현이 필요하면 별도 분석 스크립트를 써야 한다.
+    당일 가드(F2b 1-a④): ad_date가 오늘이 아니면 빈 목록을 반환한다 — 마감된 과거일에 이
+    함수를 돌리면(리플레이/백테스트 등) 그날은 이미 끝났는데도 "아직 못 썼다"는 underpace가
+    대량 오발생한다(실측). 이 harness는 라이브 관찰 전용(D-NAO-4 빠른 루프)이라 과거일 재현이
+    필요하면 별도 분석 스크립트를 써야 한다.
+    today: "오늘" 판정 기준 — 미지정 시 kst_today(). codex review 지적: 함수 내부에서
+    kst_today()를 다시 계산하면 호출자(run_hourly)가 이미 확정한 시각과 자정 경계에서
+    어긋나는 레이스가 이론상 있다 — run_hourly가 한 번 계산한 값을 명시적으로 넘긴다.
     """
-    if ad_date != kst_today():
+    today = today if today is not None else kst_today()
+    if ad_date != today:
         return []
 
     rows = _latest_snapshot_rows(db, ad_date)
@@ -139,12 +159,20 @@ def find_pacing_anomalies(db: Session, ad_date: date) -> list[dict]:
             NaverForecastDaily.grain == "campaign", NaverForecastDaily.target_date == ad_date,
         ).all()
     }
+    # hour별 hourly_pattern 조회 캐시(codex 지적, N+1 방지) — 캠페인이 몇 개든 (weekday, hour)
+    # 조합당 최대 1쿼리.
+    fraction_cache: dict[int, "Decimal | None"] = {}
+
+    def _fraction_at(hour: int) -> "Decimal | None":
+        if hour not in fraction_cache:
+            fraction_cache[hour] = hourly_pattern.expected_cost_fraction(db, weekday=weekday, hour=hour)
+        return fraction_cache[hour]
 
     out = []
     for r in rows:
         if r.daily_budget is None or r.daily_budget <= 0:
             continue
-        expected_pace = _curve_expected_pace(forecasts, r.campaign_id, r.daily_budget, weekday, r.snapshot_hour, db)
+        expected_pace = _curve_expected_pace(forecasts, r.campaign_id, r.daily_budget, r.snapshot_at, _fraction_at)
         if expected_pace is None:
             expected_pace = _linear_expected_pace(r.snapshot_at)
         if expected_pace <= 0:
@@ -319,9 +347,10 @@ def run_hourly(db: Session, *, ad_date: date | None = None) -> dict:
     쿨다운 통과분만 즉시 제안 생성 + Slack. 순위 이탈은 이번 스코프 제외(모듈 docstring 참조).
     """
     now = kst_now()
-    ad_date = ad_date or kst_today()
+    today = kst_today()  # 한 번만 계산 — find_pacing_anomalies에 그대로 넘겨 자정 경계 레이스 방지(codex 지적)
+    ad_date = ad_date or today
 
-    pacing = find_pacing_anomalies(db, ad_date)
+    pacing = find_pacing_anomalies(db, ad_date, today=today)
     cpc = find_cpc_spikes(db, ad_date)
 
     candidates: list[tuple[str, dict, Callable[[dict], dict]]] = (

@@ -121,7 +121,7 @@ def find_pre_exhaustion_signals(db: Session, ad_date: date) -> list[dict]:
         if r.daily_budget is None or r.daily_budget <= 0 or r.cost >= r.daily_budget:
             continue
         pred_cost = forecasts.get(r.campaign_id)
-        if pred_cost is None or pred_cost < r.daily_budget:
+        if pred_cost is None or pred_cost <= r.daily_budget:
             continue
         signals.append({
             "campaign_id": r.campaign_id, "campaign_type": r.campaign_type,
