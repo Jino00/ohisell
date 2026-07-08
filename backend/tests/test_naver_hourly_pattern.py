@@ -121,6 +121,40 @@ def test_compute_bid_weight_empty_when_no_history(db):
     assert hourly_pattern.compute_bid_weight_recommendations(db) == []
 
 
+# ── expected_cost_fraction (F2b ⓒ, D-NAO-26) ──
+def test_expected_cost_fraction_cumulative_up_to_hour(db):
+    """0~hour(포함) cost_sum ÷ 전체 24시간 cost_sum — 시간대별 지출분포 곡선의 누적 비율."""
+    db.add(NaverHourlyPatternHistory(weekday=1, hour=10, clk_sum=0, cost_sum=1000, sample_days=1))
+    db.add(NaverHourlyPatternHistory(weekday=1, hour=14, clk_sum=0, cost_sum=3000, sample_days=1))
+    db.commit()
+
+    frac = hourly_pattern.expected_cost_fraction(db, weekday=1, hour=10)
+    assert frac == pytest.approx(0.25)  # 1000/4000
+
+    frac_full = hourly_pattern.expected_cost_fraction(db, weekday=1, hour=14)
+    assert frac_full == pytest.approx(1.0)
+
+
+def test_expected_cost_fraction_none_when_no_data_for_weekday(db):
+    assert hourly_pattern.expected_cost_fraction(db, weekday=1, hour=10) is None
+
+
+def test_expected_cost_fraction_none_when_total_cost_zero(db):
+    db.add(NaverHourlyPatternHistory(weekday=1, hour=10, clk_sum=5, cost_sum=0, sample_days=1))
+    db.commit()
+    assert hourly_pattern.expected_cost_fraction(db, weekday=1, hour=10) is None
+
+
+def test_expected_cost_fraction_excludes_unobserved_cells(db):
+    """sample_days=0(관측 안 됨) 셀은 분모/분자 계산에서 제외."""
+    db.add(NaverHourlyPatternHistory(weekday=1, hour=10, clk_sum=0, cost_sum=1000, sample_days=1))
+    db.add(NaverHourlyPatternHistory(weekday=1, hour=14, clk_sum=0, cost_sum=999999, sample_days=0))
+    db.commit()
+
+    frac = hourly_pattern.expected_cost_fraction(db, weekday=1, hour=23)
+    assert frac == pytest.approx(1.0)  # 미관측 14시 cost_sum(999999)은 무시
+
+
 # ── run_daily ──
 def test_run_daily_writes_learning_state_per_cell(db):
     db.add(_snap("cmp1", 10, cost=1000, clk=10))

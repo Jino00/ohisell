@@ -101,6 +101,22 @@ def compute_bid_weight_recommendations(db: Session, *, weekday: int | None = Non
     return out
 
 
+def expected_cost_fraction(db: Session, *, weekday: int, hour: int) -> Decimal | None:
+    """weekday의 0~hour(포함) 누적 cost_sum ÷ 전체 24시간 cost_sum(관측된 셀만) — 지출분포
+    곡선에서 현재 시각까지 기대되는 누적 소진 비율(F2b ⓒ, trigger_watch 페이싱 예측곡선의 원료).
+
+    관측 없으면(그 요일 데이터 자체가 없거나 관측된 셀의 총합이 0) None — 추정 금지, 호출자가
+    선형모델(elapsed/24h)로 폴백한다.
+    """
+    rows = db.query(NaverHourlyPatternHistory).filter(NaverHourlyPatternHistory.weekday == weekday).all()
+    observed = [r for r in rows if r.sample_days > 0]
+    total = sum(r.cost_sum for r in observed)
+    if total <= 0:
+        return None
+    cumulative = sum(r.cost_sum for r in observed if r.hour <= hour)
+    return (Decimal(cumulative) / Decimal(total)).quantize(_Q4)
+
+
 def _upsert_learning_state(db: Session, *, scope_key: str, value: Decimal, sample_n: int, confidence: Decimal) -> None:
     row = db.query(NaverLearningState).filter(
         NaverLearningState.scope == "global", NaverLearningState.scope_key == scope_key,

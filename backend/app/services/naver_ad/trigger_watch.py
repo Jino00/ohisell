@@ -22,8 +22,8 @@ from typing import Callable
 from sqlalchemy import func as sqlfunc
 from sqlalchemy.orm import Session
 
-from app.models import NaverAdDaily, NaverHourlySnapshot, NaverProposal
-from app.services.naver_ad import slack_notifier
+from app.models import NaverAdDaily, NaverForecastDaily, NaverHourlySnapshot, NaverProposal
+from app.services.naver_ad import hourly_pattern, slack_notifier
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.utils.kst import kst_now, kst_today
 
@@ -81,27 +81,72 @@ def _latest_snapshot_rows(db: Session, ad_date: date) -> list[NaverHourlySnapsho
     )
 
 
+def _linear_expected_pace(snapshot_at: datetime) -> Decimal:
+    """선형 폴백 — 스냅샷 실제 경과시간(snapshot_at의 시:분)÷24h(그 시각까지 "정상"이라면
+    이만큼 썼어야 한다는 가장 단순한 가정). codex 지적: snapshot_hour(정수 시각)만 쓰고 +1로
+    시간이 "완료"됐다고 가정하면 판정이 부정확해져 분 단위까지 반영한다."""
+    elapsed_minutes = snapshot_at.hour * 60 + snapshot_at.minute
+    return Decimal(elapsed_minutes) / Decimal(24 * 60)
+
+
+def _curve_expected_pace(
+    forecasts: dict[str, int], campaign_id: str, daily_budget: int, weekday: int, hour: int, db: Session,
+) -> Decimal | None:
+    """예측곡선(F2b ⓒ, D-NAO-26) — hourly_pattern의 요일별 지출분포 누적비율×오늘 예측(pred_cost)을
+    daily_budget에 대한 비율로 환산. 선형모델(균등 소진 가정)보다 실제 소진 곡선에 가까운 기대치.
+
+    campaign에 오늘자 예측이 없거나(fallback/미가동) hourly_pattern이 그 요일 데이터가 아직
+    없으면(초기 상태) None — 호출자가 _linear_expected_pace로 폴백한다(추정 금지, 데이터 없이
+    억지로 곡선을 만들지 않음).
+    """
+    pred_cost = forecasts.get(campaign_id)
+    if pred_cost is None:
+        return None
+    fraction = hourly_pattern.expected_cost_fraction(db, weekday=weekday, hour=hour)
+    if fraction is None:
+        return None
+    return (fraction * Decimal(pred_cost) / Decimal(daily_budget)).quantize(_Q4)
+
+
 def find_pacing_anomalies(db: Session, ad_date: date) -> list[dict]:
     """daily_budget이 설정된 캠페인 중 페이싱(경과시간 대비 소진 속도)이 정상 범위를 벗어난 것.
 
-    expected_pace = 스냅샷 실제 경과시간(snapshot_at의 시:분)÷24h(그 시각까지 "정상"이라면
-    선형으로 이만큼 썼어야 함) — codex 지적: snapshot_hour(정수 시각)만 쓰고 +1로 시간이
-    "완료"됐다고 가정하면, 예를 들어 10:07에 수집된 스냅샷이 실제 경과 10.12/24h가 아니라
-    11/24h로 계산돼 overpace 판정이 늦어지고 underpace 판정이 약해진다 — snapshot_at의 분
-    단위까지 반영해 실제 경과시간으로 계산한다.
+    expected_pace: 오늘자 캠페인 grain 예측(forecast_model_builder pred_cost)과 hourly_pattern
+    요일별 지출분포가 모두 있으면 예측곡선(_curve_expected_pace)을, 없으면 선형(_linear_
+    expected_pace, 균등 소진 가정)으로 폴백한다(F2b ⓒ, D-NAO-26).
     actual_pace = 당일 누적cost/daily_budget. ratio=actual/expected. overpace(≥2배)는 이 속도로
     가면 예산이 하루 중 일찍 소진될 수 있다는 신호, underpace(정오 이후·≤0.5배)는 예산을
     다 못 쓸 수 있다는 신호 — 둘 다 원인은 판단하지 않는다(추정 금지, 사실만 알림).
     반환: [{campaign_id, ad_date, hour, cost, daily_budget, actual_pace, expected_pace, ratio, kind}],
     |ratio-1| 내림차순.
+
+    당일 가드(F2b 1-a④): ad_date가 오늘(kst_today())이 아니면 빈 목록을 반환한다 — 마감된
+    과거일에 이 함수를 돌리면(리플레이/백테스트 등) 그날은 이미 끝났는데도 "아직 못 썼다"는
+    underpace가 대량 오발생한다(실측). 이 harness는 라이브 관찰 전용(D-NAO-4 빠른 루프)이라
+    과거일 재현이 필요하면 별도 분석 스크립트를 써야 한다.
     """
+    if ad_date != kst_today():
+        return []
+
     rows = _latest_snapshot_rows(db, ad_date)
+    if not rows:
+        return []
+
+    weekday = ad_date.weekday()
+    forecasts = {
+        f.scope_key: f.pred_cost
+        for f in db.query(NaverForecastDaily).filter(
+            NaverForecastDaily.grain == "campaign", NaverForecastDaily.target_date == ad_date,
+        ).all()
+    }
+
     out = []
     for r in rows:
         if r.daily_budget is None or r.daily_budget <= 0:
             continue
-        elapsed_minutes = r.snapshot_at.hour * 60 + r.snapshot_at.minute
-        expected_pace = Decimal(elapsed_minutes) / Decimal(24 * 60)
+        expected_pace = _curve_expected_pace(forecasts, r.campaign_id, r.daily_budget, weekday, r.snapshot_hour, db)
+        if expected_pace is None:
+            expected_pace = _linear_expected_pace(r.snapshot_at)
         if expected_pace <= 0:
             continue  # 자정 직후(경과 0분)는 비교 불가 — 다음 시간대에 재판정
         actual_pace = Decimal(r.cost) / Decimal(r.daily_budget)
@@ -237,7 +282,7 @@ def _pacing_proposal(item: dict) -> dict:
     rationale = (
         f"[trigger_watch] 페이싱 이탈 {kind_label} — {item['ad_date']} {item['hour']}시 기준 "
         f"소진 {item['cost']}원/{item['daily_budget']}원(실제페이스={item['actual_pace']}, "
-        f"이론선형페이스={item['expected_pace']}, 배수={item['ratio']})."
+        f"기대페이스={item['expected_pace']}(예측곡선 있으면 그걸, 없으면 선형폴백), 배수={item['ratio']})."
     )
     return {
         "proposal_type": _PROPOSAL_TYPE_PACING,

@@ -9,10 +9,11 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.database import Base
-from app.models import NaverAdDaily, NaverHourlySnapshot, NaverProposal
+from app.models import NaverAdDaily, NaverForecastDaily, NaverHourlyPatternHistory, NaverHourlySnapshot, NaverProposal
 from app.services.naver_ad import trigger_watch
+from app.utils.kst import kst_today
 
-AD_DATE = date(2026, 7, 8)
+AD_DATE = kst_today()  # trigger_watch는 "오늘"만 대상(F2b 1-a④ 당일 가드) — 고정 과거일 쓰면 안 됨
 
 
 @pytest.fixture
@@ -83,6 +84,66 @@ def test_pacing_excludes_campaign_without_daily_budget(db):
     db.commit()
     out = trigger_watch.find_pacing_anomalies(db, AD_DATE)
     assert out == []
+
+
+def test_pacing_skips_non_today_ad_date(db):
+    """F2b 1-a④: 마감 과거일에 돌리면 underpace가 대량 오발생하므로, 오늘이 아니면 아예 스킵."""
+    past = AD_DATE - timedelta(days=1)
+    db.add(_snap("cmp1", 18, cost=500, daily_budget=10000, ad_date=past))  # 정상이면 underpace 조건
+    db.commit()
+    out = trigger_watch.find_pacing_anomalies(db, past)
+    assert out == []
+
+
+# ── find_pacing_anomalies: 예측곡선 (F2b ⓒ, D-NAO-26) ──
+def _forecast(campaign_id, pred_cost, target_date=AD_DATE):
+    return NaverForecastDaily(
+        target_date=target_date, grain="campaign", scope_key=campaign_id,
+        pred_clk=0, pred_cost=pred_cost, pred_conv_amt=0,
+    )
+
+
+def test_pacing_uses_forecast_curve_when_available(db):
+    """예측(pred_cost)과 hourly_pattern 지출분포가 모두 있으면 선형 대신 곡선 기대치를 쓴다.
+
+    weekday(AD_DATE)의 0~10시 누적비율=25%(1000/4000). pred_cost=10000 → 기대소진=2500원,
+    daily_budget=10000이니 expected_pace=25%. 실제소진=9000원(90%) → 배수=3.6배(overpace).
+    선형모델이었다면 10시=41.7% 기대라 배수=2.16배로도 이미 overpace였겠지만, 이 테스트는
+    곡선이 실제로 다른(더 낮은) expected_pace를 냈다는 걸 배수 차이로 간접 검증한다.
+    """
+    weekday = AD_DATE.weekday()
+    db.add(NaverHourlyPatternHistory(weekday=weekday, hour=10, clk_sum=0, cost_sum=1000, sample_days=1))
+    db.add(NaverHourlyPatternHistory(weekday=weekday, hour=14, clk_sum=0, cost_sum=3000, sample_days=1))
+    db.add(_forecast("cmp1", pred_cost=10000))
+    db.add(_snap("cmp1", 10, cost=9000, daily_budget=10000))
+    db.commit()
+
+    out = trigger_watch.find_pacing_anomalies(db, AD_DATE)
+    assert len(out) == 1
+    assert out[0]["expected_pace"] == pytest.approx(0.25)  # 곡선 기대치(선형이었다면 0.4167)
+
+
+def test_pacing_falls_back_to_linear_without_forecast(db):
+    """예측이 없으면(fallback/미가동) hourly_pattern이 있어도 기존 선형모델로 폴백."""
+    weekday = AD_DATE.weekday()
+    db.add(NaverHourlyPatternHistory(weekday=weekday, hour=10, clk_sum=0, cost_sum=1000, sample_days=1))
+    db.add(_snap("cmp1", 10, cost=10000, daily_budget=10000))
+    db.commit()
+
+    out = trigger_watch.find_pacing_anomalies(db, AD_DATE)
+    assert len(out) == 1
+    assert out[0]["expected_pace"] == pytest.approx(10 / 24, abs=1e-3)  # 선형(10시=10/24)
+
+
+def test_pacing_falls_back_to_linear_without_hourly_pattern(db):
+    """예측은 있어도 hourly_pattern 데이터가 없으면(초기 상태) 곡선을 못 만들어 선형 폴백."""
+    db.add(_forecast("cmp1", pred_cost=10000))
+    db.add(_snap("cmp1", 10, cost=10000, daily_budget=10000))
+    db.commit()
+
+    out = trigger_watch.find_pacing_anomalies(db, AD_DATE)
+    assert len(out) == 1
+    assert out[0]["expected_pace"] == pytest.approx(10 / 24, abs=1e-3)
 
 
 # ── find_cpc_spikes ──
