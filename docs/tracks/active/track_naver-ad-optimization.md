@@ -179,9 +179,16 @@
 
 - ✅ **예측·전문가 스프린트 E1a T8 완료(2026-07-09, admiring-solomon-b4f056, Sonnet 구현)**: `GET /expert-scorecard` 신규(T6 놓친 부분 발견·보강) + 프론트 평결 배지+Ava 검토 패널. **codex review**: P1 0건, P2 2건 반영(scope_key 필터 누락, 정직라벨 순서). **라이브 검증**: 스크래치DB+미니앱+실 vite dev서버로 브라우저 렌더링 확인(배지 3종·총평·정직라벨 정상, 콘솔에러 0). tsc 통과. 테스트 5개. pytest 896→901. 커밋 `b76091d`. **다음 = T9 prod 사본 e2e(E1a 최종 태스크)**.
 
+- ✅✅ **예측·전문가 스프린트 E1a 전체(T1~T9) 완료(2026-07-09, admiring-solomon-b4f056, Sonnet 구현)**: T9 prod 사본 e2e — prod DB scp 사본에 미배포 마이그레이션 4개 적용(F0/F1/F2/E1a, 즉시 원복) → **prod에 NaverProposal 0건 발견**(proposal_pipeline이 prod에 한 번도 배포된 적 없음, F0b 필요성 재확인) → 89K 재검증과 동일 원칙으로 `proposal_pipeline.run_daily`를 먼저 실행해 **실제 prod 광고데이터로 실제안 2건 생성** → 그 위에 `expert_desk.run_daily(가짜 reviewer)` 4단계 전부 ok, 평결 3행, **스키마위반 0** → 라우터 3개(`/proposals`·`/expert-reviews`·`/expert-scorecard`) 실데이터 curl 검증 전부 정확. 검증 후 사본 즉시 삭제. **E1a 코드 전체(T1~T9)가 이 브랜치에 완성**: 신규 테이블 2개·SA 4개(briefing_builder/expert_llm/ava_reviewer/expert_ledger)·Harness 1개(expert_desk)·라우터 3개·크론 1개·프론트 배지+패널. codex review는 T1~T8 매 태스크에서 누적 실행(P1 다수 발견·전부 수정), T9은 신규 코드 없어 추가 리뷰 불필요. pytest 808→901(E1a 전체 93개 신규).
+
 ## 다음 액션
 
-> **★2026-07-09 개정(E1a T8 완료 — T9부터 계속, E1a 마지막 태스크)**: 새 세션은 **이 트랙 → `docs/PLAN_naver-ad-forecast-expert.md`(특히 §8 E1a task 분해) 순으로 필독**. F2 전부 완료. E1 설계 확정·Jino 구조 승인 완료(전문가=AI_office 기존직원 Ava 재사용, 검토는 ohisell claude -p 배치 1콜). **T1~T8(마이그레이션+모델·briefing_builder·expert_llm+ava_reviewer·expert_ledger·expert_desk 하네스·라우터·크론·프론트) 전부 완료**(위 참조). **다음 구현 대상 = E1a T9(prod 사본 e2e 가짜 reviewer + codex review + 트랙/§7 갱신)**(§8 완료기준: prod 사본 실제안으로 브리핑→평결배열→ledger→라우터/콘솔, 스키마위반 0). E1a는 ohisell 자족(AI_office·실 claude 무의존)이라 계속 진행 가능. T9 완료 시 **E1a 전체 완료**. E1b(Ava 연동)는 AI_office쪽 별도 작업 후(별도 세션). 방향 임의 변경 금지. 브랜치 `claude/admiring-solomon-b4f056` — 로컬 커밋 다수 미push, docs 갱신 커밋됨.
+> **★2026-07-09 개정(E1a 전체 완료 — 다음은 Jino 결정 대기)**: 새 세션은 **이 트랙 → `docs/PLAN_naver-ad-forecast-expert.md` 순으로 필독**. **E1a(T1~T9) 코드 100% 완료**(위 참조) — 브랜치 `claude/admiring-solomon-b4f056`, 로컬 다수 커밋 **미push**. **Jino 결정 필요 항목들**:
+> 1. **미push 커밋 origin push 여부**(현재 이 브랜치 전체가 로컬에만 있음).
+> 2. **F0b**: prod에 캠페인 백필 + F0~E1a 마이그레이션 4개 실배포 + 라이브 self-verify — E1a가 매일 08:05 실제로 돌려면 필수 선행. T9에서 "prod NaverProposal 0건" 재확인됨(프론트/백엔드 다 준비됐지만 prod cron이 실제 제안을 만든 적이 없음).
+> 3. **E1b**: Ava 연동(ava_client wisdom pull + observe push) + 실 claude 어댑터 스모크 — AI_office쪽 별도 세션 작업 필요(Ava 지혜/SOUL read 엔드포인트·인증·CORS 신설).
+> 4. **E2**: 부분 게이트(반자동 전환 결정과 동기, 보류 중).
+> 방향 임의 변경 금지 — 위 4개 중 어느 것부터 할지는 Jino가 정한다.
 > (이전) 2026-07-08 밤 개정(F1 완료 + F2 착수 승인 D-NAO-26): F2a grain 확장부터 시작 — **완료됨(위 참조)**.
 > (이전) 2026-07-07 밤 개정(D-NAO-22/23): 듀얼모드 스프린트 — **Phase 1~6 전부 완료(2026-07-08) + prod 89K 재검증 완료.**
 
