@@ -85,7 +85,7 @@
 
 1. ~~LLM 호출 경로: 백엔드에서 Anthropic API 직호출~~ **확정(D-NAO-30/31, 2026-07-08)**: `claude -p` 서브프로세스 호출, **ANTHROPIC_API_KEY 불필요**. 레퍼런스=AI_office `backend/app/utils/claude_cli.py`(프로덕션 검증). 확정 호출식: `[claude, "--print", "--output-format", "json", "--model", "opus", "--system-prompt", persona]` + **프롬프트 stdin**(ARG_MAX 회피) + `cwd=/tmp` + 인증은 `env`에서 `ANTHROPIC_API_KEY` 제거(OAuth Max plan). 구조화출력=스키마를 프롬프트에 붙이고 응답 `["result"]`에서 regex로 JSON 추출(`--json-schema` 플래그 없음). **배치**: 오늘 제안 전체를 1콜에 담아 평결 배열 수신(하루 1~2콜). **모델=최고(Opus)**. 남은 실측: 배포 호스트(sellc)에 claude 설치·로그인·PATH, 정확한 `--model` 문자열.
 2. 게이트 임계값 초기 상수 — F1 백테스트로 실측 후 확정.
-3. 전문가 페르소나 이름·톤 — Jino 결정(재미 요소).
+3. ~~전문가 페르소나 이름·톤~~ **확정(D-NAO-32)**: 신규 페르소나 불요 — 전문가 = **AI_office 기존 직원 Ava(`ohi_ads_media`)**. 역할에 네이버 매체 운영 이미 포함(factory.py:245-251). 페르소나=Ava SOUL(AI_office에서 pull). 아키텍처=분리(검토는 ohisell claude -p / 지혜는 Ava 인지 in AI_office, `observe` push + wisdom pull). E1a(ohisell 자족)→E1b(Ava 연동).
 4. 브리핑 토큰 예산 — E1 착수 시 실측.
 
 ## §7 체크리스트
