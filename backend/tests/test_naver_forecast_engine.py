@@ -68,3 +68,21 @@ def test_run_daily_only_forecasts_active_status_entities(db, monkeypatch):
     result = forecast_engine.run_daily(db, today=TODAY)
 
     assert result["model_builder"]["campaigns"] == 1  # off 캠페인 제외
+
+
+def test_run_daily_includes_adgroup_and_keyword_scopes(db, monkeypatch):
+    """F2a: campaign뿐 아니라 status='on'인 adgroup·keyword 엔티티도 순회 대상에 포함해야 한다."""
+    monkeypatch.setattr(forecast_engine, "backfill_campaign_daily", _noop_backfill)
+    db.add(NaverEntity(entity_type="campaign", entity_id="cmp-1", campaign_id="cmp-1",
+                        campaign_type="WEB_SITE", name="캠페인", status="on"))
+    db.add(NaverEntity(entity_type="adgroup", entity_id="adg-1", campaign_id="cmp-1",
+                        campaign_type="WEB_SITE", name="그룹", status="on"))
+    db.add(NaverEntity(entity_type="adgroup", entity_id="adg-off", campaign_id="cmp-1",
+                        campaign_type="WEB_SITE", name="꺼진그룹", status="off"))
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-1", campaign_id="cmp-1",
+                        campaign_type="WEB_SITE", name="키워드", status="on"))
+    db.commit()
+
+    result = forecast_engine.run_daily(db, today=TODAY)
+
+    assert result["model_builder"]["campaigns"] == 3  # cmp-1 + adg-1 + nkw-1(꺼진 adg-off 제외)

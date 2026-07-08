@@ -47,7 +47,7 @@ def _seed_flat_history(db, *, days=28, clk=100, cost=1000):
 
 def test_skips_forecast_when_gate_fallback(db):
     """활동일이 부족하면(게이트 fallback) 예측 행을 만들지 않는다 — 정직 경계."""
-    result = forecast_model_builder.build_and_forecast(db, CAMPAIGN, today=TODAY)
+    result = forecast_model_builder.build_and_forecast(db, "campaign", CAMPAIGN, today=TODAY)
 
     assert result["gate_status"] == "fallback"
     assert result["forecast_created"] is False
@@ -61,7 +61,7 @@ def test_flat_series_forecasts_exact_level(db):
     """완전 정상(요일 편차 없는) 28일 이력이면 예측이 그 수준을 정확히 재현해야 한다."""
     _seed_flat_history(db, clk=100, cost=1000)
 
-    result = forecast_model_builder.build_and_forecast(db, CAMPAIGN, today=TODAY)
+    result = forecast_model_builder.build_and_forecast(db, "campaign", CAMPAIGN, today=TODAY)
 
     assert result["gate_status"] == "active"
     assert result["forecast_created"] is True
@@ -90,7 +90,7 @@ def test_trend_weights_recent_days_more_than_older(db):
     _sentinel(db, TODAY - timedelta(days=1), clk=200, cost=2000)  # 가장 최근일 — 가장 큰 가중치
     db.commit()
 
-    result = forecast_model_builder.build_and_forecast(db, CAMPAIGN, today=TODAY)
+    result = forecast_model_builder.build_and_forecast(db, "campaign", CAMPAIGN, today=TODAY)
 
     assert result["forecast_created"] is True
     simple_avg = (50 + 100 + 200) / 3  # 116.67 — 감쇠 없는 단순평균이었다면 이 값
@@ -101,8 +101,8 @@ def test_trend_weights_recent_days_more_than_older(db):
 def test_rerun_same_day_replaces_idempotently(db):
     _seed_flat_history(db, clk=100, cost=1000)
 
-    forecast_model_builder.build_and_forecast(db, CAMPAIGN, today=TODAY)
-    forecast_model_builder.build_and_forecast(db, CAMPAIGN, today=TODAY)
+    forecast_model_builder.build_and_forecast(db, "campaign", CAMPAIGN, today=TODAY)
+    forecast_model_builder.build_and_forecast(db, "campaign", CAMPAIGN, today=TODAY)
 
     assert db.query(NaverForecastDaily).filter(
         NaverForecastDaily.target_date == TODAY, NaverForecastDaily.scope_key == CAMPAIGN,
@@ -110,7 +110,7 @@ def test_rerun_same_day_replaces_idempotently(db):
     assert db.query(NaverForecastModel).filter(NaverForecastModel.scope_key == CAMPAIGN).count() == 1
 
 
-def test_run_daily_iterates_multiple_campaigns(db):
+def test_run_daily_iterates_multiple_scopes(db):
     for cid in ("cmp-1", "cmp-2"):
         for i in range(1, 15):
             db.add(NaverAdDaily(
@@ -120,7 +120,45 @@ def test_run_daily_iterates_multiple_campaigns(db):
             ))
     db.commit()
 
-    result = forecast_model_builder.run_daily(db, ["cmp-1", "cmp-2", "cmp-missing"], today=TODAY)
+    scopes = [("campaign", "cmp-1"), ("campaign", "cmp-2"), ("campaign", "cmp-missing")]
+    result = forecast_model_builder.run_daily(db, scopes, today=TODAY)
 
     assert result["campaigns"] == 3
     assert result["forecasted"] == 2  # cmp-missing은 이력 없음 → fallback
+
+
+def test_build_and_forecast_adgroup_grain_aggregates_keyword_rows(db):
+    """F2a: adgroup grain은 forecast_source가 키워드별 행을 합산한 시계열로 예측해야 한다."""
+    for i in range(1, 15):
+        db.add(NaverAdDaily(
+            ad_date=TODAY - timedelta(days=i), campaign_id=CAMPAIGN, campaign_type="WEB_SITE",
+            adgroup_id="adg-1", keyword_id="nkw-1",
+            imp=300, clk=30, cost=300, rank_sum=0,
+        ))
+        db.add(NaverAdDaily(
+            ad_date=TODAY - timedelta(days=i), campaign_id=CAMPAIGN, campaign_type="WEB_SITE",
+            adgroup_id="adg-1", keyword_id="nkw-2",
+            imp=700, clk=70, cost=700, rank_sum=0,
+        ))
+    db.commit()
+
+    result = forecast_model_builder.build_and_forecast(db, "adgroup", "adg-1", today=TODAY)
+
+    assert result["gate_status"] == "active"
+    assert result["forecast_created"] is True
+    assert result["pred_clk"] == 100  # 30+70 합산 수준
+    assert result["pred_cost"] == 1000
+
+    row = db.query(NaverForecastDaily).filter(
+        NaverForecastDaily.target_date == TODAY, NaverForecastDaily.grain == "adgroup",
+        NaverForecastDaily.scope_key == "adg-1",
+    ).first()
+    assert row is not None
+
+
+def test_build_and_forecast_keyword_grain_with_no_history_is_fallback(db):
+    """F2a: keyword grain 이력이 아직 없으면(정직 경계) fallback으로 남는다."""
+    result = forecast_model_builder.build_and_forecast(db, "keyword", "nkw-new", today=TODAY)
+
+    assert result["gate_status"] == "fallback"
+    assert result["forecast_created"] is False

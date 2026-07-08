@@ -154,3 +154,26 @@ def test_run_daily_scores_yesterday(db):
 
     assert result["target_date"] == YESTERDAY.isoformat()
     assert result["scored"] == 1
+
+
+def test_scores_adgroup_grain_forecast_via_forecast_source(db):
+    """F2a: campaign 외 adgroup grain도 forecast_source로 실측을 조회해 채점해야 한다."""
+    row = NaverForecastDaily(
+        target_date=YESTERDAY, grain="adgroup", scope_key="adg-1",
+        pred_clk=100, pred_cost=1000, pred_conv_amt=0,
+    )
+    db.add(row)
+    db.add(NaverAdDaily(
+        ad_date=YESTERDAY, campaign_id=CAMPAIGN, campaign_type="WEB_SITE",
+        adgroup_id="adg-1", keyword_id="nkw-1",
+        imp=1000, clk=100, cost=1000, rank_sum=0,
+        conv_direct_cnt=0, conv_indirect_cnt=0, conv_direct_amt=0, conv_indirect_amt=0,
+    ))
+    db.commit()
+
+    result = forecast_scorer.score_target_date(db, target_date=YESTERDAY, today=TODAY)
+
+    assert result["scored"] == 1
+    scored_row = db.query(NaverForecastDaily).filter(NaverForecastDaily.grain == "adgroup").first()
+    assert scored_row.actual_clk == 100
+    assert scored_row.mape_clk == Decimal("0.0000")

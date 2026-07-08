@@ -1,7 +1,7 @@
-# forecast_scorer.py — forecast_scorer SA (예측·전문가 스프린트 F1, D-NAO-24)
-# 역할(SA 단일 책임): 어제(target_date) 예측을 오늘 도착한 실측(campaign_backfill sentinel
-#   시계열, 전날 07:50 forecast_engine이 캠페인 예측을 만든 뒤 그날 하루가 지나면 /stats에
-#   반영됨)과 대조해 MAPE를 채우고, 최근 성적이 계속 나쁜 모델을 자동 강등(demoted)한다.
+# forecast_scorer.py — forecast_scorer SA (예측·전문가 스프린트 F1→F2a, D-NAO-24/26)
+# 역할(SA 단일 책임): 어제(target_date) 예측을 오늘 도착한 실측(전날 07:50 forecast_engine이
+#   예측을 만든 뒤 그날 하루가 지나면 /stats에 반영됨, grain별 소싱은 forecast_source에 위임
+#   — 원칙18-6)과 대조해 MAPE를 채우고, 최근 성적이 계속 나쁜 모델을 자동 강등(demoted)한다.
 #   강등은 demoted_until까지 쿨다운 — forecast_gate가 그 사이엔 재평가로 되돌리지 않는다.
 from __future__ import annotations
 
@@ -11,8 +11,8 @@ from decimal import Decimal
 
 from sqlalchemy.orm import Session
 
-from app.models import NaverAdDaily, NaverForecastDaily, NaverForecastModel
-from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
+from app.models import NaverForecastDaily, NaverForecastModel
+from app.services.naver_ad import forecast_source
 from app.utils.kst import kst_now
 
 log = logging.getLogger(__name__)
@@ -53,37 +53,35 @@ def score_target_date(db: Session, *, target_date: date, today: date) -> dict:
     건너뛰고 다음 실행에서 재시도된다(scored_at이 NULL로 남아 자연스럽게 재시도 대상).
     """
     pending = db.query(NaverForecastDaily).filter(
-        NaverForecastDaily.target_date == target_date, NaverForecastDaily.grain == "campaign",
+        NaverForecastDaily.target_date == target_date,
         NaverForecastDaily.actual_clk.is_(None),
     ).all()
 
-    scored_scope_keys: set[str] = set()
+    scored_scopes: set[tuple[str, str]] = set()
     for row in pending:
-        actual = db.query(NaverAdDaily).filter(
-            NaverAdDaily.campaign_id == row.scope_key,
-            NaverAdDaily.adgroup_id == BACKFILL_SENTINEL_ADGROUP,
-            NaverAdDaily.ad_date == target_date,
-        ).first()
+        series = forecast_source.daily_series(
+            db, grain=row.grain, scope_key=row.scope_key, date_from=target_date, date_to=target_date,
+        )
+        actual = series.get(target_date)
         if actual is None:
             continue
-        actual_conv_amt = actual.conv_direct_amt + actual.conv_indirect_amt
-        row.actual_clk = actual.clk
-        row.actual_cost = actual.cost
-        row.actual_conv_amt = actual_conv_amt
-        row.mape_clk = _mape(row.pred_clk, actual.clk)
-        row.mape_cost = _mape(row.pred_cost, actual.cost)
-        row.mape_conv_amt = _mape(row.pred_conv_amt, actual_conv_amt)
+        row.actual_clk = actual["clk"]
+        row.actual_cost = actual["cost"]
+        row.actual_conv_amt = actual["conv_amt"]
+        row.mape_clk = _mape(row.pred_clk, actual["clk"])
+        row.mape_cost = _mape(row.pred_cost, actual["cost"])
+        row.mape_conv_amt = _mape(row.pred_conv_amt, actual["conv_amt"])
         row.scored_at = kst_now()
-        scored_scope_keys.add(row.scope_key)
+        scored_scopes.add((row.grain, row.scope_key))
     db.commit()
 
     demoted: list[str] = []
-    for scope_key in scored_scope_keys:
-        rollup = _rollup_mape(db, grain="campaign", scope_key=scope_key)
+    for grain, scope_key in scored_scopes:
+        rollup = _rollup_mape(db, grain=grain, scope_key=scope_key)
         if rollup is None:
             continue
         model_row = db.query(NaverForecastModel).filter(
-            NaverForecastModel.grain == "campaign", NaverForecastModel.scope_key == scope_key,
+            NaverForecastModel.grain == grain, NaverForecastModel.scope_key == scope_key,
         ).first()
         if model_row is None:
             continue
@@ -96,11 +94,11 @@ def score_target_date(db: Session, *, target_date: date, today: date) -> dict:
 
     log.info(
         "forecast_scorer: %s 채점 %d/%d건, 강등 %d개 (%s)",
-        target_date, len(scored_scope_keys), len(pending), len(demoted), demoted,
+        target_date, len(scored_scopes), len(pending), len(demoted), demoted,
     )
     return {
-        "target_date": target_date.isoformat(), "scored": len(scored_scope_keys),
-        "pending": len(pending), "unscored_pending": len(pending) - len(scored_scope_keys),
+        "target_date": target_date.isoformat(), "scored": len(scored_scopes),
+        "pending": len(pending), "unscored_pending": len(pending) - len(scored_scopes),
         "demoted": demoted,
     }
 

@@ -1,7 +1,7 @@
-# forecast_engine.py — forecast_engine Harness (예측·전문가 스프린트 F1, D-NAO-24)
-# 역할: 캠페인 grain 예측 SA 3개(forecast_gate는 model_builder가 내부에서 호출)를
-#   ①최근 창 재백필(시계열 신선도 유지) ②forecast_model_builder(오늘 예측 생성)
-#   ③forecast_scorer(어제 예측 채점+자동강등) 순서로 조합한다. learning_loops.py와
+# forecast_engine.py — forecast_engine Harness (예측·전문가 스프린트 F1→F2a, D-NAO-24/26)
+# 역할: grain(campaign/adgroup/keyword, F2a로 확장) 예측 SA 3개(forecast_gate는 model_builder가
+#   내부에서 호출)를 ①최근 창 재백필(캠페인 시계열 신선도 유지) ②forecast_model_builder(오늘
+#   예측 생성) ③forecast_scorer(어제 예측 채점+자동강등) 순서로 조합한다. learning_loops.py와
 #   동일 단계격리 원칙(원칙18-6) — 한 단계 실패가 나머지를 막지 않고 stage_status로
 #   관측 가능하게 남긴다.
 from __future__ import annotations
@@ -23,11 +23,12 @@ log = logging.getLogger(__name__)
 REFRESH_WINDOW_DAYS = 16
 
 
-def _active_campaign_ids(db: Session) -> list[str]:
-    rows = db.query(NaverEntity.entity_id).filter(
-        NaverEntity.entity_type == "campaign", NaverEntity.status == "on",
+def _active_scopes(db: Session) -> list[tuple[str, str]]:
+    """status='on'인 campaign·adgroup·keyword 엔티티를 (grain, scope_key) 목록으로."""
+    rows = db.query(NaverEntity.entity_type, NaverEntity.entity_id).filter(
+        NaverEntity.entity_type.in_(("campaign", "adgroup", "keyword")), NaverEntity.status == "on",
     ).all()
-    return [r[0] for r in rows]
+    return [(r[0], r[1]) for r in rows]
 
 
 def run_daily(db: Session, *, today: date | None = None) -> dict:
@@ -47,8 +48,8 @@ def run_daily(db: Session, *, today: date | None = None) -> dict:
         result["errors"].append(f"backfill_refresh: {e}")
 
     try:
-        campaign_ids = _active_campaign_ids(db)
-        result["model_builder"] = forecast_model_builder.run_daily(db, campaign_ids, today=today)
+        scopes = _active_scopes(db)
+        result["model_builder"] = forecast_model_builder.run_daily(db, scopes, today=today)
         result["stage_status"]["model_builder"] = "ok"
     except Exception as e:  # noqa: BLE001
         db.rollback()

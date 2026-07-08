@@ -1,6 +1,7 @@
-# forecast_model_builder.py — forecast_model_builder SA (예측·전문가 스프린트 F1, D-NAO-24)
-# 역할(SA 단일 책임): 캠페인 grain(F1 스코프) 일별 clk/cost/conv_amt를 최근 추세 지수감쇠
-#   이동평균(모델 v1)으로 예측한다.
+# forecast_model_builder.py — forecast_model_builder SA (예측·전문가 스프린트 F1→F2a, D-NAO-24/26)
+# 역할(SA 단일 책임): grain(campaign/adgroup/keyword, F2a로 확장)별 일별 clk/cost/conv_amt를
+#   최근 추세 지수감쇠 이동평균(모델 v1)으로 예측한다. 시계열 소싱은 forecast_source에 위임
+#   (원칙18-6, grain별 라우팅 중복 금지).
 # **모델 설계 변경 이력(백테스트 실증, 정직 경계)**: 계획서 원안은 "요일 계절성×추세"였으나
 #   실제 43캠페인×151일 워크포워드 백테스트에서 요일 계절성 적용이 나이브 베이스라인(어제
 #   값을 그대로 오늘 예측으로 씀)보다 항상 더 나빴다(clk MAPE 0.63 vs 나이브 0.61,
@@ -19,9 +20,8 @@ from decimal import Decimal, ROUND_HALF_UP
 
 from sqlalchemy.orm import Session
 
-from app.models import NaverAdDaily, NaverForecastDaily, NaverForecastModel
-from app.services.naver_ad import forecast_gate
-from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
+from app.models import NaverForecastDaily, NaverForecastModel
+from app.services.naver_ad import forecast_gate, forecast_source
 from app.utils.kst import kst_now
 
 log = logging.getLogger(__name__)
@@ -32,19 +32,6 @@ TREND_DECAY = Decimal("0.6")  # 지수감쇠율(백테스트 스윕: 0.6~0.7 구
 _METRICS = ("clk", "cost", "conv_amt")
 _Q0 = Decimal("1")
 _Q2 = Decimal("0.01")
-
-
-def _daily_series(db: Session, campaign_id: str, date_from: date, date_to: date) -> dict[date, dict]:
-    """campaign_backfill sentinel 행에서 {date: {clk,cost,conv_amt}} 시계열을 읽는다."""
-    rows = db.query(NaverAdDaily).filter(
-        NaverAdDaily.campaign_id == campaign_id,
-        NaverAdDaily.adgroup_id == BACKFILL_SENTINEL_ADGROUP,
-        NaverAdDaily.ad_date >= date_from, NaverAdDaily.ad_date <= date_to,
-    ).all()
-    return {
-        r.ad_date: {"clk": r.clk, "cost": r.cost, "conv_amt": r.conv_direct_amt + r.conv_indirect_amt}
-        for r in rows
-    }
 
 
 def _trend_level(series: dict[date, dict], metric: str) -> Decimal:
@@ -62,18 +49,18 @@ def _round_int(v: Decimal) -> int:
     return int(v.quantize(_Q0, rounding=ROUND_HALF_UP))
 
 
-def build_and_forecast(db: Session, campaign_id: str, *, today: date) -> dict:
+def build_and_forecast(db: Session, grain: str, scope_key: str, *, today: date) -> dict:
     """게이트 평가 → (active면) 예측 생성 → NaverForecastModel/NaverForecastDaily upsert.
 
-    같은 (campaign_id, today) 재실행 시 교체(멱등) — 크론 재실행/백테스트 재현 안전.
+    같은 (grain, scope_key, today) 재실행 시 교체(멱등) — 크론 재실행/백테스트 재현 안전.
     """
-    gate = forecast_gate.evaluate(db, grain="campaign", scope_key=campaign_id, today=today)
+    gate = forecast_gate.evaluate(db, grain=grain, scope_key=scope_key, today=today)
 
     model_row = db.query(NaverForecastModel).filter(
-        NaverForecastModel.grain == "campaign", NaverForecastModel.scope_key == campaign_id,
+        NaverForecastModel.grain == grain, NaverForecastModel.scope_key == scope_key,
     ).first()
     if model_row is None:
-        model_row = NaverForecastModel(grain="campaign", scope_key=campaign_id)
+        model_row = NaverForecastModel(grain=grain, scope_key=scope_key)
         db.add(model_row)
     model_row.gate_status = gate["gate_status"]
     model_row.sample_days = gate["active_days"]
@@ -81,18 +68,18 @@ def build_and_forecast(db: Session, campaign_id: str, *, today: date) -> dict:
     if gate["gate_status"] != "active":
         db.commit()
         return {
-            "campaign_id": campaign_id, "gate_status": gate["gate_status"],
+            "grain": grain, "scope_key": scope_key, "gate_status": gate["gate_status"],
             "forecast_created": False, "reason": gate["reason"],
         }
 
     date_to = today - timedelta(days=1)
     date_from = date_to - timedelta(days=HISTORY_LOOKBACK_DAYS - 1)
-    series = _daily_series(db, campaign_id, date_from, date_to)
+    series = forecast_source.daily_series(db, grain=grain, scope_key=scope_key, date_from=date_from, date_to=date_to)
     if not series:
         model_row.gate_status = "fallback"
         db.commit()
         return {
-            "campaign_id": campaign_id, "gate_status": "fallback",
+            "grain": grain, "scope_key": scope_key, "gate_status": "fallback",
             "forecast_created": False, "reason": "게이트는 active이나 조회 구간에 시계열 없음(경합 데이터)",
         }
 
@@ -104,11 +91,11 @@ def build_and_forecast(db: Session, campaign_id: str, *, today: date) -> dict:
     pred_cpc = (Decimal(pred_cost) / Decimal(pred_clk)).quantize(_Q2, rounding=ROUND_HALF_UP) if pred_clk > 0 else None
 
     forecast_row = db.query(NaverForecastDaily).filter(
-        NaverForecastDaily.target_date == today, NaverForecastDaily.grain == "campaign",
-        NaverForecastDaily.scope_key == campaign_id,
+        NaverForecastDaily.target_date == today, NaverForecastDaily.grain == grain,
+        NaverForecastDaily.scope_key == scope_key,
     ).first()
     if forecast_row is None:
-        forecast_row = NaverForecastDaily(target_date=today, grain="campaign", scope_key=campaign_id)
+        forecast_row = NaverForecastDaily(target_date=today, grain=grain, scope_key=scope_key)
         db.add(forecast_row)
     forecast_row.pred_clk = pred_clk
     forecast_row.pred_cost = pred_cost
@@ -124,14 +111,14 @@ def build_and_forecast(db: Session, campaign_id: str, *, today: date) -> dict:
 
     db.commit()
     return {
-        "campaign_id": campaign_id, "gate_status": "active", "forecast_created": True,
+        "grain": grain, "scope_key": scope_key, "gate_status": "active", "forecast_created": True,
         "pred_clk": pred_clk, "pred_cost": pred_cost, "pred_conv_amt": pred_conv_amt,
     }
 
 
-def run_daily(db: Session, campaign_ids: list[str], *, today: date) -> dict:
-    """전 캠페인(호출자가 목록 전달 — F1은 naver_entity 조회를 harness가 담당) 순회 실행."""
-    results = [build_and_forecast(db, cid, today=today) for cid in campaign_ids]
+def run_daily(db: Session, scopes: list[tuple[str, str]], *, today: date) -> dict:
+    """전 스코프(호출자가 (grain, scope_key) 목록 전달 — naver_entity 조회는 harness가 담당) 순회 실행."""
+    results = [build_and_forecast(db, grain, scope_key, today=today) for grain, scope_key in scopes]
     forecasted = sum(1 for r in results if r["forecast_created"])
-    log.info("forecast_model_builder: %d개 캠페인 중 %d개 예측 생성(%s)", len(campaign_ids), forecasted, today)
-    return {"campaigns": len(campaign_ids), "forecasted": forecasted, "results": results}
+    log.info("forecast_model_builder: %d개 스코프 중 %d개 예측 생성(%s)", len(scopes), forecasted, today)
+    return {"campaigns": len(scopes), "forecasted": forecasted, "results": results}

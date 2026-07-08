@@ -92,6 +92,28 @@ def test_gate_reevaluates_after_cooldown_expires(db):
     assert result["gate_status"] == "active"
 
 
-def test_rejects_non_campaign_grain(db):
+def test_rejects_unsupported_grain(db):
     with pytest.raises(ValueError):
-        forecast_gate.evaluate(db, grain="keyword", scope_key="nkw-1", today=TODAY)
+        forecast_gate.evaluate(db, grain="account", scope_key="acc-1", today=TODAY)
+
+
+def test_active_for_adgroup_grain(db):
+    """F2a: campaign 외 adgroup grain도 게이트 평가 가능해야 한다."""
+    for i in range(1, 15):
+        db.add(NaverAdDaily(
+            ad_date=TODAY - timedelta(days=i), campaign_id=CAMPAIGN, campaign_type="WEB_SITE",
+            adgroup_id="adg-1", keyword_id="nkw-1",
+            imp=100, clk=10, cost=1000, rank_sum=0,
+            conv_direct_cnt=0, conv_indirect_cnt=0, conv_direct_amt=0, conv_indirect_amt=0,
+        ))
+    db.commit()
+
+    result = forecast_gate.evaluate(db, grain="adgroup", scope_key="adg-1", today=TODAY)
+    assert result["gate_status"] == "active"
+    assert result["active_days"] == 14
+
+
+def test_fallback_for_keyword_grain_with_no_history(db):
+    """F2a: keyword grain은 이력 부족(nkw는 개시 초기)이라 fallback이 자연스럽다."""
+    result = forecast_gate.evaluate(db, grain="keyword", scope_key="nkw-1", today=TODAY)
+    assert result["gate_status"] == "fallback"
