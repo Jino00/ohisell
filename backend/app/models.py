@@ -1583,6 +1583,8 @@ class NaverChangeLog(Base):
     actual_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 실측 결과
     outcome: Mapped[Optional[str]] = mapped_column(String(12), nullable=True)  # improved/declined/neutral/executed
     proposal_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    dry_run: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)  # P5: 실제 API쓰기 없이 기록만
+    executed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)  # P5: 실행 시도 시각(dry-run 포함)
 
 
 class NaverProposal(Base):
