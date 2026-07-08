@@ -3,8 +3,11 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
-- 날짜: 2026-07-08 (★네이버 광고 트랙 **예측·전문가 스프린트 F0a 완료 — 캠페인 grain 180일 백필**, sonnet 구현 세션)
-- ★**F0a 완료**: prod DB scp 읽기전용 사본(스크래치, prod 원본 무접촉) → additive 마이그레이션 2개(`w7x8y9z0a1b2`·`x8y9z0a1b2c3`) 적용 → `campaign_backfill.backfill_campaign_daily`로 실제 네이버 `/stats` API 180일 백필: 43캠페인·7,740행·2026-01-09~07-07·cost합 80,335,231원. 완료기준 2개 다 충족(①기존 리포트 수치 백필 전/후 byte-identical ②겹치는 10일 재백필로 멱등 확인). pytest 738 passed(회귀 0). **다음 = F1 forecast_engine 코어**(이 백필 데이터로 walk-forward 백테스트). 상세: `docs/tracks/active/track_naver-ad-optimization.md`, `docs/PLAN_naver-ad-forecast-expert.md` §7.
+- 날짜: 2026-07-08 (★네이버 광고 트랙 **예측·전문가 스프린트 F1 forecast_engine 코어 완료** — 모델 재설계+codex review, sonnet 구현 세션)
+- ★**F1 완료**: 신규 테이블 2개(`naver_forecast_model`·`naver_forecast_daily`) + SA 3개(forecast_gate·forecast_model_builder·forecast_scorer)+Harness forecast_engine + 크론 07:50. **모델 재설계(백테스트 실증)**: 계획서 원안 "요일계절성×추세"가 F0a 180일 실데이터 워크포워드에서 나이브 베이스라인보다 항상 나빴음(4주 이력 요일지수=순노이즈) → 계절성 제거+짧은창(3일) 지수감쇠(0.6)로 나이브 대비 clk MAPE -5.1%·cost MAPE -3.0% 개선 확인(완료기준①), 일일 재생성 0.078초(완료기준②). codex review: [P1] backfill timeIncrement 우려는 F0a 라이브 실측으로 반박·기각(한도소진으로 후속라운드 불가, Claude 판단 기록) / [P2] 삭제범위 무활동일 stale sentinel 버그는 동의·즉시수정+테스트3개. pytest 762 passed(신규 24개, 회귀 0). **다음 = F2 grain 확장 + 배선 3곳**. 상세: `docs/tracks/active/track_naver-ad-optimization.md`, `docs/PLAN_naver-ad-forecast-expert.md` §7.
+- ─────────────────────────────────────────────
+- (이전) 날짜: 2026-07-08 (★네이버 광고 트랙 **예측·전문가 스프린트 F0a 완료 — 캠페인 grain 180일 백필**, sonnet 구현 세션)
+- ★**F0a 완료**: prod DB scp 읽기전용 사본(스크래치, prod 원본 무접촉) → additive 마이그레이션 2개(`w7x8y9z0a1b2`·`x8y9z0a1b2c3`) 적용 → `campaign_backfill.backfill_campaign_daily`로 실제 네이버 `/stats` API 180일 백필: 43캠페인·7,740행·2026-01-09~07-07·cost합 80,335,231원. 완료기준 2개 다 충족(①기존 리포트 수치 백필 전/후 byte-identical ②겹치는 10일 재백필로 멱등 확인). pytest 738 passed(회귀 0). 상세: `docs/tracks/active/track_naver-ad-optimization.md`, `docs/PLAN_naver-ad-forecast-expert.md` §7.
 - ─────────────────────────────────────────────
 - (이전) 날짜: 2026-07-08 (★네이버 광고 트랙 **D-NAO-24/25 확정 + 예측·전문가 스프린트 구조 승인·계획서 완성** — 같은 날 fable 설계 세션)
 - ★**예측·전문가 스프린트 설계 완료(코드 0줄)**: MOP 대시보드 관찰 대화에서 Jino 지시 2건 → **D-NAO-24**(MOP식 일일 예측 모델층 이식 — "클릭을 키운다는 전제"로 선구축, 모델 개수 무제한·게이트가 유일한 문지기. 라이브 실측 근거: MOP도 30,250 키워드에 모델 40개=캠페인급 grain) + **D-NAO-25**(24시간 전문가 에이전트, (b) 부분 게이트 지향 — 위임 스위치는 영구 Jino, 판단 전건 기록→성적표로 "37년 경력"을 축적 구조로 실현). 구조 승인("진행하자") → 계획서 `docs/PLAN_naver-ad-forecast-expert.md`(F0 백필→F1 캠페인 grain 코어→F2 grain 확장+배선3곳→E1 조언자→E2 부분게이트[보류]). 미확정 4건 §6(ANTHROPIC_API_KEY 등). **다음 = Sonnet 새 세션에서 F0a부터 구현**(트랙→계획서 필독).

@@ -91,7 +91,11 @@
 ## §7 체크리스트
 
 - [x] **F0a 로컬 사본 캠페인 백필(백테스트 원료) — 완료 2026-07-08 (admiring-solomon-b4f056)**: prod DB scp 읽기전용 사본(스크래치, prod 원본 무접촉) → additive 마이그레이션 2개 적용(alembic.ini 임시 포인팅→git checkout으로 즉시 원복, 이 워크트리엔 dotenv override=False라 alembic만 별도 처리 필요했음) → `campaign_backfill.backfill_campaign_daily` 실제 네이버 `/stats` API로 180일 백필(43캠페인, 2026-01-09~07-07, 7,740행, cost합 80,335,231원 — SHOPPING 29캠페인/53.2M, WEB_SITE 12캠페인/27.2M, BRAND_SEARCH 2캠페인/0원). **완료기준 둘 다 충족**: ①실단위 기존 리포트 수치(07-04~07-07, `metrics_aggregator.aggregate`) 백필 전/후 byte-identical(sentinel 필터 정상 작동, 이중계상 없음) ②겹치는 10일 구간 재백필로 멱등 교체 확인(재실행 후에도 총 7,740행 유지, 중복 없음). 전체 pytest 738 passed(회귀 0, 코드 변경 없이 기존 SA만 실행). 이 워크트리에 backend/.env 없어 메인 워크트리에서 복사(NAVER 크리덴셜, gitignored·미커밋).
-- [ ] F1 forecast_engine 코어 + 백테스트 + codex review
+- [x] **F1 forecast_engine 코어 + 백테스트 + codex review — 완료 2026-07-08 (admiring-solomon-b4f056, sonnet 구현)**: 신규 테이블 2개(`naver_forecast_model`·`naver_forecast_daily`, migration `y9z0a1b2c3d4`) + SA 3개(`forecast_gate` 활동일게이트+쿨다운·`forecast_model_builder` 추세모델·`forecast_scorer` MAPE채점+자동강등) + Harness `forecast_engine`(3단계 격리) + 크론 07:50 등록. 테스트 21개 신규(759 passed).
+  - **모델 설계 변경(백테스트 실증, 정직 경계)**: 계획서 원안 "요일계절성×추세"를 F0a 180일 실백필 데이터(43캠페인×165일 워크포워드)로 검증한 결과 **요일 계절성 적용이 항상 나이브 베이스라인(어제=오늘)보다 나빴음**(계절성 포함 window=1조차 순수나이브보다 열위: clk MAPE 0.63>0.61) — 4주 이력만으로 추정한 요일지수의 추정오차가 실제 신호보다 커서 순노이즈로 작용(캠페인 단위는 요일패턴보다 일별 자기상관이 훨씬 강함). **계절성 제거 + 짧은 창(3일) 지수감쇠(decay=0.6)로 전환**해 나이브 대비 clk MAPE -5.1%·cost MAPE -3.0% 개선 확인(완료기준① 충족). 요일 패턴은 데이터 축적 후 F2/v2 재검토 대상.
+  - **완료기준② 실측**: 29개 on캠페인 전체 모델 일일 재생성 0.078초(크론 07:50 여유 충분).
+  - **codex review(원칙19)**: 1건[P1] "backfill fetcher가 timeIncrement 미지정→집계 응답 우려" — **반박·기각**: 이 함수는 F1 이전 P2-S1 스프린트에서 이미 실측 문서화됨(`docs/references/22`, 92일 청크 한도 자체가 daily breakdown 전제)+F0a 라이브 백필이 정확히 43캠페인×180일=7,740행(요청 범위와 1:1, 집계됐다면 ~43행이어야 함)을 반환해 일별 그레인이 실제로 정상 작동함을 실측으로 반증. 후속 대화 라운드는 codex 사용한도 소진(OpenAI 12:39 재시도 안내)으로 진행 불가 — 트랙 폴백 규칙대로 이 반박은 Claude 자체 판단으로 기록(재개 시 재확인 가능). 1건[P2] "campaign_backfill 삭제범위가 응답 날짜만 커버→무활동일 stale sentinel 잔존" — **동의·즉시수정**: forecast_engine이 이 함수를 매일 재실행하며 위험이 실사용 경로로 노출됐기 때문. 삭제조건을 요청 전체 [date_from,date_to]로 확장, fix전 상태로 되돌려 회귀 재현 확인 후 재적용(원칙14), 이 SA의 첫 단위테스트 3개 신규 추가. 최종 762 passed.
+  - 코드: 브랜치 `claude/admiring-solomon-b4f056`, 커밋 `a1deb28`(F1 코어)+`178a2fa`(codex fix). **다음 = F2 grain 확장 + 배선 3곳.**
 - [ ] F2 grain 확장 + 배선 ⓐⓑⓒ + 89K 재검증 (+ 트랙 1-a ④⑤ 처리)
 - [ ] E1 expert_desk 조언자 모드 + 콘솔 뷰 + codex review
 - [ ] F0b prod 백필 + 배포 + 라이브 self-verify (원칙22)
