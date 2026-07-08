@@ -169,9 +169,11 @@
 
 - ✅ **예측·전문가 스프린트 E1a T3 완료(2026-07-09, admiring-solomon-b4f056, Sonnet 구현)**: `expert_llm.py`(AI_office claude_cli.py 린 포팅, cost_guard 미포함) + `ava_reviewer.py`(SA2, invoke 주입경계, 강한 스키마검증→위반시 1회재시도→degraded 조작금지). **codex review**: [P1] JSON봉투 파싱 실패 시 raw JSONDecodeError 유출 → RuntimeError로 통일(동의·수정). P2 2건(reasoning 필수검증·bool/float proposal_id) 동의·수정. 프롬프트 인젝션 잔여위험은 codex도 P1 아님 판단 → 보류. 테스트 25개. pytest 826→851. 커밋 `21abec7`. **다음 = T4 `expert_ledger`**.
 
+- ✅ **예측·전문가 스프린트 E1a T4 완료(2026-07-09, admiring-solomon-b4f056, Sonnet 구현)**: `expert_ledger.py`(SA3) — record(멱등 키=as_of+briefing_hash) + grade_due_predictions(before/after 7일창 실측 대조 4-outcome 채점 + 성적표). **codex review에서 진짜 P1 5건**(C3 세션공유 허점·무변동 오채점·미지 target_type 누수·비원자적 커밋·성적표 표류위험) 전부 발견·수정 — 이번 태스크는 codex가 실질적 가치를 낸 케이스. 테스트 21개. pytest 851→876. 커밋 `4e60a6f`. **다음 = T5 `expert_desk` 하네스**.
+
 ## 다음 액션
 
-> **★2026-07-09 개정(E1a T3 완료 — T4부터 계속)**: 새 세션은 **이 트랙 → `docs/PLAN_naver-ad-forecast-expert.md`(특히 §8 E1a task 분해) 순으로 필독**. F2 전부 완료. E1 설계 확정·Jino 구조 승인 완료(전문가=AI_office 기존직원 Ava 재사용, 검토는 ohisell claude -p 배치 1콜). **T1(마이그레이션+모델)·T2(expert_briefing_builder)·T3(expert_llm+ava_reviewer) 완료**(위 참조). **다음 구현 대상 = E1a T4(`expert_ledger`: record+grade_due_predictions)부터**(§8 순서, 구현=**Sonnet**, TDD: 총평 dedup A1·record 멱등·grade 4-outcome·성적표 upsert·**자문경계 C3: NaverProposal 무변경**). E1a는 ohisell 자족(AI_office·실 claude 무의존, 주입경계 TDD)이라 계속 진행 가능. E1b(Ava 연동)는 AI_office쪽 별도 작업 후. 방향 임의 변경 금지. 브랜치 `claude/admiring-solomon-b4f056` — 로컬 커밋 다수 미push, docs 갱신 커밋됨.
+> **★2026-07-09 개정(E1a T4 완료 — T5부터 계속)**: 새 세션은 **이 트랙 → `docs/PLAN_naver-ad-forecast-expert.md`(특히 §8 E1a task 분해) 순으로 필독**. F2 전부 완료. E1 설계 확정·Jino 구조 승인 완료(전문가=AI_office 기존직원 Ava 재사용, 검토는 ohisell claude -p 배치 1콜). **T1~T4(마이그레이션+모델·briefing_builder·expert_llm+ava_reviewer·expert_ledger) 완료**(위 참조). **다음 구현 대상 = E1a T5(`expert_desk` 하네스: run_daily 4단계 격리 — grade_due_predictions→briefing_builder→ava_reviewer→ledger.record, stage2.5 빈제안 skip A2)부터**(§8 순서, 구현=**Sonnet**, TDD: 단계격리·빈제안 skip). E1a는 ohisell 자족(AI_office·실 claude 무의존, 주입경계 TDD)이라 계속 진행 가능. E1b(Ava 연동)는 AI_office쪽 별도 작업 후. 방향 임의 변경 금지. 브랜치 `claude/admiring-solomon-b4f056` — 로컬 커밋 다수 미push, docs 갱신 커밋됨.
 > (이전) 2026-07-08 밤 개정(F1 완료 + F2 착수 승인 D-NAO-26): F2a grain 확장부터 시작 — **완료됨(위 참조)**.
 > (이전) 2026-07-07 밤 개정(D-NAO-22/23): 듀얼모드 스프린트 — **Phase 1~6 전부 완료(2026-07-08) + prod 89K 재검증 완료.**
 
