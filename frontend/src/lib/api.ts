@@ -1657,6 +1657,15 @@ export function fetchNaverAdDiagnosis(params?: {
 }
 
 // ── 네이버 SA 광고 최적화 콘솔 (P2-S3b, track_naver-ad-optimization) ──
+export type NaverExpertVerdict = "agree" | "partial" | "reject" | "insufficient_evidence" | "commentary";
+
+export interface NaverExpertVerdictSummary {
+  verdict: NaverExpertVerdict;
+  confidence: number | null;
+  as_of: string;
+  run_id: number;
+}
+
 export interface NaverAdProposal {
   id: number;
   created_at: string | null;
@@ -1669,6 +1678,7 @@ export interface NaverAdProposal {
   status: string;
   slack_ts: string | null;
   executed_change_log_id: number | null;
+  expert_verdict: NaverExpertVerdictSummary | null;
 }
 
 export interface NaverAdProposalList {
@@ -1690,6 +1700,52 @@ export function fetchNaverAdProposals(params?: {
   if (params?.limit) q.set("limit", String(params.limit));
   const qs = q.toString();
   return fetchApi<NaverAdProposalList>(`/api/naver/ad/proposals${qs ? `?${qs}` : ""}`);
+}
+
+// E1a T8 — 전문가(Ava) 검토 패널
+export interface NaverExpertReview {
+  id: number;
+  run_id: number;
+  as_of: string | null;
+  proposal_id: number | null;
+  verdict: NaverExpertVerdict;
+  confidence: number | null;
+  reasoning: string | null;
+  checkable_prediction: string | null;
+  pred_target_type: string | null;
+  pred_target_id: string | null;
+  pred_metric: string | null;
+  pred_direction: string | null;
+  verify_date: string | null;
+  outcome: string | null;
+  source: string;
+}
+
+export interface NaverExpertReviewList {
+  rows: NaverExpertReview[];
+}
+
+export function fetchNaverExpertReviews(params?: {
+  asOf?: string;
+  proposalId?: number;
+  limit?: number;
+}): Promise<NaverExpertReviewList> {
+  const q = new URLSearchParams();
+  if (params?.asOf) q.set("as_of", params.asOf);
+  if (params?.proposalId != null) q.set("proposal_id", String(params.proposalId));
+  if (params?.limit) q.set("limit", String(params.limit));
+  const qs = q.toString();
+  return fetchApi<NaverExpertReviewList>(`/api/naver/ad/expert-reviews${qs ? `?${qs}` : ""}`);
+}
+
+export interface NaverExpertScorecard {
+  sample_n: number;
+  accuracy: number | null;
+  label: string | null;
+}
+
+export function fetchNaverExpertScorecard(): Promise<NaverExpertScorecard> {
+  return fetchApi<NaverExpertScorecard>("/api/naver/ad/expert-scorecard");
 }
 
 export type NaverAdOptimizer = "none" | "ours" | "mop";

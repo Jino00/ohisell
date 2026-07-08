@@ -24,6 +24,7 @@ from app.models import (
     NaverChangeLog,
     NaverExpertReview,
     NaverExpertReviewRun,
+    NaverLearningState,
     NaverProductBep,
     NaverProposal,
 )
@@ -276,6 +277,34 @@ def expert_reviews(
         q = q.filter(NaverExpertReview.proposal_id == proposal_id)
     rows = q.order_by(NaverExpertReview.id.desc()).limit(limit).all()
     return {"rows": [_serialize_expert_review(r) for r in rows]}
+
+
+# 표본이 이보다 적으면 정확도%를 헤드라인으로 노출하지 않는다(정직 라벨, codex 아웃사이드
+# 보이스 반영 — "정확도%를 competence 신호로 헤드라인 금지"). 정확한 임계값은 스펙에 명시돼
+# 있지 않아 보수적으로 20으로 시작(추정 금지 원칙상 실사용 데이터로 재검토 대상).
+_SCOREBOARD_HONEST_THRESHOLD = 20
+
+
+@router.get("/expert-scorecard")
+def expert_scorecard(db: Session = Depends(get_db)):
+    """전문가 예측 정확도 성적표(콘솔 "Ava의 검토" 패널) — naver_learning_state(scope=expert,
+    metric=prediction_accuracy) 단순 read. 표본이 적으면 label에 "표본 축적 중" 류 안내를
+    담아 정확도%가 competence 신호로 헤드라인되지 않게 한다(E1a T8)."""
+    row = (
+        db.query(NaverLearningState)
+        .filter(
+            NaverLearningState.scope == "expert",
+            NaverLearningState.scope_key == "all",  # expert_ledger._SCOREBOARD_SCOPE_KEY 계약과 일치
+            NaverLearningState.metric == "prediction_accuracy",
+        )
+        .first()
+    )
+    if row is None:
+        return {"sample_n": 0, "accuracy": None, "label": "아직 채점된 예측이 없습니다"}
+    sample_n = row.sample_n
+    accuracy = _num(row.current_value)
+    label = "표본 축적 중(참고용)" if sample_n < _SCOREBOARD_HONEST_THRESHOLD else None
+    return {"sample_n": sample_n, "accuracy": accuracy, "label": label}
 
 
 _VALID_OPTIMIZERS = {"none", "ours", "mop"}

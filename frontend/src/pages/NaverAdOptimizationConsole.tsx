@@ -9,10 +9,14 @@ import {
   fetchNaverCampaignSettings,
   putNaverCampaignSettings,
   fetchNaverAdDiagnosis,
+  fetchNaverExpertReviews,
+  fetchNaverExpertScorecard,
   type NaverAdProposal,
   type NaverAdCampaignSettings,
   type NaverAdOptimizer,
   type NaverAdCampaignMode,
+  type NaverExpertVerdict,
+  type NaverExpertScorecard,
 } from "../lib/api";
 
 function isoKST(d: Date): string {
@@ -72,6 +76,15 @@ const PROPOSAL_TYPE_LABEL: Record<string, string> = {
   new_setup: "신규 세팅",
 };
 
+// E1a T8 — 제안 카드 평결 배지(Ava 검토, 콘솔 배지용 요약은 백엔드 _serialize_expert_verdict_summary 참조)
+const VERDICT_META: Record<NaverExpertVerdict, { icon: string; label: string; className: string }> = {
+  agree: { icon: "✓", label: "동의", className: "bg-green-50 text-green-700" },
+  partial: { icon: "⚠", label: "부분동의", className: "bg-amber-50 text-amber-700" },
+  reject: { icon: "✗", label: "기각", className: "bg-red-50 text-red-700" },
+  insufficient_evidence: { icon: "?", label: "판단보류", className: "bg-gray-100 text-gray-600" },
+  commentary: { icon: "💬", label: "총평", className: "bg-blue-50 text-blue-700" },
+};
+
 interface CampaignRow {
   campaign_id: string;
   campaign_type: string;
@@ -108,6 +121,11 @@ export default function NaverAdOptimizationConsole() {
   const [savingIds, setSavingIds] = useState<Record<string, boolean>>({});
   const [savedId, setSavedId] = useState<string | null>(null);
   const proposalsReqSeq = useRef(0);
+
+  const [avaCommentary, setAvaCommentary] = useState<string | null>(null);
+  const [avaScorecard, setAvaScorecard] = useState<NaverExpertScorecard | null>(null);
+  const [avaLoading, setAvaLoading] = useState(false);
+  const [avaError, setAvaError] = useState<string | null>(null);
 
   async function loadProposals() {
     const mySeq = ++proposalsReqSeq.current;
@@ -159,10 +177,30 @@ export default function NaverAdOptimizationConsole() {
     }
   }
 
+  async function loadAva() {
+    setAvaLoading(true);
+    setAvaError(null);
+    try {
+      const [reviews, scorecard] = await Promise.all([
+        fetchNaverExpertReviews({ asOf: daysAgo(0) }),
+        fetchNaverExpertScorecard(),
+      ]);
+      const commentaryRow = reviews.rows.find((r) => r.proposal_id === null && r.verdict === "commentary");
+      setAvaCommentary(commentaryRow?.reasoning ?? null);
+      setAvaScorecard(scorecard);
+    } catch (e: any) {
+      setAvaError(e.message);
+    } finally {
+      setAvaLoading(false);
+    }
+  }
+
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { loadProposals(); }, [proposalStatus]);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { loadPanel(); }, []);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { loadAva(); }, []);
 
   function updateEdit(campaignId: string, patch: Partial<EditState>) {
     setEdits((prev) => ({ ...prev, [campaignId]: { ...prev[campaignId], ...patch } }));
@@ -247,6 +285,14 @@ export default function NaverAdOptimizationConsole() {
                     <span className="text-xs text-gray-400">{p.campaign_id}</span>
                     <span className="text-xs text-gray-400">{p.target_type}:{p.target_id}</span>
                     <span className="text-xs text-gray-300">{p.created_at?.slice(0, 16).replace("T", " ")}</span>
+                    {p.expert_verdict && (
+                      <span
+                        className={`px-1.5 py-0.5 text-xs rounded font-medium ${VERDICT_META[p.expert_verdict.verdict].className}`}
+                        title={`Ava 검토(${p.expert_verdict.as_of}): ${VERDICT_META[p.expert_verdict.verdict].label}${p.expert_verdict.confidence != null ? ` · 확신도 ${(p.expert_verdict.confidence * 100).toFixed(0)}%` : ""}`}
+                      >
+                        {VERDICT_META[p.expert_verdict.verdict].icon} {VERDICT_META[p.expert_verdict.verdict].label}
+                      </span>
+                    )}
                   </div>
                   {p.rationale && <p className="text-sm text-gray-700 mt-1.5">{p.rationale}</p>}
                   {p.expected_effect && <p className="text-xs text-gray-500 mt-1">예상 효과: {p.expected_effect}</p>}
@@ -342,6 +388,35 @@ export default function NaverAdOptimizationConsole() {
                 })}
               </tbody>
             </table>
+          )}
+        </div>
+      </div>
+
+      {/* 섹션 3: Ava의 검토(E1a T8) */}
+      <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
+        <div className="p-4 border-b border-gray-200 flex items-center justify-between flex-wrap gap-2">
+          <h3 className="text-sm font-medium text-gray-700">Ava의 검토</h3>
+          {avaScorecard && avaScorecard.sample_n > 0 && (
+            <span className="text-xs text-gray-400">
+              {/* codex review 발견(P2): 정직 라벨은 정확도%보다 먼저 노출 — 표본 부족 상태를
+                  숫자 뒤에 묻어두면 정확도가 먼저 눈에 들어와 헤드라인 금지 취지가 무색해진다. */}
+              {avaScorecard.label ? `${avaScorecard.label} · ` : ""}
+              표본 {avaScorecard.sample_n}건
+              {avaScorecard.accuracy != null && !avaScorecard.label ? ` · 예측 적중률 ${(avaScorecard.accuracy * 100).toFixed(0)}%` : ""}
+            </span>
+          )}
+        </div>
+        {avaError && <div className="p-3 text-sm text-red-600 bg-red-50">{avaError}</div>}
+        <div className="p-4">
+          {avaLoading ? (
+            <div className="text-center text-gray-400 text-sm py-4">불러오는 중...</div>
+          ) : avaCommentary ? (
+            <p className="text-sm text-gray-700 whitespace-pre-wrap">{avaCommentary}</p>
+          ) : (
+            <p className="text-sm text-gray-400">오늘 아직 검토가 없습니다(08:05 크론 대기 또는 pending 제안 없음).</p>
+          )}
+          {avaScorecard && avaScorecard.sample_n === 0 && (
+            <p className="text-xs text-gray-400 mt-2">{avaScorecard.label}</p>
           )}
         </div>
       </div>

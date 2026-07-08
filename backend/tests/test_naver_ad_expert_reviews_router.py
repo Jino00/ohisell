@@ -13,7 +13,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.database import Base, get_db
 from app.main import app
-from app.models import NaverExpertReview, NaverExpertReviewRun, NaverProposal
+from app.models import NaverExpertReview, NaverExpertReviewRun, NaverLearningState, NaverProposal
 
 AS_OF = date(2026, 7, 9)
 
@@ -206,3 +206,59 @@ def test_proposals_endpoint_expert_verdict_prefers_later_as_of_even_with_lower_r
     resp = client.get("/api/naver/ad/proposals")
     rows = resp.json()["rows"]
     assert rows[0]["expert_verdict"]["verdict"] == "agree"
+
+
+# ── GET /expert-scorecard (T8, 콘솔 "Ava의 검토" 패널용) ──
+
+def test_expert_scorecard_returns_no_data_state_when_no_rows(client):
+    resp = client.get("/api/naver/ad/expert-scorecard")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["sample_n"] == 0
+    assert body["accuracy"] is None
+    assert body["label"]
+
+
+def test_expert_scorecard_shows_accumulating_label_below_threshold(client, db):
+    """정직 라벨(codex 아웃사이드 보이스): 표본이 적으면 정확도를 헤드라인으로 노출하지 않는다."""
+    db.add(NaverLearningState(scope="expert", scope_key="all", metric="prediction_accuracy", sample_n=5, current_value=1.0))
+    db.commit()
+
+    resp = client.get("/api/naver/ad/expert-scorecard")
+    body = resp.json()
+    assert body["sample_n"] == 5
+    assert body["accuracy"] == 1.0
+    assert body["label"] is not None  # "표본 축적 중" 류 라벨이 붙어야 함
+
+
+def test_expert_scorecard_headline_ready_at_or_above_threshold(client, db):
+    db.add(NaverLearningState(scope="expert", scope_key="all", metric="prediction_accuracy", sample_n=25, current_value=0.72))
+    db.commit()
+
+    resp = client.get("/api/naver/ad/expert-scorecard")
+    body = resp.json()
+    assert body["sample_n"] == 25
+    assert body["accuracy"] == 0.72
+    assert body["label"] is None
+
+
+def test_expert_scorecard_ignores_other_scopes(client, db):
+    db.add(NaverLearningState(scope="action_type", scope_key="bid_down", metric="proposal_accuracy", sample_n=99, current_value=0.5))
+    db.commit()
+
+    resp = client.get("/api/naver/ad/expert-scorecard")
+    body = resp.json()
+    assert body["sample_n"] == 0
+    assert body["accuracy"] is None
+
+
+def test_expert_scorecard_ignores_non_all_scope_key(client, db):
+    """codex review 발견(P2): expert_ledger._SCOREBOARD_SCOPE_KEY='all' 계약 — 같은
+    scope/metric이라도 scope_key가 다른 행(예: 장래 캠페인별 세분화)은 집계 대상이 아니다."""
+    db.add(NaverLearningState(scope="expert", scope_key="campaign:cmp-1", metric="prediction_accuracy", sample_n=99, current_value=0.1))
+    db.commit()
+
+    resp = client.get("/api/naver/ad/expert-scorecard")
+    body = resp.json()
+    assert body["sample_n"] == 0
+    assert body["accuracy"] is None
