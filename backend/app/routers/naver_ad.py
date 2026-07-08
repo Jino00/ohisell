@@ -4,8 +4,11 @@
 # GET /api/naver/ad/diagnosis         — 진단 보드(출혈/승자/확장버킷/쇼핑BEP/제외후보/3단분류/악순환),
 #   diagnosis Harness 경유(P2-S2). D-NAO-15/D-3: 전부 읽기 전용 — 제안·쓰기 없음.
 # GET /api/naver/ad/proposals         — 제안 카드 목록(P2-S3, naver_proposals 단순 read).
+#   각 행에 expert_verdict(최근 완료(status=ok) run의 평결 요약) 조인(E1a T6, 배지용).
 # GET/PUT /api/naver/ad/campaign-settings — optimizer/mode/override 조회·설정(P2-S3, 전환 시
 #   naver_change_log에 경량 기록). 광고 API 쓰기는 아님 — 우리 시스템 내부 설정만(D-NAO-13).
+# GET /api/naver/ad/expert-reviews    — 전문가(Ava) 평결 목록(E1a T6, naver_expert_review 단순
+#   read). proposal_id=NULL 행은 하루 총평.
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
@@ -16,7 +19,14 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import NaverCampaignSettings, NaverChangeLog, NaverProductBep, NaverProposal
+from app.models import (
+    NaverCampaignSettings,
+    NaverChangeLog,
+    NaverExpertReview,
+    NaverExpertReviewRun,
+    NaverProductBep,
+    NaverProposal,
+)
 from app.services.naver_ad import metrics_aggregator
 from app.services.naver_ad.ad_report import build_report
 from app.services.naver_ad.diagnosis import build_diagnosis
@@ -152,7 +162,7 @@ _PROPOSAL_STATUSES = {"pending", "approved", "rejected", "expired"}
 _MAX_PROPOSAL_RANGE_DAYS = 90
 
 
-def _serialize_proposal(p: NaverProposal) -> dict:
+def _serialize_proposal(p: NaverProposal, verdict: NaverExpertReview | None) -> dict:
     return {
         "id": p.id,
         "created_at": p.created_at.isoformat() if p.created_at else None,
@@ -165,7 +175,37 @@ def _serialize_proposal(p: NaverProposal) -> dict:
         "status": p.status,
         "slack_ts": p.slack_ts,
         "executed_change_log_id": p.executed_change_log_id,
+        "expert_verdict": _serialize_expert_verdict_summary(verdict) if verdict else None,
     }
+
+
+def _serialize_expert_verdict_summary(v: NaverExpertReview) -> dict:
+    """배지용 요약(전체 필드는 GET /expert-reviews에서)."""
+    return {"verdict": v.verdict, "confidence": _num(v.confidence), "as_of": v.as_of.isoformat(), "run_id": v.run_id}
+
+
+def _latest_ok_verdicts_by_proposal(db: Session, proposal_ids: list[int]) -> dict[int, NaverExpertReview]:
+    """proposal_id별 가장 최근 완료(status=ok) run의 평결 1개(codex 아웃사이드 보이스: "라우터
+    조인=as_of 최근 완료 run의 평결"). 제안이 여러 날 pending으로 남아 재검토됐을 수 있어
+    run_id 기준 최신 것만 남긴다 — degraded/skipped/failed run은 애초에 조인 대상에서 제외."""
+    if not proposal_ids:
+        return {}
+    rows = (
+        db.query(NaverExpertReview)
+        .join(NaverExpertReviewRun, NaverExpertReview.run_id == NaverExpertReviewRun.id)
+        .filter(NaverExpertReviewRun.status == "ok", NaverExpertReview.proposal_id.in_(proposal_ids))
+        .order_by(
+            NaverExpertReview.proposal_id.asc(),
+            NaverExpertReviewRun.as_of.desc(),  # codex 발견(P1): run.id만으론 "실제 최신"을 못 보장(백필 등)
+            NaverExpertReviewRun.id.desc(),
+            NaverExpertReview.id.desc(),
+        )
+        .all()
+    )
+    latest: dict[int, NaverExpertReview] = {}
+    for r in rows:
+        latest.setdefault(r.proposal_id, r)  # 정렬 덕분에 각 proposal_id의 첫 항목이 최신
+    return latest
 
 
 @router.get("/proposals")
@@ -177,7 +217,8 @@ def proposals(
     limit: int = Query(200, ge=1, le=1000),
     db: Session = Depends(get_db),
 ):
-    """제안 카드 목록(콘솔) — naver_proposals 단순 read, 최신순."""
+    """제안 카드 목록(콘솔) — naver_proposals 단순 read, 최신순. expert_verdict는 최근 완료
+    (status=ok) run의 평결 요약(배지용, E1a T6)."""
     if status is not None and status not in _PROPOSAL_STATUSES:
         raise HTTPException(400, f"status는 {sorted(_PROPOSAL_STATUSES)} 중 하나여야 합니다")
     if date_from and date_to and date_from > date_to:
@@ -195,7 +236,46 @@ def proposals(
     if date_to:
         q = q.filter(NaverProposal.created_at < datetime.combine(date_to + timedelta(days=1), datetime.min.time()))
     rows = q.order_by(NaverProposal.created_at.desc()).limit(limit).all()
-    return {"rows": [_serialize_proposal(p) for p in rows]}
+    verdicts = _latest_ok_verdicts_by_proposal(db, [p.id for p in rows])
+    return {"rows": [_serialize_proposal(p, verdicts.get(p.id)) for p in rows]}
+
+
+def _serialize_expert_review(r: NaverExpertReview) -> dict:
+    return {
+        "id": r.id,
+        "run_id": r.run_id,
+        "as_of": r.as_of.isoformat() if r.as_of else None,
+        "proposal_id": r.proposal_id,
+        "verdict": r.verdict,
+        "confidence": _num(r.confidence),
+        "reasoning": r.reasoning,
+        "checkable_prediction": r.checkable_prediction,
+        "pred_target_type": r.pred_target_type,
+        "pred_target_id": r.pred_target_id,
+        "pred_metric": r.pred_metric,
+        "pred_direction": r.pred_direction,
+        "verify_date": r.verify_date.isoformat() if r.verify_date else None,
+        "outcome": r.outcome,
+        "source": r.source,
+    }
+
+
+@router.get("/expert-reviews")
+def expert_reviews(
+    as_of: date | None = Query(None, description="검토일(기본=전체)"),
+    proposal_id: int | None = Query(None, description="특정 제안만 필터(NULL=하루 총평 행은 이 필터로 제외됨)"),
+    limit: int = Query(500, ge=1, le=1000),
+    db: Session = Depends(get_db),
+):
+    """전문가(Ava) 평결 목록(콘솔) — naver_expert_review 단순 read, 최신순. proposal_id=NULL
+    행은 하루 총평(E1a T6)."""
+    q = db.query(NaverExpertReview)
+    if as_of is not None:
+        q = q.filter(NaverExpertReview.as_of == as_of)
+    if proposal_id is not None:
+        q = q.filter(NaverExpertReview.proposal_id == proposal_id)
+    rows = q.order_by(NaverExpertReview.id.desc()).limit(limit).all()
+    return {"rows": [_serialize_expert_review(r) for r in rows]}
 
 
 _VALID_OPTIMIZERS = {"none", "ours", "mop"}
