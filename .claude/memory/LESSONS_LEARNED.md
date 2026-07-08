@@ -76,3 +76,19 @@ Jino와 대화로 범위를 2단계 축소(D-11): 수정·등록 제외(라이�
 
 ### 📌 교훈
 "전부 구현해줘" 요청이라도 **API 스펙 실측 + 실데이터 프로브로 진짜 필요/위험을 먼저 확인**하면 범위가 줄어든다(원칙22). 특히 외부 쓰기 API는 이름(옵션 재고 변경)과 실제 동작(가격까지 필수)이 다를 수 있으니 필수 필드를 꼭 본다. 같은 목적(재고 관리)을 더 안전한 엔드포인트(가격 안 받는 change-status)로 달성할 수 있으면 그쪽을 택한다. 전이 규칙이 있는 상태머신 API는 현재상태별 유효 전이만 UI에 노출해 무효 요청(네이버 400)을 사전 차단한다.
+
+## 7. E1a expert_desk(T1~T9) — SQLAlchemy 스크립트 함정 + 프론트 라이브 프리뷰 안전 절차
+
+### 🐛 이슈
+- 독립 파이썬 스크립트에서 `from app.database import Base, engine; Base.metadata.create_all(engine)`만 실행하면 **테이블이 0개** 생성된다. `app.models`를 명시적으로 import하지 않으면 SQLAlchemy declarative 등록(모델 클래스가 `Base`에 자신을 등록하는 부수효과)이 일어나지 않아 `Base.metadata`가 비어 있다. pytest에서는 항상 `from app.models import X, Y`를 같이 import해서 이 함정을 못 느꼈다.
+- 프론트 시각 검증을 위해 `app.main:app`(전체 앱)을 그대로 띄우면 `lifespan`이 `start_scheduler()`를 호출해 real APScheduler가 진짜 크론(외부 API 크레덴셜 사용)까지 등록한다 — 스크래치 DB로 프론트만 확인하려던 의도와 달리 실제 외부 호출 위험을 안게 된다.
+- `mcp__Claude_Preview__preview_start`용 `.claude/launch.json`은 **작업 대상 워크트리가 아니라 이 세션 자체의 워크트리**(`.claude/worktrees/<session>/.claude/launch.json`)에 있어야 인식된다 — 코드가 있는 워크트리에 만들면 "launch.json 없음" 에러가 난다.
+
+### ✅ 해결
+- 스크립트에서 `Base.metadata.create_all` 전에 반드시 `from app import models  # noqa: F401`을 먼저 import.
+- 프론트 프리뷰는 필요한 라우터만 마운트한 미니 FastAPI 앱(`app.include_router(naver_ad.router)`만, `app.main`의 `lifespan`/스케줄러 없이)을 임시로 만들어 사용 — 스크래치 DB에 대해서도 외부 API 부작용이 전혀 없게 격리.
+- launch.json은 `runtimeExecutable`을 다른 워크트리 경로의 wrapper 스크립트나 `bash -c "cd '<target>' && ..."`로 지정해, 세션 워크트리에 두고 실제 코드는 작업 워크트리를 가리키게 한다.
+- prod 사본 검증 시 대상 테이블(NaverProposal)이 비어 있으면 "생성 파이프라인 자체가 prod에 배포된 적 없다"는 신호일 수 있다(추정 금지 — 코드 버그로 오판하지 않고 먼저 배포 이력을 재확인) — 이럴 땐 상위 파이프라인(proposal_pipeline)을 같은 사본에서 먼저 돌려 실제 데이터를 만든 뒤 하위 기능(expert_desk)을 검증한다(89K 재검증 때와 동일 원칙).
+
+### 📌 교훈
+독립 스크립트로 SQLAlchemy 모델을 다룰 때는 **모델 모듈을 명시적으로 import했는지 항상 확인**한다(pytest의 암묵적 import에 기대지 마라). 스크래치 DB로 프론트를 검증할 때도 백엔드 진입점을 있는 그대로 쓰지 말고 **필요한 라우터만 마운트한 최소 앱**을 만들어 외부 부작용 표면을 원천 차단한다. `preview_start`의 `launch.json`은 세션 워크트리 기준이라는 것을 기억한다. prod 사본 검증에서 "데이터가 없다"는 관찰은 버그가 아니라 **배포 상태에 대한 실측 정보**일 수 있으니 코드를 의심하기 전에 그 가능성부터 확인한다.
