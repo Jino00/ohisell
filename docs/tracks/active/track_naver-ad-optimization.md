@@ -165,7 +165,7 @@
 
 ## 다음 액션
 
-> **★2026-07-08 야간 개정(89K 재검증 완료 D-NAO-29 — F2 코드+실규모 검증 전부 완료)**: 새 세션은 **이 트랙 → `docs/PLAN_naver-ad-forecast-expert.md` 순으로 필독**. F2a·F2b·89K재검증 전부 완료·codex review pass·크래시 0건. **다음 구현 대상(계획서 §7 순서) = E1 expert_desk 조언자 모드 또는 F0b prod 백필+배포+라이브 self-verify** — 둘 다 이전과 다른 종류의 작업이라(E1=신규 Agent/Harness 설계+ANTHROPIC_API_KEY 필요, F0b=실제 prod 배포) **착수 전 Jino 확인 필요**. 방향 임의 변경 금지. 승계 큐(아래 2번, 관찰모드 개시 등)는 직교 — 병행 가능. 브랜치 `claude/admiring-solomon-b4f056` — F2a+F2b 로컬 커밋 7개(`f91bfc7`~`c519541`) 미push, docs 변경(트랙+계획서) 미커밋(Jino 확인 후 진행).
+> **★2026-07-08 야간 개정(E1 설계 완료·Jino 승인 D-NAO-30/31/32 — E1a 구현 대기)**: 새 세션은 **이 트랙 → `docs/PLAN_naver-ad-forecast-expert.md`(특히 §8 E1a task 분해) 순으로 필독**. F2 전부 완료. **E1 설계 확정·Jino 구조 승인 완료**: 전문가=AI_office 기존직원 Ava(`ohi_ads_media`) 재사용, 검토는 ohisell claude -p 배치 1콜(Opus, 레퍼런스 AI_office `claude_cli.py`), 지혜는 Ava 인지(observe push/wisdom pull), 검증채점(실행의존→E2, 검증가능예측→지금 부분성적표). **다음 구현 대상 = E1a T1(마이그레이션+NaverExpertReview 모델)부터**(§8 순서, 구현=**Sonnet**). E1a는 ohisell 자족(AI_office·실 claude 무의존, 주입경계 TDD)이라 바로 착수 가능. E1b(Ava 연동)는 AI_office쪽 별도 작업 후. 방향 임의 변경 금지. 브랜치 `claude/admiring-solomon-b4f056` — 로컬 커밋 다수 미push, docs 갱신 커밋됨.
 > (이전) 2026-07-08 밤 개정(F1 완료 + F2 착수 승인 D-NAO-26): F2a grain 확장부터 시작 — **완료됨(위 참조)**.
 > (이전) 2026-07-07 밤 개정(D-NAO-22/23): 듀얼모드 스프린트 — **Phase 1~6 전부 완료(2026-07-08) + prod 89K 재검증 완료.**
 

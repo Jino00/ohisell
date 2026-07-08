@@ -100,8 +100,48 @@
   - [x] **F2a grain 확장** — 완료(2026-07-08, Sonnet, TDD). 신규 `forecast_source.py`(순수 reader SA, grain→시계열 소싱 단일화) → forecast_gate/model_builder/scorer `grain=="campaign"` 하드코딩 제거·파라미터화 → forecast_engine이 NaverEntity(status='on') 활성 adgroup·keyword까지 순회. 소스: campaign=sentinel(`__backfill__`), adgroup=실P0 adgroup별 일합산(sentinel 제외), keyword=실P0 keyword별(WEB_SITE만). **codex review(D-NAO-27)**: P1 2건·P2 1건 — 부모-자식 status 캐스케이드 누락(즉시수정, entity_sync.py 실측으로 실버그 확인)·빈 scope_key 방어+keyword 중복합산 누락(즉시수정)·NaverAdDaily adgroup_id/keyword_id 인덱스 부재로 인한 N+1 스케일 위험(스키마 변경이라 F2a 범위 밖, 89K 재검증에서 실측 후 처리로 의도적 이연). 코드: 커밋 `f91bfc7`(F2a 코어)+`ba46a17`(codex fix). pytest 762→779 passed. **다음 = F2b.**
   - [x] **F2b 배선 3곳 + 1-a④⑤** — 완료(2026-07-08, Sonnet, TDD). ⓐ `proposal_pipeline.compute_forecast_evidence`→`proposal_writer.build(forecast_data=...)` — bid_up/bid_down/negative_keyword/growth_bid_up rationale에 예측치 병기만(입찰산식 D-NAO-19 불변, 커밋 `d9c6f01`). ⓑ `budget_allocator.find_pre_exhaustion_signals`(pred_cost>budget 미소진 사전경보, 신규 `budget_pre_exhaustion` 정보성 제안, 커밋 `235b2f3`). ⓒ `trigger_watch.find_pacing_anomalies` 예측곡선 페이싱(hourly_pattern 신규 `expected_cost_fraction`×오늘 pred_cost, 예측/패턴 없으면 선형 폴백) + 1-a④ 당일 가드(`ad_date != today` → 빈 목록) + 1-a⑤ `anomaly_feed` 절대액 floor(SPEND_ANOMALY_MIN_ABS=1000원, 양쪽 다 미만이면 스킵, 커밋 `95b591c`+`320d79a`). **codex review(GATE PASS, P1 0건·P2 4건)**: 전부 즉시 반영(커밋 `c519541`) — pred_cost==budget 경계(`<`→`<=`), 곡선이 정각에 그 시간 몫을 전부 반영해 선형(분단위)보다 정밀도 낮던 문제(hour-1~hour 사이 분단위 보간), hourly_pattern 조회 N+1(hour별 캐시), find_pacing_anomalies 내부 kst_today() 재계산이 호출자와 자정 경계에서 어긋날 이론상 레이스(명시적 today 파라미터로 run_hourly가 한 번만 계산해 전달). pytest 779→808 passed. **다음 = 89K 재검증.**
   - [x] **89K 재검증** — 완료(2026-07-08, D-NAO-29). prod DB scp 읽기전용 사본(`sellc.ohitech.co.kr:/home/ubuntu/ohisell/backend/ohisell.db`) → additive 마이그레이션 3개(`w7x8y9z0a1b2`/`x8y9z0a1b2c3`/`y9z0a1b2c3d4`, alembic.ini 임시 포인팅 트릭 후 즉시 git checkout 원복) 적용 → forecast_engine+배선3곳 실규모 실행, **크래시 0건**. **부모 체인 캐스케이드 필터(F2a codex fix) 실측 검증**: NaverEntity status='on' 90,364개 중 `_active_scopes`가 부모 전부 on인 30,916개만 통과(campaign 29·adgroup 451·keyword 30,436) — 나머지는 부모가 off인 고아 엔티티, 필터가 실제로 동작함을 확인. **N+1 스케일 실측(F2a codex 이연 항목 해소)**: `forecast_engine.run_daily` 30,916 스코프 46.7초 — 일일 크론(07:50) 예산 내 여유, **인덱스 추가 불필요로 결론**(이연 항목 종결, 스키마 변경 없이 진행). model_builder: 30,916개 전부 `fallback`(정직 경계 — prod는 P0 실단위 이력 7/04 개시 4일뿐이라 14일 게이트 미달, 캠페인 grain sentinel 백필도 F0a가 별도 스크래치 DB에서만 실행돼 prod 실DB엔 부재 — 설계대로, F0b가 이 백필을 prod에 배포하는 별도 작업). budget_allocator/trigger_watch/compute_forecast_evidence 배선 3곳 전부 예측 없음 상태에서 정상 no-op(오탐 0건). 스크래치 사본은 검증 직후 즉시 삭제(prod 미변경).
-- [ ] E1 expert_desk 조언자 모드 + 콘솔 뷰 + codex review
+- [ ] **E1a expert_desk (ohisell 자족) + 콘솔 + codex review** — 상세 §8. Ava 페르소나로 08:05 배치 검토(Opus), 평결 저장·콘솔, 검증가능예측 D+7/14 로컬 성적표. AI_office·실 claude 무의존(주입경계 TDD). **다음 착수 대상**.
+- [ ] **E1b Ava 연동** — ava_client(wisdom pull 브리핑 주입 + observe push) + 실 claude 어댑터 스모크. AI_office쪽(Ava 지혜/SOUL read 엔드포인트·인증·CORS, 별도 세션) 준비 후.
 - [ ] F0b prod 백필 + 배포 + 라이브 self-verify (원칙22)
 - [ ] E2 부분 게이트 (보류 — 반자동 전환 결정과 동기)
 
 > 매 Phase: 구현 → codex review pass → 트랙/이 문서 §7 즉시 갱신(원칙20 보강 룰).
+
+## §8 E1a 상세 구현 계획 (task 분해, D-NAO-30/31/32)
+
+**목표(E1a)**: ohisell 자족 — Ava 페르소나로 매일 08:05 오늘 pending 제안 전체를 claude -p 배치 1콜(Opus)로 검토해 평결을 저장·콘솔 노출 + 반대 시 붙인 "검증 가능한 예측"을 D+7/14에 실측 채점하는 로컬 성적표. **AI_office·실 claude 무의존으로 전부 TDD**(reviewer LLM 호출은 주입가능 경계). 실 claude 어댑터는 CLI 설치처에서 별도 스모크.
+
+**정직 경계**: E1a 페르소나·지혜=로컬 상수/로컬 성적표(Ava 실 SOUL·지혜는 E1b pull). 실행 의존 채점은 E2 연기(관찰모드 미실행). 브리핑 밖 수치 인용 금지 프롬프트 + 스키마 강제(원칙19 환각 방어) + no silent cap(절삭 시 로깅).
+
+### 데이터 (additive 마이그레이션 1개)
+- `naver_expert_review`: id, created_at, `as_of`(Date), `proposal_id`(Int nullable FK naver_proposals.id — null=하루 총평), `verdict`(str16: agree/partial/reject/commentary), `confidence`(Numeric nullable), `reasoning`(Text), `checkable_prediction`(Text nullable — 반대 시 필수), `pred_target_type`/`pred_target_id`(str nullable), `pred_metric`(str nullable)/`pred_direction`(str nullable up/down), `verify_date`(Date nullable=as_of+7/+14), `outcome`(str12 nullable: correct/wrong/unverifiable/pending), `model`(str), `source`(str: local/ava). UniqueConstraint(as_of, proposal_id) 멱등.
+- 성적표: 기존 `NaverLearningState` 재사용(scope="expert", scope_key=pred 유형, metric="prediction_accuracy") — 채점된 예측만 롤업.
+
+### SA (단일 책임)
+- **SA1 `expert_briefing_builder.build(db, as_of) -> dict`** [결정적, LLM 아님]: 오늘 pending NaverProposal 전체 + 진단보드 요약 + forecast 예측vs실측 최근 롤업 + 최근 trigger 이벤트 + 현재 로컬 성적표 요약 조립(+E1b: Ava 지혜). 페르소나는 여기 안 넣음. 토큰가드: 상한 초과 시 오래된 컨텍스트부터 절삭+로깅. 결정적(같은 입력→같은 브리핑).
+- **SA2 `ava_reviewer.review(briefing, *, invoke=_invoke_claude, model="opus") -> dict`**: 브리핑→스키마 지시(제안별 verdict 배열 + 총평, 반대 시 checkable_prediction 필수)→`invoke`(주입경계: 기본=실 claude, 테스트=가짜). 반환 {verdicts[], commentary, raw, usage}, 스키마 검증(위반 시 1회 재시도 후 실패 기록, 조작 금지). 페르소나(system)=E1a 로컬 Ava 상수 / E1b pull.
+- **어댑터 `_invoke_claude(prompt, system, schema, model, timeout)`** [claude_cli.py 린 포팅, cost_guard 미포함]: `[which("claude"), "--print", "--output-format", "json", "--model", model, "--system-prompt", system]` + 프롬프트 stdin + `env`에서 ANTHROPIC_API_KEY 제거 + cwd=/tmp + 재시도(t→×1.5→×2). stdout→`json["result"]`→regex로 JSON 추출. 신규 `app/services/naver_ad/expert_llm.py`.
+- **SA3 `expert_ledger`**: `record(db, as_of, review)` 평결 저장(멱등)[+E1b observe push] / `grade_due_predictions(db, today)` verify_date<=today & pending 행을 pred_target 엔티티 실성과(naver_ad_daily/forecast_scorer 재사용)와 대조→outcome 설정 + 성적표 upsert.
+
+### Harness `expert_desk.run_daily(db, *, today=None)` [learning_loops식 단계격리]
+stage1 grade_due_predictions → stage2 briefing_builder.build(as_of=kst_today()) → stage3 ava_reviewer.review(주입경계) → stage4 expert_ledger.record. 각 단계 독립 try/except, stage_status/errors.
+
+### 배선
+- 크론: scheduler_service `generate_expert_desk`(`5 8 * * *`, 08:00 proposal 직후).
+- 라우터: `GET /api/naver/ad/expert-reviews?as_of=&proposal_id=` + `/proposals` 응답에 verdict 요약 조인(배지용).
+- 프론트(NaverAdOptimizationConsole.tsx): 제안 카드 평결 배지(✓/⚠/✗) + "Ava의 검토" 패널(총평 + 성적표).
+
+### 완료기준(E1a)
+prod 사본 실제안으로 (가짜 reviewer) e2e[브리핑→평결배열→ledger→라우터/콘솔, 스키마위반 0] + grade_due_predictions 채점 단위테스트(예측→outcome→성적표) + 전 SA/harness TDD + codex review pass. 실 claude 어댑터는 CLI 설치·인증 호스트에서 1콜 왕복 스모크(별도, E1a 코드 무의존).
+
+### Task 순서 (각 T: TDD RED→GREEN → codex review → 커밋 → 트랙/§7 즉시 갱신)
+- **T1** 마이그레이션 + `NaverExpertReview` 모델 + 모델 테스트
+- **T2** `expert_briefing_builder` + 테스트(결정성·토큰가드)
+- **T3** `expert_llm._invoke_claude` 린 어댑터 + `ava_reviewer`(주입경계) + 테스트(가짜 invoke·스키마검증·재시도)
+- **T4** `expert_ledger`(record + grade_due_predictions) + 테스트(멱등·채점·성적표)
+- **T5** `expert_desk` 하네스 + 테스트(단계격리)
+- **T6** 라우터 GET /expert-reviews + /proposals 조인 + 테스트
+- **T7** 크론 08:05 등록
+- **T8** 프론트 배지 + Ava 패널(tsc/build)
+- **T9** prod 사본 e2e(가짜 reviewer) + codex review + 트랙/§7 갱신
+- (T10 E1b, 별도) ava_client pull/push + 실 어댑터 스모크 — AI_office쪽 준비 후
