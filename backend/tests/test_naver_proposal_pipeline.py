@@ -11,8 +11,8 @@ from sqlalchemy.pool import StaticPool
 
 from app.database import Base
 from app.models import (
-    NaverAdDaily, NaverCampaignSettings, NaverEntity, NaverHourlySnapshot, NaverProductBep,
-    NaverProposal, Order,
+    NaverAdDaily, NaverCampaignSettings, NaverEntity, NaverForecastDaily, NaverHourlySnapshot,
+    NaverProductBep, NaverProposal, Order,
 )
 from app.services.naver_ad import proposal_pipeline
 from app.utils.kst import kst_today
@@ -398,6 +398,46 @@ def test_run_daily_no_budget_up_when_not_exhausted(db, monkeypatch):
     assert db.query(NaverProposal).filter(NaverProposal.proposal_type == "budget_up").count() == 0
 
 
+def test_compute_pre_exhaustion_signals_wraps_budget_allocator(db):
+    """F2b ⓑ: compute_pre_exhaustion_signals가 budget_allocator.find_pre_exhaustion_signals를 그대로 위임."""
+    db.add(_hourly_snapshot("cmp1", cost=3000, daily_budget=10000, ad_date=kst_today()))
+    db.add(NaverForecastDaily(
+        target_date=kst_today(), grain="campaign", scope_key="cmp1",
+        pred_clk=0, pred_cost=12000, pred_conv_amt=0,
+    ))
+    db.commit()
+
+    out = proposal_pipeline.compute_pre_exhaustion_signals(db)
+    assert len(out) == 1
+    assert out[0]["campaign_id"] == "cmp1"
+    assert out[0]["pred_cost"] == 12000
+
+
+def test_run_daily_generates_budget_pre_exhaustion_proposal(db, monkeypatch):
+    """F2b ⓑ 통합: 아직 미소진이나 오늘 예측이 예산 초과면 budget_pre_exhaustion 정보성 제안 생성."""
+    _seed_bep(db)
+    db.add(NaverCampaignSettings(campaign_id="cmp1", optimizer="ours"))
+    _row(db, AS_OF, "cmp1", "WEB_SITE", "grp1", "nkw-1", 1000, 100, 5000, direct=1_000_000)  # freshness 게이트
+    db.add(_hourly_snapshot("cmp1", cost=3000, daily_budget=10000, ad_date=kst_today()))  # 아직 미소진
+    db.add(NaverForecastDaily(
+        target_date=kst_today(), grain="campaign", scope_key="cmp1",
+        pred_clk=0, pred_cost=12000, pred_conv_amt=0,
+    ))
+    db.commit()
+
+    monkeypatch.setattr(
+        proposal_pipeline.fetcher, "estimate_average_position_bid",
+        lambda device, items: [{"nccKeywordId": it["key"], "bid": 100_000} for it in items],
+    )
+
+    out = proposal_pipeline.run_daily(db)
+    assert out["stage_status"]["budget_allocator"] == "ok"
+    saved = db.query(NaverProposal).filter(NaverProposal.proposal_type == "budget_pre_exhaustion").all()
+    assert len(saved) == 1
+    assert saved[0].target_id == "cmp1"
+    assert "실행 대상 아님" in saved[0].expected_effect
+
+
 def test_run_daily_generates_anomaly_spend_spike_proposal(db, monkeypatch):
     _seed_bep(db)
     db.add(NaverCampaignSettings(campaign_id="cmp1", optimizer="ours"))
@@ -466,7 +506,7 @@ def test_run_daily_proposal_writer_failure_isolated_other_stages_still_run(db, m
     db.commit()
 
     def boom(db_, diagnosis_dict, *, bid_sims=None, growth_candidates=None, growth_sims=None,
-             budget_signals=None, anomalies=None, as_of=None):
+             budget_signals=None, pre_exhaustion_signals=None, anomalies=None, as_of=None):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(proposal_pipeline.proposal_writer, "build", boom)

@@ -384,6 +384,17 @@ def compute_budget_signals(
     return budget_allocator.find_budget_expansion_signals(db, today, growth_candidates=growth_all_candidates)
 
 
+def compute_pre_exhaustion_signals(db: Session, *, today: date | None = None) -> list[dict]:
+    """budget_allocator F2b(D-NAO-26) — 아직 소진 전이지만 오늘자 예측(forecast_model_builder
+    pred_cost)이 daily_budget을 넘어설 캠페인을 사전경보로 산출. estimate 재조회 없음(순수
+    로컬 비교, budget_allocator.find_pre_exhaustion_signals에 위임).
+    today: hourly_snapshot·forecast 모두 "오늘" 기준이라 as_of(어제)가 아니라 오늘로 판단
+    (compute_budget_signals와 동일 이유) — 미지정 시 kst_today().
+    """
+    today = today if today is not None else kst_today()
+    return budget_allocator.find_pre_exhaustion_signals(db, today)
+
+
 def compute_anomalies(db: Session, as_of: date) -> dict:
     """anomaly_feed Phase 3(경량, D-NAO-22-④ 앞부분) — freshness 부분적재 + 소진 급변.
 
@@ -472,8 +483,10 @@ def run_daily(db: Session, *, lookback_days: int = 15) -> dict:
         result["stage_status"]["growth_sweeper"] = "skipped"
 
     budget_signals: list[dict] = []
+    pre_exhaustion_signals: list[dict] = []
     try:
         budget_signals = compute_budget_signals(db, growth.get("all_candidates") or [])
+        pre_exhaustion_signals = compute_pre_exhaustion_signals(db)
         result["stage_status"]["budget_allocator"] = "ok"
     except Exception as e:  # noqa: BLE001 — 예산 신호 실패는 저하만, 나머지 단계는 계속 진행
         log.exception("proposal_pipeline budget_allocator 단계 실패: %s", e)
@@ -495,7 +508,8 @@ def run_daily(db: Session, *, lookback_days: int = 15) -> dict:
             candidates = proposal_writer.build(
                 db, diag, bid_sims=bid_sims,
                 growth_candidates=growth["candidates"], growth_sims=growth["sims"],
-                budget_signals=budget_signals, anomalies=anomalies, as_of=as_of,
+                budget_signals=budget_signals, pre_exhaustion_signals=pre_exhaustion_signals,
+                anomalies=anomalies, as_of=as_of,
             )
             saved = proposal_writer.persist(db, candidates)
             proposal_writer.account_brief_singleton(db, diag, as_of)

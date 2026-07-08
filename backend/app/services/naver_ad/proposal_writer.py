@@ -14,6 +14,7 @@ from app.services.naver_ad import campaign_target_resolver, growth_sweeper
 _NEGATIVE = "negative_keyword"
 _GROWTH_BID_UP = "growth_bid_up"
 _BUDGET_UP = "budget_up"
+_BUDGET_PRE_EXHAUSTION = "budget_pre_exhaustion"
 _ANOMALY = "anomaly"
 _ANOMALY_FRESHNESS = "anomaly_freshness"
 
@@ -175,6 +176,29 @@ def _budget_proposal(signal: dict, target_label: dict) -> dict:
     }
 
 
+def _budget_pre_exhaustion_proposal(signal: dict, target_label: dict) -> dict:
+    """budget_allocator 사전경보 신호(F2b, D-NAO-26) → 정보성 제안. 아직 예산 소진 전이지만
+    오늘자 예측(forecast_model_builder pred_cost)이 daily_budget을 넘어설 것으로 보이는 경우.
+    marginal ROAS 인과추정 아님(예측치를 daily_budget과 비교만 함) — anomaly_feed와 동일하게
+    실행 대상 아닌 정보성 신호(D-3)."""
+    rationale = (
+        f"[budget_allocator 사전경보] 일예산 {signal['daily_budget']}원, 현재 누적 {signal['cost']}원"
+        f"({signal['hour']}시 기준) — 오늘 예측 지출 {signal['pred_cost']}원으로 예산 초과 예상"
+        f"(예측초과분={signal['pred_gap']}원). target_roas 근거={target_label['source']}"
+        + (f"({target_label['target_roas']})" if target_label.get("target_roas") is not None else "")
+        + "."
+    )
+    return {
+        "proposal_type": _BUDGET_PRE_EXHAUSTION,
+        "target_type": "campaign",
+        "target_id": signal["campaign_id"],
+        "campaign_id": signal["campaign_id"],
+        "rationale": rationale,
+        "expected_effect": "정보성 신호 — 실행 대상 아님(예측 기반 사전경보, marginal ROAS 인과추정 없음).",
+        "status": "pending",
+    }
+
+
 def _anomaly_spend_proposal(item: dict) -> dict:
     """anomaly_feed 소진 급변 신호 → 정보성 제안(D-3, 실행 대상 아님). 전 캠페인 대상
     (진단 성격이라 D-NAO-13 optimizer='ours' 제한 예외 — account_diagnosis 보드와 동일 취급).
@@ -217,7 +241,8 @@ def _anomaly_freshness_proposal(freshness: dict) -> dict:
 def build(
     db: Session, diagnosis: dict, *, bid_sims: dict | None = None,
     growth_candidates: list[dict] | None = None, growth_sims: dict | None = None,
-    budget_signals: list[dict] | None = None, anomalies: dict | None = None, as_of: date,
+    budget_signals: list[dict] | None = None, pre_exhaustion_signals: list[dict] | None = None,
+    anomalies: dict | None = None, as_of: date,
 ) -> list[dict]:
     """진단 보드 + bid_simulator 결과 → 제안 후보 목록(아직 미저장, dict 리스트).
 
@@ -229,6 +254,11 @@ def build(
       빌더(_growth_proposal)로 처리한다.
     budget_signals: budget_allocator 신호(D-NAO-22-③, Phase3) —
       proposal_pipeline.compute_budget_signals() 반환값. optimizer='ours'만 제안 생성.
+    pre_exhaustion_signals: budget_allocator 사전경보 신호(F2b, D-NAO-26) —
+      proposal_pipeline.compute_pre_exhaustion_signals() 반환값. budget_signals와 형태가
+      달라(pred_cost/pred_gap, 이미 소진된 게 아니라 오늘 예측이 초과) 전용 빌더로 처리.
+      정보성(anomaly와 동일 취급, 실행 대상 아님)이나 대상은 optimizer='ours'로 제한한다
+      (budget_signals와 동일 성격 — 이 시스템이 관리하는 캠페인에 대한 예산 신호이므로).
     anomalies: anomaly_feed 신호(경량, Phase3) — {"freshness": {...}|None, "spend": [...]}.
       진단 성격(D-3, 사실 정리)이라 optimizer 무관 전 캠페인 대상(diagnosis 보드와 동일 취급).
     optimizer='ours' 캠페인만 대상(D-NAO-13) — 그 외(none/mop)는 진단엔 나와도 제안 없음.
@@ -237,6 +267,7 @@ def build(
     growth_candidates = growth_candidates or []
     growth_sims = growth_sims or {}
     budget_signals = budget_signals or []
+    pre_exhaustion_signals = pre_exhaustion_signals or []
     anomalies = anomalies or {}
     boards = diagnosis.get("boards") or {}
     ours = _ours_campaign_ids(db)
@@ -306,6 +337,14 @@ def build(
         if cid not in ours:
             continue
         proposals.append(_budget_proposal(s, labels.get(cid)))
+
+    # budget_allocator 사전경보(F2b, D-NAO-26): 아직 소진 전이지만 오늘 예측이 예산을
+    # 넘어설 것으로 보이는 캠페인 — 정보성(실행 대상 아님), budget_signals와 동일하게 ours로 제한.
+    for s in pre_exhaustion_signals:
+        cid = s["campaign_id"]
+        if cid not in ours:
+            continue
+        proposals.append(_budget_pre_exhaustion_proposal(s, labels.get(cid)))
 
     # anomaly_feed(경량, Phase3): 진단 성격이라 diagnosis 보드와 동일하게 전 캠페인 대상
     # (optimizer 무관) — D-3 사실 정리, 실행 없음.

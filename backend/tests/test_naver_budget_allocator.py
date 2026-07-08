@@ -9,7 +9,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.database import Base
-from app.models import NaverHourlySnapshot
+from app.models import NaverForecastDaily, NaverHourlySnapshot
 from app.services.naver_ad import budget_allocator
 
 AS_OF = date(2026, 7, 7)
@@ -90,3 +90,63 @@ def test_expansion_signals_empty_when_no_exhausted_campaigns(db):
     db.commit()
     out = budget_allocator.find_budget_expansion_signals(db, AS_OF, growth_candidates=[{"campaign_id": "x", "gap": 1}])
     assert out == []
+
+
+def _forecast(campaign_id, pred_cost, target_date=AS_OF):
+    return NaverForecastDaily(
+        target_date=target_date, grain="campaign", scope_key=campaign_id,
+        pred_clk=0, pred_cost=pred_cost, pred_conv_amt=0,
+    )
+
+
+def test_pre_exhaustion_flags_not_yet_exhausted_campaign_with_high_forecast(db):
+    """F2b ⓑ: 아직 소진 전이지만 오늘 예측 pred_cost가 daily_budget을 넘으면 사전경보."""
+    db.add(_snap("cmp1", 10, cost=3000, daily_budget=10000))  # 아직 소진 아님
+    db.add(_forecast("cmp1", pred_cost=12000))  # 오늘 예측은 예산 초과
+    db.commit()
+
+    out = budget_allocator.find_pre_exhaustion_signals(db, AS_OF)
+
+    assert len(out) == 1
+    assert out[0]["campaign_id"] == "cmp1"
+    assert out[0]["pred_cost"] == 12000
+    assert out[0]["pred_gap"] == 2000
+
+
+def test_pre_exhaustion_excludes_already_exhausted_campaign(db):
+    """이미 소진된 캠페인은 find_budget_exhausted_campaigns 대상이지 사전경보 대상이 아니다."""
+    db.add(_snap("cmp1", 10, cost=10000, daily_budget=10000))
+    db.add(_forecast("cmp1", pred_cost=15000))
+    db.commit()
+
+    out = budget_allocator.find_pre_exhaustion_signals(db, AS_OF)
+    assert out == []
+
+
+def test_pre_exhaustion_excludes_when_forecast_below_budget(db):
+    db.add(_snap("cmp1", 10, cost=3000, daily_budget=10000))
+    db.add(_forecast("cmp1", pred_cost=8000))  # 예측도 예산 이하
+    db.commit()
+
+    out = budget_allocator.find_pre_exhaustion_signals(db, AS_OF)
+    assert out == []
+
+
+def test_pre_exhaustion_excludes_campaign_without_forecast(db):
+    """예측 모델이 아직 없거나(fallback) 미가동인 캠페인은 비교 불가라 제외."""
+    db.add(_snap("cmp1", 10, cost=3000, daily_budget=10000))
+    db.commit()
+
+    out = budget_allocator.find_pre_exhaustion_signals(db, AS_OF)
+    assert out == []
+
+
+def test_pre_exhaustion_sorted_by_pred_gap_descending(db):
+    db.add(_snap("cmp-small-gap", 10, cost=1000, daily_budget=10000))
+    db.add(_forecast("cmp-small-gap", pred_cost=10500))
+    db.add(_snap("cmp-big-gap", 10, cost=1000, daily_budget=10000))
+    db.add(_forecast("cmp-big-gap", pred_cost=20000))
+    db.commit()
+
+    out = budget_allocator.find_pre_exhaustion_signals(db, AS_OF)
+    assert [c["campaign_id"] for c in out] == ["cmp-big-gap", "cmp-small-gap"]

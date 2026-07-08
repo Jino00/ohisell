@@ -326,6 +326,39 @@ def test_build_budget_signal_skips_non_ours_campaign(db):
     assert out == []
 
 
+def _pre_exhaustion_signal(**overrides):
+    row = {"campaign_id": "cmp-ours", "campaign_type": "WEB_SITE", "daily_budget": 10000,
+           "cost": 3000, "hour": 10, "pred_cost": 12000, "pred_gap": 2000}
+    row.update(overrides)
+    return row
+
+
+def test_build_pre_exhaustion_signal_produces_informational_proposal(db):
+    """F2b ⓑ: 사전경보는 정보성 제안(anomaly와 동일 취급) — 실행 대상 아님."""
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis()
+
+    out = proposal_writer.build(db, diagnosis, pre_exhaustion_signals=[_pre_exhaustion_signal()], as_of=AS_OF)
+    assert len(out) == 1
+    assert out[0]["proposal_type"] == "budget_pre_exhaustion"
+    assert out[0]["target_type"] == "campaign"
+    assert out[0]["target_id"] == "cmp-ours"
+    assert "실행 대상 아님" in out[0]["expected_effect"]
+    assert "12000원" in out[0]["rationale"]
+
+
+def test_build_pre_exhaustion_signal_skips_non_ours_campaign(db):
+    db.add(NaverCampaignSettings(campaign_id="cmp-none", optimizer="none"))
+    db.commit()
+    diagnosis = _diagnosis()
+
+    out = proposal_writer.build(
+        db, diagnosis, pre_exhaustion_signals=[_pre_exhaustion_signal(campaign_id="cmp-none")], as_of=AS_OF,
+    )
+    assert out == []
+
+
 def test_build_anomaly_spend_proposal_ignores_ours_filter(db):
     """anomaly_feed는 진단 성격이라 optimizer 무관(전 캠페인 대상) — cmp-settings가 아예 없어도 생성돼야 함."""
     diagnosis = _diagnosis()
