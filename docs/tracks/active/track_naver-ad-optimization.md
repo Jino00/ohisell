@@ -183,11 +183,14 @@
 
 - ✅ **D-NAO-33 F0b 잔여 — prod 캠페인 180일 백필 완료(2026-07-08, 이어지는 세션, Sonnet)**: F0a와 동일 작업(`campaign_backfill.backfill_campaign_daily`)을 prod 실DB에 직접 실행(스크래치 아님 — prod 서버 SSH 접속, `.venv` 인터프리터로 실 prod `ohisell.db`에 대해 실행, 실제 네이버 `/stats` API 호출). **사전 백업**: `sellc.ohitech.co.kr:/home/ubuntu/ohisell_bak/naver-ad-campaign-backfill_20260708_115522/ohisell.db.pre-campaign-backfill`. 실행 전 확인: prod sentinel 행 0건, P0 실단위 이력 2026-07-04~07-07(4일)뿐 — 위 D-NAO-29 관찰과 일치. **결과: 43캠페인·7,740행·2026-01-09~07-07(180일)·cost합 80,335,231원** — F0a 스크래치 실행과 완전 일치(같은 기간의 실 네이버 API 이력이므로 예상대로). **완료기준 둘 다 충족**: ①`metrics_aggregator.aggregate`로 07-04~07-07 실단위 집계를 백필 전/후 비교 → `IDENTICAL=True`(sentinel 필터가 prod 실DB에서도 정상 작동, 이중계상 없음) ②겹치는 10일(06-28~07-07) 재백필 → sentinel 행 수 7,740 그대로 유지(`IDEMPOTENT=True`, 중복 없음). 임시 실행 스크립트는 prod에 남기지 않고 검증 직후 삭제. **F0b 완전 종결** — forecast_engine 캠페인 grain 모델이 다음 크론(07:50)부터 `fallback`을 벗어날 조건 충족(30,916 스코프 중 campaign grain 29개가 캠페인 sentinel 이력을 갖게 됨).
 
+- ✅ **MOP Pro 풀 갭 리뷰 완료(2026-07-10, fable, recursing-engelbart-6bb9d5)**: Jino 지시 4축 — ①MOP 라이브 재실측(로그인 계정, be.mopapp.net API 직접 조회: **Basic 티어·SPA 유닛 2개 전부 종료(bidYn=N)** — "250617_ROAS최적화"가 2025-06-24~2026-06-17 1년 가동 후 종료, 현재 MOP는 우리 계정에서 아무것도 입찰 안 함. Basic 기능 플래그 전량 확보) ②우리 데이터 신선도 실측(**키워드 성과 D-1은 MOP도 동일** — "광고 정보 갱신은 매일 오전" 문서 명시. 갭은 데이터가 아니라 당일 신호→당일 입찰 반영 루프) ③support 전 문서 재정독(2026-05-08 플랜 개편: Basic 무료/Lite 29만/Pro 99만, 휴면정책 7-28 시행) ④외부자료 리서치(LG CNS 발표 ROAS +14.7%·키워드당 시간대×입찰가 ~350 경우의 수 이산 최적화·**2025-08 네이버 ADVoost MOU**·아이보스 실패모드 실증 "광고비만 소진 SKU·객단가 쏠림"). **종합 결론: 두뇌는 동급+부분 우위, 갭은 "손"(G1 입찰 집행 0줄·G2 시간대 플래닝·G3 당일 반영 루프·G4 순위유지)** — 상세·갭 매트릭스·참고 알고리즘(USCB/AuctionNet)은 `docs/references/25_mop_pro_gap_analysis.md`(신규), ref 24는 great-hertz 워크트리에서 이 리포지토리로 편입. **부수 발견**: ⓐ2026-07-09 08:05 첫 Ava 크론이 pm2 환경 claude CLI OAuth 401로 실패(expert_review_run 0행, 수리 태스크 칩 발행) ⓑF0b 백필 효과 실증(forecast 모델 active 0→20개) ⓒpending 150건 중 trigger_pacing 145건(브리핑 토큰가드 절삭 위험 실증).
+
 ## 다음 액션
 
 > **★2026-07-08 개정(F0b 완전 종결 — 남은 건 E1b+E2뿐)**: 새 세션은 **이 트랙 → `docs/PLAN_naver-ad-forecast-expert.md` 순으로 필독**. **E1a(T1~T9) 코드 100% 완료 + prod 실배포 완료 + F0b 캠페인 백필 완료**(위 D-NAO-33 참조) — main에 병합·origin push 완료, prod가 매일 08:00/07:50/08:05/08:10 크론으로 실제 돌아가는 중, 캠페인 grain 이력도 이제 prod에 존재. **남은 항목**:
 > 1. **E1b**: Ava 연동(ava_client wisdom pull + observe push) + 실 claude 어댑터 스모크 — **AI_office는 다른 레포/프로젝트**, 이 세션에서 불가. AI_office쪽 별도 세션 필요(Ava 지혜/SOUL read 엔드포인트·인증·CORS 신설).
-> 2. **E2**: 부분 게이트 — "반자동 전환 결정"과 동기, Jino 결정 대기.
+> 2. **E2/실행 루프**: 부분 게이트 — Jino가 2026-07-10 "허용하면서 발전시키자"+"MOP처럼 자동 운영" 방향 표명 → **MOP 갭 리뷰(ref 25) 완료, 갭=G1 집행·G2 시간대 플래닝·G3 당일 루프·G4 순위유지로 구조화됨**. 다음 계획 수립 시 ref 25 §5의 스프린트 방향(쓰기 API 실측→execution_harness 실쓰기 어댑터→D-NAO-16 순서 개방)을 출발점으로. 정식 스코프·순서는 Jino 승인 필요(아직 미확정).
+> 2-a. (선결) **prod Ava 크론 401 수리**: pm2 환경 claude CLI OAuth 인증 실패 — 수리 태스크 칩 발행됨(2026-07-10). E2 이전에 해결 권장(Ava 검토가 실행 게이트의 신뢰 기반).
 > 방향 임의 변경 금지 — 위 2개 중 어느 것부터 할지는 Jino가 정한다.
 > (이전) 2026-07-08 F0b 잔여(prod 캠페인 백필) — **완료됨(위 D-NAO-33 참조)**.
 > (이전) 2026-07-08 밤 개정(F1 완료 + F2 착수 승인 D-NAO-26): F2a grain 확장부터 시작 — **완료됨(위 참조)**.
