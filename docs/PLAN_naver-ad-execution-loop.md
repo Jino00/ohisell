@@ -88,7 +88,7 @@ X0 선결 → X1a 손(제외키워드) → X1b 손(정지·재개→입찰) → 
 - [ ] X0-2 카나리 캠페인 2~3개 지정·ours 전환 (Jino) — **연기 확정(2026-07-10, Jino: "카나리 캠페인은 프로그램 완성되면 정하자")**: 코딩은 카나리 없이 진행하고, 실집행 라이브 검증 단계(X1a 완료기준①·X1b②·X2 라이브)만 카나리 지정 후 수행.
 - [x] X0-3 정보성 pending 경량화 정책 결정 — **완료(2026-07-10, D-NAO-37)**: 차등 TTL+브리핑 접기+백로그 정리 확정. 구현은 X1a T6.
 - [x] X1a T1 쓰기 API 스펙 문서화 — **완료(2026-07-10)**: 원본 swagger 유실 → 공식 GitHub gh-pages에서 재확보(`docs/references/data/ncc-heroes-ncc.json`에 커밋, 재유실 차단), ref 27 작성(제외키워드 POST/GET/DELETE·bidAmt PUT·userLock 3계층 PUT + prod 라이브 읽기 실측 3건 200). ⏳ **왕복 실측(추가→재조회→삭제)만 잔여** — X0-2 카나리 연기에 따라 실쓰기 검증 단계에서 수행(ref 27 §6 시나리오 준비 완료). 배선 발견: negative_keyword 제안에 adgroup_id 부재 — T2/T3에서 해결(ref 27 §8-1).
-- [ ] X1a T2 naver_sa_writer SA
+- [x] X1a T2 naver_sa_writer SA — **완료(2026-07-10, Sonnet TDD + codex 3라운드 PASS)**: 제외키워드 add/delete/get 3함수(userLock·bidAmt는 X1b에서 확장 — 점진 개방, fable 설계 결정). 계약=모든 쓰기가 (before 실측, 쓰기 응답, after 재조회) 반환·쓰기 무재시도·성공 판정은 after 재조회로만(fail-closed). codex 리뷰 5건 전부 동의·수정(delete no-op 차단, created_ids after 파생+완전성, 요청 내 중복 차단, DELETE 429 테스트, 복수 행 모호성 fail-closed). 테스트 20개, 전체 924 passed. 커밋 `10cd1cb`+`02982a7`. ⚠️라이브 왕복 실측은 T3 완료기준①에서(카나리 대기).
 - [ ] X1a T3 execution_harness 실쓰기 + 제외키워드 개방
 - [ ] X1a T4 콘솔 승인 버튼 (반자동 개시)
 - [ ] X1a T5 E2 위임 스위치 (expert_delegated_types)
