@@ -69,6 +69,47 @@ def test_run_daily_full_pipeline_success(db):
     assert p.status == "pending"  # 위임 OFF — 무접촉(완료기준③)
 
 
+def test_run_daily_skips_review_when_only_informational_pending_a2(db):
+    """X1a T6(D-NAO-37): 정보성 pending만 있고 실행형 0건이면 A2 가드가 여전히 적용돼야
+    한다 — briefing_builder가 정보성을 pending_proposals에서 빼기 때문에 자동으로 성립."""
+    db.add(NaverProposal(proposal_type="account_brief", target_type="account", target_id="", campaign_id="", status="pending"))
+    db.add(NaverProposal(proposal_type="anomaly", target_type="account", target_id="", campaign_id="", status="pending"))
+    db.commit()
+    invoke_calls = {"n": 0}
+
+    def counting_invoke(prompt, *, system, schema, model, timeout):
+        invoke_calls["n"] += 1
+        return {"json": {"verdicts": [], "commentary": "x"}, "raw": "", "usage": {}}
+
+    result = expert_desk.run_daily(db, today=AS_OF, invoke=counting_invoke)
+
+    assert result["stage_status"]["briefing_builder"] == "ok"
+    assert result["stage_status"]["ava_reviewer"] == "skipped"
+    assert result["stage_status"]["expert_ledger"] == "skipped"
+    assert invoke_calls["n"] == 0, "정보성만 있어도 claude가 호출되면 안 됨(A2)"
+    assert db.query(NaverExpertReviewRun).count() == 0
+
+
+def test_run_daily_expected_ids_exclude_informational_proposals(db):
+    """X1a T6(D-NAO-37): 정보성 pending은 브리핑 pending_proposals에서 빠지므로 ava_reviewer
+    expected_ids에도 없다 — 실행형(negative_keyword 등)만 평결 대상이 된다(expected_ids 연쇄)."""
+    p = _seed_pending_proposal(db)  # bid_down(실행형)
+    db.add(NaverProposal(proposal_type="account_brief", target_type="account", target_id="", campaign_id="", status="pending"))
+    db.add(NaverProposal(proposal_type="trigger_pacing", target_type="campaign", target_id="cmp-9", campaign_id="cmp-9", status="pending"))
+    db.commit()
+
+    result = expert_desk.run_daily(db, today=AS_OF, invoke=_fake_invoke_ok([p.id]))
+
+    assert result["stage_status"]["ava_reviewer"] == "ok"
+    run = db.query(NaverExpertReviewRun).filter(NaverExpertReviewRun.as_of == AS_OF).first()
+    # verdict="commentary"(proposal_id=None) 행은 총평 전용(expert_ledger.record) — 제안별
+    # 평결만 걸러서 확인한다.
+    verdicts = db.query(NaverExpertReview).filter(
+        NaverExpertReview.run_id == run.id, NaverExpertReview.verdict != "commentary",
+    ).all()
+    assert {v.proposal_id for v in verdicts} == {p.id}, "정보성 제안 id는 평결 대상에 없어야 함"
+
+
 def test_run_daily_skips_review_when_no_pending_proposals_a2(db):
     """A2: pending 제안이 0건이면 claude를 아예 호출하지 않고 stage3/4 skip."""
     invoke_calls = {"n": 0}

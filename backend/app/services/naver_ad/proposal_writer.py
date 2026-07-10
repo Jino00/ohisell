@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.models import NaverCampaignSettings, NaverProposal
 from app.services.naver_ad import campaign_target_resolver, growth_sweeper
+from app.services.naver_ad.trigger_watch import PROPOSAL_TYPE_CPC, PROPOSAL_TYPE_PACING
 
 _NEGATIVE = "negative_keyword"
 _GROWTH_BID_UP = "growth_bid_up"
@@ -17,6 +18,18 @@ _BUDGET_UP = "budget_up"
 _BUDGET_PRE_EXHAUSTION = "budget_pre_exhaustion"
 _ANOMALY = "anomaly"
 _ANOMALY_FRESHNESS = "anomaly_freshness"
+_ACCOUNT_BRIEF = "account_brief"
+
+# X1a T6(D-NAO-37): 정보성 제안 유형 5종 — 실행 대상 자체가 없는 제안(naver_execution_harness의
+# _ACTION_BY_PROPOSAL_TYPE에 매핑이 없는 유형과 의미상 같지만, 그 매핑에는 budget_up처럼 아직
+# OPEN_ACTIONS에 없을 뿐인 "실행형인데 미개방" 유형도 섞여 있어 "매핑에 없음"을 파생 조건으로
+# 쓰면 안전하지 않다(향후 예산 개방 시점에 조용히 브리핑에서 빠져버릴 위험) — 반드시 이 명시
+# 목록을 단일 진실로 유지한다. proposal_pipeline(차등 TTL)·expert_briefing_builder(브리핑
+# 접기)가 이 상수를 공유 import한다(순환 import 없음 — 두 모듈 다 이 모듈을 참조할 뿐, 이
+# 모듈은 어느 쪽도 import하지 않는다).
+INFORMATIONAL_PROPOSAL_TYPES: frozenset[str] = frozenset({
+    _ANOMALY, _ANOMALY_FRESHNESS, _ACCOUNT_BRIEF, PROPOSAL_TYPE_PACING, PROPOSAL_TYPE_CPC,
+})
 
 # 보드 의미상 허용되는 방향(codex 지적, 라이브검증 후속): starving_winners(육성 의도, D-NAO-18)는
 # bid_up만, bleeding_keywords/shopping_group_bep(손실 축소 의도)는 bid_down만 허용한다.
@@ -425,7 +438,7 @@ def account_brief_singleton(db: Session, diagnosis: dict, as_of: date) -> NaverP
     """
     today_start = datetime.combine(date.today(), datetime.min.time())
     existing = db.query(NaverProposal).filter(
-        NaverProposal.proposal_type == "account_brief",
+        NaverProposal.proposal_type == _ACCOUNT_BRIEF,
         NaverProposal.created_at >= today_start,
     ).first()
     if existing:
@@ -445,7 +458,7 @@ def account_brief_singleton(db: Session, diagnosis: dict, as_of: date) -> NaverP
         f"정리대상={triage.get('dead')}."
     )
     obj = NaverProposal(
-        proposal_type="account_brief", target_type="account", target_id="",
+        proposal_type=_ACCOUNT_BRIEF, target_type="account", target_id="",
         campaign_id="", rationale=rationale,
         expected_effect="정보성 요약 — 실행 대상 아님.", status="pending",
     )

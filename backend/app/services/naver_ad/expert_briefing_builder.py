@@ -2,18 +2,24 @@
 # 결정적(같은 DB 상태·as_of → 같은 브리핑) — LLM 호출 없음, 페르소나도 안 넣는다(SA2 몫).
 # 오늘 pending 제안 + 진단보드 요약 + forecast 예측vs실측 롤업 + 최근 trigger + 로컬 성적표를
 # 읽기 전용으로만 조립한다(D-3 관찰모드, 어떤 상태도 변경하지 않음).
+#
+# X1a T6(D-NAO-37 ②): pending_proposals는 실행형 제안만 나열한다(전건 카드, ava_reviewer
+# expected_ids의 근거) — 정보성 5종(anomaly/anomaly_freshness/account_brief/trigger_pacing/
+# trigger_cpc_spike, proposal_writer.INFORMATIONAL_PROPOSAL_TYPES 참조)은 informational_pending
+# 유형별 집계로 접어서 별도 키에 담는다(Ava는 실행형 전건 + 정보성 집계 총평 원료만 본다).
 from __future__ import annotations
 
 import json
 import logging
 from datetime import date, timedelta
 
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, func as sqlfunc, or_
 from sqlalchemy.orm import Session
 
 from app.models import NaverEntity, NaverForecastDaily, NaverLearningState, NaverProposal
 from app.services.naver_ad.diagnosis import build_diagnosis
 from app.services.naver_ad.proposal_scoreboard import METRIC as PROPOSAL_ACCURACY_METRIC
+from app.services.naver_ad.proposal_writer import INFORMATIONAL_PROPOSAL_TYPES
 from app.services.naver_ad.trigger_watch import PROPOSAL_TYPE_CPC, PROPOSAL_TYPE_PACING
 from app.utils.kst import kst_today
 
@@ -34,6 +40,7 @@ def build(db: Session, as_of: date | None = None) -> dict:
     as_of = as_of or kst_today()
 
     proposals, dropped_ids = _build_pending_proposals(db)
+    informational_pending = _build_informational_pending(db)
     diagnosis_summary = _build_diagnosis_summary(db, as_of)
     forecast_rollup = _build_forecast_rollup(db)
     recent_triggers = _build_recent_triggers(db)
@@ -42,6 +49,7 @@ def build(db: Session, as_of: date | None = None) -> dict:
     return {
         "as_of": as_of.isoformat(),
         "pending_proposals": proposals,
+        "informational_pending": informational_pending,
         "diagnosis_summary": diagnosis_summary,
         "forecast_rollup": forecast_rollup,
         "recent_triggers": recent_triggers,
@@ -51,7 +59,13 @@ def build(db: Session, as_of: date | None = None) -> dict:
 
 
 def _build_pending_proposals(db: Session) -> tuple[list[dict], list[int]]:
-    rows = db.query(NaverProposal).filter(NaverProposal.status == "pending").order_by(NaverProposal.id.asc()).all()
+    """실행형 pending 제안 전건(D-NAO-37 ②) — 정보성 5종은 제외(_build_informational_pending
+    이 유형별 집계로 별도 처리). ava_reviewer.review의 expected_ids가 이 목록의 id만 근거로
+    삼는다 — 정보성은 자동으로 검토 대상에서 빠진다(의도된 효과)."""
+    rows = db.query(NaverProposal).filter(
+        NaverProposal.status == "pending",
+        NaverProposal.proposal_type.notin_(INFORMATIONAL_PROPOSAL_TYPES),
+    ).order_by(NaverProposal.id.asc()).all()
 
     pairs = {(r.target_type, r.target_id) for r in rows if r.target_id}
     entity_names = _entity_names(db, pairs)
@@ -70,6 +84,32 @@ def _build_pending_proposals(db: Session) -> tuple[list[dict], list[int]]:
         for r in rows
     ]
     return _apply_token_guard(proposals)
+
+
+def _build_informational_pending(db: Session) -> list[dict]:
+    """정보성 pending(D-NAO-37 ②)을 유형별로 집계 — 개별 카드 대신 Ava가 총평(commentary)
+    원료로만 쓸 수 있게 건수·고유 캠페인 수만 제공한다. 0건인 유형은 미포함, proposal_type
+    오름차순 정렬(결정적). 토큰가드 대상이 아니다(이미 집계라 유형 수만큼만 존재)."""
+    rows = (
+        db.query(
+            NaverProposal.proposal_type,
+            sqlfunc.count(NaverProposal.id),
+            # 빈 campaign_id('' — account_brief 등 계정 단위)는 캠페인 수에서 제외(codex 지적):
+            # nullif로 ''→NULL 변환하면 count(distinct)가 자연히 무시한다.
+            sqlfunc.count(sqlfunc.distinct(sqlfunc.nullif(NaverProposal.campaign_id, ""))),
+        )
+        .filter(
+            NaverProposal.status == "pending",
+            NaverProposal.proposal_type.in_(INFORMATIONAL_PROPOSAL_TYPES),
+        )
+        .group_by(NaverProposal.proposal_type)
+        .order_by(NaverProposal.proposal_type.asc())
+        .all()
+    )
+    return [
+        {"proposal_type": proposal_type, "count": int(count), "campaign_count": int(campaign_count)}
+        for proposal_type, count, campaign_count in rows
+    ]
 
 
 def _entity_names(db: Session, pairs: set[tuple[str, str]]) -> dict[tuple[str, str], str]:

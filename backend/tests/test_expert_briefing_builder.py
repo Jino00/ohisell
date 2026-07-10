@@ -66,6 +66,99 @@ def test_only_pending_proposals_included(db):
     assert ids == [pending.id]
 
 
+# ── X1a T6(D-NAO-37 ②) 브리핑 접기 ──
+def test_pending_proposals_excludes_informational_types(db):
+    """정보성 5종(anomaly/anomaly_freshness/account_brief/trigger_pacing/trigger_cpc_spike)은
+    pending_proposals(실행형 카드 목록)에서 빠져야 한다 — informational_pending 몫."""
+    executable = _add_proposal(db, proposal_type="bid_down", target_id="nkw-1")
+    negative = _add_proposal(db, proposal_type="negative_keyword", target_id="nkw-2")
+    for t in ("anomaly", "anomaly_freshness", "account_brief", "trigger_pacing", "trigger_cpc_spike"):
+        _add_proposal(db, proposal_type=t, target_type="account", target_id="")
+
+    briefing = expert_briefing_builder.build(db, as_of=AS_OF)
+
+    ids = {p["id"] for p in briefing["pending_proposals"]}
+    assert ids == {executable.id, negative.id}
+    types = {p["proposal_type"] for p in briefing["pending_proposals"]}
+    assert types == {"bid_down", "negative_keyword"}
+
+
+def test_informational_pending_aggregates_count_and_campaign_count(db):
+    """유형별 집계: count=건수, campaign_count=고유 campaign_id 수."""
+    _add_proposal(db, proposal_type="anomaly", target_type="account", target_id="", campaign_id="cmp-1")
+    _add_proposal(db, proposal_type="anomaly", target_type="account", target_id="", campaign_id="cmp-2")
+    _add_proposal(db, proposal_type="anomaly", target_type="account", target_id="", campaign_id="cmp-2")
+    _add_proposal(db, proposal_type="trigger_pacing", target_type="campaign", target_id="cmp-9", campaign_id="cmp-9")
+
+    briefing = expert_briefing_builder.build(db, as_of=AS_OF)
+
+    by_type = {row["proposal_type"]: row for row in briefing["informational_pending"]}
+    assert by_type["anomaly"] == {"proposal_type": "anomaly", "count": 3, "campaign_count": 2}
+    assert by_type["trigger_pacing"] == {"proposal_type": "trigger_pacing", "count": 1, "campaign_count": 1}
+
+
+def test_informational_pending_blank_campaign_id_not_counted_as_campaign(db):
+    """계정 단위 정보성(campaign_id='' — account_brief 등)은 캠페인 수에 안 센다(codex 지적):
+    account_brief 1건뿐이면 count=1, campaign_count=0."""
+    _add_proposal(db, proposal_type="account_brief", target_type="account", target_id="", campaign_id="")
+    _add_proposal(db, proposal_type="anomaly", target_type="account", target_id="", campaign_id="")
+    _add_proposal(db, proposal_type="anomaly", target_type="account", target_id="", campaign_id="cmp-1")
+
+    briefing = expert_briefing_builder.build(db, as_of=AS_OF)
+
+    by_type = {row["proposal_type"]: row for row in briefing["informational_pending"]}
+    assert by_type["account_brief"] == {"proposal_type": "account_brief", "count": 1, "campaign_count": 0}
+    assert by_type["anomaly"] == {"proposal_type": "anomaly", "count": 2, "campaign_count": 1}
+
+
+def test_informational_pending_empty_when_no_informational_types(db):
+    _add_proposal(db, proposal_type="bid_down", target_id="nkw-1")
+
+    briefing = expert_briefing_builder.build(db, as_of=AS_OF)
+
+    assert briefing["informational_pending"] == []
+
+
+def test_informational_pending_excludes_non_pending_status(db):
+    _add_proposal(db, proposal_type="anomaly", target_type="account", target_id="", status="expired")
+
+    briefing = expert_briefing_builder.build(db, as_of=AS_OF)
+
+    assert briefing["informational_pending"] == []
+
+
+def test_informational_pending_sorted_by_proposal_type_asc(db):
+    _add_proposal(db, proposal_type="trigger_pacing", target_type="account", target_id="")
+    _add_proposal(db, proposal_type="account_brief", target_type="account", target_id="")
+    _add_proposal(db, proposal_type="anomaly", target_type="account", target_id="")
+
+    briefing = expert_briefing_builder.build(db, as_of=AS_OF)
+
+    types = [row["proposal_type"] for row in briefing["informational_pending"]]
+    assert types == sorted(types)
+
+
+def test_token_guard_ignores_informational_pending(db, monkeypatch, caplog):
+    """토큰가드는 실행형(pending_proposals)에만 적용 — 정보성이 많아도 절삭 대상이 아니다."""
+    monkeypatch.setattr(expert_briefing_builder, "_MAX_PROPOSALS_CHARS", 500)
+    long_rationale = "근거 " * 100
+    ids = []
+    for i in range(5):
+        p = _add_proposal(db, proposal_type="bid_down", target_id=f"nkw-{i}", rationale=long_rationale)
+        ids.append(p.id)
+    for i in range(10):  # 정보성 다건 — 토큰가드 절삭 대상 계산에 영향을 주면 안 됨
+        _add_proposal(db, proposal_type="anomaly", target_type="account", target_id="", campaign_id=f"cmp-{i}")
+
+    with caplog.at_level(logging.WARNING):
+        briefing = expert_briefing_builder.build(db, as_of=AS_OF)
+
+    dropped_ids = briefing["truncated"]["pending_proposals_dropped_ids"]
+    assert dropped_ids, "실행형은 여전히 예산 초과로 절삭돼야 함"
+    assert all(pid in ids for pid in dropped_ids), "절삭 대상은 실행형 id만이어야 함(정보성 섞이면 안 됨)"
+    assert len(briefing["informational_pending"]) == 1
+    assert briefing["informational_pending"][0]["count"] == 10, "정보성은 절삭 대상이 아니라 집계 그대로 유지"
+
+
 def test_proposal_carries_resolved_entity_name(db):
     db.add(NaverEntity(entity_type="keyword", entity_id="nkw-1", campaign_id="cmp-1", name="가을 신상 원피스"))
     db.commit()
