@@ -387,13 +387,19 @@ def pause_candidates(db: Session, date_from: date, date_to: date) -> list[dict]:
 
 
 def resume_candidates(
-    db: Session, date_to: date, target_roas: Decimal, correction_factor: Decimal,
+    db: Session, date_to: date, target_roas_resolver, correction_factor: Decimal,
 ) -> list[dict]:
     """재개 후보 (X1b T3, D-NAO-38) — 우리 시스템이 정지시킨(change_log action='pause',
     proposal_id 있음 — Jino가 콘솔에서 수동 정지한 경우는 proposal_id가 없어 제외, 우리가
     모르는 이유로 정지된 것을 임의로 재개하지 않는다) 키워드 중 정지 직전 창의 보정ROAS가
-    현재 목표(target_roas) 이상 — D-NAO-16 "정지 사유 해소" 중 "BEP 개선"(우리 목표 자체가
-    낮아졌거나, 정지 당시 이미 양호했던 키워드) 신호.
+    현재 목표 이상 — D-NAO-16 "정지 사유 해소" 중 "BEP 개선"(우리 목표 자체가 낮아졌거나,
+    정지 당시 이미 양호했던 키워드) 신호.
+
+    target_roas_resolver: campaign_id(str) → Decimal, 캠페인별 목표(override > 계정 기본값,
+    campaign_target_resolver.resolve_target_roas) 해석 함수(harness가 주입). 계정 단일
+    target_roas만 쓰면 캠페인 override가 무시되는 재발 버그 패턴(codex[P2] — compute_bid_sims의
+    _make_target_roas_resolver가 동일 근거로 이미 한 번 고친 버그, 2026-07-07 라이브검증
+    이력)이라 여기도 같은 방식으로 캠페인별 해석을 강제한다.
 
     정직 경계: "계절성 회복·CPC 하락"(D-NAO-16 예시의 나머지 2가지)은 미구현 — 정지 중엔
     해당 키워드의 새 실적이 쌓이지 않아 직접 관측 불가하고, 대체 신호(캠페인 CPC 추세 등)는
@@ -455,6 +461,7 @@ def resume_candidates(
             continue  # 정지 직전 창에 실적 자체가 없음 — 판정 불가
         roas_naver = float(Decimal(agg_conv) / Decimal(agg_cost))
         roas_c = _corrected_roas(roas_naver, correction_factor)
+        target_roas = target_roas_resolver(campaign_id)
         if roas_c is not None and roas_c >= float(target_roas):
             out.append({
                 "campaign_id": campaign_id, "adgroup_id": off_entities[keyword_id].parent_id,

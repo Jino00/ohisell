@@ -385,7 +385,7 @@ def test_resume_candidates_recovered_roas_since_our_pause(db):
     ))
     db.commit()
 
-    out = diag.resume_candidates(db, D_TO, target_roas=Decimal("2.0"), correction_factor=Decimal("1"))
+    out = diag.resume_candidates(db, D_TO, target_roas_resolver=lambda cid: Decimal("2.0"), correction_factor=Decimal("1"))
     assert len(out) == 1
     assert out[0]["keyword_id"] == "nkw-off-1"
     assert out[0]["roas_at_pause"] == 5.0
@@ -402,7 +402,7 @@ def test_resume_candidates_excludes_manual_pause_no_proposal_id(db):
     ))
     db.commit()
 
-    out = diag.resume_candidates(db, D_TO, target_roas=Decimal("2.0"), correction_factor=Decimal("1"))
+    out = diag.resume_candidates(db, D_TO, target_roas_resolver=lambda cid: Decimal("2.0"), correction_factor=Decimal("1"))
     assert out == []
 
 
@@ -416,7 +416,7 @@ def test_resume_candidates_excludes_roas_still_below_target(db):
     ))
     db.commit()
 
-    out = diag.resume_candidates(db, D_TO, target_roas=Decimal("2.0"), correction_factor=Decimal("1"))
+    out = diag.resume_candidates(db, D_TO, target_roas_resolver=lambda cid: Decimal("2.0"), correction_factor=Decimal("1"))
     assert out == []
 
 
@@ -425,7 +425,7 @@ def test_resume_candidates_excludes_off_keyword_without_pause_log(db):
     _entity(db, "keyword", "nkw-off-1", status="off", bid_amt=190)
     db.commit()
 
-    out = diag.resume_candidates(db, D_TO, target_roas=Decimal("2.0"), correction_factor=Decimal("1"))
+    out = diag.resume_candidates(db, D_TO, target_roas_resolver=lambda cid: Decimal("2.0"), correction_factor=Decimal("1"))
     assert out == []
 
 
@@ -437,7 +437,7 @@ def test_resume_candidates_excludes_currently_on_keyword(db):
     ))
     db.commit()
 
-    out = diag.resume_candidates(db, D_TO, target_roas=Decimal("2.0"), correction_factor=Decimal("1"))
+    out = diag.resume_candidates(db, D_TO, target_roas_resolver=lambda cid: Decimal("2.0"), correction_factor=Decimal("1"))
     assert out == []
 
 
@@ -459,7 +459,7 @@ def test_resume_candidates_uses_most_recent_pause_when_multiple(db):
     ))
     db.commit()
 
-    out = diag.resume_candidates(db, D_TO, target_roas=Decimal("2.0"), correction_factor=Decimal("1"))
+    out = diag.resume_candidates(db, D_TO, target_roas_resolver=lambda cid: Decimal("2.0"), correction_factor=Decimal("1"))
     assert len(out) == 1
     assert out[0]["roas_at_pause"] == 5.0  # 최근 정지 직전 창 기준(옛 창의 0.5가 아님)
 
@@ -489,7 +489,7 @@ def test_resume_candidates_excludes_when_latest_lock_change_is_manual_repause_af
     ))
     db.commit()
 
-    out = diag.resume_candidates(db, D_TO, target_roas=Decimal("2.0"), correction_factor=Decimal("1"))
+    out = diag.resume_candidates(db, D_TO, target_roas_resolver=lambda cid: Decimal("2.0"), correction_factor=Decimal("1"))
     assert out == []
 
 
@@ -515,6 +515,41 @@ def test_resume_candidates_includes_when_latest_lock_change_is_our_repause(db):
     ))
     db.commit()
 
-    out = diag.resume_candidates(db, D_TO, target_roas=Decimal("2.0"), correction_factor=Decimal("1"))
+    out = diag.resume_candidates(db, D_TO, target_roas_resolver=lambda cid: Decimal("2.0"), correction_factor=Decimal("1"))
     assert len(out) == 1
     assert out[0]["roas_at_pause"] == 5.0
+
+
+def test_resume_candidates_uses_per_campaign_target_roas_override(db):
+    """[codex P2] 계정 기본 target_roas(2.0)만 쓰면 캠페인 override(5.0)가 무시된다 —
+    roas_at_pause=3.0은 계정기본(2.0)은 넘지만 캠페인 override(5.0)는 못 넘으므로 후보에서
+    빠져야 한다(compute_bid_sims의 _make_target_roas_resolver와 동일 재발버그 패턴,
+    2026-07-07 라이브검증 이력 참조)."""
+    _entity(db, "keyword", "nkw-off-1", status="off", bid_amt=190, campaign_id="cmp-override")
+    pre_pause_date = D_TO - timedelta(days=5)
+    _row(db, pre_pause_date, "cmp-override", "WEB_SITE", "grp1", "nkw-off-1", 100, 10, 3000, direct=9000)  # roas=3.0
+    db.add(NaverChangeLog(
+        entity_type="keyword", entity_id="nkw-off-1", campaign_id="cmp-override", action="pause",
+        proposal_id=1, outcome="executed", changed_at=datetime.combine(D_TO, datetime.min.time()),
+    ))
+    db.commit()
+
+    resolver = lambda cid: Decimal("5.0") if cid == "cmp-override" else Decimal("2.0")  # noqa: E731
+    out = diag.resume_candidates(db, D_TO, target_roas_resolver=resolver, correction_factor=Decimal("1"))
+    assert out == []  # 3.0 < campaign override 5.0
+
+
+def test_resume_candidates_passes_with_campaign_override_when_roas_clears_it(db):
+    _entity(db, "keyword", "nkw-off-1", status="off", bid_amt=190, campaign_id="cmp-override")
+    pre_pause_date = D_TO - timedelta(days=5)
+    _row(db, pre_pause_date, "cmp-override", "WEB_SITE", "grp1", "nkw-off-1", 100, 10, 1000, direct=6000)  # roas=6.0
+    db.add(NaverChangeLog(
+        entity_type="keyword", entity_id="nkw-off-1", campaign_id="cmp-override", action="pause",
+        proposal_id=1, outcome="executed", changed_at=datetime.combine(D_TO, datetime.min.time()),
+    ))
+    db.commit()
+
+    resolver = lambda cid: Decimal("5.0") if cid == "cmp-override" else Decimal("2.0")  # noqa: E731
+    out = diag.resume_candidates(db, D_TO, target_roas_resolver=resolver, correction_factor=Decimal("1"))
+    assert len(out) == 1
+    assert out[0]["roas_at_pause"] == 6.0

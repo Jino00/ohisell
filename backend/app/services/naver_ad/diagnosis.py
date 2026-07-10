@@ -43,6 +43,26 @@ def _correction_factor(db: Session, date_to: date) -> dict:
     }
 
 
+def _target_roas_resolver(db: Session, account_target_roas: Decimal):
+    """campaign_id → Decimal target_roas 리졸버(override > 계정기본값) — 회차 내 캐싱.
+
+    resume_candidates 전용(codex[P2], X1b T3) — proposal_pipeline._make_target_roas_resolver와
+    동일 원리(계정 단일 target_roas만 쓰면 캠페인 override가 실제 판정에 반영되지 않는 재발
+    버그 패턴, 2026-07-07 라이브검증 이력)를 diagnosis Harness 쪽에서도 적용한다.
+    """
+    cache: dict[str, Decimal] = {}
+
+    def _resolve(campaign_id: str) -> Decimal:
+        if campaign_id not in cache:
+            resolved = campaign_target_resolver.resolve_target_roas(db, campaign_id)
+            cache[campaign_id] = (
+                resolved["target_roas"] if resolved["target_roas"] is not None else account_target_roas
+            )
+        return cache[campaign_id]
+
+    return _resolve
+
+
 def build_diagnosis(db: Session, date_from: date, date_to: date) -> dict:
     """진단 보드 6개 + 보정계수 + 계정 BEP/목표ROAS를 조립. 읽기 전용(D-3, 제안 없음)."""
     correction = _correction_factor(db, date_to)
@@ -70,7 +90,9 @@ def build_diagnosis(db: Session, date_from: date, date_to: date) -> dict:
         "keyword_triage": diag.keyword_triage(db, as_of=date_to),
         "vicious_cycle": diag.vicious_cycle_flags(db, date_to, target_roas, factor),
         "pause_candidates": diag.pause_candidates(db, date_from, date_to),
-        "resume_candidates": diag.resume_candidates(db, date_to, target_roas, factor),
+        "resume_candidates": diag.resume_candidates(
+            db, date_to, _target_roas_resolver(db, target_roas), factor,
+        ),
     }
 
     return {
