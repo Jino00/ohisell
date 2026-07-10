@@ -213,6 +213,27 @@ def test_persist_other_types_store_null_adgroup_id(db):
     assert saved[0].adgroup_id is None
 
 
+def test_persist_dedup_scoped_by_adgroup_same_term_different_adgroup_both_saved(db):
+    """[codex P2] 같은 검색어·같은 캠페인이라도 adgroup이 다르면 별개 실행 대상(restricted-
+    keywords는 광고그룹 단위 리소스) — dedup 키에 adgroup_id 포함. 같은 adgroup 재실행은 dedup."""
+    base = {"proposal_type": "negative_keyword", "target_type": "search_term",
+            "target_id": "같은검색어", "campaign_id": "cmp-a",
+            "rationale": "r", "expected_effect": "e", "status": "pending"}
+    first = proposal_writer.persist(db, [dict(base, adgroup_id="grp-1")])
+    assert len(first) == 1
+    db.commit()
+
+    # 다른 adgroup — 별개 제안으로 저장돼야 함
+    second = proposal_writer.persist(db, [dict(base, adgroup_id="grp-2")])
+    assert len(second) == 1
+    db.commit()
+
+    # 같은 adgroup 재실행 — dedup
+    third = proposal_writer.persist(db, [dict(base, adgroup_id="grp-1")])
+    assert third == []
+    assert db.query(NaverProposal).filter(NaverProposal.target_id == "같은검색어").count() == 2
+
+
 def test_persist_dedups_existing_pending_same_type_and_target(db):
     db.add(NaverProposal(proposal_type="bid_down", target_type="keyword", target_id="nkw-1",
                           campaign_id="cmp-ours", status="pending"))

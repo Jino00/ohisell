@@ -15,6 +15,7 @@ from app.database import Base
 from app.models import NaverCampaignSettings, NaverChangeLog, NaverProposal
 from app.services.naver_ad import naver_execution_harness as harness
 from app.services.naver_ad import naver_sa_writer
+from app.utils.kst import kst_now
 
 
 @pytest.fixture
@@ -174,11 +175,20 @@ def test_live_execute_negative_keyword_success_records_measured_change_log(db):
     result = _write_result(before=[], after=after_rows, created_ids=["rkw-9"],
                            response=after_rows)
 
+    status_during_write = []
+
+    def fake_write(adgroup_id, keywords):
+        # [codex P1] 클레임 우선: writer 호출 시점에 이미 내구 클레임(executing)이 커밋돼
+        # 있어야 크래시/동시호출 시 approved 게이트가 재진입을 자연 차단한다.
+        status_during_write.append(p.status)
+        return result
+
     with patch.object(harness.naver_sa_writer, "add_restricted_keywords",
-                      return_value=result) as mock_write:
+                      side_effect=fake_write) as mock_write:
         log_entry = harness.execute(db, p.id, dry_run=False)
 
     mock_write.assert_called_once_with("grp-1", ["무관검색어"])
+    assert status_during_write == ["executing"]  # 쓰기 직전 클레임이 이미 확정돼 있었음
     assert log_entry.dry_run is False
     assert log_entry.outcome == "executed"
     assert json.loads(log_entry.before_value) == []
@@ -189,10 +199,12 @@ def test_live_execute_negative_keyword_success_records_measured_change_log(db):
 
     db.refresh(p)
     assert p.executed_change_log_id == log_entry.id
-    assert p.status == "approved"  # 성공 시 status는 건드리지 않음(현행 유지)
+    assert p.status == "approved"  # 성공 시 approved 복원 — "실행됨" 마커는 executed_change_log_id
 
 
 def test_live_execute_missing_adgroup_id_raises_before_writer(db):
+    """[codex P1] 사전 가드 실패도 운영자 관점에선 시도 — 전건 기록(D-NAO-12) + 영구 결함이라
+    failed 종결(재승인해도 데이터가 안 바뀌는 제안의 재승인 루프 방지). writer는 미호출."""
     p = _negative_proposal(db, adgroup_id=None)
     _settings(db, optimizer="ours")
 
@@ -201,8 +213,13 @@ def test_live_execute_missing_adgroup_id_raises_before_writer(db):
             harness.execute(db, p.id, dry_run=False)
 
     mock_write.assert_not_called()
-    # 사전 검증 실패는 실행 시도가 아님 — change_log 신규 행 0
-    assert db.query(NaverChangeLog).count() == 0
+    db.refresh(p)
+    assert p.status == "failed"
+    logs = db.query(NaverChangeLog).filter(NaverChangeLog.proposal_id == p.id).all()
+    assert len(logs) == 1
+    assert logs[0].outcome == "failed"
+    assert logs[0].dry_run is False
+    assert "[실행 불가]" in logs[0].rationale
 
 
 @pytest.mark.parametrize("exc_cls", [
@@ -243,7 +260,34 @@ def test_live_execute_wrong_target_type_raises_before_writer(db):
             harness.execute(db, p.id, dry_run=False)
 
     mock_write.assert_not_called()
-    assert db.query(NaverChangeLog).count() == 0  # 사전 검증 실패 — change_log 미기록
+    db.refresh(p)
+    assert p.status == "failed"  # [codex P1] 영구 결함 — failed 종결(재승인 루프 방지)
+    logs = db.query(NaverChangeLog).filter(NaverChangeLog.proposal_id == p.id).all()
+    assert len(logs) == 1
+    assert logs[0].outcome == "failed"
+    assert "[실행 불가]" in logs[0].rationale
+
+
+def test_live_execute_claim_race_lost_raises_already_executed(db):
+    """[codex R2 P1] 클레임은 조건부 UPDATE로 원자화 — 두 실행자가 동시에 approved를 읽어도
+    (T4 콘솔 라우터·X2 flight_loop 크론 다중 진입) UPDATE ... WHERE status='approved'는 한쪽만
+    1행 성공. '게이트는 통과했지만 클레임 UPDATE가 0행'인 경합을 직접 재현: 사전 가드는
+    통과하는 제안의 status를 다른 실행자가 선점한 값('executing')으로 바꿔놓고 executor를
+    직접 호출한다."""
+    p = _negative_proposal(db)
+    _settings(db, optimizer="ours")
+    # 다른 실행자의 선점 시뮬레이션 — approved 게이트 통과 이후·클레임 이전에 상태가 바뀐 상황
+    p.status = "executing"
+    db.commit()
+
+    with patch.object(harness.naver_sa_writer, "add_restricted_keywords") as mock_write:
+        with pytest.raises(harness.AlreadyExecutedError):
+            harness._execute_add_negative_keyword(db, p, kst_now())
+
+    mock_write.assert_not_called()
+    db.refresh(p)
+    assert p.status == "executing"  # 선점자의 클레임을 훼손하지 않음
+    assert db.query(NaverChangeLog).count() == 0  # 쓰기 시도 없음 — 기록도 없음
 
 
 def test_open_action_without_executor_blocked_by_write_not_opened(db, monkeypatch):

@@ -56,8 +56,9 @@ class WriteNotOpenedError(Exception):
 
 
 class MissingExecutionTargetError(Exception):
-    """실쓰기 대상 정보 부족/부적합 — 사전 검증 실패라 실행 시도가 아니며(writer 미호출,
-    change_log 미기록), 제안 데이터 결함을 표면화한다. 걸리는 케이스:
+    """실쓰기 대상 정보 부족/부적합 — writer는 호출하지 않지만 운영자 관점에선 시도이므로
+    change_log 전건 기록(D-NAO-12, rationale '[실행 불가]') + status='failed' 종결(영구 결함
+    — 재승인해도 데이터가 안 바뀌므로 재승인 루프 방지) 후 이 예외를 던진다. 걸리는 케이스:
     ① target_type != 'search_term': restricted-keywords는 검색어 텍스트를 등록하는 API인데
        _bid_proposal 격상 경로(economic_ceiling<=0)의 negative_keyword는 target_type='keyword',
        target_id='nkw-…'(키워드 ID)라서 그대로 등록하면 무의미한 문자열이 제외키워드로 등록됨
@@ -81,37 +82,74 @@ _ACTION_BY_PROPOSAL_TYPE = {
 OPEN_ACTIONS: frozenset[str] = frozenset({"add_negative_keyword"})
 
 
+def _guard_failure(db: Session, proposal: NaverProposal, now: datetime, reason: str) -> None:
+    """사전 가드 실패 처리(codex P1) — 운영자 관점에선 시도다: 전건 기록(D-NAO-12) + 영구
+    결함(제안 데이터가 재승인으로 바뀌지 않음)이라 failed로 종결해 재승인 루프를 막는다.
+    writer는 호출하지 않는다(실제 API 시도 없음 — change_log에는 [실행 불가]로 구분 기록)."""
+    proposal.status = "failed"
+    entry = NaverChangeLog(
+        entity_type=proposal.target_type, entity_id=proposal.target_id,
+        campaign_id=proposal.campaign_id, action="add_negative_keyword",
+        rationale=f"{proposal.rationale or ''} [실행 불가] {reason}",
+        predicted_json=proposal.expected_effect, proposal_id=proposal.id,
+        dry_run=False, outcome="failed", executed_at=now,
+    )
+    db.add(entry)
+    db.commit()
+    log.error("naver_execution_harness: proposal_id=%s 실쓰기 불가(fail-closed) — %s",
+              proposal.id, reason)
+
+
 def _execute_add_negative_keyword(db: Session, proposal: NaverProposal, now: datetime) -> NaverChangeLog:
     """제외키워드 실쓰기 1건 (X1a T3). naver_sa_writer 호출 → 성공/실패 모두 change_log 전건
     기록(D-NAO-12) — 성공은 before/after 실측값+created_ids(원복 원료, T3 이후 원복 기능의
     유일한 재료라 반드시 저장), 실패는 outcome='failed'+예외 요약을 커밋한 후 원 예외 재전파.
 
+    클레임 우선(codex P1): 가드 통과 후 writer 호출 **전에** status='executing'을 커밋한다
+    (내구 클레임) — 크래시/동시호출 시 approved 게이트가 재진입을 자연 차단한다. 성공하면
+    approved로 복원(같은 커밋에 executed_change_log_id 연결 — "실행됨" 마커는
+    executed_change_log_id. 'executed' 신규 status는 다운스트림 필터 영향 미조사라 도입 안 함).
+    ⚠️ 'executing'에 멈춘 채 잔존하는 제안 = 크래시로 쓰기 결과 불확실 — 자동 복구하지
+    않는다. 사람이 네이버 콘솔/재조회(GET restricted-keywords)로 실제 반영 여부를 확인한 후
+    수동 처리해야 한다(사람 조사 대상).
+
     실패 시 proposal.status='failed' — approved 게이트가 자동 재시도를 자연 차단한다
     (재시도는 사람이 콘솔에서 재승인하는 것이 유일 경로, D-NAO-5와 일관).
     """
     if proposal.target_type != "search_term":
-        # 사전 검증 실패는 실행 시도가 아님 — writer 미호출, change_log 미기록.
-        log.error(
-            "naver_execution_harness: proposal_id=%s target_type=%r — 실쓰기 불가(fail-closed)",
-            proposal.id, proposal.target_type,
+        reason = (
+            f"target_type={proposal.target_type!r} — restricted-keywords는 검색어 텍스트를 "
+            f"등록하는 API. target_type='keyword'(_bid_proposal 격상 경로) 제안의 target_id는 "
+            f"nkw-… ID라서 그대로 등록하면 무의미한 문자열이 제외키워드로 등록됨(fail-closed) "
+            f"— search_term 제안만 실행 가능"
         )
-        raise MissingExecutionTargetError(
-            f"proposal_id={proposal.id} target_type={proposal.target_type!r} — "
-            f"restricted-keywords는 검색어 텍스트를 등록하는 API. target_type='keyword'"
-            f"(_bid_proposal 격상 경로) 제안의 target_id는 nkw-… ID라서 그대로 등록하면 "
-            f"무의미한 문자열이 제외키워드로 등록됨(fail-closed) — search_term 제안만 실행 가능"
-        )
+        _guard_failure(db, proposal, now, reason)
+        raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
 
     if not proposal.adgroup_id:
-        # 사전 검증 실패는 실행 시도가 아님 — writer 미호출, change_log 미기록.
-        log.error(
-            "naver_execution_harness: proposal_id=%s adgroup_id 없음 — 실쓰기 불가(fail-closed)",
-            proposal.id,
+        reason = (
+            "adgroup_id 없음 — restricted-keywords API는 adgroupId 필수(ref 27 §8-1). "
+            "구 제안이거나 격상 경로 제안 — 재생성 필요"
         )
-        raise MissingExecutionTargetError(
-            f"proposal_id={proposal.id} adgroup_id 없음 — restricted-keywords API는 adgroupId "
-            f"필수(ref 27 §8-1). 구 제안이거나 격상 경로 제안 — 재생성 필요"
+        _guard_failure(db, proposal, now, reason)
+        raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
+
+    # 내구 클레임(codex P1) — 조건부 UPDATE로 원자화(codex R2 P1): ORM 인스턴스 대입만으로는
+    # 두 세션이 동시에 approved를 읽었을 때 둘 다 클레임 가능(check-then-set TOCTOU).
+    # UPDATE ... WHERE status='approved' AND executed_change_log_id IS NULL은 DB가 직렬화해
+    # 정확히 한쪽만 1행 성공 — T4 콘솔 라우터(사람 클릭)·X2 flight_loop 크론의 다중 진입 대비.
+    # 이 시점 이후 크래시해도 'executing'이 남아 approved 게이트가 재진입을 차단한다.
+    claimed = db.query(NaverProposal).filter(
+        NaverProposal.id == proposal.id,
+        NaverProposal.status == "approved",
+        NaverProposal.executed_change_log_id.is_(None),
+    ).update({"status": "executing"}, synchronize_session=False)
+    db.commit()
+    if claimed != 1:
+        raise AlreadyExecutedError(
+            f"proposal_id={proposal.id} 클레임 실패 — 다른 실행자가 선점(동시 실행 차단)"
         )
+    db.refresh(proposal)
 
     try:
         result = naver_sa_writer.add_restricted_keywords(proposal.adgroup_id, [proposal.target_id])
@@ -150,6 +188,7 @@ def _execute_add_negative_keyword(db: Session, proposal: NaverProposal, now: dat
     db.add(log_entry)
     db.flush()
     proposal.executed_change_log_id = log_entry.id
+    proposal.status = "approved"  # 클레임 해제(복원) — 같은 커밋에 executed_change_log_id 연결
     db.commit()
 
     log.info(
@@ -175,7 +214,8 @@ def execute(db: Session, proposal_id: int, *, dry_run: bool = True, now: datetim
     """제안 1건을 실행 시도 — 실행 여부와 무관하게 naver_change_log에 전건 기록한다.
 
     순서: ①제안 조회 ②실행 가능 유형인지(액션 매핑 존재) ③status=='approved' 하드체크
-    (D-NAO-5 사람 승인 게이트 — pending/rejected/expired/failed는 실행 불가) ④재실행 방지
+    (D-NAO-5 사람 승인 게이트 — pending/rejected/expired/failed/executing은 실행 불가.
+    executing은 클레임 잔존 = 크래시로 쓰기 결과 불확실 — 사람 조사 대상) ④재실행 방지
     (executed_change_log_id가 이미 있으면 차단) ⑤optimizer=='ours' 하드체크(D-NAO-13 —
     제안 생성 단계에서 이미 걸러졌어도, 그 사이 설정이 바뀌었을 수 있어 실행 직전 재검증)
     ⑥OPEN_ACTIONS 미포함 액션은 dry_run 강제 True(D-NAO-5) ⑦change_log 기록

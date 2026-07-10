@@ -388,10 +388,12 @@ def build(
 
 def persist(db: Session, proposals: list[dict]) -> list[NaverProposal]:
     """제안 후보를 naver_proposals에 저장. dedup: 같은 (proposal_type, target_type,
-    campaign_id, target_id)로 status='pending'이 이미 있으면 skip(트랜잭션 내
+    campaign_id, adgroup_id, target_id)로 status='pending'이 이미 있으면 skip(트랜잭션 내
     check-then-insert). campaign_id를 빼면 서로 다른 캠페인의 동일 검색어
     negative_keyword 제안이 충돌한다(codex 지적, 라이브검증 후속 — search_term은
-    캠페인마다 같은 문자열이 반복될 수 있음).
+    캠페인마다 같은 문자열이 반복될 수 있음). adgroup_id도 동일 원리(codex[P2] X1a T3):
+    restricted-keywords는 광고그룹 단위 리소스라 같은 검색어·같은 캠페인이라도 adgroup이
+    다르면 별개 실행 대상 — adgroup_id 없는 유형은 None(IS NULL) 비교라 기존 동작 불변.
 
     단일 08:00 크론 가정 — 동시성/재시도 하드닝(DB 유니크 인덱스)은 P3(계획서 명시 연기).
     """
@@ -401,6 +403,7 @@ def persist(db: Session, proposals: list[dict]) -> list[NaverProposal]:
             NaverProposal.proposal_type == p["proposal_type"],
             NaverProposal.target_type == p["target_type"],
             NaverProposal.campaign_id == p["campaign_id"],
+            NaverProposal.adgroup_id == p.get("adgroup_id"),  # None → IS NULL(기존 유형 불변)
             NaverProposal.target_id == p["target_id"],
             NaverProposal.status == "pending",
         ).first()
