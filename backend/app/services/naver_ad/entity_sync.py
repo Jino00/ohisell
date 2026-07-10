@@ -6,11 +6,12 @@
 #   전 유형 수집(진단 보드 이름 표시용).
 from __future__ import annotations
 
+import json
 import logging
 
 from sqlalchemy.orm import Session
 
-from app.models import NaverEntity
+from app.models import NaverChangeLog, NaverEntity
 from app.services.naver_sa_ad_fetcher import get_adgroups, get_campaigns_full, get_keywords
 from app.utils.kst import kst_now
 
@@ -79,6 +80,50 @@ def collect_entities(
     return rows
 
 
+def _log_external_status_change(db: Session, entity: NaverEntity, new_status: str, now) -> None:
+    """D-NAO-40: 우리 change_log에 없는 외부 상태 변경을 감지하면 기록한다.
+    우리 실행으로 인한 변경(최근 set_user_lock 성공 기록과 방향이 일치)이면 건너뛴다."""
+    old_lock = entity.status == "off"
+    new_lock = new_status == "off"
+    if old_lock == new_lock:
+        return
+
+    last_our_write = (
+        db.query(NaverChangeLog)
+        .filter(
+            NaverChangeLog.entity_type == entity.entity_type,
+            NaverChangeLog.entity_id == entity.entity_id,
+            NaverChangeLog.action == "set_user_lock",
+            NaverChangeLog.dry_run.is_(False),
+            NaverChangeLog.after_value.isnot(None),
+        )
+        .order_by(NaverChangeLog.changed_at.desc())
+        .first()
+    )
+    if last_our_write and last_our_write.after_value:
+        try:
+            last_after = json.loads(last_our_write.after_value)
+            if isinstance(last_after, dict) and last_after.get("userLock") == new_lock:
+                return
+        except (ValueError, TypeError):
+            pass
+
+    db.add(NaverChangeLog(
+        entity_type=entity.entity_type,
+        entity_id=entity.entity_id,
+        campaign_id=entity.campaign_id,
+        action="external_status_change",
+        proposal_id=None,
+        dry_run=False,
+        changed_at=now,
+        before_value=json.dumps({"userLock": old_lock}),
+        after_value=json.dumps({"userLock": new_lock}),
+        rationale="entity_sync 감지: 외부(MOP/사람) 상태 변경",
+    ))
+    log.info("external_status_change detected: %s %s %s→%s",
+             entity.entity_type, entity.entity_id, entity.status, new_status)
+
+
 def sync_entities(db: Session, *, rows: list[dict] | None = None) -> dict:
     """naver_entity upsert(멱등, 일 1회 동기화) — keywordstool 보강 필드(monthly_volume 등) 보존.
 
@@ -105,6 +150,8 @@ def sync_entities(db: Session, *, rows: list[dict] | None = None) -> dict:
                 status=r["status"], bid_amt=r.get("bid_amt"), synced_at=now,
             ))
         else:
+            if e.status != r["status"] and e.status != "deleted":
+                _log_external_status_change(db, e, r["status"], now)
             e.parent_id = r["parent_id"]
             e.campaign_id = r["campaign_id"]
             e.campaign_type = r["campaign_type"]

@@ -527,6 +527,32 @@ def test_resume_candidates_excludes_when_latest_lock_change_after_value_unparsea
     assert out == []
 
 
+def test_resume_candidates_excludes_when_external_repause_logged_by_entity_sync(db):
+    """[codex P2, D-NAO-40] 시나리오: 우리 정지(proposal_id=1) → 외부 재개(change_log 미기록)
+    → 외부 재정지(entity_sync가 external_status_change 기록, proposal_id=None).
+    resume_candidates 쿼리가 external_status_change도 고려해 external 재정지가 최신이면
+    재개 후보에서 제외해야 한다."""
+    _entity(db, "keyword", "nkw-off-1", status="off", bid_amt=190)
+    # 정지 직전 창(정지=D_TO기준)에 양호한 실적 — roas 5.0
+    pre_pause_date = D_TO - timedelta(days=2)
+    _row(db, pre_pause_date, "cmp1", "WEB_SITE", "grp1", "nkw-off-1", 100, 10, 2000, direct=10000)
+    # ①우리 정지(D_TO)
+    db.add(_lock_log("nkw-off-1", "cmp1", locked=True, proposal_id=1,
+                      changed_at=datetime.combine(D_TO, datetime.min.time())))
+    # ②외부 재정지(entity_sync가 감지, D_TO+3일) — action=external_status_change, proposal_id=None
+    db.add(NaverChangeLog(
+        entity_type="keyword", entity_id="nkw-off-1", campaign_id="cmp1",
+        action="external_status_change", proposal_id=None, dry_run=False,
+        changed_at=datetime.combine(D_TO + timedelta(days=3), datetime.min.time()),
+        after_value=json.dumps({"userLock": True}),
+        before_value=json.dumps({"userLock": False}),
+    ))
+    db.commit()
+
+    out = diag.resume_candidates(db, D_TO, target_roas_resolver=lambda cid: Decimal("2.0"), correction_factor=Decimal("1"))
+    assert out == []  # 외부 재정지가 최신 → 재개 금지
+
+
 def test_resume_candidates_uses_per_campaign_target_roas_override(db):
     """[codex P2] 계정 기본 target_roas(2.0)만 쓰면 캠페인 override(5.0)가 무시된다 —
     roas_at_pause=3.0은 계정기본(2.0)은 넘지만 캠페인 override(5.0)는 못 넘으므로 후보에서

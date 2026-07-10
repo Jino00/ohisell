@@ -15,7 +15,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.database import Base
 from app.models import (
-    NaverAdDaily, NaverCampaignSettings, NaverEntity, NaverProductBep, NaverSearchTermDaily, Order,
+    NaverAdDaily, NaverCampaignSettings, NaverChangeLog, NaverEntity, NaverProductBep, NaverSearchTermDaily, Order,
 )
 from app.services.naver_ad import (
     campaign_backfill, campaign_target_resolver, entity_sync, keyword_volume_sync, search_term_ingest,
@@ -79,6 +79,121 @@ def test_sync_entities_preserves_volume_and_marks_stale_deleted(db):
     kw2 = db.query(NaverEntity).filter(NaverEntity.entity_id == "nkw-1").one()
     assert kw2.status == "deleted"
     assert kw2.monthly_volume == 1234  # 볼륨 데이터는 보존
+
+
+def test_sync_entities_logs_external_status_change_to_change_log(db):
+    """[codex P2, D-NAO-40] entity_sync가 라이브에서 status 변경을 감지하면 change_log에
+    action='external_status_change', proposal_id=None 행을 남긴다.
+    이렇게 하면 resume_candidates의 기존 'proposal_id is None → skip' 로직이
+    외부 재정지를 자동 차단한다."""
+    rows_v1 = [
+        {"entity_type": "keyword", "entity_id": "nkw-1", "parent_id": "grp-1",
+         "campaign_id": "cmp-1", "campaign_type": "WEB_SITE", "name": "필름",
+         "status": "on", "bid_amt": 700},
+    ]
+    entity_sync.sync_entities(db, rows=rows_v1)
+
+    # 2차 동기화: 외부(MOP/사람)가 keyword를 off로 변경한 상태
+    rows_v2 = [
+        {"entity_type": "keyword", "entity_id": "nkw-1", "parent_id": "grp-1",
+         "campaign_id": "cmp-1", "campaign_type": "WEB_SITE", "name": "필름",
+         "status": "off", "bid_amt": 700},
+    ]
+    entity_sync.sync_entities(db, rows=rows_v2)
+
+    logs = db.query(NaverChangeLog).filter(
+        NaverChangeLog.entity_id == "nkw-1",
+        NaverChangeLog.action == "external_status_change",
+    ).all()
+    assert len(logs) == 1
+    assert logs[0].proposal_id is None
+    assert logs[0].entity_type == "keyword"
+    assert logs[0].campaign_id == "cmp-1"
+    assert logs[0].dry_run is False
+    import json
+    after = json.loads(logs[0].after_value)
+    assert after == {"userLock": True}  # off = userLock:True
+    before = json.loads(logs[0].before_value)
+    assert before == {"userLock": False}  # on = userLock:False
+
+
+def test_sync_entities_logs_external_resume_to_change_log(db):
+    """외부 재개(off→on)도 change_log에 남긴다 — 완전한 이력 추적."""
+    rows_v1 = [
+        {"entity_type": "keyword", "entity_id": "nkw-1", "parent_id": "grp-1",
+         "campaign_id": "cmp-1", "campaign_type": "WEB_SITE", "name": "필름",
+         "status": "off", "bid_amt": 700},
+    ]
+    entity_sync.sync_entities(db, rows=rows_v1)
+
+    rows_v2 = [
+        {"entity_type": "keyword", "entity_id": "nkw-1", "parent_id": "grp-1",
+         "campaign_id": "cmp-1", "campaign_type": "WEB_SITE", "name": "필름",
+         "status": "on", "bid_amt": 700},
+    ]
+    entity_sync.sync_entities(db, rows=rows_v2)
+
+    logs = db.query(NaverChangeLog).filter(
+        NaverChangeLog.entity_id == "nkw-1",
+        NaverChangeLog.action == "external_status_change",
+    ).all()
+    assert len(logs) == 1
+    import json
+    after = json.loads(logs[0].after_value)
+    assert after == {"userLock": False}
+
+
+def test_sync_entities_no_log_when_status_unchanged(db):
+    """status 동일하면 change_log에 기록하지 않는다."""
+    rows = [
+        {"entity_type": "keyword", "entity_id": "nkw-1", "parent_id": "grp-1",
+         "campaign_id": "cmp-1", "campaign_type": "WEB_SITE", "name": "필름",
+         "status": "on", "bid_amt": 700},
+    ]
+    entity_sync.sync_entities(db, rows=rows)
+    entity_sync.sync_entities(db, rows=rows)  # 같은 status
+
+    logs = db.query(NaverChangeLog).filter(
+        NaverChangeLog.entity_id == "nkw-1",
+        NaverChangeLog.action == "external_status_change",
+    ).all()
+    assert logs == []
+
+
+def test_sync_entities_skips_log_for_our_own_change(db):
+    """우리가 실행해서 바뀐 것(change_log에 이미 최근 set_user_lock 성공 기록이 있는 경우)은
+    external_status_change를 남기지 않는다 — 이중 기록 방지."""
+    import json
+    from datetime import datetime as dt
+    rows_v1 = [
+        {"entity_type": "keyword", "entity_id": "nkw-1", "parent_id": "grp-1",
+         "campaign_id": "cmp-1", "campaign_type": "WEB_SITE", "name": "필름",
+         "status": "on", "bid_amt": 700},
+    ]
+    entity_sync.sync_entities(db, rows=rows_v1)
+
+    # 우리가 정지 실행한 기록(proposal_id 있음, after_value={"userLock": true})
+    db.add(NaverChangeLog(
+        entity_type="keyword", entity_id="nkw-1", campaign_id="cmp-1",
+        action="set_user_lock", proposal_id=42, dry_run=False,
+        after_value=json.dumps({"userLock": True}),
+        changed_at=dt(2026, 7, 15, 8, 0, 0),
+    ))
+    db.commit()
+
+    # 동기화에서 off 확인 — 우리가 직접 정지한 결과이므로 external log 안 남김
+    rows_v2 = [
+        {"entity_type": "keyword", "entity_id": "nkw-1", "parent_id": "grp-1",
+         "campaign_id": "cmp-1", "campaign_type": "WEB_SITE", "name": "필름",
+         "status": "off", "bid_amt": 700},
+    ]
+    entity_sync.sync_entities(db, rows=rows_v2)
+
+    ext_logs = db.query(NaverChangeLog).filter(
+        NaverChangeLog.entity_id == "nkw-1",
+        NaverChangeLog.action == "external_status_change",
+    ).all()
+    assert ext_logs == []
 
 
 # ── 검색어 리포트 컬럼 파싱 (SHOPPINGKEYWORD_DETAIL/EXPKEYWORD 공통 16열) ──

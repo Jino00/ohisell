@@ -460,7 +460,8 @@ def resume_candidates(
             NaverChangeLog.proposal_id, NaverChangeLog.changed_at,
         )
         .filter(
-            NaverChangeLog.entity_type == "keyword", NaverChangeLog.action == "set_user_lock",
+            NaverChangeLog.entity_type == "keyword",
+            NaverChangeLog.action.in_(["set_user_lock", "external_status_change"]),
             NaverChangeLog.entity_id.in_(off_ids),
             NaverChangeLog.dry_run.is_(False), NaverChangeLog.after_value.isnot(None),
         )
