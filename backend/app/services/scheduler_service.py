@@ -350,6 +350,27 @@ def run_naver_learning_loops_job():
         db.close()
 
 
+def run_naver_flight_loop_job():
+    """당일 플라이트 루프 — 2시간 주기 캠페인별 α 산출(X2, D-NAO-34).
+
+    response_curve_builder(T1)→pacing_controller(T2) SA 조합으로
+    optimizer='ours' 캠페인의 최적 입찰배수를 산출·기록한다.
+    dry_run=True(기본) — Jino 전환 결정까지 실제 입찰 변경 없음(D-NAO-5).
+    """
+    db = _get_own_db_session()
+    try:
+        from app.services.naver_ad.flight_loop import run_flight_loop
+
+        result = run_flight_loop(db)
+        log.info("[스케줄러] naver flight_loop: %d캠페인, dry_run=%s",
+                 result["campaigns_processed"], result.get("dry_run", True))
+    except Exception as e:
+        log.exception("[스케줄러] run_naver_flight_loop_job 에러: %s", e)
+        raise
+    finally:
+        db.close()
+
+
 def generate_expert_desk_job():
     """전문가(Ava) 검토 데스크 — E1a expert_desk.run_daily (08:05 KST, generate_naver_proposals
     08:00 직후, 계획서 §8). AI_office·실 claude 무의존(E1a 자족) — invoke 인자를 넘기지 않아
@@ -866,6 +887,7 @@ def _ensure_default_states(db):
         ("generate_naver_proposals", "0 8 * * *"),  # 네이버 SA 제안 자동생성(진단→시뮬→제안→Slack, 트랙 P2-S3)
         ("generate_expert_desk", "5 8 * * *"),  # 전문가(Ava) 검토 데스크(E1a, PLAN §8)
         ("run_naver_learning_loops", "10 8 * * *"),  # 학습루프 4종(성적표·예측편향·전환성숙·시간대분포, 트랙 P6)
+        ("run_naver_flight_loop", "15 */2 * * *"),  # 당일 플라이트 루프 2시간 주기(X2, dry_run=True)
         ("sync_naver_settlement", "25 5 * * *"),
         ("sync_naver_case_settlement", "30 5 * * *"),
         ("sync_meta_ad_costs", "0 7 * * *"),
@@ -935,6 +957,8 @@ def start_scheduler():
                 job_func = run_naver_learning_loops_job
             elif state.job_name == "generate_expert_desk":
                 job_func = generate_expert_desk_job
+            elif state.job_name == "run_naver_flight_loop":
+                job_func = run_naver_flight_loop_job
             elif state.job_name == "sync_naver_settlement":
                 job_func = sync_naver_settlement_job
             elif state.job_name == "sync_naver_case_settlement":
