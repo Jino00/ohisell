@@ -3,6 +3,9 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
+- 날짜: 2026-07-10 저녁 (★네이버 광고 트랙 **X1a 전체 완료 + prod 배포 완료** — fable 설계·검수·배포, Sonnet 구현)
+- ★**X1a T5·T6 완료 + prod 실배포**: T5 E2 위임 스위치(naver_account_settings KV + delegation_gate SA + expert_desk stage5 + 콘솔 위임 패널 + approval_source 감사, codex 3R PASS) / T6 정보성 pending 경량화(차등 TTL D+1/D+3 — D+N 당일 만료로 codex 경계 수정, 브리핑 접기 informational_pending, 백로그는 배포 후 첫 크론이 자연 소급 정리, codex 2R PASS). 테스트 1026 passed. **PR #9 main 병합(bc5a0ce) → prod 배포 완료**(DB 백업 naver-ad-X1a_20260710_092610 → rsync sha256 12/12 → 마이그레이션 a1b2c3d4e5f6+b2c3d4e5f6g7 → pm2 재시작 → 프론트 배포, 라이브 검증 전부 외부 HTTPS 200). **다음 = ①내일(7/11) 08:00/08:05 크론에서 T6 효과 확인(백로그 145건 expired·절삭 로그 0·Ava 평결=실행형 전건) ②Jino 카나리 캠페인 2~3개 지정 → X1a 완료기준① 라이브 왕복 ③X1b(정지재개→입찰+가드레일)**. 워크트리 현행 = naver-ad-execution-loop-6cc75b(브랜치 동명, main 병합 완료 상태).
+- ─────────────────────────────────────────────
 - 날짜: 2026-07-10 저녁 (★네이버 광고 트랙 **X1a T4 완료 — 콘솔 승인·실행 버튼(반자동 개시, D-NAO-5)** — fable 설계+Sonnet 서브에이전트 2개 구현 세션)
 - ★**X1a T4 완료**: `POST /proposals/{id}/status`(전이 상태기계+조건부 UPDATE 원자화, failed→approved 재승인 경로 첫 배선) / `POST /proposals/{id}/execute`(미개방 409 무접촉 — dry-run 제안 소비 함정 차단·회귀 테스트 고정, 구조 결함은 harness 422+failed 감사 경로, 쓰기 실패 502) / harness `real_write_blocker()` 헬퍼→serializer `executable`/`not_executable_reason`(단일 진실) / 콘솔 승인(Confirm)·반려·실행(Confirm 2중)·재승인 버튼+failed·executing 탭+반자동 배너 / `/expert-reviews` run status=ok 조인(codex 연기 항목). codex 2라운드: 승인 Confirm·busy 유지 동의 반영, "구조결함 좌초" 기각→codex 철회, PASS. 테스트 935→964 passed, tsc·build 통과. 커밋 `e0adf34`·`7903bfa`(미push 총 11개). **워크트리 재이동: gracious-heyrovsky → recursing-engelbart-6bb9d5**(브랜치 `claude/naver-ad-x1a-t4-5ceb68`, T1~T3 ff 병합 완료 — 이쪽이 현행). **다음 세션 = `.claude/memory/HANDOFF_ohisell-naver-ad-X1a-T4-done_20260710.md` 필독 → X1a T5(E2 위임 스위치)부터. prod 배포는 T5·T6와 묶어서(마이그레이션 `a1b2c3d4e5f6` 포함). 라이브 왕복은 카나리 지정 후.**
 - ─────────────────────────────────────────────

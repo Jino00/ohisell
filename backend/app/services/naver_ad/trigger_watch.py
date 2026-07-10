@@ -35,6 +35,14 @@ _Q4 = Decimal("0.0001")
 PROPOSAL_TYPE_PACING = "trigger_pacing"
 PROPOSAL_TYPE_CPC = "trigger_cpc_spike"
 
+# dashboard_overview 실측 결과의 단일 진실 소스(코드리뷰 P2 재조사, 타임스탬프 이중변환
+# 버그 수정) — run_hourly()가 NaverProposal.created_at=kst_now()로 명시 스탬프하는 유일한
+# 두 유형. 나머지 SA(proposal_writer.persist/account_brief_singleton)는
+# server_default=func.now() UTC 관례를 그대로 따른다 — dashboard_overview는 이 상수로
+# "이미 KST라 변환 금지" 대상을 판정한다(proposal_writer.INFORMATIONAL_PROPOSAL_TYPES와는
+# 목적이 다르다: 그건 실행형/정보성 분류, 이건 시간대 소스 분류 — 둘이 겹치지 않는다).
+KST_STAMPED_PROPOSAL_TYPES: frozenset[str] = frozenset({PROPOSAL_TYPE_PACING, PROPOSAL_TYPE_CPC})
+
 # 페이싱 이탈 배수 — anomaly_feed.SPEND_SPIKE_RATIO/SPEND_DROP_RATIO(Phase3, codex review
 # 통과 완료)와 동일한 "사람이 한 번 볼 만큼 크게 움직였다"는 상식적 배수(2배/절반) 전례를
 # 그대로 재사용한다(자의적 신규 상수 발명 대신 기존 승인 임계값 재사용). 실제 페이스(당일
