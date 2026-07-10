@@ -742,6 +742,54 @@ def test_build_guardrail_context_no_prior_changes(db):
     assert ctx["last_change_at"] is None
 
 
+def test_build_guardrail_context_excludes_dry_run_and_failed_from_cooldown(db):
+    """[codex P2] dry-run(outcome=None)·실패(outcome='failed') 행은 네이버 상태를 바꾸지
+    않았다 — 쿨다운·일일상한에 포함시키면 아무 일도 안 일어났는데 다음 실행이 차단된다."""
+    p = _proposal(db, proposal_type="bid_up")
+    now = kst_now()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    db.add(NaverChangeLog(  # dry-run — outcome 미기록
+        entity_type="keyword", entity_id="nkw-1", campaign_id="cmp1", action="update_bid",
+        dry_run=True, changed_at=today_start + timedelta(hours=1),
+    ))
+    db.add(NaverChangeLog(  # 사전 가드 실패
+        entity_type="keyword", entity_id="nkw-1", campaign_id="cmp1", action="update_bid",
+        outcome="failed", changed_at=today_start + timedelta(hours=2),
+    ))
+    db.commit()
+
+    with patch.object(harness.naver_sa_writer, "get_keyword", return_value={"bidAmt": 200}):
+        ctx = harness._build_guardrail_context(db, p, now)
+
+    assert ctx["changes_today_count"] == 0
+    assert ctx["last_change_at"] is None
+
+
+def test_build_guardrail_context_only_counts_executed_among_mixed_outcomes(db):
+    p = _proposal(db, proposal_type="bid_up")
+    now = kst_now()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    db.add(NaverChangeLog(  # dry-run — 제외
+        entity_type="keyword", entity_id="nkw-1", campaign_id="cmp1", action="update_bid",
+        dry_run=True, changed_at=today_start + timedelta(hours=1),
+    ))
+    db.add(NaverChangeLog(  # 실제 실행 — 포함
+        entity_type="keyword", entity_id="nkw-1", campaign_id="cmp1", action="update_bid",
+        outcome="executed", changed_at=today_start + timedelta(hours=3),
+    ))
+    db.add(NaverChangeLog(  # 실패 — 제외
+        entity_type="keyword", entity_id="nkw-1", campaign_id="cmp1", action="update_bid",
+        outcome="failed", changed_at=today_start + timedelta(hours=5),
+    ))
+    db.commit()
+
+    with patch.object(harness.naver_sa_writer, "get_keyword", return_value={"bidAmt": 200}):
+        ctx = harness._build_guardrail_context(db, p, now)
+
+    assert ctx["changes_today_count"] == 1
+    assert ctx["last_change_at"] == today_start + timedelta(hours=3)  # 실패(5시)보다 앞선 실제 실행만
+
+
 def test_build_guardrail_context_cost_today_and_daily_budget_from_hourly_snapshot(db):
     from app.models import NaverHourlySnapshot
     p = _proposal(db, proposal_type="bid_up")

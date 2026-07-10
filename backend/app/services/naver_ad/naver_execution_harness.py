@@ -230,11 +230,16 @@ def _build_guardrail_context(db: Session, proposal: NaverProposal, now: datetime
         context["cost_today"] = latest_snapshot.cost
         context["daily_budget"] = latest_snapshot.daily_budget
 
+    # codex[P2]: dry-run(outcome=None)·실패(outcome='failed', _guard_failure 포함) 행은
+    # 네이버 상태를 바꾸지 않았다 — 그런데도 쿨다운·일일상한에 포함시키면 실제로는 아무
+    # 일도 안 일어났는데 다음 실행이 차단된다. 실제 쓰기가 확정된 행(outcome='executed')만
+    # 센다.
     change_rows = (
         db.query(NaverChangeLog.changed_at)
         .filter(
             NaverChangeLog.entity_type == proposal.target_type,
             NaverChangeLog.entity_id == proposal.target_id,
+            NaverChangeLog.outcome == "executed",
         )
         .all()
     )

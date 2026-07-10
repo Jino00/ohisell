@@ -6,6 +6,7 @@
 #   모수 게이트(D-NAO-9 30일 클릭<10='저클릭')는 keyword_volume_sync과 동일 상수 재사용.
 from __future__ import annotations
 
+import json
 from datetime import date, timedelta
 from decimal import Decimal
 
@@ -408,11 +409,11 @@ def pause_candidates(db: Session, date_from: date, date_to: date) -> list[dict]:
 def resume_candidates(
     db: Session, date_to: date, target_roas_resolver, correction_factor: Decimal,
 ) -> list[dict]:
-    """재개 후보 (X1b T3, D-NAO-38) — 우리 시스템이 정지시킨(change_log action='pause',
-    proposal_id 있음 — Jino가 콘솔에서 수동 정지한 경우는 proposal_id가 없어 제외, 우리가
-    모르는 이유로 정지된 것을 임의로 재개하지 않는다) 키워드 중 정지 직전 창의 보정ROAS가
-    현재 목표 이상 — D-NAO-16 "정지 사유 해소" 중 "BEP 개선"(우리 목표 자체가 낮아졌거나,
-    정지 당시 이미 양호했던 키워드) 신호.
+    """재개 후보 (X1b T3, D-NAO-38) — 우리 시스템이 정지시킨(change_log proposal_id 있음 —
+    Jino가 콘솔에서 수동 정지한 경우는 proposal_id가 없어 제외, 우리가 모르는 이유로 정지된
+    것을 임의로 재개하지 않는다) 키워드 중 정지 직전 창의 보정ROAS가 현재 목표 이상 —
+    D-NAO-16 "정지 사유 해소" 중 "BEP 개선"(우리 목표 자체가 낮아졌거나, 정지 당시 이미
+    양호했던 키워드) 신호.
 
     target_roas_resolver: campaign_id(str) → Decimal, 캠페인별 목표(override > 계정 기본값,
     campaign_target_resolver.resolve_target_roas) 해석 함수(harness가 주입). 계정 단일
@@ -426,9 +427,10 @@ def resume_candidates(
 
     **최신 잠금변경이 우리 정지일 때만 후보**(codex[P2]) — 정지→우리 재개→(수동이든 새
     시스템 정지든)재정지 이력이 있으면 지금 off 상태의 진짜 원인은 그 마지막 이벤트다.
-    action='pause'만 보고 max(changed_at)를 구하면 옛 우리 정지를 잘못 채택할 수 있어,
-    pause·resume 둘 다 조회해 키워드별 진짜 최신 이벤트를 가린 뒤 그 이벤트가 action='pause'
-    +proposal_id 있음일 때만 진행한다.
+    action 문자열은 방향 판별에 쓰지 않는다 — naver_execution_harness가 pause·resume 둘 다
+    action='set_user_lock'으로 기록하므로(_ACTION_BY_PROPOSAL_TYPE이 두 proposal_type을
+    하나의 실행 액션으로 묶음, update_bid가 bid_up/bid_down/growth_bid_up을 묶는 것과 동일
+    관례, codex[P2] X1b T4 2라운드) 정지 여부는 after_value의 실제 userLock 값으로 판별한다.
     """
     off_entities = {
         e.entity_id: e for e in
@@ -440,24 +442,30 @@ def resume_candidates(
 
     lock_rows = (
         db.query(
-            NaverChangeLog.entity_id, NaverChangeLog.campaign_id, NaverChangeLog.action,
+            NaverChangeLog.entity_id, NaverChangeLog.campaign_id, NaverChangeLog.after_value,
             NaverChangeLog.proposal_id, NaverChangeLog.changed_at,
         )
         .filter(
-            NaverChangeLog.entity_type == "keyword", NaverChangeLog.action.in_(("pause", "resume")),
+            NaverChangeLog.entity_type == "keyword", NaverChangeLog.action == "set_user_lock",
             NaverChangeLog.entity_id.in_(off_ids), NaverChangeLog.outcome == "executed",
         )
         .order_by(NaverChangeLog.changed_at.asc())
         .all()
     )
     latest_lock_change: dict[str, tuple] = {}
-    for entity_id, campaign_id, action, proposal_id, changed_at in lock_rows:
-        latest_lock_change[entity_id] = (campaign_id, action, proposal_id, changed_at)  # asc 정렬 — 뒤에 올수록 최신
+    for entity_id, campaign_id, after_value, proposal_id, changed_at in lock_rows:
+        latest_lock_change[entity_id] = (campaign_id, after_value, proposal_id, changed_at)  # asc 정렬 — 뒤에 올수록 최신
 
     out = []
-    for keyword_id, (campaign_id, action, proposal_id, paused_at) in latest_lock_change.items():
-        if action != "pause" or proposal_id is None:
-            continue  # 최신 잠금변경이 우리 정지가 아님(수동 재정지·우리 재개로 끝남 등)
+    for keyword_id, (campaign_id, after_value, proposal_id, paused_at) in latest_lock_change.items():
+        if proposal_id is None:
+            continue  # 최신 잠금변경이 우리 실행이 아님(수동 정지)
+        try:
+            after = json.loads(after_value) if after_value else None
+        except (ValueError, TypeError):
+            after = None
+        if not isinstance(after, dict) or after.get("userLock") is not True:
+            continue  # 방향 판별 불가(fail-closed) 또는 최신 잠금변경이 정지가 아님(재개로 끝남)
         pause_date = paused_at.date()
         window_to = pause_date - timedelta(days=1)
         window_from = window_to - timedelta(days=LOW_CLICK_LOOKBACK_DAYS - 1)
