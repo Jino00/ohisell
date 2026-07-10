@@ -337,13 +337,32 @@ def vicious_cycle_flags(
     return flags
 
 
-def pause_candidates(db: Session, date_from: date, date_to: date) -> list[dict]:
-    """정지 후보 (X1b T3, D-NAO-38) — WEB_SITE 등록 키워드(status='on') 중 창 내 전환 0건
-    + 누적비용이 스톱로스 절대액(D-NAO-20) 이상. 스톱로스 절대액 = 현재 입찰가 ×
-    LOW_CLICK_THRESHOLD(growth_sweeper.STOP_LOSS_CLICK_MULTIPLE과 동일 상수, D-NAO-9/20 근거
-    재사용) — "무전환 지출 상한 도달 시 자동 인하/중단"(D-NAO-16)의 "중단" 쪽 구현.
-    NaverEntity에 bid_amt가 없는(미확보) 키워드는 스톱로스 계산 불가라 fail-closed 제외.
+def _on_adgroup_ids(db: Session) -> set[str]:
+    """부모 체인(campaign→adgroup)이 전부 status='on'인 adgroup_id 집합.
+
+    entity_sync는 부모-자식 status를 캐스케이드하지 않는다(네이버 API가 캠페인/그룹/키워드
+    상태를 각자 독립적으로 보고 — F2a codex 지적, D-NAO-27과 동일 근거) — 캠페인이 꺼져도
+    자식 adgroup이 개별 status='on'으로 남을 수 있다. pause_candidates(codex[P2], X1b T3
+    2라운드)가 이 세트로 자식 키워드의 실질 활성 여부를 교차 확인한다.
     """
+    rows = db.query(
+        NaverEntity.entity_type, NaverEntity.entity_id, NaverEntity.parent_id, NaverEntity.status,
+    ).filter(NaverEntity.entity_type.in_(("campaign", "adgroup"))).all()
+    on_campaigns = {r[1] for r in rows if r[0] == "campaign" and r[3] == "on"}
+    return {r[1] for r in rows if r[0] == "adgroup" and r[3] == "on" and r[2] in on_campaigns}
+
+
+def pause_candidates(db: Session, date_from: date, date_to: date) -> list[dict]:
+    """정지 후보 (X1b T3, D-NAO-38) — WEB_SITE 등록 키워드(status='on', 부모 체인도 전부 on)
+    중 창 내 전환 0건 + 누적비용이 스톱로스 절대액(D-NAO-20) 이상. 스톱로스 절대액 = 현재
+    입찰가 × LOW_CLICK_THRESHOLD(growth_sweeper.STOP_LOSS_CLICK_MULTIPLE과 동일 상수,
+    D-NAO-9/20 근거 재사용) — "무전환 지출 상한 도달 시 자동 인하/중단"(D-NAO-16)의 "중단"
+    쪽 구현. NaverEntity에 bid_amt가 없는(미확보) 키워드는 스톱로스 계산 불가라 fail-closed
+    제외. **부모(광고그룹·캠페인)가 off인데 키워드만 on인 경우도 제외**(codex[P2]) — 그
+    상태에서 키워드에 별도 정지를 걸면, 나중에 부모만 재개해도 이 키워드는 계속 잠긴 채
+    남는다(의도치 않은 영구 정지).
+    """
+    on_adgroups = _on_adgroup_ids(db)
     entity_map = {
         e.entity_id: e for e in
         db.query(NaverEntity).filter(NaverEntity.entity_type == "keyword", NaverEntity.status == "on").all()
@@ -357,6 +376,8 @@ def pause_candidates(db: Session, date_from: date, date_to: date) -> list[dict]:
     for r in rows:
         entity = entity_map.get(r["keyword_id"])
         if entity is None or not entity.bid_amt:
+            continue
+        if entity.parent_id not in on_adgroups:
             continue
         stop_loss_amount = entity.bid_amt * LOW_CLICK_THRESHOLD
         if r["conv_amt"] == 0 and r["cost"] >= stop_loss_amount:
@@ -377,6 +398,12 @@ def resume_candidates(
     정직 경계: "계절성 회복·CPC 하락"(D-NAO-16 예시의 나머지 2가지)은 미구현 — 정지 중엔
     해당 키워드의 새 실적이 쌓이지 않아 직접 관측 불가하고, 대체 신호(캠페인 CPC 추세 등)는
     이번 스코프에 넣지 않았다(§8 승계 큐 후보로 별도 기록 필요).
+
+    **최신 잠금변경이 우리 정지일 때만 후보**(codex[P2]) — 정지→우리 재개→(수동이든 새
+    시스템 정지든)재정지 이력이 있으면 지금 off 상태의 진짜 원인은 그 마지막 이벤트다.
+    action='pause'만 보고 max(changed_at)를 구하면 옛 우리 정지를 잘못 채택할 수 있어,
+    pause·resume 둘 다 조회해 키워드별 진짜 최신 이벤트를 가린 뒤 그 이벤트가 action='pause'
+    +proposal_id 있음일 때만 진행한다.
     """
     off_ids = {
         r[0] for r in
@@ -387,19 +414,26 @@ def resume_candidates(
     if not off_ids:
         return []
 
-    pause_rows = (
-        db.query(NaverChangeLog.entity_id, NaverChangeLog.campaign_id, sqlfunc.max(NaverChangeLog.changed_at))
-        .filter(
-            NaverChangeLog.entity_type == "keyword", NaverChangeLog.action == "pause",
-            NaverChangeLog.proposal_id.isnot(None), NaverChangeLog.entity_id.in_(off_ids),
-            NaverChangeLog.outcome == "executed",
+    lock_rows = (
+        db.query(
+            NaverChangeLog.entity_id, NaverChangeLog.campaign_id, NaverChangeLog.action,
+            NaverChangeLog.proposal_id, NaverChangeLog.changed_at,
         )
-        .group_by(NaverChangeLog.entity_id, NaverChangeLog.campaign_id)
+        .filter(
+            NaverChangeLog.entity_type == "keyword", NaverChangeLog.action.in_(("pause", "resume")),
+            NaverChangeLog.entity_id.in_(off_ids), NaverChangeLog.outcome == "executed",
+        )
+        .order_by(NaverChangeLog.changed_at.asc())
         .all()
     )
+    latest_lock_change: dict[str, tuple] = {}
+    for entity_id, campaign_id, action, proposal_id, changed_at in lock_rows:
+        latest_lock_change[entity_id] = (campaign_id, action, proposal_id, changed_at)  # asc 정렬 — 뒤에 올수록 최신
 
     out = []
-    for keyword_id, campaign_id, paused_at in pause_rows:
+    for keyword_id, (campaign_id, action, proposal_id, paused_at) in latest_lock_change.items():
+        if action != "pause" or proposal_id is None:
+            continue  # 최신 잠금변경이 우리 정지가 아님(수동 재정지·우리 재개로 끝남 등)
         pause_date = paused_at.date()
         window_to = pause_date - timedelta(days=1)
         window_from = window_to - timedelta(days=LOW_CLICK_LOOKBACK_DAYS - 1)
