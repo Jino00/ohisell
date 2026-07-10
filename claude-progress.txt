@@ -3,7 +3,10 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
-- 날짜: 2026-07-10 오후 늦게 (★네이버 광고 트랙 **X1a T1·T2·T3 완료 — 쓰기 어댑터+실쓰기 첫 개방** — fable 지휘+Sonnet 서브에이전트 구현 세션)
+- 날짜: 2026-07-10 저녁 (★네이버 광고 트랙 **X1a T4 완료 — 콘솔 승인·실행 버튼(반자동 개시, D-NAO-5)** — fable 설계+Sonnet 서브에이전트 2개 구현 세션)
+- ★**X1a T4 완료**: `POST /proposals/{id}/status`(전이 상태기계+조건부 UPDATE 원자화, failed→approved 재승인 경로 첫 배선) / `POST /proposals/{id}/execute`(미개방 409 무접촉 — dry-run 제안 소비 함정 차단·회귀 테스트 고정, 구조 결함은 harness 422+failed 감사 경로, 쓰기 실패 502) / harness `real_write_blocker()` 헬퍼→serializer `executable`/`not_executable_reason`(단일 진실) / 콘솔 승인(Confirm)·반려·실행(Confirm 2중)·재승인 버튼+failed·executing 탭+반자동 배너 / `/expert-reviews` run status=ok 조인(codex 연기 항목). codex 2라운드: 승인 Confirm·busy 유지 동의 반영, "구조결함 좌초" 기각→codex 철회, PASS. 테스트 935→964 passed, tsc·build 통과. 커밋 `e0adf34`·`7903bfa`(미push 총 11개). **워크트리 재이동: gracious-heyrovsky → recursing-engelbart-6bb9d5**(브랜치 `claude/naver-ad-x1a-t4-5ceb68`, T1~T3 ff 병합 완료 — 이쪽이 현행). **다음 세션 = `.claude/memory/HANDOFF_ohisell-naver-ad-X1a-T4-done_20260710.md` 필독 → X1a T5(E2 위임 스위치)부터. prod 배포는 T5·T6와 묶어서(마이그레이션 `a1b2c3d4e5f6` 포함). 라이브 왕복은 카나리 지정 후.**
+- ─────────────────────────────────────────────
+- (이전) 날짜: 2026-07-10 오후 늦게 (★네이버 광고 트랙 **X1a T1·T2·T3 완료 — 쓰기 어댑터+실쓰기 첫 개방** — fable 지휘+Sonnet 서브에이전트 구현 세션)
 - ★**X1a 전반부 완료**: T1 ref 27(swagger gh-pages 재확보·repo 보존 + prod 읽기 실측 3건) / T2 naver_sa_writer(제외키워드 3함수, 재조회 실측 성공판정·무재시도·fail-closed, codex 3라운드 PASS) / T3 execution_harness 실쓰기 개방(OPEN_ACTIONS 제외키워드, 원자적 클레임→executing, before/after+created_ids 전건 기록, 실패=failed 종결, target_type·adgroup_id 이중 가드, adgroup_id 컬럼 마이그레이션 `a1b2c3d4e5f6` — **prod 미적용**, codex 2사이클 PASS). 테스트 904→935 passed. 커밋 `4fa3fe2`~`56b39de`(미push). 워크트리 이동: admiring-solomon → **gracious-heyrovsky-98a1bb**(X0 커밋 ff 병합 완료). 백로그: alembic oauth_tokens 결함 별도 세션 진행 중. **다음 세션 = `.claude/memory/HANDOFF_ohisell-naver-ad-X1a-T1T2T3-done_20260710.md` 필독 → X1a T4(콘솔 승인 버튼+실행 라우터+run-status 조인)부터. 실쓰기는 아직 실행 경로 없음(T4·카나리 대기).**
 - ─────────────────────────────────────────────
 - (이전) 날짜: 2026-07-10 오후 (★네이버 광고 트랙 **X0 선결 전부 종결 + expert_ledger 멱등 버그 수정·prod 배포** — fable 세션)
