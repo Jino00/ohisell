@@ -331,6 +331,15 @@ def update_keyword_bid(ncc_keyword_id: str, bid_amt: int) -> WriteResult:
             f"update_keyword_bid: 쓰기 응답은 성공(status={resp.status_code})이나 재조회에 "
             f"반영되지 않음(fail-closed): 요청={bid_amt} 재조회={after.get('bidAmt')}"
         )
+    # codex[P2]: bidAmt가 재조회에서 요청대로 나와도 useGroupBidAmt가 여전히 true면
+    # 실효 CPC는 광고그룹 입찰가를 그대로 쓴다(키워드별 입찰이 반영 안 됨) — bidAmt만
+    # 보고 성공 판정하면 "응답은 성공, 실효 반영은 실패"를 놓친다(fail-closed).
+    if after.get("useGroupBidAmt") is not False:
+        raise WriteVerificationError(
+            f"update_keyword_bid: bidAmt는 반영됐으나 useGroupBidAmt가 false로 전환되지 "
+            f"않음(fail-closed) — 실효 CPC는 광고그룹 입찰가를 그대로 사용: "
+            f"재조회 useGroupBidAmt={after.get('useGroupBidAmt')}"
+        )
 
     log.info("Naver SA 쓰기 성공: update_keyword_bid keyword=%s bidAmt=%s", ncc_keyword_id, bid_amt)
     return WriteResult(

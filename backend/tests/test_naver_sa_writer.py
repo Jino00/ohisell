@@ -461,6 +461,26 @@ def test_update_bid_verification_mismatch_raises_verification_error():
             writer.update_keyword_bid(KEYWORD_ID, 500)
 
 
+def test_update_bid_use_group_bid_amt_still_true_raises_verification_error():
+    """[codex P2] bidAmt는 요청대로 재조회돼도 useGroupBidAmt가 여전히 true면 실효 CPC는
+    광고그룹 입찰가를 그대로 쓴다(우리 키워드별 입찰이 반영 안 됨) — bidAmt만 보고 성공
+    판정하면 '응답은 성공, 실효 반영은 실패'를 놓친다. fail-closed."""
+    before = FakeResp(200, {
+        "nccKeywordId": KEYWORD_ID, "nccAdgroupId": ADGROUP_ID, "keyword": "오하이",
+        "bidAmt": 190, "useGroupBidAmt": True, "userLock": False, "status": "ELIGIBLE",
+    })
+    after = FakeResp(200, {
+        "nccKeywordId": KEYWORD_ID, "nccAdgroupId": ADGROUP_ID, "keyword": "오하이",
+        "bidAmt": 500, "useGroupBidAmt": True, "userLock": False, "status": "ELIGIBLE",  # 반전 안 됨
+    })
+    put_resp = FakeResp(200, after.json())
+
+    with patch.object(writer.fetcher, "_get", side_effect=[before, after]), \
+         patch.object(writer.requests, "put", return_value=put_resp):
+        with pytest.raises(WriteVerificationError):
+            writer.update_keyword_bid(KEYWORD_ID, 500)
+
+
 def test_update_bid_headers_signed_with_put_method_and_no_query_in_path():
     before = _keyword_resp(bid_amt=190)
     after = _keyword_resp(bid_amt=500)
