@@ -6,13 +6,14 @@
 #   모수 게이트(D-NAO-9 30일 클릭<10='저클릭')는 keyword_volume_sync과 동일 상수 재사용.
 from __future__ import annotations
 
+import json
 from datetime import date, timedelta
 from decimal import Decimal
 
 from sqlalchemy import func as sqlfunc
 from sqlalchemy.orm import Session
 
-from app.models import NaverAdDaily, NaverEntity, NaverSearchTermDaily
+from app.models import NaverAdDaily, NaverChangeLog, NaverEntity, NaverSearchTermDaily
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 
 _WEB_SITE = "WEB_SITE"
@@ -335,3 +336,164 @@ def vicious_cycle_flags(
             })
     flags.sort(key=lambda x: x["recent_roas_corrected"])
     return flags
+
+
+def _on_adgroup_ids(db: Session) -> set[str]:
+    """부모 체인(campaign→adgroup)이 전부 status='on'인 adgroup_id 집합.
+
+    entity_sync는 부모-자식 status를 캐스케이드하지 않는다(네이버 API가 캠페인/그룹/키워드
+    상태를 각자 독립적으로 보고 — F2a codex 지적, D-NAO-27과 동일 근거) — 캠페인이 꺼져도
+    자식 adgroup이 개별 status='on'으로 남을 수 있다. pause_candidates(codex[P2], X1b T3
+    2라운드)가 이 세트로 자식 키워드의 실질 활성 여부를 교차 확인한다.
+    """
+    rows = db.query(
+        NaverEntity.entity_type, NaverEntity.entity_id, NaverEntity.parent_id, NaverEntity.status,
+    ).filter(NaverEntity.entity_type.in_(("campaign", "adgroup"))).all()
+    on_campaigns = {r[1] for r in rows if r[0] == "campaign" and r[3] == "on"}
+    return {r[1] for r in rows if r[0] == "adgroup" and r[3] == "on" and r[2] in on_campaigns}
+
+
+def keyword_window_agg(db: Session, keyword_id: str, date_from: date, date_to: date) -> dict:
+    """단일 키워드의 창 내 (cost, conv_amt) 집계 — SQL WHERE에 keyword_id를 직접 걸어
+    `_keyword_rows()`처럼 전 키워드를 GROUP BY하지 않는다(codex[P2], X1b T3 — 후보/실행
+    대상마다 창이 제각각이라 배치 불가할 때 O(대상 수 × 전체 키워드 행) 스케일을 피한다).
+    resume_candidates와 naver_execution_harness(T4 guardrail context)가 공유한다.
+    """
+    cost, direct, indirect = db.query(
+        sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.cost), 0),
+        sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.conv_direct_amt), 0),
+        sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.conv_indirect_amt), 0),
+    ).filter(
+        NaverAdDaily.keyword_id == keyword_id,
+        NaverAdDaily.ad_date >= date_from, NaverAdDaily.ad_date <= date_to,
+        NaverAdDaily.campaign_type == _WEB_SITE,
+        NaverAdDaily.adgroup_id != BACKFILL_SENTINEL_ADGROUP,
+    ).one()
+    return {"cost": int(cost), "conv_amt": int(direct) + int(indirect)}
+
+
+def pause_candidates(db: Session, date_from: date, date_to: date) -> list[dict]:
+    """정지 후보 (X1b T3, D-NAO-38) — WEB_SITE 등록 키워드(status='on', 부모 체인도 전부 on)
+    중 창 내 전환 0건 + 누적비용이 스톱로스 절대액(D-NAO-20) 이상. 스톱로스 절대액 = 현재
+    입찰가 × LOW_CLICK_THRESHOLD(growth_sweeper.STOP_LOSS_CLICK_MULTIPLE과 동일 상수,
+    D-NAO-9/20 근거 재사용) — "무전환 지출 상한 도달 시 자동 인하/중단"(D-NAO-16)의 "중단"
+    쪽 구현. NaverEntity에 bid_amt가 없는(미확보) 키워드는 스톱로스 계산 불가라 fail-closed
+    제외. **부모(광고그룹·캠페인)가 off인데 키워드만 on인 경우도 제외**(codex[P2]) — 그
+    상태에서 키워드에 별도 정지를 걸면, 나중에 부모만 재개해도 이 키워드는 계속 잠긴 채
+    남는다(의도치 않은 영구 정지).
+    """
+    on_adgroups = _on_adgroup_ids(db)
+    entity_map = {
+        e.entity_id: e for e in
+        db.query(NaverEntity).filter(NaverEntity.entity_type == "keyword", NaverEntity.status == "on").all()
+    }
+    if not entity_map:
+        return []
+
+    rows = [r for r in _keyword_rows(db, date_from, date_to, _WEB_SITE)
+            if r["keyword_id"] and r["cost"] > 0]
+    out = []
+    for r in rows:
+        entity = entity_map.get(r["keyword_id"])
+        if entity is None or not entity.bid_amt:
+            continue
+        if entity.parent_id not in on_adgroups:
+            continue
+        stop_loss_amount = entity.bid_amt * LOW_CLICK_THRESHOLD
+        if r["conv_amt"] == 0 and r["cost"] >= stop_loss_amount:
+            out.append({**r, "current_bid": entity.bid_amt, "stop_loss_amount": stop_loss_amount})
+    out.sort(key=lambda x: x["cost"], reverse=True)
+    return out
+
+
+def resume_candidates(
+    db: Session, date_to: date, target_roas_resolver, correction_factor: Decimal,
+) -> list[dict]:
+    """재개 후보 (X1b T3, D-NAO-38) — 우리 시스템이 정지시킨(change_log proposal_id 있음 —
+    Jino가 콘솔에서 수동 정지한 경우는 proposal_id가 없어 제외, 우리가 모르는 이유로 정지된
+    것을 임의로 재개하지 않는다) 키워드 중 정지 직전 창의 보정ROAS가 현재 목표 이상 —
+    D-NAO-16 "정지 사유 해소" 중 "BEP 개선"(우리 목표 자체가 낮아졌거나, 정지 당시 이미
+    양호했던 키워드) 신호.
+
+    target_roas_resolver: campaign_id(str) → Decimal, 캠페인별 목표(override > 계정 기본값,
+    campaign_target_resolver.resolve_target_roas) 해석 함수(harness가 주입). 계정 단일
+    target_roas만 쓰면 캠페인 override가 무시되는 재발 버그 패턴(codex[P2] — compute_bid_sims의
+    _make_target_roas_resolver가 동일 근거로 이미 한 번 고친 버그, 2026-07-07 라이브검증
+    이력)이라 여기도 같은 방식으로 캠페인별 해석을 강제한다.
+
+    정직 경계: "계절성 회복·CPC 하락"(D-NAO-16 예시의 나머지 2가지)은 미구현 — 정지 중엔
+    해당 키워드의 새 실적이 쌓이지 않아 직접 관측 불가하고, 대체 신호(캠페인 CPC 추세 등)는
+    이번 스코프에 넣지 않았다(§8 승계 큐 후보로 별도 기록 필요).
+
+    **최신 잠금변경이 우리 정지일 때만 후보**(codex[P2]) — 정지→우리 재개→(수동이든 새
+    시스템 정지든)재정지 이력이 있으면 지금 off 상태의 진짜 원인은 그 마지막 이벤트다.
+    action 문자열은 방향 판별에 쓰지 않는다 — naver_execution_harness가 pause·resume 둘 다
+    action='set_user_lock'으로 기록하므로(_ACTION_BY_PROPOSAL_TYPE이 두 proposal_type을
+    하나의 실행 액션으로 묶음, update_bid가 bid_up/bid_down/growth_bid_up을 묶는 것과 동일
+    관례, codex[P2] X1b T4 2라운드) 정지 여부는 after_value의 실제 userLock 값으로 판별한다.
+
+    **의도적 비대칭(Claude 적대 리뷰 지적, codex 한도 소진 대체, 2026-07-10) — pause_candidates와
+    달리 부모(광고그룹·캠페인) 체인 상태를 확인하지 않는다**: pause_candidates의 부모체인
+    검사는 "새 판단이 부모-off로 왜곡된 실적 데이터에 근거할 위험"을 막는 것(부모가 꺼져
+    트래픽이 없는데 그걸 키워드 자체 문제로 오판)이지만, resume_candidates는 **과거 정지 시점
+    이전(부모 상태와 무관한 실데이터) 실적을 근거로 우리 자신의 과거 판단을 되돌리는 것**이라
+    같은 왜곡 경로가 없다. 부모가 꺼진 채로 재개해도(userLock만 false로 복원) 키워드는 실제
+    노출되지 않으며(네이버는 부모 체인 전부 on이어야 서빙), 이는 낭비가 아니라 우리
+    키워드레벨 판단과 남의 부모레벨 운영 판단을 분리 보존하는 것 — 부모가 나중에 켜지면
+    자동으로 정상 서빙 재개(재차 개입 불요). 판단 재검토 필요 시 Jino 논의 대상.
+    """
+    off_entities = {
+        e.entity_id: e for e in
+        db.query(NaverEntity).filter(NaverEntity.entity_type == "keyword", NaverEntity.status == "off").all()
+    }
+    if not off_entities:
+        return []
+    off_ids = set(off_entities)
+
+    # 실제 성공한 쓰기 판별은 outcome이 아니라 after_value 존재 여부로 한다(X1b T5 배선확인,
+    # Claude 적대적 리뷰 발견 — outcome은 이제 D+14 채점 전엔 NULL이고 채점 후엔
+    # improved/declined/neutral로 바뀌므로 "executed" 영구 상태가 아니다. naver_execution_harness
+    # 주석 참조).
+    lock_rows = (
+        db.query(
+            NaverChangeLog.entity_id, NaverChangeLog.campaign_id, NaverChangeLog.after_value,
+            NaverChangeLog.proposal_id, NaverChangeLog.changed_at,
+        )
+        .filter(
+            NaverChangeLog.entity_type == "keyword", NaverChangeLog.action == "set_user_lock",
+            NaverChangeLog.entity_id.in_(off_ids),
+            NaverChangeLog.dry_run.is_(False), NaverChangeLog.after_value.isnot(None),
+        )
+        .order_by(NaverChangeLog.changed_at.asc())
+        .all()
+    )
+    latest_lock_change: dict[str, tuple] = {}
+    for entity_id, campaign_id, after_value, proposal_id, changed_at in lock_rows:
+        latest_lock_change[entity_id] = (campaign_id, after_value, proposal_id, changed_at)  # asc 정렬 — 뒤에 올수록 최신
+
+    out = []
+    for keyword_id, (campaign_id, after_value, proposal_id, paused_at) in latest_lock_change.items():
+        if proposal_id is None:
+            continue  # 최신 잠금변경이 우리 실행이 아님(수동 정지)
+        try:
+            after = json.loads(after_value) if after_value else None
+        except (ValueError, TypeError):
+            after = None
+        if not isinstance(after, dict) or after.get("userLock") is not True:
+            continue  # 방향 판별 불가(fail-closed) 또는 최신 잠금변경이 정지가 아님(재개로 끝남)
+        pause_date = paused_at.date()
+        window_to = pause_date - timedelta(days=1)
+        window_from = window_to - timedelta(days=LOW_CLICK_LOOKBACK_DAYS - 1)
+        agg = keyword_window_agg(db, keyword_id, window_from, window_to)
+        if agg["cost"] == 0:
+            continue  # 정지 직전 창에 실적 자체가 없음 — 판정 불가
+        roas_naver = float(Decimal(agg["conv_amt"]) / Decimal(agg["cost"]))
+        roas_c = _corrected_roas(roas_naver, correction_factor)
+        target_roas = target_roas_resolver(campaign_id)
+        if roas_c is not None and roas_c >= float(target_roas):
+            out.append({
+                "campaign_id": campaign_id, "adgroup_id": off_entities[keyword_id].parent_id,
+                "keyword_id": keyword_id, "roas_at_pause": roas_c, "paused_at": paused_at.isoformat(),
+            })
+    out.sort(key=lambda x: x["roas_at_pause"], reverse=True)
+    return out

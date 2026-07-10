@@ -1618,6 +1618,8 @@ class NaverProposal(Base):
     slack_ts: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
     executed_change_log_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     approval_source: Mapped[Optional[str]] = mapped_column(String(12), nullable=True)  # X1a T5: console/delegation
+    target_bid: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # X1b: bid_up/bid_down/growth_bid_up의 목표 입찰가(원) — 실행자는 이 컬럼만 읽는다(rationale 텍스트 파싱 금지)
+    target_lock: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)  # X1b: pause/resume 제안의 목표 userLock(true=정지, false=재개)
 
 
 class NaverKeywordCandidate(Base):

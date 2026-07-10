@@ -14,6 +14,8 @@ from app.services.naver_ad.trigger_watch import PROPOSAL_TYPE_CPC, PROPOSAL_TYPE
 
 _NEGATIVE = "negative_keyword"
 _GROWTH_BID_UP = "growth_bid_up"
+_PAUSE = "pause"  # X1b T3, D-NAO-38 — 정지(target_lock=True)
+_RESUME = "resume"  # X1b T3, D-NAO-38 — 재개(target_lock=False)
 _BUDGET_UP = "budget_up"
 _BUDGET_PRE_EXHAUSTION = "budget_pre_exhaustion"
 _ANOMALY = "anomaly"
@@ -121,6 +123,9 @@ def _bid_proposal(
         "rationale": rationale,
         "expected_effect": sim["expected_effect_text"],
         "status": "pending",
+        # X1b T3(D-NAO-38 갭①): 추천입찰가를 구조화 컬럼에 저장 — 실행자는 이 필드만 읽는다
+        # (rationale 텍스트 파싱 금지). negative_keyword 격상 시엔 입찰 목표가 없어 None.
+        "target_bid": sim["recommended_bid"] if proposal_type != _NEGATIVE else None,
     }
 
 
@@ -158,6 +163,7 @@ def _growth_proposal(
         "rationale": rationale,
         "expected_effect": sim["expected_effect_text"],
         "status": "pending",
+        "target_bid": sim["recommended_bid"],  # X1b T3(D-NAO-38 갭①) — 구조화 저장
     }
 
 
@@ -179,6 +185,50 @@ def _negative_keyword_from_exclusion(row: dict, campaign_id: str) -> dict:
             f"cost={row.get('cost')}원, clk={row.get('clk')}, imp={row.get('imp')}."
         ),
         "expected_effect": "전환 데이터 없음 — 제외 시 비용 절감 추정만 가능(정밀 예측 불가).",
+        "status": "pending",
+    }
+
+
+def _pause_proposal(row: dict) -> dict:
+    """pause_candidates 보드 1행(account_diagnosis) → pause 제안(X1b T3, D-NAO-38).
+
+    D-NAO-20 스톱로스 절대액(현재입찰×LOW_CLICK_THRESHOLD) 도달 — 무전환 지출 중단이
+    목적이라 target_roas 근거 병기가 불필요(스톱로스는 손익 목표와 무관한 절대액 안전핀)."""
+    return {
+        "proposal_type": _PAUSE,
+        "target_type": "keyword",
+        "target_id": row["keyword_id"],
+        "campaign_id": row["campaign_id"],
+        "adgroup_id": row["adgroup_id"],
+        "target_lock": True,
+        "rationale": (
+            f"[pause_candidates] 무전환 누적비용 {row['cost']}원 ≥ 스톱로스 {row['stop_loss_amount']}원"
+            f"(현재입찰={row['current_bid']}원, D-NAO-20) clk={row.get('clk')}."
+        ),
+        "expected_effect": "무전환 지출 중단 — 추가 비용 발생 차단(D-NAO-16 정지).",
+        "status": "pending",
+    }
+
+
+def _resume_proposal(row: dict, target_label: dict) -> dict:
+    """resume_candidates 보드 1행 → resume 제안(X1b T3, D-NAO-38).
+
+    정지 직전 창의 보정ROAS가 현재 목표(target_roas) 이상으로 회복 — D-NAO-16 "정지 사유
+    해소"(BEP 개선) 신호. 우리 시스템이 정지시킨 키워드만 대상(account_diagnosis.
+    resume_candidates가 proposal_id 없는 수동 정지를 이미 제외)."""
+    return {
+        "proposal_type": _RESUME,
+        "target_type": "keyword",
+        "target_id": row["keyword_id"],
+        "campaign_id": row["campaign_id"],
+        "adgroup_id": row["adgroup_id"],
+        "target_lock": False,
+        "rationale": (
+            f"[resume_candidates] 정지({row['paused_at']}) 직전 보정ROAS {row['roas_at_pause']}"
+            f"(현재 목표={target_label.get('target_roas')}, 근거={target_label.get('source')}) "
+            f"— BEP 개선 신호(D-NAO-16)."
+        ),
+        "expected_effect": "정지 해제 — 재노출 재개.",
         "status": "pending",
     }
 
@@ -298,6 +348,8 @@ def build(
       예측 없음(fallback/미가동)이라 병기하지 않는다(정직 경계).
     anomalies: anomaly_feed 신호(경량, Phase3) — {"freshness": {...}|None, "spend": [...]}.
       진단 성격(D-3, 사실 정리)이라 optimizer 무관 전 캠페인 대상(diagnosis 보드와 동일 취급).
+    diagnosis["boards"]의 pause_candidates/resume_candidates(X1b T3, D-NAO-38)는 실행형
+      제안이라 ours 필터 적용(D-NAO-13) — 다른 진단 보드처럼 optimizer 무관이 아니다.
     optimizer='ours' 캠페인만 대상(D-NAO-13) — 그 외(none/mop)는 진단엔 나와도 제안 없음.
     """
     bid_sims = bid_sims or {}
@@ -354,6 +406,20 @@ def build(
         if cid not in ours:
             continue
         proposals.append(_negative_keyword_from_exclusion(row, cid))
+
+    # pause_candidates/resume_candidates(X1b T3, D-NAO-38): D-NAO-13 ours 필터 동일 적용
+    # (실행 대상 액션이라 진단 보드와 달리 optimizer 무관 전 캠페인 대상이 아님).
+    for row in boards.get("pause_candidates", []) or []:
+        cid = row["campaign_id"]
+        if cid not in ours:
+            continue
+        proposals.append(_pause_proposal(row))
+
+    for row in boards.get("resume_candidates", []) or []:
+        cid = row["campaign_id"]
+        if cid not in ours:
+            continue
+        proposals.append(_resume_proposal(row, labels.get(cid)))
 
     # growth_sweeper(D-NAO-22-①): 후보는 이미 gap 내림차순(find_growth_candidates) — 상위부터
     # 채택해 GROWTH_PROPOSAL_CAP에서 멈춘다(탐색 예산 총액 캡의 count 기반 대체, growth_sweeper

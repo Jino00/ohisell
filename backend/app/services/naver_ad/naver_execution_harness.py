@@ -11,6 +11,11 @@
 #
 #   X1a T4(콘솔 승인 버튼+실행 라우터): `real_write_blocker()`가 실행 가능 여부 판정을
 #   naver_ad.py 라우터에 공개한다(D-NAO-5 반자동 게이트 UI 노출).
+#
+#   X1b T4(D-NAO-16 2·3단계): 정지·재개(set_user_lock)·입찰(update_bid) 개방. 실쓰기 직전
+#   guardrail_gate.check()(±15%·쿨다운·일일상한·스톱로스·BEP증액금지·클램프·일예산)를
+#   반드시 통과해야 하는 새 단계가 실행 순서(§4)에 추가된다. MOP 충돌 감지(D-NAO-13)도
+#   여기서 배선 — 우리 마지막 기록과 방금 재조회한 라이브 값이 다르면 경고(차단 아님).
 from __future__ import annotations
 
 import json
@@ -19,8 +24,9 @@ from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session
 
-from app.models import NaverCampaignSettings, NaverChangeLog, NaverProposal
-from app.services.naver_ad import naver_sa_writer
+from app.models import NaverCampaignSettings, NaverChangeLog, NaverEntity, NaverHourlySnapshot, NaverProposal
+from app.services.naver_ad import account_diagnosis, campaign_target_resolver, guardrail_gate, naver_sa_writer
+from app.services.naver_ad.diagnosis import correction_factor as compute_correction_factor
 from app.utils.kst import kst_now
 
 log = logging.getLogger(__name__)
@@ -28,6 +34,10 @@ log = logging.getLogger(__name__)
 # D+14 검증 예정일(D-NAO-14 "D+7/14 실측" · proposal_pipeline._PROPOSAL_EXPIRY_DAYS와 동일
 # 하한 채택) — proposal_scoreboard(Phase 6 루프1)가 이 날짜 이후 실측 대조를 수행한다.
 VERIFY_DAYS = 14
+
+# guardrail_gate 컨텍스트의 실적 창(account_diagnosis.LOW_CLICK_LOOKBACK_DAYS 재사용 —
+# 신규 상수 아님, pause_candidates/resume_candidates와 동일 창으로 정합성 유지).
+_GUARDRAIL_LOOKBACK_DAYS = account_diagnosis.LOW_CLICK_LOOKBACK_DAYS
 
 
 class OptimizerGuardError(Exception):
@@ -71,36 +81,182 @@ class MissingExecutionTargetError(Exception):
 
 # 제안유형 → 실행 액션 매핑. anomaly/anomaly_freshness/account_brief/trigger_pacing/
 # trigger_cpc_spike는 의도적으로 매핑에 없음(정보성, 실행 불가 — ActionNotExecutableError).
+# pause/resume(X1b T3, D-NAO-38)은 둘 다 naver_sa_writer.set_keyword_lock 하나로 실행되므로
+# 액션명을 공유(target_lock 값으로 방향 구분 — guardrail_gate가 이미 이 값으로 방향검증).
 _ACTION_BY_PROPOSAL_TYPE = {
     "negative_keyword": "add_negative_keyword",
     "bid_up": "update_bid",
     "bid_down": "update_bid",
     "growth_bid_up": "update_bid",
+    "pause": "set_user_lock",
+    "resume": "set_user_lock",
     "budget_up": "update_budget",
 }
 
 # D-NAO-16 개방 순서(제외키워드→정지·재개→입찰→예산)의 실제 스위치. 코드 배포로만 변경
-# (런타임/UI 토글 없음). X1a T3: 1단계 제외키워드만 개방 — ref 27 정찰 + naver_sa_writer(T2)
-# 구현 완료가 전제조건이었다. 나머지는 X1b 이후(순서 임의 변경 금지, D-NAO-34).
-OPEN_ACTIONS: frozenset[str] = frozenset({"add_negative_keyword"})
+# (런타임/UI 토글 없음). X1a T3: 1단계 제외키워드 개방. X1b T4: 2·3단계(정지·재개→입찰)
+# 개방 — ref 27 정찰 + naver_sa_writer(T1)·guardrail_gate(T2) 구현 완료가 전제조건이었다.
+# 예산은 여전히 스코프 밖(D-NAO-34 금지선, 영구 Confirm).
+OPEN_ACTIONS: frozenset[str] = frozenset({"add_negative_keyword", "update_bid", "set_user_lock"})
 
 
-def _guard_failure(db: Session, proposal: NaverProposal, now: datetime, reason: str) -> None:
+def _guard_failure(db: Session, proposal: NaverProposal, now: datetime, action: str, reason: str) -> None:
     """사전 가드 실패 처리(codex P1) — 운영자 관점에선 시도다: 전건 기록(D-NAO-12) + 영구
     결함(제안 데이터가 재승인으로 바뀌지 않음)이라 failed로 종결해 재승인 루프를 막는다.
     writer는 호출하지 않는다(실제 API 시도 없음 — change_log에는 [실행 불가]로 구분 기록)."""
     proposal.status = "failed"
     entry = NaverChangeLog(
         entity_type=proposal.target_type, entity_id=proposal.target_id,
-        campaign_id=proposal.campaign_id, action="add_negative_keyword",
+        campaign_id=proposal.campaign_id, action=action,
         rationale=f"{proposal.rationale or ''} [실행 불가] {reason}",
         predicted_json=proposal.expected_effect, proposal_id=proposal.id,
-        dry_run=False, outcome="failed", executed_at=now,
+        dry_run=False, outcome="failed", changed_at=now, executed_at=now,
     )
     db.add(entry)
     db.commit()
     log.error("naver_execution_harness: proposal_id=%s 실쓰기 불가(fail-closed) — %s",
               proposal.id, reason)
+
+
+def _claim_executing(db: Session, proposal: NaverProposal) -> None:
+    """내구 클레임(codex P1) — 조건부 UPDATE로 원자화(codex R2 P1): ORM 인스턴스 대입만으로는
+    두 세션이 동시에 approved를 읽었을 때 둘 다 클레임 가능(check-then-set TOCTOU).
+    UPDATE ... WHERE status='approved' AND executed_change_log_id IS NULL은 DB가 직렬화해
+    정확히 한쪽만 1행 성공 — 콘솔 라우터(사람 클릭)·X2 flight_loop 크론의 다중 진입 대비.
+    이 시점 이후 크래시해도 'executing'이 남아 approved 게이트가 재진입을 차단한다.
+    실행자 3개(add_negative_keyword/update_bid/set_user_lock)가 동일 로직을 공유한다."""
+    claimed = db.query(NaverProposal).filter(
+        NaverProposal.id == proposal.id,
+        NaverProposal.status == "approved",
+        NaverProposal.executed_change_log_id.is_(None),
+    ).update({"status": "executing"}, synchronize_session=False)
+    db.commit()
+    if claimed != 1:
+        raise AlreadyExecutedError(
+            f"proposal_id={proposal.id} 클레임 실패 — 다른 실행자가 선점(동시 실행 차단)"
+        )
+    db.refresh(proposal)
+
+
+def _detect_external_change(db: Session, proposal: NaverProposal, live_before: dict, field: str) -> str | None:
+    """MOP 충돌 감지(D-NAO-13, X1b T4 배선) — 우리의 마지막 성공 기록(change_log.after_value)과
+    방금 재조회한 라이브 값이 다르면 그 사이 외부(MOP 등)가 바꿨다는 신호. 차단하지 않고
+    경고만 반환(원문: "외부 변경 감지 시 경고") — 호출자가 rationale에 부착해 change_log에
+    남긴다. field: 비교할 키('bidAmt' 또는 'userLock').
+
+    "우리 마지막 성공" 판별은 outcome이 아니라 after_value 존재 여부로 한다 — outcome은
+    이제 D+14 채점 전엔 NULL이고(proposal_scoreboard 배선, 위 executor 주석 참조) 채점
+    후엔 improved/declined/neutral로 바뀌므로 "executed"라는 영구 상태가 아니다.
+    dry_run=False + after_value가 있는 행만 실제 성공한 쓰기다(실패·가드거부 행은
+    before/after_value를 안 채움, dry-run도 마찬가지)."""
+    last = (
+        db.query(NaverChangeLog)
+        .filter(
+            NaverChangeLog.entity_type == proposal.target_type,
+            NaverChangeLog.entity_id == proposal.target_id,
+            NaverChangeLog.dry_run.is_(False), NaverChangeLog.after_value.isnot(None),
+        )
+        .order_by(NaverChangeLog.executed_at.desc())
+        .first()
+    )
+    if last is None or not last.after_value:
+        return None
+    try:
+        last_after = json.loads(last.after_value)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(last_after, dict):
+        return None
+    prior_value = last_after.get(field)
+    live_value = live_before.get(field)
+    if prior_value is not None and live_value is not None and prior_value != live_value:
+        return (
+            f"⚠️외부 변경 감지(D-NAO-13) — 우리 마지막 기록 {field}={prior_value}, "
+            f"현재 라이브 {field}={live_value}(MOP가 아직 켜져있을 수 있음)"
+        )
+    return None
+
+
+def _build_guardrail_context(db: Session, proposal: NaverProposal, now: datetime) -> dict:
+    """guardrail_gate.check()에 넘길 라이브 상태 precompute (X1b T4). keyword 대상만 지원 —
+    target_type이 keyword가 아니면 전부 None(guardrail_gate가 fail-closed로 차단).
+
+    재조회 실패·데이터 부재는 전부 None으로 남긴다(추정으로 채우지 않음 — guardrail_gate가
+    None 필드를 만나면 검증불가로 차단하는 것이 기존 계약, T2 참조).
+    current_bid: 라이브 재조회(naver_sa_writer.get_keyword) — writer 자체의 before 재조회와
+      별개(가드 판정 시점과 실쓰기 시점 값이 다를 수 있어 각자 재조회, writer의 after 검증이
+      최종 안전망). roas_corrected/unconverted_spend: account_diagnosis.keyword_window_agg
+      재사용(30일 창, as_of=어제 — naver_ad_daily는 D-1까지만 확정) + diagnosis.correction_factor
+      (D-NAO-21, 진단과 동일 산식). cost_today/daily_budget: NaverHourlySnapshot 당일 최신
+      스냅샷(캠페인 단위, budget_allocator와 동일 소스). last_change_at/changes_today_count:
+      naver_change_log 이력(entity_id 기준, 액션 유형 무관 — 정지 다음 곧바로 입찰 변경하는
+      것도 동일 쿨다운·상한 대상으로 본다).
+    """
+    context: dict = {
+        "current_bid": None, "roas_corrected": None, "target_roas": None,
+        "cost_today": None, "daily_budget": None, "unconverted_spend": None,
+        "last_change_at": None, "changes_today_count": 0,
+    }
+    if proposal.target_type != "keyword":
+        return context
+
+    try:
+        live = naver_sa_writer.get_keyword(proposal.target_id)
+        context["current_bid"] = live.get("bidAmt")
+    except Exception as e:  # noqa: BLE001 — 재조회 실패는 fail-closed(current_bid=None 유지)
+        log.warning(
+            "naver_execution_harness: guardrail context get_keyword 실패(fail-closed) "
+            "target_id=%s: %s", proposal.target_id, e,
+        )
+
+    as_of = now.date() - timedelta(days=1)  # naver_ad_daily는 D-1까지만 확정
+    window_from = as_of - timedelta(days=_GUARDRAIL_LOOKBACK_DAYS - 1)
+    agg = account_diagnosis.keyword_window_agg(db, proposal.target_id, window_from, as_of)
+    if agg["cost"] > 0:
+        correction = compute_correction_factor(db, as_of)
+        roas_naver = agg["conv_amt"] / agg["cost"]
+        context["roas_corrected"] = roas_naver * float(correction["factor"])
+        context["unconverted_spend"] = agg["cost"] if agg["conv_amt"] == 0 else 0
+
+    resolved = campaign_target_resolver.resolve_target_roas(db, proposal.campaign_id)
+    target_roas = resolved["target_roas"]
+    if target_roas is None:
+        target_roas = campaign_target_resolver.account_default_target_roas(db)
+    context["target_roas"] = float(target_roas) if target_roas is not None else None
+
+    latest_snapshot = (
+        db.query(NaverHourlySnapshot)
+        .filter(
+            NaverHourlySnapshot.campaign_id == proposal.campaign_id,
+            NaverHourlySnapshot.ad_date == now.date(),
+        )
+        .order_by(NaverHourlySnapshot.snapshot_hour.desc())
+        .first()
+    )
+    if latest_snapshot is not None:
+        context["cost_today"] = latest_snapshot.cost
+        context["daily_budget"] = latest_snapshot.daily_budget
+
+    # codex[P2]: dry-run·실패(outcome='failed', _guard_failure 포함) 행은 네이버 상태를
+    # 바꾸지 않았다 — 그런데도 쿨다운·일일상한에 포함시키면 실제로는 아무 일도 안 일어났는데
+    # 다음 실행이 차단된다. 실제 쓰기가 확정된 행만 센다 — outcome이 아니라 after_value
+    # 존재 여부로 판별(outcome은 D+14 채점 전 NULL, "executed" 영구 상태 아님 — 위
+    # _execute_add_negative_keyword 주석 참조).
+    change_rows = (
+        db.query(NaverChangeLog.changed_at)
+        .filter(
+            NaverChangeLog.entity_type == proposal.target_type,
+            NaverChangeLog.entity_id == proposal.target_id,
+            NaverChangeLog.dry_run.is_(False), NaverChangeLog.after_value.isnot(None),
+        )
+        .all()
+    )
+    if change_rows:
+        context["last_change_at"] = max(r[0] for r in change_rows)
+        today_start = datetime.combine(now.date(), datetime.min.time())
+        context["changes_today_count"] = sum(1 for r in change_rows if r[0] >= today_start)
+
+    return context
 
 
 def _execute_add_negative_keyword(db: Session, proposal: NaverProposal, now: datetime) -> NaverChangeLog:
@@ -126,7 +282,7 @@ def _execute_add_negative_keyword(db: Session, proposal: NaverProposal, now: dat
             f"nkw-… ID라서 그대로 등록하면 무의미한 문자열이 제외키워드로 등록됨(fail-closed) "
             f"— search_term 제안만 실행 가능"
         )
-        _guard_failure(db, proposal, now, reason)
+        _guard_failure(db, proposal, now, "add_negative_keyword", reason)
         raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
 
     if not proposal.adgroup_id:
@@ -134,25 +290,10 @@ def _execute_add_negative_keyword(db: Session, proposal: NaverProposal, now: dat
             "adgroup_id 없음 — restricted-keywords API는 adgroupId 필수(ref 27 §8-1). "
             "구 제안이거나 격상 경로 제안 — 재생성 필요"
         )
-        _guard_failure(db, proposal, now, reason)
+        _guard_failure(db, proposal, now, "add_negative_keyword", reason)
         raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
 
-    # 내구 클레임(codex P1) — 조건부 UPDATE로 원자화(codex R2 P1): ORM 인스턴스 대입만으로는
-    # 두 세션이 동시에 approved를 읽었을 때 둘 다 클레임 가능(check-then-set TOCTOU).
-    # UPDATE ... WHERE status='approved' AND executed_change_log_id IS NULL은 DB가 직렬화해
-    # 정확히 한쪽만 1행 성공 — T4 콘솔 라우터(사람 클릭)·X2 flight_loop 크론의 다중 진입 대비.
-    # 이 시점 이후 크래시해도 'executing'이 남아 approved 게이트가 재진입을 차단한다.
-    claimed = db.query(NaverProposal).filter(
-        NaverProposal.id == proposal.id,
-        NaverProposal.status == "approved",
-        NaverProposal.executed_change_log_id.is_(None),
-    ).update({"status": "executing"}, synchronize_session=False)
-    db.commit()
-    if claimed != 1:
-        raise AlreadyExecutedError(
-            f"proposal_id={proposal.id} 클레임 실패 — 다른 실행자가 선점(동시 실행 차단)"
-        )
-    db.refresh(proposal)
+    _claim_executing(db, proposal)
 
     try:
         result = naver_sa_writer.add_restricted_keywords(proposal.adgroup_id, [proposal.target_id])
@@ -165,7 +306,7 @@ def _execute_add_negative_keyword(db: Session, proposal: NaverProposal, now: dat
                 f"{proposal.rationale or ''} [실행 실패] {type(exc).__name__}: {str(exc)[:300]}"
             ),
             predicted_json=proposal.expected_effect, proposal_id=proposal.id,
-            dry_run=False, outcome="failed", executed_at=now,
+            dry_run=False, outcome="failed", changed_at=now, executed_at=now,
             # before_value: writer 예외는 before 스냅샷을 실어주지 않아 확보 불가 — 정직하게 None.
             # executed_change_log_id는 연결하지 않음(성공 전용). verify_date 없음(검증 대상 부재).
         )
@@ -177,16 +318,23 @@ def _execute_add_negative_keyword(db: Session, proposal: NaverProposal, now: dat
         )
         raise
 
+    # codex[P2, T5 배선확인, Claude 적대적 리뷰 — codex 한도 소진 대체]: outcome은 여기서
+    # "executed"로 채우지 않는다(X1a T3 원안 결함, 지금 발견·수정) — proposal_scoreboard.
+    # run_daily()가 "실행됐지만 아직 미검증"을 outcome IS NULL로 식별한다(Phase 6 설계
+    # 원안·test_naver_proposal_scoreboard.py의 _change() 기본값이 이미 그렇게 되어 있었음).
+    # 여기서 outcome="executed"를 즉시 박으면 그 필터에 영원히 안 걸려 D+14 채점이 전혀
+    # 안 도는 상태였다(D-NAO-14 학습루프 핵심 기능 무력화). 실제 성공 여부는 after_value가
+    # 채워졌는지로 판별한다(_detect_external_change·guardrail 쿨다운·resume_candidates 참조).
     log_entry = NaverChangeLog(
         entity_type=proposal.target_type, entity_id=proposal.target_id,
         campaign_id=proposal.campaign_id, action="add_negative_keyword",
         rationale=proposal.rationale, predicted_json=proposal.expected_effect,
-        proposal_id=proposal.id, dry_run=False, outcome="executed",
+        proposal_id=proposal.id, dry_run=False,
         before_value=json.dumps(result.before, ensure_ascii=False),
         after_value=json.dumps(
             {"after": result.after, "created_ids": result.created_ids}, ensure_ascii=False
         ),
-        executed_at=now, verify_date=(now + timedelta(days=VERIFY_DAYS)).date(),
+        changed_at=now, executed_at=now, verify_date=(now + timedelta(days=VERIFY_DAYS)).date(),
     )
     db.add(log_entry)
     db.flush()
@@ -201,9 +349,173 @@ def _execute_add_negative_keyword(db: Session, proposal: NaverProposal, now: dat
     return log_entry
 
 
+def _execute_update_bid(db: Session, proposal: NaverProposal, now: datetime) -> NaverChangeLog:
+    """입찰가 실쓰기 1건 (X1b T4, D-NAO-16 3단계). bid_up/bid_down/growth_bid_up 공용 —
+    target_bid 컬럼(X1b T3, proposal_writer가 구조화 저장)을 그대로 쓴다(rationale 텍스트
+    파싱 금지). guardrail_gate.check()가 실행 직전 최종 관문(§4 실행 순서의 "가드레일" 단계).
+
+    구조 결함(target_type≠'keyword'·target_bid 없음)·가드레일 위반은 전부 _guard_failure로
+    failed 종결(재승인 루프 방지, _execute_add_negative_keyword와 동일 원칙). **adgroup 단위
+    입찰(bidAmt PUT on adgroup, ref 27 §4)은 미구현** — shopping_group_bep 보드가 만드는
+    target_type='adgroup' 제안은 이 가드에서 걸린다(정직 경계, §8 승계 큐 후보).
+    """
+    if proposal.target_type != "keyword":
+        reason = (
+            f"target_type={proposal.target_type!r} — 키워드 단위 입찰만 구현됨(adgroup 단위 "
+            "bidAmt PUT은 미구현, ref 27 §4 — shopping_group_bep 제안 실행 불가, 정직 경계)"
+        )
+        _guard_failure(db, proposal, now, "update_bid", reason)
+        raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
+
+    if proposal.target_bid is None:
+        reason = "target_bid 없음 — 구조 결함(구 제안이거나 격상 경로, 재생성 필요)"
+        _guard_failure(db, proposal, now, "update_bid", reason)
+        raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
+
+    context = _build_guardrail_context(db, proposal, now)
+    gate_proposal = {
+        "proposal_type": proposal.proposal_type, "target_bid": proposal.target_bid, "target_lock": None,
+    }
+    block_reason = guardrail_gate.check(gate_proposal, context, now=now)
+    if block_reason is not None:
+        reason = f"가드레일 차단 — {block_reason}"
+        _guard_failure(db, proposal, now, "update_bid", reason)
+        raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
+
+    _claim_executing(db, proposal)
+
+    try:
+        result = naver_sa_writer.update_keyword_bid(proposal.target_id, proposal.target_bid)
+    except Exception as exc:  # WriteValidationError/WriteError/WriteVerificationError + requests 계열
+        proposal.status = "failed"  # 자동 재시도 차단(approved 게이트) — 재승인만 재시도 경로
+        fail_entry = NaverChangeLog(
+            entity_type=proposal.target_type, entity_id=proposal.target_id,
+            campaign_id=proposal.campaign_id, action="update_bid",
+            rationale=(
+                f"{proposal.rationale or ''} [실행 실패] {type(exc).__name__}: {str(exc)[:300]}"
+            ),
+            predicted_json=proposal.expected_effect, proposal_id=proposal.id,
+            dry_run=False, outcome="failed", changed_at=now, executed_at=now,
+        )
+        db.add(fail_entry)
+        db.commit()
+        log.error(
+            "naver_execution_harness: 실쓰기 실패 proposal_id=%s keyword=%s target_bid=%s — %s: %s",
+            proposal.id, proposal.target_id, proposal.target_bid, type(exc).__name__, exc,
+        )
+        raise
+
+    conflict_warning = _detect_external_change(db, proposal, result.before, "bidAmt")
+    rationale = f"{proposal.rationale or ''} {conflict_warning}" if conflict_warning else proposal.rationale
+
+    # outcome 미기록 — proposal_scoreboard.run_daily()가 D+14까지 IS NULL로 식별(위
+    # _execute_add_negative_keyword 주석 참조).
+    log_entry = NaverChangeLog(
+        entity_type=proposal.target_type, entity_id=proposal.target_id,
+        campaign_id=proposal.campaign_id, action="update_bid",
+        rationale=rationale, predicted_json=proposal.expected_effect,
+        proposal_id=proposal.id, dry_run=False,
+        before_value=json.dumps(result.before, ensure_ascii=False),
+        after_value=json.dumps(result.after, ensure_ascii=False),
+        changed_at=now, executed_at=now, verify_date=(now + timedelta(days=VERIFY_DAYS)).date(),
+    )
+    db.add(log_entry)
+    db.flush()
+    proposal.executed_change_log_id = log_entry.id
+    proposal.status = "approved"
+    db.commit()
+
+    log.info(
+        "naver_execution_harness: 실쓰기 성공 proposal_id=%s keyword=%s target_bid=%s",
+        proposal.id, proposal.target_id, proposal.target_bid,
+    )
+    return log_entry
+
+
+def _execute_set_user_lock(db: Session, proposal: NaverProposal, now: datetime) -> NaverChangeLog:
+    """정지·재개 실쓰기 1건 (X1b T4, D-NAO-16 2단계). pause/resume 공용 — target_lock 컬럼
+    (X1b T3)을 그대로 쓴다. guardrail_gate가 방향 일치(pause→true/resume→false, T2 codex
+    반영분)까지 재검증한다."""
+    if proposal.target_type != "keyword":
+        reason = (
+            f"target_type={proposal.target_type!r} — 키워드 단위 정지·재개만 구현됨"
+            "(광고그룹·캠페인 단위 userLock은 미구현, 정직 경계)"
+        )
+        _guard_failure(db, proposal, now, "set_user_lock", reason)
+        raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
+
+    if proposal.target_lock is None:
+        reason = "target_lock 없음 — 구조 결함(구 제안, 재생성 필요)"
+        _guard_failure(db, proposal, now, "set_user_lock", reason)
+        raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
+
+    context = _build_guardrail_context(db, proposal, now)
+    gate_proposal = {
+        "proposal_type": proposal.proposal_type, "target_bid": None, "target_lock": proposal.target_lock,
+    }
+    block_reason = guardrail_gate.check(gate_proposal, context, now=now)
+    if block_reason is not None:
+        reason = f"가드레일 차단 — {block_reason}"
+        _guard_failure(db, proposal, now, "set_user_lock", reason)
+        raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
+
+    _claim_executing(db, proposal)
+
+    try:
+        result = naver_sa_writer.set_keyword_lock(proposal.target_id, proposal.target_lock)
+    except Exception as exc:
+        proposal.status = "failed"
+        fail_entry = NaverChangeLog(
+            entity_type=proposal.target_type, entity_id=proposal.target_id,
+            campaign_id=proposal.campaign_id, action="set_user_lock",
+            rationale=(
+                f"{proposal.rationale or ''} [실행 실패] {type(exc).__name__}: {str(exc)[:300]}"
+            ),
+            predicted_json=proposal.expected_effect, proposal_id=proposal.id,
+            dry_run=False, outcome="failed", changed_at=now, executed_at=now,
+        )
+        db.add(fail_entry)
+        db.commit()
+        log.error(
+            "naver_execution_harness: 실쓰기 실패 proposal_id=%s keyword=%s target_lock=%s — %s: %s",
+            proposal.id, proposal.target_id, proposal.target_lock, type(exc).__name__, exc,
+        )
+        raise
+
+    conflict_warning = _detect_external_change(db, proposal, result.before, "userLock")
+    rationale = f"{proposal.rationale or ''} {conflict_warning}" if conflict_warning else proposal.rationale
+
+    # outcome 미기록 — proposal_scoreboard.run_daily()가 D+14까지 IS NULL로 식별(위
+    # _execute_add_negative_keyword 주석 참조).
+    log_entry = NaverChangeLog(
+        entity_type=proposal.target_type, entity_id=proposal.target_id,
+        campaign_id=proposal.campaign_id, action="set_user_lock",
+        rationale=rationale, predicted_json=proposal.expected_effect,
+        proposal_id=proposal.id, dry_run=False,
+        before_value=json.dumps(result.before, ensure_ascii=False),
+        after_value=json.dumps(result.after, ensure_ascii=False),
+        changed_at=now, executed_at=now, verify_date=(now + timedelta(days=VERIFY_DAYS)).date(),
+    )
+    db.add(log_entry)
+    db.flush()
+    proposal.executed_change_log_id = log_entry.id
+    proposal.status = "approved"
+    db.commit()
+
+    log.info(
+        "naver_execution_harness: 실쓰기 성공 proposal_id=%s keyword=%s target_lock=%s",
+        proposal.id, proposal.target_id, proposal.target_lock,
+    )
+    return log_entry
+
+
 # 실쓰기 디스패치 테이블 — OPEN_ACTIONS와 별도(이중 방벽): OPEN_ACTIONS에 있어도 여기 구현이
 # 없으면 WriteNotOpenedError(fail-closed). 액션 확장 시 두 곳을 모두 의도적으로 갱신해야 한다.
-_WRITE_EXECUTORS = {"add_negative_keyword": _execute_add_negative_keyword}
+_WRITE_EXECUTORS = {
+    "add_negative_keyword": _execute_add_negative_keyword,
+    "update_bid": _execute_update_bid,
+    "set_user_lock": _execute_set_user_lock,
+}
 
 
 def real_write_blocker(proposal: NaverProposal) -> str | None:
@@ -219,11 +531,18 @@ def real_write_blocker(proposal: NaverProposal) -> str | None:
     ③action=='add_negative_keyword'인데 target_type이 'search_term'이 아니거나
       adgroup_id가 없음 → restricted-keywords API 대상으로 부적합
       (`_execute_add_negative_keyword`의 MissingExecutionTargetError 가드와 동일 조건).
+    ④(X1b T4) action=='update_bid'인데 target_type이 'keyword'가 아니거나(adgroup 단위
+      bidAmt는 미구현, 정직 경계) target_bid가 없음 → 실행 대상 부적합.
+    ⑤(X1b T4) action=='set_user_lock'인데 target_type이 'keyword'가 아니거나 target_lock이
+      없음 → 실행 대상 부적합.
 
-    ⚠️ ③의 판정은 harness의 `_execute_add_negative_keyword` 내부 가드와 의도적으로
-    중복이다(이중 방벽 — 그 가드는 제거하지 않는다). 이 함수는 UI 표시(`executable`)용
-    전체 판정이고, `POST /proposals/{id}/execute`(naver_ad.py)의 사전 차단은 ①·②만
-    가로챈다 — ③(target_type/adgroup_id 구조 결함)은 harness에 그대로 넘겨
+    ⚠️ ③~⑤의 판정은 harness의 실행 함수 내부 가드와 의도적으로 중복이다(이중 방벽 — 그
+    가드는 제거하지 않는다). 이 함수는 UI 표시(`executable`)용 구조 판정만 하고,
+    guardrail_gate.check()(±15%·쿨다운·일일상한·스톱로스·BEP증액금지·일예산 — 라이브
+    재조회가 필요)는 **실행 시도 시점에만** 돈다 — 목록 조회마다 매번 네이버 API를 호출하면
+    콘솔 로딩이 승인된 제안 수만큼 API 콜을 유발하므로(비용·레이트리밋), 여기서는 하지
+    않는다(설계 결정, T4). `POST /proposals/{id}/execute`(naver_ad.py)의 사전 차단은
+    ①·②만 가로챈다 — ③~⑤(구조 결함)·가드레일 위반은 harness에 그대로 넘겨
     MissingExecutionTargetError→422+failed 감사 기록 경로를 타게 한다(라우터가 여기서
     선점하면 그 감사 기록이 안 남는다 — T4 설계, 라우터 docstring 참조).
     """
@@ -231,7 +550,7 @@ def real_write_blocker(proposal: NaverProposal) -> str | None:
     if action is None:
         return "정보성 제안 — 실행 대상 아님"
     if action not in OPEN_ACTIONS or action not in _WRITE_EXECUTORS:
-        return "액션 미개방(X1b 이후 개방 예정)"
+        return "액션 미개방(예산은 스코프 밖, D-NAO-34)"
     if action == "add_negative_keyword":
         if proposal.target_type != "search_term":
             return (
@@ -240,6 +559,21 @@ def real_write_blocker(proposal: NaverProposal) -> str | None:
             )
         if not proposal.adgroup_id:
             return "adgroup_id 없음 — 실행 대상 정보 부족(구 제안이거나 재생성 필요)"
+    elif action == "update_bid":
+        if proposal.target_type != "keyword":
+            return (
+                f"target_type={proposal.target_type!r} — 키워드 단위 입찰만 구현됨"
+                "(adgroup 단위 bidAmt는 미구현, 정직 경계)"
+            )
+        if proposal.target_bid is None:
+            return "target_bid 없음 — 실행 대상 정보 부족(구 제안이거나 재생성 필요)"
+    elif action == "set_user_lock":
+        if proposal.target_type != "keyword":
+            return (
+                f"target_type={proposal.target_type!r} — 키워드 단위 정지·재개만 구현됨(정직 경계)"
+            )
+        if proposal.target_lock is None:
+            return "target_lock 없음 — 실행 대상 정보 부족(구 제안, 재생성 필요)"
     return None
 
 
@@ -306,7 +640,7 @@ def execute(db: Session, proposal_id: int, *, dry_run: bool = True, now: datetim
         entity_type=proposal.target_type, entity_id=proposal.target_id,
         campaign_id=proposal.campaign_id, action=action,
         rationale=proposal.rationale, predicted_json=proposal.expected_effect,
-        proposal_id=proposal.id, dry_run=effective_dry_run, executed_at=now,
+        proposal_id=proposal.id, dry_run=effective_dry_run, changed_at=now, executed_at=now,
         verify_date=(now + timedelta(days=VERIFY_DAYS)).date(),
     )
     db.add(log_entry)

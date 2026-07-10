@@ -1,0 +1,161 @@
+# guardrail_gate.py — X1b T2 실행 직전 가드레일 순수 판정 SA (D-NAO-5/19/20, 계획서 §3 X1b).
+# 역할(SA): 제안(proposal) + harness가 precompute한 라이브 상태(context) → 통과(None) 또는
+#   사람이 읽을 차단사유(문자열). 부수효과 0(DB·API 접근 없음, bid_simulator와 동일 규율).
+#   SA간 직접 호출 금지(원칙18) — harness(T4)가 재조회·집계값을 이 함수에 넘겨준다.
+#
+#   §4 "실행은 항상: ... → OPEN_ACTIONS → 가드레일 → 쓰기 → 재조회 검증 → change_log" 순서의
+#   "가드레일" 단계 전체를 이 모듈이 담당한다. 클램프(70~100,000원·10원단위)는 naver_sa_writer
+#   에도 있지만(이중 방벽 — add_restricted_keywords/execution_harness 패턴과 동일), 실제
+#   API 호출 전에 여기서 먼저 걸러 무의미한 네트워크 호출을 막는다.
+from __future__ import annotations
+
+from datetime import datetime
+from decimal import Decimal
+
+from app.services.naver_ad import growth_sweeper
+
+# D-NAO-5: 회당 변경폭 상한(운영 키워드). D-NAO-20-③에 따라 신규/육성 트랙(growth_bid_up)은
+# 비적용 — 절대액 스톱로스가 실질 안전장치이므로 여기서는 변경폭 검사만 면제한다.
+_MAX_CHANGE_PCT = Decimal("0.15")
+_EXEMPT_FROM_CHANGE_PCT = frozenset({"growth_bid_up"})
+
+# D-NAO-19 "동일 키워드 재변경 최소 간격" — 정확한 시간 수치는 문서에 없음(추정 금지 원칙
+# 상 확인 안 됨으로 명시). trigger_watch.TRIGGER_COOLDOWN_HOURS(재알림 간격, MOP Pro 실측
+# "시간별·5회+" 근거)와 동일 값을 채택 — 근접한 목적의 기존 결정을 재사용한 것이지 새로
+# 추정한 수치가 아니다. Jino 확정 시 조정 가능한 튜닝 후보.
+_COOLDOWN_HOURS = 5
+
+# §4 "폭주 방지: 일일 변경 건수 상한" 신규 상수 — 문서에서 확인 안 됨(추정 금지 원칙 상
+# 정직 라벨), 보수적 기본값. 키워드/광고그룹/캠페인 단위로 harness가 집계해 전달한다.
+_MAX_DAILY_CHANGES = 3
+
+_MIN_BID = 70
+_MAX_BID = 100_000
+_BID_INCREMENT = 10
+
+_BID_UP_TYPES = frozenset({"bid_up", "growth_bid_up"})
+_BID_DOWN_TYPES = frozenset({"bid_down"})
+_BID_TYPES = _BID_UP_TYPES | _BID_DOWN_TYPES
+_LOCK_TYPES = frozenset({"pause", "resume"})
+
+
+def check(proposal: dict, context: dict, *, now: datetime) -> str | None:
+    """제안 1건의 실행 직전 가드레일 판정 — 통과 시 None, 차단 시 한국어 사유.
+
+    proposal: {"proposal_type", "target_bid", "target_lock"} — NaverProposal에서
+      harness가 추출한 부분집합(원본 ORM 객체가 아닌 값 전달 — SA는 DB를 모른다).
+    context: harness가 재조회·집계해 precompute한 라이브 상태.
+      {"current_bid": int|None(재조회된 현재 입찰가), "roas_corrected": float|None(D-NAO-21
+       보정ROAS), "target_roas": float|None(BEP×공격성), "cost_today": int|None(오늘 누적
+       소진), "daily_budget": int|None, "unconverted_spend": int|None(무전환 누적 지출,
+       스톱로스 원료), "last_change_at": datetime|None(이 대상의 마지막 change_log 시각,
+       proposal_type 무관), "changes_today_count": int(이 대상의 오늘 변경 건수)}.
+    now: kst_now() — harness가 한 번만 계산해 명시 전달(원칙: 자정 경계 레이스 방지,
+      F2b codex 수정과 동일 패턴).
+
+    판정 순서: ①쿨다운·일일상한(전 유형 공통, fail-open 아님 — 근거값 없으면 통과) →
+      ②유형별 검사(bid: 클램프→변경폭→[up만] 스톱로스→BEP→일예산 / lock: 구조 검증만).
+    """
+    proposal_type = proposal.get("proposal_type")
+    if proposal_type not in _BID_TYPES and proposal_type not in _LOCK_TYPES:
+        return f"guardrail_gate: 지원하지 않는 proposal_type={proposal_type!r}"
+
+    reason = _check_cooldown_and_cap(context, now)
+    if reason:
+        return reason
+
+    if proposal_type in _BID_TYPES:
+        return _check_bid(proposal, context, proposal_type)
+    return _check_lock(proposal, proposal_type)
+
+
+def _check_cooldown_and_cap(context: dict, now: datetime) -> str | None:
+    last_change_at = context.get("last_change_at")
+    if last_change_at is not None:
+        elapsed_hours = (now - last_change_at).total_seconds() / 3600
+        if elapsed_hours < _COOLDOWN_HOURS:
+            return (
+                f"쿨다운 중 — 마지막 변경 {elapsed_hours:.1f}시간 전"
+                f"(최소 {_COOLDOWN_HOURS}시간 필요, D-NAO-19)"
+            )
+
+    changes_today = context.get("changes_today_count", 0)
+    if changes_today >= _MAX_DAILY_CHANGES:
+        return f"일일 변경 건수 상한 도달({changes_today}/{_MAX_DAILY_CHANGES}건, 폭주 방지)"
+
+    return None
+
+
+def _check_bid(proposal: dict, context: dict, proposal_type: str) -> str | None:
+    target_bid = proposal.get("target_bid")
+    if target_bid is None:
+        return "target_bid 없음 — 구조 결함(재생성 필요)"
+    if not (_MIN_BID <= target_bid <= _MAX_BID) or target_bid % _BID_INCREMENT != 0:
+        return f"target_bid={target_bid}는 유효 범위 밖(70~100,000원, 10원 단위)"
+
+    current_bid = context.get("current_bid")
+    if current_bid is None:
+        return "current_bid 미확보 — 변경폭 검증 불가(fail-closed)"
+
+    # codex[P2]: 구조 결함/stale 행 방어 — proposal_type이 주장하는 방향과 실제
+    # target_bid의 방향이 어긋나면(예: bid_down인데 인상 방향) 절대변경폭 검사만으로는
+    # 통과할 수 있고, bid_down은 up 전용 검사(스톱로스·BEP·일예산)를 면제받으므로 그
+    # 방어망까지 우회한다. 방향 불일치는 magnitude 검사보다 먼저 fail-closed 차단.
+    if proposal_type in _BID_UP_TYPES and target_bid <= current_bid:
+        return f"방향 불일치 — {proposal_type}인데 target_bid={target_bid}가 현재={current_bid} 이하"
+    if proposal_type in _BID_DOWN_TYPES and target_bid >= current_bid:
+        return f"방향 불일치 — {proposal_type}인데 target_bid={target_bid}가 현재={current_bid} 이상"
+
+    if proposal_type not in _EXEMPT_FROM_CHANGE_PCT and current_bid > 0:
+        change_pct = abs(Decimal(target_bid) - Decimal(current_bid)) / Decimal(current_bid)
+        if change_pct > _MAX_CHANGE_PCT:
+            return (
+                f"변경폭 {float(change_pct):.1%} 초과(상한 {float(_MAX_CHANGE_PCT):.0%}, D-NAO-5) "
+                f"— 현재={current_bid}원 목표={target_bid}원"
+            )
+
+    if proposal_type in _BID_UP_TYPES:
+        stop_loss_amount = target_bid * growth_sweeper.STOP_LOSS_CLICK_MULTIPLE
+        unconverted_spend = context.get("unconverted_spend")
+        if unconverted_spend is not None and unconverted_spend >= stop_loss_amount:
+            return (
+                f"스톱로스 도달 — 무전환 지출 {unconverted_spend}원 ≥ 상한 {stop_loss_amount}원"
+                f"(D-NAO-20, target_bid×{growth_sweeper.STOP_LOSS_CLICK_MULTIPLE})"
+            )
+
+        roas_corrected = context.get("roas_corrected")
+        target_roas = context.get("target_roas")
+        if roas_corrected is not None and target_roas is not None and roas_corrected < target_roas:
+            return (
+                f"BEP 미달 증액 금지 — 보정ROAS {roas_corrected} < 목표 {target_roas}"
+                f"(D-NAO-1 안전선)"
+            )
+
+        cost_today = context.get("cost_today")
+        daily_budget = context.get("daily_budget")
+        # codex[P2]: dailyBudget=0은 budget_allocator 기존 관행(daily_budget>0 필수, D-3)상
+        # "미설정"(useDailyBudget=false)을 뜻한다 — 0을 그대로 비교하면 uncapped 캠페인의
+        # 정상 bid_up까지 항상 차단된다.
+        if cost_today is not None and daily_budget is not None and daily_budget > 0 and cost_today >= daily_budget:
+            return f"일예산 상한 불가침 — 오늘 누적 {cost_today}원 ≥ 일예산 {daily_budget}원"
+
+    return None
+
+
+def _check_lock(proposal: dict, proposal_type: str) -> str | None:
+    target_lock = proposal.get("target_lock")
+    if target_lock is None:
+        return "target_lock 없음 — 구조 결함(재생성 필요)"
+    if not isinstance(target_lock, bool):
+        return f"target_lock은 bool이어야 함: {target_lock!r}"
+
+    # codex[P2]: pause는 정지(target_lock=True)만, resume은 재개(target_lock=False)만
+    # 유효하다 — 값이 반대면 구조 결함/stale 행이 실행기에 그대로 흘러가 의도와 반대
+    # 액션(재개하려는데 정지)이 집행될 수 있다.
+    expected = True if proposal_type == "pause" else False
+    if target_lock != expected:
+        return (
+            f"방향 불일치 — {proposal_type}인데 target_lock={target_lock}"
+            f"(기대값={expected})"
+        )
+    return None
