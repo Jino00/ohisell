@@ -17,7 +17,7 @@ from app.models import NaverAdDaily, NaverEntity, NaverForecastDaily, NaverLearn
 from app.services import naver_sa_ad_fetcher as fetcher
 from app.services.naver_ad import (
     anomaly_feed, bid_simulator, budget_allocator, campaign_target_resolver, diagnosis, growth_sweeper,
-    proposal_writer, slack_notifier,
+    proposal_writer, slack_notifier, trigger_watch,
 )
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.utils.kst import kst_today
@@ -25,7 +25,26 @@ from app.utils.kst import kst_today
 log = logging.getLogger(__name__)
 
 _TARGET_RANK_POSITION = 2  # 목표순위 기본값 — 진단 보드에 avg_rank가 아직 없어 고정값(P3+ 정교화 여지)
-_PROPOSAL_EXPIRY_DAYS = 14  # 계획서 §0 "관찰 2~4주" 하한 채택 — pending 14일 초과 시 자동 만료
+_PROPOSAL_EXPIRY_DAYS = 14  # 계획서 §0 "관찰 2~4주" 하한 채택 — 실행형 제안(폴백) pending 14일
+# 초과 시 자동 만료.
+
+# X1a T6(D-NAO-37 ①): 정보성 제안은 실행형보다 훨씬 빨리 접는다 — 145건 규모 백로그가 매일
+# 브리핑 토큰가드 절삭을 유발한 문제의 근본 원인이 "정보성이 실행형과 같은 14일 TTL을 쓴다"
+# 였다. trigger_pacing/trigger_cpc_spike는 trigger_watch 상수를 재사용(단일 진실 — 값이
+# proposal_writer.INFORMATIONAL_PROPOSAL_TYPES와 이중 유지되지 않도록). 이 딕셔너리에 없는
+# 유형(실행형 전부)은 _PROPOSAL_EXPIRY_DAYS로 폴백한다.
+#
+# 값의 의미 = **만료 실행일 D+N**(생성일 D 기준 — 이 프로젝트의 D+7/14 검증 표기와 동일
+# 시맨틱, codex 지적 반영): D+1이면 생성 다음날 크론에서 만료(생성일이 어제 이전이면 만료),
+# cutoff = `오늘 - (N-1)` 자정. 실행형 폴백은 기존 시맨틱 불변(14일 "초과" 시 = D+15 만료,
+# cutoff = `오늘 - 14` 자정) — 두 계산식이 다르니 _expire_stale_pending의 분기 주의.
+_INFORMATIONAL_EXPIRE_DPLUS: dict[str, int] = {
+    trigger_watch.PROPOSAL_TYPE_PACING: 1,
+    trigger_watch.PROPOSAL_TYPE_CPC: 1,
+    proposal_writer._ACCOUNT_BRIEF: 1,
+    proposal_writer._ANOMALY: 3,
+    proposal_writer._ANOMALY_FRESHNESS: 3,
+}
 
 
 def _freshness_gate(db: Session, as_of: date) -> dict:
@@ -435,14 +454,32 @@ def compute_anomalies(db: Session, as_of: date) -> dict:
 
 
 def _expire_stale_pending(db: Session) -> int:
-    """pending 상태로 _PROPOSAL_EXPIRY_DAYS일 초과한 제안을 expired로 전환."""
-    cutoff = datetime.combine(kst_today() - timedelta(days=_PROPOSAL_EXPIRY_DAYS), datetime.min.time())
-    stale = db.query(NaverProposal).filter(
-        NaverProposal.status == "pending", NaverProposal.created_at < cutoff,
-    ).all()
-    for p in stale:
-        p.status = "expired"
-    return len(stale)
+    """pending 제안을 유형별 만료일에 expired로 전환(X1a T6, D-NAO-37 ① 차등 TTL).
+
+    - 정보성(_INFORMATIONAL_EXPIRE_DPLUS): 생성일 D 기준 **D+N에 만료** — cutoff는
+      `오늘 - (N-1)` 자정(달력일 경계). 예: D+1은 생성 다음날 크론에서 만료(codex 지적 —
+      `오늘 - N`으로 하면 하루 늦게 만료).
+    - 실행형(폴백): 기존 시맨틱 불변 — 14일 "초과" 시 만료(cutoff `오늘 - 14` 자정 = D+15).
+
+    소급 효과가 곧 백로그 정리다(D-NAO-37 ③, 별도 백필 스크립트 없음): created_at 기준
+    비교라 이 로직이 배포된 후 첫 08:00 크론 실행이 이미 쌓여있던 정보성 pending 백로그
+    (예: trigger_pacing 145건)를 그날로 일괄 expired 전환한다 — 의도된 부수효과다.
+    """
+    today = kst_today()
+    pending = db.query(NaverProposal).filter(NaverProposal.status == "pending").all()
+    by_type_counts: dict[str, int] = {}
+    for p in pending:
+        dplus = _INFORMATIONAL_EXPIRE_DPLUS.get(p.proposal_type)
+        if dplus is not None:
+            cutoff = datetime.combine(today - timedelta(days=dplus - 1), datetime.min.time())
+        else:
+            cutoff = datetime.combine(today - timedelta(days=_PROPOSAL_EXPIRY_DAYS), datetime.min.time())
+        if p.created_at < cutoff:
+            p.status = "expired"
+            by_type_counts[p.proposal_type] = by_type_counts.get(p.proposal_type, 0) + 1
+    if by_type_counts:
+        log.info("proposal_pipeline: pending 만료(유형별 건수): %s", by_type_counts)
+    return sum(by_type_counts.values())
 
 
 def run_daily(db: Session, *, lookback_days: int = 15) -> dict:

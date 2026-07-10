@@ -2,6 +2,10 @@
 // 제안 카드(D-NAO-22) + 캠페인 optimizer/모드/공격성 다이얼 패널(D-NAO-2/13/22-②).
 // 다이얼(공격성)은 라벨이 아니라 target_roas_override PUT으로 campaign_target_resolver
 // 실계산에 그대로 반영된다(계획서 §4-Phase1 경고 — S3a HANDOFF 교훈).
+// X1a T4 — 승인/반려/실행 버튼(반자동 개시, 실쓰기 첫 개방=제외키워드). 자동 실행은 없다 —
+// 모든 실쓰기는 사람의 Confirm을 거친다(D-NAO-5).
+// X1a T5 — E2 위임 스위치(D-NAO-25): Ava agree+가드레일 통과 유형만 사람 승인 없이
+// 자동 승인·실행되도록 콘솔에서 켜고 끈다. 스위치 행사자는 Jino뿐.
 import { useEffect, useRef, useState } from "react";
 import {
   fetchNaverAdReport,
@@ -11,12 +15,17 @@ import {
   fetchNaverAdDiagnosis,
   fetchNaverExpertReviews,
   fetchNaverExpertScorecard,
+  updateNaverProposalStatus,
+  executeNaverProposal,
+  getNaverExpertDelegation,
+  putNaverExpertDelegation,
   type NaverAdProposal,
   type NaverAdCampaignSettings,
   type NaverAdOptimizer,
   type NaverAdCampaignMode,
   type NaverExpertVerdict,
   type NaverExpertScorecard,
+  type NaverExpertDelegationSettings,
 } from "../lib/api";
 
 function isoKST(d: Date): string {
@@ -65,6 +74,8 @@ const PROPOSAL_STATUS_TABS = [
   { key: "approved", label: "승인" },
   { key: "rejected", label: "반려" },
   { key: "expired", label: "만료" },
+  { key: "failed", label: "실패" },
+  { key: "executing", label: "실행중" },
 ];
 
 const PROPOSAL_TYPE_LABEL: Record<string, string> = {
@@ -126,6 +137,20 @@ export default function NaverAdOptimizationConsole() {
   const [avaScorecard, setAvaScorecard] = useState<NaverExpertScorecard | null>(null);
   const [avaLoading, setAvaLoading] = useState(false);
   const [avaError, setAvaError] = useState<string | null>(null);
+
+  // X1a T4 — 제안 카드 승인/반려/실행 액션 상태(카드 단위, in-flight 중복클릭 방지 + 결과 피드백).
+  const [actionBusy, setActionBusy] = useState<Record<number, boolean>>({});
+  const [actionMsg, setActionMsg] = useState<Record<number, string>>({});
+  const [actionMsgIsError, setActionMsgIsError] = useState<Record<number, boolean>>({});
+
+  // X1a T5 — E2 위임 스위치 상태(콘솔 패널, 기본 접힘).
+  const [delegation, setDelegation] = useState<NaverExpertDelegationSettings | null>(null);
+  const [delegationLoading, setDelegationLoading] = useState(false);
+  const [delegationError, setDelegationError] = useState<string | null>(null);
+  // 전역 busy(유형별 아님) — PUT이 전체 배열 치환이라 저장 중 다른 유형을 토글하면
+  // 서로 덮어쓸 수 있음(codex 지적). 저장 중엔 패널 전체를 잠근다.
+  const [delegationBusy, setDelegationBusy] = useState(false);
+  const [delegationPanelOpen, setDelegationPanelOpen] = useState(false);
 
   async function loadProposals() {
     const mySeq = ++proposalsReqSeq.current;
@@ -195,12 +220,27 @@ export default function NaverAdOptimizationConsole() {
     }
   }
 
+  async function loadDelegation() {
+    setDelegationLoading(true);
+    setDelegationError(null);
+    try {
+      const data = await getNaverExpertDelegation();
+      setDelegation(data);
+    } catch (e: any) {
+      setDelegationError(e.message);
+    } finally {
+      setDelegationLoading(false);
+    }
+  }
+
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { loadProposals(); }, [proposalStatus]);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { loadPanel(); }, []);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { loadAva(); }, []);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { loadDelegation(); }, []);
 
   function updateEdit(campaignId: string, patch: Partial<EditState>) {
     setEdits((prev) => ({ ...prev, [campaignId]: { ...prev[campaignId], ...patch } }));
@@ -248,11 +288,234 @@ export default function NaverAdOptimizationConsole() {
     }
   }
 
+  // ── X1a T4: 제안 카드 승인/반려/실행 액션 ──
+  function setActionResult(id: number, msg: string, isError: boolean) {
+    setActionMsg((prev) => ({ ...prev, [id]: msg }));
+    setActionMsgIsError((prev) => ({ ...prev, [id]: isError }));
+  }
+
+  function clearActionResult(id: number) {
+    setActionMsg((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+  }
+
+  // 실행 Confirm 문안 — 실쓰기임을 명시(D-NAO-5). target_id="검색어"는 현재 유일하게
+  // 개방된 액션(제외키워드, target_type='search_term')을 전제로 한다.
+  function executeConfirmText(p: NaverAdProposal): string {
+    return (
+      `제외키워드를 네이버에 실제 등록합니다.\n` +
+      `검색어: "${p.target_id}"\n` +
+      `광고그룹: ${p.adgroup_id}\n` +
+      `캠페인: ${p.campaign_id}\n\n` +
+      `실행할까요? (실쓰기 — 되돌리려면 네이버 콘솔에서 삭제)`
+    );
+  }
+
+  async function runExecute(id: number) {
+    setActionBusy((prev) => ({ ...prev, [id]: true }));
+    try {
+      const result = await executeNaverProposal(id);
+      setActionResult(id, `✓ 등록 완료 (change_log #${result.change_log_id})`, false);
+    } catch (e: any) {
+      setActionResult(id, e.message, true);
+    } finally {
+      // codex P2: 목록 갱신이 끝난 뒤에 busy 해제 — 갱신 전에 풀면 짧은 이중클릭 창이 생긴다.
+      await loadProposals();
+      setActionBusy((prev) => ({ ...prev, [id]: false }));
+    }
+  }
+
+  async function handleExecuteClick(p: NaverAdProposal) {
+    if (!window.confirm(executeConfirmText(p))) return;
+    await runExecute(p.id);
+  }
+
+  // 승인(pending→approved) + 재승인(failed→approved) 공용 — 승인 성공 후 executable이면
+  // 즉시 실행을 Confirm으로 제안한다(취소 시 승인 상태로만 남기고 별도 안내 없음, 사양대로).
+  // preConfirm 필수(codex P1-1): 승인/재승인 모두 Confirm을 먼저 통과해야 status API를
+  // 호출한다. 즉시 실행 흐름에서 다이얼로그 2회가 되는 것은 의도된 안전장치(X1a 첫 실쓰기 개방).
+  async function approveAndMaybeExecute(p: NaverAdProposal, preConfirm: string) {
+    if (!window.confirm(preConfirm)) return;
+    setActionBusy((prev) => ({ ...prev, [p.id]: true }));
+    clearActionResult(p.id);
+    let updated: NaverAdProposal;
+    try {
+      updated = await updateNaverProposalStatus(p.id, "approved");
+    } catch (e: any) {
+      setActionResult(p.id, e.message, true);
+      await loadProposals(); // codex P2: 갱신 완료 후 busy 해제
+      setActionBusy((prev) => ({ ...prev, [p.id]: false }));
+      return;
+    }
+    if (updated.executable && window.confirm(executeConfirmText(updated))) {
+      await runExecute(p.id); // 자체적으로 재조회 후 busy 해제
+      return;
+    }
+    await loadProposals(); // codex P2: 갱신 완료 후 busy 해제
+    setActionBusy((prev) => ({ ...prev, [p.id]: false }));
+  }
+
+  function handleApprove(p: NaverAdProposal) {
+    return approveAndMaybeExecute(p, "이 제안을 승인할까요? (실행은 별도 Confirm)");
+  }
+
+  function handleReapprove(p: NaverAdProposal) {
+    return approveAndMaybeExecute(p, "실패한 제안을 재승인해 재시도할까요?");
+  }
+
+  async function handleReject(p: NaverAdProposal) {
+    if (!window.confirm("이 제안을 반려할까요?")) return;
+    setActionBusy((prev) => ({ ...prev, [p.id]: true }));
+    try {
+      await updateNaverProposalStatus(p.id, "rejected");
+      setActionResult(p.id, "반려되었습니다.", false);
+    } catch (e: any) {
+      setActionResult(p.id, e.message, true);
+    } finally {
+      // codex P2: 목록 갱신이 끝난 뒤에 busy 해제
+      await loadProposals();
+      setActionBusy((prev) => ({ ...prev, [p.id]: false }));
+    }
+  }
+
+  // ── X1a T5: E2 위임 스위치 토글 ──
+  // ON 전환은 Confirm 필수(자동 실행 개시 — D-NAO-5 취지 연장), OFF는 즉시(자율성 축소는
+  // 마찰 불필요). 전체 배열 치환 PUT이므로 다른 이미 위임된 유형은 그대로 유지한다.
+  async function toggleDelegation(proposalType: string, nextOn: boolean) {
+    if (!delegation || delegationBusy) return;
+    if (nextOn) {
+      const label = PROPOSAL_TYPE_LABEL[proposalType] ?? proposalType;
+      const confirmText =
+        `"${label}" 유형을 Ava 위임 자동승인으로 전환합니다.\n\n` +
+        `다음 08:05 크론부터, 이 유형의 제안 중 Ava가 동의(agree) 평결하고 가드레일을 통과한 ` +
+        `건은 사람 승인 없이 자동으로 승인·실행됩니다.\n` +
+        `그 외(부분동의·기각·판단보류·구조결함·미개방 액션)는 지금처럼 전부 사람 검토로 남습니다.\n\n` +
+        `켤까요?`;
+      if (!window.confirm(confirmText)) return;
+    }
+    const prev = delegation;
+    const nextTypes = nextOn
+      ? Array.from(new Set([...delegation.delegated_types, proposalType]))
+      : delegation.delegated_types.filter((t) => t !== proposalType);
+    setDelegationBusy(true);
+    try {
+      const updated = await putNaverExpertDelegation(nextTypes);
+      setDelegation(updated);
+    } catch (e: any) {
+      alert(e.message);
+      setDelegation(prev); // 실패 시 이전 상태로 복원
+    } finally {
+      setDelegationBusy(false);
+    }
+  }
+
+  function renderProposalActions(p: NaverAdProposal, busy: boolean) {
+    const btnBase = "px-3 py-1.5 text-xs rounded border disabled:opacity-50 disabled:cursor-not-allowed";
+    if (p.status === "pending") {
+      return (
+        <div className="flex gap-1.5">
+          <button disabled={busy} onClick={() => handleApprove(p)}
+            className={`${btnBase} border-blue-200 text-blue-600 hover:bg-blue-50`}>
+            승인
+          </button>
+          <button disabled={busy} onClick={() => handleReject(p)}
+            className={`${btnBase} border-gray-200 text-gray-500 hover:bg-gray-50`}>
+            반려
+          </button>
+        </div>
+      );
+    }
+    if (p.status === "approved") {
+      const alreadyExecuted = p.executed_change_log_id != null;
+      const execDisabled = busy || alreadyExecuted || !p.executable;
+      const execTitle = alreadyExecuted ? "이미 실행됨" : (p.not_executable_reason ?? undefined);
+      return (
+        <div className="flex gap-1.5">
+          <button disabled={execDisabled} title={execTitle} onClick={() => handleExecuteClick(p)}
+            className={`${btnBase} border-blue-600 bg-blue-600 text-white hover:bg-blue-700 disabled:bg-gray-200 disabled:border-gray-200 disabled:text-gray-400`}>
+            실행
+          </button>
+          {!alreadyExecuted && (
+            <button disabled={busy} onClick={() => handleReject(p)}
+              className={`${btnBase} border-gray-200 text-gray-500 hover:bg-gray-50`}>
+              반려
+            </button>
+          )}
+        </div>
+      );
+    }
+    if (p.status === "failed") {
+      return (
+        <div className="flex gap-1.5">
+          <button disabled={busy} onClick={() => handleReapprove(p)}
+            className={`${btnBase} border-blue-200 text-blue-600 hover:bg-blue-50`}>
+            재승인
+          </button>
+          <button disabled={busy} onClick={() => handleReject(p)}
+            className={`${btnBase} border-gray-200 text-gray-500 hover:bg-gray-50`}>
+            반려
+          </button>
+        </div>
+      );
+    }
+    return null; // rejected/expired/executing — 버튼 없음(executing은 카드에 경고 배지만)
+  }
+
   return (
     <div className="space-y-6">
       <div className="bg-amber-50 border border-amber-200 text-amber-700 text-xs rounded-lg p-3">
-        관찰 모드 — 제안은 자동 실행되지 않습니다. optimizer/모드/공격성 다이얼은 저장 즉시
-        실제 목표 ROAS 계산(campaign_target_resolver)에 반영됩니다(라벨이 아님).
+        반자동 모드 — 자동 실행은 없습니다. 승인 후 Confirm을 거친 제안만 실제 집행됩니다(현재
+        개방: 제외키워드). optimizer/모드/공격성 다이얼은 저장 즉시 실제 목표 ROAS 계산에
+        반영됩니다.
+      </div>
+
+      {/* Ava 위임 자동승인 설정 (X1a T5, D-NAO-25) — 기본 접힘 */}
+      <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
+        <button type="button" onClick={() => setDelegationPanelOpen((v) => !v)}
+          className="w-full p-3 flex items-center justify-between gap-2 text-left hover:bg-gray-50">
+          <span className="text-sm font-medium text-gray-700 flex items-center gap-1.5">
+            Ava 위임 자동승인 (E2)
+            {delegation && delegation.delegated_types.length > 0 && (
+              <span className="px-1.5 py-0.5 text-[11px] rounded font-medium bg-purple-50 text-purple-700">
+                {delegation.delegated_types.length}개 위임 중
+              </span>
+            )}
+          </span>
+          <span className="text-xs text-gray-400">{delegationPanelOpen ? "접기 ▲" : "펼치기 ▼"}</span>
+        </button>
+        {delegationPanelOpen && (
+          <div className="px-4 pb-4 border-t border-gray-100">
+            <p className="text-xs text-gray-500 mt-3 mb-3">
+              위임 ON = Ava가 동의(agree) 평결하고 가드레일을 통과한 제안만 08:05 크론에서 사람
+              승인 없이 자동 승인·실행됩니다. 그 외(부분동의·기각·판단보류·구조결함·미개방
+              액션)는 전부 사람 검토로 남습니다. 스위치는 Jino만 조작합니다.
+            </p>
+            {delegationError && <div className="text-sm text-red-600 mb-2">{delegationError}</div>}
+            {delegationLoading ? (
+              <div className="text-sm text-gray-400 py-2">불러오는 중...</div>
+            ) : !delegation || delegation.delegable_types.length === 0 ? (
+              <div className="text-sm text-gray-400 py-2">현재 위임 가능한 유형 없음</div>
+            ) : (
+              <div className="flex flex-col gap-2">
+                {delegation.delegable_types.map((t) => {
+                  const on = delegation.delegated_types.includes(t);
+                  return (
+                    <label key={t} className="flex items-center gap-2 text-sm text-gray-700">
+                      <input type="checkbox" checked={on} disabled={delegationBusy}
+                        onChange={(ev) => toggleDelegation(t, ev.target.checked)}
+                        className="h-4 w-4 rounded border-gray-300 text-blue-600 disabled:opacity-50" />
+                      {PROPOSAL_TYPE_LABEL[t] ?? t}
+                    </label>
+                  );
+                })}
+                {delegationBusy && <span className="text-xs text-gray-400">저장 중...</span>}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* 섹션 1: 제안 카드 */}
@@ -293,15 +556,34 @@ export default function NaverAdOptimizationConsole() {
                         {VERDICT_META[p.expert_verdict.verdict].icon} {VERDICT_META[p.expert_verdict.verdict].label}
                       </span>
                     )}
+                    {p.approval_source === "delegation" && (
+                      <span className="px-1.5 py-0.5 text-xs rounded font-medium bg-purple-50 text-purple-700"
+                        title="Ava가 동의 평결 + 가드레일을 통과해 사람 승인 없이 자동 승인·실행됨(E2, D-NAO-25)">
+                        🤖 Ava 위임 자동승인
+                      </span>
+                    )}
+                    {p.status === "executing" && (
+                      <span className="px-1.5 py-0.5 text-xs rounded font-medium bg-amber-50 text-amber-700"
+                        title="클레임 후 완료되지 않고 잔존한 실행 — 쓰기 결과를 네이버 콘솔에서 직접 확인하세요.">
+                        ⚠ 실행중 잔존 — 쓰기 결과 불확실, 수동 조사 필요
+                      </span>
+                    )}
+                    {p.executed_change_log_id != null && (
+                      <span className="px-1.5 py-0.5 text-xs rounded font-medium bg-green-50 text-green-700">
+                        ✓ 실행됨 #{p.executed_change_log_id}
+                      </span>
+                    )}
                   </div>
                   {p.rationale && <p className="text-sm text-gray-700 mt-1.5">{p.rationale}</p>}
                   {p.expected_effect && <p className="text-xs text-gray-500 mt-1">예상 효과: {p.expected_effect}</p>}
+                  {actionMsg[p.id] && (
+                    <p className={`text-xs mt-1.5 ${actionMsgIsError[p.id] ? "text-red-600" : "text-green-600"}`}>
+                      {actionMsg[p.id]}
+                    </p>
+                  )}
                 </div>
                 <div className="text-right shrink-0">
-                  <button disabled title="관찰 모드 — 자동 실행 비활성화"
-                    className="px-3 py-1.5 text-xs rounded border border-gray-200 text-gray-300 cursor-not-allowed">
-                    실행
-                  </button>
+                  {renderProposalActions(p, !!actionBusy[p.id])}
                 </div>
               </div>
             ))

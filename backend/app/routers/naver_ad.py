@@ -4,22 +4,36 @@
 # GET /api/naver/ad/diagnosis         — 진단 보드(출혈/승자/확장버킷/쇼핑BEP/제외후보/3단분류/악순환),
 #   diagnosis Harness 경유(P2-S2). D-NAO-15/D-3: 전부 읽기 전용 — 제안·쓰기 없음.
 # GET /api/naver/ad/proposals         — 제안 카드 목록(P2-S3, naver_proposals 단순 read).
-#   각 행에 expert_verdict(최근 완료(status=ok) run의 평결 요약) 조인(E1a T6, 배지용).
+#   각 행에 expert_verdict(최근 완료(status=ok) run의 평결 요약) 조인(E1a T6, 배지용) +
+#   executable/not_executable_reason(X1a T4, naver_execution_harness.real_write_blocker).
+# POST /api/naver/ad/proposals/{id}/status  — 상태 전이(승인/반려, X1a T4). D-NAO-5 사람 승인
+#   게이트의 유일한 정당 경로 — pending→approved가 이 라우터를 거쳐야 harness.execute()가
+#   실행을 허용한다.
+# POST /api/naver/ad/proposals/{id}/execute — 실쓰기 실행(X1a T4). naver_execution_harness.
+#   execute(dry_run=False) 호출 — 사람이 콘솔에서 승인한 제안만(approved) 실제 집행.
 # GET/PUT /api/naver/ad/campaign-settings — optimizer/mode/override 조회·설정(P2-S3, 전환 시
 #   naver_change_log에 경량 기록). 광고 API 쓰기는 아님 — 우리 시스템 내부 설정만(D-NAO-13).
 # GET /api/naver/ad/expert-reviews    — 전문가(Ava) 평결 목록(E1a T6, naver_expert_review 단순
-#   read). proposal_id=NULL 행은 하루 총평.
+#   read). proposal_id=NULL 행은 하루 총평. 완료(status=ok) run만 조인(X1a T4, codex
+#   아웃사이드 보이스 2026-07-10 합의 — 비-ok run의 child 평결 누출 방어).
+# GET/PUT /api/naver/ad/settings/expert-delegation — E2 위임 스위치(X1a T5, D-NAO-25) 조회·
+#   설정. Jino만 유형 단위로 명시 위임(자동승인+자동실행, delegation_gate 경유) — 전체 치환
+#   저장 + naver_change_log 감사 기록(campaign-settings PUT 전례와 동일 패턴).
 from __future__ import annotations
 
+import json
+import logging
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
+import requests
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import (
+    NaverAccountSettings,
     NaverCampaignSettings,
     NaverChangeLog,
     NaverExpertReview,
@@ -28,10 +42,15 @@ from app.models import (
     NaverProductBep,
     NaverProposal,
 )
+from app.services.naver_ad import delegation_gate
 from app.services.naver_ad import metrics_aggregator
+from app.services.naver_ad import naver_execution_harness
+from app.services.naver_ad import naver_sa_writer
 from app.services.naver_ad.ad_report import build_report
 from app.services.naver_ad.diagnosis import build_diagnosis
-from app.utils.kst import kst_today
+from app.utils.kst import kst_now, kst_today
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/naver/ad", tags=["naver-ad"])
 
@@ -159,11 +178,14 @@ def diagnosis(
 # ══════════════════════════════════════════════════════════════════
 # P2-S3 — 제안 카드·캠페인 optimizer 설정 (관찰 모드, D-3: 읽기전용 제안만)
 # ══════════════════════════════════════════════════════════════════
-_PROPOSAL_STATUSES = {"pending", "approved", "rejected", "expired"}
+# failed/executing은 X1a T3에서 추가된 상태(harness의 클레임·재승인 재시도 경로) — GET
+# /proposals의 status 필터도 이 값들을 받아야 콘솔에서 "실패한 제안" 등을 조회할 수 있다(T4).
+_PROPOSAL_STATUSES = {"pending", "approved", "rejected", "expired", "failed", "executing"}
 _MAX_PROPOSAL_RANGE_DAYS = 90
 
 
 def _serialize_proposal(p: NaverProposal, verdict: NaverExpertReview | None) -> dict:
+    blocker_reason = naver_execution_harness.real_write_blocker(p)
     return {
         "id": p.id,
         "created_at": p.created_at.isoformat() if p.created_at else None,
@@ -171,12 +193,18 @@ def _serialize_proposal(p: NaverProposal, verdict: NaverExpertReview | None) -> 
         "target_type": p.target_type,
         "target_id": p.target_id,
         "campaign_id": p.campaign_id,
+        "adgroup_id": p.adgroup_id,
         "rationale": p.rationale,
         "expected_effect": p.expected_effect,
         "status": p.status,
         "slack_ts": p.slack_ts,
         "executed_change_log_id": p.executed_change_log_id,
+        "approval_source": p.approval_source,  # X1a T5: console(사람)/delegation(E2 위임 자동승인)
         "expert_verdict": _serialize_expert_verdict_summary(verdict) if verdict else None,
+        # X1a T4: 콘솔 실행 버튼 활성화 여부 + 사유(naver_execution_harness.real_write_blocker,
+        # 상태와 무관하게 판정 — pending이어도 "구조적으로 실행 가능한 제안인지"는 미리 보여줌).
+        "executable": blocker_reason is None,
+        "not_executable_reason": blocker_reason,
     }
 
 
@@ -241,6 +269,162 @@ def proposals(
     return {"rows": [_serialize_proposal(p, verdicts.get(p.id)) for p in rows]}
 
 
+# ══════════════════════════════════════════════════════════════════
+# X1a T4 — 콘솔 승인/반려 + 실행 라우터
+# ══════════════════════════════════════════════════════════════════
+_VALID_STATUS_TARGETS = {"approved", "rejected"}
+
+# 허용 전이(from, to). pending/failed에서만 approved로 갈 수 있다(D-NAO-5 사람 승인 게이트 —
+# approved가 harness.execute()를 허용하는 유일한 상태). approved→rejected는 아직 실행 전
+# (executed_change_log_id IS NULL)인 경우만 — 이미 실행된 건 반려로 되돌릴 수 없다.
+# failed→{approved,rejected}는 T3 설계의 "재승인만 재시도 경로"(harness가 실쓰기 실패 시
+# status='failed'로 종결 — 자동 재시도 없음, 사람이 콘솔에서 재승인해야만 재시도).
+# executing/expired/rejected에서의 전이는 전부 금지(사람 조사 대상 — executing은 클레임
+# 잔존=크래시로 쓰기 결과 불확실, expired/rejected는 이미 종결된 제안).
+_ALLOWED_STATUS_TRANSITIONS = {
+    ("pending", "approved"),
+    ("pending", "rejected"),
+    ("approved", "rejected"),
+    ("failed", "approved"),
+    ("failed", "rejected"),
+}
+
+
+class ProposalStatusIn(BaseModel):
+    status: str  # "approved" | "rejected" — 그 외 값은 400
+
+
+@router.post("/proposals/{proposal_id}/status")
+def proposal_status_transition(
+    proposal_id: int, body: ProposalStatusIn, db: Session = Depends(get_db),
+):
+    """제안 상태 전이(콘솔 승인/반려 버튼, X1a T4). D-NAO-5 "반자동 = Confirm 승인 후 실행"의
+    유일한 정당 경로 — pending→approved가 이 라우터를 거쳐야만 harness.execute()가 실행을
+    허용한다(harness의 ProposalNotApprovedError 게이트와 대칭).
+
+    원자화: 검증한 현재 status를 WHERE 조건에 넣은 조건부 UPDATE로 동시성 처리
+    (naver_execution_harness._execute_add_negative_keyword의 클레임 패턴과 동일 — codex R2
+    P1). rowcount!=1이면 그 사이 상태가 바뀐 것 — 409 "새로고침 후 재시도". approved→rejected
+    는 WHERE에 executed_change_log_id IS NULL도 포함해 이미 실행된 제안의 반려를 원자적으로
+    막는다.
+    """
+    if body.status not in _VALID_STATUS_TARGETS:
+        raise HTTPException(400, f"status는 {sorted(_VALID_STATUS_TARGETS)} 중 하나여야 합니다")
+
+    proposal = db.get(NaverProposal, proposal_id)
+    if proposal is None:
+        raise HTTPException(404, "제안을 찾을 수 없습니다")
+
+    current = proposal.status
+    target = body.status
+    if (current, target) not in _ALLOWED_STATUS_TRANSITIONS:
+        raise HTTPException(409, f"허용되지 않는 상태 전이: {current} → {target}")
+
+    q = db.query(NaverProposal).filter(
+        NaverProposal.id == proposal_id,
+        NaverProposal.status == current,
+    )
+    if (current, target) == ("approved", "rejected"):
+        q = q.filter(NaverProposal.executed_change_log_id.is_(None))
+    # target=='approved'인 전이는 사람이 이 콘솔 라우터를 직접 호출한 것 — approval_source=
+    # 'console'로 감사 기록(X1a T5, delegation_gate의 'delegation'과 대칭). rejected 전이는
+    # approval_source를 건드리지 않는다(이력 보존 — 반려됐던 승인의 출처도 남겨둔다).
+    values = {"status": target}
+    if target == "approved":
+        values["approval_source"] = "console"
+    rowcount = q.update(values, synchronize_session=False)
+    db.commit()
+    if rowcount != 1:
+        raise HTTPException(409, "상태가 변경됨 — 새로고침 후 재시도")
+
+    db.refresh(proposal)
+    verdicts = _latest_ok_verdicts_by_proposal(db, [proposal.id])
+    return _serialize_proposal(proposal, verdicts.get(proposal.id))
+
+
+@router.post("/proposals/{proposal_id}/execute")
+def proposal_execute(proposal_id: int, db: Session = Depends(get_db)):
+    """제안 실쓰기 실행(콘솔 실행 버튼, X1a T4) — naver_execution_harness.execute(dry_run=False)
+    호출. 사람이 위 /status 라우터로 승인(approved)한 제안만 실제 네이버 광고 API에 쓰기가
+    가해진다(D-NAO-5).
+
+    사전 차단(하네스 호출 전, 라우터 레이어): 액션 자체가 없는 정보성 제안이거나 아직
+    미개방(D-NAO-16)인 액션은 여기서 409로 먼저 막는다 — harness에 그대로 넘기면
+    OPEN_ACTIONS에 없는 액션에 대해 execute()의 dry_run 강제 로직이 dry-run change_log를
+    만들고 proposal.executed_change_log_id를 박아버리는 함정이 있다(제안이 "소비"돼 버림 —
+    T4 회귀 테스트로 못 박음). target_type/adgroup_id 구조 결함(예: negative_keyword인데
+    target_type='keyword')은 여기서 가로채지 않는다 — harness 자체 가드
+    (_execute_add_negative_keyword, MissingExecutionTargetError)로 흘려보내야 failed 종결
+    +change_log 감사 기록이 정상적으로 남는다(422로 매핑, 아래 참조).
+    """
+    proposal = db.get(NaverProposal, proposal_id)
+    if proposal is None:
+        raise HTTPException(404, "제안을 찾을 수 없습니다")
+
+    action = naver_execution_harness._ACTION_BY_PROPOSAL_TYPE.get(proposal.proposal_type)
+    action_unavailable = (
+        action is None
+        or action not in naver_execution_harness.OPEN_ACTIONS
+        or action not in naver_execution_harness._WRITE_EXECUTORS
+    )
+    if action_unavailable:
+        reason = naver_execution_harness.real_write_blocker(proposal)
+        raise HTTPException(409, reason)
+
+    try:
+        change_log = naver_execution_harness.execute(db, proposal_id, dry_run=False)
+    except (
+        naver_execution_harness.ProposalNotApprovedError,
+        naver_execution_harness.AlreadyExecutedError,
+        naver_execution_harness.OptimizerGuardError,
+        naver_execution_harness.WriteNotOpenedError,
+        naver_execution_harness.ActionNotExecutableError,
+    ) as exc:
+        raise HTTPException(409, str(exc))
+    except naver_execution_harness.MissingExecutionTargetError as exc:
+        raise HTTPException(
+            422,
+            f"{exc} — 제안은 harness가 이미 'failed'로 종결하고 change_log에 감사 기록을 "
+            "남겼습니다(재승인해도 데이터가 바뀌지 않는 영구 결함).",
+        )
+    except (
+        naver_sa_writer.WriteValidationError,
+        naver_sa_writer.WriteError,
+        naver_sa_writer.WriteVerificationError,
+        requests.RequestException,
+    ) as exc:
+        log.error(
+            "naver_ad execute 라우터: 실쓰기 실패 proposal_id=%s — %s: %s",
+            proposal_id, type(exc).__name__, exc,
+        )
+        raise HTTPException(
+            502,
+            f"{type(exc).__name__}: {exc} — 제안은 failed로 종결됨(change_log 감사 기록 완료) "
+            "— 재승인으로만 재시도 가능합니다.",
+        )
+
+    db.refresh(proposal)
+    verdicts = _latest_ok_verdicts_by_proposal(db, [proposal.id])
+    return {
+        "change_log_id": change_log.id,
+        "outcome": change_log.outcome,
+        "before": _parse_json_or_raw(change_log.before_value),
+        "after": _parse_json_or_raw(change_log.after_value),
+        "proposal": _serialize_proposal(proposal, verdicts.get(proposal.id)),
+    }
+
+
+def _parse_json_or_raw(value: str | None):
+    """change_log.before_value/after_value는 JSON 문자열로 저장된다(json.dumps) — 파싱해
+    구조화된 값으로 응답한다. 파싱 실패 시 원문 문자열 그대로 반환(방어, 데이터 유실 방지)."""
+    if value is None:
+        return None
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError):
+        return value
+
+
 def _serialize_expert_review(r: NaverExpertReview) -> dict:
     return {
         "id": r.id,
@@ -269,8 +453,14 @@ def expert_reviews(
     db: Session = Depends(get_db),
 ):
     """전문가(Ava) 평결 목록(콘솔) — naver_expert_review 단순 read, 최신순. proposal_id=NULL
-    행은 하루 총평(E1a T6)."""
-    q = db.query(NaverExpertReview)
+    행은 하루 총평(E1a T6). 완료(status=ok) run만 조인(X1a T4, codex 아웃사이드 보이스
+    2026-07-10 합의) — degraded/skipped/failed run의 child 평결이 콘솔에 새는 것을 막는다
+    (GET /proposals의 _latest_ok_verdicts_by_proposal과 동일한 status=ok 계약)."""
+    q = (
+        db.query(NaverExpertReview)
+        .join(NaverExpertReviewRun, NaverExpertReview.run_id == NaverExpertReviewRun.id)
+        .filter(NaverExpertReviewRun.status == "ok")
+    )
     if as_of is not None:
         q = q.filter(NaverExpertReview.as_of == as_of)
     if proposal_id is not None:
@@ -380,3 +570,68 @@ def campaign_settings_put(body: CampaignSettingsIn, db: Session = Depends(get_db
     db.commit()
     db.refresh(settings)
     return _serialize_settings(settings)
+
+
+# ══════════════════════════════════════════════════════════════════
+# X1a T5 — E2 위임 스위치(D-NAO-25 부분 게이트) 콘솔 설정
+# ══════════════════════════════════════════════════════════════════
+_DELEGATION_KEY = "expert_delegated_types"
+
+
+class ExpertDelegationIn(BaseModel):
+    delegated_types: list[str]
+
+
+def _delegation_response(db: Session) -> dict:
+    return {
+        "delegated_types": sorted(delegation_gate.get_delegated_types(db) & delegation_gate.delegable_types()),
+        "delegable_types": sorted(delegation_gate.delegable_types()),
+    }
+
+
+@router.get("/settings/expert-delegation")
+def expert_delegation_get(db: Session = Depends(get_db)):
+    """E2 위임 스위치 조회(X1a T5) — 저장값 중 delegable_types()에 속한 것만 정제해 반환
+    (미개방 유형이 저장돼 있어도 콘솔엔 유효한 것만 보여준다, delegation_gate와 동일 정제)."""
+    return _delegation_response(db)
+
+
+@router.put("/settings/expert-delegation")
+def expert_delegation_put(body: ExpertDelegationIn, db: Session = Depends(get_db)):
+    """E2 위임 스위치 설정(X1a T5, D-NAO-25) — Jino만 유형 단위로 명시 위임. 전체 치환 저장.
+    delegable_types() 밖 유형이나 중복은 400(콘솔 오조작 방지) — 여기서 막아도 delegation_gate
+    자체는 이중 방어로 저장값∩delegable만 쓰므로 안전하지만, 사람에게는 즉시 피드백이 낫다.
+    변경 전후가 실제로 다르면 naver_change_log에 감사 기록(campaign-settings PUT 전례)."""
+    if not isinstance(body.delegated_types, list):
+        raise HTTPException(400, "delegated_types는 리스트여야 합니다")
+    if len(set(body.delegated_types)) != len(body.delegated_types):
+        raise HTTPException(400, "delegated_types에 중복된 유형이 있습니다")
+    allowed = delegation_gate.delegable_types()
+    invalid = set(body.delegated_types) - allowed
+    if invalid:
+        raise HTTPException(
+            400, f"허용되지 않는 유형: {sorted(invalid)} — 위임 가능 유형은 {sorted(allowed)}뿐입니다",
+        )
+
+    before = sorted(delegation_gate.get_delegated_types(db) & allowed)
+    after = sorted(set(body.delegated_types))
+
+    row = db.query(NaverAccountSettings).filter(NaverAccountSettings.key == _DELEGATION_KEY).first()
+    if row is None:
+        row = NaverAccountSettings(key=_DELEGATION_KEY, value_json=json.dumps(after))
+        db.add(row)
+    else:
+        row.value_json = json.dumps(after)
+
+    if before != after:
+        db.add(NaverChangeLog(
+            entity_type="account", entity_id="", campaign_id="",
+            action="update_expert_delegation",
+            before_value=json.dumps(before, ensure_ascii=False),
+            after_value=json.dumps(after, ensure_ascii=False),
+            rationale="콘솔 PUT /settings/expert-delegation",
+            dry_run=False, executed_at=kst_now(),
+        ))
+
+    db.commit()
+    return _delegation_response(db)

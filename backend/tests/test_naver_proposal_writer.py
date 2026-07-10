@@ -189,6 +189,51 @@ def test_build_exclusion_candidates_labeled_negative_no_conversion_claim(db):
     assert "전환" in out[0]["expected_effect"]  # 정밀예측 불가 명시
 
 
+def test_build_exclusion_includes_adgroup_id_and_persist_stores_it(db):
+    """X1a T3: restricted-keywords API는 adgroupId 필수(ref 27 §8-1) — exclusion 제안 dict에
+    adgroup_id가 실려 persist(NaverProposal(**p))로 컬럼까지 통과해야 실행 시점 재해석이 없다."""
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    row = {"campaign_id": "cmp-ours", "adgroup_id": "grp-1", "search_term": "무관검색어",
+           "source": "expkeyword", "cost": 30000, "clk": 20, "imp": 400}
+    diagnosis = _diagnosis(exclusion_candidates=[row])
+
+    out = proposal_writer.build(db, diagnosis, as_of=AS_OF)
+    assert out[0]["adgroup_id"] == "grp-1"
+
+    saved = proposal_writer.persist(db, out)
+    assert saved[0].adgroup_id == "grp-1"
+
+
+def test_persist_other_types_store_null_adgroup_id(db):
+    """adgroup_id 없는 제안 유형(bid 등)은 컬럼에 None 저장 — 실행 시 MissingExecutionTargetError로 fail-closed."""
+    candidates = [{"proposal_type": "bid_down", "target_type": "keyword", "target_id": "nkw-1",
+                   "campaign_id": "cmp-ours", "rationale": "r", "expected_effect": "e", "status": "pending"}]
+    saved = proposal_writer.persist(db, candidates)
+    assert saved[0].adgroup_id is None
+
+
+def test_persist_dedup_scoped_by_adgroup_same_term_different_adgroup_both_saved(db):
+    """[codex P2] 같은 검색어·같은 캠페인이라도 adgroup이 다르면 별개 실행 대상(restricted-
+    keywords는 광고그룹 단위 리소스) — dedup 키에 adgroup_id 포함. 같은 adgroup 재실행은 dedup."""
+    base = {"proposal_type": "negative_keyword", "target_type": "search_term",
+            "target_id": "같은검색어", "campaign_id": "cmp-a",
+            "rationale": "r", "expected_effect": "e", "status": "pending"}
+    first = proposal_writer.persist(db, [dict(base, adgroup_id="grp-1")])
+    assert len(first) == 1
+    db.commit()
+
+    # 다른 adgroup — 별개 제안으로 저장돼야 함
+    second = proposal_writer.persist(db, [dict(base, adgroup_id="grp-2")])
+    assert len(second) == 1
+    db.commit()
+
+    # 같은 adgroup 재실행 — dedup
+    third = proposal_writer.persist(db, [dict(base, adgroup_id="grp-1")])
+    assert third == []
+    assert db.query(NaverProposal).filter(NaverProposal.target_id == "같은검색어").count() == 2
+
+
 def test_persist_dedups_existing_pending_same_type_and_target(db):
     db.add(NaverProposal(proposal_type="bid_down", target_type="keyword", target_id="nkw-1",
                           campaign_id="cmp-ours", status="pending"))

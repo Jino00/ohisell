@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.models import NaverCampaignSettings, NaverProposal
 from app.services.naver_ad import campaign_target_resolver, growth_sweeper
+from app.services.naver_ad.trigger_watch import PROPOSAL_TYPE_CPC, PROPOSAL_TYPE_PACING
 
 _NEGATIVE = "negative_keyword"
 _GROWTH_BID_UP = "growth_bid_up"
@@ -17,6 +18,18 @@ _BUDGET_UP = "budget_up"
 _BUDGET_PRE_EXHAUSTION = "budget_pre_exhaustion"
 _ANOMALY = "anomaly"
 _ANOMALY_FRESHNESS = "anomaly_freshness"
+_ACCOUNT_BRIEF = "account_brief"
+
+# X1a T6(D-NAO-37): 정보성 제안 유형 5종 — 실행 대상 자체가 없는 제안(naver_execution_harness의
+# _ACTION_BY_PROPOSAL_TYPE에 매핑이 없는 유형과 의미상 같지만, 그 매핑에는 budget_up처럼 아직
+# OPEN_ACTIONS에 없을 뿐인 "실행형인데 미개방" 유형도 섞여 있어 "매핑에 없음"을 파생 조건으로
+# 쓰면 안전하지 않다(향후 예산 개방 시점에 조용히 브리핑에서 빠져버릴 위험) — 반드시 이 명시
+# 목록을 단일 진실로 유지한다. proposal_pipeline(차등 TTL)·expert_briefing_builder(브리핑
+# 접기)가 이 상수를 공유 import한다(순환 import 없음 — 두 모듈 다 이 모듈을 참조할 뿐, 이
+# 모듈은 어느 쪽도 import하지 않는다).
+INFORMATIONAL_PROPOSAL_TYPES: frozenset[str] = frozenset({
+    _ANOMALY, _ANOMALY_FRESHNESS, _ACCOUNT_BRIEF, PROPOSAL_TYPE_PACING, PROPOSAL_TYPE_CPC,
+})
 
 # 보드 의미상 허용되는 방향(codex 지적, 라이브검증 후속): starving_winners(육성 의도, D-NAO-18)는
 # bid_up만, bleeding_keywords/shopping_group_bep(손실 축소 의도)는 bid_down만 허용한다.
@@ -150,12 +163,17 @@ def _growth_proposal(
 
 def _negative_keyword_from_exclusion(row: dict, campaign_id: str) -> dict:
     """확장버킷 비용상위 검색어 → 제외후보 제안(전환귀속 없음 — '비용/볼륨 후보' 정직 라벨,
-    exclusion_candidates 보드 자체가 전환 데이터 없이 비용순만 제공하므로 그 경계를 그대로 전달)."""
+    exclusion_candidates 보드 자체가 전환 데이터 없이 비용순만 제공하므로 그 경계를 그대로 전달).
+
+    adgroup_id(X1a T3): restricted-keywords 쓰기 API가 adgroupId 필수(ref 27 §8-1) —
+    exclusion_candidates 보드가 이미 SELECT하는 값을 제안 생성 시점에 확정 저장(실행 시점
+    재해석보다 단순·결정적)."""
     return {
         "proposal_type": _NEGATIVE,
         "target_type": "search_term",
         "target_id": row["search_term"],
         "campaign_id": campaign_id,
+        "adgroup_id": row["adgroup_id"],
         "rationale": (
             f"[exclusion_candidates] 비용/볼륨 후보(전환귀속 데이터 없음, source={row.get('source')}) "
             f"cost={row.get('cost')}원, clk={row.get('clk')}, imp={row.get('imp')}."
@@ -383,10 +401,12 @@ def build(
 
 def persist(db: Session, proposals: list[dict]) -> list[NaverProposal]:
     """제안 후보를 naver_proposals에 저장. dedup: 같은 (proposal_type, target_type,
-    campaign_id, target_id)로 status='pending'이 이미 있으면 skip(트랜잭션 내
+    campaign_id, adgroup_id, target_id)로 status='pending'이 이미 있으면 skip(트랜잭션 내
     check-then-insert). campaign_id를 빼면 서로 다른 캠페인의 동일 검색어
     negative_keyword 제안이 충돌한다(codex 지적, 라이브검증 후속 — search_term은
-    캠페인마다 같은 문자열이 반복될 수 있음).
+    캠페인마다 같은 문자열이 반복될 수 있음). adgroup_id도 동일 원리(codex[P2] X1a T3):
+    restricted-keywords는 광고그룹 단위 리소스라 같은 검색어·같은 캠페인이라도 adgroup이
+    다르면 별개 실행 대상 — adgroup_id 없는 유형은 None(IS NULL) 비교라 기존 동작 불변.
 
     단일 08:00 크론 가정 — 동시성/재시도 하드닝(DB 유니크 인덱스)은 P3(계획서 명시 연기).
     """
@@ -396,6 +416,7 @@ def persist(db: Session, proposals: list[dict]) -> list[NaverProposal]:
             NaverProposal.proposal_type == p["proposal_type"],
             NaverProposal.target_type == p["target_type"],
             NaverProposal.campaign_id == p["campaign_id"],
+            NaverProposal.adgroup_id == p.get("adgroup_id"),  # None → IS NULL(기존 유형 불변)
             NaverProposal.target_id == p["target_id"],
             NaverProposal.status == "pending",
         ).first()
@@ -417,7 +438,7 @@ def account_brief_singleton(db: Session, diagnosis: dict, as_of: date) -> NaverP
     """
     today_start = datetime.combine(date.today(), datetime.min.time())
     existing = db.query(NaverProposal).filter(
-        NaverProposal.proposal_type == "account_brief",
+        NaverProposal.proposal_type == _ACCOUNT_BRIEF,
         NaverProposal.created_at >= today_start,
     ).first()
     if existing:
@@ -437,7 +458,7 @@ def account_brief_singleton(db: Session, diagnosis: dict, as_of: date) -> NaverP
         f"정리대상={triage.get('dead')}."
     )
     obj = NaverProposal(
-        proposal_type="account_brief", target_type="account", target_id="",
+        proposal_type=_ACCOUNT_BRIEF, target_type="account", target_id="",
         campaign_id="", rationale=rationale,
         expected_effect="정보성 요약 — 실행 대상 아님.", status="pending",
     )

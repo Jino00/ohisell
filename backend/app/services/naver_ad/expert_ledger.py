@@ -49,14 +49,22 @@ def _assert_session_clean_of_naver_proposal(db: Session) -> None:
 def record(db: Session, as_of: date, review: dict) -> NaverExpertReviewRun:
     """review(ava_reviewer.review 반환값)를 run 원장+평결 child로 저장.
 
-    멱등: 같은 (as_of, briefing_hash)에 대해 이미 run이 있으면 새로 쓰지 않고 그 run을 반환한다.
+    멱등은 status='ok' run에 대해서만 — 같은 (as_of, briefing_hash)에 이미 status='ok' run이
+    있으면 새로 쓰지 않고 그 run을 반환한다. degraded/failed run은 재시도를 막지 않는다
+    (2026-07-10 prod 실증: 스키마 검증 실패로 평결이 비어있는 degraded run이 같은 날 성공한
+    재시도를 삼켜 새 평결 43건이 조용히 버려짐 — 기존 degraded 행은 삭제·수정하지 않고
+    새 run을 별도 행으로 원장에 누적한다).
     재실행(진짜 새 브리핑, 다른 briefing_hash)은 같은 날이어도 새 run(덮어쓰기 아님).
     """
     _assert_session_clean_of_naver_proposal(db)
     briefing_hash = review.get("briefing_hash")
     existing = (
         db.query(NaverExpertReviewRun)
-        .filter(NaverExpertReviewRun.as_of == as_of, NaverExpertReviewRun.briefing_hash == briefing_hash)
+        .filter(
+            NaverExpertReviewRun.as_of == as_of,
+            NaverExpertReviewRun.briefing_hash == briefing_hash,
+            NaverExpertReviewRun.status == "ok",
+        )
         .order_by(NaverExpertReviewRun.id.desc())
         .first()
     )

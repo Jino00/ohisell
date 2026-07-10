@@ -590,6 +590,77 @@ def test_run_daily_expires_stale_pending_proposals(db):
     assert old.status == "expired"
 
 
+# ── X1a T6(D-NAO-37 ①) 차등 TTL ──
+def _make_pending(db, proposal_type, days_ago, **kw):
+    defaults = dict(
+        proposal_type=proposal_type, target_type="keyword", target_id=f"nkw-{proposal_type}-{days_ago}",
+        campaign_id="cmp1", status="pending",
+    )
+    defaults.update(kw)
+    p = NaverProposal(**defaults)
+    db.add(p)
+    db.commit()
+    p.created_at = datetime.combine(kst_today() - timedelta(days=days_ago), datetime.min.time())
+    db.commit()
+    return p
+
+
+@pytest.mark.parametrize("proposal_type, days_ago, expect_expired", [
+    # ★정확 경계(codex 지적 — D+N 당일에 만료돼야 함, 하루 늦으면 안 됨)
+    ("trigger_pacing", 1, True),      # D+1 당일 → expired (구 계산식은 D+2에야 만료 — 회귀 고정)
+    ("account_brief", 1, True),       # D+1 당일 → expired
+    ("anomaly", 3, True),             # D+3 당일 → expired
+    ("anomaly_freshness", 3, True),   # D+3 당일 → expired
+    ("negative_keyword", 14, False),  # 실행형은 기존 시맨틱 불변 — 14일 "초과"만(D+15), 14일째 유지
+    # 일반 케이스
+    ("trigger_pacing", 2, True),   # D+1 지남 → expired
+    ("trigger_pacing", 0, False),  # 당일 생성 → 유지
+    ("trigger_cpc_spike", 2, True),  # D+1 지남 → expired
+    ("account_brief", 2, True),      # D+1 지남 → expired
+    ("anomaly", 2, False),          # D+3 이전 → 유지
+    ("anomaly", 4, True),           # D+3 지남 → expired
+    ("anomaly_freshness", 2, False),  # D+3 이전 → 유지
+    ("anomaly_freshness", 4, True),   # D+3 지남 → expired
+    ("negative_keyword", 5, False),  # 실행형 폴백 TTL=14 이내 → 유지
+    ("negative_keyword", 15, True),  # 실행형 폴백 TTL=14 초과 → expired
+    ("bid_down", 5, False),          # 실행형 폴백 TTL=14 이내 → 유지(비정보성 임의 유형도 폴백)
+])
+def test_expire_stale_pending_differential_ttl(db, proposal_type, days_ago, expect_expired):
+    p = _make_pending(db, proposal_type, days_ago)
+
+    proposal_pipeline._expire_stale_pending(db)
+    db.commit()
+    db.refresh(p)
+
+    assert (p.status == "expired") == expect_expired
+
+
+def test_expire_stale_pending_returns_total_count_across_types(db):
+    """반환값은 기존 호출부(run_daily의 result['expired']) 호환 — 유형 무관 총 만료 건수."""
+    _make_pending(db, "trigger_pacing", 2)       # expired (TTL=1)
+    _make_pending(db, "anomaly", 4)               # expired (TTL=3)
+    _make_pending(db, "negative_keyword", 5)      # 유지 (TTL=14)
+
+    count = proposal_pipeline._expire_stale_pending(db)
+
+    assert count == 2
+
+
+def test_expire_stale_pending_backlog_retroactive_sweep(db):
+    """D-NAO-37 ③: 소급 효과가 곧 백로그 정리 — created_at 기준이라 기존에 쌓인 정보성
+    pending 백로그(예: 배포 전부터 있던 trigger_pacing 다건)도 이 로직 첫 실행에서 일괄
+    expired 전환된다(별도 백필 스크립트 없음)."""
+    backlog = [_make_pending(db, "trigger_pacing", 10, target_id=f"cmp-{i}") for i in range(3)]
+
+    count = proposal_pipeline._expire_stale_pending(db)
+    db.commit()
+
+    assert count == 3
+    for p in backlog:
+        db.refresh(p)
+        assert p.status == "expired"
+
+
 # ── 내부 헬퍼 단위테스트 ──
 def test_precompute_aggregates_sums_by_level(db):
     _row(db, AS_OF, "cmp1", "WEB_SITE", "grp1", "nkw-1", 100, 10, 1000, direct=500)
