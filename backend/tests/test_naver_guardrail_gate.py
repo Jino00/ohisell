@@ -262,6 +262,49 @@ def test_lock_target_lock_non_bool_blocked():
     assert reason is not None
 
 
+# ── 방향 불일치 (codex P2, 2026-07-10) ───────────────────────────────────
+
+
+def test_bid_down_with_target_bid_above_current_blocked():
+    # 구조 결함/stale 행 방어: proposal_type='bid_down'인데 target_bid가 오히려 인상 방향
+    reason = gate.check(_bid_proposal("bid_down", 210), _ctx(current_bid=190), now=NOW)
+    assert reason is not None
+    assert "방향" in reason
+
+
+def test_bid_up_with_target_bid_below_current_blocked():
+    reason = gate.check(_bid_proposal("bid_up", 170), _ctx(current_bid=190), now=NOW)
+    assert reason is not None
+    assert "방향" in reason
+
+
+def test_growth_bid_up_with_target_bid_below_current_blocked():
+    reason = gate.check(_bid_proposal("growth_bid_up", 170), _ctx(current_bid=190), now=NOW)
+    assert reason is not None
+    assert "방향" in reason
+
+
+def test_bid_up_with_target_bid_equal_current_blocked_as_no_direction():
+    # hold 방향은 proposal_writer가 애초에 제안을 안 만들지만(direction='hold'는 제안 자체가
+    # 없음), 구조 결함 방어 차원에서 방향성이 없는 등가도 차단
+    reason = gate.check(_bid_proposal("bid_up", 190), _ctx(current_bid=190), now=NOW)
+    assert reason is not None
+    assert "방향" in reason
+
+
+def test_pause_with_target_lock_false_blocked():
+    # proposal_type='pause'인데 target_lock=False(재개 방향) — 방향 불일치
+    reason = gate.check(_lock_proposal("pause", False), _ctx(), now=NOW)
+    assert reason is not None
+    assert "방향" in reason
+
+
+def test_resume_with_target_lock_true_blocked():
+    reason = gate.check(_lock_proposal("resume", True), _ctx(), now=NOW)
+    assert reason is not None
+    assert "방향" in reason
+
+
 # ── 지원하지 않는 유형 ────────────────────────────────────────────────────
 
 

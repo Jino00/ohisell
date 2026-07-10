@@ -66,7 +66,7 @@ def check(proposal: dict, context: dict, *, now: datetime) -> str | None:
 
     if proposal_type in _BID_TYPES:
         return _check_bid(proposal, context, proposal_type)
-    return _check_lock(proposal)
+    return _check_lock(proposal, proposal_type)
 
 
 def _check_cooldown_and_cap(context: dict, now: datetime) -> str | None:
@@ -96,6 +96,15 @@ def _check_bid(proposal: dict, context: dict, proposal_type: str) -> str | None:
     current_bid = context.get("current_bid")
     if current_bid is None:
         return "current_bid 미확보 — 변경폭 검증 불가(fail-closed)"
+
+    # codex[P2]: 구조 결함/stale 행 방어 — proposal_type이 주장하는 방향과 실제
+    # target_bid의 방향이 어긋나면(예: bid_down인데 인상 방향) 절대변경폭 검사만으로는
+    # 통과할 수 있고, bid_down은 up 전용 검사(스톱로스·BEP·일예산)를 면제받으므로 그
+    # 방어망까지 우회한다. 방향 불일치는 magnitude 검사보다 먼저 fail-closed 차단.
+    if proposal_type in _BID_UP_TYPES and target_bid <= current_bid:
+        return f"방향 불일치 — {proposal_type}인데 target_bid={target_bid}가 현재={current_bid} 이하"
+    if proposal_type in _BID_DOWN_TYPES and target_bid >= current_bid:
+        return f"방향 불일치 — {proposal_type}인데 target_bid={target_bid}가 현재={current_bid} 이상"
 
     if proposal_type not in _EXEMPT_FROM_CHANGE_PCT and current_bid > 0:
         change_pct = abs(Decimal(target_bid) - Decimal(current_bid)) / Decimal(current_bid)
@@ -130,10 +139,20 @@ def _check_bid(proposal: dict, context: dict, proposal_type: str) -> str | None:
     return None
 
 
-def _check_lock(proposal: dict) -> str | None:
+def _check_lock(proposal: dict, proposal_type: str) -> str | None:
     target_lock = proposal.get("target_lock")
     if target_lock is None:
         return "target_lock 없음 — 구조 결함(재생성 필요)"
     if not isinstance(target_lock, bool):
         return f"target_lock은 bool이어야 함: {target_lock!r}"
+
+    # codex[P2]: pause는 정지(target_lock=True)만, resume은 재개(target_lock=False)만
+    # 유효하다 — 값이 반대면 구조 결함/stale 행이 실행기에 그대로 흘러가 의도와 반대
+    # 액션(재개하려는데 정지)이 집행될 수 있다.
+    expected = True if proposal_type == "pause" else False
+    if target_lock != expected:
+        return (
+            f"방향 불일치 — {proposal_type}인데 target_lock={target_lock}"
+            f"(기대값={expected})"
+        )
     return None
