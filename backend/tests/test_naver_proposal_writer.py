@@ -213,6 +213,146 @@ def test_persist_other_types_store_null_adgroup_id(db):
     assert saved[0].adgroup_id is None
 
 
+# ── X1b T3: target_bid 구조화 저장 (D-NAO-38 갭①) ────────────────────────
+
+
+def test_build_bleeding_keyword_stores_target_bid(db):
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis(bleeding_keywords=[_bleeding_row()])
+
+    out = proposal_writer.build(
+        db, diagnosis, bid_sims={("keyword", "nkw-1"): _sim(direction="down", recommended=170)}, as_of=AS_OF,
+    )
+    assert out[0]["target_bid"] == 170
+
+    saved = proposal_writer.persist(db, out)
+    assert saved[0].target_bid == 170
+
+
+def test_build_starving_winner_stores_target_bid(db):
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    row = {"campaign_id": "cmp-ours", "adgroup_id": "grp-1", "keyword_id": "nkw-2",
+           "cost": 5000, "clk": 3, "conv_amt": 50_000, "roas_corrected": 10.0, "avg_daily_clk": 0.1}
+    diagnosis = _diagnosis(starving_winners=[row])
+
+    out = proposal_writer.build(
+        db, diagnosis, bid_sims={("keyword", "nkw-2"): _sim(direction="up", recommended=220)}, as_of=AS_OF,
+    )
+    assert out[0]["target_bid"] == 220
+
+
+def test_build_growth_candidate_stores_target_bid(db):
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis()
+
+    out = proposal_writer.build(
+        db, diagnosis, growth_candidates=[_growth_candidate()],
+        growth_sims={("keyword", "nkw-growth"): _sim(direction="up", ceiling=500, recommended=470)},
+        as_of=AS_OF,
+    )
+    assert out[0]["target_bid"] == 470
+
+
+def test_build_negative_keyword_escalation_has_no_target_bid(db):
+    """economic_ceiling<=0 격상 시엔 입찰 목표 자체가 없음 — target_bid는 None(구조상 당연,
+    실행자가 target_bid를 읽지 않는 negative_keyword 액션이라 무해)."""
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis(bleeding_keywords=[_bleeding_row()])
+
+    out = proposal_writer.build(
+        db, diagnosis,
+        bid_sims={("keyword", "nkw-1"): _sim(direction="down", ceiling=0, recommended=0)},
+        as_of=AS_OF,
+    )
+    assert out[0]["proposal_type"] == "negative_keyword"
+    assert out[0]["target_bid"] is None
+
+
+# ── X1b T3: pause/resume 생성기 (D-NAO-38) ───────────────────────────────
+
+
+def _pause_row(**overrides):
+    row = {"campaign_id": "cmp-ours", "adgroup_id": "grp-1", "keyword_id": "nkw-pause",
+           "imp": 500, "clk": 25, "cost": 2500, "conv_amt": 0, "roas_naver": None,
+           "current_bid": 200, "stop_loss_amount": 2000}
+    row.update(overrides)
+    return row
+
+
+def test_build_pause_candidate_produces_pause_proposal(db):
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis(pause_candidates=[_pause_row()])
+
+    out = proposal_writer.build(db, diagnosis, as_of=AS_OF)
+    assert len(out) == 1
+    assert out[0]["proposal_type"] == "pause"
+    assert out[0]["target_type"] == "keyword"
+    assert out[0]["target_id"] == "nkw-pause"
+    assert out[0]["adgroup_id"] == "grp-1"
+    assert out[0]["target_lock"] is True
+    assert "스톱로스" in out[0]["rationale"]
+
+
+def test_build_pause_candidate_skips_non_ours_campaign(db):
+    db.add(NaverCampaignSettings(campaign_id="cmp-none", optimizer="none"))
+    db.commit()
+    diagnosis = _diagnosis(pause_candidates=[_pause_row(campaign_id="cmp-none")])
+
+    out = proposal_writer.build(db, diagnosis, as_of=AS_OF)
+    assert out == []
+
+
+def test_persist_pause_proposal_stores_target_lock_true(db):
+    row = _pause_row()
+    p = proposal_writer._pause_proposal(row)
+    saved = proposal_writer.persist(db, [p])
+    assert saved[0].target_lock is True
+    assert saved[0].target_bid is None
+
+
+def _resume_row(**overrides):
+    row = {"campaign_id": "cmp-ours", "adgroup_id": "grp-1", "keyword_id": "nkw-resume",
+           "roas_at_pause": 5.0, "paused_at": "2026-07-01T00:00:00"}
+    row.update(overrides)
+    return row
+
+
+def test_build_resume_candidate_produces_resume_proposal(db):
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis(resume_candidates=[_resume_row()])
+
+    out = proposal_writer.build(db, diagnosis, as_of=AS_OF)
+    assert len(out) == 1
+    assert out[0]["proposal_type"] == "resume"
+    assert out[0]["target_type"] == "keyword"
+    assert out[0]["target_id"] == "nkw-resume"
+    assert out[0]["target_lock"] is False
+    assert "BEP 개선" in out[0]["rationale"]
+
+
+def test_build_resume_candidate_skips_non_ours_campaign(db):
+    db.add(NaverCampaignSettings(campaign_id="cmp-none", optimizer="none"))
+    db.commit()
+    diagnosis = _diagnosis(resume_candidates=[_resume_row(campaign_id="cmp-none")])
+
+    out = proposal_writer.build(db, diagnosis, as_of=AS_OF)
+    assert out == []
+
+
+def test_persist_resume_proposal_stores_target_lock_false(db):
+    row = _resume_row()
+    p = proposal_writer._resume_proposal(row, {"source": "account_default", "target_roas": None})
+    saved = proposal_writer.persist(db, [p])
+    assert saved[0].target_lock is False
+    assert saved[0].target_bid is None
+
+
 def test_persist_dedup_scoped_by_adgroup_same_term_different_adgroup_both_saved(db):
     """[codex P2] 같은 검색어·같은 캠페인이라도 adgroup이 다르면 별개 실행 대상(restricted-
     keywords는 광고그룹 단위 리소스) — dedup 키에 adgroup_id 포함. 같은 adgroup 재실행은 dedup."""

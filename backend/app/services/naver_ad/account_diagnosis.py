@@ -12,7 +12,7 @@ from decimal import Decimal
 from sqlalchemy import func as sqlfunc
 from sqlalchemy.orm import Session
 
-from app.models import NaverAdDaily, NaverEntity, NaverSearchTermDaily
+from app.models import NaverAdDaily, NaverChangeLog, NaverEntity, NaverSearchTermDaily
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 
 _WEB_SITE = "WEB_SITE"
@@ -335,3 +335,86 @@ def vicious_cycle_flags(
             })
     flags.sort(key=lambda x: x["recent_roas_corrected"])
     return flags
+
+
+def pause_candidates(db: Session, date_from: date, date_to: date) -> list[dict]:
+    """정지 후보 (X1b T3, D-NAO-38) — WEB_SITE 등록 키워드(status='on') 중 창 내 전환 0건
+    + 누적비용이 스톱로스 절대액(D-NAO-20) 이상. 스톱로스 절대액 = 현재 입찰가 ×
+    LOW_CLICK_THRESHOLD(growth_sweeper.STOP_LOSS_CLICK_MULTIPLE과 동일 상수, D-NAO-9/20 근거
+    재사용) — "무전환 지출 상한 도달 시 자동 인하/중단"(D-NAO-16)의 "중단" 쪽 구현.
+    NaverEntity에 bid_amt가 없는(미확보) 키워드는 스톱로스 계산 불가라 fail-closed 제외.
+    """
+    entity_map = {
+        e.entity_id: e for e in
+        db.query(NaverEntity).filter(NaverEntity.entity_type == "keyword", NaverEntity.status == "on").all()
+    }
+    if not entity_map:
+        return []
+
+    rows = [r for r in _keyword_rows(db, date_from, date_to, _WEB_SITE)
+            if r["keyword_id"] and r["cost"] > 0]
+    out = []
+    for r in rows:
+        entity = entity_map.get(r["keyword_id"])
+        if entity is None or not entity.bid_amt:
+            continue
+        stop_loss_amount = entity.bid_amt * LOW_CLICK_THRESHOLD
+        if r["conv_amt"] == 0 and r["cost"] >= stop_loss_amount:
+            out.append({**r, "current_bid": entity.bid_amt, "stop_loss_amount": stop_loss_amount})
+    out.sort(key=lambda x: x["cost"], reverse=True)
+    return out
+
+
+def resume_candidates(
+    db: Session, date_to: date, target_roas: Decimal, correction_factor: Decimal,
+) -> list[dict]:
+    """재개 후보 (X1b T3, D-NAO-38) — 우리 시스템이 정지시킨(change_log action='pause',
+    proposal_id 있음 — Jino가 콘솔에서 수동 정지한 경우는 proposal_id가 없어 제외, 우리가
+    모르는 이유로 정지된 것을 임의로 재개하지 않는다) 키워드 중 정지 직전 창의 보정ROAS가
+    현재 목표(target_roas) 이상 — D-NAO-16 "정지 사유 해소" 중 "BEP 개선"(우리 목표 자체가
+    낮아졌거나, 정지 당시 이미 양호했던 키워드) 신호.
+
+    정직 경계: "계절성 회복·CPC 하락"(D-NAO-16 예시의 나머지 2가지)은 미구현 — 정지 중엔
+    해당 키워드의 새 실적이 쌓이지 않아 직접 관측 불가하고, 대체 신호(캠페인 CPC 추세 등)는
+    이번 스코프에 넣지 않았다(§8 승계 큐 후보로 별도 기록 필요).
+    """
+    off_ids = {
+        r[0] for r in
+        db.query(NaverEntity.entity_id).filter(
+            NaverEntity.entity_type == "keyword", NaverEntity.status == "off",
+        ).all()
+    }
+    if not off_ids:
+        return []
+
+    pause_rows = (
+        db.query(NaverChangeLog.entity_id, NaverChangeLog.campaign_id, sqlfunc.max(NaverChangeLog.changed_at))
+        .filter(
+            NaverChangeLog.entity_type == "keyword", NaverChangeLog.action == "pause",
+            NaverChangeLog.proposal_id.isnot(None), NaverChangeLog.entity_id.in_(off_ids),
+            NaverChangeLog.outcome == "executed",
+        )
+        .group_by(NaverChangeLog.entity_id, NaverChangeLog.campaign_id)
+        .all()
+    )
+
+    out = []
+    for keyword_id, campaign_id, paused_at in pause_rows:
+        pause_date = paused_at.date()
+        window_to = pause_date - timedelta(days=1)
+        window_from = window_to - timedelta(days=LOW_CLICK_LOOKBACK_DAYS - 1)
+        rows = [r for r in _keyword_rows(db, window_from, window_to, _WEB_SITE)
+                if r["keyword_id"] == keyword_id]
+        if not rows:
+            continue
+        agg_cost = sum(r["cost"] for r in rows)
+        agg_conv = sum(r["conv_amt"] for r in rows)
+        roas_naver = float(Decimal(agg_conv) / Decimal(agg_cost)) if agg_cost else None
+        roas_c = _corrected_roas(roas_naver, correction_factor)
+        if roas_c is not None and roas_c >= float(target_roas):
+            out.append({
+                "campaign_id": campaign_id, "adgroup_id": rows[0]["adgroup_id"], "keyword_id": keyword_id,
+                "roas_at_pause": roas_c, "paused_at": paused_at.isoformat(),
+            })
+    out.sort(key=lambda x: x["roas_at_pause"], reverse=True)
+    return out

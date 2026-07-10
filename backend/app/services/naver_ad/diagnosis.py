@@ -69,6 +69,8 @@ def build_diagnosis(db: Session, date_from: date, date_to: date) -> dict:
         "exclusion_candidates": diag.exclusion_candidates(db, date_from, date_to),
         "keyword_triage": diag.keyword_triage(db, as_of=date_to),
         "vicious_cycle": diag.vicious_cycle_flags(db, date_to, target_roas, factor),
+        "pause_candidates": diag.pause_candidates(db, date_from, date_to),
+        "resume_candidates": diag.resume_candidates(db, date_to, target_roas, factor),
     }
 
     return {

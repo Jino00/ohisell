@@ -3,7 +3,7 @@
 #   + diagnosis harness 조립(보정계수·계정 BEP/목표ROAS 없을 때 폴백).
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -12,7 +12,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.database import Base
-from app.models import NaverAdDaily, NaverEntity, NaverProductBep, NaverSearchTermDaily, Order
+from app.models import NaverAdDaily, NaverChangeLog, NaverEntity, NaverProductBep, NaverSearchTermDaily, Order
 from app.services.naver_ad import account_diagnosis as diag
 from app.services.naver_ad.diagnosis import build_diagnosis
 
@@ -235,5 +235,171 @@ def test_build_diagnosis_assembles_all_boards(db):
     assert set(result["boards"]) == {
         "bleeding_keywords", "starving_winners", "expansion_bucket",
         "shopping_group_bep", "exclusion_candidates", "keyword_triage", "vicious_cycle",
+        "pause_candidates", "resume_candidates",
     }
     assert result["account_bep_roas"] == pytest.approx(3.3333)
+
+
+# ── pause_candidates (X1b T3, D-NAO-38) ──
+
+
+def _entity(db, entity_type, entity_id, *, status="on", bid_amt=None, campaign_id="cmp1",
+            parent_id="grp1", campaign_type="WEB_SITE"):
+    db.add(NaverEntity(
+        entity_type=entity_type, entity_id=entity_id, parent_id=parent_id,
+        campaign_id=campaign_id, campaign_type=campaign_type, name=entity_id,
+        status=status, bid_amt=bid_amt,
+    ))
+
+
+def test_pause_candidates_zero_conversion_over_stop_loss(db):
+    # bid_amt=200 → 스톱로스 절대액 = 200*10(LOW_CLICK_THRESHOLD) = 2,000원. 무전환 누적비용 2,500원.
+    _entity(db, "keyword", "nkw-1", status="on", bid_amt=200)
+    _row(db, D0, "cmp1", "WEB_SITE", "grp1", "nkw-1", 500, 25, 2500, direct=0, indirect=0)
+    db.commit()
+
+    out = diag.pause_candidates(db, D0, D0)
+    assert len(out) == 1
+    assert out[0]["keyword_id"] == "nkw-1"
+    assert out[0]["current_bid"] == 200
+    assert out[0]["stop_loss_amount"] == 2000
+
+
+def test_pause_candidates_excludes_converting_keyword(db):
+    _entity(db, "keyword", "nkw-1", status="on", bid_amt=200)
+    _row(db, D0, "cmp1", "WEB_SITE", "grp1", "nkw-1", 500, 25, 2500, direct=3000)  # 전환 있음
+    db.commit()
+
+    out = diag.pause_candidates(db, D0, D0)
+    assert out == []
+
+
+def test_pause_candidates_excludes_cost_below_stop_loss(db):
+    _entity(db, "keyword", "nkw-1", status="on", bid_amt=200)
+    _row(db, D0, "cmp1", "WEB_SITE", "grp1", "nkw-1", 200, 5, 1000, direct=0)  # 1,000 < 2,000
+    db.commit()
+
+    out = diag.pause_candidates(db, D0, D0)
+    assert out == []
+
+
+def test_pause_candidates_excludes_already_off(db):
+    _entity(db, "keyword", "nkw-1", status="off", bid_amt=200)  # 이미 정지됨
+    _row(db, D0, "cmp1", "WEB_SITE", "grp1", "nkw-1", 500, 25, 2500, direct=0)
+    db.commit()
+
+    out = diag.pause_candidates(db, D0, D0)
+    assert out == []
+
+
+def test_pause_candidates_excludes_missing_entity(db):
+    # NaverEntity 행 자체가 없음(bid_amt 미확보) — fail-closed 스킵
+    _row(db, D0, "cmp1", "WEB_SITE", "grp1", "nkw-1", 500, 25, 2500, direct=0)
+    db.commit()
+
+    out = diag.pause_candidates(db, D0, D0)
+    assert out == []
+
+
+def test_pause_candidates_sorted_by_cost_desc(db):
+    _entity(db, "keyword", "nkw-1", status="on", bid_amt=200)
+    _entity(db, "keyword", "nkw-2", status="on", bid_amt=200, parent_id="grp2")
+    _row(db, D0, "cmp1", "WEB_SITE", "grp1", "nkw-1", 500, 25, 2000, direct=0)
+    _row(db, D0, "cmp1", "WEB_SITE", "grp2", "nkw-2", 800, 40, 3000, direct=0)
+    db.commit()
+
+    out = diag.pause_candidates(db, D0, D0)
+    assert [r["keyword_id"] for r in out] == ["nkw-2", "nkw-1"]
+
+
+# ── resume_candidates (X1b T3, D-NAO-38) ──
+
+
+def test_resume_candidates_recovered_roas_since_our_pause(db):
+    _entity(db, "keyword", "nkw-off-1", status="off", bid_amt=190)
+    # 정지 직전 30일 창(D_TO-30 ~ D_TO-1)에 양호한 실적(보정ROAS 5.0 ≥ 목표 2.0)
+    pre_pause_date = D_TO - timedelta(days=5)
+    _row(db, pre_pause_date, "cmp1", "WEB_SITE", "grp1", "nkw-off-1", 100, 10, 2000, direct=10000)
+    db.add(NaverChangeLog(
+        entity_type="keyword", entity_id="nkw-off-1", campaign_id="cmp1", action="pause",
+        proposal_id=1, outcome="executed", changed_at=datetime.combine(D_TO, datetime.min.time()),
+    ))
+    db.commit()
+
+    out = diag.resume_candidates(db, D_TO, target_roas=Decimal("2.0"), correction_factor=Decimal("1"))
+    assert len(out) == 1
+    assert out[0]["keyword_id"] == "nkw-off-1"
+    assert out[0]["roas_at_pause"] == 5.0
+
+
+def test_resume_candidates_excludes_manual_pause_no_proposal_id(db):
+    _entity(db, "keyword", "nkw-off-1", status="off", bid_amt=190)
+    pre_pause_date = D_TO - timedelta(days=5)
+    _row(db, pre_pause_date, "cmp1", "WEB_SITE", "grp1", "nkw-off-1", 100, 10, 2000, direct=10000)
+    db.add(NaverChangeLog(
+        entity_type="keyword", entity_id="nkw-off-1", campaign_id="cmp1", action="pause",
+        proposal_id=None, outcome="executed",  # Jino가 콘솔에서 수동 정지 — 우리가 재개 판단 금지
+        changed_at=datetime.combine(D_TO, datetime.min.time()),
+    ))
+    db.commit()
+
+    out = diag.resume_candidates(db, D_TO, target_roas=Decimal("2.0"), correction_factor=Decimal("1"))
+    assert out == []
+
+
+def test_resume_candidates_excludes_roas_still_below_target(db):
+    _entity(db, "keyword", "nkw-off-1", status="off", bid_amt=190)
+    pre_pause_date = D_TO - timedelta(days=5)
+    _row(db, pre_pause_date, "cmp1", "WEB_SITE", "grp1", "nkw-off-1", 100, 10, 2000, direct=1000)  # roas=0.5
+    db.add(NaverChangeLog(
+        entity_type="keyword", entity_id="nkw-off-1", campaign_id="cmp1", action="pause",
+        proposal_id=1, outcome="executed", changed_at=datetime.combine(D_TO, datetime.min.time()),
+    ))
+    db.commit()
+
+    out = diag.resume_candidates(db, D_TO, target_roas=Decimal("2.0"), correction_factor=Decimal("1"))
+    assert out == []
+
+
+def test_resume_candidates_excludes_off_keyword_without_pause_log(db):
+    # status='off'지만 change_log에 pause 기록이 없음(예: 네이버 콘솔에서 직접 조작, 추적 불가)
+    _entity(db, "keyword", "nkw-off-1", status="off", bid_amt=190)
+    db.commit()
+
+    out = diag.resume_candidates(db, D_TO, target_roas=Decimal("2.0"), correction_factor=Decimal("1"))
+    assert out == []
+
+
+def test_resume_candidates_excludes_currently_on_keyword(db):
+    _entity(db, "keyword", "nkw-1", status="on", bid_amt=190)
+    db.add(NaverChangeLog(
+        entity_type="keyword", entity_id="nkw-1", campaign_id="cmp1", action="pause",
+        proposal_id=1, outcome="executed", changed_at=datetime.combine(D_TO, datetime.min.time()),
+    ))
+    db.commit()
+
+    out = diag.resume_candidates(db, D_TO, target_roas=Decimal("2.0"), correction_factor=Decimal("1"))
+    assert out == []
+
+
+def test_resume_candidates_uses_most_recent_pause_when_multiple(db):
+    # 정지→(다른 이유로 우리가 아닌?)재개→재정지 이력이 있어도 가장 최근 pause만 사용
+    _entity(db, "keyword", "nkw-off-1", status="off", bid_amt=190)
+    old_pre_pause = D_TO - timedelta(days=40)
+    recent_pre_pause = D_TO - timedelta(days=5)
+    _row(db, old_pre_pause, "cmp1", "WEB_SITE", "grp1", "nkw-off-1", 100, 10, 2000, direct=1000)  # 낮은 roas(옛 정지 근거)
+    _row(db, recent_pre_pause, "cmp1", "WEB_SITE", "grp1", "nkw-off-1", 100, 10, 2000, direct=10000)  # 높은 roas(최근 정지 근거)
+    db.add(NaverChangeLog(
+        entity_type="keyword", entity_id="nkw-off-1", campaign_id="cmp1", action="pause",
+        proposal_id=1, outcome="executed",
+        changed_at=datetime.combine(D_TO - timedelta(days=35), datetime.min.time()),
+    ))
+    db.add(NaverChangeLog(
+        entity_type="keyword", entity_id="nkw-off-1", campaign_id="cmp1", action="pause",
+        proposal_id=2, outcome="executed", changed_at=datetime.combine(D_TO, datetime.min.time()),
+    ))
+    db.commit()
+
+    out = diag.resume_candidates(db, D_TO, target_roas=Decimal("2.0"), correction_factor=Decimal("1"))
+    assert len(out) == 1
+    assert out[0]["roas_at_pause"] == 5.0  # 최근 정지 직전 창 기준(옛 창의 0.5가 아님)
