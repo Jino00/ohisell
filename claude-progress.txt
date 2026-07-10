@@ -3,7 +3,10 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
-- 날짜: 2026-07-10 오후 (★네이버 광고 트랙 **X0 선결 전부 종결 + expert_ledger 멱등 버그 수정·prod 배포** — fable 세션)
+- 날짜: 2026-07-10 오후 늦게 (★네이버 광고 트랙 **X1a T1·T2·T3 완료 — 쓰기 어댑터+실쓰기 첫 개방** — fable 지휘+Sonnet 서브에이전트 구현 세션)
+- ★**X1a 전반부 완료**: T1 ref 27(swagger gh-pages 재확보·repo 보존 + prod 읽기 실측 3건) / T2 naver_sa_writer(제외키워드 3함수, 재조회 실측 성공판정·무재시도·fail-closed, codex 3라운드 PASS) / T3 execution_harness 실쓰기 개방(OPEN_ACTIONS 제외키워드, 원자적 클레임→executing, before/after+created_ids 전건 기록, 실패=failed 종결, target_type·adgroup_id 이중 가드, adgroup_id 컬럼 마이그레이션 `a1b2c3d4e5f6` — **prod 미적용**, codex 2사이클 PASS). 테스트 904→935 passed. 커밋 `4fa3fe2`~`56b39de`(미push). 워크트리 이동: admiring-solomon → **gracious-heyrovsky-98a1bb**(X0 커밋 ff 병합 완료). 백로그: alembic oauth_tokens 결함 별도 세션 진행 중. **다음 세션 = `.claude/memory/HANDOFF_ohisell-naver-ad-X1a-T1T2T3-done_20260710.md` 필독 → X1a T4(콘솔 승인 버튼+실행 라우터+run-status 조인)부터. 실쓰기는 아직 실행 경로 없음(T4·카나리 대기).**
+- ─────────────────────────────────────────────
+- (이전) 날짜: 2026-07-10 오후 (★네이버 광고 트랙 **X0 선결 전부 종결 + expert_ledger 멱등 버그 수정·prod 배포** — fable 세션)
 - ★**X0 완료**: X0-1 Ava ok run 라이브 검증(run id=2 ok·평결 44행 — 과정에서 멱등 버그 발견: degraded run이 당일 성공 재시도 평결을 삼킴 → dedup status=ok 필터, TDD 904 passed·codex PASS·prod 배포, failures.jsonl 기록) / X0-2 카나리 연기(Jino "프로그램 완성되면 정하자") / X0-3=D-NAO-37 경량화 정책 확정(차등 TTL+브리핑 접기+백로그 정리, 구현=X1a T6). 결정 추가: D-NAO-35(설계=fable ~7/12 한시·구현=Sonnet), D-NAO-36(G4 후속+§8 승계 큐), D-NAO-37. 커밋 `eb81bc0`·`c4445b9`(미push). **다음 세션 = HANDOFF_ohisell-naver-ad-X0-done+dedupfix_20260710.md 필독 → 계획서 §0·§7 → X1a T1(swagger 찾기→ref 27 문서화. 실쓰기 실측은 Jino 캠페인 지정 후).**
 - ─────────────────────────────────────────────
 - (이전) 날짜: 2026-07-10 (★네이버 광고 트랙 **MOP 풀 갭 리뷰 + 논문 서베이 + 실행 루프(X) 스프린트 구조 승인(D-NAO-34)** — fable 설계 세션)
