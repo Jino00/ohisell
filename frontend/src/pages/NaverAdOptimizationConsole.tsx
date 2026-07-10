@@ -6,7 +6,7 @@
 // 모든 실쓰기는 사람의 Confirm을 거친다(D-NAO-5).
 // X1a T5 — E2 위임 스위치(D-NAO-25): Ava agree+가드레일 통과 유형만 사람 승인 없이
 // 자동 승인·실행되도록 콘솔에서 켜고 끈다. 스위치 행사자는 Jino뿐.
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import {
   fetchNaverAdReport,
   fetchNaverAdProposals,
@@ -19,6 +19,7 @@ import {
   executeNaverProposal,
   getNaverExpertDelegation,
   putNaverExpertDelegation,
+  getNaverDashboardOverview,
   type NaverAdProposal,
   type NaverAdCampaignSettings,
   type NaverAdOptimizer,
@@ -26,6 +27,7 @@ import {
   type NaverExpertVerdict,
   type NaverExpertScorecard,
   type NaverExpertDelegationSettings,
+  type NaverDashboardOverview,
 } from "../lib/api";
 
 function isoKST(d: Date): string {
@@ -34,6 +36,19 @@ function isoKST(d: Date): string {
 }
 function daysAgo(n: number): string {
   return isoKST(new Date(Date.now() - n * 86400000));
+}
+// T2 — 백엔드 last_evidence_at은 naive KST 문자열(다른 콘솔 코드도 동일 관례,
+// 예: p.created_at?.slice(0,16) 직접 슬라이스 — Date 객체로 재해석하면 이중 시프트된다).
+// 오늘이면 "HH:mm", 아니면 "M/D HH:mm".
+function fmtEvidenceTime(iso: string | null): string {
+  if (!iso) return "-";
+  const datePart = iso.slice(0, 10);
+  const timePart = iso.slice(11, 16);
+  if (!timePart) return datePart;
+  const today = isoKST(new Date());
+  if (datePart === today) return timePart;
+  const [, m, d] = datePart.split("-");
+  return `${Number(m)}/${Number(d)} ${timePart}`;
 }
 function fmt(n: number | null | undefined): string {
   if (n == null) return "-";
@@ -56,12 +71,21 @@ const AGGRESSIVENESS_OPTIONS: { key: string; label: string; mult: number }[] = [
   { key: "aggressive", label: "공격 ×1.05", mult: 1.05 },
 ];
 
-const MODE_OPTIONS: { key: NaverAdCampaignMode; label: string }[] = [
-  { key: "growth", label: "성장" },
-  { key: "recovery", label: "회복" },
-  { key: "launch", label: "런칭" },
-  { key: "defense", label: "방어" },
+// T4 — 운영모드 라디오 카드(MOP 24b 균형운영/성장운영 카드 패턴). 코드에 기존 설명 문구가
+// 없어 작업 지시에 명시된 문구를 그대로 사용(§4 T4-1).
+const MODE_OPTIONS: { key: NaverAdCampaignMode; label: string; desc: string }[] = [
+  { key: "growth", label: "성장", desc: "볼륨 성장 우선" },
+  { key: "recovery", label: "회복", desc: "수익성 회복" },
+  { key: "launch", label: "런칭", desc: "신규 진입 탐색" },
+  { key: "defense", label: "방어", desc: "이익 방어" },
 ];
+
+// T4 — MOP `13_budget_pacing` 커버리지 스택바 색 규약(ours=파랑) 재사용.
+const STAGE_STATUS_META: Record<string, { dot: string; label: string }> = {
+  ok: { dot: "bg-green-500", label: "정상" },
+  stale: { dot: "bg-amber-500", label: "지연" },
+  none: { dot: "bg-gray-300", label: "없음" },
+};
 
 const OPTIMIZER_OPTIONS: { key: NaverAdOptimizer; label: string }[] = [
   { key: "none", label: "없음(수동)" },
@@ -118,6 +142,11 @@ function toEditState(s: NaverAdCampaignSettings | undefined): EditState {
 }
 
 export default function NaverAdOptimizationConsole() {
+  // T2 — 엔진 파이프라인 5단계 + optimizer 커버리지(대시보드 미니 스프린트).
+  const [dashboardOverview, setDashboardOverview] = useState<NaverDashboardOverview | null>(null);
+  const [dashboardLoading, setDashboardLoading] = useState(false);
+  const [dashboardError, setDashboardError] = useState<string | null>(null);
+
   const [proposals, setProposals] = useState<NaverAdProposal[]>([]);
   const [proposalStatus, setProposalStatus] = useState("pending");
   const [proposalsLoading, setProposalsLoading] = useState(false);
@@ -151,6 +180,19 @@ export default function NaverAdOptimizationConsole() {
   // 서로 덮어쓸 수 있음(codex 지적). 저장 중엔 패널 전체를 잠근다.
   const [delegationBusy, setDelegationBusy] = useState(false);
   const [delegationPanelOpen, setDelegationPanelOpen] = useState(false);
+
+  async function loadDashboardOverview() {
+    setDashboardLoading(true);
+    setDashboardError(null);
+    try {
+      const data = await getNaverDashboardOverview();
+      setDashboardOverview(data);
+    } catch (e: any) {
+      setDashboardError(e.message);
+    } finally {
+      setDashboardLoading(false);
+    }
+  }
 
   async function loadProposals() {
     const mySeq = ++proposalsReqSeq.current;
@@ -234,6 +276,8 @@ export default function NaverAdOptimizationConsole() {
   }
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { loadDashboardOverview(); }, []);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { loadProposals(); }, [proposalStatus]);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { loadPanel(); }, []);
@@ -251,6 +295,26 @@ export default function NaverAdOptimizationConsole() {
     if (accountBepRoas == null) return;
     const override = Math.round(accountBepRoas * mult * 10000) / 10000;
     updateEdit(campaignId, { targetRoasOverride: String(override) });
+  }
+
+  // T4 — 슬라이더 위치는 AGGRESSIVENESS_OPTIONS 3개 배수 중 현재 override에 가장 가까운
+  // 인덱스로 파생(코드에 이미 있는 배수 3개만 사용 — 새 범위 발명 금지). 매칭 실패/미지정
+  // 시 표준(idx 1)을 기본값으로 보여준다. 저장되는 값은 항상 숫자 input이 담당(정밀 보존).
+  function sliderIndexForCampaign(campaignId: string): number {
+    const e = edits[campaignId];
+    if (!e || accountBepRoas == null || accountBepRoas <= 0) return 1;
+    const trimmed = e.targetRoasOverride.trim();
+    if (trimmed === "") return 1;
+    const parsed = Number(trimmed);
+    if (!Number.isFinite(parsed) || parsed <= 0) return 1;
+    const mult = parsed / accountBepRoas;
+    let bestIdx = 1;
+    let bestDiff = Infinity;
+    AGGRESSIVENESS_OPTIONS.forEach((opt, idx) => {
+      const diff = Math.abs(opt.mult - mult);
+      if (diff < bestDiff) { bestDiff = diff; bestIdx = idx; }
+    });
+    return bestIdx;
   }
 
   async function save(campaignId: string) {
@@ -466,6 +530,76 @@ export default function NaverAdOptimizationConsole() {
 
   return (
     <div className="space-y-6">
+      {/* 엔진 파이프라인 5단계 + optimizer 커버리지(T1/T2, 대시보드 미니 스프린트) */}
+      <div className="bg-white rounded-lg border border-gray-200 p-4">
+        <h3 className="text-sm font-medium text-gray-700 mb-3">엔진 파이프라인</h3>
+        {dashboardError && <div className="text-sm text-red-600 mb-2">{dashboardError}</div>}
+        {dashboardLoading ? (
+          <div className="text-sm text-gray-400 py-4 text-center">불러오는 중...</div>
+        ) : dashboardOverview ? (
+          <div className="flex items-stretch gap-1 overflow-x-auto">
+            {dashboardOverview.engine_stages.map((s, i) => (
+              <Fragment key={s.key}>
+                <div className="flex-1 min-w-[130px] rounded border border-gray-200 bg-white p-2.5">
+                  <div className="flex items-center gap-1.5">
+                    <span
+                      className={`inline-block h-2 w-2 shrink-0 rounded-full ${STAGE_STATUS_META[s.status]?.dot ?? "bg-gray-300"}`}
+                      title={STAGE_STATUS_META[s.status]?.label ?? s.status}
+                    />
+                    <span className="text-xs font-medium text-gray-700">{s.name}</span>
+                  </div>
+                  <div className="text-[11px] text-gray-400 mt-1">{fmtEvidenceTime(s.last_evidence_at)}</div>
+                  <div className="text-[11px] text-gray-500 mt-0.5 truncate" title={s.detail}>{s.detail}</div>
+                </div>
+                {i < dashboardOverview.engine_stages.length - 1 && (
+                  <div className="flex items-center text-gray-300 text-sm px-0.5">→</div>
+                )}
+              </Fragment>
+            ))}
+          </div>
+        ) : (
+          <div className="text-sm text-gray-400 py-4 text-center">데이터 없음</div>
+        )}
+
+        {dashboardOverview && (() => {
+          const cov = dashboardOverview.optimizer_coverage;
+          const total = cov.total_cost;
+          const oursPct = total > 0 ? (cov.ours_cost / total) * 100 : 0;
+          const mopPct = total > 0 ? (cov.mop_cost / total) * 100 : 0;
+          const nonePct = total > 0 ? (cov.none_cost / total) * 100 : 0;
+          return (
+            <div className="mt-4 pt-3 border-t border-gray-100">
+              <div className="flex items-center justify-between gap-2 flex-wrap mb-1.5">
+                <h4 className="text-xs font-medium text-gray-600">최적화 커버리지 (최근 {cov.window_days}일 광고비 기준)</h4>
+                {total > 0 && (
+                  <span className="text-xs text-gray-500">
+                    ours {won(cov.ours_cost)} ({(cov.ours_ratio * 100).toFixed(1)}%)
+                  </span>
+                )}
+              </div>
+              {total === 0 ? (
+                <div className="text-sm text-gray-400">데이터 없음</div>
+              ) : (
+                <div className="h-3 w-full rounded-full overflow-hidden flex bg-gray-100">
+                  {oursPct > 0 && (
+                    <div style={{ width: `${oursPct}%`, backgroundColor: "#2563eb" }}
+                      title={`ours ${won(cov.ours_cost)} (${oursPct.toFixed(1)}%)`} />
+                  )}
+                  {mopPct > 0 && (
+                    <div className="bg-gray-400" style={{ width: `${mopPct}%` }}
+                      title={`mop ${won(cov.mop_cost)} (${mopPct.toFixed(1)}%)`} />
+                  )}
+                  {nonePct > 0 && (
+                    <div className="bg-gray-200" style={{ width: `${nonePct}%` }}
+                      title={`none ${won(cov.none_cost)} (${nonePct.toFixed(1)}%)`} />
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })()}
+      </div>
+
       <div className="bg-amber-50 border border-amber-200 text-amber-700 text-xs rounded-lg p-3">
         반자동 모드 — 자동 실행은 없습니다. 승인 후 Confirm을 거친 제안만 실제 집행됩니다(현재
         개방: 제외키워드). optimizer/모드/공격성 다이얼은 저장 즉시 실제 목표 ROAS 계산에
@@ -636,22 +770,43 @@ export default function NaverAdOptimizationConsole() {
                         </select>
                       </td>
                       <td className="px-4 py-2 text-sm border-b border-gray-100">
-                        <select value={e.mode} onChange={(ev) => updateEdit(c.campaign_id, { mode: ev.target.value as NaverAdCampaignMode | "" })}
-                          className="text-xs border border-gray-300 rounded px-1.5 py-1">
-                          <option value="">(미지정)</option>
-                          {MODE_OPTIONS.map((m) => <option key={m.key} value={m.key}>{m.label}</option>)}
-                        </select>
+                        {/* T4 — 라디오 카드 2×2(MOP 24b 운영모드 카드 패턴). 선택된 모드를
+                            다시 클릭하면 해제(미지정)된다 — 기존 select의 "(미지정)" 옵션과 동등. */}
+                        <div className="grid grid-cols-2 gap-1 w-[168px]">
+                          {MODE_OPTIONS.map((m) => {
+                            const selected = e.mode === m.key;
+                            return (
+                              <button key={m.key} type="button"
+                                onClick={() => updateEdit(c.campaign_id, { mode: selected ? "" : m.key })}
+                                title={m.desc}
+                                className={`text-left px-1.5 py-1 rounded border leading-tight ${selected ? "border-blue-500 bg-blue-50" : "border-gray-200 hover:bg-gray-50"}`}>
+                                <div className={`text-[11px] font-medium ${selected ? "text-blue-700" : "text-gray-700"}`}>{m.label}</div>
+                                <div className="text-[10px] text-gray-400 truncate">{m.desc}</div>
+                              </button>
+                            );
+                          })}
+                        </div>
                       </td>
                       <td className="px-4 py-2 text-sm border-b border-gray-100">
-                        <div className="flex gap-1 flex-wrap mb-1">
-                          {AGGRESSIVENESS_OPTIONS.map((a) => (
-                            <button key={a.key} disabled={accountBepRoas == null}
-                              onClick={() => applyAggressiveness(c.campaign_id, a.mult)}
-                              title={accountBepRoas == null ? "계정 BEP ROAS 산출 불가" : `override = ${accountBepRoas} × ${a.mult}`}
-                              className="px-1.5 py-0.5 text-[11px] rounded border border-blue-200 text-blue-600 hover:bg-blue-50 disabled:opacity-40 disabled:cursor-not-allowed">
-                              {a.label}
-                            </button>
-                          ))}
+                        {/* T4 — 공격성 슬라이더(MOP 24b 이지모드 슬라이더 패턴, 눈금 라벨
+                            보수적↔공격적). 3단 배수는 AGGRESSIVENESS_OPTIONS 그대로(신규 범위
+                            발명 없음) — 슬라이더는 빠른 프리셋 선택, 숫자 input이 정밀 조정 담당. */}
+                        <div className="mb-1.5 w-40">
+                          <input type="range" min={0} max={AGGRESSIVENESS_OPTIONS.length - 1} step={1}
+                            value={sliderIndexForCampaign(c.campaign_id)}
+                            disabled={accountBepRoas == null}
+                            onChange={(ev) => applyAggressiveness(c.campaign_id, AGGRESSIVENESS_OPTIONS[Number(ev.target.value)].mult)}
+                            title={accountBepRoas == null ? "계정 BEP ROAS 산출 불가" : undefined}
+                            className="w-40 accent-blue-600 disabled:opacity-40" />
+                          <div className="flex justify-between text-[10px] text-gray-400 mt-0.5">
+                            <span>보수적</span>
+                            <span>공격적</span>
+                          </div>
+                          {accountBepRoas != null && (
+                            <div className="text-[10px] text-gray-500 mt-0.5">
+                              {AGGRESSIVENESS_OPTIONS[sliderIndexForCampaign(c.campaign_id)].label}
+                            </div>
+                          )}
                         </div>
                         <input type="number" step="0.0001" value={e.targetRoasOverride}
                           onChange={(ev) => updateEdit(c.campaign_id, { targetRoasOverride: ev.target.value })}

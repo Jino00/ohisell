@@ -1842,3 +1842,31 @@ export function putNaverExpertDelegation(delegatedTypes: string[]): Promise<Nave
     body: JSON.stringify({ delegated_types: delegatedTypes }),
   });
 }
+
+// 대시보드 미니 스프린트 T1/T2 — 엔진 파이프라인 5단계 라이브 증거 상태 + optimizer 커버리지
+// (dashboard_overview.py 응답과 1:1 대응, PLAN_naver-ad-dashboard-mini.md §1 T1).
+export interface NaverDashboardEngineStage {
+  key: string;
+  name: string;
+  last_evidence_at: string | null;
+  status: "ok" | "stale" | "none";
+  detail: string;
+}
+
+export interface NaverDashboardOptimizerCoverage {
+  window_days: number;
+  ours_cost: number;
+  mop_cost: number;
+  none_cost: number;
+  total_cost: number;
+  ours_ratio: number;
+}
+
+export interface NaverDashboardOverview {
+  engine_stages: NaverDashboardEngineStage[];
+  optimizer_coverage: NaverDashboardOptimizerCoverage;
+}
+
+export function getNaverDashboardOverview(): Promise<NaverDashboardOverview> {
+  return fetchApi<NaverDashboardOverview>("/api/naver/ad/dashboard-overview");
+}

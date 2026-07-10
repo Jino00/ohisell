@@ -1,4 +1,6 @@
 # naver_ad.py — 네이버 SA 광고 리포트 라우터 (P1/P2-S2/P2-S3, track_naver-ad-optimization)
+# GET /api/naver/ad/dashboard-overview — 대시보드 개요(엔진 5단계 라이브 증거 상태 +
+#   optimizer_coverage), dashboard_overview SA 단순 read(대시보드 미니 스프린트 T1).
 # GET /api/naver/ad/report            — 광고 리포트(KPI·3열 ROAS·드릴다운·시계열), ad_report Harness 경유.
 # GET /api/naver/ad/bep               — 상품별 BEP 목록(단순 read, CRUD 직접).
 # GET /api/naver/ad/diagnosis         — 진단 보드(출혈/승자/확장버킷/쇼핑BEP/제외후보/3단분류/악순환),
@@ -42,6 +44,7 @@ from app.models import (
     NaverProductBep,
     NaverProposal,
 )
+from app.services.naver_ad import dashboard_overview
 from app.services.naver_ad import delegation_gate
 from app.services.naver_ad import metrics_aggregator
 from app.services.naver_ad import naver_execution_harness
@@ -57,6 +60,13 @@ router = APIRouter(prefix="/api/naver/ad", tags=["naver-ad"])
 _VALID_GRAINS = metrics_aggregator.GRAINS + ("hour",)
 _MAX_RANGE_DAYS = 180  # 과도한 범위 방지(리포트는 최근 위주)
 _MAX_DIAGNOSIS_RANGE_DAYS = 30  # 진단 창은 최근 위주(다기간 비교는 harness 내부에서 30일 고정 사용)
+
+
+@router.get("/dashboard-overview")
+def dashboard_overview_endpoint(db: Session = Depends(get_db)):
+    """대시보드 개요 — 엔진 5단계(수집·예측·제안·전문가·학습) 라이브 증거 상태 +
+    optimizer_coverage(최근 7일 비용을 ours/mop/none별 합산). 파라미터 없음(단순 read)."""
+    return dashboard_overview.build(db)
 
 
 @router.get("/report")
