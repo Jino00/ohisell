@@ -282,7 +282,10 @@ def test_execute_success_returns_before_after_and_updates_proposal(client, db):
     mock_write.assert_called_once_with("grp-1", ["무관검색어"])
     assert resp.status_code == 200
     body = resp.json()
-    assert body["outcome"] == "executed"
+    # outcome은 D+14 채점 전엔 NULL이 정상(proposal_scoreboard가 outcome IS NULL로 미검증
+    # 실행 건을 찾는다 — X1b T5 배선확인에서 발견·수정, "executed" 영구 마킹은 그 채점
+    # 필터를 영원히 못 타게 만드는 구 결함이었다). 성공 여부는 HTTP 200 + after 필드로 확인.
+    assert body["outcome"] is None
     assert body["before"] == []
     assert body["after"]["after"] == after_rows
     assert body["after"]["created_ids"] == ["rkw-9"]
@@ -294,7 +297,8 @@ def test_execute_success_returns_before_after_and_updates_proposal(client, db):
     assert p.executed_change_log_id == body["change_log_id"]
     logs = db.query(NaverChangeLog).filter(NaverChangeLog.proposal_id == p.id).all()
     assert len(logs) == 1
-    assert logs[0].outcome == "executed"
+    assert logs[0].outcome is None
+    assert logs[0].after_value is not None  # 실제 성공 판별은 after_value로
 
 
 def test_execute_pending_proposal_returns_409_and_db_untouched(client, db):

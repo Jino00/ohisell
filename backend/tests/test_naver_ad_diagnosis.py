@@ -380,9 +380,11 @@ def test_pause_candidates_sorted_by_cost_desc(db):
 
 
 def _lock_log(entity_id, campaign_id, *, locked, proposal_id, changed_at, entity_type="keyword"):
+    # dry_run=False + after_value 존재 = 실제 성공한 쓰기(outcome은 D+14 채점 전 NULL이
+    # 정상 — proposal_scoreboard 배선, X1b T5 Claude 적대적 리뷰 수정 참조).
     return NaverChangeLog(
         entity_type=entity_type, entity_id=entity_id, campaign_id=campaign_id, action="set_user_lock",
-        proposal_id=proposal_id, outcome="executed", changed_at=changed_at,
+        proposal_id=proposal_id, dry_run=False, changed_at=changed_at,
         after_value=json.dumps({"userLock": locked}),
     )
 
@@ -511,11 +513,12 @@ def test_resume_candidates_includes_when_latest_lock_change_is_our_repause(db):
 
 
 def test_resume_candidates_excludes_when_latest_lock_change_after_value_unparseable(db):
-    """after_value가 JSON이 아니면(구 데이터·손상) 방향 판별 불가 — fail-closed 제외."""
+    """after_value가 JSON이 아니면(구 데이터·손상) 방향 판별 불가 — fail-closed 제외.
+    dry_run=False 명시 — dry_run 필터가 아니라 파싱 실패 경로로 제외되는 것을 검증."""
     _entity(db, "keyword", "nkw-off-1", status="off", bid_amt=190)
     db.add(NaverChangeLog(
         entity_type="keyword", entity_id="nkw-off-1", campaign_id="cmp1", action="set_user_lock",
-        proposal_id=1, outcome="executed", changed_at=datetime.combine(D_TO, datetime.min.time()),
+        proposal_id=1, dry_run=False, changed_at=datetime.combine(D_TO, datetime.min.time()),
         after_value="not json",
     ))
     db.commit()

@@ -142,12 +142,19 @@ def _detect_external_change(db: Session, proposal: NaverProposal, live_before: d
     """MOP 충돌 감지(D-NAO-13, X1b T4 배선) — 우리의 마지막 성공 기록(change_log.after_value)과
     방금 재조회한 라이브 값이 다르면 그 사이 외부(MOP 등)가 바꿨다는 신호. 차단하지 않고
     경고만 반환(원문: "외부 변경 감지 시 경고") — 호출자가 rationale에 부착해 change_log에
-    남긴다. field: 비교할 키('bidAmt' 또는 'userLock')."""
+    남긴다. field: 비교할 키('bidAmt' 또는 'userLock').
+
+    "우리 마지막 성공" 판별은 outcome이 아니라 after_value 존재 여부로 한다 — outcome은
+    이제 D+14 채점 전엔 NULL이고(proposal_scoreboard 배선, 위 executor 주석 참조) 채점
+    후엔 improved/declined/neutral로 바뀌므로 "executed"라는 영구 상태가 아니다.
+    dry_run=False + after_value가 있는 행만 실제 성공한 쓰기다(실패·가드거부 행은
+    before/after_value를 안 채움, dry-run도 마찬가지)."""
     last = (
         db.query(NaverChangeLog)
         .filter(
             NaverChangeLog.entity_type == proposal.target_type,
-            NaverChangeLog.entity_id == proposal.target_id, NaverChangeLog.outcome == "executed",
+            NaverChangeLog.entity_id == proposal.target_id,
+            NaverChangeLog.dry_run.is_(False), NaverChangeLog.after_value.isnot(None),
         )
         .order_by(NaverChangeLog.executed_at.desc())
         .first()
@@ -230,16 +237,17 @@ def _build_guardrail_context(db: Session, proposal: NaverProposal, now: datetime
         context["cost_today"] = latest_snapshot.cost
         context["daily_budget"] = latest_snapshot.daily_budget
 
-    # codex[P2]: dry-run(outcome=None)·실패(outcome='failed', _guard_failure 포함) 행은
-    # 네이버 상태를 바꾸지 않았다 — 그런데도 쿨다운·일일상한에 포함시키면 실제로는 아무
-    # 일도 안 일어났는데 다음 실행이 차단된다. 실제 쓰기가 확정된 행(outcome='executed')만
-    # 센다.
+    # codex[P2]: dry-run·실패(outcome='failed', _guard_failure 포함) 행은 네이버 상태를
+    # 바꾸지 않았다 — 그런데도 쿨다운·일일상한에 포함시키면 실제로는 아무 일도 안 일어났는데
+    # 다음 실행이 차단된다. 실제 쓰기가 확정된 행만 센다 — outcome이 아니라 after_value
+    # 존재 여부로 판별(outcome은 D+14 채점 전 NULL, "executed" 영구 상태 아님 — 위
+    # _execute_add_negative_keyword 주석 참조).
     change_rows = (
         db.query(NaverChangeLog.changed_at)
         .filter(
             NaverChangeLog.entity_type == proposal.target_type,
             NaverChangeLog.entity_id == proposal.target_id,
-            NaverChangeLog.outcome == "executed",
+            NaverChangeLog.dry_run.is_(False), NaverChangeLog.after_value.isnot(None),
         )
         .all()
     )
@@ -310,11 +318,18 @@ def _execute_add_negative_keyword(db: Session, proposal: NaverProposal, now: dat
         )
         raise
 
+    # codex[P2, T5 배선확인, Claude 적대적 리뷰 — codex 한도 소진 대체]: outcome은 여기서
+    # "executed"로 채우지 않는다(X1a T3 원안 결함, 지금 발견·수정) — proposal_scoreboard.
+    # run_daily()가 "실행됐지만 아직 미검증"을 outcome IS NULL로 식별한다(Phase 6 설계
+    # 원안·test_naver_proposal_scoreboard.py의 _change() 기본값이 이미 그렇게 되어 있었음).
+    # 여기서 outcome="executed"를 즉시 박으면 그 필터에 영원히 안 걸려 D+14 채점이 전혀
+    # 안 도는 상태였다(D-NAO-14 학습루프 핵심 기능 무력화). 실제 성공 여부는 after_value가
+    # 채워졌는지로 판별한다(_detect_external_change·guardrail 쿨다운·resume_candidates 참조).
     log_entry = NaverChangeLog(
         entity_type=proposal.target_type, entity_id=proposal.target_id,
         campaign_id=proposal.campaign_id, action="add_negative_keyword",
         rationale=proposal.rationale, predicted_json=proposal.expected_effect,
-        proposal_id=proposal.id, dry_run=False, outcome="executed",
+        proposal_id=proposal.id, dry_run=False,
         before_value=json.dumps(result.before, ensure_ascii=False),
         after_value=json.dumps(
             {"after": result.after, "created_ids": result.created_ids}, ensure_ascii=False
@@ -393,11 +408,13 @@ def _execute_update_bid(db: Session, proposal: NaverProposal, now: datetime) -> 
     conflict_warning = _detect_external_change(db, proposal, result.before, "bidAmt")
     rationale = f"{proposal.rationale or ''} {conflict_warning}" if conflict_warning else proposal.rationale
 
+    # outcome 미기록 — proposal_scoreboard.run_daily()가 D+14까지 IS NULL로 식별(위
+    # _execute_add_negative_keyword 주석 참조).
     log_entry = NaverChangeLog(
         entity_type=proposal.target_type, entity_id=proposal.target_id,
         campaign_id=proposal.campaign_id, action="update_bid",
         rationale=rationale, predicted_json=proposal.expected_effect,
-        proposal_id=proposal.id, dry_run=False, outcome="executed",
+        proposal_id=proposal.id, dry_run=False,
         before_value=json.dumps(result.before, ensure_ascii=False),
         after_value=json.dumps(result.after, ensure_ascii=False),
         changed_at=now, executed_at=now, verify_date=(now + timedelta(days=VERIFY_DAYS)).date(),
@@ -468,11 +485,13 @@ def _execute_set_user_lock(db: Session, proposal: NaverProposal, now: datetime) 
     conflict_warning = _detect_external_change(db, proposal, result.before, "userLock")
     rationale = f"{proposal.rationale or ''} {conflict_warning}" if conflict_warning else proposal.rationale
 
+    # outcome 미기록 — proposal_scoreboard.run_daily()가 D+14까지 IS NULL로 식별(위
+    # _execute_add_negative_keyword 주석 참조).
     log_entry = NaverChangeLog(
         entity_type=proposal.target_type, entity_id=proposal.target_id,
         campaign_id=proposal.campaign_id, action="set_user_lock",
         rationale=rationale, predicted_json=proposal.expected_effect,
-        proposal_id=proposal.id, dry_run=False, outcome="executed",
+        proposal_id=proposal.id, dry_run=False,
         before_value=json.dumps(result.before, ensure_ascii=False),
         after_value=json.dumps(result.after, ensure_ascii=False),
         changed_at=now, executed_at=now, verify_date=(now + timedelta(days=VERIFY_DAYS)).date(),

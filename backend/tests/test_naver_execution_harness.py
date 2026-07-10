@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import patch
 
@@ -193,7 +193,7 @@ def test_live_execute_negative_keyword_success_records_measured_change_log(db):
     mock_write.assert_called_once_with("grp-1", ["무관검색어"])
     assert status_during_write == ["executing"]  # 쓰기 직전 클레임이 이미 확정돼 있었음
     assert log_entry.dry_run is False
-    assert log_entry.outcome == "executed"
+    assert log_entry.outcome is None  # 채점 전 정상(X1b T5 배선확인) — 성공 판별은 after_value
     assert json.loads(log_entry.before_value) == []
     after_payload = json.loads(log_entry.after_value)
     assert after_payload["after"] == after_rows
@@ -347,7 +347,7 @@ def test_execute_update_bid_success(db):
     gate_call_args = mock_gate.call_args
     assert gate_call_args[0][0] == {"proposal_type": "bid_up", "target_bid": 210, "target_lock": None}
     mock_write.assert_called_once_with("nkw-1", 210)
-    assert log_entry.outcome == "executed"
+    assert log_entry.outcome is None  # 채점 전 정상(X1b T5 배선확인) — 성공 판별은 after_value
     assert log_entry.action == "update_bid"
     assert json.loads(log_entry.before_value) == {"bidAmt": 190, "userLock": False}
     assert json.loads(log_entry.after_value) == {"bidAmt": 210, "userLock": False}
@@ -458,7 +458,7 @@ def test_execute_set_user_lock_pause_success(db):
     assert gate_call_args[0][0] == {"proposal_type": "pause", "target_bid": None, "target_lock": True}
     mock_write.assert_called_once_with("nkw-1", True)
     assert log_entry.action == "set_user_lock"
-    assert log_entry.outcome == "executed"
+    assert log_entry.outcome is None  # 채점 전 정상(X1b T5 배선확인) — 성공 판별은 after_value
     assert json.loads(log_entry.after_value)["userLock"] is True
 
     db.refresh(p)
@@ -585,7 +585,7 @@ def test_execute_update_bid_detects_external_change_appends_warning(db):
     # 우리의 이전 성공 기록 — bidAmt=210으로 남아있음
     db.add(NaverChangeLog(
         entity_type="keyword", entity_id="nkw-1", campaign_id="cmp1", action="update_bid",
-        outcome="executed", after_value=json.dumps({"bidAmt": 210, "userLock": False}),
+        dry_run=False, after_value=json.dumps({"bidAmt": 210, "userLock": False}),
         executed_at=kst_now(),
     ))
     db.commit()
@@ -599,7 +599,7 @@ def test_execute_update_bid_detects_external_change_appends_warning(db):
 
     assert "외부 변경 감지" in log_entry.rationale
     assert "210" in log_entry.rationale and "250" in log_entry.rationale
-    assert log_entry.outcome == "executed"  # 차단 아님 — 경고만 부착하고 정상 진행
+    assert log_entry.outcome is None  # 채점 전 정상(D+14 배선) — 차단 아님, 경고만 부착하고 정상 진행
 
 
 def test_execute_update_bid_no_warning_when_before_matches_our_last_record(db):
@@ -609,7 +609,7 @@ def test_execute_update_bid_no_warning_when_before_matches_our_last_record(db):
     _settings(db, optimizer="ours")
     db.add(NaverChangeLog(
         entity_type="keyword", entity_id="nkw-1", campaign_id="cmp1", action="update_bid",
-        outcome="executed", after_value=json.dumps({"bidAmt": 210, "userLock": False}),
+        dry_run=False, after_value=json.dumps({"bidAmt": 210, "userLock": False}),
         executed_at=kst_now(),
     ))
     db.commit()
@@ -713,17 +713,19 @@ def test_build_guardrail_context_changes_today_count_and_last_change_at(db):
     p = _proposal(db, proposal_type="bid_up")
     now = kst_now()
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    # dry_run=False + after_value = 실제 성공한 쓰기(X1b T5 배선확인 — outcome은 D+14
+    # 채점 전 NULL이 정상이라 더 이상 "executed" 마킹으로 판별하지 않는다).
     db.add(NaverChangeLog(
         entity_type="keyword", entity_id="nkw-1", campaign_id="cmp1", action="update_bid",
-        outcome="executed", changed_at=today_start + timedelta(hours=1),
+        dry_run=False, after_value=json.dumps({"bidAmt": 200}), changed_at=today_start + timedelta(hours=1),
     ))
     db.add(NaverChangeLog(
         entity_type="keyword", entity_id="nkw-1", campaign_id="cmp1", action="update_bid",
-        outcome="executed", changed_at=today_start + timedelta(hours=5),
+        dry_run=False, after_value=json.dumps({"bidAmt": 210}), changed_at=today_start + timedelta(hours=5),
     ))
     db.add(NaverChangeLog(  # 어제 — 오늘 카운트 제외 대상
         entity_type="keyword", entity_id="nkw-1", campaign_id="cmp1", action="update_bid",
-        outcome="executed", changed_at=today_start - timedelta(hours=1),
+        dry_run=False, after_value=json.dumps({"bidAmt": 190}), changed_at=today_start - timedelta(hours=1),
     ))
     db.commit()
 
@@ -773,13 +775,13 @@ def test_build_guardrail_context_only_counts_executed_among_mixed_outcomes(db):
         entity_type="keyword", entity_id="nkw-1", campaign_id="cmp1", action="update_bid",
         dry_run=True, changed_at=today_start + timedelta(hours=1),
     ))
-    db.add(NaverChangeLog(  # 실제 실행 — 포함
+    db.add(NaverChangeLog(  # 실제 실행 — 포함(dry_run=False + after_value)
         entity_type="keyword", entity_id="nkw-1", campaign_id="cmp1", action="update_bid",
-        outcome="executed", changed_at=today_start + timedelta(hours=3),
+        dry_run=False, after_value=json.dumps({"bidAmt": 210}), changed_at=today_start + timedelta(hours=3),
     ))
-    db.add(NaverChangeLog(  # 실패 — 제외
+    db.add(NaverChangeLog(  # 실패(after_value 없음) — 제외
         entity_type="keyword", entity_id="nkw-1", campaign_id="cmp1", action="update_bid",
-        outcome="failed", changed_at=today_start + timedelta(hours=5),
+        dry_run=False, outcome="failed", changed_at=today_start + timedelta(hours=5),
     ))
     db.commit()
 
@@ -868,7 +870,7 @@ def test_detect_external_change_matching_value_returns_none(db):
     p = _proposal(db, proposal_type="bid_up")
     db.add(NaverChangeLog(
         entity_type="keyword", entity_id="nkw-1", campaign_id="cmp1", action="update_bid",
-        outcome="executed", after_value=json.dumps({"bidAmt": 200}), executed_at=kst_now(),
+        dry_run=False, after_value=json.dumps({"bidAmt": 200}), executed_at=kst_now(),
     ))
     db.commit()
     reason = harness._detect_external_change(db, p, {"bidAmt": 200}, "bidAmt")
@@ -879,7 +881,7 @@ def test_detect_external_change_mismatch_returns_warning(db):
     p = _proposal(db, proposal_type="bid_up")
     db.add(NaverChangeLog(
         entity_type="keyword", entity_id="nkw-1", campaign_id="cmp1", action="update_bid",
-        outcome="executed", after_value=json.dumps({"bidAmt": 200}), executed_at=kst_now(),
+        dry_run=False, after_value=json.dumps({"bidAmt": 200}), executed_at=kst_now(),
     ))
     db.commit()
     reason = harness._detect_external_change(db, p, {"bidAmt": 350}, "bidAmt")
@@ -891,7 +893,7 @@ def test_detect_external_change_unparseable_after_value_returns_none(db):
     p = _proposal(db, proposal_type="bid_up")
     db.add(NaverChangeLog(
         entity_type="keyword", entity_id="nkw-1", campaign_id="cmp1", action="update_bid",
-        outcome="executed", after_value="not json", executed_at=kst_now(),
+        dry_run=False, after_value="not json", executed_at=kst_now(),
     ))
     db.commit()
     reason = harness._detect_external_change(db, p, {"bidAmt": 350}, "bidAmt")
@@ -989,3 +991,46 @@ def test_dry_run_execute_sets_changed_at_to_kst_now(db):
     log_entry = harness.execute(db, p.id, now=now)  # dry_run=True 기본
 
     assert log_entry.changed_at == now
+
+
+# ── X1b T5: D+7/14 채점 배선 확인(proposal_scoreboard 통합) ──────────────
+# T5는 "배선 확인"만 요구했으나, 확인 과정에서 X1a부터 있던 실제 결함을 발견했다(이 파일
+# 상단 "changed_at KST 명시"·"outcome D+14 배선" 두 절 참조) — 이 테스트는 harness.execute()의
+# 산출물이 proposal_scoreboard.run_daily()의 입력 계약과 실제로 맞물리는지 종단 검증한다.
+
+
+def test_executed_change_log_is_picked_up_by_proposal_scoreboard_after_verify_date(db):
+    """harness.execute()가 만든 change_log 행이 D+14 후 proposal_scoreboard.run_daily()에
+    실제로 픽업되는지 종단 확인 — 이게 T5의 핵심 질문이었고, outcome="executed" 즉시기록
+    (수정 전 상태)이었다면 이 테스트는 pending=0으로 영원히 실패했을 것이다."""
+    from app.services.naver_ad import proposal_scoreboard
+
+    p = _proposal(db, proposal_type="bid_up")
+    p.target_bid = 210
+    db.commit()
+    _settings(db, optimizer="ours")
+
+    executed_date = date(2026, 6, 20)
+    executed_at = datetime.combine(executed_date, datetime.min.time())
+    result = _keyword_write_result(before={"bidAmt": 190, "userLock": False}, after={"bidAmt": 210, "userLock": False})
+
+    with patch.object(harness, "_build_guardrail_context", return_value={}), \
+         patch.object(harness.guardrail_gate, "check", return_value=None), \
+         patch.object(harness.naver_sa_writer, "update_keyword_bid", return_value=result):
+        log_entry = harness.execute(db, p.id, dry_run=False, now=executed_at)
+
+    verify_date = log_entry.verify_date  # executed_date + 14일(VERIFY_DAYS)
+    assert verify_date == executed_date + timedelta(days=14)
+
+    # verify_date 이전엔 아직 채점 대상 아님(정직 경계 확인)
+    result_before_due = proposal_scoreboard.run_daily(db, today=verify_date - timedelta(days=1))
+    assert result_before_due["pending"] == 0
+
+    # verify_date 이후엔 outcome=None + dry_run=False + verify_date 경과 조건에 걸려 픽업된다.
+    # (실제 개선폭 판정에 필요한 naver_ad_daily는 없으므로 모수미달로 outcome=None 유지 —
+    # 여기서 검증하려는 건 "픽업 자체가 되는가"이지 판정 로직 자체가 아니다.)
+    result_after_due = proposal_scoreboard.run_daily(db, today=verify_date)
+    assert result_after_due["pending"] == 1
+
+    db.refresh(log_entry)
+    assert log_entry.actual_json is not None  # 모수미달이어도 실측치 기록 시도는 됨(재시도 대상)

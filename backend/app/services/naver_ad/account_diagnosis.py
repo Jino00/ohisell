@@ -450,6 +450,10 @@ def resume_candidates(
         return []
     off_ids = set(off_entities)
 
+    # 실제 성공한 쓰기 판별은 outcome이 아니라 after_value 존재 여부로 한다(X1b T5 배선확인,
+    # Claude 적대적 리뷰 발견 — outcome은 이제 D+14 채점 전엔 NULL이고 채점 후엔
+    # improved/declined/neutral로 바뀌므로 "executed" 영구 상태가 아니다. naver_execution_harness
+    # 주석 참조).
     lock_rows = (
         db.query(
             NaverChangeLog.entity_id, NaverChangeLog.campaign_id, NaverChangeLog.after_value,
@@ -457,7 +461,8 @@ def resume_candidates(
         )
         .filter(
             NaverChangeLog.entity_type == "keyword", NaverChangeLog.action == "set_user_lock",
-            NaverChangeLog.entity_id.in_(off_ids), NaverChangeLog.outcome == "executed",
+            NaverChangeLog.entity_id.in_(off_ids),
+            NaverChangeLog.dry_run.is_(False), NaverChangeLog.after_value.isnot(None),
         )
         .order_by(NaverChangeLog.changed_at.asc())
         .all()

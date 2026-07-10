@@ -169,7 +169,10 @@ def test_on_type_agree_guardrails_pass_auto_approves_and_executes(db):
 
     logs = db.query(NaverChangeLog).filter(NaverChangeLog.proposal_id == p.id).all()
     assert len(logs) == 1
-    assert logs[0].outcome == "executed"
+    # outcome은 D+14 채점 전엔 NULL이 정상(X1b T5 배선확인 — proposal_scoreboard가
+    # outcome IS NULL로 미검증 실행 건을 찾는다). 성공 판별은 after_value로.
+    assert logs[0].outcome is None
+    assert logs[0].after_value is not None
     assert logs[0].dry_run is False
 
 
