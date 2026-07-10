@@ -896,3 +896,96 @@ def test_detect_external_change_unparseable_after_value_returns_none(db):
     db.commit()
     reason = harness._detect_external_change(db, p, {"bidAmt": 350}, "bidAmt")
     assert reason is None
+
+
+# ── X1b T4 codex 2라운드(Claude 적대 리뷰, codex 한도 소진 대체): changed_at KST 명시 ──
+# NaverChangeLog.changed_at은 server_default=func.now() — SQLite에서 이는 UTC를 반환한다
+# (KST 아님, 9시간 차이 실측). guardrail_gate의 쿨다운(now - last_change_at)과
+# _build_guardrail_context의 오늘 자정 경계 비교가 전부 kst_now() 기준이라, changed_at을
+# 명시하지 않으면 그 비교가 항상 어긋난다(쿨다운은 항상 "충분히 지남"으로 오판정 —
+# fail-open, D-NAO-19 안전장치 무력화). executed_at은 이미 명시(now)돼 있었으나 changed_at은
+# 누락돼 있었다 — 전 change_log 생성 지점에 changed_at=now를 추가한다.
+
+
+def test_execute_add_negative_keyword_success_sets_changed_at_to_kst_now(db):
+    p = _negative_proposal(db)
+    _settings(db, optimizer="ours")
+    now = kst_now()
+    result = _write_result(before=[], after=[{"nccAdgroupRestrictKwdId": "rkw-1", "keyword": "무관검색어"}],
+                           created_ids=["rkw-1"])
+
+    with patch.object(harness.naver_sa_writer, "add_restricted_keywords", return_value=result):
+        log_entry = harness._execute_add_negative_keyword(db, p, now)
+
+    assert log_entry.changed_at == now
+
+
+def test_execute_update_bid_success_sets_changed_at_to_kst_now(db):
+    p = _proposal(db, proposal_type="bid_up")
+    p.target_bid = 210
+    db.commit()
+    _settings(db, optimizer="ours")
+    now = kst_now()
+    result = _keyword_write_result()
+
+    with patch.object(harness, "_build_guardrail_context", return_value={}), \
+         patch.object(harness.guardrail_gate, "check", return_value=None), \
+         patch.object(harness.naver_sa_writer, "update_keyword_bid", return_value=result):
+        log_entry = harness._execute_update_bid(db, p, now)
+
+    assert log_entry.changed_at == now
+
+
+def test_execute_set_user_lock_success_sets_changed_at_to_kst_now(db):
+    p = _proposal(db, proposal_type="pause")
+    p.target_lock = True
+    db.commit()
+    _settings(db, optimizer="ours")
+    now = kst_now()
+    result = _lock_write_result(before_lock=False, after_lock=True)
+
+    with patch.object(harness, "_build_guardrail_context", return_value={}), \
+         patch.object(harness.guardrail_gate, "check", return_value=None), \
+         patch.object(harness.naver_sa_writer, "set_keyword_lock", return_value=result):
+        log_entry = harness._execute_set_user_lock(db, p, now)
+
+    assert log_entry.changed_at == now
+
+
+def test_guard_failure_sets_changed_at_to_kst_now(db):
+    p = _proposal(db, proposal_type="bid_up")  # target_bid 미설정 — 구조 가드 실패 경로
+    now = kst_now()
+
+    with pytest.raises(harness.MissingExecutionTargetError):
+        harness._execute_update_bid(db, p, now)
+
+    log = db.query(NaverChangeLog).filter(NaverChangeLog.proposal_id == p.id).one()
+    assert log.changed_at == now
+
+
+def test_writer_failure_sets_changed_at_to_kst_now(db):
+    p = _proposal(db, proposal_type="bid_down")
+    p.target_bid = 170
+    db.commit()
+    _settings(db, optimizer="ours")
+    now = kst_now()
+
+    with patch.object(harness, "_build_guardrail_context", return_value={}), \
+         patch.object(harness.guardrail_gate, "check", return_value=None), \
+         patch.object(harness.naver_sa_writer, "update_keyword_bid",
+                       side_effect=naver_sa_writer.WriteError("500")):
+        with pytest.raises(naver_sa_writer.WriteError):
+            harness._execute_update_bid(db, p, now)
+
+    log = db.query(NaverChangeLog).filter(NaverChangeLog.proposal_id == p.id).one()
+    assert log.changed_at == now
+
+
+def test_dry_run_execute_sets_changed_at_to_kst_now(db):
+    p = _negative_proposal(db)
+    _settings(db, optimizer="ours")
+    now = kst_now()
+
+    log_entry = harness.execute(db, p.id, now=now)  # dry_run=True 기본
+
+    assert log_entry.changed_at == now

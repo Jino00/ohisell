@@ -110,7 +110,7 @@ def _guard_failure(db: Session, proposal: NaverProposal, now: datetime, action: 
         campaign_id=proposal.campaign_id, action=action,
         rationale=f"{proposal.rationale or ''} [실행 불가] {reason}",
         predicted_json=proposal.expected_effect, proposal_id=proposal.id,
-        dry_run=False, outcome="failed", executed_at=now,
+        dry_run=False, outcome="failed", changed_at=now, executed_at=now,
     )
     db.add(entry)
     db.commit()
@@ -298,7 +298,7 @@ def _execute_add_negative_keyword(db: Session, proposal: NaverProposal, now: dat
                 f"{proposal.rationale or ''} [실행 실패] {type(exc).__name__}: {str(exc)[:300]}"
             ),
             predicted_json=proposal.expected_effect, proposal_id=proposal.id,
-            dry_run=False, outcome="failed", executed_at=now,
+            dry_run=False, outcome="failed", changed_at=now, executed_at=now,
             # before_value: writer 예외는 before 스냅샷을 실어주지 않아 확보 불가 — 정직하게 None.
             # executed_change_log_id는 연결하지 않음(성공 전용). verify_date 없음(검증 대상 부재).
         )
@@ -319,7 +319,7 @@ def _execute_add_negative_keyword(db: Session, proposal: NaverProposal, now: dat
         after_value=json.dumps(
             {"after": result.after, "created_ids": result.created_ids}, ensure_ascii=False
         ),
-        executed_at=now, verify_date=(now + timedelta(days=VERIFY_DAYS)).date(),
+        changed_at=now, executed_at=now, verify_date=(now + timedelta(days=VERIFY_DAYS)).date(),
     )
     db.add(log_entry)
     db.flush()
@@ -380,7 +380,7 @@ def _execute_update_bid(db: Session, proposal: NaverProposal, now: datetime) -> 
                 f"{proposal.rationale or ''} [실행 실패] {type(exc).__name__}: {str(exc)[:300]}"
             ),
             predicted_json=proposal.expected_effect, proposal_id=proposal.id,
-            dry_run=False, outcome="failed", executed_at=now,
+            dry_run=False, outcome="failed", changed_at=now, executed_at=now,
         )
         db.add(fail_entry)
         db.commit()
@@ -400,7 +400,7 @@ def _execute_update_bid(db: Session, proposal: NaverProposal, now: datetime) -> 
         proposal_id=proposal.id, dry_run=False, outcome="executed",
         before_value=json.dumps(result.before, ensure_ascii=False),
         after_value=json.dumps(result.after, ensure_ascii=False),
-        executed_at=now, verify_date=(now + timedelta(days=VERIFY_DAYS)).date(),
+        changed_at=now, executed_at=now, verify_date=(now + timedelta(days=VERIFY_DAYS)).date(),
     )
     db.add(log_entry)
     db.flush()
@@ -455,7 +455,7 @@ def _execute_set_user_lock(db: Session, proposal: NaverProposal, now: datetime) 
                 f"{proposal.rationale or ''} [실행 실패] {type(exc).__name__}: {str(exc)[:300]}"
             ),
             predicted_json=proposal.expected_effect, proposal_id=proposal.id,
-            dry_run=False, outcome="failed", executed_at=now,
+            dry_run=False, outcome="failed", changed_at=now, executed_at=now,
         )
         db.add(fail_entry)
         db.commit()
@@ -475,7 +475,7 @@ def _execute_set_user_lock(db: Session, proposal: NaverProposal, now: datetime) 
         proposal_id=proposal.id, dry_run=False, outcome="executed",
         before_value=json.dumps(result.before, ensure_ascii=False),
         after_value=json.dumps(result.after, ensure_ascii=False),
-        executed_at=now, verify_date=(now + timedelta(days=VERIFY_DAYS)).date(),
+        changed_at=now, executed_at=now, verify_date=(now + timedelta(days=VERIFY_DAYS)).date(),
     )
     db.add(log_entry)
     db.flush()
@@ -621,7 +621,7 @@ def execute(db: Session, proposal_id: int, *, dry_run: bool = True, now: datetim
         entity_type=proposal.target_type, entity_id=proposal.target_id,
         campaign_id=proposal.campaign_id, action=action,
         rationale=proposal.rationale, predicted_json=proposal.expected_effect,
-        proposal_id=proposal.id, dry_run=effective_dry_run, executed_at=now,
+        proposal_id=proposal.id, dry_run=effective_dry_run, changed_at=now, executed_at=now,
         verify_date=(now + timedelta(days=VERIFY_DAYS)).date(),
     )
     db.add(log_entry)

@@ -431,6 +431,16 @@ def resume_candidates(
     action='set_user_lock'으로 기록하므로(_ACTION_BY_PROPOSAL_TYPE이 두 proposal_type을
     하나의 실행 액션으로 묶음, update_bid가 bid_up/bid_down/growth_bid_up을 묶는 것과 동일
     관례, codex[P2] X1b T4 2라운드) 정지 여부는 after_value의 실제 userLock 값으로 판별한다.
+
+    **의도적 비대칭(Claude 적대 리뷰 지적, codex 한도 소진 대체, 2026-07-10) — pause_candidates와
+    달리 부모(광고그룹·캠페인) 체인 상태를 확인하지 않는다**: pause_candidates의 부모체인
+    검사는 "새 판단이 부모-off로 왜곡된 실적 데이터에 근거할 위험"을 막는 것(부모가 꺼져
+    트래픽이 없는데 그걸 키워드 자체 문제로 오판)이지만, resume_candidates는 **과거 정지 시점
+    이전(부모 상태와 무관한 실데이터) 실적을 근거로 우리 자신의 과거 판단을 되돌리는 것**이라
+    같은 왜곡 경로가 없다. 부모가 꺼진 채로 재개해도(userLock만 false로 복원) 키워드는 실제
+    노출되지 않으며(네이버는 부모 체인 전부 on이어야 서빙), 이는 낭비가 아니라 우리
+    키워드레벨 판단과 남의 부모레벨 운영 판단을 분리 보존하는 것 — 부모가 나중에 켜지면
+    자동으로 정상 서빙 재개(재차 개입 불요). 판단 재검토 필요 시 Jino 논의 대상.
     """
     off_entities = {
         e.entity_id: e for e in
