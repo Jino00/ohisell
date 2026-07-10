@@ -10,9 +10,10 @@
 
 ## ★ 진행 중 메가 프로젝트 (세션 시작 시 반드시 확인 — 기획 변형 금지)
 - **단일 진입점: `docs/TRACKS.md`** — 활성 트랙 인덱스를 먼저 읽을 것.
-- **현재 주력 트랙: `docs/tracks/active/track_naver-ad-optimization.md`** (네이버 SA 광고 최적화 — 우리판 MOP, 확정 결정 D-NAO-1~25 누적).
-  - 듀얼모드 6-Phase 완료(2026-07-08) + prod 89K 재검증 완료. **다음 구현 = 예측·전문가 스프린트: `docs/PLAN_naver-ad-forecast-expert.md` 필독 후 F0부터** (D-NAO-24 예측 모델층·D-NAO-25 전문가 에이전트).
-  - 이 트랙 작업은 브랜치 `claude/admiring-solomon-b4f056`(워크트리 admiring-solomon-b4f056)에서만. 작업 전 `git branch --show-current`로 브랜치 일치 확인(2026-07-08 브랜치 뒤바뀜 사고 재발 방지).
+- **현재 주력 트랙: `docs/tracks/active/track_naver-ad-optimization.md`** (네이버 SA 광고 최적화 — 우리판 MOP, 확정 결정 D-NAO-1~34 누적).
+  - F0~F2+E1a 완료·prod 가동 중(크론 07:50/08:00/08:05/08:10). **현재 스프린트 = 실행 루프(X): `docs/PLAN_naver-ad-execution-loop.md` — 이 트랙을 건드리는 모든 세션은 그 문서 §0(방향 고정)을 먼저 읽고 §7 체크리스트로 현재 위치를 확인할 것**(D-NAO-34, 스프린트 끝날 때까지 유지. 배경 문서: ref 25 갭 분석·ref 26 논문 서베이).
+  - 스프린트 X 진행 중 금지선: Phase 구조·개방 순서(제외키워드→정지재개→입찰) 임의 변경 금지, 예산 변경 개방은 스코프 밖, 위임 스위치는 Jino만. 설계=fable, 구현=Sonnet.
+  - 이 트랙 작업은 main 기준 워크트리에서(2026-07-08 main 병합 완료 — 구 admiring-solomon 브랜치 고정 지침은 해제). 작업 전 `git branch --show-current` 확인 습관 유지.
 - 이 트랙을 무시하거나 변형해서 진행하지 말 것. 변경은 Jino 승인 후 트랙 파일에 D-N으로 기록.
 - (쿠팡 full-integration 트랙은 완료됨 — `docs/TRACKS.md` Completed 참조.)
 
