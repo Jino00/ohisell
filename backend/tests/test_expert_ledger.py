@@ -99,6 +99,47 @@ def test_record_is_idempotent_for_same_as_of_and_briefing_hash(db):
     assert db.query(NaverExpertReview).filter(NaverExpertReview.run_id == run1.id).count() == 3  # 평결2+총평1
 
 
+def test_record_does_not_dedup_against_degraded_run_same_day_same_hash(db):
+    """2026-07-10 prod 실증: 아침 status='degraded' run(스키마 검증 실패, 평결 비어있음)이 기록된 뒤
+    같은 (as_of, briefing_hash)로 재시도해서 status='ok' review가 와도, 기존 degraded run을 반환하며
+    새 평결을 버리면 안 된다 — 새 run 행을 만들고, 평결이 실제로 저장되고, 기존 degraded run은
+    그대로 남아야 한다(원장에 시도 이력 누적, 기존 행 삭제·수정 금지)."""
+    degraded_review = _review(briefing_hash="same-hash", status="degraded", verdicts=[])
+    degraded_run = expert_ledger.record(db, AS_OF, degraded_review)
+    assert degraded_run.status == "degraded"
+
+    retry_review = _review(briefing_hash="same-hash", status="ok")
+    retry_run = expert_ledger.record(db, AS_OF, retry_review)
+
+    assert retry_run.id != degraded_run.id, "degraded run을 반환하며 성공 재시도를 삼키면 안 된다"
+    assert retry_run.status == "ok"
+
+    # (a) 새 run 행이 실제로 생겼는지
+    assert db.query(NaverExpertReviewRun).filter(
+        NaverExpertReviewRun.as_of == AS_OF, NaverExpertReviewRun.briefing_hash == "same-hash",
+    ).count() == 2
+
+    # (b) 평결 행들이 새 run에 실제로 저장됐는지(버려지지 않음)
+    proposal_verdicts = [
+        v for v in db.query(NaverExpertReview).filter(NaverExpertReview.run_id == retry_run.id)
+        if v.proposal_id is not None
+    ]
+    assert {v.proposal_id for v in proposal_verdicts} == {1, 2}
+
+    # (c) 기존 degraded run은 그대로 남아있는지(삭제·수정 안 됨)
+    db.refresh(degraded_run)
+    assert degraded_run.status == "degraded"
+    assert db.query(NaverExpertReviewRun).filter(NaverExpertReviewRun.id == degraded_run.id).count() == 1
+
+    # (d) codex 리뷰 보강: ok run이 생긴 뒤 같은 (as_of, briefing_hash)의 세 번째 ok review는
+    # ok 멱등에 걸려 방금 만든 run을 그대로 반환하고, run 총 개수는 2에서 늘지 않아야 한다.
+    third_run = expert_ledger.record(db, AS_OF, _review(briefing_hash="same-hash", status="ok"))
+    assert third_run.id == retry_run.id, "ok run이 있으면 같은 키의 ok 재호출은 그 run을 반환해야 한다(멱등)"
+    assert db.query(NaverExpertReviewRun).filter(
+        NaverExpertReviewRun.as_of == AS_OF, NaverExpertReviewRun.briefing_hash == "same-hash",
+    ).count() == 2, "run 총 개수가 2(degraded 1 + ok 1)에서 늘면 안 된다"
+
+
 def test_record_creates_new_run_for_different_briefing_hash_same_day(db):
     """재실행=새 run(덮어쓰기 아님) — briefing_hash가 다르면 같은 날이어도 새 run."""
     run1 = expert_ledger.record(db, AS_OF, _review(briefing_hash="hash-A"))
