@@ -174,6 +174,15 @@ def test_bid_up_daily_budget_exhausted_blocked():
     assert "일예산" in reason
 
 
+def test_bid_up_zero_daily_budget_treated_as_unset_passes():
+    # [codex P2] dailyBudget=0은 budget_allocator 기존 관행상 "미설정"(useDailyBudget=false)
+    # — cost_today>=0은 항상 참이 되어 uncapped 캠페인의 정상 bid_up까지 차단하면 안 됨
+    reason = gate.check(
+        _bid_proposal("bid_up", 210), _ctx(current_bid=190, cost_today=50_000, daily_budget=0), now=NOW,
+    )
+    assert reason is None
+
+
 def test_bid_up_daily_budget_not_exhausted_passes():
     reason = gate.check(
         _bid_proposal("bid_up", 210),

@@ -133,7 +133,10 @@ def _check_bid(proposal: dict, context: dict, proposal_type: str) -> str | None:
 
         cost_today = context.get("cost_today")
         daily_budget = context.get("daily_budget")
-        if cost_today is not None and daily_budget is not None and cost_today >= daily_budget:
+        # codex[P2]: dailyBudget=0은 budget_allocator 기존 관행(daily_budget>0 필수, D-3)상
+        # "미설정"(useDailyBudget=false)을 뜻한다 — 0을 그대로 비교하면 uncapped 캠페인의
+        # 정상 bid_up까지 항상 차단된다.
+        if cost_today is not None and daily_budget is not None and daily_budget > 0 and cost_today >= daily_budget:
             return f"일예산 상한 불가침 — 오늘 누적 {cost_today}원 ≥ 일예산 {daily_budget}원"
 
     return None
