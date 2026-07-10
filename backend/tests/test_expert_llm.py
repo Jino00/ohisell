@@ -91,6 +91,37 @@ def test_invoke_claude_extracts_json_from_fenced_code_block(monkeypatch):
     assert result["json"] == {"verdicts": [{"proposal_id": 1}], "commentary": "총평"}
 
 
+def test_invoke_claude_extracts_json_from_unclosed_fenced_block(monkeypatch):
+    """prod 실측 회귀(2026-07-10): opus가 ```json만 열고 닫는 펜스를 생략 → 기존 정규식 미매치
+    → text.strip()이 "```json"으로 시작해 json.loads 실패 → 스키마 위반 2회 → run degraded."""
+    monkeypatch.setattr(expert_llm.shutil, "which", lambda name: "/usr/local/bin/claude")
+
+    def fake_run(cmd, **kwargs):
+        text = '```json\n{"verdicts": [{"proposal_id": 110}], "commentary": "총평"}'
+        return _FakeCompletedProcess(stdout=_ok_stdout(text))
+
+    monkeypatch.setattr(expert_llm.subprocess, "run", fake_run)
+
+    result = expert_llm._invoke_claude("p", system="s", schema={"type": "object"}, model="opus", timeout=30)
+
+    assert result["json"] == {"verdicts": [{"proposal_id": 110}], "commentary": "총평"}
+
+
+def test_invoke_claude_extracts_json_with_leading_prose_no_fence(monkeypatch):
+    """펜스 없이 앞뒤 설명문 사이에 JSON 객체만 있는 경우 — 첫 '{'~마지막 '}' 폴백으로 추출."""
+    monkeypatch.setattr(expert_llm.shutil, "which", lambda name: "/usr/local/bin/claude")
+
+    def fake_run(cmd, **kwargs):
+        text = '검토 결과입니다.\n{"verdicts": [], "commentary": "ok"}\n이상입니다.'
+        return _FakeCompletedProcess(stdout=_ok_stdout(text))
+
+    monkeypatch.setattr(expert_llm.subprocess, "run", fake_run)
+
+    result = expert_llm._invoke_claude("p", system="s", schema={"type": "object"}, model="opus", timeout=30)
+
+    assert result["json"] == {"verdicts": [], "commentary": "ok"}
+
+
 def test_invoke_claude_json_is_none_when_unparseable(monkeypatch):
     monkeypatch.setattr(expert_llm.shutil, "which", lambda name: "/usr/local/bin/claude")
 
