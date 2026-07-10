@@ -1,5 +1,6 @@
-# naver_sa_writer.py — 네이버 SA 쓰기 유일 저수준 어댑터 SA (X1a T2, ref 27). 제외키워드
-# (restricted-keywords) 추가/삭제만 쓴다 — userLock·bidAmt는 X1b에서 별도 함수로 확장한다.
+# naver_sa_writer.py — 네이버 SA 쓰기 유일 저수준 어댑터 SA (X1a T2 제외키워드 + X1b T1
+# bidAmt·userLock 확장, ref 27). D-NAO-16 개방 순서(제외키워드→정지·재개→입찰)의 쓰기
+# 함수 전체가 이 모듈에 있다 — 다른 SA는 이 모듈을 거치지 않고 네이버 API에 쓰지 않는다.
 #
 # 원칙 요약(ref 27 근거):
 # - 서명은 실제 HTTP 메서드와 반드시 일치(POST/DELETE 각각 fetcher._headers(path, method=...)),
@@ -35,9 +36,13 @@ class WriteValidationError(Exception):
 
 
 class WriteResult:
-    """쓰기 1건의 실행 전/후 실측값 + 쓰기 응답을 담는 결과 객체 (ref 27 §8-2 계약)."""
+    """쓰기 1건의 실행 전/후 실측값 + 쓰기 응답을 담는 결과 객체 (ref 27 §8-2 계약).
 
-    def __init__(self, action: str, before: list, response: object, after: list, created_ids: list):
+    before/after는 restricted-keywords처럼 리스트 리소스면 list, keyword/adgroup/campaign
+    단건 리소스(X1b bidAmt·userLock)면 dict — 대상 리소스의 GET 원본 형태를 그대로 담는다.
+    """
+
+    def __init__(self, action: str, before, response: object, after, created_ids: list):
         self.action = action
         self.before = before
         self.response = response
@@ -245,4 +250,187 @@ def delete_restricted_keywords(adgroup_id: str, restrict_kwd_ids: list[str]) -> 
         response=None,
         after=after,
         created_ids=[],
+    )
+
+
+# ── X1b T1: bidAmt·userLock (D-NAO-16 2·3단계, ref 27 §3·§4) ────────────────
+# 성공 판정은 여기서도 재조회로만(fail-closed) — PUT 응답 body는 response 필드에 원본
+# 기록용으로만 유지한다(add_restricted_keywords와 동일 규율).
+
+_MIN_BID = 70
+_MAX_BID = 100_000
+_BID_INCREMENT = 10
+
+
+def get_keyword(ncc_keyword_id: str) -> dict:
+    """GET /ncc/keywords/{nccKeywordId} — 현재 키워드 원본 JSON(bidAmt·userLock 포함).
+
+    update_keyword_bid·set_keyword_lock의 before/after 재조회(검증)용 유일 소스(ref 27 §5).
+    """
+    resp = fetcher._get(f"/ncc/keywords/{ncc_keyword_id}")
+    resp.raise_for_status()
+    return resp.json()
+
+
+def get_campaign(ncc_campaign_id: str) -> dict:
+    """GET /ncc/campaigns/{nccCampaignId} — 현재 캠페인 원본 JSON(userLock 포함).
+
+    set_campaign_lock의 before/after 재조회(검증)용 유일 소스(ref 27 §5).
+    """
+    resp = fetcher._get(f"/ncc/campaigns/{ncc_campaign_id}")
+    resp.raise_for_status()
+    return resp.json()
+
+
+def update_keyword_bid(ncc_keyword_id: str, bid_amt: int) -> WriteResult:
+    """PUT /ncc/keywords/{nccKeywordId}?fields=bidAmt — 키워드 입찰가 변경(ref 27 §3-1).
+
+    bid_amt 사전검증(70~100,000원, 10원 단위 — bid_simulator 규격과 동일, ref 27 §3-1
+    swagger 명시)은 여기서도 반복한다. 상위(guardrail_gate)가 이미 걸렀어도 이 어댑터
+    단독 호출 시에도 무효 입찰가가 네이버에 그대로 전송되지 않도록 방어(fail-closed).
+
+    Raises:
+        WriteValidationError: bid_amt가 범위 밖이거나 10원 단위가 아님.
+        WriteError: PUT이 2xx 아님(재시도 없음 — 비멱등 쓰기).
+        WriteVerificationError: PUT은 2xx였는데 재조회에 반영 안 됨.
+    """
+    if not (_MIN_BID <= bid_amt <= _MAX_BID) or bid_amt % _BID_INCREMENT != 0:
+        raise WriteValidationError(
+            f"update_keyword_bid: bid_amt={bid_amt}는 유효 범위 밖(70~100,000원, 10원 단위)"
+        )
+
+    before = get_keyword(ncc_keyword_id)
+
+    path = f"/ncc/keywords/{ncc_keyword_id}"
+    body = {"nccKeywordId": ncc_keyword_id, "bidAmt": bid_amt, "useGroupBidAmt": False}
+    log.info("Naver SA 쓰기 시도: update_keyword_bid keyword=%s bidAmt=%s", ncc_keyword_id, bid_amt)
+    resp = requests.put(
+        fetcher.BASE_URL + path,
+        headers=fetcher._headers(path, method="PUT"),
+        params={"fields": "bidAmt"},
+        json=body,
+        timeout=30,
+    )
+    if not (200 <= resp.status_code < 300):
+        log.error(
+            "Naver SA 쓰기 실패: update_keyword_bid keyword=%s status=%s body=%s",
+            ncc_keyword_id, resp.status_code, resp.text[:300],
+        )
+        raise WriteError(
+            f"update_keyword_bid 실패: status={resp.status_code} body={resp.text[:300]}"
+        )
+
+    try:
+        response_body = resp.json()
+    except ValueError:
+        response_body = None
+
+    after = get_keyword(ncc_keyword_id)
+    if after.get("bidAmt") != bid_amt:
+        raise WriteVerificationError(
+            f"update_keyword_bid: 쓰기 응답은 성공(status={resp.status_code})이나 재조회에 "
+            f"반영되지 않음(fail-closed): 요청={bid_amt} 재조회={after.get('bidAmt')}"
+        )
+
+    log.info("Naver SA 쓰기 성공: update_keyword_bid keyword=%s bidAmt=%s", ncc_keyword_id, bid_amt)
+    return WriteResult(
+        action="update_keyword_bid", before=before, response=response_body, after=after, created_ids=[],
+    )
+
+
+def _put_user_lock(*, action: str, path: str, body: dict, before: dict, after_fetch) -> WriteResult:
+    """3계층(keyword/adgroup/campaign) userLock PUT 공통 로직 — before/after 재조회 계약,
+    성공 판정은 재조회로만(fail-closed). fields=userLock 항상 명시(ref 27 §4 전체교체 함정)."""
+    log.info("Naver SA 쓰기 시도: %s path=%s body=%s", action, path, body)
+    resp = requests.put(
+        fetcher.BASE_URL + path,
+        headers=fetcher._headers(path, method="PUT"),
+        params={"fields": "userLock"},
+        json=body,
+        timeout=30,
+    )
+    if not (200 <= resp.status_code < 300):
+        log.error("Naver SA 쓰기 실패: %s status=%s body=%s", action, resp.status_code, resp.text[:300])
+        raise WriteError(f"{action} 실패: status={resp.status_code} body={resp.text[:300]}")
+
+    try:
+        response_body = resp.json()
+    except ValueError:
+        response_body = None
+
+    after = after_fetch()
+    if after.get("userLock") != body["userLock"]:
+        raise WriteVerificationError(
+            f"{action}: 쓰기 응답은 성공(status={resp.status_code})이나 재조회에 반영되지 "
+            f"않음(fail-closed): 요청={body['userLock']} 재조회={after.get('userLock')}"
+        )
+
+    log.info("Naver SA 쓰기 성공: %s userLock=%s", action, body["userLock"])
+    return WriteResult(action=action, before=before, response=response_body, after=after, created_ids=[])
+
+
+def set_keyword_lock(ncc_keyword_id: str, user_lock: bool) -> WriteResult:
+    """PUT /ncc/keywords/{nccKeywordId}?fields=userLock — 키워드 정지(true)/재개(false)
+    (ref 27 §4 키워드 계층). D-NAO-16 개방 순서 2단계(정지·재개)의 키워드 단위 실행 함수.
+
+    Raises:
+        WriteValidationError: user_lock이 bool이 아님.
+        WriteError: PUT이 2xx 아님.
+        WriteVerificationError: PUT은 2xx였는데 재조회에 반영 안 됨.
+    """
+    if not isinstance(user_lock, bool):
+        raise WriteValidationError(f"set_keyword_lock: user_lock은 bool이어야 함: {user_lock!r}")
+
+    before = get_keyword(ncc_keyword_id)
+    path = f"/ncc/keywords/{ncc_keyword_id}"
+    body = {"nccKeywordId": ncc_keyword_id, "userLock": user_lock}
+    return _put_user_lock(
+        action="set_keyword_lock", path=path, body=body, before=before,
+        after_fetch=lambda: get_keyword(ncc_keyword_id),
+    )
+
+
+def set_adgroup_lock(ncc_adgroup_id: str, user_lock: bool) -> WriteResult:
+    """PUT /ncc/adgroups/{nccAdgroupId}?fields=userLock — 광고그룹 정지(true)/재개(false)
+    (ref 27 §4 광고그룹 계층). customerId 불필요(Adgroup 정의엔 required-update 표시 없음,
+    swagger definitions 재확인 — Campaign과 다름).
+
+    Raises:
+        WriteValidationError: user_lock이 bool이 아님.
+        WriteError: PUT이 2xx 아님.
+        WriteVerificationError: PUT은 2xx였는데 재조회에 반영 안 됨.
+    """
+    if not isinstance(user_lock, bool):
+        raise WriteValidationError(f"set_adgroup_lock: user_lock은 bool이어야 함: {user_lock!r}")
+
+    before = _get_adgroup(ncc_adgroup_id)
+    path = f"/ncc/adgroups/{ncc_adgroup_id}"
+    body = {"nccAdgroupId": ncc_adgroup_id, "userLock": user_lock}
+    return _put_user_lock(
+        action="set_adgroup_lock", path=path, body=body, before=before,
+        after_fetch=lambda: _get_adgroup(ncc_adgroup_id),
+    )
+
+
+def set_campaign_lock(ncc_campaign_id: str, user_lock: bool) -> WriteResult:
+    """PUT /ncc/campaigns/{nccCampaignId}?fields=userLock — 캠페인 정지(true)/재개(false)
+    (ref 27 §4 캠페인 계층, D-NAO-16 원문 사례 "캠페인이 죽었으면 정지"). customerId는
+    swagger에서 캠페인 PUT의 #required-update — 반드시 포함(Campaign 정의 재확인).
+
+    Raises:
+        WriteValidationError: user_lock이 bool이 아님.
+        WriteError: PUT이 2xx 아님.
+        WriteVerificationError: PUT은 2xx였는데 재조회에 반영 안 됨.
+    """
+    if not isinstance(user_lock, bool):
+        raise WriteValidationError(f"set_campaign_lock: user_lock은 bool이어야 함: {user_lock!r}")
+
+    before = get_campaign(ncc_campaign_id)
+    path = f"/ncc/campaigns/{ncc_campaign_id}"
+    body = {
+        "nccCampaignId": ncc_campaign_id, "customerId": int(fetcher.CUSTOMER_ID), "userLock": user_lock,
+    }
+    return _put_user_lock(
+        action="set_campaign_lock", path=path, body=body, before=before,
+        after_fetch=lambda: get_campaign(ncc_campaign_id),
     )

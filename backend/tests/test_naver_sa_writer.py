@@ -325,3 +325,348 @@ def test_get_restricted_keywords_returns_raw_json():
     assert out == rows
     args, kwargs = mock_get.call_args
     assert args[0] == f"/ncc/adgroups/{ADGROUP_ID}/restricted-keywords"
+
+
+# ── X1b T1: update_keyword_bid / set_keyword_lock / set_adgroup_lock / set_campaign_lock ──
+# 근거: ref 27 §3(bidAmt)·§4(userLock 3계층), swagger definitions(Adgroup/Campaign/AdKeyword)
+# 재확인(2026-07-10) — PUT 응답 200(갱신 body)+201 둘 다 정의, 기존 add_restricted_keywords와
+# 동일하게 2xx 전부 성공으로 취급한다.
+
+KEYWORD_ID = "nkw-a001-01-000005009913563"
+CAMPAIGN_ID = "cmp-a001-01-000000010206612"
+
+
+def _keyword_resp(bid_amt=190, user_lock=False):
+    return FakeResp(200, {
+        "nccKeywordId": KEYWORD_ID, "nccAdgroupId": ADGROUP_ID, "keyword": "오하이",
+        "bidAmt": bid_amt, "useGroupBidAmt": False, "userLock": user_lock, "status": "ELIGIBLE",
+    })
+
+
+def _adgroup_resp(user_lock=False):
+    return FakeResp(200, {"nccAdgroupId": ADGROUP_ID, "adgroupType": "WEB_SITE", "userLock": user_lock})
+
+
+def _campaign_resp(user_lock=False):
+    return FakeResp(200, {"nccCampaignId": CAMPAIGN_ID, "userLock": user_lock})
+
+
+# ── get_keyword / get_campaign ───────────────────────────────────────────
+
+
+def test_get_keyword_returns_raw_json():
+    with patch.object(writer.fetcher, "_get", return_value=_keyword_resp()) as mock_get:
+        out = writer.get_keyword(KEYWORD_ID)
+
+    assert out == _keyword_resp().json()
+    args, kwargs = mock_get.call_args
+    assert args[0] == f"/ncc/keywords/{KEYWORD_ID}"
+
+
+def test_get_campaign_returns_raw_json():
+    with patch.object(writer.fetcher, "_get", return_value=_campaign_resp()) as mock_get:
+        out = writer.get_campaign(CAMPAIGN_ID)
+
+    assert out == _campaign_resp().json()
+    args, kwargs = mock_get.call_args
+    assert args[0] == f"/ncc/campaigns/{CAMPAIGN_ID}"
+
+
+# ── update_keyword_bid ───────────────────────────────────────────────────
+
+
+def test_update_bid_success_roundtrip():
+    before = _keyword_resp(bid_amt=190)
+    after = _keyword_resp(bid_amt=500)
+    put_resp = FakeResp(200, after.json())
+
+    with patch.object(writer.fetcher, "_get", side_effect=[before, after]) as mock_get, \
+         patch.object(writer.requests, "put", return_value=put_resp) as mock_put:
+        result = writer.update_keyword_bid(KEYWORD_ID, 500)
+
+    assert isinstance(result, WriteResult)
+    assert result.action == "update_keyword_bid"
+    assert result.before == before.json()
+    assert result.after == after.json()
+    assert result.created_ids == []
+    assert mock_get.call_count == 2
+    assert mock_put.call_count == 1
+
+
+def test_update_bid_body_includes_use_group_bid_amt_false():
+    before = _keyword_resp(bid_amt=190)
+    after = _keyword_resp(bid_amt=500)
+    put_resp = FakeResp(200, after.json())
+
+    with patch.object(writer.fetcher, "_get", side_effect=[before, after]), \
+         patch.object(writer.requests, "put", return_value=put_resp) as mock_put:
+        writer.update_keyword_bid(KEYWORD_ID, 500)
+
+    _, kwargs = mock_put.call_args
+    assert kwargs["json"] == {"nccKeywordId": KEYWORD_ID, "bidAmt": 500, "useGroupBidAmt": False}
+    assert kwargs["params"] == {"fields": "bidAmt"}
+
+
+def test_update_bid_below_min_raises_validation_error_no_http():
+    with patch.object(writer.fetcher, "_get") as mock_get, \
+         patch.object(writer.requests, "put") as mock_put:
+        with pytest.raises(WriteValidationError):
+            writer.update_keyword_bid(KEYWORD_ID, 60)
+
+    mock_get.assert_not_called()
+    mock_put.assert_not_called()
+
+
+def test_update_bid_above_max_raises_validation_error_no_http():
+    with patch.object(writer.fetcher, "_get") as mock_get, \
+         patch.object(writer.requests, "put") as mock_put:
+        with pytest.raises(WriteValidationError):
+            writer.update_keyword_bid(KEYWORD_ID, 100_010)
+
+    mock_get.assert_not_called()
+    mock_put.assert_not_called()
+
+
+def test_update_bid_not_multiple_of_10_raises_validation_error_no_http():
+    with patch.object(writer.fetcher, "_get") as mock_get, \
+         patch.object(writer.requests, "put") as mock_put:
+        with pytest.raises(WriteValidationError):
+            writer.update_keyword_bid(KEYWORD_ID, 505)
+
+    mock_get.assert_not_called()
+    mock_put.assert_not_called()
+
+
+def test_update_bid_put_4xx_raises_write_error_no_after_refetch():
+    before = _keyword_resp(bid_amt=190)
+    put_resp = FakeResp(403, {"message": "forbidden"})
+
+    with patch.object(writer.fetcher, "_get", side_effect=[before]) as mock_get, \
+         patch.object(writer.requests, "put", return_value=put_resp) as mock_put:
+        with pytest.raises(WriteError):
+            writer.update_keyword_bid(KEYWORD_ID, 500)
+
+    assert mock_get.call_count == 1  # before만, after 재조회 없음
+    assert mock_put.call_count == 1
+
+
+def test_update_bid_verification_mismatch_raises_verification_error():
+    before = _keyword_resp(bid_amt=190)
+    after = _keyword_resp(bid_amt=190)  # PUT은 성공했다는데 반영 안 됨
+    put_resp = FakeResp(200, _keyword_resp(bid_amt=500).json())
+
+    with patch.object(writer.fetcher, "_get", side_effect=[before, after]), \
+         patch.object(writer.requests, "put", return_value=put_resp):
+        with pytest.raises(WriteVerificationError):
+            writer.update_keyword_bid(KEYWORD_ID, 500)
+
+
+def test_update_bid_headers_signed_with_put_method_and_no_query_in_path():
+    before = _keyword_resp(bid_amt=190)
+    after = _keyword_resp(bid_amt=500)
+    put_resp = FakeResp(200, after.json())
+
+    with patch.object(writer.fetcher, "_get", side_effect=[before, after]), \
+         patch.object(writer.requests, "put", return_value=put_resp), \
+         patch.object(writer.fetcher, "_headers", return_value={}) as mock_headers:
+        writer.update_keyword_bid(KEYWORD_ID, 500)
+
+    put_call = [c for c in mock_headers.call_args_list if c.kwargs.get("method") == "PUT"]
+    assert len(put_call) == 1
+    signed_path = put_call[0].args[0]
+    assert signed_path == f"/ncc/keywords/{KEYWORD_ID}"
+    assert "?" not in signed_path and "fields=" not in signed_path
+
+
+def test_update_bid_put_2xx_unparseable_body_still_verified_via_after():
+    before = _keyword_resp(bid_amt=190)
+    after = _keyword_resp(bid_amt=500)
+
+    class UnparseableResp(FakeResp):
+        def json(self):
+            raise ValueError("no json")
+
+    put_resp = UnparseableResp(200, None)
+
+    with patch.object(writer.fetcher, "_get", side_effect=[before, after]), \
+         patch.object(writer.requests, "put", return_value=put_resp):
+        result = writer.update_keyword_bid(KEYWORD_ID, 500)
+
+    assert result.response is None
+    assert result.after == after.json()
+
+
+# ── set_keyword_lock ─────────────────────────────────────────────────────
+
+
+def test_set_keyword_lock_pause_success_roundtrip():
+    before = _keyword_resp(user_lock=False)
+    after = _keyword_resp(user_lock=True)
+    put_resp = FakeResp(200, after.json())
+
+    with patch.object(writer.fetcher, "_get", side_effect=[before, after]) as mock_get, \
+         patch.object(writer.requests, "put", return_value=put_resp) as mock_put:
+        result = writer.set_keyword_lock(KEYWORD_ID, True)
+
+    assert result.action == "set_keyword_lock"
+    assert result.before == before.json()
+    assert result.after == after.json()
+    assert mock_get.call_count == 2
+    assert mock_put.call_count == 1
+
+
+def test_set_keyword_lock_resume_success_roundtrip():
+    before = _keyword_resp(user_lock=True)
+    after = _keyword_resp(user_lock=False)
+    put_resp = FakeResp(200, after.json())
+
+    with patch.object(writer.fetcher, "_get", side_effect=[before, after]), \
+         patch.object(writer.requests, "put", return_value=put_resp):
+        result = writer.set_keyword_lock(KEYWORD_ID, False)
+
+    assert result.after["userLock"] is False
+
+
+def test_set_keyword_lock_body_shape():
+    before = _keyword_resp(user_lock=False)
+    after = _keyword_resp(user_lock=True)
+    put_resp = FakeResp(200, after.json())
+
+    with patch.object(writer.fetcher, "_get", side_effect=[before, after]), \
+         patch.object(writer.requests, "put", return_value=put_resp) as mock_put:
+        writer.set_keyword_lock(KEYWORD_ID, True)
+
+    _, kwargs = mock_put.call_args
+    assert kwargs["json"] == {"nccKeywordId": KEYWORD_ID, "userLock": True}
+    assert kwargs["params"] == {"fields": "userLock"}
+
+
+def test_set_keyword_lock_non_bool_raises_validation_error_no_http():
+    with patch.object(writer.fetcher, "_get") as mock_get, \
+         patch.object(writer.requests, "put") as mock_put:
+        with pytest.raises(WriteValidationError):
+            writer.set_keyword_lock(KEYWORD_ID, "true")  # 문자열 — bool 아님
+
+    mock_get.assert_not_called()
+    mock_put.assert_not_called()
+
+
+def test_set_keyword_lock_put_4xx_raises_write_error():
+    before = _keyword_resp(user_lock=False)
+    put_resp = FakeResp(500, {"message": "server error"})
+
+    with patch.object(writer.fetcher, "_get", side_effect=[before]), \
+         patch.object(writer.requests, "put", return_value=put_resp):
+        with pytest.raises(WriteError):
+            writer.set_keyword_lock(KEYWORD_ID, True)
+
+
+def test_set_keyword_lock_verification_mismatch_raises_verification_error():
+    before = _keyword_resp(user_lock=False)
+    after = _keyword_resp(user_lock=False)  # 반영 안 됨
+    put_resp = FakeResp(200, _keyword_resp(user_lock=True).json())
+
+    with patch.object(writer.fetcher, "_get", side_effect=[before, after]), \
+         patch.object(writer.requests, "put", return_value=put_resp):
+        with pytest.raises(WriteVerificationError):
+            writer.set_keyword_lock(KEYWORD_ID, True)
+
+
+# ── set_adgroup_lock ─────────────────────────────────────────────────────
+
+
+def test_set_adgroup_lock_success_roundtrip():
+    before = _adgroup_resp(user_lock=False)
+    after = _adgroup_resp(user_lock=True)
+    put_resp = FakeResp(200, after.json())
+
+    with patch.object(writer.fetcher, "_get", side_effect=[before, after]) as mock_get, \
+         patch.object(writer.requests, "put", return_value=put_resp) as mock_put:
+        result = writer.set_adgroup_lock(ADGROUP_ID, True)
+
+    assert result.action == "set_adgroup_lock"
+    assert result.after["userLock"] is True
+    assert mock_get.call_count == 2
+    assert mock_put.call_count == 1
+
+
+def test_set_adgroup_lock_body_shape_no_customer_id():
+    before = _adgroup_resp(user_lock=False)
+    after = _adgroup_resp(user_lock=True)
+    put_resp = FakeResp(200, after.json())
+
+    with patch.object(writer.fetcher, "_get", side_effect=[before, after]), \
+         patch.object(writer.requests, "put", return_value=put_resp) as mock_put:
+        writer.set_adgroup_lock(ADGROUP_ID, True)
+
+    _, kwargs = mock_put.call_args
+    assert kwargs["json"] == {"nccAdgroupId": ADGROUP_ID, "userLock": True}
+    assert kwargs["params"] == {"fields": "userLock"}
+
+
+def test_set_adgroup_lock_verification_mismatch_raises_verification_error():
+    before = _adgroup_resp(user_lock=False)
+    after = _adgroup_resp(user_lock=False)
+    put_resp = FakeResp(200, _adgroup_resp(user_lock=True).json())
+
+    with patch.object(writer.fetcher, "_get", side_effect=[before, after]), \
+         patch.object(writer.requests, "put", return_value=put_resp):
+        with pytest.raises(WriteVerificationError):
+            writer.set_adgroup_lock(ADGROUP_ID, True)
+
+
+# ── set_campaign_lock ────────────────────────────────────────────────────
+
+
+def test_set_campaign_lock_success_roundtrip():
+    before = _campaign_resp(user_lock=False)
+    after = _campaign_resp(user_lock=True)
+    put_resp = FakeResp(200, after.json())
+
+    with patch.object(writer.fetcher, "_get", side_effect=[before, after]) as mock_get, \
+         patch.object(writer.requests, "put", return_value=put_resp) as mock_put:
+        result = writer.set_campaign_lock(CAMPAIGN_ID, True)
+
+    assert result.action == "set_campaign_lock"
+    assert result.after["userLock"] is True
+    assert mock_get.call_count == 2
+    assert mock_put.call_count == 1
+
+
+def test_set_campaign_lock_body_includes_customer_id():
+    before = _campaign_resp(user_lock=False)
+    after = _campaign_resp(user_lock=True)
+    put_resp = FakeResp(200, after.json())
+
+    with patch.object(writer.fetcher, "_get", side_effect=[before, after]), \
+         patch.object(writer.requests, "put", return_value=put_resp) as mock_put:
+        writer.set_campaign_lock(CAMPAIGN_ID, True)
+
+    _, kwargs = mock_put.call_args
+    assert kwargs["json"] == {
+        "nccCampaignId": CAMPAIGN_ID, "customerId": int(writer.fetcher.CUSTOMER_ID), "userLock": True,
+    }
+    assert kwargs["params"] == {"fields": "userLock"}
+
+
+def test_set_campaign_lock_verification_mismatch_raises_verification_error():
+    before = _campaign_resp(user_lock=False)
+    after = _campaign_resp(user_lock=False)
+    put_resp = FakeResp(200, _campaign_resp(user_lock=True).json())
+
+    with patch.object(writer.fetcher, "_get", side_effect=[before, after]), \
+         patch.object(writer.requests, "put", return_value=put_resp):
+        with pytest.raises(WriteVerificationError):
+            writer.set_campaign_lock(CAMPAIGN_ID, True)
+
+
+def test_set_campaign_lock_put_4xx_raises_write_error_no_after_refetch():
+    before = _campaign_resp(user_lock=False)
+    put_resp = FakeResp(404, {"message": "not found"})
+
+    with patch.object(writer.fetcher, "_get", side_effect=[before]) as mock_get, \
+         patch.object(writer.requests, "put", return_value=put_resp):
+        with pytest.raises(WriteError):
+            writer.set_campaign_lock(CAMPAIGN_ID, True)
+
+    assert mock_get.call_count == 1

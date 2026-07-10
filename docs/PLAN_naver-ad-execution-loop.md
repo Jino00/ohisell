@@ -48,10 +48,22 @@ X0 선결 → X1a 손(제외키워드) → X1b 손(정지·재개→입찰) → 
 - **완료기준(확인 방법)**: ①카나리 캠페인에서 제외키워드 1건 실집행 후 네이버 API 재조회로 반영 확인(라이브, 원칙 22) ②승인 없는 pending 실행 시도 → 차단 테스트 ③위임 OFF 유형은 Ava agree여도 자동 실행 안 됨 테스트 ④change_log에 before/after 실측값 기록 확인 ⑤전체 pytest 회귀 0.
 
 ### X1b — 정지·재개 → 입찰 개방 + 가드레일 실효화
-1. userLock(정지·재개) 개방 → 입찰(bid_up/bid_down/growth_bid_up) 개방 — D-NAO-16 순서.
-2. 가드레일 전부 코드로 실효화: 회당 ±15%(운영 키워드, D-NAO-5)·쿨다운(D-NAO-19)·**일일 변경 건수 상한(신규 상수)**·키워드 스톱로스 절대액(D-NAO-20)·BEP 미달 증액 금지·일예산 상한 불가침·10원 단위 70~100,000원 클램프(기존 bid_simulator 규격).
-3. 실행 결과의 D+7/14 채점은 기존 proposal_scoreboard·change_log verify_date가 이미 수신 — 배선 확인만.
-- **완료기준**: ①가드레일 각각의 차단 단위테스트(위반 시나리오 전수) ②카나리에서 입찰 변경 1건 실집행·재조회 확인 ③±15% 초과 제안이 실행 단계에서 잘리는 것 실측 ④pytest 회귀 0.
+
+> **정찰 확정(2026-07-10, Opus, D-NAO-38)**: 착수 전 ref 27·기존 코드 실독으로 3개 구조적 갭 확정 →
+> ①입찰 목표값이 구조화 필드 부재(추천입찰가가 rationale 텍스트에만, proposal_writer.py:108 — 텍스트 파싱 금지, X1a T3 adgroup_id 컬럼 신설과 동일 선례로 신규 컬럼) ②정지·재개 proposal_type·생성기 전무(현 7종에 pause/resume 없음 — **Jino "완벽히 작동하도록" 결정으로 생성기까지 구축**) ③가드레일 미실효(클램프는 bid_simulator 제안생성 시점에만, ±15%·쿨다운·일일상한·스톱로스·BEP증액금지는 어디에도 강제 안 됨 → 실행 직전 gate가 새 핵심).
+> **개방 순서(D-NAO-16) 준수**: 제외키워드(완료)→**정지·재개→입찰**→예산(스코프밖). 정지·재개가 입찰보다 안전(완전 가역, 품질지수 이력 보존)이라 먼저 개방.
+
+**T1 스키마 + writer 확장** — ①마이그레이션: `naver_proposals`에 `target_bid`(INT, nullable — 입찰 제안의 목표 입찰가, 실행자가 텍스트 아닌 이 컬럼을 읽음)·`target_lock`(BOOL, nullable — 정지=true/재개=false, userLock 의미 그대로) 신설. ②`naver_sa_writer`에 `update_keyword_bid(nccKeywordId, bidAmt)`(PUT `?fields=bidAmt`, body에 `bidAmt`+`useGroupBidAmt` 둘 다 필수 — ref 27 §3-1) + `set_user_lock(...)`(키워드/광고그룹/캠페인 3계층 PUT `?fields=userLock`, ref 27 §4 — `fields` 항상 명시로 전체교체 함정 차단, 캠페인은 `customerId` 포함) 신설. 전부 기존 (before 재조회, 쓰기 응답, after 재조회) 계약 + 무재시도 + after 재조회 성공판정(fail-closed) — T2 제외키워드 함수와 동일 규율.
+
+**T2 `guardrail_gate` SA** — 순수 판정 함수(부수효과 0): (제안 + 라이브 현재상태[current_bid·최근 change_log·오늘 집행 건수 등 harness precompute]) → 통과(None) or 차단사유(한국어). 강제 항목: 회당 ±15%(운영 키워드, D-NAO-5 — 신규/육성 트랙 제외, D-NAO-20-③)·쿨다운(동일 키워드 재변경 최소 간격, D-NAO-19)·**일일 변경 건수 상한(신규 상수)**·키워드 스톱로스 절대액(무전환 지출 상한, D-NAO-20)·BEP 미달 증액 금지(bid_up인데 프로필상 손익 안 맞으면 차단)·일예산 상한 불가침·10원 단위 70~100,000원 클램프(bid_simulator 규격 재사용). SA간 직접호출 금지(원칙18) — harness가 원료 precompute해 전달.
+
+**T3 proposal_writer 배선 + 정지·재개 생성기** — ①`_bid_proposal`·`_growth_proposal`이 `recommended_bid`를 `target_bid` 컬럼에 저장(구조화). ②정지·재개 생성기(D-NAO-38, Jino 완전작동 지시): pause = 스톱로스 도달(무전환 지출이 절대액 초과) 등 진단 근거로 키워드 정지 제안 / resume = 정지 사유 해소 감지(D-NAO-16: 계절성 회복·BEP 개선·CPC 하락)로 재개 제안. account_diagnosis 기존 보드 신호 재사용, 근거 없는 정지·재개 금지(추정 금지). `target_lock` 저장.
+
+**T4 execution_harness 개방** — `OPEN_ACTIONS += {update_bid, set_user_lock}` + `_WRITE_EXECUTORS`에 `_execute_update_bid`·`_execute_set_user_lock`(각각: 가드레일 게이트 통과 확인 → writer 호출 → after 재조회 검증 → change_log 전건 before/after 기록, 실패=failed 종결·재조회 불일치=원복시도+알림). MOP 충돌 감지 배선(D-NAO-13 — 우리가 안 한 변경이 change_log 대조로 감지되면 경고). 실행 순서(§4)에 가드레일 단계 삽입.
+
+**T5 D+7/14 채점 배선 확인** — 실행 결과의 D+7/14 채점은 기존 proposal_scoreboard·change_log verify_date가 이미 수신 — 신규 액션 유형이 채점 경로에 정상 흐르는지 배선 확인만.
+
+- **완료기준(확인 방법)**: ①가드레일 각각의 차단 단위테스트(위반 시나리오 전수 — ±15% 초과·쿨다운 중·일일상한 초과·스톱로스·BEP미달 증액·클램프 범위밖 각각) ②카나리에서 입찰 변경 1건 + 정지·재개 각 1건 실집행·재조회 확인(라이브, 원칙22) ③±15% 초과 제안이 실행 단계에서 잘리는 것 실측 ④정지·재개 생성기가 실데이터에서 근거 있는 제안만 생성 확인 ⑤pytest 회귀 0.
 
 ### X2 — 당일 플라이트 루프 (G2+G3, ref 26 ①)
 1. **T1 `response_curve_builder` SA**: 캠페인(우선)·키워드(후순위) 단위 "입찰배수 α → 오늘 예상 비용·매출" 곡선. 원료 = forecast(일 예측) × hourly_pattern(시간대 분포) × 견적 API(실시간 스팟 보정) × hourly_snapshot(당일 실적 누적).
@@ -95,8 +107,11 @@ X0 선결 → X1a 손(제외키워드) → X1b 손(정지·재개→입찰) → 
 - [x] X1a T6 정보성 pending 경량화 구현 — **완료(2026-07-10, fable 설계+Sonnet 구현+codex 2라운드 PASS, D-NAO-37)**: ①차등 TTL — `_INFORMATIONAL_EXPIRE_DPLUS`(trigger_pacing·trigger_cpc_spike·account_brief=D+1 / anomaly·anomaly_freshness=D+3, **D+N 당일 만료** — codex P1: 구 계산식은 하루 늦음, cutoff=오늘-(N-1) 자정으로 수정+경계 테스트 고정. 실행형 14일 기존 시맨틱 불변) ②브리핑 접기 — `pending_proposals`=실행형만(→ava expected_ids 자동으로 실행형 전건), 신규 `informational_pending` 유형별 집계(count·campaign_count, 빈 campaign_id 제외 — codex P2), 토큰가드는 실행형에만, A2 가드 유지(정보성만 있는 날 claude 미호출) ③백로그 일괄 expired = **별도 스크립트 없음**: created_at 기준이라 배포 후 첫 08:00 크론이 145건 백로그 자연 소급 정리(행 보존). 정보성 5종 명시 상수 `proposal_writer.INFORMATIONAL_PROPOSAL_TYPES`(harness 매핑 파생 금지 — budget_up 함정). 테스트 1026 passed(+27). ⚠️완료 확인(다음 크론 절삭 로그 0건·Ava 평결=실행형 전건)은 prod 배포 후 라이브로.
 - [x] X1a prod 배포 — **완료(2026-07-10 저녁, fable 직접 수행)**: PR #9 main 병합(`bc5a0ce`) → prod DB+dist 백업(`/home/ubuntu/ohisell_bak/naver-ad-X1a_20260710_092610/`) → 백엔드 rsync+**sha256 12/12 전수 일치**(1차 검증 스크립트가 zsh 워드스플릿 버그로 거짓 통과 — 재검증으로 잡음, failures.jsonl) → 마이그레이션 2개(`a1b2c3d4e5f6`→`b2c3d4e5f6g7`) 실DB 적용·스키마 확인 → pm2 재시작(에러 0) → 프론트 빌드+rsync. **라이브 검증(원칙 22, 전부 외부 HTTPS)**: `/settings/expert-delegation` 200 `{delegated:[], delegable:[negative_keyword]}` · proposals 직렬화 신규 필드(approval_source/executable/사유) 정상 · 네이버 크론 12개 전부 등록(내일 07:30~08:10 체인) · 신규 번들 서빙 확인. **내일 08:00 크론 = T6 백로그 145건 자연 소급 정리 + 08:05 = Ava 경량 브리핑 첫 가동** — 절삭 로그 0건·평결=실행형 전건 확인 필요(T6 완료 확인).
 - [ ] X1a 완료기준① 라이브 왕복 — **카나리 캠페인 2~3개 지정 대기(Jino)** → optimizer='ours' 전환 → 콘솔에서 제외키워드 1건 승인·실행 → 네이버 API 재조회 반영 확인
-- [ ] X1b 정지·재개 개방
-- [ ] X1b 입찰 개방 + 가드레일 전부 실효화
+- [x] X1b T1 스키마 + naver_sa_writer 확장 — **완료(2026-07-10, Sonnet 구현, TDD)**: 마이그레이션 `c3d4e5f6g7h8`(naver_proposals에 `target_bid` INT nullable·`target_lock` BOOL nullable, additive — 격리 스크립트로 up/down/재up 검증: 기존 행 무영향·컬럼 존재/제거 확인) + `naver_sa_writer`에 `get_keyword`/`get_campaign`(재조회 소스) + `update_keyword_bid`(PUT fields=bidAmt, 70~100,000원·10원단위 사전검증, ref 27 §3-1) + `set_keyword_lock`/`set_adgroup_lock`/`set_campaign_lock`(PUT fields=userLock 3계층, ref 27 §4 — campaign만 customerId 필수, swagger definitions로 재확인해 adgroup은 불필요 확정) 신설. 전부 기존 (before 재조회, 쓰기 응답, after 재조회) 계약 + 무재시도 + after 재조회 성공판정(fail-closed) 규율 재사용. 응답코드는 swagger 직접 확인(200 OK+갱신body, 201 병기)으로 add_restricted_keywords와 동일 2xx 판정 확정(추정 아님). 테스트 24개 신규(1053→1077 passed, 회귀 0).
+- [ ] X1b T2 guardrail_gate SA (±15%·쿨다운·일일상한·스톱로스·BEP증액금지·클램프·일예산)
+- [ ] X1b T3 proposal_writer target_bid 저장 + 정지·재개 생성기(pause/resume, D-NAO-38)
+- [ ] X1b T4 execution_harness 개방(update_bid·set_user_lock 실행자) + MOP 충돌감지(D-NAO-13)
+- [ ] X1b T5 D+7/14 채점 배선 확인
 - [ ] X2 T1 response_curve_builder
 - [ ] X2 T2 pacing_controller (αB·αC 이분법)
 - [ ] X2 T3 flight_loop 크론 (dry-run 1주 → 실전환)
