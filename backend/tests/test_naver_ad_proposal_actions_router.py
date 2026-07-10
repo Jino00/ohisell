@@ -204,6 +204,42 @@ def test_status_transition_already_executed_approved_cannot_be_rejected(client, 
     assert p.status == "approved"
 
 
+@pytest.mark.parametrize("current", ["pending", "failed"])
+def test_status_transition_approval_records_console_source(client, db, current):
+    """X1a T5: 콘솔 승인 경로는 approval_source='console'로 감사 기록 — delegation_gate의
+    'delegation'과 대칭(누가 승인했는지 구분)."""
+    p = _proposal(db, status=current)
+
+    resp = client.post(f"/api/naver/ad/proposals/{p.id}/status", json={"status": "approved"})
+    assert resp.status_code == 200
+    assert resp.json()["approval_source"] == "console"
+
+    db.refresh(p)
+    assert p.approval_source == "console"
+
+
+def test_status_transition_rejection_does_not_set_approval_source(client, db):
+    p = _proposal(db, status="pending")
+    resp = client.post(f"/api/naver/ad/proposals/{p.id}/status", json={"status": "rejected"})
+    assert resp.status_code == 200
+    assert resp.json()["approval_source"] is None
+    db.refresh(p)
+    assert p.approval_source is None
+
+
+def test_status_transition_rejection_preserves_prior_approval_source(client, db):
+    """반려는 approval_source를 지우지 않는다(이력 보존)."""
+    p = _proposal(db, status="approved")
+    p.approval_source = "delegation"
+    db.commit()
+
+    resp = client.post(f"/api/naver/ad/proposals/{p.id}/status", json={"status": "rejected"})
+    assert resp.status_code == 200
+    assert resp.json()["approval_source"] == "delegation"
+    db.refresh(p)
+    assert p.approval_source == "delegation"
+
+
 def test_status_transition_rejects_invalid_status_value(client, db):
     p = _proposal(db, status="pending")
     resp = client.post(f"/api/naver/ad/proposals/{p.id}/status", json={"status": "bogus"})

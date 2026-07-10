@@ -1683,6 +1683,9 @@ export interface NaverAdProposal {
   // X1a T4 — 콘솔 실행 버튼 활성화 여부(naver_execution_harness.real_write_blocker).
   executable: boolean;
   not_executable_reason: string | null;
+  // X1a T5 — 승인 경로(콘솔 사람 승인 vs Ava 위임 자동승인, D-NAO-25). 승인 전(pending)이거나
+  // 구버전 데이터는 null.
+  approval_source: "console" | "delegation" | null;
 }
 
 export interface NaverAdProposalList {
@@ -1819,5 +1822,23 @@ export function putNaverCampaignSettings(body: {
       target_roas_override: body.targetRoasOverride ?? null,
       memo: body.memo ?? null,
     }),
+  });
+}
+
+// X1a T5 — E2 위임 스위치(D-NAO-25): Ava가 agree 평결 + 가드레일을 통과한 제안 유형만
+// 08:05 크론에서 사람 승인 없이 자동 승인·실행되도록 켜고 끈다. 스위치 행사자는 Jino뿐.
+export interface NaverExpertDelegationSettings {
+  delegated_types: string[];
+  delegable_types: string[];
+}
+
+export function getNaverExpertDelegation(): Promise<NaverExpertDelegationSettings> {
+  return fetchApi<NaverExpertDelegationSettings>("/api/naver/ad/settings/expert-delegation");
+}
+
+export function putNaverExpertDelegation(delegatedTypes: string[]): Promise<NaverExpertDelegationSettings> {
+  return fetchApi<NaverExpertDelegationSettings>("/api/naver/ad/settings/expert-delegation", {
+    method: "PUT",
+    body: JSON.stringify({ delegated_types: delegatedTypes }),
   });
 }

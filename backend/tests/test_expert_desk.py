@@ -55,13 +55,18 @@ def test_run_daily_full_pipeline_success(db):
 
     assert result["stage_status"] == {
         "grade_due_predictions": "ok", "briefing_builder": "ok",
-        "ava_reviewer": "ok", "expert_ledger": "ok",
+        "ava_reviewer": "ok", "expert_ledger": "ok", "delegation_gate": "ok",
     }
     assert result["errors"] == []
+    # 위임 설정을 하지 않은 기본 상태 — stage5는 "ok"로 실행됐지만 내부적으로는
+    # delegated_types가 비어있어 skipped(D-NAO-25 fail-closed 기본값).
+    assert result["delegation"]["status"] == "skipped"
     run = db.query(NaverExpertReviewRun).filter(NaverExpertReviewRun.as_of == AS_OF).first()
     assert run is not None
     verdicts = db.query(NaverExpertReview).filter(NaverExpertReview.run_id == run.id, NaverExpertReview.proposal_id == p.id).all()
     assert len(verdicts) == 1
+    db.refresh(p)
+    assert p.status == "pending"  # 위임 OFF — 무접촉(완료기준③)
 
 
 def test_run_daily_skips_review_when_no_pending_proposals_a2(db):
@@ -149,6 +154,85 @@ def test_run_daily_includes_grade_result_in_output(db):
 
     assert "grade" in result
     assert result["grade"]["graded"] == 0
+
+
+# ══════════════════════════════════════════════════════════════════
+# X1a T5 — stage5 delegation_gate 배선
+# ══════════════════════════════════════════════════════════════════
+
+def test_run_daily_degraded_run_skips_delegation_gate(db, monkeypatch):
+    """degraded run(예: 스키마 검증 실패로 평결이 부실)은 자동실행 금지(fail-closed,
+    D-NAO-25) — stage5는 시도조차 하지 않고 skipped."""
+    p = _seed_pending_proposal(db)
+    from app.models import NaverAccountSettings
+    import json as _json
+    db.add(NaverAccountSettings(key="expert_delegated_types", value_json=_json.dumps(["negative_keyword"])))
+    db.commit()
+
+    def degraded_record(db, today, review):
+        from app.models import NaverExpertReviewRun
+        run = NaverExpertReviewRun(as_of=today, model="m", prompt_version="v1", status="degraded")
+        db.add(run)
+        db.commit()
+        return run
+
+    monkeypatch.setattr(expert_desk.expert_ledger, "record", degraded_record)
+
+    result = expert_desk.run_daily(db, today=AS_OF, invoke=_fake_invoke_ok([p.id]))
+
+    assert result["stage_status"]["expert_ledger"] == "ok"
+    assert result["stage_status"]["delegation_gate"] == "skipped"
+    assert "delegation" not in result
+    db.refresh(p)
+    assert p.status == "pending"
+
+
+def test_run_daily_expert_ledger_failure_skips_delegation_gate(db, monkeypatch):
+    p = _seed_pending_proposal(db)
+
+    def boom(db, today, review):
+        raise RuntimeError("ledger 기록 실패")
+
+    monkeypatch.setattr(expert_desk.expert_ledger, "record", boom)
+
+    result = expert_desk.run_daily(db, today=AS_OF, invoke=_fake_invoke_ok([p.id]))
+
+    assert result["stage_status"]["expert_ledger"] == "failed"
+    assert result["stage_status"]["delegation_gate"] == "skipped"
+
+
+def test_run_daily_ok_run_with_delegated_type_auto_approves_and_executes(db):
+    """stage4 run.status=='ok' + 콘솔에서 위임 켠 유형 + agree 평결이면 stage5가 실제로
+    자동승인+실행까지 왕복한다(negative_keyword만 X1a T5 시점 delegable)."""
+    from app.models import NaverAccountSettings, NaverCampaignSettings
+    import json as _json
+
+    p = _seed_pending_proposal(
+        db, proposal_type="negative_keyword", target_type="search_term", target_id="무관검색어",
+        adgroup_id="grp-1",
+    )
+    db.add(NaverCampaignSettings(campaign_id="cmp-1", optimizer="ours"))
+    db.add(NaverAccountSettings(key="expert_delegated_types", value_json=_json.dumps(["negative_keyword"])))
+    db.commit()
+
+    from unittest.mock import patch
+    from app.services.naver_ad import naver_sa_writer
+
+    write_result = naver_sa_writer.WriteResult(
+        action="add_restricted_keywords", before=[], response=None,
+        after=[{"nccAdgroupRestrictKwdId": "rkw-1", "keyword": "무관검색어"}], created_ids=["rkw-1"],
+    )
+
+    with patch.object(expert_desk.delegation_gate.naver_execution_harness.naver_sa_writer,
+                       "add_restricted_keywords", return_value=write_result) as mock_write:
+        result = expert_desk.run_daily(db, today=AS_OF, invoke=_fake_invoke_ok([p.id]))
+
+    mock_write.assert_called_once_with("grp-1", ["무관검색어"])
+    assert result["stage_status"]["delegation_gate"] == "ok"
+    assert result["delegation"]["executed"] == 1
+    db.refresh(p)
+    assert p.status == "approved"
+    assert p.approval_source == "delegation"
 
 
 def test_run_daily_defaults_today_to_kst_today(db, monkeypatch):

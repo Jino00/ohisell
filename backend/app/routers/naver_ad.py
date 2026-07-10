@@ -16,6 +16,9 @@
 # GET /api/naver/ad/expert-reviews    — 전문가(Ava) 평결 목록(E1a T6, naver_expert_review 단순
 #   read). proposal_id=NULL 행은 하루 총평. 완료(status=ok) run만 조인(X1a T4, codex
 #   아웃사이드 보이스 2026-07-10 합의 — 비-ok run의 child 평결 누출 방어).
+# GET/PUT /api/naver/ad/settings/expert-delegation — E2 위임 스위치(X1a T5, D-NAO-25) 조회·
+#   설정. Jino만 유형 단위로 명시 위임(자동승인+자동실행, delegation_gate 경유) — 전체 치환
+#   저장 + naver_change_log 감사 기록(campaign-settings PUT 전례와 동일 패턴).
 from __future__ import annotations
 
 import json
@@ -30,6 +33,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import (
+    NaverAccountSettings,
     NaverCampaignSettings,
     NaverChangeLog,
     NaverExpertReview,
@@ -38,12 +42,13 @@ from app.models import (
     NaverProductBep,
     NaverProposal,
 )
+from app.services.naver_ad import delegation_gate
 from app.services.naver_ad import metrics_aggregator
 from app.services.naver_ad import naver_execution_harness
 from app.services.naver_ad import naver_sa_writer
 from app.services.naver_ad.ad_report import build_report
 from app.services.naver_ad.diagnosis import build_diagnosis
-from app.utils.kst import kst_today
+from app.utils.kst import kst_now, kst_today
 
 log = logging.getLogger(__name__)
 
@@ -194,6 +199,7 @@ def _serialize_proposal(p: NaverProposal, verdict: NaverExpertReview | None) -> 
         "status": p.status,
         "slack_ts": p.slack_ts,
         "executed_change_log_id": p.executed_change_log_id,
+        "approval_source": p.approval_source,  # X1a T5: console(사람)/delegation(E2 위임 자동승인)
         "expert_verdict": _serialize_expert_verdict_summary(verdict) if verdict else None,
         # X1a T4: 콘솔 실행 버튼 활성화 여부 + 사유(naver_execution_harness.real_write_blocker,
         # 상태와 무관하게 판정 — pending이어도 "구조적으로 실행 가능한 제안인지"는 미리 보여줌).
@@ -320,7 +326,13 @@ def proposal_status_transition(
     )
     if (current, target) == ("approved", "rejected"):
         q = q.filter(NaverProposal.executed_change_log_id.is_(None))
-    rowcount = q.update({"status": target}, synchronize_session=False)
+    # target=='approved'인 전이는 사람이 이 콘솔 라우터를 직접 호출한 것 — approval_source=
+    # 'console'로 감사 기록(X1a T5, delegation_gate의 'delegation'과 대칭). rejected 전이는
+    # approval_source를 건드리지 않는다(이력 보존 — 반려됐던 승인의 출처도 남겨둔다).
+    values = {"status": target}
+    if target == "approved":
+        values["approval_source"] = "console"
+    rowcount = q.update(values, synchronize_session=False)
     db.commit()
     if rowcount != 1:
         raise HTTPException(409, "상태가 변경됨 — 새로고침 후 재시도")
@@ -558,3 +570,68 @@ def campaign_settings_put(body: CampaignSettingsIn, db: Session = Depends(get_db
     db.commit()
     db.refresh(settings)
     return _serialize_settings(settings)
+
+
+# ══════════════════════════════════════════════════════════════════
+# X1a T5 — E2 위임 스위치(D-NAO-25 부분 게이트) 콘솔 설정
+# ══════════════════════════════════════════════════════════════════
+_DELEGATION_KEY = "expert_delegated_types"
+
+
+class ExpertDelegationIn(BaseModel):
+    delegated_types: list[str]
+
+
+def _delegation_response(db: Session) -> dict:
+    return {
+        "delegated_types": sorted(delegation_gate.get_delegated_types(db) & delegation_gate.delegable_types()),
+        "delegable_types": sorted(delegation_gate.delegable_types()),
+    }
+
+
+@router.get("/settings/expert-delegation")
+def expert_delegation_get(db: Session = Depends(get_db)):
+    """E2 위임 스위치 조회(X1a T5) — 저장값 중 delegable_types()에 속한 것만 정제해 반환
+    (미개방 유형이 저장돼 있어도 콘솔엔 유효한 것만 보여준다, delegation_gate와 동일 정제)."""
+    return _delegation_response(db)
+
+
+@router.put("/settings/expert-delegation")
+def expert_delegation_put(body: ExpertDelegationIn, db: Session = Depends(get_db)):
+    """E2 위임 스위치 설정(X1a T5, D-NAO-25) — Jino만 유형 단위로 명시 위임. 전체 치환 저장.
+    delegable_types() 밖 유형이나 중복은 400(콘솔 오조작 방지) — 여기서 막아도 delegation_gate
+    자체는 이중 방어로 저장값∩delegable만 쓰므로 안전하지만, 사람에게는 즉시 피드백이 낫다.
+    변경 전후가 실제로 다르면 naver_change_log에 감사 기록(campaign-settings PUT 전례)."""
+    if not isinstance(body.delegated_types, list):
+        raise HTTPException(400, "delegated_types는 리스트여야 합니다")
+    if len(set(body.delegated_types)) != len(body.delegated_types):
+        raise HTTPException(400, "delegated_types에 중복된 유형이 있습니다")
+    allowed = delegation_gate.delegable_types()
+    invalid = set(body.delegated_types) - allowed
+    if invalid:
+        raise HTTPException(
+            400, f"허용되지 않는 유형: {sorted(invalid)} — 위임 가능 유형은 {sorted(allowed)}뿐입니다",
+        )
+
+    before = sorted(delegation_gate.get_delegated_types(db) & allowed)
+    after = sorted(set(body.delegated_types))
+
+    row = db.query(NaverAccountSettings).filter(NaverAccountSettings.key == _DELEGATION_KEY).first()
+    if row is None:
+        row = NaverAccountSettings(key=_DELEGATION_KEY, value_json=json.dumps(after))
+        db.add(row)
+    else:
+        row.value_json = json.dumps(after)
+
+    if before != after:
+        db.add(NaverChangeLog(
+            entity_type="account", entity_id="", campaign_id="",
+            action="update_expert_delegation",
+            before_value=json.dumps(before, ensure_ascii=False),
+            after_value=json.dumps(after, ensure_ascii=False),
+            rationale="콘솔 PUT /settings/expert-delegation",
+            dry_run=False, executed_at=kst_now(),
+        ))
+
+    db.commit()
+    return _delegation_response(db)

@@ -1598,6 +1598,9 @@ class NaverProposal(Base):
     adgroup_id: 실쓰기 대상 광고그룹(X1a T3) — restricted-keywords API가 adgroupId 필수
     (ref 27 §8-1)라 negative_keyword 제안 생성 시점에 확정 저장(실행 시점 재해석 없음).
     다른 제안 유형은 None.
+    approval_source: 승인 출처 감사(X1a T5) — 'console'(사람이 콘솔에서 승인, T4) /
+    'delegation'(E2 위임 자동승인, delegation_gate). NULL = 아직 승인된 적 없음(pending 등).
+    반려로는 지우지 않는다(이력 보존 — 반려됐던 승인의 출처도 남겨둔다).
     """
 
     __tablename__ = "naver_proposals"
@@ -1614,6 +1617,7 @@ class NaverProposal(Base):
     status: Mapped[str] = mapped_column(String(12), nullable=False, default="pending", index=True)
     slack_ts: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
     executed_change_log_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    approval_source: Mapped[Optional[str]] = mapped_column(String(12), nullable=True)  # X1a T5: console/delegation
 
 
 class NaverKeywordCandidate(Base):
@@ -1873,6 +1877,8 @@ class NaverExpertReview(Base):
     걸쳐 NULL이 중복돼도 문제없음). checkable_prediction은 기각(reject) 평결에도 붙일 수
     있는 선택 필드(억지 예측 방지, codex 반영). C3 자문 경계: 이 테이블은 전문가의 의견을
     기록할 뿐 NaverProposal.status나 실행 상태를 절대 건드리지 않는다(D-3 관찰모드).
+    이 경계는 지금도 유효하다 — 유일하게 승인된 소비 경로는 delegation_gate(X1a T5,
+    D-NAO-25 — Jino가 유형 단위로 명시 위임한 경우만, naver_account_settings.expert_delegated_types).
     """
 
     __tablename__ = "naver_expert_review"
@@ -1892,3 +1898,21 @@ class NaverExpertReview(Base):
     verify_date: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True, index=True)
     outcome: Mapped[Optional[str]] = mapped_column(String(12), nullable=True)  # NAVER_EXPERT_OUTCOMES
     source: Mapped[str] = mapped_column(String(10), nullable=False, default="local")  # NAVER_EXPERT_SOURCES
+
+
+# ══════════════════════════════════════════════════════════════════
+# X1a T5 — E2 위임 스위치 (D-NAO-25 부분 게이트, docs/PLAN_naver-ad-execution-loop.md)
+# ══════════════════════════════════════════════════════════════════
+class NaverAccountSettings(Base):
+    """계정 단위 설정 KV(X1a T5). key 예: 'expert_delegated_types'(E2 위임 스위치, D-NAO-25 —
+    Jino가 유형 단위로 명시 위임한 proposal_type 집합을 JSON 배열로 저장. 기본 ∅ — 이 설정이
+    없거나 파싱 실패하면 delegation_gate는 fail-closed로 빈 set 취급한다). 콘솔 PUT
+    /api/naver/ad/settings/expert-delegation으로만 행사(사람 명시 조작, Jino만).
+    """
+
+    __tablename__ = "naver_account_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    key: Mapped[str] = mapped_column(String(40), unique=True, nullable=False)
+    value_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
