@@ -3,7 +3,13 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
-- 날짜: 2026-07-08 (★네이버 광고 트랙 **예측·전문가 스프린트 F1 forecast_engine 코어 완료** — 모델 재설계+codex review, sonnet 구현 세션)
+- 날짜: 2026-07-10 (★네이버 광고 트랙 **MOP 풀 갭 리뷰 + 논문 서베이 + 실행 루프(X) 스프린트 구조 승인(D-NAO-34)** — fable 설계 세션)
+- ★**실행 루프 X 스프린트 개시**: MOP 라이브 재실측+데이터 신선도 실측+support 재정독+외부자료 리서치(ref 25) → 갭="손"(G1 집행·G2 시간대·G3 당일루프·G4 순위) → 딥리서치 논문 서베이(ref 26, 3표 검증) → 기법 TOP5 확정 → **X1a(쓰기+제외키워드+반자동)→X1b(정지재개→입찰+가드레일)→X2(GRM식 당일 플라이트)→X3(DHEB 풀링+GAVE 점수) 구조 Jino 승인**. 카나리=캠페인 2~3개(Jino 지정 대기). 선결=Ava 크론 401 수리(별도 세션 진행 중). **다음 세션 = `docs/PLAN_naver-ad-execution-loop.md` §0 필독 → §7 체크리스트 위치 확인 → X0/X1a부터 Sonnet 구현.** 부수: 첫 Ava 크론 401 실패 발견·칩 발행, F0b 백필 효과 실증(forecast active 0→20), 리서치 워크플로 모델 배분 규칙(검색=sonnet/검증종합=fable) 메모리 저장.
+- ─────────────────────────────────────────────
+- (이전) 날짜: 2026-07-08 (★네이버 광고 트랙 **F0b 잔여 — prod 캠페인 180일 백필 완료(D-NAO-33)** — E1a+F0b 배포 완료 세션에 이어지는 세션, sonnet)
+- ★**F0b 완전 종결**: prod 서버 SSH 접속 → 실DB 사전 백업 → `campaign_backfill.backfill_campaign_daily`를 스크래치가 아닌 prod 실DB에 직접 실행(실 네이버 `/stats` API 호출). 결과: 43캠페인·7,740행·2026-01-09~07-07·cost합 80,335,231원(F0a 스크래치 실행과 완전 일치). 완료기준 둘 다 충족(①07-04~07-07 실단위 집계 byte-identical ②겹치는 10일 재백필 멱등 확인). forecast_engine 캠페인 grain 모델이 다음 크론(07:50)부터 `fallback`을 벗어날 조건 충족. **남은 항목 = E1b(Ava 연동, AI_office 별도 세션)·E2(부분게이트, Jino 결정 대기)뿐**. 상세: `docs/tracks/active/track_naver-ad-optimization.md` D-NAO-33, `docs/PLAN_naver-ad-forecast-expert.md` §7.
+- ─────────────────────────────────────────────
+- (이전) 날짜: 2026-07-08 (★네이버 광고 트랙 **예측·전문가 스프린트 F1 forecast_engine 코어 완료** — 모델 재설계+codex review, sonnet 구현 세션)
 - ★**F1 완료**: 신규 테이블 2개(`naver_forecast_model`·`naver_forecast_daily`) + SA 3개(forecast_gate·forecast_model_builder·forecast_scorer)+Harness forecast_engine + 크론 07:50. **모델 재설계(백테스트 실증)**: 계획서 원안 "요일계절성×추세"가 F0a 180일 실데이터 워크포워드에서 나이브 베이스라인보다 항상 나빴음(4주 이력 요일지수=순노이즈) → 계절성 제거+짧은창(3일) 지수감쇠(0.6)로 나이브 대비 clk MAPE -5.1%·cost MAPE -3.0% 개선 확인(완료기준①), 일일 재생성 0.078초(완료기준②). codex review: [P1] backfill timeIncrement 우려는 F0a 라이브 실측으로 반박·기각(한도소진으로 후속라운드 불가, Claude 판단 기록) / [P2] 삭제범위 무활동일 stale sentinel 버그는 동의·즉시수정+테스트3개. pytest 762 passed(신규 24개, 회귀 0). **다음 = F2 grain 확장 + 배선 3곳**. 상세: `docs/tracks/active/track_naver-ad-optimization.md`, `docs/PLAN_naver-ad-forecast-expert.md` §7.
 - ─────────────────────────────────────────────
 - (이전) 날짜: 2026-07-08 (★네이버 광고 트랙 **예측·전문가 스프린트 F0a 완료 — 캠페인 grain 180일 백필**, sonnet 구현 세션)
