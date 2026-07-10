@@ -8,6 +8,9 @@
 #   _WRITE_EXECUTORS 구현 존재의 3중 조건 — 하나라도 빠지면 dry-run 강등 또는
 #   WriteNotOpenedError(fail-closed). 나머지 액션(정지·재개→입찰→예산 순서)은 X1b 이후
 #   (D-NAO-34 금지선: 개방 순서 임의 변경 금지, 예산은 스코프 밖).
+#
+#   X1a T4(콘솔 승인 버튼+실행 라우터): `real_write_blocker()`가 실행 가능 여부 판정을
+#   naver_ad.py 라우터에 공개한다(D-NAO-5 반자동 게이트 UI 노출).
 from __future__ import annotations
 
 import json
@@ -201,6 +204,43 @@ def _execute_add_negative_keyword(db: Session, proposal: NaverProposal, now: dat
 # 실쓰기 디스패치 테이블 — OPEN_ACTIONS와 별도(이중 방벽): OPEN_ACTIONS에 있어도 여기 구현이
 # 없으면 WriteNotOpenedError(fail-closed). 액션 확장 시 두 곳을 모두 의도적으로 갱신해야 한다.
 _WRITE_EXECUTORS = {"add_negative_keyword": _execute_add_negative_keyword}
+
+
+def real_write_blocker(proposal: NaverProposal) -> str | None:
+    """이 제안이 지금 실쓰기 불가능한 이유(사람이 읽을 한국어 문자열)를 반환, 가능하면 None
+    (X1a T4). 콘솔의 실행 버튼 활성화 여부(`executable`, naver_ad.py `_serialize_proposal`)와
+    사람이 읽을 사유(`not_executable_reason`) 판정에 쓰인다. **판정만 하고 DB를 절대
+    건드리지 않는다** — 부수효과 없는 순수 함수.
+
+    판정 순서:
+    ①`_ACTION_BY_PROPOSAL_TYPE`에 매핑이 없음 → 정보성 제안(실행 대상 자체가 없음).
+    ②action이 `OPEN_ACTIONS`(D-NAO-16 개방 순서) 또는 `_WRITE_EXECUTORS`(이중 방벽)에
+      없음 → 아직 미개방.
+    ③action=='add_negative_keyword'인데 target_type이 'search_term'이 아니거나
+      adgroup_id가 없음 → restricted-keywords API 대상으로 부적합
+      (`_execute_add_negative_keyword`의 MissingExecutionTargetError 가드와 동일 조건).
+
+    ⚠️ ③의 판정은 harness의 `_execute_add_negative_keyword` 내부 가드와 의도적으로
+    중복이다(이중 방벽 — 그 가드는 제거하지 않는다). 이 함수는 UI 표시(`executable`)용
+    전체 판정이고, `POST /proposals/{id}/execute`(naver_ad.py)의 사전 차단은 ①·②만
+    가로챈다 — ③(target_type/adgroup_id 구조 결함)은 harness에 그대로 넘겨
+    MissingExecutionTargetError→422+failed 감사 기록 경로를 타게 한다(라우터가 여기서
+    선점하면 그 감사 기록이 안 남는다 — T4 설계, 라우터 docstring 참조).
+    """
+    action = _ACTION_BY_PROPOSAL_TYPE.get(proposal.proposal_type)
+    if action is None:
+        return "정보성 제안 — 실행 대상 아님"
+    if action not in OPEN_ACTIONS or action not in _WRITE_EXECUTORS:
+        return "액션 미개방(X1b 이후 개방 예정)"
+    if action == "add_negative_keyword":
+        if proposal.target_type != "search_term":
+            return (
+                f"target_type={proposal.target_type!r} — negative_keyword 실행은 "
+                "search_term 대상만 가능(격상 경로 제안은 재생성 필요)"
+            )
+        if not proposal.adgroup_id:
+            return "adgroup_id 없음 — 실행 대상 정보 부족(구 제안이거나 재생성 필요)"
+    return None
 
 
 def _resolve_optimizer(db: Session, campaign_id: str) -> str:

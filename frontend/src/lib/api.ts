@@ -1673,12 +1673,16 @@ export interface NaverAdProposal {
   target_type: string;
   target_id: string;
   campaign_id: string;
+  adgroup_id: string | null;
   rationale: string | null;
   expected_effect: string | null;
   status: string;
   slack_ts: string | null;
   executed_change_log_id: number | null;
   expert_verdict: NaverExpertVerdictSummary | null;
+  // X1a T4 — 콘솔 실행 버튼 활성화 여부(naver_execution_harness.real_write_blocker).
+  executable: boolean;
+  not_executable_reason: string | null;
 }
 
 export interface NaverAdProposalList {
@@ -1700,6 +1704,32 @@ export function fetchNaverAdProposals(params?: {
   if (params?.limit) q.set("limit", String(params.limit));
   const qs = q.toString();
   return fetchApi<NaverAdProposalList>(`/api/naver/ad/proposals${qs ? `?${qs}` : ""}`);
+}
+
+// X1a T4 — 콘솔 승인/반려 상태 전이.
+export function updateNaverProposalStatus(
+  id: number,
+  status: "approved" | "rejected",
+): Promise<NaverAdProposal> {
+  return fetchApi<NaverAdProposal>(`/api/naver/ad/proposals/${id}/status`, {
+    method: "POST",
+    body: JSON.stringify({ status }),
+  });
+}
+
+// X1a T4 — 콘솔 실행 버튼(실쓰기, naver_execution_harness.execute(dry_run=False)).
+export interface NaverProposalExecuteResult {
+  change_log_id: number;
+  outcome: string;
+  before: unknown;
+  after: unknown;
+  proposal: NaverAdProposal;
+}
+
+export function executeNaverProposal(id: number): Promise<NaverProposalExecuteResult> {
+  return fetchApi<NaverProposalExecuteResult>(`/api/naver/ad/proposals/${id}/execute`, {
+    method: "POST",
+  });
 }
 
 // E1a T8 — 전문가(Ava) 검토 패널

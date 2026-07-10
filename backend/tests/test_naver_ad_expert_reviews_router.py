@@ -133,6 +133,22 @@ def test_expert_reviews_endpoint_rejects_invalid_as_of(client):
     assert resp.status_code == 422  # FastAPI Query(date) 자체 검증
 
 
+def test_expert_reviews_endpoint_excludes_degraded_run_rows(client, db):
+    """X1a T4(codex 아웃사이드 보이스, 2026-07-10 합의): GET /expert-reviews도 GET /proposals의
+    expert_verdict 조인과 동일하게 완료(status=ok) run만 노출 — degraded run의 child 평결이
+    콘솔에 새면 안 된다."""
+    ok_run = _add_run(db, status="ok")
+    degraded_run = _add_run(db, status="degraded")
+    db.add(NaverExpertReview(run_id=ok_run.id, as_of=AS_OF, proposal_id=None, verdict="commentary", reasoning="정상 run", source="local"))
+    db.add(NaverExpertReview(run_id=degraded_run.id, as_of=AS_OF, proposal_id=None, verdict="commentary", reasoning="degraded인데도 있으면 안 됨", source="local"))
+    db.commit()
+
+    resp = client.get("/api/naver/ad/expert-reviews", params={"as_of": AS_OF.isoformat()})
+    rows = resp.json()["rows"]
+    assert len(rows) == 1
+    assert rows[0]["reasoning"] == "정상 run"
+
+
 def test_expert_reviews_endpoint_respects_limit_param(client, db):
     """codex review 발견(P2): /proposals처럼 limit을 노출해 하드캡 뒤로 숨기지 않는다."""
     run = _add_run(db)
