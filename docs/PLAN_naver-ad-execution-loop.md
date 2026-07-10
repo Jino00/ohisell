@@ -87,7 +87,7 @@ X0 선결 → X1a 손(제외키워드) → X1b 손(정지·재개→입찰) → 
 - [x] X0-1 Ava 401 수리 확인 — **완료(2026-07-10 14:14 KST)**: run id=2 status=ok·평결 44행(agree 42/partial 1/commentary 1) 라이브 확인. 과정에서 멱등 버그 발견·수정(degraded run이 당일 성공 재시도를 삼킴 → dedup에 status=ok 필터, TDD+codex pass, prod 배포, failures.jsonl 기록). 내일 08:05 크론 경로 ok run은 자연 재확인 예정.
 - [ ] X0-2 카나리 캠페인 2~3개 지정·ours 전환 (Jino) — **연기 확정(2026-07-10, Jino: "카나리 캠페인은 프로그램 완성되면 정하자")**: 코딩은 카나리 없이 진행하고, 실집행 라이브 검증 단계(X1a 완료기준①·X1b②·X2 라이브)만 카나리 지정 후 수행.
 - [x] X0-3 정보성 pending 경량화 정책 결정 — **완료(2026-07-10, D-NAO-37)**: 차등 TTL+브리핑 접기+백로그 정리 확정. 구현은 X1a T6.
-- [ ] X1a T1 쓰기 API 실측 (ref 27 생성)
+- [x] X1a T1 쓰기 API 스펙 문서화 — **완료(2026-07-10)**: 원본 swagger 유실 → 공식 GitHub gh-pages에서 재확보(`docs/references/data/ncc-heroes-ncc.json`에 커밋, 재유실 차단), ref 27 작성(제외키워드 POST/GET/DELETE·bidAmt PUT·userLock 3계층 PUT + prod 라이브 읽기 실측 3건 200). ⏳ **왕복 실측(추가→재조회→삭제)만 잔여** — X0-2 카나리 연기에 따라 실쓰기 검증 단계에서 수행(ref 27 §6 시나리오 준비 완료). 배선 발견: negative_keyword 제안에 adgroup_id 부재 — T2/T3에서 해결(ref 27 §8-1).
 - [ ] X1a T2 naver_sa_writer SA
 - [ ] X1a T3 execution_harness 실쓰기 + 제외키워드 개방
 - [ ] X1a T4 콘솔 승인 버튼 (반자동 개시)
