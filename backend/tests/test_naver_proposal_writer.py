@@ -189,6 +189,30 @@ def test_build_exclusion_candidates_labeled_negative_no_conversion_claim(db):
     assert "전환" in out[0]["expected_effect"]  # 정밀예측 불가 명시
 
 
+def test_build_exclusion_includes_adgroup_id_and_persist_stores_it(db):
+    """X1a T3: restricted-keywords API는 adgroupId 필수(ref 27 §8-1) — exclusion 제안 dict에
+    adgroup_id가 실려 persist(NaverProposal(**p))로 컬럼까지 통과해야 실행 시점 재해석이 없다."""
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    row = {"campaign_id": "cmp-ours", "adgroup_id": "grp-1", "search_term": "무관검색어",
+           "source": "expkeyword", "cost": 30000, "clk": 20, "imp": 400}
+    diagnosis = _diagnosis(exclusion_candidates=[row])
+
+    out = proposal_writer.build(db, diagnosis, as_of=AS_OF)
+    assert out[0]["adgroup_id"] == "grp-1"
+
+    saved = proposal_writer.persist(db, out)
+    assert saved[0].adgroup_id == "grp-1"
+
+
+def test_persist_other_types_store_null_adgroup_id(db):
+    """adgroup_id 없는 제안 유형(bid 등)은 컬럼에 None 저장 — 실행 시 MissingExecutionTargetError로 fail-closed."""
+    candidates = [{"proposal_type": "bid_down", "target_type": "keyword", "target_id": "nkw-1",
+                   "campaign_id": "cmp-ours", "rationale": "r", "expected_effect": "e", "status": "pending"}]
+    saved = proposal_writer.persist(db, candidates)
+    assert saved[0].adgroup_id is None
+
+
 def test_persist_dedups_existing_pending_same_type_and_target(db):
     db.add(NaverProposal(proposal_type="bid_down", target_type="keyword", target_id="nkw-1",
                           campaign_id="cmp-ours", status="pending"))

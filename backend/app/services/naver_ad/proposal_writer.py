@@ -150,12 +150,17 @@ def _growth_proposal(
 
 def _negative_keyword_from_exclusion(row: dict, campaign_id: str) -> dict:
     """확장버킷 비용상위 검색어 → 제외후보 제안(전환귀속 없음 — '비용/볼륨 후보' 정직 라벨,
-    exclusion_candidates 보드 자체가 전환 데이터 없이 비용순만 제공하므로 그 경계를 그대로 전달)."""
+    exclusion_candidates 보드 자체가 전환 데이터 없이 비용순만 제공하므로 그 경계를 그대로 전달).
+
+    adgroup_id(X1a T3): restricted-keywords 쓰기 API가 adgroupId 필수(ref 27 §8-1) —
+    exclusion_candidates 보드가 이미 SELECT하는 값을 제안 생성 시점에 확정 저장(실행 시점
+    재해석보다 단순·결정적)."""
     return {
         "proposal_type": _NEGATIVE,
         "target_type": "search_term",
         "target_id": row["search_term"],
         "campaign_id": campaign_id,
+        "adgroup_id": row["adgroup_id"],
         "rationale": (
             f"[exclusion_candidates] 비용/볼륨 후보(전환귀속 데이터 없음, source={row.get('source')}) "
             f"cost={row.get('cost')}원, clk={row.get('clk')}, imp={row.get('imp')}."

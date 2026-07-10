@@ -1591,7 +1591,11 @@ class NaverProposal(Base):
     """제안 1건 (D-NAO 계획서 §2). 진단→제안 카드→Slack→(승인)→change_log.
 
     type 예: negative_keyword/bid_up/bid_down/budget/new_setup. status:
-    pending/approved/rejected/expired. P0에서는 스키마만(생성은 P2).
+    pending/approved/rejected/expired/failed(X1a T3 — 실쓰기 실패 시 fail-closed 마킹,
+    자동 재시도 차단·재시도는 사람이 콘솔에서 재승인). P0에서는 스키마만(생성은 P2).
+    adgroup_id: 실쓰기 대상 광고그룹(X1a T3) — restricted-keywords API가 adgroupId 필수
+    (ref 27 §8-1)라 negative_keyword 제안 생성 시점에 확정 저장(실행 시점 재해석 없음).
+    다른 제안 유형은 None.
     """
 
     __tablename__ = "naver_proposals"
@@ -1602,6 +1606,7 @@ class NaverProposal(Base):
     target_type: Mapped[str] = mapped_column(String(20), nullable=False, default="")  # campaign/adgroup/keyword
     target_id: Mapped[str] = mapped_column(String(50), nullable=False, default="")
     campaign_id: Mapped[str] = mapped_column(String(50), nullable=False, default="", index=True)
+    adgroup_id: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)  # X1a T3 실쓰기 대상
     rationale: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 무엇을/왜 3근거
     expected_effect: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 예상효과
     status: Mapped[str] = mapped_column(String(12), nullable=False, default="pending", index=True)
