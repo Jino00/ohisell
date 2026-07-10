@@ -64,6 +64,7 @@ X0 선결 → X1a 손(제외키워드) → X1b 손(정지·재개→입찰) → 
 **T5 D+7/14 채점 배선 확인** — 실행 결과의 D+7/14 채점은 기존 proposal_scoreboard·change_log verify_date가 이미 수신 — 신규 액션 유형이 채점 경로에 정상 흐르는지 배선 확인만.
 
 - **완료기준(확인 방법)**: ①가드레일 각각의 차단 단위테스트(위반 시나리오 전수 — ±15% 초과·쿨다운 중·일일상한 초과·스톱로스·BEP미달 증액·클램프 범위밖 각각) ②카나리에서 입찰 변경 1건 + 정지·재개 각 1건 실집행·재조회 확인(라이브, 원칙22) ③±15% 초과 제안이 실행 단계에서 잘리는 것 실측 ④정지·재개 생성기가 실데이터에서 근거 있는 제안만 생성 확인 ⑤pytest 회귀 0.
+- [ ] **⚠️카나리 전 필수수정 (codex[P2], 2026-07-11 재검증 발견 · D-NAO-40)**: `account_diagnosis.resume_candidates`(account_diagnosis.py:457-499)가 stale 시스템 정지 로그로부터 재개 제안을 생성해 **사람/MOP의 수동 정지를 덮어쓸 수 있음**. 원인 — 외부(사람/MOP) status 변경은 `NaverChangeLog` 행을 안 남기고 `NaverEntity.status`만 갱신하므로 "우리 최신 락 행 = 우리 정지"가 "지금 off의 원인 = 우리"를 보장하지 못한다(우리 정지→외부 재개→외부 재정지 시퀀스에서 우리 옛 정지 행이 여전히 최신). `_detect_external_change`도 우리 기록(userLock=True)과 라이브(userLock=True)가 값이 같아 불일치를 못 잡고, 그마저 차단이 아닌 경고만 한다. **카나리 전 라이브 노출 0**(resume 제안은 우리가 정지시킨 키워드가 있어야 생성→optimizer='ours' 카나리 선결)이라 X1b 배포는 진행(Jino 결정 2026-07-11)하되, **카나리(X0-2) 전 반드시 수정**: 외부 status 변경을 change_log(또는 마커)에 로깅해 `proposal_id is None` 스킵이 실제 작동하게 하거나, 라이브 off를 우리 원인으로 귀속 불가하면 fail-closed(별도 TDD 사이클 — real-write 경로). codex GATE 자체는 PASS(P1 0건).
 
 ### X2 — 당일 플라이트 루프 (G2+G3, ref 26 ①)
 1. **T1 `response_curve_builder` SA**: 캠페인(우선)·키워드(후순위) 단위 "입찰배수 α → 오늘 예상 비용·매출" 곡선. 원료 = forecast(일 예측) × hourly_pattern(시간대 분포) × 견적 API(실시간 스팟 보정) × hourly_snapshot(당일 실적 누적).
