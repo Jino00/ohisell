@@ -352,6 +352,25 @@ def _on_adgroup_ids(db: Session) -> set[str]:
     return {r[1] for r in rows if r[0] == "adgroup" and r[3] == "on" and r[2] in on_campaigns}
 
 
+def keyword_window_agg(db: Session, keyword_id: str, date_from: date, date_to: date) -> dict:
+    """단일 키워드의 창 내 (cost, conv_amt) 집계 — SQL WHERE에 keyword_id를 직접 걸어
+    `_keyword_rows()`처럼 전 키워드를 GROUP BY하지 않는다(codex[P2], X1b T3 — 후보/실행
+    대상마다 창이 제각각이라 배치 불가할 때 O(대상 수 × 전체 키워드 행) 스케일을 피한다).
+    resume_candidates와 naver_execution_harness(T4 guardrail context)가 공유한다.
+    """
+    cost, direct, indirect = db.query(
+        sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.cost), 0),
+        sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.conv_direct_amt), 0),
+        sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.conv_indirect_amt), 0),
+    ).filter(
+        NaverAdDaily.keyword_id == keyword_id,
+        NaverAdDaily.ad_date >= date_from, NaverAdDaily.ad_date <= date_to,
+        NaverAdDaily.campaign_type == _WEB_SITE,
+        NaverAdDaily.adgroup_id != BACKFILL_SENTINEL_ADGROUP,
+    ).one()
+    return {"cost": int(cost), "conv_amt": int(direct) + int(indirect)}
+
+
 def pause_candidates(db: Session, date_from: date, date_to: date) -> list[dict]:
     """정지 후보 (X1b T3, D-NAO-38) — WEB_SITE 등록 키워드(status='on', 부모 체인도 전부 on)
     중 창 내 전환 0건 + 누적비용이 스톱로스 절대액(D-NAO-20) 이상. 스톱로스 절대액 = 현재
@@ -442,24 +461,10 @@ def resume_candidates(
         pause_date = paused_at.date()
         window_to = pause_date - timedelta(days=1)
         window_from = window_to - timedelta(days=LOW_CLICK_LOOKBACK_DAYS - 1)
-        # codex[P2]: _keyword_rows()는 창 내 WEB_SITE 전 키워드를 GROUP BY로 집계한 뒤 파이썬
-        # 필터로 이 keyword_id 하나만 골라낸다 — 후보마다(창이 제각각이라 배치 불가) 이걸
-        # 반복하면 O(재개후보 수 × 전체 키워드 행)로 스케일된다. keyword_id를 SQL WHERE에
-        # 직접 걸어 이 키워드 행만 집계한다.
-        agg_cost, agg_direct, agg_indirect = db.query(
-            sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.cost), 0),
-            sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.conv_direct_amt), 0),
-            sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.conv_indirect_amt), 0),
-        ).filter(
-            NaverAdDaily.keyword_id == keyword_id,
-            NaverAdDaily.ad_date >= window_from, NaverAdDaily.ad_date <= window_to,
-            NaverAdDaily.campaign_type == _WEB_SITE,
-            NaverAdDaily.adgroup_id != BACKFILL_SENTINEL_ADGROUP,
-        ).one()
-        agg_cost, agg_conv = int(agg_cost), int(agg_direct) + int(agg_indirect)
-        if agg_cost == 0:
+        agg = keyword_window_agg(db, keyword_id, window_from, window_to)
+        if agg["cost"] == 0:
             continue  # 정지 직전 창에 실적 자체가 없음 — 판정 불가
-        roas_naver = float(Decimal(agg_conv) / Decimal(agg_cost))
+        roas_naver = float(Decimal(agg["conv_amt"]) / Decimal(agg["cost"]))
         roas_c = _corrected_roas(roas_naver, correction_factor)
         target_roas = target_roas_resolver(campaign_id)
         if roas_c is not None and roas_c >= float(target_roas):

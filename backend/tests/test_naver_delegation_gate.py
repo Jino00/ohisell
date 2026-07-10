@@ -115,9 +115,14 @@ def test_get_delegated_types_non_list_json_returns_empty_set_fail_closed(db):
     assert delegation_gate.get_delegated_types(db) == set()
 
 
-def test_delegable_types_is_negative_keyword_only_x1a():
-    """X1a T5 시점: OPEN_ACTIONS={'add_negative_keyword'}뿐이라 delegable도 그것뿐."""
-    assert delegation_gate.delegable_types() == {"negative_keyword"}
+def test_delegable_types_tracks_open_actions_x1b():
+    """X1b T4 시점: OPEN_ACTIONS가 정지·재개·입찰까지 확장됐으므로 delegable도 자동으로
+    넓어진다(delegable_types() 자체 docstring: "X1b 이후 OPEN_ACTIONS가 넓어지면 이 함수도
+    자동으로 넓어짐" — 구 test_delegable_types_is_negative_keyword_only_x1a를 T4 계약에 맞춰
+    갱신). 예산(budget_up)은 여전히 스코프 밖(D-NAO-34)이라 제외."""
+    assert delegation_gate.delegable_types() == {
+        "negative_keyword", "bid_up", "bid_down", "growth_bid_up", "pause", "resume",
+    }
 
 
 # ── run_gate: 핵심 게이트 로직 ──

@@ -110,13 +110,15 @@ def test_serializer_executable_false_for_informational_proposal(client, db):
     assert row["not_executable_reason"] is not None
 
 
-def test_serializer_executable_false_for_unopened_bid_up(client, db):
-    _proposal(db, proposal_type="bid_up", status="approved")
+def test_serializer_executable_false_for_unopened_budget_up(client, db):
+    """X1b T4로 bid_up/bid_down/growth_bid_up/pause/resume이 전부 개방됐다 — 여전히
+    스코프 밖인 budget_up(예산, D-NAO-34 영구 Confirm)으로 '미개방' 판정을 검증한다."""
+    _proposal(db, proposal_type="budget_up", status="approved")
 
     resp = client.get("/api/naver/ad/proposals")
     row = resp.json()["rows"][0]
     assert row["executable"] is False
-    assert "미개방" in row["not_executable_reason"]
+    assert "예산" in row["not_executable_reason"]
 
 
 def test_serializer_executable_false_for_negative_keyword_missing_adgroup_id(client, db):
@@ -311,17 +313,18 @@ def test_execute_pending_proposal_returns_409_and_db_untouched(client, db):
 
 
 def test_execute_unopened_action_returns_409_without_consuming_proposal(client, db):
-    """핵심 회귀 테스트: bid_up(미개방 액션)을 harness에 그대로 넘기면 dry-run 경로가
-    change_log를 만들고 executed_change_log_id를 박아 제안을 "소비"해버리는 함정이 있다
+    """핵심 회귀 테스트: 미개방 액션을 harness에 그대로 넘기면 dry-run 경로가 change_log를
+    만들고 executed_change_log_id를 박아 제안을 "소비"해버리는 함정이 있다
     (naver_execution_harness.execute의 effective_dry_run 강제 로직). 라우터의 사전 차단이
-    이를 막아야 한다 — change_log 0건, status 그대로, executed_change_log_id None 확인."""
-    p = _proposal(db, proposal_type="bid_up", status="approved")
+    이를 막아야 한다 — change_log 0건, status 그대로, executed_change_log_id None 확인.
+    X1b T4로 bid_up이 개방됐으므로 여전히 스코프 밖인 budget_up으로 검증한다."""
+    p = _proposal(db, proposal_type="budget_up", status="approved")
     _settings(db, optimizer="ours")
 
     resp = client.post(f"/api/naver/ad/proposals/{p.id}/execute")
 
     assert resp.status_code == 409
-    assert "미개방" in resp.json()["detail"]
+    assert "예산" in resp.json()["detail"]
 
     db.refresh(p)
     assert p.status == "approved"

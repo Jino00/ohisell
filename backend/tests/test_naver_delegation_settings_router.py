@@ -51,7 +51,10 @@ def test_get_default_returns_empty_delegated_and_delegable_list(client):
     assert resp.status_code == 200
     body = resp.json()
     assert body["delegated_types"] == []
-    assert body["delegable_types"] == ["negative_keyword"]  # X1a T5 시점 유일 delegable
+    # X1b T4로 정지·재개·입찰 개방 — delegable도 자동 확장(sorted, 예산 제외 D-NAO-34)
+    assert body["delegable_types"] == [
+        "bid_down", "bid_up", "growth_bid_up", "negative_keyword", "pause", "resume",
+    ]
 
 
 def test_put_valid_type_saves_and_records_change_log(client, db):
@@ -83,8 +86,9 @@ def test_put_no_change_log_when_value_unchanged(client, db):
 
 
 def test_put_disallowed_type_returns_400(client, db):
+    """X1b T4로 bid_up이 delegable해졌으므로, 여전히 스코프 밖인 budget_up(D-NAO-34)으로 검증."""
     resp = client.put("/api/naver/ad/settings/expert-delegation",
-                       json={"delegated_types": ["bid_up"]})
+                       json={"delegated_types": ["budget_up"]})
     assert resp.status_code == 400
     assert db.query(NaverAccountSettings).count() == 0
 

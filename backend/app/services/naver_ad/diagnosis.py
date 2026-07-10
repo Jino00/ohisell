@@ -16,7 +16,7 @@ from app.services.naver_ad.actual_revenue import naver_order_revenue
 _CORRECTION_LOOKBACK_DAYS = 30  # D-NAO-21: 계정 보정계수 산출 창(30일 고정)
 
 
-def _correction_factor(db: Session, date_to: date) -> dict:
+def correction_factor(db: Session, date_to: date) -> dict:
     """D-NAO-21 보정계수 = (실단위 데이터가 실제로 존재하는 창의) 실주문매출 ÷ 네이버 convAmt.
 
     네이버 convAmt(직+간접)가 실주문 대비 과대(~2.6배 실증) → 진단 판정 시 곱해 보정.
@@ -24,6 +24,10 @@ def _correction_factor(db: Session, date_to: date) -> dict:
     가동 초기) 실제 데이터가 있는 구간으로 양쪽(매출·convAmt)을 똑같이 좁힌다 — 그렇지 않으면
     "매출은 30일치, convAmt는 3일치"처럼 창이 어긋나 계수가 왜곡된다(원칙22, 라이브 검증 중 발견).
     naver convAmt=0이면(실단위 데이터 자체가 없음) 계수 산출 불가(1.0 폴백, no-op 보정 + 사유 명시).
+
+    X1b T4(naver_execution_harness 가드레일 컨텍스트)도 재사용 — 진단·실행 양쪽이 같은
+    보정계수 산출 로직을 공유해야 판정 기준이 어긋나지 않는다(공개 함수로 승격, 원래
+    비공개였음).
     """
     earliest_real = diag.earliest_real_data_date(db, date_to, _CORRECTION_LOOKBACK_DAYS)
     if earliest_real is None:
@@ -65,7 +69,7 @@ def _target_roas_resolver(db: Session, account_target_roas: Decimal):
 
 def build_diagnosis(db: Session, date_from: date, date_to: date) -> dict:
     """진단 보드 6개 + 보정계수 + 계정 BEP/목표ROAS를 조립. 읽기 전용(D-3, 제안 없음)."""
-    correction = _correction_factor(db, date_to)
+    correction = correction_factor(db, date_to)
     factor = correction["factor"]
 
     bep_roas = campaign_target_resolver.account_default_bep_roas(db)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import timedelta
+from decimal import Decimal
 from unittest.mock import patch
 
 import pytest
@@ -116,8 +117,10 @@ def test_execute_dry_run_records_change_log(db, proposal_type, expected_action):
 
 
 def test_execute_forces_dry_run_even_when_caller_requests_live(db):
-    """OPEN_ACTIONS가 비어 있는 한 dry_run=False를 넘겨도 강제로 dry-run 처리된다(D-NAO-5)."""
-    p = _proposal(db)
+    """액션이 OPEN_ACTIONS 밖이면 dry_run=False를 넘겨도 강제로 dry-run 처리된다(D-NAO-5).
+    X1b T4로 bid_up/pause/resume이 전부 개방됐으므로, 여전히 스코프 밖인 budget_up
+    (예산은 영구 Confirm, D-NAO-34)으로 검증한다."""
+    p = _proposal(db, proposal_type="budget_up")
     _settings(db, optimizer="ours")
     log_entry = harness.execute(db, p.id, dry_run=False)
     assert log_entry.dry_run is True
@@ -148,11 +151,11 @@ def test_execute_blocked_on_second_call_already_executed(db):
     assert len(saved) == 1  # 재실행 차단 — change_log 중복 기록 없음
 
 
-def test_open_actions_contains_only_negative_keyword_x1a(db):
-    """X1a T3: D-NAO-16 개방 순서의 1단계(제외키워드)만 개방 — 정지·재개/입찰/예산은 스코프 밖.
-    (구 test_open_actions_is_empty_this_sprint를 T3 계약에 따라 갱신 — 듀얼모드 스프린트의
-    '항상 빈 집합' 불변식은 X 스프린트 T3에서 공식 해제됨.)"""
-    assert harness.OPEN_ACTIONS == frozenset({"add_negative_keyword"})
+def test_open_actions_contains_negative_keyword_bid_and_lock_x1b(db):
+    """X1b T4: D-NAO-16 개방 순서의 1~3단계(제외키워드→정지·재개→입찰) 전부 개방 — 예산만
+    스코프 밖(D-NAO-34, 영구 Confirm). (구 test_open_actions_contains_only_negative_keyword_x1a를
+    T4 계약에 따라 갱신.)"""
+    assert harness.OPEN_ACTIONS == frozenset({"add_negative_keyword", "update_bid", "set_user_lock"})
 
 
 # ── X1a T3: 실쓰기 개방(add_negative_keyword) ──
@@ -291,11 +294,13 @@ def test_live_execute_claim_race_lost_raises_already_executed(db):
 
 
 def test_open_action_without_executor_blocked_by_write_not_opened(db, monkeypatch):
-    """방벽: OPEN_ACTIONS에 실수로 추가돼도 _WRITE_EXECUTORS에 구현이 없으면 fail-closed."""
-    p = _proposal(db)  # bid_up → update_bid
+    """방벽: OPEN_ACTIONS에 실수로 추가돼도 _WRITE_EXECUTORS에 구현이 없으면 fail-closed.
+    X1b T4로 update_bid/set_user_lock 둘 다 구현됐으므로, 여전히 미구현인 update_budget
+    (budget_up)으로 검증한다."""
+    p = _proposal(db, proposal_type="budget_up")
     _settings(db, optimizer="ours")
     monkeypatch.setattr(harness, "OPEN_ACTIONS",
-                        frozenset({"add_negative_keyword", "update_bid"}))
+                        frozenset({"add_negative_keyword", "update_bid", "set_user_lock", "update_budget"}))
 
     with pytest.raises(harness.WriteNotOpenedError):
         harness.execute(db, p.id, dry_run=False)
@@ -312,3 +317,534 @@ def test_opened_action_still_dry_run_by_default(db):
     mock_write.assert_not_called()
     assert log_entry.dry_run is True
     assert log_entry.outcome is None  # dry-run은 기존대로 outcome 미기록
+
+
+# ── X1b T4: update_bid 실쓰기 개방 ──────────────────────────────────────
+
+
+def _keyword_write_result(before=None, after=None):
+    return naver_sa_writer.WriteResult(
+        action="update_keyword_bid",
+        before=before if before is not None else {"bidAmt": 190, "userLock": False},
+        response=after, after=after if after is not None else {"bidAmt": 210, "userLock": False},
+        created_ids=[],
+    )
+
+
+def test_execute_update_bid_success(db):
+    p = _proposal(db, proposal_type="bid_up")
+    p.target_bid = 210
+    db.commit()
+    _settings(db, optimizer="ours")
+    result = _keyword_write_result(before={"bidAmt": 190, "userLock": False}, after={"bidAmt": 210, "userLock": False})
+
+    with patch.object(harness, "_build_guardrail_context", return_value={}), \
+         patch.object(harness.guardrail_gate, "check", return_value=None) as mock_gate, \
+         patch.object(harness.naver_sa_writer, "update_keyword_bid", return_value=result) as mock_write:
+        log_entry = harness.execute(db, p.id, dry_run=False)
+
+    mock_gate.assert_called_once()
+    gate_call_args = mock_gate.call_args
+    assert gate_call_args[0][0] == {"proposal_type": "bid_up", "target_bid": 210, "target_lock": None}
+    mock_write.assert_called_once_with("nkw-1", 210)
+    assert log_entry.outcome == "executed"
+    assert log_entry.action == "update_bid"
+    assert json.loads(log_entry.before_value) == {"bidAmt": 190, "userLock": False}
+    assert json.loads(log_entry.after_value) == {"bidAmt": 210, "userLock": False}
+
+    db.refresh(p)
+    assert p.executed_change_log_id == log_entry.id
+    assert p.status == "approved"
+
+
+def test_execute_update_bid_blocked_by_guardrail(db):
+    p = _proposal(db, proposal_type="bid_up")
+    p.target_bid = 300
+    db.commit()
+    _settings(db, optimizer="ours")
+
+    with patch.object(harness, "_build_guardrail_context", return_value={}), \
+         patch.object(harness.guardrail_gate, "check", return_value="변경폭 초과") as mock_gate, \
+         patch.object(harness.naver_sa_writer, "update_keyword_bid") as mock_write:
+        with pytest.raises(harness.MissingExecutionTargetError):
+            harness.execute(db, p.id, dry_run=False)
+
+    mock_gate.assert_called_once()
+    mock_write.assert_not_called()
+    db.refresh(p)
+    assert p.status == "failed"
+    logs = db.query(NaverChangeLog).filter(NaverChangeLog.proposal_id == p.id).all()
+    assert len(logs) == 1
+    assert logs[0].outcome == "failed"
+    assert "가드레일 차단" in logs[0].rationale
+    assert "변경폭 초과" in logs[0].rationale
+
+
+def test_execute_update_bid_missing_target_bid_raises_before_gate(db):
+    p = _proposal(db, proposal_type="bid_up")  # target_bid 미설정(None)
+    _settings(db, optimizer="ours")
+
+    with patch.object(harness, "_build_guardrail_context") as mock_ctx, \
+         patch.object(harness.naver_sa_writer, "update_keyword_bid") as mock_write:
+        with pytest.raises(harness.MissingExecutionTargetError):
+            harness.execute(db, p.id, dry_run=False)
+
+    mock_ctx.assert_not_called()
+    mock_write.assert_not_called()
+    db.refresh(p)
+    assert p.status == "failed"
+
+
+def test_execute_update_bid_wrong_target_type_raises(db):
+    p = _proposal(db, proposal_type="bid_up", target_type="adgroup", target_id="grp-1")
+    p.target_bid = 210
+    db.commit()
+    _settings(db, optimizer="ours")
+
+    with patch.object(harness.naver_sa_writer, "update_keyword_bid") as mock_write:
+        with pytest.raises(harness.MissingExecutionTargetError):
+            harness.execute(db, p.id, dry_run=False)
+
+    mock_write.assert_not_called()
+    db.refresh(p)
+    assert p.status == "failed"
+
+
+def test_execute_update_bid_writer_failure_records_failed(db):
+    p = _proposal(db, proposal_type="bid_down")
+    p.target_bid = 170
+    db.commit()
+    _settings(db, optimizer="ours")
+
+    with patch.object(harness, "_build_guardrail_context", return_value={}), \
+         patch.object(harness.guardrail_gate, "check", return_value=None), \
+         patch.object(harness.naver_sa_writer, "update_keyword_bid",
+                       side_effect=naver_sa_writer.WriteError("500")):
+        with pytest.raises(naver_sa_writer.WriteError):
+            harness.execute(db, p.id, dry_run=False)
+
+    db.refresh(p)
+    assert p.status == "failed"
+    logs = db.query(NaverChangeLog).filter(NaverChangeLog.proposal_id == p.id).all()
+    assert len(logs) == 1
+    assert logs[0].outcome == "failed"
+    assert "[실행 실패]" in logs[0].rationale
+
+
+# ── X1b T4: set_user_lock 실쓰기 개방(pause/resume) ─────────────────────
+
+
+def _lock_write_result(before_lock=False, after_lock=True):
+    return naver_sa_writer.WriteResult(
+        action="set_keyword_lock",
+        before={"bidAmt": 190, "userLock": before_lock},
+        response=None, after={"bidAmt": 190, "userLock": after_lock}, created_ids=[],
+    )
+
+
+def test_execute_set_user_lock_pause_success(db):
+    p = _proposal(db, proposal_type="pause")
+    p.target_lock = True
+    db.commit()
+    _settings(db, optimizer="ours")
+    result = _lock_write_result(before_lock=False, after_lock=True)
+
+    with patch.object(harness, "_build_guardrail_context", return_value={}), \
+         patch.object(harness.guardrail_gate, "check", return_value=None) as mock_gate, \
+         patch.object(harness.naver_sa_writer, "set_keyword_lock", return_value=result) as mock_write:
+        log_entry = harness.execute(db, p.id, dry_run=False)
+
+    gate_call_args = mock_gate.call_args
+    assert gate_call_args[0][0] == {"proposal_type": "pause", "target_bid": None, "target_lock": True}
+    mock_write.assert_called_once_with("nkw-1", True)
+    assert log_entry.action == "set_user_lock"
+    assert log_entry.outcome == "executed"
+    assert json.loads(log_entry.after_value)["userLock"] is True
+
+    db.refresh(p)
+    assert p.status == "approved"
+    assert p.executed_change_log_id == log_entry.id
+
+
+def test_execute_set_user_lock_resume_success(db):
+    p = _proposal(db, proposal_type="resume")
+    p.target_lock = False
+    db.commit()
+    _settings(db, optimizer="ours")
+    result = _lock_write_result(before_lock=True, after_lock=False)
+
+    with patch.object(harness, "_build_guardrail_context", return_value={}), \
+         patch.object(harness.guardrail_gate, "check", return_value=None), \
+         patch.object(harness.naver_sa_writer, "set_keyword_lock", return_value=result) as mock_write:
+        log_entry = harness.execute(db, p.id, dry_run=False)
+
+    mock_write.assert_called_once_with("nkw-1", False)
+    assert json.loads(log_entry.after_value)["userLock"] is False
+
+
+def test_execute_set_user_lock_blocked_by_guardrail(db):
+    p = _proposal(db, proposal_type="pause")
+    p.target_lock = True
+    db.commit()
+    _settings(db, optimizer="ours")
+
+    with patch.object(harness, "_build_guardrail_context", return_value={}), \
+         patch.object(harness.guardrail_gate, "check", return_value="쿨다운 중") as mock_gate, \
+         patch.object(harness.naver_sa_writer, "set_keyword_lock") as mock_write:
+        with pytest.raises(harness.MissingExecutionTargetError):
+            harness.execute(db, p.id, dry_run=False)
+
+    mock_gate.assert_called_once()
+    mock_write.assert_not_called()
+    db.refresh(p)
+    assert p.status == "failed"
+
+
+def test_execute_set_user_lock_missing_target_lock_raises(db):
+    p = _proposal(db, proposal_type="pause")  # target_lock 미설정(None)
+    _settings(db, optimizer="ours")
+
+    with patch.object(harness.naver_sa_writer, "set_keyword_lock") as mock_write:
+        with pytest.raises(harness.MissingExecutionTargetError):
+            harness.execute(db, p.id, dry_run=False)
+
+    mock_write.assert_not_called()
+    db.refresh(p)
+    assert p.status == "failed"
+
+
+def test_execute_set_user_lock_wrong_target_type_raises(db):
+    p = _proposal(db, proposal_type="pause", target_type="adgroup", target_id="grp-1")
+    p.target_lock = True
+    db.commit()
+    _settings(db, optimizer="ours")
+
+    with patch.object(harness.naver_sa_writer, "set_keyword_lock") as mock_write:
+        with pytest.raises(harness.MissingExecutionTargetError):
+            harness.execute(db, p.id, dry_run=False)
+
+    mock_write.assert_not_called()
+
+
+def test_execute_set_user_lock_writer_failure_records_failed(db):
+    p = _proposal(db, proposal_type="resume")
+    p.target_lock = False
+    db.commit()
+    _settings(db, optimizer="ours")
+
+    with patch.object(harness, "_build_guardrail_context", return_value={}), \
+         patch.object(harness.guardrail_gate, "check", return_value=None), \
+         patch.object(harness.naver_sa_writer, "set_keyword_lock",
+                       side_effect=naver_sa_writer.WriteError("500")):
+        with pytest.raises(naver_sa_writer.WriteError):
+            harness.execute(db, p.id, dry_run=False)
+
+    db.refresh(p)
+    assert p.status == "failed"
+
+
+# ── X1b T4: dry-run 회귀(신규 개방 액션도 dry_run=True 기본) ─────────────
+
+
+def test_bid_up_dry_run_by_default_no_writer_call(db):
+    p = _proposal(db, proposal_type="bid_up")
+    p.target_bid = 210
+    db.commit()
+    _settings(db, optimizer="ours")
+
+    with patch.object(harness.naver_sa_writer, "update_keyword_bid") as mock_write:
+        log_entry = harness.execute(db, p.id)
+
+    mock_write.assert_not_called()
+    assert log_entry.dry_run is True
+
+
+def test_pause_dry_run_by_default_no_writer_call(db):
+    p = _proposal(db, proposal_type="pause")
+    p.target_lock = True
+    db.commit()
+    _settings(db, optimizer="ours")
+
+    with patch.object(harness.naver_sa_writer, "set_keyword_lock") as mock_write:
+        log_entry = harness.execute(db, p.id)
+
+    mock_write.assert_not_called()
+    assert log_entry.dry_run is True
+
+
+# ── X1b T4: MOP 충돌 감지(D-NAO-13) ──────────────────────────────────────
+
+
+def test_execute_update_bid_detects_external_change_appends_warning(db):
+    """우리 마지막 기록(after_value.bidAmt=210)과 방금 재조회한 라이브 before(bidAmt=250)가
+    다르면 — 그 사이 외부(MOP 등)가 바꿨다는 신호. 실행 자체는 진행(경고만, 차단 아님)."""
+    p = _proposal(db, proposal_type="bid_up")
+    p.target_bid = 300
+    db.commit()
+    _settings(db, optimizer="ours")
+    # 우리의 이전 성공 기록 — bidAmt=210으로 남아있음
+    db.add(NaverChangeLog(
+        entity_type="keyword", entity_id="nkw-1", campaign_id="cmp1", action="update_bid",
+        outcome="executed", after_value=json.dumps({"bidAmt": 210, "userLock": False}),
+        executed_at=kst_now(),
+    ))
+    db.commit()
+    # 방금 재조회한 라이브 before는 250 — 우리가 마지막으로 기록한 210과 다름(외부 변경)
+    result = _keyword_write_result(before={"bidAmt": 250, "userLock": False}, after={"bidAmt": 300, "userLock": False})
+
+    with patch.object(harness, "_build_guardrail_context", return_value={}), \
+         patch.object(harness.guardrail_gate, "check", return_value=None), \
+         patch.object(harness.naver_sa_writer, "update_keyword_bid", return_value=result):
+        log_entry = harness.execute(db, p.id, dry_run=False)
+
+    assert "외부 변경 감지" in log_entry.rationale
+    assert "210" in log_entry.rationale and "250" in log_entry.rationale
+    assert log_entry.outcome == "executed"  # 차단 아님 — 경고만 부착하고 정상 진행
+
+
+def test_execute_update_bid_no_warning_when_before_matches_our_last_record(db):
+    p = _proposal(db, proposal_type="bid_up")
+    p.target_bid = 300
+    db.commit()
+    _settings(db, optimizer="ours")
+    db.add(NaverChangeLog(
+        entity_type="keyword", entity_id="nkw-1", campaign_id="cmp1", action="update_bid",
+        outcome="executed", after_value=json.dumps({"bidAmt": 210, "userLock": False}),
+        executed_at=kst_now(),
+    ))
+    db.commit()
+    # 재조회 before가 우리 마지막 기록(210)과 일치 — 외부 변경 없음
+    result = _keyword_write_result(before={"bidAmt": 210, "userLock": False}, after={"bidAmt": 300, "userLock": False})
+
+    with patch.object(harness, "_build_guardrail_context", return_value={}), \
+         patch.object(harness.guardrail_gate, "check", return_value=None), \
+         patch.object(harness.naver_sa_writer, "update_keyword_bid", return_value=result):
+        log_entry = harness.execute(db, p.id, dry_run=False)
+
+    assert "외부 변경 감지" not in (log_entry.rationale or "")
+
+
+def test_execute_update_bid_no_warning_when_no_prior_record(db):
+    p = _proposal(db, proposal_type="bid_up")
+    p.target_bid = 210
+    db.commit()
+    _settings(db, optimizer="ours")
+    result = _keyword_write_result()
+
+    with patch.object(harness, "_build_guardrail_context", return_value={}), \
+         patch.object(harness.guardrail_gate, "check", return_value=None), \
+         patch.object(harness.naver_sa_writer, "update_keyword_bid", return_value=result):
+        log_entry = harness.execute(db, p.id, dry_run=False)
+
+    assert "외부 변경 감지" not in (log_entry.rationale or "")
+
+
+# ── X1b T4: real_write_blocker 신규 구조 판정 ────────────────────────────
+
+
+def test_real_write_blocker_update_bid_executable_when_valid(db):
+    p = _proposal(db, proposal_type="bid_up")
+    p.target_bid = 210
+    db.commit()
+    assert harness.real_write_blocker(p) is None
+
+
+def test_real_write_blocker_update_bid_missing_target_bid(db):
+    p = _proposal(db, proposal_type="bid_up")
+    reason = harness.real_write_blocker(p)
+    assert reason is not None and "target_bid" in reason
+
+
+def test_real_write_blocker_update_bid_wrong_target_type(db):
+    p = _proposal(db, proposal_type="bid_up", target_type="adgroup", target_id="grp-1")
+    p.target_bid = 210
+    reason = harness.real_write_blocker(p)
+    assert reason is not None and "adgroup" in reason
+
+
+def test_real_write_blocker_set_user_lock_executable_when_valid(db):
+    p = _proposal(db, proposal_type="pause")
+    p.target_lock = True
+    db.commit()
+    assert harness.real_write_blocker(p) is None
+
+
+def test_real_write_blocker_set_user_lock_missing_target_lock(db):
+    p = _proposal(db, proposal_type="resume")
+    reason = harness.real_write_blocker(p)
+    assert reason is not None and "target_lock" in reason
+
+
+def test_real_write_blocker_budget_up_still_not_open(db):
+    p = _proposal(db, proposal_type="budget_up")
+    reason = harness.real_write_blocker(p)
+    assert reason is not None and "예산" in reason
+
+
+# ── X1b T4: _build_guardrail_context ─────────────────────────────────────
+
+
+def test_build_guardrail_context_non_keyword_target_all_none(db):
+    p = _proposal(db, proposal_type="bid_up", target_type="adgroup", target_id="grp-1")
+    ctx = harness._build_guardrail_context(db, p, kst_now())
+    assert ctx == {
+        "current_bid": None, "roas_corrected": None, "target_roas": None,
+        "cost_today": None, "daily_budget": None, "unconverted_spend": None,
+        "last_change_at": None, "changes_today_count": 0,
+    }
+
+
+def test_build_guardrail_context_current_bid_from_live_reread(db):
+    p = _proposal(db, proposal_type="bid_up")
+    with patch.object(harness.naver_sa_writer, "get_keyword",
+                       return_value={"bidAmt": 250, "userLock": False}):
+        ctx = harness._build_guardrail_context(db, p, kst_now())
+    assert ctx["current_bid"] == 250
+
+
+def test_build_guardrail_context_get_keyword_failure_fail_closed(db):
+    p = _proposal(db, proposal_type="bid_up")
+    with patch.object(harness.naver_sa_writer, "get_keyword", side_effect=RuntimeError("network")):
+        ctx = harness._build_guardrail_context(db, p, kst_now())
+    assert ctx["current_bid"] is None  # 재조회 실패 — 추정으로 채우지 않음
+
+
+def test_build_guardrail_context_changes_today_count_and_last_change_at(db):
+    p = _proposal(db, proposal_type="bid_up")
+    now = kst_now()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    db.add(NaverChangeLog(
+        entity_type="keyword", entity_id="nkw-1", campaign_id="cmp1", action="update_bid",
+        outcome="executed", changed_at=today_start + timedelta(hours=1),
+    ))
+    db.add(NaverChangeLog(
+        entity_type="keyword", entity_id="nkw-1", campaign_id="cmp1", action="update_bid",
+        outcome="executed", changed_at=today_start + timedelta(hours=5),
+    ))
+    db.add(NaverChangeLog(  # 어제 — 오늘 카운트 제외 대상
+        entity_type="keyword", entity_id="nkw-1", campaign_id="cmp1", action="update_bid",
+        outcome="executed", changed_at=today_start - timedelta(hours=1),
+    ))
+    db.commit()
+
+    with patch.object(harness.naver_sa_writer, "get_keyword", return_value={"bidAmt": 200}):
+        ctx = harness._build_guardrail_context(db, p, now)
+
+    assert ctx["changes_today_count"] == 2
+    assert ctx["last_change_at"] == today_start + timedelta(hours=5)
+
+
+def test_build_guardrail_context_no_prior_changes(db):
+    p = _proposal(db, proposal_type="bid_up")
+    with patch.object(harness.naver_sa_writer, "get_keyword", return_value={"bidAmt": 200}):
+        ctx = harness._build_guardrail_context(db, p, kst_now())
+    assert ctx["changes_today_count"] == 0
+    assert ctx["last_change_at"] is None
+
+
+def test_build_guardrail_context_cost_today_and_daily_budget_from_hourly_snapshot(db):
+    from app.models import NaverHourlySnapshot
+    p = _proposal(db, proposal_type="bid_up")
+    now = kst_now()
+    db.add(NaverHourlySnapshot(
+        snapshot_at=now, ad_date=now.date(), snapshot_hour=5, campaign_id="cmp1",
+        campaign_type="WEB_SITE", cost=100_000, clk=50, imp=1000, daily_budget=500_000,
+    ))
+    db.add(NaverHourlySnapshot(  # 더 이른 시각 — 최신 아님
+        snapshot_at=now, ad_date=now.date(), snapshot_hour=3, campaign_id="cmp1",
+        campaign_type="WEB_SITE", cost=40_000, clk=20, imp=400, daily_budget=500_000,
+    ))
+    db.commit()
+
+    with patch.object(harness.naver_sa_writer, "get_keyword", return_value={"bidAmt": 200}):
+        ctx = harness._build_guardrail_context(db, p, now)
+
+    assert ctx["cost_today"] == 100_000  # 최신(hour=5) 스냅샷만
+    assert ctx["daily_budget"] == 500_000
+
+
+def test_build_guardrail_context_unconverted_spend_from_window_agg(db):
+    from app.models import NaverAdDaily
+    p = _proposal(db, proposal_type="bid_up")
+    now = kst_now()
+    as_of = now.date() - timedelta(days=1)
+    db.add(NaverAdDaily(
+        ad_date=as_of, campaign_id="cmp1", campaign_type="WEB_SITE", adgroup_id="grp-1",
+        keyword_id="nkw-1", imp=500, clk=25, cost=3000, rank_sum=1500,
+        conv_direct_cnt=0, conv_indirect_cnt=0, conv_direct_amt=0, conv_indirect_amt=0,
+    ))
+    db.commit()
+
+    with patch.object(harness.naver_sa_writer, "get_keyword", return_value={"bidAmt": 200}):
+        ctx = harness._build_guardrail_context(db, p, now)
+
+    assert ctx["unconverted_spend"] == 3000
+    assert ctx["roas_corrected"] == 0.0
+
+
+def test_build_guardrail_context_converted_window_zero_unconverted_spend(db):
+    from app.models import NaverAdDaily, Order
+    p = _proposal(db, proposal_type="bid_up")
+    now = kst_now()
+    as_of = now.date() - timedelta(days=1)
+    db.add(NaverAdDaily(
+        ad_date=as_of, campaign_id="cmp1", campaign_type="WEB_SITE", adgroup_id="grp-1",
+        keyword_id="nkw-1", imp=500, clk=25, cost=3000, rank_sum=1500,
+        conv_direct_cnt=1, conv_indirect_cnt=0, conv_direct_amt=9000, conv_indirect_amt=0,
+    ))
+    # D-NAO-21 보정계수 = 실주문매출÷네이버convAmt — 여기선 9000/9000=1.0이 되도록 실주문도 시딩
+    # (채널 실측: naver_order_revenue는 channel_id=6 고정, actual_revenue.py 참조).
+    db.add(Order(
+        channel_id=6, platform_product_id="cp-1", order_number="ORD-1",
+        order_date=as_of, status="정상", selling_price=Decimal("9000"),
+    ))
+    db.commit()
+
+    with patch.object(harness.naver_sa_writer, "get_keyword", return_value={"bidAmt": 200}):
+        ctx = harness._build_guardrail_context(db, p, now)
+
+    assert ctx["unconverted_spend"] == 0  # 창 내 전환 존재 — 무전환 누적으로 안 잡힘
+    assert ctx["roas_corrected"] == pytest.approx(3.0)  # 9000/3000 × 보정계수 1.0(9000/9000)
+
+
+# ── X1b T4: _detect_external_change ──────────────────────────────────────
+
+
+def test_detect_external_change_no_prior_log_returns_none(db):
+    p = _proposal(db, proposal_type="bid_up")
+    reason = harness._detect_external_change(db, p, {"bidAmt": 200}, "bidAmt")
+    assert reason is None
+
+
+def test_detect_external_change_matching_value_returns_none(db):
+    p = _proposal(db, proposal_type="bid_up")
+    db.add(NaverChangeLog(
+        entity_type="keyword", entity_id="nkw-1", campaign_id="cmp1", action="update_bid",
+        outcome="executed", after_value=json.dumps({"bidAmt": 200}), executed_at=kst_now(),
+    ))
+    db.commit()
+    reason = harness._detect_external_change(db, p, {"bidAmt": 200}, "bidAmt")
+    assert reason is None
+
+
+def test_detect_external_change_mismatch_returns_warning(db):
+    p = _proposal(db, proposal_type="bid_up")
+    db.add(NaverChangeLog(
+        entity_type="keyword", entity_id="nkw-1", campaign_id="cmp1", action="update_bid",
+        outcome="executed", after_value=json.dumps({"bidAmt": 200}), executed_at=kst_now(),
+    ))
+    db.commit()
+    reason = harness._detect_external_change(db, p, {"bidAmt": 350}, "bidAmt")
+    assert reason is not None
+    assert "200" in reason and "350" in reason
+
+
+def test_detect_external_change_unparseable_after_value_returns_none(db):
+    p = _proposal(db, proposal_type="bid_up")
+    db.add(NaverChangeLog(
+        entity_type="keyword", entity_id="nkw-1", campaign_id="cmp1", action="update_bid",
+        outcome="executed", after_value="not json", executed_at=kst_now(),
+    ))
+    db.commit()
+    reason = harness._detect_external_change(db, p, {"bidAmt": 350}, "bidAmt")
+    assert reason is None
