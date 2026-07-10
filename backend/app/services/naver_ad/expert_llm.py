@@ -74,11 +74,18 @@ def _invoke_claude(
         parsed_json: dict | None = None
         if schema and text:
             block_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-            json_str = block_match.group(1) if block_match else text.strip()
-            try:
-                parsed_json = json.loads(json_str)
-            except json.JSONDecodeError:
-                parsed_json = None
+            candidates = [block_match.group(1)] if block_match else [text.strip()]
+            # 2026-07-10 prod 실측: opus가 ```json 펜스를 열고 닫지 않아 위 정규식이 미매치
+            # → 첫 '{'~마지막 '}' substring을 마지막 후보로 시도(펜스 유실·앞뒤 설명문 방어).
+            brace_start, brace_end = text.find("{"), text.rfind("}")
+            if brace_start != -1 and brace_end > brace_start:
+                candidates.append(text[brace_start : brace_end + 1])
+            for candidate in candidates:
+                try:
+                    parsed_json = json.loads(candidate)
+                    break
+                except json.JSONDecodeError:
+                    parsed_json = None
 
         return {"text": text, "json": parsed_json, "raw": raw, "usage": usage}
 
