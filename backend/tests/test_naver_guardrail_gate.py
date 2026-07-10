@@ -1,0 +1,273 @@
+# test_naver_guardrail_gate.py — X1b T2 guardrail_gate 순수 판정 함수 단위테스트
+# 근거: docs/PLAN_naver-ad-execution-loop.md §3 X1b, D-NAO-5/19/20. DB·API 접근 없음.
+from __future__ import annotations
+
+from datetime import datetime, timedelta
+
+import pytest
+
+from app.services.naver_ad import guardrail_gate as gate
+
+
+NOW = datetime(2026, 7, 11, 10, 0, 0)
+
+
+def _bid_proposal(proposal_type="bid_up", target_bid=210):
+    return {"proposal_type": proposal_type, "target_bid": target_bid, "target_lock": None}
+
+
+def _lock_proposal(proposal_type="pause", target_lock=True):
+    return {"proposal_type": proposal_type, "target_bid": None, "target_lock": target_lock}
+
+
+def _ctx(**overrides):
+    base = {
+        "current_bid": 190,
+        "roas_corrected": 250.0,
+        "target_roas": 150.0,
+        "cost_today": 10_000,
+        "daily_budget": 500_000,
+        "unconverted_spend": 0,
+        "last_change_at": None,
+        "changes_today_count": 0,
+    }
+    base.update(overrides)
+    return base
+
+
+# ── bid_up: 통과 경로 ─────────────────────────────────────────────────────
+
+
+def test_bid_up_within_all_limits_passes():
+    # 190 -> 210는 +10% 이내(±15% 상한)
+    assert gate.check(_bid_proposal("bid_up", 210), _ctx(), now=NOW) is None
+
+
+def test_bid_down_within_all_limits_passes():
+    assert gate.check(_bid_proposal("bid_down", 170), _ctx(), now=NOW) is None
+
+
+# ── 클램프(70~100,000원, 10원 단위) ──────────────────────────────────────
+
+
+def test_bid_below_min_blocked():
+    reason = gate.check(_bid_proposal("bid_up", 60), _ctx(current_bid=60), now=NOW)
+    assert reason is not None
+    assert "70~100,000" in reason
+
+
+def test_bid_above_max_blocked():
+    reason = gate.check(_bid_proposal("bid_up", 100_010), _ctx(current_bid=90_000), now=NOW)
+    assert reason is not None
+
+
+def test_bid_not_multiple_of_10_blocked():
+    reason = gate.check(_bid_proposal("bid_up", 205), _ctx(), now=NOW)
+    assert reason is not None
+
+
+def test_target_bid_missing_blocked():
+    reason = gate.check(_bid_proposal("bid_up", None), _ctx(), now=NOW)
+    assert reason is not None
+    assert "target_bid" in reason
+
+
+# ── 변경폭 ±15% ───────────────────────────────────────────────────────────
+
+
+def test_bid_up_change_pct_exceeds_15_percent_blocked():
+    # 190 -> 230은 +21.05%
+    reason = gate.check(_bid_proposal("bid_up", 230), _ctx(current_bid=190), now=NOW)
+    assert reason is not None
+    assert "변경폭" in reason
+
+
+def test_bid_down_change_pct_exceeds_15_percent_blocked():
+    # 190 -> 150은 -21.05%
+    reason = gate.check(_bid_proposal("bid_down", 150), _ctx(current_bid=190), now=NOW)
+    assert reason is not None
+    assert "변경폭" in reason
+
+
+def test_bid_up_change_pct_exactly_at_boundary_passes():
+    # 200 -> 230은 정확히 +15%
+    reason = gate.check(_bid_proposal("bid_up", 230), _ctx(current_bid=200), now=NOW)
+    assert reason is None
+
+
+def test_growth_bid_up_exempt_from_change_pct(monkeypatch):
+    # D-NAO-20-③: 신규/육성 트랙은 ±15% 비적용 — 190 -> 300(+57.9%)도 변경폭 사유로는 안 걸림
+    reason = gate.check(
+        _bid_proposal("growth_bid_up", 300),
+        _ctx(current_bid=190, unconverted_spend=0),
+        now=NOW,
+    )
+    assert reason is None
+
+
+def test_current_bid_missing_blocked_fail_closed():
+    reason = gate.check(_bid_proposal("bid_up", 210), _ctx(current_bid=None), now=NOW)
+    assert reason is not None
+    assert "current_bid" in reason
+
+
+# ── 스톱로스 절대액 (bid_up/growth_bid_up만) ─────────────────────────────
+
+
+def test_bid_up_stop_loss_reached_blocked():
+    # stop_loss_amount = target_bid(210) * STOP_LOSS_CLICK_MULTIPLE(10) = 2,100원
+    reason = gate.check(
+        _bid_proposal("bid_up", 210), _ctx(current_bid=190, unconverted_spend=2_100), now=NOW,
+    )
+    assert reason is not None
+    assert "스톱로스" in reason
+
+
+def test_bid_up_stop_loss_not_reached_passes():
+    reason = gate.check(
+        _bid_proposal("bid_up", 210), _ctx(current_bid=190, unconverted_spend=1_000), now=NOW,
+    )
+    assert reason is None
+
+
+def test_bid_down_not_subject_to_stop_loss():
+    # bid_down은 지출 축소 방향이라 스톱로스 무관 — unconverted_spend가 커도 통과
+    reason = gate.check(
+        _bid_proposal("bid_down", 170), _ctx(current_bid=190, unconverted_spend=999_999), now=NOW,
+    )
+    assert reason is None
+
+
+# ── BEP 미달 증액 금지 (bid_up/growth_bid_up만) ──────────────────────────
+
+
+def test_bid_up_bep_below_target_blocked():
+    reason = gate.check(
+        _bid_proposal("bid_up", 210),
+        _ctx(current_bid=190, roas_corrected=100.0, target_roas=150.0),
+        now=NOW,
+    )
+    assert reason is not None
+    assert "BEP" in reason
+
+
+def test_bid_down_not_subject_to_bep_check():
+    # bid_down은 손실 축소 방향이라 BEP 미달이어도 통과(오히려 그게 목적)
+    reason = gate.check(
+        _bid_proposal("bid_down", 170),
+        _ctx(current_bid=190, roas_corrected=100.0, target_roas=150.0),
+        now=NOW,
+    )
+    assert reason is None
+
+
+# ── 일예산 상한 불가침 (bid_up/growth_bid_up만) ──────────────────────────
+
+
+def test_bid_up_daily_budget_exhausted_blocked():
+    reason = gate.check(
+        _bid_proposal("bid_up", 210),
+        _ctx(current_bid=190, cost_today=500_000, daily_budget=500_000),
+        now=NOW,
+    )
+    assert reason is not None
+    assert "일예산" in reason
+
+
+def test_bid_up_daily_budget_not_exhausted_passes():
+    reason = gate.check(
+        _bid_proposal("bid_up", 210),
+        _ctx(current_bid=190, cost_today=499_990, daily_budget=500_000),
+        now=NOW,
+    )
+    assert reason is None
+
+
+# ── 쿨다운 (전 액션 유형 공통) ────────────────────────────────────────────
+
+
+def test_cooldown_active_blocked():
+    reason = gate.check(
+        _bid_proposal("bid_up", 210),
+        _ctx(current_bid=190, last_change_at=NOW - timedelta(hours=2)),
+        now=NOW,
+    )
+    assert reason is not None
+    assert "쿨다운" in reason
+
+
+def test_cooldown_elapsed_passes():
+    reason = gate.check(
+        _bid_proposal("bid_up", 210),
+        _ctx(current_bid=190, last_change_at=NOW - timedelta(hours=6)),
+        now=NOW,
+    )
+    assert reason is None
+
+
+def test_cooldown_applies_to_lock_types_too():
+    reason = gate.check(
+        _lock_proposal("pause", True),
+        _ctx(last_change_at=NOW - timedelta(hours=1)),
+        now=NOW,
+    )
+    assert reason is not None
+    assert "쿨다운" in reason
+
+
+def test_no_prior_change_no_cooldown():
+    reason = gate.check(_bid_proposal("bid_up", 210), _ctx(current_bid=190, last_change_at=None), now=NOW)
+    assert reason is None
+
+
+# ── 일일 변경 건수 상한 (전 액션 유형 공통) ──────────────────────────────
+
+
+def test_daily_change_cap_reached_blocked():
+    reason = gate.check(
+        _bid_proposal("bid_up", 210), _ctx(current_bid=190, changes_today_count=3), now=NOW,
+    )
+    assert reason is not None
+    assert "일일 변경" in reason
+
+
+def test_daily_change_cap_not_reached_passes():
+    reason = gate.check(
+        _bid_proposal("bid_up", 210), _ctx(current_bid=190, changes_today_count=2), now=NOW,
+    )
+    assert reason is None
+
+
+# ── 정지·재개(pause/resume) ──────────────────────────────────────────────
+
+
+def test_pause_passes():
+    assert gate.check(_lock_proposal("pause", True), _ctx(), now=NOW) is None
+
+
+def test_resume_passes():
+    assert gate.check(_lock_proposal("resume", False), _ctx(), now=NOW) is None
+
+
+def test_lock_target_lock_missing_blocked():
+    reason = gate.check(_lock_proposal("pause", None), _ctx(), now=NOW)
+    assert reason is not None
+    assert "target_lock" in reason
+
+
+def test_lock_target_lock_non_bool_blocked():
+    reason = gate.check(
+        {"proposal_type": "pause", "target_bid": None, "target_lock": "true"}, _ctx(), now=NOW,
+    )
+    assert reason is not None
+
+
+# ── 지원하지 않는 유형 ────────────────────────────────────────────────────
+
+
+def test_unsupported_proposal_type_blocked():
+    reason = gate.check(
+        {"proposal_type": "negative_keyword", "target_bid": None, "target_lock": None}, _ctx(), now=NOW,
+    )
+    assert reason is not None
+    assert "지원하지 않는" in reason
