@@ -405,14 +405,13 @@ def resume_candidates(
     pause·resume 둘 다 조회해 키워드별 진짜 최신 이벤트를 가린 뒤 그 이벤트가 action='pause'
     +proposal_id 있음일 때만 진행한다.
     """
-    off_ids = {
-        r[0] for r in
-        db.query(NaverEntity.entity_id).filter(
-            NaverEntity.entity_type == "keyword", NaverEntity.status == "off",
-        ).all()
+    off_entities = {
+        e.entity_id: e for e in
+        db.query(NaverEntity).filter(NaverEntity.entity_type == "keyword", NaverEntity.status == "off").all()
     }
-    if not off_ids:
+    if not off_entities:
         return []
+    off_ids = set(off_entities)
 
     lock_rows = (
         db.query(
@@ -437,18 +436,29 @@ def resume_candidates(
         pause_date = paused_at.date()
         window_to = pause_date - timedelta(days=1)
         window_from = window_to - timedelta(days=LOW_CLICK_LOOKBACK_DAYS - 1)
-        rows = [r for r in _keyword_rows(db, window_from, window_to, _WEB_SITE)
-                if r["keyword_id"] == keyword_id]
-        if not rows:
-            continue
-        agg_cost = sum(r["cost"] for r in rows)
-        agg_conv = sum(r["conv_amt"] for r in rows)
-        roas_naver = float(Decimal(agg_conv) / Decimal(agg_cost)) if agg_cost else None
+        # codex[P2]: _keyword_rows()는 창 내 WEB_SITE 전 키워드를 GROUP BY로 집계한 뒤 파이썬
+        # 필터로 이 keyword_id 하나만 골라낸다 — 후보마다(창이 제각각이라 배치 불가) 이걸
+        # 반복하면 O(재개후보 수 × 전체 키워드 행)로 스케일된다. keyword_id를 SQL WHERE에
+        # 직접 걸어 이 키워드 행만 집계한다.
+        agg_cost, agg_direct, agg_indirect = db.query(
+            sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.cost), 0),
+            sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.conv_direct_amt), 0),
+            sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.conv_indirect_amt), 0),
+        ).filter(
+            NaverAdDaily.keyword_id == keyword_id,
+            NaverAdDaily.ad_date >= window_from, NaverAdDaily.ad_date <= window_to,
+            NaverAdDaily.campaign_type == _WEB_SITE,
+            NaverAdDaily.adgroup_id != BACKFILL_SENTINEL_ADGROUP,
+        ).one()
+        agg_cost, agg_conv = int(agg_cost), int(agg_direct) + int(agg_indirect)
+        if agg_cost == 0:
+            continue  # 정지 직전 창에 실적 자체가 없음 — 판정 불가
+        roas_naver = float(Decimal(agg_conv) / Decimal(agg_cost))
         roas_c = _corrected_roas(roas_naver, correction_factor)
         if roas_c is not None and roas_c >= float(target_roas):
             out.append({
-                "campaign_id": campaign_id, "adgroup_id": rows[0]["adgroup_id"], "keyword_id": keyword_id,
-                "roas_at_pause": roas_c, "paused_at": paused_at.isoformat(),
+                "campaign_id": campaign_id, "adgroup_id": off_entities[keyword_id].parent_id,
+                "keyword_id": keyword_id, "roas_at_pause": roas_c, "paused_at": paused_at.isoformat(),
             })
     out.sort(key=lambda x: x["roas_at_pause"], reverse=True)
     return out
