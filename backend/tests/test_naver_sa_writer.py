@@ -172,6 +172,64 @@ def test_add_post_2xx_with_unparseable_body_still_succeeds_via_after_verificatio
     assert result.created_ids == ["rkw-1"]  # after 재조회에서 보충 수집
 
 
+def test_add_created_ids_derived_from_after_even_if_post_body_partial():
+    """[codex P1] created_ids는 POST 응답이 아니라 검증 완료된 after 재조회에서 파생한다.
+    POST 응답에 id가 1개만 있어도(부분 body) 요청 키워드 2개 전부의 id가 after에서 확보돼야 함."""
+    before_resp = _restricted_kwds_resp([])
+    after_resp = _restricted_kwds_resp([
+        {"nccAdgroupRestrictKwdId": "rkw-1", "keyword": "제외어A"},
+        {"nccAdgroupRestrictKwdId": "rkw-2", "keyword": "제외어B"},
+    ])
+    post_resp = FakeResp(200, [{"nccAdgroupRestrictKwdId": "rkw-1", "keyword": "제외어A"}])
+
+    with patch.object(writer.fetcher, "_get", side_effect=[WEB_SITE_ADGROUP, before_resp, after_resp]), \
+         patch.object(writer.requests, "post", return_value=post_resp):
+        result = writer.add_restricted_keywords(ADGROUP_ID, ["제외어A", "제외어B"])
+
+    assert sorted(result.created_ids) == ["rkw-1", "rkw-2"]
+
+
+def test_add_after_row_missing_id_field_raises_verification_error():
+    """[codex P1 방어] after 행에 nccAdgroupRestrictKwdId가 없으면(요청 keyword당 id 1개
+    미확보) 완전성 검증 실패 — WriteVerificationError."""
+    before_resp = _restricted_kwds_resp([])
+    after_resp = _restricted_kwds_resp([{"keyword": "테스트제외어"}])  # id 필드 누락
+    post_resp = FakeResp(200, [{"keyword": "테스트제외어"}])
+
+    with patch.object(writer.fetcher, "_get", side_effect=[WEB_SITE_ADGROUP, before_resp, after_resp]), \
+         patch.object(writer.requests, "post", return_value=post_resp):
+        with pytest.raises(WriteVerificationError):
+            writer.add_restricted_keywords(ADGROUP_ID, ["테스트제외어"])
+
+
+def test_add_after_has_multiple_rows_for_same_keyword_raises_verification_error():
+    """[codex P1 2R] before/after 사이 다른 행위자(콘솔의 사람·MOP)가 같은 키워드를 등록하면
+    after에 같은 keyword 행이 2개 이상 생길 수 있다 — 어느 행이 이번 쓰기 결과인지 판별 불가.
+    임의 id 채택은 T3 원복이 남의 행을 삭제할 위험 → WriteVerificationError(fail-closed)."""
+    before_resp = _restricted_kwds_resp([])
+    after_resp = _restricted_kwds_resp([
+        {"nccAdgroupRestrictKwdId": "rkw-1", "keyword": "테스트제외어"},
+        {"nccAdgroupRestrictKwdId": "rkw-2", "keyword": "테스트제외어"},  # 동시 등록된 남의 행
+    ])
+    post_resp = FakeResp(200, [{"nccAdgroupRestrictKwdId": "rkw-1", "keyword": "테스트제외어"}])
+
+    with patch.object(writer.fetcher, "_get", side_effect=[WEB_SITE_ADGROUP, before_resp, after_resp]), \
+         patch.object(writer.requests, "post", return_value=post_resp):
+        with pytest.raises(WriteVerificationError):
+            writer.add_restricted_keywords(ADGROUP_ID, ["테스트제외어"])
+
+
+def test_add_duplicate_keywords_within_request_raises_validation_error_no_http():
+    """[codex P2] 요청 리스트 내부 중복 — 서버 동작 미문서라 진입 차단(HTTP 0회)."""
+    with patch.object(writer.fetcher, "_get") as mock_get, \
+         patch.object(writer.requests, "post") as mock_post:
+        with pytest.raises(WriteValidationError):
+            writer.add_restricted_keywords(ADGROUP_ID, ["테스트제외어", "테스트제외어"])
+
+    mock_get.assert_not_called()
+    mock_post.assert_not_called()
+
+
 # ── delete_restricted_keywords ───────────────────────────────────────────
 
 
@@ -218,6 +276,32 @@ def test_delete_headers_signed_with_delete_method_and_no_query_in_path():
     signed_path = delete_call[0].args[0]
     assert signed_path == f"/ncc/adgroups/{ADGROUP_ID}/restricted-keywords"
     assert "?" not in signed_path and "ids=" not in signed_path
+
+
+def test_delete_id_not_in_before_raises_validation_error_no_delete():
+    """[codex P1] before에 없는 id 삭제 요청 = stale/오타 id — 204 no-op가 되면 'after에 없음'
+    검증이 공허하게 통과하는 구멍. DELETE 호출 전에 차단한다."""
+    before_resp = _restricted_kwds_resp([{"nccAdgroupRestrictKwdId": "rkw-1", "keyword": "테스트제외어"}])
+
+    with patch.object(writer.fetcher, "_get", side_effect=[before_resp]), \
+         patch.object(writer.requests, "delete") as mock_delete:
+        with pytest.raises(WriteValidationError):
+            writer.delete_restricted_keywords(ADGROUP_ID, ["rkw-STALE"])
+
+    mock_delete.assert_not_called()
+
+
+def test_delete_429_no_retry_single_call_raises_write_error():
+    """[codex P2] DELETE 429 → 재시도 없이 즉시 WriteError(POST 대칭 — 쓰기 무재시도 원칙)."""
+    before_resp = _restricted_kwds_resp([{"nccAdgroupRestrictKwdId": "rkw-1", "keyword": "테스트제외어"}])
+    delete_resp = FakeResp(429, {"message": "rate limited"})
+
+    with patch.object(writer.fetcher, "_get", side_effect=[before_resp]), \
+         patch.object(writer.requests, "delete", return_value=delete_resp) as mock_delete:
+        with pytest.raises(WriteError):
+            writer.delete_restricted_keywords(ADGROUP_ID, ["rkw-1"])
+
+    assert mock_delete.call_count == 1
 
 
 def test_delete_empty_ids_raises_validation_error_no_http():
