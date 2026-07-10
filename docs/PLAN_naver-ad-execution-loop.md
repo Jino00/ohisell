@@ -44,7 +44,7 @@ X0 선결 → X1a 손(제외키워드) → X1b 손(정지·재개→입찰) → 
 3. **T3 execution_harness 실쓰기 연결**: `OPEN_ACTIONS={'add_negative_keyword'}` 첫 개방. before/after 실측 기록, 쓰기 후 재조회 불일치 시 자동 원복 시도+알림.
 4. **T4 콘솔 승인 버튼 활성화**: 제안 카드 "승인"(disabled 해제) → status='approved' → 실행 API(신규 라우터, Confirm 후 호출). D-NAO-5 반자동 단계 개시. +codex 연기 항목 반영(2026-07-10 합의): `/expert-reviews` 라우터에 run status=ok 조인 추가(비-ok child 누출 방어 — 현재는 도달 불가지만 이 라우터를 만질 때 함께).
 5. **T5 E2 위임 스위치**: `expert_delegated_types`(계정 설정, 기본 ∅). ON 유형 = [Ava 평결 agree + 가드레일 통과] 시 자동 승인 경로. Jino 전용 UI(콘솔).
-6. **T6 정보성 pending 경량화**(X0-3 결정 반영).
+6. **T6 정보성 pending 경량화**(D-NAO-37 확정 정책 구현): ①유형별 차등 TTL(trigger_pacing·trigger_cpc_spike·account_brief=D+1 / anomaly·anomaly_freshness=D+3 / 실행형=14일 유지) — `_expire_stale_pending` 확장 ②briefing_builder 정보성 유형 집계 블록 접기(expected_ids에서 제외, Ava는 실행형 전건+집계 총평) ③백로그 소급 일괄 expired(prod 백업 후, 행 보존). 완료 확인: 다음 크론에서 절삭 로그 0건·Ava 평결 대상=실행형 전건.
 - **완료기준(확인 방법)**: ①카나리 캠페인에서 제외키워드 1건 실집행 후 네이버 API 재조회로 반영 확인(라이브, 원칙 22) ②승인 없는 pending 실행 시도 → 차단 테스트 ③위임 OFF 유형은 Ava agree여도 자동 실행 안 됨 테스트 ④change_log에 before/after 실측값 기록 확인 ⑤전체 pytest 회귀 0.
 
 ### X1b — 정지·재개 → 입찰 개방 + 가드레일 실효화
@@ -85,8 +85,8 @@ X0 선결 → X1a 손(제외키워드) → X1b 손(정지·재개→입찰) → 
 
 ## §7 체크리스트 (진행 위치 — 태스크 완료 즉시 갱신)
 - [x] X0-1 Ava 401 수리 확인 — **완료(2026-07-10 14:14 KST)**: run id=2 status=ok·평결 44행(agree 42/partial 1/commentary 1) 라이브 확인. 과정에서 멱등 버그 발견·수정(degraded run이 당일 성공 재시도를 삼킴 → dedup에 status=ok 필터, TDD+codex pass, prod 배포, failures.jsonl 기록). 내일 08:05 크론 경로 ok run은 자연 재확인 예정.
-- [ ] X0-2 카나리 캠페인 2~3개 지정·ours 전환 (Jino)
-- [ ] X0-3 정보성 pending 경량화 정책 결정
+- [ ] X0-2 카나리 캠페인 2~3개 지정·ours 전환 (Jino) — **연기 확정(2026-07-10, Jino: "카나리 캠페인은 프로그램 완성되면 정하자")**: 코딩은 카나리 없이 진행하고, 실집행 라이브 검증 단계(X1a 완료기준①·X1b②·X2 라이브)만 카나리 지정 후 수행.
+- [x] X0-3 정보성 pending 경량화 정책 결정 — **완료(2026-07-10, D-NAO-37)**: 차등 TTL+브리핑 접기+백로그 정리 확정. 구현은 X1a T6.
 - [ ] X1a T1 쓰기 API 실측 (ref 27 생성)
 - [ ] X1a T2 naver_sa_writer SA
 - [ ] X1a T3 execution_harness 실쓰기 + 제외키워드 개방
