@@ -50,6 +50,7 @@ def test_fetch_ad_performance_aggregates_device_and_ad(monkeypatch):
     """소재·기기 롤업 + '-'→'' 정규화 + rank_sum 합산."""
     monkeypatch.setattr(fetcher, "ACCESS_LICENSE", "x")
     monkeypatch.setattr(fetcher, "SECRET_KEY_B64", "x")
+    monkeypatch.setattr(fetcher, "ensure_reports_built", lambda *a, **k: None)
     monkeypatch.setattr(fetcher, "list_ad_reports",
                         lambda a, b: [{"date": "2026-07-05", "downloadUrl": "u", "reportJobId": "j"}])
     rows = [
@@ -71,6 +72,7 @@ def test_fetch_ad_performance_aggregates_device_and_ad(monkeypatch):
 def test_fetch_conversion_splits_direct_indirect_and_excludes_cart(monkeypatch):
     monkeypatch.setattr(fetcher, "ACCESS_LICENSE", "x")
     monkeypatch.setattr(fetcher, "SECRET_KEY_B64", "x")
+    monkeypatch.setattr(fetcher, "ensure_reports_built", lambda *a, **k: None)
     monkeypatch.setattr(fetcher, "_list_reports_by_type",
                         lambda tp, a, b: [{"date": "2026-07-05", "downloadUrl": "u"}])
     rows = [

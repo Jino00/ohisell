@@ -205,6 +205,7 @@ def _st_row(date_s, camp, grp, term, imp, clk, cost, rank_sum):
 def test_fetch_search_term_daily_aggregates(monkeypatch):
     monkeypatch.setattr(fetcher, "ACCESS_LICENSE", "x")
     monkeypatch.setattr(fetcher, "SECRET_KEY_B64", "x")
+    monkeypatch.setattr(fetcher, "ensure_reports_built", lambda *a, **k: None)
     monkeypatch.setattr(fetcher, "_list_reports_by_type",
                         lambda tp, a, b: [{"date": "2026-07-05", "downloadUrl": "u"}])
     rows = [
