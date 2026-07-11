@@ -37,7 +37,7 @@ def compute_gave_score(
             "gamma": gamma,
         }
 
-    roas = (revenue / cost * _HUNDRED).quantize(_Q4)
+    roas = (revenue / cost).quantize(_Q4)
 
     if bep_roas <= 0:
         return {

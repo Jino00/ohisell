@@ -149,6 +149,27 @@ def test_flight_loop_total_vs_remaining_budget_comparison(db):
     )
 
 
+def test_flight_loop_fallback_roas_uses_ratio_not_percent():
+    """codex P2 regression: fallback target_roas must be ratio (2.0), not percent (200).
+    Verify at the source code level that the constant is 2, not 200."""
+    import ast, inspect
+    from app.services.naver_ad import flight_loop
+    source = inspect.getsource(flight_loop)
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and hasattr(node, 'args'):
+            for arg in node.args:
+                if isinstance(arg, ast.Constant) and arg.value == "200":
+                    if any(isinstance(kw.value, ast.Constant) and kw.value == "200"
+                           for kw in getattr(node, 'keywords', [])):
+                        pass
+    # Direct check: the fallback string in source should be "2" not "200"
+    assert 'Decimal("200")' not in source, (
+        "fallback target_roas must be ratio (2), not percent (200)"
+    )
+    assert 'Decimal("2")' in source
+
+
 def test_flight_loop_error_in_one_campaign_doesnt_block_others(db):
     _setup_campaign(db, campaign_id="cmp-good")
     db.add(NaverCampaignSettings(campaign_id="cmp-bad", optimizer="ours"))

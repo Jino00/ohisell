@@ -215,7 +215,7 @@ def run_flight_loop(
             target_roas = (
                 target_roas_result["target_roas"]
                 if target_roas_result and target_roas_result.get("target_roas")
-                else Decimal("200")
+                else Decimal("2")
             )
 
             budget_for_pacing = budget["daily_budget"] if budget["daily_budget"] is not None else 999_999_999
