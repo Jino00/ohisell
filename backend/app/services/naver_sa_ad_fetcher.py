@@ -86,6 +86,16 @@ def _get(path: str, params: dict | None = None) -> requests.Response:
     return last  # type: ignore[return-value]
 
 
+def _json_list(resp: requests.Response) -> list:
+    """목록 응답 바디를 파싱해 리스트로 반환. 계정에 보고서가 0개면 /stat-reports가
+    HTTP 200 + 빈 바디(0바이트)를 반환한다(실측, 2026-07-11 수집장애 근본원인) — 이 경우
+    resp.json()이 JSONDecodeError로 크래시하므로, 빈/공백 바디는 크래시 대신 []로 처리한다."""
+    text = resp.text
+    if not text or not text.strip():
+        return []
+    return resp.json()
+
+
 def _download_tsv(download_url: str) -> list[list[str]]:
     """report-download URL을 다운로드해 TSV를 컬럼 리스트의 리스트로 반환(공통 헬퍼)."""
     parsed = urlparse(download_url)
@@ -107,7 +117,7 @@ def list_ad_reports(date_from: date, date_to: date) -> list[dict]:
     """/stat-reports에서 AD 타입 보고서 목록을 날짜 범위로 필터링해 반환."""
     resp = _get("/stat-reports")
     resp.raise_for_status()
-    all_reports = resp.json()
+    all_reports = _json_list(resp)
 
     result = []
     for rep in all_reports:
@@ -167,6 +177,7 @@ def fetch_campaign_daily_spend(date_from: date, date_to: date) -> list[dict]:
 
     try:
         campaign_map = get_campaigns()
+        ensure_reports_built("AD", date_from, date_to)
         reports = list_ad_reports(date_from, date_to)
 
         if not reports:
@@ -207,7 +218,7 @@ def _list_reports_by_type(report_tp: str, date_from: date, date_to: date) -> lis
     resp = _get("/stat-reports")
     resp.raise_for_status()
     result = []
-    for rep in resp.json():
+    for rep in _json_list(resp):
         if rep.get("reportTp") != report_tp or rep.get("status") != "BUILT":
             continue
         stat_dt_raw = rep.get("statDt", "")
@@ -234,6 +245,7 @@ def fetch_daily_conversion_revenue(date_from: date, date_to: date) -> dict[str, 
         return {}
 
     try:
+        ensure_reports_built("AD_CONVERSION", date_from, date_to)
         reports = _list_reports_by_type("AD_CONVERSION", date_from, date_to)
         if not reports:
             log.warning("Naver SA: %s~%s AD_CONVERSION 보고서 없음", date_from, date_to)
@@ -366,6 +378,7 @@ def fetch_ad_performance_daily(date_from: date, date_to: date) -> list[dict]:
         log.warning("Naver SA 자격증명 없음 — AD 성과 수집 건너뜀")
         return []
 
+    ensure_reports_built("AD", date_from, date_to)
     reports = list_ad_reports(date_from, date_to)
     if not reports:
         log.warning("Naver SA: %s~%s AD 보고서 없음", date_from, date_to)
@@ -415,6 +428,7 @@ def fetch_conversion_daily(date_from: date, date_to: date) -> list[dict]:
         log.warning("Naver SA 자격증명 없음 — 전환 수집 건너뜀")
         return []
 
+    ensure_reports_built("AD_CONVERSION", date_from, date_to)
     reports = _list_reports_by_type("AD_CONVERSION", date_from, date_to)
     if not reports:
         log.warning("Naver SA: %s~%s AD_CONVERSION 보고서 없음", date_from, date_to)
@@ -492,20 +506,28 @@ def get_keywords(adgroup_id: str) -> list[dict]:
     } for k in resp.json()]
 
 
-def create_expkeyword_report(stat_date: date) -> dict:
-    """EXPKEYWORD(파워링크 확장검색어) 리포트 생성 요청 — 자동 생성 안 됨(실측, docs/references/22).
+def create_stat_report(report_tp: str, stat_date: date) -> dict:
+    """지정 타입의 stat-report 생성 요청(자체생성, 2026-07-11 수집장애 근본원인 수정).
 
-    POST /stat-reports {"reportTp":"EXPKEYWORD","statDt": YYYYMMDD}. 즉시 BUILT 아님(REGIST/RUNNING
-    → 폴링 필요). 반환: {"reportJobId","status", ...}(생성 응답 원본).
+    POST /stat-reports {"reportTp": report_tp, "statDt": YYYYMMDD}. 즉시 BUILT 아님(REGIST/RUNNING
+    → 폴링 필요, ensure_reports_built 참조). 실측(docs/PLAN_naver-report-self-create.md §0):
+    AD·AD_CONVERSION·SHOPPINGKEYWORD_DETAIL·EXPKEYWORD 전부 이 방식으로 자체생성됨 —
+    수집이 외부(MOP/네이버 UI 정기보고서)가 생성해준 보고서에 기생하던 것을 자족 구조로 전환.
+    반환: {"reportJobId","status", ...}(생성 응답 원본).
     """
     resp = requests.post(
         BASE_URL + "/stat-reports",
         headers=_headers("/stat-reports", method="POST"),
-        json={"reportTp": "EXPKEYWORD", "statDt": stat_date.strftime("%Y%m%d")},
+        json={"reportTp": report_tp, "statDt": stat_date.strftime("%Y%m%d")},
         timeout=30,
     )
     resp.raise_for_status()
     return resp.json()
+
+
+def create_expkeyword_report(stat_date: date) -> dict:
+    """EXPKEYWORD(파워링크 확장검색어) 리포트 생성 요청 — create_stat_report 하위호환 래퍼."""
+    return create_stat_report("EXPKEYWORD", stat_date)
 
 
 def get_report_job(report_job_id: int | str) -> dict:
@@ -519,7 +541,113 @@ def list_report_jobs(report_tp: str) -> list[dict]:
     """/stat-reports 전체 목록 중 지정 타입만 반환 (상태 무관 — 중복생성 방지용 조회)."""
     resp = _get("/stat-reports")
     resp.raise_for_status()
-    return [rep for rep in resp.json() if rep.get("reportTp") == report_tp]
+    return [rep for rep in _json_list(resp) if rep.get("reportTp") == report_tp]
+
+
+def _stat_dt_to_kst_date(stat_dt_raw: str) -> date | None:
+    """statDt(UTC ISO 문자열)를 KST 날짜로 변환. 파싱 실패 시 None.
+    list_ad_reports/_list_reports_by_type과 동일 규칙(UTC→KST, T15:00 이상이면 +1일)."""
+    stat_dt_utc = stat_dt_raw[:10]
+    try:
+        d_utc = date.fromisoformat(stat_dt_utc)
+    except ValueError:
+        return None
+    time_part = stat_dt_raw[11:16] if len(stat_dt_raw) > 10 else "00:00"
+    return d_utc + timedelta(days=1) if time_part >= "15:00" else d_utc
+
+
+def _report_status_by_kst_date(report_tp: str) -> dict[str, tuple[str, object]]:
+    """report_tp의 기존 잡들을 KST 날짜별 (status, reportJobId)로 매핑.
+
+    같은 날짜에 복수 잡이 있으면 BUILT를 최우선으로 채택(dedup 판정에 쓰임).
+    """
+    by_date: dict[str, tuple[str, object]] = {}
+    for rep in list_report_jobs(report_tp):
+        d = _stat_dt_to_kst_date(rep.get("statDt", ""))
+        if d is None:
+            continue
+        iso = d.isoformat()
+        status = rep.get("status")
+        prev = by_date.get(iso)
+        if prev is None or (status == "BUILT" and prev[0] != "BUILT"):
+            by_date[iso] = (status, rep.get("reportJobId"))
+    return by_date
+
+
+def _poll_until_built(report_job_id, *, timeout: float, poll_interval: float) -> bool:
+    """report_job_id가 BUILT 될 때까지 폴링. BUILT 도달 시 True, ERROR/NONE/timeout/조회실패는
+    False(예외 전파 없음 — 호출측이 개별 skip 처리)."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            job = get_report_job(report_job_id)
+        except Exception as e:
+            log.warning("Naver SA 리포트 상태 조회 실패 jobId=%s: %s", report_job_id, e)
+            return False
+        status = job.get("status")
+        if status == "BUILT":
+            return True
+        if status in ("ERROR", "NONE"):
+            return False
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(poll_interval)
+
+
+def _ensure_one_report_built(
+    report_tp: str, stat_date: date, existing: tuple[str, object] | None,
+    *, timeout: float, poll_interval: float,
+) -> None:
+    """단일 날짜의 report_tp 보고서 BUILT를 보장(필요 시 생성+폴링). 실패는 log.warning만
+    (예외 전파 없음 — ensure_reports_built가 나머지 날짜를 계속 진행할 수 있게)."""
+    iso = stat_date.isoformat()
+    if existing and existing[0] == "BUILT":
+        return  # dedup: 이미 BUILT
+
+    # REGIST/RUNNING(진행 중)만 재사용해 폴링. 터미널(ERROR/NONE)·그 외 상태는 낡은 잡을
+    # 버리고 새로 생성한다 — codex[P2]: ERROR 잡 id를 재사용하면 _poll_until_built가 즉시
+    # False→그 날짜가 낡은 잡 소멸까지 영구 skip돼 자체생성 복구가 무력화됨.
+    job_id = existing[1] if (existing and existing[0] in ("REGIST", "RUNNING")) else None
+    if job_id is None:
+        try:
+            created = create_stat_report(report_tp, stat_date)
+        except Exception as e:
+            log.warning("Naver SA %s %s 보고서 생성 실패(건너뜀): %s", report_tp, iso, e)
+            return
+        job_id = created.get("reportJobId")
+        if job_id is None:
+            log.warning("Naver SA %s %s 보고서 생성 응답에 reportJobId 없음(건너뜀)", report_tp, iso)
+            return
+
+    if not _poll_until_built(job_id, timeout=timeout, poll_interval=poll_interval):
+        log.warning("Naver SA %s %s 보고서 BUILT 대기 실패(건너뜀, jobId=%s)", report_tp, iso, job_id)
+
+
+def ensure_reports_built(
+    report_tp: str, date_from: date, date_to: date,
+    *, timeout: float = 60.0, poll_interval: float = 2.0,
+) -> None:
+    """report_tp의 stat-report가 date_from~date_to 각 날짜에 대해 BUILT 상태가 되도록 보장한다
+    (자체생성 POST + BUILT까지 폴링). 부수효과만(생성·빌드 보장) — 반환 없음.
+
+    - 자격증명 없으면 즉시 no-op(fetch_* 가드와 일관).
+    - 이미 BUILT인 날짜는 skip(dedup). REGIST/RUNNING 중인 날짜는 기존 잡을 재사용해 폴링만.
+    - 생성 실패·폴링 timeout/ERROR/NONE은 해당 날짜만 log.warning 후 skip, 나머지 날짜는 계속.
+    """
+    if not ACCESS_LICENSE or not SECRET_KEY_B64:
+        return
+
+    try:
+        by_date = _report_status_by_kst_date(report_tp)
+    except Exception as e:
+        log.warning("Naver SA %s 기존 잡 목록 조회 실패(계속 진행): %s", report_tp, e)
+        by_date = {}
+
+    cur = date_from
+    while cur <= date_to:
+        _ensure_one_report_built(report_tp, cur, by_date.get(cur.isoformat()),
+                                  timeout=timeout, poll_interval=poll_interval)
+        cur += timedelta(days=1)
 
 
 # SHOPPINGKEYWORD_DETAIL/EXPKEYWORD 보고서 컬럼(16열, 실측 확정 docs/references/22):
@@ -549,6 +677,7 @@ def fetch_search_term_daily(report_tp: str, date_from: date, date_to: date) -> l
         log.warning("Naver SA 자격증명 없음 — 검색어 리포트 수집 건너뜀")
         return []
 
+    ensure_reports_built(report_tp, date_from, date_to)
     reports = _list_reports_by_type(report_tp, date_from, date_to)
     if not reports:
         log.warning("Naver SA: %s~%s %s 보고서 없음", date_from, date_to, report_tp)
