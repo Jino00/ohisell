@@ -3,6 +3,12 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
+- 날짜: 2026-07-11 (★★네이버 **일별 수집 파이프라인 자체생성 복구 완료·prod 배포·라이브 백필 검증** — Opus 근본원인+설계·검증, Sonnet 구현. X 스프린트와 독립한 별개 결함, D-NAO-41)
+  - **발단**: X2+X3 배포 상태 라이브 점검(원칙22) 중, 일별 수집 크론 3개(ad_costs 07:00·ad_daily 07:30·search_term 07:40)가 2026-07-11 아침 `GET /stat-reports`→`resp.json()` JSONDecodeError로 전멸 발견. naver_ad_daily 07-10 43/1800행·search_term 07-09 정지 → 최적화 루프 원료 저하.
+  - **근본원인(완전 확정, 라이브 실증)**: `/stat-reports`가 계정에 보고서 0개일 때 HTTP 200+빈 바디(0바이트)→`resp.json()` 크래시. 우리 수집기는 AD/AD_CONVERSION/SHOPPINGKEYWORD_DETAIL을 조회만 하고 생성 안 함(EXPKEYWORD만 생성). 외부 행위자(MOP/네이버 정기보고서)가 만들어준 것에 기생하다 멈춤(2026-07-10 MOP 유닛 종료와 일치). `POST {reportTp:AD,statDt}`→BUILT→4199행으로 3종 자체생성 가능 실증.
+  - **수정**: `create_stat_report`+`ensure_reports_built`(생성·BUILT폴링·dedup·터미널상태 재생성·타임아웃)+`_json_list`(빈바디 graceful), fetch_* 4곳 배선. codex GATE PASS(P2 1건 수정). 테스트 932 passed(+18) 회귀0. 스키마 변경 없음. 계획서 `docs/PLAN_naver-report-self-create.md`.
+  - **배포·검증**: PR #14 main(`ce69ff3`)→prod 단일파일 rsync(sha256 일치)→pm2 재시작(import정상)→백필(크론 잡 3개 `.venv/bin/python3` 실행). **라이브 실측(원칙22)**: naver_ad_daily 07-10 **43→1669행**·search_term 07-10 **7289행 등장**·07-08/09 갱신. 앞으로 크론이 매일 자체생성(07-11은 내일 07시 크론이 수집).
+  - **X 스프린트 상태 불변**: X2+X3 배포 완료·카나리 지정은 Jino 보류(이번 세션에서 재확인). 카나리는 프로그램 성숙 후.
 - 날짜: 2026-07-10 밤 늦게 (★네이버 광고 트랙 **X1b(정지재개→입찰 개방+가드레일) T1~T5 전체 완료 — 치명적 결함 3건 발견·수정** — Opus 설계, Sonnet 구현+TDD, codex+Claude 적대적 리뷰)
 - ★**X1b 코드 완료**: T1 스키마(target_bid/target_lock)+쓰기함수(update_keyword_bid·set_keyword_lock 등) / T2 guardrail_gate(순수판정, 클램프·±15%·쿨다운·일일상한·스톱로스·BEP증액금지·일예산불가침) / T3 target_bid 구조화저장+pause_candidates/resume_candidates 생성기 / T4 execution_harness update_bid·set_user_lock 실행자+가드레일컨텍스트+MOP충돌감지 / T5 D+7/14 채점배선확인. **⭐발견한 치명적 결함 3건(전부 수정 완료)**: ①resume 루프 action 문자열 불일치 — 정지→재개 루프가 설계상 작동 불능이었음(Jino "완벽하게 작동" 지시 핵심 실패) ②changed_at UTC/KST 불일치(SQLite server_default가 UTC 반환, 9시간차) — D-NAO-19 쿨다운 안전장치 fail-open 무력화 ③D+7/14 채점루프가 X1a부터 한 번도 안 돎(outcome="executed" 즉시기록이 proposal_scoreboard의 outcome IS NULL 필터를 영원히 못 탐) — D-NAO-14 학습루프 핵심기능 X1a 배포 이후 무력화. 셋 다 "배선 확인" 태스크 도중 라이브 시간 실측·종단 통합테스트로 발견(원칙22 정신). codex 사용한도 소진(00:49 KST 재설정 예정)으로 T4 2라운드부터 Claude 적대적 리뷰 대체(원칙19 폴백). 테스트 1053→1187(+134), 회귀 0. **⚠️미완료: prod 미배포(main 미병합·미push), 카나리 라이브 왕복 미실시(X1a부터 이어진 동일 선결), codex 최종 재검증 권장.** 다음 세션 = codex 재검증 → prod 배포 → Jino 카나리 지정 → X1b 완료기준 라이브 왕복 → X2 착수. HANDOFF: `.claude/memory/HANDOFF_ohisell-naver-ad-x1b-complete+critical-bugs-found_20260710.md`
 - ─────────────────────────────────────────────
