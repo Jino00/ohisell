@@ -516,6 +516,7 @@ class CampaignSettingsIn(BaseModel):
     optimizer: str
     mode: str | None = None
     target_roas_override: float | None = None
+    gamma: float | None = None
     memo: str | None = None
 
 
@@ -525,6 +526,7 @@ def _serialize_settings(s: NaverCampaignSettings) -> dict:
         "optimizer": s.optimizer,
         "mode": s.mode,
         "target_roas_override": _num(s.target_roas_override),
+        "gamma": _num(s.gamma),
         "memo": s.memo,
         "updated_at": s.updated_at.isoformat() if s.updated_at else None,
     }
@@ -566,6 +568,9 @@ def campaign_settings_put(body: CampaignSettingsIn, db: Session = Depends(get_db
     settings.mode = body.mode
     settings.target_roas_override = (
         Decimal(str(body.target_roas_override)) if body.target_roas_override is not None else None
+    )
+    settings.gamma = (
+        Decimal(str(body.gamma)) if body.gamma is not None else None
     )
     settings.memo = body.memo
 

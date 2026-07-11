@@ -1530,6 +1530,7 @@ class NaverCampaignSettings(Base):
     optimizer: Mapped[str] = mapped_column(String(8), nullable=False, default="none")  # none/ours/mop
     mode: Mapped[Optional[str]] = mapped_column(String(12), nullable=True)  # growth/recovery/launch/defense
     target_roas_override: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4), nullable=True)
+    gamma: Mapped[Optional[Decimal]] = mapped_column(Numeric(4, 2), nullable=True)
     memo: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
