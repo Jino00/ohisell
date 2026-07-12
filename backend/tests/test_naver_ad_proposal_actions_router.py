@@ -321,14 +321,16 @@ def test_execute_unopened_action_returns_409_without_consuming_proposal(client, 
     만들고 executed_change_log_id를 박아 제안을 "소비"해버리는 함정이 있다
     (naver_execution_harness.execute의 effective_dry_run 강제 로직). 라우터의 사전 차단이
     이를 막아야 한다 — change_log 0건, status 그대로, executed_change_log_id None 확인.
-    X1b T4로 bid_up이 개방됐으므로 여전히 스코프 밖인 budget_up으로 검증한다."""
-    p = _proposal(db, proposal_type="budget_up", status="approved")
+    P3(D-NAO-42-f)로 매핑된 액션(add_negative_keyword/update_bid/set_user_lock/
+    update_budget)이 전부 개방됐으므로, OPEN_ACTIONS를 일시적으로 비워 "미개방 액션"
+    상황 자체를 시뮬레이션한다(구 budget_up 사례를 P3 계약에 맞춰 갱신)."""
+    p = _proposal(db, proposal_type="bid_up", status="approved")
     _settings(db, optimizer="ours")
 
-    resp = client.post(f"/api/naver/ad/proposals/{p.id}/execute")
+    with patch.object(harness, "OPEN_ACTIONS", frozenset()):
+        resp = client.post(f"/api/naver/ad/proposals/{p.id}/execute")
 
     assert resp.status_code == 409
-    assert "예산" in resp.json()["detail"]
 
     db.refresh(p)
     assert p.status == "approved"

@@ -417,11 +417,13 @@ def compute_pre_exhaustion_signals(db: Session, *, today: date | None = None) ->
 def compute_forecast_evidence(
     db: Session, targets: list[tuple[str, str]], *, today: date | None = None,
 ) -> dict[tuple[str, str], dict]:
-    """F2b ⓐ(D-NAO-26) — targets((target_type,target_id) 목록, keyword/adgroup grain만)에
-    대해 오늘자 예측(pred_clk/cost/conv_amt)을 배치 조회해 proposal_writer.build의
-    forecast_data 인자로 그대로 전달. 입찰 산식(D-NAO-19)에는 관여하지 않는다 — rationale
-    병기만(정직 경계). keyword/adgroup은 이미 NaverForecastDaily 1행=1일=1스코프라
-    forecast_source의 daily_series 집계가 불필요, 이 테이블을 직접 배치 조회한다.
+    """F2b ⓐ(D-NAO-26) — targets((target_type,target_id) 목록)에 대해 오늘자 예측
+    (pred_clk/cost/conv_amt)을 배치 조회해 proposal_writer.build의 forecast_data 인자로
+    그대로 전달. 입찰 산식(D-NAO-19)에는 관여하지 않는다 — rationale 병기만(정직 경계).
+    keyword/adgroup은 이미 NaverForecastDaily 1행=1일=1스코프라 forecast_source의
+    daily_series 집계가 불필요, 이 테이블을 직접 배치 조회한다. grain은 targets에서 그대로
+    뽑아 쓰므로(하드코딩 없음) campaign grain(P3, D-NAO-42-f budget_up 사이징)도 동일 경로로
+    지원된다 — run_daily이 budget_signals의 campaign_id를 targets에 포함시켜야 채워진다.
 
     없는 조합(예측 없음, fallback/미가동)은 반환 dict에 아예 없음.
     """
@@ -569,7 +571,14 @@ def run_daily(db: Session, *, lookback_days: int = 15) -> dict:
     proposal_summaries: list[dict] = []
     if diag and diag.get("boards") is not None:
         try:
-            forecast_targets = list(bid_sims.keys()) + list(growth["sims"].keys())
+            # P3(D-NAO-42-f): budget_up 사이징(proposal_writer._size_budget_up, §5-G)이
+            # 캠페인 grain pred_cost를 쓰려면 그 target도 배치조회 목록에 포함돼야 한다 —
+            # compute_forecast_evidence는 grain을 targets에서 그대로 뽑아 쓰므로(하드코딩
+            # 없음) 이 한 줄만으로 "campaign" grain이 자연히 지원된다.
+            forecast_targets = (
+                list(bid_sims.keys()) + list(growth["sims"].keys())
+                + [("campaign", s["campaign_id"]) for s in budget_signals]
+            )
             try:
                 forecast_data = compute_forecast_evidence(db, forecast_targets)
             except Exception as e:  # noqa: BLE001 — 예측 병기는 저하만, 제안 생성 자체는 계속 진행

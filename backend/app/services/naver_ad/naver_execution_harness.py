@@ -16,6 +16,13 @@
 #   guardrail_gate.check()(±15%·쿨다운·일일상한·스톱로스·BEP증액금지·클램프·일예산)를
 #   반드시 통과해야 하는 새 단계가 실행 순서(§4)에 추가된다. MOP 충돌 감지(D-NAO-13)도
 #   여기서 배선 — 우리 마지막 기록과 방금 재조회한 라이브 값이 다르면 경고(차단 아님).
+#
+#   P3(D-NAO-42-f, D-NAO-16 4단계): 예산(update_budget) 개방 — "우리 MOP = MOP Pro+
+#   무제한"의 마지막 조각. update_bid와 동형(구조검증 → guardrail_gate._check_budget →
+#   claim → naver_sa_writer.update_campaign_budget → change_log). 라운드 봉투(§5-E, 회당
+#   총 증가액≤10만원)는 실행 단계가 아니라 proposal_writer.build(생성 단계)에서 이미
+#   budget_auto_eligible로 분류돼 있다 — 여기서는 그 분류를 소비하지 않는다(오늘은 반자동,
+#   Jino 콘솔 승인이 모든 budget_up 실행의 유일한 게이트).
 from __future__ import annotations
 
 import json
@@ -83,6 +90,9 @@ class MissingExecutionTargetError(Exception):
 # trigger_cpc_spike는 의도적으로 매핑에 없음(정보성, 실행 불가 — ActionNotExecutableError).
 # pause/resume(X1b T3, D-NAO-38)은 둘 다 naver_sa_writer.set_keyword_lock 하나로 실행되므로
 # 액션명을 공유(target_lock 값으로 방향 구분 — guardrail_gate가 이미 이 값으로 방향검증).
+# budget_up/budget_down(P3, D-NAO-42-f)도 동일 원리 — 둘 다 naver_sa_writer.
+# update_campaign_budget 하나로 실행되고, 방향은 target_budget vs current_budget 비교로
+# guardrail_gate._check_budget이 구분한다.
 _ACTION_BY_PROPOSAL_TYPE = {
     "negative_keyword": "add_negative_keyword",
     "bid_up": "update_bid",
@@ -91,13 +101,18 @@ _ACTION_BY_PROPOSAL_TYPE = {
     "pause": "set_user_lock",
     "resume": "set_user_lock",
     "budget_up": "update_budget",
+    "budget_down": "update_budget",
 }
 
 # D-NAO-16 개방 순서(제외키워드→정지·재개→입찰→예산)의 실제 스위치. 코드 배포로만 변경
 # (런타임/UI 토글 없음). X1a T3: 1단계 제외키워드 개방. X1b T4: 2·3단계(정지·재개→입찰)
 # 개방 — ref 27 정찰 + naver_sa_writer(T1)·guardrail_gate(T2) 구현 완료가 전제조건이었다.
-# 예산은 여전히 스코프 밖(D-NAO-34 금지선, 영구 Confirm).
-OPEN_ACTIONS: frozenset[str] = frozenset({"add_negative_keyword", "update_bid", "set_user_lock"})
+# P3(D-NAO-42-f): 4단계 예산(update_budget) 개방 — D-NAO-34 금지선 개정(예산 통제 개방,
+# 계획서 PLAN_naver-ad-budget-control.md §0). 안전가드레일(BEP 이익하한·스톱로스·클램프·
+# +100%캡)은 guardrail_gate._check_budget이 그대로 유지한다 — "무제한 ≠ 무분별".
+OPEN_ACTIONS: frozenset[str] = frozenset(
+    {"add_negative_keyword", "update_bid", "set_user_lock", "update_budget"}
+)
 
 
 def _guard_failure(db: Session, proposal: NaverProposal, now: datetime, action: str, reason: str) -> None:
@@ -527,12 +542,100 @@ def _execute_set_user_lock(db: Session, proposal: NaverProposal, now: datetime) 
     return log_entry
 
 
+def _execute_update_budget(db: Session, proposal: NaverProposal, now: datetime) -> NaverChangeLog:
+    """캠페인 일예산 실쓰기 1건 (P3, D-NAO-16 4단계, D-NAO-42-f). budget_up/budget_down 공용 —
+    target_budget 컬럼(P1, proposal_writer가 구조화 저장)을 그대로 쓴다(rationale 텍스트
+    파싱 금지). guardrail_gate.check()가 실행 직전 최종 관문(_check_budget, PLAN §5-C) —
+    클램프·방향·+100%캡(증액만)·스톱로스(증액만)·BEP(증액만)·쿨다운/일일상한.
+
+    구조 결함(target_type≠'campaign'·target_budget 없음)·가드레일 위반은 전부 _guard_failure로
+    failed 종결(재승인 루프 방지, _execute_update_bid와 동일 원칙). 캠페인 단위 쓰기라
+    target_id==campaign_id(proposal_writer._budget_proposal이 그렇게 저장) — writer 호출은
+    proposal.campaign_id를 쓴다(target_id와 동일값이지만 의미상 캠페인ID를 명시).
+
+    라운드 봉투(budget_auto_eligible, §5-E)는 여기서 소비하지 않는다 — 오늘은 반자동이라
+    Jino 콘솔 승인(status='approved')이 실행 전 유일한 게이트이고, 라운드 봉투는 자율(위임)
+    승급 후 자동발사 경로에서만 실효(PLAN §5-E 주석)."""
+    if proposal.target_type != "campaign":
+        reason = (
+            f"target_type={proposal.target_type!r} — 캠페인 단위 예산만 구현됨(정직 경계)"
+        )
+        _guard_failure(db, proposal, now, "update_budget", reason)
+        raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
+
+    if proposal.target_budget is None:
+        reason = "target_budget 없음 — 구조 결함(구 제안이거나 재생성 필요)"
+        _guard_failure(db, proposal, now, "update_budget", reason)
+        raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
+
+    context = _build_guardrail_context(db, proposal, now)
+    gate_proposal = {
+        "proposal_type": proposal.proposal_type, "target_bid": None, "target_lock": None,
+        "target_budget": proposal.target_budget,
+    }
+    block_reason = guardrail_gate.check(gate_proposal, context, now=now)
+    if block_reason is not None:
+        reason = f"가드레일 차단 — {block_reason}"
+        _guard_failure(db, proposal, now, "update_budget", reason)
+        raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
+
+    _claim_executing(db, proposal)
+
+    try:
+        result = naver_sa_writer.update_campaign_budget(proposal.campaign_id, proposal.target_budget)
+    except Exception as exc:  # WriteValidationError/WriteError/WriteVerificationError + requests 계열
+        proposal.status = "failed"  # 자동 재시도 차단(approved 게이트) — 재승인만 재시도 경로
+        fail_entry = NaverChangeLog(
+            entity_type=proposal.target_type, entity_id=proposal.target_id,
+            campaign_id=proposal.campaign_id, action="update_budget",
+            rationale=(
+                f"{proposal.rationale or ''} [실행 실패] {type(exc).__name__}: {str(exc)[:300]}"
+            ),
+            predicted_json=proposal.expected_effect, proposal_id=proposal.id,
+            dry_run=False, outcome="failed", changed_at=now, executed_at=now,
+        )
+        db.add(fail_entry)
+        db.commit()
+        log.error(
+            "naver_execution_harness: 실쓰기 실패 proposal_id=%s campaign=%s target_budget=%s — %s: %s",
+            proposal.id, proposal.campaign_id, proposal.target_budget, type(exc).__name__, exc,
+        )
+        raise
+
+    conflict_warning = _detect_external_change(db, proposal, result.before, "dailyBudget")
+    rationale = f"{proposal.rationale or ''} {conflict_warning}" if conflict_warning else proposal.rationale
+
+    # outcome 미기록 — proposal_scoreboard.run_daily()가 D+14까지 IS NULL로 식별(위
+    # _execute_add_negative_keyword 주석 참조).
+    log_entry = NaverChangeLog(
+        entity_type=proposal.target_type, entity_id=proposal.target_id,
+        campaign_id=proposal.campaign_id, action="update_budget",
+        rationale=rationale, predicted_json=proposal.expected_effect,
+        proposal_id=proposal.id, dry_run=False,
+        before_value=json.dumps(result.before, ensure_ascii=False),
+        after_value=json.dumps(result.after, ensure_ascii=False),
+        changed_at=now, executed_at=now, verify_date=(now + timedelta(days=VERIFY_DAYS)).date(),
+    )
+    db.add(log_entry)
+    db.flush()
+    proposal.executed_change_log_id = log_entry.id
+    proposal.status = "approved"
+    db.commit()
+
+    log.info(
+        "naver_execution_harness: 실쓰기 성공 proposal_id=%s campaign=%s target_budget=%s",
+        proposal.id, proposal.campaign_id, proposal.target_budget,
+    )
+    return log_entry
+
+
 # 실쓰기 디스패치 테이블 — OPEN_ACTIONS와 별도(이중 방벽): OPEN_ACTIONS에 있어도 여기 구현이
 # 없으면 WriteNotOpenedError(fail-closed). 액션 확장 시 두 곳을 모두 의도적으로 갱신해야 한다.
 _WRITE_EXECUTORS = {
     "add_negative_keyword": _execute_add_negative_keyword,
     "update_bid": _execute_update_bid,
     "set_user_lock": _execute_set_user_lock,
+    "update_budget": _execute_update_budget,
 }
 
 
@@ -553,14 +656,16 @@ def real_write_blocker(proposal: NaverProposal) -> str | None:
       bidAmt는 미구현, 정직 경계) target_bid가 없음 → 실행 대상 부적합.
     ⑤(X1b T4) action=='set_user_lock'인데 target_type이 'keyword'가 아니거나 target_lock이
       없음 → 실행 대상 부적합.
+    ⑥(P3, D-NAO-42-f) action=='update_budget'인데 target_type이 'campaign'이 아니거나
+      target_budget이 없음 → 실행 대상 부적합.
 
-    ⚠️ ③~⑤의 판정은 harness의 실행 함수 내부 가드와 의도적으로 중복이다(이중 방벽 — 그
+    ⚠️ ③~⑥의 판정은 harness의 실행 함수 내부 가드와 의도적으로 중복이다(이중 방벽 — 그
     가드는 제거하지 않는다). 이 함수는 UI 표시(`executable`)용 구조 판정만 하고,
     guardrail_gate.check()(±15%·쿨다운·일일상한·스톱로스·BEP증액금지·일예산 — 라이브
     재조회가 필요)는 **실행 시도 시점에만** 돈다 — 목록 조회마다 매번 네이버 API를 호출하면
     콘솔 로딩이 승인된 제안 수만큼 API 콜을 유발하므로(비용·레이트리밋), 여기서는 하지
     않는다(설계 결정, T4). `POST /proposals/{id}/execute`(naver_ad.py)의 사전 차단은
-    ①·②만 가로챈다 — ③~⑤(구조 결함)·가드레일 위반은 harness에 그대로 넘겨
+    ①·②만 가로챈다 — ③~⑥(구조 결함)·가드레일 위반은 harness에 그대로 넘겨
     MissingExecutionTargetError→422+failed 감사 기록 경로를 타게 한다(라우터가 여기서
     선점하면 그 감사 기록이 안 남는다 — T4 설계, 라우터 docstring 참조).
     """
@@ -568,7 +673,7 @@ def real_write_blocker(proposal: NaverProposal) -> str | None:
     if action is None:
         return "정보성 제안 — 실행 대상 아님"
     if action not in OPEN_ACTIONS or action not in _WRITE_EXECUTORS:
-        return "액션 미개방(예산은 스코프 밖, D-NAO-34)"
+        return "액션 미개방(D-NAO-16 개방 순서, 아직 코드 배포 전)"
     if action == "add_negative_keyword":
         if proposal.target_type != "search_term":
             return (
@@ -592,6 +697,13 @@ def real_write_blocker(proposal: NaverProposal) -> str | None:
             )
         if proposal.target_lock is None:
             return "target_lock 없음 — 실행 대상 정보 부족(구 제안, 재생성 필요)"
+    elif action == "update_budget":
+        if proposal.target_type != "campaign":
+            return (
+                f"target_type={proposal.target_type!r} — 캠페인 단위 예산만 구현됨(정직 경계)"
+            )
+        if proposal.target_budget is None:
+            return "target_budget 없음 — 실행 대상 정보 부족(구 제안이거나 재생성 필요)"
     return None
 
 

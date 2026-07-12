@@ -118,11 +118,13 @@ def test_execute_dry_run_records_change_log(db, proposal_type, expected_action):
 
 def test_execute_forces_dry_run_even_when_caller_requests_live(db):
     """액션이 OPEN_ACTIONS 밖이면 dry_run=False를 넘겨도 강제로 dry-run 처리된다(D-NAO-5).
-    X1b T4로 bid_up/pause/resume이 전부 개방됐으므로, 여전히 스코프 밖인 budget_up
-    (예산은 영구 Confirm, D-NAO-34)으로 검증한다."""
-    p = _proposal(db, proposal_type="budget_up")
+    P3(D-NAO-42-f)로 update_budget까지 개방되며 매핑된 액션(add_negative_keyword/update_bid/
+    set_user_lock/update_budget)이 전부 열렸다 — 게이트 자체의 동작(닫힌 액션이면 강제
+    dry-run)을 검증하려면 OPEN_ACTIONS를 일시적으로 비워 시뮬레이션한다."""
+    p = _proposal(db, proposal_type="bid_up")
     _settings(db, optimizer="ours")
-    log_entry = harness.execute(db, p.id, dry_run=False)
+    with patch.object(harness, "OPEN_ACTIONS", frozenset()):
+        log_entry = harness.execute(db, p.id, dry_run=False)
     assert log_entry.dry_run is True
 
 
@@ -151,11 +153,13 @@ def test_execute_blocked_on_second_call_already_executed(db):
     assert len(saved) == 1  # 재실행 차단 — change_log 중복 기록 없음
 
 
-def test_open_actions_contains_negative_keyword_bid_and_lock_x1b(db):
-    """X1b T4: D-NAO-16 개방 순서의 1~3단계(제외키워드→정지·재개→입찰) 전부 개방 — 예산만
-    스코프 밖(D-NAO-34, 영구 Confirm). (구 test_open_actions_contains_only_negative_keyword_x1a를
-    T4 계약에 따라 갱신.)"""
-    assert harness.OPEN_ACTIONS == frozenset({"add_negative_keyword", "update_bid", "set_user_lock"})
+def test_open_actions_contains_negative_keyword_bid_lock_and_budget_p3(db):
+    """P3(D-NAO-42-f): D-NAO-16 개방 순서 4단계(제외키워드→정지·재개→입찰→예산) 전부 개방
+    (D-NAO-34 금지선 개정). (구 test_open_actions_contains_negative_keyword_bid_and_lock_x1b를
+    P3 계약에 따라 갱신.)"""
+    assert harness.OPEN_ACTIONS == frozenset(
+        {"add_negative_keyword", "update_bid", "set_user_lock", "update_budget"}
+    )
 
 
 # ── X1a T3: 실쓰기 개방(add_negative_keyword) ──
@@ -295,12 +299,15 @@ def test_live_execute_claim_race_lost_raises_already_executed(db):
 
 def test_open_action_without_executor_blocked_by_write_not_opened(db, monkeypatch):
     """방벽: OPEN_ACTIONS에 실수로 추가돼도 _WRITE_EXECUTORS에 구현이 없으면 fail-closed.
-    X1b T4로 update_bid/set_user_lock 둘 다 구현됐으므로, 여전히 미구현인 update_budget
-    (budget_up)으로 검증한다."""
+    P3(D-NAO-42-f)로 매핑된 액션(add_negative_keyword/update_bid/set_user_lock/
+    update_budget)이 전부 구현됐으므로, 가상의 미구현 액션으로 이중 방벽 자체를 검증한다."""
     p = _proposal(db, proposal_type="budget_up")
     _settings(db, optimizer="ours")
-    monkeypatch.setattr(harness, "OPEN_ACTIONS",
-                        frozenset({"add_negative_keyword", "update_bid", "set_user_lock", "update_budget"}))
+    monkeypatch.setattr(
+        harness, "_ACTION_BY_PROPOSAL_TYPE",
+        {**harness._ACTION_BY_PROPOSAL_TYPE, "budget_up": "future_action"},
+    )
+    monkeypatch.setattr(harness, "OPEN_ACTIONS", frozenset({"future_action"}))
 
     with pytest.raises(harness.WriteNotOpenedError):
         harness.execute(db, p.id, dry_run=False)
@@ -675,10 +682,28 @@ def test_real_write_blocker_set_user_lock_missing_target_lock(db):
     assert reason is not None and "target_lock" in reason
 
 
-def test_real_write_blocker_budget_up_still_not_open(db):
-    p = _proposal(db, proposal_type="budget_up")
+def test_real_write_blocker_budget_up_executable_when_valid(db):
+    """P3(D-NAO-42-f): update_budget 개방 — 구조가 유효(target_type='campaign' +
+    target_budget 존재)하면 실행 가능(구 test_real_write_blocker_budget_up_still_not_open을
+    P3 계약에 따라 갱신)."""
+    p = _proposal(db, proposal_type="budget_up", target_type="campaign", target_id="cmp1")
+    p.target_budget = 12_000
+    db.commit()
+    assert harness.real_write_blocker(p) is None
+
+
+def test_real_write_blocker_budget_up_missing_target_budget(db):
+    p = _proposal(db, proposal_type="budget_up", target_type="campaign", target_id="cmp1")
     reason = harness.real_write_blocker(p)
-    assert reason is not None and "예산" in reason
+    assert reason is not None and "target_budget" in reason
+
+
+def test_real_write_blocker_budget_up_wrong_target_type(db):
+    p = _proposal(db, proposal_type="budget_up")  # 기본 target_type="keyword"
+    p.target_budget = 12_000
+    db.commit()
+    reason = harness.real_write_blocker(p)
+    assert reason is not None and "keyword" in reason
 
 
 # ── X1b T4: _build_guardrail_context ─────────────────────────────────────
@@ -1133,3 +1158,153 @@ def test_executed_change_log_is_picked_up_by_proposal_scoreboard_after_verify_da
 
     db.refresh(log_entry)
     assert log_entry.actual_json is not None  # 모수미달이어도 실측치 기록 시도는 됨(재시도 대상)
+
+
+# ── P3(D-NAO-42-f): update_budget 실쓰기 개방(D-NAO-16 4단계) ────────────────
+
+
+def _campaign_budget_write_result(before=None, after=None):
+    return naver_sa_writer.WriteResult(
+        action="update_campaign_budget",
+        before=before if before is not None else
+        {"dailyBudget": 10_000, "useDailyBudget": True, "sharedBudgetId": None},
+        response=after,
+        after=after if after is not None else
+        {"dailyBudget": 12_000, "useDailyBudget": True, "sharedBudgetId": None},
+        created_ids=[],
+    )
+
+
+def _budget_proposal_row(db, target_budget=12_000, campaign_id="cmp-budget", proposal_type="budget_up"):
+    p = _proposal(db, proposal_type=proposal_type, campaign_id=campaign_id,
+                  target_type="campaign", target_id=campaign_id)
+    p.target_budget = target_budget
+    db.commit()
+    return p
+
+
+def test_execute_update_budget_success(db):
+    p = _budget_proposal_row(db, target_budget=12_000)
+    _settings(db, campaign_id="cmp-budget", optimizer="ours")
+    result = _campaign_budget_write_result(
+        before={"dailyBudget": 10_000, "useDailyBudget": True, "sharedBudgetId": None},
+        after={"dailyBudget": 12_000, "useDailyBudget": True, "sharedBudgetId": None},
+    )
+
+    with patch.object(harness, "_build_guardrail_context", return_value={}), \
+         patch.object(harness.guardrail_gate, "check", return_value=None) as mock_gate, \
+         patch.object(harness.naver_sa_writer, "update_campaign_budget", return_value=result) as mock_write:
+        log_entry = harness.execute(db, p.id, dry_run=False)
+
+    mock_gate.assert_called_once()
+    gate_call_args = mock_gate.call_args
+    assert gate_call_args[0][0] == {
+        "proposal_type": "budget_up", "target_bid": None, "target_lock": None, "target_budget": 12_000,
+    }
+    mock_write.assert_called_once_with("cmp-budget", 12_000)
+    assert log_entry.action == "update_budget"
+    assert log_entry.outcome is None  # 채점 전 정상(D+14 배선) — 성공 판별은 after_value
+    assert json.loads(log_entry.before_value) == {
+        "dailyBudget": 10_000, "useDailyBudget": True, "sharedBudgetId": None,
+    }
+    assert json.loads(log_entry.after_value) == {
+        "dailyBudget": 12_000, "useDailyBudget": True, "sharedBudgetId": None,
+    }
+
+    db.refresh(p)
+    assert p.executed_change_log_id == log_entry.id
+    assert p.status == "approved"
+
+
+def test_execute_update_budget_blocked_by_guardrail(db):
+    p = _budget_proposal_row(db, target_budget=999_999)
+    _settings(db, campaign_id="cmp-budget", optimizer="ours")
+
+    with patch.object(harness, "_build_guardrail_context", return_value={}), \
+         patch.object(harness.guardrail_gate, "check", return_value="예산 증액폭 초과") as mock_gate, \
+         patch.object(harness.naver_sa_writer, "update_campaign_budget") as mock_write:
+        with pytest.raises(harness.MissingExecutionTargetError):
+            harness.execute(db, p.id, dry_run=False)
+
+    mock_gate.assert_called_once()
+    mock_write.assert_not_called()
+    db.refresh(p)
+    assert p.status == "failed"
+    logs = db.query(NaverChangeLog).filter(NaverChangeLog.proposal_id == p.id).all()
+    assert len(logs) == 1
+    assert logs[0].outcome == "failed"
+    assert "가드레일 차단" in logs[0].rationale
+
+
+def test_execute_update_budget_wrong_target_type_guard_failure(db):
+    p = _proposal(db, proposal_type="budget_up", campaign_id="cmp-budget",
+                  target_type="keyword", target_id="nkw-1")
+    p.target_budget = 12_000
+    db.commit()
+    _settings(db, campaign_id="cmp-budget", optimizer="ours")
+
+    with pytest.raises(harness.MissingExecutionTargetError):
+        harness.execute(db, p.id, dry_run=False)
+
+    db.refresh(p)
+    assert p.status == "failed"
+    logs = db.query(NaverChangeLog).filter(NaverChangeLog.proposal_id == p.id).all()
+    assert len(logs) == 1
+    assert "실행 불가" in logs[0].rationale
+
+
+def test_execute_update_budget_missing_target_budget_guard_failure(db):
+    p = _proposal(db, proposal_type="budget_up", campaign_id="cmp-budget",
+                  target_type="campaign", target_id="cmp-budget")
+    _settings(db, campaign_id="cmp-budget", optimizer="ours")
+
+    with pytest.raises(harness.MissingExecutionTargetError):
+        harness.execute(db, p.id, dry_run=False)
+
+    db.refresh(p)
+    assert p.status == "failed"
+
+
+def test_execute_update_budget_write_failure_marks_proposal_failed(db):
+    p = _budget_proposal_row(db, target_budget=12_000)
+    _settings(db, campaign_id="cmp-budget", optimizer="ours")
+
+    with patch.object(harness, "_build_guardrail_context", return_value={}), \
+         patch.object(harness.guardrail_gate, "check", return_value=None), \
+         patch.object(harness.naver_sa_writer, "update_campaign_budget",
+                       side_effect=naver_sa_writer.WriteError("500")):
+        with pytest.raises(naver_sa_writer.WriteError):
+            harness.execute(db, p.id, dry_run=False)
+
+    db.refresh(p)
+    assert p.status == "failed"
+    logs = db.query(NaverChangeLog).filter(NaverChangeLog.proposal_id == p.id).all()
+    assert len(logs) == 1
+    assert logs[0].outcome == "failed"
+
+
+def test_execute_update_budget_detects_external_change_appends_warning(db):
+    """우리 마지막 기록(after_value.dailyBudget=10,000)과 방금 재조회한 라이브 before
+    (13,000)가 다르면 — 그 사이 외부(MOP 등)가 바꿨다는 신호(D-NAO-13). 실행 자체는
+    진행(경고만, 차단 아님) — update_bid와 동일 계약."""
+    p = _budget_proposal_row(db, target_budget=15_000)
+    _settings(db, campaign_id="cmp-budget", optimizer="ours")
+    db.add(NaverChangeLog(
+        entity_type="campaign", entity_id="cmp-budget", campaign_id="cmp-budget",
+        action="update_budget", dry_run=False,
+        after_value=json.dumps({"dailyBudget": 10_000}), executed_at=kst_now(),
+    ))
+    db.commit()
+    result = _campaign_budget_write_result(
+        before={"dailyBudget": 13_000, "useDailyBudget": True, "sharedBudgetId": None},
+        after={"dailyBudget": 15_000, "useDailyBudget": True, "sharedBudgetId": None},
+    )
+
+    with patch.object(harness, "_build_guardrail_context", return_value={}), \
+         patch.object(harness.guardrail_gate, "check", return_value=None), \
+         patch.object(harness.naver_sa_writer, "update_campaign_budget", return_value=result):
+        log_entry = harness.execute(db, p.id, dry_run=False)
+
+    assert "외부 변경 감지" in log_entry.rationale
+    assert "10000" in log_entry.rationale and "13000" in log_entry.rationale
+    assert log_entry.outcome is None  # 차단 아님, 경고만 부착
