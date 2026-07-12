@@ -69,7 +69,14 @@ def _resolve_optimizer(db: Session, campaign_id: str) -> str:
 
 def _eligible(db: Session, proposal: NaverProposal, delegated: set[str], skipped: dict) -> bool:
     """자격 사전 필터 — 하나라도 탈락하면 그 제안은 무접촉(상태 변경·기록 없음, 사유별
-    카운트만). 순서: 위임유형 → pending → real_write_blocker → optimizer."""
+    카운트만). 순서: 위임유형 → pending → real_write_blocker → optimizer → 라운드봉투(budget_up만).
+
+    라운드봉투(budget_envelope, D-NAO-42-f②, codex P1): budget_up 제안은
+    budget_auto_eligible이 정확히 True일 때만 자동승인 대상이다 — 라운드 합계가 회당
+    자율한도(10만원)를 넘긴 초과분(False)은 위임이 켜져 있어도 반드시 사람 승인
+    (proposal_writer._classify_budget_round_envelope가 생성 단계에서 분류, 여기선 그
+    분류를 소비만 한다). budget_down은 이 검사에서 면제(감액은 자유, budget_auto_eligible이
+    애초에 None으로 남아 있음 — _classify_budget_round_envelope는 budget_up만 분류)."""
     if proposal.proposal_type not in delegated:
         skipped["not_delegated"] += 1
         return False
@@ -82,6 +89,9 @@ def _eligible(db: Session, proposal: NaverProposal, delegated: set[str], skipped
         return False
     if _resolve_optimizer(db, proposal.campaign_id) != "ours":
         skipped["optimizer"] += 1
+        return False
+    if proposal.proposal_type == "budget_up" and proposal.budget_auto_eligible is not True:
+        skipped["budget_envelope"] += 1
         return False
     return True
 
@@ -100,14 +110,14 @@ def run_gate(db: Session, run_id: int, *, now=None) -> dict:
             "status": "skipped",
             "reason": f"run_id={run_id} 없음 또는 status!='ok' — degraded/부재 run 자동실행 금지(fail-closed)",
             "delegated_types": [], "agree_count": 0, "auto_approved": 0, "executed": 0, "failed": 0,
-            "skipped": {"not_delegated": 0, "not_pending": 0, "blocked": 0, "optimizer": 0},
+            "skipped": {"not_delegated": 0, "not_pending": 0, "blocked": 0, "optimizer": 0, "budget_envelope": 0},
         }
     delegated = get_delegated_types(db) & delegable_types()  # 저장값에 미개방 유형이 섞여도 이중 방어
     if not delegated:
         return {
             "status": "skipped", "reason": "delegated_types 비어있음",
             "delegated_types": [], "agree_count": 0, "auto_approved": 0, "executed": 0, "failed": 0,
-            "skipped": {"not_delegated": 0, "not_pending": 0, "blocked": 0, "optimizer": 0},
+            "skipped": {"not_delegated": 0, "not_pending": 0, "blocked": 0, "optimizer": 0, "budget_envelope": 0},
         }
 
     agree_reviews = (
@@ -120,7 +130,7 @@ def run_gate(db: Session, run_id: int, *, now=None) -> dict:
         .all()
     )
 
-    skipped = {"not_delegated": 0, "not_pending": 0, "blocked": 0, "optimizer": 0}
+    skipped = {"not_delegated": 0, "not_pending": 0, "blocked": 0, "optimizer": 0, "budget_envelope": 0}
     auto_approved = 0
     executed = 0
     failed = 0

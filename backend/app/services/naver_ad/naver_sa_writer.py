@@ -476,7 +476,9 @@ def update_campaign_budget(ncc_campaign_id: str, daily_budget: int) -> WriteResu
         WriteVerificationError: PUT은 2xx였는데 재조회에 dailyBudget이 반영되지
             않음 / useDailyBudget이 true로 확인되지 않음(useGroupBidAmt 이중
             확인과 동형 — dailyBudget만 보고 성공 판정하면 "응답은 성공, 실효
-            반영은 실패"를 놓친다).
+            반영은 실패"를 놓친다) / after 재조회에서 sharedBudgetId가 채워짐(Fix 5,
+            codex P2 — 쓰기 중간에 다른 행위자가 공유예산으로 전환해 우리 쓰기가
+            무효화된 상태 변화).
     """
     if not isinstance(daily_budget, int) or isinstance(daily_budget, bool) or daily_budget <= 0:
         raise WriteValidationError(
@@ -534,6 +536,17 @@ def update_campaign_budget(ncc_campaign_id: str, daily_budget: int) -> WriteResu
             f"update_campaign_budget: dailyBudget은 반영됐으나 useDailyBudget이 true로 전환되지 "
             f"않음(fail-closed) — false면 네이버가 dailyBudget 값을 무시함(swagger 명시): "
             f"재조회 useDailyBudget={after.get('useDailyBudget')}"
+        )
+    # Fix 5(codex P2): before 재조회 시점엔 공유예산이 아니었는데(그래서 PUT까지 진행됐는데),
+    # PUT과 after 재조회 사이에 다른 행위자(콘솔의 사람·MOP)가 이 캠페인을 공유예산으로
+    # 전환했을 수 있다 — 그러면 우리가 방금 쓴 per-campaign dailyBudget은 공유예산 하위에서
+    # 무효(swagger sharedDailyBudget 별도 경로, before 재조회 검증과 동일 근거). dailyBudget/
+    # useDailyBudget만 보고 성공 판정하면 이 상태 변화를 놓친다(fail-closed).
+    if after.get("sharedBudgetId") is not None:
+        raise WriteVerificationError(
+            f"update_campaign_budget: 쓰기 응답은 성공(status={resp.status_code})이나 재조회에서 "
+            f"공유예산으로 전환됨(fail-closed) — sharedBudgetId={after.get('sharedBudgetId')!r} "
+            "(쓰기 중 다른 행위자가 상태를 바꿨을 수 있음, per-campaign dailyBudget 무효)"
         )
 
     log.info(

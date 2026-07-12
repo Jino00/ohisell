@@ -163,8 +163,10 @@ def _check_budget(proposal: dict, context: dict, proposal_type: str) -> str | No
     """캠페인 일예산(dailyBudget) 증액·감액 판정 (P2, D-NAO-42-f, PLAN §5-C).
 
     판정 순서(증액 budget_up): (a)클램프(양의 정수) → (b)current_budget 미확보 fail-closed →
+      (b')current_budget<=0 fail-closed(Fix 4 — "미설정/무제한"에서 +100% 정의 불가) →
       (c)방향 일치 → (d)+100%캡(③, 캠페인당 최대 2배) → (e)스톱로스(⑤, 무전환 캠페인 증액
-      금지) → (f)BEP 이익하한(④, 보정ROAS<목표 차단). 감액(budget_down)은 (a)~(c)만 —
+      금지) → (f)BEP 이익하한(④, roas_corrected/target_roas 둘 중 하나라도 None이면
+      Fix 3로 fail-closed 차단, 아니면 보정ROAS<목표 차단). 감액(budget_down)은 (a)~(c)만 —
       +100%캡·스톱로스·BEP는 면제(감액은 자유, 계획서 §2⑥).
 
     ⚠️ "회당 총 증가액 ≤100,000원(라운드 합계)" 캡(계획서 §2②)은 여기서 검사하지 않는다 —
@@ -186,19 +188,28 @@ def _check_budget(proposal: dict, context: dict, proposal_type: str) -> str | No
         return "current_budget 미확보 — 변경폭 검증 불가(fail-closed)"
 
     if proposal_type in _BUDGET_UP_TYPES:
+        # Fix 4(codex P1): current_budget<=0("미설정/무제한" — dailyBudget=0은 budget_allocator
+        # 관행상 useDailyBudget=false를 뜻함, _check_bid의 daily_budget=0 취급과 동일 근거)에서는
+        # "+100%"가 애당초 정의 불가(0의 2배는 여전히 0). 아래 change_ratio 계산도 0으로 나누게
+        # 되므로, 이 자리에서 명시적으로 fail-closed 차단한다(과거엔 `if current_budget > 0:`
+        # 가드가 이 케이스를 조용히 건너뛰어 +100%캡이 무력화됐었다 — codex 지적).
+        if current_budget <= 0:
+            return (
+                f"current_budget={current_budget}(미설정/무제한)에서 +100% 정의 불가 — fail-closed"
+            )
+
         if target_budget <= current_budget:
             return (
                 f"방향 불일치 — {proposal_type}인데 target_budget={target_budget}가 "
                 f"현재={current_budget} 이하"
             )
 
-        if current_budget > 0:
-            change_ratio = (Decimal(target_budget) - Decimal(current_budget)) / Decimal(current_budget)
-            if change_ratio > _BUDGET_UP_MAX_CHANGE_PCT:
-                return (
-                    f"예산 증액폭 {float(change_ratio):.0%} 초과(상한 100%, D-NAO-42-f③) "
-                    f"— 현재={current_budget}원 목표={target_budget}원"
-                )
+        change_ratio = (Decimal(target_budget) - Decimal(current_budget)) / Decimal(current_budget)
+        if change_ratio > _BUDGET_UP_MAX_CHANGE_PCT:
+            return (
+                f"예산 증액폭 {float(change_ratio):.0%} 초과(상한 100%, D-NAO-42-f③) "
+                f"— 현재={current_budget}원 목표={target_budget}원"
+            )
 
         # ⑤ 스톱로스 — bid의 상대배수 임계치(STOP_LOSS_CLICK_MULTIPLE)와 달리 매직넘버 없는
         # 제로 톨러런스 규칙: 캠페인 창 내 무전환 지출이 조금이라도 있으면 증액 자체를
@@ -213,7 +224,18 @@ def _check_budget(proposal: dict, context: dict, proposal_type: str) -> str | No
 
         roas_corrected = context.get("roas_corrected")
         target_roas = context.get("target_roas")
-        if roas_corrected is not None and target_roas is not None and roas_corrected < target_roas:
+        # Fix 3(codex P1): 증거 없음(None) 자체를 fail-closed 차단한다 — 이건 _check_bid의
+        # BEP 검사(증거 없으면 그냥 통과, fail-open)와 **의도적으로 다른** 동작이다. Jino가
+        # BEP 이익하한을 예산까지 확장(D-NAO-42-f④)하면서, 예산은 입찰보다 더 무거운 레버(캠페인
+        # 전체 지출 상한)라 증거 부재 상태에서까지 증액을 허용하지 않기로 확정했다 — 근거값을
+        # 못 구했으면(재조회 실패·target_roas 미해결 등) 증액하지 않는 쪽이 안전하다는 판단.
+        if roas_corrected is None or target_roas is None:
+            return (
+                f"BEP 검증 불가(fail-closed) — roas_corrected={roas_corrected!r} "
+                f"target_roas={target_roas!r}(D-NAO-42-f④, _check_bid의 fail-open과 의도적으로 "
+                "다른 stricter 게이트)"
+            )
+        if roas_corrected < target_roas:
             return (
                 f"BEP 미달 증액 금지 — 보정ROAS {roas_corrected} < 목표 {target_roas}"
                 f"(D-NAO-1 안전선)"

@@ -491,6 +491,74 @@ def test_budget_up_bep_below_target_blocked():
     assert "BEP" in reason
 
 
+# ── Fix 3(codex P1, D-NAO-42-f④): BEP 증거 없음(None) fail-closed(budget_up만) ──
+
+
+def test_budget_up_bep_roas_corrected_none_blocked_fail_closed():
+    """_check_bid는 증거 없으면 fail-open(그냥 통과)이지만, _check_budget은 의도적으로
+    다르다 — 예산은 더 무거운 레버라 근거값을 못 구했으면 증액하지 않는다."""
+    reason = gate.check(
+        _budget_proposal("budget_up", 150_000),
+        _ctx(current_budget=100_000, roas_corrected=None, target_roas=150.0),
+        now=NOW,
+    )
+    assert reason is not None
+    assert "BEP" in reason
+
+
+def test_budget_up_bep_target_roas_none_blocked_fail_closed():
+    reason = gate.check(
+        _budget_proposal("budget_up", 150_000),
+        _ctx(current_budget=100_000, roas_corrected=250.0, target_roas=None),
+        now=NOW,
+    )
+    assert reason is not None
+    assert "BEP" in reason
+
+
+def test_budget_up_bep_both_present_and_sufficient_passes():
+    reason = gate.check(
+        _budget_proposal("budget_up", 150_000),
+        _ctx(current_budget=100_000, roas_corrected=250.0, target_roas=150.0),
+        now=NOW,
+    )
+    assert reason is None
+
+
+def test_budget_down_not_subject_to_bep_evidence_check():
+    """budget_down은 애초에 BEP 검사 자체가 면제 — roas_corrected/target_roas가 둘 다
+    None이어도 통과해야 한다(Fix 3은 budget_up 경로에만 적용)."""
+    reason = gate.check(
+        _budget_proposal("budget_down", 50_000),
+        _ctx(current_budget=100_000, roas_corrected=None, target_roas=None),
+        now=NOW,
+    )
+    assert reason is None
+
+
+# ── Fix 4(codex P1, D-NAO-42-f③): current_budget<=0 fail-closed(budget_up만) ──
+
+
+def test_budget_up_current_budget_zero_blocked_fail_closed():
+    """current_budget=0(미설정/무제한)에서는 "+100%"가 정의 불가 — 과거엔
+    `if current_budget > 0:` 가드가 이 케이스를 조용히 건너뛰어 +100%캡이 무력화됐었다."""
+    reason = gate.check(
+        _budget_proposal("budget_up", 150_000), _ctx(current_budget=0), now=NOW,
+    )
+    assert reason is not None
+    assert "0" in reason
+
+
+def test_budget_down_current_budget_zero_not_specially_blocked():
+    """Fix 4는 budget_up 전용 — budget_down은 current_budget=0이어도 방향 검사만
+    적용된다(0에서 더 내릴 target_budget은 없으므로 방향 불일치로 자연히 막힘)."""
+    reason = gate.check(
+        _budget_proposal("budget_down", 50_000), _ctx(current_budget=0), now=NOW,
+    )
+    assert reason is not None
+    assert "방향" in reason  # "+100% 정의 불가" 사유가 아니라 방향 불일치로 막힘
+
+
 def test_budget_up_bep_at_or_above_target_passes():
     reason = gate.check(
         _budget_proposal("budget_up", 150_000),

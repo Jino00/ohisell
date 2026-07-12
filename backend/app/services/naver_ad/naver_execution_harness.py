@@ -236,12 +236,16 @@ def _build_guardrail_context(db: Session, proposal: NaverProposal, now: datetime
         agg = account_diagnosis.keyword_window_agg(db, proposal.target_id, window_from, as_of)
     else:  # campaign (P2, D-NAO-42-f 예산 통제 컨텍스트)
         try:
-            live = naver_sa_writer.get_campaign(proposal.target_id)
+            # codex[P1, Fix 2]: campaign_id로 재조회한다(target_id 아님) — 집계(agg, 아래)는
+            # 이미 campaign_id를 쓰고 있었으므로 current_budget도 같은 캠페인을 가리켜야
+            # "가드 판정 대상"과 "실쓰기 대상"이 항상 동일 캠페인이 된다(target_id는 실행 함수
+            # 쪽 별도 가드로 campaign_id와 항상 같음이 이미 강제됨, 여기선 명시적으로 campaign_id).
+            live = naver_sa_writer.get_campaign(proposal.campaign_id)
             context["current_budget"] = live.get("dailyBudget")
         except Exception as e:  # noqa: BLE001 — 재조회 실패는 fail-closed(current_budget=None 유지)
             log.warning(
                 "naver_execution_harness: guardrail context get_campaign 실패(fail-closed) "
-                "target_id=%s: %s", proposal.target_id, e,
+                "campaign_id=%s: %s", proposal.campaign_id, e,
             )
         agg = account_diagnosis.campaign_window_agg(db, proposal.campaign_id, window_from, as_of)
 
@@ -568,6 +572,19 @@ def _execute_update_budget(db: Session, proposal: NaverProposal, now: datetime) 
         _guard_failure(db, proposal, now, "update_budget", reason)
         raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
 
+    # codex[P1, Fix 2]: 캠페인 단위 예산 쓰기는 target_id==campaign_id가 불변이어야 한다
+    # (proposal_writer._budget_proposal이 그렇게 저장). 어긋나면 stale/malformed 제안 —
+    # writer 호출(_build_guardrail_context의 재조회 포함)에 어느 캠페인을 쓸지 모호해지므로
+    # fail-closed(이중 방벽: real_write_blocker도 동일 조건으로 UI 표시를 미리 막는다).
+    if proposal.target_id != proposal.campaign_id or not proposal.target_id or not proposal.campaign_id:
+        reason = (
+            f"target_id={proposal.target_id!r} != campaign_id={proposal.campaign_id!r}(또는 "
+            "둘 중 하나가 비어있음) — 캠페인 예산 쓰기는 target_id==campaign_id가 불변, "
+            "stale/malformed 제안(fail-closed)"
+        )
+        _guard_failure(db, proposal, now, "update_budget", reason)
+        raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
+
     context = _build_guardrail_context(db, proposal, now)
     gate_proposal = {
         "proposal_type": proposal.proposal_type, "target_bid": None, "target_lock": None,
@@ -657,7 +674,8 @@ def real_write_blocker(proposal: NaverProposal) -> str | None:
     ⑤(X1b T4) action=='set_user_lock'인데 target_type이 'keyword'가 아니거나 target_lock이
       없음 → 실행 대상 부적합.
     ⑥(P3, D-NAO-42-f) action=='update_budget'인데 target_type이 'campaign'이 아니거나
-      target_budget이 없음 → 실행 대상 부적합.
+      target_budget이 없거나 target_id!=campaign_id(Fix 2, codex P1 — 캠페인 예산 쓰기는
+      두 값이 항상 같아야 함) → 실행 대상 부적합.
 
     ⚠️ ③~⑥의 판정은 harness의 실행 함수 내부 가드와 의도적으로 중복이다(이중 방벽 — 그
     가드는 제거하지 않는다). 이 함수는 UI 표시(`executable`)용 구조 판정만 하고,
@@ -704,6 +722,13 @@ def real_write_blocker(proposal: NaverProposal) -> str | None:
             )
         if proposal.target_budget is None:
             return "target_budget 없음 — 실행 대상 정보 부족(구 제안이거나 재생성 필요)"
+        # codex[P1, Fix 2]: _execute_update_budget과 동일한 이중 방벽 — target_id가
+        # campaign_id와 다르면(또는 비어있으면) stale/malformed(정직 경계).
+        if proposal.target_id != proposal.campaign_id or not proposal.target_id or not proposal.campaign_id:
+            return (
+                f"target_id={proposal.target_id!r} != campaign_id={proposal.campaign_id!r} — "
+                "캠페인 예산 쓰기는 target_id==campaign_id가 불변(stale/malformed 제안)"
+            )
     return None
 
 

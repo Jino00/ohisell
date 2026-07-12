@@ -706,6 +706,18 @@ def test_real_write_blocker_budget_up_wrong_target_type(db):
     assert reason is not None and "keyword" in reason
 
 
+def test_real_write_blocker_budget_up_target_id_campaign_id_mismatch(db):
+    """Fix 2(codex P1): target_id != campaign_id인 캠페인 예산 제안은 stale/malformed —
+    구조(target_type='campaign' + target_budget 존재)만으로는 통과시키면 안 된다."""
+    p = _proposal(db, proposal_type="budget_up", campaign_id="cmp-budget",
+                  target_type="campaign", target_id="cmp-other")
+    p.target_budget = 12_000
+    db.commit()
+    reason = harness.real_write_blocker(p)
+    assert reason is not None
+    assert "target_id" in reason and "campaign_id" in reason
+
+
 # ── X1b T4: _build_guardrail_context ─────────────────────────────────────
 
 
@@ -902,6 +914,20 @@ def test_build_guardrail_context_campaign_get_campaign_failure_fail_closed(db):
     with patch.object(harness.naver_sa_writer, "get_campaign", side_effect=RuntimeError("network")):
         ctx = harness._build_guardrail_context(db, p, kst_now())
     assert ctx["current_budget"] is None  # 재조회 실패 — 추정으로 채우지 않음
+
+
+def test_build_guardrail_context_campaign_uses_campaign_id_not_target_id(db):
+    """Fix 2(codex P1): get_campaign 재조회는 campaign_id로 해야 한다(target_id 아님) —
+    가드 판정 대상과 실쓰기 대상이 항상 같은 캠페인이어야 한다(집계 agg는 이미 campaign_id
+    를 쓰고 있었음, current_budget만 target_id를 써서 불일치할 여지가 있었다).
+    target_id를 일부러 campaign_id와 다른 값으로 둬 어느 값이 실제로 쓰였는지 드러낸다."""
+    p = _proposal(db, proposal_type="budget_up", campaign_id="cmp-budget",
+                  target_type="campaign", target_id="cmp-budget-STALE")
+    with patch.object(harness.naver_sa_writer, "get_campaign",
+                       return_value={"dailyBudget": 77_000}) as mock_get:
+        ctx = harness._build_guardrail_context(db, p, kst_now())
+    mock_get.assert_called_once_with("cmp-budget")
+    assert ctx["current_budget"] == 77_000
 
 
 def test_build_guardrail_context_campaign_roas_and_unconverted_spend_from_campaign_window_agg(db):
@@ -1263,6 +1289,25 @@ def test_execute_update_budget_missing_target_budget_guard_failure(db):
 
     db.refresh(p)
     assert p.status == "failed"
+
+
+def test_execute_update_budget_target_id_campaign_id_mismatch_guard_failure(db):
+    """Fix 2(codex P1): target_id != campaign_id는 stale/malformed 제안 — 구조(target_type/
+    target_budget)만 유효해도 fail-closed로 차단해야 한다(guardrail_gate.check까지 가면 안 됨)."""
+    p = _proposal(db, proposal_type="budget_up", campaign_id="cmp-budget",
+                  target_type="campaign", target_id="cmp-other")
+    p.target_budget = 12_000
+    db.commit()
+    _settings(db, campaign_id="cmp-budget", optimizer="ours")
+
+    with pytest.raises(harness.MissingExecutionTargetError):
+        harness.execute(db, p.id, dry_run=False)
+
+    db.refresh(p)
+    assert p.status == "failed"
+    logs = db.query(NaverChangeLog).filter(NaverChangeLog.proposal_id == p.id).all()
+    assert len(logs) == 1
+    assert "실행 불가" in logs[0].rationale
 
 
 def test_execute_update_budget_write_failure_marks_proposal_failed(db):

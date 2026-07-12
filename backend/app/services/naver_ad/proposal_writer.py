@@ -266,18 +266,27 @@ def _classify_budget_round_envelope(deltas_and_candidates: list[tuple[int, dict]
     """budget_up 후보들의 라운드 봉투 분류(PLAN §5-E, 계획서 §2②) — "회당 총 증가액≤10만원
     (라운드 합계)"을 그리디로 재현한다.
 
-    deltas_and_candidates: [(target_budget-current_budget, candidate_dict), ...] — 이미
-    우선순위(total_gap 내림차순, budget_allocator.find_budget_expansion_signals가 정렬)
-    순서 그대로 전달돼야 한다(이 함수는 재정렬하지 않는다). 각 dict는 in-place로
-    "budget_auto_eligible"이 추가된다.
+    deltas_and_candidates: [(target_budget-current_budget, candidate_dict), ...]. candidate_dict
+    가 "total_gap" 키를 가지고 있으면(build()가 threading — 아래 build() 참조) 이 함수가
+    스스로 그 값 내림차순으로 정렬한 후 그리디 누적한다(Fix 6, codex P2 — 호출자가
+    budget_allocator.find_budget_expansion_signals의 정렬을 이미 신뢰할 수 있어도, 이 함수가
+    "재정렬하지 않는다"는 이전 계약은 호출자 순서에 암묵 의존이라 취약했다: 호출자가 실수로
+    비정렬 리스트를 넘기면 조용히 잘못된 분류가 나온다). "total_gap"이 없는 dict(레거시
+    직접호출 테스트 등)는 0으로 취급 — Python sort는 안정정렬이라 전부 같은 키(0)면 원래
+    순서가 그대로 보존돼 기존 동작과 100% 호환된다.
+
+    정렬은 candidate dict 참조 자체를 바꾸지 않는다(같은 객체에 in-place로
+    "budget_auto_eligible"을 세팅) — 그래서 caller가 들고 있는 원본 리스트(어떤 순서든)의
+    각 dict에도 올바른 값이 반영된다.
 
     누적 ΣΔ가 10만원 이내인 동안은 True(자율 승급 시 자동 발사 대상, 오늘은 반자동이라
     분류 메타일 뿐 게이트 아님 — PLAN §5-E 참조), 넘기는 순간부터는 False(초과분, 위임이
     켜져도 반드시 Jino 승인). 앞선 큰 증액이 캡을 넘겨 거부돼도, 뒤이은 더 작은 증액은
     남은 여유에 들어갈 수 있다 — 이건 "제일 큰 것부터 강제 배정"이 아니라 순서대로 소비하는
     그리디 누적이다(PLAN §5-E 명시 알고리즘)."""
+    ordered = sorted(deltas_and_candidates, key=lambda dc: dc[1].get("total_gap", 0), reverse=True)
     cumulative = 0
-    for delta, candidate in deltas_and_candidates:
+    for delta, candidate in ordered:
         if cumulative + delta <= _ROUND_BUDGET_AUTO_CAP:
             candidate["budget_auto_eligible"] = True
             cumulative += delta
@@ -507,16 +516,21 @@ def build(
     # budget_allocator(D-NAO-22-③, Phase3): P3(D-NAO-42-f)부터 실행 개방 — 소진 캠페인 수
     # 자체가 자연히 적어(전체 캠페인의 극히 일부만 캡에 도달) 개수 캡은 불필요하나, 대신
     # 라운드 봉투(§5-E "회당 총 증가액≤10만원, 라운드 합계")를 여기서 분류한다.
-    # budget_signals는 이미 total_gap 내림차순 정렬(find_budget_expansion_signals) —
-    # ours 필터링만 하고 순서는 그대로 보존해 그리디로 budget_auto_eligible을 매긴다.
+    # budget_signals는 통상 total_gap 내림차순(find_budget_expansion_signals)이지만, 이
+    # 순서에 의존하지 않는다(Fix 6, codex P2) — "total_gap"을 candidate dict에 threading해
+    # _classify_budget_round_envelope가 스스로 재정렬하게 한다. ours 필터링만 하고 원본
+    # signal 순서는 바꾸지 않는다(재정렬은 분류 함수 내부에서만 일어남).
     budget_up_deltas: list[tuple[int, dict]] = []
     for s in budget_signals:
         cid = s["campaign_id"]
         if cid not in ours:
             continue
         p = _budget_proposal(s, labels.get(cid), forecast=forecast_data.get(("campaign", cid)))
+        p["total_gap"] = s["total_gap"]  # 분류용 임시 키(persist 직전에 제거 — NaverProposal 컬럼 아님)
         budget_up_deltas.append((p["target_budget"] - s["daily_budget"], p))
     _classify_budget_round_envelope(budget_up_deltas)
+    for _, p in budget_up_deltas:
+        del p["total_gap"]
     proposals.extend(p for _, p in budget_up_deltas)
 
     # budget_allocator 사전경보(F2b, D-NAO-26): 아직 소진 전이지만 오늘 예측이 예산을

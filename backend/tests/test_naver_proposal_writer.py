@@ -706,6 +706,36 @@ def test_round_envelope_single_over_cap_candidate_is_false():
     assert c1["budget_auto_eligible"] is False
 
 
+# ── Fix 6(codex P2): 라운드 봉투가 caller 순서에 의존하지 않고 self-sort ──────────
+
+
+def test_round_envelope_self_sorts_by_total_gap_regardless_of_caller_order():
+    """caller가 total_gap 오름차순(우선순위 역순)으로 넘겨도, 함수가 스스로 내림차순
+    정렬한 후 그리디 누적해야 한다 — test_round_envelope_marks_overflow_false_at_boundary
+    와 동일한 90,000/20,000/5,000 경계 수치를 쓰되, 입력 순서만 뒤집는다."""
+    c1 = {"total_gap": 900}  # 최우선(가장 큰 gap), delta=90,000
+    c2 = {"total_gap": 500}  # 2순위, delta=20,000
+    c3 = {"total_gap": 100}  # 최하위(가장 작은 gap), delta=5,000
+    # 일부러 우선순위 역순(작은 gap부터)으로 전달
+    deltas = [(5_000, c3), (20_000, c2), (90_000, c1)]
+
+    proposal_writer._classify_budget_round_envelope(deltas)
+
+    assert c1["budget_auto_eligible"] is True   # 90,000 ≤ 100,000
+    assert c2["budget_auto_eligible"] is False  # 90,000+20,000=110,000 > 100,000
+    assert c3["budget_auto_eligible"] is True   # 90,000+5,000=95,000 ≤ 100,000(그리디 소비)
+
+
+def test_round_envelope_missing_total_gap_defaults_to_zero_preserves_legacy_order():
+    """total_gap 키가 없는 legacy 호출(직접 dict 전달)은 0으로 취급 — 전부 동률이라 안정
+    정렬로 원래 순서가 보존돼 기존 계약(test_round_envelope_all_fit_within_cap 등)과
+    100% 호환된다."""
+    candidates = [{} for _ in range(3)]
+    deltas = [(30_000, candidates[0]), (30_000, candidates[1]), (30_000, candidates[2])]
+    proposal_writer._classify_budget_round_envelope(deltas)
+    assert [c["budget_auto_eligible"] for c in candidates] == [True, True, True]
+
+
 # ── P3(D-NAO-42-f): build() 라운드 봉투 + 사이징 배선 ────────────────────────────
 
 
@@ -772,6 +802,34 @@ def test_build_budget_up_round_envelope_overflow_marks_false(db):
     by_cid = {p["campaign_id"]: p for p in out}
     assert by_cid["cmp-a"]["budget_auto_eligible"] is False
     assert by_cid["cmp-b"]["budget_auto_eligible"] is True
+
+
+def test_build_budget_up_round_envelope_self_sorts_when_signals_passed_unsorted(db):
+    """Fix 6(codex P2): build()가 budget_allocator의 정렬을 무조건 신뢰하지 않는다 —
+    signals를 일부러 gap 오름차순(최하위 캠페인 먼저)으로 넘겨도
+    test_build_budget_up_round_envelope_overflow_marks_false와 동일한 결과가 나와야 한다.
+    fallback +20% 사이징: 450,000→540,000(Δ90,000) / 100,000→120,000(Δ20,000) /
+    25,000→30,000(Δ5,000) — 90k+20k=110k>10만(cmp-b는 False), 90k+5k=95k≤10만(cmp-c는 True)."""
+    for cid in ("cmp-a", "cmp-b", "cmp-c"):
+        db.add(NaverCampaignSettings(campaign_id=cid, optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis()
+    signals = [
+        _budget_signal(campaign_id="cmp-c", daily_budget=25_000, total_gap=100),   # 최하위, 먼저 나열
+        _budget_signal(campaign_id="cmp-b", daily_budget=100_000, total_gap=500),
+        _budget_signal(campaign_id="cmp-a", daily_budget=450_000, total_gap=900),  # 최우선, 나중에 나열
+    ]
+
+    out = proposal_writer.build(db, diagnosis, budget_signals=signals, as_of=AS_OF)
+    by_cid = {p["campaign_id"]: p for p in out}
+    assert by_cid["cmp-a"]["budget_auto_eligible"] is True
+    assert by_cid["cmp-b"]["budget_auto_eligible"] is False
+    assert by_cid["cmp-c"]["budget_auto_eligible"] is True
+    # threading용 임시 키는 최종 제안 dict에 남으면 안 됨(persist가 NaverProposal(**p)로
+    # 그대로 언패킹하는데 total_gap은 컬럼이 아니라서 TypeError가 남).
+    assert "total_gap" not in by_cid["cmp-a"]
+    assert "total_gap" not in by_cid["cmp-b"]
+    assert "total_gap" not in by_cid["cmp-c"]
 
 
 def test_build_budget_down_leaves_budget_auto_eligible_none(db):

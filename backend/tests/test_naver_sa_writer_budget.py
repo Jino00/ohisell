@@ -195,3 +195,18 @@ def test_update_budget_use_daily_budget_not_true_raises_verification_error():
          patch.object(writer.requests, "put", return_value=put_resp):
         with pytest.raises(WriteVerificationError):
             writer.update_campaign_budget(CAMPAIGN_ID, 60_000)
+
+
+def test_update_budget_after_shared_budget_id_appears_raises_verification_error():
+    """Fix 5(codex P2): before 재조회 시점엔 공유예산이 아니었지만(그래서 PUT까지 진행),
+    PUT과 after 재조회 사이에 다른 행위자(콘솔의 사람·MOP)가 공유예산으로 전환했다면 —
+    우리가 방금 쓴 per-campaign dailyBudget은 무효(swagger sharedDailyBudget 별도 경로).
+    dailyBudget/useDailyBudget만 보고 성공 판정하면 이 상태 변화를 놓친다(fail-closed)."""
+    before = _campaign_resp(daily_budget=30_000, shared_budget_id=None)
+    after = _campaign_resp(daily_budget=60_000, use_daily_budget=True, shared_budget_id="sbg-000002")
+    put_resp = FakeResp(200, after.json())
+
+    with patch.object(writer.fetcher, "_get", side_effect=[before, after]), \
+         patch.object(writer.requests, "put", return_value=put_resp):
+        with pytest.raises(WriteVerificationError):
+            writer.update_campaign_budget(CAMPAIGN_ID, 60_000)
