@@ -1,6 +1,10 @@
 # naver_sa_writer.py — 네이버 SA 쓰기 유일 저수준 어댑터 SA (X1a T2 제외키워드 + X1b T1
-# bidAmt·userLock 확장, ref 27). D-NAO-16 개방 순서(제외키워드→정지·재개→입찰)의 쓰기
-# 함수 전체가 이 모듈에 있다 — 다른 SA는 이 모듈을 거치지 않고 네이버 API에 쓰지 않는다.
+# bidAmt·userLock 확장 + P1 dailyBudget 확장, ref 27 + PLAN_naver-ad-budget-control §5-B).
+# D-NAO-16 개방 순서(제외키워드→정지·재개→입찰→예산)의 쓰기 함수 전체가 이 모듈에 있다 —
+# 다른 SA는 이 모듈을 거치지 않고 네이버 API에 쓰지 않는다.
+#
+# 예산(dailyBudget) 쓰기는 D-NAO-34 하에서 "영구 스코프 밖"이었으나(ref 27이 의도적으로
+# 미상세) D-NAO-42-f가 이를 개방으로 개정 — update_campaign_budget은 그 개방의 어댑터.
 #
 # 원칙 요약(ref 27 근거):
 # - 서명은 실제 HTTP 메서드와 반드시 일치(POST/DELETE 각각 fetcher._headers(path, method=...)),
@@ -442,4 +446,101 @@ def set_campaign_lock(ncc_campaign_id: str, user_lock: bool) -> WriteResult:
     return _put_user_lock(
         action="set_campaign_lock", path=path, body=body, before=before,
         after_fetch=lambda: get_campaign(ncc_campaign_id),
+    )
+
+
+# ── P1: update_campaign_budget (D-NAO-16 4단계, D-NAO-42-f 개방, PLAN §5-B) ──────
+# 성공 판정은 여기서도 재조회로만(fail-closed) — PUT 응답 body는 response 필드에 원본
+# 기록용으로만 유지한다(update_keyword_bid/set_campaign_lock과 동일 규율).
+
+
+def update_campaign_budget(ncc_campaign_id: str, daily_budget: int) -> WriteResult:
+    """PUT /ncc/campaigns/{nccCampaignId}?fields=budget — 캠페인 일예산 변경
+    (PLAN_naver-ad-budget-control.md §5-B, swagger+라이브 04 확정 2026-07-13).
+
+    dailyBudget의 정확한 최소값·증분 단위는 swagger(ncc-heroes-ncc.json)에 정의돼
+    있지 않다(integer, default 0, minimum/multipleOf 미정의) — 추정 금지 원칙에 따라
+    여기서는 `daily_budget > 0`인 정수만 사전검증하고, 그 외 유효 범위는 네이버 API의
+    거부(WriteError) + after 재조회 exact-match(fail-closed)에 위임한다. 정확한
+    min·증분은 P4 라이브 왕복에서 실측한다(sizer가 100원 단위로 반올림해 침묵
+    반올림을 방어 — PLAN §5-G).
+
+    공유예산(sharedBudgetId) 캠페인은 per-campaign dailyBudget이 무효하므로(swagger
+    sharedDailyBudget 별도 경로) before 재조회에서 sharedBudgetId가 있으면 PUT
+    자체를 시도하지 않고 fail-closed 차단한다.
+
+    Raises:
+        WriteValidationError: daily_budget이 양의 정수가 아님 / 대상 캠페인이
+            공유예산(sharedBudgetId != None)에 속함.
+        WriteError: PUT이 2xx 아님(재시도 없음 — 비멱등 쓰기).
+        WriteVerificationError: PUT은 2xx였는데 재조회에 dailyBudget이 반영되지
+            않음 / useDailyBudget이 true로 확인되지 않음(useGroupBidAmt 이중
+            확인과 동형 — dailyBudget만 보고 성공 판정하면 "응답은 성공, 실효
+            반영은 실패"를 놓친다).
+    """
+    if not isinstance(daily_budget, int) or isinstance(daily_budget, bool) or daily_budget <= 0:
+        raise WriteValidationError(
+            f"update_campaign_budget: daily_budget={daily_budget!r}는 양의 정수여야 함"
+        )
+
+    before = get_campaign(ncc_campaign_id)
+    if before.get("sharedBudgetId") is not None:
+        raise WriteValidationError(
+            f"update_campaign_budget: 캠페인 {ncc_campaign_id}는 공유예산"
+            f"(sharedBudgetId={before.get('sharedBudgetId')!r})에 속함 — "
+            "per-campaign dailyBudget 변경은 무효(swagger sharedDailyBudget 별도 경로)"
+        )
+
+    path = f"/ncc/campaigns/{ncc_campaign_id}"
+    body = {
+        "nccCampaignId": ncc_campaign_id,
+        "customerId": int(fetcher.CUSTOMER_ID),
+        "useDailyBudget": True,
+        "dailyBudget": daily_budget,
+    }
+    log.info(
+        "Naver SA 쓰기 시도: update_campaign_budget campaign=%s dailyBudget=%s",
+        ncc_campaign_id, daily_budget,
+    )
+    resp = requests.put(
+        fetcher.BASE_URL + path,
+        headers=fetcher._headers(path, method="PUT"),
+        params={"fields": "budget"},
+        json=body,
+        timeout=30,
+    )
+    if not (200 <= resp.status_code < 300):
+        log.error(
+            "Naver SA 쓰기 실패: update_campaign_budget campaign=%s status=%s body=%s",
+            ncc_campaign_id, resp.status_code, resp.text[:300],
+        )
+        raise WriteError(
+            f"update_campaign_budget 실패: status={resp.status_code} body={resp.text[:300]}"
+        )
+
+    try:
+        response_body = resp.json()
+    except ValueError:
+        response_body = None
+
+    after = get_campaign(ncc_campaign_id)
+    if after.get("dailyBudget") != daily_budget:
+        raise WriteVerificationError(
+            f"update_campaign_budget: 쓰기 응답은 성공(status={resp.status_code})이나 재조회에 "
+            f"반영되지 않음(fail-closed): 요청={daily_budget} 재조회={after.get('dailyBudget')}"
+        )
+    if after.get("useDailyBudget") is not True:
+        raise WriteVerificationError(
+            f"update_campaign_budget: dailyBudget은 반영됐으나 useDailyBudget이 true로 전환되지 "
+            f"않음(fail-closed) — false면 네이버가 dailyBudget 값을 무시함(swagger 명시): "
+            f"재조회 useDailyBudget={after.get('useDailyBudget')}"
+        )
+
+    log.info(
+        "Naver SA 쓰기 성공: update_campaign_budget campaign=%s dailyBudget=%s",
+        ncc_campaign_id, daily_budget,
+    )
+    return WriteResult(
+        action="update_campaign_budget", before=before, response=response_body, after=after,
+        created_ids=[],
     )

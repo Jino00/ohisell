@@ -1621,6 +1621,8 @@ class NaverProposal(Base):
     approval_source: Mapped[Optional[str]] = mapped_column(String(12), nullable=True)  # X1a T5: console/delegation
     target_bid: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # X1b: bid_up/bid_down/growth_bid_up의 목표 입찰가(원) — 실행자는 이 컬럼만 읽는다(rationale 텍스트 파싱 금지)
     target_lock: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)  # X1b: pause/resume 제안의 목표 userLock(true=정지, false=재개)
+    target_budget: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # P1(D-NAO-42-f): budget_up/budget_down의 목표 일예산(원, dailyBudget) — 실행자는 이 컬럼만 읽는다(rationale 텍스트 파싱 금지)
+    budget_auto_eligible: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)  # P1(D-NAO-42-f): 라운드 봉투 분류(Jino "넣어" 2026-07-13) — True=자율(위임 시 자동)/False=회당 라운드 캡 초과분(승인대기)/None=예산제안 아님
 
 
 class NaverKeywordCandidate(Base):
