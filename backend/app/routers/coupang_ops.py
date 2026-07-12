@@ -1459,14 +1459,22 @@ def rocket_refresh_status_endpoint(db: Session = Depends(get_db)):
 
 
 @router.post("/rocket/refresh-claim")
-def rocket_refresh_claim(db: Session = Depends(get_db)):
-    """로켓 페처가 갱신 요청을 소비(플래그 clear)."""
+def rocket_refresh_claim(
+    x_ingest_token: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """로켓 페처가 갱신 요청을 소비(플래그 clear). 토큰 인증(ingest와 동일 — 페처 전용 뮤테이션)."""
+    _check_ingest_token(x_ingest_token)
     return rocket_supplier_sync.claim_rocket_refresh(db)
 
 
 @router.post("/rocket/fetch-success")
-def rocket_fetch_success(db: Session = Depends(get_db)):
-    """로켓 페처 실행 완료 시 last_success_at 갱신(UI 폴링 완료 감지용)."""
+def rocket_fetch_success(
+    x_ingest_token: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """로켓 페처 실행 완료 시 last_success_at 갱신(UI 폴링 완료 감지용). 토큰 인증."""
+    _check_ingest_token(x_ingest_token)
     rocket_supplier_sync.mark_rocket_fetch_success(db)
     return {"ok": True}
 
