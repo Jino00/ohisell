@@ -685,10 +685,11 @@ def test_real_write_blocker_budget_up_still_not_open(db):
 
 
 def test_build_guardrail_context_non_keyword_target_all_none(db):
+    # target_type='adgroup'은 keyword도 campaign도 아니므로(P2 D-NAO-42-f) 전부 None 유지
     p = _proposal(db, proposal_type="bid_up", target_type="adgroup", target_id="grp-1")
     ctx = harness._build_guardrail_context(db, p, kst_now())
     assert ctx == {
-        "current_bid": None, "roas_corrected": None, "target_roas": None,
+        "current_bid": None, "current_budget": None, "roas_corrected": None, "target_roas": None,
         "cost_today": None, "daily_budget": None, "unconverted_spend": None,
         "last_change_at": None, "changes_today_count": 0,
     }
@@ -855,6 +856,104 @@ def test_build_guardrail_context_converted_window_zero_unconverted_spend(db):
 
     assert ctx["unconverted_spend"] == 0  # 창 내 전환 존재 — 무전환 누적으로 안 잡힘
     assert ctx["roas_corrected"] == pytest.approx(3.0)  # 9000/3000 × 보정계수 1.0(9000/9000)
+
+
+# ── P2 (D-NAO-42-f): _build_guardrail_context campaign 브랜치 ───────────
+
+
+def test_build_guardrail_context_campaign_current_budget_from_live_reread(db):
+    p = _proposal(db, proposal_type="budget_up", campaign_id="cmp-budget",
+                  target_type="campaign", target_id="cmp-budget")
+    with patch.object(harness.naver_sa_writer, "get_campaign",
+                       return_value={"dailyBudget": 100_000, "useDailyBudget": True}):
+        ctx = harness._build_guardrail_context(db, p, kst_now())
+    assert ctx["current_budget"] == 100_000
+    assert ctx["current_bid"] is None  # keyword 전용 필드는 campaign 브랜치에서 안 채움
+
+
+def test_build_guardrail_context_campaign_get_campaign_failure_fail_closed(db):
+    p = _proposal(db, proposal_type="budget_up", campaign_id="cmp-budget",
+                  target_type="campaign", target_id="cmp-budget")
+    with patch.object(harness.naver_sa_writer, "get_campaign", side_effect=RuntimeError("network")):
+        ctx = harness._build_guardrail_context(db, p, kst_now())
+    assert ctx["current_budget"] is None  # 재조회 실패 — 추정으로 채우지 않음
+
+
+def test_build_guardrail_context_campaign_roas_and_unconverted_spend_from_campaign_window_agg(db):
+    from app.models import NaverAdDaily
+    p = _proposal(db, proposal_type="budget_up", campaign_id="cmp-budget",
+                  target_type="campaign", target_id="cmp-budget")
+    now = kst_now()
+    as_of = now.date() - timedelta(days=1)
+    # SHOPPING 타입 — campaign_window_agg는 WEB_SITE 필터가 없으므로 캠페인 grain 그대로 집계
+    db.add(NaverAdDaily(
+        ad_date=as_of, campaign_id="cmp-budget", campaign_type="SHOPPING", adgroup_id="grp-1",
+        keyword_id="", imp=500, clk=25, cost=3000, rank_sum=1500,
+        conv_direct_cnt=0, conv_indirect_cnt=0, conv_direct_amt=0, conv_indirect_amt=0,
+    ))
+    db.commit()
+
+    with patch.object(harness.naver_sa_writer, "get_campaign", return_value={"dailyBudget": 100_000}):
+        ctx = harness._build_guardrail_context(db, p, now)
+
+    assert ctx["unconverted_spend"] == 3000  # 창 내 전환 0건 — 무전환 누적으로 잡힘
+    assert ctx["roas_corrected"] == 0.0
+
+
+def test_build_guardrail_context_campaign_change_log_uses_entity_type_campaign(db):
+    p = _proposal(db, proposal_type="budget_up", campaign_id="cmp-budget",
+                  target_type="campaign", target_id="cmp-budget")
+    now = kst_now()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    db.add(NaverChangeLog(
+        entity_type="campaign", entity_id="cmp-budget", campaign_id="cmp-budget",
+        action="update_budget", dry_run=False,
+        after_value=json.dumps({"dailyBudget": 100_000}), changed_at=today_start + timedelta(hours=2),
+    ))
+    # 다른 대상(entity_type='keyword')의 오늘 변경은 이 캠페인 컨텍스트에 섞이면 안 됨
+    db.add(NaverChangeLog(
+        entity_type="keyword", entity_id="nkw-1", campaign_id="cmp-budget",
+        action="update_bid", dry_run=False,
+        after_value=json.dumps({"bidAmt": 200}), changed_at=today_start + timedelta(hours=3),
+    ))
+    db.commit()
+
+    with patch.object(harness.naver_sa_writer, "get_campaign", return_value={"dailyBudget": 100_000}):
+        ctx = harness._build_guardrail_context(db, p, now)
+
+    assert ctx["changes_today_count"] == 1
+    assert ctx["last_change_at"] == today_start + timedelta(hours=2)
+
+
+def test_build_guardrail_context_campaign_target_roas_from_resolver(db):
+    from app.models import NaverCampaignSettings
+    p = _proposal(db, proposal_type="budget_up", campaign_id="cmp-budget",
+                  target_type="campaign", target_id="cmp-budget")
+    db.add(NaverCampaignSettings(campaign_id="cmp-budget", target_roas_override=Decimal("180.0")))
+    db.commit()
+
+    with patch.object(harness.naver_sa_writer, "get_campaign", return_value={"dailyBudget": 100_000}):
+        ctx = harness._build_guardrail_context(db, p, kst_now())
+
+    assert ctx["target_roas"] == pytest.approx(180.0)
+
+
+def test_build_guardrail_context_campaign_cost_today_and_daily_budget_from_hourly_snapshot(db):
+    from app.models import NaverHourlySnapshot
+    p = _proposal(db, proposal_type="budget_up", campaign_id="cmp-budget",
+                  target_type="campaign", target_id="cmp-budget")
+    now = kst_now()
+    db.add(NaverHourlySnapshot(
+        snapshot_at=now, ad_date=now.date(), snapshot_hour=5, campaign_id="cmp-budget",
+        campaign_type="SHOPPING", cost=80_000, clk=40, imp=900, daily_budget=100_000,
+    ))
+    db.commit()
+
+    with patch.object(harness.naver_sa_writer, "get_campaign", return_value={"dailyBudget": 100_000}):
+        ctx = harness._build_guardrail_context(db, p, now)
+
+    assert ctx["cost_today"] == 80_000
+    assert ctx["daily_budget"] == 100_000
 
 
 # ── X1b T4: _detect_external_change ──────────────────────────────────────

@@ -372,6 +372,31 @@ def keyword_window_agg(db: Session, keyword_id: str, date_from: date, date_to: d
     return {"cost": int(cost), "conv_amt": int(direct) + int(indirect)}
 
 
+def campaign_window_agg(db: Session, campaign_id: str, date_from: date, date_to: date) -> dict:
+    """단일 캠페인의 창 내 (cost, conv_amt) 집계 — keyword_window_agg의 캠페인 grain 병렬판
+    (P2, D-NAO-42-f PLAN §5-D). naver_execution_harness._build_guardrail_context의 campaign
+    브랜치가 이 값으로 guardrail_gate._check_budget용 roas_corrected/unconverted_spend를
+    산출한다.
+
+    ⚠️ keyword_window_agg와 달리 campaign_type == WEB_SITE 필터를 **의도적으로 걸지 않는다**
+    — 예산 통제(budget_up/budget_down)는 캠페인 그레인 개념이라 SHOPPING(쇼핑검색) 캠페인도
+    대상이다(예: 라이브 04 카나리는 SHOPPING). WEB_SITE 전용인 키워드 집계와는 스코프가
+    다르다(PLAN §5-D 명시, 추정 아님).
+    adgroup_id != BACKFILL_SENTINEL_ADGROUP은 그대로 유지 — 캠페인 단위 백필 센티널 행과의
+    이중집계를 막는다(keyword_window_agg와 동일 규율).
+    """
+    cost, direct, indirect = db.query(
+        sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.cost), 0),
+        sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.conv_direct_amt), 0),
+        sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.conv_indirect_amt), 0),
+    ).filter(
+        NaverAdDaily.campaign_id == campaign_id,
+        NaverAdDaily.ad_date >= date_from, NaverAdDaily.ad_date <= date_to,
+        NaverAdDaily.adgroup_id != BACKFILL_SENTINEL_ADGROUP,
+    ).one()
+    return {"cost": int(cost), "conv_amt": int(direct) + int(indirect)}
+
+
 def pause_candidates(db: Session, date_from: date, date_to: date) -> list[dict]:
     """정지 후보 (X1b T3, D-NAO-38) — WEB_SITE 등록 키워드(status='on', 부모 체인도 전부 on)
     중 창 내 전환 0건 + 누적비용이 스톱로스 절대액(D-NAO-20) 이상. 스톱로스 절대액 = 현재

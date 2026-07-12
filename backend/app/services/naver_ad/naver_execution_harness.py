@@ -178,40 +178,58 @@ def _detect_external_change(db: Session, proposal: NaverProposal, live_before: d
 
 
 def _build_guardrail_context(db: Session, proposal: NaverProposal, now: datetime) -> dict:
-    """guardrail_gate.check()에 넘길 라이브 상태 precompute (X1b T4). keyword 대상만 지원 —
-    target_type이 keyword가 아니면 전부 None(guardrail_gate가 fail-closed로 차단).
+    """guardrail_gate.check()에 넘길 라이브 상태 precompute (X1b T4, P2 D-NAO-42-f 확장).
+    keyword·campaign 대상만 지원 — 그 외 target_type이면 전부 None(guardrail_gate가
+    fail-closed로 차단).
 
     재조회 실패·데이터 부재는 전부 None으로 남긴다(추정으로 채우지 않음 — guardrail_gate가
     None 필드를 만나면 검증불가로 차단하는 것이 기존 계약, T2 참조).
-    current_bid: 라이브 재조회(naver_sa_writer.get_keyword) — writer 자체의 before 재조회와
-      별개(가드 판정 시점과 실쓰기 시점 값이 다를 수 있어 각자 재조회, writer의 after 검증이
-      최종 안전망). roas_corrected/unconverted_spend: account_diagnosis.keyword_window_agg
-      재사용(30일 창, as_of=어제 — naver_ad_daily는 D-1까지만 확정) + diagnosis.correction_factor
-      (D-NAO-21, 진단과 동일 산식). cost_today/daily_budget: NaverHourlySnapshot 당일 최신
-      스냅샷(캠페인 단위, budget_allocator와 동일 소스). last_change_at/changes_today_count:
-      naver_change_log 이력(entity_id 기준, 액션 유형 무관 — 정지 다음 곧바로 입찰 변경하는
-      것도 동일 쿨다운·상한 대상으로 본다).
+    current_bid(keyword)/current_budget(campaign, P2): 라이브 재조회(naver_sa_writer의
+      get_keyword/get_campaign) — writer 자체의 before 재조회와 별개(가드 판정 시점과
+      실쓰기 시점 값이 다를 수 있어 각자 재조회, writer의 after 검증이 최종 안전망).
+    roas_corrected/unconverted_spend: keyword는 account_diagnosis.keyword_window_agg,
+      campaign(P2)은 account_diagnosis.campaign_window_agg 재사용(둘 다 30일 창,
+      as_of=어제 — naver_ad_daily는 D-1까지만 확정) + diagnosis.correction_factor
+      (D-NAO-21, 진단과 동일 산식·양쪽 공유).
+    cost_today/daily_budget: NaverHourlySnapshot 당일 최신 스냅샷(캠페인 단위,
+      budget_allocator와 동일 소스 — keyword/campaign 공통, proposal.campaign_id 기준이라
+      분기 불필요).
+    last_change_at/changes_today_count: naver_change_log 이력(entity_type/entity_id 기준,
+      액션 유형 무관 — 정지 다음 곧바로 입찰·예산 변경하는 것도 동일 쿨다운·상한 대상으로
+      본다. campaign 대상이면 entity_type='campaign'이 자연히 걸린다).
     """
     context: dict = {
-        "current_bid": None, "roas_corrected": None, "target_roas": None,
+        "current_bid": None, "current_budget": None, "roas_corrected": None, "target_roas": None,
         "cost_today": None, "daily_budget": None, "unconverted_spend": None,
         "last_change_at": None, "changes_today_count": 0,
     }
-    if proposal.target_type != "keyword":
+    if proposal.target_type not in ("keyword", "campaign"):
         return context
-
-    try:
-        live = naver_sa_writer.get_keyword(proposal.target_id)
-        context["current_bid"] = live.get("bidAmt")
-    except Exception as e:  # noqa: BLE001 — 재조회 실패는 fail-closed(current_bid=None 유지)
-        log.warning(
-            "naver_execution_harness: guardrail context get_keyword 실패(fail-closed) "
-            "target_id=%s: %s", proposal.target_id, e,
-        )
 
     as_of = now.date() - timedelta(days=1)  # naver_ad_daily는 D-1까지만 확정
     window_from = as_of - timedelta(days=_GUARDRAIL_LOOKBACK_DAYS - 1)
-    agg = account_diagnosis.keyword_window_agg(db, proposal.target_id, window_from, as_of)
+
+    if proposal.target_type == "keyword":
+        try:
+            live = naver_sa_writer.get_keyword(proposal.target_id)
+            context["current_bid"] = live.get("bidAmt")
+        except Exception as e:  # noqa: BLE001 — 재조회 실패는 fail-closed(current_bid=None 유지)
+            log.warning(
+                "naver_execution_harness: guardrail context get_keyword 실패(fail-closed) "
+                "target_id=%s: %s", proposal.target_id, e,
+            )
+        agg = account_diagnosis.keyword_window_agg(db, proposal.target_id, window_from, as_of)
+    else:  # campaign (P2, D-NAO-42-f 예산 통제 컨텍스트)
+        try:
+            live = naver_sa_writer.get_campaign(proposal.target_id)
+            context["current_budget"] = live.get("dailyBudget")
+        except Exception as e:  # noqa: BLE001 — 재조회 실패는 fail-closed(current_budget=None 유지)
+            log.warning(
+                "naver_execution_harness: guardrail context get_campaign 실패(fail-closed) "
+                "target_id=%s: %s", proposal.target_id, e,
+            )
+        agg = account_diagnosis.campaign_window_agg(db, proposal.campaign_id, window_from, as_of)
+
     if agg["cost"] > 0:
         correction = compute_correction_factor(db, as_of)
         roas_naver = agg["conv_amt"] / agg["cost"]

@@ -20,9 +20,17 @@ def _lock_proposal(proposal_type="pause", target_lock=True):
     return {"proposal_type": proposal_type, "target_bid": None, "target_lock": target_lock}
 
 
+def _budget_proposal(proposal_type="budget_up", target_budget=150_000):
+    return {
+        "proposal_type": proposal_type, "target_bid": None, "target_lock": None,
+        "target_budget": target_budget,
+    }
+
+
 def _ctx(**overrides):
     base = {
         "current_bid": 190,
+        "current_budget": None,
         "roas_corrected": 250.0,
         "target_roas": 150.0,
         "cost_today": 10_000,
@@ -323,3 +331,210 @@ def test_unsupported_proposal_type_blocked():
     )
     assert reason is not None
     assert "지원하지 않는" in reason
+
+
+# ── budget_up/budget_down (P2, D-NAO-42-f) ───────────────────────────────
+
+
+def test_budget_up_within_100pct_cap_passes():
+    # 100,000 -> 150,000은 +50%(상한 100% 이내), BEP·스톱로스도 통과
+    reason = gate.check(
+        _budget_proposal("budget_up", 150_000), _ctx(current_budget=100_000), now=NOW,
+    )
+    assert reason is None
+
+
+def test_budget_down_free_pass_even_with_bep_and_stoploss_violations():
+    # 감액은 자유(⑥) — BEP 미달·무전환 지출이 있어도 방향+클램프만 통과하면 됨
+    reason = gate.check(
+        _budget_proposal("budget_down", 50_000),
+        _ctx(current_budget=100_000, roas_corrected=10.0, target_roas=150.0, unconverted_spend=999_999),
+        now=NOW,
+    )
+    assert reason is None
+
+
+def test_budget_target_budget_missing_blocked():
+    reason = gate.check(
+        _budget_proposal("budget_up", None), _ctx(current_budget=100_000), now=NOW,
+    )
+    assert reason is not None
+    assert "target_budget" in reason
+
+
+def test_budget_target_budget_zero_blocked():
+    reason = gate.check(
+        _budget_proposal("budget_up", 0), _ctx(current_budget=100_000), now=NOW,
+    )
+    assert reason is not None
+    assert "target_budget" in reason
+
+
+def test_budget_target_budget_negative_blocked():
+    reason = gate.check(
+        _budget_proposal("budget_up", -1000), _ctx(current_budget=100_000), now=NOW,
+    )
+    assert reason is not None
+    assert "target_budget" in reason
+
+
+def test_budget_target_budget_non_int_blocked():
+    reason = gate.check(
+        _budget_proposal("budget_up", 100_000.5), _ctx(current_budget=100_000), now=NOW,
+    )
+    assert reason is not None
+    assert "target_budget" in reason
+
+
+def test_budget_current_budget_missing_blocked_fail_closed():
+    reason = gate.check(
+        _budget_proposal("budget_up", 150_000), _ctx(current_budget=None), now=NOW,
+    )
+    assert reason is not None
+    assert "current_budget" in reason
+
+
+def test_budget_up_with_target_below_current_blocked_direction():
+    reason = gate.check(
+        _budget_proposal("budget_up", 90_000), _ctx(current_budget=100_000), now=NOW,
+    )
+    assert reason is not None
+    assert "방향" in reason
+
+
+def test_budget_up_with_target_equal_current_blocked_direction():
+    # hold 방향(증액 아님)도 구조 결함 방어 차원에서 방향 불일치로 차단(bid와 동형)
+    reason = gate.check(
+        _budget_proposal("budget_up", 100_000), _ctx(current_budget=100_000), now=NOW,
+    )
+    assert reason is not None
+    assert "방향" in reason
+
+
+def test_budget_down_with_target_above_current_blocked_direction():
+    reason = gate.check(
+        _budget_proposal("budget_down", 110_000), _ctx(current_budget=100_000), now=NOW,
+    )
+    assert reason is not None
+    assert "방향" in reason
+
+
+def test_budget_down_with_target_equal_current_blocked_direction():
+    reason = gate.check(
+        _budget_proposal("budget_down", 100_000), _ctx(current_budget=100_000), now=NOW,
+    )
+    assert reason is not None
+    assert "방향" in reason
+
+
+def test_budget_up_exactly_at_100pct_cap_passes():
+    # 100,000 -> 200,000은 정확히 +100%(상한 경계, 캠페인당 최대 2배)
+    reason = gate.check(
+        _budget_proposal("budget_up", 200_000), _ctx(current_budget=100_000), now=NOW,
+    )
+    assert reason is None
+
+
+def test_budget_up_over_100pct_cap_blocked():
+    # 100,000 -> 200,010은 +100%를 아주 조금 초과
+    reason = gate.check(
+        _budget_proposal("budget_up", 200_010), _ctx(current_budget=100_000), now=NOW,
+    )
+    assert reason is not None
+    assert "100%" in reason or "증액폭" in reason
+
+
+def test_budget_down_not_subject_to_100pct_cap():
+    # 감액 방향이라 100% 캡 자체가 적용 안 됨(감액은 상한 없이 자유)
+    reason = gate.check(
+        _budget_proposal("budget_down", 1_000), _ctx(current_budget=100_000), now=NOW,
+    )
+    assert reason is None
+
+
+def test_budget_up_stop_loss_zero_conversion_blocked():
+    # 스톱로스(⑤): 무전환 지출이 조금이라도 있으면 절대금액과 무관하게 차단(제로 톨러런스)
+    reason = gate.check(
+        _budget_proposal("budget_up", 150_000),
+        _ctx(current_budget=100_000, unconverted_spend=1),
+        now=NOW,
+    )
+    assert reason is not None
+    assert "스톱로스" in reason
+
+
+def test_budget_up_no_unconverted_spend_passes_stop_loss_check():
+    reason = gate.check(
+        _budget_proposal("budget_up", 150_000),
+        _ctx(current_budget=100_000, unconverted_spend=0),
+        now=NOW,
+    )
+    assert reason is None
+
+
+def test_budget_down_not_subject_to_stop_loss():
+    reason = gate.check(
+        _budget_proposal("budget_down", 50_000),
+        _ctx(current_budget=100_000, unconverted_spend=999_999),
+        now=NOW,
+    )
+    assert reason is None
+
+
+def test_budget_up_bep_below_target_blocked():
+    reason = gate.check(
+        _budget_proposal("budget_up", 150_000),
+        _ctx(current_budget=100_000, roas_corrected=100.0, target_roas=150.0),
+        now=NOW,
+    )
+    assert reason is not None
+    assert "BEP" in reason
+
+
+def test_budget_up_bep_at_or_above_target_passes():
+    reason = gate.check(
+        _budget_proposal("budget_up", 150_000),
+        _ctx(current_budget=100_000, roas_corrected=150.0, target_roas=150.0),
+        now=NOW,
+    )
+    assert reason is None
+
+
+def test_budget_down_not_subject_to_bep_check():
+    reason = gate.check(
+        _budget_proposal("budget_down", 50_000),
+        _ctx(current_budget=100_000, roas_corrected=10.0, target_roas=150.0),
+        now=NOW,
+    )
+    assert reason is None
+
+
+def test_budget_up_cooldown_applies():
+    reason = gate.check(
+        _budget_proposal("budget_up", 150_000),
+        _ctx(current_budget=100_000, last_change_at=NOW - timedelta(hours=2)),
+        now=NOW,
+    )
+    assert reason is not None
+    assert "쿨다운" in reason
+
+
+def test_budget_down_cooldown_applies_too():
+    # 쿨다운·일일상한은 전 유형 공통(감액도 예외 아님) — §5-C step7
+    reason = gate.check(
+        _budget_proposal("budget_down", 50_000),
+        _ctx(current_budget=100_000, last_change_at=NOW - timedelta(hours=2)),
+        now=NOW,
+    )
+    assert reason is not None
+    assert "쿨다운" in reason
+
+
+def test_budget_up_daily_change_cap_applies():
+    reason = gate.check(
+        _budget_proposal("budget_up", 150_000),
+        _ctx(current_budget=100_000, changes_today_count=3),
+        now=NOW,
+    )
+    assert reason is not None
+    assert "일일 변경" in reason

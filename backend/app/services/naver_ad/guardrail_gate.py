@@ -38,26 +38,41 @@ _BID_DOWN_TYPES = frozenset({"bid_down"})
 _BID_TYPES = _BID_UP_TYPES | _BID_DOWN_TYPES
 _LOCK_TYPES = frozenset({"pause", "resume"})
 
+# P2(D-NAO-42-f): 예산 통제 — PLAN_naver-ad-budget-control.md §5-C. bid_up/down과 병렬 구조.
+_BUDGET_UP_TYPES = frozenset({"budget_up"})
+_BUDGET_DOWN_TYPES = frozenset({"budget_down"})
+_BUDGET_TYPES = _BUDGET_UP_TYPES | _BUDGET_DOWN_TYPES
+
+# D-NAO-42-f③: 캠페인당 회당 변경폭 상한 = +100%(최대 2배). bid의 _MAX_CHANGE_PCT(±15%)와
+# 별도 상수 — 예산은 Jino가 명시적으로 더 넓은 자율폭을 확정했다(계획서 §2②).
+_BUDGET_UP_MAX_CHANGE_PCT = Decimal("1.0")
+
 
 def check(proposal: dict, context: dict, *, now: datetime) -> str | None:
     """제안 1건의 실행 직전 가드레일 판정 — 통과 시 None, 차단 시 한국어 사유.
 
-    proposal: {"proposal_type", "target_bid", "target_lock"} — NaverProposal에서
-      harness가 추출한 부분집합(원본 ORM 객체가 아닌 값 전달 — SA는 DB를 모른다).
+    proposal: {"proposal_type", "target_bid", "target_lock", "target_budget"} — NaverProposal
+      에서 harness가 추출한 부분집합(원본 ORM 객체가 아닌 값 전달 — SA는 DB를 모른다).
     context: harness가 재조회·집계해 precompute한 라이브 상태.
-      {"current_bid": int|None(재조회된 현재 입찰가), "roas_corrected": float|None(D-NAO-21
-       보정ROAS), "target_roas": float|None(BEP×공격성), "cost_today": int|None(오늘 누적
-       소진), "daily_budget": int|None, "unconverted_spend": int|None(무전환 누적 지출,
-       스톱로스 원료), "last_change_at": datetime|None(이 대상의 마지막 change_log 시각,
-       proposal_type 무관), "changes_today_count": int(이 대상의 오늘 변경 건수)}.
+      {"current_bid": int|None(재조회된 현재 입찰가), "current_budget": int|None(재조회된
+       현재 일예산, P2), "roas_corrected": float|None(D-NAO-21 보정ROAS), "target_roas":
+       float|None(BEP×공격성), "cost_today": int|None(오늘 누적 소진), "daily_budget": int|None,
+       "unconverted_spend": int|None(무전환 누적 지출, 스톱로스 원료), "last_change_at":
+       datetime|None(이 대상의 마지막 change_log 시각, proposal_type 무관), "changes_today_count":
+       int(이 대상의 오늘 변경 건수)}.
     now: kst_now() — harness가 한 번만 계산해 명시 전달(원칙: 자정 경계 레이스 방지,
       F2b codex 수정과 동일 패턴).
 
     판정 순서: ①쿨다운·일일상한(전 유형 공통, fail-open 아님 — 근거값 없으면 통과) →
-      ②유형별 검사(bid: 클램프→변경폭→[up만] 스톱로스→BEP→일예산 / lock: 구조 검증만).
+      ②유형별 검사(bid: 클램프→변경폭→[up만] 스톱로스→BEP→일예산 / lock: 구조 검증만 /
+      budget: 클램프→방향→[up만] +100%캡→스톱로스→BEP, PLAN §5-C).
     """
     proposal_type = proposal.get("proposal_type")
-    if proposal_type not in _BID_TYPES and proposal_type not in _LOCK_TYPES:
+    if (
+        proposal_type not in _BID_TYPES
+        and proposal_type not in _LOCK_TYPES
+        and proposal_type not in _BUDGET_TYPES
+    ):
         return f"guardrail_gate: 지원하지 않는 proposal_type={proposal_type!r}"
 
     reason = _check_cooldown_and_cap(context, now)
@@ -66,6 +81,8 @@ def check(proposal: dict, context: dict, *, now: datetime) -> str | None:
 
     if proposal_type in _BID_TYPES:
         return _check_bid(proposal, context, proposal_type)
+    if proposal_type in _BUDGET_TYPES:
+        return _check_budget(proposal, context, proposal_type)
     return _check_lock(proposal, proposal_type)
 
 
@@ -138,6 +155,75 @@ def _check_bid(proposal: dict, context: dict, proposal_type: str) -> str | None:
         # 정상 bid_up까지 항상 차단된다.
         if cost_today is not None and daily_budget is not None and daily_budget > 0 and cost_today >= daily_budget:
             return f"일예산 상한 불가침 — 오늘 누적 {cost_today}원 ≥ 일예산 {daily_budget}원"
+
+    return None
+
+
+def _check_budget(proposal: dict, context: dict, proposal_type: str) -> str | None:
+    """캠페인 일예산(dailyBudget) 증액·감액 판정 (P2, D-NAO-42-f, PLAN §5-C).
+
+    판정 순서(증액 budget_up): (a)클램프(양의 정수) → (b)current_budget 미확보 fail-closed →
+      (c)방향 일치 → (d)+100%캡(③, 캠페인당 최대 2배) → (e)스톱로스(⑤, 무전환 캠페인 증액
+      금지) → (f)BEP 이익하한(④, 보정ROAS<목표 차단). 감액(budget_down)은 (a)~(c)만 —
+      +100%캡·스톱로스·BEP는 면제(감액은 자유, 계획서 §2⑥).
+
+    ⚠️ "회당 총 증가액 ≤100,000원(라운드 합계)" 캡(계획서 §2②)은 여기서 검사하지 않는다 —
+    이 함수는 캠페인 1건 스코프의 실행 직전 판정이라 "한 라운드에서 생성된 다른 제안들의
+    합"을 볼 수 없다. 그 캡은 생성 단계(proposal_pipeline, P3)에서 budget_auto_eligible로
+    분류한다(PLAN §5-E) — P2는 capability만, 라운드 봉투는 P3 스코프.
+    """
+    target_budget = proposal.get("target_budget")
+    if (
+        target_budget is None
+        or not isinstance(target_budget, int)
+        or isinstance(target_budget, bool)
+        or target_budget <= 0
+    ):
+        return f"target_budget={target_budget!r}는 유효하지 않음(양의 정수 필요) — 구조 결함(재생성 필요)"
+
+    current_budget = context.get("current_budget")
+    if current_budget is None:
+        return "current_budget 미확보 — 변경폭 검증 불가(fail-closed)"
+
+    if proposal_type in _BUDGET_UP_TYPES:
+        if target_budget <= current_budget:
+            return (
+                f"방향 불일치 — {proposal_type}인데 target_budget={target_budget}가 "
+                f"현재={current_budget} 이하"
+            )
+
+        if current_budget > 0:
+            change_ratio = (Decimal(target_budget) - Decimal(current_budget)) / Decimal(current_budget)
+            if change_ratio > _BUDGET_UP_MAX_CHANGE_PCT:
+                return (
+                    f"예산 증액폭 {float(change_ratio):.0%} 초과(상한 100%, D-NAO-42-f③) "
+                    f"— 현재={current_budget}원 목표={target_budget}원"
+                )
+
+        # ⑤ 스톱로스 — bid의 상대배수 임계치(STOP_LOSS_CLICK_MULTIPLE)와 달리 매직넘버 없는
+        # 제로 톨러런스 규칙: 캠페인 창 내 무전환 지출이 조금이라도 있으면 증액 자체를
+        # 금지한다(D-NAO-42-f⑤, PLAN §5-C step5). 아래 BEP 이익하한(④)을 보완하는 별도
+        # 안전장치 — BEP는 ROAS 미달을 잡고, 이건 "전환이 아예 0"인 더 강한 신호를 잡는다.
+        unconverted_spend = context.get("unconverted_spend")
+        if unconverted_spend is not None and unconverted_spend > 0:
+            return (
+                f"스톱로스 — 무전환 캠페인 증액 금지(무전환 지출 {unconverted_spend}원, "
+                f"D-NAO-42-f⑤)"
+            )
+
+        roas_corrected = context.get("roas_corrected")
+        target_roas = context.get("target_roas")
+        if roas_corrected is not None and target_roas is not None and roas_corrected < target_roas:
+            return (
+                f"BEP 미달 증액 금지 — 보정ROAS {roas_corrected} < 목표 {target_roas}"
+                f"(D-NAO-1 안전선)"
+            )
+    else:  # budget_down — 감액은 자유(⑥): 방향 검증 + 클램프만
+        if target_budget >= current_budget:
+            return (
+                f"방향 불일치 — {proposal_type}인데 target_budget={target_budget}가 "
+                f"현재={current_budget} 이상"
+            )
 
     return None
 
