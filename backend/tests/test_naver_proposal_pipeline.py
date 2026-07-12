@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -31,6 +31,27 @@ def db():
         yield s
     finally:
         s.close()
+
+
+@pytest.fixture
+def freeze_created_at():
+    """created_at을 '오늘(KST) 정오'로 고정한다 — 시간 고정(freeze).
+
+    NaverProposal.created_at은 server_default=func.now()(SQLite에선 UTC)라, KST 00:00~09:00
+    사이에 테스트가 돌면 신규 생성 제안의 created_at이 '어제(UTC)'로 찍혀 kst_today() 기준
+    만료 컷오프보다 이르게 판정된다(날짜 드리프트). 삽입 시 created_at을 KST 오늘 정오로
+    결정적으로 찍어 이 드리프트를 제거한다(명시적으로 지정된 값은 덮어쓰지 않음)."""
+    frozen = datetime.combine(kst_today(), datetime.min.time()).replace(hour=12)
+
+    def _stamp(_mapper, _connection, target):
+        if getattr(target, "created_at", None) is None:
+            target.created_at = frozen
+
+    event.listen(NaverProposal, "before_insert", _stamp)
+    try:
+        yield frozen
+    finally:
+        event.remove(NaverProposal, "before_insert", _stamp)
 
 
 def _row(db, ad_date, campaign_id, campaign_type, adgroup_id, keyword_id, imp, clk, cost, direct=0, indirect=0):
@@ -573,7 +594,7 @@ def test_run_daily_proposal_writer_failure_isolated_other_stages_still_run(db, m
 
 
 # ── expiry ──
-def test_run_daily_expires_stale_pending_proposals(db):
+def test_run_daily_expires_stale_pending_proposals(db, freeze_created_at):
     _seed_bep(db)
     db.add(NaverCampaignSettings(campaign_id="cmp1", optimizer="ours"))
     _row(db, AS_OF, "cmp1", "WEB_SITE", "grp1", "nkw-99", 10, 1, 100, direct=0)
