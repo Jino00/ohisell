@@ -177,13 +177,15 @@ marginal ROAS 인과추정 없이(추정 금지) 목표 예산을 정한다:
 
 ## §9 체크리스트
 
-- [ ] Jino 계획 승인 (§6 열린질문 2·3 확정)
-- [ ] P0 swagger 캠페인 budget PUT 실확인 → §5-B 확정
-- [ ] P1 스키마 마이그레이션 + update_campaign_budget + 테스트 + codex pass
-- [ ] P2 _check_budget + campaign 컨텍스트 + 테스트 + codex pass
-- [ ] P3 사이징 + 라운드 봉투 + _execute_update_budget + 배선 + 테스트 + codex pass
-- [ ] P4 04 카나리 라이브 왕복 + 가드레일 실차단 실측(원칙22)
-- [ ] 트랙 D-NAO-42-f 하위에 구현 완료 D-N 기록 + PR(Jino 승인 후)
+- [x] Jino 계획 승인 (§6 열린질문 2·3 확정: auto_eligible 컬럼 넣음·fallback +20%) — 2026-07-13
+- [x] P0 swagger 캠페인 budget PUT 실확인 → §5-B 확정 (ncc-heroes-ncc.json + 라이브 04)
+- [x] P1 스키마 마이그레이션(`e5f6g7h8i9j0`) + update_campaign_budget + 테스트 (`138ad1a`)
+- [x] P2 _check_budget + campaign 컨텍스트 + campaign_window_agg + 테스트 (`45a453e`)
+- [x] P3 사이징 + 라운드 봉투 + _execute_update_budget + 배선 + 테스트 (`68d7ef5`)
+- [x] codex review(P1~P3) → [P1×4·P2×2] 전부 반영(P3.1) → **재검증 GATE PASS**. 테스트 1377 passed(회귀0)
+- [ ] **P4 04 카나리 라이브 왕복 + 가드레일 실차단 실측(원칙22) — Jino 게이트**: prod 배포(마이그레이션+코드) + 04 예산증액 제안→Jino 콘솔 승인→실 PUT→재조회 반영. min/증분 실측. **재정적 액션=Jino 승인 필요, 자동집행 금지.**
+- [x] 트랙 D-NAO-42-g 구현 완료 기록
+- [ ] PR(Jino 승인 후) — 브랜치 `claude/naver-ad-budget-control`
 
 ## §10 완료 기준
 
