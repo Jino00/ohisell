@@ -6,7 +6,8 @@
 - 날짜: 2026-07-13 아침 (★★**예산 통제 구현 완료 P0~P3.1 + codex GATE PASS + 테스트 1377 pass**. Opus 오케스트레이션·Sonnet 구현·codex 검증. D-NAO-42-g. 브랜치 `claude/naver-ad-budget-control`)
   - **완료**: P0(swagger+라이브 확정)→P1(스키마+writer `138ad1a`)→P2(가드레일+campaign컨텍스트 `45a453e`)→P3(사이징+라운드봉투+실행 `68d7ef5`)→P3.1(codex P1×4·P2×2 반영 `e5424bf`)→docs `24ca8da`. codex 재검증 GATE PASS. 독립 테스트 확인(원칙22).
   - **핵심 설계**: 라운드캡=생성단계 봉투(delegation_gate가 budget_up 자동승인을 budget_auto_eligible=True로 강제 — codex가 이 강제 누락 P1 발견)·per-campaign캡=guardrail_gate._check_budget(실행직전, budget_up BEP 근거None fail-closed). writer=PUT ?fields=budget 공유예산 fail-closed. 사이징 pred_cost/+20%·100원반올림.
-  - **남은 것=Jino 게이트 2개 + 저녁 관찰**: ①prod 배포(마이그레이션 e5f6g7h8i9j0+코드, 재정적 액션→Jino 승인)·PR도 Jino 후 ②P4 04 카나리 라이브 왕복(예산증액 제안→콘솔 승인→실 PUT→가드레일 실차단·min/증분 실측; 자동집행 금지) ③저녁 A/B 03vs04 D1 관찰. HANDOFF: `.claude/memory/HANDOFF_ohisell-budget-control-implemented+codex-pass_20260713.md`.
+  - **★prod 배포 완료(2026-07-13 오전, Jino "지금 배포+P4 준비", 원칙22)**: DB백업→9파일 file-copy·sha256 일치→마이그레이션 e5f6g7h8i9j0 적용→pm2 재시작 online·HTTP 정상·OPEN_ACTIONS에 update_budget·08:07 크론 신코드 크래시0.
+  - **남은 것**: ①**P4 라이브 왕복=트리거 조건 미충족**(04 소진 안 됨=budget_up 미생성; Jino가 04 예산 낮추거나 소진 캠페인 'ours' 지정해야 트리거→콘솔 승인→실 PUT) ②PR은 Jino 승인 후 ③저녁 A/B 03vs04 D1 관찰. 별건: coupang_ops.py:1458 rocket_refresh_status 없음(무관). HANDOFF: `.claude/memory/HANDOFF_ohisell-budget-control-implemented+codex-pass_20260713.md`.
   - (별건) date-drift 테스트 2건 무관 실패·budget_down 생성기 미구현·Ava 공백=후속.
 - 날짜: 2026-07-13 새벽 (★**예산 통제 계획서 작성 완료(D-NAO-42-f) + '10만=라운드 합계' 확정 + A/B D1 상태 확인**. Opus 설계. 워크트리=naver-ad-execution-canary-9c4b69 세션이나 파일 기록은 6cc75b[D-NAO-42 living-memory 소재지])
   - **Jino 확정(06:20 KST)**: 예산 정책 ②"회당 총 증가액 ≤10만"=**라운드 합계**(전 캠페인 증액분 합, 캠페인당 아님). 두 캡 동시 = ⓐ라운드 절대캡(합≤10만 자율) + ⓑ캠페인당 +100%. 트랙 D-NAO-42-f 갱신.

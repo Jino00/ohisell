@@ -25,9 +25,10 @@
 - **writer**: `PUT /ncc/campaigns/{id}?fields=budget` body `{nccCampaignId,customerId,useDailyBudget:True,dailyBudget}`, 공유예산 before+after fail-closed, before/after 재조회 exact-match. **min/증분 미확정(swagger 없음)→P4 라이브 실측**(sizer 100원 반올림으로 침묵반올림 방어).
 - **사이징**: `min(current×2, max(current+100, pred_cost))`, 예측없으면 `current×1.2`(+20% Jino), 100원 반올림, >current 보장.
 
-## 3. 다음 = Jino 게이트 2개 + 저녁 관찰
-- [ ] **(Jino 결정) prod 배포**: 마이그레이션 `e5f6g7h8i9j0` + 코드. 배포해도 자동발사 0(위임 미설정·optimizer=ours는 04만·반자동). 하지만 예산 실쓰기를 *가능* 상태로 만드는 재정적 액션 → **Jino 배포 승인 필요**. 배포 절차=prod SSH+마이그레이션+pm2(직전 D-NAO-41 배포 패턴). **PR도 Jino 승인 후**(브랜치 push 안 함).
-- [ ] **(Jino 게이트) P4 라이브 왕복**: 배포 후 04(cmp-…008514959)에서 08:00 크론이 예산증액 제안 생성될 수 있음(소진+성장후보 조건 충족 시)→ **Jino 콘솔 승인** → 실 PUT → 재조회 반영 → change_log. 가드레일 실차단(+100%·BEP)·min/증분 라이브 실측. **재정적 액션=자동집행 금지, Jino 승인분만.**
+## 3. 다음 = Jino 게이트 + 저녁 관찰
+- [x] **prod 배포 완료·검증(2026-07-13 오전, Jino "지금 배포 + P4 준비", 원칙22)**: DB 백업 → 소스 9파일 file-copy(prod=non-git)·sha256 일치 → 마이그레이션 `e5f6g7h8i9j0` 적용(컬럼 확인) → pm2 재시작·online·HTTP 8001 정상 → OPEN_ACTIONS에 update_budget 로드 확인·08:07 크론 신코드 크래시0. 백업=`ohisell_bak/naver-ad-budget-control_20260712_224822/`.
+- [ ] **(Jino 게이트) P4 라이브 왕복 — 트리거 조건 미충족(현재)**: budget_up은 "예산 캡 소진 + 성장후보" 캠페인만 생성. **04는 소진 안 됨**(dailyBudget 30,000·일지출~1,031, prod budget 제안 0건). → **P4 실왕복하려면 Jino가 ①04 예산을 소진 수준으로 낮추거나(네이버 콘솔 수동=재정적 액션) ②이미 소진된 캠페인을 'ours' 지정**. 그 뒤 08:00 크론 budget_up 생성→**Jino 콘솔 승인**→실 PUT→가드레일 실차단·min/증분 실측. **자동집행 금지.** PR도 Jino 승인 후(브랜치 push 안 함).
+- [ ] (별건) prod 쿠팡 에러 `coupang_ops.py:1458 rocket_supplier_sync.rocket_refresh_status 없음` — 이 배포와 무관, 별도 조사.
 - [ ] **저녁 A/B 03 vs 04 D1 관찰**: 오늘 저녁(집행 하루치 후). 04 제안·집행 + 03 MOP delta(unit6245_baseline_snapshot.py 재실행) + lift%·메커니즘. 로그 `mop_vs_ours_03_04_comparison.md`. 크론 6b2c0462(20:20)는 죽은 세션 종속=불확실→수동 실행 권장.
 - [ ] (후속) budget_down **생성기**는 미구현(실행·가드레일·배선만 완료). 지속 저소진+BEP미달 신호에서 생성하는 로직은 별도 phase(PLAN §5-G, 감액은 04 왕복엔 불필요).
 - [ ] (후속·별건) Ava 공백 수리(자율 대결 승급 선결, D-NAO-42-e).
