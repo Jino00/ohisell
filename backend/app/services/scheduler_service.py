@@ -997,6 +997,31 @@ def _record_catchup_status(job_name, *, ok, exception=None):
         db.close()
 
 
+def _run_proposals_catchup_verified():
+    """proposals catch-up 전용 실행 — run_daily를 직접 호출해 '실제 완주'를 확인한다.
+
+    generate_naver_proposals_job(래퍼)는 run_daily가 freshness stale·proposal_writer 실패를
+    result.stage_status로 삼켜 정상 반환해도 예외를 안 던진다(부분 실패도 정상 흐름 설계).
+    그러면 catch-up 체인이 '성공'으로 오인해 last_run_at을 전진시키고 하류(expert)를 잇는다
+    (codex R3 [P1-a]). 그래서 catch-up 경로에선 stage_status를 직접 검사해, 제안이 실제로
+    생성·커밋되는 단계(freshness+proposal_writer)가 ok가 아니면 예외를 던져 체인을 중단시킨다
+    (last_run_at 미전진 → 다음 재시작/다음날 크론 재시도). generated=0(전부 dedup)은 정상 완주.
+    """
+    db = _get_own_db_session()
+    try:
+        from app.services.naver_ad.proposal_pipeline import run_daily
+
+        result = run_daily(db)
+        ss = result.get("stage_status", {})
+        if ss.get("freshness") != "ok" or ss.get("proposal_writer") != "ok":
+            raise RuntimeError(
+                f"proposals 미완주 → catch-up 체인 중단: stage_status={ss} errors={result.get('errors')}"
+            )
+        log.info("[스케줄러] catch-up proposals 완주 확인: generated=%s", result.get("generated"))
+    finally:
+        db.close()
+
+
 def _catch_up_morning_batch():
     """스케줄러 기동 시, 재시작으로 놓친 네이버 아침배치를 cron 순서로 순차 따라잡는다.
 
@@ -1024,7 +1049,9 @@ def _catch_up_morning_batch():
 
     funcs = {
         "run_naver_forecast_engine": run_naver_forecast_engine_job,
-        "generate_naver_proposals": generate_naver_proposals_job,
+        # proposals는 완주 검증판 사용(codex R3 P1-a): stage_status로 실제 생성 확인,
+        # 미완주면 예외 → 체인 중단(expert가 pending 0으로 오실행되는 것 원천 차단).
+        "generate_naver_proposals": _run_proposals_catchup_verified,
         "generate_expert_desk": generate_expert_desk_job,
         "run_naver_learning_loops": run_naver_learning_loops_job,
     }
