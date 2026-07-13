@@ -18,7 +18,19 @@ from app.models import Channel, OAuthToken, SchedulerState
 
 log = logging.getLogger(__name__)
 
-scheduler = BackgroundScheduler(timezone="Asia/Seoul")
+# job_defaults: APScheduler 기본 misfire_grace_time은 1초라, 백엔드가 크론 발화 시각에
+# 다운/재시작 중이면 그 잡이 catch-up 없이 조용히 드롭된다. 2026-07-13 실사고 — pm2가
+# 08:53에 재생성(재시작 48회)되며 08:00 제안·07:50 예측·08:05 전문가·08:10 학습 크론이
+# 전부 미발동(account_brief 누락으로 사후 확인). 유예 1시간(3600s)이면 아침 배치 창 내
+# 재시작 시 복구 직후 1회 따라잡는다. coalesce=True(APScheduler 기본이지만 명시)로 누락된
+# 다중 발화를 1회로 합쳐 중복을 막고, 재실행분은 proposal_writer.persist dedup + 계정
+# 브리프 싱글톤으로 멱등(신규 0 → slack_notifier "no_proposals" → Slack 미발송).
+# 한계: 1시간을 넘는 장기 정지는 여전히 드롭(D-1 일배치라 무해). 완전 견고화(재시작 간
+# 마지막 실행 추적)는 영속 jobstore가 정답 — 후속 과제.
+scheduler = BackgroundScheduler(
+    timezone="Asia/Seoul",
+    job_defaults={"misfire_grace_time": 3600, "coalesce": True},
+)
 
 
 def _get_own_db_session():
