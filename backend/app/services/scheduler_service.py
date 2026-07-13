@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from app.utils.kst import kst_now, kst_today
+from app.utils.kst import KST, kst_now, kst_today
 from datetime import date, datetime, timedelta
 
 from apscheduler.events import (
@@ -929,6 +929,68 @@ def _ensure_default_states(db):
     db.commit()
 
 
+# 네이버 아침배치 catch-up 대상(07:50~08:10 일배치). misfire_grace_time은 프로세스
+# 재시작을 못 잡는다(in-memory jobstore라 재시작 시 과거 발화 기록 소실 → misfire 미인식,
+# codex 2026-07-13 [P1]). 그래서 SchedulerState.last_run_at(마지막 '성공' 시각)로 오늘
+# 예정 발화를 놓쳤는지 명시적으로 판정해 1회 따라잡는다. 범위는 네이버 아침배치로 한정
+# (Jino 결정 2026-07-13) — 쿠팡/기타 잡은 blast radius 때문에 제외.
+_MORNING_BATCH_CATCHUP: frozenset[str] = frozenset({
+    "run_naver_forecast_engine",   # 07:50
+    "generate_naver_proposals",    # 08:00
+    "generate_expert_desk",        # 08:05
+    "run_naver_learning_loops",    # 08:10
+})
+_CATCHUP_LOOKBACK = timedelta(hours=12)  # 오늘 예정 발화가 이보다 오래됐으면 스킵(다음 정상 발화에 위임)
+
+
+def _catch_up_morning_batch():
+    """스케줄러 기동 시, 네이버 아침배치 중 오늘 예정 발화를 놓친 잡을 즉시 1회 따라잡는다.
+
+    2026-07-13 실사고: pm2 백엔드가 08:53 재생성되며 08:00 제안·07:50 예측·08:05 전문가·
+    08:10 학습이 catch-up 없이 드롭(account_brief 누락). misfire_grace_time으론 재시작
+    시나리오를 못 잡아(codex [P1]) last_run_at 기반 명시 catch-up으로 보완한다.
+
+    판정: 오늘 예정 발화 시각(cron의 hour:minute) <= now 이고, last_run_at이 그 시각 이전
+    (또는 없음)이면 놓친 것 → 즉시 발화. 12h 초과 지연은 스킵. 재실행은 proposal_writer
+    persist dedup·account_brief 싱글톤 등으로 멱등이라 다중 재시작에도 안전(성공 1회 후
+    last_run_at 갱신되어 이후 재시작은 스킵).
+    """
+    now = kst_now()  # naive KST — last_run_at도 kst_now()로 저장돼 동일 기준
+    db = _get_own_db_session()
+    try:
+        for job_name in _MORNING_BATCH_CATCHUP:
+            state = db.query(SchedulerState).filter(
+                SchedulerState.job_name == job_name
+            ).first()
+            if state is None or not state.is_enabled:
+                continue
+            try:
+                parts = (state.cron_expression or "").split()
+                minute, hour = int(parts[0]), int(parts[1])
+            except (ValueError, IndexError):
+                continue  # 비정형 cron(범위·*/n 등)은 안전하게 catch-up 스킵
+            scheduled_today = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if now < scheduled_today:
+                continue  # 아직 오늘 발화 전 — 놓친 것 없음
+            if (now - scheduled_today) > _CATCHUP_LOOKBACK:
+                continue  # 너무 늦음 — 다음 정상 발화에 위임
+            if state.last_run_at is not None and state.last_run_at >= scheduled_today:
+                continue  # 오늘 예정 시각 이후 이미 성공 실행됨
+            job = scheduler.get_job(job_name)
+            if job is None:
+                continue
+            log.warning(
+                "[스케줄러] 아침배치 catch-up: %s 오늘 예정(%s) 미발동 감지(last_run=%s) → 즉시 재실행",
+                job_name, scheduled_today, state.last_run_at,
+            )
+            # aware KST로 전달 — 정상 executor·리스너 경로를 타 last_run_at이 갱신된다.
+            job.modify(next_run_time=datetime.now(KST))
+    except Exception as e:  # noqa: BLE001 — catch-up 실패가 스케줄러 기동을 막으면 안 됨
+        log.exception("[스케줄러] 아침배치 catch-up 에러(무시): %s", e)
+    finally:
+        db.close()
+
+
 def start_scheduler():
     """스케줄러 시작 — 기본 작업 2개 등록"""
     db = _get_own_db_session()
@@ -1032,6 +1094,10 @@ def start_scheduler():
 
     scheduler.start()
     log.info("스케줄러 시작됨")
+
+    # 재시작으로 놓친 네이버 아침배치를 즉시 따라잡는다(misfire_grace_time이 재시작을
+    # 못 잡는 구멍 보완, codex [P1] 2026-07-13). 잡 등록·start 이후라야 get_job/modify 가능.
+    _catch_up_morning_batch()
 
 
 def stop_scheduler():
