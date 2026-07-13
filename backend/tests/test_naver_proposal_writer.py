@@ -412,16 +412,12 @@ def test_persist_allows_new_target_and_allows_after_previous_resolved(db):
 
 
 def test_account_brief_singleton_created_once_per_day(db, monkeypatch):
-    # 시간 고정(freeze): 싱글톤은 date.today()로 '오늘 자정' 컷오프를 만들고 created_at >= 컷오프로
-    # 오늘자 기존 브리프를 찾는다. 그러나 created_at은 func.now()(SQLite에선 UTC)라 KST 00:00~09:00
-    # 사이엔 first.created_at이 '어제(UTC)'로 찍혀 재호출 시 기존 것을 못 찾고 중복 생성한다(날짜
-    # 드리프트). date.today()를 AS_OF로 고정하고 created_at을 같은 날 정오로 결정적으로 찍어 제거한다.
-    class _FrozenDate(date):
-        @classmethod
-        def today(cls):
-            return AS_OF
-
-    monkeypatch.setattr(proposal_writer, "date", _FrozenDate)
+    # 싱글톤은 kst_today()로 'KST 오늘'의 UTC 자정 컷오프를 만들고 created_at(=func.now()=UTC)
+    # >= 컷오프로 오늘자 브리프를 찾는다. kst_today를 AS_OF로 고정하고 first.created_at을
+    # **08:00 KST 실행 시각(=AS_OF 전날 23:00 UTC, UTC 자정을 넘는 straddle)**으로 찍어,
+    # 같은 KST일 재호출이 dedup되는지 검증한다(2026-07-13 실측 UTC/KST 중복 버그 id502·544 회귀:
+    # 구 date.today() 컷오프였다면 여기서 못 찾고 중복 생성됐다).
+    monkeypatch.setattr(proposal_writer, "kst_today", lambda: AS_OF)
 
     diagnosis = _diagnosis(
         expansion_bucket={"cost_share": 0.3, "roas_corrected": 1.2},
@@ -430,13 +426,14 @@ def test_account_brief_singleton_created_once_per_day(db, monkeypatch):
         starving_winners=[],
     )
     first = proposal_writer.account_brief_singleton(db, diagnosis, AS_OF)
-    first.created_at = datetime.combine(AS_OF, datetime.min.time()).replace(hour=12)  # func.now()(UTC) 덮어쓰기
+    # 08:00 KST(AS_OF) = AS_OF 전날 23:00 UTC — UTC 자정 이전이라 구버그의 트리거 지점.
+    first.created_at = datetime.combine(AS_OF, datetime.min.time()) - timedelta(hours=1)
     db.commit()
     assert first.proposal_type == "account_brief"
     assert "as_of=2026-07-06" in first.rationale
 
     second = proposal_writer.account_brief_singleton(db, diagnosis, AS_OF)
-    assert second.id == first.id  # 재호출해도 오늘자 기존 것 재사용(중복 생성 없음)
+    assert second.id == first.id  # 같은 KST일 재호출은 기존 것 재사용(중복 생성 없음)
     assert db.query(NaverProposal).filter(NaverProposal.proposal_type == "account_brief").count() == 1
 
 
