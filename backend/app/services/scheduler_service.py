@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import logging
-from app.utils.kst import KST, kst_now, kst_today
+import threading
+from app.utils.kst import kst_now, kst_today
 from datetime import date, datetime, timedelta
 
 from apscheduler.events import (
@@ -929,66 +930,123 @@ def _ensure_default_states(db):
     db.commit()
 
 
-# 네이버 아침배치 catch-up 대상(07:50~08:10 일배치). misfire_grace_time은 프로세스
-# 재시작을 못 잡는다(in-memory jobstore라 재시작 시 과거 발화 기록 소실 → misfire 미인식,
-# codex 2026-07-13 [P1]). 그래서 SchedulerState.last_run_at(마지막 '성공' 시각)로 오늘
-# 예정 발화를 놓쳤는지 명시적으로 판정해 1회 따라잡는다. 범위는 네이버 아침배치로 한정
-# (Jino 결정 2026-07-13) — 쿠팡/기타 잡은 blast radius 때문에 제외.
-_MORNING_BATCH_CATCHUP: frozenset[str] = frozenset({
+# 네이버 아침배치 catch-up. misfire_grace_time은 프로세스 재시작을 못 잡는다(in-memory
+# jobstore라 재시작 시 과거 발화 기록 소실 → misfire 미인식, codex 2026-07-13 [P1]).
+# 그래서 SchedulerState.last_run_at(마지막 '성공' 시각)로 오늘 예정 발화를 놓쳤는지 명시적
+# 판정해 따라잡는다. 범위는 네이버 아침배치 한정(Jino 결정 2026-07-13) — 쿠팡 등 blast
+# radius 제외. ★순서 중요(codex [P1] R2): 이 4잡은 의존 스태거(forecast→proposals→expert
+# →learning). expert_desk는 pending 제안 0이면 '성공 스킵'하므로 proposals보다 먼저 돌면
+# 오늘 전문가검토가 영구 스킵된다. 따라서 동시 발화 금지 — cron 순서로 순차 실행하고 상류가
+# 성공해야 하류를 잇는다.
+_CATCHUP_ORDER: tuple[str, ...] = (
     "run_naver_forecast_engine",   # 07:50
     "generate_naver_proposals",    # 08:00
-    "generate_expert_desk",        # 08:05
+    "generate_expert_desk",        # 08:05 (proposals 성공 후라야 pending>0 → 의미 있음)
     "run_naver_learning_loops",    # 08:10
-})
+)
 _CATCHUP_LOOKBACK = timedelta(hours=12)  # 오늘 예정 발화가 이보다 오래됐으면 스킵(다음 정상 발화에 위임)
 
 
+def _missed_morning_jobs(db, now):
+    """오늘 예정 발화를 놓친 아침배치 잡을 cron(=의존) 순서로 반환.
+
+    판정: 오늘 예정 발화 시각(cron hour:minute) <= now 이고, last_run_at이 그 시각 이전
+    (또는 없음)이며, 12h 이내면 놓친 것. 비정형 cron(*/n·범위)은 안전하게 제외.
+    """
+    missed: list[str] = []
+    for job_name in _CATCHUP_ORDER:
+        state = db.query(SchedulerState).filter(
+            SchedulerState.job_name == job_name
+        ).first()
+        if state is None or not state.is_enabled:
+            continue
+        try:
+            parts = (state.cron_expression or "").split()
+            minute, hour = int(parts[0]), int(parts[1])
+        except (ValueError, IndexError):
+            continue
+        scheduled_today = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if now < scheduled_today:
+            continue
+        if (now - scheduled_today) > _CATCHUP_LOOKBACK:
+            continue
+        if state.last_run_at is not None and state.last_run_at >= scheduled_today:
+            continue
+        missed.append(job_name)
+    return missed
+
+
+def _record_catchup_status(job_name, *, ok, exception=None):
+    """catch-up 직접 호출은 스케줄러 리스너(EVENT_JOB_*)를 안 거치므로 SchedulerState를
+    수동 갱신한다. 리스너와 동일한 _apply_job_event를 재사용 → last_run_at='마지막 성공'
+    의미가 일관(실패 시 last_run_at 미갱신=다음 재시작 재시도, 워치독 stale 판정과 정합).
+    """
+    db = _get_own_db_session()
+    try:
+        state = db.query(SchedulerState).filter(
+            SchedulerState.job_name == job_name
+        ).first()
+        if state is None:
+            return
+        code = EVENT_JOB_EXECUTED if ok else EVENT_JOB_ERROR
+        _apply_job_event(state, code, kst_now(), exception=exception)
+        db.commit()
+    except Exception as e:  # noqa: BLE001 — 상태 기록 실패가 체인을 죽이면 안 됨
+        log.exception("[스케줄러] catch-up 상태 기록 실패(%s): %s", job_name, e)
+    finally:
+        db.close()
+
+
 def _catch_up_morning_batch():
-    """스케줄러 기동 시, 네이버 아침배치 중 오늘 예정 발화를 놓친 잡을 즉시 1회 따라잡는다.
+    """스케줄러 기동 시, 재시작으로 놓친 네이버 아침배치를 cron 순서로 순차 따라잡는다.
 
-    2026-07-13 실사고: pm2 백엔드가 08:53 재생성되며 08:00 제안·07:50 예측·08:05 전문가·
-    08:10 학습이 catch-up 없이 드롭(account_brief 누락). misfire_grace_time으론 재시작
-    시나리오를 못 잡아(codex [P1]) last_run_at 기반 명시 catch-up으로 보완한다.
+    2026-07-13 실사고: pm2가 08:53 재생성되며 07:50 예측·08:00 제안·08:05 전문가·08:10 학습이
+    catch-up 없이 드롭(account_brief 누락). misfire_grace_time은 재시작을 못 잡아(codex [P1])
+    last_run_at 기반 명시 catch-up으로 보완.
 
-    판정: 오늘 예정 발화 시각(cron의 hour:minute) <= now 이고, last_run_at이 그 시각 이전
-    (또는 없음)이면 놓친 것 → 즉시 발화. 12h 초과 지연은 스킵. 재실행은 proposal_writer
-    persist dedup·account_brief 싱글톤 등으로 멱등이라 다중 재시작에도 안전(성공 1회 후
-    last_run_at 갱신되어 이후 재시작은 스킵).
+    ★순차 실행(codex [P1] R2): 별도 데몬 스레드에서 놓친 잡을 cron 순서로 하나씩 동기 실행 —
+    상류가 성공해야 하류를 잇는다(상류 실패 시 체인 중단→다음 재시작 재시도). expert_desk가
+    proposals보다 먼저 도는 것을 원천 차단(pending 0 오탐→영구 스킵 방지). 리스너 미경유라
+    성공/실패를 _record_catchup_status로 직접 기록. 재실행은 persist dedup·account_brief
+    싱글톤으로 멱등이라 다중 재시작에도 안전(성공분은 last_run_at 갱신되어 재catch-up 제외).
     """
     now = kst_now()  # naive KST — last_run_at도 kst_now()로 저장돼 동일 기준
     db = _get_own_db_session()
     try:
-        for job_name in _MORNING_BATCH_CATCHUP:
-            state = db.query(SchedulerState).filter(
-                SchedulerState.job_name == job_name
-            ).first()
-            if state is None or not state.is_enabled:
-                continue
-            try:
-                parts = (state.cron_expression or "").split()
-                minute, hour = int(parts[0]), int(parts[1])
-            except (ValueError, IndexError):
-                continue  # 비정형 cron(범위·*/n 등)은 안전하게 catch-up 스킵
-            scheduled_today = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            if now < scheduled_today:
-                continue  # 아직 오늘 발화 전 — 놓친 것 없음
-            if (now - scheduled_today) > _CATCHUP_LOOKBACK:
-                continue  # 너무 늦음 — 다음 정상 발화에 위임
-            if state.last_run_at is not None and state.last_run_at >= scheduled_today:
-                continue  # 오늘 예정 시각 이후 이미 성공 실행됨
-            job = scheduler.get_job(job_name)
-            if job is None:
-                continue
-            log.warning(
-                "[스케줄러] 아침배치 catch-up: %s 오늘 예정(%s) 미발동 감지(last_run=%s) → 즉시 재실행",
-                job_name, scheduled_today, state.last_run_at,
-            )
-            # aware KST로 전달 — 정상 executor·리스너 경로를 타 last_run_at이 갱신된다.
-            job.modify(next_run_time=datetime.now(KST))
-    except Exception as e:  # noqa: BLE001 — catch-up 실패가 스케줄러 기동을 막으면 안 됨
-        log.exception("[스케줄러] 아침배치 catch-up 에러(무시): %s", e)
+        missed = _missed_morning_jobs(db, now)
+    except Exception as e:  # noqa: BLE001 — 감지 실패가 스케줄러 기동을 막으면 안 됨
+        log.exception("[스케줄러] 아침배치 catch-up 감지 에러(무시): %s", e)
+        return
     finally:
         db.close()
+    if not missed:
+        return
+
+    funcs = {
+        "run_naver_forecast_engine": run_naver_forecast_engine_job,
+        "generate_naver_proposals": generate_naver_proposals_job,
+        "generate_expert_desk": generate_expert_desk_job,
+        "run_naver_learning_loops": run_naver_learning_loops_job,
+    }
+    log.warning("[스케줄러] 아침배치 catch-up 대상(cron순 순차): %s", missed)
+
+    def _run_chain():
+        for job_name in missed:  # 이미 cron(의존) 순서
+            func = funcs.get(job_name)
+            if func is None:
+                continue
+            try:
+                log.warning("[스케줄러] catch-up 순차 실행: %s", job_name)
+                func()  # 동기 실행(각 잡이 자체 db 세션·예외 처리, 성공 시 정상 반환)
+            except Exception as e:  # noqa: BLE001 — 상류 실패 시 하류 중단(의존 보존)
+                log.exception(
+                    "[스케줄러] catch-up %s 실패 → 체인 중단(다음 재시작 재시도): %s", job_name, e
+                )
+                _record_catchup_status(job_name, ok=False, exception=e)
+                break
+            _record_catchup_status(job_name, ok=True)
+
+    threading.Thread(target=_run_chain, name="naver-morning-catchup", daemon=True).start()
 
 
 def start_scheduler():
