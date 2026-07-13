@@ -115,13 +115,15 @@ def test_get_delegated_types_non_list_json_returns_empty_set_fail_closed(db):
     assert delegation_gate.get_delegated_types(db) == set()
 
 
-def test_delegable_types_tracks_open_actions_x1b():
-    """X1b T4 시점: OPEN_ACTIONS가 정지·재개·입찰까지 확장됐으므로 delegable도 자동으로
-    넓어진다(delegable_types() 자체 docstring: "X1b 이후 OPEN_ACTIONS가 넓어지면 이 함수도
-    자동으로 넓어짐" — 구 test_delegable_types_is_negative_keyword_only_x1a를 T4 계약에 맞춰
-    갱신). 예산(budget_up)은 여전히 스코프 밖(D-NAO-34)이라 제외."""
+def test_delegable_types_tracks_open_actions_p3():
+    """P3(D-NAO-42-f) 시점: OPEN_ACTIONS가 예산(update_budget)까지 확장됐으므로 delegable도
+    자동으로 넓어진다(delegable_types() 자체 docstring: "OPEN_ACTIONS가 넓어지면 이 함수도
+    자동으로 넓어짐" — 구 test_delegable_types_tracks_open_actions_x1b를 P3 계약에 맞춰
+    갱신). 자동 발사 자체는 여전히 위임 스위치(D-NAO-5/25, Jino만)가 별도로 켜야 하지만,
+    "위임 가능 유형" 집합 자체는 이미 넓어진다."""
     assert delegation_gate.delegable_types() == {
         "negative_keyword", "bid_up", "bid_down", "growth_bid_up", "pause", "resume",
+        "budget_up", "budget_down",
     }
 
 
@@ -370,6 +372,88 @@ def test_missing_run_skipped_fail_closed(db):
     summary = delegation_gate.run_gate(db, 99999)
     assert summary["status"] == "skipped"
     assert "fail-closed" in summary["reason"]
+
+
+# ── Fix 1(codex P1, D-NAO-42-f②): budget_up 라운드봉투 게이트 ──
+
+def _budget_proposal_row(db, budget_auto_eligible=None, status="pending", campaign_id="cmp-budget"):
+    p = NaverProposal(
+        proposal_type="budget_up", target_type="campaign", target_id=campaign_id,
+        campaign_id=campaign_id, adgroup_id=None, target_budget=120_000,
+        budget_auto_eligible=budget_auto_eligible,
+        rationale="테스트 근거", expected_effect="테스트 예상효과", status=status,
+    )
+    db.add(p)
+    db.commit()
+    db.refresh(p)
+    return p
+
+
+def test_eligible_budget_up_auto_eligible_false_is_not_eligible(db):
+    """라운드 합계 초과분(False)은 위임이 켜져 있어도 자동승인 대상이 아니다."""
+    p = _budget_proposal_row(db, budget_auto_eligible=False)
+    _settings(db, campaign_id="cmp-budget", optimizer="ours")
+    skipped = {"not_delegated": 0, "not_pending": 0, "blocked": 0, "optimizer": 0, "budget_envelope": 0}
+
+    assert delegation_gate._eligible(db, p, {"budget_up"}, skipped) is False
+    assert skipped["budget_envelope"] == 1
+
+
+def test_eligible_budget_up_auto_eligible_none_is_not_eligible(db):
+    """budget_auto_eligible이 세팅 안 된(None) 구 제안도 fail-closed로 탈락."""
+    p = _budget_proposal_row(db, budget_auto_eligible=None)
+    _settings(db, campaign_id="cmp-budget", optimizer="ours")
+    skipped = {"not_delegated": 0, "not_pending": 0, "blocked": 0, "optimizer": 0, "budget_envelope": 0}
+
+    assert delegation_gate._eligible(db, p, {"budget_up"}, skipped) is False
+    assert skipped["budget_envelope"] == 1
+
+
+def test_eligible_budget_up_auto_eligible_true_is_eligible(db):
+    p = _budget_proposal_row(db, budget_auto_eligible=True)
+    _settings(db, campaign_id="cmp-budget", optimizer="ours")
+    skipped = {"not_delegated": 0, "not_pending": 0, "blocked": 0, "optimizer": 0, "budget_envelope": 0}
+
+    assert delegation_gate._eligible(db, p, {"budget_up"}, skipped) is True
+    assert skipped["budget_envelope"] == 0
+
+
+def test_eligible_budget_down_eligible_regardless_of_budget_auto_eligible(db):
+    """감액은 자유(budget_auto_eligible 검사 자체가 budget_up 전용) — None이어도 통과."""
+    p = NaverProposal(
+        proposal_type="budget_down", target_type="campaign", target_id="cmp-budget",
+        campaign_id="cmp-budget", adgroup_id=None, target_budget=80_000,
+        budget_auto_eligible=None,
+        rationale="테스트 근거", expected_effect="테스트 예상효과", status="pending",
+    )
+    db.add(p)
+    db.commit()
+    db.refresh(p)
+    _settings(db, campaign_id="cmp-budget", optimizer="ours")
+    skipped = {"not_delegated": 0, "not_pending": 0, "blocked": 0, "optimizer": 0, "budget_envelope": 0}
+
+    assert delegation_gate._eligible(db, p, {"budget_down"}, skipped) is True
+    assert skipped["budget_envelope"] == 0
+
+
+def test_run_gate_budget_up_overflow_skipped_untouched(db):
+    """run_gate 전체 경로 — 라운드봉투 초과(False)는 위임 켜져도 무접촉(pending 유지)."""
+    p = _budget_proposal_row(db, budget_auto_eligible=False)
+    _settings(db, campaign_id="cmp-budget", optimizer="ours")
+    _delegate(db, {"budget_up"})
+    run = _run(db)
+    _review(db, run.id, p.id, verdict="agree")
+
+    with patch.object(delegation_gate.naver_execution_harness, "execute") as mock_execute:
+        summary = delegation_gate.run_gate(db, run.id)
+
+    mock_execute.assert_not_called()
+    assert summary["auto_approved"] == 0
+    assert summary["skipped"]["budget_envelope"] == 1
+
+    db.refresh(p)
+    assert p.status == "pending"
+    assert p.approval_source is None
 
 
 def test_claim_race_lost_skips_without_write(db):

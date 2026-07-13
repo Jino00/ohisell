@@ -51,9 +51,10 @@ def test_get_default_returns_empty_delegated_and_delegable_list(client):
     assert resp.status_code == 200
     body = resp.json()
     assert body["delegated_types"] == []
-    # X1b T4로 정지·재개·입찰 개방 — delegable도 자동 확장(sorted, 예산 제외 D-NAO-34)
+    # P3(D-NAO-42-f)로 예산(update_budget)까지 개방 — delegable도 자동 확장(sorted)
     assert body["delegable_types"] == [
-        "bid_down", "bid_up", "growth_bid_up", "negative_keyword", "pause", "resume",
+        "bid_down", "bid_up", "budget_down", "budget_up", "growth_bid_up",
+        "negative_keyword", "pause", "resume",
     ]
 
 
@@ -86,9 +87,11 @@ def test_put_no_change_log_when_value_unchanged(client, db):
 
 
 def test_put_disallowed_type_returns_400(client, db):
-    """X1b T4로 bid_up이 delegable해졌으므로, 여전히 스코프 밖인 budget_up(D-NAO-34)으로 검증."""
+    """P3(D-NAO-42-f)로 budget_up까지 delegable해졌으므로(모든 실행형 액션이 개방됨),
+    애초에 실행 대상 자체가 없는 정보성 유형(anomaly — _ACTION_BY_PROPOSAL_TYPE에 매핑 없음,
+    proposal_writer.INFORMATIONAL_PROPOSAL_TYPES)으로 검증한다(구 budget_up 사례를 갱신)."""
     resp = client.put("/api/naver/ad/settings/expert-delegation",
-                       json={"delegated_types": ["budget_up"]})
+                       json={"delegated_types": ["anomaly"]})
     assert resp.status_code == 400
     assert db.query(NaverAccountSettings).count() == 0
 

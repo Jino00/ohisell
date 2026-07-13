@@ -118,11 +118,13 @@ def test_execute_dry_run_records_change_log(db, proposal_type, expected_action):
 
 def test_execute_forces_dry_run_even_when_caller_requests_live(db):
     """액션이 OPEN_ACTIONS 밖이면 dry_run=False를 넘겨도 강제로 dry-run 처리된다(D-NAO-5).
-    X1b T4로 bid_up/pause/resume이 전부 개방됐으므로, 여전히 스코프 밖인 budget_up
-    (예산은 영구 Confirm, D-NAO-34)으로 검증한다."""
-    p = _proposal(db, proposal_type="budget_up")
+    P3(D-NAO-42-f)로 update_budget까지 개방되며 매핑된 액션(add_negative_keyword/update_bid/
+    set_user_lock/update_budget)이 전부 열렸다 — 게이트 자체의 동작(닫힌 액션이면 강제
+    dry-run)을 검증하려면 OPEN_ACTIONS를 일시적으로 비워 시뮬레이션한다."""
+    p = _proposal(db, proposal_type="bid_up")
     _settings(db, optimizer="ours")
-    log_entry = harness.execute(db, p.id, dry_run=False)
+    with patch.object(harness, "OPEN_ACTIONS", frozenset()):
+        log_entry = harness.execute(db, p.id, dry_run=False)
     assert log_entry.dry_run is True
 
 
@@ -151,11 +153,13 @@ def test_execute_blocked_on_second_call_already_executed(db):
     assert len(saved) == 1  # 재실행 차단 — change_log 중복 기록 없음
 
 
-def test_open_actions_contains_negative_keyword_bid_and_lock_x1b(db):
-    """X1b T4: D-NAO-16 개방 순서의 1~3단계(제외키워드→정지·재개→입찰) 전부 개방 — 예산만
-    스코프 밖(D-NAO-34, 영구 Confirm). (구 test_open_actions_contains_only_negative_keyword_x1a를
-    T4 계약에 따라 갱신.)"""
-    assert harness.OPEN_ACTIONS == frozenset({"add_negative_keyword", "update_bid", "set_user_lock"})
+def test_open_actions_contains_negative_keyword_bid_lock_and_budget_p3(db):
+    """P3(D-NAO-42-f): D-NAO-16 개방 순서 4단계(제외키워드→정지·재개→입찰→예산) 전부 개방
+    (D-NAO-34 금지선 개정). (구 test_open_actions_contains_negative_keyword_bid_and_lock_x1b를
+    P3 계약에 따라 갱신.)"""
+    assert harness.OPEN_ACTIONS == frozenset(
+        {"add_negative_keyword", "update_bid", "set_user_lock", "update_budget"}
+    )
 
 
 # ── X1a T3: 실쓰기 개방(add_negative_keyword) ──
@@ -295,12 +299,15 @@ def test_live_execute_claim_race_lost_raises_already_executed(db):
 
 def test_open_action_without_executor_blocked_by_write_not_opened(db, monkeypatch):
     """방벽: OPEN_ACTIONS에 실수로 추가돼도 _WRITE_EXECUTORS에 구현이 없으면 fail-closed.
-    X1b T4로 update_bid/set_user_lock 둘 다 구현됐으므로, 여전히 미구현인 update_budget
-    (budget_up)으로 검증한다."""
+    P3(D-NAO-42-f)로 매핑된 액션(add_negative_keyword/update_bid/set_user_lock/
+    update_budget)이 전부 구현됐으므로, 가상의 미구현 액션으로 이중 방벽 자체를 검증한다."""
     p = _proposal(db, proposal_type="budget_up")
     _settings(db, optimizer="ours")
-    monkeypatch.setattr(harness, "OPEN_ACTIONS",
-                        frozenset({"add_negative_keyword", "update_bid", "set_user_lock", "update_budget"}))
+    monkeypatch.setattr(
+        harness, "_ACTION_BY_PROPOSAL_TYPE",
+        {**harness._ACTION_BY_PROPOSAL_TYPE, "budget_up": "future_action"},
+    )
+    monkeypatch.setattr(harness, "OPEN_ACTIONS", frozenset({"future_action"}))
 
     with pytest.raises(harness.WriteNotOpenedError):
         harness.execute(db, p.id, dry_run=False)
@@ -675,20 +682,51 @@ def test_real_write_blocker_set_user_lock_missing_target_lock(db):
     assert reason is not None and "target_lock" in reason
 
 
-def test_real_write_blocker_budget_up_still_not_open(db):
-    p = _proposal(db, proposal_type="budget_up")
+def test_real_write_blocker_budget_up_executable_when_valid(db):
+    """P3(D-NAO-42-f): update_budget 개방 — 구조가 유효(target_type='campaign' +
+    target_budget 존재)하면 실행 가능(구 test_real_write_blocker_budget_up_still_not_open을
+    P3 계약에 따라 갱신)."""
+    p = _proposal(db, proposal_type="budget_up", target_type="campaign", target_id="cmp1")
+    p.target_budget = 12_000
+    db.commit()
+    assert harness.real_write_blocker(p) is None
+
+
+def test_real_write_blocker_budget_up_missing_target_budget(db):
+    p = _proposal(db, proposal_type="budget_up", target_type="campaign", target_id="cmp1")
     reason = harness.real_write_blocker(p)
-    assert reason is not None and "예산" in reason
+    assert reason is not None and "target_budget" in reason
+
+
+def test_real_write_blocker_budget_up_wrong_target_type(db):
+    p = _proposal(db, proposal_type="budget_up")  # 기본 target_type="keyword"
+    p.target_budget = 12_000
+    db.commit()
+    reason = harness.real_write_blocker(p)
+    assert reason is not None and "keyword" in reason
+
+
+def test_real_write_blocker_budget_up_target_id_campaign_id_mismatch(db):
+    """Fix 2(codex P1): target_id != campaign_id인 캠페인 예산 제안은 stale/malformed —
+    구조(target_type='campaign' + target_budget 존재)만으로는 통과시키면 안 된다."""
+    p = _proposal(db, proposal_type="budget_up", campaign_id="cmp-budget",
+                  target_type="campaign", target_id="cmp-other")
+    p.target_budget = 12_000
+    db.commit()
+    reason = harness.real_write_blocker(p)
+    assert reason is not None
+    assert "target_id" in reason and "campaign_id" in reason
 
 
 # ── X1b T4: _build_guardrail_context ─────────────────────────────────────
 
 
 def test_build_guardrail_context_non_keyword_target_all_none(db):
+    # target_type='adgroup'은 keyword도 campaign도 아니므로(P2 D-NAO-42-f) 전부 None 유지
     p = _proposal(db, proposal_type="bid_up", target_type="adgroup", target_id="grp-1")
     ctx = harness._build_guardrail_context(db, p, kst_now())
     assert ctx == {
-        "current_bid": None, "roas_corrected": None, "target_roas": None,
+        "current_bid": None, "current_budget": None, "roas_corrected": None, "target_roas": None,
         "cost_today": None, "daily_budget": None, "unconverted_spend": None,
         "last_change_at": None, "changes_today_count": 0,
     }
@@ -855,6 +893,118 @@ def test_build_guardrail_context_converted_window_zero_unconverted_spend(db):
 
     assert ctx["unconverted_spend"] == 0  # 창 내 전환 존재 — 무전환 누적으로 안 잡힘
     assert ctx["roas_corrected"] == pytest.approx(3.0)  # 9000/3000 × 보정계수 1.0(9000/9000)
+
+
+# ── P2 (D-NAO-42-f): _build_guardrail_context campaign 브랜치 ───────────
+
+
+def test_build_guardrail_context_campaign_current_budget_from_live_reread(db):
+    p = _proposal(db, proposal_type="budget_up", campaign_id="cmp-budget",
+                  target_type="campaign", target_id="cmp-budget")
+    with patch.object(harness.naver_sa_writer, "get_campaign",
+                       return_value={"dailyBudget": 100_000, "useDailyBudget": True}):
+        ctx = harness._build_guardrail_context(db, p, kst_now())
+    assert ctx["current_budget"] == 100_000
+    assert ctx["current_bid"] is None  # keyword 전용 필드는 campaign 브랜치에서 안 채움
+
+
+def test_build_guardrail_context_campaign_get_campaign_failure_fail_closed(db):
+    p = _proposal(db, proposal_type="budget_up", campaign_id="cmp-budget",
+                  target_type="campaign", target_id="cmp-budget")
+    with patch.object(harness.naver_sa_writer, "get_campaign", side_effect=RuntimeError("network")):
+        ctx = harness._build_guardrail_context(db, p, kst_now())
+    assert ctx["current_budget"] is None  # 재조회 실패 — 추정으로 채우지 않음
+
+
+def test_build_guardrail_context_campaign_uses_campaign_id_not_target_id(db):
+    """Fix 2(codex P1): get_campaign 재조회는 campaign_id로 해야 한다(target_id 아님) —
+    가드 판정 대상과 실쓰기 대상이 항상 같은 캠페인이어야 한다(집계 agg는 이미 campaign_id
+    를 쓰고 있었음, current_budget만 target_id를 써서 불일치할 여지가 있었다).
+    target_id를 일부러 campaign_id와 다른 값으로 둬 어느 값이 실제로 쓰였는지 드러낸다."""
+    p = _proposal(db, proposal_type="budget_up", campaign_id="cmp-budget",
+                  target_type="campaign", target_id="cmp-budget-STALE")
+    with patch.object(harness.naver_sa_writer, "get_campaign",
+                       return_value={"dailyBudget": 77_000}) as mock_get:
+        ctx = harness._build_guardrail_context(db, p, kst_now())
+    mock_get.assert_called_once_with("cmp-budget")
+    assert ctx["current_budget"] == 77_000
+
+
+def test_build_guardrail_context_campaign_roas_and_unconverted_spend_from_campaign_window_agg(db):
+    from app.models import NaverAdDaily
+    p = _proposal(db, proposal_type="budget_up", campaign_id="cmp-budget",
+                  target_type="campaign", target_id="cmp-budget")
+    now = kst_now()
+    as_of = now.date() - timedelta(days=1)
+    # SHOPPING 타입 — campaign_window_agg는 WEB_SITE 필터가 없으므로 캠페인 grain 그대로 집계
+    db.add(NaverAdDaily(
+        ad_date=as_of, campaign_id="cmp-budget", campaign_type="SHOPPING", adgroup_id="grp-1",
+        keyword_id="", imp=500, clk=25, cost=3000, rank_sum=1500,
+        conv_direct_cnt=0, conv_indirect_cnt=0, conv_direct_amt=0, conv_indirect_amt=0,
+    ))
+    db.commit()
+
+    with patch.object(harness.naver_sa_writer, "get_campaign", return_value={"dailyBudget": 100_000}):
+        ctx = harness._build_guardrail_context(db, p, now)
+
+    assert ctx["unconverted_spend"] == 3000  # 창 내 전환 0건 — 무전환 누적으로 잡힘
+    assert ctx["roas_corrected"] == 0.0
+
+
+def test_build_guardrail_context_campaign_change_log_uses_entity_type_campaign(db):
+    p = _proposal(db, proposal_type="budget_up", campaign_id="cmp-budget",
+                  target_type="campaign", target_id="cmp-budget")
+    now = kst_now()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    db.add(NaverChangeLog(
+        entity_type="campaign", entity_id="cmp-budget", campaign_id="cmp-budget",
+        action="update_budget", dry_run=False,
+        after_value=json.dumps({"dailyBudget": 100_000}), changed_at=today_start + timedelta(hours=2),
+    ))
+    # 다른 대상(entity_type='keyword')의 오늘 변경은 이 캠페인 컨텍스트에 섞이면 안 됨
+    db.add(NaverChangeLog(
+        entity_type="keyword", entity_id="nkw-1", campaign_id="cmp-budget",
+        action="update_bid", dry_run=False,
+        after_value=json.dumps({"bidAmt": 200}), changed_at=today_start + timedelta(hours=3),
+    ))
+    db.commit()
+
+    with patch.object(harness.naver_sa_writer, "get_campaign", return_value={"dailyBudget": 100_000}):
+        ctx = harness._build_guardrail_context(db, p, now)
+
+    assert ctx["changes_today_count"] == 1
+    assert ctx["last_change_at"] == today_start + timedelta(hours=2)
+
+
+def test_build_guardrail_context_campaign_target_roas_from_resolver(db):
+    from app.models import NaverCampaignSettings
+    p = _proposal(db, proposal_type="budget_up", campaign_id="cmp-budget",
+                  target_type="campaign", target_id="cmp-budget")
+    db.add(NaverCampaignSettings(campaign_id="cmp-budget", target_roas_override=Decimal("180.0")))
+    db.commit()
+
+    with patch.object(harness.naver_sa_writer, "get_campaign", return_value={"dailyBudget": 100_000}):
+        ctx = harness._build_guardrail_context(db, p, kst_now())
+
+    assert ctx["target_roas"] == pytest.approx(180.0)
+
+
+def test_build_guardrail_context_campaign_cost_today_and_daily_budget_from_hourly_snapshot(db):
+    from app.models import NaverHourlySnapshot
+    p = _proposal(db, proposal_type="budget_up", campaign_id="cmp-budget",
+                  target_type="campaign", target_id="cmp-budget")
+    now = kst_now()
+    db.add(NaverHourlySnapshot(
+        snapshot_at=now, ad_date=now.date(), snapshot_hour=5, campaign_id="cmp-budget",
+        campaign_type="SHOPPING", cost=80_000, clk=40, imp=900, daily_budget=100_000,
+    ))
+    db.commit()
+
+    with patch.object(harness.naver_sa_writer, "get_campaign", return_value={"dailyBudget": 100_000}):
+        ctx = harness._build_guardrail_context(db, p, now)
+
+    assert ctx["cost_today"] == 80_000
+    assert ctx["daily_budget"] == 100_000
 
 
 # ── X1b T4: _detect_external_change ──────────────────────────────────────
@@ -1034,3 +1184,172 @@ def test_executed_change_log_is_picked_up_by_proposal_scoreboard_after_verify_da
 
     db.refresh(log_entry)
     assert log_entry.actual_json is not None  # 모수미달이어도 실측치 기록 시도는 됨(재시도 대상)
+
+
+# ── P3(D-NAO-42-f): update_budget 실쓰기 개방(D-NAO-16 4단계) ────────────────
+
+
+def _campaign_budget_write_result(before=None, after=None):
+    return naver_sa_writer.WriteResult(
+        action="update_campaign_budget",
+        before=before if before is not None else
+        {"dailyBudget": 10_000, "useDailyBudget": True, "sharedBudgetId": None},
+        response=after,
+        after=after if after is not None else
+        {"dailyBudget": 12_000, "useDailyBudget": True, "sharedBudgetId": None},
+        created_ids=[],
+    )
+
+
+def _budget_proposal_row(db, target_budget=12_000, campaign_id="cmp-budget", proposal_type="budget_up"):
+    p = _proposal(db, proposal_type=proposal_type, campaign_id=campaign_id,
+                  target_type="campaign", target_id=campaign_id)
+    p.target_budget = target_budget
+    db.commit()
+    return p
+
+
+def test_execute_update_budget_success(db):
+    p = _budget_proposal_row(db, target_budget=12_000)
+    _settings(db, campaign_id="cmp-budget", optimizer="ours")
+    result = _campaign_budget_write_result(
+        before={"dailyBudget": 10_000, "useDailyBudget": True, "sharedBudgetId": None},
+        after={"dailyBudget": 12_000, "useDailyBudget": True, "sharedBudgetId": None},
+    )
+
+    with patch.object(harness, "_build_guardrail_context", return_value={}), \
+         patch.object(harness.guardrail_gate, "check", return_value=None) as mock_gate, \
+         patch.object(harness.naver_sa_writer, "update_campaign_budget", return_value=result) as mock_write:
+        log_entry = harness.execute(db, p.id, dry_run=False)
+
+    mock_gate.assert_called_once()
+    gate_call_args = mock_gate.call_args
+    assert gate_call_args[0][0] == {
+        "proposal_type": "budget_up", "target_bid": None, "target_lock": None, "target_budget": 12_000,
+    }
+    mock_write.assert_called_once_with("cmp-budget", 12_000)
+    assert log_entry.action == "update_budget"
+    assert log_entry.outcome is None  # 채점 전 정상(D+14 배선) — 성공 판별은 after_value
+    assert json.loads(log_entry.before_value) == {
+        "dailyBudget": 10_000, "useDailyBudget": True, "sharedBudgetId": None,
+    }
+    assert json.loads(log_entry.after_value) == {
+        "dailyBudget": 12_000, "useDailyBudget": True, "sharedBudgetId": None,
+    }
+
+    db.refresh(p)
+    assert p.executed_change_log_id == log_entry.id
+    assert p.status == "approved"
+
+
+def test_execute_update_budget_blocked_by_guardrail(db):
+    p = _budget_proposal_row(db, target_budget=999_999)
+    _settings(db, campaign_id="cmp-budget", optimizer="ours")
+
+    with patch.object(harness, "_build_guardrail_context", return_value={}), \
+         patch.object(harness.guardrail_gate, "check", return_value="예산 증액폭 초과") as mock_gate, \
+         patch.object(harness.naver_sa_writer, "update_campaign_budget") as mock_write:
+        with pytest.raises(harness.MissingExecutionTargetError):
+            harness.execute(db, p.id, dry_run=False)
+
+    mock_gate.assert_called_once()
+    mock_write.assert_not_called()
+    db.refresh(p)
+    assert p.status == "failed"
+    logs = db.query(NaverChangeLog).filter(NaverChangeLog.proposal_id == p.id).all()
+    assert len(logs) == 1
+    assert logs[0].outcome == "failed"
+    assert "가드레일 차단" in logs[0].rationale
+
+
+def test_execute_update_budget_wrong_target_type_guard_failure(db):
+    p = _proposal(db, proposal_type="budget_up", campaign_id="cmp-budget",
+                  target_type="keyword", target_id="nkw-1")
+    p.target_budget = 12_000
+    db.commit()
+    _settings(db, campaign_id="cmp-budget", optimizer="ours")
+
+    with pytest.raises(harness.MissingExecutionTargetError):
+        harness.execute(db, p.id, dry_run=False)
+
+    db.refresh(p)
+    assert p.status == "failed"
+    logs = db.query(NaverChangeLog).filter(NaverChangeLog.proposal_id == p.id).all()
+    assert len(logs) == 1
+    assert "실행 불가" in logs[0].rationale
+
+
+def test_execute_update_budget_missing_target_budget_guard_failure(db):
+    p = _proposal(db, proposal_type="budget_up", campaign_id="cmp-budget",
+                  target_type="campaign", target_id="cmp-budget")
+    _settings(db, campaign_id="cmp-budget", optimizer="ours")
+
+    with pytest.raises(harness.MissingExecutionTargetError):
+        harness.execute(db, p.id, dry_run=False)
+
+    db.refresh(p)
+    assert p.status == "failed"
+
+
+def test_execute_update_budget_target_id_campaign_id_mismatch_guard_failure(db):
+    """Fix 2(codex P1): target_id != campaign_id는 stale/malformed 제안 — 구조(target_type/
+    target_budget)만 유효해도 fail-closed로 차단해야 한다(guardrail_gate.check까지 가면 안 됨)."""
+    p = _proposal(db, proposal_type="budget_up", campaign_id="cmp-budget",
+                  target_type="campaign", target_id="cmp-other")
+    p.target_budget = 12_000
+    db.commit()
+    _settings(db, campaign_id="cmp-budget", optimizer="ours")
+
+    with pytest.raises(harness.MissingExecutionTargetError):
+        harness.execute(db, p.id, dry_run=False)
+
+    db.refresh(p)
+    assert p.status == "failed"
+    logs = db.query(NaverChangeLog).filter(NaverChangeLog.proposal_id == p.id).all()
+    assert len(logs) == 1
+    assert "실행 불가" in logs[0].rationale
+
+
+def test_execute_update_budget_write_failure_marks_proposal_failed(db):
+    p = _budget_proposal_row(db, target_budget=12_000)
+    _settings(db, campaign_id="cmp-budget", optimizer="ours")
+
+    with patch.object(harness, "_build_guardrail_context", return_value={}), \
+         patch.object(harness.guardrail_gate, "check", return_value=None), \
+         patch.object(harness.naver_sa_writer, "update_campaign_budget",
+                       side_effect=naver_sa_writer.WriteError("500")):
+        with pytest.raises(naver_sa_writer.WriteError):
+            harness.execute(db, p.id, dry_run=False)
+
+    db.refresh(p)
+    assert p.status == "failed"
+    logs = db.query(NaverChangeLog).filter(NaverChangeLog.proposal_id == p.id).all()
+    assert len(logs) == 1
+    assert logs[0].outcome == "failed"
+
+
+def test_execute_update_budget_detects_external_change_appends_warning(db):
+    """우리 마지막 기록(after_value.dailyBudget=10,000)과 방금 재조회한 라이브 before
+    (13,000)가 다르면 — 그 사이 외부(MOP 등)가 바꿨다는 신호(D-NAO-13). 실행 자체는
+    진행(경고만, 차단 아님) — update_bid와 동일 계약."""
+    p = _budget_proposal_row(db, target_budget=15_000)
+    _settings(db, campaign_id="cmp-budget", optimizer="ours")
+    db.add(NaverChangeLog(
+        entity_type="campaign", entity_id="cmp-budget", campaign_id="cmp-budget",
+        action="update_budget", dry_run=False,
+        after_value=json.dumps({"dailyBudget": 10_000}), executed_at=kst_now(),
+    ))
+    db.commit()
+    result = _campaign_budget_write_result(
+        before={"dailyBudget": 13_000, "useDailyBudget": True, "sharedBudgetId": None},
+        after={"dailyBudget": 15_000, "useDailyBudget": True, "sharedBudgetId": None},
+    )
+
+    with patch.object(harness, "_build_guardrail_context", return_value={}), \
+         patch.object(harness.guardrail_gate, "check", return_value=None), \
+         patch.object(harness.naver_sa_writer, "update_campaign_budget", return_value=result):
+        log_entry = harness.execute(db, p.id, dry_run=False)
+
+    assert "외부 변경 감지" in log_entry.rationale
+    assert "10000" in log_entry.rationale and "13000" in log_entry.rationale
+    assert log_entry.outcome is None  # 차단 아님, 경고만 부착

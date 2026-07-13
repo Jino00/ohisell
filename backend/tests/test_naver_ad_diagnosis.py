@@ -15,6 +15,7 @@ from sqlalchemy.pool import StaticPool
 from app.database import Base
 from app.models import NaverAdDaily, NaverChangeLog, NaverEntity, NaverProductBep, NaverSearchTermDaily, Order
 from app.services.naver_ad import account_diagnosis as diag
+from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.services.naver_ad.diagnosis import build_diagnosis
 
 D0 = date(2026, 7, 1)
@@ -582,3 +583,59 @@ def test_resume_candidates_passes_with_campaign_override_when_roas_clears_it(db)
     out = diag.resume_candidates(db, D_TO, target_roas_resolver=resolver, correction_factor=Decimal("1"))
     assert len(out) == 1
     assert out[0]["roas_at_pause"] == 6.0
+
+
+# ── campaign_window_agg (P2, D-NAO-42-f) ─────────────────────────────────
+
+
+def test_campaign_window_agg_sums_cost_and_conv_amt_across_adgroups_and_keywords(db):
+    # 같은 캠페인의 서로 다른 광고그룹/키워드 행이 합산되어야 함
+    _row(db, D0, "cmp1", "WEB_SITE", "grp1", "nkw-1", 100, 10, 3000, direct=1000, indirect=500)
+    _row(db, D0, "cmp1", "WEB_SITE", "grp2", "nkw-2", 50, 5, 2000, direct=0, indirect=0)
+    # 다른 캠페인 — 집계에서 제외되어야 함
+    _row(db, D0, "cmp2", "WEB_SITE", "grp1", "nkw-3", 100, 10, 9000, direct=9000)
+    db.commit()
+
+    out = diag.campaign_window_agg(db, "cmp1", D0, D0)
+    assert out == {"cost": 5000, "conv_amt": 1500}
+
+
+def test_campaign_window_agg_includes_shopping_campaign_type():
+    # 이 테스트는 SHOPPING 타입도 집계되어야 함(예산 통제는 캠페인 그레인 — WEB_SITE 전용
+    # 아님, keyword_window_agg와의 핵심 차이). db fixture 재사용 위해 아래에서 세션 생성.
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+    db = Session()
+    try:
+        _row(db, D0, "cmp-shopping", "SHOPPING", "grp1", "", 200, 20, 4000, direct=8000)
+        db.commit()
+        out = diag.campaign_window_agg(db, "cmp-shopping", D0, D0)
+        assert out == {"cost": 4000, "conv_amt": 8000}  # WEB_SITE 필터가 없어 SHOPPING도 잡힘
+    finally:
+        db.close()
+
+
+def test_campaign_window_agg_excludes_backfill_sentinel_adgroup(db):
+    # 백필 센티널 행(adgroup_id=BACKFILL_SENTINEL_ADGROUP)은 실단위 행과의 이중집계를
+    # 막기 위해 제외한다(keyword_window_agg와 동일 규율).
+    _row(db, D0, "cmp1", "WEB_SITE", "grp1", "nkw-1", 100, 10, 3000, direct=1000)
+    _row(db, D0, "cmp1", "WEB_SITE", BACKFILL_SENTINEL_ADGROUP, "", 100, 10, 999_999, direct=0)
+    db.commit()
+
+    out = diag.campaign_window_agg(db, "cmp1", D0, D0)
+    assert out == {"cost": 3000, "conv_amt": 1000}
+
+
+def test_campaign_window_agg_no_data_returns_zeros(db):
+    out = diag.campaign_window_agg(db, "cmp-nonexistent", D0, D0)
+    assert out == {"cost": 0, "conv_amt": 0}
+
+
+def test_campaign_window_agg_respects_date_window(db):
+    _row(db, D0, "cmp1", "WEB_SITE", "grp1", "nkw-1", 100, 10, 3000, direct=1000)
+    _row(db, D0 - timedelta(days=1), "cmp1", "WEB_SITE", "grp1", "nkw-1", 100, 10, 5000, direct=2000)
+    db.commit()
+
+    out = diag.campaign_window_agg(db, "cmp1", D0, D0)
+    assert out == {"cost": 3000, "conv_amt": 1000}  # 창 밖(D0-1) 행은 제외

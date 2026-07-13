@@ -47,6 +47,10 @@ _ALLOWED_DIRECTIONS = {
     "growth_sweeper": {"up"},
 }
 
+# P3(D-NAO-42-f): 예산 사이징(PLAN §5-G)·라운드 봉투(PLAN §5-E) 상수.
+_BUDGET_ROUND_INCREMENT = 100  # 100원 단위 반올림 — 네이버 침묵 반올림 방어(PLAN §5-B/G)
+_ROUND_BUDGET_AUTO_CAP = 100_000  # 계획서 §2② — 회당 총 증가액(라운드 합계) 자율 한도
+
 
 def _ours_campaign_ids(db: Session) -> set[str]:
     """optimizer='ours' 캠페인 ID 집합(D-NAO-13 — 제안 대상은 이 캠페인만)."""
@@ -233,17 +237,86 @@ def _resume_proposal(row: dict, target_label: dict) -> dict:
     }
 
 
-def _budget_proposal(signal: dict, target_label: dict) -> dict:
-    """budget_allocator 신호(D-NAO-22-③) → budget_up 제안. 실행은 영구 Confirm(D-NAO-5 —
-    예산 상한 인상은 신규 캠페인·재구축과 동급 게이트). marginal ROAS 인과추정은 하지
-    않는다(D-S3-c 연기 사유 유지, 추정 금지) — "예산 캡이 이미 소진됐고 그 안에 이익보장
-    잔존 볼륨이 실측으로 확인됐다"는 사실만 제공."""
+def _size_budget_up(current: int, pred_cost: int | None) -> int:
+    """목표 일예산 사이징(PLAN §5-G, D-NAO-42-f) — marginal ROAS 인과추정 없이(추정 금지)
+    목표 예산을 정한다.
+
+    pred_cost(캠페인 grain 예측, forecast_engine 추세 지수감쇠·비인과, D-NAO-26/28) 있으면
+    "추세가 말하는 미제한 지출"까지 완화(min(현재×2, max(현재+1증분, pred_cost))) — 현재×2는
+    캠페인당 +100% 캡(계획서 §2③, guardrail_gate._BUDGET_UP_MAX_CHANGE_PCT와 동일 상한을
+    사이징 단계에서 선반영)이다. pred_cost 없으면(fallback, 예측 미가동/미적재) 보수적 고정
+    스텝 +20%(Jino 확정 2026-07-13, current×1.2).
+
+    100원 단위로 반올림(네이버 침묵 반올림 방어, §5-B) — 반올림 결과가 현재값 이하로
+    떨어지면 다음 100원 단위로 올려 방향 불일치(guardrail_gate가 차단)를 사전에 막는다.
+    이 함수는 사이징(생성 단계) 휴리스틱일 뿐 최종 방어는 여전히 guardrail_gate._check_budget
+    (실행 직전 재검증, 이중 방벽)."""
+    if pred_cost is not None:
+        raw = min(current * 2, max(current + _BUDGET_ROUND_INCREMENT, pred_cost))
+    else:
+        raw = current * 1.2  # Jino 확정 fallback +20%(2026-07-13)
+
+    target = int(round(raw / _BUDGET_ROUND_INCREMENT) * _BUDGET_ROUND_INCREMENT)
+    if target <= current:
+        target = ((current // _BUDGET_ROUND_INCREMENT) + 1) * _BUDGET_ROUND_INCREMENT
+    return target
+
+
+def _classify_budget_round_envelope(deltas_and_candidates: list[tuple[int, dict]]) -> None:
+    """budget_up 후보들의 라운드 봉투 분류(PLAN §5-E, 계획서 §2②) — "회당 총 증가액≤10만원
+    (라운드 합계)"을 그리디로 재현한다.
+
+    deltas_and_candidates: [(target_budget-current_budget, candidate_dict), ...]. candidate_dict
+    가 "total_gap" 키를 가지고 있으면(build()가 threading — 아래 build() 참조) 이 함수가
+    스스로 그 값 내림차순으로 정렬한 후 그리디 누적한다(Fix 6, codex P2 — 호출자가
+    budget_allocator.find_budget_expansion_signals의 정렬을 이미 신뢰할 수 있어도, 이 함수가
+    "재정렬하지 않는다"는 이전 계약은 호출자 순서에 암묵 의존이라 취약했다: 호출자가 실수로
+    비정렬 리스트를 넘기면 조용히 잘못된 분류가 나온다). "total_gap"이 없는 dict(레거시
+    직접호출 테스트 등)는 0으로 취급 — Python sort는 안정정렬이라 전부 같은 키(0)면 원래
+    순서가 그대로 보존돼 기존 동작과 100% 호환된다.
+
+    정렬은 candidate dict 참조 자체를 바꾸지 않는다(같은 객체에 in-place로
+    "budget_auto_eligible"을 세팅) — 그래서 caller가 들고 있는 원본 리스트(어떤 순서든)의
+    각 dict에도 올바른 값이 반영된다.
+
+    누적 ΣΔ가 10만원 이내인 동안은 True(자율 승급 시 자동 발사 대상, 오늘은 반자동이라
+    분류 메타일 뿐 게이트 아님 — PLAN §5-E 참조), 넘기는 순간부터는 False(초과분, 위임이
+    켜져도 반드시 Jino 승인). 앞선 큰 증액이 캡을 넘겨 거부돼도, 뒤이은 더 작은 증액은
+    남은 여유에 들어갈 수 있다 — 이건 "제일 큰 것부터 강제 배정"이 아니라 순서대로 소비하는
+    그리디 누적이다(PLAN §5-E 명시 알고리즘)."""
+    ordered = sorted(deltas_and_candidates, key=lambda dc: dc[1].get("total_gap", 0), reverse=True)
+    cumulative = 0
+    for delta, candidate in ordered:
+        if cumulative + delta <= _ROUND_BUDGET_AUTO_CAP:
+            candidate["budget_auto_eligible"] = True
+            cumulative += delta
+        else:
+            candidate["budget_auto_eligible"] = False
+
+
+def _budget_proposal(signal: dict, target_label: dict, *, forecast: dict | None = None) -> dict:
+    """budget_allocator 신호(D-NAO-22-③) → budget_up 제안. 실행은 P3(D-NAO-42-f)부터 개방
+    (D-NAO-16 4단계 — 반자동 게이트는 그대로, 콘솔 승인 후 실행). marginal ROAS 인과추정은
+    하지 않는다(D-S3-c 연기 사유 유지, 추정 금지) — "예산 캡이 이미 소진됐고 그 안에 이익보장
+    잔존 볼륨이 실측으로 확인됐다"는 사실만 제공.
+
+    target_budget(구조화 컬럼, 실행자는 이 컬럼만 읽는다 — rationale 텍스트 파싱 금지)은
+    _size_budget_up(§5-G)이 정한다. forecast(캠페인 grain pred_cost, F2b/D-NAO-26 계열
+    비인과 예측)가 있으면 사이징에 반영 + rationale에 병기(_forecast_evidence_suffix,
+    입찰 산식과 동일하게 정보 병기만 — 산식 자체를 바꾸지 않음). budget_auto_eligible은
+    여기서 세팅하지 않는다 — 라운드 봉투 분류(_classify_budget_round_envelope)는 build()가
+    이번 회차 전체 우선순위를 보고 나서 하는 별도 단계다(PLAN §5-E)."""
+    current = signal["daily_budget"]
+    pred_cost = forecast.get("pred_cost") if forecast else None
+    target_budget = _size_budget_up(current, pred_cost)
+
     rationale = (
         f"[budget_allocator] 일예산 {signal['daily_budget']}원 소진(누적 {signal['cost']}원, "
         f"{signal['hour']}시 기준) — 동일 캠페인 내 이익보장 성장후보 {signal['growth_candidate_count']}건 "
         f"존재(합산 입찰여력 gap={signal['total_gap']}원). target_roas 근거={target_label['source']}"
         + (f"({target_label['target_roas']})" if target_label.get("target_roas") is not None else "")
-        + "."
+        + f". 목표 일예산={target_budget}원(D-NAO-42-f 사이징, §5-G)."
+        + _forecast_evidence_suffix(forecast)
     )
     return {
         "proposal_type": _BUDGET_UP,
@@ -256,6 +329,7 @@ def _budget_proposal(signal: dict, target_label: dict) -> dict:
             "잠재 신호(성장후보 gap 합계)만 제공, 실제 효과는 승인 후 D+7/14 실측 필요."
         ),
         "status": "pending",
+        "target_budget": target_budget,
     }
 
 
@@ -345,7 +419,9 @@ def build(
     forecast_data: {(target_type, target_id): {"pred_clk","pred_cost","pred_conv_amt"}, ...}(F2b ⓐ,
       D-NAO-26) — proposal_pipeline.compute_forecast_evidence() 반환값. bid_up/bid_down/
       growth_bid_up rationale에 예측치를 병기만 한다(입찰 산식 D-NAO-19 불변). 없는 타겟은
-      예측 없음(fallback/미가동)이라 병기하지 않는다(정직 경계).
+      예측 없음(fallback/미가동)이라 병기하지 않는다(정직 경계). budget_up은 ("campaign",
+      campaign_id) grain(P3, D-NAO-42-f) — rationale 병기뿐 아니라 _size_budget_up(§5-G)
+      사이징에도 쓰인다(harness가 forecast_targets에 캠페인 target을 포함시켜야 채워짐).
     anomalies: anomaly_feed 신호(경량, Phase3) — {"freshness": {...}|None, "spend": [...]}.
       진단 성격(D-3, 사실 정리)이라 optimizer 무관 전 캠페인 대상(diagnosis 보드와 동일 취급).
     diagnosis["boards"]의 pause_candidates/resume_candidates(X1b T3, D-NAO-38)는 실행형
@@ -437,13 +513,25 @@ def build(
             proposals.append(p)
             growth_created += 1
 
-    # budget_allocator(D-NAO-22-③, Phase3): 예산 상한 인상은 D-NAO-5 영구 Confirm 게이트 —
-    # 소진 캠페인 수 자체가 자연히 적어(전체 캠페인의 극히 일부만 캡에 도달) 별도 캡 불필요.
+    # budget_allocator(D-NAO-22-③, Phase3): P3(D-NAO-42-f)부터 실행 개방 — 소진 캠페인 수
+    # 자체가 자연히 적어(전체 캠페인의 극히 일부만 캡에 도달) 개수 캡은 불필요하나, 대신
+    # 라운드 봉투(§5-E "회당 총 증가액≤10만원, 라운드 합계")를 여기서 분류한다.
+    # budget_signals는 통상 total_gap 내림차순(find_budget_expansion_signals)이지만, 이
+    # 순서에 의존하지 않는다(Fix 6, codex P2) — "total_gap"을 candidate dict에 threading해
+    # _classify_budget_round_envelope가 스스로 재정렬하게 한다. ours 필터링만 하고 원본
+    # signal 순서는 바꾸지 않는다(재정렬은 분류 함수 내부에서만 일어남).
+    budget_up_deltas: list[tuple[int, dict]] = []
     for s in budget_signals:
         cid = s["campaign_id"]
         if cid not in ours:
             continue
-        proposals.append(_budget_proposal(s, labels.get(cid)))
+        p = _budget_proposal(s, labels.get(cid), forecast=forecast_data.get(("campaign", cid)))
+        p["total_gap"] = s["total_gap"]  # 분류용 임시 키(persist 직전에 제거 — NaverProposal 컬럼 아님)
+        budget_up_deltas.append((p["target_budget"] - s["daily_budget"], p))
+    _classify_budget_round_envelope(budget_up_deltas)
+    for _, p in budget_up_deltas:
+        del p["total_gap"]
+    proposals.extend(p for _, p in budget_up_deltas)
 
     # budget_allocator 사전경보(F2b, D-NAO-26): 아직 소진 전이지만 오늘 예측이 예산을
     # 넘어설 것으로 보이는 캠페인 — 정보성(실행 대상 아님), budget_signals와 동일하게 ours로 제한.

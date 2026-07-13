@@ -3,6 +3,46 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
+- 날짜: 2026-07-13 아침 (★★**예산 통제 구현 완료 P0~P3.1 + codex GATE PASS + 테스트 1377 pass**. Opus 오케스트레이션·Sonnet 구현·codex 검증. D-NAO-42-g. 브랜치 `claude/naver-ad-budget-control`)
+  - **완료**: P0(swagger+라이브 확정)→P1(스키마+writer `138ad1a`)→P2(가드레일+campaign컨텍스트 `45a453e`)→P3(사이징+라운드봉투+실행 `68d7ef5`)→P3.1(codex P1×4·P2×2 반영 `e5424bf`)→docs `24ca8da`. codex 재검증 GATE PASS. 독립 테스트 확인(원칙22).
+  - **핵심 설계**: 라운드캡=생성단계 봉투(delegation_gate가 budget_up 자동승인을 budget_auto_eligible=True로 강제 — codex가 이 강제 누락 P1 발견)·per-campaign캡=guardrail_gate._check_budget(실행직전, budget_up BEP 근거None fail-closed). writer=PUT ?fields=budget 공유예산 fail-closed. 사이징 pred_cost/+20%·100원반올림.
+  - **★prod 배포 완료(2026-07-13 오전, Jino "지금 배포+P4 준비", 원칙22)**: DB백업→9파일 file-copy·sha256 일치→마이그레이션 e5f6g7h8i9j0 적용→pm2 재시작 online·HTTP 정상·OPEN_ACTIONS에 update_budget·08:07 크론 신코드 크래시0.
+  - **남은 것**: ①**P4 라이브 왕복=트리거 조건 미충족**(04 소진 안 됨=budget_up 미생성; Jino가 04 예산 낮추거나 소진 캠페인 'ours' 지정해야 트리거→콘솔 승인→실 PUT) ②PR은 Jino 승인 후 ③저녁 A/B 03vs04 D1 관찰. 별건: coupang_ops.py:1458 rocket_refresh_status 없음(무관). HANDOFF: `.claude/memory/HANDOFF_ohisell-budget-control-implemented+codex-pass_20260713.md`.
+  - (별건) date-drift 테스트 2건 무관 실패·budget_down 생성기 미구현·Ava 공백=후속.
+- 날짜: 2026-07-13 새벽 (★**예산 통제 계획서 작성 완료(D-NAO-42-f) + '10만=라운드 합계' 확정 + A/B D1 상태 확인**. Opus 설계. 워크트리=naver-ad-execution-canary-9c4b69 세션이나 파일 기록은 6cc75b[D-NAO-42 living-memory 소재지])
+  - **Jino 확정(06:20 KST)**: 예산 정책 ②"회당 총 증가액 ≤10만"=**라운드 합계**(전 캠페인 증액분 합, 캠페인당 아님). 두 캡 동시 = ⓐ라운드 절대캡(합≤10만 자율) + ⓑ캠페인당 +100%. 트랙 D-NAO-42-f 갱신.
+  - **계획서 완료**: `docs/PLAN_naver-ad-budget-control.md`(Opus, 실측 grounding). 핵심 설계: execute()=per-proposal이라 **라운드캡=생성단계 봉투**(proposal_pipeline)·per-proposal캡=guardrail_gate._check_budget(실행직전). 신설=target_budget 컬럼·update_campaign_budget writer·_check_budget·campaign 컨텍스트 브랜치·budget_sizer. ⚠️swagger 캠페인 budget PUT 미확정=P0 확인(추정금지). **Jino 계획 승인 대기 — 코딩 미착수**. §6 열린질문2건(budget_auto_eligible 컬럼 지금/나중·사이징 fallback 스텝).
+  - **A/B D1(07-13) 상태**: 04 카나리 여전히 라이브(optimizer=ours 재확인). 06:20엔 04 제안 미생성(08:00 크론 전)·MOP 6245 집행 오늘 시작·03 종일치는 07-14 07:30 수집. **의미있는 D1 대조=오늘 저녁**(원칙22, 지금 "관찰완료" 금지). 크론 6b2c0462는 죽은 세션 종속→저녁 새 세션 수동 실행 필요. 로그 `mop_vs_ours_03_04_comparison.md` D1 append.
+  - ⚠️ Ava 공백 지속(자동 대결 승급 선결). **다음**: ①Jino 계획 승인+§6 확정 → Sonnet P0(swagger)→P1~P4 구현 ②저녁 D1 관찰. HANDOFF: `.claude/memory/HANDOFF_ohisell-budget-plan-drafted+ab-d1_20260713.md`.
+- 날짜: 2026-07-12 밤 (★★**04 첫 실입찰 카나리 개방(반자동) + MOP(03)vs우리(04) A/B 실험 라이브 + 예산 통제 개방 결정**. Opus 오케스트레이션·설계, 서브에이전트 게이팅 매핑. D-NAO-42-e/f)
+  - **04 카나리 개방**: `PUT localhost:8001/api/naver/ad/campaign-settings optimizer=ours`(cmp-…008514959, 감사로그 none→ours). 위임 미설정→자동발사 0, 입찰 제안 pending→**Jino 콘솔 승인분만 실입찰**(입찰만, 정지/재개 금지=D-NAO-40 회피). X1b 스키마 prod 배포 확인(target_bid 컬럼). 우리 자율쓰기 0(dry0 11건=external 감지).
+  - **A/B 철학 대결**: 03(MOP 유닛6245 CLICK/GROWTH)vs04(우리 BEP-ROAS). baseline 03=32,411/7일·04=7,214/7일(03≈4.5×→lift%비교). 로그 `docs/references/data/mop_ui/mop_vs_ours_03_04_comparison.md`. 관찰크론 6b2c0462(07-13 20:20 KST). 내일 08:00 크론이 04 입찰 제안 생성.
+  - **예산 통제 개방(D-NAO-42-f, D-NAO-34 개정)**: 우리MOP=MOP Pro+ 무제한이되 안전가드레일(BEP이익하한·스톱로스·클램프) 유지. 정책: 증액 Jino승인·회당 총증가≤10만 자율·캠페인당+100%·BEP하한 예산에도 확장·감액자유. **계획서 미작성=다음 Opus 세션**(`docs/PLAN_naver-ad-budget-control.md`, "10만=라운드합계 vs 캠페인당" 확인 먼저).
+  - ⚠️ **Ava 공백**(expert_review_run 07-10 마지막)→자동경로 막힘=자동 대결 승급 선결. **다음 세션 라우팅=복잡 Opus·단순 Sonnet, 끝까지 자동+신선도 유지**. HANDOFF: `.claude/memory/HANDOFF_ohisell-mop-vs-ours-04-canary+budget-scope_20260712.md`.
+- 날짜: 2026-07-12 저녁 (★B안 실행 — **MOP 최적화 유닛 6245 생성·저장 완료**. 03.아이폰_강화유리를 MOP에 맡겨 성장 관찰 시작. D-NAO-42-d)
+  - ★목적 재정렬(Jino): MOP가 실제 어떻게 최적화하는지 학습·복제(네이버 광고 운영 아님). 00.아이폰_17은 MOP 밖(predicted:false)이라 관찰 불가 → 이력 있는 03에 MOP 유닛 켬.
+  - **네이버 캠페인 켜기 ≠ MOP 최적화**: 명시적 유닛 생성·저장해야 MOP가 입찰집행. Basic=유닛1개·30그룹·전문가모드잠금(이지모드만, 예산=7일평균 실지출, 네이버 하루예산 캡 무관).
+  - **유닛 6245**: CLICK·GROWTH·42,130원(7일평균+20%)·03 24그룹·07-13 집행시작·계속·INSPECTING. `POST /optimizations/sa/shopping/easy`.
+  - **다음(07-13~)**: MOP가 03 성장시키는 과정 매일 관찰 — 입찰횟수(플라이트)·입찰계획·소재 입찰가 변화·예측·리포트 전항목 수집→우리판 MOP 복제. 로그 `mop_unit_6245_growth_observation.md`.
+- 날짜: 2026-07-12 오후 (★A안 **MOP 라이브 관찰 D+1(계속) — SPA 엔진·목표입찰 메커니즘 완전 매핑 + MOP는 day-1엔 작업불가 결론**. D-NAO-42-c. Opus 조사·분석)
+  - **★날짜 정정**: 오늘=07-12(세션 중 07-13 오기 전부 정정, 파일명 20260712). Jino 지적 "켠 시점(07-11 저녁)부터 지금까지 봐야". 켠~지금 MOP: 07-11 imp181·clk0·rank4.07 / 07-12부분 imp57·clk0·rank7.21 = 238노출·0클릭·하루치 → "CTR0%=소재문제" 결론 **철회**(표본 과소).
+  - **SPA 엔진 경로 확정**: `/dashboard/saShopping/*`=존재안함(500). SPA=`/optimizations/sa/shopping/*`·`/report/opt/*`. 광고주전환=`sessionStorage.advertiserId=756`. MOP 판단신호=후보목록 `predicted`(ML모델)·`inBidding` 플래그. 우리 3그룹 predicted:false·inBidding:false(계정 450중 predicted150·inBidding0)=이력0이라 MOP가 예측모델조차 안 만듦.
+  - **4099 리포트=소멸**(report/opt 보존 05-13~07-11 ~2개월, 활동기 밖 전지표0). 남은 건 설정 스냅샷(`spa_opt_4099_detail_20260712.json`).
+  - **★목표입찰 메커니즘 완전 매핑**: 소재1개에 입찰기준키워드+목표(Avg Rank/ROAS/CPA)+최대입찰가·변동폭 → 우리 BEP-ROAS 다이얼+가드레일과 동형. **소재ID=SA API로 확보**(UI불필요, `/ncc/ads?nccAdgroupId=`; `00iphone17_soljae_ids_20260712.md`).
+  - **★실측 3건**: ①03.6H사생활 0노출 원인=**소재4개 연동 비정상**(statusReason=AD_ABNORMAL_INTERLOCK; 토글 ON·userLock=false → 정지 아님). ⚠️처음 status만 보고 "PAUSED=정지" 오보고→statusReason 정정. ②현재입찰가=**1,390원**(50원은 애드그룹기본값, 소재는1390→낮은입찰 원인 아님). ③목표입찰 등록시도→hero소재(739856,132노출) 정상인식하나 **keywordStats=[]**(2주실적없음)→저장 disabled=등록불가.
+  - **★★최종결론**: MOP 노출레버 둘 다 history-gated(입찰최적화=7일예산+predicted, 목표입찰=2주키워드실적)→**day-1엔 MOP 작업 불가. 시동 본질=돈 아니라 2주 이력 쌓기.**
+  - **결정 정정**: "03 PAUSE 해제" **무효**(03은 정지 아님=소재 연동 비정상, 토글 이미 ON). 03 재개=소재 연동 정상화 필요(상품/소재 영역, Jino). **다음=03 연동이상 원인 정리·Jino 판단 대기; 관찰은 정상 서빙 광고그룹 3개(01·02·03) 모두 매일 스냅샷 2주 축적·2주후 레버 재확인**. failures.jsonl 기록(SA API env 로딩=set -a;. backend/.env).
+- 날짜: 2026-07-12 (★A안 **MOP 라이브 관찰 D+1** — HANDOFF `.claude/memory/HANDOFF_ohisell-mop-A-D1-observation_20260712.md`. Opus 관찰·분석)
+  - **★advertiserId 정정 1422→756**(원칙22): 직전이 "756틀림 1422맞다"고 반대로 오기. 1422=Google Ads라 네이버 조회 전부 `-`(→"지출0 탓" 오귀속). 756=오하이_구민정(우리 네이버 스마트스토어 광고계정). `GET /v1/advertisers`로 확정. `-`=계정에 데이터 없음(756에선 cost0인 우리캠페인도 imp181 정상). mop_snapshot.js ADV=756 수정.
+  - **00.아이폰_17(756)**: 07-11 imp181·clk0·cost0(prod 정확일치)·7일동일·07-12 imp57clk0. 이지모드 예산 0원유지. MOP SA_SHOPPING/NAVER 25캠페인에 활성 등록됨.
+  - **MOP 엔진 산출물 캡처**(Jino질문): `docs/references/data/mop_ui/mop_engine_outputs.md`. 엔드포인트 `/v1/dashboard/sa/{collection|projection|flight|abnormal}`. 실측=ML모델40개 상시생성, 플래닝·플라이트는 활성유닛0이라 산출0. 유닛 4099(ROAS·EXPERT)·1119(CONVERSION·EXPERT) 종료. ★MOP EXPERT모드=숫자목표라 우리 BEP-ROAS에 근접("숫자목표없음"은 이지모드만 본 오해).
+  - **크래시 해결**: 동기XHR→비동기fetch(4회 크래시 원인규명, failures.jsonl). **D-NAO-41 크론 재확인 완료**(07-11 자체생성·수집).
+  - **Jino 결정 대기 2건**: ①시동(입찰↑로 첫지출→MOP유닛생성, 추천A) ②모드(EXPERT-ROAS 방향, 추천). **다음=SPA 전용 엔진 캡처 + 유닛 최적화리포트**.
+- 날짜: 2026-07-11 저녁 (★A안 **MOP 라이브 관찰 착수** — 실제 MOP가 캠페인 관리하는 걸 관찰해 우리판 naver_ad와 비교. Opus 오케스트레이션·분석, Sonnet 위임 조작·조사. D-NAO-42)
+  - **대상 캠페인 변경(Jino)**: 05.아이폰_사생활보호 → **00.아이폰_17**(cmp-a001-02-000000009793536, 쇼핑검색). Jino가 07-11 MOP 테스트용으로 캠페인+애드그룹3(강화유리/사생활/6H사생활) ON, 하루예산 150만→**5만원** 조정. **자동화 경로=MOP 유지(A안).**
+  - **MOP 관찰 방법 확립(원칙22)**: API 백엔드 `be.mopapp.net`, advertiserId **1422**(≠구 HANDOFF 756), 인증 헤더 `x-session-id`(=sessionStorage.sessionId, 쿠키 httpOnly), 캠페인 실적 `POST /v1/report/campaign/1422/summary` + body `saShoppingCampaigns.naverCampaignIds:[cid]`. 재현 스크립트 `docs/references/data/mop_ui/mop_snapshot.js`, baseline `mop_live_A_00iphone17.md`. MOP 이지모드 위저드 실측: 유닛 신규1개 가능(Basic 0/1), 운영모드 균형(기본)/성장, 하루예산=7일평균 기반(현재 7일지출0→**0원 계산**), 제외키워드 Pro잠김. **저장 안 함**(돈 게이트).
+  - **확정 사실 3건**: ①네이버 stat API=**일 단위 최소 해상도**(timeIncrement "1"/"allDays"만, hourly 없음; 당일은 cycleBaseTm 부분치)→실시간 데이터 불가. ②우리 목표는 **단일**(D-NAO-1 BEP하한 내 매출극대); `mode`(성장/회복/런칭/방어 4종) 저장만·미반영, `gave_score` 미배선, MOP식 다중목표 개념 없음→"MOP식 목표 채택"=신규 구현. BEP 하한은 실작동, 유지 기본. ③MOP 내부는 블랙박스→행동 궤적 역설계로 관찰.
+  - **다음(D+1, 07-12)**: MOP 재로그인→mop_snapshot.js 실행→07-11 데이터 MOP 반영·예산 0원탈출 확인→(Jino 승인 시) MOP 최적화 유닛 생성→러닝 관찰. **미결**: gstack 헤디드 세션 반복 로그아웃 원인. **보류**: 유닛 생성(저장=돈)은 지출 반영 후. **방향 미확정**: mode 실효화·다중목표 채택은 며칠 관찰 후 결정(설계 선고정 금지, Jino).
 - 날짜: 2026-07-11 (★★네이버 **일별 수집 파이프라인 자체생성 복구 완료·prod 배포·라이브 백필 검증** — Opus 근본원인+설계·검증, Sonnet 구현. X 스프린트와 독립한 별개 결함, D-NAO-41)
   - **발단**: X2+X3 배포 상태 라이브 점검(원칙22) 중, 일별 수집 크론 3개(ad_costs 07:00·ad_daily 07:30·search_term 07:40)가 2026-07-11 아침 `GET /stat-reports`→`resp.json()` JSONDecodeError로 전멸 발견. naver_ad_daily 07-10 43/1800행·search_term 07-09 정지 → 최적화 루프 원료 저하.
   - **근본원인(완전 확정, 라이브 실증)**: `/stat-reports`가 계정에 보고서 0개일 때 HTTP 200+빈 바디(0바이트)→`resp.json()` 크래시. 우리 수집기는 AD/AD_CONVERSION/SHOPPINGKEYWORD_DETAIL을 조회만 하고 생성 안 함(EXPKEYWORD만 생성). 외부 행위자(MOP/네이버 정기보고서)가 만들어준 것에 기생하다 멈춤(2026-07-10 MOP 유닛 종료와 일치). `POST {reportTp:AD,statDt}`→BUILT→4199행으로 3종 자체생성 가능 실증.

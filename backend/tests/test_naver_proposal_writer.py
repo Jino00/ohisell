@@ -645,3 +645,248 @@ def test_account_brief_singleton_new_day_creates_new_row(db):
     today_brief = proposal_writer.account_brief_singleton(db, diagnosis, AS_OF)
     assert today_brief.id != yesterday_brief.id
     assert db.query(NaverProposal).filter(NaverProposal.proposal_type == "account_brief").count() == 2
+
+
+# ── P3(D-NAO-42-f): 예산 사이징(_size_budget_up, §5-G) ──────────────────────────
+
+
+def test_size_budget_up_pred_cost_clamped_to_plus_100_pct():
+    """pred_cost가 current×2를 넘으면 +100% 캡(계획서 §2③)에서 클램프된다."""
+    assert proposal_writer._size_budget_up(10_000, 50_000) == 20_000
+
+
+def test_size_budget_up_pred_cost_used_when_within_range():
+    """pred_cost가 current+1증분~current×2 사이면 그대로(추세 반영) 채택."""
+    assert proposal_writer._size_budget_up(10_000, 15_000) == 15_000
+
+
+def test_size_budget_up_pred_cost_floored_at_current_plus_one_increment():
+    """pred_cost가 current보다 조금만 높으면(증분 미만) 최소 +1증분(100원)까지는 올린다."""
+    assert proposal_writer._size_budget_up(10_000, 10_050) == 10_100
+
+
+def test_size_budget_up_fallback_plus_20_pct_when_no_forecast():
+    """예측 없음(fallback) — Jino 확정 +20%(2026-07-13)."""
+    assert proposal_writer._size_budget_up(10_000, None) == 12_000
+
+
+def test_size_budget_up_rounds_to_nearest_100():
+    """100원 단위로 반올림(네이버 침묵 반올림 방어) — 10333×1.2=12399.6 → 12400."""
+    assert proposal_writer._size_budget_up(10_333, None) == 12_400
+
+
+def test_size_budget_up_never_leq_current_when_rounding_collapses():
+    """200×1.2=240 → 100원 단위 반올림하면 200(=current)으로 떨어짐 — 방향 불일치를
+    막기 위해 다음 100원 단위(300)로 올린다."""
+    assert proposal_writer._size_budget_up(200, None) == 300
+
+
+# ── P3(D-NAO-42-f): 라운드 봉투(_classify_budget_round_envelope, §5-E) ──────────
+
+
+def test_round_envelope_all_fit_within_cap():
+    candidates = [{"target_budget": 0} for _ in range(3)]
+    deltas = [(30_000, candidates[0]), (30_000, candidates[1]), (30_000, candidates[2])]
+    proposal_writer._classify_budget_round_envelope(deltas)
+    assert [c["budget_auto_eligible"] for c in candidates] == [True, True, True]
+
+
+def test_round_envelope_marks_overflow_false_at_boundary():
+    """합이 10만원을 넘는 순간부터 False — 그 뒤도 계속 False가 아니라, 남은 여유에
+    들어가는 더 작은 후보는 다시 True가 될 수 있다(그리디 순차 소비)."""
+    c1, c2, c3 = {}, {}, {}
+    deltas = [(90_000, c1), (20_000, c2), (5_000, c3)]
+    # c1: 누적 90,000 ≤ 100,000 → True
+    # c2: 누적 90,000+20,000=110,000 > 100,000 → False(누적은 갱신되지 않음, 90,000 유지)
+    # c3: 90,000+5,000=95,000 ≤ 100,000 → True(뒤가 앞선 거부 후 남은 여유에 들어감)
+    proposal_writer._classify_budget_round_envelope(deltas)
+    assert c1["budget_auto_eligible"] is True
+    assert c2["budget_auto_eligible"] is False
+    assert c3["budget_auto_eligible"] is True
+
+
+def test_round_envelope_exact_boundary_is_eligible():
+    """정확히 10만원 도달(초과 아님)은 True."""
+    c1 = {}
+    proposal_writer._classify_budget_round_envelope([(100_000, c1)])
+    assert c1["budget_auto_eligible"] is True
+
+
+def test_round_envelope_single_over_cap_candidate_is_false():
+    c1 = {}
+    proposal_writer._classify_budget_round_envelope([(100_001, c1)])
+    assert c1["budget_auto_eligible"] is False
+
+
+# ── Fix 6(codex P2): 라운드 봉투가 caller 순서에 의존하지 않고 self-sort ──────────
+
+
+def test_round_envelope_self_sorts_by_total_gap_regardless_of_caller_order():
+    """caller가 total_gap 오름차순(우선순위 역순)으로 넘겨도, 함수가 스스로 내림차순
+    정렬한 후 그리디 누적해야 한다 — test_round_envelope_marks_overflow_false_at_boundary
+    와 동일한 90,000/20,000/5,000 경계 수치를 쓰되, 입력 순서만 뒤집는다."""
+    c1 = {"total_gap": 900}  # 최우선(가장 큰 gap), delta=90,000
+    c2 = {"total_gap": 500}  # 2순위, delta=20,000
+    c3 = {"total_gap": 100}  # 최하위(가장 작은 gap), delta=5,000
+    # 일부러 우선순위 역순(작은 gap부터)으로 전달
+    deltas = [(5_000, c3), (20_000, c2), (90_000, c1)]
+
+    proposal_writer._classify_budget_round_envelope(deltas)
+
+    assert c1["budget_auto_eligible"] is True   # 90,000 ≤ 100,000
+    assert c2["budget_auto_eligible"] is False  # 90,000+20,000=110,000 > 100,000
+    assert c3["budget_auto_eligible"] is True   # 90,000+5,000=95,000 ≤ 100,000(그리디 소비)
+
+
+def test_round_envelope_missing_total_gap_defaults_to_zero_preserves_legacy_order():
+    """total_gap 키가 없는 legacy 호출(직접 dict 전달)은 0으로 취급 — 전부 동률이라 안정
+    정렬로 원래 순서가 보존돼 기존 계약(test_round_envelope_all_fit_within_cap 등)과
+    100% 호환된다."""
+    candidates = [{} for _ in range(3)]
+    deltas = [(30_000, candidates[0]), (30_000, candidates[1]), (30_000, candidates[2])]
+    proposal_writer._classify_budget_round_envelope(deltas)
+    assert [c["budget_auto_eligible"] for c in candidates] == [True, True, True]
+
+
+# ── P3(D-NAO-42-f): build() 라운드 봉투 + 사이징 배선 ────────────────────────────
+
+
+def test_build_budget_up_sets_target_budget_from_sizer(db):
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis()
+
+    out = proposal_writer.build(db, diagnosis, budget_signals=[_budget_signal(daily_budget=10_000)], as_of=AS_OF)
+    assert len(out) == 1
+    assert out[0]["target_budget"] == 12_000  # fallback +20%(예측 없음)
+
+
+def test_build_budget_up_uses_campaign_forecast_for_sizing(db):
+    """forecast_data에 ("campaign", campaign_id) grain이 있으면 사이징에 반영(§5-G)."""
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis()
+    forecast_data = {("campaign", "cmp-ours"): {"pred_clk": 0, "pred_cost": 18_000, "pred_conv_amt": 0}}
+
+    out = proposal_writer.build(
+        db, diagnosis, budget_signals=[_budget_signal(daily_budget=10_000)],
+        forecast_data=forecast_data, as_of=AS_OF,
+    )
+    assert len(out) == 1
+    assert out[0]["target_budget"] == 18_000
+    assert "예측(오늘)" in out[0]["rationale"]
+
+
+def test_build_budget_up_round_envelope_classifies_by_total_gap_priority(db):
+    """budget_signals는 이미 total_gap 내림차순 — build()가 그 순서 그대로 그리디 분류한다.
+    daily_budget=90,000(fallback +20%→108,000, delta=18,000)이 1순위, 45,000(→54,000,
+    delta=9,000)이 2순위: 18,000+9,000=27,000 ≤ 10만 → 둘 다 True."""
+    db.add(NaverCampaignSettings(campaign_id="cmp-a", optimizer="ours"))
+    db.add(NaverCampaignSettings(campaign_id="cmp-b", optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis()
+    signals = [
+        _budget_signal(campaign_id="cmp-a", daily_budget=90_000, total_gap=900),
+        _budget_signal(campaign_id="cmp-b", daily_budget=45_000, total_gap=100),
+    ]
+
+    out = proposal_writer.build(db, diagnosis, budget_signals=signals, as_of=AS_OF)
+    by_cid = {p["campaign_id"]: p for p in out}
+    assert by_cid["cmp-a"]["budget_auto_eligible"] is True
+    assert by_cid["cmp-b"]["budget_auto_eligible"] is True
+
+
+def test_build_budget_up_round_envelope_overflow_marks_false(db):
+    """1순위 캠페인 단독으로 이미 10만원을 넘으면 False — 그 다음 더 작은 후보는 남은
+    여유(=10만 그대로, 1순위가 소비 안 됨)에 들어가 True가 될 수 있다."""
+    db.add(NaverCampaignSettings(campaign_id="cmp-a", optimizer="ours"))
+    db.add(NaverCampaignSettings(campaign_id="cmp-b", optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis()
+    # cmp-a: daily_budget=600,000 → fallback +20%=720,000, delta=120,000(>10만 단독 초과)
+    # cmp-b: daily_budget=10,000 → fallback +20%=12,000, delta=2,000(단독으로는 10만 이내)
+    signals = [
+        _budget_signal(campaign_id="cmp-a", daily_budget=600_000, total_gap=900),
+        _budget_signal(campaign_id="cmp-b", daily_budget=10_000, total_gap=100),
+    ]
+
+    out = proposal_writer.build(db, diagnosis, budget_signals=signals, as_of=AS_OF)
+    by_cid = {p["campaign_id"]: p for p in out}
+    assert by_cid["cmp-a"]["budget_auto_eligible"] is False
+    assert by_cid["cmp-b"]["budget_auto_eligible"] is True
+
+
+def test_build_budget_up_round_envelope_self_sorts_when_signals_passed_unsorted(db):
+    """Fix 6(codex P2): build()가 budget_allocator의 정렬을 무조건 신뢰하지 않는다 —
+    signals를 일부러 gap 오름차순(최하위 캠페인 먼저)으로 넘겨도
+    test_build_budget_up_round_envelope_overflow_marks_false와 동일한 결과가 나와야 한다.
+    fallback +20% 사이징: 450,000→540,000(Δ90,000) / 100,000→120,000(Δ20,000) /
+    25,000→30,000(Δ5,000) — 90k+20k=110k>10만(cmp-b는 False), 90k+5k=95k≤10만(cmp-c는 True)."""
+    for cid in ("cmp-a", "cmp-b", "cmp-c"):
+        db.add(NaverCampaignSettings(campaign_id=cid, optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis()
+    signals = [
+        _budget_signal(campaign_id="cmp-c", daily_budget=25_000, total_gap=100),   # 최하위, 먼저 나열
+        _budget_signal(campaign_id="cmp-b", daily_budget=100_000, total_gap=500),
+        _budget_signal(campaign_id="cmp-a", daily_budget=450_000, total_gap=900),  # 최우선, 나중에 나열
+    ]
+
+    out = proposal_writer.build(db, diagnosis, budget_signals=signals, as_of=AS_OF)
+    by_cid = {p["campaign_id"]: p for p in out}
+    assert by_cid["cmp-a"]["budget_auto_eligible"] is True
+    assert by_cid["cmp-b"]["budget_auto_eligible"] is False
+    assert by_cid["cmp-c"]["budget_auto_eligible"] is True
+    # threading용 임시 키는 최종 제안 dict에 남으면 안 됨(persist가 NaverProposal(**p)로
+    # 그대로 언패킹하는데 total_gap은 컬럼이 아니라서 TypeError가 남).
+    assert "total_gap" not in by_cid["cmp-a"]
+    assert "total_gap" not in by_cid["cmp-b"]
+    assert "total_gap" not in by_cid["cmp-c"]
+
+
+def test_build_budget_down_leaves_budget_auto_eligible_none(db):
+    """budget_down 경로는 아직 생성기가 없음(§5-G "감액은 별도 신호, Phase3 선택") —
+    budget_up만 봉투 분류 대상이므로 다른 유형(bid_down 등)은 budget_auto_eligible이
+    build() 단계에서 아예 세팅되지 않는다(None, persist가 컬럼 기본값으로 남김)."""
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis(bleeding_keywords=[_bleeding_row()])
+
+    out = proposal_writer.build(
+        db, diagnosis, bid_sims={("keyword", "nkw-1"): _sim(direction="down")}, as_of=AS_OF,
+    )
+    assert len(out) == 1
+    assert "budget_auto_eligible" not in out[0]
+
+
+# ── P3(D-NAO-42-f): persist()가 target_budget/budget_auto_eligible을 그대로 저장 ──
+
+
+def test_persist_saves_target_budget_and_budget_auto_eligible(db):
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis()
+
+    candidates = proposal_writer.build(
+        db, diagnosis, budget_signals=[_budget_signal(daily_budget=10_000)], as_of=AS_OF,
+    )
+    saved = proposal_writer.persist(db, candidates)
+    db.commit()
+    assert len(saved) == 1
+    assert saved[0].target_budget == 12_000
+    assert saved[0].budget_auto_eligible is True
+
+
+def test_persist_non_budget_proposal_leaves_budget_columns_none(db):
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis(bleeding_keywords=[_bleeding_row()])
+
+    candidates = proposal_writer.build(
+        db, diagnosis, bid_sims={("keyword", "nkw-1"): _sim(direction="down")}, as_of=AS_OF,
+    )
+    saved = proposal_writer.persist(db, candidates)
+    db.commit()
+    assert len(saved) == 1
+    assert saved[0].target_budget is None
+    assert saved[0].budget_auto_eligible is None

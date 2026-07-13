@@ -514,6 +514,48 @@ def test_run_daily_passes_forecast_evidence_to_proposal_writer(db, monkeypatch):
     }
 
 
+def test_run_daily_passes_campaign_forecast_evidence_for_budget_signals(db, monkeypatch):
+    """P3(D-NAO-42-f): budget_up 사이징(proposal_writer._size_budget_up, §5-G)이 캠페인
+    grain pred_cost를 쓰려면 run_daily이 budget_signals의 campaign_id를 forecast_targets에
+    포함시켜야 한다 — compute_forecast_evidence 자체는 grain을 하드코딩하지 않는다."""
+    _seed_bep(db)
+    db.add(NaverCampaignSettings(campaign_id="cmp1", optimizer="ours"))
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-grow", campaign_id="cmp1",
+                        campaign_type="WEB_SITE", name="성장후보", status="on", bid_amt=70))
+    _row(db, AS_OF, "cmp1", "WEB_SITE", "grp1", "nkw-grow", 1000, 100, 5000, direct=1_000_000)
+    db.add(Order(channel_id=6, platform_product_id="cp-1", order_number="ORD-2",
+                  order_date=AS_OF, status="정상", selling_price=Decimal("990000")))
+    db.add(_hourly_snapshot("cmp1", cost=10000, daily_budget=10000, ad_date=kst_today()))
+    db.add(NaverForecastDaily(
+        target_date=kst_today(), grain="campaign", scope_key="cmp1",
+        pred_clk=0, pred_cost=15000, pred_conv_amt=0,
+    ))
+    db.commit()
+
+    monkeypatch.setattr(
+        proposal_pipeline.fetcher, "estimate_average_position_bid",
+        lambda device, items: [{"nccKeywordId": it["key"], "bid": 100_000} for it in items],
+    )
+
+    captured = {}
+    real_build = proposal_pipeline.proposal_writer.build
+
+    def _spy_build(*args, **kwargs):
+        captured.update(kwargs)
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(proposal_pipeline.proposal_writer, "build", _spy_build)
+
+    proposal_pipeline.run_daily(db)
+    assert captured.get("forecast_data", {}).get(("campaign", "cmp1")) == {
+        "pred_clk": 0, "pred_cost": 15000, "pred_conv_amt": 0,
+    }
+    # 실제로 사이징에 반영됐는지도 확인 — target_budget이 pred_cost(15000)를 채택했는지.
+    saved = db.query(NaverProposal).filter(NaverProposal.proposal_type == "budget_up").all()
+    assert len(saved) == 1
+    assert saved[0].target_budget == 15000
+
+
 def test_run_daily_generates_anomaly_spend_spike_proposal(db, monkeypatch):
     _seed_bep(db)
     db.add(NaverCampaignSettings(campaign_id="cmp1", optimizer="ours"))
