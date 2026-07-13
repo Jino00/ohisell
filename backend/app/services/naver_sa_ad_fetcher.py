@@ -767,8 +767,17 @@ def fetch_campaign_daily_backfill(campaign_id: str, date_from: date, date_to: da
 _KEYWORDSTOOL_BATCH = 5  # 실측 문서(ncc-keywordstool.json): hintKeywords 최대 5개/호출
 
 
-def _parse_qc(v: str) -> int:
-    """'<10' 등 검색량 문자열 → 정수(하한 sentinel 5)."""
+def _parse_qc(v) -> int:
+    """월검색량 필드(monthlyPcQcCnt 등) → 정수(하한 sentinel 5).
+
+    네이버 keywordstool는 같은 필드를 고검색량 키워드엔 int, 저검색량엔 '< 10' 문자열로
+    섞어 반환한다(2026-07-13 실사고: int일 때 .strip() → AttributeError로 sync_naver_keyword
+    _volume_job 크래시). int/float/None/str 모두 방어한다.
+    """
+    if isinstance(v, bool):  # bool은 int 서브클래스 — 검색량 아님, 방어적으로 0
+        return 0
+    if isinstance(v, (int, float)):
+        return int(v)
     v = (v or "").strip()
     if v.startswith("<"):
         return 5
