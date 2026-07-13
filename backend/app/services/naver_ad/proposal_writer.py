@@ -4,13 +4,14 @@
 #   SA간 직접 호출 금지(원칙18) — harness(proposal_pipeline, T5)가 diagnosis·bid_sims를 넘긴다.
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from sqlalchemy.orm import Session
 
 from app.models import NaverCampaignSettings, NaverProposal
 from app.services.naver_ad import campaign_target_resolver, growth_sweeper
 from app.services.naver_ad.trigger_watch import PROPOSAL_TYPE_CPC, PROPOSAL_TYPE_PACING
+from app.utils.kst import kst_today
 
 _NEGATIVE = "negative_keyword"
 _GROWTH_BID_UP = "growth_bid_up"
@@ -502,7 +503,12 @@ def account_brief_singleton(db: Session, diagnosis: dict, as_of: date) -> NaverP
     harness가 여러 번 재실행해도 중복 생성 없음, as_of 자체가 아니라 '오늘 실행 여부'로
     판단해야 08:00 재시도/수동 재실행 시에도 안전).
     """
-    today_start = datetime.combine(date.today(), datetime.min.time())
+    # dedup 경계는 KST 달력일이어야 한다. created_at은 server_default(UTC)라, date.today()
+    # (서버 로컬=UTC)로 today_start를 잡으면 08:00 KST 실행분(=전날 23:00 UTC)과 09:00 KST
+    # 이후 재실행분(=당일 UTC)이 서로 다른 UTC일로 갈려 같은 KST일에 중복 브리프가 생긴다
+    # (2026-07-13 실측: id 502·544 중복, catch-up/수동 재실행 시 재현). KST 자정을 UTC로
+    # 환산해 비교한다([[sqlite-server-default-now-is-utc]], learning_loops와 동일 kst_today 채택).
+    today_start = datetime.combine(kst_today(), datetime.min.time()) - timedelta(hours=9)
     existing = db.query(NaverProposal).filter(
         NaverProposal.proposal_type == _ACCOUNT_BRIEF,
         NaverProposal.created_at >= today_start,
