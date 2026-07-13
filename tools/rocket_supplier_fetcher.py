@@ -604,6 +604,7 @@ def _do_run(cfg: dict) -> int:
         try:
             requests.post(
                 cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/rocket/fetch-success",
+                headers={"X-Ingest-Token": cfg["ingest_token"]},
                 timeout=10,
             )
         except Exception:  # noqa: BLE001
@@ -628,6 +629,7 @@ def _prod_rocket_claim(cfg: dict) -> dict:
     try:
         r = requests.post(
             cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/rocket/refresh-claim",
+            headers={"X-Ingest-Token": cfg["ingest_token"]},
             timeout=10,
         )
         return r.json() if r.status_code == 200 else {}

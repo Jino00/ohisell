@@ -411,7 +411,18 @@ def test_persist_allows_new_target_and_allows_after_previous_resolved(db):
     assert len(saved) == 1  # 기존 건은 approved라 dedup 대상 아님
 
 
-def test_account_brief_singleton_created_once_per_day(db):
+def test_account_brief_singleton_created_once_per_day(db, monkeypatch):
+    # 시간 고정(freeze): 싱글톤은 date.today()로 '오늘 자정' 컷오프를 만들고 created_at >= 컷오프로
+    # 오늘자 기존 브리프를 찾는다. 그러나 created_at은 func.now()(SQLite에선 UTC)라 KST 00:00~09:00
+    # 사이엔 first.created_at이 '어제(UTC)'로 찍혀 재호출 시 기존 것을 못 찾고 중복 생성한다(날짜
+    # 드리프트). date.today()를 AS_OF로 고정하고 created_at을 같은 날 정오로 결정적으로 찍어 제거한다.
+    class _FrozenDate(date):
+        @classmethod
+        def today(cls):
+            return AS_OF
+
+    monkeypatch.setattr(proposal_writer, "date", _FrozenDate)
+
     diagnosis = _diagnosis(
         expansion_bucket={"cost_share": 0.3, "roas_corrected": 1.2},
         keyword_triage={"judgeable": 10, "growth_candidate": 2, "dead": 5},
@@ -419,6 +430,7 @@ def test_account_brief_singleton_created_once_per_day(db):
         starving_winners=[],
     )
     first = proposal_writer.account_brief_singleton(db, diagnosis, AS_OF)
+    first.created_at = datetime.combine(AS_OF, datetime.min.time()).replace(hour=12)  # func.now()(UTC) 덮어쓰기
     db.commit()
     assert first.proposal_type == "account_brief"
     assert "as_of=2026-07-06" in first.rationale

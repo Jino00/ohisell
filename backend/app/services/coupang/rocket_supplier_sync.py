@@ -18,6 +18,7 @@ from app.models import (
     CoupangRocketPurchaseOrder,
     CoupangRocketPurchaseOrderItem,
     CoupangRocketSettlement,
+    CoupangWingCookie,
 )
 from app.utils.kst import kst_now
 
@@ -159,3 +160,75 @@ def ingest_po_items(db: Session, purchase_order_seq: int, vendor_id: str, rows: 
     db.commit()
     log.info("rocket PO 발주상세 ingest: po=%d vendor=%s skus=%d", purchase_order_seq, vendor_id, len(recs))
     return {"ingested": len(recs), "purchase_order_seq": purchase_order_seq}
+
+
+# ════════════════════════════════════════════════
+# ④ 페처 갱신 트리거(버튼-poll) — Wing 패턴 복제(ohitech_ad_sync 동형)
+#   로켓배송 supplier.coupang.com은 Akamai 봇방어(D-1) → 백엔드 직접 fetch 불가.
+#   UI '로켓 갱신' 버튼 → refresh_requested_at set → Mac 헤드풀 CDP 페처(S3)가 다음 폴에서
+#   claim(소비) → headful fetch·push → run 성공 시 mark_rocket_fetch_success로 완료 감지.
+#   상태는 CoupangWingCookie(account_key="COUPANG_ROCKET") 한 행에 저장(민감값 없음).
+# ════════════════════════════════════════════════
+_ROCKET_ACCOUNT = "COUPANG_ROCKET"
+
+
+def _rocket_state_row(db: Session):
+    return (
+        db.query(CoupangWingCookie)
+        .filter(CoupangWingCookie.account_key == _ROCKET_ACCOUNT)
+        .first()
+    )
+
+
+def _ensure_rocket_state_row(db: Session):
+    row = _rocket_state_row(db)
+    if row is None:
+        row = CoupangWingCookie(account_key=_ROCKET_ACCOUNT)
+        db.add(row)
+    return row
+
+
+def request_rocket_refresh(db: Session) -> dict:
+    """UI '로켓 갱신' 버튼 → 갱신 요청 플래그 set. Mac poll 데몬이 다음 폴에서 소비."""
+    row = _ensure_rocket_state_row(db)
+    row.refresh_requested_at = kst_now()
+    db.commit()
+    return {"requested": True, "requested_at": row.refresh_requested_at.isoformat()}
+
+
+def rocket_refresh_status(db: Session) -> dict:
+    """갱신 요청/완료 상태. UI 폴링·페처 소비 공용(민감값 없음)."""
+    row = _rocket_state_row(db)
+    if row is None:
+        return {"requested": False, "requested_at": None, "last_success_at": None,
+                "status": "none", "last_error": None}
+    return {
+        "requested": row.refresh_requested_at is not None,
+        "requested_at": row.refresh_requested_at.isoformat() if row.refresh_requested_at else None,
+        "last_success_at": row.last_success_at.isoformat() if row.last_success_at else None,
+        "status": row.status,
+        "last_error": row.last_error,
+    }
+
+
+def claim_rocket_refresh(db: Session) -> dict:
+    """페처가 갱신 요청을 '소비'(플래그 clear). 원자적 조건부 UPDATE(중복 claim 방지)."""
+    from sqlalchemy import update
+
+    res = db.execute(
+        update(CoupangWingCookie)
+        .where(CoupangWingCookie.account_key == _ROCKET_ACCOUNT)
+        .where(CoupangWingCookie.refresh_requested_at.isnot(None))
+        .values(refresh_requested_at=None)
+    )
+    db.commit()
+    return {"claimed": (res.rowcount or 0) > 0}
+
+
+def mark_rocket_fetch_success(db: Session) -> None:
+    """페처 run 성공 시 last_success_at 갱신(UI 폴링 완료 감지용)."""
+    row = _ensure_rocket_state_row(db)
+    row.last_success_at = kst_now()
+    row.status = "green"
+    row.last_error = None
+    db.commit()
