@@ -169,6 +169,35 @@ def test_bid_down_not_subject_to_bep_check():
     assert reason is None
 
 
+def test_bid_down_passes_with_only_current_bid_minimal_context():
+    """쇼핑 adgroup 대상(D-NAO-16 3단계 SHOPPING 확장): _build_guardrail_context가
+    adgroup_window_agg 미구현(정직 경계)이라 current_bid 외 전부 None/기본값으로 채워도,
+    bid_down은 up 전용 검사(스톱로스·BEP·일예산)를 면제받으므로 current_bid + 쿨다운/일일
+    카운트만으로 guardrail_gate를 통과해야 한다(±15%·클램프는 여전히 검사됨)."""
+    minimal_ctx = {
+        "current_bid": 1200, "current_budget": None, "roas_corrected": None, "target_roas": None,
+        "cost_today": None, "daily_budget": None, "unconverted_spend": None,
+        "last_change_at": None, "changes_today_count": 0,
+    }
+    # 1200 -> 1100은 -8.3%(±15% 이내), 방향도 일치
+    reason = gate.check(_bid_proposal("bid_down", 1100), minimal_ctx, now=NOW)
+    assert reason is None
+
+
+def test_bid_down_minimal_context_still_enforces_clamp_and_change_pct():
+    """위 최소 컨텍스트에서도 클램프·변경폭 검사는 여전히 살아있다(면제되는 건 up 전용
+    검사뿐 — bid_down이 '전부 무검증'은 아님)."""
+    minimal_ctx = {
+        "current_bid": 1200, "current_budget": None, "roas_corrected": None, "target_roas": None,
+        "cost_today": None, "daily_budget": None, "unconverted_spend": None,
+        "last_change_at": None, "changes_today_count": 0,
+    }
+    # 1200 -> 900은 -25%(±15% 초과)
+    reason = gate.check(_bid_proposal("bid_down", 900), minimal_ctx, now=NOW)
+    assert reason is not None
+    assert "변경폭" in reason
+
+
 # ── 일예산 상한 불가침 (bid_up/growth_bid_up만) ──────────────────────────
 
 

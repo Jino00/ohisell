@@ -214,12 +214,15 @@ def _build_guardrail_context(db: Session, proposal: NaverProposal, now: datetime
       액션 유형 무관 — 정지 다음 곧바로 입찰·예산 변경하는 것도 동일 쿨다운·상한 대상으로
       본다. campaign 대상이면 entity_type='campaign'이 자연히 걸린다).
 
-    target_type='adgroup'(X1b-S S1, D-NAO-43 쇼핑 스톱로스 정지·재개): _check_lock은
-      target_lock 방향만 검증하므로 bid/budget 관련 필드(current_bid·roas_corrected 등)는
-      불필요 — adgroup_window_agg가 아직 없어(S2/S3 스코프) None으로 정직하게 남긴다.
-      다만 쿨다운·일일상한(_check_cooldown_and_cap)까지 통째로 None/0 고정이면 그 안전장치
-      자체가 adgroup에서 항상 fail-open(무력화)되므로, last_change_at/changes_today_count만
-      아래 공용 change_rows 조회로 채운다(최소 컨텍스트).
+    target_type='adgroup'(X1b-S S1, D-NAO-43 쇼핑 스톱로스 정지·재개 + X1b-S bid 확장,
+      D-NAO-16 3단계 SHOPPING 대칭): current_bid는 naver_sa_writer._get_adgroup 라이브
+      재조회로 채운다(get_keyword의 adgroup 대칭) — bid_down은 guardrail_gate에서
+      스톱로스·BEP·일예산이 up 전용 검사라 면제되므로 current_bid만으로 충분(bid_up 확장은
+      roas_corrected 등 window agg가 필요해 향후 스코프). current_budget/roas_corrected/
+      target_roas/cost_today/daily_budget/unconverted_spend는 adgroup_window_agg가 아직
+      없어(S2/S3 스코프) None으로 정직하게 남긴다. 쿨다운·일일상한(_check_cooldown_and_cap)
+      까지 통째로 None/0 고정이면 그 안전장치 자체가 adgroup에서 항상 fail-open(무력화)
+      되므로, last_change_at/changes_today_count는 아래 공용 change_rows 조회로 채운다.
     """
     context: dict = {
         "current_bid": None, "current_budget": None, "roas_corrected": None, "target_roas": None,
@@ -227,6 +230,21 @@ def _build_guardrail_context(db: Session, proposal: NaverProposal, now: datetime
         "last_change_at": None, "changes_today_count": 0,
     }
     if proposal.target_type == "adgroup":
+        # X1b-S bid 확장(D-NAO-16 3단계 SHOPPING 대칭, shopping_group_bep 보드): current_bid는
+        # naver_sa_writer._get_adgroup 라이브 재조회로 채운다(get_keyword의 adgroup 대칭 —
+        # writer 자체의 before 재조회와 별개, 가드 판정 시점과 실쓰기 시점 값이 다를 수 있어
+        # 각자 재조회). current_budget/roas_corrected/target_roas 등은 여전히
+        # adgroup_window_agg 미구현이라 None 유지(정직 경계, S2/S3 스코프) — bid_down은
+        # guardrail_gate에서 스톱로스·BEP·일예산이 up 전용 검사라 면제되므로 current_bid +
+        # 쿨다운/일일카운트만으로 충분하다.
+        try:
+            live = naver_sa_writer._get_adgroup(proposal.target_id)
+            context["current_bid"] = live.get("bidAmt")
+        except Exception as e:  # noqa: BLE001 — 재조회 실패는 fail-closed(current_bid=None 유지)
+            log.warning(
+                "naver_execution_harness: guardrail context _get_adgroup 실패(fail-closed) "
+                "target_id=%s: %s", proposal.target_id, e,
+            )
         change_rows = (
             db.query(NaverChangeLog.changed_at)
             .filter(
@@ -411,19 +429,22 @@ def _execute_add_negative_keyword(db: Session, proposal: NaverProposal, now: dat
 
 
 def _execute_update_bid(db: Session, proposal: NaverProposal, now: datetime) -> NaverChangeLog:
-    """입찰가 실쓰기 1건 (X1b T4, D-NAO-16 3단계). bid_up/bid_down/growth_bid_up 공용 —
-    target_bid 컬럼(X1b T3, proposal_writer가 구조화 저장)을 그대로 쓴다(rationale 텍스트
-    파싱 금지). guardrail_gate.check()가 실행 직전 최종 관문(§4 실행 순서의 "가드레일" 단계).
+    """입찰가 실쓰기 1건 (X1b T4, D-NAO-16 3단계 + X1b-S bid 확장, SHOPPING 대칭).
+    bid_up/bid_down/growth_bid_up 공용 — target_bid 컬럼(X1b T3, proposal_writer가 구조화
+    저장)을 그대로 쓴다(rationale 텍스트 파싱 금지). guardrail_gate.check()가 실행 직전
+    최종 관문(§4 실행 순서의 "가드레일" 단계).
 
-    구조 결함(target_type≠'keyword'·target_bid 없음)·가드레일 위반은 전부 _guard_failure로
-    failed 종결(재승인 루프 방지, _execute_add_negative_keyword와 동일 원칙). **adgroup 단위
-    입찰(bidAmt PUT on adgroup, ref 27 §4)은 미구현** — shopping_group_bep 보드가 만드는
-    target_type='adgroup' 제안은 이 가드에서 걸린다(정직 경계, §8 승계 큐 후보).
+    구조 결함(target_type이 'keyword'·'adgroup' 어느 쪽도 아님·target_bid 없음)·가드레일
+    위반은 전부 _guard_failure로 failed 종결(재승인 루프 방지, _execute_add_negative_keyword와
+    동일 원칙). target_type='keyword'는 naver_sa_writer.update_keyword_bid, 'adgroup'
+    (shopping_group_bep 보드, ref 27 §85)은 naver_sa_writer.update_adgroup_bid로 분기만
+    다르고 가드·클레임·기록 로직은 완전 대칭(_execute_set_user_lock의 keyword/adgroup 분기와
+    동형). 캠페인 단위 입찰은 여전히 미구현(정직 경계).
     """
-    if proposal.target_type != "keyword":
+    if proposal.target_type not in ("keyword", "adgroup"):
         reason = (
-            f"target_type={proposal.target_type!r} — 키워드 단위 입찰만 구현됨(adgroup 단위 "
-            "bidAmt PUT은 미구현, ref 27 §4 — shopping_group_bep 제안 실행 불가, 정직 경계)"
+            f"target_type={proposal.target_type!r} — 키워드·광고그룹 단위 입찰만 구현됨"
+            "(캠페인 단위는 미구현, 정직 경계)"
         )
         _guard_failure(db, proposal, now, "update_bid", reason)
         raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
@@ -445,8 +466,12 @@ def _execute_update_bid(db: Session, proposal: NaverProposal, now: datetime) -> 
 
     _claim_executing(db, proposal)
 
+    writer_fn = (
+        naver_sa_writer.update_keyword_bid if proposal.target_type == "keyword"
+        else naver_sa_writer.update_adgroup_bid
+    )
     try:
-        result = naver_sa_writer.update_keyword_bid(proposal.target_id, proposal.target_bid)
+        result = writer_fn(proposal.target_id, proposal.target_bid)
     except Exception as exc:  # WriteValidationError/WriteError/WriteVerificationError + requests 계열
         proposal.status = "failed"  # 자동 재시도 차단(approved 게이트) — 재승인만 재시도 경로
         fail_entry = NaverChangeLog(
@@ -461,8 +486,10 @@ def _execute_update_bid(db: Session, proposal: NaverProposal, now: datetime) -> 
         db.add(fail_entry)
         db.commit()
         log.error(
-            "naver_execution_harness: 실쓰기 실패 proposal_id=%s keyword=%s target_bid=%s — %s: %s",
-            proposal.id, proposal.target_id, proposal.target_bid, type(exc).__name__, exc,
+            "naver_execution_harness: 실쓰기 실패 proposal_id=%s target_type=%s target=%s "
+            "target_bid=%s — %s: %s",
+            proposal.id, proposal.target_type, proposal.target_id, proposal.target_bid,
+            type(exc).__name__, exc,
         )
         raise
 
@@ -487,8 +514,8 @@ def _execute_update_bid(db: Session, proposal: NaverProposal, now: datetime) -> 
     db.commit()
 
     log.info(
-        "naver_execution_harness: 실쓰기 성공 proposal_id=%s keyword=%s target_bid=%s",
-        proposal.id, proposal.target_id, proposal.target_bid,
+        "naver_execution_harness: 실쓰기 성공 proposal_id=%s target_type=%s target=%s target_bid=%s",
+        proposal.id, proposal.target_type, proposal.target_id, proposal.target_bid,
     )
     return log_entry
 
@@ -701,8 +728,9 @@ def real_write_blocker(proposal: NaverProposal) -> str | None:
     ③action=='add_negative_keyword'인데 target_type이 'search_term'이 아니거나
       adgroup_id가 없음 → restricted-keywords API 대상으로 부적합
       (`_execute_add_negative_keyword`의 MissingExecutionTargetError 가드와 동일 조건).
-    ④(X1b T4) action=='update_bid'인데 target_type이 'keyword'가 아니거나(adgroup 단위
-      bidAmt는 미구현, 정직 경계) target_bid가 없음 → 실행 대상 부적합.
+    ④(X1b T4 + X1b-S bid 확장) action=='update_bid'인데 target_type이 'keyword'·'adgroup'
+      어느 쪽도 아니거나(캠페인 단위 bidAmt는 미구현, 정직 경계) target_bid가 없음 →
+      실행 대상 부적합.
     ⑤(X1b T4 + X1b-S S1 D-NAO-43) action=='set_user_lock'인데 target_type이 'keyword'·
       'adgroup' 어느 쪽도 아니거나(캠페인 단위 userLock은 미구현, 정직 경계) target_lock이
       없음 → 실행 대상 부적합.
@@ -734,10 +762,10 @@ def real_write_blocker(proposal: NaverProposal) -> str | None:
         if not proposal.adgroup_id:
             return "adgroup_id 없음 — 실행 대상 정보 부족(구 제안이거나 재생성 필요)"
     elif action == "update_bid":
-        if proposal.target_type != "keyword":
+        if proposal.target_type not in ("keyword", "adgroup"):
             return (
-                f"target_type={proposal.target_type!r} — 키워드 단위 입찰만 구현됨"
-                "(adgroup 단위 bidAmt는 미구현, 정직 경계)"
+                f"target_type={proposal.target_type!r} — 키워드·광고그룹 단위 입찰만 구현됨"
+                "(캠페인 단위는 미구현, 정직 경계)"
             )
         if proposal.target_bid is None:
             return "target_bid 없음 — 실행 대상 정보 부족(구 제안이거나 재생성 필요)"
