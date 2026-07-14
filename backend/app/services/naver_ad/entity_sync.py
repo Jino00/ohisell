@@ -82,7 +82,24 @@ def collect_entities(
 
 def _log_external_status_change(db: Session, entity: NaverEntity, new_status: str, now) -> None:
     """D-NAO-40: 우리 change_log에 없는 외부 상태 변경을 감지하면 기록한다.
-    우리 실행으로 인한 변경(최근 set_user_lock 성공 기록과 방향이 일치)이면 건너뛴다."""
+    우리 실행으로 인한 변경(최근 set_user_lock 성공 기록과 방향이 일치 **그리고** 그 쓰기가
+    지난 관측(entity.synced_at) 이후에 실제로 일어났을 때)이면 건너뛴다.
+
+    ⚠️ 방향 일치만으로 판단하면 안 된다(원 버그): 우리 정지→외부 재개→외부 재정지 시퀀스에서
+    마지막 외부 재정지는 방향이 (우리의 옛 정지 기록과) 우연히 같아, 그 사이 sync가 없었던
+    것처럼 오인해 스킵되어 버렸다. 그러면 resume_candidates가 옛 우리 정지를 최신 잠금변경으로
+    착각해 외부/사람이 정지한 것을 임의로 재개해버리는 안전사고로 이어진다.
+
+    시간 판별: last_our_write.changed_at이 entity.synced_at(이번 sync로 갱신되기 *전*의
+    직전 관측 시각 — 호출부가 e.synced_at=now 갱신 이전에 이 함수를 호출하는 것에 의존)보다
+    나중이어야만 "우리가 방금 한 변경"으로 인정한다. 즉 직전 관측 이후 실제로 쓰기가 없었다면
+    방향이 우연히 같아도 외부 변경으로 기록한다.
+
+    changed_at·synced_at 모두 kst_now()로 명시 기록되는 KST naive datetime이라 직접 비교
+    가능(SQLite server_default=func.now()는 UTC라 다르지만 여기선 둘 다 명시 값만 사용).
+    entity.synced_at이 없거나(비정상 데이터) 판단 근거가 불충분하면 fail-closed로 스킵하지
+    않는다 — 최악의 경우도 "우리가 방금 한 변경을 외부로 오기록"일 뿐이라 resume_candidates가
+    그 이후 재개를 보수적으로 건너뛰게 만들 뿐 안전하다."""
     old_lock = entity.status == "off"
     new_lock = new_status == "off"
     if old_lock == new_lock:
@@ -100,7 +117,12 @@ def _log_external_status_change(db: Session, entity: NaverEntity, new_status: st
         .order_by(NaverChangeLog.changed_at.desc())
         .first()
     )
-    if last_our_write and last_our_write.after_value:
+    if (
+        last_our_write
+        and last_our_write.after_value
+        and entity.synced_at is not None
+        and last_our_write.changed_at > entity.synced_at
+    ):
         try:
             last_after = json.loads(last_our_write.after_value)
             if isinstance(last_after, dict) and last_after.get("userLock") == new_lock:
