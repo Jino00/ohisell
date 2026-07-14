@@ -523,3 +523,146 @@ def resume_candidates(
             })
     out.sort(key=lambda x: x["roas_at_pause"], reverse=True)
     return out
+
+
+def shopping_pause_candidates(db: Session, date_from: date, date_to: date) -> list[dict]:
+    """쇼핑 정지 후보 (X1b-S S1 T2, D-NAO-43) — pause_candidates(WEB_SITE 키워드 전용)의
+    SHOPPING adgroup 대칭 확장. 대상=NaverEntity entity_type='adgroup', status='on',
+    campaign_type='SHOPPING'이고 부모 캠페인도 on(_on_adgroup_ids 재사용 — 대상 자신이 이미
+    adgroup이라 키워드판의 3단 체인과 달리 캠페인→adgroup 2단만 확인).
+
+    스톱로스 절대액 = 현재입찰가(entity.bid_amt) × LOW_CLICK_THRESHOLD — pause_candidates와
+    동일 상수·산식(D-NAO-20). NaverEntity에 bid_amt가 없는(미확보) 그룹은 계산 불가라
+    fail-closed 제외."""
+    on_adgroups = _on_adgroup_ids(db)
+    entity_map = {
+        e.entity_id: e for e in
+        db.query(NaverEntity).filter(
+            NaverEntity.entity_type == "adgroup", NaverEntity.status == "on",
+            NaverEntity.campaign_type == _SHOPPING,
+        ).all()
+    }
+    if not entity_map:
+        return []
+
+    q = (
+        db.query(
+            NaverAdDaily.campaign_id, NaverAdDaily.adgroup_id,
+            sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.cost), 0),
+            sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.conv_direct_amt), 0),
+            sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.conv_indirect_amt), 0),
+        )
+        .filter(
+            NaverAdDaily.ad_date >= date_from, NaverAdDaily.ad_date <= date_to,
+            NaverAdDaily.campaign_type == _SHOPPING,
+            NaverAdDaily.adgroup_id != BACKFILL_SENTINEL_ADGROUP,
+        )
+        .group_by(NaverAdDaily.campaign_id, NaverAdDaily.adgroup_id)
+        .all()
+    )
+    out = []
+    for campaign_id, adgroup_id, cost, conv_direct, conv_indirect in q:
+        cost = int(cost)
+        if cost <= 0:
+            continue
+        entity = entity_map.get(adgroup_id)
+        if entity is None or not entity.bid_amt:
+            continue
+        if adgroup_id not in on_adgroups:
+            continue
+        conv_amt = int(conv_direct) + int(conv_indirect)
+        stop_loss_amount = entity.bid_amt * LOW_CLICK_THRESHOLD
+        if conv_amt == 0 and cost >= stop_loss_amount:
+            out.append({
+                "campaign_id": campaign_id, "adgroup_id": adgroup_id, "cost": cost,
+                "conv_amt": conv_amt, "current_bid": entity.bid_amt,
+                "stop_loss_amount": stop_loss_amount,
+            })
+    out.sort(key=lambda x: x["cost"], reverse=True)
+    return out
+
+
+def _shopping_adgroup_window_agg(db: Session, adgroup_id: str, date_from: date, date_to: date) -> dict:
+    """단일 쇼핑 광고그룹의 창 내 (cost, conv_amt) 집계 — keyword_window_agg의 adgroup·
+    SHOPPING grain 판(shopping_resume_candidates 전용, X1b-S S1). 캠페인 무관 재사용
+    가능한 공개 adgroup_window_agg(PLAN §3 S2/S3 스코프)는 별도 서브스프린트에서 도입."""
+    cost, direct, indirect = db.query(
+        sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.cost), 0),
+        sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.conv_direct_amt), 0),
+        sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.conv_indirect_amt), 0),
+    ).filter(
+        NaverAdDaily.adgroup_id == adgroup_id,
+        NaverAdDaily.ad_date >= date_from, NaverAdDaily.ad_date <= date_to,
+        NaverAdDaily.campaign_type == _SHOPPING,
+        NaverAdDaily.adgroup_id != BACKFILL_SENTINEL_ADGROUP,
+    ).one()
+    return {"cost": int(cost), "conv_amt": int(direct) + int(indirect)}
+
+
+def shopping_resume_candidates(
+    db: Session, date_to: date, target_roas_resolver, correction_factor: Decimal,
+) -> list[dict]:
+    """쇼핑 재개 후보 (X1b-S S1 T2, D-NAO-43) — resume_candidates(WEB_SITE 키워드 전용)의
+    SHOPPING adgroup 대칭 확장. 우리 시스템이 정지시킨(change_log proposal_id 있음) 광고그룹
+    중 정지 직전 30일 창의 보정ROAS가 현재 목표(캠페인별 override > 계정기본값) 이상 —
+    D-NAO-16 "정지 사유 해소" 신호.
+
+    D-NAO-40 안전판별을 entity_type='adgroup'으로 그대로 계승: 최신 잠금변경(action이
+    set_user_lock 또는 entity_sync의 external_status_change)이 우리 정지(proposal_id 존재 +
+    after_value.userLock=True)일 때만 후보 — 수동/외부 재정지가 최신이면 제외(resume_candidates
+    문서 참조, 의미상 동일 판별 로직)."""
+    off_entities = {
+        e.entity_id: e for e in
+        db.query(NaverEntity).filter(
+            NaverEntity.entity_type == "adgroup", NaverEntity.status == "off",
+            NaverEntity.campaign_type == _SHOPPING,
+        ).all()
+    }
+    if not off_entities:
+        return []
+    off_ids = set(off_entities)
+
+    lock_rows = (
+        db.query(
+            NaverChangeLog.entity_id, NaverChangeLog.campaign_id, NaverChangeLog.after_value,
+            NaverChangeLog.proposal_id, NaverChangeLog.changed_at,
+        )
+        .filter(
+            NaverChangeLog.entity_type == "adgroup",
+            NaverChangeLog.action.in_(["set_user_lock", "external_status_change"]),
+            NaverChangeLog.entity_id.in_(off_ids),
+            NaverChangeLog.dry_run.is_(False), NaverChangeLog.after_value.isnot(None),
+        )
+        .order_by(NaverChangeLog.changed_at.asc())
+        .all()
+    )
+    latest_lock_change: dict[str, tuple] = {}
+    for entity_id, campaign_id, after_value, proposal_id, changed_at in lock_rows:
+        latest_lock_change[entity_id] = (campaign_id, after_value, proposal_id, changed_at)  # asc 정렬 — 뒤에 올수록 최신
+
+    out = []
+    for adgroup_id, (campaign_id, after_value, proposal_id, paused_at) in latest_lock_change.items():
+        if proposal_id is None:
+            continue  # 최신 잠금변경이 우리 실행이 아님(수동 정지)
+        try:
+            after = json.loads(after_value) if after_value else None
+        except (ValueError, TypeError):
+            after = None
+        if not isinstance(after, dict) or after.get("userLock") is not True:
+            continue  # 방향 판별 불가(fail-closed) 또는 최신 잠금변경이 정지가 아님
+        pause_date = paused_at.date()
+        window_to = pause_date - timedelta(days=1)
+        window_from = window_to - timedelta(days=LOW_CLICK_LOOKBACK_DAYS - 1)
+        agg = _shopping_adgroup_window_agg(db, adgroup_id, window_from, window_to)
+        if agg["cost"] == 0:
+            continue  # 정지 직전 창에 실적 자체가 없음 — 판정 불가
+        roas_naver = float(Decimal(agg["conv_amt"]) / Decimal(agg["cost"]))
+        roas_c = _corrected_roas(roas_naver, correction_factor)
+        target_roas = target_roas_resolver(campaign_id)
+        if roas_c is not None and roas_c >= float(target_roas):
+            out.append({
+                "campaign_id": campaign_id, "adgroup_id": adgroup_id,
+                "roas_at_pause": roas_c, "paused_at": paused_at.isoformat(),
+            })
+    out.sort(key=lambda x: x["roas_at_pause"], reverse=True)
+    return out

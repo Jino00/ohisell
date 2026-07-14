@@ -193,9 +193,10 @@ def _detect_external_change(db: Session, proposal: NaverProposal, live_before: d
 
 
 def _build_guardrail_context(db: Session, proposal: NaverProposal, now: datetime) -> dict:
-    """guardrail_gate.check()에 넘길 라이브 상태 precompute (X1b T4, P2 D-NAO-42-f 확장).
-    keyword·campaign 대상만 지원 — 그 외 target_type이면 전부 None(guardrail_gate가
-    fail-closed로 차단).
+    """guardrail_gate.check()에 넘길 라이브 상태 precompute (X1b T4, P2 D-NAO-42-f 확장,
+    X1b-S S1 D-NAO-43 adgroup lock 최소 컨텍스트 확장).
+    keyword·campaign 대상은 전체 필드 지원, adgroup 대상은 쿨다운 필드만(아래 참조) — 그
+    외 target_type이면 전부 None(guardrail_gate가 fail-closed로 차단).
 
     재조회 실패·데이터 부재는 전부 None으로 남긴다(추정으로 채우지 않음 — guardrail_gate가
     None 필드를 만나면 검증불가로 차단하는 것이 기존 계약, T2 참조).
@@ -212,12 +213,35 @@ def _build_guardrail_context(db: Session, proposal: NaverProposal, now: datetime
     last_change_at/changes_today_count: naver_change_log 이력(entity_type/entity_id 기준,
       액션 유형 무관 — 정지 다음 곧바로 입찰·예산 변경하는 것도 동일 쿨다운·상한 대상으로
       본다. campaign 대상이면 entity_type='campaign'이 자연히 걸린다).
+
+    target_type='adgroup'(X1b-S S1, D-NAO-43 쇼핑 스톱로스 정지·재개): _check_lock은
+      target_lock 방향만 검증하므로 bid/budget 관련 필드(current_bid·roas_corrected 등)는
+      불필요 — adgroup_window_agg가 아직 없어(S2/S3 스코프) None으로 정직하게 남긴다.
+      다만 쿨다운·일일상한(_check_cooldown_and_cap)까지 통째로 None/0 고정이면 그 안전장치
+      자체가 adgroup에서 항상 fail-open(무력화)되므로, last_change_at/changes_today_count만
+      아래 공용 change_rows 조회로 채운다(최소 컨텍스트).
     """
     context: dict = {
         "current_bid": None, "current_budget": None, "roas_corrected": None, "target_roas": None,
         "cost_today": None, "daily_budget": None, "unconverted_spend": None,
         "last_change_at": None, "changes_today_count": 0,
     }
+    if proposal.target_type == "adgroup":
+        change_rows = (
+            db.query(NaverChangeLog.changed_at)
+            .filter(
+                NaverChangeLog.entity_type == proposal.target_type,
+                NaverChangeLog.entity_id == proposal.target_id,
+                NaverChangeLog.dry_run.is_(False), NaverChangeLog.after_value.isnot(None),
+            )
+            .all()
+        )
+        if change_rows:
+            context["last_change_at"] = max(r[0] for r in change_rows)
+            today_start = datetime.combine(now.date(), datetime.min.time())
+            context["changes_today_count"] = sum(1 for r in change_rows if r[0] >= today_start)
+        return context
+
     if proposal.target_type not in ("keyword", "campaign"):
         return context
 
@@ -470,13 +494,17 @@ def _execute_update_bid(db: Session, proposal: NaverProposal, now: datetime) -> 
 
 
 def _execute_set_user_lock(db: Session, proposal: NaverProposal, now: datetime) -> NaverChangeLog:
-    """정지·재개 실쓰기 1건 (X1b T4, D-NAO-16 2단계). pause/resume 공용 — target_lock 컬럼
-    (X1b T3)을 그대로 쓴다. guardrail_gate가 방향 일치(pause→true/resume→false, T2 codex
-    반영분)까지 재검증한다."""
-    if proposal.target_type != "keyword":
+    """정지·재개 실쓰기 1건 (X1b T4, D-NAO-16 2단계 + X1b-S S1 쇼핑 adgroup 확장, D-NAO-43).
+    pause/resume 공용 — target_lock 컬럼(X1b T3)을 그대로 쓴다. target_type='keyword'는
+    WEB_SITE 키워드(naver_sa_writer.set_keyword_lock), target_type='adgroup'은 SHOPPING
+    광고그룹(naver_sa_writer.set_adgroup_lock) — writer 호출만 분기하고 가드·클레임·기록
+    로직은 완전 대칭(양쪽 다 change_log.action="set_user_lock"으로 기록, 기존 pause/resume
+    관례 유지). guardrail_gate가 방향 일치(pause→true/resume→false, T2 codex 반영분)까지
+    재검증한다."""
+    if proposal.target_type not in ("keyword", "adgroup"):
         reason = (
-            f"target_type={proposal.target_type!r} — 키워드 단위 정지·재개만 구현됨"
-            "(광고그룹·캠페인 단위 userLock은 미구현, 정직 경계)"
+            f"target_type={proposal.target_type!r} — 키워드·광고그룹 단위 정지·재개만 구현됨"
+            "(캠페인 단위 userLock은 미구현, 정직 경계)"
         )
         _guard_failure(db, proposal, now, "set_user_lock", reason)
         raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
@@ -498,8 +526,12 @@ def _execute_set_user_lock(db: Session, proposal: NaverProposal, now: datetime) 
 
     _claim_executing(db, proposal)
 
+    writer_fn = (
+        naver_sa_writer.set_keyword_lock if proposal.target_type == "keyword"
+        else naver_sa_writer.set_adgroup_lock
+    )
     try:
-        result = naver_sa_writer.set_keyword_lock(proposal.target_id, proposal.target_lock)
+        result = writer_fn(proposal.target_id, proposal.target_lock)
     except Exception as exc:
         proposal.status = "failed"
         fail_entry = NaverChangeLog(
@@ -671,7 +703,8 @@ def real_write_blocker(proposal: NaverProposal) -> str | None:
       (`_execute_add_negative_keyword`의 MissingExecutionTargetError 가드와 동일 조건).
     ④(X1b T4) action=='update_bid'인데 target_type이 'keyword'가 아니거나(adgroup 단위
       bidAmt는 미구현, 정직 경계) target_bid가 없음 → 실행 대상 부적합.
-    ⑤(X1b T4) action=='set_user_lock'인데 target_type이 'keyword'가 아니거나 target_lock이
+    ⑤(X1b T4 + X1b-S S1 D-NAO-43) action=='set_user_lock'인데 target_type이 'keyword'·
+      'adgroup' 어느 쪽도 아니거나(캠페인 단위 userLock은 미구현, 정직 경계) target_lock이
       없음 → 실행 대상 부적합.
     ⑥(P3, D-NAO-42-f) action=='update_budget'인데 target_type이 'campaign'이 아니거나
       target_budget이 없거나 target_id!=campaign_id(Fix 2, codex P1 — 캠페인 예산 쓰기는
@@ -709,9 +742,10 @@ def real_write_blocker(proposal: NaverProposal) -> str | None:
         if proposal.target_bid is None:
             return "target_bid 없음 — 실행 대상 정보 부족(구 제안이거나 재생성 필요)"
     elif action == "set_user_lock":
-        if proposal.target_type != "keyword":
+        if proposal.target_type not in ("keyword", "adgroup"):
             return (
-                f"target_type={proposal.target_type!r} — 키워드 단위 정지·재개만 구현됨(정직 경계)"
+                f"target_type={proposal.target_type!r} — 키워드·광고그룹 단위 정지·재개만 "
+                "구현됨(캠페인 단위 userLock은 미구현, 정직 경계)"
             )
         if proposal.target_lock is None:
             return "target_lock 없음 — 실행 대상 정보 부족(구 제안, 재생성 필요)"

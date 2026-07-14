@@ -97,6 +97,12 @@ def build_diagnosis(db: Session, date_from: date, date_to: date) -> dict:
         "resume_candidates": diag.resume_candidates(
             db, date_to, _target_roas_resolver(db, target_roas), factor,
         ),
+        # X1b-S S1(D-NAO-43): pause_candidates/resume_candidates(WEB_SITE 키워드)의 SHOPPING
+        # adgroup 대칭 확장 — 04 등 쇼핑 캠페인 스톱로스 정지·재개.
+        "shopping_pause_candidates": diag.shopping_pause_candidates(db, date_from, date_to),
+        "shopping_resume_candidates": diag.shopping_resume_candidates(
+            db, date_to, _target_roas_resolver(db, target_roas), factor,
+        ),
     }
 
     return {

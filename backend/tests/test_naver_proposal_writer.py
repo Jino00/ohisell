@@ -353,6 +353,110 @@ def test_persist_resume_proposal_stores_target_lock_false(db):
     assert saved[0].target_bid is None
 
 
+# ── X1b-S S1: 쇼핑 adgroup pause/resume 생성기 (D-NAO-43) ─────────────────
+
+
+def _shopping_pause_row(**overrides):
+    row = {"campaign_id": "cmp-ours", "adgroup_id": "grp-shop-1", "cost": 2500, "conv_amt": 0,
+           "current_bid": 200, "stop_loss_amount": 2000}
+    row.update(overrides)
+    return row
+
+
+def test_build_shopping_pause_candidate_produces_pause_proposal_targeting_adgroup(db):
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis(shopping_pause_candidates=[_shopping_pause_row()])
+
+    out = proposal_writer.build(db, diagnosis, as_of=AS_OF)
+    assert len(out) == 1
+    assert out[0]["proposal_type"] == "pause"
+    assert out[0]["target_type"] == "adgroup"
+    assert out[0]["target_id"] == "grp-shop-1"
+    assert out[0]["target_lock"] is True
+    assert "스톱로스" in out[0]["rationale"]
+
+
+def test_build_shopping_pause_candidate_skips_non_ours_campaign(db):
+    db.add(NaverCampaignSettings(campaign_id="cmp-none", optimizer="none"))
+    db.commit()
+    diagnosis = _diagnosis(shopping_pause_candidates=[_shopping_pause_row(campaign_id="cmp-none")])
+
+    out = proposal_writer.build(db, diagnosis, as_of=AS_OF)
+    assert out == []
+
+
+def test_persist_shopping_pause_proposal_stores_adgroup_target_type_and_lock(db):
+    row = _shopping_pause_row()
+    p = proposal_writer._pause_proposal(row, target_type="adgroup")
+    assert p["target_type"] == "adgroup"
+    assert p["target_id"] == "grp-shop-1"
+    saved = proposal_writer.persist(db, [p])
+    assert saved[0].target_type == "adgroup"
+    assert saved[0].target_id == "grp-shop-1"
+    assert saved[0].target_lock is True
+    assert saved[0].target_bid is None
+
+
+def _shopping_resume_row(**overrides):
+    row = {"campaign_id": "cmp-ours", "adgroup_id": "grp-shop-1",
+           "roas_at_pause": 5.0, "paused_at": "2026-07-01T00:00:00"}
+    row.update(overrides)
+    return row
+
+
+def test_build_shopping_resume_candidate_produces_resume_proposal_targeting_adgroup(db):
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis(shopping_resume_candidates=[_shopping_resume_row()])
+
+    out = proposal_writer.build(db, diagnosis, as_of=AS_OF)
+    assert len(out) == 1
+    assert out[0]["proposal_type"] == "resume"
+    assert out[0]["target_type"] == "adgroup"
+    assert out[0]["target_id"] == "grp-shop-1"
+    assert out[0]["target_lock"] is False
+    assert "BEP 개선" in out[0]["rationale"]
+
+
+def test_build_shopping_resume_candidate_skips_non_ours_campaign(db):
+    db.add(NaverCampaignSettings(campaign_id="cmp-none", optimizer="none"))
+    db.commit()
+    diagnosis = _diagnosis(shopping_resume_candidates=[_shopping_resume_row(campaign_id="cmp-none")])
+
+    out = proposal_writer.build(db, diagnosis, as_of=AS_OF)
+    assert out == []
+
+
+def test_persist_shopping_resume_proposal_stores_adgroup_target_type_and_lock(db):
+    row = _shopping_resume_row()
+    p = proposal_writer._resume_proposal(row, {"source": "account_default", "target_roas": None}, target_type="adgroup")
+    assert p["target_type"] == "adgroup"
+    assert p["target_id"] == "grp-shop-1"
+    saved = proposal_writer.persist(db, [p])
+    assert saved[0].target_type == "adgroup"
+    assert saved[0].target_id == "grp-shop-1"
+    assert saved[0].target_lock is False
+    assert saved[0].target_bid is None
+
+
+def test_pause_proposal_defaults_to_keyword_target_type_unchanged(db):
+    """회귀 방지 — target_type 인자를 안 넘기면 기존 keyword 경로와 완전히 동일해야 한다."""
+    row = _pause_row()
+    p = proposal_writer._pause_proposal(row)
+    assert p["target_type"] == "keyword"
+    assert p["target_id"] == "nkw-pause"
+    assert p["adgroup_id"] == "grp-1"
+
+
+def test_resume_proposal_defaults_to_keyword_target_type_unchanged(db):
+    row = _resume_row()
+    p = proposal_writer._resume_proposal(row, {"source": "account_default", "target_roas": None})
+    assert p["target_type"] == "keyword"
+    assert p["target_id"] == "nkw-resume"
+    assert p["adgroup_id"] == "grp-1"
+
+
 def test_persist_dedup_scoped_by_adgroup_same_term_different_adgroup_both_saved(db):
     """[codex P2] 같은 검색어·같은 캠페인이라도 adgroup이 다르면 별개 실행 대상(restricted-
     keywords는 광고그룹 단위 리소스) — dedup 키에 adgroup_id 포함. 같은 adgroup 재실행은 dedup."""
