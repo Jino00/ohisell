@@ -90,6 +90,11 @@ def build_diagnosis(db: Session, date_from: date, date_to: date) -> dict:
         "starving_winners": diag.starving_winners(db, date_from, date_to, target_roas, factor),
         "expansion_bucket": diag.expansion_bucket(db, date_from, date_to, factor),
         "shopping_group_bep": diag.shopping_group_bep(db, date_from, date_to, bep_roas, factor),
+        # X1b-S S3(D-NAO-43 성장 확장): shopping_group_bep(적자, down)의 반대 — 수익 그룹
+        # 성장 후보(bid_up). 같은 캠페인별 target_roas 리졸버(override>계정기본값) 재사용.
+        "shopping_group_growth": diag.shopping_group_growth(
+            db, date_from, date_to, _target_roas_resolver(db, target_roas), factor,
+        ),
         "exclusion_candidates": diag.exclusion_candidates(db, date_from, date_to),
         "keyword_triage": diag.keyword_triage(db, as_of=date_to),
         "vicious_cycle": diag.vicious_cycle_flags(db, date_to, target_roas, factor),

@@ -117,6 +117,12 @@ def _collect_bid_sim_candidates(boards: dict) -> list[tuple[str, str, str, dict,
         out.append(("keyword", row["keyword_id"], row["campaign_id"], row, "starving_winners"))
     for row in boards.get("shopping_group_bep", []) or []:
         out.append(("adgroup", row["adgroup_id"], row["campaign_id"], row, "shopping_group_bep"))
+    # X1b-S S3(D-NAO-43 확장): shopping_group_bep(적자, down)의 반대 — 수익 그룹 성장(up)
+    # 후보도 동일하게 adgroup grain sim 대상에 추가한다. 안 넣으면 shopping_group_growth
+    # 진단 보드는 만들어져도 bid_simulator가 절대 안 돌아 proposal_writer.build의
+    # bid_sims.get(("adgroup", target_id))가 항상 None이 되고, 보드가 조용히 죽는다.
+    for row in boards.get("shopping_group_growth", []) or []:
+        out.append(("adgroup", row["adgroup_id"], row["campaign_id"], row, "shopping_group_growth"))
     return out
 
 

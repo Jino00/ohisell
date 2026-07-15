@@ -493,34 +493,128 @@ def test_execute_update_bid_adgroup_bid_down_success(db):
     assert p.status == "approved"
 
 
-def test_execute_update_bid_adgroup_bid_up_blocked_down_only(db):
-    """[codex P1] adgroup 증액(bid_up/growth_bid_up)은 up-only 가드 컨텍스트(BEP·스톱로스·
-    일예산) 미구현이라 실행 직전 차단된다 — 컨텍스트 없이 증액이 방향/±15%/쿨다운만으로
-    통과하는 것 방지. 쇼핑 adgroup은 현재 bid_down만 실행(S3에서 up 개방). writer 미호출·failed."""
+OTHER_UP_TYPES = ("bid_up", "growth_bid_up")
+
+
+@pytest.mark.parametrize("ptype", OTHER_UP_TYPES)
+def test_execute_update_bid_adgroup_up_blocked_when_context_missing_roas(db, ptype):
+    """[S3, D-NAO-43 확장] adgroup 증액은 컨텍스트에 roas_corrected/target_roas가 둘 다
+    채워져야만 guardrail_gate로 넘어간다 — guardrail_gate._check_bid의 BEP 검사는 그 값이
+    None이면 fail-open(검사 건너뜀)이므로, executor가 직접 fail-closed로 막는다(S2의
+    blanket 차단을 대체). 컨텍스트가 미비하면(예: roas_corrected만 있고 target_roas 없음)
+    guardrail_gate.check 자체를 호출하지 않고 즉시 차단·writer 미호출·failed."""
+    p = _proposal(db, proposal_type=ptype, target_type="adgroup", target_id="grp-shop-up")
+    p.target_bid = 2000
+    db.commit()
     _settings(db, optimizer="ours")
-    for ptype in ("bid_up", "growth_bid_up"):
-        p = _proposal(db, proposal_type=ptype, target_type="adgroup", target_id="grp-shop-up")
-        p.target_bid = 2000
-        db.commit()
 
-        with patch.object(harness.naver_sa_writer, "update_adgroup_bid") as mock_ag, \
-             patch.object(harness.naver_sa_writer, "update_keyword_bid") as mock_kw:
-            with pytest.raises(harness.MissingExecutionTargetError):
-                harness.execute(db, p.id, dry_run=False)
+    with patch.object(harness, "_build_guardrail_context",
+                       return_value={"current_bid": 1000, "roas_corrected": 3.0, "target_roas": None}), \
+         patch.object(harness.guardrail_gate, "check") as mock_gate, \
+         patch.object(harness.naver_sa_writer, "update_adgroup_bid") as mock_ag, \
+         patch.object(harness.naver_sa_writer, "update_keyword_bid") as mock_kw:
+        with pytest.raises(harness.MissingExecutionTargetError):
+            harness.execute(db, p.id, dry_run=False)
 
-        mock_ag.assert_not_called()
-        mock_kw.assert_not_called()
-        db.refresh(p)
-        assert p.status == "failed"
+    mock_gate.assert_not_called()
+    mock_ag.assert_not_called()
+    mock_kw.assert_not_called()
+    db.refresh(p)
+    assert p.status == "failed"
+    logs = db.query(NaverChangeLog).filter(NaverChangeLog.proposal_id == p.id).all()
+    assert len(logs) == 1
+    assert "fail-closed" in logs[0].rationale
 
 
-def test_real_write_blocker_adgroup_bid_up_not_executable(db):
-    """[codex P1] real_write_blocker(콘솔 executable 판정)도 adgroup 증액을 미실행으로 표시."""
+def test_execute_update_bid_adgroup_bid_up_blocked_when_roas_corrected_missing(db):
+    """roas_corrected 쪽이 없는 경우도 동일하게 fail-closed(target_roas만 있는 경우)."""
     p = _proposal(db, proposal_type="bid_up", target_type="adgroup", target_id="grp-shop-up")
     p.target_bid = 2000
     db.commit()
-    reason = harness.real_write_blocker(p)
-    assert reason is not None and "adgroup" in reason.lower()
+    _settings(db, optimizer="ours")
+
+    with patch.object(harness, "_build_guardrail_context",
+                       return_value={"current_bid": 1000, "roas_corrected": None, "target_roas": 2.0}), \
+         patch.object(harness.guardrail_gate, "check") as mock_gate, \
+         patch.object(harness.naver_sa_writer, "update_adgroup_bid") as mock_ag:
+        with pytest.raises(harness.MissingExecutionTargetError):
+            harness.execute(db, p.id, dry_run=False)
+
+    mock_gate.assert_not_called()
+    mock_ag.assert_not_called()
+    db.refresh(p)
+    assert p.status == "failed"
+
+
+def test_execute_update_bid_adgroup_bid_up_success_when_context_complete(db):
+    """[S3] 컨텍스트가 완전(roas_corrected·target_roas 둘 다 존재)하면 guardrail_gate로
+    넘어가고, 통과 시 update_adgroup_bid로 정상 디스패치된다."""
+    p = _proposal(db, proposal_type="bid_up", target_type="adgroup", target_id="grp-shop-up")
+    p.target_bid = 1300
+    db.commit()
+    _settings(db, optimizer="ours")
+    result = _adgroup_write_result(
+        before={"bidAmt": 1200, "systemBiddingType": "NONE"},
+        after={"bidAmt": 1300, "systemBiddingType": "NONE"},
+    )
+    complete_ctx = {
+        "current_bid": 1200, "roas_corrected": 5.0, "target_roas": 2.0,
+        "unconverted_spend": 0, "cost_today": 1000, "daily_budget": 50_000,
+        "last_change_at": None, "changes_today_count": 0,
+    }
+
+    with patch.object(harness, "_build_guardrail_context", return_value=complete_ctx), \
+         patch.object(harness.guardrail_gate, "check", return_value=None) as mock_gate, \
+         patch.object(harness.naver_sa_writer, "update_adgroup_bid", return_value=result) as mock_write, \
+         patch.object(harness.naver_sa_writer, "update_keyword_bid") as mock_kw:
+        log_entry = harness.execute(db, p.id, dry_run=False)
+
+    mock_gate.assert_called_once()
+    mock_write.assert_called_once_with("grp-shop-up", 1300)
+    mock_kw.assert_not_called()
+    assert log_entry.entity_type == "adgroup"
+    assert log_entry.action == "update_bid"
+
+    db.refresh(p)
+    assert p.status == "approved"
+    assert p.executed_change_log_id == log_entry.id
+
+
+def test_execute_update_bid_adgroup_bid_up_blocked_by_real_guardrail_bep(db):
+    """[완료기준⑤] 컨텍스트는 완전하지만 보정ROAS가 목표 미달인 경우 — 실제
+    guardrail_gate.check(mock 아님)가 BEP 미달로 차단해야 한다(D-NAO-1 안전선)."""
+    p = _proposal(db, proposal_type="bid_up", target_type="adgroup", target_id="grp-shop-up")
+    p.target_bid = 1300
+    db.commit()
+    _settings(db, optimizer="ours")
+    incomplete_but_present_ctx = {
+        "current_bid": 1200, "roas_corrected": 1.0, "target_roas": 2.0,  # BEP 미달
+        "unconverted_spend": 0, "cost_today": 1000, "daily_budget": 50_000,
+        "last_change_at": None, "changes_today_count": 0,
+    }
+
+    with patch.object(harness, "_build_guardrail_context", return_value=incomplete_but_present_ctx), \
+         patch.object(harness.naver_sa_writer, "update_adgroup_bid") as mock_write:
+        with pytest.raises(harness.MissingExecutionTargetError):
+            harness.execute(db, p.id, dry_run=False)
+
+    mock_write.assert_not_called()
+    db.refresh(p)
+    assert p.status == "failed"
+    logs = db.query(NaverChangeLog).filter(NaverChangeLog.proposal_id == p.id).all()
+    assert len(logs) == 1
+    assert "BEP 미달" in logs[0].rationale
+
+
+def test_real_write_blocker_adgroup_bid_up_executable_when_valid(db):
+    """[S3] real_write_blocker는 구조 판정만 한다(target_type/target_bid) — 런타임 컨텍스트
+    검증(roas_corrected/target_roas fail-closed)은 executor가 실행 시도 시점에 담당하므로
+    콘솔 executable 표시에서는 더 이상 adgroup 증액을 블랑켓 차단하지 않는다."""
+    for ptype in OTHER_UP_TYPES:
+        p = _proposal(db, proposal_type=ptype, target_type="adgroup", target_id="grp-shop-up")
+        p.target_bid = 2000
+        db.commit()
+        assert harness.real_write_blocker(p) is None
 
 
 def test_execute_update_bid_adgroup_blocked_by_guardrail(db):
@@ -1045,6 +1139,151 @@ def test_build_guardrail_context_adgroup_get_adgroup_failure_fail_closed(db):
     with patch.object(harness.naver_sa_writer, "_get_adgroup", side_effect=RuntimeError("network")):
         ctx = harness._build_guardrail_context(db, p, kst_now())
     assert ctx["current_bid"] is None  # 재조회 실패 — 추정으로 채우지 않음
+
+
+# ── X1b-S S3(D-NAO-43 확장): _build_guardrail_context adgroup UP 브랜치 ──────
+# adgroup 증액(bid_up/growth_bid_up)만 roas_corrected/target_roas/unconverted_spend/
+# cost_today/daily_budget을 채운다 — bid_down/pause/resume은 여전히 None(위 테스트들이 이미
+# 그 회귀를 커버).
+
+
+def test_build_guardrail_context_adgroup_bid_up_fills_roas_and_target_from_window_agg(db):
+    from app.models import NaverAdDaily, Order
+    p = _proposal(db, proposal_type="bid_up", target_type="adgroup", target_id="grp-shop-1")
+    now = kst_now()
+    as_of = now.date() - timedelta(days=1)
+    db.add(NaverAdDaily(
+        ad_date=as_of, campaign_id="cmp1", campaign_type="SHOPPING", adgroup_id="grp-shop-1",
+        keyword_id="", imp=500, clk=25, cost=3000, rank_sum=1500,
+        conv_direct_cnt=1, conv_indirect_cnt=0, conv_direct_amt=9000, conv_indirect_amt=0,
+    ))
+    # D-NAO-21 보정계수 = 실주문매출÷네이버convAmt — 9000/9000=1.0이 되도록 실주문도 시딩
+    # (채널 실측: naver_order_revenue는 channel_id=6 고정, test_build_guardrail_context_
+    # converted_window_zero_unconverted_spend와 동일 패턴).
+    db.add(Order(
+        channel_id=6, platform_product_id="cp-1", order_number="ORD-1",
+        order_date=as_of, status="정상", selling_price=Decimal("9000"),
+    ))
+    db.commit()
+
+    with patch.object(harness.naver_sa_writer, "_get_adgroup",
+                       return_value={"bidAmt": 1200, "systemBiddingType": "NONE"}):
+        ctx = harness._build_guardrail_context(db, p, now)
+
+    assert ctx["current_bid"] == 1200
+    assert ctx["roas_corrected"] == pytest.approx(3.0)  # 9000/3000 × 보정계수 1.0(9000/9000)
+    assert ctx["unconverted_spend"] == 0  # 전환 존재 — 무전환 누적으로 안 잡힘
+
+
+def test_build_guardrail_context_adgroup_bid_up_unconverted_spend_when_zero_conversion(db):
+    from app.models import NaverAdDaily
+    p = _proposal(db, proposal_type="bid_up", target_type="adgroup", target_id="grp-shop-1")
+    now = kst_now()
+    as_of = now.date() - timedelta(days=1)
+    db.add(NaverAdDaily(
+        ad_date=as_of, campaign_id="cmp1", campaign_type="SHOPPING", adgroup_id="grp-shop-1",
+        keyword_id="", imp=500, clk=25, cost=3000, rank_sum=1500,
+        conv_direct_cnt=0, conv_indirect_cnt=0, conv_direct_amt=0, conv_indirect_amt=0,
+    ))
+    db.commit()
+
+    with patch.object(harness.naver_sa_writer, "_get_adgroup",
+                       return_value={"bidAmt": 1200, "systemBiddingType": "NONE"}):
+        ctx = harness._build_guardrail_context(db, p, now)
+
+    assert ctx["unconverted_spend"] == 3000
+    assert ctx["roas_corrected"] == 0.0
+
+
+def test_build_guardrail_context_adgroup_growth_bid_up_also_fills(db):
+    """growth_bid_up도 bid_up과 동일하게 up 취급된다(_BID_UP_TYPES와 동일 집합)."""
+    from app.models import NaverAdDaily, Order
+    p = _proposal(db, proposal_type="growth_bid_up", target_type="adgroup", target_id="grp-shop-1")
+    now = kst_now()
+    as_of = now.date() - timedelta(days=1)
+    db.add(NaverAdDaily(
+        ad_date=as_of, campaign_id="cmp1", campaign_type="SHOPPING", adgroup_id="grp-shop-1",
+        keyword_id="", imp=500, clk=25, cost=3000, rank_sum=1500,
+        conv_direct_cnt=1, conv_indirect_cnt=0, conv_direct_amt=9000, conv_indirect_amt=0,
+    ))
+    db.add(Order(
+        channel_id=6, platform_product_id="cp-1", order_number="ORD-1",
+        order_date=as_of, status="정상", selling_price=Decimal("9000"),
+    ))
+    db.commit()
+
+    with patch.object(harness.naver_sa_writer, "_get_adgroup",
+                       return_value={"bidAmt": 1200, "systemBiddingType": "NONE"}):
+        ctx = harness._build_guardrail_context(db, p, now)
+
+    assert ctx["roas_corrected"] == pytest.approx(3.0)
+
+
+def test_build_guardrail_context_adgroup_bid_up_no_cost_leaves_roas_none(db):
+    """window agg에 cost=0(실적 자체가 없음)이면 roas_corrected/unconverted_spend는
+    None(추정 금지) — target_roas/cost_today/daily_budget은 그와 무관하게 채워진다."""
+    p = _proposal(db, proposal_type="bid_up", target_type="adgroup", target_id="grp-shop-1")
+    with patch.object(harness.naver_sa_writer, "_get_adgroup",
+                       return_value={"bidAmt": 1200, "systemBiddingType": "NONE"}):
+        ctx = harness._build_guardrail_context(db, p, kst_now())
+    assert ctx["roas_corrected"] is None
+    assert ctx["unconverted_spend"] is None
+
+
+def test_build_guardrail_context_adgroup_bid_up_target_roas_from_campaign_override(db):
+    from app.models import NaverCampaignSettings
+    p = _proposal(db, proposal_type="bid_up", campaign_id="cmp-override",
+                  target_type="adgroup", target_id="grp-shop-1")
+    db.add(NaverCampaignSettings(campaign_id="cmp-override", target_roas_override=Decimal("4.5")))
+    db.commit()
+
+    with patch.object(harness.naver_sa_writer, "_get_adgroup",
+                       return_value={"bidAmt": 1200, "systemBiddingType": "NONE"}):
+        ctx = harness._build_guardrail_context(db, p, kst_now())
+
+    assert ctx["target_roas"] == pytest.approx(4.5)
+
+
+def test_build_guardrail_context_adgroup_bid_up_cost_today_and_daily_budget_from_snapshot(db):
+    from app.models import NaverHourlySnapshot
+    p = _proposal(db, proposal_type="bid_up", target_type="adgroup", target_id="grp-shop-1")
+    now = kst_now()
+    db.add(NaverHourlySnapshot(
+        snapshot_at=now, ad_date=now.date(), snapshot_hour=5, campaign_id="cmp1",
+        campaign_type="SHOPPING", cost=60_000, clk=30, imp=800, daily_budget=100_000,
+    ))
+    db.commit()
+
+    with patch.object(harness.naver_sa_writer, "_get_adgroup",
+                       return_value={"bidAmt": 1200, "systemBiddingType": "NONE"}):
+        ctx = harness._build_guardrail_context(db, p, now)
+
+    assert ctx["cost_today"] == 60_000
+    assert ctx["daily_budget"] == 100_000
+
+
+def test_build_guardrail_context_adgroup_bid_down_still_none_for_roas_fields(db):
+    """회귀 방지 — bid_down(감액)은 여전히 up 전용 필드를 채우지 않는다(S2 계약 불변)."""
+    from app.models import NaverAdDaily
+    p = _proposal(db, proposal_type="bid_down", target_type="adgroup", target_id="grp-shop-1")
+    now = kst_now()
+    as_of = now.date() - timedelta(days=1)
+    db.add(NaverAdDaily(
+        ad_date=as_of, campaign_id="cmp1", campaign_type="SHOPPING", adgroup_id="grp-shop-1",
+        keyword_id="", imp=500, clk=25, cost=8000, rank_sum=1500,
+        conv_direct_cnt=1, conv_indirect_cnt=0, conv_direct_amt=40000, conv_indirect_amt=0,
+    ))
+    db.commit()
+
+    with patch.object(harness.naver_sa_writer, "_get_adgroup",
+                       return_value={"bidAmt": 1200, "systemBiddingType": "NONE"}):
+        ctx = harness._build_guardrail_context(db, p, now)
+
+    assert ctx["roas_corrected"] is None
+    assert ctx["target_roas"] is None
+    assert ctx["unconverted_spend"] is None
+    assert ctx["cost_today"] is None
+    assert ctx["daily_budget"] is None
 
 
 def test_build_guardrail_context_current_bid_from_live_reread(db):

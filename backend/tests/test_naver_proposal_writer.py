@@ -440,6 +440,84 @@ def test_persist_shopping_resume_proposal_stores_adgroup_target_type_and_lock(db
     assert saved[0].target_bid is None
 
 
+# ── X1b-S S3: 쇼핑 adgroup 성장(bid_up) 생성기 (D-NAO-43 확장) ─────────────
+# shopping_group_bep(적자, down)의 반대 — shopping_group_growth 보드(수익 그룹) →
+# bid_up 제안. _bid_proposal 공용 경로(target_type="adgroup")를 그대로 쓴다(shopping_group_bep
+# 과 동일 배선, board_name만 다름 — _ALLOWED_DIRECTIONS가 방향을 강제).
+
+
+def _growth_group_row(**overrides):
+    row = {"campaign_id": "cmp-ours", "adgroup_id": "grp-shop-growth", "cost": 8000,
+           "conv_amt": 40000, "roas_naver": 5.0, "roas_corrected": 5.0}
+    row.update(overrides)
+    return row
+
+
+def test_build_shopping_group_growth_produces_bid_up_targeting_adgroup(db):
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis(shopping_group_growth=[_growth_group_row()])
+
+    out = proposal_writer.build(
+        db, diagnosis, bid_sims={("adgroup", "grp-shop-growth"): _sim(direction="up")}, as_of=AS_OF,
+    )
+    assert len(out) == 1
+    assert out[0]["proposal_type"] == "bid_up"
+    assert out[0]["target_type"] == "adgroup"
+    assert out[0]["target_id"] == "grp-shop-growth"
+    assert "target_roas 근거=" in out[0]["rationale"]
+
+
+def test_build_shopping_group_growth_stores_target_bid(db):
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis(shopping_group_growth=[_growth_group_row()])
+
+    out = proposal_writer.build(
+        db, diagnosis,
+        bid_sims={("adgroup", "grp-shop-growth"): _sim(direction="up", recommended=1300)}, as_of=AS_OF,
+    )
+    assert out[0]["target_bid"] == 1300
+
+    saved = proposal_writer.persist(db, out)
+    assert saved[0].target_bid == 1300
+    assert saved[0].target_type == "adgroup"
+
+
+def test_build_shopping_group_growth_wrong_direction_skipped(db):
+    """shopping_group_growth는 bid_up만 허용(_ALLOWED_DIRECTIONS) — 표본이 얇아 계층
+    수축으로 direction='down'이 나오면 성장 의도와 반대라 억지 제안 대신 건너뛴다."""
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis(shopping_group_growth=[_growth_group_row()])
+
+    out = proposal_writer.build(
+        db, diagnosis,
+        bid_sims={("adgroup", "grp-shop-growth"): _sim(direction="down", ceiling=50, recommended=50)},
+        as_of=AS_OF,
+    )
+    assert out == []
+
+
+def test_build_shopping_group_growth_skips_non_ours_campaign(db):
+    db.add(NaverCampaignSettings(campaign_id="cmp-none", optimizer="none"))
+    db.commit()
+    diagnosis = _diagnosis(shopping_group_growth=[_growth_group_row(campaign_id="cmp-none")])
+
+    out = proposal_writer.build(
+        db, diagnosis, bid_sims={("adgroup", "grp-shop-growth"): _sim(direction="up")}, as_of=AS_OF,
+    )
+    assert out == []
+
+
+def test_build_shopping_group_growth_no_sim_available_skips_row(db):
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis(shopping_group_growth=[_growth_group_row()])
+    out = proposal_writer.build(db, diagnosis, bid_sims={}, as_of=AS_OF)  # sim 없음
+    assert out == []
+
+
 def test_pause_proposal_defaults_to_keyword_target_type_unchanged(db):
     """회귀 방지 — target_type 인자를 안 넘기면 기존 keyword 경로와 완전히 동일해야 한다."""
     row = _pause_row()

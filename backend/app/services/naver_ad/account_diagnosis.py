@@ -582,6 +582,103 @@ def shopping_pause_candidates(db: Session, date_from: date, date_to: date) -> li
     return out
 
 
+def shopping_group_growth(
+    db: Session, date_from: date, date_to: date, target_roas_resolver, correction_factor: Decimal,
+) -> list[dict]:
+    """쇼핑검색 그룹(adgroup)별 수익 성장 후보 (X1b-S S3, D-NAO-43 확장) —
+    shopping_group_bep(적자, down)의 반대. SHOPPING adgroup(status='on' + 부모 캠페인도 on,
+    _on_adgroup_ids 재사용 — shopping_pause/resume_candidates와 동일 부모체인 규율) 중
+    보정ROAS ≥ 캠페인별 목표(target_roas_resolver(campaign_id), override>계정기본값)인
+    수익 그룹, cost>0.
+
+    starving_winners(account_diagnosis.py 상단, WEB_SITE 키워드판 육성 의도)의 adgroup grain
+    대칭이되, 저클릭 필터는 두지 않는다 — "충분히 노출됐는데 저클릭"이라는 판단 자체가
+    SHOPPING 그룹 단위엔 성립하지 않고(그룹 안에 여러 상품이 섞여있어 클릭 볼륨 해석이
+    다름), 방향(성장 여력 유무)은 bid_simulator의 economic_ceiling 계산에 맡긴다 — 이 보드는
+    "수익성 확인된 그룹"까지만 걸러준다.
+
+    entity 조회로 bid_amt(현재 입찰가)를 확보하지 못하면 fail-closed 제외
+    (shopping_pause_candidates와 동일 근거 — downstream bid_simulator/실쓰기가 현재
+    입찰가를 필요로 함, 값 없이 성장 후보로 올려봐야 실행 불가능한 유령 후보가 된다).
+    """
+    on_adgroups = _on_adgroup_ids(db)
+    entity_map = {
+        e.entity_id: e for e in
+        db.query(NaverEntity).filter(
+            NaverEntity.entity_type == "adgroup", NaverEntity.status == "on",
+            NaverEntity.campaign_type == _SHOPPING,
+        ).all()
+    }
+    if not entity_map:
+        return []
+
+    q = (
+        db.query(
+            NaverAdDaily.campaign_id, NaverAdDaily.adgroup_id,
+            sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.cost), 0),
+            sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.conv_direct_amt), 0),
+            sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.conv_indirect_amt), 0),
+        )
+        .filter(
+            NaverAdDaily.ad_date >= date_from, NaverAdDaily.ad_date <= date_to,
+            NaverAdDaily.campaign_type == _SHOPPING,
+            NaverAdDaily.adgroup_id != BACKFILL_SENTINEL_ADGROUP,
+        )
+        .group_by(NaverAdDaily.campaign_id, NaverAdDaily.adgroup_id)
+        .all()
+    )
+    out = []
+    for campaign_id, adgroup_id, cost, conv_direct, conv_indirect in q:
+        cost = int(cost)
+        if cost <= 0:
+            continue
+        entity = entity_map.get(adgroup_id)
+        if entity is None or not entity.bid_amt:
+            continue
+        if adgroup_id not in on_adgroups:
+            continue
+        conv_amt = int(conv_direct) + int(conv_indirect)
+        roas_naver = float((Decimal(conv_amt) / Decimal(cost)).quantize(_Q4))
+        roas_c = _corrected_roas(roas_naver, correction_factor)
+        target_roas = target_roas_resolver(campaign_id)
+        if roas_c is not None and target_roas is not None and roas_c >= float(target_roas):
+            out.append({
+                "campaign_id": campaign_id, "adgroup_id": adgroup_id, "cost": cost,
+                "conv_amt": conv_amt, "roas_naver": roas_naver, "roas_corrected": roas_c,
+            })
+    out.sort(key=lambda x: x["roas_corrected"], reverse=True)
+    return out
+
+
+def adgroup_window_agg(db: Session, adgroup_id: str, date_from: date, date_to: date) -> dict:
+    """단일 광고그룹의 창 내 (cost, conv_amt, conv_cnt) 집계 — keyword_window_agg의 adgroup
+    grain 공개 대칭판(P2/S3, D-NAO-42-f PLAN §3 S2/S3 스코프 예고 실현). naver_execution_harness
+    (S3 adgroup up 가드레일 컨텍스트)가 소비한다.
+
+    campaign_type 필터를 걸지 않는다 — adgroup_id 자체가 이미 특정 campaign_type에 속한
+    그룹 하나를 유일하게 가리키므로(현재 유일한 소비처는 SHOPPING adgroup up이지만, 필터를
+    걸지 않는 편이 campaign_window_agg와 동일한 "그레인이 이미 스코프를 결정한다" 원칙에
+    맞다). S1b의 private `_shopping_adgroup_window_agg`(SHOPPING 필터 포함,
+    shopping_resume_candidates 전용)는 그대로 유지 — 이 함수가 대체하지 않는다(기존
+    호출부 회귀 방지, 별도 유지보수 부담이 크지 않음).
+    """
+    cost, direct, indirect, direct_cnt, indirect_cnt = db.query(
+        sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.cost), 0),
+        sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.conv_direct_amt), 0),
+        sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.conv_indirect_amt), 0),
+        sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.conv_direct_cnt), 0),
+        sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.conv_indirect_cnt), 0),
+    ).filter(
+        NaverAdDaily.adgroup_id == adgroup_id,
+        NaverAdDaily.ad_date >= date_from, NaverAdDaily.ad_date <= date_to,
+        NaverAdDaily.adgroup_id != BACKFILL_SENTINEL_ADGROUP,
+    ).one()
+    return {
+        "cost": int(cost), "conv_amt": int(direct) + int(indirect),
+        "conv_cnt": int(direct_cnt) + int(indirect_cnt),
+    }
+
+
 def _shopping_adgroup_window_agg(db: Session, adgroup_id: str, date_from: date, date_to: date) -> dict:
     """단일 쇼핑 광고그룹의 창 내 (cost, conv_amt) 집계 — keyword_window_agg의 adgroup·
     SHOPPING grain 판(shopping_resume_candidates 전용, X1b-S S1). 캠페인 무관 재사용

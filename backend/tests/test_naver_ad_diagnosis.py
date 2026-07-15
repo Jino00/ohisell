@@ -236,7 +236,8 @@ def test_build_diagnosis_assembles_all_boards(db):
     assert result["boards"] is not None
     assert set(result["boards"]) == {
         "bleeding_keywords", "starving_winners", "expansion_bucket",
-        "shopping_group_bep", "exclusion_candidates", "keyword_triage", "vicious_cycle",
+        "shopping_group_bep", "shopping_group_growth", "exclusion_candidates", "keyword_triage",
+        "vicious_cycle",
         "pause_candidates", "resume_candidates",
         "shopping_pause_candidates", "shopping_resume_candidates",
     }
@@ -919,3 +920,211 @@ def test_campaign_window_agg_respects_date_window(db):
 
     out = diag.campaign_window_agg(db, "cmp1", D0, D0)
     assert out == {"cost": 3000, "conv_amt": 1000}  # 창 밖(D0-1) 행은 제외
+
+
+# ── shopping_group_growth (X1b-S S3, D-NAO-43 성장 확장) ──────────────────
+# shopping_group_bep(적자, down)의 반대 — 수익 그룹(보정ROAS≥캠페인목표) 성장 후보.
+# _on_adgroup_ids(부모 체인 전부 on) + entity bid_amt 확보를 요구한다(fail-closed, downstream
+# bid_simulator/실쓰기가 현재 입찰가를 필요로 함 — shopping_pause_candidates와 동일 근거).
+
+
+def test_shopping_group_growth_flags_profitable_group_above_target(db):
+    _seed_shopping_active_campaign(db)
+    _shopping_entity(db, "grp-shop-1", status="on", bid_amt=1000)
+    # cost=8000, conv_amt=40000 → roas=5.0 ≥ 목표 2.0(성장 후보)
+    _row(db, D0, "cmp-shop", "SHOPPING", "grp-shop-1", "", 500, 25, 8000, direct=40000)
+    db.commit()
+
+    out = diag.shopping_group_growth(
+        db, D0, D0, target_roas_resolver=lambda cid: Decimal("2.0"), correction_factor=Decimal("1"),
+    )
+    assert len(out) == 1
+    assert out[0]["adgroup_id"] == "grp-shop-1"
+    assert out[0]["campaign_id"] == "cmp-shop"
+    assert out[0]["cost"] == 8000
+    assert out[0]["conv_amt"] == 40000
+    assert out[0]["roas_corrected"] == 5.0
+
+
+def test_shopping_group_growth_excludes_deficit_group_below_target(db):
+    _seed_shopping_active_campaign(db)
+    _shopping_entity(db, "grp-shop-1", status="on", bid_amt=1000)
+    # cost=8000, conv_amt=8000 → roas=1.0 < 목표 2.0(적자/미달, 성장 대상 아님)
+    _row(db, D0, "cmp-shop", "SHOPPING", "grp-shop-1", "", 500, 25, 8000, direct=8000)
+    db.commit()
+
+    out = diag.shopping_group_growth(
+        db, D0, D0, target_roas_resolver=lambda cid: Decimal("2.0"), correction_factor=Decimal("1"),
+    )
+    assert out == []
+
+
+def test_shopping_group_growth_excludes_when_parent_campaign_off(db):
+    db.add(NaverEntity(entity_type="campaign", entity_id="cmp-shop", parent_id="",
+                        campaign_id="cmp-shop", campaign_type="SHOPPING", name="cmp-shop", status="off"))
+    _shopping_entity(db, "grp-shop-1", status="on", bid_amt=1000)
+    _row(db, D0, "cmp-shop", "SHOPPING", "grp-shop-1", "", 500, 25, 8000, direct=40000)
+    db.commit()
+
+    out = diag.shopping_group_growth(
+        db, D0, D0, target_roas_resolver=lambda cid: Decimal("2.0"), correction_factor=Decimal("1"),
+    )
+    assert out == []
+
+
+def test_shopping_group_growth_excludes_when_adgroup_off(db):
+    _seed_shopping_active_campaign(db)
+    _shopping_entity(db, "grp-shop-1", status="off", bid_amt=1000)
+    _row(db, D0, "cmp-shop", "SHOPPING", "grp-shop-1", "", 500, 25, 8000, direct=40000)
+    db.commit()
+
+    out = diag.shopping_group_growth(
+        db, D0, D0, target_roas_resolver=lambda cid: Decimal("2.0"), correction_factor=Decimal("1"),
+    )
+    assert out == []
+
+
+def test_shopping_group_growth_excludes_missing_bid_amt(db):
+    # NaverEntity 행 자체가 없음(bid_amt 미확보) — fail-closed 스킵(downstream 실행이
+    # 현재 입찰가를 필요로 함, shopping_pause_candidates와 동일 근거)
+    _seed_shopping_active_campaign(db)
+    _row(db, D0, "cmp-shop", "SHOPPING", "grp-shop-1", "", 500, 25, 8000, direct=40000)
+    db.commit()
+
+    out = diag.shopping_group_growth(
+        db, D0, D0, target_roas_resolver=lambda cid: Decimal("2.0"), correction_factor=Decimal("1"),
+    )
+    assert out == []
+
+
+def test_shopping_group_growth_excludes_entity_bid_amt_none_even_if_row_exists(db):
+    _seed_shopping_active_campaign(db)
+    _shopping_entity(db, "grp-shop-1", status="on", bid_amt=None)
+    _row(db, D0, "cmp-shop", "SHOPPING", "grp-shop-1", "", 500, 25, 8000, direct=40000)
+    db.commit()
+
+    out = diag.shopping_group_growth(
+        db, D0, D0, target_roas_resolver=lambda cid: Decimal("2.0"), correction_factor=Decimal("1"),
+    )
+    assert out == []
+
+
+def test_shopping_group_growth_excludes_zero_cost(db):
+    _seed_shopping_active_campaign(db)
+    _shopping_entity(db, "grp-shop-1", status="on", bid_amt=1000)
+    _row(db, D0, "cmp-shop", "SHOPPING", "grp-shop-1", "", 500, 0, 0, direct=0)
+    db.commit()
+
+    out = diag.shopping_group_growth(
+        db, D0, D0, target_roas_resolver=lambda cid: Decimal("2.0"), correction_factor=Decimal("1"),
+    )
+    assert out == []
+
+
+def test_shopping_group_growth_excludes_web_site_campaign_type(db):
+    db.add(NaverEntity(entity_type="campaign", entity_id="cmp-web", parent_id="",
+                        campaign_id="cmp-web", campaign_type="WEB_SITE", name="cmp-web", status="on"))
+    db.add(NaverEntity(entity_type="adgroup", entity_id="grp-web-1", parent_id="cmp-web",
+                        campaign_id="cmp-web", campaign_type="WEB_SITE", name="grp-web-1",
+                        status="on", bid_amt=1000))
+    _row(db, D0, "cmp-web", "WEB_SITE", "grp-web-1", "", 500, 25, 8000, direct=40000)
+    db.commit()
+
+    out = diag.shopping_group_growth(
+        db, D0, D0, target_roas_resolver=lambda cid: Decimal("2.0"), correction_factor=Decimal("1"),
+    )
+    assert out == []
+
+
+def test_shopping_group_growth_applies_correction_factor(db):
+    _seed_shopping_active_campaign(db)
+    _shopping_entity(db, "grp-shop-1", status="on", bid_amt=1000)
+    # roas_naver=1.0, 보정계수 3.0 적용 → roas_corrected=3.0 ≥ 목표 2.0
+    _row(db, D0, "cmp-shop", "SHOPPING", "grp-shop-1", "", 500, 25, 8000, direct=8000)
+    db.commit()
+
+    out = diag.shopping_group_growth(
+        db, D0, D0, target_roas_resolver=lambda cid: Decimal("2.0"), correction_factor=Decimal("3.0"),
+    )
+    assert len(out) == 1
+    assert out[0]["roas_corrected"] == pytest.approx(3.0)
+
+
+def test_shopping_group_growth_uses_per_campaign_target_roas_override(db):
+    _seed_shopping_active_campaign(db, campaign_id="cmp-shop-override")
+    _shopping_entity(db, "grp-shop-1", status="on", bid_amt=1000, campaign_id="cmp-shop-override")
+    # roas=3.0 — 계정 기본 2.0은 넘지만 캠페인 override 5.0은 못 넘음
+    _row(db, D0, "cmp-shop-override", "SHOPPING", "grp-shop-1", "", 500, 25, 3000, direct=9000)
+    db.commit()
+
+    resolver = lambda cid: Decimal("5.0") if cid == "cmp-shop-override" else Decimal("2.0")  # noqa: E731
+    out = diag.shopping_group_growth(db, D0, D0, target_roas_resolver=resolver, correction_factor=Decimal("1"))
+    assert out == []  # 3.0 < campaign override 5.0
+
+
+def test_shopping_group_growth_sorted_by_roas_desc(db):
+    _seed_shopping_active_campaign(db)
+    _shopping_entity(db, "grp-shop-1", status="on", bid_amt=1000)
+    _shopping_entity(db, "grp-shop-2", status="on", bid_amt=1000)
+    _row(db, D0, "cmp-shop", "SHOPPING", "grp-shop-1", "", 500, 25, 8000, direct=24000)   # roas=3.0
+    _row(db, D0, "cmp-shop", "SHOPPING", "grp-shop-2", "", 500, 25, 8000, direct=80000)   # roas=10.0
+    db.commit()
+
+    out = diag.shopping_group_growth(
+        db, D0, D0, target_roas_resolver=lambda cid: Decimal("2.0"), correction_factor=Decimal("1"),
+    )
+    assert [r["adgroup_id"] for r in out] == ["grp-shop-2", "grp-shop-1"]
+
+
+# ── adgroup_window_agg (P2/S3, D-NAO-42-f PLAN §3 S2/S3 스코프 실현) ──────
+# keyword_window_agg의 adgroup grain 대칭판(공개, campaign_type 무관) — 실행하너스(S3)
+# 가드레일 컨텍스트의 원료. _shopping_adgroup_window_agg(private, SHOPPING 필터·
+# shopping_resume_candidates 전용)와 별개 — 그 함수는 그대로 유지된다.
+
+
+def test_adgroup_window_agg_sums_cost_and_conv_amt(db):
+    _row(db, D0, "cmp-shop", "SHOPPING", "grp-shop-1", "", 500, 25, 8000, direct=3000, indirect=1000)
+    db.commit()
+
+    out = diag.adgroup_window_agg(db, "grp-shop-1", D0, D0)
+    assert out["cost"] == 8000
+    assert out["conv_amt"] == 4000
+
+
+def test_adgroup_window_agg_includes_conv_cnt(db):
+    _row(db, D0, "cmp-shop", "SHOPPING", "grp-shop-1", "", 500, 25, 8000, direct=3000, indirect=1000)
+    db.commit()
+
+    out = diag.adgroup_window_agg(db, "grp-shop-1", D0, D0)
+    assert out["conv_cnt"] == 2  # direct 1건 + indirect 1건(_row 헬퍼가 각 1건씩 세팅)
+
+
+def test_adgroup_window_agg_excludes_other_adgroups(db):
+    _row(db, D0, "cmp-shop", "SHOPPING", "grp-shop-1", "", 500, 25, 8000, direct=3000)
+    _row(db, D0, "cmp-shop", "SHOPPING", "grp-shop-2", "", 500, 25, 9000, direct=1000)
+    db.commit()
+
+    out = diag.adgroup_window_agg(db, "grp-shop-1", D0, D0)
+    assert out == {"cost": 8000, "conv_amt": 3000, "conv_cnt": 1}
+
+
+def test_adgroup_window_agg_excludes_backfill_sentinel_adgroup(db):
+    _row(db, D0, "cmp-shop", "SHOPPING", BACKFILL_SENTINEL_ADGROUP, "", 500, 25, 999_999, direct=0)
+    db.commit()
+
+    out = diag.adgroup_window_agg(db, BACKFILL_SENTINEL_ADGROUP, D0, D0)
+    assert out == {"cost": 0, "conv_amt": 0, "conv_cnt": 0}
+
+
+def test_adgroup_window_agg_no_data_returns_zeros(db):
+    out = diag.adgroup_window_agg(db, "grp-nonexistent", D0, D0)
+    assert out == {"cost": 0, "conv_amt": 0, "conv_cnt": 0}
+
+
+def test_adgroup_window_agg_respects_date_window(db):
+    _row(db, D0, "cmp-shop", "SHOPPING", "grp-shop-1", "", 500, 25, 8000, direct=3000)
+    _row(db, D0 - timedelta(days=1), "cmp-shop", "SHOPPING", "grp-shop-1", "", 500, 25, 5000, direct=2000)
+    db.commit()
+
+    out = diag.adgroup_window_agg(db, "grp-shop-1", D0, D0)
+    assert out == {"cost": 8000, "conv_amt": 3000, "conv_cnt": 1}  # 창 밖(D0-1) 행은 제외

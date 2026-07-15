@@ -45,6 +45,7 @@ _ALLOWED_DIRECTIONS = {
     "bleeding_keywords": {"down"},
     "starving_winners": {"up"},
     "shopping_group_bep": {"down"},
+    "shopping_group_growth": {"up"},  # X1b-S S3(D-NAO-43 확장) — shopping_group_bep의 반대(성장)
     "growth_sweeper": {"up"},
 }
 
@@ -491,6 +492,21 @@ def build(
         sim = bid_sims.get(("adgroup", target_id))
         p = _bid_proposal(row, sim, cid, target_id, target_type="adgroup",
                            target_label=labels.get(cid), board_name="shopping_group_bep",
+                           forecast=forecast_data.get(("adgroup", target_id)))
+        if p:
+            proposals.append(p)
+
+    # shopping_group_growth(X1b-S S3, D-NAO-43 확장): shopping_group_bep(적자, down)의 반대 —
+    # 수익 그룹 성장(bid_up). 배선은 shopping_group_bep과 완전 대칭(target_type="adgroup",
+    # board_name만 다름) — _ALLOWED_DIRECTIONS가 "up"만 통과시킨다.
+    for row in boards.get("shopping_group_growth", []) or []:
+        cid = row["campaign_id"]
+        if cid not in ours:
+            continue
+        target_id = row["adgroup_id"]
+        sim = bid_sims.get(("adgroup", target_id))
+        p = _bid_proposal(row, sim, cid, target_id, target_type="adgroup",
+                           target_label=labels.get(cid), board_name="shopping_group_growth",
                            forecast=forecast_data.get(("adgroup", target_id)))
         if p:
             proposals.append(p)
