@@ -30,7 +30,7 @@
 - 카나리=04 유지(Jino, 원래 A/B 계획). 스캔 대안=TPU 425541(29성장+4정지)·갤럭시지문방지_사생활 164717(9정지+6성장) — Jino가 나중에 실volume 카나리 원하면 후보.
 
 ## 6. 다음 작업 (선택, Jino 게이트)
-- [ ] **PR #21 리뷰·병합**(Jino) → main.
+- [x] ~~PR #21 리뷰·병합~~ **완료(2026-07-15, Jino 승인)** — merge commit 5599ccd, main==prod 정합 확인(naver_ad 7파일 sha 일치).
 - [ ] **위임 스위치**(expert_delegated_types, Jino 전용): 04 자동 실행 개방(현재 콘솔 승인만). Ava 공백(expert_review_run) 선결.
 - [ ] shopping_group_bep(down 보드)에도 clk 대칭 보강(후속 품질, codex[P2]와 동형).
 - [ ] 04 유기적 관찰(임계 넘는지) / 실volume 쇼핑 카나리 추가(Jino).
