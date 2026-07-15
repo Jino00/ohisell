@@ -454,6 +454,19 @@ def _execute_update_bid(db: Session, proposal: NaverProposal, now: datetime) -> 
         _guard_failure(db, proposal, now, "update_bid", reason)
         raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
 
+    # codex[P1] S2: adgroup 증액(bid_up/growth_bid_up)은 up-only 가드 컨텍스트(BEP 이익하한·
+    # 스톱로스·일예산)가 아직 미구현(S3 스코프)이라 차단 — _build_guardrail_context의 adgroup
+    # 브랜치가 roas/스톱로스/일예산을 None으로 남겨 guardrail_gate가 up-only 검사를 건너뛰고
+    # 방향/±15%/쿨다운만으로 증액을 통과시키는 것을 막는다. 쇼핑 adgroup은 현재 bid_down만
+    # 실행(S3에서 adgroup_window_agg 붙으면 up 개방).
+    if proposal.target_type == "adgroup" and proposal.proposal_type in ("bid_up", "growth_bid_up"):
+        reason = (
+            "adgroup 증액은 up-only 가드 컨텍스트 미구현이라 차단 — 쇼핑 adgroup은 현재 "
+            "bid_down만 실행(S3 개방 예정, fail-closed 정직 경계)"
+        )
+        _guard_failure(db, proposal, now, "update_bid", reason)
+        raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
+
     context = _build_guardrail_context(db, proposal, now)
     gate_proposal = {
         "proposal_type": proposal.proposal_type, "target_bid": proposal.target_bid, "target_lock": None,
@@ -766,6 +779,12 @@ def real_write_blocker(proposal: NaverProposal) -> str | None:
             return (
                 f"target_type={proposal.target_type!r} — 키워드·광고그룹 단위 입찰만 구현됨"
                 "(캠페인 단위는 미구현, 정직 경계)"
+            )
+        # codex[P1] S2: adgroup 증액은 up-only 가드 컨텍스트 미구현이라 실행 불가(S3 개방 예정).
+        if proposal.target_type == "adgroup" and proposal.proposal_type in ("bid_up", "growth_bid_up"):
+            return (
+                "adgroup 증액(bid_up/growth_bid_up)은 up-only 가드 컨텍스트 미구현 — 쇼핑 "
+                "adgroup은 현재 bid_down만 실행(S3 개방 예정, 정직 경계)"
             )
         if proposal.target_bid is None:
             return "target_bid 없음 — 실행 대상 정보 부족(구 제안이거나 재생성 필요)"

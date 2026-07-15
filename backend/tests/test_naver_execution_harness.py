@@ -493,6 +493,36 @@ def test_execute_update_bid_adgroup_bid_down_success(db):
     assert p.status == "approved"
 
 
+def test_execute_update_bid_adgroup_bid_up_blocked_down_only(db):
+    """[codex P1] adgroup 증액(bid_up/growth_bid_up)은 up-only 가드 컨텍스트(BEP·스톱로스·
+    일예산) 미구현이라 실행 직전 차단된다 — 컨텍스트 없이 증액이 방향/±15%/쿨다운만으로
+    통과하는 것 방지. 쇼핑 adgroup은 현재 bid_down만 실행(S3에서 up 개방). writer 미호출·failed."""
+    _settings(db, optimizer="ours")
+    for ptype in ("bid_up", "growth_bid_up"):
+        p = _proposal(db, proposal_type=ptype, target_type="adgroup", target_id="grp-shop-up")
+        p.target_bid = 2000
+        db.commit()
+
+        with patch.object(harness.naver_sa_writer, "update_adgroup_bid") as mock_ag, \
+             patch.object(harness.naver_sa_writer, "update_keyword_bid") as mock_kw:
+            with pytest.raises(harness.MissingExecutionTargetError):
+                harness.execute(db, p.id, dry_run=False)
+
+        mock_ag.assert_not_called()
+        mock_kw.assert_not_called()
+        db.refresh(p)
+        assert p.status == "failed"
+
+
+def test_real_write_blocker_adgroup_bid_up_not_executable(db):
+    """[codex P1] real_write_blocker(콘솔 executable 판정)도 adgroup 증액을 미실행으로 표시."""
+    p = _proposal(db, proposal_type="bid_up", target_type="adgroup", target_id="grp-shop-up")
+    p.target_bid = 2000
+    db.commit()
+    reason = harness.real_write_blocker(p)
+    assert reason is not None and "adgroup" in reason.lower()
+
+
 def test_execute_update_bid_adgroup_blocked_by_guardrail(db):
     p = _proposal(db, proposal_type="bid_down", target_type="adgroup", target_id="grp-shop-1")
     p.target_bid = 100  # -15% 초과라고 가정(가드가 차단하는 시나리오를 mock으로 표현)

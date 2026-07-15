@@ -707,8 +707,11 @@ def _adgroup_bid_resp(bid_amt=1200, system_bidding_type="NONE", is_autobid_activ
     }
     if autobid_strategy is not None:
         body["autobidStrategy"] = autobid_strategy
-    elif is_autobid_active:
-        body["autobidStrategy"] = {"isAutobidActive": True}
+    else:
+        # 실제 수동입찰 그룹은 autobidStrategy.isAutobidActive=False를 명시적으로 반환한다
+        # (S0-2 라이브 실측). codex[P1] 강화 가드는 이 값이 explicit False일 때만 수동으로
+        # 인정하므로, 기본 mock도 실물처럼 명시값을 포함한다.
+        body["autobidStrategy"] = {"isAutobidActive": is_autobid_active}
     return FakeResp(200, body)
 
 
@@ -806,6 +809,25 @@ def test_update_adgroup_bid_missing_system_bidding_type_field_raises_validation_
     """[fail-closed] systemBiddingType 필드 자체가 응답에 없으면(None) 'NONE'과 다르므로
     안전 쪽(차단)으로 판정한다 — 추정으로 '수동입찰이겠지'라고 통과시키지 않는다."""
     before = FakeResp(200, {"nccAdgroupId": ADGROUP_ID, "adgroupType": "SHOPPING", "bidAmt": 1200})
+
+    with patch.object(writer.fetcher, "_get", side_effect=[before]) as mock_get, \
+         patch.object(writer.requests, "put") as mock_put:
+        with pytest.raises(WriteValidationError):
+            writer.update_adgroup_bid(ADGROUP_ID, 1000)
+
+    assert mock_get.call_count == 1
+    mock_put.assert_not_called()
+
+
+def test_update_adgroup_bid_none_systembidding_but_missing_autobid_flag_blocks():
+    """[codex P1] systemBiddingType='NONE'이어도 autobidStrategy(또는 isAutobidActive)가
+    응답에 없으면 isAutobidActive를 False로 강제하지 않고 차단한다 — 부분응답/스키마변경 시
+    ML 가드를 우회하던 것 방지(explicit False일 때만 수동 인정, fail-closed on ambiguity)."""
+    # systemBiddingType='NONE'이지만 autobidStrategy 필드 자체가 없음(isAutobidActive 불명)
+    before = FakeResp(200, {
+        "nccAdgroupId": ADGROUP_ID, "adgroupType": "SHOPPING", "bidAmt": 1200,
+        "systemBiddingType": "NONE",
+    })
 
     with patch.object(writer.fetcher, "_get", side_effect=[before]) as mock_get, \
          patch.object(writer.requests, "put") as mock_put:

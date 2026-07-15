@@ -594,15 +594,16 @@ def update_adgroup_bid(ncc_adgroup_id: str, bid_amt: int) -> WriteResult:
     before = _get_adgroup(ncc_adgroup_id)
 
     system_bidding_type = before.get("systemBiddingType")
-    autobid_strategy = before.get("autobidStrategy") or {}
-    is_autobid_active = bool(autobid_strategy.get("isAutobidActive")) if isinstance(
-        autobid_strategy, dict
-    ) else False
-    if system_bidding_type != "NONE" or is_autobid_active:
+    autobid_strategy = before.get("autobidStrategy")
+    autobid_active = autobid_strategy.get("isAutobidActive") if isinstance(autobid_strategy, dict) else None
+    # codex[P1] S2: isAutobidActive가 **명시적으로 False**일 때만 수동입찰로 인정(추정 금지).
+    # 필드 누락·비-dict·True는 전부 차단 — 부분응답/스키마변경 시 False로 강제해 ML 가드를
+    # 우회하던 것 방지(fail-closed on ambiguity). systemBiddingType도 'NONE' 명시 필수.
+    if system_bidding_type != "NONE" or autobid_active is not False:
         raise WriteValidationError(
-            f"update_adgroup_bid: adgroup {ncc_adgroup_id}는 시스템(ML) 자동입찰 중"
-            f"(systemBiddingType={system_bidding_type!r}, isAutobidActive={is_autobid_active!r}) "
-            "— 수동 bidAmt PUT은 충돌/무의미해 차단(fail-closed)"
+            f"update_adgroup_bid: adgroup {ncc_adgroup_id}는 수동입찰로 확인 불가"
+            f"(systemBiddingType={system_bidding_type!r}, isAutobidActive={autobid_active!r}) "
+            "— 시스템(ML) 자동입찰이거나 상태 불명이라 수동 bidAmt PUT 차단(fail-closed)"
         )
 
     path = f"/ncc/adgroups/{ncc_adgroup_id}"
