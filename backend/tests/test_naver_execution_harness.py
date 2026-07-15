@@ -580,6 +580,78 @@ def test_execute_update_bid_adgroup_bid_up_success_when_context_complete(db):
     assert p.executed_change_log_id == log_entry.id
 
 
+def test_execute_update_bid_adgroup_bid_up_blocked_when_daily_budget_missing(db):
+    """[codex P1 S3] roas/target은 있어도 daily_budget이 None(스냅샷/재조회 실패)이면
+    guardrail의 일예산 상한 검사가 fail-open이므로 executor가 fail-closed로 막는다."""
+    p = _proposal(db, proposal_type="bid_up", target_type="adgroup", target_id="grp-shop-up")
+    p.target_bid = 1300
+    db.commit()
+    _settings(db, optimizer="ours")
+    ctx = {"current_bid": 1200, "roas_corrected": 5.0, "target_roas": 2.0,
+           "unconverted_spend": 0, "cost_today": None, "daily_budget": None,
+           "last_change_at": None, "changes_today_count": 0}
+
+    with patch.object(harness, "_build_guardrail_context", return_value=ctx), \
+         patch.object(harness.guardrail_gate, "check") as mock_gate, \
+         patch.object(harness.naver_sa_writer, "update_adgroup_bid") as mock_ag:
+        with pytest.raises(harness.MissingExecutionTargetError):
+            harness.execute(db, p.id, dry_run=False)
+
+    mock_gate.assert_not_called()
+    mock_ag.assert_not_called()
+    db.refresh(p)
+    assert p.status == "failed"
+
+
+def test_execute_update_bid_adgroup_bid_up_blocked_when_capped_but_cost_today_missing(db):
+    """[codex P1 S3] daily_budget>0(상한 있음)인데 cost_today가 None(오늘 소진 미확보)이면
+    상한 검증 불가 → fail-closed 차단."""
+    p = _proposal(db, proposal_type="bid_up", target_type="adgroup", target_id="grp-shop-up")
+    p.target_bid = 1300
+    db.commit()
+    _settings(db, optimizer="ours")
+    ctx = {"current_bid": 1200, "roas_corrected": 5.0, "target_roas": 2.0,
+           "unconverted_spend": 0, "cost_today": None, "daily_budget": 50_000,
+           "last_change_at": None, "changes_today_count": 0}
+
+    with patch.object(harness, "_build_guardrail_context", return_value=ctx), \
+         patch.object(harness.guardrail_gate, "check") as mock_gate, \
+         patch.object(harness.naver_sa_writer, "update_adgroup_bid") as mock_ag:
+        with pytest.raises(harness.MissingExecutionTargetError):
+            harness.execute(db, p.id, dry_run=False)
+
+    mock_gate.assert_not_called()
+    mock_ag.assert_not_called()
+    db.refresh(p)
+    assert p.status == "failed"
+
+
+def test_execute_update_bid_adgroup_bid_up_allowed_when_uncapped_daily_budget_zero(db):
+    """[codex P1 S3] daily_budget==0 = uncapped(무제한) → 상한 검사 자체가 없으므로
+    cost_today가 None이어도 컨텍스트 완전으로 보고 guardrail_gate로 넘어간다(과도차단 방지)."""
+    p = _proposal(db, proposal_type="bid_up", target_type="adgroup", target_id="grp-shop-up")
+    p.target_bid = 1300
+    db.commit()
+    _settings(db, optimizer="ours")
+    result = _adgroup_write_result(
+        before={"bidAmt": 1200, "systemBiddingType": "NONE"},
+        after={"bidAmt": 1300, "systemBiddingType": "NONE"},
+    )
+    ctx = {"current_bid": 1200, "roas_corrected": 5.0, "target_roas": 2.0,
+           "unconverted_spend": 0, "cost_today": None, "daily_budget": 0,
+           "last_change_at": None, "changes_today_count": 0}
+
+    with patch.object(harness, "_build_guardrail_context", return_value=ctx), \
+         patch.object(harness.guardrail_gate, "check", return_value=None) as mock_gate, \
+         patch.object(harness.naver_sa_writer, "update_adgroup_bid", return_value=result) as mock_write:
+        log_entry = harness.execute(db, p.id, dry_run=False)
+
+    mock_gate.assert_called_once()
+    mock_write.assert_called_once_with("grp-shop-up", 1300)
+    db.refresh(p)
+    assert p.status == "approved"
+
+
 def test_execute_update_bid_adgroup_bid_up_blocked_by_real_guardrail_bep(db):
     """[완료기준⑤] 컨텍스트는 완전하지만 보정ROAS가 목표 미달인 경우 — 실제
     guardrail_gate.check(mock 아님)가 BEP 미달로 차단해야 한다(D-NAO-1 안전선)."""

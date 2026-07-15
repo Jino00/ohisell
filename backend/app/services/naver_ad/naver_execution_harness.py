@@ -504,12 +504,32 @@ def _execute_update_bid(db: Session, proposal: NaverProposal, now: datetime) -> 
     # executor가 실행 직전 한 번 더 완전성을 확인해 fail-closed로 막는다(guardrail_gate
     # 자체는 변경하지 않음 — S2의 blanket 차단을 이 데이터 기반 차단으로 대체).
     if proposal.target_type == "adgroup" and proposal.proposal_type in ("bid_up", "growth_bid_up"):
+        # guardrail_gate._check_bid의 up 전용 검사(BEP·스톱로스·일예산)는 그 원료가 None이면
+        # 전부 fail-open(검사 건너뜀)이다 — 컨텍스트가 불완전한 채 넘기면 D-NAO-1 이익하한·
+        # 일예산 상한이 조용히 우회된다. 각 원료의 소스가 달라(BEP/스톱로스=adgroup_window_agg,
+        # 일예산=당일 스냅샷+_get_adgroup) 하나가 채워져도 다른 게 빌 수 있으므로, executor가
+        # 실행 직전 완전성을 종합 확인해 fail-closed로 막는다(guardrail_gate 자체는 불변).
+        missing = []
         if context.get("roas_corrected") is None or context.get("target_roas") is None:
+            # 스톱로스 원료(unconverted_spend)는 roas_corrected와 동일 agg 소스라 roas가
+            # not None이면 함께 채워짐 — 별도 검사 불요.
+            missing.append(
+                f"BEP(roas_corrected={context.get('roas_corrected')!r}, "
+                f"target_roas={context.get('target_roas')!r})"
+            )
+        daily_budget = context.get("daily_budget")
+        cost_today = context.get("cost_today")
+        # daily_budget is None = 예산 미확보(스냅샷/재조회 실패)라 상한 검증 불가 → 차단.
+        # daily_budget == 0 = uncapped(useDailyBudget=false, 무제한)라 상한 검사 자체가 없음 →
+        #   cost_today None이어도 허용(codex[P2] 이력: 0은 uncapped, guardrail도 동일 처리).
+        # daily_budget > 0 인데 cost_today None = 오늘 소진 미확보 → 상한 검증 불가 → 차단.
+        if daily_budget is None or (daily_budget > 0 and cost_today is None):
+            missing.append(f"일예산(daily_budget={daily_budget!r}, cost_today={cost_today!r})")
+        if missing:
             reason = (
-                "adgroup 증액 BEP 검증 불가(fail-closed) — roas_corrected="
-                f"{context.get('roas_corrected')!r} target_roas={context.get('target_roas')!r} "
-                "(guardrail_gate의 BEP 검사는 값이 None이면 fail-open이라 executor가 메꿈, "
-                "D-NAO-43 S3)"
+                "adgroup 증액 가드 컨텍스트 불완전(fail-closed) — " + ", ".join(missing)
+                + " (guardrail_gate의 해당 up 검사는 값이 None이면 fail-open이라 executor가 "
+                "메꿈, codex[P1] D-NAO-43 S3)"
             )
             _guard_failure(db, proposal, now, "update_bid", reason)
             raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
