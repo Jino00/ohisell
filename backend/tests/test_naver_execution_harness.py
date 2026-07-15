@@ -403,16 +403,21 @@ def test_execute_update_bid_missing_target_bid_raises_before_gate(db):
 
 
 def test_execute_update_bid_wrong_target_type_raises(db):
-    p = _proposal(db, proposal_type="bid_up", target_type="adgroup", target_id="grp-1")
+    """target_type='campaign'은 여전히 미구현(정직 경계) — keyword·adgroup만 구현됨
+    (adgroup은 X1b-S bid 확장, D-NAO-16 3단계 SHOPPING 대칭 확장으로 이제 유효 대상이라
+    구 test는 target_type='campaign'으로 갱신)."""
+    p = _proposal(db, proposal_type="bid_up", target_type="campaign", target_id="cmp1")
     p.target_bid = 210
     db.commit()
     _settings(db, optimizer="ours")
 
-    with patch.object(harness.naver_sa_writer, "update_keyword_bid") as mock_write:
+    with patch.object(harness.naver_sa_writer, "update_keyword_bid") as mock_kw, \
+         patch.object(harness.naver_sa_writer, "update_adgroup_bid") as mock_ag:
         with pytest.raises(harness.MissingExecutionTargetError):
             harness.execute(db, p.id, dry_run=False)
 
-    mock_write.assert_not_called()
+    mock_kw.assert_not_called()
+    mock_ag.assert_not_called()
     db.refresh(p)
     assert p.status == "failed"
 
@@ -426,6 +431,296 @@ def test_execute_update_bid_writer_failure_records_failed(db):
     with patch.object(harness, "_build_guardrail_context", return_value={}), \
          patch.object(harness.guardrail_gate, "check", return_value=None), \
          patch.object(harness.naver_sa_writer, "update_keyword_bid",
+                       side_effect=naver_sa_writer.WriteError("500")):
+        with pytest.raises(naver_sa_writer.WriteError):
+            harness.execute(db, p.id, dry_run=False)
+
+    db.refresh(p)
+    assert p.status == "failed"
+    logs = db.query(NaverChangeLog).filter(NaverChangeLog.proposal_id == p.id).all()
+    assert len(logs) == 1
+    assert logs[0].outcome == "failed"
+    assert "[실행 실패]" in logs[0].rationale
+
+
+# ── X1b-S bid 확장: update_bid target_type='adgroup'(SHOPPING) 대칭 확장 ──────
+# D-NAO-16 3단계의 쇼핑 광고그룹 대칭 — shopping_group_bep 보드 제안(target_type='adgroup')이
+# 이 경로로 실쓰기된다. bid_down이 주 사용처(shopping_group_bep는 적자그룹 감액이 핵심)지만
+# writer 자체는 방향 무관(bid_up도 동일 함수) — update_keyword_bid와 동형 대칭 구조.
+
+
+def _adgroup_write_result(before=None, after=None):
+    return naver_sa_writer.WriteResult(
+        action="update_adgroup_bid",
+        before=before if before is not None else {"bidAmt": 1200, "systemBiddingType": "NONE"},
+        response=after, after=after if after is not None else {"bidAmt": 1000, "systemBiddingType": "NONE"},
+        created_ids=[],
+    )
+
+
+def test_execute_update_bid_adgroup_bid_down_success(db):
+    """shopping_group_bep 대칭 확장 핵심 케이스 — target_type='adgroup' + bid_down이
+    naver_sa_writer.update_adgroup_bid(update_keyword_bid 아님)로 디스패치돼야 한다."""
+    p = _proposal(db, proposal_type="bid_down", target_type="adgroup", target_id="grp-shop-1")
+    p.target_bid = 1000
+    db.commit()
+    _settings(db, optimizer="ours")
+    result = _adgroup_write_result(
+        before={"bidAmt": 1200, "systemBiddingType": "NONE"},
+        after={"bidAmt": 1000, "systemBiddingType": "NONE"},
+    )
+
+    with patch.object(harness, "_build_guardrail_context", return_value={"current_bid": 1200}), \
+         patch.object(harness.guardrail_gate, "check", return_value=None) as mock_gate, \
+         patch.object(harness.naver_sa_writer, "update_adgroup_bid", return_value=result) as mock_write, \
+         patch.object(harness.naver_sa_writer, "update_keyword_bid") as mock_kw:
+        log_entry = harness.execute(db, p.id, dry_run=False)
+
+    mock_gate.assert_called_once()
+    gate_call_args = mock_gate.call_args
+    assert gate_call_args[0][0] == {"proposal_type": "bid_down", "target_bid": 1000, "target_lock": None}
+    mock_write.assert_called_once_with("grp-shop-1", 1000)
+    mock_kw.assert_not_called()
+    assert log_entry.action == "update_bid"
+    assert log_entry.entity_type == "adgroup"
+    assert log_entry.entity_id == "grp-shop-1"
+    assert log_entry.outcome is None  # 채점 전 정상 — 성공 판별은 after_value
+    assert json.loads(log_entry.before_value) == {"bidAmt": 1200, "systemBiddingType": "NONE"}
+    assert json.loads(log_entry.after_value) == {"bidAmt": 1000, "systemBiddingType": "NONE"}
+
+    db.refresh(p)
+    assert p.executed_change_log_id == log_entry.id
+    assert p.status == "approved"
+
+
+OTHER_UP_TYPES = ("bid_up", "growth_bid_up")
+
+
+@pytest.mark.parametrize("ptype", OTHER_UP_TYPES)
+def test_execute_update_bid_adgroup_up_blocked_when_context_missing_roas(db, ptype):
+    """[S3, D-NAO-43 확장] adgroup 증액은 컨텍스트에 roas_corrected/target_roas가 둘 다
+    채워져야만 guardrail_gate로 넘어간다 — guardrail_gate._check_bid의 BEP 검사는 그 값이
+    None이면 fail-open(검사 건너뜀)이므로, executor가 직접 fail-closed로 막는다(S2의
+    blanket 차단을 대체). 컨텍스트가 미비하면(예: roas_corrected만 있고 target_roas 없음)
+    guardrail_gate.check 자체를 호출하지 않고 즉시 차단·writer 미호출·failed."""
+    p = _proposal(db, proposal_type=ptype, target_type="adgroup", target_id="grp-shop-up")
+    p.target_bid = 2000
+    db.commit()
+    _settings(db, optimizer="ours")
+
+    with patch.object(harness, "_build_guardrail_context",
+                       return_value={"current_bid": 1000, "roas_corrected": 3.0, "target_roas": None}), \
+         patch.object(harness.guardrail_gate, "check") as mock_gate, \
+         patch.object(harness.naver_sa_writer, "update_adgroup_bid") as mock_ag, \
+         patch.object(harness.naver_sa_writer, "update_keyword_bid") as mock_kw:
+        with pytest.raises(harness.MissingExecutionTargetError):
+            harness.execute(db, p.id, dry_run=False)
+
+    mock_gate.assert_not_called()
+    mock_ag.assert_not_called()
+    mock_kw.assert_not_called()
+    db.refresh(p)
+    assert p.status == "failed"
+    logs = db.query(NaverChangeLog).filter(NaverChangeLog.proposal_id == p.id).all()
+    assert len(logs) == 1
+    assert "fail-closed" in logs[0].rationale
+
+
+def test_execute_update_bid_adgroup_bid_up_blocked_when_roas_corrected_missing(db):
+    """roas_corrected 쪽이 없는 경우도 동일하게 fail-closed(target_roas만 있는 경우)."""
+    p = _proposal(db, proposal_type="bid_up", target_type="adgroup", target_id="grp-shop-up")
+    p.target_bid = 2000
+    db.commit()
+    _settings(db, optimizer="ours")
+
+    with patch.object(harness, "_build_guardrail_context",
+                       return_value={"current_bid": 1000, "roas_corrected": None, "target_roas": 2.0}), \
+         patch.object(harness.guardrail_gate, "check") as mock_gate, \
+         patch.object(harness.naver_sa_writer, "update_adgroup_bid") as mock_ag:
+        with pytest.raises(harness.MissingExecutionTargetError):
+            harness.execute(db, p.id, dry_run=False)
+
+    mock_gate.assert_not_called()
+    mock_ag.assert_not_called()
+    db.refresh(p)
+    assert p.status == "failed"
+
+
+def test_execute_update_bid_adgroup_bid_up_success_when_context_complete(db):
+    """[S3] 컨텍스트가 완전(roas_corrected·target_roas 둘 다 존재)하면 guardrail_gate로
+    넘어가고, 통과 시 update_adgroup_bid로 정상 디스패치된다."""
+    p = _proposal(db, proposal_type="bid_up", target_type="adgroup", target_id="grp-shop-up")
+    p.target_bid = 1300
+    db.commit()
+    _settings(db, optimizer="ours")
+    result = _adgroup_write_result(
+        before={"bidAmt": 1200, "systemBiddingType": "NONE"},
+        after={"bidAmt": 1300, "systemBiddingType": "NONE"},
+    )
+    complete_ctx = {
+        "current_bid": 1200, "roas_corrected": 5.0, "target_roas": 2.0,
+        "unconverted_spend": 0, "cost_today": 1000, "daily_budget": 50_000,
+        "last_change_at": None, "changes_today_count": 0,
+    }
+
+    with patch.object(harness, "_build_guardrail_context", return_value=complete_ctx), \
+         patch.object(harness.guardrail_gate, "check", return_value=None) as mock_gate, \
+         patch.object(harness.naver_sa_writer, "update_adgroup_bid", return_value=result) as mock_write, \
+         patch.object(harness.naver_sa_writer, "update_keyword_bid") as mock_kw:
+        log_entry = harness.execute(db, p.id, dry_run=False)
+
+    mock_gate.assert_called_once()
+    mock_write.assert_called_once_with("grp-shop-up", 1300)
+    mock_kw.assert_not_called()
+    assert log_entry.entity_type == "adgroup"
+    assert log_entry.action == "update_bid"
+
+    db.refresh(p)
+    assert p.status == "approved"
+    assert p.executed_change_log_id == log_entry.id
+
+
+def test_execute_update_bid_adgroup_bid_up_blocked_when_daily_budget_missing(db):
+    """[codex P1 S3] roas/target은 있어도 daily_budget이 None(스냅샷/재조회 실패)이면
+    guardrail의 일예산 상한 검사가 fail-open이므로 executor가 fail-closed로 막는다."""
+    p = _proposal(db, proposal_type="bid_up", target_type="adgroup", target_id="grp-shop-up")
+    p.target_bid = 1300
+    db.commit()
+    _settings(db, optimizer="ours")
+    ctx = {"current_bid": 1200, "roas_corrected": 5.0, "target_roas": 2.0,
+           "unconverted_spend": 0, "cost_today": None, "daily_budget": None,
+           "last_change_at": None, "changes_today_count": 0}
+
+    with patch.object(harness, "_build_guardrail_context", return_value=ctx), \
+         patch.object(harness.guardrail_gate, "check") as mock_gate, \
+         patch.object(harness.naver_sa_writer, "update_adgroup_bid") as mock_ag:
+        with pytest.raises(harness.MissingExecutionTargetError):
+            harness.execute(db, p.id, dry_run=False)
+
+    mock_gate.assert_not_called()
+    mock_ag.assert_not_called()
+    db.refresh(p)
+    assert p.status == "failed"
+
+
+def test_execute_update_bid_adgroup_bid_up_blocked_when_capped_but_cost_today_missing(db):
+    """[codex P1 S3] daily_budget>0(상한 있음)인데 cost_today가 None(오늘 소진 미확보)이면
+    상한 검증 불가 → fail-closed 차단."""
+    p = _proposal(db, proposal_type="bid_up", target_type="adgroup", target_id="grp-shop-up")
+    p.target_bid = 1300
+    db.commit()
+    _settings(db, optimizer="ours")
+    ctx = {"current_bid": 1200, "roas_corrected": 5.0, "target_roas": 2.0,
+           "unconverted_spend": 0, "cost_today": None, "daily_budget": 50_000,
+           "last_change_at": None, "changes_today_count": 0}
+
+    with patch.object(harness, "_build_guardrail_context", return_value=ctx), \
+         patch.object(harness.guardrail_gate, "check") as mock_gate, \
+         patch.object(harness.naver_sa_writer, "update_adgroup_bid") as mock_ag:
+        with pytest.raises(harness.MissingExecutionTargetError):
+            harness.execute(db, p.id, dry_run=False)
+
+    mock_gate.assert_not_called()
+    mock_ag.assert_not_called()
+    db.refresh(p)
+    assert p.status == "failed"
+
+
+def test_execute_update_bid_adgroup_bid_up_allowed_when_uncapped_daily_budget_zero(db):
+    """[codex P1 S3] daily_budget==0 = uncapped(무제한) → 상한 검사 자체가 없으므로
+    cost_today가 None이어도 컨텍스트 완전으로 보고 guardrail_gate로 넘어간다(과도차단 방지)."""
+    p = _proposal(db, proposal_type="bid_up", target_type="adgroup", target_id="grp-shop-up")
+    p.target_bid = 1300
+    db.commit()
+    _settings(db, optimizer="ours")
+    result = _adgroup_write_result(
+        before={"bidAmt": 1200, "systemBiddingType": "NONE"},
+        after={"bidAmt": 1300, "systemBiddingType": "NONE"},
+    )
+    ctx = {"current_bid": 1200, "roas_corrected": 5.0, "target_roas": 2.0,
+           "unconverted_spend": 0, "cost_today": None, "daily_budget": 0,
+           "last_change_at": None, "changes_today_count": 0}
+
+    with patch.object(harness, "_build_guardrail_context", return_value=ctx), \
+         patch.object(harness.guardrail_gate, "check", return_value=None) as mock_gate, \
+         patch.object(harness.naver_sa_writer, "update_adgroup_bid", return_value=result) as mock_write:
+        log_entry = harness.execute(db, p.id, dry_run=False)
+
+    mock_gate.assert_called_once()
+    mock_write.assert_called_once_with("grp-shop-up", 1300)
+    db.refresh(p)
+    assert p.status == "approved"
+
+
+def test_execute_update_bid_adgroup_bid_up_blocked_by_real_guardrail_bep(db):
+    """[완료기준⑤] 컨텍스트는 완전하지만 보정ROAS가 목표 미달인 경우 — 실제
+    guardrail_gate.check(mock 아님)가 BEP 미달로 차단해야 한다(D-NAO-1 안전선)."""
+    p = _proposal(db, proposal_type="bid_up", target_type="adgroup", target_id="grp-shop-up")
+    p.target_bid = 1300
+    db.commit()
+    _settings(db, optimizer="ours")
+    incomplete_but_present_ctx = {
+        "current_bid": 1200, "roas_corrected": 1.0, "target_roas": 2.0,  # BEP 미달
+        "unconverted_spend": 0, "cost_today": 1000, "daily_budget": 50_000,
+        "last_change_at": None, "changes_today_count": 0,
+    }
+
+    with patch.object(harness, "_build_guardrail_context", return_value=incomplete_but_present_ctx), \
+         patch.object(harness.naver_sa_writer, "update_adgroup_bid") as mock_write:
+        with pytest.raises(harness.MissingExecutionTargetError):
+            harness.execute(db, p.id, dry_run=False)
+
+    mock_write.assert_not_called()
+    db.refresh(p)
+    assert p.status == "failed"
+    logs = db.query(NaverChangeLog).filter(NaverChangeLog.proposal_id == p.id).all()
+    assert len(logs) == 1
+    assert "BEP 미달" in logs[0].rationale
+
+
+def test_real_write_blocker_adgroup_bid_up_executable_when_valid(db):
+    """[S3] real_write_blocker는 구조 판정만 한다(target_type/target_bid) — 런타임 컨텍스트
+    검증(roas_corrected/target_roas fail-closed)은 executor가 실행 시도 시점에 담당하므로
+    콘솔 executable 표시에서는 더 이상 adgroup 증액을 블랑켓 차단하지 않는다."""
+    for ptype in OTHER_UP_TYPES:
+        p = _proposal(db, proposal_type=ptype, target_type="adgroup", target_id="grp-shop-up")
+        p.target_bid = 2000
+        db.commit()
+        assert harness.real_write_blocker(p) is None
+
+
+def test_execute_update_bid_adgroup_blocked_by_guardrail(db):
+    p = _proposal(db, proposal_type="bid_down", target_type="adgroup", target_id="grp-shop-1")
+    p.target_bid = 100  # -15% 초과라고 가정(가드가 차단하는 시나리오를 mock으로 표현)
+    db.commit()
+    _settings(db, optimizer="ours")
+
+    with patch.object(harness, "_build_guardrail_context", return_value={"current_bid": 1200}), \
+         patch.object(harness.guardrail_gate, "check", return_value="변경폭 초과") as mock_gate, \
+         patch.object(harness.naver_sa_writer, "update_adgroup_bid") as mock_write:
+        with pytest.raises(harness.MissingExecutionTargetError):
+            harness.execute(db, p.id, dry_run=False)
+
+    mock_gate.assert_called_once()
+    mock_write.assert_not_called()
+    db.refresh(p)
+    assert p.status == "failed"
+    logs = db.query(NaverChangeLog).filter(NaverChangeLog.proposal_id == p.id).all()
+    assert len(logs) == 1
+    assert logs[0].outcome == "failed"
+    assert "가드레일 차단" in logs[0].rationale
+    assert "변경폭 초과" in logs[0].rationale
+
+
+def test_execute_update_bid_adgroup_writer_failure_records_failed(db):
+    p = _proposal(db, proposal_type="bid_down", target_type="adgroup", target_id="grp-shop-1")
+    p.target_bid = 1000
+    db.commit()
+    _settings(db, optimizer="ours")
+
+    with patch.object(harness, "_build_guardrail_context", return_value={"current_bid": 1200}), \
+         patch.object(harness.guardrail_gate, "check", return_value=None), \
+         patch.object(harness.naver_sa_writer, "update_adgroup_bid",
                        side_effect=naver_sa_writer.WriteError("500")):
         with pytest.raises(naver_sa_writer.WriteError):
             harness.execute(db, p.id, dry_run=False)
@@ -521,16 +816,20 @@ def test_execute_set_user_lock_missing_target_lock_raises(db):
 
 
 def test_execute_set_user_lock_wrong_target_type_raises(db):
-    p = _proposal(db, proposal_type="pause", target_type="adgroup", target_id="grp-1")
+    """X1b-S S1(D-NAO-43)로 adgroup은 이제 유효 대상이라(set_adgroup_lock) — 여전히
+    미구현인 campaign으로 '잘못된 target_type' 케이스를 검증한다."""
+    p = _proposal(db, proposal_type="pause", target_type="campaign", target_id="cmp-x")
     p.target_lock = True
     db.commit()
     _settings(db, optimizer="ours")
 
-    with patch.object(harness.naver_sa_writer, "set_keyword_lock") as mock_write:
+    with patch.object(harness.naver_sa_writer, "set_keyword_lock") as mock_kw, \
+         patch.object(harness.naver_sa_writer, "set_adgroup_lock") as mock_ag:
         with pytest.raises(harness.MissingExecutionTargetError):
             harness.execute(db, p.id, dry_run=False)
 
-    mock_write.assert_not_called()
+    mock_kw.assert_not_called()
+    mock_ag.assert_not_called()
 
 
 def test_execute_set_user_lock_writer_failure_records_failed(db):
@@ -548,6 +847,119 @@ def test_execute_set_user_lock_writer_failure_records_failed(db):
 
     db.refresh(p)
     assert p.status == "failed"
+
+
+# ── X1b-S S1: set_user_lock adgroup 확장(쇼핑 스톱로스 정지·재개, D-NAO-43) ─────
+
+
+def _adgroup_lock_write_result(before_lock=False, after_lock=True):
+    return naver_sa_writer.WriteResult(
+        action="set_adgroup_lock",
+        before={"userLock": before_lock}, response=None,
+        after={"userLock": after_lock}, created_ids=[],
+    )
+
+
+def test_execute_set_user_lock_pause_adgroup_success(db):
+    p = _proposal(db, proposal_type="pause", target_type="adgroup", target_id="grp-shop-1")
+    p.target_lock = True
+    db.commit()
+    _settings(db, optimizer="ours")
+    result = _adgroup_lock_write_result(before_lock=False, after_lock=True)
+
+    with patch.object(harness, "_build_guardrail_context", return_value={}), \
+         patch.object(harness.guardrail_gate, "check", return_value=None) as mock_gate, \
+         patch.object(harness.naver_sa_writer, "set_adgroup_lock", return_value=result) as mock_write, \
+         patch.object(harness.naver_sa_writer, "set_keyword_lock") as mock_kw_write:
+        log_entry = harness.execute(db, p.id, dry_run=False)
+
+    gate_call_args = mock_gate.call_args
+    assert gate_call_args[0][0] == {"proposal_type": "pause", "target_bid": None, "target_lock": True}
+    mock_write.assert_called_once_with("grp-shop-1", True)
+    mock_kw_write.assert_not_called()
+    assert log_entry.action == "set_user_lock"
+    assert log_entry.outcome is None
+    assert json.loads(log_entry.after_value)["userLock"] is True
+
+    db.refresh(p)
+    assert p.status == "approved"
+    assert p.executed_change_log_id == log_entry.id
+
+
+def test_execute_set_user_lock_resume_adgroup_success(db):
+    p = _proposal(db, proposal_type="resume", target_type="adgroup", target_id="grp-shop-1")
+    p.target_lock = False
+    db.commit()
+    _settings(db, optimizer="ours")
+    result = _adgroup_lock_write_result(before_lock=True, after_lock=False)
+
+    with patch.object(harness, "_build_guardrail_context", return_value={}), \
+         patch.object(harness.guardrail_gate, "check", return_value=None), \
+         patch.object(harness.naver_sa_writer, "set_adgroup_lock", return_value=result) as mock_write:
+        log_entry = harness.execute(db, p.id, dry_run=False)
+
+    mock_write.assert_called_once_with("grp-shop-1", False)
+    assert json.loads(log_entry.after_value)["userLock"] is False
+
+
+def test_execute_set_user_lock_adgroup_blocked_by_guardrail(db):
+    p = _proposal(db, proposal_type="pause", target_type="adgroup", target_id="grp-shop-1")
+    p.target_lock = True
+    db.commit()
+    _settings(db, optimizer="ours")
+
+    with patch.object(harness, "_build_guardrail_context", return_value={}), \
+         patch.object(harness.guardrail_gate, "check", return_value="쿨다운 중") as mock_gate, \
+         patch.object(harness.naver_sa_writer, "set_adgroup_lock") as mock_write:
+        with pytest.raises(harness.MissingExecutionTargetError):
+            harness.execute(db, p.id, dry_run=False)
+
+    mock_gate.assert_called_once()
+    mock_write.assert_not_called()
+    db.refresh(p)
+    assert p.status == "failed"
+
+
+def test_execute_set_user_lock_adgroup_writer_failure_records_failed(db):
+    p = _proposal(db, proposal_type="pause", target_type="adgroup", target_id="grp-shop-1")
+    p.target_lock = True
+    db.commit()
+    _settings(db, optimizer="ours")
+
+    with patch.object(harness, "_build_guardrail_context", return_value={}), \
+         patch.object(harness.guardrail_gate, "check", return_value=None), \
+         patch.object(harness.naver_sa_writer, "set_adgroup_lock",
+                       side_effect=naver_sa_writer.WriteError("500")):
+        with pytest.raises(naver_sa_writer.WriteError):
+            harness.execute(db, p.id, dry_run=False)
+
+    db.refresh(p)
+    assert p.status == "failed"
+    logs = db.query(NaverChangeLog).filter(NaverChangeLog.proposal_id == p.id).all()
+    assert len(logs) == 1
+    assert logs[0].outcome == "failed"
+
+
+def test_real_write_blocker_set_user_lock_adgroup_executable_when_valid(db):
+    p = _proposal(db, proposal_type="pause", target_type="adgroup", target_id="grp-shop-1")
+    p.target_lock = True
+    db.commit()
+    assert harness.real_write_blocker(p) is None
+
+
+def test_real_write_blocker_set_user_lock_adgroup_missing_target_lock(db):
+    p = _proposal(db, proposal_type="resume", target_type="adgroup", target_id="grp-shop-1")
+    reason = harness.real_write_blocker(p)
+    assert reason is not None and "target_lock" in reason
+
+
+def test_real_write_blocker_set_user_lock_campaign_still_not_implemented(db):
+    """캠페인 단위 userLock은 이 스프린트(X1b-S S1) 스코프 밖 — keyword/adgroup만 개방."""
+    p = _proposal(db, proposal_type="pause", target_type="campaign", target_id="cmp1")
+    p.target_lock = True
+    db.commit()
+    reason = harness.real_write_blocker(p)
+    assert reason is not None and "campaign" in reason
 
 
 # ── X1b T4: dry-run 회귀(신규 개방 액션도 dry_run=True 기본) ─────────────
@@ -662,11 +1074,21 @@ def test_real_write_blocker_update_bid_missing_target_bid(db):
     assert reason is not None and "target_bid" in reason
 
 
+def test_real_write_blocker_update_bid_adgroup_executable_when_valid(db):
+    """X1b-S bid 확장(D-NAO-16 3단계 SHOPPING 대칭) — target_type='adgroup' + target_bid
+    존재면 이제 실행 가능(구 test_real_write_blocker_update_bid_wrong_target_type을
+    이 계약에 따라 target_type='campaign'으로 갱신, 아래)."""
+    p = _proposal(db, proposal_type="bid_down", target_type="adgroup", target_id="grp-shop-1")
+    p.target_bid = 1000
+    db.commit()
+    assert harness.real_write_blocker(p) is None
+
+
 def test_real_write_blocker_update_bid_wrong_target_type(db):
-    p = _proposal(db, proposal_type="bid_up", target_type="adgroup", target_id="grp-1")
+    p = _proposal(db, proposal_type="bid_up", target_type="campaign", target_id="cmp1")
     p.target_bid = 210
     reason = harness.real_write_blocker(p)
-    assert reason is not None and "adgroup" in reason
+    assert reason is not None and "campaign" in reason
 
 
 def test_real_write_blocker_set_user_lock_executable_when_valid(db):
@@ -722,14 +1144,218 @@ def test_real_write_blocker_budget_up_target_id_campaign_id_mismatch(db):
 
 
 def test_build_guardrail_context_non_keyword_target_all_none(db):
-    # target_type='adgroup'은 keyword도 campaign도 아니므로(P2 D-NAO-42-f) 전부 None 유지
-    p = _proposal(db, proposal_type="bid_up", target_type="adgroup", target_id="grp-1")
+    # target_type='search_term'은 keyword/campaign/adgroup 어느 것도 아니므로 전부 None 유지
+    p = _proposal(db, proposal_type="negative_keyword", target_type="search_term", target_id="검색어")
     ctx = harness._build_guardrail_context(db, p, kst_now())
     assert ctx == {
         "current_bid": None, "current_budget": None, "roas_corrected": None, "target_roas": None,
         "cost_today": None, "daily_budget": None, "unconverted_spend": None,
         "last_change_at": None, "changes_today_count": 0,
     }
+
+
+def test_build_guardrail_context_adgroup_target_bid_budget_fields_none_no_prior_changes(db):
+    """X1b-S S1(D-NAO-43)+bid 확장: target_type='adgroup'은 current_budget/roas 등은
+    adgroup_window_agg 미구현이라 여전히 None(정직 경계, S2/S3 스코프) — current_bid는
+    이제 _get_adgroup 라이브 재조회를 시도한다(bid 확장). 재조회 실패는 fail-closed로
+    None 유지(get_keyword 실패 패턴과 동형) — 변경 이력이 없으면 쿨다운 필드도 기본값."""
+    p = _proposal(db, proposal_type="pause", target_type="adgroup", target_id="grp-shop-1")
+    with patch.object(harness.naver_sa_writer, "_get_adgroup", side_effect=RuntimeError("network")):
+        ctx = harness._build_guardrail_context(db, p, kst_now())
+    assert ctx == {
+        "current_bid": None, "current_budget": None, "roas_corrected": None, "target_roas": None,
+        "cost_today": None, "daily_budget": None, "unconverted_spend": None,
+        "last_change_at": None, "changes_today_count": 0,
+    }
+
+
+def test_build_guardrail_context_adgroup_cooldown_fields_populated_from_prior_lock_changes(db):
+    """X1b-S S1(D-NAO-43): adgroup 정지·재개도 쿨다운·일일상한(_check_cooldown_and_cap)이
+    실효돼야 한다 — 이전엔 target_type='adgroup'이 통째로 None 처리돼 쿨다운이 사실상
+    무력화됐다(fail-open이면 안전장치 우회). last_change_at/changes_today_count만 채우고
+    bid/budget 필드는 여전히 None(_get_adgroup 재조회 실패를 mock — fail-closed)."""
+    p = _proposal(db, proposal_type="pause", target_type="adgroup", target_id="grp-shop-1")
+    now = kst_now()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    db.add(NaverChangeLog(
+        entity_type="adgroup", entity_id="grp-shop-1", campaign_id="cmp1", action="set_user_lock",
+        dry_run=False, after_value=json.dumps({"userLock": False}), changed_at=today_start + timedelta(hours=2),
+    ))
+    db.commit()
+
+    with patch.object(harness.naver_sa_writer, "_get_adgroup", side_effect=RuntimeError("network")):
+        ctx = harness._build_guardrail_context(db, p, now)
+    assert ctx["last_change_at"] == today_start + timedelta(hours=2)
+    assert ctx["changes_today_count"] == 1
+    assert ctx["current_bid"] is None
+    assert ctx["current_budget"] is None
+
+
+def test_build_guardrail_context_adgroup_current_bid_from_live_reread(db):
+    """X1b-S bid 확장(D-NAO-16 3단계 SHOPPING 대칭): target_type='adgroup'의 current_bid는
+    naver_sa_writer._get_adgroup 라이브 재조회에서 채워진다(get_keyword의 adgroup 대칭)."""
+    p = _proposal(db, proposal_type="bid_down", target_type="adgroup", target_id="grp-shop-1")
+    with patch.object(harness.naver_sa_writer, "_get_adgroup",
+                       return_value={"bidAmt": 1200, "systemBiddingType": "NONE"}) as mock_get:
+        ctx = harness._build_guardrail_context(db, p, kst_now())
+    mock_get.assert_called_once_with("grp-shop-1")
+    assert ctx["current_bid"] == 1200
+    # bid/budget 외 나머지는 adgroup_window_agg 미구현이라 여전히 None(정직 경계)
+    assert ctx["current_budget"] is None
+    assert ctx["roas_corrected"] is None
+    assert ctx["target_roas"] is None
+
+
+def test_build_guardrail_context_adgroup_get_adgroup_failure_fail_closed(db):
+    p = _proposal(db, proposal_type="bid_down", target_type="adgroup", target_id="grp-shop-1")
+    with patch.object(harness.naver_sa_writer, "_get_adgroup", side_effect=RuntimeError("network")):
+        ctx = harness._build_guardrail_context(db, p, kst_now())
+    assert ctx["current_bid"] is None  # 재조회 실패 — 추정으로 채우지 않음
+
+
+# ── X1b-S S3(D-NAO-43 확장): _build_guardrail_context adgroup UP 브랜치 ──────
+# adgroup 증액(bid_up/growth_bid_up)만 roas_corrected/target_roas/unconverted_spend/
+# cost_today/daily_budget을 채운다 — bid_down/pause/resume은 여전히 None(위 테스트들이 이미
+# 그 회귀를 커버).
+
+
+def test_build_guardrail_context_adgroup_bid_up_fills_roas_and_target_from_window_agg(db):
+    from app.models import NaverAdDaily, Order
+    p = _proposal(db, proposal_type="bid_up", target_type="adgroup", target_id="grp-shop-1")
+    now = kst_now()
+    as_of = now.date() - timedelta(days=1)
+    db.add(NaverAdDaily(
+        ad_date=as_of, campaign_id="cmp1", campaign_type="SHOPPING", adgroup_id="grp-shop-1",
+        keyword_id="", imp=500, clk=25, cost=3000, rank_sum=1500,
+        conv_direct_cnt=1, conv_indirect_cnt=0, conv_direct_amt=9000, conv_indirect_amt=0,
+    ))
+    # D-NAO-21 보정계수 = 실주문매출÷네이버convAmt — 9000/9000=1.0이 되도록 실주문도 시딩
+    # (채널 실측: naver_order_revenue는 channel_id=6 고정, test_build_guardrail_context_
+    # converted_window_zero_unconverted_spend와 동일 패턴).
+    db.add(Order(
+        channel_id=6, platform_product_id="cp-1", order_number="ORD-1",
+        order_date=as_of, status="정상", selling_price=Decimal("9000"),
+    ))
+    db.commit()
+
+    with patch.object(harness.naver_sa_writer, "_get_adgroup",
+                       return_value={"bidAmt": 1200, "systemBiddingType": "NONE"}):
+        ctx = harness._build_guardrail_context(db, p, now)
+
+    assert ctx["current_bid"] == 1200
+    assert ctx["roas_corrected"] == pytest.approx(3.0)  # 9000/3000 × 보정계수 1.0(9000/9000)
+    assert ctx["unconverted_spend"] == 0  # 전환 존재 — 무전환 누적으로 안 잡힘
+
+
+def test_build_guardrail_context_adgroup_bid_up_unconverted_spend_when_zero_conversion(db):
+    from app.models import NaverAdDaily
+    p = _proposal(db, proposal_type="bid_up", target_type="adgroup", target_id="grp-shop-1")
+    now = kst_now()
+    as_of = now.date() - timedelta(days=1)
+    db.add(NaverAdDaily(
+        ad_date=as_of, campaign_id="cmp1", campaign_type="SHOPPING", adgroup_id="grp-shop-1",
+        keyword_id="", imp=500, clk=25, cost=3000, rank_sum=1500,
+        conv_direct_cnt=0, conv_indirect_cnt=0, conv_direct_amt=0, conv_indirect_amt=0,
+    ))
+    db.commit()
+
+    with patch.object(harness.naver_sa_writer, "_get_adgroup",
+                       return_value={"bidAmt": 1200, "systemBiddingType": "NONE"}):
+        ctx = harness._build_guardrail_context(db, p, now)
+
+    assert ctx["unconverted_spend"] == 3000
+    assert ctx["roas_corrected"] == 0.0
+
+
+def test_build_guardrail_context_adgroup_growth_bid_up_also_fills(db):
+    """growth_bid_up도 bid_up과 동일하게 up 취급된다(_BID_UP_TYPES와 동일 집합)."""
+    from app.models import NaverAdDaily, Order
+    p = _proposal(db, proposal_type="growth_bid_up", target_type="adgroup", target_id="grp-shop-1")
+    now = kst_now()
+    as_of = now.date() - timedelta(days=1)
+    db.add(NaverAdDaily(
+        ad_date=as_of, campaign_id="cmp1", campaign_type="SHOPPING", adgroup_id="grp-shop-1",
+        keyword_id="", imp=500, clk=25, cost=3000, rank_sum=1500,
+        conv_direct_cnt=1, conv_indirect_cnt=0, conv_direct_amt=9000, conv_indirect_amt=0,
+    ))
+    db.add(Order(
+        channel_id=6, platform_product_id="cp-1", order_number="ORD-1",
+        order_date=as_of, status="정상", selling_price=Decimal("9000"),
+    ))
+    db.commit()
+
+    with patch.object(harness.naver_sa_writer, "_get_adgroup",
+                       return_value={"bidAmt": 1200, "systemBiddingType": "NONE"}):
+        ctx = harness._build_guardrail_context(db, p, now)
+
+    assert ctx["roas_corrected"] == pytest.approx(3.0)
+
+
+def test_build_guardrail_context_adgroup_bid_up_no_cost_leaves_roas_none(db):
+    """window agg에 cost=0(실적 자체가 없음)이면 roas_corrected/unconverted_spend는
+    None(추정 금지) — target_roas/cost_today/daily_budget은 그와 무관하게 채워진다."""
+    p = _proposal(db, proposal_type="bid_up", target_type="adgroup", target_id="grp-shop-1")
+    with patch.object(harness.naver_sa_writer, "_get_adgroup",
+                       return_value={"bidAmt": 1200, "systemBiddingType": "NONE"}):
+        ctx = harness._build_guardrail_context(db, p, kst_now())
+    assert ctx["roas_corrected"] is None
+    assert ctx["unconverted_spend"] is None
+
+
+def test_build_guardrail_context_adgroup_bid_up_target_roas_from_campaign_override(db):
+    from app.models import NaverCampaignSettings
+    p = _proposal(db, proposal_type="bid_up", campaign_id="cmp-override",
+                  target_type="adgroup", target_id="grp-shop-1")
+    db.add(NaverCampaignSettings(campaign_id="cmp-override", target_roas_override=Decimal("4.5")))
+    db.commit()
+
+    with patch.object(harness.naver_sa_writer, "_get_adgroup",
+                       return_value={"bidAmt": 1200, "systemBiddingType": "NONE"}):
+        ctx = harness._build_guardrail_context(db, p, kst_now())
+
+    assert ctx["target_roas"] == pytest.approx(4.5)
+
+
+def test_build_guardrail_context_adgroup_bid_up_cost_today_and_daily_budget_from_snapshot(db):
+    from app.models import NaverHourlySnapshot
+    p = _proposal(db, proposal_type="bid_up", target_type="adgroup", target_id="grp-shop-1")
+    now = kst_now()
+    db.add(NaverHourlySnapshot(
+        snapshot_at=now, ad_date=now.date(), snapshot_hour=5, campaign_id="cmp1",
+        campaign_type="SHOPPING", cost=60_000, clk=30, imp=800, daily_budget=100_000,
+    ))
+    db.commit()
+
+    with patch.object(harness.naver_sa_writer, "_get_adgroup",
+                       return_value={"bidAmt": 1200, "systemBiddingType": "NONE"}):
+        ctx = harness._build_guardrail_context(db, p, now)
+
+    assert ctx["cost_today"] == 60_000
+    assert ctx["daily_budget"] == 100_000
+
+
+def test_build_guardrail_context_adgroup_bid_down_still_none_for_roas_fields(db):
+    """회귀 방지 — bid_down(감액)은 여전히 up 전용 필드를 채우지 않는다(S2 계약 불변)."""
+    from app.models import NaverAdDaily
+    p = _proposal(db, proposal_type="bid_down", target_type="adgroup", target_id="grp-shop-1")
+    now = kst_now()
+    as_of = now.date() - timedelta(days=1)
+    db.add(NaverAdDaily(
+        ad_date=as_of, campaign_id="cmp1", campaign_type="SHOPPING", adgroup_id="grp-shop-1",
+        keyword_id="", imp=500, clk=25, cost=8000, rank_sum=1500,
+        conv_direct_cnt=1, conv_indirect_cnt=0, conv_direct_amt=40000, conv_indirect_amt=0,
+    ))
+    db.commit()
+
+    with patch.object(harness.naver_sa_writer, "_get_adgroup",
+                       return_value={"bidAmt": 1200, "systemBiddingType": "NONE"}):
+        ctx = harness._build_guardrail_context(db, p, now)
+
+    assert ctx["roas_corrected"] is None
+    assert ctx["target_roas"] is None
+    assert ctx["unconverted_spend"] is None
+    assert ctx["cost_today"] is None
+    assert ctx["daily_budget"] is None
 
 
 def test_build_guardrail_context_current_bid_from_live_reread(db):

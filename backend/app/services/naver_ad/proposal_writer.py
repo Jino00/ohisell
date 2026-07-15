@@ -45,6 +45,7 @@ _ALLOWED_DIRECTIONS = {
     "bleeding_keywords": {"down"},
     "starving_winners": {"up"},
     "shopping_group_bep": {"down"},
+    "shopping_group_growth": {"up"},  # X1b-S S3(D-NAO-43 확장) — shopping_group_bep의 반대(성장)
     "growth_sweeper": {"up"},
 }
 
@@ -194,20 +195,31 @@ def _negative_keyword_from_exclusion(row: dict, campaign_id: str) -> dict:
     }
 
 
-def _pause_proposal(row: dict) -> dict:
-    """pause_candidates 보드 1행(account_diagnosis) → pause 제안(X1b T3, D-NAO-38).
+def _pause_proposal(row: dict, *, target_type: str = "keyword") -> dict:
+    """pause_candidates/shopping_pause_candidates 보드 1행(account_diagnosis) → pause 제안
+    (X1b T3, D-NAO-38 / 쇼핑 adgroup 확장은 X1b-S S1, D-NAO-43).
+
+    target_type='keyword'(기본값, 하위호환)는 WEB_SITE 키워드(pause_candidates 보드,
+    target_id=row["keyword_id"]) — target_type='adgroup'은 SHOPPING 광고그룹
+    (shopping_pause_candidates 보드, target_id=row["adgroup_id"]). 두 보드는 row 스키마가
+    동형(campaign_id/cost/stop_loss_amount 등 공통, 대상id 키만 다름)이라 한 빌더가 함께
+    처리한다. adgroup_id 컬럼(NaverProposal, 실쓰기 대상 광고그룹 정보용)은 keyword
+    대상에서만 채운다 — adgroup 대상은 target_id 자체가 이미 그 값이라 중복 저장하지 않는다
+    (shopping_group_bep의 _bid_proposal이 adgroup 대상에 adgroup_id를 안 채우는 것과 동일 관례).
 
     D-NAO-20 스톱로스 절대액(현재입찰×LOW_CLICK_THRESHOLD) 도달 — 무전환 지출 중단이
     목적이라 target_roas 근거 병기가 불필요(스톱로스는 손익 목표와 무관한 절대액 안전핀)."""
+    target_id = row["keyword_id"] if target_type == "keyword" else row["adgroup_id"]
+    board_name = "pause_candidates" if target_type == "keyword" else "shopping_pause_candidates"
     return {
         "proposal_type": _PAUSE,
-        "target_type": "keyword",
-        "target_id": row["keyword_id"],
+        "target_type": target_type,
+        "target_id": target_id,
         "campaign_id": row["campaign_id"],
-        "adgroup_id": row["adgroup_id"],
+        "adgroup_id": row["adgroup_id"] if target_type == "keyword" else None,
         "target_lock": True,
         "rationale": (
-            f"[pause_candidates] 무전환 누적비용 {row['cost']}원 ≥ 스톱로스 {row['stop_loss_amount']}원"
+            f"[{board_name}] 무전환 누적비용 {row['cost']}원 ≥ 스톱로스 {row['stop_loss_amount']}원"
             f"(현재입찰={row['current_bid']}원, D-NAO-20) clk={row.get('clk')}."
         ),
         "expected_effect": "무전환 지출 중단 — 추가 비용 발생 차단(D-NAO-16 정지).",
@@ -215,21 +227,25 @@ def _pause_proposal(row: dict) -> dict:
     }
 
 
-def _resume_proposal(row: dict, target_label: dict) -> dict:
-    """resume_candidates 보드 1행 → resume 제안(X1b T3, D-NAO-38).
+def _resume_proposal(row: dict, target_label: dict, *, target_type: str = "keyword") -> dict:
+    """resume_candidates/shopping_resume_candidates 보드 1행 → resume 제안(X1b T3, D-NAO-38
+    / 쇼핑 adgroup 확장은 X1b-S S1, D-NAO-43). target_type 규약은 _pause_proposal과 동일
+    (기본값 'keyword'=하위호환, 'adgroup'=쇼핑 광고그룹).
 
     정지 직전 창의 보정ROAS가 현재 목표(target_roas) 이상으로 회복 — D-NAO-16 "정지 사유
-    해소"(BEP 개선) 신호. 우리 시스템이 정지시킨 키워드만 대상(account_diagnosis.
-    resume_candidates가 proposal_id 없는 수동 정지를 이미 제외)."""
+    해소"(BEP 개선) 신호. 우리 시스템이 정지시킨 대상만(account_diagnosis.resume_candidates/
+    shopping_resume_candidates가 proposal_id 없는 수동 정지를 이미 제외)."""
+    target_id = row["keyword_id"] if target_type == "keyword" else row["adgroup_id"]
+    board_name = "resume_candidates" if target_type == "keyword" else "shopping_resume_candidates"
     return {
         "proposal_type": _RESUME,
-        "target_type": "keyword",
-        "target_id": row["keyword_id"],
+        "target_type": target_type,
+        "target_id": target_id,
         "campaign_id": row["campaign_id"],
-        "adgroup_id": row["adgroup_id"],
+        "adgroup_id": row["adgroup_id"] if target_type == "keyword" else None,
         "target_lock": False,
         "rationale": (
-            f"[resume_candidates] 정지({row['paused_at']}) 직전 보정ROAS {row['roas_at_pause']}"
+            f"[{board_name}] 정지({row['paused_at']}) 직전 보정ROAS {row['roas_at_pause']}"
             f"(현재 목표={target_label.get('target_roas')}, 근거={target_label.get('source')}) "
             f"— BEP 개선 신호(D-NAO-16)."
         ),
@@ -425,8 +441,10 @@ def build(
       사이징에도 쓰인다(harness가 forecast_targets에 캠페인 target을 포함시켜야 채워짐).
     anomalies: anomaly_feed 신호(경량, Phase3) — {"freshness": {...}|None, "spend": [...]}.
       진단 성격(D-3, 사실 정리)이라 optimizer 무관 전 캠페인 대상(diagnosis 보드와 동일 취급).
-    diagnosis["boards"]의 pause_candidates/resume_candidates(X1b T3, D-NAO-38)는 실행형
-      제안이라 ours 필터 적용(D-NAO-13) — 다른 진단 보드처럼 optimizer 무관이 아니다.
+    diagnosis["boards"]의 pause_candidates/resume_candidates(X1b T3, D-NAO-38)와 그 SHOPPING
+      adgroup 대칭 확장 shopping_pause_candidates/shopping_resume_candidates(X1b-S S1,
+      D-NAO-43)는 실행형 제안이라 ours 필터 적용(D-NAO-13) — 다른 진단 보드처럼 optimizer
+      무관이 아니다.
     optimizer='ours' 캠페인만 대상(D-NAO-13) — 그 외(none/mop)는 진단엔 나와도 제안 없음.
     """
     bid_sims = bid_sims or {}
@@ -478,6 +496,21 @@ def build(
         if p:
             proposals.append(p)
 
+    # shopping_group_growth(X1b-S S3, D-NAO-43 확장): shopping_group_bep(적자, down)의 반대 —
+    # 수익 그룹 성장(bid_up). 배선은 shopping_group_bep과 완전 대칭(target_type="adgroup",
+    # board_name만 다름) — _ALLOWED_DIRECTIONS가 "up"만 통과시킨다.
+    for row in boards.get("shopping_group_growth", []) or []:
+        cid = row["campaign_id"]
+        if cid not in ours:
+            continue
+        target_id = row["adgroup_id"]
+        sim = bid_sims.get(("adgroup", target_id))
+        p = _bid_proposal(row, sim, cid, target_id, target_type="adgroup",
+                           target_label=labels.get(cid), board_name="shopping_group_growth",
+                           forecast=forecast_data.get(("adgroup", target_id)))
+        if p:
+            proposals.append(p)
+
     for row in boards.get("exclusion_candidates", []) or []:
         cid = row["campaign_id"]
         if cid not in ours:
@@ -497,6 +530,21 @@ def build(
         if cid not in ours:
             continue
         proposals.append(_resume_proposal(row, labels.get(cid)))
+
+    # shopping_pause_candidates/shopping_resume_candidates(X1b-S S1, D-NAO-43): 위
+    # pause_candidates/resume_candidates의 SHOPPING adgroup 대칭 확장 — D-NAO-13 ours 필터
+    # 동일 적용(실행형 제안).
+    for row in boards.get("shopping_pause_candidates", []) or []:
+        cid = row["campaign_id"]
+        if cid not in ours:
+            continue
+        proposals.append(_pause_proposal(row, target_type="adgroup"))
+
+    for row in boards.get("shopping_resume_candidates", []) or []:
+        cid = row["campaign_id"]
+        if cid not in ours:
+            continue
+        proposals.append(_resume_proposal(row, labels.get(cid), target_type="adgroup"))
 
     # growth_sweeper(D-NAO-22-①): 후보는 이미 gap 내림차순(find_growth_candidates) — 상위부터
     # 채택해 GROWTH_PROPOSAL_CAP에서 멈춘다(탐색 예산 총액 캡의 count 기반 대체, growth_sweeper

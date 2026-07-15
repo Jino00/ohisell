@@ -5,7 +5,8 @@
 # 컬럼 인덱스 근거: docs/references/22_naver_sa_p2s1_recon.md (실측 확정)
 from __future__ import annotations
 
-from datetime import date
+import json
+from datetime import date, datetime
 from decimal import Decimal
 
 import pytest
@@ -18,6 +19,7 @@ from app.models import (
     NaverAdDaily, NaverCampaignSettings, NaverChangeLog, NaverEntity, NaverProductBep, NaverSearchTermDaily, Order,
 )
 from app.services.naver_ad import (
+    account_diagnosis as diag,
     campaign_backfill, campaign_target_resolver, entity_sync, keyword_volume_sync, search_term_ingest,
 )
 from app.services import naver_sa_ad_fetcher as fetcher
@@ -164,7 +166,7 @@ def test_sync_entities_skips_log_for_our_own_change(db):
     """우리가 실행해서 바뀐 것(change_log에 이미 최근 set_user_lock 성공 기록이 있는 경우)은
     external_status_change를 남기지 않는다 — 이중 기록 방지."""
     import json
-    from datetime import datetime as dt
+    from datetime import timedelta
     rows_v1 = [
         {"entity_type": "keyword", "entity_id": "nkw-1", "parent_id": "grp-1",
          "campaign_id": "cmp-1", "campaign_type": "WEB_SITE", "name": "필름",
@@ -172,12 +174,15 @@ def test_sync_entities_skips_log_for_our_own_change(db):
     ]
     entity_sync.sync_entities(db, rows=rows_v1)
 
-    # 우리가 정지 실행한 기록(proposal_id 있음, after_value={"userLock": true})
+    # 우리가 정지 실행한 기록(proposal_id 있음, after_value={"userLock": true}).
+    # changed_at은 첫 동기화(직전 관측)의 synced_at보다 나중이어야 "우리가 방금 한 변경"으로
+    # 판별됨 — 하드코딩 미래시각(월클럭 의존, codex[P2]) 대신 실제 synced_at 기준 상대값 사용.
+    ent = db.query(NaverEntity).filter_by(entity_type="keyword", entity_id="nkw-1").one()
     db.add(NaverChangeLog(
         entity_type="keyword", entity_id="nkw-1", campaign_id="cmp-1",
         action="set_user_lock", proposal_id=42, dry_run=False,
         after_value=json.dumps({"userLock": True}),
-        changed_at=dt(2026, 7, 15, 8, 0, 0),
+        changed_at=ent.synced_at + timedelta(seconds=1),
     ))
     db.commit()
 
@@ -194,6 +199,73 @@ def test_sync_entities_skips_log_for_our_own_change(db):
         NaverChangeLog.action == "external_status_change",
     ).all()
     assert ext_logs == []
+
+
+def test_sync_entities_logs_external_repause_after_stale_our_write(db, monkeypatch):
+    """D-NAO-40 버그 재현: 우리 정지 → 외부 재개 → 외부 재정지.
+
+    ①우리가 키워드를 정지(set_user_lock, changed_at=T1) ②외부(사람/MOP)가 재개(v2 sync가
+    정상 기록) ③외부가 다시 정지(v3 sync). 방향(userLock 값) 일치만으로 skip하던 옛 코드는
+    ③에서 last_our_write(=①, changed_at=T1)의 방향이 새 상태(off)와 우연히 같다는 이유로
+    이걸 '우리가 방금 한 변경'으로 오인해 external_status_change를 남기지 않았다. 그 결과
+    resume_candidates가 ①(proposal_id 있음)을 최신 잠금변경으로 오인해 이 키워드를 재개
+    후보로 낸다 — 외부/사람의 정지를 우리가 임의 재개하는 안전사고.
+
+    수정 후에는 last_our_write.changed_at(T1)이 그 사이 일어난 sync에서 갱신된
+    entity.synced_at(v2 시점, T4)보다 오래됐으므로 '우리가 방금 한 변경'으로 인정하지 않고
+    외부 변경으로 기록해야 하며, resume_candidates는 이 키워드를 후보에서 제외해야 한다."""
+    T0 = datetime(2026, 7, 1, 8, 0, 0)   # v0 sync(최초, on)
+    T1 = datetime(2026, 7, 1, 8, 0, 5)   # ①우리 정지 실행(change_log 기록)
+    T2 = datetime(2026, 7, 1, 8, 1, 0)   # v1 sync: 우리 정지 반영 관측
+    T4 = datetime(2026, 7, 2, 9, 1, 0)   # v2 sync: ②외부 재개 관측
+    T6 = datetime(2026, 7, 3, 9, 1, 0)   # v3 sync: ③외부 재정지 관측
+
+    times = iter([T0, T2, T4, T6])
+    monkeypatch.setattr(entity_sync, "kst_now", lambda: next(times))
+
+    row_on = {"entity_type": "keyword", "entity_id": "nkw-1", "parent_id": "grp-1",
+              "campaign_id": "cmp-1", "campaign_type": "WEB_SITE", "name": "필름",
+              "status": "on", "bid_amt": 700}
+
+    entity_sync.sync_entities(db, rows=[row_on])  # v0: synced_at=T0
+
+    db.add(NaverChangeLog(  # ①우리 정지(naver_execution_harness가 남기는 실제 성공 기록)
+        entity_type="keyword", entity_id="nkw-1", campaign_id="cmp-1",
+        action="set_user_lock", proposal_id=99, dry_run=False,
+        after_value=json.dumps({"userLock": True}), changed_at=T1,
+    ))
+    db.commit()
+
+    def _ext_logs():
+        return db.query(NaverChangeLog).filter(
+            NaverChangeLog.entity_id == "nkw-1", NaverChangeLog.action == "external_status_change",
+        ).order_by(NaverChangeLog.changed_at.asc()).all()
+
+    # v1: 우리 정지 반영 관측 — T1(정지실행) > synced_at(T0) → 우리 변경으로 스킵, 기록 없음
+    entity_sync.sync_entities(db, rows=[{**row_on, "status": "off"}])
+    assert _ext_logs() == []
+
+    # v2: ②외부 재개 — 방향이 반대라 항상 기록됨(기존 로직도 통과)
+    entity_sync.sync_entities(db, rows=[row_on])
+    assert len(_ext_logs()) == 1
+
+    # v3: ③외부 재정지 — 버그 지점. last_our_write는 여전히 ①(changed_at=T1)뿐이고 그 방향이
+    # 새 상태(off)와 우연히 같음. 하지만 T1은 v2에서 갱신된 synced_at(T4)보다 오래됐으므로
+    # '우리가 방금 한 변경'이 아니다 — 외부 변경으로 기록돼야 한다.
+    entity_sync.sync_entities(db, rows=[{**row_on, "status": "off"}])
+    ext_logs = _ext_logs()
+    assert len(ext_logs) == 2, "외부 재정지(③)가 change_log에 기록돼야 한다 — D-NAO-40"
+    assert ext_logs[-1].proposal_id is None
+    assert json.loads(ext_logs[-1].after_value) == {"userLock": True}
+
+    # resume_candidates가 이 키워드를 재개 후보로 내면 안 된다(최신 잠금변경=외부 재정지,
+    # proposal_id=None → fail-closed 제외 — account_diagnosis.py는 수정 불필요, 이미 이 경로를
+    # 올바르게 처리한다).
+    out = diag.resume_candidates(
+        db, date(2026, 7, 10), target_roas_resolver=lambda cid: Decimal("2.0"),
+        correction_factor=Decimal("1"),
+    )
+    assert out == [], "외부가 재정지한 키워드를 우리가 임의 재개 후보로 내면 안 된다 — D-NAO-40"
 
 
 # ── 검색어 리포트 컬럼 파싱 (SHOPPINGKEYWORD_DETAIL/EXPKEYWORD 공통 16열) ──

@@ -690,3 +690,208 @@ def test_set_campaign_lock_put_4xx_raises_write_error_no_after_refetch():
             writer.set_campaign_lock(CAMPAIGN_ID, True)
 
     assert mock_get.call_count == 1
+
+
+# ── update_adgroup_bid (쇼핑 광고그룹 단위 입찰가, D-NAO-16 3단계 SHOPPING 대칭 확장) ──
+# 근거: ref 27 §85 + swagger(ncc-heroes-ncc.json) AdgroupRequest.bidAmt(70~100,000, 10원 단위,
+# fields=bidAmt) 실측(2026-07-14). 키워드의 useGroupBidAmt 커플링은 adgroup엔 없음(adgroup이
+# 입찰 최하위 단위). 대신 systemBiddingType(NONE|ML)·autobidStrategy.isAutobidActive로 ML
+# 자동입찰 충돌을 사전 차단한다(수동 bidAmt PUT이 자동입찰과 충돌/무의미해지는 것을 방지).
+
+
+def _adgroup_bid_resp(bid_amt=1200, system_bidding_type="NONE", is_autobid_active=False,
+                       autobid_strategy=None):
+    body = {
+        "nccAdgroupId": ADGROUP_ID, "adgroupType": "SHOPPING", "bidAmt": bid_amt,
+        "systemBiddingType": system_bidding_type,
+    }
+    if autobid_strategy is not None:
+        body["autobidStrategy"] = autobid_strategy
+    else:
+        # 실제 수동입찰 그룹은 autobidStrategy.isAutobidActive=False를 명시적으로 반환한다
+        # (S0-2 라이브 실측). codex[P1] 강화 가드는 이 값이 explicit False일 때만 수동으로
+        # 인정하므로, 기본 mock도 실물처럼 명시값을 포함한다.
+        body["autobidStrategy"] = {"isAutobidActive": is_autobid_active}
+    return FakeResp(200, body)
+
+
+def test_update_adgroup_bid_success_roundtrip():
+    before = _adgroup_bid_resp(bid_amt=1200)
+    after = _adgroup_bid_resp(bid_amt=1000)
+    put_resp = FakeResp(200, after.json())
+
+    with patch.object(writer.fetcher, "_get", side_effect=[before, after]) as mock_get, \
+         patch.object(writer.requests, "put", return_value=put_resp) as mock_put:
+        result = writer.update_adgroup_bid(ADGROUP_ID, 1000)
+
+    assert isinstance(result, WriteResult)
+    assert result.action == "update_adgroup_bid"
+    assert result.before == before.json()
+    assert result.after == after.json()
+    assert result.created_ids == []
+    assert mock_get.call_count == 2
+    assert mock_put.call_count == 1
+
+
+def test_update_adgroup_bid_body_shape():
+    before = _adgroup_bid_resp(bid_amt=1200)
+    after = _adgroup_bid_resp(bid_amt=1000)
+    put_resp = FakeResp(200, after.json())
+
+    with patch.object(writer.fetcher, "_get", side_effect=[before, after]), \
+         patch.object(writer.requests, "put", return_value=put_resp) as mock_put:
+        writer.update_adgroup_bid(ADGROUP_ID, 1000)
+
+    _, kwargs = mock_put.call_args
+    assert kwargs["json"] == {"nccAdgroupId": ADGROUP_ID, "bidAmt": 1000}
+    assert kwargs["params"] == {"fields": "bidAmt"}
+
+
+def test_update_adgroup_bid_below_min_raises_validation_error_no_http():
+    with patch.object(writer.fetcher, "_get") as mock_get, \
+         patch.object(writer.requests, "put") as mock_put:
+        with pytest.raises(WriteValidationError):
+            writer.update_adgroup_bid(ADGROUP_ID, 60)
+
+    mock_get.assert_not_called()
+    mock_put.assert_not_called()
+
+
+def test_update_adgroup_bid_above_max_raises_validation_error_no_http():
+    with patch.object(writer.fetcher, "_get") as mock_get, \
+         patch.object(writer.requests, "put") as mock_put:
+        with pytest.raises(WriteValidationError):
+            writer.update_adgroup_bid(ADGROUP_ID, 100_010)
+
+    mock_get.assert_not_called()
+    mock_put.assert_not_called()
+
+
+def test_update_adgroup_bid_not_multiple_of_10_raises_validation_error_no_http():
+    with patch.object(writer.fetcher, "_get") as mock_get, \
+         patch.object(writer.requests, "put") as mock_put:
+        with pytest.raises(WriteValidationError):
+            writer.update_adgroup_bid(ADGROUP_ID, 1005)
+
+    mock_get.assert_not_called()
+    mock_put.assert_not_called()
+
+
+def test_update_adgroup_bid_ml_autobid_type_raises_validation_error_no_put():
+    """systemBiddingType='ML'이면 시스템 자동입찰 중 — 수동 bidAmt PUT은 충돌/무의미해
+    fail-closed 차단한다(before 재조회만, PUT 시도 자체를 안 함)."""
+    before = _adgroup_bid_resp(bid_amt=1200, system_bidding_type="ML")
+
+    with patch.object(writer.fetcher, "_get", side_effect=[before]) as mock_get, \
+         patch.object(writer.requests, "put") as mock_put:
+        with pytest.raises(WriteValidationError):
+            writer.update_adgroup_bid(ADGROUP_ID, 1000)
+
+    assert mock_get.call_count == 1
+    mock_put.assert_not_called()
+
+
+def test_update_adgroup_bid_is_autobid_active_true_raises_validation_error_no_put():
+    """systemBiddingType='NONE'이어도 autobidStrategy.isAutobidActive=true면 자동입찰 활성 —
+    동일하게 fail-closed 차단."""
+    before = _adgroup_bid_resp(bid_amt=1200, system_bidding_type="NONE", is_autobid_active=True)
+
+    with patch.object(writer.fetcher, "_get", side_effect=[before]) as mock_get, \
+         patch.object(writer.requests, "put") as mock_put:
+        with pytest.raises(WriteValidationError):
+            writer.update_adgroup_bid(ADGROUP_ID, 1000)
+
+    assert mock_get.call_count == 1
+    mock_put.assert_not_called()
+
+
+def test_update_adgroup_bid_missing_system_bidding_type_field_raises_validation_error_no_put():
+    """[fail-closed] systemBiddingType 필드 자체가 응답에 없으면(None) 'NONE'과 다르므로
+    안전 쪽(차단)으로 판정한다 — 추정으로 '수동입찰이겠지'라고 통과시키지 않는다."""
+    before = FakeResp(200, {"nccAdgroupId": ADGROUP_ID, "adgroupType": "SHOPPING", "bidAmt": 1200})
+
+    with patch.object(writer.fetcher, "_get", side_effect=[before]) as mock_get, \
+         patch.object(writer.requests, "put") as mock_put:
+        with pytest.raises(WriteValidationError):
+            writer.update_adgroup_bid(ADGROUP_ID, 1000)
+
+    assert mock_get.call_count == 1
+    mock_put.assert_not_called()
+
+
+def test_update_adgroup_bid_none_systembidding_but_missing_autobid_flag_blocks():
+    """[codex P1] systemBiddingType='NONE'이어도 autobidStrategy(또는 isAutobidActive)가
+    응답에 없으면 isAutobidActive를 False로 강제하지 않고 차단한다 — 부분응답/스키마변경 시
+    ML 가드를 우회하던 것 방지(explicit False일 때만 수동 인정, fail-closed on ambiguity)."""
+    # systemBiddingType='NONE'이지만 autobidStrategy 필드 자체가 없음(isAutobidActive 불명)
+    before = FakeResp(200, {
+        "nccAdgroupId": ADGROUP_ID, "adgroupType": "SHOPPING", "bidAmt": 1200,
+        "systemBiddingType": "NONE",
+    })
+
+    with patch.object(writer.fetcher, "_get", side_effect=[before]) as mock_get, \
+         patch.object(writer.requests, "put") as mock_put:
+        with pytest.raises(WriteValidationError):
+            writer.update_adgroup_bid(ADGROUP_ID, 1000)
+
+    assert mock_get.call_count == 1
+    mock_put.assert_not_called()
+
+
+def test_update_adgroup_bid_put_4xx_raises_write_error_no_after_refetch():
+    before = _adgroup_bid_resp(bid_amt=1200)
+    put_resp = FakeResp(403, {"message": "forbidden"})
+
+    with patch.object(writer.fetcher, "_get", side_effect=[before]) as mock_get, \
+         patch.object(writer.requests, "put", return_value=put_resp) as mock_put:
+        with pytest.raises(WriteError):
+            writer.update_adgroup_bid(ADGROUP_ID, 1000)
+
+    assert mock_get.call_count == 1  # before만, after 재조회 없음
+    assert mock_put.call_count == 1
+
+
+def test_update_adgroup_bid_verification_mismatch_raises_verification_error():
+    before = _adgroup_bid_resp(bid_amt=1200)
+    after = _adgroup_bid_resp(bid_amt=1200)  # PUT은 성공했다는데 반영 안 됨
+    put_resp = FakeResp(200, _adgroup_bid_resp(bid_amt=1000).json())
+
+    with patch.object(writer.fetcher, "_get", side_effect=[before, after]), \
+         patch.object(writer.requests, "put", return_value=put_resp):
+        with pytest.raises(WriteVerificationError):
+            writer.update_adgroup_bid(ADGROUP_ID, 1000)
+
+
+def test_update_adgroup_bid_headers_signed_with_put_method_and_no_query_in_path():
+    before = _adgroup_bid_resp(bid_amt=1200)
+    after = _adgroup_bid_resp(bid_amt=1000)
+    put_resp = FakeResp(200, after.json())
+
+    with patch.object(writer.fetcher, "_get", side_effect=[before, after]), \
+         patch.object(writer.requests, "put", return_value=put_resp), \
+         patch.object(writer.fetcher, "_headers", return_value={}) as mock_headers:
+        writer.update_adgroup_bid(ADGROUP_ID, 1000)
+
+    put_call = [c for c in mock_headers.call_args_list if c.kwargs.get("method") == "PUT"]
+    assert len(put_call) == 1
+    signed_path = put_call[0].args[0]
+    assert signed_path == f"/ncc/adgroups/{ADGROUP_ID}"
+    assert "?" not in signed_path and "fields=" not in signed_path
+
+
+def test_update_adgroup_bid_put_2xx_unparseable_body_still_verified_via_after():
+    before = _adgroup_bid_resp(bid_amt=1200)
+    after = _adgroup_bid_resp(bid_amt=1000)
+
+    class UnparseableResp(FakeResp):
+        def json(self):
+            raise ValueError("no json")
+
+    put_resp = UnparseableResp(200, None)
+
+    with patch.object(writer.fetcher, "_get", side_effect=[before, after]), \
+         patch.object(writer.requests, "put", return_value=put_resp):
+        result = writer.update_adgroup_bid(ADGROUP_ID, 1000)
+
+    assert result.response is None
+    assert result.after == after.json()

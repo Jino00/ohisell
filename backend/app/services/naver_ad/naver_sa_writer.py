@@ -557,3 +557,87 @@ def update_campaign_budget(ncc_campaign_id: str, daily_budget: int) -> WriteResu
         action="update_campaign_budget", before=before, response=response_body, after=after,
         created_ids=[],
     )
+
+
+# ── update_adgroup_bid (쇼핑 광고그룹 단위 입찰가, D-NAO-16 3단계 SHOPPING 대칭 확장) ──
+# 성공 판정은 여기서도 재조회로만(fail-closed) — PUT 응답 body는 response 필드에 원본
+# 기록용으로만 유지한다(update_keyword_bid와 동일 규율). 근거: ref 27 §85 + swagger
+# (ncc-heroes-ncc.json) AdgroupRequest.bidAmt(70~100,000, 10원 단위, fields=bidAmt) 실측
+# (2026-07-14). 키워드의 useGroupBidAmt 커플링은 adgroup엔 없음(adgroup이 입찰 최하위 단위 —
+# swagger Adgroup 정의에 그런 필드 없음).
+
+
+def update_adgroup_bid(ncc_adgroup_id: str, bid_amt: int) -> WriteResult:
+    """PUT /ncc/adgroups/{nccAdgroupId}?fields=bidAmt — 쇼핑 광고그룹 입찰가 변경
+    (swagger Adgroup.bidAmt, 실측 2026-07-14).
+
+    bid_amt 사전검증(70~100,000원, 10원 단위 — update_keyword_bid와 동일 상수)은 여기서도
+    반복한다(이중 방벽, 상위 guardrail_gate가 이미 걸렀어도 이 어댑터 단독 호출 시에도
+    무효 입찰가가 네이버에 그대로 전송되지 않도록 방어, fail-closed).
+
+    ML 자동입찰 충돌 사전가드: swagger Adgroup.systemBiddingType(NONE|ML)이 'NONE'이 아니거나
+    autobidStrategy.isAutobidActive가 true면 시스템(ML) 자동입찰이 이미 이 그룹의 입찰을
+    관리 중 — 수동 bidAmt PUT은 무의미하거나 충돌한다. systemBiddingType 필드 자체가 응답에
+    없는 경우도 'NONE'과 다르므로(추정 금지) 안전 쪽(차단)으로 판정한다.
+
+    Raises:
+        WriteValidationError: bid_amt가 범위 밖이거나 10원 단위가 아님 / 대상 광고그룹이
+            시스템(ML) 자동입찰 중(systemBiddingType != 'NONE' 또는 isAutobidActive=true).
+        WriteError: PUT이 2xx 아님(재시도 없음 — 비멱등 쓰기).
+        WriteVerificationError: PUT은 2xx였는데 재조회에 반영 안 됨.
+    """
+    if not (_MIN_BID <= bid_amt <= _MAX_BID) or bid_amt % _BID_INCREMENT != 0:
+        raise WriteValidationError(
+            f"update_adgroup_bid: bid_amt={bid_amt}는 유효 범위 밖(70~100,000원, 10원 단위)"
+        )
+
+    before = _get_adgroup(ncc_adgroup_id)
+
+    system_bidding_type = before.get("systemBiddingType")
+    autobid_strategy = before.get("autobidStrategy")
+    autobid_active = autobid_strategy.get("isAutobidActive") if isinstance(autobid_strategy, dict) else None
+    # codex[P1] S2: isAutobidActive가 **명시적으로 False**일 때만 수동입찰로 인정(추정 금지).
+    # 필드 누락·비-dict·True는 전부 차단 — 부분응답/스키마변경 시 False로 강제해 ML 가드를
+    # 우회하던 것 방지(fail-closed on ambiguity). systemBiddingType도 'NONE' 명시 필수.
+    if system_bidding_type != "NONE" or autobid_active is not False:
+        raise WriteValidationError(
+            f"update_adgroup_bid: adgroup {ncc_adgroup_id}는 수동입찰로 확인 불가"
+            f"(systemBiddingType={system_bidding_type!r}, isAutobidActive={autobid_active!r}) "
+            "— 시스템(ML) 자동입찰이거나 상태 불명이라 수동 bidAmt PUT 차단(fail-closed)"
+        )
+
+    path = f"/ncc/adgroups/{ncc_adgroup_id}"
+    body = {"nccAdgroupId": ncc_adgroup_id, "bidAmt": bid_amt}
+    log.info("Naver SA 쓰기 시도: update_adgroup_bid adgroup=%s bidAmt=%s", ncc_adgroup_id, bid_amt)
+    resp = requests.put(
+        fetcher.BASE_URL + path,
+        headers=fetcher._headers(path, method="PUT"),
+        params={"fields": "bidAmt"},
+        json=body,
+        timeout=30,
+    )
+    if not (200 <= resp.status_code < 300):
+        log.error(
+            "Naver SA 쓰기 실패: update_adgroup_bid adgroup=%s status=%s body=%s",
+            ncc_adgroup_id, resp.status_code, resp.text[:300],
+        )
+        raise WriteError(
+            f"update_adgroup_bid 실패: status={resp.status_code} body={resp.text[:300]}"
+        )
+
+    try:
+        response_body = resp.json()
+    except ValueError:
+        response_body = None
+
+    after = _get_adgroup(ncc_adgroup_id)
+    if after.get("bidAmt") != bid_amt:
+        raise WriteVerificationError(
+            f"update_adgroup_bid: 쓰기 응답은 성공(status={resp.status_code})이나 재조회에 "
+            f"반영되지 않음(fail-closed): 요청={bid_amt} 재조회={after.get('bidAmt')}"
+        )
+
+    log.info("Naver SA 쓰기 성공: update_adgroup_bid adgroup=%s bidAmt=%s", ncc_adgroup_id, bid_amt)
+    return WriteResult(
+        action="update_adgroup_bid", before=before, response=response_body, after=after, created_ids=[],
+    )

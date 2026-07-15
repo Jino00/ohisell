@@ -738,6 +738,42 @@ def test_precompute_aggregates_sums_by_level(db):
     assert agg["account"] == {"clk": 35, "conv_amt": 1750}
 
 
+# ── _collect_bid_sim_candidates (X1b-S S3, D-NAO-43 확장) ─────────────────
+
+
+def test_collect_bid_sim_candidates_includes_shopping_group_growth():
+    """shopping_group_growth 보드도 shopping_group_bep과 동형으로("adgroup" grain) sim
+    후보에 포함돼야 한다 — 안 그러면 진단은 만들어져도 bid_simulator가 절대 안 돌아
+    보드가 조용히 죽은 채로 남는다."""
+    row = {"campaign_id": "cmp1", "adgroup_id": "grp-growth-1", "cost": 8000,
+           "conv_amt": 40000, "roas_corrected": 5.0}
+    boards = {"shopping_group_growth": [row]}
+
+    out = proposal_pipeline._collect_bid_sim_candidates(boards)
+
+    assert ("adgroup", "grp-growth-1", "cmp1", row, "shopping_group_growth") in out
+
+
+def test_collect_bid_sim_candidates_combines_all_boards():
+    bleeding = {"campaign_id": "cmp1", "adgroup_id": "grp1", "keyword_id": "nkw-1"}
+    starving = {"campaign_id": "cmp1", "adgroup_id": "grp1", "keyword_id": "nkw-2"}
+    bep = {"campaign_id": "cmp1", "adgroup_id": "grp-bep"}
+    growth = {"campaign_id": "cmp1", "adgroup_id": "grp-growth"}
+    boards = {
+        "bleeding_keywords": [bleeding], "starving_winners": [starving],
+        "shopping_group_bep": [bep], "shopping_group_growth": [growth],
+    }
+
+    out = proposal_pipeline._collect_bid_sim_candidates(boards)
+
+    assert out == [
+        ("keyword", "nkw-1", "cmp1", bleeding, "bleeding_keywords"),
+        ("keyword", "nkw-2", "cmp1", starving, "starving_winners"),
+        ("adgroup", "grp-bep", "cmp1", bep, "shopping_group_bep"),
+        ("adgroup", "grp-growth", "cmp1", growth, "shopping_group_growth"),
+    ]
+
+
 def test_freshness_gate_ok_and_stale(db):
     assert proposal_pipeline._freshness_gate(db, AS_OF)["ok"] is False
     _row(db, AS_OF, "cmp1", "WEB_SITE", "grp1", "nkw-1", 10, 1, 100)
