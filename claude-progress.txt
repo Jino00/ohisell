@@ -3,6 +3,23 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
+- 날짜: 2026-07-14 오후 (★★**근본해결 A 착수 = 쇼핑 캠페인 실행 경로 완성(X1b-S)**. Opus 설계·Sonnet 구현·codex 게이트. D-NAO-43. 브랜치 `claude/naver-ad-shopping-execution`(main 기준))
+  - **문제 규명(라이브)**: Jino "우리 MOP 켜서 04 작업 시작" → 04=SHOPPING 캠페인인데 우리 실행 손은 키워드(WEB_SITE) 중심 → 실행형 제안 구조적 0건. 두뇌(shopping_group_bep)·bid_down 생성은 배선됨, 갭=writer `update_adgroup_bid` 부재+executor adgroup 차단+성장보드 부재+쇼핑 pause 부재.
+  - **근본해결 A 확정(Jino)**: 쇼핑 실행 3겹 완성 = 손(update_adgroup_bid)+성장 개방(BEP하한 유지)+쇼핑 정지·재개+D-NAO-40 수정. 계획서 `docs/PLAN_naver-ad-shopping-execution.md`(Phase S0~S4). B(파워링크 카나리 교체)=회피라 기각.
+  - **S0 라이브 진단 완료(원칙22)**: ①04 11그룹 전부 수동입찰(ML 충돌 없음) ②**04 액션 임계 실측=어떤 레버도 발동 0**(pause: 적자4그룹 bleed 3.7~6.8k<임계 bid×10; down: sim=up; up: 적자=BEP차단·수익=hold). **04는 정당하게 최적화할 게 없음(정상 절제)**.
+  - **★카나리=04 유지(Jino 결정)**: 스캔이 TPU(425541, 29성장+4정지) 등 대안 냈으나 Jino "원래 계획대로 04". 04 유기적액션0이어도 캐퍼빌리티는 04 쇼핑그룹에 필요 → 구현 지속. **S4 검증=04 adgroup 통제 왕복 실측**(읽기→소액PUT→재조회→원복, ref27§6)으로 쓰기손 증명. D-NAO-43-a/b.
+  - **S1a D-NAO-40 안전수정 완료+codex PASS**: entity_sync `_log_external_status_change` skip을 시간기반(`changed_at > synced_at`)으로 → 외부 재정지 누락→수동정지 덮어쓰기 위험 제거. codex GATE PASS(P1 0), [P2] 테스트브리틀 수정. 116 test 통과(독립검증). 커밋 `claude/naver-ad-shopping-execution`.
+  - **S1b 완료+codex PASS**(커밋 4e5b4f0): shopping_pause/resume_candidates+_shopping_adgroup_window_agg / proposal_writer adgroup 분기 / _execute_set_user_lock→set_adgroup_lock. 239 test.
+  - **S2 완료+codex 재검증 PASS**(커밋 d3e6558 + [P1]수정 커밋): update_adgroup_bid writer(PUT /ncc/adgroups?fields=bidAmt, clamp+ML autobid explicit-False 가드+after 검증) + _execute_update_bid adgroup 분기 + guardrail context adgroup current_bid. **codex[P1] 2건 수정**: adgroup 증액 down-only 차단(S3까지)·ML autobid explicit-False. 230+178 test.
+  - **S3 완료+codex 재검증 PASS**(커밋 7c45117+[P1]67d8871+[P2]0055ee5): shopping_group_growth(수익그룹, clk 포함) + adgroup_window_agg + proposal_writer/pipeline/diagnosis 배선 + _build_guardrail_context adgroup up 원료 + **_execute_update_bid adgroup 증액 개방(roas/target/일예산 컨텍스트 완전성 fail-closed 검증 — guardrail BEP·일예산 fail-open 메꿈, D-NAO-1 이익하한 불침)**. codex[P1] 2건(BEP·예산 우회)+[P2] 1건(clk) 반영. 490 test 독립검증·py_compile OK.
+  - **★S1~S3 코드 완성·codex PASS + S4 완료(Jino 승인, 2026-07-15).** 브랜치 `claude/naver-ad-shopping-execution` 7커밋(미PR). **S4 ①prod 배포**: 7파일 sha256 7/7 일치(prod==main clean apply)·pm2 id0 재시작 online·HTTP200·크래시0·신규심볼 로드OK. 마이그레이션 없음. **②04 통제 왕복 라이브(원칙22)**: grp-…743916 1450→+10 PUT(1460 확인)→원복(1450 확인)→잔여0. **update_adgroup_bid 라이브 작동 증명.** DB백업 `ohisell_bak/naver-ad-shopping-exec_20260715_122655`.
+  - **★근본해결 A 완결**: "우리 MOP가 04 쇼핑에 일할" 실행 손(정지·재개·입찰↓↑) 완성·배포·라이브검증. **단 04는 액션 임계 미도달(정당 절제)이라 유기적 실집행 미발생** — 04 그룹이 임계 넘거나 콘솔 승인 시 작동(S0-4). **다음(선택)**: PR 생성(Jino)·04 유기적 관찰·위임 스위치(Jino)·shopping_group_bep도 clk 보강(대칭, 후속). codex가 이번 스프린트 안전갭 3건(BEP·예산 우회·RPC 폴백) 발견·수정(failures.jsonl 기록).
+  - **관찰 트랙 계속**(별건): 07-14 15:00 예약 루틴 `mop-ipad-5752-d1-synthesis-0714`(MOP 아이패드 가동 포착). 03·아이패드 여전히 미개입(07-14 14시 실측).
+- 날짜: 2026-07-13 저녁 18:30 (★**D1 저녁 재관찰=3축 모두 실질 입찰 개입 0(정상)** + main==prod 정합 확인. 관찰 세션. 코드 변경 0. 브랜치 `claude/naver-ad-execution-loop-78dced`=PR#20 병합본)
+  - **라이브 실측(원칙22)**: ①**03(MOP 유닛6245)**=bidYn=N, 24그룹 변화 0(10:17 이후 감지기 */10 전 tick "변화없음") ②**아이패드 파워링크(MOP 유닛5752)**=키워드 2056개 CPC/on-off 변화 0, **집행시작 07-14**라 오늘 검수/플래닝일(정상) ③**04(우리 ours)**=실행형 제안 0·실쓰기 0(정당 절제, 15일 윈도우 적자그룹 방향 up≠보드 down), 성과 당일 5259원/4클릭/284노출 자연축적.
+  - **결론**: 세 축 모두 오늘 실질 입찰 개입 0 → **진짜 D1 대조 아직 불가**. 변곡점=**07-14 아침 아이패드5752 집행 개시**(첫 MOP 키워드 조정 데이터 발생→우리 로직 학습 반영 대상). 감지기 3종(activation */10, keyword :15) VM 무인 정상·baseline 최신(2056키워드)→내일 자동 포착.
+  - 이번 세션 산출: `mop_vs_ours_03_04_comparison.md` 18:30 섹션 append(신선도). 없는 데이터로 "학습 반영" 단정 안 함(원칙22).
+  - **다음(07-14~)**: ①`cat backend/mop_keyword.log` CPC·추가/제외 변화 포착→키워드 최적화 로직 학습 반영 ②03 bidYn N→Y·04 성과 축적 후 진짜 D1 대조 ③(Jino 게이트) 예산 P4. HANDOFF: `HANDOFF_ohisell-scheduler-catchup-fix+D1-observation_20260713.md`(16:00, main==prod 정합·49재시작 만성아님 조사완료).
 - 날짜: 2026-07-13 아침 (★★**예산 통제 구현 완료 P0~P3.1 + codex GATE PASS + 테스트 1377 pass**. Opus 오케스트레이션·Sonnet 구현·codex 검증. D-NAO-42-g. 브랜치 `claude/naver-ad-budget-control`)
   - **완료**: P0(swagger+라이브 확정)→P1(스키마+writer `138ad1a`)→P2(가드레일+campaign컨텍스트 `45a453e`)→P3(사이징+라운드봉투+실행 `68d7ef5`)→P3.1(codex P1×4·P2×2 반영 `e5424bf`)→docs `24ca8da`. codex 재검증 GATE PASS. 독립 테스트 확인(원칙22).
   - **핵심 설계**: 라운드캡=생성단계 봉투(delegation_gate가 budget_up 자동승인을 budget_auto_eligible=True로 강제 — codex가 이 강제 누락 P1 발견)·per-campaign캡=guardrail_gate._check_budget(실행직전, budget_up BEP 근거None fail-closed). writer=PUT ?fields=budget 공유예산 fail-closed. 사이징 pred_cost/+20%·100원반올림.
