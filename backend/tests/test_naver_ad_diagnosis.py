@@ -944,6 +944,8 @@ def test_shopping_group_growth_flags_profitable_group_above_target(db):
     assert out[0]["cost"] == 8000
     assert out[0]["conv_amt"] == 40000
     assert out[0]["roas_corrected"] == 5.0
+    # codex[P2]: clk를 실어야 compute_bid_sims가 이 그룹 자신의 RPC를 계산(캠페인 폴백 방지)
+    assert out[0]["clk"] == 25
 
 
 def test_shopping_group_growth_excludes_deficit_group_below_target(db):

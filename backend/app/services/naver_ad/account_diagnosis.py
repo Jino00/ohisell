@@ -618,6 +618,7 @@ def shopping_group_growth(
             sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.cost), 0),
             sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.conv_direct_amt), 0),
             sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.conv_indirect_amt), 0),
+            sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.clk), 0),
         )
         .filter(
             NaverAdDaily.ad_date >= date_from, NaverAdDaily.ad_date <= date_to,
@@ -628,7 +629,7 @@ def shopping_group_growth(
         .all()
     )
     out = []
-    for campaign_id, adgroup_id, cost, conv_direct, conv_indirect in q:
+    for campaign_id, adgroup_id, cost, conv_direct, conv_indirect, clk in q:
         cost = int(cost)
         if cost <= 0:
             continue
@@ -642,9 +643,13 @@ def shopping_group_growth(
         roas_c = _corrected_roas(roas_naver, correction_factor)
         target_roas = target_roas_resolver(campaign_id)
         if roas_c is not None and target_roas is not None and roas_c >= float(target_roas):
+            # clk 포함(codex[P2]): compute_bid_sims가 row["clk"]로 이 그룹 자신의 RPC
+            # (conv_amt/clk)를 계산 — 없으면 clk=0 폴백으로 캠페인 평균 RPC가 쓰여 이 그룹
+            # 경제성과 안 맞는 target_bid가 추천될 수 있다(성장=up이라 특히 중요).
             out.append({
                 "campaign_id": campaign_id, "adgroup_id": adgroup_id, "cost": cost,
-                "conv_amt": conv_amt, "roas_naver": roas_naver, "roas_corrected": roas_c,
+                "conv_amt": conv_amt, "clk": int(clk),
+                "roas_naver": roas_naver, "roas_corrected": roas_c,
             })
     out.sort(key=lambda x: x["roas_corrected"], reverse=True)
     return out
