@@ -163,3 +163,62 @@ def test_campaign_settings_put_target_roas_override(client):
     })
     assert resp.status_code == 200
     assert resp.json()["target_roas_override"] == 350.5
+
+
+# ── D-NAO-47 T4: _serialize_proposal 보강 ──
+def test_proposal_serializes_target_bid(client, db):
+    """★"입찰 인상" 카드가 '얼마로' 올리는지 화면에 없던 결함(스펙 §1-6).
+    현재 pending 실행대상 5건이 전부 bid_up이라 바로 체감되는 누락이다."""
+    db.add(NaverProposal(
+        proposal_type="bid_up", target_type="keyword", target_id="nkw-1",
+        campaign_id="cmp-1", status="pending", target_bid=1450,
+    ))
+    db.commit()
+    items = client.get("/api/naver/ad/proposals?status=pending").json()["rows"]
+    assert items[0]["target_bid"] == 1450
+
+
+def test_proposal_serializes_target_lock_and_budget(client, db):
+    db.add(NaverProposal(
+        proposal_type="pause", target_type="keyword", target_id="nkw-2",
+        campaign_id="cmp-1", status="pending", target_lock=True, target_budget=50000,
+    ))
+    db.commit()
+    items = client.get("/api/naver/ad/proposals?status=pending").json()["rows"]
+    assert items[0]["target_lock"] is True
+    assert items[0]["target_budget"] == 50000
+
+
+def test_proposal_serializes_informational_flag(client, db):
+    """프론트가 '나를 기다리는 것'(실행형)과 '롤업 대상'(정보성)을 가르는 기준.
+    ★프론트에서 유형 문자열을 하드코딩해 재분류하면 드리프트한다 — 백엔드가 진실을 준다."""
+    db.add(NaverProposal(
+        proposal_type="trigger_pacing", target_type="campaign", target_id="cmp-1",
+        campaign_id="cmp-1", status="pending",
+    ))
+    db.add(NaverProposal(
+        proposal_type="bid_up", target_type="keyword", target_id="nkw-3",
+        campaign_id="cmp-1", status="pending", target_bid=900,
+    ))
+    db.commit()
+    items = client.get("/api/naver/ad/proposals?status=pending").json()["rows"]
+    by_type = {i["proposal_type"]: i for i in items}
+    assert by_type["trigger_pacing"]["informational"] is True
+    assert by_type["bid_up"]["informational"] is False
+
+
+def test_all_proposal_types_constant_covers_every_emitted_type():
+    """★드리프트 방지: 백엔드가 새 유형을 만들면 이 상수에 반드시 추가해야 한다.
+    프론트 라벨 13종은 이 상수를 진실로 삼는다(유령 라벨 재발 방지).
+
+    ⚠️ 계획서(2026-07-17-mop-command-center-backend.md T4)의 "13종" 표는 budget_down을
+    누락했다(실측: naver_execution_harness._ACTION_BY_PROPOSAL_TYPE에 budget_up과 대칭으로
+    이미 존재 — D-NAO-42-f, 커밋 68d7ef5). ALL_PROPOSAL_TYPES는 이 드리프트 가드 자체가
+    커버해야 할 실제 코드 상태를 진실로 삼으므로 14종으로 정정한다(Phase 2 프론트 라벨은
+    별도 계획서 소관 — 여기서는 백엔드 집합의 정합성만 보장)."""
+    from app.services.naver_ad.proposal_writer import ALL_PROPOSAL_TYPES, INFORMATIONAL_PROPOSAL_TYPES
+    from app.services.naver_ad.naver_execution_harness import _ACTION_BY_PROPOSAL_TYPE
+
+    assert INFORMATIONAL_PROPOSAL_TYPES <= ALL_PROPOSAL_TYPES
+    assert set(_ACTION_BY_PROPOSAL_TYPE) <= ALL_PROPOSAL_TYPES
+    assert len(ALL_PROPOSAL_TYPES) == 14

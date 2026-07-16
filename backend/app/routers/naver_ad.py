@@ -54,6 +54,7 @@ from app.services.naver_ad import delegation_gate
 from app.services.naver_ad import metrics_aggregator
 from app.services.naver_ad import naver_execution_harness
 from app.services.naver_ad import naver_sa_writer
+from app.services.naver_ad import proposal_writer
 from app.services.naver_ad.ad_report import build_report
 from app.services.naver_ad.diagnosis import build_diagnosis
 from app.utils.kst import kst_now, kst_today
@@ -209,6 +210,15 @@ def _serialize_proposal(p: NaverProposal, verdict: NaverExpertReview | None) -> 
         "target_id": p.target_id,
         "campaign_id": p.campaign_id,
         "adgroup_id": p.adgroup_id,
+        # D-NAO-47: 실행 목표값 — 이게 없어서 "입찰 인상" 카드가 *얼마로* 올리는지
+        # 화면에 안 나왔다(스펙 §1-6). pending 실행대상 5건이 전부 bid_up이라 바로 체감됨.
+        "target_bid": p.target_bid,
+        "target_lock": p.target_lock,
+        "target_budget": p.target_budget,
+        "budget_auto_eligible": p.budget_auto_eligible,
+        # D-NAO-47: 정보성/실행형 구분을 백엔드가 준다 — 프론트가 유형 문자열을 하드코딩해
+        # 재분류하면 백엔드에 유형이 추가될 때 조용히 드리프트한다.
+        "informational": p.proposal_type in proposal_writer.INFORMATIONAL_PROPOSAL_TYPES,
         "rationale": p.rationale,
         "expected_effect": p.expected_effect,
         "status": p.status,
