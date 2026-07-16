@@ -78,11 +78,16 @@ export default function NaverAdCommandCenter() {
             <div className="rounded border border-blue-200 bg-blue-50/40 p-3">
               <Badge tone="owner">우리 MOP</Badge>
               <div className="mt-2">
+                {/* ★reason은 **측정한 사실만** 말한다(codex[P2] R5). ours_cost는 최근
+                    N일 **광고비 롤업**이지 캠페인 보유 여부가 아니다. 0을 보고 "넘긴 캠페인이
+                    없다"고 단언하면, 넘겼는데 이 기간 집행만 없었던 경우(정지·신규 인계)
+                    바로 아래 캠페인 리스트에는 그 캠페인이 보이면서 위에선 없다고 말하는
+                    **자기모순 화면**이 된다. 캠페인 유무는 아래 리스트가 말하게 둔다. */}
                 <Stat
                   label="광고비"
                   value={won(cov.ours_cost)}
                   isEmpty={cov.ours_cost === 0}
-                  reason="아직 우리 MOP에 넘긴 캠페인이 없습니다."
+                  reason={`최근 ${cov.window_days}일 우리 MOP 캠페인의 광고비 집행이 없습니다.`}
                   tone={cov.ours_cost === 0 ? "idle" : "neutral"}
                   sub={cov.total_cost ? `전체의 ${pctFromFraction(cov.ours_cost / cov.total_cost)}` : undefined}
                 />
@@ -91,12 +96,13 @@ export default function NaverAdCommandCenter() {
             <div className="rounded border border-gray-200 p-3">
               <Badge>원본 MOP</Badge>
               <div className="mt-2">
+                {/* ★같은 이유로 태깅 여부를 단언하지 않는다 — 측정한 건 광고비 0이고,
+                    태깅 누락은 **가장 유력한 원인**이지 관측 사실이 아니다(D-47-g). */}
                 <Stat
                   label="광고비"
                   value={won(cov.mop_cost)}
                   isEmpty={cov.mop_cost === 0}
-                  // ★D-47-g: 03을 optimizer='mop'으로 태깅해야 이 열이 채워진다.
-                  reason="원본 MOP가 돌리는 캠페인이 optimizer='mop'으로 태깅되지 않았습니다(D-47-g)."
+                  reason={`최근 ${cov.window_days}일 optimizer='mop' 태깅 캠페인의 광고비가 없습니다 — 03 태깅 전이면 태깅이 필요합니다(D-47-g).`}
                   tone="idle"
                 />
               </div>
