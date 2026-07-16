@@ -792,7 +792,7 @@ def get_change_log(
 
     return {
         "total": total,
-        "items": [
+        "rows": [
             {
                 "id": r.id,
                 "changed_at": r.changed_at.isoformat() if r.changed_at else None,
@@ -846,7 +846,7 @@ def get_raw_keywords(
     rows = query.order_by(NaverEntity.name).offset(offset).limit(limit).all()
     return {
         "total": total,
-        "items": [
+        "rows": [
             {
                 "entity_id": r.entity_id,
                 "name": r.name,
@@ -888,7 +888,7 @@ def get_raw_search_terms(
     )
     return {
         "total": total,
-        "items": [
+        "rows": [
             {
                 "ad_date": r.ad_date.isoformat() if r.ad_date else None,
                 "campaign_id": r.campaign_id,
@@ -941,7 +941,7 @@ def get_raw_hourly(
 
     return {
         "total": total,
-        "items": [
+        "rows": [
             {
                 "ad_date": r.ad_date.isoformat() if r.ad_date else None,
                 "snapshot_hour": r.snapshot_hour,

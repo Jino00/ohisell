@@ -65,7 +65,7 @@ def test_raw_keywords_returns_only_keyword_rows(client, db):
         status="on", bid_amt=None, synced_at=kst_now(),
     ))
     db.commit()
-    items = client.get("/api/naver/ad/raw/keywords").json()["items"]
+    items = client.get("/api/naver/ad/raw/keywords").json()["rows"]
     assert len(items) == 1
     assert items[0]["entity_id"] == "nkw-1"
     assert items[0]["bid_amt"] == 700
@@ -82,13 +82,13 @@ def test_raw_keywords_returns_total_for_pagination(client, db):
         _seed_keyword(db, entity_id=f"nkw-{i}", name=f"kw{i}")
     body = client.get("/api/naver/ad/raw/keywords?limit=2").json()
     assert body["total"] == 5
-    assert len(body["items"]) == 2
+    assert len(body["rows"]) == 2
 
 
 def test_raw_keywords_search_by_name(client, db):
     _seed_keyword(db, entity_id="nkw-1", name="아이폰 필름")
     _seed_keyword(db, entity_id="nkw-2", name="갤럭시 케이스")
-    items = client.get("/api/naver/ad/raw/keywords?q=필름").json()["items"]
+    items = client.get("/api/naver/ad/raw/keywords?q=필름").json()["rows"]
     assert len(items) == 1
     assert items[0]["name"] == "아이폰 필름"
 
@@ -98,14 +98,14 @@ def test_raw_keywords_filters_by_campaign_and_status(client, db):
     _seed_keyword(db, entity_id="nkw-2", campaign_id="cmp-2", status="on")
     _seed_keyword(db, entity_id="nkw-3", campaign_id="cmp-1", status="off")
 
-    assert len(client.get("/api/naver/ad/raw/keywords?campaign_id=cmp-1").json()["items"]) == 2
-    assert len(client.get("/api/naver/ad/raw/keywords?campaign_id=cmp-1&status=on").json()["items"]) == 1
+    assert len(client.get("/api/naver/ad/raw/keywords?campaign_id=cmp-1").json()["rows"]) == 2
+    assert len(client.get("/api/naver/ad/raw/keywords?campaign_id=cmp-1&status=on").json()["rows"]) == 1
 
 
 def test_raw_keywords_excludes_deleted_by_default(client, db):
     _seed_keyword(db, entity_id="nkw-1", status="on")
     _seed_keyword(db, entity_id="nkw-2", status="deleted")
-    items = client.get("/api/naver/ad/raw/keywords").json()["items"]
+    items = client.get("/api/naver/ad/raw/keywords").json()["rows"]
     assert len(items) == 1
     assert items[0]["entity_id"] == "nkw-1"
 
@@ -117,7 +117,7 @@ def test_raw_search_terms_returns_rows(client, db):
         search_term="아이폰 필름", source="shopping", imp=100, clk=5, cost=1000,
     ))
     db.commit()
-    items = client.get("/api/naver/ad/raw/search-terms").json()["items"]
+    items = client.get("/api/naver/ad/raw/search-terms").json()["rows"]
     assert len(items) == 1
     assert items[0]["search_term"] == "아이폰 필름"
 
@@ -137,7 +137,7 @@ def test_raw_search_terms_respects_days_window(client, db):
         search_term="최근", source="shopping", imp=1, clk=0, cost=0,
     ))
     db.commit()
-    items = client.get("/api/naver/ad/raw/search-terms?days=7").json()["items"]
+    items = client.get("/api/naver/ad/raw/search-terms?days=7").json()["rows"]
     assert len(items) == 1
     assert items[0]["search_term"] == "최근"
 
@@ -152,7 +152,7 @@ def test_raw_hourly_returns_rows_with_budget_and_ratio(client, db):
         cost=25000, clk=10, imp=100, daily_budget=100000, synced_at=kst_now(),
     ))
     db.commit()
-    items = client.get("/api/naver/ad/raw/hourly").json()["items"]
+    items = client.get("/api/naver/ad/raw/hourly").json()["rows"]
     assert len(items) == 1
     assert items[0]["daily_budget"] == 100000
     assert items[0]["snapshot_hour"] == 14
@@ -167,7 +167,7 @@ def test_raw_hourly_spend_ratio_is_none_when_budget_missing(client, db):
         cost=25000, clk=10, imp=100, daily_budget=None, synced_at=kst_now(),
     ))
     db.commit()
-    items = client.get("/api/naver/ad/raw/hourly").json()["items"]
+    items = client.get("/api/naver/ad/raw/hourly").json()["rows"]
     assert items[0]["spend_ratio"] is None
 
 
@@ -178,7 +178,7 @@ def test_raw_hourly_spend_ratio_is_none_when_budget_zero(client, db):
         cost=25000, clk=10, imp=100, daily_budget=0, synced_at=kst_now(),
     ))
     db.commit()
-    assert client.get("/api/naver/ad/raw/hourly").json()["items"][0]["spend_ratio"] is None
+    assert client.get("/api/naver/ad/raw/hourly").json()["rows"][0]["spend_ratio"] is None
 
 
 def test_raw_hourly_ordered_by_date_then_hour(client, db):
@@ -189,11 +189,11 @@ def test_raw_hourly_ordered_by_date_then_hour(client, db):
             cost=100, clk=1, imp=10, daily_budget=1000, synced_at=kst_now(),
         ))
     db.commit()
-    items = client.get("/api/naver/ad/raw/hourly").json()["items"]
+    items = client.get("/api/naver/ad/raw/hourly").json()["rows"]
     assert [i["snapshot_hour"] for i in items] == [14, 11, 9]  # 최신 시각 먼저
 
 
 def test_raw_endpoints_empty_are_200(client):
     for path in ("keywords", "search-terms", "hourly"):
         body = client.get(f"/api/naver/ad/raw/{path}").json()
-        assert body == {"items": [], "total": 0}
+        assert body == {"rows": [], "total": 0}

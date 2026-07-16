@@ -64,14 +64,14 @@ def test_change_log_returns_rows_newest_first(client, db):
     _seed(db, days_ago=1)
     r = client.get("/api/naver/ad/change-log")
     assert r.status_code == 200
-    items = r.json()["items"]
+    items = r.json()["rows"]
     assert len(items) == 2
     assert items[0]["changed_at"] > items[1]["changed_at"]
 
 
 def test_change_log_parses_before_after_json(client, db):
     _seed(db)
-    items = client.get("/api/naver/ad/change-log").json()["items"]
+    items = client.get("/api/naver/ad/change-log").json()["rows"]
     assert items[0]["before"] == {"bidAmt": 700}
     assert items[0]["after"] == {"bidAmt": 900}
     assert items[0]["action"] == "update_bid"
@@ -85,13 +85,13 @@ def test_change_log_survives_malformed_json_without_500(client, db):
     db.commit()
     r = client.get("/api/naver/ad/change-log")
     assert r.status_code == 200
-    assert r.json()["items"][0]["before"] is None
+    assert r.json()["rows"][0]["before"] is None
 
 
 def test_change_log_filters_by_campaign(client, db):
     _seed(db, campaign_id="cmp-1")
     _seed(db, campaign_id="cmp-2")
-    items = client.get("/api/naver/ad/change-log?campaign_id=cmp-1").json()["items"]
+    items = client.get("/api/naver/ad/change-log?campaign_id=cmp-1").json()["rows"]
     assert len(items) == 1
     assert items[0]["campaign_id"] == "cmp-1"
 
@@ -99,7 +99,7 @@ def test_change_log_filters_by_campaign(client, db):
 def test_change_log_filters_by_action(client, db):
     _seed(db, action="update_bid")
     _seed(db, action="external_bid_change")
-    items = client.get("/api/naver/ad/change-log?action=external_bid_change").json()["items"]
+    items = client.get("/api/naver/ad/change-log?action=external_bid_change").json()["rows"]
     assert len(items) == 1
     assert items[0]["action"] == "external_bid_change"
 
@@ -109,18 +109,18 @@ def test_change_log_excludes_dry_run_by_default(client, db):
     dry_run을 섞으면 아무것도 안 했는데 일한 것처럼 보인다(D-47-h 정직성)."""
     _seed(db, dry_run=True)
     _seed(db, dry_run=False)
-    items = client.get("/api/naver/ad/change-log").json()["items"]
+    items = client.get("/api/naver/ad/change-log").json()["rows"]
     assert len(items) == 1
     assert items[0]["dry_run"] is False
 
-    all_items = client.get("/api/naver/ad/change-log?include_dry_run=true").json()["items"]
+    all_items = client.get("/api/naver/ad/change-log?include_dry_run=true").json()["rows"]
     assert len(all_items) == 2
 
 
 def test_change_log_respects_days_window(client, db):
     _seed(db, days_ago=40)
     _seed(db, days_ago=2)
-    items = client.get("/api/naver/ad/change-log?days=7").json()["items"]
+    items = client.get("/api/naver/ad/change-log?days=7").json()["rows"]
     assert len(items) == 1
 
 
@@ -134,10 +134,10 @@ def test_change_log_returns_total_for_pagination(client, db):
         _seed(db)
     body = client.get("/api/naver/ad/change-log?limit=2").json()
     assert body["total"] == 3
-    assert len(body["items"]) == 2
+    assert len(body["rows"]) == 2
 
 
 def test_change_log_empty_is_200_not_404(client):
     """★빈 상태는 에러가 아니다 — 1층이 '우리 조작 0회'를 정직하게 그려야 한다(D-47-h)."""
     body = client.get("/api/naver/ad/change-log").json()
-    assert body == {"items": [], "total": 0}
+    assert body == {"rows": [], "total": 0}
