@@ -2008,3 +2008,44 @@ export function fetchNaverRetroScorecard(days?: number): Promise<NaverRetroScore
   const q = days != null ? `?days=${days}` : "";
   return fetchApi<NaverRetroScorecard>(`/api/naver/ad/retro-scorecard${q}`);
 }
+
+
+// ── D-NAO-48 캠페인 명부 + 관리주체 스위치 ──
+
+export interface NaverCampaignRosterRow {
+  campaign_id: string;
+  /** ★캠페인 이름. 이게 없어서 그동안 화면에 내부 ID가 그대로 노출됐다(MOP UX 리뷰에서
+   *  "베끼면 안 되는 것"으로 꼽은 항목). naver_entity에 있던 걸 이제 명부 SA가 준다. */
+  name: string;
+  campaign_type: string;
+  status: string;
+  cost: number;
+  clk: number;
+  conv_amt: number;
+  /** 광고비 0이면 null — 'ROAS 0배'가 아니라 '알 수 없음'. */
+  roas_naver: number | null;
+  optimizer: NaverAdOptimizer;
+  window_days: number;
+}
+
+export function fetchNaverCampaignRoster(params: {
+  days?: number; campaign_type?: string; optimizer?: NaverAdOptimizer;
+} = {}): Promise<{ total: number; rows: NaverCampaignRosterRow[] }> {
+  const q = new URLSearchParams();
+  Object.entries(params).forEach(([k, v]) => { if (v != null) q.set(k, String(v)); });
+  const qs = q.toString();
+  return fetchApi(`/api/naver/ad/campaigns${qs ? `?${qs}` : ""}`);
+}
+
+/** 관리주체만 바꾼다(D-NAO-48).
+ *  ★putNaverCampaignSettings를 쓰지 말 것 — 그건 **전체 치환**이라 optimizer만 보내면
+ *  mode·target_roas_override·gamma·memo가 전부 null로 날아간다. 이 엔드포인트는 optimizer
+ *  외 필드를 건드리지 않는다. */
+export function putNaverCampaignOptimizer(body: {
+  campaignId: string; optimizer: NaverAdOptimizer;
+}): Promise<NaverAdCampaignSettings> {
+  return fetchApi<NaverAdCampaignSettings>("/api/naver/ad/campaign-settings/optimizer", {
+    method: "PUT",
+    body: JSON.stringify({ campaign_id: body.campaignId, optimizer: body.optimizer }),
+  });
+}

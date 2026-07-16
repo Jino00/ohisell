@@ -13,13 +13,14 @@
 // 없어(백엔드 _serialize_settings가 안 줌) campaign_id만 표시한다 — 추측으로 필드를 만들지 않는다.
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { Card, Stat, EmptyState, Loading, CoverageBar, Table, Th, Td, Badge, LayerNav } from "../components/ui";
-import { num, won, pctFromFraction, NO_DATA } from "../lib/format";
+import { Card, Stat, EmptyState, Loading, CoverageBar, Table, Th, Td, Badge, LayerNav, OptimizerSwitch } from "../components/ui";
+import { num, won, roasX, pctFromFraction, NO_DATA } from "../lib/format";
 import { useAsyncData } from "../lib/useAsyncData";
 import {
-  getNaverDashboardOverview, fetchNaverChangeLog, fetchNaverCampaignSettings,
+  getNaverDashboardOverview, fetchNaverChangeLog,
   fetchNaverRetroScorecard, fetchNaverAdProposals,
-  type NaverDashboardOverview, type NaverAdCampaignSettings,
+  fetchNaverCampaignRoster, putNaverCampaignOptimizer,
+  type NaverDashboardOverview, type NaverCampaignRosterRow, type NaverAdOptimizer,
   type NaverRetroScorecard, type NaverChangeLogRow,
 } from "../lib/api";
 import { PROPOSAL_TYPE_LABEL } from "./NaverAdOptimizationConsole";
@@ -119,10 +120,10 @@ export default function NaverAdCommandCenter() {
 
       {/* ② 우리 MOP 캠페인 리스트 — 오늘 1행, 나중 N행(D-47-c) */}
       <Card
-        title="우리 MOP가 돌리는 캠페인"
-        right={<Link to="/naver-ad/console" className="text-xs text-blue-600 hover:underline">캠페인 넘기기 →</Link>}
+        title="스마트스토어 캠페인 — 누구에게 맡길지"
+        right={<Link to="/naver-ad/console" className="text-xs text-blue-600 hover:underline">모드·공격성 설정 →</Link>}
       >
-        <OursCampaignList />
+        <CampaignRoster />
       </Card>
 
       {/* ③ 성적표 두 겹 — 중복 아니라 상보 */}
@@ -143,113 +144,105 @@ export default function NaverAdCommandCenter() {
   );
 }
 
-function OursCampaignList() {
-  const [rows, setRows] = useState<NaverAdCampaignSettings[] | null>(null);
-  // ★캠페인별 조작 횟수(codex[P2] R2·R3). 계정 전체 합계를 모든 행에 똑같이 찍으면 캠페인이
-  //   늘었을 때 A의 조작이 B 행에 표시된다 — **D-47-c(N=1→N=여럿 동일 컴포넌트) 정면 위반**.
-  //   오늘 04 하나뿐이라 우연히 맞아 보일 뿐, 카나리를 확대하는 순간 틀린다(그 확대가 이
-  //   화면의 존재 이유다).
-  //   ★행을 받아 클라이언트에서 묶지 않는다(codex[P2] R3): 한 페이지(500건)만 받아 세면
-  //   그 창을 넘는 순간 **조용히 적게 센다**(옛 실집행만 있는 캠페인이 "0회"로 보인다).
-  //   캠페인당 limit=1로 서버의 `total`을 읽으면 페이지네이션과 무관하게 **정확**하다.
-  //   요청 수는 ours 캠페인 수(설계상 카나리라 소수)라 감당된다.
-  //   ★실패 시 {}로 만들지 않는다(codex[P2] R3): 모르는 걸 "0회"라고 단언하면 D-47-h의
-  //   0-vs-불명 계약을 깬다. null로 두어 "—"가 뜨게 한다.
-  const [countByCampaign, setCountByCampaign] = useState<Record<string, number> | null>(null);
-  const [countError, setCountError] = useState(false);
-  const [listError, setListError] = useState<string | null>(null);
+// D-NAO-48 — 광고 종류 한글 라벨. naver_entity.campaign_type 실측값 3종.
+const CAMPAIGN_TYPE_LABEL: Record<string, string> = {
+  WEB_SITE: "파워링크",
+  SHOPPING: "쇼핑",
+  BRAND_SEARCH: "브랜드검색",
+};
+
+function CampaignRoster() {
+  // D-NAO-48: Jino "광고 종류별 스마트스토어 광고 옆에 토글버튼을 달아서 우리가 만든 MOP로
+  // 돌릴지 선택하게 해주자". 여기가 카나리가 확대되는 자리다(D-47-c).
+  // ★전체 캠페인을 보여준다 — 우리 것만 보여주면 넘길 대상이 화면에 없어서 확대를 못 한다.
+  const [rows, setRows] = useState<NaverCampaignRosterRow[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
-    (async () => {
-      let ours: NaverAdCampaignSettings[];
-      try {
-        const r = await fetchNaverCampaignSettings();
-        ours = r.rows.filter((c) => c.optimizer === "ours");
-      } catch (e) {
-        // ★실패를 빈 목록으로 위장하지 않는다 — setRows([])로 두면 화면이 "우리 MOP에 넘긴
-        //   캠페인이 아직 없습니다"라고 **단언**한다. 넘긴 캠페인이 있는데 조회만 실패했을
-        //   수도 있다. 모르면 모른다고 한다(D-47-h · useAsyncData 헤더의 그 실수와 동일 계열).
-        if (alive) setListError(e instanceof Error ? e.message : String(e));
-        return;
-      }
-      if (!alive) return;
-      setRows(ours);
-
-      try {
-        const counts = await Promise.all(
-          ours.map((c) =>
-            fetchNaverChangeLog({ days: 30, limit: 1, actor: "ours", campaign_id: c.campaign_id })
-              .then((r) => [c.campaign_id, r.total] as const),
-          ),
-        );
-        if (!alive) return;
-        setCountByCampaign(Object.fromEntries(counts));
-      } catch {
-        if (alive) setCountError(true);  // 불명 유지 — 0이라고 단언하지 않는다
-      }
-    })();
+    fetchNaverCampaignRoster({ days: 30 })
+      .then((r) => { if (alive) setRows(r.rows); })
+      // ★실패를 빈 목록으로 위장하지 않는다 — "캠페인이 없다"고 단언하게 된다(D-47-h).
+      .catch((e) => { if (alive) setError(e instanceof Error ? e.message : String(e)); });
     return () => { alive = false; };
   }, []);
 
-  if (listError) {
-    return <EmptyState reason={`캠페인 목록을 불러오지 못했습니다: ${listError}`} hint="새로고침하거나 백엔드 상태를 확인하세요." />;
-  }
-  if (rows === null) return <Loading rows={2} />;
-  if (rows.length === 0) {
-    return (
-      <EmptyState
-        reason="우리 MOP에 넘긴 캠페인이 아직 없습니다."
-        hint="최적화 콘솔에서 캠페인의 관리 주체를 '우리'로 바꾸면 여기에 나타납니다."
-      />
-    );
+  async function changeOptimizer(campaignId: string, next: NaverAdOptimizer) {
+    setSaveError(null);
+    try {
+      // ★putNaverCampaignSettings(전체 치환)가 아니라 전용 엔드포인트 — 그걸 쓰면
+      //   mode·override·gamma·memo가 전부 null로 날아간다(D-NAO-48 백엔드 주석 참조).
+      await putNaverCampaignOptimizer({ campaignId, optimizer: next });
+      setRows((prev) => prev?.map((r) => (r.campaign_id === campaignId ? { ...r, optimizer: next } : r)) ?? prev);
+    } catch (e) {
+      setSaveError(e instanceof Error ? e.message : String(e));
+    }
   }
 
+  if (error) {
+    return <EmptyState reason={`캠페인 목록을 불러오지 못했습니다: ${error}`} hint="새로고침하거나 백엔드 상태를 확인하세요." />;
+  }
+  if (rows === null) return <Loading rows={4} />;
+  if (rows.length === 0) {
+    return <EmptyState reason="수집된 캠페인이 없습니다." hint="캠페인 인벤토리는 매일 07:35 크론이 동기화합니다." />;
+  }
+
+  // 광고 종류별로 묶는다(Jino "광고 종류별"). 종류 안에서는 광고비 순(명부 SA가 정렬).
+  const byType = new Map<string, NaverCampaignRosterRow[]>();
+  for (const r of rows) {
+    const list = byType.get(r.campaign_type) ?? [];
+    list.push(r);
+    byType.set(r.campaign_type, list);
+  }
+  const oursCount = rows.filter((r) => r.optimizer === "ours").length;
+
   return (
-    <Table head={<>
-      <Th>캠페인</Th>
-      <Th right>우리 조작</Th>
-      <Th>상태</Th>
-    </>}>
-      {rows.map((c) => {
-        const changeCount = countByCampaign === null ? null : (countByCampaign[c.campaign_id] ?? 0);
-        return (
-        <tr key={c.campaign_id}>
-          {/* ★campaign_name은 백엔드 /campaign-settings가 주지 않는다(_serialize_settings 실측) —
-              추측으로 필드를 만들지 않고 campaign_id만 표시한다. */}
-          <Td><span className="text-gray-900">{c.campaign_id}</span></Td>
-          {/* ★"우리 조작 N회" — 프로그램이 일하는지 매일 보이는 자리.
-              0은 회색(judge-idle)이다. 빨강이면 고장난 것처럼 보이고 초록이면 거짓말이다. */}
-          <Td right>
-            <span className={changeCount === 0 ? "text-judge-idle" : "text-gray-900"}>
-              {changeCount == null ? NO_DATA : `${num(changeCount)}회`}
-            </span>
-          </Td>
-          <Td>
-            {/* ★0-vs-불명을 가른다(D-47-h): 0은 "0회"+이유(회색), **모르면 이유를 지어내지
-                않는다**. 조회 실패를 "승인된 실행이 없습니다"라고 쓰면 사실이 아닌 걸 단언하는
-                것이다(codex[P2] R3). */}
-            {changeCount == null ? (
-              <span className="text-xs text-gray-400">
-                {countError ? "조작 횟수를 불러오지 못했습니다." : "확인 중…"}
-              </span>
-            ) : changeCount === 0 ? (
-              <span className="text-xs text-gray-500">
-                제안은 나오지만 승인된 실행이 없습니다(사람 승인 게이트 대기).
-              </span>
-            ) : <Badge tone="owner">가동 중</Badge>}
-          </Td>
-        </tr>
-        );
-      })}
-    </Table>
+    <div>
+      {saveError && <p className="px-4 py-2 text-xs text-judge-bad bg-red-50">{saveError}</p>}
+      <p className="px-4 py-2 text-xs text-gray-500 border-b border-gray-100">
+        전체 {num(rows.length)}개 중 우리 MOP {num(oursCount)}개 — 넘기면 우리 프로그램이 그 캠페인의
+        입찰을 제안·실행합니다(사람 승인 게이트 유지). 원본 MOP는 자동으로 꺼지지 않습니다.
+      </p>
+      {[...byType.entries()].map(([type, list]) => (
+        <div key={type}>
+          <p className="px-4 py-1.5 text-xs font-medium text-gray-600 bg-gray-50 border-y border-gray-100">
+            {CAMPAIGN_TYPE_LABEL[type] ?? type} · {num(list.length)}개
+          </p>
+          <Table head={<>
+            <Th>캠페인</Th>
+            <Th right>광고비(30일)</Th>
+            <Th right>ROAS</Th>
+            <Th>관리 주체</Th>
+          </>}>
+            {list.map((c) => (
+              <tr key={c.campaign_id}>
+                <Td>
+                  {/* ★내부 ID 대신 이름 — MOP가 저지른 실수(§2-7)를 우리도 하고 있었다.
+                      D-NAO-48 명부 SA가 naver_entity의 이름을 실어준다. */}
+                  <span className="text-gray-900">{c.name || c.campaign_id}</span>
+                  {c.status !== "on" && <Badge>{c.status === "off" ? "정지" : c.status}</Badge>}
+                </Td>
+                <Td right>{won(c.cost)}</Td>
+                {/* ★cost 0이면 roas는 null — "0배"가 아니라 "알 수 없음"이다. */}
+                <Td right>{c.roas_naver == null ? NO_DATA : roasX(c.roas_naver)}</Td>
+                <Td>
+                  <OptimizerSwitch
+                    campaignId={c.campaign_id}
+                    campaignName={c.name || c.campaign_id}
+                    value={c.optimizer}
+                    onChange={changeOptimizer}
+                  />
+                </Td>
+              </tr>
+            ))}
+          </Table>
+        </div>
+      ))}
+    </div>
   );
 }
 
-// D-NAO-45(상설 소급 채점) 라이브 — 실행이 0이어도 이건 채워진다. "우리 조작 0회"만
-// 있으면 초라하지만, 그 옆에 방향 정밀도가 붙으면 신뢰의 근거가 된다.
-// 정직 경계(D-NAO-45 docstring): "방향 정확도 계기판이지 인과 성과 검증이 아니다 —
-// 인과 승격은 카나리 몫". 그 카나리가 바로 이 화면의 1층이다.
 function RetroScorecardPane() {
   const { data, error } = useAsyncData<NaverRetroScorecard>(() => fetchNaverRetroScorecard(), []);
   if (error) return <EmptyState reason={`불러오지 못했습니다: ${error}`} hint="새로고침하거나 백엔드 상태를 확인하세요." />;
