@@ -115,55 +115,64 @@ def test_campaign_settings_get_returns_200_empty(client):
 
 
 def test_campaign_settings_put_creates_new_row(client, db):
+    """★D-NAO-48(codex[P2] R2): 이 PUT은 이제 **모드·공격성 전용**이고 optimizer를 받지 않는다.
+    새 행의 optimizer는 항상 'none'에서 시작한다 — 모드만 저장했는데 라이브 쓰기가 켜지면 안 된다."""
     resp = client.put("/api/naver/ad/campaign-settings", json={
-        "campaign_id": "cmp-new", "optimizer": "ours", "mode": "growth",
+        "campaign_id": "cmp-new", "mode": "growth",
     })
     assert resp.status_code == 200
     body = resp.json()
     assert body["campaign_id"] == "cmp-new"
-    assert body["optimizer"] == "ours"
     assert body["mode"] == "growth"
+    assert body["optimizer"] == "none"
 
     get_resp = client.get("/api/naver/ad/campaign-settings", params={"campaign_id": "cmp-new"})
-    assert get_resp.json()["rows"][0]["optimizer"] == "ours"
+    assert get_resp.json()["rows"][0]["optimizer"] == "none"
 
 
-def test_campaign_settings_put_logs_optimizer_transition(client, db):
-    client.put("/api/naver/ad/campaign-settings", json={"campaign_id": "cmp-1", "optimizer": "none"})
-    resp = client.put("/api/naver/ad/campaign-settings", json={"campaign_id": "cmp-1", "optimizer": "ours"})
-    assert resp.status_code == 200
-
-    logs = db.query(NaverChangeLog).filter(
-        NaverChangeLog.campaign_id == "cmp-1", NaverChangeLog.action == "optimizer_change",
-    ).all()
-    assert len(logs) == 1
-    assert logs[0].before_value == "none"
-    assert logs[0].after_value == "ours"
+def test_campaign_settings_put_rejects_optimizer_field(client, db):
+    """★쓰기 경로를 **구조적으로** 하나로 만든다(codex[P2] R2). 이전엔 optional로 두고
+    "콘솔이 안 보내면 된다"고 문서로 막았는데, 그건 이 세션 내내 배격한 방식이다
+    (reason은 타입으로, EXECUTION_ACTIONS는 파생으로 막았듯이). 문을 열어두면 언젠가 들어온다:
+    stale 값 하나가 스위치로 끈 캠페인을 'ours'로 되돌려 확인창 없이 쓰기를 재무장시킨다.
+    → 이 PUT은 optimizer를 **거부**한다. 유일 경로 = PUT /campaign-settings/optimizer."""
+    r = client.put("/api/naver/ad/campaign-settings",
+                   json={"campaign_id": "cmp-1", "optimizer": "ours", "mode": "growth"})
+    assert r.status_code == 422
 
 
-def test_campaign_settings_put_no_log_when_optimizer_unchanged(client, db):
-    client.put("/api/naver/ad/campaign-settings", json={"campaign_id": "cmp-1", "optimizer": "ours"})
-    client.put("/api/naver/ad/campaign-settings", json={"campaign_id": "cmp-1", "optimizer": "ours", "memo": "메모만 변경"})
+def test_campaign_settings_put_never_touches_optimizer(client, db):
+    """모드를 저장해도 관리주체는 그대로 — 이 PUT은 optimizer를 건드리지 않는다."""
+    from app.models import NaverCampaignSettings
+    db.add(NaverCampaignSettings(campaign_id="cmp-1", optimizer="ours"))
+    db.commit()
 
-    logs = db.query(NaverChangeLog).filter(NaverChangeLog.campaign_id == "cmp-1").all()
-    assert len(logs) == 1  # 최초 none→ours 전환 1건만, memo만 바뀐 두번째 호출은 로그 없음
+    r = client.put("/api/naver/ad/campaign-settings", json={"campaign_id": "cmp-1", "mode": "defense"})
+    assert r.status_code == 200
+    assert r.json()["optimizer"] == "ours"
+    assert r.json()["mode"] == "defense"
+    # 전이가 없으니 감사 기록도 없다
+    assert db.query(NaverChangeLog).filter(NaverChangeLog.action == "optimizer_change").count() == 0
 
 
-def test_campaign_settings_put_rejects_invalid_optimizer(client):
-    resp = client.put("/api/naver/ad/campaign-settings", json={"campaign_id": "cmp-1", "optimizer": "bogus"})
-    assert resp.status_code == 400
+def test_campaign_settings_put_memo_only_writes_no_audit(client, db):
+    """memo만 바꾸면 감사 기록이 없다. (optimizer 전이 로깅은 이제 이 PUT의 책임이 아니다 —
+    D-NAO-48로 전용 스위치 엔드포인트로 이관, test_naver_optimizer_switch_router.py가 커버.)"""
+    client.put("/api/naver/ad/campaign-settings", json={"campaign_id": "cmp-1", "memo": "메모"})
+    client.put("/api/naver/ad/campaign-settings", json={"campaign_id": "cmp-1", "memo": "메모만 변경"})
+    assert db.query(NaverChangeLog).filter(NaverChangeLog.campaign_id == "cmp-1").count() == 0
 
 
 def test_campaign_settings_put_rejects_invalid_mode(client):
     resp = client.put("/api/naver/ad/campaign-settings", json={
-        "campaign_id": "cmp-1", "optimizer": "ours", "mode": "bogus",
+        "campaign_id": "cmp-1", "mode": "bogus",
     })
     assert resp.status_code == 400
 
 
 def test_campaign_settings_put_target_roas_override(client):
     resp = client.put("/api/naver/ad/campaign-settings", json={
-        "campaign_id": "cmp-1", "optimizer": "ours", "target_roas_override": 350.5,
+        "campaign_id": "cmp-1", "target_roas_override": 350.5,
     })
     assert resp.status_code == 200
     assert resp.json()["target_roas_override"] == 350.5
