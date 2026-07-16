@@ -450,6 +450,26 @@ def run_naver_retro_scoring_job():
         db.close()
 
 
+def sweep_naver_keyword_hourly_job():
+    """키워드/쇼핑그룹 시간별(hh24) 축적 — 일 1회 D-1 스윕 (09:10 KST, sync_naver_ad_daily
+    07:30 이후. D-NAO-46②, docs/PLAN_naver-ad-keyword-hourly-accrual.md §4).
+
+    naver_ad_daily D-1의 imp>0 유닛을 유닛별 hh24 곡선으로 영구 축적(관찰 전용, 쓰기 API 0).
+    hh24 상세는 네이버가 최근 7일만 보존 — 캐치업으로 [D-6,D-2] 결손 유닛도 보수적으로 보완.
+    """
+    db = _get_own_db_session()
+    try:
+        from app.services.naver_ad.keyword_hourly_sweep import sweep_keyword_hourly
+
+        result = sweep_keyword_hourly(db)
+        log.info("[스케줄러] naver keyword_hourly sweep: %s", result)
+    except Exception as e:
+        log.exception("[스케줄러] sweep_naver_keyword_hourly_job 에러: %s", e)
+        raise
+    finally:
+        db.close()
+
+
 def sync_meta_ad_costs_job():
     """Meta 광고비 어제치 자동 적재 (07:00 KST)"""
     db = _get_own_db_session()
@@ -922,6 +942,7 @@ def _ensure_default_states(db):
         ("generate_expert_desk", "5 8 * * *"),  # 전문가(Ava) 검토 데스크(E1a, PLAN §8)
         ("run_naver_learning_loops", "10 8 * * *"),  # 학습루프 4종(성적표·예측편향·전환성숙·시간대분포, 트랙 P6)
         ("run_naver_retro_scoring", "30 8 * * *"),  # 상설 소급 채점(진단 보드 as-of 리플레이 + 페이싱 경보, D-NAO-45)
+        ("sweep_naver_keyword_hourly", "10 9 * * *"),  # 키워드/쇼핑그룹 시간별(hh24) 축적, D-1 스윕(D-NAO-46②)
         ("run_naver_flight_loop", "15 */2 * * *"),  # 당일 플라이트 루프 2시간 주기(X2, dry_run=True)
         ("sync_naver_settlement", "25 5 * * *"),
         ("sync_naver_case_settlement", "30 5 * * *"),
@@ -956,16 +977,18 @@ def _ensure_default_states(db):
 # jobstore라 재시작 시 과거 발화 기록 소실 → misfire 미인식, codex 2026-07-13 [P1]).
 # 그래서 SchedulerState.last_run_at(마지막 '성공' 시각)로 오늘 예정 발화를 놓쳤는지 명시적
 # 판정해 따라잡는다. 범위는 네이버 아침배치 한정(Jino 결정 2026-07-13) — 쿠팡 등 blast
-# radius 제외. ★순서 중요(codex [P1] R2): 이 4잡은 의존 스태거(forecast→proposals→expert
+# radius 제외. ★순서 중요(codex [P1] R2): 이 잡들은 의존 스태거(forecast→proposals→expert
 # →learning). expert_desk는 pending 제안 0이면 '성공 스킵'하므로 proposals보다 먼저 돌면
 # 오늘 전문가검토가 영구 스킵된다. 따라서 동시 발화 금지 — cron 순서로 순차 실행하고 상류가
-# 성공해야 하류를 잇는다.
+# 성공해야 하류를 잇는다. keyword_hourly sweep은 다른 잡에 의존하지 않지만(자체 완결) 09:10
+# 표준 cron이라 같은 catch-up 목록에 포함(D-NAO-46②) — 순서상 맨 뒤(가장 늦은 cron).
 _CATCHUP_ORDER: tuple[str, ...] = (
     "run_naver_forecast_engine",   # 07:50
     "generate_naver_proposals",    # 08:00
     "generate_expert_desk",        # 08:05 (proposals 성공 후라야 pending>0 → 의미 있음)
     "run_naver_learning_loops",    # 08:10
     "run_naver_retro_scoring",     # 08:30 (D-NAO-45, 비정형 아닌 표준 cron이라 catch-up 포함)
+    "sweep_naver_keyword_hourly",  # 09:10 (D-NAO-46②, 독립 잡이나 표준 cron catch-up 포함)
 )
 _CATCHUP_LOOKBACK = timedelta(hours=12)  # 오늘 예정 발화가 이보다 오래됐으면 스킵(다음 정상 발화에 위임)
 
@@ -1078,6 +1101,7 @@ def _catch_up_morning_batch():
         "generate_expert_desk": generate_expert_desk_job,
         "run_naver_learning_loops": run_naver_learning_loops_job,
         "run_naver_retro_scoring": run_naver_retro_scoring_job,
+        "sweep_naver_keyword_hourly": sweep_naver_keyword_hourly_job,
     }
     log.warning("[스케줄러] 아침배치 catch-up 대상(cron순 순차): %s", missed)
 
@@ -1140,6 +1164,8 @@ def start_scheduler():
                 job_func = run_naver_learning_loops_job
             elif state.job_name == "run_naver_retro_scoring":
                 job_func = run_naver_retro_scoring_job
+            elif state.job_name == "sweep_naver_keyword_hourly":
+                job_func = sweep_naver_keyword_hourly_job
             elif state.job_name == "generate_expert_desk":
                 job_func = generate_expert_desk_job
             elif state.job_name == "run_naver_flight_loop":

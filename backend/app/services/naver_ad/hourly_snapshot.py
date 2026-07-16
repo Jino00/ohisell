@@ -63,6 +63,7 @@ def snapshot_hourly(db: Session, *, campaigns: list[dict] | None = None,
             campaign_type=type_by_id.get(s["campaign_id"], ""),
             cost=s["cost"], clk=s["clk"], imp=s["imp"],
             daily_budget=budget_by_id.get(s["campaign_id"]),
+            avg_rank=s.get("avg_rank"),  # D-NAO-46②: fetch_campaign_stats avg_rank(없으면 None)
         ))
 
     # 7일 롤링 정리

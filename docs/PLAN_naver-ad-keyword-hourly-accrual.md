@@ -121,9 +121,9 @@ keyword_hourly_accrual (Harness, 신규 파일 keyword_hourly_sweep.py)
 
 - [x] H0: 마이그레이션(naver_keyword_hourly + avg_rank + qi_grade) + 모델
 - [x] H0: fetch_entity_hh24 + _STATS_FIELDS avgRnk + get_keywords qi (TDD)
-- [ ] H1: sweep_keyword_hourly(타깃 도출·교체 upsert·캐치업·롤링) (TDD)
-- [ ] H1: hourly_snapshot avg_rank 저장 + entity_sync qi_grade+변화로그 (TDD)
-- [ ] H1: 크론 등록(09:10)+catch-up 목록
+- [x] H1: sweep_keyword_hourly(타깃 도출·교체 upsert·캐치업·롤링) (TDD)
+- [x] H1: hourly_snapshot avg_rank 저장 + entity_sync qi_grade+변화로그 (TDD)
+- [x] H1: 크론 등록(09:10)+catch-up 목록
 - [ ] codex review PASS
 - [ ] 라이브 합격(§8)
 - [ ] PR + 트랙/progress 갱신

@@ -71,6 +71,7 @@ def collect_entities(
                     "campaign_id": cid, "campaign_type": ctype, "name": kw.get("keyword", ""),
                     "status": _status(kw.get("status", ""), kw.get("user_lock", False)),
                     "bid_amt": kw.get("bid_amt"),
+                    "qi_grade": kw.get("qi_grade"),  # D-NAO-46②: 품질지수 1~7(get_keywords 무상 편승)
                 })
 
     log.info("naver_entity collect: campaign=%d adgroup=%d keyword=%d",
@@ -146,6 +147,29 @@ def _log_external_status_change(db: Session, entity: NaverEntity, new_status: st
              entity.entity_type, entity.entity_id, entity.status, new_status)
 
 
+def _log_external_qi_change(db: Session, entity: NaverEntity, new_qi, now) -> None:
+    """D-NAO-46②: 품질지수(qi_grade) 변화를 관찰 기록(외부 변경 — 우리는 qi에 쓰기 없음).
+
+    기존 값과 새 값이 둘 다 non-None이고 다를 때만 기록한다(처음 관측되거나 API가 일시
+    부재로 None을 반환한 경우는 잡음이라 기록 대상 아님). dry_run=True(관찰만, 실쓰기 아님)."""
+    if entity.qi_grade is None or new_qi is None or entity.qi_grade == new_qi:
+        return
+    db.add(NaverChangeLog(
+        entity_type=entity.entity_type,
+        entity_id=entity.entity_id,
+        campaign_id=entity.campaign_id,
+        action="external_qi_change",
+        proposal_id=None,
+        dry_run=True,
+        changed_at=now,
+        before_value=str(entity.qi_grade),
+        after_value=str(new_qi),
+        rationale="entity_sync 감지: 품질지수(qi) 변화(관찰)",
+    ))
+    log.info("external_qi_change detected: %s %s %s→%s",
+             entity.entity_type, entity.entity_id, entity.qi_grade, new_qi)
+
+
 def sync_entities(db: Session, *, rows: list[dict] | None = None) -> dict:
     """naver_entity upsert(멱등, 일 1회 동기화) — keywordstool 보강 필드(monthly_volume 등) 보존.
 
@@ -169,17 +193,19 @@ def sync_entities(db: Session, *, rows: list[dict] | None = None) -> dict:
             db.add(NaverEntity(
                 entity_type=r["entity_type"], entity_id=r["entity_id"], parent_id=r["parent_id"],
                 campaign_id=r["campaign_id"], campaign_type=r["campaign_type"], name=r["name"],
-                status=r["status"], bid_amt=r.get("bid_amt"), synced_at=now,
+                status=r["status"], bid_amt=r.get("bid_amt"), qi_grade=r.get("qi_grade"), synced_at=now,
             ))
         else:
             if e.status != r["status"] and e.status != "deleted":
                 _log_external_status_change(db, e, r["status"], now)
+            _log_external_qi_change(db, e, r.get("qi_grade"), now)
             e.parent_id = r["parent_id"]
             e.campaign_id = r["campaign_id"]
             e.campaign_type = r["campaign_type"]
             e.name = r["name"]
             e.status = r["status"]
             e.bid_amt = r.get("bid_amt")
+            e.qi_grade = r.get("qi_grade")
             e.synced_at = now
 
     stale = 0
