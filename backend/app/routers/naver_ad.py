@@ -21,6 +21,9 @@
 # GET/PUT /api/naver/ad/settings/expert-delegation — E2 위임 스위치(X1a T5, D-NAO-25) 조회·
 #   설정. Jino만 유형 단위로 명시 위임(자동승인+자동실행, delegation_gate 경유) — 전체 치환
 #   저장 + naver_change_log 감사 기록(campaign-settings PUT 전례와 동일 패턴).
+# GET /api/naver/ad/retro-scorecard   — 상설 소급 채점 성적표(D-NAO-45). naver_retro_signal
+#   (보드별 d3/d7 방향 정밀도)·naver_retro_pacing_score(저속/과속 경보 채점) 단순 rollup
+#   read. 정직 경계(ref 31): 방향 정확도 계기판이지 인과 성과 검증 아님(그건 카나리 몫).
 from __future__ import annotations
 
 import json
@@ -43,6 +46,8 @@ from app.models import (
     NaverLearningState,
     NaverProductBep,
     NaverProposal,
+    NaverRetroPacingScore,
+    NaverRetroSignal,
 )
 from app.services.naver_ad import dashboard_overview
 from app.services.naver_ad import delegation_gate
@@ -650,3 +655,67 @@ def expert_delegation_put(body: ExpertDelegationIn, db: Session = Depends(get_db
 
     db.commit()
     return _delegation_response(db)
+
+
+_RETRO_VERDICTS = ("correct", "gray", "wrong", "no_spend")
+
+
+def _retro_board_rollup(rows: list[NaverRetroSignal], horizon: int) -> dict:
+    """단일 보드·단일 지평(d3/d7)의 rollup — PLAN §5: n, correct/gray/wrong/no_spend,
+    precision_spenders(=correct/(correct+gray+wrong), no_spend 제외 — 지출 지속 타깃 기준),
+    bleed_sum(down/pause & verdict=correct 행의 양수 bleed 합, ref 31 §1-c와 동일 산식)."""
+    verdict_attr, bleed_attr = f"verdict_d{horizon}", f"bleed_post{horizon}"
+    counts = dict.fromkeys(_RETRO_VERDICTS, 0)
+    bleed_sum = 0
+    for row in rows:
+        verdict = getattr(row, verdict_attr)
+        if verdict is None:  # 아직 채점 전(사후창 미도달) — rollup 대상 아님
+            continue
+        counts[verdict] = counts.get(verdict, 0) + 1
+        if row.direction in ("down", "pause") and verdict == "correct":
+            bleed_sum += max(0, getattr(row, bleed_attr) or 0)
+    spenders = counts["correct"] + counts["gray"] + counts["wrong"]
+    precision = round(counts["correct"] / spenders, 4) if spenders else None
+    return {
+        "n": spenders + counts["no_spend"],
+        "correct": counts["correct"], "gray": counts["gray"],
+        "wrong": counts["wrong"], "no_spend": counts["no_spend"],
+        "precision_spenders": precision, "bleed_sum": bleed_sum,
+    }
+
+
+@router.get("/retro-scorecard")
+def retro_scorecard(
+    days: int = Query(28, ge=1, le=180, description="조회 창(일, asof_date/alert_date 기준)"),
+    db: Session = Depends(get_db),
+):
+    """상설 소급 채점 성적표(D-NAO-45, PLAN_naver-ad-retro-scoring.md §5) — naver_retro_signal
+    (진단 보드 as-of 스냅샷의 d3/d7 방향 정밀도)·naver_retro_pacing_score(trigger_pacing
+    경보 채점) 단순 rollup read. 쓰기 없음.
+
+    **정직 경계(ref 31 — 원칙22)**: 이것은 방향 정확도 계기판이지 인과 성과 검증이 아니다
+    (인과 승격은 카나리 몫). unparsed pacing 경보는 alert_date가 없어(파싱 실패) 이 창
+    필터에서 자연히 빠진다 — 별도 unparsed 총계는 이 엔드포인트 스코프 밖(PLAN §2 OUT)."""
+    cutoff = kst_today() - timedelta(days=days)
+
+    signal_rows = db.query(NaverRetroSignal).filter(NaverRetroSignal.asof_date >= cutoff).all()
+    by_board: dict[str, list[NaverRetroSignal]] = {}
+    for row in signal_rows:
+        by_board.setdefault(row.board, []).append(row)
+    boards = {
+        board: {"d3": _retro_board_rollup(rows, 3), "d7": _retro_board_rollup(rows, 7)}
+        for board, rows in by_board.items()
+    }
+
+    pacing_rows = (
+        db.query(NaverRetroPacingScore)
+        .filter(NaverRetroPacingScore.alert_date.isnot(None), NaverRetroPacingScore.alert_date >= cutoff)
+        .all()
+    )
+    pacing: dict[str, dict[str, int]] = {}
+    for row in pacing_rows:
+        kind = row.kind or "unparsed"
+        pacing.setdefault(kind, {}).setdefault(row.verdict, 0)
+        pacing[kind][row.verdict] += 1
+
+    return {"window_days": days, "boards": boards, "pacing": pacing}

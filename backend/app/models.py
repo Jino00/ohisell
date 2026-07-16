@@ -6,7 +6,7 @@ from decimal import Decimal
 from typing import Optional
 
 from sqlalchemy import (
-    JSON, Boolean, DateTime, Date, ForeignKey, Index, Integer, Numeric,
+    JSON, Boolean, DateTime, Date, Float, ForeignKey, Index, Integer, Numeric,
     String, Text, UniqueConstraint, func, text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -1623,6 +1623,95 @@ class NaverProposal(Base):
     target_lock: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)  # X1b: pause/resume 제안의 목표 userLock(true=정지, false=재개)
     target_budget: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # P1(D-NAO-42-f): budget_up/budget_down의 목표 일예산(원, dailyBudget) — 실행자는 이 컬럼만 읽는다(rationale 텍스트 파싱 금지)
     budget_auto_eligible: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)  # P1(D-NAO-42-f): 라운드 봉투 분류(Jino "넣어" 2026-07-13) — True=자율(위임 시 자동)/False=회당 라운드 캡 초과분(승인대기)/None=예산제안 아님
+
+
+class NaverRetroSignal(Base):
+    """상설 소급 채점(retro scoring) — 진단 보드 as-of 스냅샷 1행
+    (D-NAO-45, docs/PLAN_naver-ad-retro-scoring.md §3).
+
+    매일 08:30 크론(retro_scoring_loop)이 diagnosis.build_diagnosis를 asof 시점으로 그대로
+    리플레이해 지목된 타깃마다 1행을 남기고(retro_snapshotter), D+3/D+7에 naver_ad_daily
+    사후 실적으로 방향을 채점한다(retro_scorer, verdict=correct/gray/wrong/no_spend).
+    cf_asof/bep_asof/target_asof는 asof 시점 값으로 고정(스냅샷 시점 렌즈) — 나중에 계정
+    보정계수·BEP가 바뀌어도 이 행의 판정 기준(채점 재현성)은 변하지 않는다.
+
+    board(6종)→direction 매핑(ref 31 §1-a 고정): bleeding_keywords/shopping_group_bep=down,
+    starving_winners/shopping_group_growth=up, pause_candidates/shopping_pause_candidates=pause.
+    resume류는 제외(정지 중 = 사후 관측 불가, 정직 경계).
+
+    **정직 경계(ref 31 — 원칙22)**: 이것은 "신호가 옳은 방향이었나"의 방향 정확도 계기판이지
+    인과 성과 검증이 아니다(인과 승격은 카나리 몫). entity 상태(입찰가·on/off)와 product
+    BEP/target은 이력이 없어 스냅샷 시점 현재값을 쓴다(알려진 한계, 실행 개입 거의 0인
+    관찰 기간이라 영향 미미).
+    """
+
+    __tablename__ = "naver_retro_signal"
+    __table_args__ = (
+        UniqueConstraint("asof_date", "board", "target_id", name="uq_naver_retro_signal"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)  # 반드시 kst_now() 명시(server_default=func.now()는 UTC)
+    asof_date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)
+    board: Mapped[str] = mapped_column(String(32), nullable=False)
+    direction: Mapped[str] = mapped_column(String(8), nullable=False)  # down/up/pause
+    grain: Mapped[str] = mapped_column(String(8), nullable=False)  # keyword/adgroup
+    target_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    campaign_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+
+    # 스냅샷 시점 고정 렌즈(채점 재현성)
+    cf_asof: Mapped[float] = mapped_column(Float, nullable=False)
+    bep_asof: Mapped[float] = mapped_column(Float, nullable=False)
+    target_asof: Mapped[float] = mapped_column(Float, nullable=False)
+    cost_asof: Mapped[int] = mapped_column(Integer, nullable=False)
+    roas_c_asof: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    # D+3 채점
+    verdict_d3: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)  # correct/gray/wrong/no_spend
+    scored_d3_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    cost_post3: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    conv_post3: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    roas_c_post3: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    bleed_post3: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+    # D+7 채점
+    verdict_d7: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    scored_d7_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    cost_post7: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    conv_post7: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    roas_c_post7: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    bleed_post7: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+
+class NaverRetroPacingScore(Base):
+    """trigger_pacing 경보(저속·과속) 소급 채점 1건
+    (D-NAO-45, docs/PLAN_naver-ad-retro-scoring.md §3).
+
+    proposal_id(naver_proposals.id, UNIQUE) — rationale 텍스트를 정규식으로 파싱(ref 31
+    스크립트 패턴 고정, retro_pacing_scorer)해 그날 캠페인 sentinel(BACKFILL_SENTINEL_ADGROUP)
+    최종 소진과 대조한다. 파싱 실패는 verdict='unparsed'로 즉시 기록(재시도 무한루프 방지) —
+    sentinel 최종치가 아직 없으면(당일 미확정) 행 자체를 만들지 않고 다음 날 재시도한다
+    (kind/alert_hour 등은 이 두 경우 모두 확정 불가할 수 있어 nullable).
+
+    후속(스코프 밖, PLAN §2 OUT): trigger_watch가 구조화 필드를 직접 쓰게 바뀌면 이 텍스트
+    파싱은 대체 대상.
+    """
+
+    __tablename__ = "naver_retro_pacing_score"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    proposal_id: Mapped[int] = mapped_column(Integer, unique=True, nullable=False)
+    alert_date: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True, index=True)
+    campaign_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    kind: Mapped[Optional[str]] = mapped_column(String(8), nullable=True)  # 저속/과속(unparsed는 None)
+    alert_hour: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    spent: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    budget: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    multiple: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # rationale 파싱값
+    final_cost: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    final_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    verdict: Mapped[str] = mapped_column(String(24), nullable=False)  # 버킷: ref 31 §2와 동일
+    scored_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
 
 class NaverKeywordCandidate(Base):

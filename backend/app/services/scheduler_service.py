@@ -429,6 +429,27 @@ def run_naver_forecast_engine_job():
         db.close()
 
 
+def run_naver_retro_scoring_job():
+    """상설 소급 채점 — retro_scoring_loop.run_daily_retro (08:30 KST, generate_naver_proposals
+    08:00·run_naver_learning_loops 08:10 이후, D-NAO-45).
+
+    ①진단 보드 as-of(어제) 스냅샷(retro_snapshotter) ②D+3/D+7 사후창 방향 채점(retro_scorer)
+    ③trigger_pacing 경보 채점(retro_pacing_scorer) — harness가 단계격리로 조합 실행하므로
+    이 잡은 결과를 로그만 남긴다(learning_loops/forecast_engine과 동일 원칙).
+    """
+    db = _get_own_db_session()
+    try:
+        from app.services.naver_ad.retro_scoring_loop import run_daily_retro
+
+        result = run_daily_retro(db)
+        log.info("[스케줄러] naver retro_scoring: %s", result["stage_status"])
+    except Exception as e:
+        log.exception("[스케줄러] run_naver_retro_scoring_job 에러: %s", e)
+        raise
+    finally:
+        db.close()
+
+
 def sync_meta_ad_costs_job():
     """Meta 광고비 어제치 자동 적재 (07:00 KST)"""
     db = _get_own_db_session()
@@ -900,6 +921,7 @@ def _ensure_default_states(db):
         ("generate_naver_proposals", "0 8 * * *"),  # 네이버 SA 제안 자동생성(진단→시뮬→제안→Slack, 트랙 P2-S3)
         ("generate_expert_desk", "5 8 * * *"),  # 전문가(Ava) 검토 데스크(E1a, PLAN §8)
         ("run_naver_learning_loops", "10 8 * * *"),  # 학습루프 4종(성적표·예측편향·전환성숙·시간대분포, 트랙 P6)
+        ("run_naver_retro_scoring", "30 8 * * *"),  # 상설 소급 채점(진단 보드 as-of 리플레이 + 페이싱 경보, D-NAO-45)
         ("run_naver_flight_loop", "15 */2 * * *"),  # 당일 플라이트 루프 2시간 주기(X2, dry_run=True)
         ("sync_naver_settlement", "25 5 * * *"),
         ("sync_naver_case_settlement", "30 5 * * *"),
@@ -943,6 +965,7 @@ _CATCHUP_ORDER: tuple[str, ...] = (
     "generate_naver_proposals",    # 08:00
     "generate_expert_desk",        # 08:05 (proposals 성공 후라야 pending>0 → 의미 있음)
     "run_naver_learning_loops",    # 08:10
+    "run_naver_retro_scoring",     # 08:30 (D-NAO-45, 비정형 아닌 표준 cron이라 catch-up 포함)
 )
 _CATCHUP_LOOKBACK = timedelta(hours=12)  # 오늘 예정 발화가 이보다 오래됐으면 스킵(다음 정상 발화에 위임)
 
@@ -1054,6 +1077,7 @@ def _catch_up_morning_batch():
         "generate_naver_proposals": _run_proposals_catchup_verified,
         "generate_expert_desk": generate_expert_desk_job,
         "run_naver_learning_loops": run_naver_learning_loops_job,
+        "run_naver_retro_scoring": run_naver_retro_scoring_job,
     }
     log.warning("[스케줄러] 아침배치 catch-up 대상(cron순 순차): %s", missed)
 
@@ -1114,6 +1138,8 @@ def start_scheduler():
                 job_func = generate_naver_proposals_job
             elif state.job_name == "run_naver_learning_loops":
                 job_func = run_naver_learning_loops_job
+            elif state.job_name == "run_naver_retro_scoring":
+                job_func = run_naver_retro_scoring_job
             elif state.job_name == "generate_expert_desk":
                 job_func = generate_expert_desk_job
             elif state.job_name == "run_naver_flight_loop":
