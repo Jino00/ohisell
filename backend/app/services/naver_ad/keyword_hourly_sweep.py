@@ -132,6 +132,11 @@ def sweep_keyword_hourly(db: Session, *, sweep_date: date | None = None, fetch=N
             failed += 1
             continue
         _replace_rows(db, sweep_date, t, hh)
+        # 라이브[P1] 증분 커밋: 끝 1회 커밋이면 3,500콜(~12분) 내내 SQLite 쓰기 락 보유 →
+        # 09:05 hourly snapshot 크론이 database is locked로 실패(라이브 실측). 유닛마다
+        # 커밋해 락 보유 창을 유닛당 ~ms로 축소(API fetch는 트랜잭션 밖). 멱등 replace라
+        # 부분 커밋 안전 — 중단 시 잔여는 다음날 캐치업이 자연 복구(크래시 내성도 향상).
+        db.commit()
         rows_written += len(hh)
 
     # 캐치업: [D-6, D-2] 범위에서 ad_daily imp>0 유닛인데 naver_keyword_hourly에 그
@@ -175,6 +180,7 @@ def sweep_keyword_hourly(db: Session, *, sweep_date: date | None = None, fetch=N
                         failed += 1
                         continue
                     _replace_rows(db, d, t, hh)
+                    db.commit()  # 라이브[P1] 증분 커밋 — 본스윕과 동일(락 보유 창 최소화)
                     rows_written += len(hh)
             d += timedelta(days=1)
 

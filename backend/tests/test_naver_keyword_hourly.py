@@ -417,6 +417,70 @@ def test_sweep_respects_call_cap(db, monkeypatch):
     assert len(calls) == 1
 
 
+def test_sweep_commits_incrementally_per_unit(db, monkeypatch):
+    """라이브[P1]: commit을 맨 끝 1회만 하면 3,500콜(~12분) 내내 SQLite 쓰기 락을 보유해
+    09:05 hourly snapshot 크론이 database is locked로 실패(라이브 실측). 유닛 단위 증분
+    커밋이어야 한다 — commit 호출 횟수 >= 유닛 수."""
+    _ad_row(db, campaign_id="cmp-w", campaign_type="WEB_SITE", adgroup_id="grp-1",
+            keyword_id="nkw-1", imp=10)
+    _ad_row(db, campaign_id="cmp-w", campaign_type="WEB_SITE", adgroup_id="grp-1",
+            keyword_id="nkw-2", imp=5)
+    db.commit()
+
+    commit_count = 0
+    real_commit = db.commit
+
+    def counting_commit():
+        nonlocal commit_count
+        commit_count += 1
+        real_commit()
+
+    monkeypatch.setattr(db, "commit", counting_commit)
+
+    fetch = _fake_fetch_factory(
+        {"nkw-1": [{"hour": 1, "imp": 10, "clk": 1, "cost": 100, "avg_rank": None}],
+         "nkw-2": [{"hour": 2, "imp": 5, "clk": 0, "cost": 0, "avg_rank": None}]}, [],
+    )
+    result = keyword_hourly_sweep.sweep_keyword_hourly(db, sweep_date=D, fetch=fetch)
+
+    assert result["rows"] == 2
+    assert commit_count >= 2, "유닛마다 증분 커밋해야 한다(락 보유 창 최소화) — 끝 1회 커밋 금지"
+
+
+def test_sweep_first_unit_survives_hard_crash_on_second(db, monkeypatch):
+    """라이브[P1] 크래시 내성: 2번째 유닛 처리 중 하드 예외(개별 skip 로직 밖)가 나도
+    1번째 유닛 행은 이미 커밋돼 있어야 한다(멱등 replace라 부분 커밋 안전 — 잔여는
+    다음날 캐치업이 자연 복구)."""
+    _ad_row(db, campaign_id="cmp-w", campaign_type="WEB_SITE", adgroup_id="grp-1",
+            keyword_id="nkw-1", imp=10)
+    _ad_row(db, campaign_id="cmp-w", campaign_type="WEB_SITE", adgroup_id="grp-1",
+            keyword_id="nkw-2", imp=5)
+    db.commit()
+
+    real_replace = keyword_hourly_sweep._replace_rows
+    replaced: list = []
+
+    def crashing_replace(db_, ad_date, target, hh_rows):
+        if len(replaced) >= 1:
+            raise RuntimeError("hard crash mid-sweep")
+        replaced.append(target["entity_id"])
+        real_replace(db_, ad_date, target, hh_rows)
+
+    monkeypatch.setattr(keyword_hourly_sweep, "_replace_rows", crashing_replace)
+
+    fetch = _fake_fetch_factory(
+        {"nkw-1": [{"hour": 1, "imp": 10, "clk": 1, "cost": 100, "avg_rank": None}],
+         "nkw-2": [{"hour": 2, "imp": 5, "clk": 0, "cost": 0, "avg_rank": None}]}, [],
+    )
+    with pytest.raises(RuntimeError):
+        keyword_hourly_sweep.sweep_keyword_hourly(db, sweep_date=D, fetch=fetch)
+
+    db.rollback()  # 크래시 후 세션 정리(pending 잔여 제거) — 커밋된 것만 남아야 함
+    rows = db.query(NaverKeywordHourly).filter(NaverKeywordHourly.ad_date == D).all()
+    assert len(rows) == 1, "크래시 전에 처리 완료된 1번째 유닛은 이미 커밋돼 있어야 한다"
+    assert rows[0].entity_id == replaced[0]
+
+
 def test_sweep_rolls_off_rows_older_than_365_days(db, monkeypatch):
     monkeypatch.setattr(keyword_hourly_sweep, "kst_today", lambda: D)
     old_date = D - timedelta(days=400)
