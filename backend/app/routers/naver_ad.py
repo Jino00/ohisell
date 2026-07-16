@@ -719,3 +719,75 @@ def retro_scorecard(
         pacing[kind][row.verdict] += 1
 
     return {"window_days": days, "boards": boards, "pacing": pacing}
+
+
+# ══════════════════════════════════════════════════════════════════
+# D-NAO-47 — 변경 이력 조회(change_log) · 커맨드 센터 1층 "우리 조작 N회"의 원천
+# ══════════════════════════════════════════════════════════════════
+_MAX_CHANGE_LOG_LIMIT = 500
+
+
+def _loads_or_none(raw: str | None) -> dict | None:
+    """change_log의 before/after_value 파싱 — 쓰레기가 들어있어도 500 대신 None.
+    (이 테이블은 여러 writer가 각자 dumps 하므로 스키마 보장이 없다.)"""
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+@router.get("/change-log")
+def get_change_log(
+    campaign_id: str | None = Query(None, description="캠페인 필터"),
+    action: str | None = Query(None, description="update_bid/external_bid_change/set_user_lock 등"),
+    days: int = Query(30, ge=1, le=365, description="changed_at 조회 창(KST 기준)"),
+    include_dry_run: bool = Query(False, description="dry-run 기록 포함 여부(기본 제외)"),
+    limit: int = Query(100, ge=1, le=_MAX_CHANGE_LOG_LIMIT),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+) -> dict:
+    """변경 이력 조회(D-NAO-47, 읽기 전용).
+
+    ★`include_dry_run` 기본 False가 의도적이다: 1층 "우리 조작 N회"는 **실제 집행만** 세야
+    한다. dry-run을 섞으면 아무것도 실행하지 않았는데 일한 것처럼 보인다(D-47-h 정직성 —
+    0이면 0이라고 말하는 게 이 화면의 일).
+
+    ⚠️ 이 API는 change_log를 **읽기만** 한다. 이력을 *채우는* 것은 entity_sync의 diff 밸브
+    (D-NAO-47 T2)와 naver_execution_harness다.
+    """
+    since = kst_now() - timedelta(days=days)
+    q = db.query(NaverChangeLog).filter(NaverChangeLog.changed_at >= since)
+    if campaign_id:
+        q = q.filter(NaverChangeLog.campaign_id == campaign_id)
+    if action:
+        q = q.filter(NaverChangeLog.action == action)
+    if not include_dry_run:
+        q = q.filter(NaverChangeLog.dry_run.is_(False))
+
+    total = q.count()
+    rows = q.order_by(NaverChangeLog.changed_at.desc()).offset(offset).limit(limit).all()
+
+    return {
+        "total": total,
+        "items": [
+            {
+                "id": r.id,
+                "changed_at": r.changed_at.isoformat() if r.changed_at else None,
+                "entity_type": r.entity_type,
+                "entity_id": r.entity_id,
+                "campaign_id": r.campaign_id,
+                "action": r.action,
+                "before": _loads_or_none(r.before_value),
+                "after": _loads_or_none(r.after_value),
+                "rationale": r.rationale,
+                "outcome": r.outcome,
+                "dry_run": r.dry_run,
+                "proposal_id": r.proposal_id,
+                "executed_at": r.executed_at.isoformat() if r.executed_at else None,
+            }
+            for r in rows
+        ],
+    }
