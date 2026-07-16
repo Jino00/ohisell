@@ -94,7 +94,9 @@ const PROPOSAL_STATUS_TABS = [
 //   **유령 라벨**을 갖고 있었다(스펙 §1-3).
 // 백엔드에 유형을 추가하면 여기도 추가한다 — 백엔드
 // test_all_proposal_types_constant_covers_every_emitted_type이 상수 쪽을 지킨다.
-const PROPOSAL_TYPE_LABEL: Record<string, string> = {
+// export: 커맨드 센터 2층(NaverAdCommandCenter의 PendingPane)도 같은 라벨을 쓴다 —
+// 단일 진실을 이 파일 하나로 유지해 두 화면 라벨이 조용히 갈라지는 걸 막는다.
+export const PROPOSAL_TYPE_LABEL: Record<string, string> = {
   // 실행형
   bid_up: "입찰 인상",
   bid_down: "입찰 인하",

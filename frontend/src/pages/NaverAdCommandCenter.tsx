@@ -14,11 +14,30 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { Card, Stat, EmptyState, Loading, CoverageBar, Table, Th, Td, Badge, LayerNav } from "../components/ui";
-import { num, won, pctFromFraction } from "../lib/format";
+import { num, won, pctFromFraction, NO_DATA } from "../lib/format";
 import {
   getNaverDashboardOverview, fetchNaverChangeLog, fetchNaverCampaignSettings,
+  fetchNaverRetroScorecard, fetchNaverAdProposals,
   type NaverDashboardOverview, type NaverAdCampaignSettings,
+  type NaverRetroScorecard, type NaverChangeLogRow, type NaverAdProposal,
 } from "../lib/api";
+import { PROPOSAL_TYPE_LABEL } from "./NaverAdOptimizationConsole";
+
+// D-NAO-47 2층 ③ — 보드 6종(진단 보드와 동일 키) 한글 라벨. NaverRetroSignal.board 실측
+// (models.py:1638 docstring) 기준.
+const BOARD_LABEL: Record<string, string> = {
+  bleeding_keywords: "출혈 키워드",
+  starving_winners: "굶는 승자",
+  shopping_group_bep: "쇼핑그룹 BEP",
+  shopping_group_growth: "쇼핑그룹 성장",
+  pause_candidates: "정지 후보",
+  shopping_pause_candidates: "쇼핑 정지 후보",
+};
+
+// D-NAO-47 2층 ③ — pacing kind 한글은 백엔드가 이미 한글로 준다("저속"/"과속",
+// retro_pacing_scorer._bucket). "unparsed"는 kind가 None인 행을 라우터가 묶은 버킷명
+// (naver_ad.py:737 `kind = row.kind or "unparsed"`)이라 프론트에서 한글화한다.
+const PACING_KIND_LABEL: Record<string, string> = { unparsed: "파싱 실패" };
 
 export default function NaverAdCommandCenter() {
   const [loading, setLoading] = useState(true);
@@ -105,6 +124,21 @@ export default function NaverAdCommandCenter() {
       >
         <OursCampaignList changeCount={changeCount} />
       </Card>
+
+      {/* ③ 성적표 두 겹 — 중복 아니라 상보 */}
+      <div className="grid grid-cols-2 gap-4">
+        <Card title="우리 조언이 맞았나 (방향 정밀도)">
+          <RetroScorecardPane />
+        </Card>
+        <Card title="우리가 한 일의 결과 (인과)">
+          <ChangeLogPane />
+        </Card>
+      </div>
+
+      {/* ④ 나를 기다리는 것 */}
+      <Card title="나를 기다리는 것">
+        <PendingPane />
+      </Card>
     </div>
   );
 }
@@ -158,5 +192,178 @@ function OursCampaignList({ changeCount }: { changeCount: number | null }) {
         </tr>
       ))}
     </Table>
+  );
+}
+
+// D-NAO-45(상설 소급 채점) 라이브 — 실행이 0이어도 이건 채워진다. "우리 조작 0회"만
+// 있으면 초라하지만, 그 옆에 방향 정밀도가 붙으면 신뢰의 근거가 된다.
+// 정직 경계(D-NAO-45 docstring): "방향 정확도 계기판이지 인과 성과 검증이 아니다 —
+// 인과 승격은 카나리 몫". 그 카나리가 바로 이 화면의 1층이다.
+function RetroScorecardPane() {
+  const [data, setData] = useState<NaverRetroScorecard | null>(null);
+  useEffect(() => {
+    let alive = true;
+    fetchNaverRetroScorecard()
+      .then((r) => { if (alive) setData(r); })
+      .catch(() => { if (alive) setData({ window_days: 0, boards: {}, pacing: {} }); });
+    return () => { alive = false; };
+  }, []);
+  if (data === null) return <Loading rows={3} />;
+  return <RetroRollup data={data} />;
+}
+
+function RetroRollup({ data }: { data: NaverRetroScorecard }) {
+  const boardEntries = Object.entries(data.boards);
+  const pacingEntries = Object.entries(data.pacing);
+
+  if (boardEntries.length === 0 && pacingEntries.length === 0) {
+    return (
+      <EmptyState
+        reason="최근 창에 채점된 소급 신호가 없습니다."
+        hint={`조회 창 ${data.window_days}일 — 진단 보드 스냅샷이 D+3/D+7 사후창에 아직 도달하지 않았을 수 있습니다.`}
+      />
+    );
+  }
+
+  return (
+    <div className="p-4 space-y-4">
+      {/* 보드별 방향 정밀도(D+3/D+7) — 지출 지속 타깃 기준(no_spend 제외), 정직 경계는
+          위 함수 docstring 참조. */}
+      {boardEntries.length > 0 && (
+        <div>
+          <p className="text-xs text-gray-500 mb-2">보드별 방향 정밀도 (지출 대상 기준, no_spend 제외)</p>
+          <Table head={<><Th>보드</Th><Th right>D+3 정밀도</Th><Th right>D+7 정밀도</Th></>}>
+            {boardEntries.map(([board, h]) => (
+              <tr key={board}>
+                <Td>{BOARD_LABEL[board] ?? board}</Td>
+                <Td right>
+                  {h.d3.precision_spenders == null ? NO_DATA : pctFromFraction(h.d3.precision_spenders, 1)}
+                  <span className="text-gray-400"> ({num(h.d3.correct)}/{num(h.d3.correct + h.d3.gray + h.d3.wrong)})</span>
+                </Td>
+                <Td right>
+                  {h.d7.precision_spenders == null ? NO_DATA : pctFromFraction(h.d7.precision_spenders, 1)}
+                  <span className="text-gray-400"> ({num(h.d7.correct)}/{num(h.d7.correct + h.d7.gray + h.d7.wrong)})</span>
+                </Td>
+              </tr>
+            ))}
+          </Table>
+        </div>
+      )}
+
+      {/* ★저속 경보 롤업 — 접지 말고 집계(스펙 §1-3 정정): 초판이 "노이즈"라 규정한 게
+          틀렸다. 저속 경보는 만성 저소진의 실재 신호였다(실측: correct 98.7%, D-NAO-45 HANDOFF).
+          verdict 버킷은 retro_pacing_scorer._bucket 고정: correct/partial/false_alarm. */}
+      {pacingEntries.length > 0 && (
+        <div>
+          <p className="text-xs text-gray-500 mb-2">페이싱 경보 채점 (그날 최종 소진과 대조)</p>
+          <div className="space-y-1">
+            {pacingEntries.map(([kind, verdicts]) => {
+              const correct = verdicts.correct ?? 0;
+              const partial = verdicts.partial ?? 0;
+              const falseAlarm = verdicts.false_alarm ?? 0;
+              const unparsed = verdicts.unparsed ?? 0;
+              const scored = correct + partial + falseAlarm;
+              const precision = scored > 0 ? correct / scored : null;
+              return (
+                <div key={kind} className="flex items-center justify-between text-sm border-b border-gray-100 py-1.5 last:border-0">
+                  <span className="text-gray-700">{PACING_KIND_LABEL[kind] ?? kind}</span>
+                  <span className="text-xs text-gray-500 tabular-nums">
+                    {scored > 0 ? (
+                      <>correct {num(correct)} · partial {num(partial)} · false_alarm {num(falseAlarm)} · 정밀도 {precision != null ? pctFromFraction(precision, 1) : NO_DATA}</>
+                    ) : unparsed > 0 ? (
+                      <>{num(unparsed)}건</>
+                    ) : NO_DATA}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+          {/* ★"평균 최종 소진율"은 계획서가 요구했으나 /retro-scorecard 실제 응답은 verdict별
+              건수 롤업만 준다(naver_ad.py:707 retro_scorecard, avg 필드 없음) — 확인 안 된 필드를
+              추측으로 만들지 않는다. correct 건수·정밀도는 위에서 집계해 노출한다(D-47-h). */}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ChangeLogPane() {
+  const [data, setData] = useState<{ total: number; rows: NaverChangeLogRow[] } | null>(null);
+  useEffect(() => {
+    let alive = true;
+    fetchNaverChangeLog({ days: 30, limit: 10 })
+      .then((r) => { if (alive) setData(r); })
+      .catch(() => { if (alive) setData({ total: 0, rows: [] }); });
+    return () => { alive = false; };
+  }, []);
+  if (data === null) return <Loading rows={3} />;
+  if (data.rows.length === 0) {
+    return (
+      <EmptyState
+        reason="최근 30일 우리가 집행한 변경이 없습니다."
+        hint="제안은 생성되지만 사람 승인 게이트를 통과한 실행이 아직 없습니다. 승인하면 여기에 '무엇을 왜 바꿨는지'가 쌓입니다."
+      />
+    );
+  }
+  return (
+    <Table head={<><Th>시각</Th><Th>대상</Th><Th>변경</Th><Th>근거</Th></>}>
+      {data.rows.map((r) => (
+        <tr key={r.id}>
+          <Td><span className="text-xs text-gray-500">{r.changed_at?.slice(5, 16) ?? NO_DATA}</span></Td>
+          <Td><span className="text-xs">{r.entity_type} {r.entity_id}</span></Td>
+          {/* ★"무엇을 왜 바꿨는지" — MOP에 0개인 컬럼(ref24). 우리가 이길 자리. */}
+          <Td>
+            <span className="text-xs tabular-nums">
+              {String(r.before?.bidAmt ?? r.before?.userLock ?? NO_DATA)} → {String(r.after?.bidAmt ?? r.after?.userLock ?? NO_DATA)}
+            </span>
+          </Td>
+          <Td><span className="text-xs text-gray-600">{r.rationale ?? NO_DATA}</span></Td>
+        </tr>
+      ))}
+    </Table>
+  );
+}
+
+function PendingPane() {
+  const [rows, setRows] = useState<NaverAdProposal[] | null>(null);
+  useEffect(() => {
+    let alive = true;
+    fetchNaverAdProposals({ status: "pending", limit: 100 })
+      .then((r) => { if (alive) setRows(r.rows); })
+      .catch(() => { if (alive) setRows([]); });
+    return () => { alive = false; };
+  }, []);
+  if (rows === null) return <Loading rows={3} />;
+
+  // ★백엔드가 준 informational 플래그로 가른다 — 프론트에서 유형 문자열을 하드코딩해
+  //   재분류하면 백엔드에 유형이 추가될 때 조용히 드리프트한다.
+  const actionable = rows.filter((p) => !p.informational);
+  const informational = rows.filter((p) => p.informational);
+
+  return (
+    <div>
+      {actionable.length === 0 ? (
+        <EmptyState reason="지금 결정할 제안이 없습니다." hint="정보성 경보는 아래에 집계됩니다." />
+      ) : (
+        <Table head={<><Th>유형</Th><Th>대상</Th><Th right>목표</Th><Th>근거</Th></>}>
+          {actionable.map((p) => (
+            <tr key={p.id}>
+              <Td>{PROPOSAL_TYPE_LABEL[p.proposal_type] ?? p.proposal_type}</Td>
+              <Td><span className="text-xs">{p.target_id}</span></Td>
+              <Td right>{p.target_bid != null ? won(p.target_bid) : p.target_budget != null ? won(p.target_budget) : NO_DATA}</Td>
+              <Td><span className="text-xs text-gray-600">{p.rationale}</span></Td>
+            </tr>
+          ))}
+        </Table>
+      )}
+      {/* ★정보성은 접지 말고 집계 — 저속 경보 98.7%가 진짜였다(스펙 §1-3 정정).
+          개별 건을 나열하진 않되, 숨기지도 않는다. */}
+      {informational.length > 0 && (
+        <p className="px-4 py-2 text-xs text-gray-500 border-t border-gray-100">
+          정보성 경보 {num(informational.length)}건 집계됨(개별 나열 안 함) —{" "}
+          <Link to="/naver-ad/console" className="text-blue-600 hover:underline">콘솔에서 보기</Link>
+        </p>
+      )}
+    </div>
   );
 }
