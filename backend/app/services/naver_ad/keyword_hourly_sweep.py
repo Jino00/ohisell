@@ -145,6 +145,12 @@ def sweep_keyword_hourly(db: Session, *, sweep_date: date | None = None, fetch=N
             if calls >= _CALL_CAP:
                 cap_hit = True
                 break
+            if d == sweep_date:
+                # codex 3R[P2]: sweep_date가 캐치업 창 안이면(수동 보수 등) 본스윕이 방금
+                # 처리한 날짜 — pending insert(autoflush=False, 커밋 전)를 _existing_entity_ids가
+                # 못 봐 같은 유닛을 재fetch+재add하면 unique 제약 충돌. 캐치업에서 제외.
+                d += timedelta(days=1)
+                continue
             day_targets = build_sweep_targets(db, d)
             if day_targets:
                 existing = _existing_entity_ids(db, d)

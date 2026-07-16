@@ -372,6 +372,35 @@ def test_sweep_catchup_only_resweeps_missing_units(db, monkeypatch):
     assert len(rows) == 1
 
 
+def test_sweep_date_inside_catchup_window_not_double_fetched(db, monkeypatch):
+    """codex 3R[P2]: sweep_date를 캐치업 창([D-6,D-2]) 안 날짜로 명시하면(수동 보수 등)
+    본스윕의 pending insert(autoflush=False, 커밋 전)를 캐치업의 _existing_entity_ids가
+    못 봐 같은 유닛을 재fetch+재add → commit에서 (ad_date,entity_id,hour) unique 충돌.
+    캐치업은 sweep_date와 같은 날짜를 제외해야 한다 — 이중 fetch 없이 commit 완주."""
+    today = D
+    monkeypatch.setattr(keyword_hourly_sweep, "kst_today", lambda: today)
+
+    manual_date = today - timedelta(days=4)  # 캐치업 창 안
+    _ad_row(db, campaign_id="cmp-w", campaign_type="WEB_SITE", adgroup_id="grp-1",
+            keyword_id="nkw-1", imp=10, ad_date=manual_date)
+    db.commit()
+
+    calls: list = []
+    fetch = _fake_fetch_factory(
+        {"nkw-1": [{"hour": 7, "imp": 10, "clk": 1, "cost": 100, "avg_rank": 2.0}]}, calls,
+    )
+
+    result = keyword_hourly_sweep.sweep_keyword_hourly(db, sweep_date=manual_date, fetch=fetch)
+
+    same_unit_calls = [c for c in calls if c == ("nkw-1", manual_date)]
+    assert len(same_unit_calls) == 1, "본스윕이 처리한 (유닛, 날짜)를 캐치업이 재fetch하면 안 된다"
+    assert result["catchup_calls"] == 0
+    rows = db.query(NaverKeywordHourly).filter(
+        NaverKeywordHourly.ad_date == manual_date, NaverKeywordHourly.entity_id == "nkw-1"
+    ).all()
+    assert len(rows) == 1  # unique 충돌 없이 commit 완주 + 행 1개
+
+
 def test_sweep_respects_call_cap(db, monkeypatch):
     monkeypatch.setattr(keyword_hourly_sweep, "_CALL_CAP", 1)
     _ad_row(db, campaign_id="cmp-w", campaign_type="WEB_SITE", adgroup_id="grp-1",
