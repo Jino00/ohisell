@@ -102,13 +102,29 @@ const PROPOSAL_STATUS_TABS = [
   { key: "executing", label: "실행중" },
 ];
 
+// D-NAO-47: 제안 유형 14종 전량. 백엔드 단일 진실 = proposal_writer.ALL_PROPOSAL_TYPES.
+// ★기존엔 6종만 정의해 9종이 **영문 원문으로 렌더**됐고(라이브 확인: trigger_pacing·
+//   account_brief가 영문 pill), 반대로 백엔드가 만들지 않는 'budget'·'new_setup'
+//   **유령 라벨**을 갖고 있었다(스펙 §1-3).
+// 백엔드에 유형을 추가하면 여기도 추가한다 — 백엔드
+// test_all_proposal_types_constant_covers_every_emitted_type이 상수 쪽을 지킨다.
 const PROPOSAL_TYPE_LABEL: Record<string, string> = {
+  // 실행형
   bid_up: "입찰 인상",
   bid_down: "입찰 인하",
-  negative_keyword: "제외 키워드",
-  budget: "예산 조정",
   growth_bid_up: "성장 입찰 인상",
-  new_setup: "신규 세팅",
+  negative_keyword: "제외 키워드",
+  pause: "정지",
+  resume: "재개",
+  budget_up: "예산 증액",
+  budget_down: "예산 감액",
+  budget_pre_exhaustion: "예산 소진 임박",
+  // 정보성(informational=true)
+  anomaly: "이상 감지",
+  anomaly_freshness: "데이터 신선도 이상",
+  account_brief: "계정 브리핑",
+  trigger_pacing: "페이싱 경보",
+  trigger_cpc_spike: "CPC 급등 경보",
 };
 
 // E1a T8 — 제안 카드 평결 배지(Ava 검토, 콘솔 배지용 요약은 백엔드 _serialize_expert_verdict_summary 참조)
@@ -679,6 +695,14 @@ export default function NaverAdOptimizationConsole() {
                     <span className="px-2 py-0.5 text-xs rounded bg-blue-50 text-blue-700 font-medium">
                       {PROPOSAL_TYPE_LABEL[p.proposal_type] ?? p.proposal_type}
                     </span>
+                    {/* D-NAO-47: "입찰 인상" 카드가 *얼마로* 올리는지 화면에 없던 결함(스펙 §1-6).
+                        현재 pending 실행대상 5건이 전부 bid_up이라 바로 체감된다. */}
+                    {p.target_bid != null && (
+                      <span className="text-xs text-gray-600 tabular-nums">→ {won(p.target_bid)}</span>
+                    )}
+                    {p.target_budget != null && (
+                      <span className="text-xs text-gray-600 tabular-nums">→ 일예산 {won(p.target_budget)}</span>
+                    )}
                     <span className="text-xs text-gray-400">{p.campaign_id}</span>
                     <span className="text-xs text-gray-400">{p.target_type}:{p.target_id}</span>
                     <span className="text-xs text-gray-300">{p.created_at?.slice(0, 16).replace("T", " ")}</span>
