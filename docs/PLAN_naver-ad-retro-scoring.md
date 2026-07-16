@@ -119,5 +119,12 @@
   불일치 ②단계 예외 핸들러 6곳 db.rollback() — 실패 트랜잭션 세션 오염으로 다음 단계
   PendingRollbackError 연쇄 실패(격리 무력화), mutation check로 테스트 유효성 증명.
   R2: "no remaining blocking issues" PASS. 커밋 5845995. 신규 46 test + naver 스위트 902 green.)
-- [ ] 배포 + 백필 + 라이브 확인 (Jino) — §7-3 절차: 마이그레이션 f6g7h8i9j0k1 + 파일 copy +
-  pm2 재시작 → backfill(07-08~어제) 1회 → 다음 날 08:30 크론 자연 발화 확인
+- [x] 배포 + 백필 (2026-07-16 밤, Jino "배포 대기 3건 지금 배포하자") — DB백업
+  `ohisell_bak/naver-retro-pacing_20260716_predeploy.db`(167MB) → 11파일 scp·sha256 11/11 일치
+  → alembic e5f6g7h8i9j0→f6g7h8i9j0k1(테이블 2 생성 확인) → pm2 재시작 online·크래시 0
+  → 크론 `run_naver_retro_scoring`(30 8 * * *) 등록 확인 → **backfill(07-08~07-15) 완료**:
+  신호 5,377건(일 514~808) 스냅샷·D+3 3,068건·D+7 514건·페이싱 788건(unparsed 0, skipped 102=
+  최종치 미도래 재시도 대상) → GET /retro-scorecard 실데이터 rollup 정상(ref 31 수치와 정합:
+  bleeding d3 82.2%·starving 17.9%·sgb 68.2%).
+- [ ] 라이브 확인 잔여: 07-17 08:30 크론 자연 발화로 as-of 07-16 신규 스냅샷 1일 추가 확인
+  (원칙22 — 이것까지 봐야 "상설" 완성).

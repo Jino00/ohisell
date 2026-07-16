@@ -3,6 +3,11 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
+- 날짜: 2026-07-16 심야 (★★★**3건 합동 prod 배포 완료**: D-NAO-44 pacing 보정 + D-NAO-45 소급 채점(+백필) + D-NAO-46① 보존 365일. Jino "지금 배포하자")
+  - **배포 실측(원칙22)**: DB백업 167MB → 11파일 sha 11/11 → 마이그 f6g7h8i9j0k1(테이블 2) → pm2 online 크래시0 → 크론 retro_scoring 08:30 등록 → **백필 완료**(신호 5,377건·D+3 3,068·D+7 514·페이싱 788, /retro-scorecard 실데이터 rollup이 ref31과 정합: bleeding 82.2%·starving 17.9%·sgb 68.2%) → 완결도 곡선 prod 라이브 산출(v2 실측 정확 일치·23시 factor 1.095).
+  - **★발견(배포 무관 기존 동작)**: 04 캠페인 예측모델이 07-12 scorer 강등(demoted_until 07-16) → 07-13~16 flight 루프가 "forecast 없음" 정당 스킵(로그 공백 원인). 07-17 07:50 게이트 재평가로 자동 복귀 예정(활동일 14/14).
+  - **07-17 아침 확인 2건(원칙22 잔여)**: ①08:15 flight 크론 change_log에 projection 필드 실출현(04 forecast 복귀 후) ②08:30 retro 크론 자연 발화(as-of 07-16 신규 스냅샷). 기존 09:30 곡선검증+폴러정리 루틴도 예약돼 있음.
+  - hourly_snapshot 보존 연장은 앞으로 min(ad_date)가 고정된 채 일수만 늘어나는 걸로 자연 확인.
 - 날짜: 2026-07-16 밤 (★★**D-NAO-45 상설 소급 채점 코드 완성+codex PASS / ref31 소급 채점 실측**. 같은 워크트리·브랜치, D-NAO-44 위)
   - **ref 31 소급 채점(일회성, Jino "1번부터 바로 돌려봐")**: 기존 912제안 중 실행형은 07-16 bid_up 5건뿐(채점 불가) → 진단 보드를 as-of 07-08~12로 리플레이+사후 채점. **결과: down/pause 정밀도 61~88%(3일 지속 시 상단)·유니크 적자 148타깃 50.3만원 실출혈 / up 29~60%(소표본 평균회귀, 풀링 필요 실증) / 저속경보 98.7% 진짜(만성 저소진=성장레버는 입찰/순위)·과속경보 전오탐**. 문서 docs/references/31_*.md + 재현 스크립트 커밋.
   - **D-NAO-45 상설화(Jino "1번을 진행하자")**: 계획서 docs/PLAN_naver-ad-retro-scoring.md(Fable) → Sonnet TDD 구현(테이블2·SA3·Harness·크론 08:30·백필·API) → Fable 독립검증(46 test·스위트 902 pass) → **codex 2R GATE PASS**([P2]×2 수정: growth 렌즈 override 정합·단계 rollback 격리). 커밋 ab0a7f6~5845995.

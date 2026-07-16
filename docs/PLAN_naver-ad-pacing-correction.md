@@ -62,4 +62,9 @@
       current_hour로 조회 — 최신 스냅샷이 이전 시각분이면 저투영 → snapshot_hour 기준 캠페인별
       조회로 이동. R3: "remaining correctness issues 없음" PASS. 전 지적 동의·수정, 기각 0.
       naver 스위트 833 pass.)
-- [ ] 배포 + 라이브 확인 (Jino 게이트 — §5)
+- [x] 배포 (2026-07-16 밤, D-NAO-45·46①과 합동 — sha 일치·pm2 online). **라이브 부분 확인**:
+  build_curve가 prod 실데이터로 24시각 곡선 산출(12시 0.280·18시 0.648·23시 0.913 = v2 실측과
+  정확 일치, 표본 n=19), 23시 factor ×1.095. **잔여**: change_log projection 필드 실출현은
+  07-17 08:15 flight 크론에서 확인 — 04 예측모델이 07-12 scorer 강등(demoted_until 07-16)으로
+  현재 forecast 부재→flight 정당 스킵 중, 07-17 07:50 게이트 재평가(활동일 14/14)로 자동 복귀
+  예정. 이 강등이 07-13~16 flight_pacing 로그 공백의 원인(배포 무관 기존 동작, 별도 이슈 아님).
