@@ -1679,6 +1679,14 @@ export interface NaverAdProposal {
   status: string;
   slack_ts: string | null;
   executed_change_log_id: number | null;
+  // D-NAO-47: 실행 목표값 — "입찰 인상" 카드가 *얼마로* 올리는지 화면에 없던 결함(스펙 §1-6).
+  target_bid: number | null;
+  target_lock: boolean | null;
+  target_budget: number | null;
+  budget_auto_eligible: boolean | null;
+  /** 백엔드가 주는 정보성/실행형 구분. ★프론트에서 유형 문자열로 재분류하지 말 것 —
+   *  백엔드에 유형이 추가되면 조용히 드리프트한다. */
+  informational: boolean;
   expert_verdict: NaverExpertVerdictSummary | null;
   // X1a T4 — 콘솔 실행 버튼 활성화 여부(naver_execution_harness.real_write_blocker).
   executable: boolean;
@@ -1869,4 +1877,110 @@ export interface NaverDashboardOverview {
 
 export function getNaverDashboardOverview(): Promise<NaverDashboardOverview> {
   return fetchApi<NaverDashboardOverview>("/api/naver/ad/dashboard-overview");
+}
+
+// ── D-NAO-47 커맨드 센터 API ──
+// ★응답 키는 rows다(items 아님). 기존 /proposals·/bep·/expert-reviews와 같은 관례.
+
+export interface NaverChangeLogRow {
+  id: number;
+  changed_at: string | null;
+  entity_type: string;
+  entity_id: string;
+  campaign_id: string;
+  action: string;
+  before: Record<string, unknown> | null;
+  after: Record<string, unknown> | null;
+  rationale: string | null;
+  outcome: string | null;
+  dry_run: boolean;
+  proposal_id: number | null;
+  executed_at: string | null;
+}
+
+export interface NaverChangeLogResponse { total: number; rows: NaverChangeLogRow[] }
+
+/** 변경 이력. ★include_dry_run 기본 false — "우리 조작 N회"는 실집행만 센다(D-47-h). */
+export async function fetchNaverChangeLog(params: {
+  campaign_id?: string; action?: string; days?: number;
+  include_dry_run?: boolean; limit?: number; offset?: number;
+} = {}): Promise<NaverChangeLogResponse> {
+  const q = new URLSearchParams();
+  Object.entries(params).forEach(([k, v]) => { if (v != null) q.set(k, String(v)); });
+  return fetchApi(`/api/naver/ad/change-log?${q.toString()}`);
+}
+
+export interface NaverRawKeywordRow {
+  entity_id: string; name: string; parent_id: string; campaign_id: string;
+  campaign_type: string; status: string; bid_amt: number | null;
+  monthly_volume: number | null; competition: string | null; synced_at: string | null;
+}
+
+export async function fetchNaverRawKeywords(params: {
+  q?: string; campaign_id?: string; status?: string; limit?: number; offset?: number;
+} = {}): Promise<{ total: number; rows: NaverRawKeywordRow[] }> {
+  const s = new URLSearchParams();
+  Object.entries(params).forEach(([k, v]) => { if (v != null) s.set(k, String(v)); });
+  return fetchApi(`/api/naver/ad/raw/keywords?${s.toString()}`);
+}
+
+export interface NaverRawSearchTermRow {
+  ad_date: string | null; campaign_id: string; adgroup_id: string;
+  search_term: string; source: string; imp: number; clk: number; cost: number;
+}
+
+export async function fetchNaverRawSearchTerms(params: {
+  q?: string; campaign_id?: string; days?: number; limit?: number; offset?: number;
+} = {}): Promise<{ total: number; rows: NaverRawSearchTermRow[] }> {
+  const s = new URLSearchParams();
+  Object.entries(params).forEach(([k, v]) => { if (v != null) s.set(k, String(v)); });
+  return fetchApi(`/api/naver/ad/raw/search-terms?${s.toString()}`);
+}
+
+export interface NaverRawHourlyRow {
+  ad_date: string | null; snapshot_hour: number; snapshot_at: string | null;
+  campaign_id: string; campaign_type: string; cost: number; clk: number; imp: number;
+  daily_budget: number | null;
+  /** ★예산이 없거나 0이면 null — "소진율 0%"가 아니라 "알 수 없음"이다. */
+  spend_ratio: number | null;
+}
+
+export async function fetchNaverRawHourly(params: {
+  campaign_id?: string; days?: number; limit?: number; offset?: number;
+} = {}): Promise<{ total: number; rows: NaverRawHourlyRow[] }> {
+  const s = new URLSearchParams();
+  Object.entries(params).forEach(([k, v]) => { if (v != null) s.set(k, String(v)); });
+  return fetchApi(`/api/naver/ad/raw/hourly?${s.toString()}`);
+}
+
+// ── D-NAO-47 — 상설 소급 채점 성적표(D-NAO-45, /retro-scorecard) ──
+// 실제 응답 형태는 backend/app/routers/naver_ad.py:707 retro_scorecard()를 grep해 대조함
+// (계획서 초안엔 형태가 없었다 — "실제에 맞춰라" 지시에 따른 실측 배선).
+export interface NaverRetroBoardRollup {
+  n: number;
+  correct: number;
+  gray: number;
+  wrong: number;
+  no_spend: number;
+  precision_spenders: number | null;
+  bleed_sum: number;
+}
+
+export interface NaverRetroBoardHorizons {
+  d3: NaverRetroBoardRollup;
+  d7: NaverRetroBoardRollup;
+}
+
+/** pacing 롤업: kind("저속"/"과속"/"unparsed") → verdict("correct"/"partial"/"false_alarm"/"unparsed") → 건수. */
+export type NaverRetroPacingRollup = Record<string, Record<string, number>>;
+
+export interface NaverRetroScorecard {
+  window_days: number;
+  boards: Record<string, NaverRetroBoardHorizons>;
+  pacing: NaverRetroPacingRollup;
+}
+
+export function fetchNaverRetroScorecard(days?: number): Promise<NaverRetroScorecard> {
+  const q = days != null ? `?days=${days}` : "";
+  return fetchApi<NaverRetroScorecard>(`/api/naver/ad/retro-scorecard${q}`);
 }
