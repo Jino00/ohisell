@@ -151,6 +151,7 @@ function OursCampaignList() {
   //   0-vs-불명 계약을 깬다. null로 두어 "—"가 뜨게 한다.
   const [countByCampaign, setCountByCampaign] = useState<Record<string, number> | null>(null);
   const [countError, setCountError] = useState(false);
+  const [listError, setListError] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -159,8 +160,11 @@ function OursCampaignList() {
       try {
         const r = await fetchNaverCampaignSettings();
         ours = r.rows.filter((c) => c.optimizer === "ours");
-      } catch {
-        if (alive) setRows([]);
+      } catch (e) {
+        // ★실패를 빈 목록으로 위장하지 않는다 — setRows([])로 두면 화면이 "우리 MOP에 넘긴
+        //   캠페인이 아직 없습니다"라고 **단언**한다. 넘긴 캠페인이 있는데 조회만 실패했을
+        //   수도 있다. 모르면 모른다고 한다(D-47-h · useAsyncData 헤더의 그 실수와 동일 계열).
+        if (alive) setListError(e instanceof Error ? e.message : String(e));
         return;
       }
       if (!alive) return;
@@ -182,6 +186,9 @@ function OursCampaignList() {
     return () => { alive = false; };
   }, []);
 
+  if (listError) {
+    return <EmptyState reason={`캠페인 목록을 불러오지 못했습니다: ${listError}`} hint="새로고침하거나 백엔드 상태를 확인하세요." />;
+  }
   if (rows === null) return <Loading rows={2} />;
   if (rows.length === 0) {
     return (
