@@ -230,3 +230,21 @@ def test_hourly_snapshot_idempotent_same_hour(db):
     rows = db.query(NaverHourlySnapshot).all()
     assert len(rows) == 1
     assert rows[0].cost == 500 and rows[0].daily_budget == 1000
+
+
+def test_hourly_snapshot_stores_avg_rank(db):
+    """D-NAO-46②: stats의 avg_rank를 naver_hourly_snapshot.avg_rank로 저장(빠른 루프 원료)."""
+    campaigns = [{"campaign_id": "c1", "daily_budget": 1000, "campaign_type": "WEB_SITE"}]
+    stats = [{"campaign_id": "c1", "cost": 500, "clk": 2, "imp": 100, "conv_cnt": 0, "conv_amt": 0, "avg_rank": 2.4}]
+    hourly_snapshot.snapshot_hourly(db, campaigns=campaigns, stats=stats)
+    row = db.query(NaverHourlySnapshot).one()
+    assert float(row.avg_rank) == pytest.approx(2.4)
+
+
+def test_hourly_snapshot_avg_rank_none_when_absent(db):
+    """avg_rank 키가 없는 stats(예: 구버전 호출)도 크래시 없이 None으로 저장."""
+    campaigns = [{"campaign_id": "c1", "daily_budget": 1000, "campaign_type": "WEB_SITE"}]
+    stats = [{"campaign_id": "c1", "cost": 500, "clk": 2, "imp": 100, "conv_cnt": 0, "conv_amt": 0}]
+    hourly_snapshot.snapshot_hourly(db, campaigns=campaigns, stats=stats)
+    row = db.query(NaverHourlySnapshot).one()
+    assert row.avg_rank is None

@@ -3,6 +3,12 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
+- 날짜: 2026-07-17 새벽 (★★★**D-NAO-46② 키워드 시간별 축적 구현·prod 배포·라이브 합격 + PR #22 병합 완료**. 워크트리 `spot-backtest-cadence-pacing-dedfad`, 브랜치 `claude/spot-backtest-cadence-pacing-dedfad`(main 기준). 라우팅: 구조=Fable·recon=Opus·구현=Sonnet·codex 4R)
+  - **PR #22 병합**(2026-07-17 merge c4a728e) → main==prod 정합 복원.
+  - **recon(ref 32, prod 라이브 ~49콜 전부 GET)**: avgRnk `/stats` 실시간 확보 확정(리포트 교차검증)·**hh24 breakdown 발견**(유닛 1콜=24시간대 곡선, 매시폴링 대비 1/24)·**보존 7일 하드리밋**(백필 긴급성)·자식분해 불가·qi=`nccQi.qiGrade` 무상(entity_sync 편승).
+  - **구현(계획서 `docs/PLAN_naver-ad-keyword-hourly-accrual.md`)**: `naver_keyword_hourly` 테이블(마이그 g7h8i9j0k1l2)+`fetch_entity_hh24`+`keyword_hourly_sweep`(D-1 스윕+7일 캐치업+콜캡 3,500)+스냅샷 avg_rank+entity qi_grade+크론 09:10. codex 4R PASS(P2×4 수정: qi None 덮어쓰기·빈 fetch 이력삭제·grain을 keyword_id로·캐치업 중복). 테스트 811 pass(신규 35).
+  - **prod 라이브 합격(원칙22)**: 백업 `naver-keyword-hourly_20260717_predeploy.db`(174MB)→7파일 sha 7/7→마이그 적용→pm2 online→**수동 스윕 1차 3,500콜 failed 0·19,315행**(07-11·12 완전+07-13 일부 — 캐치업이 만료임박 날짜 우선 처리 확인)→정합 키워드 3/3 imp·clk·cost 완전일치·쇼핑그룹 일치·avg_rank 100%. 2차 스윕으로 07-13~15 백필 진행.
+  - **자연 확인 대기(다음 크론)**: ①01:05+ 스냅샷 avg_rank 유입 ②아침 entity_sync 후 naver_entity.qi_grade 채움 ③09:10 sweep 크론 자연 발화(07-16 본스윕) ④07-17 아침 확인 2건(08:15 flight projection·08:30 retro — 09:30 예약 루틴에 병합됨).
 - 날짜: 2026-07-16 심야 (★★★**3건 합동 prod 배포 완료 + PR #22 생성**(https://github.com/Jino00/ohisell/pull/22, main 병합 대기): D-NAO-44 pacing 보정 + D-NAO-45 소급 채점(+백필) + D-NAO-46① 보존 365일. Jino "지금 배포하자")
   - **배포 실측(원칙22)**: DB백업 167MB → 11파일 sha 11/11 → 마이그 f6g7h8i9j0k1(테이블 2) → pm2 online 크래시0 → 크론 retro_scoring 08:30 등록 → **백필 완료**(신호 5,377건·D+3 3,068·D+7 514·페이싱 788, /retro-scorecard 실데이터 rollup이 ref31과 정합: bleeding 82.2%·starving 17.9%·sgb 68.2%) → 완결도 곡선 prod 라이브 산출(v2 실측 정확 일치·23시 factor 1.095).
   - **★발견(배포 무관 기존 동작)**: 04 캠페인 예측모델이 07-12 scorer 강등(demoted_until 07-16) → 07-13~16 flight 루프가 "forecast 없음" 정당 스킵(로그 공백 원인). 07-17 07:50 게이트 재평가로 자동 복귀 예정(활동일 14/14).
