@@ -59,6 +59,7 @@ from app.models import (
     NaverRetroSignal,
     NaverSearchTermDaily,
 )
+from app.services.naver_ad import campaign_roster
 from app.services.naver_ad import dashboard_overview
 from app.services.naver_ad import delegation_gate
 from app.services.naver_ad import metrics_aggregator
@@ -632,6 +633,58 @@ def campaign_settings_put(body: CampaignSettingsIn, db: Session = Depends(get_db
     return _serialize_settings(settings)
 
 
+class OptimizerSwitchIn(BaseModel):
+    campaign_id: str
+    optimizer: str
+
+
+@router.put("/campaign-settings/optimizer")
+def campaign_optimizer_switch(body: OptimizerSwitchIn, db: Session = Depends(get_db)):
+    """관리주체만 바꾼다(D-NAO-48). 1층 캠페인 스위치의 쓰기 경로.
+
+    ★왜 PUT /campaign-settings를 쓰지 않는가: 그건 **전체 치환**이라
+    (`settings.mode = body.mode`를 무조건 대입) optimizer만 보내면 mode·target_roas_override·
+    gamma·memo가 전부 null로 날아간다. 콘솔은 memo를 되돌려보내 겨우 막고 있고
+    (NaverAdOptimizationConsole.tsx:344 주석), **gamma는 api.ts에 파라미터조차 없어 콘솔이
+    저장할 때마다 조용히 지워진다**(스펙 §1-6이 지적한 괴리의 실제 결과 — 현재 gamma가 전부
+    NULL이라 안 보일 뿐). "필드 하나 바꾸는 동작"에 전체 치환을 쓰는 게 애초에 틀렸다.
+    이 엔드포인트는 optimizer 외 필드를 **건드리지 않아** 그 실수를 구조적으로 불가능하게 한다.
+
+    ⚠️ 이건 우리 시스템 내부 설정이지 광고 API 쓰기가 아니다(D-NAO-13). 실제 실행 게이트는
+    naver_execution_harness의 optimizer=='ours' 하드체크(:912)이고 이중 방어는 불변이다.
+    ⚠️ 'ours'로 바꿔도 **원본 MOP는 꺼지지 않는다** — 우리 프로그램은 MOP를 끌 수 없다(별도
+    SaaS). Jino가 MOP 콘솔에서 직접 꺼야 하며, 안 끄면 두 옵티마이저가 같은 캠페인 입찰을
+    두고 충돌한다. 그 경고는 프론트 확인창이 띄운다(D-48-b). 충돌이 실제로 나면
+    entity_sync의 external_bid_change/external_status_change 감지로 드러난다(D-NAO-47 밸브).
+    """
+    if body.optimizer not in _VALID_OPTIMIZERS:
+        raise HTTPException(422, f"optimizer는 {sorted(_VALID_OPTIMIZERS)} 중 하나여야 합니다")
+
+    settings = db.query(NaverCampaignSettings).filter(
+        NaverCampaignSettings.campaign_id == body.campaign_id
+    ).first()
+    before_optimizer = settings.optimizer if settings else "none"
+
+    if settings is None:
+        # 없던 행은 optimizer만 세팅 — mode 등 기본값을 임의로 지어내지 않는다.
+        settings = NaverCampaignSettings(campaign_id=body.campaign_id, optimizer=body.optimizer)
+        db.add(settings)
+    else:
+        settings.optimizer = body.optimizer  # ★다른 필드는 손대지 않는다
+
+    if before_optimizer != body.optimizer:
+        db.add(NaverChangeLog(
+            entity_type="campaign", entity_id=body.campaign_id, campaign_id=body.campaign_id,
+            action="optimizer_change",
+            before_value=before_optimizer, after_value=body.optimizer,
+            rationale="커맨드 센터 관리주체 스위치(D-NAO-48)",
+        ))
+
+    db.commit()
+    db.refresh(settings)
+    return _serialize_settings(settings)
+
+
 # ══════════════════════════════════════════════════════════════════
 # X1a T5 — E2 위임 스위치(D-NAO-25 부분 게이트) 콘솔 설정
 # ══════════════════════════════════════════════════════════════════
@@ -1028,3 +1081,33 @@ def get_raw_hourly(
             for r in rows
         ],
     }
+
+
+# ══════════════════════════════════════════════════════════════════
+# D-NAO-48 — 캠페인 명부(관리주체 스위치의 데이터 원천)
+# ★이 API가 생기기 전엔 화면에 캠페인 **이름이 없었다**(report가 안 줌) → 내부 ID
+#   `cmp-a001-02-000000008492582`가 그대로 노출. MOP UX 리뷰에서 "베끼면 안 되는 것"으로
+#   꼽은 항목을 우리가 하고 있었다. 이름은 naver_entity에 있다.
+# 읽기 전용 — 관리주체 변경은 기존 PUT /campaign-settings가 유일 경로이고, 실행 게이트는
+#   naver_execution_harness의 optimizer=='ours' 하드체크다(D-NAO-13, 이중 방어 불변).
+# ══════════════════════════════════════════════════════════════════
+
+
+@router.get("/campaigns")
+def campaigns_roster(
+    days: int = Query(30, ge=1, le=180, description="성과 집계 창(D-1 확정치 기준)"),
+    campaign_type: str | None = Query(None, description="WEB_SITE/SHOPPING/BRAND_SEARCH"),
+    optimizer: str | None = Query(None, pattern="^(none|ours|mop)$", description="관리주체 필터"),
+    db: Session = Depends(get_db),
+) -> dict:
+    """캠페인 명부 — 이름·광고종류·상태 + 최근 N일 성과 + 관리주체(D-NAO-48).
+
+    광고비 0인 캠페인도 포함한다(정지·신규 인계 대상에도 관리주체를 지정할 수 있어야
+    카나리를 확대한다). roas_naver는 광고비 0이면 None — 'ROAS 0배'가 아니라 '알 수 없음'.
+    """
+    rows = campaign_roster.build(db, days=days)
+    if campaign_type:
+        rows = [r for r in rows if r["campaign_type"] == campaign_type]
+    if optimizer:
+        rows = [r for r in rows if r["optimizer"] == optimizer]
+    return {"total": len(rows), "rows": rows}
