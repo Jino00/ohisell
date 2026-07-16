@@ -138,27 +138,46 @@ export default function NaverAdCommandCenter() {
 
 function OursCampaignList() {
   const [rows, setRows] = useState<NaverAdCampaignSettings[] | null>(null);
-  // ★캠페인별 조작 횟수(codex[P2] R2). 계정 전체 합계를 모든 행에 똑같이 찍으면
-  //   캠페인이 늘었을 때 A의 조작이 B 행에도 표시된다 — **D-47-c(N=1→N=여럿 동일 컴포넌트)
-  //   정면 위반**이고, 오늘 04 하나뿐이라 우연히 맞아 보일 뿐 카나리를 확대하는 순간
-  //   틀린다(그 확대가 이 화면의 존재 이유다).
-  //   캠페인마다 요청하지 않고 ours 실집행을 한 번에 받아 campaign_id로 묶는다
-  //   (실집행은 현재 0건이고 앞으로도 희소해 500건 창이면 충분하다).
+  // ★캠페인별 조작 횟수(codex[P2] R2·R3). 계정 전체 합계를 모든 행에 똑같이 찍으면 캠페인이
+  //   늘었을 때 A의 조작이 B 행에 표시된다 — **D-47-c(N=1→N=여럿 동일 컴포넌트) 정면 위반**.
+  //   오늘 04 하나뿐이라 우연히 맞아 보일 뿐, 카나리를 확대하는 순간 틀린다(그 확대가 이
+  //   화면의 존재 이유다).
+  //   ★행을 받아 클라이언트에서 묶지 않는다(codex[P2] R3): 한 페이지(500건)만 받아 세면
+  //   그 창을 넘는 순간 **조용히 적게 센다**(옛 실집행만 있는 캠페인이 "0회"로 보인다).
+  //   캠페인당 limit=1로 서버의 `total`을 읽으면 페이지네이션과 무관하게 **정확**하다.
+  //   요청 수는 ours 캠페인 수(설계상 카나리라 소수)라 감당된다.
+  //   ★실패 시 {}로 만들지 않는다(codex[P2] R3): 모르는 걸 "0회"라고 단언하면 D-47-h의
+  //   0-vs-불명 계약을 깬다. null로 두어 "—"가 뜨게 한다.
   const [countByCampaign, setCountByCampaign] = useState<Record<string, number> | null>(null);
+  const [countError, setCountError] = useState(false);
 
   useEffect(() => {
     let alive = true;
-    fetchNaverCampaignSettings()
-      .then((r) => { if (alive) setRows(r.rows.filter((c) => c.optimizer === "ours")); })
-      .catch(() => { if (alive) setRows([]); });
-    fetchNaverChangeLog({ days: 30, limit: 500, actor: "ours" })
-      .then((r) => {
+    (async () => {
+      let ours: NaverAdCampaignSettings[];
+      try {
+        const r = await fetchNaverCampaignSettings();
+        ours = r.rows.filter((c) => c.optimizer === "ours");
+      } catch {
+        if (alive) setRows([]);
+        return;
+      }
+      if (!alive) return;
+      setRows(ours);
+
+      try {
+        const counts = await Promise.all(
+          ours.map((c) =>
+            fetchNaverChangeLog({ days: 30, limit: 1, actor: "ours", campaign_id: c.campaign_id })
+              .then((r) => [c.campaign_id, r.total] as const),
+          ),
+        );
         if (!alive) return;
-        const acc: Record<string, number> = {};
-        for (const row of r.rows) acc[row.campaign_id] = (acc[row.campaign_id] ?? 0) + 1;
-        setCountByCampaign(acc);
-      })
-      .catch(() => { if (alive) setCountByCampaign({}); });
+        setCountByCampaign(Object.fromEntries(counts));
+      } catch {
+        if (alive) setCountError(true);  // 불명 유지 — 0이라고 단언하지 않는다
+      }
+    })();
     return () => { alive = false; };
   }, []);
 
@@ -189,11 +208,18 @@ function OursCampaignList() {
               0은 회색(judge-idle)이다. 빨강이면 고장난 것처럼 보이고 초록이면 거짓말이다. */}
           <Td right>
             <span className={changeCount === 0 ? "text-judge-idle" : "text-gray-900"}>
-              {changeCount == null ? "—" : `${num(changeCount)}회`}
+              {changeCount == null ? NO_DATA : `${num(changeCount)}회`}
             </span>
           </Td>
           <Td>
-            {changeCount === 0 ? (
+            {/* ★0-vs-불명을 가른다(D-47-h): 0은 "0회"+이유(회색), **모르면 이유를 지어내지
+                않는다**. 조회 실패를 "승인된 실행이 없습니다"라고 쓰면 사실이 아닌 걸 단언하는
+                것이다(codex[P2] R3). */}
+            {changeCount == null ? (
+              <span className="text-xs text-gray-400">
+                {countError ? "조작 횟수를 불러오지 못했습니다." : "확인 중…"}
+              </span>
+            ) : changeCount === 0 ? (
               <span className="text-xs text-gray-500">
                 제안은 나오지만 승인된 실행이 없습니다(사람 승인 게이트 대기).
               </span>
@@ -311,6 +337,36 @@ function RetroRollup({ data }: { data: NaverRetroScorecard }) {
   );
 }
 
+/** change_log 한 행을 "무엇이 어떻게 바뀌었나" 한 줄로. ★action마다 after_value 모양이 다르다
+ *  (writer가 네이버 재조회 응답을 그대로 dumps하므로 camelCase, add_negative_keyword만 래핑됨).
+ *  bidAmt/userLock만 읽으면 update_budget·add_negative_keyword 실집행이 "— → —"로 보인다
+ *  (codex[P2] R3) — 그 두 액션도 EXECUTION_ACTIONS라 이 패널에 뜨는데, **"무엇을 왜 바꿨는지"가
+ *  MOP의 최대 공백이자 우리가 이길 자리**(ref24)라 절반을 비워두면 자기모순이다.
+ *  실측 근거: update_bid→get_keyword()의 bidAmt / update_budget→campaign의 dailyBudget /
+ *  set_user_lock→userLock / add_negative_keyword→{after, created_ids}(harness:466 래핑). */
+function describeChange(row: NaverChangeLogRow): string {
+  const b = row.before as Record<string, unknown> | null;
+  const a = row.after as Record<string, unknown> | null;
+  const lock = (v: unknown) => (v === true ? "정지" : v === false ? "재개" : NO_DATA);
+  const n = (v: unknown) => (typeof v === "number" ? won(v) : NO_DATA);
+
+  switch (row.action) {
+    case "update_bid":
+      return `입찰가 ${n(b?.bidAmt)} → ${n(a?.bidAmt)}`;
+    case "update_budget":
+      return `일예산 ${n(b?.dailyBudget)} → ${n(a?.dailyBudget)}`;
+    case "set_user_lock":
+      return `${lock(b?.userLock)} → ${lock(a?.userLock)}`;
+    case "add_negative_keyword": {
+      const created = Array.isArray(a?.created_ids) ? a.created_ids.length : null;
+      return created == null ? "제외 키워드 추가" : `제외 키워드 ${num(created)}개 추가`;
+    }
+    default:
+      // 알 수 없는 액션은 지어내지 않는다 — action 원문을 그대로 보여준다.
+      return row.action;
+  }
+}
+
 function ChangeLogPane() {
   const [data, setData] = useState<{ total: number; rows: NaverChangeLogRow[] } | null>(null);
   useEffect(() => {
@@ -338,11 +394,10 @@ function ChangeLogPane() {
         <tr key={r.id}>
           <Td><span className="text-xs text-gray-500">{r.changed_at?.slice(5, 16) ?? NO_DATA}</span></Td>
           <Td><span className="text-xs">{r.entity_type} {r.entity_id}</span></Td>
-          {/* ★"무엇을 왜 바꿨는지" — MOP에 0개인 컬럼(ref24). 우리가 이길 자리. */}
+          {/* ★"무엇을 왜 바꿨는지" — MOP에 0개인 컬럼(ref24). 우리가 이길 자리이므로
+              지원하는 실행 액션 4종을 전부 제대로 그린다(codex[P2] R3). */}
           <Td>
-            <span className="text-xs tabular-nums">
-              {String(r.before?.bidAmt ?? r.before?.userLock ?? NO_DATA)} → {String(r.after?.bidAmt ?? r.after?.userLock ?? NO_DATA)}
-            </span>
+            <span className="text-xs tabular-nums">{describeChange(r)}</span>
           </Td>
           <Td><span className="text-xs text-gray-600">{r.rationale ?? NO_DATA}</span></Td>
         </tr>
