@@ -167,7 +167,53 @@ def _log_external_status_change(db: Session, entity: NaverEntity, new_status: st
              entity.entity_type, entity.entity_id, entity.status, new_status)
 
 
-def _log_external_bid_change(db: Session, entity: NaverEntity, new_bid_raw, now) -> None:
+def _load_our_bid_writes(db: Session) -> dict[tuple[str, str], NaverChangeLog]:
+    """우리의 최근 update_bid 성공 기록을 (entity_type, entity_id)→최신 1건으로 적재한다.
+
+    ★루프 **전에 1회** 호출한다. codex[P2](2026-07-17)가 지적한 되돌림 레이스를 잡으려면
+    무변동 행에서도 "우리가 방금 쓴 값이 있었나"를 봐야 하는데, 그걸 행마다 쿼리하면
+    91,005번 조회한다(쓰기 폭증을 읽기 폭증으로 바꾸는 셈). 한 번에 적재해 O(1) 조회로 만든다.
+
+    dry_run=False + after_value 존재 = 실제 성공한 쓰기(실패·가드거부·dry-run은 after_value를
+    안 채운다 — naver_execution_harness의 _detect_external_change 주석과 같은 판별).
+    """
+    rows = (
+        db.query(NaverChangeLog)
+        .filter(
+            NaverChangeLog.action == "update_bid",
+            NaverChangeLog.dry_run.is_(False),
+            NaverChangeLog.after_value.isnot(None),
+        )
+        .order_by(NaverChangeLog.changed_at.asc())  # 뒤에 오는 최신이 앞을 덮어씀
+        .all()
+    )
+    return {(r.entity_type, r.entity_id): r for r in rows}
+
+
+def _our_bid_target(entity: NaverEntity, our_writes: dict[tuple[str, str], NaverChangeLog]) -> int | None:
+    """직전 관측(entity.synced_at) *이후*에 우리가 실제로 써넣은 목표 입찰가. 없으면 None.
+
+    시간 판별이 핵심이다(_log_external_status_change의 ⚠️ 주석과 같은 이유): 직전 관측보다
+    오래된 우리 쓰기는 "이번 관측 구간에 우리가 한 일"이 아니므로 귀속 근거가 될 수 없다.
+    after_value의 키가 camelCase 'bidAmt'인 것은 writer가 네이버 재조회 응답(get_keyword)을
+    그대로 json.dumps 하기 때문(naver_sa_writer.py:350) — 'bid_amt'(snake)가 아니다.
+    """
+    last = our_writes.get((entity.entity_type, entity.entity_id))
+    if not (last and last.after_value and entity.synced_at is not None):
+        return None
+    if last.changed_at <= entity.synced_at:
+        return None
+    try:
+        after = json.loads(last.after_value)
+    except (ValueError, TypeError):
+        return None
+    return _norm_bid(after.get("bidAmt")) if isinstance(after, dict) else None
+
+
+def _log_external_bid_change(
+    db: Session, entity: NaverEntity, new_bid_raw, now,
+    our_writes: dict[tuple[str, str], NaverChangeLog],
+) -> None:
     """D-NAO-47: 입찰가 변경을 change_log에 기록한다 — `_log_external_status_change`의 대칭.
 
     ★이 함수가 없던 동안 `e.bid_amt = r.get("bid_amt")`가 매일 91,005개 키워드의 어제
@@ -181,51 +227,58 @@ def _log_external_bid_change(db: Session, entity: NaverEntity, new_bid_raw, now)
         전 행이 '변경됨'이 되어 91,005행/일이 쌓인다(_norm_bid docstring 참조).
       - old/new 어느 쪽이든 None이면 로깅하지 않는다. 신규 관측·수집 누락은 '변경'이 아니고,
         특히 API 장애로 bid_amt가 전부 None이 되면 91,005행이 쏟아진다.
+      - our_writes는 **호출부가 루프 전에 1회** 적재해 넘긴다(_load_our_bid_writes). 여기서
+        쿼리하면 91,005번 조회한다.
 
     호출 계약: `e.bid_amt` 대입 **전에** 호출해야 한다(entity.bid_amt가 옛값이어야 함).
     `_log_external_status_change`가 `e.synced_at` 대입 전에 호출되는 것과 같은 이유다.
 
-    우리 쓰기 귀속: `_log_external_status_change`와 동일 — 우리의 마지막 성공 쓰기
-    (action="update_bid", dry_run=False, after_value 존재)가 직전 관측(entity.synced_at)
-    **이후**이고 그 결과값이 지금 관측값과 같으면 "우리가 방금 한 것"이라 스킵한다.
-    방향 일치만으로 판단하지 않는 이유는 _log_external_status_change의 ⚠️ 주석 참조.
-    after_value의 키가 camelCase 'bidAmt'인 것은 writer가 네이버 재조회 응답(get_keyword)을
-    그대로 json.dumps 하기 때문이다(naver_sa_writer.py:350) — 'bid_amt'(snake)가 아니다.
+    ★되돌림 레이스(codex[P2] 2026-07-17): 우리가 700→900을 쓴 뒤 다음 sync 전에 외부가
+    900→700으로 되돌리면 old_bid==new_bid(700==700)라 무변동으로 보인다. 하지만 실제로는
+    외부가 우리 변경을 무효화한 것이고, 그걸 안 남기면 change_log는 "우리가 900으로 바꿈"에서
+    멈춰 **현재 값이 900인 줄로 읽힌다**(실제 700). 03(MOP) vs 04(우리) 철학 대결에서 정확히
+    측정하려는 시나리오라 반드시 남긴다. prod 실측상 update_bid 쓰기가 아직 0건이라 지금은
+    도달 불가하지만, 카나리가 열리는 순간 도달 가능해진다.
     """
     if entity.status == "deleted":
         return
 
     old_bid = _norm_bid(entity.bid_amt)
     new_bid = _norm_bid(new_bid_raw)
+
+    # ★파싱 실패를 조용히 넘기지 않는다(codex[P2] 2026-07-17): 값이 있는데 정규화가 실패하면
+    # 그 행은 영영 로깅되지 않는다. prod 실측(2026-07-17)상 91,005행 전부 integer라 현재
+    # 발생하지 않지만, 네이버가 형식을 바꾸면 **아무 신호 없이** 이력이 끊긴다. 추측으로
+    # 콤마 파싱 같은 걸 미리 넣지 않되(원칙: 추정 금지), 벌어지면 시끄럽게 만든다.
+    if new_bid_raw is not None and new_bid is None:
+        log.warning(
+            "naver_entity bid_amt 정규화 실패 — 이 행의 입찰 변경은 기록되지 않는다: "
+            "%s %s raw=%r(%s). 네이버 응답 형식 변경 의심(원칙22: 실측 후 _norm_bid 확장).",
+            entity.entity_type, entity.entity_id, new_bid_raw, type(new_bid_raw).__name__,
+        )
+
     if old_bid is None or new_bid is None:
         return  # 신규 관측/수집 누락/파싱 실패는 변경이 아님
-    if old_bid == new_bid:
-        return  # ★ 절대다수가 여기서 끊긴다 — 이 한 줄이 쓰기 폭증을 막는다
 
-    last_our_write = (
-        db.query(NaverChangeLog)
-        .filter(
-            NaverChangeLog.entity_type == entity.entity_type,
-            NaverChangeLog.entity_id == entity.entity_id,
-            NaverChangeLog.action == "update_bid",
-            NaverChangeLog.dry_run.is_(False),
-            NaverChangeLog.after_value.isnot(None),
-        )
-        .order_by(NaverChangeLog.changed_at.desc())
-        .first()
+    our_target = _our_bid_target(entity, our_writes)
+
+    if our_target is not None and our_target == new_bid:
+        return  # 우리가 방금 써넣은 값 그대로 관측됨 = 외부 변경 아님
+
+    if old_bid == new_bid and our_target is None:
+        return  # ★절대다수가 여기서 끊긴다 — 이 한 줄이 쓰기 폭증을 막는다
+
+    # 여기 도달하는 두 경우:
+    #  (a) old != new           → 평범한 외부 변경(before=old_bid)
+    #  (b) old == new 인데 our_target이 있고 new와 다름 → 외부가 우리 변경을 되돌림.
+    #      이때 실제 전이는 our_target(우리가 써넣은 값) → new_bid 다. before를 old_bid로
+    #      쓰면 700→700이라는 무의미한 행이 되므로 our_target을 before로 쓴다.
+    reverted = old_bid == new_bid
+    before_bid = our_target if reverted else old_bid
+    rationale = (
+        "entity_sync 감지: 외부(MOP/사람)가 우리 입찰 변경을 되돌림"
+        if reverted else "entity_sync 감지: 외부(MOP/사람) 입찰가 변경"
     )
-    if (
-        last_our_write
-        and last_our_write.after_value
-        and entity.synced_at is not None
-        and last_our_write.changed_at > entity.synced_at
-    ):
-        try:
-            last_after = json.loads(last_our_write.after_value)
-            if isinstance(last_after, dict) and _norm_bid(last_after.get("bidAmt")) == new_bid:
-                return
-        except (ValueError, TypeError):
-            pass
 
     db.add(NaverChangeLog(
         entity_type=entity.entity_type,
@@ -235,12 +288,13 @@ def _log_external_bid_change(db: Session, entity: NaverEntity, new_bid_raw, now)
         proposal_id=None,
         dry_run=False,
         changed_at=now,
-        before_value=json.dumps({"bidAmt": old_bid}),
+        before_value=json.dumps({"bidAmt": before_bid}),
         after_value=json.dumps({"bidAmt": new_bid}),
-        rationale="entity_sync 감지: 외부(MOP/사람) 입찰가 변경",
+        rationale=rationale,
     ))
-    log.info("external_bid_change detected: %s %s %s→%s",
-             entity.entity_type, entity.entity_id, old_bid, new_bid)
+    log.info("external_bid_change detected%s: %s %s %s→%s",
+             " (revert)" if reverted else "",
+             entity.entity_type, entity.entity_id, before_bid, new_bid)
 
 
 def sync_entities(db: Session, *, rows: list[dict] | None = None) -> dict:
@@ -257,6 +311,8 @@ def sync_entities(db: Session, *, rows: list[dict] | None = None) -> dict:
     existing = {(e.entity_type, e.entity_id): e for e in db.query(NaverEntity).all()}
     seen: set[tuple[str, str]] = set()
     now = kst_now()
+    # ★루프 전 1회 적재(D-NAO-47, codex[P2]) — 루프 안에서 행마다 조회하면 91,005번 쿼리한다.
+    our_bid_writes = _load_our_bid_writes(db)
 
     for r in rows:
         key = (r["entity_type"], r["entity_id"])
@@ -272,7 +328,7 @@ def sync_entities(db: Session, *, rows: list[dict] | None = None) -> dict:
             if e.status != r["status"] and e.status != "deleted":
                 _log_external_status_change(db, e, r["status"], now)
             # ★ e.bid_amt 대입 *전*에 호출 — 함수가 entity.bid_amt를 옛값으로 읽는다(D-NAO-47).
-            _log_external_bid_change(db, e, r.get("bid_amt"), now)
+            _log_external_bid_change(db, e, r.get("bid_amt"), now, our_bid_writes)
             e.parent_id = r["parent_id"]
             e.campaign_id = r["campaign_id"]
             e.campaign_type = r["campaign_type"]

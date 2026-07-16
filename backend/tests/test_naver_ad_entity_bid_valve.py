@@ -214,3 +214,101 @@ def test_large_sync_with_no_bid_changes_writes_zero_logs(db):
 
     entity_sync.sync_entities(db, rows=rows)
     assert db.query(NaverChangeLog).count() == 0
+
+
+# ── codex[P2] 2026-07-17: 되돌림 레이스 + 파싱 실패 관측성 ──
+def test_logs_when_external_reverts_our_bid_change(db):
+    """★codex[P2]: 우리가 700→900을 쓴 뒤 외부가 900→700으로 되돌리면 old==new(700==700)라
+    무변동으로 보이지만 실제로는 외부가 우리 변경을 무효화한 것이다. 안 남기면 change_log가
+    "우리가 900으로 바꿈"에서 멈춰 현재 값이 900인 줄로 읽힌다(실제 700).
+    03(MOP) vs 04(우리) 대결에서 정확히 측정하려는 시나리오."""
+    prev_sync = kst_now() - timedelta(hours=2)
+    _seed_entity(db, bid_amt=700, synced_at=prev_sync)
+    db.add(NaverChangeLog(
+        entity_type="keyword", entity_id="nkw-1", campaign_id="cmp-1",
+        action="update_bid", dry_run=False,
+        changed_at=kst_now() - timedelta(minutes=30),  # 직전 관측 이후 = 우리가 방금 씀
+        after_value=json.dumps({"bidAmt": 900}),
+    ))
+    db.commit()
+
+    # 외부가 900 → 700으로 되돌림. 관측값은 옛 관측값(700)과 같다.
+    entity_sync.sync_entities(db, rows=_rows(db, keyword_bid=700))
+
+    logs = db.query(NaverChangeLog).filter(NaverChangeLog.action == "external_bid_change").all()
+    assert len(logs) == 1
+    # 실제 전이는 our_target(900) → 700 이다. 700→700이 아니다.
+    assert json.loads(logs[0].before_value) == {"bidAmt": 900}
+    assert json.loads(logs[0].after_value) == {"bidAmt": 700}
+    assert "되돌림" in logs[0].rationale
+
+
+def test_no_revert_log_when_our_write_predates_last_observation(db):
+    """우리 쓰기가 직전 관측보다 오래됐으면 이미 관측에 반영된 것 — 되돌림이 아니다.
+    (이게 없으면 옛 우리 쓰기 때문에 무변동 행이 매일 로깅된다 = 쓰기 폭증 재발)"""
+    prev_sync = kst_now() - timedelta(minutes=10)
+    _seed_entity(db, bid_amt=700, synced_at=prev_sync)
+    db.add(NaverChangeLog(
+        entity_type="keyword", entity_id="nkw-1", campaign_id="cmp-1",
+        action="update_bid", dry_run=False,
+        changed_at=kst_now() - timedelta(hours=5),  # 직전 관측보다 오래됨
+        after_value=json.dumps({"bidAmt": 900}),
+    ))
+    db.commit()
+
+    entity_sync.sync_entities(db, rows=_rows(db, keyword_bid=700))
+    assert db.query(NaverChangeLog).filter(NaverChangeLog.action == "external_bid_change").count() == 0
+
+
+def test_warns_when_bid_cannot_be_normalized(db, caplog):
+    """★codex[P2]: 값이 있는데 정규화 실패면 그 행은 영영 로깅 안 된다. 조용히 넘기지 말고
+    시끄럽게 — 네이버 형식 변경을 사람이 알아챌 유일한 신호다."""
+    _seed_entity(db, bid_amt=700)
+    with caplog.at_level("WARNING"):
+        entity_sync.sync_entities(db, rows=_rows(db, keyword_bid="1,450"))
+
+    assert any("정규화 실패" in r.message for r in caplog.records)
+    assert db.query(NaverChangeLog).filter(NaverChangeLog.action == "external_bid_change").count() == 0
+
+
+def test_no_warning_when_bid_is_legitimately_none(db, caplog):
+    """수집 누락(None)은 '파싱 실패'가 아니라 정상 경로다. None까지 경고하면 네이버 장애 때
+    91,005건 경고가 쏟아져 로그가 못 쓰게 된다 — 경고의 신호 가치를 지킨다."""
+    _seed_entity(db, bid_amt=700)
+    with caplog.at_level("WARNING"):
+        entity_sync.sync_entities(db, rows=_rows(db, keyword_bid=None))
+
+    assert not any("정규화 실패" in r.message for r in caplog.records)
+    assert db.query(NaverChangeLog).filter(NaverChangeLog.action == "external_bid_change").count() == 0
+
+
+def test_our_bid_writes_loaded_once_not_per_row(db):
+    """★codex[P2]의 순진한 수정(행마다 change_log 조회)은 91,005 쿼리/일 = 읽기 폭증이다.
+    루프 전 1회 적재를 계약으로 고정한다 — 이 테스트가 깨지면 읽기 폭증이 돌아온 것."""
+    for i in range(300):
+        db.add(NaverEntity(
+            entity_type="keyword", entity_id=f"nkw-{i}", parent_id="grp-1",
+            campaign_id="cmp-1", campaign_type="WEB_SITE", name=f"kw{i}",
+            status="on", bid_amt=700, synced_at=kst_now(),
+        ))
+    db.commit()
+
+    calls = {"n": 0}
+    real = entity_sync._load_our_bid_writes
+
+    def counting(dbs):
+        calls["n"] += 1
+        return real(dbs)
+
+    entity_sync._load_our_bid_writes = counting
+    try:
+        rows = [{
+            "entity_type": "keyword", "entity_id": f"nkw-{i}", "parent_id": "grp-1",
+            "campaign_id": "cmp-1", "campaign_type": "WEB_SITE", "name": f"kw{i}",
+            "status": "on", "bid_amt": 700,
+        } for i in range(300)]
+        entity_sync.sync_entities(db, rows=rows)
+    finally:
+        entity_sync._load_our_bid_writes = real
+
+    assert calls["n"] == 1, f"300행 sync에 {calls['n']}회 적재 — 루프 안에서 부르고 있다"
