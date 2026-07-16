@@ -36,6 +36,7 @@
 | prod `/home/ubuntu/ohisell_bak/naver-keyword-hourly_20260717_predeploy.db` | 마이그 전 백업 |
 
 ## 5. 알려진 이슈 / 주의
+- ⚠️**같은 밤 병행 세션 존재(원칙20)**: `HANDOFF_ohisell-mop-command-center-design_20260717`(01:30, 워크트리 `video-content-summary-0e6c41`) — **D-NAO-47 MOP 커맨드 센터 프론트 설계**(코드변경 0, 구조 승인·구현 미착수). 이 세션(D-NAO-46②)과 코드 충돌 없음. 단 그쪽이 지적한 `entity_sync.py:182` 입찰가 덮어쓰기(변경 이력 소실) 이슈는 이 브랜치의 entity_sync 수정(qi)과 같은 파일 — D-NAO-47 구현 세션은 PR #23 병합 후 main 기준으로 시작할 것.
 - `sync_naver_keyword_volume` last_status=error — 01:05 락 사건의 피해자(수정 전). 다음 자연 실행에서 자가 회복 예상, 09:30 루틴이 확인.
 - 07-16분 keyword_hourly는 **오늘 09:10 크론이 첫 본스윕**(08:00 ad_daily 적재 후). 01~02시 수동 스윕에선 targets 0이 정상이었음(ad_daily 미적재).
 - hh24 `breakdowns[].name`은 한글 라벨 파싱("00시~01시") — API 포맷 변경 시 파싱 skip+warn으로 드러남.
