@@ -29,11 +29,8 @@ import {
   type NaverExpertDelegationSettings,
   type NaverDashboardOverview,
 } from "../lib/api";
+import { isoKST, won, roasX, NO_DATA } from "../lib/format";
 
-function isoKST(d: Date): string {
-  const kst = new Date(d.toLocaleString("en-US", { timeZone: "Asia/Seoul" }));
-  return `${kst.getFullYear()}-${String(kst.getMonth() + 1).padStart(2, "0")}-${String(kst.getDate()).padStart(2, "0")}`;
-}
 function daysAgo(n: number): string {
   return isoKST(new Date(Date.now() - n * 86400000));
 }
@@ -41,7 +38,7 @@ function daysAgo(n: number): string {
 // 예: p.created_at?.slice(0,16) 직접 슬라이스 — Date 객체로 재해석하면 이중 시프트된다).
 // 오늘이면 "HH:mm", 아니면 "M/D HH:mm".
 function fmtEvidenceTime(iso: string | null): string {
-  if (!iso) return "-";
+  if (!iso) return NO_DATA;
   const datePart = iso.slice(0, 10);
   const timePart = iso.slice(11, 16);
   if (!timePart) return datePart;
@@ -49,18 +46,6 @@ function fmtEvidenceTime(iso: string | null): string {
   if (datePart === today) return timePart;
   const [, m, d] = datePart.split("-");
   return `${Number(m)}/${Number(d)} ${timePart}`;
-}
-function fmt(n: number | null | undefined): string {
-  if (n == null) return "-";
-  return n.toLocaleString("ko-KR");
-}
-function won(n: number | null | undefined): string {
-  if (n == null) return "-";
-  return `${fmt(n)}원`;
-}
-function roasX(n: number | null | undefined): string {
-  if (n == null) return "-";
-  return `${n.toFixed(2)}배`;
 }
 
 // D-NAO-2 공격성 배수 (bep_calculator.AGG_MULT와 동일 값 — 프론트는 이 값으로 override를 계산할 뿐
@@ -754,7 +739,7 @@ export default function NaverAdOptimizationConsole() {
         <div className="p-4 border-b border-gray-200 flex items-center justify-between flex-wrap gap-2">
           <h3 className="text-sm font-medium text-gray-700">캠페인 관리 주체 · 모드 · 공격성</h3>
           <span className="text-xs text-gray-400">
-            계정 BEP ROAS {accountBepRoas != null ? roasX(accountBepRoas) : "-"} (공격성 다이얼 기준값)
+            계정 BEP ROAS {accountBepRoas != null ? roasX(accountBepRoas) : NO_DATA} (공격성 다이얼 기준값)
           </span>
         </div>
         {panelError && <div className="p-3 text-sm text-red-600 bg-red-50">{panelError}</div>}
