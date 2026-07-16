@@ -27,6 +27,27 @@ def _status(raw_status: str, user_lock: bool) -> str:
     return "on"
 
 
+def _norm_bid(v) -> int | None:
+    """입찰가를 int|None으로 정규화 — diff 비교 전 **반드시** 통과시킨다.
+
+    ★왜 필요한가(원칙22, 실측): NaverEntity.bid_amt는 Integer 선언이지만 SQLite는 동적
+    타입이라 fetcher가 네이버 API 응답을 그대로 넘긴 값(str일 수 있음 — naver_sa_ad_fetcher
+    :505는 k.get("bidAmt")를 캐스팅 없이 전달)이 그대로 저장된다. 정규화 없이 비교하면
+    700(DB, int) != "700"(API, str)이 되어 **매일 91,005개 키워드 전부가 '입찰 변경'으로
+    오판정**되고 naver_change_log에 91,005행/일이 쌓인다(현재 전체 17행).
+
+    파싱 불가 값은 예외 대신 None을 반환한다 — 이 함수는 매일 07:35 크론 경로에서 91,005번
+    호출되므로 쓰레기 값 하나가 동기화 전체를 죽이면 안 된다(fail-safe). None은 호출부에서
+    '비교 불가 → 로깅 안 함'으로 처리된다.
+    """
+    if v is None or v == "":
+        return None
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return None
+
+
 def collect_entities(
     *,
     campaigns: list[dict] | None = None,
