@@ -787,6 +787,11 @@ def _loads_or_none(raw: str | None) -> dict | None:
 def get_change_log(
     campaign_id: str | None = Query(None, description="캠페인 필터"),
     action: str | None = Query(None, description="update_bid/external_bid_change/set_user_lock 등"),
+    actor: str = Query(
+        "all",
+        pattern="^(all|ours|external)$",
+        description="ours=우리 실집행만 / external=외부 변경 감지만 / all=전부(기본)",
+    ),
     days: int = Query(30, ge=1, le=365, description="changed_at 조회 창(KST 기준)"),
     include_dry_run: bool = Query(False, description="dry-run 기록 포함 여부(기본 제외)"),
     limit: int = Query(100, ge=1, le=_MAX_CHANGE_LOG_LIMIT),
@@ -799,6 +804,14 @@ def get_change_log(
     한다. dry-run을 섞으면 아무것도 실행하지 않았는데 일한 것처럼 보인다(D-47-h 정직성 —
     0이면 0이라고 말하는 게 이 화면의 일).
 
+    ★`actor`도 같은 이유다(codex[P2] 2026-07-17). change_log에는 세 부류가 섞여 있다:
+      ① 우리 실집행(EXECUTION_ACTIONS) ② 외부 변경 **감지**(entity_sync가 기록 — MOP·사람이
+      바꾼 걸 우리가 관측한 것) ③ 우리 시스템 내부 설정(optimizer_change 등, 광고 API 쓰기 아님).
+    prod 실측(2026-07-17): dry_run=False 행 15건이 **전부 ②**이고 우리 실집행은 0건이다.
+    필터 없이 total을 세면 1층이 **"우리 조작 15회"**라고 표시한다 — 정확히 반대의 거짓말.
+    실행 액션 목록은 harness의 `_ACTION_BY_PROPOSAL_TYPE`에서 파생한다(하드코딩 금지 — 새
+    제안 유형이 배선될 때 조용히 어긋난다).
+
     ⚠️ 이 API는 change_log를 **읽기만** 한다. 이력을 *채우는* 것은 entity_sync의 diff 밸브
     (D-NAO-47 T2)와 naver_execution_harness다.
     """
@@ -808,6 +821,10 @@ def get_change_log(
         q = q.filter(NaverChangeLog.campaign_id == campaign_id)
     if action:
         q = q.filter(NaverChangeLog.action == action)
+    if actor == "ours":
+        q = q.filter(NaverChangeLog.action.in_(naver_execution_harness.EXECUTION_ACTIONS))
+    elif actor == "external":
+        q = q.filter(NaverChangeLog.action.in_(naver_execution_harness.EXTERNAL_DETECTION_ACTIONS))
     if not include_dry_run:
         q = q.filter(NaverChangeLog.dry_run.is_(False))
 

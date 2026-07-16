@@ -1902,7 +1902,13 @@ export interface NaverChangeLogResponse { total: number; rows: NaverChangeLogRow
 
 /** 변경 이력. ★include_dry_run 기본 false — "우리 조작 N회"는 실집행만 센다(D-47-h). */
 export async function fetchNaverChangeLog(params: {
-  campaign_id?: string; action?: string; days?: number;
+  campaign_id?: string; action?: string;
+  /** ★ours=우리 실집행만 / external=외부 변경 감지만 / all=전부(기본).
+   *  "우리 조작 N회"를 셀 땐 **반드시 ours**다 — change_log에는 external_bid_change 등
+   *  외부 변경 감지가 섞여 있어(prod 실측: dry_run=False 15건이 전부 외부 감지) 필터 없이
+   *  세면 우리가 아무것도 안 했는데 "15회"라고 표시된다(codex[P2] 2026-07-17). */
+  actor?: "all" | "ours" | "external";
+  days?: number;
   include_dry_run?: boolean; limit?: number; offset?: number;
 } = {}): Promise<NaverChangeLogResponse> {
   const q = new URLSearchParams();

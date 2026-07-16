@@ -54,7 +54,12 @@ export default function NaverAdCommandCenter() {
           getNaverDashboardOverview(),
           // ★dry_run 제외가 기본 — 실집행만 센다. 아무것도 안 했는데 일한 것처럼
           //   보이면 안 된다(D-47-h 정직성).
-          fetchNaverChangeLog({ days: 30, limit: 1 }),
+          // ★actor:"ours"가 필수다(codex[P2] 2026-07-17). change_log에는 external_bid_change
+          //   /external_status_change(외부가 바꾼 걸 우리가 **감지**한 것)와 optimizer_change
+          //   (내부 설정)가 섞여 있다. prod 실측상 dry_run=False 15건이 **전부 외부 감지**라,
+          //   필터 없이 total을 쓰면 우리가 아무것도 실행 안 했는데 "우리 조작 15회"가 된다 —
+          //   0을 0이라고 말하는 게 이 화면의 존재 이유인데 정반대의 거짓말이 된다(D-47-h).
+          fetchNaverChangeLog({ days: 30, limit: 1, actor: "ours" }),
         ]);
         if (!alive) return;
         setOverview(ov);
@@ -304,7 +309,10 @@ function ChangeLogPane() {
   const [data, setData] = useState<{ total: number; rows: NaverChangeLogRow[] } | null>(null);
   useEffect(() => {
     let alive = true;
-    fetchNaverChangeLog({ days: 30, limit: 10 })
+    // ★이 패널은 "우리가 한 일의 결과"(인과)다 — 외부가 바꾼 걸 감지한 행이 섞이면
+    //   남의 조작을 우리 성과로 보여주게 된다(codex[P2] 2026-07-17). 외부 변경은
+    //   별도 관심사(3열 대조의 MOP 열·이상 피드)라 여기 섞지 않는다.
+    fetchNaverChangeLog({ days: 30, limit: 10, actor: "ours" })
       .then((r) => { if (alive) setData(r); })
       .catch(() => { if (alive) setData({ total: 0, rows: [] }); });
     return () => { alive = false; };

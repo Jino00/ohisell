@@ -141,3 +141,66 @@ def test_change_log_empty_is_200_not_404(client):
     """★빈 상태는 에러가 아니다 — 1층이 '우리 조작 0회'를 정직하게 그려야 한다(D-47-h)."""
     body = client.get("/api/naver/ad/change-log").json()
     assert body == {"rows": [], "total": 0}
+
+
+# ── codex[P2] 2026-07-17: actor 필터 — "우리 조작"에 외부 감지를 섞으면 안 된다 ──
+def test_actor_ours_excludes_external_detections(client, db):
+    """★D-47-h의 핵심. prod 실측상 change_log의 dry_run=False 행 15건이 **전부**
+    external_status_change(외부가 바꾼 걸 우리가 감지한 것)다. 필터 없이 total을 쓰면
+    1층이 "우리 조작 15회"라고 표시한다 — 우리는 아무것도 실행하지 않았는데.
+    0을 0이라고 말하는 게 이 화면의 존재 이유인데 정반대로 거짓말을 하게 된다."""
+    _seed(db, action="external_status_change")
+    _seed(db, action="external_bid_change")
+    _seed(db, action="update_bid")  # 우리 실집행
+
+    ours = client.get("/api/naver/ad/change-log?actor=ours").json()
+    assert ours["total"] == 1
+    assert ours["rows"][0]["action"] == "update_bid"
+
+
+def test_actor_ours_is_zero_when_only_external_exists(client, db):
+    """★prod 현재 상태 재현: 외부 감지만 있고 우리 실집행은 0."""
+    for _ in range(15):
+        _seed(db, action="external_status_change")
+    body = client.get("/api/naver/ad/change-log?actor=ours").json()
+    assert body["total"] == 0
+    assert body["rows"] == []
+
+
+def test_actor_external_returns_only_detections(client, db):
+    _seed(db, action="external_bid_change")
+    _seed(db, action="update_bid")
+    body = client.get("/api/naver/ad/change-log?actor=external").json()
+    assert body["total"] == 1
+    assert body["rows"][0]["action"] == "external_bid_change"
+
+
+def test_actor_excludes_settings_changes_from_ours(client, db):
+    """optimizer_change·update_expert_delegation은 우리 시스템 내부 설정이지
+    광고 실집행이 아니다(광고 API 쓰기 아님)."""
+    _seed(db, action="optimizer_change")
+    _seed(db, action="update_expert_delegation")
+    assert client.get("/api/naver/ad/change-log?actor=ours").json()["total"] == 0
+
+
+def test_actor_all_is_default(client, db):
+    _seed(db, action="external_status_change")
+    _seed(db, action="update_bid")
+    assert client.get("/api/naver/ad/change-log").json()["total"] == 2
+    assert client.get("/api/naver/ad/change-log?actor=all").json()["total"] == 2
+
+
+def test_actor_rejects_unknown_value(client):
+    assert client.get("/api/naver/ad/change-log?actor=bogus").status_code == 422
+
+
+def test_execution_actions_derives_from_harness_mapping():
+    """★드리프트 방지: 실행 액션 목록을 프론트나 라우터가 하드코딩하면 새 제안 유형이
+    배선될 때 조용히 어긋난다. harness의 _ACTION_BY_PROPOSAL_TYPE이 단일 진실이다."""
+    from app.services.naver_ad.naver_execution_harness import (
+        EXECUTION_ACTIONS, _ACTION_BY_PROPOSAL_TYPE,
+    )
+    assert EXECUTION_ACTIONS == frozenset(_ACTION_BY_PROPOSAL_TYPE.values())
+    assert "external_bid_change" not in EXECUTION_ACTIONS
+    assert "external_status_change" not in EXECUTION_ACTIONS
+    assert "optimizer_change" not in EXECUTION_ACTIONS
