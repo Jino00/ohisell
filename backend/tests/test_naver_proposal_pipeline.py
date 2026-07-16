@@ -182,11 +182,16 @@ def test_run_daily_slack_failure_reflected_as_failed_stage(db, monkeypatch):
 
 def test_run_daily_wires_performance_estimate_into_expected_effect(db, monkeypatch):
     """codex 지적: estimate_performance가 파이프라인에서 전혀 연결 안 돼 expected_effect가
-    항상 '미조회'였다 — 확정된 recommended_bid로 performance-bulk를 호출해 예측클릭을 채운다."""
+    항상 '미조회'였다 — 확정된 recommended_bid로 performance-bulk를 호출해 예측클릭을 채운다.
+
+    bid_amt=90: 추천(경제상한) 80이 스텝 하한(90×0.85=76.5→올림 80)과 일치해 클램프
+    미발동 시나리오 — 클램프가 발동하면 expected_effect가 정직 텍스트로 교체되므로(codex[P2]
+    예측치 정합, test_naver_proposal_writer 참조) 이 테스트의 목적(estimate 배선 검증)에는
+    미클램프 케이스가 맞다."""
     _seed_bep(db)
     db.add(NaverCampaignSettings(campaign_id="cmp1", optimizer="ours"))
     db.add(NaverEntity(entity_type="keyword", entity_id="nkw-1", campaign_id="cmp1",
-                        campaign_type="WEB_SITE", name="출혈키워드", status="on", bid_amt=500))
+                        campaign_type="WEB_SITE", name="출혈키워드", status="on", bid_amt=90))
     _row(db, AS_OF, "cmp1", "WEB_SITE", "grp1", "nkw-1", 500, 50, 10000, direct=1000)
     db.commit()
 

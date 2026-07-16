@@ -165,13 +165,26 @@ def _bid_proposal(
         + "."
         + _forecast_evidence_suffix(forecast)
     )
+
+    # codex[P2] 클램프 후 예측치 정합: sim의 예측 텍스트(예상 클릭·매출)는 원 추천 입찰가
+    # 기준이라 클램프된 target_bid와 불일치 — 그대로 두면 콘솔 오도 + predicted_json
+    # (naver_execution_harness가 expected_effect를 복사 저장)이 잘못된 기준으로 남는다.
+    # 클램프 입찰가 기준 재산출은 불가(예측클릭 = /estimate/performance API 2차 패스 산출,
+    # 이 SA는 API 접근 없음·로컬 응답곡선 없음) → 정직 정리로 교체(추정 금지 원칙).
+    expected_effect = sim["expected_effect_text"]
+    if clamp_note:
+        expected_effect = (
+            f"스텝 클램프 {target_bid}원 실행 — 원 추천 {sim['recommended_bid']}원 기준 "
+            f"예측치는 무효(클램프 입찰가 기준 재산출 불가, 정직 경계)."
+        )
+
     return {
         "proposal_type": proposal_type,
         "target_type": target_type,
         "target_id": target_id,
         "campaign_id": campaign_id,
         "rationale": rationale,
-        "expected_effect": sim["expected_effect_text"],
+        "expected_effect": expected_effect,
         "status": "pending",
         "target_bid": target_bid,
     }

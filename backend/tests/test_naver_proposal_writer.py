@@ -685,6 +685,65 @@ def test_bid_down_step_floor_respects_absolute_min_70(db):
     assert out[0]["target_bid"] == 70
 
 
+# ── codex[P2]: 클램프 후 예측치 정합 — expected_effect가 원 추천 기준 수치를 담으면 오도 ──
+def test_bid_up_clamped_expected_effect_replaced_with_honest_text(db):
+    """클램프 발동 시 expected_effect가 원 추천(10000원) 기준 예측 텍스트를 그대로 담으면
+    콘솔 오도 + predicted_json(=expected_effect 복사) 오염 — 정직 텍스트로 교체돼야 한다."""
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    row = {"campaign_id": "cmp-ours", "adgroup_id": "grp-1", "keyword_id": "nkw-sw",
+           "cost": 5000, "clk": 30, "conv_amt": 50_000, "roas_corrected": 10.0}
+    diagnosis = _diagnosis(starving_winners=[row])
+
+    out = proposal_writer.build(
+        db, diagnosis,
+        bid_sims={("keyword", "nkw-sw"): _sim(
+            direction="up", ceiling=10_000, recommended=10_000, current_bid=1000)},
+        as_of=AS_OF,
+    )
+    assert len(out) == 1
+    assert out[0]["target_bid"] == 1150
+    assert "테스트 expected_effect" not in out[0]["expected_effect"], \
+        "원 추천 기준 예측 텍스트가 그대로 남으면 콘솔 오도"
+    assert "스텝 클램프 1150원" in out[0]["expected_effect"]
+    assert "원 추천 10000원" in out[0]["expected_effect"]
+    assert "무효" in out[0]["expected_effect"]
+
+
+def test_bid_down_clamped_expected_effect_replaced_with_honest_text(db):
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis(bleeding_keywords=[_bleeding_row()])
+
+    out = proposal_writer.build(
+        db, diagnosis,
+        bid_sims={("keyword", "nkw-1"): _sim(direction="down", ceiling=1000, recommended=1000,
+                                              current_bid=2000)},
+        as_of=AS_OF,
+    )
+    assert len(out) == 1
+    assert out[0]["target_bid"] == 1700
+    assert "테스트 expected_effect" not in out[0]["expected_effect"]
+    assert "스텝 클램프 1700원" in out[0]["expected_effect"]
+    assert "원 추천 1000원" in out[0]["expected_effect"]
+
+
+def test_unclamped_expected_effect_unchanged(db):
+    """클램프 미발동이면 expected_effect는 sim 텍스트 그대로(기존 동작 회귀 방지)."""
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis(bleeding_keywords=[_bleeding_row()])
+
+    out = proposal_writer.build(
+        db, diagnosis,
+        bid_sims={("keyword", "nkw-1"): _sim(direction="down", ceiling=1900, recommended=1900,
+                                              current_bid=2000)},
+        as_of=AS_OF,
+    )
+    assert len(out) == 1
+    assert out[0]["expected_effect"] == "테스트 expected_effect"
+
+
 def test_pause_proposal_defaults_to_keyword_target_type_unchanged(db):
     """회귀 방지 — target_type 인자를 안 넘기면 기존 keyword 경로와 완전히 동일해야 한다."""
     row = _pause_row()
