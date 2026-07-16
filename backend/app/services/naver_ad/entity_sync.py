@@ -205,7 +205,10 @@ def sync_entities(db: Session, *, rows: list[dict] | None = None) -> dict:
             e.name = r["name"]
             e.status = r["status"]
             e.bid_amt = r.get("bid_amt")
-            e.qi_grade = r.get("qi_grade")
+            if r.get("qi_grade") is not None:
+                # codex[P2] D-NAO-46②: qi는 느리게 변하는 관측치 — API가 일시적으로 nccQi를
+                # 누락(또는 레거시 rows 주입)해도 last-known 등급을 None으로 지우지 않는다.
+                e.qi_grade = r["qi_grade"]
             e.synced_at = now
 
     stale = 0

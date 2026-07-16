@@ -327,6 +327,25 @@ def test_sync_entities_logs_external_qi_change_when_both_non_none_and_differ(db)
     assert logs[0].after_value == "6"
 
 
+def test_sync_entities_keeps_last_known_qi_when_new_is_none(db):
+    """codex[P2] D-NAO-46②: /ncc/keywords가 일시적으로 nccQi를 누락(또는 레거시 rows 주입)해도
+    기존 저장 등급을 None으로 지우면 안 된다 — qi는 느리게 변하는 관측치라 last-known 유지."""
+    rows_v1 = [{"entity_type": "keyword", "entity_id": "nkw-1", "parent_id": "grp-1",
+                "campaign_id": "cmp-1", "campaign_type": "WEB_SITE", "name": "필름",
+                "status": "on", "bid_amt": 700, "qi_grade": 4}]
+    entity_sync.sync_entities(db, rows=rows_v1)
+
+    rows_v2 = [{**rows_v1[0], "qi_grade": None}]  # 일시 누락 응답
+    entity_sync.sync_entities(db, rows=rows_v2)
+
+    e = db.query(NaverEntity).filter_by(entity_id="nkw-1").one()
+    assert e.qi_grade == 4, "None 응답이 last-known 등급(4)을 지우면 안 된다"
+    logs = db.query(NaverChangeLog).filter(
+        NaverChangeLog.entity_id == "nkw-1", NaverChangeLog.action == "external_qi_change",
+    ).all()
+    assert logs == [], "None 관여 시 변화 로그도 남기지 않는다"
+
+
 def test_sync_entities_no_log_when_qi_unchanged(db):
     rows = [{"entity_type": "keyword", "entity_id": "nkw-1", "parent_id": "grp-1",
              "campaign_id": "cmp-1", "campaign_type": "WEB_SITE", "name": "필름",
