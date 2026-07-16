@@ -1557,7 +1557,41 @@ class NaverHourlySnapshot(Base):
     clk: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     imp: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     daily_budget: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 소진율 계산용
+    avg_rank: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)  # D-NAO-46②: 캠페인 당일 누적 순위(avgRnk<=0→NULL)
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class NaverKeywordHourly(Base):
+    """키워드/쇼핑그룹 grain 시간별 축적 — 일 1회 D-1 hh24 스윕, 영구 보존
+    (D-NAO-46②, docs/PLAN_naver-ad-keyword-hourly-accrual.md §3).
+
+    grain: (ad_date, entity_id, hour). WEB_SITE=키워드(nkw-…) entity_type='keyword',
+    SHOPPING/BRAND_SEARCH=애드그룹(grp-…) entity_type='adgroup' — naver_ad_daily의
+    keyword_id='' sentinel 규약과 동일 축. imp/clk/cost는 hh24 breakdown 원본 그대로
+    (그 시간대 구간값 — 당일 누적 아님). avg_rank는 avgRnk<=0(무의미, 순위는 1부터)이면
+    NULL. hh24 상세는 네이버가 최근 7일만 보존 — 이 테이블이 시간당 밴드 관제(순위
+    2.5~4 유지)·학습 베이스라인의 유일한 영구 원료(ref 32 §4). 365일 롤링 삭제
+    (keyword_hourly_sweep.py).
+    """
+
+    __tablename__ = "naver_keyword_hourly"
+    __table_args__ = (
+        UniqueConstraint("ad_date", "entity_id", "hour", name="uq_naver_keyword_hourly"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ad_date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)
+    hour: Mapped[int] = mapped_column(Integer, nullable=False)  # 0~23 (name 라벨 파싱)
+    entity_type: Mapped[str] = mapped_column(String(10), nullable=False)  # keyword/adgroup
+    entity_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)  # nkw-… / grp-…
+    adgroup_id: Mapped[str] = mapped_column(String(50), nullable=False, default="")  # keyword 행의 소속 그룹
+    campaign_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    campaign_type: Mapped[str] = mapped_column(String(20), nullable=False, default="")  # WEB_SITE/SHOPPING/BRAND_SEARCH
+    imp: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    clk: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cost: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    avg_rank: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
+    synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())  # ⚠️UTC(sqlite-server-default-now-is-utc) — 시간계산엔 미사용
 
 
 class NaverChangeLog(Base):
@@ -1837,6 +1871,7 @@ class NaverEntity(Base):
     monthly_volume: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # keywordstool PC+Mobile 합
     competition: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)  # low/mid/high
     volume_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    qi_grade: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 품질지수 1~7(D-NAO-46②, keyword 행만 — /ncc/keywords nccQi.qiGrade)
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 

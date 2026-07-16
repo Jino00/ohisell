@@ -332,6 +332,27 @@ def test_fetch_keyword_volumes_parses_low_volume_sentinel(monkeypatch):
     assert "무관한연관어" not in out  # 요청하지 않은 연관 키워드는 제외
 
 
+# ── get_keywords qi_grade (D-NAO-46②) ──
+def test_get_keywords_includes_qi_grade(monkeypatch):
+    class FakeResp:
+        status_code = 200
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return [
+                {"nccKeywordId": "nkw-1", "nccAdgroupId": "grp-1", "keyword": "필름",
+                 "status": "ELIGIBLE", "userLock": False, "bidAmt": 700,
+                 "nccQi": {"qiGrade": 4}},
+                {"nccKeywordId": "nkw-2", "nccAdgroupId": "grp-1", "keyword": "케이스",
+                 "status": "ELIGIBLE", "userLock": False, "bidAmt": 650},  # nccQi 부재
+            ]
+    monkeypatch.setattr(fetcher, "_get", lambda path, params=None: FakeResp())
+
+    out = fetcher.get_keywords("grp-1")
+    assert out[0]["qi_grade"] == 4
+    assert out[1]["qi_grade"] is None  # nccQi 부재 시 None(크래시 아님)
+
+
 # ── campaign_backfill ──
 def test_backfill_campaign_daily_uses_sentinel_adgroup(db, monkeypatch):
     def fake_backfill(campaign_id, date_from, date_to):
