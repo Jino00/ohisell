@@ -30,6 +30,7 @@ def run_daily_retro(db: Session, today: date | None = None) -> dict:
         result["snapshot"] = retro_snapshotter.snapshot_signals(db, today - timedelta(days=1))
         result["stage_status"]["snapshotter"] = "ok"
     except Exception as e:  # noqa: BLE001
+        db.rollback()  # codex[P2] 실패 트랜잭션 정리 — 없으면 공유 세션이 failed 상태로 남아 다음 단계가 PendingRollbackError로 연쇄 실패(격리 무력화)
         log.exception("retro_scoring_loop snapshotter 단계 실패: %s", e)
         result["stage_status"]["snapshotter"] = "failed"
         result["snapshot"] = {"error": str(e)}
@@ -38,6 +39,7 @@ def run_daily_retro(db: Session, today: date | None = None) -> dict:
         result["scored"] = retro_scorer.score_due(db, today)
         result["stage_status"]["scorer"] = "ok"
     except Exception as e:  # noqa: BLE001
+        db.rollback()  # codex[P2] 실패 트랜잭션 정리 — 없으면 공유 세션이 failed 상태로 남아 다음 단계가 PendingRollbackError로 연쇄 실패(격리 무력화)
         log.exception("retro_scoring_loop scorer 단계 실패: %s", e)
         result["stage_status"]["scorer"] = "failed"
         result["scored"] = {"error": str(e)}
@@ -46,6 +48,7 @@ def run_daily_retro(db: Session, today: date | None = None) -> dict:
         result["pacing"] = retro_pacing_scorer.score_alerts(db, today - timedelta(days=1))
         result["stage_status"]["pacing_scorer"] = "ok"
     except Exception as e:  # noqa: BLE001
+        db.rollback()  # codex[P2] 실패 트랜잭션 정리 — 없으면 공유 세션이 failed 상태로 남아 다음 단계가 PendingRollbackError로 연쇄 실패(격리 무력화)
         log.exception("retro_scoring_loop pacing_scorer 단계 실패: %s", e)
         result["stage_status"]["pacing_scorer"] = "failed"
         result["pacing"] = {"error": str(e)}
@@ -69,6 +72,7 @@ def backfill(db: Session, date_from: date, date_to: date, today: date | None = N
             snap = retro_snapshotter.snapshot_signals(db, d)
             result["days"].append({"asof": d.isoformat(), "snapshot": snap})
         except Exception as e:  # noqa: BLE001 — 하루 실패가 나머지 구간을 막으면 안 됨
+            db.rollback()  # codex[P2] 동일 — 실패한 as-of 하루가 세션을 오염시키면 나머지 구간 전체가 죽는다
             log.exception("retro_scoring_loop backfill snapshot 실패(asof=%s): %s", d, e)
             result["days"].append({"asof": d.isoformat(), "error": str(e)})
         d += timedelta(days=1)
@@ -77,6 +81,7 @@ def backfill(db: Session, date_from: date, date_to: date, today: date | None = N
         result["scored"] = retro_scorer.score_due(db, today)
         result["stage_status"]["scorer"] = "ok"
     except Exception as e:  # noqa: BLE001
+        db.rollback()  # codex[P2] 실패 트랜잭션 정리 — 없으면 공유 세션이 failed 상태로 남아 다음 단계가 PendingRollbackError로 연쇄 실패(격리 무력화)
         log.exception("retro_scoring_loop backfill scorer 실패: %s", e)
         result["stage_status"]["scorer"] = "failed"
         result["scored"] = {"error": str(e)}
@@ -85,6 +90,7 @@ def backfill(db: Session, date_from: date, date_to: date, today: date | None = N
         result["pacing"] = retro_pacing_scorer.score_alerts(db, date_to)
         result["stage_status"]["pacing_scorer"] = "ok"
     except Exception as e:  # noqa: BLE001
+        db.rollback()  # codex[P2] 실패 트랜잭션 정리 — 없으면 공유 세션이 failed 상태로 남아 다음 단계가 PendingRollbackError로 연쇄 실패(격리 무력화)
         log.exception("retro_scoring_loop backfill pacing_scorer 실패: %s", e)
         result["stage_status"]["pacing_scorer"] = "failed"
         result["pacing"] = {"error": str(e)}

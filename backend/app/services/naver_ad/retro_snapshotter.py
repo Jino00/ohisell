@@ -11,7 +11,7 @@ from datetime import date, timedelta
 from sqlalchemy.orm import Session
 
 from app.models import NaverRetroSignal
-from app.services.naver_ad import diagnosis
+from app.services.naver_ad import campaign_target_resolver, diagnosis
 from app.utils.kst import kst_now
 
 _LOOKBACK_DAYS = 14  # ref 31과 동일 진단 윈도우(run_daily의 lookback_days=15와는 별개 — as-of 리플레이 전용)
@@ -49,7 +49,20 @@ def snapshot_signals(db: Session, asof: date) -> dict:
 
     cf_asof = diag_out["correction_factor"]["factor"]
     bep_asof = diag_out["account_bep_roas"]
-    target_asof = diag_out["account_target_roas"]
+    account_target = diag_out["account_target_roas"]
+
+    # codex[P2] 렌즈 정합: shopping_group_growth는 build_diagnosis가 캠페인별 리졸브 목표
+    # (override > 계정기본값)로 *선별*하므로, 채점 렌즈(target_asof)도 같은 값을 얼려야 한다
+    # — 계정 기본값으로 채점하면 override 캠페인은 선별 기준과 채점 기준이 어긋난다.
+    # 다른 보드(starving/bep류)는 선별도 계정값이라 계정값 저장이 정합.
+    _target_cache: dict[str, float] = {}
+
+    def _campaign_target(campaign_id: str) -> float:
+        if campaign_id not in _target_cache:
+            resolved = campaign_target_resolver.resolve_target_roas(db, campaign_id)
+            t = resolved["target_roas"]
+            _target_cache[campaign_id] = float(t) if t is not None else account_target
+        return _target_cache[campaign_id]
 
     existing = {
         (row.board, row.target_id)
@@ -67,9 +80,15 @@ def snapshot_signals(db: Session, asof: date) -> dict:
                 continue
             if (board, target_id) in existing:
                 continue
+            campaign_id = c.get("campaign_id", "")
+            target_asof = (
+                _campaign_target(campaign_id)
+                if board == "shopping_group_growth" and campaign_id
+                else account_target
+            )
             db.add(NaverRetroSignal(
                 created_at=kst_now(), asof_date=asof, board=board, direction=direction,
-                grain=grain, target_id=target_id, campaign_id=c.get("campaign_id", ""),
+                grain=grain, target_id=target_id, campaign_id=campaign_id,
                 cf_asof=cf_asof, bep_asof=bep_asof, target_asof=target_asof,
                 cost_asof=c.get("cost"), roas_c_asof=c.get("roas_corrected"),
             ))

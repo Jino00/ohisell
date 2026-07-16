@@ -198,3 +198,29 @@ def test_backfill_isolates_single_day_snapshot_failure(db, monkeypatch):
     assert "error" in result["days"][1]
     assert "snapshot" in result["days"][0]
     assert "snapshot" in result["days"][2]
+
+
+def test_run_daily_retro_rolls_back_poisoned_session_before_next_stage(db, monkeypatch):
+    """codex[P2] 회귀: 단계가 DB 예외(IntegrityError 등)로 죽으면 세션이 failed 트랜잭션
+    상태로 남는다 — 핸들러가 rollback하지 않으면 다음 단계가 PendingRollbackError로 연쇄
+    실패해 격리 설계가 무력화된다. 진짜 DB 오염으로 재현(문자열 예외 아님)."""
+    from app.services.naver_ad import retro_snapshotter
+
+    def poison_snapshot(db_, asof):
+        row = dict(
+            asof_date=asof, board="bleeding_keywords", direction="down", grain="keyword",
+            target_id="nkw-dup", campaign_id="cmp1",
+            cf_asof=1.0, bep_asof=2.0, target_asof=4.0, cost_asof=100,
+        )
+        db_.add(NaverRetroSignal(**row))
+        db_.flush()
+        db_.add(NaverRetroSignal(**row))  # (asof,board,target) UNIQUE 위반
+        db_.flush()  # IntegrityError → 세션 failed 상태로 전이
+
+    monkeypatch.setattr(retro_snapshotter, "snapshot_signals", poison_snapshot)
+    result = retro_scoring_loop.run_daily_retro(db, today=TODAY)
+
+    assert result["stage_status"]["snapshotter"] == "failed"
+    # rollback 덕에 이후 단계는 PendingRollbackError 없이 정상 완주해야 한다
+    assert result["stage_status"]["scorer"] == "ok"
+    assert result["stage_status"]["pacing_scorer"] == "ok"

@@ -202,3 +202,29 @@ def test_snapshot_asof_leakage_regression(db):
     assert result["snapshotted"] == 1
     row = db.query(NaverRetroSignal).one()
     assert row.cost_asof == 10000, "asof 다음날 지출이 섞이면 910,000원이 되어야 하는데 그러면 안 됨"
+
+
+def test_snapshot_growth_freezes_campaign_override_target(db):
+    """codex[P2] 회귀: shopping_group_growth는 캠페인별 리졸브 목표(override>계정기본)로
+    선별되므로 채점 렌즈(target_asof)도 같은 값을 얼려야 한다. 보정ROAS 3.5 그룹은
+    override 3.0으론 선별되지만 계정 목표 4.0 기준으론 아니다 — 행이 존재한다는 것 자체가
+    선별에 override가 쓰였다는 증거이고, 그렇다면 target_asof도 3.0이어야 정합."""
+    from app.models import NaverCampaignSettings
+
+    _bep(db)  # 계정 bep 2.0 / target 4.0
+    db.add(NaverCampaignSettings(campaign_id="cmp-s", optimizer="ours",
+                                 target_roas_override=Decimal("3.0")))
+    _active_campaign(db, "cmp-s", "SHOPPING")
+    _entity(db, "adgroup", "grp-s", status="on", bid_amt=500, campaign_id="cmp-s",
+            parent_id="cmp-s", campaign_type="SHOPPING")
+    _row(db, ASOF, "cmp-s", "SHOPPING", "grp-s", "", 1000, 50, 10000, direct=35000)  # roas_c=3.5
+    db.commit()
+
+    result = retro_snapshotter.snapshot_signals(db, ASOF)
+    assert result["snapshotted"] >= 1
+    row = db.query(NaverRetroSignal).filter(NaverRetroSignal.board == "shopping_group_growth").one()
+    assert row.target_asof == 3.0, "override 캠페인의 growth 행은 계정 목표(4.0)가 아니라 override(3.0)를 얼려야 함"
+    # 다른 보드는 계정 목표 유지(선별도 계정값이므로) — 회귀 방지 대조군
+    others = db.query(NaverRetroSignal).filter(NaverRetroSignal.board != "shopping_group_growth").all()
+    for o in others:
+        assert o.target_asof == 4.0
