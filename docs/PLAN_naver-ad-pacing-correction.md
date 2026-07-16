@@ -50,7 +50,16 @@
 4. 문서 신선도: 이 문서 §7 체크 + progress + 트랙파일.
 
 ## 7. 진행 기록 (구현자가 갱신)
-- [ ] C1 SA + 단위테스트
-- [ ] C2 배선 + 통합테스트 (+ 곡선 point 의미 확정 기록: ___)
-- [ ] C3 codex PASS (라운드/지적/반영: ___)
-- [ ] 배포 + 라이브 확인
+- [x] C1 SA + 단위테스트 (14 test — sentinel 이중계산 회귀·경계·as-of 포함, 커밋 d86cb61)
+- [x] C2 배선 + 통합테스트 (커밋 7074a7e + 테스트 5종 5d85ca2/7f1c51f. **곡선 point 의미 확정**:
+      `points[i]["cost"] = cost_so_far + scaled_remaining_cost(α)` = 오늘 하루 전체 예상 총비용
+      (전일 물량) — daily_budget과 원래부터 동종 비교(P2-2 회귀 테스트 참조). 편향 원인은
+      cost_so_far가 raw(저평가)라는 점 → so-far 항만 projected로 교체. 잔여분 개념 중복은
+      보수화 방향 근사로 수용, dry-run 관찰로 캘리브레이션.)
+- [x] C3 codex PASS (3라운드, 2026-07-16. R1 [P2]×2: ①build_curve가 벽시계 kst_today만 사용
+      → today= as-of 관통 ②cost만 투영 시 ROAS 분모만 부풀어 αC 오발동 → clk·conv_amt 동일
+      factor 투영으로 비율 보존(mutation check로 테스트 유효성 검증). R2 [P2]×1: factor를
+      current_hour로 조회 — 최신 스냅샷이 이전 시각분이면 저투영 → snapshot_hour 기준 캠페인별
+      조회로 이동. R3: "remaining correctness issues 없음" PASS. 전 지적 동의·수정, 기각 0.
+      naver 스위트 833 pass.)
+- [ ] 배포 + 라이브 확인 (Jino 게이트 — §5)

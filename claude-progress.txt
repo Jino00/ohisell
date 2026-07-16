@@ -3,6 +3,12 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
+- 날짜: 2026-07-16 저녁~ (★**D-NAO-44 pacing 완결도 보정 배선 완성 + codex 3R PASS + Ava 배선 확인**. 워크트리 `spot-backtest-cadence-pacing-2e3bfa`, 브랜치 `claude/spot-backtest-cadence-pacing-2e3bfa`(main 기준). 라우팅: 구조=Fable·하위=Opus·단순=Sonnet)
+  - **pacing 배선 완결(코드+게이트)**: 직전 세션 WIP(exciting-liskov-681358 미커밋)를 이 워크트리로 이식 → C1 `completeness_curve` SA + C2 flight_loop 배선 커밋(d86cb61/7074a7e) → **codex 3라운드 GATE PASS**: R1 [P2]×2(①build_curve as-of `today=` 관통 ②clk·conv_amt 동일 factor 투영으로 so-far ROAS 비율 보존 — mutation check로 테스트 유효성 증명) R2 [P2]×1(③factor를 snapshot_hour 기준 캠페인별 조회 — current_hour 조회는 스냅샷 지연 시 저투영) R3 잔여 0. 수정 커밋 5d85ca2/7f1c51f. **naver 스위트 833 pass·회귀 0**. PLAN C3 flight 통합테스트 5종 신규(WIP에 없었음). PLAN §7 진행기록 갱신.
+  - **★남은 것(Jino 게이트)**: prod 배포(completeness_curve.py+flight_loop.py 2파일 copy·pm2 재시작, 마이그無) → 다음 2h 플라이트 크론 change_log에 projection 필드 실출현 확인(원칙22 — 그 전까지 "됐다" 금지). PR 생성도 Jino 결정.
+  - **Ava 배선 확인 완료(HANDOFF §6-⑤ 해소, D-NAO-44-a)**: 드리프트 아님 — 실행 코어는 Ava 무인지(사람 콘솔 경로는 평결 무관), delegation_gate 자동 레인만 verdict=='agree'를 필요조건 소비하되 위임 스위치(Jino 전용, 현재 빈 set=비활성)가 선행 게이트. D-NAO-25 일관, 수정 불요.
+  - **워크트리 부채 주의**: exciting-liskov-681358에 같은 WIP가 미커밋 상태로 남아있음(이 브랜치에 커밋된 버전이 codex 수정 포함 최신 — 그쪽 WIP는 이제 stale, 정리는 Jino/다음 세션 확인 후). 6cc75b의 백테스트·관찰 산출물 untracked 부채도 여전.
+  - **다른 미완(HANDOFF 승계)**: ①(Jino) 04 pending 5건 콘솔 승인 — 840 최우선(첫 카나리 겸 밴드 인과검증), 839는 소재 구성(useGroupBidAmt) 확인 먼저 ②(Jino) MOP 6245/5752 bidYn=Y 활성화 ③07-17 09:30 곡선검증+폴러정리 루틴 ④(승인 후) 성장보드 "목표 순위밴드 2.5~4" 로직·그룹별 BEP 이름매칭(resolver ② 갭).
 - 날짜: 2026-07-14 오후 (★★**근본해결 A 착수 = 쇼핑 캠페인 실행 경로 완성(X1b-S)**. Opus 설계·Sonnet 구현·codex 게이트. D-NAO-43. 브랜치 `claude/naver-ad-shopping-execution`(main 기준))
   - **문제 규명(라이브)**: Jino "우리 MOP 켜서 04 작업 시작" → 04=SHOPPING 캠페인인데 우리 실행 손은 키워드(WEB_SITE) 중심 → 실행형 제안 구조적 0건. 두뇌(shopping_group_bep)·bid_down 생성은 배선됨, 갭=writer `update_adgroup_bid` 부재+executor adgroup 차단+성장보드 부재+쇼핑 pause 부재.
   - **근본해결 A 확정(Jino)**: 쇼핑 실행 3겹 완성 = 손(update_adgroup_bid)+성장 개방(BEP하한 유지)+쇼핑 정지·재개+D-NAO-40 수정. 계획서 `docs/PLAN_naver-ad-shopping-execution.md`(Phase S0~S4). B(파워링크 카나리 교체)=회피라 기각.
