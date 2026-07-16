@@ -1974,10 +1974,17 @@ export interface NaverRetroBoardHorizons {
 /** pacing 롤업: kind("저속"/"과속"/"unparsed") → verdict("correct"/"partial"/"false_alarm"/"unparsed") → 건수. */
 export type NaverRetroPacingRollup = Record<string, Record<string, number>>;
 
+/** kind → verdict → 그 버킷의 **평균 최종 소진율**(0~1 분수). final_ratio가 전부 NULL이면 null.
+ *  ★D-NAO-47에서 추가. "저속 correct 769건"은 '경보가 맞았다'까지고, **"평균 최종 소진율
+ *  4.9%"라야 "하루가 끝나도 일예산의 4.9%만 썼다 = 만성 저소진이 실재한다"는 증거**가 된다
+ *  — D-NAO-45 정정(trigger_pacing은 노이즈 아님 → 접지 말고 롤업)의 핵심 숫자. */
+export type NaverRetroPacingRatioRollup = Record<string, Record<string, number | null>>;
+
 export interface NaverRetroScorecard {
   window_days: number;
   boards: Record<string, NaverRetroBoardHorizons>;
   pacing: NaverRetroPacingRollup;
+  pacing_final_ratio: NaverRetroPacingRatioRollup;
 }
 
 export function fetchNaverRetroScorecard(days?: number): Promise<NaverRetroScorecard> {

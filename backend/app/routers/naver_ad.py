@@ -733,12 +733,36 @@ def retro_scorecard(
         .all()
     )
     pacing: dict[str, dict[str, int]] = {}
+    # D-NAO-47: kind×verdict별 final_ratio 평균. ★"저속 경보 769건 correct"는 '경보가
+    # 맞았다'까지고, **"평균 최종 소진율 4.9%"라야 "하루가 끝나도 일예산의 4.9%만 썼다 =
+    # 만성 저소진이 실재한다"는 증거**가 된다. D-NAO-45의 정정(trigger_pacing은 노이즈가
+    # 아니다 → 접지 말고 롤업)의 핵심 숫자라 커맨드 센터 2층이 이걸 표시해야 한다.
+    # 데이터는 naver_retro_pacing_score.final_ratio에 이미 있었는데 이 엔드포인트가 안 줬다.
+    ratio_acc: dict[str, dict[str, list[float]]] = {}
     for row in pacing_rows:
         kind = row.kind or "unparsed"
         pacing.setdefault(kind, {}).setdefault(row.verdict, 0)
         pacing[kind][row.verdict] += 1
+        ratio_acc.setdefault(kind, {}).setdefault(row.verdict, [])
+        if row.final_ratio is not None:
+            ratio_acc[kind][row.verdict].append(float(row.final_ratio))
 
-    return {"window_days": days, "boards": boards, "pacing": pacing}
+    # ★전부 NULL(unparsed 등)이면 평균은 0이 아니라 **None**이다. 0으로 적으면
+    # "소진율 0%"라는 거짓 사실이 된다(0과 '알 수 없음'은 다르다).
+    pacing_final_ratio = {
+        kind: {
+            verdict: (round(sum(vals) / len(vals), 4) if vals else None)
+            for verdict, vals in by_verdict.items()
+        }
+        for kind, by_verdict in ratio_acc.items()
+    }
+
+    return {
+        "window_days": days,
+        "boards": boards,
+        "pacing": pacing,
+        "pacing_final_ratio": pacing_final_ratio,
+    }
 
 
 # ══════════════════════════════════════════════════════════════════

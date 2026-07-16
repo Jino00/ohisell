@@ -205,7 +205,7 @@ function RetroScorecardPane() {
     let alive = true;
     fetchNaverRetroScorecard()
       .then((r) => { if (alive) setData(r); })
-      .catch(() => { if (alive) setData({ window_days: 0, boards: {}, pacing: {} }); });
+      .catch(() => { if (alive) setData({ window_days: 0, boards: {}, pacing: {}, pacing_final_ratio: {} }); });
     return () => { alive = false; };
   }, []);
   if (data === null) return <Loading rows={3} />;
@@ -264,23 +264,36 @@ function RetroRollup({ data }: { data: NaverRetroScorecard }) {
               const unparsed = verdicts.unparsed ?? 0;
               const scored = correct + partial + falseAlarm;
               const precision = scored > 0 ? correct / scored : null;
+              // ★평균 최종 소진율 — 이 롤업의 진짜 punchline(D-NAO-47에서 백엔드에 추가).
+              //   correct 건수는 "경보가 맞았다"까지고, 이 숫자라야 **"하루가 끝나도 일예산의
+              //   4.9%만 썼다 = 만성 저소진이 실재한다"**는 증거가 된다. null이면 "0%"가 아니라
+              //   "알 수 없음"이다(final_ratio가 전부 NULL인 unparsed 버킷).
+              const correctRatio = data.pacing_final_ratio?.[kind]?.correct ?? null;
               return (
-                <div key={kind} className="flex items-center justify-between text-sm border-b border-gray-100 py-1.5 last:border-0">
-                  <span className="text-gray-700">{PACING_KIND_LABEL[kind] ?? kind}</span>
-                  <span className="text-xs text-gray-500 tabular-nums">
-                    {scored > 0 ? (
-                      <>correct {num(correct)} · partial {num(partial)} · false_alarm {num(falseAlarm)} · 정밀도 {precision != null ? pctFromFraction(precision, 1) : NO_DATA}</>
-                    ) : unparsed > 0 ? (
-                      <>{num(unparsed)}건</>
-                    ) : NO_DATA}
-                  </span>
+                <div key={kind} className="border-b border-gray-100 py-1.5 last:border-0">
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-gray-700">{PACING_KIND_LABEL[kind] ?? kind}</span>
+                    <span className="text-xs text-gray-500 tabular-nums">
+                      {scored > 0 ? (
+                        <>correct {num(correct)} · partial {num(partial)} · false_alarm {num(falseAlarm)} · 정밀도 {precision != null ? pctFromFraction(precision, 1) : NO_DATA}</>
+                      ) : unparsed > 0 ? (
+                        <>{num(unparsed)}건</>
+                      ) : NO_DATA}
+                    </span>
+                  </div>
+                  {correct > 0 && (
+                    <p className="mt-0.5 text-xs text-gray-500 tabular-nums">
+                      맞은 경보의 평균 최종 소진율{" "}
+                      <span className={correctRatio != null && correctRatio < 0.5 ? "text-judge-warn font-medium" : ""}>
+                        {correctRatio != null ? pctFromFraction(correctRatio, 1) : NO_DATA}
+                      </span>
+                      {correctRatio != null && correctRatio < 0.5 && " — 하루가 끝나도 일예산을 이만큼밖에 못 씀(만성 저소진)"}
+                    </p>
+                  )}
                 </div>
               );
             })}
           </div>
-          {/* ★"평균 최종 소진율"은 계획서가 요구했으나 /retro-scorecard 실제 응답은 verdict별
-              건수 롤업만 준다(naver_ad.py:707 retro_scorecard, avg 필드 없음) — 확인 안 된 필드를
-              추측으로 만들지 않는다. correct 건수·정밀도는 위에서 집계해 노출한다(D-47-h). */}
         </div>
       )}
     </div>
