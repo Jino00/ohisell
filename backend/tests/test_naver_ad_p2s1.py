@@ -268,6 +268,97 @@ def test_sync_entities_logs_external_repause_after_stale_our_write(db, monkeypat
     assert out == [], "외부가 재정지한 키워드를 우리가 임의 재개 후보로 내면 안 된다 — D-NAO-40"
 
 
+# ── entity_sync qi_grade (D-NAO-46②) ──
+def test_collect_entities_includes_qi_grade_for_keyword_rows():
+    campaigns = [{"campaign_id": "cmp-web", "campaign_type": "WEB_SITE", "name": "파워링크", "status": "ELIGIBLE"}]
+    adgroups = {"cmp-web": [{"adgroup_id": "grp-web", "name": "그룹W", "status": "ELIGIBLE", "user_lock": False, "bid_amt": 500}]}
+    keywords = {"grp-web": [{"keyword_id": "nkw-1", "keyword": "필름", "status": "ELIGIBLE",
+                              "user_lock": False, "bid_amt": 700, "qi_grade": 5}]}
+    rows = entity_sync.collect_entities(campaigns=campaigns, adgroups_by_campaign=adgroups, keywords_by_adgroup=keywords)
+    kw_rows = [r for r in rows if r["entity_type"] == "keyword"]
+    assert kw_rows[0]["qi_grade"] == 5
+
+
+def test_sync_entities_sets_qi_grade_on_new_entity(db):
+    rows = [{"entity_type": "keyword", "entity_id": "nkw-1", "parent_id": "grp-1",
+             "campaign_id": "cmp-1", "campaign_type": "WEB_SITE", "name": "필름",
+             "status": "on", "bid_amt": 700, "qi_grade": 4}]
+    entity_sync.sync_entities(db, rows=rows)
+    e = db.query(NaverEntity).filter_by(entity_id="nkw-1").one()
+    assert e.qi_grade == 4
+
+
+def test_sync_entities_updates_qi_grade_no_log_when_previously_none(db):
+    rows_v1 = [{"entity_type": "keyword", "entity_id": "nkw-1", "parent_id": "grp-1",
+                "campaign_id": "cmp-1", "campaign_type": "WEB_SITE", "name": "필름",
+                "status": "on", "bid_amt": 700, "qi_grade": None}]
+    entity_sync.sync_entities(db, rows=rows_v1)
+
+    rows_v2 = [{**rows_v1[0], "qi_grade": 4}]
+    entity_sync.sync_entities(db, rows=rows_v2)
+
+    e = db.query(NaverEntity).filter_by(entity_id="nkw-1").one()
+    assert e.qi_grade == 4
+    logs = db.query(NaverChangeLog).filter(
+        NaverChangeLog.entity_id == "nkw-1", NaverChangeLog.action == "external_qi_change",
+    ).all()
+    assert logs == [], "이전 값이 None이면(처음 관측) 변화 로그를 남기지 않는다"
+
+
+def test_sync_entities_logs_external_qi_change_when_both_non_none_and_differ(db):
+    rows_v1 = [{"entity_type": "keyword", "entity_id": "nkw-1", "parent_id": "grp-1",
+                "campaign_id": "cmp-1", "campaign_type": "WEB_SITE", "name": "필름",
+                "status": "on", "bid_amt": 700, "qi_grade": 4}]
+    entity_sync.sync_entities(db, rows=rows_v1)
+
+    rows_v2 = [{**rows_v1[0], "qi_grade": 6}]
+    entity_sync.sync_entities(db, rows=rows_v2)
+
+    e = db.query(NaverEntity).filter_by(entity_id="nkw-1").one()
+    assert e.qi_grade == 6
+    logs = db.query(NaverChangeLog).filter(
+        NaverChangeLog.entity_id == "nkw-1", NaverChangeLog.action == "external_qi_change",
+    ).all()
+    assert len(logs) == 1
+    assert logs[0].entity_type == "keyword"
+    assert logs[0].campaign_id == "cmp-1"
+    assert logs[0].dry_run is True
+    assert logs[0].before_value == "4"
+    assert logs[0].after_value == "6"
+
+
+def test_sync_entities_keeps_last_known_qi_when_new_is_none(db):
+    """codex[P2] D-NAO-46②: /ncc/keywords가 일시적으로 nccQi를 누락(또는 레거시 rows 주입)해도
+    기존 저장 등급을 None으로 지우면 안 된다 — qi는 느리게 변하는 관측치라 last-known 유지."""
+    rows_v1 = [{"entity_type": "keyword", "entity_id": "nkw-1", "parent_id": "grp-1",
+                "campaign_id": "cmp-1", "campaign_type": "WEB_SITE", "name": "필름",
+                "status": "on", "bid_amt": 700, "qi_grade": 4}]
+    entity_sync.sync_entities(db, rows=rows_v1)
+
+    rows_v2 = [{**rows_v1[0], "qi_grade": None}]  # 일시 누락 응답
+    entity_sync.sync_entities(db, rows=rows_v2)
+
+    e = db.query(NaverEntity).filter_by(entity_id="nkw-1").one()
+    assert e.qi_grade == 4, "None 응답이 last-known 등급(4)을 지우면 안 된다"
+    logs = db.query(NaverChangeLog).filter(
+        NaverChangeLog.entity_id == "nkw-1", NaverChangeLog.action == "external_qi_change",
+    ).all()
+    assert logs == [], "None 관여 시 변화 로그도 남기지 않는다"
+
+
+def test_sync_entities_no_log_when_qi_unchanged(db):
+    rows = [{"entity_type": "keyword", "entity_id": "nkw-1", "parent_id": "grp-1",
+             "campaign_id": "cmp-1", "campaign_type": "WEB_SITE", "name": "필름",
+             "status": "on", "bid_amt": 700, "qi_grade": 4}]
+    entity_sync.sync_entities(db, rows=rows)
+    entity_sync.sync_entities(db, rows=rows)  # 같은 qi_grade 재동기화
+
+    logs = db.query(NaverChangeLog).filter(
+        NaverChangeLog.entity_id == "nkw-1", NaverChangeLog.action == "external_qi_change",
+    ).all()
+    assert logs == []
+
+
 # ── 검색어 리포트 컬럼 파싱 (SHOPPINGKEYWORD_DETAIL/EXPKEYWORD 공통 16열) ──
 def _st_row(date_s, camp, grp, term, imp, clk, cost, rank_sum):
     return [date_s, "1313769", camp, grp, term, "nad-x", "bsn-x", "03", "02",
@@ -330,6 +421,27 @@ def test_fetch_keyword_volumes_parses_low_volume_sentinel(monkeypatch):
     out = fetcher.fetch_keyword_volumes(["필름A"])
     assert out == {"필름A": {"monthly_volume": 125, "competition": "high"}}  # 120+5(<10 sentinel)
     assert "무관한연관어" not in out  # 요청하지 않은 연관 키워드는 제외
+
+
+# ── get_keywords qi_grade (D-NAO-46②) ──
+def test_get_keywords_includes_qi_grade(monkeypatch):
+    class FakeResp:
+        status_code = 200
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return [
+                {"nccKeywordId": "nkw-1", "nccAdgroupId": "grp-1", "keyword": "필름",
+                 "status": "ELIGIBLE", "userLock": False, "bidAmt": 700,
+                 "nccQi": {"qiGrade": 4}},
+                {"nccKeywordId": "nkw-2", "nccAdgroupId": "grp-1", "keyword": "케이스",
+                 "status": "ELIGIBLE", "userLock": False, "bidAmt": 650},  # nccQi 부재
+            ]
+    monkeypatch.setattr(fetcher, "_get", lambda path, params=None: FakeResp())
+
+    out = fetcher.get_keywords("grp-1")
+    assert out[0]["qi_grade"] == 4
+    assert out[1]["qi_grade"] is None  # nccQi 부재 시 None(크래시 아님)
 
 
 # ── campaign_backfill ──

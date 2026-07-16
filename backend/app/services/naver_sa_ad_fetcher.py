@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import logging
 import os
+import re
 import time
 from datetime import date, timedelta
 from decimal import Decimal
@@ -305,7 +306,18 @@ def get_campaigns_full() -> list[dict]:
     } for c in resp.json()]
 
 
-_STATS_FIELDS = '["impCnt","clkCnt","salesAmt","ccnt","convAmt"]'
+_STATS_FIELDS = '["impCnt","clkCnt","salesAmt","ccnt","convAmt","avgRnk"]'
+
+
+def _parse_avg_rank(raw) -> float | None:
+    """avgRnk 원본값 → float | None. avgRnk<=0은 무의미(순위는 1부터) → None(D-NAO-46②)."""
+    if raw is None:
+        return None
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return v if v > 0 else None
 
 
 def fetch_campaign_stats(
@@ -319,7 +331,9 @@ def fetch_campaign_stats(
     date_preset="today"면 당일 누적(빠른 루프용). time_range 주면 그 범위. /stats는 id 단수만
     데이터 반환(ids 복수는 빈 응답, 실측). salesAmt=비용(원, AD리포트 cost와 정합 실증).
 
-    Returns: [{"campaign_id","imp","clk","cost","conv_cnt","conv_amt"}, ...] (데이터 있는 캠페인만).
+    Returns: [{"campaign_id","imp","clk","cost","conv_cnt","conv_amt","avg_rank"}, ...]
+    (데이터 있는 캠페인만). avg_rank는 avgRnk<=0 또는 필드 부재 시 None(기존 키 의미 불변,
+    avg_rank 키만 추가 — D-NAO-46②).
     """
     if not ACCESS_LICENSE or not SECRET_KEY_B64:
         log.warning("Naver SA 자격증명 없음 — /stats 수집 건너뜀")
@@ -346,6 +360,71 @@ def fetch_campaign_stats(
             "cost": _safe_int(d.get("salesAmt", 0)),
             "conv_cnt": _safe_int(d.get("ccnt", 0)),
             "conv_amt": _safe_int(d.get("convAmt", 0)),
+            "avg_rank": _parse_avg_rank(d.get("avgRnk")),
+        })
+    return out
+
+
+_STATS_HH24_FIELDS = '["impCnt","clkCnt","salesAmt","avgRnk"]'
+_HOUR_LABEL_RE = re.compile(r"^(\d{1,2})시")
+
+
+def fetch_entity_hh24(entity_id: str, stat_date: date) -> list[dict]:
+    """키워드/애드그룹 1건의 단일일 시간대별(hh24) imp/clk/cost/avgRnk 곡선(D-NAO-46②).
+
+    GET /stats?id=<entity_id>&fields=[...]&timeRange={단일일}&timeIncrement=allDays&breakdown=hh24
+    — 1콜로 그 날의 실적 있는 시간대만 반환(ref 32 §4). 과거 데이터는 네이버가 최근 7일만
+    보존(초과 시 400).
+
+    Returns: [{"hour","imp","clk","cost","avg_rank"}, ...] (실적 있는 시간대만, 없으면 []).
+
+    ⚠️ breakdown은 조건이 안 맞으면 무언 무시(200 + 집계 1행)라 무언 데이터손실을 방어한다:
+    응답 data가 있고 그 날 imp>0인데 breakdowns 키가 없거나 비어 있으면 예외를 던진다
+    (호출측 sweep_keyword_hourly가 유닛 단위로 잡아 실패로 카운트).
+    라벨("00시~01시"/"0시~1시")을 정규식으로 못 읽는 엔트리는 skip+warn(그 시간대만 유실).
+    """
+    if not ACCESS_LICENSE or not SECRET_KEY_B64:
+        log.warning("Naver SA 자격증명 없음 — hh24 수집 건너뜀")
+        return []
+
+    d_iso = stat_date.isoformat()
+    params = {
+        "id": entity_id,
+        "fields": _STATS_HH24_FIELDS,
+        "timeRange": f'{{"since":"{d_iso}","until":"{d_iso}"}}',
+        "timeIncrement": "allDays",
+        "breakdown": "hh24",
+    }
+    resp = _get("/stats", params)
+    if resp.status_code != 200:
+        raise RuntimeError(
+            f"Naver SA hh24 {entity_id} {d_iso}: HTTP {resp.status_code} {resp.text[:200]}"
+        )
+    data = resp.json().get("data") or []
+    if not data:
+        return []
+
+    d = data[0]
+    top_imp = _safe_int(d.get("impCnt", 0))
+    breakdowns = d.get("breakdowns")
+    if top_imp > 0 and not breakdowns:
+        raise RuntimeError(
+            f"Naver SA hh24 {entity_id} {d_iso}: imp={top_imp}인데 breakdowns 없음(무언 무시 방어)"
+        )
+
+    out: list[dict] = []
+    for b in breakdowns or []:
+        name = b.get("name", "") or ""
+        m = _HOUR_LABEL_RE.match(name)
+        if not m:
+            log.warning("Naver SA hh24 라벨 파싱 실패 skip: entity=%s name=%r", entity_id, name)
+            continue
+        out.append({
+            "hour": int(m.group(1)),
+            "imp": _safe_int(b.get("impCnt", 0)),
+            "clk": _safe_int(b.get("clkCnt", 0)),
+            "cost": _safe_int(b.get("salesAmt", 0)),
+            "avg_rank": _parse_avg_rank(b.get("avgRnk")),
         })
     return out
 
@@ -492,7 +571,9 @@ def get_keywords(adgroup_id: str) -> list[dict]:
     """광고그룹의 키워드 목록 (P2-S1 entity_sync, WEB_SITE만 호출 — SHOPPING은 개별 키워드 무의미,
     실측: 계정 전체 등록 키워드 90,379건 중 90,150건이 WEB_SITE 소속, docs/references/22).
 
-    Returns: [{"keyword_id","adgroup_id","keyword","status","user_lock","bid_amt"}, ...]
+    Returns: [{"keyword_id","adgroup_id","keyword","status","user_lock","bid_amt","qi_grade"}, ...]
+    qi_grade(1~7, 품질지수)는 /ncc/keywords 응답 nccQi.qiGrade — entity_sync 기존 일일
+    열거에 무상 편승(추가 콜 0, D-NAO-46②, ref 32 §5).
     """
     resp = _get("/ncc/keywords", {"nccAdgroupId": adgroup_id})
     resp.raise_for_status()
@@ -503,6 +584,7 @@ def get_keywords(adgroup_id: str) -> list[dict]:
         "status": k.get("status", ""),
         "user_lock": bool(k.get("userLock", False)),
         "bid_amt": k.get("bidAmt"),
+        "qi_grade": (k.get("nccQi") or {}).get("qiGrade"),
     } for k in resp.json()]
 
 

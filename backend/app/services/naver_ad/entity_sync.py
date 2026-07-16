@@ -92,6 +92,7 @@ def collect_entities(
                     "campaign_id": cid, "campaign_type": ctype, "name": kw.get("keyword", ""),
                     "status": _status(kw.get("status", ""), kw.get("user_lock", False)),
                     "bid_amt": kw.get("bid_amt"),
+                    "qi_grade": kw.get("qi_grade"),  # D-NAO-46②: 품질지수 1~7(get_keywords 무상 편승)
                 })
 
     log.info("naver_entity collect: campaign=%d adgroup=%d keyword=%d",
@@ -304,6 +305,35 @@ def _log_external_bid_change(
              entity.entity_type, entity.entity_id, before_bid, new_bid)
 
 
+def _log_external_qi_change(db: Session, entity: NaverEntity, new_qi, now) -> None:
+    """D-NAO-46②: 품질지수(qi_grade) 변화를 관찰 기록(외부 변경 — 우리는 qi에 쓰기 없음).
+
+    기존 값과 새 값이 둘 다 non-None이고 다를 때만 기록한다(처음 관측되거나 API가 일시
+    부재로 None을 반환한 경우는 잡음이라 기록 대상 아님). dry_run=True(관찰만, 실쓰기 아님).
+
+    ⚠️ 병합 메모(2026-07-17): D-NAO-46②(qi)와 D-NAO-47(입찰가)이 **서로 모르는 채 같은
+    함수에 같은 패턴의 diff 밸브**를 만들었다(원칙20 병행 세션). 둘 다 유지한다 — 관심사가
+    다르고(품질지수 관찰 vs 입찰 인과), 둘 다 무변동 미로깅 가드가 있어 91,005행 크론에서
+    안전하다. 호출 순서도 둘 다 대입 **전**이라 옛값을 읽는 계약이 동일하다.
+    """
+    if entity.qi_grade is None or new_qi is None or entity.qi_grade == new_qi:
+        return
+    db.add(NaverChangeLog(
+        entity_type=entity.entity_type,
+        entity_id=entity.entity_id,
+        campaign_id=entity.campaign_id,
+        action="external_qi_change",
+        proposal_id=None,
+        dry_run=True,
+        changed_at=now,
+        before_value=str(entity.qi_grade),
+        after_value=str(new_qi),
+        rationale="entity_sync 감지: 품질지수(qi) 변화(관찰)",
+    ))
+    log.info("external_qi_change detected: %s %s %s→%s",
+             entity.entity_type, entity.entity_id, entity.qi_grade, new_qi)
+
+
 def sync_entities(db: Session, *, rows: list[dict] | None = None) -> dict:
     """naver_entity upsert(멱등, 일 1회 동기화) — keywordstool 보강 필드(monthly_volume 등) 보존.
 
@@ -329,19 +359,26 @@ def sync_entities(db: Session, *, rows: list[dict] | None = None) -> dict:
             db.add(NaverEntity(
                 entity_type=r["entity_type"], entity_id=r["entity_id"], parent_id=r["parent_id"],
                 campaign_id=r["campaign_id"], campaign_type=r["campaign_type"], name=r["name"],
-                status=r["status"], bid_amt=r.get("bid_amt"), synced_at=now,
+                status=r["status"], bid_amt=r.get("bid_amt"), qi_grade=r.get("qi_grade"), synced_at=now,
             ))
         else:
             if e.status != r["status"] and e.status != "deleted":
                 _log_external_status_change(db, e, r["status"], now)
-            # ★ e.bid_amt 대입 *전*에 호출 — 함수가 entity.bid_amt를 옛값으로 읽는다(D-NAO-47).
+            # ★두 밸브 모두 **대입 전**에 호출한다 — entity의 옛값을 읽어야 diff가 나온다.
+            #   (D-NAO-47 입찰가 / D-NAO-46② 품질지수. 병합 2026-07-17: 두 세션이 서로 모르는
+            #   채 같은 자리에 같은 패턴을 만들었고, 관심사가 달라 둘 다 유지한다.)
             _log_external_bid_change(db, e, r.get("bid_amt"), now, our_bid_writes)
+            _log_external_qi_change(db, e, r.get("qi_grade"), now)
             e.parent_id = r["parent_id"]
             e.campaign_id = r["campaign_id"]
             e.campaign_type = r["campaign_type"]
             e.name = r["name"]
             e.status = r["status"]
             e.bid_amt = r.get("bid_amt")
+            if r.get("qi_grade") is not None:
+                # codex[P2] D-NAO-46②: qi는 느리게 변하는 관측치 — API가 일시적으로 nccQi를
+                # 누락(또는 레거시 rows 주입)해도 last-known 등급을 None으로 지우지 않는다.
+                e.qi_grade = r["qi_grade"]
             e.synced_at = now
 
     stale = 0
