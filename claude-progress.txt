@@ -3,6 +3,17 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
+- 날짜: 2026-07-17 (★★**D-NAO-47 MOP 커맨드 센터 Phase 1+2 구현 완료 · codex PASS(백엔드 3R·프론트 6R) · prod 미배포**)
+  - 워크트리 `mop-command-center-design-7e087a` / 브랜치 `claude/mop-command-center-design-7e087a` / base `cf193e5`(최신 main c4a728e + 설계 스펙). **31 커밋.**
+  - **검증 실측**: 백엔드 **1608 pass / 0 fail**(+47) · 프론트 `tsc -b` clean · **vitest 14 pass(이 프로젝트 첫 프론트 테스트)** · build 성공 · **리스킨 경계 밖 10파일 diff 0줄**.
+  - **한 일**: 디자인 시스템 설계(색을 방향/판단 두 축으로 분리 — 모순 규약 4개 동시 사용 발견) · `/browse` 라이브 확인(**recharts Y축 이미 0 시작 → §2-2 조치 불필요**) · 백엔드 5태스크(입찰가 diff 밸브·change-log API·raw API 3종·직렬화 보강·라벨 14종) · 프론트 10태스크(토큰·format.ts·컴포넌트 10종·1~3층·딥링크 5라우트).
+  - **★남은 것 = 배포뿐이고 Jino 게이트.** 진짜 합격 기준 = **배포 다음날 07:35 크론 후 `external_bid_change` 행수 실측**(수십~수백=정상 / 91,005 근접=밸브 붕괴 즉시 롤백 / 0=호출 안 됨 의심). **그 전까지 "밸브가 작동한다" 금지**(원칙22).
+  - **★별건(스코프 밖)**: **prod 인증 없음** — 빈 쿠키로 광고비·매출·마진 + 쓰기 컨트롤 노출. Jino 보고 필요.
+  - **★교훈 2개(다음 세션 필독)**: ①**`npx tsc --noEmit`은 이 저장소에서 파일 0개를 검사한다**(solution-style tsconfig) — 타입 검증은 반드시 `npx tsc -b`. ②`alembic/env.py`의 `fileConfig()`가 기본으로 모든 기존 로거를 무력화(전체 스위트 돌려야 보임) — 수정함.
+  - 인계: `.claude/memory/HANDOFF_ohisell-mop-command-center-implemented_20260717.md`
+
+## 이전 상태
+
 - 날짜: 2026-07-17 새벽 (★★**MOP 커맨드 센터 설계 — 구조 승인 완료·구현 미착수·코드변경 0**. D-NAO-47. 브레인스토밍 세션)
   - **스펙 전문 = `docs/superpowers/specs/2026-07-17-mop-command-center-design.md`(§0-A 먼저).** 트랙 D-NAO-47에도 전문 요약.
   - **발단**: Jino "sellc에 붙은 우리 MOP frontend 개선 — 내용·형식 둘 다". design 스킬 요청이었으나 실측 결과 **병목=디자인 아니라 데이터가 화면에 도달 못 함**.
