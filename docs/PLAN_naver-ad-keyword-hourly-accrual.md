@@ -125,8 +125,8 @@ keyword_hourly_accrual (Harness, 신규 파일 keyword_hourly_sweep.py)
 - [x] H1: hourly_snapshot avg_rank 저장 + entity_sync qi_grade+변화로그 (TDD)
 - [x] H1: 크론 등록(09:10)+catch-up 목록
 - [x] codex review PASS (2026-07-17 4R: 1R[P2] qi None 덮어쓰기 → 2R[P2]×2 빈 fetch 이력보존·grain을 keyword_id로 → 3R[P2] 캐치업 sweep_date 중복 제외 → 4R clean. 전부 RED 재현 후 수정)
-- [ ] 라이브 합격(§8)
-- [ ] PR + 트랙/progress 갱신
+- [x] 라이브 합격(§8) (2026-07-17 새벽: 마이그 적용·수동 스윕 3회 8,597콜 failed 0·07-11~15 백필 완결 43,346행·정합 키워드 3/3 완전일치·avg_rank 100%·02:05 스냅샷 avg_rank 30/45 유입. ★라이브가 결함 1건 발견·수정: 단일 커밋이 ~12분 쓰기락 보유→01:05 스냅샷 크론 database is locked 실측→유닛 증분 커밋(d8f0ca5)→02:05 크론이 스윕3 실행 중 성공으로 해소 증명. 잔여 자연확인: qi=아침 entity_sync 후·09:10 크론 첫 발화 — 09:30 예약 루틴이 확인)
+- [x] PR + 트랙/progress 갱신 (PR #23: https://github.com/Jino00/ohisell/pull/23)
 
 ## §8 라이브 합격 시나리오 (원칙22 — 코드 존재·테스트 통과 ≠ 합격)
 
