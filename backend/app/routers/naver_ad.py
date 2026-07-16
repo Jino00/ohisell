@@ -559,7 +559,14 @@ _VALID_MODES = {"growth", "recovery", "launch", "defense"}
 
 class CampaignSettingsIn(BaseModel):
     campaign_id: str
-    optimizer: str
+    # ★optional(D-NAO-48, codex[P1] 2026-07-17): 생략하면 optimizer를 **건드리지 않는다**.
+    # 이 PUT은 이제 모드·공격성·override·memo 전용이고, optimizer의 쓰기 경로는
+    # PUT /campaign-settings/optimizer 하나다(단일 경로).
+    # 왜: ①콘솔이 optimizer를 같이 보내면 1층 스위치의 **확인창(MOP 미차단 경고)을 우회**해
+    # 캠페인이 라이브 쓰기 대상이 된다 ②콘솔의 stale 편집 버퍼가 나중에 커밋되면 스위치로
+    # 끈 걸 'ours'로 되돌려 **아무도 의도하지 않은 채 쓰기가 재무장**된다(레이스).
+    # 명시적으로 보내면 여전히 동작한다(하위호환 — 기존 호출자·테스트).
+    optimizer: str | None = None
     mode: str | None = None
     target_roas_override: float | None = None
     gamma: float | None = None
@@ -597,7 +604,7 @@ def campaign_settings_put(body: CampaignSettingsIn, db: Session = Depends(get_db
     전환 기록(누가/언제는 API 호출 자체·changed_at 서버타임이 근거, 전후 값만 저장 — codex #16).
     이 엔드포인트는 우리 시스템 설정 테이블만 쓴다 — 네이버 광고 API에 쓰기 요청 없음(D-NAO-13).
     """
-    if body.optimizer not in _VALID_OPTIMIZERS:
+    if body.optimizer is not None and body.optimizer not in _VALID_OPTIMIZERS:
         raise HTTPException(400, f"optimizer는 {sorted(_VALID_OPTIMIZERS)} 중 하나여야 합니다")
     if body.mode is not None and body.mode not in _VALID_MODES:
         raise HTTPException(400, f"mode는 {sorted(_VALID_MODES)} 중 하나여야 합니다")
@@ -606,11 +613,14 @@ def campaign_settings_put(body: CampaignSettingsIn, db: Session = Depends(get_db
         NaverCampaignSettings.campaign_id == body.campaign_id
     ).first()
     before_optimizer = settings.optimizer if settings else "none"
+    # 생략 시 기존 값 유지. 신규 행이면 'none'(자동화 안 함)에서 시작 — 기본값이 'ours'면
+    # 모드만 저장해도 라이브 쓰기가 켜진다.
+    next_optimizer = body.optimizer if body.optimizer is not None else before_optimizer
 
     if settings is None:
-        settings = NaverCampaignSettings(campaign_id=body.campaign_id, optimizer=body.optimizer)
+        settings = NaverCampaignSettings(campaign_id=body.campaign_id, optimizer=next_optimizer)
         db.add(settings)
-    settings.optimizer = body.optimizer
+    settings.optimizer = next_optimizer
     settings.mode = body.mode
     settings.target_roas_override = (
         Decimal(str(body.target_roas_override)) if body.target_roas_override is not None else None
@@ -620,11 +630,11 @@ def campaign_settings_put(body: CampaignSettingsIn, db: Session = Depends(get_db
     )
     settings.memo = body.memo
 
-    if before_optimizer != body.optimizer:
+    if before_optimizer != next_optimizer:
         db.add(NaverChangeLog(
             entity_type="campaign", entity_id=body.campaign_id, campaign_id=body.campaign_id,
             action="optimizer_change",
-            before_value=before_optimizer, after_value=body.optimizer,
+            before_value=before_optimizer, after_value=next_optimizer,
             rationale="콘솔 PUT /campaign-settings",
         ))
 

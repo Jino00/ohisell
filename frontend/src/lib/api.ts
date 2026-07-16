@@ -1825,9 +1825,13 @@ export function fetchNaverCampaignSettings(params?: {
   return fetchApi<NaverAdCampaignSettingsList>(`/api/naver/ad/campaign-settings${qs ? `?${qs}` : ""}`);
 }
 
+/** 모드·공격성·override·memo 설정(전체 치환).
+ *  ★optimizer는 optional이고 **생략하면 백엔드가 기존 값을 보존**한다. 관리주체를 바꾸려면
+ *  `putNaverCampaignOptimizer`를 쓸 것 — 여기로 optimizer를 보내면 1층 스위치의 확인창
+ *  (원본 MOP 미차단 경고)을 우회하고, stale 버퍼가 스위치 변경을 덮어쓴다(codex[P1]). */
 export function putNaverCampaignSettings(body: {
   campaignId: string;
-  optimizer: NaverAdOptimizer;
+  optimizer?: NaverAdOptimizer;
   mode?: NaverAdCampaignMode | null;
   targetRoasOverride?: number | null;
   memo?: string | null;
@@ -1836,7 +1840,7 @@ export function putNaverCampaignSettings(body: {
     method: "PUT",
     body: JSON.stringify({
       campaign_id: body.campaignId,
-      optimizer: body.optimizer,
+      ...(body.optimizer !== undefined ? { optimizer: body.optimizer } : {}),
       mode: body.mode ?? null,
       target_roas_override: body.targetRoasOverride ?? null,
       memo: body.memo ?? null,

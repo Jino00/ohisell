@@ -132,14 +132,14 @@ interface CampaignRow {
 }
 
 interface EditState {
-  optimizer: NaverAdOptimizer;
+  // ★optimizer 없음(D-NAO-48, codex[P1]): 이 패널은 관리주체를 바꾸지 않는다. 편집 상태로
+  //   들고 있으면 누군가 다시 payload에 실어 1층 스위치의 확인창을 우회시키기 쉽다.
   mode: NaverAdCampaignMode | "";
   targetRoasOverride: string; // 입력 필드 원문(빈 문자열=해제)
 }
 
 function toEditState(s: NaverAdCampaignSettings | undefined): EditState {
   return {
-    optimizer: s?.optimizer ?? "none",
     mode: s?.mode ?? "",
     targetRoasOverride: s?.target_roas_override != null ? String(s.target_roas_override) : "",
   };
@@ -338,7 +338,9 @@ export default function NaverAdOptimizationConsole() {
     try {
       const updated = await putNaverCampaignSettings({
         campaignId,
-        optimizer: e.optimizer,
+        // ★optimizer를 보내지 않는다(D-NAO-48, codex[P1]) — 백엔드가 생략 시 기존 값을
+        //   보존한다. 보내면 stale 버퍼가 1층 스위치의 변경을 덮어써 쓰기 게이트가
+        //   의도치 않게 재무장된다.
         mode: e.mode === "" ? null : e.mode,
         targetRoasOverride: override,
         memo: settingsMap[campaignId]?.memo ?? null, // 콘솔에 memo 편집 UI 없음 — 기존 값 보존(덮어쓰기 방지)
@@ -607,7 +609,7 @@ export default function NaverAdOptimizationConsole() {
 
       <div className="bg-amber-50 border border-amber-200 text-amber-700 text-xs rounded-lg p-3">
         반자동 모드 — 자동 실행은 없습니다. 승인 후 Confirm을 거친 제안만 실제 집행됩니다(현재
-        개방: 제외키워드). optimizer/모드/공격성 다이얼은 저장 즉시 실제 목표 ROAS 계산에
+        개방: 제외키워드). 모드·공격성 다이얼은 저장 즉시 실제 목표 ROAS 계산에
         반영됩니다.
       </div>
 
@@ -738,10 +740,11 @@ export default function NaverAdOptimizationConsole() {
         </div>
       </div>
 
-      {/* 섹션 2: 캠페인 optimizer/모드/공격성 패널 */}
+      {/* 섹션 2: 캠페인 모드·공격성 패널. 관리주체(optimizer)는 읽기 전용 —
+          변경은 1층 커맨드 센터 스위치가 유일 경로다(D-NAO-48, codex[P1]). */}
       <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
         <div className="p-4 border-b border-gray-200 flex items-center justify-between flex-wrap gap-2">
-          <h3 className="text-sm font-medium text-gray-700">캠페인 관리 주체 · 모드 · 공격성</h3>
+          <h3 className="text-sm font-medium text-gray-700">캠페인 모드 · 공격성</h3>
           <span className="text-xs text-gray-400">
             계정 BEP ROAS {accountBepRoas != null ? roasX(accountBepRoas) : NO_DATA} (공격성 다이얼 기준값)
           </span>
@@ -777,10 +780,17 @@ export default function NaverAdOptimizationConsole() {
                       <td className="px-4 py-2 text-sm border-b border-gray-100 text-right tabular-nums">{won(c.cost)}</td>
                       <td className="px-4 py-2 text-sm border-b border-gray-100 text-right tabular-nums">{roasX(c.roas_naver)}</td>
                       <td className="px-4 py-2 text-sm border-b border-gray-100">
-                        <select value={e.optimizer} onChange={(ev) => updateEdit(c.campaign_id, { optimizer: ev.target.value as NaverAdOptimizer })}
-                          className="text-xs border border-gray-300 rounded px-1.5 py-1">
-                          {OPTIMIZER_OPTIONS.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
-                        </select>
+                        {/* ★D-NAO-48(codex[P1] 2026-07-17): 여기서 optimizer를 **바꾸지 않는다** — 읽기 전용.
+                            원래 select였는데, 그러면 1층 스위치의 확인창(원본 MOP가 자동으로 꺼지지
+                            않는다는 D-NAO-13 경고)을 우회해 캠페인이 라이브 쓰기 대상이 된다. 게다가
+                            이 패널의 stale 편집 버퍼가 나중에 커밋되면 스위치로 끈 걸 'ours'로 되돌려
+                            **아무도 의도하지 않은 채 쓰기가 재무장**된다(레이스).
+                            → optimizer의 쓰기 경로는 1층 스위치 하나. 이 패널은 모드·공격성 전용이고
+                            저장 payload에서도 optimizer를 뺐다(백엔드가 생략 시 기존 값 보존). */}
+                        <span className="text-xs text-gray-600">
+                          {OPTIMIZER_OPTIONS.find((o) => o.key === (settingsMap[c.campaign_id]?.optimizer ?? "none"))?.label}
+                        </span>
+                        <a href="/naver-ad" className="ml-1.5 text-xs text-blue-600 hover:underline">변경 →</a>
                       </td>
                       <td className="px-4 py-2 text-sm border-b border-gray-100">
                         {/* T4 — 라디오 카드 2×2(MOP 24b 운영모드 카드 패턴). 선택된 모드를

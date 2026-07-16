@@ -113,3 +113,37 @@ def test_switch_accepts_all_three_states(client, db):
         assert _put(client, "cmp-1", opt).status_code == 200
         db.expire_all()
         assert db.query(NaverCampaignSettings).filter_by(campaign_id="cmp-1").one().optimizer == opt
+
+
+# ── codex[P1] 2026-07-17: optimizer 쓰기 경로는 하나여야 한다 ──
+def test_full_put_without_optimizer_preserves_it(client, db):
+    """★codex[P1]: 콘솔의 전체 치환 PUT이 optimizer를 같이 보내면 **확인창을 우회**해
+    캠페인이 라이브 쓰기 대상이 된다(MOP 경고 없이). 그리고 stale 편집 버퍼가 나중에
+    커밋되면 스위치로 끈 걸 다시 'ours'로 되돌려 **아무도 의도하지 않은 채 쓰기가 재무장**된다.
+
+    → optimizer를 optional로 만들고, 생략하면 **건드리지 않는다**. 콘솔은 이제 안 보낸다
+    (모드·공격성 전용). optimizer의 유일한 쓰기 경로 = PUT /campaign-settings/optimizer."""
+    db.add(NaverCampaignSettings(campaign_id="cmp-1", optimizer="ours", mode="growth"))
+    db.commit()
+
+    r = client.put("/api/naver/ad/campaign-settings",
+                   json={"campaign_id": "cmp-1", "mode": "defense"})  # optimizer 없음
+    assert r.status_code == 200
+    assert r.json()["optimizer"] == "ours", "optimizer가 생략됐는데 바뀌었다"
+    assert r.json()["mode"] == "defense"
+
+
+def test_full_put_without_optimizer_defaults_none_for_new_row(client, db):
+    """설정 행이 없던 캠페인에 모드만 저장하면 optimizer는 'none'(자동화 안 함)에서 시작한다
+    — 기본값이 'ours'면 모드 저장만으로 라이브 쓰기가 켜진다."""
+    r = client.put("/api/naver/ad/campaign-settings",
+                   json={"campaign_id": "cmp-new", "mode": "growth"})
+    assert r.status_code == 200
+    assert r.json()["optimizer"] == "none"
+
+
+def test_full_put_without_optimizer_writes_no_audit(client, db):
+    db.add(NaverCampaignSettings(campaign_id="cmp-1", optimizer="ours"))
+    db.commit()
+    client.put("/api/naver/ad/campaign-settings", json={"campaign_id": "cmp-1", "mode": "growth"})
+    assert db.query(NaverChangeLog).filter(NaverChangeLog.action == "optimizer_change").count() == 0
