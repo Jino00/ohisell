@@ -23,9 +23,8 @@ import {
   type NaverAdKpis,
   type NaverAdTrendRow,
 } from "../lib/api";
-import NaverAdDiagnosisBoard from "./NaverAdDiagnosisBoard";
-import NaverAdOptimizationConsole from "./NaverAdOptimizationConsole";
 import { isoKST, num, won, pctFromFraction, roasX, NO_DATA } from "../lib/format";
+import { LayerNav } from "../components/ui";
 
 function daysAgo(n: number): string {
   return isoKST(new Date(Date.now() - n * 86400000));
@@ -194,14 +193,7 @@ function drilldownKey(row: NaverAdDrilldownRow | NaverAdHourlyRow, grain: NaverA
   return `${parts}#${index}`;
 }
 
-const TOP_TABS: { key: "report" | "diagnosis" | "console"; label: string }[] = [
-  { key: "report", label: "리포트" },
-  { key: "diagnosis", label: "진단 보드" },
-  { key: "console", label: "최적화 콘솔" },
-];
-
 export default function NaverAdReport() {
-  const [view, setView] = useState<"report" | "diagnosis" | "console">("report");
   const today = isoKST(new Date());
   const [dateFrom, setDateFrom] = useState(daysAgo(6));
   const [dateTo, setDateTo] = useState(today);
@@ -289,27 +281,12 @@ export default function NaverAdReport() {
 
   return (
     <div className="space-y-6">
+      <LayerNav />
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-bold text-gray-900">네이버 SA 광고 리포트</h1>
         <p className="text-xs text-gray-400">D-NAO-15: 읽기 전용 리포트 코어 (제안·쓰기 없음)</p>
       </div>
 
-      {/* 상단 탭: 리포트 / 진단 보드 */}
-      <div className="flex border-b border-gray-200">
-        {TOP_TABS.map((t) => (
-          <button key={t.key} onClick={() => setView(t.key)}
-            className={`px-4 py-2 text-sm ${view === t.key ? "border-b-2 border-blue-600 text-blue-700 font-medium" : "text-gray-500 hover:text-gray-700"}`}>
-            {t.label}
-          </button>
-        ))}
-      </div>
-
-      {view === "diagnosis" ? (
-        <NaverAdDiagnosisBoard />
-      ) : view === "console" ? (
-        <NaverAdOptimizationConsole />
-      ) : (
-      <>
       {/* 필터바 */}
       <div className="bg-white rounded-lg border border-gray-200 p-4 space-y-3">
         <div className="flex flex-wrap items-center gap-3">
@@ -561,8 +538,6 @@ export default function NaverAdReport() {
           )}
         </div>
       </div>
-      </>
-      )}
     </div>
   );
 }

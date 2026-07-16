@@ -8,6 +8,7 @@ import {
   type NaverAdDiagnosisKeywordRow,
 } from "../lib/api";
 import { isoKST, num, won, pctFromFraction, roasX, NO_DATA } from "../lib/format";
+import { LayerNav } from "../components/ui";
 
 function daysAgo(n: number): string {
   return isoKST(new Date(Date.now() - n * 86400000));
@@ -120,6 +121,7 @@ export default function NaverAdDiagnosisBoard() {
 
   return (
     <div className="space-y-6">
+      <LayerNav />
       {/* 필터바 */}
       <div className="bg-white rounded-lg border border-gray-200 p-4">
         <div className="flex flex-wrap items-center gap-3">

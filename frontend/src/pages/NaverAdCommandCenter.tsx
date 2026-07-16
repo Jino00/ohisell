@@ -13,7 +13,7 @@
 // 없어(백엔드 _serialize_settings가 안 줌) campaign_id만 표시한다 — 추측으로 필드를 만들지 않는다.
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { Card, Stat, EmptyState, Loading, CoverageBar, Table, Th, Td, Badge } from "../components/ui";
+import { Card, Stat, EmptyState, Loading, CoverageBar, Table, Th, Td, Badge, LayerNav } from "../components/ui";
 import { num, won, pctFromFraction } from "../lib/format";
 import {
   getNaverDashboardOverview, fetchNaverChangeLog, fetchNaverCampaignSettings,
@@ -49,13 +49,14 @@ export default function NaverAdCommandCenter() {
     return () => { alive = false; };
   }, []);
 
-  if (loading) return <Loading label="커맨드 센터를 불러오는 중…" rows={6} />;
-  if (error) return <EmptyState reason={`불러오지 못했습니다: ${error}`} hint="새로고침하거나 백엔드 상태를 확인하세요." />;
+  if (loading) return <><LayerNav /><Loading label="커맨드 센터를 불러오는 중…" rows={6} /></>;
+  if (error) return <><LayerNav /><EmptyState reason={`불러오지 못했습니다: ${error}`} hint="새로고침하거나 백엔드 상태를 확인하세요." /></>;
 
   const cov = overview?.optimizer_coverage ?? { window_days: 7, ours_cost: 0, mop_cost: 0, none_cost: 0, total_cost: 0, ours_ratio: 0 };
 
   return (
     <div className="space-y-4">
+      <LayerNav />
       {/* ① 관리주체 3열 대조 — 우리 열만 크게(위계=대비) */}
       <Card title="누가 이 광고를 돌리는가">
         <div className="p-4 space-y-4">

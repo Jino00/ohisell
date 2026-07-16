@@ -7,3 +7,4 @@ export { Delta } from "./Delta";
 export { Loading } from "./Loading";
 export { CoverageBar } from "./CoverageBar";
 export { Table, Th, Td, Pager } from "./Table";
+export { LayerNav } from "./LayerNav";

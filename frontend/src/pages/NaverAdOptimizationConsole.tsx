@@ -30,6 +30,7 @@ import {
   type NaverDashboardOverview,
 } from "../lib/api";
 import { isoKST, won, roasX, NO_DATA } from "../lib/format";
+import { LayerNav } from "../components/ui";
 
 function daysAgo(n: number): string {
   return isoKST(new Date(Date.now() - n * 86400000));
@@ -531,6 +532,7 @@ export default function NaverAdOptimizationConsole() {
 
   return (
     <div className="space-y-6">
+      <LayerNav />
       {/* 엔진 파이프라인 5단계 + optimizer 커버리지(T1/T2, 대시보드 미니 스프린트) */}
       <div className="bg-white rounded-lg border border-gray-200 p-4">
         <h3 className="text-sm font-medium text-gray-700 mb-3">엔진 파이프라인</h3>

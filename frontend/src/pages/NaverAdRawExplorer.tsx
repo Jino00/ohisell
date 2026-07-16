@@ -3,7 +3,7 @@
 //   114,285 · 시간당 스냅샷. 여기가 처음으로 그걸 여는 자리.
 // ★규모 때문에 서버 페이지네이션이 계약이다(§9 라이브: 489행 무페이징 → 스크롤 27,305px).
 import { useEffect, useState } from "react";
-import { Card, Table, Th, Td, Pager, Loading, EmptyState, Button } from "../components/ui";
+import { Card, Table, Th, Td, Pager, Loading, EmptyState, Button, LayerNav } from "../components/ui";
 import { num, won, pctFromFraction, NO_DATA } from "../lib/format";
 import {
   fetchNaverRawKeywords, fetchNaverRawSearchTerms, fetchNaverRawHourly,
@@ -16,22 +16,25 @@ const PAGE = 50;
 export default function NaverAdRawExplorer() {
   const [tab, setTab] = useState<Tab>("keywords");
   return (
-    <Card
-      title="원자료 탐색"
-      right={
-        <div className="flex gap-1">
-          {(["keywords", "search-terms", "hourly"] as Tab[]).map((t) => (
-            <Button key={t} variant={tab === t ? "primary" : "ghost"} onClick={() => setTab(t)}>
-              {t === "keywords" ? "등록 키워드" : t === "search-terms" ? "검색어" : "시간당"}
-            </Button>
-          ))}
-        </div>
-      }
-    >
-      {tab === "keywords" && <KeywordsPane />}
-      {tab === "search-terms" && <SearchTermsPane />}
-      {tab === "hourly" && <HourlyPane />}
-    </Card>
+    <div className="space-y-4">
+      <LayerNav />
+      <Card
+        title="원자료 탐색"
+        right={
+          <div className="flex gap-1">
+            {(["keywords", "search-terms", "hourly"] as Tab[]).map((t) => (
+              <Button key={t} variant={tab === t ? "primary" : "ghost"} onClick={() => setTab(t)}>
+                {t === "keywords" ? "등록 키워드" : t === "search-terms" ? "검색어" : "시간당"}
+              </Button>
+            ))}
+          </div>
+        }
+      >
+        {tab === "keywords" && <KeywordsPane />}
+        {tab === "search-terms" && <SearchTermsPane />}
+        {tab === "hourly" && <HourlyPane />}
+      </Card>
+    </div>
   );
 }
 
