@@ -114,5 +114,10 @@
   매핑+_CATCHUP_ORDER 등록. API `GET /retro-scorecard?days=28` naver_ad.py에 추가(라우터
   테스트 `test_naver_retro_scorecard_router.py` 작성 — 로컬 bcrypt collection 이슈로 실행
   확인은 직접 함수 호출로 대체 검증).
-- [ ] codex GATE PASS (라운드/지적/반영: ___)
-- [ ] 배포 + 백필 + 라이브 확인 (Jino)
+- [x] codex GATE PASS (2026-07-16, 2라운드. R1 [P2]×2 전부 동의·수정, 기각 0: ①growth 행의
+  target_asof에 캠페인 리졸브 목표(override>계정기본) 고정 — 계정값 채점 시 선별·채점 렌즈
+  불일치 ②단계 예외 핸들러 6곳 db.rollback() — 실패 트랜잭션 세션 오염으로 다음 단계
+  PendingRollbackError 연쇄 실패(격리 무력화), mutation check로 테스트 유효성 증명.
+  R2: "no remaining blocking issues" PASS. 커밋 5845995. 신규 46 test + naver 스위트 902 green.)
+- [ ] 배포 + 백필 + 라이브 확인 (Jino) — §7-3 절차: 마이그레이션 f6g7h8i9j0k1 + 파일 copy +
+  pm2 재시작 → backfill(07-08~어제) 1회 → 다음 날 08:30 크론 자연 발화 확인
