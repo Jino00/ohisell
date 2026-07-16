@@ -24,6 +24,13 @@
 # GET /api/naver/ad/retro-scorecard   — 상설 소급 채점 성적표(D-NAO-45). naver_retro_signal
 #   (보드별 d3/d7 방향 정밀도)·naver_retro_pacing_score(저속/과속 경보 채점) 단순 rollup
 #   read. 정직 경계(ref 31): 방향 정확도 계기판이지 인과 성과 검증 아님(그건 카나리 몫).
+# GET /api/naver/ad/change-log        — 변경 이력 조회(D-NAO-47). naver_change_log 단순 read.
+#   include_dry_run 기본 False — 1층 "우리 조작 N회"는 실제 집행만 센다(D-47-h 정직성).
+#   이 API는 읽기만 하고, 이력을 *채우는* 것은 entity_sync의 diff 밸브와 execution_harness다.
+# GET /api/naver/ad/raw/keywords      — 등록 키워드 원자료(prod 91,005행), limit 상한 200 강제.
+# GET /api/naver/ad/raw/search-terms  — 검색어 원자료(prod 114,285행), limit 상한 200 강제.
+# GET /api/naver/ad/raw/hourly        — 시간당 스냅샷 + daily_budget·spend_ratio(스펙 §1-4의
+#   "소진율 미노출" 해소). spend_ratio는 budget 없음/0이면 None(0 나눗셈 금지).
 from __future__ import annotations
 
 import json
