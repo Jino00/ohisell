@@ -191,7 +191,7 @@ def run_flight_loop(
     # 원료를 유통하고 SA는 서로 모른다). /stats 당일누적은 시각별로 체계적 저평가라
     # (완결도 곡선 v2, naver_stat_field_cadence_20260716.md) 보정 없이 raw cost_so_far를
     # 쓰면 예산제약(αB)이 남은예산을 과대평가해 α가 과속 편향된다(PLAN §0).
-    curve_by_hour = completeness_curve.build_curve(db)
+    curve_by_hour = completeness_curve.build_curve(db, today=today)
     projection = completeness_curve.projection_factor(curve_by_hour, current_hour)
     hour_completeness = (
         curve_by_hour.get(current_hour, {}).get("completeness") if projection is not None else None
@@ -244,16 +244,27 @@ def run_flight_loop(
                 # cost_so_far + scaled_remaining_cost(α) — 이미 "오늘 하루 전체 예상 총비용"
                 # (전일 물량)이다. daily_budget도 전일 물량이라 원래부터 동종 비교였다
                 # (P2-2 회귀 test_flight_loop_total_vs_remaining_budget_comparison 참조).
-                # 편향의 원인은 그 cost_so_far 항이 raw(저평가)라는 점 — 여기(cost_so_far)만
-                # projected_final_cost로 교체해 동종성을 유지한 채 저평가를 보정한다.
-                # (ROAS제약 αC는 손대지 않음: 클릭·노출·비용 완결도 곡선이 거의 동일해
-                # 비율인 ROAS에는 편향이 상쇄되기 때문 — 참고문서 §3.)
-                # 알려진 근사: scaled_remaining_cost(α)도 이미 "잔여 예상비용"을 더하므로
-                # projected_final_cost(완결도 기반, 미래분 포함)를 그대로 cost_so_far 자리에
-                # 넣으면 잔여분이 개념적으로 일부 중복 반영될 수 있다 — 방향은 항상 α를
-                # 낮추는(보수화) 쪽이라 안전 측 편향이며, dry-run 관찰(07-17~)로 캘리브레이션한다.
+                # 편향의 원인은 그 cost_so_far 항이 raw(저평가)라는 점 — so-far 항을
+                # projected로 교체해 동종성을 유지한 채 저평가를 보정한다.
+                # codex[P2] ROAS 오염 방지: cost만 투영하면 points의 ROAS(=revenue/cost)
+                # 분모만 부풀어 αC가 체계적으로 깎인다(예산 보정이 ROAS 제약을 오발동).
+                # 클릭·노출·비용의 완결도 곡선이 거의 동일하므로(참고문서 §3) clk·conv_amt도
+                # 같은 factor로 투영해 so-far ROAS 비율을 보존한다. (전환 완결도는 어트리뷰션
+                # 지연으로 더 낮지만 conv_amt는 rpc=0일 때만 쓰이는 revenue 폴백 — 같은
+                # factor 적용이 ratio 보존 관점에서 안전.)
+                # 알려진 근사: scaled_remaining_*(α)도 이미 "잔여 예상물량"을 더하므로
+                # projected(완결도 기반, 미래분 포함)를 그대로 so-far 자리에 넣으면 잔여분이
+                # 개념적으로 일부 중복 반영될 수 있다 — cost·clk 양쪽에 같은 방향이라 ROAS는
+                # 중립, 예산(αB)은 항상 α를 낮추는(보수화) 안전 측 편향이며, dry-run
+                # 관찰(07-17~)로 캘리브레이션한다.
                 actuals_for_curve = dict(actuals)
                 actuals_for_curve["cost"] = projected_final_cost
+                actuals_for_curve["clk"] = int(
+                    (Decimal(actuals["clk"]) * projection).to_integral_value()
+                )
+                actuals_for_curve["conv_amt"] = int(
+                    (Decimal(actuals.get("conv_amt", 0)) * projection).to_integral_value()
+                )
 
                 curve = response_curve_builder.build_response_curve(
                     forecast=forecast,

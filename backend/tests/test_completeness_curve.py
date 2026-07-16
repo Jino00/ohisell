@@ -123,6 +123,26 @@ def test_build_curve_no_data_returns_empty_dict(db):
     assert completeness_curve.build_curve(db) == {}
 
 
+def test_build_curve_respects_explicit_asof_today(db):
+    """codex[P2] 회귀: 리플레이/백테스트에서 호출자의 as-of 날짜(today=)를 전달하면
+    벽시계(kst_today)가 아니라 그 날짜 기준으로 창이 잡혀야 한다 — as-of 당일과
+    그 이후(시뮬레이션 관점의 미래) 확정치가 표본에 누출되면 안 됨."""
+    asof = TODAY - timedelta(days=5)
+    d_prev = asof - timedelta(days=1)
+    _sentinel(db, "cmp-a", d_prev, 100_000)
+    _snapshot(db, "cmp-a", d_prev, 12, 28_000)
+    # as-of 당일(벽시계 기준으론 이미 확정 과거지만, 리플레이에선 미확정이어야 함)
+    _sentinel(db, "cmp-a", asof, 100_000)
+    _snapshot(db, "cmp-a", asof, 12, 90_000)
+    db.commit()
+
+    curve = completeness_curve.build_curve(db, today=asof, min_daily_cost=50_000)
+    assert curve[12]["completeness"] == Decimal("0.28"), (
+        "as-of 당일(0.90) 표본이 누출되면 median이 왜곡됨 — 전일(0.28)만 포함돼야 함"
+    )
+    assert curve[12]["n"] == 1
+
+
 def test_projection_factor_none_when_hour_missing():
     curve: dict[int, dict] = {}
     assert completeness_curve.projection_factor(curve, 9) is None

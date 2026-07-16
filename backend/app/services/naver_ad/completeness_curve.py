@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 import statistics
-from datetime import timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 
 from sqlalchemy.orm import Session
@@ -21,12 +21,16 @@ from app.utils.kst import kst_today
 
 
 def build_curve(
-    db: Session, *, lookback_days: int = 14, min_daily_cost: int = 50_000,
+    db: Session, *, today: date | None = None,
+    lookback_days: int = 14, min_daily_cost: int = 50_000,
 ) -> dict[int, dict]:
     """캠페인-일별 (시각별 누적cost / 확정 최종cost) 비율의 시각별 median.
 
+    today: as-of 기준일 — 리플레이/백테스트에서 호출자(flight_loop)의 루프 날짜를 전달
+      (codex[P2]: 벽시계 kst_today()만 쓰면 시뮬레이션 날짜 이후 확정치가 표본에 누출됨).
+      미지정 시 kst_today().
     finals: naver_ad_daily WHERE adgroup_id == BACKFILL_SENTINEL_ADGROUP
-      AND ad_date < kst_today() (오늘은 미확정이라 제외) AND ad_date >= kst_today()-lookback_days.
+      AND ad_date < today (기준일 당일은 미확정이라 제외) AND ad_date >= today-lookback_days.
       final_cost >= min_daily_cost인 캠페인-일만 포함(저볼륨 노이즈 배제).
     samples: naver_hourly_snapshot의 같은 (campaign_id, ad_date) 조합, 시각별 누적cost.
     비율은 캠페인-일 단위로 구한 뒤 시각별 median을 취한다(합산비 아님 — 캠페인 동등 가중,
@@ -35,7 +39,7 @@ def build_curve(
 
     반환: {hour: {"completeness": Decimal, "n": int}}. 표본 없는 시각은 키 자체가 없음.
     """
-    today = kst_today()
+    today = today or kst_today()
     date_from = today - timedelta(days=lookback_days)
 
     finals_rows = (

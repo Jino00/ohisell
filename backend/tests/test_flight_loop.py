@@ -1,7 +1,8 @@
 # test_flight_loop.py — X2 T3 flight_loop Harness 단위 테스트
 from __future__ import annotations
 
-from datetime import date, datetime
+import json
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -168,6 +169,118 @@ def test_flight_loop_fallback_roas_uses_ratio_not_percent():
         "fallback target_roas must be ratio (2), not percent (200)"
     )
     assert 'Decimal("2")' in source
+
+
+# ── D-NAO-44: 완결도 보정(projection) 통합 테스트 (PLAN_naver-ad-pacing-correction §4 ④⑤⑥) ──
+
+def _setup_completeness_history(
+    db, *, hour=10, hour_cost=50_000, final_cost=100_000,
+    days=5, end=date(2026, 7, 10), campaign_id="cmp-hist",
+):
+    """build_curve 표본용 과거 이력: sentinel 확정치 + 시각별 스냅샷.
+    completeness = hour_cost/final_cost, n = days(기본 5 = min_samples 충족)."""
+    for i in range(days):
+        d = end - timedelta(days=i)
+        db.add(NaverAdDaily(
+            ad_date=d, campaign_id=campaign_id, campaign_type="WEB_SITE",
+            adgroup_id=BACKFILL_SENTINEL_ADGROUP, keyword_id="",
+            imp=1000, clk=100, cost=final_cost, rank_sum=0,
+        ))
+        db.add(NaverHourlySnapshot(
+            snapshot_at=datetime(d.year, d.month, d.day, hour, 5), ad_date=d,
+            snapshot_hour=hour, campaign_id=campaign_id, campaign_type="WEB_SITE",
+            cost=hour_cost, clk=hour_cost // 500, imp=hour_cost // 10,
+        ))
+    db.commit()
+
+
+def test_flight_loop_projection_unavailable_forces_neutral_alpha(db):
+    """C3-④: 완결도 표본 없음 → α=1.0 중립 고정 + projection_unavailable 라벨
+    (저평가 raw 입력으로 원 로직을 계속 계산하지 않는다 — PLAN §3 fail-safe)."""
+    _setup_campaign(db)
+    result = run_flight_loop(db, today=date(2026, 7, 11), current_hour=10)
+    d = result["decisions"][0]
+    assert d["binding_constraint"] == "projection_unavailable"
+    assert d["alpha"] == 1.0 and d["alpha_budget"] == 1.0 and d["alpha_roas"] == 1.0
+    assert d["projected_final_cost"] is None
+    assert d["completeness"] is None
+    assert d["raw_today_cost"] == 20000
+
+
+def test_flight_loop_projection_tightens_budget_alpha(db):
+    """C3-⑤: projected cost가 raw 대비 αB를 실제로 낮춘다.
+    raw 20,000이면 α=1 총예상(≈49k)이 예산 50,000 이내라 budget 미발동이지만,
+    completeness 0.5 → projected 40,000이면 총예상(≈69k)이 예산을 넘어 budget 발동."""
+    _setup_campaign(db, daily_budget=50_000)
+    _setup_completeness_history(db, hour_cost=50_000, final_cost=100_000)  # factor 2
+    result = run_flight_loop(db, today=date(2026, 7, 11), current_hour=10)
+    d = result["decisions"][0]
+    assert d["projected_final_cost"] == 40_000
+    assert float(d["projection_factor"]) == 2.0
+    assert d["binding_constraint"] == "budget"
+    assert d["alpha"] < 1.0
+
+
+def test_flight_loop_projection_preserves_roas_ratio(db, monkeypatch):
+    """codex[P2] 회귀: cost만 투영하면 so-far ROAS가 factor배 깎여 αC가 오발동한다.
+    raw so-far ROAS=6(40clk×rpc3000/20,000), completeness 0.25(factor 4)에서
+    cost만 투영하면 ROAS 1.5<target 2로 roas 바인딩 — clk·conv_amt 동일 factor
+    투영으로 비율(6)이 보존되어 roas 미발동이어야 한다."""
+    # rpc 산출은 이 테스트의 관심사가 아님 — 실주문 매출 없는 픽스처에선 보정계수가
+    # 0(=rpc 0)이 되므로 no-op(1)으로 고정해 rpc=3000이 나오게 한다.
+    from app.services.naver_ad import flight_loop as fl
+    monkeypatch.setattr(
+        fl, "compute_correction_factor",
+        lambda db_, date_to: {"factor": Decimal("1"), "source": "test"},
+    )
+    db.add(NaverCampaignSettings(campaign_id="cmp-roas", optimizer="ours"))
+    db.add(NaverEntity(
+        entity_type="campaign", entity_id="cmp-roas", campaign_id="cmp-roas",
+        campaign_type="WEB_SITE", name="ROAS회귀", status="on",
+    ))
+    # 잔여항 영향 최소화를 위해 forecast는 아주 작게
+    db.add(NaverForecastDaily(
+        target_date=date(2026, 7, 11), grain="campaign", scope_key="cmp-roas",
+        pred_clk=2, pred_cost=1000, pred_conv_amt=3000,
+    ))
+    db.add(NaverHourlySnapshot(
+        snapshot_at=datetime(2026, 7, 11, 10, 0), ad_date=date(2026, 7, 11),
+        snapshot_hour=10, campaign_id="cmp-roas", campaign_type="WEB_SITE",
+        cost=20000, clk=40, imp=4000, daily_budget=1_000_000,
+    ))
+    for h in range(24):
+        db.add(NaverHourlyPatternHistory(weekday=4, hour=h, clk_sum=10, cost_sum=2000, sample_days=4))
+    db.add(NaverAdDaily(  # rpc≈3000 (150,000/50clk)
+        ad_date=date(2026, 7, 10), campaign_id="cmp-roas", adgroup_id="grp-1",
+        keyword_id="kw-1", campaign_type="WEB_SITE",
+        clk=50, cost=25000, imp=5000, conv_direct_amt=100000, conv_indirect_amt=50000,
+    ))
+    _setup_completeness_history(db, hour_cost=25_000, final_cost=100_000)  # factor 4
+    result = run_flight_loop(db, today=date(2026, 7, 11), current_hour=10)
+    d = result["decisions"][0]
+    assert d["projected_final_cost"] == 80_000
+    assert d["binding_constraint"] != "roas", (
+        "예산 보정(cost 투영)이 ROAS 제약을 오발동시키면 안 됨 — "
+        "clk도 같은 factor로 투영해 so-far ROAS 비율이 보존돼야 한다"
+    )
+    assert d["alpha_roas"] > 1.0
+
+
+def test_flight_loop_change_log_detail_has_projection_fields(db):
+    """C3-⑥: change_log detail(JSON)에 D-NAO-44 관측 필드 4종 기록 —
+    dry-run 관찰·07-17 이후 대조의 원료."""
+    _setup_campaign(db)
+    _setup_completeness_history(db, hour_cost=50_000, final_cost=100_000)
+    run_flight_loop(db, today=date(2026, 7, 11), current_hour=10)
+    log = db.query(NaverChangeLog).filter(
+        NaverChangeLog.action == "flight_pacing",
+        NaverChangeLog.campaign_id == "cmp-test",
+    ).one()
+    detail = json.loads(log.after_value)
+    assert detail["raw_today_cost"] == 20000
+    assert detail["projected_final_cost"] == 40000
+    assert Decimal(detail["projection_factor"]) == Decimal("2")
+    assert Decimal(detail["completeness"]) == Decimal("0.5")
 
 
 def test_flight_loop_error_in_one_campaign_doesnt_block_others(db):
