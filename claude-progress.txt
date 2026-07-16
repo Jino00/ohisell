@@ -3,6 +3,11 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
+- 날짜: 2026-07-17 08:40 KST (★**D-NAO-48 캠페인 관리주체 스위치 배포 완료·라이브 검증 통과**. Jino 요청 "광고 옆에 토글")
+  - 1층에 **스마트스토어 캠페인 45개를 광고 종류별로**(쇼핑30·파워링크13·브랜드검색2) 나열 + 각 행 **3단 스위치**(우리 MOP/원본 MOP/수동). **캠페인 이름 표시**(신규 `campaign_roster` SA — 그동안 API에 이름이 없어 내부 ID가 노출됐음, MOP 리뷰 §2-7을 우리가 하고 있던 것).
+  - **★codex [P1]**(세션 첫 P1): 콘솔 select가 전체 치환 PUT으로 저장해 **1층 확인창(MOP 미차단 경고)을 우회** + stale 버퍼가 스위치 변경을 덮어써 **쓰기 게이트 재무장** 레이스. 뿌리는 "같은 필드에 쓰기 경로 2개". → 전체 PUT이 optimizer를 **422로 거부**(`extra=forbid`), 콘솔은 읽기전용 배지+"변경 →", **유일 경로=`PUT /campaign-settings/optimizer`**. R2에서 내가 하위호환 절충으로 문을 열어뒀던 걸 codex가 다시 지적 → 철회(구조로 강제). R3 PASS.
+  - 라이브 실증: 전체 PUT+optimizer→**422** · 전용 스위치가 **memo 보존** · 확인창 실물 확인 후 취소→상태 불변·쓰기 0건.
+  - 검증: 백엔드 **1638 pass/0 fail**(+27) · tsc -b clean · vitest 14 · 경계 밖 파일 diff 0줄.
 - 날짜: 2026-07-17 (★★**D-NAO-47 MOP 커맨드 센터 Phase 1+2 구현 완료 · codex PASS(백엔드 3R·프론트 6R) · prod 미배포**)
   - 워크트리 `mop-command-center-design-7e087a` / 브랜치 `claude/mop-command-center-design-7e087a` / base `cf193e5`(최신 main c4a728e + 설계 스펙). **31 커밋.**
   - **검증 실측**: 백엔드 **1608 pass / 0 fail**(+47) · 프론트 `tsc -b` clean · **vitest 14 pass(이 프로젝트 첫 프론트 테스트)** · build 성공 · **리스킨 경계 밖 10파일 diff 0줄**.
