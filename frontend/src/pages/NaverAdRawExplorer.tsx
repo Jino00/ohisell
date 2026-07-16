@@ -2,12 +2,12 @@
 // ★수집은 풍부한데 API가 0건이라 볼 방법이 없었다(스펙 §1-4): 키워드 91,005 · 검색어
 //   114,285 · 시간당 스냅샷. 여기가 처음으로 그걸 여는 자리.
 // ★규모 때문에 서버 페이지네이션이 계약이다(§9 라이브: 489행 무페이징 → 스크롤 27,305px).
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Card, Table, Th, Td, Pager, Loading, EmptyState, Button, LayerNav } from "../components/ui";
 import { num, won, pctFromFraction, NO_DATA } from "../lib/format";
+import { useAsyncData } from "../lib/useAsyncData";
 import {
   fetchNaverRawKeywords, fetchNaverRawSearchTerms, fetchNaverRawHourly,
-  type NaverRawKeywordRow, type NaverRawSearchTermRow, type NaverRawHourlyRow,
 } from "../lib/api";
 
 type Tab = "keywords" | "search-terms" | "hourly";
@@ -41,16 +41,10 @@ export default function NaverAdRawExplorer() {
 function KeywordsPane() {
   const [q, setQ] = useState("");
   const [offset, setOffset] = useState(0);
-  const [data, setData] = useState<{ total: number; rows: NaverRawKeywordRow[] } | null>(null);
-
-  useEffect(() => {
-    let alive = true;
-    setData(null);
-    fetchNaverRawKeywords({ q: q || undefined, limit: PAGE, offset })
-      .then((r) => { if (alive) setData(r); })
-      .catch(() => { if (alive) setData({ total: 0, rows: [] }); });
-    return () => { alive = false; };
-  }, [q, offset]);
+  const { data, error } = useAsyncData(
+    () => fetchNaverRawKeywords({ q: q || undefined, limit: PAGE, offset }),
+    [q, offset],
+  );
 
   return (
     <div>
@@ -62,7 +56,9 @@ function KeywordsPane() {
           onChange={(e) => { setOffset(0); setQ(e.target.value); }}
         />
       </div>
-      {data === null ? <Loading rows={5} /> : data.rows.length === 0 ? (
+      {error ? (
+        <EmptyState reason={`불러오지 못했습니다: ${error}`} hint="새로고침하거나 백엔드 상태를 확인하세요." />
+      ) : data === null ? <Loading rows={5} /> : data.rows.length === 0 ? (
         <EmptyState reason={q ? `"${q}"와 일치하는 키워드가 없습니다.` : "등록된 키워드가 없습니다."} />
       ) : (
         <>
@@ -86,17 +82,12 @@ function KeywordsPane() {
 
 function SearchTermsPane() {
   const [offset, setOffset] = useState(0);
-  const [data, setData] = useState<{ total: number; rows: NaverRawSearchTermRow[] } | null>(null);
+  const { data, error } = useAsyncData(
+    () => fetchNaverRawSearchTerms({ days: 14, limit: PAGE, offset }),
+    [offset],
+  );
 
-  useEffect(() => {
-    let alive = true;
-    setData(null);
-    fetchNaverRawSearchTerms({ days: 14, limit: PAGE, offset })
-      .then((r) => { if (alive) setData(r); })
-      .catch(() => { if (alive) setData({ total: 0, rows: [] }); });
-    return () => { alive = false; };
-  }, [offset]);
-
+  if (error) return <EmptyState reason={`불러오지 못했습니다: ${error}`} hint="새로고침하거나 백엔드 상태를 확인하세요." />;
   if (data === null) return <Loading rows={5} />;
   if (data.rows.length === 0) {
     return <EmptyState reason="최근 14일 검색어 데이터가 없습니다." hint="검색어 리포트는 매일 07:40 크론이 수집합니다." />;
@@ -122,17 +113,12 @@ function SearchTermsPane() {
 
 function HourlyPane() {
   const [offset, setOffset] = useState(0);
-  const [data, setData] = useState<{ total: number; rows: NaverRawHourlyRow[] } | null>(null);
+  const { data, error } = useAsyncData(
+    () => fetchNaverRawHourly({ days: 3, limit: PAGE, offset }),
+    [offset],
+  );
 
-  useEffect(() => {
-    let alive = true;
-    setData(null);
-    fetchNaverRawHourly({ days: 3, limit: PAGE, offset })
-      .then((r) => { if (alive) setData(r); })
-      .catch(() => { if (alive) setData({ total: 0, rows: [] }); });
-    return () => { alive = false; };
-  }, [offset]);
-
+  if (error) return <EmptyState reason={`불러오지 못했습니다: ${error}`} hint="새로고침하거나 백엔드 상태를 확인하세요." />;
   if (data === null) return <Loading rows={5} />;
   if (data.rows.length === 0) {
     return <EmptyState reason="최근 3일 시간당 스냅샷이 없습니다." hint="시간당 스냅샷은 매시 수집됩니다." />;

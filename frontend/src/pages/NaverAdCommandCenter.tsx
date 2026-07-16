@@ -15,6 +15,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { Card, Stat, EmptyState, Loading, CoverageBar, Table, Th, Td, Badge, LayerNav } from "../components/ui";
 import { num, won, pctFromFraction, NO_DATA } from "../lib/format";
+import { useAsyncData } from "../lib/useAsyncData";
 import {
   getNaverDashboardOverview, fetchNaverChangeLog, fetchNaverCampaignSettings,
   fetchNaverRetroScorecard, fetchNaverAdProposals,
@@ -237,14 +238,8 @@ function OursCampaignList() {
 // 정직 경계(D-NAO-45 docstring): "방향 정확도 계기판이지 인과 성과 검증이 아니다 —
 // 인과 승격은 카나리 몫". 그 카나리가 바로 이 화면의 1층이다.
 function RetroScorecardPane() {
-  const [data, setData] = useState<NaverRetroScorecard | null>(null);
-  useEffect(() => {
-    let alive = true;
-    fetchNaverRetroScorecard()
-      .then((r) => { if (alive) setData(r); })
-      .catch(() => { if (alive) setData({ window_days: 0, boards: {}, pacing: {}, pacing_final_ratio: {} }); });
-    return () => { alive = false; };
-  }, []);
+  const { data, error } = useAsyncData<NaverRetroScorecard>(() => fetchNaverRetroScorecard(), []);
+  if (error) return <EmptyState reason={`불러오지 못했습니다: ${error}`} hint="새로고침하거나 백엔드 상태를 확인하세요." />;
   if (data === null) return <Loading rows={3} />;
   return <RetroRollup data={data} />;
 }
@@ -368,17 +363,11 @@ function describeChange(row: NaverChangeLogRow): string {
 }
 
 function ChangeLogPane() {
-  const [data, setData] = useState<{ total: number; rows: NaverChangeLogRow[] } | null>(null);
-  useEffect(() => {
-    let alive = true;
-    // ★이 패널은 "우리가 한 일의 결과"(인과)다 — 외부가 바꾼 걸 감지한 행이 섞이면
-    //   남의 조작을 우리 성과로 보여주게 된다(codex[P2] 2026-07-17). 외부 변경은
-    //   별도 관심사(3열 대조의 MOP 열·이상 피드)라 여기 섞지 않는다.
-    fetchNaverChangeLog({ days: 30, limit: 10, actor: "ours" })
-      .then((r) => { if (alive) setData(r); })
-      .catch(() => { if (alive) setData({ total: 0, rows: [] }); });
-    return () => { alive = false; };
-  }, []);
+  // ★이 패널은 "우리가 한 일의 결과"(인과)다 — 외부가 바꾼 걸 감지한 행이 섞이면
+  //   남의 조작을 우리 성과로 보여주게 된다(codex[P2] 2026-07-17). 외부 변경은
+  //   별도 관심사(3열 대조의 MOP 열·이상 피드)라 여기 섞지 않는다.
+  const { data, error } = useAsyncData(() => fetchNaverChangeLog({ days: 30, limit: 10, actor: "ours" }), []);
+  if (error) return <EmptyState reason={`불러오지 못했습니다: ${error}`} hint="새로고침하거나 백엔드 상태를 확인하세요." />;
   if (data === null) return <Loading rows={3} />;
   if (data.rows.length === 0) {
     return (
@@ -407,14 +396,11 @@ function ChangeLogPane() {
 }
 
 function PendingPane() {
-  const [rows, setRows] = useState<NaverAdProposal[] | null>(null);
-  useEffect(() => {
-    let alive = true;
-    fetchNaverAdProposals({ status: "pending", limit: 100 })
-      .then((r) => { if (alive) setRows(r.rows); })
-      .catch(() => { if (alive) setRows([]); });
-    return () => { alive = false; };
-  }, []);
+  const { data: rows, error } = useAsyncData<NaverAdProposal[]>(
+    () => fetchNaverAdProposals({ status: "pending", limit: 100 }).then((r) => r.rows),
+    [],
+  );
+  if (error) return <EmptyState reason={`불러오지 못했습니다: ${error}`} hint="새로고침하거나 백엔드 상태를 확인하세요." />;
   if (rows === null) return <Loading rows={3} />;
 
   // ★백엔드가 준 informational 플래그로 가른다 — 프론트에서 유형 문자열을 하드코딩해
