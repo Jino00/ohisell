@@ -124,7 +124,7 @@ keyword_hourly_accrual (Harness, 신규 파일 keyword_hourly_sweep.py)
 - [x] H1: sweep_keyword_hourly(타깃 도출·교체 upsert·캐치업·롤링) (TDD)
 - [x] H1: hourly_snapshot avg_rank 저장 + entity_sync qi_grade+변화로그 (TDD)
 - [x] H1: 크론 등록(09:10)+catch-up 목록
-- [ ] codex review PASS
+- [x] codex review PASS (2026-07-17 4R: 1R[P2] qi None 덮어쓰기 → 2R[P2]×2 빈 fetch 이력보존·grain을 keyword_id로 → 3R[P2] 캐치업 sweep_date 중복 제외 → 4R clean. 전부 RED 재현 후 수정)
 - [ ] 라이브 합격(§8)
 - [ ] PR + 트랙/progress 갱신
 
