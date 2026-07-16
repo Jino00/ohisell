@@ -43,27 +43,15 @@ export default function NaverAdCommandCenter() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [overview, setOverview] = useState<NaverDashboardOverview | null>(null);
-  const [changeCount, setChangeCount] = useState<number | null>(null);
 
   useEffect(() => {
     let alive = true;
     (async () => {
       try {
         setLoading(true);
-        const [ov, cl] = await Promise.all([
-          getNaverDashboardOverview(),
-          // ★dry_run 제외가 기본 — 실집행만 센다. 아무것도 안 했는데 일한 것처럼
-          //   보이면 안 된다(D-47-h 정직성).
-          // ★actor:"ours"가 필수다(codex[P2] 2026-07-17). change_log에는 external_bid_change
-          //   /external_status_change(외부가 바꾼 걸 우리가 **감지**한 것)와 optimizer_change
-          //   (내부 설정)가 섞여 있다. prod 실측상 dry_run=False 15건이 **전부 외부 감지**라,
-          //   필터 없이 total을 쓰면 우리가 아무것도 실행 안 했는데 "우리 조작 15회"가 된다 —
-          //   0을 0이라고 말하는 게 이 화면의 존재 이유인데 정반대의 거짓말이 된다(D-47-h).
-          fetchNaverChangeLog({ days: 30, limit: 1, actor: "ours" }),
-        ]);
+        const ov = await getNaverDashboardOverview();
         if (!alive) return;
         setOverview(ov);
-        setChangeCount(cl.total);
       } catch (e) {
         if (alive) setError(e instanceof Error ? e.message : String(e));
       } finally {
@@ -127,7 +115,7 @@ export default function NaverAdCommandCenter() {
         title="우리 MOP가 돌리는 캠페인"
         right={<Link to="/naver-ad/console" className="text-xs text-blue-600 hover:underline">캠페인 넘기기 →</Link>}
       >
-        <OursCampaignList changeCount={changeCount} />
+        <OursCampaignList />
       </Card>
 
       {/* ③ 성적표 두 겹 — 중복 아니라 상보 */}
@@ -148,14 +136,29 @@ export default function NaverAdCommandCenter() {
   );
 }
 
-function OursCampaignList({ changeCount }: { changeCount: number | null }) {
+function OursCampaignList() {
   const [rows, setRows] = useState<NaverAdCampaignSettings[] | null>(null);
+  // ★캠페인별 조작 횟수(codex[P2] R2). 계정 전체 합계를 모든 행에 똑같이 찍으면
+  //   캠페인이 늘었을 때 A의 조작이 B 행에도 표시된다 — **D-47-c(N=1→N=여럿 동일 컴포넌트)
+  //   정면 위반**이고, 오늘 04 하나뿐이라 우연히 맞아 보일 뿐 카나리를 확대하는 순간
+  //   틀린다(그 확대가 이 화면의 존재 이유다).
+  //   캠페인마다 요청하지 않고 ours 실집행을 한 번에 받아 campaign_id로 묶는다
+  //   (실집행은 현재 0건이고 앞으로도 희소해 500건 창이면 충분하다).
+  const [countByCampaign, setCountByCampaign] = useState<Record<string, number> | null>(null);
 
   useEffect(() => {
     let alive = true;
     fetchNaverCampaignSettings()
       .then((r) => { if (alive) setRows(r.rows.filter((c) => c.optimizer === "ours")); })
       .catch(() => { if (alive) setRows([]); });
+    fetchNaverChangeLog({ days: 30, limit: 500, actor: "ours" })
+      .then((r) => {
+        if (!alive) return;
+        const acc: Record<string, number> = {};
+        for (const row of r.rows) acc[row.campaign_id] = (acc[row.campaign_id] ?? 0) + 1;
+        setCountByCampaign(acc);
+      })
+      .catch(() => { if (alive) setCountByCampaign({}); });
     return () => { alive = false; };
   }, []);
 
@@ -175,7 +178,9 @@ function OursCampaignList({ changeCount }: { changeCount: number | null }) {
       <Th right>우리 조작</Th>
       <Th>상태</Th>
     </>}>
-      {rows.map((c) => (
+      {rows.map((c) => {
+        const changeCount = countByCampaign === null ? null : (countByCampaign[c.campaign_id] ?? 0);
+        return (
         <tr key={c.campaign_id}>
           {/* ★campaign_name은 백엔드 /campaign-settings가 주지 않는다(_serialize_settings 실측) —
               추측으로 필드를 만들지 않고 campaign_id만 표시한다. */}
@@ -195,7 +200,8 @@ function OursCampaignList({ changeCount }: { changeCount: number | null }) {
             ) : <Badge tone="owner">가동 중</Badge>}
           </Td>
         </tr>
-      ))}
+        );
+      })}
     </Table>
   );
 }

@@ -822,7 +822,17 @@ def get_change_log(
     if action:
         q = q.filter(NaverChangeLog.action == action)
     if actor == "ours":
-        q = q.filter(NaverChangeLog.action.in_(naver_execution_harness.EXECUTION_ACTIONS))
+        # ★after_value 존재를 함께 요구한다(codex[P2] R2). harness는 가드 거부·쓰기 실패에도
+        # 같은 action을 dry_run=False로 남긴다(`_guard_failure`는 writer를 부르지도 않는다).
+        # 그 행을 세면 광고에 아무 변화가 없었는데 "우리 조작 1회"가 된다.
+        # 판별 기준이 outcome이 아니라 after_value인 것은 이 코드베이스가 이미 정한 규약이다
+        # (naver_execution_harness.py:372 주석 · _detect_external_change · _load_our_bid_writes):
+        # outcome은 D+14 채점 전 NULL이고 채점 후엔 improved/declined로 바뀌므로 "실행됨"이라는
+        # 영구 상태가 아니다. 실패·가드거부·dry-run은 before/after_value를 안 채운다.
+        q = q.filter(
+            NaverChangeLog.action.in_(naver_execution_harness.EXECUTION_ACTIONS),
+            NaverChangeLog.after_value.isnot(None),
+        )
     elif actor == "external":
         q = q.filter(NaverChangeLog.action.in_(naver_execution_harness.EXTERNAL_DETECTION_ACTIONS))
     if not include_dry_run:

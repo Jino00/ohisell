@@ -204,3 +204,33 @@ def test_execution_actions_derives_from_harness_mapping():
     assert "external_bid_change" not in EXECUTION_ACTIONS
     assert "external_status_change" not in EXECUTION_ACTIONS
     assert "optimizer_change" not in EXECUTION_ACTIONS
+
+
+def test_actor_ours_excludes_failed_writes(client, db):
+    """★codex[P2] R2: 실패한 쓰기는 '우리 조작'이 아니다. harness는 가드 거부·쓰기 실패에도
+    같은 action(update_bid)을 dry_run=False로 남긴다(_guard_failure는 writer를 부르지도 않음).
+    그걸 세면 광고에 아무 변화가 없었는데 "우리 조작 1회"가 된다.
+    판별은 outcome이 아니라 **after_value 존재**다 — 이 코드베이스가 이미 정한 규약
+    (naver_execution_harness.py:372 주석·_load_our_bid_writes와 동일)."""
+    _seed(db, action="update_bid")  # 성공(before/after 채워짐)
+    db.add(NaverChangeLog(
+        entity_type="keyword", entity_id="nkw-fail", campaign_id="cmp-1",
+        action="update_bid", dry_run=False, outcome="failed",
+        changed_at=kst_now(), before_value=None, after_value=None,  # ← 실패라 안 채워짐
+    ))
+    db.commit()
+
+    body = client.get("/api/naver/ad/change-log?actor=ours").json()
+    assert body["total"] == 1
+    assert body["rows"][0]["entity_id"] == "nkw-1"
+
+
+def test_actor_ours_scoped_by_campaign(client, db):
+    """★codex[P2] R2: D-47-c(N=1→N=여럿)를 위해 캠페인별 집계가 되어야 한다.
+    캠페인이 늘면 A의 조작이 B 행에도 표시되면 안 된다."""
+    _seed(db, action="update_bid", campaign_id="cmp-1")
+    _seed(db, action="update_bid", campaign_id="cmp-2")
+    _seed(db, action="update_bid", campaign_id="cmp-2")
+
+    assert client.get("/api/naver/ad/change-log?actor=ours&campaign_id=cmp-1").json()["total"] == 1
+    assert client.get("/api/naver/ad/change-log?actor=ours&campaign_id=cmp-2").json()["total"] == 2
