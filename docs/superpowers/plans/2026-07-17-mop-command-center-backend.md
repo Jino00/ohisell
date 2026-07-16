@@ -744,7 +744,9 @@ git commit -m "feat(naver-ad): D-NAO-47 T3 GET /change-log — 변경 이력 조
 
 **설계:** 스펙 §1-6 — `_serialize_proposal`이 `target_bid`를 안 주는 탓에 **"입찰 인상" 카드가 얼마로 올리는지 화면에 없다.** 지금 pending인 실행 대상 5건이 전부 `bid_up`이라 이건 곧바로 체감되는 결함이다.
 
-**제안 유형 13종(실측 확정 — prod DB + 코드 상수 대조):**
+**제안 유형 14종 (★계획 초판의 "13종"은 틀렸다 — 아래 정정 참조):**
+
+> **★정정 (구현 중 발견, 2026-07-17):** 초판은 13종이라 했으나 **실제는 14종**이다. `budget_down`이 빠져 있었다 — `naver_execution_harness._ACTION_BY_PROPOSAL_TYPE:104`에 `"budget_down": "update_budget"`으로 **이미 배선돼 있다**(D-NAO-42-f, 커밋 `68d7ef5` — 이 계획서보다 먼저). 계획서 표를 진실로 삼았다면 놓쳤을 것을, **T4의 드리프트 가드 테스트(`set(_ACTION_BY_PROPOSAL_TYPE) <= ALL_PROPOSAL_TYPES`)가 계획서의 오류를 잡아냈다.** 가드가 의도대로 동작한 사례다. → **Phase 2 프론트 라벨은 14종**이다.
 
 | # | type | 분류 | 라벨(프론트에서 사용) |
 |---|---|---|---|
@@ -755,12 +757,13 @@ git commit -m "feat(naver-ad): D-NAO-47 T3 GET /change-log — 변경 이력 조
 | 5 | `pause` | 실행형 | 정지 |
 | 6 | `resume` | 실행형 | 재개 |
 | 7 | `budget_up` | 실행형(미개방) | 예산 증액 |
-| 8 | `budget_pre_exhaustion` | 실행형(미개방) | 예산 소진 임박 |
-| 9 | `anomaly` | 정보성 | 이상 감지 |
-| 10 | `anomaly_freshness` | 정보성 | 데이터 신선도 이상 |
-| 11 | `account_brief` | 정보성 | 계정 브리핑 |
-| 12 | `trigger_pacing` | 정보성 | 페이싱 경보 |
-| 13 | `trigger_cpc_spike` | 정보성 | CPC 급등 경보 |
+| 8 | **`budget_down`** | 실행형(미개방) | **예산 감액** ★초판 누락 |
+| 9 | `budget_pre_exhaustion` | 실행형(미개방) | 예산 소진 임박 |
+| 10 | `anomaly` | 정보성 | 이상 감지 |
+| 11 | `anomaly_freshness` | 정보성 | 데이터 신선도 이상 |
+| 12 | `account_brief` | 정보성 | 계정 브리핑 |
+| 13 | `trigger_pacing` | 정보성 | 페이싱 경보 |
+| 14 | `trigger_cpc_spike` | 정보성 | CPC 급등 경보 |
 
 출처: `proposal_writer.py:16-24`(`_NEGATIVE`~`_ACCOUNT_BRIEF`) + `trigger_watch.PROPOSAL_TYPE_PACING/CPC` + `guardrail_gate.py:36-37`(`_BID_UP_TYPES`/`_BID_DOWN_TYPES`) + `naver_execution_harness.py:98-99`. **프론트의 `budget`·`new_setup`은 백엔드가 생성하지 않는 유령 라벨**(제거 대상 — Phase 2에서).
 
