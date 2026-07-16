@@ -41,6 +41,14 @@
 
 Phase 1의 신규 엔드포인트는 기존 라우터 관례에 맞춰 `{"rows": [...], "total": N}`을 반환한다. `items`로 쓰면 `undefined`가 되고 조용히 빈 화면이 된다.
 
+### 4. ★★타입 체크는 `npx tsc -b`다 — `npx tsc --noEmit`은 **아무것도 검사하지 않는다**
+
+`frontend/tsconfig.json`은 `{"files": [], "references": [...]}` 형태(solution-style)라 **bare `tsc --noEmit`은 파일 0개를 검사하고 조용히 성공한다.** 코드가 아무리 깨져 있어도 통과한다 — 검증이 아니라 **위약(僞藥)**이다.
+
+실측(2026-07-17): `src/`에 `const x: number = "string"`을 넣고 `npx tsc --noEmit` → **출력 없음(통과)**. 같은 파일에 `npx tsc -b` → `error TS2322` 정상 검출.
+
+→ **모든 타입 검증은 `npx tsc -b`로 한다.** (`npm run build`도 내부적으로 `tsc -b`를 쓴다.)
+
 ---
 
 ## File Structure
@@ -60,7 +68,7 @@ Phase 1의 신규 엔드포인트는 기존 라우터 관례에 맞춰 `{"rows":
 | `frontend/src/lib/api.ts` | 신규 API 4개 타입·함수 추가 | 수정 |
 | `frontend/src/App.tsx` | 라우트 5개 | 수정 |
 
-**테스트 실행:** `cd frontend && npx vitest run` (vitest 미설치면 Task 2 Step 1에서 설치). 타입: `cd frontend && npx tsc --noEmit`. 빌드: `cd frontend && npm run build`.
+**테스트 실행:** `cd frontend && npx vitest run` (vitest 미설치면 Task 2 Step 1에서 설치). 타입: `cd frontend && npx tsc -b`. 빌드: `cd frontend && npm run build`.
 
 ---
 
@@ -548,7 +556,7 @@ export { Table, Th, Td, Pager } from "./Table";
 
 - [ ] **Step 3: 타입·빌드 확인**
 
-Run: `cd frontend && npx tsc --noEmit && npm run build`
+Run: `cd frontend && npx tsc -b && npm run build`
 Expected: 둘 다 성공
 
 - [ ] **Step 4: 커밋**
@@ -661,7 +669,7 @@ export async function fetchNaverRawHourly(params: {
 
 - [ ] **Step 3: 타입 확인 + 커밋**
 
-Run: `cd frontend && npx tsc --noEmit`
+Run: `cd frontend && npx tsc -b`
 ```bash
 cd frontend && git add src/lib/api.ts
 git commit -m "feat(naver-ad): D-NAO-47 P2-T4 api.ts — change-log·raw 3종 배선 + 제안 target_bid/informational"
@@ -725,7 +733,7 @@ const PROPOSAL_TYPE_LABEL: Record<string, string> = {
 
 - [ ] **Step 3: 타입·빌드 + 커밋**
 
-Run: `cd frontend && npx tsc --noEmit && npm run build`
+Run: `cd frontend && npx tsc -b && npm run build`
 ```bash
 cd frontend && git add src/pages/NaverAdOptimizationConsole.tsx
 git commit -m "feat(naver-ad): D-NAO-47 P2-T5 제안 라벨 14종 정합 + target_bid 표시 (유령 2종 제거)"
@@ -769,7 +777,7 @@ Expected: **출력 없음**(0줄 변경). 출력이 있으면 경계를 넘은 �
 
 - [ ] **Step 4: 타입·빌드 + 커밋**
 
-Run: `cd frontend && npx tsc --noEmit && npm run build && npx vitest run`
+Run: `cd frontend && npx tsc -b && npm run build && npx vitest run`
 ```bash
 cd frontend && git add src/pages/NaverAdReport.tsx src/pages/NaverAdDiagnosisBoard.tsx src/pages/NaverAdOptimizationConsole.tsx
 git commit -m "refactor(naver-ad): D-NAO-47 P2-T6 naver-ad 3파일 유틸 통합 (경계 밖 파일 불변)"
@@ -948,7 +956,7 @@ function OursCampaignList({ changeCount }: { changeCount: number | null }) {
 
 - [ ] **Step 2: 타입·빌드 + 커밋**
 
-Run: `cd frontend && npx tsc --noEmit && npm run build`
+Run: `cd frontend && npx tsc -b && npm run build`
 ```bash
 cd frontend && git add src/pages/NaverAdCommandCenter.tsx
 git commit -m "feat(naver-ad): D-NAO-47 P2-T7 1층 커맨드 센터 — 3열 대조 + 우리 조작 N회 + 왜 0인가"
@@ -1121,7 +1129,7 @@ function HourlyPane() {
 
 - [ ] **Step 2: 타입·빌드 + 커밋**
 
-Run: `cd frontend && npx tsc --noEmit && npm run build`
+Run: `cd frontend && npx tsc -b && npm run build`
 ```bash
 cd frontend && git add src/pages/NaverAdRawExplorer.tsx
 git commit -m "feat(naver-ad): D-NAO-47 P2-T8 3층 원자료 탐색 — 키워드 91k·검색어 114k 서버 페이지네이션"
@@ -1337,7 +1345,7 @@ function PendingPane() {
 
 - [ ] **Step 3: 타입·빌드 + 커밋**
 
-Run: `cd frontend && npx tsc --noEmit && npm run build`
+Run: `cd frontend && npx tsc -b && npm run build`
 ```bash
 cd frontend && git add src/pages/NaverAdCommandCenter.tsx
 git commit -m "feat(naver-ad): D-NAO-47 P2-T10 2층 — 성적표 두 겹(방향정밀도+인과) + 저소진 롤업"

@@ -52,3 +52,10 @@ describe("NO_DATA", () => {
     expect(NO_DATA).toBe("—");
   });
 });
+
+// ── D-NAO-47: 이 파일이 프론트 유일 테스트라 여기 남긴다 ──
+// ★타입 검증은 `npx tsc -b`로 해야 한다. `npx tsc --noEmit`은 **아무것도 검사하지 않는다** —
+//   tsconfig.json이 {"files": [], "references": [...]} 형태(solution-style)라 bare tsc는
+//   파일 0개를 보고 조용히 성공한다. 실측(2026-07-17): src/에 `const x: number = "string"`을
+//   넣고 `npx tsc --noEmit` → 출력 없음(통과). 같은 파일에 `npx tsc -b` → TS2322 정상 검출.
+//   "타입 통과했습니다"를 --noEmit으로 주장하면 위약이다.
