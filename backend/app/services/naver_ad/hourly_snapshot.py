@@ -16,7 +16,10 @@ from app.utils.kst import kst_now, kst_today
 
 log = logging.getLogger(__name__)
 
-_RETAIN_DAYS = 7
+# D-NAO-46(2026-07-16 Jino): 시간별 원시 시계열 = 학습 데이터 영구 축적 방침 — 기존 7일
+# 롤링을 365일로 연장. 규모 무해(캠페인 ~25개×24h ≈ 600행/일 ≈ 22만행/년). 완결도 곡선
+# (D-NAO-44)·시간당 관제 루프(D-NAO-46 설계 예정)의 표본도 이만큼 깊어진다.
+_RETAIN_DAYS = 365
 
 
 def snapshot_hourly(db: Session, *, campaigns: list[dict] | None = None,
