@@ -28,8 +28,12 @@ _CATCHUP_LOOKBACK_END = 2   # D-2까지(D-1=sweep_date 본진행분 제외)
 def build_sweep_targets(db: Session, sweep_date: date) -> list[dict]:
     """naver_ad_daily에서 sweep_date의 imp>0 유닛을 스윕 타깃으로 도출(순수 함수).
 
-    WEB_SITE: keyword_id(nkw-…) → entity_type='keyword'(adgroup_id=소속 그룹).
-    SHOPPING/BRAND_SEARCH: keyword_id='' sentinel 행의 adgroup_id → entity_type='adgroup'.
+    grain 판정은 keyword_id 비어있음 여부(codex 2R[P2-2]) — campaign_type이 아니라:
+      keyword_id 실재(nkw-…) → entity_type='keyword'(adgroup_id=소속 그룹) [WEB_SITE 규약]
+      keyword_id='' sentinel → 그 행의 adgroup_id → entity_type='adgroup' [SHOPPING/BRAND_SEARCH 규약]
+    일별 수집기가 타입 조회 실패 시 campaign_type=''로 적재할 수 있고 구버전 행도 공백
+    가능한데, campaign_type으로 분기하면 실재 keyword_id 행이 adgroup grain으로 오분류되어
+    키워드 곡선을 영영 안 모은다. campaign_type은 저장 컬럼으로만 유지.
     campaign_backfill의 캠페인 grain 소급행(adgroup_id==BACKFILL_SENTINEL_ADGROUP)은
     실단위 유닛이 아니므로 제외(2배 함정 규약, PLAN §5).
 
@@ -46,16 +50,14 @@ def build_sweep_targets(db: Session, sweep_date: date) -> list[dict]:
     )
     targets: dict[tuple[str, str], dict] = {}
     for r in rows:
-        if r.campaign_type == "WEB_SITE":
-            if not r.keyword_id:
-                continue
+        if r.keyword_id:  # 키워드 grain (WEB_SITE 규약 — campaign_type 공백이어도 keyword_id가 진실)
             key = ("keyword", r.keyword_id)
             targets[key] = {
                 "entity_type": "keyword", "entity_id": r.keyword_id,
                 "adgroup_id": r.adgroup_id, "campaign_id": r.campaign_id,
                 "campaign_type": r.campaign_type,
             }
-        else:  # SHOPPING/BRAND_SEARCH
+        else:  # keyword_id='' sentinel → 애드그룹 grain (SHOPPING/BRAND_SEARCH 규약)
             if not r.adgroup_id:
                 continue
             key = ("adgroup", r.adgroup_id)
@@ -121,6 +123,14 @@ def sweep_keyword_hourly(db: Session, *, sweep_date: date | None = None, fetch=N
                         t["entity_id"], sweep_date, e)
             failed += 1
             continue
+        if not hh:
+            # codex 2R[P2-1]: 타깃은 전부 ad_daily imp>0 — 빈 fetch는 이상 신호(무자격증명·
+            # 일시 API 글리치). _replace_rows로 기존 수집분을 지우지 않고 failed로 카운트+skip
+            # (행이 0인 채로 남으면 다음날 캐치업이 자연 재시도).
+            log.warning("keyword_hourly_sweep 빈 fetch skip(기존 행 보존): entity=%s date=%s",
+                        t["entity_id"], sweep_date)
+            failed += 1
+            continue
         _replace_rows(db, sweep_date, t, hh)
         rows_written += len(hh)
 
@@ -150,6 +160,12 @@ def sweep_keyword_hourly(db: Session, *, sweep_date: date | None = None, fetch=N
                     except Exception as e:
                         log.warning("keyword_hourly_sweep 캐치업 유닛 실패 skip: entity=%s date=%s: %s",
                                     t["entity_id"], d, e)
+                        failed += 1
+                        continue
+                    if not hh:
+                        # codex 2R[P2-1]과 동일 — 캐치업도 imp>0 유닛만 오므로 빈 fetch=이상 신호
+                        log.warning("keyword_hourly_sweep 캐치업 빈 fetch skip: entity=%s date=%s",
+                                    t["entity_id"], d)
                         failed += 1
                         continue
                     _replace_rows(db, d, t, hh)

@@ -224,6 +224,34 @@ def test_build_sweep_targets_excludes_zero_imp(db):
     assert targets == []
 
 
+def test_build_sweep_targets_blank_campaign_type_with_keyword_id_is_keyword_grain(db):
+    """codex 2R[P2-2]: 일별 수집기가 타입 조회 실패 시 campaign_type=''로 적재할 수 있고
+    구버전 행도 공백 가능 — keyword_id가 실재(nkw-…)하면 campaign_type과 무관하게 keyword
+    grain이어야 한다(아니면 adgroup grain으로 오분류되어 키워드 곡선을 영영 안 모음)."""
+    _ad_row(db, campaign_id="cmp-x", campaign_type="", adgroup_id="grp-1",
+            keyword_id="nkw-legacy", imp=10)
+    db.commit()
+
+    targets = keyword_hourly_sweep.build_sweep_targets(db, D)
+    assert len(targets) == 1
+    t = targets[0]
+    assert t["entity_type"] == "keyword"
+    assert t["entity_id"] == "nkw-legacy"
+    assert t["adgroup_id"] == "grp-1"
+
+
+def test_build_sweep_targets_blank_campaign_type_without_keyword_id_is_adgroup_grain(db):
+    """공백 campaign_type + keyword_id='' sentinel → adgroup grain (P2-2 대칭 케이스)."""
+    _ad_row(db, campaign_id="cmp-x", campaign_type="", adgroup_id="grp-legacy",
+            keyword_id="", imp=10)
+    db.commit()
+
+    targets = keyword_hourly_sweep.build_sweep_targets(db, D)
+    assert len(targets) == 1
+    assert targets[0]["entity_type"] == "adgroup"
+    assert targets[0]["entity_id"] == "grp-legacy"
+
+
 def test_build_sweep_targets_brand_search_uses_adgroup_grain(db):
     _ad_row(db, campaign_id="cmp-b", campaign_type="BRAND_SEARCH", adgroup_id="grp-brand",
             keyword_id="", imp=5)
@@ -266,6 +294,29 @@ def test_sweep_writes_rows_for_target_and_is_idempotent(db):
     assert r2["rows"] == 1
     rows2 = db.query(NaverKeywordHourly).filter(NaverKeywordHourly.ad_date == D).all()
     assert len(rows2) == 1
+
+
+def test_sweep_empty_fetch_preserves_existing_rows_and_counts_failed(db):
+    """codex 2R[P2-1]: 타깃은 전부 ad_daily imp>0이므로 빈 fetch(무자격증명·일시 API 글리치)
+    = 이상 신호. _replace_rows를 호출해 기존 수집분을 delete 후 insert 0으로 지우면 안 된다 —
+    failed 카운트+skip으로 기존 행 보존(다음날 캐치업이 자연 재시도)."""
+    _ad_row(db, campaign_id="cmp-w", campaign_type="WEB_SITE", adgroup_id="grp-1",
+            keyword_id="nkw-1", imp=10)
+    # 이전 스윕이 이미 수집해 둔 행
+    db.add(NaverKeywordHourly(ad_date=D, hour=9, entity_type="keyword",
+                               entity_id="nkw-1", adgroup_id="grp-1", campaign_id="cmp-w",
+                               campaign_type="WEB_SITE", imp=10, clk=1, cost=100))
+    db.commit()
+
+    fetch = _fake_fetch_factory({}, [])  # 모든 fetch가 빈 리스트 반환(글리치 시뮬레이션)
+    result = keyword_hourly_sweep.sweep_keyword_hourly(db, sweep_date=D, fetch=fetch)
+
+    assert result["failed"] == 1, "빈 fetch는 failed로 카운트해야 한다"
+    rows = db.query(NaverKeywordHourly).filter(
+        NaverKeywordHourly.ad_date == D, NaverKeywordHourly.entity_id == "nkw-1"
+    ).all()
+    assert len(rows) == 1, "빈 fetch가 기존 수집분을 지우면 안 된다"
+    assert rows[0].hour == 9 and rows[0].imp == 10
 
 
 def test_sweep_unit_failure_skipped_and_counted(db):
