@@ -167,6 +167,82 @@ def _log_external_status_change(db: Session, entity: NaverEntity, new_status: st
              entity.entity_type, entity.entity_id, entity.status, new_status)
 
 
+def _log_external_bid_change(db: Session, entity: NaverEntity, new_bid_raw, now) -> None:
+    """D-NAO-47: 입찰가 변경을 change_log에 기록한다 — `_log_external_status_change`의 대칭.
+
+    ★이 함수가 없던 동안 `e.bid_amt = r.get("bid_amt")`가 매일 91,005개 키워드의 어제
+    입찰가를 조용히 덮어썼다(스펙 §1-5). 그래서 "우리(또는 MOP)가 CPC를 얼마에서 얼마로
+    바꿨나"를 보여줄 데이터가 **아예 존재하지 않았다**(prod change_log 전체 17행 · 우리
+    자동 입찰변경 0건).
+
+    ⚠️ 쓰기 폭증 방어(이 함수의 존재 이유의 절반):
+      - 무변동 행은 로깅하지 않는다. naver_entity 91,005행 중 절대다수는 매일 그대로다.
+      - 비교 전 반드시 `_norm_bid()`로 정규화한다 — 타입 불일치(DB int vs API str) 하나로
+        전 행이 '변경됨'이 되어 91,005행/일이 쌓인다(_norm_bid docstring 참조).
+      - old/new 어느 쪽이든 None이면 로깅하지 않는다. 신규 관측·수집 누락은 '변경'이 아니고,
+        특히 API 장애로 bid_amt가 전부 None이 되면 91,005행이 쏟아진다.
+
+    호출 계약: `e.bid_amt` 대입 **전에** 호출해야 한다(entity.bid_amt가 옛값이어야 함).
+    `_log_external_status_change`가 `e.synced_at` 대입 전에 호출되는 것과 같은 이유다.
+
+    우리 쓰기 귀속: `_log_external_status_change`와 동일 — 우리의 마지막 성공 쓰기
+    (action="update_bid", dry_run=False, after_value 존재)가 직전 관측(entity.synced_at)
+    **이후**이고 그 결과값이 지금 관측값과 같으면 "우리가 방금 한 것"이라 스킵한다.
+    방향 일치만으로 판단하지 않는 이유는 _log_external_status_change의 ⚠️ 주석 참조.
+    after_value의 키가 camelCase 'bidAmt'인 것은 writer가 네이버 재조회 응답(get_keyword)을
+    그대로 json.dumps 하기 때문이다(naver_sa_writer.py:350) — 'bid_amt'(snake)가 아니다.
+    """
+    if entity.status == "deleted":
+        return
+
+    old_bid = _norm_bid(entity.bid_amt)
+    new_bid = _norm_bid(new_bid_raw)
+    if old_bid is None or new_bid is None:
+        return  # 신규 관측/수집 누락/파싱 실패는 변경이 아님
+    if old_bid == new_bid:
+        return  # ★ 절대다수가 여기서 끊긴다 — 이 한 줄이 쓰기 폭증을 막는다
+
+    last_our_write = (
+        db.query(NaverChangeLog)
+        .filter(
+            NaverChangeLog.entity_type == entity.entity_type,
+            NaverChangeLog.entity_id == entity.entity_id,
+            NaverChangeLog.action == "update_bid",
+            NaverChangeLog.dry_run.is_(False),
+            NaverChangeLog.after_value.isnot(None),
+        )
+        .order_by(NaverChangeLog.changed_at.desc())
+        .first()
+    )
+    if (
+        last_our_write
+        and last_our_write.after_value
+        and entity.synced_at is not None
+        and last_our_write.changed_at > entity.synced_at
+    ):
+        try:
+            last_after = json.loads(last_our_write.after_value)
+            if isinstance(last_after, dict) and _norm_bid(last_after.get("bidAmt")) == new_bid:
+                return
+        except (ValueError, TypeError):
+            pass
+
+    db.add(NaverChangeLog(
+        entity_type=entity.entity_type,
+        entity_id=entity.entity_id,
+        campaign_id=entity.campaign_id,
+        action="external_bid_change",
+        proposal_id=None,
+        dry_run=False,
+        changed_at=now,
+        before_value=json.dumps({"bidAmt": old_bid}),
+        after_value=json.dumps({"bidAmt": new_bid}),
+        rationale="entity_sync 감지: 외부(MOP/사람) 입찰가 변경",
+    ))
+    log.info("external_bid_change detected: %s %s %s→%s",
+             entity.entity_type, entity.entity_id, old_bid, new_bid)
+
+
 def sync_entities(db: Session, *, rows: list[dict] | None = None) -> dict:
     """naver_entity upsert(멱등, 일 1회 동기화) — keywordstool 보강 필드(monthly_volume 등) 보존.
 
@@ -195,6 +271,8 @@ def sync_entities(db: Session, *, rows: list[dict] | None = None) -> dict:
         else:
             if e.status != r["status"] and e.status != "deleted":
                 _log_external_status_change(db, e, r["status"], now)
+            # ★ e.bid_amt 대입 *전*에 호출 — 함수가 entity.bid_amt를 옛값으로 읽는다(D-NAO-47).
+            _log_external_bid_change(db, e, r.get("bid_amt"), now)
             e.parent_id = r["parent_id"]
             e.campaign_id = r["campaign_id"]
             e.campaign_type = r["campaign_type"]
