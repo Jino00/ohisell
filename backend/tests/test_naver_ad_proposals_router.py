@@ -4,6 +4,8 @@
 # 500 유발)를 못 잡는다. 반드시 실제 HTTP 왕복으로 검증한다.
 from __future__ import annotations
 
+from datetime import datetime
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -49,7 +51,9 @@ def db(client_and_session):
 def test_proposals_endpoint_returns_200_empty(client):
     resp = client.get("/api/naver/ad/proposals")
     assert resp.status_code == 200
-    assert resp.json() == {"rows": []}
+    # D-NAO-47: total 추가(additive — 기존 rows 소비자 불변). limit으로 자른 페이지 길이를
+    # 건수로 쓰면 틀린 숫자가 되므로 서버가 전체 건수를 준다.
+    assert resp.json() == {"total": 0, "rows": []}
 
 
 def test_proposals_endpoint_returns_seeded_rows(client, db):
@@ -222,3 +226,66 @@ def test_all_proposal_types_constant_covers_every_emitted_type():
     assert INFORMATIONAL_PROPOSAL_TYPES <= ALL_PROPOSAL_TYPES
     assert set(_ACTION_BY_PROPOSAL_TYPE) <= ALL_PROPOSAL_TYPES
     assert len(ALL_PROPOSAL_TYPES) == 14
+
+
+# ── D-NAO-47 라이브 배포 검증에서 발견: 정보성이 실행형을 페이지 밖으로 밀어낸다 ──
+def test_proposals_informational_filter_surfaces_actionable(client, db):
+    """★prod 실측(2026-07-17 배포 중 발견): pending 107건 중 trigger_pacing 102건(07-16)이
+    bid_up 5건(07-15)보다 최신이라, created_at DESC + limit=100이면 **bid_up이 한 건도
+    안 나온다**. 프론트가 받은 페이지를 !informational로 걸러 "지금 결정할 제안이 없습니다"를
+    렌더했다 — 5건이 기다리는데 없다고 말하는 것.
+    limit만 올리는 건 임시방편이다(내일 trigger_pacing이 500건이면 또 밀려난다).
+    **실행형은 실행형으로 질의한다.**"""
+    db.add(NaverProposal(
+        proposal_type="bid_up", target_type="adgroup", target_id="grp-old",
+        campaign_id="cmp-1", status="pending", target_bid=2090,
+        created_at=datetime(2026, 7, 15, 9, 0),
+    ))
+    for i in range(30):  # 더 최신인 정보성이 잔뜩
+        db.add(NaverProposal(
+            proposal_type="trigger_pacing", target_type="campaign", target_id=f"cmp-{i}",
+            campaign_id="cmp-1", status="pending",
+            created_at=datetime(2026, 7, 16, 9, 0),
+        ))
+    db.commit()
+
+    # 순진한 방식: 최신 5건만 받으면 bid_up이 안 나온다(회귀 재현)
+    naive = client.get("/api/naver/ad/proposals?status=pending&limit=5").json()["rows"]
+    assert all(r["proposal_type"] == "trigger_pacing" for r in naive), "전제 재현 실패"
+
+    # 필터: 실행형만 질의하면 페이지 위치와 무관하게 나온다
+    actionable = client.get("/api/naver/ad/proposals?status=pending&informational=false&limit=5").json()["rows"]
+    assert len(actionable) == 1
+    assert actionable[0]["proposal_type"] == "bid_up"
+    assert actionable[0]["target_bid"] == 2090
+
+    only_info = client.get("/api/naver/ad/proposals?status=pending&informational=true&limit=100").json()["rows"]
+    assert len(only_info) == 30
+    assert all(r["informational"] for r in only_info)
+
+
+def test_proposals_informational_filter_omitted_returns_both(client, db):
+    db.add(NaverProposal(
+        proposal_type="bid_up", target_type="adgroup", target_id="g1",
+        campaign_id="c1", status="pending", target_bid=100,
+    ))
+    db.add(NaverProposal(
+        proposal_type="trigger_pacing", target_type="campaign", target_id="c1",
+        campaign_id="c1", status="pending",
+    ))
+    db.commit()
+    assert len(client.get("/api/naver/ad/proposals?status=pending").json()["rows"]) == 2
+
+
+def test_proposals_returns_total_independent_of_limit(client, db):
+    """★limit으로 자른 페이지 길이를 건수로 쓰면 안 된다 — 서버가 total을 준다.
+    (정보성 "N건 집계됨"이 limit에 따라 달라지면 그냥 틀린 숫자다.)"""
+    for i in range(7):
+        db.add(NaverProposal(
+            proposal_type="trigger_pacing", target_type="campaign", target_id=f"c{i}",
+            campaign_id="c1", status="pending",
+        ))
+    db.commit()
+    body = client.get("/api/naver/ad/proposals?status=pending&informational=true&limit=2").json()
+    assert body["total"] == 7          # 전체
+    assert len(body["rows"]) == 2      # 페이지

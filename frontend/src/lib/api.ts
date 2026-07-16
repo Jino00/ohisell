@@ -1697,6 +1697,9 @@ export interface NaverAdProposal {
 }
 
 export interface NaverAdProposalList {
+  /** ★limit과 무관한 전체 건수(D-NAO-47). 페이지 길이(rows.length)를 건수로 쓰지 말 것 —
+   *  limit에 따라 달라지는 틀린 숫자가 된다. */
+  total: number;
   rows: NaverAdProposal[];
 }
 
@@ -1705,6 +1708,13 @@ export function fetchNaverAdProposals(params?: {
   dateFrom?: string;
   dateTo?: string;
   campaignId?: string;
+  /** ★true=정보성만 / false=실행형만 / 생략=전부.
+   *  목록은 created_at DESC인데 정보성 경보(trigger_pacing)가 실행형보다 훨씬 자주 생성된다.
+   *  prod 실측(2026-07-17): pending 107건 = trigger_pacing 102(07-16) + bid_up 5(07-15)라
+   *  **limit=100이면 bid_up이 한 건도 안 나온다**. 받은 페이지를 !informational로 거르면
+   *  "지금 결정할 제안이 없습니다"가 뜬다 — 5건이 결정을 기다리는데.
+   *  **실행형이 필요하면 informational:false로 질의한다**(limit 올리기는 임시방편). */
+  informational?: boolean;
   limit?: number;
 }): Promise<NaverAdProposalList> {
   const q = new URLSearchParams();
@@ -1712,6 +1722,7 @@ export function fetchNaverAdProposals(params?: {
   if (params?.dateFrom) q.set("date_from", params.dateFrom);
   if (params?.dateTo) q.set("date_to", params.dateTo);
   if (params?.campaignId) q.set("campaign_id", params.campaignId);
+  if (params?.informational !== undefined) q.set("informational", String(params.informational));
   if (params?.limit) q.set("limit", String(params.limit));
   const qs = q.toString();
   return fetchApi<NaverAdProposalList>(`/api/naver/ad/proposals${qs ? `?${qs}` : ""}`);

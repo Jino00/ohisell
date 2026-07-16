@@ -20,7 +20,7 @@ import {
   getNaverDashboardOverview, fetchNaverChangeLog, fetchNaverCampaignSettings,
   fetchNaverRetroScorecard, fetchNaverAdProposals,
   type NaverDashboardOverview, type NaverAdCampaignSettings,
-  type NaverRetroScorecard, type NaverChangeLogRow, type NaverAdProposal,
+  type NaverRetroScorecard, type NaverChangeLogRow,
 } from "../lib/api";
 import { PROPOSAL_TYPE_LABEL } from "./NaverAdOptimizationConsole";
 
@@ -409,17 +409,24 @@ function ChangeLogPane() {
 }
 
 function PendingPane() {
-  const { data: rows, error } = useAsyncData<NaverAdProposal[]>(
-    () => fetchNaverAdProposals({ status: "pending", limit: 100 }).then((r) => r.rows),
+  // ★실행형과 정보성을 **각각 질의한다**(2026-07-17 prod 배포 검증에서 발견).
+  //   한 번에 받아 !informational로 거르면 안 된다: 목록이 created_at DESC이고 정보성이
+  //   훨씬 자주 생성돼서, prod 실측 당시 pending 107건 중 최신 100건이 **전부 trigger_pacing**
+  //   이었다 → 실행형 bid_up 5건이 페이지 밖으로 밀려나 "지금 결정할 제안이 없습니다"가
+  //   렌더됐다. 5건이 사람 결정을 기다리는데 없다고 말한 것 — 이 패널이 존재하는 이유가
+  //   정확히 그 5건을 보여주는 것이라 치명적이다.
+  //   limit을 올리는 건 임시방편(정보성이 더 쌓이면 다시 밀려남) → 서버에 물어본다.
+  const { data, error } = useAsyncData(
+    () => Promise.all([
+      fetchNaverAdProposals({ status: "pending", informational: false, limit: 200 }).then((r) => r.rows),
+      // ★limit=1이어도 total은 전체 건수라 정확하다(rows.length를 세면 1이 된다).
+      fetchNaverAdProposals({ status: "pending", informational: true, limit: 1 }),
+    ]).then(([act, info]) => ({ actionable: act, informationalCount: info.total })),
     [],
   );
   if (error) return <EmptyState reason={`불러오지 못했습니다: ${error}`} hint="새로고침하거나 백엔드 상태를 확인하세요." />;
-  if (rows === null) return <Loading rows={3} />;
-
-  // ★백엔드가 준 informational 플래그로 가른다 — 프론트에서 유형 문자열을 하드코딩해
-  //   재분류하면 백엔드에 유형이 추가될 때 조용히 드리프트한다.
-  const actionable = rows.filter((p) => !p.informational);
-  const informational = rows.filter((p) => p.informational);
+  if (data === null) return <Loading rows={3} />;
+  const actionable = data.actionable;
 
   return (
     <div>
@@ -439,9 +446,9 @@ function PendingPane() {
       )}
       {/* ★정보성은 접지 말고 집계 — 저속 경보 98.7%가 진짜였다(스펙 §1-3 정정).
           개별 건을 나열하진 않되, 숨기지도 않는다. */}
-      {informational.length > 0 && (
+      {data.informationalCount > 0 && (
         <p className="px-4 py-2 text-xs text-gray-500 border-t border-gray-100">
-          정보성 경보 {num(informational.length)}건 집계됨(개별 나열 안 함) —{" "}
+          정보성 경보 {num(data.informationalCount)}건 집계됨(개별 나열 안 함) —{" "}
           <Link to="/naver-ad/console" className="text-blue-600 hover:underline">콘솔에서 보기</Link>
         </p>
       )}

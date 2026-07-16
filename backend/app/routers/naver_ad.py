@@ -278,11 +278,24 @@ def proposals(
     date_from: date | None = Query(None, description="created_at 시작일(KST 달력일 경계)"),
     date_to: date | None = Query(None, description="created_at 종료일(포함)"),
     campaign_id: str | None = Query(None, description="특정 캠페인만 필터"),
+    informational: bool | None = Query(
+        None,
+        description="true=정보성만 / false=실행형만 / 생략=전부. 실행형을 확실히 받으려면 false",
+    ),
     limit: int = Query(200, ge=1, le=1000),
     db: Session = Depends(get_db),
 ):
     """제안 카드 목록(콘솔) — naver_proposals 단순 read, 최신순. expert_verdict는 최근 완료
-    (status=ok) run의 평결 요약(배지용, E1a T6)."""
+    (status=ok) run의 평결 요약(배지용, E1a T6).
+
+    ★`informational` 필터가 필요한 이유(D-NAO-47, 2026-07-17 prod 배포 검증 중 발견):
+    이 목록은 `created_at DESC`인데 정보성 경보(trigger_pacing)가 실행형보다 훨씬 자주
+    생성된다. prod 실측 당시 pending 107건 = trigger_pacing 102건(07-16) + bid_up 5건(07-15)
+    이라 **limit=100이면 bid_up이 한 건도 안 나왔다**. 받은 페이지를 클라이언트에서
+    `!informational`로 거르면 "지금 결정할 제안이 없습니다"가 렌더된다 — 5건이 사람 결정을
+    기다리는데. limit을 올리는 건 임시방편이다(정보성이 더 쌓이면 다시 밀려난다).
+    **실행형은 실행형으로 질의한다.** 분류 기준은 proposal_writer.INFORMATIONAL_PROPOSAL_TYPES
+    (단일 진실 — 프론트가 유형 문자열로 재분류하면 드리프트한다)."""
     if status is not None and status not in _PROPOSAL_STATUSES:
         raise HTTPException(400, f"status는 {sorted(_PROPOSAL_STATUSES)} 중 하나여야 합니다")
     if date_from and date_to and date_from > date_to:
@@ -295,13 +308,20 @@ def proposals(
         q = q.filter(NaverProposal.status == status)
     if campaign_id:
         q = q.filter(NaverProposal.campaign_id == campaign_id)
+    if informational is True:
+        q = q.filter(NaverProposal.proposal_type.in_(proposal_writer.INFORMATIONAL_PROPOSAL_TYPES))
+    elif informational is False:
+        q = q.filter(NaverProposal.proposal_type.notin_(proposal_writer.INFORMATIONAL_PROPOSAL_TYPES))
     if date_from:
         q = q.filter(NaverProposal.created_at >= datetime.combine(date_from, datetime.min.time()))
     if date_to:
         q = q.filter(NaverProposal.created_at < datetime.combine(date_to + timedelta(days=1), datetime.min.time()))
+    # D-NAO-47: total은 limit과 무관한 전체 건수. 페이지 길이를 건수로 쓰면 limit에 따라
+    # 달라지는 틀린 숫자가 된다(정보성 "N건 집계됨" 등). rows는 additive라 기존 소비자 불변.
+    total = q.count()
     rows = q.order_by(NaverProposal.created_at.desc()).limit(limit).all()
     verdicts = _latest_ok_verdicts_by_proposal(db, [p.id for p in rows])
-    return {"rows": [_serialize_proposal(p, verdicts.get(p.id)) for p in rows]}
+    return {"total": total, "rows": [_serialize_proposal(p, verdicts.get(p.id)) for p in rows]}
 
 
 # ══════════════════════════════════════════════════════════════════
