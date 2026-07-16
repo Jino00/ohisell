@@ -5,11 +5,15 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 
 from sqlalchemy.orm import Session
 
 from app.models import NaverCampaignSettings, NaverProposal
 from app.services.naver_ad import campaign_target_resolver, growth_sweeper
+# 라이브[P1] DOA 수정: 생성 단계 스텝 클램프의 스텝 상수는 실행 가드레일과 단일 진실 소스
+# (하드코딩 0.15 중복 금지 — 드리프트 방지). guardrail_gate는 이 모듈을 import하지 않아 순환 없음.
+from app.services.naver_ad.guardrail_gate import _MAX_CHANGE_PCT
 from app.services.naver_ad.trigger_watch import PROPOSAL_TYPE_CPC, PROPOSAL_TYPE_PACING
 from app.utils.kst import kst_today
 
@@ -113,9 +117,32 @@ def _bid_proposal(
             return None
         proposal_type = f"bid_{sim['direction']}"  # bid_up / bid_down
 
+    # X1b T3(D-NAO-38 갭①): 추천입찰가를 구조화 컬럼에 저장 — 실행자는 이 필드만 읽는다
+    # (rationale 텍스트 파싱 금지). negative_keyword 격상 시엔 입찰 목표가 없어 None.
+    target_bid = sim["recommended_bid"] if proposal_type != _NEGATIVE else None
+    clamp_note = ""
+    if proposal_type == "bid_up":
+        # 라이브[P1] DOA 수정(04 카나리 실측): 경제 상한을 target_bid로 직행 저장하면 실행
+        # 가드레일 _MAX_CHANGE_PCT(±15%)와 영구 충돌 — bid_up 제안이 구조적으로 전부 발사
+        # 불능(스텝 +39%~+4300% 전건 차단). 생성 단계에서 min(시뮬 추천, 현재입찰×(1+스텝))
+        # 으로 클램프(10원 내림 — affordable_ceiling과 동일 규약). 상한까지는 여러 라운드에
+        # 걸쳐 스텝 단위로 접근한다(growth_bid_up은 가드레일 면제 유형이라 대상 아님).
+        current_bid = sim.get("current_bid")
+        if current_bid:
+            step_cap = int(
+                (Decimal(current_bid) * (Decimal(1) + _MAX_CHANGE_PCT)) // 10
+            ) * 10
+            if step_cap < target_bid:
+                target_bid = step_cap
+                clamp_note = f"(경제상한 {sim['economic_ceiling']}원, 스텝 클램프)"
+            if target_bid <= current_bid:
+                # 클램프/불일치 sim으로 스텝이 소실되면 skip(기존 '억지 제안 금지' 관례) —
+                # 가드레일 방향 불일치로 어차피 차단될 제안을 만들지 않는다.
+                return None
+
     rationale = (
         f"[{board_name}] 보정ROAS={row.get('roas_corrected')} cost={row.get('cost')}원 "
-        f"clk={row.get('clk')} — 시뮬 근거={sim['basis']}, 추천입찰={sim['recommended_bid']}원, "
+        f"clk={row.get('clk')} — 시뮬 근거={sim['basis']}, 추천입찰={target_bid if target_bid is not None else sim['recommended_bid']}원{clamp_note}, "
         f"target_roas 근거={target_label['source']}"
         + (f"({target_label['target_roas']})" if target_label.get("target_roas") is not None else "")
         + "."
@@ -129,9 +156,7 @@ def _bid_proposal(
         "rationale": rationale,
         "expected_effect": sim["expected_effect_text"],
         "status": "pending",
-        # X1b T3(D-NAO-38 갭①): 추천입찰가를 구조화 컬럼에 저장 — 실행자는 이 필드만 읽는다
-        # (rationale 텍스트 파싱 금지). negative_keyword 격상 시엔 입찰 목표가 없어 None.
-        "target_bid": sim["recommended_bid"] if proposal_type != _NEGATIVE else None,
+        "target_bid": target_bid,
     }
 
 
