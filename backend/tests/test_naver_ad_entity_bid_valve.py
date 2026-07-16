@@ -312,3 +312,39 @@ def test_our_bid_writes_loaded_once_not_per_row(db):
         entity_sync._load_our_bid_writes = real
 
     assert calls["n"] == 1, f"300행 sync에 {calls['n']}회 적재 — 루프 안에서 부르고 있다"
+
+
+def test_logs_our_target_as_before_when_external_overwrites_to_third_value(db):
+    """★codex[P2] R2: 3값 케이스. 저장된 old=700, 우리가 900으로 씀, 외부가 800으로 덮음.
+    old(700)!=new(800)이라 '되돌림'이 아니지만, change_log엔 이미 우리 700→900 행이 있으므로
+    외부 행은 900→800이어야 이력이 이어진다. 700→800으로 적으면 900이라는 중간 상태가
+    지워져 오귀속된다."""
+    prev_sync = kst_now() - timedelta(hours=2)
+    _seed_entity(db, bid_amt=700, synced_at=prev_sync)
+    db.add(NaverChangeLog(
+        entity_type="keyword", entity_id="nkw-1", campaign_id="cmp-1",
+        action="update_bid", dry_run=False,
+        changed_at=kst_now() - timedelta(minutes=30),  # 직전 관측 이후 = 우리가 방금 씀
+        after_value=json.dumps({"bidAmt": 900}),
+    ))
+    db.commit()
+
+    entity_sync.sync_entities(db, rows=_rows(db, keyword_bid=800))  # 외부가 제3의 값으로
+
+    logs = db.query(NaverChangeLog).filter(NaverChangeLog.action == "external_bid_change").all()
+    assert len(logs) == 1
+    assert json.loads(logs[0].before_value) == {"bidAmt": 900}, "우리가 써넣은 900이 출발값이어야"
+    assert json.loads(logs[0].after_value) == {"bidAmt": 800}
+    assert "덮어씀" in logs[0].rationale
+
+
+def test_plain_external_change_still_uses_old_bid_as_before(db):
+    """우리 쓰기가 없으면(our_target None) 출발값은 그대로 old_bid — (c) 수정이 (a)를 깨지 않았는지."""
+    _seed_entity(db, bid_amt=700)
+    entity_sync.sync_entities(db, rows=_rows(db, keyword_bid=900))
+
+    logs = db.query(NaverChangeLog).filter(NaverChangeLog.action == "external_bid_change").all()
+    assert len(logs) == 1
+    assert json.loads(logs[0].before_value) == {"bidAmt": 700}
+    assert "덮어씀" not in logs[0].rationale
+    assert "되돌림" not in logs[0].rationale

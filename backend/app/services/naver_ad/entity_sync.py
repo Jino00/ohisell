@@ -268,17 +268,24 @@ def _log_external_bid_change(
     if old_bid == new_bid and our_target is None:
         return  # ★절대다수가 여기서 끊긴다 — 이 한 줄이 쓰기 폭증을 막는다
 
-    # 여기 도달하는 두 경우:
-    #  (a) old != new           → 평범한 외부 변경(before=old_bid)
-    #  (b) old == new 인데 our_target이 있고 new와 다름 → 외부가 우리 변경을 되돌림.
-    #      이때 실제 전이는 our_target(우리가 써넣은 값) → new_bid 다. before를 old_bid로
-    #      쓰면 700→700이라는 무의미한 행이 되므로 our_target을 before로 쓴다.
-    reverted = old_bid == new_bid
-    before_bid = our_target if reverted else old_bid
-    rationale = (
-        "entity_sync 감지: 외부(MOP/사람)가 우리 입찰 변경을 되돌림"
-        if reverted else "entity_sync 감지: 외부(MOP/사람) 입찰가 변경"
-    )
+    # before를 무엇으로 볼 것인가 — 규칙 하나로 정리(codex[P2] R2, 2026-07-17):
+    # **직전 관측 이후 우리가 썼다면(our_target 존재), 외부 행위자가 본 출발값은 old_bid가
+    # 아니라 our_target이다.** 우리 쓰기가 이미 값을 our_target으로 옮겨놨기 때문이다.
+    # change_log에는 우리 old_bid→our_target 행이 이미 있으므로, 외부 행은 our_target→new_bid로
+    # 이어져야 이력이 끊기지 않는다.
+    #   (a) our_target 없음            → 평범한 외부 변경: old_bid → new_bid
+    #   (b) our_target 있고 new==old   → 외부가 우리 변경을 **되돌림**: our_target → new_bid
+    #   (c) our_target 있고 new!=old   → 외부가 우리 변경을 **덮어씀**(제3의 값): our_target → new_bid
+    # 초판은 (c)를 놓쳐 old_bid(700)→new_bid(800)로 적었다. 우리가 900으로 써둔 뒤였으므로
+    # 실제 외부 전이는 900→800이고, 700→800은 900이라는 중간 상태를 지워 이력을 오귀속한다.
+    overwrote_ours = our_target is not None
+    before_bid = our_target if overwrote_ours else old_bid
+    if not overwrote_ours:
+        rationale = "entity_sync 감지: 외부(MOP/사람) 입찰가 변경"
+    elif new_bid == old_bid:
+        rationale = "entity_sync 감지: 외부(MOP/사람)가 우리 입찰 변경을 되돌림"
+    else:
+        rationale = "entity_sync 감지: 외부(MOP/사람)가 우리 입찰 변경을 덮어씀"
 
     db.add(NaverChangeLog(
         entity_type=entity.entity_type,
@@ -293,7 +300,7 @@ def _log_external_bid_change(
         rationale=rationale,
     ))
     log.info("external_bid_change detected%s: %s %s %s→%s",
-             " (revert)" if reverted else "",
+             " (overwrote ours)" if overwrote_ours else "",
              entity.entity_type, entity.entity_id, before_bid, new_bid)
 
 
