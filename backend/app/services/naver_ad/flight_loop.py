@@ -85,8 +85,14 @@ def _today_actuals(db: Session, campaign_id: str, today: date) -> dict:
         .first()
     )
     if row is None:
-        return {"cost": 0, "clk": 0, "imp": 0, "conv_amt": 0}
-    return {"cost": row.cost, "clk": row.clk, "imp": row.imp, "conv_amt": 0}
+        return {"cost": 0, "clk": 0, "imp": 0, "conv_amt": 0, "snapshot_hour": None}
+    return {
+        "cost": row.cost, "clk": row.clk, "imp": row.imp, "conv_amt": 0,
+        # codex[P2] R2: 완결도 factor는 이 스냅샷이 찍힌 시각 기준이어야 한다 —
+        # current_hour 스냅샷이 아직 안 쓰였으면 최신 행은 이전 시각분이고, 거기에
+        # 더 늦은 시각의(더 높은 완결도=더 낮은) factor를 곱하면 저투영된다.
+        "snapshot_hour": row.snapshot_hour,
+    }
 
 
 def _campaign_rpc(db: Session, campaign_id: str, today: date, lookback: int = 15) -> Decimal:
@@ -192,10 +198,6 @@ def run_flight_loop(
     # (완결도 곡선 v2, naver_stat_field_cadence_20260716.md) 보정 없이 raw cost_so_far를
     # 쓰면 예산제약(αB)이 남은예산을 과대평가해 α가 과속 편향된다(PLAN §0).
     curve_by_hour = completeness_curve.build_curve(db, today=today)
-    projection = completeness_curve.projection_factor(curve_by_hour, current_hour)
-    hour_completeness = (
-        curve_by_hour.get(current_hour, {}).get("completeness") if projection is not None else None
-    )
 
     for cs in campaigns:
         cid = cs.campaign_id
@@ -207,6 +209,17 @@ def run_flight_loop(
 
             actuals = _today_actuals(db, cid, today)
             raw_today_cost = actuals["cost"]
+            # codex[P2] R2: factor는 캠페인별 최신 스냅샷의 시각 기준(불일치 시 저투영 —
+            # 예: 10시 run인데 최신 스냅샷이 9시분이면 9시 factor를 써야 함). 오늘
+            # 스냅샷이 아예 없으면 current_hour 폴백(cost=0이라 수치 영향 없음).
+            snapshot_hour = (
+                actuals["snapshot_hour"] if actuals["snapshot_hour"] is not None else current_hour
+            )
+            projection = completeness_curve.projection_factor(curve_by_hour, snapshot_hour)
+            hour_completeness = (
+                curve_by_hour.get(snapshot_hour, {}).get("completeness")
+                if projection is not None else None
+            )
             rpc = _campaign_rpc(db, cid, today)
             budget = _budget_info(db, cid, today)
 
@@ -298,6 +311,7 @@ def run_flight_loop(
                 "dry_run": dry_run,
                 # D-NAO-44 관측 필드 — dry-run 관찰·07-17 이후 대조의 원료(PLAN §3/§6).
                 "raw_today_cost": raw_today_cost,
+                "snapshot_hour": actuals["snapshot_hour"],
                 "completeness": hour_completeness,
                 "projection_factor": projection,
                 "projected_final_cost": projected_final_cost,

@@ -266,6 +266,25 @@ def test_flight_loop_projection_preserves_roas_ratio(db, monkeypatch):
     assert d["alpha_roas"] > 1.0
 
 
+def test_flight_loop_projection_uses_snapshot_hour_not_current_hour(db):
+    """codex[P2] R2 회귀: run 시각(current_hour)의 스냅샷이 아직 안 쓰였으면 최신
+    스냅샷은 이전 시각분 — 거기에 current_hour의(더 높은 완결도=더 낮은) factor를
+    곱하면 저투영되어 과속 편향이 재유입된다. factor는 스냅샷 시각 기준이어야 함."""
+    _setup_campaign(db)  # 오늘 스냅샷은 hour=10분(cost 20,000)이 최신
+    # 곡선: 10시 완결도 0.25(factor 4), 12시 완결도 0.5(factor 2)
+    _setup_completeness_history(db, hour=10, hour_cost=25_000, final_cost=100_000)
+    _setup_completeness_history(db, hour=12, hour_cost=50_000, final_cost=100_000,
+                                campaign_id="cmp-hist2")
+    # run은 12시에 돌지만 12시 스냅샷은 아직 없음 → 10시 factor(4)를 써야 함
+    result = run_flight_loop(db, today=date(2026, 7, 11), current_hour=12)
+    d = result["decisions"][0]
+    assert d["snapshot_hour"] == 10
+    assert Decimal(str(d["completeness"])) == Decimal("0.25")
+    assert d["projected_final_cost"] == 80_000, (
+        "current_hour(12시) factor 2를 쓰면 40,000 저투영 — 스냅샷 시각(10시) factor 4로 80,000이어야 함"
+    )
+
+
 def test_flight_loop_change_log_detail_has_projection_fields(db):
     """C3-⑥: change_log detail(JSON)에 D-NAO-44 관측 필드 4종 기록 —
     dry-run 관찰·07-17 이후 대조의 원료."""
