@@ -41,13 +41,16 @@ from app.models import (
     NaverAccountSettings,
     NaverCampaignSettings,
     NaverChangeLog,
+    NaverEntity,
     NaverExpertReview,
     NaverExpertReviewRun,
+    NaverHourlySnapshot,
     NaverLearningState,
     NaverProductBep,
     NaverProposal,
     NaverRetroPacingScore,
     NaverRetroSignal,
+    NaverSearchTermDaily,
 )
 from app.services.naver_ad import dashboard_overview
 from app.services.naver_ad import delegation_gate
@@ -797,6 +800,152 @@ def get_change_log(
                 "dry_run": r.dry_run,
                 "proposal_id": r.proposal_id,
                 "executed_at": r.executed_at.isoformat() if r.executed_at else None,
+            }
+            for r in rows
+        ],
+    }
+
+
+# ══════════════════════════════════════════════════════════════════
+# D-NAO-47 — 원자료 탐색(3층 ⑨). 수집은 풍부한데 API가 0건이라 볼 방법이 없었다(스펙 §1-4).
+# ★limit 상한 200 고정: 키워드 91,005행 · 검색어 114,285행. §9 라이브에서 489행 무페이징이
+#   스크롤 27,305px를 만든 전례가 있어 상한을 API가 강제한다(프론트 선의에 맡기지 않는다).
+# ══════════════════════════════════════════════════════════════════
+_MAX_RAW_LIMIT = 200
+
+
+@router.get("/raw/keywords")
+def get_raw_keywords(
+    q: str | None = Query(None, description="키워드 텍스트 부분일치"),
+    campaign_id: str | None = Query(None),
+    status: str | None = Query(None, description="on/off"),
+    include_deleted: bool = Query(False),
+    limit: int = Query(50, ge=1, le=_MAX_RAW_LIMIT),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+) -> dict:
+    """등록 키워드 원자료(naver_entity의 keyword 행, prod 91,005행) 조회 — 읽기 전용."""
+    query = db.query(NaverEntity).filter(NaverEntity.entity_type == "keyword")
+    if not include_deleted:
+        query = query.filter(NaverEntity.status != "deleted")
+    if q:
+        query = query.filter(NaverEntity.name.contains(q))
+    if campaign_id:
+        query = query.filter(NaverEntity.campaign_id == campaign_id)
+    if status:
+        query = query.filter(NaverEntity.status == status)
+
+    total = query.count()
+    rows = query.order_by(NaverEntity.name).offset(offset).limit(limit).all()
+    return {
+        "total": total,
+        "items": [
+            {
+                "entity_id": r.entity_id,
+                "name": r.name,
+                "parent_id": r.parent_id,
+                "campaign_id": r.campaign_id,
+                "campaign_type": r.campaign_type,
+                "status": r.status,
+                "bid_amt": r.bid_amt,
+                "monthly_volume": r.monthly_volume,
+                "competition": r.competition,
+                "synced_at": r.synced_at.isoformat() if r.synced_at else None,
+            }
+            for r in rows
+        ],
+    }
+
+
+@router.get("/raw/search-terms")
+def get_raw_search_terms(
+    q: str | None = Query(None, description="검색어 부분일치"),
+    campaign_id: str | None = Query(None),
+    days: int = Query(14, ge=1, le=365),
+    limit: int = Query(50, ge=1, le=_MAX_RAW_LIMIT),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+) -> dict:
+    """검색어 원자료(prod 114,285행, 현재 shopping 소스만) 조회 — 읽기 전용."""
+    since = kst_today() - timedelta(days=days)
+    query = db.query(NaverSearchTermDaily).filter(NaverSearchTermDaily.ad_date >= since)
+    if q:
+        query = query.filter(NaverSearchTermDaily.search_term.contains(q))
+    if campaign_id:
+        query = query.filter(NaverSearchTermDaily.campaign_id == campaign_id)
+
+    total = query.count()
+    rows = (
+        query.order_by(NaverSearchTermDaily.ad_date.desc(), NaverSearchTermDaily.cost.desc())
+        .offset(offset).limit(limit).all()
+    )
+    return {
+        "total": total,
+        "items": [
+            {
+                "ad_date": r.ad_date.isoformat() if r.ad_date else None,
+                "campaign_id": r.campaign_id,
+                "adgroup_id": r.adgroup_id,
+                "search_term": r.search_term,
+                "source": r.source,
+                "imp": r.imp,
+                "clk": r.clk,
+                "cost": r.cost,
+            }
+            for r in rows
+        ],
+    }
+
+
+@router.get("/raw/hourly")
+def get_raw_hourly(
+    campaign_id: str | None = Query(None),
+    days: int = Query(3, ge=1, le=365),
+    limit: int = Query(100, ge=1, le=_MAX_RAW_LIMIT),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+) -> dict:
+    """시간당 스냅샷 조회 — 읽기 전용.
+
+    ★daily_budget·소진율(spend_ratio)이 화면에 없던 결함(스펙 §1-4)을 여기서 해소한다.
+    spend_ratio는 daily_budget이 없거나 0이면 **None**이다 — '소진율 0%'가 아니라
+    '알 수 없음'이다. 0으로 나누지 않는다.
+
+    보존기간: D-NAO-46①로 7→365일 연장됨. days 상한 365는 그 상한과 맞춘 것.
+
+    ⚠️ 컬럼명은 `snapshot_hour`다(`hour` 아님 — models.py:1553). 응답 키도 snapshot_hour로
+    그대로 노출해 프론트↔DB 이름을 일치시킨다(번역 레이어를 만들지 않는다).
+    """
+    since = kst_today() - timedelta(days=days)
+    query = db.query(NaverHourlySnapshot).filter(NaverHourlySnapshot.ad_date >= since)
+    if campaign_id:
+        query = query.filter(NaverHourlySnapshot.campaign_id == campaign_id)
+
+    total = query.count()
+    rows = (
+        query.order_by(NaverHourlySnapshot.ad_date.desc(), NaverHourlySnapshot.snapshot_hour.desc())
+        .offset(offset).limit(limit).all()
+    )
+
+    def _ratio(cost: int, budget: int | None) -> float | None:
+        if not budget:  # None 또는 0
+            return None
+        return round(cost / budget, 4)
+
+    return {
+        "total": total,
+        "items": [
+            {
+                "ad_date": r.ad_date.isoformat() if r.ad_date else None,
+                "snapshot_hour": r.snapshot_hour,
+                "snapshot_at": r.snapshot_at.isoformat() if r.snapshot_at else None,
+                "campaign_id": r.campaign_id,
+                "campaign_type": r.campaign_type,
+                "cost": r.cost,
+                "clk": r.clk,
+                "imp": r.imp,
+                "daily_budget": r.daily_budget,
+                "spend_ratio": _ratio(r.cost, r.daily_budget),
             }
             for r in rows
         ],
