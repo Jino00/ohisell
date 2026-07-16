@@ -98,9 +98,21 @@
 4. 문서 신선도: 이 문서 §8 + progress + 트랙(D-NAO-45).
 
 ## 8. 진행 기록 (구현자가 갱신)
-- [ ] C1 snapshotter + 마이그레이션 + 테스트
-- [ ] C2 scorer + 테스트
-- [ ] C3 pacing scorer + 테스트
-- [ ] C4 harness + 크론 + API + 백필 + 테스트
+- [x] C1 snapshotter + 마이그레이션 + 테스트 (2026-07-16, Sonnet) — `retro_snapshotter.py` +
+  `f6g7h8i9j0k1_add_naver_retro_scoring_tables.py`(테이블 2개) + `test_naver_retro_snapshotter.py`
+  5 tests green(행 생성·렌즈 고정값/6보드 방향매핑/idempotent/boards None graceful/as-of 누출 회귀).
+- [x] C2 scorer + 테스트 (2026-07-16, Sonnet) — `retro_scorer.py` + `test_naver_retro_scorer.py`
+  17 tests green(판정 매트릭스 9종·no_spend·d3/d7 창 경계·사후창 7일 경계·이중채점 방지·
+  밀린 as-of catch-up·bleed 계산·sentinel 이중계산 회귀).
+- [x] C3 pacing scorer + 테스트 (2026-07-16, Sonnet) — `retro_pacing_scorer.py` +
+  `test_naver_retro_pacing_scorer.py` 14 tests green(정규식 파싱·버킷 경계 8종·unparsed
+  기록+재시도 방지·최종치 없음 skip 후 재시도·upto 필터·idempotent).
+- [x] C4 harness + 크론 + API + 백필 + 테스트 (2026-07-16, Sonnet) — `retro_scoring_loop.py`
+  (`run_daily_retro`/`backfill`) + `test_naver_retro_scoring_loop.py` 8 tests green(단계
+  오케스트레이션·partial-failure 격리 3종·backfill 순회+idempotent+단일일 격리). 크론
+  `run_naver_retro_scoring`(30 8 * * *) scheduler_service defaults+start_scheduler
+  매핑+_CATCHUP_ORDER 등록. API `GET /retro-scorecard?days=28` naver_ad.py에 추가(라우터
+  테스트 `test_naver_retro_scorecard_router.py` 작성 — 로컬 bcrypt collection 이슈로 실행
+  확인은 직접 함수 호출로 대체 검증).
 - [ ] codex GATE PASS (라운드/지적/반영: ___)
 - [ ] 배포 + 백필 + 라이브 확인 (Jino)
