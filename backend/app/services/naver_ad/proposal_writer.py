@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING
 
 from sqlalchemy.orm import Session
 
@@ -138,6 +138,23 @@ def _bid_proposal(
             if target_bid <= current_bid:
                 # 클램프/불일치 sim으로 스텝이 소실되면 skip(기존 '억지 제안 금지' 관례) —
                 # 가드레일 방향 불일치로 어차피 차단될 제안을 만들지 않는다.
+                return None
+    elif proposal_type == "bid_down":
+        # bid_down 대칭(ref31 실측: down 정밀도 61~88% — 검증된 핵심 루프가 DOA면 사망):
+        # 경제 하한 직행도 같은 ±15% 가드레일과 충돌. 스텝 하한 = 현재입찰×(1-스텝)의
+        # **10원 올림**(내림하면 15%를 넘어버림 — up의 내림과 방향 대칭) 후 절대 하한 70원
+        # (기존 클램프 규약) 유지. target = max(시뮬 추천, 스텝 하한).
+        current_bid = sim.get("current_bid")
+        if current_bid:
+            stepped = Decimal(current_bid) * (Decimal(1) - _MAX_CHANGE_PCT)
+            # 10원 올림(ceil) — Decimal의 //는 버림(truncation)이라 음수 트릭 불가, ROUND_CEILING 명시
+            step_floor = int((stepped / 10).to_integral_value(rounding=ROUND_CEILING)) * 10
+            step_floor = max(step_floor, 70)  # 절대 하한(_MIN_BID 규약, guardrail_gate와 동일)
+            if step_floor > target_bid:
+                target_bid = step_floor
+                clamp_note = f"(경제하한 {sim['economic_ceiling']}원, 스텝 클램프)"
+            if target_bid >= current_bid:
+                # 스텝 소실/불일치 sim — bid_up과 동일 skip 관례.
                 return None
 
     rationale = (
