@@ -208,20 +208,31 @@ export default function CoupangOps() {
     setAdRefreshing(true);
     setAdSyncMsg("Mac에서 광고비 가져오는 중… (~20초, 첫 갱신이면 Mac 로그인 창 확인)");
     try {
-      const baseline = (await getAdCostRefreshStatus()).last_success_at;
+      const before = await getAdCostRefreshStatus();
+      const baseline = before.last_success_at;
+      const errBaseline = before.last_error_at; // 실패도 감지해야 "진행 중"과 구분된다
       await requestAdCostRefresh();
       const deadline = Date.now() + 215000; // 215초 — 데몬 로그인 대기(180s)+fetch 여유까지 커버
       let done = false;
+      let failed: string | null = null;
       while (Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 3000));
         const st = await getAdCostRefreshStatus();
         if (st.last_success_at && st.last_success_at !== baseline) { done = true; break; }
+        // 페처가 실패를 보고하면 즉시 이탈 — 이게 없으면 이미 끝난 실패를 215초 헛기다린다.
+        if (st.last_error_at && st.last_error_at !== errBaseline) {
+          failed = st.last_error || "원인 미상";
+          break;
+        }
       }
       if (done) {
         await loadTodayAdCost();
         await loadAdCookieStatus();
         setAdSyncMsg("✅ 광고비 갱신 완료");
         setTimeout(() => setAdSyncMsg(null), 4000);
+      } else if (failed) {
+        await loadAdCookieStatus();
+        setAdSyncMsg("❌ Mac 페처 실패: " + failed);
       } else {
         setAdSyncMsg("⚠️ Mac 응답 없음 — Mac이 켜져 있는지, 첫 갱신이면 로그인 창을 확인하세요.");
       }

@@ -28,6 +28,7 @@ export interface AdCostCookieStatus {
   last_saved_at: string | null;
   last_success_at: string | null;
   last_error: string | null;
+  last_error_at: string | null; // 마지막 실패 시각(last_success_at의 짝) — 성공 시 클리어
   age_hours: number | null; // 마지막 push 이후 경과(로컬 페처 heartbeat)
   stale: boolean;           // push 끊김(페처 다운) — 배너 트리거
   refresh_cron_enabled: boolean | null; // 갱신 크론 on/off(null=행 없음) — false면 쿠키 재설정은 헛수고
@@ -39,13 +40,14 @@ export function getAdCostCookieStatus(): Promise<AdCostCookieStatus> {
 
 // ── 쿠팡 광고비 "버튼 트리거" 갱신 (Akamai로 prod 직접 fetch 불가 → Jino Mac 페처가 가져옴) ──
 // 버튼 클릭 → request-refresh로 요청 플래그 set → Mac 데몬이 감지·fetch·push →
-// refresh-status의 last_success_at가 올라가면 갱신 완료.
+// refresh-status의 last_success_at가 올라가면 갱신 완료, last_error_at이 올라가면 갱신 실패.
 export interface AdCostRefreshStatus {
   requested: boolean;
   requested_at: string | null;
   last_success_at: string | null;
   status: string; // green | red | unknown | none
   last_error: string | null;
+  last_error_at: string | null; // 페처 실패 보고 시각 — 이게 변하면 실패(성공만 기다리면 215초 헛대기)
 }
 
 export function requestAdCostRefresh(): Promise<{ requested: boolean; requested_at: string }> {

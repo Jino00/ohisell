@@ -1598,6 +1598,24 @@ def claim_ad_cost_refresh(
     return ad_cost_sync.claim_refresh(db)
 
 
+@router.post("/ad-cost/fetch-error")
+def report_ad_cost_fetch_error(
+    body: dict[str, Any] = Body(...),
+    x_ingest_token: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """Mac 페처 run 실패 보고 → last_error/last_error_at 기록. 토큰 인증(claim과 동일).
+
+    ★claim의 짝(2026-07-17 13:02 실사고): 페처가 요청을 claim한 뒤 브라우저 에러로 죽으면
+    플래그는 이미 clear라 아무 흔적도 안 남았다 — UI는 실패인지 진행 중인지 알 수 없었다.
+    성공은 ingest가 알리고(last_success_at), 실패는 이 엔드포인트가 알린다.
+    """
+    _check_ingest_token(x_ingest_token)
+    error = str(body.get("error") or "").strip() or "unknown"
+    ad_cost_sync.mark_fetch_error(db, error)
+    return {"ok": True}
+
+
 @router.get("/ad-cost")
 def get_ad_cost(
     db: Session = Depends(get_db),

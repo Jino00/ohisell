@@ -96,7 +96,8 @@ def cookie_status(db: Session) -> dict:
     if row is None:
         return {"account": _ADS_ACCOUNT, "configured": False, "status": "none",
                 "last_saved_at": None, "last_success_at": None, "last_error": None,
-                "age_hours": None, "stale": False, "refresh_cron_enabled": cron_enabled}
+                "last_error_at": None, "age_hours": None, "stale": False,
+                "refresh_cron_enabled": cron_enabled}
     age_hours = None
     stale = False
     if row.last_success_at:
@@ -110,6 +111,7 @@ def cookie_status(db: Session) -> dict:
         "last_saved_at": row.last_saved_at.isoformat() if row.last_saved_at else None,
         "last_success_at": row.last_success_at.isoformat() if row.last_success_at else None,
         "last_error": row.last_error,
+        "last_error_at": row.last_error_at.isoformat() if row.last_error_at else None,
         "age_hours": age_hours,
         "stale": stale,
         "refresh_cron_enabled": cron_enabled,
@@ -125,10 +127,29 @@ def _mark_cookie(db: Session, *, status: str | None, error: str | None,
         row.status = status
     if error is not None:
         row.last_error = error[:300]
+        row.last_error_at = kst_now()  # last_success_at의 짝 — "언제 실패했나"
     if success:
         row.last_success_at = kst_now()
         row.last_error = None
+        row.last_error_at = None  # 성공하면 과거 실패 흔적을 남기지 않는다(배너 오진단 방지)
     db.commit()
+
+
+def mark_fetch_error(db: Session, error: str) -> None:
+    """Mac 페처 run 실패 보고 → last_error/last_error_at 기록(UI가 실패를 감지하는 유일 경로).
+
+    ★존재 이유(2026-07-17 13:02 실사고): 페처가 브라우저 에러로 죽어도 prod에 알리는 경로가
+    없어 last_error가 계속 null이었다. UI는 "실패"와 "아직 진행 중"을 구분할 수단이 없어
+    215초를 헛기다린 뒤 "Mac 응답 없음"이라는 뭉뚱그린 문구만 냈다(진짜 원인은 화면 어디에도
+    안 나옴). 형제 fetch-success(mark_fetch_success)의 짝.
+
+    ★status는 일부러 건드리지 않는다(codex 1R[P2]): 이 행의 status=red는 Layout 배너에서
+    곧바로 "쿠키 만료(재설정 필요)" + 쿠키 재설정 CTA로 렌더된다(Layout.tsx:201/206).
+    브라우저 크래시·Mac 세션 만료는 쿠키 문제가 아니라 재설정해도 헛수고다(07-17에 실제로
+    그 헛수고를 했다 — 쿠키는 멀쩡했고 창이 닫힌 게 원인이었다). 지속 실패는 워치독이
+    last_success_at 경과로 잡고(status 미의존), 배너는 stale→"로컬 페처 확인 필요"로 흐른다.
+    """
+    _mark_cookie(db, status=None, error=error)
 
 
 # ════════════════════════════════════════════════
@@ -267,6 +288,7 @@ def ingest_ad_cost(db: Session, cost_date: date, vendors: list[dict]) -> dict:
         db.add(row)
     row.status = "green"
     row.last_error = None
+    row.last_error_at = None  # 성공 = 실패 흔적 클리어(_mark_cookie(success=True)와 동일 규칙)
     row.last_success_at = kst_now()
     db.commit()
     log.info("광고비 ingest: %s vendors=%d", cost_date, n)
@@ -325,6 +347,7 @@ def ingest_ad_cost_days(db: Session, days: list[dict]) -> dict:
         db.add(row)
     row.status = "green"
     row.last_error = None
+    row.last_error_at = None  # 성공 = 실패 흔적 클리어(_mark_cookie(success=True)와 동일 규칙)
     row.last_success_at = kst_now()
     db.commit()
     log.info("광고비 ingest(SALES): days=%d", n)
@@ -350,17 +373,20 @@ def refresh_status(db: Session) -> dict:
     """갱신 요청/완료 상태. 대시보드(버튼 후 폴링)·Mac 페처(요청 확인) 공용.
 
     requested=요청 대기 중. last_success_at=마지막 push(버튼 후 이 값이 올라가면 갱신 완료).
+    last_error_at=마지막 실패 시각(버튼 후 이 값이 올라가면 갱신 실패) — UI가 성공/실패 둘 중
+    무엇이 왔는지 이 두 시각의 변화로 가른다. 없으면 실패를 못 보고 폴링 창을 헛기다린다.
     """
     row = _cookie_row(db)
     if row is None:
         return {"requested": False, "requested_at": None, "last_success_at": None,
-                "status": "none", "last_error": None}
+                "status": "none", "last_error": None, "last_error_at": None}
     return {
         "requested": row.refresh_requested_at is not None,
         "requested_at": row.refresh_requested_at.isoformat() if row.refresh_requested_at else None,
         "last_success_at": row.last_success_at.isoformat() if row.last_success_at else None,
         "status": row.status,
         "last_error": row.last_error,
+        "last_error_at": row.last_error_at.isoformat() if row.last_error_at else None,
     }
 
 
