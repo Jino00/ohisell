@@ -129,6 +129,26 @@ _ACTION_BY_PROPOSAL_TYPE = {
 # 존재 이유다(D-47-h).
 EXECUTION_ACTIONS: frozenset[str] = frozenset(_ACTION_BY_PROPOSAL_TYPE.values())
 
+# ══════════════════════════════════════════════════════════════════
+# 실패 rationale 접두사(D-NAO-54) — **두 사건은 다르다. 섞으면 화면이 거짓말한다.**
+#
+#   [실행 불가] = 사전 가드 거부(_guard_failure). writer를 부르지도 않았다.
+#                 → 광고는 **확실히 안 바뀌었다**.
+#   [실행 실패] = writer 예외. PUT을 이미 보낸 뒤일 수 있다.
+#                 → 광고가 바뀌었는지 **모른다**. 예: naver_sa_writer의
+#                   WriteVerificationError는 "bidAmt는 반영됐으나 useGroupBidAmt가
+#                   전환 안 됨"에서도 뜬다(writer:341) — 이때 네이버엔 우리 입찰가가
+#                   들어가 있다. 네트워크 타임아웃(PUT 성공·응답 유실)도 같은 행을 만든다.
+#
+# 두 행의 DB 모양은 동일하다(dry_run=False · outcome='failed' · after_value=None).
+# 구분 신호는 이 접두사뿐이라, 문자열을 흩뿌리지 않고 상수로 고정해 라우터가 파생하게 한다
+# (EXECUTION_ACTIONS를 _ACTION_BY_PROPOSAL_TYPE에서 파생시킨 것과 같은 원칙 — 하드코딩하면
+# 접두사가 바뀔 때 화면이 **조용히** 어긋난다).
+# ★"모름"을 "차단됨"으로 표시하는 것은 원칙22 위반이다. 이 코드의 다른 곳(:441 주석)도
+#   쓰기 실패에 대해 "사람이 네이버 콘솔로 실제 반영 여부를 확인"하라고 못 박고 있다.
+GUARD_BLOCK_MARKER = "[실행 불가]"
+WRITE_FAILURE_MARKER = "[실행 실패]"
+
 # entity_sync가 기록하는 "외부가 바꿨다" 감지 행(D-NAO-40 상태 / D-NAO-47 입찰 /
 # D-NAO-50 키워드 인벤토리 add·remove 밸브). 커맨드 센터의 actor=external 필터가 이 집합을 쓴다.
 EXTERNAL_DETECTION_ACTIONS: frozenset[str] = frozenset({
@@ -155,7 +175,7 @@ def _guard_failure(db: Session, proposal: NaverProposal, now: datetime, action: 
     entry = NaverChangeLog(
         entity_type=proposal.target_type, entity_id=proposal.target_id,
         campaign_id=proposal.campaign_id, action=action,
-        rationale=f"{proposal.rationale or ''} [실행 불가] {reason}",
+        rationale=f"{proposal.rationale or ''} {GUARD_BLOCK_MARKER} {reason}",
         predicted_json=proposal.expected_effect, proposal_id=proposal.id,
         dry_run=False, outcome="failed", changed_at=now, executed_at=now,
     )
@@ -474,7 +494,7 @@ def _execute_add_negative_keyword(db: Session, proposal: NaverProposal, now: dat
             entity_type=proposal.target_type, entity_id=proposal.target_id,
             campaign_id=proposal.campaign_id, action="add_negative_keyword",
             rationale=(
-                f"{proposal.rationale or ''} [실행 실패] {type(exc).__name__}: {str(exc)[:300]}"
+                f"{proposal.rationale or ''} {WRITE_FAILURE_MARKER} {type(exc).__name__}: {str(exc)[:300]}"
             ),
             predicted_json=proposal.expected_effect, proposal_id=proposal.id,
             dry_run=False, outcome="failed", changed_at=now, executed_at=now,
@@ -616,7 +636,7 @@ def _execute_update_bid(db: Session, proposal: NaverProposal, now: datetime) -> 
             entity_type=proposal.target_type, entity_id=proposal.target_id,
             campaign_id=proposal.campaign_id, action="update_bid",
             rationale=(
-                f"{proposal.rationale or ''} [실행 실패] {type(exc).__name__}: {str(exc)[:300]}"
+                f"{proposal.rationale or ''} {WRITE_FAILURE_MARKER} {type(exc).__name__}: {str(exc)[:300]}"
             ),
             predicted_json=proposal.expected_effect, proposal_id=proposal.id,
             dry_run=False, outcome="failed", changed_at=now, executed_at=now,
@@ -703,7 +723,7 @@ def _execute_set_user_lock(db: Session, proposal: NaverProposal, now: datetime) 
             entity_type=proposal.target_type, entity_id=proposal.target_id,
             campaign_id=proposal.campaign_id, action="set_user_lock",
             rationale=(
-                f"{proposal.rationale or ''} [실행 실패] {type(exc).__name__}: {str(exc)[:300]}"
+                f"{proposal.rationale or ''} {WRITE_FAILURE_MARKER} {type(exc).__name__}: {str(exc)[:300]}"
             ),
             predicted_json=proposal.expected_effect, proposal_id=proposal.id,
             dry_run=False, outcome="failed", changed_at=now, executed_at=now,
@@ -803,7 +823,7 @@ def _execute_update_budget(db: Session, proposal: NaverProposal, now: datetime) 
             entity_type=proposal.target_type, entity_id=proposal.target_id,
             campaign_id=proposal.campaign_id, action="update_budget",
             rationale=(
-                f"{proposal.rationale or ''} [실행 실패] {type(exc).__name__}: {str(exc)[:300]}"
+                f"{proposal.rationale or ''} {WRITE_FAILURE_MARKER} {type(exc).__name__}: {str(exc)[:300]}"
             ),
             predicted_json=proposal.expected_effect, proposal_id=proposal.id,
             dry_run=False, outcome="failed", changed_at=now, executed_at=now,

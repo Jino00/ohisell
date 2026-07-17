@@ -1924,15 +1924,25 @@ export interface NaverChangeLogRow {
   after: Record<string, unknown> | null;
   rationale: string | null;
   outcome: string | null;
-  /** 실제로 광고가 바뀌었나(D-NAO-54). false = 가드레일 차단·쓰기 실패 시도(before/after 없음).
-   *  ★outcome으로 판별하지 말 것 — D+14 채점 전 NULL이고 채점 후 improved/declined로 바뀐다. */
-  executed: boolean;
+  /** 우리 실집행 시도의 3-상태(D-NAO-54) — bool이 아닌 이유가 있다.
+   *   "executed" 광고가 실제로 바뀜 / "blocked" 가드레일이 막음(확실히 안 바뀜) /
+   *   "unknown"  쓰기 예외 — PUT을 이미 보낸 뒤일 수 있어 **반영 여부 모름** /
+   *   null       이 개념이 적용 안 되는 행(외부 감지·내부 설정·dry-run).
+   *  ★"unknown"을 "blocked"로 그리면 안 된다: WriteVerificationError는 "bidAmt는 반영됐으나
+   *  useGroupBidAmt 미전환"에서도 뜬다 — 네이버엔 우리 입찰가가 들어가 있다(원칙22). */
+  execution_state: "executed" | "blocked" | "unknown" | null;
   dry_run: boolean;
   proposal_id: number | null;
   executed_at: string | null;
 }
 
-export interface NaverChangeLogResponse { total: number; rows: NaverChangeLogRow[] }
+export interface NaverChangeLogResponse {
+  total: number;
+  /** total 중 실제로 광고가 바뀐 건수. actor=ours+include_blocked에서만 채워진다(그 외 null).
+   *  ★total만 쓰면 "우리가 한 일" 카드가 차단 시도를 집행으로 센다. */
+  executed_total: number | null;
+  rows: NaverChangeLogRow[];
+}
 
 /** 변경 이력. ★include_dry_run 기본 false — "우리 조작 N회"는 실집행만 센다(D-47-h). */
 export async function fetchNaverChangeLog(params: {

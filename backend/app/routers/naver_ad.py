@@ -693,6 +693,12 @@ def campaign_optimizer_switch(body: OptimizerSwitchIn, db: Session = Depends(get
             action="optimizer_change",
             before_value=before_optimizer, after_value=body.optimizer,
             rationale="커맨드 센터 관리주체 스위치(D-NAO-48)",
+            # ★changed_at 명시(D-NAO-54): 안 넘기면 models.py의 server_default=func.now()가
+            #   먹어 **UTC**로 박힌다(실측 drift 9.0h). 이 테이블의 다른 모든 writer는
+            #   kst_now()를 명시 전달하는데 이 라우터의 두 writer만 빠져 있었다 →
+            #   00:00~09:00 KST 조작이 전날로 귀속됐다(D-NAO-54 날짜 창이 이걸 처음 가시화).
+            #   memory: sqlite-server-default-now-is-utc — 같은 함정 세 번째.
+            changed_at=kst_now(),
         ))
 
     db.commit()
@@ -758,7 +764,9 @@ def expert_delegation_put(body: ExpertDelegationIn, db: Session = Depends(get_db
             before_value=json.dumps(before, ensure_ascii=False),
             after_value=json.dumps(after, ensure_ascii=False),
             rationale="콘솔 PUT /settings/expert-delegation",
-            dry_run=False, executed_at=kst_now(),
+            # ★changed_at 명시(D-NAO-54) — executed_at만 kst_now()를 주고 changed_at을
+            #   빠뜨려서 UTC로 박히고 있었다. 위 optimizer_change와 같은 결함.
+            dry_run=False, executed_at=kst_now(), changed_at=kst_now(),
         ))
 
     db.commit()
@@ -870,9 +878,14 @@ def _change_log_window(
     `days`는 date_from/date_to가 없을 때만 쓰는 폴백으로 남긴다(구 프론트 번들 호환 —
     배포 순간에 옛 JS가 days=30을 보내도 창이 뒤바뀌지 않게).
 
-    ★KST 경계다. changed_at은 KST로 저장된다(harness·entity_sync 모두 kst_now() 명시 전달).
-    서버 시계가 UTC라고 UTC 자정으로 자르면 9시간 어긋난다
+    ★KST 경계다. `changed_at`은 **writer가 kst_now()를 명시 전달할 때만** KST다 — 모델의
+    `server_default=func.now()`(models.py:1614)는 **UTC**라서 안 넘긴 writer는 9시간 어긋난다
     (memory: sqlite-server-default-now-is-utc — 이 저장소가 이미 두 번 당한 함정).
+    2026-07-17 실측: harness·entity_sync는 전부 명시 전달하지만 **이 라우터 자신의 writer
+    2개**(optimizer_change:691 · update_expert_delegation:755)가 빠뜨려 UTC로 박고 있었다
+    (drift 9.0h 실측) → 같은 커밋에서 고쳤다. **이 불변식은 여전히 규율이지 구조가 아니다** —
+    새 writer를 추가할 때 kst_now()를 명시하지 않으면 조용히 UTC가 된다. prod에 이미 박힌
+    과거 UTC 행(optimizer_change 등)은 백필하지 않았으므로 actor=all 조회 시 남아 있다.
     """
     if (date_from is None) != (date_to is None):
         # 한쪽만 주면 나머지 끝을 days로 메우게 되는데, 그건 사용자가 고른 적 없는 구간이다.
@@ -885,10 +898,14 @@ def _change_log_window(
     if (date_to - date_from).days + 1 > _MAX_CHANGE_LOG_SPAN_DAYS:
         raise HTTPException(422, f"조회 구간은 최대 {_MAX_CHANGE_LOG_SPAN_DAYS}일입니다.")
     # date_to 당일을 통째로 포함한다(끝점 포함) — 안 그러면 '당일' 탭이 00:00만 보고 빈다.
-    return (
-        datetime.combine(date_from, datetime.min.time()),
-        datetime.combine(date_to + timedelta(days=1), datetime.min.time()),
-    )
+    try:
+        until = datetime.combine(date_to + timedelta(days=1), datetime.min.time())
+    except OverflowError:
+        # ★date(9999,12,31) + 1일 = OverflowError → 500. 위 검사를 전부 통과한 뒤 터진다
+        #   (from==to면 span 1일이라 합법). `<input type="date">`에 max가 없어 연도 칸에
+        #   9999를 타이핑하면 도달한다 — 다른 잘못된 입력은 전부 422인데 이것만 500이었다.
+        raise HTTPException(422, "date_to가 표현 가능한 날짜 범위를 벗어났습니다.") from None
+    return datetime.combine(date_from, datetime.min.time()), until
 
 
 
@@ -902,6 +919,45 @@ def _loads_or_none(raw: str | None) -> dict | None:
     except (ValueError, TypeError):
         return None
     return parsed if isinstance(parsed, dict) else None
+
+
+def _execution_state(row: NaverChangeLog) -> str | None:
+    """우리 실집행 시도의 3-상태(D-NAO-54). 해당 없으면 None.
+
+      "executed" — 광고가 실제로 바뀌었다(writer가 네이버 재조회 응답을 after_value에 실었다).
+      "blocked"  — 사전 가드레일 거부. writer를 부르지도 않았으므로 **확실히 안 바뀌었다**.
+      "unknown"  — writer 예외. PUT을 이미 보낸 뒤일 수 있어 **반영 여부를 모른다**.
+      None       — 이 개념이 적용되지 않는 행(외부 감지·내부 설정 변경·dry-run).
+
+    ★왜 3-상태인가(codex 계열 지적, 2026-07-17): 처음엔 `executed: bool` 하나였는데, 그러면
+    WriteVerificationError 행이 false가 되어 화면이 "🚫 차단됨"이라고 **단언**한다. 그런데
+    그 예외는 "bidAmt는 반영됐으나 useGroupBidAmt 미전환"에서도 뜬다(naver_sa_writer:341) —
+    **네이버엔 우리 입찰가가 들어가 있는데** 안 바꿨다고 말하는 셈이다. 네트워크 타임아웃
+    (PUT 성공·응답 유실)도 같다. 모름을 긍정 주장으로 바꾸는 건 원칙22 위반이고, harness도
+    같은 상황에 "사람이 네이버 콘솔로 실제 반영 여부를 확인"하라고 못 박고 있다.
+
+    ★None을 정확히 돌려주는 것도 계약이다: 이 필드는 **actor=ours 관점 전용**인데 응답 전역에
+    나간다. `external_keyword_removed`는 after_value가 없고(entity_sync가 before에 싣는다)
+    `optimizer_change`는 after_value가 있다 — bool 하나로는 각각 "차단됨"·"집행됨"이라는
+    거짓이 된다. 우리 가드레일은 남의 조작에 걸리지도 않고, optimizer_change는 광고 API를
+    건드린 적이 없다.
+
+    판별이 outcome이 아니라 after_value인 것은 이 코드베이스의 규약이다(_load_our_bid_writes·
+    _detect_external_change 동일) — outcome은 D+14 채점 전 NULL이고 채점 후 improved/declined로
+    바뀌므로 "실행됨"의 영구 상태가 아니다.
+    """
+    if row.action not in naver_execution_harness.EXECUTION_ACTIONS or row.dry_run:
+        return None
+    if row.after_value is not None:
+        return "executed"
+    if row.outcome != "failed":
+        return None  # 실행 중(executing)·미판정 등 — 지어내지 않는다
+    rationale = row.rationale or ""
+    if naver_execution_harness.GUARD_BLOCK_MARKER in rationale:
+        return "blocked"
+    # WRITE_FAILURE_MARKER이거나, 접두사가 없어 판별 불가한 경우. 둘 다 "모름"으로 보수 판정
+    # 한다 — 가드 거부라고 단정하려면 GUARD_BLOCK_MARKER라는 적극적 증거가 있어야 한다.
+    return "unknown"
 
 
 @router.get("/change-log")
@@ -948,6 +1004,11 @@ def get_change_log(
     ⚠️ 이 API는 change_log를 **읽기만** 한다. 이력을 *채우는* 것은 entity_sync의 diff 밸브
     (D-NAO-47 T2)와 naver_execution_harness다.
     """
+    if include_blocked and actor != "ours":
+        # 뒷문은 아니다(actor=all은 애초에 무필터라 차단분이 이미 들어오고, external은
+        # EXTERNAL_DETECTION_ACTIONS로 좁혀져 닿지 않는다). 다만 **조용히 무시**하면 호출자가
+        # 켰다고 믿는다 — 이 코드베이스는 무성 실패를 시끄럽게 만드는 쪽을 택해왔다.
+        raise HTTPException(422, "include_blocked는 actor=ours에서만 의미가 있습니다.")
     since, until = _change_log_window(date_from, date_to, days)
     q = db.query(NaverChangeLog).filter(NaverChangeLog.changed_at >= since)
     if until is not None:
@@ -984,10 +1045,20 @@ def get_change_log(
         q = q.filter(NaverChangeLog.dry_run.is_(False))
 
     total = q.count()
+    # ★분리 집계(D-NAO-54): total 하나만 주면 "우리가 한 일의 결과" 카드가 `총 32건`이라고
+    #   쓰는데 그게 실집행 2 + 차단 30일 수 있다 — actor 필터가 막으려던 바로 그 거짓말이
+    #   화면에서 되살아난다. 행마다 execution_state를 주면서 집계는 안 나누면 옵트인이라는
+    #   방어가 화면에서 0원이다. executed_total은 include_blocked를 켠 경우에만 의미가 있다.
+    executed_total = (
+        q.filter(NaverChangeLog.after_value.isnot(None)).count()
+        if actor == "ours" and include_blocked
+        else None
+    )
     rows = q.order_by(NaverChangeLog.changed_at.desc()).offset(offset).limit(limit).all()
 
     return {
         "total": total,
+        "executed_total": executed_total,
         "rows": [
             {
                 "id": r.id,
@@ -1000,10 +1071,8 @@ def get_change_log(
                 "after": _loads_or_none(r.after_value),
                 "rationale": r.rationale,
                 "outcome": r.outcome,
-                # ★실제로 광고가 바뀌었나(D-NAO-54). 판별이 outcome이 아니라 after_value인 것은
-                # 위 actor=ours 주석과 같은 이유다(outcome은 D+14 채점으로 값이 바뀐다).
-                # _loads_or_none이 아니라 원본 컬럼으로 판단한다 — JSON 파싱 실패는 '차단'이 아니다.
-                "executed": r.after_value is not None,
+                # executed(bool)가 아니라 3-상태다 — 왜인지는 _execution_state docstring 참조.
+                "execution_state": _execution_state(r),
                 "dry_run": r.dry_run,
                 "proposal_id": r.proposal_id,
                 "executed_at": r.executed_at.isoformat() if r.executed_at else None,
