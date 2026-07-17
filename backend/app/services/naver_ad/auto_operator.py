@@ -359,11 +359,26 @@ def _check_spend_circuit_breaker(db: Session, campaign_id: str, today: date) -> 
     return None
 
 
+# codex 1R[P1-2]: 입찰 grain 규약 — 캠페인유형별 유효 entity_type. WEB_SITE(파워링크)는
+# 키워드 단위 입찰만, SHOPPING/BRAND_SEARCH는 광고그룹 단위 입찰만(naver_ad_daily grain
+# 규약·update_keyword_bid/update_adgroup_bid 분기와 동일 원칙). 이 매핑에 없는 조합
+# (예: WEB_SITE 캠페인의 adgroup 엔티티)은 핫셋에서 제외 — 잘못된 grain에 스텝을 쏘는
+# 것을 원천 차단한다.
+_HOT_SET_ENTITY_TYPE_BY_CAMPAIGN_TYPE = {
+    "WEB_SITE": "keyword",
+    "SHOPPING": "adgroup",
+    "BRAND_SEARCH": "adgroup",
+}
+
+
 def _hot_set_candidates(
     db: Session, campaign_id: str, window_from: date, window_to: date,
 ) -> list[tuple[str, str]]:
     """§4-1 핫셋 선정: auto_operate 캠페인의 keyword/adgroup 엔티티(status='on') 중
-    정착창 클릭 ≥10. 반환: [(target_type, target_id), ...] target_id 오름차순(결정적)."""
+    캠페인유형-grain 규약(P1-2, 위 매핑)에 맞고 정착창 클릭 ≥10인 것.
+    campaign_type이 비어 있으면(동기화 미채움) grain 판정 불가 — fail-closed 제외
+    (억지 판정 금지, 다음 entity_sync 후 자연 편입). 반환: [(target_type, target_id), ...]
+    target_id 오름차순(결정적)."""
     entities = (
         db.query(NaverEntity)
         .filter(
@@ -376,15 +391,24 @@ def _hot_set_candidates(
     )
     out: list[tuple[str, str]] = []
     for e in entities:
+        allowed_type = _HOT_SET_ENTITY_TYPE_BY_CAMPAIGN_TYPE.get(e.campaign_type or "")
+        if allowed_type is None or e.entity_type != allowed_type:
+            continue  # grain 규약 위반 또는 campaign_type 미확보 — fail-closed 제외
         agg = _settlement_agg(db, e.entity_type, e.entity_id, window_from, window_to)
         if agg["clk"] >= _MIN_CLICK_FOR_APPROVAL:
             out.append((e.entity_type, e.entity_id))
     return out
 
 
-def _weighted_recent(curve: list[dict]) -> dict:
-    """최근 _HOURLY_RECENT_HOURS(3)개 완료 시간대의 imp-가중 avg_rank + imp 합계."""
-    recent = sorted(curve, key=lambda h: h["hour"])[-_HOURLY_RECENT_HOURS:]
+def _weighted_recent(curve: list[dict], now_hour: int) -> dict:
+    """최근 _HOURLY_RECENT_HOURS(3)개 **완료** 시간대의 imp-가중 avg_rank + imp 합계.
+
+    codex 1R[P2]: :20 실행 시 hh24 응답에 현재 시간대(20분치 부분 데이터)가 섞여 온다 —
+    부분 버킷을 그대로 판정에 쓰면 rank/표본이 왜곡된다. hour < now_hour인 완료 시간대만
+    취한 뒤 마지막 3개를 쓴다(00시대 실행처럼 완료 버킷이 없으면 imp_sum=0 → 표본 부족
+    hold로 자연 수렴)."""
+    completed = [h for h in curve if h["hour"] < now_hour]
+    recent = sorted(completed, key=lambda h: h["hour"])[-_HOURLY_RECENT_HOURS:]
     imp_sum = sum(h["imp"] for h in recent)
     rank_imp_sum = sum(h["imp"] for h in recent if h.get("avg_rank") is not None)
     weighted_rank = None
@@ -440,7 +464,7 @@ def _judge_hourly(
 
     ROAS/BEP는 여기서 신규 판단하지 않는다(정착창 재사용은 조건 재확인일 뿐, 시간당
     ROAS 산출은 없음 — §4 "시간당 판단은 순위·CPC·페이싱만" 원칙 준수)."""
-    summary = _weighted_recent(curve)
+    summary = _weighted_recent(curve, now.hour)
     if summary["imp_sum"] < _MIN_HOURLY_SAMPLE_IMP:
         return {
             "direction": "hold",

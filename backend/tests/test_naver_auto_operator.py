@@ -265,10 +265,10 @@ def test_hourly_lane_hot_set_only_clicks_ge_10_and_imp_today(db):
     _settings(db)
     window_from, window_to = _settlement_window()
     # qualifies: clk=10 in settlement window
-    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-hot", campaign_id=CAMPAIGN, status="on"))
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-hot", campaign_id=CAMPAIGN, campaign_type="WEB_SITE", status="on"))
     _ad_row(db, keyword_id="nkw-hot", ad_date=window_from, clk=10, cost=100)
     # below threshold: clk=5
-    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-cold", campaign_id=CAMPAIGN, status="on"))
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-cold", campaign_id=CAMPAIGN, campaign_type="WEB_SITE", status="on"))
     _ad_row(db, keyword_id="nkw-cold", ad_date=window_from, clk=5, cost=100)
     db.commit()
 
@@ -290,7 +290,7 @@ def test_hourly_lane_hot_set_only_clicks_ge_10_and_imp_today(db):
 def test_hourly_lane_low_imp_bucket_held(db):
     _settings(db)
     window_from, window_to = _settlement_window()
-    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-lowimp", campaign_id=CAMPAIGN, status="on"))
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-lowimp", campaign_id=CAMPAIGN, campaign_type="WEB_SITE", status="on"))
     _ad_row(db, keyword_id="nkw-lowimp", ad_date=window_from, clk=10, cost=100)
     db.commit()
 
@@ -306,7 +306,7 @@ def test_hourly_lane_low_imp_bucket_held(db):
 def test_hourly_lane_down_priority_when_rank_below_2_5(db):
     _settings(db)
     window_from, window_to = _settlement_window()
-    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-down", campaign_id=CAMPAIGN, status="on"))
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-down", campaign_id=CAMPAIGN, campaign_type="WEB_SITE", status="on"))
     _ad_row(db, keyword_id="nkw-down", ad_date=window_from, clk=10, cost=100)
     db.commit()
 
@@ -333,7 +333,7 @@ def test_hourly_lane_down_priority_when_rank_below_2_5(db):
 def test_hourly_lane_down_on_cpc_spike(db):
     _settings(db)
     window_from, window_to = _settlement_window()
-    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-cpc", campaign_id=CAMPAIGN, status="on"))
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-cpc", campaign_id=CAMPAIGN, campaign_type="WEB_SITE", status="on"))
     # baseline: cost=1000/clk=10 → CPC=100원, 급등 임계=200원(×2)
     _ad_row(db, keyword_id="nkw-cpc", ad_date=window_from, clk=10, cost=1000)
     db.commit()
@@ -358,7 +358,7 @@ def test_hourly_lane_down_on_cpc_spike(db):
 def test_hourly_lane_up_only_when_all_3_conditions_met(db):
     _settings(db, target_roas_override=Decimal("2.0"))
     window_from, window_to = _settlement_window()
-    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-up", campaign_id=CAMPAIGN, status="on"))
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-up", campaign_id=CAMPAIGN, campaign_type="WEB_SITE", status="on"))
     # roas_naver = 21000/7000 = 3.0 >= 2.0, baseline CPC = 7000/20 = 350원
     _ad_row(db, keyword_id="nkw-up", ad_date=window_from, clk=20, cost=7000, conv_direct_amt=21000)
     db.commit()
@@ -387,7 +387,7 @@ def test_hourly_lane_up_not_fired_when_roas_condition_missing(db):
     """rank>4.0·페이싱저속은 충족하지만 정착창 실적 자체가 없어 ROAS 검증 불가 → hold
     (3조건 동시 충족 요구 — 2개만 만족해도 up 아님)."""
     _settings(db, target_roas_override=Decimal("2.0"))
-    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-up2", campaign_id=CAMPAIGN, status="on"))
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-up2", campaign_id=CAMPAIGN, campaign_type="WEB_SITE", status="on"))
     window_from, window_to = _settlement_window()
     # 핫셋 자격만 채우는 별도 클릭 없이는애초에 hot-set에 안 들어가므로, clk>=10인 행을
     # 넣되 cost=0으로 만들어(collected 0 cost) roas 검증만 실패하게 한다.
@@ -412,7 +412,7 @@ def test_hourly_lane_up_not_fired_when_roas_condition_missing(db):
 def test_hourly_lane_default_hold_when_rank_in_neutral_band(db):
     _settings(db)
     window_from, window_to = _settlement_window()
-    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-neutral", campaign_id=CAMPAIGN, status="on"))
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-neutral", campaign_id=CAMPAIGN, campaign_type="WEB_SITE", status="on"))
     _ad_row(db, keyword_id="nkw-neutral", ad_date=window_from, clk=10, cost=1000)
     db.commit()
 
@@ -440,7 +440,7 @@ def test_hourly_lane_spend_circuit_breaker_holds_entire_campaign(db):
         snapshot_at=NOW, ad_date=TODAY, snapshot_hour=8, campaign_id=CAMPAIGN,
         campaign_type="SHOPPING", cost=500, clk=10, imp=100,  # 500 > 100×3
     ))
-    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-never", campaign_id=CAMPAIGN, status="on"))
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-never", campaign_id=CAMPAIGN, campaign_type="WEB_SITE", status="on"))
     _ad_row(db, keyword_id="nkw-never", ad_date=window_from, clk=99, cost=100)
     db.commit()
 
@@ -457,7 +457,7 @@ def test_hourly_lane_spend_circuit_breaker_holds_entire_campaign(db):
 def test_hourly_lane_intraday_fetch_failure_skips_group(db):
     _settings(db)
     window_from, window_to = _settlement_window()
-    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-fail", campaign_id=CAMPAIGN, status="on"))
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-fail", campaign_id=CAMPAIGN, campaign_type="WEB_SITE", status="on"))
     _ad_row(db, keyword_id="nkw-fail", ad_date=window_from, clk=10, cost=100)
     db.commit()
 
@@ -481,13 +481,104 @@ def test_clamp_step_15pct_and_10won_rounding():
     assert auto_operator._clamp_step(70, "down") is None
 
 
+# ── codex 1R[P1-2]: 핫셋 grain 규약 — WEB_SITE=키워드만 / SHOPPING·BRAND_SEARCH=애드그룹만 ──
+
+def test_hourly_lane_hot_set_excludes_adgroup_of_website_campaign(db):
+    """WEB_SITE 캠페인의 adgroup 엔티티는 입찰 grain이 아니다(키워드 단위) — 클릭이 충분해도
+    핫셋에서 제외돼야 한다. SHOPPING 캠페인의 keyword 엔티티도 대칭으로 제외."""
+    _settings(db)
+    window_from, window_to = _settlement_window()
+    # WEB_SITE 캠페인의 adgroup 엔티티(grain 위반 — 제외 대상)
+    db.add(NaverEntity(entity_type="adgroup", entity_id="grp-web", campaign_id=CAMPAIGN,
+                        campaign_type="WEB_SITE", status="on"))
+    _ad_row(db, adgroup_id="grp-web", keyword_id="nkw-x", campaign_type="WEB_SITE",
+            ad_date=window_from, clk=50, cost=1000)
+    # SHOPPING 캠페인의 keyword 엔티티(grain 위반 대칭 — 제외 대상)
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-shop", campaign_id=CAMPAIGN,
+                        campaign_type="SHOPPING", status="on"))
+    _ad_row(db, keyword_id="nkw-shop", campaign_type="WEB_SITE",
+            ad_date=window_from + timedelta(days=1), clk=50, cost=1000)
+    # 정상 grain 2건: WEB_SITE keyword + SHOPPING adgroup
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-ok", campaign_id=CAMPAIGN,
+                        campaign_type="WEB_SITE", status="on"))
+    _ad_row(db, keyword_id="nkw-ok", campaign_type="WEB_SITE",
+            ad_date=window_from + timedelta(days=2), clk=50, cost=1000)
+    db.add(NaverEntity(entity_type="adgroup", entity_id="grp-ok", campaign_id=CAMPAIGN,
+                        campaign_type="SHOPPING", status="on"))
+    _ad_row(db, adgroup_id="grp-ok", keyword_id="", campaign_type="SHOPPING",
+            ad_date=window_from + timedelta(days=3), clk=50, cost=1000)
+    db.commit()
+
+    hot = auto_operator._hot_set_candidates(db, CAMPAIGN, window_from, window_to)
+    assert ("adgroup", "grp-web") not in hot
+    assert ("keyword", "nkw-shop") not in hot
+    assert ("keyword", "nkw-ok") in hot
+    assert ("adgroup", "grp-ok") in hot
+
+
+# ── codex 1R[P2]: 진행 중(부분) 시간대 제외 — 완료 시간대(hour < now.hour)만 판정에 사용 ──
+
+def test_hourly_lane_excludes_in_progress_hour_bucket(db):
+    """:20 실행 시 hh24 응답에 현재 시간대(20분치 부분 데이터)가 섞여 온다 — 그대로 마지막
+    3개를 취하면 부분 데이터로 오판한다. 현재 시간대 버킷(rank=1.0, 포함 시 확실히 down
+    판정)이 있어도 제외되고, 직전 3개 완료 시간대(중립 rank=3.2)로 hold가 나와야 한다."""
+    _settings(db)
+    window_from, window_to = _settlement_window()
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-partial", campaign_id=CAMPAIGN,
+                        campaign_type="WEB_SITE", status="on"))
+    _ad_row(db, keyword_id="nkw-partial", ad_date=window_from, clk=10, cost=1000)
+    db.commit()
+
+    now = datetime(2026, 7, 20, 12, 20, 0)  # 12시대 진행 중(20분 경과)
+    curve = [
+        _hour(9, imp=15, clk=1, cost=50, avg_rank=3.2),
+        _hour(10, imp=15, clk=1, cost=50, avg_rank=3.2),
+        _hour(11, imp=15, clk=1, cost=50, avg_rank=3.2),
+        _hour(12, imp=100, clk=1, cost=50, avg_rank=1.0),  # 진행 중 부분 버킷 — 포함되면 down 오판
+    ]
+    with patch.object(auto_operator.naver_sa_writer, "get_keyword",
+                       return_value={"bidAmt": 1000}), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(
+            db, now=now, fetch_intraday=lambda tid, d: curve,
+        )
+    mock_exec.assert_not_called()  # 완료 3개(9~11, 중립)로 판정 → hold
+    assert result["held"][0]["reason"] == "판정 조건 미충족(기본 hold)"
+
+
+def test_hourly_lane_completed_buckets_only_for_imp_gate(db):
+    """imp 표본 게이트(≥30)도 완료 시간대만 센다 — 진행 중 버킷의 imp가 표본을 부풀려
+    성급한 판정을 만들면 안 된다."""
+    _settings(db)
+    window_from, window_to = _settlement_window()
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-pad", campaign_id=CAMPAIGN,
+                        campaign_type="WEB_SITE", status="on"))
+    _ad_row(db, keyword_id="nkw-pad", ad_date=window_from, clk=10, cost=1000)
+    db.commit()
+
+    now = datetime(2026, 7, 20, 12, 20, 0)
+    curve = [
+        _hour(10, imp=5, clk=1, cost=50, avg_rank=2.0),
+        _hour(11, imp=5, clk=1, cost=50, avg_rank=2.0),
+        _hour(12, imp=100, clk=1, cost=50, avg_rank=2.0),  # 진행 중 — 제외하면 imp=10 < 30
+    ]
+    with patch.object(auto_operator.naver_sa_writer, "get_keyword",
+                       return_value={"bidAmt": 1000}), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(
+            db, now=now, fetch_intraday=lambda tid, d: curve,
+        )
+    mock_exec.assert_not_called()
+    assert "표본 부족" in result["held"][0]["reason"]
+
+
 # ── 통합 케이스: 쿨다운/가드레일 차단이 실행을 실제로 막는지(harness.execute 실호출) ──
 
 def test_hourly_lane_execution_blocked_by_real_guardrail_cooldown(db):
     _settings(db)
     window_from, window_to = _settlement_window()
     target_id = "nkw-cd"
-    db.add(NaverEntity(entity_type="keyword", entity_id=target_id, campaign_id=CAMPAIGN, status="on"))
+    db.add(NaverEntity(entity_type="keyword", entity_id=target_id, campaign_id=CAMPAIGN, campaign_type="WEB_SITE", status="on"))
     _ad_row(db, keyword_id=target_id, ad_date=window_from, clk=10, cost=100)
     # 1시간 전 우리 시스템이 이미 이 키워드를 변경 — 쿨다운 5시간 이내(guardrail_gate)
     db.add(NaverChangeLog(

@@ -1,6 +1,6 @@
 """add naver_campaign_settings.auto_operate (자동 운영 스위치, D-NAO-49)
 
-Revision ID: h2i3j4k5l6m7
+Revision ID: n4o5p6q7r8s9
 Revises: g7h8i9j0k1l2
 Create Date: 2026-07-17 00:00:00.000000
 
@@ -18,7 +18,9 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision: str = 'h2i3j4k5l6m7'
+# codex 1R[P1-1]: 초판 id 'h2i3j4k5l6m7'가 기존 rename_rg_fulfillment_to_delivery 마이그와
+# 중복 — alembic 스크립트 디렉토리 로딩이 깨지는 치명 결함이라 고유 id로 재발급.
+revision: str = 'n4o5p6q7r8s9'
 down_revision: Union[str, None] = 'g7h8i9j0k1l2'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
