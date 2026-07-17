@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 from app.models import NaverEntity, NaverForecastDaily, NaverLearningState, NaverProposal
 from app.services.naver_ad.diagnosis import build_diagnosis
 from app.services.naver_ad.proposal_scoreboard import METRIC as PROPOSAL_ACCURACY_METRIC
-from app.services.naver_ad.proposal_writer import INFORMATIONAL_PROPOSAL_TYPES
+from app.services.naver_ad.proposal_writer import INFORMATIONAL_PROPOSAL_TYPES, PARAM_CHANGE
 from app.services.naver_ad.wisdom_apply import active_wisdom_prefix
 from app.services.naver_ad.trigger_watch import PROPOSAL_TYPE_CPC, PROPOSAL_TYPE_PACING
 from app.utils.kst import kst_today
@@ -72,9 +72,14 @@ def _build_pending_proposals(db: Session) -> tuple[list[dict], list[int]]:
     """실행형 pending 제안 전건(D-NAO-37 ②) — 정보성 5종은 제외(_build_informational_pending
     이 유형별 집계로 별도 처리). ava_reviewer.review의 expected_ids가 이 목록의 id만 근거로
     삼는다 — 정보성은 자동으로 검토 대상에서 빠진다(의도된 효과)."""
+    # P4 리뷰 P3-1: 결정 전용 param_change도 제외 — 지혜는 이미 active_wisdom prefix로
+    # Ava에게 전달되므로 이중 검토이며, LLM 산출 rationale이 프롬프트에 재삽입되는
+    # 주입면·비용만 늘린다(실행 결과도 없어 검토 실익 없음).
     rows = db.query(NaverProposal).filter(
         NaverProposal.status == "pending",
-        NaverProposal.proposal_type.notin_(INFORMATIONAL_PROPOSAL_TYPES),
+        NaverProposal.proposal_type.notin_(
+            tuple(INFORMATIONAL_PROPOSAL_TYPES) + (PARAM_CHANGE,)
+        ),
     ).order_by(NaverProposal.id.asc()).all()
 
     pairs = {(r.target_type, r.target_id) for r in rows if r.target_id}

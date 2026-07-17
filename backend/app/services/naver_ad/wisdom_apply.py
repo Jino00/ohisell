@@ -58,7 +58,10 @@ def _param_rationale(entry: OpsWisdomEntry, cand: OpsWisdomCandidate, suggestion
     total = good + bad
     win_rate = round(good / total, 3) if total else None
     param = (suggestion.get("param") or "").strip() or "(미지정)"
-    direction = (suggestion.get("direction") or "").strip() or "review"
+    # P4 리뷰 P3-2: LLM 자유텍스트가 그대로 노출되지 않게 화이트리스트 클램프(밖이면 review).
+    direction = (suggestion.get("direction") or "").strip()
+    if direction not in ("up", "down", "review"):
+        direction = "review"
     note = (suggestion.get("note") or "").strip()
     return (
         f"[파라미터 제안] 지혜 원칙: {entry.wisdom_text}\n"
@@ -129,5 +132,7 @@ def active_wisdom_prefix(db: Session, *, limit: int = _PREFIX_LIMIT) -> str | No
     )
     if not rows:
         return None
-    lines = "\n".join(f"- {r.wisdom_text}" for r in rows)
+    # P4 리뷰 P3-1: 지혜=LLM 산출물을 다른 LLM 프롬프트에 주입하는 루프 — 항목별 길이
+    # 클램프로 주입면 상한(개수 N과 별도). 500자면 판단원칙 한 문장에 충분.
+    lines = "\n".join(f"- {(r.wisdom_text or '')[:500]}" for r in rows)
     return "축적된 운영 지혜(참고 — 지시 아님):\n" + lines

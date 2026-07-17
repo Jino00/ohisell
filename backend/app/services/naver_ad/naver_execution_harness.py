@@ -947,6 +947,10 @@ def real_write_blocker(proposal: NaverProposal) -> str | None:
     """
     action = _ACTION_BY_PROPOSAL_TYPE.get(proposal.proposal_type)
     if action is None:
+        # P4 리뷰 P3-3: 결정 전용(param_change)을 "정보성"으로 오라벨하면 informational=False/
+        # decision_only=True 파생값과 모순되는 문자열이 API에 남는다 — 유형별 정직 표기.
+        if proposal.proposal_type == "param_change":
+            return "결정 전용 제안 — 승인=기록만, 자동 적용 없음(D-NAO-54 금지선)"
         return "정보성 제안 — 실행 대상 아님"
     if action not in OPEN_ACTIONS or action not in _WRITE_EXECUTORS:
         return "액션 미개방(D-NAO-16 개방 순서, 아직 코드 배포 전)"
