@@ -101,8 +101,9 @@ def test_d7_fills_seven_day_window_and_preserves_existing_d1(db):
 
 
 def test_retro_signal_linked_by_target_and_date(db):
+    # P3-3 방향 일치 필터: action=bid_down(→down)과 direction=down 신호가 일치 → 연결.
     action_date = TODAY - timedelta(days=2)
-    _entry(db, action_date=action_date)
+    _entry(db, action_date=action_date, action="bid_down")
     _daily(db, TODAY - timedelta(days=1), cost=1000, clk=5, conv=500)
     db.add(NaverRetroSignal(
         created_at=NOW, asof_date=action_date, board="bleeding_keywords", direction="down",
@@ -116,6 +117,25 @@ def test_retro_signal_linked_by_target_and_date(db):
     assert res["retro_linked"] == 1
     retro = json.loads(db.query(OpsDiaryEntry).one().outcome_json)["retro"]
     assert retro == {"board": "bleeding_keywords", "direction": "down", "verdict_d3": "correct"}
+
+
+def test_retro_signal_direction_mismatch_not_linked(db):
+    # P2 리뷰 P3-3: retro는 '제안 방향' 추적 — direction=down 신호를 action=bid_up(→up) 행에
+    # 붙이면 오연결. 방향 매핑이 존재하는데 일치 신호가 없으면 붙이지 않는다.
+    action_date = TODAY - timedelta(days=2)
+    _entry(db, action_date=action_date, action="bid_up")
+    _daily(db, TODAY - timedelta(days=1), cost=1000, clk=5, conv=500)
+    db.add(NaverRetroSignal(
+        created_at=NOW, asof_date=action_date, board="bleeding_keywords", direction="down",
+        grain="keyword", target_id="nkw-1", campaign_id="cmp1", cf_asof=1.0, bep_asof=2.0,
+        target_asof=4.0, cost_asof=1000, roas_c_asof=None, verdict_d3="correct",
+    ))
+    db.commit()
+
+    res = diary_outcome.backfill_outcomes(db, now=NOW)
+
+    assert res["retro_linked"] == 0
+    assert "retro" not in json.loads(db.query(OpsDiaryEntry).one().outcome_json)
 
 
 def test_out_of_window_row_untouched(db):
@@ -286,11 +306,13 @@ def test_default_cron_is_0835_kst():
     assert '("run_naver_diary_reflection", "35 8 * * *")' in src
 
 
-def test_registered_in_catchup_order_after_retro_before_auto_daily():
+def test_registered_in_catchup_order_after_retro_and_after_money_job():
+    """P2 리뷰 P2-1: catch-up 체인에서 관찰 전용 reflection(LLM 최대 9분)은 돈 나가는
+    auto_operator_daily *뒤*여야 한다(retro 뒤이기도 — outcome 최신). 재배치 회귀 방지."""
     order = scheduler_service._CATCHUP_ORDER
     assert "run_naver_diary_reflection" in order
     assert order.index("run_naver_diary_reflection") > order.index("run_naver_retro_scoring")
-    assert order.index("run_naver_diary_reflection") < order.index("run_naver_auto_operator_daily")
+    assert order.index("run_naver_diary_reflection") > order.index("run_naver_auto_operator_daily")
 
 
 def test_wired_in_job_func_for_and_catchup_funcs():
@@ -298,3 +320,17 @@ def test_wired_in_job_func_for_and_catchup_funcs():
         is scheduler_service.run_naver_diary_reflection_job
     src = inspect.getsource(scheduler_service._catch_up_morning_batch)
     assert '"run_naver_diary_reflection": run_naver_diary_reflection_job' in src
+
+
+def test_reflection_cron_job_is_fail_open(monkeypatch):
+    """P2 리뷰 P3-1: 금지선("일기 해석 실패가 집행을 막으면 안 됨")의 최종 방어 =
+    run_naver_diary_reflection_job의 fail-open(raise 없음)을 실제 예외 경로로 검증 —
+    catch-up 체인에서 이 잡이 raise하면 하류 08:50 집행 잡이 죽는다."""
+    from app.services import scheduler_service
+
+    def _boom(db, **kwargs):
+        raise RuntimeError("reflection 폭발(테스트)")
+
+    monkeypatch.setattr("app.services.naver_ad.reflection_loop.run_daily_reflection", _boom)
+    # 예외가 전파되면 이 호출 자체가 테스트를 실패시킨다.
+    scheduler_service.run_naver_diary_reflection_job()

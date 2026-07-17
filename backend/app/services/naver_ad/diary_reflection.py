@@ -34,7 +34,9 @@ _SYSTEM = (
     "변경 권고는 절대 하지 마세요. ②환경 조건(요일·휴일·계절·아이폰 오프셋)이 결과와 같이"
     "움직인 것으로 보이면 그 관찰을 명시하되, 단정적 인과가 아니라 '같은 조건에서 반복 관찰'의"
     "언어로 적으세요. ③avg_rank는 D-1 스윕 기준(집행 시점이 아니라 최대 하루 스테일)임을"
-    "전제하세요. ④JSON에 없는 수치를 지어내지 마세요. 한국어 자유 서술로 답하세요."
+    "전제하세요. ④d1 결과의 전환·보정ROAS는 간접전환(~1일 정착)이 아직 덜 여문 시점의 캡처라"
+    "구조적으로 저평가될 수 있습니다 — 낮은 d1 roas_c를 확정 결과로 단정하지 말고, d7이 있으면"
+    "d7을 우선하세요. ⑤JSON에 없는 수치를 지어내지 마세요. 한국어 자유 서술로 답하세요."
 )
 
 
@@ -86,7 +88,9 @@ def _dedup(entries: list[OpsDiaryEntry]) -> list[dict]:
     views: list[dict] = []
     for es in groups.values():
         types = {e.event_type for e in es}
-        if len(es) > 1 and types <= {"blocked", "reject"}:
+        # 정확히 blocked+reject 둘 다 있을 때만 병합(P2 리뷰 P3-4: blocked 2행만 있는 키를
+        # 병합하면 'blocked+reject' 오라벨 + 별개 사건(일/시간 레인 각각 hold) 과소집계).
+        if len(es) > 1 and types == {"blocked", "reject"}:
             views.append(_merged_view(es))
         else:
             views.extend(_entry_view(e) for e in es)

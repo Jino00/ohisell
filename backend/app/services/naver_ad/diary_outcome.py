@@ -93,14 +93,26 @@ def _retro_dict(sig: NaverRetroSignal) -> dict:
     return d
 
 
-def _find_retro(db: Session, target_id: str, asof: date) -> dict | None:
-    """같은 target_id·같은 날(asof_date=diary 날짜) 채점 신호. 같은 날 여러 board가 있으면
-    verdict_d7이 채워진 신호를 우선(사후 정보가 더 풍부)."""
+# diary action → retro direction (방향 일치 필터용, P2 리뷰 P3-3). 매핑 없는 action은 무필터.
+_ACTION_TO_DIRECTION = {"bid_up": "up", "bid_down": "down", "pause": "pause",
+                        "update_bid": None, "set_user_lock": None}
+
+
+def _find_retro(db: Session, target_id: str, asof: date, action: str | None) -> dict | None:
+    """같은 target_id·같은 날(asof_date=diary 날짜) 채점 신호. P2 리뷰 P3-3: retro는 '제안
+    방향' 추적이라 diary 행위와 동일 사건 보장이 없음 — action이 방향으로 매핑되면 direction
+    일치 신호를 우선하고, 일치가 하나도 없으면 붙이지 않는다(오연결 방지). 매핑 불가 action은
+    기존대로 verdict_d7 우선."""
     sigs = db.query(NaverRetroSignal).filter(
         NaverRetroSignal.target_id == target_id, NaverRetroSignal.asof_date == asof,
     ).order_by(NaverRetroSignal.id).all()
     if not sigs:
         return None
+    want = _ACTION_TO_DIRECTION.get(action or "")
+    if want is not None:
+        sigs = [s for s in sigs if s.direction == want]
+        if not sigs:
+            return None
     best = next((s for s in sigs if s.verdict_d7 is not None), sigs[0])
     return _retro_dict(best)
 
@@ -122,7 +134,7 @@ def _backfill_row(db: Session, entry: OpsDiaryEntry, today: date, cf: float) -> 
         )
         counts["d7"] = 1
     if entry.target_id:
-        desired = _find_retro(db, entry.target_id, action_date)
+        desired = _find_retro(db, entry.target_id, action_date, entry.action)
         if desired is not None and desired != outcome.get("retro"):
             outcome["retro"] = desired
             counts["retro"] = 1

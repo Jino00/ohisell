@@ -1066,8 +1066,8 @@ _CATCHUP_ORDER: tuple[str, ...] = (
     "generate_expert_desk",        # 08:05 (proposals 성공 후라야 pending>0 → 의미 있음)
     "run_naver_learning_loops",    # 08:10
     "run_naver_retro_scoring",     # 08:30 (D-NAO-45, 비정형 아닌 표준 cron이라 catch-up 포함)
-    "run_naver_diary_reflection",  # 08:35 (D-NAO-54 P2, retro 뒤=outcome 최신. 잡 자체가 fail-open이라 raise 없음 → 하류 집행 잡을 막지 않는다)
     "run_naver_auto_operator_daily",  # 08:50 (D-NAO-49, 조건④ bleeding 판정이 retro_scoring 결과를 쓴다 — 그 뒤)
+    "run_naver_diary_reflection",  # 08:35 크론이지만 catch-up은 집행(08:50) *뒤*(P2 리뷰 P2-1: LLM 재시도 최대 9분이 돈 잡 복구를 지연시키면 안 됨 — 관찰 전용이라 어제/D-2/D-8 버킷은 순서 무관. fail-open은 영구 블록만 막고 지연은 못 막는다)
     "sweep_naver_keyword_hourly",  # 09:10 (D-NAO-46②, 독립 잡이나 표준 cron catch-up 포함)
 )
 _CATCHUP_LOOKBACK = timedelta(hours=12)  # 오늘 예정 발화가 이보다 오래됐으면 스킵(다음 정상 발화에 위임)
