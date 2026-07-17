@@ -280,7 +280,9 @@ def test_all_proposal_types_constant_covers_every_emitted_type():
 
     assert INFORMATIONAL_PROPOSAL_TYPES <= ALL_PROPOSAL_TYPES
     assert set(_ACTION_BY_PROPOSAL_TYPE) <= ALL_PROPOSAL_TYPES
-    assert len(ALL_PROPOSAL_TYPES) == 14
+    # 14 + wisdom_promoted(D-NAO-54 P3 정보성) = 15. 실행 매핑(_ACTION_BY_PROPOSAL_TYPE)에는
+    # 절대 넣지 않는다(지혜→실행 직접 쓰기 금지 금지선) — 그래서 정보성 집합에만 추가된다.
+    assert len(ALL_PROPOSAL_TYPES) == 15
 
 
 # ── D-NAO-47 라이브 배포 검증에서 발견: 정보성이 실행형을 페이지 밖으로 밀어낸다 ──
