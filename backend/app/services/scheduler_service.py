@@ -33,6 +33,12 @@ scheduler = BackgroundScheduler(
     job_defaults={"misfire_grace_time": 3600, "coalesce": True},
 )
 
+# codex 9R[P2](D-NAO-49): auto_operator 시간당 레인 전용 misfire 유예 — 전역 3600s를 상속하면
+# 스케줄러 지연/스톨 시 놓친 :20 실행이 최대 1시간 늦게 발화해 의도한 케이던스 밖 실입찰이
+# 나간다(이 레인의 문서화된 정책 = catch-up 제외, 놓친 회차는 폐기·다음 정시가 재기회).
+# 5분(:20 잡이 :25 내에 못 돌면 폐기)만 허용. 일 레인(08:50)은 전역 기본+catch-up 정책 유지.
+_AUTO_OPERATOR_HOURLY_MISFIRE_GRACE = 300
+
 
 def _get_own_db_session():
     """FastAPI Depends 없이 직접 DB 세션 생성"""
@@ -1265,11 +1271,17 @@ def start_scheduler():
                     trigger = CronTrigger.from_crontab(
                         state.cron_expression, timezone="Asia/Seoul"
                     )
+                    # codex 9R[P2]: hourly 레인만 per-job misfire 5분(놓친 :20은 폐기 —
+                    # catch-up 제외 정책과 정합). 그 외 잡은 전역 기본(3600s) 상속.
+                    per_job_kwargs = {}
+                    if state.job_name == "run_naver_auto_operator_hourly":
+                        per_job_kwargs["misfire_grace_time"] = _AUTO_OPERATOR_HOURLY_MISFIRE_GRACE
                     scheduler.add_job(
                         job_func,
                         trigger=trigger,
                         id=state.job_name,
                         replace_existing=True,
+                        **per_job_kwargs,
                     )
                     log.info("스케줄러 작업 등록: %s (%s)", state.job_name, state.cron_expression)
                 except Exception as e:

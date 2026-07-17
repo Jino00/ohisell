@@ -102,3 +102,17 @@ def test_start_scheduler_wires_both_job_names():
     assert "job_func = run_naver_auto_operator_daily_job" in src
     assert 'state.job_name == "run_naver_auto_operator_hourly"' in src
     assert "job_func = run_naver_auto_operator_hourly_job" in src
+
+
+def test_hourly_job_has_5min_misfire_grace_not_global_1hour():
+    """codex 9R[P2]: hourly 레인이 전역 misfire_grace_time=3600을 상속하면 스케줄러 지연 시
+    놓친 :20 실행이 최대 1시간 늦게 발화 — 케이던스 밖 실입찰. per-job 5분(:25 내 미발화 시
+    폐기, 다음 정시가 재기회) 명시. 일 레인은 기존 정책 유지(전역 상속 — per-job 미지정)."""
+    assert scheduler_service._AUTO_OPERATOR_HOURLY_MISFIRE_GRACE == 300
+    src = inspect.getsource(scheduler_service.start_scheduler)
+    assert 'state.job_name == "run_naver_auto_operator_hourly"' in src
+    assert "_AUTO_OPERATOR_HOURLY_MISFIRE_GRACE" in src
+    assert "misfire_grace_time" in src
+    # 일 레인엔 per-job misfire 미적용(catch-up 정책 유지) — daily 분기에 misfire 문자열이 없어야 함
+    daily_branch = src.split('state.job_name == "run_naver_auto_operator_daily"')[1].split("elif")[0]
+    assert "misfire_grace_time" not in daily_branch
