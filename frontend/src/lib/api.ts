@@ -1688,6 +1688,10 @@ export interface NaverAdProposal {
   /** 백엔드가 주는 정보성/실행형 구분. ★프론트에서 유형 문자열로 재분류하지 말 것 —
    *  백엔드에 유형이 추가되면 조용히 드리프트한다. */
   informational: boolean;
+  /** 실행 액션(add_negative_keyword/update_bid/set_user_lock/update_budget) — 백엔드 파생값
+   *  (harness._ACTION_BY_PROPOSAL_TYPE). ★실행 Confirm 문안은 이 값으로 분기한다. 프론트가
+   *  proposal_type으로 액션을 재추론하면 틀린 액션명이 뜬다(정보성 유형은 null). */
+  action: string | null;
   expert_verdict: NaverExpertVerdictSummary | null;
   // X1a T4 — 콘솔 실행 버튼 활성화 여부(naver_execution_harness.real_write_blocker).
   executable: boolean;
@@ -1701,6 +1705,10 @@ export interface NaverAdProposalList {
   /** ★limit과 무관한 전체 건수(D-NAO-47). 페이지 길이(rows.length)를 건수로 쓰지 말 것 —
    *  limit에 따라 달라지는 틀린 숫자가 된다. */
   total: number;
+  /** 현재 실쓰기 개방된 액션 목록(코드 배포로만 변경). ★배너의 "현재 개방" 표시는 이 값을
+   *  쓴다 — 하드코딩 라벨("제외키워드")이 개방 순서 진행과 어긋나던 결함 재발 방지. 백엔드
+   *  파생값(harness.open_executable_actions, 이중 방벽 교집합)이라 프론트가 추론하지 않는다. */
+  open_actions: string[];
   rows: NaverAdProposal[];
 }
 

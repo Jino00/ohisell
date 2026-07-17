@@ -2,8 +2,10 @@
 // 제안 카드(D-NAO-22) + 캠페인 optimizer/모드/공격성 다이얼 패널(D-NAO-2/13/22-②).
 // 다이얼(공격성)은 라벨이 아니라 target_roas_override PUT으로 campaign_target_resolver
 // 실계산에 그대로 반영된다(계획서 §4-Phase1 경고 — S3a HANDOFF 교훈).
-// X1a T4 — 승인/반려/실행 버튼(반자동 개시, 실쓰기 첫 개방=제외키워드). 자동 실행은 없다 —
-// 모든 실쓰기는 사람의 Confirm을 거친다(D-NAO-5).
+// X1a T4 — 승인/반려/실행 버튼(반자동 개시). 자동 실행은 없다 — 모든 실쓰기는 사람의
+// Confirm을 거친다(D-NAO-5). 현재 개방 액션은 하드코딩하지 않는다: 목록 API의 open_actions
+// (백엔드 파생값)를 배너·Confirm 문안이 진실로 삼는다 — 개방 순서가 코드로 진행돼도
+// 자동으로 따라온다(제외키워드→정지·재개→입찰→예산, D-NAO-16).
 // X1a T5 — E2 위임 스위치(D-NAO-25): Ava agree+가드레일 통과 유형만 사람 승인 없이
 // 자동 승인·실행되도록 콘솔에서 켜고 끈다. 스위치 행사자는 Jino뿐.
 import { Fragment, useEffect, useRef, useState } from "react";
@@ -47,6 +49,82 @@ function fmtEvidenceTime(iso: string | null): string {
   if (datePart === today) return timePart;
   const [, m, d] = datePart.split("-");
   return `${Number(m)}/${Number(d)} ${timePart}`;
+}
+
+// 실행 액션 → 한국어 라벨(배너의 "현재 개방" 표시용). 맵에 없는 액션은 원문 그대로 노출한다
+// (숨기면 새로 개방된 게 안 보인다 — 정직 경계). 진실은 백엔드 open_actions.
+const ACTION_LABEL_KO: Record<string, string> = {
+  add_negative_keyword: "제외키워드",
+  update_bid: "입찰가",
+  set_user_lock: "정지·재개",
+  update_budget: "예산",
+};
+
+function actionLabelKo(action: string): string {
+  return ACTION_LABEL_KO[action] ?? action;
+}
+
+// 실행 Confirm 문안 — 실쓰기임을 명시(D-NAO-5). ★p.action(백엔드 파생값)으로 분기한다.
+// 프론트가 proposal_type으로 액션을 재추론하지 않는다: 미지 액션(null 포함)은 폴백 일반
+// 문구를 쓰므로, 새 액션이 개방돼도 "제외키워드"처럼 틀린 액션명을 사칭할 수 없다
+// (하드코딩 액션명 재발 방지의 핵심). export = vitest 드리프트 가드 대상.
+export function executeConfirmText(p: NaverAdProposal): string {
+  const target = `대상: ${p.target_type} ${p.target_id}`;
+  const group = `광고그룹: ${p.adgroup_id ?? NO_DATA}`;
+  const campaign = `캠페인: ${p.campaign_id}`;
+  switch (p.action) {
+    case "add_negative_keyword":
+      return (
+        `제외키워드를 네이버에 실제 등록합니다.\n` +
+        `검색어: "${p.target_id}"\n` +
+        `${group}\n${campaign}\n\n` +
+        `실행할까요? (실쓰기 — 되돌리려면 네이버 콘솔에서 삭제)`
+      );
+    case "update_bid": {
+      const bid = p.target_bid == null
+        ? "(값 없음 — 실행 시 서버가 거부)"
+        : `${p.target_bid}원`;
+      return (
+        `입찰가를 변경합니다.\n` +
+        `${target}\n` +
+        `새 입찰가: ${bid}\n` +
+        `${group}\n${campaign}\n\n` +
+        `실행할까요? (실쓰기 — 되돌리려면 네이버 콘솔에서 되돌리기)`
+      );
+    }
+    case "set_user_lock": {
+      const verb = p.target_lock === true
+        ? "광고를 정지합니다(userLock)"
+        : p.target_lock === false
+          ? "정지된 광고를 재개합니다"
+          : "광고 정지/재개 상태를 변경합니다(값 없음 — 실행 시 서버가 거부)";
+      return (
+        `${verb}.\n` +
+        `${target}\n` +
+        `${group}\n${campaign}\n\n` +
+        `실행할까요? (실쓰기 — 되돌리려면 네이버 콘솔에서 되돌리기)`
+      );
+    }
+    case "update_budget": {
+      const budget = p.target_budget == null
+        ? "(값 없음 — 실행 시 서버가 거부)"
+        : `${p.target_budget}원`;
+      return (
+        `캠페인 일예산을 변경합니다.\n` +
+        `새 예산: ${budget}\n` +
+        `${campaign}\n\n` +
+        `실행할까요? (실쓰기 — 되돌리려면 네이버 콘솔에서 되돌리기)`
+      );
+    }
+    default:
+      // 미지 액션(null 포함) — 구체 액션명을 사칭하지 않는 일반 문구. 대상 필드만 나열한다.
+      return (
+        `이 제안(${p.proposal_type})을 네이버에 실제 집행합니다.\n` +
+        `${target}\n` +
+        `${group}\n${campaign}\n\n` +
+        `실행할까요? (실쓰기 — 실행 전 대상과 값을 신중히 확인하세요)`
+      );
+  }
 }
 
 // D-NAO-2 공격성 배수 (bep_calculator.AGG_MULT와 동일 값 — 프론트는 이 값으로 override를 계산할 뿐
@@ -152,6 +230,8 @@ export default function NaverAdOptimizationConsole() {
   const [dashboardError, setDashboardError] = useState<string | null>(null);
 
   const [proposals, setProposals] = useState<NaverAdProposal[]>([]);
+  // null = 아직 미도착(배너는 "확인 중" 중립 표기). 도착하면 백엔드 open_actions를 그대로 든다.
+  const [openActions, setOpenActions] = useState<string[] | null>(null);
   const [proposalStatus, setProposalStatus] = useState("pending");
   const [proposalsLoading, setProposalsLoading] = useState(false);
   const [proposalsError, setProposalsError] = useState<string | null>(null);
@@ -206,6 +286,7 @@ export default function NaverAdOptimizationConsole() {
       const data = await fetchNaverAdProposals({ status: proposalStatus, limit: 100 });
       if (mySeq !== proposalsReqSeq.current) return; // stale 응답 무시(탭 빠르게 전환 시 레이스 방지)
       setProposals(data.rows);
+      setOpenActions(data.open_actions);
     } catch (e: any) {
       if (mySeq !== proposalsReqSeq.current) return;
       setProposalsError(e.message);
@@ -370,18 +451,6 @@ export default function NaverAdOptimizationConsole() {
       delete next[id];
       return next;
     });
-  }
-
-  // 실행 Confirm 문안 — 실쓰기임을 명시(D-NAO-5). target_id="검색어"는 현재 유일하게
-  // 개방된 액션(제외키워드, target_type='search_term')을 전제로 한다.
-  function executeConfirmText(p: NaverAdProposal): string {
-    return (
-      `제외키워드를 네이버에 실제 등록합니다.\n` +
-      `검색어: "${p.target_id}"\n` +
-      `광고그룹: ${p.adgroup_id}\n` +
-      `캠페인: ${p.campaign_id}\n\n` +
-      `실행할까요? (실쓰기 — 되돌리려면 네이버 콘솔에서 삭제)`
-    );
   }
 
   async function runExecute(id: number) {
@@ -609,8 +678,13 @@ export default function NaverAdOptimizationConsole() {
 
       <div className="bg-amber-50 border border-amber-200 text-amber-700 text-xs rounded-lg p-3">
         반자동 모드 — 자동 실행은 없습니다. 승인 후 Confirm을 거친 제안만 실제 집행됩니다(현재
-        개방: 제외키워드). 모드·공격성 다이얼은 저장 즉시 실제 목표 ROAS 계산에
-        반영됩니다.
+        개방:{" "}
+        {openActions === null
+          ? "확인 중"
+          : openActions.length === 0
+            ? "없음"
+            : openActions.map(actionLabelKo).join(", ")}
+        ). 모드·공격성 다이얼은 저장 즉시 실제 목표 ROAS 계산에 반영됩니다.
       </div>
 
       {/* Ava 위임 자동승인 설정 (X1a T5, D-NAO-25) — 기본 접힘 */}

@@ -230,6 +230,11 @@ def _serialize_proposal(p: NaverProposal, verdict: NaverExpertReview | None) -> 
         # D-NAO-47: 정보성/실행형 구분을 백엔드가 준다 — 프론트가 유형 문자열을 하드코딩해
         # 재분류하면 백엔드에 유형이 추가될 때 조용히 드리프트한다.
         "informational": p.proposal_type in proposal_writer.INFORMATIONAL_PROPOSAL_TYPES,
+        # 실행 액션(add_negative_keyword/update_bid/set_user_lock/update_budget) — 콘솔의
+        # 실행 Confirm 문안이 이걸 기준으로 분기한다. 매핑은 harness가 단일 진실
+        # (_ACTION_BY_PROPOSAL_TYPE) — 프론트가 유형 문자열로 액션을 재추론해 틀린 액션명을
+        # 띄우던 결함을 막는다. 정보성 유형은 매핑에 없어 자연히 None.
+        "action": naver_execution_harness._ACTION_BY_PROPOSAL_TYPE.get(p.proposal_type),
         "rationale": p.rationale,
         "expected_effect": p.expected_effect,
         "status": p.status,
@@ -322,7 +327,13 @@ def proposals(
     total = q.count()
     rows = q.order_by(NaverProposal.created_at.desc()).limit(limit).all()
     verdicts = _latest_ok_verdicts_by_proposal(db, [p.id for p in rows])
-    return {"total": total, "rows": [_serialize_proposal(p, verdicts.get(p.id)) for p in rows]}
+    # 현재 실쓰기 개방된 액션 목록(배너 표시용) — 코드 배포로만 바뀌는 이중 방벽 교집합.
+    # 하드코딩 라벨("현재 개방: 제외키워드")이 개방 순서 진행과 어긋나던 결함 재발 방지.
+    return {
+        "total": total,
+        "open_actions": naver_execution_harness.open_executable_actions(),
+        "rows": [_serialize_proposal(p, verdicts.get(p.id)) for p in rows],
+    }
 
 
 # ══════════════════════════════════════════════════════════════════

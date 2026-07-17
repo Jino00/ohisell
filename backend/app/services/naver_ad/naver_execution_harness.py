@@ -853,6 +853,15 @@ _WRITE_EXECUTORS = {
 }
 
 
+def open_executable_actions() -> list[str]:
+    """지금 실제로 실쓰기 가능한 액션 목록(정렬). 이중 방벽의 **교집합**이다:
+    `OPEN_ACTIONS`(D-NAO-16 개방 순서)에 있으면서 `_WRITE_EXECUTORS`(디스패치 구현)에도
+    있는 것만. 콘솔 배너의 "현재 개방" 표시가 이 값을 진실로 삼는다(공개 헬퍼로 노출해
+    라우터가 프라이빗 `_WRITE_EXECUTORS`를 직접 참조하지 않게 한다 — 하드코딩 라벨이
+    개방 순서와 어긋나던 결함 재발 방지)."""
+    return sorted(OPEN_ACTIONS & set(_WRITE_EXECUTORS))
+
+
 def real_write_blocker(proposal: NaverProposal) -> str | None:
     """이 제안이 지금 실쓰기 불가능한 이유(사람이 읽을 한국어 문자열)를 반환, 가능하면 None
     (X1a T4). 콘솔의 실행 버튼 활성화 여부(`executable`, naver_ad.py `_serialize_proposal`)와
