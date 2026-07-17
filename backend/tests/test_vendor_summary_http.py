@@ -119,14 +119,16 @@ def test_rg_settlement_upload_requires_token(client):
     assert r.status_code == 401
 
 
-def test_rg_settlement_upload_roundtrip_offloads_to_threadpool(client):
+def test_rg_settlement_upload_roundtrip_survives_cross_thread_session(client):
     """업로드 성공 경로 HTTP 왕복 — 파싱·적재 결과가 응답에 실려 오는지.
 
-    ★이 테스트가 필요한 이유(2026-07-17): 엔드포인트가 `async def`라 동기 ingest가 이벤트 루프를
-    막았고(단일 워커 = 그동안 모든 API 정지), 수정으로 run_in_threadpool 오프로드를 넣었다.
-    오프로드는 **DB 세션을 워커 스레드에서 쓰게 만든다** → SQLite `check_same_thread` 설정이
-    틀리면 여기서만 터진다(파서 단위 테스트로는 절대 안 잡힘).
-    prod 엔진도 connect_args={"check_same_thread": False}라 동일 조건(app/database.py).
+    ★이 테스트가 필요한 이유(2026-07-17): run_in_threadpool 오프로드는 **DB 세션을 워커
+    스레드에서 쓰게 만든다** → SQLite `check_same_thread` 설정이 틀리면 여기서만 터진다
+    (파서 단위 테스트로는 절대 안 잡힘). prod 엔진도 connect_args={"check_same_thread": False}
+    라 동일 조건(app/database.py).
+
+    ⚠️이 테스트는 "오프로드가 됐는지"는 검증하지 **않는다**(오프로드를 지워도 통과) —
+    그건 아래 test_rg_settlement_upload_runs_ingest_off_the_event_loop 담당. (codex P2 반영)
     """
     from tests.test_rg_settlement_sync import _build_xlsx, _WH_ROWS
 
@@ -143,6 +145,52 @@ def test_rg_settlement_upload_roundtrip_offloads_to_threadpool(client):
     assert body["status"] == "ok"
     assert body["upserted"] == 2               # 고유 옵션 2개
     assert body["account_key"] == "COUPANG_WING1"
+
+
+def test_rg_settlement_upload_runs_ingest_off_the_event_loop(client, monkeypatch):
+    """★사고 재발 방지의 핵심 가드: 동기 ingest가 이벤트 루프 위에서 돌면 실패한다.
+
+    2026-07-17 사고의 절반은 파싱 O(n²)였고, 나머지 절반이 이것이다 — 업로드 엔드포인트가
+    `async def`인데 동기 ingest를 그냥 호출해서 **이벤트 루프를 점유**했다. prod는
+    uvicorn --workers 1이라 그동안 모든 API가 멈춘다(같은 시각 fetch-error POST 15초 타임아웃).
+
+    판정 방법(타이밍·스레드 이름 대신 결정론적 신호): 이벤트 루프 스레드에서 돌면
+    asyncio.get_running_loop()이 루프를 반환하고, 스레드풀 워커에서 돌면 RuntimeError가 난다.
+    → 워커에서 돌았다 == 루프가 안 잡힌다.
+
+    (codex P2: 기존 왕복 테스트는 run_in_threadpool을 지워도 통과해서 이 퇴행을 못 잡았다.)
+    """
+    import asyncio
+
+    from app.services.coupang import rg_settlement_sync as _rs
+    from tests.test_rg_settlement_sync import _build_xlsx, _WH_ROWS
+
+    seen: dict[str, bool] = {}
+    _real = _rs.ingest_settlement_xlsx
+
+    def _spy(db, account_key, content):
+        try:
+            asyncio.get_running_loop()
+            seen["on_event_loop"] = True      # 루프 스레드 = 오프로드 안 됨 = 퇴행
+        except RuntimeError:
+            seen["on_event_loop"] = False     # 워커 스레드 = 정상
+        return _real(db, account_key, content)
+
+    monkeypatch.setattr(_rs, "ingest_settlement_xlsx", _spy)
+
+    r = client.post(
+        "/api/coupang/ops/rg/settlement/upload-xlsx",
+        params={"account_key": "COUPANG_WING1"},
+        files={"file": ("WAREHOUSING_SHIPPING-ko-x.xlsx",
+                        _build_xlsx([("입출고비", "입출고비", _WH_ROWS)]),
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        headers={"X-Ingest-Token": _TOKEN},
+    )
+    assert r.status_code == 200, r.text
+    assert seen.get("on_event_loop") is False, (
+        "동기 ingest가 이벤트 루프에서 실행됨 — run_in_threadpool 오프로드가 빠졌다."
+        " 단일 워커(prod)에서 업로드 내내 모든 API가 멈춘다."
+    )
 
 
 def test_rg_settlement_upload_corrupt_file_returns_422(client):
