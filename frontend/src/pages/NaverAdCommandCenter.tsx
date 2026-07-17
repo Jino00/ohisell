@@ -126,13 +126,16 @@ export default function NaverAdCommandCenter() {
         <CampaignRoster />
       </Card>
 
-      {/* ③ 성적표 두 겹 — 중복 아니라 상보 */}
+      {/* ③ 성적표 두 겹 — 중복 아니라 상보 + 외부 변경 감지(D-NAO-50) */}
       <div className="grid grid-cols-2 gap-4">
         <Card title="우리 조언이 맞았나 (방향 정밀도)">
           <RetroScorecardPane />
         </Card>
         <Card title="우리가 한 일의 결과 (인과)">
           <ChangeLogPane />
+        </Card>
+        <Card title="외부(MOP/사람)가 바꾼 것 감지">
+          <ExternalChangesPane />
         </Card>
       </div>
 
@@ -396,7 +399,7 @@ function describeChange(row: NaverChangeLogRow): string {
 function ChangeLogPane() {
   // ★이 패널은 "우리가 한 일의 결과"(인과)다 — 외부가 바꾼 걸 감지한 행이 섞이면
   //   남의 조작을 우리 성과로 보여주게 된다(codex[P2] 2026-07-17). 외부 변경은
-  //   별도 관심사(3열 대조의 MOP 열·이상 피드)라 여기 섞지 않는다.
+  //   별도 관심사라 여기 섞지 않는다 — 그 피드는 ExternalChangesPane(바로 아래)이 그린다.
   const { data, error } = useAsyncData(() => fetchNaverChangeLog({ days: 30, limit: 10, actor: "ours" }), []);
   if (error) return <EmptyState reason={`불러오지 못했습니다: ${error}`} hint="새로고침하거나 백엔드 상태를 확인하세요." />;
   if (data === null) return <Loading rows={3} />;
@@ -419,6 +422,36 @@ function ChangeLogPane() {
           <Td>
             <span className="text-xs tabular-nums">{describeChange(r)}</span>
           </Td>
+          <Td><span className="text-xs text-gray-600">{r.rationale ?? NO_DATA}</span></Td>
+        </tr>
+      ))}
+    </Table>
+  );
+}
+
+function ExternalChangesPane() {
+  // D-NAO-50: actor=external의 **첫 화면 소비자**. 이 패널이 없으면 키워드·입찰가·상태
+  // diff 밸브가 DB에만 쌓이고 어디서도 안 보인다 — 정확히 "수집은 풍부한데 화면엔 없음"
+  // (스펙 §1-4)의 재발이다. ChangeLogPane과 구조는 같지만 관심사가 반대다:
+  // 그쪽=우리가 한 일(인과), 이쪽=외부(MOP/사람)가 바꾼 걸 우리가 관측한 것(감지).
+  const { data, error } = useAsyncData(() => fetchNaverChangeLog({ days: 30, limit: 10, actor: "external" }), []);
+  if (error) return <EmptyState reason={`불러오지 못했습니다: ${error}`} hint="새로고침하거나 백엔드 상태를 확인하세요." />;
+  if (data === null) return <Loading rows={3} />;
+  if (data.rows.length === 0) {
+    return (
+      <EmptyState
+        reason="최근 30일 감지된 외부 변경이 없습니다."
+        hint="입찰가·상태·키워드 diff는 매일 07:35 entity_sync에서 잡힙니다."
+      />
+    );
+  }
+  return (
+    <Table head={<><Th>시각</Th><Th>대상</Th><Th>변경</Th><Th>근거</Th></>}>
+      {data.rows.map((r) => (
+        <tr key={r.id}>
+          <Td><span className="text-xs text-gray-500">{r.changed_at?.slice(5, 16) ?? NO_DATA}</span></Td>
+          <Td><span className="text-xs">{r.entity_type} {r.entity_id}</span></Td>
+          <Td><span className="text-xs tabular-nums">{describeChange(r)}</span></Td>
           <Td><span className="text-xs text-gray-600">{r.rationale ?? NO_DATA}</span></Td>
         </tr>
       ))}
