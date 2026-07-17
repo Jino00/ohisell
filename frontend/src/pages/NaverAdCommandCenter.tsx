@@ -345,6 +345,17 @@ function RetroRollup({ data }: { data: NaverRetroScorecard }) {
  *  MOP의 최대 공백이자 우리가 이길 자리**(ref24)라 절반을 비워두면 자기모순이다.
  *  실측 근거: update_bid→get_keyword()의 bidAmt / update_budget→campaign의 dailyBudget /
  *  set_user_lock→userLock / add_negative_keyword→{after, created_ids}(harness:466 래핑). */
+/** D-NAO-50 __bulk__ 요약행 전용 — entity_sync._emit_inventory_side가 200건 초과 시 남기는
+ *  {"bulk": true, "count": N, "sample": [이름 최대 20개]} 모양을 그린다(keyword/bidAmt 없음). */
+function describeBulkKeywordChange(payload: Record<string, unknown> | null, verb: string): string {
+  const count = typeof payload?.count === "number" ? num(payload.count) : NO_DATA;
+  const sample = Array.isArray(payload?.sample)
+    ? payload.sample.filter((s): s is string => typeof s === "string")
+    : [];
+  const preview = sample.length > 0 ? ` (예: ${sample.slice(0, 3).join(", ")} …)` : "";
+  return `키워드 대량 ${verb} ${count}건${preview}`;
+}
+
 function describeChange(row: NaverChangeLogRow): string {
   const b = row.before as Record<string, unknown> | null;
   const a = row.after as Record<string, unknown> | null;
@@ -361,6 +372,20 @@ function describeChange(row: NaverChangeLogRow): string {
     case "add_negative_keyword": {
       const created = Array.isArray(a?.created_ids) ? a.created_ids.length : null;
       return created == null ? "제외 키워드 추가" : `제외 키워드 ${num(created)}개 추가`;
+    }
+    // D-NAO-50 키워드 밸브: added는 after_value, removed는 before_value에 실린다(entity_sync.py
+    // _emit_inventory_side). ★대량(__bulk__)은 payload 모양이 다르다({bulk,count,sample} —
+    // keyword/bidAmt 없음) — entity_id로 먼저 분기해 일반 케이스와 섞이지 않게 한다.
+    case "external_keyword_added": {
+      if (row.entity_id === "__bulk__") return describeBulkKeywordChange(a, "등록");
+      const kw = typeof a?.keyword === "string" ? a.keyword : NO_DATA;
+      const bid = typeof a?.bidAmt === "number" ? ` (입찰가 ${won(a.bidAmt)})` : "";
+      return `키워드 등록 감지: "${kw}"${bid}`;
+    }
+    case "external_keyword_removed": {
+      if (row.entity_id === "__bulk__") return describeBulkKeywordChange(b, "소실");
+      const kw = typeof b?.keyword === "string" ? b.keyword : NO_DATA;
+      return `키워드 삭제·소실 감지: "${kw}"`;
     }
     default:
       // 알 수 없는 액션은 지어내지 않는다 — action 원문을 그대로 보여준다.
