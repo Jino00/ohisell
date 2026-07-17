@@ -1,8 +1,9 @@
 # auto_operator.py — auto_operator Harness (D-NAO-49, docs/PLAN_naver-ad-auto-operator.md)
-# 역할: D-NAO-48 04 자동운영 4조건 정책을 서버로 이관 — 일 레인(run_daily_lane, 08:50 크론).
-#   시간당 밴드 관제 레인(run_hourly_lane)은 다음 커밋(A2+A3)에서 이 파일에 추가된다.
+# 역할: D-NAO-48 04 자동운영 4조건 정책을 서버로 이관(일 레인, run_daily_lane — 08:50 크론)
+#   + 시간당 밴드 관제 실입찰(시간당 레인, run_hourly_lane — 매시 :20 크론). 둘 다
 #   auto_operate=True 캠페인(현재 04 하나)만 대상. 로컬 08:55 루틴은 보고·감사 전용으로
-#   강등(§0). 예산 변경 불가침(D-NAO-42 Jino 게이트), 03(MOP) 등 타 캠페인 개입 금지.
+#   강등(§0). 예산 변경 불가침(D-NAO-42 Jino 게이트), 03(MOP) 등 타 캠페인 개입 금지, 시간당
+#   레인은 순위·CPC·페이싱만 판단(ROAS/BEP 신규 판단 금지 — 가드레일의 기존 BEP 차단만).
 #   쓰기는 반드시 naver_execution_harness.execute() 경유(초크포인트 유지, 원칙18-6 —
 #   guardrail_gate·naver_sa_writer 직접 쓰기 호출 금지, 이 harness는 SA를 조합만 한다).
 from __future__ import annotations
@@ -10,7 +11,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import date, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING
 
 from sqlalchemy import func as sqlfunc
 from sqlalchemy.orm import Session
@@ -19,12 +20,16 @@ from app.models import (
     NaverAdDaily,
     NaverCampaignSettings,
     NaverChangeLog,
+    NaverEntity,
+    NaverHourlySnapshot,
     NaverProposal,
     NaverRetroSignal,
 )
-from app.services.naver_ad import campaign_target_resolver, diagnosis, naver_execution_harness, naver_sa_writer
+from app.services.naver_ad import campaign_target_resolver, diagnosis, hourly_pattern, naver_execution_harness, naver_sa_writer
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.services.naver_ad.guardrail_gate import _MAX_CHANGE_PCT
+from app.services.naver_ad.trigger_watch import CPC_SPIKE_RATIO
+from app.services.naver_sa_ad_fetcher import fetch_entity_hh24
 from app.utils.kst import kst_now
 
 log = logging.getLogger(__name__)
@@ -39,6 +44,12 @@ _SETTLEMENT_WINDOW_END_DAYS = 2
 
 _DAILY_LANE_PROPOSAL_TYPES = ("bid_up", "bid_down", "pause")  # PLAN §3 명시 목록(growth_bid_up 등 제외)
 _MIN_CLICK_FOR_APPROVAL = 10  # D-NAO-48 조건②(rationale 창 클릭) / §4-1 핫셋 클릭 게이트 공유
+_MIN_HOURLY_SAMPLE_IMP = 30  # §4-2 "imp 합 < 30이면 그 시간대 묶음은 판단 보류"
+_HOURLY_RANK_DOWN_THRESHOLD = Decimal("2.5")  # §4-3 DOWN: 가중 avg_rank < 2.5
+_HOURLY_RANK_UP_THRESHOLD = Decimal("4.0")  # §4-3 UP: 가중 avg_rank > 4.0
+_HOURLY_RECENT_HOURS = 3  # §4-2 "최근 3개 완료 시간대"
+_HOURLY_SPEND_BREAKER_MULTIPLE = 3  # §4-6 "직전 7일 일평균 ×3"
+_HOURLY_BASELINE_DAYS = 7  # 소진 서킷브레이커 직전 7일
 
 # rationale에 이미 병기된 "clk=N" 추출 정규식 — proposal_writer._bid_proposal/_growth_proposal이
 # 공유하는 포맷("... clk={n} ..." 또는 "... clk={n} (저클릭 표본) ...", 둘 다 뒤에 숫자 아닌
@@ -299,5 +310,286 @@ def run_daily_lane(db: Session, *, now: datetime | None = None) -> dict:
         except Exception as e:  # noqa: BLE001 — harness가 change_log/상태를 이미 확정(failed 등)
             result["failed"] += 1
             log.warning("auto_operator: 일 레인 실행 실패 proposal_id=%s: %s", p.id, e)
+
+    return result
+
+
+# ══════════════════════════ 시간당 레인(A2+A3) ══════════════════════════
+
+
+def _auto_operate_campaigns(db: Session) -> list[str]:
+    rows = db.query(NaverCampaignSettings.campaign_id).filter(
+        NaverCampaignSettings.auto_operate.is_(True)
+    ).order_by(NaverCampaignSettings.campaign_id.asc()).all()
+    return [r[0] for r in rows]
+
+
+def _check_spend_circuit_breaker(db: Session, campaign_id: str, today: date) -> str | None:
+    """§4-6 정지 조건(레인 자체 fail-closed): 당일 캠페인 소진 > 직전 7일 일평균 ×3 →
+    그 캠페인의 시간당 레인 전체 hold. 직전 7일 데이터가 없으면(신규 캠페인 등) 비교 기준
+    자체가 없어 브레이커는 미발동(fail-open) — 근거 없이 레인 전체를 막지 않는다(개별
+    안전장치는 guardrail_gate가 여전히 담당하므로 이 브레이커가 유일한 방어선이 아니다)."""
+    latest = (
+        db.query(NaverHourlySnapshot)
+        .filter(NaverHourlySnapshot.campaign_id == campaign_id, NaverHourlySnapshot.ad_date == today)
+        .order_by(NaverHourlySnapshot.snapshot_hour.desc())
+        .first()
+    )
+    if latest is None:
+        return None
+    today_cost = latest.cost
+
+    window_from = today - timedelta(days=_HOURLY_BASELINE_DAYS)
+    window_to = today - timedelta(days=1)
+    (prior_total,) = db.query(
+        sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.cost), 0)
+    ).filter(
+        NaverAdDaily.campaign_id == campaign_id,
+        NaverAdDaily.ad_date >= window_from, NaverAdDaily.ad_date <= window_to,
+        NaverAdDaily.adgroup_id != BACKFILL_SENTINEL_ADGROUP,
+    ).one()
+    prior_avg = int(prior_total) / _HOURLY_BASELINE_DAYS
+    if prior_avg <= 0:
+        return None
+    if today_cost > prior_avg * _HOURLY_SPEND_BREAKER_MULTIPLE:
+        return (
+            f"소진 서킷브레이커 — 당일 {today_cost}원 > 직전{_HOURLY_BASELINE_DAYS}일평균"
+            f"×{_HOURLY_SPEND_BREAKER_MULTIPLE}({prior_avg:.0f}원×{_HOURLY_SPEND_BREAKER_MULTIPLE})"
+        )
+    return None
+
+
+def _hot_set_candidates(
+    db: Session, campaign_id: str, window_from: date, window_to: date,
+) -> list[tuple[str, str]]:
+    """§4-1 핫셋 선정: auto_operate 캠페인의 keyword/adgroup 엔티티(status='on') 중
+    정착창 클릭 ≥10. 반환: [(target_type, target_id), ...] target_id 오름차순(결정적)."""
+    entities = (
+        db.query(NaverEntity)
+        .filter(
+            NaverEntity.campaign_id == campaign_id,
+            NaverEntity.entity_type.in_(["keyword", "adgroup"]),
+            NaverEntity.status == "on",
+        )
+        .order_by(NaverEntity.entity_id.asc())
+        .all()
+    )
+    out: list[tuple[str, str]] = []
+    for e in entities:
+        agg = _settlement_agg(db, e.entity_type, e.entity_id, window_from, window_to)
+        if agg["clk"] >= _MIN_CLICK_FOR_APPROVAL:
+            out.append((e.entity_type, e.entity_id))
+    return out
+
+
+def _weighted_recent(curve: list[dict]) -> dict:
+    """최근 _HOURLY_RECENT_HOURS(3)개 완료 시간대의 imp-가중 avg_rank + imp 합계."""
+    recent = sorted(curve, key=lambda h: h["hour"])[-_HOURLY_RECENT_HOURS:]
+    imp_sum = sum(h["imp"] for h in recent)
+    rank_imp_sum = sum(h["imp"] for h in recent if h.get("avg_rank") is not None)
+    weighted_rank = None
+    if rank_imp_sum > 0:
+        weighted_rank = sum(
+            Decimal(str(h["avg_rank"])) * h["imp"] for h in recent if h.get("avg_rank") is not None
+        ) / Decimal(rank_imp_sum)
+    return {"imp_sum": imp_sum, "weighted_rank": weighted_rank}
+
+
+def _today_group_cpc(curve: list[dict]) -> Decimal | None:
+    clk = sum(h["clk"] for h in curve)
+    cost = sum(h["cost"] for h in curve)
+    if clk <= 0:
+        return None
+    return Decimal(cost) / Decimal(clk)
+
+
+def _is_pacing_slow(
+    db: Session, target_type: str, target_id: str, curve: list[dict], now: datetime,
+) -> tuple[bool, str]:
+    """§4-3 UP 조건의 "당일 소진 페이싱 저속" — hourly_pattern.expected_cost_fraction
+    (요일×시간 168칸 실측 곡선) 사용 가능하면 그것, 없으면 선형 기대(경과분/24h)로 폴백
+    (§4-2 명시 규칙). 실제 페이스 = 오늘 누적 그룹 비용 ÷ 정착창 일평균 그룹 비용(둘 다
+    "정상적인 하루 전체 대비 비율" 단위로 맞춘 것 — expected_cost_fraction과 동일 척도).
+    실제<기대면 저속(스펙에 배수 미명시 — 단순 비교, 추정 금지 원칙상 임의 배수 도입 안 함)."""
+    window_from, window_to = _settlement_window(now.date())
+    agg = _settlement_agg(db, target_type, target_id, window_from, window_to)
+    avg_daily_cost = agg["cost"] / _HOURLY_BASELINE_DAYS if agg["cost"] > 0 else 0.0
+    if avg_daily_cost <= 0:
+        return False, "정착창 소진 기준 없음(페이싱 판단 불가 — 저속 아님으로 처리)"
+
+    today_cost = sum(h["cost"] for h in curve)
+    actual_pace = today_cost / avg_daily_cost
+
+    expected = hourly_pattern.expected_cost_fraction(db, weekday=now.weekday(), hour=now.hour)
+    if expected is None:
+        expected = Decimal(now.hour * 60 + now.minute) / Decimal(24 * 60)
+        basis = "선형기대"
+    else:
+        basis = "hourly_pattern"
+    expected_f = float(expected)
+
+    if actual_pace < expected_f:
+        return True, f"페이싱저속(실제소진비{actual_pace:.2f}<기대{expected_f:.2f}, {basis})"
+    return False, f"페이싱정상(실제{actual_pace:.2f}>=기대{expected_f:.2f}, {basis})"
+
+
+def _judge_hourly(
+    db: Session, *, target_type: str, target_id: str, campaign_id: str, curve: list[dict], now: datetime,
+) -> dict:
+    """§4-3 시간당 판정(우선순위 순, 하나만) — {"direction": "up"/"down"/"hold", "reason": str}.
+
+    ROAS/BEP는 여기서 신규 판단하지 않는다(정착창 재사용은 조건 재확인일 뿐, 시간당
+    ROAS 산출은 없음 — §4 "시간당 판단은 순위·CPC·페이싱만" 원칙 준수)."""
+    summary = _weighted_recent(curve)
+    if summary["imp_sum"] < _MIN_HOURLY_SAMPLE_IMP:
+        return {
+            "direction": "hold",
+            "reason": f"최근{_HOURLY_RECENT_HOURS}시간대 imp={summary['imp_sum']}<{_MIN_HOURLY_SAMPLE_IMP}(표본 부족)",
+        }
+
+    weighted_rank = summary["weighted_rank"]
+
+    # DOWN 우선 ①: 과열밴드(순위 과도하게 높음 — 낮은 숫자일수록 상위노출)
+    if weighted_rank is not None and weighted_rank < _HOURLY_RANK_DOWN_THRESHOLD:
+        return {
+            "direction": "down",
+            "reason": f"가중avg_rank={float(weighted_rank):.2f}<{_HOURLY_RANK_DOWN_THRESHOLD}(과열밴드)",
+        }
+
+    # DOWN 우선 ②: CPC 급등(trigger_watch.CPC_SPIKE_RATIO 재사용 — 단일소스, PLAN §4 원문의
+    # "×1.5" 표기와 실제 상수(×2)가 불일치해 실코드 상수를 채택함, 최종보고에 명시)
+    window_from, window_to = _settlement_window(now.date())
+    baseline_agg = _settlement_agg(db, target_type, target_id, window_from, window_to)
+    baseline_cpc = (
+        Decimal(baseline_agg["cost"]) / Decimal(baseline_agg["clk"]) if baseline_agg["clk"] > 0 else None
+    )
+    today_cpc = _today_group_cpc(curve)
+    if baseline_cpc is not None and baseline_cpc > 0 and today_cpc is not None:
+        if today_cpc > baseline_cpc * CPC_SPIKE_RATIO:
+            return {
+                "direction": "down",
+                "reason": (
+                    f"CPC급등 — 당일={float(today_cpc):.1f}원 > 정착창기준={float(baseline_cpc):.1f}원"
+                    f"×{CPC_SPIKE_RATIO}"
+                ),
+            }
+
+    # UP: 3조건 동시 충족 시만(밴드하단이탈 AND 정착ROAS충족 AND 페이싱저속)
+    if weighted_rank is not None and weighted_rank > _HOURLY_RANK_UP_THRESHOLD:
+        roas_ok, roas_reason = _settlement_roas_ok(db, target_type, target_id, campaign_id, now.date())
+        if roas_ok:
+            pacing_slow, pacing_reason = _is_pacing_slow(db, target_type, target_id, curve, now)
+            if pacing_slow:
+                return {
+                    "direction": "up",
+                    "reason": (
+                        f"가중avg_rank={float(weighted_rank):.2f}>{_HOURLY_RANK_UP_THRESHOLD}"
+                        f"(밴드하단이탈), {roas_reason}, {pacing_reason}"
+                    ),
+                }
+
+    return {"direction": "hold", "reason": "판정 조건 미충족(기본 hold)"}
+
+
+def _clamp_step(current_bid: int, direction: str) -> int | None:
+    """§4-4 스텝 = 현재가×(1±0.15) 클램프 + 10원 반올림 — proposal_writer._bid_proposal의
+    스텝 클램프 반올림 규약과 동일(up=10원 내림, down=10원 올림, 절대하한 70원, 상한
+    100,000원) — _MAX_CHANGE_PCT 단일소스(guardrail_gate) import."""
+    if direction == "up":
+        raw = Decimal(current_bid) * (Decimal(1) + _MAX_CHANGE_PCT)
+        stepped = int(raw // 10) * 10
+        stepped = min(stepped, 100_000)
+        return stepped if stepped > current_bid else None
+    if direction == "down":
+        raw = Decimal(current_bid) * (Decimal(1) - _MAX_CHANGE_PCT)
+        stepped = int((raw / 10).to_integral_value(rounding=ROUND_CEILING)) * 10
+        stepped = max(stepped, 70)
+        return stepped if stepped < current_bid else None
+    return None
+
+
+def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=None) -> dict:
+    """시간당 밴드 관제 실입찰(PLAN §4). 매시 :20 크론(catch-up 제외 — 시간성 소멸).
+
+    ①캠페인별 소진 서킷브레이커(§4-6) → 걸리면 그 캠페인 전체 hold ②핫셋 선정(§4-1)
+    ③유닛별 intraday hh24 곡선 조회(§4-2, 실패 시 skip) ④판정(§4-3, 순위·CPC·페이싱만 —
+    ROAS 신규 판단 없음) ⑤스텝 제안 생성+즉시 승인(approval_source='auto_operator_hourly')
+    +naver_execution_harness.execute() 경유 실행(가드레일 전량 통과 필요 — 쿨다운·일일상한·
+    BEP·스톱로스가 최종 방어선).
+
+    fetch_intraday 미주입 시 fetch_entity_hh24(테스트 주입, 원칙18-8 — keyword_hourly_sweep과
+    동일 관례). stat_date=오늘(now.date())로 호출하면 timeRange since=until=오늘이 되어
+    이미 당일 조회가 가능하다 — datePreset="today" 하위호환 확장은 불필요로 판단(최종보고 명시).
+
+    반환: {"reviewed", "approved", "executed", "held": [...], "skipped", "failed"}.
+    """
+    now = now or kst_now()
+    fetch_intraday = fetch_intraday or fetch_entity_hh24
+    today = now.date()
+    window_from, window_to = _settlement_window(today)
+
+    result: dict = {
+        "reviewed": 0, "approved": 0, "executed": 0, "held": [], "skipped": 0, "failed": 0,
+    }
+
+    for campaign_id in _auto_operate_campaigns(db):
+        breaker_reason = _check_spend_circuit_breaker(db, campaign_id, today)
+        if breaker_reason:
+            result["held"].append({"campaign_id": campaign_id, "reason": breaker_reason})
+            continue
+
+        for target_type, target_id in _hot_set_candidates(db, campaign_id, window_from, window_to):
+            result["reviewed"] += 1
+
+            try:
+                curve = fetch_intraday(target_id, today)
+            except Exception as e:  # noqa: BLE001 — §4-6 "intraday 조회 실패 → 해당 그룹 skip"
+                result["skipped"] += 1
+                log.warning("auto_operator: 시간당 레인 intraday 조회 실패 target=%s: %s", target_id, e)
+                continue
+
+            if not curve or sum(h["imp"] for h in curve) == 0:
+                result["held"].append({"target_id": target_id, "reason": "당일 imp 없음"})
+                continue
+
+            verdict = _judge_hourly(
+                db, target_type=target_type, target_id=target_id, campaign_id=campaign_id,
+                curve=curve, now=now,
+            )
+            if verdict["direction"] == "hold":
+                result["held"].append({"target_id": target_id, "reason": verdict["reason"]})
+                continue
+
+            current_bid = _live_current_bid(target_type, target_id)
+            if current_bid is None:
+                result["held"].append({"target_id": target_id, "reason": "라이브 현재가 재조회 실패"})
+                continue
+            step_bid = _clamp_step(current_bid, verdict["direction"])
+            if step_bid is None:
+                result["held"].append({"target_id": target_id, "reason": "스텝 클램프 계산 불가(방향 무의미)"})
+                continue
+
+            proposal_type = "bid_up" if verdict["direction"] == "up" else "bid_down"
+            proposal = NaverProposal(
+                proposal_type=proposal_type, target_type=target_type, target_id=target_id,
+                campaign_id=campaign_id,
+                rationale=f"[시간당밴드] {verdict['reason']}",
+                expected_effect="시간당 밴드 관제 — 순위·CPC·페이싱 기반 스텝 조정(ROAS 신규 판단 없음).",
+                status="pending", target_bid=step_bid,
+            )
+            db.add(proposal)
+            db.flush()
+
+            proposal.status = "approved"
+            proposal.approval_source = "auto_operator_hourly"
+            db.commit()
+            result["approved"] += 1
+
+            try:
+                naver_execution_harness.execute(db, proposal.id, dry_run=False, now=now)
+                result["executed"] += 1
+            except Exception as e:  # noqa: BLE001 — harness가 change_log/상태를 이미 확정(failed 등)
+                result["failed"] += 1
+                log.warning("auto_operator: 시간당 레인 실행 실패 proposal_id=%s: %s", proposal.id, e)
 
     return result

@@ -69,8 +69,8 @@ naver_auto_operator (Harness, 신규 backend/app/services/naver_ad/auto_operator
 
 - [x] A0: 마이그레이션(auto_operate) + 모델
 - [x] A1: 일 레인(4조건 심사·집행) TDD
-- [ ] A2: 시간당 레인(핫셋·intraday·판정·실행) TDD
-- [ ] A3: 크론 2개+catch-up 배선
+- [x] A2: 시간당 레인(핫셋·intraday·판정·실행) TDD
+- [x] A3: 크론 2개+catch-up 배선
 - [ ] codex review PASS
 - [ ] 라이브 합격(§8)
 - [ ] 로컬 루틴 강등 + PR + 문서

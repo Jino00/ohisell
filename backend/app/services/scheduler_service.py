@@ -470,6 +470,52 @@ def sweep_naver_keyword_hourly_job():
         db.close()
 
 
+def run_naver_auto_operator_daily_job():
+    """auto_operator 일 레인 — D-NAO-48 4조건 심사·집행 서버 코드화 (08:50 KST,
+    run_naver_retro_scoring 08:30 이후 — 조건④ bleeding 판정이 그 결과를 쓴다, D-NAO-49).
+
+    auto_operate=True 캠페인의 당일 pending bid_up/bid_down/pause를 심사해 승인 시
+    naver_execution_harness.execute(dry_run=False)로 즉시 집행한다."""
+    db = _get_own_db_session()
+    try:
+        from app.services.naver_ad.auto_operator import run_daily_lane
+
+        result = run_daily_lane(db)
+        log.info(
+            "[스케줄러] naver auto_operator daily: reviewed=%s approved=%s executed=%s held=%s failed=%s",
+            result["reviewed"], result["approved"], result["executed"],
+            len(result["held"]), result["failed"],
+        )
+    except Exception as e:
+        log.exception("[스케줄러] run_naver_auto_operator_daily_job 에러: %s", e)
+        raise
+    finally:
+        db.close()
+
+
+def run_naver_auto_operator_hourly_job():
+    """auto_operator 시간당 레인 — 핫셋 intraday 밴드 관제 실입찰 (매시 :20 KST, D-NAO-49).
+
+    catch-up 제외(시간성 소멸 — 다음 정시가 곧 재기회, PLAN §5). auto_operate=True 캠페인의
+    핫셋(클릭≥10 그룹)만, 순위·CPC·페이싱 기반 스텝 제안을 생성 즉시 심사·집행한다."""
+    db = _get_own_db_session()
+    try:
+        from app.services.naver_ad.auto_operator import run_hourly_lane
+
+        result = run_hourly_lane(db)
+        log.info(
+            "[스케줄러] naver auto_operator hourly: reviewed=%s approved=%s executed=%s "
+            "held=%s skipped=%s failed=%s",
+            result["reviewed"], result["approved"], result["executed"],
+            len(result["held"]), result["skipped"], result["failed"],
+        )
+    except Exception as e:
+        log.exception("[스케줄러] run_naver_auto_operator_hourly_job 에러: %s", e)
+        raise
+    finally:
+        db.close()
+
+
 def sync_meta_ad_costs_job():
     """Meta 광고비 어제치 자동 적재 (07:00 KST)"""
     db = _get_own_db_session()
@@ -942,7 +988,9 @@ def _ensure_default_states(db):
         ("generate_expert_desk", "5 8 * * *"),  # 전문가(Ava) 검토 데스크(E1a, PLAN §8)
         ("run_naver_learning_loops", "10 8 * * *"),  # 학습루프 4종(성적표·예측편향·전환성숙·시간대분포, 트랙 P6)
         ("run_naver_retro_scoring", "30 8 * * *"),  # 상설 소급 채점(진단 보드 as-of 리플레이 + 페이싱 경보, D-NAO-45)
+        ("run_naver_auto_operator_daily", "50 8 * * *"),  # D-NAO-48 4조건 심사·집행 서버화(D-NAO-49)
         ("sweep_naver_keyword_hourly", "10 9 * * *"),  # 키워드/쇼핑그룹 시간별(hh24) 축적, D-1 스윕(D-NAO-46②)
+        ("run_naver_auto_operator_hourly", "20 * * * *"),  # 시간당 밴드 관제 실입찰(catch-up 제외, D-NAO-49)
         ("run_naver_flight_loop", "15 */2 * * *"),  # 당일 플라이트 루프 2시간 주기(X2, dry_run=True)
         ("sync_naver_settlement", "25 5 * * *"),
         ("sync_naver_case_settlement", "30 5 * * *"),
@@ -988,6 +1036,7 @@ _CATCHUP_ORDER: tuple[str, ...] = (
     "generate_expert_desk",        # 08:05 (proposals 성공 후라야 pending>0 → 의미 있음)
     "run_naver_learning_loops",    # 08:10
     "run_naver_retro_scoring",     # 08:30 (D-NAO-45, 비정형 아닌 표준 cron이라 catch-up 포함)
+    "run_naver_auto_operator_daily",  # 08:50 (D-NAO-49, 조건④ bleeding 판정이 retro_scoring 결과를 쓴다 — 그 뒤)
     "sweep_naver_keyword_hourly",  # 09:10 (D-NAO-46②, 독립 잡이나 표준 cron catch-up 포함)
 )
 _CATCHUP_LOOKBACK = timedelta(hours=12)  # 오늘 예정 발화가 이보다 오래됐으면 스킵(다음 정상 발화에 위임)
@@ -1101,6 +1150,7 @@ def _catch_up_morning_batch():
         "generate_expert_desk": generate_expert_desk_job,
         "run_naver_learning_loops": run_naver_learning_loops_job,
         "run_naver_retro_scoring": run_naver_retro_scoring_job,
+        "run_naver_auto_operator_daily": run_naver_auto_operator_daily_job,
         "sweep_naver_keyword_hourly": sweep_naver_keyword_hourly_job,
     }
     log.warning("[스케줄러] 아침배치 catch-up 대상(cron순 순차): %s", missed)
@@ -1166,6 +1216,10 @@ def start_scheduler():
                 job_func = run_naver_retro_scoring_job
             elif state.job_name == "sweep_naver_keyword_hourly":
                 job_func = sweep_naver_keyword_hourly_job
+            elif state.job_name == "run_naver_auto_operator_daily":
+                job_func = run_naver_auto_operator_daily_job
+            elif state.job_name == "run_naver_auto_operator_hourly":
+                job_func = run_naver_auto_operator_hourly_job
             elif state.job_name == "generate_expert_desk":
                 job_func = generate_expert_desk_job
             elif state.job_name == "run_naver_flight_loop":
