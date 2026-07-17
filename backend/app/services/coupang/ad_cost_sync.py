@@ -68,6 +68,22 @@ def save_cookie(db: Session, curl_or_cookie: str) -> dict:
     return {"account": _ADS_ACCOUNT, "saved": True, "cookie_len": len(cookie)}
 
 
+def _refresh_cron_enabled(db: Session) -> bool | None:
+    """갱신 크론(request_ad_cost_refresh) on/off. 행 없으면 None(판정 불가).
+
+    ★크론이 꺼져 있으면 쿠키가 멀쩡해도 갱신 요청이 안 나가 push가 끊긴다(13일 정지의 실제
+    원인) — 쿠키 red로 오진단하지 않도록 배너가 이 값을 우선 본다. 순환 import 회피 위해 지연 import.
+    """
+    from app.models import SchedulerState
+
+    row = (
+        db.query(SchedulerState)
+        .filter(SchedulerState.job_name == "request_ad_cost_refresh")
+        .first()
+    )
+    return None if row is None else bool(row.is_enabled)
+
+
 def cookie_status(db: Session) -> dict:
     """쿠키 설정·상태 요약 (민감값 미포함).
 
@@ -75,11 +91,12 @@ def cookie_status(db: Session) -> dict:
     ingest로 push. last_success_at = 마지막 push 시각. stale=push가 _STALE_HOURS 초과로
     끊김(페처 다운) → 전역 배너. age_hours/stale은 배너 트리거에 사용.
     """
+    cron_enabled = _refresh_cron_enabled(db)
     row = _cookie_row(db)
     if row is None:
         return {"account": _ADS_ACCOUNT, "configured": False, "status": "none",
                 "last_saved_at": None, "last_success_at": None, "last_error": None,
-                "age_hours": None, "stale": False}
+                "age_hours": None, "stale": False, "refresh_cron_enabled": cron_enabled}
     age_hours = None
     stale = False
     if row.last_success_at:
@@ -95,6 +112,7 @@ def cookie_status(db: Session) -> dict:
         "last_error": row.last_error,
         "age_hours": age_hours,
         "stale": stale,
+        "refresh_cron_enabled": cron_enabled,
     }
 
 

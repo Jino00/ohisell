@@ -33,6 +33,12 @@ scheduler = BackgroundScheduler(
     job_defaults={"misfire_grace_time": 3600, "coalesce": True},
 )
 
+# codex 9R[P2](D-NAO-49): auto_operator 시간당 레인 전용 misfire 유예 — 전역 3600s를 상속하면
+# 스케줄러 지연/스톨 시 놓친 :20 실행이 최대 1시간 늦게 발화해 의도한 케이던스 밖 실입찰이
+# 나간다(이 레인의 문서화된 정책 = catch-up 제외, 놓친 회차는 폐기·다음 정시가 재기회).
+# 5분(:20 잡이 :25 내에 못 돌면 폐기)만 허용. 일 레인(08:50)은 전역 기본+catch-up 정책 유지.
+_AUTO_OPERATOR_HOURLY_MISFIRE_GRACE = 300
+
 
 def _get_own_db_session():
     """FastAPI Depends 없이 직접 DB 세션 생성"""
@@ -465,6 +471,52 @@ def sweep_naver_keyword_hourly_job():
         log.info("[스케줄러] naver keyword_hourly sweep: %s", result)
     except Exception as e:
         log.exception("[스케줄러] sweep_naver_keyword_hourly_job 에러: %s", e)
+        raise
+    finally:
+        db.close()
+
+
+def run_naver_auto_operator_daily_job():
+    """auto_operator 일 레인 — D-NAO-48 4조건 심사·집행 서버 코드화 (08:50 KST,
+    run_naver_retro_scoring 08:30 이후 — 조건④ bleeding 판정이 그 결과를 쓴다, D-NAO-49).
+
+    auto_operate=True 캠페인의 당일 pending bid_up/bid_down/pause를 심사해 승인 시
+    naver_execution_harness.execute(dry_run=False)로 즉시 집행한다."""
+    db = _get_own_db_session()
+    try:
+        from app.services.naver_ad.auto_operator import run_daily_lane
+
+        result = run_daily_lane(db)
+        log.info(
+            "[스케줄러] naver auto_operator daily: reviewed=%s approved=%s executed=%s held=%s failed=%s",
+            result["reviewed"], result["approved"], result["executed"],
+            len(result["held"]), result["failed"],
+        )
+    except Exception as e:
+        log.exception("[스케줄러] run_naver_auto_operator_daily_job 에러: %s", e)
+        raise
+    finally:
+        db.close()
+
+
+def run_naver_auto_operator_hourly_job():
+    """auto_operator 시간당 레인 — 핫셋 intraday 밴드 관제 실입찰 (매시 :20 KST, D-NAO-49).
+
+    catch-up 제외(시간성 소멸 — 다음 정시가 곧 재기회, PLAN §5). auto_operate=True 캠페인의
+    핫셋(클릭≥10 그룹)만, 순위·CPC·페이싱 기반 스텝 제안을 생성 즉시 심사·집행한다."""
+    db = _get_own_db_session()
+    try:
+        from app.services.naver_ad.auto_operator import run_hourly_lane
+
+        result = run_hourly_lane(db)
+        log.info(
+            "[스케줄러] naver auto_operator hourly: reviewed=%s approved=%s executed=%s "
+            "held=%s skipped=%s failed=%s",
+            result["reviewed"], result["approved"], result["executed"],
+            len(result["held"]), result["skipped"], result["failed"],
+        )
+    except Exception as e:
+        log.exception("[스케줄러] run_naver_auto_operator_hourly_job 에러: %s", e)
         raise
     finally:
         db.close()
@@ -942,7 +994,9 @@ def _ensure_default_states(db):
         ("generate_expert_desk", "5 8 * * *"),  # 전문가(Ava) 검토 데스크(E1a, PLAN §8)
         ("run_naver_learning_loops", "10 8 * * *"),  # 학습루프 4종(성적표·예측편향·전환성숙·시간대분포, 트랙 P6)
         ("run_naver_retro_scoring", "30 8 * * *"),  # 상설 소급 채점(진단 보드 as-of 리플레이 + 페이싱 경보, D-NAO-45)
+        ("run_naver_auto_operator_daily", "50 8 * * *"),  # D-NAO-48 4조건 심사·집행 서버화(D-NAO-49)
         ("sweep_naver_keyword_hourly", "10 9 * * *"),  # 키워드/쇼핑그룹 시간별(hh24) 축적, D-1 스윕(D-NAO-46②)
+        ("run_naver_auto_operator_hourly", "20 * * * *"),  # 시간당 밴드 관제 실입찰(catch-up 제외, D-NAO-49)
         ("run_naver_flight_loop", "15 */2 * * *"),  # 당일 플라이트 루프 2시간 주기(X2, dry_run=True)
         ("sync_naver_settlement", "25 5 * * *"),
         ("sync_naver_case_settlement", "30 5 * * *"),
@@ -988,6 +1042,7 @@ _CATCHUP_ORDER: tuple[str, ...] = (
     "generate_expert_desk",        # 08:05 (proposals 성공 후라야 pending>0 → 의미 있음)
     "run_naver_learning_loops",    # 08:10
     "run_naver_retro_scoring",     # 08:30 (D-NAO-45, 비정형 아닌 표준 cron이라 catch-up 포함)
+    "run_naver_auto_operator_daily",  # 08:50 (D-NAO-49, 조건④ bleeding 판정이 retro_scoring 결과를 쓴다 — 그 뒤)
     "sweep_naver_keyword_hourly",  # 09:10 (D-NAO-46②, 독립 잡이나 표준 cron catch-up 포함)
 )
 _CATCHUP_LOOKBACK = timedelta(hours=12)  # 오늘 예정 발화가 이보다 오래됐으면 스킵(다음 정상 발화에 위임)
@@ -1101,6 +1156,7 @@ def _catch_up_morning_batch():
         "generate_expert_desk": generate_expert_desk_job,
         "run_naver_learning_loops": run_naver_learning_loops_job,
         "run_naver_retro_scoring": run_naver_retro_scoring_job,
+        "run_naver_auto_operator_daily": run_naver_auto_operator_daily_job,
         "sweep_naver_keyword_hourly": sweep_naver_keyword_hourly_job,
     }
     log.warning("[스케줄러] 아침배치 catch-up 대상(cron순 순차): %s", missed)
@@ -1124,6 +1180,62 @@ def _catch_up_morning_batch():
     threading.Thread(target=_run_chain, name="naver-morning-catchup", daemon=True).start()
 
 
+def job_func_for(job_name: str):
+    """job_name → 등록할 잡 함수(단일 진실). 매핑에 없으면 None.
+
+    ★start_scheduler와 toggle 라이브 등록이 같은 매핑을 봐야 한다 — 한쪽만 알면 toggle이
+    재시작 없이 살릴 잡을 못 찾아 DB만 바뀌고 실제 미가동(쿠팡 광고비 13일 정지의 뿌리).
+    """
+    return {
+        "auto_sync_orders": sync_all_channels_job,
+        "auto_profit_calc": recalculate_profit_job,
+        "cafe24_token_refresh": cafe24_proactive_refresh_job,
+        "sync_naver_sa_ad_costs": sync_naver_sa_ad_costs_job,
+        "sync_naver_ad_daily": sync_naver_ad_daily_job,
+        "snapshot_naver_ad_hourly": snapshot_naver_ad_hourly_job,
+        "trigger_watch": trigger_watch_job,
+        "sync_naver_entity": sync_naver_entity_job,
+        "sync_naver_search_term": sync_naver_search_term_job,
+        "sync_naver_keyword_volume": sync_naver_keyword_volume_job,
+        "run_naver_forecast_engine": run_naver_forecast_engine_job,
+        "generate_naver_proposals": generate_naver_proposals_job,
+        "run_naver_learning_loops": run_naver_learning_loops_job,
+        "run_naver_retro_scoring": run_naver_retro_scoring_job,
+        "sweep_naver_keyword_hourly": sweep_naver_keyword_hourly_job,
+        "run_naver_auto_operator_daily": run_naver_auto_operator_daily_job,
+        "run_naver_auto_operator_hourly": run_naver_auto_operator_hourly_job,
+        "generate_expert_desk": generate_expert_desk_job,
+        "run_naver_flight_loop": run_naver_flight_loop_job,
+        "sync_naver_settlement": sync_naver_settlement_job,
+        "sync_naver_case_settlement": sync_naver_case_settlement_job,
+        "sync_meta_ad_costs": sync_meta_ad_costs_job,
+        "sync_coupang_products": sync_coupang_products_job,
+        "sync_coupang_returns": sync_coupang_returns_job,
+        "sync_coupang_settlement": sync_coupang_settlement_job,
+        "sync_coupang_rg_sizes": sync_coupang_rg_sizes_job,
+        "sync_coupang_rg_inventory": sync_coupang_rg_inventory_job,
+        "sync_coupang_rg_orders": sync_coupang_rg_orders_job,
+        "sync_coupang_rg_inbound": sync_coupang_rg_inbound_job,
+        "sync_coupang_rg_settlement": sync_coupang_rg_settlement_job,
+        "auto_download_rg_settlement": auto_download_rg_settlement_job,
+        "sync_coupang_coupons": sync_coupang_coupons_job,
+        "sync_coupang_cs": sync_coupang_cs_job,
+        "sync_coupang_ad_cost": sync_coupang_ad_cost_job,
+        "request_ad_cost_refresh": request_ad_cost_refresh_job,
+    }.get(job_name)
+
+
+def job_kwargs_for(job_name: str) -> dict:
+    """job별 add_job 추가 옵션(단일 진실 — start_scheduler·toggle 라이브 등록 공용).
+
+    hourly 레인만 per-job misfire 5분(codex 9R[P2]: 놓친 :20은 폐기 — catch-up 제외
+    정책과 정합). 그 외 잡은 전역 기본(3600s) 상속.
+    """
+    if job_name == "run_naver_auto_operator_hourly":
+        return {"misfire_grace_time": _AUTO_OPERATOR_HOURLY_MISFIRE_GRACE}
+    return {}
+
+
 def start_scheduler():
     """스케줄러 시작 — 기본 작업 2개 등록"""
     db = _get_own_db_session()
@@ -1135,73 +1247,7 @@ def start_scheduler():
             if not state.is_enabled:
                 continue
 
-            job_func = None
-            if state.job_name == "auto_sync_orders":
-                job_func = sync_all_channels_job
-            elif state.job_name == "auto_profit_calc":
-                job_func = recalculate_profit_job
-            elif state.job_name == "cafe24_token_refresh":
-                job_func = cafe24_proactive_refresh_job
-            elif state.job_name == "sync_naver_sa_ad_costs":
-                job_func = sync_naver_sa_ad_costs_job
-            elif state.job_name == "sync_naver_ad_daily":
-                job_func = sync_naver_ad_daily_job
-            elif state.job_name == "snapshot_naver_ad_hourly":
-                job_func = snapshot_naver_ad_hourly_job
-            elif state.job_name == "trigger_watch":
-                job_func = trigger_watch_job
-            elif state.job_name == "sync_naver_entity":
-                job_func = sync_naver_entity_job
-            elif state.job_name == "sync_naver_search_term":
-                job_func = sync_naver_search_term_job
-            elif state.job_name == "sync_naver_keyword_volume":
-                job_func = sync_naver_keyword_volume_job
-            elif state.job_name == "run_naver_forecast_engine":
-                job_func = run_naver_forecast_engine_job
-            elif state.job_name == "generate_naver_proposals":
-                job_func = generate_naver_proposals_job
-            elif state.job_name == "run_naver_learning_loops":
-                job_func = run_naver_learning_loops_job
-            elif state.job_name == "run_naver_retro_scoring":
-                job_func = run_naver_retro_scoring_job
-            elif state.job_name == "sweep_naver_keyword_hourly":
-                job_func = sweep_naver_keyword_hourly_job
-            elif state.job_name == "generate_expert_desk":
-                job_func = generate_expert_desk_job
-            elif state.job_name == "run_naver_flight_loop":
-                job_func = run_naver_flight_loop_job
-            elif state.job_name == "sync_naver_settlement":
-                job_func = sync_naver_settlement_job
-            elif state.job_name == "sync_naver_case_settlement":
-                job_func = sync_naver_case_settlement_job
-            elif state.job_name == "sync_meta_ad_costs":
-                job_func = sync_meta_ad_costs_job
-            elif state.job_name == "sync_coupang_products":
-                job_func = sync_coupang_products_job
-            elif state.job_name == "sync_coupang_returns":
-                job_func = sync_coupang_returns_job
-            elif state.job_name == "sync_coupang_settlement":
-                job_func = sync_coupang_settlement_job
-            elif state.job_name == "sync_coupang_rg_sizes":
-                job_func = sync_coupang_rg_sizes_job
-            elif state.job_name == "sync_coupang_rg_inventory":
-                job_func = sync_coupang_rg_inventory_job
-            elif state.job_name == "sync_coupang_rg_orders":
-                job_func = sync_coupang_rg_orders_job
-            elif state.job_name == "sync_coupang_rg_inbound":
-                job_func = sync_coupang_rg_inbound_job
-            elif state.job_name == "sync_coupang_rg_settlement":
-                job_func = sync_coupang_rg_settlement_job
-            elif state.job_name == "auto_download_rg_settlement":
-                job_func = auto_download_rg_settlement_job
-            elif state.job_name == "sync_coupang_coupons":
-                job_func = sync_coupang_coupons_job
-            elif state.job_name == "sync_coupang_cs":
-                job_func = sync_coupang_cs_job
-            elif state.job_name == "sync_coupang_ad_cost":
-                job_func = sync_coupang_ad_cost_job
-            elif state.job_name == "request_ad_cost_refresh":
-                job_func = request_ad_cost_refresh_job
+            job_func = job_func_for(state.job_name)
 
             if job_func:
                 try:
@@ -1211,11 +1257,13 @@ def start_scheduler():
                     trigger = CronTrigger.from_crontab(
                         state.cron_expression, timezone="Asia/Seoul"
                     )
+                    per_job_kwargs = job_kwargs_for(state.job_name)
                     scheduler.add_job(
                         job_func,
                         trigger=trigger,
                         id=state.job_name,
                         replace_existing=True,
+                        **per_job_kwargs,
                     )
                     log.info("스케줄러 작업 등록: %s (%s)", state.job_name, state.cron_expression)
                 except Exception as e:
