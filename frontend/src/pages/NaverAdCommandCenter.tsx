@@ -434,17 +434,29 @@ const PERIOD_PRESETS = [
 type PeriodKey = (typeof PERIOD_PRESETS)[number]["key"] | "custom";
 type Period = ReturnType<typeof usePeriod>;
 
+/** 커스텀 구간이 조회 불가한 이유. null이면 조회 가능.
+ *  ★`<input type="date">`는 사용자가 지우면 **빈 문자열**을 준다(실측). 그걸 안 잡으면
+ *  `date_from=`이 그대로 나가고 백엔드가 422 + 날 것의 pydantic 메시지를 뱉어
+ *  화면에 "불러오지 못했습니다: Input should be a valid date…"가 뜬다(실측).
+ *  ★`from > to` 하나만 보면 빈 문자열을 못 잡는다: `"" > "2026-07-17"`는 **false**다(실측).
+ *  ISO 날짜라서 문자열 비교가 곧 날짜 비교인 건 **양쪽이 채워졌을 때만** 참이다. */
+export function customRangeError(range: DateRange): string | null {
+  if (!range.from || !range.to) return "시작일과 종료일을 모두 선택하세요.";
+  if (range.from > range.to) return "시작일이 종료일보다 늦습니다.";
+  return null;
+}
+
 /** 기간 상태. range는 원시 문자열 2개라 useAsyncData deps에 그대로 넣어도 안정적이다. */
 function usePeriod() {
   const [key, setKey] = useState<PeriodKey>("today");
   const [custom, setCustom] = useState<DateRange>({ from: kstDate(-7), to: kstDate(0) });
   const preset = PERIOD_PRESETS.find((p) => p.key === key);
   const range = preset ? preset.range() : custom;
-  // ISO 날짜는 문자열 비교가 곧 날짜 비교다. 뒤집힌 구간은 백엔드가 422로 막지만(조용한
-  // 빈 결과 = "변경 없음"으로 읽히므로), 화면에서 먼저 잡아 요청 자체를 안 보낸다.
-  const invalid = key === "custom" && custom.from > custom.to;
+  // 잘못된 구간은 백엔드도 422로 막지만(조용한 빈 결과 = "변경 없음"으로 읽히므로),
+  // 화면에서 먼저 잡아 요청 자체를 안 보낸다 — 422 원문은 사용자에게 무의미하다.
+  const error = preset ? null : customRangeError(custom);
   const label = preset ? preset.label : `${custom.from} ~ ${custom.to}`;
-  return { key, setKey, custom, setCustom, range, invalid, label };
+  return { key, setKey, custom, setCustom, range, error, label };
 }
 
 function PeriodTabs({ p }: { p: Period }) {
@@ -508,13 +520,17 @@ function ChangeLogPane() {
   //   (기본 False라 1층 "우리 조작 N회"는 여전히 실집행만 센다).
   const p = usePeriod();
   const { data, error } = useAsyncData(
-    () => fetchNaverChangeLog({
-      date_from: p.range.from, date_to: p.range.to, limit: 10, actor: "ours", include_blocked: true,
-    }),
-    [p.range.from, p.range.to],
+    // ★잘못된 구간이면 요청을 아예 안 보낸다(422 원문 노출 방지). deps에 p.error를 넣어
+    //   구간이 고쳐지는 순간 다시 질의하게 한다.
+    () => p.error
+      ? Promise.resolve({ total: 0, rows: [] })
+      : fetchNaverChangeLog({
+          date_from: p.range.from, date_to: p.range.to, limit: 10, actor: "ours", include_blocked: true,
+        }),
+    [p.range.from, p.range.to, p.error],
   );
   const body = () => {
-    if (p.invalid) return <EmptyState reason="시작일이 종료일보다 늦습니다." hint="기간을 다시 선택하세요." />;
+    if (p.error) return <EmptyState reason={p.error} hint="기간을 다시 선택하세요." />;
     if (error) return <EmptyState reason={`불러오지 못했습니다: ${error}`} hint="새로고침하거나 백엔드 상태를 확인하세요." />;
     if (data === null) return <Loading rows={3} />;
     if (data.rows.length === 0) {
@@ -560,11 +576,14 @@ function ExternalChangesPane() {
   // ★include_blocked를 안 쓴다: 외부 변경엔 '차단'이 없다(우리 가드레일은 우리 쓰기에만 건다).
   const p = usePeriod();
   const { data, error } = useAsyncData(
-    () => fetchNaverChangeLog({ date_from: p.range.from, date_to: p.range.to, limit: 10, actor: "external" }),
-    [p.range.from, p.range.to],
+    // ★ChangeLogPane과 같은 이유로 잘못된 구간이면 요청하지 않는다.
+    () => p.error
+      ? Promise.resolve({ total: 0, rows: [] })
+      : fetchNaverChangeLog({ date_from: p.range.from, date_to: p.range.to, limit: 10, actor: "external" }),
+    [p.range.from, p.range.to, p.error],
   );
   const body = () => {
-    if (p.invalid) return <EmptyState reason="시작일이 종료일보다 늦습니다." hint="기간을 다시 선택하세요." />;
+    if (p.error) return <EmptyState reason={p.error} hint="기간을 다시 선택하세요." />;
     if (error) return <EmptyState reason={`불러오지 못했습니다: ${error}`} hint="새로고침하거나 백엔드 상태를 확인하세요." />;
     if (data === null) return <Loading rows={3} />;
     if (data.rows.length === 0) {
