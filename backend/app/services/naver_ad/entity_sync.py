@@ -334,6 +334,103 @@ def _log_external_qi_change(db: Session, entity: NaverEntity, new_qi, now) -> No
              entity.entity_type, entity.entity_id, entity.qi_grade, new_qi)
 
 
+_MASS_EVENT_THRESHOLD = 200
+
+
+def _log_keyword_inventory_changes(
+    db: Session,
+    added: list[dict],
+    removed: list[dict],
+    now,
+    *,
+    bootstrap: bool,
+) -> None:
+    """D-NAO-50: 키워드가 새로 나타나거나(등록·재등장) 사라지는(삭제·수집 소실) 인벤토리 변화를
+    change_log에 기록한다 — 상태·입찰·품질 밸브에 이은 네 번째 diff 밸브.
+
+    ★이 함수가 없던 동안 키워드 add/remove 이력이 **어디에도** 남지 않았다. MOP(또는 Jino)가
+    네이버 콘솔에서 추가한 키워드는 그냥 새 naver_entity 행으로 조용히 나타났고, 삭제된 키워드는
+    status='deleted'만 찍힐 뿐 로그가 없었다(스펙 D-47-d "입찰가·키워드 diff 로깅" 중 입찰가만
+    구현됨). Jino "키워드들의 history는 어디서 볼 수 있어?"의 답이 add/remove에 대해선 '없음'이었다.
+
+    설계상 두 action:
+      - external_keyword_added   : (a) 신규 등록  (b) 재등장(기존 deleted → 수집 on)
+      - external_keyword_removed : (a) API가 DELETED 반환  (b) 수집에서 완전 소실(stale 루프)
+
+    ★행 단위로 루프 안에서 로깅하지 않는다 — sync 루프/stale 루프에서 후보만 모아(added/removed
+    리스트) 여기서 **한 번에** 기록한다. 아래 두 가드가 방향(등록/소실)마다 독립적으로 걸린다.
+
+    ⚠️ 가드 1 — 부트스트랩(added 전용): 호출부가 `bootstrap`(기존 키워드 0행)을 넘긴다. 새 DB의
+      첫 sync는 91,005개 키워드 전부를 '외부 등록'으로 볼 것이므로 added 로깅을 통째로 건너뛴다.
+      (removed는 부트스트랩에서 발화 불가 — 기존 행이 없으니 사라질 것도 없다.)
+
+    ⚠️ 가드 2 — 대량 이벤트(_MASS_EVENT_THRESHOLD=200): 네이버 API가 부분 장애로 어떤 광고그룹에
+      빈 응답을 주면, 그 그룹의 키워드 수천 개가 한꺼번에 stale 처리되어 소실로 잡힌다. 이걸 개별
+      로깅하면 change_log가 정확히 입찰가 밸브가 막으려던 쓰기 폭증처럼 폭파한다(스펙 §쓰기증폭).
+      방향별 후보가 200을 넘으면 개별행 대신 요약 1행(entity_id="__bulk__")만 남기고 개별 로깅을
+      생략한다 — "대량 작업 또는 API 부분 장애 의심"이라는 신호는 요약행이 그대로 전달한다.
+
+    ⚠️ 가드 3 — 귀속(our-write) 체크 없음(의도적): `_log_external_bid_change`와 달리 여기엔 "우리가
+      방금 한 것이면 억제"가 없다. 우리 프로그램에는 **정규 키워드를 등록/삭제하는 쓰기 경로가
+      아예 없기 때문**이다. `add_negative_keyword`는 제외키워드(restricted-keywords API)를 쓰는데,
+      이는 /ncc/keywords 인벤토리에 절대 나타나지 않는 **다른 네이버 리소스**라 여기 diff에 걸리지
+      않는다. ★P4(키워드 발굴→등록)가 실제 등록 쓰기 경로를 열면 이 밸브도 `_load_our_bid_writes`
+      같은 귀속 로직이 필요해진다 — 없으면 우리 자신의 등록이 '외부'로 오분류된다.
+
+    호출 계약: stale 루프 이후, `db.commit()` 이전에 1회 호출한다.
+    """
+    if added and not bootstrap:
+        _emit_inventory_side(db, added, now, direction="added")
+    if removed:
+        _emit_inventory_side(db, removed, now, direction="removed")
+
+
+def _emit_inventory_side(db: Session, items: list[dict], now, *, direction: str) -> None:
+    """added/removed 한 방향을 기록. 200 초과면 __bulk__ 요약 1행, 아니면 개별행.
+
+    payload 배치가 방향에 따라 다르다: added는 after_value(before=None, 등장), removed는
+    before_value(after=None, 소실). 대량 요약은 {"bulk":True,"count":N,"sample":[이름 20개]}.
+    """
+    is_added = direction == "added"
+    action = "external_keyword_added" if is_added else "external_keyword_removed"
+    n = len(items)
+
+    if n > _MASS_EVENT_THRESHOLD:
+        verb = "등록" if is_added else "소실"
+        summary = json.dumps(
+            {"bulk": True, "count": n, "sample": [it["name"] for it in items[:20]]},
+            ensure_ascii=False,
+        )
+        db.add(NaverChangeLog(
+            entity_type="keyword", entity_id="__bulk__", campaign_id="",
+            action=action, proposal_id=None, dry_run=False, changed_at=now,
+            before_value=None if is_added else summary,
+            after_value=summary if is_added else None,
+            rationale=(
+                f"entity_sync 감지: 키워드 대량 {verb} {n}건 — "
+                "API 부분 장애 또는 대량 작업 의심, 개별 로깅 생략"
+            ),
+        ))
+        log.warning("keyword_inventory %s bulk: %d건 요약 1행 기록(개별 생략)", direction, n)
+        return
+
+    rationale = (
+        "entity_sync 감지: 외부(MOP/사람) 키워드 등록"
+        if is_added else
+        "entity_sync 감지: 외부(MOP/사람) 키워드 삭제·소실"
+    )
+    for it in items:
+        payload = json.dumps({"keyword": it["name"], "bidAmt": it["bid"]}, ensure_ascii=False)
+        db.add(NaverChangeLog(
+            entity_type="keyword", entity_id=it["entity_id"], campaign_id=it["campaign_id"],
+            action=action, proposal_id=None, dry_run=False, changed_at=now,
+            before_value=None if is_added else payload,
+            after_value=payload if is_added else None,
+            rationale=rationale,
+        ))
+    log.info("keyword_inventory %s: %d건 개별 기록", direction, n)
+
+
 def sync_entities(db: Session, *, rows: list[dict] | None = None) -> dict:
     """naver_entity upsert(멱등, 일 1회 동기화) — keywordstool 보강 필드(monthly_volume 등) 보존.
 
@@ -351,17 +448,42 @@ def sync_entities(db: Session, *, rows: list[dict] | None = None) -> dict:
     # ★루프 전 1회 적재(D-NAO-47, codex[P2]) — 루프 안에서 행마다 조회하면 91,005번 쿼리한다.
     our_bid_writes = _load_our_bid_writes(db)
 
+    # D-NAO-50 키워드 인벤토리 밸브: 루프에서 후보만 모아 stale 루프 뒤 일괄 로깅한다.
+    # bootstrap = 기존 키워드 행이 0 → 새 DB 첫 sync가 91,005 add를 쏟아내는 걸 막는 added 가드.
+    bootstrap = not any(k[0] == "keyword" for k in existing)
+    added_keywords: list[dict] = []
+    removed_keywords: list[dict] = []
+
     for r in rows:
         key = (r["entity_type"], r["entity_id"])
         seen.add(key)
         e = existing.get(key)
         if e is None:
+            # (a) 신규 등록: 키워드 신규 행 + 수집 status가 deleted가 아닐 때. 부트스트랩이면 스킵.
+            if r["entity_type"] == "keyword" and not bootstrap and r["status"] != "deleted":
+                added_keywords.append({
+                    "name": r["name"], "entity_id": r["entity_id"],
+                    "campaign_id": r["campaign_id"], "bid": _norm_bid(r.get("bid_amt")),
+                })
             db.add(NaverEntity(
                 entity_type=r["entity_type"], entity_id=r["entity_id"], parent_id=r["parent_id"],
                 campaign_id=r["campaign_id"], campaign_type=r["campaign_type"], name=r["name"],
                 status=r["status"], bid_amt=r.get("bid_amt"), qi_grade=r.get("qi_grade"), synced_at=now,
             ))
         else:
+            if r["entity_type"] == "keyword":
+                if e.status == "deleted" and r["status"] != "deleted":
+                    # (b) 재등장: 기존 deleted 키워드가 다시 켜짐. (status 밸브는 e.status=deleted라 미발화)
+                    added_keywords.append({
+                        "name": r["name"], "entity_id": r["entity_id"],
+                        "campaign_id": r["campaign_id"], "bid": _norm_bid(r.get("bid_amt")),
+                    })
+                elif e.status != "deleted" and r["status"] == "deleted":
+                    # (a) 삭제: API가 DELETED 반환. (on→deleted는 lock 변화가 아니라 status 밸브 미발화)
+                    removed_keywords.append({
+                        "name": e.name, "entity_id": e.entity_id,
+                        "campaign_id": e.campaign_id, "bid": _norm_bid(e.bid_amt),
+                    })
             if e.status != r["status"] and e.status != "deleted":
                 _log_external_status_change(db, e, r["status"], now)
             # ★두 밸브 모두 **대입 전**에 호출한다 — entity의 옛값을 읽어야 diff가 나온다.
@@ -384,13 +506,27 @@ def sync_entities(db: Session, *, rows: list[dict] | None = None) -> dict:
     stale = 0
     for key, e in existing.items():
         if key not in seen and e.status != "deleted":
+            # (b) 소실: 최신 수집에 없는 기존 live 키워드 → removed 후보(entity_type=keyword만).
+            if e.entity_type == "keyword":
+                removed_keywords.append({
+                    "name": e.name, "entity_id": e.entity_id,
+                    "campaign_id": e.campaign_id, "bid": _norm_bid(e.bid_amt),
+                })
             e.status = "deleted"
             stale += 1
+
+    # D-NAO-50: commit 전에 인벤토리 변화 일괄 로깅(부트스트랩·대량 가드는 함수 내부에서 적용).
+    _log_keyword_inventory_changes(db, added_keywords, removed_keywords, now, bootstrap=bootstrap)
 
     db.commit()
 
     by_type: dict[str, int] = {}
     for r in rows:
         by_type[r["entity_type"]] = by_type.get(r["entity_type"], 0) + 1
-    log.info("naver_entity sync: %s (stale→deleted=%d)", by_type, stale)
-    return {"rows": len(rows), "stale_marked_deleted": stale, **by_type}
+    log.info("naver_entity sync: %s (stale→deleted=%d, kw_added=%d kw_removed=%d)",
+             by_type, stale, len(added_keywords), len(removed_keywords))
+    return {
+        "rows": len(rows), "stale_marked_deleted": stale,
+        "keyword_added": len(added_keywords), "keyword_removed": len(removed_keywords),
+        **by_type,
+    }
