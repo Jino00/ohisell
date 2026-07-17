@@ -310,3 +310,23 @@ def test_vault_export_cron_job_is_fail_open(monkeypatch):
 def test_mac_pull_script_parses():
     p = Path(__file__).resolve().parents[2] / "scripts" / "ohisell_vault_pull.py"
     ast.parse(p.read_text(encoding="utf-8"))
+
+
+def test_diary_window_includes_d7_backfill_age(db, vault):
+    """P5 리뷰 P2 회귀 고정: d7은 diary_outcome이 age≥8(D-8 행)에 기입한다 — export 창이
+    age 8을 포함하지 않으면 d7이 볼트에 영원히 안 실린다(off-by-one). 창 상수가 다시
+    줄어들면 이 테스트가 잡는다."""
+    import json as _json
+    from datetime import timedelta as _td
+
+    age8 = TODAY - _td(days=8)
+    _diary(db, action_date=age8,
+           outcome_json=_json.dumps({"d7": {"cost": 700, "clk": 7, "conv": 7000, "roas_c": 10.0}}))
+    db.commit()
+
+    vault_export.export_vault(db, now=NOW)
+
+    md = (vault / "diary" / f"{age8.isoformat()}.md")
+    assert md.exists(), "age-8 날짜의 일기 md가 창에 포함되어야 함(d7 기입 시점)"
+    assert "d7" in md.read_text(encoding="utf-8")
+    assert vault_export._DIARY_DAYS >= 9

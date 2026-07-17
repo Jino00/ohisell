@@ -24,7 +24,10 @@ from app.utils.kst import kst_now
 log = logging.getLogger(__name__)
 
 # 일기 export 범위 — 최근 N일(KST 날짜별 1파일).
-_DIARY_DAYS = 8
+# ★14일인 이유(P5 리뷰 P2): d7 결과는 diary_outcome이 age≥8(D-8 행)에 기입한다 — 창이
+# 8일(age 0~7)이면 d7이 채워지는 바로 그날 행이 창 밖으로 밀려나 볼트 md에 d7이 영원히
+# 안 실린다(off-by-one). age 8 포함 + 크론 미스파이어 마진으로 14일.
+_DIARY_DAYS = 14
 
 # 요일(0=월) → 한글 라벨. env_snapshot의 weekday와 KST 날짜 weekday 표기에 공용.
 _WEEKDAY_KR = ("월", "화", "수", "목", "금", "토", "일")
@@ -293,7 +296,9 @@ def _render_index(now: datetime, diary_dates: list[date], active: list[OpsWisdom
     lines.append("## 활성 지혜")
     if active:
         for entry in active:
-            title = (entry.wisdom_text or "").strip().splitlines()[0] if entry.wisdom_text else "(제목 없음)"
+            # 공백만 있는 wisdom_text면 splitlines()가 빈 리스트(P5 리뷰 P3) — or 기본값으로 방어.
+            first_line = ((entry.wisdom_text or "").strip().splitlines() or ["(제목 없음)"])[0]
+            title = first_line
             fname = f"{entry.id:03d}-{_slug(entry.wisdom_text or '')}"
             lines.append(f"- [[wisdom/{fname}|#{entry.id} {title[:60]}]]")
     else:

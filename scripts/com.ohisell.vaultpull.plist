@@ -7,6 +7,8 @@
 <!--   launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.ohisell.vaultpull.plist         -->
 <!--   (재설치 시 먼저: launchctl bootout gui/$UID/com.ohisell.vaultpull 2>/dev/null)           -->
 <!-- 전제: ssh sellc.ohitech.co.kr 무암호 접속(BatchMode) — safe_deploy.sh와 동일 키.            -->
+<!-- ★__SCRIPT__는 워크트리 사본이 아니라 안정 경로(프로젝트 루트 scripts/)로 치환할 것 —        -->
+<!--   워크트리는 세션 종료 후 삭제될 수 있어 launchd 잡이 조용히 죽는다(P5 리뷰 P3).            -->
 <plist version="1.0">
 <dict>
   <key>Label</key>
