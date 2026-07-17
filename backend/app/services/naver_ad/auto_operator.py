@@ -43,6 +43,12 @@ _SETTLEMENT_WINDOW_START_DAYS = 8
 _SETTLEMENT_WINDOW_END_DAYS = 2
 
 _DAILY_LANE_PROPOSAL_TYPES = ("bid_up", "bid_down", "pause")  # PLAN §3 명시 목록(growth_bid_up 등 제외)
+
+# codex 2R[P1-1]: naver_proposals.approval_source는 String(12) — 'auto_operator'(13자)/
+# 'auto_operator_hourly'(20자)는 스키마 계약 위반(SQLite는 무시하지만 PG 이전 시 커밋 실패).
+# 스키마 변경 없이 값을 단축(마이그레이션 리스크 0) — 소급채점 레인별 분리 식별자 역할은 유지.
+APPROVAL_SOURCE_DAILY = "auto_op"  # 7자
+APPROVAL_SOURCE_HOURLY = "auto_op_hr"  # 10자
 _MIN_CLICK_FOR_APPROVAL = 10  # D-NAO-48 조건②(rationale 창 클릭) / §4-1 핫셋 클릭 게이트 공유
 _MIN_HOURLY_SAMPLE_IMP = 30  # §4-2 "imp 합 < 30이면 그 시간대 묶음은 판단 보류"
 _HOURLY_RANK_DOWN_THRESHOLD = Decimal("2.5")  # §4-3 DOWN: 가중 avg_rank < 2.5
@@ -300,7 +306,7 @@ def run_daily_lane(db: Session, *, now: datetime | None = None) -> dict:
         # bid_down: 조건 없음(무조건 승인, 안전 방향)
 
         p.status = "approved"
-        p.approval_source = "auto_operator"
+        p.approval_source = APPROVAL_SOURCE_DAILY
         db.commit()
         result["approved"] += 1
 
@@ -326,9 +332,14 @@ def _auto_operate_campaigns(db: Session) -> list[str]:
 
 def _check_spend_circuit_breaker(db: Session, campaign_id: str, today: date) -> str | None:
     """§4-6 정지 조건(레인 자체 fail-closed): 당일 캠페인 소진 > 직전 7일 일평균 ×3 →
-    그 캠페인의 시간당 레인 전체 hold. 직전 7일 데이터가 없으면(신규 캠페인 등) 비교 기준
-    자체가 없어 브레이커는 미발동(fail-open) — 근거 없이 레인 전체를 막지 않는다(개별
-    안전장치는 guardrail_gate가 여전히 담당하므로 이 브레이커가 유일한 방어선이 아니다)."""
+    그 캠페인의 시간당 레인 전체 hold.
+
+    codex 2R[P1-2]: 당일 스냅샷 자체가 없으면(수집 미가동/stale — 어제 행만 있는 경우도
+    ad_date 필터로 동일하게 부재) 소진을 **평가할 수 없다** — 평가 불가 상태에서 실입찰을
+    진행하면 브레이커가 무의미하므로 fail-closed로 캠페인 전체 hold. 반면 직전 7일
+    베이스라인이 없는 경우(신규 캠페인 등)는 "당일 소진은 보이는데 비교 기준이 없음" —
+    폭주 관측 자체는 가능한 상태라 미발동(fail-open, 개별 안전장치는 guardrail_gate가
+    여전히 담당)으로 남긴다(두 부재의 의미가 다름)."""
     latest = (
         db.query(NaverHourlySnapshot)
         .filter(NaverHourlySnapshot.campaign_id == campaign_id, NaverHourlySnapshot.ad_date == today)
@@ -336,7 +347,10 @@ def _check_spend_circuit_breaker(db: Session, campaign_id: str, today: date) -> 
         .first()
     )
     if latest is None:
-        return None
+        return (
+            f"당일({today.isoformat()}) 소진 스냅샷 부재 — 서킷브레이커 평가 불가"
+            "(fail-closed, codex 2R[P1-2])"
+        )
     today_cost = latest.cost
 
     window_from = today - timedelta(days=_HOURLY_BASELINE_DAYS)
@@ -375,10 +389,39 @@ def _hot_set_candidates(
     db: Session, campaign_id: str, window_from: date, window_to: date,
 ) -> list[tuple[str, str]]:
     """§4-1 핫셋 선정: auto_operate 캠페인의 keyword/adgroup 엔티티(status='on') 중
-    캠페인유형-grain 규약(P1-2, 위 매핑)에 맞고 정착창 클릭 ≥10인 것.
-    campaign_type이 비어 있으면(동기화 미채움) grain 판정 불가 — fail-closed 제외
+    캠페인유형-grain 규약(P1-2, 위 매핑)에 맞고 **부모 체인 전체 활성**(codex 2R[P2])이며
+    정착창 클릭 ≥10인 것.
+
+    부모 체인(codex 2R[P2]): entity_sync는 부모-자식 status를 캐스케이드하지 않는다
+    (account_diagnosis._on_adgroup_ids와 동일 근거 — 네이버 API가 각 계층 상태를 독립
+    보고). 캠페인/부모 adgroup이 off인데 자식만 on이면 비활성 체인 아래에 실입찰이
+    나간다 — campaign 엔티티 행 status='on' + (키워드 grain이면 부모 adgroup 행도 on)을
+    요구한다. 캠페인/부모 엔티티 행 자체가 없으면 체인 확인 불가 — fail-closed 제외.
+    campaign_type이 비어 있으면(동기화 미채움) grain 판정 불가 — 동일하게 fail-closed 제외
     (억지 판정 금지, 다음 entity_sync 후 자연 편입). 반환: [(target_type, target_id), ...]
     target_id 오름차순(결정적)."""
+    campaign_on = (
+        db.query(NaverEntity.id)
+        .filter(
+            NaverEntity.entity_type == "campaign",
+            NaverEntity.entity_id == campaign_id,
+            NaverEntity.status == "on",
+        )
+        .first()
+        is not None
+    )
+    if not campaign_on:
+        return []  # 캠페인 엔티티가 off이거나 행 부재 — 체인 최상위 비활성(fail-closed)
+
+    # 이 캠페인 소속 on adgroup id 집합 — 키워드 grain의 부모 체인 확인용(캠페인 on은 위에서 확정)
+    on_adgroup_ids = {
+        r[0] for r in db.query(NaverEntity.entity_id).filter(
+            NaverEntity.entity_type == "adgroup",
+            NaverEntity.campaign_id == campaign_id,
+            NaverEntity.status == "on",
+        ).all()
+    }
+
     entities = (
         db.query(NaverEntity)
         .filter(
@@ -394,6 +437,8 @@ def _hot_set_candidates(
         allowed_type = _HOT_SET_ENTITY_TYPE_BY_CAMPAIGN_TYPE.get(e.campaign_type or "")
         if allowed_type is None or e.entity_type != allowed_type:
             continue  # grain 규약 위반 또는 campaign_type 미확보 — fail-closed 제외
+        if e.entity_type == "keyword" and e.parent_id not in on_adgroup_ids:
+            continue  # 부모 adgroup off/행 부재 — 비활성 체인(fail-closed 제외, codex 2R[P2])
         agg = _settlement_agg(db, e.entity_type, e.entity_id, window_from, window_to)
         if agg["clk"] >= _MIN_CLICK_FOR_APPROVAL:
             out.append((e.entity_type, e.entity_id))
@@ -537,7 +582,7 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
 
     ①캠페인별 소진 서킷브레이커(§4-6) → 걸리면 그 캠페인 전체 hold ②핫셋 선정(§4-1)
     ③유닛별 intraday hh24 곡선 조회(§4-2, 실패 시 skip) ④판정(§4-3, 순위·CPC·페이싱만 —
-    ROAS 신규 판단 없음) ⑤스텝 제안 생성+즉시 승인(approval_source='auto_operator_hourly')
+    ROAS 신규 판단 없음) ⑤스텝 제안 생성+즉시 승인(approval_source=APPROVAL_SOURCE_HOURLY)
     +naver_execution_harness.execute() 경유 실행(가드레일 전량 통과 필요 — 쿨다운·일일상한·
     BEP·스톱로스가 최종 방어선).
 
@@ -605,7 +650,7 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
             db.flush()
 
             proposal.status = "approved"
-            proposal.approval_source = "auto_operator_hourly"
+            proposal.approval_source = APPROVAL_SOURCE_HOURLY
             db.commit()
             result["approved"] += 1
 

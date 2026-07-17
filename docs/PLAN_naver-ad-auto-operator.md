@@ -24,7 +24,7 @@ naver_auto_operator (Harness, 신규 backend/app/services/naver_ad/auto_operator
      retro-scorecard 집계(bleeding 판정)
 ```
 
-승인 표기: `approval_source='auto_operator'`(일) / `'auto_operator_hourly'`(시간당) — delegation('delegation')·수동과 구분, 소급채점이 레인별 성적 분리 가능.
+승인 표기: `approval_source='auto_op'`(일) / `'auto_op_hr'`(시간당) — delegation('delegation')·수동과 구분, 소급채점이 레인별 성적 분리 가능. (codex 2R[P1-1]: 컬럼이 String(12)라 원안 'auto_operator'(13자)/'auto_operator_hourly'(20자)는 스키마 계약 위반 — 스키마 변경 없이 값 단축으로 확정.)
 
 ## §2 스키마 (마이그레이션 1건)
 
