@@ -3,7 +3,7 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
-- 날짜: 2026-07-17 22:10 KST (★**RG 정산 XLSX 업로드 60초 타임아웃 진범 해소·배포·라이브 합격** — 트랙 외 별건(네이버 트랙 무관), Jino 승인. 워크트리 `mop-command-center-design-7e087a`, 배포 commit `c0ea885`, PR 미생성)
+- 날짜: 2026-07-17 22:10 KST (★**RG 정산 XLSX 업로드 60초 타임아웃 진범 해소·배포·라이브 합격** — 트랙 외 별건(네이버 트랙 무관), Jino 승인. 워크트리 `mop-command-center-design-7e087a`, 배포 commit `c0ea885`, **PR #39 오픈(병합 대기)**)
   - **증상**: Mac 페처 `_rg_push_xlsx`(timeout=60) POST가 "Read timed out" 2건 → 실패 보고. 그런데 서버는 완주(데이터 정상 적재)
     → last_error_at(21:12:25.959)이 last_success_at(21:12:25.821)보다 **138ms 뒤**에 찍혀 행이 "실패"로 남음.
   - **진범 = 파싱 O(n²)**: `parse_settlement_xlsx`가 `read_only=True` 워크북에 **랜덤접근 `ws.cell(row,col)`**을 행 루프에서 사용.
