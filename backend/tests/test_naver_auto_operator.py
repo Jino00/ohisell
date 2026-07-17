@@ -1055,6 +1055,66 @@ def test_hourly_lane_excludes_everything_when_campaign_entity_off(db):
     assert hot == []
 
 
+# ── codex 10R[P1]: 페이싱 기대·실측 시간경계 정렬 — 이른 분(:20) 저속 오판 차단 ──
+
+def test_hourly_lane_normal_pace_not_misjudged_slow_at_minute_20(db):
+    """기대치가 expected(hour=now.hour)=현재 시각 '종료'까지 누적인데 실측은 관측 시점까지
+    소진 — :20처럼 이른 분에는 기대가 과대해 정상 페이스가 저속으로 오판돼 증액이 나간다.
+    두 값 모두 완료 시간대 경계(now.hour-1 종료)로 정렬: 정상 페이스(선형 기대와 동일 비율
+    소진 — 12시 완료 경계 기대 0.5 vs 실측 500/1000=0.5) 타깃은 저속 아님 → UP 불발 hold."""
+    _settings(db, target_roas_override=Decimal("2.0"))
+    window_from, window_to = _settlement_window()
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-pace", parent_id="grp-1",
+                        campaign_id=CAMPAIGN, campaign_type="WEB_SITE", status="on"))
+    # 정착창: cost 7000(일평균 1000)·ROAS 3.0 ≥ 2.0·baseline CPC 350원
+    _ad_row(db, keyword_id="nkw-pace", ad_date=window_from, clk=20, cost=7000, conv_direct_amt=21000)
+    db.commit()
+
+    curve = [  # 완료 시간대(9~11) 합계 500 = 일평균 1000의 정확히 절반(12시 경계 선형 기대 0.5와 동률)
+        _hour(9, imp=15, clk=2, cost=167, avg_rank=5.0),
+        _hour(10, imp=15, clk=2, cost=167, avg_rank=5.0),
+        _hour(11, imp=15, clk=2, cost=166, avg_rank=5.0),
+    ]  # rank 5.0>4.0(UP 후보), CPC 500/6≈83<350×2 — 페이싱만이 UP 여부를 결정
+    now_minute20 = datetime(2026, 7, 20, 12, 20, 0)
+    with patch.object(auto_operator.naver_sa_writer, "get_keyword", return_value={"bidAmt": 1000}), \
+         patch.object(auto_operator.diagnosis, "correction_factor",
+                       return_value={"factor": Decimal("1"), "source": "actual_revenue_ratio"}), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(
+            db, now=now_minute20, fetch_intraday=lambda tid, d: curve,
+        )
+    mock_exec.assert_not_called()  # 정상 페이스 — 저속 오판으로 증액이 나가면 안 됨
+    assert result["approved"] == 0
+    assert result["held"][0]["reason"] == "판정 조건 미충족(기본 hold)"
+
+
+def test_hourly_lane_genuinely_slow_pace_still_fires_up(db):
+    """회귀 가드: 실제 저속(완료 경계 기대 0.5 대비 실측 0.05 — 큰 미달) 타깃은 여전히 UP."""
+    _settings(db, target_roas_override=Decimal("2.0"))
+    window_from, window_to = _settlement_window()
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-slow", parent_id="grp-1",
+                        campaign_id=CAMPAIGN, campaign_type="WEB_SITE", status="on"))
+    _ad_row(db, keyword_id="nkw-slow", ad_date=window_from, clk=20, cost=7000, conv_direct_amt=21000)
+    db.commit()
+
+    curve = [
+        _hour(9, imp=15, clk=2, cost=17, avg_rank=5.0),
+        _hour(10, imp=15, clk=2, cost=17, avg_rank=5.0),
+        _hour(11, imp=15, clk=2, cost=16, avg_rank=5.0),
+    ]  # 완료 시간대 합 50 → 실측 0.05 ≪ 기대 0.5(선형)
+    now_minute20 = datetime(2026, 7, 20, 12, 20, 0)
+    with patch.object(auto_operator.naver_sa_writer, "get_keyword", return_value={"bidAmt": 1000}), \
+         patch.object(auto_operator.diagnosis, "correction_factor",
+                       return_value={"factor": Decimal("1"), "source": "actual_revenue_ratio"}), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(
+            db, now=now_minute20, fetch_intraday=lambda tid, d: curve,
+        )
+    mock_exec.assert_called_once()
+    saved = db.get(NaverProposal, mock_exec.call_args[0][1])
+    assert saved.proposal_type == "bid_up"
+
+
 # ── codex 1R[P2]: 진행 중(부분) 시간대 제외 — 완료 시간대(hour < now.hour)만 판정에 사용 ──
 
 def test_hourly_lane_excludes_in_progress_hour_bucket(db):

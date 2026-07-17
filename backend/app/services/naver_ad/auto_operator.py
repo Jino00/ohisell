@@ -549,30 +549,42 @@ def _is_pacing_slow(
     db: Session, target_type: str, target_id: str, curve: list[dict], now: datetime,
 ) -> tuple[bool, str]:
     """§4-3 UP 조건의 "당일 소진 페이싱 저속" — hourly_pattern.expected_cost_fraction
-    (요일×시간 168칸 실측 곡선) 사용 가능하면 그것, 없으면 선형 기대(경과분/24h)로 폴백
-    (§4-2 명시 규칙). 실제 페이스 = 오늘 누적 그룹 비용 ÷ 정착창 일평균 그룹 비용(둘 다
-    "정상적인 하루 전체 대비 비율" 단위로 맞춘 것 — expected_cost_fraction과 동일 척도).
-    실제<기대면 저속(스펙에 배수 미명시 — 단순 비교, 추정 금지 원칙상 임의 배수 도입 안 함)."""
+    (요일×시간 168칸 실측 곡선) 사용 가능하면 그것, 없으면 선형 기대로 폴백(§4-2 명시 규칙).
+    실제 페이스 = 완료 시간대 누적 그룹 비용 ÷ 정착창 일평균 그룹 비용(둘 다 "정상적인
+    하루 전체 대비 비율" 단위 — expected_cost_fraction과 동일 척도). 실제<기대면 저속
+    (스펙에 배수 미명시 — 단순 비교, 추정 금지 원칙상 임의 배수 도입 안 함).
+
+    codex 10R[P1] 시간 경계 정렬: 초판은 기대치를 expected(hour=now.hour)(= 현재 시각
+    **종료**까지의 누적 비율)로 두고 실측은 관측 시점(:20, 부분 시간대 포함)까지 합산 —
+    이른 분에는 기대가 과대해 정상 페이스가 저속으로 오판돼 증액이 나갔다. 두 값을 같은
+    경계(완료 시간대 = now.hour-1 종료 시점)로 고정한다: 실측 = hour < now.hour 버킷 합 /
+    기대 = expected_cost_fraction(hour=now.hour-1), 선형 폴백도 now.hour×60분/1440분.
+    자정 직후(now.hour=0)는 완료 시간대가 없어 판정 보류(저속 아님 반환 → UP 불발 —
+    같은 시각 _weighted_recent 표본 게이트도 창이 비어 hold, 정합)."""
+    if now.hour == 0:
+        return False, "완료 시간대 없음(자정 직후) — 페이싱 판정 보류(codex 10R)"
+
     window_from, window_to = _settlement_window(now.date())
     agg = _settlement_agg(db, target_type, target_id, window_from, window_to)
     avg_daily_cost = agg["cost"] / _HOURLY_BASELINE_DAYS if agg["cost"] > 0 else 0.0
     if avg_daily_cost <= 0:
         return False, "정착창 소진 기준 없음(페이싱 판단 불가 — 저속 아님으로 처리)"
 
-    today_cost = sum(h["cost"] for h in curve)
+    boundary_hour = now.hour - 1  # 완료 시간대 경계 — 기대·실측 공통(codex 10R)
+    today_cost = sum(h["cost"] for h in curve if h["hour"] <= boundary_hour)
     actual_pace = today_cost / avg_daily_cost
 
-    expected = hourly_pattern.expected_cost_fraction(db, weekday=now.weekday(), hour=now.hour)
+    expected = hourly_pattern.expected_cost_fraction(db, weekday=now.weekday(), hour=boundary_hour)
     if expected is None:
-        expected = Decimal(now.hour * 60 + now.minute) / Decimal(24 * 60)
+        expected = Decimal(now.hour * 60) / Decimal(24 * 60)  # boundary_hour 종료 = now.hour×60분
         basis = "선형기대"
     else:
         basis = "hourly_pattern"
     expected_f = float(expected)
 
     if actual_pace < expected_f:
-        return True, f"페이싱저속(실제소진비{actual_pace:.2f}<기대{expected_f:.2f}, {basis})"
-    return False, f"페이싱정상(실제{actual_pace:.2f}>=기대{expected_f:.2f}, {basis})"
+        return True, f"페이싱저속(실제소진비{actual_pace:.2f}<기대{expected_f:.2f}, {basis}, 경계={boundary_hour}시 종료)"
+    return False, f"페이싱정상(실제{actual_pace:.2f}>=기대{expected_f:.2f}, {basis}, 경계={boundary_hour}시 종료)"
 
 
 def _judge_hourly(
