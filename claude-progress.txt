@@ -3,6 +3,10 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
+- 날짜: 2026-07-17 21:10 KST (★**D-NAO-53 콘솔 Confirm 문안 오사칭 결함 수정·배포·라이브 합격** + 같은 세션에서 **세션 자동 아카이브 진범 규명·해소**)
+  - ①세션 소실 원인 = 데스크톱 앱 `ccAutoArchiveOnPrClose: true`(PR 병합 시 5분 내 자동 아카이브+워크트리 삭제 — 07-11 HANDOFF 소실의 진짜 메커니즘). Jino가 Settings에서 OFF, 파일 false 실측 확인. MOP35 세션은 Archived에서 무손상 복구 가능. 상세=auto-memory `ohisell-session-record-policy.md`.
+  - ②D-NAO-53: executeConfirmText가 액션 무관 "제외키워드 등록" Confirm(OPEN_ACTIONS 4개 개방인데 X1a 하드코딩 잔재, D-NAO-5 훼손) → serializer `action`+목록 `open_actions`(harness 파생, 신규 `open_executable_actions()`)+Confirm 5분기(미지 액션 폴백=사칭 불가)+배너 동적화. 1771 pass·codex PASS·PR #31 병합(main `339c231`)·safe_deploy 배포·prod API/번들 라이브 실측 합격. Fable설계/Opus구현/Sonnet검증 handoff.
+  - 남은 것: 브라우저 시각 확인 1건(분류기 일시 불가로 번들 실측으로 대체 완료 — 선택적).
 - 날짜: 2026-07-17 12:35 KST (★**D-NAO-50 키워드 변경 이력 밸브 구현·배포·라이브검증 완료**. Jino "키워드 변경 이력 밸브도 추가해줘" + 모델 라우팅 Fable설계/Opus구현/Sonnet단순)
   - external_keyword_added/removed 밸브(부트스트랩·대량 __bulk__ 가드, mutation test 실증) + EXTERNAL_DETECTION_ACTIONS 배선 + **ExternalChangesPane 신설**(actor=external 첫 화면 소비자 — 데이터만 쌓이고 화면에 없을 뻔한 걸 Sonnet 리서치가 발견).
   - codex R1 [P2] 플랩 지적 → R2 AGREE-DEFER 합의(내일 실측이 감시 지점). 1699 pass/0 fail.
