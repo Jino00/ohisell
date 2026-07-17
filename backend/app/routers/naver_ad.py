@@ -953,10 +953,19 @@ def _execution_state(row: NaverChangeLog) -> str | None:
     if row.outcome != "failed":
         return None  # 실행 중(executing)·미판정 등 — 지어내지 않는다
     rationale = row.rationale or ""
+    # ★검사 순서가 안전 방향이다: WRITE_FAILURE를 **먼저** 본다. harness는 제안 rationale
+    # 뒤에 접두사를 이어붙이므로(f"{proposal.rationale} {MARKER} {reason}"), 제안 원문에
+    # "[실행 불가]"가 들어 있으면 쓰기 실패 행이 blocked로 오판된다 — 그게 정확히 P1-2의
+    # 거짓말(반영됐을 수도 있는데 "확실히 안 바뀜"이라 단언)이다. 이 순서면 쓰기 실패 행은
+    # 항상 unknown으로 떨어진다. 반대 방향 오판(가드 거부 → unknown)은 보수적이라 안전하다.
+    # prod 실측(2026-07-17): 제안 1,023건 중 원문에 마커를 가진 건 0건 — 지금은 도달 불가지만
+    # 문자열 검사에 기대는 이상 순서로 막아둔다.
+    if naver_execution_harness.WRITE_FAILURE_MARKER in rationale:
+        return "unknown"
     if naver_execution_harness.GUARD_BLOCK_MARKER in rationale:
         return "blocked"
-    # WRITE_FAILURE_MARKER이거나, 접두사가 없어 판별 불가한 경우. 둘 다 "모름"으로 보수 판정
-    # 한다 — 가드 거부라고 단정하려면 GUARD_BLOCK_MARKER라는 적극적 증거가 있어야 한다.
+    # 접두사가 없어 판별 불가 — "모름"으로 보수 판정한다(가드 거부라고 단정하려면
+    # GUARD_BLOCK_MARKER라는 적극적 증거가 있어야 한다).
     return "unknown"
 
 
@@ -1049,8 +1058,16 @@ def get_change_log(
     #   쓰는데 그게 실집행 2 + 차단 30일 수 있다 — actor 필터가 막으려던 바로 그 거짓말이
     #   화면에서 되살아난다. 행마다 execution_state를 주면서 집계는 안 나누면 옵트인이라는
     #   방어가 화면에서 0원이다. executed_total은 include_blocked를 켠 경우에만 의미가 있다.
+    # ★dry_run.is_(False)를 반드시 함께 건다: 이 count는 `execution_state == "executed"`인 행
+    #   수와 **정확히 같아야** 한다(푸터가 그 배지들의 집계라고 주장하므로). _execution_state는
+    #   dry-run이면 None을 주는데 여기서 dry_run을 안 보면 `include_dry_run=true` 조합에서
+    #   푸터가 "집행 1건"이라 말하면서 정작 그 행엔 배지가 없다(실측). 시뮬을 집행으로 세는 건
+    #   D-47-h가 금지하는 바로 그 거짓말이다 — 아무것도 안 했는데 일한 것처럼 보인다.
     executed_total = (
-        q.filter(NaverChangeLog.after_value.isnot(None)).count()
+        q.filter(
+            NaverChangeLog.after_value.isnot(None),
+            NaverChangeLog.dry_run.is_(False),
+        ).count()
         if actor == "ours" and include_blocked
         else None
     )

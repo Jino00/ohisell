@@ -453,9 +453,15 @@ const MAX_SPAN_DAYS = 365;
  *  입력은 타이핑 중간값도 onChange로 흘린다 — 연도 칸에 2026을 치면 0002·0020·0202를
  *  거치는데 그 중간값들이 파라미터 검증을 **통과**한 뒤 span 초과로 422가 된다.
  *  여기서 막으면 요청 자체가 안 나가므로 디바운스 없이도 원문 노출이 사라진다. */
-export function customRangeError(range: DateRange): string | null {
+export function customRangeError(range: DateRange, today: string = kstDate(0)): string | null {
   if (!range.from || !range.to) return "시작일과 종료일을 모두 선택하세요.";
   if (range.from > range.to) return "시작일이 종료일보다 늦습니다.";
+  // ★미래 차단(D-NAO-54 R2): 변경 이력은 지나간 사건의 기록이라 미래 구간은 의미가 없다.
+  //   동시에 이게 `9999-12-31` 계열을 통째로 막는다 — 백엔드는 그 날짜에서
+  //   `date_to + 1일`이 OverflowError라 422를 주는데(자체 프로브로 발견), 프론트가 안 막으면
+  //   그 422가 "불러오지 못했습니다: API error 422: {…}"로 사용자에게 그대로 간다.
+  //   불변식: **백엔드가 막는 입력은 프론트가 먼저 막는다**(프론트가 더 엄격한 건 허용).
+  if (range.to > today) return "미래 날짜는 조회할 수 없습니다.";
   const spanDays = (Date.parse(`${range.to}T00:00:00Z`) - Date.parse(`${range.from}T00:00:00Z`))
     / 86_400_000 + 1;
   if (!Number.isFinite(spanDays)) return "날짜 형식이 올바르지 않습니다.";
@@ -514,13 +520,13 @@ function PeriodTabs({ p }: { p: Period }) {
       {p.key === "custom" && (
         <span className="flex items-center gap-1 ml-1">
           <input
-            type="date" value={p.custom.from}
+            type="date" value={p.custom.from} max={kstDate(0)}
             onChange={(e) => p.setCustom({ ...p.custom, from: e.target.value })}
             className="text-xs border border-gray-200 rounded px-1 py-0.5"
           />
           <span className="text-xs text-gray-400">~</span>
           <input
-            type="date" value={p.custom.to}
+            type="date" value={p.custom.to} max={kstDate(0)}
             onChange={(e) => p.setCustom({ ...p.custom, to: e.target.value })}
             className="text-xs border border-gray-200 rounded px-1 py-0.5"
           />

@@ -82,3 +82,22 @@ describe("kstDate — 이 파일에서 유일하게 타임존이 걸린 함수",
     expect(kstDate(0, KST_0005)).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
 });
+
+describe("customRangeError — 미래 차단 (백엔드가 막는 건 프론트가 먼저 막는다)", () => {
+  const TODAY = "2026-07-17";
+
+  it("★9999-12-31을 막는다 — 백엔드는 date_to+1일이 OverflowError라 422를 준다", () => {
+    // 안 막으면 그 422가 "불러오지 못했습니다: API error 422: {…}"로 사용자에게 그대로 간다.
+    expect(customRangeError({ from: "9999-12-31", to: "9999-12-31" }, TODAY))
+      .toBe("미래 날짜는 조회할 수 없습니다.");
+  });
+
+  it("내일도 막는다 — 변경 이력은 지나간 사건의 기록이다", () => {
+    expect(customRangeError({ from: TODAY, to: "2026-07-18" }, TODAY))
+      .toBe("미래 날짜는 조회할 수 없습니다.");
+  });
+
+  it("오늘까지는 통과 (당일 탭과 같은 구간)", () => {
+    expect(customRangeError({ from: TODAY, to: TODAY }, TODAY)).toBeNull();
+  });
+});

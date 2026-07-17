@@ -527,3 +527,52 @@ def test_date_range_max_date_is_422_not_500(client, db):
     통과한 뒤 터진다(from==to면 span 1일이라 합법). input에 max가 없어 도달 가능하다."""
     r = client.get("/api/naver/ad/change-log?date_from=9999-12-31&date_to=9999-12-31")
     assert r.status_code == 422
+
+
+def test_executed_total_never_counts_dry_run_as_executed(client, db):
+    """★R2 자체 검증에서 발견. executed_total은 `execution_state=="executed"` 행 수와
+    **정확히 같아야** 한다 — 푸터가 그 배지들의 집계라고 주장하기 때문이다.
+    dry_run을 안 걸렀더니 include_dry_run=true 조합에서 푸터가 "집행 1건"이라 말하면서
+    정작 그 행엔 배지가 없었다(실측). 시뮬을 집행으로 세는 건 D-47-h가 금지하는 거짓말이다."""
+    db.add(NaverChangeLog(
+        entity_type="keyword", entity_id="nkw-dry", campaign_id="cmp-1", action="update_bid",
+        dry_run=True, changed_at=kst_now(),
+        before_value=json.dumps({"bidAmt": 700}), after_value=json.dumps({"bidAmt": 900}),
+    ))
+    db.commit()
+    body = client.get(
+        "/api/naver/ad/change-log?actor=ours&include_blocked=true&include_dry_run=true"
+    ).json()
+    assert body["executed_total"] == 0, "dry-run은 집행이 아니다"
+    # 불변식: 푸터 숫자 == 배지 개수
+    badged = sum(1 for r in body["rows"] if r["execution_state"] == "executed")
+    assert body["executed_total"] == badged
+
+
+def test_executed_total_equals_executed_badges_invariant(client, db):
+    """위 불변식을 섞인 데이터로 한 번 더 — 푸터와 배지가 갈라지면 화면이 자기모순이다."""
+    _seed(db, action="update_bid")
+    _seed_blocked(db, entity_id="grp-b1")
+    _seed_write_failed(db)
+    body = client.get("/api/naver/ad/change-log?actor=ours&include_blocked=true").json()
+    badged = sum(1 for r in body["rows"] if r["execution_state"] == "executed")
+    assert body["executed_total"] == badged == 1
+
+
+def test_write_failure_marker_wins_over_guard_marker(client, db):
+    """★검사 순서 고정. harness는 제안 rationale **뒤에** 접두사를 이어붙인다
+    (f"{proposal.rationale} {MARKER} {reason}"). 제안 원문에 '[실행 불가]'가 섞여 있으면
+    쓰기 실패 행이 blocked로 오판된다 — 반영됐을 수도 있는데 "확실히 안 바뀜"이라 단언하는
+    P1-2의 거짓말이다. prod 실측(2026-07-17) 제안 1,023건 중 0건이라 지금은 도달 불가하지만,
+    문자열 검사에 기대는 이상 순서로 막는다."""
+    db.add(NaverChangeLog(
+        entity_type="adgroup", entity_id="grp-both", campaign_id="cmp-1", action="update_bid",
+        dry_run=False, outcome="failed", changed_at=kst_now(), before_value=None, after_value=None,
+        rationale=(
+            f"제안 원문에 {naver_execution_harness.GUARD_BLOCK_MARKER} 문자열이 섞여 있음 "
+            f"{naver_execution_harness.WRITE_FAILURE_MARKER} WriteVerificationError: ..."
+        ),
+    ))
+    db.commit()
+    rows = client.get("/api/naver/ad/change-log?actor=ours&include_blocked=true").json()["rows"]
+    assert rows[0]["execution_state"] == "unknown", "쓰기 실패는 마커가 섞여도 unknown이어야 한다"
