@@ -307,19 +307,31 @@ def run_daily_lane(db: Session, *, now: datetime | None = None) -> dict:
     """D-NAO-48 정책의 서버 코드화 — auto_operate 캠페인의 당일 생성 pending 실행형
     (bid_up/bid_down/pause)을 심사·승인·집행(PLAN §3). 08:50 크론(catch-up 포함).
 
-    bid_up은 4조건 전부 충족해야 승인(하나라도 미충족 시 hold, pending 그대로 유지 —
-    harness로 넘기지 않아 'failed' 영구 종결을 피한다). bid_down은 무조건 승인(안전
-    방향, ref31 정밀도 61~88%). pause는 D-NAO-40 외부 정지 이력만 확인. 승인 후 실행은
-    반드시 naver_execution_harness.execute(dry_run=False) 경유 — 가드레일 이중 검증
-    의도적(§3 "이중 게이트 의도적").
+    bid_up은 4조건 전부 충족해야 승인(하나라도 미충족 시 hold — harness로 넘기지 않아
+    'failed' 영구 종결을 피한다). bid_down은 무조건 승인(안전 방향, ref31 정밀도 61~88%).
+    pause는 D-NAO-40 외부 정지 이력만 확인. 승인 후 실행은 반드시
+    naver_execution_harness.execute(dry_run=False) 경유 — 가드레일 이중 검증 의도적
+    (§3 "이중 게이트 의도적").
 
-    반환: {"reviewed", "approved", "executed", "held": [{"id","reason"}], "failed"}.
+    codex 11R[P2] 일일 재생성 사이클: hold된 제안을 pending으로 남기면 proposal_writer.
+    persist의 dedup(같은 타깃 pending 존재 시 신규 억제)에 걸려 다음 날 갱신 제안이 영구히
+    안 생긴다(당일 생성분만 심사하므로 어제 pending은 재심사도 안 됨 — 959~961 좌초).
+    레인 말미에 auto_operate 캠페인의 잔존 pending(오늘 hold분 + 이전 날 stale분)을
+    rejected 처리 → 익일 08:00 생성기가 fresh rationale로 재생성 → 08:50 재심사.
+    킬스위치 OFF 캠페인의 pending은 건드리지 않는다(정지 ≠ 폐기 — 말미에 auto_operate를
+    재조회해 여전히 ON인 캠페인만 정리).
+
+    반환: {"reviewed", "approved", "executed", "held": [{"id","reason"}], "failed",
+           "rejected_stale"}.
     """
     now = now or kst_now()
     today = now.date()
     day_start, day_end = _day_bounds_utc(today)
 
-    result: dict = {"reviewed": 0, "approved": 0, "executed": 0, "held": [], "failed": 0}
+    result: dict = {
+        "reviewed": 0, "approved": 0, "executed": 0, "held": [], "failed": 0,
+        "rejected_stale": 0,
+    }
 
     auto_ids = _auto_operate_campaign_ids(db)
     if not auto_ids:
@@ -372,6 +384,33 @@ def run_daily_lane(db: Session, *, now: datetime | None = None) -> dict:
         except Exception as e:  # noqa: BLE001 — harness가 change_log/상태를 이미 확정(failed 등)
             result["failed"] += 1
             log.warning("auto_operator: 일 레인 실행 실패 proposal_id=%s: %s", p.id, e)
+
+    # codex 11R[P2]: 잔존 pending 정리(일일 재생성 사이클) — 오늘 hold분+이전 날 stale분을
+    # rejected 처리해 persist dedup 좌초를 막는다. 킬스위치 OFF 캠페인은 제외(정지 ≠ 폐기 —
+    # 그 캠페인의 pending은 그대로 두고, 스위치 재가동 시 정상 사이클로 복귀): 레인 시작
+    # 시점 auto 집합(auto_ids)과 지금 재조회한 집합의 교집합만 정리 — 도중에 OFF 된
+    # 캠페인(킬스위치 skip분 포함)과 도중에 ON 된 캠페인(이번 레인이 심사 안 함) 둘 다 제외.
+    sweep_ids = auto_ids & _auto_operate_campaign_ids(db)
+    if sweep_ids:
+        leftovers = (
+            db.query(NaverProposal)
+            .filter(
+                NaverProposal.status == "pending",
+                NaverProposal.proposal_type.in_(_DAILY_LANE_PROPOSAL_TYPES),
+                NaverProposal.campaign_id.in_(sweep_ids),
+                NaverProposal.created_at < day_end,
+            )
+            .all()
+        )
+        for lp in leftovers:
+            lp.status = "rejected"
+            lp.rationale = (
+                f"{lp.rationale or ''} [auto_op 보류 — 익일 08:00 생성기가 갱신 데이터로 "
+                "재생성(D-NAO-49 일일 사이클, codex 11R)]"
+            )
+            result["rejected_stale"] += 1
+        if leftovers:
+            db.commit()
 
     return result
 

@@ -119,7 +119,8 @@ def _settlement_window():
 def test_daily_lane_reviews_nothing_when_no_auto_operate_campaign(db):
     _proposal(db)  # NaverCampaignSettings 행 자체 없음(auto_operate 기본 False 취급)
     result = auto_operator.run_daily_lane(db, now=NOW)
-    assert result == {"reviewed": 0, "approved": 0, "executed": 0, "held": [], "failed": 0}
+    assert result == {"reviewed": 0, "approved": 0, "executed": 0, "held": [], "failed": 0,
+                      "rejected_stale": 0}
 
 
 def test_daily_lane_ignores_non_auto_operate_campaign(db):
@@ -136,11 +137,46 @@ def test_daily_lane_ignores_informational_proposal(db):
     assert result["reviewed"] == 0
 
 
-def test_daily_lane_ignores_stale_pending_created_yesterday(db):
+def test_daily_lane_stale_pending_not_reviewed_but_rejected_for_regeneration(db):
+    """codex 11R[P2]: 어제 생성 stale pending은 심사 대상이 아니지만(당일 생성분만),
+    pending인 채 남기면 proposal_writer.persist dedup에 걸려 다음 날 갱신 제안이 영구히
+    안 생긴다(959~961 좌초 시나리오) — 레인 말미에 rejected 처리해 일일 재생성 사이클 보장."""
     _settings(db)
-    _proposal(db, proposal_type="bid_down", created_at=DAY_START_UTC - timedelta(hours=1))
+    p = _proposal(db, proposal_type="bid_down", created_at=DAY_START_UTC - timedelta(hours=1))
     result = auto_operator.run_daily_lane(db, now=NOW)
-    assert result["reviewed"] == 0
+    assert result["reviewed"] == 0  # 심사는 여전히 당일 생성분만
+    assert result["rejected_stale"] == 1
+    db.refresh(p)
+    assert p.status == "rejected"
+    assert "일일 사이클" in p.rationale
+
+
+def test_daily_lane_held_bid_up_rejected_at_end_for_regeneration(db):
+    """codex 11R[P2]: 오늘 hold된 bid_up도 pending으로 남기면 dedup 좌초 — 레인 말미에
+    rejected(+사유) 처리, 익일 08:00 생성기가 fresh rationale로 재생성 → 08:50 재심사."""
+    p, current_bid = _seed_bid_up_happy_path(db, clk=3)  # 조건② 미충족 → hold
+    with patch.object(auto_operator.naver_sa_writer, "get_keyword",
+                       return_value={"bidAmt": current_bid}), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_daily_lane(db, now=NOW)
+    mock_exec.assert_not_called()
+    assert len(result["held"]) == 1  # hold 사유 기록은 유지
+    assert result["rejected_stale"] == 1
+    db.refresh(p)
+    assert p.status == "rejected"
+    assert "auto_op 보류" in p.rationale
+
+
+def test_daily_lane_reject_sweep_never_touches_non_auto_campaign(db):
+    """경계: auto_operate=False 캠페인의 pending은 절대 건드리지 않음."""
+    _settings(db)  # auto 캠페인(cmp-04)
+    _settings(db, campaign_id="cmp-manual", auto_operate=False, seed_chain=False, seed_snapshot=False)
+    p_manual = _proposal(db, campaign_id="cmp-manual", proposal_type="bid_down",
+                          created_at=DAY_START_UTC - timedelta(days=2))
+    result = auto_operator.run_daily_lane(db, now=NOW)
+    assert result["rejected_stale"] == 0
+    db.refresh(p_manual)
+    assert p_manual.status == "pending"
 
 
 def test_daily_lane_bid_down_always_approved(db):
@@ -174,7 +210,7 @@ def test_daily_lane_pause_held_when_recent_external_stop(db):
     assert result["held"][0]["id"] == p.id
     assert "D-NAO-40" in result["held"][0]["reason"]
     db.refresh(p)
-    assert p.status == "pending"
+    assert p.status == "rejected"  # codex 11R: hold분은 레인 말미 reject(익일 재생성 사이클)
 
 
 def test_daily_lane_pause_approved_when_no_external_stop(db):
@@ -235,7 +271,9 @@ def test_daily_lane_bid_up_condition1_fails_step_clamp_out_of_range(db):
     assert len(result["held"]) == 1
     assert "①" in result["held"][0]["reason"]
     db.refresh(p)
-    assert p.status == "pending"  # harness에 안 넘어가 failed로 종결되지 않음
+    # harness에 안 넘어가 'failed' 영구 종결은 아니지만, 레인 말미 sweep이 rejected 처리
+    # (codex 11R — pending 잔존 시 dedup 좌초, 익일 생성기가 fresh 데이터로 재생성)
+    assert p.status == "rejected"
 
 
 def test_daily_lane_bid_up_condition2_fails_click_below_10(db):
@@ -278,7 +316,7 @@ def test_daily_lane_bid_up_condition4_stale_retro_asof_holds(db):
     assert "④" in result["held"][0]["reason"]
     assert "stale" in result["held"][0]["reason"]
     db.refresh(p)
-    assert p.status == "pending"
+    assert p.status == "rejected"  # codex 11R: hold분은 레인 말미 reject(익일 재생성 사이클)
 
 
 def test_daily_lane_bid_down_unaffected_by_stale_retro(db):
@@ -328,7 +366,7 @@ def test_daily_lane_bid_up_held_when_correction_factor_unavailable(db):
     assert "③" in result["held"][0]["reason"]
     assert "unavailable" in result["held"][0]["reason"]
     db.refresh(p)
-    assert p.status == "pending"
+    assert p.status == "rejected"  # codex 11R: hold분은 레인 말미 reject(익일 재생성 사이클)
 
 
 def test_hourly_lane_up_held_when_correction_factor_unavailable(db):
