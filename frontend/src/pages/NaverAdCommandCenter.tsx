@@ -376,6 +376,14 @@ function describeChange(row: NaverChangeLogRow): string {
       const created = Array.isArray(a?.created_ids) ? a.created_ids.length : null;
       return created == null ? "제외 키워드 추가" : `제외 키워드 ${num(created)}개 추가`;
     }
+    // 외부 감지 2종(라이브 검증이 발견 — ExternalChangesPane이 생기기 전엔 어떤 화면에도
+    // 안 떠서 케이스 누락이 보이지 않았고, prod 15행 전부가 action 원문으로 렌더됐다).
+    // payload는 우리 실행과 같은 키다: userLock / bidAmt(entity_sync.py:163·300 실측,
+    // bidAmt는 직전 관측 부재 시 null 가능 → n()이 막는다).
+    case "external_status_change":
+      return `상태 변경 감지: ${lock(b?.userLock)} → ${lock(a?.userLock)}`;
+    case "external_bid_change":
+      return `입찰가 변경 감지: ${n(b?.bidAmt)} → ${n(a?.bidAmt)}`;
     // D-NAO-50 키워드 밸브: added는 after_value, removed는 before_value에 실린다(entity_sync.py
     // _emit_inventory_side). ★대량(__bulk__)은 payload 모양이 다르다({bulk,count,sample} —
     // keyword/bidAmt 없음) — entity_id로 먼저 분기해 일반 케이스와 섞이지 않게 한다.
@@ -412,20 +420,29 @@ function ChangeLogPane() {
     );
   }
   return (
-    <Table head={<><Th>시각</Th><Th>대상</Th><Th>변경</Th><Th>근거</Th></>}>
-      {data.rows.map((r) => (
-        <tr key={r.id}>
-          <Td><span className="text-xs text-gray-500">{r.changed_at?.slice(5, 16) ?? NO_DATA}</span></Td>
-          <Td><span className="text-xs">{r.entity_type} {r.entity_id}</span></Td>
-          {/* ★"무엇을 왜 바꿨는지" — MOP에 0개인 컬럼(ref24). 우리가 이길 자리이므로
-              지원하는 실행 액션 4종을 전부 제대로 그린다(codex[P2] R3). */}
-          <Td>
-            <span className="text-xs tabular-nums">{describeChange(r)}</span>
-          </Td>
-          <Td><span className="text-xs text-gray-600">{r.rationale ?? NO_DATA}</span></Td>
-        </tr>
-      ))}
-    </Table>
+    <>
+      <Table head={<><Th>시각</Th><Th>대상</Th><Th>변경</Th><Th>근거</Th></>}>
+        {data.rows.map((r) => (
+          <tr key={r.id}>
+            <Td><span className="text-xs text-gray-500">{r.changed_at?.slice(5, 16) ?? NO_DATA}</span></Td>
+            <Td><span className="text-xs">{r.entity_type} {r.entity_id}</span></Td>
+            {/* ★"무엇을 왜 바꿨는지" — MOP에 0개인 컬럼(ref24). 우리가 이길 자리이므로
+                지원하는 실행 액션 4종을 전부 제대로 그린다(codex[P2] R3). */}
+            <Td>
+              <span className="text-xs tabular-nums">{describeChange(r)}</span>
+            </Td>
+            <Td><span className="text-xs text-gray-600">{r.rationale ?? NO_DATA}</span></Td>
+          </tr>
+        ))}
+      </Table>
+      {/* ★잘림을 숨기지 않는다(라이브 검증: 15건인데 10건만 보이고 표식 0). PendingPane의
+          집계 푸터와 같은 패턴. */}
+      {data.total > data.rows.length && (
+        <p className="px-4 py-2 text-xs text-gray-500 border-t border-gray-100">
+          최근 {num(data.rows.length)}건 표시 · 총 {num(data.total)}건
+        </p>
+      )}
+    </>
   );
 }
 
@@ -446,16 +463,24 @@ function ExternalChangesPane() {
     );
   }
   return (
-    <Table head={<><Th>시각</Th><Th>대상</Th><Th>변경</Th><Th>근거</Th></>}>
-      {data.rows.map((r) => (
-        <tr key={r.id}>
-          <Td><span className="text-xs text-gray-500">{r.changed_at?.slice(5, 16) ?? NO_DATA}</span></Td>
-          <Td><span className="text-xs">{r.entity_type} {r.entity_id}</span></Td>
-          <Td><span className="text-xs tabular-nums">{describeChange(r)}</span></Td>
-          <Td><span className="text-xs text-gray-600">{r.rationale ?? NO_DATA}</span></Td>
-        </tr>
-      ))}
-    </Table>
+    <>
+      <Table head={<><Th>시각</Th><Th>대상</Th><Th>변경</Th><Th>근거</Th></>}>
+        {data.rows.map((r) => (
+          <tr key={r.id}>
+            <Td><span className="text-xs text-gray-500">{r.changed_at?.slice(5, 16) ?? NO_DATA}</span></Td>
+            <Td><span className="text-xs">{r.entity_type} {r.entity_id}</span></Td>
+            <Td><span className="text-xs tabular-nums">{describeChange(r)}</span></Td>
+            <Td><span className="text-xs text-gray-600">{r.rationale ?? NO_DATA}</span></Td>
+          </tr>
+        ))}
+      </Table>
+      {/* ★잘림을 숨기지 않는다(라이브 검증: 15건인데 10건만 보이고 표식 0). */}
+      {data.total > data.rows.length && (
+        <p className="px-4 py-2 text-xs text-gray-500 border-t border-gray-100">
+          최근 {num(data.rows.length)}건 표시 · 총 {num(data.total)}건
+        </p>
+      )}
+    </>
   );
 }
 
