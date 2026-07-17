@@ -25,7 +25,7 @@ from app.models import (
     NaverProposal,
     NaverRetroSignal,
 )
-from app.services.naver_ad import campaign_target_resolver, diagnosis, hourly_pattern, naver_execution_harness, naver_sa_writer
+from app.services.naver_ad import campaign_target_resolver, diagnosis, diary, hourly_pattern, naver_execution_harness, naver_sa_writer
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.services.naver_ad.guardrail_gate import _MAX_CHANGE_PCT
 from app.services.naver_ad.trigger_watch import CPC_SPIKE_RATIO
@@ -88,6 +88,29 @@ def _auto_operate_campaign_ids(db: Session) -> set[str]:
         NaverCampaignSettings.auto_operate.is_(True)
     ).all()
     return {r[0] for r in rows}
+
+
+def _record_blocked(
+    db: Session, *, campaign_id: str, actor: str, reason: str, now: datetime,
+    target_type: str | None = None, target_id: str | None = None,
+    adgroup_id: str | None = None, action: str | None = None,
+    event_type: str = "blocked",
+) -> None:
+    """레인 고유 hold 1건을 운영 일기(blocked)로 기록(D-NAO-54 P1). diary.write_diary_entry가
+    fail-open이라 별도 try 불필요 — 일기 실패가 레인 집행/hold를 막지 않는다. 실집행/가드레일
+    차단/킬스위치는 harness가 기록하므로(이중 기록 금지), 이 함수는 레인이 harness로 넘기지
+    않고 자체 hold한 이벤트만 남긴다.
+
+    ★기록 대상 선별(소음 차단): "의도된 액션이 차단된 것"만 기록한다 — 시간당 레인의 일상
+    관찰(판정 hold=밴드 정상, 당일 imp 없음, intraday skip)은 액션 의도 자체가 없었으므로
+    기록하지 않는다(핫셋×매시 hold를 전부 적으면 일 수백 행 소음 → P3 후보 채굴 오염).
+
+    킬스위치 사유 hold는 event_type="kill_switch"로 기록(독립 리뷰 P3-1: harness의 writer측
+    거부와 같은 원인이 두 타입에 분산되면 P3 채굴이 kill_switch 빈도를 과소집계한다)."""
+    diary.write_diary_entry(
+        db, event_type, campaign_id, actor=actor, target_type=target_type,
+        target_id=target_id, adgroup_id=adgroup_id, action=action, rationale=reason, now=now,
+    )
 
 
 def _auto_operate_now(db: Session, campaign_id: str) -> bool:
@@ -357,19 +380,32 @@ def run_daily_lane(db: Session, *, now: datetime | None = None) -> dict:
             hold_reason = _check_bid_up_conditions(db, p, today)
             if hold_reason:
                 result["held"].append({"id": p.id, "reason": hold_reason})
+                _record_blocked(
+                    db, campaign_id=p.campaign_id, actor=diary.ACTOR_DAILY, reason=hold_reason,
+                    now=now, target_type=p.target_type, target_id=p.target_id,
+                    adgroup_id=p.adgroup_id, action=p.proposal_type,
+                )
                 continue
         elif p.proposal_type == "pause":
             if _has_recent_external_stop(db, p.target_type, p.target_id):
-                result["held"].append(
-                    {"id": p.id, "reason": "D-NAO-40: 최근 외부/수동 정지 이력 발견 — hold"}
+                hold_reason = "D-NAO-40: 최근 외부/수동 정지 이력 발견 — hold"
+                result["held"].append({"id": p.id, "reason": hold_reason})
+                _record_blocked(
+                    db, campaign_id=p.campaign_id, actor=diary.ACTOR_DAILY, reason=hold_reason,
+                    now=now, target_type=p.target_type, target_id=p.target_id,
+                    adgroup_id=p.adgroup_id, action=p.proposal_type,
                 )
                 continue
         # bid_down: 조건 없음(무조건 승인, 안전 방향)
 
         # 킬스위치 실행 직전 재확인(codex 5R[P1-2]) — 앞선 실행 도중 OFF 됐으면 이후 전부 skip.
         if not _auto_operate_now(db, p.campaign_id):
-            result["held"].append(
-                {"id": p.id, "reason": "킬스위치 OFF — auto_operate=False(실행 직전 재확인, codex 5R[P1-2])"}
+            hold_reason = "킬스위치 OFF — auto_operate=False(실행 직전 재확인, codex 5R[P1-2])"
+            result["held"].append({"id": p.id, "reason": hold_reason})
+            _record_blocked(
+                db, campaign_id=p.campaign_id, actor=diary.ACTOR_DAILY, reason=hold_reason,
+                now=now, target_type=p.target_type, target_id=p.target_id,
+                adgroup_id=p.adgroup_id, action=p.proposal_type, event_type="kill_switch",
             )
             continue
 
@@ -410,7 +446,22 @@ def run_daily_lane(db: Session, *, now: datetime | None = None) -> dict:
             )
             result["rejected_stale"] += 1
         if leftovers:
+            # D-NAO-54 P1 일기(reject)용 원시값을 커밋 前 캡처(독립 리뷰 P2-1: 커밋이 ORM
+            # 인스턴스를 만료시켜, 커밋 후 lp.* 접근은 refresh SELECT(I/O)를 유발 — 그 예외는
+            # write_diary_entry의 try 밖(호출 프레임)이라 fail-open 계약을 뚫는다).
+            rejected_info = [
+                (lp.campaign_id, lp.target_type, lp.target_id, lp.adgroup_id, lp.proposal_type)
+                for lp in leftovers
+            ]
             db.commit()
+            # 커밋 확정 후에만 기록(기록은 확정된 사실만) — 인자는 위에서 캡처한 원시값.
+            for c_id, t_type, t_id, ag_id, p_type in rejected_info:
+                diary.write_diary_entry(
+                    db, "reject", c_id, actor=diary.ACTOR_DAILY,
+                    target_type=t_type, target_id=t_id, adgroup_id=ag_id, action=p_type,
+                    rationale="auto_op 보류/stale — 익일 08:00 재생성(D-NAO-49 일일 사이클, codex 11R)",
+                    now=now,
+                )
 
     return result
 
@@ -729,6 +780,10 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
         breaker_reason = _check_spend_circuit_breaker(db, campaign_id, now)
         if breaker_reason:
             result["held"].append({"campaign_id": campaign_id, "reason": breaker_reason})
+            _record_blocked(
+                db, campaign_id=campaign_id, actor=diary.ACTOR_HOURLY,
+                reason=breaker_reason, now=now,
+            )
             continue
 
         for target_type, target_id in _hot_set_candidates(db, campaign_id, window_from, window_to):
@@ -753,25 +808,41 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                 result["held"].append({"target_id": target_id, "reason": verdict["reason"]})
                 continue
 
+            # 여기부터는 verdict가 up/down = 액션 의도 확정 — 이후의 hold는 "의도된 액션이
+            # 차단된 것"이므로 일기(blocked) 기록 대상(위의 판정 hold·imp 없음은 관찰 소음이라 제외).
+            intended_action = "bid_up" if verdict["direction"] == "up" else "bid_down"
             current_bid = _live_current_bid(target_type, target_id)
             if current_bid is None:
-                result["held"].append({"target_id": target_id, "reason": "라이브 현재가 재조회 실패"})
+                hold_reason = "라이브 현재가 재조회 실패"
+                result["held"].append({"target_id": target_id, "reason": hold_reason})
+                _record_blocked(
+                    db, campaign_id=campaign_id, actor=diary.ACTOR_HOURLY, reason=hold_reason,
+                    now=now, target_type=target_type, target_id=target_id, action=intended_action,
+                )
                 continue
             step_bid = _clamp_step(current_bid, verdict["direction"])
             if step_bid is None:
-                result["held"].append({"target_id": target_id, "reason": "스텝 클램프 계산 불가(방향 무의미)"})
+                hold_reason = "스텝 클램프 계산 불가(방향 무의미)"
+                result["held"].append({"target_id": target_id, "reason": hold_reason})
+                _record_blocked(
+                    db, campaign_id=campaign_id, actor=diary.ACTOR_HOURLY, reason=hold_reason,
+                    now=now, target_type=target_type, target_id=target_id, action=intended_action,
+                )
                 continue
 
             # 킬스위치 실행 직전 재확인(codex 5R[P1-2]) — 앞선 실행 도중 OFF 됐으면 이후
             # 유닛은 제안 생성 자체를 하지 않는다(즉시 정지 계약).
             if not _auto_operate_now(db, campaign_id):
-                result["held"].append(
-                    {"target_id": target_id,
-                     "reason": "킬스위치 OFF — auto_operate=False(실행 직전 재확인, codex 5R[P1-2])"}
+                hold_reason = "킬스위치 OFF — auto_operate=False(실행 직전 재확인, codex 5R[P1-2])"
+                result["held"].append({"target_id": target_id, "reason": hold_reason})
+                _record_blocked(
+                    db, campaign_id=campaign_id, actor=diary.ACTOR_HOURLY, reason=hold_reason,
+                    now=now, target_type=target_type, target_id=target_id, action=intended_action,
+                    event_type="kill_switch",
                 )
                 continue
 
-            proposal_type = "bid_up" if verdict["direction"] == "up" else "bid_down"
+            proposal_type = intended_action
             proposal = NaverProposal(
                 proposal_type=proposal_type, target_type=target_type, target_id=target_id,
                 campaign_id=campaign_id,

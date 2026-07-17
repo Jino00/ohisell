@@ -2051,3 +2051,53 @@ class NaverAccountSettings(Base):
     key: Mapped[str] = mapped_column(String(40), unique=True, nullable=False)
     value_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+# ══════════════════════════════════════════════════════════════════
+# D-NAO-54 P1 — 운영 일기(기록층) (docs/PLAN_naver-ad-diary-wisdom.md §P1)
+# ══════════════════════════════════════════════════════════════════
+class OpsDiaryEntry(Base):
+    """운영 일기 1건 — "무엇을 했나(집행/차단/거부/킬스위치)"를 그 순간의 환경 스냅샷과 함께
+    남기는 기록층(D-NAO-54 P1). Jino 문제의식: "한 일만 적지 말고 환경조건(휴일·계절·폰
+    출시기간·요일)에 맞춰 결과를 학습". P2 해석층이 outcome_json에 D+1/D+7 결과를 소급 기입하고,
+    P3가 3회 반복/TTL로 지혜 승격 후보를 뽑는다.
+
+    기록 원리(이중 기록 금지): 실집행/가드레일 차단/킬스위치는 naver_execution_harness가,
+    레인 고유 이벤트(일·시간당 레인의 hold=blocked, rejected_stale=reject)는 auto_operator가
+    남긴다. 일기 쓰기 실패는 집행을 막지 않는다(diary.write_diary_entry fail-open — 독립 세션).
+
+    event_type: execute|blocked|reject|kill_switch|observe.
+    actor: daily|hourly|console|delegation|system (diary.actor_from_approval_source 파생).
+    source_ref: 이 일기가 가리키는 naver_change_log.id(execute/blocked 시 연결, 그 외 None).
+    """
+
+    __tablename__ = "ops_diary_entries"
+    __table_args__ = (
+        Index("ix_ops_diary_entries_campaign_created", "campaign_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # ⚠️UTC — server_default=func.now()는 UTC로 찍힌다([[sqlite-server-default-now-is-utc]] 교훈,
+    # NaverChangeLog.changed_at과 동일 관례). 환경 스냅샷의 weekday/season은 KST now 기준이라
+    # created_at(UTC)과 의미가 다른 별개 필드다(혼동 금지).
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
+    event_type: Mapped[str] = mapped_column(String(16), nullable=False)  # execute/blocked/reject/kill_switch/observe
+    campaign_id: Mapped[str] = mapped_column(String(50), nullable=False, default="", index=True)
+    adgroup_id: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    target_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)  # campaign/adgroup/keyword/search_term
+    target_id: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    actor: Mapped[str] = mapped_column(String(12), nullable=False, default="system")  # daily/hourly/console/delegation/system
+    action: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)  # update_bid/set_user_lock/bid_up 등
+    before_value: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    after_value: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    rationale: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # ── 환경 스냅샷(env_snapshot_sa) — 어떤 필드든 조회 실패 시 None ──
+    weekday: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 0=월 … 6=일 (KST now 기준)
+    is_kr_holiday: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    season: Mapped[Optional[str]] = mapped_column(String(6), nullable=True)  # spring/summer/autumn/winter
+    iphone_launch_offset_days: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # +출시 후 경과/-출시 전
+    spend_pacing_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # 캠페인 당일 소진율(%)
+    avg_rank: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # keyword 대상 최신 avg_rank
+    # ── P2가 소급 기입(지금은 항상 None) ──
+    outcome_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    source_ref: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # naver_change_log.id

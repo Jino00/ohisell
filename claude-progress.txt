@@ -3,6 +3,10 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
+- 날짜: 2026-07-18 (★★**D-NAO-54 운영 일기·지혜 시스템 — P1 구현 진행 중** — 워크트리 `session-dfd814`, 브랜치 `claude/session-dfd814`, origin/main f1b341a 기준. Fable설계/Opus구현/Sonnet단순 라우팅, 옵션=추천안 자동 진행(Jino 지시). 계획서=`docs/PLAN_naver-ad-diary-wisdom.md` §0 먼저)
+  - 전 세션(07-17 밤, dedfad): 구조 Jino 승인·계획서 완성·구현 미착수 → HANDOFF=`.claude/memory/HANDOFF_ohisell-diary-wisdom-approved+bridge-fix_20260717.md`. 미커밋 docs(트랙 D-NAO-54·계획서·HANDOFF 2건)는 이 브랜치 첫 커밋에 포함됨.
+  - codex 한도 07-23 19:15까지 소진 — 독립 리뷰어 서브에이전트 대체 + 커밋에 "codex 소급 리뷰 후보" 명기.
+  - 세션 소실 재발 방지: `ccAutoArchiveOnPrClose` OFF 실측(07-11 HANDOFF 소실도 같은 원인). 되감기 복구 상세=`HANDOFF_MOP36-rewind-recovery_20260717.md`.
 - 날짜: 2026-07-17 22:55 KST (★**파이프라인 신선도 3층 방어 — 층2·층3 배포·라이브합격·PR #41 병합, 층1 구현 중** — 트랙 외 별건(쿠팡 RG, 네이버 트랙 무관), Jino "끝까지 자동 진행" 승인. 워크트리 `spot-backtest-cadence-pacing-2e3bfa`, 브랜치 `claude/elastic-turing-6f1eee`)
   - **사고 규명**: WING1/WING2 Wing 쿠키 06-21/06-10 만료 → RG status/api 계정 row 26/37일 공백, 크론은 auth_error를 삼키고 last_status=ok(green-while-dead). 감지(health API)+Mac 6h 알림은 **정상 작동 중이었고**, 죽은 지점=대시보드 상설 배너 부재(ADS1만 배너 있었고 그것만 고쳐진 자연실험). -6d 추측 폴백이 월경계 2주기 오적재 → 6월 RG비용 +55% 과대계상.
   - **정산주기 실규칙 확정**: 월~일 주별 + 달력 월경계 분할 (prod 계정 row 18/18 검증) — 레퍼런스 17에 없던 사실, 라이브가 권위.
