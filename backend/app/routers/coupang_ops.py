@@ -17,6 +17,7 @@ import os
 import re
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, File, Header, HTTPException, Path, Query, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -1800,7 +1801,14 @@ async def upload_rg_settlement_xlsx(
 
     content = await file.read()
     try:
-        result = rg_settlement_sync.ingest_settlement_xlsx(db, account_key, content)
+        # ★run_in_threadpool 필수(2026-07-17 사고): 이 라우터 82개 엔드포인트 중 79개는 `def`라
+        # FastAPI가 알아서 스레드풀로 보내지만, 업로드 2개만 `async def`(await file.read() 때문)여서
+        # 동기 ingest가 **이벤트 루프 위에서** 돌았다. prod는 uvicorn --workers 1 단일 워커라
+        # 그 시간 동안 모든 API가 멈춘다(같은 시각 fetch-error POST도 15초 타임아웃). 파싱이
+        # 빨라진 지금도(0.06초) 파일이 커지면 재발하므로 구조로 막는다.
+        result = await run_in_threadpool(
+            rg_settlement_sync.ingest_settlement_xlsx, db, account_key, content
+        )
     except WingReadError as e:
         raise HTTPException(status_code=422, detail=f"엑셀 파싱 실패: {e}")
     # S4-P2: 자동 다운로드(Mac 페처 push)·수동 업로드 모두 freshness 갱신(스케줄 중복방지·상태표시).
@@ -1885,7 +1893,10 @@ async def upload_product_size_xlsx(
     if not filename.lower().endswith(".xlsx"):
         raise HTTPException(status_code=400, detail="xlsx 파일만 업로드 가능합니다.")
     content = await file.read()
-    result = rg_product_size_sync.ingest_product_size(db, content, source_group_key=source_group_key)
+    # 위 upload-xlsx와 동일 이유로 스레드풀 오프로드(`async def` + 동기 파싱 = 단일 워커 전체 정지).
+    result = await run_in_threadpool(
+        rg_product_size_sync.ingest_product_size, db, content, source_group_key=source_group_key
+    )
     return result
 
 

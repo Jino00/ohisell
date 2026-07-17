@@ -680,6 +680,41 @@ def test_ingest_empty_when_all_unknown():
     assert res["upserted"] == 0
 
 
+# ─── 파싱 성능 가드 (2026-07-17 라이브 사고) ──────────────
+def test_parse_xlsx_scales_linearly_not_quadratically():
+    """대형 시트 파싱이 O(n²)로 퇴행하지 않는지 가드.
+
+    ★사고(2026-07-17 21:07~21:12): read_only=True 워크북에 랜덤접근 ws.cell(row,col)을
+    행 루프 안에서 쓰면, openpyxl은 cell() 호출마다 시트 XML을 1행부터 **다시 파싱**한다
+    (ReadOnlyWorksheet._get_cell → _cells_by_row → 새 WorkSheetParser). 행당 cell() 3회 =
+    O(n²) → 실측 100행 1.3초 / 200행 4.5초 / 400행 16.4초(2.5시간 아니고 배가 3.5배씩).
+    실제 정산 엑셀(≈800행/시트)이 60초를 넘겨 Mac 페처 POST가 타임아웃(timeout=60)했고,
+    단일 워커(uvicorn --workers 1)라 그동안 다른 API까지 멈췄다.
+
+    → 파서는 시트당 **1회 스트리밍 순회**만 해야 한다(iter_rows). 수정 후 1000행 ≈ 0.06초.
+    경계 5초 = 수정본 대비 80배 여유(느린 CI 대비) · 퇴행본(≈43초) 대비 8배 아래 → 둘을 확실히 가름.
+    """
+    import time
+
+    n_rows = 1000
+    rows = [(str(95521944483 + (i % 45)), "2026-06-04", "2026-06-07", 3300, 1050, 2250)
+            for i in range(n_rows)]
+    content = _build_xlsx([("입출고비", "입출고비", rows, 25, None, "2026-06-07")])
+
+    t0 = time.perf_counter()
+    parsed = parse_settlement_xlsx(content)
+    elapsed = time.perf_counter() - t0
+
+    # 정확성도 같이 확인 — 빨라졌다고 결과가 달라지면 안 된다.
+    sheet = parsed["sheets"][0]
+    assert len(sheet["options"]) == 45          # 고유 옵션(1000행이 45개로 합산)
+    assert sheet["sum_detail"] == Decimal("2250") * n_rows
+    assert elapsed < 5.0, (
+        f"{n_rows}행 파싱에 {elapsed:.1f}초 — O(n²) 퇴행 의심"
+        " (read_only 워크북에 랜덤 ws.cell() 쓰면 재발)"
+    )
+
+
 # ─── codex 리뷰 반영(원칙19) ──────────────────────────
 def test_ingest_snapshot_replace_removes_stale_option():
     """재업로드 시 이번 엑셀에 없는 옵션 row 삭제(codex P2 snapshot replace)."""

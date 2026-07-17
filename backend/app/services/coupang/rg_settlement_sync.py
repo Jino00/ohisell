@@ -350,17 +350,46 @@ def _parse_excel_date(value) -> date | None:
         return None
 
 
-def _find_header_row(ws) -> int | None:
+def _read_grid(ws) -> list[tuple]:
+    """시트를 **단 1회** 스트리밍해 값 격자(1행=튜플)로 읽는다.
+
+    ★이 함수가 존재하는 이유(2026-07-17 라이브 사고): read_only=True 워크북에서
+    `ws.cell(row, col)`은 상수시간 조회가 **아니다**. ReadOnlyWorksheet._get_cell →
+    _cells_by_row가 호출마다 시트 XML을 1행부터 새 WorkSheetParser로 다시 판다.
+    행 루프 안에서 셀 3개를 읽으면 O(n²) → 1000행 48초(실측), 실제 정산 엑셀이
+    60초를 넘겨 Mac 페처 POST 타임아웃 + 단일 워커 전체 지연을 유발했다.
+    → 격자로 한 번 읽고 이후엔 메모리에서만 인덱싱한다(1000행 0.06초).
+
+    메모리: 시트 1개분 값만 유지하고 다음 시트로 넘어가며 버린다(주간 정산 ≈1천행 → 무시 가능).
+    """
+    return [tuple(row) for row in ws.iter_rows(values_only=True)]
+
+
+def _at(grid: list[tuple], r: int, c: int):
+    """격자 1-indexed 셀 값. 범위 밖/없는 셀 → None (ws.cell(...).value와 동일 의미)."""
+    if 1 <= r <= len(grid):
+        row = grid[r - 1]
+        if 1 <= c <= len(row):
+            return row[c - 1]
+    return None
+
+
+def _max_column(grid: list[tuple]) -> int:
+    """격자 최대 컬럼 수(=ws.max_column 대체). 빈 시트 → 0."""
+    return max((len(row) for row in grid), default=0)
+
+
+def _find_header_row(grid: list[tuple]) -> int | None:
     """'옵션ID'를 값으로 가진 행 = 상세 헤더행. 상단 20행 내 탐색. 없으면 None(D-13)."""
-    for r in range(1, min(ws.max_row, 20) + 1):
-        for c in range(1, ws.max_column + 1):
-            v = ws.cell(row=r, column=c).value
+    for r in range(1, min(len(grid), 20) + 1):
+        for c in range(1, _max_column(grid) + 1):
+            v = _at(grid, r, c)
             if v is not None and str(v).strip() == _COL_OPTION_ID:
                 return r
     return None
 
 
-def _build_col_map(ws, header_row: int) -> dict[str, int]:
+def _build_col_map(grid: list[tuple], header_row: int) -> dict[str, int]:
     """헤더행 + 바로 아래 서브헤더행을 합쳐 {label: col} 매핑(서브 우선).
 
     2층 헤더 대응: row7 메인(옵션ID·매출인식일·'…입출고비(VAT별도)' 병합) +
@@ -368,9 +397,9 @@ def _build_col_map(ws, header_row: int) -> dict[str, int]:
     같은 label 중복 시 먼저 본 컬럼 유지.
     """
     col_map: dict[str, int] = {}
-    for c in range(1, ws.max_column + 1):
-        main = ws.cell(row=header_row, column=c).value
-        sub = ws.cell(row=header_row + 1, column=c).value
+    for c in range(1, _max_column(grid) + 1):
+        main = _at(grid, header_row, c)
+        sub = _at(grid, header_row + 1, c)
         for label in (sub, main):  # 서브헤더 우선
             if label is not None and str(label).strip():
                 key = str(label).strip()
@@ -378,16 +407,16 @@ def _build_col_map(ws, header_row: int) -> dict[str, int]:
     return col_map
 
 
-def _parse_summary(ws) -> dict | None:
+def _parse_summary(grid: list[tuple]) -> dict | None:
     """요약 행(정산주기 종료일·합계·세액·최종비용) 파싱. 헤더 위치 동적 탐색.
 
     상단 8행 내에서 '정산주기(종료일)' + '…합계' + '세액' + '최종비용' 헤더를 모두 가진 행을
     요약 헤더로 보고, 그 다음 행을 데이터로 읽는다. (상세 헤더 row7은 '세액'/'최종비용' 없어 매칭 안 됨.)
     """
-    for r in range(1, min(ws.max_row, 8) + 1):
+    for r in range(1, min(len(grid), 8) + 1):
         labels: dict[str, int] = {}
-        for c in range(1, ws.max_column + 1):
-            v = ws.cell(row=r, column=c).value
+        for c in range(1, _max_column(grid) + 1):
+            v = _at(grid, r, c)
             if v is not None and str(v).strip():
                 labels.setdefault(str(v).strip(), c)
         end_col = labels.get(_COL_PERIOD_END)
@@ -397,10 +426,10 @@ def _parse_summary(ws) -> dict | None:
         if end_col and sum_col and tax_col and final_col:
             dr = r + 1
             return {
-                "period_end": _parse_excel_date(ws.cell(row=dr, column=end_col).value),
-                "sum_discounted": _dec(ws.cell(row=dr, column=sum_col).value),
-                "tax": _dec(ws.cell(row=dr, column=tax_col).value),
-                "final": _dec(ws.cell(row=dr, column=final_col).value),
+                "period_end": _parse_excel_date(_at(grid, dr, end_col)),
+                "sum_discounted": _dec(_at(grid, dr, sum_col)),
+                "tax": _dec(_at(grid, dr, tax_col)),
+                "final": _dec(_at(grid, dr, final_col)),
             }
     return None
 
@@ -435,12 +464,13 @@ def parse_settlement_xlsx(content: bytes) -> dict:
                 skipped.append(sn)
                 continue
             ws = wb[sn]
-            hr = _find_header_row(ws)
+            grid = _read_grid(ws)   # ★시트당 XML 1회 파싱(그 뒤는 전부 메모리 인덱싱)
+            hr = _find_header_row(grid)
             if hr is None:
                 log.warning("RG 엑셀 '%s' 상세 헤더(옵션ID) 못 찾음, 건너뜀", sn)
                 skipped.append(sn)
                 continue
-            col_map = _build_col_map(ws, hr)
+            col_map = _build_col_map(grid, hr)
             oid_col = col_map.get(_COL_OPTION_ID)
             cost_col = col_map.get(_COL_DISCOUNTED)
             pend_col = col_map.get(_COL_PERIOD_END)
@@ -452,17 +482,17 @@ def parse_settlement_xlsx(content: bytes) -> dict:
             options: dict[tuple[str, date | None], Decimal] = {}
             sum_detail = Decimal(0)
             # 헤더+1부터 순회. 서브헤더 행은 옵션ID가 비어 자동 skip(서브헤더 유무 무관).
-            for r in range(hr + 1, ws.max_row + 1):
-                oid = _norm_option_id(ws.cell(row=r, column=oid_col).value)
+            for r in range(hr + 1, len(grid) + 1):
+                oid = _norm_option_id(_at(grid, r, oid_col))
                 if not oid:
                     continue
-                cost = _dec(ws.cell(row=r, column=cost_col).value)
-                pend = _parse_excel_date(ws.cell(row=r, column=pend_col).value) if pend_col else None
+                cost = _dec(_at(grid, r, cost_col))
+                pend = _parse_excel_date(_at(grid, r, pend_col)) if pend_col else None
                 key = (oid, pend)
                 options[key] = options.get(key, Decimal(0)) + cost
                 sum_detail += cost
 
-            summary = _parse_summary(ws)
+            summary = _parse_summary(grid)
             reconcile = None
             if summary is not None:
                 diff = sum_detail - summary["sum_discounted"]

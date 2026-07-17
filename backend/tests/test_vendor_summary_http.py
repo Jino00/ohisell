@@ -119,6 +119,44 @@ def test_rg_settlement_upload_requires_token(client):
     assert r.status_code == 401
 
 
+def test_rg_settlement_upload_roundtrip_offloads_to_threadpool(client):
+    """업로드 성공 경로 HTTP 왕복 — 파싱·적재 결과가 응답에 실려 오는지.
+
+    ★이 테스트가 필요한 이유(2026-07-17): 엔드포인트가 `async def`라 동기 ingest가 이벤트 루프를
+    막았고(단일 워커 = 그동안 모든 API 정지), 수정으로 run_in_threadpool 오프로드를 넣었다.
+    오프로드는 **DB 세션을 워커 스레드에서 쓰게 만든다** → SQLite `check_same_thread` 설정이
+    틀리면 여기서만 터진다(파서 단위 테스트로는 절대 안 잡힘).
+    prod 엔진도 connect_args={"check_same_thread": False}라 동일 조건(app/database.py).
+    """
+    from tests.test_rg_settlement_sync import _build_xlsx, _WH_ROWS
+
+    content = _build_xlsx([("입출고비", "입출고비", _WH_ROWS)])
+    r = client.post(
+        "/api/coupang/ops/rg/settlement/upload-xlsx",
+        params={"account_key": "COUPANG_WING1"},   # 파일명 vendor_id 없음 → 명시 account_key 사용
+        files={"file": ("WAREHOUSING_SHIPPING-ko-x.xlsx", content,
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        headers={"X-Ingest-Token": _TOKEN},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["upserted"] == 2               # 고유 옵션 2개
+    assert body["account_key"] == "COUPANG_WING1"
+
+
+def test_rg_settlement_upload_corrupt_file_returns_422(client):
+    """손상 파일 → 500 아닌 422(WingReadError 매핑). 스레드풀 오프로드 후에도 예외가 전파되는지 확인."""
+    r = client.post(
+        "/api/coupang/ops/rg/settlement/upload-xlsx",
+        params={"account_key": "COUPANG_WING1"},
+        files={"file": ("WAREHOUSING_SHIPPING-ko-x.xlsx", b"not-a-real-xlsx",
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        headers={"X-Ingest-Token": _TOKEN},
+    )
+    assert r.status_code == 422, r.text
+
+
 def test_rg_settlement_refresh_trigger_claim_flow(client):
     """request-refresh(무토큰 UI) → status requested=True → claim(토큰) → requested=False. (vendor-summary 미러)"""
     base = "/api/coupang/ops/wing/rg-settlement"
