@@ -17,6 +17,7 @@
   - ②D-NAO-53: executeConfirmText가 액션 무관 "제외키워드 등록" Confirm(OPEN_ACTIONS 4개 개방인데 X1a 하드코딩 잔재, D-NAO-5 훼손) → serializer `action`+목록 `open_actions`(harness 파생, 신규 `open_executable_actions()`)+Confirm 5분기(미지 액션 폴백=사칭 불가)+배너 동적화. 1771 pass·codex PASS·PR #31 병합(main `339c231`)·safe_deploy 배포·prod API/번들 라이브 실측 합격. Fable설계/Opus구현/Sonnet검증 handoff.
   - 시각 확인 완결: Jino 스크린샷으로 배너 "현재 개방: 제외키워드, 정지·재개, 입찰가, 예산" 라이브 렌더 확인.
   - ③D-NAO-53-a 제안 카드 유형 필터(실행형/정보성/전부, 기본=실행형) — 정보성 72건이 대기 탭 점유(Jino 스크린샷). 백엔드 ?informational 재사용·변경 0. vitest 25·codex PASS·PR #34 병합·배포·라이브 번들/쿼리 실측. 오늘 pending 실행형=0이 진실(11건 전부 처리완료)이라 기본 화면=정직한 빈 상태.
+  - ④D-NAO-53-b 정보성 카드 승인/반려 버튼 제거(Jino "필요없는 버튼 복잡"). no-op·자동만료 D+1~3·채점 무관 실측 → showsActionButtons + "자동 만료" 캡션. vitest 28·codex PASS·PR #36 병합·배포·번들 실측(index-sK3sCwzW.js). 콘솔 완성형: 실행형=결정+버튼 / 정보성=읽기 전용.
 
 ## 이전 상태
 - 날짜: 2026-07-17 17:40 KST (★**쿠팡 광고비 페처 실패 보고 구멍 수정·배포·라이브합격** — 트랙 외 별건, Jino 승인. PR #30)
