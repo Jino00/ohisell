@@ -572,6 +572,42 @@ def test_harness_executes_auto_op_proposal_when_kill_switch_on(db):
     assert log_entry.action == "update_bid"
 
 
+# ── codex 8R[P1]: 킬스위치 최종 확인 = writer 직전(진입 체크~PUT 사이 잔여 레이스 봉쇄) ──
+
+def test_harness_kill_switch_flip_after_entry_check_blocks_writer(db):
+    """execute() 진입 체크(7R)와 writer PUT 사이엔 라이브 재조회·가드레일 평가(수백 ms)가
+    있다 — 그 동안의 OFF를 못 잡으면 잔여 레이스. 가드레일 컨텍스트 빌드의 부수효과로
+    플래그를 끄면(진입 체크는 ON으로 통과한 뒤) writer 직전 최종 확인이 차단해야 한다:
+    writer 미호출·change_log 0건·approved 유지(클레임 원복)."""
+    from app.services.naver_ad import naver_execution_harness as harness
+
+    _settings(db, auto_operate=True)  # 진입 체크 시점엔 ON
+    p = _proposal(db, proposal_type="bid_down", target_id="nkw-race", target_bid=850,
+                  status="approved")
+    p.approval_source = auto_operator.APPROVAL_SOURCE_DAILY
+    db.commit()
+
+    def _ctx_build_and_kill(db_arg, proposal_arg, now_arg):
+        # 진입 체크 통과 후·writer 전 구간(라이브 재조회 자리)에서 킬스위치 OFF를 재현
+        db.query(NaverCampaignSettings).filter(
+            NaverCampaignSettings.campaign_id == CAMPAIGN
+        ).update({"auto_operate": False})
+        db.commit()
+        return {}
+
+    with patch.object(harness, "_build_guardrail_context", side_effect=_ctx_build_and_kill), \
+         patch.object(harness.guardrail_gate, "check", return_value=None), \
+         patch.object(harness.naver_sa_writer, "update_keyword_bid") as mock_write:
+        with pytest.raises(harness.KillSwitchEngagedError):
+            harness.execute(db, p.id, dry_run=False)
+
+    mock_write.assert_not_called()
+    db.refresh(p)
+    assert p.status == "approved"  # executing 클레임이 원복돼야 함(미실행 정직 상태)
+    assert p.executed_change_log_id is None
+    assert db.query(NaverChangeLog).filter(NaverChangeLog.proposal_id == p.id).count() == 0
+
+
 # ══════════════════════════ 시간당 레인(A2+A3) ══════════════════════════
 
 def _hour(h, *, imp, clk, cost, avg_rank=None):

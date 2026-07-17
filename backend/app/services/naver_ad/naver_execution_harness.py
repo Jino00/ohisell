@@ -149,7 +149,15 @@ def _claim_executing(db: Session, proposal: NaverProposal) -> None:
     UPDATE ... WHERE status='approved' AND executed_change_log_id IS NULL은 DB가 직렬화해
     정확히 한쪽만 1행 성공 — 콘솔 라우터(사람 클릭)·X2 flight_loop 크론의 다중 진입 대비.
     이 시점 이후 크래시해도 'executing'이 남아 approved 게이트가 재진입을 차단한다.
-    실행자 3개(add_negative_keyword/update_bid/set_user_lock)가 동일 로직을 공유한다."""
+    실행자 3개(add_negative_keyword/update_bid/set_user_lock)가 동일 로직을 공유한다.
+
+    codex 8R[P1](D-NAO-49): 클레임 성공 직후 = 모든 실행자의 writer_fn 호출 직전 단일
+    공통 지점 — execute() 진입 체크(7R)와 PUT 사이의 라이브 재조회·가드레일 평가(수백 ms)
+    동안 킬스위치가 꺼지는 잔여 레이스를 여기서 봉쇄한다(최종 권위, 3중 방어 완성:
+    레인 pre-check → execute() 진입 → writer 직전). approval_source가 auto_op/auto_op_hr인
+    제안에 한해 재확인, OFF면 클레임을 approved로 원복(미실행 정직 상태 — executing 잔존
+    방지)하고 KillSwitchEngagedError — 쓰기·change_log 없음. 수동 콘솔(NULL)·delegation은
+    비영향."""
     claimed = db.query(NaverProposal).filter(
         NaverProposal.id == proposal.id,
         NaverProposal.status == "approved",
@@ -161,6 +169,25 @@ def _claim_executing(db: Session, proposal: NaverProposal) -> None:
             f"proposal_id={proposal.id} 클레임 실패 — 다른 실행자가 선점(동시 실행 차단)"
         )
     db.refresh(proposal)
+
+    if proposal.approval_source is not None:
+        from app.services.naver_ad import auto_operator as _auto_operator  # 지연 import(순환 회피, 7R과 동일)
+
+        if proposal.approval_source in (
+            _auto_operator.APPROVAL_SOURCE_DAILY, _auto_operator.APPROVAL_SOURCE_HOURLY,
+        ) and not _auto_operator._auto_operate_now(db, proposal.campaign_id):
+            proposal.status = "approved"  # 클레임 원복 — executing 잔존 방지(미실행 정직 상태)
+            db.commit()
+            log.warning(
+                "naver_execution_harness: 킬스위치 OFF(writer 직전 최종 확인) — proposal_id=%s"
+                "(approval_source=%s, campaign_id=%s) 실행 거부(쓰기·change_log 없음, "
+                "approved 원복, codex 8R)",
+                proposal.id, proposal.approval_source, proposal.campaign_id,
+            )
+            raise KillSwitchEngagedError(
+                f"proposal_id={proposal.id} campaign_id={proposal.campaign_id} — "
+                f"auto_operate=False(킬스위치 OFF, writer 직전 최종 확인)"
+            )
 
 
 def _detect_external_change(db: Session, proposal: NaverProposal, live_before: dict, field: str) -> str | None:
