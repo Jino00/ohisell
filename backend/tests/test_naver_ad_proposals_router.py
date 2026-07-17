@@ -53,7 +53,13 @@ def test_proposals_endpoint_returns_200_empty(client):
     assert resp.status_code == 200
     # D-NAO-47: total 추가(additive — 기존 rows 소비자 불변). limit으로 자른 페이지 길이를
     # 건수로 쓰면 틀린 숫자가 되므로 서버가 전체 건수를 준다.
-    assert resp.json() == {"total": 0, "rows": []}
+    # open_actions 추가(additive) — 배너의 "현재 개방" 표시가 하드코딩 대신 이 값을 쓴다.
+    from app.services.naver_ad import naver_execution_harness
+    assert resp.json() == {
+        "total": 0,
+        "open_actions": naver_execution_harness.open_executable_actions(),
+        "rows": [],
+    }
 
 
 def test_proposals_endpoint_returns_seeded_rows(client, db):
@@ -218,6 +224,46 @@ def test_proposal_serializes_informational_flag(client, db):
     by_type = {i["proposal_type"]: i for i in items}
     assert by_type["trigger_pacing"]["informational"] is True
     assert by_type["bid_up"]["informational"] is False
+
+
+# ── 실행 액션 파생값(action) + 개방 목록(open_actions) 드리프트 가드 ──
+def test_open_actions_matches_harness_derived_value(client, db):
+    """★배너의 "현재 개방" 표시는 하드코딩(구: "제외키워드")이 아니라 목록 API의 open_actions를
+    쓴다. 그 값이 harness의 실제 개방 집합(이중 방벽 교집합)과 어긋나면 안 된다 — 개방 순서가
+    코드로 진행돼도 배너가 자동으로 따라온다."""
+    from app.services.naver_ad import naver_execution_harness
+    body = client.get("/api/naver/ad/proposals").json()
+    assert body["open_actions"] == naver_execution_harness.open_executable_actions()
+    # 교집합의 실제 의미: OPEN_ACTIONS이면서 구현(_WRITE_EXECUTORS)이 있는 것만.
+    assert set(body["open_actions"]) <= naver_execution_harness.OPEN_ACTIONS
+    for a in body["open_actions"]:
+        assert a in naver_execution_harness._WRITE_EXECUTORS
+
+
+def test_proposal_serializes_action_for_bid_up(client, db):
+    """bid_up → update_bid. 프론트가 유형 문자열로 액션을 재추론하지 않도록 백엔드가 파생값을
+    준다(harness._ACTION_BY_PROPOSAL_TYPE 단일 진실)."""
+    db.add(NaverProposal(
+        proposal_type="bid_up", target_type="keyword", target_id="nkw-1",
+        campaign_id="cmp-1", status="pending", target_bid=1450,
+    ))
+    db.commit()
+    items = client.get("/api/naver/ad/proposals?status=pending").json()["rows"]
+    assert items[0]["action"] == "update_bid"
+
+
+def test_proposal_serializes_action_null_for_informational(client, db):
+    """정보성 유형은 실행 대상이 없어 action이 None(매핑에 없음)."""
+    from app.services.naver_ad.proposal_writer import INFORMATIONAL_PROPOSAL_TYPES
+    info_type = sorted(INFORMATIONAL_PROPOSAL_TYPES)[0]
+    db.add(NaverProposal(
+        proposal_type=info_type, target_type="campaign", target_id="cmp-1",
+        campaign_id="cmp-1", status="pending",
+    ))
+    db.commit()
+    items = client.get("/api/naver/ad/proposals?status=pending").json()["rows"]
+    assert items[0]["informational"] is True
+    assert items[0]["action"] is None
 
 
 def test_all_proposal_types_constant_covers_every_emitted_type():

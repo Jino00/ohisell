@@ -2,8 +2,10 @@
 // 제안 카드(D-NAO-22) + 캠페인 optimizer/모드/공격성 다이얼 패널(D-NAO-2/13/22-②).
 // 다이얼(공격성)은 라벨이 아니라 target_roas_override PUT으로 campaign_target_resolver
 // 실계산에 그대로 반영된다(계획서 §4-Phase1 경고 — S3a HANDOFF 교훈).
-// X1a T4 — 승인/반려/실행 버튼(반자동 개시, 실쓰기 첫 개방=제외키워드). 자동 실행은 없다 —
-// 모든 실쓰기는 사람의 Confirm을 거친다(D-NAO-5).
+// X1a T4 — 승인/반려/실행 버튼(반자동 개시). 자동 실행은 없다 — 모든 실쓰기는 사람의
+// Confirm을 거친다(D-NAO-5). 현재 개방 액션은 하드코딩하지 않는다: 목록 API의 open_actions
+// (백엔드 파생값)를 배너·Confirm 문안이 진실로 삼는다 — 개방 순서가 코드로 진행돼도
+// 자동으로 따라온다(제외키워드→정지·재개→입찰→예산, D-NAO-16).
 // X1a T5 — E2 위임 스위치(D-NAO-25): Ava agree+가드레일 통과 유형만 사람 승인 없이
 // 자동 승인·실행되도록 콘솔에서 켜고 끈다. 스위치 행사자는 Jino뿐.
 import { Fragment, useEffect, useRef, useState } from "react";
@@ -49,6 +51,82 @@ function fmtEvidenceTime(iso: string | null): string {
   return `${Number(m)}/${Number(d)} ${timePart}`;
 }
 
+// 실행 액션 → 한국어 라벨(배너의 "현재 개방" 표시용). 맵에 없는 액션은 원문 그대로 노출한다
+// (숨기면 새로 개방된 게 안 보인다 — 정직 경계). 진실은 백엔드 open_actions.
+const ACTION_LABEL_KO: Record<string, string> = {
+  add_negative_keyword: "제외키워드",
+  update_bid: "입찰가",
+  set_user_lock: "정지·재개",
+  update_budget: "예산",
+};
+
+function actionLabelKo(action: string): string {
+  return ACTION_LABEL_KO[action] ?? action;
+}
+
+// 실행 Confirm 문안 — 실쓰기임을 명시(D-NAO-5). ★p.action(백엔드 파생값)으로 분기한다.
+// 프론트가 proposal_type으로 액션을 재추론하지 않는다: 미지 액션(null 포함)은 폴백 일반
+// 문구를 쓰므로, 새 액션이 개방돼도 "제외키워드"처럼 틀린 액션명을 사칭할 수 없다
+// (하드코딩 액션명 재발 방지의 핵심). export = vitest 드리프트 가드 대상.
+export function executeConfirmText(p: NaverAdProposal): string {
+  const target = `대상: ${p.target_type} ${p.target_id}`;
+  const group = `광고그룹: ${p.adgroup_id ?? NO_DATA}`;
+  const campaign = `캠페인: ${p.campaign_id}`;
+  switch (p.action) {
+    case "add_negative_keyword":
+      return (
+        `제외키워드를 네이버에 실제 등록합니다.\n` +
+        `검색어: "${p.target_id}"\n` +
+        `${group}\n${campaign}\n\n` +
+        `실행할까요? (실쓰기 — 되돌리려면 네이버 콘솔에서 삭제)`
+      );
+    case "update_bid": {
+      const bid = p.target_bid == null
+        ? "(값 없음 — 실행 시 서버가 거부)"
+        : `${p.target_bid}원`;
+      return (
+        `입찰가를 변경합니다.\n` +
+        `${target}\n` +
+        `새 입찰가: ${bid}\n` +
+        `${group}\n${campaign}\n\n` +
+        `실행할까요? (실쓰기 — 되돌리려면 네이버 콘솔에서 되돌리기)`
+      );
+    }
+    case "set_user_lock": {
+      const verb = p.target_lock === true
+        ? "광고를 정지합니다(userLock)"
+        : p.target_lock === false
+          ? "정지된 광고를 재개합니다"
+          : "광고 정지/재개 상태를 변경합니다(값 없음 — 실행 시 서버가 거부)";
+      return (
+        `${verb}.\n` +
+        `${target}\n` +
+        `${group}\n${campaign}\n\n` +
+        `실행할까요? (실쓰기 — 되돌리려면 네이버 콘솔에서 되돌리기)`
+      );
+    }
+    case "update_budget": {
+      const budget = p.target_budget == null
+        ? "(값 없음 — 실행 시 서버가 거부)"
+        : `${p.target_budget}원`;
+      return (
+        `캠페인 일예산을 변경합니다.\n` +
+        `새 예산: ${budget}\n` +
+        `${campaign}\n\n` +
+        `실행할까요? (실쓰기 — 되돌리려면 네이버 콘솔에서 되돌리기)`
+      );
+    }
+    default:
+      // 미지 액션(null 포함) — 구체 액션명을 사칭하지 않는 일반 문구. 대상 필드만 나열한다.
+      return (
+        `이 제안(${p.proposal_type})을 네이버에 실제 집행합니다.\n` +
+        `${target}\n` +
+        `${group}\n${campaign}\n\n` +
+        `실행할까요? (실쓰기 — 실행 전 대상과 값을 신중히 확인하세요)`
+      );
+  }
+}
+
 // D-NAO-2 공격성 배수 (bep_calculator.AGG_MULT와 동일 값 — 프론트는 이 값으로 override를 계산할 뿐
 // 최종 판정은 항상 백엔드 campaign_target_resolver가 override 컬럼을 읽어 수행한다).
 const AGGRESSIVENESS_OPTIONS: { key: string; label: string; mult: number }[] = [
@@ -87,6 +165,32 @@ const PROPOSAL_STATUS_TABS = [
   { key: "failed", label: "실패" },
   { key: "executing", label: "실행중" },
 ];
+
+// D-NAO-47: 제안 카드 유형 필터. 기본이 "실행형"인 이유 — 콘솔의 존재 이유는 "지금 결정할
+// 것"을 먼저 보이는 것인데, 목록이 created_at DESC라 정보성 경보(trigger_pacing 등)가 실행형
+// (bid_up 등)보다 훨씬 자주 생성돼 limit=100 안에서 실행형을 전부 파묻던 라이브 버그가 있었다
+// (2026-07-17 prod: 정보성 다수가 실행형 소수를 밀어내 "결정할 제안 없음"이 잘못 렌더).
+type ProposalKind = "actionable" | "informational" | "all";
+
+const PROPOSAL_KIND_TABS: { key: ProposalKind; label: string }[] = [
+  { key: "actionable", label: "실행형" },
+  { key: "informational", label: "정보성" },
+  { key: "all", label: "전부" },
+];
+
+// 유형 → 백엔드 informational 쿼리 파라미터(backend GET /proposals: true=정보성만 /
+// false=실행형만 / 생략=전부). 분류의 단일 진실은 백엔드 INFORMATIONAL_PROPOSAL_TYPES이며
+// 프론트는 유형 문자열로 재분류하지 않는다. export = vitest 매핑 드리프트 가드 대상.
+export function proposalKindToInformational(kind: ProposalKind): boolean | undefined {
+  switch (kind) {
+    case "actionable":
+      return false;
+    case "informational":
+      return true;
+    case "all":
+      return undefined;
+  }
+}
 
 // D-NAO-47: 제안 유형 14종 전량. 백엔드 단일 진실 = proposal_writer.ALL_PROPOSAL_TYPES.
 // ★기존엔 6종만 정의해 9종이 **영문 원문으로 렌더**됐고(라이브 확인: trigger_pacing·
@@ -152,7 +256,12 @@ export default function NaverAdOptimizationConsole() {
   const [dashboardError, setDashboardError] = useState<string | null>(null);
 
   const [proposals, setProposals] = useState<NaverAdProposal[]>([]);
+  // null = 아직 미도착(배너는 "확인 중" 중립 표기). 도착하면 백엔드 open_actions를 그대로 든다.
+  const [openActions, setOpenActions] = useState<string[] | null>(null);
   const [proposalStatus, setProposalStatus] = useState("pending");
+  // 기본 "actionable"(실행형) — 콘솔은 결정할 것을 먼저 보인다(D-NAO-47 라이브 버그: 정보성이
+  // 최신순으로 실행형을 파묻어 "결정할 제안 없음"이 잘못 렌더됐다).
+  const [proposalKind, setProposalKind] = useState<ProposalKind>("actionable");
   const [proposalsLoading, setProposalsLoading] = useState(false);
   const [proposalsError, setProposalsError] = useState<string | null>(null);
 
@@ -203,9 +312,14 @@ export default function NaverAdOptimizationConsole() {
     setProposalsLoading(true);
     setProposalsError(null);
     try {
-      const data = await fetchNaverAdProposals({ status: proposalStatus, limit: 100 });
+      const data = await fetchNaverAdProposals({
+        status: proposalStatus,
+        informational: proposalKindToInformational(proposalKind),
+        limit: 100,
+      });
       if (mySeq !== proposalsReqSeq.current) return; // stale 응답 무시(탭 빠르게 전환 시 레이스 방지)
       setProposals(data.rows);
+      setOpenActions(data.open_actions);
     } catch (e: any) {
       if (mySeq !== proposalsReqSeq.current) return;
       setProposalsError(e.message);
@@ -282,7 +396,7 @@ export default function NaverAdOptimizationConsole() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { loadDashboardOverview(); }, []);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { loadProposals(); }, [proposalStatus]);
+  useEffect(() => { loadProposals(); }, [proposalStatus, proposalKind]);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { loadPanel(); }, []);
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -370,18 +484,6 @@ export default function NaverAdOptimizationConsole() {
       delete next[id];
       return next;
     });
-  }
-
-  // 실행 Confirm 문안 — 실쓰기임을 명시(D-NAO-5). target_id="검색어"는 현재 유일하게
-  // 개방된 액션(제외키워드, target_type='search_term')을 전제로 한다.
-  function executeConfirmText(p: NaverAdProposal): string {
-    return (
-      `제외키워드를 네이버에 실제 등록합니다.\n` +
-      `검색어: "${p.target_id}"\n` +
-      `광고그룹: ${p.adgroup_id}\n` +
-      `캠페인: ${p.campaign_id}\n\n` +
-      `실행할까요? (실쓰기 — 되돌리려면 네이버 콘솔에서 삭제)`
-    );
   }
 
   async function runExecute(id: number) {
@@ -609,8 +711,13 @@ export default function NaverAdOptimizationConsole() {
 
       <div className="bg-amber-50 border border-amber-200 text-amber-700 text-xs rounded-lg p-3">
         반자동 모드 — 자동 실행은 없습니다. 승인 후 Confirm을 거친 제안만 실제 집행됩니다(현재
-        개방: 제외키워드). 모드·공격성 다이얼은 저장 즉시 실제 목표 ROAS 계산에
-        반영됩니다.
+        개방:{" "}
+        {openActions === null
+          ? "확인 중"
+          : openActions.length === 0
+            ? "없음"
+            : openActions.map(actionLabelKo).join(", ")}
+        ). 모드·공격성 다이얼은 저장 즉시 실제 목표 ROAS 계산에 반영됩니다.
       </div>
 
       {/* Ava 위임 자동승인 설정 (X1a T5, D-NAO-25) — 기본 접힘 */}
@@ -663,13 +770,25 @@ export default function NaverAdOptimizationConsole() {
       <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
         <div className="p-4 border-b border-gray-200 flex items-center justify-between flex-wrap gap-2">
           <h3 className="text-sm font-medium text-gray-700">제안 카드</h3>
-          <div className="flex gap-1">
-            {PROPOSAL_STATUS_TABS.map((t) => (
-              <button key={t.key} onClick={() => setProposalStatus(t.key)}
-                className={`px-2.5 py-1 text-xs rounded ${proposalStatus === t.key ? "bg-blue-600 text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"}`}>
-                {t.label}
-              </button>
-            ))}
+          <div className="flex items-center gap-3 flex-wrap">
+            {/* 유형 필터(D-NAO-47) — 상태 탭과 동일 스타일 관례. 기본 '실행형'. */}
+            <div className="flex gap-1">
+              {PROPOSAL_KIND_TABS.map((t) => (
+                <button key={t.key} onClick={() => setProposalKind(t.key)}
+                  className={`px-2.5 py-1 text-xs rounded ${proposalKind === t.key ? "bg-blue-600 text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"}`}>
+                  {t.label}
+                </button>
+              ))}
+            </div>
+            <div className="h-4 w-px bg-gray-200" aria-hidden />
+            <div className="flex gap-1">
+              {PROPOSAL_STATUS_TABS.map((t) => (
+                <button key={t.key} onClick={() => setProposalStatus(t.key)}
+                  className={`px-2.5 py-1 text-xs rounded ${proposalStatus === t.key ? "bg-blue-600 text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"}`}>
+                  {t.label}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
         {proposalsError && <div className="p-3 text-sm text-red-600 bg-red-50">{proposalsError}</div>}
@@ -677,7 +796,16 @@ export default function NaverAdOptimizationConsole() {
           {proposalsLoading ? (
             <div className="p-8 text-center text-gray-400 text-sm">불러오는 중...</div>
           ) : proposals.length === 0 ? (
-            <div className="p-8 text-center text-gray-400 text-sm">해당 상태의 제안이 없습니다</div>
+            // 정직성(D-NAO-47): 실행형 0건이면 정보성이 다른 탭에 있을 수 있음을 알린다.
+            // 응답 total은 현재 필터에 종속돼 다른 유형 건수를 못 주므로(백엔드 변경 금지),
+            // 정확한 N 대신 "정보성 탭에서 확인"으로 안내한다.
+            <div className="p-8 text-center text-gray-400 text-sm">
+              {proposalKind === "actionable"
+                ? "지금 결정할 실행형 제안이 없습니다 (정보성 경보는 '정보성' 탭에서 확인)"
+                : proposalKind === "informational"
+                  ? "정보성 제안이 없습니다"
+                  : "해당 상태의 제안이 없습니다"}
+            </div>
           ) : (
             proposals.map((p) => (
               <div key={p.id} className="p-4 flex items-start justify-between gap-4">
