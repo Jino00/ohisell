@@ -522,23 +522,44 @@ def parse_settlement_xlsx(content: bytes) -> dict:
     return {"sheets": sheets_out, "sheets_skipped": skipped}
 
 
+def _expected_period_start(period_end: date) -> date:
+    """정산주기 종료일 → 시작일 (달력 규칙, 순수 함수).
+
+    규칙: **월요일~일요일 주별 + 달력 월 경계에서 분할**.
+      start = max(그 주의 월요일, 그 달 1일)
+            = max(period_end - period_end.weekday()일, period_end.replace(day=1))
+    월 경계에 걸친 주는 두 조각으로 나뉜다(예: 06-29~06-30 | 07-01~07-05).
+
+    규칙 출처: 2026-07-17 prod 계정 row 18개 전수 검증 18/18 일치(라이브 실측).
+    레퍼런스 17에는 "주별"만 있고 월 경계 분할은 미기재 — 라이브가 권위(원칙22).
+    구 폴백(period_end-6일 고정)은 월 경계 주간에서 반드시 틀려 6월 RG 비용을 +55%
+    과대계상한 사고의 원인이었다(2026-07-17). 이 함수는 추측이 아니라 검증된 규칙이다.
+    """
+    monday = period_end - timedelta(days=period_end.weekday())
+    month_first = period_end.replace(day=1)
+    return max(monday, month_first)
+
+
 def _resolve_period_start(db: Session, account_key: str, period_end: date) -> date:
     """옵션 row의 recognition_date_from 결정.
 
-    status/api 계정 row(vendor_item_id="", 같은 account_key·recognition_date_to==period_end)에서
-    from을 차용 → status/api와 정산주기(grain) 정확 일치 보장(검산 가능).
-    매칭 없으면 주별 가정 폴백(period_end-6일) + 경고. (status/api 선행 sync 권장.)
+    1순위(불변): status/api 계정 row(vendor_item_id="", 같은 account_key·recognition_date_to==
+      period_end)에서 from을 차용 → status/api와 정산주기(grain) 정확 일치 보장(검산 가능).
+    2순위: 계정 row 없으면 검증된 달력 규칙(_expected_period_start) 사용 + 경고.
+      (구 -6d 추측 폴백은 월 경계에서 틀려 삭제. 달력 규칙은 18/18 라이브 검증됨.)
     """
     acct = db.query(CoupangRgSettlementFee).filter_by(
         account_key=account_key, recognition_date_to=period_end, vendor_item_id="",
     ).first()
     if acct is not None:
         return acct.recognition_date_from
+    fallback = _expected_period_start(period_end)
     log.warning(
-        "RG 옵션 적재: status/api 계정 row 없음(account=%s, period_end=%s) → 주별 폴백(-6d)",
-        account_key, period_end,
+        "RG 옵션 적재: status/api 계정 row 없음(account=%s, period_end=%s) → "
+        "달력 규칙 폴백(월~일+월경계분할)=%s (추측 아님, 18/18 검증)",
+        account_key, period_end, fallback,
     )
-    return period_end - timedelta(days=6)
+    return fallback
 
 
 def ingest_settlement_xlsx(db: Session, account_key: str, content: bytes) -> dict:
