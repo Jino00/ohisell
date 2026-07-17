@@ -3,6 +3,33 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
+- 날짜: 2026-07-17 22:10 KST (★**RG 정산 XLSX 업로드 60초 타임아웃 진범 해소·배포·라이브 합격** — 트랙 외 별건(네이버 트랙 무관), Jino 승인. 워크트리 `mop-command-center-design-7e087a`, 배포 commit `c0ea885`, PR 미생성)
+  - **증상**: Mac 페처 `_rg_push_xlsx`(timeout=60) POST가 "Read timed out" 2건 → 실패 보고. 그런데 서버는 완주(데이터 정상 적재)
+    → last_error_at(21:12:25.959)이 last_success_at(21:12:25.821)보다 **138ms 뒤**에 찍혀 행이 "실패"로 남음.
+  - **진범 = 파싱 O(n²)**: `parse_settlement_xlsx`가 `read_only=True` 워크북에 **랜덤접근 `ws.cell(row,col)`**을 행 루프에서 사용.
+    read_only의 cell()은 상수시간이 아니다 — `_get_cell→_cells_by_row`가 호출마다 시트 XML을 1행부터 **새 WorkSheetParser로 재파싱**
+    (openpyxl 3.1.5 소스 확인). 행당 3회 = 제곱. **실측 100행 1.32s / 200행 4.51s / 400행 16.4s / 1000행 48.4s**(배가 3.5배).
+    파일은 400행에 24KB — 네트워크가 아니라 순수 CPU였다.
+    → 시트당 `iter_rows` **1회 스트리밍**(`_read_grid`) + 메모리 인덱싱(`_at`/`_max_column`). **1000행 48.4s → 0.06s(약 800배)**. 결과값 불변.
+  - **부수 = 단일 워커 이벤트 루프 블로킹**: 라우터 82개 중 79개는 `def`(FastAPI 자동 스레드풀)인데 업로드 2개만 `async def`
+    (`await file.read()` 때문)라 **동기 ingest가 이벤트 루프 위에서** 돌았다. prod는 `uvicorn --workers 1` → 그동안 **모든 API 정지**.
+    → `run_in_threadpool` 오프로드(2개 다). prod 엔진이 이미 `check_same_thread=False`라 교차 스레드 세션 안전.
+  - **★연쇄 규명(오진단 함정)**: 남아있던 last_error는 `PRODUCT_SIZE_COMPARISON`이었지만 **그건 진범이 아니라 피해자**다.
+    페처가 60s에 포기해도 서버는 파싱을 계속한다(취소 전파 없음) → 곧바로 push된 PRODUCT_SIZE가 **막힌 루프**에 도착해 같이 타임아웃,
+    `_fail()`이 last_error를 덮어써 마지막 피해자만 남았다. 실패 보고 POST(21:12:19)조차 막혀 **서버가 루프 해제 138ms 뒤에 처리**한 것이
+    바로 그 "138ms 미스터리"의 정체. (product_size 파서 자체는 이미 iter_rows·682행 인덱스 테이블 = 무죄.)
+  - **codex 2R PASS**: 1R[P2] "왕복 테스트는 run_in_threadpool을 지워도 통과 → 블로킹 퇴행 무방비"(타당 — 테스트 이름부터 오주장)
+    → `test_..._runs_ingest_off_the_event_loop` 신설(스파이 안에서 `asyncio.get_running_loop()`이 RuntimeError면 워커 스레드 = 정상.
+    타이밍·스레드명 대신 결정론적 신호). **뮤테이션 실증: 오프로드 있음 1 passed / 제거 1 failed.** 2R 무지적.
+  - **★라이브 합격(원칙22)**: 22:03 갱신 트리거 → 22:07 발화 → **동일 실파일(138,229 bytes) push 성공 2 / 실패 0**
+    (21:07 회차엔 같은 파일이 **타임아웃 2 / 성공 0**). upserted=90, **reconcile 입출고비·배송비 둘 다 match=True(diff 0.0)**,
+    PRODUCT_SIZE upserted=185. **last_error/last_error_at 둘 다 NULL로 클리어**, status green. 1830 pass / 0 fail.
+  - **★safe_deploy CAS가 실제로 clobber를 막음**: 첫 배포 시도 ABORT("prod 내용이 내 브랜치 역사에 없음") — 병행 세션이 같은 파일에
+    RG 페처 실패 보고(`rg_mark_fetch_error`)를 배포해둔 상태였고 내 브랜치가 origin/main보다 뒤처져 있었다. 직접 scp였으면 그 기능이 죽었다.
+    → fetch·merge(충돌 0, 두 변경 공존 확인) 후 재배포 통과. **ABORT는 사고가 아니라 가드의 정상 작동**(D-NAO-49 실효성 실증).
+  - **남은 것(별건 분리 — Jino 승인)**: status/api 계정 row가 WING1 06-21 / WING2 06-07 이후 **공백** →
+    06-28·06-30·07-05·07-12 4개 주기의 `recognition_date_from`이 **`-6d` 추측값**(net_profit 소스). **06-28과 06-30이 이틀 차로 공존
+    = 주별이 아님** → 폴백이 틀릴 수 있다. 이번 회차에도 `vs_status_api: None`·폴백 warning 90건으로 재현됨. 별도 세션 조사 필요.
 - 날짜: 2026-07-17 21:20 KST (★**나머지 페처 4종 실패 보고 구멍 수정·배포·라이브합격** — 트랙 외 별건(네이버 트랙 무관), Jino 승인. **PR #33 병합**)
   - PR #30(오픽스 광고비)이 확립한 패턴을 같은 구멍을 공유하던 나머지에 적용: Wing 판매분석(COUPANG_WING_VS)·RG 정산(COUPANG_WING_RG)·오하이테크 광고(COUPANG_OHITECH_AD)·**로켓 발주/정산(COUPANG_ROCKET)**.
   - ★**브리프 전제 2건 정정**: ①**마이그 없음** — 4종 상태행이 전부 `coupang_wing_cookie` 한 테이블(account_key로만 구분) → #30의 last_error_at 컬럼이 이미 다 덮음(prod 이미 그 head 실측). ②**범위 4종**(브리프는 3종 지목했으나 폴링 루프는 4곳, 로켓 페처도 이미 목록에 있었음).
