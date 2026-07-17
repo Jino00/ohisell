@@ -166,6 +166,32 @@ const PROPOSAL_STATUS_TABS = [
   { key: "executing", label: "실행중" },
 ];
 
+// D-NAO-47: 제안 카드 유형 필터. 기본이 "실행형"인 이유 — 콘솔의 존재 이유는 "지금 결정할
+// 것"을 먼저 보이는 것인데, 목록이 created_at DESC라 정보성 경보(trigger_pacing 등)가 실행형
+// (bid_up 등)보다 훨씬 자주 생성돼 limit=100 안에서 실행형을 전부 파묻던 라이브 버그가 있었다
+// (2026-07-17 prod: 정보성 다수가 실행형 소수를 밀어내 "결정할 제안 없음"이 잘못 렌더).
+type ProposalKind = "actionable" | "informational" | "all";
+
+const PROPOSAL_KIND_TABS: { key: ProposalKind; label: string }[] = [
+  { key: "actionable", label: "실행형" },
+  { key: "informational", label: "정보성" },
+  { key: "all", label: "전부" },
+];
+
+// 유형 → 백엔드 informational 쿼리 파라미터(backend GET /proposals: true=정보성만 /
+// false=실행형만 / 생략=전부). 분류의 단일 진실은 백엔드 INFORMATIONAL_PROPOSAL_TYPES이며
+// 프론트는 유형 문자열로 재분류하지 않는다. export = vitest 매핑 드리프트 가드 대상.
+export function proposalKindToInformational(kind: ProposalKind): boolean | undefined {
+  switch (kind) {
+    case "actionable":
+      return false;
+    case "informational":
+      return true;
+    case "all":
+      return undefined;
+  }
+}
+
 // D-NAO-47: 제안 유형 14종 전량. 백엔드 단일 진실 = proposal_writer.ALL_PROPOSAL_TYPES.
 // ★기존엔 6종만 정의해 9종이 **영문 원문으로 렌더**됐고(라이브 확인: trigger_pacing·
 //   account_brief가 영문 pill), 반대로 백엔드가 만들지 않는 'budget'·'new_setup'
@@ -233,6 +259,9 @@ export default function NaverAdOptimizationConsole() {
   // null = 아직 미도착(배너는 "확인 중" 중립 표기). 도착하면 백엔드 open_actions를 그대로 든다.
   const [openActions, setOpenActions] = useState<string[] | null>(null);
   const [proposalStatus, setProposalStatus] = useState("pending");
+  // 기본 "actionable"(실행형) — 콘솔은 결정할 것을 먼저 보인다(D-NAO-47 라이브 버그: 정보성이
+  // 최신순으로 실행형을 파묻어 "결정할 제안 없음"이 잘못 렌더됐다).
+  const [proposalKind, setProposalKind] = useState<ProposalKind>("actionable");
   const [proposalsLoading, setProposalsLoading] = useState(false);
   const [proposalsError, setProposalsError] = useState<string | null>(null);
 
@@ -283,7 +312,11 @@ export default function NaverAdOptimizationConsole() {
     setProposalsLoading(true);
     setProposalsError(null);
     try {
-      const data = await fetchNaverAdProposals({ status: proposalStatus, limit: 100 });
+      const data = await fetchNaverAdProposals({
+        status: proposalStatus,
+        informational: proposalKindToInformational(proposalKind),
+        limit: 100,
+      });
       if (mySeq !== proposalsReqSeq.current) return; // stale 응답 무시(탭 빠르게 전환 시 레이스 방지)
       setProposals(data.rows);
       setOpenActions(data.open_actions);
@@ -363,7 +396,7 @@ export default function NaverAdOptimizationConsole() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { loadDashboardOverview(); }, []);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { loadProposals(); }, [proposalStatus]);
+  useEffect(() => { loadProposals(); }, [proposalStatus, proposalKind]);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { loadPanel(); }, []);
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -737,13 +770,25 @@ export default function NaverAdOptimizationConsole() {
       <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
         <div className="p-4 border-b border-gray-200 flex items-center justify-between flex-wrap gap-2">
           <h3 className="text-sm font-medium text-gray-700">제안 카드</h3>
-          <div className="flex gap-1">
-            {PROPOSAL_STATUS_TABS.map((t) => (
-              <button key={t.key} onClick={() => setProposalStatus(t.key)}
-                className={`px-2.5 py-1 text-xs rounded ${proposalStatus === t.key ? "bg-blue-600 text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"}`}>
-                {t.label}
-              </button>
-            ))}
+          <div className="flex items-center gap-3 flex-wrap">
+            {/* 유형 필터(D-NAO-47) — 상태 탭과 동일 스타일 관례. 기본 '실행형'. */}
+            <div className="flex gap-1">
+              {PROPOSAL_KIND_TABS.map((t) => (
+                <button key={t.key} onClick={() => setProposalKind(t.key)}
+                  className={`px-2.5 py-1 text-xs rounded ${proposalKind === t.key ? "bg-blue-600 text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"}`}>
+                  {t.label}
+                </button>
+              ))}
+            </div>
+            <div className="h-4 w-px bg-gray-200" aria-hidden />
+            <div className="flex gap-1">
+              {PROPOSAL_STATUS_TABS.map((t) => (
+                <button key={t.key} onClick={() => setProposalStatus(t.key)}
+                  className={`px-2.5 py-1 text-xs rounded ${proposalStatus === t.key ? "bg-blue-600 text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"}`}>
+                  {t.label}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
         {proposalsError && <div className="p-3 text-sm text-red-600 bg-red-50">{proposalsError}</div>}
@@ -751,7 +796,16 @@ export default function NaverAdOptimizationConsole() {
           {proposalsLoading ? (
             <div className="p-8 text-center text-gray-400 text-sm">불러오는 중...</div>
           ) : proposals.length === 0 ? (
-            <div className="p-8 text-center text-gray-400 text-sm">해당 상태의 제안이 없습니다</div>
+            // 정직성(D-NAO-47): 실행형 0건이면 정보성이 다른 탭에 있을 수 있음을 알린다.
+            // 응답 total은 현재 필터에 종속돼 다른 유형 건수를 못 주므로(백엔드 변경 금지),
+            // 정확한 N 대신 "정보성 탭에서 확인"으로 안내한다.
+            <div className="p-8 text-center text-gray-400 text-sm">
+              {proposalKind === "actionable"
+                ? "지금 결정할 실행형 제안이 없습니다 (정보성 경보는 '정보성' 탭에서 확인)"
+                : proposalKind === "informational"
+                  ? "정보성 제안이 없습니다"
+                  : "해당 상태의 제안이 없습니다"}
+            </div>
           ) : (
             proposals.map((p) => (
               <div key={p.id} className="p-4 flex items-start justify-between gap-4">
