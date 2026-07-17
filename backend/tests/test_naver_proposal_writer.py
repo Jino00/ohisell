@@ -41,10 +41,10 @@ def _diagnosis(**boards):
     return {"window": {}, "correction_factor": {"factor": 2.0}, "boards": boards}
 
 
-def _sim(direction="down", ceiling=100, recommended=100, basis="economic_ceiling"):
+def _sim(direction="down", ceiling=100, recommended=100, basis="economic_ceiling", current_bid=None):
     return {
         "recommended_bid": recommended, "economic_ceiling": ceiling, "rank_bid": None,
-        "direction": direction, "basis": basis,
+        "direction": direction, "basis": basis, "current_bid": current_bid,
         "expected_effect_text": "테스트 expected_effect",
         "capability_flags": {"estimate_ok": False, "performance_estimate_ok": False,
                               "is_new_or_growth": False, "keyword_sample_thin": False},
@@ -516,6 +516,232 @@ def test_build_shopping_group_growth_no_sim_available_skips_row(db):
     diagnosis = _diagnosis(shopping_group_growth=[_growth_group_row()])
     out = proposal_writer.build(db, diagnosis, bid_sims={}, as_of=AS_OF)  # sim 없음
     assert out == []
+
+
+# ── 라이브[P1] DOA 수정: bid_up 스텝 클램프 (04 카나리 실측 — 가드레일 15%와 영구충돌) ──
+def test_bid_up_target_clamped_to_step_over_current(db):
+    """경제상한 직행이 가드레일 _MAX_CHANGE_PCT(15%)와 영구충돌(DOA) — 생성 단계에서
+    target_bid = min(경제상한, 현재입찰×1.15, 10원 내림). 1500×1.15=1725→1720."""
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis(shopping_group_growth=[_growth_group_row()])
+
+    out = proposal_writer.build(
+        db, diagnosis,
+        bid_sims={("adgroup", "grp-shop-growth"): _sim(
+            direction="up", ceiling=2090, recommended=2090, current_bid=1500)},
+        as_of=AS_OF,
+    )
+    assert len(out) == 1
+    assert out[0]["target_bid"] == 1720
+    assert "경제상한 2090원" in out[0]["rationale"]
+    assert "스텝 클램프" in out[0]["rationale"]
+    assert "추천입찰=1720원" in out[0]["rationale"]
+
+
+def test_bid_up_target_not_clamped_when_ceiling_below_step(db):
+    """상한이 스텝 캡보다 낮으면(1500·상한 1600 < 1725) 그대로 1600 — 클램프 표기 없음."""
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis(shopping_group_growth=[_growth_group_row()])
+
+    out = proposal_writer.build(
+        db, diagnosis,
+        bid_sims={("adgroup", "grp-shop-growth"): _sim(
+            direction="up", ceiling=1600, recommended=1600, current_bid=1500)},
+        as_of=AS_OF,
+    )
+    assert len(out) == 1
+    assert out[0]["target_bid"] == 1600
+    assert "스텝 클램프" not in out[0]["rationale"]
+
+
+def test_bid_up_skipped_when_clamped_step_vanishes(db):
+    """클램프/불일치로 target_bid<=현재입찰이면 skip(기존 '억지 제안 금지' 관례) —
+    가드레일 방향 불일치로 어차피 차단될 DOA 제안을 만들지 않는다."""
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis(shopping_group_growth=[_growth_group_row()])
+
+    out = proposal_writer.build(
+        db, diagnosis,
+        bid_sims={("adgroup", "grp-shop-growth"): _sim(
+            direction="up", ceiling=1500, recommended=1500, current_bid=1500)},
+        as_of=AS_OF,
+    )
+    assert out == []
+
+
+def test_bid_up_keyword_starving_winner_also_clamped(db):
+    """키워드 bid_up(starving_winners)도 같은 _bid_proposal 공용 경로 — 동일 클램프 적용
+    (1000×1.15=1150)."""
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    row = {"campaign_id": "cmp-ours", "adgroup_id": "grp-1", "keyword_id": "nkw-sw",
+           "cost": 5000, "clk": 30, "conv_amt": 50_000, "roas_corrected": 10.0}
+    diagnosis = _diagnosis(starving_winners=[row])
+
+    out = proposal_writer.build(
+        db, diagnosis,
+        bid_sims={("keyword", "nkw-sw"): _sim(
+            direction="up", ceiling=10_000, recommended=10_000, current_bid=1000)},
+        as_of=AS_OF,
+    )
+    assert len(out) == 1
+    assert out[0]["proposal_type"] == "bid_up"
+    assert out[0]["target_bid"] == 1150
+    assert "스텝 클램프" in out[0]["rationale"]
+
+
+def test_bid_down_target_clamped_to_step_under_current(db):
+    """bid_down 대칭(ref31 실측: down 정밀도 61~88% — DOA면 핵심 루프 사망): 현재 2000·
+    추천 1000 → 2000×0.85=1700 정확(스텝 하한), rationale에 경제하한 병기."""
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis(bleeding_keywords=[_bleeding_row()])
+
+    out = proposal_writer.build(
+        db, diagnosis,
+        bid_sims={("keyword", "nkw-1"): _sim(direction="down", ceiling=1000, recommended=1000,
+                                              current_bid=2000)},
+        as_of=AS_OF,
+    )
+    assert len(out) == 1
+    assert out[0]["proposal_type"] == "bid_down"
+    assert out[0]["target_bid"] == 1700
+    assert "경제하한 1000원" in out[0]["rationale"]
+    assert "스텝 클램프" in out[0]["rationale"]
+    assert "추천입찰=1700원" in out[0]["rationale"]
+
+
+def test_bid_down_not_clamped_when_recommended_within_step(db):
+    """현재 2000·추천 1900(> 스텝 하한 1700) → 1900 그대로, 클램프 표기 없음."""
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis(bleeding_keywords=[_bleeding_row()])
+
+    out = proposal_writer.build(
+        db, diagnosis,
+        bid_sims={("keyword", "nkw-1"): _sim(direction="down", ceiling=1900, recommended=1900,
+                                              current_bid=2000)},
+        as_of=AS_OF,
+    )
+    assert len(out) == 1
+    assert out[0]["target_bid"] == 1900
+    assert "스텝 클램프" not in out[0]["rationale"]
+
+
+def test_bid_down_step_floor_rounds_up_to_stay_within_15pct(db):
+    """반올림 경계: down에서 10원 '내림'하면 15%를 넘어버림 — 반드시 올림. 현재 1450×0.85
+    =1232.5→올림 1240, (1450-1240)/1450=14.48%≤15%(가드레일 통과)."""
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis(bleeding_keywords=[_bleeding_row()])
+
+    out = proposal_writer.build(
+        db, diagnosis,
+        bid_sims={("keyword", "nkw-1"): _sim(direction="down", ceiling=1000, recommended=1000,
+                                              current_bid=1450)},
+        as_of=AS_OF,
+    )
+    assert len(out) == 1
+    assert out[0]["target_bid"] == 1240  # 1232.5를 내림(1230)하면 15.17% 초과 — 올림이어야 함
+
+
+def test_bid_down_skipped_when_clamped_step_vanishes(db):
+    """스텝 소실(불일치 sim: 추천>=현재인데 direction=down) → skip — bid_up과 동일 관례."""
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis(bleeding_keywords=[_bleeding_row()])
+
+    out = proposal_writer.build(
+        db, diagnosis,
+        bid_sims={("keyword", "nkw-1"): _sim(direction="down", ceiling=1500, recommended=1500,
+                                              current_bid=1500)},
+        as_of=AS_OF,
+    )
+    assert out == []
+
+
+def test_bid_down_step_floor_respects_absolute_min_70(db):
+    """절대 하한 70원(기존 클램프 규약) — 스텝 하한이 70원 밑으로 내려가지 않는다.
+    adgroup(negative 격상 없는 경로) 현재 75: 75×0.85=63.75→올림 70(=_MIN_BID),
+    target=max(추천 10, 70)=70."""
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis(shopping_group_bep=[{
+        "campaign_id": "cmp-ours", "adgroup_id": "grp-sb",
+        "cost": 5000, "conv_amt": 100, "roas_corrected": 0.02,
+    }])
+
+    out = proposal_writer.build(
+        db, diagnosis,
+        bid_sims={("adgroup", "grp-sb"): _sim(direction="down", ceiling=10, recommended=10,
+                                               current_bid=75)},
+        as_of=AS_OF,
+    )
+    assert len(out) == 1
+    assert out[0]["proposal_type"] == "bid_down"
+    assert out[0]["target_bid"] == 70
+
+
+# ── codex[P2]: 클램프 후 예측치 정합 — expected_effect가 원 추천 기준 수치를 담으면 오도 ──
+def test_bid_up_clamped_expected_effect_replaced_with_honest_text(db):
+    """클램프 발동 시 expected_effect가 원 추천(10000원) 기준 예측 텍스트를 그대로 담으면
+    콘솔 오도 + predicted_json(=expected_effect 복사) 오염 — 정직 텍스트로 교체돼야 한다."""
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    row = {"campaign_id": "cmp-ours", "adgroup_id": "grp-1", "keyword_id": "nkw-sw",
+           "cost": 5000, "clk": 30, "conv_amt": 50_000, "roas_corrected": 10.0}
+    diagnosis = _diagnosis(starving_winners=[row])
+
+    out = proposal_writer.build(
+        db, diagnosis,
+        bid_sims={("keyword", "nkw-sw"): _sim(
+            direction="up", ceiling=10_000, recommended=10_000, current_bid=1000)},
+        as_of=AS_OF,
+    )
+    assert len(out) == 1
+    assert out[0]["target_bid"] == 1150
+    assert "테스트 expected_effect" not in out[0]["expected_effect"], \
+        "원 추천 기준 예측 텍스트가 그대로 남으면 콘솔 오도"
+    assert "스텝 클램프 1150원" in out[0]["expected_effect"]
+    assert "원 추천 10000원" in out[0]["expected_effect"]
+    assert "무효" in out[0]["expected_effect"]
+
+
+def test_bid_down_clamped_expected_effect_replaced_with_honest_text(db):
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis(bleeding_keywords=[_bleeding_row()])
+
+    out = proposal_writer.build(
+        db, diagnosis,
+        bid_sims={("keyword", "nkw-1"): _sim(direction="down", ceiling=1000, recommended=1000,
+                                              current_bid=2000)},
+        as_of=AS_OF,
+    )
+    assert len(out) == 1
+    assert out[0]["target_bid"] == 1700
+    assert "테스트 expected_effect" not in out[0]["expected_effect"]
+    assert "스텝 클램프 1700원" in out[0]["expected_effect"]
+    assert "원 추천 1000원" in out[0]["expected_effect"]
+
+
+def test_unclamped_expected_effect_unchanged(db):
+    """클램프 미발동이면 expected_effect는 sim 텍스트 그대로(기존 동작 회귀 방지)."""
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis(bleeding_keywords=[_bleeding_row()])
+
+    out = proposal_writer.build(
+        db, diagnosis,
+        bid_sims={("keyword", "nkw-1"): _sim(direction="down", ceiling=1900, recommended=1900,
+                                              current_bid=2000)},
+        as_of=AS_OF,
+    )
+    assert len(out) == 1
+    assert out[0]["expected_effect"] == "테스트 expected_effect"
 
 
 def test_pause_proposal_defaults_to_keyword_target_type_unchanged(db):

@@ -5,11 +5,15 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from decimal import Decimal, ROUND_CEILING
 
 from sqlalchemy.orm import Session
 
 from app.models import NaverCampaignSettings, NaverProposal
 from app.services.naver_ad import campaign_target_resolver, growth_sweeper
+# 라이브[P1] DOA 수정: 생성 단계 스텝 클램프의 스텝 상수는 실행 가드레일과 단일 진실 소스
+# (하드코딩 0.15 중복 금지 — 드리프트 방지). guardrail_gate는 이 모듈을 import하지 않아 순환 없음.
+from app.services.naver_ad.guardrail_gate import _MAX_CHANGE_PCT
 from app.services.naver_ad.trigger_watch import PROPOSAL_TYPE_CPC, PROPOSAL_TYPE_PACING
 from app.utils.kst import kst_today
 
@@ -132,25 +136,76 @@ def _bid_proposal(
             return None
         proposal_type = f"bid_{sim['direction']}"  # bid_up / bid_down
 
+    # X1b T3(D-NAO-38 갭①): 추천입찰가를 구조화 컬럼에 저장 — 실행자는 이 필드만 읽는다
+    # (rationale 텍스트 파싱 금지). negative_keyword 격상 시엔 입찰 목표가 없어 None.
+    target_bid = sim["recommended_bid"] if proposal_type != _NEGATIVE else None
+    clamp_note = ""
+    if proposal_type == "bid_up":
+        # 라이브[P1] DOA 수정(04 카나리 실측): 경제 상한을 target_bid로 직행 저장하면 실행
+        # 가드레일 _MAX_CHANGE_PCT(±15%)와 영구 충돌 — bid_up 제안이 구조적으로 전부 발사
+        # 불능(스텝 +39%~+4300% 전건 차단). 생성 단계에서 min(시뮬 추천, 현재입찰×(1+스텝))
+        # 으로 클램프(10원 내림 — affordable_ceiling과 동일 규약). 상한까지는 여러 라운드에
+        # 걸쳐 스텝 단위로 접근한다(growth_bid_up은 가드레일 면제 유형이라 대상 아님).
+        current_bid = sim.get("current_bid")
+        if current_bid:
+            step_cap = int(
+                (Decimal(current_bid) * (Decimal(1) + _MAX_CHANGE_PCT)) // 10
+            ) * 10
+            if step_cap < target_bid:
+                target_bid = step_cap
+                clamp_note = f"(경제상한 {sim['economic_ceiling']}원, 스텝 클램프)"
+            if target_bid <= current_bid:
+                # 클램프/불일치 sim으로 스텝이 소실되면 skip(기존 '억지 제안 금지' 관례) —
+                # 가드레일 방향 불일치로 어차피 차단될 제안을 만들지 않는다.
+                return None
+    elif proposal_type == "bid_down":
+        # bid_down 대칭(ref31 실측: down 정밀도 61~88% — 검증된 핵심 루프가 DOA면 사망):
+        # 경제 하한 직행도 같은 ±15% 가드레일과 충돌. 스텝 하한 = 현재입찰×(1-스텝)의
+        # **10원 올림**(내림하면 15%를 넘어버림 — up의 내림과 방향 대칭) 후 절대 하한 70원
+        # (기존 클램프 규약) 유지. target = max(시뮬 추천, 스텝 하한).
+        current_bid = sim.get("current_bid")
+        if current_bid:
+            stepped = Decimal(current_bid) * (Decimal(1) - _MAX_CHANGE_PCT)
+            # 10원 올림(ceil) — Decimal의 //는 버림(truncation)이라 음수 트릭 불가, ROUND_CEILING 명시
+            step_floor = int((stepped / 10).to_integral_value(rounding=ROUND_CEILING)) * 10
+            step_floor = max(step_floor, 70)  # 절대 하한(_MIN_BID 규약, guardrail_gate와 동일)
+            if step_floor > target_bid:
+                target_bid = step_floor
+                clamp_note = f"(경제하한 {sim['economic_ceiling']}원, 스텝 클램프)"
+            if target_bid >= current_bid:
+                # 스텝 소실/불일치 sim — bid_up과 동일 skip 관례.
+                return None
+
     rationale = (
         f"[{board_name}] 보정ROAS={row.get('roas_corrected')} cost={row.get('cost')}원 "
-        f"clk={row.get('clk')} — 시뮬 근거={sim['basis']}, 추천입찰={sim['recommended_bid']}원, "
+        f"clk={row.get('clk')} — 시뮬 근거={sim['basis']}, 추천입찰={target_bid if target_bid is not None else sim['recommended_bid']}원{clamp_note}, "
         f"target_roas 근거={target_label['source']}"
         + (f"({target_label['target_roas']})" if target_label.get("target_roas") is not None else "")
         + "."
         + _forecast_evidence_suffix(forecast)
     )
+
+    # codex[P2] 클램프 후 예측치 정합: sim의 예측 텍스트(예상 클릭·매출)는 원 추천 입찰가
+    # 기준이라 클램프된 target_bid와 불일치 — 그대로 두면 콘솔 오도 + predicted_json
+    # (naver_execution_harness가 expected_effect를 복사 저장)이 잘못된 기준으로 남는다.
+    # 클램프 입찰가 기준 재산출은 불가(예측클릭 = /estimate/performance API 2차 패스 산출,
+    # 이 SA는 API 접근 없음·로컬 응답곡선 없음) → 정직 정리로 교체(추정 금지 원칙).
+    expected_effect = sim["expected_effect_text"]
+    if clamp_note:
+        expected_effect = (
+            f"스텝 클램프 {target_bid}원 실행 — 원 추천 {sim['recommended_bid']}원 기준 "
+            f"예측치는 무효(클램프 입찰가 기준 재산출 불가, 정직 경계)."
+        )
+
     return {
         "proposal_type": proposal_type,
         "target_type": target_type,
         "target_id": target_id,
         "campaign_id": campaign_id,
         "rationale": rationale,
-        "expected_effect": sim["expected_effect_text"],
+        "expected_effect": expected_effect,
         "status": "pending",
-        # X1b T3(D-NAO-38 갭①): 추천입찰가를 구조화 컬럼에 저장 — 실행자는 이 필드만 읽는다
-        # (rationale 텍스트 파싱 금지). negative_keyword 격상 시엔 입찰 목표가 없어 None.
-        "target_bid": sim["recommended_bid"] if proposal_type != _NEGATIVE else None,
+        "target_bid": target_bid,
     }
 
 

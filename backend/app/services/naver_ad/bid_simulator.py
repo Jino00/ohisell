@@ -162,6 +162,7 @@ def simulate_bid(
         "rank_bid": rank_bid,
         "direction": direction,
         "basis": basis,
+        "current_bid": current_bid,  # 라이브[P1] DOA 수정 — proposal_writer 스텝 클램프 원료(direction 판정에 이미 쓰던 값의 노출)
         "expected_effect_text": expected_effect_text,
         "capability_flags": capability_flags,
     }
