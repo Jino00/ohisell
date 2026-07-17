@@ -1,7 +1,8 @@
 # 세션 인수인계: MOP 커맨드 센터 구현 완료 (D-NAO-47 Phase 1+2)
 
 > 저장일시: 2026-07-17 · 워크트리 `mop-command-center-design-7e087a` · 브랜치 `claude/mop-command-center-design-7e087a`
-> **base = `cf193e5`(= 최신 main `c4a728e` + 설계 스펙). prod 배포 완료(2026-07-17 07:41~08:00 KST, Jino "그래" 승인) — 밸브 실전 판정만 07-18 07:50 예약 대기.**
+> **★PR #26 병합 완료(`d6d84d7`) · main == prod 13/13 파일 실측 정합 · 밸브 실전 판정만 07-18 07:50 예약 대기.**
+> 병합 직후 발견: 오늘 상호 clobber는 **2건**이었다 — 내가 그쪽 qi를 덮었고(07:41), **그쪽도 내 proposal_writer를 덮었다**(~08:2x, 클램프 수정 재배포. 내 런타임 필수가 라우터 쪽이라 무사고). main 병합 후 prod의 proposal_writer만 병합 전 버전이라 **safe_deploy.sh 첫 실전 투입으로 정렬**(CAS가 그쪽 버전을 '병합된 내 역사 속 버전'으로 정확히 인식·통과). D-NAO-49 가드는 `scripts/safe_deploy.sh` — **이후 모든 prod 배포는 이것만**(직접 scp 금지, CLAUDE.md 등재).
 
 ## 1. 한 줄 요약
 
