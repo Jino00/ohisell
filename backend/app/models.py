@@ -2104,18 +2104,22 @@ class OpsDiaryEntry(Base):
 
 
 class OpsWisdomCandidate(Base):
-    """지혜 승격 후보 1건 — 결과 기입된 diary 행에서 뽑은 (캠페인×액션×환경버킷) 반복 패턴
-    (D-NAO-54 P3). candidate_sa가 같은 시그니처 재등장마다 occurrences++·last_seen_at 갱신하고,
-    TTL 14일 or occurrences≥3이면 독립 LLM 판사(judge_sa, 자기평가 금지)가 promote/reject한다.
-    미승격(pending) 후보는 Ebbinghaus 망각(retention_sa가 soft-hide=status hidden), 승격분·지혜는
-    불망각(D-NAO-54 결정 4축).
+    """지혜 승격 후보 1건 — 결과 기입된 diary 행에서 뽑은 (캠페인×액션×환경버킷) 반복 조건 패턴
+    (D-NAO-54 P3). 시그니처는 조건(campaign|action|day_class|season|iphone_window)만이고 결과
+    방향은 시그니처에 넣지 않는다 — 같은 조건의 good/bad를 good_count/bad_count로 함께 세어
+    '이 조건에서 이 액션의 성적'을 한 후보에 모은다(리뷰 P2-2). candidate_sa가 같은 시그니처
+    재등장마다 방향에 따라 good_count/bad_count를 올리고, occurrences = good_count+bad_count로
+    정의한다(중복 diary id는 미가산). TTL 14일 or occurrences≥3이면 독립 LLM 판사(judge_sa,
+    자기평가 금지)가 승률·표본까지 보고 promote/reject한다. 미승격(pending) 후보는 Ebbinghaus
+    망각(retention_sa가 soft-hide=status hidden), 승격분·지혜는 불망각(D-NAO-54 결정 4축).
 
     ★UTC 혼동 금지: created_at은 server_default(UTC)지만 first_seen_at/last_seen_at은 SA가
     KST now로 명시 기입한다 — 감쇠 Δt(경과일) 계산과 TTL 판정의 진실 소스라 두 시간계를 섞으면
     안 된다([[sqlite-server-default-now-is-utc]]).
 
     status: pending|promoted|rejected|hidden. 시그니처는 signature(unique)로 멱등 재수확한다 —
-    promoted/rejected/hidden 시그니처는 재수확 대상이 아니다(판사가 이미 판정했거나 망각됨).
+    promoted/rejected는 재수확 대상이 아니지만(판사가 이미 판정), hidden은 시그니처가 재등장하면
+    pending으로 부활한다(Ebbinghaus 재노출 강화 — 연 1회 iphone_window 패턴이 해를 넘겨 누적됨).
     """
 
     __tablename__ = "ops_wisdom_candidates"
@@ -2128,7 +2132,9 @@ class OpsWisdomCandidate(Base):
     action: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
     env_bucket_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 버킷 상세(day_class/season/…)
     observation: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 규칙 기반 요약문(LLM 아님)
-    occurrences: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    occurrences: Mapped[int] = mapped_column(Integer, nullable=False, default=1)  # = good_count+bad_count
+    good_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 이 조건에서 결과 good 관찰 수
+    bad_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 이 조건에서 결과 bad 관찰 수
     first_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)  # KST 명시(TTL 기준)
     last_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)  # KST 명시(감쇠 Δt 기준)
     source_entry_ids_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 기여 diary id 목록(중복 제외)

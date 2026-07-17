@@ -6,9 +6,10 @@ Create Date: 2026-07-18 09:00:00.000000
 
 docs/PLAN_naver-ad-diary-wisdom.md §P3 — additive 2건:
 
-  ops_wisdom_candidates: 결과 기입된 diary 행에서 (캠페인×액션×환경버킷) 시그니처로 뽑은 반복
-    패턴 후보. TTL 14일 숙성 or occurrences≥3이면 독립 LLM 판사가 promote/reject. 미승격
-    후보는 Ebbinghaus 망각(soft-hide=status hidden), 승격분은 불망각.
+  ops_wisdom_candidates: 결과 기입된 diary 행에서 (캠페인×액션×환경) 조건 시그니처로 뽑은 반복
+    패턴 후보. 결과 방향은 시그니처가 아니라 good_count/bad_count로 세고(occurrences=good+bad),
+    TTL 14일 숙성 or occurrences≥3이면 독립 LLM 판사가 승률·표본까지 보고 promote/reject. 미승격
+    후보는 Ebbinghaus 망각(soft-hide=status hidden, 시그니처 재등장 시 부활), 승격분은 불망각.
   ops_wisdom_entries: 승격된 재사용 판단원칙(지혜). writer_sa가 promoted 후보에서 1:1 생성하고
     Jino 보고는 정보성 NaverProposal(wisdom_promoted)로 낸다. 지혜는 감쇠하지 않는다.
 
@@ -39,7 +40,9 @@ def upgrade() -> None:
         sa.Column('action', sa.String(40), nullable=True),
         sa.Column('env_bucket_json', sa.Text(), nullable=True),
         sa.Column('observation', sa.Text(), nullable=True),
-        sa.Column('occurrences', sa.Integer(), nullable=False, server_default='1'),
+        sa.Column('occurrences', sa.Integer(), nullable=False, server_default='1'),  # = good_count+bad_count
+        sa.Column('good_count', sa.Integer(), nullable=False, server_default='0'),
+        sa.Column('bad_count', sa.Integer(), nullable=False, server_default='0'),
         sa.Column('first_seen_at', sa.DateTime(), nullable=True),
         sa.Column('last_seen_at', sa.DateTime(), nullable=True),
         sa.Column('source_entry_ids_json', sa.Text(), nullable=True),

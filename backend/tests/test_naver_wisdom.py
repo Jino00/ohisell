@@ -90,9 +90,10 @@ def test_harvest_creates_new_candidate_with_signature(db):
     res = wisdom_candidates.harvest_candidates(db, now=NOW)
     assert res["new"] == 1
     cand = db.query(OpsWisdomCandidate).one()
-    # signature = campaign|action|day_class|season|iphone_window|direction
-    assert cand.signature == "cmp1|bid_up|weekend|summer|unknown|good"
+    # signature = 조건만(campaign|action|day_class|season|iphone_window) — 방향은 tally로(리뷰 P2-2)
+    assert cand.signature == "cmp1|bid_up|weekend|summer|unknown"
     assert cand.occurrences == 1
+    assert cand.good_count == 1 and cand.bad_count == 0
     assert cand.status == "pending"
     assert json.loads(cand.source_entry_ids_json) == [1]
 
@@ -132,6 +133,23 @@ def test_harvest_terminal_signature_ignored(db):
     assert cand.occurrences == 1  # 갱신 안 됨(완전 무시)
 
 
+def test_harvest_revives_hidden_on_reoccurrence(db):
+    """hidden은 terminal이 아니다 — 시그니처 재등장 시 pending으로 부활하고 tally를 누적한다
+    (리뷰 P2-1: 망각↔TTL 데드락 해소 + Ebbinghaus 재노출 강화)."""
+    _diary(db, outcome=_good())
+    wisdom_candidates.harvest_candidates(db, now=NOW)
+    cand = db.query(OpsWisdomCandidate).one()
+    cand.status = "hidden"  # retention이 망각시켰다고 가정
+    db.commit()
+    _diary(db, action_date=date(2026, 7, 14), outcome=_good())  # 같은 시그니처 재등장(새 diary 행)
+    res = wisdom_candidates.harvest_candidates(db, now=NOW)
+    assert res["revived"] == 1
+    db.refresh(cand)
+    assert cand.status == "pending"                 # 부활
+    assert cand.occurrences == 2 and cand.good_count == 2
+    assert set(json.loads(cand.source_entry_ids_json)) == {1, 2}
+
+
 def test_harvest_skips_when_target_unavailable(db, monkeypatch):
     monkeypatch.setattr(
         wisdom_candidates.campaign_target_resolver, "resolve_target_roas",
@@ -143,13 +161,20 @@ def test_harvest_skips_when_target_unavailable(db, monkeypatch):
     assert db.query(OpsWisdomCandidate).count() == 0
 
 
-def test_harvest_direction_bad_and_cost_zero_is_good(db):
+def test_harvest_bad_direction_tallies_bad(db):
     _diary(db, campaign_id="cA", outcome=_bad())
-    _diary(db, campaign_id="cB", outcome={"d7": {"cost": 0, "clk": 0, "conv": 0, "roas_c": None}})
     wisdom_candidates.harvest_candidates(db, now=NOW)
-    dirs = {c.campaign_id: c.signature.split("|")[-1] for c in db.query(OpsWisdomCandidate).all()}
-    assert dirs["cA"] == "bad"
-    assert dirs["cB"] == "good"  # cost=0 → good(스펙: roas_c≥target or cost=0)
+    c = db.query(OpsWisdomCandidate).filter_by(campaign_id="cA").one()
+    assert c.bad_count == 1 and c.good_count == 0 and c.occurrences == 1
+
+
+def test_harvest_cost_zero_is_neutral_skip(db):
+    """cost=0 관찰은 중립 — good도 bad도 아니고 후보 생성 자체를 skip(리뷰 P2-3)."""
+    _diary(db, campaign_id="cB", outcome={"d7": {"cost": 0, "clk": 0, "conv": 0, "roas_c": None}})
+    res = wisdom_candidates.harvest_candidates(db, now=NOW)
+    assert res["skipped_neutral"] == 1
+    assert res["new"] == 0
+    assert db.query(OpsWisdomCandidate).count() == 0
 
 
 def test_harvest_day_class_and_iphone_window_buckets(db):
@@ -157,8 +182,9 @@ def test_harvest_day_class_and_iphone_window_buckets(db):
     _diary(db, campaign_id="wd", weekday=1, is_kr_holiday=False, iphone_offset=40, outcome=_good())
     wisdom_candidates.harvest_candidates(db, now=NOW)
     sigs = {c.campaign_id: c.signature for c in db.query(OpsWisdomCandidate).all()}
-    assert "|holiday|" in sigs["h"] and "|launch_window|" in sigs["h"]
-    assert "|weekday|" in sigs["wd"] and "|normal|" in sigs["wd"]
+    # signature = campaign|action|day_class|season|iphone_window (iphone_window은 마지막 토큰)
+    assert "|holiday|" in sigs["h"] and sigs["h"].endswith("|launch_window")
+    assert "|weekday|" in sigs["wd"] and sigs["wd"].endswith("|normal")
 
 
 def test_harvest_only_execute_blocked_and_needs_outcome(db):
@@ -172,12 +198,14 @@ def test_harvest_only_execute_blocked_and_needs_outcome(db):
 # ══════════════════════════ judge_sa ══════════════════════════
 
 
-def _cand(db, *, signature="s", occurrences=1, first_seen=NOW, status="pending", env=None):
+def _cand(db, *, signature="s", occurrences=1, first_seen=NOW, status="pending", env=None,
+          good_count=0, bad_count=0):
     c = OpsWisdomCandidate(
         signature=signature, campaign_id="cmp1", action="bid_up",
         env_bucket_json=json.dumps(env or {"day_class": "weekday", "season": "summer",
-                                            "iphone_window": "normal", "outcome_direction": "good"}),
-        observation="obs", occurrences=occurrences, first_seen_at=first_seen,
+                                            "iphone_window": "normal"}),
+        observation="obs", occurrences=occurrences, good_count=good_count, bad_count=bad_count,
+        first_seen_at=first_seen,
         last_seen_at=first_seen, source_entry_ids_json="[1]", status=status,
     )
     db.add(c)
@@ -252,6 +280,17 @@ def test_judge_insufficient_response_keeps_pending(db):
     assert db.query(OpsWisdomCandidate).one().status == "pending"
 
 
+def test_judge_prompt_exposes_win_rate_and_tally(db):
+    """판사 프롬프트에 good/bad 표본과 승률이 노출된다 — 분모 없이·모순 승격을 막기 위함
+    (리뷰 P2-2). good 3 vs bad 10 → win_rate 0.231."""
+    c = _cand(db, signature="wr", occurrences=13, good_count=3, bad_count=10)
+    db.commit()
+    prompt = wisdom_judge._prompt(c, NOW)
+    assert '"good_count": 3' in prompt
+    assert '"bad_count": 10' in prompt
+    assert '"win_rate": 0.231' in prompt  # 3/13
+
+
 # ══════════════════════════ writer_sa ══════════════════════════
 
 
@@ -299,20 +338,24 @@ def test_wisdom_promoted_not_wired_to_execution():
 # ══════════════════════════ retention_sa ══════════════════════════
 
 
-def test_retention_hides_decayed_pending(db):
-    _cand(db, signature="old", first_seen=NOW - timedelta(days=9))  # last_seen도 9일 전
+def test_retention_ttl_guard_keeps_young_candidate(db):
+    """단발 후보가 9일차라 s_eff(≈0.14)는 임계 아래지만, TTL(14일) 전이라 감쇠 제외 — 판사가
+    볼 기회를 보장한다(리뷰 P2-1: 망각↔TTL 데드락 해소)."""
+    _cand(db, signature="young", first_seen=NOW - timedelta(days=9))  # last_seen도 9일 전
+    db.commit()
+    res = wisdom_retention.apply_retention(db, now=NOW)
+    assert res["kept"] == 1
+    assert res["hidden"] == 0
+    assert db.query(OpsWisdomCandidate).one().status == "pending"
+
+
+def test_retention_hides_after_ttl(db):
+    """TTL(14일) 경과 + 미승격 + 재등장 없음(s_eff<0.15) 후보는 감쇠(soft-hide)."""
+    _cand(db, signature="old", first_seen=NOW - timedelta(days=15))  # last_seen도 15일 전
     db.commit()
     res = wisdom_retention.apply_retention(db, now=NOW)
     assert res["hidden"] == 1
     assert db.query(OpsWisdomCandidate).one().status == "hidden"
-
-
-def test_retention_boundary_keeps_recent(db):
-    _cand(db, signature="fresh", first_seen=NOW - timedelta(days=8))  # 경계 안(유지)
-    db.commit()
-    res = wisdom_retention.apply_retention(db, now=NOW)
-    assert res["kept"] == 1
-    assert db.query(OpsWisdomCandidate).one().status == "pending"
 
 
 def test_retention_never_forgets_promoted(db):
