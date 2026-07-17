@@ -50,8 +50,10 @@ def _settings(db, *, campaign_id=CAMPAIGN, auto_operate=True, optimizer="ours",
 
     seed_chain: campaign 엔티티(on)+adgroup grp-1(on, parent=campaign) — codex 2R[P2]
       부모 체인 활성 요구를 기본 충족(키워드 테스트 엔티티는 parent_id='grp-1' 규약).
-    seed_snapshot: 당일 NaverHourlySnapshot(cost=0) — codex 2R[P1-2] 스냅샷 부재
-      fail-closed를 기본 통과(브레이커 자체를 검증하는 테스트는 False로 끄고 직접 시드)."""
+    seed_snapshot: 당일 NaverHourlySnapshot(cost=0, snapshot_hour=23) — codex 2R[P1-2]
+      부재 fail-closed와 codex 3R[P1-1] 신선도(snapshot_hour >= now.hour-1, 23이면 어떤
+      now에도 신선)를 기본 통과(브레이커/신선도 자체를 검증하는 테스트는 False로 끄고
+      직접 시드)."""
     db.add(NaverCampaignSettings(
         campaign_id=campaign_id, auto_operate=auto_operate, optimizer=optimizer,
         target_roas_override=target_roas_override,
@@ -63,7 +65,7 @@ def _settings(db, *, campaign_id=CAMPAIGN, auto_operate=True, optimizer="ours",
                             campaign_id=campaign_id, status="on"))
     if seed_snapshot:
         db.add(NaverHourlySnapshot(
-            snapshot_at=NOW, ad_date=TODAY, snapshot_hour=0, campaign_id=campaign_id,
+            snapshot_at=NOW, ad_date=TODAY, snapshot_hour=23, campaign_id=campaign_id,
             campaign_type="", cost=0, clk=0, imp=0,
         ))
     db.commit()
@@ -446,7 +448,7 @@ def test_hourly_lane_default_hold_when_rank_in_neutral_band(db):
 
 
 def test_hourly_lane_spend_circuit_breaker_holds_entire_campaign(db):
-    _settings(db)
+    _settings(db, seed_snapshot=False)  # 브레이커 검증용 스냅샷을 아래서 직접 시드(now와 same-hour)
     window_from, window_to = _settlement_window()
     # 직전 7일 일평균 = 700/7 = 100원
     for i in range(7):
@@ -583,6 +585,98 @@ def test_hourly_lane_stale_yesterday_snapshot_also_holds(db):
     )
     assert result["reviewed"] == 0
     assert "스냅샷" in result["held"][0]["reason"]
+
+
+# ── codex 3R[P1-1]: 스냅샷 신선도 — 당일 행이어도 몇 시간 전 것이면 stale hold ──
+
+def test_hourly_lane_stale_morning_snapshot_holds_campaign(db):
+    """스냅샷 잡이 아침에 쓰고 죽으면 당일 행은 있지만 today_cost가 몇 시간 전 값 —
+    그걸로 서킷브레이커를 평가하면 소진 폭주를 놓친다. 최신 snapshot_hour >= now.hour-1
+    미달이면 캠페인 hold(fail-closed). 아침 6시 스냅샷만 있고 now=14시 → UP 조건을 다
+    채워도 실행 0."""
+    _settings(db, target_roas_override=Decimal("2.0"), seed_snapshot=False)
+    db.add(NaverHourlySnapshot(
+        snapshot_at=datetime(2026, 7, 20, 6, 5, 0), ad_date=TODAY, snapshot_hour=6,
+        campaign_id=CAMPAIGN, campaign_type="", cost=100, clk=1, imp=10,
+    ))
+    window_from, window_to = _settlement_window()
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-up", parent_id="grp-1",
+                        campaign_id=CAMPAIGN, campaign_type="WEB_SITE", status="on"))
+    _ad_row(db, keyword_id="nkw-up", ad_date=window_from, clk=20, cost=7000, conv_direct_amt=21000)
+    db.commit()
+
+    up_curve = [
+        _hour(11, imp=15, clk=2, cost=35, avg_rank=5.0),
+        _hour(12, imp=15, clk=2, cost=35, avg_rank=5.0),
+        _hour(13, imp=15, clk=2, cost=30, avg_rank=5.0),
+    ]
+    now_afternoon = datetime(2026, 7, 20, 14, 20, 0)
+    with patch.object(auto_operator.naver_sa_writer, "get_keyword", return_value={"bidAmt": 1000}), \
+         patch.object(auto_operator.diagnosis, "correction_factor",
+                       return_value={"factor": Decimal("1")}), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(
+            db, now=now_afternoon, fetch_intraday=lambda tid, d: up_curve,
+        )
+    mock_exec.assert_not_called()
+    assert result["reviewed"] == 0
+    assert result["executed"] == 0
+    assert len(result["held"]) == 1
+    assert result["held"][0]["campaign_id"] == CAMPAIGN
+    assert "stale" in result["held"][0]["reason"]
+
+
+def test_hourly_lane_same_hour_snapshot_is_fresh(db):
+    """정상 케이스: 스냅샷 :05·레인 :20이라 same-hour 스냅샷이 표준 — snapshot_hour ==
+    now.hour면 신선(브레이커 평가 진행, 핫셋 순회까지 감)."""
+    _settings(db, seed_snapshot=False)
+    db.add(NaverHourlySnapshot(
+        snapshot_at=NOW, ad_date=TODAY, snapshot_hour=8,  # now=8:50과 same-hour
+        campaign_id=CAMPAIGN, campaign_type="", cost=0, clk=0, imp=0,
+    ))
+    window_from, window_to = _settlement_window()
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-fresh", parent_id="grp-1",
+                        campaign_id=CAMPAIGN, campaign_type="WEB_SITE", status="on"))
+    _ad_row(db, keyword_id="nkw-fresh", ad_date=window_from, clk=10, cost=100)
+    db.commit()
+
+    result = auto_operator.run_hourly_lane(
+        db, now=NOW, fetch_intraday=lambda tid, d: [_hour(9, imp=0, clk=0, cost=0)],
+    )
+    assert result["reviewed"] == 1  # stale hold 없이 핫셋 순회 진행
+
+
+# ── codex 3R[P1-2]: 판단 창 = 최근 3시계시간(now.hour-3 ≤ hour < now.hour)으로 제한 ──
+
+def test_hourly_lane_ignores_old_buckets_outside_recent_3_hour_window(db):
+    """hh24는 활동 있는 버킷만 반환한다 — "완료 버킷 마지막 3개"가 몇 시간 전 데이터일 수
+    있다(이른 아침 활동 후 정오까지 조용한 곡선). 판단 창을 now.hour-3 ≤ hour < now.hour로
+    제한하면 창 내 imp=0 → 표본 게이트가 자연 hold. 이른 버킷(rank 2.0 — 포함되면 down
+    오판)이 있어도 now=14시엔 hold여야 한다."""
+    _settings(db, seed_snapshot=False)
+    db.add(NaverHourlySnapshot(
+        snapshot_at=datetime(2026, 7, 20, 14, 5, 0), ad_date=TODAY, snapshot_hour=14,
+        campaign_id=CAMPAIGN, campaign_type="", cost=0, clk=0, imp=0,
+    ))
+    window_from, window_to = _settlement_window()
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-quiet", parent_id="grp-1",
+                        campaign_id=CAMPAIGN, campaign_type="WEB_SITE", status="on"))
+    _ad_row(db, keyword_id="nkw-quiet", ad_date=window_from, clk=10, cost=1000)
+    db.commit()
+
+    early_curve = [
+        _hour(6, imp=15, clk=2, cost=100, avg_rank=2.0),
+        _hour(7, imp=15, clk=2, cost=100, avg_rank=2.0),
+        _hour(8, imp=15, clk=2, cost=100, avg_rank=2.0),
+    ]  # 이른 아침만 활동 — 11~13시대는 응답에 아예 없음(imp 0 취급)
+    now_afternoon = datetime(2026, 7, 20, 14, 20, 0)
+    with patch.object(auto_operator.naver_sa_writer, "get_keyword", return_value={"bidAmt": 1000}), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(
+            db, now=now_afternoon, fetch_intraday=lambda tid, d: early_curve,
+        )
+    mock_exec.assert_not_called()
+    assert "표본 부족" in result["held"][0]["reason"]
 
 
 # ── codex 2R[P2]: 부모 체인(campaign→adgroup) 활성 확인 — 비활성 체인 아래 실입찰 차단 ──

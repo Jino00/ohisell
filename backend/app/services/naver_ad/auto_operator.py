@@ -330,16 +330,23 @@ def _auto_operate_campaigns(db: Session) -> list[str]:
     return [r[0] for r in rows]
 
 
-def _check_spend_circuit_breaker(db: Session, campaign_id: str, today: date) -> str | None:
+def _check_spend_circuit_breaker(db: Session, campaign_id: str, now: datetime) -> str | None:
     """§4-6 정지 조건(레인 자체 fail-closed): 당일 캠페인 소진 > 직전 7일 일평균 ×3 →
     그 캠페인의 시간당 레인 전체 hold.
 
     codex 2R[P1-2]: 당일 스냅샷 자체가 없으면(수집 미가동/stale — 어제 행만 있는 경우도
     ad_date 필터로 동일하게 부재) 소진을 **평가할 수 없다** — 평가 불가 상태에서 실입찰을
-    진행하면 브레이커가 무의미하므로 fail-closed로 캠페인 전체 hold. 반면 직전 7일
-    베이스라인이 없는 경우(신규 캠페인 등)는 "당일 소진은 보이는데 비교 기준이 없음" —
-    폭주 관측 자체는 가능한 상태라 미발동(fail-open, 개별 안전장치는 guardrail_gate가
-    여전히 담당)으로 남긴다(두 부재의 의미가 다름)."""
+    진행하면 브레이커가 무의미하므로 fail-closed로 캠페인 전체 hold.
+
+    codex 3R[P1-1]: 당일 행 존재만으로는 부족 — 스냅샷 잡이 이른 시각에 쓰고 죽으면 몇
+    시간 전 today_cost로 폭주 여부를 평가하게 된다(폭주를 놓침). 최신 snapshot_hour >=
+    now.hour-1을 요구한다(스냅샷 크론 :05·이 레인 :20이라 정상 시 same-hour, 직전 시각
+    까지만 유예). 미달이면 stale hold(fail-closed).
+
+    반면 직전 7일 베이스라인이 없는 경우(신규 캠페인 등)는 "당일 소진은 보이는데 비교
+    기준이 없음" — 폭주 관측 자체는 가능한 상태라 미발동(fail-open, 개별 안전장치는
+    guardrail_gate가 여전히 담당)으로 남긴다(두 부재의 의미가 다름)."""
+    today = now.date()
     latest = (
         db.query(NaverHourlySnapshot)
         .filter(NaverHourlySnapshot.campaign_id == campaign_id, NaverHourlySnapshot.ad_date == today)
@@ -350,6 +357,11 @@ def _check_spend_circuit_breaker(db: Session, campaign_id: str, today: date) -> 
         return (
             f"당일({today.isoformat()}) 소진 스냅샷 부재 — 서킷브레이커 평가 불가"
             "(fail-closed, codex 2R[P1-2])"
+        )
+    if latest.snapshot_hour < now.hour - 1:
+        return (
+            f"소진 스냅샷 stale — 최신 snapshot_hour={latest.snapshot_hour} < now.hour-1"
+            f"={now.hour - 1}(몇 시간 전 소진값으로 폭주 평가 불가, fail-closed, codex 3R[P1-1])"
         )
     today_cost = latest.cost
 
@@ -446,14 +458,19 @@ def _hot_set_candidates(
 
 
 def _weighted_recent(curve: list[dict], now_hour: int) -> dict:
-    """최근 _HOURLY_RECENT_HOURS(3)개 **완료** 시간대의 imp-가중 avg_rank + imp 합계.
+    """최근 _HOURLY_RECENT_HOURS(3)개 **시계 시간** 창의 imp-가중 avg_rank + imp 합계.
 
     codex 1R[P2]: :20 실행 시 hh24 응답에 현재 시간대(20분치 부분 데이터)가 섞여 온다 —
-    부분 버킷을 그대로 판정에 쓰면 rank/표본이 왜곡된다. hour < now_hour인 완료 시간대만
-    취한 뒤 마지막 3개를 쓴다(00시대 실행처럼 완료 버킷이 없으면 imp_sum=0 → 표본 부족
-    hold로 자연 수렴)."""
-    completed = [h for h in curve if h["hour"] < now_hour]
-    recent = sorted(completed, key=lambda h: h["hour"])[-_HOURLY_RECENT_HOURS:]
+    부분 버킷을 그대로 판정에 쓰면 rank/표본이 왜곡된다 → hour < now_hour만.
+    codex 3R[P1-2]: hh24는 **활동 있는 버킷만** 반환하므로 "완료 버킷 마지막 3개"가 몇
+    시간 전 데이터일 수 있다(이른 아침 활동 후 정오까지 조용한 곡선을 14시에 판정하는 오류)
+    → 창을 시계 시간 [now_hour-3, now_hour)으로 고정한다. 창에 없는 시간대는 활동 0
+    (imp 0 기여)과 동일 — 창 내 imp 합 < 30이면 기존 표본 게이트가 자연 hold(00시대
+    실행처럼 창이 자정 이전으로 넘어가는 부분은 그날 버킷이 없어 동일하게 표본 부족)."""
+    recent = sorted(
+        (h for h in curve if now_hour - _HOURLY_RECENT_HOURS <= h["hour"] < now_hour),
+        key=lambda h: h["hour"],
+    )
     imp_sum = sum(h["imp"] for h in recent)
     rank_imp_sum = sum(h["imp"] for h in recent if h.get("avg_rank") is not None)
     weighted_rank = None
@@ -602,7 +619,7 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
     }
 
     for campaign_id in _auto_operate_campaigns(db):
-        breaker_reason = _check_spend_circuit_breaker(db, campaign_id, today)
+        breaker_reason = _check_spend_circuit_breaker(db, campaign_id, now)
         if breaker_reason:
             result["held"].append({"campaign_id": campaign_id, "reason": breaker_reason})
             continue
