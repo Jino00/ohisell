@@ -51,7 +51,7 @@ def test_reports_error_with_valid_token(env):
     row = seed.query(CoupangWingCookie).first()
     assert "browser" in row.last_error
     assert row.last_error_at is not None
-    assert row.status == "red"
+    assert row.status == "unknown"  # 쿠키 status는 안 건드림(codex 1R[P2]) — red면 배너가 재설정을 시킨다
 
 
 def test_rejects_without_token(env):

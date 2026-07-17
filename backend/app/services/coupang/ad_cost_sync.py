@@ -142,9 +142,14 @@ def mark_fetch_error(db: Session, error: str) -> None:
     없어 last_error가 계속 null이었다. UI는 "실패"와 "아직 진행 중"을 구분할 수단이 없어
     215초를 헛기다린 뒤 "Mac 응답 없음"이라는 뭉뚱그린 문구만 냈다(진짜 원인은 화면 어디에도
     안 나옴). 형제 fetch-success(mark_fetch_success)의 짝.
-    status=red는 sync_ad_cost가 쓰던 기존 어휘 재사용 — 다음 성공 push가 green으로 되돌린다.
+
+    ★status는 일부러 건드리지 않는다(codex 1R[P2]): 이 행의 status=red는 Layout 배너에서
+    곧바로 "쿠키 만료(재설정 필요)" + 쿠키 재설정 CTA로 렌더된다(Layout.tsx:201/206).
+    브라우저 크래시·Mac 세션 만료는 쿠키 문제가 아니라 재설정해도 헛수고다(07-17에 실제로
+    그 헛수고를 했다 — 쿠키는 멀쩡했고 창이 닫힌 게 원인이었다). 지속 실패는 워치독이
+    last_success_at 경과로 잡고(status 미의존), 배너는 stale→"로컬 페처 확인 필요"로 흐른다.
     """
-    _mark_cookie(db, status="red", error=error)
+    _mark_cookie(db, status=None, error=error)
 
 
 # ════════════════════════════════════════════════

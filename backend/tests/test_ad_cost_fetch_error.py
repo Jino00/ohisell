@@ -36,15 +36,31 @@ def _seed_cookie(db) -> CoupangWingCookie:
     return row
 
 
-def test_mark_fetch_error_records_message_time_and_red(db):
-    """페처 실패 보고 → last_error·last_error_at·status=red. (실사고 메시지 그대로)"""
+def test_mark_fetch_error_records_message_and_time(db):
+    """페처 실패 보고 → last_error·last_error_at 기록. (실사고 메시지 그대로)"""
     _seed_cookie(db)
     ad_cost_sync.mark_fetch_error(db, "browser: Target page, context or browser has been closed")
 
     st = ad_cost_sync.cookie_status(db)
     assert "browser" in (st["last_error"] or "")
     assert st["last_error_at"] is not None  # ← 짝이 없어 실패/진행중을 못 가르던 뿌리
-    assert st["status"] == "red"
+
+
+def test_mark_fetch_error_does_not_touch_cookie_status(db):
+    """★페처 실패는 status를 red로 만들지 않는다(codex 1R[P2]).
+
+    red면 Layout 배너가 "쿠키 만료(재설정 필요)" + 재설정 CTA를 띄운다(Layout.tsx:201/206).
+    브라우저 크래시는 쿠키 문제가 아니라 재설정해도 헛수고 — 07-17에 실제로 그 헛수고를 했다.
+    """
+    _seed_cookie(db)
+    ad_cost_sync.mark_fetch_error(db, "browser: Target page has been closed")
+    assert ad_cost_sync.cookie_status(db)["status"] == "unknown"  # seed 그대로, red 아님
+
+    row = db.query(CoupangWingCookie).first()
+    row.status = "green"
+    db.commit()
+    ad_cost_sync.mark_fetch_error(db, "browser: closed again")
+    assert ad_cost_sync.cookie_status(db)["status"] == "green"  # 어떤 값이든 보존
 
 
 def test_mark_fetch_error_truncates_to_column_limit(db):
