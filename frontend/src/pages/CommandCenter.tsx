@@ -132,14 +132,22 @@ export default function CommandCenter() {
     setSalesRefreshing(true);
     setSalesRefreshMsg("Mac에서 판매분석 가져오는 중… (~20초, 첫 갱신이면 Mac 로그인 창 확인)");
     try {
-      const baseline = (await getWingVendorSummaryRefreshStatus()).last_success_at;
+      const before = await getWingVendorSummaryRefreshStatus();
+      const baseline = before.last_success_at;
+      const errBaseline = before.last_error_at; // 실패도 감지해야 "진행 중"과 구분된다
       await requestWingVendorSummaryRefresh();
       const deadline = Date.now() + 215000; // 215초 — 데몬 로그인 대기(180s)+fetch 여유까지 커버
       let done = false;
+      let failed: string | null = null;
       while (Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 3000));
         const st = await getWingVendorSummaryRefreshStatus();
         if (st.last_success_at && st.last_success_at !== baseline) { done = true; break; }
+        // 페처가 실패를 보고하면 즉시 이탈 — 이게 없으면 이미 끝난 실패를 215초 헛기다린다.
+        if (st.last_error_at && st.last_error_at !== errBaseline) {
+          failed = st.last_error || "원인 미상";
+          break;
+        }
       }
       if (done) {
         // 대기 중 사용자가 계정/기간을 바꿨을 수 있음 → 현재 선택(selRef)으로 재조회(codex S3 P1).
@@ -147,6 +155,8 @@ export default function CommandCenter() {
         doFetch(sel.from, sel.to, sel.account);
         setSalesRefreshMsg("✅ 판매분석 갱신 완료");
         setTimeout(() => setSalesRefreshMsg(null), 4000);
+      } else if (failed) {
+        setSalesRefreshMsg("❌ Mac 페처 실패: " + failed);
       } else {
         setSalesRefreshMsg("⚠️ Mac 응답 없음 — Mac이 켜져 있는지, 첫 갱신이면 로그인 창을 확인하세요.");
       }
@@ -162,20 +172,30 @@ export default function CommandCenter() {
     setRgRefreshing(true);
     setRgRefreshMsg("Mac에서 RG 정산 가져오는 중… (~30초)");
     try {
-      const baseline = (await getWingRgSettlementRefreshStatus()).last_success_at;
+      const before = await getWingRgSettlementRefreshStatus();
+      const baseline = before.last_success_at;
+      const errBaseline = before.last_error_at; // 실패도 감지해야 "진행 중"과 구분된다
       await requestWingRgSettlementRefresh();
       const deadline = Date.now() + 215000;
       let done = false;
+      let failed: string | null = null;
       while (Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 3000));
         const st = await getWingRgSettlementRefreshStatus();
         if (st.last_success_at && st.last_success_at !== baseline) { done = true; break; }
+        // 페처가 실패를 보고하면 즉시 이탈 — 이게 없으면 이미 끝난 실패를 215초 헛기다린다.
+        if (st.last_error_at && st.last_error_at !== errBaseline) {
+          failed = st.last_error || "원인 미상";
+          break;
+        }
       }
       if (done) {
         const sel = selRef.current;
         doFetch(sel.from, sel.to, sel.account);
         setRgRefreshMsg("✅ RG 정산 갱신 완료");
         setTimeout(() => setRgRefreshMsg(null), 4000);
+      } else if (failed) {
+        setRgRefreshMsg("❌ Mac 페처 실패: " + failed);
       } else {
         setRgRefreshMsg("⚠️ Mac 응답 없음 — Mac이 켜져 있는지 확인하세요.");
       }
@@ -192,20 +212,30 @@ export default function CommandCenter() {
     setRocketRefreshing(true);
     setRocketRefreshMsg("Mac에서 로켓배송 발주/정산 가져오는 중… (~30초)");
     try {
-      const baseline = (await getRocketRefreshStatus()).last_success_at;
+      const before = await getRocketRefreshStatus();
+      const baseline = before.last_success_at;
+      const errBaseline = before.last_error_at; // 실패도 감지해야 "진행 중"과 구분된다
       await requestRocketRefresh();
       const deadline = Date.now() + 180000; // 180초
       let done = false;
+      let failed: string | null = null;
       while (Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 5000));
         const st = await getRocketRefreshStatus();
         if (st.last_success_at && st.last_success_at !== baseline) { done = true; break; }
+        // 페처가 실패를 보고하면 즉시 이탈 — 이게 없으면 이미 끝난 실패를 180초 헛기다린다.
+        if (st.last_error_at && st.last_error_at !== errBaseline) {
+          failed = st.last_error || "원인 미상";
+          break;
+        }
       }
       if (done) {
         const sel = selRef.current;
         doFetch(sel.from, sel.to, sel.account);
         setRocketRefreshMsg("✅ 로켓배송 갱신 완료");
         setTimeout(() => setRocketRefreshMsg(null), 4000);
+      } else if (failed) {
+        setRocketRefreshMsg("❌ Mac 페처 실패: " + failed);
       } else {
         setRocketRefreshMsg("⚠️ Mac 응답 없음 — Mac이 켜져 있는지, Chrome(CDP 9223)이 실행 중인지 확인하세요.");
       }
@@ -223,20 +253,30 @@ export default function CommandCenter() {
     setOhitechAdRefreshing(true);
     setOhitechAdRefreshMsg("Mac에서 오하이테크 광고비 가져오는 중… (~수초, 첫 갱신이면 Chrome 로그인 확인)");
     try {
-      const baseline = (await getOhitechAdRefreshStatus()).last_success_at;
+      const before = await getOhitechAdRefreshStatus();
+      const baseline = before.last_success_at;
+      const errBaseline = before.last_error_at; // 실패도 감지해야 "진행 중"과 구분된다
       await requestOhitechAdRefresh();
       const deadline = Date.now() + 180000; // 180초
       let done = false;
+      let failed: string | null = null;
       while (Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 5000));
         const st = await getOhitechAdRefreshStatus();
         if (st.last_success_at && st.last_success_at !== baseline) { done = true; break; }
+        // 페처가 실패를 보고하면 즉시 이탈 — 이게 없으면 이미 끝난 실패를 180초 헛기다린다.
+        if (st.last_error_at && st.last_error_at !== errBaseline) {
+          failed = st.last_error || "원인 미상";
+          break;
+        }
       }
       if (done) {
         const sel = selRef.current;
         doFetch(sel.from, sel.to, sel.account);
         setOhitechAdRefreshMsg("✅ 광고비 갱신 완료");
         setTimeout(() => setOhitechAdRefreshMsg(null), 4000);
+      } else if (failed) {
+        setOhitechAdRefreshMsg("❌ Mac 페처 실패: " + failed);
       } else {
         setOhitechAdRefreshMsg("⚠️ Mac 응답 없음 — Mac이 켜져 있는지, Chrome(CDP 9224)이 실행 중인지 확인하세요.");
       }

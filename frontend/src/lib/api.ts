@@ -94,13 +94,14 @@ export function fetchRevenueReconcile(
 
 // ── Wing 판매분석(vendor-summary) "갱신 버튼" — 광고비 버튼과 동일 패턴 ──
 // 클릭 → request-refresh 플래그 set → Mac Wing 데몬(com.ohisell.wing)이 fetch·push →
-// refresh-status의 last_success_at가 올라가면 갱신 완료.
+// refresh-status의 last_success_at가 올라가면 갱신 완료, last_error_at이 올라가면 갱신 실패.
 export interface WingVendorSummaryRefreshStatus {
   requested: boolean;
   requested_at: string | null;
   last_success_at: string | null;
   status: string; // green | red | unknown | none
   last_error: string | null;
+  last_error_at: string | null; // 페처 실패 보고 시각 — 이게 변하면 실패(성공만 기다리면 215초 헛대기)
 }
 
 export function requestWingVendorSummaryRefresh(): Promise<{ requested: boolean; requested_at: string }> {
@@ -120,6 +121,7 @@ export interface WingRgSettlementRefreshStatus {
   last_success_at: string | null;
   status: string; // green | red | unknown | none
   last_error: string | null;
+  last_error_at: string | null; // 페처 실패 보고 시각 — 이게 변하면 실패(성공만 기다리면 215초 헛대기)
 }
 
 export function requestWingRgSettlementRefresh(): Promise<{ requested: boolean; requested_at: string }> {
@@ -912,6 +914,7 @@ export interface RocketRefreshStatus {
   last_success_at: string | null;
   status: string;
   last_error: string | null;
+  last_error_at: string | null; // 페처 실패 보고 시각 — 이게 변하면 실패(성공만 기다리면 180초 헛대기)
 }
 
 export function requestRocketRefresh(): Promise<{ requested: boolean; requested_at: string }> {
@@ -924,13 +927,15 @@ export function getRocketRefreshStatus(): Promise<RocketRefreshStatus> {
 
 // ── 오하이테크(1P) 광고비 갱신 버튼 (S3, 트랙 D-11 — adcost/rocket 패턴) ──
 // 광고비는 Akamai로 prod 직접 fetch 불가(D-4) → Jino Mac poll 데몬이 가져옴. 버튼 클릭 →
-// request-refresh 플래그 set → 데몬이 claim·fetch·push → refresh-status.last_success_at 변화로 완료 감지.
+// request-refresh 플래그 set → 데몬이 claim·fetch·push → refresh-status.last_success_at 변화로 완료 감지
+// (last_error_at 변화면 실패).
 export interface OhitechAdRefreshStatus {
   requested: boolean;
   requested_at: string | null;
   last_success_at: string | null;
   status: string;
   last_error: string | null;
+  last_error_at: string | null; // 페처 실패 보고 시각 — 이게 변하면 실패(성공만 기다리면 헛대기)
 }
 
 export function requestOhitechAdRefresh(): Promise<{ requested: boolean; requested_at: string }> {
