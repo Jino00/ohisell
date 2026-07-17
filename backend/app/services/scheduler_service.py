@@ -506,6 +506,28 @@ def run_naver_wisdom_job():
         db.close()
 
 
+def run_naver_vault_export_job():
+    """운영 일기·지혜 Obsidian 볼트 export — vault_export.export_vault (09:05 KST, D-NAO-54 P5).
+
+    ops_diary_entries(최근 8일)·ops_wisdom_entries(활성/은퇴)를 사람이 읽는 마크다운으로
+    <backend>/data/vault/Ohisell/에 재생성한다(Mac pull 스크립트가 iCloud Obsidian으로 미러).
+
+    ★fail-open(관찰·열람 전용, 집행 아님): 예외를 다시 던지지 않는다 — 볼트 export 실패가
+    catch-up 체인의 하류 집행 잡을 막으면 안 된다(D-NAO-54 금지선). export_vault 자체도
+    내부 fail-open이라 여기서는 방어적 이중 안전망.
+    """
+    db = _get_own_db_session()
+    try:
+        from app.services.naver_ad.vault_export import export_vault
+
+        result = export_vault(db)
+        log.info("[스케줄러] naver vault_export: %s", result)
+    except Exception as e:  # noqa: BLE001 — fail-open: 열람 전용 잡, 집행 체인 보호(raise 없음)
+        log.exception("[스케줄러] run_naver_vault_export_job 에러(fail-open): %s", e)
+    finally:
+        db.close()
+
+
 def sweep_naver_keyword_hourly_job():
     """키워드/쇼핑그룹 시간별(hh24) 축적 — 일 1회 D-1 스윕 (09:10 KST, sync_naver_ad_daily
     07:30 이후. D-NAO-46②, docs/PLAN_naver-ad-keyword-hourly-accrual.md §4).
@@ -1046,6 +1068,7 @@ def _ensure_default_states(db):
         ("run_naver_retro_scoring", "30 8 * * *"),  # 상설 소급 채점(진단 보드 as-of 리플레이 + 페이싱 경보, D-NAO-45)
         ("run_naver_diary_reflection", "35 8 * * *"),  # 운영 일기 해석층(결과 소급 기입+해석문, D-NAO-54 P2)
         ("run_naver_wisdom", "45 8 * * *"),  # 운영 일기 지혜 승격·망각층(후보→판사→지혜+보고→망각, D-NAO-54 P3)
+        ("run_naver_vault_export", "5 9 * * *"),  # 운영 일기·지혜 Obsidian 볼트 export(열람층, D-NAO-54 P5)
         ("run_naver_auto_operator_daily", "50 8 * * *"),  # D-NAO-48 4조건 심사·집행 서버화(D-NAO-49)
         ("sweep_naver_keyword_hourly", "10 9 * * *"),  # 키워드/쇼핑그룹 시간별(hh24) 축적, D-1 스윕(D-NAO-46②)
         ("run_naver_auto_operator_hourly", "20 * * * *"),  # 시간당 밴드 관제 실입찰(catch-up 제외, D-NAO-49)
@@ -1098,6 +1121,7 @@ _CATCHUP_ORDER: tuple[str, ...] = (
     "run_naver_diary_reflection",  # 08:35 크론이지만 catch-up은 집행(08:50) *뒤*(P2 리뷰 P2-1: LLM 재시도 최대 9분이 돈 잡 복구를 지연시키면 안 됨 — 관찰 전용이라 어제/D-2/D-8 버킷은 순서 무관. fail-open은 영구 블록만 막고 지연은 못 막는다)
     "sweep_naver_keyword_hourly",  # 09:10 (D-NAO-46②, 독립 잡이나 표준 cron catch-up 포함)
     "run_naver_wisdom",  # 08:45 크론이지만 catch-up은 돈 잡(08:50)·reflection 뒤(D-NAO-54 P3): reflection이 outcome을 소급 기입해야 후보 수확 결과가 최신 + LLM 판사(최대 회당 5×재시도)가 집행 복구를 지연시키면 안 됨. 관찰·보고 전용이라 맨 뒤 배치(diary_outcome 60일 하한 내면 하루 늦어도 무관). fail-open은 영구 블록만 막고 지연은 못 막는다
+    "run_naver_vault_export",  # 09:05 크론이지만 catch-up은 맨 뒤(D-NAO-54 P5): 일기·지혜를 마크다운으로 재생성하는 열람 전용 잡이라 wisdom(승격)까지 끝난 뒤에 도는 게 볼트 최신성에 맞고, 파일 IO가 집행 복구를 지연시키면 안 된다. 매 실행 전체 재생성(멱등)이라 하루 늦어도 무해. fail-open은 영구 블록만 막고 지연은 못 막는다
 )
 _CATCHUP_LOOKBACK = timedelta(hours=12)  # 오늘 예정 발화가 이보다 오래됐으면 스킵(다음 정상 발화에 위임)
 
@@ -1214,6 +1238,7 @@ def _catch_up_morning_batch():
         "run_naver_auto_operator_daily": run_naver_auto_operator_daily_job,
         "sweep_naver_keyword_hourly": sweep_naver_keyword_hourly_job,
         "run_naver_wisdom": run_naver_wisdom_job,
+        "run_naver_vault_export": run_naver_vault_export_job,
     }
     log.warning("[스케줄러] 아침배치 catch-up 대상(cron순 순차): %s", missed)
 
@@ -1259,6 +1284,7 @@ def job_func_for(job_name: str):
         "run_naver_retro_scoring": run_naver_retro_scoring_job,
         "run_naver_diary_reflection": run_naver_diary_reflection_job,
         "run_naver_wisdom": run_naver_wisdom_job,
+        "run_naver_vault_export": run_naver_vault_export_job,
         "sweep_naver_keyword_hourly": sweep_naver_keyword_hourly_job,
         "run_naver_auto_operator_daily": run_naver_auto_operator_daily_job,
         "run_naver_auto_operator_hourly": run_naver_auto_operator_hourly_job,
