@@ -2167,6 +2167,11 @@ class OpsWisdomEntry(Base):
     judge_rationale: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(8), nullable=False, default="active")  # active/retired
     promoted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)  # KST 명시
+    # D-NAO-54 P4(소비층): 이 지혜가 param_suggestion을 담고 있어 param_change 제안을 냈다면
+    # 그 NaverProposal.id를 여기 새긴다. wisdom_apply.propose_param_changes의 멱등 키 —
+    # 같은 지혜로 param_change 제안을 1회만 생성한다(rationale 텍스트 매칭 대신 전용 추적).
+    # None = 아직 제안 미생성(param_suggestion 없거나 아직 안 돎).
+    param_proposal_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     __table_args__ = (
         Index("ux_ops_wisdom_entries_source_candidate", "source_candidate_id", unique=True),

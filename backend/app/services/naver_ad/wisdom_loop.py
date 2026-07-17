@@ -9,6 +9,7 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session
 
+from app.services.naver_ad.wisdom_apply import propose_param_changes
 from app.services.naver_ad.wisdom_candidates import harvest_candidates
 from app.services.naver_ad.wisdom_judge import judge_ripe_candidates
 from app.services.naver_ad.wisdom_retention import apply_retention
@@ -34,9 +35,11 @@ def _stage(result: dict, key: str, fn, db: Session, now: datetime) -> None:
 
 
 def run_daily_wisdom(db: Session, *, now: datetime | None = None) -> dict:
-    """08:45 엔트리 — 수확→판정→기록→망각 4단계 단계격리(한 단계 실패가 나머지를 막지 않음).
+    """08:45 엔트리 — 수확→판정→기록→망각→적용 5단계 단계격리(한 단계 실패가 나머지를 막지 않음).
 
     now: as-of 관통 파라미터(미지정 시 kst_now) — 백테스트/catch-up에서 호출자 시각 존중.
+    ⑤apply(propose_param_changes): 갓 기록된 지혜 중 param_suggestion 보유분을 결정 전용
+    param_change 제안으로 낸다(writer 뒤 = 이번 회차 승격분도 같은 날 반영, 멱등이라 재실행 안전).
     """
     now = now or kst_now()
     result: dict = {"stage_status": {}}
@@ -44,4 +47,5 @@ def run_daily_wisdom(db: Session, *, now: datetime | None = None) -> dict:
     _stage(result, "judge", judge_ripe_candidates, db, now)
     _stage(result, "writer", write_wisdom, db, now)
     _stage(result, "retention", apply_retention, db, now)
+    _stage(result, "apply", propose_param_changes, db, now)
     return result
