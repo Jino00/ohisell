@@ -3,7 +3,7 @@
 #   우선순위: disabled > failed > never_succeeded > stale > ok
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from app.services.scheduler_watchdog import (
     COOKIE_STALE_DAYS,
@@ -14,6 +14,7 @@ from app.services.scheduler_watchdog import (
     STATE_OK,
     STATE_STALE,
     evaluate_cookie_freshness,
+    evaluate_data_freshness,
     evaluate_job,
     evaluate_staleness,
 )
@@ -229,3 +230,77 @@ def test_cookie_aware_naive_mixed_does_not_crash():
     aware = (NOW - timedelta(days=11)).replace(tzinfo=timezone.utc)
     v = evaluate_cookie_freshness([_cookie(last_success_at=aware)], NOW)
     assert len(v) == 1 and v[0]["state"] == "stale"
+
+
+# ── 데이터 나이 freshness (잡·쿠키 보고가 거짓말해도 데이터 나이는 못 함) ──────
+def _data(**kw):
+    base = {
+        "name": "rg_settlement_account_rows",
+        "account_key": "COUPANG_WING1",
+        "latest": NOW - timedelta(days=5),
+        "max_age_days": 14.0,
+        "impact": "RG 정산비용이 net_profit에서 누락 중",
+    }
+    base.update(kw)
+    return base
+
+
+def test_data_fresh_within_max_age_excluded():
+    # 5일 전 데이터 < 14일 임계 → 정상(빈 목록).
+    assert evaluate_data_freshness([_data(latest=NOW - timedelta(days=5))], NOW) == []
+
+
+def test_data_stale_when_older_than_max_age():
+    v = evaluate_data_freshness([_data(latest=NOW - timedelta(days=26))], NOW)
+    assert len(v) == 1
+    assert v[0]["state"] == "stale"
+    assert v[0]["account_key"] == "COUPANG_WING1"
+    assert v[0]["age_days"] > 25
+    assert v[0]["max_age_days"] == 14.0
+    assert "누락" in v[0]["impact"]
+
+
+def test_data_none_latest_is_no_data():
+    # latest=None(한 번도 수집 안 됨)은 즉시 비정상(cookies_stale와 달리 시끄럽게).
+    v = evaluate_data_freshness([_data(latest=None)], NOW)
+    assert len(v) == 1
+    assert v[0]["state"] == "no_data"
+    assert v[0]["age_days"] is None
+
+
+def test_data_boundary_just_over_max_age():
+    over = NOW - timedelta(days=14, seconds=60)
+    under = NOW - timedelta(days=14, seconds=-60)
+    assert len(evaluate_data_freshness([_data(latest=over)], NOW)) == 1
+    assert evaluate_data_freshness([_data(latest=under)], NOW) == []
+
+
+def test_data_accepts_date_object_from_sqlalchemy_date_column():
+    # recognition_date_to는 SQLAlchemy Date → date 객체. 자정 datetime으로 변환 후 비교.
+    old_date = (NOW - timedelta(days=26)).date()
+    v = evaluate_data_freshness([_data(latest=old_date)], NOW)
+    assert len(v) == 1 and v[0]["state"] == "stale"
+    fresh_date = (NOW - timedelta(days=2)).date()
+    assert evaluate_data_freshness([_data(latest=fresh_date)], NOW) == []
+
+
+def test_data_accepts_plain_date():
+    # 순수 date 객체(자정 기준) 방어 확인.
+    assert isinstance((NOW - timedelta(days=2)).date(), date)
+
+
+def test_data_aware_datetime_does_not_crash():
+    from datetime import timezone
+    aware = (NOW - timedelta(days=26)).replace(tzinfo=timezone.utc)
+    v = evaluate_data_freshness([_data(latest=aware)], NOW)
+    assert len(v) == 1 and v[0]["state"] == "stale"
+
+
+def test_data_only_abnormal_ones_returned():
+    snaps = [
+        _data(account_key="A", latest=NOW - timedelta(days=26)),  # stale
+        _data(account_key="B", latest=NOW - timedelta(days=3)),   # 정상 → 제외
+        _data(account_key="C", latest=None),                       # no_data
+    ]
+    v = evaluate_data_freshness(snaps, NOW)
+    assert {x["account_key"] for x in v} == {"A", "C"}

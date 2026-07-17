@@ -210,3 +210,88 @@ def test_build_health_no_cookies_arg_defaults_empty():
     h = build_health(["a"], states, {"a"}, True, NOW)
     assert h["cookies_stale"] == []
     assert h["healthy"] is True
+
+
+# ── 데이터 나이 통합(build_health) ─────────────────────────────────────────
+def _data_snap(**kw):
+    base = {
+        "name": "rg_settlement_account_rows",
+        "account_key": "COUPANG_WING1",
+        "latest": NOW - timedelta(days=5),
+        "max_age_days": 14.0,
+        "impact": "RG 정산비용 누락 중",
+    }
+    base.update(kw)
+    return base
+
+
+def test_build_health_stale_data_breaks_health():
+    states = [_FakeState(job_name="a")]
+    snaps = [
+        _data_snap(account_key="COUPANG_WING1", latest=NOW - timedelta(days=26)),  # stale
+        _data_snap(account_key="COUPANG_WING2", latest=NOW - timedelta(days=5)),   # ok
+    ]
+    h = build_health(["a"], states, {"a"}, True, NOW, data_snapshots=snaps)
+    assert h["healthy"] is False
+    assert len(h["data_stale"]) == 1
+    assert h["data_stale"][0]["account_key"] == "COUPANG_WING1"
+    assert h["data_stale"][0]["state"] == "stale"
+
+
+def test_build_health_no_data_breaks_health():
+    states = [_FakeState(job_name="a")]
+    snaps = [_data_snap(latest=None)]  # 한 번도 수집 안 됨
+    h = build_health(["a"], states, {"a"}, True, NOW, data_snapshots=snaps)
+    assert h["healthy"] is False
+    assert h["data_stale"][0]["state"] == "no_data"
+
+
+def test_build_health_fresh_data_keeps_health():
+    states = [_FakeState(job_name="a")]
+    snaps = [_data_snap(latest=NOW - timedelta(days=3))]
+    h = build_health(["a"], states, {"a"}, True, NOW, data_snapshots=snaps)
+    assert h["healthy"] is True
+    assert h["data_stale"] == []
+
+
+def test_build_health_no_data_snapshots_arg_defaults_empty():
+    states = [_FakeState(job_name="a")]
+    h = build_health(["a"], states, {"a"}, True, NOW)
+    assert h["data_stale"] == []
+    assert h["healthy"] is True
+
+
+# ── 스키마 직렬화: response_model이 data_stale을 지우지 않고 응답에 실어야 함 ──
+def test_scheduler_health_out_serializes_data_stale():
+    # response_model(SchedulerHealthOut)에 필드가 없으면 API에서 조용히 사라진다 → 회귀 방지.
+    from app.schemas import SchedulerHealthOut
+
+    states = [_FakeState(job_name="a")]
+    snaps = [
+        {
+            "name": "rg_settlement_account_rows",
+            "account_key": "COUPANG_WING1",
+            "latest": NOW - timedelta(days=26),
+            "max_age_days": 14.0,
+            "impact": "RG 정산비용(오픽스) 누락 중",
+        }
+    ]
+    h = build_health(["a"], states, {"a"}, True, NOW, data_snapshots=snaps)
+    out = SchedulerHealthOut(**h).model_dump()
+    assert "data_stale" in out
+    assert len(out["data_stale"]) == 1
+    v = out["data_stale"][0]
+    assert v["name"] == "rg_settlement_account_rows"
+    assert v["account_key"] == "COUPANG_WING1"
+    assert v["state"] == "stale"
+    assert v["max_age_days"] == 14.0
+    assert "누락" in v["impact"]
+
+
+def test_scheduler_health_out_data_stale_defaults_empty():
+    from app.schemas import SchedulerHealthOut
+
+    states = [_FakeState(job_name="a")]
+    h = build_health(["a"], states, {"a"}, True, NOW)
+    out = SchedulerHealthOut(**h).model_dump()
+    assert out["data_stale"] == []

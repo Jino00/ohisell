@@ -123,6 +123,9 @@ def _problem_keys(health: dict) -> list[str]:
     # 쿠키 만료(fail-soft 잡이 조용히 멈추는 사고) — account_key 단위.
     for c in health.get("cookies_stale", []) or []:
         keys.append(f"cookie:{c.get('account_key', '?')}")
+    # 데이터 나이(잡·쿠키 보고가 거짓말해도 최신 데이터 나이는 거짓말 못 함) — name:account_key 단위.
+    for v in health.get("data_stale", []) or []:
+        keys.append(f"data:{v.get('name', '?')}:{v.get('account_key', '')}")
     return keys
 
 
@@ -139,6 +142,7 @@ def _summarize(keys: list[str]) -> str:
         "stale": "지연(stale)",
         "never_succeeded": "성공기록없음",
         "cookie": "쿠키만료",
+        "data": "데이터끊김",
     }
     parts = []
     for kind, names in groups.items():
