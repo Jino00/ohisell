@@ -71,9 +71,9 @@ naver_auto_operator (Harness, 신규 backend/app/services/naver_ad/auto_operator
 - [x] A1: 일 레인(4조건 심사·집행) TDD
 - [x] A2: 시간당 레인(핫셋·intraday·판정·실행) TDD
 - [x] A3: 크론 2개+catch-up 배선
-- [ ] codex review PASS
-- [ ] 라이브 합격(§8)
-- [ ] 로컬 루틴 강등 + PR + 문서
+- [x] codex review PASS (2026-07-17 12R: P1 8건·P2 6건 발견 — P1 7건 수정·1건(다중 head 주장) 실측 기각, P2 6건 수정. 킬스위치 3중 방어(pre-check→execute 진입→writer 직전)·페이싱 경계 정렬·보류 일일 사이클 등. 12R clean)
+- [x] 라이브 합격(§8) (2026-07-17 15:30~16:20 prod: 마이그 n4o5p6q7r8s9·04만 auto_operate=1·크론 2개 등록·catch-up 일 레인 자동 발화가 아침 수동 심사와 동일 판정(959~961 클릭부족 reject·962 불가침·정보성 불가침·집행 0)·시간당 수동 1회 hold+사유 로그·16:20 자연 발화 ok. 가드레일 차단 실관찰은 자연 발생 대기 — 아침 감사 루틴이 확인)
+- [x] 로컬 루틴 강등(보고·감사·킬스위치 대리 전용 — 집행 조항 삭제) + PR + 문서 (2026-07-17)
 
 ## §8 라이브 합격 시나리오 (원칙22)
 
