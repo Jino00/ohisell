@@ -3,6 +3,11 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
+- 날짜: 2026-07-17 12:35 KST (★**D-NAO-50 키워드 변경 이력 밸브 구현·배포·라이브검증 완료**. Jino "키워드 변경 이력 밸브도 추가해줘" + 모델 라우팅 Fable설계/Opus구현/Sonnet단순)
+  - external_keyword_added/removed 밸브(부트스트랩·대량 __bulk__ 가드, mutation test 실증) + EXTERNAL_DETECTION_ACTIONS 배선 + **ExternalChangesPane 신설**(actor=external 첫 화면 소비자 — 데이터만 쌓이고 화면에 없을 뻔한 걸 Sonnet 리서치가 발견).
+  - codex R1 [P2] 플랩 지적 → R2 AGREE-DEFER 합의(내일 실측이 감시 지점). 1699 pass/0 fail.
+  - ★라이브 검증이 라벨 결함 발견(external_status_change 영문 렌더 — 새 패널이 처음 노출시켜 드러남) → 수정·재배포(483e9c0). 두 번째 "라이브에서만 보이는 버그" 사례.
+  - **남은 것 = 07-18 07:50 밸브 실측**(scheduled task 프롬프트에 키워드 밸브+플랩 감시 추가됨). sellc 비밀번호 건은 Jino 최종 "안 함"(메모리 정정 완료 — 먼저 제안 금지).
 - 날짜: 2026-07-17 08:40 KST (★**D-NAO-48 캠페인 관리주체 스위치 배포 완료·라이브 검증 통과**. Jino 요청 "광고 옆에 토글")
   - 1층에 **스마트스토어 캠페인 45개를 광고 종류별로**(쇼핑30·파워링크13·브랜드검색2) 나열 + 각 행 **3단 스위치**(우리 MOP/원본 MOP/수동). **캠페인 이름 표시**(신규 `campaign_roster` SA — 그동안 API에 이름이 없어 내부 ID가 노출됐음, MOP 리뷰 §2-7을 우리가 하고 있던 것).
   - **★codex [P1]**(세션 첫 P1): 콘솔 select가 전체 치환 PUT으로 저장해 **1층 확인창(MOP 미차단 경고)을 우회** + stale 버퍼가 스위치 변경을 덮어써 **쓰기 게이트 재무장** 레이스. 뿌리는 "같은 필드에 쓰기 경로 2개". → 전체 PUT이 optimizer를 **422로 거부**(`extra=forbid`), 콘솔은 읽기전용 배지+"변경 →", **유일 경로=`PUT /campaign-settings/optimizer`**. R2에서 내가 하위호환 절충으로 문을 열어뒀던 걸 codex가 다시 지적 → 철회(구조로 강제). R3 PASS.

@@ -126,13 +126,16 @@ export default function NaverAdCommandCenter() {
         <CampaignRoster />
       </Card>
 
-      {/* ③ 성적표 두 겹 — 중복 아니라 상보 */}
+      {/* ③ 성적표 두 겹 — 중복 아니라 상보 + 외부 변경 감지(D-NAO-50) */}
       <div className="grid grid-cols-2 gap-4">
         <Card title="우리 조언이 맞았나 (방향 정밀도)">
           <RetroScorecardPane />
         </Card>
         <Card title="우리가 한 일의 결과 (인과)">
           <ChangeLogPane />
+        </Card>
+        <Card title="외부(MOP/사람)가 바꾼 것 감지">
+          <ExternalChangesPane />
         </Card>
       </div>
 
@@ -345,6 +348,17 @@ function RetroRollup({ data }: { data: NaverRetroScorecard }) {
  *  MOP의 최대 공백이자 우리가 이길 자리**(ref24)라 절반을 비워두면 자기모순이다.
  *  실측 근거: update_bid→get_keyword()의 bidAmt / update_budget→campaign의 dailyBudget /
  *  set_user_lock→userLock / add_negative_keyword→{after, created_ids}(harness:466 래핑). */
+/** D-NAO-50 __bulk__ 요약행 전용 — entity_sync._emit_inventory_side가 200건 초과 시 남기는
+ *  {"bulk": true, "count": N, "sample": [이름 최대 20개]} 모양을 그린다(keyword/bidAmt 없음). */
+function describeBulkKeywordChange(payload: Record<string, unknown> | null, verb: string): string {
+  const count = typeof payload?.count === "number" ? num(payload.count) : NO_DATA;
+  const sample = Array.isArray(payload?.sample)
+    ? payload.sample.filter((s): s is string => typeof s === "string")
+    : [];
+  const preview = sample.length > 0 ? ` (예: ${sample.slice(0, 3).join(", ")} …)` : "";
+  return `키워드 대량 ${verb} ${count}건${preview}`;
+}
+
 function describeChange(row: NaverChangeLogRow): string {
   const b = row.before as Record<string, unknown> | null;
   const a = row.after as Record<string, unknown> | null;
@@ -362,6 +376,28 @@ function describeChange(row: NaverChangeLogRow): string {
       const created = Array.isArray(a?.created_ids) ? a.created_ids.length : null;
       return created == null ? "제외 키워드 추가" : `제외 키워드 ${num(created)}개 추가`;
     }
+    // 외부 감지 2종(라이브 검증이 발견 — ExternalChangesPane이 생기기 전엔 어떤 화면에도
+    // 안 떠서 케이스 누락이 보이지 않았고, prod 15행 전부가 action 원문으로 렌더됐다).
+    // payload는 우리 실행과 같은 키다: userLock / bidAmt(entity_sync.py:163·300 실측,
+    // bidAmt는 직전 관측 부재 시 null 가능 → n()이 막는다).
+    case "external_status_change":
+      return `상태 변경 감지: ${lock(b?.userLock)} → ${lock(a?.userLock)}`;
+    case "external_bid_change":
+      return `입찰가 변경 감지: ${n(b?.bidAmt)} → ${n(a?.bidAmt)}`;
+    // D-NAO-50 키워드 밸브: added는 after_value, removed는 before_value에 실린다(entity_sync.py
+    // _emit_inventory_side). ★대량(__bulk__)은 payload 모양이 다르다({bulk,count,sample} —
+    // keyword/bidAmt 없음) — entity_id로 먼저 분기해 일반 케이스와 섞이지 않게 한다.
+    case "external_keyword_added": {
+      if (row.entity_id === "__bulk__") return describeBulkKeywordChange(a, "등록");
+      const kw = typeof a?.keyword === "string" ? a.keyword : NO_DATA;
+      const bid = typeof a?.bidAmt === "number" ? ` (입찰가 ${won(a.bidAmt)})` : "";
+      return `키워드 등록 감지: "${kw}"${bid}`;
+    }
+    case "external_keyword_removed": {
+      if (row.entity_id === "__bulk__") return describeBulkKeywordChange(b, "소실");
+      const kw = typeof b?.keyword === "string" ? b.keyword : NO_DATA;
+      return `키워드 삭제·소실 감지: "${kw}"`;
+    }
     default:
       // 알 수 없는 액션은 지어내지 않는다 — action 원문을 그대로 보여준다.
       return row.action;
@@ -371,7 +407,7 @@ function describeChange(row: NaverChangeLogRow): string {
 function ChangeLogPane() {
   // ★이 패널은 "우리가 한 일의 결과"(인과)다 — 외부가 바꾼 걸 감지한 행이 섞이면
   //   남의 조작을 우리 성과로 보여주게 된다(codex[P2] 2026-07-17). 외부 변경은
-  //   별도 관심사(3열 대조의 MOP 열·이상 피드)라 여기 섞지 않는다.
+  //   별도 관심사라 여기 섞지 않는다 — 그 피드는 ExternalChangesPane(바로 아래)이 그린다.
   const { data, error } = useAsyncData(() => fetchNaverChangeLog({ days: 30, limit: 10, actor: "ours" }), []);
   if (error) return <EmptyState reason={`불러오지 못했습니다: ${error}`} hint="새로고침하거나 백엔드 상태를 확인하세요." />;
   if (data === null) return <Loading rows={3} />;
@@ -384,20 +420,67 @@ function ChangeLogPane() {
     );
   }
   return (
-    <Table head={<><Th>시각</Th><Th>대상</Th><Th>변경</Th><Th>근거</Th></>}>
-      {data.rows.map((r) => (
-        <tr key={r.id}>
-          <Td><span className="text-xs text-gray-500">{r.changed_at?.slice(5, 16) ?? NO_DATA}</span></Td>
-          <Td><span className="text-xs">{r.entity_type} {r.entity_id}</span></Td>
-          {/* ★"무엇을 왜 바꿨는지" — MOP에 0개인 컬럼(ref24). 우리가 이길 자리이므로
-              지원하는 실행 액션 4종을 전부 제대로 그린다(codex[P2] R3). */}
-          <Td>
-            <span className="text-xs tabular-nums">{describeChange(r)}</span>
-          </Td>
-          <Td><span className="text-xs text-gray-600">{r.rationale ?? NO_DATA}</span></Td>
-        </tr>
-      ))}
-    </Table>
+    <>
+      <Table head={<><Th>시각</Th><Th>대상</Th><Th>변경</Th><Th>근거</Th></>}>
+        {data.rows.map((r) => (
+          <tr key={r.id}>
+            <Td><span className="text-xs text-gray-500">{r.changed_at?.slice(5, 16) ?? NO_DATA}</span></Td>
+            <Td><span className="text-xs">{r.entity_type} {r.entity_id}</span></Td>
+            {/* ★"무엇을 왜 바꿨는지" — MOP에 0개인 컬럼(ref24). 우리가 이길 자리이므로
+                지원하는 실행 액션 4종을 전부 제대로 그린다(codex[P2] R3). */}
+            <Td>
+              <span className="text-xs tabular-nums">{describeChange(r)}</span>
+            </Td>
+            <Td><span className="text-xs text-gray-600">{r.rationale ?? NO_DATA}</span></Td>
+          </tr>
+        ))}
+      </Table>
+      {/* ★잘림을 숨기지 않는다(라이브 검증: 15건인데 10건만 보이고 표식 0). PendingPane의
+          집계 푸터와 같은 패턴. */}
+      {data.total > data.rows.length && (
+        <p className="px-4 py-2 text-xs text-gray-500 border-t border-gray-100">
+          최근 {num(data.rows.length)}건 표시 · 총 {num(data.total)}건
+        </p>
+      )}
+    </>
+  );
+}
+
+function ExternalChangesPane() {
+  // D-NAO-50: actor=external의 **첫 화면 소비자**. 이 패널이 없으면 키워드·입찰가·상태
+  // diff 밸브가 DB에만 쌓이고 어디서도 안 보인다 — 정확히 "수집은 풍부한데 화면엔 없음"
+  // (스펙 §1-4)의 재발이다. ChangeLogPane과 구조는 같지만 관심사가 반대다:
+  // 그쪽=우리가 한 일(인과), 이쪽=외부(MOP/사람)가 바꾼 걸 우리가 관측한 것(감지).
+  const { data, error } = useAsyncData(() => fetchNaverChangeLog({ days: 30, limit: 10, actor: "external" }), []);
+  if (error) return <EmptyState reason={`불러오지 못했습니다: ${error}`} hint="새로고침하거나 백엔드 상태를 확인하세요." />;
+  if (data === null) return <Loading rows={3} />;
+  if (data.rows.length === 0) {
+    return (
+      <EmptyState
+        reason="최근 30일 감지된 외부 변경이 없습니다."
+        hint="입찰가·상태·키워드 diff는 매일 07:35 entity_sync에서 잡힙니다."
+      />
+    );
+  }
+  return (
+    <>
+      <Table head={<><Th>시각</Th><Th>대상</Th><Th>변경</Th><Th>근거</Th></>}>
+        {data.rows.map((r) => (
+          <tr key={r.id}>
+            <Td><span className="text-xs text-gray-500">{r.changed_at?.slice(5, 16) ?? NO_DATA}</span></Td>
+            <Td><span className="text-xs">{r.entity_type} {r.entity_id}</span></Td>
+            <Td><span className="text-xs tabular-nums">{describeChange(r)}</span></Td>
+            <Td><span className="text-xs text-gray-600">{r.rationale ?? NO_DATA}</span></Td>
+          </tr>
+        ))}
+      </Table>
+      {/* ★잘림을 숨기지 않는다(라이브 검증: 15건인데 10건만 보이고 표식 0). */}
+      {data.total > data.rows.length && (
+        <p className="px-4 py-2 text-xs text-gray-500 border-t border-gray-100">
+          최근 {num(data.rows.length)}건 표시 · 총 {num(data.total)}건
+        </p>
+      )}
+    </>
   );
 }
 

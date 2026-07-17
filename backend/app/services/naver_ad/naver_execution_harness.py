@@ -119,9 +119,11 @@ _ACTION_BY_PROPOSAL_TYPE = {
 # 존재 이유다(D-47-h).
 EXECUTION_ACTIONS: frozenset[str] = frozenset(_ACTION_BY_PROPOSAL_TYPE.values())
 
-# entity_sync가 기록하는 "외부가 바꿨다" 감지 행(D-NAO-40 / D-NAO-47 밸브).
+# entity_sync가 기록하는 "외부가 바꿨다" 감지 행(D-NAO-40 상태 / D-NAO-47 입찰 /
+# D-NAO-50 키워드 인벤토리 add·remove 밸브). 커맨드 센터의 actor=external 필터가 이 집합을 쓴다.
 EXTERNAL_DETECTION_ACTIONS: frozenset[str] = frozenset({
     "external_status_change", "external_bid_change",
+    "external_keyword_added", "external_keyword_removed",
 })
 
 # D-NAO-16 개방 순서(제외키워드→정지·재개→입찰→예산)의 실제 스위치. 코드 배포로만 변경
