@@ -3,6 +3,10 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
+- 날짜: 2026-07-17 16:20 KST (★★**쿠팡 광고비 13일 정지(07-04~) 근본해결·배포·PR #28 병합(main `889f3ea`==prod)**. 발단: Jino가 skills.ag 크롤링 스킬(149,000원) 구매 검토 → 조사 결과 **봇차단 아님 = 구매 불요**)
+  - 진짜 원인: prod `request_ad_cost_refresh` 크론 disabled + toggle API가 미등록 잡 enable 시 예외 삼킴(DB만 토글) + 배너가 "쿠키 만료" 오진단. 재활성+재시작으로 즉시 복구, 페처가 확정치 07-05~07-16 **자동 백필 완료(데이터 손실 0)** — 크론 fetch 14/15/16시 3연속 라이브 실증.
+  - 재발 방지 3종 배포: ①toggle 라이브 등록(`job_func_for`/`job_kwargs_for` 단일 매핑, live_registered 응답 — prod에서 off→on 왕복 실증) ②cookie_status `refresh_cron_enabled` 노출→배너 크론꺼짐 우선 진단 ③`COUPANG_OHITECH_AD` 워치독 편입. 1768 pass·codex PASS·safe_deploy(CAS가 dedfad 세션 배포본 감지→병합 후 배포, 가드 첫 실전 작동).
+  - **남은 것: ①Jino 액션 — 9224 크롬 창 오하이테크 재로그인**(오늘 09:21부터 매시 "세션 만료", 07-16치부터 공백, 로그인하면 29일치 자동 소급) **②별건 발견 — WING1 26일·WING2 37일 쿠키 stale + sync_coupang_rg_orders 6.4일 연속 실패**(RG 정산 계열, 미조치).
 - 날짜: 2026-07-17 12:35 KST (★**D-NAO-50 키워드 변경 이력 밸브 구현·배포·라이브검증 완료**. Jino "키워드 변경 이력 밸브도 추가해줘" + 모델 라우팅 Fable설계/Opus구현/Sonnet단순)
   - external_keyword_added/removed 밸브(부트스트랩·대량 __bulk__ 가드, mutation test 실증) + EXTERNAL_DETECTION_ACTIONS 배선 + **ExternalChangesPane 신설**(actor=external 첫 화면 소비자 — 데이터만 쌓이고 화면에 없을 뻔한 걸 Sonnet 리서치가 발견).
   - codex R1 [P2] 플랩 지적 → R2 AGREE-DEFER 합의(내일 실측이 감시 지점). 1699 pass/0 fail.
