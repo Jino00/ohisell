@@ -127,6 +127,16 @@ export function executeConfirmText(p: NaverAdProposal): string {
   }
 }
 
+// D-NAO-53-b: 정보성 제안(p.informational)은 실행 대상이 없어 승인해도 no-op이고(harness가
+// "정보성 제안 — 실행 대상 아님"으로 응답), 자동 만료(D+1~D+3)가 있어 방치가 정상이며, 소급
+// 채점도 status를 읽지 않는다 — 승인/반려/실행/재승인 버튼은 실행형 카드와 틀을 공유하다 따라
+// 나온 흔적이므로 렌더하지 않는다. ★백엔드 파생값(p.informational)만 쓰고 proposal_type
+// 문자열로 재분류하지 않는다(이 콘솔의 드리프트 교훈 — proposalKindToInformational 상단 주석 참조).
+// export = vitest 드리프트 가드 대상.
+export function showsActionButtons(p: NaverAdProposal): boolean {
+  return !p.informational;
+}
+
 // D-NAO-2 공격성 배수 (bep_calculator.AGG_MULT와 동일 값 — 프론트는 이 값으로 override를 계산할 뿐
 // 최종 판정은 항상 백엔드 campaign_target_resolver가 override 컬럼을 읽어 수행한다).
 const AGGRESSIVENESS_OPTIONS: { key: string; label: string; mult: number }[] = [
@@ -585,6 +595,10 @@ export default function NaverAdOptimizationConsole() {
   }
 
   function renderProposalActions(p: NaverAdProposal, busy: boolean) {
+    // D-NAO-53-b: 정보성 카드는 승인해도 no-op이고 자동 만료되므로 액션 버튼을 렌더하지 않는다.
+    if (!showsActionButtons(p)) {
+      return <span className="text-xs text-gray-300">자동 만료</span>;
+    }
     const btnBase = "px-3 py-1.5 text-xs rounded border disabled:opacity-50 disabled:cursor-not-allowed";
     if (p.status === "pending") {
       return (
