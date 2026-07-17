@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import SchedulerState
 from app.schemas import SchedulerHealthOut, SchedulerJobOut, SchedulerStatusOut
-from app.services.scheduler_service import job_func_for, scheduler
+from app.services.scheduler_service import job_func_for, job_kwargs_for, scheduler
 
 log = logging.getLogger(__name__)
 
@@ -145,7 +145,8 @@ def toggle_job(job_id: str, db: Session = Depends(get_db)):
                     trigger = CronTrigger.from_crontab(
                         state.cron_expression, timezone="Asia/Seoul"
                     )
-                    scheduler.add_job(func, trigger=trigger, id=job_id, replace_existing=True)
+                    scheduler.add_job(func, trigger=trigger, id=job_id,
+                                      replace_existing=True, **job_kwargs_for(job_id))
                     live_registered = True
                 else:
                     # 매핑 밖 — 재시작 시 등록되는 잡일 수 있으니 DB 토글만 유지(500 금지).
