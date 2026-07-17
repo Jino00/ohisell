@@ -90,6 +90,17 @@ def _auto_operate_campaign_ids(db: Session) -> set[str]:
     return {r[0] for r in rows}
 
 
+def _auto_operate_now(db: Session, campaign_id: str) -> bool:
+    """킬스위치 실행 직전 재확인(codex 5R[P1-2]) — 레인 시작 시 1회 스냅샷만 믿으면 실행
+    도중 Jino가 OFF("04 자동운영 중지") 해도 남은 실입찰이 진행된다(문서화된 "즉시 정지"
+    계약 위반). 컬럼 단독 조회는 ORM identity map을 경유하지 않고 매번 SELECT를 실행하므로
+    다른 세션(콘솔 UPDATE)의 커밋을 즉시 반영한다. 행 부재도 False(fail-closed)."""
+    row = db.query(NaverCampaignSettings.auto_operate).filter(
+        NaverCampaignSettings.campaign_id == campaign_id
+    ).first()
+    return bool(row and row[0])
+
+
 def _extract_rationale_clk(rationale: str | None) -> int | None:
     """D-NAO-48 조건②("rationale 창 클릭") 추출 — 로컬 루틴(사람/Claude가 rationale
     텍스트를 읽고 판단)과 동일 신호를 그대로 재현한다. target_bid처럼 구조화 컬럼이
@@ -156,12 +167,24 @@ def _settlement_roas_ok(
     db: Session, target_type: str, target_id: str, campaign_id: str, today: date,
 ) -> tuple[bool, str]:
     """D-NAO-48 조건③(그룹 보정ROAS(정착창 D-8~D-2) ≥ target_roas) — 근거 없음은 전부
-    fail-closed(추정 금지 원칙, guardrail_gate와 동일 태도)."""
+    fail-closed(추정 금지 원칙, guardrail_gate와 동일 태도).
+
+    codex 5R[P1-1]: correction_factor()는 실주문 매출 부재 시 factor=1·source='unavailable'
+    을 반환한다(no-op 보정 폴백) — 그걸 검증된 보정처럼 쓰면 데이터 정전 시 무보정
+    convAmt/cost로 bid_up(일 레인)·시간당 UP이 승인된다. source가 'actual_revenue_ratio'
+    (실측 비율)가 아니면 ROAS 검증 불가로 fail-closed. DOWN 경로는 이 함수를 타지 않아
+    영향 없음(안전 방향, 보정 불요)."""
     window_from, window_to = _settlement_window(today)
     agg = _settlement_agg(db, target_type, target_id, window_from, window_to)
     if agg["cost"] <= 0:
         return False, f"정착창({window_from.isoformat()}~{window_to.isoformat()}) 실적 없음 — 보정ROAS 검증 불가(fail-closed)"
-    factor = diagnosis.correction_factor(db, today - timedelta(days=1))["factor"]
+    factor_info = diagnosis.correction_factor(db, today - timedelta(days=1))
+    if factor_info.get("source") != "actual_revenue_ratio":
+        return False, (
+            f"보정계수 unavailable(source={factor_info.get('source')!r}) — 실주문 매출 부재, "
+            "보정ROAS 검증 불가(fail-closed, codex 5R[P1-1])"
+        )
+    factor = factor_info["factor"]
     roas_corrected = (agg["conv_amt"] / agg["cost"]) * float(factor)
     target_roas = _resolve_target_roas(db, campaign_id)
     if target_roas is None:
@@ -321,6 +344,13 @@ def run_daily_lane(db: Session, *, now: datetime | None = None) -> dict:
                 )
                 continue
         # bid_down: 조건 없음(무조건 승인, 안전 방향)
+
+        # 킬스위치 실행 직전 재확인(codex 5R[P1-2]) — 앞선 실행 도중 OFF 됐으면 이후 전부 skip.
+        if not _auto_operate_now(db, p.campaign_id):
+            result["held"].append(
+                {"id": p.id, "reason": "킬스위치 OFF — auto_operate=False(실행 직전 재확인, codex 5R[P1-2])"}
+            )
+            continue
 
         p.status = "approved"
         p.approval_source = APPROVAL_SOURCE_DAILY
@@ -670,6 +700,15 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
             step_bid = _clamp_step(current_bid, verdict["direction"])
             if step_bid is None:
                 result["held"].append({"target_id": target_id, "reason": "스텝 클램프 계산 불가(방향 무의미)"})
+                continue
+
+            # 킬스위치 실행 직전 재확인(codex 5R[P1-2]) — 앞선 실행 도중 OFF 됐으면 이후
+            # 유닛은 제안 생성 자체를 하지 않는다(즉시 정지 계약).
+            if not _auto_operate_now(db, campaign_id):
+                result["held"].append(
+                    {"target_id": target_id,
+                     "reason": "킬스위치 OFF — auto_operate=False(실행 직전 재확인, codex 5R[P1-2])"}
+                )
                 continue
 
             proposal_type = "bid_up" if verdict["direction"] == "up" else "bid_down"

@@ -210,7 +210,7 @@ def test_daily_lane_bid_up_all_4_conditions_met_approved_and_executed(db):
     with patch.object(auto_operator.naver_sa_writer, "get_keyword",
                        return_value={"bidAmt": current_bid}), \
          patch.object(auto_operator.diagnosis, "correction_factor",
-                       return_value={"factor": Decimal("1")}), \
+                       return_value={"factor": Decimal("1"), "source": "actual_revenue_ratio"}), \
          patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
         result = auto_operator.run_daily_lane(db, now=NOW)
 
@@ -269,7 +269,7 @@ def test_daily_lane_bid_up_condition4_stale_retro_asof_holds(db):
     with patch.object(auto_operator.naver_sa_writer, "get_keyword",
                        return_value={"bidAmt": current_bid}), \
          patch.object(auto_operator.diagnosis, "correction_factor",
-                       return_value={"factor": Decimal("1")}), \
+                       return_value={"factor": Decimal("1"), "source": "actual_revenue_ratio"}), \
          patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
         result = auto_operator.run_daily_lane(db, now=NOW)
     mock_exec.assert_not_called()
@@ -301,11 +301,150 @@ def test_daily_lane_bid_up_condition4_fails_currently_bleeding(db):
     with patch.object(auto_operator.naver_sa_writer, "get_keyword",
                        return_value={"bidAmt": current_bid}), \
          patch.object(auto_operator.diagnosis, "correction_factor",
-                       return_value={"factor": Decimal("1")}), \
+                       return_value={"factor": Decimal("1"), "source": "actual_revenue_ratio"}), \
          patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
         result = auto_operator.run_daily_lane(db, now=NOW)
     mock_exec.assert_not_called()
     assert "④" in result["held"][0]["reason"]
+
+
+# ── codex 5R[P1-1]: 보정계수 unavailable → ROAS 검증 불가 = fail-closed hold ──
+
+def test_daily_lane_bid_up_held_when_correction_factor_unavailable(db):
+    """correction_factor()가 실주문 매출 부재 시 factor=1·source='unavailable'을 반환 —
+    그걸 검증된 보정ROAS처럼 쓰면 데이터 정전 시 무보정 convAmt/cost로 bid_up이 승인된다.
+    source != 'actual_revenue_ratio'면 조건③ 미충족 hold."""
+    p, current_bid = _seed_bid_up_happy_path(db)
+    with patch.object(auto_operator.naver_sa_writer, "get_keyword",
+                       return_value={"bidAmt": current_bid}), \
+         patch.object(auto_operator.diagnosis, "correction_factor",
+                       return_value={"factor": Decimal("1"), "source": "unavailable",
+                                     "window_revenue": 0, "window_conv_amt": 0}), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_daily_lane(db, now=NOW)
+    mock_exec.assert_not_called()
+    assert result["approved"] == 0
+    assert len(result["held"]) == 1
+    assert "③" in result["held"][0]["reason"]
+    assert "unavailable" in result["held"][0]["reason"]
+    db.refresh(p)
+    assert p.status == "pending"
+
+
+def test_hourly_lane_up_held_when_correction_factor_unavailable(db):
+    """시간당 UP도 동일 — 보정계수 unavailable이면 정착ROAS 조건 미충족 → hold.
+    DOWN 경로는 영향 없음(안전 방향, 보정 불요)."""
+    _settings(db, target_roas_override=Decimal("2.0"))
+    window_from, window_to = _settlement_window()
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-up", parent_id="grp-1",
+                        campaign_id=CAMPAIGN, campaign_type="WEB_SITE", status="on"))
+    _ad_row(db, keyword_id="nkw-up", ad_date=window_from, clk=20, cost=7000, conv_direct_amt=21000)
+    db.commit()
+
+    up_curve = [
+        _hour(10, imp=15, clk=2, cost=35, avg_rank=5.0),
+        _hour(11, imp=15, clk=2, cost=35, avg_rank=5.0),
+    ]
+    now_midday = datetime(2026, 7, 20, 12, 20, 0)
+    with patch.object(auto_operator.naver_sa_writer, "get_keyword", return_value={"bidAmt": 1000}), \
+         patch.object(auto_operator.diagnosis, "correction_factor",
+                       return_value={"factor": Decimal("1"), "source": "unavailable",
+                                     "window_revenue": 0, "window_conv_amt": 0}), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(
+            db, now=now_midday, fetch_intraday=lambda tid, d: up_curve,
+        )
+    mock_exec.assert_not_called()
+    assert result["approved"] == 0
+    assert result["held"][0]["reason"] == "판정 조건 미충족(기본 hold)"
+
+
+def test_hourly_lane_down_unaffected_by_correction_factor_unavailable(db):
+    """DOWN은 순위/CPC 기반(안전 방향) — 보정계수 상태와 무관하게 진행."""
+    _settings(db)
+    window_from, window_to = _settlement_window()
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-down", parent_id="grp-1",
+                        campaign_id=CAMPAIGN, campaign_type="WEB_SITE", status="on"))
+    _ad_row(db, keyword_id="nkw-down", ad_date=window_from, clk=10, cost=100)
+    db.commit()
+
+    curve = [
+        _hour(6, imp=15, clk=2, cost=100, avg_rank=2.0),
+        _hour(7, imp=15, clk=2, cost=100, avg_rank=2.0),
+    ]
+    with patch.object(auto_operator.naver_sa_writer, "get_keyword", return_value={"bidAmt": 1000}), \
+         patch.object(auto_operator.diagnosis, "correction_factor",
+                       return_value={"factor": Decimal("1"), "source": "unavailable",
+                                     "window_revenue": 0, "window_conv_amt": 0}), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(
+            db, now=NOW, fetch_intraday=lambda tid, d: curve,
+        )
+    mock_exec.assert_called_once()
+
+
+# ── codex 5R[P1-2]: 킬스위치 실행 직전 재확인 — 레인 도중 OFF 시 즉시 정지 ──
+
+def test_daily_lane_kill_switch_mid_run_stops_remaining_executions(db):
+    """레인 시작 시 auto_operate 1회 스냅샷만 믿으면, 실행 도중 Jino가 OFF 해도 남은
+    실입찰이 진행된다("즉시 정지" 계약 위반). 각 제안의 승인·실행 직전 DB 재조회 — 첫
+    실행의 부수효과로 플래그가 꺼지면 두 번째 제안은 미실행."""
+    _settings(db)
+    p1 = _proposal(db, proposal_type="bid_down", target_id="nkw-k1", target_bid=900)
+    p2 = _proposal(db, proposal_type="bid_down", target_id="nkw-k2", target_bid=900)
+
+    def _execute_and_kill(db_arg, proposal_id, **kw):
+        db.query(NaverCampaignSettings).filter(
+            NaverCampaignSettings.campaign_id == CAMPAIGN
+        ).update({"auto_operate": False})
+        db.commit()
+
+    with patch.object(auto_operator.naver_execution_harness, "execute",
+                       side_effect=_execute_and_kill) as mock_exec:
+        result = auto_operator.run_daily_lane(db, now=NOW)
+
+    assert mock_exec.call_count == 1  # 첫 제안만 실행
+    assert mock_exec.call_args[0][1] == p1.id
+    assert result["approved"] == 1
+    held_reasons = [h["reason"] for h in result["held"]]
+    assert any("킬스위치" in r for r in held_reasons)
+    db.refresh(p2)
+    assert p2.status == "pending"  # 두 번째는 승인조차 안 됨
+
+
+def test_hourly_lane_kill_switch_mid_run_stops_remaining_executions(db):
+    """시간당 레인 동일 — 첫 실행 부수효과로 OFF 시 두 번째 핫셋 유닛은 제안 생성/실행 없음."""
+    _settings(db)
+    window_from, window_to = _settlement_window()
+    for eid, day_offset in (("nkw-ka", 0), ("nkw-kb", 1)):
+        db.add(NaverEntity(entity_type="keyword", entity_id=eid, parent_id="grp-1",
+                            campaign_id=CAMPAIGN, campaign_type="WEB_SITE", status="on"))
+        _ad_row(db, keyword_id=eid, ad_date=window_from + timedelta(days=day_offset),
+                clk=10, cost=100)
+    db.commit()
+
+    curve = [
+        _hour(6, imp=15, clk=2, cost=100, avg_rank=2.0),
+        _hour(7, imp=15, clk=2, cost=100, avg_rank=2.0),
+    ]  # rank<2.5 → down 판정(두 유닛 모두)
+
+    def _execute_and_kill(db_arg, proposal_id, **kw):
+        db.query(NaverCampaignSettings).filter(
+            NaverCampaignSettings.campaign_id == CAMPAIGN
+        ).update({"auto_operate": False})
+        db.commit()
+
+    with patch.object(auto_operator.naver_sa_writer, "get_keyword", return_value={"bidAmt": 1000}), \
+         patch.object(auto_operator.naver_execution_harness, "execute",
+                       side_effect=_execute_and_kill) as mock_exec:
+        result = auto_operator.run_hourly_lane(db, now=NOW, fetch_intraday=lambda tid, d: curve)
+
+    assert mock_exec.call_count == 1  # 첫 유닛만 실행
+    assert result["approved"] == 1
+    held_reasons = [h["reason"] for h in result["held"]]
+    assert any("킬스위치" in r for r in held_reasons)
+    # 두 번째 유닛의 제안은 생성되지 않아야 함(승인 직전 재확인에서 차단)
+    assert db.query(NaverProposal).filter(NaverProposal.target_id == "nkw-kb").count() == 0
 
 
 # ══════════════════════════ 시간당 레인(A2+A3) ══════════════════════════
@@ -424,7 +563,7 @@ def test_hourly_lane_up_only_when_all_3_conditions_met(db):
     now_midday = datetime(2026, 7, 20, 12, 20, 0)  # 선형기대=740/1440≈0.514 vs 실제0.1 → 저속
     with patch.object(auto_operator.naver_sa_writer, "get_keyword", return_value={"bidAmt": 1000}), \
          patch.object(auto_operator.diagnosis, "correction_factor",
-                       return_value={"factor": Decimal("1")}), \
+                       return_value={"factor": Decimal("1"), "source": "actual_revenue_ratio"}), \
          patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
         result = auto_operator.run_hourly_lane(
             db, now=now_midday, fetch_intraday=lambda tid, d: up_curve,
@@ -589,7 +728,7 @@ def test_hourly_lane_snapshot_missing_holds_entire_campaign_fail_closed(db):
     now_midday = datetime(2026, 7, 20, 13, 20, 0)
     with patch.object(auto_operator.naver_sa_writer, "get_keyword", return_value={"bidAmt": 1000}), \
          patch.object(auto_operator.diagnosis, "correction_factor",
-                       return_value={"factor": Decimal("1")}), \
+                       return_value={"factor": Decimal("1"), "source": "actual_revenue_ratio"}), \
          patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
         result = auto_operator.run_hourly_lane(
             db, now=now_midday, fetch_intraday=lambda tid, d: up_curve,
@@ -648,7 +787,7 @@ def test_hourly_lane_stale_morning_snapshot_holds_campaign(db):
     now_afternoon = datetime(2026, 7, 20, 14, 20, 0)
     with patch.object(auto_operator.naver_sa_writer, "get_keyword", return_value={"bidAmt": 1000}), \
          patch.object(auto_operator.diagnosis, "correction_factor",
-                       return_value={"factor": Decimal("1")}), \
+                       return_value={"factor": Decimal("1"), "source": "actual_revenue_ratio"}), \
          patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
         result = auto_operator.run_hourly_lane(
             db, now=now_afternoon, fetch_intraday=lambda tid, d: up_curve,
