@@ -33,6 +33,10 @@
 - 완료 기준(라이브): prod 배포 후 다음 시간당 레인 발화(:20) 또는 일 레인에서 diary 행 실생성 + 환경 컬럼 채워짐 실측.
 
 ### P2 해석층
+- **P1 독립 리뷰가 남긴 설계 선결 조건 2건** (2026-07-18, GATE PASS 후 P3 이월분):
+  - (P3-2) 일 레인에서 hold된 bid_up은 diary에 blocked(hold 시점)+reject(말미 stale 정리) **2행**이 남는다(연결키 없음, 의도된 설계). 해석·채굴 시 같은 제안의 이중계상 금지 — (campaign_id, target_id, action, 같은 날) 단위 dedup 계약을 P2/P3 읽기 쪽에 명시적으로 구현할 것.
+  - (P3-4) 일기는 best-effort(fail-open — WAL 쓰기경합 30s 초과 시 행 조용히 소실 가능). **"행 없음 = 아무 일도 없었음" 해석 금지** — 완전성이 필요한 판단은 change_log(전건 기록)를 진실 소스로, diary는 env 컨텍스트 부가용으로.
+  - (env 캐비어트) avg_rank는 D-1 스윕 기준(집행 시점 아님, 최대 ~1일 스테일)·iphone_launch_offset_days는 미래 출시일 미등록 시 큰 양수(직전 출시 기준)로 나옴 — 해석문·상관 분석에서 오해 금지.
 - **`outcome_backfill_sa` (★"한 일↔결과" 고리)**: 소급 채점(D-NAO-45)·정착창 성과·flight 데이터를 읽어 어제/그제 diary 행의 outcome_json에 D+1/D+7 결과를 소급 기입. "결과 없는 일기"가 원리적으로 안 남게 하는 구조 — Jino 문제의식("한 일만 적고 결과가 없다")의 직접 해소 지점.
 - `daily_reflection_sa`: 어제 일기(+기입된 결과) + 환경 → 해석문. LLM=`claude -p`(expert_llm 패턴 재사용). 크론 08:35(retro 08:30 뒤 = outcome 최신). diary에 kind=reflection 행 또는 별도 테이블(구현 시 판단, 추천=같은 테이블 kind 컬럼).
 - 완료 기준: 크론 발화 실측 + outcome 기입률 실측 + 해석문에 환경 맥락 인용 확인.

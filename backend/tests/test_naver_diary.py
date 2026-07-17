@@ -562,3 +562,13 @@ def test_harness_dry_run_writes_no_diary_row(db):
     mock_write.assert_not_called()
     assert log_entry.dry_run is True
     assert db.query(OpsDiaryEntry).count() == 0
+
+
+def test_approval_source_literal_drift_guard():
+    """독립 리뷰 P3-3: diary의 actor 매핑 리터럴('auto_op'/'auto_op_hr')이 auto_operator의
+    실제 상수와 어긋나면(개명 등) 조용히 raw passthrough로 저장돼 actor 라벨이 오분류된다 —
+    실제 상수를 참조해 드리프트를 여기서 못박는다."""
+    assert auto_operator.APPROVAL_SOURCE_DAILY in diary._APPROVAL_SOURCE_TO_ACTOR
+    assert auto_operator.APPROVAL_SOURCE_HOURLY in diary._APPROVAL_SOURCE_TO_ACTOR
+    assert diary._APPROVAL_SOURCE_TO_ACTOR[auto_operator.APPROVAL_SOURCE_DAILY] == diary.ACTOR_DAILY
+    assert diary._APPROVAL_SOURCE_TO_ACTOR[auto_operator.APPROVAL_SOURCE_HOURLY] == diary.ACTOR_HOURLY

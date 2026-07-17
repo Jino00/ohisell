@@ -94,6 +94,7 @@ def _record_blocked(
     db: Session, *, campaign_id: str, actor: str, reason: str, now: datetime,
     target_type: str | None = None, target_id: str | None = None,
     adgroup_id: str | None = None, action: str | None = None,
+    event_type: str = "blocked",
 ) -> None:
     """레인 고유 hold 1건을 운영 일기(blocked)로 기록(D-NAO-54 P1). diary.write_diary_entry가
     fail-open이라 별도 try 불필요 — 일기 실패가 레인 집행/hold를 막지 않는다. 실집행/가드레일
@@ -102,9 +103,12 @@ def _record_blocked(
 
     ★기록 대상 선별(소음 차단): "의도된 액션이 차단된 것"만 기록한다 — 시간당 레인의 일상
     관찰(판정 hold=밴드 정상, 당일 imp 없음, intraday skip)은 액션 의도 자체가 없었으므로
-    기록하지 않는다(핫셋×매시 hold를 전부 적으면 일 수백 행 소음 → P3 후보 채굴 오염)."""
+    기록하지 않는다(핫셋×매시 hold를 전부 적으면 일 수백 행 소음 → P3 후보 채굴 오염).
+
+    킬스위치 사유 hold는 event_type="kill_switch"로 기록(독립 리뷰 P3-1: harness의 writer측
+    거부와 같은 원인이 두 타입에 분산되면 P3 채굴이 kill_switch 빈도를 과소집계한다)."""
     diary.write_diary_entry(
-        db, "blocked", campaign_id, actor=actor, target_type=target_type,
+        db, event_type, campaign_id, actor=actor, target_type=target_type,
         target_id=target_id, adgroup_id=adgroup_id, action=action, rationale=reason, now=now,
     )
 
@@ -401,7 +405,7 @@ def run_daily_lane(db: Session, *, now: datetime | None = None) -> dict:
             _record_blocked(
                 db, campaign_id=p.campaign_id, actor=diary.ACTOR_DAILY, reason=hold_reason,
                 now=now, target_type=p.target_type, target_id=p.target_id,
-                adgroup_id=p.adgroup_id, action=p.proposal_type,
+                adgroup_id=p.adgroup_id, action=p.proposal_type, event_type="kill_switch",
             )
             continue
 
@@ -442,13 +446,19 @@ def run_daily_lane(db: Session, *, now: datetime | None = None) -> dict:
             )
             result["rejected_stale"] += 1
         if leftovers:
+            # D-NAO-54 P1 일기(reject)용 원시값을 커밋 前 캡처(독립 리뷰 P2-1: 커밋이 ORM
+            # 인스턴스를 만료시켜, 커밋 후 lp.* 접근은 refresh SELECT(I/O)를 유발 — 그 예외는
+            # write_diary_entry의 try 밖(호출 프레임)이라 fail-open 계약을 뚫는다).
+            rejected_info = [
+                (lp.campaign_id, lp.target_type, lp.target_id, lp.adgroup_id, lp.proposal_type)
+                for lp in leftovers
+            ]
             db.commit()
-            # D-NAO-54 P1 일기(reject) — 커밋 확정 후에만 기록(기록은 확정된 사실만).
-            for lp in leftovers:
+            # 커밋 확정 후에만 기록(기록은 확정된 사실만) — 인자는 위에서 캡처한 원시값.
+            for c_id, t_type, t_id, ag_id, p_type in rejected_info:
                 diary.write_diary_entry(
-                    db, "reject", lp.campaign_id, actor=diary.ACTOR_DAILY,
-                    target_type=lp.target_type, target_id=lp.target_id,
-                    adgroup_id=lp.adgroup_id, action=lp.proposal_type,
+                    db, "reject", c_id, actor=diary.ACTOR_DAILY,
+                    target_type=t_type, target_id=t_id, adgroup_id=ag_id, action=p_type,
                     rationale="auto_op 보류/stale — 익일 08:00 재생성(D-NAO-49 일일 사이클, codex 11R)",
                     now=now,
                 )
@@ -828,6 +838,7 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                 _record_blocked(
                     db, campaign_id=campaign_id, actor=diary.ACTOR_HOURLY, reason=hold_reason,
                     now=now, target_type=target_type, target_id=target_id, action=intended_action,
+                    event_type="kill_switch",
                 )
                 continue
 
