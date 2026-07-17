@@ -98,6 +98,15 @@
       + 번들에 배너 코드 실재. (브라우저 DOM 시각 확인만 도구 장애로 미완 — 로직·번들·API 검증됨)
 - [x] Mac 폴러 갱신 — kickstart 즉시 '데이터끊김' 경보 라이브 발화 실측
 - [x] PR #41 병합 (main 9b98448 == prod)
-- [x] 층1 설계 문서 (docs/PLAN_rg-status-live-session.md) — 구현 진행 중
-- [ ] 층1 구현·배포·라이브 합격 (§ 그 문서 §2)
-- [ ] Jino: WING2 wing2 프로필 로그인 1회 (층1 뒤. WING1은 층1로 개입 0 — 쿠키 재등록 불필요해짐)
+- [x] 층1 설계 문서 (docs/PLAN_rg-status-live-session.md)
+- [x] **층1 구현·배포·라이브 합격** (PR #42, main f1b341a==prod) — 23:02:57 첫 발화 synced=98,
+      계정 row 4주기 백필(06-22~28 / 06-29~30 / 07-01~05 월경계분할 / 07-06~12).
+      ★쿠팡 원천 데이터가 달력 규칙·PR #41 보정값을 독립 검증(API from 06-29·07-01 == 보정값).
+      data_stale WING1 소멸 · vs_status_api 검산 부활(diff 0) · WING1 쿠키 재등록 불필요 확정.
+      WATCHDOG_COOKIES에서 WING1/2 제거(data_stale 전담). rg_status_days 90 백필 후 기본 35 복귀.
+- [ ] 🔴 Jino: WING2(오하이테크) 활성화 — 그 전까지 data_stale 41d 경보 유지가 정상:
+      ① 로그인 1회: `OHISELL_WING_CONFIG=~/.ohisell_wing2_fetcher.json OHISELL_WING_LOG=~/.ohisell_wing2_fetcher.log OHISELL_WING_LOCK=~/.ohisell_wing2_fetcher.lock python3 ~/.ohisell/tools/wing_browser_fetcher.py login`
+      ② launchd 인스턴스 등록(com.ohisell.wing2 — com.ohisell.wing.plist 복제 + 위 env 3개 추가)
+- [ ] 배너 DOM 시각 확인 — 브라우저 도구 장애로 미완(로직 테스트 7건·번들 문자열·API 라이브는 검증됨).
+      Jino가 대시보드 열면 앰버 배너 "⚠️ 파이프라인 경고 — RG 정산 데이터 41일째(오하이테크)"가 보여야 정상.
+- [ ] ⚠️원칙19 부채: 07-23 19:15 codex 쿼터 복구 후 PR #41·#42 소급 /codex review

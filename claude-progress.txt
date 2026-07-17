@@ -10,8 +10,11 @@
   - **층3 배포·라이브합격(머니코드)**: _expected_period_start 달력 규칙으로 폴백 교체 + prod 보정 apply 152행 — 6월 3,230,100→2,083,450·7월 2,570,425·총합 무손실·재스캔 0. 사본 리허설 후 실행.
   - **병행 세션 조우 2건**: ①safe_deploy CAS가 PR #39(O(n²) 파싱) 실배포본 clobber 차단 → 3-way 병합 흡수 ②PR #39가 먼저 main 병합 → 테스트 충돌 양쪽 보존으로 해소. PR #41 병합(main 9b98448==prod).
   - ⚠️**원칙19 부채**: codex 쿼터 소진(07-23 19:15 복구) → 독립 적대적 리뷰(별도 인스턴스, GATE PASS P1 0)로 대체. **07-23 이후 소급 /codex review 필요.**
-  - **층1 진행 중**: status/api 수집을 Mac 상주 브라우저로 이관(쿠키 의존 소멸) — 설계 docs/PLAN_rg-status-live-session.md, 구현 에이전트 가동 중. 완료 시 WING1 백필은 자동(쿠키 재등록 불필요), WING2만 Jino 로그인 1회.
-  - 계획서: docs/PLAN_pipeline-freshness-3layer.md (체크리스트 최신).
+  - **층1 완료·라이브 합격(PR #42 병합, main f1b341a==prod)**: Mac이 버리던 status/api raw JSON을 ingest-status로 push. 첫 발화 23:02:57 synced=98 — 계정 row 4주기 백필(월경계 분할 06-29~30|07-01~05 포함). ★쿠팡 원천 데이터가 달력 규칙·보정값을 독립 검증(API from == 보정 from). data_stale WING1 소멸·vs_status_api 검산 부활(diff 0)·**WING1 쿠키 재등록 불필요 확정**. WATCHDOG_COOKIES에서 WING1/2 제거(data_stale 전담). Mac 페처 갱신+kickstart 완료, rg_status_days 90 백필 후 기본 복귀.
+  - 🔴 **Jino 조치 2건**: ①WING2(오하이테크) 활성화 — wing2 프로필 로그인 1회+launchd 인스턴스(명령은 PLAN_pipeline-freshness-3layer.md §6 체크리스트에 기재. 그 전까지 data_stale 41d 경보=정상) ②대시보드 열어 앰버 배너 육안 확인(브라우저 도구 장애로 DOM 시각 확인만 미완).
+  - 별건 칩 분리: sync_coupang_rg_orders 6일째 실패(07-11부터, db.commit 경로) — spawn task로 등록.
+  - ⚠️원칙19 부채: codex 쿼터 소진 → PR #41·#42는 독립 적대적 리뷰(GATE PASS)로 대체. **07-23 19:15 복구 후 소급 /codex review 필수.**
+  - 계획서: docs/PLAN_pipeline-freshness-3layer.md (체크리스트 최신) · docs/PLAN_rg-status-live-session.md (층1 설계).
 - 날짜: 2026-07-17 22:10 KST (★**RG 정산 XLSX 업로드 60초 타임아웃 진범 해소·배포·라이브 합격** — 트랙 외 별건(네이버 트랙 무관), Jino 승인. 워크트리 `mop-command-center-design-7e087a`, 배포 commit `c0ea885`, **PR #39 오픈(병합 대기)**)
   - **증상**: Mac 페처 `_rg_push_xlsx`(timeout=60) POST가 "Read timed out" 2건 → 실패 보고. 그런데 서버는 완주(데이터 정상 적재)
     → last_error_at(21:12:25.959)이 last_success_at(21:12:25.821)보다 **138ms 뒤**에 찍혀 행이 "실패"로 남음.
