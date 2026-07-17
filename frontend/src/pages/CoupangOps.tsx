@@ -142,6 +142,18 @@ export default function CoupangOps() {
   const [adSyncMsg, setAdSyncMsg] = useState<string | null>(null);
   const [todayAdCost, setTodayAdCost] = useState<number | null>(null);  // 오늘 라이브 광고비(coupang_ad_cost_daily)
   const [adRefreshing, setAdRefreshing] = useState(false);
+  const adPanelRef = useRef<HTMLDivElement | null>(null);
+
+  // 전역 배너 CTA(?adcookie=open)는 이미 이 페이지에 있을 때도 눌린다 — useState 초기값만으로는
+  // 재마운트가 없어 무반응이었음(사용자 "안눌리는 느낌" 보고). 네비게이션마다 패널 펼침+스크롤+포커스.
+  useEffect(() => {
+    if (searchParams.get("adcookie") !== "open") return;
+    setShowAdSettings(true);
+    requestAnimationFrame(() => {
+      adPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      adPanelRef.current?.querySelector("textarea")?.focus();
+    });
+  }, [searchParams]);
 
   const API_BASE = import.meta.env.DEV ? "http://localhost:8000" : "";
 
@@ -475,7 +487,7 @@ export default function CoupangOps() {
 
       {/* ── 광고 쿠키 설정 패널 ── */}
       {showAdSettings && (
-        <div className="mb-4 bg-orange-50 border border-orange-200 rounded-lg p-4 text-sm">
+        <div ref={adPanelRef} className="mb-4 bg-orange-50 border border-orange-200 rounded-lg p-4 text-sm">
           <div className="flex items-center gap-2 mb-3">
             <span className="font-semibold text-orange-800">📣 쿠팡 광고비 쿠키 설정</span>
             <span className="text-xs text-gray-500">advertising.coupang.com 세션쿠키 — 매일 자정 자동 동기화</span>
@@ -501,7 +513,7 @@ export default function CoupangOps() {
             <textarea
               value={adCurl}
               onChange={(e) => setAdCurl(e.target.value)}
-              placeholder="curl 'https://advertising.coupang.com/...' ..."
+              placeholder="여기에 복사한 cURL을 그대로 붙여넣으세요 (curl 'https://advertising.coupang.com/…' -H 'cookie: …' 형태)"
               className="flex-1 h-16 px-3 py-2 text-xs border border-gray-300 rounded-lg font-mono resize-none focus:outline-none focus:ring-1 focus:ring-orange-400"
             />
             <div className="flex flex-col gap-1">

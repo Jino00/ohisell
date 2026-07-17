@@ -1679,6 +1679,14 @@ export interface NaverAdProposal {
   status: string;
   slack_ts: string | null;
   executed_change_log_id: number | null;
+  // D-NAO-47: 실행 목표값 — "입찰 인상" 카드가 *얼마로* 올리는지 화면에 없던 결함(스펙 §1-6).
+  target_bid: number | null;
+  target_lock: boolean | null;
+  target_budget: number | null;
+  budget_auto_eligible: boolean | null;
+  /** 백엔드가 주는 정보성/실행형 구분. ★프론트에서 유형 문자열로 재분류하지 말 것 —
+   *  백엔드에 유형이 추가되면 조용히 드리프트한다. */
+  informational: boolean;
   expert_verdict: NaverExpertVerdictSummary | null;
   // X1a T4 — 콘솔 실행 버튼 활성화 여부(naver_execution_harness.real_write_blocker).
   executable: boolean;
@@ -1689,6 +1697,9 @@ export interface NaverAdProposal {
 }
 
 export interface NaverAdProposalList {
+  /** ★limit과 무관한 전체 건수(D-NAO-47). 페이지 길이(rows.length)를 건수로 쓰지 말 것 —
+   *  limit에 따라 달라지는 틀린 숫자가 된다. */
+  total: number;
   rows: NaverAdProposal[];
 }
 
@@ -1697,6 +1708,13 @@ export function fetchNaverAdProposals(params?: {
   dateFrom?: string;
   dateTo?: string;
   campaignId?: string;
+  /** ★true=정보성만 / false=실행형만 / 생략=전부.
+   *  목록은 created_at DESC인데 정보성 경보(trigger_pacing)가 실행형보다 훨씬 자주 생성된다.
+   *  prod 실측(2026-07-17): pending 107건 = trigger_pacing 102(07-16) + bid_up 5(07-15)라
+   *  **limit=100이면 bid_up이 한 건도 안 나온다**. 받은 페이지를 !informational로 거르면
+   *  "지금 결정할 제안이 없습니다"가 뜬다 — 5건이 결정을 기다리는데.
+   *  **실행형이 필요하면 informational:false로 질의한다**(limit 올리기는 임시방편). */
+  informational?: boolean;
   limit?: number;
 }): Promise<NaverAdProposalList> {
   const q = new URLSearchParams();
@@ -1704,6 +1722,7 @@ export function fetchNaverAdProposals(params?: {
   if (params?.dateFrom) q.set("date_from", params.dateFrom);
   if (params?.dateTo) q.set("date_to", params.dateTo);
   if (params?.campaignId) q.set("campaign_id", params.campaignId);
+  if (params?.informational !== undefined) q.set("informational", String(params.informational));
   if (params?.limit) q.set("limit", String(params.limit));
   const qs = q.toString();
   return fetchApi<NaverAdProposalList>(`/api/naver/ad/proposals${qs ? `?${qs}` : ""}`);
@@ -1806,9 +1825,13 @@ export function fetchNaverCampaignSettings(params?: {
   return fetchApi<NaverAdCampaignSettingsList>(`/api/naver/ad/campaign-settings${qs ? `?${qs}` : ""}`);
 }
 
+/** 모드·공격성·override·memo 설정(전체 치환).
+ *  ★optimizer는 optional이고 **생략하면 백엔드가 기존 값을 보존**한다. 관리주체를 바꾸려면
+ *  `putNaverCampaignOptimizer`를 쓸 것 — 여기로 optimizer를 보내면 1층 스위치의 확인창
+ *  (원본 MOP 미차단 경고)을 우회하고, stale 버퍼가 스위치 변경을 덮어쓴다(codex[P1]). */
 export function putNaverCampaignSettings(body: {
   campaignId: string;
-  optimizer: NaverAdOptimizer;
+  optimizer?: NaverAdOptimizer;
   mode?: NaverAdCampaignMode | null;
   targetRoasOverride?: number | null;
   memo?: string | null;
@@ -1817,7 +1840,7 @@ export function putNaverCampaignSettings(body: {
     method: "PUT",
     body: JSON.stringify({
       campaign_id: body.campaignId,
-      optimizer: body.optimizer,
+      ...(body.optimizer !== undefined ? { optimizer: body.optimizer } : {}),
       mode: body.mode ?? null,
       target_roas_override: body.targetRoasOverride ?? null,
       memo: body.memo ?? null,
@@ -1869,4 +1892,164 @@ export interface NaverDashboardOverview {
 
 export function getNaverDashboardOverview(): Promise<NaverDashboardOverview> {
   return fetchApi<NaverDashboardOverview>("/api/naver/ad/dashboard-overview");
+}
+
+// ── D-NAO-47 커맨드 센터 API ──
+// ★응답 키는 rows다(items 아님). 기존 /proposals·/bep·/expert-reviews와 같은 관례.
+
+export interface NaverChangeLogRow {
+  id: number;
+  changed_at: string | null;
+  entity_type: string;
+  entity_id: string;
+  campaign_id: string;
+  action: string;
+  before: Record<string, unknown> | null;
+  after: Record<string, unknown> | null;
+  rationale: string | null;
+  outcome: string | null;
+  dry_run: boolean;
+  proposal_id: number | null;
+  executed_at: string | null;
+}
+
+export interface NaverChangeLogResponse { total: number; rows: NaverChangeLogRow[] }
+
+/** 변경 이력. ★include_dry_run 기본 false — "우리 조작 N회"는 실집행만 센다(D-47-h). */
+export async function fetchNaverChangeLog(params: {
+  campaign_id?: string; action?: string;
+  /** ★ours=우리 실집행만 / external=외부 변경 감지만 / all=전부(기본).
+   *  "우리 조작 N회"를 셀 땐 **반드시 ours**다 — change_log에는 external_bid_change 등
+   *  외부 변경 감지가 섞여 있어(prod 실측: dry_run=False 15건이 전부 외부 감지) 필터 없이
+   *  세면 우리가 아무것도 안 했는데 "15회"라고 표시된다(codex[P2] 2026-07-17). */
+  actor?: "all" | "ours" | "external";
+  days?: number;
+  include_dry_run?: boolean; limit?: number; offset?: number;
+} = {}): Promise<NaverChangeLogResponse> {
+  const q = new URLSearchParams();
+  Object.entries(params).forEach(([k, v]) => { if (v != null) q.set(k, String(v)); });
+  return fetchApi(`/api/naver/ad/change-log?${q.toString()}`);
+}
+
+export interface NaverRawKeywordRow {
+  entity_id: string; name: string; parent_id: string; campaign_id: string;
+  campaign_type: string; status: string; bid_amt: number | null;
+  monthly_volume: number | null; competition: string | null; synced_at: string | null;
+}
+
+export async function fetchNaverRawKeywords(params: {
+  q?: string; campaign_id?: string; status?: string; limit?: number; offset?: number;
+} = {}): Promise<{ total: number; rows: NaverRawKeywordRow[] }> {
+  const s = new URLSearchParams();
+  Object.entries(params).forEach(([k, v]) => { if (v != null) s.set(k, String(v)); });
+  return fetchApi(`/api/naver/ad/raw/keywords?${s.toString()}`);
+}
+
+export interface NaverRawSearchTermRow {
+  ad_date: string | null; campaign_id: string; adgroup_id: string;
+  search_term: string; source: string; imp: number; clk: number; cost: number;
+}
+
+export async function fetchNaverRawSearchTerms(params: {
+  q?: string; campaign_id?: string; days?: number; limit?: number; offset?: number;
+} = {}): Promise<{ total: number; rows: NaverRawSearchTermRow[] }> {
+  const s = new URLSearchParams();
+  Object.entries(params).forEach(([k, v]) => { if (v != null) s.set(k, String(v)); });
+  return fetchApi(`/api/naver/ad/raw/search-terms?${s.toString()}`);
+}
+
+export interface NaverRawHourlyRow {
+  ad_date: string | null; snapshot_hour: number; snapshot_at: string | null;
+  campaign_id: string; campaign_type: string; cost: number; clk: number; imp: number;
+  daily_budget: number | null;
+  /** ★예산이 없거나 0이면 null — "소진율 0%"가 아니라 "알 수 없음"이다. */
+  spend_ratio: number | null;
+}
+
+export async function fetchNaverRawHourly(params: {
+  campaign_id?: string; days?: number; limit?: number; offset?: number;
+} = {}): Promise<{ total: number; rows: NaverRawHourlyRow[] }> {
+  const s = new URLSearchParams();
+  Object.entries(params).forEach(([k, v]) => { if (v != null) s.set(k, String(v)); });
+  return fetchApi(`/api/naver/ad/raw/hourly?${s.toString()}`);
+}
+
+// ── D-NAO-47 — 상설 소급 채점 성적표(D-NAO-45, /retro-scorecard) ──
+// 실제 응답 형태는 backend/app/routers/naver_ad.py:707 retro_scorecard()를 grep해 대조함
+// (계획서 초안엔 형태가 없었다 — "실제에 맞춰라" 지시에 따른 실측 배선).
+export interface NaverRetroBoardRollup {
+  n: number;
+  correct: number;
+  gray: number;
+  wrong: number;
+  no_spend: number;
+  precision_spenders: number | null;
+  bleed_sum: number;
+}
+
+export interface NaverRetroBoardHorizons {
+  d3: NaverRetroBoardRollup;
+  d7: NaverRetroBoardRollup;
+}
+
+/** pacing 롤업: kind("저속"/"과속"/"unparsed") → verdict("correct"/"partial"/"false_alarm"/"unparsed") → 건수. */
+export type NaverRetroPacingRollup = Record<string, Record<string, number>>;
+
+/** kind → verdict → 그 버킷의 **평균 최종 소진율**(0~1 분수). final_ratio가 전부 NULL이면 null.
+ *  ★D-NAO-47에서 추가. "저속 correct 769건"은 '경보가 맞았다'까지고, **"평균 최종 소진율
+ *  4.9%"라야 "하루가 끝나도 일예산의 4.9%만 썼다 = 만성 저소진이 실재한다"는 증거**가 된다
+ *  — D-NAO-45 정정(trigger_pacing은 노이즈 아님 → 접지 말고 롤업)의 핵심 숫자. */
+export type NaverRetroPacingRatioRollup = Record<string, Record<string, number | null>>;
+
+export interface NaverRetroScorecard {
+  window_days: number;
+  boards: Record<string, NaverRetroBoardHorizons>;
+  pacing: NaverRetroPacingRollup;
+  pacing_final_ratio: NaverRetroPacingRatioRollup;
+}
+
+export function fetchNaverRetroScorecard(days?: number): Promise<NaverRetroScorecard> {
+  const q = days != null ? `?days=${days}` : "";
+  return fetchApi<NaverRetroScorecard>(`/api/naver/ad/retro-scorecard${q}`);
+}
+
+
+// ── D-NAO-48 캠페인 명부 + 관리주체 스위치 ──
+
+export interface NaverCampaignRosterRow {
+  campaign_id: string;
+  /** ★캠페인 이름. 이게 없어서 그동안 화면에 내부 ID가 그대로 노출됐다(MOP UX 리뷰에서
+   *  "베끼면 안 되는 것"으로 꼽은 항목). naver_entity에 있던 걸 이제 명부 SA가 준다. */
+  name: string;
+  campaign_type: string;
+  status: string;
+  cost: number;
+  clk: number;
+  conv_amt: number;
+  /** 광고비 0이면 null — 'ROAS 0배'가 아니라 '알 수 없음'. */
+  roas_naver: number | null;
+  optimizer: NaverAdOptimizer;
+  window_days: number;
+}
+
+export function fetchNaverCampaignRoster(params: {
+  days?: number; campaign_type?: string; optimizer?: NaverAdOptimizer;
+} = {}): Promise<{ total: number; rows: NaverCampaignRosterRow[] }> {
+  const q = new URLSearchParams();
+  Object.entries(params).forEach(([k, v]) => { if (v != null) q.set(k, String(v)); });
+  const qs = q.toString();
+  return fetchApi(`/api/naver/ad/campaigns${qs ? `?${qs}` : ""}`);
+}
+
+/** 관리주체만 바꾼다(D-NAO-48).
+ *  ★putNaverCampaignSettings를 쓰지 말 것 — 그건 **전체 치환**이라 optimizer만 보내면
+ *  mode·target_roas_override·gamma·memo가 전부 null로 날아간다. 이 엔드포인트는 optimizer
+ *  외 필드를 건드리지 않는다. */
+export function putNaverCampaignOptimizer(body: {
+  campaignId: string; optimizer: NaverAdOptimizer;
+}): Promise<NaverAdCampaignSettings> {
+  return fetchApi<NaverAdCampaignSettings>("/api/naver/ad/campaign-settings/optimizer", {
+    method: "PUT",
+    body: JSON.stringify({ campaign_id: body.campaignId, optimizer: body.optimizer }),
+  });
 }

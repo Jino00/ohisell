@@ -29,11 +29,9 @@ import {
   type NaverExpertDelegationSettings,
   type NaverDashboardOverview,
 } from "../lib/api";
+import { isoKST, won, roasX, NO_DATA } from "../lib/format";
+import { LayerNav } from "../components/ui";
 
-function isoKST(d: Date): string {
-  const kst = new Date(d.toLocaleString("en-US", { timeZone: "Asia/Seoul" }));
-  return `${kst.getFullYear()}-${String(kst.getMonth() + 1).padStart(2, "0")}-${String(kst.getDate()).padStart(2, "0")}`;
-}
 function daysAgo(n: number): string {
   return isoKST(new Date(Date.now() - n * 86400000));
 }
@@ -41,7 +39,7 @@ function daysAgo(n: number): string {
 // 예: p.created_at?.slice(0,16) 직접 슬라이스 — Date 객체로 재해석하면 이중 시프트된다).
 // 오늘이면 "HH:mm", 아니면 "M/D HH:mm".
 function fmtEvidenceTime(iso: string | null): string {
-  if (!iso) return "-";
+  if (!iso) return NO_DATA;
   const datePart = iso.slice(0, 10);
   const timePart = iso.slice(11, 16);
   if (!timePart) return datePart;
@@ -49,18 +47,6 @@ function fmtEvidenceTime(iso: string | null): string {
   if (datePart === today) return timePart;
   const [, m, d] = datePart.split("-");
   return `${Number(m)}/${Number(d)} ${timePart}`;
-}
-function fmt(n: number | null | undefined): string {
-  if (n == null) return "-";
-  return n.toLocaleString("ko-KR");
-}
-function won(n: number | null | undefined): string {
-  if (n == null) return "-";
-  return `${fmt(n)}원`;
-}
-function roasX(n: number | null | undefined): string {
-  if (n == null) return "-";
-  return `${n.toFixed(2)}배`;
 }
 
 // D-NAO-2 공격성 배수 (bep_calculator.AGG_MULT와 동일 값 — 프론트는 이 값으로 override를 계산할 뿐
@@ -102,13 +88,31 @@ const PROPOSAL_STATUS_TABS = [
   { key: "executing", label: "실행중" },
 ];
 
-const PROPOSAL_TYPE_LABEL: Record<string, string> = {
+// D-NAO-47: 제안 유형 14종 전량. 백엔드 단일 진실 = proposal_writer.ALL_PROPOSAL_TYPES.
+// ★기존엔 6종만 정의해 9종이 **영문 원문으로 렌더**됐고(라이브 확인: trigger_pacing·
+//   account_brief가 영문 pill), 반대로 백엔드가 만들지 않는 'budget'·'new_setup'
+//   **유령 라벨**을 갖고 있었다(스펙 §1-3).
+// 백엔드에 유형을 추가하면 여기도 추가한다 — 백엔드
+// test_all_proposal_types_constant_covers_every_emitted_type이 상수 쪽을 지킨다.
+// export: 커맨드 센터 2층(NaverAdCommandCenter의 PendingPane)도 같은 라벨을 쓴다 —
+// 단일 진실을 이 파일 하나로 유지해 두 화면 라벨이 조용히 갈라지는 걸 막는다.
+export const PROPOSAL_TYPE_LABEL: Record<string, string> = {
+  // 실행형
   bid_up: "입찰 인상",
   bid_down: "입찰 인하",
-  negative_keyword: "제외 키워드",
-  budget: "예산 조정",
   growth_bid_up: "성장 입찰 인상",
-  new_setup: "신규 세팅",
+  negative_keyword: "제외 키워드",
+  pause: "정지",
+  resume: "재개",
+  budget_up: "예산 증액",
+  budget_down: "예산 감액",
+  budget_pre_exhaustion: "예산 소진 임박",
+  // 정보성(informational=true)
+  anomaly: "이상 감지",
+  anomaly_freshness: "데이터 신선도 이상",
+  account_brief: "계정 브리핑",
+  trigger_pacing: "페이싱 경보",
+  trigger_cpc_spike: "CPC 급등 경보",
 };
 
 // E1a T8 — 제안 카드 평결 배지(Ava 검토, 콘솔 배지용 요약은 백엔드 _serialize_expert_verdict_summary 참조)
@@ -128,14 +132,14 @@ interface CampaignRow {
 }
 
 interface EditState {
-  optimizer: NaverAdOptimizer;
+  // ★optimizer 없음(D-NAO-48, codex[P1]): 이 패널은 관리주체를 바꾸지 않는다. 편집 상태로
+  //   들고 있으면 누군가 다시 payload에 실어 1층 스위치의 확인창을 우회시키기 쉽다.
   mode: NaverAdCampaignMode | "";
   targetRoasOverride: string; // 입력 필드 원문(빈 문자열=해제)
 }
 
 function toEditState(s: NaverAdCampaignSettings | undefined): EditState {
   return {
-    optimizer: s?.optimizer ?? "none",
     mode: s?.mode ?? "",
     targetRoasOverride: s?.target_roas_override != null ? String(s.target_roas_override) : "",
   };
@@ -334,7 +338,9 @@ export default function NaverAdOptimizationConsole() {
     try {
       const updated = await putNaverCampaignSettings({
         campaignId,
-        optimizer: e.optimizer,
+        // ★optimizer를 보내지 않는다(D-NAO-48, codex[P1]) — 백엔드가 생략 시 기존 값을
+        //   보존한다. 보내면 stale 버퍼가 1층 스위치의 변경을 덮어써 쓰기 게이트가
+        //   의도치 않게 재무장된다.
         mode: e.mode === "" ? null : e.mode,
         targetRoasOverride: override,
         memo: settingsMap[campaignId]?.memo ?? null, // 콘솔에 memo 편집 UI 없음 — 기존 값 보존(덮어쓰기 방지)
@@ -530,6 +536,7 @@ export default function NaverAdOptimizationConsole() {
 
   return (
     <div className="space-y-6">
+      <LayerNav />
       {/* 엔진 파이프라인 5단계 + optimizer 커버리지(T1/T2, 대시보드 미니 스프린트) */}
       <div className="bg-white rounded-lg border border-gray-200 p-4">
         <h3 className="text-sm font-medium text-gray-700 mb-3">엔진 파이프라인</h3>
@@ -602,7 +609,7 @@ export default function NaverAdOptimizationConsole() {
 
       <div className="bg-amber-50 border border-amber-200 text-amber-700 text-xs rounded-lg p-3">
         반자동 모드 — 자동 실행은 없습니다. 승인 후 Confirm을 거친 제안만 실제 집행됩니다(현재
-        개방: 제외키워드). optimizer/모드/공격성 다이얼은 저장 즉시 실제 목표 ROAS 계산에
+        개방: 제외키워드). 모드·공격성 다이얼은 저장 즉시 실제 목표 ROAS 계산에
         반영됩니다.
       </div>
 
@@ -679,6 +686,14 @@ export default function NaverAdOptimizationConsole() {
                     <span className="px-2 py-0.5 text-xs rounded bg-blue-50 text-blue-700 font-medium">
                       {PROPOSAL_TYPE_LABEL[p.proposal_type] ?? p.proposal_type}
                     </span>
+                    {/* D-NAO-47: "입찰 인상" 카드가 *얼마로* 올리는지 화면에 없던 결함(스펙 §1-6).
+                        현재 pending 실행대상 5건이 전부 bid_up이라 바로 체감된다. */}
+                    {p.target_bid != null && (
+                      <span className="text-xs text-gray-600 tabular-nums">→ {won(p.target_bid)}</span>
+                    )}
+                    {p.target_budget != null && (
+                      <span className="text-xs text-gray-600 tabular-nums">→ 일예산 {won(p.target_budget)}</span>
+                    )}
                     <span className="text-xs text-gray-400">{p.campaign_id}</span>
                     <span className="text-xs text-gray-400">{p.target_type}:{p.target_id}</span>
                     <span className="text-xs text-gray-300">{p.created_at?.slice(0, 16).replace("T", " ")}</span>
@@ -725,12 +740,13 @@ export default function NaverAdOptimizationConsole() {
         </div>
       </div>
 
-      {/* 섹션 2: 캠페인 optimizer/모드/공격성 패널 */}
+      {/* 섹션 2: 캠페인 모드·공격성 패널. 관리주체(optimizer)는 읽기 전용 —
+          변경은 1층 커맨드 센터 스위치가 유일 경로다(D-NAO-48, codex[P1]). */}
       <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
         <div className="p-4 border-b border-gray-200 flex items-center justify-between flex-wrap gap-2">
-          <h3 className="text-sm font-medium text-gray-700">캠페인 관리 주체 · 모드 · 공격성</h3>
+          <h3 className="text-sm font-medium text-gray-700">캠페인 모드 · 공격성</h3>
           <span className="text-xs text-gray-400">
-            계정 BEP ROAS {accountBepRoas != null ? roasX(accountBepRoas) : "-"} (공격성 다이얼 기준값)
+            계정 BEP ROAS {accountBepRoas != null ? roasX(accountBepRoas) : NO_DATA} (공격성 다이얼 기준값)
           </span>
         </div>
         {panelError && <div className="p-3 text-sm text-red-600 bg-red-50">{panelError}</div>}
@@ -764,10 +780,17 @@ export default function NaverAdOptimizationConsole() {
                       <td className="px-4 py-2 text-sm border-b border-gray-100 text-right tabular-nums">{won(c.cost)}</td>
                       <td className="px-4 py-2 text-sm border-b border-gray-100 text-right tabular-nums">{roasX(c.roas_naver)}</td>
                       <td className="px-4 py-2 text-sm border-b border-gray-100">
-                        <select value={e.optimizer} onChange={(ev) => updateEdit(c.campaign_id, { optimizer: ev.target.value as NaverAdOptimizer })}
-                          className="text-xs border border-gray-300 rounded px-1.5 py-1">
-                          {OPTIMIZER_OPTIONS.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
-                        </select>
+                        {/* ★D-NAO-48(codex[P1] 2026-07-17): 여기서 optimizer를 **바꾸지 않는다** — 읽기 전용.
+                            원래 select였는데, 그러면 1층 스위치의 확인창(원본 MOP가 자동으로 꺼지지
+                            않는다는 D-NAO-13 경고)을 우회해 캠페인이 라이브 쓰기 대상이 된다. 게다가
+                            이 패널의 stale 편집 버퍼가 나중에 커밋되면 스위치로 끈 걸 'ours'로 되돌려
+                            **아무도 의도하지 않은 채 쓰기가 재무장**된다(레이스).
+                            → optimizer의 쓰기 경로는 1층 스위치 하나. 이 패널은 모드·공격성 전용이고
+                            저장 payload에서도 optimizer를 뺐다(백엔드가 생략 시 기존 값 보존). */}
+                        <span className="text-xs text-gray-600">
+                          {OPTIMIZER_OPTIONS.find((o) => o.key === (settingsMap[c.campaign_id]?.optimizer ?? "none"))?.label}
+                        </span>
+                        <a href="/naver-ad" className="ml-1.5 text-xs text-blue-600 hover:underline">변경 →</a>
                       </td>
                       <td className="px-4 py-2 text-sm border-b border-gray-100">
                         {/* T4 — 라디오 카드 2×2(MOP 24b 운영모드 카드 패턴). 선택된 모드를

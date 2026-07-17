@@ -38,6 +38,25 @@ INFORMATIONAL_PROPOSAL_TYPES: frozenset[str] = frozenset({
     _ANOMALY, _ANOMALY_FRESHNESS, _ACCOUNT_BRIEF, PROPOSAL_TYPE_PACING, PROPOSAL_TYPE_CPC,
 })
 
+# D-NAO-47: 제안 유형 14종 단일 진실 — 프론트 라벨 맵이 이걸 진실로 삼는다.
+# ★배경: 프론트 PROPOSAL_TYPE_LABEL이 6종만 정의해 9종이 영문 원문으로 렌더됐고, 반대로
+# 백엔드가 생성하지 않는 'budget'·'new_setup' 유령 라벨을 갖고 있었다(스펙 §1-3).
+# 새 유형을 추가하면 여기에도 반드시 넣는다 — test_all_proposal_types_constant_covers_
+# every_emitted_type이 강제한다.
+# ⚠️계획서(2026-07-17-mop-command-center-backend.md T4) 표는 13종이라 적었으나 budget_down이
+# 빠져 있었다(실측: naver_execution_harness._ACTION_BY_PROPOSAL_TYPE에 budget_up과 대칭으로
+# 이미 존재 — D-NAO-42-f, 커밋 68d7ef5). 드리프트 가드는 계획서 표가 아니라 실제 코드 상태를
+# 진실로 삼아야 하므로 여기서 14종으로 정정한다.
+_BID_UP = "bid_up"
+_BID_DOWN = "bid_down"
+_BUDGET_DOWN = "budget_down"  # D-NAO-42-f, budget_up과 동형(감액은 자유 — guardrail_gate 참조)
+
+ALL_PROPOSAL_TYPES: frozenset[str] = frozenset({
+    _BID_UP, _BID_DOWN, _GROWTH_BID_UP, _NEGATIVE, _PAUSE, _RESUME,
+    _BUDGET_UP, _BUDGET_DOWN, _BUDGET_PRE_EXHAUSTION,
+    _ANOMALY, _ANOMALY_FRESHNESS, _ACCOUNT_BRIEF, PROPOSAL_TYPE_PACING, PROPOSAL_TYPE_CPC,
+})
+
 # 보드 의미상 허용되는 방향(codex 지적, 라이브검증 후속): starving_winners(육성 의도, D-NAO-18)는
 # bid_up만, bleeding_keywords/shopping_group_bep(손실 축소 의도)는 bid_down만 허용한다.
 # rank estimate를 걸러도(proposal_pipeline._RANK_ESTIMATE_BOARDS) economic_ceiling 자체가

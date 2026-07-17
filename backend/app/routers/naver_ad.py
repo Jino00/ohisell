@@ -24,6 +24,13 @@
 # GET /api/naver/ad/retro-scorecard   — 상설 소급 채점 성적표(D-NAO-45). naver_retro_signal
 #   (보드별 d3/d7 방향 정밀도)·naver_retro_pacing_score(저속/과속 경보 채점) 단순 rollup
 #   read. 정직 경계(ref 31): 방향 정확도 계기판이지 인과 성과 검증 아님(그건 카나리 몫).
+# GET /api/naver/ad/change-log        — 변경 이력 조회(D-NAO-47). naver_change_log 단순 read.
+#   include_dry_run 기본 False — 1층 "우리 조작 N회"는 실제 집행만 센다(D-47-h 정직성).
+#   이 API는 읽기만 하고, 이력을 *채우는* 것은 entity_sync의 diff 밸브와 execution_harness다.
+# GET /api/naver/ad/raw/keywords      — 등록 키워드 원자료(prod 91,005행), limit 상한 200 강제.
+# GET /api/naver/ad/raw/search-terms  — 검색어 원자료(prod 114,285행), limit 상한 200 강제.
+# GET /api/naver/ad/raw/hourly        — 시간당 스냅샷 + daily_budget·spend_ratio(스펙 §1-4의
+#   "소진율 미노출" 해소). spend_ratio는 budget 없음/0이면 None(0 나눗셈 금지).
 from __future__ import annotations
 
 import json
@@ -41,19 +48,24 @@ from app.models import (
     NaverAccountSettings,
     NaverCampaignSettings,
     NaverChangeLog,
+    NaverEntity,
     NaverExpertReview,
     NaverExpertReviewRun,
+    NaverHourlySnapshot,
     NaverLearningState,
     NaverProductBep,
     NaverProposal,
     NaverRetroPacingScore,
     NaverRetroSignal,
+    NaverSearchTermDaily,
 )
+from app.services.naver_ad import campaign_roster
 from app.services.naver_ad import dashboard_overview
 from app.services.naver_ad import delegation_gate
 from app.services.naver_ad import metrics_aggregator
 from app.services.naver_ad import naver_execution_harness
 from app.services.naver_ad import naver_sa_writer
+from app.services.naver_ad import proposal_writer
 from app.services.naver_ad.ad_report import build_report
 from app.services.naver_ad.diagnosis import build_diagnosis
 from app.utils.kst import kst_now, kst_today
@@ -209,6 +221,15 @@ def _serialize_proposal(p: NaverProposal, verdict: NaverExpertReview | None) -> 
         "target_id": p.target_id,
         "campaign_id": p.campaign_id,
         "adgroup_id": p.adgroup_id,
+        # D-NAO-47: 실행 목표값 — 이게 없어서 "입찰 인상" 카드가 *얼마로* 올리는지
+        # 화면에 안 나왔다(스펙 §1-6). pending 실행대상 5건이 전부 bid_up이라 바로 체감됨.
+        "target_bid": p.target_bid,
+        "target_lock": p.target_lock,
+        "target_budget": p.target_budget,
+        "budget_auto_eligible": p.budget_auto_eligible,
+        # D-NAO-47: 정보성/실행형 구분을 백엔드가 준다 — 프론트가 유형 문자열을 하드코딩해
+        # 재분류하면 백엔드에 유형이 추가될 때 조용히 드리프트한다.
+        "informational": p.proposal_type in proposal_writer.INFORMATIONAL_PROPOSAL_TYPES,
         "rationale": p.rationale,
         "expected_effect": p.expected_effect,
         "status": p.status,
@@ -258,11 +279,24 @@ def proposals(
     date_from: date | None = Query(None, description="created_at 시작일(KST 달력일 경계)"),
     date_to: date | None = Query(None, description="created_at 종료일(포함)"),
     campaign_id: str | None = Query(None, description="특정 캠페인만 필터"),
+    informational: bool | None = Query(
+        None,
+        description="true=정보성만 / false=실행형만 / 생략=전부. 실행형을 확실히 받으려면 false",
+    ),
     limit: int = Query(200, ge=1, le=1000),
     db: Session = Depends(get_db),
 ):
     """제안 카드 목록(콘솔) — naver_proposals 단순 read, 최신순. expert_verdict는 최근 완료
-    (status=ok) run의 평결 요약(배지용, E1a T6)."""
+    (status=ok) run의 평결 요약(배지용, E1a T6).
+
+    ★`informational` 필터가 필요한 이유(D-NAO-47, 2026-07-17 prod 배포 검증 중 발견):
+    이 목록은 `created_at DESC`인데 정보성 경보(trigger_pacing)가 실행형보다 훨씬 자주
+    생성된다. prod 실측 당시 pending 107건 = trigger_pacing 102건(07-16) + bid_up 5건(07-15)
+    이라 **limit=100이면 bid_up이 한 건도 안 나왔다**. 받은 페이지를 클라이언트에서
+    `!informational`로 거르면 "지금 결정할 제안이 없습니다"가 렌더된다 — 5건이 사람 결정을
+    기다리는데. limit을 올리는 건 임시방편이다(정보성이 더 쌓이면 다시 밀려난다).
+    **실행형은 실행형으로 질의한다.** 분류 기준은 proposal_writer.INFORMATIONAL_PROPOSAL_TYPES
+    (단일 진실 — 프론트가 유형 문자열로 재분류하면 드리프트한다)."""
     if status is not None and status not in _PROPOSAL_STATUSES:
         raise HTTPException(400, f"status는 {sorted(_PROPOSAL_STATUSES)} 중 하나여야 합니다")
     if date_from and date_to and date_from > date_to:
@@ -275,13 +309,20 @@ def proposals(
         q = q.filter(NaverProposal.status == status)
     if campaign_id:
         q = q.filter(NaverProposal.campaign_id == campaign_id)
+    if informational is True:
+        q = q.filter(NaverProposal.proposal_type.in_(proposal_writer.INFORMATIONAL_PROPOSAL_TYPES))
+    elif informational is False:
+        q = q.filter(NaverProposal.proposal_type.notin_(proposal_writer.INFORMATIONAL_PROPOSAL_TYPES))
     if date_from:
         q = q.filter(NaverProposal.created_at >= datetime.combine(date_from, datetime.min.time()))
     if date_to:
         q = q.filter(NaverProposal.created_at < datetime.combine(date_to + timedelta(days=1), datetime.min.time()))
+    # D-NAO-47: total은 limit과 무관한 전체 건수. 페이지 길이를 건수로 쓰면 limit에 따라
+    # 달라지는 틀린 숫자가 된다(정보성 "N건 집계됨" 등). rows는 additive라 기존 소비자 불변.
+    total = q.count()
     rows = q.order_by(NaverProposal.created_at.desc()).limit(limit).all()
     verdicts = _latest_ok_verdicts_by_proposal(db, [p.id for p in rows])
-    return {"rows": [_serialize_proposal(p, verdicts.get(p.id)) for p in rows]}
+    return {"total": total, "rows": [_serialize_proposal(p, verdicts.get(p.id)) for p in rows]}
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -517,8 +558,22 @@ _VALID_MODES = {"growth", "recovery", "launch", "defense"}
 
 
 class CampaignSettingsIn(BaseModel):
+    """모드·공격성·override·memo 전용(D-NAO-48).
+
+    ★`optimizer`를 **받지 않는다**(extra='forbid'로 422). 관리주체의 유일한 쓰기 경로는
+    `PUT /campaign-settings/optimizer`다.
+    왜 optional이 아니라 아예 거부인가(codex[P2] R2 — 내 하위호환 절충을 스스로 접음):
+      ① 이 PUT이 optimizer를 쓰면 1층 스위치의 **확인창(원본 MOP가 자동으로 안 꺼진다는
+         D-NAO-13 경고)을 우회**해 캠페인이 라이브 쓰기 대상이 된다.
+      ② stale 편집 버퍼가 나중에 커밋되면 스위치로 끈 걸 'ours'로 되돌려 **아무도 의도하지
+         않은 채 쓰기 게이트가 재무장**된다.
+    optional로 두고 "안 보내면 된다"고 문서로 막는 건 약하다 — 문을 열어두면 언젠가 들어온다.
+    돈이 걸린 게이트라 구조로 막는다(reason을 타입으로, EXECUTION_ACTIONS를 파생으로 막은 것과 같은 원칙).
+    """
+
+    model_config = {"extra": "forbid"}
+
     campaign_id: str
-    optimizer: str
     mode: str | None = None
     target_roas_override: float | None = None
     gamma: float | None = None
@@ -556,20 +611,17 @@ def campaign_settings_put(body: CampaignSettingsIn, db: Session = Depends(get_db
     전환 기록(누가/언제는 API 호출 자체·changed_at 서버타임이 근거, 전후 값만 저장 — codex #16).
     이 엔드포인트는 우리 시스템 설정 테이블만 쓴다 — 네이버 광고 API에 쓰기 요청 없음(D-NAO-13).
     """
-    if body.optimizer not in _VALID_OPTIMIZERS:
-        raise HTTPException(400, f"optimizer는 {sorted(_VALID_OPTIMIZERS)} 중 하나여야 합니다")
     if body.mode is not None and body.mode not in _VALID_MODES:
         raise HTTPException(400, f"mode는 {sorted(_VALID_MODES)} 중 하나여야 합니다")
 
     settings = db.query(NaverCampaignSettings).filter(
         NaverCampaignSettings.campaign_id == body.campaign_id
     ).first()
-    before_optimizer = settings.optimizer if settings else "none"
-
+    # ★optimizer는 건드리지 않는다(D-NAO-48). 신규 행은 'none'(자동화 안 함)에서 시작 —
+    # 모드만 저장했는데 라이브 쓰기가 켜지면 안 된다.
     if settings is None:
-        settings = NaverCampaignSettings(campaign_id=body.campaign_id, optimizer=body.optimizer)
+        settings = NaverCampaignSettings(campaign_id=body.campaign_id, optimizer="none")
         db.add(settings)
-    settings.optimizer = body.optimizer
     settings.mode = body.mode
     settings.target_roas_override = (
         Decimal(str(body.target_roas_override)) if body.target_roas_override is not None else None
@@ -579,12 +631,56 @@ def campaign_settings_put(body: CampaignSettingsIn, db: Session = Depends(get_db
     )
     settings.memo = body.memo
 
+    db.commit()
+    db.refresh(settings)
+    return _serialize_settings(settings)
+
+
+class OptimizerSwitchIn(BaseModel):
+    campaign_id: str
+    optimizer: str
+
+
+@router.put("/campaign-settings/optimizer")
+def campaign_optimizer_switch(body: OptimizerSwitchIn, db: Session = Depends(get_db)):
+    """관리주체만 바꾼다(D-NAO-48). 1층 캠페인 스위치의 쓰기 경로.
+
+    ★왜 PUT /campaign-settings를 쓰지 않는가: 그건 **전체 치환**이라
+    (`settings.mode = body.mode`를 무조건 대입) optimizer만 보내면 mode·target_roas_override·
+    gamma·memo가 전부 null로 날아간다. 콘솔은 memo를 되돌려보내 겨우 막고 있고
+    (NaverAdOptimizationConsole.tsx:344 주석), **gamma는 api.ts에 파라미터조차 없어 콘솔이
+    저장할 때마다 조용히 지워진다**(스펙 §1-6이 지적한 괴리의 실제 결과 — 현재 gamma가 전부
+    NULL이라 안 보일 뿐). "필드 하나 바꾸는 동작"에 전체 치환을 쓰는 게 애초에 틀렸다.
+    이 엔드포인트는 optimizer 외 필드를 **건드리지 않아** 그 실수를 구조적으로 불가능하게 한다.
+
+    ⚠️ 이건 우리 시스템 내부 설정이지 광고 API 쓰기가 아니다(D-NAO-13). 실제 실행 게이트는
+    naver_execution_harness의 optimizer=='ours' 하드체크(:912)이고 이중 방어는 불변이다.
+    ⚠️ 'ours'로 바꿔도 **원본 MOP는 꺼지지 않는다** — 우리 프로그램은 MOP를 끌 수 없다(별도
+    SaaS). Jino가 MOP 콘솔에서 직접 꺼야 하며, 안 끄면 두 옵티마이저가 같은 캠페인 입찰을
+    두고 충돌한다. 그 경고는 프론트 확인창이 띄운다(D-48-b). 충돌이 실제로 나면
+    entity_sync의 external_bid_change/external_status_change 감지로 드러난다(D-NAO-47 밸브).
+    """
+    if body.optimizer not in _VALID_OPTIMIZERS:
+        raise HTTPException(422, f"optimizer는 {sorted(_VALID_OPTIMIZERS)} 중 하나여야 합니다")
+
+    settings = db.query(NaverCampaignSettings).filter(
+        NaverCampaignSettings.campaign_id == body.campaign_id
+    ).first()
+    before_optimizer = settings.optimizer if settings else "none"
+
+    if settings is None:
+        # 없던 행은 optimizer만 세팅 — mode 등 기본값을 임의로 지어내지 않는다.
+        settings = NaverCampaignSettings(campaign_id=body.campaign_id, optimizer=body.optimizer)
+        db.add(settings)
+    else:
+        settings.optimizer = body.optimizer  # ★다른 필드는 손대지 않는다
+
     if before_optimizer != body.optimizer:
         db.add(NaverChangeLog(
             entity_type="campaign", entity_id=body.campaign_id, campaign_id=body.campaign_id,
             action="optimizer_change",
             before_value=before_optimizer, after_value=body.optimizer,
-            rationale="콘솔 PUT /campaign-settings",
+            rationale="커맨드 센터 관리주체 스위치(D-NAO-48)",
         ))
 
     db.commit()
@@ -713,9 +809,308 @@ def retro_scorecard(
         .all()
     )
     pacing: dict[str, dict[str, int]] = {}
+    # D-NAO-47: kind×verdict별 final_ratio 평균. ★"저속 경보 769건 correct"는 '경보가
+    # 맞았다'까지고, **"평균 최종 소진율 4.9%"라야 "하루가 끝나도 일예산의 4.9%만 썼다 =
+    # 만성 저소진이 실재한다"는 증거**가 된다. D-NAO-45의 정정(trigger_pacing은 노이즈가
+    # 아니다 → 접지 말고 롤업)의 핵심 숫자라 커맨드 센터 2층이 이걸 표시해야 한다.
+    # 데이터는 naver_retro_pacing_score.final_ratio에 이미 있었는데 이 엔드포인트가 안 줬다.
+    ratio_acc: dict[str, dict[str, list[float]]] = {}
     for row in pacing_rows:
         kind = row.kind or "unparsed"
         pacing.setdefault(kind, {}).setdefault(row.verdict, 0)
         pacing[kind][row.verdict] += 1
+        ratio_acc.setdefault(kind, {}).setdefault(row.verdict, [])
+        if row.final_ratio is not None:
+            ratio_acc[kind][row.verdict].append(float(row.final_ratio))
 
-    return {"window_days": days, "boards": boards, "pacing": pacing}
+    # ★전부 NULL(unparsed 등)이면 평균은 0이 아니라 **None**이다. 0으로 적으면
+    # "소진율 0%"라는 거짓 사실이 된다(0과 '알 수 없음'은 다르다).
+    pacing_final_ratio = {
+        kind: {
+            verdict: (round(sum(vals) / len(vals), 4) if vals else None)
+            for verdict, vals in by_verdict.items()
+        }
+        for kind, by_verdict in ratio_acc.items()
+    }
+
+    return {
+        "window_days": days,
+        "boards": boards,
+        "pacing": pacing,
+        "pacing_final_ratio": pacing_final_ratio,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════
+# D-NAO-47 — 변경 이력 조회(change_log) · 커맨드 센터 1층 "우리 조작 N회"의 원천
+# ══════════════════════════════════════════════════════════════════
+_MAX_CHANGE_LOG_LIMIT = 500
+
+
+def _loads_or_none(raw: str | None) -> dict | None:
+    """change_log의 before/after_value 파싱 — 쓰레기가 들어있어도 500 대신 None.
+    (이 테이블은 여러 writer가 각자 dumps 하므로 스키마 보장이 없다.)"""
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+@router.get("/change-log")
+def get_change_log(
+    campaign_id: str | None = Query(None, description="캠페인 필터"),
+    action: str | None = Query(None, description="update_bid/external_bid_change/set_user_lock 등"),
+    actor: str = Query(
+        "all",
+        pattern="^(all|ours|external)$",
+        description="ours=우리 실집행만 / external=외부 변경 감지만 / all=전부(기본)",
+    ),
+    days: int = Query(30, ge=1, le=365, description="changed_at 조회 창(KST 기준)"),
+    include_dry_run: bool = Query(False, description="dry-run 기록 포함 여부(기본 제외)"),
+    limit: int = Query(100, ge=1, le=_MAX_CHANGE_LOG_LIMIT),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+) -> dict:
+    """변경 이력 조회(D-NAO-47, 읽기 전용).
+
+    ★`include_dry_run` 기본 False가 의도적이다: 1층 "우리 조작 N회"는 **실제 집행만** 세야
+    한다. dry-run을 섞으면 아무것도 실행하지 않았는데 일한 것처럼 보인다(D-47-h 정직성 —
+    0이면 0이라고 말하는 게 이 화면의 일).
+
+    ★`actor`도 같은 이유다(codex[P2] 2026-07-17). change_log에는 세 부류가 섞여 있다:
+      ① 우리 실집행(EXECUTION_ACTIONS) ② 외부 변경 **감지**(entity_sync가 기록 — MOP·사람이
+      바꾼 걸 우리가 관측한 것) ③ 우리 시스템 내부 설정(optimizer_change 등, 광고 API 쓰기 아님).
+    prod 실측(2026-07-17): dry_run=False 행 15건이 **전부 ②**이고 우리 실집행은 0건이다.
+    필터 없이 total을 세면 1층이 **"우리 조작 15회"**라고 표시한다 — 정확히 반대의 거짓말.
+    실행 액션 목록은 harness의 `_ACTION_BY_PROPOSAL_TYPE`에서 파생한다(하드코딩 금지 — 새
+    제안 유형이 배선될 때 조용히 어긋난다).
+
+    ⚠️ 이 API는 change_log를 **읽기만** 한다. 이력을 *채우는* 것은 entity_sync의 diff 밸브
+    (D-NAO-47 T2)와 naver_execution_harness다.
+    """
+    since = kst_now() - timedelta(days=days)
+    q = db.query(NaverChangeLog).filter(NaverChangeLog.changed_at >= since)
+    if campaign_id:
+        q = q.filter(NaverChangeLog.campaign_id == campaign_id)
+    if action:
+        q = q.filter(NaverChangeLog.action == action)
+    if actor == "ours":
+        # ★after_value 존재를 함께 요구한다(codex[P2] R2). harness는 가드 거부·쓰기 실패에도
+        # 같은 action을 dry_run=False로 남긴다(`_guard_failure`는 writer를 부르지도 않는다).
+        # 그 행을 세면 광고에 아무 변화가 없었는데 "우리 조작 1회"가 된다.
+        # 판별 기준이 outcome이 아니라 after_value인 것은 이 코드베이스가 이미 정한 규약이다
+        # (naver_execution_harness.py:372 주석 · _detect_external_change · _load_our_bid_writes):
+        # outcome은 D+14 채점 전 NULL이고 채점 후엔 improved/declined로 바뀌므로 "실행됨"이라는
+        # 영구 상태가 아니다. 실패·가드거부·dry-run은 before/after_value를 안 채운다.
+        q = q.filter(
+            NaverChangeLog.action.in_(naver_execution_harness.EXECUTION_ACTIONS),
+            NaverChangeLog.after_value.isnot(None),
+        )
+    elif actor == "external":
+        q = q.filter(NaverChangeLog.action.in_(naver_execution_harness.EXTERNAL_DETECTION_ACTIONS))
+    if not include_dry_run:
+        q = q.filter(NaverChangeLog.dry_run.is_(False))
+
+    total = q.count()
+    rows = q.order_by(NaverChangeLog.changed_at.desc()).offset(offset).limit(limit).all()
+
+    return {
+        "total": total,
+        "rows": [
+            {
+                "id": r.id,
+                "changed_at": r.changed_at.isoformat() if r.changed_at else None,
+                "entity_type": r.entity_type,
+                "entity_id": r.entity_id,
+                "campaign_id": r.campaign_id,
+                "action": r.action,
+                "before": _loads_or_none(r.before_value),
+                "after": _loads_or_none(r.after_value),
+                "rationale": r.rationale,
+                "outcome": r.outcome,
+                "dry_run": r.dry_run,
+                "proposal_id": r.proposal_id,
+                "executed_at": r.executed_at.isoformat() if r.executed_at else None,
+            }
+            for r in rows
+        ],
+    }
+
+
+# ══════════════════════════════════════════════════════════════════
+# D-NAO-47 — 원자료 탐색(3층 ⑨). 수집은 풍부한데 API가 0건이라 볼 방법이 없었다(스펙 §1-4).
+# ★limit 상한 200 고정: 키워드 91,005행 · 검색어 114,285행. §9 라이브에서 489행 무페이징이
+#   스크롤 27,305px를 만든 전례가 있어 상한을 API가 강제한다(프론트 선의에 맡기지 않는다).
+# ══════════════════════════════════════════════════════════════════
+_MAX_RAW_LIMIT = 200
+
+
+@router.get("/raw/keywords")
+def get_raw_keywords(
+    q: str | None = Query(None, description="키워드 텍스트 부분일치"),
+    campaign_id: str | None = Query(None),
+    status: str | None = Query(None, description="on/off"),
+    include_deleted: bool = Query(False),
+    limit: int = Query(50, ge=1, le=_MAX_RAW_LIMIT),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+) -> dict:
+    """등록 키워드 원자료(naver_entity의 keyword 행, prod 91,005행) 조회 — 읽기 전용."""
+    query = db.query(NaverEntity).filter(NaverEntity.entity_type == "keyword")
+    if not include_deleted:
+        query = query.filter(NaverEntity.status != "deleted")
+    if q:
+        query = query.filter(NaverEntity.name.contains(q))
+    if campaign_id:
+        query = query.filter(NaverEntity.campaign_id == campaign_id)
+    if status:
+        query = query.filter(NaverEntity.status == status)
+
+    total = query.count()
+    rows = query.order_by(NaverEntity.name).offset(offset).limit(limit).all()
+    return {
+        "total": total,
+        "rows": [
+            {
+                "entity_id": r.entity_id,
+                "name": r.name,
+                "parent_id": r.parent_id,
+                "campaign_id": r.campaign_id,
+                "campaign_type": r.campaign_type,
+                "status": r.status,
+                "bid_amt": r.bid_amt,
+                "monthly_volume": r.monthly_volume,
+                "competition": r.competition,
+                "synced_at": r.synced_at.isoformat() if r.synced_at else None,
+            }
+            for r in rows
+        ],
+    }
+
+
+@router.get("/raw/search-terms")
+def get_raw_search_terms(
+    q: str | None = Query(None, description="검색어 부분일치"),
+    campaign_id: str | None = Query(None),
+    days: int = Query(14, ge=1, le=365),
+    limit: int = Query(50, ge=1, le=_MAX_RAW_LIMIT),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+) -> dict:
+    """검색어 원자료(prod 114,285행, 현재 shopping 소스만) 조회 — 읽기 전용."""
+    since = kst_today() - timedelta(days=days)
+    query = db.query(NaverSearchTermDaily).filter(NaverSearchTermDaily.ad_date >= since)
+    if q:
+        query = query.filter(NaverSearchTermDaily.search_term.contains(q))
+    if campaign_id:
+        query = query.filter(NaverSearchTermDaily.campaign_id == campaign_id)
+
+    total = query.count()
+    rows = (
+        query.order_by(NaverSearchTermDaily.ad_date.desc(), NaverSearchTermDaily.cost.desc())
+        .offset(offset).limit(limit).all()
+    )
+    return {
+        "total": total,
+        "rows": [
+            {
+                "ad_date": r.ad_date.isoformat() if r.ad_date else None,
+                "campaign_id": r.campaign_id,
+                "adgroup_id": r.adgroup_id,
+                "search_term": r.search_term,
+                "source": r.source,
+                "imp": r.imp,
+                "clk": r.clk,
+                "cost": r.cost,
+            }
+            for r in rows
+        ],
+    }
+
+
+@router.get("/raw/hourly")
+def get_raw_hourly(
+    campaign_id: str | None = Query(None),
+    days: int = Query(3, ge=1, le=365),
+    limit: int = Query(100, ge=1, le=_MAX_RAW_LIMIT),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+) -> dict:
+    """시간당 스냅샷 조회 — 읽기 전용.
+
+    ★daily_budget·소진율(spend_ratio)이 화면에 없던 결함(스펙 §1-4)을 여기서 해소한다.
+    spend_ratio는 daily_budget이 없거나 0이면 **None**이다 — '소진율 0%'가 아니라
+    '알 수 없음'이다. 0으로 나누지 않는다.
+
+    보존기간: D-NAO-46①로 7→365일 연장됨. days 상한 365는 그 상한과 맞춘 것.
+
+    ⚠️ 컬럼명은 `snapshot_hour`다(`hour` 아님 — models.py:1553). 응답 키도 snapshot_hour로
+    그대로 노출해 프론트↔DB 이름을 일치시킨다(번역 레이어를 만들지 않는다).
+    """
+    since = kst_today() - timedelta(days=days)
+    query = db.query(NaverHourlySnapshot).filter(NaverHourlySnapshot.ad_date >= since)
+    if campaign_id:
+        query = query.filter(NaverHourlySnapshot.campaign_id == campaign_id)
+
+    total = query.count()
+    rows = (
+        query.order_by(NaverHourlySnapshot.ad_date.desc(), NaverHourlySnapshot.snapshot_hour.desc())
+        .offset(offset).limit(limit).all()
+    )
+
+    def _ratio(cost: int, budget: int | None) -> float | None:
+        if not budget:  # None 또는 0
+            return None
+        return round(cost / budget, 4)
+
+    return {
+        "total": total,
+        "rows": [
+            {
+                "ad_date": r.ad_date.isoformat() if r.ad_date else None,
+                "snapshot_hour": r.snapshot_hour,
+                "snapshot_at": r.snapshot_at.isoformat() if r.snapshot_at else None,
+                "campaign_id": r.campaign_id,
+                "campaign_type": r.campaign_type,
+                "cost": r.cost,
+                "clk": r.clk,
+                "imp": r.imp,
+                "daily_budget": r.daily_budget,
+                "spend_ratio": _ratio(r.cost, r.daily_budget),
+            }
+            for r in rows
+        ],
+    }
+
+
+# ══════════════════════════════════════════════════════════════════
+# D-NAO-48 — 캠페인 명부(관리주체 스위치의 데이터 원천)
+# ★이 API가 생기기 전엔 화면에 캠페인 **이름이 없었다**(report가 안 줌) → 내부 ID
+#   `cmp-a001-02-000000008492582`가 그대로 노출. MOP UX 리뷰에서 "베끼면 안 되는 것"으로
+#   꼽은 항목을 우리가 하고 있었다. 이름은 naver_entity에 있다.
+# 읽기 전용 — 관리주체 변경은 기존 PUT /campaign-settings가 유일 경로이고, 실행 게이트는
+#   naver_execution_harness의 optimizer=='ours' 하드체크다(D-NAO-13, 이중 방어 불변).
+# ══════════════════════════════════════════════════════════════════
+
+
+@router.get("/campaigns")
+def campaigns_roster(
+    days: int = Query(30, ge=1, le=180, description="성과 집계 창(D-1 확정치 기준)"),
+    campaign_type: str | None = Query(None, description="WEB_SITE/SHOPPING/BRAND_SEARCH"),
+    optimizer: str | None = Query(None, pattern="^(none|ours|mop)$", description="관리주체 필터"),
+    db: Session = Depends(get_db),
+) -> dict:
+    """캠페인 명부 — 이름·광고종류·상태 + 최근 N일 성과 + 관리주체(D-NAO-48).
+
+    광고비 0인 캠페인도 포함한다(정지·신규 인계 대상에도 관리주체를 지정할 수 있어야
+    카나리를 확대한다). roas_naver는 광고비 0이면 None — 'ROAS 0배'가 아니라 '알 수 없음'.
+    """
+    rows = campaign_roster.build(db, days=days)
+    if campaign_type:
+        rows = [r for r in rows if r["campaign_type"] == campaign_type]
+    if optimizer:
+        rows = [r for r in rows if r["optimizer"] == optimizer]
+    return {"total": len(rows), "rows": rows}

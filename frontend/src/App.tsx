@@ -13,6 +13,10 @@ import CoupangOps from "./pages/CoupangOps";
 import NaverOps from "./pages/NaverOps";
 import ProductConnectionMap from "./pages/ProductConnectionMap";
 import NaverAdReport from "./pages/NaverAdReport";
+import NaverAdCommandCenter from "./pages/NaverAdCommandCenter";
+import NaverAdDiagnosisBoard from "./pages/NaverAdDiagnosisBoard";
+import NaverAdOptimizationConsole from "./pages/NaverAdOptimizationConsole";
+import NaverAdRawExplorer from "./pages/NaverAdRawExplorer";
 
 export default function App() {
   return (
@@ -30,7 +34,11 @@ export default function App() {
           <Route path="settlements" element={<Settlements />} />
           <Route path="settings" element={<Settings />} />
           <Route path="ad-report" element={<AdReport />} />
-          <Route path="naver-ad" element={<NaverAdReport />} />
+          <Route path="naver-ad" element={<NaverAdCommandCenter />} />
+          <Route path="naver-ad/report" element={<NaverAdReport />} />
+          <Route path="naver-ad/diagnosis" element={<NaverAdDiagnosisBoard />} />
+          <Route path="naver-ad/console" element={<NaverAdOptimizationConsole />} />
+          <Route path="naver-ad/raw" element={<NaverAdRawExplorer />} />
         </Route>
       </Routes>
     </BrowserRouter>

@@ -114,6 +114,28 @@ _ACTION_BY_PROPOSAL_TYPE = {
     "budget_down": "update_budget",
 }
 
+# D-NAO-47(codex[P2] 2026-07-17): **우리가 실제로 광고 API에 쓴 것**의 action 집합.
+# 위 매핑의 값에서 파생한다 — 하드코딩하면 새 제안 유형이 배선될 때 조용히 어긋난다.
+#
+# ★왜 필요한가: naver_change_log에는 세 부류가 섞여 있다.
+#   ① 우리 실집행        — update_bid / add_negative_keyword / set_user_lock / update_budget
+#   ② 외부 변경 **감지**  — external_bid_change / external_status_change (entity_sync가 기록.
+#                          MOP·사람이 바꾼 걸 우리가 관측한 것이지 우리가 한 게 아니다)
+#   ③ 우리 시스템 내부 설정 — optimizer_change / update_expert_delegation / flight_pacing
+#                          (광고 API 쓰기 아님)
+# 커맨드 센터 1층의 "우리 조작 N회"가 ②③을 섞어 세면 **정반대의 거짓말**이 된다:
+# prod 실측(2026-07-17) change_log의 dry_run=False 행 15건은 **전부 ②**이고 우리 실집행은
+# 0건이라, 필터 없이 세면 "우리 조작 15회"라고 표시된다. 0을 0이라고 말하는 게 그 화면의
+# 존재 이유다(D-47-h).
+EXECUTION_ACTIONS: frozenset[str] = frozenset(_ACTION_BY_PROPOSAL_TYPE.values())
+
+# entity_sync가 기록하는 "외부가 바꿨다" 감지 행(D-NAO-40 상태 / D-NAO-47 입찰 /
+# D-NAO-50 키워드 인벤토리 add·remove 밸브). 커맨드 센터의 actor=external 필터가 이 집합을 쓴다.
+EXTERNAL_DETECTION_ACTIONS: frozenset[str] = frozenset({
+    "external_status_change", "external_bid_change",
+    "external_keyword_added", "external_keyword_removed",
+})
+
 # D-NAO-16 개방 순서(제외키워드→정지·재개→입찰→예산)의 실제 스위치. 코드 배포로만 변경
 # (런타임/UI 토글 없음). X1a T3: 1단계 제외키워드 개방. X1b T4: 2·3단계(정지·재개→입찰)
 # 개방 — ref 27 정찰 + naver_sa_writer(T1)·guardrail_gate(T2) 구현 완료가 전제조건이었다.

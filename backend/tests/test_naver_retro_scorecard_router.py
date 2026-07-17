@@ -113,3 +113,44 @@ def test_retro_scorecard_excludes_rows_outside_window(client):
 def test_retro_scorecard_rejects_invalid_days(client):
     resp = client.get("/api/naver/ad/retro-scorecard", params={"days": 0})
     assert resp.status_code == 422
+
+
+# ── D-NAO-47: 저속 롤업에 평균 최종 소진율 노출 ──
+def test_pacing_rollup_exposes_avg_final_ratio(client):
+    """★D-NAO-45의 정정("노이즈 아님 → 롤업")의 **핵심 숫자**가 평균 최종 소진율이다.
+    "저속 경보 769건 correct"만으론 '경보가 맞았다'까지고, "평균 최종 소진율 4.9%"라야
+    **하루가 끝나도 일예산의 4.9%만 썼다 = 만성 저소진이 실재한다**는 증거가 된다.
+    데이터는 이미 naver_retro_pacing_score.final_ratio에 있는데 엔드포인트가 안 줬다."""
+    today = kst_today()
+    _seed(client, pacing=[
+        NaverRetroPacingScore(
+            proposal_id=1, alert_date=today - timedelta(days=2), campaign_id="cmp1",
+            kind="저속", verdict="correct", final_ratio=0.04, scored_at=kst_now(),
+        ),
+        NaverRetroPacingScore(
+            proposal_id=2, alert_date=today - timedelta(days=2), campaign_id="cmp2",
+            kind="저속", verdict="correct", final_ratio=0.06, scored_at=kst_now(),
+        ),
+    ])
+    body = client.get("/api/naver/ad/retro-scorecard", params={"days": 28}).json()
+    assert body["pacing"]["저속"]["correct"] == 2
+    assert body["pacing_final_ratio"]["저속"]["correct"] == pytest.approx(0.05)
+
+
+def test_pacing_avg_final_ratio_is_none_when_all_null(client):
+    """final_ratio가 전부 NULL(unparsed)이면 평균은 0이 아니라 **없음**이다.
+    0으로 적으면 '소진율 0%'라는 거짓 사실이 된다."""
+    today = kst_today()
+    _seed(client, pacing=[
+        NaverRetroPacingScore(
+            proposal_id=1, alert_date=today - timedelta(days=1), campaign_id="cmp1",
+            kind="저속", verdict="unparsed", final_ratio=None, scored_at=kst_now(),
+        ),
+    ])
+    body = client.get("/api/naver/ad/retro-scorecard", params={"days": 28}).json()
+    assert body["pacing_final_ratio"]["저속"]["unparsed"] is None
+
+
+def test_pacing_final_ratio_absent_when_no_rows(client):
+    body = client.get("/api/naver/ad/retro-scorecard", params={"days": 28}).json()
+    assert body["pacing_final_ratio"] == {}
