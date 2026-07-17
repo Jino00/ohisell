@@ -142,6 +142,9 @@ export default function CommandCenter() {
       while (Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 3000));
         const st = await getWingVendorSummaryRefreshStatus();
+        // ★성공 우선(순서 바꾸지 말 것): 둘 다 변했으면 성공이 이긴다. 라이브 실측
+        // (2026-07-17 RG): 업로드가 클라 타임아웃(60s)을 넘겨 페처는 실패로 보고했지만
+        // 서버는 완주해 success/error가 138ms 차로 함께 갱신됐다 — 데이터는 실제로 들어왔다.
         if (st.last_success_at && st.last_success_at !== baseline) { done = true; break; }
         // 페처가 실패를 보고하면 즉시 이탈 — 이게 없으면 이미 끝난 실패를 215초 헛기다린다.
         if (st.last_error_at && st.last_error_at !== errBaseline) {
@@ -182,6 +185,9 @@ export default function CommandCenter() {
       while (Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 3000));
         const st = await getWingRgSettlementRefreshStatus();
+        // ★성공 우선(순서 바꾸지 말 것): 둘 다 변했으면 성공이 이긴다. 라이브 실측
+        // (2026-07-17 RG): 업로드가 클라 타임아웃(60s)을 넘겨 페처는 실패로 보고했지만
+        // 서버는 완주해 success/error가 138ms 차로 함께 갱신됐다 — 데이터는 실제로 들어왔다.
         if (st.last_success_at && st.last_success_at !== baseline) { done = true; break; }
         // 페처가 실패를 보고하면 즉시 이탈 — 이게 없으면 이미 끝난 실패를 215초 헛기다린다.
         if (st.last_error_at && st.last_error_at !== errBaseline) {
@@ -222,6 +228,9 @@ export default function CommandCenter() {
       while (Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 5000));
         const st = await getRocketRefreshStatus();
+        // ★성공 우선(순서 바꾸지 말 것): 둘 다 변했으면 성공이 이긴다. 라이브 실측
+        // (2026-07-17 RG): 업로드가 클라 타임아웃(60s)을 넘겨 페처는 실패로 보고했지만
+        // 서버는 완주해 success/error가 138ms 차로 함께 갱신됐다 — 데이터는 실제로 들어왔다.
         if (st.last_success_at && st.last_success_at !== baseline) { done = true; break; }
         // 페처가 실패를 보고하면 즉시 이탈 — 이게 없으면 이미 끝난 실패를 180초 헛기다린다.
         if (st.last_error_at && st.last_error_at !== errBaseline) {
@@ -263,6 +272,9 @@ export default function CommandCenter() {
       while (Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 5000));
         const st = await getOhitechAdRefreshStatus();
+        // ★성공 우선(순서 바꾸지 말 것): 둘 다 변했으면 성공이 이긴다. 라이브 실측
+        // (2026-07-17 RG): 업로드가 클라 타임아웃(60s)을 넘겨 페처는 실패로 보고했지만
+        // 서버는 완주해 success/error가 138ms 차로 함께 갱신됐다 — 데이터는 실제로 들어왔다.
         if (st.last_success_at && st.last_success_at !== baseline) { done = true; break; }
         // 페처가 실패를 보고하면 즉시 이탈 — 이게 없으면 이미 끝난 실패를 180초 헛기다린다.
         if (st.last_error_at && st.last_error_at !== errBaseline) {
