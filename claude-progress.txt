@@ -3,6 +3,15 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
+- 날짜: 2026-07-17 22:55 KST (★**파이프라인 신선도 3층 방어 — 층2·층3 배포·라이브합격·PR #41 병합, 층1 구현 중** — 트랙 외 별건(쿠팡 RG, 네이버 트랙 무관), Jino "끝까지 자동 진행" 승인. 워크트리 `spot-backtest-cadence-pacing-2e3bfa`, 브랜치 `claude/elastic-turing-6f1eee`)
+  - **사고 규명**: WING1/WING2 Wing 쿠키 06-21/06-10 만료 → RG status/api 계정 row 26/37일 공백, 크론은 auth_error를 삼키고 last_status=ok(green-while-dead). 감지(health API)+Mac 6h 알림은 **정상 작동 중이었고**, 죽은 지점=대시보드 상설 배너 부재(ADS1만 배너 있었고 그것만 고쳐진 자연실험). -6d 추측 폴백이 월경계 2주기 오적재 → 6월 RG비용 +55% 과대계상.
+  - **정산주기 실규칙 확정**: 월~일 주별 + 달력 월경계 분할 (prod 계정 row 18/18 검증) — 레퍼런스 17에 없던 사실, 라이브가 권위.
+  - **층2 배포·라이브합격**: data_stale 버킷(데이터 나이는 거짓말 못함, 14d 규칙) + Layout 전역 앰버 배너(5분 폴링·ADS1 제외) + Mac 폴러 '데이터끊김' 라벨(kickstart 즉시 실발화). health API 라이브: WING1 26.9d·WING2 40.9d 실표시.
+  - **층3 배포·라이브합격(머니코드)**: _expected_period_start 달력 규칙으로 폴백 교체 + prod 보정 apply 152행 — 6월 3,230,100→2,083,450·7월 2,570,425·총합 무손실·재스캔 0. 사본 리허설 후 실행.
+  - **병행 세션 조우 2건**: ①safe_deploy CAS가 PR #39(O(n²) 파싱) 실배포본 clobber 차단 → 3-way 병합 흡수 ②PR #39가 먼저 main 병합 → 테스트 충돌 양쪽 보존으로 해소. PR #41 병합(main 9b98448==prod).
+  - ⚠️**원칙19 부채**: codex 쿼터 소진(07-23 19:15 복구) → 독립 적대적 리뷰(별도 인스턴스, GATE PASS P1 0)로 대체. **07-23 이후 소급 /codex review 필요.**
+  - **층1 진행 중**: status/api 수집을 Mac 상주 브라우저로 이관(쿠키 의존 소멸) — 설계 docs/PLAN_rg-status-live-session.md, 구현 에이전트 가동 중. 완료 시 WING1 백필은 자동(쿠키 재등록 불필요), WING2만 Jino 로그인 1회.
+  - 계획서: docs/PLAN_pipeline-freshness-3layer.md (체크리스트 최신).
 - 날짜: 2026-07-17 22:10 KST (★**RG 정산 XLSX 업로드 60초 타임아웃 진범 해소·배포·라이브 합격** — 트랙 외 별건(네이버 트랙 무관), Jino 승인. 워크트리 `mop-command-center-design-7e087a`, 배포 commit `c0ea885`, **PR #39 오픈(병합 대기)**)
   - **증상**: Mac 페처 `_rg_push_xlsx`(timeout=60) POST가 "Read timed out" 2건 → 실패 보고. 그런데 서버는 완주(데이터 정상 적재)
     → last_error_at(21:12:25.959)이 last_success_at(21:12:25.821)보다 **138ms 뒤**에 찍혀 행이 "실패"로 남음.

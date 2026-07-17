@@ -79,18 +79,25 @@
    - 보정 스크립트: prod DB에서 2개 주기 from 교정 + 6월 합계가 3,230,100 → 2,083,450으로 내려감 확인.
 5. PR 생성·병합, progress/HANDOFF/failures.jsonl 갱신.
 
-## §6. 체크리스트
+## §6. 체크리스트 (2026-07-17 22:50 갱신)
 
 - [x] 원인 규명 (쿠키 red 06-10/06-21, 신호 사망 지점 = 표면)
 - [x] 정산주기 규칙 검증 (18/18)
 - [x] 계획서 저장 (이 문서)
-- [ ] 층2b 백엔드 data_stale (Opus)
-- [ ] 층2a 프론트 헬스 배너 (Opus)
-- [ ] 층3 달력 규칙 + 폴백 교체 + 테스트 (Opus)
-- [ ] 층3 prod 오염 보정 (dry-run → 적용 → 재검증)
-- [ ] codex 게이트 (review + challenge)
-- [ ] safe_deploy + 라이브 합격 (§5)
-- [ ] Mac 폴러 갱신 반영(로컬 복사 + launchd kickstart)
-- [ ] PR + 기록 갱신
-- [ ] 층1 설계 문서 (후속)
-- [ ] 🔴 Jino: WING1/WING2 쿠키 재등록 (4주 계정 row 백필 — 층1 완성 전까지 필요)
+- [x] 층2b 백엔드 data_stale (Opus, 64 테스트)
+- [x] 층2a 프론트 헬스 배너 (Opus, tsc clean + vitest 35)
+- [x] 층3 달력 규칙 + 폴백 교체 + 테스트 (Opus, TDD 90 테스트)
+- [x] 층3 prod 오염 보정 — **라이브 합격**: 사본 리허설 후 prod apply 152행, 6월
+      3,230,100→2,083,450 · 7월 2,570,425 · 총합 무손실(4,748,775/462) · 재스캔 0
+- [x] 게이트 — ★codex 쿼터 소진(07-23 19:15 복구)으로 **독립 적대적 리뷰(별도 Opus 인스턴스)로
+      대체**: GATE PASS(P1 0/P2 5), P2 2건 수정 반영(apply 충돌 재검사·data 쿼리 try/except).
+      **[ ] 07-23 이후 소급 /codex review 필요** (원칙19 부채로 기록)
+- [x] safe_deploy 배포 — 도중 CAS 가드가 병행 세션(PR #39, O(n²) 파싱) 실배포본 clobber를
+      정확히 차단 → 3-way 병합 흡수 후 재배포 성공. 프론트 dist도 배포.
+- [x] 라이브 합격: health API data_stale 2건 실표시(WING1 26.9d·WING2 40.9d) + 공개 URL 응답
+      + 번들에 배너 코드 실재. (브라우저 DOM 시각 확인만 도구 장애로 미완 — 로직·번들·API 검증됨)
+- [x] Mac 폴러 갱신 — kickstart 즉시 '데이터끊김' 경보 라이브 발화 실측
+- [x] PR #41 병합 (main 9b98448 == prod)
+- [x] 층1 설계 문서 (docs/PLAN_rg-status-live-session.md) — 구현 진행 중
+- [ ] 층1 구현·배포·라이브 합격 (§ 그 문서 §2)
+- [ ] Jino: WING2 wing2 프로필 로그인 1회 (층1 뒤. WING1은 층1로 개입 0 — 쿠키 재등록 불필요해짐)

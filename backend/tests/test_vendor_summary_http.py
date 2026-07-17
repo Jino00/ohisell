@@ -215,3 +215,38 @@ def test_rg_settlement_refresh_trigger_claim_flow(client):
     claimed = client.post(f"{base}/refresh-claim", headers={"X-Ingest-Token": _TOKEN})
     assert claimed.status_code == 200 and claimed.json()["claimed"] is True
     assert client.get(f"{base}/refresh-status").json()["requested"] is False
+
+
+# ── 층1: RG status/api 계정 단위 인제스트 (Mac 상주 브라우저, 쿠키 이관) ──
+_STATUS = "/api/coupang/ops/wing/rg-settlement/ingest-status"
+
+
+def test_rg_ingest_status_requires_token(client):
+    """회계(net_profit 소스) 변경 → 토큰 없으면 401(파싱 전 차단)."""
+    r = client.post(f"{_STATUS}?account_key=COUPANG_WING1", json={"settlementStatusReports": []})
+    assert r.status_code == 401
+
+
+def test_rg_ingest_status_bad_account_key_rejected(client):
+    """RG_ACCOUNTS 아닌 account_key → 400."""
+    r = client.post(f"{_STATUS}?account_key=TYPO",
+                    headers={"X-Ingest-Token": _TOKEN}, json={"settlementStatusReports": []})
+    assert r.status_code == 400
+
+
+def test_rg_ingest_status_parse_error_returns_422(client):
+    """스키마 드리프트 raw → WingReadError → 500 아닌 422."""
+    r = client.post(f"{_STATUS}?account_key=COUPANG_WING1",
+                    headers={"X-Ingest-Token": _TOKEN}, json={"unexpected_key": []})
+    assert r.status_code == 422, r.text
+
+
+def test_rg_ingest_status_roundtrip(client):
+    """토큰 + 유효 raw → 200, 계정 단위 7행 적재 결과가 응답에 실려 온다."""
+    from tests.test_rg_settlement_sync import _FIXTURE_SINGLE
+
+    r = client.post(f"{_STATUS}?account_key=COUPANG_WING1",
+                    headers={"X-Ingest-Token": _TOKEN}, json=_FIXTURE_SINGLE)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body == {"synced": 7, "account_key": "COUPANG_WING1", "status": "ok"}
