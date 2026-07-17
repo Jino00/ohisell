@@ -385,6 +385,17 @@ class SchedulerCookieVerdictOut(BaseModel):
     reason: str
 
 
+class SchedulerDataVerdictOut(BaseModel):
+    # 데이터 나이 감시(잡·쿠키 보고가 거짓말해도 최신 데이터 나이는 거짓말 못 함).
+    name: str
+    account_key: str
+    state: str  # no_data | stale
+    age_days: Optional[float] = None  # no_data면 None
+    max_age_days: float
+    impact: str  # 돈 영향 한글 라벨
+    reason: str
+
+
 class SchedulerHealthOut(BaseModel):
     healthy: bool
     scheduler_running: bool
@@ -395,4 +406,6 @@ class SchedulerHealthOut(BaseModel):
     disabled: list[SchedulerJobVerdictOut]
     # fail-soft 잡(RG 정산·광고)의 쿠키 만료 직접 감시 — 며칠째 성공 못 한 쿠키.
     cookies_stale: list[SchedulerCookieVerdictOut] = []
+    # 데이터 나이 감시 — 최신 row가 max_age_days를 넘겼거나 아예 없는(no_data) 파이프라인.
+    data_stale: list[SchedulerDataVerdictOut] = []
     as_of: str

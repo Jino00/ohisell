@@ -3,6 +3,10 @@
 # 순수 SA②(staleness_evaluator)에 주입하고, /api/scheduler/health가 표면화할 dict를 만든다.
 # 머니로직 미접촉. DB/스케줄러 접근은 compute_scheduler_health에 한정하고, 판정 로직(build_health)과
 # interval 산출(compute_interval_seconds)은 순수 함수로 분리해 단위 테스트한다(원칙22).
+#
+# 잡 자기보고·쿠키 상태 외에 '데이터 나이'(data_stale)도 감시한다: 잡·쿠키 보고는 거짓말할 수 있고
+# (2026-07-17 사고: last_status='ok'인 채 RG 정산이 26일 침묵), 데이터 나이는 거짓말 못 한다.
+# 층1(수집 경로 이관)로 쿠키 행이 사라진 뒤에도 살아남는 최후의 감시선이다.
 from __future__ import annotations
 
 import logging
@@ -17,6 +21,7 @@ from app.services.scheduler_watchdog import (
     STATE_NEVER_SUCCEEDED,
     STATE_STALE,
     evaluate_cookie_freshness,
+    evaluate_data_freshness,
     evaluate_staleness,
 )
 
@@ -45,6 +50,21 @@ WATCHDOG_JOBS: tuple[str, ...] = (
 
 # 에러 요약 최대 길이 — sanitized 한 줄(전체 traceback은 DB에만, codex #12 누출 방지).
 _ERR_SUMMARY_MAX = 200
+
+# ── 데이터 나이 감시 규칙(선언적) ─────────────────────────────────────────
+# 왜 잡·쿠키 감시가 있는데 또 데이터 나이인가: 잡·쿠키의 자기보고는 거짓말할 수 있다
+# (2026-07-17 사고: RG 정산 수집이 쿠키 만료로 26일 조용히 죽었는데 last_status='ok'로 green-while-dead).
+# 데이터 나이는 거짓말 못 한다 — '가장 최신 row가 며칠 전 것인가'가 파이프라인 생존의 직접 증거다.
+# 층1(수집 경로를 정적 쿠키 → Mac 상주 브라우저로 이관) 후 쿠키 행이 사라져도 이 감시는 살아남는다.
+#
+# max_age_days=14 근거: RG 정산은 주별(월~일) + ~2일 랙으로 인식된다 → 정상이면 최신 계정 row의
+# recognition_date_to가 9~16일 이내에 들어온다. 14일 = 한 주를 통째로 놓친 것 + 여유(헛알림 방지).
+DATA_FRESHNESS_RULES: tuple[dict, ...] = (
+    {"name": "rg_settlement_account_rows", "account_key": "COUPANG_WING1", "max_age_days": 14.0,
+     "impact": "RG 정산비용(오픽스)이 net_profit에서 누락 중"},
+    {"name": "rg_settlement_account_rows", "account_key": "COUPANG_WING2", "max_age_days": 14.0,
+     "impact": "RG 정산비용(오하이테크)이 net_profit에서 누락 중"},
+)
 
 # 쿠키 freshness 감시 대상 — 돈에 직결되는 fail-soft 잡의 쿠키만(codex P2: 전체 감시 시 폐기/회전
 # 쿠키가 영구 stale 노이즈). WING1/WING2=RG 정산(net_profit), ADS1=쿠팡 광고비(net_profit).
@@ -118,6 +138,7 @@ def build_health(
     scheduler_running: bool,
     now: datetime,
     cookies: Iterable[Any] = (),
+    data_snapshots: Iterable[dict] = (),
 ) -> dict:
     """워치독 판정 코어(순수: DB/스케줄러 미접촉 — 인자로 받은 스냅샷만 사용).
 
@@ -125,6 +146,8 @@ def build_health(
             .last_status/.last_status_at/.created_at/.last_error). registered_job_names:
             현재 APScheduler에 등록된 잡 id 집합. cookies: CoupangWingCookie 유사 객체
             (.account_key/.status/.last_success_at) — fail-soft 잡의 쿠키 만료를 직접 감시.
+            data_snapshots: 데이터 나이 스냅샷 dict 목록(name/account_key/latest/max_age_days/
+            impact) — 잡·쿠키 보고와 무관하게 '최신 데이터가 며칠 전인가'를 직접 본다(기본 () 하위호환).
             반환 dict는 그대로 API 응답이 된다.
     """
     by_name = {getattr(s, "job_name", None): s for s in states}
@@ -190,6 +213,9 @@ def build_health(
     ]
     cookies_stale = evaluate_cookie_freshness(cookie_snaps, now)
 
+    # 데이터 나이 — 잡·쿠키 보고가 거짓말해도(2026-07-17 사고) 최신 데이터 나이는 거짓말 못 한다.
+    data_stale = evaluate_data_freshness(list(data_snapshots), now)
+
     # disabled는 정상(노이즈 제외) — healthy 판정에서 무시. 그 외 어떤 비정상이라도 healthy=False.
     healthy = (
         scheduler_running
@@ -198,6 +224,7 @@ def build_health(
         and not stale
         and not never_succeeded
         and not cookies_stale
+        and not data_stale
     )
 
     return {
@@ -209,6 +236,7 @@ def build_health(
         "never_succeeded": never_succeeded,
         "disabled": disabled,
         "cookies_stale": cookies_stale,
+        "data_stale": data_stale,
         "as_of": now.isoformat(),
     }
 
@@ -219,7 +247,9 @@ def compute_scheduler_health(db, scheduler, now: datetime) -> dict:
     읽기 전용. 머니로직 미접촉. 라우터(GET /api/scheduler/health)가 호출한다.
     """
     # 지연 임포트(순수 코어를 app 의존 없이 테스트하기 위함)
-    from app.models import CoupangWingCookie, SchedulerState
+    from sqlalchemy import func
+
+    from app.models import CoupangRgSettlementFee, CoupangWingCookie, SchedulerState
 
     running = bool(getattr(scheduler, "running", False))
     registered: set[str] = set()
@@ -239,4 +269,35 @@ def compute_scheduler_health(db, scheduler, now: datetime) -> dict:
         .filter(CoupangWingCookie.account_key.in_(WATCHDOG_COOKIES))
         .all()
     )
-    return build_health(WATCHDOG_JOBS, states, registered, running, now, cookies=cookies)
+
+    # 데이터 나이 스냅샷: 규칙별로 계정 row(vendor_item_id='' sentinel)의 최신 recognition_date_to를
+    # 조회한다. 계정 row가 하나도 없으면 max→None → SA가 no_data(즉시 비정상)로 판정.
+    # ★try/except(적대적 리뷰 P2): 이 쿼리는 이번에 추가된 유일한 새 raise 경로 — 실패해도 헬스
+    #   API 전체(잡·쿠키 감시)를 죽이면 안 된다(워치독 침묵 = 이 스프린트가 막으려는 바로 그 실패).
+    #   실패 시 데이터 감시만 구버전 동작으로 강등(로그만 남김).
+    data_snapshots: list[dict] = []
+    try:
+        for rule in DATA_FRESHNESS_RULES:
+            latest = (
+                db.query(func.max(CoupangRgSettlementFee.recognition_date_to))
+                .filter(
+                    CoupangRgSettlementFee.account_key == rule["account_key"],
+                    CoupangRgSettlementFee.vendor_item_id == "",
+                )
+                .scalar()
+            )
+            data_snapshots.append({
+                "name": rule["name"],
+                "account_key": rule["account_key"],
+                "latest": latest,
+                "max_age_days": rule["max_age_days"],
+                "impact": rule["impact"],
+            })
+    except Exception:
+        log.exception("[워치독] 데이터 나이 쿼리 실패 — data_stale 감시만 생략(헬스 API는 유지)")
+        data_snapshots = []
+
+    return build_health(
+        WATCHDOG_JOBS, states, registered, running, now,
+        cookies=cookies, data_snapshots=data_snapshots,
+    )

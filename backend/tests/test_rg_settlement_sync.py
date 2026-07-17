@@ -663,14 +663,15 @@ def test_ingest_idempotent_upsert():
     assert len(rows) == 2  # 고유 옵션 2개만(중복 없음)
 
 def test_ingest_period_start_fallback():
-    """status/api 계정 row 없으면 주별 폴백(period_end-6d)."""
+    """status/api 계정 row 없으면 달력 규칙 폴백(월~일+월경계분할).
+    06-07은 온전한 주(월 06-01~일 06-07)라 달력 규칙=구 -6d와 값이 일치(06-01)."""
     db = _db()
     content = _build_xlsx([("입출고비", "입출고비", _WH_ROWS)])
     ingest_settlement_xlsx(db, "COUPANG_WING1", content)
     opt = db.query(CoupangRgSettlementFee).filter_by(
         fee_type="warehousing", vendor_item_id="95521944484").one()
     assert opt.recognition_date_to == date(2026, 6, 7)
-    assert opt.recognition_date_from == date(2026, 6, 1)  # 6/7 - 6d
+    assert opt.recognition_date_from == date(2026, 6, 1)  # 6/7=일요일, 월~일 주 = 6/1
 
 def test_ingest_empty_when_all_unknown():
     db = _db()
@@ -680,7 +681,74 @@ def test_ingest_empty_when_all_unknown():
     assert res["upserted"] == 0
 
 
-# ─── 파싱 성능 가드 (2026-07-17 라이브 사고) ──────────────
+# ═══════════════════════════════════════════════════════════════════════
+# 층3 (§3, PLAN_pipeline-freshness-3layer) — 정산주기 시작일 달력 규칙 (머니코드)
+# ═══════════════════════════════════════════════════════════════════════
+# _expected_period_start: 월~일 주별 + 달력 월 경계 분할. prod 계정 row 18개 전수 18/18 검증
+# (2026-07-17 라이브). 구 -6d 폴백은 월 경계 주간(예: 06-30, 07-05)에서 반드시 틀려 6월 RG
+# 비용을 +55% 과대계상한 사고의 원인이었다. 이 테스트가 규칙을 못박는다.
+from app.services.coupang.rg_settlement_sync import _expected_period_start, _resolve_period_start
+
+# prod 계정 row 18개 실주기(2026) — (period_end → period_from) 재현 ground truth (전수)
+_VERIFIED_CYCLES = [
+    (date(2026, 3, 8), date(2026, 3, 2)),
+    (date(2026, 3, 15), date(2026, 3, 9)),
+    (date(2026, 3, 22), date(2026, 3, 16)),
+    (date(2026, 3, 29), date(2026, 3, 23)),
+    (date(2026, 3, 31), date(2026, 3, 30)),   # 월말 부분주(월~화)
+    (date(2026, 4, 5), date(2026, 4, 1)),     # 월초 부분주(수~일) — 월 경계 분할
+    (date(2026, 4, 12), date(2026, 4, 6)),
+    (date(2026, 4, 19), date(2026, 4, 13)),
+    (date(2026, 4, 26), date(2026, 4, 20)),
+    (date(2026, 4, 30), date(2026, 4, 27)),   # 월말 부분주(월~목)
+    (date(2026, 5, 3), date(2026, 5, 1)),     # 월초 부분주(금~일)
+    (date(2026, 5, 10), date(2026, 5, 4)),
+    (date(2026, 5, 17), date(2026, 5, 11)),
+    (date(2026, 5, 24), date(2026, 5, 18)),
+    (date(2026, 5, 31), date(2026, 5, 25)),
+    (date(2026, 6, 7), date(2026, 6, 1)),
+    (date(2026, 6, 14), date(2026, 6, 8)),
+    (date(2026, 6, 21), date(2026, 6, 15)),
+]
+
+# 추가 경계 케이스(월 경계·요일별)
+_BOUNDARY_CYCLES = [
+    (date(2026, 6, 30), date(2026, 6, 29)),    # 화요일 월말 → 06-29(월)
+    (date(2026, 7, 5), date(2026, 7, 1)),      # 일요일이나 월초 분할 → 07-01
+    (date(2026, 7, 12), date(2026, 7, 6)),     # 온전한 주(월~일)
+    (date(2026, 8, 1), date(2026, 8, 1)),      # 토요일 1일 = 그 자체(월 경계)
+    (date(2026, 9, 1), date(2026, 9, 1)),      # 화요일 1일 = 그 자체
+    (date(2026, 12, 31), date(2026, 12, 28)),  # 목요일 월말 → 12-28(월)
+]
+
+
+@pytest.mark.parametrize("period_end,expected_from", _VERIFIED_CYCLES + _BOUNDARY_CYCLES)
+def test_expected_period_start_calendar_rule(period_end, expected_from):
+    """월~일 주별 + 달력 월 경계 분할. prod 18/18 + 경계 케이스."""
+    assert _expected_period_start(period_end) == expected_from
+
+
+def test_resolve_period_start_calendar_fallback_at_month_boundary():
+    """계정 row 없을 때 달력 규칙 폴백. 06-30 → 06-29 (구 -6d였으면 06-24 오류)."""
+    db = _db()
+    got = _resolve_period_start(db, "COUPANG_WING1", date(2026, 6, 30))
+    assert got == date(2026, 6, 29)
+    assert got != date(2026, 6, 24)  # 구 -6d 회귀 가드
+
+
+def test_resolve_period_start_borrows_account_row_unchanged():
+    """계정 row 있으면 그 from을 차용(1순위 불변) — 달력 규칙보다 우선."""
+    db = _db()
+    db.add(CoupangRgSettlementFee(
+        account_key="COUPANG_WING1", recognition_date_from=date(2026, 6, 25),
+        recognition_date_to=date(2026, 6, 30), fee_type="warehousing", vendor_item_id="",
+        raw_type="status/api", amount=Decimal("100")))
+    db.commit()
+    # 계정 row from=06-25 (달력 규칙 06-29와 일부러 다른 값) → 차용값이 우선함을 확인
+    assert _resolve_period_start(db, "COUPANG_WING1", date(2026, 6, 30)) == date(2026, 6, 25)
+
+
+# ─── 파싱 성능 가드 (2026-07-17 라이브 사고, 병행 세션 PR #39) ──────────────
 def test_parse_xlsx_scales_linearly_not_quadratically():
     """대형 시트 파싱이 O(n²)로 퇴행하지 않는지 가드.
 
