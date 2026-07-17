@@ -1532,6 +1532,9 @@ class NaverCampaignSettings(Base):
     target_roas_override: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4), nullable=True)
     gamma: Mapped[Optional[Decimal]] = mapped_column(Numeric(4, 2), nullable=True)
     memo: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # D-NAO-49: 자동 운영(auto_operator SA) 대상 스위치 — True인 캠페인만 일/시간당 레인이
+    # 심사·집행한다. 킬스위치 = 이 플래그 OFF(Jino "04 자동운영 중지" → 즉시 UPDATE).
+    auto_operate: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
