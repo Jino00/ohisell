@@ -54,7 +54,27 @@ def _mark_heartbeat(db: Session) -> None:
     row = _ensure_state_row(db)
     row.status = "green"
     row.last_error = None
+    row.last_error_at = None  # 성공 = 실패 흔적 클리어(안 지우면 오래된 실패가 화면에 남는다)
     row.last_success_at = kst_now()
+    db.commit()
+
+
+def mark_fetch_error(db: Session, error: str) -> None:
+    """Wing 페처 run 실패 보고 → last_error/last_error_at 기록(UI가 실패를 감지하는 유일 경로).
+
+    ★존재 이유(PR #30이 광고비에서 먼저 고친 것과 같은 구멍): 페처가 갱신 요청을 claim한
+    뒤(=플래그 이미 clear) 브라우저 에러로 죽으면 prod에 아무 흔적도 안 남았다. 성공에만
+    시각(last_success_at)이 있고 실패엔 짝이 없어서 UI는 "실패"와 "아직 진행 중"을 구분할
+    수단이 없었다 — 215초를 헛기다린 뒤 "Mac 응답 없음"이라는 뭉뚱그린 문구만 냈다.
+
+    ★status는 일부러 건드리지 않는다(PR #30 codex 1R[P2]): status=red는 Layout 배너에서
+    곧바로 "쿠키 만료(재설정 필요)" + 쿠키 재설정 CTA로 렌더된다(Layout.tsx:201/206).
+    브라우저 크래시는 쿠키 문제가 아니라 재설정해도 헛수고다. 지속 실패는 워치독이
+    last_success_at 경과로 잡는다(status 미의존).
+    """
+    row = _ensure_state_row(db)
+    row.last_error = error[:300]  # 컬럼 한계 — 긴 스택트레이스로 보고 자체가 날아가면 안 된다
+    row.last_error_at = kst_now()
     db.commit()
 
 
@@ -166,7 +186,7 @@ def vs_status(db: Session) -> dict:
     row = _state_row(db)
     if row is None:
         return {"account": _VS_ACCOUNT, "status": "none", "last_success_at": None,
-                "age_hours": None, "stale": False}
+                "last_error": None, "last_error_at": None, "age_hours": None, "stale": False}
     age_hours = None
     stale = False
     if row.last_success_at:
@@ -177,6 +197,7 @@ def vs_status(db: Session) -> dict:
         "status": row.status,
         "last_success_at": row.last_success_at.isoformat() if row.last_success_at else None,
         "last_error": row.last_error,
+        "last_error_at": row.last_error_at.isoformat() if row.last_error_at else None,
         "age_hours": age_hours,
         "stale": stale,
     }
@@ -191,17 +212,22 @@ def request_refresh(db: Session) -> dict:
 
 
 def refresh_status(db: Session) -> dict:
-    """갱신 요청/완료 상태. UI(버튼 후 폴링)·Wing 페처(요청 확인) 공용."""
+    """갱신 요청/완료 상태. UI(버튼 후 폴링)·Wing 페처(요청 확인) 공용.
+
+    last_error_at=마지막 실패 시각(버튼 후 이 값이 올라가면 갱신 실패) — UI가 성공/실패 둘 중
+    무엇이 왔는지 이 두 시각의 변화로 가른다. 없으면 실패를 못 보고 폴링 창을 헛기다린다.
+    """
     row = _state_row(db)
     if row is None:
         return {"requested": False, "requested_at": None, "last_success_at": None,
-                "status": "none", "last_error": None}
+                "status": "none", "last_error": None, "last_error_at": None}
     return {
         "requested": row.refresh_requested_at is not None,
         "requested_at": row.refresh_requested_at.isoformat() if row.refresh_requested_at else None,
         "last_success_at": row.last_success_at.isoformat() if row.last_success_at else None,
         "status": row.status,
         "last_error": row.last_error,
+        "last_error_at": row.last_error_at.isoformat() if row.last_error_at else None,
     }
 
 
