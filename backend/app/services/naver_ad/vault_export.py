@@ -106,13 +106,28 @@ def _outcome_summary(e: OpsDiaryEntry) -> str:
     return "<br>".join(parts) if parts else "-"
 
 
+def _compact_value(raw: str | None) -> str:
+    """change_log의 before/after는 네이버 API 전체 페이로드(수 KB JSON)일 수 있다 — 사람이
+    읽는 볼트에는 핵심 값만: JSON이고 bidAmt가 있으면 'bidAmt N원', 그 외는 120자 절단.
+    (전체 원본은 DB source_ref→naver_change_log에 그대로 있다 — 볼트는 열람용 요약.)"""
+    if raw is None:
+        return "-"
+    s = raw.strip()
+    if s.startswith("{"):
+        try:
+            obj = json.loads(s)
+            if isinstance(obj, dict) and "bidAmt" in obj:
+                return f"{obj['bidAmt']}원"
+        except (ValueError, TypeError):
+            pass
+    return s if len(s) <= 120 else s[:120] + "…"
+
+
 def _change_str(e: OpsDiaryEntry) -> str:
-    """before→after 변경 표기(둘 다 없으면 '-')."""
+    """before→after 변경 표기(둘 다 없으면 '-'). 값은 _compact_value로 요약."""
     if e.before_value is None and e.after_value is None:
         return "-"
-    before = "-" if e.before_value is None else e.before_value
-    after = "-" if e.after_value is None else e.after_value
-    return _cell(f"{before}→{after}")
+    return _cell(f"{_compact_value(e.before_value)}→{_compact_value(e.after_value)}")
 
 
 def _target_str(e: OpsDiaryEntry) -> str:
