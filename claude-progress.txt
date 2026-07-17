@@ -7,6 +7,18 @@
   - ①세션 소실 원인 = 데스크톱 앱 `ccAutoArchiveOnPrClose: true`(PR 병합 시 5분 내 자동 아카이브+워크트리 삭제 — 07-11 HANDOFF 소실의 진짜 메커니즘). Jino가 Settings에서 OFF, 파일 false 실측 확인. MOP35 세션은 Archived에서 무손상 복구 가능. 상세=auto-memory `ohisell-session-record-policy.md`.
   - ②D-NAO-53: executeConfirmText가 액션 무관 "제외키워드 등록" Confirm(OPEN_ACTIONS 4개 개방인데 X1a 하드코딩 잔재, D-NAO-5 훼손) → serializer `action`+목록 `open_actions`(harness 파생, 신규 `open_executable_actions()`)+Confirm 5분기(미지 액션 폴백=사칭 불가)+배너 동적화. 1771 pass·codex PASS·PR #31 병합(main `339c231`)·safe_deploy 배포·prod API/번들 라이브 실측 합격. Fable설계/Opus구현/Sonnet검증 handoff.
   - 남은 것: 브라우저 시각 확인 1건(분류기 일시 불가로 번들 실측으로 대체 완료 — 선택적).
+- 날짜: 2026-07-17 17:40 KST (★**쿠팡 광고비 페처 실패 보고 구멍 수정·배포·라이브합격** — 트랙 외 별건, Jino 승인. PR #30)
+  - 13:02 실사고의 남은 절반: 페처가 claim 후 죽어도 prod에 알리는 경로가 0 → last_error=null 영구 유지.
+    성공에만 시각(last_success_at)이 있고 실패엔 없어 **UI가 "실패"와 "진행 중"을 구분 불가**(215초 헛대기 후 "Mac 응답 없음").
+  - `coupang_wing_cookie.last_error_at`(마이그 `p8q9r0s1t2u3`, prod 적용 완료) + `mark_fetch_error()` +
+    `POST /ad-cost/fetch-error`(토큰) + 프론트 폴링 조기이탈 + 페처 실패경로 11곳을 `_fail()` 단일 통로로.
+  - ★**codex 1R[P2]**: status=red 재사용이 Layout 배너를 "쿠키 만료(재설정 필요)"로 오진단시킴(오늘 Jino가 실제로 한 헛수고)
+    → **status 미변경**으로 수정(red 소비자는 배너 하나뿐, 워치독은 last_success_at만 봄). 2R PASS.
+  - 라이브 합격: 실패 유도 → last_error 실제 메시지·last_error_at 17:34:27·**status green 불변** / 실제 성공 push → 둘 다 클리어.
+  - 1779 pass/0 fail · tsc -b clean · vitest 14. prod DB 백업 `ohisell_bak/adcost-fetch-error_20260717_predeploy.db`.
+  - **남김(별건)**: Wing 판매분석·RG 정산·오하이테크 광고 페처도 같은 구멍(성공에만 시각) 공유.
+  - ⚠️ 이 워크트리는 시작 시 main보다 9커밋 뒤처져 있었음 → ff 후 작업. 다른 세션이 같은 13일 정지의 **진짜 원인(갱신 크론 꺼짐)**을
+    15:46에 이미 고쳐 main에 넣어둠(954c1a3) — 중복 아님, 상보. 작업 전 `git log HEAD..origin/main` 확인 습관 필요.
 - 날짜: 2026-07-17 12:35 KST (★**D-NAO-50 키워드 변경 이력 밸브 구현·배포·라이브검증 완료**. Jino "키워드 변경 이력 밸브도 추가해줘" + 모델 라우팅 Fable설계/Opus구현/Sonnet단순)
   - external_keyword_added/removed 밸브(부트스트랩·대량 __bulk__ 가드, mutation test 실증) + EXTERNAL_DETECTION_ACTIONS 배선 + **ExternalChangesPane 신설**(actor=external 첫 화면 소비자 — 데이터만 쌓이고 화면에 없을 뻔한 걸 Sonnet 리서치가 발견).
   - codex R1 [P2] 플랩 지적 → R2 AGREE-DEFER 합의(내일 실측이 감시 지점). 1699 pass/0 fail.
