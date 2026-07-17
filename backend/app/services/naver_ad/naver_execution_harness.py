@@ -75,6 +75,16 @@ class WriteNotOpenedError(Exception):
     (fail-closed) — 이 예외가 그 안전장치다."""
 
 
+class KillSwitchEngagedError(Exception):
+    """auto_operator 승인 제안(approval_source가 auto_op/auto_op_hr)이 쓰기 직전 킬스위치
+    (naver_campaign_settings.auto_operate) OFF로 거부됨 (codex 7R[P1], D-NAO-49).
+
+    레인의 승인 커밋~harness 쓰기 사이에 Jino가 킬스위치를 끄는 TOCTOU 구간을 여기서
+    봉쇄한다(레인 자체의 승인 직전 pre-check와 이중 방어 — 이 가드가 최종). 쓰기·change_log
+    없음, proposal은 approved인 채 미실행(정직 상태 — 스위치 재가동 후 재실행 가능).
+    수동 콘솔(approval_source NULL)·delegation 승인 제안에는 절대 적용되지 않는다."""
+
+
 class MissingExecutionTargetError(Exception):
     """실쓰기 대상 정보 부족/부적합 — writer는 호출하지 않지만 운영자 관점에선 시도이므로
     change_log 전건 기록(D-NAO-12, rationale '[실행 불가]') + status='failed' 종결(영구 결함
@@ -926,6 +936,28 @@ def execute(db: Session, proposal_id: int, *, dry_run: bool = True, now: datetim
             f"campaign_id={proposal.campaign_id} optimizer={optimizer!r} — "
             f"'ours'만 실행 가능(D-NAO-13, 실행 직전 재검증)"
         )
+
+    # codex 7R[P1](D-NAO-49): auto_operator 승인 제안 한정 킬스위치 최종 가드 — 레인의 승인
+    # 커밋과 이 지점 사이에 Jino가 auto_operate를 끄는 TOCTOU 구간을 쓰기 직전 단일 지점에서
+    # 봉쇄한다(부가적 가드 — 기존 게이트·실행 로직 불변, 다른 approval_source(수동 콘솔
+    # NULL·delegation)는 조건 분기로 절대 영향 없음). 지연 import: auto_operator가 이 모듈을
+    # module-level import하므로 역방향은 함수 안에서만(순환 회피). _auto_operate_now는 엔진
+    # 레벨 독립 커넥션 조회(codex 6R)라 타 프로세스의 OFF 커밋이 항상 보인다.
+    if proposal.approval_source is not None:
+        from app.services.naver_ad import auto_operator as _auto_operator
+
+        if proposal.approval_source in (
+            _auto_operator.APPROVAL_SOURCE_DAILY, _auto_operator.APPROVAL_SOURCE_HOURLY,
+        ) and not _auto_operator._auto_operate_now(db, proposal.campaign_id):
+            log.warning(
+                "naver_execution_harness: 킬스위치 OFF — proposal_id=%s(approval_source=%s, "
+                "campaign_id=%s) 실행 거부(쓰기·change_log 없음, approved 유지, codex 7R)",
+                proposal.id, proposal.approval_source, proposal.campaign_id,
+            )
+            raise KillSwitchEngagedError(
+                f"proposal_id={proposal.id} campaign_id={proposal.campaign_id} — "
+                f"auto_operate=False(킬스위치 OFF, 쓰기 직전 재확인)"
+            )
 
     effective_dry_run = dry_run or action not in OPEN_ACTIONS
     if not effective_dry_run:

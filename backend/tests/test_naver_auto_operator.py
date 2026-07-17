@@ -495,6 +495,83 @@ def test_hourly_lane_kill_switch_mid_run_stops_remaining_executions(db):
     assert db.query(NaverProposal).filter(NaverProposal.target_id == "nkw-kb").count() == 0
 
 
+# ── codex 7R[P1]: 킬스위치 최종 가드 = harness 쓰기 직전(TOCTOU 봉쇄, auto_op* 한정) ──
+
+def test_harness_refuses_auto_op_proposal_when_kill_switch_off(db):
+    """승인 커밋~harness 쓰기 사이에 킬스위치가 OFF 되면(레인 pre-check는 이미 통과) 실입찰이
+    나가면 안 된다 — harness 실행 진입점이 approval_source가 auto_op/auto_op_hr인 제안에
+    한해 _auto_operate_now를 쓰기 직전 재확인. OFF면 writer 미호출·change_log 미기록·
+    proposal은 approved인 채 미실행(정직 상태)."""
+    from app.services.naver_ad import naver_execution_harness as harness
+    from app.services.naver_ad import naver_sa_writer
+
+    _settings(db, auto_operate=False)  # 승인 후 OFF 된 상태를 재현(optimizer='ours' 유지)
+    p = _proposal(db, proposal_type="bid_down", target_id="nkw-ks", target_bid=850,
+                  status="approved")
+    p.approval_source = auto_operator.APPROVAL_SOURCE_HOURLY
+    db.commit()
+
+    with patch.object(harness, "_build_guardrail_context", return_value={}), \
+         patch.object(harness.guardrail_gate, "check", return_value=None), \
+         patch.object(harness.naver_sa_writer, "update_keyword_bid") as mock_write:
+        with pytest.raises(harness.KillSwitchEngagedError):
+            harness.execute(db, p.id, dry_run=False)
+
+    mock_write.assert_not_called()
+    db.refresh(p)
+    assert p.status == "approved"  # failed로 종결하지 않음 — 미실행 정직 상태
+    assert p.executed_change_log_id is None
+    assert db.query(NaverChangeLog).filter(NaverChangeLog.proposal_id == p.id).count() == 0
+
+
+def test_harness_executes_manual_proposal_even_when_auto_operate_off(db):
+    """비영향 가드: 수동 콘솔 승인(approval_source NULL) 제안은 auto_operate=False여도
+    정상 실행 — 킬스위치는 auto_operator 레인 전용이며 수동 운영을 막지 않는다."""
+    from app.services.naver_ad import naver_execution_harness as harness
+    from app.services.naver_ad import naver_sa_writer
+
+    _settings(db, auto_operate=False)
+    p = _proposal(db, proposal_type="bid_down", target_id="nkw-manual", target_bid=850,
+                  status="approved")
+    assert p.approval_source is None  # 수동 콘솔 경로
+
+    result = naver_sa_writer.WriteResult(
+        action="update_keyword_bid", before={"bidAmt": 1000, "userLock": False},
+        response=None, after={"bidAmt": 850, "userLock": False}, created_ids=[],
+    )
+    with patch.object(harness, "_build_guardrail_context", return_value={}), \
+         patch.object(harness.guardrail_gate, "check", return_value=None), \
+         patch.object(harness.naver_sa_writer, "update_keyword_bid", return_value=result) as mock_write:
+        log_entry = harness.execute(db, p.id, dry_run=False)
+
+    mock_write.assert_called_once_with("nkw-manual", 850)
+    assert log_entry.action == "update_bid"
+
+
+def test_harness_executes_auto_op_proposal_when_kill_switch_on(db):
+    """회귀 가드: 킬스위치 ON이면 auto_op* 제안도 정상 실행(가드가 과차단하지 않음)."""
+    from app.services.naver_ad import naver_execution_harness as harness
+    from app.services.naver_ad import naver_sa_writer
+
+    _settings(db, auto_operate=True)
+    p = _proposal(db, proposal_type="bid_down", target_id="nkw-on", target_bid=850,
+                  status="approved")
+    p.approval_source = auto_operator.APPROVAL_SOURCE_DAILY
+    db.commit()
+
+    result = naver_sa_writer.WriteResult(
+        action="update_keyword_bid", before={"bidAmt": 1000, "userLock": False},
+        response=None, after={"bidAmt": 850, "userLock": False}, created_ids=[],
+    )
+    with patch.object(harness, "_build_guardrail_context", return_value={}), \
+         patch.object(harness.guardrail_gate, "check", return_value=None), \
+         patch.object(harness.naver_sa_writer, "update_keyword_bid", return_value=result) as mock_write:
+        log_entry = harness.execute(db, p.id, dry_run=False)
+
+    mock_write.assert_called_once()
+    assert log_entry.action == "update_bid"
+
+
 # ══════════════════════════ 시간당 레인(A2+A3) ══════════════════════════
 
 def _hour(h, *, imp, clk, cost, avg_rank=None):
