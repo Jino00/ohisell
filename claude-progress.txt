@@ -3,9 +3,12 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
-- 날짜: 2026-07-18 00:30 KST (★★**D-NAO-54 운영 일기·지혜 시스템 — P1 배포 완료·라이브 검증 대기, P2 준비** — 워크트리 `session-dfd814`, 브랜치 `claude/session-dfd814`. Fable설계/Opus구현/Sonnet단순 라우팅, 옵션=추천안 자동 진행(Jino 지시). 계획서=`docs/PLAN_naver-ad-diary-wisdom.md` §0 먼저)
-  - **P1**: 마이그 q9r0s1t2u3v4(prod ohisell.db 적용)+diary.py+harness/레인 훅. 테스트 30 신규·1914 pass. 독립 리뷰 GATE PASS(P2-1/P3-1/P3-3 반영). PR #44 병합·safe_deploy 6파일·pm2 재시작. **라이브 합격 대기: 01:20 시간당 레인 or 08:50 일 레인에서 diary 행 실측**(소음 차단 설계라 조용한 시간대 0행=정상일 수 있음 — 레인 크래시 없음+08:50 reject 행이 확실한 증거).
-  - **CAS 3번째 실사고 차단**: prod harness에 병행 세션 배포분(마커 상수 30줄, 라우터가 import) — 3-way 흡수. ★그쪽도 'D-NAO-54' 번호 사용 = 번호 충돌, 그쪽 PR 등장 시 재번호.
+- 날짜: 2026-07-18 01:50 KST (★★**D-NAO-54 운영 일기·지혜 시스템 — P1+P2+P3 전부 배포 완료, 아침 사슬 라이브 검증 대기** — 워크트리 `session-dfd814`, PR #44/#45/#46 병합, main(d5a8657)==prod. Fable설계/Opus구현 라우팅·독립 적대적 리뷰 3회 전부 GATE PASS 후 지적 반영)
+  - **P1 기록층**: 마이그 q9r0s1t2u3v4+diary.py+harness/레인 훅. **라이브 부분 합격**: 01:20 시간당 레인 신코드 완주 ok 실측(scheduler_state)·diary 0행=심야 무트래픽 판정hold 기록제외 설계와 정합. 확실 증거는 아침 레인.
+  - **P2 해석층**: diary_outcome(d1/d7 소급)+diary_reflection(claude -p 해석문, observe 행)+크론 08:35(catch-up은 돈 잡 뒤). **P3 승격·망각**: wisdom 5모듈+마이그 r0s1t2u3v4w5+크론 08:45. 리뷰 P2 3건(망각↔TTL 데드락→TTL 보장+hidden 부활 / 방향 selection bias→tally 컬럼+승률 / cost=0 중립) 반영. 테스트 총 1972 pass.
+  - **백필 prod 적용**: change_log→diary 4행(execute 2·blocked 2, KST-naive→UTC −9h 변환, 외부감지 15 정확 제외). ★제헌절 2026 부활(holidays 라이브러리가 2026부터 True — 법 개정 반영, is_kr_holiday=1 정확).
+  - **다음 = 07-18 아침 사슬 실측(원칙22 합격 판정)**: ①08:35 reflection 첫 발화(어제=07-17 백필 4행 → LLM 해석문 observe 행) ②08:45 wisdom(outcome 없어 후보 0=정상) ③08:50 일 레인 diary 행(reject/blocked 확실) ④아침 시간당 레인 행. 그 후 P4(소비층)·P5(열람층).
+  - CAS 3번째 실사고 차단(prod harness 마커 상수 3-way 흡수). ★병행 세션도 'D-NAO-54' 번호 사용 = 번호 충돌, 그쪽 PR 등장 시 재번호. codex 소급 리뷰 후보=P1~P3 전 커밋(07-23).
   - 전 세션(07-17 밤, dedfad): 구조 Jino 승인·계획서 완성·구현 미착수 → HANDOFF=`.claude/memory/HANDOFF_ohisell-diary-wisdom-approved+bridge-fix_20260717.md`. 미커밋 docs(트랙 D-NAO-54·계획서·HANDOFF 2건)는 이 브랜치 첫 커밋에 포함됨.
   - codex 한도 07-23 19:15까지 소진 — 독립 리뷰어 서브에이전트 대체 + 커밋에 "codex 소급 리뷰 후보" 명기.
   - 세션 소실 재발 방지: `ccAutoArchiveOnPrClose` OFF 실측(07-11 HANDOFF 소실도 같은 원인). 되감기 복구 상세=`HANDOFF_MOP36-rewind-recovery_20260717.md`.
