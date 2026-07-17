@@ -1,1 +1,32 @@
 @import "tailwindcss";
+
+/* D-NAO-47 디자인 토큰 — naver-ad 커맨드 센터용.
+   ★색을 두 축으로 나눈다. 인벤토리 실측(2026-07-17) 결과 서로 모순되는 색 규약 4개가
+   동시에 살아있었다(profitColor 양수=파랑 / Dashboard 양수=초록 / mopDelta 증가=빨강).
+   원인은 "누가 틀렸나"가 아니라 **방향과 판단을 한 색으로 칠하려 한 것**이다.
+     · 방향(direction): 숫자가 올랐나 내렸나. 가치판단 없음. 한국 증시·MOP 관례.
+     · 판단(judgment): 그게 좋은가 나쁜가. BEP 위인가 아래인가.
+   "노출 +28%"는 방향이고, 그게 좋은지는 별개다(비용이 같이 올랐으면 나쁨).
+   한 색으로 둘 다 하려니 mopDelta의 invert 플래그 같은 땜질이 나왔다 → invert 제거.
+
+   ⚠️ 이 토큰은 naver-ad 화면 전용이다. 기존 쿠팡/대시보드 화면은 참조하지 않으므로
+   추가만으로는 영향 0이다(PLAN_naver-ad-dashboard-mini.md:40 "전면 리스킨 안 함" 유지). */
+@theme {
+  /* 축 1: 방향 — 가치판단 없음 */
+  --color-dir-up: var(--color-red-600);
+  --color-dir-down: var(--color-blue-600);
+  --color-dir-flat: var(--color-gray-400);
+
+  /* 축 2: 판단 — 좋은가 나쁜가 */
+  --color-judge-good: var(--color-emerald-600);
+  --color-judge-bad: var(--color-red-600);
+  --color-judge-warn: var(--color-amber-500);
+  /* ★judge-idle이 D-47-h의 색이다. "우리 조작 0회"는 나쁜 게(빨강) 아니라
+     **아직 일어나지 않은 것**이다. 빨강이면 고장난 것처럼 보이고 초록이면 거짓말이다. */
+  --color-judge-idle: var(--color-gray-400);
+
+  /* 관리주체 3열 대조(1층 ①) */
+  --color-owner-ours: var(--color-blue-600);
+  --color-owner-mop: var(--color-gray-500);
+  --color-owner-manual: var(--color-gray-300);
+}

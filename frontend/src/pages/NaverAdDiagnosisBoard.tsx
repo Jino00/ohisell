@@ -7,34 +7,11 @@ import {
   type NaverAdDiagnosis,
   type NaverAdDiagnosisKeywordRow,
 } from "../lib/api";
-
-function isoKST(d: Date): string {
-  const kst = new Date(d.toLocaleString("en-US", { timeZone: "Asia/Seoul" }));
-  return `${kst.getFullYear()}-${String(kst.getMonth() + 1).padStart(2, "0")}-${String(kst.getDate()).padStart(2, "0")}`;
-}
+import { isoKST, num, won, pctFromFraction, roasX, NO_DATA } from "../lib/format";
+import { LayerNav } from "../components/ui";
 
 function daysAgo(n: number): string {
   return isoKST(new Date(Date.now() - n * 86400000));
-}
-
-function fmt(n: number | null | undefined): string {
-  if (n == null) return "-";
-  return n.toLocaleString("ko-KR");
-}
-
-function won(n: number | null | undefined): string {
-  if (n == null) return "-";
-  return `${fmt(n)}원`;
-}
-
-function pct(n: number | null | undefined, digits = 1): string {
-  if (n == null) return "-";
-  return `${(n * 100).toFixed(digits)}%`;
-}
-
-function roasX(n: number | null | undefined): string {
-  if (n == null) return "-";
-  return `${n.toFixed(2)}배`;
 }
 
 function keywordLabel(r: NaverAdDiagnosisKeywordRow): string {
@@ -90,11 +67,11 @@ function KeywordTable({ rows, showAvgClk }: { rows: NaverAdDiagnosisKeywordRow[]
           {rows.map((r, i) => (
             <tr key={`${r.campaign_id}/${r.adgroup_id}/${r.keyword_id}#${i}`} className="hover:bg-gray-50">
               <td className="px-4 py-2 text-sm border-b border-gray-100">{keywordLabel(r)}</td>
-              <td className="px-4 py-2 text-sm border-b border-gray-100 text-right tabular-nums">{fmt(r.imp)}</td>
-              <td className="px-4 py-2 text-sm border-b border-gray-100 text-right tabular-nums">{fmt(r.clk)}</td>
+              <td className="px-4 py-2 text-sm border-b border-gray-100 text-right tabular-nums">{num(r.imp)}</td>
+              <td className="px-4 py-2 text-sm border-b border-gray-100 text-right tabular-nums">{num(r.clk)}</td>
               {showAvgClk && (
                 <td className="px-4 py-2 text-sm border-b border-gray-100 text-right tabular-nums">
-                  {r.avg_daily_clk?.toFixed(2) ?? "-"}
+                  {r.avg_daily_clk?.toFixed(2) ?? NO_DATA}
                 </td>
               )}
               <td className="px-4 py-2 text-sm border-b border-gray-100 text-right tabular-nums">{won(r.cost)}</td>
@@ -144,6 +121,7 @@ export default function NaverAdDiagnosisBoard() {
 
   return (
     <div className="space-y-6">
+      <LayerNav />
       {/* 필터바 */}
       <div className="bg-white rounded-lg border border-gray-200 p-4">
         <div className="flex flex-wrap items-center gap-3">
@@ -221,11 +199,11 @@ export default function NaverAdDiagnosisBoard() {
               </div>
               <div>
                 <div className="text-xs text-gray-500">비용 비중</div>
-                <div className="text-sm font-semibold tabular-nums">{pct(expansion.cost_share)}</div>
+                <div className="text-sm font-semibold tabular-nums">{pctFromFraction(expansion.cost_share, 1)}</div>
               </div>
               <div>
                 <div className="text-xs text-gray-500">클릭</div>
-                <div className="text-sm font-semibold tabular-nums">{fmt(expansion.clk)}</div>
+                <div className="text-sm font-semibold tabular-nums">{num(expansion.clk)}</div>
               </div>
               <div>
                 <div className="text-xs text-gray-500">전환매출</div>
@@ -295,8 +273,8 @@ export default function NaverAdDiagnosisBoard() {
                         <td className="px-4 py-2 text-sm border-b border-gray-100">{r.search_term}</td>
                         <td className="px-4 py-2 text-sm border-b border-gray-100 text-gray-500">{r.campaign_id} / {r.adgroup_id}</td>
                         <td className="px-4 py-2 text-sm border-b border-gray-100 text-gray-500">{r.source}</td>
-                        <td className="px-4 py-2 text-sm border-b border-gray-100 text-right tabular-nums">{fmt(r.imp)}</td>
-                        <td className="px-4 py-2 text-sm border-b border-gray-100 text-right tabular-nums">{fmt(r.clk)}</td>
+                        <td className="px-4 py-2 text-sm border-b border-gray-100 text-right tabular-nums">{num(r.imp)}</td>
+                        <td className="px-4 py-2 text-sm border-b border-gray-100 text-right tabular-nums">{num(r.clk)}</td>
                         <td className="px-4 py-2 text-sm border-b border-gray-100 text-right tabular-nums">{won(r.cost)}</td>
                       </tr>
                     ))}
@@ -311,23 +289,23 @@ export default function NaverAdDiagnosisBoard() {
             <div className="grid grid-cols-2 md:grid-cols-5 gap-3 p-4">
               <div>
                 <div className="text-xs text-gray-500">전체(on)</div>
-                <div className="text-lg font-semibold tabular-nums">{fmt(triage.total)}</div>
+                <div className="text-lg font-semibold tabular-nums">{num(triage.total)}</div>
               </div>
               <div>
                 <div className="text-xs text-gray-500">판정가능</div>
-                <div className="text-lg font-semibold tabular-nums text-blue-600">{fmt(triage.judgeable)}</div>
+                <div className="text-lg font-semibold tabular-nums text-blue-600">{num(triage.judgeable)}</div>
               </div>
               <div>
                 <div className="text-xs text-gray-500">육성후보</div>
-                <div className="text-lg font-semibold tabular-nums text-green-600">{fmt(triage.growth_candidate)}</div>
+                <div className="text-lg font-semibold tabular-nums text-green-600">{num(triage.growth_candidate)}</div>
               </div>
               <div>
                 <div className="text-xs text-gray-500">진짜정리</div>
-                <div className="text-lg font-semibold tabular-nums text-red-600">{fmt(triage.dead)}</div>
+                <div className="text-lg font-semibold tabular-nums text-red-600">{num(triage.dead)}</div>
               </div>
               <div>
                 <div className="text-xs text-gray-500">검색량 미조회</div>
-                <div className="text-lg font-semibold tabular-nums text-gray-400">{fmt(triage.volume_unchecked)}</div>
+                <div className="text-lg font-semibold tabular-nums text-gray-400">{num(triage.volume_unchecked)}</div>
               </div>
             </div>
           </Board>

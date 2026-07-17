@@ -23,36 +23,11 @@ import {
   type NaverAdKpis,
   type NaverAdTrendRow,
 } from "../lib/api";
-import NaverAdDiagnosisBoard from "./NaverAdDiagnosisBoard";
-import NaverAdOptimizationConsole from "./NaverAdOptimizationConsole";
-
-function isoKST(d: Date): string {
-  const kst = new Date(d.toLocaleString("en-US", { timeZone: "Asia/Seoul" }));
-  return `${kst.getFullYear()}-${String(kst.getMonth() + 1).padStart(2, "0")}-${String(kst.getDate()).padStart(2, "0")}`;
-}
+import { isoKST, num, won, pctFromFraction, roasX, NO_DATA } from "../lib/format";
+import { LayerNav } from "../components/ui";
 
 function daysAgo(n: number): string {
   return isoKST(new Date(Date.now() - n * 86400000));
-}
-
-function fmt(n: number | null | undefined): string {
-  if (n == null) return "-";
-  return n.toLocaleString("ko-KR");
-}
-
-function won(n: number | null | undefined): string {
-  if (n == null) return "-";
-  return `${fmt(n)}원`;
-}
-
-function pct(n: number | null | undefined, digits = 2): string {
-  if (n == null) return "-";
-  return `${(n * 100).toFixed(digits)}%`;
-}
-
-function roasX(n: number | null | undefined): string {
-  if (n == null) return "-";
-  return `${n.toFixed(2)}배`;
 }
 
 // ── T3: KPI 스트립 + 이중축 차트 (MOP `15_report_campaign.png`/`15b` 픽셀 차용) ──
@@ -60,7 +35,7 @@ function roasX(n: number | null | undefined): string {
 // MOP 관례: 증가=▲빨강 / 감소=▼파랑이 기본값. 단 비용성 지표(비용·CPC·CPA)는 증가=악화이므로
 // invert=true를 줘서 색만 반전(화살표 방향은 실제 증감 그대로 유지 — 방향 표기와 호전/악화 색을 분리).
 function mopDelta(n: number | null | undefined, invert = false): { text: string; cls: string } {
-  if (n == null) return { text: "-", cls: "text-gray-400" };
+  if (n == null) return { text: NO_DATA, cls: "text-gray-400" };
   if (n === 0) return { text: "0.0%", cls: "text-gray-400" };
   const up = n > 0;
   const isRed = invert ? !up : up;
@@ -113,9 +88,9 @@ type ChartMetricKey = "cost" | "imp" | "clk" | "conv_cnt" | "conv_amt" | "cpc" |
 
 const METRIC_META: Record<ChartMetricKey, { label: string; format: (n: number | null | undefined) => string }> = {
   cost: { label: "광고비", format: won },
-  imp: { label: "노출수", format: fmt },
-  clk: { label: "클릭수", format: fmt },
-  conv_cnt: { label: "전환수", format: fmt },
+  imp: { label: "노출수", format: num },
+  clk: { label: "클릭수", format: num },
+  conv_cnt: { label: "전환수", format: num },
   conv_amt: { label: "전환매출", format: won },
   cpc: { label: "CPC", format: won },
   cpa: { label: "CPA", format: won },
@@ -218,14 +193,7 @@ function drilldownKey(row: NaverAdDrilldownRow | NaverAdHourlyRow, grain: NaverA
   return `${parts}#${index}`;
 }
 
-const TOP_TABS: { key: "report" | "diagnosis" | "console"; label: string }[] = [
-  { key: "report", label: "리포트" },
-  { key: "diagnosis", label: "진단 보드" },
-  { key: "console", label: "최적화 콘솔" },
-];
-
 export default function NaverAdReport() {
-  const [view, setView] = useState<"report" | "diagnosis" | "console">("report");
   const today = isoKST(new Date());
   const [dateFrom, setDateFrom] = useState(daysAgo(6));
   const [dateTo, setDateTo] = useState(today);
@@ -313,27 +281,12 @@ export default function NaverAdReport() {
 
   return (
     <div className="space-y-6">
+      <LayerNav />
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-bold text-gray-900">네이버 SA 광고 리포트</h1>
         <p className="text-xs text-gray-400">D-NAO-15: 읽기 전용 리포트 코어 (제안·쓰기 없음)</p>
       </div>
 
-      {/* 상단 탭: 리포트 / 진단 보드 */}
-      <div className="flex border-b border-gray-200">
-        {TOP_TABS.map((t) => (
-          <button key={t.key} onClick={() => setView(t.key)}
-            className={`px-4 py-2 text-sm ${view === t.key ? "border-b-2 border-blue-600 text-blue-700 font-medium" : "text-gray-500 hover:text-gray-700"}`}>
-            {t.label}
-          </button>
-        ))}
-      </div>
-
-      {view === "diagnosis" ? (
-        <NaverAdDiagnosisBoard />
-      ) : view === "console" ? (
-        <NaverAdOptimizationConsole />
-      ) : (
-      <>
       {/* 필터바 */}
       <div className="bg-white rounded-lg border border-gray-200 p-4 space-y-3">
         <div className="flex flex-wrap items-center gap-3">
@@ -374,9 +327,9 @@ export default function NaverAdReport() {
           비용성 지표는 색 반전 — mopDelta 참조). CTR·평균순위는 기존 드릴다운 표에 존속. */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <MopKpiCard label="광고비" value={won(kpis?.cost)} delta={compareOn ? compare?.deltas_pct?.cost : undefined} invert />
-        <MopKpiCard label="노출수" value={fmt(kpis?.imp)} delta={compareOn ? compare?.deltas_pct?.imp : undefined} />
-        <MopKpiCard label="클릭수" value={fmt(kpis?.clk)} delta={compareOn ? compare?.deltas_pct?.clk : undefined} />
-        <MopKpiCard label="전환수" value={fmt(kpis?.conv_cnt)} delta={compareOn ? compare?.deltas_pct?.conv_cnt : undefined} />
+        <MopKpiCard label="노출수" value={num(kpis?.imp)} delta={compareOn ? compare?.deltas_pct?.imp : undefined} />
+        <MopKpiCard label="클릭수" value={num(kpis?.clk)} delta={compareOn ? compare?.deltas_pct?.clk : undefined} />
+        <MopKpiCard label="전환수" value={num(kpis?.conv_cnt)} delta={compareOn ? compare?.deltas_pct?.conv_cnt : undefined} />
         <MopKpiCard label="전환매출" value={won(kpis?.conv_amt)} delta={compareOn ? compare?.deltas_pct?.conv_amt : undefined} />
         <MopKpiCard label="CPC" value={won(kpis?.cpc)} delta={cpcDelta} invert />
         <MopKpiCard label="CPA" value={won(kpiCpa)} delta={cpaDelta} invert />
@@ -501,8 +454,8 @@ export default function NaverAdReport() {
                 {(report.rows as NaverAdHourlyRow[]).map((r, i) => (
                   <tr key={`h${r.hour}#${i}`} className="hover:bg-gray-50">
                     <td className="px-4 py-2 text-sm border-b border-gray-100">{r.hour}시</td>
-                    <td className="px-4 py-2 text-sm border-b border-gray-100 text-right tabular-nums">{fmt(r.imp)}</td>
-                    <td className="px-4 py-2 text-sm border-b border-gray-100 text-right tabular-nums">{fmt(r.clk)}</td>
+                    <td className="px-4 py-2 text-sm border-b border-gray-100 text-right tabular-nums">{num(r.imp)}</td>
+                    <td className="px-4 py-2 text-sm border-b border-gray-100 text-right tabular-nums">{num(r.clk)}</td>
                     <td className="px-4 py-2 text-sm border-b border-gray-100 text-right tabular-nums">{won(r.cost)}</td>
                   </tr>
                 ))}
@@ -532,9 +485,9 @@ export default function NaverAdReport() {
                         : grain === "adgroup" ? `${r.campaign_id} / ${r.adgroup_id}`
                         : r.keyword_id ? `${r.adgroup_id} / ${r.keyword_id}` : `${r.adgroup_id} (키워드 없음 — 쇼핑검색 등)`}
                     </td>
-                    <td className="px-4 py-2 text-sm border-b border-gray-100 text-right tabular-nums">{fmt(r.imp)}</td>
-                    <td className="px-4 py-2 text-sm border-b border-gray-100 text-right tabular-nums">{fmt(r.clk)}</td>
-                    <td className="px-4 py-2 text-sm border-b border-gray-100 text-right tabular-nums">{pct(r.ctr)}</td>
+                    <td className="px-4 py-2 text-sm border-b border-gray-100 text-right tabular-nums">{num(r.imp)}</td>
+                    <td className="px-4 py-2 text-sm border-b border-gray-100 text-right tabular-nums">{num(r.clk)}</td>
+                    <td className="px-4 py-2 text-sm border-b border-gray-100 text-right tabular-nums">{pctFromFraction(r.ctr)}</td>
                     <td className="px-4 py-2 text-sm border-b border-gray-100 text-right tabular-nums">{won(r.cost)}</td>
                     <td className="px-4 py-2 text-sm border-b border-gray-100 text-right tabular-nums">{won(r.conv_amt)}</td>
                     <td className="px-4 py-2 text-sm border-b border-gray-100 text-right tabular-nums">{roasX(r.roas_naver)}</td>
@@ -585,8 +538,6 @@ export default function NaverAdReport() {
           )}
         </div>
       </div>
-      </>
-      )}
     </div>
   );
 }

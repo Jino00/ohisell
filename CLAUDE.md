@@ -33,7 +33,15 @@
 - scripts/init.sh: 개발 서버 시작
 
 ## 이 프로젝트만의 규칙
-(없음 — 전역 CLAUDE.md 규칙 따름)
+
+### ★prod 배포는 반드시 `scripts/safe_deploy.sh` — 직접 scp/rsync 금지 (D-NAO-49)
+- 이유(2026-07-17 사고): 병행 세션 둘 다 "배포 → 나중에 PR" 순서라, 직접 scp는 **상대 세션이
+  방금 배포한 코드를 구버전으로 덮는다**(qi 수집이 4분 만에 죽음). 원칙20 문서는 세 번 다
+  못 막았다 — 이 스크립트가 구조로 막는다.
+- 동작: prod 파일의 현재 내용이 **내 브랜치 역사에 없는 버전이면 배포 거부**(CAS) +
+  prod 측 배포 락 + 커밋 안 된 파일 거부 + 배포 매니페스트 기록.
+- 백엔드: `scripts/safe_deploy.sh backend/app/... [--restart]` / 프론트: `--frontend`
+- CAS 거부가 뜨면 = 다른 세션이 배포한 것. **덮지 말고** fetch·병합 후 재시도.
 
 ## Skill routing
 
