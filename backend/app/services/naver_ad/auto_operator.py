@@ -13,7 +13,7 @@ import re
 from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_CEILING
 
-from sqlalchemy import func as sqlfunc
+from sqlalchemy import func as sqlfunc, select
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -93,11 +93,20 @@ def _auto_operate_campaign_ids(db: Session) -> set[str]:
 def _auto_operate_now(db: Session, campaign_id: str) -> bool:
     """킬스위치 실행 직전 재확인(codex 5R[P1-2]) — 레인 시작 시 1회 스냅샷만 믿으면 실행
     도중 Jino가 OFF("04 자동운영 중지") 해도 남은 실입찰이 진행된다(문서화된 "즉시 정지"
-    계약 위반). 컬럼 단독 조회는 ORM identity map을 경유하지 않고 매번 SELECT를 실행하므로
-    다른 세션(콘솔 UPDATE)의 커밋을 즉시 반영한다. 행 부재도 False(fail-closed)."""
-    row = db.query(NaverCampaignSettings.auto_operate).filter(
-        NaverCampaignSettings.campaign_id == campaign_id
-    ).first()
+    계약 위반). 행 부재도 False(fail-closed).
+
+    codex 6R[P1]: 세션 경유 컬럼 조회(초판)는 결국 같은 Session 트랜잭션 안에서 실행된다 —
+    SQLite(WAL)에서 리더는 트랜잭션 시작 시점 스냅샷을 보므로, 레인이 조기 쿼리로 읽기
+    트랜잭션을 연 뒤 타 프로세스가 auto_operate=0을 커밋해도 이 세션엔 안 보였다(첫 승인
+    커밋 전 구간에서 stale True → 실입찰 1건 진행 가능). **엔진 레벨 독립 커넥션**으로
+    조회한다 — 세션 트랜잭션과 무관한 새 트랜잭션이라 타 프로세스 커밋이 항상 보이고,
+    세션 상태를 오염시키지 않는다(commit/rollback 사이드이펙트 없음)."""
+    with db.get_bind().connect() as conn:
+        row = conn.execute(
+            select(NaverCampaignSettings.auto_operate).where(
+                NaverCampaignSettings.campaign_id == campaign_id
+            )
+        ).first()
     return bool(row and row[0])
 
 

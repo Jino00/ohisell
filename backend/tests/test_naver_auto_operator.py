@@ -412,6 +412,54 @@ def test_daily_lane_kill_switch_mid_run_stops_remaining_executions(db):
     assert p2.status == "pending"  # 두 번째는 승인조차 안 됨
 
 
+def test_auto_operate_now_sees_external_commit_via_independent_connection(tmp_path):
+    """codex 6R[P1]: 세션 경유 조회는 같은 Session 트랜잭션 안 — SQLite(WAL)에서 리더는
+    트랜잭션 시작 시점 스냅샷을 보므로 타 프로세스의 OFF 커밋이 안 보일 수 있다.
+    _auto_operate_now는 엔진 레벨 독립 커넥션(새 트랜잭션)으로 조회해야 한다 — 파일 기반
+    DB(커넥션 실분리, in-memory StaticPool은 커넥션 공유라 검증 불가)에서: 세션이 먼저
+    읽기 트랜잭션을 연 상태 → 별도 커넥션으로 OFF 커밋 → False 반환을 증명."""
+    from sqlalchemy import create_engine as _create_engine, event
+
+    db_file = tmp_path / "kill_switch.db"
+    engine = _create_engine(f"sqlite:///{db_file}")
+
+    @event.listens_for(engine, "connect")
+    def _set_wal(dbapi_conn, _rec):  # WAL — 스냅샷 격리가 실재하는 모드로 검증
+        dbapi_conn.execute("PRAGMA journal_mode=WAL")
+
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+    seed = Session()
+    seed.add(NaverCampaignSettings(campaign_id=CAMPAIGN, auto_operate=True, optimizer="ours"))
+    seed.commit()
+    seed.close()
+
+    lane_session = Session()
+    try:
+        # 레인이 조기 쿼리로 읽기 트랜잭션을 연 상태를 재현
+        assert lane_session.query(NaverCampaignSettings).filter(
+            NaverCampaignSettings.campaign_id == CAMPAIGN
+        ).one().auto_operate is True
+
+        # 타 프로세스(콘솔)가 별도 커넥션으로 킬스위치 OFF 커밋
+        with engine.connect() as other:
+            other.execute(
+                NaverCampaignSettings.__table__.update()
+                .where(NaverCampaignSettings.campaign_id == CAMPAIGN)
+                .values(auto_operate=False)
+            )
+            other.commit()
+
+        # 독립 커넥션 조회 — 세션 스냅샷과 무관하게 OFF가 보여야 함
+        assert auto_operator._auto_operate_now(lane_session, CAMPAIGN) is False
+        # 행 부재도 False(fail-closed) 유지
+        assert auto_operator._auto_operate_now(lane_session, "cmp-none") is False
+    finally:
+        lane_session.close()
+        engine.dispose()
+
+
 def test_hourly_lane_kill_switch_mid_run_stops_remaining_executions(db):
     """시간당 레인 동일 — 첫 실행 부수효과로 OFF 시 두 번째 핫셋 유닛은 제안 생성/실행 없음."""
     _settings(db)
