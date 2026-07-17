@@ -171,25 +171,41 @@ def _settlement_roas_ok(
     return True, f"정착창 보정ROAS {roas_corrected:.4f} >= 목표 {target_roas}"
 
 
-def _is_bleeding_now(db: Session, target_type: str, target_id: str) -> bool:
-    """D-NAO-48 조건④(최신 소급채점에서 bleeding 아님) — retro_snapshotter._BOARDS가 매일
-    board별로 스냅샷하는 NaverRetroSignal 최신 asof_date 행에 이 target_id가 해당 bleeding
-    보드(board)로 존재하면 "지금 bleeding"으로 판정한다. 소급채점 시스템 자체가 아직 한
-    번도 안 돌았으면(latest_asof None) 검증 근거가 없어 fail-closed(True=bleeding 취급,
-    hold) — 반면 최신 스냅샷은 있는데 이 target_id가 그 보드에 없으면 "그날 안 걸림" =
-    실제 not-bleeding 신호이므로 False."""
+def _bleeding_hold_reason(db: Session, target_type: str, target_id: str, today: date) -> str | None:
+    """D-NAO-48 조건④(최신 소급채점에서 bleeding 아님) 판정 — 미충족 시 hold 사유, 통과 시
+    None. retro_snapshotter._BOARDS가 매일 08:30 board별로 스냅샷하는 NaverRetroSignal의
+    최신 asof_date 행에 이 target_id가 해당 bleeding 보드(board)로 존재하면 bleeding.
+
+    fail-closed 계열(전부 hold):
+    - 알 수 없는 grain(board 매핑 없음) — 판정 불가.
+    - 소급채점 데이터 전무(latest_asof None) — 검증 근거 없음.
+    - codex 4R[P1] asof 신선도: 일 레인(08:50) 기준 기대 as-of = 오늘-1(08:30 retro가
+      매일 어제 as-of를 생성). latest_asof < 기대면 당일 retro 크론이 실패한 것 — 과거
+      성적표에서의 "부재"를 "bleeding 아님"으로 해석하면 stale 데이터로 bid_up이 자동
+      실행된다(fail-open). stale이면 존재 여부와 무관하게 hold.
+
+    최신(신선한) 스냅샷은 있는데 이 target_id가 그 보드에 없으면 "그날 안 걸림" = 실제
+    not-bleeding 신호 — 통과(None)."""
     board = _BLEEDING_BOARD_BY_TARGET_TYPE.get(target_type)
     if board is None:
-        return True  # 알 수 없는 grain — fail-closed
+        return f"④grain={target_type!r} 판정 불가(bleeding 보드 매핑 없음, fail-closed)"
     latest_asof = db.query(sqlfunc.max(NaverRetroSignal.asof_date)).scalar()
     if latest_asof is None:
-        return True  # 소급채점 데이터 자체가 없음 — 검증 불가(fail-closed)
+        return "④소급채점 데이터 없음 — bleeding 검증 불가(fail-closed)"
+    expected_asof = today - timedelta(days=1)
+    if latest_asof < expected_asof:
+        return (
+            f"④소급채점 stale — latest_asof={latest_asof.isoformat()} < 기대 "
+            f"{expected_asof.isoformat()}(당일 retro 미완주, fail-closed, codex 4R[P1])"
+        )
     exists = db.query(NaverRetroSignal.id).filter(
         NaverRetroSignal.asof_date == latest_asof,
         NaverRetroSignal.board == board,
         NaverRetroSignal.target_id == target_id,
     ).first()
-    return exists is not None
+    if exists is not None:
+        return "④최신 소급채점에서 bleeding으로 판정됨"
+    return None
 
 
 def _has_recent_external_stop(db: Session, target_type: str, target_id: str) -> bool:
@@ -247,9 +263,10 @@ def _check_bid_up_conditions(db: Session, p: NaverProposal, today: date) -> str 
     if not roas_ok:
         return f"③{roas_reason}"
 
-    # ④최신 소급채점에서 bleeding 아님
-    if _is_bleeding_now(db, p.target_type, p.target_id):
-        return "④최신 소급채점에서 bleeding으로 판정됨"
+    # ④최신 소급채점에서 bleeding 아님(asof 신선도 포함 — codex 4R[P1])
+    bleeding_reason = _bleeding_hold_reason(db, p.target_type, p.target_id, today)
+    if bleeding_reason:
+        return bleeding_reason
 
     return None
 

@@ -258,6 +258,41 @@ def test_daily_lane_bid_up_condition3_fails_no_settlement_roas_evidence(db):
     assert "③" in result["held"][0]["reason"]
 
 
+def test_daily_lane_bid_up_condition4_stale_retro_asof_holds(db):
+    """codex 4R[P1]: 08:30 retro 크론이 실패해 당일 as-of(=오늘-1) 행이 없으면, 과거
+    성적표에서의 부재를 "bleeding 아님"으로 해석해 bid_up이 자동 실행되면 안 된다
+    (fail-open 차단). latest_asof < 기대 as-of(오늘-1) → 조건④ 미충족 hold."""
+    p, current_bid = _seed_bid_up_happy_path(db, exclude_bleeding=False)
+    # 소급채점 최신 행이 이틀 전 as-of뿐(어제 as-of 없음) — 이 target은 그 보드에도 없음
+    _retro_signal(db, asof_date=TODAY - timedelta(days=2), board="bleeding_keywords",
+                  target_id="nkw-other")
+    with patch.object(auto_operator.naver_sa_writer, "get_keyword",
+                       return_value={"bidAmt": current_bid}), \
+         patch.object(auto_operator.diagnosis, "correction_factor",
+                       return_value={"factor": Decimal("1")}), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_daily_lane(db, now=NOW)
+    mock_exec.assert_not_called()
+    assert result["approved"] == 0
+    assert len(result["held"]) == 1
+    assert "④" in result["held"][0]["reason"]
+    assert "stale" in result["held"][0]["reason"]
+    db.refresh(p)
+    assert p.status == "pending"
+
+
+def test_daily_lane_bid_down_unaffected_by_stale_retro(db):
+    """조건④는 bid_up 전용 — 소급채점이 stale이어도 bid_down은 무조건 승인(안전 방향)."""
+    _settings(db)
+    _retro_signal(db, asof_date=TODAY - timedelta(days=2), board="bleeding_keywords",
+                  target_id="nkw-other")
+    p = _proposal(db, proposal_type="bid_down", target_bid=900)
+    with patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_daily_lane(db, now=NOW)
+    mock_exec.assert_called_once_with(db, p.id, dry_run=False, now=NOW)
+    assert result["approved"] == 1
+
+
 def test_daily_lane_bid_up_condition4_fails_currently_bleeding(db):
     p, current_bid = _seed_bid_up_happy_path(db, exclude_bleeding=False, target_id="nkw-1")
     window_from, window_to = _settlement_window()
