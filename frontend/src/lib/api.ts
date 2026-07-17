@@ -1924,6 +1924,9 @@ export interface NaverChangeLogRow {
   after: Record<string, unknown> | null;
   rationale: string | null;
   outcome: string | null;
+  /** 실제로 광고가 바뀌었나(D-NAO-54). false = 가드레일 차단·쓰기 실패 시도(before/after 없음).
+   *  ★outcome으로 판별하지 말 것 — D+14 채점 전 NULL이고 채점 후 improved/declined로 바뀐다. */
+  executed: boolean;
   dry_run: boolean;
   proposal_id: number | null;
   executed_at: string | null;
@@ -1939,8 +1942,17 @@ export async function fetchNaverChangeLog(params: {
    *  외부 변경 감지가 섞여 있어(prod 실측: dry_run=False 15건이 전부 외부 감지) 필터 없이
    *  세면 우리가 아무것도 안 했는데 "15회"라고 표시된다(codex[P2] 2026-07-17). */
   actor?: "all" | "ours" | "external";
+  /** ★date_from/date_to의 폴백일 뿐이다(D-NAO-54). "지금부터 N일 전"이라 '당일만'·'어제만'
+   *  같은 닫힌 구간을 표현할 수 없다 — 화면 프리셋은 date_from/date_to를 쓴다. */
   days?: number;
-  include_dry_run?: boolean; limit?: number; offset?: number;
+  /** KST 날짜 YYYY-MM-DD, 양끝 **포함**. 반드시 date_to와 함께(한쪽만 주면 422). */
+  date_from?: string;
+  date_to?: string;
+  include_dry_run?: boolean;
+  /** actor=ours에서 가드레일 차단 시도도 포함(기본 false). 행의 executed로 구분해 그린다.
+   *  ★기본 false가 계약이다: 1층 "우리 조작 N회"는 실집행만 센다(D-47-h). */
+  include_blocked?: boolean;
+  limit?: number; offset?: number;
 } = {}): Promise<NaverChangeLogResponse> {
   const q = new URLSearchParams();
   Object.entries(params).forEach(([k, v]) => { if (v != null) q.set(k, String(v)); });

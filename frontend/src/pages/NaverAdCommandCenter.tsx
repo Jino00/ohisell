@@ -404,23 +404,129 @@ function describeChange(row: NaverChangeLogRow): string {
   }
 }
 
+// ══════════════════════════════════════════════════════════════════
+// D-NAO-54 기간 선택 — 변경 이력 두 패널이 공유하는 최소 단위.
+// Jino 확정(2026-07-17): 기본=당일 · 7일/30일은 **어제 기준**(당일은 진행 중이라 별도 탭이고,
+// 섞으면 "완결된 과거"라는 탭의 의미가 깨진다) · 임의 구간은 캘린더.
+// ══════════════════════════════════════════════════════════════════
+
+type DateRange = { from: string; to: string };
+
+/** KST 기준 N일 전 날짜(YYYY-MM-DD).
+ *  ★브라우저 로컬시각(`new Date().toISOString().slice(0,10)` 등)으로 계산하면 안 된다:
+ *  그건 UTC/로컬 날짜이고 서버의 changed_at은 **KST**다(harness·entity_sync가 kst_now()로
+ *  명시 저장). 자정~09:00 사이에 하루가 어긋난다 — 이 저장소가 이미 두 번 당한 함정
+ *  (memory: sqlite-server-default-now-is-utc). 그래서 타임존을 명시해 KST로 못박는다.
+ *  ★en-CA 로케일이 YYYY-MM-DD를 준다. 한국은 DST가 없어 ±N일이 정확히 86,400초다. */
+function kstDate(offsetDays: number): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Seoul" })
+    .format(new Date(Date.now() + offsetDays * 86_400_000));
+}
+
+const PERIOD_PRESETS = [
+  { key: "today", label: "당일", range: (): DateRange => ({ from: kstDate(0), to: kstDate(0) }) },
+  { key: "yesterday", label: "어제", range: (): DateRange => ({ from: kstDate(-1), to: kstDate(-1) }) },
+  // 어제를 끝점으로 7일/30일 — 당일 미포함(끝점 포함이므로 -7..-1이 정확히 7일이다).
+  { key: "7d", label: "7일", range: (): DateRange => ({ from: kstDate(-7), to: kstDate(-1) }) },
+  { key: "30d", label: "30일", range: (): DateRange => ({ from: kstDate(-30), to: kstDate(-1) }) },
+] as const;
+
+type PeriodKey = (typeof PERIOD_PRESETS)[number]["key"] | "custom";
+type Period = ReturnType<typeof usePeriod>;
+
+/** 기간 상태. range는 원시 문자열 2개라 useAsyncData deps에 그대로 넣어도 안정적이다. */
+function usePeriod() {
+  const [key, setKey] = useState<PeriodKey>("today");
+  const [custom, setCustom] = useState<DateRange>({ from: kstDate(-7), to: kstDate(0) });
+  const preset = PERIOD_PRESETS.find((p) => p.key === key);
+  const range = preset ? preset.range() : custom;
+  // ISO 날짜는 문자열 비교가 곧 날짜 비교다. 뒤집힌 구간은 백엔드가 422로 막지만(조용한
+  // 빈 결과 = "변경 없음"으로 읽히므로), 화면에서 먼저 잡아 요청 자체를 안 보낸다.
+  const invalid = key === "custom" && custom.from > custom.to;
+  const label = preset ? preset.label : `${custom.from} ~ ${custom.to}`;
+  return { key, setKey, custom, setCustom, range, invalid, label };
+}
+
+function PeriodTabs({ p }: { p: Period }) {
+  return (
+    <div className="px-4 py-2 border-b border-gray-100 flex items-center gap-1 flex-wrap">
+      {PERIOD_PRESETS.map((preset) => (
+        <button
+          key={preset.key}
+          type="button"
+          onClick={() => p.setKey(preset.key)}
+          className={`px-2 py-0.5 text-xs rounded-full ${
+            p.key === preset.key ? "bg-blue-50 text-blue-700 font-semibold" : "text-gray-600 hover:bg-gray-100"
+          }`}
+        >
+          {preset.label}
+        </button>
+      ))}
+      <button
+        type="button"
+        onClick={() => p.setKey("custom")}
+        className={`px-2 py-0.5 text-xs rounded-full ${
+          p.key === "custom" ? "bg-blue-50 text-blue-700 font-semibold" : "text-gray-600 hover:bg-gray-100"
+        }`}
+      >
+        기간 지정
+      </button>
+      {p.key === "custom" && (
+        <span className="flex items-center gap-1 ml-1">
+          <input
+            type="date" value={p.custom.from}
+            onChange={(e) => p.setCustom({ ...p.custom, from: e.target.value })}
+            className="text-xs border border-gray-200 rounded px-1 py-0.5"
+          />
+          <span className="text-xs text-gray-400">~</span>
+          <input
+            type="date" value={p.custom.to}
+            onChange={(e) => p.setCustom({ ...p.custom, to: e.target.value })}
+            className="text-xs border border-gray-200 rounded px-1 py-0.5"
+          />
+        </span>
+      )}
+    </div>
+  );
+}
+
+/** 변경 칸. ★차단 행은 before/after가 **둘 다 없다**(harness._guard_failure는 writer를 부르지도
+ *  않는다) — describeChange에 그대로 넘기면 "입찰가 — → —"가 되어 데이터 결손처럼 보인다.
+ *  차단은 결손이 아니라 **가드레일이 일한 사건**이다(왜 막혔는지는 근거 칸이 말한다). */
+function ChangeCell({ row }: { row: NaverChangeLogRow }) {
+  if (!row.executed) return <Badge tone="neutral">🚫 차단됨</Badge>;
+  return <span className="text-xs tabular-nums">{describeChange(row)}</span>;
+}
+
 function ChangeLogPane() {
   // ★이 패널은 "우리가 한 일의 결과"(인과)다 — 외부가 바꾼 걸 감지한 행이 섞이면
   //   남의 조작을 우리 성과로 보여주게 된다(codex[P2] 2026-07-17). 외부 변경은
   //   별도 관심사라 여기 섞지 않는다 — 그 피드는 ExternalChangesPane(바로 아래)이 그린다.
-  const { data, error } = useAsyncData(() => fetchNaverChangeLog({ days: 30, limit: 10, actor: "ours" }), []);
-  if (error) return <EmptyState reason={`불러오지 못했습니다: ${error}`} hint="새로고침하거나 백엔드 상태를 확인하세요." />;
-  if (data === null) return <Loading rows={3} />;
-  if (data.rows.length === 0) {
+  // ★include_blocked(D-NAO-54): 가드레일이 막은 시도도 보여준다. prod 실측(2026-07-17)에서
+  //   입찰 시도 4건 중 2건이 차단됐는데(변경폭 39.3%>15% · 쿨다운 1.0h<5h) 어느 화면에도
+  //   안 떴다 — 가드레일이 일한 것도 우리가 한 일이다. total의 정직성은 백엔드가 지킨다
+  //   (기본 False라 1층 "우리 조작 N회"는 여전히 실집행만 센다).
+  const p = usePeriod();
+  const { data, error } = useAsyncData(
+    () => fetchNaverChangeLog({
+      date_from: p.range.from, date_to: p.range.to, limit: 10, actor: "ours", include_blocked: true,
+    }),
+    [p.range.from, p.range.to],
+  );
+  const body = () => {
+    if (p.invalid) return <EmptyState reason="시작일이 종료일보다 늦습니다." hint="기간을 다시 선택하세요." />;
+    if (error) return <EmptyState reason={`불러오지 못했습니다: ${error}`} hint="새로고침하거나 백엔드 상태를 확인하세요." />;
+    if (data === null) return <Loading rows={3} />;
+    if (data.rows.length === 0) {
+      return (
+        <EmptyState
+          reason={`${p.label}: 우리가 집행한 변경이 없습니다.`}
+          hint="기간을 넓혀 보세요. 제안이 있어도 승인 게이트를 통과한 실행이 없으면 여기는 빕니다."
+        />
+      );
+    }
     return (
-      <EmptyState
-        reason="최근 30일 우리가 집행한 변경이 없습니다."
-        hint="제안은 생성되지만 사람 승인 게이트를 통과한 실행이 아직 없습니다. 승인하면 여기에 '무엇을 왜 바꿨는지'가 쌓입니다."
-      />
-    );
-  }
-  return (
-    <>
+      <>
       <Table head={<><Th>시각</Th><Th>대상</Th><Th>변경</Th><Th>근거</Th></>}>
         {data.rows.map((r) => (
           <tr key={r.id}>
@@ -428,9 +534,7 @@ function ChangeLogPane() {
             <Td><span className="text-xs">{r.entity_type} {r.entity_id}</span></Td>
             {/* ★"무엇을 왜 바꿨는지" — MOP에 0개인 컬럼(ref24). 우리가 이길 자리이므로
                 지원하는 실행 액션 4종을 전부 제대로 그린다(codex[P2] R3). */}
-            <Td>
-              <span className="text-xs tabular-nums">{describeChange(r)}</span>
-            </Td>
+            <Td><ChangeCell row={r} /></Td>
             <Td><span className="text-xs text-gray-600">{r.rationale ?? NO_DATA}</span></Td>
           </tr>
         ))}
@@ -442,8 +546,10 @@ function ChangeLogPane() {
           최근 {num(data.rows.length)}건 표시 · 총 {num(data.total)}건
         </p>
       )}
-    </>
-  );
+      </>
+    );
+  };
+  return <><PeriodTabs p={p} />{body()}</>;
 }
 
 function ExternalChangesPane() {
@@ -451,37 +557,46 @@ function ExternalChangesPane() {
   // diff 밸브가 DB에만 쌓이고 어디서도 안 보인다 — 정확히 "수집은 풍부한데 화면엔 없음"
   // (스펙 §1-4)의 재발이다. ChangeLogPane과 구조는 같지만 관심사가 반대다:
   // 그쪽=우리가 한 일(인과), 이쪽=외부(MOP/사람)가 바꾼 걸 우리가 관측한 것(감지).
-  const { data, error } = useAsyncData(() => fetchNaverChangeLog({ days: 30, limit: 10, actor: "external" }), []);
-  if (error) return <EmptyState reason={`불러오지 못했습니다: ${error}`} hint="새로고침하거나 백엔드 상태를 확인하세요." />;
-  if (data === null) return <Loading rows={3} />;
-  if (data.rows.length === 0) {
-    return (
-      <EmptyState
-        reason="최근 30일 감지된 외부 변경이 없습니다."
-        hint="입찰가·상태·키워드 diff는 매일 07:35 entity_sync에서 잡힙니다."
-      />
-    );
-  }
-  return (
-    <>
-      <Table head={<><Th>시각</Th><Th>대상</Th><Th>변경</Th><Th>근거</Th></>}>
-        {data.rows.map((r) => (
-          <tr key={r.id}>
-            <Td><span className="text-xs text-gray-500">{r.changed_at?.slice(5, 16) ?? NO_DATA}</span></Td>
-            <Td><span className="text-xs">{r.entity_type} {r.entity_id}</span></Td>
-            <Td><span className="text-xs tabular-nums">{describeChange(r)}</span></Td>
-            <Td><span className="text-xs text-gray-600">{r.rationale ?? NO_DATA}</span></Td>
-          </tr>
-        ))}
-      </Table>
-      {/* ★잘림을 숨기지 않는다(라이브 검증: 15건인데 10건만 보이고 표식 0). */}
-      {data.total > data.rows.length && (
-        <p className="px-4 py-2 text-xs text-gray-500 border-t border-gray-100">
-          최근 {num(data.rows.length)}건 표시 · 총 {num(data.total)}건
-        </p>
-      )}
-    </>
+  // ★include_blocked를 안 쓴다: 외부 변경엔 '차단'이 없다(우리 가드레일은 우리 쓰기에만 건다).
+  const p = usePeriod();
+  const { data, error } = useAsyncData(
+    () => fetchNaverChangeLog({ date_from: p.range.from, date_to: p.range.to, limit: 10, actor: "external" }),
+    [p.range.from, p.range.to],
   );
+  const body = () => {
+    if (p.invalid) return <EmptyState reason="시작일이 종료일보다 늦습니다." hint="기간을 다시 선택하세요." />;
+    if (error) return <EmptyState reason={`불러오지 못했습니다: ${error}`} hint="새로고침하거나 백엔드 상태를 확인하세요." />;
+    if (data === null) return <Loading rows={3} />;
+    if (data.rows.length === 0) {
+      return (
+        <EmptyState
+          reason={`${p.label}: 감지된 외부 변경이 없습니다.`}
+          hint="입찰가·상태·키워드 diff는 매일 07:35 entity_sync에서 잡힙니다."
+        />
+      );
+    }
+    return (
+      <>
+        <Table head={<><Th>시각</Th><Th>대상</Th><Th>변경</Th><Th>근거</Th></>}>
+          {data.rows.map((r) => (
+            <tr key={r.id}>
+              <Td><span className="text-xs text-gray-500">{r.changed_at?.slice(5, 16) ?? NO_DATA}</span></Td>
+              <Td><span className="text-xs">{r.entity_type} {r.entity_id}</span></Td>
+              <Td><span className="text-xs tabular-nums">{describeChange(r)}</span></Td>
+              <Td><span className="text-xs text-gray-600">{r.rationale ?? NO_DATA}</span></Td>
+            </tr>
+          ))}
+        </Table>
+        {/* ★잘림을 숨기지 않는다(라이브 검증: 15건인데 10건만 보이고 표식 0). */}
+        {data.total > data.rows.length && (
+          <p className="px-4 py-2 text-xs text-gray-500 border-t border-gray-100">
+            최근 {num(data.rows.length)}건 표시 · 총 {num(data.total)}건
+          </p>
+        )}
+      </>
+    );
+  };
+  return <><PeriodTabs p={p} />{body()}</>;
 }
 
 function PendingPane() {

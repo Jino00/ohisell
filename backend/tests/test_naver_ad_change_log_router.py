@@ -14,7 +14,7 @@ from sqlalchemy.pool import StaticPool
 from app.database import Base, get_db
 from app.main import app
 from app.models import NaverChangeLog
-from app.utils.kst import kst_now
+from app.utils.kst import kst_now, kst_today
 
 
 @pytest.fixture
@@ -234,3 +234,140 @@ def test_actor_ours_scoped_by_campaign(client, db):
 
     assert client.get("/api/naver/ad/change-log?actor=ours&campaign_id=cmp-1").json()["total"] == 1
     assert client.get("/api/naver/ad/change-log?actor=ours&campaign_id=cmp-2").json()["total"] == 2
+
+
+# ══════════════════════════════════════════════════════════════════
+# D-NAO-54 ① 날짜 범위(date_from/date_to) — 프리셋 5종의 원천
+#   당일 / 어제 / 어제부터 7일 / 어제부터 30일 / 캘린더 커스텀.
+#   ★`days`는 "지금부터 N일 전"이라 **당일만**·**어제만** 같은 닫힌 구간을 표현할 수 없다.
+#   ★changed_at은 KST 저장이므로(kst_now() 명시 전달) 경계도 KST 날짜로 판단한다.
+#     서버 시계가 UTC인데 `date('now')`를 쓰면 9시간 어긋난다(memory: sqlite-server-default-now-is-utc).
+# ══════════════════════════════════════════════════════════════════
+
+
+def _seed_blocked(db, *, action="update_bid", campaign_id="cmp-1", days_ago=0, dry_run=False):
+    """가드레일 차단 시도 = harness._guard_failure가 남기는 모양.
+    before/after 둘 다 None · outcome='failed' · dry_run=False(실제 시도였으므로)."""
+    row = NaverChangeLog(
+        entity_type="adgroup", entity_id="grp-blocked", campaign_id=campaign_id,
+        action=action, dry_run=dry_run, outcome="failed",
+        changed_at=kst_now() - timedelta(days=days_ago),
+        before_value=None, after_value=None,
+        rationale="근거 [실행 불가] 가드레일 차단 — 변경폭 39.3% 초과(상한 15%, D-NAO-5)",
+    )
+    db.add(row)
+    db.commit()
+    return row
+
+
+def test_date_range_is_inclusive_on_both_ends(client, db):
+    """당일·어제 프리셋의 근간 — date_to 당일 23:59:59가 잘리면 '당일' 탭이 빈다."""
+    today = kst_today().isoformat()
+    _seed(db, days_ago=0)
+    _seed(db, days_ago=1)
+    _seed(db, days_ago=2)
+
+    body = client.get(f"/api/naver/ad/change-log?date_from={today}&date_to={today}").json()
+    assert body["total"] == 1, "당일 = 오늘 하루만"
+
+    yesterday = (kst_today() - timedelta(days=1)).isoformat()
+    body = client.get(f"/api/naver/ad/change-log?date_from={yesterday}&date_to={yesterday}").json()
+    assert body["total"] == 1, "어제 = 어제 하루만(오늘 제외)"
+
+
+def test_date_range_seven_days_ending_yesterday_excludes_today(client, db):
+    """Jino 확정(2026-07-17): 7일·30일은 **어제 기준**이다 — 당일은 진행 중이라 별도 탭.
+    당일이 섞이면 '완결된 과거'라는 탭의 의미가 깨진다."""
+    _seed(db, days_ago=0)   # 오늘 — 제외되어야 함
+    _seed(db, days_ago=1)   # 어제 — 포함
+    _seed(db, days_ago=7)   # 7일 창의 끝 — 포함
+    _seed(db, days_ago=8)   # 창 밖 — 제외
+
+    date_to = (kst_today() - timedelta(days=1)).isoformat()
+    date_from = (kst_today() - timedelta(days=7)).isoformat()
+    body = client.get(f"/api/naver/ad/change-log?date_from={date_from}&date_to={date_to}").json()
+    assert body["total"] == 2, "어제 + 7일전만(오늘·8일전 제외)"
+
+
+def test_date_range_takes_precedence_over_days(client, db):
+    _seed(db, days_ago=0)
+    _seed(db, days_ago=10)
+    today = kst_today().isoformat()
+    body = client.get(f"/api/naver/ad/change-log?days=30&date_from={today}&date_to={today}").json()
+    assert body["total"] == 1, "date_from/date_to가 오면 days는 무시한다"
+
+
+def test_date_range_rejects_reversed_range(client, db):
+    today = kst_today().isoformat()
+    yesterday = (kst_today() - timedelta(days=1)).isoformat()
+    r = client.get(f"/api/naver/ad/change-log?date_from={today}&date_to={yesterday}")
+    assert r.status_code == 422, "캘린더에서 뒤집어 고를 수 있다 — 빈 결과로 조용히 넘기지 않는다"
+
+
+def test_date_range_rejects_span_over_limit(client, db):
+    """days가 le=365인 것과 같은 상한 — 캘린더로 우회되면 안 된다."""
+    date_to = kst_today().isoformat()
+    date_from = (kst_today() - timedelta(days=400)).isoformat()
+    r = client.get(f"/api/naver/ad/change-log?date_from={date_from}&date_to={date_to}")
+    assert r.status_code == 422
+
+
+def test_date_range_requires_both_ends(client, db):
+    """한쪽만 주면 나머지 창이 days로 결정돼 사용자가 고른 적 없는 구간이 나온다 — 명시적으로 막는다."""
+    today = kst_today().isoformat()
+    assert client.get(f"/api/naver/ad/change-log?date_from={today}").status_code == 422
+    assert client.get(f"/api/naver/ad/change-log?date_to={today}").status_code == 422
+
+
+def test_date_range_rejects_malformed_date(client, db):
+    assert client.get("/api/naver/ad/change-log?date_from=2026-13-99&date_to=2026-07-17").status_code == 422
+
+
+# ══════════════════════════════════════════════════════════════════
+# D-NAO-54 ② include_blocked — 가드레일이 막은 시도를 보이게
+#   ★actor=ours의 기본 계약("실집행만")은 불변이다: 1층 "우리 조작 N회"의 원천이라
+#   차단분이 기본으로 섞이면 광고에 아무 변화가 없었는데 "조작 1회"가 된다(codex[P2] R2).
+#   그래서 **옵트인**이고, 프론트는 executed 플래그로 구분해 그린다.
+# ══════════════════════════════════════════════════════════════════
+
+
+def test_include_blocked_defaults_off_preserving_ours_contract(client, db):
+    _seed(db, action="update_bid")
+    _seed_blocked(db)
+    body = client.get("/api/naver/ad/change-log?actor=ours").json()
+    assert body["total"] == 1, "기본값은 실집행만 — 1층 카운트 정직성(D-47-h)"
+
+
+def test_include_blocked_surfaces_guard_rejections(client, db):
+    _seed(db, action="update_bid")
+    _seed_blocked(db)
+    body = client.get("/api/naver/ad/change-log?actor=ours&include_blocked=true").json()
+    assert body["total"] == 2
+    ids = {r["entity_id"] for r in body["rows"]}
+    assert "grp-blocked" in ids
+
+
+def test_executed_flag_distinguishes_blocked_from_real(client, db):
+    """프론트가 🚫 배지를 달 근거. ★outcome이 아니라 after 존재로 판별한다 —
+    outcome은 D+14 채점 전 NULL이고 채점 후 improved/declined로 바뀌어 '실행됨'의 영구 상태가 아니다."""
+    _seed(db, action="update_bid")
+    _seed_blocked(db)
+    rows = client.get("/api/naver/ad/change-log?actor=ours&include_blocked=true").json()["rows"]
+    by_id = {r["entity_id"]: r for r in rows}
+    assert by_id["nkw-1"]["executed"] is True
+    assert by_id["grp-blocked"]["executed"] is False
+
+
+def test_include_blocked_does_not_admit_external_detections(client, db):
+    """차단분을 여는 것이 외부 감지까지 여는 뒷문이 되면 안 된다 — 남의 조작이 우리 성과로 섞인다."""
+    _seed(db, action="external_bid_change")
+    _seed_blocked(db)
+    rows = client.get("/api/naver/ad/change-log?actor=ours&include_blocked=true").json()["rows"]
+    assert all(r["action"] == "update_bid" for r in rows)
+
+
+def test_include_blocked_still_excludes_dry_run(client, db):
+    """dry-run 차단은 '시도'조차 아니다 — include_dry_run과 직교해야 한다."""
+    _seed_blocked(db, dry_run=True)
+    body = client.get("/api/naver/ad/change-log?actor=ours&include_blocked=true").json()
+    assert body["total"] == 0

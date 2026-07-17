@@ -41,6 +41,7 @@ from decimal import Decimal
 import requests
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -856,6 +857,39 @@ def retro_scorecard(
 # D-NAO-47 — 변경 이력 조회(change_log) · 커맨드 센터 1층 "우리 조작 N회"의 원천
 # ══════════════════════════════════════════════════════════════════
 _MAX_CHANGE_LOG_LIMIT = 500
+_MAX_CHANGE_LOG_SPAN_DAYS = 365  # `days`의 le=365와 같은 상한 — 캘린더로 우회되면 안 된다
+
+
+def _change_log_window(
+    date_from: date | None, date_to: date | None, days: int
+) -> tuple[datetime, datetime | None]:
+    """조회 창을 [since, until) 로 확정한다(KST). until=None이면 상한 없음(= 지금까지).
+
+    ★두 표현이 공존하는 이유(D-NAO-54): `days`는 "지금부터 N일 전"이라 **닫힌 구간**을 못 만든다.
+    화면 프리셋이 요구하는 '당일만'·'어제만'·'어제부터 7일'(당일 제외)은 끝점이 필요하다.
+    `days`는 date_from/date_to가 없을 때만 쓰는 폴백으로 남긴다(구 프론트 번들 호환 —
+    배포 순간에 옛 JS가 days=30을 보내도 창이 뒤바뀌지 않게).
+
+    ★KST 경계다. changed_at은 KST로 저장된다(harness·entity_sync 모두 kst_now() 명시 전달).
+    서버 시계가 UTC라고 UTC 자정으로 자르면 9시간 어긋난다
+    (memory: sqlite-server-default-now-is-utc — 이 저장소가 이미 두 번 당한 함정).
+    """
+    if (date_from is None) != (date_to is None):
+        # 한쪽만 주면 나머지 끝을 days로 메우게 되는데, 그건 사용자가 고른 적 없는 구간이다.
+        raise HTTPException(422, "date_from과 date_to는 함께 지정해야 합니다.")
+    if date_from is None or date_to is None:
+        return kst_now() - timedelta(days=days), None
+    if date_from > date_to:
+        # 캘린더에서 뒤집어 고를 수 있다. 빈 결과로 조용히 넘기면 "변경이 없다"로 읽힌다.
+        raise HTTPException(422, "date_from은 date_to보다 늦을 수 없습니다.")
+    if (date_to - date_from).days + 1 > _MAX_CHANGE_LOG_SPAN_DAYS:
+        raise HTTPException(422, f"조회 구간은 최대 {_MAX_CHANGE_LOG_SPAN_DAYS}일입니다.")
+    # date_to 당일을 통째로 포함한다(끝점 포함) — 안 그러면 '당일' 탭이 00:00만 보고 빈다.
+    return (
+        datetime.combine(date_from, datetime.min.time()),
+        datetime.combine(date_to + timedelta(days=1), datetime.min.time()),
+    )
+
 
 
 def _loads_or_none(raw: str | None) -> dict | None:
@@ -879,8 +913,14 @@ def get_change_log(
         pattern="^(all|ours|external)$",
         description="ours=우리 실집행만 / external=외부 변경 감지만 / all=전부(기본)",
     ),
-    days: int = Query(30, ge=1, le=365, description="changed_at 조회 창(KST 기준)"),
+    days: int = Query(30, ge=1, le=365, description="changed_at 조회 창(KST). date_from/date_to의 폴백"),
+    date_from: date | None = Query(None, description="조회 시작일(KST, 포함). date_to와 함께 지정"),
+    date_to: date | None = Query(None, description="조회 종료일(KST, 포함). date_from과 함께 지정"),
     include_dry_run: bool = Query(False, description="dry-run 기록 포함 여부(기본 제외)"),
+    include_blocked: bool = Query(
+        False,
+        description="actor=ours일 때 가드레일 차단·쓰기 실패 시도도 포함(기본 제외). executed로 구분",
+    ),
     limit: int = Query(100, ge=1, le=_MAX_CHANGE_LOG_LIMIT),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -899,11 +939,19 @@ def get_change_log(
     실행 액션 목록은 harness의 `_ACTION_BY_PROPOSAL_TYPE`에서 파생한다(하드코딩 금지 — 새
     제안 유형이 배선될 때 조용히 어긋난다).
 
+    ★`include_blocked`(D-NAO-54)는 위 계약을 **깨지 않으려고** 옵트인이다. 기본값 False에서
+    actor=ours의 total은 여전히 "실제로 광고를 바꾼 횟수"다. True를 주면 가드레일이 막은 시도
+    (harness `_guard_failure`: before/after 없음 · outcome='failed')가 함께 오고, 각 행의
+    `executed`로 구분한다. 화면에 이게 필요한 이유: 가드레일이 일한 것도 우리가 한 일이다
+    (prod 실측 2026-07-17 — 입찰 시도 4건 중 2건이 차단됐는데 어느 화면에도 안 떴다).
+
     ⚠️ 이 API는 change_log를 **읽기만** 한다. 이력을 *채우는* 것은 entity_sync의 diff 밸브
     (D-NAO-47 T2)와 naver_execution_harness다.
     """
-    since = kst_now() - timedelta(days=days)
+    since, until = _change_log_window(date_from, date_to, days)
     q = db.query(NaverChangeLog).filter(NaverChangeLog.changed_at >= since)
+    if until is not None:
+        q = q.filter(NaverChangeLog.changed_at < until)
     if campaign_id:
         q = q.filter(NaverChangeLog.campaign_id == campaign_id)
     if action:
@@ -916,10 +964,20 @@ def get_change_log(
         # (naver_execution_harness.py:372 주석 · _detect_external_change · _load_our_bid_writes):
         # outcome은 D+14 채점 전 NULL이고 채점 후엔 improved/declined로 바뀌므로 "실행됨"이라는
         # 영구 상태가 아니다. 실패·가드거부·dry-run은 before/after_value를 안 채운다.
-        q = q.filter(
-            NaverChangeLog.action.in_(naver_execution_harness.EXECUTION_ACTIONS),
-            NaverChangeLog.after_value.isnot(None),
-        )
+        q = q.filter(NaverChangeLog.action.in_(naver_execution_harness.EXECUTION_ACTIONS))
+        if include_blocked:
+            # ★"실집행 또는 **명시적 실패**"다. after_value 요구를 그냥 없애지 않는 이유:
+            # 그러면 after가 비어 있기만 하면(원인 불명·중간 상태 포함) 무엇이든 '차단됨'
+            # 배지를 달게 된다. 지어내지 않는다 — harness가 실제로 남기는 두 모양만 받는다
+            # (성공=after 채움 / 가드거부·쓰기실패=outcome 'failed').
+            q = q.filter(
+                or_(
+                    NaverChangeLog.after_value.isnot(None),
+                    NaverChangeLog.outcome == "failed",
+                )
+            )
+        else:
+            q = q.filter(NaverChangeLog.after_value.isnot(None))
     elif actor == "external":
         q = q.filter(NaverChangeLog.action.in_(naver_execution_harness.EXTERNAL_DETECTION_ACTIONS))
     if not include_dry_run:
@@ -942,6 +1000,10 @@ def get_change_log(
                 "after": _loads_or_none(r.after_value),
                 "rationale": r.rationale,
                 "outcome": r.outcome,
+                # ★실제로 광고가 바뀌었나(D-NAO-54). 판별이 outcome이 아니라 after_value인 것은
+                # 위 actor=ours 주석과 같은 이유다(outcome은 D+14 채점으로 값이 바뀐다).
+                # _loads_or_none이 아니라 원본 컬럼으로 판단한다 — JSON 파싱 실패는 '차단'이 아니다.
+                "executed": r.after_value is not None,
                 "dry_run": r.dry_run,
                 "proposal_id": r.proposal_id,
                 "executed_at": r.executed_at.isoformat() if r.executed_at else None,
