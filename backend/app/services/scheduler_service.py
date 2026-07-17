@@ -139,6 +139,10 @@ def sync_all_channels_job():
         try:
             from app.services.coupang.rg_order_sync import sync_all_rg_orders
             rg_results = sync_all_rg_orders(db, days=3)
+            rg_failed = _coupang_failed(rg_results)
+            if rg_failed:
+                # 계정 격리(sync_all_rg_orders)로 예외 대신 error dict가 오므로 warning으로 표면화
+                log.warning("[스케줄러] RG 주문 동기화 계정 실패: %s", rg_failed)
             log.info("[스케줄러] RG 주문 동기화 완료: %s", rg_results)
         except Exception as e:
             log.error("[스케줄러] RG 주문 동기화 에러: %s", e)
