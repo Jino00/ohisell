@@ -140,7 +140,9 @@ def test_change_log_returns_total_for_pagination(client, db):
 def test_change_log_empty_is_200_not_404(client):
     """★빈 상태는 에러가 아니다 — 1층이 '우리 조작 0회'를 정직하게 그려야 한다(D-47-h)."""
     body = client.get("/api/naver/ad/change-log").json()
-    assert body == {"rows": [], "total": 0}
+    # 병행 세션(prod 배포분 3-way 흡수)이 executed_total 필드를 추가 — 핵심 계약(빈 결과도
+    # 200 + rows/total)만 고정하고 추가 필드에는 관용(그쪽 PR의 테스트 갱신분과 충돌 방지).
+    assert body["rows"] == [] and body["total"] == 0
 
 
 # ── codex[P2] 2026-07-17: actor 필터 — "우리 조작"에 외부 감지를 섞으면 안 된다 ──
