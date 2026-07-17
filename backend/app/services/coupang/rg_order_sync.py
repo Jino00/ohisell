@@ -77,8 +77,24 @@ def _merge_order_items(order: dict) -> list[dict]:
             merged[key] = dict(item)
             continue
         prev_qty, cur_qty = prev.get("salesQuantity"), item.get("salesQuantity")
+        total = (prev_qty or 0) + (cur_qty or 0)
         if prev_qty is not None or cur_qty is not None:
-            prev["salesQuantity"] = (prev_qty or 0) + (cur_qty or 0)
+            prev["salesQuantity"] = total
+        # 단가가 라인마다 다르면(프로모션 분할 등 가능성) 수량가중 평균으로
+        # 매출 불변식(Σ qty×price) 보존 — 하류 3곳이 qty×unit_price로 매출 계산.
+        p_prev = _dec(prev.get("unitSalesPrice") if prev.get("unitSalesPrice") is not None
+                      else prev.get("salesPrice"))
+        p_cur = _dec(item.get("unitSalesPrice") if item.get("unitSalesPrice") is not None
+                     else item.get("salesPrice"))
+        if (p_prev is not None and p_cur is not None and p_prev != p_cur
+                and prev_qty and cur_qty):
+            prev["unitSalesPrice"] = str(
+                (p_prev * prev_qty + p_cur * cur_qty) / total
+            )
+            log.warning(
+                "RG 주문 %s 옵션 %s 중복 라인 단가 상이(%s vs %s) → 수량가중 %s",
+                order.get("orderId"), key, p_prev, p_cur, prev["unitSalesPrice"],
+            )
         log.warning(
             "RG 주문 %s 옵션 %s 중복 라인 병합 (누적 qty=%s)",
             order.get("orderId"), key, prev.get("salesQuantity"),

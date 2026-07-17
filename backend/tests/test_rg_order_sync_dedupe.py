@@ -115,6 +115,66 @@ def test_same_order_repeated_in_stream(db, monkeypatch):
     assert rows[0].sales_quantity == 4
 
 
+def test_merged_lines_weighted_price(db, monkeypatch):
+    """단가가 다른 중복 라인 → 수량가중 평균 단가로 매출 불변식 보존 (리뷰 F1).
+
+    qty 2 @16,900 + qty 2 @9,900 = 매출 53,600 → 4 × 13,400 (첫 단가 유지면 67,600 과대)."""
+    order = _dup_line_order()
+    order["orderItems"][1]["unitSalesPrice"] = "9900.0"
+    _patch_client(monkeypatch, {"COUPANG_WING1": [order]})
+
+    rg_order_sync.sync_account_rg_orders(db, "COUPANG_WING1", days=3)
+
+    rows = db.query(CoupangRgOrderItem).all()
+    assert len(rows) == 1
+    assert rows[0].sales_quantity == 4
+    assert rows[0].unit_sales_price * rows[0].sales_quantity == 53600
+
+
+def test_account_isolation_commit_integrity_error(db, monkeypatch):
+    """실사고 모드 재현: 계정1이 commit 시점 IntegrityError(pending-rollback 세션)로 죽어도
+    rollback 후 계정2가 깨끗한 세션에서 커밋된다 (리뷰 F3 — 6일 침묵 사고의 실제 형태)."""
+    good_order = {
+        "orderId": 111,
+        "paidAt": "1783784103000",
+        "orderItems": [
+            {
+                "vendorItemId": 222,
+                "productName": "정상 주문",
+                "salesQuantity": 1,
+                "unitSalesPrice": "10000.0",
+                "currency": "KRW",
+            }
+        ],
+    }
+    class _PoisonClient:
+        """세션에 중복 키 행 2개를 직접 add → sync의 db.commit()에서 UNIQUE 위반 강제."""
+
+        def iter_rg_orders(self, **kw):
+            for _ in range(2):
+                db.add(
+                    CoupangRgOrderItem(
+                        order_id="X", vendor_item_id="Y", account_key="COUPANG_WING1",
+                        vendor_id="A0", product_name="poison", sales_quantity=1,
+                    )
+                )
+            yield from ()
+
+    monkeypatch.setattr(rg_order_sync, "get_coupang_config", lambda key: _FakeConfig())
+    clients = iter([_PoisonClient(), _FakeClient([good_order])])
+    monkeypatch.setattr(
+        rg_order_sync, "CoupangRocketGrowthClient", lambda cfg: next(clients)
+    )
+
+    results = rg_order_sync.sync_all_rg_orders(db, days=3)
+
+    assert "error" in results[0] and "UNIQUE" in results[0]["error"]
+    assert "error" not in results[1]
+    rows = db.query(CoupangRgOrderItem).all()
+    assert len(rows) == 1
+    assert rows[0].order_id == "111"
+
+
 def test_account_isolation(db, monkeypatch):
     """한 계정의 예기치 못한 실패가 다른 계정 수집을 죽이지 않는다(6일 침묵 사고 회귀 방지)."""
     good_order = {
