@@ -68,7 +68,7 @@ naver_auto_operator (Harness, 신규 backend/app/services/naver_ad/auto_operator
 ## §7 체크리스트
 
 - [x] A0: 마이그레이션(auto_operate) + 모델
-- [ ] A1: 일 레인(4조건 심사·집행) TDD
+- [x] A1: 일 레인(4조건 심사·집행) TDD
 - [ ] A2: 시간당 레인(핫셋·intraday·판정·실행) TDD
 - [ ] A3: 크론 2개+catch-up 배선
 - [ ] codex review PASS
