@@ -21,9 +21,11 @@
 # 설정 파일 ~/.ohisell_wing_fetcher.json (push용):
 #   {"account_key":"COUPANG_WING1","prod_base_url":"https://sellc.ohitech.co.kr","ingest_token":"<AD_INGEST_TOKEN>","vs_days":7,
 #    "vendor_id":"A01564720","rg_report_types":["WAREHOUSING_SHIPPING"],"rg_max_periods":1,"rg_days":21,
-#    "rg_daily_hour":7,"rg_min_interval_s":3600}
+#    "rg_status_days":35,"rg_daily_hour":7,"rg_min_interval_s":3600}
 #   (vendor_id·rg_* 는 'rg' 명령·poll 데몬 RG 분기용. account_key=WING1→vendor_id A01564720(오픽스),
-#    WING2→A01029796(오하이테크). rg_daily_hour=새벽 일일예약 KST 시각, rg_min_interval_s=RG 실행 최소간격.)
+#    WING2→A01029796(오하이테크). rg_daily_hour=새벽 일일예약 KST 시각, rg_min_interval_s=RG 실행 최소간격.
+#    rg_status_days=층1 계정 수수료 push 윈도우(기본 35, 백필 시 90으로 1회 실행). rg_days=엑셀 열거 윈도우.)
+# 다계정 인스턴스 분리 env(D-7): OHISELL_WING_CONFIG(config)·OHISELL_WING_LOG(로그)·OHISELL_WING_LOCK(lock).
 from __future__ import annotations
 
 import contextlib
@@ -44,7 +46,11 @@ from playwright.sync_api import sync_playwright
 # 미설정 시 기존 경로(하위호환).
 CONFIG_PATH = Path(os.path.expanduser(os.getenv("OHISELL_WING_CONFIG", "~/.ohisell_wing_fetcher.json")))
 LOG_PATH = Path(os.path.expanduser(os.getenv("OHISELL_WING_LOG", "~/.ohisell_wing_fetcher.log")))
-LOCK_PATH = Path(os.path.expanduser("~/.ohisell_wing_fetcher.lock"))
+# ★다계정 인스턴스 분리(D-7): LOCK_PATH가 고정이면 WING2 인스턴스가 WING1과 같은 lock 파일을
+#   놓고 상호 배제돼(한쪽 flock이 다른쪽을 통째로 건너뛰게 함) 서로의 실행을 죽인다. OHISELL_WING_LOCK
+#   env로 분리 가능하게 한다(기본값 불변 — 기존 WING1 인스턴스 하위호환). state 경로는 cfg["state_file"]로
+#   이미 인스턴스별 분리 가능(각 config 파일이 자기 state_file 지정), LOG_PATH는 OHISELL_WING_LOG로 분리.
+LOCK_PATH = Path(os.path.expanduser(os.getenv("OHISELL_WING_LOCK", "~/.ohisell_wing_fetcher.lock")))
 DEFAULT_STATE = os.path.expanduser("~/.ohisell_wing_state.json")
 
 # 로그인이 착지하는 Wing 페이지(판매분석). 모바일 UA라 로그인 시 m-wing.coupang.com(모바일 호스트)로
@@ -640,15 +646,60 @@ def _kst_date_to_utc_iso(kst_date) -> str:
     return f"{kst_date.isoformat()}T15:00:00.000Z"
 
 
-def _rg_status_payload(cfg: dict) -> dict:
-    """status/api body — 최근 윈도우(매출인식일 SALES, D-10). 정산주기 열거용."""
-    days = int(cfg.get("rg_days", 21))   # 최근 ~3주 → 닫힌 주별 정산 여러 건 포함
+def _rg_status_payload(cfg: dict, days: int | None = None) -> dict:
+    """status/api body — 최근 윈도우(매출인식일 SALES, D-10). 정산주기 열거·계정 수집 공용.
+
+    days=None이면 기존 동작 유지(cfg['rg_days'], 기본 21 — 다운로드 열거용, 기존 호출 불변).
+    층1 계정 수집(_rg_fetch_status_raw)은 rg_status_days(기본 35, 백필 시 90)를 명시 전달한다.
+    """
+    if days is None:
+        days = int(cfg.get("rg_days", 21))   # 최근 ~3주 → 닫힌 주별 정산 여러 건 포함
     today = datetime.now(KST).date()
     return {
         "startDate": _kst_date_to_utc_iso(today - timedelta(days=days)),
         "endDate": _kst_date_to_utc_iso(today),
         "searchDateType": "SALES",
     }
+
+
+def _rg_fetch_status_raw(page, cfg: dict) -> dict | None:
+    """status/api를 **1회** POST해 raw JSON dict 반환(층1: prod push + group key 열거 공용 소스).
+
+    윈도우=rg_status_days(기본 35 — 월경계 분할 주기+여유, 백필 시 cfg로 90 오버라이드).
+    200이 아니거나 로그인 HTML이면 None(_rg_json 규칙). 호출자가 None을 세션 이상으로 처리.
+    ★이 함수가 유일한 status/api 소스여야 push와 열거가 같은 raw를 공유(이중 호출 금지, §1.6).
+    """
+    days = int(cfg.get("rg_status_days", 35))
+    res = _rg_post(page, RG_STATUS_PATH, _rg_status_payload(cfg, days=days))
+    return _rg_json(res)
+
+
+def _rg_push_status(cfg: dict, raw: dict) -> int:
+    """status/api raw JSON → prod ingest-status push. 0=성공/1=실패. (_rg_push_xlsx 에러 처리 미러)
+
+    ★fail-soft: push 실패는 log만 하고 계속 — 엑셀(다운로드) 흐름을 죽이면 안 된다(§1.5).
+    account_key 명시(백엔드가 RG_ACCOUNTS 검증) + X-Ingest-Token(엑셀 push와 동일 인증).
+    """
+    try:
+        pr = requests.post(
+            cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/wing/rg-settlement/ingest-status",
+            params={"account_key": cfg["account_key"]},
+            json=raw,
+            headers={"X-Ingest-Token": cfg["ingest_token"]},
+            timeout=60,
+        )
+    except requests.RequestException as e:
+        log.error("RG status push 네트워크 오류: %s", e)
+        return 1
+    if pr.status_code != 200:
+        log.error("RG status push 실패 HTTP %s — %s", pr.status_code, pr.text[:200])
+        return 1
+    try:
+        info = pr.json()
+    except ValueError:
+        info = pr.text[:120]
+    log.info("RG status push 성공 → %s", info)
+    return 0
 
 
 def _rg_post(page, path: str, payload: dict):
@@ -669,15 +720,16 @@ def _rg_json(res):
         return None
 
 
-def _rg_enumerate_group_keys(page, cfg: dict, vendor_id: str) -> list[dict]:
-    """status/api → [{group_key, period_end}]. settlementGroupKey 우선, 없으면 vendorId-start-end 생성.
+def _rg_enumerate_group_keys(raw: dict, vendor_id: str) -> list[dict]:
+    """status/api raw dict → [{group_key, period_end}]. settlementGroupKey 우선, 없으면 vendorId-start-end.
 
+    ★층1: raw를 인자로 받는다(page 의존 제거) — _rg_fetch_status_raw가 한 번만 POST한 raw를
+      push와 열거가 공유해 status/api 이중 호출을 막는다(§1.6).
     설치분(가지급/확정)으로 같은 기간 리포트가 2개 와도 group_key 동일 → dedupe.
     """
-    res = _rg_post(page, RG_STATUS_PATH, _rg_status_payload(cfg))
-    data = _rg_json(res)
+    data = raw
     if not isinstance(data, dict):
-        raise RuntimeError(f"status/api 응답 비정상(status={res.get('status') if res else None})")
+        raise RuntimeError("status/api 응답 비정상(dict 아님)")
     reports = data.get("settlementStatusReports")
     if not isinstance(reports, list):
         raise RuntimeError("status/api에 settlementStatusReports 없음(스키마 드리프트 의심)")
@@ -874,10 +926,22 @@ def _do_rg_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
                 else:
                     save()  # 세션 유효 → 회전 쿠키 보존 (CDP: no-op)
 
+                # 층1: status/api raw를 1회 fetch → prod push(계정 수수료 적재) → 같은 raw로 열거.
                 try:
-                    periods = _rg_enumerate_group_keys(page, cfg, vendor_id)
+                    raw = _rg_fetch_status_raw(page, cfg)
                 except Exception as e:  # noqa: BLE001 — 응답 비정상/챌린지 → 실패 보고
-                    log.error("RG status/api 열거 실패(정산 페이지 same-origin 200 미확인?): %s", e)
+                    log.error("RG status/api fetch 실패(정산 페이지 same-origin 200 미확인?): %s", e)
+                    return 1
+                if not isinstance(raw, dict):
+                    log.error("RG status/api 응답 비정상(200/JSON 아님) — 세션·챌린지 확인.")
+                    return 1
+                # 계정 단위 수수료 push는 엑셀 흐름과 독립(fail-soft): 실패해도 다운로드는 계속.
+                if _push_configured(cfg):
+                    _rg_push_status(cfg, raw)
+                try:
+                    periods = _rg_enumerate_group_keys(raw, vendor_id)
+                except Exception as e:  # noqa: BLE001 — 응답 비정상 → 실패 보고
+                    log.error("RG status/api 열거 실패: %s", e)
                     return 1
                 if not periods:
                     log.info("RG: status/api에 정산주기 없음 — 다운로드 건너뜀.")

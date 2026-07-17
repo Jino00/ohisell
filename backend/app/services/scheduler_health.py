@@ -67,10 +67,12 @@ DATA_FRESHNESS_RULES: tuple[dict, ...] = (
 )
 
 # 쿠키 freshness 감시 대상 — 돈에 직결되는 fail-soft 잡의 쿠키만(codex P2: 전체 감시 시 폐기/회전
-# 쿠키가 영구 stale 노이즈). WING1/WING2=RG 정산(net_profit), ADS1=쿠팡 광고비(net_profit).
+# 쿠키가 영구 stale 노이즈). ADS1=쿠팡 광고비(net_profit).
+# ★WING1/WING2 제거(2026-07-17 층1 라이브 합격): RG 계정 수수료는 Mac 상주 브라우저 push로
+#   이관돼(ingest-status) 서버 쿠키 없이 흐른다 — 실측: 백필 98행·data_stale WING1 소멸.
+#   쿠키 경보를 유지하면 영구 노이즈(정확히 이 계열 사고의 알림 피로 원인). 이 파이프라인의
+#   감시는 DATA_FRESHNESS_RULES(데이터 나이 — 거짓말 불가)가 전담한다.
 WATCHDOG_COOKIES: tuple[str, ...] = (
-    "COUPANG_WING1",
-    "COUPANG_WING2",
     "COUPANG_ADS1",
     # 1P 로켓 광고비(net_profit)·데일리 주기. 워치독 밖이라 만료가 조용히 묻혀 광고비가
     # 끊긴 사고 재발 방지 — prod 행 존재 실측(07-17).

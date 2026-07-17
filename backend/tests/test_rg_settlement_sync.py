@@ -682,6 +682,80 @@ def test_ingest_empty_when_all_unknown():
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# 층1 — ingest_status_payload (Mac 상주 브라우저 status/api push, 쿠키 무관 경로)
+# ═══════════════════════════════════════════════════════════════════════
+# 기존 sync_rg_settlement upsert 루프를 _upsert_account_rows로 추출한 뒤 쿠키 없이 raw dict를
+# 그대로 적재하는 경로. 계정 단위(vendor_item_id="")만 건드리고 옵션 row는 불변.
+import copy as _copy
+from app.services.coupang.rg_settlement_sync import ingest_status_payload, _upsert_account_rows
+
+
+def test_ingest_status_payload_creates_account_rows():
+    """raw status/api dict → 계정 단위(vendor_item_id="") 7행 적재 + 반환 형식."""
+    db = _db()
+    res = ingest_status_payload(db, "COUPANG_WING1", _FIXTURE_SINGLE)
+    assert res == {"synced": 7, "account_key": "COUPANG_WING1", "status": "ok"}
+    rows = db.query(CoupangRgSettlementFee).all()
+    assert len(rows) == 7                                   # _FEE_FIELD_MAP 7개
+    assert all(r.vendor_item_id == "" for r in rows)        # 계정 단위 sentinel
+    fee_map = {r.fee_type: r.amount for r in rows}
+    assert fee_map["sale_fee"] == Decimal("2214")
+    assert fee_map["ad_sales"] == Decimal("16510")
+    assert rows[0].recognition_date_from == date(2026, 4, 6)
+    assert rows[0].recognition_date_to == date(2026, 4, 12)
+
+
+def test_ingest_status_payload_idempotent_update():
+    """재호출(값 변경) → 중복 행 생성 없이 update(upsert grain 동일)."""
+    db = _db()
+    ingest_status_payload(db, "COUPANG_WING1", _FIXTURE_SINGLE)
+    modified = _copy.deepcopy(_FIXTURE_SINGLE)
+    modified["settlementStatusReports"][0]["settlementStatusReportDetail"][
+        "totalTakeRateAmountWithVat"] = 9999
+    res = ingest_status_payload(db, "COUPANG_WING1", modified)
+    assert res["synced"] == 7
+    rows = db.query(CoupangRgSettlementFee).all()
+    assert len(rows) == 7                                   # 중복 생성 없음
+    sale = db.query(CoupangRgSettlementFee).filter_by(
+        fee_type="sale_fee", vendor_item_id="").one()
+    assert sale.amount == Decimal("9999")                   # update 반영
+
+
+def test_ingest_status_payload_parse_error_propagates():
+    """스키마 드리프트(WingReadError)는 전파(라우터가 422로 변환)."""
+    db = _db()
+    with pytest.raises(WingReadError, match="스키마 드리프트"):
+        ingest_status_payload(db, "COUPANG_WING1", {"unexpected_key": []})
+
+
+def test_ingest_status_payload_leaves_option_rows_untouched():
+    """계정 row(vendor_item_id='')만 upsert — 옵션 row(vendor_item_id=옵션ID)는 안 덮어씀(S6 가드)."""
+    db = _db()
+    db.add(CoupangRgSettlementFee(
+        account_key="COUPANG_WING1", recognition_date_from=date(2026, 4, 6),
+        recognition_date_to=date(2026, 4, 12), fee_type="sale_fee",
+        vendor_item_id="95521944483", raw_type="xlsx:sale_fee", amount=Decimal("111")))
+    db.commit()
+    ingest_status_payload(db, "COUPANG_WING1", _FIXTURE_SINGLE)
+    opt = db.query(CoupangRgSettlementFee).filter_by(
+        fee_type="sale_fee", vendor_item_id="95521944483").one()
+    assert opt.amount == Decimal("111")                    # 옵션 row 불변
+    acct = db.query(CoupangRgSettlementFee).filter_by(
+        fee_type="sale_fee", vendor_item_id="").one()
+    assert acct.amount == Decimal("2214")                  # 계정 row 신규 적재
+
+
+def test_upsert_account_rows_no_commit_returns_count():
+    """_upsert_account_rows는 commit하지 않고 건수만 반환(commit은 호출자 책임)."""
+    db = _db()
+    rows = _parse_status_response(_FIXTURE_SINGLE, "COUPANG_WING1")
+    n = _upsert_account_rows(db, rows)
+    assert n == 7
+    db.rollback()                                          # 미commit이면 롤백으로 사라짐
+    assert db.query(CoupangRgSettlementFee).count() == 0
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # 층3 (§3, PLAN_pipeline-freshness-3layer) — 정산주기 시작일 달력 규칙 (머니코드)
 # ═══════════════════════════════════════════════════════════════════════
 # _expected_period_start: 월~일 주별 + 달력 월 경계 분할. prod 계정 row 18개 전수 18/18 검증

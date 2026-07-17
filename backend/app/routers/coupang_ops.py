@@ -1886,6 +1886,31 @@ async def upload_rg_settlement_xlsx(
     return result
 
 
+@router.post("/wing/rg-settlement/ingest-status")
+def ingest_rg_settlement_status(
+    payload: dict = Body(...),
+    account_key: str = Query(..., description="COUPANG_WING1/2 — RG_ACCOUNTS 검증"),
+    x_ingest_token: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """Mac 상주 브라우저 페처 → status/api raw JSON 인제스트 → 계정 단위 정산 수수료 적재(층1).
+
+    ★정적 쿠키 경로(sync_coupang_rg_settlement 크론, WING1/2 쿠키)를 이관한다: Mac 세션이 매일
+    받던 status/api JSON을 그대로 push해 계정 row를 적재(새 인증·새 세션 없음). 회계(net_profit
+    소스) 변경 엔드포인트이므로 upload-xlsx와 동일 방어 수위 — X-Ingest-Token 필수 +
+    account_key ∈ RG_ACCOUNTS + body=raw JSON dict. 스키마 드리프트(WingReadError)는 422.
+    ★rg_mark_heartbeat 호출 안 함: 그건 엑셀 push 캐던스 상태행 전용(COUPANG_WING_RG)이다.
+    이 경로의 신선도는 적재된 데이터 자체(data_stale 감시)로 검증한다. 프론트 호출 없음.
+    """
+    _require_ingest_token(x_ingest_token)
+    if account_key not in rg_settlement_sync.RG_ACCOUNTS:
+        raise HTTPException(status_code=400, detail=f"지원하지 않는 account_key: {account_key}")
+    try:
+        return rg_settlement_sync.ingest_status_payload(db, account_key, payload)
+    except WingReadError as e:
+        raise HTTPException(status_code=422, detail=f"status/api 파싱 실패: {e}")
+
+
 # ════════════════════════════════════════════════════════════════════
 # RG 정산 자동 다운로드 + 적재 (S6-auto — Wing 세션쿠키 필요)
 # ════════════════════════════════════════════════════════════════════

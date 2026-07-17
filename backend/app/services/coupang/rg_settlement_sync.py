@@ -261,9 +261,21 @@ def sync_rg_settlement(
         log.error("RG 정산 파싱 실패: %s — %s", account_key, e)
         return {"synced": 0, "account_key": account_key, "period": f"{start_date}~{end_date}", "status": "parse_error", "error": str(e)}
 
-    # upsert: (account_key, from, to, fee_type, vendor_item_id="") 기준.
-    # ★vendor_item_id="" 가드(S6): 같은 (account,from,to,fee_type)에 옵션 row(vendor_item_id=옵션ID)가
-    #   공존하므로, 계정 row 쿼리에 ""를 명시하지 않으면 옵션 row를 first()로 잡아 덮어쓸 위험.
+    synced = _upsert_account_rows(db, rows)
+    db.commit()
+    _mark_last_success(db, account_key)
+    log.info("RG 정산 sync 완료: %s — %d건", account_key, synced)
+    return {"synced": synced, "account_key": account_key, "period": f"{start_date}~{end_date}", "status": "ok"}
+
+
+def _upsert_account_rows(db: Session, rows: list[CoupangRgSettlementFee]) -> int:
+    """계정 단위(status/api) row upsert 루프. commit은 호출자 책임(반환=처리 건수).
+
+    upsert: (account_key, from, to, fee_type, vendor_item_id="") 기준.
+    ★vendor_item_id="" 가드(S6): 같은 (account,from,to,fee_type)에 옵션 row(vendor_item_id=옵션ID)가
+      공존하므로, 계정 row 쿼리에 ""를 명시하지 않으면 옵션 row를 first()로 잡아 덮어쓸 위험.
+    (쿠키 경로 sync_rg_settlement + 쿠키 무관 경로 ingest_status_payload 공용 — 동작 완전 불변.)
+    """
     synced = 0
     for row in rows:
         existing = db.query(CoupangRgSettlementFee).filter_by(
@@ -280,11 +292,21 @@ def sync_rg_settlement(
             existing.raw_type = row.raw_type
             existing.synced_at = kst_now()
         synced += 1
+    return synced
 
+
+def ingest_status_payload(db: Session, account_key: str, raw: dict) -> dict:
+    """Mac 상주 브라우저가 받은 status/api raw JSON → 계정 단위 정산 수수료 적재(층1).
+
+    쿠키 무관 경로 — 정적 쿠키(WING1/2)를 계정 row 수집에서 제거하기 위한 이관 엔드포인트.
+    ★쿠키 상태행(mark_red/mark_last_success) 조작 없음: 이 경로는 쿠키를 쓰지 않으므로 쿠키
+      status에 손대면 안 된다(쿠키 경보는 별개 폴백 경로 sync_rg_settlement 전용).
+    파싱 실패(스키마 드리프트)는 WingReadError로 전파 → 라우터가 422.
+    """
+    rows = _parse_status_response(raw, account_key)
+    synced = _upsert_account_rows(db, rows)
     db.commit()
-    _mark_last_success(db, account_key)
-    log.info("RG 정산 sync 완료: %s — %d건", account_key, synced)
-    return {"synced": synced, "account_key": account_key, "period": f"{start_date}~{end_date}", "status": "ok"}
+    return {"synced": synced, "account_key": account_key, "status": "ok"}
 
 
 def sync_all_rg_settlements(db: Session, *, start_date: str | None = None, end_date: str | None = None) -> list[dict]:
