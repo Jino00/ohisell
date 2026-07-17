@@ -456,6 +456,29 @@ def run_naver_retro_scoring_job():
         db.close()
 
 
+def run_naver_diary_reflection_job():
+    """운영 일기 해석층 — reflection_loop.run_daily_reflection (08:35 KST,
+    run_naver_retro_scoring 08:30 이후 = outcome 최신, D-NAO-54 P2).
+
+    ①outcome_backfill_sa(어제/그제/D-8 diary 행에 D+1/D+7 결과·retro 채점 소급 기입)
+    ②daily_reflection_sa(어제 일기+환경→해석문, 독립 LLM) — harness가 단계격리로 조합.
+
+    ★fail-open(관찰 전용, 집행 아님): retro 잡과 달리 예외를 다시 던지지 않는다 — 일기 해석
+    실패가 catch-up 체인의 하류 집행 잡(auto_operator_daily)을 막으면 안 되기 때문(D-NAO-54
+    금지선: "일기 기록 실패가 집행을 막으면 안 됨").
+    """
+    db = _get_own_db_session()
+    try:
+        from app.services.naver_ad.reflection_loop import run_daily_reflection
+
+        result = run_daily_reflection(db)
+        log.info("[스케줄러] naver diary_reflection: %s", result["stage_status"])
+    except Exception as e:  # noqa: BLE001 — fail-open: 관찰 전용 잡, 집행 체인 보호(raise 없음)
+        log.exception("[스케줄러] run_naver_diary_reflection_job 에러(fail-open): %s", e)
+    finally:
+        db.close()
+
+
 def sweep_naver_keyword_hourly_job():
     """키워드/쇼핑그룹 시간별(hh24) 축적 — 일 1회 D-1 스윕 (09:10 KST, sync_naver_ad_daily
     07:30 이후. D-NAO-46②, docs/PLAN_naver-ad-keyword-hourly-accrual.md §4).
@@ -994,6 +1017,7 @@ def _ensure_default_states(db):
         ("generate_expert_desk", "5 8 * * *"),  # 전문가(Ava) 검토 데스크(E1a, PLAN §8)
         ("run_naver_learning_loops", "10 8 * * *"),  # 학습루프 4종(성적표·예측편향·전환성숙·시간대분포, 트랙 P6)
         ("run_naver_retro_scoring", "30 8 * * *"),  # 상설 소급 채점(진단 보드 as-of 리플레이 + 페이싱 경보, D-NAO-45)
+        ("run_naver_diary_reflection", "35 8 * * *"),  # 운영 일기 해석층(결과 소급 기입+해석문, D-NAO-54 P2)
         ("run_naver_auto_operator_daily", "50 8 * * *"),  # D-NAO-48 4조건 심사·집행 서버화(D-NAO-49)
         ("sweep_naver_keyword_hourly", "10 9 * * *"),  # 키워드/쇼핑그룹 시간별(hh24) 축적, D-1 스윕(D-NAO-46②)
         ("run_naver_auto_operator_hourly", "20 * * * *"),  # 시간당 밴드 관제 실입찰(catch-up 제외, D-NAO-49)
@@ -1042,6 +1066,7 @@ _CATCHUP_ORDER: tuple[str, ...] = (
     "generate_expert_desk",        # 08:05 (proposals 성공 후라야 pending>0 → 의미 있음)
     "run_naver_learning_loops",    # 08:10
     "run_naver_retro_scoring",     # 08:30 (D-NAO-45, 비정형 아닌 표준 cron이라 catch-up 포함)
+    "run_naver_diary_reflection",  # 08:35 (D-NAO-54 P2, retro 뒤=outcome 최신. 잡 자체가 fail-open이라 raise 없음 → 하류 집행 잡을 막지 않는다)
     "run_naver_auto_operator_daily",  # 08:50 (D-NAO-49, 조건④ bleeding 판정이 retro_scoring 결과를 쓴다 — 그 뒤)
     "sweep_naver_keyword_hourly",  # 09:10 (D-NAO-46②, 독립 잡이나 표준 cron catch-up 포함)
 )
@@ -1156,6 +1181,7 @@ def _catch_up_morning_batch():
         "generate_expert_desk": generate_expert_desk_job,
         "run_naver_learning_loops": run_naver_learning_loops_job,
         "run_naver_retro_scoring": run_naver_retro_scoring_job,
+        "run_naver_diary_reflection": run_naver_diary_reflection_job,
         "run_naver_auto_operator_daily": run_naver_auto_operator_daily_job,
         "sweep_naver_keyword_hourly": sweep_naver_keyword_hourly_job,
     }
@@ -1201,6 +1227,7 @@ def job_func_for(job_name: str):
         "generate_naver_proposals": generate_naver_proposals_job,
         "run_naver_learning_loops": run_naver_learning_loops_job,
         "run_naver_retro_scoring": run_naver_retro_scoring_job,
+        "run_naver_diary_reflection": run_naver_diary_reflection_job,
         "sweep_naver_keyword_hourly": sweep_naver_keyword_hourly_job,
         "run_naver_auto_operator_daily": run_naver_auto_operator_daily_job,
         "run_naver_auto_operator_hourly": run_naver_auto_operator_hourly_job,
