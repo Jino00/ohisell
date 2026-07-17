@@ -3,7 +3,9 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
-- 날짜: 2026-07-18 (★★**D-NAO-54 운영 일기·지혜 시스템 — P1 구현 진행 중** — 워크트리 `session-dfd814`, 브랜치 `claude/session-dfd814`, origin/main f1b341a 기준. Fable설계/Opus구현/Sonnet단순 라우팅, 옵션=추천안 자동 진행(Jino 지시). 계획서=`docs/PLAN_naver-ad-diary-wisdom.md` §0 먼저)
+- 날짜: 2026-07-18 00:30 KST (★★**D-NAO-54 운영 일기·지혜 시스템 — P1 배포 완료·라이브 검증 대기, P2 준비** — 워크트리 `session-dfd814`, 브랜치 `claude/session-dfd814`. Fable설계/Opus구현/Sonnet단순 라우팅, 옵션=추천안 자동 진행(Jino 지시). 계획서=`docs/PLAN_naver-ad-diary-wisdom.md` §0 먼저)
+  - **P1**: 마이그 q9r0s1t2u3v4(prod ohisell.db 적용)+diary.py+harness/레인 훅. 테스트 30 신규·1914 pass. 독립 리뷰 GATE PASS(P2-1/P3-1/P3-3 반영). PR #44 병합·safe_deploy 6파일·pm2 재시작. **라이브 합격 대기: 01:20 시간당 레인 or 08:50 일 레인에서 diary 행 실측**(소음 차단 설계라 조용한 시간대 0행=정상일 수 있음 — 레인 크래시 없음+08:50 reject 행이 확실한 증거).
+  - **CAS 3번째 실사고 차단**: prod harness에 병행 세션 배포분(마커 상수 30줄, 라우터가 import) — 3-way 흡수. ★그쪽도 'D-NAO-54' 번호 사용 = 번호 충돌, 그쪽 PR 등장 시 재번호.
   - 전 세션(07-17 밤, dedfad): 구조 Jino 승인·계획서 완성·구현 미착수 → HANDOFF=`.claude/memory/HANDOFF_ohisell-diary-wisdom-approved+bridge-fix_20260717.md`. 미커밋 docs(트랙 D-NAO-54·계획서·HANDOFF 2건)는 이 브랜치 첫 커밋에 포함됨.
   - codex 한도 07-23 19:15까지 소진 — 독립 리뷰어 서브에이전트 대체 + 커밋에 "codex 소급 리뷰 후보" 명기.
   - 세션 소실 재발 방지: `ccAutoArchiveOnPrClose` OFF 실측(07-11 HANDOFF 소실도 같은 원인). 되감기 복구 상세=`HANDOFF_MOP36-rewind-recovery_20260717.md`.
