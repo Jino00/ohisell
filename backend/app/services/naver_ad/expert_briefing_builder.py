@@ -20,6 +20,7 @@ from app.models import NaverEntity, NaverForecastDaily, NaverLearningState, Nave
 from app.services.naver_ad.diagnosis import build_diagnosis
 from app.services.naver_ad.proposal_scoreboard import METRIC as PROPOSAL_ACCURACY_METRIC
 from app.services.naver_ad.proposal_writer import INFORMATIONAL_PROPOSAL_TYPES
+from app.services.naver_ad.wisdom_apply import active_wisdom_prefix
 from app.services.naver_ad.trigger_watch import PROPOSAL_TYPE_CPC, PROPOSAL_TYPE_PACING
 from app.utils.kst import kst_today
 
@@ -45,8 +46,12 @@ def build(db: Session, as_of: date | None = None) -> dict:
     forecast_rollup = _build_forecast_rollup(db)
     recent_triggers = _build_recent_triggers(db)
     scoreboard_summary = _build_scoreboard_summary(db)
+    # D-NAO-54 P4(briefing_sa): 활성 지혜를 "참고(지시 아님)" 섹션으로 브리핑 앞부분에 주입한다
+    # (wisdom_apply.active_wisdom_prefix — 하니스 성격의 builder가 SA를 호출, 원칙18 허용).
+    # 지혜 0건이면 None → 키 자체를 넣지 않아 현행 출력 불변(0건 회귀 계약).
+    wisdom_prefix = active_wisdom_prefix(db)
 
-    return {
+    briefing = {
         "as_of": as_of.isoformat(),
         "pending_proposals": proposals,
         "informational_pending": informational_pending,
@@ -56,6 +61,11 @@ def build(db: Session, as_of: date | None = None) -> dict:
         "scoreboard_summary": scoreboard_summary,
         "truncated": {"pending_proposals_dropped_ids": dropped_ids} if dropped_ids else {},
     }
+    # 앞부분 주입(0건이면 키 미추가 → 현행 출력 불변). ava_reviewer._build_prompt가 briefing
+    # dict를 통째로 JSON 직렬화하므로 이 키가 프롬프트에 그대로 실린다.
+    if wisdom_prefix is not None:
+        return {"active_wisdom": wisdom_prefix, **briefing}
+    return briefing
 
 
 def _build_pending_proposals(db: Session) -> tuple[list[dict], list[int]]:

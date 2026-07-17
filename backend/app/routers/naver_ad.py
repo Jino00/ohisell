@@ -210,6 +210,15 @@ def diagnosis(
 _PROPOSAL_STATUSES = {"pending", "approved", "rejected", "expired", "failed", "executing"}
 _MAX_PROPOSAL_RANGE_DAYS = 90
 
+# D-NAO-54 P4(결정 전용): 승인해도 harness.execute를 부르지 않는 유형 — 승인=결정 기록만
+# (적용은 Jino가 콘솔/설정에서 수동, 금지선 "지혜→실행 직접 쓰기 금지"). 정보성(no-op·자동만료)
+# 과도, 실행형(승인→실행)과도 다른 제3의 분기. proposal_writer.PARAM_CHANGE를 단일 진실로
+# 삼는다(문자열 하드코딩 금지 — 유형이 늘면 이 집합에만 추가). ★기존 실행형/정보성 흐름은
+# 1비트도 바뀌지 않는다: /status(승인)는 애초에 execute를 부르지 않고, param_change는 실행
+# 매핑(_ACTION_BY_PROPOSAL_TYPE)이 없어 /execute·real_write_blocker가 자연히 차단한다.
+# 이 상수는 프론트에 "결정 전용"임을 알리는 파생 필드(decision_only)의 단일 진실이다.
+DECISION_ONLY_PROPOSAL_TYPES: frozenset[str] = frozenset({proposal_writer.PARAM_CHANGE})
+
 
 def _serialize_proposal(p: NaverProposal, verdict: NaverExpertReview | None) -> dict:
     blocker_reason = naver_execution_harness.real_write_blocker(p)
@@ -230,6 +239,9 @@ def _serialize_proposal(p: NaverProposal, verdict: NaverExpertReview | None) -> 
         # D-NAO-47: 정보성/실행형 구분을 백엔드가 준다 — 프론트가 유형 문자열을 하드코딩해
         # 재분류하면 백엔드에 유형이 추가될 때 조용히 드리프트한다.
         "informational": p.proposal_type in proposal_writer.INFORMATIONAL_PROPOSAL_TYPES,
+        # D-NAO-54 P4: 결정 전용 유형(param_change) — 승인해도 자동 적용 없음(콘솔 Confirm 문안·
+        # 실행버튼 비노출을 프론트가 이 파생값으로 분기, informational/action 파생 패턴과 동일).
+        "decision_only": p.proposal_type in DECISION_ONLY_PROPOSAL_TYPES,
         # 실행 액션(add_negative_keyword/update_bid/set_user_lock/update_budget) — 콘솔의
         # 실행 Confirm 문안이 이걸 기준으로 분기한다. 매핑은 harness가 단일 진실
         # (_ACTION_BY_PROPOSAL_TYPE) — 프론트가 유형 문자열로 액션을 재추론해 틀린 액션명을

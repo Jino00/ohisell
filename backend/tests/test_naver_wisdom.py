@@ -380,7 +380,9 @@ def test_retention_leaves_rejected_untouched(db):
 def test_loop_runs_all_stages(db):
     _diary(db, outcome=_good())
     res = wisdom_loop.run_daily_wisdom(db, now=NOW)
-    assert res["stage_status"] == {"harvest": "ok", "judge": "ok", "writer": "ok", "retention": "ok"}
+    assert res["stage_status"] == {
+        "harvest": "ok", "judge": "ok", "writer": "ok", "retention": "ok", "apply": "ok",
+    }
     assert res["harvest"]["new"] == 1
 
 

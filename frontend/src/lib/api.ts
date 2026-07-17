@@ -1739,6 +1739,10 @@ export interface NaverAdProposal {
   /** 백엔드가 주는 정보성/실행형 구분. ★프론트에서 유형 문자열로 재분류하지 말 것 —
    *  백엔드에 유형이 추가되면 조용히 드리프트한다. */
   informational: boolean;
+  /** D-NAO-54 P4: 결정 전용 유형(param_change) — 승인해도 자동 적용 없음(적용은 수동).
+   *  ★프론트는 이 파생값으로만 분기(유형 문자열 재분류 금지). 승인 Confirm 문안과 실행버튼
+   *  비노출을 이 값으로 결정한다. 정보성도 실행형도 아닌 제3 분기. */
+  decision_only: boolean;
   /** 실행 액션(add_negative_keyword/update_bid/set_user_lock/update_budget) — 백엔드 파생값
    *  (harness._ACTION_BY_PROPOSAL_TYPE). ★실행 Confirm 문안은 이 값으로 분기한다. 프론트가
    *  proposal_type으로 액션을 재추론하면 틀린 액션명이 뜬다(정보성 유형은 null). */

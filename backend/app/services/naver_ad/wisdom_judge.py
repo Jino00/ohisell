@@ -40,11 +40,24 @@ _SYSTEM = (
     "good과 bad가 모순되게 팽팽하면 어느 방향으로도 승격하지 마세요. "
     "반드시 아래 JSON만 응답하세요(다른 텍스트 없이): "
     '{"verdict": "promote" 또는 "reject", "principle": 승격 시 재사용 판단원칙 한 문장(reject면 빈 문자열), '
-    '"rationale": 판정 근거(필수, 한국어)}. '
+    '"rationale": 판정 근거(필수, 한국어), '
+    '"param_suggestion": 선택 필드}. '
+    "★param_suggestion은 **이 지혜가 생성기 파라미터(다이얼·클램프·스텝 등) 변경을 구체적으로 "
+    "함의할 때만** 채우고, 아니면 아예 생략하세요(대부분 생략이 정상 — 억지로 만들지 마세요). "
+    'param_suggestion을 채울 때 형식: {"param": 대상 다이얼 자유 텍스트(예 "17E 스텝 클램프 상한"), '
+    '"direction": "up"|"down"|"review" 중 하나, "note": 왜 그렇게 조정해야 하는지 한 문장}. '
+    "이 제안은 자동 적용되지 않고 Jino가 콘솔에서 결정할 참고 신호일 뿐입니다. "
     "근거 없는 승격을 하지 말고, 표본이 얇거나 인과가 불명하면 reject하세요."
 )
 
-_SCHEMA = {"verdict": "promote|reject", "principle": "string", "rationale": "string"}
+_SCHEMA = {
+    "verdict": "promote|reject",
+    "principle": "string",
+    "rationale": "string",
+    # 선택 필드(지혜가 파라미터 변경을 함의할 때만) — 없으면 생략. promote 시 judge_verdict_json에
+    # 그대로 보존돼(파싱 dict 전체를 dump) P4 wisdom_apply가 param_change 제안으로 소비한다.
+    "param_suggestion?": {"param": "string", "direction": "up|down|review", "note": "string"},
+}
 
 
 def _is_ripe(cand: OpsWisdomCandidate, now: datetime) -> bool:

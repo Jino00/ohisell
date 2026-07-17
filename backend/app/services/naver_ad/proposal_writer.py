@@ -27,6 +27,13 @@ _ANOMALY = "anomaly"
 _ANOMALY_FRESHNESS = "anomaly_freshness"
 _ACCOUNT_BRIEF = "account_brief"
 _WISDOM_PROMOTED = "wisdom_promoted"  # D-NAO-54 P3 — 지혜 승격 보고(정보성, 실행 대상 아님)
+# D-NAO-54 P4(소비층) — 지혜가 함의한 생성기 파라미터 변경 "제안". 정보성도 실행형도 아닌
+# **결정 전용**: 실행 payload(target_bid 등)를 애초에 담지 않고, 승인해도 harness.execute를
+# 부르지 않는다(적용은 Jino가 콘솔/설정에서 수동 — D-NAO-54 금지선 "지혜→실행 직접 쓰기 금지").
+# 그래서 INFORMATIONAL_PROPOSAL_TYPES(no-op·자동만료 카드)에도, _ACTION_BY_PROPOSAL_TYPE/
+# OPEN_ACTIONS/_WRITE_EXECUTORS(실행 매핑)에도 절대 등록하지 않는다 — 라우터의
+# DECISION_ONLY_PROPOSAL_TYPES가 이 유형을 결정 전용으로 분기한다.
+PARAM_CHANGE = "param_change"
 
 # X1a T6(D-NAO-37): 정보성 제안 유형 5종 — 실행 대상 자체가 없는 제안(naver_execution_harness의
 # _ACTION_BY_PROPOSAL_TYPE에 매핑이 없는 유형과 의미상 같지만, 그 매핑에는 budget_up처럼 아직
@@ -58,6 +65,7 @@ ALL_PROPOSAL_TYPES: frozenset[str] = frozenset({
     _BUDGET_UP, _BUDGET_DOWN, _BUDGET_PRE_EXHAUSTION,
     _ANOMALY, _ANOMALY_FRESHNESS, _ACCOUNT_BRIEF, PROPOSAL_TYPE_PACING, PROPOSAL_TYPE_CPC,
     _WISDOM_PROMOTED,  # D-NAO-54 P3(정보성) — INFORMATIONAL_PROPOSAL_TYPES <= ALL 불변 유지
+    PARAM_CHANGE,  # D-NAO-54 P4(결정 전용) — 정보성도 실행형도 아님(라우터 DECISION_ONLY 분기)
 })
 
 # 보드 의미상 허용되는 방향(codex 지적, 라이브검증 후속): starving_winners(육성 의도, D-NAO-18)는
