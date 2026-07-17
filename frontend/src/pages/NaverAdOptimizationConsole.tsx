@@ -227,6 +227,7 @@ export const PROPOSAL_TYPE_LABEL: Record<string, string> = {
   account_brief: "계정 브리핑",
   trigger_pacing: "페이싱 경보",
   trigger_cpc_spike: "CPC 급등 경보",
+  wisdom_promoted: "지혜 승격", // D-NAO-54 P3 — 운영 일기에서 승격된 판단원칙 보고(정보성)
 };
 
 // E1a T8 — 제안 카드 평결 배지(Ava 검토, 콘솔 배지용 요약은 백엔드 _serialize_expert_verdict_summary 참조)

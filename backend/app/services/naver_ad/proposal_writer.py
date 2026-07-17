@@ -26,6 +26,7 @@ _BUDGET_PRE_EXHAUSTION = "budget_pre_exhaustion"
 _ANOMALY = "anomaly"
 _ANOMALY_FRESHNESS = "anomaly_freshness"
 _ACCOUNT_BRIEF = "account_brief"
+_WISDOM_PROMOTED = "wisdom_promoted"  # D-NAO-54 P3 — 지혜 승격 보고(정보성, 실행 대상 아님)
 
 # X1a T6(D-NAO-37): 정보성 제안 유형 5종 — 실행 대상 자체가 없는 제안(naver_execution_harness의
 # _ACTION_BY_PROPOSAL_TYPE에 매핑이 없는 유형과 의미상 같지만, 그 매핑에는 budget_up처럼 아직
@@ -36,6 +37,7 @@ _ACCOUNT_BRIEF = "account_brief"
 # 모듈은 어느 쪽도 import하지 않는다).
 INFORMATIONAL_PROPOSAL_TYPES: frozenset[str] = frozenset({
     _ANOMALY, _ANOMALY_FRESHNESS, _ACCOUNT_BRIEF, PROPOSAL_TYPE_PACING, PROPOSAL_TYPE_CPC,
+    _WISDOM_PROMOTED,  # D-NAO-54 P3 — 정보성(실행 개방 액션에 매핑 없음, Jino 콘솔 열람 전용)
 })
 
 # D-NAO-47: 제안 유형 14종 단일 진실 — 프론트 라벨 맵이 이걸 진실로 삼는다.
@@ -55,6 +57,7 @@ ALL_PROPOSAL_TYPES: frozenset[str] = frozenset({
     _BID_UP, _BID_DOWN, _GROWTH_BID_UP, _NEGATIVE, _PAUSE, _RESUME,
     _BUDGET_UP, _BUDGET_DOWN, _BUDGET_PRE_EXHAUSTION,
     _ANOMALY, _ANOMALY_FRESHNESS, _ACCOUNT_BRIEF, PROPOSAL_TYPE_PACING, PROPOSAL_TYPE_CPC,
+    _WISDOM_PROMOTED,  # D-NAO-54 P3(정보성) — INFORMATIONAL_PROPOSAL_TYPES <= ALL 불변 유지
 })
 
 # 보드 의미상 허용되는 방향(codex 지적, 라이브검증 후속): starving_winners(육성 의도, D-NAO-18)는

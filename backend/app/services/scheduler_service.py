@@ -479,6 +479,29 @@ def run_naver_diary_reflection_job():
         db.close()
 
 
+def run_naver_wisdom_job():
+    """운영 일기 지혜 승격·망각층 — wisdom_loop.run_daily_wisdom (08:45 KST, D-NAO-54 P3).
+
+    ①candidate_sa(결과 기입 diary → 반복 패턴 후보) ②judge_sa(숙성 후보 독립 LLM 판정)
+    ③writer_sa(승격분 지혜 엔트리 + 정보성 보고) ④retention_sa(미승격 Ebbinghaus 망각) —
+    harness가 단계격리로 조합. 08:35 reflection이 outcome을 소급 기입한 뒤라 결과가 최신이다.
+
+    ★fail-open(관찰·보고 전용, 집행 아님): reflection 잡과 동일 이유로 예외를 다시 던지지 않는다
+    — 지혜 처리 실패가 catch-up 체인의 집행 잡(auto_operator_daily)을 막으면 안 된다(D-NAO-54
+    금지선: "일기 기록 실패가 집행을 막으면 안 됨").
+    """
+    db = _get_own_db_session()
+    try:
+        from app.services.naver_ad.wisdom_loop import run_daily_wisdom
+
+        result = run_daily_wisdom(db)
+        log.info("[스케줄러] naver wisdom: %s", result["stage_status"])
+    except Exception as e:  # noqa: BLE001 — fail-open: 관찰·보고 전용 잡, 집행 체인 보호(raise 없음)
+        log.exception("[스케줄러] run_naver_wisdom_job 에러(fail-open): %s", e)
+    finally:
+        db.close()
+
+
 def sweep_naver_keyword_hourly_job():
     """키워드/쇼핑그룹 시간별(hh24) 축적 — 일 1회 D-1 스윕 (09:10 KST, sync_naver_ad_daily
     07:30 이후. D-NAO-46②, docs/PLAN_naver-ad-keyword-hourly-accrual.md §4).
@@ -1018,6 +1041,7 @@ def _ensure_default_states(db):
         ("run_naver_learning_loops", "10 8 * * *"),  # 학습루프 4종(성적표·예측편향·전환성숙·시간대분포, 트랙 P6)
         ("run_naver_retro_scoring", "30 8 * * *"),  # 상설 소급 채점(진단 보드 as-of 리플레이 + 페이싱 경보, D-NAO-45)
         ("run_naver_diary_reflection", "35 8 * * *"),  # 운영 일기 해석층(결과 소급 기입+해석문, D-NAO-54 P2)
+        ("run_naver_wisdom", "45 8 * * *"),  # 운영 일기 지혜 승격·망각층(후보→판사→지혜+보고→망각, D-NAO-54 P3)
         ("run_naver_auto_operator_daily", "50 8 * * *"),  # D-NAO-48 4조건 심사·집행 서버화(D-NAO-49)
         ("sweep_naver_keyword_hourly", "10 9 * * *"),  # 키워드/쇼핑그룹 시간별(hh24) 축적, D-1 스윕(D-NAO-46②)
         ("run_naver_auto_operator_hourly", "20 * * * *"),  # 시간당 밴드 관제 실입찰(catch-up 제외, D-NAO-49)
@@ -1069,6 +1093,7 @@ _CATCHUP_ORDER: tuple[str, ...] = (
     "run_naver_auto_operator_daily",  # 08:50 (D-NAO-49, 조건④ bleeding 판정이 retro_scoring 결과를 쓴다 — 그 뒤)
     "run_naver_diary_reflection",  # 08:35 크론이지만 catch-up은 집행(08:50) *뒤*(P2 리뷰 P2-1: LLM 재시도 최대 9분이 돈 잡 복구를 지연시키면 안 됨 — 관찰 전용이라 어제/D-2/D-8 버킷은 순서 무관. fail-open은 영구 블록만 막고 지연은 못 막는다)
     "sweep_naver_keyword_hourly",  # 09:10 (D-NAO-46②, 독립 잡이나 표준 cron catch-up 포함)
+    "run_naver_wisdom",  # 08:45 크론이지만 catch-up은 돈 잡(08:50)·reflection 뒤(D-NAO-54 P3): reflection이 outcome을 소급 기입해야 후보 수확 결과가 최신 + LLM 판사(최대 회당 5×재시도)가 집행 복구를 지연시키면 안 됨. 관찰·보고 전용이라 맨 뒤 배치(diary_outcome 60일 하한 내면 하루 늦어도 무관). fail-open은 영구 블록만 막고 지연은 못 막는다
 )
 _CATCHUP_LOOKBACK = timedelta(hours=12)  # 오늘 예정 발화가 이보다 오래됐으면 스킵(다음 정상 발화에 위임)
 
@@ -1184,6 +1209,7 @@ def _catch_up_morning_batch():
         "run_naver_diary_reflection": run_naver_diary_reflection_job,
         "run_naver_auto_operator_daily": run_naver_auto_operator_daily_job,
         "sweep_naver_keyword_hourly": sweep_naver_keyword_hourly_job,
+        "run_naver_wisdom": run_naver_wisdom_job,
     }
     log.warning("[스케줄러] 아침배치 catch-up 대상(cron순 순차): %s", missed)
 
@@ -1228,6 +1254,7 @@ def job_func_for(job_name: str):
         "run_naver_learning_loops": run_naver_learning_loops_job,
         "run_naver_retro_scoring": run_naver_retro_scoring_job,
         "run_naver_diary_reflection": run_naver_diary_reflection_job,
+        "run_naver_wisdom": run_naver_wisdom_job,
         "sweep_naver_keyword_hourly": sweep_naver_keyword_hourly_job,
         "run_naver_auto_operator_daily": run_naver_auto_operator_daily_job,
         "run_naver_auto_operator_hourly": run_naver_auto_operator_hourly_job,

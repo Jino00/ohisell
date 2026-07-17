@@ -2101,3 +2101,67 @@ class OpsDiaryEntry(Base):
     # ── P2가 소급 기입(지금은 항상 None) ──
     outcome_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     source_ref: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # naver_change_log.id
+
+
+class OpsWisdomCandidate(Base):
+    """지혜 승격 후보 1건 — 결과 기입된 diary 행에서 뽑은 (캠페인×액션×환경버킷) 반복 패턴
+    (D-NAO-54 P3). candidate_sa가 같은 시그니처 재등장마다 occurrences++·last_seen_at 갱신하고,
+    TTL 14일 or occurrences≥3이면 독립 LLM 판사(judge_sa, 자기평가 금지)가 promote/reject한다.
+    미승격(pending) 후보는 Ebbinghaus 망각(retention_sa가 soft-hide=status hidden), 승격분·지혜는
+    불망각(D-NAO-54 결정 4축).
+
+    ★UTC 혼동 금지: created_at은 server_default(UTC)지만 first_seen_at/last_seen_at은 SA가
+    KST now로 명시 기입한다 — 감쇠 Δt(경과일) 계산과 TTL 판정의 진실 소스라 두 시간계를 섞으면
+    안 된다([[sqlite-server-default-now-is-utc]]).
+
+    status: pending|promoted|rejected|hidden. 시그니처는 signature(unique)로 멱등 재수확한다 —
+    promoted/rejected/hidden 시그니처는 재수확 대상이 아니다(판사가 이미 판정했거나 망각됨).
+    """
+
+    __tablename__ = "ops_wisdom_candidates"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # ⚠️UTC(server_default) — 감쇠·TTL은 first_seen_at/last_seen_at(KST 명시)로 판단(created_at 아님).
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    signature: Mapped[str] = mapped_column(String(200), nullable=False)  # 캠페인×액션×환경버킷 키
+    campaign_id: Mapped[str] = mapped_column(String(50), nullable=False, default="")
+    action: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    env_bucket_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 버킷 상세(day_class/season/…)
+    observation: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 규칙 기반 요약문(LLM 아님)
+    occurrences: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    first_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)  # KST 명시(TTL 기준)
+    last_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)  # KST 명시(감쇠 Δt 기준)
+    source_entry_ids_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 기여 diary id 목록(중복 제외)
+    status: Mapped[str] = mapped_column(String(12), nullable=False, default="pending")  # pending/promoted/rejected/hidden
+    judge_verdict_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 판사 응답(verdict/principle/rationale)
+    importance: Mapped[int] = mapped_column(Integer, nullable=False, default=5)  # Ebbinghaus 가중(0~10)
+    strength: Mapped[float] = mapped_column(Float, nullable=False, default=7.0)  # Ebbinghaus 시상수(일수)
+
+    __table_args__ = (
+        Index("ux_ops_wisdom_candidates_signature", "signature", unique=True),
+        Index("ix_ops_wisdom_candidates_status", "status"),
+    )
+
+
+class OpsWisdomEntry(Base):
+    """승격된 지혜 1건 — 재사용 가능한 판단원칙(D-NAO-54 P3). writer_sa가 promoted 후보에서
+    1:1(source_candidate_id unique)로 생성하고, Jino 보고는 정보성 NaverProposal(wisdom_promoted)로
+    별도 낸다(지혜→실행 직접 쓰기 금지 = D-NAO-54 금지선).
+
+    지혜는 감쇠하지 않는다(불망각) — retention_sa는 이 테이블을 건드리지 않는다. status는 후속
+    사용자 철회 대비 여지(active|retired)만 둔다(P3에서 능동 retire 경로는 없음).
+    """
+
+    __tablename__ = "ops_wisdom_entries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    wisdom_text: Mapped[str] = mapped_column(Text, nullable=False)  # 판단원칙 한 문장(judge principle)
+    source_candidate_id: Mapped[int] = mapped_column(Integer, nullable=False)  # 멱등 키(unique)
+    judge_rationale: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(8), nullable=False, default="active")  # active/retired
+    promoted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)  # KST 명시
+
+    __table_args__ = (
+        Index("ux_ops_wisdom_entries_source_candidate", "source_candidate_id", unique=True),
+    )
