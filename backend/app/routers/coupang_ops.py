@@ -1479,6 +1479,23 @@ def rocket_fetch_success(
     return {"ok": True}
 
 
+@router.post("/rocket/fetch-error")
+def rocket_fetch_error(
+    body: dict[str, Any] = Body(...),
+    x_ingest_token: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """로켓 페처 run 실패 보고 → last_error/last_error_at 기록. 토큰 인증(형제 fetch-success와 동일).
+
+    ★claim의 짝: 페처가 요청을 claim한 뒤 브라우저 에러로 죽으면 플래그는 이미 clear라 아무
+    흔적도 안 남았다 — UI는 실패인지 진행 중인지 알 수 없었다(215초 헛기다림).
+    """
+    _check_ingest_token(x_ingest_token)
+    error = str(body.get("error") or "").strip() or "unknown"
+    rocket_supplier_sync.mark_rocket_fetch_error(db, error)
+    return {"ok": True}
+
+
 # ════════════════════════════════════════════════
 # 오하이테크(1P 로켓배송) 광고비 페처 갱신 트리거 (S3 버튼-poll, adcost/rocket 패턴)
 #   광고비는 Akamai로 prod 직접 fetch 불가(D-4) → Mac CDP 페처(poll 데몬)가 가져온다.
@@ -1514,6 +1531,23 @@ def ohitech_ad_fetch_success(
     """페처 run 완료 시 last_success_at 갱신(UI 폴링 완료 감지용). 토큰 인증."""
     _check_ingest_token(x_ingest_token)
     ohitech_ad_sync.mark_fetch_success(db)
+    return {"ok": True}
+
+
+@router.post("/rocket/ad-cost/fetch-error")
+def ohitech_ad_fetch_error(
+    body: dict[str, Any] = Body(...),
+    x_ingest_token: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """오하이테크 광고 페처 run 실패 보고 → last_error/last_error_at 기록. 토큰 인증.
+
+    ★claim의 짝: 페처가 요청을 claim한 뒤 브라우저 에러로 죽으면 플래그는 이미 clear라 아무
+    흔적도 안 남았다 — UI는 실패인지 진행 중인지 알 수 없었다(215초 헛기다림).
+    """
+    _check_ingest_token(x_ingest_token)
+    error = str(body.get("error") or "").strip() or "unknown"
+    ohitech_ad_sync.mark_fetch_error(db, error)
     return {"ok": True}
 
 
@@ -1717,6 +1751,24 @@ def claim_wing_vendor_summary_refresh(
     return vendor_summary_sync.claim_refresh(db)
 
 
+@router.post("/wing/vendor-summary/fetch-error")
+def wing_vendor_summary_fetch_error(
+    body: dict[str, Any] = Body(...),
+    x_ingest_token: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """Wing 판매분석 페처 run 실패 보고 → last_error/last_error_at 기록. 토큰 인증(claim과 동일).
+
+    ★claim의 짝: 페처가 요청을 claim한 뒤 브라우저 에러로 죽으면 플래그는 이미 clear라 아무
+    흔적도 안 남았다 — UI는 실패인지 진행 중인지 알 수 없었다(215초 헛기다림).
+    성공은 ingest가 알리고(last_success_at), 실패는 이 엔드포인트가 알린다.
+    """
+    _require_ingest_token(x_ingest_token)
+    error = str(body.get("error") or "").strip() or "unknown"
+    vendor_summary_sync.mark_fetch_error(db, error)
+    return {"ok": True}
+
+
 # ── RG 정산 자동 다운로드 갱신 트리거 (Wing 세션 자동화 트랙 S4-P2, D-8) ──
 # vendor-summary와 동일 메커니즘이되 상태행 분리(COUPANG_WING_RG). 페처 데몬이 claim 후
 # 정산 엑셀 브라우저측 다운로드 → /rg/settlement/upload-xlsx 로 push(기존 ingest 재사용).
@@ -1740,6 +1792,24 @@ def claim_wing_rg_settlement_refresh(
     """Wing 페처가 RG 갱신 요청을 소비(플래그 clear). 토큰 인증(ingest와 동일)."""
     _require_ingest_token(x_ingest_token)
     return rg_settlement_sync.rg_claim_refresh(db)
+
+
+@router.post("/wing/rg-settlement/fetch-error")
+def wing_rg_settlement_fetch_error(
+    body: dict[str, Any] = Body(...),
+    x_ingest_token: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """Wing RG 정산 페처 run 실패 보고 → last_error/last_error_at 기록. 토큰 인증(claim과 동일).
+
+    ★claim의 짝: 페처가 요청을 claim한 뒤 브라우저 에러로 죽으면 플래그는 이미 clear라 아무
+    흔적도 안 남았다 — UI는 실패인지 진행 중인지 알 수 없었다(215초 헛기다림).
+    성공은 upload-xlsx(rg_mark_heartbeat)가 알리고, 실패는 이 엔드포인트가 알린다.
+    """
+    _require_ingest_token(x_ingest_token)
+    error = str(body.get("error") or "").strip() or "unknown"
+    rg_settlement_sync.rg_mark_fetch_error(db, error)
+    return {"ok": True}
 
 
 # ════════════════════════════════════════════════════════════════════

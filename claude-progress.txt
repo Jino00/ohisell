@@ -3,12 +3,23 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
-- 날짜: 2026-07-17 21:10 KST (★**D-NAO-53 콘솔 Confirm 문안 오사칭 결함 수정·배포·라이브 합격** + 같은 세션에서 **세션 자동 아카이브 진범 규명·해소**)
+- 날짜: 2026-07-17 21:20 KST (★**나머지 페처 4종 실패 보고 구멍 수정·배포·라이브합격** — 트랙 외 별건(네이버 트랙 무관), Jino 승인. **PR #33 병합**)
+  - PR #30(오픽스 광고비)이 확립한 패턴을 같은 구멍을 공유하던 나머지에 적용: Wing 판매분석(COUPANG_WING_VS)·RG 정산(COUPANG_WING_RG)·오하이테크 광고(COUPANG_OHITECH_AD)·**로켓 발주/정산(COUPANG_ROCKET)**.
+  - ★**브리프 전제 2건 정정**: ①**마이그 없음** — 4종 상태행이 전부 `coupang_wing_cookie` 한 테이블(account_key로만 구분) → #30의 last_error_at 컬럼이 이미 다 덮음(prod 이미 그 head 실측). ②**범위 4종**(브리프는 3종 지목했으나 폴링 루프는 4곳, 로켓 페처도 이미 목록에 있었음).
+  - ★**status 미변경 계약 승계**(#30 codex 1R[P2]): red면 Layout.tsx:201/206이 헛된 쿠키 재설정 CTA를 띄운다. 4종 모두 테스트로 못박음.
+  - ★**라이브 증거**: 재기동 4분 만에 **실제 실패 2건이 스스로 잡힘**(유도 아님) — 오하이테크=세션 만료, 로켓=CDP 9223 미연결. 로그가 완벽한 before/after: 같은 실패가 17:24·18:24·19:24·20:25에 rc=1로 찍혔지만 prod엔 **아무것도 안 갔었다**(구코드). 성공 클리어도 VS 버튼 흐름으로 라이브 확인.
+  - codex **5R PASS**(1R P1은 메커니즘 정정해 수용 / 예약-오탐 지적은 근거 대고 기각 → codex 수용 / 2R·3R·4R P1 전부 수용 — claim↔보고 사이 예외 누수를 구조적으로 봉쇄).
+  - 검증: 백엔드 **1823 pass/0 fail**(신규 44) · tsc -b clean · vitest 14 · safe_deploy CAS 5/5 · 데몬 3종 kickstart.
+  - 🔴 **Jino 조치 필요(이 PR이 드러낸 실재 고장)**: ①오하이테크 광고 Chrome(9224) 재로그인 ②로켓 Chrome CDP 9223 미실행. 둘 다 그동안 조용히 실패 중이었음(오하이테크 마지막 성공 07-16 10:21, 로켓은 성공 이력 자체가 없음).
+  - 후속 태스크 분리: RG 업로드 60s 클라 타임아웃(서버는 완주 → 성공 138ms 뒤 실패보고가 도착해 순서 역전. UI는 성공 우선 검사라 정상 판정 — 불변식 주석으로 못박음).
+- 날짜: 2026-07-17 21:10 KST (★**D-NAO-53 콘솔 Confirm 문안 오사칭 결함 수정·배포·라이브 합격** + 같은 세션에서 **세션 자동 아카이브 진범 규명·해소**) ※병행 세션(네이버 트랙) — 위 21:20 쿠팡 건과 코드 충돌 없음(api.ts만 양쪽 추가, 자동 병합)
   - ①세션 소실 원인 = 데스크톱 앱 `ccAutoArchiveOnPrClose: true`(PR 병합 시 5분 내 자동 아카이브+워크트리 삭제 — 07-11 HANDOFF 소실의 진짜 메커니즘). Jino가 Settings에서 OFF, 파일 false 실측 확인. MOP35 세션은 Archived에서 무손상 복구 가능. 상세=auto-memory `ohisell-session-record-policy.md`.
   - ②D-NAO-53: executeConfirmText가 액션 무관 "제외키워드 등록" Confirm(OPEN_ACTIONS 4개 개방인데 X1a 하드코딩 잔재, D-NAO-5 훼손) → serializer `action`+목록 `open_actions`(harness 파생, 신규 `open_executable_actions()`)+Confirm 5분기(미지 액션 폴백=사칭 불가)+배너 동적화. 1771 pass·codex PASS·PR #31 병합(main `339c231`)·safe_deploy 배포·prod API/번들 라이브 실측 합격. Fable설계/Opus구현/Sonnet검증 handoff.
   - 시각 확인 완결: Jino 스크린샷으로 배너 "현재 개방: 제외키워드, 정지·재개, 입찰가, 예산" 라이브 렌더 확인.
   - ③D-NAO-53-a 제안 카드 유형 필터(실행형/정보성/전부, 기본=실행형) — 정보성 72건이 대기 탭 점유(Jino 스크린샷). 백엔드 ?informational 재사용·변경 0. vitest 25·codex PASS·PR #34 병합·배포·라이브 번들/쿼리 실측. 오늘 pending 실행형=0이 진실(11건 전부 처리완료)이라 기본 화면=정직한 빈 상태.
   - ④D-NAO-53-b 정보성 카드 승인/반려 버튼 제거(Jino "필요없는 버튼 복잡"). no-op·자동만료 D+1~3·채점 무관 실측 → showsActionButtons + "자동 만료" 캡션. vitest 28·codex PASS·PR #36 병합·배포·번들 실측(index-sK3sCwzW.js). 콘솔 완성형: 실행형=결정+버튼 / 정보성=읽기 전용.
+
+## 이전 상태
 - 날짜: 2026-07-17 17:40 KST (★**쿠팡 광고비 페처 실패 보고 구멍 수정·배포·라이브합격** — 트랙 외 별건, Jino 승인. PR #30)
   - 13:02 실사고의 남은 절반: 페처가 claim 후 죽어도 prod에 알리는 경로가 0 → last_error=null 영구 유지.
     성공에만 시각(last_success_at)이 있고 실패엔 없어 **UI가 "실패"와 "진행 중"을 구분 불가**(215초 헛대기 후 "Mac 응답 없음").
