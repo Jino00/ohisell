@@ -1124,6 +1124,49 @@ def _catch_up_morning_batch():
     threading.Thread(target=_run_chain, name="naver-morning-catchup", daemon=True).start()
 
 
+def job_func_for(job_name: str):
+    """job_name → 등록할 잡 함수(단일 진실). 매핑에 없으면 None.
+
+    ★start_scheduler와 toggle 라이브 등록이 같은 매핑을 봐야 한다 — 한쪽만 알면 toggle이
+    재시작 없이 살릴 잡을 못 찾아 DB만 바뀌고 실제 미가동(쿠팡 광고비 13일 정지의 뿌리).
+    """
+    return {
+        "auto_sync_orders": sync_all_channels_job,
+        "auto_profit_calc": recalculate_profit_job,
+        "cafe24_token_refresh": cafe24_proactive_refresh_job,
+        "sync_naver_sa_ad_costs": sync_naver_sa_ad_costs_job,
+        "sync_naver_ad_daily": sync_naver_ad_daily_job,
+        "snapshot_naver_ad_hourly": snapshot_naver_ad_hourly_job,
+        "trigger_watch": trigger_watch_job,
+        "sync_naver_entity": sync_naver_entity_job,
+        "sync_naver_search_term": sync_naver_search_term_job,
+        "sync_naver_keyword_volume": sync_naver_keyword_volume_job,
+        "run_naver_forecast_engine": run_naver_forecast_engine_job,
+        "generate_naver_proposals": generate_naver_proposals_job,
+        "run_naver_learning_loops": run_naver_learning_loops_job,
+        "run_naver_retro_scoring": run_naver_retro_scoring_job,
+        "sweep_naver_keyword_hourly": sweep_naver_keyword_hourly_job,
+        "generate_expert_desk": generate_expert_desk_job,
+        "run_naver_flight_loop": run_naver_flight_loop_job,
+        "sync_naver_settlement": sync_naver_settlement_job,
+        "sync_naver_case_settlement": sync_naver_case_settlement_job,
+        "sync_meta_ad_costs": sync_meta_ad_costs_job,
+        "sync_coupang_products": sync_coupang_products_job,
+        "sync_coupang_returns": sync_coupang_returns_job,
+        "sync_coupang_settlement": sync_coupang_settlement_job,
+        "sync_coupang_rg_sizes": sync_coupang_rg_sizes_job,
+        "sync_coupang_rg_inventory": sync_coupang_rg_inventory_job,
+        "sync_coupang_rg_orders": sync_coupang_rg_orders_job,
+        "sync_coupang_rg_inbound": sync_coupang_rg_inbound_job,
+        "sync_coupang_rg_settlement": sync_coupang_rg_settlement_job,
+        "auto_download_rg_settlement": auto_download_rg_settlement_job,
+        "sync_coupang_coupons": sync_coupang_coupons_job,
+        "sync_coupang_cs": sync_coupang_cs_job,
+        "sync_coupang_ad_cost": sync_coupang_ad_cost_job,
+        "request_ad_cost_refresh": request_ad_cost_refresh_job,
+    }.get(job_name)
+
+
 def start_scheduler():
     """스케줄러 시작 — 기본 작업 2개 등록"""
     db = _get_own_db_session()
@@ -1135,73 +1178,7 @@ def start_scheduler():
             if not state.is_enabled:
                 continue
 
-            job_func = None
-            if state.job_name == "auto_sync_orders":
-                job_func = sync_all_channels_job
-            elif state.job_name == "auto_profit_calc":
-                job_func = recalculate_profit_job
-            elif state.job_name == "cafe24_token_refresh":
-                job_func = cafe24_proactive_refresh_job
-            elif state.job_name == "sync_naver_sa_ad_costs":
-                job_func = sync_naver_sa_ad_costs_job
-            elif state.job_name == "sync_naver_ad_daily":
-                job_func = sync_naver_ad_daily_job
-            elif state.job_name == "snapshot_naver_ad_hourly":
-                job_func = snapshot_naver_ad_hourly_job
-            elif state.job_name == "trigger_watch":
-                job_func = trigger_watch_job
-            elif state.job_name == "sync_naver_entity":
-                job_func = sync_naver_entity_job
-            elif state.job_name == "sync_naver_search_term":
-                job_func = sync_naver_search_term_job
-            elif state.job_name == "sync_naver_keyword_volume":
-                job_func = sync_naver_keyword_volume_job
-            elif state.job_name == "run_naver_forecast_engine":
-                job_func = run_naver_forecast_engine_job
-            elif state.job_name == "generate_naver_proposals":
-                job_func = generate_naver_proposals_job
-            elif state.job_name == "run_naver_learning_loops":
-                job_func = run_naver_learning_loops_job
-            elif state.job_name == "run_naver_retro_scoring":
-                job_func = run_naver_retro_scoring_job
-            elif state.job_name == "sweep_naver_keyword_hourly":
-                job_func = sweep_naver_keyword_hourly_job
-            elif state.job_name == "generate_expert_desk":
-                job_func = generate_expert_desk_job
-            elif state.job_name == "run_naver_flight_loop":
-                job_func = run_naver_flight_loop_job
-            elif state.job_name == "sync_naver_settlement":
-                job_func = sync_naver_settlement_job
-            elif state.job_name == "sync_naver_case_settlement":
-                job_func = sync_naver_case_settlement_job
-            elif state.job_name == "sync_meta_ad_costs":
-                job_func = sync_meta_ad_costs_job
-            elif state.job_name == "sync_coupang_products":
-                job_func = sync_coupang_products_job
-            elif state.job_name == "sync_coupang_returns":
-                job_func = sync_coupang_returns_job
-            elif state.job_name == "sync_coupang_settlement":
-                job_func = sync_coupang_settlement_job
-            elif state.job_name == "sync_coupang_rg_sizes":
-                job_func = sync_coupang_rg_sizes_job
-            elif state.job_name == "sync_coupang_rg_inventory":
-                job_func = sync_coupang_rg_inventory_job
-            elif state.job_name == "sync_coupang_rg_orders":
-                job_func = sync_coupang_rg_orders_job
-            elif state.job_name == "sync_coupang_rg_inbound":
-                job_func = sync_coupang_rg_inbound_job
-            elif state.job_name == "sync_coupang_rg_settlement":
-                job_func = sync_coupang_rg_settlement_job
-            elif state.job_name == "auto_download_rg_settlement":
-                job_func = auto_download_rg_settlement_job
-            elif state.job_name == "sync_coupang_coupons":
-                job_func = sync_coupang_coupons_job
-            elif state.job_name == "sync_coupang_cs":
-                job_func = sync_coupang_cs_job
-            elif state.job_name == "sync_coupang_ad_cost":
-                job_func = sync_coupang_ad_cost_job
-            elif state.job_name == "request_ad_cost_refresh":
-                job_func = request_ad_cost_refresh_job
+            job_func = job_func_for(state.job_name)
 
             if job_func:
                 try:

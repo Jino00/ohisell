@@ -30,6 +30,7 @@ export interface AdCostCookieStatus {
   last_error: string | null;
   age_hours: number | null; // 마지막 push 이후 경과(로컬 페처 heartbeat)
   stale: boolean;           // push 끊김(페처 다운) — 배너 트리거
+  refresh_cron_enabled: boolean | null; // 갱신 크론 on/off(null=행 없음) — false면 쿠키 재설정은 헛수고
 }
 
 export function getAdCostCookieStatus(): Promise<AdCostCookieStatus> {

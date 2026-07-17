@@ -7,6 +7,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from app.services.scheduler_health import (
+    WATCHDOG_COOKIES,
     build_health,
     compute_interval_seconds,
     _sanitize_error,
@@ -77,6 +78,11 @@ def test_sanitize_error_none_and_empty():
 def test_sanitize_error_truncates_to_200():
     s = _sanitize_error("E: " + "x" * 5000)
     assert len(s) == 200
+
+
+# ── 워치독 쿠키 allowlist: 1P 로켓 광고비 편입(만료가 조용히 묻히던 사고 방지) ──
+def test_watchdog_cookies_includes_ohitech_ad():
+    assert "COUPANG_OHITECH_AD" in WATCHDOG_COOKIES
 
 
 # ── build_health: 전부 정상 → healthy True ─────────────────────────────────

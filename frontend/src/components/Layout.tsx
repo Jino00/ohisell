@@ -176,35 +176,52 @@ export default function Layout() {
         </header>
 
         {/* 광고쿠키 수집 중단 전역 경고 — 어느 페이지에 있든 보임 (광고비 stale 방지) */}
-        {/* 로컬 페처(Jino Mac)가 끊기면 stale, prod 직접 fetch 실패 시 red. 둘 다 갱신 필요 */}
-        {(adCookie?.status === "red" || adCookie?.stale) && (
+        {/* 크론 꺼짐 > red > stale 우선순위: 크론이 꺼져 있으면 쿠키가 멀쩡해도 push가 안 와 재설정은 헛수고 */}
+        {(adCookie?.refresh_cron_enabled === false || adCookie?.status === "red" || adCookie?.stale) && (
           <div className="flex items-center gap-3 bg-red-600 text-white px-4 py-2 text-sm">
             <span className="font-semibold shrink-0">🔴 쿠팡 광고비 수집 중단</span>
-            <span className="text-red-100 min-w-0 truncate">
-              {adRefreshMsg ?? (
-                <>
-                  광고비 수집이 멈췄습니다 — {adCookie.status === "red" ? "쿠키 만료(재설정 필요)" : "로컬 페처 확인 필요"}
+            {adCookie?.refresh_cron_enabled === false ? (
+              <>
+                <span className="text-red-100 min-w-0 truncate">
+                  갱신 크론 꺼짐(스케줄러에서 재개 필요)
                   {adCookie.last_success_at && ` (마지막 수집 ${adCookie.last_success_at.slice(0, 10)})`}.
-                </>
-              )}
-            </span>
-            {adCookie.status === "red" ? (
-              // 쿠키 만료 → 재설정 폼으로 (Mac이 fetch해도 인증 실패하므로 갱신 요청 무의미)
-              <Link
-                to="/coupang-ops?adcookie=open"
-                className="ml-auto shrink-0 bg-white text-red-700 font-medium px-3 py-1 rounded hover:bg-red-50"
-              >
-                쿠키 다시 설정 →
-              </Link>
+                </span>
+                <Link
+                  to="/coupang-ops"
+                  className="ml-auto shrink-0 bg-white text-red-700 font-medium px-3 py-1 rounded hover:bg-red-50"
+                >
+                  스케줄러 관리 →
+                </Link>
+              </>
             ) : (
-              // stale(쿠키 정상, 페처 지연) → 실제 갱신 요청
-              <button
-                onClick={handleAdRefresh}
-                disabled={adRefreshing}
-                className="ml-auto shrink-0 bg-white text-red-700 font-medium px-3 py-1 rounded hover:bg-red-50 disabled:opacity-60"
-              >
-                {adRefreshing ? "요청 중…" : "지금 갱신 →"}
-              </button>
+              <>
+                <span className="text-red-100 min-w-0 truncate">
+                  {adRefreshMsg ?? (
+                    <>
+                      광고비 수집이 멈췄습니다 — {adCookie?.status === "red" ? "쿠키 만료(재설정 필요)" : "로컬 페처 확인 필요"}
+                      {adCookie?.last_success_at && ` (마지막 수집 ${adCookie.last_success_at.slice(0, 10)})`}.
+                    </>
+                  )}
+                </span>
+                {adCookie?.status === "red" ? (
+                  // 쿠키 만료 → 재설정 폼으로 (Mac이 fetch해도 인증 실패하므로 갱신 요청 무의미)
+                  <Link
+                    to="/coupang-ops?adcookie=open"
+                    className="ml-auto shrink-0 bg-white text-red-700 font-medium px-3 py-1 rounded hover:bg-red-50"
+                  >
+                    쿠키 다시 설정 →
+                  </Link>
+                ) : (
+                  // stale(쿠키 정상, 페처 지연) → 실제 갱신 요청
+                  <button
+                    onClick={handleAdRefresh}
+                    disabled={adRefreshing}
+                    className="ml-auto shrink-0 bg-white text-red-700 font-medium px-3 py-1 rounded hover:bg-red-50 disabled:opacity-60"
+                  >
+                    {adRefreshing ? "요청 중…" : "지금 갱신 →"}
+                  </button>
+                )}
+              </>
             )}
           </div>
         )}

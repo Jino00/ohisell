@@ -52,6 +52,9 @@ WATCHDOG_COOKIES: tuple[str, ...] = (
     "COUPANG_WING1",
     "COUPANG_WING2",
     "COUPANG_ADS1",
+    # 1P 로켓 광고비(net_profit)·데일리 주기. 워치독 밖이라 만료가 조용히 묻혀 광고비가
+    # 끊긴 사고 재발 방지 — prod 행 존재 실측(07-17).
+    "COUPANG_OHITECH_AD",
 )
 
 
