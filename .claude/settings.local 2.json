@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Skill(qa)",
+      "Skill(qa:*)",
+      "Skill(autoplan)",
+      "Skill(autoplan:*)",
+      "Skill(browse)",
+      "Skill(browse:*)",
+      "Skill(codex)",
+      "Skill(codex:*)",
+      "Bash(cd \"/Users/jino/Library/Mobile Documents/com~apple~CloudDocs/1Personal/AI Program/Ohiselling/.claude/memory\" && printf '%s\\\\n' '- [HANDOFF_ohisell-sprint4b-cafe24순이익_20260516]\\(HANDOFF_ohisell-sprint4b-cafe24순이익_20260516.md\\) — 자사몰 순이익 정확화 완료\\(SA4+codex2게이트PASS\\), cafe24 순이익 19.5% 과대 교정. 미커밋. 다음=네이버 정확화' >> MEMORY.md && tail -1 MEMORY.md)",
+      "mcp__Claude_in_Chrome__tabs_context_mcp",
+      "mcp__Claude_in_Chrome__navigate"
+    ]
+  }
+}

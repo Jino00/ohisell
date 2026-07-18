@@ -126,8 +126,10 @@ export default function NaverAdCommandCenter() {
         <CampaignRoster />
       </Card>
 
-      {/* ③ 성적표 두 겹 — 중복 아니라 상보 + 외부 변경 감지(D-NAO-50) */}
-      <div className="grid grid-cols-2 gap-4">
+      {/* ③ 성적표 두 겹 — 중복 아니라 상보 + 외부 변경 감지(D-NAO-50).
+          ★세로로 쌓는다(Jino 2026-07-18: "칸이 부족하면 옆으로 붙이지 말고 밑으로"):
+          변경 이력의 '근거' 칸은 한 문장이 길어 반폭이면 눌린다. 전체폭을 준다. */}
+      <div className="space-y-4">
         <Card title="우리 조언이 맞았나 (방향 정밀도)">
           <RetroScorecardPane />
         </Card>
@@ -405,6 +407,120 @@ function describeChange(row: NaverChangeLogRow): string {
 }
 
 // ══════════════════════════════════════════════════════════════════
+// 근거(rationale) 사람말 변환(Jino 2026-07-18: "내가 알아볼 수 있는 내용으로 적어줘").
+// 백엔드 생성기(proposal_writer·auto_operator)가 남긴 기계용 문자열
+//   예) "[shopping_group_growth] 보정ROAS=1.7708 cost=75914원 clk=51 — 시뮬 근거=…,
+//        추천입찰=1550원, target_roas 근거=account_default(1.697…). 예측(오늘): clk=7, …"
+// 을 Jino가 읽는 한 문장으로 옮긴다.
+// ★원칙: (1) 못 알아보는 모양은 원문 그대로 폴백 — 지어내지 않는다(원칙22).
+//        (2) 원문은 항상 title 툴팁에 보존 — 이 화면의 존재 이유가 "무엇을 왜 바꿨나"의
+//            투명성이라(ref24) 감사 가능성을 버리면 안 된다.
+// ══════════════════════════════════════════════════════════════════
+const HOURLY_BAND_RE = /^\[시간당밴드\]\s*가중avg_rank=([\d.]+)\s*([<>])\s*([\d.]+)\s*\(([^)]+)\)/;
+const BOARD_PROPOSAL_RE = /^\[([a-z_]+)\]\s*보정ROAS=([\d.]+)\s+cost=(\d+)원\s+clk=(\d+)/;
+const PAUSE_RE = /^\[([a-z_]+)\]\s*정지\([^)]*\)\s*직전 보정ROAS\s*([\d.]+)/;
+const GROWTH_RE = /^\[growth_sweeper\][\s\S]*?clk=(\d+)/;
+const RECOMMEND_BID_RE = /추천입찰=\d+원(\([^)]*\))?/;
+const FORECAST_RE = /예측\(오늘\):\s*clk=(\d+),\s*cost=(\d+)원,\s*conv_amt=(\d+)원/;
+const TARGET_ROAS_RE = /target_roas 근거=[^(]*\(([\d.]+)\)/;
+
+function fmtRoas(s: string): string {
+  const v = Number(s);
+  return Number.isFinite(v) ? v.toFixed(2) : s;
+}
+function fmtWon(s: string): string {
+  const v = Number(s);
+  return Number.isFinite(v) ? won(v) : `${s}원`;
+}
+function fmtCount(s: string, unit: string): string {
+  const v = Number(s);
+  return Number.isFinite(v) ? `${num(v)}${unit}` : `${s}${unit}`;
+}
+
+/** 진단 보드 제안·성장 제안의 "예측(오늘)" 꼬리 → 사람말(있을 때만). */
+function forecastSuffix(base: string): string {
+  const f = base.match(FORECAST_RE);
+  return f ? ` 오늘 예상: 클릭 ${fmtCount(f[1], "회")}·광고비 ${fmtWon(f[2])}·전환매출 ${fmtWon(f[3])}.` : "";
+}
+
+/** 가드레일 거부/실패 사유에서 내부 참조태그(D-NAO-*)만 걷어낸다 — 나머지는 이미 한국어다. */
+function humanizeGuardReason(reason: string): string {
+  return reason.replace(/\s*,?\s*D-NAO-[\w-]+/g, "").replace(/\s+/g, " ").trim();
+}
+
+/** 기본 근거(차단 접미사 제거된) 한 문장. 못 알아보면 null(호출자가 원문 폴백). */
+function humanizeRationaleBody(base: string): string | null {
+  // ① 시간당 밴드(auto_operator) — 노출순위 기반 상향/하향
+  const h = base.match(HOURLY_BAND_RE);
+  if (h) {
+    const [, rank, cmp, thr, band] = h;
+    return band.includes("과열") || cmp === "<"
+      ? `시간당 점검 — 평균 노출순위 ${rank}위로 상위권이 과열(기준 ${thr}위)이라 입찰가를 낮췄습니다.`
+      : `시간당 점검 — 평균 노출순위 ${rank}위로 노출이 약해(기준 ${thr}위) 입찰가를 올렸습니다.`;
+  }
+
+  // ② 정지 판단
+  const p = base.match(PAUSE_RE);
+  if (p) {
+    const label = BOARD_LABEL[p[1]] ?? p[1];
+    return `${label} — 정지 직전 광고효율 ROAS ${fmtRoas(p[2])}(목표 미달)라 정지로 판단했습니다.`;
+  }
+
+  // ③ 진단 보드 입찰 제안(가장 흔함)
+  const m = base.match(BOARD_PROPOSAL_RE);
+  if (m) {
+    const [, board, roas, cost, clk] = m;
+    const label = BOARD_LABEL[board] ?? board.replace(/_/g, " ");
+    const t = base.match(TARGET_ROAS_RE);
+    const targetNote = t ? `(목표 ${fmtRoas(t[1])})` : "";
+    const rec = base.match(RECOMMEND_BID_RE);
+    const clampNote = rec?.[1]?.includes("스텝 클램프")
+      ? " 한 번에 15%까지만 조정하는 규칙에 걸려 이번엔 일부만 반영했습니다." : "";
+    return `${label} 판단 — 최근 광고효율 ROAS ${fmtRoas(roas)}${targetNote}. 판단 근거: 광고비 ${fmtWon(cost)}·클릭 ${fmtCount(clk, "회")}.${clampNote}${forecastSuffix(base)}`;
+  }
+
+  // ④ 성장 스위퍼(수익 여력 있는 키워드 육성)
+  const g = base.match(GROWTH_RE);
+  if (g) {
+    return `성장 후보 — 수익 여력이 있어 입찰가를 올렸습니다. 판단 근거: 클릭 ${fmtCount(g[1], "회")}.${forecastSuffix(base)}`;
+  }
+
+  return null; // 못 알아봄 → 원문 폴백
+}
+
+/** rationale → {화면 문장, 원문 툴팁}. 차단/실패 접미사는 분리해 사람말로 붙인다. */
+export function formatRationale(raw: string | null | undefined): { text: string; title?: string } {
+  if (!raw || !raw.trim()) return { text: NO_DATA };
+  const trimmed = raw.trim();
+
+  let base = trimmed;
+  let suffix = "";
+  const bm = trimmed.match(/\[(실행 불가|실행 실패)\]\s*([\s\S]*)$/);
+  if (bm && bm.index !== undefined) {
+    base = trimmed.slice(0, bm.index).trim();
+    const reason = humanizeGuardReason(bm[2].trim());
+    const why = reason ? `: ${reason}` : "";
+    suffix = bm[1] === "실행 불가"
+      ? ` → 다만 가드레일에 막혀 실제로는 바뀌지 않았습니다${why}.`
+      : ` → 실행 중 오류로 실제 반영 여부가 불확실합니다${why}.`;
+  }
+
+  const body = humanizeRationaleBody(base);
+  if (body === null) {
+    // 본문은 못 알아봄 — 원문 그대로(접미사만 사람말). 원문 툴팁은 변형됐을 때만.
+    const text = base + suffix;
+    return { text, title: text !== trimmed ? raw : undefined };
+  }
+  return { text: body + suffix, title: raw };
+}
+
+/** 근거 셀 — 사람말 + 원문 title 툴팁(hover 시 감사용 원문 노출). */
+function RationaleCell({ raw }: { raw: string | null | undefined }) {
+  const { text, title } = formatRationale(raw);
+  return <span className="text-xs text-gray-600" title={title}>{text}</span>;
+}
+
+// ══════════════════════════════════════════════════════════════════
 // D-NAO-54 기간 선택 — 변경 이력 두 패널이 **각각** 쓰는 재사용 컴포넌트.
 // ★상태는 공유하지 않는다(패널마다 독립 usePeriod). 의도된 것이다: 외부 감지는 하루 1회
 //   (07:35 entity_sync)라 우리 시간당 집행과 자연스러운 창이 다르다. 대신 각 카드의 탭이
@@ -621,7 +737,7 @@ function ChangeLogTable({ range, label }: { range: DateRange; label: string }) {
             {/* ★"무엇을 왜 바꿨는지" — MOP에 0개인 컬럼(ref24). 우리가 이길 자리이므로
                 지원하는 실행 액션 4종을 전부 제대로 그린다(codex[P2] R3). */}
             <Td><ChangeCell row={r} /></Td>
-            <Td><span className="text-xs text-gray-600">{r.rationale ?? NO_DATA}</span></Td>
+            <Td><RationaleCell raw={r.rationale} /></Td>
           </tr>
         ))}
       </Table>
@@ -672,7 +788,7 @@ function ExternalChangesTable({ range, label }: { range: DateRange; label: strin
             <Td><span className="text-xs text-gray-500">{r.changed_at?.slice(5, 16) ?? NO_DATA}</span></Td>
             <Td><span className="text-xs">{r.entity_type} {r.entity_id}</span></Td>
             <Td><span className="text-xs tabular-nums">{describeChange(r)}</span></Td>
-            <Td><span className="text-xs text-gray-600">{r.rationale ?? NO_DATA}</span></Td>
+            <Td><RationaleCell raw={r.rationale} /></Td>
           </tr>
         ))}
       </Table>
@@ -712,7 +828,7 @@ function PendingPane() {
               <Td>{PROPOSAL_TYPE_LABEL[p.proposal_type] ?? p.proposal_type}</Td>
               <Td><span className="text-xs">{p.target_id}</span></Td>
               <Td right>{p.target_bid != null ? won(p.target_bid) : p.target_budget != null ? won(p.target_budget) : NO_DATA}</Td>
-              <Td><span className="text-xs text-gray-600">{p.rationale}</span></Td>
+              <Td><RationaleCell raw={p.rationale} /></Td>
             </tr>
           ))}
         </Table>
