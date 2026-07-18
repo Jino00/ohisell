@@ -52,6 +52,9 @@ def ingest_ad_daily(
             imp=r["imp"], clk=r["clk"], cost=r["cost"], rank_sum=r["rank_sum"],
             conv_direct_cnt=r["conv_direct_cnt"], conv_indirect_cnt=r["conv_indirect_cnt"],
             conv_direct_amt=r["conv_direct_amt"], conv_indirect_amt=r["conv_indirect_amt"],
+            # D-NAO-58 CD1: 장바구니 전환(구버전 rows는 cart_* 없음 → 0). total_conv엔 불섞.
+            cart_direct_cnt=r.get("cart_direct_cnt", 0), cart_indirect_cnt=r.get("cart_indirect_cnt", 0),
+            cart_direct_amt=r.get("cart_direct_amt", 0), cart_indirect_amt=r.get("cart_indirect_amt", 0),
             synced_at=now,
         ))
     db.commit()

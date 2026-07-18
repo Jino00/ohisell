@@ -1479,10 +1479,18 @@ class NaverAdDaily(Base):
     clk: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     cost: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 원, VAT 별도
     rank_sum: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # avg_rank = rank_sum/imp
-    conv_direct_cnt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 직접전환 수
-    conv_indirect_cnt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 간접전환 수
-    conv_direct_amt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 직접전환 매출(원)
-    conv_indirect_amt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 간접전환 매출(원)
+    conv_direct_cnt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 직접전환 수(구매)
+    conv_indirect_cnt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 간접전환 수(구매)
+    conv_direct_amt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 직접전환 매출(원, 구매)
+    conv_indirect_amt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 간접전환 매출(원, 구매)
+    # D-NAO-58 CD1(선행지표 데이터층): 장바구니(add_to_cart) 전환 — 구매(conv_*)와 별도 수집.
+    # ★매출/ROAS/BEP 회계엔 절대 안 섞임(회계 코드는 conv_*만 읽음). cart_conversion_rate SA가
+    # 상품별 장바구니→구매 전환율을 산출해 탐침 선행지표 가중에 쓴다. cart_*_amt는 리포트의
+    # 전환가치 컬럼 원값 저장용일 뿐, 어떤 매출 합계에도 더해지지 않는다.
+    cart_direct_cnt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 직접 장바구니 수
+    cart_indirect_cnt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 간접 장바구니 수
+    cart_direct_amt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 직접 장바구니 전환가치(원, 매출 아님)
+    cart_indirect_amt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 간접 장바구니 전환가치(원, 매출 아님)
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 

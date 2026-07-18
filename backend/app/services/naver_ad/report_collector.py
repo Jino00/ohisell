@@ -16,6 +16,8 @@ from app.services.naver_sa_ad_fetcher import (
 log = logging.getLogger(__name__)
 
 _CONV_FIELDS = ("conv_direct_cnt", "conv_indirect_cnt", "conv_direct_amt", "conv_indirect_amt")
+# D-NAO-58 CD1: 장바구니(add_to_cart) 전환 — 구매(conv_*)와 나란히 보존하되 매출엔 불섞.
+_CART_FIELDS = ("cart_direct_cnt", "cart_indirect_cnt", "cart_direct_amt", "cart_indirect_amt")
 
 
 def _key(r: dict) -> tuple:
@@ -58,6 +60,8 @@ def collect_daily_rows(
             "imp": r["imp"], "clk": r["clk"], "cost": r["cost"], "rank_sum": r["rank_sum"],
             "conv_direct_cnt": 0, "conv_indirect_cnt": 0,
             "conv_direct_amt": 0, "conv_indirect_amt": 0,
+            "cart_direct_cnt": 0, "cart_indirect_cnt": 0,
+            "cart_direct_amt": 0, "cart_indirect_amt": 0,
         }
 
     for r in conv_rows:
@@ -73,10 +77,14 @@ def collect_daily_rows(
                 "imp": 0, "clk": 0, "cost": 0, "rank_sum": 0,
                 "conv_direct_cnt": 0, "conv_indirect_cnt": 0,
                 "conv_direct_amt": 0, "conv_indirect_amt": 0,
+                "cart_direct_cnt": 0, "cart_indirect_cnt": 0,
+                "cart_direct_amt": 0, "cart_indirect_amt": 0,
             }
             merged[k] = row
         for f in _CONV_FIELDS:
             row[f] += r[f]
+        for f in _CART_FIELDS:  # 구버전 conv_rows(cart_* 없음)도 안전(기본 0)
+            row[f] += r.get(f, 0)
 
     log.info("naver_ad collect: %s~%s 병합 %d행", date_from, date_to, len(merged))
     return list(merged.values())

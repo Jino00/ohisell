@@ -69,24 +69,28 @@ def test_fetch_ad_performance_aggregates_device_and_ad(monkeypatch):
     assert (shop["imp"], shop["clk"], shop["cost"]) == (20, 3, 200)
 
 
-def test_fetch_conversion_splits_direct_indirect_and_excludes_cart(monkeypatch):
+def test_fetch_conversion_splits_direct_indirect_and_routes_cart(monkeypatch):
+    """D-NAO-58 CD1: purchase→conv_*, add_to_cart→cart_* 분리 라우팅(구매 매출 불변)."""
     monkeypatch.setattr(fetcher, "ACCESS_LICENSE", "x")
     monkeypatch.setattr(fetcher, "SECRET_KEY_B64", "x")
     monkeypatch.setattr(fetcher, "ensure_reports_built", lambda *a, **k: None)
     monkeypatch.setattr(fetcher, "_list_reports_by_type",
                         lambda tp, a, b: [{"date": "2026-07-05", "downloadUrl": "u"}])
     rows = [
-        _conv_row("20260705", "cmp-01", "grp-1", "nkw-A", "1", "purchase", 1, 15900),   # 직접
-        _conv_row("20260705", "cmp-01", "grp-1", "nkw-A", "2", "purchase", 1, 10000),   # 간접
-        _conv_row("20260705", "cmp-01", "grp-1", "nkw-A", "1", "add_to_cart", 1, 5000), # 제외
+        _conv_row("20260705", "cmp-01", "grp-1", "nkw-A", "1", "purchase", 1, 15900),   # 직접 구매
+        _conv_row("20260705", "cmp-01", "grp-1", "nkw-A", "2", "purchase", 1, 10000),   # 간접 구매
+        _conv_row("20260705", "cmp-01", "grp-1", "nkw-A", "1", "add_to_cart", 1, 5000), # 장바구니→cart_*
     ]
     monkeypatch.setattr(fetcher, "_download_tsv", lambda url: rows)
 
     out = fetcher.fetch_conversion_daily(date(2026, 7, 5), date(2026, 7, 5))
     assert len(out) == 1
     r = out[0]
+    # 구매 매출은 byte-for-byte 불변(장바구니 5000이 섞이면 안 됨)
     assert r["conv_direct_cnt"] == 1 and r["conv_direct_amt"] == 15900
-    assert r["conv_indirect_cnt"] == 1 and r["conv_indirect_amt"] == 10000  # 장바구니 5000 제외
+    assert r["conv_indirect_cnt"] == 1 and r["conv_indirect_amt"] == 10000
+    # 장바구니는 cart_*로 별도 수집
+    assert r["cart_direct_cnt"] == 1 and r["cart_direct_amt"] == 5000
 
 
 def test_report_collector_merges_and_creates_conv_only_row():
