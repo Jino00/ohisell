@@ -2,8 +2,14 @@
 # 매 sprint 완료 시 Claude가 이 파일을 갱신합니다.
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
+## 04 자동운영 감사 로그 (D-NAO-52 서버 이관 후)
+- **D+1 (2026-07-18 08:55)**: 서버 레인 정상(daily 08:50/hourly 08:20 ok, err 0). 오늘 04 집행 1건=일 레인 17E 1470→1550 bid_up(라이브 검증 합격 bidAmt=1550). 시간당 집행 0. ★핑퐁 확인(1500→1720→1470→1550/24h, 일 UP↔시간당 DOWN 상충 — Jino 판단 대상). 가드레일 차단 재확인(어제 20:20 쿨다운). ⚠️WATCH: 07-17 소진 21,257=prior7 3.36배(의도된 입찰 인상 결과·ROAS 4.21 건전·서버 서킷 미발화 → 킬스위치 미실행·관찰). 상세=track D-NAO-52 D+1 + ab jsonl.
+
 ## 현재 상태
-- 날짜: 2026-07-17 21:20 KST (★**나머지 페처 4종 실패 보고 구멍 수정·배포·라이브합격** — 트랙 외 별건(네이버 트랙 무관), Jino 승인. **PR #33 병합**)
+- 날짜: 2026-07-17 23:59 KST (★★**D-NAO-54 운영 일기·지혜 시스템 — 구조 Jino 승인·계획서 완성·구현 미착수** + MOP35 아카이브/MOP36 되감기 사고 2건 복구 + AI_office obsidian-bridge EDEADLK 수리(`bce33b1c`, 오류 287→0))
+  - **다음 세션 = `.claude/memory/HANDOFF_ohisell-diary-wisdom-approved+bridge-fix_20260717.md` 읽고 P1부터 자동 진행** (Fable설계/Opus구현/Sonnet단순, 옵션=추천안 자동 — Jino 지시 원문이 HANDOFF에 있음). 계획서=`docs/PLAN_naver-ad-diary-wisdom.md`(§0 먼저), Task 보드 #1~#5 생성됨.
+  - 새 브랜치는 origin/main(f1b341a)에서. codex 한도 07-23까지 소진 — 독립 리뷰어 서브에이전트 대체+소급 리뷰 명기. 미커밋 docs(트랙 D-NAO-54·계획서·HANDOFF 2건)는 새 브랜치 첫 커밋에 포함할 것.
+  - 세션 소실 재발 방지: `ccAutoArchiveOnPrClose` OFF 실측(07-11 HANDOFF 소실도 같은 원인이었음). 되감기 복구 상세=`HANDOFF_MOP36-rewind-recovery_20260717.md`.
   - PR #30(오픽스 광고비)이 확립한 패턴을 같은 구멍을 공유하던 나머지에 적용: Wing 판매분석(COUPANG_WING_VS)·RG 정산(COUPANG_WING_RG)·오하이테크 광고(COUPANG_OHITECH_AD)·**로켓 발주/정산(COUPANG_ROCKET)**.
   - ★**브리프 전제 2건 정정**: ①**마이그 없음** — 4종 상태행이 전부 `coupang_wing_cookie` 한 테이블(account_key로만 구분) → #30의 last_error_at 컬럼이 이미 다 덮음(prod 이미 그 head 실측). ②**범위 4종**(브리프는 3종 지목했으나 폴링 루프는 4곳, 로켓 페처도 이미 목록에 있었음).
   - ★**status 미변경 계약 승계**(#30 codex 1R[P2]): red면 Layout.tsx:201/206이 헛된 쿠키 재설정 CTA를 띄운다. 4종 모두 테스트로 못박음.
