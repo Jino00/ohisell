@@ -2,11 +2,12 @@
 # 역할: 진단·시뮬레이션(S2/S3)이 쓸 target_roas를 우선순위로 해석하는 순수 함수.
 #   우선순위(계획서 §P2-S1⑤): ① naver_campaign_settings.target_roas_override
 #   ② (쇼핑) 상품BEP 연결  ③ 계정 기본값(BEP 매출가중).
-# ⚠️ ②는 미구현 — 캠페인/그룹→상품(channel_product_id) 매핑 데이터가 아직 없음(네이버 쇼핑
-#   광고는 그룹 단위로만 성과가 잡히고, 어느 그룹이 어느 상품을 노출하는지 연결하는 소스를
-#   아직 확보하지 못함). 이름 유사도 등 추정 매칭은 금전 판단에 쓰기엔 근거가 약해 시도하지
-#   않음(원칙: 추정 금지) — 확정 소스(예: /ncc/ads 소재-상품 연결 또는 ShoppingProduct
-#   master-report) 확인 전까지 ①→③ 순으로 폴백. S2 착수 시 재검토.
+# ✅ ②는 D-NAO-57 A에서 구현됨 — /ncc/ads referenceData.mallProductId(라이브 실증)를
+#   shopping_ad_product_sync가 naver_adgroup_product에 적재하고, 여기서 그 매핑의 상품 BEP
+#   target_roas를 쓴다(여러 소재면 최근 주문매출 가중, 매출 없으면 단순평균). 매핑/BEP가 없으면
+#   기존 ③(계정 기본값)으로 폴백. 이름 유사도 등 추정 매칭은 여전히 금지(원칙: 추정 금지) —
+#   ②는 확정 소스(mall_product_id == channel_product_id)로만 성립한다.
+# ★우선순위 ①(override)은 절대 불변 — 항상 최우선(D-NAO-57 A 명시).
 from __future__ import annotations
 
 from decimal import Decimal
@@ -14,7 +15,7 @@ from decimal import Decimal
 from sqlalchemy import func as sqlfunc
 from sqlalchemy.orm import Session
 
-from app.models import NaverCampaignSettings, NaverProductBep, Order
+from app.models import NaverAdgroupProduct, NaverCampaignSettings, NaverProductBep, Order
 
 NAVER_CHANNEL_ID = 6
 
@@ -52,6 +53,79 @@ def _revenue_weighted_avg(db: Session, column) -> Decimal | None:
     return sum((v for _, v in rows), Decimal("0")) / len(rows)  # 주문 없으면 단순평균
 
 
+def _weighted_target_for_cpids(
+    db: Session, cpids: list[str], column
+) -> Decimal | None:
+    """주어진 상품(channel_product_id) 집합의 column(target/bep_roas)을 최근 주문매출로 가중평균.
+
+    D-NAO-57 A: 우선순위 ②(상품 파생 target)의 코어. has_cost=True(원가 있어 산출됨) 상품만
+    대상 — 원가 미확인 상품은 임의 추정 없이 이 계산에서 자연히 빠진다(빠진 결과로 대상 상품이
+    0개면 None 반환 → 호출부가 ③ 폴백). 여러 상품이면 실거래 매출 가중, 매출이 전혀 없으면
+    단순평균(_revenue_weighted_avg와 동일 관례).
+    """
+    if not cpids:
+        return None
+    uniq = list(dict.fromkeys(cpids))  # 중복 제거(순서 보존)
+    rows = db.query(NaverProductBep.channel_product_id, column).filter(
+        NaverProductBep.channel_id == NAVER_CHANNEL_ID,
+        NaverProductBep.has_cost.is_(True),
+        NaverProductBep.channel_product_id.in_(uniq),
+        column.isnot(None),
+    ).all()
+    if not rows:
+        return None
+
+    revenue_by_pid = dict(
+        db.query(Order.platform_product_id, sqlfunc.sum(Order.selling_price))
+        .filter(
+            Order.channel_id == NAVER_CHANNEL_ID,
+            Order.selling_price > 0,
+            Order.platform_product_id.in_([pid for pid, _ in rows]),
+        )
+        .group_by(Order.platform_product_id).all()
+    )
+    weighted_sum = Decimal("0")
+    weight_total = Decimal("0")
+    for pid, value in rows:
+        rev = Decimal(str(revenue_by_pid.get(pid) or 0))
+        weighted_sum += value * rev
+        weight_total += rev
+    if weight_total > 0:
+        return weighted_sum / weight_total
+    return sum((v for _, v in rows), Decimal("0")) / len(rows)  # 주문 없으면 단순평균
+
+
+def _cpids_for_adgroup(db: Session, adgroup_id: str) -> list[str]:
+    """광고그룹에 매핑된 상품(mall_product_id=channel_product_id) 목록(naver_adgroup_product)."""
+    return [
+        r[0] for r in db.query(NaverAdgroupProduct.mall_product_id)
+        .filter(NaverAdgroupProduct.adgroup_id == adgroup_id).all()
+    ]
+
+
+def _cpids_for_campaign(db: Session, campaign_id: str) -> list[str]:
+    """캠페인의 그룹들에 매핑된 상품 전체 목록(campaign grain 해석용, 그룹들 가중)."""
+    return [
+        r[0] for r in db.query(NaverAdgroupProduct.mall_product_id)
+        .filter(NaverAdgroupProduct.campaign_id == campaign_id).all()
+    ]
+
+
+def resolve_adgroup_target_roas(db: Session, adgroup_id: str) -> dict:
+    """광고그룹 grain의 목표 ROAS를 상품 파생(②)으로 해석. 반환: {target_roas, source}.
+
+    D-NAO-57 A: 그 그룹의 매핑 상품(들)의 상품 BEP target_roas 가중평균. 매핑/BEP가 없으면
+    계정 기본값(③)으로 폴백. 우선순위 ①(캠페인 override)은 grain이 캠페인이라 여기서는 다루지
+    않는다 — override는 캠페인 수준 resolve_target_roas에서만 적용된다.
+    source: product_bep(②) / account_default(③) / unavailable.
+    """
+    val = _weighted_target_for_cpids(db, _cpids_for_adgroup(db, adgroup_id), NaverProductBep.target_roas)
+    if val is not None:
+        return {"target_roas": val, "source": "product_bep"}
+    default = account_default_target_roas(db)
+    return {"target_roas": default, "source": "account_default" if default is not None else "unavailable"}
+
+
 def account_default_target_roas(db: Session) -> Decimal | None:
     """계정 기본 목표 ROAS = 상품별 target_roas를 최근 주문매출로 가중평균(매출가중)."""
     return _revenue_weighted_avg(db, NaverProductBep.target_roas)
@@ -70,14 +144,24 @@ def account_default_bep_roas(db: Session) -> Decimal | None:
 def resolve_target_roas(db: Session, campaign_id: str) -> dict:
     """캠페인의 목표 ROAS를 우선순위대로 해석. 반환: {target_roas, source}.
 
-    source: override(①) / account_default(③). ②(상품BEP 연결)는 위 모듈 docstring 참조 —
-    데이터 소스 확보 전까지 미구현.
+    우선순위(D-NAO-57 A로 ② 활성화):
+      ① naver_campaign_settings.target_roas_override — **절대 불변, 항상 최우선**
+      ② 상품 파생 — 이 캠페인의 그룹들에 매핑된 상품 BEP target_roas 가중평균(그룹들 가중)
+      ③ 계정 기본값(BEP 매출가중)
+    source: override(①) / product_bep(②) / account_default(③) / unavailable.
     """
     settings = db.query(NaverCampaignSettings).filter(
         NaverCampaignSettings.campaign_id == campaign_id
     ).first()
     if settings and settings.target_roas_override is not None:
         return {"target_roas": settings.target_roas_override, "source": "override"}
+
+    # ② 상품 파생: 캠페인의 그룹들에 매핑된 상품 BEP target 가중평균(그룹들 가중).
+    product_val = _weighted_target_for_cpids(
+        db, _cpids_for_campaign(db, campaign_id), NaverProductBep.target_roas
+    )
+    if product_val is not None:
+        return {"target_roas": product_val, "source": "product_bep"}
 
     default = account_default_target_roas(db)
     return {"target_roas": default, "source": "account_default" if default is not None else "unavailable"}

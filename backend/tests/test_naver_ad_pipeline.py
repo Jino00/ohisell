@@ -146,8 +146,12 @@ def test_calculate_bep_formula_and_has_cost(db):
     p1 = rows["100"]
     assert p1.has_cost is True
     assert float(p1.selling_price) == 15900 and float(p1.cost_price) == 5000
-    # contribution = (15900 - 15900*0.04173 - 5000)/1.1 ≈ 9306, bep = 15900/9306 ≈ 1.708
-    assert 1.69 < float(p1.bep_roas) < 1.72
+    # D-NAO-57 (C): logistics = 배송비 1900 ÷ 평균 주문수량(총수량7/6주문=1.1667) = 1628.57,
+    # VAT 분자 안(원가·수수료와 동일). 정산 case 없음 → 수수료 basis=blended(effective 0.04173).
+    assert p1.commission_basis == "blended"
+    assert p1.logistics_cost == Decimal("1628.57")
+    # contribution = (15900 - 15900*0.04173 - 5000 - 1628.57)/1.1 ≈ 7825, bep = 15900/7825 ≈ 2.03
+    assert 2.00 < float(p1.bep_roas) < 2.06
     assert abs(float(p1.target_roas) - float(p1.bep_roas) * 1.15) < 0.01
     p2 = rows["200"]
     assert p2.has_cost is False and p2.bep_roas is None

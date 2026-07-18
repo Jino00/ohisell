@@ -588,6 +588,39 @@ def get_keywords(adgroup_id: str) -> list[dict]:
     } for k in resp.json()]
 
 
+def get_ads(adgroup_id: str) -> list[dict]:
+    """광고그룹의 소재(ad) 목록 → 쇼핑 상품 매핑 원료 (D-NAO-57 A).
+
+    GET /ncc/ads?nccAdgroupId=... . 쇼핑 상품 소재(type=SHOPPING_PRODUCT_AD)는
+    referenceData.mallProductId(예: "13365319468")를 담는데, 이 값이
+    naver_product_bep.channel_product_id와 정확히 일치한다(라이브 실증, 트랙 D-NAO-57 A).
+
+    반환: [{"ad_id","adgroup_id","ad_type","mall_product_id","product_name"}, ...]
+    (mall_product_id가 있는 소재만 — 쇼핑 상품 소재가 아니거나 referenceData에 상품번호가
+    없으면 제외). product_name은 referenceData에서 best-effort로 추출(표시용, 매핑 정확성엔
+    무관 — 확정 필드가 아니라 여러 후보 키를 시도하고 없으면 빈 문자열).
+    """
+    resp = _get("/ncc/ads", {"nccAdgroupId": adgroup_id})
+    resp.raise_for_status()
+    out: list[dict] = []
+    for a in resp.json():
+        ref = a.get("referenceData") or {}
+        mall_pid = ref.get("mallProductId")
+        if not mall_pid:
+            continue  # 쇼핑 상품 소재가 아니거나 상품번호 부재 → 매핑 대상 아님
+        # product_name: referenceData의 확정 키가 실측 전이라 후보 키를 순서대로 시도(추정
+        # 하드코딩 아님 — 첫 존재값 채택, 전부 없으면 ""). 매핑 정확성은 mall_product_id로만 판단.
+        name = ref.get("productTitle") or ref.get("productName") or ref.get("name") or ""
+        out.append({
+            "ad_id": a.get("nccAdId", ""),
+            "adgroup_id": a.get("nccAdgroupId", adgroup_id),
+            "ad_type": a.get("type", ""),
+            "mall_product_id": str(mall_pid),
+            "product_name": name,
+        })
+    return out
+
+
 def create_stat_report(report_tp: str, stat_date: date) -> dict:
     """지정 타입의 stat-report 생성 요청(자체생성, 2026-07-11 수집장애 근본원인 수정).
 

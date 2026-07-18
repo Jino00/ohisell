@@ -1516,7 +1516,33 @@ class NaverProductBep(Base):
     aggressiveness: Mapped[str] = mapped_column(String(12), nullable=False, default="standard")  # safe/standard/aggressive
     target_roas: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4), nullable=True)  # bep_roas × 공격성 배수
     has_cost: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # D-NAO-57(B): 광고 의사결정 BEP에 쓴 수수료율 기준 — ad_case(정산 유형별 실측 분해=주문관리+
+    # 매출연동 언디루션) / blended(기존 전체 회계 실효율 폴백). None=산출 전/폴백 미판정.
+    commission_basis: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     calculated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class NaverAdgroupProduct(Base):
+    """네이버 쇼핑 광고그룹 ↔ 판매 상품 매핑 (D-NAO-57 A, 관찰성 sync).
+
+    grain: (adgroup_id, mall_product_id). 소스: 쇼핑 소재 /ncc/ads의
+    referenceData.mallProductId(type=SHOPPING_PRODUCT_AD) — naver_product_bep.channel_product_id와
+    정확히 일치(라이브 실증). 한 그룹에 소재(상품)가 여럿일 수 있어 unique는 (adgroup, mall_product).
+    optimizer='ours' 쇼핑 캠페인의 활성 그룹만 매일 08:20 sync가 스냅샷 교체(그룹 단위).
+    campaign_target_resolver 우선순위 ②(상품 파생 target_roas)가 이 매핑을 소비한다.
+    """
+
+    __tablename__ = "naver_adgroup_product"
+    __table_args__ = (
+        UniqueConstraint("adgroup_id", "mall_product_id", name="uq_naver_adgroup_product"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    adgroup_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    campaign_id: Mapped[str] = mapped_column(String(50), nullable=False, default="", index=True)
+    mall_product_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)  # = naver_product_bep.channel_product_id
+    product_name: Mapped[str] = mapped_column(String(300), nullable=False, default="")
+    synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
 class NaverCampaignSettings(Base):

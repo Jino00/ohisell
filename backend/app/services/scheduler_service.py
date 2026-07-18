@@ -299,6 +299,24 @@ def sync_naver_entity_job():
         db.close()
 
 
+def shopping_ad_product_sync_job():
+    """쇼핑 광고그룹↔상품 매핑 동기화 (08:20 KST, D-NAO-57 A, 관찰성 sync).
+
+    optimizer='ours' 쇼핑 캠페인의 활성 그룹 /ncc/ads → naver_adgroup_product 스냅샷 교체.
+    campaign_target_resolver 우선순위 ②(상품 파생 target)의 데이터 소스. fail-open — 매핑 sync
+    실패가 08:50 일 레인(catch-up 체인 하류)을 막으면 안 된다(관찰성 잡이라 하루 늦어도 무해)."""
+    db = _get_own_db_session()
+    try:
+        from app.services.naver_ad.shopping_ad_product_sync import sync_adgroup_products
+
+        result = sync_adgroup_products(db)
+        log.info("[스케줄러] naver shopping_ad_product sync: %s", result)
+    except Exception as e:
+        log.exception("[스케줄러] shopping_ad_product_sync_job 에러(fail-open): %s", e)
+    finally:
+        db.close()
+
+
 def sync_naver_search_term_job():
     """네이버 SA 검색어 단위 성과 수집 (07:40 KST, P2-S1). 최근 3일 창(사후정정 흡수)."""
     db = _get_own_db_session()
@@ -1069,6 +1087,7 @@ def _ensure_default_states(db):
         ("run_naver_diary_reflection", "35 8 * * *"),  # 운영 일기 해석층(결과 소급 기입+해석문, D-NAO-54 P2)
         ("run_naver_wisdom", "45 8 * * *"),  # 운영 일기 지혜 승격·망각층(후보→판사→지혜+보고→망각, D-NAO-54 P3)
         ("run_naver_vault_export", "5 9 * * *"),  # 운영 일기·지혜 Obsidian 볼트 export(열람층, D-NAO-54 P5)
+        ("shopping_ad_product_sync", "20 8 * * *"),  # 쇼핑 그룹↔상품 매핑(상품 파생 target 소스, D-NAO-57 A)
         ("run_naver_auto_operator_daily", "50 8 * * *"),  # D-NAO-48 4조건 심사·집행 서버화(D-NAO-49)
         ("sweep_naver_keyword_hourly", "10 9 * * *"),  # 키워드/쇼핑그룹 시간별(hh24) 축적, D-1 스윕(D-NAO-46②)
         ("run_naver_auto_operator_hourly", "20 * * * *"),  # 시간당 밴드 관제 실입찰(catch-up 제외, D-NAO-49)
@@ -1116,6 +1135,7 @@ _CATCHUP_ORDER: tuple[str, ...] = (
     "generate_naver_proposals",    # 08:00
     "generate_expert_desk",        # 08:05 (proposals 성공 후라야 pending>0 → 의미 있음)
     "run_naver_learning_loops",    # 08:10
+    "shopping_ad_product_sync",    # 08:20 (D-NAO-57 A, 레인 전 — 상품 파생 target 매핑 갱신. fail-open이라 실패해도 체인 안 끊김)
     "run_naver_retro_scoring",     # 08:30 (D-NAO-45, 비정형 아닌 표준 cron이라 catch-up 포함)
     "run_naver_auto_operator_daily",  # 08:50 (D-NAO-49, 조건④ bleeding 판정이 retro_scoring 결과를 쓴다 — 그 뒤)
     "run_naver_diary_reflection",  # 08:35 크론이지만 catch-up은 집행(08:50) *뒤*(P2 리뷰 P2-1: LLM 재시도 최대 9분이 돈 잡 복구를 지연시키면 안 됨 — 관찰 전용이라 어제/D-2/D-8 버킷은 순서 무관. fail-open은 영구 블록만 막고 지연은 못 막는다)
@@ -1233,6 +1253,7 @@ def _catch_up_morning_batch():
         "generate_naver_proposals": _run_proposals_catchup_verified,
         "generate_expert_desk": generate_expert_desk_job,
         "run_naver_learning_loops": run_naver_learning_loops_job,
+        "shopping_ad_product_sync": shopping_ad_product_sync_job,
         "run_naver_retro_scoring": run_naver_retro_scoring_job,
         "run_naver_diary_reflection": run_naver_diary_reflection_job,
         "run_naver_auto_operator_daily": run_naver_auto_operator_daily_job,
@@ -1276,6 +1297,7 @@ def job_func_for(job_name: str):
         "snapshot_naver_ad_hourly": snapshot_naver_ad_hourly_job,
         "trigger_watch": trigger_watch_job,
         "sync_naver_entity": sync_naver_entity_job,
+        "shopping_ad_product_sync": shopping_ad_product_sync_job,
         "sync_naver_search_term": sync_naver_search_term_job,
         "sync_naver_keyword_volume": sync_naver_keyword_volume_job,
         "run_naver_forecast_engine": run_naver_forecast_engine_job,
