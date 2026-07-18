@@ -34,6 +34,7 @@ _APPROVAL_SOURCE_TO_ACTOR = {
     "auto_op": ACTOR_DAILY,      # APPROVAL_SOURCE_DAILY
     "auto_op_hr": ACTOR_HOURLY,  # APPROVAL_SOURCE_HOURLY
     "probe_op": ACTOR_PROBE,     # APPROVAL_SOURCE_PROBE (D-NAO-58 CD2)
+    "revert_op": ACTOR_PROBE,    # APPROVAL_SOURCE_REVERT (D-NAO-58 CD3 되돌림 — 같은 주체)
 }
 
 # 공휴일 판정 — sales_velocity_estimator._KR_HOLIDAYS와 동일 라이브러리(holidays.SouthKorea).

@@ -54,10 +54,15 @@
 - probe_step_sa: run_hourly_lane에 탐침 분기 — 밴드 안인데 트리거 참이면 한 등 상향 제안(기존 가드레일·쿨다운·BEP하한 통과, approval_source=probe 태그). auto_operate 캠페인만 자동 집행.
 - 완료 기준: 트리거 발동·probe 집행이 diary에 probe 태그로 기록됨 실측.
 
-### CD3 되돌림·성과 판정층
-- revert_sa 2단계: ①실시간(비용 급등+즉시판매0) 즉시 원위치 ②D+1 signal_sa 종합 판정.
-- probe outcome을 diary outcome_json에 probe 결과로 기입(P2 outcome_backfill 확장).
-- 완료 기준: 탐침 왕복 1회(상향→관측→유지 or 되돌림) 실측.
+### CD3 되돌림·성과 판정층 (D-58-8~10 확정, 2026-07-18)
+- **상태 추적 = change_log 파생(마이그레이션 없음)**: standing probe = `NaverProposal(approval_source='probe_op', executed_change_log_id NOT NULL)` 중 그 유닛의 가장 최근 성공 `update_bid` change_log가 그 probe인 것(이후 다른 변경 있으면 = 이미 해소, 제외). 최근 7일 창만 probe로 취급. 되돌림 값 = 그 change_log `before_value["bidAmt"]`.
+- **신규 SA 2개(원칙18 단일책임)**:
+  - `probe_signal.py` — `probe_signal_score(db, grain, target, campaign, date_from, date_to)`: 순수 계산. immediate=conv_direct_cnt+conv_indirect_cnt, carts=cart_direct_cnt+cart_indirect_cnt, cart_rate=cart_conversion_rate(상품→캠페인→global 폴백), adjusted_score=immediate+carts×cart_rate, + cost/clk/conv_amt/roas_corrected 반환.
+  - `probe_revert.py` — revert_sa: `_standing_probes()`·`run_bleed_valve()`(Stage1)·`run_settlement()`(Stage2)·`_execute_revert()`·`_write_probe_outcome()`.
+- **Stage 1 실시간 출혈 밸브**(run_hourly_lane 말미, lazy import — 매시 :20): 당일 standing probe에 hh24 곡선으로 (a)완료시간대 누적비용/now.hour > 정착창 시간당평균(총비용/(7×24))×`_PROBE_BLEED_COST_MULTIPLE(=3)` AND (b)그날 conv_direct_cnt=0(행 부재도 0). 둘 다 → 즉시 되돌림. intraday conv 측정 한계로 사실상 "시간당 3× 비용급등 시 보수적 회수"(되돌림은 완전 가역, 쿨다운 2h 후 재탐침 가능).
+- **Stage 2 D+1 정산 판정**(신규 크론 08:55, 일 레인·해석 뒤): age≥1 standing probe에 signal_sa. ①clk=0→되돌림 ②clk>0∧roas≥target→유지(CD4 지혜 후보) ③clk>0∧roas<target∧adjusted<1.0→되돌림 ④clk>0∧roas<target∧adjusted≥1.0→defer(D+2 재판정) ⑤근거부족→defer, age≥3이면 안전 default 되돌림. 결과를 probe execute diary outcome_json["probe"]에 기입.
+- **되돌림 집행 초크포인트 경유(우회 금지)**: bid_down 제안(target_bid=before_value, `APPROVAL_SOURCE_REVERT="revert_op"`) → execute()(guardrail·킬스위치·change_log 전량 통과). diary ACTOR_PROBE 재사용, harness 킬스위치 튜플에 revert_op 추가.
+- 완료 기준: 탐침 왕복 1회(상향→관측→유지 or 되돌림) 실측(자연 발동 대기, 원칙22).
 
 ### CD4 환경별 학습·세분화층
 - 계층적 풀링: 환경 셀(거친 축 시작) × 순위 → 클릭/선행지표 집계. hierarchical_pooling 재사용.

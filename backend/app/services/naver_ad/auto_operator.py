@@ -54,6 +54,7 @@ _DAILY_LANE_PROPOSAL_TYPES = ("bid_up", "bid_down", "pause")  # PLAN §3 명시 
 APPROVAL_SOURCE_DAILY = "auto_op"  # 7자
 APPROVAL_SOURCE_HOURLY = "auto_op_hr"  # 10자
 APPROVAL_SOURCE_PROBE = "probe_op"  # 8자 — D-NAO-58 CD2 클릭 탐침(String(12) 적합, diary probe actor)
+APPROVAL_SOURCE_REVERT = "revert_op"  # 9자 — D-NAO-58 CD3 탐침 되돌림(String(12) 적합, diary ACTOR_PROBE 재사용)
 _MIN_CLICK_FOR_APPROVAL = 10  # D-NAO-48 조건②(rationale 창 클릭) / §4-1 핫셋 클릭 게이트 공유
 _MIN_HOURLY_SAMPLE_IMP = 30  # §4-2 "imp 합 < 30이면 그 시간대 묶음은 판단 보류"
 _HOURLY_RANK_DOWN_THRESHOLD = Decimal("2.5")  # §4-3 DOWN: 가중 avg_rank < 2.5
@@ -834,7 +835,12 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
     (기존 up 경로 그대로 통과 — 라이브 현재가 재조회·_clamp_step·킬스위치 재확인·execute).
     탐침 제안만 approval_source=probe_op·rationale [클릭탐침]로 태그(diary probe actor).
 
-    반환: {"reviewed", "approved", "executed", "held": [...], "skipped", "failed", "probed"}.
+    D-NAO-58 CD3 Stage 1: 레인 말미에 probe_revert.run_bleed_valve로 당일 standing probe의
+    실시간 출혈(비용×3 급등∧즉시구매0)을 회수한다(lazy import·fail-soft — 밸브 실패가 레인
+    집행 결과를 오염시키지 않는다).
+
+    반환: {"reviewed", "approved", "executed", "held": [...], "skipped", "failed", "probed",
+           "bleed"}.
     """
     now = now or kst_now()
     fetch_intraday = fetch_intraday or fetch_entity_hh24
@@ -957,5 +963,14 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
             except Exception as e:  # noqa: BLE001 — harness가 change_log/상태를 이미 확정(failed 등)
                 result["failed"] += 1
                 log.warning("auto_operator: 시간당 레인 실행 실패 proposal_id=%s: %s", proposal.id, e)
+
+    # D-NAO-58 CD3 Stage 1: 탐침 실시간 출혈 밸브 — 당일 standing probe 회수(비용×3 급등∧즉시구매0).
+    # lazy import(순환 회피 — probe_revert가 auto_operator를 import). 실패가 레인 결과를 오염시키지 않음.
+    from app.services.naver_ad import probe_revert
+    try:
+        result["bleed"] = probe_revert.run_bleed_valve(db, now=now, fetch_intraday=fetch_intraday)
+    except Exception as e:  # noqa: BLE001 — 밸브 실패는 fail-soft(레인 집행 결과 불변)
+        log.warning("auto_operator: 탐침 출혈 밸브 실패(fail-soft): %s", e)
+        result["bleed"] = {"error": str(e)}
 
     return result
