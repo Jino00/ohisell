@@ -64,11 +64,28 @@
 - **되돌림 집행 초크포인트 경유(우회 금지)**: bid_down 제안(target_bid=before_value, `APPROVAL_SOURCE_REVERT="revert_op"`) → execute()(guardrail·킬스위치·change_log 전량 통과). diary ACTOR_PROBE 재사용, harness 킬스위치 튜플에 revert_op 추가.
 - 완료 기준: 탐침 왕복 1회(상향→관측→유지 or 되돌림) 실측(자연 발동 대기, 원칙22).
 
-### CD4 환경별 학습·세분화층
+### CD4 환경별 학습·세분화층 (D-58-11~14 확정, 2026-07-19 — Claude 자동진행, Jino "너의 추천옵션으로 자동진행" 위임)
 - 계층적 풀링: 환경 셀(거친 축 시작) × 순위 → 클릭/선행지표 집계. hierarchical_pooling 재사용.
 - 세분화 판사: 표본 임계 도달 셀을 다음 축으로 쪼갤 유의성 LLM 판정(P3 판사 재사용). 근거 일기·볼트 기록.
 - 지혜 승격 연결: "환경 E → 상품 P 최적 탐침 순위 N" 3회 반복 승격. 다음 같은 환경 진입 시 탐침 생략하고 그 순위 목표.
 - 완료 기준: 백필 데이터로 첫 셀 집계·세분화 판정 1회 실측.
+
+#### 확정 설계 (D-58-11~14)
+- **D-58-11 스코프 = 지식층만(실행경로 wiring은 CD5 이월).** CD4는 "환경 셀 × 순위 → 클릭 곡선"을 **백필로 학습**하고 사람에게 보이는 지혜로 승격하는 데까지. CD2 탐침이 이 학습을 소비해 **목표 순위를 잡거나 탐침을 생략**하는 실행경로 변경은 **CD5**로 미룬다. 이유(원칙22): 탐침이 아직 자연 발동 0건 → 실행경로 변경은 라이브 검증 불가 → 검증 못 하는 주장 회피. CD4는 **advisory read 함수**(`learned_probe_rank`)만 노출하고 CD2 소비는 안 함.
+- **D-58-12 마이그레이션 0 (LESSONS #14 준수).** 학습 상태를 **새 테이블로 저장하지 않는다** — 집계는 `NaverKeywordHourly`(per-hour·avg_rank, 365일 보존)에서 **매번 재계산**(순수 파생). "3회 반복 승격"은 **창 안 ≥3 서로 다른 날 일관 신호**라는 **계산 조건**으로 구현(카운터 영속 없음). 세분화 판정 근거·승격 결과는 **`ops_diary_entries` observe 행**(append-only 로그, 스키마 불변)에 기록해 볼트 열람. `OpsWisdomEntry`는 승격 가시화용으로만 idempotent 기입(선택).
+- **D-58-13 환경 축 = day_class 시작(주말/주중/공휴일), 세분화 후보축 = iphone_window·season.** 월초/중/말 전용 헬퍼는 **신설 안 함**(기존 diary env 필드 재사용, `_day_class`·`_season_of`·`_iphone_offset_days`·`_iphone_window` 순수 재사용). 어느 축을 더 쪼갤지는 **세분화 판사(LLM)가 데이터 유의성으로 결정** — 사전 하드코딩 금지(리스크 로그 준수). 순위 밴드 = [1,2)/[2,2.5)/[2.5,3)/[3,4)/[4,∞) (CD2 임계 2.5 정합).
+- **D-58-14 구조 = 3 SA + 1 Harness + 1 크론(마이그 0).**
+  - **SA1 `probe_cell_aggregate.py`**(순수): `NaverKeywordHourly` 창 → env_cell(=day_class[×iphone_window×season 세분 시]) × rank_band → Σimp/clk/cost·CTR. 희소 셀은 `hierarchical_pooling.shrink`로 거친 env prior 축소추정(EB, **첫 프로덕션 소비자**). 선행지표(cart/conv)는 `NaverAdDaily`에서 env_cell 단위(순위 무관)로 보강. 쓰기 0.
+  - **SA2 `probe_cell_segmenter.py`**(LLM 판사 재사용): 표본 임계(Σimp≥`_MIN_CELL_IMP`) 셀에 대해 `expert_llm._invoke_claude`(model=opus·schema)로 "다음 축 세분이 클릭곡선을 유의하게 바꾸는가" 판정 + 신호 명확 시 셀별 최적 rank_band 선정. fail-open(LLM 실패→세분 안 함). 쓰기 0(판정 반환).
+  - **Harness `probe_learning_loop.py`**(wisdom_loop 패턴): aggregate→segment-judge→승격 계산→observe 일기 1행 기록(오늘 학습 요약). 스테이지 격리·fail-soft.
+  - **크론 `run_naver_probe_learning`** 매일 09:05(정산 08:55 뒤·재계산이라 catch-up 무해). 스케줄러 4곳 등록.
+  - **advisory 함수 `learned_probe_rank(db, *, env_cell, now)`** → 승격 조건 충족 셀의 최적 rank_band or None(CD5가 소비 예정, 이번엔 미배선·테스트만).
+
+### CD5 실행경로 wiring (CD4에서 분리 — D-58-11, 미착수)
+CD4가 지식층까지 완성. CD5 = 그 지식을 탐침 트리거가 실제로 소비하는 층(원래 CD4 스코프였으나 탐침 자연발동 0건이라 라이브 검증 불가 → 분리).
+- **learned_probe_rank 소비**: CD2 `_probe_trigger`(현재 무조건 한 등 상향)가 그 유닛의 env_cell에 승격된 최적 순위밴드가 있으면 → 목표 순위로 상향(or 이미 그 밴드면 탐침 생략). guardrail 전량 통과 유지(우회 금지).
+- **이익 가중 승격**: CD4 optimal_band는 순수 CTR argmax라 최상위 순위로 쏠림(이익 스팟밴드 2.5~4와 배치, P3-3). CD5에서 cell_leading_indicator(cart/conv)·roas를 승격 판정에 결합해 "이익 최적 순위"로 교정.
+- **완료 기준(원칙22)**: 탐침이 학습된 순위를 실제 목표로 삼는 왕복 1회 실측 — CD2/CD3 탐침 자연발동이 선결(현재 대기 중).
 
 ## 리스크·결정 로그
 - 탐침이 클릭만 늘리고 전환 0이면 비싼 클릭만 삼 → 되돌림 게이트가 생명선(실시간 안전판이 1차 방어).
@@ -79,4 +96,4 @@
 ## 미결(계획 시 추천안 제시 → 트랙 확정)
 - 트리거 임계: 클릭 0 지속 시간(예: 3시간?), 최소 노출(예: imp 30?).
 - 실시간 안전판 손실 상한(예: 탐침 후 시간당 비용이 정착창 평균의 N배 ∧ 판매 0).
-- 거친 환경축 초기 정의(주말/주중 + 월초/중/말 정도로 시작?).
+- ~~거친 환경축 초기 정의(주말/주중 + 월초/중/말 정도로 시작?).~~ → **해소(D-58-13)**: day_class 시작, 세분 후보축=iphone_window·season, 월초/중/말 헬퍼 신설 안 함(세분화 판사가 데이터로 결정).

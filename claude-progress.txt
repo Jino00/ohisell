@@ -3,7 +3,13 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
-- 날짜: 2026-07-19 00:20 KST (★★★**D-NAO-58 클릭 탐침 루프 CD3(되돌림·성과 판정층) — 구현·리뷰·배포·라이브 코드경로 검증 완료. 실제 탐침 왕복은 자연 발동 대기** — 워크트리 `recursing-engelbart-6bb9d5`, 브랜치 `claude/d-nao-58-click-probe-cd3`(CD2 tip 위 stack), 커밋 `9ba0ce7`. prod 배포 완료(safe_deploy). **PR 생성 예정**. CD1~CD3 완료 → 남은 것=CD4.)
+- 날짜: 2026-07-19 07:xx KST (★★★★**D-NAO-58 클릭 탐침 루프 CD4(환경별 학습·세분화층) — 구현·리뷰·배포·라이브 백필 검증 완료. CD1~CD4 완료** — 워크트리 `d-nao-58-click-probe-continue-979ca3`, 브랜치 동명(CD3 tip 위 ff-stack), 커밋 `da69acd`·**PR #58**. prod 배포 완료(safe_deploy CAS 통과). 남은 것=CD5 실행경로 wiring.)
+  - **CD4 = 지식층 전용(실행경로 wiring=CD5 이월, 원칙22)**. "환경셀×순위 밴드→클릭곡선" 백필 학습. **마이그 0**(NaverKeywordHourly/AdDaily 재계산, 유일 쓰기=observe 일기 1행). 3 SA+harness+크론.
+  - **설계 D-58-11~14(Claude 자동진행, Jino 위임)**: 스코프=지식층만·마이그0(로그/데이터 파생)·환경축=day_class 시작(세분후보 iphone_window·season, 세분화 판사가 데이터로 결정)·구조=`probe_cell_aggregate`(hierarchical_pooling.shrink EB 첫 소비자)+`probe_cell_segmenter`(LLM 판사 재사용·병렬 advisory)+`probe_learning_loop`(harness+`learned_probe_rank` CD5 API)+크론 09:03.
+  - **독립 적대적 리뷰 Opus R1 GATE PASS(P1 0·Fable 미사용·1R 수렴)**: P2-1(세분 판정 근거를 observe rationale 기록 — vault는 rationale만 렌더)·P3-1(_promote_cells N+1 재집계 제거)·P3-2(docstring 정정=승격 verdict 독립)·P3-3(승격밴드 "클릭 최다·이익가중 미반영·CD5" 표기). 전체 **2149 passed(신규 33) 회귀0·마이그0**.
+  - **라이브(원칙22 prod 백필 읽기전용)**: 새 크론 등록(`3 9 * * *`·enabled) + **첫 셀 집계 실측**(30일 3셀: weekday imp514,944·4일·optimal 1.0-2.0/weekend 2일/holiday 1일, EB shrink 정상) + **세분화 판정 1회 실측**(judged=1 weekday 유일 eligible·skipped=2 days<3 게이트 정확) + cell별 cart/conv. **P3-3 실증**: weekday optimal=1.0-2.0(순수 CTR argmax) → 이익가중 표기 정당화. **★미충족: 실 LLM verdict+observe 일기 write=09:03 deterministic 크론 대기.**
+  - (이하 CD3 이력)
+  - **[CD3] 설계 D-58-8~10 확정(Claude 자동진행, Jino "너의 추천옵션으로 자동진행" 위임)**: 되돌림 값=probe 성공 change_log `before_value["bidAmt"]`, 상태=change_log 파생(마이그 불필요). standing probe=probe_op 제안 중 그 유닛 최근 성공 update_bid가 그 probe인 것(최근 7일).
   - **설계 D-58-8~10 확정(Claude 자동진행, Jino "너의 추천옵션으로 자동진행" 위임)**: 되돌림 값=probe 성공 change_log `before_value["bidAmt"]`, 상태=change_log 파생(마이그 불필요). standing probe=probe_op 제안 중 그 유닛 최근 성공 update_bid가 그 probe인 것(최근 7일).
   - **신규 SA 2개**: `probe_signal.py`(선행지표 score=즉시구매+장바구니×상품전환율, 순수계산) + `probe_revert.py`(standing 탐색·Stage1 실시간 출혈 밸브·Stage2 D+1 정산·되돌림 집행·outcome 기입).
   - **Stage1(run_hourly_lane 말미, 매시:20)**: 당일 standing probe에 hh24로 시간당비용>정착창 시간당평균×3 ∧ 그날 conv_direct=0 → before_value로 즉시 되돌림. **Stage2(신규 크론 08:55)**: age≥1 probe에 signal_sa — clk0/roas≥target(유지)/전환부족(되돌림)/defer/age≥3 default 되돌림. 판정 결과 probe execute diary outcome_json["probe"]에 기입.
