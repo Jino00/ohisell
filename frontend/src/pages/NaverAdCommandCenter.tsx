@@ -21,7 +21,7 @@ import {
   fetchNaverRetroScorecard, fetchNaverAdProposals,
   fetchNaverCampaignRoster, putNaverCampaignOptimizer,
   type NaverDashboardOverview, type NaverCampaignRosterRow, type NaverAdOptimizer,
-  type NaverRetroScorecard, type NaverChangeLogRow,
+  type NaverRetroScorecard, type NaverChangeLogRow, type NaverChangeLogResponse,
 } from "../lib/api";
 import { PROPOSAL_TYPE_LABEL } from "./NaverAdOptimizationConsole";
 
@@ -126,8 +126,10 @@ export default function NaverAdCommandCenter() {
         <CampaignRoster />
       </Card>
 
-      {/* ③ 성적표 두 겹 — 중복 아니라 상보 + 외부 변경 감지(D-NAO-50) */}
-      <div className="grid grid-cols-2 gap-4">
+      {/* ③ 성적표 두 겹 — 중복 아니라 상보 + 외부 변경 감지(D-NAO-50).
+          ★세로로 쌓는다(Jino 2026-07-18: "칸이 부족하면 옆으로 붙이지 말고 밑으로"):
+          변경 이력의 '근거' 칸은 한 문장이 길어 반폭이면 눌린다. 전체폭을 준다. */}
+      <div className="space-y-4">
         <Card title="우리 조언이 맞았나 (방향 정밀도)">
           <RetroScorecardPane />
         </Card>
@@ -404,18 +406,348 @@ function describeChange(row: NaverChangeLogRow): string {
   }
 }
 
+// ══════════════════════════════════════════════════════════════════
+// 근거(rationale) 사람말 변환(Jino 2026-07-18: "내가 알아볼 수 있는 내용으로 적어줘").
+// 백엔드 생성기(proposal_writer·auto_operator)가 남긴 기계용 문자열
+//   예) "[shopping_group_growth] 보정ROAS=1.7708 cost=75914원 clk=51 — 시뮬 근거=…,
+//        추천입찰=1550원, target_roas 근거=account_default(1.697…). 예측(오늘): clk=7, …"
+// 을 Jino가 읽는 한 문장으로 옮긴다.
+// ★원칙: (1) 못 알아보는 모양은 원문 그대로 폴백 — 지어내지 않는다(원칙22).
+//        (2) 원문은 항상 title 툴팁에 보존 — 이 화면의 존재 이유가 "무엇을 왜 바꿨나"의
+//            투명성이라(ref24) 감사 가능성을 버리면 안 된다.
+// ══════════════════════════════════════════════════════════════════
+const HOURLY_BAND_RE = /^\[시간당밴드\]\s*가중avg_rank=([\d.]+)\s*([<>])\s*([\d.]+)\s*\(([^)]+)\)/;
+const BOARD_PROPOSAL_RE = /^\[([a-z_]+)\]\s*보정ROAS=([\d.]+)\s+cost=(\d+)원\s+clk=(\d+)/;
+const PAUSE_RE = /^\[([a-z_]+)\]\s*정지\([^)]*\)\s*직전 보정ROAS\s*([\d.]+)/;
+const GROWTH_RE = /^\[growth_sweeper\][\s\S]*?clk=(\d+)/;
+const RECOMMEND_BID_RE = /추천입찰=\d+원(\([^)]*\))?/;
+const FORECAST_RE = /예측\(오늘\):\s*clk=(\d+),\s*cost=(\d+)원,\s*conv_amt=(\d+)원/;
+const TARGET_ROAS_RE = /target_roas 근거=[^(]*\(([\d.]+)\)/;
+
+function fmtRoas(s: string): string {
+  const v = Number(s);
+  return Number.isFinite(v) ? v.toFixed(2) : s;
+}
+function fmtWon(s: string): string {
+  const v = Number(s);
+  return Number.isFinite(v) ? won(v) : `${s}원`;
+}
+function fmtCount(s: string, unit: string): string {
+  const v = Number(s);
+  return Number.isFinite(v) ? `${num(v)}${unit}` : `${s}${unit}`;
+}
+
+/** 진단 보드 제안·성장 제안의 "예측(오늘)" 꼬리 → 사람말(있을 때만). */
+function forecastSuffix(base: string): string {
+  const f = base.match(FORECAST_RE);
+  return f ? ` 오늘 예상: 클릭 ${fmtCount(f[1], "회")}·광고비 ${fmtWon(f[2])}·전환매출 ${fmtWon(f[3])}.` : "";
+}
+
+/** 가드레일 거부/실패 사유에서 내부 참조태그(D-NAO-*)만 걷어낸다 — 나머지는 이미 한국어다. */
+function humanizeGuardReason(reason: string): string {
+  return reason.replace(/\s*,?\s*D-NAO-[\w-]+/g, "").replace(/\s+/g, " ").trim();
+}
+
+/** 기본 근거(차단 접미사 제거된) 한 문장. 못 알아보면 null(호출자가 원문 폴백). */
+function humanizeRationaleBody(base: string): string | null {
+  // ① 시간당 밴드(auto_operator) — 노출순위 기반 상향/하향
+  const h = base.match(HOURLY_BAND_RE);
+  if (h) {
+    const [, rank, cmp, thr, band] = h;
+    return band.includes("과열") || cmp === "<"
+      ? `시간당 점검 — 평균 노출순위 ${rank}위로 상위권이 과열(기준 ${thr}위)이라 입찰가를 낮췄습니다.`
+      : `시간당 점검 — 평균 노출순위 ${rank}위로 노출이 약해(기준 ${thr}위) 입찰가를 올렸습니다.`;
+  }
+
+  // ② 정지 판단
+  const p = base.match(PAUSE_RE);
+  if (p) {
+    const label = BOARD_LABEL[p[1]] ?? p[1];
+    return `${label} — 정지 직전 광고효율 ROAS ${fmtRoas(p[2])}(목표 미달)라 정지로 판단했습니다.`;
+  }
+
+  // ③ 진단 보드 입찰 제안(가장 흔함)
+  const m = base.match(BOARD_PROPOSAL_RE);
+  if (m) {
+    const [, board, roas, cost, clk] = m;
+    const label = BOARD_LABEL[board] ?? board.replace(/_/g, " ");
+    const t = base.match(TARGET_ROAS_RE);
+    const targetNote = t ? `(목표 ${fmtRoas(t[1])})` : "";
+    const rec = base.match(RECOMMEND_BID_RE);
+    const clampNote = rec?.[1]?.includes("스텝 클램프")
+      ? " 한 번에 15%까지만 조정하는 규칙에 걸려 이번엔 일부만 반영했습니다." : "";
+    return `${label} 판단 — 최근 광고효율 ROAS ${fmtRoas(roas)}${targetNote}. 판단 근거: 광고비 ${fmtWon(cost)}·클릭 ${fmtCount(clk, "회")}.${clampNote}${forecastSuffix(base)}`;
+  }
+
+  // ④ 성장 스위퍼(수익 여력 있는 키워드 육성)
+  const g = base.match(GROWTH_RE);
+  if (g) {
+    return `성장 후보 — 수익 여력이 있어 입찰가를 올렸습니다. 판단 근거: 클릭 ${fmtCount(g[1], "회")}.${forecastSuffix(base)}`;
+  }
+
+  return null; // 못 알아봄 → 원문 폴백
+}
+
+/** rationale → {화면 문장, 원문 툴팁}. 차단/실패 접미사는 분리해 사람말로 붙인다. */
+export function formatRationale(raw: string | null | undefined): { text: string; title?: string } {
+  if (!raw || !raw.trim()) return { text: NO_DATA };
+  const trimmed = raw.trim();
+
+  let base = trimmed;
+  let suffix = "";
+  const bm = trimmed.match(/\[(실행 불가|실행 실패)\]\s*([\s\S]*)$/);
+  if (bm && bm.index !== undefined) {
+    base = trimmed.slice(0, bm.index).trim();
+    const reason = humanizeGuardReason(bm[2].trim());
+    const why = reason ? `: ${reason}` : "";
+    suffix = bm[1] === "실행 불가"
+      ? ` → 다만 가드레일에 막혀 실제로는 바뀌지 않았습니다${why}.`
+      : ` → 실행 중 오류로 실제 반영 여부가 불확실합니다${why}.`;
+  }
+
+  const body = humanizeRationaleBody(base);
+  if (body === null) {
+    // 본문은 못 알아봄 — 원문 그대로(접미사만 사람말). 원문 툴팁은 변형됐을 때만.
+    const text = base + suffix;
+    return { text, title: text !== trimmed ? raw : undefined };
+  }
+  return { text: body + suffix, title: raw };
+}
+
+/** 근거 셀 — 사람말 + 원문 title 툴팁(hover 시 감사용 원문 노출). */
+function RationaleCell({ raw }: { raw: string | null | undefined }) {
+  const { text, title } = formatRationale(raw);
+  return <span className="text-xs text-gray-600" title={title}>{text}</span>;
+}
+
+const ENTITY_TYPE_LABEL: Record<string, string> = {
+  campaign: "캠페인", adgroup: "광고그룹", keyword: "키워드",
+};
+
+/** 대상 셀(Jino 2026-07-18: "적혀있는 대상은 알아볼 수가 없어") — ID 대신 사람 이름.
+ *  이름(17E) + 유형 + 소속 캠페인명. 백엔드가 이름을 못 주면(대량행·미동기) 원래
+ *  'type id'로 폴백(지어내지 않음). 원식별자는 title 툴팁에 보존(감사·디버깅). */
+function TargetCell({ row }: { row: NaverChangeLogRow }) {
+  const typeLabel = ENTITY_TYPE_LABEL[row.entity_type] ?? row.entity_type;
+  const idHint = `${row.entity_type} ${row.entity_id}`;
+  if (!row.entity_name) {
+    return <span className="text-xs text-gray-500" title={idHint}>{typeLabel} {row.entity_id}</span>;
+  }
+  const showCampaign = row.entity_type !== "campaign" && row.campaign_name;
+  return (
+    <div className="text-xs leading-tight" title={idHint}>
+      <div className="font-medium text-gray-800">
+        {row.entity_name} <span className="font-normal text-gray-400">· {typeLabel}</span>
+      </div>
+      {showCampaign && <div className="text-gray-500">{row.campaign_name}</div>}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════
+// D-NAO-54 기간 선택 — 변경 이력 두 패널이 **각각** 쓰는 재사용 컴포넌트.
+// ★상태는 공유하지 않는다(패널마다 독립 usePeriod). 의도된 것이다: 외부 감지는 하루 1회
+//   (07:35 entity_sync)라 우리 시간당 집행과 자연스러운 창이 다르다. 대신 각 카드의 탭이
+//   보이고 라벨에 실제 날짜가 병기되므로 숨은 상태가 아니다(Jino 결정 2026-07-17).
+// Jino 확정(2026-07-17): 기본=당일 · 7일/30일은 **어제 기준**(당일은 진행 중이라 별도 탭이고,
+// 섞으면 "완결된 과거"라는 탭의 의미가 깨진다) · 임의 구간은 캘린더.
+// ══════════════════════════════════════════════════════════════════
+
+type DateRange = { from: string; to: string };
+
+/** KST 기준 N일 전 날짜(YYYY-MM-DD).
+ *  ★브라우저 로컬시각(`new Date().toISOString().slice(0,10)` 등)으로 계산하면 안 된다:
+ *  그건 UTC/로컬 날짜이고 서버의 changed_at은 **KST**다. 자정~09:00 사이에 하루가 어긋난다
+ *  — 이 저장소가 이미 두 번 당한 함정(memory: sqlite-server-default-now-is-utc).
+ *  그래서 타임존을 명시해 KST로 못박는다.
+ *  ★en-CA 로케일이 YYYY-MM-DD를 준다. 한국은 DST가 없어 ±N일이 정확히 86,400초다.
+ *  ★export하는 이유: 이 diff에서 **유일하게 타임존이 걸린 프론트 코드**다. 테스트 못 하는
+ *  타임존 코드를 두는 게 정확히 위 두 사고의 모양이었다. */
+export function kstDate(offsetDays: number, now: number = Date.now()): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Seoul" })
+    .format(new Date(now + offsetDays * 86_400_000));
+}
+
+const PERIOD_PRESETS = [
+  { key: "today", label: "당일", range: (): DateRange => ({ from: kstDate(0), to: kstDate(0) }) },
+  { key: "yesterday", label: "어제", range: (): DateRange => ({ from: kstDate(-1), to: kstDate(-1) }) },
+  // 어제를 끝점으로 7일/30일 — 당일 미포함(끝점 포함이므로 -7..-1이 정확히 7일이다).
+  { key: "7d", label: "7일", range: (): DateRange => ({ from: kstDate(-7), to: kstDate(-1) }) },
+  { key: "30d", label: "30일", range: (): DateRange => ({ from: kstDate(-30), to: kstDate(-1) }) },
+] as const;
+
+type PeriodKey = (typeof PERIOD_PRESETS)[number]["key"] | "custom";
+type Period = ReturnType<typeof usePeriod>;
+
+/** 백엔드 `_MAX_CHANGE_LOG_SPAN_DAYS`와 같은 값. 양끝 포함이라 365일째까지 합법. */
+const MAX_SPAN_DAYS = 365;
+
+/** 커스텀 구간이 조회 불가한 이유. null이면 조회 가능.
+ *  ★`<input type="date">`는 사용자가 지우면 **빈 문자열**을 준다(실측). 그걸 안 잡으면
+ *  `date_from=`이 그대로 나가고 백엔드가 422 + 날 것의 pydantic 메시지를 뱉어
+ *  화면에 "불러오지 못했습니다: Input should be a valid date…"가 뜬다(실측).
+ *  ★`from > to` 하나만 보면 빈 문자열을 못 잡는다: `"" > "2026-07-17"`는 **false**다(실측).
+ *  ISO 날짜라서 문자열 비교가 곧 날짜 비교인 건 **양쪽이 채워졌을 때만** 참이다.
+ *  ★백엔드 3개 규칙(빈값·뒤집힘·365일)을 **전부** 따라해야 한다. span 규칙을 빼먹었더니
+ *  `2024-01-01 ~ 2026-07-17`을 정상적으로 고르는 것만으로 422 원문이 떴다. 게다가 날짜
+ *  입력은 타이핑 중간값도 onChange로 흘린다 — 연도 칸에 2026을 치면 0002·0020·0202를
+ *  거치는데 그 중간값들이 파라미터 검증을 **통과**한 뒤 span 초과로 422가 된다.
+ *  여기서 막으면 요청 자체가 안 나가므로 디바운스 없이도 원문 노출이 사라진다. */
+export function customRangeError(range: DateRange, today: string = kstDate(0)): string | null {
+  if (!range.from || !range.to) return "시작일과 종료일을 모두 선택하세요.";
+  if (range.from > range.to) return "시작일이 종료일보다 늦습니다.";
+  // ★미래 차단(D-NAO-54 R2): 변경 이력은 지나간 사건의 기록이라 미래 구간은 의미가 없다.
+  //   동시에 이게 `9999-12-31` 계열을 통째로 막는다 — 백엔드는 그 날짜에서
+  //   `date_to + 1일`이 OverflowError라 422를 주는데(자체 프로브로 발견), 프론트가 안 막으면
+  //   그 422가 "불러오지 못했습니다: API error 422: {…}"로 사용자에게 그대로 간다.
+  //   불변식: **백엔드가 막는 입력은 프론트가 먼저 막는다**(프론트가 더 엄격한 건 허용).
+  if (range.to > today) return "미래 날짜는 조회할 수 없습니다.";
+  const spanDays = (Date.parse(`${range.to}T00:00:00Z`) - Date.parse(`${range.from}T00:00:00Z`))
+    / 86_400_000 + 1;
+  if (!Number.isFinite(spanDays)) return "날짜 형식이 올바르지 않습니다.";
+  if (spanDays > MAX_SPAN_DAYS) return `조회 구간은 최대 ${MAX_SPAN_DAYS}일입니다.`;
+  return null;
+}
+
+/** 해석된 구간을 사람이 읽는 문자열로. 프리셋도 **실제 날짜를 병기**한다.
+ *  ★"당일"만 쓰면 라벨이 거짓말할 수 있다: range는 렌더 시점의 Date.now()로 계산되는데
+ *  useAsyncData에는 타이머가 없다. 23:50에 열어둔 화면이 00:10이 되어도 재렌더가 없으면
+ *  어제 데이터를 "당일"이라고 표시한 채 굳는다. 날짜를 병기하면 최소한 거짓말은 아니고,
+ *  두 패널이 서로 다른 날을 질의하는 것도 눈에 보인다. */
+function rangeLabel(presetLabel: string | null, range: DateRange): string {
+  const span = range.from === range.to ? range.from : `${range.from} ~ ${range.to}`;
+  return presetLabel ? `${presetLabel} (${span})` : span;
+}
+
+/** 기간 상태. range는 원시 문자열 2개라 useAsyncData deps에 그대로 넣어도 안정적이다. */
+function usePeriod() {
+  const [key, setKey] = useState<PeriodKey>("today");
+  // ★초기화 함수 형태 — 객체 리터럴로 쓰면 Intl.DateTimeFormat 2개가 매 렌더 생성되고 버려진다.
+  const [custom, setCustom] = useState<DateRange>(() => ({ from: kstDate(-7), to: kstDate(0) }));
+  const preset = PERIOD_PRESETS.find((p) => p.key === key);
+  const range = preset ? preset.range() : custom;
+  // 잘못된 구간은 백엔드도 422로 막지만(조용한 빈 결과 = "변경 없음"으로 읽히므로),
+  // 화면에서 먼저 잡아 요청 자체를 안 보낸다 — 422 원문은 사용자에게 무의미하다.
+  const error = preset ? null : customRangeError(custom);
+  const label = rangeLabel(preset ? preset.label : null, range);
+  return { key, setKey, custom, setCustom, range, error, label };
+}
+
+function PeriodTabs({ p }: { p: Period }) {
+  return (
+    <div className="px-4 py-2 border-b border-gray-100 flex items-center gap-1 flex-wrap">
+      {PERIOD_PRESETS.map((preset) => (
+        <button
+          key={preset.key}
+          type="button"
+          onClick={() => p.setKey(preset.key)}
+          className={`px-2 py-0.5 text-xs rounded-full ${
+            p.key === preset.key ? "bg-blue-50 text-blue-700 font-semibold" : "text-gray-600 hover:bg-gray-100"
+          }`}
+        >
+          {preset.label}
+        </button>
+      ))}
+      <button
+        type="button"
+        onClick={() => p.setKey("custom")}
+        className={`px-2 py-0.5 text-xs rounded-full ${
+          p.key === "custom" ? "bg-blue-50 text-blue-700 font-semibold" : "text-gray-600 hover:bg-gray-100"
+        }`}
+      >
+        기간 지정
+      </button>
+      {p.key === "custom" && (
+        <span className="flex items-center gap-1 ml-1">
+          <input
+            type="date" value={p.custom.from} max={kstDate(0)}
+            onChange={(e) => p.setCustom({ ...p.custom, from: e.target.value })}
+            className="text-xs border border-gray-200 rounded px-1 py-0.5"
+          />
+          <span className="text-xs text-gray-400">~</span>
+          <input
+            type="date" value={p.custom.to} max={kstDate(0)}
+            onChange={(e) => p.setCustom({ ...p.custom, to: e.target.value })}
+            className="text-xs border border-gray-200 rounded px-1 py-0.5"
+          />
+        </span>
+      )}
+    </div>
+  );
+}
+
+/** 변경 칸. ★실패 행은 before/after가 **둘 다 없다**(writer를 부르지도 않았거나 예외로 끊겼다)
+ *  — describeChange에 그대로 넘기면 "입찰가 — → —"가 되어 데이터 결손처럼 보인다.
+ *  ★"차단됨"과 "반영 불확실"을 반드시 가른다(원칙22): 전자는 가드레일이 막아 광고가 **확실히**
+ *  안 바뀐 것이고, 후자는 PUT을 이미 보낸 뒤라 **모르는** 것이다. 후자를 "차단됨"이라 쓰면
+ *  네이버엔 우리 입찰가가 들어가 있는데 안 바꿨다고 단언하게 된다. */
+function ChangeCell({ row }: { row: NaverChangeLogRow }) {
+  if (row.execution_state === "blocked") return <Badge tone="neutral">🚫 차단됨</Badge>;
+  if (row.execution_state === "unknown") return <Badge tone="neutral">⚠️ 반영 불확실</Badge>;
+  return <span className="text-xs tabular-nums">{describeChange(row)}</span>;
+}
+
+/** 집계 푸터. ★`총 N건`만 쓰면 "우리가 한 일" 카드에서 차단 시도가 집행으로 읽힌다 —
+ *  actor 필터가 막으려던 거짓말이 화면에서 되살아난다(D-47-h). 실집행 수를 앞에 세운다. */
+function ChangeLogFooter({ data }: { data: NaverChangeLogResponse }) {
+  const shown = data.rows.length;
+  if (data.executed_total == null) {
+    // 차단분을 안 켠 패널 — total이 곧 실집행 수다. 잘림만 알리면 된다.
+    return data.total > shown ? (
+      <p className="px-4 py-2 text-xs text-gray-500 border-t border-gray-100">
+        최근 {num(shown)}건 표시 · 총 {num(data.total)}건
+      </p>
+    ) : null;
+  }
+  const notExecuted = data.total - data.executed_total;
+  return (
+    <p className="px-4 py-2 text-xs text-gray-500 border-t border-gray-100">
+      <span className="font-semibold text-gray-700">집행 {num(data.executed_total)}건</span>
+      {notExecuted > 0 && ` · 미집행(차단·불확실) ${num(notExecuted)}건`}
+      {data.total > shown && ` · 최근 ${num(shown)}건만 표시`}
+    </p>
+  );
+}
+
 function ChangeLogPane() {
   // ★이 패널은 "우리가 한 일의 결과"(인과)다 — 외부가 바꾼 걸 감지한 행이 섞이면
   //   남의 조작을 우리 성과로 보여주게 된다(codex[P2] 2026-07-17). 외부 변경은
   //   별도 관심사라 여기 섞지 않는다 — 그 피드는 ExternalChangesPane(바로 아래)이 그린다.
-  const { data, error } = useAsyncData(() => fetchNaverChangeLog({ days: 30, limit: 10, actor: "ours" }), []);
+  const p = usePeriod();
+  return (
+    <>
+      <PeriodTabs p={p} />
+      {/* ★조회 컴포넌트를 분리해 **잘못된 구간에서는 마운트조차 안 한다**. 이전 판은
+          `p.error ? Promise.resolve({total:0, rows:[]}) : fetch(...)`로 훅에 가짜 빈 데이터를
+          먹였는데, 그게 정확히 useAsyncData가 존재해서 금지하는 패턴이다("실패를 빈 데이터로
+          위장" — 6개 패널에서 반복된 실수라 훅으로 기본값을 바꾼 것). 조건 분기 하나만
+          뒤집혀도 "변경이 없습니다"라고 **단언**하게 된다 — 실은 묻지도 않았는데. */}
+      {p.error
+        ? <EmptyState reason={p.error} hint="기간을 다시 선택하세요." />
+        : <ChangeLogTable range={p.range} label={p.label} />}
+    </>
+  );
+}
+
+function ChangeLogTable({ range, label }: { range: DateRange; label: string }) {
+  // ★include_blocked(D-NAO-54): 가드레일이 막은 시도도 보여준다. prod 실측(2026-07-17)에서
+  //   입찰 시도 4건 중 2건이 차단됐는데(변경폭 39.3%>15% · 쿨다운 1.0h<5h) 어느 화면에도
+  //   안 떴다 — 가드레일이 일한 것도 우리가 한 일이다. 다만 그러면 total이 집행+차단이 되므로
+  //   푸터가 executed_total로 갈라 세운다(ChangeLogFooter). 1층 "우리 조작 N회"는 별도
+  //   엔드포인트(getNaverDashboardOverview)라 오염되지 않는다.
+  const { data, error } = useAsyncData(
+    () => fetchNaverChangeLog({
+      date_from: range.from, date_to: range.to, limit: 10, actor: "ours", include_blocked: true,
+    }),
+    [range.from, range.to],
+  );
   if (error) return <EmptyState reason={`불러오지 못했습니다: ${error}`} hint="새로고침하거나 백엔드 상태를 확인하세요." />;
   if (data === null) return <Loading rows={3} />;
   if (data.rows.length === 0) {
     return (
       <EmptyState
-        reason="최근 30일 우리가 집행한 변경이 없습니다."
-        hint="제안은 생성되지만 사람 승인 게이트를 통과한 실행이 아직 없습니다. 승인하면 여기에 '무엇을 왜 바꿨는지'가 쌓입니다."
+        reason={`${label}: 우리가 집행한 변경이 없습니다.`}
+        hint="기간을 넓혀 보세요. 제안이 있어도 승인 게이트를 통과한 실행이 없으면 여기는 빕니다."
       />
     );
   }
@@ -425,23 +757,15 @@ function ChangeLogPane() {
         {data.rows.map((r) => (
           <tr key={r.id}>
             <Td><span className="text-xs text-gray-500">{r.changed_at?.slice(5, 16) ?? NO_DATA}</span></Td>
-            <Td><span className="text-xs">{r.entity_type} {r.entity_id}</span></Td>
+            <Td><TargetCell row={r} /></Td>
             {/* ★"무엇을 왜 바꿨는지" — MOP에 0개인 컬럼(ref24). 우리가 이길 자리이므로
                 지원하는 실행 액션 4종을 전부 제대로 그린다(codex[P2] R3). */}
-            <Td>
-              <span className="text-xs tabular-nums">{describeChange(r)}</span>
-            </Td>
-            <Td><span className="text-xs text-gray-600">{r.rationale ?? NO_DATA}</span></Td>
+            <Td><ChangeCell row={r} /></Td>
+            <Td><RationaleCell raw={r.rationale} /></Td>
           </tr>
         ))}
       </Table>
-      {/* ★잘림을 숨기지 않는다(라이브 검증: 15건인데 10건만 보이고 표식 0). PendingPane의
-          집계 푸터와 같은 패턴. */}
-      {data.total > data.rows.length && (
-        <p className="px-4 py-2 text-xs text-gray-500 border-t border-gray-100">
-          최근 {num(data.rows.length)}건 표시 · 총 {num(data.total)}건
-        </p>
-      )}
+      <ChangeLogFooter data={data} />
     </>
   );
 }
@@ -451,13 +775,31 @@ function ExternalChangesPane() {
   // diff 밸브가 DB에만 쌓이고 어디서도 안 보인다 — 정확히 "수집은 풍부한데 화면엔 없음"
   // (스펙 §1-4)의 재발이다. ChangeLogPane과 구조는 같지만 관심사가 반대다:
   // 그쪽=우리가 한 일(인과), 이쪽=외부(MOP/사람)가 바꾼 걸 우리가 관측한 것(감지).
-  const { data, error } = useAsyncData(() => fetchNaverChangeLog({ days: 30, limit: 10, actor: "external" }), []);
+  const p = usePeriod();
+  return (
+    <>
+      <PeriodTabs p={p} />
+      {p.error
+        ? <EmptyState reason={p.error} hint="기간을 다시 선택하세요." />
+        : <ExternalChangesTable range={p.range} label={p.label} />}
+    </>
+  );
+}
+
+function ExternalChangesTable({ range, label }: { range: DateRange; label: string }) {
+  // ★include_blocked를 안 쓴다(백엔드가 422로 거부한다): 외부 변경엔 '차단'이 없다 —
+  //   우리 가드레일은 우리 쓰기에만 걸린다. 같은 이유로 이 표는 ChangeCell을 쓰지 않는다
+  //   (execution_state가 전부 null이라 배지가 의미 없다).
+  const { data, error } = useAsyncData(
+    () => fetchNaverChangeLog({ date_from: range.from, date_to: range.to, limit: 10, actor: "external" }),
+    [range.from, range.to],
+  );
   if (error) return <EmptyState reason={`불러오지 못했습니다: ${error}`} hint="새로고침하거나 백엔드 상태를 확인하세요." />;
   if (data === null) return <Loading rows={3} />;
   if (data.rows.length === 0) {
     return (
       <EmptyState
-        reason="최근 30일 감지된 외부 변경이 없습니다."
+        reason={`${label}: 감지된 외부 변경이 없습니다.`}
         hint="입찰가·상태·키워드 diff는 매일 07:35 entity_sync에서 잡힙니다."
       />
     );
@@ -468,18 +810,13 @@ function ExternalChangesPane() {
         {data.rows.map((r) => (
           <tr key={r.id}>
             <Td><span className="text-xs text-gray-500">{r.changed_at?.slice(5, 16) ?? NO_DATA}</span></Td>
-            <Td><span className="text-xs">{r.entity_type} {r.entity_id}</span></Td>
+            <Td><TargetCell row={r} /></Td>
             <Td><span className="text-xs tabular-nums">{describeChange(r)}</span></Td>
-            <Td><span className="text-xs text-gray-600">{r.rationale ?? NO_DATA}</span></Td>
+            <Td><RationaleCell raw={r.rationale} /></Td>
           </tr>
         ))}
       </Table>
-      {/* ★잘림을 숨기지 않는다(라이브 검증: 15건인데 10건만 보이고 표식 0). */}
-      {data.total > data.rows.length && (
-        <p className="px-4 py-2 text-xs text-gray-500 border-t border-gray-100">
-          최근 {num(data.rows.length)}건 표시 · 총 {num(data.total)}건
-        </p>
-      )}
+      <ChangeLogFooter data={data} />
     </>
   );
 }
@@ -513,9 +850,20 @@ function PendingPane() {
           {actionable.map((p) => (
             <tr key={p.id}>
               <Td>{PROPOSAL_TYPE_LABEL[p.proposal_type] ?? p.proposal_type}</Td>
-              <Td><span className="text-xs">{p.target_id}</span></Td>
+              <Td>
+                {/* 대상 사람 이름(Jino 2026-07-18: "여기에도 대상이 알수없는게 나오네").
+                    이름 없으면 target_id 폴백. 원식별자는 title 툴팁에 보존. */}
+                <div className="text-xs leading-tight" title={`${p.target_type} ${p.target_id}`}>
+                  <div className={p.target_name ? "font-medium text-gray-800" : "text-gray-500"}>
+                    {p.target_name ?? p.target_id}
+                  </div>
+                  {p.target_name && p.campaign_name && (
+                    <div className="text-gray-500">{p.campaign_name}</div>
+                  )}
+                </div>
+              </Td>
               <Td right>{p.target_bid != null ? won(p.target_bid) : p.target_budget != null ? won(p.target_budget) : NO_DATA}</Td>
-              <Td><span className="text-xs text-gray-600">{p.rationale}</span></Td>
+              <Td><RationaleCell raw={p.rationale} /></Td>
             </tr>
           ))}
         </Table>

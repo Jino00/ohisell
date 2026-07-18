@@ -193,7 +193,9 @@ def _guard_failure(db: Session, proposal: NaverProposal, now: datetime, action: 
             actor=diary.actor_from_approval_source(proposal.approval_source),
             target_type=proposal.target_type, target_id=proposal.target_id,
             adgroup_id=proposal.adgroup_id, action=action,
-            rationale=f"[실행 불가] {reason}", source_ref=entry.id, now=now,
+            # ★리터럴 대신 공유 상수(3-way 병합, D-NAO-54): 마커 드리프트 방지 테스트가
+            #   같은 값의 리터럴을 금지한다 — 값은 동일("[실행 불가]")이라 동작 불변.
+            rationale=f"{GUARD_BLOCK_MARKER} {reason}", source_ref=entry.id, now=now,
         )
     except Exception as diary_err:  # noqa: BLE001 — fail-open(인자 평가 포함)
         log.warning("naver_execution_harness: diary 기록 실패(fail-open): %s", diary_err)
