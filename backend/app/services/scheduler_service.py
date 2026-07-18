@@ -636,6 +636,27 @@ def run_naver_probe_settlement_job():
         db.close()
 
 
+def run_naver_probe_learning_job():
+    """환경별 학습·세분화층 — probe_learning_loop.run_probe_learning (09:03 KST, D-NAO-58 CD4).
+
+    CD4 환경 셀×순위 밴드 클릭곡선 집계→세분화 판정→승격→observe 일기 요약(정산 08:55·
+    keyword_hourly D-1 스윕(전날 09:10치가 최신)이 끝난 뒤 재계산). fail-open(관찰 전용 —
+    실패가 catch-up 하류를 막지 않게 예외를 다시 던지지 않는다)."""
+    db = _get_own_db_session()
+    try:
+        from app.services.naver_ad.probe_learning_loop import run_probe_learning
+
+        result = run_probe_learning(db)
+        log.info(
+            "[스케줄러] naver probe learning: cells=%s promoted=%s stage_status=%s",
+            result.get("cells"), len(result.get("promoted") or []), result.get("stage_status"),
+        )
+    except Exception as e:  # noqa: BLE001 — fail-open(re-raise 안 함 — catch-up 하류 비블록)
+        log.exception("[스케줄러] run_naver_probe_learning_job 에러(무시): %s", e)
+    finally:
+        db.close()
+
+
 def sync_meta_ad_costs_job():
     """Meta 광고비 어제치 자동 적재 (07:00 KST)"""
     db = _get_own_db_session()
@@ -1114,6 +1135,7 @@ def _ensure_default_states(db):
         ("shopping_ad_product_sync", "45 7 * * *"),  # 쇼핑 그룹↔상품 매핑(상품 파생 target 소스, D-NAO-57 A — 07:30 BEP 뒤·08:00 제안 앞. 07:45인 이유: 07:40 검색어 잡과 SQLite 라이터 충돌 회피, 리뷰 3R P3)
         ("run_naver_auto_operator_daily", "50 8 * * *"),  # D-NAO-48 4조건 심사·집행 서버화(D-NAO-49)
         ("run_naver_probe_settlement", "55 8 * * *"),  # 탐침 성과 정산 판정(유지/되돌림/보류, D-NAO-58 CD3 Stage 2 — 일 레인 08:50·retro 08:30 뒤)
+        ("run_naver_probe_learning", "3 9 * * *"),  # CD4 환경별 학습·세분화층(정산 08:55 뒤·vault 09:05 앞 재계산 → observe 요약이 당일 볼트에 포함, D-NAO-58 CD4)
         ("sweep_naver_keyword_hourly", "10 9 * * *"),  # 키워드/쇼핑그룹 시간별(hh24) 축적, D-1 스윕(D-NAO-46②)
         ("run_naver_auto_operator_hourly", "20 * * * *"),  # 시간당 밴드 관제 실입찰(catch-up 제외, D-NAO-49)
         ("run_naver_flight_loop", "15 */2 * * *"),  # 당일 플라이트 루프 2시간 주기(X2, dry_run=True)
@@ -1164,6 +1186,7 @@ _CATCHUP_ORDER: tuple[str, ...] = (
     "run_naver_retro_scoring",     # 08:30 (D-NAO-45, 비정형 아닌 표준 cron이라 catch-up 포함)
     "run_naver_auto_operator_daily",  # 08:50 (D-NAO-49, 조건④ bleeding 판정이 retro_scoring 결과를 쓴다 — 그 뒤)
     "run_naver_probe_settlement",  # 08:55 (D-NAO-58 CD3 Stage 2 — 일 레인(08:50) 집행 + 어제 naver_ad_daily 정산이 끝난 뒤라야 성과 판정이 정확)
+    "run_naver_probe_learning",  # 09:03 (D-NAO-58 CD4 — 재계산이라 순서 무해하나 정산(08:55) 뒤·vault(09:05) 앞 의존 명시)
     "run_naver_diary_reflection",  # 08:35 크론이지만 catch-up은 집행(08:50) *뒤*(P2 리뷰 P2-1: LLM 재시도 최대 9분이 돈 잡 복구를 지연시키면 안 됨 — 관찰 전용이라 어제/D-2/D-8 버킷은 순서 무관. fail-open은 영구 블록만 막고 지연은 못 막는다)
     "sweep_naver_keyword_hourly",  # 09:10 (D-NAO-46②, 독립 잡이나 표준 cron catch-up 포함)
     "run_naver_wisdom",  # 08:45 크론이지만 catch-up은 돈 잡(08:50)·reflection 뒤(D-NAO-54 P3): reflection이 outcome을 소급 기입해야 후보 수확 결과가 최신 + LLM 판사(최대 회당 5×재시도)가 집행 복구를 지연시키면 안 됨. 관찰·보고 전용이라 맨 뒤 배치(diary_outcome 60일 하한 내면 하루 늦어도 무관). fail-open은 영구 블록만 막고 지연은 못 막는다
@@ -1284,6 +1307,7 @@ def _catch_up_morning_batch():
         "run_naver_diary_reflection": run_naver_diary_reflection_job,
         "run_naver_auto_operator_daily": run_naver_auto_operator_daily_job,
         "run_naver_probe_settlement": run_naver_probe_settlement_job,
+        "run_naver_probe_learning": run_naver_probe_learning_job,
         "sweep_naver_keyword_hourly": sweep_naver_keyword_hourly_job,
         "run_naver_wisdom": run_naver_wisdom_job,
         "run_naver_vault_export": run_naver_vault_export_job,
@@ -1338,6 +1362,7 @@ def job_func_for(job_name: str):
         "run_naver_auto_operator_daily": run_naver_auto_operator_daily_job,
         "run_naver_auto_operator_hourly": run_naver_auto_operator_hourly_job,
         "run_naver_probe_settlement": run_naver_probe_settlement_job,
+        "run_naver_probe_learning": run_naver_probe_learning_job,
         "generate_expert_desk": generate_expert_desk_job,
         "run_naver_flight_loop": run_naver_flight_loop_job,
         "sync_naver_settlement": sync_naver_settlement_job,
