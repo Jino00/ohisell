@@ -94,8 +94,12 @@ def _spend_pacing_pct(db: Session, campaign_id: str, today: date) -> float | Non
 
 
 def _latest_keyword_avg_rank(db: Session, target_id: str) -> float | None:
-    """keyword 대상의 최신 avg_rank(naver_keyword_hourly, ad_date·hour 최신 + avg_rank not None).
-    없으면 None. 예외도 None."""
+    """keyword/adgroup 대상의 최신 avg_rank(naver_keyword_hourly — entity_id는 nkw-…와
+    grp-…(쇼핑그룹, D-NAO-46②) 둘 다 축적됨). 없으면 None. 예외도 None.
+
+    ★adgroup 포함 근거(2026-07-18): 첫 해석문이 "env.avg_rank null인데 시간당밴드는 자체
+    가중 avg_rank를 씀" 불일치를 지적 — 원래 keyword만 조회하던 협소 설계였고, 쇼핑그룹
+    (17E 등) 일기 행에 순위 맥락이 비면 P3 지혜 채굴에서 순위×환경 패턴을 잃는다."""
     try:
         row = (
             db.query(NaverKeywordHourly.avg_rank)
@@ -122,7 +126,10 @@ def env_snapshot_sa(
         "season": _season_of(today.month),
         "iphone_launch_offset_days": _iphone_offset_days(today),
         "spend_pacing_pct": _spend_pacing_pct(db, campaign_id, today),
-        "avg_rank": _latest_keyword_avg_rank(db, target_id) if target_type == "keyword" and target_id else None,
+        "avg_rank": (
+            _latest_keyword_avg_rank(db, target_id)
+            if target_type in ("keyword", "adgroup") and target_id else None
+        ),
     }
 
 
