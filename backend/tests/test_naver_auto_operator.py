@@ -24,7 +24,7 @@ from app.models import (
     NaverProposal,
     NaverRetroSignal,
 )
-from app.services.naver_ad import auto_operator
+from app.services.naver_ad import auto_operator, diary
 
 CAMPAIGN = "cmp-04"
 TODAY = date(2026, 7, 20)
@@ -1249,3 +1249,254 @@ def test_hourly_lane_execution_blocked_by_real_guardrail_cooldown(db):
     assert len(blocked) == 1
     assert "가드레일 차단" in blocked[0].rationale
     assert "쿨다운" in blocked[0].rationale
+
+
+# ══════════════════════════ CD2 클릭 탐침 루프 (D-NAO-58) ══════════════════════════
+# _probe_trigger 순수 단위 + run_hourly_lane 탐침 분기 통합. now.hour=8이면 완료 2시간 창은
+# [6, 8) = 시간대 6·7만 집계.
+
+
+def test_probe_trigger_fires_when_zero_clicks_high_imp_rank_in_band():
+    """clk=0 ∧ imp≥30 ∧ (창 내)rank≥2.5(밴드 안/하단) → 탐침 발동(True)."""
+    now = datetime(2026, 7, 20, 8, 20, 0)  # 완료 창 [6, 8)
+    curve = [_hour(6, imp=20, clk=0, cost=200, avg_rank=3.0),
+             _hour(7, imp=20, clk=0, cost=200, avg_rank=3.0)]
+    fired, reason = auto_operator._probe_trigger(curve, now)
+    assert fired is True
+    assert "imp=40" in reason  # imp_sum 명시
+    assert "3.0" in reason  # rank 명시(창 내 가중)
+
+
+def test_probe_trigger_no_fire_when_imp_below_min():
+    """imp<30(노출 부족 무클릭 — 순위 병리가 아님) → 미발동."""
+    now = datetime(2026, 7, 20, 8, 20, 0)
+    curve = [_hour(6, imp=10, clk=0, cost=100, avg_rank=3.0),
+             _hour(7, imp=10, clk=0, cost=100, avg_rank=3.0)]
+    fired, _ = auto_operator._probe_trigger(curve, now)
+    assert fired is False
+
+
+def test_probe_trigger_no_fire_when_clicks_present():
+    """clk>0(이미 클릭 살아있음) → 미발동."""
+    now = datetime(2026, 7, 20, 8, 20, 0)
+    curve = [_hour(6, imp=20, clk=1, cost=200, avg_rank=3.0),
+             _hour(7, imp=20, clk=0, cost=200, avg_rank=3.0)]
+    fired, _ = auto_operator._probe_trigger(curve, now)
+    assert fired is False
+
+
+def test_probe_trigger_no_fire_when_window_rank_above_band():
+    """창 내 가중 rank<2.5(밴드 상단/과열 — 위치가 아닌 수요 문제) → 미발동."""
+    now = datetime(2026, 7, 20, 8, 20, 0)
+    curve = [_hour(6, imp=20, clk=0, cost=200, avg_rank=2.0),
+             _hour(7, imp=20, clk=0, cost=200, avg_rank=2.0)]
+    fired, _ = auto_operator._probe_trigger(curve, now)
+    assert fired is False
+
+
+def test_probe_trigger_no_fire_when_window_rank_all_none():
+    """창 내 rank 근거 전부 None → fail-closed(미발동)."""
+    now = datetime(2026, 7, 20, 8, 20, 0)
+    curve = [_hour(6, imp=20, clk=0, cost=200, avg_rank=None),
+             _hour(7, imp=20, clk=0, cost=200, avg_rank=None)]
+    fired, reason = auto_operator._probe_trigger(curve, now)
+    assert fired is False
+    assert "근거 없음" in reason
+
+
+def test_probe_trigger_no_fire_before_2am_boundary():
+    """now.hour<2 — 완료 2시간 창이 비는 경계 → 표본 없음(미발동)."""
+    now = datetime(2026, 7, 20, 1, 20, 0)
+    curve = [_hour(0, imp=100, clk=0, cost=500, avg_rank=3.0)]
+    fired, _ = auto_operator._probe_trigger(curve, now)
+    assert fired is False
+
+
+def test_probe_trigger_window_excludes_current_and_old_buckets():
+    """창 정확성: [now.hour-2, now.hour)만 집계 — 현재 시간대(8, 진행중)와 2시간 초과(5)는 제외."""
+    now = datetime(2026, 7, 20, 8, 20, 0)  # 창 [6, 8)
+    curve = [
+        _hour(5, imp=100, clk=5, cost=500, avg_rank=3.0),  # 2시간 초과 — 제외
+        _hour(6, imp=20, clk=0, cost=200, avg_rank=3.0),   # 창 내
+        _hour(7, imp=20, clk=0, cost=200, avg_rank=3.0),   # 창 내
+        _hour(8, imp=100, clk=5, cost=500, avg_rank=3.0),  # 현재(진행중) — 제외
+    ]
+    fired, reason = auto_operator._probe_trigger(curve, now)
+    assert fired is True  # 창 밖 clk(5+5)를 셌다면 clk_sum>0로 미발동했을 것
+    assert "imp=40" in reason  # 창 밖 imp(100+100)를 셌다면 240이었을 것
+
+
+def test_probe_trigger_rank_from_window_only_not_3h_window():
+    """★R1 P3-1 회귀 고정: rank는 클릭 2시간 창에서만 산출한다. 3h 전(클릭창 밖) 저순위·
+    고노출 버킷(hour5 rank5.0 imp100)이 최근 2h(rank2.0·클릭0)를 밴드 사각지대로 오판하지
+    않는다 — 초판(3h 가중 rank≈4.14≥2.5)은 탐침을 쐈으나 이제 2h창 rank=2.0<2.5로 미발동."""
+    now = datetime(2026, 7, 20, 8, 20, 0)  # 창 [6, 8)
+    curve = [
+        _hour(5, imp=100, clk=0, cost=500, avg_rank=5.0),  # 클릭창 밖 — rank에 섞이면 안 됨
+        _hour(6, imp=20, clk=0, cost=200, avg_rank=2.0),
+        _hour(7, imp=20, clk=0, cost=200, avg_rank=2.0),
+    ]
+    fired, reason = auto_operator._probe_trigger(curve, now)
+    assert fired is False
+    assert "2.00" in reason  # 창 내 가중 rank=2.0(hour5 5.0을 섞었다면 4.14였을 것)
+
+
+def _probe_curve():
+    """밴드 판정이 hold(rank 2.5~4 중립)이면서 탐침 트리거가 참인 곡선(midday, 창 [10,12))."""
+    return [_hour(10, imp=20, clk=0, cost=300, avg_rank=3.0),
+            _hour(11, imp=20, clk=0, cost=300, avg_rank=3.0)]
+
+
+def test_hourly_lane_probe_fires_on_hold_verdict_and_tags_probe(db):
+    """밴드 판정 hold(중립 rank 3.0·클릭0)인데 탐침 트리거 참 → up 제안 생성, approval_source=
+    'probe_op', harness.execute 호출, diary actor 경로=probe."""
+    _settings(db)
+    window_from, window_to = _settlement_window()
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-probe", parent_id="grp-1",
+                        campaign_id=CAMPAIGN, campaign_type="WEB_SITE", status="on"))
+    _ad_row(db, keyword_id="nkw-probe", ad_date=window_from, clk=10, cost=1000)
+    db.commit()
+
+    now_midday = datetime(2026, 7, 20, 12, 20, 0)
+    with patch.object(auto_operator.naver_sa_writer, "get_keyword", return_value={"bidAmt": 1000}), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(
+            db, now=now_midday, fetch_intraday=lambda tid, d: _probe_curve(),
+        )
+
+    mock_exec.assert_called_once()
+    assert result["approved"] == 1
+    assert result["probed"] == 1
+    proposal_id = mock_exec.call_args[0][1]
+    saved = db.get(NaverProposal, proposal_id)
+    assert saved.proposal_type == "bid_up"
+    assert saved.approval_source == auto_operator.APPROVAL_SOURCE_PROBE == "probe_op"
+    assert saved.rationale.startswith("[클릭탐침]")
+    assert saved.target_bid == 1150  # 1000×1.15 → 10원 내림(탐침 방향은 항상 up)
+    # 실행되면 harness가 이 approval_source로 diary actor=probe를 남긴다(완료 기준 경로)
+    assert diary.actor_from_approval_source(saved.approval_source) == diary.ACTOR_PROBE
+
+
+def test_hourly_lane_probe_not_fired_when_verdict_is_action(db):
+    """밴드 판정이 down(rank<2.5)이면 탐침 미발동(이중 발동 금지) — 정상 시간당 밴드로 처리."""
+    _settings(db)
+    window_from, window_to = _settlement_window()
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-dn", parent_id="grp-1",
+                        campaign_id=CAMPAIGN, campaign_type="WEB_SITE", status="on"))
+    _ad_row(db, keyword_id="nkw-dn", ad_date=window_from, clk=10, cost=100)
+    db.commit()
+
+    # rank<2.5 → down. clk=0이라 탐침 조건 일부 충족하나 verdict가 hold가 아니라 탐침 분기 미진입.
+    curve = [_hour(9, imp=20, clk=0, cost=200, avg_rank=2.0),
+             _hour(10, imp=20, clk=0, cost=200, avg_rank=2.0),
+             _hour(11, imp=20, clk=0, cost=200, avg_rank=2.0)]
+    now_midday = datetime(2026, 7, 20, 12, 20, 0)
+    with patch.object(auto_operator.naver_sa_writer, "get_keyword", return_value={"bidAmt": 1000}), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(
+            db, now=now_midday, fetch_intraday=lambda tid, d: curve,
+        )
+
+    mock_exec.assert_called_once()
+    assert result["probed"] == 0
+    saved = db.get(NaverProposal, mock_exec.call_args[0][1])
+    assert saved.proposal_type == "bid_down"
+    assert saved.approval_source == auto_operator.APPROVAL_SOURCE_HOURLY  # 탐침 아님
+
+
+def test_hourly_lane_probe_not_fired_when_kill_switch_off(db):
+    """auto_operate=False → 캠페인 자체가 레인 대상 밖 → 탐침 미발동·미집행."""
+    _settings(db, auto_operate=False)
+    window_from, window_to = _settlement_window()
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-off", parent_id="grp-1",
+                        campaign_id=CAMPAIGN, campaign_type="WEB_SITE", status="on"))
+    _ad_row(db, keyword_id="nkw-off", ad_date=window_from, clk=10, cost=1000)
+    db.commit()
+
+    now_midday = datetime(2026, 7, 20, 12, 20, 0)
+    with patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(
+            db, now=now_midday, fetch_intraday=lambda tid, d: _probe_curve(),
+        )
+    mock_exec.assert_not_called()
+    assert result["reviewed"] == 0
+    assert result["probed"] == 0
+
+
+def test_actor_from_approval_source_probe():
+    """probe_op → probe actor 매핑(CD3/diary가 탐침 실행을 식별하는 경로)."""
+    assert diary.actor_from_approval_source("probe_op") == diary.ACTOR_PROBE == "probe"
+
+
+def test_harness_refuses_probe_proposal_when_kill_switch_off(db):
+    """탐침 우회 경로 금지: 탐침(approval_source=probe_op) 제안도 auto_op*과 동일하게 harness
+    쓰기 직전 킬스위치 최종 가드를 받는다 — OFF면 실입찰 거부(writer 미호출)."""
+    from app.services.naver_ad import naver_execution_harness as harness
+
+    _settings(db, auto_operate=False)
+    p = _proposal(db, proposal_type="bid_up", target_id="nkw-pks", target_bid=1150,
+                  status="approved")
+    p.approval_source = auto_operator.APPROVAL_SOURCE_PROBE
+    db.commit()
+
+    with patch.object(harness, "_build_guardrail_context", return_value={}), \
+         patch.object(harness.guardrail_gate, "check", return_value=None), \
+         patch.object(harness.naver_sa_writer, "update_keyword_bid") as mock_write:
+        with pytest.raises(harness.KillSwitchEngagedError):
+            harness.execute(db, p.id, dry_run=False)
+
+    mock_write.assert_not_called()
+    db.refresh(p)
+    assert p.status == "approved"  # 미실행 정직 상태
+    assert db.query(NaverChangeLog).filter(NaverChangeLog.proposal_id == p.id).count() == 0
+
+
+def test_hourly_lane_probe_blocked_by_real_guardrail_bep(db):
+    """★R1 P3-2: 탐침이 밴드 사각지대에서 발동해도 실제 guardrail_gate.check(mock 아님)의
+    BEP 하한(D-NAO-1)에 걸린다 — 정착창 보정ROAS(1.0) < 목표(2.0)면 증액 금지. writer 미호출,
+    change_log는 차단 기록(failed), 결과 failed. 탐침 우회 없음의 실행 증명.
+
+    guardrail context precompute(_build_guardrail_context = DB 재조회)만 스텁하고(기존
+    test_execute_update_bid_adgroup_bid_up_blocked_by_real_guardrail_bep의 확립된 관례 —
+    check 자체는 실제 실행), 나머지(guardrail_gate.check·harness 실행 경로)는 전부 실동작."""
+    from app.services.naver_ad import naver_execution_harness as harness
+
+    _settings(db)  # auto_operate=True·optimizer='ours'
+    window_from, window_to = _settlement_window()
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-probe-bep", parent_id="grp-1",
+                        campaign_id=CAMPAIGN, campaign_type="WEB_SITE", status="on"))
+    _ad_row(db, keyword_id="nkw-probe-bep", ad_date=window_from, clk=10, cost=1000)
+    db.commit()
+
+    # 탐침 target_bid=1150(현재 1000×1.15). 실 guardrail가 BEP 미달로 차단하도록 컨텍스트 주입:
+    # 방향/변경폭은 통과(1150>1000, 15%)시키고 보정ROAS 1.0<목표 2.0으로 BEP만 발동.
+    bep_fail_ctx = {
+        "current_bid": 1000, "roas_corrected": 1.0, "target_roas": 2.0,  # BEP 미달
+        "unconverted_spend": 0, "cost_today": 0, "daily_budget": 50_000,
+        "last_change_at": None, "changes_today_count": 0,
+    }
+    now_midday = datetime(2026, 7, 20, 12, 20, 0)
+    with patch.object(auto_operator.naver_sa_writer, "get_keyword", return_value={"bidAmt": 1000}), \
+         patch.object(harness, "_build_guardrail_context", return_value=bep_fail_ctx), \
+         patch.object(harness.naver_sa_writer, "update_keyword_bid") as mock_write:
+        result = auto_operator.run_hourly_lane(
+            db, now=now_midday, fetch_intraday=lambda tid, d: _probe_curve(),
+        )
+
+    # 탐침은 승인·발동됐으나 실 guardrail가 실행을 차단 → executed 0, failed 1.
+    assert result["approved"] == 1
+    assert result["probed"] == 1
+    assert result["executed"] == 0
+    assert result["failed"] == 1
+    mock_write.assert_not_called()  # BEP 차단으로 writer 미호출(실입찰 안 나감)
+
+    proposals = db.query(NaverProposal).filter(NaverProposal.target_id == "nkw-probe-bep").all()
+    assert len(proposals) == 1
+    assert proposals[0].approval_source == auto_operator.APPROVAL_SOURCE_PROBE
+    assert proposals[0].status == "failed"  # 실 guardrail 차단 → harness._guard_failure
+
+    blocked = db.query(NaverChangeLog).filter(
+        NaverChangeLog.entity_id == "nkw-probe-bep", NaverChangeLog.outcome == "failed",
+    ).all()
+    assert len(blocked) == 1
+    assert "BEP 미달" in blocked[0].rationale  # 실 guardrail_gate.check가 낸 실제 사유

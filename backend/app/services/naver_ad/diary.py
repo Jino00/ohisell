@@ -18,19 +18,22 @@ from app.utils.kst import kst_now
 
 log = logging.getLogger(__name__)
 
-# actor(일기) 값 — ops_diary_entries.actor enum(daily/hourly/console/delegation/system).
+# actor(일기) 값 — ops_diary_entries.actor(String(12), CHECK 없음 — probe 추가는 마이그레이션
+# 불필요). daily/hourly/console/delegation/system + probe(D-NAO-58 CD2 클릭 탐침).
 ACTOR_DAILY = "daily"
 ACTOR_HOURLY = "hourly"
 ACTOR_CONSOLE = "console"
 ACTOR_DELEGATION = "delegation"
 ACTOR_SYSTEM = "system"
+ACTOR_PROBE = "probe"  # D-NAO-58 CD2: 클릭 탐침(밴드 사각지대 능동 상향) 집행 주체
 
-# approval_source(naver_proposals) → actor 매핑. auto_operator.APPROVAL_SOURCE_DAILY/HOURLY의
-# 실제 값('auto_op'/'auto_op_hr', codex 2R[P1-1] 단축)을 여기 문자열 리터럴로 둔다 —
-# auto_operator를 import하면 순환(auto_operator가 diary를 import)이라 값만 복제한다.
+# approval_source(naver_proposals) → actor 매핑. auto_operator.APPROVAL_SOURCE_DAILY/HOURLY/
+# PROBE의 실제 값('auto_op'/'auto_op_hr'/'probe_op', codex 2R[P1-1] 단축)을 여기 문자열
+# 리터럴로 둔다 — auto_operator를 import하면 순환(auto_operator가 diary를 import)이라 값만 복제한다.
 _APPROVAL_SOURCE_TO_ACTOR = {
-    "auto_op": ACTOR_DAILY,     # APPROVAL_SOURCE_DAILY
+    "auto_op": ACTOR_DAILY,      # APPROVAL_SOURCE_DAILY
     "auto_op_hr": ACTOR_HOURLY,  # APPROVAL_SOURCE_HOURLY
+    "probe_op": ACTOR_PROBE,     # APPROVAL_SOURCE_PROBE (D-NAO-58 CD2)
 }
 
 # 공휴일 판정 — sales_velocity_estimator._KR_HOLIDAYS와 동일 라이브러리(holidays.SouthKorea).

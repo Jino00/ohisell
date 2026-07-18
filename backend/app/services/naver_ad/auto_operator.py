@@ -6,6 +6,10 @@
 #   레인은 순위·CPC·페이싱만 판단(ROAS/BEP 신규 판단 금지 — 가드레일의 기존 BEP 차단만).
 #   쓰기는 반드시 naver_execution_harness.execute() 경유(초크포인트 유지, 원칙18-6 —
 #   guardrail_gate·naver_sa_writer 직접 쓰기 호출 금지, 이 harness는 SA를 조합만 한다).
+#   + D-NAO-58 CD2 클릭 탐침(_probe_trigger): 시간당 레인의 밴드 판정이 hold인 사각지대
+#   (imp≥30인데 클릭0·rank 밴드 안/하단)에서 능동적으로 한 등 상향(up)을 제안해 "클릭 살아나는
+#   순위"를 실험. 탐침도 기존 가드레일·킬스위치·execute 전량 통과(우회 없음), approval_source=
+#   probe_op로 태그(diary probe actor). 되돌림(CD3)·학습(CD4)은 이 파일 범위 밖.
 from __future__ import annotations
 
 import logging
@@ -49,6 +53,7 @@ _DAILY_LANE_PROPOSAL_TYPES = ("bid_up", "bid_down", "pause")  # PLAN §3 명시 
 # 스키마 변경 없이 값을 단축(마이그레이션 리스크 0) — 소급채점 레인별 분리 식별자 역할은 유지.
 APPROVAL_SOURCE_DAILY = "auto_op"  # 7자
 APPROVAL_SOURCE_HOURLY = "auto_op_hr"  # 10자
+APPROVAL_SOURCE_PROBE = "probe_op"  # 8자 — D-NAO-58 CD2 클릭 탐침(String(12) 적합, diary probe actor)
 _MIN_CLICK_FOR_APPROVAL = 10  # D-NAO-48 조건②(rationale 창 클릭) / §4-1 핫셋 클릭 게이트 공유
 _MIN_HOURLY_SAMPLE_IMP = 30  # §4-2 "imp 합 < 30이면 그 시간대 묶음은 판단 보류"
 _HOURLY_RANK_DOWN_THRESHOLD = Decimal("2.5")  # §4-3 DOWN: 가중 avg_rank < 2.5
@@ -56,6 +61,12 @@ _HOURLY_RANK_UP_THRESHOLD = Decimal("4.0")  # §4-3 UP: 가중 avg_rank > 4.0
 _HOURLY_RECENT_HOURS = 3  # §4-2 "최근 3개 완료 시간대"
 _HOURLY_SPEND_BREAKER_MULTIPLE = 3  # §4-6 "직전 7일 일평균 ×3"
 _HOURLY_BASELINE_DAYS = 7  # 소진 서킷브레이커 직전 7일
+
+# ── D-NAO-58 CD2 클릭 탐침 상수(D-58-7 확정, 기존 검증 상수 재사용 원칙 — 새 매직넘버 최소화) ──
+_PROBE_ZERO_CLICK_HOURS = 2  # 완료 시간대 클릭0 지속 창(Jino 3h→2h 단축, "민첩한 시장 대응")
+# 실시간 안전판 손실배수 — 정착창 시간당평균 ×N ∧ 즉시구매 0 → 즉시 원위치(CD3가 소비).
+# CD2는 이 상수만 단일 소스로 정의하고 되돌림 로직은 구현하지 않는다(스코프 밖).
+_PROBE_BLEED_COST_MULTIPLE = _HOURLY_SPEND_BREAKER_MULTIPLE  # =3, 소진 서킷브레이커 배수 재사용
 
 # rationale에 이미 병기된 "clk=N" 추출 정규식 — proposal_writer._bid_proposal/_growth_proposal이
 # 공유하는 포맷("... clk={n} ..." 또는 "... clk={n} (저클릭 표본) ...", 둘 다 뒤에 숫자 아닌
@@ -752,6 +763,60 @@ def _clamp_step(current_bid: int, direction: str) -> int | None:
     return None
 
 
+def _probe_trigger(curve: list[dict], now: datetime) -> tuple[bool, str]:
+    """D-NAO-58 CD2 클릭 탐침 트리거(순수 SA·단일 창 자기완결) — 밴드의 사각지대(밴드 안/하단
+    인데 클릭0)를 감지한다(D-58-7 확정, 기존 검증 상수 재사용). (발동여부, 사유) 반환.
+
+    ★리뷰 R1 P3-1 수정: 클릭/노출과 rank를 **같은 완료 2시간 창 [now.hour-2, now.hour)에서**
+    산출한다. 초판은 rank를 _weighted_recent의 3시간 창에서 받아 넘겨, 클릭창 밖(3h 전) 저순위·
+    고노출 버킷이 가중 rank를 끌어올려 최근 2h가 이미 좋은 순위(2.0)인 유닛에 탐침이 나가는
+    오탐이 재현됐다(D-58-7 조건③ 훼손). 이제 rank도 이 창 안에서만 imp-가중 계산한다.
+
+    조건(전부 충족 시 발동, 창 = [now.hour - _PROBE_ZERO_CLICK_HOURS, now.hour)):
+    - clk 합 == 0.
+    - imp 합 ≥ 30(_MIN_HOURLY_SAMPLE_IMP 재사용) — "노출 부족 무클릭"↔"낮은 순위 무클릭"
+      분리: imp≥30인데 clk=0이면 순위 병리 = 탐침 대상.
+    - 창 내 imp-가중 avg_rank ≥ 2.5(_HOURLY_RANK_DOWN_THRESHOLD 재사용) — rank<2.5는 밴드
+      상단/과열 = 위치가 아니라 수요 문제라 올려도 소용없음. 밴드 안/하단이어야 올라갈 여지.
+      가중 로직은 _weighted_recent와 동일(rank None 버킷 제외·imp 가중·Decimal). 창 안 rank가
+      전부 None이면(rank_imp_sum==0) weighted_rank=None → fail-closed 보류(근거 없음).
+
+    now.hour < 2(이른 새벽, 완료 2시간 창이 그날 버킷을 못 채우는 경계)면 표본 없음으로
+    False — _weighted_recent/_is_pacing_slow의 자정 경계 처리와 동일 철학. BEP 여유는 여기서
+    수치로 판단하지 않는다 — 제안이 execute()로 흐르면 guardrail_gate가 BEP 하한을 강제한다
+    (§금지선: 탐침 우회 경로 금지, downstream 위임)."""
+    if now.hour < _PROBE_ZERO_CLICK_HOURS:
+        return False, f"이른 새벽(now.hour={now.hour}<{_PROBE_ZERO_CLICK_HOURS}) — 완료 창 표본 없음(탐침 보류)"
+
+    window_start = now.hour - _PROBE_ZERO_CLICK_HOURS
+    window = [h for h in curve if window_start <= h["hour"] < now.hour]  # 완료 시간대만(현재 진행중 제외)
+    imp_sum = sum(h["imp"] for h in window)
+    clk_sum = sum(h["clk"] for h in window)
+    rank_imp_sum = sum(h["imp"] for h in window if h.get("avg_rank") is not None)
+    weighted_rank = None
+    if rank_imp_sum > 0:
+        weighted_rank = sum(
+            Decimal(str(h["avg_rank"])) * h["imp"] for h in window if h.get("avg_rank") is not None
+        ) / Decimal(rank_imp_sum)
+
+    win_label = f"[{window_start},{now.hour})"
+    if clk_sum != 0:
+        return False, f"클릭 존재(창{win_label} clk={clk_sum}) — 탐침 대상 아님"
+    if imp_sum < _MIN_HOURLY_SAMPLE_IMP:
+        return False, f"노출 부족(창{win_label} imp={imp_sum}<{_MIN_HOURLY_SAMPLE_IMP}) — 순위 병리 아님(탐침 보류)"
+    if weighted_rank is None:
+        return False, f"가중 avg_rank 근거 없음(창{win_label} rank 전부 None) — 탐침 보류(fail-closed)"
+    if weighted_rank < _HOURLY_RANK_DOWN_THRESHOLD:
+        return False, (
+            f"창{win_label} 가중 avg_rank={float(weighted_rank):.2f}<{_HOURLY_RANK_DOWN_THRESHOLD}"
+            "(밴드 상단/과열=수요 문제) — 탐침 대상 아님"
+        )
+    return True, (
+        f"창{win_label} imp={imp_sum}≥{_MIN_HOURLY_SAMPLE_IMP}·clk=0·가중avg_rank="
+        f"{float(weighted_rank):.2f}≥{_HOURLY_RANK_DOWN_THRESHOLD}(밴드 사각지대 — 한 등 상향 탐침)"
+    )
+
+
 def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=None) -> dict:
     """시간당 밴드 관제 실입찰(PLAN §4). 매시 :20 크론(catch-up 제외 — 시간성 소멸).
 
@@ -765,7 +830,11 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
     동일 관례). stat_date=오늘(now.date())로 호출하면 timeRange since=until=오늘이 되어
     이미 당일 조회가 가능하다 — datePreset="today" 하위호환 확장은 불필요로 판단(최종보고 명시).
 
-    반환: {"reviewed", "approved", "executed", "held": [...], "skipped", "failed"}.
+    D-NAO-58 CD2: 밴드 판정이 hold인 사각지대에서 _probe_trigger가 참이면 up 탐침으로 치환
+    (기존 up 경로 그대로 통과 — 라이브 현재가 재조회·_clamp_step·킬스위치 재확인·execute).
+    탐침 제안만 approval_source=probe_op·rationale [클릭탐침]로 태그(diary probe actor).
+
+    반환: {"reviewed", "approved", "executed", "held": [...], "skipped", "failed", "probed"}.
     """
     now = now or kst_now()
     fetch_intraday = fetch_intraday or fetch_entity_hh24
@@ -774,6 +843,7 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
 
     result: dict = {
         "reviewed": 0, "approved": 0, "executed": 0, "held": [], "skipped": 0, "failed": 0,
+        "probed": 0,  # D-NAO-58 CD2: 탐침으로 승격된 up 제안 수(라이브 관측용)
     }
 
     for campaign_id in _auto_operate_campaigns(db):
@@ -805,18 +875,27 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                 curve=curve, now=now,
             )
             if verdict["direction"] == "hold":
-                result["held"].append({"target_id": target_id, "reason": verdict["reason"]})
-                continue
+                # D-NAO-58 CD2 클릭 탐침: 밴드 판정이 hold(액션 없음)일 때만 사각지대 평가
+                # (up/down이면 이미 액션 — 이중 발동 금지). 트리거 참이면 up-의도 탐침으로 치환.
+                # _probe_trigger는 clk/imp/rank를 모두 자기 2시간 창에서 산출(R1 P3-1 자기완결).
+                probe_fired, probe_reason = _probe_trigger(curve, now)
+                if probe_fired:
+                    verdict = {"direction": "up", "reason": probe_reason, "probe": True}
+                else:
+                    result["held"].append({"target_id": target_id, "reason": verdict["reason"]})
+                    continue
 
             # 여기부터는 verdict가 up/down = 액션 의도 확정 — 이후의 hold는 "의도된 액션이
             # 차단된 것"이므로 일기(blocked) 기록 대상(위의 판정 hold·imp 없음은 관찰 소음이라 제외).
+            is_probe = verdict.get("probe", False)
+            lane_actor = diary.ACTOR_PROBE if is_probe else diary.ACTOR_HOURLY  # 차단 일기 주체
             intended_action = "bid_up" if verdict["direction"] == "up" else "bid_down"
             current_bid = _live_current_bid(target_type, target_id)
             if current_bid is None:
                 hold_reason = "라이브 현재가 재조회 실패"
                 result["held"].append({"target_id": target_id, "reason": hold_reason})
                 _record_blocked(
-                    db, campaign_id=campaign_id, actor=diary.ACTOR_HOURLY, reason=hold_reason,
+                    db, campaign_id=campaign_id, actor=lane_actor, reason=hold_reason,
                     now=now, target_type=target_type, target_id=target_id, action=intended_action,
                 )
                 continue
@@ -825,38 +904,52 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                 hold_reason = "스텝 클램프 계산 불가(방향 무의미)"
                 result["held"].append({"target_id": target_id, "reason": hold_reason})
                 _record_blocked(
-                    db, campaign_id=campaign_id, actor=diary.ACTOR_HOURLY, reason=hold_reason,
+                    db, campaign_id=campaign_id, actor=lane_actor, reason=hold_reason,
                     now=now, target_type=target_type, target_id=target_id, action=intended_action,
                 )
                 continue
 
             # 킬스위치 실행 직전 재확인(codex 5R[P1-2]) — 앞선 실행 도중 OFF 됐으면 이후
-            # 유닛은 제안 생성 자체를 하지 않는다(즉시 정지 계약).
+            # 유닛은 제안 생성 자체를 하지 않는다(즉시 정지 계약). 탐침도 동일 경로 통과.
             if not _auto_operate_now(db, campaign_id):
                 hold_reason = "킬스위치 OFF — auto_operate=False(실행 직전 재확인, codex 5R[P1-2])"
                 result["held"].append({"target_id": target_id, "reason": hold_reason})
                 _record_blocked(
-                    db, campaign_id=campaign_id, actor=diary.ACTOR_HOURLY, reason=hold_reason,
+                    db, campaign_id=campaign_id, actor=lane_actor, reason=hold_reason,
                     now=now, target_type=target_type, target_id=target_id, action=intended_action,
                     event_type="kill_switch",
                 )
                 continue
 
             proposal_type = intended_action
+            # 탐침(is_probe): rationale은 이미 [클릭탐침] 접두 없이 사유만 오므로 접두를 붙이고,
+            # approval_source=probe_op·전용 expected_effect로 태그(diary probe actor). 그 외는 시간당 밴드.
+            if is_probe:
+                rationale = f"[클릭탐침] {verdict['reason']}"
+                expected_effect = (
+                    "클릭 탐침 — 밴드 사각지대(imp 있음·클릭0)에서 한 등 상향해 클릭 살아나는 "
+                    "순위 실험(D-NAO-58 CD2, 되돌림·이익 판정은 CD3)."
+                )
+                proposal_approval_source = APPROVAL_SOURCE_PROBE
+            else:
+                rationale = f"[시간당밴드] {verdict['reason']}"
+                expected_effect = "시간당 밴드 관제 — 순위·CPC·페이싱 기반 스텝 조정(ROAS 신규 판단 없음)."
+                proposal_approval_source = APPROVAL_SOURCE_HOURLY
             proposal = NaverProposal(
                 proposal_type=proposal_type, target_type=target_type, target_id=target_id,
                 campaign_id=campaign_id,
-                rationale=f"[시간당밴드] {verdict['reason']}",
-                expected_effect="시간당 밴드 관제 — 순위·CPC·페이싱 기반 스텝 조정(ROAS 신규 판단 없음).",
+                rationale=rationale, expected_effect=expected_effect,
                 status="pending", target_bid=step_bid,
             )
             db.add(proposal)
             db.flush()
 
             proposal.status = "approved"
-            proposal.approval_source = APPROVAL_SOURCE_HOURLY
+            proposal.approval_source = proposal_approval_source
             db.commit()
             result["approved"] += 1
+            if is_probe:
+                result["probed"] += 1
 
             try:
                 naver_execution_harness.execute(db, proposal.id, dry_run=False, now=now)
