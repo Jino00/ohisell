@@ -299,6 +299,26 @@ def sync_naver_entity_job():
         db.close()
 
 
+def shopping_ad_product_sync_job():
+    """쇼핑 광고그룹↔상품 매핑 동기화 (07:45 KST, D-NAO-57 A, 관찰성 sync).
+
+    optimizer='ours' 쇼핑 캠페인의 활성 그룹 /ncc/ads → naver_adgroup_product 스냅샷 교체+리컨실.
+    campaign_target_resolver 우선순위 ②(상품 파생 target)의 데이터 소스라 **08:00 제안 생성보다
+    먼저** 돌아야 그날 제안이 최신 매핑 기반 target을 쓴다(리뷰 P2-2 — 07:30 BEP 산출 뒤·
+    08:00 proposals 앞). fail-open — 매핑 sync 실패가 catch-up 체인 하류 집행 잡을 막으면 안
+    된다(관찰성 잡, 실패 시 그날은 기존 매핑/③ 폴백으로 동작)."""
+    db = _get_own_db_session()
+    try:
+        from app.services.naver_ad.shopping_ad_product_sync import sync_adgroup_products
+
+        result = sync_adgroup_products(db)
+        log.info("[스케줄러] naver shopping_ad_product sync: %s", result)
+    except Exception as e:
+        log.exception("[스케줄러] shopping_ad_product_sync_job 에러(fail-open): %s", e)
+    finally:
+        db.close()
+
+
 def sync_naver_search_term_job():
     """네이버 SA 검색어 단위 성과 수집 (07:40 KST, P2-S1). 최근 3일 창(사후정정 흡수)."""
     db = _get_own_db_session()
@@ -1069,6 +1089,7 @@ def _ensure_default_states(db):
         ("run_naver_diary_reflection", "35 8 * * *"),  # 운영 일기 해석층(결과 소급 기입+해석문, D-NAO-54 P2)
         ("run_naver_wisdom", "45 8 * * *"),  # 운영 일기 지혜 승격·망각층(후보→판사→지혜+보고→망각, D-NAO-54 P3)
         ("run_naver_vault_export", "5 9 * * *"),  # 운영 일기·지혜 Obsidian 볼트 export(열람층, D-NAO-54 P5)
+        ("shopping_ad_product_sync", "45 7 * * *"),  # 쇼핑 그룹↔상품 매핑(상품 파생 target 소스, D-NAO-57 A — 07:30 BEP 뒤·08:00 제안 앞. 07:45인 이유: 07:40 검색어 잡과 SQLite 라이터 충돌 회피, 리뷰 3R P3)
         ("run_naver_auto_operator_daily", "50 8 * * *"),  # D-NAO-48 4조건 심사·집행 서버화(D-NAO-49)
         ("sweep_naver_keyword_hourly", "10 9 * * *"),  # 키워드/쇼핑그룹 시간별(hh24) 축적, D-1 스윕(D-NAO-46②)
         ("run_naver_auto_operator_hourly", "20 * * * *"),  # 시간당 밴드 관제 실입찰(catch-up 제외, D-NAO-49)
@@ -1112,6 +1133,7 @@ def _ensure_default_states(db):
 # 성공해야 하류를 잇는다. keyword_hourly sweep은 다른 잡에 의존하지 않지만(자체 완결) 09:10
 # 표준 cron이라 같은 catch-up 목록에 포함(D-NAO-46②) — 순서상 맨 뒤(가장 늦은 cron).
 _CATCHUP_ORDER: tuple[str, ...] = (
+    "shopping_ad_product_sync",    # 07:45 (D-NAO-57 A, 리뷰 P2-2 — BEP(07:30, catch-up 밖) 뒤·proposals 앞: 그날 제안이 최신 매핑 target을 쓰게. fail-open이라 실패해도 체인 안 끊김)
     "run_naver_forecast_engine",   # 07:50
     "generate_naver_proposals",    # 08:00
     "generate_expert_desk",        # 08:05 (proposals 성공 후라야 pending>0 → 의미 있음)
@@ -1233,6 +1255,7 @@ def _catch_up_morning_batch():
         "generate_naver_proposals": _run_proposals_catchup_verified,
         "generate_expert_desk": generate_expert_desk_job,
         "run_naver_learning_loops": run_naver_learning_loops_job,
+        "shopping_ad_product_sync": shopping_ad_product_sync_job,
         "run_naver_retro_scoring": run_naver_retro_scoring_job,
         "run_naver_diary_reflection": run_naver_diary_reflection_job,
         "run_naver_auto_operator_daily": run_naver_auto_operator_daily_job,
@@ -1276,6 +1299,7 @@ def job_func_for(job_name: str):
         "snapshot_naver_ad_hourly": snapshot_naver_ad_hourly_job,
         "trigger_watch": trigger_watch_job,
         "sync_naver_entity": sync_naver_entity_job,
+        "shopping_ad_product_sync": shopping_ad_product_sync_job,
         "sync_naver_search_term": sync_naver_search_term_job,
         "sync_naver_keyword_volume": sync_naver_keyword_volume_job,
         "run_naver_forecast_engine": run_naver_forecast_engine_job,
