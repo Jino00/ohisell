@@ -850,7 +850,18 @@ function PendingPane() {
           {actionable.map((p) => (
             <tr key={p.id}>
               <Td>{PROPOSAL_TYPE_LABEL[p.proposal_type] ?? p.proposal_type}</Td>
-              <Td><span className="text-xs">{p.target_id}</span></Td>
+              <Td>
+                {/* 대상 사람 이름(Jino 2026-07-18: "여기에도 대상이 알수없는게 나오네").
+                    이름 없으면 target_id 폴백. 원식별자는 title 툴팁에 보존. */}
+                <div className="text-xs leading-tight" title={`${p.target_type} ${p.target_id}`}>
+                  <div className={p.target_name ? "font-medium text-gray-800" : "text-gray-500"}>
+                    {p.target_name ?? p.target_id}
+                  </div>
+                  {p.target_name && p.campaign_name && (
+                    <div className="text-gray-500">{p.campaign_name}</div>
+                  )}
+                </div>
+              </Td>
               <Td right>{p.target_bid != null ? won(p.target_bid) : p.target_budget != null ? won(p.target_budget) : NO_DATA}</Td>
               <Td><RationaleCell raw={p.rationale} /></Td>
             </tr>

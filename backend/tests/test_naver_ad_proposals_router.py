@@ -75,6 +75,27 @@ def test_proposals_endpoint_returns_seeded_rows(client, db):
     assert rows[0]["target_id"] == "nkw-1"
 
 
+def test_proposals_endpoint_resolves_target_and_campaign_names(client, db):
+    """대상 키워드ID → naver_entity.name(Jino 2026-07-18: "여기에도 대상이 알수없는게").
+    키워드 텍스트 + 소속 캠페인명을 함께 준다. 미해석이면 None(프론트 폴백)."""
+    from app.models import NaverEntity
+    db.add_all([
+        NaverEntity(entity_type="keyword", entity_id="nkw-1", campaign_id="cmp-1",
+                    name="아이폰17 케이스"),
+        NaverEntity(entity_type="campaign", entity_id="cmp-1", campaign_id="cmp-1",
+                    name="04. 아이폰_지문방지"),
+    ])
+    db.add(NaverProposal(proposal_type="bid_up", target_type="keyword", target_id="nkw-1",
+                          campaign_id="cmp-1", status="pending"))
+    db.add(NaverProposal(proposal_type="bid_up", target_type="keyword", target_id="nkw-미동기",
+                          campaign_id="cmp-1", status="pending"))
+    db.commit()
+    by_id = {r["target_id"]: r for r in client.get("/api/naver/ad/proposals").json()["rows"]}
+    assert by_id["nkw-1"]["target_name"] == "아이폰17 케이스"
+    assert by_id["nkw-1"]["campaign_name"] == "04. 아이폰_지문방지"
+    assert by_id["nkw-미동기"]["target_name"] is None  # 미해석 → 지어내지 않음
+
+
 def test_proposals_endpoint_filters_by_status(client, db):
     db.add(NaverProposal(proposal_type="bid_down", target_type="keyword", target_id="nkw-1",
                           campaign_id="cmp-1", status="pending"))

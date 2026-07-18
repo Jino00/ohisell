@@ -1726,6 +1726,11 @@ export interface NaverAdProposal {
   target_id: string;
   campaign_id: string;
   adgroup_id: string | null;
+  /** 대상 사람 이름(D-NAO-54, Jino 2026-07-18) — keyword=키워드텍스트 / adgroup·campaign명.
+   *  naver_entity.name 해석. 없으면 null → 프론트가 target_id 폴백. */
+  target_name: string | null;
+  /** 소속 캠페인명(맥락). 없으면 null. */
+  campaign_name: string | null;
   rationale: string | null;
   expected_effect: string | null;
   status: string;

@@ -16,6 +16,8 @@ function proposal(overrides: Partial<NaverAdProposal>): NaverAdProposal {
     target_id: "nkw-1",
     campaign_id: "cmp-1",
     adgroup_id: "grp-1",
+    target_name: null,
+    campaign_name: null,
     rationale: null,
     expected_effect: null,
     status: "pending",
