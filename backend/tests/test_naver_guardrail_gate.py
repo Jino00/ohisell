@@ -235,7 +235,7 @@ def test_bid_up_daily_budget_not_exhausted_passes():
 def test_cooldown_active_blocked():
     reason = gate.check(
         _bid_proposal("bid_up", 210),
-        _ctx(current_bid=190, last_change_at=NOW - timedelta(hours=2)),
+        _ctx(current_bid=190, last_change_at=NOW - timedelta(hours=gate._COOLDOWN_HOURS / 2)),
         now=NOW,
     )
     assert reason is not None
@@ -609,7 +609,7 @@ def test_budget_down_not_subject_to_bep_check():
 def test_budget_up_cooldown_applies():
     reason = gate.check(
         _budget_proposal("budget_up", 150_000),
-        _ctx(current_budget=100_000, last_change_at=NOW - timedelta(hours=2)),
+        _ctx(current_budget=100_000, last_change_at=NOW - timedelta(hours=gate._COOLDOWN_HOURS / 2)),
         now=NOW,
     )
     assert reason is not None
@@ -620,7 +620,7 @@ def test_budget_down_cooldown_applies_too():
     # 쿨다운·일일상한은 전 유형 공통(감액도 예외 아님) — §5-C step7
     reason = gate.check(
         _budget_proposal("budget_down", 50_000),
-        _ctx(current_budget=100_000, last_change_at=NOW - timedelta(hours=2)),
+        _ctx(current_budget=100_000, last_change_at=NOW - timedelta(hours=gate._COOLDOWN_HOURS / 2)),
         now=NOW,
     )
     assert reason is not None

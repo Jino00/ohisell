@@ -19,11 +19,13 @@ from app.services.naver_ad import growth_sweeper
 _MAX_CHANGE_PCT = Decimal("0.15")
 _EXEMPT_FROM_CHANGE_PCT = frozenset({"growth_bid_up"})
 
-# D-NAO-19 "동일 키워드 재변경 최소 간격" — 정확한 시간 수치는 문서에 없음(추정 금지 원칙
-# 상 확인 안 됨으로 명시). trigger_watch.TRIGGER_COOLDOWN_HOURS(재알림 간격, MOP Pro 실측
-# "시간별·5회+" 근거)와 동일 값을 채택 — 근접한 목적의 기존 결정을 재사용한 것이지 새로
-# 추정한 수치가 아니다. Jino 확정 시 조정 가능한 튜닝 후보.
-_COOLDOWN_HOURS = 5
+# D-NAO-19 "동일 키워드 재변경 최소 간격" — 초기값 5h(trigger_watch 재사용)에서
+# ★D-NAO-55(2026-07-18 Jino 승인 "그렇게 하자")로 2h 단축. 근거: 순위 데이터가 시간 단위
+# (hh24)라 변경 효과가 가중 순위에 반영되는 데 1~2시간 — 2h는 유령 신호(변경 전 데이터가
+# 지배하는 판정)에 연타하지 않는 최소선. 그 밑은 측정 지연 때문에 민첩성이 아니라 진동을
+# 산다(07-17 실사례: 하향 1시간 뒤 재판정 2.36은 대부분 하향 전 시간대 순위였음).
+# 일일상한(_MAX_DAILY_CHANGES=3)이 총 이동폭의 2차 방어선으로 유지된다.
+_COOLDOWN_HOURS = 2
 
 # §4 "폭주 방지: 일일 변경 건수 상한" 신규 상수 — 문서에서 확인 안 됨(추정 금지 원칙 상
 # 정직 라벨), 보수적 기본값. 키워드/광고그룹/캠페인 단위로 harness가 집계해 전달한다.
