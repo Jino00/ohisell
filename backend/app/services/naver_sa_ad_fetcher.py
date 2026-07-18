@@ -32,7 +32,8 @@ COL_COST = 11
 CONV_COL_DATE = 0
 CONV_COL_ACTION = 10
 CONV_COL_VALUE = 12
-CONV_PURCHASE_ACTION = "purchase"  # 실구매만 매출로 집계(장바구니 등 제외)
+CONV_PURCHASE_ACTION = "purchase"  # 실구매만 매출로 집계(conv_* → BEP/ROAS)
+CONV_ADDTOCART_ACTION = "add_to_cart"  # 장바구니(D-NAO-58 CD1): cart_*로 별도 수집, 매출엔 불섞
 
 # ── 키워드/그룹 grain 상세 컬럼 인덱스 (recon 확정, docs/references/21) ──
 # AD 보고서(14컬럼): 위 COL_* 재사용 + 아래. avg_rank = rank_sum / imp.
@@ -496,12 +497,16 @@ def fetch_ad_performance_daily(date_from: date, date_to: date) -> list[dict]:
 def fetch_conversion_daily(date_from: date, date_to: date) -> list[dict]:
     """AD_CONVERSION 보고서에서 (일자×캠페인×광고그룹×키워드) grain 전환을 집계 반환.
 
-    구매(purchase)만 집계(장바구니 제외). 직접(col9="1")/간접(col9="2") 분리.
+    구매(purchase)→conv_* 와 장바구니(add_to_cart)→cart_* 를 **분리** 집계한다(D-NAO-58 CD1).
+    그 외 전환 액션은 무시. 직접(col9="1")/간접(col9="2")은 양쪽 모두 분리 유지.
+    ★매출/ROAS/BEP 회계는 여전히 구매(conv_*)만 — cart_*는 선행지표(장바구니→구매 전환율)
+    산출 재료일 뿐 어떤 매출 합계에도 섞이지 않는다.
     keyword_id="-"는 "" sentinel. avg_rank 조인 키는 fetch_ad_performance_daily와 동일.
 
     Returns:
         [{"date","campaign_id","adgroup_id","keyword_id",
-          "conv_direct_cnt","conv_indirect_cnt","conv_direct_amt","conv_indirect_amt"}, ...]
+          "conv_direct_cnt","conv_indirect_cnt","conv_direct_amt","conv_indirect_amt",
+          "cart_direct_cnt","cart_indirect_cnt","cart_direct_amt","cart_indirect_amt"}, ...]
     """
     if not ACCESS_LICENSE or not SECRET_KEY_B64:
         log.warning("Naver SA 자격증명 없음 — 전환 수집 건너뜀")
@@ -522,7 +527,12 @@ def fetch_conversion_daily(date_from: date, date_to: date) -> list[dict]:
         for cols in _download_tsv(rep["downloadUrl"]):
             if len(cols) <= CONV_COL_VALUE:
                 continue
-            if cols[CONV_COL_ACTION] != CONV_PURCHASE_ACTION:
+            action = cols[CONV_COL_ACTION]
+            if action == CONV_PURCHASE_ACTION:
+                prefix = "conv"
+            elif action == CONV_ADDTOCART_ACTION:
+                prefix = "cart"
+            else:  # 그 외 전환 액션(회원가입 등)은 수집 대상 아님
                 continue
             d = _row_date_iso(cols[CONV_COL_DATE])
             if d is None:
@@ -535,16 +545,18 @@ def fetch_conversion_daily(date_from: date, date_to: date) -> list[dict]:
                 row = {"date": d, "campaign_id": cols[CONV_COL_CAMPAIGN],
                        "adgroup_id": cols[CONV_COL_ADGROUP], "keyword_id": keyword_id,
                        "conv_direct_cnt": 0, "conv_indirect_cnt": 0,
-                       "conv_direct_amt": 0, "conv_indirect_amt": 0}
+                       "conv_direct_amt": 0, "conv_indirect_amt": 0,
+                       "cart_direct_cnt": 0, "cart_indirect_cnt": 0,
+                       "cart_direct_amt": 0, "cart_indirect_amt": 0}
                 agg[key] = row
             cnt = _safe_int(cols[CONV_COL_CNT])
             amt = _safe_int(cols[CONV_COL_VALUE])
             if cols[CONV_COL_DIRINDIR] == "2":  # 간접
-                row["conv_indirect_cnt"] += cnt
-                row["conv_indirect_amt"] += amt
+                row[f"{prefix}_indirect_cnt"] += cnt
+                row[f"{prefix}_indirect_amt"] += amt
             else:  # 직접("1") 및 기타
-                row["conv_direct_cnt"] += cnt
-                row["conv_direct_amt"] += amt
+                row[f"{prefix}_direct_cnt"] += cnt
+                row[f"{prefix}_direct_amt"] += amt
 
     log.info("Naver SA 전환 %d행 집계 (%s~%s)", len(agg), date_from, date_to)
     return list(agg.values())
