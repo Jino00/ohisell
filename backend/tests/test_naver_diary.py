@@ -150,11 +150,11 @@ def test_env_snapshot_avg_rank_none_when_target_not_keyword(db):
         imp=10, clk=1, cost=100, avg_rank=Decimal("3.5"),
     ))
     db.commit()
-    # target_type 없음 → None(같은 행이 있어도 keyword 대상이 아니면 조회하지 않음)
+    # target_type 없음 → None(같은 행이 있어도 keyword/adgroup 대상이 아니면 조회하지 않음)
     assert diary.env_snapshot_sa(db, now, "cmp1")["avg_rank"] is None
-    # target_type='adgroup' → None
+    # target_type='campaign' → None (07-18 개정: adgroup은 이제 조회 대상 — 별도 테스트)
     assert diary.env_snapshot_sa(
-        db, now, "cmp1", target_type="adgroup", target_id="nkw-1"
+        db, now, "cmp1", target_type="campaign", target_id="cmp1"
     )["avg_rank"] is None
 
 
@@ -572,3 +572,19 @@ def test_approval_source_literal_drift_guard():
     assert auto_operator.APPROVAL_SOURCE_HOURLY in diary._APPROVAL_SOURCE_TO_ACTOR
     assert diary._APPROVAL_SOURCE_TO_ACTOR[auto_operator.APPROVAL_SOURCE_DAILY] == diary.ACTOR_DAILY
     assert diary._APPROVAL_SOURCE_TO_ACTOR[auto_operator.APPROVAL_SOURCE_HOURLY] == diary.ACTOR_HOURLY
+
+
+def test_env_snapshot_avg_rank_for_adgroup_target(db):
+    """adgroup(쇼핑그룹, grp-…) 대상도 avg_rank가 채워진다 — 첫 해석문(07-18)이 지적한
+    keyword-only 협소 설계의 수정 회귀 고정. naver_keyword_hourly는 entity_type='adgroup'
+    행(grp-…)에도 avg_rank를 축적한다(D-NAO-46②)."""
+    db.add(NaverKeywordHourly(
+        ad_date=date(2026, 7, 17), hour=20, entity_type="adgroup", entity_id="grp-9",
+        adgroup_id="", campaign_id="cmp1", campaign_type="SHOPPING",
+        imp=100, clk=5, cost=1000, avg_rank=Decimal("2.20"),
+    ))
+    db.commit()
+
+    env = diary.env_snapshot_sa(db, datetime(2026, 7, 18, 9, 0), "cmp1",
+                                target_type="adgroup", target_id="grp-9")
+    assert env["avg_rank"] == 2.2
