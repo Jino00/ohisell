@@ -1,15 +1,18 @@
 # test_scheduler_naver_auto_operator.py — auto_operator 일/시간당 크론 등록 확인 (D-NAO-49)
 # scheduler_service의 부수효과 없는 정적 등록 구조만 검증(test_scheduler_naver_keyword_hourly.py
-# 와 동일 패턴). 이 개발 환경에는 apscheduler가 설치돼 있지 않아(기존 세션에서도 동일 이슈)
-# scheduler_service import 전에 sys.modules에 최소 스텁을 심는다 — 이미 설치된 환경(CI 등)
-# 에서는 실제 apscheduler가 우선하도록 "이미 로드돼 있으면 건드리지 않음" 가드를 둔다.
+# 와 동일 패턴). apscheduler가 설치되지 않은 환경에서만 scheduler_service import 전에 sys.modules에
+# 최소 스텁을 심는다 — 설치된 환경(CI 등)에서는 실제 apscheduler를 절대 대체하지 않는다.
+# ★가드는 반드시 find_spec(설치 여부)로 판단할 것: "sys.modules에 없음"(아직 import 안 됨)으로
+#   판단하면, apscheduler가 설치돼 있어도 이 테스트가 먼저 import될 때 스텁이 실제 패키지를
+#   프로세스 전역으로 덮어써(테스트 격리 오염) test_scheduler_health의 CronTrigger가 스텁이 된다.
 from __future__ import annotations
 
+import importlib.util
 import inspect
 import sys
 import types
 
-if "apscheduler" not in sys.modules:
+if importlib.util.find_spec("apscheduler") is None:
     _apscheduler = types.ModuleType("apscheduler")
     _events = types.ModuleType("apscheduler.events")
     _events.EVENT_JOB_EXECUTED = 1
