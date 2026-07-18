@@ -3,6 +3,12 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
+- 날짜: 2026-07-18 21:57 KST (★★**D-NAO-58 클릭 탐침 루프 CD1(선행지표 데이터층) — 구현·리뷰·배포·라이브 검증 완료** — 워크트리 `knowledge-layer-inversion-phase0-77bb7d`, 브랜치 `claude/d-nao-58-click-discovery-9af4e6`, 커밋 `05e7a48`. **PR 미생성**. main==prod에 배포+마이그(`u3v4w5x6y7z8`) 적용 완료.)
+  - **CD1 완료**: naver_ad_daily cart_* 4컬럼 + fetch_conversion_daily가 add_to_cart→cart_* 분리수집(매출/BEP 회계 불변, 구매만) + report_collector/ad_daily_ingest 확장 + 신규 `cart_conversion_rate.py` SA(by_product 1:1매핑쇼핑 / by_campaign 파워링크폴백 / global). 전체 2044 passed.
+  - **구현=Opus 서브에이전트 / 리뷰=Opus R1 GATE PASS**(회계불변 grep·마이그 단일head·25테스트). 잔여 4건 MINOR/NIT(코드수정 불요). Fable 미사용(운영룰 준수).
+  - **라이브 검증(원칙22, prod 7일 재수집 실측)**: 장바구니 357건 적재 · 04 매핑상품 13365319468 by_product=1.0 · P_Test 파워링크 by_campaign=0.8 · 전환율 실분포(0.0~1.0) · 백엔드 재시작 online·에러0.
+  - **D-58-6 확정**: 전환율 분모(장바구니)는 AD_CONVERSION에만 존재→계획서 "주문 데이터" 문구와 달리 AD_CONVERSION 비율(clamp 0~1)로 산출(유일 측정경로). Jino 승인.
+  - **다음=CD2 트리거·탐침 실행층**: run_hourly_lane에 탐침 분기. **미결 임계값 3개(계획서 §미결)**: 클릭0 지속시간·최소노출·실시간 안전판 손실상한 — 착수 시 추천안→트랙 확정. + PR 생성.
 - 날짜: 2026-07-18 01:50 KST (★★**D-NAO-54 운영 일기·지혜 시스템 — P1+P2+P3 전부 배포 완료, 아침 사슬 라이브 검증 대기** — 워크트리 `session-dfd814`, PR #44/#45/#46 병합, main(d5a8657)==prod. Fable설계/Opus구현 라우팅·독립 적대적 리뷰 3회 전부 GATE PASS 후 지적 반영)
   - **P1 기록층**: 마이그 q9r0s1t2u3v4+diary.py+harness/레인 훅. **라이브 부분 합격**: 01:20 시간당 레인 신코드 완주 ok 실측(scheduler_state)·diary 0행=심야 무트래픽 판정hold 기록제외 설계와 정합. 확실 증거는 아침 레인.
   - **P2 해석층**: diary_outcome(d1/d7 소급)+diary_reflection(claude -p 해석문, observe 행)+크론 08:35(catch-up은 돈 잡 뒤). **P3 승격·망각**: wisdom 5모듈+마이그 r0s1t2u3v4w5+크론 08:45. 리뷰 P2 3건(망각↔TTL 데드락→TTL 보장+hidden 부활 / 방향 selection bias→tally 컬럼+승률 / cost=0 중립) 반영. 테스트 총 1972 pass.
