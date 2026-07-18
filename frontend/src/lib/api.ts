@@ -1919,6 +1919,11 @@ export interface NaverChangeLogRow {
   entity_type: string;
   entity_id: string;
   campaign_id: string;
+  /** 대상 사람 이름(D-NAO-54, Jino 2026-07-18) — adgroup="17E" / keyword=키워드텍스트 /
+   *  campaign=캠페인명. naver_entity.name 해석 결과. 없으면 null → 프론트가 'type id' 폴백. */
+  entity_name: string | null;
+  /** 소속 캠페인명(대상이 adgroup/keyword일 때 맥락). 없으면 null. */
+  campaign_name: string | null;
   action: string;
   before: Record<string, unknown> | null;
   after: Record<string, unknown> | null;

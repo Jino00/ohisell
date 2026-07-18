@@ -41,7 +41,7 @@ from decimal import Decimal
 import requests
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import or_
+from sqlalchemy import or_, tuple_
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -969,6 +969,46 @@ def _execution_state(row: NaverChangeLog) -> str | None:
     return "unknown"
 
 
+def _resolve_entity_names(
+    db: Session, rows: list[NaverChangeLog]
+) -> tuple[dict[tuple[str, str], str], dict[str, str]]:
+    """change_log 행들의 (entity_type, entity_id)·campaign_id → 사람 이름 배치 해석
+    (Jino 2026-07-18: "적혀있는 대상은 알아볼 수가 없어"). naver_entity.name에
+    캠페인/그룹명·키워드 텍스트가 있다(prod 실측 100% 채워짐).
+
+    ★행 수는 API가 limit≤200으로 강제하므로 쿼리 2개(엔티티·캠페인)면 충분하다 —
+    행마다 조회(N+1)하지 않는다. 이름이 비었거나 매핑에 없으면(entity_id='__bulk__' 등)
+    키가 빠지고, 프론트가 원래 'type id'로 폴백한다(지어내지 않음).
+    """
+    ent_keys = {
+        (r.entity_type, r.entity_id)
+        for r in rows
+        if r.entity_type and r.entity_id and r.entity_id != "__bulk__"
+    }
+    camp_ids = {r.campaign_id for r in rows if r.campaign_id}
+
+    ent_names: dict[tuple[str, str], str] = {}
+    if ent_keys:
+        for e in (
+            db.query(NaverEntity.entity_type, NaverEntity.entity_id, NaverEntity.name)
+            .filter(tuple_(NaverEntity.entity_type, NaverEntity.entity_id).in_(list(ent_keys)))
+            .all()
+        ):
+            if e.name:
+                ent_names[(e.entity_type, e.entity_id)] = e.name
+
+    camp_names: dict[str, str] = {}
+    if camp_ids:
+        for c in (
+            db.query(NaverEntity.entity_id, NaverEntity.name)
+            .filter(NaverEntity.entity_type == "campaign", NaverEntity.entity_id.in_(list(camp_ids)))
+            .all()
+        ):
+            if c.name:
+                camp_names[c.entity_id] = c.name
+    return ent_names, camp_names
+
+
 @router.get("/change-log")
 def get_change_log(
     campaign_id: str | None = Query(None, description="캠페인 필터"),
@@ -1072,6 +1112,8 @@ def get_change_log(
         else None
     )
     rows = q.order_by(NaverChangeLog.changed_at.desc()).offset(offset).limit(limit).all()
+    # 대상 사람 이름 해석(D-NAO-54, Jino 2026-07-18) — ID만으로는 못 알아본다.
+    ent_names, camp_names = _resolve_entity_names(db, rows)
 
     return {
         "total": total,
@@ -1083,6 +1125,9 @@ def get_change_log(
                 "entity_type": r.entity_type,
                 "entity_id": r.entity_id,
                 "campaign_id": r.campaign_id,
+                # 이름 없으면 키 자체를 안 넣는다(None) → 프론트가 'type id'로 폴백.
+                "entity_name": ent_names.get((r.entity_type, r.entity_id)),
+                "campaign_name": camp_names.get(r.campaign_id),
                 "action": r.action,
                 "before": _loads_or_none(r.before_value),
                 "after": _loads_or_none(r.after_value),

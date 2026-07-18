@@ -576,3 +576,38 @@ def test_write_failure_marker_wins_over_guard_marker(client, db):
     db.commit()
     rows = client.get("/api/naver/ad/change-log?actor=ours&include_blocked=true").json()["rows"]
     assert rows[0]["execution_state"] == "unknown", "쓰기 실패는 마커가 섞여도 unknown이어야 한다"
+
+
+# ── D-NAO-54 2026-07-18: 대상 사람 이름 해석(Jino "적혀있는 대상은 알아볼 수가 없어") ──
+def test_change_log_resolves_entity_and_campaign_names(client, db):
+    """대상 ID → naver_entity.name. adgroup='17E' + 소속 캠페인명을 함께 준다."""
+    from app.models import NaverEntity
+    db.add_all([
+        NaverEntity(entity_type="campaign", entity_id="cmp-1", campaign_id="cmp-1",
+                    name="04. 아이폰_지문방지"),
+        NaverEntity(entity_type="adgroup", entity_id="grp-9", campaign_id="cmp-1",
+                    name="17E"),
+    ])
+    row = _seed(db)
+    row.entity_type = "adgroup"; row.entity_id = "grp-9"
+    db.commit()
+    item = client.get("/api/naver/ad/change-log").json()["rows"][0]
+    assert item["entity_name"] == "17E"
+    assert item["campaign_name"] == "04. 아이폰_지문방지"
+
+
+def test_change_log_entity_name_is_none_when_unresolved(client, db):
+    """이름을 못 찾으면 키를 지어내지 않고 None → 프론트가 'type id'로 폴백한다(원칙22)."""
+    _seed(db)  # naver_entity에 nkw-1 없음
+    item = client.get("/api/naver/ad/change-log").json()["rows"][0]
+    assert item["entity_name"] is None
+    assert item["campaign_name"] is None
+
+
+def test_change_log_skips_bulk_entity_in_name_lookup(client, db):
+    """__bulk__ 요약행은 실엔티티가 아니라 이름 해석 대상이 아니다(빈 IN 방지)."""
+    row = _seed(db, action="external_keyword_removed")
+    row.entity_id = "__bulk__"
+    db.commit()
+    item = client.get("/api/naver/ad/change-log").json()["rows"][0]
+    assert item["entity_name"] is None

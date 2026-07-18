@@ -520,6 +520,30 @@ function RationaleCell({ raw }: { raw: string | null | undefined }) {
   return <span className="text-xs text-gray-600" title={title}>{text}</span>;
 }
 
+const ENTITY_TYPE_LABEL: Record<string, string> = {
+  campaign: "캠페인", adgroup: "광고그룹", keyword: "키워드",
+};
+
+/** 대상 셀(Jino 2026-07-18: "적혀있는 대상은 알아볼 수가 없어") — ID 대신 사람 이름.
+ *  이름(17E) + 유형 + 소속 캠페인명. 백엔드가 이름을 못 주면(대량행·미동기) 원래
+ *  'type id'로 폴백(지어내지 않음). 원식별자는 title 툴팁에 보존(감사·디버깅). */
+function TargetCell({ row }: { row: NaverChangeLogRow }) {
+  const typeLabel = ENTITY_TYPE_LABEL[row.entity_type] ?? row.entity_type;
+  const idHint = `${row.entity_type} ${row.entity_id}`;
+  if (!row.entity_name) {
+    return <span className="text-xs text-gray-500" title={idHint}>{typeLabel} {row.entity_id}</span>;
+  }
+  const showCampaign = row.entity_type !== "campaign" && row.campaign_name;
+  return (
+    <div className="text-xs leading-tight" title={idHint}>
+      <div className="font-medium text-gray-800">
+        {row.entity_name} <span className="font-normal text-gray-400">· {typeLabel}</span>
+      </div>
+      {showCampaign && <div className="text-gray-500">{row.campaign_name}</div>}
+    </div>
+  );
+}
+
 // ══════════════════════════════════════════════════════════════════
 // D-NAO-54 기간 선택 — 변경 이력 두 패널이 **각각** 쓰는 재사용 컴포넌트.
 // ★상태는 공유하지 않는다(패널마다 독립 usePeriod). 의도된 것이다: 외부 감지는 하루 1회
@@ -733,7 +757,7 @@ function ChangeLogTable({ range, label }: { range: DateRange; label: string }) {
         {data.rows.map((r) => (
           <tr key={r.id}>
             <Td><span className="text-xs text-gray-500">{r.changed_at?.slice(5, 16) ?? NO_DATA}</span></Td>
-            <Td><span className="text-xs">{r.entity_type} {r.entity_id}</span></Td>
+            <Td><TargetCell row={r} /></Td>
             {/* ★"무엇을 왜 바꿨는지" — MOP에 0개인 컬럼(ref24). 우리가 이길 자리이므로
                 지원하는 실행 액션 4종을 전부 제대로 그린다(codex[P2] R3). */}
             <Td><ChangeCell row={r} /></Td>
@@ -786,7 +810,7 @@ function ExternalChangesTable({ range, label }: { range: DateRange; label: strin
         {data.rows.map((r) => (
           <tr key={r.id}>
             <Td><span className="text-xs text-gray-500">{r.changed_at?.slice(5, 16) ?? NO_DATA}</span></Td>
-            <Td><span className="text-xs">{r.entity_type} {r.entity_id}</span></Td>
+            <Td><TargetCell row={r} /></Td>
             <Td><span className="text-xs tabular-nums">{describeChange(r)}</span></Td>
             <Td><RationaleCell raw={r.rationale} /></Td>
           </tr>
