@@ -155,31 +155,42 @@ def _order_shipping_cost(order_row=None) -> Decimal:
 
 
 def _avg_qty_and_logistics(db: Session) -> dict[str, dict]:
-    """네이버 상품(channel_product_id)별 평균 주문수량 + 단가당 물류비(D-NAO-57 C).
+    """네이버 상품(channel_product_id)별 평균 주문수량 + 단가당 **순**물류비(D-NAO-57 C, 리뷰 P2-1).
 
-    logistics(단가당) = 상품별 가중평균 배송비(건당) ÷ 평균 주문수량. 건당 배송비는 주문 건별
-    배송방식으로 가중평균(현시점 전 건 일반배송이라 = 1,900, _order_shipping_cost 훅 참조 —
-    N배송 판별 필드 확정 시 방식별 혼재가 자동 반영). 평균 주문수량은 최근 _PRICE_WINDOW_DAYS
-    창(없으면 전기간). 주문 없는 상품은 수량 1 폴백(= 배송비 전액 차감, 보수적).
+    logistics(단가당) = 상품별 순배송원가(건당) ÷ 평균 주문수량.
+      순배송원가 net_ship = max(0, 지불 배송비 − 평균 수취 배송비)
+        - 지불 배송비: 주문 건별 배송방식 가중평균(현시점 전 건 일반배송 1,900,
+          _order_shipping_cost 훅 참조 — N배송 판별 필드 확정 시 혼재 자동 반영)
+        - 수취 배송비: Order.shipping_cost(고객이 낸 deliveryFeeAmount) 실측 평균 —
+          라이브 실측(120일): 채널 25.4% 주문이 수취(상품별 무료/유료 혼합이 사실).
+        - ★max(0,·) 클램프 = 보수 방향: 수취가 지불을 초과해도 배송 마진을 이익(음수 물류비)으로
+          잡지 않는다 — BEP를 낙관 쪽으로 움직이는 오차를 구조적으로 차단.
+    평균 주문수량·수취 배송비는 최근 _PRICE_WINDOW_DAYS 창(없으면 전기간). 주문 없는 상품은
+    수량 1 + 수취 0 폴백(= 배송비 전액 차감, 보수적).
 
-    반환: {cpid: {"avg_qty": Decimal, "shipping": Decimal, "logistics": Decimal, "orders": int}}
+    반환: {cpid: {"avg_qty", "shipping"(지불), "collected"(수취 평균), "net_ship",
+                  "logistics"(단가당), "orders"}}
     """
     cutoff = kst_today() - timedelta(days=_PRICE_WINDOW_DAYS)
 
     def _collect(since):
-        # cpid → 주문 행(경량) 리스트. 현재 배송방식 판별에 raw_data가 불필요해(전 건 일반배송)
-        # quantity만 로드한다 — N배송 판별 필드 확정 시 여기에 그 컬럼을 추가한다.
-        qy = db.query(Order.platform_product_id, Order.quantity).filter(
+        # cpid → 주문 행(경량) 리스트. 배송방식 판별에 raw_data가 불필요해(전 건 일반배송)
+        # quantity+shipping_cost만 로드한다 — N배송 판별 필드 확정 시 여기에 그 컬럼을 추가한다.
+        qy = db.query(Order.platform_product_id, Order.quantity, Order.shipping_cost).filter(
             Order.channel_id == NAVER_CHANNEL_ID,
             Order.quantity > 0,
         )
         if since is not None:
             qy = qy.filter(Order.order_date >= since)
         acc: dict[str, list] = {}
-        for pid, qn in qy.all():
+        for pid, qn, ship_in in qy.all():
             if not pid:
                 continue
-            acc.setdefault(pid, []).append({"quantity": int(qn)})
+            acc.setdefault(pid, []).append({
+                "quantity": int(qn),
+                # 수취 배송비: None=배송비 포함 상품(수취 0 취급, Order 모델 주석과 정합)
+                "collected": Decimal(str(ship_in)) if ship_in else Decimal("0"),
+            })
         return acc
 
     recent = _collect(cutoff)
@@ -192,11 +203,15 @@ def _avg_qty_and_logistics(db: Session) -> dict[str, dict]:
         avg_qty = Decimal(total_qty) / Decimal(n) if n and total_qty > 0 else Decimal("1")
         if avg_qty <= 0:
             avg_qty = Decimal("1")
-        # 건별 배송방식 가중평균 배송비(현재 전 건 일반배송 → 1,900, 훅 확장 시 혼재 반영).
+        # 지불: 건별 배송방식 가중평균(현재 전 건 일반배송 → 1,900, 훅 확장 시 혼재 반영).
         ship_sum = sum((_order_shipping_cost(r) for r in rows), Decimal("0"))
         shipping = (ship_sum / Decimal(n)) if n else SHIPPING_COST_NORMAL
-        logistics = (shipping / avg_qty).quantize(Decimal("0.01"), ROUND_HALF_UP)
-        out[pid] = {"avg_qty": avg_qty, "shipping": shipping, "logistics": logistics, "orders": n}
+        # 수취: 주문당 평균(COALESCE(shipping_cost,0) — 무료배송 주문은 0으로 평균에 포함).
+        collected = (sum((r["collected"] for r in rows), Decimal("0")) / Decimal(n)) if n else Decimal("0")
+        net_ship = max(Decimal("0"), shipping - collected)  # ★보수 클램프(배송마진 이익 미인정)
+        logistics = (net_ship / avg_qty).quantize(Decimal("0.01"), ROUND_HALF_UP)
+        out[pid] = {"avg_qty": avg_qty, "shipping": shipping, "collected": collected,
+                    "net_ship": net_ship, "logistics": logistics, "orders": n}
     return out
 
 
@@ -240,8 +255,10 @@ def calculate_bep(db: Session, *, aggressiveness: str = "standard") -> dict:
     D-NAO-57 (B): 광고 의사결정 BEP라 광고 경로 실효율(ad_commission_rate, 매출연동 언디루션)을
     우선 쓰고, 정산 표본 부족 등으로 산출 불가면 기존 블렌드(effective_commission_rate)로 폴백.
     어느 기준을 썼는지 commission_basis(ad_case/blended)로 정직 표기(행·반환 둘 다).
-    D-NAO-57 (C): logistics=상품별 (건당 배송비 ÷ 평균 주문수량), VAT는 기존 관례대로 공헌이익
-    분자 안에서 ÷1.1(원가·수수료와 동일 — 배송비 1,900도 부가세포함이라 이중차감/미차감 없음).
+    D-NAO-57 (C, 리뷰 P2-1): logistics=상품별 (순배송원가 ÷ 평균 주문수량) — 순배송원가 =
+    max(0, 지불 1,900 − 고객 수취 배송비 평균)(수취 실측: 채널 25.4% 주문이 유료배송). VAT는
+    기존 관례대로 공헌이익 분자 안에서 ÷1.1(원가·수수료와 동일 — 지불·수취 배송비 모두
+    부가세포함이라 이중차감/미차감 없음).
     """
     ad_rate = ad_commission_rate(db)
     if ad_rate is not None:
@@ -283,8 +300,8 @@ def calculate_bep(db: Session, *, aggressiveness: str = "standard") -> dict:
         sp = prices.get(m.channel_product_id, Decimal("0"))
         cost, master_name = masters.get(m.product_id, (Decimal("0"), ""))
         name = (m.channel_product_name or master_name or "")[:300]
-        # D-NAO-57 (C): 상품별 단가당 물류비(건당 배송비 ÷ 평균 주문수량). 주문 이력 없으면
-        # 배송비 전액 차감(수량 1, 보수적) — _avg_qty_and_logistics 폴백과 정합.
+        # D-NAO-57 (C): 상품별 단가당 순물류비(순배송원가 ÷ 평균 주문수량, 수취 배송비 차감).
+        # 주문 이력 없으면 수취 0 가정 = 배송비 전액 차감(수량 1, 보수적) — 헬퍼 폴백과 정합.
         logistics = logistics_by_pid.get(
             m.channel_product_id, {"logistics": SHIPPING_COST_NORMAL}
         )["logistics"]

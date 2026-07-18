@@ -14,7 +14,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.database import Base
 from app.models import (
-    NaverAdgroupProduct, NaverCampaignSettings, NaverEntity, NaverProductBep,
+    Channel, NaverAdgroupProduct, NaverCampaignSettings, NaverEntity, NaverProductBep,
     NaverSettlementCase, NaverSettlementDaily, Order, ProductChannelMapping, ProductMaster,
 )
 from app.services.naver_ad import bep_calculator, campaign_target_resolver, shopping_ad_product_sync
@@ -67,7 +67,7 @@ def test_sync_adgroup_products_snapshot_replace_and_dedup(db):
         {"mall_product_id": "999", "product_name": "other"},
     ]}
     res = shopping_ad_product_sync.sync_adgroup_products(db, ads_by_adgroup=ads)
-    assert res == {"adgroups": 1, "mappings": 2, "products": 2}
+    assert res == {"adgroups": 1, "mappings": 2, "products": 2, "removed": 0, "failed_adgroups": 0}
     rows = db.query(NaverAdgroupProduct).filter(NaverAdgroupProduct.adgroup_id == "grp-1").all()
     assert {r.mall_product_id for r in rows} == {"13365319468", "999"}
     assert all(r.campaign_id == "cmp-shop" for r in rows)
@@ -77,6 +77,55 @@ def test_sync_adgroup_products_snapshot_replace_and_dedup(db):
     assert res2["mappings"] == 1
     rows2 = db.query(NaverAdgroupProduct).filter(NaverAdgroupProduct.adgroup_id == "grp-1").all()
     assert {r.mall_product_id for r in rows2} == {"13365319468"}
+
+
+def test_sync_reconciles_non_ours_campaign_rows(db):
+    """리뷰 P2-3 ①: optimizer가 ours가 아니게 된 캠페인의 매핑 행 삭제."""
+    _ours_shopping_adgroup(db)  # cmp-shop=ours
+    db.add(NaverCampaignSettings(campaign_id="cmp-left", optimizer="mop"))  # ours 이탈
+    db.add(NaverAdgroupProduct(adgroup_id="grp-old", campaign_id="cmp-left", mall_product_id="111"))
+    db.commit()
+    res = shopping_ad_product_sync.sync_adgroup_products(db, ads_by_adgroup={"grp-1": []})
+    assert res["removed"] == 1
+    assert db.query(NaverAdgroupProduct).filter(NaverAdgroupProduct.campaign_id == "cmp-left").count() == 0
+
+
+def test_sync_reconciles_stale_adgroup_when_fully_enumerated(db):
+    """리뷰 P2-3 ②: 전체 그룹 열거 성공 캠페인의, 수집에 없는 그룹(삭제/off) 행 삭제."""
+    _ours_shopping_adgroup(db)  # 활성 그룹 = grp-1만
+    # grp-gone: 과거 매핑 행은 있으나 활성 엔티티에 없음(그룹 삭제/off) → stale
+    db.add(NaverAdgroupProduct(adgroup_id="grp-gone", campaign_id="cmp-shop", mall_product_id="222"))
+    db.commit()
+    res = shopping_ad_product_sync.sync_adgroup_products(
+        db, ads_by_adgroup={"grp-1": [{"mall_product_id": "333", "product_name": "x"}]}
+    )
+    assert res["removed"] == 1
+    assert db.query(NaverAdgroupProduct).filter(NaverAdgroupProduct.adgroup_id == "grp-gone").count() == 0
+    assert db.query(NaverAdgroupProduct).filter(NaverAdgroupProduct.adgroup_id == "grp-1").count() == 1
+
+
+def test_sync_preserves_mappings_when_fetch_fails(db, monkeypatch):
+    """리뷰 P2-3 ② 안전변: get_ads 실패 그룹이 있는 캠페인은 stale 정리 유보(매핑 소실 금지)."""
+    _ours_shopping_adgroup(db)  # grp-1 활성
+    db.add(NaverEntity(entity_type="adgroup", entity_id="grp-2", parent_id="cmp-shop",
+                       campaign_id="cmp-shop", campaign_type="SHOPPING", status="on"))
+    # 기존 매핑: grp-2(이번에 실패할 그룹) + grp-gone(진짜 stale이지만 실패 캠페인이라 유보)
+    db.add(NaverAdgroupProduct(adgroup_id="grp-2", campaign_id="cmp-shop", mall_product_id="444"))
+    db.add(NaverAdgroupProduct(adgroup_id="grp-gone", campaign_id="cmp-shop", mall_product_id="555"))
+    db.commit()
+
+    def fake_get_ads(aid):
+        if aid == "grp-2":
+            raise RuntimeError("일시 API 장애")
+        return [{"mall_product_id": "333", "product_name": "x", "adgroup_id": aid}]
+
+    monkeypatch.setattr(shopping_ad_product_sync, "get_ads", fake_get_ads)
+    res = shopping_ad_product_sync.sync_adgroup_products(db)  # 실 경로(주입 없음)
+    assert res["failed_adgroups"] == 1
+    # 실패 그룹 매핑 보존 + 같은 캠페인의 stale 후보도 유보(removed 0)
+    assert res["removed"] == 0
+    assert db.query(NaverAdgroupProduct).filter(NaverAdgroupProduct.adgroup_id == "grp-2").count() == 1
+    assert db.query(NaverAdgroupProduct).filter(NaverAdgroupProduct.adgroup_id == "grp-gone").count() == 1
 
 
 def test_resolver_priority2_adgroup_product_derived(db):
@@ -225,7 +274,7 @@ def test_shipping_config_constants():
 
 
 def test_avg_qty_and_logistics_per_unit(db):
-    # p1: 2건(수량 2,4) → 평균수량 3 → logistics = 1900/3 = 633.33
+    # p1: 2건(수량 2,4, 수취 0) → 평균수량 3 → logistics = (1900-0)/3 = 633.33
     db.add(Order(channel_id=6, platform_product_id="p1", selling_price=Decimal("3000"), quantity=2,
                  order_date=date(2026, 7, 1), order_number="o1"))
     db.add(Order(channel_id=6, platform_product_id="p1", selling_price=Decimal("3000"), quantity=4,
@@ -234,7 +283,34 @@ def test_avg_qty_and_logistics_per_unit(db):
     out = bep_calculator._avg_qty_and_logistics(db)
     assert out["p1"]["avg_qty"] == Decimal("3")
     assert out["p1"]["shipping"] == Decimal("1900")
+    assert out["p1"]["collected"] == Decimal("0")
+    assert out["p1"]["net_ship"] == Decimal("1900")
     assert out["p1"]["logistics"] == Decimal("633.33")
+
+
+def test_avg_logistics_nets_collected_shipping(db):
+    """리뷰 P2-1: 고객 수취 배송비(Order.shipping_cost)를 차감한 순배송원가.
+    p1: 2건(수취 3000, 0) → 평균수취 1500 → net = 1900-1500 = 400, 수량 평균 1 → logistics 400."""
+    db.add(Order(channel_id=6, platform_product_id="p1", selling_price=Decimal("3000"), quantity=1,
+                 shipping_cost=Decimal("3000"), order_date=date(2026, 7, 1), order_number="o1"))
+    db.add(Order(channel_id=6, platform_product_id="p1", selling_price=Decimal("3000"), quantity=1,
+                 shipping_cost=None, order_date=date(2026, 7, 2), order_number="o2"))  # 무료배송=수취0
+    db.commit()
+    out = bep_calculator._avg_qty_and_logistics(db)
+    assert out["p1"]["collected"] == Decimal("1500")
+    assert out["p1"]["net_ship"] == Decimal("400")
+    assert out["p1"]["logistics"] == Decimal("400.00")
+
+
+def test_avg_logistics_clamps_net_at_zero(db):
+    """리뷰 P2-1 보수 클램프: 수취가 지불(1900)을 초과해도 배송 마진을 이익으로 잡지 않는다."""
+    db.add(Order(channel_id=6, platform_product_id="p1", selling_price=Decimal("3000"), quantity=1,
+                 shipping_cost=Decimal("5000"), order_date=date(2026, 7, 1), order_number="o1"))
+    db.commit()
+    out = bep_calculator._avg_qty_and_logistics(db)
+    assert out["p1"]["collected"] == Decimal("5000")
+    assert out["p1"]["net_ship"] == Decimal("0")   # max(0, 1900-5000)
+    assert out["p1"]["logistics"] == Decimal("0.00")
 
 
 def _bep_fixture(db, *, cost="5000", price="10000", qty=1):
@@ -278,6 +354,32 @@ def test_calculate_bep_ad_case_basis_when_settlement_present(db):
     row = db.query(NaverProductBep).filter(NaverProductBep.channel_product_id == "13365319468").one()
     assert row.commission_basis == "ad_case"
     assert row.commission_rate == Decimal("0.0500")
+
+
+def test_calculate_bep_hand_computed_constants(db):
+    """리뷰 P3-1 거울 방지: 프로덕션 수식 재구현이 아닌 **손계산 하드코딩 기대값** 대조.
+
+    입력: sp=11,000 / rate=0.05(채널 5%) / cost=2,200 / 지불배송 1,900·수취 800 → net_ship=1,100 / 수량 1
+    손계산: contribution = (11000 − 550 − 2200 − 1100) / 1.1 = 7150/1.1 = 6500.00
+            bep = 11000/6500 = 1.6923(4자리), target = 1.6923×1.15 = 1.946145 → 1.9461(4자리)
+    """
+    db.add(Channel(id=6, name="네이버", code="NAVER", platform="naver", commission_rate=Decimal("5.0")))
+    pm = ProductMaster(internal_sku="SKU-HC", product_name="손계산", cost_price=Decimal("2200"))
+    db.add(pm)
+    db.flush()
+    db.add(ProductChannelMapping(product_id=pm.id, channel_id=6, channel_product_id="hc-1",
+                                 channel_product_name="손계산", selling_price=Decimal("0"), is_active=True))
+    db.add(Order(channel_id=6, platform_product_id="hc-1", selling_price=Decimal("11000"), quantity=1,
+                 shipping_cost=Decimal("800"), order_date=kst_today() - timedelta(days=1), order_number="ohc"))
+    db.commit()
+
+    bep_calculator.calculate_bep(db)
+    row = db.query(NaverProductBep).filter(NaverProductBep.channel_product_id == "hc-1").one()
+    assert row.commission_rate == Decimal("0.0500")
+    assert row.logistics_cost == Decimal("1100.00")
+    assert row.contribution_margin == Decimal("6500.00")
+    assert row.bep_roas == Decimal("1.6923")
+    assert row.target_roas == Decimal("1.9461")
 
 
 def test_calculate_bep_no_orders_product_gets_full_shipping(db):

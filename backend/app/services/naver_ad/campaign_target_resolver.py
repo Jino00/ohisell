@@ -118,6 +118,11 @@ def resolve_adgroup_target_roas(db: Session, adgroup_id: str) -> dict:
     계정 기본값(③)으로 폴백. 우선순위 ①(캠페인 override)은 grain이 캠페인이라 여기서는 다루지
     않는다 — override는 캠페인 수준 resolve_target_roas에서만 적용된다.
     source: product_bep(②) / account_default(③) / unavailable.
+
+    ⚠️ 현재 프로덕션 호출부 0(의도적 선구축, 리뷰 P3-2 승인 유지): 기존 소비처(제안·레인·진단)는
+    전부 캠페인 grain으로만 호출한다. 1차 활용 후보 = auto_operator **시간당 밴드 레인** —
+    핫셋이 keyword/adgroup 엔티티 단위라 캠페인 target 대신 이 함수로 그룹별 상품 target을 쓰면
+    한 캠페인 안 상품별 差를 반영할 수 있다(호출부 변경은 별도 결정·리뷰 대상, 임의 배선 금지).
     """
     val = _weighted_target_for_cpids(db, _cpids_for_adgroup(db, adgroup_id), NaverProductBep.target_roas)
     if val is not None:
