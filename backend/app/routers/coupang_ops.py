@@ -17,6 +17,7 @@ import os
 import re
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, File, Header, HTTPException, Path, Query, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -1870,12 +1871,44 @@ async def upload_rg_settlement_xlsx(
 
     content = await file.read()
     try:
-        result = rg_settlement_sync.ingest_settlement_xlsx(db, account_key, content)
+        # ★run_in_threadpool 필수(2026-07-17 사고): 이 라우터 82개 엔드포인트 중 79개는 `def`라
+        # FastAPI가 알아서 스레드풀로 보내지만, 업로드 2개만 `async def`(await file.read() 때문)여서
+        # 동기 ingest가 **이벤트 루프 위에서** 돌았다. prod는 uvicorn --workers 1 단일 워커라
+        # 그 시간 동안 모든 API가 멈춘다(같은 시각 fetch-error POST도 15초 타임아웃). 파싱이
+        # 빨라진 지금도(0.06초) 파일이 커지면 재발하므로 구조로 막는다.
+        result = await run_in_threadpool(
+            rg_settlement_sync.ingest_settlement_xlsx, db, account_key, content
+        )
     except WingReadError as e:
         raise HTTPException(status_code=422, detail=f"엑셀 파싱 실패: {e}")
     # S4-P2: 자동 다운로드(Mac 페처 push)·수동 업로드 모두 freshness 갱신(스케줄 중복방지·상태표시).
     rg_settlement_sync.rg_mark_heartbeat(db)
     return result
+
+
+@router.post("/wing/rg-settlement/ingest-status")
+def ingest_rg_settlement_status(
+    payload: dict = Body(...),
+    account_key: str = Query(..., description="COUPANG_WING1/2 — RG_ACCOUNTS 검증"),
+    x_ingest_token: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """Mac 상주 브라우저 페처 → status/api raw JSON 인제스트 → 계정 단위 정산 수수료 적재(층1).
+
+    ★정적 쿠키 경로(sync_coupang_rg_settlement 크론, WING1/2 쿠키)를 이관한다: Mac 세션이 매일
+    받던 status/api JSON을 그대로 push해 계정 row를 적재(새 인증·새 세션 없음). 회계(net_profit
+    소스) 변경 엔드포인트이므로 upload-xlsx와 동일 방어 수위 — X-Ingest-Token 필수 +
+    account_key ∈ RG_ACCOUNTS + body=raw JSON dict. 스키마 드리프트(WingReadError)는 422.
+    ★rg_mark_heartbeat 호출 안 함: 그건 엑셀 push 캐던스 상태행 전용(COUPANG_WING_RG)이다.
+    이 경로의 신선도는 적재된 데이터 자체(data_stale 감시)로 검증한다. 프론트 호출 없음.
+    """
+    _require_ingest_token(x_ingest_token)
+    if account_key not in rg_settlement_sync.RG_ACCOUNTS:
+        raise HTTPException(status_code=400, detail=f"지원하지 않는 account_key: {account_key}")
+    try:
+        return rg_settlement_sync.ingest_status_payload(db, account_key, payload)
+    except WingReadError as e:
+        raise HTTPException(status_code=422, detail=f"status/api 파싱 실패: {e}")
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -1955,7 +1988,10 @@ async def upload_product_size_xlsx(
     if not filename.lower().endswith(".xlsx"):
         raise HTTPException(status_code=400, detail="xlsx 파일만 업로드 가능합니다.")
     content = await file.read()
-    result = rg_product_size_sync.ingest_product_size(db, content, source_group_key=source_group_key)
+    # 위 upload-xlsx와 동일 이유로 스레드풀 오프로드(`async def` + 동기 파싱 = 단일 워커 전체 정지).
+    result = await run_in_threadpool(
+        rg_product_size_sync.ingest_product_size, db, content, source_group_key=source_group_key
+    )
     return result
 
 

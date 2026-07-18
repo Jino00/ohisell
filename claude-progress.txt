@@ -3,7 +3,12 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
-- 날짜: 2026-07-18 00:00 KST (★**D-NAO-54 변경 이력 기간 프리셋 + 가드레일 차단분 표시 — 구현·교차검증 2R·배포·라이브합격**. 워크트리 session-409bd8, 아직 PR 미생성)
+- 날짜: 2026-07-18 10:40 KST (★**D-NAO-54 변경 이력 가독성 3종 — 근거 사람말화·카드 세로배치·대상 이름화, 배포·검증**. 워크트리 session-409bd8, PR #49)
+  - 발단(Jino, 화면 실측 피드백 연속): ①근거 칸이 반폭이라 눌림 → 3카드 세로배치(space-y-4). ②근거가 기계용 문자열 → `formatRationale`로 사람 한 문장(진단보드/시간당밴드/정지/성장/차단·실패 접미사, 못 알아보면 원문 폴백+title 툴팁). ③대상이 `adgroup grp-...028` ID → `naver_entity.name` 배치 해석해 "17E · 광고그룹" + 소속 캠페인명(04. 아이폰_지문방지). 이름 없으면 'type id' 폴백.
+  - 검증: 프론트 변환기 8 + 전체 53 test · 백엔드 change-log 48 test(신규 3=대상 이름 해석) · tsc clean.
+  - ★**병행 세션 CAS 재조우**: session-dfd814(일기·지혜 P1~P5)가 naver_ad.py를 origin/main(PR#48/50/51)에 병합 → safe_deploy CAS가 내 백엔드 배포 ABORT → **3-way 병합으로 그쪽 `DECISION_ONLY_PROPOSAL_TYPES`/`decision_only` 흡수**(충돌 3: import·resolver·test·progress 해소). D-NAO-49 실효 재확인.
+  - 남은 것: 병합 후 백엔드·프론트 재배포 · 라이브 검증(entity_name 응답) · Jino 시각 확인.
+- 날짜: 2026-07-18 00:00 KST (★**D-NAO-54 변경 이력 기간 프리셋 + 가드레일 차단분 표시 — 구현·교차검증 2R·배포·라이브합격**. 워크트리 session-409bd8, PR #49)
   - 발단(Jino): "네이버광고 메뉴에서 오늘 우리 MOP가 작업한 CPC 변동·키워드 변동을 어떻게 보는지 모르겠다" + "기본=당일, 어제/7일(어제부터)/30일/원하는 기간 캘린더" 요청.
   - 구현: 커맨드센터 변경이력 두 패널에 **기간 탭(당일·어제·7일·30일·커스텀 캘린더)** + **가드레일 차단분 표시**. 7일/30일은 어제 기준(당일 미포함, 진행중이라 별도 탭). 커밋 bc27b38(feat)→5f5a6b0(커스텀 422 원문 노출 수정)→6a45524(교차검증 R1: P1×4+P2×8)→50c74f8(R2 자체검증: executed_total dry-run 오집계 외 3건).
   - ★**정직성 핵심(원칙22)**: (a) 차단 시도가 "우리가 한 일" 카드에서 집행으로 셈해지던 것 → `executed_total` 분리, 푸터를 "집행 N건 · 미집행(차단·불확실) M건"으로. (b) 🚫차단됨 배지가 **광고가 실제 바뀌었을 수 있는 행**(WriteVerificationError/타임아웃 — PUT 이미 보낸 뒤)에도 붙던 것 → `_execution_state` **3분기**(executed/blocked/unknown), unknown은 "⚠️ 반영 불확실"로 낮춤(단언 금지). (c) optimizer_change·update_expert_delegation이 changed_at 안 넘겨 UTC로 박히던 것 → `kst_now()` 명시.
@@ -12,6 +17,52 @@
   - ⚠️ **시각 확인 미완**: prod IP 허용목록에 이 샌드박스 IP 없어 브라우저로 화면 렌더는 못 봄 — API 응답 구조 + 배포 번들 실존 + 프론트 소스 소비 로직으로 대체 검증. Jino가 브라우저로 최종 눈확인 권장.
   - 남은 것: PR 생성(아직 안 함) · Jino 시각 확인.
 
+- 날짜: 2026-07-18 01:50 KST (★★**D-NAO-54 운영 일기·지혜 시스템 — P1+P2+P3 전부 배포 완료, 아침 사슬 라이브 검증 대기** — 워크트리 `session-dfd814`, PR #44/#45/#46 병합, main(d5a8657)==prod. Fable설계/Opus구현 라우팅·독립 적대적 리뷰 3회 전부 GATE PASS 후 지적 반영)
+  - **P1 기록층**: 마이그 q9r0s1t2u3v4+diary.py+harness/레인 훅. **라이브 부분 합격**: 01:20 시간당 레인 신코드 완주 ok 실측(scheduler_state)·diary 0행=심야 무트래픽 판정hold 기록제외 설계와 정합. 확실 증거는 아침 레인.
+  - **P2 해석층**: diary_outcome(d1/d7 소급)+diary_reflection(claude -p 해석문, observe 행)+크론 08:35(catch-up은 돈 잡 뒤). **P3 승격·망각**: wisdom 5모듈+마이그 r0s1t2u3v4w5+크론 08:45. 리뷰 P2 3건(망각↔TTL 데드락→TTL 보장+hidden 부활 / 방향 selection bias→tally 컬럼+승률 / cost=0 중립) 반영. 테스트 총 1972 pass.
+  - **백필 prod 적용**: change_log→diary 4행(execute 2·blocked 2, KST-naive→UTC −9h 변환, 외부감지 15 정확 제외). ★제헌절 2026 부활(holidays 라이브러리가 2026부터 True — 법 개정 반영, is_kr_holiday=1 정확).
+  - **P4 소비층+P5 열람층도 구현·리뷰·배포 완료(07-18 03:20, PR #47 병합)**: P4=param_change 결정 전용(라우터 승인/실행 기분리 실측·5중 방벽 리뷰 실증·하드닝 3건)+브리핑 지혜 prefix. P5=vault_export(일기 14일 — 리뷰 GATE FAIL이던 d7↔창 off-by-one 해소)+Mac pull(launchd com.ohisell.vaultpull 15분, 안정 경로 ~/Library/Application Support/ohisell/). **P5 라이브 합격 완료**: Mac Obsidian Vault/Ohisell에 diary/2026-07-17.md 실파일 열람(bidAmt 압축 표기 포함). 테스트 2007 pass. 병행 세션 라우터 162줄(changed_at KST·조회 창) CAS 4번째 차단→3-way 흡수.
+  - **★최종 라이브 합격(07-18 09:10 실측) — D-NAO-54 P1~P5 전 페이즈 완성**: 08:35 해석문 자연 발화(LLM observe 행) · 08:45 wisdom ok(후보 0=설계값) · 08:50 일 레인 blocked3/execute1(source_ref=change_log 57 연결)/reject3 diary 기록(소진율 채워짐) · 09:05 vault 크론→09:08 Mac pull→Obsidian 오늘 일기(해석문 포함) 열람. 잔여 후속: P4 지혜 카드 실측=첫 승격 시 자연 발생 · codex 소급 리뷰 07-23 · 해석문 파일 배치 개선 후보. HANDOFF=`.claude/memory/HANDOFF_ohisell-diary-wisdom-P1-P5-live_20260718.md`.
+  - CAS 3번째 실사고 차단(prod harness 마커 상수 3-way 흡수). ★병행 세션도 'D-NAO-54' 번호 사용 = 번호 충돌, 그쪽 PR 등장 시 재번호. codex 소급 리뷰 후보=P1~P3 전 커밋(07-23).
+  - 전 세션(07-17 밤, dedfad): 구조 Jino 승인·계획서 완성·구현 미착수 → HANDOFF=`.claude/memory/HANDOFF_ohisell-diary-wisdom-approved+bridge-fix_20260717.md`. 미커밋 docs(트랙 D-NAO-54·계획서·HANDOFF 2건)는 이 브랜치 첫 커밋에 포함됨.
+  - codex 한도 07-23 19:15까지 소진 — 독립 리뷰어 서브에이전트 대체 + 커밋에 "codex 소급 리뷰 후보" 명기.
+  - 세션 소실 재발 방지: `ccAutoArchiveOnPrClose` OFF 실측(07-11 HANDOFF 소실도 같은 원인). 되감기 복구 상세=`HANDOFF_MOP36-rewind-recovery_20260717.md`.
+- 날짜: 2026-07-17 22:55 KST (★**파이프라인 신선도 3층 방어 — 층2·층3 배포·라이브합격·PR #41 병합, 층1 구현 중** — 트랙 외 별건(쿠팡 RG, 네이버 트랙 무관), Jino "끝까지 자동 진행" 승인. 워크트리 `spot-backtest-cadence-pacing-2e3bfa`, 브랜치 `claude/elastic-turing-6f1eee`)
+  - **사고 규명**: WING1/WING2 Wing 쿠키 06-21/06-10 만료 → RG status/api 계정 row 26/37일 공백, 크론은 auth_error를 삼키고 last_status=ok(green-while-dead). 감지(health API)+Mac 6h 알림은 **정상 작동 중이었고**, 죽은 지점=대시보드 상설 배너 부재(ADS1만 배너 있었고 그것만 고쳐진 자연실험). -6d 추측 폴백이 월경계 2주기 오적재 → 6월 RG비용 +55% 과대계상.
+  - **정산주기 실규칙 확정**: 월~일 주별 + 달력 월경계 분할 (prod 계정 row 18/18 검증) — 레퍼런스 17에 없던 사실, 라이브가 권위.
+  - **층2 배포·라이브합격**: data_stale 버킷(데이터 나이는 거짓말 못함, 14d 규칙) + Layout 전역 앰버 배너(5분 폴링·ADS1 제외) + Mac 폴러 '데이터끊김' 라벨(kickstart 즉시 실발화). health API 라이브: WING1 26.9d·WING2 40.9d 실표시.
+  - **층3 배포·라이브합격(머니코드)**: _expected_period_start 달력 규칙으로 폴백 교체 + prod 보정 apply 152행 — 6월 3,230,100→2,083,450·7월 2,570,425·총합 무손실·재스캔 0. 사본 리허설 후 실행.
+  - **병행 세션 조우 2건**: ①safe_deploy CAS가 PR #39(O(n²) 파싱) 실배포본 clobber 차단 → 3-way 병합 흡수 ②PR #39가 먼저 main 병합 → 테스트 충돌 양쪽 보존으로 해소. PR #41 병합(main 9b98448==prod).
+  - ⚠️**원칙19 부채**: codex 쿼터 소진(07-23 19:15 복구) → 독립 적대적 리뷰(별도 인스턴스, GATE PASS P1 0)로 대체. **07-23 이후 소급 /codex review 필요.**
+  - **층1 진행 중**: status/api 수집을 Mac 상주 브라우저로 이관(쿠키 의존 소멸) — 설계 docs/PLAN_rg-status-live-session.md, 구현 에이전트 가동 중. 완료 시 WING1 백필은 자동(쿠키 재등록 불필요), WING2만 Jino 로그인 1회.
+  - 계획서: docs/PLAN_pipeline-freshness-3layer.md (체크리스트 최신).
+- 날짜: 2026-07-17 22:10 KST (★**RG 정산 XLSX 업로드 60초 타임아웃 진범 해소·배포·라이브 합격** — 트랙 외 별건(네이버 트랙 무관), Jino 승인. 워크트리 `mop-command-center-design-7e087a`, 배포 commit `c0ea885`, **PR #39 오픈(병합 대기)**)
+  - **증상**: Mac 페처 `_rg_push_xlsx`(timeout=60) POST가 "Read timed out" 2건 → 실패 보고. 그런데 서버는 완주(데이터 정상 적재)
+    → last_error_at(21:12:25.959)이 last_success_at(21:12:25.821)보다 **138ms 뒤**에 찍혀 행이 "실패"로 남음.
+  - **진범 = 파싱 O(n²)**: `parse_settlement_xlsx`가 `read_only=True` 워크북에 **랜덤접근 `ws.cell(row,col)`**을 행 루프에서 사용.
+    read_only의 cell()은 상수시간이 아니다 — `_get_cell→_cells_by_row`가 호출마다 시트 XML을 1행부터 **새 WorkSheetParser로 재파싱**
+    (openpyxl 3.1.5 소스 확인). 행당 3회 = 제곱. **실측 100행 1.32s / 200행 4.51s / 400행 16.4s / 1000행 48.4s**(배가 3.5배).
+    파일은 400행에 24KB — 네트워크가 아니라 순수 CPU였다.
+    → 시트당 `iter_rows` **1회 스트리밍**(`_read_grid`) + 메모리 인덱싱(`_at`/`_max_column`). **1000행 48.4s → 0.06s(약 800배)**. 결과값 불변.
+  - **부수 = 단일 워커 이벤트 루프 블로킹**: 라우터 82개 중 79개는 `def`(FastAPI 자동 스레드풀)인데 업로드 2개만 `async def`
+    (`await file.read()` 때문)라 **동기 ingest가 이벤트 루프 위에서** 돌았다. prod는 `uvicorn --workers 1` → 그동안 **모든 API 정지**.
+    → `run_in_threadpool` 오프로드(2개 다). prod 엔진이 이미 `check_same_thread=False`라 교차 스레드 세션 안전.
+  - **★연쇄 규명(오진단 함정)**: 남아있던 last_error는 `PRODUCT_SIZE_COMPARISON`이었지만 **그건 진범이 아니라 피해자**다.
+    페처가 60s에 포기해도 서버는 파싱을 계속한다(취소 전파 없음) → 곧바로 push된 PRODUCT_SIZE가 **막힌 루프**에 도착해 같이 타임아웃,
+    `_fail()`이 last_error를 덮어써 마지막 피해자만 남았다. 실패 보고 POST(21:12:19)조차 막혀 **서버가 루프 해제 138ms 뒤에 처리**한 것이
+    바로 그 "138ms 미스터리"의 정체. (product_size 파서 자체는 이미 iter_rows·682행 인덱스 테이블 = 무죄.)
+  - **codex 2R PASS**: 1R[P2] "왕복 테스트는 run_in_threadpool을 지워도 통과 → 블로킹 퇴행 무방비"(타당 — 테스트 이름부터 오주장)
+    → `test_..._runs_ingest_off_the_event_loop` 신설(스파이 안에서 `asyncio.get_running_loop()`이 RuntimeError면 워커 스레드 = 정상.
+    타이밍·스레드명 대신 결정론적 신호). **뮤테이션 실증: 오프로드 있음 1 passed / 제거 1 failed.** 2R 무지적.
+  - **★라이브 합격(원칙22)**: 22:03 갱신 트리거 → 22:07 발화 → **동일 실파일(138,229 bytes) push 성공 2 / 실패 0**
+    (21:07 회차엔 같은 파일이 **타임아웃 2 / 성공 0**). upserted=90, **reconcile 입출고비·배송비 둘 다 match=True(diff 0.0)**,
+    PRODUCT_SIZE upserted=185. **last_error/last_error_at 둘 다 NULL로 클리어**, status green. 1830 pass / 0 fail.
+  - **★safe_deploy CAS가 실제로 clobber를 막음**: 첫 배포 시도 ABORT("prod 내용이 내 브랜치 역사에 없음") — 병행 세션이 같은 파일에
+    RG 페처 실패 보고(`rg_mark_fetch_error`)를 배포해둔 상태였고 내 브랜치가 origin/main보다 뒤처져 있었다. 직접 scp였으면 그 기능이 죽었다.
+    → fetch·merge(충돌 0, 두 변경 공존 확인) 후 재배포 통과. **ABORT는 사고가 아니라 가드의 정상 작동**(D-NAO-49 실효성 실증).
+  - **남은 것(별건 분리 — Jino 승인)**: status/api 계정 row가 WING1 06-21 / WING2 06-07 이후 **공백** →
+    06-28·06-30·07-05·07-12 4개 주기의 `recognition_date_from`이 **`-6d` 추측값**(net_profit 소스). **06-28과 06-30이 이틀 차로 공존
+    = 주별이 아님** → 폴백이 틀릴 수 있다. 이번 회차에도 `vs_status_api: None`·폴백 warning 90건으로 재현됨. 별도 세션 조사 필요.
 - 날짜: 2026-07-17 21:20 KST (★**나머지 페처 4종 실패 보고 구멍 수정·배포·라이브합격** — 트랙 외 별건(네이버 트랙 무관), Jino 승인. **PR #33 병합**)
   - PR #30(오픽스 광고비)이 확립한 패턴을 같은 구멍을 공유하던 나머지에 적용: Wing 판매분석(COUPANG_WING_VS)·RG 정산(COUPANG_WING_RG)·오하이테크 광고(COUPANG_OHITECH_AD)·**로켓 발주/정산(COUPANG_ROCKET)**.
   - ★**브리프 전제 2건 정정**: ①**마이그 없음** — 4종 상태행이 전부 `coupang_wing_cookie` 한 테이블(account_key로만 구분) → #30의 last_error_at 컬럼이 이미 다 덮음(prod 이미 그 head 실측). ②**범위 4종**(브리프는 3종 지목했으나 폴링 루프는 4곳, 로켓 페처도 이미 목록에 있었음).
@@ -27,6 +78,8 @@
   - 시각 확인 완결: Jino 스크린샷으로 배너 "현재 개방: 제외키워드, 정지·재개, 입찰가, 예산" 라이브 렌더 확인.
   - ③D-NAO-53-a 제안 카드 유형 필터(실행형/정보성/전부, 기본=실행형) — 정보성 72건이 대기 탭 점유(Jino 스크린샷). 백엔드 ?informational 재사용·변경 0. vitest 25·codex PASS·PR #34 병합·배포·라이브 번들/쿼리 실측. 오늘 pending 실행형=0이 진실(11건 전부 처리완료)이라 기본 화면=정직한 빈 상태.
   - ④D-NAO-53-b 정보성 카드 승인/반려 버튼 제거(Jino "필요없는 버튼 복잡"). no-op·자동만료 D+1~3·채점 무관 실측 → showsActionButtons + "자동 만료" 캡션. vitest 28·codex PASS·PR #36 병합·배포·번들 실측(index-sK3sCwzW.js). 콘솔 완성형: 실행형=결정+버튼 / 정보성=읽기 전용.
+  - ⑤★MOP35 승계 저녁 관찰(prod DB 실측): **시간당 레인 첫 자율 실집행**(19:20, 17E 1720→1470 bid_down, 과열밴드 rank 2.20, auto_op_hr, change_log 32) + **가드레일 쿨다운 첫 실차단**(20:20, 1470→1250 시도 차단, change_log 35) — D-NAO-52 남은 관찰 2건 조기 합격. 아침UP/저녁DOWN 상쇄는 내일 핑퐁 관찰 포인트. ⚠️프론트 배포 상호 클로버 1건(21:17 타세션분을 내 21:36이 덮음, frontend=CAS 불가 구멍) → main 전체병합 재빌드·재배포로 치유(index-CevC_L96.js). 습관: 프론트 배포 전 git log HEAD..origin/main.
+  - 내일(07-18) 남은 관찰: 07:50 키워드 밸브 실측 · 08:50 일 레인(959~961 재생성분) · 08:55 감사 루틴 보고.
 
 ## 이전 상태
 - 날짜: 2026-07-17 17:40 KST (★**쿠팡 광고비 페처 실패 보고 구멍 수정·배포·라이브합격** — 트랙 외 별건, Jino 승인. PR #30)

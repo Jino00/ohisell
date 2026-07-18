@@ -2051,3 +2051,128 @@ class NaverAccountSettings(Base):
     key: Mapped[str] = mapped_column(String(40), unique=True, nullable=False)
     value_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+# ══════════════════════════════════════════════════════════════════
+# D-NAO-54 P1 — 운영 일기(기록층) (docs/PLAN_naver-ad-diary-wisdom.md §P1)
+# ══════════════════════════════════════════════════════════════════
+class OpsDiaryEntry(Base):
+    """운영 일기 1건 — "무엇을 했나(집행/차단/거부/킬스위치)"를 그 순간의 환경 스냅샷과 함께
+    남기는 기록층(D-NAO-54 P1). Jino 문제의식: "한 일만 적지 말고 환경조건(휴일·계절·폰
+    출시기간·요일)에 맞춰 결과를 학습". P2 해석층이 outcome_json에 D+1/D+7 결과를 소급 기입하고,
+    P3가 3회 반복/TTL로 지혜 승격 후보를 뽑는다.
+
+    기록 원리(이중 기록 금지): 실집행/가드레일 차단/킬스위치는 naver_execution_harness가,
+    레인 고유 이벤트(일·시간당 레인의 hold=blocked, rejected_stale=reject)는 auto_operator가
+    남긴다. 일기 쓰기 실패는 집행을 막지 않는다(diary.write_diary_entry fail-open — 독립 세션).
+
+    event_type: execute|blocked|reject|kill_switch|observe.
+    actor: daily|hourly|console|delegation|system (diary.actor_from_approval_source 파생).
+    source_ref: 이 일기가 가리키는 naver_change_log.id(execute/blocked 시 연결, 그 외 None).
+    """
+
+    __tablename__ = "ops_diary_entries"
+    __table_args__ = (
+        Index("ix_ops_diary_entries_campaign_created", "campaign_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # ⚠️UTC — server_default=func.now()는 UTC로 찍힌다([[sqlite-server-default-now-is-utc]] 교훈,
+    # NaverChangeLog.changed_at과 동일 관례). 환경 스냅샷의 weekday/season은 KST now 기준이라
+    # created_at(UTC)과 의미가 다른 별개 필드다(혼동 금지).
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
+    event_type: Mapped[str] = mapped_column(String(16), nullable=False)  # execute/blocked/reject/kill_switch/observe
+    campaign_id: Mapped[str] = mapped_column(String(50), nullable=False, default="", index=True)
+    adgroup_id: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    target_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)  # campaign/adgroup/keyword/search_term
+    target_id: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    actor: Mapped[str] = mapped_column(String(12), nullable=False, default="system")  # daily/hourly/console/delegation/system
+    action: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)  # update_bid/set_user_lock/bid_up 등
+    before_value: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    after_value: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    rationale: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # ── 환경 스냅샷(env_snapshot_sa) — 어떤 필드든 조회 실패 시 None ──
+    weekday: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 0=월 … 6=일 (KST now 기준)
+    is_kr_holiday: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    season: Mapped[Optional[str]] = mapped_column(String(6), nullable=True)  # spring/summer/autumn/winter
+    iphone_launch_offset_days: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # +출시 후 경과/-출시 전
+    spend_pacing_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # 캠페인 당일 소진율(%)
+    avg_rank: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # keyword 대상 최신 avg_rank
+    # ── P2가 소급 기입(지금은 항상 None) ──
+    outcome_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    source_ref: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # naver_change_log.id
+
+
+class OpsWisdomCandidate(Base):
+    """지혜 승격 후보 1건 — 결과 기입된 diary 행에서 뽑은 (캠페인×액션×환경버킷) 반복 조건 패턴
+    (D-NAO-54 P3). 시그니처는 조건(campaign|action|day_class|season|iphone_window)만이고 결과
+    방향은 시그니처에 넣지 않는다 — 같은 조건의 good/bad를 good_count/bad_count로 함께 세어
+    '이 조건에서 이 액션의 성적'을 한 후보에 모은다(리뷰 P2-2). candidate_sa가 같은 시그니처
+    재등장마다 방향에 따라 good_count/bad_count를 올리고, occurrences = good_count+bad_count로
+    정의한다(중복 diary id는 미가산). TTL 14일 or occurrences≥3이면 독립 LLM 판사(judge_sa,
+    자기평가 금지)가 승률·표본까지 보고 promote/reject한다. 미승격(pending) 후보는 Ebbinghaus
+    망각(retention_sa가 soft-hide=status hidden), 승격분·지혜는 불망각(D-NAO-54 결정 4축).
+
+    ★UTC 혼동 금지: created_at은 server_default(UTC)지만 first_seen_at/last_seen_at은 SA가
+    KST now로 명시 기입한다 — 감쇠 Δt(경과일) 계산과 TTL 판정의 진실 소스라 두 시간계를 섞으면
+    안 된다([[sqlite-server-default-now-is-utc]]).
+
+    status: pending|promoted|rejected|hidden. 시그니처는 signature(unique)로 멱등 재수확한다 —
+    promoted/rejected는 재수확 대상이 아니지만(판사가 이미 판정), hidden은 시그니처가 재등장하면
+    pending으로 부활한다(Ebbinghaus 재노출 강화 — 연 1회 iphone_window 패턴이 해를 넘겨 누적됨).
+    """
+
+    __tablename__ = "ops_wisdom_candidates"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # ⚠️UTC(server_default) — 감쇠·TTL은 first_seen_at/last_seen_at(KST 명시)로 판단(created_at 아님).
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    signature: Mapped[str] = mapped_column(String(200), nullable=False)  # 캠페인×액션×환경버킷 키
+    campaign_id: Mapped[str] = mapped_column(String(50), nullable=False, default="")
+    action: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    env_bucket_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 버킷 상세(day_class/season/…)
+    observation: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 규칙 기반 요약문(LLM 아님)
+    occurrences: Mapped[int] = mapped_column(Integer, nullable=False, default=1)  # = good_count+bad_count
+    good_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 이 조건에서 결과 good 관찰 수
+    bad_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 이 조건에서 결과 bad 관찰 수
+    first_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)  # KST 명시(TTL 기준)
+    last_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)  # KST 명시(감쇠 Δt 기준)
+    source_entry_ids_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 기여 diary id 목록(중복 제외)
+    status: Mapped[str] = mapped_column(String(12), nullable=False, default="pending")  # pending/promoted/rejected/hidden
+    judge_verdict_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 판사 응답(verdict/principle/rationale)
+    importance: Mapped[int] = mapped_column(Integer, nullable=False, default=5)  # Ebbinghaus 가중(0~10)
+    strength: Mapped[float] = mapped_column(Float, nullable=False, default=7.0)  # Ebbinghaus 시상수(일수)
+
+    __table_args__ = (
+        Index("ux_ops_wisdom_candidates_signature", "signature", unique=True),
+        Index("ix_ops_wisdom_candidates_status", "status"),
+    )
+
+
+class OpsWisdomEntry(Base):
+    """승격된 지혜 1건 — 재사용 가능한 판단원칙(D-NAO-54 P3). writer_sa가 promoted 후보에서
+    1:1(source_candidate_id unique)로 생성하고, Jino 보고는 정보성 NaverProposal(wisdom_promoted)로
+    별도 낸다(지혜→실행 직접 쓰기 금지 = D-NAO-54 금지선).
+
+    지혜는 감쇠하지 않는다(불망각) — retention_sa는 이 테이블을 건드리지 않는다. status는 후속
+    사용자 철회 대비 여지(active|retired)만 둔다(P3에서 능동 retire 경로는 없음).
+    """
+
+    __tablename__ = "ops_wisdom_entries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    wisdom_text: Mapped[str] = mapped_column(Text, nullable=False)  # 판단원칙 한 문장(judge principle)
+    source_candidate_id: Mapped[int] = mapped_column(Integer, nullable=False)  # 멱등 키(unique)
+    judge_rationale: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(8), nullable=False, default="active")  # active/retired
+    promoted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)  # KST 명시
+    # D-NAO-54 P4(소비층): 이 지혜가 param_suggestion을 담고 있어 param_change 제안을 냈다면
+    # 그 NaverProposal.id를 여기 새긴다. wisdom_apply.propose_param_changes의 멱등 키 —
+    # 같은 지혜로 param_change 제안을 1회만 생성한다(rationale 텍스트 매칭 대신 전용 추적).
+    # None = 아직 제안 미생성(param_suggestion 없거나 아직 안 돎).
+    param_proposal_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+    __table_args__ = (
+        Index("ux_ops_wisdom_entries_source_candidate", "source_candidate_id", unique=True),
+    )

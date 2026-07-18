@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- launchd: ohisell 운영 일기·지혜 볼트를 VM → Mac iCloud Obsidian으로 15분마다 순방향 pull. -->
+<!-- D-NAO-54 P5 열람층 (docs/PLAN_naver-ad-diary-wisdom.md §P5). -->
+<!--                                                                                          -->
+<!-- 설치(경로 __PYTHON__/__SCRIPT__/__HOME__은 실제 절대경로로 치환 후):                        -->
+<!--   cp scripts/com.ohisell.vaultpull.plist ~/Library/LaunchAgents/                          -->
+<!--   launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.ohisell.vaultpull.plist         -->
+<!--   (재설치 시 먼저: launchctl bootout gui/$UID/com.ohisell.vaultpull 2>/dev/null)           -->
+<!-- 전제: ssh sellc.ohitech.co.kr 무암호 접속(BatchMode) — safe_deploy.sh와 동일 키.            -->
+<!-- ★__SCRIPT__는 워크트리 사본이 아니라 안정 경로(프로젝트 루트 scripts/)로 치환할 것 —        -->
+<!--   워크트리는 세션 종료 후 삭제될 수 있어 launchd 잡이 조용히 죽는다(P5 리뷰 P3).            -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.ohisell.vaultpull</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__PYTHON__</string>
+    <string>__SCRIPT__</string>
+  </array>
+  <!-- 15분 간격 단일 실행 후 종료(상주 아님 — rsync는 멱등이라 매 주기 안전). -->
+  <key>StartInterval</key>
+  <integer>900</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/ohisell-vault-pull.launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/ohisell-vault-pull.launchd.log</string>
+</dict>
+</plist>

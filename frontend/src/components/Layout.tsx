@@ -4,7 +4,66 @@
 import { useEffect, useState } from "react";
 import { Link, NavLink, Outlet, useLocation } from "react-router-dom";
 import SchedulerStatus from "./SchedulerStatus";
-import { getAdCostCookieStatus, requestAdCostRefresh, type AdCostCookieStatus } from "../lib/api";
+import {
+  getAdCostCookieStatus,
+  requestAdCostRefresh,
+  getSchedulerHealth,
+  type AdCostCookieStatus,
+  type SchedulerHealth,
+} from "../lib/api";
+
+// 전역 헬스 배너 요약 빌더 (순수 함수 — 테스트 대상).
+// healthy:false여도 실제로 표시할 문제가 없으면 null 반환(배너 숨김). 규칙:
+//  - COUPANG_ADS1 쿠키 항목은 제외(쿠팡 광고비 배너가 전담) → 제외 후 0개면 null.
+//  - disabled 버킷은 정상(의도적 비활성)이므로 문제로 세지 않음.
+//  - scheduler_running===false는 최우선 표기.
+// 반환: summary=" · "로 이은 한 줄(배너 truncate용), detail=줄바꿈 목록(title 호버용).
+export function buildPipelineHealthBanner(
+  health: SchedulerHealth,
+): { summary: string; detail: string } | null {
+  if (health.healthy) return null;
+  const parts: string[] = [];
+
+  // 1) 스케줄러 자체 정지 — 최우선
+  if (health.scheduler_running === false) {
+    parts.push("스케줄러 정지");
+  }
+
+  // 2) 쿠키 만료 — COUPANG_ADS1은 광고비 배너 전담이므로 제외
+  for (const c of health.cookies_stale ?? []) {
+    if (c.account_key === "COUPANG_ADS1") continue;
+    const days = c.age_days != null ? ` (${Math.floor(c.age_days)}일째)` : "";
+    let label: string;
+    if (c.account_key === "COUPANG_WING1") {
+      label = "RG 정산 수집 중단(오픽스) — 쿠키 재등록 필요";
+    } else if (c.account_key === "COUPANG_WING2") {
+      label = "RG 정산 수집 중단(오하이테크) — 쿠키 재등록 필요";
+    } else {
+      label = `${c.account_key} 쿠키 만료`;
+    }
+    parts.push(label + days);
+  }
+
+  // 3) 데이터 나이 — 백엔드 impact 라벨 그대로 노출
+  for (const d of health.data_stale ?? []) {
+    const days = d.age_days != null ? ` (${Math.floor(d.age_days)}일째)` : "";
+    parts.push(`${d.impact}${days}`);
+  }
+
+  // 4) 잡 문제 (disabled 제외 — 정상)
+  const jobNames: string[] = [
+    ...(health.failed ?? []).map((j) => j.job_name),
+    ...(health.stale ?? []).map((j) => j.job_name),
+    ...(health.never_succeeded ?? []).map((j) => j.job_name),
+    ...(health.missing_jobs ?? []),
+  ];
+  for (const n of jobNames) {
+    parts.push(`잡 실패: ${n}`);
+  }
+
+  if (parts.length === 0) return null;
+  return { summary: parts.join(" · "), detail: parts.join("\n") };
+}
 
 // 대시보드 하위 채널별 운영 패널 (접이식)
 const DASHBOARD_CHILDREN = [
@@ -39,6 +98,7 @@ export default function Layout() {
   const [adCookie, setAdCookie] = useState<AdCostCookieStatus | null>(null);
   const [adRefreshing, setAdRefreshing] = useState(false);
   const [adRefreshMsg, setAdRefreshMsg] = useState<string | null>(null);
+  const [health, setHealth] = useState<SchedulerHealth | null>(null);
 
   // 배너 '지금 갱신' — stale(쿠키 정상, Mac 페처 지연)일 때 실제 갱신 요청.
   // request_refresh 플래그 set → Mac 데몬이 다음 폴링(~20초)에서 fetch·push. 12초 뒤 상태 재확인.
@@ -77,10 +137,26 @@ export default function Layout() {
     return () => { cancelled = true; clearTimeout(t); };
   }, [location.pathname]);
 
+  // 파이프라인 헬스 — 전역 5분 폴링(경로와 무관하게 상주).
+  // 실패 시 조용히 무시 → 네트워크 오류로 배너를 잘못 띄우지 않음(오탐 금지).
+  useEffect(() => {
+    let cancelled = false;
+    const fetchHealth = () => {
+      getSchedulerHealth()
+        .then((h) => { if (!cancelled) setHealth(h); })
+        .catch(() => { /* 조용히 실패 — 배너 미표시 */ });
+    };
+    fetchHealth();
+    const t = setInterval(fetchHealth, 5 * 60 * 1000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, []);
+
   // 경로 이동 시 모바일 드로어 닫기
   useEffect(() => {
     setMobileOpen(false);
   }, [location.pathname]);
+
+  const healthBanner = health ? buildPipelineHealthBanner(health) : null;
 
   return (
     <div className="flex h-screen bg-gray-50">
@@ -223,6 +299,24 @@ export default function Layout() {
                 )}
               </>
             )}
+          </div>
+        )}
+
+        {/* 파이프라인 헬스 전역 경고 — /api/scheduler/health의 healthy:false 표면화.
+            광고비 배너(위)와 별개·동시 표시 가능. COUPANG_ADS1 쿠키는 위 배너 전담이라 제외됨. */}
+        {healthBanner && (
+          <div
+            className="flex items-center gap-3 bg-amber-600 text-white px-4 py-2 text-sm"
+            title={healthBanner.detail}
+          >
+            <span className="font-semibold shrink-0">⚠️ 파이프라인 경고</span>
+            <span className="text-amber-100 min-w-0 truncate">{healthBanner.summary}</span>
+            <Link
+              to="/coupang-ops"
+              className="ml-auto shrink-0 bg-white text-amber-700 font-medium px-3 py-1 rounded hover:bg-amber-50"
+            >
+              확인 →
+            </Link>
           </div>
         )}
 

@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 
 from app.models import NaverCampaignSettings, NaverChangeLog, NaverEntity, NaverHourlySnapshot, NaverProposal
-from app.services.naver_ad import account_diagnosis, campaign_target_resolver, guardrail_gate, naver_sa_writer
+from app.services.naver_ad import account_diagnosis, campaign_target_resolver, diary, guardrail_gate, naver_sa_writer
 from app.services.naver_ad.diagnosis import correction_factor as compute_correction_factor
 from app.utils.kst import kst_now
 
@@ -183,6 +183,22 @@ def _guard_failure(db: Session, proposal: NaverProposal, now: datetime, action: 
     db.commit()
     log.error("naver_execution_harness: proposal_id=%s 실쓰기 불가(fail-closed) — %s",
               proposal.id, reason)
+    # D-NAO-54 P1 일기(blocked) — 가드레일/구조 차단 1건. source_ref=방금 커밋한 change_log id.
+    # ★호출부 try 필요(독립 리뷰 P2-1): 직전 commit이 entry/proposal을 만료시켜 인자 평가
+    # (entry.id, proposal.*)가 refresh SELECT(I/O)를 유발한다 — 그 예외는 write_diary_entry의
+    # try 밖이라, 여기서 감싸지 않으면 일기 계약("집행/차단 보고를 오염시키지 않음")이 깨진다.
+    try:
+        diary.write_diary_entry(
+            db, "blocked", proposal.campaign_id,
+            actor=diary.actor_from_approval_source(proposal.approval_source),
+            target_type=proposal.target_type, target_id=proposal.target_id,
+            adgroup_id=proposal.adgroup_id, action=action,
+            # ★리터럴 대신 공유 상수(3-way 병합, D-NAO-54): 마커 드리프트 방지 테스트가
+            #   같은 값의 리터럴을 금지한다 — 값은 동일("[실행 불가]")이라 동작 불변.
+            rationale=f"{GUARD_BLOCK_MARKER} {reason}", source_ref=entry.id, now=now,
+        )
+    except Exception as diary_err:  # noqa: BLE001 — fail-open(인자 평가 포함)
+        log.warning("naver_execution_harness: diary 기록 실패(fail-open): %s", diary_err)
 
 
 def _claim_executing(db: Session, proposal: NaverProposal) -> None:
@@ -226,6 +242,19 @@ def _claim_executing(db: Session, proposal: NaverProposal) -> None:
                 "approved 원복, codex 8R)",
                 proposal.id, proposal.approval_source, proposal.campaign_id,
             )
+            # D-NAO-54 P1 일기(kill_switch) — writer 직전 최종 확인 거부(쓰기·change_log 없음).
+            # 호출부 try(독립 리뷰 P2-1): 직전 rollback이 proposal을 만료시켜 인자 평가가 I/O 유발 가능.
+            try:
+                diary.write_diary_entry(
+                    db, "kill_switch", proposal.campaign_id,
+                    actor=diary.actor_from_approval_source(proposal.approval_source),
+                    target_type=proposal.target_type, target_id=proposal.target_id,
+                    adgroup_id=proposal.adgroup_id,
+                    action=_ACTION_BY_PROPOSAL_TYPE.get(proposal.proposal_type),
+                    rationale="킬스위치 OFF(writer 직전 최종 확인)",
+                )
+            except Exception as diary_err:  # noqa: BLE001 — fail-open(인자 평가 포함)
+                log.warning("naver_execution_harness: diary 기록 실패(fail-open): %s", diary_err)
             raise KillSwitchEngagedError(
                 f"proposal_id={proposal.id} campaign_id={proposal.campaign_id} — "
                 f"auto_operate=False(킬스위치 OFF, writer 직전 최종 확인)"
@@ -920,6 +949,10 @@ def real_write_blocker(proposal: NaverProposal) -> str | None:
     """
     action = _ACTION_BY_PROPOSAL_TYPE.get(proposal.proposal_type)
     if action is None:
+        # P4 리뷰 P3-3: 결정 전용(param_change)을 "정보성"으로 오라벨하면 informational=False/
+        # decision_only=True 파생값과 모순되는 문자열이 API에 남는다 — 유형별 정직 표기.
+        if proposal.proposal_type == "param_change":
+            return "결정 전용 제안 — 승인=기록만, 자동 적용 없음(D-NAO-54 금지선)"
         return "정보성 제안 — 실행 대상 아님"
     if action not in OPEN_ACTIONS or action not in _WRITE_EXECUTORS:
         return "액션 미개방(D-NAO-16 개방 순서, 아직 코드 배포 전)"
@@ -1032,6 +1065,18 @@ def execute(db: Session, proposal_id: int, *, dry_run: bool = True, now: datetim
                 "campaign_id=%s) 실행 거부(쓰기·change_log 없음, approved 유지, codex 7R)",
                 proposal.id, proposal.approval_source, proposal.campaign_id,
             )
+            # D-NAO-54 P1 일기(kill_switch) — 쓰기 직전 재확인 거부(쓰기·change_log 없음).
+            # 호출부 try(독립 리뷰 P2-1): 인자 평가의 만료속성 refresh I/O까지 fail-open으로 감싼다.
+            try:
+                diary.write_diary_entry(
+                    db, "kill_switch", proposal.campaign_id,
+                    actor=diary.actor_from_approval_source(proposal.approval_source),
+                    target_type=proposal.target_type, target_id=proposal.target_id,
+                    adgroup_id=proposal.adgroup_id, action=action,
+                    rationale="킬스위치 OFF(쓰기 직전 재확인)", now=now,
+                )
+            except Exception as diary_err:  # noqa: BLE001 — fail-open(인자 평가 포함)
+                log.warning("naver_execution_harness: diary 기록 실패(fail-open): %s", diary_err)
             raise KillSwitchEngagedError(
                 f"proposal_id={proposal.id} campaign_id={proposal.campaign_id} — "
                 f"auto_operate=False(킬스위치 OFF, 쓰기 직전 재확인)"
@@ -1043,7 +1088,25 @@ def execute(db: Session, proposal_id: int, *, dry_run: bool = True, now: datetim
         if executor is None:
             # OPEN_ACTIONS에 실수로 추가돼도 실행 함수 구현이 없으면 여기서 막힌다(fail-closed).
             raise WriteNotOpenedError(f"action={action!r}는 아직 개방되지 않음(D-NAO-16/D-NAO-5)")
-        return executor(db, proposal, now)
+        log_entry = executor(db, proposal, now)
+        # D-NAO-54 P1 일기(execute) — 실쓰기 성공 1건(executor가 change_log 커밋한 직후).
+        # 구조/가드/writer 실패는 executor가 예외를 던져 여기 도달하지 않는다(성공만 기록).
+        # source_ref=그 change_log id, before/after_value는 실측값 그대로.
+        # ★호출부 try 필수(독립 리뷰 P2-1): executor의 commit이 log_entry/proposal을 만료시켜
+        # 인자 평가(log_entry.before_value 등)가 refresh SELECT(I/O)를 유발 — 여기서 예외가
+        # 새면 "돈 나간 집행 완료"가 레인에서 failed로 오집계된다(집행은 이미 확정됐는데).
+        try:
+            diary.write_diary_entry(
+                db, "execute", proposal.campaign_id,
+                actor=diary.actor_from_approval_source(proposal.approval_source),
+                target_type=proposal.target_type, target_id=proposal.target_id,
+                adgroup_id=proposal.adgroup_id, action=action,
+                before_value=log_entry.before_value, after_value=log_entry.after_value,
+                rationale=proposal.rationale, source_ref=log_entry.id, now=now,
+            )
+        except Exception as diary_err:  # noqa: BLE001 — fail-open(인자 평가 포함)
+            log.warning("naver_execution_harness: diary 기록 실패(fail-open): %s", diary_err)
+        return log_entry
 
     log_entry = NaverChangeLog(
         entity_type=proposal.target_type, entity_id=proposal.target_id,

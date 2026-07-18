@@ -275,12 +275,20 @@ def test_all_proposal_types_constant_covers_every_emitted_type():
     이미 존재 — D-NAO-42-f, 커밋 68d7ef5). ALL_PROPOSAL_TYPES는 이 드리프트 가드 자체가
     커버해야 할 실제 코드 상태를 진실로 삼으므로 14종으로 정정한다(Phase 2 프론트 라벨은
     별도 계획서 소관 — 여기서는 백엔드 집합의 정합성만 보장)."""
-    from app.services.naver_ad.proposal_writer import ALL_PROPOSAL_TYPES, INFORMATIONAL_PROPOSAL_TYPES
+    from app.services.naver_ad.proposal_writer import (
+        ALL_PROPOSAL_TYPES, INFORMATIONAL_PROPOSAL_TYPES, PARAM_CHANGE,
+    )
     from app.services.naver_ad.naver_execution_harness import _ACTION_BY_PROPOSAL_TYPE
 
     assert INFORMATIONAL_PROPOSAL_TYPES <= ALL_PROPOSAL_TYPES
     assert set(_ACTION_BY_PROPOSAL_TYPE) <= ALL_PROPOSAL_TYPES
-    assert len(ALL_PROPOSAL_TYPES) == 14
+    # 14 + wisdom_promoted(D-NAO-54 P3 정보성) + param_change(D-NAO-54 P4 결정 전용) = 16.
+    # param_change/wisdom_promoted 모두 실행 매핑(_ACTION_BY_PROPOSAL_TYPE)에는 절대 넣지
+    # 않는다(지혜→실행 직접 쓰기 금지 금지선). wisdom_promoted는 정보성 집합에, param_change는
+    # 어느 집합에도 넣지 않는다(결정 전용 — 라우터 DECISION_ONLY_PROPOSAL_TYPES가 분기).
+    assert len(ALL_PROPOSAL_TYPES) == 16
+    assert PARAM_CHANGE not in INFORMATIONAL_PROPOSAL_TYPES  # 결정 전용 ≠ 정보성
+    assert PARAM_CHANGE not in _ACTION_BY_PROPOSAL_TYPE  # 금지선: 실행 매핑 부재
 
 
 # ── D-NAO-47 라이브 배포 검증에서 발견: 정보성이 실행형을 페이지 밖으로 밀어낸다 ──

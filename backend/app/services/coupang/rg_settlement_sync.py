@@ -261,9 +261,21 @@ def sync_rg_settlement(
         log.error("RG 정산 파싱 실패: %s — %s", account_key, e)
         return {"synced": 0, "account_key": account_key, "period": f"{start_date}~{end_date}", "status": "parse_error", "error": str(e)}
 
-    # upsert: (account_key, from, to, fee_type, vendor_item_id="") 기준.
-    # ★vendor_item_id="" 가드(S6): 같은 (account,from,to,fee_type)에 옵션 row(vendor_item_id=옵션ID)가
-    #   공존하므로, 계정 row 쿼리에 ""를 명시하지 않으면 옵션 row를 first()로 잡아 덮어쓸 위험.
+    synced = _upsert_account_rows(db, rows)
+    db.commit()
+    _mark_last_success(db, account_key)
+    log.info("RG 정산 sync 완료: %s — %d건", account_key, synced)
+    return {"synced": synced, "account_key": account_key, "period": f"{start_date}~{end_date}", "status": "ok"}
+
+
+def _upsert_account_rows(db: Session, rows: list[CoupangRgSettlementFee]) -> int:
+    """계정 단위(status/api) row upsert 루프. commit은 호출자 책임(반환=처리 건수).
+
+    upsert: (account_key, from, to, fee_type, vendor_item_id="") 기준.
+    ★vendor_item_id="" 가드(S6): 같은 (account,from,to,fee_type)에 옵션 row(vendor_item_id=옵션ID)가
+      공존하므로, 계정 row 쿼리에 ""를 명시하지 않으면 옵션 row를 first()로 잡아 덮어쓸 위험.
+    (쿠키 경로 sync_rg_settlement + 쿠키 무관 경로 ingest_status_payload 공용 — 동작 완전 불변.)
+    """
     synced = 0
     for row in rows:
         existing = db.query(CoupangRgSettlementFee).filter_by(
@@ -280,11 +292,21 @@ def sync_rg_settlement(
             existing.raw_type = row.raw_type
             existing.synced_at = kst_now()
         synced += 1
+    return synced
 
+
+def ingest_status_payload(db: Session, account_key: str, raw: dict) -> dict:
+    """Mac 상주 브라우저가 받은 status/api raw JSON → 계정 단위 정산 수수료 적재(층1).
+
+    쿠키 무관 경로 — 정적 쿠키(WING1/2)를 계정 row 수집에서 제거하기 위한 이관 엔드포인트.
+    ★쿠키 상태행(mark_red/mark_last_success) 조작 없음: 이 경로는 쿠키를 쓰지 않으므로 쿠키
+      status에 손대면 안 된다(쿠키 경보는 별개 폴백 경로 sync_rg_settlement 전용).
+    파싱 실패(스키마 드리프트)는 WingReadError로 전파 → 라우터가 422.
+    """
+    rows = _parse_status_response(raw, account_key)
+    synced = _upsert_account_rows(db, rows)
     db.commit()
-    _mark_last_success(db, account_key)
-    log.info("RG 정산 sync 완료: %s — %d건", account_key, synced)
-    return {"synced": synced, "account_key": account_key, "period": f"{start_date}~{end_date}", "status": "ok"}
+    return {"synced": synced, "account_key": account_key, "status": "ok"}
 
 
 def sync_all_rg_settlements(db: Session, *, start_date: str | None = None, end_date: str | None = None) -> list[dict]:
@@ -350,17 +372,46 @@ def _parse_excel_date(value) -> date | None:
         return None
 
 
-def _find_header_row(ws) -> int | None:
+def _read_grid(ws) -> list[tuple]:
+    """시트를 **단 1회** 스트리밍해 값 격자(1행=튜플)로 읽는다.
+
+    ★이 함수가 존재하는 이유(2026-07-17 라이브 사고): read_only=True 워크북에서
+    `ws.cell(row, col)`은 상수시간 조회가 **아니다**. ReadOnlyWorksheet._get_cell →
+    _cells_by_row가 호출마다 시트 XML을 1행부터 새 WorkSheetParser로 다시 판다.
+    행 루프 안에서 셀 3개를 읽으면 O(n²) → 1000행 48초(실측), 실제 정산 엑셀이
+    60초를 넘겨 Mac 페처 POST 타임아웃 + 단일 워커 전체 지연을 유발했다.
+    → 격자로 한 번 읽고 이후엔 메모리에서만 인덱싱한다(1000행 0.06초).
+
+    메모리: 시트 1개분 값만 유지하고 다음 시트로 넘어가며 버린다(주간 정산 ≈1천행 → 무시 가능).
+    """
+    return [tuple(row) for row in ws.iter_rows(values_only=True)]
+
+
+def _at(grid: list[tuple], r: int, c: int):
+    """격자 1-indexed 셀 값. 범위 밖/없는 셀 → None (ws.cell(...).value와 동일 의미)."""
+    if 1 <= r <= len(grid):
+        row = grid[r - 1]
+        if 1 <= c <= len(row):
+            return row[c - 1]
+    return None
+
+
+def _max_column(grid: list[tuple]) -> int:
+    """격자 최대 컬럼 수(=ws.max_column 대체). 빈 시트 → 0."""
+    return max((len(row) for row in grid), default=0)
+
+
+def _find_header_row(grid: list[tuple]) -> int | None:
     """'옵션ID'를 값으로 가진 행 = 상세 헤더행. 상단 20행 내 탐색. 없으면 None(D-13)."""
-    for r in range(1, min(ws.max_row, 20) + 1):
-        for c in range(1, ws.max_column + 1):
-            v = ws.cell(row=r, column=c).value
+    for r in range(1, min(len(grid), 20) + 1):
+        for c in range(1, _max_column(grid) + 1):
+            v = _at(grid, r, c)
             if v is not None and str(v).strip() == _COL_OPTION_ID:
                 return r
     return None
 
 
-def _build_col_map(ws, header_row: int) -> dict[str, int]:
+def _build_col_map(grid: list[tuple], header_row: int) -> dict[str, int]:
     """헤더행 + 바로 아래 서브헤더행을 합쳐 {label: col} 매핑(서브 우선).
 
     2층 헤더 대응: row7 메인(옵션ID·매출인식일·'…입출고비(VAT별도)' 병합) +
@@ -368,9 +419,9 @@ def _build_col_map(ws, header_row: int) -> dict[str, int]:
     같은 label 중복 시 먼저 본 컬럼 유지.
     """
     col_map: dict[str, int] = {}
-    for c in range(1, ws.max_column + 1):
-        main = ws.cell(row=header_row, column=c).value
-        sub = ws.cell(row=header_row + 1, column=c).value
+    for c in range(1, _max_column(grid) + 1):
+        main = _at(grid, header_row, c)
+        sub = _at(grid, header_row + 1, c)
         for label in (sub, main):  # 서브헤더 우선
             if label is not None and str(label).strip():
                 key = str(label).strip()
@@ -378,16 +429,16 @@ def _build_col_map(ws, header_row: int) -> dict[str, int]:
     return col_map
 
 
-def _parse_summary(ws) -> dict | None:
+def _parse_summary(grid: list[tuple]) -> dict | None:
     """요약 행(정산주기 종료일·합계·세액·최종비용) 파싱. 헤더 위치 동적 탐색.
 
     상단 8행 내에서 '정산주기(종료일)' + '…합계' + '세액' + '최종비용' 헤더를 모두 가진 행을
     요약 헤더로 보고, 그 다음 행을 데이터로 읽는다. (상세 헤더 row7은 '세액'/'최종비용' 없어 매칭 안 됨.)
     """
-    for r in range(1, min(ws.max_row, 8) + 1):
+    for r in range(1, min(len(grid), 8) + 1):
         labels: dict[str, int] = {}
-        for c in range(1, ws.max_column + 1):
-            v = ws.cell(row=r, column=c).value
+        for c in range(1, _max_column(grid) + 1):
+            v = _at(grid, r, c)
             if v is not None and str(v).strip():
                 labels.setdefault(str(v).strip(), c)
         end_col = labels.get(_COL_PERIOD_END)
@@ -397,10 +448,10 @@ def _parse_summary(ws) -> dict | None:
         if end_col and sum_col and tax_col and final_col:
             dr = r + 1
             return {
-                "period_end": _parse_excel_date(ws.cell(row=dr, column=end_col).value),
-                "sum_discounted": _dec(ws.cell(row=dr, column=sum_col).value),
-                "tax": _dec(ws.cell(row=dr, column=tax_col).value),
-                "final": _dec(ws.cell(row=dr, column=final_col).value),
+                "period_end": _parse_excel_date(_at(grid, dr, end_col)),
+                "sum_discounted": _dec(_at(grid, dr, sum_col)),
+                "tax": _dec(_at(grid, dr, tax_col)),
+                "final": _dec(_at(grid, dr, final_col)),
             }
     return None
 
@@ -435,12 +486,13 @@ def parse_settlement_xlsx(content: bytes) -> dict:
                 skipped.append(sn)
                 continue
             ws = wb[sn]
-            hr = _find_header_row(ws)
+            grid = _read_grid(ws)   # ★시트당 XML 1회 파싱(그 뒤는 전부 메모리 인덱싱)
+            hr = _find_header_row(grid)
             if hr is None:
                 log.warning("RG 엑셀 '%s' 상세 헤더(옵션ID) 못 찾음, 건너뜀", sn)
                 skipped.append(sn)
                 continue
-            col_map = _build_col_map(ws, hr)
+            col_map = _build_col_map(grid, hr)
             oid_col = col_map.get(_COL_OPTION_ID)
             cost_col = col_map.get(_COL_DISCOUNTED)
             pend_col = col_map.get(_COL_PERIOD_END)
@@ -452,17 +504,17 @@ def parse_settlement_xlsx(content: bytes) -> dict:
             options: dict[tuple[str, date | None], Decimal] = {}
             sum_detail = Decimal(0)
             # 헤더+1부터 순회. 서브헤더 행은 옵션ID가 비어 자동 skip(서브헤더 유무 무관).
-            for r in range(hr + 1, ws.max_row + 1):
-                oid = _norm_option_id(ws.cell(row=r, column=oid_col).value)
+            for r in range(hr + 1, len(grid) + 1):
+                oid = _norm_option_id(_at(grid, r, oid_col))
                 if not oid:
                     continue
-                cost = _dec(ws.cell(row=r, column=cost_col).value)
-                pend = _parse_excel_date(ws.cell(row=r, column=pend_col).value) if pend_col else None
+                cost = _dec(_at(grid, r, cost_col))
+                pend = _parse_excel_date(_at(grid, r, pend_col)) if pend_col else None
                 key = (oid, pend)
                 options[key] = options.get(key, Decimal(0)) + cost
                 sum_detail += cost
 
-            summary = _parse_summary(ws)
+            summary = _parse_summary(grid)
             reconcile = None
             if summary is not None:
                 diff = sum_detail - summary["sum_discounted"]
@@ -492,23 +544,44 @@ def parse_settlement_xlsx(content: bytes) -> dict:
     return {"sheets": sheets_out, "sheets_skipped": skipped}
 
 
+def _expected_period_start(period_end: date) -> date:
+    """정산주기 종료일 → 시작일 (달력 규칙, 순수 함수).
+
+    규칙: **월요일~일요일 주별 + 달력 월 경계에서 분할**.
+      start = max(그 주의 월요일, 그 달 1일)
+            = max(period_end - period_end.weekday()일, period_end.replace(day=1))
+    월 경계에 걸친 주는 두 조각으로 나뉜다(예: 06-29~06-30 | 07-01~07-05).
+
+    규칙 출처: 2026-07-17 prod 계정 row 18개 전수 검증 18/18 일치(라이브 실측).
+    레퍼런스 17에는 "주별"만 있고 월 경계 분할은 미기재 — 라이브가 권위(원칙22).
+    구 폴백(period_end-6일 고정)은 월 경계 주간에서 반드시 틀려 6월 RG 비용을 +55%
+    과대계상한 사고의 원인이었다(2026-07-17). 이 함수는 추측이 아니라 검증된 규칙이다.
+    """
+    monday = period_end - timedelta(days=period_end.weekday())
+    month_first = period_end.replace(day=1)
+    return max(monday, month_first)
+
+
 def _resolve_period_start(db: Session, account_key: str, period_end: date) -> date:
     """옵션 row의 recognition_date_from 결정.
 
-    status/api 계정 row(vendor_item_id="", 같은 account_key·recognition_date_to==period_end)에서
-    from을 차용 → status/api와 정산주기(grain) 정확 일치 보장(검산 가능).
-    매칭 없으면 주별 가정 폴백(period_end-6일) + 경고. (status/api 선행 sync 권장.)
+    1순위(불변): status/api 계정 row(vendor_item_id="", 같은 account_key·recognition_date_to==
+      period_end)에서 from을 차용 → status/api와 정산주기(grain) 정확 일치 보장(검산 가능).
+    2순위: 계정 row 없으면 검증된 달력 규칙(_expected_period_start) 사용 + 경고.
+      (구 -6d 추측 폴백은 월 경계에서 틀려 삭제. 달력 규칙은 18/18 라이브 검증됨.)
     """
     acct = db.query(CoupangRgSettlementFee).filter_by(
         account_key=account_key, recognition_date_to=period_end, vendor_item_id="",
     ).first()
     if acct is not None:
         return acct.recognition_date_from
+    fallback = _expected_period_start(period_end)
     log.warning(
-        "RG 옵션 적재: status/api 계정 row 없음(account=%s, period_end=%s) → 주별 폴백(-6d)",
-        account_key, period_end,
+        "RG 옵션 적재: status/api 계정 row 없음(account=%s, period_end=%s) → "
+        "달력 규칙 폴백(월~일+월경계분할)=%s (추측 아님, 18/18 검증)",
+        account_key, period_end, fallback,
     )
-    return period_end - timedelta(days=6)
+    return fallback
 
 
 def ingest_settlement_xlsx(db: Session, account_key: str, content: bytes) -> dict:

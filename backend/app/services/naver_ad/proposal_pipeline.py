@@ -44,6 +44,9 @@ _INFORMATIONAL_EXPIRE_DPLUS: dict[str, int] = {
     proposal_writer._ACCOUNT_BRIEF: 1,
     proposal_writer._ANOMALY: 3,
     proposal_writer._ANOMALY_FRESHNESS: 3,
+    # 지혜 승격 보고(D-NAO-54 P3)는 마일스톤성이라 오래 보이게 둔다(D+14 만료 — 실행형 폴백과
+    # 같은 값이지만, 정보성으로 명시해 브리핑/토큰가드 절삭 대상임을 단일 진실로 못 박는다).
+    proposal_writer._WISDOM_PROMOTED: 14,
 }
 
 

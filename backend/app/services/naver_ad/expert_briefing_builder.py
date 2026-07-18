@@ -19,7 +19,8 @@ from sqlalchemy.orm import Session
 from app.models import NaverEntity, NaverForecastDaily, NaverLearningState, NaverProposal
 from app.services.naver_ad.diagnosis import build_diagnosis
 from app.services.naver_ad.proposal_scoreboard import METRIC as PROPOSAL_ACCURACY_METRIC
-from app.services.naver_ad.proposal_writer import INFORMATIONAL_PROPOSAL_TYPES
+from app.services.naver_ad.proposal_writer import INFORMATIONAL_PROPOSAL_TYPES, PARAM_CHANGE
+from app.services.naver_ad.wisdom_apply import active_wisdom_prefix
 from app.services.naver_ad.trigger_watch import PROPOSAL_TYPE_CPC, PROPOSAL_TYPE_PACING
 from app.utils.kst import kst_today
 
@@ -45,8 +46,12 @@ def build(db: Session, as_of: date | None = None) -> dict:
     forecast_rollup = _build_forecast_rollup(db)
     recent_triggers = _build_recent_triggers(db)
     scoreboard_summary = _build_scoreboard_summary(db)
+    # D-NAO-54 P4(briefing_sa): 활성 지혜를 "참고(지시 아님)" 섹션으로 브리핑 앞부분에 주입한다
+    # (wisdom_apply.active_wisdom_prefix — 하니스 성격의 builder가 SA를 호출, 원칙18 허용).
+    # 지혜 0건이면 None → 키 자체를 넣지 않아 현행 출력 불변(0건 회귀 계약).
+    wisdom_prefix = active_wisdom_prefix(db)
 
-    return {
+    briefing = {
         "as_of": as_of.isoformat(),
         "pending_proposals": proposals,
         "informational_pending": informational_pending,
@@ -56,15 +61,25 @@ def build(db: Session, as_of: date | None = None) -> dict:
         "scoreboard_summary": scoreboard_summary,
         "truncated": {"pending_proposals_dropped_ids": dropped_ids} if dropped_ids else {},
     }
+    # 앞부분 주입(0건이면 키 미추가 → 현행 출력 불변). ava_reviewer._build_prompt가 briefing
+    # dict를 통째로 JSON 직렬화하므로 이 키가 프롬프트에 그대로 실린다.
+    if wisdom_prefix is not None:
+        return {"active_wisdom": wisdom_prefix, **briefing}
+    return briefing
 
 
 def _build_pending_proposals(db: Session) -> tuple[list[dict], list[int]]:
     """실행형 pending 제안 전건(D-NAO-37 ②) — 정보성 5종은 제외(_build_informational_pending
     이 유형별 집계로 별도 처리). ava_reviewer.review의 expected_ids가 이 목록의 id만 근거로
     삼는다 — 정보성은 자동으로 검토 대상에서 빠진다(의도된 효과)."""
+    # P4 리뷰 P3-1: 결정 전용 param_change도 제외 — 지혜는 이미 active_wisdom prefix로
+    # Ava에게 전달되므로 이중 검토이며, LLM 산출 rationale이 프롬프트에 재삽입되는
+    # 주입면·비용만 늘린다(실행 결과도 없어 검토 실익 없음).
     rows = db.query(NaverProposal).filter(
         NaverProposal.status == "pending",
-        NaverProposal.proposal_type.notin_(INFORMATIONAL_PROPOSAL_TYPES),
+        NaverProposal.proposal_type.notin_(
+            tuple(INFORMATIONAL_PROPOSAL_TYPES) + (PARAM_CHANGE,)
+        ),
     ).order_by(NaverProposal.id.asc()).all()
 
     pairs = {(r.target_type, r.target_id) for r in rows if r.target_id}

@@ -137,6 +137,16 @@ export function showsActionButtons(p: NaverAdProposal): boolean {
   return !p.informational;
 }
 
+// D-NAO-54 P4: 승인 preConfirm 문안 — 결정 전용(param_change)은 "기록만·자동 적용 없음"을
+// 못 박는다. ★백엔드 파생값(p.decision_only)만으로 분기(proposal_type 재분류 금지 — D-NAO-53
+// 문안 파생 패턴). export = vitest 드리프트 가드 대상.
+export function approvePreConfirmText(p: NaverAdProposal): string {
+  if (p.decision_only) {
+    return "이 결정은 기록만 되며 자동 적용되지 않습니다(적용은 수동). 승인할까요?";
+  }
+  return "이 제안을 승인할까요? (실행은 별도 Confirm)";
+}
+
 // D-NAO-2 공격성 배수 (bep_calculator.AGG_MULT와 동일 값 — 프론트는 이 값으로 override를 계산할 뿐
 // 최종 판정은 항상 백엔드 campaign_target_resolver가 override 컬럼을 읽어 수행한다).
 const AGGRESSIVENESS_OPTIONS: { key: string; label: string; mult: number }[] = [
@@ -227,6 +237,9 @@ export const PROPOSAL_TYPE_LABEL: Record<string, string> = {
   account_brief: "계정 브리핑",
   trigger_pacing: "페이싱 경보",
   trigger_cpc_spike: "CPC 급등 경보",
+  wisdom_promoted: "지혜 승격", // D-NAO-54 P3 — 운영 일기에서 승격된 판단원칙 보고(정보성)
+  // 결정 전용(decision_only=true) — 승인해도 자동 적용 없음
+  param_change: "파라미터 제안", // D-NAO-54 P4 — 지혜가 함의한 생성기 파라미터 변경 제안
 };
 
 // E1a T8 — 제안 카드 평결 배지(Ava 검토, 콘솔 배지용 요약은 백엔드 _serialize_expert_verdict_summary 참조)
@@ -541,7 +554,7 @@ export default function NaverAdOptimizationConsole() {
   }
 
   function handleApprove(p: NaverAdProposal) {
-    return approveAndMaybeExecute(p, "이 제안을 승인할까요? (실행은 별도 Confirm)");
+    return approveAndMaybeExecute(p, approvePreConfirmText(p));
   }
 
   function handleReapprove(p: NaverAdProposal) {
@@ -615,6 +628,12 @@ export default function NaverAdOptimizationConsole() {
       );
     }
     if (p.status === "approved") {
+      // D-NAO-54 P4: 결정 전용 제안은 승인=결정 기록으로 끝난다(실행 대상 없음) — 실행버튼을
+      // 아예 렌더하지 않는다(executable=false라 어차피 비활성이지만 "정보성 제안" 오도 툴팁
+      // 대신 진실된 상태를 보인다).
+      if (p.decision_only) {
+        return <span className="text-xs text-gray-400">결정 기록됨</span>;
+      }
       const alreadyExecuted = p.executed_change_log_id != null;
       const execDisabled = busy || alreadyExecuted || !p.executable;
       const execTitle = alreadyExecuted ? "이미 실행됨" : (p.not_executable_reason ?? undefined);

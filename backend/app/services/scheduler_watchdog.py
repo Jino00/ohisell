@@ -4,8 +4,8 @@
 # 읽어 이 함수에 주입하고, 결과를 /api/scheduler/health로 표면화한다.
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Optional, Sequence, TypedDict
+from datetime import date, datetime
+from typing import Optional, Sequence, TypedDict, Union
 
 # 5-state (계획서 §3 SA② 규칙, 우선순위 순). 'disabled'는 노이즈 제외, 나머지 중 'ok'만 정상.
 STATE_OK = "ok"
@@ -129,8 +129,89 @@ def evaluate_cookie_freshness(
     return out
 
 
+# ── 데이터 나이 freshness (SA, 순수) ──────────────────────────────────────
+# 잡·쿠키의 자기보고는 거짓말할 수 있다(2026-07-17 사고: RG 정산이 26일 침묵했는데 last_status='ok').
+# 데이터 나이는 거짓말 못 한다 — '가장 최신 데이터가 며칠 전 것인가'는 파이프라인이 정말 살아있는지의
+# 직접 증거다. 쿠키·잡 감시가 놓치는(또는 층1 경로 이관 후 쿠키 행 자체가 사라지는) 미지 침묵 경로까지
+# 커버한다. cookies_stale과 달리 latest=None(한 번도 없음)도 즉시 비정상으로 시끄럽게 잡는다.
+class DataSnapshot(TypedDict, total=False):
+    name: str
+    account_key: str
+    latest: Optional[Union[datetime, date]]  # 최신 데이터 시각(SQLAlchemy Date면 date 객체)
+    max_age_days: float
+    impact: str  # 돈 영향 한글 라벨
+
+
+class DataVerdict(TypedDict):
+    name: str
+    account_key: str
+    state: str  # 'no_data' | 'stale'
+    age_days: Optional[float]  # no_data면 None
+    max_age_days: float
+    impact: str
+    reason: str
+
+
+def evaluate_data_freshness(
+    snapshots: Sequence[DataSnapshot], now: datetime
+) -> list[DataVerdict]:
+    """데이터 나이가 max_age_days를 넘겼거나(latest=stale) 아예 없는(no_data) 스냅샷만 반환(=비정상).
+
+    정상(나이 ≤ max_age_days)이면 결과에서 제외. cookies_stale과 달리 latest=None도 즉시 비정상
+    (no_data) — 파이프라인이 '한 번도 데이터를 못 만든' 것도 시끄럽게 잡는다(이번 사고 재발 방지).
+    """
+    out: list[DataVerdict] = []
+    now_n = _to_naive(now)  # aware/naive 혼재 시 TypeError 방어(cookie_freshness와 동형).
+    for s in snapshots:
+        name = s.get("name", "?")
+        account_key = s.get("account_key", "")
+        max_age = float(s.get("max_age_days") or 0)
+        impact = s.get("impact", "")
+        latest_n = _to_naive(_date_to_datetime(s.get("latest")))
+
+        if latest_n is None:
+            out.append({
+                "name": name,
+                "account_key": account_key,
+                "state": "no_data",
+                "age_days": None,
+                "max_age_days": max_age,
+                "impact": impact,
+                "reason": "데이터 없음(한 번도 수집된 적 없음)",
+            })
+            continue
+
+        age_days = (now_n - latest_n).total_seconds() / 86400.0
+        if age_days > max_age:
+            out.append({
+                "name": name,
+                "account_key": account_key,
+                "state": "stale",
+                "age_days": age_days,
+                "max_age_days": max_age,
+                "impact": impact,
+                "reason": f"최신 데이터 {age_days:.1f}일 전 (> {max_age:.0f}일)",
+            })
+    return out
+
+
 def _verdict(name: str, state: str, age: Optional[float], reason: str) -> JobVerdict:
     return {"job_name": name, "state": state, "age_sec": age, "reason": reason}
+
+
+def _date_to_datetime(value: Optional[Union[datetime, date]]) -> Optional[datetime]:
+    """SQLAlchemy Date 컬럼은 date 객체를 준다 → 자정 datetime으로 변환(naive 비교용).
+
+    datetime은 그대로, date는 자정으로, None은 None. date/datetime 둘 다 방어적으로 받는다.
+    (datetime이 date의 서브클래스이므로 datetime 판정을 먼저 한다.)
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return datetime(value.year, value.month, value.day)
+    return None
 
 
 def _to_naive(dt: Optional[datetime]) -> Optional[datetime]:

@@ -26,6 +26,7 @@ function proposal(overrides: Partial<NaverAdProposal>): NaverAdProposal {
     target_budget: null,
     budget_auto_eligible: null,
     informational: false,
+    decision_only: false,
     action: null,
     expert_verdict: null,
     executable: true,
