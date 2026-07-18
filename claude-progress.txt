@@ -3,6 +3,15 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
+- 날짜: 2026-07-19 00:20 KST (★★★**D-NAO-58 클릭 탐침 루프 CD3(되돌림·성과 판정층) — 구현·리뷰·배포·라이브 코드경로 검증 완료. 실제 탐침 왕복은 자연 발동 대기** — 워크트리 `recursing-engelbart-6bb9d5`, 브랜치 `claude/d-nao-58-click-probe-cd3`(CD2 tip 위 stack), 커밋 `9ba0ce7`. prod 배포 완료(safe_deploy). **PR 생성 예정**. CD1~CD3 완료 → 남은 것=CD4.)
+  - **설계 D-58-8~10 확정(Claude 자동진행, Jino "너의 추천옵션으로 자동진행" 위임)**: 되돌림 값=probe 성공 change_log `before_value["bidAmt"]`, 상태=change_log 파생(마이그 불필요). standing probe=probe_op 제안 중 그 유닛 최근 성공 update_bid가 그 probe인 것(최근 7일).
+  - **신규 SA 2개**: `probe_signal.py`(선행지표 score=즉시구매+장바구니×상품전환율, 순수계산) + `probe_revert.py`(standing 탐색·Stage1 실시간 출혈 밸브·Stage2 D+1 정산·되돌림 집행·outcome 기입).
+  - **Stage1(run_hourly_lane 말미, 매시:20)**: 당일 standing probe에 hh24로 시간당비용>정착창 시간당평균×3 ∧ 그날 conv_direct=0 → before_value로 즉시 되돌림. **Stage2(신규 크론 08:55)**: age≥1 probe에 signal_sa — clk0/roas≥target(유지)/전환부족(되돌림)/defer/age≥3 default 되돌림. 판정 결과 probe execute diary outcome_json["probe"]에 기입.
+  - **되돌림=bid_down→execute() 초크포인트(우회 0)**: 신규 `APPROVAL_SOURCE_REVERT=revert_op`+diary ACTOR_PROBE 재사용+harness 킬스위치 양 튜플에 revert_op(probe_op와 2중 방어 parity). BEP·스톱로스·쿨다운 불변.
+  - **독립 적대적 리뷰 Opus R1 GATE PASS(P1·P2 0건, Fable 미사용·5R 이내)**: 실제 guardrail 적대적 테스트로 ①되돌림은 입찰 못 올림(외부가 라이브가↓시 방향차단→되돌림 실패·standing 유지) ②쿨다운 시 안전 defer ③킬스위치 3중 ④Stage1/2 disjoint=이중되돌림 없음 ⑤회계 불변 실증. 권고 반영=실제 guardrail 영구 테스트 2개 추가. 전체 **2116 passed 회귀0**·단일 head `u3v4w5x6y7z8`.
+  - **safe_deploy CAS 전 파일 통과(병행 clobber 없음)**·pm2 healthy(startup complete·8001·probe 에러0). **라이브(원칙22)**: 새 크론 `run_naver_probe_settlement` 등록(next 07-19 08:55 KST) + prod에서 `_standing_probes`/`run_settlement`/`run_bleed_valve` end-to-end 실행 **쓰기0·에러0**(standing 0건=자연발동 전 정상) + revert_op→probe 매핑 로드.
+  - **★미충족(원칙22 — "탐침 왕복 작동" 아직 금지)**: 실제 탐침 발동·되돌림/유지 = **CD2 탐침이 자연 발동 안 함(clk0∧imp≥30∧rank≥2.5 유닛 없음)이라 0건.** 첫 발동 관측 시 트랙·HANDOFF 갱신. P3 3건 무해(중첩탐침 부분되돌림·target_roas None 보수적 되돌림·외부인상 supersede안함). codex 소급 07-23(CD1~CD3).
+  - **다음=CD4 환경별 학습·세분화층**: 계층적 풀링(환경셀×순위→클릭/선행지표)+세분화 판사(표본 임계→LLM 유의성)+지혜 승격("환경 E→상품 P 최적 탐침 순위 N" 3회 반복→다음 같은 환경 탐침 생략). HANDOFF=`.claude/memory/HANDOFF_ohisell-D-NAO-58-CD3-live_20260719.md`.
 - 날짜: 2026-07-18 23:15 KST (★★**D-NAO-58 클릭 탐침 루프 CD2(트리거·실행층) — 구현·리뷰·배포·라이브 코드경로 검증 완료. 단 실제 탐침 집행은 자연 발동 대기** — 워크트리 `d-nao-58-click-probe-cd2-33da23`, 브랜치 `claude/d-nao-58-click-probe-cd2-33da23`, 커밋 `ba733c9`. prod 배포 완료. **PR 생성 중**.)
   - **임계값 3개 Jino 확정(D-58-7)**: ①클릭0 지속 2시간(Jino 3h→2h 단축) ②최소노출 imp≥30 ③실시간 안전판 비용×3∧즉시구매0(→CD3 소비). 전부 기존 시간당 레인 검증 상수 재사용.
   - **CD2 구현(Opus 서브에이전트)**: `_probe_trigger`(순수 SA, 자기 2h 창 자기완결) + `run_hourly_lane` hold 분기 훅(이중발동 방지, up 치환→기존 up 경로 그대로 통과) + `APPROVAL_SOURCE_PROBE=probe_op`/`diary.ACTOR_PROBE=probe`(마이그 불필요) + harness 킬스위치 3중 방어에 probe_op 포함(우회금지).
