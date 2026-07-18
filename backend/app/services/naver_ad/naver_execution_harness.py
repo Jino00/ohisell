@@ -193,7 +193,9 @@ def _guard_failure(db: Session, proposal: NaverProposal, now: datetime, action: 
             actor=diary.actor_from_approval_source(proposal.approval_source),
             target_type=proposal.target_type, target_id=proposal.target_id,
             adgroup_id=proposal.adgroup_id, action=action,
-            rationale=f"[실행 불가] {reason}", source_ref=entry.id, now=now,
+            # ★리터럴 대신 공유 상수(3-way 병합, D-NAO-54): 마커 드리프트 방지 테스트가
+            #   같은 값의 리터럴을 금지한다 — 값은 동일("[실행 불가]")이라 동작 불변.
+            rationale=f"{GUARD_BLOCK_MARKER} {reason}", source_ref=entry.id, now=now,
         )
     except Exception as diary_err:  # noqa: BLE001 — fail-open(인자 평가 포함)
         log.warning("naver_execution_harness: diary 기록 실패(fail-open): %s", diary_err)
@@ -231,6 +233,7 @@ def _claim_executing(db: Session, proposal: NaverProposal) -> None:
 
         if proposal.approval_source in (
             _auto_operator.APPROVAL_SOURCE_DAILY, _auto_operator.APPROVAL_SOURCE_HOURLY,
+            _auto_operator.APPROVAL_SOURCE_PROBE,  # D-NAO-58 CD2: 탐침도 동일 킬스위치 가드(우회 금지)
         ) and not _auto_operator._auto_operate_now(db, proposal.campaign_id):
             proposal.status = "approved"  # 클레임 원복 — executing 잔존 방지(미실행 정직 상태)
             db.commit()
@@ -1057,6 +1060,7 @@ def execute(db: Session, proposal_id: int, *, dry_run: bool = True, now: datetim
 
         if proposal.approval_source in (
             _auto_operator.APPROVAL_SOURCE_DAILY, _auto_operator.APPROVAL_SOURCE_HOURLY,
+            _auto_operator.APPROVAL_SOURCE_PROBE,  # D-NAO-58 CD2: 탐침도 동일 킬스위치 가드(우회 금지)
         ) and not _auto_operator._auto_operate_now(db, proposal.campaign_id):
             log.warning(
                 "naver_execution_harness: 킬스위치 OFF — proposal_id=%s(approval_source=%s, "

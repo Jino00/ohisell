@@ -41,7 +41,7 @@ from decimal import Decimal
 import requests
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import or_
+from sqlalchemy import or_, tuple_
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -221,7 +221,11 @@ _MAX_PROPOSAL_RANGE_DAYS = 90
 DECISION_ONLY_PROPOSAL_TYPES: frozenset[str] = frozenset({proposal_writer.PARAM_CHANGE})
 
 
-def _serialize_proposal(p: NaverProposal, verdict: NaverExpertReview | None) -> dict:
+def _serialize_proposal(
+    p: NaverProposal, verdict: NaverExpertReview | None,
+    ent_names: dict[tuple[str, str], str] | None = None,
+    camp_names: dict[str, str] | None = None,
+) -> dict:
     blocker_reason = naver_execution_harness.real_write_blocker(p)
     return {
         "id": p.id,
@@ -231,6 +235,10 @@ def _serialize_proposal(p: NaverProposal, verdict: NaverExpertReview | None) -> 
         "target_id": p.target_id,
         "campaign_id": p.campaign_id,
         "adgroup_id": p.adgroup_id,
+        # 대상 사람 이름(D-NAO-54, Jino 2026-07-18) — 키워드ID nkw-… 로는 못 알아본다.
+        # 맵이 없거나(단건 응답) 미해석이면 None → 프론트가 target_id로 폴백.
+        "target_name": (ent_names or {}).get((p.target_type, p.target_id)),
+        "campaign_name": (camp_names or {}).get(p.campaign_id),
         # D-NAO-47: 실행 목표값 — 이게 없어서 "입찰 인상" 카드가 *얼마로* 올리는지
         # 화면에 안 나왔다(스펙 §1-6). pending 실행대상 5건이 전부 bid_up이라 바로 체감됨.
         "target_bid": p.target_bid,
@@ -340,12 +348,18 @@ def proposals(
     total = q.count()
     rows = q.order_by(NaverProposal.created_at.desc()).limit(limit).all()
     verdicts = _latest_ok_verdicts_by_proposal(db, [p.id for p in rows])
+    # 대상 사람 이름 배치 해석(D-NAO-54, Jino 2026-07-18) — 키워드ID로는 못 알아본다.
+    ent_names, camp_names = _batch_entity_names(
+        db,
+        {(p.target_type, p.target_id) for p in rows if p.target_type and p.target_id},
+        {p.campaign_id for p in rows if p.campaign_id},
+    )
     # 현재 실쓰기 개방된 액션 목록(배너 표시용) — 코드 배포로만 바뀌는 이중 방벽 교집합.
     # 하드코딩 라벨("현재 개방: 제외키워드")이 개방 순서 진행과 어긋나던 결함 재발 방지.
     return {
         "total": total,
         "open_actions": naver_execution_harness.open_executable_actions(),
-        "rows": [_serialize_proposal(p, verdicts.get(p.id)) for p in rows],
+        "rows": [_serialize_proposal(p, verdicts.get(p.id), ent_names, camp_names) for p in rows],
     }
 
 
@@ -981,6 +995,52 @@ def _execution_state(row: NaverChangeLog) -> str | None:
     return "unknown"
 
 
+def _batch_entity_names(
+    db: Session, ent_keys: set[tuple[str, str]], camp_ids: set[str]
+) -> tuple[dict[tuple[str, str], str], dict[str, str]]:
+    """(entity_type, entity_id)·campaign_id 집합 → 사람 이름 배치 해석
+    (Jino 2026-07-18: "적혀있는 대상은 알아볼 수가 없어"). naver_entity.name에
+    캠페인/그룹명·키워드 텍스트가 있다(prod 실측 100% 채워짐).
+
+    ★쿼리 2개(엔티티·캠페인)면 충분하다 — 대상마다 조회(N+1)하지 않는다. 호출자가
+    limit≤200을 강제하므로 IN 목록도 유한하다. 이름이 비었거나 매핑에 없으면 키가 빠지고,
+    프론트가 원래 'type id'로 폴백한다(지어내지 않음). change_log·proposals가 공유한다.
+    """
+    ent_names: dict[tuple[str, str], str] = {}
+    if ent_keys:
+        for e in (
+            db.query(NaverEntity.entity_type, NaverEntity.entity_id, NaverEntity.name)
+            .filter(tuple_(NaverEntity.entity_type, NaverEntity.entity_id).in_(list(ent_keys)))
+            .all()
+        ):
+            if e.name:
+                ent_names[(e.entity_type, e.entity_id)] = e.name
+
+    camp_names: dict[str, str] = {}
+    if camp_ids:
+        for c in (
+            db.query(NaverEntity.entity_id, NaverEntity.name)
+            .filter(NaverEntity.entity_type == "campaign", NaverEntity.entity_id.in_(list(camp_ids)))
+            .all()
+        ):
+            if c.name:
+                camp_names[c.entity_id] = c.name
+    return ent_names, camp_names
+
+
+def _resolve_entity_names(
+    db: Session, rows: list[NaverChangeLog]
+) -> tuple[dict[tuple[str, str], str], dict[str, str]]:
+    """change_log 행들 → 사람 이름. __bulk__ 요약행은 실엔티티가 아니라 제외."""
+    ent_keys = {
+        (r.entity_type, r.entity_id)
+        for r in rows
+        if r.entity_type and r.entity_id and r.entity_id != "__bulk__"
+    }
+    camp_ids = {r.campaign_id for r in rows if r.campaign_id}
+    return _batch_entity_names(db, ent_keys, camp_ids)
+
+
 @router.get("/change-log")
 def get_change_log(
     campaign_id: str | None = Query(None, description="캠페인 필터"),
@@ -1084,6 +1144,8 @@ def get_change_log(
         else None
     )
     rows = q.order_by(NaverChangeLog.changed_at.desc()).offset(offset).limit(limit).all()
+    # 대상 사람 이름 해석(D-NAO-54, Jino 2026-07-18) — ID만으로는 못 알아본다.
+    ent_names, camp_names = _resolve_entity_names(db, rows)
 
     return {
         "total": total,
@@ -1095,6 +1157,9 @@ def get_change_log(
                 "entity_type": r.entity_type,
                 "entity_id": r.entity_id,
                 "campaign_id": r.campaign_id,
+                # 이름 없으면 키 자체를 안 넣는다(None) → 프론트가 'type id'로 폴백.
+                "entity_name": ent_names.get((r.entity_type, r.entity_id)),
+                "campaign_name": camp_names.get(r.campaign_id),
                 "action": r.action,
                 "before": _loads_or_none(r.before_value),
                 "after": _loads_or_none(r.after_value),

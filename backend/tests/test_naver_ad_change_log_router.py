@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from datetime import timedelta
+import pathlib
+from datetime import datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -14,7 +15,8 @@ from sqlalchemy.pool import StaticPool
 from app.database import Base, get_db
 from app.main import app
 from app.models import NaverChangeLog
-from app.utils.kst import kst_now
+from app.services.naver_ad import naver_execution_harness
+from app.utils.kst import kst_now, kst_today
 
 
 @pytest.fixture
@@ -140,9 +142,9 @@ def test_change_log_returns_total_for_pagination(client, db):
 def test_change_log_empty_is_200_not_404(client):
     """★빈 상태는 에러가 아니다 — 1층이 '우리 조작 0회'를 정직하게 그려야 한다(D-47-h)."""
     body = client.get("/api/naver/ad/change-log").json()
-    # 병행 세션(prod 배포분 3-way 흡수)이 executed_total 필드를 추가 — 핵심 계약(빈 결과도
-    # 200 + rows/total)만 고정하고 추가 필드에는 관용(그쪽 PR의 테스트 갱신분과 충돌 방지).
-    assert body["rows"] == [] and body["total"] == 0
+    # 핵심 계약(빈 결과도 200 + rows/total)만 고정. executed_total=None도 함께 확인하되
+    # 추가 필드(대상 이름 등 per-row 필드는 빈 결과엔 없음)에는 관용.
+    assert body["rows"] == [] and body["total"] == 0 and body["executed_total"] is None
 
 
 # ── codex[P2] 2026-07-17: actor 필터 — "우리 조작"에 외부 감지를 섞으면 안 된다 ──
@@ -236,3 +238,377 @@ def test_actor_ours_scoped_by_campaign(client, db):
 
     assert client.get("/api/naver/ad/change-log?actor=ours&campaign_id=cmp-1").json()["total"] == 1
     assert client.get("/api/naver/ad/change-log?actor=ours&campaign_id=cmp-2").json()["total"] == 2
+
+
+# ══════════════════════════════════════════════════════════════════
+# D-NAO-54 ① 날짜 범위(date_from/date_to) — 프리셋 5종의 원천
+#   당일 / 어제 / 어제부터 7일 / 어제부터 30일 / 캘린더 커스텀.
+#   ★`days`는 "지금부터 N일 전"이라 **당일만**·**어제만** 같은 닫힌 구간을 표현할 수 없다.
+#   ★changed_at은 KST 저장이므로(kst_now() 명시 전달) 경계도 KST 날짜로 판단한다.
+#     서버 시계가 UTC인데 `date('now')`를 쓰면 9시간 어긋난다(memory: sqlite-server-default-now-is-utc).
+# ══════════════════════════════════════════════════════════════════
+
+
+def _seed_blocked(db, *, action="update_bid", campaign_id="cmp-1", days_ago=0, entity_id="grp-blocked"):
+    """가드레일 차단 시도 = harness._guard_failure가 남기는 모양.
+    before/after 둘 다 None · outcome='failed' · dry_run=False(하드코딩 — harness:160).
+    ★rationale 접두사는 harness 상수에서 가져온다 — 리터럴을 쓰면 harness가 문구를 바꿀 때
+      테스트만 통과하고 prod에서 조용히 어긋난다(라우터가 이 접두사로 blocked/unknown을 가른다)."""
+    row = NaverChangeLog(
+        entity_type="adgroup", entity_id=entity_id, campaign_id=campaign_id,
+        action=action, dry_run=False, outcome="failed",
+        changed_at=kst_now() - timedelta(days=days_ago),
+        before_value=None, after_value=None,
+        rationale=f"근거 {naver_execution_harness.GUARD_BLOCK_MARKER} 변경폭 39.3% 초과(상한 15%, D-NAO-5)",
+    )
+    db.add(row)
+    db.commit()
+    return row
+
+
+def _seed_write_failed(db, *, campaign_id="cmp-1", entity_id="grp-writefail"):
+    """쓰기 실패 시도 = harness의 writer 예외 경로가 남기는 모양(:497 등).
+    ★차단 행과 DB 모양이 **완전히 같다**(dry_run=False · outcome='failed' · after=None).
+      다른 건 rationale 접두사뿐 — 그래서 이 테스트가 그 구분을 지킨다."""
+    row = NaverChangeLog(
+        entity_type="adgroup", entity_id=entity_id, campaign_id=campaign_id,
+        action="update_bid", dry_run=False, outcome="failed", changed_at=kst_now(),
+        before_value=None, after_value=None,
+        rationale=(
+            f"근거 {naver_execution_harness.WRITE_FAILURE_MARKER} "
+            "WriteVerificationError: bidAmt는 반영됐으나 useGroupBidAmt가 false로 전환되지 않음"
+        ),
+    )
+    db.add(row)
+    db.commit()
+    return row
+
+
+def test_date_range_is_inclusive_on_both_ends(client, db):
+    """당일·어제 프리셋의 근간 — date_to 당일 23:59:59가 잘리면 '당일' 탭이 빈다."""
+    today = kst_today().isoformat()
+    _seed(db, days_ago=0)
+    _seed(db, days_ago=1)
+    _seed(db, days_ago=2)
+
+    body = client.get(f"/api/naver/ad/change-log?date_from={today}&date_to={today}").json()
+    assert body["total"] == 1, "당일 = 오늘 하루만"
+
+    yesterday = (kst_today() - timedelta(days=1)).isoformat()
+    body = client.get(f"/api/naver/ad/change-log?date_from={yesterday}&date_to={yesterday}").json()
+    assert body["total"] == 1, "어제 = 어제 하루만(오늘 제외)"
+
+
+def test_date_range_seven_days_ending_yesterday_excludes_today(client, db):
+    """Jino 확정(2026-07-17): 7일·30일은 **어제 기준**이다 — 당일은 진행 중이라 별도 탭.
+    당일이 섞이면 '완결된 과거'라는 탭의 의미가 깨진다."""
+    _seed(db, days_ago=0)   # 오늘 — 제외되어야 함
+    _seed(db, days_ago=1)   # 어제 — 포함
+    _seed(db, days_ago=7)   # 7일 창의 끝 — 포함
+    _seed(db, days_ago=8)   # 창 밖 — 제외
+
+    date_to = (kst_today() - timedelta(days=1)).isoformat()
+    date_from = (kst_today() - timedelta(days=7)).isoformat()
+    body = client.get(f"/api/naver/ad/change-log?date_from={date_from}&date_to={date_to}").json()
+    assert body["total"] == 2, "어제 + 7일전만(오늘·8일전 제외)"
+
+
+def test_date_range_takes_precedence_over_days(client, db):
+    _seed(db, days_ago=0)
+    _seed(db, days_ago=10)
+    today = kst_today().isoformat()
+    body = client.get(f"/api/naver/ad/change-log?days=30&date_from={today}&date_to={today}").json()
+    assert body["total"] == 1, "date_from/date_to가 오면 days는 무시한다"
+
+
+def test_date_range_rejects_reversed_range(client, db):
+    today = kst_today().isoformat()
+    yesterday = (kst_today() - timedelta(days=1)).isoformat()
+    r = client.get(f"/api/naver/ad/change-log?date_from={today}&date_to={yesterday}")
+    assert r.status_code == 422, "캘린더에서 뒤집어 고를 수 있다 — 빈 결과로 조용히 넘기지 않는다"
+
+
+def test_date_range_rejects_span_over_limit(client, db):
+    """days가 le=365인 것과 같은 상한 — 캘린더로 우회되면 안 된다."""
+    date_to = kst_today().isoformat()
+    date_from = (kst_today() - timedelta(days=400)).isoformat()
+    r = client.get(f"/api/naver/ad/change-log?date_from={date_from}&date_to={date_to}")
+    assert r.status_code == 422
+
+
+def test_date_range_requires_both_ends(client, db):
+    """한쪽만 주면 나머지 창이 days로 결정돼 사용자가 고른 적 없는 구간이 나온다 — 명시적으로 막는다."""
+    today = kst_today().isoformat()
+    assert client.get(f"/api/naver/ad/change-log?date_from={today}").status_code == 422
+    assert client.get(f"/api/naver/ad/change-log?date_to={today}").status_code == 422
+
+
+def test_date_range_rejects_malformed_date(client, db):
+    assert client.get("/api/naver/ad/change-log?date_from=2026-13-99&date_to=2026-07-17").status_code == 422
+
+
+# ══════════════════════════════════════════════════════════════════
+# D-NAO-54 ② include_blocked — 가드레일이 막은 시도를 보이게
+#   ★actor=ours의 기본 계약("실집행만")은 불변이다: 1층 "우리 조작 N회"의 원천이라
+#   차단분이 기본으로 섞이면 광고에 아무 변화가 없었는데 "조작 1회"가 된다(codex[P2] R2).
+#   그래서 **옵트인**이고, 프론트는 executed 플래그로 구분해 그린다.
+# ══════════════════════════════════════════════════════════════════
+
+
+def test_include_blocked_defaults_off_preserving_ours_contract(client, db):
+    _seed(db, action="update_bid")
+    _seed_blocked(db)
+    body = client.get("/api/naver/ad/change-log?actor=ours").json()
+    assert body["total"] == 1, "기본값은 실집행만 — 1층 카운트 정직성(D-47-h)"
+
+
+def test_include_blocked_surfaces_guard_rejections(client, db):
+    _seed(db, action="update_bid")
+    _seed_blocked(db)
+    body = client.get("/api/naver/ad/change-log?actor=ours&include_blocked=true").json()
+    assert body["total"] == 2
+    ids = {r["entity_id"] for r in body["rows"]}
+    assert "grp-blocked" in ids
+
+
+def test_include_blocked_does_not_admit_external_detections(client, db):
+    """차단분을 여는 것이 외부 감지까지 여는 뒷문이 되면 안 된다 — 남의 조작이 우리 성과로 섞인다."""
+    _seed(db, action="external_bid_change")
+    _seed_blocked(db)
+    rows = client.get("/api/naver/ad/change-log?actor=ours&include_blocked=true").json()["rows"]
+    assert all(r["action"] == "update_bid" for r in rows)
+
+
+
+
+def test_include_blocked_still_excludes_dry_run(client, db):
+    """dry-run은 '시도'조차 아니다 — include_dry_run과 직교해야 한다.
+
+    ★이전 판(2026-07-17)은 `_seed_blocked(dry_run=True)`로 시드해 **존재할 수 없는 행 모양**을
+    검증하며 공허하게 통과했다(harness._guard_failure는 dry_run=False를 하드코딩한다).
+    실제 직교성은 이것이다: dry-run 행은 after_value도 outcome도 없어 or_ 어느 가지에도
+    안 걸린다 — include_dry_run과 include_blocked를 **둘 다 켜도** 안 나온다."""
+    db.add(NaverChangeLog(
+        entity_type="keyword", entity_id="nkw-dry", campaign_id="cmp-1",
+        action="update_bid", dry_run=True, outcome=None, changed_at=kst_now(),
+        before_value=None, after_value=None, rationale="시뮬레이션",
+    ))
+    db.commit()
+    body = client.get(
+        "/api/naver/ad/change-log?actor=ours&include_blocked=true&include_dry_run=true"
+    ).json()
+    assert body["total"] == 0
+
+
+# ══════════════════════════════════════════════════════════════════
+# D-NAO-54 ③ execution_state — "모름"을 "차단됨"이라고 말하지 않는다(원칙22)
+# ══════════════════════════════════════════════════════════════════
+
+
+def test_execution_state_executed_for_real_write(client, db):
+    _seed(db, action="update_bid")
+    rows = client.get("/api/naver/ad/change-log?actor=ours").json()["rows"]
+    assert rows[0]["execution_state"] == "executed"
+
+
+def test_execution_state_blocked_only_for_guard_rejection(client, db):
+    _seed_blocked(db)
+    rows = client.get("/api/naver/ad/change-log?actor=ours&include_blocked=true").json()["rows"]
+    assert rows[0]["execution_state"] == "blocked"
+
+
+def test_execution_state_write_failure_is_unknown_not_blocked(client, db):
+    """★핵심 회귀 고정. naver_sa_writer의 WriteVerificationError는 **bidAmt가 이미 반영된 뒤**
+    useGroupBidAmt 미전환에서도 뜬다(writer:341) — 그 행을 '차단됨'이라 부르면 네이버엔
+    우리 입찰가가 들어가 있는데 안 바꿨다고 단언하는 것이다(원칙22 위반).
+    PUT 성공 후 응답만 유실된 네트워크 타임아웃도 같은 행을 만든다."""
+    _seed_write_failed(db)
+    rows = client.get("/api/naver/ad/change-log?actor=ours&include_blocked=true").json()["rows"]
+    assert rows[0]["execution_state"] == "unknown"
+    assert rows[0]["execution_state"] != "blocked"
+
+
+def test_execution_state_unknown_when_marker_absent(client, db):
+    """접두사가 없으면 보수 판정 — 가드 거부라고 단정하려면 적극적 증거가 있어야 한다."""
+    db.add(NaverChangeLog(
+        entity_type="adgroup", entity_id="grp-nomarker", campaign_id="cmp-1",
+        action="update_bid", dry_run=False, outcome="failed", changed_at=kst_now(),
+        before_value=None, after_value=None, rationale="접두사 없는 옛 행",
+    ))
+    db.commit()
+    rows = client.get("/api/naver/ad/change-log?actor=ours&include_blocked=true").json()["rows"]
+    assert rows[0]["execution_state"] == "unknown"
+
+
+def test_execution_state_is_none_for_external_and_settings(client, db):
+    """★execution_state는 actor=ours 관점 전용인데 응답 전역에 나간다. bool 하나였다면
+    external_keyword_removed(after 없음)는 '차단됨', optimizer_change(after 있음)는 '집행됨'이
+    된다 — 우리 가드레일은 남의 조작에 걸리지 않고, optimizer_change는 광고 API를 건드린 적이 없다."""
+    db.add(NaverChangeLog(
+        entity_type="keyword", entity_id="nkw-gone", campaign_id="cmp-1",
+        action="external_keyword_removed", dry_run=False, changed_at=kst_now(),
+        before_value=json.dumps({"keyword": "사라진키워드"}), after_value=None,
+    ))
+    _seed(db, action="optimizer_change")
+    db.commit()
+    rows = client.get("/api/naver/ad/change-log?actor=all").json()["rows"]
+    assert {r["execution_state"] for r in rows} == {None}
+
+
+def test_executed_total_splits_real_from_attempted(client, db):
+    """★`총 N건` 하나만 주면 "우리가 한 일" 카드가 차단분을 집행으로 세게 한다 —
+    actor 필터가 막으려던 거짓말이 화면에서 되살아난다."""
+    _seed(db, action="update_bid")
+    _seed_blocked(db, entity_id="grp-b1")
+    _seed_write_failed(db)
+    body = client.get("/api/naver/ad/change-log?actor=ours&include_blocked=true").json()
+    assert body["total"] == 3
+    assert body["executed_total"] == 1, "실제로 광고가 바뀐 건 1건뿐"
+
+
+def test_executed_total_is_none_without_include_blocked(client, db):
+    """차단분을 안 켰으면 total 자체가 이미 실집행 수라 분리 집계가 의미 없다."""
+    _seed(db, action="update_bid")
+    assert client.get("/api/naver/ad/change-log?actor=ours").json()["executed_total"] is None
+
+
+def test_include_blocked_rejected_outside_actor_ours(client, db):
+    """조용히 무시하면 호출자가 켰다고 믿는다."""
+    assert client.get("/api/naver/ad/change-log?actor=all&include_blocked=true").status_code == 422
+    assert client.get("/api/naver/ad/change-log?actor=external&include_blocked=true").status_code == 422
+
+
+def test_marker_constants_match_harness_rationale_writes():
+    """★드리프트 방지: 라우터가 이 접두사 문자열로 blocked/unknown을 가른다. harness가 문구를
+    바꾸면 라우터는 **조용히** 전부 unknown으로 떨어진다 — 상수를 공유해 그걸 막는다."""
+    from app.services.naver_ad.naver_execution_harness import (
+        GUARD_BLOCK_MARKER, WRITE_FAILURE_MARKER,
+    )
+    src = pathlib.Path(naver_execution_harness.__file__).read_text()
+    assert GUARD_BLOCK_MARKER != WRITE_FAILURE_MARKER
+    # 리터럴이 코드에 남아 있으면 상수화가 뚫린 것이다(주석 블록은 설명이라 허용).
+    code = "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))
+    assert f'{GUARD_BLOCK_MARKER} {{reason}}' not in code
+    assert f'{WRITE_FAILURE_MARKER} {{type(exc)' not in code
+
+
+# ══════════════════════════════════════════════════════════════════
+# D-NAO-54 경계 — 검토자 지적: 기존 테스트가 "경계"라 이름 붙이고 경계를 안 짚었다
+# ══════════════════════════════════════════════════════════════════
+
+
+def test_date_range_includes_last_microsecond_of_date_to(client, db):
+    """★`_seed(days_ago=0)`은 '지금'이라 23:59:59를 안 짚는다. until을 `<=`로 잘못 쓰거나
+    +1일을 빠뜨리면 여기서만 잡힌다."""
+    today = kst_today()
+    for label, t in (("sod", datetime.min.time()), ("eod", datetime.max.time())):
+        db.add(NaverChangeLog(
+            entity_type="keyword", entity_id=f"nkw-{label}", campaign_id="cmp-1",
+            action="update_bid", dry_run=False,
+            changed_at=datetime.combine(today, t),
+            before_value=json.dumps({"bidAmt": 700}), after_value=json.dumps({"bidAmt": 900}),
+        ))
+    db.commit()
+    iso = today.isoformat()
+    body = client.get(f"/api/naver/ad/change-log?date_from={iso}&date_to={iso}").json()
+    assert body["total"] == 2, "당일 00:00:00.000000 과 23:59:59.999999 둘 다 포함"
+
+
+def test_date_range_span_boundary_365_ok_366_rejected(client, db):
+    """off-by-one 고정 — 양끝 포함이므로 365일째까지가 합법이다."""
+    date_to = kst_today()
+    ok = (date_to - timedelta(days=364)).isoformat()
+    over = (date_to - timedelta(days=365)).isoformat()
+    assert client.get(f"/api/naver/ad/change-log?date_from={ok}&date_to={date_to.isoformat()}").status_code == 200
+    assert client.get(f"/api/naver/ad/change-log?date_from={over}&date_to={date_to.isoformat()}").status_code == 422
+
+
+def test_date_range_max_date_is_422_not_500(client, db):
+    """★`date(9999,12,31) + 1일`이 OverflowError를 던져 500이 났다. 뒤집힘·span 검사를 전부
+    통과한 뒤 터진다(from==to면 span 1일이라 합법). input에 max가 없어 도달 가능하다."""
+    r = client.get("/api/naver/ad/change-log?date_from=9999-12-31&date_to=9999-12-31")
+    assert r.status_code == 422
+
+
+def test_executed_total_never_counts_dry_run_as_executed(client, db):
+    """★R2 자체 검증에서 발견. executed_total은 `execution_state=="executed"` 행 수와
+    **정확히 같아야** 한다 — 푸터가 그 배지들의 집계라고 주장하기 때문이다.
+    dry_run을 안 걸렀더니 include_dry_run=true 조합에서 푸터가 "집행 1건"이라 말하면서
+    정작 그 행엔 배지가 없었다(실측). 시뮬을 집행으로 세는 건 D-47-h가 금지하는 거짓말이다."""
+    db.add(NaverChangeLog(
+        entity_type="keyword", entity_id="nkw-dry", campaign_id="cmp-1", action="update_bid",
+        dry_run=True, changed_at=kst_now(),
+        before_value=json.dumps({"bidAmt": 700}), after_value=json.dumps({"bidAmt": 900}),
+    ))
+    db.commit()
+    body = client.get(
+        "/api/naver/ad/change-log?actor=ours&include_blocked=true&include_dry_run=true"
+    ).json()
+    assert body["executed_total"] == 0, "dry-run은 집행이 아니다"
+    # 불변식: 푸터 숫자 == 배지 개수
+    badged = sum(1 for r in body["rows"] if r["execution_state"] == "executed")
+    assert body["executed_total"] == badged
+
+
+def test_executed_total_equals_executed_badges_invariant(client, db):
+    """위 불변식을 섞인 데이터로 한 번 더 — 푸터와 배지가 갈라지면 화면이 자기모순이다."""
+    _seed(db, action="update_bid")
+    _seed_blocked(db, entity_id="grp-b1")
+    _seed_write_failed(db)
+    body = client.get("/api/naver/ad/change-log?actor=ours&include_blocked=true").json()
+    badged = sum(1 for r in body["rows"] if r["execution_state"] == "executed")
+    assert body["executed_total"] == badged == 1
+
+
+def test_write_failure_marker_wins_over_guard_marker(client, db):
+    """★검사 순서 고정. harness는 제안 rationale **뒤에** 접두사를 이어붙인다
+    (f"{proposal.rationale} {MARKER} {reason}"). 제안 원문에 '[실행 불가]'가 섞여 있으면
+    쓰기 실패 행이 blocked로 오판된다 — 반영됐을 수도 있는데 "확실히 안 바뀜"이라 단언하는
+    P1-2의 거짓말이다. prod 실측(2026-07-17) 제안 1,023건 중 0건이라 지금은 도달 불가하지만,
+    문자열 검사에 기대는 이상 순서로 막는다."""
+    db.add(NaverChangeLog(
+        entity_type="adgroup", entity_id="grp-both", campaign_id="cmp-1", action="update_bid",
+        dry_run=False, outcome="failed", changed_at=kst_now(), before_value=None, after_value=None,
+        rationale=(
+            f"제안 원문에 {naver_execution_harness.GUARD_BLOCK_MARKER} 문자열이 섞여 있음 "
+            f"{naver_execution_harness.WRITE_FAILURE_MARKER} WriteVerificationError: ..."
+        ),
+    ))
+    db.commit()
+    rows = client.get("/api/naver/ad/change-log?actor=ours&include_blocked=true").json()["rows"]
+    assert rows[0]["execution_state"] == "unknown", "쓰기 실패는 마커가 섞여도 unknown이어야 한다"
+
+
+# ── D-NAO-54 2026-07-18: 대상 사람 이름 해석(Jino "적혀있는 대상은 알아볼 수가 없어") ──
+def test_change_log_resolves_entity_and_campaign_names(client, db):
+    """대상 ID → naver_entity.name. adgroup='17E' + 소속 캠페인명을 함께 준다."""
+    from app.models import NaverEntity
+    db.add_all([
+        NaverEntity(entity_type="campaign", entity_id="cmp-1", campaign_id="cmp-1",
+                    name="04. 아이폰_지문방지"),
+        NaverEntity(entity_type="adgroup", entity_id="grp-9", campaign_id="cmp-1",
+                    name="17E"),
+    ])
+    row = _seed(db)
+    row.entity_type = "adgroup"; row.entity_id = "grp-9"
+    db.commit()
+    item = client.get("/api/naver/ad/change-log").json()["rows"][0]
+    assert item["entity_name"] == "17E"
+    assert item["campaign_name"] == "04. 아이폰_지문방지"
+
+
+def test_change_log_entity_name_is_none_when_unresolved(client, db):
+    """이름을 못 찾으면 키를 지어내지 않고 None → 프론트가 'type id'로 폴백한다(원칙22)."""
+    _seed(db)  # naver_entity에 nkw-1 없음
+    item = client.get("/api/naver/ad/change-log").json()["rows"][0]
+    assert item["entity_name"] is None
+    assert item["campaign_name"] is None
+
+
+def test_change_log_skips_bulk_entity_in_name_lookup(client, db):
+    """__bulk__ 요약행은 실엔티티가 아니라 이름 해석 대상이 아니다(빈 IN 방지)."""
+    row = _seed(db, action="external_keyword_removed")
+    row.entity_id = "__bulk__"
+    db.commit()
+    item = client.get("/api/naver/ad/change-log").json()["rows"][0]
+    assert item["entity_name"] is None

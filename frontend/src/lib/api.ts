@@ -1726,6 +1726,11 @@ export interface NaverAdProposal {
   target_id: string;
   campaign_id: string;
   adgroup_id: string | null;
+  /** 대상 사람 이름(D-NAO-54, Jino 2026-07-18) — keyword=키워드텍스트 / adgroup·campaign명.
+   *  naver_entity.name 해석. 없으면 null → 프론트가 target_id 폴백. */
+  target_name: string | null;
+  /** 소속 캠페인명(맥락). 없으면 null. */
+  campaign_name: string | null;
   rationale: string | null;
   expected_effect: string | null;
   status: string;
@@ -1967,17 +1972,35 @@ export interface NaverChangeLogRow {
   entity_type: string;
   entity_id: string;
   campaign_id: string;
+  /** 대상 사람 이름(D-NAO-54, Jino 2026-07-18) — adgroup="17E" / keyword=키워드텍스트 /
+   *  campaign=캠페인명. naver_entity.name 해석 결과. 없으면 null → 프론트가 'type id' 폴백. */
+  entity_name: string | null;
+  /** 소속 캠페인명(대상이 adgroup/keyword일 때 맥락). 없으면 null. */
+  campaign_name: string | null;
   action: string;
   before: Record<string, unknown> | null;
   after: Record<string, unknown> | null;
   rationale: string | null;
   outcome: string | null;
+  /** 우리 실집행 시도의 3-상태(D-NAO-54) — bool이 아닌 이유가 있다.
+   *   "executed" 광고가 실제로 바뀜 / "blocked" 가드레일이 막음(확실히 안 바뀜) /
+   *   "unknown"  쓰기 예외 — PUT을 이미 보낸 뒤일 수 있어 **반영 여부 모름** /
+   *   null       이 개념이 적용 안 되는 행(외부 감지·내부 설정·dry-run).
+   *  ★"unknown"을 "blocked"로 그리면 안 된다: WriteVerificationError는 "bidAmt는 반영됐으나
+   *  useGroupBidAmt 미전환"에서도 뜬다 — 네이버엔 우리 입찰가가 들어가 있다(원칙22). */
+  execution_state: "executed" | "blocked" | "unknown" | null;
   dry_run: boolean;
   proposal_id: number | null;
   executed_at: string | null;
 }
 
-export interface NaverChangeLogResponse { total: number; rows: NaverChangeLogRow[] }
+export interface NaverChangeLogResponse {
+  total: number;
+  /** total 중 실제로 광고가 바뀐 건수. actor=ours+include_blocked에서만 채워진다(그 외 null).
+   *  ★total만 쓰면 "우리가 한 일" 카드가 차단 시도를 집행으로 센다. */
+  executed_total: number | null;
+  rows: NaverChangeLogRow[];
+}
 
 /** 변경 이력. ★include_dry_run 기본 false — "우리 조작 N회"는 실집행만 센다(D-47-h). */
 export async function fetchNaverChangeLog(params: {
@@ -1987,8 +2010,17 @@ export async function fetchNaverChangeLog(params: {
    *  외부 변경 감지가 섞여 있어(prod 실측: dry_run=False 15건이 전부 외부 감지) 필터 없이
    *  세면 우리가 아무것도 안 했는데 "15회"라고 표시된다(codex[P2] 2026-07-17). */
   actor?: "all" | "ours" | "external";
+  /** ★date_from/date_to의 폴백일 뿐이다(D-NAO-54). "지금부터 N일 전"이라 '당일만'·'어제만'
+   *  같은 닫힌 구간을 표현할 수 없다 — 화면 프리셋은 date_from/date_to를 쓴다. */
   days?: number;
-  include_dry_run?: boolean; limit?: number; offset?: number;
+  /** KST 날짜 YYYY-MM-DD, 양끝 **포함**. 반드시 date_to와 함께(한쪽만 주면 422). */
+  date_from?: string;
+  date_to?: string;
+  include_dry_run?: boolean;
+  /** actor=ours에서 가드레일 차단 시도도 포함(기본 false). 행의 executed로 구분해 그린다.
+   *  ★기본 false가 계약이다: 1층 "우리 조작 N회"는 실집행만 센다(D-47-h). */
+  include_blocked?: boolean;
+  limit?: number; offset?: number;
 } = {}): Promise<NaverChangeLogResponse> {
   const q = new URLSearchParams();
   Object.entries(params).forEach(([k, v]) => { if (v != null) q.set(k, String(v)); });

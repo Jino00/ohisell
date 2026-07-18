@@ -3,12 +3,15 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
-- 날짜: 2026-07-18 21:57 KST (★★**D-NAO-58 클릭 탐침 루프 CD1(선행지표 데이터층) — 구현·리뷰·배포·라이브 검증 완료** — 워크트리 `knowledge-layer-inversion-phase0-77bb7d`, 브랜치 `claude/d-nao-58-click-discovery-9af4e6`, 커밋 `05e7a48`. **PR 미생성**. main==prod에 배포+마이그(`u3v4w5x6y7z8`) 적용 완료.)
-  - **CD1 완료**: naver_ad_daily cart_* 4컬럼 + fetch_conversion_daily가 add_to_cart→cart_* 분리수집(매출/BEP 회계 불변, 구매만) + report_collector/ad_daily_ingest 확장 + 신규 `cart_conversion_rate.py` SA(by_product 1:1매핑쇼핑 / by_campaign 파워링크폴백 / global). 전체 2044 passed.
-  - **구현=Opus 서브에이전트 / 리뷰=Opus R1 GATE PASS**(회계불변 grep·마이그 단일head·25테스트). 잔여 4건 MINOR/NIT(코드수정 불요). Fable 미사용(운영룰 준수).
-  - **라이브 검증(원칙22, prod 7일 재수집 실측)**: 장바구니 357건 적재 · 04 매핑상품 13365319468 by_product=1.0 · P_Test 파워링크 by_campaign=0.8 · 전환율 실분포(0.0~1.0) · 백엔드 재시작 online·에러0.
-  - **D-58-6 확정**: 전환율 분모(장바구니)는 AD_CONVERSION에만 존재→계획서 "주문 데이터" 문구와 달리 AD_CONVERSION 비율(clamp 0~1)로 산출(유일 측정경로). Jino 승인.
-  - **다음=CD2 트리거·탐침 실행층**: run_hourly_lane에 탐침 분기. **미결 임계값 3개(계획서 §미결)**: 클릭0 지속시간·최소노출·실시간 안전판 손실상한 — 착수 시 추천안→트랙 확정. + PR 생성.
+- 날짜: 2026-07-18 23:15 KST (★★**D-NAO-58 클릭 탐침 루프 CD2(트리거·실행층) — 구현·리뷰·배포·라이브 코드경로 검증 완료. 단 실제 탐침 집행은 자연 발동 대기** — 워크트리 `d-nao-58-click-probe-cd2-33da23`, 브랜치 `claude/d-nao-58-click-probe-cd2-33da23`, 커밋 `ba733c9`. prod 배포 완료. **PR 생성 중**.)
+  - **임계값 3개 Jino 확정(D-58-7)**: ①클릭0 지속 2시간(Jino 3h→2h 단축) ②최소노출 imp≥30 ③실시간 안전판 비용×3∧즉시구매0(→CD3 소비). 전부 기존 시간당 레인 검증 상수 재사용.
+  - **CD2 구현(Opus 서브에이전트)**: `_probe_trigger`(순수 SA, 자기 2h 창 자기완결) + `run_hourly_lane` hold 분기 훅(이중발동 방지, up 치환→기존 up 경로 그대로 통과) + `APPROVAL_SOURCE_PROBE=probe_op`/`diary.ACTOR_PROBE=probe`(마이그 불필요) + harness 킬스위치 3중 방어에 probe_op 포함(우회금지).
+  - **독립 적대적 리뷰 Opus 2R GATE PASS(Fable 미사용, 5R 이내)**: R1 P1 0건 + "CD3 없이 배포 수용가능"(hot-set clk≥10 모집단이 BEP·스톱로스 실작동) 판정. R1 P3 2건 수정: (a) rank 창 3h→2h 자기산출로 오탐 제거(재현케이스 4.14→2.00 실측 교정) (b) 실 guardrail BEP 차단 테스트 추가. R2 두 수정 본질 해소 확인.
+  - **★병행 세션 CAS 5번째 실사고 차단**: safe_deploy가 prod harness=미지 버전(그쪽 `claude/session-409bd8`, 번호충돌 'D-NAO-54' 변경이력-사람이름, main 미병합·prod 배포됨) 거부 → 3-way 병합(코드충돌0, harness 자동병합=그쪽 `_guard_failure`+내 probe_op, progress.txt만 충돌) 후 재배포 성공. 병합 후 전체 2088 passed 회귀0.
+  - **라이브 검증(원칙22)**: prod 백엔드 재시작 healthy(크래시루프 없음, GUARD_BLOCK_MARKER=harness 자체정의) + read-only 실검증 — auto_operate 2캠페인(P_Test·04) 핫셋에 `_probe_trigger` 실 hh24 평가 **에러없이 실행**, judge=hold·probe=False 사유 "노출 부족(창[21,23) imp=16<30)"=imp게이트 실작동·2h창 정확.
+  - **★미충족(원칙22 — "탐침 집행 작동" 아직 금지)**: 실제 탐침 발동·diary probe 태그 = **자연 발동 조건(clk0∧imp≥30∧rank≥2.5 유닛이 :20 크론에) 충족 유닛이 아직 없어 0건.** 모니터링 중 — 첫 발동 관측 시 트랙·HANDOFF 갱신.
+  - **다음=CD3 되돌림·성과 판정층**: 실시간 안전판(비용×3∧판매0 즉시원위치, `_PROBE_BLEED_COST_MULTIPLE`=전방선언 상수 소비) + D+1 signal 종합 판정 + probe outcome을 diary outcome_json에 기입. HANDOFF=`.claude/memory/HANDOFF_ohisell-D-NAO-58-CD2-live_20260718.md`.
+  - **CD1(선행지표 데이터층, 07-18 21:57 완료)**: naver_ad_daily cart_* 4컬럼(마이그 `u3v4w5x6y7z8`) + fetch_conversion_daily 장바구니 분리수집(매출/BEP 불변) + `cart_conversion_rate.py` SA. PR #55(브랜치 `claude/d-nao-58-click-discovery-9af4e6`) — 이 CD2 브랜치가 CD1을 fast-forward 병합해 그 위에 얹음. D-58-6: 전환율 분모=AD_CONVERSION(유일 측정경로).
 - 날짜: 2026-07-18 01:50 KST (★★**D-NAO-54 운영 일기·지혜 시스템 — P1+P2+P3 전부 배포 완료, 아침 사슬 라이브 검증 대기** — 워크트리 `session-dfd814`, PR #44/#45/#46 병합, main(d5a8657)==prod. Fable설계/Opus구현 라우팅·독립 적대적 리뷰 3회 전부 GATE PASS 후 지적 반영)
   - **P1 기록층**: 마이그 q9r0s1t2u3v4+diary.py+harness/레인 훅. **라이브 부분 합격**: 01:20 시간당 레인 신코드 완주 ok 실측(scheduler_state)·diary 0행=심야 무트래픽 판정hold 기록제외 설계와 정합. 확실 증거는 아침 레인.
   - **P2 해석층**: diary_outcome(d1/d7 소급)+diary_reflection(claude -p 해석문, observe 행)+크론 08:35(catch-up은 돈 잡 뒤). **P3 승격·망각**: wisdom 5모듈+마이그 r0s1t2u3v4w5+크론 08:45. 리뷰 P2 3건(망각↔TTL 데드락→TTL 보장+hidden 부활 / 방향 selection bias→tally 컬럼+승률 / cost=0 중립) 반영. 테스트 총 1972 pass.
