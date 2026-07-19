@@ -11,7 +11,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.database import Base
 from app.models import NaverCampaignSettings, NaverProposal
-from app.services.naver_ad import proposal_writer
+from app.services.naver_ad import naver_sa_writer, proposal_writer
 
 
 @pytest.fixture
@@ -337,8 +337,10 @@ def test_stop_loss_proposal_keyword_at_floor_produces_terminal_pause():
     assert "터미널" in p["rationale"]
 
 
-def test_stop_loss_proposal_adgroup_always_pauses_unchanged():
-    """쇼핑(adgroup) 경로는 RL4 이후에도 변경 없음 — current_bid가 하한이 아니어도 pause."""
+def test_stop_loss_proposal_adgroup_manual_bid_none_defaults_to_pause():
+    """manual_bid를 안 넘기면(기본값 None, 판정불가) — RL4b 이후에도 안전측(pause).
+    구 테스트명 "always_pauses_unchanged"는 RL4b로 더는 사실이 아니라 갱신(§manual_bid=True
+    아래 새 테스트가 커버)."""
     row = {"campaign_id": "cmp-ours", "adgroup_id": "grp-shop-1", "cost": 2500, "conv_amt": 0,
            "current_bid": 200, "stop_loss_amount": 2000}
     p = proposal_writer._stop_loss_proposal(row, target_type="adgroup")
@@ -346,6 +348,100 @@ def test_stop_loss_proposal_adgroup_always_pauses_unchanged():
     assert p["target_type"] == "adgroup"
     assert p["target_lock"] is True
     assert p.get("target_bid") is None
+
+
+# ── RL4b(D-NAO-60): 쇼핑 adgroup 스톱로스도 고삐(bid_down)로 확장 ─────────────
+
+
+def test_stop_loss_proposal_adgroup_manual_bid_true_with_headroom_produces_bid_down_leash():
+    """manual_bid=True(수동입찰 확인)이고 하향 여지가 있으면 — 정지 대신 bid_down 고삐."""
+    row = {"campaign_id": "cmp-ours", "adgroup_id": "grp-shop-1", "cost": 2500, "conv_amt": 0,
+           "current_bid": 200, "stop_loss_amount": 2000}
+    p = proposal_writer._stop_loss_proposal(row, target_type="adgroup", manual_bid=True)
+    assert p["proposal_type"] == "bid_down"
+    assert p["target_type"] == "adgroup"
+    assert p["target_id"] == "grp-shop-1"
+    assert p["target_bid"] == 170  # 200×0.85=170(정확히 10원 배수, _step_down_bid)
+    assert "adgroup_id" not in p  # target_id 자체가 adgroup — 중복 저장 안 함(_bid_proposal 관례)
+    assert "target_lock" not in p
+    assert "스톱로스고삐" in p["rationale"]
+    assert "RL4b" in p["rationale"]
+
+
+def test_stop_loss_proposal_adgroup_manual_bid_true_at_floor_produces_terminal_pause():
+    """manual_bid=True여도 이미 입찰 하한(70원)이면 더 내릴 여지가 없어 터미널 pause."""
+    row = {"campaign_id": "cmp-ours", "adgroup_id": "grp-shop-1", "cost": 700, "conv_amt": 0,
+           "current_bid": 70, "stop_loss_amount": 700}
+    p = proposal_writer._stop_loss_proposal(row, target_type="adgroup", manual_bid=True)
+    assert p["proposal_type"] == "pause"
+    assert p["target_lock"] is True
+    assert p.get("target_bid") is None
+
+
+def test_stop_loss_proposal_adgroup_manual_bid_false_ml_produces_pause():
+    """manual_bid=False(ML 자동입찰 확인) — update_adgroup_bid가 어차피 거부하므로 고삐를
+    제안하지 않고 pause(정지)로 처리."""
+    row = {"campaign_id": "cmp-ours", "adgroup_id": "grp-shop-1", "cost": 2500, "conv_amt": 0,
+           "current_bid": 200, "stop_loss_amount": 2000}
+    p = proposal_writer._stop_loss_proposal(row, target_type="adgroup", manual_bid=False)
+    assert p["proposal_type"] == "pause"
+    assert p["target_type"] == "adgroup"
+    assert p["target_lock"] is True
+
+
+def test_stop_loss_proposal_adgroup_manual_bid_none_produces_pause():
+    """manual_bid=None(재조회 실패·판정불가) — 안전측(pause), 명시적으로 True일 때만 고삐."""
+    row = {"campaign_id": "cmp-ours", "adgroup_id": "grp-shop-1", "cost": 2500, "conv_amt": 0,
+           "current_bid": 200, "stop_loss_amount": 2000}
+    p = proposal_writer._stop_loss_proposal(row, target_type="adgroup", manual_bid=None)
+    assert p["proposal_type"] == "pause"
+    assert p["target_lock"] is True
+
+
+# ── _adgroup_is_manual_bid: naver_sa_writer.update_adgroup_bid와 동일 ML 판정 재사용 ──
+
+
+def test_adgroup_is_manual_bid_true_when_none_and_autobid_explicit_false(monkeypatch):
+    monkeypatch.setattr(
+        naver_sa_writer, "_get_adgroup",
+        lambda adgroup_id: {"systemBiddingType": "NONE", "autobidStrategy": {"isAutobidActive": False}},
+    )
+    assert proposal_writer._adgroup_is_manual_bid("grp-shop-1") is True
+
+
+def test_adgroup_is_manual_bid_false_when_ml():
+    def fake_get_adgroup(adgroup_id):
+        return {"systemBiddingType": "ML", "autobidStrategy": {"isAutobidActive": False}}
+
+    orig = naver_sa_writer._get_adgroup
+    naver_sa_writer._get_adgroup = fake_get_adgroup
+    try:
+        assert proposal_writer._adgroup_is_manual_bid("grp-shop-1") is False
+    finally:
+        naver_sa_writer._get_adgroup = orig
+
+
+def test_adgroup_is_manual_bid_false_when_autobid_active_true(monkeypatch):
+    monkeypatch.setattr(
+        naver_sa_writer, "_get_adgroup",
+        lambda adgroup_id: {"systemBiddingType": "NONE", "autobidStrategy": {"isAutobidActive": True}},
+    )
+    assert proposal_writer._adgroup_is_manual_bid("grp-shop-1") is False
+
+
+def test_adgroup_is_manual_bid_false_when_fields_missing(monkeypatch):
+    """systemBiddingType/autobidStrategy 필드 자체가 응답에 없음 — 모호하면 차단(False)."""
+    monkeypatch.setattr(naver_sa_writer, "_get_adgroup", lambda adgroup_id: {})
+    assert proposal_writer._adgroup_is_manual_bid("grp-shop-1") is False
+
+
+def test_adgroup_is_manual_bid_none_when_get_adgroup_raises(monkeypatch):
+    """재조회(GET) 자체가 실패하면 판정불가 — None(fail-closed, 호출부가 pause로 처리)."""
+    def raise_error(adgroup_id):
+        raise RuntimeError("network unreachable")
+
+    monkeypatch.setattr(naver_sa_writer, "_get_adgroup", raise_error)
+    assert proposal_writer._adgroup_is_manual_bid("grp-shop-1") is None
 
 
 def test_build_pause_candidate_produces_bid_down_leash_not_pause(db):
@@ -453,7 +549,12 @@ def _shopping_pause_row(**overrides):
     return row
 
 
-def test_build_shopping_pause_candidate_produces_pause_proposal_targeting_adgroup(db):
+def test_build_shopping_pause_candidate_ml_produces_pause_proposal_targeting_adgroup(db, monkeypatch):
+    """RL4b: build()가 이제 라이브 재조회(_adgroup_is_manual_bid)로 ML/수동을 판별한다 —
+    테스트는 실제 네이버 API를 부르지 않도록 monkeypatch로 ML(False)을 주입(fail-closed
+    분기 확인). 수동입찰 분기는 아래 test_build_shopping_pause_candidate_manual_bid_produces_
+    bid_down_leash가 커버(의도 변경 아님 — ML/판정불가는 여전히 pause)."""
+    monkeypatch.setattr(proposal_writer, "_adgroup_is_manual_bid", lambda adgroup_id: False)
     db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
     db.commit()
     diagnosis = _diagnosis(shopping_pause_candidates=[_shopping_pause_row()])
@@ -467,7 +568,37 @@ def test_build_shopping_pause_candidate_produces_pause_proposal_targeting_adgrou
     assert "스톱로스" in out[0]["rationale"]
 
 
+def test_build_shopping_pause_candidate_manual_bid_produces_bid_down_leash(db, monkeypatch):
+    """RL4b(D-NAO-60) 핵심 갭 수정: 수동입찰 쇼핑 광고그룹은 이제 정지 대신 bid_down 고삐."""
+    monkeypatch.setattr(proposal_writer, "_adgroup_is_manual_bid", lambda adgroup_id: True)
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis(shopping_pause_candidates=[_shopping_pause_row()])
+
+    out = proposal_writer.build(db, diagnosis, as_of=AS_OF)
+    assert len(out) == 1
+    assert out[0]["proposal_type"] == "bid_down"
+    assert out[0]["target_type"] == "adgroup"
+    assert out[0]["target_id"] == "grp-shop-1"
+    assert out[0]["target_bid"] == 170
+    assert "스톱로스고삐" in out[0]["rationale"]
+
+
+def test_build_shopping_pause_candidate_manual_bid_none_produces_pause(db, monkeypatch):
+    """_adgroup_is_manual_bid가 판정불가(None, 재조회 실패)를 반환하면 안전측(pause)."""
+    monkeypatch.setattr(proposal_writer, "_adgroup_is_manual_bid", lambda adgroup_id: None)
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis(shopping_pause_candidates=[_shopping_pause_row()])
+
+    out = proposal_writer.build(db, diagnosis, as_of=AS_OF)
+    assert len(out) == 1
+    assert out[0]["proposal_type"] == "pause"
+
+
 def test_build_shopping_pause_candidate_skips_non_ours_campaign(db):
+    """ours 필터가 먼저 걸러지므로 _adgroup_is_manual_bid(라이브 재조회)가 아예 호출되지
+    않는다 — monkeypatch 없이도 네트워크 콜 없음(회귀 없음 확인)."""
     db.add(NaverCampaignSettings(campaign_id="cmp-none", optimizer="none"))
     db.commit()
     diagnosis = _diagnosis(shopping_pause_candidates=[_shopping_pause_row(campaign_id="cmp-none")])
@@ -486,6 +617,18 @@ def test_persist_shopping_pause_proposal_stores_adgroup_target_type_and_lock(db)
     assert saved[0].target_id == "grp-shop-1"
     assert saved[0].target_lock is True
     assert saved[0].target_bid is None
+
+
+def test_persist_shopping_pause_manual_bid_stores_bid_down_no_lock(db):
+    """RL4b: 수동입찰 고삐 결과도 persist가 정상 저장한다(bid_down, target_bid, lock 없음)."""
+    row = _shopping_pause_row()
+    p = proposal_writer._stop_loss_proposal(row, target_type="adgroup", manual_bid=True)
+    saved = proposal_writer.persist(db, [p])
+    assert saved[0].proposal_type == "bid_down"
+    assert saved[0].target_type == "adgroup"
+    assert saved[0].target_id == "grp-shop-1"
+    assert saved[0].target_bid == 170
+    assert saved[0].target_lock is None
 
 
 def _shopping_resume_row(**overrides):
