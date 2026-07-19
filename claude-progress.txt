@@ -3,6 +3,13 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
+- 날짜: 2026-07-19 오전 KST (★★★★★**스프린트 RL(순위 고삐) RL1~RL5 전 페이즈 완료·배포·라이브 검증 완료** — 워크트리 `daily-rank-leash-profit-control-71b501`, 브랜치 동명(main 기준). D-NAO-59 총이익 극대화 목적을 실행으로: 하루짜리 순위 고삐 + 시간당 총이익 제어 + CD5. 계획서 `docs/PLAN_naver-ad-rank-leash.md`·트랙 D-NAO-60. PR 생성 예정.)
+  - **RL1 ccnt 데이터층**(hh24 ccnt+NaverKeywordHourly.conv_cnt 마이그 `b48c2f3bc0a3`·sweep)·**RL2 intraday_roas.py**(추정 ROAS/총이익 신호 SA)·**RL3 순위 고삐 판정**(장중 loss DOWN·비대칭 기억·D-NAO-4 안전방향 완화)·**RL4 스톱로스→고삐 교체**(키워드 pause→bid_down 고삐·하한만 터미널 pause)·**RL5 CD5**(learned_probe_rank 소비 게이트 과climb 방지 + conv 가중 승격 P3-3 해소). commits c225386/326c1c6/6f80d88/53db4d6/2143d67.
+  - **행위변경 3개(RL3·RL4·RL5) 전부 Opus 독립 적대적 리뷰 GATE PASS**(P1·P2 0). 2208 passed(+59), 회귀 0.
+  - **라이브 실증**: RL1 hh24 conv_cnt 실값·RL2 실 bep_roas 1.5921·RL3 고삐 전경로 무에러(guardrail 우회 없음·est_roas<bep⟺총이익<0)·RL4 실 스톱로스 후보 8건 전부 bid_down 고삐(1600→1360 등)·**RL5 weekend 셀 실전환 82건→optimal 3.0-4.0·basis=conv=이익 스팟밴드 실선택(D-NAO-59 정합 실증)**.
+  - **자연 발동 대기(원칙22)**: 장중 고삐 실 bid_down·탐침 소비 왕복·스톱로스 고삐 daily 실집행 = 07-20 크론(08:50/09:03/:20) 관측. 쿨다운 2h 유지 확정.
+  - **다음 후보**: 자연 발동 관측·codex 소급 리뷰 07-23·conv_cnt 축적으로 basis=conv 셀 증가 추이·(선택) 이중 bid_down persist P3 클린업(_bid_proposal adgroup_id dedup 정합).
+- (이하 CD4 이력)
 - 날짜: 2026-07-19 07:xx KST (★★★★**D-NAO-58 클릭 탐침 루프 CD4(환경별 학습·세분화층) — 구현·리뷰·배포·라이브 백필 검증 완료. CD1~CD4 완료** — 워크트리 `d-nao-58-click-probe-continue-979ca3`, 브랜치 동명(CD3 tip 위 ff-stack), 커밋 `da69acd`·**PR #58**. prod 배포 완료(safe_deploy CAS 통과). 남은 것=CD5 실행경로 wiring.)
   - **CD4 = 지식층 전용(실행경로 wiring=CD5 이월, 원칙22)**. "환경셀×순위 밴드→클릭곡선" 백필 학습. **마이그 0**(NaverKeywordHourly/AdDaily 재계산, 유일 쓰기=observe 일기 1행). 3 SA+harness+크론.
   - **설계 D-58-11~14(Claude 자동진행, Jino 위임)**: 스코프=지식층만·마이그0(로그/데이터 파생)·환경축=day_class 시작(세분후보 iphone_window·season, 세분화 판사가 데이터로 결정)·구조=`probe_cell_aggregate`(hierarchical_pooling.shrink EB 첫 소비자)+`probe_cell_segmenter`(LLM 판사 재사용·병렬 advisory)+`probe_learning_loop`(harness+`learned_probe_rank` CD5 API)+크론 09:03.

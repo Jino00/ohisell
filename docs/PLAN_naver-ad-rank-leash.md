@@ -107,6 +107,11 @@ CD4 학습 Agent (probe_learning_loop.run_probe_learning, 09:03)  ← 기존
 - [x] **RL2 시간당 추정 ROAS 신호 SA** — 완료(2026-07-19). commit `326c1c6`. `intraday_roas.py`(순수)·campaign_target_resolver 공개헬퍼. 2164 passed. 라이브: 실 애드그룹 unit_price(price 15900·margin 9986·**bep_roas 1.5921**=D-NAO-57 정밀화 일치).
 - [x] **RL3 순위 고삐 판정** — 완료·배포·라이브 경로 검증(2026-07-19). commit `6f80d88`·prod(6f80d88, RL2+RL3 함께). **Opus 적대적 리뷰 GATE PASS**(P1·P2 0·실측: guardrail 우회 없음·est_roas<bep⟺추정총이익<0). 영구 회귀 테스트 2개(쿨다운 차단 실 execute·총이익 등가). 2183 passed. 라이브: 실 hot-set 유닛 고삐 전경로 무에러 실행("당일 소진 없음" fail-closed·이른 아침). **★자연 발동(bleeding 유닛 bid_down)은 :20 크론 대기**(원칙22, CD2/CD3 패턴).
 - [x] **RL4 스톱로스→고삐 교체(키워드)** — 완료·배포·라이브 검증(2026-07-19). commit `53db4d6`·prod. `_pause_proposal`→`_stop_loss_proposal` 개명 + `_step_down_bid` 헬퍼 추출(중복 제거). 키워드: 하한(70) 아니면 pause 대신 bid_down 고삐·하한 도달만 터미널 pause. 쇼핑 adgroup=pause 유지(문서화). **Opus 적대적 리뷰 GATE PASS**(P1·P2 0·종료보장 실증: 모든 시작가 pause 도달·최대 48스텝·무한출혈 불가·guardrail 우회 없음. P3=이중 bid_down persist는 기존 구조·쿨다운 무해화). 2192 passed(+9). ★**라이브**: prod 실 스톱로스 후보 8건 전부 bid_down 고삐 생성 실증(1600→1360·1100→940·600→510, `[스톱로스고삐]`).
-- [ ] RL5 CD5 소비+이익 가중 승격 — **다음**
-- [ ] 쿨다운 2h 유지 결정 기록 (D-NAO-60)
-- [ ] PR #60(D-NAO-59 docs) 병합
+- [x] **RL5 CD5 소비+이익 가중 승격** — 완료·배포·라이브 검증(2026-07-19). commit `2143d67`·prod. Part A: `_learned_optimal_skip` 게이트(env_cell 학습 최적밴드 도달시 탐침 생략·과climb 방지)·`_probe_trigger` 순수 유지(`_probe_window_stats` 공유)·`rank_band_upper`. Part B: 밴드별 conv_cnt(RL1)·`_optimal_band` 전환 최다 우선·CTR 폴백. **Opus 적대적 리뷰 GATE PASS**(P1·P2 0·게이트 방향 6경계·우회 없음·conv 우선·하위호환 실증). 2208 passed(+16). ★**라이브(강력)**: weekend 셀 실 전환 82건 → optimal **3.0-4.0·basis=conv** = 이익 스팟밴드 실선택(CTR였다면 1.0-2.0 쏠림) = **P3-3 실해소·D-NAO-59 정합 실증**. 소비 게이트 두 경로(폴백·상향) 무에러. weekday conv_cnt=0→CTR 폴백(정직 경계, 축적 전).
+- [x] **쿨다운 2h 유지 결정** — D-NAO-60에 기록(D-NAO-55 진동 근거 + CD3 Stage1 밸브가 급성 출혈 별도 처리 → 고삐용 별도 단축 안 함, 2주 소급채점 후 재검토).
+- [x] PR #60(D-NAO-59 docs) 병합 — 완료(세션 초 병합, main==prod 동기화).
+
+## 스프린트 RL 완료 요약 (2026-07-19)
+RL1~RL5 전 페이즈 구현·배포·라이브 검증 완료. 행위변경 3개(RL3·RL4·RL5) 전부 Opus 독립 적대적 리뷰 GATE PASS(P1·P2 0). 2208 passed(스프린트 시작 2149 대비 +59), 회귀 0. prod 마이그 `b48c2f3bc0a3`(conv_cnt) 적용.
+- **자연 발동 대기(원칙22 미충족분)**: ①RL3 장중 loss 고삐 bid_down 실발동(:20 크론에 bleeding 유닛 등장 시) ②RL5 소비 게이트가 실 탐침을 생략/상향하는 왕복(탐침 자연발동 선결, CD2~4와 동일) ③RL4 스톱로스 고삐가 daily 레인에서 실집행(08:50, 후보 8건 실존 — 다음 크론 관측). 코드 경로·실데이터 판정은 전부 검증됨.
+- **다음 관측 포인트**: 07-20 08:50 daily 레인(RL4 스톱로스 고삐 실집행)·09:03 probe learning(RL5 basis=conv 확대)·:20 시간당 레인(RL3 장중 고삐). conv_cnt 축적으로 basis=conv 셀 증가 추이.
