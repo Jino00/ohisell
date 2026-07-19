@@ -853,6 +853,25 @@ def _clamp_step(current_bid: int, direction: str) -> int | None:
     return None
 
 
+def _probe_window_stats(curve: list[dict], now: datetime) -> tuple[int, int, Decimal | None, str]:
+    """D-NAO-58 CD2·D-NAO-60 RL5(CD5) 공유 헬퍼 — 완료 창 [now.hour-_PROBE_ZERO_CLICK_HOURS,
+    now.hour)의 imp/clk 합 + imp-가중 avg_rank(rank None 버킷 제외). `_probe_trigger`와
+    `_learned_optimal_skip`이 동일 창·동일 가중 규약을 쓰도록 계산부만 공유(중복 제거).
+    반환 (imp_sum, clk_sum, weighted_rank_or_None, win_label)."""
+    window_start = now.hour - _PROBE_ZERO_CLICK_HOURS
+    window = [h for h in curve if window_start <= h["hour"] < now.hour]  # 완료 시간대만(현재 진행중 제외)
+    imp_sum = sum(h["imp"] for h in window)
+    clk_sum = sum(h["clk"] for h in window)
+    rank_imp_sum = sum(h["imp"] for h in window if h.get("avg_rank") is not None)
+    weighted_rank = None
+    if rank_imp_sum > 0:
+        weighted_rank = sum(
+            Decimal(str(h["avg_rank"])) * h["imp"] for h in window if h.get("avg_rank") is not None
+        ) / Decimal(rank_imp_sum)
+    win_label = f"[{window_start},{now.hour})"
+    return imp_sum, clk_sum, weighted_rank, win_label
+
+
 def _probe_trigger(curve: list[dict], now: datetime) -> tuple[bool, str]:
     """D-NAO-58 CD2 클릭 탐침 트리거(순수 SA·단일 창 자기완결) — 밴드의 사각지대(밴드 안/하단
     인데 클릭0)를 감지한다(D-58-7 확정, 기존 검증 상수 재사용). (발동여부, 사유) 반환.
@@ -878,18 +897,7 @@ def _probe_trigger(curve: list[dict], now: datetime) -> tuple[bool, str]:
     if now.hour < _PROBE_ZERO_CLICK_HOURS:
         return False, f"이른 새벽(now.hour={now.hour}<{_PROBE_ZERO_CLICK_HOURS}) — 완료 창 표본 없음(탐침 보류)"
 
-    window_start = now.hour - _PROBE_ZERO_CLICK_HOURS
-    window = [h for h in curve if window_start <= h["hour"] < now.hour]  # 완료 시간대만(현재 진행중 제외)
-    imp_sum = sum(h["imp"] for h in window)
-    clk_sum = sum(h["clk"] for h in window)
-    rank_imp_sum = sum(h["imp"] for h in window if h.get("avg_rank") is not None)
-    weighted_rank = None
-    if rank_imp_sum > 0:
-        weighted_rank = sum(
-            Decimal(str(h["avg_rank"])) * h["imp"] for h in window if h.get("avg_rank") is not None
-        ) / Decimal(rank_imp_sum)
-
-    win_label = f"[{window_start},{now.hour})"
+    imp_sum, clk_sum, weighted_rank, win_label = _probe_window_stats(curve, now)
     if clk_sum != 0:
         return False, f"클릭 존재(창{win_label} clk={clk_sum}) — 탐침 대상 아님"
     if imp_sum < _MIN_HOURLY_SAMPLE_IMP:
@@ -904,6 +912,46 @@ def _probe_trigger(curve: list[dict], now: datetime) -> tuple[bool, str]:
     return True, (
         f"창{win_label} imp={imp_sum}≥{_MIN_HOURLY_SAMPLE_IMP}·clk=0·가중avg_rank="
         f"{float(weighted_rank):.2f}≥{_HOURLY_RANK_DOWN_THRESHOLD}(밴드 사각지대 — 한 등 상향 탐침)"
+    )
+
+
+def _learned_optimal_skip(
+    db: Session, curve: list[dict], now: datetime, campaign_id: str,
+) -> tuple[bool, str]:
+    """D-NAO-59/60 RL5(CD5) — 탐침(`_probe_trigger`)이 발동한 직후 게이트. 과climb 방지:
+    이익 스팟밴드(2.5~4)를 넘어 학습된 최적 순위밴드까지 이미 도달했으면 더 올릴 이유가
+    없다(비싼 상위로 계속 오르는 건 이익이 아니라 비용만 늘림). `probe_learning_loop.
+    learned_probe_rank`(CD4 산출물)로 그 캠페인 env_cell의 승격된 최적 밴드를 조회해,
+    `_probe_trigger`와 **동일한 완료 2시간 창**([now.hour-_PROBE_ZERO_CLICK_HOURS, now.hour))
+    에서 산출한 가중 avg_rank와 그 밴드 상한을 비교한다.
+
+    lazy import(순환 회피 — run_hourly_lane 말미 probe_revert import 전례). (skip, 사유)
+    반환 — skip=True면 run_hourly_lane이 up 승격을 취소하고 hold(관찰)로 남긴다. 학습된
+    밴드가 없으면(데이터 부족·백필 미도달) 게이트 없이 통과(CD2 폴백 — 이 게이트는 CD2
+    위에 얹는 추가 제약일 뿐, CD2 자체의 발동 조건을 대체하지 않는다). guardrail 우회는
+    없다 — skip=False로 통과한 제안도 기존 execute()→guardrail_gate 전량을 그대로 탄다."""
+    from app.services.naver_ad import probe_cell_aggregate, probe_learning_loop
+
+    _imp_sum, _clk_sum, weighted_rank, win_label = _probe_window_stats(curve, now)
+    if weighted_rank is None:
+        return False, "순위 근거 없음 — 게이트 미적용"
+
+    env_cell = probe_cell_aggregate.env_cell_of_date(now.date())
+    learned = probe_learning_loop.learned_probe_rank(
+        db, env_cell=env_cell, as_of=now.date(), campaign_id=campaign_id,
+    )
+    if learned is None:
+        return False, "학습된 최적 밴드 없음 — 무조건 탐침(CD2 폴백)"
+
+    band_high = probe_cell_aggregate.rank_band_upper(learned)
+    if band_high is None or weighted_rank < band_high:
+        return True, (
+            f"학습 최적밴드({env_cell}→{learned}) 이미 도달(현재{win_label} 가중avg_rank="
+            f"{float(weighted_rank):.2f}) — 탐침 생략(CD5)"
+        )
+    return False, (
+        f"학습 최적밴드({learned})보다 하위(현재{win_label} 가중avg_rank="
+        f"{float(weighted_rank):.2f}) — 탐침 상향(CD5 목표)"
     )
 
 
@@ -924,6 +972,11 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
     D-NAO-58 CD2: 밴드 판정이 hold인 사각지대에서 _probe_trigger가 참이면 up 탐침으로 치환
     (기존 up 경로 그대로 통과 — 라이브 현재가 재조회·_clamp_step·킬스위치 재확인·execute).
     탐침 제안만 approval_source=probe_op·rationale [클릭탐침]로 태그(diary probe actor).
+
+    D-NAO-60 RL5(CD5): 탐침이 참이어도 `_learned_optimal_skip`이 그 캠페인 env_cell의 학습된
+    최적 순위밴드(probe_learning_loop.learned_probe_rank)에 이미 도달했다고 판정하면 up
+    승격을 취소하고 hold로 남긴다(과climb 방지) — guardrail 우회는 없음(통과분만 기존
+    execute() 경로).
 
     D-NAO-58 CD3 Stage 1: 레인 말미에 probe_revert.run_bleed_valve로 당일 standing probe의
     실시간 출혈(비용×3 급등∧즉시구매0)을 회수한다(lazy import·fail-soft — 밸브 실패가 레인
@@ -976,7 +1029,15 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                 # _probe_trigger는 clk/imp/rank를 모두 자기 2시간 창에서 산출(R1 P3-1 자기완결).
                 probe_fired, probe_reason = _probe_trigger(curve, now)
                 if probe_fired:
-                    verdict = {"direction": "up", "reason": probe_reason, "probe": True}
+                    # D-NAO-60 RL5(CD5): 학습된 최적 밴드에 이미 도달했으면 상향 생략(과climb
+                    # 방지). guardrail 우회 없음 — 통과한 제안도 execute() 전량을 그대로 탄다.
+                    skip, skip_reason = _learned_optimal_skip(db, curve, now, campaign_id)
+                    if skip:
+                        result["held"].append({"target_id": target_id, "reason": skip_reason})
+                        continue
+                    verdict = {
+                        "direction": "up", "reason": f"{probe_reason} · {skip_reason}", "probe": True,
+                    }
                 else:
                     result["held"].append({"target_id": target_id, "reason": verdict["reason"]})
                     continue

@@ -22,6 +22,7 @@ from app.models import (
     NaverChangeLog,
     NaverEntity,
     NaverHourlySnapshot,
+    NaverKeywordHourly,
     NaverProductBep,
     NaverProposal,
     NaverRetroSignal,
@@ -1502,6 +1503,129 @@ def test_hourly_lane_probe_blocked_by_real_guardrail_bep(db):
     ).all()
     assert len(blocked) == 1
     assert "BEP 미달" in blocked[0].rationale  # 실 guardrail_gate.check가 낸 실제 사유
+
+
+# ══════════════════════════ RL5(CD5) 과climb 방지 게이트 (D-NAO-60) ══════════════════════════
+# _learned_optimal_skip: 탐침(_probe_trigger) 발동 직후 게이트 — env_cell의 학습된 최적 순위
+# 밴드(probe_learning_loop.learned_probe_rank)에 이미 도달했으면 up 승격을 생략한다(이익
+# 스팟밴드 2.5~4를 넘어 비싼 상위로 과climb 방지, D-NAO-59). 창은 _probe_trigger와 동일
+# [now.hour-2, now.hour). now=2026-07-20(Monday)→env_cell='weekday'.
+
+def _seed_learned_band(db, *, avg_rank, campaign_id=CAMPAIGN, base_date=date(2026, 7, 13)):
+    """optimal_band가 avg_rank가 속한 밴드로 확정되도록 weekday env_cell에 3일치를 심는다
+    (imp≥100 총합·days≥3·ctr_shrunk≥신호하한, conv_cnt=0=CTR 폴백 — basis는 이 게이트
+    테스트의 관심사가 아니다, Part B가 별도로 검증)."""
+    for i in range(3):
+        db.add(NaverKeywordHourly(
+            ad_date=base_date + timedelta(days=i), hour=9, entity_type="keyword",
+            entity_id="nkw-learn", adgroup_id="grp-1", campaign_id=campaign_id,
+            campaign_type="WEB_SITE", imp=50, clk=10, cost=500, avg_rank=avg_rank,
+        ))
+    db.commit()
+
+
+def test_learned_optimal_skip_false_when_no_learned_band(db):
+    """학습된 최적 밴드가 없으면(데이터 없음) 게이트가 막지 않는다 — CD2 폴백(무조건 탐침)."""
+    now = datetime(2026, 7, 20, 8, 20, 0)
+    curve = [_hour(6, imp=20, clk=0, cost=200, avg_rank=3.0),
+             _hour(7, imp=20, clk=0, cost=200, avg_rank=3.0)]
+    skip, reason = auto_operator._learned_optimal_skip(db, curve, now, CAMPAIGN)
+    assert skip is False
+    assert "학습된 최적 밴드 없음" in reason
+
+
+def test_learned_optimal_skip_true_when_already_in_learned_band(db):
+    """현재 창 가중 rank가 학습 최적밴드 상한보다 낮으면(이미 그 밴드 안/더 상위) 탐침 생략."""
+    _seed_learned_band(db, avg_rank=Decimal("2.2"))  # 학습 최적밴드 = 2.0-2.5(상한 2.5)
+    now = datetime(2026, 7, 20, 8, 20, 0)  # 창 [6,8)
+    curve = [_hour(6, imp=20, clk=0, cost=200, avg_rank=2.2),
+             _hour(7, imp=20, clk=0, cost=200, avg_rank=2.2)]  # 현재 rank 2.2<2.5 → 이미 도달
+    skip, reason = auto_operator._learned_optimal_skip(db, curve, now, CAMPAIGN)
+    assert skip is True
+    assert "이미 도달" in reason
+    assert "탐침 생략" in reason
+
+
+def test_learned_optimal_skip_false_when_below_learned_band(db):
+    """현재 창 가중 rank가 학습 최적밴드 상한 이상이면(아직 하위) 탐침 상향을 막지 않는다."""
+    _seed_learned_band(db, avg_rank=Decimal("2.2"))  # 학습 최적밴드 = 2.0-2.5(상한 2.5)
+    now = datetime(2026, 7, 20, 8, 20, 0)
+    curve = [_hour(6, imp=20, clk=0, cost=200, avg_rank=3.0),
+             _hour(7, imp=20, clk=0, cost=200, avg_rank=3.0)]  # 현재 rank 3.0≥2.5 → 아직 하위
+    skip, reason = auto_operator._learned_optimal_skip(db, curve, now, CAMPAIGN)
+    assert skip is False
+    assert "하위" in reason
+
+
+def test_learned_optimal_skip_always_true_for_open_ended_band(db):
+    """학습 최적밴드가 '4.0+'(상한 없음)면 현재 rank가 이미 훨씬 좋아도(rank 2.0) 더 올릴
+    이유가 없어 항상 skip=True."""
+    _seed_learned_band(db, avg_rank=Decimal("4.5"))  # 학습 최적밴드 = 4.0+(상한 없음)
+    now = datetime(2026, 7, 20, 8, 20, 0)
+    curve = [_hour(6, imp=20, clk=0, cost=200, avg_rank=2.0),
+             _hour(7, imp=20, clk=0, cost=200, avg_rank=2.0)]
+    skip, reason = auto_operator._learned_optimal_skip(db, curve, now, CAMPAIGN)
+    assert skip is True
+
+
+def test_learned_optimal_skip_false_when_no_rank_evidence(db):
+    """창 내 avg_rank가 전부 None(근거 없음) → 게이트 미적용(fail-open, 안전한 쪽=차단 안 함)."""
+    now = datetime(2026, 7, 20, 8, 20, 0)
+    curve = [_hour(6, imp=20, clk=0, cost=200, avg_rank=None),
+             _hour(7, imp=20, clk=0, cost=200, avg_rank=None)]
+    skip, reason = auto_operator._learned_optimal_skip(db, curve, now, CAMPAIGN)
+    assert skip is False
+    assert "순위 근거 없음" in reason
+
+
+def test_hourly_lane_probe_skipped_when_learned_optimal_already_reached(db):
+    """run_hourly_lane 통합: 학습된 최적 밴드가 이미(또는 그 이상) 도달됐으면 탐침이 up으로
+    승격되지 않고 hold 유지 — 과climb 방지(D-NAO-59). proposal 자체가 생성되지 않는다."""
+    _settings(db)
+    window_from, window_to = _settlement_window()
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-probe-skip", parent_id="grp-1",
+                        campaign_id=CAMPAIGN, campaign_type="WEB_SITE", status="on"))
+    _ad_row(db, keyword_id="nkw-probe-skip", ad_date=window_from, clk=10, cost=1000)
+    _seed_learned_band(db, avg_rank=Decimal("4.5"))  # 학습 최적밴드 = 4.0+(항상 skip)
+
+    now_midday = datetime(2026, 7, 20, 12, 20, 0)
+    with patch.object(auto_operator.naver_sa_writer, "get_keyword", return_value={"bidAmt": 1000}), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(
+            db, now=now_midday, fetch_intraday=lambda tid, d: _probe_curve(),
+        )
+
+    mock_exec.assert_not_called()
+    assert result["probed"] == 0
+    assert result["approved"] == 0
+    held_reasons = [h["reason"] for h in result["held"]]
+    assert any("탐침 생략" in r for r in held_reasons)
+    assert db.query(NaverProposal).filter(NaverProposal.target_id == "nkw-probe-skip").count() == 0
+
+
+def test_hourly_lane_probe_still_fires_when_below_learned_band(db):
+    """학습된 최적 밴드보다 현재 rank가 하위(아직 목표 미달)면 탐침은 그대로 up으로 승격되고
+    실행된다 — 게이트가 무조건 차단하는 게 아님을 증명."""
+    _settings(db)
+    window_from, window_to = _settlement_window()
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-probe-go", parent_id="grp-1",
+                        campaign_id=CAMPAIGN, campaign_type="WEB_SITE", status="on"))
+    _ad_row(db, keyword_id="nkw-probe-go", ad_date=window_from, clk=10, cost=1000)
+    _seed_learned_band(db, avg_rank=Decimal("2.2"))  # 학습 최적밴드 = 2.0-2.5(상한 2.5)
+
+    # _probe_curve() 창 가중 rank=3.0 ≥ 2.5(학습 밴드 상한) → 아직 학습 목표 미달, 탐침 진행
+    now_midday = datetime(2026, 7, 20, 12, 20, 0)
+    with patch.object(auto_operator.naver_sa_writer, "get_keyword", return_value={"bidAmt": 1000}), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(
+            db, now=now_midday, fetch_intraday=lambda tid, d: _probe_curve(),
+        )
+
+    mock_exec.assert_called_once()
+    assert result["probed"] == 1
+    saved = db.get(NaverProposal, mock_exec.call_args[0][1])
+    assert saved.rationale.startswith("[클릭탐침]")
+    assert "CD5 목표" in saved.rationale
 
 
 # ══════════════════════════ RL3 순위 고삐(D-NAO-60, 장중 loss DOWN) ══════════════════════════
