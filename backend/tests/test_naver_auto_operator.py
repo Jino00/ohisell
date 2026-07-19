@@ -17,10 +17,12 @@ from sqlalchemy.pool import StaticPool
 from app.database import Base
 from app.models import (
     NaverAdDaily,
+    NaverAdgroupProduct,
     NaverCampaignSettings,
     NaverChangeLog,
     NaverEntity,
     NaverHourlySnapshot,
+    NaverProductBep,
     NaverProposal,
     NaverRetroSignal,
 )
@@ -648,8 +650,8 @@ def test_harness_kill_switch_flip_after_entry_check_blocks_writer(db):
 
 # ══════════════════════════ 시간당 레인(A2+A3) ══════════════════════════
 
-def _hour(h, *, imp, clk, cost, avg_rank=None):
-    return {"hour": h, "imp": imp, "clk": clk, "cost": cost, "avg_rank": avg_rank}
+def _hour(h, *, imp, clk, cost, avg_rank=None, conv_cnt=0):
+    return {"hour": h, "imp": imp, "clk": clk, "cost": cost, "avg_rank": avg_rank, "conv_cnt": conv_cnt}
 
 
 def test_hourly_lane_hot_set_only_clicks_ge_10_and_imp_today(db):
@@ -1500,3 +1502,258 @@ def test_hourly_lane_probe_blocked_by_real_guardrail_bep(db):
     ).all()
     assert len(blocked) == 1
     assert "BEP 미달" in blocked[0].rationale  # 실 guardrail_gate.check가 낸 실제 사유
+
+
+# ══════════════════════════ RL3 순위 고삐(D-NAO-60, 장중 loss DOWN) ══════════════════════════
+
+def _seed_product_bep(db, *, adgroup_id="grp-1", mall_product_id="p-leash", campaign_id=CAMPAIGN,
+                       price=Decimal("1000"), margin=Decimal("400"), bep_roas=Decimal("2.5")):
+    """단일 상품 매핑(주문 없음 → 단순평균 경로, campaign_target_resolver 관례)."""
+    db.add(NaverAdgroupProduct(adgroup_id=adgroup_id, campaign_id=campaign_id, mall_product_id=mall_product_id))
+    db.add(NaverProductBep(
+        channel_id=6, channel_product_id=mall_product_id, has_cost=True,
+        selling_price=price, contribution_margin=margin, bep_roas=bep_roas,
+    ))
+    db.commit()
+
+
+def _leash_keyword(db, *, target_id="nkw-leash", parent_id="grp-1", campaign_id=CAMPAIGN):
+    db.add(NaverEntity(entity_type="keyword", entity_id=target_id, parent_id=parent_id,
+                        campaign_id=campaign_id, campaign_type="WEB_SITE", status="on"))
+    db.commit()
+
+
+def test_intraday_loss_leash_fires_when_underwater_and_spend_met(db):
+    """(a) 추정ROAS<BEP ∧ 당일소진≥하루평균 → 발동(True)."""
+    _seed_product_bep(db, bep_roas=Decimal("2.5"))
+    _leash_keyword(db)
+    curve = [_hour(6, imp=20, clk=2, cost=2000, avg_rank=3.0, conv_cnt=1)]  # revenue=1000·cost=2000→roas=0.5<2.5
+    baseline_agg = {"clk": 10, "cost": 7000, "conv_amt": 0}  # avg_daily=1000, today_cost=2000≥1000
+    fired, reason = auto_operator._intraday_loss_leash(
+        db, target_type="keyword", target_id="nkw-leash", campaign_id=CAMPAIGN,
+        curve=curve, now=NOW, baseline_agg=baseline_agg,
+    )
+    assert fired is True
+    assert "순위고삐" in reason
+
+
+def test_intraday_loss_leash_not_fired_when_roas_above_bep(db):
+    """(b) 추정ROAS≥BEP → 미발동."""
+    _seed_product_bep(db, bep_roas=Decimal("2.5"))
+    _leash_keyword(db)
+    curve = [_hour(6, imp=20, clk=2, cost=2000, avg_rank=3.0, conv_cnt=6)]  # revenue=6000/cost=2000=3.0≥2.5
+    baseline_agg = {"clk": 10, "cost": 7000, "conv_amt": 0}
+    fired, reason = auto_operator._intraday_loss_leash(
+        db, target_type="keyword", target_id="nkw-leash", campaign_id=CAMPAIGN,
+        curve=curve, now=NOW, baseline_agg=baseline_agg,
+    )
+    assert fired is False
+    assert "고삐 불발" in reason
+
+
+def test_intraday_loss_leash_deferred_when_spend_below_daily_average(db):
+    """(c) 당일소진<하루평균 → 유보(과소추정 방어) — ROAS가 이미 BEP 미달이어도 미발동."""
+    _seed_product_bep(db, bep_roas=Decimal("2.5"))
+    _leash_keyword(db)
+    curve = [_hour(6, imp=20, clk=2, cost=500, avg_rank=3.0, conv_cnt=0)]  # roas=0<2.5(underwater)
+    baseline_agg = {"clk": 10, "cost": 7000, "conv_amt": 0}  # avg_daily=1000, today_cost=500<1000
+    fired, reason = auto_operator._intraday_loss_leash(
+        db, target_type="keyword", target_id="nkw-leash", campaign_id=CAMPAIGN,
+        curve=curve, now=NOW, baseline_agg=baseline_agg,
+    )
+    assert fired is False
+    assert "판정 유보" in reason
+
+
+def test_intraday_loss_leash_not_fired_when_price_bep_unavailable(db):
+    """(d) 상품 매핑/원가 미확인 → 미발동(price·bep_roas None)."""
+    _leash_keyword(db)  # 매핑 없음(NaverAdgroupProduct/NaverProductBep 미시드)
+    curve = [_hour(6, imp=20, clk=2, cost=2000, avg_rank=3.0, conv_cnt=0)]
+    baseline_agg = {"clk": 10, "cost": 7000, "conv_amt": 0}
+    fired, reason = auto_operator._intraday_loss_leash(
+        db, target_type="keyword", target_id="nkw-leash", campaign_id=CAMPAIGN,
+        curve=curve, now=NOW, baseline_agg=baseline_agg,
+    )
+    assert fired is False
+    assert "단가/BEP 미확인" in reason
+
+
+def test_intraday_loss_leash_not_fired_when_no_spend_today(db):
+    """(e) 당일 cost=0 → estimated_intraday_roas가 None → 미발동."""
+    _seed_product_bep(db, bep_roas=Decimal("2.5"))
+    _leash_keyword(db)
+    curve = [_hour(6, imp=0, clk=0, cost=0, avg_rank=None, conv_cnt=0)]
+    baseline_agg = {"clk": 10, "cost": 7000, "conv_amt": 0}
+    fired, reason = auto_operator._intraday_loss_leash(
+        db, target_type="keyword", target_id="nkw-leash", campaign_id=CAMPAIGN,
+        curve=curve, now=NOW, baseline_agg=baseline_agg,
+    )
+    assert fired is False
+    assert "당일 소진 없음" in reason
+
+
+def test_intraday_loss_leash_resolves_keyword_parent_adgroup(db):
+    """(f) keyword target_type이 NaverEntity.parent_id로 부모 광고그룹을 정확히 해석한다
+    (adgroup 매핑은 부모 id에만 시드했는데 leash가 정상 발동 = 해석 성공의 증거)."""
+    _seed_product_bep(db, adgroup_id="grp-parent", bep_roas=Decimal("2.5"))
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-child", parent_id="grp-parent",
+                        campaign_id=CAMPAIGN, campaign_type="WEB_SITE", status="on"))
+    db.commit()
+    curve = [_hour(6, imp=20, clk=2, cost=2000, avg_rank=3.0, conv_cnt=1)]  # roas=0.5<2.5
+    baseline_agg = {"clk": 10, "cost": 7000, "conv_amt": 0}
+    fired, reason = auto_operator._intraday_loss_leash(
+        db, target_type="keyword", target_id="nkw-child", campaign_id=CAMPAIGN,
+        curve=curve, now=NOW, baseline_agg=baseline_agg,
+    )
+    assert fired is True
+
+
+def test_intraday_loss_leash_not_fired_when_keyword_entity_missing(db):
+    """(f-역) NaverEntity 행 자체가 없는 키워드 → adgroup 해석 불가로 미발동(fail-closed)."""
+    curve = [_hour(6, imp=20, clk=2, cost=2000, avg_rank=3.0, conv_cnt=1)]
+    baseline_agg = {"clk": 10, "cost": 7000, "conv_amt": 0}
+    fired, reason = auto_operator._intraday_loss_leash(
+        db, target_type="keyword", target_id="nkw-ghost", campaign_id=CAMPAIGN,
+        curve=curve, now=NOW, baseline_agg=baseline_agg,
+    )
+    assert fired is False
+    assert "adgroup 해석 불가" in reason
+
+
+def test_intraday_loss_leash_works_directly_on_adgroup_target_type(db):
+    """target_type='adgroup'이면 target_id를 그대로 adgroup_id로 사용(SHOPPING/BRAND_SEARCH grain)."""
+    _seed_product_bep(db, adgroup_id="grp-shop", bep_roas=Decimal("2.5"))
+    curve = [_hour(6, imp=20, clk=2, cost=2000, avg_rank=3.0, conv_cnt=1)]  # roas=0.5<2.5
+    baseline_agg = {"clk": 10, "cost": 7000, "conv_amt": 0}
+    fired, reason = auto_operator._intraday_loss_leash(
+        db, target_type="adgroup", target_id="grp-shop", campaign_id=CAMPAIGN,
+        curve=curve, now=NOW, baseline_agg=baseline_agg,
+    )
+    assert fired is True
+
+
+def test_judge_hourly_leash_fires_down_even_when_up_conditions_present(db):
+    """_judge_hourly 통합: rank>4(UP 자격)인데 장중 loss 고삐가 먼저 걸리면 고삐 DOWN이
+    이긴다(우선순위: 과열밴드DOWN·CPC급등DOWN 뒤, UP 앞) — leash 플래그로 구분 가능해야 한다."""
+    _seed_product_bep(db, bep_roas=Decimal("2.5"))
+    _leash_keyword(db)
+    window_from, window_to = _settlement_window()
+    # 정착창 실적(=baseline_agg 소스): cost=7000 → avg_daily=1000. CPC 급등 임계=350×2=700 초과 안 함.
+    _ad_row(db, keyword_id="nkw-leash", ad_date=window_from, clk=20, cost=7000)
+    db.commit()
+
+    curve = [
+        _hour(10, imp=15, clk=2, cost=400, avg_rank=5.0, conv_cnt=0),
+        _hour(11, imp=15, clk=2, cost=400, avg_rank=5.0, conv_cnt=0),
+        _hour(12, imp=15, clk=2, cost=400, avg_rank=5.0, conv_cnt=0),
+    ]  # weighted_rank=5.0>4.0(UP 자격), today_cost=1200≥avg1000, conv=0→est_roas=0<2.5(고삐 발동)
+    now_midday = datetime(2026, 7, 20, 12, 20, 0)
+    verdict = auto_operator._judge_hourly(
+        db, target_type="keyword", target_id="nkw-leash", campaign_id=CAMPAIGN,
+        curve=curve, now=now_midday,
+    )
+    assert verdict["direction"] == "down"
+    assert verdict.get("leash") is True
+    assert "순위고삐" in verdict["reason"]
+
+
+def test_judge_hourly_leash_not_fired_when_sample_insufficient(db):
+    """표본 부족(imp<30)이면 고삐 판정 자체에 도달하지 않고 기존대로 hold(leash 상품 매핑이
+    있어도 표본 게이트가 우선)."""
+    _seed_product_bep(db, bep_roas=Decimal("2.5"))
+    _leash_keyword(db)
+    curve = [_hour(6, imp=5, clk=0, cost=2000, avg_rank=3.0, conv_cnt=0)]  # imp합계=5<30
+    verdict = auto_operator._judge_hourly(
+        db, target_type="keyword", target_id="nkw-leash", campaign_id=CAMPAIGN,
+        curve=curve, now=NOW,
+    )
+    assert verdict["direction"] == "hold"
+    assert "leash" not in verdict
+
+
+def test_hourly_lane_leash_fires_and_tags_rationale(db):
+    """run_hourly_lane 통합: 고삐 발동 → rationale [순위고삐] 접두, approval_source=
+    APPROVAL_SOURCE_HOURLY(신규 소스 안 만듦), harness.execute 경유, diary actor=ACTOR_HOURLY."""
+    _settings(db)
+    _seed_product_bep(db, bep_roas=Decimal("2.5"))
+    window_from, window_to = _settlement_window()
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-leash-lane", parent_id="grp-1",
+                        campaign_id=CAMPAIGN, campaign_type="WEB_SITE", status="on"))
+    _ad_row(db, keyword_id="nkw-leash-lane", ad_date=window_from, clk=20, cost=7000)
+    db.commit()
+
+    curve = [
+        _hour(6, imp=15, clk=2, cost=400, avg_rank=3.2, conv_cnt=0),
+        _hour(7, imp=15, clk=2, cost=400, avg_rank=3.2, conv_cnt=0),
+        _hour(8, imp=15, clk=2, cost=400, avg_rank=3.2, conv_cnt=0),
+    ]  # 중립밴드(과열/CPC급등 아님)·today_cost=1200≥avg1000·est_roas=0<2.5 → 고삐 발동
+    with patch.object(auto_operator.naver_sa_writer, "get_keyword", return_value={"bidAmt": 1000}), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(
+            db, now=NOW, fetch_intraday=lambda tid, d: curve,
+        )
+    mock_exec.assert_called_once()
+    assert result["approved"] == 1
+    proposal_id = mock_exec.call_args[0][1]
+    saved = db.get(NaverProposal, proposal_id)
+    assert saved.proposal_type == "bid_down"
+    assert saved.rationale.startswith("[순위고삐]")
+    assert saved.approval_source == auto_operator.APPROVAL_SOURCE_HOURLY  # 신규 소스 안 만듦
+    assert saved.target_bid == 850  # 1000×0.85 → 10원 올림 클램프(일반 down과 동일 스텝)
+
+
+def test_hourly_lane_leash_blocked_by_real_guardrail_cooldown(db):
+    """★독립 Opus 리뷰 권고(RL3 GATE PASS) — 고삐 우회 없음 증명. 고삐(is_leash)가 발동해도
+    execute()가 여느 bid_down과 동일하게 guardrail_gate를 전량 통과해야 한다(§금지선 —
+    고삐 전용 우회 경로 금지). 이 유닛에 2시간 이내 성공 change_log(after_value 존재·
+    dry_run=False)를 실제로 심어(mock 아님) guardrail_gate.check가 진짜 쿨다운 차단을 내는지
+    확인한다 — test_hourly_lane_execution_blocked_by_real_guardrail_cooldown(일반 시간당밴드
+    down)과 동일 관례를 고삐 경로에 그대로 적용(naver_sa_writer만 최하단에서 mock, harness.
+    execute·guardrail_gate.check는 실호출)."""
+    _settings(db)
+    _seed_product_bep(db, bep_roas=Decimal("2.5"))
+    window_from, window_to = _settlement_window()
+    target_id = "nkw-leash-cd"
+    db.add(NaverEntity(entity_type="keyword", entity_id=target_id, parent_id="grp-1",
+                        campaign_id=CAMPAIGN, campaign_type="WEB_SITE", status="on"))
+    _ad_row(db, keyword_id=target_id, ad_date=window_from, clk=20, cost=7000)  # avg_daily=1000·CPC급등 아님
+    # 1시간 전 우리 시스템이 이미 이 키워드를 변경 — 쿨다운 2h 이내(guardrail_gate D-NAO-55)
+    db.add(NaverChangeLog(
+        entity_type="keyword", entity_id=target_id, campaign_id=CAMPAIGN,
+        action="update_bid", dry_run=False,
+        after_value=json.dumps({"bidAmt": 1000, "userLock": False}),
+        changed_at=NOW - timedelta(hours=1),
+    ))
+    db.commit()
+
+    curve = [
+        _hour(6, imp=15, clk=2, cost=400, avg_rank=3.2, conv_cnt=0),
+        _hour(7, imp=15, clk=2, cost=400, avg_rank=3.2, conv_cnt=0),
+        _hour(8, imp=15, clk=2, cost=400, avg_rank=3.2, conv_cnt=0),
+    ]  # 중립밴드(과열/CPC급등 아님)·today_cost=1200≥avg1000·est_roas=0<2.5 → 고삐 발동
+
+    with patch.object(auto_operator.naver_sa_writer, "get_keyword", return_value={"bidAmt": 1000}), \
+         patch.object(auto_operator.naver_sa_writer, "update_keyword_bid") as mock_write:
+        result = auto_operator.run_hourly_lane(db, now=NOW, fetch_intraday=lambda tid, d: curve)
+
+    # 고삐 제안은 승인까지는 됐으나(auto_operator 책임 끝) 실 harness.execute()의 실 guardrail_gate가
+    # 쿨다운으로 최종 차단(harness 책임) — 실 입찰변경(update_keyword_bid)은 발생하지 않는다.
+    assert result["approved"] == 1
+    assert result["executed"] == 0
+    assert result["failed"] == 1
+    mock_write.assert_not_called()  # 우회 없음의 실행 증명 — 고삐도 쓰기 초크포인트를 못 벗어난다
+
+    proposals = db.query(NaverProposal).filter(NaverProposal.target_id == target_id).all()
+    assert len(proposals) == 1
+    assert proposals[0].proposal_type == "bid_down"
+    assert proposals[0].rationale.startswith("[순위고삐]")
+    assert proposals[0].approval_source == auto_operator.APPROVAL_SOURCE_HOURLY  # 신규 소스 안 만듦
+    assert proposals[0].status == "failed"  # 실 guardrail_gate 차단 → harness._guard_failure
+
+    logs = db.query(NaverChangeLog).filter(
+        NaverChangeLog.entity_id == target_id, NaverChangeLog.action == "update_bid",
+    ).order_by(NaverChangeLog.id.desc()).all()
+    blocked = [l for l in logs if l.outcome == "failed"]
+    assert len(blocked) == 1
+    assert "가드레일 차단" in blocked[0].rationale
+    assert "쿨다운" in blocked[0].rationale  # 실 guardrail_gate.check가 낸 실제 사유(D-NAO-19/55)
