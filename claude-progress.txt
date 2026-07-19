@@ -2,6 +2,14 @@
 # 매 sprint 완료 시 Claude가 이 파일을 갱신합니다.
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
+## 최신 상태 (2026-07-19 밤, 워크트리 video-content-summary-0e6c41·브랜치 claude/maxsafe-loss-adgroup-diagnosis-4710fe)
+- **D-NAO-64 맥세이프 손실 진단 + 스톱로스 사각지대(A) 지혈 — 구현·리뷰·배포·라이브 검증 완료. PR #63(미병합, main!=prod)**.
+  - 진단: MO(grp-…70109616, 맥세이프_MO) 268K·실질ROAS 0.07·입찰 50 = 무전환 게이트+bid_down 하한 사각지대(전환 있어 pause 배제, 입찰 바닥이라 못 내림). 형제 PC는 pause·컨텐츠는 bid_down 됐으나 MO만 방치.
+  - (A) 구현: shopping_pause_candidates에 floored_loss 경로(전환>0∧보정ROAS<BEP∧at-floor). commit 4582f5e·prod 배포·2227 passed·독립 적대적 리뷰 GATE PASS. 라이브: ours 새 pause=MO 1건(정밀 지혈). **07-20 08:50 일 레인이 MO 터미널 pause 예정**.
+  - ★미결(Jino 판단): ①MO 즉시 수동정지 여부(밤에도 출혈 중, 자동은 08:50) ②근본수정 B(소재-레벨 입찰 인식) ③data 정합성(entity bid 50 vs 실효 CPC 800).
+  - 다음: PR #63 병합해 main==prod 복원 · 07-20 08:50 MO pause 실집행 관측 · 03 3개 재정지 관측(D-NAO-63) · codex 소급 07-23.
+
+
 ## 현재 상태
 - 날짜: 2026-07-19 오전 KST (★★★★★**스프린트 RL(순위 고삐) RL1~RL5 전 페이즈 완료·배포·라이브 검증 완료** — 워크트리 `daily-rank-leash-profit-control-71b501`, 브랜치 동명(main 기준). D-NAO-59 총이익 극대화 목적을 실행으로: 하루짜리 순위 고삐 + 시간당 총이익 제어 + CD5. 계획서 `docs/PLAN_naver-ad-rank-leash.md`·트랙 D-NAO-60. PR 생성 예정.)
   - **RL1 ccnt 데이터층**(hh24 ccnt+NaverKeywordHourly.conv_cnt 마이그 `b48c2f3bc0a3`·sweep)·**RL2 intraday_roas.py**(추정 ROAS/총이익 신호 SA)·**RL3 순위 고삐 판정**(장중 loss DOWN·비대칭 기억·D-NAO-4 안전방향 완화)·**RL4 스톱로스→고삐 교체**(키워드 pause→bid_down 고삐·하한만 터미널 pause)·**RL5 CD5**(learned_probe_rank 소비 게이트 과climb 방지 + conv 가중 승격 P3-3 해소). commits c225386/326c1c6/6f80d88/53db4d6/2143d67.
