@@ -111,6 +111,18 @@ def _cpids_for_campaign(db: Session, campaign_id: str) -> list[str]:
     ]
 
 
+def weighted_product_value_for_adgroup(db: Session, adgroup_id: str, column) -> Decimal | None:
+    """광고그룹 매핑 상품의 column(selling_price/contribution_margin/bep_roas 등)을
+    최근 주문매출로 가중평균(D-NAO-60 RL2, 원칙18-6 정직 경계 단일화).
+
+    has_cost=True(원가 확인된) 상품만 대상 — intraday_roas.adgroup_unit_price가 판매가·
+    공헌이익·bep_roas를 같은 모집단(원가 기반 BEP와 정합하는 상품)에서 뽑아 쓰기 위한
+    공개 헬퍼. 내부 `_weighted_target_for_cpids`(사적 함수)를 다른 모듈이 직접 크로스임포트
+    하지 않도록 이 함수가 공식 진입점 역할을 한다. 매핑/대상 상품이 0개면 None.
+    """
+    return _weighted_target_for_cpids(db, _cpids_for_adgroup(db, adgroup_id), column)
+
+
 def resolve_adgroup_target_roas(db: Session, adgroup_id: str) -> dict:
     """광고그룹 grain의 목표 ROAS를 상품 파생(②)으로 해석. 반환: {target_roas, source}.
 
