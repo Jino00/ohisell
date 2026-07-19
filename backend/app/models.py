@@ -1607,11 +1607,15 @@ class NaverKeywordHourly(Base):
 
     grain: (ad_date, entity_id, hour). WEB_SITE=키워드(nkw-…) entity_type='keyword',
     SHOPPING/BRAND_SEARCH=애드그룹(grp-…) entity_type='adgroup' — naver_ad_daily의
-    keyword_id='' sentinel 규약과 동일 축. imp/clk/cost는 hh24 breakdown 원본 그대로
-    (그 시간대 구간값 — 당일 누적 아님). avg_rank는 avgRnk<=0(무의미, 순위는 1부터)이면
-    NULL. hh24 상세는 네이버가 최근 7일만 보존 — 이 테이블이 시간당 밴드 관제(순위
-    2.5~4 유지)·학습 베이스라인의 유일한 영구 원료(ref 32 §4). 365일 롤링 삭제
-    (keyword_hourly_sweep.py).
+    keyword_id='' sentinel 규약과 동일 축. imp/clk/cost/conv_cnt는 hh24 breakdown 원본
+    그대로(그 시간대 구간값 — 당일 누적 아님). avg_rank는 avgRnk<=0(무의미, 순위는
+    1부터)이면 NULL. hh24 상세는 네이버가 최근 7일만 보존 — 이 테이블이 시간당 밴드
+    관제(순위 2.5~4 유지)·학습 베이스라인의 유일한 영구 원료(ref 32 §4). 365일 롤링
+    삭제(keyword_hourly_sweep.py).
+
+    ★회계 불변(CD1 계승, D-NAO-60 RL1): conv_cnt는 시간당 전환 "건수"만(ccnt) — 매출
+    금액(convAmt)은 hh24 breakdown에 없어(일별만 존재) 여기 못 받는다. 매출/BEP/ROAS
+    등 회계 집계 코드는 이 컬럼을 절대 읽지 않는다(순수 관측 신호).
     """
 
     __tablename__ = "naver_keyword_hourly"
@@ -1630,6 +1634,7 @@ class NaverKeywordHourly(Base):
     imp: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     clk: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     cost: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    conv_cnt: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")  # 시간당 전환건수(ccnt, D-NAO-60 RL1) — 건수만·회계 미접촉
     avg_rank: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())  # ⚠️UTC(sqlite-server-default-now-is-utc) — 시간계산엔 미사용
 

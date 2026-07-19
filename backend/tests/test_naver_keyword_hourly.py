@@ -53,17 +53,31 @@ def test_fetch_entity_hh24_parses_both_label_formats(monkeypatch):
     payload = {"data": [{
         "id": "nkw-1", "impCnt": 30,
         "breakdowns": [
-            {"name": "00시~01시", "avgRnk": 1.8, "impCnt": 22, "clkCnt": 1, "salesAmt": 100},
-            {"name": "1시~2시", "avgRnk": 2.3, "impCnt": 8, "clkCnt": 0, "salesAmt": 0},
+            {"name": "00시~01시", "avgRnk": 1.8, "impCnt": 22, "clkCnt": 1, "salesAmt": 100, "ccnt": 1},
+            {"name": "1시~2시", "avgRnk": 2.3, "impCnt": 8, "clkCnt": 0, "salesAmt": 0, "ccnt": 0},
         ],
     }]}
     monkeypatch.setattr(fetcher, "_get", lambda path, params=None: _FakeResp(payload=payload))
 
     out = fetcher.fetch_entity_hh24("nkw-1", date(2026, 7, 15))
     assert out == [
-        {"hour": 0, "imp": 22, "clk": 1, "cost": 100, "avg_rank": 1.8},
-        {"hour": 1, "imp": 8, "clk": 0, "cost": 0, "avg_rank": 2.3},
+        {"hour": 0, "imp": 22, "clk": 1, "cost": 100, "conv_cnt": 1, "avg_rank": 1.8},
+        {"hour": 1, "imp": 8, "clk": 0, "cost": 0, "conv_cnt": 0, "avg_rank": 2.3},
     ]
+
+
+def test_fetch_entity_hh24_conv_cnt_missing_key_defaults_zero(monkeypatch):
+    """D-NAO-60 RL1: ccnt 필드가 응답에 없어도(구 API 버전 등) conv_cnt=0으로 방어해야
+    한다 — 다른 필드처럼 _safe_int(b.get(...), 0) 규약을 따른다."""
+    _set_creds(monkeypatch)
+    payload = {"data": [{
+        "id": "nkw-1", "impCnt": 5,
+        "breakdowns": [{"name": "02시~03시", "avgRnk": 1.2, "impCnt": 5, "clkCnt": 1, "salesAmt": 50}],
+    }]}
+    monkeypatch.setattr(fetcher, "_get", lambda path, params=None: _FakeResp(payload=payload))
+
+    out = fetcher.fetch_entity_hh24("nkw-1", date(2026, 7, 15))
+    assert out[0]["conv_cnt"] == 0
 
 
 def test_fetch_entity_hh24_avg_rank_zero_becomes_none(monkeypatch):
@@ -120,6 +134,21 @@ def test_fetch_entity_hh24_skips_unparseable_label(monkeypatch):
     out = fetcher.fetch_entity_hh24("nkw-1", date(2026, 7, 15))
     assert len(out) == 1
     assert out[0]["hour"] == 5
+
+
+def test_fetch_entity_hh24_requests_ccnt_field(monkeypatch):
+    """D-NAO-60 RL1: hh24 요청 fields에 ccnt가 포함돼야 시간당 전환건수를 받아온다
+    (요청 안 하면 네이버가 무언 무시할 수 있음 — ref 32 §4 breakdown 규약과 동일 경계)."""
+    _set_creds(monkeypatch)
+    captured: dict = {}
+
+    def _fake_get(path, params=None):
+        captured.update(params or {})
+        return _FakeResp(payload={"data": []})
+
+    monkeypatch.setattr(fetcher, "_get", _fake_get)
+    fetcher.fetch_entity_hh24("nkw-1", date(2026, 7, 15))
+    assert "ccnt" in captured.get("fields", "")
 
 
 def test_fetch_entity_hh24_no_credentials_returns_empty(monkeypatch):
@@ -294,6 +323,43 @@ def test_sweep_writes_rows_for_target_and_is_idempotent(db):
     assert r2["rows"] == 1
     rows2 = db.query(NaverKeywordHourly).filter(NaverKeywordHourly.ad_date == D).all()
     assert len(rows2) == 1
+
+
+def test_sweep_persists_conv_cnt(db):
+    """D-NAO-60 RL1: fetch가 conv_cnt를 반환하면 naver_keyword_hourly에 그대로 저장돼야
+    한다(시간당 순위 고삐 설계의 입력 원료 — 회계 미접촉·순수 관측 신호)."""
+    _ad_row(db, campaign_id="cmp-w", campaign_type="WEB_SITE", adgroup_id="grp-1",
+            keyword_id="nkw-1", imp=10)
+    db.commit()
+
+    calls: list = []
+    fetch = _fake_fetch_factory(
+        {"nkw-1": [{"hour": 9, "imp": 10, "clk": 1, "cost": 100, "conv_cnt": 3, "avg_rank": 2.1}]}, calls,
+    )
+
+    r1 = keyword_hourly_sweep.sweep_keyword_hourly(db, sweep_date=D, fetch=fetch)
+    assert r1["rows"] == 1
+    rows = db.query(NaverKeywordHourly).filter(NaverKeywordHourly.ad_date == D).all()
+    assert len(rows) == 1
+    assert rows[0].conv_cnt == 3
+
+
+def test_sweep_defaults_conv_cnt_to_zero_when_fetch_omits_it(db):
+    """구 곡선 호환: fetch 반환 dict에 conv_cnt 키가 없어도(과거 캐치업 재현 등) 0으로
+    방어해야 한다 — KeyError로 sweep 전체가 죽으면 안 된다."""
+    _ad_row(db, campaign_id="cmp-w", campaign_type="WEB_SITE", adgroup_id="grp-1",
+            keyword_id="nkw-1", imp=10)
+    db.commit()
+
+    calls: list = []
+    fetch = _fake_fetch_factory(
+        {"nkw-1": [{"hour": 9, "imp": 10, "clk": 1, "cost": 100, "avg_rank": 2.1}]}, calls,
+    )
+
+    r1 = keyword_hourly_sweep.sweep_keyword_hourly(db, sweep_date=D, fetch=fetch)
+    assert r1["rows"] == 1
+    rows = db.query(NaverKeywordHourly).filter(NaverKeywordHourly.ad_date == D).all()
+    assert rows[0].conv_cnt == 0
 
 
 def test_sweep_empty_fetch_preserves_existing_rows_and_counts_failed(db):

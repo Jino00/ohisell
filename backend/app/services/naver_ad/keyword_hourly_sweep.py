@@ -80,7 +80,9 @@ def _replace_rows(db: Session, ad_date: date, target: dict, hh_rows: list[dict])
             ad_date=ad_date, hour=h["hour"], entity_type=target["entity_type"],
             entity_id=target["entity_id"], adgroup_id=target.get("adgroup_id") or "",
             campaign_id=target["campaign_id"], campaign_type=target["campaign_type"],
-            imp=h["imp"], clk=h["clk"], cost=h["cost"], avg_rank=h.get("avg_rank"),
+            imp=h["imp"], clk=h["clk"], cost=h["cost"],
+            conv_cnt=h.get("conv_cnt", 0),  # D-NAO-60 RL1 — 구 곡선(키 없음) 호환 .get 방어
+            avg_rank=h.get("avg_rank"),
         ))
 
 
