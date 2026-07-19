@@ -244,9 +244,10 @@ def test_build_diagnosis_assembles_all_boards(db):
     assert result["account_bep_roas"] == pytest.approx(3.3333)
 
 
-def test_build_diagnosis_shopping_pause_flags_floored_loss_group(db):
-    # D-NAO-64(A) 배선 검증: build_diagnosis가 shopping_pause_candidates에 account BEP·보정계수를
-    # 넘겨야 바닥손실 그룹(전환 있으나 실질ROAS≪BEP·입찰 하한 50)이 정지 후보로 잡힌다.
+def test_build_diagnosis_shopping_pause_flags_lever_broken_group(db):
+    # D-NAO-64(A) 배선 + DL2(D-NAO-65) 예외②: build_diagnosis가 shopping_pause_candidates에
+    # account BEP·보정계수를 넘겨야 레버끊김 그룹(전환 있으나 실질ROAS≪BEP·입찰 하한 50·실측
+    # CPC 600≫5×50=250)이 정지 후보로 잡힌다(clk 5·cost 3000 → CPC 600).
     # 이 배선이 없으면 fix가 prod에서 휴면(무전환만 잡던 원래 버그 유지).
     db.add(NaverProductBep(
         channel_id=6, channel_product_id="cp-1", product_name="테스트상품",
@@ -262,13 +263,14 @@ def test_build_diagnosis_shopping_pause_flags_floored_loss_group(db):
     _shopping_entity(db, "grp-mo", status="on", bid_amt=50, campaign_id="cmp-shop")
     # DL1(D-NAO-65): 스톱로스 창이 "마지막 입찰변경 이후"(변경이력 없으면 3일 폴백)로 좁혀졌으므로
     # 손실 행을 as_of(D_TO) 당일에 둔다 — 과거(D0)에 두면 폴백 창(D_TO-2~D_TO) 밖이라 미진입.
-    _row(db, D_TO, "cmp-shop", "SHOPPING", "grp-mo", "", 500, 25, 3000, direct=300)  # 실질ROAS≪BEP
+    _row(db, D_TO, "cmp-shop", "SHOPPING", "grp-mo", "", 500, 5, 3000, direct=300)  # 실질ROAS≪BEP·CPC 600
     db.commit()
 
     result = build_diagnosis(db, D0, D_TO)
     board = result["boards"]["shopping_pause_candidates"]
     assert [r["adgroup_id"] for r in board] == ["grp-mo"]
-    assert board[0]["reason"] == "floored_loss"
+    assert board[0]["reason"] == "lever_broken"
+    assert board[0]["lever_broken"] is True
 
 
 # ── pause_candidates (X1b T3, D-NAO-38) ──
@@ -756,12 +758,13 @@ def test_shopping_pause_candidates_sorted_by_cost_desc(db):
 # 입찰이 하한(70) 이하라 bid_down도 불가 → 어느 레인도 안 잡던 손실 그룹을 터미널 pause 후보로.
 
 
-def test_shopping_pause_candidates_floored_loss_nonzero_conv_included(db):
-    # 맥세이프_MO 재현: bid 50(하한 70 이하=못 내림), 무전환 아님(conv), 실질ROAS≪BEP.
+def test_shopping_pause_candidates_lever_broken_nonzero_conv_included(db):
+    # 맥세이프_MO 재현: bid 50(하한 70 이하=못 내림), 무전환 아님(conv), 실질ROAS≪BEP,
+    # ★실측 CPC 500(=cost 2500/clk 5) ≫ 5×50=250 → 레버끊김(예외②).
     # stop_loss = 50*10 = 500, cost 2500 ≥ 500. roas_naver=500/2500=0.2 < bep 1.5(factor 1.0).
     _seed_shopping_active_campaign(db)
     _shopping_entity(db, "grp-mo", status="on", bid_amt=50)
-    _row(db, D0, "cmp-shop", "SHOPPING", "grp-mo", "", 500, 25, 2500, direct=500)
+    _row(db, D0, "cmp-shop", "SHOPPING", "grp-mo", "", 500, 5, 2500, direct=500)
     db.commit()
 
     out = diag.shopping_pause_candidates(db, D0, D0, bep_roas=Decimal("1.5"),
@@ -770,7 +773,54 @@ def test_shopping_pause_candidates_floored_loss_nonzero_conv_included(db):
     assert out[0]["adgroup_id"] == "grp-mo"
     assert out[0]["conv_amt"] == 500  # 전환 있음에도 포함
     assert out[0]["current_bid"] == 50
-    assert out[0]["reason"] == "floored_loss"
+    assert out[0]["reason"] == "lever_broken"
+    assert out[0]["lever_broken"] is True
+    assert out[0]["chronic_cpc"] == 500  # 실측 CPC 명기(honest 사유문용)
+
+
+def test_shopping_pause_candidates_lever_normal_nonzero_conv_excluded(db):
+    # DL2(D-NAO-65): 같은 저ROAS·at-floor라도 실측 CPC가 그룹입찰에 반응(레버 정상, CPC 100 ≤
+    # 5×50=250)이면 후보 미진입 = 바닥 대기(pause 아님). 전환 있는 유닛에 pause는 레버끊김만.
+    _seed_shopping_active_campaign(db)
+    _shopping_entity(db, "grp-ok", status="on", bid_amt=50)
+    _row(db, D0, "cmp-shop", "SHOPPING", "grp-ok", "", 500, 25, 2500, direct=500)  # CPC 100 ≤ 250
+    db.commit()
+
+    out = diag.shopping_pause_candidates(db, D0, D0, bep_roas=Decimal("1.5"),
+                                        correction_factor=Decimal("1.0"))
+    assert out == []
+
+
+def test_shopping_pause_candidates_zero_conv_tags_lever_broken(db):
+    # DL2: 무전환 유닛도 만성 창 실측 CPC로 lever_broken을 별도 태깅한다(reason은 zero_conv 유지).
+    # _stop_loss_proposal이 at-floor시 이 플래그로 pause(예외②) vs 대기를 분기.
+    _seed_shopping_active_campaign(db)
+    _shopping_entity(db, "grp-z", status="on", bid_amt=50)  # 스톱로스 500
+    _row(db, D0, "cmp-shop", "SHOPPING", "grp-z", "", 500, 5, 2500, direct=0)  # CPC 500 ≫ 250
+    db.commit()
+
+    out = diag.shopping_pause_candidates(db, D0, D0, bep_roas=Decimal("1.5"),
+                                        correction_factor=Decimal("1.0"))
+    assert len(out) == 1
+    assert out[0]["reason"] == "zero_conv"
+    assert out[0]["lever_broken"] is True
+    assert out[0]["chronic_cpc"] == 500
+
+
+def test_shopping_pause_candidates_lever_broken_needs_clicks(db):
+    # DL2: clk=0이면 실측 CPC 계산 불가 → 레버끊김 판정 불가(lever_broken=False). 무전환
+    # 경로는 여전히 진입(zero_conv)하되 플래그만 False.
+    _seed_shopping_active_campaign(db)
+    _shopping_entity(db, "grp-noclk", status="on", bid_amt=50)  # 스톱로스 500
+    _row(db, D0, "cmp-shop", "SHOPPING", "grp-noclk", "", 500, 0, 2500, direct=0)  # clk 0
+    db.commit()
+
+    out = diag.shopping_pause_candidates(db, D0, D0, bep_roas=Decimal("1.5"),
+                                        correction_factor=Decimal("1.0"))
+    assert len(out) == 1
+    assert out[0]["reason"] == "zero_conv"
+    assert out[0]["lever_broken"] is False
+    assert out[0]["chronic_cpc"] is None
 
 
 def test_shopping_pause_candidates_floored_loss_excludes_above_floor_bid(db):
@@ -820,6 +870,7 @@ def test_shopping_pause_candidates_zero_conv_reason_field(db):
                                         correction_factor=Decimal("1.0"))
     assert len(out) == 1
     assert out[0]["reason"] == "zero_conv"
+    assert out[0]["lever_broken"] is False  # DL2: CPC 100(=2500/25) ≤ 5×200=1000 → 레버 정상
 
 
 # ── shopping_resume_candidates (X1b-S S1, D-NAO-43) ───────────────────────
@@ -1428,20 +1479,153 @@ def test_shopping_pause_candidates_dormant_unit_below_recent_window_not_flagged(
     assert out == []  # 입찰변경 이후 창 cost 100 < 스톱로스 500 → 미진입(전체 창이면 무전환 10100로 오발동)
 
 
-def test_shopping_pause_floored_loss_chronic_window_includes_recent_bad_day(db):
+def test_shopping_pause_lever_broken_chronic_window_includes_recent_bad_day(db):
     # 만성 판정 = 7일 롤링. 3일 행동 창 밖(07-10)이지만 7일 만성 창 안인 고비용 무전환 날이
-    # 보정ROAS를 BEP 밑으로 끌어내리면 floored_loss로 잡힌다.
+    # 보정ROAS를 BEP 밑으로 끌어내리고(0.27<1.5), 만성 CPC(11000/10=1100≫250)가 레버끊김이면
+    # lever_broken으로 잡힌다(clk를 낮춰 CPC≫그룹입찰 재현).
     _seed_shopping_active_campaign(db)
     _shopping_entity(db, "grp-mo", status="on", bid_amt=50)  # 하한(못 내림), 스톱로스 500
-    _row(db, date(2026, 7, 10), "cmp-shop", "SHOPPING", "grp-mo", "", 500, 25, 10000, direct=0)  # 7일 창 안·3일 창 밖
-    _row(db, date(2026, 7, 14), "cmp-shop", "SHOPPING", "grp-mo", "", 500, 25, 1000, direct=3000)  # 3일 창 안(전환)
+    _row(db, date(2026, 7, 10), "cmp-shop", "SHOPPING", "grp-mo", "", 500, 5, 10000, direct=0)  # 7일 창 안·3일 창 밖
+    _row(db, date(2026, 7, 14), "cmp-shop", "SHOPPING", "grp-mo", "", 500, 5, 1000, direct=3000)  # 3일 창 안(전환)
     db.commit()  # 변경이력 없음 → 행동 창=3일 폴백
 
     out = diag.shopping_pause_candidates(db, DL_FROM, DL_TO, bep_roas=Decimal("1.5"),
                                         correction_factor=Decimal("1.0"))
     assert len(out) == 1
     assert out[0]["adgroup_id"] == "grp-mo"
-    assert out[0]["reason"] == "floored_loss"  # 7일 만성 roas=3000/11000=0.27 < 1.5
+    assert out[0]["reason"] == "lever_broken"  # 7일 만성 roas=3000/11000=0.27 < 1.5 ∧ CPC 1100≫250
+
+
+# ── DL2 GATE P2-1: lever_broken CPC = 만성 창 ∩ 마지막 입찰변경 이후 창 (시점 정합) ──
+# 만성 7일 창 CPC에 입찰 하향 전 고CPC 클릭이 섞이면, 방금 정상 하향된 그룹이 "레버 끊김"으로
+# 오판·pause된다(사유문도 거짓). CPC 판정만 변경 후 구간으로 좁힌다(보정ROAS 만성 창은 유지).
+
+
+def test_shopping_pause_lever_broken_cpc_excludes_pre_change_clicks(db):
+    # [GATE P2-1 재현] 입찰 급락(07-14 변경) 전 고CPC 클릭(07-10, CPC 2000)이 만성 창에 혼입 —
+    # 변경 후 클릭은 CPC 50(레버 정상). 혼입 CPC=10500/15=700>250으로 오판하면 안 되고,
+    # 교집합(변경 후) CPC=50 ≤ 250 → 레버 정상 → 후보 미진입(바닥 대기).
+    _seed_shopping_active_campaign(db)
+    _shopping_entity(db, "grp-leashed", status="on", bid_amt=50)  # 하한, 스톱로스 500
+    _row(db, date(2026, 7, 10), "cmp-shop", "SHOPPING", "grp-leashed", "", 500, 5, 10000, direct=0)  # 변경 전 고CPC
+    _row(db, date(2026, 7, 14), "cmp-shop", "SHOPPING", "grp-leashed", "", 500, 10, 500, direct=300)  # 변경 후 CPC 50
+    db.add(_bid_change_log("grp-leashed", "cmp-shop", changed_at=datetime(2026, 7, 14, 0, 0), entity_type="adgroup"))
+    db.commit()
+
+    out = diag.shopping_pause_candidates(db, DL_FROM, DL_TO, bep_roas=Decimal("1.5"),
+                                        correction_factor=Decimal("1.0"))
+    assert out == []  # 만성 roas 0.03<1.5·at-floor여도 변경 후 CPC 정상 → lever_broken 아님(대기)
+
+
+def test_shopping_pause_lever_broken_cpc_post_change_still_broken(db):
+    # [GATE P2-1 대조군] 변경 이후 클릭도 고CPC(500/1=500>250) → 진짜 레버끊김 → 후보 진입.
+    _seed_shopping_active_campaign(db)
+    _shopping_entity(db, "grp-still", status="on", bid_amt=50)  # 하한, 스톱로스 500
+    _row(db, date(2026, 7, 10), "cmp-shop", "SHOPPING", "grp-still", "", 500, 5, 10000, direct=0)  # 변경 전
+    _row(db, date(2026, 7, 14), "cmp-shop", "SHOPPING", "grp-still", "", 500, 1, 500, direct=300)  # 변경 후도 고CPC
+    db.add(_bid_change_log("grp-still", "cmp-shop", changed_at=datetime(2026, 7, 14, 0, 0), entity_type="adgroup"))
+    db.commit()
+
+    out = diag.shopping_pause_candidates(db, DL_FROM, DL_TO, bep_roas=Decimal("1.5"),
+                                        correction_factor=Decimal("1.0"))
+    assert len(out) == 1
+    assert out[0]["reason"] == "lever_broken"
+    assert out[0]["chronic_cpc"] == 500  # 교집합(변경 후) CPC만 — 혼입이면 700
+
+
+def test_shopping_pause_lever_broken_no_clicks_after_change_fail_safe(db):
+    # [GATE P2-1 fail-safe] 교집합(변경 후) 구간에 클릭 0 → CPC 판정 불가(None) → lever_broken
+    # False(대기) — 변경 전 고CPC만으로 오판하지 않는다.
+    _seed_shopping_active_campaign(db)
+    _shopping_entity(db, "grp-noclk2", status="on", bid_amt=50)  # 하한, 스톱로스 500
+    _row(db, date(2026, 7, 10), "cmp-shop", "SHOPPING", "grp-noclk2", "", 500, 5, 10000, direct=0)  # 변경 전 클릭
+    _row(db, date(2026, 7, 14), "cmp-shop", "SHOPPING", "grp-noclk2", "", 500, 0, 500, direct=300)  # 변경 후 clk 0
+    db.add(_bid_change_log("grp-noclk2", "cmp-shop", changed_at=datetime(2026, 7, 14, 0, 0), entity_type="adgroup"))
+    db.commit()
+
+    out = diag.shopping_pause_candidates(db, DL_FROM, DL_TO, bep_roas=Decimal("1.5"),
+                                        correction_factor=Decimal("1.0"))
+    assert out == []
+
+
+def test_shopping_pause_lever_broken_exact_multiple_boundary_holds(db):
+    # [GATE P3-1] 정확 경계: 실측 CPC == 5×그룹입찰(250==250)이면 strict '>' 라 lever_broken
+    # False → 대기(경계 고정 — 배수 '이상'으로 바꾸면 이 테스트가 잡는다).
+    _seed_shopping_active_campaign(db)
+    _shopping_entity(db, "grp-edge5x", status="on", bid_amt=50)  # 하한, 스톱로스 500
+    _row(db, date(2026, 7, 14), "cmp-shop", "SHOPPING", "grp-edge5x", "", 500, 10, 2500, direct=500)  # CPC 정확 250
+    db.commit()  # 변경이력 없음
+
+    out = diag.shopping_pause_candidates(db, DL_FROM, DL_TO, bep_roas=Decimal("1.5"),
+                                        correction_factor=Decimal("1.0"))
+    assert out == []  # roas 0.2<1.5·at-floor여도 CPC 250 == 5×50 → 레버 정상(대기)
+
+
+# ── DL2 GATE P2-2: 바닥 대기 지속 밸브(floor_bleed) — 무한 방치 차단 ──
+# at-floor ∧ zero_conv ∧ 행동 창 ≥ 3일 ∧ 비용 ≥ 스톱로스 = "레버로 할 수 있는 걸 다 했는데도
+# 출혈 지속"의 실증 → 터미널 pause 격상. 3일 미만(방금 바닥 도달)은 대기 유지.
+
+
+def test_shopping_pause_zero_conv_floor_bleed_tagged_at_three_day_window(db):
+    # 변경이력 없음 → 3일 폴백 창(07-13~15) = 창 길이 3일 ∧ 무전환 출혈 600≥500 → floor_bleed 태깅.
+    # 클릭 CPC는 정상(100≤250)이라 lever_broken과 무관(밸브 경로 독립 검증).
+    _seed_shopping_active_campaign(db)
+    _shopping_entity(db, "grp-bleed", status="on", bid_amt=50)  # 하한, 스톱로스 500
+    _row(db, date(2026, 7, 13), "cmp-shop", "SHOPPING", "grp-bleed", "", 300, 3, 300, direct=0)
+    _row(db, date(2026, 7, 14), "cmp-shop", "SHOPPING", "grp-bleed", "", 300, 3, 300, direct=0)
+    db.commit()
+
+    out = diag.shopping_pause_candidates(db, DL_FROM, DL_TO, bep_roas=Decimal("1.5"),
+                                        correction_factor=Decimal("1.0"))
+    assert len(out) == 1
+    assert out[0]["reason"] == "zero_conv"
+    assert out[0]["lever_broken"] is False
+    assert out[0]["floor_bleed"] is True
+    assert out[0]["window_days"] == 3
+
+
+def test_shopping_pause_zero_conv_floor_bleed_not_tagged_below_min_days(db):
+    # 어제(07-14) 변경 → 행동 창 2일(07-14~15) < 3일 → 방금 바닥 도달 = 대기 유지(floor_bleed False).
+    _seed_shopping_active_campaign(db)
+    _shopping_entity(db, "grp-fresh2", status="on", bid_amt=50)  # 하한, 스톱로스 500
+    _row(db, date(2026, 7, 14), "cmp-shop", "SHOPPING", "grp-fresh2", "", 300, 3, 600, direct=0)
+    db.add(_bid_change_log("grp-fresh2", "cmp-shop", changed_at=datetime(2026, 7, 14, 0, 0), entity_type="adgroup"))
+    db.commit()
+
+    out = diag.shopping_pause_candidates(db, DL_FROM, DL_TO, bep_roas=Decimal("1.5"),
+                                        correction_factor=Decimal("1.0"))
+    assert len(out) == 1
+    assert out[0]["reason"] == "zero_conv"
+    assert out[0]["floor_bleed"] is False
+    assert out[0]["window_days"] == 2
+
+
+def test_pause_candidates_floor_bleed_tagged_at_three_day_window(db):
+    # 키워드 대칭: 변경이력 없음 → 3일 폴백 창 ∧ 무전환 800≥스톱로스 700 → floor_bleed 태깅.
+    _seed_active_parents(db)
+    _entity(db, "keyword", "nkw-bleed", status="on", bid_amt=70)  # 하한, 스톱로스 700
+    _row(db, date(2026, 7, 13), "cmp1", "WEB_SITE", "grp1", "nkw-bleed", 300, 4, 400, direct=0)
+    _row(db, date(2026, 7, 14), "cmp1", "WEB_SITE", "grp1", "nkw-bleed", 300, 4, 400, direct=0)
+    db.commit()
+
+    out = diag.pause_candidates(db, DL_FROM, DL_TO)
+    assert len(out) == 1
+    assert out[0]["floor_bleed"] is True
+    assert out[0]["window_days"] == 3
+
+
+def test_pause_candidates_floor_bleed_not_tagged_two_day_window(db):
+    # 키워드: 어제 변경 → 창 2일 < 3일 → floor_bleed False(방금 바닥 도달, 대기 유지).
+    _seed_active_parents(db)
+    _entity(db, "keyword", "nkw-fresh2", status="on", bid_amt=70)  # 스톱로스 700
+    _row(db, date(2026, 7, 14), "cmp1", "WEB_SITE", "grp1", "nkw-fresh2", 300, 4, 800, direct=0)
+    db.add(_bid_change_log("nkw-fresh2", "cmp1", changed_at=datetime(2026, 7, 14, 0, 0)))
+    db.commit()
+
+    out = diag.pause_candidates(db, DL_FROM, DL_TO)
+    assert len(out) == 1
+    assert out[0]["floor_bleed"] is False
+    assert out[0]["window_days"] == 2
 
 
 def test_shopping_pause_floored_loss_ignores_loss_outside_chronic_window(db):

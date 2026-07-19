@@ -292,13 +292,19 @@ def _negative_keyword_from_exclusion(row: dict, campaign_id: str) -> dict:
     }
 
 
-def _terminal_pause(row: dict, *, target_type: str) -> dict:
-    """스톱로스 대응의 최종 단계(터미널) — pause 제안 1건. RL4(D-NAO-60) 이전엔 스톱로스의
-    유일한 대응이었으나(구 `_pause_proposal`), 이제는 (a) 쇼핑 adgroup 경로에서 ML 자동입찰
-    (또는 판정불가)이거나 고삐가 이미 입찰 하한(70원)이라 더는 내릴 여지가 없을 때(RL4b,
-    D-NAO-60 — 수동입찰이고 하향 여지가 있으면 대신 bid_down 고삐), (b) 키워드 경로에서
-    고삐(bid_down)가 입찰 하한(70원)까지 내려가 더는 하향할 여지가 없을 때만 쓰인다 —
+def _terminal_pause(
+    row: dict, *, target_type: str, lever_broken: bool = False, floor_bleed: bool = False,
+) -> dict:
+    """스톱로스 대응의 최종 단계(터미널) — pause 제안 1건. DL2(D-NAO-65)로 pause는 "정책"이
+    아니라 "레버 불능 예외"로 격하됐다 — 이 함수는 (a) 예외① ML 자동입찰(입찰 API가 거부)·
+    (b) 예외② 레버끊김(그룹입찰 하향으로 지출 제어 불가한 소재-레벨 입찰 정황)·
+    (c) 지속 밸브 floor_bleed(GATE P2-2 — 바닥 대기 3일+ 무전환 출혈 지속 = 레버로 할 수 있는
+    걸 다 했는데도 출혈인 실증, 무한 대기 방치 차단)일 때만 쓰인다.
     `_stop_loss_proposal`이 호출한다(SA 직접 호출 금지, 이 함수는 비공개).
+    lever_broken=True면 예외②로 pause되는 경우라 사유문에 실측 CPC≫그룹입찰을 창 라벨과 함께
+    사실 명시(D-NAO-64 정직 경계 계승 + GATE P3-5 — CPC는 만성7일∩변경후 교집합, 누적비용은
+    변경 후 행동 창이라 서로 다른 창임을 라벨로 구분). floor_bleed=True면 밸브 사유문
+    (바닥 대기 N일 출혈 지속). 키워드 경로는 floor_bleed 밸브로만 이 함수에 도달한다.
 
     target_type='keyword'는 WEB_SITE 키워드(pause_candidates 보드, target_id=row["keyword_id"]),
     'adgroup'은 SHOPPING 광고그룹(shopping_pause_candidates 보드, target_id=row["adgroup_id"]).
@@ -315,7 +321,28 @@ def _terminal_pause(row: dict, *, target_type: str) -> dict:
     # D-NAO-64(A): 바닥그룹 저ROAS 정지는 전환이 "있는데도" 실질ROAS≪BEP·입찰 하한이라
     # 정지하는 경우(맥세이프_MO) — 사유문에 '무전환'이라 쓰면 거짓(정직 경계). 전환 유무로 분기.
     conv_amt = int(row.get("conv_amt") or 0)
-    if target_type == "keyword":
+    if lever_broken:
+        # DL2 예외②: 그룹입찰 하향으로 지출이 안 줄어드는 레버끊김(실측 CPC≫그룹입찰) — pause만
+        # 유일 실효 레버. 전환 유무와 무관하게 '무전환'이라 쓰지 않는다(정직 경계, 전환이 있을
+        # 수 있음). GATE P3-5: CPC(만성 7일∩변경 후 교집합)와 누적비용(변경 후 행동 창)은 서로
+        # 다른 창의 수치라 창 라벨을 명시한다(라벨 없으면 오독).
+        rationale = (
+            f"[{board_name}] 레버 끊김 — 실측 CPC {row.get('chronic_cpc')}원(만성 7일∩변경 후) "
+            f"≫ 그룹입찰 {row['current_bid']}원(그룹입찰 하향으로 지출 제어 불가, 소재-레벨 입찰 "
+            f"정황) → 정지(D-NAO-65 예외②) 누적비용 {row['cost']}원(변경 후 창) ≥ 스톱로스 "
+            f"{row['stop_loss_amount']}원"
+            + (f", 전환 {conv_amt}원(실질ROAS≪BEP)" if conv_amt > 0 else "")
+            + f" clk={row.get('clk')}."
+        )
+    elif floor_bleed:
+        # DL2 GATE P2-2 지속 밸브: 바닥 대기 N일+ 무전환 출혈 지속 — "레버로 할 수 있는 걸 다
+        # 했는데도 출혈" = 레버 불능 예외의 실증 케이스(무한 대기 방치 차단).
+        rationale = (
+            f"[{board_name}] 바닥 창 {row.get('window_days')}일 무전환 출혈 지속"
+            f"(비용 {row['cost']}원 ≥ 스톱로스 {row['stop_loss_amount']}원, 입찰 하한 "
+            f"{row['current_bid']}원) → 정지(D-NAO-65 지속 밸브) clk={row.get('clk')}."
+        )
+    elif target_type == "keyword":
         rationale = (
             f"[스톱로스-터미널] 입찰 하한({row['current_bid']}원) 도달 무전환 → "
             f"정지(D-NAO-60 RL4 터미널) cost={row['cost']}원 ≥ 스톱로스 {row['stop_loss_amount']}원 "
@@ -370,55 +397,78 @@ def _adgroup_is_manual_bid(adgroup_id: str) -> bool | None:
     return system_bidding_type == "NONE" and autobid_active is False
 
 
-def _stop_loss_proposal(row: dict, *, target_type: str = "keyword", manual_bid: bool | None = None) -> dict:
+def _stop_loss_proposal(
+    row: dict, *, target_type: str = "keyword", manual_bid: bool | None = None,
+) -> dict | None:
     """pause_candidates/shopping_pause_candidates 보드 1행(account_diagnosis) → 스톱로스 대응
-    제안(X1b T3 D-NAO-38 → RL4 D-NAO-60로 개명·행위 변경, 쇼핑 adgroup 확장은 X1b-S S1
-    D-NAO-43 → RL4b로 쇼핑도 고삐화, D-NAO-60).
+    제안(X1b T3 D-NAO-38 → RL4 D-NAO-60 고삐화 → DL2 D-NAO-65 pause 예외화·바닥 대기).
 
-    ★D-NAO-60 RL4(총이익 극대화, D-NAO-59): 스톱로스가 지금까지 만들던 pause(하드 정지)는
-    "볼륨 0 = 이익 0"이라 총이익 관점에서 최선이 아니다 — **키워드 경로는 정지 대신
-    순위 하향(고삐, bid_down)** 으로 바꾼다. 무전환 지출이 지속되면 다음 날 스톱로스가
-    재발동해 다시 한 등 하향(자연 graduation) → 입찰 하한(70원)까지 내려가면 그때만
-    `_terminal_pause`(최종 단계). 도중 전환이 살아나면 스톱로스 자체가 안 걸려 자동 사면된다
-    (cheaper-rank-conversion 가설의 최소 테스트).
+    ★D-NAO-60 RL4(총이익 극대화, D-NAO-59): 스톱로스는 정지 대신 순위 하향(고삐, bid_down)
+    으로 대응한다 — 무전환 지출이 지속되면 다음 날 재발동해 또 한 등 하향(자연 graduation),
+    도중 전환이 살아나면 자동 사면. 쇼핑(RL4b)도 수동입찰이면 동일 고삐.
 
-    ★RL4b(D-NAO-60, 이 함수 확장): 쇼핑(target_type='adgroup') 경로도 고삐로 확장한다 —
-    RL4가 "쇼핑은 전부 pause"로 남겨둔 갭(04·03·맥세이프가 전부 쇼핑이라 leash가 실제로
-    안 걸리던 문제)을 메운다. manual_bid는 호출부(build())가 `_adgroup_is_manual_bid`로
-    미리 해석해 넘긴다(이 함수는 API를 직접 부르지 않음 — 순수 함수 유지, 테스트 주입성).
-    manual_bid가 True이고(수동입찰 확인) 하향 여지가 있으면(스텝하한 < 현재입찰) bid_down
-    고삐, 그 외(ML 자동입찰·판정불가 None·이미 하한)는 터미널 pause — ML 자동입찰 그룹은
-    naver_sa_writer.update_adgroup_bid 자체가 fail-closed로 거부하므로 고삐를 제안해봐야
-    실행 불가(무의미한 제안 생성 금지)."""
+    ★DL2(D-NAO-65): at-floor(더 못 내림)를 "정지"가 아니라 **바닥 대기(무액션, None 반환)**
+    로 바꾼다 — 바닥(70원)에선 노출~0=출혈~0이고 익일 밴드 재시작(DL4)이 다시 기회를 준다.
+    pause는 "정책"이 아니라 "레버 불능 예외" ①②만:
+    - **예외① ML 자동입찰**(쇼핑 manual_bid가 True 아님 = False/None): 입찰 변경 API가 거부
+      하므로 pause만 실효 → 터미널 pause(불변).
+    - **예외② 레버 끊김**(쇼핑 manual_bid=True·at-floor·row['lever_broken']=True): 그룹입찰
+      하향으로 지출이 안 줄어드는 소재-레벨 입찰 정황 → pause가 유일 실효 레버.
+    manual_bid=True이고 하향 여지가 있으면(스텝하한 < 현재입찰) 기존 bid_down 고삐(불변).
+    키워드(pause_candidates) at-floor는 레버끊김 개념 없음(파워링크 키워드 입찰은 직접 유효)
+    → 바닥 대기(None). manual_bid는 호출부(build())가 `_adgroup_is_manual_bid`로 미리
+    해석해 넘긴다(이 함수는 API를 직접 부르지 않는 순수 함수 — 테스트 주입성).
+
+    ★GATE P2-2 지속 밸브(키워드·쇼핑 공통): 바닥 대기는 영구가 아니라 최대 3일의 실증 기간 —
+    at-floor에서 행동 창 ≥3일 무전환 출혈이 지속되면(진단이 row['floor_bleed'] 태깅) "레버로
+    할 수 있는 걸 다 했는데도 출혈" = 레버 불능 예외의 실증으로 터미널 pause 격상.
+    row['lever_broken']/['chronic_cpc']/['floor_bleed']/['window_days']는 account_diagnosis가
+    태깅한 값(단일 진실 소스 — k 임계·최소 실증 기간 상수는 그쪽에 canonical)."""
     if target_type == "adgroup":
         current_bid = row["current_bid"]
         step_floor = _step_down_bid(current_bid)
-        if manual_bid is True and step_floor < current_bid:
-            rationale = (
-                f"[스톱로스고삐] 무전환 누적비용 {row['cost']}원≥스톱로스 {row['stop_loss_amount']}원"
-                f"(현재입찰 {current_bid}→{step_floor}원, D-NAO-60 RL4b 쇼핑 수동입찰 한 등 하향) "
-                f"clk={row.get('clk')}."
-            )
-            return {
-                "proposal_type": _BID_DOWN,
-                "target_type": "adgroup",
-                "target_id": row["adgroup_id"],
-                "campaign_id": row["campaign_id"],
-                "rationale": rationale,
-                "expected_effect": (
-                    "무전환 지출 순위 고삐(쇼핑 수동입찰) — 정지 대신 한 등 하향, ML/하한이면 "
-                    "pause. D-NAO-59 총이익."
-                ),
-                "status": "pending",
-                "target_bid": step_floor,
-            }
+        if manual_bid is True:
+            if step_floor < current_bid:
+                # 하향 여지 있음 → 기존 bid_down 고삐(RL4b 불변).
+                rationale = (
+                    f"[스톱로스고삐] 무전환 누적비용 {row['cost']}원≥스톱로스 {row['stop_loss_amount']}원"
+                    f"(현재입찰 {current_bid}→{step_floor}원, D-NAO-60 RL4b 쇼핑 수동입찰 한 등 하향) "
+                    f"clk={row.get('clk')}."
+                )
+                return {
+                    "proposal_type": _BID_DOWN,
+                    "target_type": "adgroup",
+                    "target_id": row["adgroup_id"],
+                    "campaign_id": row["campaign_id"],
+                    "rationale": rationale,
+                    "expected_effect": (
+                        "무전환 지출 순위 고삐(쇼핑 수동입찰) — 정지 대신 한 등 하향, ML/하한이면 "
+                        "pause. D-NAO-59 총이익."
+                    ),
+                    "status": "pending",
+                    "target_bid": step_floor,
+                }
+            # at-floor(수동입찰): DL2 예외② 레버끊김 → pause / 지속 밸브 floor_bleed(GATE
+            # P2-2, 바닥 3일+ 무전환 출혈 지속) → 밸브 pause / 그 외 → 바닥 대기(None).
+            # 예외②가 밸브보다 우선(더 구체적 원인 명시가 정직 경계).
+            if row.get("lever_broken"):
+                return _terminal_pause(row, target_type=target_type, lever_broken=True)
+            if row.get("floor_bleed"):
+                return _terminal_pause(row, target_type=target_type, floor_bleed=True)
+            return None
+        # manual_bid is not True(ML 자동입찰·판정불가 None) → 예외① 터미널 pause(불변).
         return _terminal_pause(row, target_type=target_type)
 
     current_bid = row["current_bid"]
     step_floor = _step_down_bid(current_bid)
     if step_floor >= current_bid:
-        # 이미 입찰 하한(70원) — 더 내릴 여지 없음 → 최종 단계(터미널 pause).
-        return _terminal_pause(row, target_type=target_type)
+        # DL2: 이미 입찰 하한(70원) — 정지가 아니라 바닥 대기(무액션). 키워드는 레버끊김 개념
+        # 없음(직접 입찰 유효). 익일 밴드 재시작(DL4)이 기회를 준다.
+        # GATE P2-2 지속 밸브: 바닥 3일+ 무전환 출혈 지속(진단이 floor_bleed 태깅)이면 대기가
+        # 아니라 터미널 pause — 대기는 최대 3일의 실증 기간이지 영구 방치가 아니다.
+        if row.get("floor_bleed"):
+            return _terminal_pause(row, target_type=target_type, floor_bleed=True)
+        return None
 
     rationale = (
         f"[스톱로스고삐] 무전환 누적비용 {row['cost']}원≥스톱로스 {row['stop_loss_amount']}원"
@@ -739,7 +789,10 @@ def build(
         cid = row["campaign_id"]
         if cid not in ours:
             continue
-        proposals.append(_stop_loss_proposal(row))
+        # DL2(D-NAO-65): at-floor는 바닥 대기(None) — 안전 필터링(제안 생성 안 함).
+        p = _stop_loss_proposal(row)
+        if p is not None:
+            proposals.append(p)
 
     for row in boards.get("resume_candidates", []) or []:
         cid = row["campaign_id"]
@@ -758,7 +811,10 @@ def build(
         if cid not in ours:
             continue
         manual_bid = _adgroup_is_manual_bid(row["adgroup_id"])
-        proposals.append(_stop_loss_proposal(row, target_type="adgroup", manual_bid=manual_bid))
+        # DL2(D-NAO-65): at-floor·레버 정상은 바닥 대기(None) — 안전 필터링.
+        p = _stop_loss_proposal(row, target_type="adgroup", manual_bid=manual_bid)
+        if p is not None:
+            proposals.append(p)
 
     for row in boards.get("shopping_resume_candidates", []) or []:
         cid = row["campaign_id"]

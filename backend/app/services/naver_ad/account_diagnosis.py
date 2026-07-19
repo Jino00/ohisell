@@ -31,8 +31,19 @@ LOW_CLICK_THRESHOLD = 10
 _BID_CHANGE_ACTIONS = ("update_bid",)
 # 행동 창(스톱로스 발동 비용): 변경 이력 없는 유닛의 고정 폴백 = 3일(ref 33 소규모 하한 보수값).
 _STOP_LOSS_FALLBACK_DAYS = 3
-# 만성 판정 창(shopping floored_loss 보정ROAS): 7일 롤링 soft(ref 33 [1], 단발 나쁜 날로 pause 방지).
+# 만성 판정 창(shopping 레버끊김 보정ROAS·실측 CPC): 7일 롤링 soft(ref 33 [1], 단발 나쁜 날로 pause 방지).
 _CHRONIC_WINDOW_DAYS = 7
+# DL2(D-NAO-65) 예외② 레버끊김 임계 배수 — 만성 창 실측 CPC(cost/clk)가 그룹입찰의 k배를
+# 초과하면 "그룹입찰을 낮춰도 지출이 안 줄어드는" 소재-레벨 입찰 정황으로 판정한다(pause만 실효).
+# k=5 근거: D-NAO-64 MO 실사례(그룹입찰 50 vs 실측 CPC 800대 = 16배)에서 유도한 **보수값**.
+# 실측 CPC는 원래 그룹입찰을 초과할 수 없는 구조라(입찰=상한) CPC≫그룹입찰 자체가 소재-레벨
+# 입찰이 그룹입찰을 우회한다는 정의적 신호 — 배수를 크게 잡아 정상 그룹 오판을 막는다.
+_LEVER_BROKEN_CPC_MULTIPLE = 5
+# DL2 GATE P2-2: 바닥 대기 지속 밸브(floor_bleed) 최소 실증 기간 — at-floor·무전환·행동 창이
+# 이 일수 이상·창 내 비용≥스톱로스면 "레버로 할 수 있는 걸 다 했는데도 출혈 지속"의 실증 →
+# 터미널 pause 격상(무한 대기 방치 차단). 3일 = _STOP_LOSS_FALLBACK_DAYS와 동일 보수값
+# (전환 귀속 ~1일 정착 완충 포함 — 방금 바닥 도달한 유닛은 창<3일이라 대기 유지).
+_FLOOR_BLEED_MIN_DAYS = 3
 
 _Q4 = Decimal("0.0001")
 
@@ -550,11 +561,17 @@ def pause_candidates(db: Session, date_from: date, date_to: date) -> list[dict]:
         stop_loss_amount = entity.bid_amt * LOW_CLICK_THRESHOLD
         if conv_amt == 0 and cost >= stop_loss_amount:
             roas_naver = float((Decimal(conv_amt) / Decimal(cost)).quantize(_Q4)) if cost else None
+            # DL2 GATE P2-2 지속 밸브: 행동 창 길이(일) = date_to - window_start + 1(DL1 산출물
+            # 재사용, 새 상태 저장 없음). 창 ≥3일 무전환 출혈이면 floor_bleed 태깅 —
+            # _stop_loss_proposal이 at-floor시 대기 대신 밸브 pause로 격상(무한 대기 차단).
+            # at-floor 여부는 writer가 _step_down_bid로 판정(단일 진실 소스) — 여기선 기간만.
+            window_days = (date_to - window_start).days + 1
             out.append({
                 "campaign_id": entity.campaign_id, "adgroup_id": entity.parent_id,
                 "keyword_id": keyword_id, "imp": imp, "clk": clk, "cost": cost,
                 "conv_amt": conv_amt, "roas_naver": roas_naver,
                 "current_bid": entity.bid_amt, "stop_loss_amount": stop_loss_amount,
+                "floor_bleed": window_days >= _FLOOR_BLEED_MIN_DAYS, "window_days": window_days,
             })
     out.sort(key=lambda x: x["cost"], reverse=True)
     return out
@@ -670,18 +687,23 @@ def shopping_pause_candidates(
     ★D-NAO-64(A) 바닥그룹 저ROAS 지혈: 무전환(conv_amt==0)만 잡던 게이트의 사각지대 —
     전환은 조금 있으나 실질ROAS(=보정ROAS)가 BEP를 크게 밑돌고 입찰이 이미 하한(70원)이라
     bid_down(shopping_group_bep 고삐)도 불가한 그룹(맥세이프_MO 실사례: 268K 지출·실질ROAS
-    0.07·입찰 50)은 어느 레인도 안 잡았다. bep_roas·correction_factor가 주어지면 그런 그룹도
-    터미널 pause 후보로 넣는다. **입찰 여유가 있으면(하한 초과) 배제** — bid_down이 shopping_
-    group_bep의 몫이라 여기서도 잡으면 이중 제안. _stop_loss_proposal이 at-floor→터미널
-    pause로 라우팅하므로 후보 진입만 열면 지혈 완성. bep 미제공(하위호환 호출)이면 이 경로
-    휴면(무전환 게이트만 작동).
+    0.07·입찰 50)은 어느 레인도 안 잡았다. bep_roas·correction_factor가 주어지면 그런 그룹을
+    후보로 넣되, DL2(아래)부터는 **레버끊김(실측 CPC≫그룹입찰)일 때만** 넣는다(레버 정상이면
+    바닥 대기). **입찰 여유가 있으면(하한 초과) 배제** — bid_down이 shopping_group_bep의 몫이라
+    여기서도 잡으면 이중 제안. bep 미제공(하위호환 호출)이면 이 경로 휴면(무전환 게이트만 작동).
 
     ★DL1(D-NAO-65) 창 이원화:
     - **행동 창(스톱로스 비용·무전환 게이트) = 마지막 입찰변경 이후**(변경이력 없으면 3일 폴백)
       — pause_candidates와 동일(D-NAO-63 시점 불일치 소멸).
-    - **만성 판정 창(floored_loss 보정ROAS) = 7일 롤링 soft**(ref 33 [1]) — 단발 나쁜 날의
-      일별 분산으로 pause를 결정하지 않도록 명시 분리(과거 전체 창 → 7일 롤링). 이 창이
-      DL2에서 '레버 끊김' 판정기로 진화할 기반이다."""
+    - **만성 판정 창(보정ROAS·실측 CPC) = 7일 롤링 soft**(ref 33 [1]) — 단발 나쁜 날의
+      일별 분산으로 pause를 결정하지 않도록 명시 분리(과거 전체 창 → 7일 롤링).
+
+    ★DL2(D-NAO-65) 레버끊김 판정기(구 D-NAO-64 floored_loss 진화): 전환 있는 바닥손실은
+    이제 '레버끊김'(만성 창 실측 CPC = cost/clk > _LEVER_BROKEN_CPC_MULTIPLE × 그룹입찰)일
+    때만 pause 후보로 넣는다 — 레버 정상(실측 CPC ≤ k×입찰)이면 바닥에서 노출~0이라 자연
+    지혈되므로 후보 미진입(바닥 대기). 무전환 행에도 lever_broken 플래그를 태깅해
+    _stop_loss_proposal(쇼핑 경로)이 at-floor시 pause(예외②) vs 대기를 분기하게 한다.
+    reason 값: zero_conv(무전환·행동 창) / lever_broken(전환 있는 레버끊김·만성 창)."""
     on_adgroups = _on_adgroup_ids(db)
     entity_map = {
         e.entity_id: e for e in
@@ -721,8 +743,26 @@ def shopping_pause_candidates(
         stop_loss_amount = entity.bid_amt * LOW_CLICK_THRESHOLD
         if cost < stop_loss_amount:
             continue
+        # 만성 7일 창 집계 — 보정ROAS 판정용(단발 나쁜 날 조기사살 방지, DL1).
+        _, _, c_cost, c_conv = _sum_cost_conv_since(rows, chronic_from)
+        # DL2(D-NAO-65) 예외② 레버끊김: 실측 CPC(cost/clk)가 그룹입찰의 k배를 초과하면 입찰
+        # 레버가 헛도는 소재-레벨 입찰 정황. clk=0이면 CPC 계산 불가 → 판정 불가(False).
+        # ★GATE P2-1 시점 정합: CPC는 **만성 창 ∩ 마지막 실입찰변경 이후** 교집합으로 계산 —
+        # 만성 창 전체를 쓰면 입찰 하향 전 고CPC 클릭이 혼입돼, 방금 정상 하향된 그룹이
+        # "레버 끊김"으로 오판·pause된다(스톱로스 비용 창을 변경 이후로 절체한 DL1과 동일 근거).
+        # 변경 이력 없으면 만성 창 그대로(혼입 원인인 '과거 다른 입찰 구간' 자체가 없음 —
+        # 폴백 3일로 좁히면 진짜 레버끊김의 표본만 줄어 검출력 손실). 교집합에 클릭 0이면
+        # CPC None = 판정 불가 → lever_broken False(fail-safe). 보정ROAS는 만성 창 유지(목적이
+        # 다름 — 단발 나쁜 날 방지). 모든 행에 lever_broken을 태깅해 _stop_loss_proposal이
+        # at-floor시 pause(예외②) vs 바닥 대기를 분기하게 한다(무전환 행 포함).
+        cpc_from = chronic_from if last_change_date is None else max(chronic_from, last_change_date)
+        _, cpc_clk, cpc_cost, _ = _sum_cost_conv_since(rows, cpc_from)
+        chronic_cpc = int(cpc_cost // cpc_clk) if cpc_clk > 0 else None
+        lever_broken = (
+            chronic_cpc is not None and chronic_cpc > _LEVER_BROKEN_CPC_MULTIPLE * entity.bid_amt
+        )
         # GATE P2: 행동 창 2일 미만(마지막 실변경=date_to 당일)이면 zero_conv 판정 보류 —
-        # 간접전환 ~1일 정착·쇼핑 ML그룹은 터미널 pause라 오발동=실손실. floored_loss(만성
+        # 간접전환 ~1일 정착·쇼핑 ML그룹은 터미널 pause라 오발동=실손실. lever_broken(만성
         # 7일 창) 경로는 창이 길어 정착 완충이 있으므로 이 보류와 무관.
         # (GATE-2R P3: 술어는 변경일 기준 — pause_candidates와 동일 근거)
         hold_zero_conv = last_change_date is not None and last_change_date >= date_to
@@ -732,20 +772,27 @@ def shopping_pause_candidates(
                 continue  # 변경 당일 하루 창 — 귀속 지연 완충 후 다음날 정상 판정
             reason = "zero_conv"  # 기존 무전환 스톱로스(행동 창 기준)
         elif bep_roas is not None and correction_factor is not None:
-            # 전환 있음 + 실질ROAS ≪ BEP + 입찰 바닥(못 내림) = 가망 없는 출혈 → 터미널 pause.
-            # ★보정ROAS는 7일 롤링 만성 창으로 판정(단발 나쁜 날 조기사살 방지, DL1).
-            _, _, c_cost, c_conv = _sum_cost_conv_since(rows, chronic_from)
+            # 전환 있음 + 실질ROAS ≪ BEP + 입찰 바닥(못 내림) + **레버끊김** = 지혈 불능 출혈 →
+            # 터미널 pause(예외②). DL2: 레버 정상(실측 CPC≤k×입찰)이면 후보 미진입 = 바닥 대기
+            # (바닥 노출~0이라 자연 지혈). ★보정ROAS는 7일 롤링 만성 창으로 판정.
             roas_naver = float((Decimal(c_conv) / Decimal(c_cost)).quantize(_Q4)) if c_cost else None
             roas_c = _corrected_roas(roas_naver, correction_factor)
             at_floor = _step_down_bid(entity.bid_amt) >= entity.bid_amt
-            if roas_c is not None and roas_c < float(bep_roas) and at_floor:
-                reason = "floored_loss"
+            if roas_c is not None and roas_c < float(bep_roas) and at_floor and lever_broken:
+                reason = "lever_broken"
         if reason is None:
             continue
+        # DL2 GATE P2-2 지속 밸브: 무전환(zero_conv) 유닛의 행동 창이 ≥3일이면 floor_bleed
+        # 태깅(비용≥스톱로스는 이미 후보 게이트) — writer가 at-floor시 대기 대신 밸브 pause.
+        # at-floor 판정은 writer의 _step_down_bid(단일 진실 소스) 몫이라 여기선 기간만 본다.
+        window_days = (date_to - window_start).days + 1
         out.append({
             "campaign_id": entity.campaign_id, "adgroup_id": adgroup_id, "cost": cost,
             "conv_amt": conv_amt, "current_bid": entity.bid_amt,
             "stop_loss_amount": stop_loss_amount, "reason": reason,
+            "lever_broken": lever_broken, "chronic_cpc": chronic_cpc,
+            "floor_bleed": reason == "zero_conv" and window_days >= _FLOOR_BLEED_MIN_DAYS,
+            "window_days": window_days,
         })
     out.sort(key=lambda x: x["cost"], reverse=True)
     return out

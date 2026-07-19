@@ -326,15 +326,27 @@ def test_stop_loss_proposal_keyword_near_floor_produces_bid_down_to_70():
     assert p["target_bid"] == 70
 
 
-def test_stop_loss_proposal_keyword_at_floor_produces_terminal_pause():
-    """current_bid=70(이미 절대 하한, 더 못 내림) → 정지(터미널, D-NAO-60 RL4)."""
+def test_stop_loss_proposal_keyword_at_floor_produces_hold_none():
+    """DL2(D-NAO-65): current_bid=70(이미 절대 하한, 더 못 내림) → 정지가 아니라 **바닥 대기**
+    (제안 None). 바닥 70원=노출~0=출혈~0, 익일 밴드 재시작(DL4)이 다시 기회를 준다. 키워드는
+    레버끊김 개념 없음(파워링크 키워드 입찰은 직접 유효) → 대기(지속 밸브 floor_bleed 미태깅 시)."""
     row = _pause_row(current_bid=70, stop_loss_amount=700, cost=700)
+    p = proposal_writer._stop_loss_proposal(row)
+    assert p is None
+
+
+def test_stop_loss_proposal_keyword_at_floor_floor_bleed_produces_valve_pause():
+    """DL2 GATE P2-2 지속 밸브: at-floor ∧ 무전환 ∧ 행동 창 ≥3일 ∧ 비용≥스톱로스(floor_bleed
+    태깅)면 대기가 아니라 터미널 pause — 바닥에서 3일+ 출혈 지속 = 레버 불능 예외의 실증."""
+    row = _pause_row(current_bid=70, stop_loss_amount=700, cost=2100,
+                     floor_bleed=True, window_days=3)
     p = proposal_writer._stop_loss_proposal(row)
     assert p["proposal_type"] == "pause"
     assert p["target_type"] == "keyword"
     assert p["target_lock"] is True
-    assert p.get("target_bid") is None  # pause 딕셔너리는 target_bid 키 자체를 안 담음(기존 관례)
-    assert "터미널" in p["rationale"]
+    assert "지속 밸브" in p["rationale"]
+    assert "3일" in p["rationale"]
+    assert "2100" in p["rationale"]
 
 
 def test_stop_loss_proposal_adgroup_manual_bid_none_defaults_to_pause():
@@ -368,14 +380,63 @@ def test_stop_loss_proposal_adgroup_manual_bid_true_with_headroom_produces_bid_d
     assert "RL4b" in p["rationale"]
 
 
-def test_stop_loss_proposal_adgroup_manual_bid_true_at_floor_produces_terminal_pause():
-    """manual_bid=True여도 이미 입찰 하한(70원)이면 더 내릴 여지가 없어 터미널 pause."""
+def test_stop_loss_proposal_adgroup_manual_bid_true_at_floor_lever_normal_produces_hold_none():
+    """DL2(D-NAO-65): manual_bid=True로 이미 입찰 하한(70원)이고 레버 정상(lever_broken 미태깅)
+    이면 정지가 아니라 **바닥 대기**(제안 None) — 레버가 살아있으면 바닥에서 노출/지출~0이라
+    자연 지혈, 익일 밴드 재시작이 기회를 준다."""
     row = {"campaign_id": "cmp-ours", "adgroup_id": "grp-shop-1", "cost": 700, "conv_amt": 0,
            "current_bid": 70, "stop_loss_amount": 700}
     p = proposal_writer._stop_loss_proposal(row, target_type="adgroup", manual_bid=True)
+    assert p is None
+
+
+def test_stop_loss_proposal_adgroup_manual_bid_true_at_floor_lever_broken_produces_pause():
+    """DL2(D-NAO-65) 예외②: manual_bid=True·at-floor여도 레버끊김(lever_broken=True — 그룹입찰
+    하향으로 지출이 안 줄어드는 소재-레벨 입찰 정황)이면 pause가 유일 실효 레버 → 터미널 pause."""
+    row = {"campaign_id": "cmp-ours", "adgroup_id": "grp-shop-1", "cost": 2500, "conv_amt": 0,
+           "current_bid": 70, "stop_loss_amount": 700, "lever_broken": True, "chronic_cpc": 500}
+    p = proposal_writer._stop_loss_proposal(row, target_type="adgroup", manual_bid=True)
     assert p["proposal_type"] == "pause"
+    assert p["target_type"] == "adgroup"
     assert p["target_lock"] is True
     assert p.get("target_bid") is None
+    assert "레버 끊김" in p["rationale"]
+    assert "500" in p["rationale"]  # 실측 CPC 명기
+
+
+def test_stop_loss_proposal_adgroup_at_floor_floor_bleed_produces_valve_pause():
+    """DL2 GATE P2-2 지속 밸브(쇼핑 대칭): manual_bid=True·at-floor·레버 정상이어도 floor_bleed
+    (바닥 3일+ 무전환 출혈 지속) 태깅이면 터미널 pause — 무한 대기 방치 차단."""
+    row = {"campaign_id": "cmp-ours", "adgroup_id": "grp-shop-1", "cost": 2400, "conv_amt": 0,
+           "current_bid": 70, "stop_loss_amount": 700, "floor_bleed": True, "window_days": 3}
+    p = proposal_writer._stop_loss_proposal(row, target_type="adgroup", manual_bid=True)
+    assert p["proposal_type"] == "pause"
+    assert p["target_type"] == "adgroup"
+    assert p["target_lock"] is True
+    assert "지속 밸브" in p["rationale"]
+    assert "3일" in p["rationale"]
+
+
+def test_stop_loss_proposal_adgroup_lever_broken_takes_precedence_over_floor_bleed():
+    """예외②(레버끊김)가 밸브(floor_bleed)보다 우선 — 둘 다 참이면 사유문은 레버 끊김
+    (더 구체적 원인 명시가 정직 경계)."""
+    row = {"campaign_id": "cmp-ours", "adgroup_id": "grp-shop-1", "cost": 2400, "conv_amt": 0,
+           "current_bid": 70, "stop_loss_amount": 700, "lever_broken": True, "chronic_cpc": 600,
+           "floor_bleed": True, "window_days": 3}
+    p = proposal_writer._stop_loss_proposal(row, target_type="adgroup", manual_bid=True)
+    assert p["proposal_type"] == "pause"
+    assert "레버 끊김" in p["rationale"]
+    assert "지속 밸브" not in p["rationale"]
+
+
+def test_stop_loss_proposal_adgroup_ml_at_floor_still_pauses_exception1():
+    """DL2 예외①(불변): ML(manual_bid=False)은 at-floor·레버 정상이어도 pause — 입찰 API가
+    거부하므로 pause만 실효(대기로 격하하지 않는다)."""
+    row = {"campaign_id": "cmp-ours", "adgroup_id": "grp-shop-1", "cost": 700, "conv_amt": 0,
+           "current_bid": 70, "stop_loss_amount": 700}
+    p = proposal_writer._stop_loss_proposal(row, target_type="adgroup", manual_bid=False)
+    assert p["proposal_type"] == "pause"
+    assert p["target_lock"] is True
 
 
 def test_stop_loss_proposal_adgroup_manual_bid_false_ml_produces_pause():
@@ -398,11 +459,13 @@ def test_stop_loss_proposal_adgroup_manual_bid_none_produces_pause():
     assert p["target_lock"] is True
 
 
-def test_stop_loss_proposal_adgroup_floored_loss_nonzero_conv_pause_rationale_honest():
-    """D-NAO-64(A): 전환 있는 바닥손실 그룹(맥세이프_MO)의 터미널 pause 사유문은 '무전환'이라
-    하지 않는다(정직 경계) — 전환은 있으나 실질ROAS≪BEP + 입찰 하한이라 하향 불가."""
+def test_stop_loss_proposal_adgroup_lever_broken_nonzero_conv_pause_rationale_honest():
+    """D-NAO-64(A) 계승 + DL2(D-NAO-65) 예외②: 전환 있는 레버끊김 그룹(맥세이프_MO)의 터미널
+    pause 사유문은 '무전환'이라 하지 않고(정직 경계), 레버 끊김(실측 CPC≫그룹입찰)을 사실
+    명시한다 — 전환은 있으나 실질ROAS≪BEP + 그룹입찰 하향으로 지출 제어 불가."""
     row = {"campaign_id": "cmp-ours", "adgroup_id": "grp-mo", "cost": 268172, "conv_amt": 50700,
-           "current_bid": 50, "stop_loss_amount": 500, "reason": "floored_loss"}
+           "current_bid": 50, "stop_loss_amount": 500, "reason": "lever_broken",
+           "lever_broken": True, "chronic_cpc": 800}
     p = proposal_writer._stop_loss_proposal(row, target_type="adgroup", manual_bid=True)
     assert p["proposal_type"] == "pause"
     assert p["target_lock"] is True
@@ -410,6 +473,13 @@ def test_stop_loss_proposal_adgroup_floored_loss_nonzero_conv_pause_rationale_ho
     assert "무전환" not in p["rationale"]        # 전환이 있으므로 거짓말 금지
     assert "무전환" not in p["expected_effect"]
     assert "50700" in p["rationale"]             # 실제 전환 금액 명기
+    assert "레버 끊김" in p["rationale"]          # 예외② 사실 명시
+    assert "800" in p["rationale"]               # 실측 CPC 명기
+    assert "50" in p["rationale"]                # 그룹입찰 명기
+    # GATE P3-5: 창 라벨 명시 — CPC는 만성 7일∩변경 후 교집합, 누적비용은 변경 후 행동 창
+    # (서로 다른 창의 수치를 한 문장에 쓰므로 라벨 없으면 오독, 정직 경계).
+    assert "만성 7일∩변경 후" in p["rationale"]
+    assert "변경 후 창" in p["rationale"]
 
 
 # ── _adgroup_is_manual_bid: naver_sa_writer.update_adgroup_bid와 동일 ML 판정 재사용 ──
@@ -475,16 +545,31 @@ def test_build_pause_candidate_produces_bid_down_leash_not_pause(db):
     assert "스톱로스고삐" in out[0]["rationale"]
 
 
-def test_build_pause_candidate_at_floor_still_produces_terminal_pause(db):
-    """RL4 터미널 단계: 입찰이 이미 하한(70원)이면 여전히 pause가 나온다."""
+def test_build_pause_candidate_at_floor_produces_hold_no_proposal(db):
+    """DL2(D-NAO-65): 키워드 입찰이 이미 하한(70원)이면 정지가 아니라 바닥 대기 —
+    build()가 None을 안전 필터링해 제안이 0건이다."""
     db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
     db.commit()
     diagnosis = _diagnosis(pause_candidates=[_pause_row(current_bid=70, stop_loss_amount=700, cost=700)])
 
     out = proposal_writer.build(db, diagnosis, as_of=AS_OF)
+    assert out == []
+
+
+def test_build_pause_candidate_at_floor_floor_bleed_produces_valve_pause(db):
+    """DL2 GATE P2-2 배선: 진단이 floor_bleed를 태깅한 at-floor 키워드는 build()가 밸브
+    pause를 만든다(무한 대기 방치 차단)."""
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    row = _pause_row(current_bid=70, stop_loss_amount=700, cost=2100,
+                     floor_bleed=True, window_days=3)
+    diagnosis = _diagnosis(pause_candidates=[row])
+
+    out = proposal_writer.build(db, diagnosis, as_of=AS_OF)
     assert len(out) == 1
     assert out[0]["proposal_type"] == "pause"
     assert out[0]["target_lock"] is True
+    assert "지속 밸브" in out[0]["rationale"]
 
 
 def test_build_pause_candidate_skips_non_ours_campaign(db):
@@ -508,9 +593,12 @@ def test_persist_stop_loss_bid_down_leash_stores_target_bid_no_lock(db):
 
 
 def test_persist_stop_loss_terminal_pause_stores_target_lock_true(db):
-    row = _pause_row(current_bid=70, stop_loss_amount=700, cost=700)
-    p = proposal_writer._stop_loss_proposal(row)
+    """DL2: 키워드 at-floor는 이제 대기(None)라 터미널 pause를 안 만든다 — 터미널 pause의
+    persist 회귀는 쇼핑 ML(예외①) 경로로 고정한다(pause·target_lock=True·target_bid None)."""
+    row = _shopping_pause_row()
+    p = proposal_writer._stop_loss_proposal(row, target_type="adgroup", manual_bid=False)
     saved = proposal_writer.persist(db, [p])
+    assert saved[0].proposal_type == "pause"
     assert saved[0].target_lock is True
     assert saved[0].target_bid is None
 
@@ -608,6 +696,37 @@ def test_build_shopping_pause_candidate_manual_bid_none_produces_pause(db, monke
     out = proposal_writer.build(db, diagnosis, as_of=AS_OF)
     assert len(out) == 1
     assert out[0]["proposal_type"] == "pause"
+
+
+def test_build_shopping_pause_candidate_at_floor_lever_normal_holds(db, monkeypatch):
+    """DL2(D-NAO-65): 수동입찰·at-floor(70원)·레버 정상(lever_broken 미태깅) 쇼핑 그룹은
+    바닥 대기 — build()가 None을 안전 필터링해 제안 0건."""
+    monkeypatch.setattr(proposal_writer, "_adgroup_is_manual_bid", lambda adgroup_id: True)
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    row = _shopping_pause_row(current_bid=70, stop_loss_amount=700, cost=700)
+    diagnosis = _diagnosis(shopping_pause_candidates=[row])
+
+    out = proposal_writer.build(db, diagnosis, as_of=AS_OF)
+    assert out == []
+
+
+def test_build_shopping_pause_candidate_at_floor_lever_broken_produces_pause(db, monkeypatch):
+    """DL2(D-NAO-65) 예외②: 수동입찰·at-floor·레버끊김(lever_broken=True) 쇼핑 그룹은 pause가
+    유일 실효 레버 → 터미널 pause."""
+    monkeypatch.setattr(proposal_writer, "_adgroup_is_manual_bid", lambda adgroup_id: True)
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    row = _shopping_pause_row(current_bid=70, stop_loss_amount=700, cost=2500,
+                              lever_broken=True, chronic_cpc=500)
+    diagnosis = _diagnosis(shopping_pause_candidates=[row])
+
+    out = proposal_writer.build(db, diagnosis, as_of=AS_OF)
+    assert len(out) == 1
+    assert out[0]["proposal_type"] == "pause"
+    assert out[0]["target_type"] == "adgroup"
+    assert out[0]["target_lock"] is True
+    assert "레버 끊김" in out[0]["rationale"]
 
 
 def test_build_shopping_pause_candidate_skips_non_ours_campaign(db):
