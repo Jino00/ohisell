@@ -4,18 +4,21 @@
 #   SA간 직접 호출 금지(원칙18) — harness(proposal_pipeline, T5)가 diagnosis·bid_sims를 넘긴다.
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_CEILING
 
 from sqlalchemy.orm import Session
 
 from app.models import NaverCampaignSettings, NaverProposal
-from app.services.naver_ad import campaign_target_resolver, growth_sweeper
+from app.services.naver_ad import campaign_target_resolver, growth_sweeper, naver_sa_writer
 # 라이브[P1] DOA 수정: 생성 단계 스텝 클램프의 스텝 상수는 실행 가드레일과 단일 진실 소스
 # (하드코딩 0.15 중복 금지 — 드리프트 방지). guardrail_gate는 이 모듈을 import하지 않아 순환 없음.
 from app.services.naver_ad.guardrail_gate import _MAX_CHANGE_PCT
 from app.services.naver_ad.trigger_watch import PROPOSAL_TYPE_CPC, PROPOSAL_TYPE_PACING
 from app.utils.kst import kst_today
+
+log = logging.getLogger(__name__)
 
 _NEGATIVE = "negative_keyword"
 _GROWTH_BID_UP = "growth_bid_up"
@@ -291,9 +294,11 @@ def _negative_keyword_from_exclusion(row: dict, campaign_id: str) -> dict:
 
 def _terminal_pause(row: dict, *, target_type: str) -> dict:
     """스톱로스 대응의 최종 단계(터미널) — pause 제안 1건. RL4(D-NAO-60) 이전엔 스톱로스의
-    유일한 대응이었으나(구 `_pause_proposal`), 이제는 (a) 쇼핑 adgroup 경로 전체, (b) 키워드
-    경로에서 고삐(bid_down)가 입찰 하한(70원)까지 내려가 더는 하향할 여지가 없을 때만
-    쓰인다 — `_stop_loss_proposal`이 호출한다(SA 직접 호출 금지, 이 함수는 비공개).
+    유일한 대응이었으나(구 `_pause_proposal`), 이제는 (a) 쇼핑 adgroup 경로에서 ML 자동입찰
+    (또는 판정불가)이거나 고삐가 이미 입찰 하한(70원)이라 더는 내릴 여지가 없을 때(RL4b,
+    D-NAO-60 — 수동입찰이고 하향 여지가 있으면 대신 bid_down 고삐), (b) 키워드 경로에서
+    고삐(bid_down)가 입찰 하한(70원)까지 내려가 더는 하향할 여지가 없을 때만 쓰인다 —
+    `_stop_loss_proposal`이 호출한다(SA 직접 호출 금지, 이 함수는 비공개).
 
     target_type='keyword'는 WEB_SITE 키워드(pause_candidates 보드, target_id=row["keyword_id"]),
     'adgroup'은 SHOPPING 광고그룹(shopping_pause_candidates 보드, target_id=row["adgroup_id"]).
@@ -331,10 +336,32 @@ def _terminal_pause(row: dict, *, target_type: str) -> dict:
     }
 
 
-def _stop_loss_proposal(row: dict, *, target_type: str = "keyword") -> dict:
+def _adgroup_is_manual_bid(adgroup_id: str) -> bool | None:
+    """쇼핑 광고그룹이 수동입찰인지 판정(RL4b, D-NAO-60) — naver_sa_writer.update_adgroup_bid의
+    ML 자동입찰 사전가드와 동일 판정을 생성 단계에서 재사용한다(추정 금지·단일 진실 소스 —
+    같은 판정을 두 곳에 따로 구현하면 드리프트 위험). systemBiddingType이 'NONE'이고
+    autobidStrategy.isAutobidActive가 명시적으로 False일 때만 True(수동) — 그 외(ML·필드
+    누락·비-dict·불명)는 전부 False(update_adgroup_bid와 동일하게 모호하면 차단 쪽으로,
+    fail-closed on ambiguity).
+
+    재조회(GET) 자체가 실패(API 예외·404/403 등)하면 판정 자체가 불가능하므로 None을
+    반환한다 — 호출부(_stop_loss_proposal)는 manual_bid가 True가 아니면 전부 터미널
+    pause로 처리하므로 None도 안전 쪽(정지)으로 떨어진다(fail-closed)."""
+    try:
+        adgroup = naver_sa_writer._get_adgroup(adgroup_id)
+    except Exception as e:  # noqa: BLE001 — 재조회 실패는 판정불가(None), 호출부가 안전측(pause) 처리
+        log.warning("proposal_writer: adgroup 입찰유형 재조회 실패 adgroup=%s: %s", adgroup_id, e)
+        return None
+    system_bidding_type = adgroup.get("systemBiddingType")
+    autobid_strategy = adgroup.get("autobidStrategy")
+    autobid_active = autobid_strategy.get("isAutobidActive") if isinstance(autobid_strategy, dict) else None
+    return system_bidding_type == "NONE" and autobid_active is False
+
+
+def _stop_loss_proposal(row: dict, *, target_type: str = "keyword", manual_bid: bool | None = None) -> dict:
     """pause_candidates/shopping_pause_candidates 보드 1행(account_diagnosis) → 스톱로스 대응
     제안(X1b T3 D-NAO-38 → RL4 D-NAO-60로 개명·행위 변경, 쇼핑 adgroup 확장은 X1b-S S1
-    D-NAO-43).
+    D-NAO-43 → RL4b로 쇼핑도 고삐화, D-NAO-60).
 
     ★D-NAO-60 RL4(총이익 극대화, D-NAO-59): 스톱로스가 지금까지 만들던 pause(하드 정지)는
     "볼륨 0 = 이익 0"이라 총이익 관점에서 최선이 아니다 — **키워드 경로는 정지 대신
@@ -343,11 +370,36 @@ def _stop_loss_proposal(row: dict, *, target_type: str = "keyword") -> dict:
     `_terminal_pause`(최종 단계). 도중 전환이 살아나면 스톱로스 자체가 안 걸려 자동 사면된다
     (cheaper-rank-conversion 가설의 최소 테스트).
 
-    **쇼핑(target_type='adgroup') 경로는 변경 없음 — 여전히 pause.** 이유: ①ML/수동 입찰
-    판별 복잡성(update_adgroup_bid가 systemBidding이면 fail-closed라 고삐 신뢰 불가)
-    ②ours auto_operate 대상 캠페인(04·P_Test)은 전부 WEB_SITE 키워드 grain이라 실제 자동운영
-    대상은 키워드 경로가 이미 커버. 쇼핑 고삐 개방은 별도 결정(§7 잔여 항목 아님, 스코프 밖)."""
+    ★RL4b(D-NAO-60, 이 함수 확장): 쇼핑(target_type='adgroup') 경로도 고삐로 확장한다 —
+    RL4가 "쇼핑은 전부 pause"로 남겨둔 갭(04·03·맥세이프가 전부 쇼핑이라 leash가 실제로
+    안 걸리던 문제)을 메운다. manual_bid는 호출부(build())가 `_adgroup_is_manual_bid`로
+    미리 해석해 넘긴다(이 함수는 API를 직접 부르지 않음 — 순수 함수 유지, 테스트 주입성).
+    manual_bid가 True이고(수동입찰 확인) 하향 여지가 있으면(스텝하한 < 현재입찰) bid_down
+    고삐, 그 외(ML 자동입찰·판정불가 None·이미 하한)는 터미널 pause — ML 자동입찰 그룹은
+    naver_sa_writer.update_adgroup_bid 자체가 fail-closed로 거부하므로 고삐를 제안해봐야
+    실행 불가(무의미한 제안 생성 금지)."""
     if target_type == "adgroup":
+        current_bid = row["current_bid"]
+        step_floor = _step_down_bid(current_bid)
+        if manual_bid is True and step_floor < current_bid:
+            rationale = (
+                f"[스톱로스고삐] 무전환 누적비용 {row['cost']}원≥스톱로스 {row['stop_loss_amount']}원"
+                f"(현재입찰 {current_bid}→{step_floor}원, D-NAO-60 RL4b 쇼핑 수동입찰 한 등 하향) "
+                f"clk={row.get('clk')}."
+            )
+            return {
+                "proposal_type": _BID_DOWN,
+                "target_type": "adgroup",
+                "target_id": row["adgroup_id"],
+                "campaign_id": row["campaign_id"],
+                "rationale": rationale,
+                "expected_effect": (
+                    "무전환 지출 순위 고삐(쇼핑 수동입찰) — 정지 대신 한 등 하향, ML/하한이면 "
+                    "pause. D-NAO-59 총이익."
+                ),
+                "status": "pending",
+                "target_bid": step_floor,
+            }
         return _terminal_pause(row, target_type=target_type)
 
     current_bid = row["current_bid"]
@@ -686,11 +738,15 @@ def build(
     # shopping_pause_candidates/shopping_resume_candidates(X1b-S S1, D-NAO-43): 위
     # pause_candidates/resume_candidates의 SHOPPING adgroup 대칭 확장 — D-NAO-13 ours 필터
     # 동일 적용(실행형 제안).
+    # RL4b(D-NAO-60): 쇼핑 경로도 이제 고삐(bid_down)로 확장 — 대상이 수동입찰인지는
+    # `_adgroup_is_manual_bid`(라이브 재조회)로 여기서 미리 해석해 `_stop_loss_proposal`에
+    # 넘긴다(그 함수는 API를 직접 부르지 않는 순수 함수로 유지 — 테스트 주입성).
     for row in boards.get("shopping_pause_candidates", []) or []:
         cid = row["campaign_id"]
         if cid not in ours:
             continue
-        proposals.append(_stop_loss_proposal(row, target_type="adgroup"))
+        manual_bid = _adgroup_is_manual_bid(row["adgroup_id"])
+        proposals.append(_stop_loss_proposal(row, target_type="adgroup", manual_bid=manual_bid))
 
     for row in boards.get("shopping_resume_candidates", []) or []:
         cid = row["campaign_id"]
