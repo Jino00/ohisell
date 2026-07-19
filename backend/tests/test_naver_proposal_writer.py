@@ -398,6 +398,20 @@ def test_stop_loss_proposal_adgroup_manual_bid_none_produces_pause():
     assert p["target_lock"] is True
 
 
+def test_stop_loss_proposal_adgroup_floored_loss_nonzero_conv_pause_rationale_honest():
+    """D-NAO-64(A): 전환 있는 바닥손실 그룹(맥세이프_MO)의 터미널 pause 사유문은 '무전환'이라
+    하지 않는다(정직 경계) — 전환은 있으나 실질ROAS≪BEP + 입찰 하한이라 하향 불가."""
+    row = {"campaign_id": "cmp-ours", "adgroup_id": "grp-mo", "cost": 268172, "conv_amt": 50700,
+           "current_bid": 50, "stop_loss_amount": 500, "reason": "floored_loss"}
+    p = proposal_writer._stop_loss_proposal(row, target_type="adgroup", manual_bid=True)
+    assert p["proposal_type"] == "pause"
+    assert p["target_lock"] is True
+    assert p.get("target_bid") is None
+    assert "무전환" not in p["rationale"]        # 전환이 있으므로 거짓말 금지
+    assert "무전환" not in p["expected_effect"]
+    assert "50700" in p["rationale"]             # 실제 전환 금액 명기
+
+
 # ── _adgroup_is_manual_bid: naver_sa_writer.update_adgroup_bid와 동일 ML 판정 재사용 ──
 
 
