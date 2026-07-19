@@ -312,11 +312,20 @@ def _terminal_pause(row: dict, *, target_type: str) -> dict:
     목적이라 target_roas 근거 병기가 불필요(스톱로스는 손익 목표와 무관한 절대액 안전핀)."""
     target_id = row["keyword_id"] if target_type == "keyword" else row["adgroup_id"]
     board_name = "pause_candidates" if target_type == "keyword" else "shopping_pause_candidates"
+    # D-NAO-64(A): 바닥그룹 저ROAS 정지는 전환이 "있는데도" 실질ROAS≪BEP·입찰 하한이라
+    # 정지하는 경우(맥세이프_MO) — 사유문에 '무전환'이라 쓰면 거짓(정직 경계). 전환 유무로 분기.
+    conv_amt = int(row.get("conv_amt") or 0)
     if target_type == "keyword":
         rationale = (
             f"[스톱로스-터미널] 입찰 하한({row['current_bid']}원) 도달 무전환 → "
             f"정지(D-NAO-60 RL4 터미널) cost={row['cost']}원 ≥ 스톱로스 {row['stop_loss_amount']}원 "
             f"clk={row.get('clk')}."
+        )
+    elif conv_amt > 0:
+        rationale = (
+            f"[{board_name}] 저ROAS 바닥그룹(전환 {conv_amt}원 있으나 실질ROAS≪BEP) 누적비용 "
+            f"{row['cost']}원 ≥ 스톱로스 {row['stop_loss_amount']}원(현재입찰={row['current_bid']}원 "
+            f"입찰 하한이라 하향 불가 → 정지, D-NAO-64) clk={row.get('clk')}."
         )
     else:
         rationale = (
@@ -331,7 +340,10 @@ def _terminal_pause(row: dict, *, target_type: str) -> dict:
         "adgroup_id": row["adgroup_id"] if target_type == "keyword" else None,
         "target_lock": True,
         "rationale": rationale,
-        "expected_effect": "무전환 지출 중단 — 추가 비용 발생 차단(D-NAO-16 정지).",
+        "expected_effect": (
+            "손실 지출 중단 — 추가 비용 발생 차단(D-NAO-16 정지)." if conv_amt > 0
+            else "무전환 지출 중단 — 추가 비용 발생 차단(D-NAO-16 정지)."
+        ),
         "status": "pending",
     }
 

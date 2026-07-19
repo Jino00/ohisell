@@ -525,7 +525,10 @@ def resume_candidates(
     return out
 
 
-def shopping_pause_candidates(db: Session, date_from: date, date_to: date) -> list[dict]:
+def shopping_pause_candidates(
+    db: Session, date_from: date, date_to: date,
+    bep_roas: Decimal | None = None, correction_factor: Decimal | None = None,
+) -> list[dict]:
     """쇼핑 정지 후보 (X1b-S S1 T2, D-NAO-43) — pause_candidates(WEB_SITE 키워드 전용)의
     SHOPPING adgroup 대칭 확장. 대상=NaverEntity entity_type='adgroup', status='on',
     campaign_type='SHOPPING'이고 부모 캠페인도 on(_on_adgroup_ids 재사용 — 대상 자신이 이미
@@ -533,7 +536,16 @@ def shopping_pause_candidates(db: Session, date_from: date, date_to: date) -> li
 
     스톱로스 절대액 = 현재입찰가(entity.bid_amt) × LOW_CLICK_THRESHOLD — pause_candidates와
     동일 상수·산식(D-NAO-20). NaverEntity에 bid_amt가 없는(미확보) 그룹은 계산 불가라
-    fail-closed 제외."""
+    fail-closed 제외.
+
+    ★D-NAO-64(A) 바닥그룹 저ROAS 지혈: 무전환(conv_amt==0)만 잡던 게이트의 사각지대 —
+    전환은 조금 있으나 실질ROAS(=보정ROAS)가 BEP를 크게 밑돌고 입찰이 이미 하한(70원)이라
+    bid_down(shopping_group_bep 고삐)도 불가한 그룹(맥세이프_MO 실사례: 268K 지출·실질ROAS
+    0.07·입찰 50)은 어느 레인도 안 잡았다. bep_roas·correction_factor가 주어지면 그런 그룹도
+    터미널 pause 후보로 넣는다. **입찰 여유가 있으면(하한 초과) 배제** — bid_down이 shopping_
+    group_bep의 몫이라 여기서도 잡으면 이중 제안. _stop_loss_proposal이 at-floor→터미널
+    pause로 라우팅하므로 후보 진입만 열면 지혈 완성. bep 미제공(하위호환 호출)이면 이 경로
+    휴면(무전환 게이트만 작동)."""
     on_adgroups = _on_adgroup_ids(db)
     entity_map = {
         e.entity_id: e for e in
@@ -560,6 +572,10 @@ def shopping_pause_candidates(db: Session, date_from: date, date_to: date) -> li
         .group_by(NaverAdDaily.campaign_id, NaverAdDaily.adgroup_id)
         .all()
     )
+    # D-NAO-64(A): at-floor(못 내림) 판정은 스텝하향의 단일 진실원천 재사용(하드코딩 70 금지,
+    # _MAX_CHANGE_PCT 변경 시 자동 정합). 함수 레벨 import로 순환 의존 회피(호출 시점 해석).
+    from app.services.naver_ad.proposal_writer import _step_down_bid
+
     out = []
     for campaign_id, adgroup_id, cost, conv_direct, conv_indirect in q:
         cost = int(cost)
@@ -572,12 +588,25 @@ def shopping_pause_candidates(db: Session, date_from: date, date_to: date) -> li
             continue
         conv_amt = int(conv_direct) + int(conv_indirect)
         stop_loss_amount = entity.bid_amt * LOW_CLICK_THRESHOLD
-        if conv_amt == 0 and cost >= stop_loss_amount:
-            out.append({
-                "campaign_id": campaign_id, "adgroup_id": adgroup_id, "cost": cost,
-                "conv_amt": conv_amt, "current_bid": entity.bid_amt,
-                "stop_loss_amount": stop_loss_amount,
-            })
+        if cost < stop_loss_amount:
+            continue
+        reason: str | None = None
+        if conv_amt == 0:
+            reason = "zero_conv"  # 기존 무전환 스톱로스
+        elif bep_roas is not None and correction_factor is not None:
+            # 전환 있음 + 실질ROAS ≪ BEP + 입찰 바닥(못 내림) = 가망 없는 출혈 → 터미널 pause.
+            roas_naver = float((Decimal(conv_amt) / Decimal(cost)).quantize(_Q4))
+            roas_c = _corrected_roas(roas_naver, correction_factor)
+            at_floor = _step_down_bid(entity.bid_amt) >= entity.bid_amt
+            if roas_c is not None and roas_c < float(bep_roas) and at_floor:
+                reason = "floored_loss"
+        if reason is None:
+            continue
+        out.append({
+            "campaign_id": campaign_id, "adgroup_id": adgroup_id, "cost": cost,
+            "conv_amt": conv_amt, "current_bid": entity.bid_amt,
+            "stop_loss_amount": stop_loss_amount, "reason": reason,
+        })
     out.sort(key=lambda x: x["cost"], reverse=True)
     return out
 

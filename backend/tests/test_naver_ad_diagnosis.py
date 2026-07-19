@@ -244,6 +244,31 @@ def test_build_diagnosis_assembles_all_boards(db):
     assert result["account_bep_roas"] == pytest.approx(3.3333)
 
 
+def test_build_diagnosis_shopping_pause_flags_floored_loss_group(db):
+    # D-NAO-64(A) 배선 검증: build_diagnosis가 shopping_pause_candidates에 account BEP·보정계수를
+    # 넘겨야 바닥손실 그룹(전환 있으나 실질ROAS≪BEP·입찰 하한 50)이 정지 후보로 잡힌다.
+    # 이 배선이 없으면 fix가 prod에서 휴면(무전환만 잡던 원래 버그 유지).
+    db.add(NaverProductBep(
+        channel_id=6, channel_product_id="cp-1", product_name="테스트상품",
+        selling_price=Decimal("10000"), cost_price=Decimal("5000"),
+        commission_rate=Decimal("0.05"), logistics_cost=Decimal("1000"),
+        contribution_margin=Decimal("3000"), bep_roas=Decimal("3.3333"),
+        aggressiveness="standard", target_roas=Decimal("3.8333"), has_cost=True,
+    ))
+    db.add(Order(channel_id=6, platform_product_id="cp-1", order_number="ORD-1",
+                  order_date=D_TO, status="정상", selling_price=Decimal("10000")))
+    _row(db, D0, "cmp1", "WEB_SITE", "grp1", "nkw-1", 100, 10, 10000, direct=1000)
+    _seed_shopping_active_campaign(db, campaign_id="cmp-shop")
+    _shopping_entity(db, "grp-mo", status="on", bid_amt=50, campaign_id="cmp-shop")
+    _row(db, D0, "cmp-shop", "SHOPPING", "grp-mo", "", 500, 25, 3000, direct=300)  # 실질ROAS≪BEP
+    db.commit()
+
+    result = build_diagnosis(db, D0, D_TO)
+    board = result["boards"]["shopping_pause_candidates"]
+    assert [r["adgroup_id"] for r in board] == ["grp-mo"]
+    assert board[0]["reason"] == "floored_loss"
+
+
 # ── pause_candidates (X1b T3, D-NAO-38) ──
 
 
@@ -722,6 +747,77 @@ def test_shopping_pause_candidates_sorted_by_cost_desc(db):
 
     out = diag.shopping_pause_candidates(db, D0, D0)
     assert [r["adgroup_id"] for r in out] == ["grp-shop-2", "grp-shop-1"]
+
+
+# ── D-NAO-64(A) 바닥그룹 저ROAS 지혈: 전환은 있으나 실질ROAS≪BEP + 입찰 바닥(못 내림) ──
+# 스톱로스 사각지대(맥세이프_MO 실사례): conv_amt>0이라 무전환 게이트를 통과 못 하고, 그룹
+# 입찰이 하한(70) 이하라 bid_down도 불가 → 어느 레인도 안 잡던 손실 그룹을 터미널 pause 후보로.
+
+
+def test_shopping_pause_candidates_floored_loss_nonzero_conv_included(db):
+    # 맥세이프_MO 재현: bid 50(하한 70 이하=못 내림), 무전환 아님(conv), 실질ROAS≪BEP.
+    # stop_loss = 50*10 = 500, cost 2500 ≥ 500. roas_naver=500/2500=0.2 < bep 1.5(factor 1.0).
+    _seed_shopping_active_campaign(db)
+    _shopping_entity(db, "grp-mo", status="on", bid_amt=50)
+    _row(db, D0, "cmp-shop", "SHOPPING", "grp-mo", "", 500, 25, 2500, direct=500)
+    db.commit()
+
+    out = diag.shopping_pause_candidates(db, D0, D0, bep_roas=Decimal("1.5"),
+                                        correction_factor=Decimal("1.0"))
+    assert len(out) == 1
+    assert out[0]["adgroup_id"] == "grp-mo"
+    assert out[0]["conv_amt"] == 500  # 전환 있음에도 포함
+    assert out[0]["current_bid"] == 50
+    assert out[0]["reason"] == "floored_loss"
+
+
+def test_shopping_pause_candidates_floored_loss_excludes_above_floor_bid(db):
+    # 같은 손실이라도 입찰 여유가 있으면(bid 200 > 하한) bid_down(shopping_group_bep) 몫 →
+    # 여기서 pause 후보로 잡으면 이중 제안. at-floor 게이트가 배제해야 한다.
+    _seed_shopping_active_campaign(db)
+    _shopping_entity(db, "grp-hi", status="on", bid_amt=200)
+    _row(db, D0, "cmp-shop", "SHOPPING", "grp-hi", "", 500, 25, 2500, direct=500)  # roas 0.2 < bep
+    db.commit()
+
+    out = diag.shopping_pause_candidates(db, D0, D0, bep_roas=Decimal("1.5"),
+                                        correction_factor=Decimal("1.0"))
+    assert out == []
+
+
+def test_shopping_pause_candidates_floored_loss_excludes_profitable(db):
+    # 바닥 입찰이라도 실질ROAS ≥ BEP인 그룹(수익)은 정지하지 않는다.
+    _seed_shopping_active_campaign(db)
+    _shopping_entity(db, "grp-win", status="on", bid_amt=50)
+    _row(db, D0, "cmp-shop", "SHOPPING", "grp-win", "", 500, 25, 2500, direct=5000)  # roas 2.0 ≥ bep 1.5
+    db.commit()
+
+    out = diag.shopping_pause_candidates(db, D0, D0, bep_roas=Decimal("1.5"),
+                                        correction_factor=Decimal("1.0"))
+    assert out == []
+
+
+def test_shopping_pause_candidates_floored_loss_inert_without_bep(db):
+    # bep 미제공(기존 호출부·테스트 하위호환) → 무전환 게이트만 작동, 바닥손실 경로 휴면.
+    _seed_shopping_active_campaign(db)
+    _shopping_entity(db, "grp-mo", status="on", bid_amt=50)
+    _row(db, D0, "cmp-shop", "SHOPPING", "grp-mo", "", 500, 25, 2500, direct=500)
+    db.commit()
+
+    out = diag.shopping_pause_candidates(db, D0, D0)  # bep 인자 없음
+    assert out == []
+
+
+def test_shopping_pause_candidates_zero_conv_reason_field(db):
+    # 기존 무전환 경로는 reason='zero_conv'로 태깅(회귀: 기존 필드 유지).
+    _seed_shopping_active_campaign(db)
+    _shopping_entity(db, "grp-shop-1", status="on", bid_amt=200)
+    _row(db, D0, "cmp-shop", "SHOPPING", "grp-shop-1", "", 500, 25, 2500, direct=0)
+    db.commit()
+
+    out = diag.shopping_pause_candidates(db, D0, D0, bep_roas=Decimal("1.5"),
+                                        correction_factor=Decimal("1.0"))
+    assert len(out) == 1
+    assert out[0]["reason"] == "zero_conv"
 
 
 # ── shopping_resume_candidates (X1b-S S1, D-NAO-43) ───────────────────────
