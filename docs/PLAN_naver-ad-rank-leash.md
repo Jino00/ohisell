@@ -104,9 +104,9 @@ CD4 학습 Agent (probe_learning_loop.run_probe_learning, 09:03)  ← 기존
 ## §7 체크리스트 (현재 위치)
 - [x] RL0 통합 설계·D-NAO-60 기록 (이 문서·트랙) — 완료(2026-07-19)
 - [x] **RL1 시간당 전환 데이터층(ccnt)** — 완료·배포·라이브 검증(2026-07-19). commit `c225386`·마이그 `b48c2f3bc0a3` prod 적용. 2153 passed(+4). ★라이브: 전환 있던 3 애드그룹 hh24 conv_cnt 실값 흐름(21h=1·11h=1·15h=2). **캘리브레이션 항목**: 824088 hh24 conv_cnt=2 vs naver_ad_daily 일별=1 — ccnt 직/간접 귀속 차이 추정 → RL2에서 D+1 정산 대조로 확정.
-- [ ] RL2 시간당 추정 ROAS 신호 SA — **다음**
-- [ ] RL3 순위 고삐 판정
-- [ ] RL4 스톱로스→고삐 교체
+- [x] **RL2 시간당 추정 ROAS 신호 SA** — 완료(2026-07-19). commit `326c1c6`. `intraday_roas.py`(순수)·campaign_target_resolver 공개헬퍼. 2164 passed. 라이브: 실 애드그룹 unit_price(price 15900·margin 9986·**bep_roas 1.5921**=D-NAO-57 정밀화 일치).
+- [x] **RL3 순위 고삐 판정** — 완료·배포·라이브 경로 검증(2026-07-19). commit `6f80d88`·prod(6f80d88, RL2+RL3 함께). **Opus 적대적 리뷰 GATE PASS**(P1·P2 0·실측: guardrail 우회 없음·est_roas<bep⟺추정총이익<0). 영구 회귀 테스트 2개(쿨다운 차단 실 execute·총이익 등가). 2183 passed. 라이브: 실 hot-set 유닛 고삐 전경로 무에러 실행("당일 소진 없음" fail-closed·이른 아침). **★자연 발동(bleeding 유닛 bid_down)은 :20 크론 대기**(원칙22, CD2/CD3 패턴).
+- [x] **RL4 스톱로스→고삐 교체(구현, TDD)** — 구현·회귀 0 완료(2026-07-19), 배포/라이브 검증은 미실시(이 세션 범위=구현까지, PR/deploy 없음). `_pause_proposal`→`_stop_loss_proposal` 개명 + `_step_down_bid` 헬퍼 추출(`_bid_proposal`의 bid_down 클램프와 산식 공유, 중복 제거). 키워드 경로: 입찰 하한(70원) 아니면 pause 대신 bid_down(고삐) — 하한 도달 시에만 터미널 pause. **쇼핑(adgroup) 경로는 변경 없음**(ML/수동 입찰 판별 복잡성 + ours auto_operate 대상은 전부 WEB_SITE 키워드 grain이라 실질 커버). 기존 pause 기대 테스트 2건을 bid_down 기대로 의도 변경 반영 정합(회귀 아님). 2192 passed(+9, RL3 2183 대비). **다음**: RL5.
 - [ ] RL5 CD5 소비+이익 가중 승격
 - [ ] 쿨다운 2h 유지 결정 기록 (D-NAO-60)
 - [ ] PR #60(D-NAO-59 docs) 병합
