@@ -40,6 +40,17 @@ _BID_DOWN_TYPES = frozenset({"bid_down"})
 _BID_TYPES = _BID_UP_TYPES | _BID_DOWN_TYPES
 _LOCK_TYPES = frozenset({"pause", "resume"})
 
+# DL3(D-NAO-65 ①, Jino 원문 "쭉 낮추다가"): 안전방향(bid_down = 노출↓·지출↓)만
+# _MAX_DAILY_CHANGES에서 면제한다. 근거: 하향은 출혈을 줄이는 방향이라 일일 횟수 상한이
+# 오히려 "쭉 낮추다가" 일일 스톱로스를 막는다 — 활동시간 ~16h/쿨다운 2h = 유닛당 하루
+# 최대 ~8 하향 스텝(0.85⁸ ≈ 밴드입찰의 27%)까지 깊은 스로틀을 허용해야 loss 국면에서
+# 노출/지출을 계속 깎아 내릴 수 있다. D-NAO-4 선례(빠른 루프의 안전방향 완화)와 동형.
+# ★진동 방어는 쿨다운 2h(_COOLDOWN_HOURS)가 그대로 담당 — 면제되는 건 일일 횟수 상한
+# 하나뿐이고, 쿨다운·±15% 클램프·방향검증·BEP·스톱로스는 전부 불변이다.
+# 면제 범위는 canonical set _BID_DOWN_TYPES를 재사용(하드코딩 문자열 반복 금지) — bid_up·
+# growth_bid_up·budget 계열·pause/resume은 상한 3을 그대로 유지한다.
+_DAILY_CAP_EXEMPT_TYPES = _BID_DOWN_TYPES
+
 # P2(D-NAO-42-f): 예산 통제 — PLAN_naver-ad-budget-control.md §5-C. bid_up/down과 병렬 구조.
 _BUDGET_UP_TYPES = frozenset({"budget_up"})
 _BUDGET_DOWN_TYPES = frozenset({"budget_down"})
@@ -77,7 +88,7 @@ def check(proposal: dict, context: dict, *, now: datetime) -> str | None:
     ):
         return f"guardrail_gate: 지원하지 않는 proposal_type={proposal_type!r}"
 
-    reason = _check_cooldown_and_cap(context, now)
+    reason = _check_cooldown_and_cap(context, now, proposal_type)
     if reason:
         return reason
 
@@ -88,7 +99,8 @@ def check(proposal: dict, context: dict, *, now: datetime) -> str | None:
     return _check_lock(proposal, proposal_type)
 
 
-def _check_cooldown_and_cap(context: dict, now: datetime) -> str | None:
+def _check_cooldown_and_cap(context: dict, now: datetime, proposal_type: str | None) -> str | None:
+    # 쿨다운 2h는 전 유형 공통(DL3 면제 대상 아님) — 방향 무관하게 항상 검사.
     last_change_at = context.get("last_change_at")
     if last_change_at is not None:
         elapsed_hours = (now - last_change_at).total_seconds() / 3600
@@ -98,9 +110,13 @@ def _check_cooldown_and_cap(context: dict, now: datetime) -> str | None:
                 f"(최소 {_COOLDOWN_HOURS}시간 필요, D-NAO-19)"
             )
 
-    changes_today = context.get("changes_today_count", 0)
-    if changes_today >= _MAX_DAILY_CHANGES:
-        return f"일일 변경 건수 상한 도달({changes_today}/{_MAX_DAILY_CHANGES}건, 폭주 방지)"
+    # DL3(D-NAO-65): 안전방향(bid_down)은 일일 횟수 상한에서만 면제 — "쭉 낮추다가"를
+    # 위해서다. 진동 방어는 위 쿨다운 2h가 유지하고, 방향 불일치 stale 행(bid_down인데
+    # target≥current)은 뒤이은 _check_bid의 방향검증이 여전히 fail-closed 차단한다.
+    if proposal_type not in _DAILY_CAP_EXEMPT_TYPES:
+        changes_today = context.get("changes_today_count", 0)
+        if changes_today >= _MAX_DAILY_CHANGES:
+            return f"일일 변경 건수 상한 도달({changes_today}/{_MAX_DAILY_CHANGES}건, 폭주 방지)"
 
     return None
 
