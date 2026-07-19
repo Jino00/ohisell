@@ -260,7 +260,9 @@ def test_build_diagnosis_shopping_pause_flags_floored_loss_group(db):
     _row(db, D0, "cmp1", "WEB_SITE", "grp1", "nkw-1", 100, 10, 10000, direct=1000)
     _seed_shopping_active_campaign(db, campaign_id="cmp-shop")
     _shopping_entity(db, "grp-mo", status="on", bid_amt=50, campaign_id="cmp-shop")
-    _row(db, D0, "cmp-shop", "SHOPPING", "grp-mo", "", 500, 25, 3000, direct=300)  # 실질ROAS≪BEP
+    # DL1(D-NAO-65): 스톱로스 창이 "마지막 입찰변경 이후"(변경이력 없으면 3일 폴백)로 좁혀졌으므로
+    # 손실 행을 as_of(D_TO) 당일에 둔다 — 과거(D0)에 두면 폴백 창(D_TO-2~D_TO) 밖이라 미진입.
+    _row(db, D_TO, "cmp-shop", "SHOPPING", "grp-mo", "", 500, 25, 3000, direct=300)  # 실질ROAS≪BEP
     db.commit()
 
     result = build_diagnosis(db, D0, D_TO)
@@ -1226,3 +1228,231 @@ def test_adgroup_window_agg_respects_date_window(db):
 
     out = diag.adgroup_window_agg(db, "grp-shop-1", D0, D0)
     assert out == {"cost": 8000, "conv_amt": 3000, "conv_cnt": 1}  # 창 밖(D0-1) 행은 제외
+
+
+# ── DL1 스톱로스 창 절체 (D-NAO-65) ───────────────────────────────────────
+# 스톱로스 판정 비용 창을 15일 롤링 누적 → "마지막 입찰변경 이후"(행동 창)로 절체하고,
+# shopping floored_loss(D-NAO-64)의 보정ROAS 판정은 7일 롤링(만성 창)으로 분리한다.
+# 검증: 과거 고입찰 시절 비용만 남은 휴면 유닛의 시점 불일치(D-NAO-63) 소멸 + 최근 창
+# 무전환 고비용 유닛은 여전히 진입 + 변경이력 없으면 3일 폴백 + 마지막 변경 이후만 합산 +
+# changed_at은 KST-naive 저장(harness kst_now) — 저녁 변경도 같은 날짜로 정확 귀속.
+
+DL_FROM = date(2026, 7, 1)   # build_diagnosis가 넘기는 15일 창 시작(= D0)
+DL_TO = date(2026, 7, 15)    # as_of (= D_TO)
+
+
+def _bid_change_log(entity_id, campaign_id, *, changed_at, entity_type="keyword"):
+    """실제 성공한 입찰 변경 이력 1건 — naver_execution_harness가 bid_up/bid_down/growth_bid_up을
+    전부 canonical action='update_bid'로 기록한다(_ACTION_BY_PROPOSAL_TYPE). changed_at은
+    **KST-naive**(harness execute가 now=kst_now()로 기입 — probe_revert 주석 명시, UTC 아님).
+    성공 판별 규약 = after_value 존재(resume_candidates와 동일)."""
+    return NaverChangeLog(
+        entity_type=entity_type, entity_id=entity_id, campaign_id=campaign_id,
+        action="update_bid", proposal_id=1, dry_run=False, changed_at=changed_at,
+        after_value=json.dumps({"bidAmt": 50}),
+    )
+
+
+def _bid_attempt_failed_log(entity_id, campaign_id, *, changed_at, entity_type="keyword"):
+    """실패/가드 차단 입찰 '시도' 행 — naver_execution_harness._guard_failure·실행 예외 경로가
+    action='update_bid'·dry_run=False로 남기되 **after_value=None**(실제 쓰기 없음)이다.
+    이 행이 스톱로스 창을 리셋하면 안 된다(DL1 GATE P1-A)."""
+    return NaverChangeLog(
+        entity_type=entity_type, entity_id=entity_id, campaign_id=campaign_id,
+        action="update_bid", proposal_id=9, dry_run=False, changed_at=changed_at,
+        outcome="failed", after_value=None,
+    )
+
+
+def test_pause_candidates_dormant_unit_below_recent_window_not_flagged(db):
+    # D-NAO-63 시점 불일치 소멸: 과거 고입찰 시절 무전환 비용(입찰 급락 전)만 있고, 입찰변경
+    # 이후 최근 창 비용은 스톱로스 미만 → 휴면 유닛은 스톱로스 미진입.
+    _seed_active_parents(db)
+    _entity(db, "keyword", "nkw-dormant", status="on", bid_amt=50)  # 현재 저입찰(급락 후)
+    _row(db, date(2026, 7, 2), "cmp1", "WEB_SITE", "grp1", "nkw-dormant", 500, 25, 5000, direct=0)  # 창 밖(과거)
+    _row(db, date(2026, 7, 15), "cmp1", "WEB_SITE", "grp1", "nkw-dormant", 10, 0, 100, direct=0)  # 최근 ~0
+    db.add(_bid_change_log("nkw-dormant", "cmp1", changed_at=datetime(2026, 7, 14, 0, 0)))
+    db.commit()
+
+    out = diag.pause_candidates(db, DL_FROM, DL_TO)
+    assert out == []  # 최근 창(07-14~) cost 100 < 스톱로스 500 → 미진입(구현이 전체 창이면 5100로 오발동)
+
+
+def test_pause_candidates_recent_high_cost_no_conv_still_flagged(db):
+    # 입찰변경 이후 최근 창에 무전환 고비용 → 여전히 진입(창 절체가 진짜 손실을 놓치지 않음).
+    _seed_active_parents(db)
+    _entity(db, "keyword", "nkw-recent", status="on", bid_amt=200)  # 스톱로스 2000
+    _row(db, date(2026, 7, 2), "cmp1", "WEB_SITE", "grp1", "nkw-recent", 100, 5, 500, direct=0)  # 과거 소액
+    _row(db, date(2026, 7, 15), "cmp1", "WEB_SITE", "grp1", "nkw-recent", 800, 40, 2500, direct=0)  # 최근 고비용
+    db.add(_bid_change_log("nkw-recent", "cmp1", changed_at=datetime(2026, 7, 14, 0, 0)))
+    db.commit()
+
+    out = diag.pause_candidates(db, DL_FROM, DL_TO)
+    assert len(out) == 1
+    assert out[0]["keyword_id"] == "nkw-recent"
+    assert out[0]["cost"] == 2500  # 최근 창(07-14~)만 — 과거 500 미포함
+
+
+def test_pause_candidates_no_bid_change_uses_three_day_fallback(db):
+    # 변경 이력 없는 유닛 = 3일 고정 폴백 창(max(date_from, date_to-2)~date_to).
+    _seed_active_parents(db)
+    _entity(db, "keyword", "nkw-nochg", status="on", bid_amt=200)  # 스톱로스 2000
+    _row(db, date(2026, 7, 5), "cmp1", "WEB_SITE", "grp1", "nkw-nochg", 500, 25, 5000, direct=0)  # 폴백 창 밖
+    _row(db, date(2026, 7, 14), "cmp1", "WEB_SITE", "grp1", "nkw-nochg", 800, 40, 2500, direct=0)  # 폴백 창 안(07-13~15)
+    db.commit()  # 입찰변경 이력 없음
+
+    out = diag.pause_candidates(db, DL_FROM, DL_TO)
+    assert len(out) == 1
+    assert out[0]["cost"] == 2500  # 3일 폴백만 — 07-05(5000) 제외(전체 창이면 7500)
+
+
+def test_pause_candidates_multiple_bid_changes_sums_since_latest(db):
+    # 창 안에 입찰변경 여러 번 → 마지막 변경 이후만 합산.
+    _seed_active_parents(db)
+    _entity(db, "keyword", "nkw-multi", status="on", bid_amt=200)  # 스톱로스 2000
+    _row(db, date(2026, 7, 9), "cmp1", "WEB_SITE", "grp1", "nkw-multi", 500, 25, 5000, direct=0)  # 1차~2차 사이
+    _row(db, date(2026, 7, 15), "cmp1", "WEB_SITE", "grp1", "nkw-multi", 800, 40, 2500, direct=0)  # 2차(최종) 이후
+    db.add(_bid_change_log("nkw-multi", "cmp1", changed_at=datetime(2026, 7, 8, 0, 0)))   # 1차
+    db.add(_bid_change_log("nkw-multi", "cmp1", changed_at=datetime(2026, 7, 14, 0, 0)))  # 2차(최종)
+    db.commit()
+
+    out = diag.pause_candidates(db, DL_FROM, DL_TO)
+    assert len(out) == 1
+    assert out[0]["cost"] == 2500  # 최종 변경(07-14) 이후만 — 07-09(5000) 제외
+
+
+def test_pause_candidates_changed_at_kst_naive_evening_change_same_day_included(db):
+    # [GATE P1-B] changed_at은 이미 KST-naive(harness가 kst_now() 기입) — +9h 이중 시프트 금지.
+    # KST 07-14 20:00 실변경 → 창 시작 = 07-14(그날 포함). +9h를 더하면 07-15 05:00으로 읽혀
+    # 창이 하루 밀리고, 어제 저녁 변경 유닛의 그날 무전환 고비용이 통째로 제외된다(스톱로스 침묵).
+    _seed_active_parents(db)
+    _entity(db, "keyword", "nkw-tz", status="on", bid_amt=200)  # 스톱로스 2000
+    _row(db, date(2026, 7, 13), "cmp1", "WEB_SITE", "grp1", "nkw-tz", 500, 25, 5000, direct=0)  # 변경 전(창 밖)
+    _row(db, date(2026, 7, 14), "cmp1", "WEB_SITE", "grp1", "nkw-tz", 800, 40, 2500, direct=0)  # 변경 당일(창 안)
+    db.add(_bid_change_log("nkw-tz", "cmp1", changed_at=datetime(2026, 7, 14, 20, 0)))  # KST 저녁
+    db.commit()
+
+    out = diag.pause_candidates(db, DL_FROM, DL_TO)
+    assert len(out) == 1
+    assert out[0]["cost"] == 2500  # 창 시작=07-14 그대로 — 07-13행(5000)만 제외
+
+
+def test_pause_candidates_guard_blocked_attempt_does_not_reset_window(db):
+    # [GATE P1-A] 가드레일 차단/실행 실패 행(after_value=None, outcome='failed')은 실제 입찰
+    # 변경이 아니다 — 창을 리셋하면 매일 bid_down이 가드에 막히는 출혈 유닛은 스톱로스가
+    # 영구 침묵한다(이중 침묵). 성공 판별 = after_value 존재(resume_candidates 규약 재사용).
+    _seed_active_parents(db)
+    _entity(db, "keyword", "nkw-blocked", status="on", bid_amt=200)  # 스톱로스 2000
+    # 폴백 3일 창(07-13~15) 안 무전환 출혈 합계 2500 ≥ 2000
+    _row(db, date(2026, 7, 13), "cmp1", "WEB_SITE", "grp1", "nkw-blocked", 300, 15, 1000, direct=0)
+    _row(db, date(2026, 7, 14), "cmp1", "WEB_SITE", "grp1", "nkw-blocked", 300, 15, 1000, direct=0)
+    _row(db, date(2026, 7, 15), "cmp1", "WEB_SITE", "grp1", "nkw-blocked", 150, 8, 500, direct=0)
+    # 오늘자 가드 차단 실패 시도 행 — 이게 창을 리셋하면 cost=500 < 2000으로 미진입해버림
+    db.add(_bid_attempt_failed_log("nkw-blocked", "cmp1", changed_at=datetime(2026, 7, 15, 10, 0)))
+    db.commit()
+
+    out = diag.pause_candidates(db, DL_FROM, DL_TO)
+    assert len(out) == 1
+    assert out[0]["keyword_id"] == "nkw-blocked"
+    assert out[0]["cost"] == 2500  # 실패 행 무시 → 변경이력 없음 = 3일 폴백 창 전체
+
+
+def test_pause_candidates_cost_exactly_at_stop_loss_flagged(db):
+    # [GATE P3-2] 정확 경계 고정: 창 내 비용 == 스톱로스 절대액(현재입찰×10)이면 '>=' 게이트로
+    # 진입한다(경계 미만 배제는 test_pause_candidates_excludes_cost_below_stop_loss가 고정).
+    _seed_active_parents(db)
+    _entity(db, "keyword", "nkw-edge", status="on", bid_amt=200)  # 스톱로스 = 정확히 2000
+    _row(db, date(2026, 7, 14), "cmp1", "WEB_SITE", "grp1", "nkw-edge", 500, 25, 2000, direct=0)
+    db.add(_bid_change_log("nkw-edge", "cmp1", changed_at=datetime(2026, 7, 14, 9, 0)))
+    db.commit()
+
+    out = diag.pause_candidates(db, DL_FROM, DL_TO)
+    assert len(out) == 1
+    assert out[0]["cost"] == 2000
+    assert out[0]["stop_loss_amount"] == 2000  # cost == stop_loss → 진입(>= 게이트)
+
+
+def test_pause_candidates_holds_zero_conv_when_bid_change_is_same_day(db):
+    # [GATE P2] 마지막 실입찰변경이 date_to 당일 = 행동 창 1일 — 네이버 간접전환 ~1일 정착이라
+    # 변경 당일 창에서는 실제 전환이 있어도 conv=0으로 읽힐 수 있다. 하루에 입찰×10을 초과
+    # 지출하는 유닛이 귀속 지연으로 오발동 사살되지 않도록 zero_conv 판정을 보류(skip).
+    _seed_active_parents(db)
+    _entity(db, "keyword", "nkw-fresh", status="on", bid_amt=200)  # 스톱로스 2000
+    _row(db, date(2026, 7, 15), "cmp1", "WEB_SITE", "grp1", "nkw-fresh", 800, 40, 3000, direct=0)
+    db.add(_bid_change_log("nkw-fresh", "cmp1", changed_at=datetime(2026, 7, 15, 9, 0)))  # 당일 변경
+    db.commit()
+
+    out = diag.pause_candidates(db, DL_FROM, DL_TO)
+    assert out == []  # 창 2일 미만 → 판정 보류(다음날 창 2일이 되면 정상 판정)
+
+
+def test_pause_candidates_flags_zero_conv_next_day_after_change(db):
+    # [GATE P2 대조군] 변경 이튿날(창 2일)이면 정착 완충이 생겨 정상 판정 — 진입.
+    _seed_active_parents(db)
+    _entity(db, "keyword", "nkw-fresh", status="on", bid_amt=200)  # 스톱로스 2000
+    _row(db, date(2026, 7, 14), "cmp1", "WEB_SITE", "grp1", "nkw-fresh", 800, 40, 3000, direct=0)
+    _row(db, date(2026, 7, 15), "cmp1", "WEB_SITE", "grp1", "nkw-fresh", 100, 5, 500, direct=0)
+    db.add(_bid_change_log("nkw-fresh", "cmp1", changed_at=datetime(2026, 7, 14, 9, 0)))  # 어제 변경
+    db.commit()
+
+    out = diag.pause_candidates(db, DL_FROM, DL_TO)
+    assert len(out) == 1
+    assert out[0]["cost"] == 3500  # 창 07-14~15, 정상 진입
+
+
+def test_shopping_pause_candidates_holds_zero_conv_when_bid_change_is_same_day(db):
+    # [GATE P2] 쇼핑도 동일 보류 — 쇼핑 ML그룹은 터미널 pause라 오발동이 실손실.
+    _seed_shopping_active_campaign(db)
+    _shopping_entity(db, "grp-fresh", status="on", bid_amt=200)  # 스톱로스 2000
+    _row(db, date(2026, 7, 15), "cmp-shop", "SHOPPING", "grp-fresh", "", 800, 40, 3000, direct=0)
+    db.add(_bid_change_log("grp-fresh", "cmp-shop", changed_at=datetime(2026, 7, 15, 9, 0),
+                            entity_type="adgroup"))
+    db.commit()
+
+    out = diag.shopping_pause_candidates(db, DL_FROM, DL_TO, bep_roas=Decimal("1.5"),
+                                        correction_factor=Decimal("1.0"))
+    assert out == []  # 변경 당일 무전환 고지출 → 보류(floored_loss 경로는 이 보류와 무관)
+
+
+def test_shopping_pause_candidates_dormant_unit_below_recent_window_not_flagged(db):
+    # 쇼핑 행동 창 절체: 입찰 급락 후 최근 창 비용이 스톱로스 미만인 휴면 그룹은 미진입.
+    _seed_shopping_active_campaign(db)
+    _shopping_entity(db, "grp-dorm", status="on", bid_amt=50)  # 스톱로스 500
+    _row(db, date(2026, 7, 2), "cmp-shop", "SHOPPING", "grp-dorm", "", 500, 25, 10000, direct=0)  # 과거 고비용
+    _row(db, date(2026, 7, 15), "cmp-shop", "SHOPPING", "grp-dorm", "", 10, 0, 100, direct=0)  # 최근 ~0
+    db.add(_bid_change_log("grp-dorm", "cmp-shop", changed_at=datetime(2026, 7, 14, 0, 0), entity_type="adgroup"))
+    db.commit()
+
+    out = diag.shopping_pause_candidates(db, DL_FROM, DL_TO, bep_roas=Decimal("1.5"),
+                                        correction_factor=Decimal("1.0"))
+    assert out == []  # 입찰변경 이후 창 cost 100 < 스톱로스 500 → 미진입(전체 창이면 무전환 10100로 오발동)
+
+
+def test_shopping_pause_floored_loss_chronic_window_includes_recent_bad_day(db):
+    # 만성 판정 = 7일 롤링. 3일 행동 창 밖(07-10)이지만 7일 만성 창 안인 고비용 무전환 날이
+    # 보정ROAS를 BEP 밑으로 끌어내리면 floored_loss로 잡힌다.
+    _seed_shopping_active_campaign(db)
+    _shopping_entity(db, "grp-mo", status="on", bid_amt=50)  # 하한(못 내림), 스톱로스 500
+    _row(db, date(2026, 7, 10), "cmp-shop", "SHOPPING", "grp-mo", "", 500, 25, 10000, direct=0)  # 7일 창 안·3일 창 밖
+    _row(db, date(2026, 7, 14), "cmp-shop", "SHOPPING", "grp-mo", "", 500, 25, 1000, direct=3000)  # 3일 창 안(전환)
+    db.commit()  # 변경이력 없음 → 행동 창=3일 폴백
+
+    out = diag.shopping_pause_candidates(db, DL_FROM, DL_TO, bep_roas=Decimal("1.5"),
+                                        correction_factor=Decimal("1.0"))
+    assert len(out) == 1
+    assert out[0]["adgroup_id"] == "grp-mo"
+    assert out[0]["reason"] == "floored_loss"  # 7일 만성 roas=3000/11000=0.27 < 1.5
+
+
+def test_shopping_pause_floored_loss_ignores_loss_outside_chronic_window(db):
+    # 옛 손실(07-02)이 7일 만성 창 밖이면 보정ROAS 판정에서 빠져 floored_loss 아님 —
+    # 전체 창(15일)을 쓰면 roas 0.27로 오발동하던 것을 7일 롤링으로 소멸.
+    _seed_shopping_active_campaign(db)
+    _shopping_entity(db, "grp-b", status="on", bid_amt=50)  # 하한, 스톱로스 500
+    _row(db, date(2026, 7, 2), "cmp-shop", "SHOPPING", "grp-b", "", 500, 25, 10000, direct=0)  # 7일 창 밖(옛 손실)
+    _row(db, date(2026, 7, 14), "cmp-shop", "SHOPPING", "grp-b", "", 500, 25, 1000, direct=3000)  # 최근 양호(roas 3.0)
+    db.commit()
+
+    out = diag.shopping_pause_candidates(db, DL_FROM, DL_TO, bep_roas=Decimal("1.5"),
+                                        correction_factor=Decimal("1.0"))
+    assert out == []  # 7일 만성 roas=3.0 ≥ BEP 1.5 → floored 아님(전체 창이면 0.27로 오발동)

@@ -23,6 +23,17 @@ _SHOPPING = "SHOPPING"
 LOW_CLICK_LOOKBACK_DAYS = 30
 LOW_CLICK_THRESHOLD = 10
 
+# DL1(D-NAO-65) 스톱로스 창 절체 상수.
+# 입찰 변경 canonical action — naver_execution_harness._ACTION_BY_PROPOSAL_TYPE이 bid_up/
+# bid_down/growth_bid_up을 전부 'update_bid'로 기록한다(probe_revert도 동일 하드코딩 관례.
+# entity_sync의 외부 감지 기록은 'external_bid_change'라 별개 — 우리 실집행만 창 기준).
+# 순환 import 회피 위해 상수로 둔다(그쪽 매핑 변경 시 함께 갱신).
+_BID_CHANGE_ACTIONS = ("update_bid",)
+# 행동 창(스톱로스 발동 비용): 변경 이력 없는 유닛의 고정 폴백 = 3일(ref 33 소규모 하한 보수값).
+_STOP_LOSS_FALLBACK_DAYS = 3
+# 만성 판정 창(shopping floored_loss 보정ROAS): 7일 롤링 soft(ref 33 [1], 단발 나쁜 날로 pause 방지).
+_CHRONIC_WINDOW_DAYS = 7
+
 _Q4 = Decimal("0.0001")
 
 
@@ -397,6 +408,96 @@ def campaign_window_agg(db: Session, campaign_id: str, date_from: date, date_to:
     return {"cost": int(cost), "conv_amt": int(direct) + int(indirect)}
 
 
+def _last_bid_change_kst_date(db: Session, entity_ids: set[str]) -> dict[str, date]:
+    """유닛(키워드 entity_id 또는 쇼핑 adgroup_id)별 마지막 **성공한** 입찰변경 KST 날짜
+    (DL1, D-NAO-65).
+
+    스톱로스 임계는 '현재입찰 × LOW_CLICK_THRESHOLD'라 비용도 그 입찰이 유효한 구간만
+    합산해야 시점이 정합한다(D-NAO-63 시점 불일치 소멸) — naver_change_log에서 bid 변경
+    (update_bid, _BID_CHANGE_ACTIONS·dry_run=False) 최신 1건 changed_at의 KST 날짜를 돌려준다.
+    ★성공 판별 = after_value 존재(resume_candidates와 동일 규약) — _guard_failure·실행 예외
+    경로가 남기는 실패 시도 행(after_value=None, outcome='failed')까지 잡으면, 매일 bid_down이
+    가드에 막히는 출혈 유닛의 창이 매일 리셋돼 스톱로스가 영구 침묵한다(GATE P1-A).
+    ★changed_at은 **KST-naive**(harness execute가 now=kst_now()로 기입, probe_revert 주석
+    명시 — server_default UTC와 달리 이 경로는 KST) — 변환 없이 .date()가 곧 KST 달력일
+    (GATE P1-B: +9h를 더하면 KST 15시 이후 변경 유닛의 창이 하루 밀림).
+    ★34개 유닛에 N+1 쿼리 금지: entity_id 집합 IN절 + GROUP BY 1쿼리 집계.
+    (스케일 메모: SQLite IN 파라미터 상한 — 유닛 수천 규모 계정이 되면 청크 분할 필요.)"""
+    if not entity_ids:
+        return {}
+    rows = (
+        db.query(NaverChangeLog.entity_id, sqlfunc.max(NaverChangeLog.changed_at))
+        .filter(
+            NaverChangeLog.action.in_(_BID_CHANGE_ACTIONS),
+            NaverChangeLog.entity_id.in_(entity_ids),
+            NaverChangeLog.dry_run.is_(False),
+            NaverChangeLog.after_value.isnot(None),  # 실제 성공한 쓰기만(실패/가드차단 시도 제외)
+            NaverChangeLog.changed_at.isnot(None),
+        )
+        .group_by(NaverChangeLog.entity_id)
+        .all()
+    )
+    return {
+        entity_id: changed_at.date()
+        for entity_id, changed_at in rows if changed_at is not None
+    }
+
+
+def _stop_loss_window_start(date_from: date, date_to: date, last_change: date | None) -> date:
+    """스톱로스 행동 창 시작일 (DL1, D-NAO-65) — 마지막 입찰변경 있으면 max(date_from, 변경일),
+    없으면 3일 고정 폴백 max(date_from, date_to-2). 신규/장기휴면 유닛의 조기 사살 방지."""
+    if last_change is None:
+        return max(date_from, date_to - timedelta(days=_STOP_LOSS_FALLBACK_DAYS - 1))
+    return max(date_from, last_change)
+
+
+def _daily_cost_conv_by_unit(
+    db: Session, unit_col, unit_ids: set[str], campaign_type: str, date_from: date, date_to: date,
+) -> dict[str, list[tuple]]:
+    """(유닛, ad_date) 그레인 일별 (imp, clk, cost, conv_amt) 집계 — 유닛별 스톱로스 창
+    컷오프를 파이썬에서 적용하기 위한 단일 쿼리(DL1, N+1 회피 — keyword_window_agg가 대상마다
+    쿼리하는 것과 달리 유닛마다 창 시작일이 달라 GROUP BY 배치가 불가하므로 date 그레인으로
+    한 번에 긁고 파이썬에서 합산). unit_col = NaverAdDaily.keyword_id 또는 .adgroup_id."""
+    if not unit_ids:
+        return {}
+    q = (
+        db.query(
+            unit_col, NaverAdDaily.ad_date,
+            sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.imp), 0),
+            sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.clk), 0),
+            sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.cost), 0),
+            sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.conv_direct_amt), 0),
+            sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.conv_indirect_amt), 0),
+        )
+        .filter(
+            unit_col.in_(unit_ids),
+            NaverAdDaily.ad_date >= date_from, NaverAdDaily.ad_date <= date_to,
+            NaverAdDaily.campaign_type == campaign_type,
+            NaverAdDaily.adgroup_id != BACKFILL_SENTINEL_ADGROUP,
+        )
+        .group_by(unit_col, NaverAdDaily.ad_date)
+        .all()
+    )
+    out: dict[str, list[tuple]] = {}
+    for unit_id, ad_date, imp, clk, cost, direct, indirect in q:
+        out.setdefault(unit_id, []).append(
+            (ad_date, int(imp), int(clk), int(cost), int(direct) + int(indirect))
+        )
+    return out
+
+
+def _sum_cost_conv_since(rows: list[tuple], window_start: date) -> tuple[int, int, int, int]:
+    """일별 행 목록에서 ad_date ≥ window_start 구간의 (imp, clk, cost, conv_amt) 합산 (DL1)."""
+    imp = clk = cost = conv = 0
+    for ad_date, i, c, co, cv in rows:
+        if ad_date >= window_start:
+            imp += i
+            clk += c
+            cost += co
+            conv += cv
+    return imp, clk, cost, conv
+
+
 def pause_candidates(db: Session, date_from: date, date_to: date) -> list[dict]:
     """정지 후보 (X1b T3, D-NAO-38) — WEB_SITE 등록 키워드(status='on', 부모 체인도 전부 on)
     중 창 내 전환 0건 + 누적비용이 스톱로스 절대액(D-NAO-20) 이상. 스톱로스 절대액 = 현재
@@ -406,7 +507,11 @@ def pause_candidates(db: Session, date_from: date, date_to: date) -> list[dict]:
     제외. **부모(광고그룹·캠페인)가 off인데 키워드만 on인 경우도 제외**(codex[P2]) — 그
     상태에서 키워드에 별도 정지를 걸면, 나중에 부모만 재개해도 이 키워드는 계속 잠긴 채
     남는다(의도치 않은 영구 정지).
-    """
+
+    ★DL1(D-NAO-65): 스톱로스 비용/무전환 판정을 15일 롤링 전체 창이 아니라 유닛별 **행동 창
+    (마지막 입찰변경 이후, 변경이력 없으면 3일 폴백)** 으로 좁힌다 — 스톱로스 임계가
+    '현재입찰×10'이라 비용도 그 입찰 유효 구간만 합산해야 시점이 정합(D-NAO-63 시점 불일치
+    소멸: 과거 고입찰 시절 비용만 남은 휴면 유닛은 최근 창 비용이 스톱로스 미만이라 미진입)."""
     on_adgroups = _on_adgroup_ids(db)
     entity_map = {
         e.entity_id: e for e in
@@ -415,18 +520,42 @@ def pause_candidates(db: Session, date_from: date, date_to: date) -> list[dict]:
     if not entity_map:
         return []
 
-    rows = [r for r in _keyword_rows(db, date_from, date_to, _WEB_SITE)
-            if r["keyword_id"] and r["cost"] > 0]
+    # 부모 체인 on + bid_amt 확보된 키워드만 후보(그 집합으로 창 조회 — 무관 키워드 스캔 회피).
+    candidate_ids = {
+        kid for kid, e in entity_map.items() if e.bid_amt and e.parent_id in on_adgroups
+    }
+    if not candidate_ids:
+        return []
+    last_change = _last_bid_change_kst_date(db, candidate_ids)
+    daily = _daily_cost_conv_by_unit(db, NaverAdDaily.keyword_id, candidate_ids, _WEB_SITE, date_from, date_to)
+
     out = []
-    for r in rows:
-        entity = entity_map.get(r["keyword_id"])
-        if entity is None or not entity.bid_amt:
+    for keyword_id in candidate_ids:
+        rows = daily.get(keyword_id)
+        if not rows:
             continue
-        if entity.parent_id not in on_adgroups:
+        entity = entity_map[keyword_id]
+        last_change_date = last_change.get(keyword_id)
+        window_start = _stop_loss_window_start(date_from, date_to, last_change_date)
+        # GATE P2: 행동 창 2일 미만(마지막 실변경=date_to 당일)이면 zero_conv 판정 보류 —
+        # 간접전환 ~1일 정착이라 변경 당일 하루 창에서는 전환이 있어도 0으로 읽혀 고지출
+        # 유닛이 오발동 사살될 수 있다. 다음날 창이 2일이 되면 정상 판정된다.
+        # (GATE-2R P3: 술어는 변경일 기준 — window_start 기준이면 date_from==date_to인
+        #  ad-hoc 짧은 창에서 오래된 변경 이력만으로 유닛이 통째 억제된다.)
+        if last_change_date is not None and last_change_date >= date_to:
+            continue
+        imp, clk, cost, conv_amt = _sum_cost_conv_since(rows, window_start)
+        if cost <= 0:
             continue
         stop_loss_amount = entity.bid_amt * LOW_CLICK_THRESHOLD
-        if r["conv_amt"] == 0 and r["cost"] >= stop_loss_amount:
-            out.append({**r, "current_bid": entity.bid_amt, "stop_loss_amount": stop_loss_amount})
+        if conv_amt == 0 and cost >= stop_loss_amount:
+            roas_naver = float((Decimal(conv_amt) / Decimal(cost)).quantize(_Q4)) if cost else None
+            out.append({
+                "campaign_id": entity.campaign_id, "adgroup_id": entity.parent_id,
+                "keyword_id": keyword_id, "imp": imp, "clk": clk, "cost": cost,
+                "conv_amt": conv_amt, "roas_naver": roas_naver,
+                "current_bid": entity.bid_amt, "stop_loss_amount": stop_loss_amount,
+            })
     out.sort(key=lambda x: x["cost"], reverse=True)
     return out
 
@@ -545,7 +674,14 @@ def shopping_pause_candidates(
     터미널 pause 후보로 넣는다. **입찰 여유가 있으면(하한 초과) 배제** — bid_down이 shopping_
     group_bep의 몫이라 여기서도 잡으면 이중 제안. _stop_loss_proposal이 at-floor→터미널
     pause로 라우팅하므로 후보 진입만 열면 지혈 완성. bep 미제공(하위호환 호출)이면 이 경로
-    휴면(무전환 게이트만 작동)."""
+    휴면(무전환 게이트만 작동).
+
+    ★DL1(D-NAO-65) 창 이원화:
+    - **행동 창(스톱로스 비용·무전환 게이트) = 마지막 입찰변경 이후**(변경이력 없으면 3일 폴백)
+      — pause_candidates와 동일(D-NAO-63 시점 불일치 소멸).
+    - **만성 판정 창(floored_loss 보정ROAS) = 7일 롤링 soft**(ref 33 [1]) — 단발 나쁜 날의
+      일별 분산으로 pause를 결정하지 않도록 명시 분리(과거 전체 창 → 7일 롤링). 이 창이
+      DL2에서 '레버 끊김' 판정기로 진화할 기반이다."""
     on_adgroups = _on_adgroup_ids(db)
     entity_map = {
         e.entity_id: e for e in
@@ -557,45 +693,49 @@ def shopping_pause_candidates(
     if not entity_map:
         return []
 
-    q = (
-        db.query(
-            NaverAdDaily.campaign_id, NaverAdDaily.adgroup_id,
-            sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.cost), 0),
-            sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.conv_direct_amt), 0),
-            sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.conv_indirect_amt), 0),
-        )
-        .filter(
-            NaverAdDaily.ad_date >= date_from, NaverAdDaily.ad_date <= date_to,
-            NaverAdDaily.campaign_type == _SHOPPING,
-            NaverAdDaily.adgroup_id != BACKFILL_SENTINEL_ADGROUP,
-        )
-        .group_by(NaverAdDaily.campaign_id, NaverAdDaily.adgroup_id)
-        .all()
-    )
+    # 부모 캠페인 on + bid_amt 확보된 그룹만 후보(그 집합으로 창 조회).
+    candidate_ids = {
+        aid for aid, e in entity_map.items() if e.bid_amt and aid in on_adgroups
+    }
+    if not candidate_ids:
+        return []
+    last_change = _last_bid_change_kst_date(db, candidate_ids)
+    daily = _daily_cost_conv_by_unit(db, NaverAdDaily.adgroup_id, candidate_ids, _SHOPPING, date_from, date_to)
+    chronic_from = date_to - timedelta(days=_CHRONIC_WINDOW_DAYS - 1)  # 7일 롤링 만성 창
+
     # D-NAO-64(A): at-floor(못 내림) 판정은 스텝하향의 단일 진실원천 재사용(하드코딩 70 금지,
     # _MAX_CHANGE_PCT 변경 시 자동 정합). 함수 레벨 import로 순환 의존 회피(호출 시점 해석).
     from app.services.naver_ad.proposal_writer import _step_down_bid
 
     out = []
-    for campaign_id, adgroup_id, cost, conv_direct, conv_indirect in q:
-        cost = int(cost)
+    for adgroup_id in candidate_ids:
+        rows = daily.get(adgroup_id)
+        if not rows:
+            continue
+        entity = entity_map[adgroup_id]
+        last_change_date = last_change.get(adgroup_id)
+        window_start = _stop_loss_window_start(date_from, date_to, last_change_date)
+        _, _, cost, conv_amt = _sum_cost_conv_since(rows, window_start)  # 행동 창
         if cost <= 0:
             continue
-        entity = entity_map.get(adgroup_id)
-        if entity is None or not entity.bid_amt:
-            continue
-        if adgroup_id not in on_adgroups:
-            continue
-        conv_amt = int(conv_direct) + int(conv_indirect)
         stop_loss_amount = entity.bid_amt * LOW_CLICK_THRESHOLD
         if cost < stop_loss_amount:
             continue
+        # GATE P2: 행동 창 2일 미만(마지막 실변경=date_to 당일)이면 zero_conv 판정 보류 —
+        # 간접전환 ~1일 정착·쇼핑 ML그룹은 터미널 pause라 오발동=실손실. floored_loss(만성
+        # 7일 창) 경로는 창이 길어 정착 완충이 있으므로 이 보류와 무관.
+        # (GATE-2R P3: 술어는 변경일 기준 — pause_candidates와 동일 근거)
+        hold_zero_conv = last_change_date is not None and last_change_date >= date_to
         reason: str | None = None
         if conv_amt == 0:
-            reason = "zero_conv"  # 기존 무전환 스톱로스
+            if hold_zero_conv:
+                continue  # 변경 당일 하루 창 — 귀속 지연 완충 후 다음날 정상 판정
+            reason = "zero_conv"  # 기존 무전환 스톱로스(행동 창 기준)
         elif bep_roas is not None and correction_factor is not None:
             # 전환 있음 + 실질ROAS ≪ BEP + 입찰 바닥(못 내림) = 가망 없는 출혈 → 터미널 pause.
-            roas_naver = float((Decimal(conv_amt) / Decimal(cost)).quantize(_Q4))
+            # ★보정ROAS는 7일 롤링 만성 창으로 판정(단발 나쁜 날 조기사살 방지, DL1).
+            _, _, c_cost, c_conv = _sum_cost_conv_since(rows, chronic_from)
+            roas_naver = float((Decimal(c_conv) / Decimal(c_cost)).quantize(_Q4)) if c_cost else None
             roas_c = _corrected_roas(roas_naver, correction_factor)
             at_floor = _step_down_bid(entity.bid_amt) >= entity.bid_amt
             if roas_c is not None and roas_c < float(bep_roas) and at_floor:
@@ -603,7 +743,7 @@ def shopping_pause_candidates(
         if reason is None:
             continue
         out.append({
-            "campaign_id": campaign_id, "adgroup_id": adgroup_id, "cost": cost,
+            "campaign_id": entity.campaign_id, "adgroup_id": adgroup_id, "cost": cost,
             "conv_amt": conv_amt, "current_bid": entity.bid_amt,
             "stop_loss_amount": stop_loss_amount, "reason": reason,
         })
