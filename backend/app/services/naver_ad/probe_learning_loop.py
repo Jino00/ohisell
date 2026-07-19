@@ -5,7 +5,9 @@
 
 마이그레이션 없음 — 상태는 매 실행 재계산(probe_cell_aggregate/segmenter는 순수 조회). 쓰기는
 observe 일기 1행뿐(diary.write_diary_entry, 하루 1회 idempotent — diary_reflection 전례).
-learned_probe_rank는 CD5(탐침 트리거 소비)가 쓸 조회 SA — 이번 스프린트는 미배선(관찰만)."""
+learned_probe_rank는 D-NAO-60 RL5(CD5)가 소비하는 조회 SA — auto_operator._learned_optimal_skip이
+탐침 발동 직전 이 함수로 학습된 최적 밴드를 조회해 과climb을 막는다(승격 판정 로직 자체는
+불변, 소비만 배선됨)."""
 from __future__ import annotations
 
 import json
@@ -68,12 +70,25 @@ def _run_stage(result: dict, key: str, fn, default):
 
 def _promote_cells(aggregate: dict) -> list[dict]:
     """이미 계산된 aggregate 스냅샷에서 승격 조건 충족 셀만 {cell, band}로(재집계 없음 —
-    P3-1 리뷰: 셀당 aggregate_cells 재실행 N+1 제거 + 보고 cells와 동일 스냅샷 근거 보장)."""
+    P3-1 리뷰: 셀당 aggregate_cells 재실행 N+1 제거 + 보고 cells와 동일 스냅샷 근거 보장).
+    ★반환 shape은 하위호환 고정({"cell","band"} 2키만 — 소급 채점/기존 테스트가 이 dict를
+    그대로 in 비교한다). basis는 별도 `_promoted_basis_map`으로 분리."""
     return [
         {"cell": cell, "band": view["optimal_band"]}
         for cell, view in aggregate.get("cells", {}).items()
         if _is_promotable(view)
     ]
+
+
+def _promoted_basis_map(aggregate: dict) -> dict[str, str]:
+    """D-NAO-60 RL5 Part B: 승격 셀별 optimal_basis("conv"|"ctr") — _promote_cells와 동일
+    판정조건(_is_promotable) 재사용, `_summary_rationale`이 basis별 문구를 고르는 데 쓴다.
+    `_promote_cells`의 {"cell","band"} shape을 건드리지 않으려 별도 함수/스테이지로 분리."""
+    return {
+        cell: view.get("optimal_basis", "ctr")
+        for cell, view in aggregate.get("cells", {}).items()
+        if _is_promotable(view)
+    }
 
 
 def _already_run_today(db: Session, today: date) -> bool:
@@ -91,9 +106,14 @@ def _already_run_today(db: Session, today: date) -> bool:
 def _summary_rationale(result: dict) -> str:
     """observe 일기 rationale(볼트 열람층이 렌더하는 유일 필드 — vault_export._render_diary_day는
     observe를 e.rationale만 출력). D-58-12: 세분화 판정 근거·승격 결과를 여기 남긴다(P2-1 리뷰).
-    승격 밴드는 '클릭 최다 순위'라 명시 — 이익 가중은 CD5(P3-3 리뷰, 이익 스팟밴드와 혼동 방지)."""
+
+    D-NAO-60 RL5 Part B(P3-3 해소): 승격 표기가 더 이상 '클릭 최다·이익가중 미반영' 고정
+    문구가 아니다 — `promoted_basis`(cell→"conv"|"ctr")를 보고 전환 신호가 있던 승격은
+    '전환 최다(이익 방향)', 전환 신호 없어 CTR로 폴백한 승격은 '클릭 최다(전환 신호
+    부족·CTR 폴백)'로 정직하게 구분 표기한다."""
     n_cells = result.get("cells", 0)
     promoted = result.get("promoted") or []
+    basis_map = result.get("promoted_basis") or {}
     judged = (result.get("segment") or {}).get("judged") or []
     splits = [j for j in judged if j.get("verdict") == "split"]
     lines = [
@@ -102,7 +122,14 @@ def _summary_rationale(result: dict) -> str:
     ]
     if promoted:
         top = "; ".join(f"{p['cell']}→{p['band']}" for p in promoted[:5])
-        lines.append(f"- 승격(클릭 최다 순위·이익가중 미반영·CD5): {top}")
+        bases = {basis_map.get(p["cell"], "ctr") for p in promoted}
+        if bases == {"conv"}:
+            label = "전환 최다(이익 방향)"
+        elif "conv" in bases:
+            label = "전환 최다(이익 방향) 일부·나머지 클릭 최다(전환 신호 부족·CTR 폴백)"
+        else:
+            label = "클릭 최다(전환 신호 부족·CTR 폴백)"
+        lines.append(f"- 승격({label}·CD5): {top}")
     for j in splits[:5]:
         lines.append(
             f"- 세분 권고 [{j.get('cell')}] 축={j.get('axis')}: "
@@ -120,6 +147,7 @@ def _write_summary_diary(db: Session, now: datetime, result: dict) -> None:
     detail = json.dumps(
         {
             "promoted": result.get("promoted") or [],
+            "promoted_basis": result.get("promoted_basis") or {},  # D-NAO-60 RL5 Part B
             "segment": (result.get("segment") or {}).get("judged") or [],
         },
         ensure_ascii=False, default=str,
@@ -134,7 +162,8 @@ def run_probe_learning(
     db: Session, *, now: datetime | None = None, campaign_id: str | None = None,
 ) -> dict:
     """09:05 엔트리 — 집계→세분판정→승격→일기 4단계 스테이지 격리(한 단계 실패가 나머지를
-    막지 않음). 반환 {"stage_status":{...}, "cells":int, "promoted":[...], "segment":{...}}."""
+    막지 않음). 반환 {"stage_status":{...}, "cells":int, "promoted":[...], "promoted_basis":
+    {cell:"conv"|"ctr",...}(RL5 Part B), "segment":{...}}."""
     now = now or kst_now()
     as_of = now.date()
     result: dict = {"stage_status": {}}
@@ -148,6 +177,7 @@ def run_probe_learning(
               lambda: judge_cell_segmentation(db, as_of=as_of, campaign_id=campaign_id), {})
 
     _run_stage(result, "promoted", lambda: _promote_cells(aggregate), [])
+    _run_stage(result, "promoted_basis", lambda: _promoted_basis_map(aggregate), {})
 
     try:
         _write_summary_diary(db, now, result)

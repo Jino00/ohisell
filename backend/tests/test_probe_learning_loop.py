@@ -33,17 +33,20 @@ def db():
         s.close()
 
 
-def _hour_row(db, *, ad_date, hour=9, avg_rank=Decimal("2.2"), imp=50, clk=10, campaign_id="cmp-1"):
+def _hour_row(db, *, ad_date, hour=9, avg_rank=Decimal("2.2"), imp=50, clk=10, conv_cnt=0,
+              campaign_id="cmp-1"):
     db.add(NaverKeywordHourly(
         ad_date=ad_date, hour=hour, entity_type="keyword", entity_id="nkw-1",
         adgroup_id="grp-1", campaign_id=campaign_id, campaign_type="WEB_SITE",
-        imp=imp, clk=clk, cost=100, avg_rank=avg_rank,
+        imp=imp, clk=clk, cost=100, avg_rank=avg_rank, conv_cnt=conv_cnt,
     ))
     db.commit()
 
 
 def _seed_promotable_cell(db):
-    """imp≥100(총합)·days≥3·ctr_shrunk≥신호하한 충족 → optimal_band 확정되는 weekday 셀."""
+    """imp≥100(총합)·days≥3·ctr_shrunk≥신호하한 충족 → optimal_band 확정되는 weekday 셀.
+    conv_cnt=0(기본) → RL5 Part B는 CTR 폴백으로 떨어져 기존 동작(optimal_band='2.0-2.5',
+    basis='ctr')과 동일하게 유지된다."""
     for i in range(3):
         _hour_row(db, ad_date=WEEKDAY - timedelta(days=i), imp=50, clk=10)
 
@@ -119,15 +122,30 @@ def test_run_probe_learning_persists_split_verdict_to_diary_rationale(db):
     assert {"cell": "weekday", "band": "2.0-2.5"} in detail["promoted"]
 
 
-def test_run_probe_learning_rationale_flags_click_only_not_profit(db):
-    """P3-3: 승격 밴드가 '클릭 최다·이익가중 미반영'임을 볼트 표기에 명시(이익 스팟밴드 혼동 방지)."""
+def test_run_probe_learning_rationale_flags_ctr_fallback_when_no_conversions(db):
+    """D-NAO-60 RL5(CD5) Part B: 구 P3-3("클릭 최다·이익가중 미반영" 고정 표기)이 해소되고
+    basis에 따라 갱신된다 — 전환 신호 없는(conv_cnt=0) 승격은 'CTR 폴백'로 정직하게 표기."""
     _seed_promotable_cell(db)
     with patch.object(loop, "judge_cell_segmentation", return_value={"judged": [], "skipped": 0}):
         loop.run_probe_learning(db, now=NOW)
     entry = db.query(OpsDiaryEntry).filter(
         OpsDiaryEntry.event_type == "observe", OpsDiaryEntry.action == "probe_learning",
     ).one()
-    assert "이익가중 미반영" in entry.rationale
+    assert "클릭 최다" in entry.rationale
+    assert "전환 신호 부족" in entry.rationale
+
+
+def test_run_probe_learning_rationale_flags_conv_basis_when_conversions_present(db):
+    """전환 신호(conv_cnt>0) 있는 승격은 '전환 최다(이익 방향)'로 표기(P3-3 해소 본론)."""
+    for i in range(3):
+        _hour_row(db, ad_date=WEEKDAY - timedelta(days=i), imp=50, clk=10, conv_cnt=5)
+    with patch.object(loop, "judge_cell_segmentation", return_value={"judged": [], "skipped": 0}):
+        loop.run_probe_learning(db, now=NOW)
+    entry = db.query(OpsDiaryEntry).filter(
+        OpsDiaryEntry.event_type == "observe", OpsDiaryEntry.action == "probe_learning",
+    ).one()
+    assert "전환 최다" in entry.rationale
+    assert "이익 방향" in entry.rationale
 
 
 def test_run_probe_learning_empty_data_still_writes_diary(db):

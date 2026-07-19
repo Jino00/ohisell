@@ -120,6 +120,18 @@ def _forecast_evidence_suffix(forecast: dict | None) -> str:
     )
 
 
+def _step_down_bid(current_bid: int) -> int:
+    """스텝 하향 입찰가(±15% 가드레일과 동일 산식, guardrail_gate._MAX_CHANGE_PCT 재사용) —
+    현재입찰×(1-스텝)의 10원 올림(ROUND_CEILING — 내림하면 15%를 넘어버림) 과 절대 하한
+    70원(_MIN_BID 규약, guardrail_gate와 동일) 중 큰 값.
+
+    RL4(D-NAO-60)에서 _bid_proposal의 bid_down 클램프와 _stop_loss_proposal의 키워드 고삐가
+    동일 산식을 공유하도록 추출한 헬퍼 — 중복 로직 방지(단일 진실 소스)."""
+    stepped = Decimal(current_bid) * (Decimal(1) - _MAX_CHANGE_PCT)
+    step_floor = int((stepped / 10).to_integral_value(rounding=ROUND_CEILING)) * 10
+    return max(step_floor, 70)
+
+
 def _bid_proposal(
     row: dict, sim: dict | None, campaign_id: str, target_id: str, *,
     target_type: str, target_label: dict, board_name: str, forecast: dict | None = None,
@@ -176,10 +188,7 @@ def _bid_proposal(
         # (기존 클램프 규약) 유지. target = max(시뮬 추천, 스텝 하한).
         current_bid = sim.get("current_bid")
         if current_bid:
-            stepped = Decimal(current_bid) * (Decimal(1) - _MAX_CHANGE_PCT)
-            # 10원 올림(ceil) — Decimal의 //는 버림(truncation)이라 음수 트릭 불가, ROUND_CEILING 명시
-            step_floor = int((stepped / 10).to_integral_value(rounding=ROUND_CEILING)) * 10
-            step_floor = max(step_floor, 70)  # 절대 하한(_MIN_BID 규약, guardrail_gate와 동일)
+            step_floor = _step_down_bid(current_bid)
             if step_floor > target_bid:
                 target_bid = step_floor
                 clamp_note = f"(경제하한 {sim['economic_ceiling']}원, 스텝 클램프)"
@@ -280,22 +289,35 @@ def _negative_keyword_from_exclusion(row: dict, campaign_id: str) -> dict:
     }
 
 
-def _pause_proposal(row: dict, *, target_type: str = "keyword") -> dict:
-    """pause_candidates/shopping_pause_candidates 보드 1행(account_diagnosis) → pause 제안
-    (X1b T3, D-NAO-38 / 쇼핑 adgroup 확장은 X1b-S S1, D-NAO-43).
+def _terminal_pause(row: dict, *, target_type: str) -> dict:
+    """스톱로스 대응의 최종 단계(터미널) — pause 제안 1건. RL4(D-NAO-60) 이전엔 스톱로스의
+    유일한 대응이었으나(구 `_pause_proposal`), 이제는 (a) 쇼핑 adgroup 경로 전체, (b) 키워드
+    경로에서 고삐(bid_down)가 입찰 하한(70원)까지 내려가 더는 하향할 여지가 없을 때만
+    쓰인다 — `_stop_loss_proposal`이 호출한다(SA 직접 호출 금지, 이 함수는 비공개).
 
-    target_type='keyword'(기본값, 하위호환)는 WEB_SITE 키워드(pause_candidates 보드,
-    target_id=row["keyword_id"]) — target_type='adgroup'은 SHOPPING 광고그룹
-    (shopping_pause_candidates 보드, target_id=row["adgroup_id"]). 두 보드는 row 스키마가
-    동형(campaign_id/cost/stop_loss_amount 등 공통, 대상id 키만 다름)이라 한 빌더가 함께
-    처리한다. adgroup_id 컬럼(NaverProposal, 실쓰기 대상 광고그룹 정보용)은 keyword
-    대상에서만 채운다 — adgroup 대상은 target_id 자체가 이미 그 값이라 중복 저장하지 않는다
-    (shopping_group_bep의 _bid_proposal이 adgroup 대상에 adgroup_id를 안 채우는 것과 동일 관례).
+    target_type='keyword'는 WEB_SITE 키워드(pause_candidates 보드, target_id=row["keyword_id"]),
+    'adgroup'은 SHOPPING 광고그룹(shopping_pause_candidates 보드, target_id=row["adgroup_id"]).
+    두 보드는 row 스키마가 동형(campaign_id/cost/stop_loss_amount 등 공통, 대상id 키만 다름)
+    이라 한 빌더가 함께 처리한다. adgroup_id 컬럼(NaverProposal, 실쓰기 대상 광고그룹 정보용)은
+    keyword 대상에서만 채운다 — adgroup 대상은 target_id 자체가 이미 그 값이라 중복 저장하지
+    않는다(shopping_group_bep의 _bid_proposal이 adgroup 대상에 adgroup_id를 안 채우는 것과
+    동일 관례).
 
     D-NAO-20 스톱로스 절대액(현재입찰×LOW_CLICK_THRESHOLD) 도달 — 무전환 지출 중단이
     목적이라 target_roas 근거 병기가 불필요(스톱로스는 손익 목표와 무관한 절대액 안전핀)."""
     target_id = row["keyword_id"] if target_type == "keyword" else row["adgroup_id"]
     board_name = "pause_candidates" if target_type == "keyword" else "shopping_pause_candidates"
+    if target_type == "keyword":
+        rationale = (
+            f"[스톱로스-터미널] 입찰 하한({row['current_bid']}원) 도달 무전환 → "
+            f"정지(D-NAO-60 RL4 터미널) cost={row['cost']}원 ≥ 스톱로스 {row['stop_loss_amount']}원 "
+            f"clk={row.get('clk')}."
+        )
+    else:
+        rationale = (
+            f"[{board_name}] 무전환 누적비용 {row['cost']}원 ≥ 스톱로스 {row['stop_loss_amount']}원"
+            f"(현재입찰={row['current_bid']}원, D-NAO-20) clk={row.get('clk')}."
+        )
     return {
         "proposal_type": _PAUSE,
         "target_type": target_type,
@@ -303,19 +325,62 @@ def _pause_proposal(row: dict, *, target_type: str = "keyword") -> dict:
         "campaign_id": row["campaign_id"],
         "adgroup_id": row["adgroup_id"] if target_type == "keyword" else None,
         "target_lock": True,
-        "rationale": (
-            f"[{board_name}] 무전환 누적비용 {row['cost']}원 ≥ 스톱로스 {row['stop_loss_amount']}원"
-            f"(현재입찰={row['current_bid']}원, D-NAO-20) clk={row.get('clk')}."
-        ),
+        "rationale": rationale,
         "expected_effect": "무전환 지출 중단 — 추가 비용 발생 차단(D-NAO-16 정지).",
         "status": "pending",
     }
 
 
+def _stop_loss_proposal(row: dict, *, target_type: str = "keyword") -> dict:
+    """pause_candidates/shopping_pause_candidates 보드 1행(account_diagnosis) → 스톱로스 대응
+    제안(X1b T3 D-NAO-38 → RL4 D-NAO-60로 개명·행위 변경, 쇼핑 adgroup 확장은 X1b-S S1
+    D-NAO-43).
+
+    ★D-NAO-60 RL4(총이익 극대화, D-NAO-59): 스톱로스가 지금까지 만들던 pause(하드 정지)는
+    "볼륨 0 = 이익 0"이라 총이익 관점에서 최선이 아니다 — **키워드 경로는 정지 대신
+    순위 하향(고삐, bid_down)** 으로 바꾼다. 무전환 지출이 지속되면 다음 날 스톱로스가
+    재발동해 다시 한 등 하향(자연 graduation) → 입찰 하한(70원)까지 내려가면 그때만
+    `_terminal_pause`(최종 단계). 도중 전환이 살아나면 스톱로스 자체가 안 걸려 자동 사면된다
+    (cheaper-rank-conversion 가설의 최소 테스트).
+
+    **쇼핑(target_type='adgroup') 경로는 변경 없음 — 여전히 pause.** 이유: ①ML/수동 입찰
+    판별 복잡성(update_adgroup_bid가 systemBidding이면 fail-closed라 고삐 신뢰 불가)
+    ②ours auto_operate 대상 캠페인(04·P_Test)은 전부 WEB_SITE 키워드 grain이라 실제 자동운영
+    대상은 키워드 경로가 이미 커버. 쇼핑 고삐 개방은 별도 결정(§7 잔여 항목 아님, 스코프 밖)."""
+    if target_type == "adgroup":
+        return _terminal_pause(row, target_type=target_type)
+
+    current_bid = row["current_bid"]
+    step_floor = _step_down_bid(current_bid)
+    if step_floor >= current_bid:
+        # 이미 입찰 하한(70원) — 더 내릴 여지 없음 → 최종 단계(터미널 pause).
+        return _terminal_pause(row, target_type=target_type)
+
+    rationale = (
+        f"[스톱로스고삐] 무전환 누적비용 {row['cost']}원≥스톱로스 {row['stop_loss_amount']}원"
+        f"(현재입찰 {current_bid}→{step_floor}원, D-NAO-60 RL4 정지 대신 한 등 하향) "
+        f"clk={row.get('clk')}."
+    )
+    return {
+        "proposal_type": _BID_DOWN,
+        "target_type": "keyword",
+        "target_id": row["keyword_id"],
+        "campaign_id": row["campaign_id"],
+        "adgroup_id": row["adgroup_id"],
+        "rationale": rationale,
+        "expected_effect": (
+            "무전환 지출 순위 고삐 — 한 등 하향(정지 대신, 자연 재발동시 하한까지·전환 살면 "
+            "사면). D-NAO-59 총이익."
+        ),
+        "status": "pending",
+        "target_bid": step_floor,
+    }
+
+
 def _resume_proposal(row: dict, target_label: dict, *, target_type: str = "keyword") -> dict:
     """resume_candidates/shopping_resume_candidates 보드 1행 → resume 제안(X1b T3, D-NAO-38
-    / 쇼핑 adgroup 확장은 X1b-S S1, D-NAO-43). target_type 규약은 _pause_proposal과 동일
-    (기본값 'keyword'=하위호환, 'adgroup'=쇼핑 광고그룹).
+    / 쇼핑 adgroup 확장은 X1b-S S1, D-NAO-43). target_type 규약은 _stop_loss_proposal/
+    _terminal_pause와 동일(기본값 'keyword'=하위호환, 'adgroup'=쇼핑 광고그룹).
 
     정지 직전 창의 보정ROAS가 현재 목표(target_roas) 이상으로 회복 — D-NAO-16 "정지 사유
     해소"(BEP 개선) 신호. 우리 시스템이 정지시킨 대상만(account_diagnosis.resume_candidates/
@@ -604,11 +669,13 @@ def build(
 
     # pause_candidates/resume_candidates(X1b T3, D-NAO-38): D-NAO-13 ours 필터 동일 적용
     # (실행 대상 액션이라 진단 보드와 달리 optimizer 무관 전 캠페인 대상이 아님).
+    # RL4(D-NAO-60): pause_candidates 보드는 이제 pause 대신 bid_down(고삐)을 만든다(키워드
+    # 경로, 입찰 하한 도달 시에만 터미널 pause) — _stop_loss_proposal 참조.
     for row in boards.get("pause_candidates", []) or []:
         cid = row["campaign_id"]
         if cid not in ours:
             continue
-        proposals.append(_pause_proposal(row))
+        proposals.append(_stop_loss_proposal(row))
 
     for row in boards.get("resume_candidates", []) or []:
         cid = row["campaign_id"]
@@ -623,7 +690,7 @@ def build(
         cid = row["campaign_id"]
         if cid not in ours:
             continue
-        proposals.append(_pause_proposal(row, target_type="adgroup"))
+        proposals.append(_stop_loss_proposal(row, target_type="adgroup"))
 
     for row in boards.get("shopping_resume_candidates", []) or []:
         cid = row["campaign_id"]

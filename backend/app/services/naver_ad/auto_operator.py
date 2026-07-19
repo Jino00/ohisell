@@ -29,7 +29,7 @@ from app.models import (
     NaverProposal,
     NaverRetroSignal,
 )
-from app.services.naver_ad import campaign_target_resolver, diagnosis, diary, hourly_pattern, naver_execution_harness, naver_sa_writer
+from app.services.naver_ad import campaign_target_resolver, diagnosis, diary, hourly_pattern, intraday_roas, naver_execution_harness, naver_sa_writer
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.services.naver_ad.guardrail_gate import _MAX_CHANGE_PCT
 from app.services.naver_ad.trigger_watch import CPC_SPIKE_RATIO
@@ -689,13 +689,92 @@ def _is_pacing_slow(
     return False, f"페이싱정상(실제{actual_pace:.2f}>=기대{expected_f:.2f}, {basis}, 경계={boundary_hour}시 종료)"
 
 
+def _resolve_adgroup_id(db: Session, target_type: str, target_id: str) -> str | None:
+    """고삐 판정용 adgroup_id 해석 — target_type='adgroup'이면 그대로, 'keyword'면
+    NaverEntity.parent_id(부모 광고그룹)를 조회. 행 부재/parent_id 미기록이면 None
+    (fail-closed — 원가/BEP를 어느 광고그룹에 물어야 할지 모르면 고삐를 발동하지 않는다)."""
+    if target_type == "adgroup":
+        return target_id
+    if target_type == "keyword":
+        entity = (
+            db.query(NaverEntity)
+            .filter(NaverEntity.entity_type == "keyword", NaverEntity.entity_id == target_id)
+            .first()
+        )
+        if entity is None or not entity.parent_id:
+            return None
+        return entity.parent_id
+    return None
+
+
+def _intraday_loss_leash(
+    db: Session, *, target_type: str, target_id: str, campaign_id: str,
+    curve: list[dict], now: datetime, baseline_agg: dict,
+) -> tuple[bool, str]:
+    """D-NAO-60 RL3 — 장중(오늘) loss면 순위를 한 등 하향(고삐). 정지가 아니라 하향(D-NAO-59
+    총이익 절대액 극대화 — 볼륨 0=이익 0이므로 kill보다 leash가 우월). (발동여부, 사유) 반환.
+
+    발동 조건(전부 충족):
+    ① adgroup_id 해석 가능(원가를 물을 대상이 정해져야 함).
+    ② intraday_roas.adgroup_unit_price가 price·bep_roas 둘 다 산출(원가 아는 상품에만
+       발동 — 미확인 상품은 판정 근거가 없어 fail-closed).
+    ③ 당일 곡선에 소진이 있어 추정 ROAS 산출 가능(estimated_intraday_roas가 None이 아님).
+    ④ **당일 누적 소진 ≥ 정착창 하루평균 소진**(baseline_agg["cost"]/_HOURLY_BASELINE_DAYS
+       재사용 — 새 매직넘버 도입 금지). 전환지연으로 장중 추정 ROAS는 구조적으로 과소추정
+       되므로(intraday_roas.py 정직 경계②), 하루치 예산을 이미 다 쓴 뒤에만 발동해 이른
+       시각의 조급한 하향을 막는다(보수적 floor, PLAN §RL3).
+    ⑤ 추정 ROAS < bep_roas(명백히 BEP 하회).
+
+    비대칭 기억: 이 함수는 **오늘 curve만** 본다(자정 리셋 — 어제 loss가 오늘 판정에
+    영향 없음). 반대로 UP 경로(_settlement_roas_ok)는 정착창 누적을 쓰며 여기서 건드리지
+    않는다(관성 — 좋은 성과의 이득은 다음날 자동으로 사라지지 않음, PLAN §0 비대칭 기억).
+
+    하향 자체는 이 함수가 결정하지 않는다 — 방향만 반환하고 실제 집행은 여느 bid_down과
+    동일하게 naver_execution_harness.execute()의 guardrail_gate(BEP 하한·쿨다운 2h·일일
+    상한·스텝 클램프)를 전량 통과해야 한다(§금지선: 우회 경로 금지)."""
+    adgroup_id = _resolve_adgroup_id(db, target_type, target_id)
+    if adgroup_id is None:
+        return False, "adgroup 해석 불가"
+
+    price_info = intraday_roas.adgroup_unit_price(db, adgroup_id)
+    price = price_info["price"]
+    bep_roas = price_info["bep_roas"]
+    if price is None or bep_roas is None:
+        return False, "상품 단가/BEP 미확인 — 고삐 판정 불가"
+
+    est_roas = intraday_roas.estimated_intraday_roas(curve, price)
+    if est_roas is None:
+        return False, "당일 소진 없음"
+
+    today_cost = sum(h["cost"] for h in curve)
+    avg_daily_cost = baseline_agg["cost"] / _HOURLY_BASELINE_DAYS
+    if avg_daily_cost <= 0:
+        return False, "정착창 소진 기준 없음"
+    if today_cost < avg_daily_cost:
+        return False, "당일 소진<하루평균 — 판정 유보(과소추정 방어)"
+
+    if est_roas < bep_roas:
+        return True, (
+            f"순위고삐(장중loss) — 추정ROAS {est_roas} < BEP {bep_roas}, "
+            f"당일소진 {today_cost}≥하루평균 {avg_daily_cost:.0f}"
+        )
+    return False, f"장중 추정ROAS {est_roas} ≥ BEP {bep_roas} — 고삐 불발"
+
+
 def _judge_hourly(
     db: Session, *, target_type: str, target_id: str, campaign_id: str, curve: list[dict], now: datetime,
 ) -> dict:
     """§4-3 시간당 판정(우선순위 순, 하나만) — {"direction": "up"/"down"/"hold", "reason": str}.
 
     ROAS/BEP는 여기서 신규 판단하지 않는다(정착창 재사용은 조건 재확인일 뿐, 시간당
-    ROAS 산출은 없음 — §4 "시간당 판단은 순위·CPC·페이싱만" 원칙 준수)."""
+    ROAS 산출은 없음 — §4 "시간당 판단은 순위·CPC·페이싱만" 원칙 준수). ★D-NAO-60 RL3로
+    완화: 단, 장중 loss 고삐(안전방향 DOWN)는 추정 ROAS<BEP를 사용한다. 이는 D-NAO-4의
+    "시간당 ROAS 판단 없음"을 안전방향 하향에 한해 완화한 것(D-NAO-60-2). UP은 여전히
+    정착창 실측 ROAS만(_settlement_roas_ok) — 과소추정되는 장중 신호로는 증액하지 않는다.
+
+    비대칭 기억(PLAN §0): 고삐 DOWN은 오늘 곡선만 보고 자정에 리셋된다(용서 — 어제의
+    loss가 오늘 판정을 묶지 않음). UP은 정착창(D-8~D-2) 누적을 보고, 이득은 다음날 자동
+    하강하지 않는다(관성)."""
     summary = _weighted_recent(curve, now.hour)
     if summary["imp_sum"] < _MIN_HOURLY_SAMPLE_IMP:
         return {
@@ -729,6 +808,16 @@ def _judge_hourly(
                     f"×{CPC_SPIKE_RATIO}"
                 ),
             }
+
+    # DOWN 신규 ③: 장중 loss 고삐(D-NAO-60 RL3) — UP보다 먼저 검사해 "bleeding day엔 UP
+    # 금지"(PLAN §RL3 우선순위)를 자연히 구현한다. baseline_agg는 위 CPC급등 검사에서 이미
+    # 계산된 값을 그대로 재사용(중복 쿼리 금지).
+    leash_fired, leash_reason = _intraday_loss_leash(
+        db, target_type=target_type, target_id=target_id, campaign_id=campaign_id,
+        curve=curve, now=now, baseline_agg=baseline_agg,
+    )
+    if leash_fired:
+        return {"direction": "down", "reason": leash_reason, "leash": True}
 
     # UP: 3조건 동시 충족 시만(밴드하단이탈 AND 정착ROAS충족 AND 페이싱저속)
     if weighted_rank is not None and weighted_rank > _HOURLY_RANK_UP_THRESHOLD:
@@ -764,6 +853,25 @@ def _clamp_step(current_bid: int, direction: str) -> int | None:
     return None
 
 
+def _probe_window_stats(curve: list[dict], now: datetime) -> tuple[int, int, Decimal | None, str]:
+    """D-NAO-58 CD2·D-NAO-60 RL5(CD5) 공유 헬퍼 — 완료 창 [now.hour-_PROBE_ZERO_CLICK_HOURS,
+    now.hour)의 imp/clk 합 + imp-가중 avg_rank(rank None 버킷 제외). `_probe_trigger`와
+    `_learned_optimal_skip`이 동일 창·동일 가중 규약을 쓰도록 계산부만 공유(중복 제거).
+    반환 (imp_sum, clk_sum, weighted_rank_or_None, win_label)."""
+    window_start = now.hour - _PROBE_ZERO_CLICK_HOURS
+    window = [h for h in curve if window_start <= h["hour"] < now.hour]  # 완료 시간대만(현재 진행중 제외)
+    imp_sum = sum(h["imp"] for h in window)
+    clk_sum = sum(h["clk"] for h in window)
+    rank_imp_sum = sum(h["imp"] for h in window if h.get("avg_rank") is not None)
+    weighted_rank = None
+    if rank_imp_sum > 0:
+        weighted_rank = sum(
+            Decimal(str(h["avg_rank"])) * h["imp"] for h in window if h.get("avg_rank") is not None
+        ) / Decimal(rank_imp_sum)
+    win_label = f"[{window_start},{now.hour})"
+    return imp_sum, clk_sum, weighted_rank, win_label
+
+
 def _probe_trigger(curve: list[dict], now: datetime) -> tuple[bool, str]:
     """D-NAO-58 CD2 클릭 탐침 트리거(순수 SA·단일 창 자기완결) — 밴드의 사각지대(밴드 안/하단
     인데 클릭0)를 감지한다(D-58-7 확정, 기존 검증 상수 재사용). (발동여부, 사유) 반환.
@@ -789,18 +897,7 @@ def _probe_trigger(curve: list[dict], now: datetime) -> tuple[bool, str]:
     if now.hour < _PROBE_ZERO_CLICK_HOURS:
         return False, f"이른 새벽(now.hour={now.hour}<{_PROBE_ZERO_CLICK_HOURS}) — 완료 창 표본 없음(탐침 보류)"
 
-    window_start = now.hour - _PROBE_ZERO_CLICK_HOURS
-    window = [h for h in curve if window_start <= h["hour"] < now.hour]  # 완료 시간대만(현재 진행중 제외)
-    imp_sum = sum(h["imp"] for h in window)
-    clk_sum = sum(h["clk"] for h in window)
-    rank_imp_sum = sum(h["imp"] for h in window if h.get("avg_rank") is not None)
-    weighted_rank = None
-    if rank_imp_sum > 0:
-        weighted_rank = sum(
-            Decimal(str(h["avg_rank"])) * h["imp"] for h in window if h.get("avg_rank") is not None
-        ) / Decimal(rank_imp_sum)
-
-    win_label = f"[{window_start},{now.hour})"
+    imp_sum, clk_sum, weighted_rank, win_label = _probe_window_stats(curve, now)
     if clk_sum != 0:
         return False, f"클릭 존재(창{win_label} clk={clk_sum}) — 탐침 대상 아님"
     if imp_sum < _MIN_HOURLY_SAMPLE_IMP:
@@ -818,12 +915,53 @@ def _probe_trigger(curve: list[dict], now: datetime) -> tuple[bool, str]:
     )
 
 
+def _learned_optimal_skip(
+    db: Session, curve: list[dict], now: datetime, campaign_id: str,
+) -> tuple[bool, str]:
+    """D-NAO-59/60 RL5(CD5) — 탐침(`_probe_trigger`)이 발동한 직후 게이트. 과climb 방지:
+    이익 스팟밴드(2.5~4)를 넘어 학습된 최적 순위밴드까지 이미 도달했으면 더 올릴 이유가
+    없다(비싼 상위로 계속 오르는 건 이익이 아니라 비용만 늘림). `probe_learning_loop.
+    learned_probe_rank`(CD4 산출물)로 그 캠페인 env_cell의 승격된 최적 밴드를 조회해,
+    `_probe_trigger`와 **동일한 완료 2시간 창**([now.hour-_PROBE_ZERO_CLICK_HOURS, now.hour))
+    에서 산출한 가중 avg_rank와 그 밴드 상한을 비교한다.
+
+    lazy import(순환 회피 — run_hourly_lane 말미 probe_revert import 전례). (skip, 사유)
+    반환 — skip=True면 run_hourly_lane이 up 승격을 취소하고 hold(관찰)로 남긴다. 학습된
+    밴드가 없으면(데이터 부족·백필 미도달) 게이트 없이 통과(CD2 폴백 — 이 게이트는 CD2
+    위에 얹는 추가 제약일 뿐, CD2 자체의 발동 조건을 대체하지 않는다). guardrail 우회는
+    없다 — skip=False로 통과한 제안도 기존 execute()→guardrail_gate 전량을 그대로 탄다."""
+    from app.services.naver_ad import probe_cell_aggregate, probe_learning_loop
+
+    _imp_sum, _clk_sum, weighted_rank, win_label = _probe_window_stats(curve, now)
+    if weighted_rank is None:
+        return False, "순위 근거 없음 — 게이트 미적용"
+
+    env_cell = probe_cell_aggregate.env_cell_of_date(now.date())
+    learned = probe_learning_loop.learned_probe_rank(
+        db, env_cell=env_cell, as_of=now.date(), campaign_id=campaign_id,
+    )
+    if learned is None:
+        return False, "학습된 최적 밴드 없음 — 무조건 탐침(CD2 폴백)"
+
+    band_high = probe_cell_aggregate.rank_band_upper(learned)
+    if band_high is None or weighted_rank < band_high:
+        return True, (
+            f"학습 최적밴드({env_cell}→{learned}) 이미 도달(현재{win_label} 가중avg_rank="
+            f"{float(weighted_rank):.2f}) — 탐침 생략(CD5)"
+        )
+    return False, (
+        f"학습 최적밴드({learned})보다 하위(현재{win_label} 가중avg_rank="
+        f"{float(weighted_rank):.2f}) — 탐침 상향(CD5 목표)"
+    )
+
+
 def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=None) -> dict:
     """시간당 밴드 관제 실입찰(PLAN §4). 매시 :20 크론(catch-up 제외 — 시간성 소멸).
 
     ①캠페인별 소진 서킷브레이커(§4-6) → 걸리면 그 캠페인 전체 hold ②핫셋 선정(§4-1)
-    ③유닛별 intraday hh24 곡선 조회(§4-2, 실패 시 skip) ④판정(§4-3, 순위·CPC·페이싱만 —
-    ROAS 신규 판단 없음) ⑤스텝 제안 생성+즉시 승인(approval_source=APPROVAL_SOURCE_HOURLY)
+    ③유닛별 intraday hh24 곡선 조회(§4-2, 실패 시 skip) ④판정(§4-3, 순위·CPC·페이싱 +
+    D-NAO-60 RL3 장중 loss 고삐DOWN[추정ROAS<BEP, 안전방향 한정 완화] — UP은 여전히 정착창
+    실측 ROAS만) ⑤스텝 제안 생성+즉시 승인(approval_source=APPROVAL_SOURCE_HOURLY)
     +naver_execution_harness.execute() 경유 실행(가드레일 전량 통과 필요 — 쿨다운·일일상한·
     BEP·스톱로스가 최종 방어선).
 
@@ -834,6 +972,11 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
     D-NAO-58 CD2: 밴드 판정이 hold인 사각지대에서 _probe_trigger가 참이면 up 탐침으로 치환
     (기존 up 경로 그대로 통과 — 라이브 현재가 재조회·_clamp_step·킬스위치 재확인·execute).
     탐침 제안만 approval_source=probe_op·rationale [클릭탐침]로 태그(diary probe actor).
+
+    D-NAO-60 RL5(CD5): 탐침이 참이어도 `_learned_optimal_skip`이 그 캠페인 env_cell의 학습된
+    최적 순위밴드(probe_learning_loop.learned_probe_rank)에 이미 도달했다고 판정하면 up
+    승격을 취소하고 hold로 남긴다(과climb 방지) — guardrail 우회는 없음(통과분만 기존
+    execute() 경로).
 
     D-NAO-58 CD3 Stage 1: 레인 말미에 probe_revert.run_bleed_valve로 당일 standing probe의
     실시간 출혈(비용×3 급등∧즉시구매0)을 회수한다(lazy import·fail-soft — 밸브 실패가 레인
@@ -886,7 +1029,15 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                 # _probe_trigger는 clk/imp/rank를 모두 자기 2시간 창에서 산출(R1 P3-1 자기완결).
                 probe_fired, probe_reason = _probe_trigger(curve, now)
                 if probe_fired:
-                    verdict = {"direction": "up", "reason": probe_reason, "probe": True}
+                    # D-NAO-60 RL5(CD5): 학습된 최적 밴드에 이미 도달했으면 상향 생략(과climb
+                    # 방지). guardrail 우회 없음 — 통과한 제안도 execute() 전량을 그대로 탄다.
+                    skip, skip_reason = _learned_optimal_skip(db, curve, now, campaign_id)
+                    if skip:
+                        result["held"].append({"target_id": target_id, "reason": skip_reason})
+                        continue
+                    verdict = {
+                        "direction": "up", "reason": f"{probe_reason} · {skip_reason}", "probe": True,
+                    }
                 else:
                     result["held"].append({"target_id": target_id, "reason": verdict["reason"]})
                     continue
@@ -894,6 +1045,7 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
             # 여기부터는 verdict가 up/down = 액션 의도 확정 — 이후의 hold는 "의도된 액션이
             # 차단된 것"이므로 일기(blocked) 기록 대상(위의 판정 hold·imp 없음은 관찰 소음이라 제외).
             is_probe = verdict.get("probe", False)
+            is_leash = verdict.get("leash", False)  # D-NAO-60 RL3 — 순위 고삐(장중 loss DOWN)
             lane_actor = diary.ACTOR_PROBE if is_probe else diary.ACTOR_HOURLY  # 차단 일기 주체
             intended_action = "bid_up" if verdict["direction"] == "up" else "bid_down"
             current_bid = _live_current_bid(target_type, target_id)
@@ -929,7 +1081,11 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
 
             proposal_type = intended_action
             # 탐침(is_probe): rationale은 이미 [클릭탐침] 접두 없이 사유만 오므로 접두를 붙이고,
-            # approval_source=probe_op·전용 expected_effect로 태그(diary probe actor). 그 외는 시간당 밴드.
+            # approval_source=probe_op·전용 expected_effect로 태그(diary probe actor).
+            # 고삐(is_leash, D-NAO-60 RL3): 새 approval_source를 만들지 않고 시간당 밴드 레인
+            # 소속을 유지(APPROVAL_SOURCE_HOURLY·ACTOR_HOURLY 그대로) — rationale 접두만
+            # [순위고삐]로 구분해 소급채점/일기에서 시간당밴드 down과 leash down을 분간한다.
+            # 그 외(일반 밴드 down/up)는 [시간당밴드].
             if is_probe:
                 rationale = f"[클릭탐침] {verdict['reason']}"
                 expected_effect = (
@@ -937,6 +1093,13 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                     "순위 실험(D-NAO-58 CD2, 되돌림·이익 판정은 CD3)."
                 )
                 proposal_approval_source = APPROVAL_SOURCE_PROBE
+            elif is_leash:
+                rationale = f"[순위고삐] {verdict['reason']}"
+                expected_effect = (
+                    "순위 고삐 — 장중 추정 총이익 loss(추정ROAS<BEP·하루치 소진)에서 한 등 "
+                    "하향, 자정 리셋(D-NAO-60 RL3)."
+                )
+                proposal_approval_source = APPROVAL_SOURCE_HOURLY
             else:
                 rationale = f"[시간당밴드] {verdict['reason']}"
                 expected_effect = "시간당 밴드 관제 — 순위·CPC·페이싱 기반 스텝 조정(ROAS 신규 판단 없음)."

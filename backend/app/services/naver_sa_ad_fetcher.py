@@ -366,18 +366,22 @@ def fetch_campaign_stats(
     return out
 
 
-_STATS_HH24_FIELDS = '["impCnt","clkCnt","salesAmt","avgRnk"]'
+_STATS_HH24_FIELDS = '["impCnt","clkCnt","salesAmt","ccnt","avgRnk"]'
 _HOUR_LABEL_RE = re.compile(r"^(\d{1,2})시")
 
 
 def fetch_entity_hh24(entity_id: str, stat_date: date) -> list[dict]:
-    """키워드/애드그룹 1건의 단일일 시간대별(hh24) imp/clk/cost/avgRnk 곡선(D-NAO-46②).
+    """키워드/애드그룹 1건의 단일일 시간대별(hh24) imp/clk/cost/conv_cnt/avgRnk 곡선
+    (D-NAO-46②, conv_cnt는 D-NAO-60 RL1).
 
     GET /stats?id=<entity_id>&fields=[...]&timeRange={단일일}&timeIncrement=allDays&breakdown=hh24
     — 1콜로 그 날의 실적 있는 시간대만 반환(ref 32 §4). 과거 데이터는 네이버가 최근 7일만
     보존(초과 시 400).
 
-    Returns: [{"hour","imp","clk","cost","avg_rank"}, ...] (실적 있는 시간대만, 없으면 []).
+    ★회계 불변(CD1 계승): conv_cnt는 시간당 전환 "건수"만 — convAmt(금액)는 일별 필드로만
+    존재해 hh24에서는 못 받는다. 매출/BEP/ROAS 등 회계 집계에 절대 합산하지 않는다.
+
+    Returns: [{"hour","imp","clk","cost","conv_cnt","avg_rank"}, ...] (실적 있는 시간대만, 없으면 []).
 
     ⚠️ breakdown은 조건이 안 맞으면 무언 무시(200 + 집계 1행)라 무언 데이터손실을 방어한다:
     응답 data가 있고 그 날 imp>0인데 breakdowns 키가 없거나 비어 있으면 예외를 던진다
@@ -425,6 +429,7 @@ def fetch_entity_hh24(entity_id: str, stat_date: date) -> list[dict]:
             "imp": _safe_int(b.get("impCnt", 0)),
             "clk": _safe_int(b.get("clkCnt", 0)),
             "cost": _safe_int(b.get("salesAmt", 0)),
+            "conv_cnt": _safe_int(b.get("ccnt", 0)),
             "avg_rank": _parse_avg_rank(b.get("avgRnk")),
         })
     return out

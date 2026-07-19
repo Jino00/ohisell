@@ -273,6 +273,9 @@ def test_build_negative_keyword_escalation_has_no_target_bid(db):
 
 
 # ── X1b T3: pause/resume 생성기 (D-NAO-38) ───────────────────────────────
+# ── RL4(D-NAO-60): 스톱로스 대응이 pause(하드정지) → bid_down(순위 고삐)로 교체됨.
+#    아래 pause_candidates 테스트들은 "정지→고삐" 의도 변경을 반영해 갱신했다(회귀 아님) —
+#    쇼핑(adgroup) 경로는 변경 없음(§356 이하 그대로 pause 유지).
 
 
 def _pause_row(**overrides):
@@ -283,19 +286,95 @@ def _pause_row(**overrides):
     return row
 
 
-def test_build_pause_candidate_produces_pause_proposal(db):
+# ── _step_down_bid: bid_down 클램프·고삐가 공유하는 스텝 산식 헬퍼(RL4 리팩터) ──────
+
+
+def test_step_down_bid_steps_down_15pct_rounded_up_to_10():
+    assert proposal_writer._step_down_bid(1000) == 850
+
+
+def test_step_down_bid_clamps_to_absolute_floor_70():
+    assert proposal_writer._step_down_bid(80) == 70
+
+
+def test_step_down_bid_at_floor_does_not_go_below_70():
+    assert proposal_writer._step_down_bid(70) == 70
+
+
+# ── _stop_loss_proposal: RL4 순위 고삐(키워드) vs 터미널 pause(하한 도달·쇼핑) ──────
+
+
+def test_stop_loss_proposal_keyword_not_at_floor_produces_bid_down_leash():
+    """current_bid=1000(하한 아님) → 정지 대신 bid_down 850원(고삐, D-NAO-60 RL4)."""
+    row = _pause_row(current_bid=1000, stop_loss_amount=10_000, cost=10_000)
+    p = proposal_writer._stop_loss_proposal(row)
+    assert p["proposal_type"] == "bid_down"
+    assert p["target_type"] == "keyword"
+    assert p["target_id"] == "nkw-pause"
+    assert p["target_bid"] == 850
+    assert p["adgroup_id"] == "grp-1"
+    assert "target_lock" not in p  # bid_down은 target_lock을 쓰지 않음(_bid_proposal과 동형)
+    assert "스톱로스고삐" in p["rationale"]
+    assert "D-NAO-60" in p["rationale"]
+
+
+def test_stop_loss_proposal_keyword_near_floor_produces_bid_down_to_70():
+    """current_bid=80 → 스텝하한 70(절대 하한) → bid_down 70원."""
+    row = _pause_row(current_bid=80, stop_loss_amount=800, cost=800)
+    p = proposal_writer._stop_loss_proposal(row)
+    assert p["proposal_type"] == "bid_down"
+    assert p["target_bid"] == 70
+
+
+def test_stop_loss_proposal_keyword_at_floor_produces_terminal_pause():
+    """current_bid=70(이미 절대 하한, 더 못 내림) → 정지(터미널, D-NAO-60 RL4)."""
+    row = _pause_row(current_bid=70, stop_loss_amount=700, cost=700)
+    p = proposal_writer._stop_loss_proposal(row)
+    assert p["proposal_type"] == "pause"
+    assert p["target_type"] == "keyword"
+    assert p["target_lock"] is True
+    assert p.get("target_bid") is None  # pause 딕셔너리는 target_bid 키 자체를 안 담음(기존 관례)
+    assert "터미널" in p["rationale"]
+
+
+def test_stop_loss_proposal_adgroup_always_pauses_unchanged():
+    """쇼핑(adgroup) 경로는 RL4 이후에도 변경 없음 — current_bid가 하한이 아니어도 pause."""
+    row = {"campaign_id": "cmp-ours", "adgroup_id": "grp-shop-1", "cost": 2500, "conv_amt": 0,
+           "current_bid": 200, "stop_loss_amount": 2000}
+    p = proposal_writer._stop_loss_proposal(row, target_type="adgroup")
+    assert p["proposal_type"] == "pause"
+    assert p["target_type"] == "adgroup"
+    assert p["target_lock"] is True
+    assert p.get("target_bid") is None
+
+
+def test_build_pause_candidate_produces_bid_down_leash_not_pause(db):
+    """RL4(D-NAO-60): pause_candidates 보드(키워드) → 하한 아니면 pause 대신 bid_down 고삐.
+    구 동작(pause)을 기대하던 테스트를 의도 변경에 맞춰 갱신(회귀 아님)."""
     db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
     db.commit()
     diagnosis = _diagnosis(pause_candidates=[_pause_row()])
 
     out = proposal_writer.build(db, diagnosis, as_of=AS_OF)
     assert len(out) == 1
-    assert out[0]["proposal_type"] == "pause"
+    assert out[0]["proposal_type"] == "bid_down"
     assert out[0]["target_type"] == "keyword"
     assert out[0]["target_id"] == "nkw-pause"
     assert out[0]["adgroup_id"] == "grp-1"
+    assert out[0]["target_bid"] == 170  # 200×0.85=170(정확히 10원 배수)
+    assert "스톱로스고삐" in out[0]["rationale"]
+
+
+def test_build_pause_candidate_at_floor_still_produces_terminal_pause(db):
+    """RL4 터미널 단계: 입찰이 이미 하한(70원)이면 여전히 pause가 나온다."""
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis(pause_candidates=[_pause_row(current_bid=70, stop_loss_amount=700, cost=700)])
+
+    out = proposal_writer.build(db, diagnosis, as_of=AS_OF)
+    assert len(out) == 1
+    assert out[0]["proposal_type"] == "pause"
     assert out[0]["target_lock"] is True
-    assert "스톱로스" in out[0]["rationale"]
 
 
 def test_build_pause_candidate_skips_non_ours_campaign(db):
@@ -307,9 +386,20 @@ def test_build_pause_candidate_skips_non_ours_campaign(db):
     assert out == []
 
 
-def test_persist_pause_proposal_stores_target_lock_true(db):
-    row = _pause_row()
-    p = proposal_writer._pause_proposal(row)
+def test_persist_stop_loss_bid_down_leash_stores_target_bid_no_lock(db):
+    """RL4: pause_candidates에서 나온 bid_down 고삐는 target_bid를 저장하고 target_lock은
+    (bid_down 유형이라) 세팅하지 않는다 — 기존 _bid_proposal의 bid_down과 동형."""
+    row = _pause_row(current_bid=1000, stop_loss_amount=10_000, cost=10_000)
+    p = proposal_writer._stop_loss_proposal(row)
+    saved = proposal_writer.persist(db, [p])
+    assert saved[0].proposal_type == "bid_down"
+    assert saved[0].target_bid == 850
+    assert saved[0].target_lock is None
+
+
+def test_persist_stop_loss_terminal_pause_stores_target_lock_true(db):
+    row = _pause_row(current_bid=70, stop_loss_amount=700, cost=700)
+    p = proposal_writer._stop_loss_proposal(row)
     saved = proposal_writer.persist(db, [p])
     assert saved[0].target_lock is True
     assert saved[0].target_bid is None
@@ -388,7 +478,7 @@ def test_build_shopping_pause_candidate_skips_non_ours_campaign(db):
 
 def test_persist_shopping_pause_proposal_stores_adgroup_target_type_and_lock(db):
     row = _shopping_pause_row()
-    p = proposal_writer._pause_proposal(row, target_type="adgroup")
+    p = proposal_writer._stop_loss_proposal(row, target_type="adgroup")
     assert p["target_type"] == "adgroup"
     assert p["target_id"] == "grp-shop-1"
     saved = proposal_writer.persist(db, [p])
@@ -744,10 +834,12 @@ def test_unclamped_expected_effect_unchanged(db):
     assert out[0]["expected_effect"] == "테스트 expected_effect"
 
 
-def test_pause_proposal_defaults_to_keyword_target_type_unchanged(db):
-    """회귀 방지 — target_type 인자를 안 넘기면 기존 keyword 경로와 완전히 동일해야 한다."""
+def test_stop_loss_proposal_defaults_to_keyword_target_type_unchanged(db):
+    """회귀 방지 — target_type 인자를 안 넘기면 기존 keyword 경로(target_type/target_id/
+    adgroup_id 필드 구성)와 동일해야 한다. proposal_type 자체는 RL4로 bid_down 고삐가 되지만
+    (다른 테스트가 커버), target_type 기본값 규약은 불변."""
     row = _pause_row()
-    p = proposal_writer._pause_proposal(row)
+    p = proposal_writer._stop_loss_proposal(row)
     assert p["target_type"] == "keyword"
     assert p["target_id"] == "nkw-pause"
     assert p["adgroup_id"] == "grp-1"

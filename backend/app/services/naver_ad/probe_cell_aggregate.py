@@ -6,6 +6,13 @@
 cell_leading_indicator는 NaverAdDaily에서 같은 환경 셀 단위(순위 무관)로 즉시구매/장바구니
 원시 카운트만 뽑는다(가중·roas는 CD5). cart_*는 이 판정 지표에만 쓰고 매출/ROAS엔 절대 안
 섞는다(CD1 회계 불변 원칙 계승).
+
+D-NAO-60 RL5(CD5) Part B: optimal_band 승격이 순수 CTR argmax면 최상위 순위로 쏠려 이익
+스팟밴드(2.5~4)와 어긋난다(P3-3). NaverKeywordHourly.conv_cnt(RL1, 건수만·회계 미접촉)를
+밴드별로 집계해, 그 셀에 전환 신호가 있으면(Σconv_cnt≥1) **전환 최다 밴드**를 우선하고
+(ctr_shrunk 신호하한은 유지, conv_cnt 동률이면 ctr_shrunk tie-break), 전환 신호가 없으면
+(백필 기간 등) 기존 CTR argmax로 폴백한다. optimal_band 라벨 규약은 그대로(하위호환) —
+어느 근거로 뽑혔는지는 `optimal_basis`("conv"|"ctr")에 별도로 남긴다.
 """
 from __future__ import annotations
 
@@ -76,27 +83,32 @@ def rank_band_of(avg_rank) -> str | None:
 
 
 def _bucket_hourly_rows(rows, axes: tuple[str, ...]) -> dict:
-    """행 리스트 → {cell: {"imp","clk","cost","dates"(set),"bands":{band:{"imp","clk","cost"}}}}."""
+    """행 리스트 → {cell: {"imp","clk","cost","conv_cnt","dates"(set),
+    "bands":{band:{"imp","clk","cost","conv_cnt"}}}}. conv_cnt=RL1 시간당 전환건수(회계 미접촉)."""
     cells: dict[str, dict] = {}
     for row in rows:
         band = rank_band_of(row.avg_rank)
         if band is None:
             continue
         cell = env_cell_of_date(row.ad_date, axes=axes)
-        c = cells.setdefault(cell, {"imp": 0, "clk": 0, "cost": 0, "dates": set(), "bands": {}})
+        c = cells.setdefault(
+            cell, {"imp": 0, "clk": 0, "cost": 0, "conv_cnt": 0, "dates": set(), "bands": {}},
+        )
         c["imp"] += row.imp
         c["clk"] += row.clk
         c["cost"] += row.cost
+        c["conv_cnt"] += row.conv_cnt
         c["dates"].add(row.ad_date)
-        b = c["bands"].setdefault(band, {"imp": 0, "clk": 0, "cost": 0})
+        b = c["bands"].setdefault(band, {"imp": 0, "clk": 0, "cost": 0, "conv_cnt": 0})
         b["imp"] += row.imp
         b["clk"] += row.clk
         b["cost"] += row.cost
+        b["conv_cnt"] += row.conv_cnt
     return cells
 
 
 def _finalize_cell(agg: dict) -> dict:
-    """버킷 원시 집계 1셀 → 최종 뷰(ctr·ctr_shrunk·optimal_band 계산)."""
+    """버킷 원시 집계 1셀 → 최종 뷰(ctr·ctr_shrunk·optimal_band·optimal_basis 계산)."""
     cell_imp, cell_clk = agg["imp"], agg["clk"]
     cell_ctr_raw = (Decimal(cell_clk) / Decimal(cell_imp)) if cell_imp else _ZERO
     bands_out: dict[str, dict] = {}
@@ -105,24 +117,59 @@ def _finalize_cell(agg: dict) -> dict:
         ctr_raw = (Decimal(b_clk) / Decimal(b_imp)) if b_imp else _ZERO
         ctr_shrunk = shrink(n=b_imp, raw=ctr_raw, prior=cell_ctr_raw)
         bands_out[band] = {
-            "imp": b_imp, "clk": b_clk, "cost": bagg["cost"],
+            "imp": b_imp, "clk": b_clk, "cost": bagg["cost"], "conv_cnt": bagg["conv_cnt"],
             "ctr_raw": ctr_raw.quantize(_Q4), "ctr_shrunk": ctr_shrunk.quantize(_Q4),
         }
-    optimal_band = _optimal_band(bands_out)
+    optimal_band, optimal_basis = _optimal_band(bands_out)
     return {
-        "imp": cell_imp, "clk": cell_clk, "cost": agg["cost"],
+        "imp": cell_imp, "clk": cell_clk, "cost": agg["cost"], "conv_cnt": agg["conv_cnt"],
         "ctr": cell_ctr_raw.quantize(_Q4), "days": len(agg["dates"]),
-        "bands": bands_out, "optimal_band": optimal_band,
+        "bands": bands_out, "optimal_band": optimal_band, "optimal_basis": optimal_basis,
     }
 
 
-def _optimal_band(bands_out: dict) -> str | None:
-    """imp≥_MIN_BAND_IMP 밴드 중 ctr_shrunk argmax, 단 ctr_shrunk≥_CTR_SIGNAL_MIN 일 때만."""
-    candidates = [(b, v["ctr_shrunk"]) for b, v in bands_out.items() if v["imp"] >= _MIN_BAND_IMP]
+def _optimal_band(bands_out: dict) -> tuple[str | None, str]:
+    """D-NAO-60 RL5 Part B: imp≥_MIN_BAND_IMP 밴드 중 우선순위 —
+    (1) 셀 전체 conv_cnt 합≥1(전환 신호 있음)이면 그 신호가 있는 밴드(conv_cnt>0) 중
+        conv_cnt argmax(동률이면 ctr_shrunk tie-break), 단 ctr_shrunk≥_CTR_SIGNAL_MIN 유지
+        (CTR 신호하한 — 전환이 붙었어도 클릭률이 바닥인 노이즈 밴드는 후보에서 제외.
+        전환 표본 자체의 희소성 방어는 아니고, 셀 레벨 _MIN_CELL_IMP·days 게이트가 담당).
+    (2) 전환 신호 없거나(Σconv_cnt==0, 백필기간) (1)에서 조건 충족 후보가 없으면 기존
+        ctr_shrunk argmax 폴백(≥_CTR_SIGNAL_MIN 일 때만).
+    반환 (band_label_or_None, basis) — basis는 "conv"|"ctr"(하위호환: optimal_band 라벨
+    자체는 이전과 동일 값 범위, learned_probe_rank/_is_promotable은 라벨만 본다)."""
+    candidates = [(b, v) for b, v in bands_out.items() if v["imp"] >= _MIN_BAND_IMP]
     if not candidates:
-        return None
-    best_band, best_ctr = max(candidates, key=lambda x: x[1])
-    return best_band if best_ctr >= Decimal(str(_CTR_SIGNAL_MIN)) else None
+        return None, "ctr"
+
+    signal_min = Decimal(str(_CTR_SIGNAL_MIN))
+    total_conv = sum(v.get("conv_cnt", 0) for _, v in candidates)
+    if total_conv > 0:
+        conv_candidates = [
+            (b, v) for b, v in candidates
+            if v.get("conv_cnt", 0) > 0 and v["ctr_shrunk"] >= signal_min
+        ]
+        if conv_candidates:
+            best_band, _best_v = max(
+                conv_candidates, key=lambda x: (x[1]["conv_cnt"], x[1]["ctr_shrunk"]),
+            )
+            return best_band, "conv"
+
+    best_band, best_v = max(candidates, key=lambda x: x[1]["ctr_shrunk"])
+    if best_v["ctr_shrunk"] >= signal_min:
+        return best_band, "ctr"
+    return None, "ctr"
+
+
+def rank_band_upper(label: str) -> Decimal | None:
+    """밴드 라벨 → 그 밴드의 상한(hi). "4.0+"처럼 상한이 없는(개방) 밴드는 None(=∞).
+    CD5(auto_operator._learned_optimal_skip)가 학습된 최적 밴드에 "이미 도달했는가"를
+    판정할 때 쓴다. 정의되지 않은 라벨이면 ValueError(학습 밴드는 항상 _RANK_BANDS 라벨
+    이어야 함 — 조용한 오판정 방지)."""
+    for lo, hi, band_label in _RANK_BANDS:
+        if band_label == label:
+            return hi
+    raise ValueError(f"probe_cell_aggregate.rank_band_upper: 알 수 없는 밴드 라벨 '{label}'")
 
 
 def aggregate_cells(

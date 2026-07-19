@@ -34,12 +34,12 @@ def db():
 
 
 def _hour_row(db, *, ad_date, hour=10, avg_rank=Decimal("3.0"), imp=50, clk=5, cost=500,
-              entity_id="nkw-1", campaign_id="cmp-1", adgroup_id="grp-1",
+              conv_cnt=0, entity_id="nkw-1", campaign_id="cmp-1", adgroup_id="grp-1",
               entity_type="keyword", campaign_type="WEB_SITE"):
     db.add(NaverKeywordHourly(
         ad_date=ad_date, hour=hour, entity_type=entity_type, entity_id=entity_id,
         adgroup_id=adgroup_id, campaign_id=campaign_id, campaign_type=campaign_type,
-        imp=imp, clk=clk, cost=cost, avg_rank=avg_rank,
+        imp=imp, clk=clk, cost=cost, avg_rank=avg_rank, conv_cnt=conv_cnt,
     ))
     db.commit()
 
@@ -185,3 +185,105 @@ def test_cell_leading_indicator_excludes_backfill_sentinel(db):
 def test_cell_leading_indicator_empty_returns_empty_dict(db):
     result = pca.cell_leading_indicator(db, as_of=WEEKDAY, window_days=1)
     assert result == {}
+
+
+# ══════════════════════════ RL5(CD5) 이익 가중 승격 — conv_cnt 우선 ══════════════════════════
+# D-NAO-60 RL5 Part B: 전환 신호(conv_cnt) 있으면 전환 최다 밴드 우선, 없으면(백필기간) 기존
+# CTR argmax 폴백. optimal_band 라벨 규약은 하위호환(learned_probe_rank/_is_promotable 불변).
+
+def test_optimal_band_prefers_conv_cnt_over_ctr_when_conversions_present(db):
+    # 밴드 2.0-2.5: CTR 높지만 전환 0 / 밴드 3.0-4.0: CTR 낮지만 전환 있음 → conv 밴드가 이겨야 함
+    _hour_row(db, ad_date=WEEKDAY, hour=9, avg_rank=Decimal("2.2"), imp=100, clk=20, cost=1000,
+              conv_cnt=0)
+    _hour_row(db, ad_date=WEEKDAY - timedelta(days=1),
+              hour=9, avg_rank=Decimal("2.2"), imp=100, clk=20, cost=1000, conv_cnt=0)
+    _hour_row(db, ad_date=WEEKDAY, hour=10, avg_rank=Decimal("3.5"), imp=100, clk=2, cost=1000,
+              conv_cnt=3)
+    _hour_row(db, ad_date=WEEKDAY - timedelta(days=2),
+              hour=10, avg_rank=Decimal("3.5"), imp=100, clk=2, cost=1000, conv_cnt=2)
+
+    result = pca.aggregate_cells(db, as_of=WEEKDAY, window_days=30)
+    cell = result["cells"]["weekday"]
+    assert cell["bands"]["2.0-2.5"]["conv_cnt"] == 0
+    assert cell["bands"]["3.0-4.0"]["conv_cnt"] == 5
+    assert cell["optimal_band"] == "3.0-4.0"  # CTR argmax였다면 2.0-2.5가 이겼을 것
+    assert cell["optimal_basis"] == "conv"
+
+
+def test_optimal_band_falls_back_to_ctr_when_no_conversions(db):
+    # 기존 동작(conv_cnt=0 전부) — CTR argmax(2.0-2.5) 그대로 유지되고 basis="ctr"
+    _hour_row(db, ad_date=WEEKDAY, hour=9, avg_rank=Decimal("2.2"), imp=100, clk=20, cost=1000)
+    _hour_row(db, ad_date=WEEKDAY - timedelta(days=1),
+              hour=9, avg_rank=Decimal("2.2"), imp=100, clk=20, cost=1000)
+    _hour_row(db, ad_date=WEEKDAY, hour=10, avg_rank=Decimal("3.5"), imp=100, clk=2, cost=1000)
+    _hour_row(db, ad_date=WEEKDAY - timedelta(days=2),
+              hour=10, avg_rank=Decimal("3.5"), imp=100, clk=2, cost=1000)
+
+    result = pca.aggregate_cells(db, as_of=WEEKDAY, window_days=30)
+    cell = result["cells"]["weekday"]
+    assert cell["optimal_band"] == "2.0-2.5"
+    assert cell["optimal_basis"] == "ctr"
+
+
+def test_optimal_band_conv_tie_break_by_ctr_shrunk(db):
+    # 두 밴드 conv_cnt 동률(3) → ctr_shrunk 높은 쪽이 이겨야 함(2.0-2.5는 CTR 훨씬 높음)
+    _hour_row(db, ad_date=WEEKDAY, hour=9, avg_rank=Decimal("2.2"), imp=100, clk=20, cost=1000,
+              conv_cnt=3)
+    _hour_row(db, ad_date=WEEKDAY - timedelta(days=1),
+              hour=9, avg_rank=Decimal("2.2"), imp=100, clk=20, cost=1000, conv_cnt=0)
+    _hour_row(db, ad_date=WEEKDAY, hour=10, avg_rank=Decimal("3.5"), imp=100, clk=2, cost=1000,
+              conv_cnt=3)
+    _hour_row(db, ad_date=WEEKDAY - timedelta(days=2),
+              hour=10, avg_rank=Decimal("3.5"), imp=100, clk=2, cost=1000, conv_cnt=0)
+
+    result = pca.aggregate_cells(db, as_of=WEEKDAY, window_days=30)
+    cell = result["cells"]["weekday"]
+    assert cell["bands"]["2.0-2.5"]["conv_cnt"] == cell["bands"]["3.0-4.0"]["conv_cnt"] == 3
+    assert cell["optimal_band"] == "2.0-2.5"
+    assert cell["optimal_basis"] == "conv"
+
+
+def test_optimal_band_conv_candidate_below_ctr_signal_min_falls_back(db):
+    # 유일한 전환 밴드가 ctr_shrunk < _CTR_SIGNAL_MIN(0.01)이면 conv 후보에서 제외되고
+    # 나머지 CTR argmax로 폴백(전환 있다고 무조건 승격시키지 않음).
+    _hour_row(db, ad_date=WEEKDAY, hour=9, avg_rank=Decimal("2.2"), imp=100, clk=20, cost=1000,
+              conv_cnt=0)
+    _hour_row(db, ad_date=WEEKDAY - timedelta(days=1),
+              hour=9, avg_rank=Decimal("2.2"), imp=100, clk=20, cost=1000, conv_cnt=0)
+    # 전환은 있지만 클릭 자체가 거의 없어 ctr_shrunk가 신호하한 미달
+    _hour_row(db, ad_date=WEEKDAY, hour=10, avg_rank=Decimal("3.5"), imp=1000, clk=1, cost=1000,
+              conv_cnt=1)
+    _hour_row(db, ad_date=WEEKDAY - timedelta(days=2),
+              hour=10, avg_rank=Decimal("3.5"), imp=1000, clk=0, cost=1000, conv_cnt=0)
+
+    result = pca.aggregate_cells(db, as_of=WEEKDAY, window_days=30)
+    cell = result["cells"]["weekday"]
+    assert cell["bands"]["3.0-4.0"]["ctr_shrunk"] < Decimal("0.01")
+    assert cell["optimal_band"] == "2.0-2.5"  # CTR 폴백
+    assert cell["optimal_basis"] == "ctr"
+
+
+def test_optimal_band_none_when_no_candidates_conv_or_ctr(db):
+    _hour_row(db, ad_date=WEEKDAY, hour=1, avg_rank=Decimal("2.2"), imp=1000, clk=1, cost=1000)
+    result = pca.aggregate_cells(db, as_of=WEEKDAY, window_days=1)
+    cell = result["cells"]["weekday"]
+    assert cell["optimal_band"] is None
+    assert cell["optimal_basis"] == "ctr"
+
+
+# ══════════════════════════ rank_band_upper ══════════════════════════
+
+def test_rank_band_upper_returns_hi_for_bounded_band():
+    assert pca.rank_band_upper("2.0-2.5") == Decimal("2.5")
+    assert pca.rank_band_upper("1.0-2.0") == Decimal("2.0")
+    assert pca.rank_band_upper("2.5-3.0") == Decimal("3.0")
+    assert pca.rank_band_upper("3.0-4.0") == Decimal("4.0")
+
+
+def test_rank_band_upper_none_for_open_ended_band():
+    assert pca.rank_band_upper("4.0+") is None
+
+
+def test_rank_band_upper_unknown_label_raises():
+    with pytest.raises(ValueError):
+        pca.rank_band_upper("not-a-band")
