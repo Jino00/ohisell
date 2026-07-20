@@ -2,7 +2,12 @@
 # 매 sprint 완료 시 Claude가 이 파일을 갱신합니다.
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
-## 최신 상태 (2026-07-20 밤, 워크트리 session-409bd8·브랜치 claude/session-b21ee9)
+## 최신 상태 (2026-07-20 밤 21:30, 워크트리 session-409bd8·브랜치 claude/session-b21ee9)
+- **★IU 배포·라이브 완주(21:20 레인)**: retro 매핑 확인(영향 0 — retro는 일일 보드 6종·rank/band 참조 0건, diary 액션명 불변) → safe_deploy CAS 배포(auto_operator+harness, pm2 재시작·기동 정상) → **21:20 레인 status ok·에러 0(신 코드 첫 완주)·과열밴드 DOWN 0건(소멸 확인)**. UP 실집행은 21:20 조건 미충족(diary blocked 0=판정 hold) → §3-3 "(조건 충족 시)" 규정대로 상설 관측 이월(기대 신호=07-21 오전 04류 2~3스텝). PR 병합으로 main==prod 복원.
+- **★D-NAO-68 확정(Jino: "실제 실행하는 손까지 모두 만들어야해")**: 모든 레버는 실쓰기 손까지. 실측 — 있는 손=입찰 3그레인·정지재개·예산·제외키워드(3중 방벽), 없는 손=생성류(키워드 등록·그룹 생성·소재 생성)→SS·L3·소재 스프린트가 실쓰기까지 완주 의무. IU-R 서보는 기존 update_bid 손 재사용(폐루프=실집행 필수).
+- **★IU-R(순위 서보) 설계 완료·codex 3R PASS**: `docs/PLAN_naver-ad-rank-servo.md`. R0(UP 타입 레지스트리 bid_step_types.py 단일소스 — 하드코딩 5곳 중앙화)→R1(쇼검 폐루프 서보: 래칫·ceil-1·데드밴드 target±·경제성상한=pooled_rpc adgroup·예산근사=hh24 3h clk pace·실쓰기 완주)→R2(파워링크 estimate 직행·TOCTOU fail-closed)→R3(반응곡선=change_log×NaverKeywordHourly 조인·**마이그레이션 0**). codex 왕복 기각 0·사실오류 1건 교정(NaverKeywordHourly 실재→신규 테이블 폐기)·R3 P2 5건은 §codex 왕복에 구현 의무로 박음. **다음=Jino 승인 후 R0 구현(Opus)**. 내일 08:00 후 MO bid_down_first pending 관측 유지.
+
+## (이전) 최신 상태 (2026-07-20 밤, 워크트리 session-409bd8·브랜치 claude/session-b21ee9)
 - **★D-NAO-66·67 확정 — 전략 v2**(`docs/STRATEGY_naver-ad-v2.md` 단일 참조): 4대 운영 원리(①ROAS 단일 지배·순위 제한 폐지 ②행동=시간·채점=D+1~7 ③순위 서보(제어 언어=순위) ④in-out 생태계) + 로드맵 **IU→IU-R→SS→L2→L3→소재**. 배경=대행사 통화 ref 34(쇼검 제외키워드 140 기법=최대 갭, 실측 항목: 제외 한도 70vs140·그룹 생성 한도·검색어 전환 API).
 - **★스프린트 IU 구현 완료·커밋 `5c7d889` — 배포 미실시(다음 세션 첫 작업)**: 장중 상향 개방(tally≥2·est≥target×1.2·순위 무관)+순위 제한 폐지(과열밴드·learned band 천장 제거)+GATE PASS(P1 0)+P2 3중 브레이크(정산 거부권·장중-단독 일 1스텝 캡·keyword S3 게이트). **2433 passed·회귀 0**. 잔여: retro 스냅샷 매핑 확인(배포 전)→safe_deploy(auto_operator+harness)→:20 레인 라이브 검증(04류 UP 실측).
 - **다음 세션 순서**: ①IU 배포·라이브(위) ②08:00 후 MO(grp-…070109616) 소재 bid_down_first pending 1건(800→680) 생성 관측→Jino 콘솔 Confirm 왕복(B 라이브 합격) ③IU-R(순위 서보) 설계 착수(파워링크=estimate 직행·경제성 상한 캡, 쇼검=실측 rank 폐루프+반응곡선 학습) ④이후 SS. 라우팅: 구조=Fable·설계/구현=Opus·단순=Sonnet.
