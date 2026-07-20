@@ -1538,6 +1538,12 @@ class NaverAdgroupProduct(Base):
     정확히 일치(라이브 실증). 한 그룹에 소재(상품)가 여럿일 수 있어 unique는 (adgroup, mall_product).
     optimizer='ours' 쇼핑 캠페인의 활성 그룹만 매일 08:20 sync가 스냅샷 교체(그룹 단위).
     campaign_target_resolver 우선순위 ②(상품 파생 target_roas)가 이 매핑을 소비한다.
+
+    ★B1(스프린트 B, D-NAO-65): 소재-레벨 실효입찰 인식·저장. 각 SHOPPING_PRODUCT_AD 소재의
+    Ad.adAttr({"bidAmt":N,"useGroupBidAmt":bool})·userLock을 additive nullable 컬럼으로 적재
+    (grain 정확 일치 — 소재 1개 = (adgroup_id, mall_product_id) 1행). useGroupBidAmt=false 소재는
+    소재 개별 bidAmt가 실효 입찰이고 그룹입찰을 무시한다(공식 apidoc, D-NAO-65 B 선행 실측). 기존
+    행은 NULL(하위호환, backfill 불필요) — 다음 08:20 sync가 채운다. B1은 읽기 전용(파생·제어는 B2/B3).
     """
 
     __tablename__ = "naver_adgroup_product"
@@ -1550,6 +1556,11 @@ class NaverAdgroupProduct(Base):
     campaign_id: Mapped[str] = mapped_column(String(50), nullable=False, default="", index=True)
     mall_product_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)  # = naver_product_bep.channel_product_id
     product_name: Mapped[str] = mapped_column(String(300), nullable=False, default="")
+    # B1(D-NAO-65): 소재-레벨 입찰(additive nullable — 미수집/비쇼핑/adAttr부재 시 NULL).
+    ad_id: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)  # 소재 nccAdId
+    ad_bid_amt: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # adAttr.bidAmt(소재 개별 입찰)
+    use_group_bid_amt: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)  # false면 소재 bidAmt가 실효
+    ad_user_lock: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)  # 소재 userLock
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 

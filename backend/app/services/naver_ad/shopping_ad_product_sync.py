@@ -79,6 +79,12 @@ def collect_adgroup_products(
                 "mall_product_id": mall_pid,
                 "product_name": (ad.get("product_name") or "")[:300],
                 "campaign_id": ag.campaign_id,
+                # B1(D-NAO-65): 소재-레벨 입찰 필드(get_ads가 채움 — 미주입/부재 시 None).
+                # dedup은 첫 소재를 채택하므로 입찰 필드도 첫 소재 값(product_name과 동형).
+                "ad_id": ad.get("ad_id") or None,
+                "ad_bid_amt": ad.get("ad_bid_amt"),
+                "use_group_bid_amt": ad.get("use_group_bid_amt"),
+                "ad_user_lock": ad.get("ad_user_lock"),
             })
         result[aid] = rows
     return result, failed
@@ -130,6 +136,11 @@ def sync_adgroup_products(
                 campaign_id=r["campaign_id"],
                 mall_product_id=r["mall_product_id"],
                 product_name=r["product_name"],
+                # B1(D-NAO-65): 입찰 필드 미주입(기존 소비자 형식) 시 .get→None(하위호환).
+                ad_id=r.get("ad_id"),
+                ad_bid_amt=r.get("ad_bid_amt"),
+                use_group_bid_amt=r.get("use_group_bid_amt"),
+                ad_user_lock=r.get("ad_user_lock"),
                 synced_at=now,
             ))
             n_map += 1

@@ -2,6 +2,12 @@
 # 매 sprint 완료 시 Claude가 이 파일을 갱신합니다.
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
+## 최신 상태 (2026-07-20 오전, 워크트리 video-content-summary-0e6c41)
+- **★스프린트 DL(일일 손실 고삐) DL1~DL4 완료·배포·라이브 + PR #64 병합(main==prod)** — D-NAO-65 첫 스프린트. loss 대응 기본값=고삐-일일리셋, pause=레버불능 예외(①ML ②레버끊김 ③지속밸브)만. 4페이즈 전부 Opus 적대적 GATE PASS(총 7라운드, P1 2·P2 4 잡아 수정). 2275 passed·마이그 0. 계획서 docs/PLAN_naver-ad-daily-loss-leash.md.
+- 08:50 관측: D-NAO-64 첫 발동=MO pause 실집행·03 5그룹 재정지·이중 bid_down 쿨다운 차단(전부 예측 일치).
+- ★배포 후 실측: lever_broken(입찰50 vs CPC 900~1800) 계정 전반 검출 → 스프린트 B(소재-레벨 입찰) 우선순위 강화.
+- 다음: DL 자연 발동 관측(8스텝 하향·밸브·재시작 천장, 다음 크론) → 스프린트 B 설계(Opus) → UI → L2(예산 자동증액) → L3(인벤토리 확장). 외부 근거 ref 33. codex 소급 07-23.
+
 ## 최신 상태 (2026-07-19 밤, 워크트리 video-content-summary-0e6c41·브랜치 claude/maxsafe-loss-adgroup-diagnosis-4710fe)
 - **D-NAO-64 맥세이프 손실 진단 + 스톱로스 사각지대(A) 지혈 — 구현·리뷰·배포·라이브 검증 완료. PR #63(미병합, main!=prod)**.
   - 진단: MO(grp-…70109616, 맥세이프_MO) 268K·실질ROAS 0.07·입찰 50 = 무전환 게이트+bid_down 하한 사각지대(전환 있어 pause 배제, 입찰 바닥이라 못 내림). 형제 PC는 pause·컨텐츠는 bid_down 됐으나 MO만 방치.
