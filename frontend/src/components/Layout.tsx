@@ -8,9 +8,12 @@ import {
   getAdCostCookieStatus,
   requestAdCostRefresh,
   getSchedulerHealth,
+  getCollectionStatus,
   type AdCostCookieStatus,
   type SchedulerHealth,
+  type CollectionStatus,
 } from "../lib/api";
+import { buildCollectionFreshnessBanner } from "./collectionFreshnessBanner";
 
 // 전역 헬스 배너 요약 빌더 (순수 함수 — 테스트 대상).
 // healthy:false여도 실제로 표시할 문제가 없으면 null 반환(배너 숨김). 규칙:
@@ -99,6 +102,7 @@ export default function Layout() {
   const [adRefreshing, setAdRefreshing] = useState(false);
   const [adRefreshMsg, setAdRefreshMsg] = useState<string | null>(null);
   const [health, setHealth] = useState<SchedulerHealth | null>(null);
+  const [collection, setCollection] = useState<CollectionStatus | null>(null);
 
   // 배너 '지금 갱신' — stale(쿠키 정상, Mac 페처 지연)일 때 실제 갱신 요청.
   // request_refresh 플래그 set → Mac 데몬이 다음 폴링(~20초)에서 fetch·push. 12초 뒤 상태 재확인.
@@ -151,12 +155,27 @@ export default function Layout() {
     return () => { cancelled = true; clearInterval(t); };
   }, []);
 
+  // 쿠팡 수집 신선도 — 전역 60초 폴링. 자동 트리거 제거 후 '낡음/실패'를 여기서만 가시화.
+  // 실패 시 조용히 무시(fail-safe) → 네트워크 오류로 배너를 잘못 띄우지 않고 앱도 안 죽는다.
+  useEffect(() => {
+    let cancelled = false;
+    const tick = () => {
+      getCollectionStatus()
+        .then((c) => { if (!cancelled) setCollection(c); })
+        .catch(() => { /* 조용히 실패 — 배너 미표시 */ });
+    };
+    tick();
+    const t = setInterval(tick, 60 * 1000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, []);
+
   // 경로 이동 시 모바일 드로어 닫기
   useEffect(() => {
     setMobileOpen(false);
   }, [location.pathname]);
 
   const healthBanner = health ? buildPipelineHealthBanner(health) : null;
+  const collectionBanner = buildCollectionFreshnessBanner(collection);
 
   return (
     <div className="flex h-screen bg-gray-50">
@@ -316,6 +335,34 @@ export default function Layout() {
               className="ml-auto shrink-0 bg-white text-amber-700 font-medium px-3 py-1 rounded hover:bg-amber-50"
             >
               확인 →
+            </Link>
+          </div>
+        )}
+
+        {/* 쿠팡 수집 신선도 전역 배너 — 자동 트리거 제거(순수 on-demand) 후 '낡음/실패'를 표면화.
+            빨강=48h↑ 낡음 or 갱신 실패(로그인 필요), 노랑=24~48h 낡음. 항목 클릭 → 종합조망에서 갱신. */}
+        {collectionBanner && (
+          <div
+            className={`flex items-center gap-3 px-4 py-2 text-sm text-white ${
+              collectionBanner.severity === "red" ? "bg-rose-600" : "bg-amber-500"
+            }`}
+          >
+            <span className="font-semibold shrink-0">🕒 수집 신선도</span>
+            <span className="min-w-0 truncate">
+              {collectionBanner.items.map((it, i) => (
+                <span key={it.key}>
+                  {i > 0 && " · "}
+                  {it.text}
+                </span>
+              ))}
+            </span>
+            <Link
+              to="/command-center"
+              className={`ml-auto shrink-0 bg-white font-medium px-3 py-1 rounded hover:bg-gray-50 ${
+                collectionBanner.severity === "red" ? "text-rose-700" : "text-amber-700"
+              }`}
+            >
+              지금 갱신 →
             </Link>
           </div>
         )}
