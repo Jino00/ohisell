@@ -121,10 +121,14 @@ def test_delegable_types_tracks_open_actions_p3():
     자동으로 넓어짐" — 구 test_delegable_types_tracks_open_actions_x1b를 P3 계약에 맞춰
     갱신). 자동 발사 자체는 여전히 위임 스위치(D-NAO-5/25, Jino만)가 별도로 켜야 하지만,
     "위임 가능 유형" 집합 자체는 이미 넓어진다."""
+    # IU-R R1(P1-1): bid_up_servo(rank-step 서보)는 위임에서 **영구 제외** — 서보는 시간당 레인
+    # inline 전용이라, 위임 경로로 실행되면 경제성 상한·pace 재검증 없이 ±15% 면제만 적용되는
+    # 우회가 된다. delegable_types()가 RANK_STEP_TYPES를 차집합으로 뺀다.
     assert delegation_gate.delegable_types() == {
         "negative_keyword", "bid_up", "bid_down", "growth_bid_up", "pause", "resume",
         "budget_up", "budget_down",
     }
+    assert "bid_up_servo" not in delegation_gate.delegable_types()  # rank-step 서보 위임 제외(P1-1)
 
 
 # ── run_gate: 핵심 게이트 로직 ──

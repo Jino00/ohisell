@@ -17,6 +17,7 @@ from sqlalchemy import and_, func as sqlfunc, or_
 from sqlalchemy.orm import Session
 
 from app.models import NaverEntity, NaverForecastDaily, NaverLearningState, NaverProposal
+from app.services.naver_ad import bid_step_types
 from app.services.naver_ad.diagnosis import build_diagnosis
 from app.services.naver_ad.proposal_scoreboard import METRIC as PROPOSAL_ACCURACY_METRIC
 from app.services.naver_ad.proposal_writer import INFORMATIONAL_PROPOSAL_TYPES, PARAM_CHANGE
@@ -107,7 +108,8 @@ def _build_pending_proposals(db: Session) -> tuple[list[dict], list[int]]:
             "target_name": entity_names.get((r.target_type, r.target_id)),
             "campaign_id": r.campaign_id,
             "rationale": r.rationale,
-            "expected_effect": r.expected_effect,
+            # GATE R2 P2-1: rank-step TOCTOU 마커는 기계 원료 — 브리핑(사람/LLM)엔 제거.
+            "expected_effect": bid_step_types.strip_base_bid_marker(r.expected_effect),
         }
         for r in rows
     ]

@@ -23,6 +23,7 @@ from app.models import (
     NaverProposal,
 )
 from app.services.naver_ad import naver_execution_harness
+from app.services.naver_ad.bid_step_types import RANK_STEP_TYPES
 from app.utils.kst import kst_now
 
 log = logging.getLogger(__name__)
@@ -56,7 +57,8 @@ def delegable_types() -> set[str]:
     return {
         ptype for ptype, action in naver_execution_harness._ACTION_BY_PROPOSAL_TYPE.items()
         if action in openable
-    }
+    } - RANK_STEP_TYPES  # IU-R R1(P1-1): rank-step 서보는 시간당 레인 inline 전용 — 위임 경로는
+    # 서보 산정(경제성 상한·pace) 없이 실행하므로 ±15% 면제만 적용되는 우회가 된다. 영구 제외.
 
 
 def _resolve_optimizer(db: Session, campaign_id: str) -> str:

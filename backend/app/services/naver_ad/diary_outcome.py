@@ -19,6 +19,7 @@ from sqlalchemy import func as sqlfunc
 from sqlalchemy.orm import Session
 
 from app.models import NaverAdDaily, NaverRetroSignal, OpsDiaryEntry
+from app.services.naver_ad.bid_step_types import direction_of
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.services.naver_ad.diagnosis import correction_factor
 from app.utils.kst import kst_now
@@ -94,8 +95,12 @@ def _retro_dict(sig: NaverRetroSignal) -> dict:
 
 
 # diary action → retro direction (방향 일치 필터용, P2 리뷰 P3-3). 매핑 없는 action은 무필터.
-_ACTION_TO_DIRECTION = {"bid_up": "up", "bid_down": "down", "pause": "pause",
-                        "update_bid": None, "set_user_lock": None}
+# ★bid 계열(bid_up→up·bid_down→down)의 방향은 bid_step_types 레지스트리(단일 소스, IU-R R0)의
+#   direction_of로 산출한다 — 종전 하드코딩 "up"/"down" 리터럴을 레지스트리로 이관(행위 불변:
+#   같은 5개 키·같은 값 유지, growth_bid_up은 여전히 미매핑=무필터). 비-bid 액션(pause/update_bid/
+#   set_user_lock)은 direction_of가 None이라 registry로 표현 불가 → 기존 매핑을 그대로 유지한다.
+_ACTION_TO_DIRECTION = {"bid_up": direction_of("bid_up"), "bid_down": direction_of("bid_down"),
+                        "pause": "pause", "update_bid": None, "set_user_lock": None}
 
 
 def _find_retro(db: Session, target_id: str, asof: date, action: str | None) -> dict | None:
