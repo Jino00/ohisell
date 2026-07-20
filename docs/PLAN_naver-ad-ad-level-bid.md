@@ -278,9 +278,9 @@ flip-flop 방어·MO 재개가 per-campaign 하드코딩 아님(전역 규칙).
 
 ## §7 체크리스트 (현재 위치)
 - [x] B0 계획서 작성·D-NAO-65 방향고정 (이 문서) — 완료(2026-07-20)
-- [ ] B0-r Fable 계획 검토(구조 승인·관측 조건)
-- [ ] B1 인식(get_ads adAttr 파싱 + NaverAdgroupProduct additive + sync 적재 + 실측 스윕)
-- [ ] B2 실효입찰 파생 SA + 진단 재정의(스톱로스 임계·lever_broken·밴드) — 예외② pause 안전망 유지
+- [x] B0-r Fable 계획 검토 승인(2026-07-20 09:50, 관측 조건: max 실효입찰의 임계 상승 실측)
+- [x] B1 인식 — 완료(2026-07-20): 배포·마이그 c5d6e7f8a9b0·sync 실측 36그룹/88매핑, ★85/88(96%) useGroupBidAmt=false 확정. PR #65. 2284 passed.
+- [x] B2 실효입찰 파생 SA + 진단 재정의 + 미연결 억제 — 완료(2026-07-20): GATE 2R PASS(1R P2 2건: 침묵 대역→7일 증거 창·밴드 미전환→전 레인 억제). 배포 1b3f8ec·2314 passed. 라이브: 30/33 미연결 정확 판정·보드 38→32. ★B3 이월: 소재입찰 change_log 추적 시 미연결 창='마지막 소재입찰 변경 이후' 절체. 잔여 관측: 11:20 레인 미연결 hold·임계 미달 무전환 비용 합계.
 - [ ] B3 제어 개방(update_ad_bid + harness 'ad' 분기 + 실효레버 라우팅 + 카나리)
 - [ ] B4 예외② 해소(lever_broken→leash 은퇴) + 재개 흐름
 - [ ] PR 병합·트랙 D-NAO-65 B 진행 갱신·HANDOFF
