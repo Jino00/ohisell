@@ -417,6 +417,53 @@ def _build_guardrail_context(db: Session, proposal: NaverProposal, now: datetime
             context["changes_today_count"] = sum(1 for r in change_rows if r[0] >= today_start)
         return context
 
+    if proposal.target_type == "ad":
+        # B3(D-NAO-65 설계질문 3·4): 소재-레벨 입찰 제어. current_bid = 라이브 소재 bidAmt
+        # (adAttr.bidAmt) 재조회 — ±15% 클램프·방향검증이 소재 자기 입찰 기준으로 돈다
+        # (그룹/키워드 대칭, writer의 before 재조회와 별개라 각자 재조회). 쿨다운 시계는 아래
+        # change_rows가 entity_type='ad'·entity_id=nccAdId로 조회 = 소재 단위 독립 쿨다운.
+        try:
+            context["current_bid"] = naver_sa_writer.get_ad_bid(proposal.target_id)
+        except Exception as e:  # noqa: BLE001 — 재조회 실패는 fail-closed(current_bid=None 유지)
+            log.warning(
+                "naver_execution_harness: guardrail context get_ad_bid 실패(fail-closed) "
+                "target_id=%s: %s", proposal.target_id, e,
+            )
+
+        # 증액(bid_up/growth_bid_up)만 up-only 가드 원료를 채운다 — 소재 단위 실적은
+        # naver_ad_daily에 없어(그레인=adgroup/keyword) 부모 광고그룹(proposal.adgroup_id) 창
+        # agg로 BEP/스톱로스/일예산을 근사한다(소재-레벨 daily 부재 시 최선 근사 — down은 이
+        # 검사가 면제라 여전히 None, keyword/adgroup up 브랜치와 동형 재사용). adgroup_id가
+        # 없으면 roas_corrected가 None으로 남아 executor가 fail-closed로 막는다(아래 S3 가드).
+        if proposal.proposal_type in ("bid_up", "growth_bid_up") and proposal.adgroup_id:
+            as_of = now.date() - timedelta(days=1)  # naver_ad_daily는 D-1까지만 확정
+            window_from = as_of - timedelta(days=_GUARDRAIL_LOOKBACK_DAYS - 1)
+            agg = account_diagnosis.adgroup_window_agg(db, proposal.adgroup_id, window_from, as_of)
+            if agg["cost"] > 0:
+                correction = compute_correction_factor(db, as_of)
+                roas_naver = agg["conv_amt"] / agg["cost"]
+                context["roas_corrected"] = roas_naver * float(correction["factor"])
+                context["unconverted_spend"] = agg["cost"] if agg["conv_amt"] == 0 else 0
+            context["target_roas"] = _resolve_target_roas_float(db, proposal.campaign_id)
+            context["cost_today"], context["daily_budget"] = _latest_hourly_snapshot_fields(
+                db, proposal.campaign_id, now.date(),
+            )
+
+        change_rows = (
+            db.query(NaverChangeLog.changed_at)
+            .filter(
+                NaverChangeLog.entity_type == proposal.target_type,  # 'ad'
+                NaverChangeLog.entity_id == proposal.target_id,
+                NaverChangeLog.dry_run.is_(False), NaverChangeLog.after_value.isnot(None),
+            )
+            .all()
+        )
+        if change_rows:
+            context["last_change_at"] = max(r[0] for r in change_rows)
+            today_start = datetime.combine(now.date(), datetime.min.time())
+            context["changes_today_count"] = sum(1 for r in change_rows if r[0] >= today_start)
+        return context
+
     if proposal.target_type not in ("keyword", "campaign"):
         return context
 
@@ -591,9 +638,9 @@ def _execute_update_bid(db: Session, proposal: NaverProposal, now: datetime) -> 
     메꾸지 않으면 D-NAO-1 이익하한이 컨텍스트 미비 상태로 조용히 우회된다(S2의 blanket
     차단을 이 데이터 기반 차단으로 대체).
     """
-    if proposal.target_type not in ("keyword", "adgroup"):
+    if proposal.target_type not in ("keyword", "adgroup", "ad"):
         reason = (
-            f"target_type={proposal.target_type!r} — 키워드·광고그룹 단위 입찰만 구현됨"
+            f"target_type={proposal.target_type!r} — 키워드·광고그룹·소재(ad) 단위 입찰만 구현됨"
             "(캠페인 단위는 미구현, 정직 경계)"
         )
         _guard_failure(db, proposal, now, "update_bid", reason)
@@ -613,7 +660,7 @@ def _execute_update_bid(db: Session, proposal: NaverProposal, now: datetime) -> 
     # (adgroup_window_agg 창에 실적이 없거나 재조회가 실패하면 여전히 None일 수 있음) —
     # executor가 실행 직전 한 번 더 완전성을 확인해 fail-closed로 막는다(guardrail_gate
     # 자체는 변경하지 않음 — S2의 blanket 차단을 이 데이터 기반 차단으로 대체).
-    if proposal.target_type == "adgroup" and proposal.proposal_type in ("bid_up", "growth_bid_up"):
+    if proposal.target_type in ("adgroup", "ad") and proposal.proposal_type in ("bid_up", "growth_bid_up"):
         # guardrail_gate._check_bid의 up 전용 검사(BEP·스톱로스·일예산)는 그 원료가 None이면
         # 전부 fail-open(검사 건너뜀)이다 — 컨텍스트가 불완전한 채 넘기면 D-NAO-1 이익하한·
         # 일예산 상한이 조용히 우회된다. 각 원료의 소스가 달라(BEP/스톱로스=adgroup_window_agg,
@@ -655,10 +702,12 @@ def _execute_update_bid(db: Session, proposal: NaverProposal, now: datetime) -> 
 
     _claim_executing(db, proposal)
 
-    writer_fn = (
-        naver_sa_writer.update_keyword_bid if proposal.target_type == "keyword"
-        else naver_sa_writer.update_adgroup_bid
-    )
+    if proposal.target_type == "keyword":
+        writer_fn = naver_sa_writer.update_keyword_bid
+    elif proposal.target_type == "adgroup":
+        writer_fn = naver_sa_writer.update_adgroup_bid
+    else:  # ad (B3, D-NAO-65) — 소재 bidAmt 직접 수정(useGroupBidAmt=false 실효 소재)
+        writer_fn = naver_sa_writer.update_ad_bid
     try:
         result = writer_fn(proposal.target_id, proposal.target_bid)
     except Exception as exc:  # WriteValidationError/WriteError/WriteVerificationError + requests 계열
@@ -967,10 +1016,10 @@ def real_write_blocker(proposal: NaverProposal) -> str | None:
         if not proposal.adgroup_id:
             return "adgroup_id 없음 — 실행 대상 정보 부족(구 제안이거나 재생성 필요)"
     elif action == "update_bid":
-        if proposal.target_type not in ("keyword", "adgroup"):
+        if proposal.target_type not in ("keyword", "adgroup", "ad"):
             return (
-                f"target_type={proposal.target_type!r} — 키워드·광고그룹 단위 입찰만 구현됨"
-                "(캠페인 단위는 미구현, 정직 경계)"
+                f"target_type={proposal.target_type!r} — 키워드·광고그룹·소재(ad) 단위 입찰만 "
+                "구현됨(캠페인 단위는 미구현, 정직 경계)"
             )
         if proposal.target_bid is None:
             return "target_bid 없음 — 실행 대상 정보 부족(구 제안이거나 재생성 필요)"

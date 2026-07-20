@@ -226,6 +226,14 @@ effective_bid 주입)·`diagnosis.build_diagnosis`(effective_bid 주입 배선).
   복수 실효레버면 각각 제안(고삐가 그룹당 1건→소재당 1건, 쿨다운은 ad_id별).
 - **카나리**: `OPEN_ACTIONS` 불변("update_bid" 이미 개방)이나 **target_type='ad' 실쓰기는 첫 배포 시
   ours 1개 캠페인·Jino Confirm 승인분만**(D-NAO-5 신규 유형 액션 무조건 승인). 자동발사 0 → 실적 확인 후 확대.
+- **B3 GATE 반영(2026-07-20)**: ①카나리 1단계 방향 = **bid_down만**(`_AD_BID_CANARY_DIRECTIONS`,
+  ad UP은 2단계 — 상수 확장으로 개방) ②**탐침(probe) UP은 ad 라우팅 제외** — CD3 되돌림 기계가
+  'ad' grain을 처리 못 함(`probe_revert._standing_probes`의 before_value 최상위 bidAmt 파싱 vs
+  ad의 adAttr JSON 문자열 중첩 + `_conv_direct_today` grain 필터 부재). **탐침의 ad 확장은 별도
+  페이즈로 이월**(CD3 'ad' 확장이 선행조건) ③Confirm-only 코드화 — ad 제안은 레인 자동승인·인라인
+  실행 금지(시간당=pending 생성만·일 레인=심사/stale 정리 모두 제외), 실행 경로는 콘솔 Confirm만.
+  ④라이브 합격 기준 보강: max 소재입찰 하락뿐 아니라 **그룹 실현 CPC 하강**을 확인(2위 소재로의
+  노출 이전 효과까지 포착 — max만 보면 놓침).
 **어디**: `naver_sa_writer.update_ad_bid`(신규)·`_execute_update_bid`(분기)·`proposal_writer`(실효레버
 라우팅)·`guardrail_gate`(entity_id=ad_id, 로직 불변). effective_bid 재사용.
 **완료 기준(원칙22)**: 카나리에서 (a) useGroupBidAmt=false 소재에 bid_down 실집행 → 재조회 실측 반영
@@ -273,6 +281,7 @@ flip-flop 방어·MO 재개가 per-campaign 하드코딩 아님(전역 규칙).
 - **adAttr 스키마 드리프트**: 라이브 API 403이라 스펙은 공식 apidoc 기반 — B1 첫 스윕이 실 응답으로
   `adAttr` 문자열 구조를 확증(추정 금지, 원칙22). 스윕 결과가 스펙과 다르면 B2 착수 전 재설계.
 
+- **★B3 카나리 캠페인 = 맥세이프 확정(2026-07-20 11:06, Jino 원문 "수정 끝나면 배포하고 카나리는 맥세이프로 열자")**: `AD_BID_CANARY_CAMPAIGNS = frozenset({"cmp-a001-02-000000010769985"})`. GATE P2 수정(탐침 제외·Confirm-only·DOWN 한정) 반영 후 배포와 함께 개방. ad 제안은 콘솔 Confirm 전용이라 실집행은 Jino 승인 경유. 참고: 맥세이프 현재 활성 그룹=컨텐츠(070109620)뿐(MO·PC pause) — 미연결 그룹 실집행 후보는 B4 재개 흐름과 결합 시 확대.
 - **★B2 GATE P2 자동 결정(2026-07-20 10:15, Claude 추천안 — Jino 번복 가능)**: ①P2-1 임계=실효×10은 유지(통계적으로 옳음: "실효입찰 10클릭 무전환 증거". pre-B2 임계 500이 오히려 1클릭 미만 증거로 발사하던 것) — 침묵 대역의 진짜 원인은 3일 폴백 창이므로 **레버 미연결(source='ad') 유닛의 증거 창 = 만성 7일**로 확장(이 유닛은 우리가 입찰을 안 바꿔 창 리셋 우려 구조적 부재 = DL1 시점 정합 유지. 일 2,843원+ 출혈은 7일 내 도달, 미만은 진짜 증거 부족=성급 사살 금지 정당). ②P2-2 밴드 레인(RL3·bep·growth)의 미연결 그룹 그룹입찰 발사 억제(지출 무효+창 리셋 오염+슬롯 낭비 차단) — 계획서 B2 명시 항목의 실질 완성. ③lever_broken 트리거는 sync된 그룹에서 도달 불능화(CPC≤실효라 5×실효 불가)를 수용 — 미sync 그룹 폴백용으로 유지, sync 그룹의 안전망은 ①의 7일 창 밸브가 대체.
 - **★Fable 계획 검토 승인(2026-07-20 09:50)**: 6개 설계 결정 전부 승인. 강조 2: ①sync 편승=추가 API 콜 0(403 리스크 구조 회피) ②useGroupBidAmt 강제 전환 금지=운영자 의도 보존 + 제어는 항상 실효 레버로 라우팅. 관측 조건: B2의 max() 실효입찰이 스톱로스 임계를 올리므로(실효 800→임계 8000) 임계 상승이 지혈 지연을 만드는지 B2 라이브에서 실측.
 
@@ -281,7 +290,7 @@ flip-flop 방어·MO 재개가 per-campaign 하드코딩 아님(전역 규칙).
 - [x] B0-r Fable 계획 검토 승인(2026-07-20 09:50, 관측 조건: max 실효입찰의 임계 상승 실측)
 - [x] B1 인식 — 완료(2026-07-20): 배포·마이그 c5d6e7f8a9b0·sync 실측 36그룹/88매핑, ★85/88(96%) useGroupBidAmt=false 확정. PR #65. 2284 passed.
 - [x] B2 실효입찰 파생 SA + 진단 재정의 + 미연결 억제 — 완료(2026-07-20): GATE 2R PASS(1R P2 2건: 침묵 대역→7일 증거 창·밴드 미전환→전 레인 억제). 배포 1b3f8ec·2314 passed. 라이브: 30/33 미연결 정확 판정·보드 38→32. ★B3 이월: 소재입찰 change_log 추적 시 미연결 창='마지막 소재입찰 변경 이후' 절체. 잔여 관측: 11:20 레인 미연결 hold·임계 미달 무전환 비용 합계.
-- [ ] B3 제어 개방(update_ad_bid + harness 'ad' 분기 + 실효레버 라우팅 + 카나리)
+- [x] B3 제어 개방 — 완료(2026-07-20): GATE 3라운드 PASS(P2 4건 수정: 탐침 미회수·Confirm-only 부재·delegation 5번째 경로·pending 홍수). 배포 3c4bf5c·2359 passed. ★카나리 1호=맥세이프 개방(DOWN만·콘솔 Confirm 전용·자동발사 5경로 봉쇄). 라이브: 카나리·방향·update_ad_bid 로드 확인, MO 소재 551485078 입찰=800 실측(CPC 824 미스터리 완결). 잔여=첫 Confirm 실집행 왕복·그룹 실현 CPC 하강(D+1) 관측.
 - [ ] B4 예외② 해소(lever_broken→leash 은퇴) + 재개 흐름
 - [ ] PR 병합·트랙 D-NAO-65 B 진행 갱신·HANDOFF
 

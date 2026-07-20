@@ -80,6 +80,14 @@ def _eligible(db: Session, proposal: NaverProposal, delegated: set[str], skipped
     if proposal.proposal_type not in delegated:
         skipped["not_delegated"] += 1
         return False
+    # B3 GATE 2R P2-A(D-NAO-65): target_type='ad'(소재-레벨)는 위임 경로에서도 제외 —
+    # D-NAO-5 카나리 Confirm-only("Jino Confirm 승인분만·자동발사 0"). bid_down 위임이 켜진
+    # 상태에서 Ava가 재가동되면 ad pending이 이 게이트로 자동발사되는 5번째 실행 경로가
+    # 열리므로 여기서 막는다. real_write_blocker에서 막으면 콘솔 Confirm(수동 실행)까지
+    # 죽으므로 위치는 반드시 여기(위임 자격 필터). 카나리 2단계 개방 시 이 조건을 해제.
+    if proposal.target_type == "ad":
+        skipped["ad_confirm_only"] += 1
+        return False
     if proposal.status != "pending":
         # ★failed→approved 재승인은 영구 사람 전용 — 자동 재시도 금지 불변(D-NAO-5와 일관).
         skipped["not_pending"] += 1
@@ -110,14 +118,14 @@ def run_gate(db: Session, run_id: int, *, now=None) -> dict:
             "status": "skipped",
             "reason": f"run_id={run_id} 없음 또는 status!='ok' — degraded/부재 run 자동실행 금지(fail-closed)",
             "delegated_types": [], "agree_count": 0, "auto_approved": 0, "executed": 0, "failed": 0,
-            "skipped": {"not_delegated": 0, "not_pending": 0, "blocked": 0, "optimizer": 0, "budget_envelope": 0},
+            "skipped": {"not_delegated": 0, "not_pending": 0, "blocked": 0, "optimizer": 0, "budget_envelope": 0, "ad_confirm_only": 0},
         }
     delegated = get_delegated_types(db) & delegable_types()  # 저장값에 미개방 유형이 섞여도 이중 방어
     if not delegated:
         return {
             "status": "skipped", "reason": "delegated_types 비어있음",
             "delegated_types": [], "agree_count": 0, "auto_approved": 0, "executed": 0, "failed": 0,
-            "skipped": {"not_delegated": 0, "not_pending": 0, "blocked": 0, "optimizer": 0, "budget_envelope": 0},
+            "skipped": {"not_delegated": 0, "not_pending": 0, "blocked": 0, "optimizer": 0, "budget_envelope": 0, "ad_confirm_only": 0},
         }
 
     agree_reviews = (
@@ -130,7 +138,7 @@ def run_gate(db: Session, run_id: int, *, now=None) -> dict:
         .all()
     )
 
-    skipped = {"not_delegated": 0, "not_pending": 0, "blocked": 0, "optimizer": 0, "budget_envelope": 0}
+    skipped = {"not_delegated": 0, "not_pending": 0, "blocked": 0, "optimizer": 0, "budget_envelope": 0, "ad_confirm_only": 0}
     auto_approved = 0
     executed = 0
     failed = 0

@@ -135,6 +135,79 @@ def _step_down_bid(current_bid: int) -> int:
     return max(step_floor, 70)
 
 
+def _ad_step_bid(current_ad_bid: int, direction: str) -> int | None:
+    """소재 bidAmt 스텝(±15% 가드레일 동일 산식, B3 D-NAO-65) — down=_step_down_bid(10원 올림·
+    70원 하한), up=10원 내림·10만원 상한. 스텝이 소실(방향 무의미)이면 None(억지 제안 금지,
+    _bid_proposal/_clamp_step과 동일 규약 — 가드레일 방향검증에 어차피 막힐 제안을 안 만든다)."""
+    if direction == "down":
+        step = _step_down_bid(current_ad_bid)
+        return step if step < current_ad_bid else None
+    if direction == "up":
+        step = int((Decimal(current_ad_bid) * (Decimal(1) + _MAX_CHANGE_PCT)) // 10) * 10
+        step = min(step, 100_000)
+        return step if step > current_ad_bid else None
+    return None
+
+
+def _ad_bid_proposal(
+    *, ad_id: str, adgroup_id: str, campaign_id: str, current_ad_bid: int,
+    direction: str, board_name: str, note: str = "",
+) -> dict | None:
+    """레버 미연결(useGroupBidAmt=false 소재) 그룹의 ad-레벨 bid_down/bid_up 제안(B3 카나리,
+    D-NAO-65 설계질문 3·4). 그룹입찰 대신 실효 레버(소재 bidAmt)를 직접 스텝 조정한다 —
+    target_type='ad'·target_id=nccAdId·adgroup_id 병기(harness가 부모 그룹으로 up BEP 컨텍스트를
+    채운다). useGroupBidAmt는 건드리지 않는다(§0 강제 전환 금지 — writer가 false 유지만 검증).
+    스텝 소실(방향 무의미·소재 at-floor)이면 None(호출부가 기존 대기/pause 경로로 폴백).
+    GATE P2-2: 카나리 1단계 방향 게이트(_AD_BID_CANARY_DIRECTIONS={"bid_down"}) — up은 None
+    (2단계 개방 시 상수 확장만으로 열림). ★소급채점/diary는 target_type='ad'를 아직 전용
+    grain으로 채점하지 않는다 — 부모 adgroup grain 채점이 정확(후속, adgroup_id 병기가 그 원료)."""
+    target_bid = _ad_step_bid(current_ad_bid, direction)
+    if target_bid is None:
+        return None
+    proposal_type = _BID_UP if direction == "up" else _BID_DOWN
+    # GATE P2-2 DOWN 한정 — 함수 레벨 import(순환 회피, build()의 _ad_bid_canary와 동일 관례).
+    from app.services.naver_ad.auto_operator import _AD_BID_CANARY_DIRECTIONS
+    if proposal_type not in _AD_BID_CANARY_DIRECTIONS:
+        return None
+    rationale = (
+        f"[{board_name}·소재입찰] 레버 실연결(useGroupBidAmt=false 소재 {ad_id}) 소재입찰 "
+        f"{current_ad_bid}→{target_bid}원 (B3 카나리 소재-레벨 제어, 그룹입찰 우회 소재의 실효 "
+        f"레버 직접 조정){note}"
+    )
+    return {
+        "proposal_type": proposal_type,
+        "target_type": "ad",
+        "target_id": ad_id,
+        "adgroup_id": adgroup_id,
+        "campaign_id": campaign_id,
+        "rationale": rationale,
+        "expected_effect": (
+            "소재-레벨 실효입찰 직접 조정 — 그룹입찰이 헛도는 useGroupBidAmt=false 소재를 실효 "
+            "레버로 하향/상향(D-NAO-65 예외② leash화). ±15%·쿨다운·BEP 소재 단위 정합."
+        ),
+        "status": "pending",
+        "target_bid": target_bid,
+    }
+
+
+def _band_ad_route(
+    row: dict, band_effs: dict, campaign_id: str, board_name: str, bid_sims: dict,
+) -> dict | None:
+    """미연결 밴드 그룹(shopping_group_bep/growth)의 ad-레벨 라우팅(B3 카나리) — 방향은 sim,
+    스텝은 소재 bidAmt(band_effs의 실효입찰). sim 부재/방향 불일치/소재 at-floor면 None
+    (억지 제안 금지)."""
+    e = band_effs.get(row["adgroup_id"])
+    if not e or not e.get("max_ad_id"):
+        return None
+    sim = bid_sims.get(("adgroup", row["adgroup_id"]))
+    if sim is None or sim["direction"] not in _ALLOWED_DIRECTIONS.get(board_name, {"up", "down"}):
+        return None
+    return _ad_bid_proposal(
+        ad_id=e["max_ad_id"], adgroup_id=row["adgroup_id"], campaign_id=campaign_id,
+        current_ad_bid=e["effective_bid"], direction=sim["direction"], board_name=board_name,
+    )
+
+
 def _bid_proposal(
     row: dict, sim: dict | None, campaign_id: str, target_id: str, *,
     target_type: str, target_label: dict, board_name: str, forecast: dict | None = None,
@@ -410,6 +483,7 @@ def _adgroup_is_manual_bid(adgroup_id: str) -> bool | None:
 
 def _stop_loss_proposal(
     row: dict, *, target_type: str = "keyword", manual_bid: bool | None = None,
+    ad_bid_canary: bool = False,
 ) -> dict | None:
     """pause_candidates/shopping_pause_candidates 보드 1행(account_diagnosis) → 스톱로스 대응
     제안(X1b T3 D-NAO-38 → RL4 D-NAO-60 고삐화 → DL2 D-NAO-65 pause 예외화·바닥 대기).
@@ -470,6 +544,25 @@ def _stop_loss_proposal(
                     "status": "pending",
                     "target_bid": step_floor,
                 }
+            # B3 카나리(D-NAO-65): 레버 미연결(effective_source='ad') 소재를 실효 레버로 직접
+            # 하향(그룹 bid_down은 무의미). 예외② leash화 — 이전엔 바닥 대기(None)였던 미연결
+            # 유닛이 소재-레벨 bid_down 고삐를 받는다. lever_broken(소재 bidAmt까지 하한+CPC
+            # 폭등=진짜 레버불능)은 B3에서 은퇴 대상 아님(B4) → pause 안전망 유지. 소재 at-floor
+            # (스텝 소실)면 _ad_bid_proposal이 None → 아래 기존 예외 경로로 폴백. 미카나리/소재
+            # 데이터 부재(effective_ad_id 없음)도 기존 경로(대기/pause 예외).
+            if (
+                ad_bid_canary and row.get("effective_source") == "ad"
+                and row.get("effective_ad_id") and not row.get("lever_broken")
+            ):
+                ad_p = _ad_bid_proposal(
+                    ad_id=row["effective_ad_id"], adgroup_id=row["adgroup_id"],
+                    campaign_id=row["campaign_id"], current_ad_bid=effective_bid_val,
+                    direction="down", board_name="shopping_pause_candidates",
+                    note=(f" 무전환 누적비용 {row['cost']}원 ≥ 스톱로스 "
+                          f"{row['stop_loss_amount']}원, clk={row.get('clk')}."),
+                )
+                if ad_p is not None:
+                    return ad_p
             # 실효입찰 at-floor OR 레버 미연결(실효≫그룹 — 그룹 bid_down 무의미) → lever/pause 판정.
             # DL2 예외② 레버끊김 → pause / 지속 밸브 floor_bleed(GATE P2-2, 바닥 3일+ 무전환 출혈
             # 지속) → 밸브 pause / 그 외 → 바닥 대기(None). 예외②가 밸브보다 우선(정직 경계).
@@ -743,6 +836,9 @@ def build(
     boards = diagnosis.get("boards") or {}
     ours = _ours_campaign_ids(db)
     labels = _TargetLabelCache(db)
+    # B3(D-NAO-65) 카나리 게이트 — 함수 레벨 import(auto_operator ↔ proposal_writer 순환 회피,
+    # account_diagnosis._step_down_bid 함수 레벨 import와 동일 관례). 기본 빈 집합=전면 미개방.
+    from app.services.naver_ad.auto_operator import _ad_bid_canary
 
     # B2 GATE P2-2②: 레버 미연결 그룹(실효입찰 source='ad' — useGroupBidAmt=false 소재가
     # 그룹입찰을 우회) 판별. 미연결 그룹에 그룹입찰 bid_down/bid_up을 내면 지출엔 무효이면서
@@ -794,7 +890,13 @@ def build(
             continue
         target_id = row["adgroup_id"]
         if target_id in disconnected_adgroups:
-            continue  # B2 GATE P2-2②: 레버 미연결 — 그룹입찰 bid_down 무효(B3 대기)
+            # B2 GATE P2-2② → B3 라우팅: 미연결 그룹의 그룹입찰 bid_down은 무효 —
+            # 카나리면 실효 레버(max 소재) ad-레벨 제안, 비카나리는 hold(B2 억제).
+            if _ad_bid_canary(cid):
+                ad_p = _band_ad_route(row, band_effs, cid, "shopping_group_bep", bid_sims)
+                if ad_p:
+                    proposals.append(ad_p)
+            continue
         sim = bid_sims.get(("adgroup", target_id))
         p = _bid_proposal(row, sim, cid, target_id, target_type="adgroup",
                            target_label=labels.get(cid), board_name="shopping_group_bep",
@@ -811,7 +913,13 @@ def build(
             continue
         target_id = row["adgroup_id"]
         if target_id in disconnected_adgroups:
-            continue  # B2 GATE P2-2②: 레버 미연결 — 그룹입찰 bid_up 무효(B3 대기)
+            # B2 GATE P2-2② → B3 라우팅(대칭): 미연결 그룹의 그룹입찰 bid_up 무효 —
+            # 카나리면 실효 레버(max 소재) ad-레벨 up 제안, 비카나리는 hold.
+            if _ad_bid_canary(cid):
+                ad_p = _band_ad_route(row, band_effs, cid, "shopping_group_growth", bid_sims)
+                if ad_p:
+                    proposals.append(ad_p)
+            continue
         sim = bid_sims.get(("adgroup", target_id))
         p = _bid_proposal(row, sim, cid, target_id, target_type="adgroup",
                            target_label=labels.get(cid), board_name="shopping_group_growth",
@@ -856,7 +964,9 @@ def build(
             continue
         manual_bid = _adgroup_is_manual_bid(row["adgroup_id"])
         # DL2(D-NAO-65): at-floor·레버 정상은 바닥 대기(None) — 안전 필터링.
-        p = _stop_loss_proposal(row, target_type="adgroup", manual_bid=manual_bid)
+        # B3 카나리: 레버 미연결 유닛은 소재-레벨 bid_down 고삐로 라우팅(예외② leash화).
+        p = _stop_loss_proposal(row, target_type="adgroup", manual_bid=manual_bid,
+                                ad_bid_canary=_ad_bid_canary(cid))
         if p is not None:
             proposals.append(p)
 
