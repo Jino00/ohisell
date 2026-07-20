@@ -13,14 +13,14 @@
 // 없어(백엔드 _serialize_settings가 안 줌) campaign_id만 표시한다 — 추측으로 필드를 만들지 않는다.
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { Card, Stat, EmptyState, Loading, CoverageBar, Table, Th, Td, Badge, LayerNav, OptimizerSwitch } from "../components/ui";
+import { Card, Stat, EmptyState, Loading, CoverageBar, Table, Th, Td, Badge, LayerNav, OptimizerSwitch, LossPolicySwitch } from "../components/ui";
 import { num, won, roasX, pctFromFraction, NO_DATA } from "../lib/format";
 import { useAsyncData } from "../lib/useAsyncData";
 import {
   getNaverDashboardOverview, fetchNaverChangeLog,
   fetchNaverRetroScorecard, fetchNaverAdProposals,
-  fetchNaverCampaignRoster, putNaverCampaignOptimizer,
-  type NaverDashboardOverview, type NaverCampaignRosterRow, type NaverAdOptimizer,
+  fetchNaverCampaignRoster, putNaverCampaignOptimizer, putNaverCampaignLossPolicy,
+  type NaverDashboardOverview, type NaverCampaignRosterRow, type NaverAdOptimizer, type NaverLossPolicy,
   type NaverRetroScorecard, type NaverChangeLogRow, type NaverChangeLogResponse,
 } from "../lib/api";
 import { PROPOSAL_TYPE_LABEL } from "./NaverAdOptimizationConsole";
@@ -185,6 +185,20 @@ function CampaignRoster() {
     }
   }
 
+  async function changeLossPolicy(campaignId: string, next: NaverLossPolicy) {
+    // D-NAO-65 UI2: 정책은 optimizer와 독립 저장(전용 엔드포인트 — 전체 치환 아님).
+    setSaveError(null);
+    const prev = rows;  // 실패 시 되돌릴 스냅샷
+    // ★낙관적 갱신: 스위치 반응을 즉시 보이고, 저장 실패하면 롤백한다.
+    setRows((cur) => cur?.map((r) => (r.campaign_id === campaignId ? { ...r, loss_policy: next } : r)) ?? cur);
+    try {
+      await putNaverCampaignLossPolicy(campaignId, next);
+    } catch (e) {
+      setRows(prev);  // 롤백 — 저장 안 됐는데 바뀐 척하지 않는다(D-NAO-53 정신)
+      setSaveError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
   if (error) {
     return <EmptyState reason={`캠페인 목록을 불러오지 못했습니다: ${error}`} hint="새로고침하거나 백엔드 상태를 확인하세요." />;
   }
@@ -219,6 +233,7 @@ function CampaignRoster() {
             <Th right>광고비(30일)</Th>
             <Th right>ROAS</Th>
             <Th>관리 주체</Th>
+            <Th>loss 정책</Th>
           </>}>
             {list.map((c) => (
               <tr key={c.campaign_id}>
@@ -238,6 +253,22 @@ function CampaignRoster() {
                     value={c.optimizer}
                     onChange={changeOptimizer}
                   />
+                </Td>
+                <Td>
+                  {/* ★모든 캠페인에 스위치를 노출한다(편집은 optimizer와 독립). 다만 정책은
+                      우리 MOP(proposal_writer)가 loss를 처리할 때만 소비되므로, 'ours'가 아닌
+                      캠페인엔 그 사실을 회색 부연으로 정직하게 붙인다(D-NAO-65 §0). */}
+                  <div className="flex items-center gap-2">
+                    <LossPolicySwitch
+                      campaignId={c.campaign_id}
+                      campaignName={c.name || c.campaign_id}
+                      value={c.loss_policy}
+                      onChange={changeLossPolicy}
+                    />
+                    {c.optimizer !== "ours" && (
+                      <span className="text-[11px] text-gray-400 whitespace-nowrap">우리 MOP 캠페인에서만 소비됨</span>
+                    )}
+                  </div>
                 </Td>
               </tr>
             ))}

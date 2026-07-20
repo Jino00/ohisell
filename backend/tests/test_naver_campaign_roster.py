@@ -120,6 +120,31 @@ def test_roster_reflects_optimizer_setting(db):
     assert by["cmp-mop"]["optimizer"] == "mop"
 
 
+def test_roster_loss_policy_none_when_no_settings_row(db):
+    """UI2(D-NAO-65): 설정 행이 없으면 loss_policy=None — 프론트가 '기본(고삐)'로 해석.
+    조회 SA는 NULL을 임의로 'leash'로 정규화하지 않는다(그 책임은 쓰기 경로에만)."""
+    _campaign(db, cid="cmp-1", name="캠페인")
+    _daily(db, cid="cmp-1", days_ago=1, cost=100)
+    db.commit()
+
+    assert campaign_roster.build(db)[0]["loss_policy"] is None
+
+
+def test_roster_reflects_loss_policy_setting(db):
+    """UI2(D-NAO-65): 설정된 stoploss_pause를 그대로 실어 보낸다(스위치 렌더 원천)."""
+    _campaign(db, cid="cmp-leash", name="고삐")
+    _campaign(db, cid="cmp-stop", name="스톱로스")
+    _daily(db, cid="cmp-leash", days_ago=1, cost=100)
+    _daily(db, cid="cmp-stop", days_ago=1, cost=200)
+    db.add(NaverCampaignSettings(campaign_id="cmp-leash", optimizer="ours", loss_policy="leash"))
+    db.add(NaverCampaignSettings(campaign_id="cmp-stop", optimizer="ours", loss_policy="stoploss_pause"))
+    db.commit()
+
+    by = {r["campaign_id"]: r for r in campaign_roster.build(db)}
+    assert by["cmp-leash"]["loss_policy"] == "leash"
+    assert by["cmp-stop"]["loss_policy"] == "stoploss_pause"
+
+
 def test_roster_includes_campaigns_with_zero_spend(db):
     """★광고비 0이어도 명부에 있어야 스위치를 걸 수 있다. 0은 '없는 것'이 아니다 —
     정지된 캠페인·신규 인계 대상도 관리주체를 지정할 수 있어야 한다(D-47-h와 같은 정신)."""
