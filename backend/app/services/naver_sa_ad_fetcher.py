@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
 import logging
 import os
 import re
@@ -605,17 +606,48 @@ def get_keywords(adgroup_id: str) -> list[dict]:
     } for k in resp.json()]
 
 
+def _parse_ad_attr(raw: object) -> tuple[int | None, bool | None]:
+    """소재 Ad.adAttr에서 (bidAmt, useGroupBidAmt) 추출 (B1, D-NAO-65).
+
+    adAttr는 공식 apidoc상 JSON **문자열** `{"bidAmt":N,"useGroupBidAmt":bool}`이지만,
+    이미 dict로 온 경우/문자열이 깨진 경우/필드 부재를 모두 방어한다(부분응답 견고, 추정 금지):
+      - 문자열 → json.loads 시도, 실패 시 (None, None)
+      - dict 아님 / adAttr 부재 → (None, None)
+      - bidAmt/useGroupBidAmt 각 필드는 독립적으로 없으면 None(부분 필드 견고)
+    회귀 안전: 실패는 예외 없이 None으로 강등(소재 하나 파싱 실패가 sync 전체를 깨지 않음).
+    """
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (ValueError, TypeError):
+            return None, None
+    if not isinstance(raw, dict):
+        return None, None
+    bid_raw = raw.get("bidAmt")
+    try:
+        bid = int(bid_raw) if bid_raw is not None and not isinstance(bid_raw, bool) else None
+    except (ValueError, TypeError):
+        bid = None
+    ugba_raw = raw.get("useGroupBidAmt")
+    ugba = bool(ugba_raw) if isinstance(ugba_raw, bool) else None
+    return bid, ugba
+
+
 def get_ads(adgroup_id: str) -> list[dict]:
-    """광고그룹의 소재(ad) 목록 → 쇼핑 상품 매핑 원료 (D-NAO-57 A).
+    """광고그룹의 소재(ad) 목록 → 쇼핑 상품 매핑 원료 (D-NAO-57 A) + 소재-레벨 입찰(B1).
 
     GET /ncc/ads?nccAdgroupId=... . 쇼핑 상품 소재(type=SHOPPING_PRODUCT_AD)는
     referenceData.mallProductId(예: "13365319468")를 담는데, 이 값이
     naver_product_bep.channel_product_id와 정확히 일치한다(라이브 실증, 트랙 D-NAO-57 A).
 
-    반환: [{"ad_id","adgroup_id","ad_type","mall_product_id","product_name"}, ...]
+    반환: [{"ad_id","adgroup_id","ad_type","mall_product_id","product_name",
+            "ad_bid_amt","use_group_bid_amt","ad_user_lock"}, ...]
     (mall_product_id가 있는 소재만 — 쇼핑 상품 소재가 아니거나 referenceData에 상품번호가
     없으면 제외). product_name은 referenceData에서 best-effort로 추출(표시용, 매핑 정확성엔
     무관 — 확정 필드가 아니라 여러 후보 키를 시도하고 없으면 빈 문자열).
+
+    ★B1(D-NAO-65): adAttr(bidAmt·useGroupBidAmt)·userLock 추가 파싱(추가 API 콜 0 — 기존 응답
+    재사용). adAttr 부재/파싱 실패 시 입찰 필드 None(read-only 인식층, 행위변경 없음).
     """
     resp = _get("/ncc/ads", {"nccAdgroupId": adgroup_id})
     resp.raise_for_status()
@@ -628,12 +660,16 @@ def get_ads(adgroup_id: str) -> list[dict]:
         # product_name: referenceData의 확정 키가 실측 전이라 후보 키를 순서대로 시도(추정
         # 하드코딩 아님 — 첫 존재값 채택, 전부 없으면 ""). 매핑 정확성은 mall_product_id로만 판단.
         name = ref.get("productTitle") or ref.get("productName") or ref.get("name") or ""
+        ad_bid_amt, use_group_bid_amt = _parse_ad_attr(a.get("adAttr"))
         out.append({
             "ad_id": a.get("nccAdId", ""),
             "adgroup_id": a.get("nccAdgroupId", adgroup_id),
             "ad_type": a.get("type", ""),
             "mall_product_id": str(mall_pid),
             "product_name": name,
+            "ad_bid_amt": ad_bid_amt,
+            "use_group_bid_amt": use_group_bid_amt,
+            "ad_user_lock": bool(a.get("userLock", False)),
         })
     return out
 
