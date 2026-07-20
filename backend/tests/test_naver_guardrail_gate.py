@@ -635,3 +635,99 @@ def test_budget_up_daily_change_cap_applies():
     )
     assert reason is not None
     assert "일일 변경" in reason
+
+
+# ── DL3(D-NAO-65): bid_down 일일상한 면제 ("쭉 낮추다가") ───────────────────
+# 안전방향(하향=노출↓=지출↓)만 _MAX_DAILY_CHANGES에서 면제. 쿨다운 2h·클램프·방향검증·
+# BEP·스톱로스는 그대로. bid_up·growth_bid_up·budget·pause/resume은 상한 3 유지.
+
+
+def test_bid_down_exempt_from_daily_cap_over_limit_passes():
+    # 4번째 하향(changes_today_count=3)이어도 일일상한에 안 걸림 — 쿨다운 지난 상태
+    reason = gate.check(
+        _bid_proposal("bid_down", 170),
+        _ctx(current_bid=190, changes_today_count=3, last_change_at=None),
+        now=NOW,
+    )
+    assert reason is None
+
+
+def test_bid_down_exempt_from_daily_cap_even_far_over_limit_passes():
+    # 상한을 크게 초과(8번째)해도 면제 — "쭉 낮추다가" 유닛당 하루 ~8 스텝
+    reason = gate.check(
+        _bid_proposal("bid_down", 170),
+        _ctx(current_bid=190, changes_today_count=7, last_change_at=None),
+        now=NOW,
+    )
+    assert reason is None
+
+
+def test_bid_down_exempt_from_cap_but_cooldown_still_blocks():
+    # 일일상한은 면제되지만 쿨다운 2h는 여전히 유효 — 두 방어를 분리 검증
+    reason = gate.check(
+        _bid_proposal("bid_down", 170),
+        _ctx(
+            current_bid=190,
+            changes_today_count=3,
+            last_change_at=NOW - timedelta(hours=gate._COOLDOWN_HOURS / 2),
+        ),
+        now=NOW,
+    )
+    assert reason is not None
+    assert "쿨다운" in reason
+
+
+def test_bid_down_over_cap_still_enforces_direction_stale_row():
+    # 방향 불일치 stale 행(bid_down인데 target≥current)은 일일상한 면제와 무관하게
+    # 여전히 fail-closed 차단 — 면제가 방어망을 우회시키지 않음
+    reason = gate.check(
+        _bid_proposal("bid_down", 210),
+        _ctx(current_bid=190, changes_today_count=3, last_change_at=None),
+        now=NOW,
+    )
+    assert reason is not None
+    assert "방향" in reason
+
+
+def test_bid_up_not_exempt_from_daily_cap_still_blocked():
+    # 회귀: bid_up은 면제 아님 — 상한 3에서 여전히 차단
+    reason = gate.check(
+        _bid_proposal("bid_up", 210),
+        _ctx(current_bid=190, changes_today_count=3, last_change_at=None),
+        now=NOW,
+    )
+    assert reason is not None
+    assert "일일 변경" in reason
+
+
+def test_growth_bid_up_not_exempt_from_daily_cap_still_blocked():
+    # 회귀: growth_bid_up(상향 계열)도 면제 아님 — 면제는 bid_down에만
+    reason = gate.check(
+        _bid_proposal("growth_bid_up", 210),
+        _ctx(current_bid=190, changes_today_count=3, last_change_at=None),
+        now=NOW,
+    )
+    assert reason is not None
+    assert "일일 변경" in reason
+
+
+def test_pause_not_exempt_from_daily_cap_still_blocked():
+    # 회귀: pause는 면제 아님 — 상한 3에서 여전히 차단
+    reason = gate.check(
+        _lock_proposal("pause", True),
+        _ctx(changes_today_count=3, last_change_at=None),
+        now=NOW,
+    )
+    assert reason is not None
+    assert "일일 변경" in reason
+
+
+def test_budget_down_not_exempt_from_daily_cap_still_blocked():
+    # 회귀: budget_down은 하향이지만 면제 아님 — 면제 대상은 bid_down 계열뿐
+    reason = gate.check(
+        _budget_proposal("budget_down", 50_000),
+        _ctx(current_budget=100_000, changes_today_count=3, last_change_at=None),
+        now=NOW,
+    )
+    assert reason is not None
+    assert "일일 변경" in reason

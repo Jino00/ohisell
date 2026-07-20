@@ -819,19 +819,27 @@ def _judge_hourly(
     if leash_fired:
         return {"direction": "down", "reason": leash_reason, "leash": True}
 
-    # UP: 3조건 동시 충족 시만(밴드하단이탈 AND 정착ROAS충족 AND 페이싱저속)
+    # UP: 3조건 동시 충족 시만(밴드하단이탈 AND 정착ROAS충족 AND 페이싱저속).
+    # ★DL4(D-NAO-65) 익일 밴드 재시작 = 이 기존 UP 경로가 자연 수행한다 — 어제 고삐로 rank>4까지
+    # 내려간(스로틀된) 건강 유닛이 다음날 정착창(D-8~D-2, 어제 나쁜 날 제외) ROAS≥target이면
+    # 자연 상향 재시작. 별도 재시작 미들웨어·BEP 우회 게이트 신설 없음(§0 금지선 준수).
     if weighted_rank is not None and weighted_rank > _HOURLY_RANK_UP_THRESHOLD:
         roas_ok, roas_reason = _settlement_roas_ok(db, target_type, target_id, campaign_id, now.date())
-        if roas_ok:
-            pacing_slow, pacing_reason = _is_pacing_slow(db, target_type, target_id, curve, now)
-            if pacing_slow:
-                return {
-                    "direction": "up",
-                    "reason": (
-                        f"가중avg_rank={float(weighted_rank):.2f}>{_HOURLY_RANK_UP_THRESHOLD}"
-                        f"(밴드하단이탈), {roas_reason}, {pacing_reason}"
-                    ),
-                }
+        if not roas_ok:
+            # ★DL4 관측(Fable 조건①: "스로틀 고착"): rank>4(밴드 하단 = 어제 고삐로 스로틀됨/
+            # 저입찰)인데 정착창 ROAS 미달 → 재시작 UP 게이트가 ROAS에서 막힘 = "재시작 대기".
+            # 만성 sub-BEP 유닛은 여기 눌러앉아 바닥 파킹으로 수렴한다(BEP 게이트가 재출혈
+            # 사이클을 끊음). 기존 hold reason 체계 재사용(새 테이블·마이그레이션 없음).
+            return {"direction": "hold", "reason": f"재시작 대기(정착창 ROAS 미달) — {roas_reason}"}
+        pacing_slow, pacing_reason = _is_pacing_slow(db, target_type, target_id, curve, now)
+        if pacing_slow:
+            return {
+                "direction": "up",
+                "reason": (
+                    f"가중avg_rank={float(weighted_rank):.2f}>{_HOURLY_RANK_UP_THRESHOLD}"
+                    f"(밴드하단이탈), {roas_reason}, {pacing_reason}"
+                ),
+            }
 
     return {"direction": "hold", "reason": "판정 조건 미충족(기본 hold)"}
 
@@ -1040,6 +1048,20 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                     }
                 else:
                     result["held"].append({"target_id": target_id, "reason": verdict["reason"]})
+                    continue
+
+            # ★DL4(D-NAO-65) 재시작 천장 = learned band: 익일 밴드 재시작(일반 UP = band-return,
+            # rank>4 유닛의 자연 상향)도 학습된 최적밴드(probe_learning_loop.learned_probe_rank,
+            # 없으면 스팟밴드 rank≤4)를 천장으로 삼아 과climb을 막는다 — RL5 _learned_optimal_skip을
+            # 탐침 경로뿐 아니라 일반 UP에도 적용(기존 게이트 재사용, 신규 SA 0). 탐침 UP(probe=True)
+            # 은 위 hold 분기에서 이미 이 게이트를 통과했으므로 제외(이중 적용 금지). guardrail 우회
+            # 없음 — skip=False로 통과한 UP도 아래 execute()→guardrail_gate 전량을 그대로 탄다.
+            if verdict["direction"] == "up" and not verdict.get("probe"):
+                skip, skip_reason = _learned_optimal_skip(db, curve, now, campaign_id)
+                if skip:
+                    result["held"].append(
+                        {"target_id": target_id, "reason": f"[재시작 천장] {skip_reason}"}
+                    )
                     continue
 
             # 여기부터는 verdict가 up/down = 액션 의도 확정 — 이후의 hold는 "의도된 액션이
