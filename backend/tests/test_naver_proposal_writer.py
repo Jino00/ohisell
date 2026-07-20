@@ -1663,3 +1663,130 @@ def test_persist_non_budget_proposal_leaves_budget_columns_none(db):
     assert len(saved) == 1
     assert saved[0].target_budget is None
     assert saved[0].budget_auto_eligible is None
+
+
+# ══════════════════════════════════════════════════════════════════
+# UI1(D-NAO-65): 캠페인별 loss_policy 스위치 — 정책 3분기(NULL/leash/stoploss_pause)
+# ══════════════════════════════════════════════════════════════════
+# 핵심 검증: leash/NULL은 기존 고삐 동작 그대로(회귀 0), stoploss_pause만 고삐·바닥 대기를
+# 스킵하고 종전 하드 정지로 회귀한다(키워드·쇼핑 수동입찰). 쇼핑 ML은 정책 무관(예외① 유지).
+
+
+def test_stop_loss_proposal_keyword_leash_and_none_match_default(db):
+    """회귀 0: loss_policy=None과 ='leash'는 정책 미주입과 동일 결과(bid_down 고삐)."""
+    row = _pause_row(current_bid=1000, stop_loss_amount=10_000, cost=10_000)
+    p_none = proposal_writer._stop_loss_proposal(row, loss_policy=None)
+    p_leash = proposal_writer._stop_loss_proposal(row, loss_policy="leash")
+    p_default = proposal_writer._stop_loss_proposal(row)
+    assert p_none == p_default == p_leash
+    assert p_default["proposal_type"] == "bid_down"
+    assert p_default["target_bid"] == 850
+
+
+def test_stop_loss_proposal_keyword_stoploss_pause_forces_terminal_pause():
+    """stoploss_pause: 하향 여지(1000원)가 있어도 고삐 대신 종전 하드 정지 — '캠페인 정책' 사유."""
+    row = _pause_row(current_bid=1000, stop_loss_amount=10_000, cost=10_000)
+    p = proposal_writer._stop_loss_proposal(row, loss_policy="stoploss_pause")
+    assert p["proposal_type"] == "pause"
+    assert p["target_type"] == "keyword"
+    assert p["target_id"] == "nkw-pause"
+    assert p["target_lock"] is True
+    assert p.get("target_bid") is None
+    assert "[스톱로스정지 — 캠페인 정책]" in p["rationale"]
+    assert "stoploss_pause" in p["rationale"]
+
+
+def test_stop_loss_proposal_adgroup_manual_bid_stoploss_pause_forces_terminal_pause():
+    """쇼핑 수동입찰: leash면 bid_down 고삐인 상황(하향 여지)도 stoploss_pause면 하드 정지."""
+    row = _shopping_pause_row()  # current_bid=200 → leash라면 bid_down 170
+    p = proposal_writer._stop_loss_proposal(
+        row, target_type="adgroup", manual_bid=True, loss_policy="stoploss_pause")
+    assert p["proposal_type"] == "pause"
+    assert p["target_type"] == "adgroup"
+    assert p["target_id"] == "grp-shop-1"
+    assert p["target_lock"] is True
+    assert "[스톱로스정지 — 캠페인 정책]" in p["rationale"]
+
+
+def test_stop_loss_proposal_adgroup_stoploss_pause_skips_floor_wait():
+    """정책 pause가 '바닥 대기(None)'를 이긴다: at-floor·레버 정상이면 leash는 None인데,
+    stoploss_pause면 즉시 하드 정지(고삐·바닥 대기 스킵을 증명하는 강한 케이스)."""
+    row = _shopping_pause_row(current_bid=70, cost=700, stop_loss_amount=700)
+    p_leash = proposal_writer._stop_loss_proposal(row, target_type="adgroup", manual_bid=True)
+    assert p_leash is None  # 회귀 기준: leash는 바닥 대기
+    p_policy = proposal_writer._stop_loss_proposal(
+        row, target_type="adgroup", manual_bid=True, loss_policy="stoploss_pause")
+    assert p_policy["proposal_type"] == "pause"
+    assert "[스톱로스정지 — 캠페인 정책]" in p_policy["rationale"]
+
+
+def test_stop_loss_proposal_adgroup_ml_stoploss_pause_keeps_exception1_rationale():
+    """쇼핑 ML(manual_bid 아님)은 정책과 무관 — 이미 pause(예외①)이고 사유문을 '캠페인 정책'
+    으로 relabel하지 않는다(정지 이유가 정책이 아니라 레버 불능이라, 정직 경계)."""
+    row = _shopping_pause_row()
+    p = proposal_writer._stop_loss_proposal(
+        row, target_type="adgroup", manual_bid=False, loss_policy="stoploss_pause")
+    assert p["proposal_type"] == "pause"
+    assert "[스톱로스정지 — 캠페인 정책]" not in p["rationale"]
+    assert "무전환 누적비용" in p["rationale"]  # 기존 예외① 사유문 유지
+
+
+def test_build_keyword_stoploss_pause_produces_terminal_pause(db):
+    """build() 주입: loss_policy='stoploss_pause' 캠페인의 키워드 스톱로스는 고삐 대신 정지."""
+    db.add(NaverCampaignSettings(
+        campaign_id="cmp-ours", optimizer="ours", loss_policy="stoploss_pause"))
+    db.commit()
+    diagnosis = _diagnosis(pause_candidates=[_pause_row(current_bid=1000, stop_loss_amount=10_000, cost=10_000)])
+
+    out = proposal_writer.build(db, diagnosis, as_of=AS_OF)
+    assert len(out) == 1
+    assert out[0]["proposal_type"] == "pause"
+    assert out[0]["target_lock"] is True
+    assert "[스톱로스정지 — 캠페인 정책]" in out[0]["rationale"]
+
+
+def test_build_keyword_leash_explicit_still_bid_down(db):
+    """build() 회귀: 명시적 loss_policy='leash'도 NULL과 동일하게 bid_down 고삐(변화 없음)."""
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours", loss_policy="leash"))
+    db.commit()
+    diagnosis = _diagnosis(pause_candidates=[_pause_row()])
+
+    out = proposal_writer.build(db, diagnosis, as_of=AS_OF)
+    assert len(out) == 1
+    assert out[0]["proposal_type"] == "bid_down"
+    assert out[0]["target_bid"] == 170
+
+
+def test_build_shopping_stoploss_pause_manual_bid_produces_terminal_pause(db, monkeypatch):
+    """build() 쇼핑 수동입찰 + stoploss_pause → 고삐 대신 하드 정지."""
+    monkeypatch.setattr(proposal_writer, "_adgroup_is_manual_bid", lambda adgroup_id: True)
+    db.add(NaverCampaignSettings(
+        campaign_id="cmp-ours", optimizer="ours", loss_policy="stoploss_pause"))
+    db.commit()
+    diagnosis = _diagnosis(shopping_pause_candidates=[_shopping_pause_row()])
+
+    out = proposal_writer.build(db, diagnosis, as_of=AS_OF)
+    assert len(out) == 1
+    assert out[0]["proposal_type"] == "pause"
+    assert "[스톱로스정지 — 캠페인 정책]" in out[0]["rationale"]
+
+
+def test_build_lever_resume_stoploss_pause_excluded(db):
+    """UI1: 정책이 pause인 캠페인은 lever_resume(재개·bid_down_first) 제안이 자기모순 → 제외.
+    캠페인 정책 판정이 canary·ML 재조회보다 먼저라, _adgroup_is_manual_bid는 호출조차 안 된다."""
+    from unittest.mock import MagicMock
+
+    db.add(NaverCampaignSettings(
+        campaign_id="cmp-ours", optimizer="ours", loss_policy="stoploss_pause"))
+    db.commit()
+    board_row = {"campaign_id": "cmp-ours", "adgroup_id": "grp-mo", "effective_bid": 70,
+                 "effective_ad_id": "nad-1", "action": "resume",
+                 "paused_at": "2026-07-20T08:50:00"}
+    diagnosis = _diagnosis(shopping_lever_resume_candidates=[board_row])
+
+    m_manual = MagicMock()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(proposal_writer, "_adgroup_is_manual_bid", m_manual)
+        out = proposal_writer.build(db, diagnosis, as_of=AS_OF)
+    assert out == []
+    m_manual.assert_not_called()

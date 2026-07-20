@@ -62,9 +62,13 @@ def build(db: Session, *, days: int = DEFAULT_WINDOW_DAYS, today: date | None = 
         .all()
     }
 
-    optimizer_by_campaign = {
-        s.campaign_id: s.optimizer for s in db.query(NaverCampaignSettings).all()
-    }
+    settings_rows = db.query(NaverCampaignSettings).all()
+    optimizer_by_campaign = {s.campaign_id: s.optimizer for s in settings_rows}
+    # UI2(D-NAO-65): loss 대응 정책. NULL/미설정은 그대로 None으로 실어 보낸다 —
+    # 프론트가 '기본(고삐)'로 해석한다(전역 기본값 leash 불변식, 여기서 임의 정규화 금지:
+    # 화면은 '미설정'과 '명시 leash'를 구분할 필요가 없고, NULL=leash 정규화는 쓰기 경로
+    # (PUT /campaign-settings/loss-policy)의 책임이지 조회 SA가 할 일이 아니다).
+    loss_policy_by_campaign = {s.campaign_id: s.loss_policy for s in settings_rows}
 
     rows: list[dict] = []
     campaigns = (
@@ -88,6 +92,7 @@ def build(db: Session, *, days: int = DEFAULT_WINDOW_DAYS, today: date | None = 
             "conv_amt": conv_amt,
             "roas_naver": round(conv_amt / cost, 4) if cost else None,
             "optimizer": optimizer_by_campaign.get(c.entity_id, "none"),
+            "loss_policy": loss_policy_by_campaign.get(c.entity_id),  # NULL=콘솔이 '기본(고삐)'로 해석
             "window_days": days,
         })
 

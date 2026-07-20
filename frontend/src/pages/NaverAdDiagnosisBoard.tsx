@@ -6,6 +6,7 @@ import {
   fetchNaverAdDiagnosis,
   type NaverAdDiagnosis,
   type NaverAdDiagnosisKeywordRow,
+  type NaverAdDiagnosisFloorWaitRow,
 } from "../lib/api";
 import { isoKST, num, won, pctFromFraction, roasX, NO_DATA } from "../lib/format";
 import { LayerNav } from "../components/ui";
@@ -16,6 +17,13 @@ function daysAgo(n: number): string {
 
 function keywordLabel(r: NaverAdDiagnosisKeywordRow): string {
   return r.keyword_id ? `${r.adgroup_id} / ${r.keyword_id}` : r.adgroup_id;
+}
+
+// UI3(D-NAO-65): 바닥 대기 유닛 라벨 — 키워드는 그룹/키워드, 쇼핑은 캠페인/그룹.
+function floorWaitLabel(r: NaverAdDiagnosisFloorWaitRow): string {
+  return r.target_type === "keyword"
+    ? `${r.adgroup_id} / ${r.keyword_id ?? ""}`
+    : `${r.campaign_id} / ${r.adgroup_id}`;
 }
 
 function Board({
@@ -336,6 +344,52 @@ export default function NaverAdDiagnosisBoard() {
                         <td className="px-4 py-2 text-sm border-b border-gray-100 text-right tabular-nums text-gray-500">{roasX(r.prior_roas_corrected)}</td>
                         <td className="px-4 py-2 text-sm border-b border-gray-100 text-right tabular-nums">{r.recent_daily_clk.toFixed(2)}</td>
                         <td className="px-4 py-2 text-sm border-b border-gray-100 text-right tabular-nums text-gray-500">{r.prior_daily_clk.toFixed(2)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Board>
+
+          {/* ⑧ 바닥 대기 (UI3, D-NAO-65 — 관찰 전용) */}
+          <Board
+            title="⏸️ 바닥 대기 (관찰 전용 · 실행 없음)"
+            subtitle="실효입찰이 하한이라 더 못 내리는데 pause 예외(ML·레버끊김·지속밸브)도 아닌 유닛 — 어떤 제안도 생성되지 않고 바닥에서 대기 중. 쇼핑=전환有 바닥손실(레버정상) / 파워링크=무전환 at-floor."
+            count={boards.floor_wait_units?.length ?? 0}
+          >
+            {!boards.floor_wait_units || boards.floor_wait_units.length === 0 ? (
+              <EmptyRow text="바닥 대기 중인 유닛 없음" />
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full">
+                  <thead>
+                    <tr className="bg-gray-50 border-b border-gray-200">
+                      <th className="px-4 py-2 text-xs font-medium text-gray-500 text-left">유형</th>
+                      <th className="px-4 py-2 text-xs font-medium text-gray-500 text-left">캠페인/유닛</th>
+                      <th className="px-4 py-2 text-xs font-medium text-gray-500 text-right">실효입찰</th>
+                      <th className="px-4 py-2 text-xs font-medium text-gray-500 text-right">클릭</th>
+                      <th className="px-4 py-2 text-xs font-medium text-gray-500 text-right">누적비용</th>
+                      <th className="px-4 py-2 text-xs font-medium text-gray-500 text-right">스톱로스임계</th>
+                      <th className="px-4 py-2 text-xs font-medium text-gray-500 text-right">전환</th>
+                      <th className="px-4 py-2 text-xs font-medium text-gray-500 text-left">대기 사유</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {boards.floor_wait_units.map((r, i) => (
+                      <tr key={`${r.campaign_id}/${r.adgroup_id}/${r.keyword_id ?? ""}#${i}`} className="hover:bg-gray-50">
+                        <td className="px-4 py-2 text-sm border-b border-gray-100 text-gray-500">
+                          {r.target_type === "keyword" ? "파워링크" : "쇼핑"}
+                        </td>
+                        <td className="px-4 py-2 text-sm border-b border-gray-100">{floorWaitLabel(r)}</td>
+                        <td className="px-4 py-2 text-sm border-b border-gray-100 text-right tabular-nums">{won(r.effective_bid)}</td>
+                        <td className="px-4 py-2 text-sm border-b border-gray-100 text-right tabular-nums">{num(r.clk)}</td>
+                        <td className="px-4 py-2 text-sm border-b border-gray-100 text-right tabular-nums">{won(r.cost)}</td>
+                        <td className="px-4 py-2 text-sm border-b border-gray-100 text-right tabular-nums text-gray-500">{won(r.stop_loss_amount)}</td>
+                        <td className="px-4 py-2 text-sm border-b border-gray-100 text-right tabular-nums">
+                          {r.has_conv ? won(r.conv_amt) : NO_DATA}
+                        </td>
+                        <td className="px-4 py-2 text-sm border-b border-gray-100 text-gray-600">{r.reason_label}</td>
                       </tr>
                     ))}
                   </tbody>

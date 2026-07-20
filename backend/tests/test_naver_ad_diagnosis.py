@@ -241,6 +241,7 @@ def test_build_diagnosis_assembles_all_boards(db):
         "pause_candidates", "resume_candidates",
         "shopping_pause_candidates", "shopping_resume_candidates",
         "shopping_lever_resume_candidates",  # B4(D-NAO-65)
+        "floor_wait_units",  # UI3(D-NAO-65) 바닥 대기 관찰 보드(관찰 전용)
     }
     assert result["account_bep_roas"] == pytest.approx(3.3333)
 
@@ -1641,3 +1642,158 @@ def test_shopping_pause_floored_loss_ignores_loss_outside_chronic_window(db):
     out = diag.shopping_pause_candidates(db, DL_FROM, DL_TO, bep_roas=Decimal("1.5"),
                                         correction_factor=Decimal("1.0"))
     assert out == []  # 7일 만성 roas=3.0 ≥ BEP 1.5 → floored 아님(전체 창이면 0.27로 오발동)
+
+
+# ── floor_wait_units (UI3, D-NAO-65 — 바닥 대기 관찰 보드, 관찰 전용) ─────────
+# 두 갈래를 잡는다: ①쇼핑 전환有·레버정상·at-floor·보정ROAS≪BEP(shopping_pause_candidates가
+# 후보 미진입으로 떨궈 사라진 클래스) ②파워링크 무전환·at-floor(pause_candidates board엔 뜨나
+# _stop_loss_proposal이 None=무액션). 각 테스트는 floor_wait 산출과 함께 기존 보드 불변(차등)을
+# 같은 데이터로 확인한다(회귀 0 보증).
+
+_FW_BEP = Decimal("3.3333")
+_FW_F1 = Decimal("1")
+
+
+def _bid_change_log(entity_id, campaign_id, *, changed_at, entity_type="keyword"):
+    """성공한 입찰변경 change_log 1건(_last_bid_change_kst_date가 잡는 규약: update_bid·
+    dry_run=False·after_value 존재). 키워드 행동 창을 date_to-1로 좁혀 floor_bleed(≥3일) 회피용."""
+    return NaverChangeLog(
+        entity_type=entity_type, entity_id=entity_id, campaign_id=campaign_id,
+        action="update_bid", dry_run=False, changed_at=changed_at,
+        after_value=json.dumps({"bidAmt": 70}),
+    )
+
+
+def test_floor_wait_shopping_conv_loss_lever_normal_at_floor(db):
+    # 전환有·레버정상(CPC 300 ≤ 5×70=350)·실효입찰 하한(70)·보정ROAS 0.1≪BEP → 바닥 대기.
+    _seed_shopping_active_campaign(db)
+    _shopping_entity(db, "grp-floor", status="on", bid_amt=70)  # 하한 = at-floor
+    _row(db, D_TO, "cmp-shop", "SHOPPING", "grp-floor", "", 500, 10, 3000, direct=300)
+    db.commit()
+
+    # 사라짐 증명(불변): shopping_pause_candidates는 레버끊김만 board 진입 → 이 유닛 안 뜸.
+    assert diag.shopping_pause_candidates(db, D0, D_TO, bep_roas=_FW_BEP, correction_factor=_FW_F1) == []
+    out = diag.floor_wait_units(db, D0, D_TO, bep_roas=_FW_BEP, correction_factor=_FW_F1)
+    assert len(out) == 1
+    r = out[0]
+    assert r["adgroup_id"] == "grp-floor"
+    assert r["target_type"] == "adgroup"
+    assert r["reason"] == "shopping_conv_loss"
+    assert r["has_conv"] is True
+    assert r["effective_bid"] == 70
+    assert r["stop_loss_amount"] == 700
+    assert r["roas_corrected"] == 0.1
+
+
+def test_floor_wait_excludes_lever_broken_shopping(db):
+    # grp-mo: bid 50·clk5·cost3000 → CPC 600 > 5×50=250 = 레버끊김(예외② pause) → floor_wait 제외.
+    _seed_shopping_active_campaign(db)
+    _shopping_entity(db, "grp-mo", status="on", bid_amt=50)
+    _row(db, D_TO, "cmp-shop", "SHOPPING", "grp-mo", "", 500, 5, 3000, direct=300)
+    db.commit()
+
+    pause = diag.shopping_pause_candidates(db, D0, D_TO, bep_roas=_FW_BEP, correction_factor=_FW_F1)
+    assert [p["adgroup_id"] for p in pause] == ["grp-mo"]
+    assert pause[0]["reason"] == "lever_broken"  # 기존 보드 그대로(불변)
+    assert diag.floor_wait_units(db, D0, D_TO, bep_roas=_FW_BEP, correction_factor=_FW_F1) == []
+
+
+def test_floor_wait_excludes_conv_loss_with_bid_headroom(db):
+    # bid 200 → _step_down_bid(200)=170 < 200 = 하향 여지 있음(bid_down/shopping_group_bep 몫) → 제외.
+    _seed_shopping_active_campaign(db)
+    _shopping_entity(db, "grp-hr", status="on", bid_amt=200)
+    _row(db, D_TO, "cmp-shop", "SHOPPING", "grp-hr", "", 500, 10, 3000, direct=300)
+    db.commit()
+    assert diag.floor_wait_units(db, D0, D_TO, bep_roas=_FW_BEP, correction_factor=_FW_F1) == []
+
+
+def test_floor_wait_excludes_shopping_conv_at_or_above_bep(db):
+    # 전환 충분(보정ROAS ≥ BEP)이면 손실 아님 → 바닥 대기 아님.
+    _seed_shopping_active_campaign(db)
+    _shopping_entity(db, "grp-ok", status="on", bid_amt=70)
+    _row(db, D_TO, "cmp-shop", "SHOPPING", "grp-ok", "", 500, 10, 3000, direct=15000)  # roas 5.0 ≥ 3.33
+    db.commit()
+    assert diag.floor_wait_units(db, D0, D_TO, bep_roas=_FW_BEP, correction_factor=_FW_F1) == []
+
+
+def test_floor_wait_shopping_dormant_without_bep(db):
+    # bep/factor 미제공(하위호환) → 쇼핑 경로 휴면(shopping_pause_candidates conv 경로와 동형).
+    _seed_shopping_active_campaign(db)
+    _shopping_entity(db, "grp-floor", status="on", bid_amt=70)
+    _row(db, D_TO, "cmp-shop", "SHOPPING", "grp-floor", "", 500, 10, 3000, direct=300)
+    db.commit()
+    assert diag.floor_wait_units(db, D0, D_TO) == []
+
+
+def test_floor_wait_keyword_zero_conv_at_floor(db):
+    # 파워링크 무전환·at-floor(70)·행동 창 2일(<3, floor_bleed 아님) → pause board엔 뜨나 무액션.
+    _seed_active_parents(db)
+    _entity(db, "keyword", "nkw-floor", status="on", bid_amt=70)
+    db.add(_bid_change_log("nkw-floor", "cmp1",
+                            changed_at=datetime.combine(D_TO - timedelta(days=1), datetime.min.time())))
+    _row(db, D_TO, "cmp1", "WEB_SITE", "grp1", "nkw-floor", 200, 15, 1000, direct=0)
+    db.commit()
+
+    # 기존 보드 불변: pause_candidates에는 여전히 뜬다(floor_bleed=False) — 하지만 무액션.
+    pc = diag.pause_candidates(db, D0, D_TO)
+    assert [p["keyword_id"] for p in pc] == ["nkw-floor"]
+    assert pc[0]["floor_bleed"] is False
+    out = diag.floor_wait_units(db, D0, D_TO)  # bep 없어도 키워드 경로는 동작
+    assert len(out) == 1
+    assert out[0]["keyword_id"] == "nkw-floor"
+    assert out[0]["target_type"] == "keyword"
+    assert out[0]["reason"] == "keyword_zero_conv"
+    assert out[0]["has_conv"] is False
+    assert out[0]["window_days"] == 2
+    assert out[0]["stop_loss_amount"] == 700
+
+
+def test_floor_wait_excludes_keyword_floor_bleed(db):
+    # 변경이력 없음 → 행동 창 3일(폴백) = floor_bleed(예외③, 실제 터미널 pause) → floor_wait 제외.
+    _seed_active_parents(db)
+    _entity(db, "keyword", "nkw-bleed", status="on", bid_amt=70)
+    _row(db, D_TO - timedelta(days=2), "cmp1", "WEB_SITE", "grp1", "nkw-bleed", 100, 5, 400, direct=0)
+    _row(db, D_TO, "cmp1", "WEB_SITE", "grp1", "nkw-bleed", 100, 5, 400, direct=0)
+    db.commit()
+
+    pc = diag.pause_candidates(db, D0, D_TO)  # 기존 보드엔 floor_bleed=True로 뜬다(불변)
+    assert [p["keyword_id"] for p in pc] == ["nkw-bleed"]
+    assert pc[0]["floor_bleed"] is True
+    assert diag.floor_wait_units(db, D0, D_TO) == []
+
+
+def test_floor_wait_excludes_keyword_with_bid_headroom(db):
+    # 키워드 bid 200 → 하향 여지(_step_down_bid 170<200) = 고삐 bid_down 제안됨 → 무액션 아님.
+    _seed_active_parents(db)
+    _entity(db, "keyword", "nkw-hr", status="on", bid_amt=200)
+    db.add(_bid_change_log("nkw-hr", "cmp1",
+                            changed_at=datetime.combine(D_TO - timedelta(days=1), datetime.min.time())))
+    _row(db, D_TO, "cmp1", "WEB_SITE", "grp1", "nkw-hr", 200, 15, 3000, direct=0)  # cost≥2000 스톱로스
+    db.commit()
+    assert diag.floor_wait_units(db, D0, D_TO) == []
+
+
+def test_build_diagnosis_includes_floor_wait_units(db):
+    # 배선(harness): build_diagnosis가 floor_wait_units를 boards에 실어야 한다 + 같은 데이터로
+    # shopping_pause_candidates는 여전히 빈 채(기존 보드 불변, 사라진 클래스). 보정계수 1.0으로
+    # 고정(Order 매출 = naver convAmt = 100)해 roas_corrected 판정을 결정적으로 만든다.
+    db.add(NaverProductBep(
+        channel_id=6, channel_product_id="cp-fw", product_name="테스트상품",
+        selling_price=Decimal("10000"), cost_price=Decimal("5000"),
+        commission_rate=Decimal("0.05"), logistics_cost=Decimal("1000"),
+        contribution_margin=Decimal("3000"), bep_roas=Decimal("3.3333"),
+        aggressiveness="standard", target_roas=Decimal("3.8333"), has_cost=True,
+    ))
+    db.add(Order(channel_id=6, platform_product_id="cp-fw", order_number="ORD-fw",
+                  order_date=D_TO, status="정상", selling_price=Decimal("100")))
+    _seed_shopping_active_campaign(db, campaign_id="cmp-shop")
+    _shopping_entity(db, "grp-floor", status="on", bid_amt=70, campaign_id="cmp-shop")
+    _row(db, D_TO, "cmp-shop", "SHOPPING", "grp-floor", "", 500, 20, 5000, direct=100)  # CPC 250·roas 0.02
+    db.commit()
+
+    result = build_diagnosis(db, D0, D_TO)
+    boards = result["boards"]
+    assert isinstance(boards["floor_wait_units"], list)
+    assert [r["adgroup_id"] for r in boards["floor_wait_units"]] == ["grp-floor"]
+    assert boards["floor_wait_units"][0]["reason"] == "shopping_conv_loss"
+    assert boards["shopping_pause_candidates"] == []  # 기존 보드 불변(차등)

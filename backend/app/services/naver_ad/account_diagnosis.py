@@ -881,6 +881,175 @@ def shopping_pause_candidates(
     return out
 
 
+def floor_wait_units(
+    db: Session, date_from: date, date_to: date,
+    bep_roas: Decimal | None = None, correction_factor: Decimal | None = None,
+) -> list[dict]:
+    """바닥 대기(at-floor 무액션) 관찰 보드 (UI3, D-NAO-65 — DL2 GATE P3① 후속).
+
+    ★관찰 전용(실행 없음): 이 보드는 어떤 제안·쓰기 경로에도 연결되지 않는다(§0 금지선). DL2부터
+    loss 대응이 pause 대신 '바닥 대기'(bid_down 고삐 → 하한 도달 후 무액션)로 바뀌면서, 실효입찰이
+    하한이라 더 못 내리는데 pause 예외(①ML ②레버끊김 ③지속밸브)에도 해당하지 않는 유닛은
+    진단 콘솔 어디서도 "지금 바닥에서 대기 중"임을 볼 수 없다. 그 관찰 공백을 메운다.
+
+    ★기존 보드 불변(회귀 0 최우선): shopping_pause_candidates·pause_candidates를 1바이트도
+    수정하지 않는다. 이 함수는 그 두 보드의 스캔 로직을 **별도 함수로 재계산**하되, 임계·스텝·
+    창 판정은 전부 그쪽과 동일한 단일 진실 소스(LOW_CLICK_THRESHOLD·_step_down_bid·
+    _stop_loss_window_start·_CHRONIC_WINDOW_DAYS·_LEVER_BROKEN_CPC_MULTIPLE·_FLOOR_BLEED_MIN_DAYS·
+    effective_bid SA)를 재사용한다(하드코딩 금지). harness가 shopping_pause_candidates와 **같은
+    date_from/date_to/bep_roas/correction_factor**를 주입하므로 창·임계가 정확히 일치 → 이 보드가
+    잡는 집합은 그 보드가 무액션으로 떨군 집합의 정확한 여집합이 된다.
+
+    잡는 대상(둘 다 at-floor·스톱로스 비용 도달인데 무액션으로 떨어지는 유닛):
+    - **쇼핑 전환有 바닥손실(레버정상 at-floor)**: 전환은 있으나 보정ROAS≪BEP·실효입찰 하한이라
+      bid_down(shopping_group_bep 고삐) 불가·레버정상(not lever_broken)이라 예외② pause도 아님 →
+      shopping_pause_candidates가 후보 미진입으로 떨궈 **완전히 사라진** 클래스(reason 진입
+      조건이 lever_broken이라 정상 레버는 board에 안 들어옴). shopping_group_bep에는 BEP미달로
+      뜨지만 "이미 바닥이라 더 못 내림"이라는 구분 신호가 없다 — 그 구분을 여기서 준다.
+    - **키워드(파워링크) 무전환 at-floor**: pause_candidates board엔 뜨지만 _stop_loss_proposal이
+      at-floor·not floor_bleed면 None(무액션) 반환 → 어떤 제안도 생성 안 됨. 그 무액션 상태를 표시.
+
+    제외(정직 경계):
+    - lever_broken(예외②)·floor_bleed(예외③, 지속 밸브 3일+)는 실제로 터미널 pause되므로 제외.
+    - **쇼핑 무전환 at-floor는 제외**: shopping_pause_candidates board에 reason='zero_conv'로 이미
+      보이고(사라진 게 아님), 그 유닛이 바닥 대기냐 예외① ML pause냐는 manual_bid(라이브 API
+      _adgroup_is_manual_bid) 판정에 달려 있어 읽기전용 DB SA에서 확정 불가 — ML 유닛(실제로는
+      pause)을 '바닥 대기'로 잘못 표시할 위험이 있어 이 보드에는 넣지 않는다(원칙22 정직 표기).
+      키워드는 입찰이 직접 유효(ML 개념 없음)라 이 모호성이 없어 포함한다."""
+    from app.services.naver_ad.proposal_writer import _step_down_bid  # 순환 import 회피(호출 시점 해석)
+
+    out: list[dict] = []
+    on_adgroups = _on_adgroup_ids(db)
+
+    # ── 쇼핑: 전환有·레버정상·at-floor·보정ROAS≪BEP (사라진 클래스) ──
+    # bep/correction 미제공(하위호환 호출)이면 이 경로 휴면 — shopping_pause_candidates의 conv 경로와 동형.
+    if bep_roas is not None and correction_factor is not None:
+        shop_entities = {
+            e.entity_id: e for e in
+            db.query(NaverEntity).filter(
+                NaverEntity.entity_type == "adgroup", NaverEntity.status == "on",
+                NaverEntity.campaign_type == _SHOPPING,
+            ).all()
+        }
+        shop_candidates = {
+            aid for aid, e in shop_entities.items() if e.bid_amt and aid in on_adgroups
+        }
+        if shop_candidates:
+            last_change = _last_bid_change_kst_date(db, shop_candidates)
+            daily = _daily_cost_conv_by_unit(
+                db, NaverAdDaily.adgroup_id, shop_candidates, _SHOPPING, date_from, date_to,
+            )
+            chronic_from = date_to - timedelta(days=_CHRONIC_WINDOW_DAYS - 1)
+            effs = effbid.adgroup_effective_bids(
+                db, {aid: shop_entities[aid].bid_amt for aid in shop_candidates},
+            )
+            ad_change = _last_ad_bid_change_by_group(db, shop_candidates)
+            for adgroup_id in shop_candidates:
+                rows = daily.get(adgroup_id)
+                if not rows:
+                    continue
+                entity = shop_entities[adgroup_id]
+                eff = effs[adgroup_id]
+                eff_bid = eff["effective_bid"]
+                last_change_date = last_change.get(adgroup_id)
+                # 창 분기 — shopping_pause_candidates와 동일(source='ad'는 만성7일∩소재변경, else 행동창).
+                if eff["source"] == "ad":
+                    ad_change_date = ad_change.get(adgroup_id)
+                    base_start = max(date_from, chronic_from)
+                    window_start = max(base_start, ad_change_date) if ad_change_date is not None else base_start
+                    cpc_change = ad_change_date
+                else:
+                    window_start = _stop_loss_window_start(date_from, date_to, last_change_date)
+                    cpc_change = last_change_date
+                _, clk, cost, conv_amt = _sum_cost_conv_since(rows, window_start)
+                if cost <= 0:
+                    continue
+                stop_loss_amount = eff_bid * LOW_CLICK_THRESHOLD  # 실효입찰×10(그룹입찰 아님)
+                if cost < stop_loss_amount:
+                    continue
+                # at-floor(더 못 내림) — 단일 진실 소스 _step_down_bid 재사용(하드코딩 70 금지).
+                if _step_down_bid(eff_bid) < eff_bid:
+                    continue  # 하향 여지 있음 = 바닥 아님(bid_down/shopping_group_bep 몫)
+                # 이 보드는 전환有(무전환은 위 docstring대로 제외) 클래스만.
+                if conv_amt == 0:
+                    continue
+                # 만성 7일 창 보정ROAS(단발 나쁜 날 방지) — shopping_pause_candidates 라인 857과 동일.
+                _, _, c_cost, c_conv = _sum_cost_conv_since(rows, chronic_from)
+                roas_naver = float((Decimal(c_conv) / Decimal(c_cost)).quantize(_Q4)) if c_cost else None
+                roas_c = _corrected_roas(roas_naver, correction_factor)
+                if roas_c is None or roas_c >= float(bep_roas):
+                    continue  # 손실 아님 → 바닥 대기 아님
+                # 레버끊김(예외② pause) 판정 — 제외용. CPC 창은 shopping_pause_candidates와 동일.
+                cpc_from = chronic_from if cpc_change is None else max(chronic_from, cpc_change)
+                _, cpc_clk, cpc_cost, _ = _sum_cost_conv_since(rows, cpc_from)
+                chronic_cpc = int(cpc_cost // cpc_clk) if cpc_clk > 0 else None
+                lever_broken = (
+                    chronic_cpc is not None and chronic_cpc > _LEVER_BROKEN_CPC_MULTIPLE * eff_bid
+                )
+                if lever_broken:
+                    continue  # 예외② — 실제로 터미널 pause되므로 바닥 대기 아님
+                window_days = (date_to - window_start).days + 1
+                out.append({
+                    "campaign_id": entity.campaign_id, "adgroup_id": adgroup_id, "keyword_id": None,
+                    "target_type": "adgroup", "current_bid": entity.bid_amt,
+                    "effective_bid": eff_bid, "effective_source": eff["source"],
+                    "cost": cost, "clk": clk, "conv_amt": conv_amt, "has_conv": True,
+                    "roas_corrected": roas_c, "chronic_cpc": chronic_cpc,
+                    "stop_loss_amount": stop_loss_amount, "window_days": window_days,
+                    "reason": "shopping_conv_loss",
+                    "reason_label": "전환有 바닥손실(레버정상·실효입찰 하한이라 하향 불가)",
+                })
+
+    # ── 키워드(파워링크): 무전환·at-floor·not floor_bleed (pause_candidates board엔 뜨나 무액션) ──
+    kw_entities = {
+        e.entity_id: e for e in
+        db.query(NaverEntity).filter(
+            NaverEntity.entity_type == "keyword", NaverEntity.status == "on",
+        ).all()
+    }
+    kw_candidates = {
+        kid for kid, e in kw_entities.items() if e.bid_amt and e.parent_id in on_adgroups
+    }
+    if kw_candidates:
+        kw_last_change = _last_bid_change_kst_date(db, kw_candidates)
+        kw_daily = _daily_cost_conv_by_unit(
+            db, NaverAdDaily.keyword_id, kw_candidates, _WEB_SITE, date_from, date_to,
+        )
+        for keyword_id in kw_candidates:
+            rows = kw_daily.get(keyword_id)
+            if not rows:
+                continue
+            entity = kw_entities[keyword_id]
+            last_change_date = kw_last_change.get(keyword_id)
+            window_start = _stop_loss_window_start(date_from, date_to, last_change_date)
+            if last_change_date is not None and last_change_date >= date_to:
+                continue  # 변경 당일 하루 창 — pause_candidates와 동일 보류(판정 미확정)
+            _, clk, cost, conv_amt = _sum_cost_conv_since(rows, window_start)
+            if cost <= 0:
+                continue
+            stop_loss_amount = entity.bid_amt * LOW_CLICK_THRESHOLD
+            if not (conv_amt == 0 and cost >= stop_loss_amount):
+                continue  # pause_candidates board 진입 조건(무전환·스톱로스 도달)과 동일
+            if _step_down_bid(entity.bid_amt) < entity.bid_amt:
+                continue  # 하향 여지 있음 = 고삐 bid_down 제안됨(무액션 아님)
+            window_days = (date_to - window_start).days + 1
+            if window_days >= _FLOOR_BLEED_MIN_DAYS:
+                continue  # 예외③ 지속 밸브 — 실제로 터미널 pause되므로 바닥 대기 아님
+            out.append({
+                "campaign_id": entity.campaign_id, "adgroup_id": entity.parent_id,
+                "keyword_id": keyword_id, "target_type": "keyword",
+                "current_bid": entity.bid_amt, "effective_bid": entity.bid_amt,
+                "effective_source": "group", "cost": cost, "clk": clk,
+                "conv_amt": conv_amt, "has_conv": False, "roas_corrected": None,
+                "chronic_cpc": None, "stop_loss_amount": stop_loss_amount,
+                "window_days": window_days, "reason": "keyword_zero_conv",
+                "reason_label": "파워링크 무전환 at-floor 대기(≤3일 실증 창, 익일 밴드 재시작)",
+            })
+
+    out.sort(key=lambda x: x["cost"], reverse=True)
+    return out
+
+
 def shopping_group_growth(
     db: Session, date_from: date, date_to: date, target_roas_resolver, correction_factor: Decimal,
 ) -> list[dict]:

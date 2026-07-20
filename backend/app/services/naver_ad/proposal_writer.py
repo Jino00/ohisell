@@ -99,6 +99,19 @@ def _ours_campaign_ids(db: Session) -> set[str]:
     return {r[0] for r in rows}
 
 
+def _loss_policy_map(db: Session) -> dict[str, str]:
+    """캠페인별 loss 대응 정책(D-NAO-65 UI1) — {campaign_id: 'stoploss_pause', ...} 매핑.
+
+    NULL/'leash'는 기본값(고삐-일일리셋)이라 매핑에서 제외한다 — 소비부는 dict.get(cid)가
+    None이면 leash로 해석하므로 stoploss_pause만 실을 필요가 있다(회귀 0: 기존 캠페인은
+    전부 미등록 → None → 고삐 경로 불변). build()가 한 번에 로드해 `_stop_loss_proposal`에
+    주입한다 — SA(순수 함수)는 DB를 직접 읽지 않는다(_ours_campaign_ids와 동일 관례)."""
+    rows = db.query(
+        NaverCampaignSettings.campaign_id, NaverCampaignSettings.loss_policy
+    ).filter(NaverCampaignSettings.loss_policy == "stoploss_pause").all()
+    return {cid: lp for cid, lp in rows}
+
+
 class _TargetLabelCache:
     """캠페인당 target_roas 근거(override/account_default)를 회차 내 1회만 조회(N+1 방지)."""
 
@@ -367,6 +380,7 @@ def _negative_keyword_from_exclusion(row: dict, campaign_id: str) -> dict:
 
 def _terminal_pause(
     row: dict, *, target_type: str, lever_broken: bool = False, floor_bleed: bool = False,
+    policy_pause: bool = False,
 ) -> dict:
     """스톱로스 대응의 최종 단계(터미널) — pause 제안 1건. DL2(D-NAO-65)로 pause는 "정책"이
     아니라 "레버 불능 예외"로 격하됐다 — 이 함수는 (a) 예외① ML 자동입찰(입찰 API가 거부)·
@@ -394,7 +408,18 @@ def _terminal_pause(
     # D-NAO-64(A): 바닥그룹 저ROAS 정지는 전환이 "있는데도" 실질ROAS≪BEP·입찰 하한이라
     # 정지하는 경우(맥세이프_MO) — 사유문에 '무전환'이라 쓰면 거짓(정직 경계). 전환 유무로 분기.
     conv_amt = int(row.get("conv_amt") or 0)
-    if lever_broken:
+    if policy_pause:
+        # UI1(D-NAO-65): 이 캠페인은 loss_policy='stoploss_pause' — Jino 콘솔이 이 캠페인만
+        # 종전 하드 정지로 회귀시키기로 선언한 예외다(전역 기본값은 여전히 고삐-일일리셋, §0).
+        # 고삐로 내릴 여지가 있어도 정책상 정지이므로, "레버 불능 예외"(①ML ②레버끊김 ③밸브)와
+        # 구분되도록 사유문을 '캠페인 정책'으로 정직 표기한다(전환 유무는 부기로만).
+        rationale = (
+            f"[스톱로스정지 — 캠페인 정책] 스톱로스 발동(누적비용 {row['cost']}원 ≥ 스톱로스 "
+            f"{row['stop_loss_amount']}원, 현재입찰 {row['current_bid']}원) → 고삐 대신 정지"
+            f"(loss_policy=stoploss_pause, D-NAO-65 UI1) clk={row.get('clk')}."
+            + (f" 전환 {conv_amt}원." if conv_amt > 0 else "")
+        )
+    elif lever_broken:
         # DL2 예외②: 그룹입찰 하향으로 지출이 안 줄어드는 레버끊김(실측 CPC≫그룹입찰) — pause만
         # 유일 실효 레버. 전환 유무와 무관하게 '무전환'이라 쓰지 않는다(정직 경계, 전환이 있을
         # 수 있음). GATE P3-5: CPC(만성 7일∩변경 후 교집합)와 누적비용(변경 후 행동 창)은 서로
@@ -483,7 +508,7 @@ def _adgroup_is_manual_bid(adgroup_id: str) -> bool | None:
 
 def _stop_loss_proposal(
     row: dict, *, target_type: str = "keyword", manual_bid: bool | None = None,
-    ad_bid_canary: bool = False,
+    ad_bid_canary: bool = False, loss_policy: str | None = None,
 ) -> dict | None:
     """pause_candidates/shopping_pause_candidates 보드 1행(account_diagnosis) → 스톱로스 대응
     제안(X1b T3 D-NAO-38 → RL4 D-NAO-60 고삐화 → DL2 D-NAO-65 pause 예외화·바닥 대기).
@@ -508,7 +533,15 @@ def _stop_loss_proposal(
     at-floor에서 행동 창 ≥3일 무전환 출혈이 지속되면(진단이 row['floor_bleed'] 태깅) "레버로
     할 수 있는 걸 다 했는데도 출혈" = 레버 불능 예외의 실증으로 터미널 pause 격상.
     row['lever_broken']/['chronic_cpc']/['floor_bleed']/['window_days']는 account_diagnosis가
-    태깅한 값(단일 진실 소스 — k 임계·최소 실증 기간 상수는 그쪽에 canonical)."""
+    태깅한 값(단일 진실 소스 — k 임계·최소 실증 기간 상수는 그쪽에 canonical).
+
+    ★UI1(D-NAO-65) loss_policy: 캠페인별 예외 스위치. build()가 _loss_policy_map으로 미리
+    로드해 주입한다(순수 함수 유지 — DB 직접 조회 안 함). None/'leash'(기본)=위 DL/B 동작
+    그대로(회귀 0). 'stoploss_pause'=스톱로스 발동 즉시 고삐(bid_down)·바닥 대기·B3 소재
+    라우팅을 전부 스킵하고 종전 하드 pause로 회귀(키워드·쇼핑 수동입찰 공통). 단 쇼핑 ML
+    (manual_bid가 True 아님)은 정책과 무관하게 기존 예외① pause 그대로 — 정책 pause가 아니라
+    레버 불능 pause라 사유문을 relabel하지 않는다(정직 경계, §0 pause 예외 불변)."""
+    policy_pause = loss_policy == "stoploss_pause"
     if target_type == "adgroup":
         current_bid = row["current_bid"]  # 그룹입찰(target_bid 스텝 기준 — B2는 소재입찰 안 씀)
         # B2(D-NAO-65): at-floor·레버연결 판정은 실효입찰(effective_bid) 기준(진단과 정합).
@@ -524,6 +557,11 @@ def _stop_loss_proposal(
         else:
             lever_connected = effective_bid_val == current_bid
         if manual_bid is True:
+            if policy_pause:
+                # UI1(D-NAO-65): loss_policy='stoploss_pause' — 고삐·바닥 대기·B3 소재 라우팅·
+                # 레버/밸브 판정을 전부 스킵하고 종전 하드 정지로 회귀(§0 캠페인 예외 스위치).
+                # leash/NULL이면 policy_pause=False라 아래 기존 고삐 경로가 바이트 단위로 불변.
+                return _terminal_pause(row, target_type=target_type, policy_pause=True)
             if step_floor < current_bid and lever_connected:
                 # 그룹입찰이 실효 레버이고 하향 여지 있음 → 기존 bid_down 고삐(RL4b 불변).
                 rationale = (
@@ -593,6 +631,10 @@ def _stop_loss_proposal(
 
     current_bid = row["current_bid"]
     step_floor = _step_down_bid(current_bid)
+    if policy_pause:
+        # UI1(D-NAO-65): 키워드(파워링크)도 loss_policy='stoploss_pause'면 고삐·바닥 대기 스킵,
+        # 즉시 종전 하드 정지(§0 캠페인 예외 스위치). leash/NULL이면 아래 기존 경로 불변(회귀 0).
+        return _terminal_pause(row, target_type=target_type, policy_pause=True)
     if step_floor >= current_bid:
         # DL2: 이미 입찰 하한(70원) — 정지가 아니라 바닥 대기(무액션). 키워드는 레버끊김 개념
         # 없음(직접 입찰 유효). 익일 밴드 재시작(DL4)이 기회를 준다.
@@ -890,6 +932,9 @@ def build(
     anomalies = anomalies or {}
     boards = diagnosis.get("boards") or {}
     ours = _ours_campaign_ids(db)
+    # UI1(D-NAO-65): 캠페인별 loss 정책을 회차당 1쿼리로 로드해 스톱로스 SA에 주입한다(허브
+    # 역할 — SA는 DB를 직접 읽지 않는다). stoploss_pause만 실림(NULL/leash=기본, .get→None).
+    loss_policies = _loss_policy_map(db)
     labels = _TargetLabelCache(db)
     # B3(D-NAO-65) 카나리 게이트 — 함수 레벨 import(auto_operator ↔ proposal_writer 순환 회피,
     # account_diagnosis._step_down_bid 함수 레벨 import와 동일 관례). 기본 빈 집합=전면 미개방.
@@ -997,7 +1042,8 @@ def build(
         if cid not in ours:
             continue
         # DL2(D-NAO-65): at-floor는 바닥 대기(None) — 안전 필터링(제안 생성 안 함).
-        p = _stop_loss_proposal(row)
+        # UI1: 캠페인 정책 주입(stoploss_pause면 고삐 대신 즉시 하드 정지).
+        p = _stop_loss_proposal(row, loss_policy=loss_policies.get(cid))
         if p is not None:
             proposals.append(p)
 
@@ -1020,8 +1066,11 @@ def build(
         manual_bid = _adgroup_is_manual_bid(row["adgroup_id"])
         # DL2(D-NAO-65): at-floor·레버 정상은 바닥 대기(None) — 안전 필터링.
         # B3 카나리: 레버 미연결 유닛은 소재-레벨 bid_down 고삐로 라우팅(예외② leash화).
+        # UI1(D-NAO-65): 캠페인 정책 주입 — stoploss_pause면 수동입찰이어도 고삐 대신 즉시
+        # 하드 정지(ML은 정책 무관 기존 예외① pause 그대로, _stop_loss_proposal 내부 분기).
         p = _stop_loss_proposal(row, target_type="adgroup", manual_bid=manual_bid,
-                                ad_bid_canary=_ad_bid_canary(cid))
+                                ad_bid_canary=_ad_bid_canary(cid),
+                                loss_policy=loss_policies.get(cid))
         if p is not None:
             proposals.append(p)
 
@@ -1047,6 +1096,10 @@ def build(
     for row in boards.get("shopping_lever_resume_candidates", []) or []:
         cid = row["campaign_id"]
         if cid not in ours:
+            continue
+        if loss_policies.get(cid) == "stoploss_pause":
+            # UI1(D-NAO-65): 이 캠페인의 정책이 pause인데 재개(resume·bid_down_first) 제안은
+            # 자기모순 — 정책이 유지하려는 정지를 스스로 되돌리게 된다. 제외(재개 미생성).
             continue
         if not _ad_bid_canary(cid):
             continue  # B4 = 카나리 한정(B3 스코프 계승)

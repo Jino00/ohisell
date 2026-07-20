@@ -1671,6 +1671,27 @@ export interface NaverAdDiagnosisViciousCycleRow {
   prior_daily_clk: number;
 }
 
+// UI3(D-NAO-65, DL2 GATE P3① 후속): 바닥 대기(at-floor 무액션) 관찰 행 — 관찰 전용(실행 없음).
+export interface NaverAdDiagnosisFloorWaitRow {
+  campaign_id: string;
+  adgroup_id: string;
+  keyword_id: string | null;
+  target_type: "adgroup" | "keyword";
+  current_bid: number;
+  effective_bid: number;
+  effective_source: string;
+  cost: number;
+  clk: number;
+  conv_amt: number;
+  has_conv: boolean;
+  roas_corrected: number | null;
+  chronic_cpc: number | null;
+  stop_loss_amount: number;
+  window_days: number;
+  reason: string;
+  reason_label: string;
+}
+
 export interface NaverAdDiagnosisBoards {
   bleeding_keywords: NaverAdDiagnosisKeywordRow[];
   starving_winners: NaverAdDiagnosisKeywordRow[];
@@ -1679,6 +1700,8 @@ export interface NaverAdDiagnosisBoards {
   exclusion_candidates: NaverAdDiagnosisExclusionCandidateRow[];
   keyword_triage: NaverAdDiagnosisKeywordTriage;
   vicious_cycle: NaverAdDiagnosisViciousCycleRow[];
+  // UI3(D-NAO-65): 바닥 대기 관찰 보드(관찰 전용) — 백엔드 boards의 additive 필드.
+  floor_wait_units?: NaverAdDiagnosisFloorWaitRow[];
 }
 
 export interface NaverAdDiagnosis {
@@ -1871,6 +1894,9 @@ export function fetchNaverExpertScorecard(): Promise<NaverExpertScorecard> {
 
 export type NaverAdOptimizer = "none" | "ours" | "mop";
 export type NaverAdCampaignMode = "growth" | "recovery" | "launch" | "defense";
+// D-NAO-65 UI2 — 캠페인별 loss 대응 정책. leash=고삐(전역 기본값) / stoploss_pause=하드 정지 회귀.
+// 백엔드는 NULL도 반환한다(미설정) → 프론트가 '기본(고삐)'로 해석(effectiveLossPolicy).
+export type NaverLossPolicy = "leash" | "stoploss_pause";
 
 export interface NaverAdCampaignSettings {
   campaign_id: string;
@@ -1878,6 +1904,8 @@ export interface NaverAdCampaignSettings {
   mode: NaverAdCampaignMode | null;
   target_roas_override: number | null;
   memo: string | null;
+  /** D-NAO-65 UI2 — loss 대응 정책. null=미설정(기본 고삐). _serialize_settings가 실어줌. */
+  loss_policy: NaverLossPolicy | null;
   updated_at: string | null;
 }
 
@@ -2125,6 +2153,8 @@ export interface NaverCampaignRosterRow {
   /** 광고비 0이면 null — 'ROAS 0배'가 아니라 '알 수 없음'. */
   roas_naver: number | null;
   optimizer: NaverAdOptimizer;
+  /** D-NAO-65 UI2 — loss 대응 정책. null=미설정 → 콘솔이 '기본(고삐)'로 해석. */
+  loss_policy: NaverLossPolicy | null;
   window_days: number;
 }
 
@@ -2147,5 +2177,19 @@ export function putNaverCampaignOptimizer(body: {
   return fetchApi<NaverAdCampaignSettings>("/api/naver/ad/campaign-settings/optimizer", {
     method: "PUT",
     body: JSON.stringify({ campaign_id: body.campaignId, optimizer: body.optimizer }),
+  });
+}
+
+/** loss 대응 정책만 바꾼다(D-NAO-65 UI2). optimizer 스위치와 동형의 전용 엔드포인트 —
+ *  전체 치환 PUT을 쓰면 mode·override·gamma가 null로 날아간다(D-NAO-53 교훈). 이 엔드포인트는
+ *  loss_policy 외 필드를 건드리지 않는다. 백엔드는 loss_policy를 leash|stoploss_pause만 받는다
+ *  (naver_ad.py _VALID_LOSS_POLICIES). NULL→leash 정규화·change_log 기록은 백엔드 책임. */
+export function putNaverCampaignLossPolicy(
+  campaignId: string,
+  lossPolicy: NaverLossPolicy,
+): Promise<NaverAdCampaignSettings> {
+  return fetchApi<NaverAdCampaignSettings>("/api/naver/ad/campaign-settings/loss-policy", {
+    method: "PUT",
+    body: JSON.stringify({ campaign_id: campaignId, loss_policy: lossPolicy }),
   });
 }

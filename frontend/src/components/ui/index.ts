@@ -9,3 +9,4 @@ export { CoverageBar } from "./CoverageBar";
 export { Table, Th, Td, Pager } from "./Table";
 export { LayerNav } from "./LayerNav";
 export { OptimizerSwitch } from "./OptimizerSwitch";
+export { LossPolicySwitch } from "./LossPolicySwitch";
