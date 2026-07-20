@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy import func as sqlfunc
@@ -45,6 +45,10 @@ _LEVER_BROKEN_CPC_MULTIPLE = 5
 # 터미널 pause 격상(무한 대기 방치 차단). 3일 = _STOP_LOSS_FALLBACK_DAYS와 동일 보수값
 # (전환 귀속 ~1일 정착 완충 포함 — 방금 바닥 도달한 유닛은 창<3일이라 대기 유지).
 _FLOOR_BLEED_MIN_DAYS = 3
+# B4 GATE P2-3①(D-NAO-65): 레버끊김 재개 flip-flop 쿨다운 — pause→resume→재pause 이력 그룹은
+# 재pause 후 이 일수 동안 재개 후보 제외(D-NAO-19 flip-flop 방지 계승, 3일 = 위 밸브들과 동일
+# 보수값 — 재pause가 곧 "재개 실패 증거"이므로 그 증거의 정착 기간).
+_LEVER_RESUME_COOLDOWN_DAYS = 3
 
 _Q4 = Decimal("0.0001")
 
@@ -1062,4 +1066,132 @@ def shopping_resume_candidates(
                 "roas_at_pause": roas_c, "paused_at": paused_at.isoformat(),
             })
     out.sort(key=lambda x: x["roas_at_pause"], reverse=True)
+    return out
+
+
+def _our_paused_shopping_groups(db: Session) -> dict[str, tuple[str, datetime, bool]]:
+    """우리가 정지시킨 SHOPPING 광고그룹(off) → {adgroup_id: (campaign_id, paused_at,
+    had_prior_resume)}.
+
+    shopping_resume_candidates와 동일한 D-NAO-40 안전판별을 계승한다 — 최신 잠금변경
+    (set_user_lock/external_status_change 중 changed_at 최신)이 우리 실행(proposal_id 존재)
+    이고 after_value.userLock=True(정지)일 때만 포함. 수동/외부 재정지가 최신이거나 방향
+    판별 불가(비-dict/파싱 실패)면 제외(fail-closed). had_prior_resume = 최신 pause 이전에
+    재개(userLock=False) 이력이 있었는지(B4 GATE P2-3① flip-flop 쿨다운의 원료 — "재pause"
+    판별). shopping_resume_candidates와 이 헬퍼를 공유하지 않는 이유: 그 함수는 정지 직전
+    ROAS 회복 게이트가 목적이라 창 조회까지 하나로 묶여 있고, B4 레버끊김 재개는 게이트
+    (바닥 재개)가 근본적으로 다르다(그 함수를 확장하면 두 목적이 한 루프에 얽혀 회귀 위험)."""
+    off_ids = {
+        e.entity_id for e in
+        db.query(NaverEntity.entity_id).filter(
+            NaverEntity.entity_type == "adgroup", NaverEntity.status == "off",
+            NaverEntity.campaign_type == _SHOPPING,
+        ).all()
+    }
+    if not off_ids:
+        return {}
+    lock_rows = (
+        db.query(
+            NaverChangeLog.entity_id, NaverChangeLog.campaign_id, NaverChangeLog.after_value,
+            NaverChangeLog.proposal_id, NaverChangeLog.changed_at,
+        )
+        .filter(
+            NaverChangeLog.entity_type == "adgroup",
+            NaverChangeLog.action.in_(["set_user_lock", "external_status_change"]),
+            NaverChangeLog.entity_id.in_(off_ids),
+            NaverChangeLog.dry_run.is_(False), NaverChangeLog.after_value.isnot(None),
+            NaverChangeLog.changed_at.isnot(None),  # paused_at.isoformat() 크래시 방지(정렬 안정)
+        )
+        .order_by(NaverChangeLog.changed_at.asc())
+        .all()
+    )
+    def _locked_of(after_value) -> bool | None:
+        try:
+            after = json.loads(after_value) if after_value else None
+        except (ValueError, TypeError):
+            return None
+        if not isinstance(after, dict):
+            return None
+        lock = after.get("userLock")
+        return lock if isinstance(lock, bool) else None
+
+    latest: dict[str, tuple] = {}
+    resume_seen: dict[str, bool] = {}  # 재개(userLock=False) 이력 존재 여부 — 최종 행이
+    # 정지(True)일 때만 소비되므로(아래 게이트) 재개 행은 항상 그 최종 정지보다 앞선다
+    # (asc 순회) = "선행 재개" 판별로 충분.
+    for entity_id, campaign_id, after_value, proposal_id, changed_at in lock_rows:
+        if _locked_of(after_value) is False:
+            resume_seen[entity_id] = True
+        latest[entity_id] = (campaign_id, after_value, proposal_id, changed_at)  # asc — 뒤=최신
+    out: dict[str, tuple[str, datetime, bool]] = {}
+    for adgroup_id, (campaign_id, after_value, proposal_id, changed_at) in latest.items():
+        if proposal_id is None:
+            continue  # 최신 잠금변경이 우리 실행 아님(수동 정지)
+        if _locked_of(after_value) is not True:
+            continue  # 방향 판별 불가 또는 최신이 재개(정지 아님)
+        out[adgroup_id] = (campaign_id, changed_at, resume_seen.get(adgroup_id, False))
+    return out
+
+
+def shopping_lever_resume_candidates(db: Session, *, date_to: date) -> list[dict]:
+    """레버끊김 재개 후보 (B4, D-NAO-65 설계질문 5 — GATE P2-1 "바닥에서 재개") — 우리가
+    정지시킨 쇼핑 그룹(off) 중 소재-레벨 실효 레버가 확보된(effective_source='ad') 그룹을
+    소재 실효입찰과 **입찰 바닥(_MIN_BID 70, guardrail 규약 재사용)**의 비교로 분기한다.
+    DL2 예외②를 pause에서 leash로 되돌리는 재개 배선.
+
+    분기(action):
+    - 'bid_down_first': 소재 실효입찰 > 바닥 → 재개 전 소재입찰을 바닥까지 단계 하향
+      (800원 그대로 재개하면 재출혈 — item 4·5). effective_ad_id로 소재-레벨 bid_down.
+    - 'resume': 소재 실효입찰 ≤ 바닥 → 재개 준비 완료.
+
+    ★재개 = 최소 노출로 증거 축적 재개일 뿐이다(GATE P2-1 원리): 바닥(70원)에선 노출~0이라
+    재출혈 상한 ≈ 바닥 노출 수준. 올리는 건 이 보드가 아니라 DL4 밴드 재시작의 BEP 게이트가
+    **정착창 ROAS 실증과 함께** 수행한다(D-NAO-59 정합 — 증거 없이 올리지 않는다). 이전
+    설계의 "안전 CPC = 판매가/target_roas"는 CVR=1 상한이라 실질 무필터였고(MO 실사례: 소재
+    800 ≤ 8,711 즉시 통과 — 실측 CVR 0.9% 기준 현실 BEP CPC ~78원의 10배) 무필터를 필터인
+    척 두지 않기 위해 제거했다(정직 경계).
+
+    ★GATE P2-3① flip-flop 쿨다운: pause→resume→재pause 이력(had_prior_resume)이 있고 그
+    재pause가 최근 _LEVER_RESUME_COOLDOWN_DAYS(3일, D-NAO-19 계승) 내면 제외 — 재개하자마자
+    다시 pause된 그룹을 즉시 또 재개 제안하는 진동 차단. 최초 pause(선행 재개 없음)는
+    쿨다운 미적용(첫 재개 기회를 늦출 이유 없음).
+
+    '레버끊김'의 조작적 정의 = effective_source='ad'(소재 bidAmt가 그룹입찰을 우회 = DL2가
+    lever_broken으로 pause하던 바로 그 부류의 실효레버 확보 상태) — 전역 규칙이라 per-campaign
+    하드코딩 없음(§0). 카나리 스코프·순서강제(같은 그룹에 ad bid_down pending 공존 시 resume
+    금지)·ML 사전 제외·ours 필터는 proposal_writer.build()가 적용한다 — 이 SA는 canary/
+    pending/optimizer/API를 모른다(단일책임, 원칙18)."""
+    # 함수 레벨 import — guardrail_gate와의 모듈 결합 최소화(proposal_writer._step_down_bid
+    # 함수 레벨 import와 동일 관례). _MIN_BID=70(절대 하한)의 단일 진실 소스 재사용.
+    from app.services.naver_ad.guardrail_gate import _MIN_BID
+
+    paused = _our_paused_shopping_groups(db)
+    if not paused:
+        return []
+    entity_bids = dict(
+        db.query(NaverEntity.entity_id, NaverEntity.bid_amt).filter(
+            NaverEntity.entity_type == "adgroup",
+            NaverEntity.entity_id.in_(set(paused)),
+        ).all()
+    )
+    group_bids = {aid: bid for aid, bid in entity_bids.items() if bid}
+    effs = effbid.adgroup_effective_bids(db, group_bids)
+
+    out = []
+    for adgroup_id, (campaign_id, paused_at, had_prior_resume) in paused.items():
+        eff = effs.get(adgroup_id)
+        # 레버 미확보(그룹입찰 폴백·소재 데이터 없음)면 소재-레벨 재개 대상 아님(B4 스코프 밖).
+        if eff is None or eff["source"] != "ad" or not eff.get("max_ad_id"):
+            continue
+        # GATE P2-3① flip-flop 쿨다운: 재pause(선행 재개 이력 존재) 후 3일 내면 제외.
+        if had_prior_resume and (date_to - paused_at.date()).days < _LEVER_RESUME_COOLDOWN_DAYS:
+            continue
+        eff_bid = eff["effective_bid"]
+        action = "resume" if eff_bid <= _MIN_BID else "bid_down_first"
+        out.append({
+            "campaign_id": campaign_id, "adgroup_id": adgroup_id,
+            "effective_bid": eff_bid, "effective_ad_id": eff["max_ad_id"],
+            "action": action, "paused_at": paused_at.isoformat(),
+        })
+    out.sort(key=lambda x: x["effective_bid"], reverse=True)
     return out

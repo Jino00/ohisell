@@ -75,6 +75,11 @@ def _build_pending_proposals(db: Session) -> tuple[list[dict], list[int]]:
     # P4 리뷰 P3-1: 결정 전용 param_change도 제외 — 지혜는 이미 active_wisdom prefix로
     # Ava에게 전달되므로 이중 검토이며, LLM 산출 rationale이 프롬프트에 재삽입되는
     # 주입면·비용만 늘린다(실행 결과도 없어 검토 실익 없음).
+    # B4 GATE P2-2(D-NAO-65): 카나리 캠페인 전면 제외(아래 filter) — delegation_gate의
+    # canary_confirm_only 게이트와 대칭. 함수 레벨 import(순환 리스크 회피, delegation_gate와
+    # 동일 관례).
+    from app.services.naver_ad.auto_operator import AD_BID_CANARY_CAMPAIGNS
+
     rows = db.query(NaverProposal).filter(
         NaverProposal.status == "pending",
         NaverProposal.proposal_type.notin_(
@@ -85,6 +90,9 @@ def _build_pending_proposals(db: Session) -> tuple[list[dict], list[int]]:
         # (expected_ids)에 실리면 혼란만 준다. 카나리 2단계 개방 시 delegation_gate의
         # ad 제외와 함께 해제.
         NaverProposal.target_type != "ad",
+        # B4 GATE P2-2: 카나리 캠페인의 비-ad 제안(lever-resume의 resume 등)도 전부 제외 —
+        # 카나리 기간 = 캠페인 전체 Confirm-only. 카나리 졸업(상수 제거) 시 자동 해제.
+        NaverProposal.campaign_id.notin_(AD_BID_CANARY_CAMPAIGNS),
     ).order_by(NaverProposal.id.asc()).all()
 
     pairs = {(r.target_type, r.target_id) for r in rows if r.target_id}

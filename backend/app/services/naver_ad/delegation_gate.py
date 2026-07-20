@@ -88,6 +88,17 @@ def _eligible(db: Session, proposal: NaverProposal, delegated: set[str], skipped
     if proposal.target_type == "ad":
         skipped["ad_confirm_only"] += 1
         return False
+    # B4 GATE P2-2(D-NAO-65): **카나리 캠페인 전면 위임 제외** — 카나리 기간 = 그 캠페인
+    # 전체가 사람 감독(Confirm-only) 기간이라는 정책 그대로. target_type 마커(위 'ad' 검사)만
+    # 으로는 B4 lever-resume의 resume(target_type='adgroup')처럼 카나리 흐름이 만드는 비-ad
+    # 제안이 위임으로 자동발사될 수 있어(취약한 마커 의존) 원리적 게이트로 막는다. 카나리
+    # 졸업 = AD_BID_CANARY_CAMPAIGNS에서 상수 제거 시 자동 해제. 함수 레벨 import —
+    # auto_operator ↔ (harness·diagnosis) 모듈 로드 체인과의 순환 리스크 회피
+    # (proposal_writer의 동일 상수 함수 레벨 import 관례).
+    from app.services.naver_ad.auto_operator import AD_BID_CANARY_CAMPAIGNS
+    if proposal.campaign_id in AD_BID_CANARY_CAMPAIGNS:
+        skipped["canary_confirm_only"] += 1
+        return False
     if proposal.status != "pending":
         # ★failed→approved 재승인은 영구 사람 전용 — 자동 재시도 금지 불변(D-NAO-5와 일관).
         skipped["not_pending"] += 1
@@ -118,14 +129,14 @@ def run_gate(db: Session, run_id: int, *, now=None) -> dict:
             "status": "skipped",
             "reason": f"run_id={run_id} 없음 또는 status!='ok' — degraded/부재 run 자동실행 금지(fail-closed)",
             "delegated_types": [], "agree_count": 0, "auto_approved": 0, "executed": 0, "failed": 0,
-            "skipped": {"not_delegated": 0, "not_pending": 0, "blocked": 0, "optimizer": 0, "budget_envelope": 0, "ad_confirm_only": 0},
+            "skipped": {"not_delegated": 0, "not_pending": 0, "blocked": 0, "optimizer": 0, "budget_envelope": 0, "ad_confirm_only": 0, "canary_confirm_only": 0},
         }
     delegated = get_delegated_types(db) & delegable_types()  # 저장값에 미개방 유형이 섞여도 이중 방어
     if not delegated:
         return {
             "status": "skipped", "reason": "delegated_types 비어있음",
             "delegated_types": [], "agree_count": 0, "auto_approved": 0, "executed": 0, "failed": 0,
-            "skipped": {"not_delegated": 0, "not_pending": 0, "blocked": 0, "optimizer": 0, "budget_envelope": 0, "ad_confirm_only": 0},
+            "skipped": {"not_delegated": 0, "not_pending": 0, "blocked": 0, "optimizer": 0, "budget_envelope": 0, "ad_confirm_only": 0, "canary_confirm_only": 0},
         }
 
     agree_reviews = (
@@ -138,7 +149,7 @@ def run_gate(db: Session, run_id: int, *, now=None) -> dict:
         .all()
     )
 
-    skipped = {"not_delegated": 0, "not_pending": 0, "blocked": 0, "optimizer": 0, "budget_envelope": 0, "ad_confirm_only": 0}
+    skipped = {"not_delegated": 0, "not_pending": 0, "blocked": 0, "optimizer": 0, "budget_envelope": 0, "ad_confirm_only": 0, "canary_confirm_only": 0}
     auto_approved = 0
     executed = 0
     failed = 0

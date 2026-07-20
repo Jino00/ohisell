@@ -111,6 +111,13 @@ def build_diagnosis(db: Session, date_from: date, date_to: date) -> dict:
         "shopping_resume_candidates": diag.shopping_resume_candidates(
             db, date_to, _target_roas_resolver(db, target_roas), factor,
         ),
+        # B4(D-NAO-65): 이미 pause된 레버끊김(MO형) 그룹의 소재-레벨 재개 배선 — 소재 실효입찰
+        # vs 입찰 바닥(70) 비교로 재개 준비(소재 bid_down)/바닥 재개(resume) 분기(GATE P2-1)
+        # + 재pause 3일 쿨다운(GATE P2-3①). 카나리 스코프·ML 제외·순서강제는
+        # proposal_writer.build()가 적용(이 보드는 후보 판정만).
+        "shopping_lever_resume_candidates": diag.shopping_lever_resume_candidates(
+            db, date_to=date_to,
+        ),
     }
 
     return {
