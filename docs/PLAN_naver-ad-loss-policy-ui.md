@@ -43,5 +43,5 @@ sellc 최적화 콘솔/커맨드센터 (Agent)
 - [x] UI1 GATE PASS (Opus 적대 리뷰 1R — P1 0·P2 0·P3 관찰 4건: 정책→leash 회귀 시 정상레버 pause는 정규 resume 게이트로만 재개(안전 방향)·campaign_id 실재 미검증(optimizer 스위치 동형 관례)·밴드 입찰 불변은 의도(UI 문구로 명시)·B4 lever_broken 정책 라벨 우선)
 - [x] UI2 구현 + tsc/vitest (LossPolicySwitch 2단 + 커맨드센터 「loss 정책」열 + roster loss_policy + P3-3 문구 반영, vitest 62→69·tsc 클린·build 성공)
 - [x] UI3 구현 (`floor_wait_units` 관찰 보드 — 기존 보드 0 deletion·차등 테스트로 여집합 보증, 진단 보드 페이지에 「바닥 대기」카드. 쇼핑 무전환 at-floor는 ML 판정 불가로 정직 제외. pytest 2404→2415·vitest 69·build 성공)
-- [ ] 배포(백엔드+프론트) + 라이브 합격
+- [x] 배포(백엔드+프론트) + 라이브 합격 (07-20 16:03 safe_deploy 7파일+dist·마이그 head `d6e7f8a9b0c1`·health 200·PUT round-trip 비-ours 캠페인 change_log 156/157 왕복·422 거부·`floor_wait_units` 보드 노출(현재 0건)·번들 신규 UI 실존. PR #70 병합 main==prod)
 - [ ] 자연 발동 관측(stoploss_pause 캠페인 발화 시) — 상설 관측 항목
