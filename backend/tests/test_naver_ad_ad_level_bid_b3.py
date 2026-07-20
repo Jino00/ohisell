@@ -236,7 +236,8 @@ def test_harness_ad_bid_down_dispatches_to_update_ad_bid(db):
     change_log entity_type='ad'·action='update_bid'·before/after 기록."""
     p = _ad_proposal(db, proposal_type="bid_down", target_bid=680)
     _settings(db, optimizer="ours")
-    with patch.object(harness, "_build_guardrail_context", return_value={"current_bid": 800}), \
+    with patch.object(auto_operator, "AD_BID_CANARY_CAMPAIGNS", frozenset({"cmp1"})), \
+         patch.object(harness, "_build_guardrail_context", return_value={"current_bid": 800}), \
          patch.object(harness.guardrail_gate, "check", return_value=None) as mgate, \
          patch.object(harness.naver_sa_writer, "update_ad_bid", return_value=_ad_write_result()) as mad, \
          patch.object(harness.naver_sa_writer, "update_adgroup_bid") as magp, \
@@ -259,7 +260,8 @@ def test_harness_ad_bid_down_guardrail_block_no_write(db):
     """가드레일 차단(쿨다운 등) → update_ad_bid 미호출·failed·[실행 불가] 감사(우회 금지)."""
     p = _ad_proposal(db, proposal_type="bid_down", target_bid=680)
     _settings(db, optimizer="ours")
-    with patch.object(harness, "_build_guardrail_context", return_value={"current_bid": 800}), \
+    with patch.object(auto_operator, "AD_BID_CANARY_CAMPAIGNS", frozenset({"cmp1"})), \
+         patch.object(harness, "_build_guardrail_context", return_value={"current_bid": 800}), \
          patch.object(harness.guardrail_gate, "check", return_value="쿨다운 중"), \
          patch.object(harness.naver_sa_writer, "update_ad_bid") as mad:
         with pytest.raises(harness.MissingExecutionTargetError):
@@ -284,7 +286,11 @@ def test_harness_ad_bid_up_blocked_when_bep_context_incomplete(db):
     guardrail_gate 호출 전 fail-closed(D-NAO-1 이익하한 우회 방지)."""
     p = _ad_proposal(db, proposal_type="bid_up", target_bid=920)
     _settings(db, optimizer="ours")
-    with patch.object(harness, "_build_guardrail_context",
+    # 카나리 2단계(up 개방) 가정 — 방향 게이트를 열어야 BEP 완전성 가드 자체를 검증 가능
+    # (codex 소급[P2] 최종 경계 가드가 방향을 먼저 막으면 이 가드에 도달 못 함).
+    with patch.object(auto_operator, "AD_BID_CANARY_CAMPAIGNS", frozenset({"cmp1"})), \
+         patch.object(auto_operator, "_AD_BID_CANARY_DIRECTIONS", frozenset({"bid_down", "bid_up"})), \
+         patch.object(harness, "_build_guardrail_context",
                       return_value={"current_bid": 800, "roas_corrected": None, "target_roas": 2.0}), \
          patch.object(harness.guardrail_gate, "check") as mgate, \
          patch.object(harness.naver_sa_writer, "update_ad_bid") as mad:
@@ -301,7 +307,9 @@ def test_harness_ad_bid_up_success_when_context_complete(db):
     _settings(db, optimizer="ours")
     ctx = {"current_bid": 800, "roas_corrected": 5.0, "target_roas": 2.0, "unconverted_spend": 0,
            "cost_today": 1000, "daily_budget": 50_000, "last_change_at": None, "changes_today_count": 0}
-    with patch.object(harness, "_build_guardrail_context", return_value=ctx), \
+    with patch.object(auto_operator, "AD_BID_CANARY_CAMPAIGNS", frozenset({"cmp1"})), \
+         patch.object(auto_operator, "_AD_BID_CANARY_DIRECTIONS", frozenset({"bid_down", "bid_up"})), \
+         patch.object(harness, "_build_guardrail_context", return_value=ctx), \
          patch.object(harness.guardrail_gate, "check", return_value=None), \
          patch.object(harness.naver_sa_writer, "update_ad_bid",
                       return_value=_ad_write_result(800, 920)) as mad:
@@ -312,12 +320,66 @@ def test_harness_ad_bid_up_success_when_context_complete(db):
 
 def test_real_write_blocker_ad_executable(db):
     p = _ad_proposal(db, proposal_type="bid_down", target_bid=680)
-    assert harness.real_write_blocker(p) is None
+    with patch.object(auto_operator, "AD_BID_CANARY_CAMPAIGNS", frozenset({"cmp1"})):
+        assert harness.real_write_blocker(p) is None
 
 
 def test_real_write_blocker_ad_no_target_bid(db):
     p = _ad_proposal(db, proposal_type="bid_down", target_bid=None)
     assert "target_bid" in (harness.real_write_blocker(p) or "")
+
+
+# ══════════════════════════════════════════════════════════════════
+# (2b) codex 소급[P2] 2026-07-20 — 최종 쓰기 경계 가드(카나리·방향·adgroup_id)
+# ══════════════════════════════════════════════════════════════════
+def test_harness_ad_blocks_non_canary_campaign(db):
+    """카나리 밖 캠페인의 승인된 ad 제안(stale/수기) → 쓰기 직전 fail-closed·update_ad_bid
+    미호출·failed 감사(생성·위임 단계 가드의 최종 경계 이중화)."""
+    p = _ad_proposal(db, proposal_type="bid_down", target_bid=680)  # cmp1 = 비카나리
+    _settings(db, optimizer="ours")
+    with patch.object(harness.naver_sa_writer, "update_ad_bid") as mad:
+        with pytest.raises(harness.MissingExecutionTargetError):
+            harness.execute(db, p.id, dry_run=False)
+    mad.assert_not_called()
+    db.refresh(p)
+    assert p.status == "failed"
+
+
+def test_harness_ad_blocks_undirectional_bid_up(db):
+    """카나리 캠페인이어도 ad bid_up은 1단계 미개방 방향 → 최종 경계 차단(개방은 상수 확장)."""
+    p = _ad_proposal(db, proposal_type="bid_up", target_bid=920)
+    _settings(db, optimizer="ours")
+    with patch.object(auto_operator, "AD_BID_CANARY_CAMPAIGNS", frozenset({"cmp1"})), \
+         patch.object(harness.naver_sa_writer, "update_ad_bid") as mad:
+        with pytest.raises(harness.MissingExecutionTargetError):
+            harness.execute(db, p.id, dry_run=False)
+    mad.assert_not_called()
+    db.refresh(p)
+    assert p.status == "failed"
+
+
+def test_harness_ad_blocks_missing_adgroup_id(db):
+    p = _ad_proposal(db, proposal_type="bid_down", target_bid=680, adgroup_id=None)
+    _settings(db, optimizer="ours")
+    with patch.object(auto_operator, "AD_BID_CANARY_CAMPAIGNS", frozenset({"cmp1"})), \
+         patch.object(harness.naver_sa_writer, "update_ad_bid") as mad:
+        with pytest.raises(harness.MissingExecutionTargetError):
+            harness.execute(db, p.id, dry_run=False)
+    mad.assert_not_called()
+
+
+def test_real_write_blocker_ad_non_canary_not_executable(db):
+    """콘솔 executable 판정도 동일 이중 방벽 — 카나리 밖 ad 제안은 실행 버튼 비활성."""
+    p = _ad_proposal(db, proposal_type="bid_down", target_bid=680)  # cmp1 = 비카나리(기본 상수)
+    blocked = harness.real_write_blocker(p)
+    assert blocked is not None and "카나리" in blocked
+
+
+def test_real_write_blocker_ad_bid_up_not_executable(db):
+    p = _ad_proposal(db, proposal_type="bid_up", target_bid=920)
+    with patch.object(auto_operator, "AD_BID_CANARY_CAMPAIGNS", frozenset({"cmp1"})):
+        blocked = harness.real_write_blocker(p)
+    assert blocked is not None and "미개방 방향" in blocked
 
 
 def test_build_guardrail_context_ad_current_bid_from_live_ad(db):

@@ -651,6 +651,31 @@ def _execute_update_bid(db: Session, proposal: NaverProposal, now: datetime) -> 
         _guard_failure(db, proposal, now, "update_bid", reason)
         raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
 
+    # codex 소급[P2] 2026-07-20 — B3 카나리의 **최종 쓰기 경계** 이중화(D-NAO-13 optimizer
+    # 쓰기 직전 하드 체크와 동형 관례): 카나리·방향 제한은 생성(proposal_writer)·위임
+    # (delegation_gate)에서 강제되지만, 실행자는 승인된 'ad' 제안을 재검증 없이 썼다 —
+    # stale 제안(카나리 상수 축소 후 잔존 pending)이나 경로 밖에서 생성된 제안이 콘솔
+    # 승인만으로 최종 경계를 통과하는 fail-open. 쓰기 직전 fail-closed로 재검증한다.
+    # 함수 레벨 import — delegation_gate와 동일 관례(auto_operator 모듈 결합 최소화).
+    if proposal.target_type == "ad":
+        from app.services.naver_ad.auto_operator import (
+            AD_BID_CANARY_CAMPAIGNS, _AD_BID_CANARY_DIRECTIONS,
+        )
+        ad_guard = []
+        if proposal.campaign_id not in AD_BID_CANARY_CAMPAIGNS:
+            ad_guard.append("캠페인이 소재입찰 카나리 개방 대상 아님")
+        if proposal.proposal_type not in _AD_BID_CANARY_DIRECTIONS:
+            ad_guard.append(
+                f"proposal_type={proposal.proposal_type!r}는 소재-레벨 미개방 방향"
+                f"(개방={sorted(_AD_BID_CANARY_DIRECTIONS)})"
+            )
+        if not proposal.adgroup_id:
+            ad_guard.append("adgroup_id 없음(소재 제안 필수 컨텍스트)")
+        if ad_guard:
+            reason = "소재(ad) 실쓰기 경계 차단(fail-closed) — " + " · ".join(ad_guard)
+            _guard_failure(db, proposal, now, "update_bid", reason)
+            raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
+
     context = _build_guardrail_context(db, proposal, now)
 
     # S3(D-NAO-43 성장 확장): adgroup 증액(bid_up/growth_bid_up)은 guardrail_gate._check_bid의
@@ -1023,6 +1048,23 @@ def real_write_blocker(proposal: NaverProposal) -> str | None:
             )
         if proposal.target_bid is None:
             return "target_bid 없음 — 실행 대상 정보 부족(구 제안이거나 재생성 필요)"
+        # codex 소급[P2] 2026-07-20: 소재(ad) 실쓰기는 카나리 캠페인·개방 방향 안에서만 —
+        # _execute_update_bid의 최종 경계 가드와 동일 판정(이중 방벽). 정적 상수 비교라
+        # API 콜 없음(이 함수의 "라이브 재조회 금지" 설계 유지). stale 제안(카나리 축소 후
+        # 잔존 pending)이 콘솔에서 executable로 보이는 것을 막는다.
+        if proposal.target_type == "ad":
+            from app.services.naver_ad.auto_operator import (
+                AD_BID_CANARY_CAMPAIGNS, _AD_BID_CANARY_DIRECTIONS,
+            )
+            if proposal.campaign_id not in AD_BID_CANARY_CAMPAIGNS:
+                return "소재(ad) 입찰은 카나리 캠페인만 실쓰기 가능(B3 개방 스코프 밖 — stale 제안 가능성)"
+            if proposal.proposal_type not in _AD_BID_CANARY_DIRECTIONS:
+                return (
+                    f"소재(ad) {proposal.proposal_type}은 미개방 방향"
+                    f"(현재 개방={sorted(_AD_BID_CANARY_DIRECTIONS)}, 카나리 2단계에서 확장)"
+                )
+            if not proposal.adgroup_id:
+                return "adgroup_id 없음 — 소재 제안 필수 컨텍스트 부족(재생성 필요)"
     elif action == "set_user_lock":
         if proposal.target_type not in ("keyword", "adgroup"):
             return (

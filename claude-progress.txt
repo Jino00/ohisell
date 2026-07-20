@@ -6,7 +6,8 @@
 - **★스프린트 UI(sellc 캠페인별 loss 정책 스위치) UI1~UI3 완료·배포·라이브 합격 + PR #70 병합(main==prod `81ace9b`)** — D-NAO-65 3번째 스프린트. UI1 백엔드(loss_policy 컬럼·마이그 `d6e7f8a9b0c1`·stoploss_pause=하드 pause 회귀 분기·전용 PUT+감사, GATE PASS P1/P2 0) + UI2 프론트(LossPolicySwitch 2단·확인창·커맨드센터 열) + UI3(floor_wait_units 바닥 대기 관찰 보드). pytest 2415·vitest 69. 라이브: PUT round-trip change_log 156/157·422 거부·보드/번들 실존. 계획서 docs/PLAN_naver-ad-loss-policy-ui.md.
 - 07-20 오후 관측(15:20): B3/B4 배포 후 레인 전부 ok·자동발사 0(Confirm-only 유지)·MO pause cl 143 등 발동 전부 예측 일치.
 - **★내일(07-21) 첫 행동: 08:00 이후 MO(grp-…070109616) 소재 bid_down_first pending 1건(800→680) 생성 확인** — read-only 사전 검증 완료(오늘 0건은 entity sync 시차가 원인, 내일 07:35 sync가 자동 치유·나머지 게이트 전부 통과). 생성되면 Jino 콘솔 Confirm 왕복 관측(B 라이브 합격 시작). "[레버 미연결]" hold·"재시작 대기"·stoploss_pause 자연 발동은 상설 관측.
-- 다음 스프린트: L2(예산 자동증액, ref 33 규칙) → L3(인벤토리 확장). codex 소급 리뷰 07-23(DL·B·UI 전 커밋).
+- **★codex 소급 리뷰 완료(07-20 16:20, 07-23 예정분 조기 — 한도 회복 실측)**: DL·B·UI 전 커밋 3 findings 왕복 합의 — P2 2건 수정·배포(`02d3235`: zero_conv 보류 cpc_change 정합 + ad 실쓰기 최종 경계 가드), P1은 강등 합의(B 후속 백로그: effective_bid 다중 max 기여자 반환·드레인). 2422 passed·재평가 GATE PASS.
+- 다음 스프린트: L2(예산 자동증액, ref 33 규칙) → L3(인벤토리 확장).
 
 ## 최신 상태 (2026-07-20 오전, 워크트리 video-content-summary-0e6c41)
 - **★스프린트 DL(일일 손실 고삐) DL1~DL4 완료·배포·라이브 + PR #64 병합(main==prod)** — D-NAO-65 첫 스프린트. loss 대응 기본값=고삐-일일리셋, pause=레버불능 예외(①ML ②레버끊김 ③지속밸브)만. 4페이즈 전부 Opus 적대적 GATE PASS(총 7라운드, P1 2·P2 4 잡아 수정). 2275 passed·마이그 0. 계획서 docs/PLAN_naver-ad-daily-loss-leash.md.
