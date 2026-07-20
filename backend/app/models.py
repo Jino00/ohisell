@@ -1834,9 +1834,20 @@ class NaverKeywordCandidate(Base):
 class NaverLearningState(Base):
     """자율학습 파라미터 상태 (D-NAO-14, 계획서 §3.5). verify_harness가 유일 쓰기 주체.
 
-    scope: campaign/keyword_type/global. metric 예: proposal_accuracy/estimate_bias/
-    conv_delay/discovery_winrate/hour_weight/bep_accuracy. P0에서는 스키마만(환류는 P3/P5).
+    scope: campaign/keyword_type/global/action_type/entity. metric 예: proposal_accuracy/
+    estimate_bias/conv_delay/discovery_winrate/hour_weight/bep_accuracy/bid_rank_slope.
+    P0에서는 스키마만(환류는 P3/P5).
     학습 경계: 파라미터만 조정, 가드레일 상수·권한 단계는 학습 대상 아님.
+
+    ★scope 규약(scope_key 형태):
+    - campaign: scope_key=campaign_id
+    - keyword_type: scope_key=WEB_SITE/SHOPPING/BRAND_SEARCH
+    - global: scope_key=상황버킷(day_N 등)
+    - action_type: scope_key=proposal_type(expert_briefing 소급 정확도)
+    - entity(IU-R R3, bid_rank_curve): scope_key="adgroup:<id>"/"keyword:<id>",
+      metric="bid_rank_slope" — 유닛별 입찰→순위 반응 곡선 기울기(원/rank개선 1.0, 양수).
+      current_value=기울기, sample_n=유효 관측쌍 수, confidence=적합도. rank_servo가
+      response_prior로 소비(adgroup: prefix만).
     """
 
     __tablename__ = "naver_learning_state"

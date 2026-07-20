@@ -195,8 +195,8 @@ IU-R이 쓰는 입찰 손은 전부 구현돼 있다. 서보는 새 writer가 �
 - [x] R1 GATE PASS — Opus 적대(P1 0·P2 3=R2 백로그) + codex 2R 왕복(P1 2 수정: 위임 제외+신선도 게이트 10분 / pace 관측 슬롯 fail-closed·P2-2 미래 스냅샷 필터·P2-1 부분 기각 합의·created_at None=stale 보강) **PASS**
 - [x] R2: 시간당 estimate 직행(동적 목표 ceil−1·1~4 clamp) + agg precompute + `bid_up_rank` 등록 + estimate fail-closed 7종(실패/누락/0/비10원/범위밖/현재이하/bid키부재) + TOCTOU 마커(엄격 suffix·부재=fail-closed) + `_RUN_ESTIMATE_BUDGET` 캡·캐시 + prefilter 공용 helper(R1 백로그 이행) + 실집행 배선 + 다운스트림 정합 — **2531 passed·회귀 0** (핫셋 campaign_type 관통은 재이월)
 - [x] R2 GATE PASS — Opus 적대(P1 1=bid 키 KeyError 레인 중단 → 수정·봉인 / P2 4) + codex 2R 왕복(P1 1=마커 부재 fail-closed 뒤집기·P2 3 전 수용) **PASS**. 부수: 자정 플레이크 테스트 근본수정·iCloud 중복 사본 제거
-- [ ] R3: `bid_rank_curve` SA(조인 기반·마이그레이션 0·h−1/h+1 버킷 규칙·기울기 원/rank 단위) + `NaverLearningState`(scope="entity" 규약·bid_rank_slope·docstring/테스트 갱신) + `learning_loops.run_all` 스테이지 + 인과 오염 제외·불확실 플래그·무반응 평탄기울기 + 콜드스타트 폴백 + 익일 반영 명시 + 테스트
-- [ ] R3 GATE PASS
+- [x] R3: `bid_rank_curve` SA(change_log×NaverProposal×NaverKeywordHourly 조인·**마이그레이션 0**·h−1/h+1 결정론 버킷·중앙값 기울기 원/rank·오염 제외=성공 실쓰기 기준) + `NaverLearningState` scope="entity"/`bid_rank_slope` 규약(current_value/sample_n/confidence 3컬럼·명시 updated_at) + `learning_loops` 5스테이지 + 서보 prior 주입(precompute 1회) + 콜드스타트/무효 마킹 — **2554 passed·회귀 0**
+- [x] R3 GATE PASS — codex 3R 왕복(P1 2 수정: stale slope 이중 방어[쓰기 무효 마킹+읽기 4조건·3일 만료]·스캔-무쌍 유닛 무효 마킹 / P2 1 수정: 오염=성공 실쓰기만) **PASS**. slope 오염돼도 서보 캡·경제성 상한 clamp 방어선 확인됨
 - [ ] 배포 + 라이브(실쓰기 합격, §3-4): R0 배포 회귀 0 → R1 폐루프 한 바퀴 라이브 완주(실 `update_adgroup_bid`→다음 시간 순위 이동→데드밴드/래칫)·R2 ±15% 초과 1스텝 실쓰기·ad 카나리 UP 누출 0·사전 봉투 준수 — **다음 세션**
 - [ ] 자연 발동 상설 관측(서보 래칫·데드밴드·반응 곡선 적립·무반응 hold) — 상설
 

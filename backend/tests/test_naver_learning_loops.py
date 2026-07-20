@@ -31,7 +31,7 @@ def test_run_all_succeeds_with_no_data(db):
     result = learning_loops.run_all(db, today=TODAY)
     assert result["stage_status"] == {
         "proposal_scoreboard": "ok", "estimate_calibrator": "ok",
-        "conversion_maturity": "ok", "hourly_pattern": "ok",
+        "conversion_maturity": "ok", "hourly_pattern": "ok", "bid_rank_curve": "ok",
     }
     assert result["errors"] == []
 
@@ -46,4 +46,5 @@ def test_run_all_isolates_one_failing_loop(db, monkeypatch):
     assert result["stage_status"]["proposal_scoreboard"] == "ok"
     assert result["stage_status"]["conversion_maturity"] == "ok"
     assert result["stage_status"]["hourly_pattern"] == "ok"
+    assert result["stage_status"]["bid_rank_curve"] == "ok"
     assert any("estimate_calibrator" in e for e in result["errors"])

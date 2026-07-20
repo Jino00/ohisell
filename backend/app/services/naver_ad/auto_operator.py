@@ -32,7 +32,7 @@ from app.models import (
     NaverProposal,
     NaverRetroSignal,
 )
-from app.services.naver_ad import bid_simulator, campaign_target_resolver, diagnosis, diary, effective_bid, guardrail_gate, intraday_roas, naver_execution_harness, naver_sa_writer, rank_servo
+from app.services.naver_ad import bid_rank_curve, bid_simulator, campaign_target_resolver, diagnosis, diary, effective_bid, guardrail_gate, intraday_roas, naver_execution_harness, naver_sa_writer, rank_servo
 from app.services.naver_ad.bid_step_types import BID_UP_TYPES, encode_base_bid
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.services.naver_ad.guardrail_gate import _MAX_CHANGE_PCT
@@ -1462,11 +1462,16 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
     campaigns = _auto_operate_campaigns(db)
     servo_agg: dict | None = None
     servo_correction_factor: Decimal | None = None
+    # IU-R R3: 서보 response_prior(입찰→순위 반응 곡선 기울기, 원/rank개선) — 캠페인 순회 밖에서
+    # 1회 벌크 적재(N+1 방지). {scope_key: slope}. 서보 유닛의 "adgroup:<id>" 키만 조회해 콜드
+    # 스타트 대신 "한 단 위 필요 증분"을 근접 산정한다(없으면 None → rank_servo 콜드스타트 폴백).
+    response_priors: dict = {}
     if campaigns:
         from app.services.naver_ad import proposal_pipeline
         servo_agg = proposal_pipeline._precompute_aggregates(db, window_from, window_to)
         _cf = diagnosis.correction_factor(db, today - timedelta(days=1))
         servo_correction_factor = Decimal(str(_cf["factor"]))
+        response_priors = bid_rank_curve.load_response_priors(db)
 
     for campaign_id in campaigns:
         breaker_reason = _check_spend_circuit_breaker(db, campaign_id, now)
@@ -1648,10 +1653,14 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                         servo_agg=servo_agg, correction_factor=servo_correction_factor,
                         window_from=window_from, window_to=window_to,
                     )
+                    # IU-R R3: 반응곡선 기울기를 response_prior로 주입(harness read, 원칙18-6).
+                    # 유닛별 "adgroup:<id>" 곡선이 있으면 그 기울기로 "한 단 위 필요 증분" 근접,
+                    # 없으면 None → rank_servo 콜드스타트 보수 기본 스텝 폴백.
                     rank_step_meta = rank_servo.decide_servo_step(
                         verdict.get("weighted_rank"), step_base,
                         imp_sum=verdict.get("imp_sum", 0),
-                        economic_ceiling=economic_ceiling, response_prior=None,  # R3 전 콜드스타트
+                        economic_ceiling=economic_ceiling,
+                        response_prior=response_priors.get(f"adgroup:{exec_target_id}"),
                     )
                     hold_prefix = f"[{rank_tag}] 스텝 없음 — "
                 else:  # estimate 직행(R2)
