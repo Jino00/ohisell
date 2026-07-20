@@ -14,6 +14,7 @@ from sqlalchemy import func as sqlfunc
 from sqlalchemy.orm import Session
 
 from app.models import NaverAdDaily, NaverChangeLog, NaverEntity, NaverSearchTermDaily
+from app.services.naver_ad import effective_bid as effbid
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 
 _WEB_SITE = "WEB_SITE"
@@ -703,7 +704,17 @@ def shopping_pause_candidates(
     때만 pause 후보로 넣는다 — 레버 정상(실측 CPC ≤ k×입찰)이면 바닥에서 노출~0이라 자연
     지혈되므로 후보 미진입(바닥 대기). 무전환 행에도 lever_broken 플래그를 태깅해
     _stop_loss_proposal(쇼핑 경로)이 at-floor시 pause(예외②) vs 대기를 분기하게 한다.
-    reason 값: zero_conv(무전환·행동 창) / lever_broken(전환 있는 레버끊김·만성 창)."""
+    reason 값: zero_conv(무전환·행동 창) / lever_broken(전환 있는 레버끊김·만성 창).
+
+    ★B2(D-NAO-65) 실효입찰 재정의: 스톱로스 임계(=입찰×10)·lever_broken(CPC>k×입찰)·at-floor
+    판정의 기준 입찰을 **그룹입찰(entity.bid_amt) → 실효입찰(effective_bid SA)**로 치환한다.
+    85/88 소재가 useGroupBidAmt=false라 실효입찰≠그룹입찰이 기본 — 그룹입찰 50인데 소재 bidAmt
+    1990이면 실효≈CPC라 lever_broken 대부분 자연 소멸(예외② 오판 축소, 완료기준 a). 진짜
+    소재-레벨 끊김(소재 bidAmt도 낮은데 CPC 폭등)만 lever_broken 유지(완료기준 b). 소재-레벨
+    데이터 없는 그룹(sync 전)은 effective_bid SA가 그룹입찰 폴백 → 종전 동작 보존(하위호환).
+    board에 effective_bid 필드 제공(_stop_loss_proposal이 at-floor/사유문에 소비) — current_bid는
+    그룹입찰 유지(target_bid 스텝 기준·B2는 소재입찰 안 씀·제어는 B3). 예외② pause 경로 자체는
+    B2에서 제거하지 않는다(B3 제어 전 통제불능 갭 방지, §0 금지선)."""
     on_adgroups = _on_adgroup_ids(db)
     entity_map = {
         e.entity_id: e for e in
@@ -724,6 +735,10 @@ def shopping_pause_candidates(
     last_change = _last_bid_change_kst_date(db, candidate_ids)
     daily = _daily_cost_conv_by_unit(db, NaverAdDaily.adgroup_id, candidate_ids, _SHOPPING, date_from, date_to)
     chronic_from = date_to - timedelta(days=_CHRONIC_WINDOW_DAYS - 1)  # 7일 롤링 만성 창
+    # B2 GATE P3-2: 실효입찰 배치 파생(후보별 1쿼리 N+1 → 전 후보 1쿼리).
+    effs = effbid.adgroup_effective_bids(
+        db, {aid: entity_map[aid].bid_amt for aid in candidate_ids},
+    )
 
     # D-NAO-64(A): at-floor(못 내림) 판정은 스텝하향의 단일 진실원천 재사용(하드코딩 70 금지,
     # _MAX_CHANGE_PCT 변경 시 자동 정합). 함수 레벨 import로 순환 의존 회피(호출 시점 해석).
@@ -735,12 +750,27 @@ def shopping_pause_candidates(
         if not rows:
             continue
         entity = entity_map[adgroup_id]
+        # B2(D-NAO-65): 실효입찰 파생 — 그룹입찰 대신 소재-레벨 실효입찰을 임계·lever_broken·
+        # at-floor 기준으로 쓴다(소재 데이터 없으면 SA가 그룹입찰 폴백 = 종전 동작 보존).
+        eff = effs[adgroup_id]
+        eff_bid = eff["effective_bid"]
         last_change_date = last_change.get(adgroup_id)
-        window_start = _stop_loss_window_start(date_from, date_to, last_change_date)
-        _, _, cost, conv_amt = _sum_cost_conv_since(rows, window_start)  # 행동 창
+        # B2 GATE P2-1: 레버 미연결 유닛(source='ad' — 소재입찰이 그룹입찰 우회)의 스톱로스
+        # 비용 창은 DL1 행동 창(3일 폴백)이 아니라 **만성 7일 창**을 쓴다(침묵 대역 해소).
+        # 근거: ①이 유닛들은 우리가 입찰을 안 바꾸므로(그룹 bid_down이 P2-2로 억제됨) DL1의
+        # "변경 후 창 절체" 우려가 구조적으로 없음 = 시점 정합 유지 ②3일 폴백이면 일 출혈이
+        # 임계/3 미만인 유닛이 영구 침묵(예: 실효 1990 임계 19,900 → 일 6,633원 미만 무감지),
+        # 7일이면 일 임계/7 이상 출혈은 도달하고 그 미만은 진짜 "실효입찰 10클릭 증거 부족"
+        # (성급 사살 금지가 정당). floor_bleed 밸브의 window_days도 이 창 기준(아래 산출 공유).
+        # 레버 연결 유닛(source='group')은 기존 DL1 행동 창 유지(우리가 입찰을 바꾸는 유닛).
+        if eff["source"] == "ad":
+            window_start = max(date_from, chronic_from)
+        else:
+            window_start = _stop_loss_window_start(date_from, date_to, last_change_date)
+        _, _, cost, conv_amt = _sum_cost_conv_since(rows, window_start)  # 행동/증거 창
         if cost <= 0:
             continue
-        stop_loss_amount = entity.bid_amt * LOW_CLICK_THRESHOLD
+        stop_loss_amount = eff_bid * LOW_CLICK_THRESHOLD  # B2: 실효입찰×10(그룹입찰 아님)
         if cost < stop_loss_amount:
             continue
         # 만성 7일 창 집계 — 보정ROAS 판정용(단발 나쁜 날 조기사살 방지, DL1).
@@ -758,8 +788,10 @@ def shopping_pause_candidates(
         cpc_from = chronic_from if last_change_date is None else max(chronic_from, last_change_date)
         _, cpc_clk, cpc_cost, _ = _sum_cost_conv_since(rows, cpc_from)
         chronic_cpc = int(cpc_cost // cpc_clk) if cpc_clk > 0 else None
+        # B2: 레버끊김 판정 기준 = 실효입찰(그룹입찰 아님). 실효≈CPC면 CPC≤k×실효라 미발동
+        # (예외② 오판 소멸) — 진짜 소재-레벨 끊김(소재 bidAmt도 낮은데 CPC 폭등)만 유지.
         lever_broken = (
-            chronic_cpc is not None and chronic_cpc > _LEVER_BROKEN_CPC_MULTIPLE * entity.bid_amt
+            chronic_cpc is not None and chronic_cpc > _LEVER_BROKEN_CPC_MULTIPLE * eff_bid
         )
         # GATE P2: 행동 창 2일 미만(마지막 실변경=date_to 당일)이면 zero_conv 판정 보류 —
         # 간접전환 ~1일 정착·쇼핑 ML그룹은 터미널 pause라 오발동=실손실. lever_broken(만성
@@ -777,7 +809,7 @@ def shopping_pause_candidates(
             # (바닥 노출~0이라 자연 지혈). ★보정ROAS는 7일 롤링 만성 창으로 판정.
             roas_naver = float((Decimal(c_conv) / Decimal(c_cost)).quantize(_Q4)) if c_cost else None
             roas_c = _corrected_roas(roas_naver, correction_factor)
-            at_floor = _step_down_bid(entity.bid_amt) >= entity.bid_amt
+            at_floor = _step_down_bid(eff_bid) >= eff_bid  # B2: at-floor도 실효입찰 기준
             if roas_c is not None and roas_c < float(bep_roas) and at_floor and lever_broken:
                 reason = "lever_broken"
         if reason is None:
@@ -789,6 +821,8 @@ def shopping_pause_candidates(
         out.append({
             "campaign_id": entity.campaign_id, "adgroup_id": adgroup_id, "cost": cost,
             "conv_amt": conv_amt, "current_bid": entity.bid_amt,
+            # B2: 실효입찰(그룹입찰과 다를 수 있음) — writer가 at-floor/레버연결·사유문에 소비.
+            "effective_bid": eff_bid, "effective_source": eff["source"],
             "stop_loss_amount": stop_loss_amount, "reason": reason,
             "lever_broken": lever_broken, "chronic_cpc": chronic_cpc,
             "floor_bleed": reason == "zero_conv" and window_days >= _FLOOR_BLEED_MIN_DAYS,

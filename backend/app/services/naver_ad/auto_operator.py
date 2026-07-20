@@ -29,7 +29,7 @@ from app.models import (
     NaverProposal,
     NaverRetroSignal,
 )
-from app.services.naver_ad import campaign_target_resolver, diagnosis, diary, hourly_pattern, intraday_roas, naver_execution_harness, naver_sa_writer
+from app.services.naver_ad import campaign_target_resolver, diagnosis, diary, effective_bid, hourly_pattern, intraday_roas, naver_execution_harness, naver_sa_writer
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.services.naver_ad.guardrail_gate import _MAX_CHANGE_PCT
 from app.services.naver_ad.trigger_watch import CPC_SPIKE_RATIO
@@ -1079,6 +1079,31 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                     now=now, target_type=target_type, target_id=target_id, action=intended_action,
                 )
                 continue
+            # B2 GATE P2-2①(D-NAO-65): 레버 미연결 그룹 억제 — SHOPPING adgroup의 실효입찰이
+            # 소재 bidAmt(useGroupBidAmt=false, source='ad')면 그룹입찰 스텝(고삐 DOWN·밴드
+            # DOWN/UP)은 지출·노출에 무효이면서 ①DL1 행동 창(naver_change_log update_bid)만
+            # 리셋해 진단의 미연결 스톱로스 그물(P2-1 만성 7일 창)을 늦추고 ②changes_today
+            # 일일 상한 슬롯을 낭비한다 — 집행 전 skip(소재-레벨 제어는 B3 대기). adgroup
+            # grain만(키워드는 소재입찰 개념 없음). 파생 실패/소재 데이터 없음(sync 전)은
+            # 기존 동작 폴백(그룹입찰 유효 가정 — fail-safe 하위호환).
+            if target_type == "adgroup":
+                try:
+                    eff = effective_bid.adgroup_effective_bid(db, target_id, current_bid)
+                except Exception as e:  # noqa: BLE001 — 파생 실패는 기존 동작 폴백(차단 아님)
+                    log.warning("auto_operator: 실효입찰 파생 실패 adgroup=%s: %s", target_id, e)
+                    eff = None
+                if eff is not None and eff["source"] == "ad":
+                    hold_reason = (
+                        f"[레버 미연결] 그룹입찰 무효(실효=소재입찰 {eff['effective_bid']}원) "
+                        f"— B3 대기"
+                    )
+                    result["held"].append({"target_id": target_id, "reason": hold_reason})
+                    _record_blocked(
+                        db, campaign_id=campaign_id, actor=lane_actor, reason=hold_reason,
+                        now=now, target_type=target_type, target_id=target_id,
+                        action=intended_action,
+                    )
+                    continue
             step_bid = _clamp_step(current_bid, verdict["direction"])
             if step_bid is None:
                 hold_reason = "스텝 클램프 계산 불가(방향 무의미)"
