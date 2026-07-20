@@ -2,6 +2,12 @@
 # 매 sprint 완료 시 Claude가 이 파일을 갱신합니다.
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
+## 최신 상태 (2026-07-20 밤, 워크트리 session-409bd8·브랜치 claude/session-b21ee9)
+- **★D-NAO-66·67 확정 — 전략 v2**(`docs/STRATEGY_naver-ad-v2.md` 단일 참조): 4대 운영 원리(①ROAS 단일 지배·순위 제한 폐지 ②행동=시간·채점=D+1~7 ③순위 서보(제어 언어=순위) ④in-out 생태계) + 로드맵 **IU→IU-R→SS→L2→L3→소재**. 배경=대행사 통화 ref 34(쇼검 제외키워드 140 기법=최대 갭, 실측 항목: 제외 한도 70vs140·그룹 생성 한도·검색어 전환 API).
+- **★스프린트 IU 구현 완료·커밋 `5c7d889` — 배포 미실시(다음 세션 첫 작업)**: 장중 상향 개방(tally≥2·est≥target×1.2·순위 무관)+순위 제한 폐지(과열밴드·learned band 천장 제거)+GATE PASS(P1 0)+P2 3중 브레이크(정산 거부권·장중-단독 일 1스텝 캡·keyword S3 게이트). **2433 passed·회귀 0**. 잔여: retro 스냅샷 매핑 확인(배포 전)→safe_deploy(auto_operator+harness)→:20 레인 라이브 검증(04류 UP 실측).
+- **다음 세션 순서**: ①IU 배포·라이브(위) ②08:00 후 MO(grp-…070109616) 소재 bid_down_first pending 1건(800→680) 생성 관측→Jino 콘솔 Confirm 왕복(B 라이브 합격) ③IU-R(순위 서보) 설계 착수(파워링크=estimate 직행·경제성 상한 캡, 쇼검=실측 rank 폐루프+반응곡선 학습) ④이후 SS. 라우팅: 구조=Fable·설계/구현=Opus·단순=Sonnet.
+- 상세 인계: `.claude/memory/HANDOFF_ohisell-strategy-v2+IU-implemented_20260720.md`
+
 ## 최신 상태 (2026-07-20 오후, 워크트리 session-409bd8·브랜치 claude/session-b21ee9)
 - **★스프린트 UI(sellc 캠페인별 loss 정책 스위치) UI1~UI3 완료·배포·라이브 합격 + PR #70 병합(main==prod `81ace9b`)** — D-NAO-65 3번째 스프린트. UI1 백엔드(loss_policy 컬럼·마이그 `d6e7f8a9b0c1`·stoploss_pause=하드 pause 회귀 분기·전용 PUT+감사, GATE PASS P1/P2 0) + UI2 프론트(LossPolicySwitch 2단·확인창·커맨드센터 열) + UI3(floor_wait_units 바닥 대기 관찰 보드). pytest 2415·vitest 69. 라이브: PUT round-trip change_log 156/157·422 거부·보드/번들 실존. 계획서 docs/PLAN_naver-ad-loss-policy-ui.md.
 - 07-20 오후 관측(15:20): B3/B4 배포 후 레인 전부 ok·자동발사 0(Confirm-only 유지)·MO pause cl 143 등 발동 전부 예측 일치.
