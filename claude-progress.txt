@@ -2,6 +2,11 @@
 # 매 sprint 완료 시 Claude가 이 파일을 갱신합니다.
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
+## 최신 상태 (2026-07-20 오후, 워크트리 video-content-summary-0e6c41)
+- **★D-NAO-65 스프린트 DL(일일 고삐)+B(소재입찰 B1~B4) 전부 완료·배포·라이브. PR #63~69 병합(main==prod tip ceb638f).** GATE 누적 19라운드(P1 2·P2 13 수정). 2384 passed.
+- **카나리 1호=맥세이프 개방**(DOWN만·콘솔 Confirm 전용·위임/브리핑 제외). ★내일(07-21) 08:00 MO 소재 bid_down_first pending 자연 생성 예정 → **Jino 콘솔 첫 Confirm이 B 라이브 합격의 시작.**
+- 다음: MO Confirm 왕복 관측 → UI 스프린트(loss 정책 스위치) → L2(예산 자동증액, ref 33) → L3(인벤토리 확장) → 카나리 확대/졸업 → codex 소급 07-23.
+
 ## 최신 상태 (2026-07-20 오전, 워크트리 video-content-summary-0e6c41)
 - **★스프린트 DL(일일 손실 고삐) DL1~DL4 완료·배포·라이브 + PR #64 병합(main==prod)** — D-NAO-65 첫 스프린트. loss 대응 기본값=고삐-일일리셋, pause=레버불능 예외(①ML ②레버끊김 ③지속밸브)만. 4페이즈 전부 Opus 적대적 GATE PASS(총 7라운드, P1 2·P2 4 잡아 수정). 2275 passed·마이그 0. 계획서 docs/PLAN_naver-ad-daily-loss-leash.md.
 - 08:50 관측: D-NAO-64 첫 발동=MO pause 실집행·03 5그룹 재정지·이중 bid_down 쿨다운 차단(전부 예측 일치).
