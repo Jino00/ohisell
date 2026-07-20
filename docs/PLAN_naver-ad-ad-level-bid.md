@@ -290,7 +290,7 @@ flip-flop 방어·MO 재개가 per-campaign 하드코딩 아님(전역 규칙).
 - [x] B0-r Fable 계획 검토 승인(2026-07-20 09:50, 관측 조건: max 실효입찰의 임계 상승 실측)
 - [x] B1 인식 — 완료(2026-07-20): 배포·마이그 c5d6e7f8a9b0·sync 실측 36그룹/88매핑, ★85/88(96%) useGroupBidAmt=false 확정. PR #65. 2284 passed.
 - [x] B2 실효입찰 파생 SA + 진단 재정의 + 미연결 억제 — 완료(2026-07-20): GATE 2R PASS(1R P2 2건: 침묵 대역→7일 증거 창·밴드 미전환→전 레인 억제). 배포 1b3f8ec·2314 passed. 라이브: 30/33 미연결 정확 판정·보드 38→32. ★B3 이월: 소재입찰 change_log 추적 시 미연결 창='마지막 소재입찰 변경 이후' 절체. 잔여 관측: 11:20 레인 미연결 hold·임계 미달 무전환 비용 합계.
-- [ ] B3 제어 개방(update_ad_bid + harness 'ad' 분기 + 실효레버 라우팅 + 카나리)
+- [x] B3 제어 개방 — 완료(2026-07-20): GATE 3라운드 PASS(P2 4건 수정: 탐침 미회수·Confirm-only 부재·delegation 5번째 경로·pending 홍수). 배포 3c4bf5c·2359 passed. ★카나리 1호=맥세이프 개방(DOWN만·콘솔 Confirm 전용·자동발사 5경로 봉쇄). 라이브: 카나리·방향·update_ad_bid 로드 확인, MO 소재 551485078 입찰=800 실측(CPC 824 미스터리 완결). 잔여=첫 Confirm 실집행 왕복·그룹 실현 CPC 하강(D+1) 관측.
 - [ ] B4 예외② 해소(lever_broken→leash 은퇴) + 재개 흐름
 - [ ] PR 병합·트랙 D-NAO-65 B 진행 갱신·HANDOFF
 
