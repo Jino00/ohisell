@@ -21,6 +21,7 @@ from app.models import (
     NaverAdDaily,
     NaverAdgroupProduct,
     NaverCampaignSettings,
+    NaverChangeLog,
     NaverEntity,
     NaverHourlySnapshot,
     NaverProposal,
@@ -339,6 +340,48 @@ def test_shopping_pause_disconnected_three_days_only_insufficient(db):
     out = diag.shopping_pause_candidates(db, D0, D_TO, bep_roas=Decimal("1.5"),
                                          correction_factor=Decimal("1.0"))
     assert out == []
+
+
+def test_shopping_pause_disconnected_same_day_ad_change_held(db):
+    """codex 소급[P2] 2026-07-20: 미연결 유닛의 소재입찰을 **오늘** 바꿨으면(zero-conv 보류가
+    adgroup 변경일이 아니라 소재 변경일 기준이어야) 귀속 지연 완충으로 당일 zero_conv 미진입.
+    종전엔 last_change_date(adgroup-레벨, 이 유닛엔 None)만 봐서 당일 즉시 후보 진입했다."""
+    _active_campaign(db)
+    _shopping_entity(db, "grp-mo", bid_amt=50)
+    _ad(db, "grp-mo", "p1", ad_id="nad-1", ad_bid_amt=1990, use_group=False)
+    for i in range(7):
+        _daily(db, D_TO - timedelta(days=i), "grp-mo", clk=2, cost=3000, direct=0)
+    # 오늘(D_TO) 소재입찰 변경 성공 기록(entity_type='ad'·update_bid·KST-naive changed_at)
+    db.add(NaverChangeLog(
+        entity_type="ad", entity_id="nad-1", campaign_id="cmp-shop", action="update_bid",
+        after_value='{"bidAmt": 1690}', dry_run=False,
+        changed_at=datetime(D_TO.year, D_TO.month, D_TO.day, 9, 0, 0),
+    ))
+    db.commit()
+    out = diag.shopping_pause_candidates(db, D0, D_TO, bep_roas=Decimal("1.5"),
+                                         correction_factor=Decimal("1.0"))
+    assert out == []  # 변경 당일 하루 창 — 다음날부터 정상 판정
+
+
+def test_shopping_pause_disconnected_prior_day_ad_change_not_held(db):
+    """소재입찰 변경이 어제(D_TO-1)면 보류 대상 아님 — 창은 변경일 이후로 절체돼 판정 지속.
+    (창 2일치 비용 6,000 < 임계라 이 케이스는 증거 미달 미진입 — 보류가 아니라 임계 게이트.)"""
+    _active_campaign(db)
+    _shopping_entity(db, "grp-mo", bid_amt=50)
+    _ad(db, "grp-mo", "p1", ad_id="nad-1", ad_bid_amt=990, use_group=False)  # 임계 9,900
+    for i in range(7):
+        _daily(db, D_TO - timedelta(days=i), "grp-mo", clk=5, cost=6000, direct=0)
+    prev = D_TO - timedelta(days=1)
+    db.add(NaverChangeLog(
+        entity_type="ad", entity_id="nad-1", campaign_id="cmp-shop", action="update_bid",
+        after_value='{"bidAmt": 990}', dry_run=False,
+        changed_at=datetime(prev.year, prev.month, prev.day, 9, 0, 0),
+    ))
+    db.commit()
+    out = diag.shopping_pause_candidates(db, D0, D_TO, bep_roas=Decimal("1.5"),
+                                         correction_factor=Decimal("1.0"))
+    assert len(out) == 1  # 어제+오늘 2일 창 12,000 ≥ 임계 9,900 → 보류 없이 정상 진입
+    assert out[0]["reason"] == "zero_conv"
 
 
 def test_shopping_pause_connected_keeps_dl1_window(db):

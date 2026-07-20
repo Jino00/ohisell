@@ -844,7 +844,11 @@ def shopping_pause_candidates(
         # 간접전환 ~1일 정착·쇼핑 ML그룹은 터미널 pause라 오발동=실손실. lever_broken(만성
         # 7일 창) 경로는 창이 길어 정착 완충이 있으므로 이 보류와 무관.
         # (GATE-2R P3: 술어는 변경일 기준 — pause_candidates와 동일 근거)
-        hold_zero_conv = last_change_date is not None and last_change_date >= date_to
+        # codex 소급[P2] 2026-07-20: 보류 판정도 **창을 절체한 그 변경일**(cpc_change =
+        # source='ad'면 소재입찰 변경일, 'group'이면 adgroup 변경일) 기준 — 종전엔
+        # last_change_date 고정이라 소재입찰을 오늘 바꾼 미연결 유닛(adgroup 변경 없음 =
+        # last_change None)이 귀속 지연 완충 없이 당일 zero_conv로 즉시 후보 진입했다.
+        hold_zero_conv = cpc_change is not None and cpc_change >= date_to
         reason: str | None = None
         if conv_amt == 0:
             if hold_zero_conv:
