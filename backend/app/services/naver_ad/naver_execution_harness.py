@@ -685,11 +685,15 @@ def _execute_update_bid(db: Session, proposal: NaverProposal, now: datetime) -> 
     # (adgroup_window_agg 창에 실적이 없거나 재조회가 실패하면 여전히 None일 수 있음) —
     # executor가 실행 직전 한 번 더 완전성을 확인해 fail-closed로 막는다(guardrail_gate
     # 자체는 변경하지 않음 — S2의 blanket 차단을 이 데이터 기반 차단으로 대체).
-    if proposal.target_type in ("adgroup", "ad") and proposal.proposal_type in ("bid_up", "growth_bid_up"):
+    # GATE P2-B(D-NAO-66 IU): "keyword"도 완전성 게이트에 포함 — 종전엔 adgroup/ad만이었고
+    # 키워드 UP의 BEP 바닥은 핫셋 클릭 게이트·정착창 검사와의 암묵적 커플링에 기대고 있었다.
+    # IU가 장중-단독 UP(정산 판정불가 유닛)을 열었으므로 키워드도 컨텍스트 완전성(BEP 원료·
+    # 일예산)을 명시적으로 보장한다(가드 약화 없음 — keyword 브랜치는 이 원료를 원래 채움).
+    if proposal.target_type in ("adgroup", "ad", "keyword") and proposal.proposal_type in ("bid_up", "growth_bid_up"):
         # guardrail_gate._check_bid의 up 전용 검사(BEP·스톱로스·일예산)는 그 원료가 None이면
         # 전부 fail-open(검사 건너뜀)이다 — 컨텍스트가 불완전한 채 넘기면 D-NAO-1 이익하한·
-        # 일예산 상한이 조용히 우회된다. 각 원료의 소스가 달라(BEP/스톱로스=adgroup_window_agg,
-        # 일예산=당일 스냅샷+_get_adgroup) 하나가 채워져도 다른 게 빌 수 있으므로, executor가
+        # 일예산 상한이 조용히 우회된다. 각 원료의 소스가 달라(BEP/스톱로스=window_agg,
+        # 일예산=당일 스냅샷+라이브 재조회) 하나가 채워져도 다른 게 빌 수 있으므로, executor가
         # 실행 직전 완전성을 종합 확인해 fail-closed로 막는다(guardrail_gate 자체는 불변).
         missing = []
         if context.get("roas_corrected") is None or context.get("target_roas") is None:
@@ -709,9 +713,9 @@ def _execute_update_bid(db: Session, proposal: NaverProposal, now: datetime) -> 
             missing.append(f"일예산(daily_budget={daily_budget!r}, cost_today={cost_today!r})")
         if missing:
             reason = (
-                "adgroup 증액 가드 컨텍스트 불완전(fail-closed) — " + ", ".join(missing)
+                f"{proposal.target_type} 증액 가드 컨텍스트 불완전(fail-closed) — " + ", ".join(missing)
                 + " (guardrail_gate의 해당 up 검사는 값이 None이면 fail-open이라 executor가 "
-                "메꿈, codex[P1] D-NAO-43 S3)"
+                "메꿈, codex[P1] D-NAO-43 S3 + GATE P2-B keyword 확장)"
             )
             _guard_failure(db, proposal, now, "update_bid", reason)
             raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")

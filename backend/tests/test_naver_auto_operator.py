@@ -53,10 +53,11 @@ def _settings(db, *, campaign_id=CAMPAIGN, auto_operate=True, optimizer="ours",
 
     seed_chain: campaign 엔티티(on)+adgroup grp-1(on, parent=campaign) — codex 2R[P2]
       부모 체인 활성 요구를 기본 충족(키워드 테스트 엔티티는 parent_id='grp-1' 규약).
-    seed_snapshot: 당일 NaverHourlySnapshot(cost=0, snapshot_hour=23) — codex 2R[P1-2]
-      부재 fail-closed와 codex 3R[P1-1] 신선도(snapshot_hour >= now.hour-1, 23이면 어떤
-      now에도 신선)를 기본 통과(브레이커/신선도 자체를 검증하는 테스트는 False로 끄고
-      직접 시드)."""
+    seed_snapshot: 당일 NaverHourlySnapshot(cost=0, daily_budget=100000, snapshot_hour=23)
+      — codex 2R[P1-2] 부재 fail-closed·codex 3R[P1-1] 신선도(snapshot_hour >= now.hour-1,
+      23이면 어떤 now에도 신선)를 기본 통과 + IU1(D-NAO-66) 예산 여력 게이트(_budget_headroom_ok)
+      가 읽을 daily_budget/cost도 기본 채운다(capped·여력 있음: cost 0 < 예산 10만). 브레이커/
+      신선도/예산 소진 자체를 검증하는 테스트는 seed_snapshot=False로 끄고 직접 시드)."""
     db.add(NaverCampaignSettings(
         campaign_id=campaign_id, auto_operate=auto_operate, optimizer=optimizer,
         target_roas_override=target_roas_override,
@@ -69,7 +70,7 @@ def _settings(db, *, campaign_id=CAMPAIGN, auto_operate=True, optimizer="ours",
     if seed_snapshot:
         db.add(NaverHourlySnapshot(
             snapshot_at=NOW, ad_date=TODAY, snapshot_hour=23, campaign_id=campaign_id,
-            campaign_type="", cost=0, clk=0, imp=0,
+            campaign_type="", cost=0, clk=0, imp=0, daily_budget=100000,
         ))
     db.commit()
 
@@ -816,13 +817,15 @@ def test_hourly_lane_default_hold_when_rank_in_neutral_band(db):
         _hour(6, imp=15, clk=1, cost=50, avg_rank=3.2),
         _hour(7, imp=15, clk=1, cost=50, avg_rank=3.2),
         _hour(8, imp=10, clk=1, cost=50, avg_rank=3.2),
-    ]  # rank 2.5~4.0 사이(중립), today CPC=150/3=50원 < baseline100×2
+    ]  # today CPC=150/3=50원 < baseline100×2 (CPC 급등 아님)
     with patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
         result = auto_operator.run_hourly_lane(
             db, now=NOW, fetch_intraday=lambda tid, d: curve,
         )
     mock_exec.assert_not_called()
-    assert result["held"][0]["reason"] == "판정 조건 미충족(기본 hold)"
+    # D-NAO-66: 순위 중립대 개념 폐지 — DOWN(CPC/loss) 조건도 UP(tally/정착ROAS) 근거도 없어 hold.
+    # 순위 전제가 사라졌으니 hold 사유는 ROAS 미달(재시작 대기).
+    assert "재시작 대기(ROAS 미달)" in result["held"][0]["reason"]
 
 
 def test_hourly_lane_spend_circuit_breaker_holds_entire_campaign(db):
@@ -1100,12 +1103,12 @@ def test_hourly_lane_excludes_everything_when_campaign_entity_off(db):
 
 # ── codex 10R[P1]: 페이싱 기대·실측 시간경계 정렬 — 이른 분(:20) 저속 오판 차단 ──
 
-def test_hourly_lane_normal_pace_not_misjudged_slow_at_minute_20(db):
-    """기대치가 expected(hour=now.hour)=현재 시각 '종료'까지 누적인데 실측은 관측 시점까지
-    소진 — :20처럼 이른 분에는 기대가 과대해 정상 페이스가 저속으로 오판돼 증액이 나간다.
-    두 값 모두 완료 시간대 경계(now.hour-1 종료)로 정렬: 정상 페이스(선형 기대와 동일 비율
-    소진 — 12시 완료 경계 기대 0.5 vs 실측 500/1000=0.5) 타깃은 저속 아님 → UP 불발 hold."""
-    _settings(db, target_roas_override=Decimal("2.0"))
+def test_hourly_lane_normal_pace_no_longer_blocks_up_d_nao_66(db):
+    """D-NAO-66(IU1): 페이싱 저속 게이트 폐지 → 예산 여력 게이트로 대체. 종전엔 "정상 페이스"
+    (실측 0.5 = 완료 경계 기대 0.5)면 저속 아님으로 UP이 막혔다(hold). 이제는 페이스와 무관하게
+    정착창 ROAS≥target ∧ 일예산 잔여가 있으면 UP이 나간다("저속일 때만"이 아니라 "예산 남으면").
+    종전 hold → 신 UP 차등."""
+    _settings(db, target_roas_override=Decimal("2.0"))  # 기본 스냅샷: daily_budget 10만·cost 0(여력)
     window_from, window_to = _settlement_window()
     db.add(NaverEntity(entity_type="keyword", entity_id="nkw-pace", parent_id="grp-1",
                         campaign_id=CAMPAIGN, campaign_type="WEB_SITE", status="on"))
@@ -1113,11 +1116,11 @@ def test_hourly_lane_normal_pace_not_misjudged_slow_at_minute_20(db):
     _ad_row(db, keyword_id="nkw-pace", ad_date=window_from, clk=20, cost=7000, conv_direct_amt=21000)
     db.commit()
 
-    curve = [  # 완료 시간대(9~11) 합계 500 = 일평균 1000의 정확히 절반(12시 경계 선형 기대 0.5와 동률)
+    curve = [  # 완료 시간대(9~11) 합계 500 = 일평균의 절반(종전 '정상 페이스' = UP 불발이던 케이스)
         _hour(9, imp=15, clk=2, cost=167, avg_rank=5.0),
         _hour(10, imp=15, clk=2, cost=167, avg_rank=5.0),
         _hour(11, imp=15, clk=2, cost=166, avg_rank=5.0),
-    ]  # rank 5.0>4.0(UP 후보), CPC 500/6≈83<350×2 — 페이싱만이 UP 여부를 결정
+    ]  # CPC 500/6≈83<350×2(급등 아님) — 순위·페이싱 무관, ROAS+예산만이 UP을 결정
     now_minute20 = datetime(2026, 7, 20, 12, 20, 0)
     with patch.object(auto_operator.naver_sa_writer, "get_keyword", return_value={"bidAmt": 1000}), \
          patch.object(auto_operator.diagnosis, "correction_factor",
@@ -1126,25 +1129,34 @@ def test_hourly_lane_normal_pace_not_misjudged_slow_at_minute_20(db):
         result = auto_operator.run_hourly_lane(
             db, now=now_minute20, fetch_intraday=lambda tid, d: curve,
         )
-    mock_exec.assert_not_called()  # 정상 페이스 — 저속 오판으로 증액이 나가면 안 됨
-    assert result["approved"] == 0
-    assert result["held"][0]["reason"] == "판정 조건 미충족(기본 hold)"
+    mock_exec.assert_called_once()  # 예산 여력 있으면 정상 페이스여도 UP(D-NAO-66)
+    saved = db.get(NaverProposal, mock_exec.call_args[0][1])
+    assert saved.proposal_type == "bid_up"
+    assert "ROAS-UP" in saved.rationale and "예산 여력" in saved.rationale
 
 
-def test_hourly_lane_genuinely_slow_pace_still_fires_up(db):
-    """회귀 가드: 실제 저속(완료 경계 기대 0.5 대비 실측 0.05 — 큰 미달) 타깃은 여전히 UP."""
-    _settings(db, target_roas_override=Decimal("2.0"))
+def test_hourly_lane_up_held_when_daily_budget_exhausted(db):
+    """D-NAO-66(IU1) 예산 여력 게이트 반대측: 정착창 ROAS≥target여도 일예산을 이미 소진했으면
+    (cost_today ≥ daily_budget) UP은 hold — 예산 불가침(§0 불변 가드). PLAN §3-1④."""
+    _settings(db, target_roas_override=Decimal("2.0"), seed_snapshot=False)
+    # capped 예산 + 소진 완료 스냅샷(now=12:20과 same-hour라 신선). cost 2500 ≥ 예산 2000(소진)
+    # 이지만 서킷브레이커(정착창 일평균 1000×3=3000)는 안 걸리게(2500<3000) 맞춤 — 예산 여력
+    # 게이트만 단독 검증.
+    db.add(NaverHourlySnapshot(
+        snapshot_at=datetime(2026, 7, 20, 12, 5, 0), ad_date=TODAY, snapshot_hour=12,
+        campaign_id=CAMPAIGN, campaign_type="", cost=2500, clk=100, imp=1000, daily_budget=2000,
+    ))
     window_from, window_to = _settlement_window()
-    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-slow", parent_id="grp-1",
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-exhaust", parent_id="grp-1",
                         campaign_id=CAMPAIGN, campaign_type="WEB_SITE", status="on"))
-    _ad_row(db, keyword_id="nkw-slow", ad_date=window_from, clk=20, cost=7000, conv_direct_amt=21000)
+    _ad_row(db, keyword_id="nkw-exhaust", ad_date=window_from, clk=20, cost=7000, conv_direct_amt=21000)
     db.commit()
 
     curve = [
         _hour(9, imp=15, clk=2, cost=17, avg_rank=5.0),
         _hour(10, imp=15, clk=2, cost=17, avg_rank=5.0),
         _hour(11, imp=15, clk=2, cost=16, avg_rank=5.0),
-    ]  # 완료 시간대 합 50 → 실측 0.05 ≪ 기대 0.5(선형)
+    ]  # 정착창 ROAS 3.0≥2.0(UP 후보)이나 예산 소진 → hold
     now_minute20 = datetime(2026, 7, 20, 12, 20, 0)
     with patch.object(auto_operator.naver_sa_writer, "get_keyword", return_value={"bidAmt": 1000}), \
          patch.object(auto_operator.diagnosis, "correction_factor",
@@ -1153,9 +1165,9 @@ def test_hourly_lane_genuinely_slow_pace_still_fires_up(db):
         result = auto_operator.run_hourly_lane(
             db, now=now_minute20, fetch_intraday=lambda tid, d: curve,
         )
-    mock_exec.assert_called_once()
-    saved = db.get(NaverProposal, mock_exec.call_args[0][1])
-    assert saved.proposal_type == "bid_up"
+    mock_exec.assert_not_called()
+    assert result["approved"] == 0
+    assert any("예산 여력 없음" in h["reason"] and "소진" in h["reason"] for h in result["held"])
 
 
 # ── codex 1R[P2]: 진행 중(부분) 시간대 제외 — 완료 시간대(hour < now.hour)만 판정에 사용 ──
@@ -1176,7 +1188,7 @@ def test_hourly_lane_excludes_in_progress_hour_bucket(db):
         _hour(9, imp=15, clk=1, cost=50, avg_rank=3.2),
         _hour(10, imp=15, clk=1, cost=50, avg_rank=3.2),
         _hour(11, imp=15, clk=1, cost=50, avg_rank=3.2),
-        _hour(12, imp=100, clk=1, cost=50, avg_rank=1.0),  # 진행 중 부분 버킷 — 포함되면 down 오판
+        _hour(12, imp=100, clk=1, cost=50, avg_rank=1.0),  # 진행 중 부분 버킷 — 포함돼도(과열밴드 폐지) DOWN 아님
     ]
     with patch.object(auto_operator.naver_sa_writer, "get_keyword",
                        return_value={"bidAmt": 1000}), \
@@ -1184,8 +1196,9 @@ def test_hourly_lane_excludes_in_progress_hour_bucket(db):
         result = auto_operator.run_hourly_lane(
             db, now=now, fetch_intraday=lambda tid, d: curve,
         )
-    mock_exec.assert_not_called()  # 완료 3개(9~11, 중립)로 판정 → hold
-    assert result["held"][0]["reason"] == "판정 조건 미충족(기본 hold)"
+    mock_exec.assert_not_called()  # 완료 3개(9~11)만 판정 — CPC/loss/tally 근거 없어 hold
+    # D-NAO-66: 진행 중 부분 버킷 제외 로직은 그대로 검증(완료 버킷만 판정). hold 사유는 ROAS 미달.
+    assert "재시작 대기(ROAS 미달)" in result["held"][0]["reason"]
 
 
 def test_hourly_lane_completed_buckets_only_for_imp_gate(db):
@@ -1383,18 +1396,23 @@ def test_hourly_lane_probe_fires_on_hold_verdict_and_tags_probe(db):
 
 
 def test_hourly_lane_probe_not_fired_when_verdict_is_action(db):
-    """밴드 판정이 down(rank<2.5)이면 탐침 미발동(이중 발동 금지) — 정상 시간당 밴드로 처리."""
+    """밴드 판정이 action(여기선 loss 고삐 DOWN)이면 탐침 미발동(이중 발동 금지) — 정상 처리.
+    ★D-NAO-66: 과열밴드 DOWN이 폐지돼 이 '액션' 트리거를 loss 고삐로 교체. 탐침 조건(clk=0·
+    imp≥30·창내 rank≥2.5)을 모두 충족하는 곡선이지만, loss 고삐가 먼저 DOWN을 내므로 verdict가
+    hold가 아니라 탐침 분기에 진입조차 하지 않음을 검증한다."""
     _settings(db)
+    _seed_product_bep(db, adgroup_id="grp-1", bep_roas=Decimal("2.5"))  # 원가 있어 고삐 평가 가능
     window_from, window_to = _settlement_window()
     db.add(NaverEntity(entity_type="keyword", entity_id="nkw-dn", parent_id="grp-1",
                         campaign_id=CAMPAIGN, campaign_type="WEB_SITE", status="on"))
-    _ad_row(db, keyword_id="nkw-dn", ad_date=window_from, clk=10, cost=100)
+    _ad_row(db, keyword_id="nkw-dn", ad_date=window_from, clk=10, cost=100)  # 정착창 일평균 cost 100/7≈14
     db.commit()
 
-    # rank<2.5 → down. clk=0이라 탐침 조건 일부 충족하나 verdict가 hold가 아니라 탐침 분기 미진입.
-    curve = [_hour(9, imp=20, clk=0, cost=200, avg_rank=2.0),
-             _hour(10, imp=20, clk=0, cost=200, avg_rank=2.0),
-             _hour(11, imp=20, clk=0, cost=200, avg_rank=2.0)]
+    # clk=0·imp≥30·창내 rank 3.0≥2.5 = 탐침 조건 충족. 그러나 conv_cnt=0 → est ROAS 0<BEP 2.5,
+    # 당일소진 600≥하루평균14 → loss 고삐 DOWN이 먼저 발동(탐침 분기 미진입). CPC는 clk=0이라 None(급등 아님).
+    curve = [_hour(9, imp=20, clk=0, cost=200, avg_rank=3.0, conv_cnt=0),
+             _hour(10, imp=20, clk=0, cost=200, avg_rank=3.0, conv_cnt=0),
+             _hour(11, imp=20, clk=0, cost=200, avg_rank=3.0, conv_cnt=0)]
     now_midday = datetime(2026, 7, 20, 12, 20, 0)
     with patch.object(auto_operator.naver_sa_writer, "get_keyword", return_value={"bidAmt": 1000}), \
          patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
@@ -1406,7 +1424,8 @@ def test_hourly_lane_probe_not_fired_when_verdict_is_action(db):
     assert result["probed"] == 0
     saved = db.get(NaverProposal, mock_exec.call_args[0][1])
     assert saved.proposal_type == "bid_down"
-    assert saved.approval_source == auto_operator.APPROVAL_SOURCE_HOURLY  # 탐침 아님
+    assert saved.rationale.startswith("[순위고삐]")  # loss 고삐 DOWN(탐침 아님)
+    assert saved.approval_source == auto_operator.APPROVAL_SOURCE_HOURLY
 
 
 def test_hourly_lane_probe_not_fired_when_kill_switch_off(db):
@@ -1953,25 +1972,29 @@ def test_dl4_judge_hourly_restart_waiting_reason_when_settlement_roas_below_targ
             curve=curve, now=now_midday,
         )
     assert verdict["direction"] == "hold"
-    assert "재시작 대기(정착창 ROAS 미달)" in verdict["reason"]
+    # D-NAO-66: 순위 전제 폐지 후 "재시작 대기"의 진짜 사유 = ROAS 미달(장중 tally·정착 둘 다 불통과).
+    assert "재시작 대기(ROAS 미달)" in verdict["reason"]
+    assert "정착" in verdict["reason"] and "ROAS" in verdict["reason"]
 
 
-def test_dl4_general_up_skipped_when_learned_band_reached(db):
-    """★item2 핵심(과climb 0, 신규 배선): 재시작 상향(일반 band-return UP)이 학습된 최적밴드
-    (4.0+·이미 도달)를 넘지 않도록 _learned_optimal_skip 천장이 UP을 취소하고 hold로 남긴다 —
-    proposal 미생성. RED 前: 일반 UP은 이 게이트를 안 타 과climb됐다(탐침 경로에만 있었음)."""
+def test_dl4_general_up_not_capped_by_learned_band_d_nao_66(db):
+    """★D-NAO-66(IU2) 재시작 천장 폐지(구 test_dl4_general_up_skipped_when_learned_band_reached
+    를 반전): 종전엔 일반 UP이 학습밴드(4.0+·이미 도달)에 걸려 _learned_optimal_skip 천장이 상향을
+    취소했다(hold). 이제 learned band는 하드 캡이 아니라 **탐침 프라이어**로 강등 — ROAS-driven
+    UP은 밴드를 참조하지 않고 정착창 ROAS≥target ∧ 예산 여력이면 그대로 상향한다(순위는 목표가
+    아니라 결과). 오버슛은 스텝1+쿨다운2h로 자연 캡."""
     _settings(db, target_roas_override=Decimal("2.0"))
     window_from, window_to = _settlement_window()
     db.add(NaverEntity(entity_type="keyword", entity_id="nkw-cap", parent_id="grp-1",
                         campaign_id=CAMPAIGN, campaign_type="WEB_SITE", status="on"))
     _ad_row(db, keyword_id="nkw-cap", ad_date=window_from, clk=20, cost=7000, conv_direct_amt=21000)  # ROAS 3.0≥2.0
-    _seed_learned_band(db, avg_rank=Decimal("4.5"))  # 학습 최적밴드 4.0+(상한 없음) — 이미 그 밴드
+    _seed_learned_band(db, avg_rank=Decimal("4.5"))  # 학습 최적밴드 4.0+ — 종전엔 여기서 UP 취소됐음
 
     up_curve = [
         _hour(10, imp=15, clk=2, cost=35, avg_rank=5.0),
         _hour(11, imp=15, clk=2, cost=35, avg_rank=5.0),
         _hour(12, imp=15, clk=2, cost=30, avg_rank=5.0),
-    ]  # rank 5.0>4 → UP 자격이나 학습밴드 4.0+에 이미 있어 재시작 천장이 상향 취소
+    ]  # rank 5.0 — 학습밴드 4.0+에 이미 있으나 D-NAO-66은 밴드로 UP을 막지 않는다
     now_midday = datetime(2026, 7, 20, 12, 20, 0)
     with patch.object(auto_operator.naver_sa_writer, "get_keyword", return_value={"bidAmt": 1000}), \
          patch.object(auto_operator.diagnosis, "correction_factor",
@@ -1980,21 +2003,22 @@ def test_dl4_general_up_skipped_when_learned_band_reached(db):
         result = auto_operator.run_hourly_lane(
             db, now=now_midday, fetch_intraday=lambda tid, d: up_curve,
         )
-    mock_exec.assert_not_called()  # 과climb 0
-    assert result["approved"] == 0
-    assert any("재시작 천장" in h["reason"] for h in result["held"])
-    assert db.query(NaverProposal).filter(NaverProposal.target_id == "nkw-cap").count() == 0
+    mock_exec.assert_called_once()  # 학습밴드 천장 없음 — ROAS+예산으로 UP 진행
+    assert result["approved"] == 1
+    assert not any("재시작 천장" in h["reason"] for h in result["held"])
+    saved = db.get(NaverProposal, mock_exec.call_args[0][1])
+    assert saved.proposal_type == "bid_up"
 
 
-def test_dl4_general_up_proceeds_when_below_learned_band(db):
-    """item2(천장이 무조건 차단 아님): 학습 최적밴드(2.0-2.5)보다 현재 rank(5.0)가 하위면 재시작
-    UP은 그대로 진행·실행된다 — 천장은 밴드 도달 시에만 작동('있는 셀' 통과측)."""
+def test_dl4_general_up_proceeds_regardless_of_learned_band(db):
+    """D-NAO-66: 학습밴드가 상한이든 하한이든 ROAS-driven UP은 참조하지 않고 진행(밴드=탐침
+    프라이어). 학습밴드 2.0-2.5(현재 rank 5.0가 하위)든 위 4.0+든 결과 동일 — UP 실행."""
     _settings(db, target_roas_override=Decimal("2.0"))
     window_from, window_to = _settlement_window()
     db.add(NaverEntity(entity_type="keyword", entity_id="nkw-go", parent_id="grp-1",
                         campaign_id=CAMPAIGN, campaign_type="WEB_SITE", status="on"))
     _ad_row(db, keyword_id="nkw-go", ad_date=window_from, clk=20, cost=7000, conv_direct_amt=21000)
-    _seed_learned_band(db, avg_rank=Decimal("2.2"))  # 학습 최적밴드 2.0-2.5(상한 2.5)
+    _seed_learned_band(db, avg_rank=Decimal("2.2"))  # 학습 최적밴드 2.0-2.5 — UP 판정에 무관(참조 안 함)
 
     up_curve = [
         _hour(10, imp=15, clk=2, cost=35, avg_rank=5.0),
@@ -2015,9 +2039,11 @@ def test_dl4_general_up_proceeds_when_below_learned_band(db):
     assert saved.approval_source == auto_operator.APPROVAL_SOURCE_HOURLY  # 일반 재시작 UP(탐침 아님)
 
 
-def test_dl4_winner_inertia_band_inside_unit_holds_no_forced_down(db):
-    """item3(승자 관성): 밴드 안(2.5≤rank≤4)·ROAS 양호·페이싱 정상 유닛은 밤사이/다음날 강제
-    하향 경로가 없다 → hold(direction!=down, leash 미발동). 고삐 DOWN은 '오늘 loss'에만 작동."""
+def test_iu1_band_inside_healthy_unit_climbs_up_d_nao_66(db):
+    """★D-NAO-66(IU1) §3-1①: 밴드 안(rank 3.0)·ROAS 양호·loss 없음 유닛은 강제 하향이 아니라
+    profitable-climb으로 UP(순위 무관, target ROAS 유지가 지배). 종전엔 rank가 4 이하라 UP 전제
+    (>4)에 안 걸려 hold였다 → 신 UP 차등. 승자는 내려가지 않을 뿐 아니라(관성) 이익 구간이면
+    계속 오른다(§0 사이클). leash는 미발동(오늘 loss 없음)."""
     _settings(db, target_roas_override=Decimal("2.0"))
     _seed_product_bep(db, adgroup_id="grp-1", bep_roas=Decimal("2.0"))  # 고삐가 '평가'되되 미발동임을 보장
     window_from, window_to = _settlement_window()
@@ -2029,37 +2055,236 @@ def test_dl4_winner_inertia_band_inside_unit_holds_no_forced_down(db):
         _hour(10, imp=20, clk=2, cost=200, avg_rank=3.0, conv_cnt=2),
         _hour(11, imp=20, clk=2, cost=200, avg_rank=3.0, conv_cnt=2),
         _hour(12, imp=20, clk=2, cost=200, avg_rank=3.0, conv_cnt=2),
-    ]  # 밴드 안 rank 3.0·CPC 정상·오늘 loss 없음
+    ]  # 밴드 안 rank 3.0·CPC 정상·오늘 loss 없음(장중 est ROAS = conv 6×price1000/600 = 10 ≥ target×1.2)
     now_midday = datetime(2026, 7, 20, 12, 20, 0)
-    verdict = auto_operator._judge_hourly(
-        db, target_type="keyword", target_id="nkw-inertia", campaign_id=CAMPAIGN,
-        curve=curve, now=now_midday,
-    )
-    assert verdict["direction"] == "hold"
-    assert verdict.get("leash") is not True  # 강제 하향 없음(관성)
+    # 보정계수 실측(factor 1) 패치 — 정착창 ROAS 3.0 ≥ 2.0(settle ok). 미패치 시 주문매출 0으로
+    # factor 0 → 정착 "명시적 미달" → GATE P2-A 정산 거부권이 발동해 이 테스트의 관심사(순위
+    # 전제 폐지)가 아닌 다른 게이트를 검증하게 된다(거부권 자체는 전용 테스트가 검증).
+    with patch.object(auto_operator.diagnosis, "correction_factor",
+                       return_value={"factor": Decimal("1"), "source": "actual_revenue_ratio"}):
+        verdict = auto_operator._judge_hourly(
+            db, target_type="keyword", target_id="nkw-inertia", campaign_id=CAMPAIGN,
+            curve=curve, now=now_midday,
+        )
+    assert verdict["direction"] == "up"  # 밴드 안이어도 이익이면 상향(종전 hold와 차등)
+    assert verdict.get("leash") is not True  # 강제 하향 없음(오늘 loss 없음)
+    assert "ROAS-UP(순위 무관, D-NAO-66)" in verdict["reason"]
 
 
-def test_dl4_overheated_unit_still_down_for_profit_protection(db):
-    """item3(관성↔과열 경계): 밴드 상단 초과(rank<2.5=과열)는 이익 보호로 여전히 DOWN.
-    관성(밴드 안 승자 안 내림)과 반대 edge라 충돌 없음 — 스팟밴드가 관성 상한이자 과열 하한."""
+def test_iu2_top_rank_no_longer_force_downed_when_no_loss(db):
+    """★D-NAO-66(IU2) §3-1②: 밴드 상단(rank 2.0=1~2등)이어도 순위만으로는 강제 하향하지 않는다
+    (과열밴드 DOWN 폐지). loss 신호(CPC 급등·est ROAS<BEP)가 없으면 DOWN이 아니라 hold — 순위는
+    목표가 아니라 결과. 종전엔 rank<2.5 = 무조건 과열밴드 DOWN이었다 → 신 hold 차등."""
     _settings(db)
     window_from, window_to = _settlement_window()
     db.add(NaverEntity(entity_type="keyword", entity_id="nkw-hot", parent_id="grp-1",
                         campaign_id=CAMPAIGN, campaign_type="WEB_SITE", status="on"))
+    # baseline CPC 100원(cost1000/clk10) → 당일 CPC 50(300/6)<200 급등 아님. 원가 미매핑 → loss 고삐 미평가.
     _ad_row(db, keyword_id="nkw-hot", ad_date=window_from, clk=10, cost=1000)
     db.commit()
     curve = [
         _hour(10, imp=20, clk=2, cost=100, avg_rank=2.0),
         _hour(11, imp=20, clk=2, cost=100, avg_rank=2.0),
         _hour(12, imp=20, clk=2, cost=100, avg_rank=2.0),
-    ]  # rank 2.0<2.5 → 과열밴드 DOWN
+    ]  # rank 2.0(상단) — 종전 과열밴드 DOWN, 이제 loss 신호 없어 hold
     now_midday = datetime(2026, 7, 20, 12, 20, 0)
     verdict = auto_operator._judge_hourly(
         db, target_type="keyword", target_id="nkw-hot", campaign_id=CAMPAIGN,
         curve=curve, now=now_midday,
     )
+    assert verdict["direction"] == "hold"  # 순위만으로 강제 하향 없음(과열밴드 폐지)
+    assert verdict.get("leash") is not True
+
+
+def test_iu2_top_rank_underwater_high_spend_still_leashed(db):
+    """★D-NAO-66(IU2) §3-1③ 안전망 생존: 과열밴드 DOWN을 삭제해도 상단 순위(rank 2.0)의 무전환
+    고지출 유닛은 loss 고삐 DOWN이 잡는다(전환 0 → est ROAS 0 < BEP, 당일소진≥하루평균). 상단이
+    이상 지출일 때의 안전망은 순위 규칙이 아니라 ROAS/BEP 규칙이 담당한다."""
+    _settings(db)
+    _seed_product_bep(db, adgroup_id="grp-1", bep_roas=Decimal("2.5"))  # 원가 매핑 → 고삐 평가 가능
+    window_from, window_to = _settlement_window()
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-bleed", parent_id="grp-1",
+                        campaign_id=CAMPAIGN, campaign_type="WEB_SITE", status="on"))
+    _ad_row(db, keyword_id="nkw-bleed", ad_date=window_from, clk=10, cost=700)  # 정착창 일평균 cost 100
+    db.commit()
+    curve = [
+        _hour(10, imp=20, clk=2, cost=200, avg_rank=2.0, conv_cnt=0),
+        _hour(11, imp=20, clk=2, cost=200, avg_rank=2.0, conv_cnt=0),
+        _hour(12, imp=20, clk=2, cost=200, avg_rank=2.0, conv_cnt=0),
+    ]  # rank 2.0 상단·전환 0·당일소진 600≥하루평균100 → est ROAS 0<BEP 2.5 → loss 고삐 DOWN
+    now_midday = datetime(2026, 7, 20, 12, 20, 0)
+    verdict = auto_operator._judge_hourly(
+        db, target_type="keyword", target_id="nkw-bleed", campaign_id=CAMPAIGN,
+        curve=curve, now=now_midday,
+    )
     assert verdict["direction"] == "down"
-    assert "과열밴드" in verdict["reason"]
+    assert verdict.get("leash") is True  # 순위 규칙이 아니라 ROAS/BEP 고삐가 안전망
+    assert "순위고삐" in verdict["reason"]
+
+
+# ── GATE P2-A(D-NAO-66): 정산 거부권(veto) + 장중-단독 UP 일 1스텝 캡 ──
+
+def _seed_executed_bid_up_today(db, *, target_id, changed_at, target_type="keyword"):
+    """오늘 성공한 상향 실쓰기 1건(change_log×proposal 조인 카운터 대상) 시드."""
+    p = NaverProposal(
+        proposal_type="bid_up", target_type=target_type, target_id=target_id,
+        campaign_id=CAMPAIGN, rationale="이전 상향", expected_effect="-", status="approved",
+        target_bid=1150,
+    )
+    db.add(p)
+    db.flush()
+    db.add(NaverChangeLog(
+        entity_type=target_type, entity_id=target_id, campaign_id=CAMPAIGN,
+        action="update_bid", dry_run=False, proposal_id=p.id,
+        after_value=json.dumps({"bidAmt": 1150, "userLock": False}),
+        changed_at=changed_at,
+    ))
+    db.commit()
+
+
+def test_gate_p2a_settlement_veto_blocks_intraday_only_up(db):
+    """①정산 거부권: 정착창이 **명시적 미달**(데이터 충분·ROAS 1.0<target 2.0)이면 장중 추정이
+    아무리 좋아도(tally 6·est ROAS 10) UP 금지 — 정산(간접전환 포함 실측)이 나쁘다는데 장중
+    추정(과대귀속 가능)만으로 올리지 않는다."""
+    _settings(db, target_roas_override=Decimal("2.0"))
+    _seed_product_bep(db, adgroup_id="grp-1", price=Decimal("1000"), bep_roas=Decimal("2.0"))
+    _leash_keyword(db, target_id="nkw-veto")
+    window_from, _ = _settlement_window()
+    _ad_row(db, keyword_id="nkw-veto", ad_date=window_from, clk=20, cost=7000, conv_direct_amt=7000)  # ROAS 1.0<2.0
+    db.commit()
+    curve = [
+        _hour(10, imp=20, clk=2, cost=200, avg_rank=3.0, conv_cnt=2),
+        _hour(11, imp=20, clk=2, cost=200, avg_rank=3.0, conv_cnt=2),
+        _hour(12, imp=20, clk=2, cost=100, avg_rank=3.0, conv_cnt=2),
+    ]  # est ROAS = 6000/500=12 ≥ 2.4(장중 좋음)·CPC 83<350×2·leash 미발동(est≥bep)
+    now_midday = datetime(2026, 7, 20, 12, 20, 0)
+    with patch.object(auto_operator.diagnosis, "correction_factor",
+                       return_value={"factor": Decimal("1"), "source": "actual_revenue_ratio"}):
+        verdict = auto_operator._judge_hourly(
+            db, target_type="keyword", target_id="nkw-veto", campaign_id=CAMPAIGN,
+            curve=curve, now=now_midday,
+        )
+    assert verdict["direction"] == "hold"
+    assert "정산 거부권" in verdict["reason"]
+
+
+def test_gate_p2a_intraday_only_up_capped_at_one_step_per_day(db):
+    """②장중-단독 일 1스텝 캡: 정착창 판정불가(실적 없음=unknown) + 장중 tally 좋음 → 오늘 첫
+    UP은 발사, 성공 상향 1건이 기록된 뒤엔 같은 날 추가 UP 금지(hold — +15%/일 제한). 다음날
+    정산이 따라와 veto(below)하거나 승인(ok)한다."""
+    _settings(db, target_roas_override=Decimal("2.0"))
+    _seed_product_bep(db, adgroup_id="grp-1", price=Decimal("1000"), bep_roas=Decimal("2.0"))
+    _leash_keyword(db, target_id="nkw-cap1")
+    window_from, _ = _settlement_window()
+    _ad_row(db, keyword_id="nkw-cap1", ad_date=window_from, clk=20, cost=0)  # 실적 cost 0 → settle unknown
+    db.commit()
+    curve = [
+        _hour(10, imp=20, clk=2, cost=250, avg_rank=3.0, conv_cnt=2),
+        _hour(11, imp=20, clk=2, cost=250, avg_rank=3.0, conv_cnt=1),
+    ]  # est ROAS = 3000/500=6.0 ≥ 2.4·tally 3≥2·imp 40≥30
+    now_midday = datetime(2026, 7, 20, 12, 20, 0)
+
+    # 오늘 첫 판정 — 장중 단독 근거 UP 발사
+    first = auto_operator._judge_hourly(
+        db, target_type="keyword", target_id="nkw-cap1", campaign_id=CAMPAIGN,
+        curve=curve, now=now_midday,
+    )
+    assert first["direction"] == "up"
+    assert "장중 tally" in first["reason"]
+
+    # 오늘 성공 상향 1건 기록 후 — 같은 날 두 번째 장중 단독 UP은 캡에 걸려 hold
+    _seed_executed_bid_up_today(db, target_id="nkw-cap1", changed_at=now_midday - timedelta(hours=2))
+    second = auto_operator._judge_hourly(
+        db, target_type="keyword", target_id="nkw-cap1", campaign_id=CAMPAIGN,
+        curve=curve, now=now_midday,
+    )
+    assert second["direction"] == "hold"
+    assert "1스텝 캡" in second["reason"]
+
+
+def test_gate_p2a_settlement_ok_up_not_limited_by_one_step_cap(db):
+    """③settle ok 근거 UP은 1스텝 캡 미적용 — 오늘 이미 성공 상향이 있어도 정착창 실측이
+    합격이면 UP 진행(기존 가드레일 일일상한 3이 최종 방어선, 판정 레벨 추가 제한 없음)."""
+    _settings(db, target_roas_override=Decimal("2.0"))
+    _leash_keyword(db, target_id="nkw-settle")
+    window_from, _ = _settlement_window()
+    _ad_row(db, keyword_id="nkw-settle", ad_date=window_from, clk=20, cost=7000, conv_direct_amt=21000)  # ROAS 3.0≥2.0
+    db.commit()
+    now_midday = datetime(2026, 7, 20, 12, 20, 0)
+    _seed_executed_bid_up_today(db, target_id="nkw-settle", changed_at=now_midday - timedelta(hours=3))
+    curve = [
+        _hour(10, imp=20, clk=2, cost=35, avg_rank=3.0),
+        _hour(11, imp=20, clk=2, cost=35, avg_rank=3.0),
+    ]  # conv_cnt 0 → intraday 불발, settle ok 단독 근거
+    with patch.object(auto_operator.diagnosis, "correction_factor",
+                       return_value={"factor": Decimal("1"), "source": "actual_revenue_ratio"}):
+        verdict = auto_operator._judge_hourly(
+            db, target_type="keyword", target_id="nkw-settle", campaign_id=CAMPAIGN,
+            curve=curve, now=now_midday,
+        )
+    assert verdict["direction"] == "up"
+    assert "정착창 실측" in verdict["reason"]
+
+
+# ── IU1(D-NAO-66) 장중 tally UP 게이트 순수 단위(_intraday_up_ok) — §3-1④ fail-closed ──
+
+def test_intraday_up_ok_fails_when_price_unknown(db):
+    """원가 미확인 상품(product_bep 매핑 없음)이면 price=None → 장중 UP 판정 불가(fail-closed,
+    RL3 고삐와 동일 관례)."""
+    _settings(db, target_roas_override=Decimal("2.0"))
+    _leash_keyword(db, target_id="nkw-noprice")  # 원가 매핑 없음
+    curve = [_hour(9, imp=40, clk=2, cost=100, avg_rank=3.0, conv_cnt=3)]
+    now_midday = datetime(2026, 7, 20, 12, 20, 0)
+    ok, reason = auto_operator._intraday_up_ok(
+        db, target_type="keyword", target_id="nkw-noprice", campaign_id=CAMPAIGN,
+        curve=curve, now=now_midday,
+    )
+    assert ok is False and "단가 미확인" in reason
+
+
+def test_intraday_up_ok_fails_when_conv_tally_below_min(db):
+    """직접전환 tally < _INTRADAY_UP_MIN_CONV(2)면 추정 ROAS가 높아도 상향 근거 부족(불발)."""
+    _settings(db, target_roas_override=Decimal("2.0"))
+    _seed_product_bep(db, adgroup_id="grp-1", price=Decimal("1000"), bep_roas=Decimal("2.0"))
+    _leash_keyword(db, target_id="nkw-thin")
+    # conv 1건뿐(<2) — 추정 ROAS(1000/100=10)는 target×1.2 넘어도 tally 미달로 불발
+    curve = [_hour(9, imp=40, clk=2, cost=100, avg_rank=3.0, conv_cnt=1)]
+    now_midday = datetime(2026, 7, 20, 12, 20, 0)
+    ok, reason = auto_operator._intraday_up_ok(
+        db, target_type="keyword", target_id="nkw-thin", campaign_id=CAMPAIGN,
+        curve=curve, now=now_midday,
+    )
+    assert ok is False and "tally" in reason
+
+
+def test_intraday_up_ok_fails_when_roas_below_margin(db):
+    """추정 ROAS가 target×여유계수(1.2)에 못 미치면 불발(과소추정에도 확실 이익 구간만 상향)."""
+    _settings(db, target_roas_override=Decimal("2.0"))
+    _seed_product_bep(db, adgroup_id="grp-1", price=Decimal("1000"), bep_roas=Decimal("2.0"))
+    _leash_keyword(db, target_id="nkw-marg")
+    # conv 2·price 1000 → revenue 2000, cost 1000 → 추정 ROAS 2.0 < target 2.0×1.2=2.4 → 불발
+    curve = [_hour(9, imp=40, clk=2, cost=1000, avg_rank=3.0, conv_cnt=2)]
+    now_midday = datetime(2026, 7, 20, 12, 20, 0)
+    ok, reason = auto_operator._intraday_up_ok(
+        db, target_type="keyword", target_id="nkw-marg", campaign_id=CAMPAIGN,
+        curve=curve, now=now_midday,
+    )
+    assert ok is False and "여유 미달" in reason
+
+
+def test_intraday_up_ok_true_when_all_met(db):
+    """전환 tally≥2 ∧ 추정 ROAS ≥ target×1.2 ∧ 표본 충분 → 장중 UP 근거 성립(순위 무관)."""
+    _settings(db, target_roas_override=Decimal("2.0"))
+    _seed_product_bep(db, adgroup_id="grp-1", price=Decimal("1000"), bep_roas=Decimal("2.0"))
+    _leash_keyword(db, target_id="nkw-up-ok")
+    # conv 3·price 1000 → revenue 3000, cost 500 → 추정 ROAS 6.0 ≥ 2.4, imp 40≥30
+    curve = [_hour(9, imp=40, clk=2, cost=500, avg_rank=3.0, conv_cnt=3)]
+    now_midday = datetime(2026, 7, 20, 12, 20, 0)
+    ok, reason = auto_operator._intraday_up_ok(
+        db, target_type="keyword", target_id="nkw-up-ok", campaign_id=CAMPAIGN,
+        curve=curve, now=now_midday,
+    )
+    assert ok is True and "tally 충족" in reason
 
 
 def test_dl4_morning_restart_up_passes_cap_after_yesterdays_downs_reset():

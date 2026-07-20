@@ -413,7 +413,8 @@ def test_hourly_lane_circuit_breaker_records_campaign_level_blocked(db):
 
 
 def test_hourly_lane_neutral_band_hold_writes_no_diary_row(db):
-    """소음 차단 설계: 판정 hold(밴드 정상 — 순위 2.5~4)는 액션 의도가 없어 diary 행 없음."""
+    """소음 차단 설계: 판정 hold(액션 의도 없음)는 diary 행 없음. ★D-NAO-66: 순위 중립대 개념
+    폐지 — DOWN(CPC/loss) 근거도 UP(tally/정착ROAS) 근거도 없어 hold(재시작 대기)."""
     _lane_settings(db)
     window_from = auto_operator._settlement_window(TODAY)[0]
     db.add(NaverEntity(entity_type="keyword", entity_id="nkw-neutral", parent_id="grp-1",
@@ -422,7 +423,7 @@ def test_hourly_lane_neutral_band_hold_writes_no_diary_row(db):
     _ad_row(db, keyword_id="nkw-neutral", ad_date=window_from, clk=10, cost=1000)
     db.commit()
 
-    # avg_rank=3.0 (2.5~4.0 사이 = 중립밴드), imp 충분 → 판정 hold(기본)
+    # avg_rank=3.0·imp 충분·CPC 정상·원가 미매핑(loss 고삐 미평가)·정착 conv 없음 → 판정 hold
     curve = [
         _hour(6, imp=15, clk=2, cost=100, avg_rank=3.0),
         _hour(7, imp=15, clk=2, cost=100, avg_rank=3.0),
@@ -431,7 +432,7 @@ def test_hourly_lane_neutral_band_hold_writes_no_diary_row(db):
     result = auto_operator.run_hourly_lane(db, now=NOW, fetch_intraday=lambda tid, d: curve)
 
     assert result["approved"] == 0
-    assert any("판정 조건 미충족" in h["reason"] for h in result["held"])
+    assert any("재시작 대기(ROAS 미달)" in h["reason"] for h in result["held"])
     assert db.query(OpsDiaryEntry).count() == 0  # 관찰 소음 — 기록 안 함
 
 
@@ -491,7 +492,11 @@ def test_harness_execute_success_writes_execute_diary_row(db):
     result = _kw_write_result(before={"bidAmt": 190, "userLock": False},
                               after={"bidAmt": 210, "userLock": False})
 
-    with patch.object(harness, "_build_guardrail_context", return_value={}), \
+    # GATE P2-B(D-NAO-66 IU): keyword bid_up도 S3 완전성 게이트 대상 — BEP·일예산 원료를
+    # 완전히 시드해야 실행 경로에 도달한다(가드 약화 금지, 테스트를 게이트에 정합).
+    ctx = {"current_bid": 190, "roas_corrected": 5.0, "target_roas": 2.0, "unconverted_spend": 0,
+           "cost_today": 1000, "daily_budget": 50_000, "last_change_at": None, "changes_today_count": 0}
+    with patch.object(harness, "_build_guardrail_context", return_value=ctx), \
          patch.object(harness.guardrail_gate, "check", return_value=None), \
          patch.object(harness.naver_sa_writer, "update_keyword_bid", return_value=result):
         log_entry = harness.execute(db, p.id, dry_run=False)

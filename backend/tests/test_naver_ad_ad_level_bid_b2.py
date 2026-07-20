@@ -509,11 +509,14 @@ def _seed_hourly_shopping(db, *, adgroup_id="grp-hot"):
 
 
 def _overheat_curve():
-    """가중 rank 2.0 < 2.5(과열밴드) → 밴드 DOWN 판정 곡선."""
+    """밴드 DOWN 판정 곡선 — ★D-NAO-66으로 과열밴드 DOWN(rank<2.5) 폐지됨에 따라 CPC 급등으로
+    DOWN을 유발한다(정착창 baseline CPC 100원 = _seed_hourly_shopping cost2000/clk20 → 당일
+    CPC 250원 > 100×2). 이 파일 테스트는 'DOWN 방향의 소재-레벨 라우팅'이 관심사라, DOWN을
+    내는 트리거는 CPC 급등이든 순위든 무방(rank는 판정에서 무관해짐)."""
     return [
-        {"hour": 6, "imp": 15, "clk": 2, "cost": 100, "avg_rank": 2.0},
-        {"hour": 7, "imp": 15, "clk": 2, "cost": 100, "avg_rank": 2.0},
-        {"hour": 8, "imp": 15, "clk": 2, "cost": 100, "avg_rank": 2.0},
+        {"hour": 6, "imp": 15, "clk": 2, "cost": 500, "avg_rank": 2.0},
+        {"hour": 7, "imp": 15, "clk": 2, "cost": 500, "avg_rank": 2.0},
+        {"hour": 8, "imp": 15, "clk": 2, "cost": 500, "avg_rank": 2.0},
     ]
 
 

@@ -2,8 +2,11 @@
 # 역할: D-NAO-48 04 자동운영 4조건 정책을 서버로 이관(일 레인, run_daily_lane — 08:50 크론)
 #   + 시간당 밴드 관제 실입찰(시간당 레인, run_hourly_lane — 매시 :20 크론). 둘 다
 #   auto_operate=True 캠페인(현재 04 하나)만 대상. 로컬 08:55 루틴은 보고·감사 전용으로
-#   강등(§0). 예산 변경 불가침(D-NAO-42 Jino 게이트), 03(MOP) 등 타 캠페인 개입 금지, 시간당
-#   레인은 순위·CPC·페이싱만 판단(ROAS/BEP 신규 판단 금지 — 가드레일의 기존 BEP 차단만).
+#   강등(§0). 예산 변경 불가침(D-NAO-42 Jino 게이트), 03(MOP) 등 타 캠페인 개입 금지. 시간당
+#   레인 판정: ★IU(D-NAO-66)로 순위 제한 폐지 — 순위는 목표가 아니라 결과이고, 상향/하향의
+#   지배 게이트는 target ROAS(BEP×공격성) 유지 여부다. DOWN=CPC 급등 + RL3 장중 loss 고삐
+#   (추정ROAS<BEP), UP=(장중 tally OR 정착창 실측 ROAS≥target) ∧ 예산 여력. 실집행 방어선은
+#   여전히 가드레일(BEP 하한·쿨다운 2h·일일상한·스톱로스)이며 이 harness는 방향만 정한다.
 #   쓰기는 반드시 naver_execution_harness.execute() 경유(초크포인트 유지, 원칙18-6 —
 #   guardrail_gate·naver_sa_writer 직접 쓰기 호출 금지, 이 harness는 SA를 조합만 한다).
 #   + D-NAO-58 CD2 클릭 탐침(_probe_trigger): 시간당 레인의 밴드 판정이 hold인 사각지대
@@ -29,7 +32,7 @@ from app.models import (
     NaverProposal,
     NaverRetroSignal,
 )
-from app.services.naver_ad import campaign_target_resolver, diagnosis, diary, effective_bid, hourly_pattern, intraday_roas, naver_execution_harness, naver_sa_writer
+from app.services.naver_ad import campaign_target_resolver, diagnosis, diary, effective_bid, intraday_roas, naver_execution_harness, naver_sa_writer
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.services.naver_ad.guardrail_gate import _MAX_CHANGE_PCT
 from app.services.naver_ad.trigger_watch import CPC_SPIKE_RATIO
@@ -80,8 +83,23 @@ def _ad_bid_canary(campaign_id: str) -> bool:
     return campaign_id in AD_BID_CANARY_CAMPAIGNS
 _MIN_CLICK_FOR_APPROVAL = 10  # D-NAO-48 조건②(rationale 창 클릭) / §4-1 핫셋 클릭 게이트 공유
 _MIN_HOURLY_SAMPLE_IMP = 30  # §4-2 "imp 합 < 30이면 그 시간대 묶음은 판단 보류"
-_HOURLY_RANK_DOWN_THRESHOLD = Decimal("2.5")  # §4-3 DOWN: 가중 avg_rank < 2.5
-_HOURLY_RANK_UP_THRESHOLD = Decimal("4.0")  # §4-3 UP: 가중 avg_rank > 4.0
+# _HOURLY_RANK_DOWN_THRESHOLD: 과열밴드 DOWN(<2.5)은 IU2(D-NAO-66)로 폐지 — 순위는 목표가
+# 아니라 결과이므로 순위만으로 강제 하향하지 않는다(상단 순위의 이상 지출은 CPC 급등 DOWN +
+# RL3 loss 고삐가 담당). 이 상수는 탐침(_probe_trigger·_learned_optimal_skip의 밴드 프라이어)
+# 에서 계속 소비하므로 유지(삭제 금지) — 탐침의 "밴드 안/하단이라 올릴 여지 있음" 경계값.
+_HOURLY_RANK_DOWN_THRESHOLD = Decimal("2.5")  # 탐침(CD2/CD5) 밴드 프라이어 경계 — ROAS-UP 캡 아님(D-NAO-66)
+# _HOURLY_RANK_UP_THRESHOLD: 과거 UP 전제(weighted_rank>4.0 = 밴드하단이탈일 때만 UP)였으나
+# IU1(D-NAO-66)로 폐지 — UP은 순위 무관, target ROAS 유지 여부만이 지배 게이트. 상수 자체는
+# 관찰 프라이어(스팟 밴드 하단 = 밴드 재시작 여지)로 보존하되 UP 판정에는 더 이상 쓰지 않는다.
+_HOURLY_RANK_UP_THRESHOLD = Decimal("4.0")  # (D-NAO-66 UP 게이트에서 은퇴 — 관찰 프라이어로만 보존)
+# IU1(D-NAO-66) 장중 tally UP 게이트 — 오늘 hh24 누적 신호로 상향(정착창 실측 UP과 OR).
+_INTRADAY_UP_MIN_CONV = 2  # 장중 직접전환 tally 최소치(추정치 과신 방지 — 표본 하한)
+_INTRADAY_UP_MARGIN = Decimal("1.2")  # 추정 ROAS는 전환지연으로 과소추정되지만, 여유계수로 과상향 폭주 방지
+# GATE P2-A-2: 정산 판정불가(unknown) 유닛의 장중-단독 근거 UP은 일 1스텝(+15%/일)로 제한 —
+# ccnt 과대귀속 가능성 × 정산 지연(최대 D-2 창)이 겹치면 검증 안 된 추정만으로 하루 여러
+# 스텝(최대 8) 오르는 폭주 경로가 열린다. 다음날 정산이 따라오면 veto(below) 또는 승인(ok)으로
+# 해소된다. settle_ok 근거 UP은 이 캡 미적용(기존 가드레일 일일상한 3 유지).
+_INTRADAY_ONLY_UP_DAILY_CAP = 1
 _HOURLY_RECENT_HOURS = 3  # §4-2 "최근 3개 완료 시간대"
 _HOURLY_SPEND_BREAKER_MULTIPLE = 3  # §4-6 "직전 7일 일평균 ×3"
 _HOURLY_BASELINE_DAYS = 7  # 소진 서킷브레이커 직전 7일
@@ -230,24 +248,30 @@ def _settlement_agg(db: Session, target_type: str, target_id: str, date_from: da
     return {"clk": int(clk), "cost": int(cost), "conv_amt": int(direct) + int(indirect)}
 
 
-def _settlement_roas_ok(
+def _settlement_roas_status(
     db: Session, target_type: str, target_id: str, campaign_id: str, today: date,
-) -> tuple[bool, str]:
-    """D-NAO-48 조건③(그룹 보정ROAS(정착창 D-8~D-2) ≥ target_roas) — 근거 없음은 전부
-    fail-closed(추정 금지 원칙, guardrail_gate와 동일 태도).
+) -> tuple[str, str]:
+    """D-NAO-48 조건③(그룹 보정ROAS(정착창 D-8~D-2) ≥ target_roas)의 3상 판정
+    (GATE P2-A-1, D-NAO-66) — (status, reason) 반환, status ∈:
+      "ok"      = 데이터 충분 ∧ 보정ROAS ≥ target (검증된 합격)
+      "below"   = 데이터 충분 ∧ 보정ROAS < target (**명시적 미달** — 정산이 나쁘다고 실측으로
+                  말하는 상태. 장중 추정 UP의 거부권(veto) 근거로 쓰인다)
+      "unknown" = 데이터 불충분(실적 없음/보정계수 unavailable/target 해석 불가 — 판정 불가)
+    "below"와 "unknown"의 구분이 P2-A 핵심: 종전 bool은 둘을 뭉개 "정산이 명시적으로 나쁨"을
+    "모름"과 동일 취급했다 — 정산 미달인데 장중 추정(ccnt 과대귀속 가능)만으로 올리는 구멍.
 
     codex 5R[P1-1]: correction_factor()는 실주문 매출 부재 시 factor=1·source='unavailable'
     을 반환한다(no-op 보정 폴백) — 그걸 검증된 보정처럼 쓰면 데이터 정전 시 무보정
     convAmt/cost로 bid_up(일 레인)·시간당 UP이 승인된다. source가 'actual_revenue_ratio'
-    (실측 비율)가 아니면 ROAS 검증 불가로 fail-closed. DOWN 경로는 이 함수를 타지 않아
+    (실측 비율)가 아니면 ROAS 검증 불가 = "unknown". DOWN 경로는 이 함수를 타지 않아
     영향 없음(안전 방향, 보정 불요)."""
     window_from, window_to = _settlement_window(today)
     agg = _settlement_agg(db, target_type, target_id, window_from, window_to)
     if agg["cost"] <= 0:
-        return False, f"정착창({window_from.isoformat()}~{window_to.isoformat()}) 실적 없음 — 보정ROAS 검증 불가(fail-closed)"
+        return "unknown", f"정착창({window_from.isoformat()}~{window_to.isoformat()}) 실적 없음 — 보정ROAS 검증 불가(fail-closed)"
     factor_info = diagnosis.correction_factor(db, today - timedelta(days=1))
     if factor_info.get("source") != "actual_revenue_ratio":
-        return False, (
+        return "unknown", (
             f"보정계수 unavailable(source={factor_info.get('source')!r}) — 실주문 매출 부재, "
             "보정ROAS 검증 불가(fail-closed, codex 5R[P1-1])"
         )
@@ -255,10 +279,20 @@ def _settlement_roas_ok(
     roas_corrected = (agg["conv_amt"] / agg["cost"]) * float(factor)
     target_roas = _resolve_target_roas(db, campaign_id)
     if target_roas is None:
-        return False, "target_roas 해석 불가(계정 기본값 없음) — 검증 불가(fail-closed)"
+        return "unknown", "target_roas 해석 불가(계정 기본값 없음) — 검증 불가(fail-closed)"
     if roas_corrected < target_roas:
-        return False, f"정착창 보정ROAS {roas_corrected:.4f} < 목표 {target_roas}"
-    return True, f"정착창 보정ROAS {roas_corrected:.4f} >= 목표 {target_roas}"
+        return "below", f"정착창 보정ROAS {roas_corrected:.4f} < 목표 {target_roas}"
+    return "ok", f"정착창 보정ROAS {roas_corrected:.4f} >= 목표 {target_roas}"
+
+
+def _settlement_roas_ok(
+    db: Session, target_type: str, target_id: str, campaign_id: str, today: date,
+) -> tuple[bool, str]:
+    """기존 bool 인터페이스 보존 래퍼(일 레인 _check_bid_up_conditions 등 기존 호출처 회귀 0)
+    — ok만 True, below/unknown은 둘 다 False(종전과 동일 fail-closed 의미). 3상 구분이 필요한
+    시간당 UP 경로는 _settlement_roas_status를 직접 쓴다(GATE P2-A-1)."""
+    status, reason = _settlement_roas_status(db, target_type, target_id, campaign_id, today)
+    return status == "ok", reason
 
 
 def _bleeding_hold_reason(db: Session, target_type: str, target_id: str, today: date) -> str | None:
@@ -677,46 +711,122 @@ def _today_group_cpc(curve: list[dict]) -> Decimal | None:
     return Decimal(cost) / Decimal(clk)
 
 
-def _is_pacing_slow(
-    db: Session, target_type: str, target_id: str, curve: list[dict], now: datetime,
+def _intraday_up_ok(
+    db: Session, *, target_type: str, target_id: str, campaign_id: str,
+    curve: list[dict], now: datetime,
 ) -> tuple[bool, str]:
-    """§4-3 UP 조건의 "당일 소진 페이싱 저속" — hourly_pattern.expected_cost_fraction
-    (요일×시간 168칸 실측 곡선) 사용 가능하면 그것, 없으면 선형 기대로 폴백(§4-2 명시 규칙).
-    실제 페이스 = 완료 시간대 누적 그룹 비용 ÷ 정착창 일평균 그룹 비용(둘 다 "정상적인
-    하루 전체 대비 비율" 단위 — expected_cost_fraction과 동일 척도). 실제<기대면 저속
-    (스펙에 배수 미명시 — 단순 비교, 추정 금지 원칙상 임의 배수 도입 안 함).
+    """IU1(D-NAO-66) 장중 tally UP 게이트(순수) — 오늘 hh24 곡선 누적만으로 상향 근거를
+    판정한다. 대행사 사이클("올려보고 → 누적 ROAS ≥ target이면 또 올리고")의 자동판이며,
+    정착창(D-8~D-2) 실측 UP(_settlement_roas_ok)과 OR로 결합돼 "순위 무관·ROAS 지배" UP을
+    구성한다(D-NAO-66 §0). (발동여부, 사유) 반환.
 
-    codex 10R[P1] 시간 경계 정렬: 초판은 기대치를 expected(hour=now.hour)(= 현재 시각
-    **종료**까지의 누적 비율)로 두고 실측은 관측 시점(:20, 부분 시간대 포함)까지 합산 —
-    이른 분에는 기대가 과대해 정상 페이스가 저속으로 오판돼 증액이 나갔다. 두 값을 같은
-    경계(완료 시간대 = now.hour-1 종료 시점)로 고정한다: 실측 = hour < now.hour 버킷 합 /
-    기대 = expected_cost_fraction(hour=now.hour-1), 선형 폴백도 now.hour×60분/1440분.
-    자정 직후(now.hour=0)는 완료 시간대가 없어 판정 보류(저속 아님 반환 → UP 불발 —
-    같은 시각 _weighted_recent 표본 게이트도 창이 비어 hold, 정합)."""
-    if now.hour == 0:
-        return False, "완료 시간대 없음(자정 직후) — 페이싱 판정 보류(codex 10R)"
+    발동 조건(전부 충족):
+    ① adgroup_id 해석 가능 + intraday_roas.adgroup_unit_price가 price 산출 — 원가 아는
+       상품에만 발동(미확인 상품은 판정 근거 없음, fail-closed. RL3 _intraday_loss_leash와
+       동일 관례 — 원가 미확인이면 상향/하향 어느 쪽도 근거가 없다).
+    ② 표본 게이트: 당일 누적 imp ≥ _MIN_HOURLY_SAMPLE_IMP(기존 상수 재사용) — 얇은 표본에서
+       조급한 상향 금지. estimated_intraday_roas가 전체 곡선 누적을 쓰므로 표본도 전체 누적.
+    ③ 직접전환 tally ≥ _INTRADAY_UP_MIN_CONV — hh24 conv_cnt 누적(RL1 실측 신호, 장중 동일일
+       전환건수). 전환 없는(또는 1건) 유닛은 추정 ROAS가 불안정하므로 상향 근거 불충분.
+    ④ estimated_intraday_roas ≥ target_roas × _INTRADAY_UP_MARGIN — 여유계수로 과소추정
+       (전환지연, intraday_roas 정직 경계②)에도 확실히 이익 구간일 때만 상향(과상향 폭주 방지).
 
-    window_from, window_to = _settlement_window(now.date())
-    agg = _settlement_agg(db, target_type, target_id, window_from, window_to)
-    avg_daily_cost = agg["cost"] / _HOURLY_BASELINE_DAYS if agg["cost"] > 0 else 0.0
-    if avg_daily_cost <= 0:
-        return False, "정착창 소진 기준 없음(페이싱 판단 불가 — 저속 아님으로 처리)"
+    이 게이트는 순위를 전혀 보지 않는다(D-NAO-66: 순위는 결과). 실집행은 여느 UP과 동일하게
+    execute()→guardrail_gate(BEP 하한·쿨다운 2h·일일 상한·스텝 클램프) 전량을 통과해야 한다."""
+    adgroup_id = _resolve_adgroup_id(db, target_type, target_id)
+    if adgroup_id is None:
+        return False, "adgroup 해석 불가 — 장중 UP 판정 불가"
+    price = intraday_roas.adgroup_unit_price(db, adgroup_id)["price"]
+    if price is None:
+        return False, "상품 단가 미확인(원가 미확인 상품) — 장중 UP 판정 불가(fail-closed)"
 
-    boundary_hour = now.hour - 1  # 완료 시간대 경계 — 기대·실측 공통(codex 10R)
-    today_cost = sum(h["cost"] for h in curve if h["hour"] <= boundary_hour)
-    actual_pace = today_cost / avg_daily_cost
+    total_imp = sum(h["imp"] for h in curve)
+    if total_imp < _MIN_HOURLY_SAMPLE_IMP:
+        return False, f"당일 누적 imp={total_imp}<{_MIN_HOURLY_SAMPLE_IMP}(표본 부족) — 장중 UP 보류"
 
-    expected = hourly_pattern.expected_cost_fraction(db, weekday=now.weekday(), hour=boundary_hour)
-    if expected is None:
-        expected = Decimal(now.hour * 60) / Decimal(24 * 60)  # boundary_hour 종료 = now.hour×60분
-        basis = "선형기대"
-    else:
-        basis = "hourly_pattern"
-    expected_f = float(expected)
+    total_conv = sum(int(h.get("conv_cnt", 0) or 0) for h in curve)
+    if total_conv < _INTRADAY_UP_MIN_CONV:
+        return False, f"장중 직접전환 tally {total_conv}<{_INTRADAY_UP_MIN_CONV} — 상향 근거 부족"
 
-    if actual_pace < expected_f:
-        return True, f"페이싱저속(실제소진비{actual_pace:.2f}<기대{expected_f:.2f}, {basis}, 경계={boundary_hour}시 종료)"
-    return False, f"페이싱정상(실제{actual_pace:.2f}>=기대{expected_f:.2f}, {basis}, 경계={boundary_hour}시 종료)"
+    est_roas = intraday_roas.estimated_intraday_roas(curve, price)
+    if est_roas is None:
+        return False, "당일 소진 없음 — 추정 ROAS 산출 불가"
+    target_roas = _resolve_target_roas(db, campaign_id)
+    if target_roas is None:
+        return False, "target_roas 해석 불가(계정 기본값 없음) — 검증 불가(fail-closed)"
+    threshold = Decimal(str(target_roas)) * _INTRADAY_UP_MARGIN
+    if est_roas < threshold:
+        return False, (
+            f"장중 추정ROAS {est_roas} < target {target_roas}×{_INTRADAY_UP_MARGIN}"
+            f"={threshold:.4f}(여유 미달)"
+        )
+    return True, (
+        f"장중 tally 충족 — 전환 {total_conv}≥{_INTRADAY_UP_MIN_CONV}·추정ROAS {est_roas} ≥ "
+        f"target {target_roas}×{_INTRADAY_UP_MARGIN}"
+    )
+
+
+def _budget_headroom_ok(db: Session, campaign_id: str, now: datetime) -> tuple[bool, str]:
+    """IU1(D-NAO-66) UP 예산 여력 게이트 — 종전 "페이싱 저속일 때만 UP"을 "일예산 잔여가
+    있으면 UP"으로 재정의(§2). 저속 여부가 아니라 예산이 남아 있는지가 상향 허용 기준.
+    (발동가능여부, 사유) 반환.
+
+    데이터 소스 = 당일 최신 시간별 스냅샷(cost, daily_budget) — guardrail_gate 일예산
+    불가침(_check_bid)·_check_spend_circuit_breaker와 **동일 소스** 재사용(단일 진실, 하드코딩
+    금지). 스텝 단위의 정밀 상한 검증은 execute()의 guardrail_gate가 다시 수행하므로, 이 게이트는
+    "이미 일예산 상한에 도달했는가"(도달했으면 여력 0)만 본다.
+
+    - daily_budget == 0 = uncapped(useDailyBudget=false, 무제한) → 항상 여력 있음(허용 —
+      guardrail_gate._check_bid의 0 취급과 동일).
+    - 소스 미확보(당일 스냅샷 부재)·daily_budget None·(capped인데 cost_today None) → fail-closed
+      hold(예산 검증 불가 상태에서 증액 금지 — 돈 경로 보수). 라이브 경로에서는 캠페인 진입 시
+      _check_spend_circuit_breaker가 스냅샷 부재·stale을 이미 캠페인 전체 hold로 걸러낸다.
+    - daily_budget > 0 ∧ cost_today ≥ daily_budget → 소진 완료(여력 없음, hold)."""
+    latest = (
+        db.query(NaverHourlySnapshot)
+        .filter(NaverHourlySnapshot.campaign_id == campaign_id, NaverHourlySnapshot.ad_date == now.date())
+        .order_by(NaverHourlySnapshot.snapshot_hour.desc())
+        .first()
+    )
+    if latest is None:
+        return False, "당일 소진 스냅샷 부재 — 예산 여력 검증 불가(fail-closed)"
+    daily_budget = latest.daily_budget
+    cost_today = latest.cost
+    if daily_budget is None:
+        return False, "일예산 미확보(daily_budget=None) — 예산 여력 검증 불가(fail-closed)"
+    if daily_budget == 0:
+        return True, "일예산 uncapped(무제한) — 예산 여력 있음"
+    if cost_today is None:
+        return False, "당일 소진 미확보(cost_today=None) — 예산 여력 검증 불가(fail-closed)"
+    if cost_today >= daily_budget:
+        return False, f"일예산 소진 — 오늘 {cost_today}원 ≥ 일예산 {daily_budget}원(여력 없음)"
+    return True, f"예산 여력 — 오늘 {cost_today}원 < 일예산 {daily_budget}원"
+
+
+def _executed_bid_ups_today(db: Session, target_type: str, target_id: str, now: datetime) -> int:
+    """오늘(KST) 이 유닛에 **성공한** 상향 실쓰기(bid_up/growth_bid_up) 횟수 — GATE P2-A-2
+    장중-단독 UP 일 1스텝 캡의 카운터. 단일 쿼리(change_log×proposal 조인, N+1 없음).
+
+    판별 기준 = naver_execution_harness._build_guardrail_context의 쿨다운/일일상한 카운트와
+    동일 관례 재사용: dry_run=False ∧ after_value 존재(실쓰기 확정 — 실패 행은 after_value가
+    없어 자연 제외, outcome은 D+14 채점 전 NULL이라 판별에 못 씀) ∧ changed_at ≥ KST 오늘
+    0시(changed_at은 kst_now 기반 naive KST — 같은 관례). 방향(up)은 change_log에 직접 없어
+    proposal_type 조인으로 식별 — growth_bid_up도 상향이므로 포함(보수 방향)."""
+    today_start = datetime.combine(now.date(), datetime.min.time())
+    return int(
+        db.query(sqlfunc.count(NaverChangeLog.id))
+        .join(NaverProposal, NaverProposal.id == NaverChangeLog.proposal_id)
+        .filter(
+            NaverChangeLog.entity_type == target_type,
+            NaverChangeLog.entity_id == target_id,
+            NaverChangeLog.action == "update_bid",
+            NaverChangeLog.dry_run.is_(False),
+            NaverChangeLog.after_value.isnot(None),
+            NaverChangeLog.changed_at >= today_start,
+            NaverProposal.proposal_type.in_(("bid_up", "growth_bid_up")),
+        )
+        .scalar() or 0
+    )
 
 
 def _resolve_adgroup_id(db: Session, target_type: str, target_id: str) -> str | None:
@@ -796,15 +906,22 @@ def _judge_hourly(
 ) -> dict:
     """§4-3 시간당 판정(우선순위 순, 하나만) — {"direction": "up"/"down"/"hold", "reason": str}.
 
-    ROAS/BEP는 여기서 신규 판단하지 않는다(정착창 재사용은 조건 재확인일 뿐, 시간당
-    ROAS 산출은 없음 — §4 "시간당 판단은 순위·CPC·페이싱만" 원칙 준수). ★D-NAO-60 RL3로
-    완화: 단, 장중 loss 고삐(안전방향 DOWN)는 추정 ROAS<BEP를 사용한다. 이는 D-NAO-4의
-    "시간당 ROAS 판단 없음"을 안전방향 하향에 한해 완화한 것(D-NAO-60-2). UP은 여전히
-    정착창 실측 ROAS만(_settlement_roas_ok) — 과소추정되는 장중 신호로는 증액하지 않는다.
+    ★IU(D-NAO-66) 순위 제한 폐지 + 장중 상향 개방. 순위는 목표가 아니라 결과 — 상향/하향의
+    유일한 지배 게이트 = target ROAS(BEP×공격성) 유지 여부. 과열밴드 DOWN(<2.5)·UP의 순위
+    하단(>4) 전제는 폐지됐다. UP은 (장중 tally OR 정착창 실측 ROAS) ∧ 예산 여력이면 순위와
+    무관하게 발동한다.
 
-    비대칭 기억(PLAN §0): 고삐 DOWN은 오늘 곡선만 보고 자정에 리셋된다(용서 — 어제의
-    loss가 오늘 판정을 묶지 않음). UP은 정착창(D-8~D-2) 누적을 보고, 이득은 다음날 자동
-    하강하지 않는다(관성)."""
+    우선순위(하나만, DOWN이 UP보다 먼저 = bleeding day UP 금지, §0 불변 가드):
+      0. 표본 게이트(최근 3시간 imp<30 → hold).
+      1. CPC 급등 DOWN(trigger_watch.CPC_SPIKE_RATIO).
+      2. 장중 loss 고삐 DOWN(D-NAO-60 RL3 — 추정 ROAS<BEP, 안전방향 한정 완화). 상단 순위의
+         무전환 고지출도 여기서 잡힌다(전환 0 → est ROAS 0 < BEP → 고삐, IU2 안전망).
+      3. UP(IU1): (장중 tally 게이트 OR 정착창 실측 ROAS≥target) ∧ 예산 여력. 순위 무관.
+      4. 기본 hold.
+
+    비대칭 기억(§0): 고삐 DOWN은 오늘 곡선만 보고 자정에 리셋(용서). UP의 정착창 근거는
+    D-8~D-2 누적(관성 — 좋은 성과는 다음날 자동 하강하지 않음)이고, 장중 tally는 당일 누적
+    (뒤로 갈수록 신뢰 상승, 자정 리셋)."""
     summary = _weighted_recent(curve, now.hour)
     if summary["imp_sum"] < _MIN_HOURLY_SAMPLE_IMP:
         return {
@@ -812,16 +929,12 @@ def _judge_hourly(
             "reason": f"최근{_HOURLY_RECENT_HOURS}시간대 imp={summary['imp_sum']}<{_MIN_HOURLY_SAMPLE_IMP}(표본 부족)",
         }
 
-    weighted_rank = summary["weighted_rank"]
+    # ── IU2(D-NAO-66): 과열밴드 DOWN(<2.5) 삭제 ──
+    # 종전엔 여기서 weighted_rank<2.5면 무조건 DOWN이었다. 순위는 목표가 아니라 결과이므로
+    # (§0) 순위만으로 강제 하향하지 않는다. 상단 순위(1~2등)여도 ROAS≥target이면 유지·상향,
+    # 상단인데 이상 지출(무전환 고지출)이면 아래 CPC 급등 DOWN + RL3 loss 고삐가 담당한다.
 
-    # DOWN 우선 ①: 과열밴드(순위 과도하게 높음 — 낮은 숫자일수록 상위노출)
-    if weighted_rank is not None and weighted_rank < _HOURLY_RANK_DOWN_THRESHOLD:
-        return {
-            "direction": "down",
-            "reason": f"가중avg_rank={float(weighted_rank):.2f}<{_HOURLY_RANK_DOWN_THRESHOLD}(과열밴드)",
-        }
-
-    # DOWN 우선 ②: CPC 급등(trigger_watch.CPC_SPIKE_RATIO 재사용 — 단일소스, PLAN §4 원문의
+    # DOWN 우선 ①: CPC 급등(trigger_watch.CPC_SPIKE_RATIO 재사용 — 단일소스, PLAN §4 원문의
     # "×1.5" 표기와 실제 상수(×2)가 불일치해 실코드 상수를 채택함, 최종보고에 명시)
     window_from, window_to = _settlement_window(now.date())
     baseline_agg = _settlement_agg(db, target_type, target_id, window_from, window_to)
@@ -839,9 +952,10 @@ def _judge_hourly(
                 ),
             }
 
-    # DOWN 신규 ③: 장중 loss 고삐(D-NAO-60 RL3) — UP보다 먼저 검사해 "bleeding day엔 UP
-    # 금지"(PLAN §RL3 우선순위)를 자연히 구현한다. baseline_agg는 위 CPC급등 검사에서 이미
-    # 계산된 값을 그대로 재사용(중복 쿼리 금지).
+    # DOWN 우선 ②: 장중 loss 고삐(D-NAO-60 RL3) — UP보다 먼저 검사해 "bleeding day엔 UP
+    # 금지"(§0 우선순위)를 자연히 구현한다. baseline_agg는 위 CPC급등 검사에서 이미 계산된
+    # 값을 그대로 재사용(중복 쿼리 금지). ★IU2 안전망: 과열밴드 DOWN 삭제 후 상단 순위의
+    # 무전환 고지출 유닛은 이 고삐가 잡는다(전환 0 → est ROAS 0 < BEP, 하루치 소진 도달 시).
     leash_fired, leash_reason = _intraday_loss_leash(
         db, target_type=target_type, target_id=target_id, campaign_id=campaign_id,
         curve=curve, now=now, baseline_agg=baseline_agg,
@@ -849,29 +963,63 @@ def _judge_hourly(
     if leash_fired:
         return {"direction": "down", "reason": leash_reason, "leash": True}
 
-    # UP: 3조건 동시 충족 시만(밴드하단이탈 AND 정착ROAS충족 AND 페이싱저속).
-    # ★DL4(D-NAO-65) 익일 밴드 재시작 = 이 기존 UP 경로가 자연 수행한다 — 어제 고삐로 rank>4까지
-    # 내려간(스로틀된) 건강 유닛이 다음날 정착창(D-8~D-2, 어제 나쁜 날 제외) ROAS≥target이면
-    # 자연 상향 재시작. 별도 재시작 미들웨어·BEP 우회 게이트 신설 없음(§0 금지선 준수).
-    if weighted_rank is not None and weighted_rank > _HOURLY_RANK_UP_THRESHOLD:
-        roas_ok, roas_reason = _settlement_roas_ok(db, target_type, target_id, campaign_id, now.date())
-        if not roas_ok:
-            # ★DL4 관측(Fable 조건①: "스로틀 고착"): rank>4(밴드 하단 = 어제 고삐로 스로틀됨/
-            # 저입찰)인데 정착창 ROAS 미달 → 재시작 UP 게이트가 ROAS에서 막힘 = "재시작 대기".
-            # 만성 sub-BEP 유닛은 여기 눌러앉아 바닥 파킹으로 수렴한다(BEP 게이트가 재출혈
-            # 사이클을 끊음). 기존 hold reason 체계 재사용(새 테이블·마이그레이션 없음).
-            return {"direction": "hold", "reason": f"재시작 대기(정착창 ROAS 미달) — {roas_reason}"}
-        pacing_slow, pacing_reason = _is_pacing_slow(db, target_type, target_id, curve, now)
-        if pacing_slow:
+    # UP(IU1, D-NAO-66): 순위 전제 폐지 — target ROAS 유지가 유일 지배 게이트.
+    # UP 검토 = (장중 tally 게이트) OR (정착창 실측 ROAS≥target). 둘 다 실패면 hold("재시작
+    # 대기"의 진짜 사유 = ROAS 미달 — 순위 전제가 사라졌으니 사유문도 ROAS 기준으로 정합).
+    # ★DL4(D-NAO-65) 익일 밴드 재시작 = 이 UP 경로가 자연 수행(어제 고삐로 스로틀된 건강 유닛이
+    # 정착창 ROAS≥target이면 재상향). 별도 재시작 미들웨어·BEP 우회 게이트 신설 없음(§0 금지선).
+    intraday_ok, intraday_reason = _intraday_up_ok(
+        db, target_type=target_type, target_id=target_id, campaign_id=campaign_id,
+        curve=curve, now=now,
+    )
+    settle_status, settle_reason = _settlement_roas_status(
+        db, target_type, target_id, campaign_id, now.date()
+    )
+    # GATE P2-A-1 정산 거부권(veto): 정산(간접전환 포함 실측 — 장중 ccnt보다 신뢰)이 **명시적
+    # 미달**(below)이라 말하면, 장중 추정(과대귀속 가능)이 아무리 좋아도 UP 금지. "모름
+    # (unknown)"과 "나쁨(below)"은 다르다 — 나쁨이 확인된 유닛을 추정만으로 올리지 않는다.
+    if settle_status == "below" and intraday_ok:
+        return {
+            "direction": "hold",
+            "reason": (
+                f"UP 보류(정산 거부권, GATE P2-A) — 정착창 명시적 미달({settle_reason})인데 "
+                f"장중 추정({intraday_reason})만으로는 상향 금지"
+            ),
+        }
+    if not (intraday_ok or settle_status == "ok"):
+        # DL4 관측 사유("재시작 대기")의 의미 유지 — 만성 sub-BEP 유닛이 UP 게이트를 못 넘고
+        # 바닥에 눌러앉는 신호를 기존 hold reason 체계로 표면화(순위 언급 제거, ROAS 근거로).
+        return {
+            "direction": "hold",
+            "reason": f"재시작 대기(ROAS 미달) — 장중 tally:{intraday_reason} / 정착:{settle_reason}",
+        }
+    # GATE P2-A-2 장중-단독 UP 일 1스텝 캡: 정산 판정불가(unknown) 유닛의 UP 근거가 장중
+    # 추정뿐이면, 오늘 이미 성공한 상향이 있을 때 추가 UP 금지(+15%/일 제한). 다음날 정산이
+    # 따라와 veto(below)하거나 승인(ok)한다. settle_ok 근거 UP은 기존 일일상한(3, guardrail)만.
+    intraday_only = intraday_ok and settle_status != "ok"
+    if intraday_only:
+        ups_today = _executed_bid_ups_today(db, target_type, target_id, now)
+        if ups_today >= _INTRADAY_ONLY_UP_DAILY_CAP:
             return {
-                "direction": "up",
+                "direction": "hold",
                 "reason": (
-                    f"가중avg_rank={float(weighted_rank):.2f}>{_HOURLY_RANK_UP_THRESHOLD}"
-                    f"(밴드하단이탈), {roas_reason}, {pacing_reason}"
+                    f"UP 보류(장중 단독 일 {_INTRADAY_ONLY_UP_DAILY_CAP}스텝 캡, GATE P2-A) — "
+                    f"오늘 성공 상향 {ups_today}회, 정산 판정불가({settle_reason}) 유닛은 "
+                    "추정 단독으로 하루 1스텝만"
                 ),
             }
-
-    return {"direction": "hold", "reason": "판정 조건 미충족(기본 hold)"}
+    # 예산 여력(IU1 재정의): 저속일 때만이 아니라 일예산 잔여가 있으면 UP(§2). 스텝 단위 정밀
+    # 상한은 execute()의 guardrail_gate가 재검증 — 여기선 "이미 소진 완료 아님"만 확인.
+    budget_ok, budget_reason = _budget_headroom_ok(db, campaign_id, now)
+    if not budget_ok:
+        return {"direction": "hold", "reason": f"UP 보류(예산 여력 없음/미확보) — {budget_reason}"}
+    up_basis = (
+        f"정착창 실측({settle_reason})" if settle_status == "ok" else f"장중 tally({intraday_reason})"
+    )
+    return {
+        "direction": "up",
+        "reason": f"ROAS-UP(순위 무관, D-NAO-66) — {up_basis}, {budget_reason}",
+    }
 
 
 def _clamp_step(current_bid: int, direction: str) -> int | None:
@@ -929,7 +1077,7 @@ def _probe_trigger(curve: list[dict], now: datetime) -> tuple[bool, str]:
       전부 None이면(rank_imp_sum==0) weighted_rank=None → fail-closed 보류(근거 없음).
 
     now.hour < 2(이른 새벽, 완료 2시간 창이 그날 버킷을 못 채우는 경계)면 표본 없음으로
-    False — _weighted_recent/_is_pacing_slow의 자정 경계 처리와 동일 철학. BEP 여유는 여기서
+    False — _weighted_recent의 자정 경계 처리와 동일 철학. BEP 여유는 여기서
     수치로 판단하지 않는다 — 제안이 execute()로 흐르면 guardrail_gate가 BEP 하한을 강제한다
     (§금지선: 탐침 우회 경로 금지, downstream 위임)."""
     if now.hour < _PROBE_ZERO_CLICK_HOURS:
@@ -956,9 +1104,12 @@ def _probe_trigger(curve: list[dict], now: datetime) -> tuple[bool, str]:
 def _learned_optimal_skip(
     db: Session, curve: list[dict], now: datetime, campaign_id: str,
 ) -> tuple[bool, str]:
-    """D-NAO-59/60 RL5(CD5) — 탐침(`_probe_trigger`)이 발동한 직후 게이트. 과climb 방지:
-    이익 스팟밴드(2.5~4)를 넘어 학습된 최적 순위밴드까지 이미 도달했으면 더 올릴 이유가
-    없다(비싼 상위로 계속 오르는 건 이익이 아니라 비용만 늘림). `probe_learning_loop.
+    """D-NAO-59/60 RL5(CD5) — 탐침(`_probe_trigger`)이 발동한 직후 게이트. **탐침 전용**.
+    ★밴드=탐침 프라이어, ROAS-UP 캡 아님(D-NAO-66). IU2 이후 ROAS-driven 일반 UP은 이 게이트를
+    참조하지 않는다(순위는 목표가 아니라 결과 — 학습밴드로 상향을 막지 않는다). 이 게이트는
+    "클릭 살아나는 순위"를 찾는 탐침이 과열 상단으로 무근거로 계속 오르는 것만 억제한다.
+    과climb 방지: 이익 스팟밴드(2.5~4)를 넘어 학습된 최적 순위밴드까지 이미 도달했으면 더 올릴
+    이유가 없다(탐침 목적이 이미 달성됨). `probe_learning_loop.
     learned_probe_rank`(CD4 산출물)로 그 캠페인 env_cell의 승격된 최적 밴드를 조회해,
     `_probe_trigger`와 **동일한 완료 2시간 창**([now.hour-_PROBE_ZERO_CLICK_HOURS, now.hour))
     에서 산출한 가중 avg_rank와 그 밴드 상한을 비교한다.
@@ -997,11 +1148,11 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
     """시간당 밴드 관제 실입찰(PLAN §4). 매시 :20 크론(catch-up 제외 — 시간성 소멸).
 
     ①캠페인별 소진 서킷브레이커(§4-6) → 걸리면 그 캠페인 전체 hold ②핫셋 선정(§4-1)
-    ③유닛별 intraday hh24 곡선 조회(§4-2, 실패 시 skip) ④판정(§4-3, 순위·CPC·페이싱 +
-    D-NAO-60 RL3 장중 loss 고삐DOWN[추정ROAS<BEP, 안전방향 한정 완화] — UP은 여전히 정착창
-    실측 ROAS만) ⑤스텝 제안 생성+즉시 승인(approval_source=APPROVAL_SOURCE_HOURLY)
-    +naver_execution_harness.execute() 경유 실행(가드레일 전량 통과 필요 — 쿨다운·일일상한·
-    BEP·스톱로스가 최종 방어선).
+    ③유닛별 intraday hh24 곡선 조회(§4-2, 실패 시 skip) ④판정(_judge_hourly, ★IU D-NAO-66:
+    순위 제한 폐지 — CPC 급등 DOWN + RL3 장중 loss 고삐 DOWN[추정ROAS<BEP] + UP(장중 tally
+    OR 정착창 실측 ROAS) ∧ 예산 여력, 순위 무관) ⑤스텝 제안 생성+즉시 승인(approval_source=
+    APPROVAL_SOURCE_HOURLY) +naver_execution_harness.execute() 경유 실행(가드레일 전량 통과
+    필요 — 쿨다운 2h·일일상한·BEP 하한·스톱로스가 최종 방어선).
 
     fetch_intraday 미주입 시 fetch_entity_hh24(테스트 주입, 원칙18-8 — keyword_hourly_sweep과
     동일 관례). stat_date=오늘(now.date())로 호출하면 timeRange since=until=오늘이 되어
@@ -1082,19 +1233,13 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                     result["held"].append({"target_id": target_id, "reason": verdict["reason"]})
                     continue
 
-            # ★DL4(D-NAO-65) 재시작 천장 = learned band: 익일 밴드 재시작(일반 UP = band-return,
-            # rank>4 유닛의 자연 상향)도 학습된 최적밴드(probe_learning_loop.learned_probe_rank,
-            # 없으면 스팟밴드 rank≤4)를 천장으로 삼아 과climb을 막는다 — RL5 _learned_optimal_skip을
-            # 탐침 경로뿐 아니라 일반 UP에도 적용(기존 게이트 재사용, 신규 SA 0). 탐침 UP(probe=True)
-            # 은 위 hold 분기에서 이미 이 게이트를 통과했으므로 제외(이중 적용 금지). guardrail 우회
-            # 없음 — skip=False로 통과한 UP도 아래 execute()→guardrail_gate 전량을 그대로 탄다.
-            if verdict["direction"] == "up" and not verdict.get("probe"):
-                skip, skip_reason = _learned_optimal_skip(db, curve, now, campaign_id)
-                if skip:
-                    result["held"].append(
-                        {"target_id": target_id, "reason": f"[재시작 천장] {skip_reason}"}
-                    )
-                    continue
+            # ★IU2(D-NAO-66) 재시작 천장(learned band) 폐지: 종전엔 일반 UP(ROAS-driven
+            # band-return)에도 _learned_optimal_skip 천장을 적용해 학습밴드 도달 시 상향을
+            # 취소했다. 그러나 D-NAO-66은 learned band를 하드 캡이 아니라 **탐침(CD2/CD5)
+            # 프라이어**로 강등한다 — ROAS-UP 경로는 밴드를 참조하지 않는다(순위는 목표가 아니라
+            # 결과). 밴드=탐침 프라이어, ROAS-UP 캡 아님(D-NAO-66). _learned_optimal_skip은 위
+            # 탐침(probe) 분기 전용으로 남는다(과열 상단으로의 무근거 탐침 상향만 억제). 오버슛
+            # 비용은 스텝 1개 분량 + 쿨다운 2h로 자연 캡되고, BEP 하한·loss 고삐가 최종 방어선.
 
             # 여기부터는 verdict가 up/down = 액션 의도 확정 — 이후의 hold는 "의도된 액션이
             # 차단된 것"이므로 일기(blocked) 기록 대상(위의 판정 hold·imp 없음은 관찰 소음이라 제외).
@@ -1218,7 +1363,10 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                 proposal_approval_source = APPROVAL_SOURCE_HOURLY
             else:
                 rationale = f"[시간당밴드] {verdict['reason']}"
-                expected_effect = "시간당 밴드 관제 — 순위·CPC·페이싱 기반 스텝 조정(ROAS 신규 판단 없음)."
+                expected_effect = (
+                    "시간당 밴드 관제 — CPC 급등 DOWN 또는 ROAS-UP(장중 tally/정착 실측, 순위 무관, "
+                    "예산 여력) 기반 스텝 조정(D-NAO-66)."
+                )
                 proposal_approval_source = APPROVAL_SOURCE_HOURLY
             # B3 GATE 2R P2-B: ad Confirm-only 제안은 즉시 실행되지 않고 pending으로 남으므로,
             # 동일 (proposal_type, target_type='ad', target_id) pending이 이미 있으면 생성
