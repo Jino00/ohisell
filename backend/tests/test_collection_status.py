@@ -2,6 +2,14 @@
 #   ★존재 이유: 자동 트리거 제거 후 '잊어버림→조용히 낡음'을 막는 유일한 안전장치가 이 상태다.
 from datetime import datetime
 
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from app.database import Base, get_db
+from app.main import app
 from app.services.coupang.collection_status import (
     CRIT_HOURS,
     WARN_HOURS,
@@ -70,3 +78,32 @@ def test_boundary_exactly_24h_is_warn():
 def test_constants():
     assert WARN_HOURS == 24
     assert CRIT_HOURS == 48
+
+
+@pytest.fixture
+def client():
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    TestingSession = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+    def _override_get_db():
+        db = TestingSession()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    app.dependency_overrides[get_db] = _override_get_db
+    yield TestClient(app)
+    app.dependency_overrides.clear()
+
+
+def test_collection_status_route_shape(client):
+    r = client.get("/api/coupang/ops/collection-status")
+    assert r.status_code == 200
+    body = r.json()
+    assert "streams" in body and "as_of" in body
+    keys = {s["key"] for s in body["streams"]}
+    assert keys == {"ofix_sales", "ofix_ad", "ohitech_ad", "supplier_hub"}
+    for s in body["streams"]:
+        assert s["state"] in {"fresh", "warn", "critical", "failed", "in_flight"}

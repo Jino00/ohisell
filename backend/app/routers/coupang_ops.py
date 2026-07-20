@@ -1469,6 +1469,16 @@ def rocket_refresh_claim(
     return rocket_supplier_sync.claim_rocket_refresh(db)
 
 
+@router.get("/collection-status")
+def coupang_collection_status(db: Session = Depends(get_db)):
+    """쿠팡 4개 브라우저 수집 스트림(ofix 판매/광고, ohitech 광고, 로켓 발주)의
+    신선도·실패 상태 집계. 전역 신선도 배너 전용(60s 폴). 자동 트리거 제거 후
+    '낡음/실패'를 가시화하는 유일 경로."""
+    from app.services.coupang import collection_status as _cs
+
+    return _cs.collection_status(db)
+
+
 @router.post("/rocket/fetch-success")
 def rocket_fetch_success(
     x_ingest_token: str | None = Header(default=None),
