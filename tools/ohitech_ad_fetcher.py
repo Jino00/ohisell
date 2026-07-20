@@ -80,7 +80,7 @@ def load_config() -> dict:
     cfg.setdefault("cdp_profile", DEFAULT_CDP_PROFILE)
     cfg.setdefault("poll_interval_s", 60)        # poll: refresh-status 확인 주기
     cfg.setdefault("min_fetch_interval_s", 60)   # poll: 연속 fetch 최소 간격(해머링 방지)
-    cfg.setdefault("daily_run_hours", 23)        # poll: 마지막 성공 N시간 초과 시 자동 run(일별)
+    # daily_run_hours(일별 자동 run)는 제거됨 — 순수 on-demand(버튼만). 신선도=collection-status 배너.
     return cfg
 
 
@@ -527,10 +527,11 @@ def cmd_chrome_supervise(cfg: dict) -> int:
 
 
 def cmd_poll(cfg: dict) -> int:
-    """상주 poll 데몬 — '광고비 갱신' 버튼 요청 감지 + 일별 자동 실행 (S3, 트랙 D-11).
+    """상주 poll 데몬 — '광고비 갱신' 버튼 요청만 감지·실행(순수 on-demand, S3 트랙 D-11).
 
-    ① poll_interval_s마다 prod refresh-status 확인 → requested면 claim(소비) 후 run.
-    ② last_success_at이 daily_run_hours 초과면 자동 run(버튼 안 눌러도 하루 1회 신선도 유지).
+    poll_interval_s마다 prod refresh-status 확인 → requested면 claim(소비) 후 run.
+    ★자동(일별 daily_run_hours) 실행은 제거됨 — 창을 스스로 띄우지 않고 버튼 누를 때만 뜬다.
+    낡음/실패는 prod GET /collection-status → 전역 신선도 배너로 가시화(잊어버림 방지).
     run은 _try_lock 하에 수행(수동 run과 충돌 방지). 광고비는 prod 직접 fetch 불가(D-4)라
     이 데몬이 유일한 갱신 경로. launchd KeepAlive(com.ohisell.ohitech-ad.plist).
     연속 네트워크 실패가 쌓이면 종료 → launchd가 fresh 재기동(sleep/wake 소켓 고착 해소).
@@ -539,37 +540,17 @@ def cmd_poll(cfg: dict) -> int:
 
     interval = int(cfg.get("poll_interval_s", 60))
     cooldown = int(cfg.get("min_fetch_interval_s", 60))
-    daily_hours = int(cfg.get("daily_run_hours", 23))
     _MAX_FAILS = 10
     last_fetch = 0.0   # time.monotonic — 해머링 방지 쿨다운
-    last_auto = 0.0    # time.time — last_success_at 없을 때 자동실행 디바운스
     net_fails = 0
     auth_alerted = False  # claim 401 알림 디바운스(성공 claim 시 해제) — 토큰 불일치 스팸 방지
-    log.info("[poll] 시작 — %ds 간격 갱신요청 확인 + %dh 자동실행(버튼/일별), 포트 %s",
-             interval, daily_hours, cfg.get("cdp_port"))
+    log.info("[poll] 시작 — %ds 간격 갱신요청(버튼)만 확인·실행, 포트 %s",
+             interval, cfg.get("cdp_port"))
     while True:
         try:
             st = _prod_refresh_status(cfg)
             net_fails = 0
-            trigger = None  # "button" | "daily"
-            if st.get("requested"):
-                trigger = "button"
-            else:
-                suc = st.get("last_success_at")
-                if suc:
-                    # last_success_at은 prod가 naive KST(kst_now)로 기록 → KST로 명시 해석해 비교
-                    # (Mac 로컬 TZ에 의존하지 않도록, 리뷰 P2 — TZ 휴리스틱 제거).
-                    try:
-                        suc_dt = datetime.fromisoformat(suc)
-                        if suc_dt.tzinfo is None:
-                            suc_dt = suc_dt.replace(tzinfo=KST)
-                        age_s = (datetime.now(KST) - suc_dt).total_seconds()
-                    except (ValueError, TypeError):
-                        age_s = daily_hours * 3600 + 1  # 파싱 실패 → 자동 실행 유도
-                    if age_s > daily_hours * 3600:
-                        trigger = "daily"
-                elif (_time.time() - last_auto) > daily_hours * 3600:
-                    trigger = "daily"  # 성공 기록 없음 → 첫 자동 실행
+            trigger = "button" if st.get("requested") else None  # 자동 트리거 제거(on-demand)
 
             if trigger:
                 if _time.monotonic() - last_fetch < cooldown:
@@ -579,17 +560,14 @@ def cmd_poll(cfg: dict) -> int:
                         if not acquired:
                             log.info("[poll] 다른 실행 진행 중 — 보류")
                         else:
-                            proceed = True
-                            if trigger == "button":
-                                # claim 실패 = 요청 없음/타 데몬 선점 → run 스킵(요청 유실 방지).
-                                # claim이 raise(401 등)하면 아래 except가 처리. 200이면 인증 정상.
-                                proceed = _prod_claim(cfg).get("claimed", False)
-                                auth_alerted = False
-                                if not proceed:
-                                    log.info("[poll] claim 미획득 — 보류")
+                            # claim 실패 = 요청 없음/타 데몬 선점 → run 스킵(요청 유실 방지).
+                            # claim이 raise(401 등)하면 아래 except가 처리. 200이면 인증 정상.
+                            proceed = _prod_claim(cfg).get("claimed", False)
+                            auth_alerted = False
+                            if not proceed:
+                                log.info("[poll] claim 미획득 — 보류")
                             if proceed:
                                 last_fetch = _time.monotonic()
-                                last_auto = _time.time()
                                 log.info("[poll] %s 트리거 → run", trigger)
                                 rc = cmd_run(cfg)
                                 log.info("[poll] run 완료 rc=%d", rc)
