@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 
 # 워치독 대상 allowlist (계획 §3, Jino 승인 critical-only). 서버측 필수 잡만.
 # 제외(fail-soft/Mac·쿠키 의존): sync_coupang_rg_inbound, sync_coupang_rg_settlement,
-#   auto_download_rg_settlement, sync_coupang_ad_cost, request_ad_cost_refresh, cafe24_token_refresh.
+#   auto_download_rg_settlement, sync_coupang_ad_cost, cafe24_token_refresh.
 WATCHDOG_JOBS: tuple[str, ...] = (
     "auto_sync_orders",
     "auto_profit_calc",
