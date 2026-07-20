@@ -240,6 +240,7 @@ def test_build_diagnosis_assembles_all_boards(db):
         "vicious_cycle",
         "pause_candidates", "resume_candidates",
         "shopping_pause_candidates", "shopping_resume_candidates",
+        "shopping_lever_resume_candidates",  # B4(D-NAO-65)
     }
     assert result["account_bep_roas"] == pytest.approx(3.3333)
 

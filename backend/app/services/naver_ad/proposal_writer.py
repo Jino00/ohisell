@@ -546,26 +546,43 @@ def _stop_loss_proposal(
                 }
             # B3 카나리(D-NAO-65): 레버 미연결(effective_source='ad') 소재를 실효 레버로 직접
             # 하향(그룹 bid_down은 무의미). 예외② leash화 — 이전엔 바닥 대기(None)였던 미연결
-            # 유닛이 소재-레벨 bid_down 고삐를 받는다. lever_broken(소재 bidAmt까지 하한+CPC
-            # 폭등=진짜 레버불능)은 B3에서 은퇴 대상 아님(B4) → pause 안전망 유지. 소재 at-floor
-            # (스텝 소실)면 _ad_bid_proposal이 None → 아래 기존 예외 경로로 폴백. 미카나리/소재
-            # 데이터 부재(effective_ad_id 없음)도 기존 경로(대기/pause 예외).
+            # 유닛이 소재-레벨 bid_down 고삐를 받는다. 소재 at-floor(스텝 소실)면 _ad_bid_proposal
+            # 이 None → 아래 기존 예외 경로로 폴백. 미카나리/소재 데이터 부재(effective_ad_id
+            # 없음)도 기존 경로(대기/pause 예외).
+            # ★B4(D-NAO-65) item 1 — lever_broken 조건부 은퇴: B3에선 `not lever_broken`으로
+            #   lever_broken 유닛을 이 라우팅에서 제외해 pause로 뒀지만(안전망), B3 제어가 라이브
+            #   검증됐으므로 카나리에 한해 그 제외를 해제한다. lever_broken이어도 소재 실효입찰에
+            #   하향 여지가 있으면(스텝 성립) 소재-레벨 bid_down으로 되돌린다(kill→leash). 소재
+            #   실효입찰까지 하한(70)인 진짜 레버불능(CPC 폭등)만 _ad_bid_proposal이 None을 내
+            #   아래 lever_broken 터미널 pause로 떨어진다(§0 금지선: pause는 정책 아닌 예외).
+            #   비카나리는 ad_bid_canary=False라 이 블록 자체를 건너뛰어 기존 pause 유지(회귀 0).
             if (
                 ad_bid_canary and row.get("effective_source") == "ad"
-                and row.get("effective_ad_id") and not row.get("lever_broken")
+                and row.get("effective_ad_id")
             ):
+                if row.get("lever_broken"):
+                    note = (
+                        f" 레버끊김(실측 CPC {row.get('chronic_cpc')}원 ≫ 실효입찰) — 소재입찰 "
+                        f"하향으로 지출 제어(B4 예외② leash화). 누적비용 {row['cost']}원 ≥ 스톱로스 "
+                        f"{row['stop_loss_amount']}원, clk={row.get('clk')}."
+                    )
+                else:
+                    note = (
+                        f" 무전환 누적비용 {row['cost']}원 ≥ 스톱로스 "
+                        f"{row['stop_loss_amount']}원, clk={row.get('clk')}."
+                    )
                 ad_p = _ad_bid_proposal(
                     ad_id=row["effective_ad_id"], adgroup_id=row["adgroup_id"],
                     campaign_id=row["campaign_id"], current_ad_bid=effective_bid_val,
-                    direction="down", board_name="shopping_pause_candidates",
-                    note=(f" 무전환 누적비용 {row['cost']}원 ≥ 스톱로스 "
-                          f"{row['stop_loss_amount']}원, clk={row.get('clk')}."),
+                    direction="down", board_name="shopping_pause_candidates", note=note,
                 )
                 if ad_p is not None:
                     return ad_p
             # 실효입찰 at-floor OR 레버 미연결(실효≫그룹 — 그룹 bid_down 무의미) → lever/pause 판정.
             # DL2 예외② 레버끊김 → pause / 지속 밸브 floor_bleed(GATE P2-2, 바닥 3일+ 무전환 출혈
             # 지속) → 밸브 pause / 그 외 → 바닥 대기(None). 예외②가 밸브보다 우선(정직 경계).
+            # B4: 카나리·하향 여지 있는 lever_broken은 위에서 이미 소재 bid_down으로 반환됐고,
+            # 여기 도달하는 lever_broken은 소재까지 하한인 진짜 레버불능(터미널 pause 잔존).
             if row.get("lever_broken"):
                 return _terminal_pause(row, target_type=target_type, lever_broken=True)
             if row.get("floor_bleed"):
@@ -629,6 +646,44 @@ def _resume_proposal(row: dict, target_label: dict, *, target_type: str = "keywo
             f"— BEP 개선 신호(D-NAO-16)."
         ),
         "expected_effect": "정지 해제 — 재노출 재개.",
+        "status": "pending",
+    }
+
+
+def _lever_resume_proposal(row: dict) -> dict:
+    """레버끊김 그룹 재개 제안 (B4, D-NAO-65 item 2·3 — GATE P2-1 "바닥에서 재개") —
+    shopping_lever_resume_candidates의 action='resume' 행(소재 실효입찰이 바닥 70원까지
+    내려옴) → resume 제안.
+
+    shopping_resume_candidates(정지 직전 ROAS 회복 신호)의 _resume_proposal과 별개인 이유:
+    레버끊김 그룹은 정지 당시 ROAS가 나빠 그 회복 게이트를 못 통과한다(정지 사유가 ROAS가
+    아니라 '그룹입찰 하향으로 지출 제어 불가'였다). 재개 근거는 대신 '소재 실효입찰을 바닥까지
+    잡았다 = 실효레버 확보 + 재출혈 상한 ≈ 바닥 노출 수준'이다. 재개는 최소 노출로 증거 축적
+    재개일 뿐이고, 올리는 건 DL4 밴드 재시작의 BEP 게이트가 정착창 ROAS 실증과 함께 수행한다
+    (D-NAO-59 — 증거 없이 올리지 않는다).
+
+    ★GATE P2-1 c 정직 경계: 카나리 체제에선 재개 후의 교정 액션(소재 bid_down 등)도 전부
+    Confirm-only pending이라 "자동 감시"라 쓰면 거짓 — rationale에 사실대로 명시한다.
+    resume 자체도 자동 레인(_DAILY_LANE_PROPOSAL_TYPES) 대상이 아닌 콘솔 Confirm 전용.
+    카나리 스코프·ML 사전 제외·순서강제는 build()가 적용."""
+    return {
+        "proposal_type": _RESUME,
+        "target_type": "adgroup",
+        "target_id": row["adgroup_id"],
+        "campaign_id": row["campaign_id"],
+        "adgroup_id": None,  # adgroup 대상은 target_id 자체가 그 값(_resume_proposal 관례)
+        "target_lock": False,
+        "rationale": (
+            f"[shopping_lever_resume] 소재 실효입찰 {row['effective_bid']}원 = 입찰 바닥 — "
+            f"최소 노출로 증거 축적 재개(정지 {row['paused_at']}, D-NAO-65 예외② leash화). "
+            f"바닥 재개라 재출혈 상한 ≈ 바닥 노출 수준. 상향은 밴드 재시작(DL4)의 BEP 게이트가 "
+            f"정착창 ROAS 실증과 함께 수행(증거 없이 올리지 않음, D-NAO-59). 재개 후 교정 "
+            f"제안은 콘솔 Confirm 대기 — 자동 실행 아님(카나리 Confirm-only)."
+        ),
+        "expected_effect": (
+            "정지 해제 — 바닥(최소 노출) 재개로 증거 축적 재개. 재출혈 상한 ≈ 바닥 노출 수준, "
+            "교정 제안은 콘솔 Confirm 대기(D-NAO-65 예외② leash화)."
+        ),
         "status": "pending",
     }
 
@@ -975,6 +1030,48 @@ def build(
         if cid not in ours:
             continue
         proposals.append(_resume_proposal(row, labels.get(cid), target_type="adgroup"))
+
+    # shopping_lever_resume_candidates(B4, D-NAO-65 item 2·4·5 — GATE P2-1/P2-3): 이미 pause된
+    # 레버끊김(MO형) 그룹의 소재-레벨 재개 배선 — 예외②를 pause에서 leash로 되돌리는 마지막
+    # 조각. 카나리 한정(B3 스코프 계승, _ad_bid_canary). **ML 사전 제외(GATE P2-3②)**: 부모
+    # 그룹이 수동입찰(True)이 아니면(ML/판정불가 None) resume·bid_down_first 모두 미생성 —
+    # 예외①(ML) 부류는 소재 bidAmt도 무시돼 소재 leash가 불가하므로 재개하면 통제 수단이 없다
+    # (fail-closed). 재조회 API 콜은 카나리 소수 그룹뿐(비카나리는 위에서 이미 skip). action 분기:
+    #  - bid_down_first: 소재 실효입찰 > 바닥(70) → 소재-레벨 bid_down으로 바닥까지 단계 하향
+    #    (재개 준비 — 800원 그대로 재개 방지, item 5). Confirm 전용(target_type='ad'는 일/시간당
+    #    레인이 이미 제외). 소재 at-floor(스텝 소실)면 _ad_bid_proposal None → skip.
+    #  - resume: 소재 실효입찰 ≤ 바닥(준비 완료 — 바닥 재개, GATE P2-1) → resume 제안.
+    #    단 **순서강제**(item 4): 같은 그룹에 ad bid_down pending이 살아있으면 하향이 아직
+    #    확정 안 된 것이므로 resume 금지(하향 먼저). resume은 자동 레인 대상 아님 = 콘솔
+    #    Confirm 전용.
+    for row in boards.get("shopping_lever_resume_candidates", []) or []:
+        cid = row["campaign_id"]
+        if cid not in ours:
+            continue
+        if not _ad_bid_canary(cid):
+            continue  # B4 = 카나리 한정(B3 스코프 계승)
+        if _adgroup_is_manual_bid(row["adgroup_id"]) is not True:
+            continue  # GATE P2-3②: ML/판정불가 — 소재 leash 불가, 재개 미제안(fail-closed)
+        if row["action"] == "bid_down_first":
+            ad_p = _ad_bid_proposal(
+                ad_id=row["effective_ad_id"], adgroup_id=row["adgroup_id"], campaign_id=cid,
+                current_ad_bid=row["effective_bid"], direction="down",
+                board_name="shopping_lever_resume",
+                note=(f" 재개 준비 — 소재 실효입찰 {row['effective_bid']}원 > 바닥(70원), "
+                      f"바닥까지 단계 하향 후 재개(정지 {row['paused_at']})."),
+            )
+            if ad_p is not None:
+                proposals.append(ad_p)
+        elif row["action"] == "resume":
+            # 순서강제: 같은 그룹에 ad bid_down pending 존재 시 resume 금지(하향 확정 전).
+            pending_ad_down = db.query(NaverProposal.id).filter(
+                NaverProposal.status == "pending",
+                NaverProposal.target_type == "ad",
+                NaverProposal.proposal_type == _BID_DOWN,
+                NaverProposal.adgroup_id == row["adgroup_id"],
+            ).first()
+            if pending_ad_down is None:
+                proposals.append(_lever_resume_proposal(row))
 
     # growth_sweeper(D-NAO-22-①): 후보는 이미 gap 내림차순(find_growth_candidates) — 상위부터
     # 채택해 GROWTH_PROPOSAL_CAP에서 멈춘다(탐색 예산 총액 캡의 count 기반 대체, growth_sweeper
