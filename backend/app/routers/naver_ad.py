@@ -626,6 +626,8 @@ def _serialize_settings(s: NaverCampaignSettings) -> dict:
         "target_roas_override": _num(s.target_roas_override),
         "gamma": _num(s.gamma),
         "memo": s.memo,
+        # UI1(D-NAO-65): loss 대응 정책. NULL은 콘솔에서 기본값 'leash'(고삐)로 해석.
+        "loss_policy": s.loss_policy,
         "updated_at": s.updated_at.isoformat() if s.updated_at else None,
     }
 
@@ -724,6 +726,67 @@ def campaign_optimizer_switch(body: OptimizerSwitchIn, db: Session = Depends(get
             #   kst_now()를 명시 전달하는데 이 라우터의 두 writer만 빠져 있었다 →
             #   00:00~09:00 KST 조작이 전날로 귀속됐다(D-NAO-54 날짜 창이 이걸 처음 가시화).
             #   memory: sqlite-server-default-now-is-utc — 같은 함정 세 번째.
+            changed_at=kst_now(),
+        ))
+
+    db.commit()
+    db.refresh(settings)
+    return _serialize_settings(settings)
+
+
+_VALID_LOSS_POLICIES = {"leash", "stoploss_pause"}
+
+
+class LossPolicySwitchIn(BaseModel):
+    """캠페인 loss 대응 정책 전용 스위치(D-NAO-65 UI1). optimizer 스위치와 동형 —
+    이 필드만 바꾸고 나머지(optimizer/mode/…)는 손대지 않는다(extra='forbid'로 오필드 422)."""
+
+    model_config = {"extra": "forbid"}
+
+    campaign_id: str
+    loss_policy: str
+
+
+@router.put("/campaign-settings/loss-policy")
+def campaign_loss_policy_switch(body: LossPolicySwitchIn, db: Session = Depends(get_db)):
+    """캠페인별 loss 대응 정책만 바꾼다(D-NAO-65 UI1). 커맨드센터 loss 정책 스위치의 쓰기 경로.
+
+    ★왜 전용 엔드포인트인가(PUT /campaign-settings·/optimizer와 같은 원칙, D-NAO-53 교훈):
+    전체 치환 PUT을 쓰면 loss_policy만 보내려다 mode·override·gamma가 null로 날아간다. 좁은
+    엔드포인트로 그 실수를 구조적으로 막는다 — 이 함수는 loss_policy 외 필드를 건드리지 않는다.
+
+    ⚠️ §0 금지선: 정책 쓰기는 이 PUT 하나뿐이다. 위임(delegation_gate)·자동 레인·SA 어디서도
+    loss_policy를 바꾸지 않는다. 이건 우리 시스템 내부 설정이지 광고 API 쓰기가 아니다.
+    실제 행위 차이는 proposal_writer.build()가 이 값을 읽어 스톱로스 SA에 주입할 때 난다.
+
+    ★NULL=leash 정규화(감사 정확성): 미설정(NULL)은 기본값 'leash'와 의미가 같다. 그래서
+    before를 'leash'로 정규화해 비교한다 — NULL→'leash'는 실질 무변경이라 change_log를 남기지
+    않고, NULL→'stoploss_pause'만 기록한다(optimizer 스위치의 before='none' 정규화와 동형)."""
+    if body.loss_policy not in _VALID_LOSS_POLICIES:
+        raise HTTPException(422, f"loss_policy는 {sorted(_VALID_LOSS_POLICIES)} 중 하나여야 합니다")
+
+    settings = db.query(NaverCampaignSettings).filter(
+        NaverCampaignSettings.campaign_id == body.campaign_id
+    ).first()
+    # NULL/미설정은 기본값 'leash'로 정규화(NULL=leash 불변식) — 실질 변경 여부 판정용.
+    before = (settings.loss_policy if settings and settings.loss_policy else "leash")
+
+    if settings is None:
+        # 없던 행은 optimizer='none'(자동화 안 함)에서 시작 — 정책만 저장했다고 라이브 쓰기가
+        # 켜지면 안 된다(PUT /campaign-settings 신규행 관례와 동일).
+        settings = NaverCampaignSettings(
+            campaign_id=body.campaign_id, optimizer="none", loss_policy=body.loss_policy)
+        db.add(settings)
+    else:
+        settings.loss_policy = body.loss_policy  # ★다른 필드는 손대지 않는다
+
+    if before != body.loss_policy:
+        db.add(NaverChangeLog(
+            entity_type="campaign", entity_id=body.campaign_id, campaign_id=body.campaign_id,
+            action="set_loss_policy",
+            before_value=before, after_value=body.loss_policy,
+            rationale="커맨드 센터 loss 정책 스위치(D-NAO-65 UI1)",
+            # changed_at 명시(D-NAO-54, sqlite-server-default-now-is-utc): 안 넘기면 UTC로 박힘.
             changed_at=kst_now(),
         ))
 

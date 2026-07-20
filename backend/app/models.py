@@ -1583,6 +1583,11 @@ class NaverCampaignSettings(Base):
     # D-NAO-49: 자동 운영(auto_operator SA) 대상 스위치 — True인 캠페인만 일/시간당 레인이
     # 심사·집행한다. 킬스위치 = 이 플래그 OFF(Jino "04 자동운영 중지" → 즉시 UPDATE).
     auto_operate: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # UI1(D-NAO-65): loss 대응 정책(캠페인별 예외 스위치). NULL/'leash'=기본(고삐-일일리셋,
+    # DL 스프린트 구현·불변), 'stoploss_pause'=종전 하드 정지로 회귀. 전역 기본값은 여전히
+    # 고삐라 additive nullable(기존 행 무영향·회귀 0). ★쓰기는 Router PUT /campaign-settings/
+    # loss-policy 하나뿐 — 위임·자동 레인 어디서도 이 값을 바꾸지 않는다(§0 금지선).
+    loss_policy: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
