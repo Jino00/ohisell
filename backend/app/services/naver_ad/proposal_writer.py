@@ -11,7 +11,7 @@ from decimal import Decimal, ROUND_CEILING
 from sqlalchemy.orm import Session
 
 from app.models import NaverCampaignSettings, NaverProposal
-from app.services.naver_ad import campaign_target_resolver, growth_sweeper, naver_sa_writer
+from app.services.naver_ad import campaign_target_resolver, effective_bid, growth_sweeper, naver_sa_writer
 # 라이브[P1] DOA 수정: 생성 단계 스텝 클램프의 스텝 상수는 실행 가드레일과 단일 진실 소스
 # (하드코딩 0.15 중복 금지 — 드리프트 방지). guardrail_gate는 이 모듈을 import하지 않아 순환 없음.
 from app.services.naver_ad.guardrail_gate import _MAX_CHANGE_PCT
@@ -337,11 +337,22 @@ def _terminal_pause(
     elif floor_bleed:
         # DL2 GATE P2-2 지속 밸브: 바닥 대기 N일+ 무전환 출혈 지속 — "레버로 할 수 있는 걸 다
         # 했는데도 출혈" = 레버 불능 예외의 실증 케이스(무한 대기 방치 차단).
-        rationale = (
-            f"[{board_name}] 바닥 창 {row.get('window_days')}일 무전환 출혈 지속"
-            f"(비용 {row['cost']}원 ≥ 스톱로스 {row['stop_loss_amount']}원, 입찰 하한 "
-            f"{row['current_bid']}원) → 정지(D-NAO-65 지속 밸브) clk={row.get('clk')}."
-        )
+        # B2 GATE P3-1(정직 경계): 레버 미연결(effective_source='ad') 경유면 "바닥"이 아니다 —
+        # 입찰이 하한이라 대기한 게 아니라 그룹입찰이 무효(소재입찰이 우회)라 대기한 것.
+        # 사유문을 사실대로 분기(레버 미연결 대기 + 실효 소재입찰 명기).
+        if row.get("effective_source") == "ad":
+            rationale = (
+                f"[{board_name}] 레버 미연결 대기 {row.get('window_days')}일(실효 소재입찰 "
+                f"{row.get('effective_bid')}원, 그룹입찰 {row['current_bid']}원 무효 — B3 전) "
+                f"무전환 출혈 지속(비용 {row['cost']}원 ≥ 스톱로스 {row['stop_loss_amount']}원) "
+                f"→ 정지(D-NAO-65 지속 밸브) clk={row.get('clk')}."
+            )
+        else:
+            rationale = (
+                f"[{board_name}] 바닥 창 {row.get('window_days')}일 무전환 출혈 지속"
+                f"(비용 {row['cost']}원 ≥ 스톱로스 {row['stop_loss_amount']}원, 입찰 하한 "
+                f"{row['current_bid']}원) → 정지(D-NAO-65 지속 밸브) clk={row.get('clk')}."
+            )
     elif target_type == "keyword":
         rationale = (
             f"[스톱로스-터미널] 입찰 하한({row['current_bid']}원) 도달 무전환 → "
@@ -425,11 +436,22 @@ def _stop_loss_proposal(
     row['lever_broken']/['chronic_cpc']/['floor_bleed']/['window_days']는 account_diagnosis가
     태깅한 값(단일 진실 소스 — k 임계·최소 실증 기간 상수는 그쪽에 canonical)."""
     if target_type == "adgroup":
-        current_bid = row["current_bid"]
-        step_floor = _step_down_bid(current_bid)
+        current_bid = row["current_bid"]  # 그룹입찰(target_bid 스텝 기준 — B2는 소재입찰 안 씀)
+        # B2(D-NAO-65): at-floor·레버연결 판정은 실효입찰(effective_bid) 기준(진단과 정합).
+        # 그룹입찰이 곧 실효 레버일 때만(effective_source='group' = 실효==그룹) 그룹 bid_down이
+        # 유효 — 실효≫그룹(useGroupBidAmt=false 소재가 그룹입찰 우회)이면 그룹 bid_down은 무의미
+        # 하므로 제안하지 않고 lever/pause 판정에 위임한다(소재-레벨 제어는 B3). effective_bid/
+        # effective_source 미제공(하위호환·키워드)이면 그룹입찰 기준으로 폴백(종전 동작 보존).
+        step_floor = _step_down_bid(current_bid)  # 그룹 스텝(target_bid — 소재입찰 아님)
+        effective_source = row.get("effective_source")
+        effective_bid_val = row.get("effective_bid", current_bid)
+        if effective_source is not None:
+            lever_connected = effective_source == "group"
+        else:
+            lever_connected = effective_bid_val == current_bid
         if manual_bid is True:
-            if step_floor < current_bid:
-                # 하향 여지 있음 → 기존 bid_down 고삐(RL4b 불변).
+            if step_floor < current_bid and lever_connected:
+                # 그룹입찰이 실효 레버이고 하향 여지 있음 → 기존 bid_down 고삐(RL4b 불변).
                 rationale = (
                     f"[스톱로스고삐] 무전환 누적비용 {row['cost']}원≥스톱로스 {row['stop_loss_amount']}원"
                     f"(현재입찰 {current_bid}→{step_floor}원, D-NAO-60 RL4b 쇼핑 수동입찰 한 등 하향) "
@@ -448,9 +470,9 @@ def _stop_loss_proposal(
                     "status": "pending",
                     "target_bid": step_floor,
                 }
-            # at-floor(수동입찰): DL2 예외② 레버끊김 → pause / 지속 밸브 floor_bleed(GATE
-            # P2-2, 바닥 3일+ 무전환 출혈 지속) → 밸브 pause / 그 외 → 바닥 대기(None).
-            # 예외②가 밸브보다 우선(더 구체적 원인 명시가 정직 경계).
+            # 실효입찰 at-floor OR 레버 미연결(실효≫그룹 — 그룹 bid_down 무의미) → lever/pause 판정.
+            # DL2 예외② 레버끊김 → pause / 지속 밸브 floor_bleed(GATE P2-2, 바닥 3일+ 무전환 출혈
+            # 지속) → 밸브 pause / 그 외 → 바닥 대기(None). 예외②가 밸브보다 우선(정직 경계).
             if row.get("lever_broken"):
                 return _terminal_pause(row, target_type=target_type, lever_broken=True)
             if row.get("floor_bleed"):
@@ -722,6 +744,24 @@ def build(
     ours = _ours_campaign_ids(db)
     labels = _TargetLabelCache(db)
 
+    # B2 GATE P2-2②: 레버 미연결 그룹(실효입찰 source='ad' — useGroupBidAmt=false 소재가
+    # 그룹입찰을 우회) 판별. 미연결 그룹에 그룹입찰 bid_down/bid_up을 내면 지출엔 무효이면서
+    # DL1 행동 창만 리셋(P2-1 침묵 그물 지연) + changes_today 슬롯 낭비 — adgroup grain 밴드
+    # 보드(shopping_group_bep/shopping_group_growth) 제안을 생성 단계에서 건너뛴다(소재-레벨
+    # 제어는 B3 몫, 키워드 보드 무관). 그룹입찰은 sim의 current_bid(NaverEntity.bid_amt 유래)
+    # 로 얻고, 없으면 판정 불가 → 기존 동작 폴백(그룹입찰 유효 가정). 배치 1쿼리(GATE P3-2).
+    band_group_bids: dict[str, int] = {}
+    for band_board in ("shopping_group_bep", "shopping_group_growth"):
+        for row in boards.get(band_board, []) or []:
+            if row["campaign_id"] not in ours:
+                continue
+            band_sim = bid_sims.get(("adgroup", row["adgroup_id"]))
+            band_current_bid = (band_sim or {}).get("current_bid")
+            if band_current_bid:
+                band_group_bids[row["adgroup_id"]] = band_current_bid
+    band_effs = effective_bid.adgroup_effective_bids(db, band_group_bids)
+    disconnected_adgroups = {aid for aid, e in band_effs.items() if e["source"] == "ad"}
+
     proposals: list[dict] = []
 
     for row in boards.get("bleeding_keywords", []) or []:
@@ -753,6 +793,8 @@ def build(
         if cid not in ours:
             continue
         target_id = row["adgroup_id"]
+        if target_id in disconnected_adgroups:
+            continue  # B2 GATE P2-2②: 레버 미연결 — 그룹입찰 bid_down 무효(B3 대기)
         sim = bid_sims.get(("adgroup", target_id))
         p = _bid_proposal(row, sim, cid, target_id, target_type="adgroup",
                            target_label=labels.get(cid), board_name="shopping_group_bep",
@@ -768,6 +810,8 @@ def build(
         if cid not in ours:
             continue
         target_id = row["adgroup_id"]
+        if target_id in disconnected_adgroups:
+            continue  # B2 GATE P2-2②: 레버 미연결 — 그룹입찰 bid_up 무효(B3 대기)
         sim = bid_sims.get(("adgroup", target_id))
         p = _bid_proposal(row, sim, cid, target_id, target_type="adgroup",
                            target_label=labels.get(cid), board_name="shopping_group_growth",
