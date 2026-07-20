@@ -38,9 +38,10 @@
 
 ## §4 체크리스트
 
-- [ ] IU1 구현 + 테스트
-- [ ] IU2 구현 + 테스트
-- [ ] GATE PASS
-- [ ] IU3 정합
-- [ ] 배포 + 라이브 확인
-- [ ] 자연 발동 관측(장중 UP 실집행·상단 유지 실측) — 상설
+- [x] IU1 구현 + 테스트 (`_intraday_up_ok` tally≥2·est≥target×1.2·imp≥30·price fail-closed / UP=(intraday OR settle) 순위 무관 / `_is_pacing_slow`→`_budget_headroom_ok`)
+- [x] IU2 구현 + 테스트 (과열밴드 DOWN 삭제·general-UP learned band 천장 제거 — `_learned_optimal_skip`은 탐침 프라이어 전용 존치. 성장 스윕엔 순위 상한 없음 실측 확인 — bid_simulator rank@2는 D-NAO-19 효율캡이라 불변)
+- [x] GATE PASS (Opus 적대 리뷰 — P1 0. 방어 3중 실증: 쿨다운 2h·일일캡 3(=일 최대 +52%)·BEP는 30일 정산 기준 + 서킷브레이커·일예산. P2 2건 권고)
+- [x] GATE P2 반영 (P2-A-1 **정산 거부권**: 정착창 명시적 target 미달이면 intraday 근거 UP 금지 / P2-A-2 **장중-단독 UP 일 1스텝 캡**: 정산 판정불가 유닛은 +15%/일, `_executed_bid_ups_today` / P2-B **keyword S3 완전성 게이트**: 키워드 UP도 BEP·일예산 원료 fail-closed. 에이전트 중단분(테스트 1건)은 오케스트레이터가 마무리 — **2433 passed·회귀 0**)
+- [x] IU3 정합 (사유문 "재시작 대기(ROAS 미달)"·diary 갱신. retro 스냅샷 매핑 확인은 배포 전 확인 항목으로 이월)
+- [ ] 배포(safe_deploy auto_operator.py+naver_execution_harness.py) + 라이브: 다음 :20 레인 완주·04류 UP 판정 실측·상단 강제 DOWN 소멸 — **다음 세션**
+- [ ] 자연 발동 관측(장중 UP 실집행·정산 거부권/1스텝 캡 발동·상단 유지 실측) — 상설

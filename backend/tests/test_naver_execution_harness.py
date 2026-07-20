@@ -338,6 +338,17 @@ def _keyword_write_result(before=None, after=None):
     )
 
 
+def _complete_kw_up_ctx():
+    """GATE P2-B(D-NAO-66 IU): keyword 증액도 S3 완전성 게이트 대상이 되어, keyword bid_up
+    테스트의 mock 컨텍스트도 완전(BEP 원료·일예산)해야 실행 경로에 진입한다 — 가드를 약화하지
+    않고 테스트 시드를 완전하게(adgroup S3 테스트의 complete_ctx와 동형)."""
+    return {
+        "current_bid": 190, "roas_corrected": 5.0, "target_roas": 2.0,
+        "unconverted_spend": 0, "cost_today": 1000, "daily_budget": 50_000,
+        "last_change_at": None, "changes_today_count": 0,
+    }
+
+
 def test_execute_update_bid_success(db):
     p = _proposal(db, proposal_type="bid_up")
     p.target_bid = 210
@@ -345,7 +356,7 @@ def test_execute_update_bid_success(db):
     _settings(db, optimizer="ours")
     result = _keyword_write_result(before={"bidAmt": 190, "userLock": False}, after={"bidAmt": 210, "userLock": False})
 
-    with patch.object(harness, "_build_guardrail_context", return_value={}), \
+    with patch.object(harness, "_build_guardrail_context", return_value=_complete_kw_up_ctx()), \
          patch.object(harness.guardrail_gate, "check", return_value=None) as mock_gate, \
          patch.object(harness.naver_sa_writer, "update_keyword_bid", return_value=result) as mock_write:
         log_entry = harness.execute(db, p.id, dry_run=False)
@@ -370,7 +381,7 @@ def test_execute_update_bid_blocked_by_guardrail(db):
     db.commit()
     _settings(db, optimizer="ours")
 
-    with patch.object(harness, "_build_guardrail_context", return_value={}), \
+    with patch.object(harness, "_build_guardrail_context", return_value=_complete_kw_up_ctx()), \
          patch.object(harness.guardrail_gate, "check", return_value="변경폭 초과") as mock_gate, \
          patch.object(harness.naver_sa_writer, "update_keyword_bid") as mock_write:
         with pytest.raises(harness.MissingExecutionTargetError):
@@ -494,6 +505,53 @@ def test_execute_update_bid_adgroup_bid_down_success(db):
 
 
 OTHER_UP_TYPES = ("bid_up", "growth_bid_up")
+
+
+@pytest.mark.parametrize("ptype", OTHER_UP_TYPES)
+def test_execute_update_bid_keyword_up_blocked_when_context_incomplete(db, ptype):
+    """[GATE P2-B, D-NAO-66 IU] keyword 증액도 S3 완전성 게이트 대상 — BEP 원료(roas_corrected/
+    target_roas)·일예산이 불완전하면 guardrail_gate 호출 전 fail-closed 차단(writer 미호출·
+    failed). 종전엔 adgroup/ad만이었고 키워드는 핫셋 클릭 게이트와의 암묵적 커플링에 기댔다 —
+    IU가 장중-단독 UP을 연 만큼 키워드도 명시적으로 보장한다."""
+    p = _proposal(db, proposal_type=ptype)  # target_type='keyword'(기본), target_id='nkw-1'
+    p.target_bid = 210
+    db.commit()
+    _settings(db, optimizer="ours")
+
+    with patch.object(harness, "_build_guardrail_context",
+                       return_value={"current_bid": 190, "roas_corrected": 3.0, "target_roas": None}), \
+         patch.object(harness.guardrail_gate, "check") as mock_gate, \
+         patch.object(harness.naver_sa_writer, "update_keyword_bid") as mock_kw:
+        with pytest.raises(harness.MissingExecutionTargetError):
+            harness.execute(db, p.id, dry_run=False)
+
+    mock_gate.assert_not_called()
+    mock_kw.assert_not_called()
+    db.refresh(p)
+    assert p.status == "failed"
+    logs = db.query(NaverChangeLog).filter(NaverChangeLog.proposal_id == p.id).all()
+    assert len(logs) == 1
+    assert "keyword 증액 가드 컨텍스트 불완전" in logs[0].rationale
+
+
+def test_execute_update_bid_keyword_down_exempt_from_completeness_gate(db):
+    """[GATE P2-B 대칭] keyword bid_down(안전 방향)은 완전성 게이트 면제 — up 전용 검사라
+    컨텍스트가 비어도 guardrail_gate로 정상 진행(기존 동작 보존, 과도차단 방지)."""
+    p = _proposal(db, proposal_type="bid_down")
+    p.target_bid = 170
+    db.commit()
+    _settings(db, optimizer="ours")
+    result = _keyword_write_result(before={"bidAmt": 190, "userLock": False},
+                                    after={"bidAmt": 170, "userLock": False})
+
+    with patch.object(harness, "_build_guardrail_context", return_value={}), \
+         patch.object(harness.guardrail_gate, "check", return_value=None) as mock_gate, \
+         patch.object(harness.naver_sa_writer, "update_keyword_bid", return_value=result) as mock_kw:
+        log_entry = harness.execute(db, p.id, dry_run=False)
+
+    mock_gate.assert_called_once()
+    mock_kw.assert_called_once_with("nkw-1", 170)
+    assert log_entry.action == "update_bid"
 
 
 @pytest.mark.parametrize("ptype", OTHER_UP_TYPES)
@@ -1011,7 +1069,7 @@ def test_execute_update_bid_detects_external_change_appends_warning(db):
     # 방금 재조회한 라이브 before는 250 — 우리가 마지막으로 기록한 210과 다름(외부 변경)
     result = _keyword_write_result(before={"bidAmt": 250, "userLock": False}, after={"bidAmt": 300, "userLock": False})
 
-    with patch.object(harness, "_build_guardrail_context", return_value={}), \
+    with patch.object(harness, "_build_guardrail_context", return_value=_complete_kw_up_ctx()), \
          patch.object(harness.guardrail_gate, "check", return_value=None), \
          patch.object(harness.naver_sa_writer, "update_keyword_bid", return_value=result):
         log_entry = harness.execute(db, p.id, dry_run=False)
@@ -1035,7 +1093,7 @@ def test_execute_update_bid_no_warning_when_before_matches_our_last_record(db):
     # 재조회 before가 우리 마지막 기록(210)과 일치 — 외부 변경 없음
     result = _keyword_write_result(before={"bidAmt": 210, "userLock": False}, after={"bidAmt": 300, "userLock": False})
 
-    with patch.object(harness, "_build_guardrail_context", return_value={}), \
+    with patch.object(harness, "_build_guardrail_context", return_value=_complete_kw_up_ctx()), \
          patch.object(harness.guardrail_gate, "check", return_value=None), \
          patch.object(harness.naver_sa_writer, "update_keyword_bid", return_value=result):
         log_entry = harness.execute(db, p.id, dry_run=False)
@@ -1050,7 +1108,7 @@ def test_execute_update_bid_no_warning_when_no_prior_record(db):
     _settings(db, optimizer="ours")
     result = _keyword_write_result()
 
-    with patch.object(harness, "_build_guardrail_context", return_value={}), \
+    with patch.object(harness, "_build_guardrail_context", return_value=_complete_kw_up_ctx()), \
          patch.object(harness.guardrail_gate, "check", return_value=None), \
          patch.object(harness.naver_sa_writer, "update_keyword_bid", return_value=result):
         log_entry = harness.execute(db, p.id, dry_run=False)
@@ -1706,7 +1764,7 @@ def test_execute_update_bid_success_sets_changed_at_to_kst_now(db):
     now = kst_now()
     result = _keyword_write_result()
 
-    with patch.object(harness, "_build_guardrail_context", return_value={}), \
+    with patch.object(harness, "_build_guardrail_context", return_value=_complete_kw_up_ctx()), \
          patch.object(harness.guardrail_gate, "check", return_value=None), \
          patch.object(harness.naver_sa_writer, "update_keyword_bid", return_value=result):
         log_entry = harness._execute_update_bid(db, p, now)
@@ -1790,7 +1848,7 @@ def test_executed_change_log_is_picked_up_by_proposal_scoreboard_after_verify_da
     executed_at = datetime.combine(executed_date, datetime.min.time())
     result = _keyword_write_result(before={"bidAmt": 190, "userLock": False}, after={"bidAmt": 210, "userLock": False})
 
-    with patch.object(harness, "_build_guardrail_context", return_value={}), \
+    with patch.object(harness, "_build_guardrail_context", return_value=_complete_kw_up_ctx()), \
          patch.object(harness.guardrail_gate, "check", return_value=None), \
          patch.object(harness.naver_sa_writer, "update_keyword_bid", return_value=result):
         log_entry = harness.execute(db, p.id, dry_run=False, now=executed_at)

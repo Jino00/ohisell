@@ -423,10 +423,12 @@ def _seed_hourly_shopping(db, *, adgroup_id="grp-hot"):
 
 
 def _overheat_curve():
+    # ★D-NAO-66: 과열밴드 DOWN(rank<2.5) 폐지 → CPC 급등으로 DOWN 유발(baseline CPC 100원 =
+    # cost2000/clk20 → 당일 CPC 250원 > 100×2). DOWN 방향 소재-레벨 라우팅이 관심사(트리거 무관).
     return [
-        {"hour": 6, "imp": 15, "clk": 2, "cost": 100, "avg_rank": 2.0},
-        {"hour": 7, "imp": 15, "clk": 2, "cost": 100, "avg_rank": 2.0},
-        {"hour": 8, "imp": 15, "clk": 2, "cost": 100, "avg_rank": 2.0},
+        {"hour": 6, "imp": 15, "clk": 2, "cost": 500, "avg_rank": 2.0},
+        {"hour": 7, "imp": 15, "clk": 2, "cost": 500, "avg_rank": 2.0},
+        {"hour": 8, "imp": 15, "clk": 2, "cost": 500, "avg_rank": 2.0},
     ]
 
 
