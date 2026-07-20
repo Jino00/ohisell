@@ -33,5 +33,5 @@
 ## 5. 주의
 - 원칙22: B3 "됐다" 금지(GATE·배포·카나리 CPC 실하락 왕복 전). 개별 캠페인 소방수 금지(전역 규칙만). naver_ad_daily 2배 함정(센티널 dedup). 보정계수 ×1.21. codex 07-23.
 
-## 6. 새 세션 시작 프롬프트
-`.claude/worktrees/video-content-summary-0e6c41/.claude/memory/HANDOFF_ohisell-D-NAO-65-DL+B-sprints-live_20260720.md 읽고 이어서 진행해줘. B3 GATE 결과 처리부터.`
+## 6. 새 세션 시작 프롬프트 (12:15 갱신 — §3의 B3/B4는 완료됨, 상단 12:15 추가분이 최신 상태)
+`.claude/worktrees/video-content-summary-0e6c41/.claude/memory/HANDOFF_ohisell-D-NAO-65-DL+B-sprints-live_20260720.md 읽고 이어서 진행해줘. 우선 07-21 08:00 이후 MO(grp-…070109616) 소재 bid_down_first pending 생성과 DL/B 자연 발동(미연결 hold·8스텝 하향·재시작 대기 사유)을 관측·보고하고, 이상 없으면 UI 스프린트(sellc loss 정책 스위치) 설계부터 자동 진행해줘(라우팅: 구조=Fable·설계/구현=Opus·단순=Sonnet, 옵션은 추천안 자동).`
