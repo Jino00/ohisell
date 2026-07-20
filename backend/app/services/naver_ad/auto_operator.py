@@ -32,12 +32,12 @@ from app.models import (
     NaverProposal,
     NaverRetroSignal,
 )
-from app.services.naver_ad import bid_simulator, campaign_target_resolver, diagnosis, diary, effective_bid, intraday_roas, naver_execution_harness, naver_sa_writer, rank_servo
-from app.services.naver_ad.bid_step_types import BID_UP_TYPES
+from app.services.naver_ad import bid_simulator, campaign_target_resolver, diagnosis, diary, effective_bid, guardrail_gate, intraday_roas, naver_execution_harness, naver_sa_writer, rank_servo
+from app.services.naver_ad.bid_step_types import BID_UP_TYPES, encode_base_bid
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.services.naver_ad.guardrail_gate import _MAX_CHANGE_PCT
 from app.services.naver_ad.trigger_watch import CPC_SPIKE_RATIO
-from app.services.naver_sa_ad_fetcher import fetch_entity_hh24
+from app.services.naver_sa_ad_fetcher import estimate_average_position_bid, fetch_entity_hh24
 from app.utils.kst import kst_now
 
 log = logging.getLogger(__name__)
@@ -112,6 +112,23 @@ _HOURLY_BASELINE_DAYS = 7  # 소진 서킷브레이커 직전 7일
 # 서보 스텝에 사전 체크한다. ★안전계수는 **보수 방향 < 1**로 못박음(여유계수 1.2류 오독 방지) —
 # 잔여예산의 80%까지만 예상 지출을 허용(외삽 오차 마진). daily_budget=0(uncapped)이면 통과.
 _BUDGET_HEADROOM_SAFETY_RATIO = Decimal("0.8")
+
+# ── IU-R R2(D-NAO-67 원리③) 파워링크 estimate 직행 상수 ──
+# §난제4 estimate 호출 캡(보수 초기값 — canary 실측 후 확정, §실측5). 실제 스텝할 유닛
+# (ROAS 게이트 통과·쿨다운/일일캡 prefilter 통과·데드밴드 밖)에만 호출하고 런 내
+# (kw_id,position) 캐시로 중복 호출을 없앤다 — 그럼에도 호출량 상한을 둔다.
+# ★의미 = **per-run 캡**(codex R2 P2 — 정직한 명명): counter가 run_hourly_lane 실행마다
+# 리셋되므로 같은 시간대 재시도/수동 실행이 겹치면 시간당 총량은 이 값을 넘을 수 있다.
+# 시간당 총량 계약이 필요해지면 DB 시간 버킷 카운터로 승격(canary 실측 후 판단).
+_RUN_ESTIMATE_BUDGET = 50
+# estimate/average-position-bid의 유효 position 범위(fetcher 실측: 1~4만 유효, 그 밖은 400).
+_ESTIMATE_POSITION_MIN = 1
+_ESTIMATE_POSITION_MAX = 4
+# 네이버 SA 유효 입찰가 규격(bid_simulator._MIN_BID/_MAX_BID/_BID_INCREMENT·rank_servo와 동일 —
+# 라이브검증 2026-07-07: 70~100,000원·10원 단위만 유효). estimate rank_bid 이상값 판별에 사용.
+_VALID_BID_MIN = 70
+_VALID_BID_MAX = 100_000
+_BID_INCREMENT = 10
 
 # ── D-NAO-58 CD2 클릭 탐침 상수(D-58-7 확정, 기존 검증 상수 재사용 원칙 — 새 매직넘버 최소화) ──
 _PROBE_ZERO_CLICK_HOURS = 2  # 완료 시간대 클릭0 지속 창(Jino 3h→2h 단축, "민첩한 시장 대응")
@@ -1000,6 +1017,128 @@ def _servo_budget_pace_ok(
     )
 
 
+# ══════════════════════ IU-R R2 파워링크 estimate 직행 원료(PLAN §2 R2) ══════════════════════
+
+
+def _rank_step_prefilter(
+    db: Session, *, entity_type: str, entity_id: str, now: datetime, proposal_type: str,
+) -> str | None:
+    """rank-step(서보·estimate) 진입 전 쿨다운/일일캡 사전점검(PLAN §2 R2 point2 · R1 GATE P2-2
+    백로그 이행). (차단사유, or None=통과). estimate 호출·서보 산정 비용을 아끼려고, 실행 시점
+    guardrail이 어차피 막을 쿨다운/일일캡을 **동일 판별**로 미리 거른다 — guardrail 로직 중복
+    금지: naver_execution_harness.compute_change_cadence(원료 단일 쿼리) + guardrail_gate.
+    precheck_cooldown_and_cap(임계·면제 단일 소스)을 그대로 재사용한다(prefilter↔guardrail 어긋남
+    0). proposal_type=bid_up_servo/bid_up_rank(둘 다 UP·일일캡 비면제)."""
+    last_change_at, changes_today = naver_execution_harness.compute_change_cadence(
+        db, entity_type, entity_id, now,
+    )
+    return guardrail_gate.precheck_cooldown_and_cap(last_change_at, changes_today, now, proposal_type)
+
+
+def _estimate_target_position(weighted_rank) -> int | None:
+    """estimate 목표 순위 = clamp(ceil(weighted_rank)−1, 1, 4)(PLAN §2 R2 point1, estimate
+    position 1~4 제약). None 반환 = hold:
+      · weighted_rank None(순위 전부 null) — 근거 없음(fail-closed).
+      · weighted_rank ≤ 1+deadband — 최상단 converged(rank_servo 최상단 가드 재사용,
+        estimate position 1 요청 자체 차단, codex P1-4). deadband는 rank_servo 단일 소스."""
+    if weighted_rank is None:
+        return None
+    wr = Decimal(str(weighted_rank))
+    if wr <= Decimal(1) + rank_servo._SERVO_DEADBAND:
+        return None
+    ceil_rank = int(wr.to_integral_value(rounding=ROUND_CEILING))
+    target = ceil_rank - 1
+    return max(_ESTIMATE_POSITION_MIN, min(_ESTIMATE_POSITION_MAX, target))
+
+
+def _fetch_estimate_rank_bid(
+    keyword_id: str, position: int, *, cache: dict, counter: dict,
+) -> tuple[int | None, str]:
+    """(rank_bid, note) — 목표 position 필요입찰가 estimate 조회(런 캐시·회당 캡). fetcher
+    실패는 fail-closed(None). 캐시 히트/캡 도달은 API 호출을 소비하지 않는다(§난제4 호출 절약)."""
+    key = (keyword_id, position)
+    if key in cache:
+        return cache[key], "런 캐시 재사용"
+    if counter["n"] >= _RUN_ESTIMATE_BUDGET:
+        return None, f"estimate 회당(run) 캡 {_RUN_ESTIMATE_BUDGET} 도달 — 호출 보류(다음 레인)"
+    counter["n"] += 1
+    try:
+        rows = estimate_average_position_bid("MOBILE", [{"key": keyword_id, "position": position}])
+    except Exception as e:  # noqa: BLE001 — API/네트워크 실패는 fail-closed hold(순위 근거 없음)
+        log.warning("auto_operator: estimate 조회 실패 keyword=%s position=%s: %s", keyword_id, position, e)
+        cache[key] = None
+        return None, f"estimate 호출 실패({type(e).__name__})"
+    # bid도 .get() — 네이버가 산정 불가 키워드에 bid 키 자체를 누락한 행을 줄 수 있고,
+    # 첨자 접근이면 KeyError가 시간당 레인 전체(R1 서보 포함)를 중단시킨다(GATE R2 P1).
+    # 키 부재→None은 아래 이상값 검증이 그대로 fail-closed hold로 받는다.
+    # position도 일치해야(codex R2 P2) — 같은 키워드의 다른 position 행이 섞이면 목표순위와
+    # 다른 필요입찰을 쓰게 된다(호출은 1건이지만 응답 방어).
+    rank_bid = next(
+        (r.get("bid") for r in rows
+         if r.get("nccKeywordId") == keyword_id and r.get("position") == position),
+        None,
+    )
+    cache[key] = rank_bid
+    return rank_bid, f"estimate 조회(position {position})"
+
+
+def _estimate_direct_step(
+    db: Session, *, keyword_id: str, campaign_id: str, current_bid: int, weighted_rank,
+    servo_agg: dict, correction_factor: Decimal, window_from: date, window_to: date,
+    cache: dict, counter: dict,
+) -> dict:
+    """파워링크 estimate 직행 스텝(PLAN §2 R2) — 목표순위(현재−1)로 estimate 필요입찰을 받아
+    bid_simulator.simulate_bid의 min(경제성 상한, rank_bid)로 최종 목표가를 낸다.
+
+    반환: {"target_bid": int|None, "target_position": int|None, "step_reason": str}.
+      target_bid=None = hold. estimate 실패·이상값(누락/0/비10원/범위밖/현재이하) = fail-closed
+      hold(일 레인은 경제성상한만으로 계속 진행하지만, 시간당 서보는 순위 근거 없으면 스텝
+      금지 — PLAN §2 R2 point5 명시 차이). 원료 부재/clk=0 심층 콜드 → 경제성상한 0 →
+      recommended≤현재 → hold(fail-closed)."""
+    position = _estimate_target_position(weighted_rank)
+    if position is None:
+        wr_txt = "None(순위 null)" if weighted_rank is None else f"{float(Decimal(str(weighted_rank))):.2f}(최상단)"
+        return {"target_bid": None, "target_position": None,
+                "step_reason": f"estimate 미요청(weighted_rank={wr_txt}) — fail-closed hold"}
+
+    rank_bid, note = _fetch_estimate_rank_bid(keyword_id, position, cache=cache, counter=counter)
+    if (rank_bid is None or rank_bid <= 0 or rank_bid % _BID_INCREMENT != 0
+            or not (_VALID_BID_MIN <= rank_bid <= _VALID_BID_MAX)):
+        return {"target_bid": None, "target_position": position,
+                "step_reason": f"estimate 이상값(rank_bid={rank_bid}, {note}) — fail-closed hold"}
+
+    target_roas = _resolve_target_roas(db, campaign_id)
+    if target_roas is None or target_roas <= 0:
+        return {"target_bid": None, "target_position": position,
+                "step_reason": "target_roas 미해석 — fail-closed hold"}
+
+    adgroup_id = _resolve_adgroup_id(db, "keyword", keyword_id)  # 부모 광고그룹(group_agg 귀속)
+    settle = _settlement_agg(db, "keyword", keyword_id, window_from, window_to)
+    keyword_row = {"clk": settle["clk"], "conv_amt": settle["conv_amt"], "bid_amt": current_bid}
+    group_agg = servo_agg["group"].get(adgroup_id, {"clk": 0, "conv_amt": 0}) if adgroup_id else {"clk": 0, "conv_amt": 0}
+    campaign_agg = servo_agg["campaign"].get(campaign_id, {"clk": 0, "conv_amt": 0})
+    sim = bid_simulator.simulate_bid(
+        keyword_row, Decimal(str(target_roas)),
+        group_agg=group_agg, campaign_agg=campaign_agg, account_agg=servo_agg["account"],
+        correction_factor=correction_factor, estimate={"rank_bid": rank_bid},
+    )
+    target_bid = sim["recommended_bid"]  # min(경제성 상한, estimate rank_bid)
+    if target_bid is None or target_bid <= current_bid or target_bid < _VALID_BID_MIN:
+        return {"target_bid": None, "target_position": position,
+                "step_reason": (
+                    f"유효 스텝 없음 — estimate {rank_bid}원·경제성상한 "
+                    f"{sim['economic_ceiling']}원 → min {target_bid}원 ≤ 현재 {current_bid}원 or <70원"
+                )}
+    return {
+        "target_bid": int(target_bid), "target_position": position,
+        "step_reason": (
+            f"목표순위 {position}(관측 {float(Decimal(str(weighted_rank))):.2f}) — estimate {rank_bid}원·"
+            f"경제성상한 {sim['economic_ceiling']}원 → {int(target_bid)}원(현재 {current_bid}원, "
+            f"basis={sim['basis']})"
+        ),
+    }
+
+
 def _judge_hourly(
     db: Session, *, target_type: str, target_id: str, campaign_id: str, curve: list[dict], now: datetime,
 ) -> dict:
@@ -1309,7 +1448,12 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
         "ad_confirm_pending": 0,  # B3 GATE P2-2: Confirm 대기로 생성된 ad-레벨 제안 수
         "ad_confirm_pending_dup_skipped": 0,  # B3 GATE 2R P2-B: 동일 pending 존재로 skip된 수
         "servo": 0,  # IU-R R1: 서보 스텝으로 승인된 쇼검 UP 제안 수(라이브 관측용)
+        "rank_direct": 0,  # IU-R R2: estimate 직행 스텝으로 승인된 파워링크 UP 제안 수(라이브 관측용)
     }
+    # IU-R R2: estimate 회당 캡·런 캐시(§난제4) — 실제 스텝 유닛에만 호출하고 (kw_id,position)
+    # 중복은 캐시로 흡수. counter는 mutable dict로 helper와 공유(호출 수 봉인 테스트가 이 값 관측).
+    estimate_cache: dict = {}
+    estimate_counter: dict = {"n": 0}
 
     # IU-R R1(PLAN §2, 원칙18-6 허브): 서보 경제성 상한 원료를 캠페인 순회 **밖에서 1회**
     # precompute한다(N+1 방지) — 정착창 계층 agg(campaign/account) + 보정계수. 함수 레벨
@@ -1456,38 +1600,41 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                     exec_adgroup_id = target_id
                     step_base = ad_live_bid
 
-            # ── IU-R R1(PLAN §2 R1) 그레인·방향 라우팅 ──
-            # UP ∧ SHOPPING adgroup(비-probe·비-ad) → 순위 서보(decide_servo_step). 그 외
-            # (BRAND_SEARCH adgroup·keyword UP[R2 전]·DOWN·probe UP·ad DOWN)는 기존 _clamp_step
-            # ±15% 유지(codex P1-3 — 서보 미적용이지 UP 회귀 아님). probe는 별도 실험 기계라
-            # 서보 미적용(is_probe 제외) — 서보는 ROAS 지배 게이트 통과 UP에만 얹힌다.
-            # ★P2-1(codex 기각 근거): campaign_type None(NULL·미채움)이면 서보 미적용 =
-            #   기존 ±15% _clamp_step 경로로 폴백한다. 이는 fail-open이 아니라 **더 보수적인
-            #   레거시 경로**다 — BEP·스톱로스·일예산·쿨다운 가드가 전량 걸리고 스텝도 더 작다.
-            #   hold로 바꾸면 campaign_type NULL 유닛의 UP 능력이 R1 이전 대비 회귀(행위 보존
-            #   위반)라 폴백을 유지한다. 핫셋 campaign_type 관통 전달은 GATE P2-3와 함께 R2 백로그.
-            # ★ad-라우팅 UP은 위에서 이미 hold(카나리 2단계)라 여기 exec_target_type=="ad"는
-            #   DOWN뿐 → 서보 조건(direction=="up")에 자연히 안 걸림(ad 카나리 UP 누출 0).
-            servo_used = False
-            servo_meta: dict = {}
-            is_servo_grain = (
-                verdict["direction"] == "up" and not is_probe
-                and exec_target_type == "adgroup"
-                and _entity_campaign_type(db, "adgroup", exec_target_id) == "SHOPPING"
-            )
-            if is_servo_grain and servo_agg is not None and servo_correction_factor is not None:
-                economic_ceiling = _servo_economic_ceiling(
-                    db, adgroup_id=exec_target_id, campaign_id=campaign_id,
-                    servo_agg=servo_agg, correction_factor=servo_correction_factor,
-                    window_from=window_from, window_to=window_to,
+            # ── IU-R 그레인·방향 라우팅(PLAN §2 R1·R2) ──
+            # UP ∧ 비-probe ∧ 비-ad에 대해:
+            #   · SHOPPING adgroup → 쇼검 폐루프 순위 서보(bid_up_servo, R1)
+            #   · WEB_SITE keyword → 파워링크 estimate 직행(bid_up_rank, R2 — 목표순위 현재−1의
+            #     estimate 필요입찰을 min(경제성 상한, rank_bid)로 절체)
+            # 그 외(BRAND_SEARCH adgroup·DOWN·probe UP·ad DOWN·campaign_type None)는 기존 ±15%
+            # _clamp_step 폴백(codex P1-3·P2-1 — rank-step 미적용이지 UP 회귀 아님, 더 보수적 레거시
+            # 경로. BEP·스톱로스·일예산·쿨다운 가드 전량 존치·스텝도 더 작음). probe는 별도 실험
+            # 기계라 rank-step 미적용. ★ad-라우팅 UP은 위에서 이미 hold(카나리 2단계)라
+            # exec_target_type=="ad"는 DOWN뿐 → rank-step 조건(direction=="up")에 자연히 안 걸림
+            # (ad 카나리 UP 누출 0). rank_step_meta['step_reason']엔 태그를 넣지 않고(중복 방지),
+            # hold_reason·rationale 구성 시 [순위서보]/[순위직행] 접두를 이 레인에서 붙인다.
+            rank_step_used = False
+            rank_step_meta: dict = {}
+            rank_step_type = None  # "bid_up_servo" | "bid_up_rank"
+            rank_kind = None       # "servo" | "estimate"
+            rank_tag = ""
+            if verdict["direction"] == "up" and not is_probe:
+                if (exec_target_type == "adgroup"
+                        and _entity_campaign_type(db, "adgroup", exec_target_id) == "SHOPPING"):
+                    rank_kind, rank_step_type, rank_tag = "servo", "bid_up_servo", "순위서보"
+                elif (exec_target_type == "keyword"
+                        and _entity_campaign_type(db, "keyword", exec_target_id) == "WEB_SITE"):
+                    rank_kind, rank_step_type, rank_tag = "estimate", "bid_up_rank", "순위직행"
+
+            step_bid = None
+            if rank_kind is not None and servo_agg is not None and servo_correction_factor is not None:
+                # prefilter(쿨다운/일일캡) — estimate 호출·서보 산정 전에 실행 시점 guardrail이
+                # 어차피 막을 유닛을 동일 판별로 미리 거른다(R1 GATE P2-2 백로그·중복 금지).
+                prefilter_reason = _rank_step_prefilter(
+                    db, entity_type=exec_target_type, entity_id=exec_target_id, now=now,
+                    proposal_type=rank_step_type,
                 )
-                servo = rank_servo.decide_servo_step(
-                    verdict.get("weighted_rank"), step_base,
-                    imp_sum=verdict.get("imp_sum", 0),
-                    economic_ceiling=economic_ceiling, response_prior=None,  # R3 전 콜드스타트
-                )
-                if servo["target_bid"] is None:
-                    hold_reason = f"[순위서보] 스텝 없음 — {servo['step_reason']}"
+                if prefilter_reason is not None:
+                    hold_reason = f"[{rank_tag}] prefilter 차단(쿨다운/일일캡) — {prefilter_reason}"
                     result["held"].append({"target_id": exec_target_id, "reason": hold_reason})
                     _record_blocked(
                         db, campaign_id=campaign_id, actor=lane_actor, reason=hold_reason,
@@ -1495,13 +1642,44 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                         action=intended_action,
                     )
                     continue
-                # 예산 pace 사전체크(큰 스텝 → 잔여예산 초과 지출 사전 차단). guardrail의 사후
-                # 소진 가드와 별개(forward-looking) — 실패면 hold(관찰).
+                if rank_kind == "servo":
+                    economic_ceiling = _servo_economic_ceiling(
+                        db, adgroup_id=exec_target_id, campaign_id=campaign_id,
+                        servo_agg=servo_agg, correction_factor=servo_correction_factor,
+                        window_from=window_from, window_to=window_to,
+                    )
+                    rank_step_meta = rank_servo.decide_servo_step(
+                        verdict.get("weighted_rank"), step_base,
+                        imp_sum=verdict.get("imp_sum", 0),
+                        economic_ceiling=economic_ceiling, response_prior=None,  # R3 전 콜드스타트
+                    )
+                    hold_prefix = f"[{rank_tag}] 스텝 없음 — "
+                else:  # estimate 직행(R2)
+                    rank_step_meta = _estimate_direct_step(
+                        db, keyword_id=exec_target_id, campaign_id=campaign_id, current_bid=step_base,
+                        weighted_rank=verdict.get("weighted_rank"), servo_agg=servo_agg,
+                        correction_factor=servo_correction_factor,
+                        window_from=window_from, window_to=window_to,
+                        cache=estimate_cache, counter=estimate_counter,
+                    )
+                    hold_prefix = f"[{rank_tag}] "
+                step_bid = rank_step_meta["target_bid"]
+                if step_bid is None:
+                    hold_reason = f"{hold_prefix}{rank_step_meta['step_reason']}"
+                    result["held"].append({"target_id": exec_target_id, "reason": hold_reason})
+                    _record_blocked(
+                        db, campaign_id=campaign_id, actor=lane_actor, reason=hold_reason,
+                        now=now, target_type=exec_target_type, target_id=exec_target_id,
+                        action=intended_action,
+                    )
+                    continue
+                # 예산 pace 사전체크(공용) — 큰 스텝 → 잔여예산 초과 지출 사전 차단. guardrail의
+                # 사후 소진 가드와 별개(forward-looking). 실패면 hold(관찰).
                 pace_ok, pace_reason = _servo_budget_pace_ok(
-                    db, campaign_id=campaign_id, curve=curve, now=now, target_bid=servo["target_bid"],
+                    db, campaign_id=campaign_id, curve=curve, now=now, target_bid=step_bid,
                 )
                 if not pace_ok:
-                    hold_reason = f"[순위서보] 예산 pace 차단 — {pace_reason}"
+                    hold_reason = f"[{rank_tag}] 예산 pace 차단 — {pace_reason}"
                     result["held"].append({"target_id": exec_target_id, "reason": hold_reason})
                     _record_blocked(
                         db, campaign_id=campaign_id, actor=lane_actor, reason=hold_reason,
@@ -1509,9 +1687,7 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                         action=intended_action,
                     )
                     continue
-                step_bid = servo["target_bid"]
-                servo_used = True
-                servo_meta = servo
+                rank_step_used = True
             else:
                 step_bid = _clamp_step(step_base, verdict["direction"])
             if step_bid is None:
@@ -1550,17 +1726,26 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                     "순위 실험(D-NAO-58 CD2, 되돌림·이익 판정은 CD3)."
                 )
                 proposal_approval_source = APPROVAL_SOURCE_PROBE
-            elif servo_used:
-                # IU-R R1: 쇼검 폐루프 순위 서보 — proposal_type=bid_up_servo(±15% 면제·rank-step).
-                # 시간당 밴드 레인 소속 유지(APPROVAL_SOURCE_HOURLY) — rationale 접두 [순위서보]로
-                # 소급채점/일기에서 일반 UP·서보 UP을 분간한다. 근거(목표순위·서보 산정)를
-                # rationale에 보존(원칙25 근거 보존).
-                proposal_type = "bid_up_servo"
-                rationale = f"[순위서보] {verdict['reason']} · {servo_meta['step_reason']}"
-                expected_effect = (
-                    "쇼검 폐루프 순위 서보 — 관측 순위 한 단 위로 래칫(D-NAO-67 원리③). ±15% 면제, "
-                    "경제성 상한·서보 절대 캡·예산 pace로 상한 대체. 다음 시간 순위 피드백으로 재평가."
-                )
+            elif rank_step_used:
+                # IU-R R1/R2: rank-step(bid_up_servo 쇼검 서보 / bid_up_rank 파워링크 estimate
+                # 직행) — 둘 다 ±15% 면제·rank-step(스톱로스 current 기준·신선도·TOCTOU). 시간당
+                # 밴드 레인 소속 유지(APPROVAL_SOURCE_HOURLY) — rationale 접두([순위서보]/[순위직행])로
+                # 소급채점/일기에서 일반 UP·rank-step UP을 분간한다. 근거(목표순위·산정)를
+                # rationale에 보존(원칙25 근거 보존). ★expected_effect 끝에 제안 시점 base_bid
+                # 마커를 심어 harness가 실행 직전 TOCTOU 대조(제안 시점≠실행 시점 라이브 bid면 중단).
+                proposal_type = rank_step_type
+                rationale = f"[{rank_tag}] {verdict['reason']} · {rank_step_meta['step_reason']}"
+                if rank_kind == "servo":
+                    effect_body = (
+                        "쇼검 폐루프 순위 서보 — 관측 순위 한 단 위로 래칫(D-NAO-67 원리③). ±15% 면제, "
+                        "경제성 상한·서보 절대 캡·예산 pace로 상한 대체. 다음 시간 순위 피드백으로 재평가."
+                    )
+                else:  # estimate 직행
+                    effect_body = (
+                        "파워링크 estimate 직행 — 목표순위(현재−1)의 필요입찰을 min(경제성 상한, "
+                        "estimate)로 직행(D-NAO-67 원리③·D-NAO-19). ±15% 면제, 경제성 상한으로 상한 대체."
+                    )
+                expected_effect = encode_base_bid(effect_body, step_base)
                 proposal_approval_source = APPROVAL_SOURCE_HOURLY
             elif is_leash:
                 rationale = f"[순위고삐] {verdict['reason']}"
@@ -1619,8 +1804,10 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
             result["approved"] += 1
             if is_probe:
                 result["probed"] += 1
-            if servo_used:
+            if rank_step_used and rank_kind == "servo":
                 result["servo"] += 1
+            elif rank_step_used and rank_kind == "estimate":
+                result["rank_direct"] += 1
 
             try:
                 naver_execution_harness.execute(db, proposal.id, dry_run=False, now=now)

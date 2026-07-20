@@ -103,6 +103,20 @@ def check(proposal: dict, context: dict, *, now: datetime) -> str | None:
     return _check_lock(proposal, proposal_type)
 
 
+def precheck_cooldown_and_cap(
+    last_change_at: datetime | None, changes_today_count: int, now: datetime,
+    proposal_type: str | None,
+) -> str | None:
+    """쿨다운·일일상한 사전점검(IU-R R2 공용 — auto_operator.run_hourly_lane의 rank-step
+    prefilter가 estimate 호출 전 재사용). 임계·면제 규칙은 _check_cooldown_and_cap 단일 소스를
+    그대로 태운다(중복 금지) — prefilter와 실행 시점 guardrail이 **같은 판정**을 공유한다.
+    (차단사유, or None=통과). last_change_at/changes_today_count는 compute_change_cadence 산출."""
+    return _check_cooldown_and_cap(
+        {"last_change_at": last_change_at, "changes_today_count": changes_today_count},
+        now, proposal_type,
+    )
+
+
 def _check_cooldown_and_cap(context: dict, now: datetime, proposal_type: str | None) -> str | None:
     # 쿨다운 2h는 전 유형 공통(DL3 면제 대상 아님) — 방향 무관하게 항상 검사.
     last_change_at = context.get("last_change_at")

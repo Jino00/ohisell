@@ -33,7 +33,7 @@ from sqlalchemy.orm import Session
 
 from app.models import NaverCampaignSettings, NaverChangeLog, NaverEntity, NaverHourlySnapshot, NaverProposal
 from app.services.naver_ad import account_diagnosis, campaign_target_resolver, diary, guardrail_gate, naver_sa_writer
-from app.services.naver_ad.bid_step_types import BID_DOWN_TYPES, BID_UP_TYPES, RANK_STEP_TYPES
+from app.services.naver_ad.bid_step_types import BID_DOWN_TYPES, BID_UP_TYPES, RANK_STEP_TYPES, decode_base_bid
 from app.services.naver_ad.diagnosis import correction_factor as compute_correction_factor
 from app.utils.kst import kst_now
 
@@ -335,6 +335,33 @@ def _latest_hourly_snapshot_fields(db: Session, campaign_id: str, on_date) -> tu
     return latest_snapshot.cost, latest_snapshot.daily_budget
 
 
+def compute_change_cadence(
+    db: Session, entity_type: str, entity_id: str, now: datetime,
+) -> tuple[datetime | None, int]:
+    """(last_change_at, changes_today_count) — 쿨다운·일일상한의 단일 원료(IU-R R2 공용 helper).
+
+    실제 쓰기가 확정된 행만 센다(dry_run=False ∧ after_value 존재) — dry-run·실패·가드거부 행은
+    네이버 상태를 바꾸지 않았으므로 제외(codex[P2], _build_guardrail_context의 3개 중복 블록에서
+    이 함수로 단일화). changes_today = KST 오늘 0시 이후 변경 수. R2 시간당 레인 rank-step
+    prefilter(estimate 호출 절약)와 guardrail 컨텍스트가 **동일 쿼리·동일 판별**을 공유해
+    "prefilter는 통과했는데 guardrail은 쿨다운으로 막는" 어긋남을 원천 차단한다(중복 금지)."""
+    change_rows = (
+        db.query(NaverChangeLog.changed_at)
+        .filter(
+            NaverChangeLog.entity_type == entity_type,
+            NaverChangeLog.entity_id == entity_id,
+            NaverChangeLog.dry_run.is_(False), NaverChangeLog.after_value.isnot(None),
+        )
+        .all()
+    )
+    if not change_rows:
+        return None, 0
+    last_change_at = max(r[0] for r in change_rows)
+    today_start = datetime.combine(now.date(), datetime.min.time())
+    changes_today = sum(1 for r in change_rows if r[0] >= today_start)
+    return last_change_at, changes_today
+
+
 def _build_guardrail_context(db: Session, proposal: NaverProposal, now: datetime) -> dict:
     """guardrail_gate.check()에 넘길 라이브 상태 precompute (X1b T4, P2 D-NAO-42-f 확장,
     X1b-S S1 D-NAO-43 adgroup lock 최소 컨텍스트 확장).
@@ -411,19 +438,9 @@ def _build_guardrail_context(db: Session, proposal: NaverProposal, now: datetime
                 db, proposal.campaign_id, now.date(),
             )
 
-        change_rows = (
-            db.query(NaverChangeLog.changed_at)
-            .filter(
-                NaverChangeLog.entity_type == proposal.target_type,
-                NaverChangeLog.entity_id == proposal.target_id,
-                NaverChangeLog.dry_run.is_(False), NaverChangeLog.after_value.isnot(None),
-            )
-            .all()
+        context["last_change_at"], context["changes_today_count"] = compute_change_cadence(
+            db, proposal.target_type, proposal.target_id, now,
         )
-        if change_rows:
-            context["last_change_at"] = max(r[0] for r in change_rows)
-            today_start = datetime.combine(now.date(), datetime.min.time())
-            context["changes_today_count"] = sum(1 for r in change_rows if r[0] >= today_start)
         return context
 
     if proposal.target_type == "ad":
@@ -458,19 +475,9 @@ def _build_guardrail_context(db: Session, proposal: NaverProposal, now: datetime
                 db, proposal.campaign_id, now.date(),
             )
 
-        change_rows = (
-            db.query(NaverChangeLog.changed_at)
-            .filter(
-                NaverChangeLog.entity_type == proposal.target_type,  # 'ad'
-                NaverChangeLog.entity_id == proposal.target_id,
-                NaverChangeLog.dry_run.is_(False), NaverChangeLog.after_value.isnot(None),
-            )
-            .all()
+        context["last_change_at"], context["changes_today_count"] = compute_change_cadence(
+            db, proposal.target_type, proposal.target_id, now,  # entity_type='ad', entity_id=nccAdId
         )
-        if change_rows:
-            context["last_change_at"] = max(r[0] for r in change_rows)
-            today_start = datetime.combine(now.date(), datetime.min.time())
-            context["changes_today_count"] = sum(1 for r in change_rows if r[0] >= today_start)
         return context
 
     if proposal.target_type not in ("keyword", "campaign"):
@@ -517,22 +524,11 @@ def _build_guardrail_context(db: Session, proposal: NaverProposal, now: datetime
 
     # codex[P2]: dry-run·실패(outcome='failed', _guard_failure 포함) 행은 네이버 상태를
     # 바꾸지 않았다 — 그런데도 쿨다운·일일상한에 포함시키면 실제로는 아무 일도 안 일어났는데
-    # 다음 실행이 차단된다. 실제 쓰기가 확정된 행만 센다 — outcome이 아니라 after_value
-    # 존재 여부로 판별(outcome은 D+14 채점 전 NULL, "executed" 영구 상태 아님 — 위
-    # _execute_add_negative_keyword 주석 참조).
-    change_rows = (
-        db.query(NaverChangeLog.changed_at)
-        .filter(
-            NaverChangeLog.entity_type == proposal.target_type,
-            NaverChangeLog.entity_id == proposal.target_id,
-            NaverChangeLog.dry_run.is_(False), NaverChangeLog.after_value.isnot(None),
-        )
-        .all()
+    # 다음 실행이 차단된다. compute_change_cadence가 실제 쓰기 확정 행(dry_run=False ∧
+    # after_value 존재)만 세는 단일 판별을 담당(IU-R R2 공용 helper — prefilter와 동일 쿼리).
+    context["last_change_at"], context["changes_today_count"] = compute_change_cadence(
+        db, proposal.target_type, proposal.target_id, now,
     )
-    if change_rows:
-        context["last_change_at"] = max(r[0] for r in change_rows)
-        today_start = datetime.combine(now.date(), datetime.min.time())
-        context["changes_today_count"] = sum(1 for r in change_rows if r[0] >= today_start)
 
     return context
 
@@ -709,6 +705,36 @@ def _execute_update_bid(db: Session, proposal: NaverProposal, now: datetime) -> 
             raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
 
     context = _build_guardrail_context(db, proposal, now)
+
+    # IU-R R2(P1-5) rank-step TOCTOU 방어 — estimate/서보 스텝은 **제안 시점 current_bid**를
+    # 기준으로 목표를 산정한다(estimate 필요입찰·서보 증분 모두). 그 사이(생성→실행) 라이브
+    # bid가 MOP·사람·외부로 바뀌었으면 산정 전제가 깨졌으므로 **fail-closed 중단**한다 —
+    # 하니스에서 재산정하지 않는다(초크포인트 순수성: 여기에 estimate 재호출/네트워크를 얹지
+    # 않는다, PLAN §2 R2 point6·§codex P2-2). 재산정은 다음 시간당 레인의 fresh current 몫.
+    # DB 상태 = failed(stale 사유)로 종결 — pending 잔류 시 자동 재시도 루프 위험(_guard_failure
+    # 관례 동형). base_bid는 run_hourly_lane이 expected_effect에 심은 마커(신규 마이그레이션
+    # 금지 — 기존 Text 컬럼 재사용). ★마커 부재/중복/오염 = fail-closed(codex R2 P1) —
+    # rank-step은 ±15% 면제 타입이라 산정 base 검증 없이 큰 스텝이 나가면 안 된다.
+    # run_hourly_lane 정상 생성분은 항상 단일 suffix 마커 보유 → 정상 경로 무영향.
+    # 라이브 재조회 실패(current_bid None)는 아래 guardrail 완전성 게이트가 fail-closed 차단.
+    if proposal.proposal_type in RANK_STEP_TYPES:
+        base_bid = decode_base_bid(proposal.expected_effect)
+        if base_bid is None:
+            reason = (
+                "rank-step base_bid 마커 부재/오염(fail-closed) — ±15% 면제 타입은 제안 시점 "
+                "산정 base 검증 없이 실행 금지. run_hourly_lane 밖 생성/변조 제안 차단(codex R2 P1)"
+            )
+            _guard_failure(db, proposal, now, "update_bid", reason)
+            raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
+        live_bid = context.get("current_bid")
+        if live_bid is not None and int(live_bid) != base_bid:
+            reason = (
+                f"rank-step TOCTOU 중단(fail-closed) — 제안 시점 base_bid={base_bid}원 ≠ 실행 시점 "
+                f"라이브 bid={live_bid}원. 스텝 산정 전제(estimate/서보 증분)가 그 사이 외부 변경으로 "
+                "깨짐 — 재산정 없이 중단(다음 시간당 레인이 fresh current로 재진입, PLAN §2 R2 P1-5)"
+            )
+            _guard_failure(db, proposal, now, "update_bid", reason)
+            raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
 
     # S3(D-NAO-43 성장 확장): adgroup 증액(bid_up/growth_bid_up)은 guardrail_gate._check_bid의
     # BEP 검사(roas_corrected/target_roas)가 그 값이 None이면 fail-open(검사를 건너뜀)이라,

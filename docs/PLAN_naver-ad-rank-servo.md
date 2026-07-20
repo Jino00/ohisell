@@ -193,8 +193,8 @@ IU-R이 쓰는 입찰 손은 전부 구현돼 있다. 서보는 새 writer가 �
 - [x] R0 GATE PASS(codex review P1 0·P2 1 — `_ACTION_BY_PROPOSAL_TYPE` 리터럴 잔존 → 레지스트리 파생으로 수용 반영 + 누락 감지 테스트 추가)
 - [x] R1: `rank_servo` SA + 구조화 verdict + 그레인 라우팅(BRAND_SEARCH/keyword/DOWN 행위 보존, probe 제외) + `bid_up_servo` 레지스트리 등록(`_DAILY_LANE` 제외) + 경제성 상한·예산 pace(관측 슬롯 fail-closed)·current-기준 스톱로스 + 실집행 배선 + 다운스트림 전수 정합 + 신규 테스트 37 — **2502 passed·회귀 0** (prefilter helper 추출은 GATE P2-2로 R2 이월)
 - [x] R1 GATE PASS — Opus 적대(P1 0·P2 3=R2 백로그) + codex 2R 왕복(P1 2 수정: 위임 제외+신선도 게이트 10분 / pace 관측 슬롯 fail-closed·P2-2 미래 스냅샷 필터·P2-1 부분 기각 합의·created_at None=stale 보강) **PASS**
-- [ ] R2: 시간당 estimate 배선(ceil−1·1~4 clamp) + agg precompute + `bid_up_rank` 등록 + estimate fail-closed/TOCTOU/예산캡 + `update_keyword_bid` 실집행 + 다운스트림 정합 + 테스트
-- [ ] R2 GATE PASS
+- [x] R2: 시간당 estimate 직행(동적 목표 ceil−1·1~4 clamp) + agg precompute + `bid_up_rank` 등록 + estimate fail-closed 7종(실패/누락/0/비10원/범위밖/현재이하/bid키부재) + TOCTOU 마커(엄격 suffix·부재=fail-closed) + `_RUN_ESTIMATE_BUDGET` 캡·캐시 + prefilter 공용 helper(R1 백로그 이행) + 실집행 배선 + 다운스트림 정합 — **2531 passed·회귀 0** (핫셋 campaign_type 관통은 재이월)
+- [x] R2 GATE PASS — Opus 적대(P1 1=bid 키 KeyError 레인 중단 → 수정·봉인 / P2 4) + codex 2R 왕복(P1 1=마커 부재 fail-closed 뒤집기·P2 3 전 수용) **PASS**. 부수: 자정 플레이크 테스트 근본수정·iCloud 중복 사본 제거
 - [ ] R3: `bid_rank_curve` SA(조인 기반·마이그레이션 0·h−1/h+1 버킷 규칙·기울기 원/rank 단위) + `NaverLearningState`(scope="entity" 규약·bid_rank_slope·docstring/테스트 갱신) + `learning_loops.run_all` 스테이지 + 인과 오염 제외·불확실 플래그·무반응 평탄기울기 + 콜드스타트 폴백 + 익일 반영 명시 + 테스트
 - [ ] R3 GATE PASS
 - [ ] 배포 + 라이브(실쓰기 합격, §3-4): R0 배포 회귀 0 → R1 폐루프 한 바퀴 라이브 완주(실 `update_adgroup_bid`→다음 시간 순위 이동→데드밴드/래칫)·R2 ±15% 초과 1스텝 실쓰기·ad 카나리 UP 누출 0·사전 봉투 준수 — **다음 세션**

@@ -168,9 +168,12 @@ def test_run_probe_learning_idempotent_same_day(db):
     from app.utils.kst import kst_now
 
     real_now = kst_now()
+    # +1h가 자정을 넘으면 "같은 날" 전제가 깨져 23시대 실행마다 플레이크(2026-07-20 실측,
+    # base 재현) — 같은 날을 보장하는 +1분으로 두 번째 호출(판정은 KST 날짜 기준이라 동등).
+    second_now = real_now + timedelta(minutes=1)
     with patch.object(loop, "judge_cell_segmentation", return_value={"judged": [], "skipped": 0}):
         loop.run_probe_learning(db, now=real_now)
-        loop.run_probe_learning(db, now=real_now + timedelta(hours=1))
+        loop.run_probe_learning(db, now=second_now)
     entries = db.query(OpsDiaryEntry).filter(
         OpsDiaryEntry.event_type == "observe", OpsDiaryEntry.action == "probe_learning",
     ).all()

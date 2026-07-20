@@ -33,25 +33,26 @@ _GOLDEN_BID_UP = frozenset({"bid_up", "growth_bid_up"})
 _GOLDEN_BID_DOWN = frozenset({"bid_down"})
 _GOLDEN_EXEMPT = frozenset({"growth_bid_up"})
 
-# IU-R R1 기대 상태 — bid_up_servo가 UP·±15%면제·rank-step 3셋에 등록됨.
-_R1_BID_UP = _GOLDEN_BID_UP | {"bid_up_servo"}
-_R1_EXEMPT = _GOLDEN_EXEMPT | {"bid_up_servo"}
-_R1_RANK_STEP = frozenset({"bid_up_servo"})
+# IU-R R2 기대 상태 — R1 bid_up_servo(쇼검 서보) + R2 bid_up_rank(파워링크 estimate 직행)가
+# UP·±15%면제·rank-step 3셋에 등록됨.
+_R2_BID_UP = _GOLDEN_BID_UP | {"bid_up_servo", "bid_up_rank"}
+_R2_EXEMPT = _GOLDEN_EXEMPT | {"bid_up_servo", "bid_up_rank"}
+_R2_RANK_STEP = frozenset({"bid_up_servo", "bid_up_rank"})
 
 
 # ══════════════════════════════════════════════════════════════════
 # (A) 레지스트리 자체 단위 테스트
 # ══════════════════════════════════════════════════════════════════
 def test_registry_membership_sets():
-    # IU-R R1: bid_up_servo가 UP·±15%면제 셋에 추가됨(DOWN은 불변).
-    assert BID_UP_TYPES == _R1_BID_UP
+    # IU-R R2: bid_up_servo·bid_up_rank가 UP·±15%면제 셋에 추가됨(DOWN은 불변).
+    assert BID_UP_TYPES == _R2_BID_UP
     assert BID_DOWN_TYPES == _GOLDEN_BID_DOWN
-    assert CHANGE_PCT_EXEMPT_TYPES == _R1_EXEMPT
+    assert CHANGE_PCT_EXEMPT_TYPES == _R2_EXEMPT
 
 
 def test_rank_step_types_filled_with_servo():
-    # IU-R R1: rank-step 타입은 쇼검 서보 bid_up_servo로 채워졌다(R0의 빈 셋 → R1 채움).
-    assert RANK_STEP_TYPES == _R1_RANK_STEP
+    # IU-R R2: rank-step 타입 = 쇼검 서보 bid_up_servo + 파워링크 estimate 직행 bid_up_rank.
+    assert RANK_STEP_TYPES == _R2_RANK_STEP
     # rank-step은 반드시 UP 타입의 부분집합(rank 스텝은 상향 스텝의 하위 의미).
     assert RANK_STEP_TYPES <= BID_UP_TYPES
 
@@ -86,10 +87,10 @@ def test_direction_of(pt, expected):
 # (B1) 차등 — guardrail_gate가 소비하는 집합이 골든과 동일 + 판정 산출물 동일
 # ══════════════════════════════════════════════════════════════════
 def test_guardrail_consumes_registry_sets():
-    # guardrail_gate가 레지스트리를 별칭 import — R1 값과 동일(중복 정의 아님, 동일 객체).
-    assert guardrail_gate._BID_UP_TYPES == _R1_BID_UP
+    # guardrail_gate가 레지스트리를 별칭 import — R2 값과 동일(중복 정의 아님, 동일 객체).
+    assert guardrail_gate._BID_UP_TYPES == _R2_BID_UP
     assert guardrail_gate._BID_DOWN_TYPES == _GOLDEN_BID_DOWN
-    assert guardrail_gate._EXEMPT_FROM_CHANGE_PCT == _R1_EXEMPT
+    assert guardrail_gate._EXEMPT_FROM_CHANGE_PCT == _R2_EXEMPT
     assert guardrail_gate._BID_UP_TYPES is BID_UP_TYPES  # 단일 소스(별칭)
 
 
@@ -191,6 +192,7 @@ def test_action_by_proposal_type_mapping_derived_with_servo():
         "bid_down": "update_bid",
         "growth_bid_up": "update_bid",
         "bid_up_servo": "update_bid",  # IU-R R1: 레지스트리 파생으로 자동 매핑
+        "bid_up_rank": "update_bid",   # IU-R R2: 레지스트리 파생으로 자동 매핑
         "pause": "set_user_lock",
         "resume": "set_user_lock",
         "budget_up": "update_budget",

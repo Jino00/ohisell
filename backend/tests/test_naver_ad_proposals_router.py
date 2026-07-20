@@ -304,11 +304,12 @@ def test_all_proposal_types_constant_covers_every_emitted_type():
     assert INFORMATIONAL_PROPOSAL_TYPES <= ALL_PROPOSAL_TYPES
     assert set(_ACTION_BY_PROPOSAL_TYPE) <= ALL_PROPOSAL_TYPES
     # 14 + wisdom_promoted(D-NAO-54 P3 정보성) + param_change(D-NAO-54 P4 결정 전용) = 16.
-    # ★IU-R R1: bid_up_servo(쇼검 폐루프 순위 서보, auto_operator inline 생성) 추가 → 17.
+    # ★IU-R R1: bid_up_servo(쇼검 폐루프 순위 서보) → 17. ★IU-R R2: bid_up_rank(파워링크
+    # estimate 직행, auto_operator inline 생성) → 18. 둘 다 rank-step inline 전용.
     # param_change/wisdom_promoted 모두 실행 매핑(_ACTION_BY_PROPOSAL_TYPE)에는 절대 넣지
     # 않는다(지혜→실행 직접 쓰기 금지 금지선). wisdom_promoted는 정보성 집합에, param_change는
     # 어느 집합에도 넣지 않는다(결정 전용 — 라우터 DECISION_ONLY_PROPOSAL_TYPES가 분기).
-    assert len(ALL_PROPOSAL_TYPES) == 17
+    assert len(ALL_PROPOSAL_TYPES) == 18
     assert PARAM_CHANGE not in INFORMATIONAL_PROPOSAL_TYPES  # 결정 전용 ≠ 정보성
     assert PARAM_CHANGE not in _ACTION_BY_PROPOSAL_TYPE  # 금지선: 실행 매핑 부재
 
