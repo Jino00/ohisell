@@ -68,16 +68,19 @@ def _seed(seed, job_name, *, is_enabled, cron="*/5 * * * *"):
 
 
 def test_enable_unregistered_mapped_job_live_registers(env):
-    """미등록 + 매핑된 잡을 enable → add_job 호출·live_registered=True."""
-    client, seed, fake = env
-    _seed(seed, "request_ad_cost_refresh", is_enabled=False)
+    """미등록 + 매핑된 잡을 enable → add_job 호출·live_registered=True.
 
-    r = client.put("/api/scheduler/toggle/request_ad_cost_refresh")
+    (예시 잡은 여전히 job_func_for에 매핑된 sync_coupang_ad_cost — request_ad_cost_refresh는
+    순수 on-demand 전환으로 잡맵에서 제거됨.)"""
+    client, seed, fake = env
+    _seed(seed, "sync_coupang_ad_cost", is_enabled=False)
+
+    r = client.put("/api/scheduler/toggle/sync_coupang_ad_cost")
     assert r.status_code == 200
     body = r.json()
     assert body["is_enabled"] is True
     assert body["live_registered"] is True
-    assert "request_ad_cost_refresh" in fake.added
+    assert "sync_coupang_ad_cost" in fake.added
     assert fake.resumed == []
 
 
