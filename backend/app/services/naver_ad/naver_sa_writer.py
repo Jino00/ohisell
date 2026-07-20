@@ -16,6 +16,7 @@
 # - DB 접근 없음(순수 API 어댑터, 단일 책임). change_log 기록·원복은 T3 harness 몫.
 from __future__ import annotations
 
+import json
 import logging
 
 import requests
@@ -640,4 +641,135 @@ def update_adgroup_bid(ncc_adgroup_id: str, bid_amt: int) -> WriteResult:
     log.info("Naver SA 쓰기 성공: update_adgroup_bid adgroup=%s bidAmt=%s", ncc_adgroup_id, bid_amt)
     return WriteResult(
         action="update_adgroup_bid", before=before, response=response_body, after=after, created_ids=[],
+    )
+
+
+# ── update_ad_bid (쇼핑 소재 단위 실효입찰, B3 D-NAO-65 설계질문 3·4) ──────────────
+# 소재(SHOPPING_PRODUCT_AD)의 adAttr.bidAmt 직접 수정. useGroupBidAmt=false 소재는 소재
+# 개별 bidAmt가 실효 입찰이고 그룹입찰을 무시하므로(공식 apidoc), 그룹/키워드 레버가 헛도는
+# 이런 소재를 실효 레버로 잡는다. useGroupBidAmt는 절대 불변(§0 강제 전환 금지) —
+# useGroupBidAmt=true(또는 불명) 소재는 그룹입찰이 실효라 개별 bidAmt 수정이 무의미·혼란 →
+# fail-closed 거부. 성공 판정은 여기서도 재조회 실측으로만(fail-closed) — PUT 응답 body는
+# response 필드에 원본 기록용으로만 유지(update_keyword_bid와 동일 규율).
+
+
+def get_ad(ncc_ad_id: str) -> dict:
+    """GET /ncc/ads/{nccAdId} — 현재 소재 원본 JSON(adAttr·userLock·nccAdgroupId 포함).
+
+    update_ad_bid의 before/after 재조회(검증)용 유일 소스(update_keyword_bid의 get_keyword
+    대칭). adAttr은 JSON 문자열(공식 apidoc) — 파싱은 fetcher._parse_ad_attr 재사용(B1과
+    단일 진실 소스, 추정 금지)."""
+    resp = fetcher._get(f"/ncc/ads/{ncc_ad_id}")
+    resp.raise_for_status()
+    return resp.json()
+
+
+def get_ad_bid(ncc_ad_id: str) -> int | None:
+    """소재의 현재 실효 bidAmt(adAttr.bidAmt) 라이브 재조회 — harness 가드레일 컨텍스트·
+    auto_operator 스텝 기준용(get_ad + _parse_ad_attr, 단일 진실 소스)."""
+    ad = get_ad(ncc_ad_id)
+    bid, _ = fetcher._parse_ad_attr(ad.get("adAttr"))
+    return bid
+
+
+def update_ad_bid(ncc_ad_id: str, bid_amt: int) -> WriteResult:
+    """PUT /ncc/ads/{nccAdId}?fields=adAttr — 쇼핑 소재 개별 입찰가 변경(B3, D-NAO-65).
+
+    adAttr의 bidAmt만 변경, useGroupBidAmt는 불변(§0 강제 전환 금지 — before가 false인
+    소재에 false를 재전송할 뿐 강제 전환이 아니다). 대상 소재가 useGroupBidAmt=true(또는
+    불명)면 그룹입찰이 실효라 개별 bidAmt 수정이 무의미·혼란 → fail-closed 거부
+    (WriteValidationError). 부모 광고그룹이 ML 자동입찰이면 소재 bidAmt도 무시되므로
+    update_adgroup_bid와 동일 사전가드(systemBiddingType/isAutobidActive)로 차단. bid_amt
+    사전검증(70~100,000원·10원 단위 — update_keyword_bid와 동일 상수, 이중 방벽). 성공 판정 =
+    재조회 실측(after adAttr.bidAmt==요청 ∧ useGroupBidAmt==false, update_keyword_bid의
+    useGroupBidAmt 이중확인 동형). DB 접근 없음(순수 어댑터).
+
+    Raises:
+        WriteValidationError: bid_amt 범위 밖·10원 단위 아님 / before 재조회에서
+            useGroupBidAmt가 false 아님(그룹입찰 실효 소재) / 부모 그룹 ML 자동입찰·상태불명.
+        WriteError: PUT이 2xx 아님(재시도 없음 — 비멱등 쓰기).
+        WriteVerificationError: PUT은 2xx였는데 재조회에 bidAmt 미반영 / useGroupBidAmt가
+            false로 유지되지 않음(강제 전환 감지) / before에 nccAdgroupId 부재로 ML 재확인 불가.
+    """
+    if not (_MIN_BID <= bid_amt <= _MAX_BID) or bid_amt % _BID_INCREMENT != 0:
+        raise WriteValidationError(
+            f"update_ad_bid: bid_amt={bid_amt}는 유효 범위 밖(70~100,000원, 10원 단위)"
+        )
+
+    before = get_ad(ncc_ad_id)
+    _before_bid, before_ugba = fetcher._parse_ad_attr(before.get("adAttr"))
+    # useGroupBidAmt=false 소재만 개별 bidAmt가 실효 — true/불명이면 그룹입찰이 실효라
+    # 개별 수정 무의미(fail-closed on ambiguity, update_adgroup_bid ML 가드와 동형 규율).
+    if before_ugba is not False:
+        raise WriteValidationError(
+            f"update_ad_bid: 소재 {ncc_ad_id}의 useGroupBidAmt가 false가 아님"
+            f"(useGroupBidAmt={before_ugba!r}) — 그룹입찰이 실효 레버라 개별 bidAmt 수정 무의미"
+            "(fail-closed, 강제 전환 금지 §0)"
+        )
+
+    # 부모 그룹 ML 가드: 부모가 ML 자동입찰이면 소재 bidAmt도 무시된다 → 차단(update_adgroup_bid
+    # 와 동일 판정 — systemBiddingType 'NONE' 명시 + isAutobidActive explicit False만 수동 인정,
+    # 그 외는 전부 fail-closed on ambiguity).
+    parent_adgroup_id = before.get("nccAdgroupId")
+    if not parent_adgroup_id:
+        raise WriteVerificationError(
+            f"update_ad_bid: 소재 {ncc_ad_id} 재조회에 nccAdgroupId 부재 — 부모 ML 가드 확인 "
+            "불가(fail-closed)"
+        )
+    parent = _get_adgroup(parent_adgroup_id)
+    system_bidding_type = parent.get("systemBiddingType")
+    autobid_strategy = parent.get("autobidStrategy")
+    autobid_active = autobid_strategy.get("isAutobidActive") if isinstance(autobid_strategy, dict) else None
+    if system_bidding_type != "NONE" or autobid_active is not False:
+        raise WriteValidationError(
+            f"update_ad_bid: 소재 {ncc_ad_id}의 부모 그룹 {parent_adgroup_id}가 수동입찰로 확인 "
+            f"불가(systemBiddingType={system_bidding_type!r}, isAutobidActive={autobid_active!r}) "
+            "— ML 자동입찰이면 소재 bidAmt도 무시(fail-closed)"
+        )
+
+    path = f"/ncc/ads/{ncc_ad_id}"
+    # adAttr는 JSON 문자열(공식 apidoc). useGroupBidAmt=false는 before와 동일값 재전송(불변 —
+    # 강제 전환 아님). fields=adAttr로 부분교체 명시(userLock 등 다른 필드 보존).
+    ad_attr = json.dumps({"bidAmt": bid_amt, "useGroupBidAmt": False}, ensure_ascii=False)
+    body = {"nccAdId": ncc_ad_id, "adAttr": ad_attr}
+    log.info("Naver SA 쓰기 시도: update_ad_bid ad=%s bidAmt=%s", ncc_ad_id, bid_amt)
+    resp = requests.put(
+        fetcher.BASE_URL + path,
+        headers=fetcher._headers(path, method="PUT"),
+        params={"fields": "adAttr"},
+        json=body,
+        timeout=30,
+    )
+    if not (200 <= resp.status_code < 300):
+        log.error(
+            "Naver SA 쓰기 실패: update_ad_bid ad=%s status=%s body=%s",
+            ncc_ad_id, resp.status_code, resp.text[:300],
+        )
+        raise WriteError(
+            f"update_ad_bid 실패: status={resp.status_code} body={resp.text[:300]}"
+        )
+
+    try:
+        response_body = resp.json()
+    except ValueError:
+        response_body = None
+
+    after = get_ad(ncc_ad_id)
+    after_bid, after_ugba = fetcher._parse_ad_attr(after.get("adAttr"))
+    if after_bid != bid_amt:
+        raise WriteVerificationError(
+            f"update_ad_bid: 쓰기 응답은 성공(status={resp.status_code})이나 재조회에 반영되지 "
+            f"않음(fail-closed): 요청={bid_amt} 재조회={after_bid}"
+        )
+    # useGroupBidAmt 불변 확인(§0) — 우리 쓰기가 실수로 그룹입찰 커플링을 전환하지 않았는지,
+    # 또는 다른 행위자가 전환하지 않았는지 이중확인(update_keyword_bid의 useGroupBidAmt 검증 동형).
+    if after_ugba is not False:
+        raise WriteVerificationError(
+            f"update_ad_bid: bidAmt는 반영됐으나 useGroupBidAmt가 false로 유지되지 않음"
+            f"(fail-closed 강제 전환 감지) — 재조회 useGroupBidAmt={after_ugba!r}"
+        )
+
+    log.info("Naver SA 쓰기 성공: update_ad_bid ad=%s bidAmt=%s", ncc_ad_id, bid_amt)
+    return WriteResult(
+        action="update_ad_bid", before=before, response=response_body, after=after, created_ids=[],
     )

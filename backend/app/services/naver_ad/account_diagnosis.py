@@ -13,7 +13,7 @@ from decimal import Decimal
 from sqlalchemy import func as sqlfunc
 from sqlalchemy.orm import Session
 
-from app.models import NaverAdDaily, NaverChangeLog, NaverEntity, NaverSearchTermDaily
+from app.models import NaverAdDaily, NaverAdgroupProduct, NaverChangeLog, NaverEntity, NaverSearchTermDaily
 from app.services.naver_ad import effective_bid as effbid
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 
@@ -455,6 +455,38 @@ def _last_bid_change_kst_date(db: Session, entity_ids: set[str]) -> dict[str, da
     }
 
 
+def _last_ad_bid_change_by_group(db: Session, adgroup_ids: set[str]) -> dict[str, date]:
+    """레버 미연결 그룹의 마지막 **소재-레벨** 입찰변경 KST 날짜(B3 이월, D-NAO-65).
+
+    B3부터 우리가 소재 bidAmt를 직접 바꾸므로(entity_type='ad'·action='update_bid' change_log),
+    미연결 유닛(source='ad')의 증거 창도 '마지막 소재입찰 변경 이후'로 절체해야 시점이 정합한다
+    (변경 전 고CPC·고비용 혼입 방지 — source='group' 유닛의 DL1 창 절체와 동일 근거).
+    NaverAdgroupProduct(adgroup↔ad_id 매핑)로 그룹의 소재들을 모으고, 그 ad_id들의 update_bid
+    change_log 최신일(_last_bid_change_kst_date 재사용 — entity_type 무관·entity_id만 필터)을
+    그룹별 max로 집계. ★B3 실집행 전에는 ad change_log가 없어 빈 dict(종전 만성 7일 창 동작
+    보존 — 하위호환). ★1쿼리 매핑 + 1쿼리 change_log(N+1 금지, _last_bid_change_kst_date 계승)."""
+    if not adgroup_ids:
+        return {}
+    ad_rows = (
+        db.query(NaverAdgroupProduct.adgroup_id, NaverAdgroupProduct.ad_id)
+        .filter(
+            NaverAdgroupProduct.adgroup_id.in_(adgroup_ids),
+            NaverAdgroupProduct.ad_id.isnot(None),
+        )
+        .all()
+    )
+    ad_to_group: dict[str, str] = {ad_id: gid for gid, ad_id in ad_rows if ad_id}
+    if not ad_to_group:
+        return {}
+    last_by_ad = _last_bid_change_kst_date(db, set(ad_to_group))
+    out: dict[str, date] = {}
+    for ad_id, changed_date in last_by_ad.items():
+        gid = ad_to_group.get(ad_id)
+        if gid is not None and (gid not in out or changed_date > out[gid]):
+            out[gid] = changed_date
+    return out
+
+
 def _stop_loss_window_start(date_from: date, date_to: date, last_change: date | None) -> date:
     """스톱로스 행동 창 시작일 (DL1, D-NAO-65) — 마지막 입찰변경 있으면 max(date_from, 변경일),
     없으면 3일 고정 폴백 max(date_from, date_to-2). 신규/장기휴면 유닛의 조기 사살 방지."""
@@ -739,6 +771,9 @@ def shopping_pause_candidates(
     effs = effbid.adgroup_effective_bids(
         db, {aid: entity_map[aid].bid_amt for aid in candidate_ids},
     )
+    # B3 이월(D-NAO-65): 미연결 유닛의 증거 창을 '마지막 소재입찰 변경 이후'로 절체하기 위해
+    # 그룹별 마지막 ad-레벨 입찰변경일을 미리 집계(B3 실집행 전엔 빈 dict = 종전 만성 7일 창).
+    ad_change = _last_ad_bid_change_by_group(db, candidate_ids)
 
     # D-NAO-64(A): at-floor(못 내림) 판정은 스텝하향의 단일 진실원천 재사용(하드코딩 70 금지,
     # _MAX_CHANGE_PCT 변경 시 자동 정합). 함수 레벨 import로 순환 의존 회피(호출 시점 해석).
@@ -764,9 +799,15 @@ def shopping_pause_candidates(
         # (성급 사살 금지가 정당). floor_bleed 밸브의 window_days도 이 창 기준(아래 산출 공유).
         # 레버 연결 유닛(source='group')은 기존 DL1 행동 창 유지(우리가 입찰을 바꾸는 유닛).
         if eff["source"] == "ad":
-            window_start = max(date_from, chronic_from)
+            # B3 이월: 소재입찰을 우리가 바꿨으면 증거 창을 그 변경일 이후로 절체(만성 7일과
+            # 결합 = 더 좁은 창). 변경 없으면(B3 전) 종전 만성 7일 창(max(date_from, chronic_from)).
+            ad_change_date = ad_change.get(adgroup_id)
+            base_start = max(date_from, chronic_from)
+            window_start = max(base_start, ad_change_date) if ad_change_date is not None else base_start
+            cpc_change = ad_change_date  # CPC 창도 소재입찰 변경 이후로 절체(변경 전 고CPC 혼입 방지)
         else:
             window_start = _stop_loss_window_start(date_from, date_to, last_change_date)
+            cpc_change = last_change_date  # source='group'은 기존 adgroup-레벨 변경일
         _, _, cost, conv_amt = _sum_cost_conv_since(rows, window_start)  # 행동/증거 창
         if cost <= 0:
             continue
@@ -785,7 +826,9 @@ def shopping_pause_candidates(
         # CPC None = 판정 불가 → lever_broken False(fail-safe). 보정ROAS는 만성 창 유지(목적이
         # 다름 — 단발 나쁜 날 방지). 모든 행에 lever_broken을 태깅해 _stop_loss_proposal이
         # at-floor시 pause(예외②) vs 바닥 대기를 분기하게 한다(무전환 행 포함).
-        cpc_from = chronic_from if last_change_date is None else max(chronic_from, last_change_date)
+        # B3 이월: source='ad'는 소재입찰 변경(cpc_change), source='group'은 adgroup 변경 이후로
+        # CPC 창을 절체(위 window 분기에서 cpc_change 확정 — 변경 전 고CPC 클릭 혼입 방지).
+        cpc_from = chronic_from if cpc_change is None else max(chronic_from, cpc_change)
         _, cpc_clk, cpc_cost, _ = _sum_cost_conv_since(rows, cpc_from)
         chronic_cpc = int(cpc_cost // cpc_clk) if cpc_clk > 0 else None
         # B2: 레버끊김 판정 기준 = 실효입찰(그룹입찰 아님). 실효≈CPC면 CPC≤k×실효라 미발동
@@ -822,7 +865,9 @@ def shopping_pause_candidates(
             "campaign_id": entity.campaign_id, "adgroup_id": adgroup_id, "cost": cost,
             "conv_amt": conv_amt, "current_bid": entity.bid_amt,
             # B2: 실효입찰(그룹입찰과 다를 수 있음) — writer가 at-floor/레버연결·사유문에 소비.
+            # B3: effective_ad_id = 실효값을 만든 소재 nccAdId(source='ad'일 때, 소재-레벨 제어 대상).
             "effective_bid": eff_bid, "effective_source": eff["source"],
+            "effective_ad_id": eff["max_ad_id"],
             "stop_loss_amount": stop_loss_amount, "reason": reason,
             "lever_broken": lever_broken, "chronic_cpc": chronic_cpc,
             "floor_bleed": reason == "zero_conv" and window_days >= _FLOOR_BLEED_MIN_DAYS,

@@ -226,6 +226,14 @@ effective_bid 주입)·`diagnosis.build_diagnosis`(effective_bid 주입 배선).
   복수 실효레버면 각각 제안(고삐가 그룹당 1건→소재당 1건, 쿨다운은 ad_id별).
 - **카나리**: `OPEN_ACTIONS` 불변("update_bid" 이미 개방)이나 **target_type='ad' 실쓰기는 첫 배포 시
   ours 1개 캠페인·Jino Confirm 승인분만**(D-NAO-5 신규 유형 액션 무조건 승인). 자동발사 0 → 실적 확인 후 확대.
+- **B3 GATE 반영(2026-07-20)**: ①카나리 1단계 방향 = **bid_down만**(`_AD_BID_CANARY_DIRECTIONS`,
+  ad UP은 2단계 — 상수 확장으로 개방) ②**탐침(probe) UP은 ad 라우팅 제외** — CD3 되돌림 기계가
+  'ad' grain을 처리 못 함(`probe_revert._standing_probes`의 before_value 최상위 bidAmt 파싱 vs
+  ad의 adAttr JSON 문자열 중첩 + `_conv_direct_today` grain 필터 부재). **탐침의 ad 확장은 별도
+  페이즈로 이월**(CD3 'ad' 확장이 선행조건) ③Confirm-only 코드화 — ad 제안은 레인 자동승인·인라인
+  실행 금지(시간당=pending 생성만·일 레인=심사/stale 정리 모두 제외), 실행 경로는 콘솔 Confirm만.
+  ④라이브 합격 기준 보강: max 소재입찰 하락뿐 아니라 **그룹 실현 CPC 하강**을 확인(2위 소재로의
+  노출 이전 효과까지 포착 — max만 보면 놓침).
 **어디**: `naver_sa_writer.update_ad_bid`(신규)·`_execute_update_bid`(분기)·`proposal_writer`(실효레버
 라우팅)·`guardrail_gate`(entity_id=ad_id, 로직 불변). effective_bid 재사용.
 **완료 기준(원칙22)**: 카나리에서 (a) useGroupBidAmt=false 소재에 bid_down 실집행 → 재조회 실측 반영

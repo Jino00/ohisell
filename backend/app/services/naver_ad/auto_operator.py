@@ -55,6 +55,29 @@ APPROVAL_SOURCE_DAILY = "auto_op"  # 7자
 APPROVAL_SOURCE_HOURLY = "auto_op_hr"  # 10자
 APPROVAL_SOURCE_PROBE = "probe_op"  # 8자 — D-NAO-58 CD2 클릭 탐침(String(12) 적합, diary probe actor)
 APPROVAL_SOURCE_REVERT = "revert_op"  # 9자 — D-NAO-58 CD3 탐침 되돌림(String(12) 적합, diary ACTOR_PROBE 재사용)
+
+# B3(D-NAO-65) 소재-레벨 입찰 제어 카나리 게이트. auto_operate 캠페인 중 이 집합에 든
+# 캠페인만 레버 미연결(source='ad') 그룹에서 ad-레벨 실쓰기(update_ad_bid)로 라우팅한다 —
+# 나머지는 기존 [레버 미연결] hold(B2 억제) 유지. ★기본 빈 집합 = 전면 hold(현행 동작 보존,
+# 배포 즉시 행위 변화 0). 개방은 운영 결정으로 이 상수에 캠페인 id를 채운다(마이그레이션 0 —
+# 코드 배포로만 변경, D-NAO-16 개방 순서 관례·OPEN_ACTIONS와 동형). §0 "개별 캠페인 하드코딩
+# 금지"의 유일 예외 자리(카나리 상수) — 산출 규칙 자체는 전역(source='ad' 판별)이고, 이 상수는
+# "어느 캠페인에 먼저 개방하느냐"의 카나리 스코프만 좁힌다.
+AD_BID_CANARY_CAMPAIGNS: frozenset[str] = frozenset({
+    # 카나리 1호 = 맥세이프카드케이스_쇼검 (Jino 확정 2026-07-20 "카나리는 맥세이프로 열자")
+    "cmp-a001-02-000000010769985",
+})
+
+# B3 GATE P2-2: 카나리 1단계 개방 방향 = **bid_down만**(안전방향 — 지출·노출 하향). ad UP은
+# 카나리 2단계(1단계 DOWN 실적 확인 후 상수 확장으로 개방). 탐침 UP은 방향과 별개로
+# CD3 되돌림 기계가 'ad' grain을 처리 못 해(_standing_probes의 before_value 최상위 bidAmt
+# 파싱 — ad는 adAttr JSON 문자열 중첩·_conv_direct_today grain 필터 부재) 별도 페이즈로 이월.
+_AD_BID_CANARY_DIRECTIONS: frozenset[str] = frozenset({"bid_down"})
+
+
+def _ad_bid_canary(campaign_id: str) -> bool:
+    """캠페인이 B3 소재-레벨 제어 카나리 개방 대상인지(기본 빈 집합=전면 미개방)."""
+    return campaign_id in AD_BID_CANARY_CAMPAIGNS
 _MIN_CLICK_FOR_APPROVAL = 10  # D-NAO-48 조건②(rationale 창 클릭) / §4-1 핫셋 클릭 게이트 공유
 _MIN_HOURLY_SAMPLE_IMP = 30  # §4-2 "imp 합 < 30이면 그 시간대 묶음은 판단 보류"
 _HOURLY_RANK_DOWN_THRESHOLD = Decimal("2.5")  # §4-3 DOWN: 가중 avg_rank < 2.5
@@ -377,6 +400,9 @@ def run_daily_lane(db: Session, *, now: datetime | None = None) -> dict:
         .filter(
             NaverProposal.status == "pending",
             NaverProposal.proposal_type.in_(_DAILY_LANE_PROPOSAL_TYPES),
+            # B3 GATE P2-2 Confirm-only: target_type='ad'(소재-레벨)는 자동승인 제외 —
+            # 실행은 Jino 콘솔 Confirm 경로만(D-NAO-5 카나리 "자동발사 0").
+            NaverProposal.target_type != "ad",
             NaverProposal.campaign_id.in_(auto_ids),
             NaverProposal.created_at >= day_start,
             NaverProposal.created_at < day_end,
@@ -445,6 +471,10 @@ def run_daily_lane(db: Session, *, now: datetime | None = None) -> dict:
             .filter(
                 NaverProposal.status == "pending",
                 NaverProposal.proposal_type.in_(_DAILY_LANE_PROPOSAL_TYPES),
+                # B3 GATE P2-2: ad-레벨 제안은 stale 정리에서도 제외 — pending은 "Confirm
+                # 대기" 정상 상태(rejected 처리하면 콘솔 승인 창 자체가 소멸). 만료는
+                # proposal_pipeline의 expiry가 담당(14일).
+                NaverProposal.target_type != "ad",
                 NaverProposal.campaign_id.in_(sweep_ids),
                 NaverProposal.created_at < day_end,
             )
@@ -1001,6 +1031,8 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
     result: dict = {
         "reviewed": 0, "approved": 0, "executed": 0, "held": [], "skipped": 0, "failed": 0,
         "probed": 0,  # D-NAO-58 CD2: 탐침으로 승격된 up 제안 수(라이브 관측용)
+        "ad_confirm_pending": 0,  # B3 GATE P2-2: Confirm 대기로 생성된 ad-레벨 제안 수
+        "ad_confirm_pending_dup_skipped": 0,  # B3 GATE 2R P2-B: 동일 pending 존재로 skip된 수
     }
 
     for campaign_id in _auto_operate_campaigns(db):
@@ -1079,13 +1111,16 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                     now=now, target_type=target_type, target_id=target_id, action=intended_action,
                 )
                 continue
-            # B2 GATE P2-2①(D-NAO-65): 레버 미연결 그룹 억제 — SHOPPING adgroup의 실효입찰이
-            # 소재 bidAmt(useGroupBidAmt=false, source='ad')면 그룹입찰 스텝(고삐 DOWN·밴드
-            # DOWN/UP)은 지출·노출에 무효이면서 ①DL1 행동 창(naver_change_log update_bid)만
-            # 리셋해 진단의 미연결 스톱로스 그물(P2-1 만성 7일 창)을 늦추고 ②changes_today
-            # 일일 상한 슬롯을 낭비한다 — 집행 전 skip(소재-레벨 제어는 B3 대기). adgroup
-            # grain만(키워드는 소재입찰 개념 없음). 파생 실패/소재 데이터 없음(sync 전)은
-            # 기존 동작 폴백(그룹입찰 유효 가정 — fail-safe 하위호환).
+            # B2 GATE P2-2①(D-NAO-65) → B3 라우팅: 레버 미연결 그룹(실효입찰이 소재
+            # bidAmt=useGroupBidAmt=false, source='ad')은 그룹입찰 스텝(고삐 DOWN·밴드 DOWN/UP)
+            # 이 지출·노출에 무효이면서 ①DL1 행동 창(naver_change_log update_bid)만 리셋해 진단의
+            # 미연결 스톱로스 그물(P2-1 만성 7일 창)을 늦추고 ②changes_today 일일 상한 슬롯을
+            # 낭비한다. 카나리 캠페인이면 실효 레버(max 소재)의 bidAmt를 대상으로 ad-레벨 제안으로
+            # 라우팅(B3 소재-레벨 제어), 비카나리는 기존 hold(B2 억제) 유지. adgroup grain만
+            # (키워드는 소재입찰 개념 없음). 파생 실패/소재 데이터 없음(sync 전)은 그룹입찰 유효
+            # 가정 폴백(fail-safe 하위호환). exec_* = 실제 제안 대상(라우팅 후 소재로 절체될 수 있음).
+            exec_target_type, exec_target_id, exec_adgroup_id = target_type, target_id, None
+            step_base = current_bid
             if target_type == "adgroup":
                 try:
                     eff = effective_bid.adgroup_effective_bid(db, target_id, current_bid)
@@ -1093,24 +1128,58 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                     log.warning("auto_operator: 실효입찰 파생 실패 adgroup=%s: %s", target_id, e)
                     eff = None
                 if eff is not None and eff["source"] == "ad":
-                    hold_reason = (
-                        f"[레버 미연결] 그룹입찰 무효(실효=소재입찰 {eff['effective_bid']}원) "
-                        f"— B3 대기"
-                    )
-                    result["held"].append({"target_id": target_id, "reason": hold_reason})
-                    _record_blocked(
-                        db, campaign_id=campaign_id, actor=lane_actor, reason=hold_reason,
-                        now=now, target_type=target_type, target_id=target_id,
-                        action=intended_action,
-                    )
-                    continue
-            step_bid = _clamp_step(current_bid, verdict["direction"])
+                    if not (_ad_bid_canary(campaign_id) and eff.get("max_ad_id")):
+                        hold_reason = (
+                            f"[레버 미연결] 그룹입찰 무효(실효=소재입찰 {eff['effective_bid']}원) "
+                            f"— B3 대기"
+                        )
+                    elif is_probe:
+                        # GATE P2-1: 탐침은 ad 라우팅 금지 — CD3 되돌림(_standing_probes)이
+                        # 'ad' before_value(adAttr JSON 중첩)를 파싱 못 해 영원히 미회수 +
+                        # _conv_direct_today grain 필터 부재. 탐침 ad 확장은 별도 페이즈.
+                        hold_reason = "[레버 미연결] 탐침은 ad 미지원 — CD3 'ad' 확장 후"
+                    elif intended_action not in _AD_BID_CANARY_DIRECTIONS:
+                        # GATE P2-2: 카나리 1단계는 bid_down만 — ad UP은 카나리 2단계.
+                        hold_reason = "[레버 미연결] ad UP은 카나리 2단계"
+                    else:
+                        hold_reason = None
+                    if hold_reason is not None:
+                        result["held"].append({"target_id": target_id, "reason": hold_reason})
+                        _record_blocked(
+                            db, campaign_id=campaign_id, actor=lane_actor, reason=hold_reason,
+                            now=now, target_type=target_type, target_id=target_id,
+                            action=intended_action,
+                        )
+                        continue
+                    # B3 카나리: max 소재의 라이브 bidAmt를 스텝 기준으로 ad-레벨 제안 라우팅.
+                    # 라이브 재조회는 ±15% 클램프(가드레일)를 소재 자기 입찰 기준으로 맞추기 위함.
+                    try:
+                        ad_live_bid = naver_sa_writer.get_ad_bid(eff["max_ad_id"])
+                    except Exception as e:  # noqa: BLE001 — 재조회 실패는 hold(fail-closed)
+                        log.warning("auto_operator: 소재 입찰 재조회 실패 ad=%s: %s",
+                                    eff["max_ad_id"], e)
+                        ad_live_bid = None
+                    if ad_live_bid is None:
+                        hold_reason = "소재 입찰 라이브 재조회 실패(B3 카나리)"
+                        result["held"].append({"target_id": target_id, "reason": hold_reason})
+                        _record_blocked(
+                            db, campaign_id=campaign_id, actor=lane_actor, reason=hold_reason,
+                            now=now, target_type=target_type, target_id=target_id,
+                            action=intended_action,
+                        )
+                        continue
+                    exec_target_type = "ad"
+                    exec_target_id = eff["max_ad_id"]
+                    exec_adgroup_id = target_id
+                    step_base = ad_live_bid
+            step_bid = _clamp_step(step_base, verdict["direction"])
             if step_bid is None:
                 hold_reason = "스텝 클램프 계산 불가(방향 무의미)"
-                result["held"].append({"target_id": target_id, "reason": hold_reason})
+                result["held"].append({"target_id": exec_target_id, "reason": hold_reason})
                 _record_blocked(
                     db, campaign_id=campaign_id, actor=lane_actor, reason=hold_reason,
-                    now=now, target_type=target_type, target_id=target_id, action=intended_action,
+                    now=now, target_type=exec_target_type, target_id=exec_target_id,
+                    action=intended_action,
                 )
                 continue
 
@@ -1118,11 +1187,11 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
             # 유닛은 제안 생성 자체를 하지 않는다(즉시 정지 계약). 탐침도 동일 경로 통과.
             if not _auto_operate_now(db, campaign_id):
                 hold_reason = "킬스위치 OFF — auto_operate=False(실행 직전 재확인, codex 5R[P1-2])"
-                result["held"].append({"target_id": target_id, "reason": hold_reason})
+                result["held"].append({"target_id": exec_target_id, "reason": hold_reason})
                 _record_blocked(
                     db, campaign_id=campaign_id, actor=lane_actor, reason=hold_reason,
-                    now=now, target_type=target_type, target_id=target_id, action=intended_action,
-                    event_type="kill_switch",
+                    now=now, target_type=exec_target_type, target_id=exec_target_id,
+                    action=intended_action, event_type="kill_switch",
                 )
                 continue
 
@@ -1151,14 +1220,42 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                 rationale = f"[시간당밴드] {verdict['reason']}"
                 expected_effect = "시간당 밴드 관제 — 순위·CPC·페이싱 기반 스텝 조정(ROAS 신규 판단 없음)."
                 proposal_approval_source = APPROVAL_SOURCE_HOURLY
+            # B3 GATE 2R P2-B: ad Confirm-only 제안은 즉시 실행되지 않고 pending으로 남으므로,
+            # 동일 (proposal_type, target_type='ad', target_id) pending이 이미 있으면 생성
+            # skip(proposal_writer.persist의 pending dedup 규약 재사용) — 없으면 매시간 동일
+            # pending이 누적(~16건/일 × 만료 14일)돼 Confirm 큐가 매몰된다.
+            if exec_target_type == "ad":
+                dup_exists = db.query(NaverProposal.id).filter(
+                    NaverProposal.proposal_type == proposal_type,
+                    NaverProposal.target_type == "ad",
+                    NaverProposal.target_id == exec_target_id,
+                    NaverProposal.status == "pending",
+                ).first()
+                if dup_exists is not None:
+                    result["ad_confirm_pending_dup_skipped"] += 1
+                    continue
+
             proposal = NaverProposal(
-                proposal_type=proposal_type, target_type=target_type, target_id=target_id,
-                campaign_id=campaign_id,
+                proposal_type=proposal_type, target_type=exec_target_type, target_id=exec_target_id,
+                campaign_id=campaign_id, adgroup_id=exec_adgroup_id,
                 rationale=rationale, expected_effect=expected_effect,
                 status="pending", target_bid=step_bid,
             )
             db.add(proposal)
             db.flush()
+
+            # B3 GATE P2-2 Confirm-only(계획서 카나리 스펙 "Jino Confirm 승인분만·자동발사 0",
+            # D-NAO-5): target_type='ad' 제안은 어떤 레인에서도 자동 승인·인라인 실행 금지 —
+            # pending으로 생성만 하고 실행은 기존 콘솔 Confirm 경로(라우터 승인→harness)만.
+            if exec_target_type == "ad":
+                db.commit()
+                result["ad_confirm_pending"] += 1
+                log.info(
+                    "auto_operator: B3 카나리 ad-레벨 제안 Confirm 대기 생성 proposal_id=%s "
+                    "ad=%s adgroup=%s target_bid=%s(자동발사 0, D-NAO-5)",
+                    proposal.id, exec_target_id, exec_adgroup_id, step_bid,
+                )
+                continue
 
             proposal.status = "approved"
             proposal.approval_source = proposal_approval_source

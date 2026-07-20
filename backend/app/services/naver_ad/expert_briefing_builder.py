@@ -80,6 +80,11 @@ def _build_pending_proposals(db: Session) -> tuple[list[dict], list[int]]:
         NaverProposal.proposal_type.notin_(
             tuple(INFORMATIONAL_PROPOSAL_TYPES) + (PARAM_CHANGE,)
         ),
+        # B3 GATE 2R P2-A(D-NAO-65): 소재-레벨(target_type='ad') 제안은 브리핑 제외 —
+        # Confirm-only 카나리(D-NAO-5)라 위임 실행이 불가한 카드가 Ava 검토 대상
+        # (expected_ids)에 실리면 혼란만 준다. 카나리 2단계 개방 시 delegation_gate의
+        # ad 제외와 함께 해제.
+        NaverProposal.target_type != "ad",
     ).order_by(NaverProposal.id.asc()).all()
 
     pairs = {(r.target_type, r.target_id) for r in rows if r.target_id}
