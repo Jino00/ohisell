@@ -17,6 +17,7 @@ from app.services.naver_ad.bid_step_types import (
     BID_DOWN_TYPES as _BID_DOWN_TYPES,
     BID_UP_TYPES as _BID_UP_TYPES,
     CHANGE_PCT_EXEMPT_TYPES as _EXEMPT_FROM_CHANGE_PCT,
+    RANK_STEP_TYPES as _RANK_STEP_TYPES,
 )
 
 # D-NAO-5: 회당 변경폭 상한(운영 키워드). D-NAO-20-③에 따라 신규/육성 트랙(growth_bid_up)은
@@ -153,12 +154,18 @@ def _check_bid(proposal: dict, context: dict, proposal_type: str) -> str | None:
             )
 
     if proposal_type in _BID_UP_TYPES:
-        stop_loss_amount = target_bid * growth_sweeper.STOP_LOSS_CLICK_MULTIPLE
+        # IU-R R1 스톱로스 완화 방지(codex 엣지): rank-step 타입(bid_up_servo 등)은 스텝이
+        # ±15%를 넘을 수 있어 target_bid 기준 스톱로스가 실질 완화된다(target_bid↑ → 상한↑).
+        # rank-step은 **스텝 전 current_bid** 기준으로 산정해 더 보수적으로 막는다(PLAN §2 R1).
+        # 비-rank-step(bid_up/growth_bid_up)은 종전 target_bid 기준 유지(행위 불변).
+        stop_loss_base = current_bid if proposal_type in _RANK_STEP_TYPES else target_bid
+        stop_loss_amount = stop_loss_base * growth_sweeper.STOP_LOSS_CLICK_MULTIPLE
         unconverted_spend = context.get("unconverted_spend")
         if unconverted_spend is not None and unconverted_spend >= stop_loss_amount:
+            base_label = "current_bid" if proposal_type in _RANK_STEP_TYPES else "target_bid"
             return (
                 f"스톱로스 도달 — 무전환 지출 {unconverted_spend}원 ≥ 상한 {stop_loss_amount}원"
-                f"(D-NAO-20, target_bid×{growth_sweeper.STOP_LOSS_CLICK_MULTIPLE})"
+                f"(D-NAO-20, {base_label}×{growth_sweeper.STOP_LOSS_CLICK_MULTIPLE})"
             )
 
         roas_corrected = context.get("roas_corrected")

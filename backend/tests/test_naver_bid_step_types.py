@@ -25,24 +25,35 @@ from app.services.naver_ad.bid_step_types import (
     is_bid_up,
 )
 
-# 리팩터 전(pre-R0) 하드코딩 리터럴 — 차등 테스트의 골든값. 이 값들이 바뀌면 = 행위 변경.
+# 리팩터 전(pre-R0) 하드코딩 리터럴 — R0 차등 테스트가 "동일 입력 → 동일 결과"를 증명한
+# 원본 두 타입(bid_up·growth_bid_up). R0의 B-루프(BEP·일일캡)는 이 두 타입 위에서 pre-R0
+# 행위가 보존됨을 계속 못박는다. ★IU-R R1은 여기에 `bid_up_servo`를 **의도적으로** 추가한다
+# (행위 변경 = 신규 쇼검 서보 타입) — 멤버십/매핑 테스트는 아래 R1 기대값으로 갱신한다.
 _GOLDEN_BID_UP = frozenset({"bid_up", "growth_bid_up"})
 _GOLDEN_BID_DOWN = frozenset({"bid_down"})
 _GOLDEN_EXEMPT = frozenset({"growth_bid_up"})
+
+# IU-R R1 기대 상태 — bid_up_servo가 UP·±15%면제·rank-step 3셋에 등록됨.
+_R1_BID_UP = _GOLDEN_BID_UP | {"bid_up_servo"}
+_R1_EXEMPT = _GOLDEN_EXEMPT | {"bid_up_servo"}
+_R1_RANK_STEP = frozenset({"bid_up_servo"})
 
 
 # ══════════════════════════════════════════════════════════════════
 # (A) 레지스트리 자체 단위 테스트
 # ══════════════════════════════════════════════════════════════════
 def test_registry_membership_sets():
-    assert BID_UP_TYPES == _GOLDEN_BID_UP
+    # IU-R R1: bid_up_servo가 UP·±15%면제 셋에 추가됨(DOWN은 불변).
+    assert BID_UP_TYPES == _R1_BID_UP
     assert BID_DOWN_TYPES == _GOLDEN_BID_DOWN
-    assert CHANGE_PCT_EXEMPT_TYPES == _GOLDEN_EXEMPT
+    assert CHANGE_PCT_EXEMPT_TYPES == _R1_EXEMPT
 
 
-def test_rank_step_types_empty_placeholder():
-    # R0는 신규 rank 타입을 아직 도입하지 않는다 — 자리만 잡은 빈 셋(R1/R2에서 채움).
-    assert RANK_STEP_TYPES == frozenset()
+def test_rank_step_types_filled_with_servo():
+    # IU-R R1: rank-step 타입은 쇼검 서보 bid_up_servo로 채워졌다(R0의 빈 셋 → R1 채움).
+    assert RANK_STEP_TYPES == _R1_RANK_STEP
+    # rank-step은 반드시 UP 타입의 부분집합(rank 스텝은 상향 스텝의 하위 의미).
+    assert RANK_STEP_TYPES <= BID_UP_TYPES
 
 
 def test_registry_invariants():
@@ -75,10 +86,10 @@ def test_direction_of(pt, expected):
 # (B1) 차등 — guardrail_gate가 소비하는 집합이 골든과 동일 + 판정 산출물 동일
 # ══════════════════════════════════════════════════════════════════
 def test_guardrail_consumes_registry_sets():
-    # guardrail_gate가 레지스트리를 별칭 import — 골든 리터럴과 값 동일(중복 정의 아님, 동일 객체).
-    assert guardrail_gate._BID_UP_TYPES == _GOLDEN_BID_UP
+    # guardrail_gate가 레지스트리를 별칭 import — R1 값과 동일(중복 정의 아님, 동일 객체).
+    assert guardrail_gate._BID_UP_TYPES == _R1_BID_UP
     assert guardrail_gate._BID_DOWN_TYPES == _GOLDEN_BID_DOWN
-    assert guardrail_gate._EXEMPT_FROM_CHANGE_PCT == _GOLDEN_EXEMPT
+    assert guardrail_gate._EXEMPT_FROM_CHANGE_PCT == _R1_EXEMPT
     assert guardrail_gate._BID_UP_TYPES is BID_UP_TYPES  # 단일 소스(별칭)
 
 
@@ -127,16 +138,59 @@ def test_guardrail_daily_cap_exempts_down_only():
 
 
 # ══════════════════════════════════════════════════════════════════
-# (B2) 차등 — _ACTION_BY_PROPOSAL_TYPE: 오늘 값 골든 불변 + bid 계열은 레지스트리 파생
-# (codex R0 리뷰 P2: 리터럴 유지 시 R1 신규 타입이 가드엔 등록되고 실행 매핑에서 누락되는
-#  어긋남 위험 → 파생으로 전환. 파생 후에도 오늘 값은 골든과 동일해야 함 = 행위 불변)
+# (B1-R1) IU-R R1 서보 타입(bid_up_servo) 가드 차등 — ±15% 면제하되 나머지 가드 존치
 # ══════════════════════════════════════════════════════════════════
-def test_action_by_proposal_type_mapping_unchanged():
+def test_guardrail_servo_change_pct_exempt_like_growth():
+    # bid_up_servo도 ±15% 변경폭 면제(한 순위 위 입찰폭이 15% 초과 가능). 200→300=+50% 통과.
+    over = _ctx()
+    assert guardrail_gate.check(_bid("bid_up_servo", 300), over, now=_NOW) is None
+    # 대조: bid_up(비면제)은 변경폭 차단.
+    r = guardrail_gate.check(_bid("bid_up", 300), over, now=_NOW)
+    assert r is not None and "변경폭" in r
+
+
+def test_guardrail_servo_stop_loss_uses_current_base_stricter():
+    # current=1000, target=1450(+45%, 면제), unconverted=12000.
+    # rank-step(bid_up_servo): 스톱로스 base=current 1000×10=10000 → 12000≥10000 → 차단.
+    # 대조 growth_bid_up(비 rank-step): base=target 1450×10=14500 → 12000<14500 → 스톱로스 통과.
+    over = _ctx(current_bid=1000, unconverted_spend=12000, roas_corrected=300.0, target_roas=150.0)
+    r_servo = guardrail_gate.check(_bid("bid_up_servo", 1450), over, now=_NOW)
+    assert r_servo is not None and "스톱로스" in r_servo and "current_bid" in r_servo
+    assert guardrail_gate.check(_bid("growth_bid_up", 1450), over, now=_NOW) is None
+
+
+def test_guardrail_servo_still_blocks_bep_budget_cooldown_cap():
+    # ±15%는 면제해도 BEP·일예산·쿨다운·일일캡은 서보에도 전량 존치(PLAN §0 불변 가드).
+    r_bep = guardrail_gate.check(
+        _bid("bid_up_servo", 1300), _ctx(current_bid=1000, roas_corrected=100.0, target_roas=150.0), now=_NOW,
+    )
+    assert r_bep is not None and "BEP" in r_bep
+    r_bud = guardrail_gate.check(
+        _bid("bid_up_servo", 1300), _ctx(current_bid=1000, cost_today=500_000, daily_budget=500_000), now=_NOW,
+    )
+    assert r_bud is not None and "일예산" in r_bud
+    r_cd = guardrail_gate.check(
+        _bid("bid_up_servo", 1300), _ctx(current_bid=1000, last_change_at=_NOW - timedelta(hours=1)), now=_NOW,
+    )
+    assert r_cd is not None and "쿨다운" in r_cd
+    r_cap = guardrail_gate.check(
+        _bid("bid_up_servo", 1300), _ctx(current_bid=1000, changes_today_count=3), now=_NOW,
+    )
+    assert r_cap is not None and "일일 변경" in r_cap
+
+
+# ══════════════════════════════════════════════════════════════════
+# (B2) 차등 — _ACTION_BY_PROPOSAL_TYPE: bid 계열은 레지스트리 파생(R0 P2). IU-R R1에서
+# bid_up_servo를 레지스트리에 등록하면 실행 매핑도 자동으로 update_bid로 파생돼야 한다
+# (가드는 UP으로 인식하는데 실행 매핑 누락으로 ActionNotExecutableError가 나는 어긋남 차단).
+# ══════════════════════════════════════════════════════════════════
+def test_action_by_proposal_type_mapping_derived_with_servo():
     assert harness._ACTION_BY_PROPOSAL_TYPE == {
         "negative_keyword": "add_negative_keyword",
         "bid_up": "update_bid",
         "bid_down": "update_bid",
         "growth_bid_up": "update_bid",
+        "bid_up_servo": "update_bid",  # IU-R R1: 레지스트리 파생으로 자동 매핑
         "pause": "set_user_lock",
         "resume": "set_user_lock",
         "budget_up": "update_budget",

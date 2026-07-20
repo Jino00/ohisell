@@ -32,7 +32,7 @@ from app.models import (
     NaverProposal,
     NaverRetroSignal,
 )
-from app.services.naver_ad import campaign_target_resolver, diagnosis, diary, effective_bid, intraday_roas, naver_execution_harness, naver_sa_writer
+from app.services.naver_ad import bid_simulator, campaign_target_resolver, diagnosis, diary, effective_bid, intraday_roas, naver_execution_harness, naver_sa_writer, rank_servo
 from app.services.naver_ad.bid_step_types import BID_UP_TYPES
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.services.naver_ad.guardrail_gate import _MAX_CHANGE_PCT
@@ -106,6 +106,12 @@ _INTRADAY_ONLY_UP_DAILY_CAP = 1
 _HOURLY_RECENT_HOURS = 3  # §4-2 "최근 3개 완료 시간대"
 _HOURLY_SPEND_BREAKER_MULTIPLE = 3  # §4-6 "직전 7일 일평균 ×3"
 _HOURLY_BASELINE_DAYS = 7  # 소진 서킷브레이커 직전 7일
+
+# IU-R R1(D-NAO-67) 서보 예산 pace 사전체크(codex R3 P2-3): 큰 스텝은 guardrail의 사후
+# 소진 가드(cost_today≥daily_budget)만으론 부족 → "잔여시간 예상 지출 ≤ 잔여예산×안전계수"를
+# 서보 스텝에 사전 체크한다. ★안전계수는 **보수 방향 < 1**로 못박음(여유계수 1.2류 오독 방지) —
+# 잔여예산의 80%까지만 예상 지출을 허용(외삽 오차 마진). daily_budget=0(uncapped)이면 통과.
+_BUDGET_HEADROOM_SAFETY_RATIO = Decimal("0.8")
 
 # ── D-NAO-58 CD2 클릭 탐침 상수(D-58-7 확정, 기존 검증 상수 재사용 원칙 — 새 매직넘버 최소화) ──
 _PROBE_ZERO_CLICK_HOURS = 2  # 완료 시간대 클릭0 지속 창(Jino 3h→2h 단축, "민첩한 시장 대응")
@@ -904,6 +910,96 @@ def _intraday_loss_leash(
     return False, f"장중 추정ROAS {est_roas} ≥ BEP {bep_roas} — 고삐 불발"
 
 
+# ══════════════════════ IU-R R1 쇼검 순위 서보 원료(PLAN §2 R1) ══════════════════════
+
+
+def _entity_campaign_type(db: Session, target_type: str, target_id: str) -> str | None:
+    """유닛의 campaign_type 조회(NaverEntity) — 서보 그레인 라우팅용(SHOPPING adgroup만 서보,
+    BRAND_SEARCH adgroup은 ±15% fallback, codex P1-3). 행 부재/미채움이면 None(fail-closed —
+    서보 미적용 → 기존 _clamp_step 경로 유지, 회귀 0)."""
+    row = (
+        db.query(NaverEntity.campaign_type)
+        .filter(NaverEntity.entity_type == target_type, NaverEntity.entity_id == target_id)
+        .first()
+    )
+    return row[0] if row and row[0] else None
+
+
+def _servo_economic_ceiling(
+    db: Session, *, adgroup_id: str, campaign_id: str, servo_agg: dict,
+    correction_factor: Decimal, window_from: date, window_to: date,
+) -> int:
+    """쇼검 광고그룹 경제성 상한(원) — compute_bid_sims의 SHOPPING 처리 동형(PLAN §2 R1).
+    pooled_rpc(정착창 adgroup 실적, group_agg=campaign_agg 근사, 상위 prior={campaign,account})
+    → affordable_ceiling(rpc×보정계수, target_roas). rpc≤0(심층 콜드)·target_roas 미해석 →
+    0(입찰 근거 없음 → 서보 fail-closed hold)."""
+    target_roas = _resolve_target_roas(db, campaign_id)
+    if target_roas is None or target_roas <= 0:
+        return 0
+    settle = _settlement_agg(db, "adgroup", adgroup_id, window_from, window_to)
+    keyword_row = {"clk": settle["clk"], "conv_amt": settle["conv_amt"]}
+    campaign_agg = servo_agg["campaign"].get(campaign_id, {"clk": 0, "conv_amt": 0})
+    group_agg = campaign_agg  # SHOPPING: 그룹 하위 키워드 grain 부재 → group=campaign 근사
+    rpc_raw = bid_simulator.pooled_rpc(keyword_row, group_agg, campaign_agg, servo_agg["account"])
+    rpc_corrected = (rpc_raw * correction_factor).quantize(Decimal("0.0001"))
+    return bid_simulator.affordable_ceiling(rpc_corrected, Decimal(str(target_roas)))
+
+
+def _servo_budget_pace_ok(
+    db: Session, *, campaign_id: str, curve: list[dict], now: datetime, target_bid: int,
+) -> tuple[bool, str]:
+    """서보 스텝 예산 pace 사전체크(PLAN §2 R1, codex P1-2) — "잔여시간 예상 지출 ≤ 잔여예산
+    ×안전계수"(guardrail의 사후 소진 가드를 보완하는 forward-looking 체크). (통과여부, 사유).
+
+    원료 = 이미 조회한 hh24 곡선의 최근 3시간 실측 clk pace(신규 API 없음). 잔여 활동시간은
+    now.hour 기준 그날 남은 시각(24−now.hour)으로 보수 외삽(§실측11). daily_budget=0(uncapped)
+    → 통과. 소스 미확보/소진 완료 → fail-closed hold(§0 표본 게이트가 이미 대부분 hold하지만
+    이중 방어). 안전계수 _BUDGET_HEADROOM_SAFETY_RATIO는 보수 방향<1.
+
+    ★P1-2 관측 슬롯 분모: pace = clk합 ÷ **관측된 완료 슬롯 수**(imp>0 버킷만) — 고정 3이
+    아니다. 자정 직후(완료 슬롯 1개)·곡선 누락 버킷을 0클릭으로 세면 pace가 과소추정돼 과대
+    허용된다(누락 버킷=0 아님, 관측 슬롯만). observed==0(근거 없음·now.hour==0 포함) →
+    fail-closed hold. ★P2-2: snapshot_hour<=now.hour만(같은 ad_date 내 미래 스냅샷 배제 —
+    백필/테스트 now 주입 방어)."""
+    latest = (
+        db.query(NaverHourlySnapshot)
+        .filter(
+            NaverHourlySnapshot.campaign_id == campaign_id,
+            NaverHourlySnapshot.ad_date == now.date(),
+            NaverHourlySnapshot.snapshot_hour <= now.hour,  # P2-2: 미래 스냅샷 배제
+        )
+        .order_by(NaverHourlySnapshot.snapshot_hour.desc())
+        .first()
+    )
+    if latest is None or latest.daily_budget is None:
+        return False, "예산 소스 미확보(스냅샷/일예산) — 서보 pace 검증 불가(fail-closed)"
+    if latest.daily_budget == 0:
+        return True, "일예산 uncapped(무제한) — pace 제약 없음"
+    if latest.cost is None:
+        return False, "당일 소진 미확보 — 서보 pace 검증 불가(fail-closed)"
+    remaining_budget = latest.daily_budget - latest.cost
+    if remaining_budget <= 0:
+        return False, f"잔여예산 없음 — 오늘 {latest.cost}원 ≥ 일예산 {latest.daily_budget}원"
+    recent = [h for h in curve if now.hour - _HOURLY_RECENT_HOURS <= h["hour"] < now.hour]
+    observed = sum(1 for h in recent if h["imp"] > 0)  # P1-2: 관측된 완료 슬롯만(누락=0 아님)
+    if observed == 0:
+        return False, "최근 완료 슬롯 관측 0(자정 직후/곡선 누락) — pace 근거 없음(fail-closed)"
+    clk_pace = Decimal(sum(h["clk"] for h in recent)) / Decimal(observed)  # 관측 슬롯당 클릭
+    remaining_hours = Decimal(max(0, 24 - now.hour))
+    expected_spend = clk_pace * remaining_hours * Decimal(target_bid)
+    allowed = Decimal(remaining_budget) * _BUDGET_HEADROOM_SAFETY_RATIO
+    if expected_spend <= allowed:
+        return True, (
+            f"pace 여유 — 예상지출 {float(expected_spend):.0f}원 ≤ 잔여예산 {remaining_budget}원×"
+            f"{float(_BUDGET_HEADROOM_SAFETY_RATIO)}"
+        )
+    return False, (
+        f"pace 초과 — 예상지출 {float(expected_spend):.0f}원(관측 {observed}슬롯 clk pace "
+        f"{float(clk_pace):.1f}/h×{int(remaining_hours)}h×{target_bid}원) > 잔여예산 "
+        f"{remaining_budget}원×{float(_BUDGET_HEADROOM_SAFETY_RATIO)}"
+    )
+
+
 def _judge_hourly(
     db: Session, *, target_type: str, target_id: str, campaign_id: str, curve: list[dict], now: datetime,
 ) -> dict:
@@ -926,10 +1022,16 @@ def _judge_hourly(
     D-8~D-2 누적(관성 — 좋은 성과는 다음날 자동 하강하지 않음)이고, 장중 tally는 당일 누적
     (뒤로 갈수록 신뢰 상승, 자정 리셋)."""
     summary = _weighted_recent(curve, now.hour)
+    # IU-R R1(PLAN §2): 구조화 verdict 필드 — 서보/estimate 라우팅이 문자열 파싱 없이 소비한다
+    # (codex 지적1). weighted_rank·imp_sum은 항상 채우고(서보 입력), UP 특정 필드
+    # (settle_status·intraday_ok·target_roas·est_roas·budget_ok)는 UP 판정 구간에서 채운다.
+    # 기존 direction/reason 소비자 행위 불변 — 키를 추가만 한다.
+    base = {"weighted_rank": summary["weighted_rank"], "imp_sum": summary["imp_sum"]}
     if summary["imp_sum"] < _MIN_HOURLY_SAMPLE_IMP:
         return {
             "direction": "hold",
             "reason": f"최근{_HOURLY_RECENT_HOURS}시간대 imp={summary['imp_sum']}<{_MIN_HOURLY_SAMPLE_IMP}(표본 부족)",
+            **base,
         }
 
     # ── IU2(D-NAO-66): 과열밴드 DOWN(<2.5) 삭제 ──
@@ -953,6 +1055,7 @@ def _judge_hourly(
                     f"CPC급등 — 당일={float(today_cpc):.1f}원 > 정착창기준={float(baseline_cpc):.1f}원"
                     f"×{CPC_SPIKE_RATIO}"
                 ),
+                **base,
             }
 
     # DOWN 우선 ②: 장중 loss 고삐(D-NAO-60 RL3) — UP보다 먼저 검사해 "bleeding day엔 UP
@@ -964,7 +1067,7 @@ def _judge_hourly(
         curve=curve, now=now, baseline_agg=baseline_agg,
     )
     if leash_fired:
-        return {"direction": "down", "reason": leash_reason, "leash": True}
+        return {"direction": "down", "reason": leash_reason, "leash": True, **base}
 
     # UP(IU1, D-NAO-66): 순위 전제 폐지 — target ROAS 유지가 유일 지배 게이트.
     # UP 검토 = (장중 tally 게이트) OR (정착창 실측 ROAS≥target). 둘 다 실패면 hold("재시작
@@ -978,6 +1081,17 @@ def _judge_hourly(
     settle_status, settle_reason = _settlement_roas_status(
         db, target_type, target_id, campaign_id, now.date()
     )
+    # IU-R R1 구조화 필드(UP 특정) — 서보/estimate 라우팅·다운스트림 브레드크럼. est_roas는
+    # intraday_roas로 산출(원가 아는 상품에 한함, 아니면 None). 서보 라우팅은 이 필드를 소비하지
+    # 않고(economic_ceiling을 harness가 별도 precompute) weighted_rank/imp_sum만 쓴다.
+    _servo_adgroup = _resolve_adgroup_id(db, target_type, target_id)
+    _servo_price = intraday_roas.adgroup_unit_price(db, _servo_adgroup)["price"] if _servo_adgroup else None
+    up_fields = {
+        "settle_status": settle_status,
+        "intraday_ok": intraday_ok,
+        "target_roas": _resolve_target_roas(db, campaign_id),
+        "est_roas": intraday_roas.estimated_intraday_roas(curve, _servo_price) if _servo_price is not None else None,
+    }
     # GATE P2-A-1 정산 거부권(veto): 정산(간접전환 포함 실측 — 장중 ccnt보다 신뢰)이 **명시적
     # 미달**(below)이라 말하면, 장중 추정(과대귀속 가능)이 아무리 좋아도 UP 금지. "모름
     # (unknown)"과 "나쁨(below)"은 다르다 — 나쁨이 확인된 유닛을 추정만으로 올리지 않는다.
@@ -988,6 +1102,7 @@ def _judge_hourly(
                 f"UP 보류(정산 거부권, GATE P2-A) — 정착창 명시적 미달({settle_reason})인데 "
                 f"장중 추정({intraday_reason})만으로는 상향 금지"
             ),
+            **base, **up_fields,
         }
     if not (intraday_ok or settle_status == "ok"):
         # DL4 관측 사유("재시작 대기")의 의미 유지 — 만성 sub-BEP 유닛이 UP 게이트를 못 넘고
@@ -995,6 +1110,7 @@ def _judge_hourly(
         return {
             "direction": "hold",
             "reason": f"재시작 대기(ROAS 미달) — 장중 tally:{intraday_reason} / 정착:{settle_reason}",
+            **base, **up_fields,
         }
     # GATE P2-A-2 장중-단독 UP 일 1스텝 캡: 정산 판정불가(unknown) 유닛의 UP 근거가 장중
     # 추정뿐이면, 오늘 이미 성공한 상향이 있을 때 추가 UP 금지(+15%/일 제한). 다음날 정산이
@@ -1010,18 +1126,23 @@ def _judge_hourly(
                     f"오늘 성공 상향 {ups_today}회, 정산 판정불가({settle_reason}) 유닛은 "
                     "추정 단독으로 하루 1스텝만"
                 ),
+                **base, **up_fields,
             }
     # 예산 여력(IU1 재정의): 저속일 때만이 아니라 일예산 잔여가 있으면 UP(§2). 스텝 단위 정밀
     # 상한은 execute()의 guardrail_gate가 재검증 — 여기선 "이미 소진 완료 아님"만 확인.
     budget_ok, budget_reason = _budget_headroom_ok(db, campaign_id, now)
     if not budget_ok:
-        return {"direction": "hold", "reason": f"UP 보류(예산 여력 없음/미확보) — {budget_reason}"}
+        return {
+            "direction": "hold", "reason": f"UP 보류(예산 여력 없음/미확보) — {budget_reason}",
+            **base, **up_fields, "budget_ok": budget_ok,
+        }
     up_basis = (
         f"정착창 실측({settle_reason})" if settle_status == "ok" else f"장중 tally({intraday_reason})"
     )
     return {
         "direction": "up",
         "reason": f"ROAS-UP(순위 무관, D-NAO-66) — {up_basis}, {budget_reason}",
+        **base, **up_fields, "budget_ok": budget_ok,
     }
 
 
@@ -1187,9 +1308,23 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
         "probed": 0,  # D-NAO-58 CD2: 탐침으로 승격된 up 제안 수(라이브 관측용)
         "ad_confirm_pending": 0,  # B3 GATE P2-2: Confirm 대기로 생성된 ad-레벨 제안 수
         "ad_confirm_pending_dup_skipped": 0,  # B3 GATE 2R P2-B: 동일 pending 존재로 skip된 수
+        "servo": 0,  # IU-R R1: 서보 스텝으로 승인된 쇼검 UP 제안 수(라이브 관측용)
     }
 
-    for campaign_id in _auto_operate_campaigns(db):
+    # IU-R R1(PLAN §2, 원칙18-6 허브): 서보 경제성 상한 원료를 캠페인 순회 **밖에서 1회**
+    # precompute한다(N+1 방지) — 정착창 계층 agg(campaign/account) + 보정계수. 함수 레벨
+    # import(proposal_pipeline는 무거운 파이프라인이라 module-level 결합 회피, 순환 리스크
+    # 최소화 — probe_revert lazy import 관례와 동형). auto 캠페인이 없으면 계산 자체를 건너뛴다.
+    campaigns = _auto_operate_campaigns(db)
+    servo_agg: dict | None = None
+    servo_correction_factor: Decimal | None = None
+    if campaigns:
+        from app.services.naver_ad import proposal_pipeline
+        servo_agg = proposal_pipeline._precompute_aggregates(db, window_from, window_to)
+        _cf = diagnosis.correction_factor(db, today - timedelta(days=1))
+        servo_correction_factor = Decimal(str(_cf["factor"]))
+
+    for campaign_id in campaigns:
         breaker_reason = _check_spend_circuit_breaker(db, campaign_id, now)
         if breaker_reason:
             result["held"].append({"campaign_id": campaign_id, "reason": breaker_reason})
@@ -1320,7 +1455,65 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                     exec_target_id = eff["max_ad_id"]
                     exec_adgroup_id = target_id
                     step_base = ad_live_bid
-            step_bid = _clamp_step(step_base, verdict["direction"])
+
+            # ── IU-R R1(PLAN §2 R1) 그레인·방향 라우팅 ──
+            # UP ∧ SHOPPING adgroup(비-probe·비-ad) → 순위 서보(decide_servo_step). 그 외
+            # (BRAND_SEARCH adgroup·keyword UP[R2 전]·DOWN·probe UP·ad DOWN)는 기존 _clamp_step
+            # ±15% 유지(codex P1-3 — 서보 미적용이지 UP 회귀 아님). probe는 별도 실험 기계라
+            # 서보 미적용(is_probe 제외) — 서보는 ROAS 지배 게이트 통과 UP에만 얹힌다.
+            # ★P2-1(codex 기각 근거): campaign_type None(NULL·미채움)이면 서보 미적용 =
+            #   기존 ±15% _clamp_step 경로로 폴백한다. 이는 fail-open이 아니라 **더 보수적인
+            #   레거시 경로**다 — BEP·스톱로스·일예산·쿨다운 가드가 전량 걸리고 스텝도 더 작다.
+            #   hold로 바꾸면 campaign_type NULL 유닛의 UP 능력이 R1 이전 대비 회귀(행위 보존
+            #   위반)라 폴백을 유지한다. 핫셋 campaign_type 관통 전달은 GATE P2-3와 함께 R2 백로그.
+            # ★ad-라우팅 UP은 위에서 이미 hold(카나리 2단계)라 여기 exec_target_type=="ad"는
+            #   DOWN뿐 → 서보 조건(direction=="up")에 자연히 안 걸림(ad 카나리 UP 누출 0).
+            servo_used = False
+            servo_meta: dict = {}
+            is_servo_grain = (
+                verdict["direction"] == "up" and not is_probe
+                and exec_target_type == "adgroup"
+                and _entity_campaign_type(db, "adgroup", exec_target_id) == "SHOPPING"
+            )
+            if is_servo_grain and servo_agg is not None and servo_correction_factor is not None:
+                economic_ceiling = _servo_economic_ceiling(
+                    db, adgroup_id=exec_target_id, campaign_id=campaign_id,
+                    servo_agg=servo_agg, correction_factor=servo_correction_factor,
+                    window_from=window_from, window_to=window_to,
+                )
+                servo = rank_servo.decide_servo_step(
+                    verdict.get("weighted_rank"), step_base,
+                    imp_sum=verdict.get("imp_sum", 0),
+                    economic_ceiling=economic_ceiling, response_prior=None,  # R3 전 콜드스타트
+                )
+                if servo["target_bid"] is None:
+                    hold_reason = f"[순위서보] 스텝 없음 — {servo['step_reason']}"
+                    result["held"].append({"target_id": exec_target_id, "reason": hold_reason})
+                    _record_blocked(
+                        db, campaign_id=campaign_id, actor=lane_actor, reason=hold_reason,
+                        now=now, target_type=exec_target_type, target_id=exec_target_id,
+                        action=intended_action,
+                    )
+                    continue
+                # 예산 pace 사전체크(큰 스텝 → 잔여예산 초과 지출 사전 차단). guardrail의 사후
+                # 소진 가드와 별개(forward-looking) — 실패면 hold(관찰).
+                pace_ok, pace_reason = _servo_budget_pace_ok(
+                    db, campaign_id=campaign_id, curve=curve, now=now, target_bid=servo["target_bid"],
+                )
+                if not pace_ok:
+                    hold_reason = f"[순위서보] 예산 pace 차단 — {pace_reason}"
+                    result["held"].append({"target_id": exec_target_id, "reason": hold_reason})
+                    _record_blocked(
+                        db, campaign_id=campaign_id, actor=lane_actor, reason=hold_reason,
+                        now=now, target_type=exec_target_type, target_id=exec_target_id,
+                        action=intended_action,
+                    )
+                    continue
+                step_bid = servo["target_bid"]
+                servo_used = True
+                servo_meta = servo
+            else:
+                step_bid = _clamp_step(step_base, verdict["direction"])
             if step_bid is None:
                 hold_reason = "스텝 클램프 계산 불가(방향 무의미)"
                 result["held"].append({"target_id": exec_target_id, "reason": hold_reason})
@@ -1357,6 +1550,18 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                     "순위 실험(D-NAO-58 CD2, 되돌림·이익 판정은 CD3)."
                 )
                 proposal_approval_source = APPROVAL_SOURCE_PROBE
+            elif servo_used:
+                # IU-R R1: 쇼검 폐루프 순위 서보 — proposal_type=bid_up_servo(±15% 면제·rank-step).
+                # 시간당 밴드 레인 소속 유지(APPROVAL_SOURCE_HOURLY) — rationale 접두 [순위서보]로
+                # 소급채점/일기에서 일반 UP·서보 UP을 분간한다. 근거(목표순위·서보 산정)를
+                # rationale에 보존(원칙25 근거 보존).
+                proposal_type = "bid_up_servo"
+                rationale = f"[순위서보] {verdict['reason']} · {servo_meta['step_reason']}"
+                expected_effect = (
+                    "쇼검 폐루프 순위 서보 — 관측 순위 한 단 위로 래칫(D-NAO-67 원리③). ±15% 면제, "
+                    "경제성 상한·서보 절대 캡·예산 pace로 상한 대체. 다음 시간 순위 피드백으로 재평가."
+                )
+                proposal_approval_source = APPROVAL_SOURCE_HOURLY
             elif is_leash:
                 rationale = f"[순위고삐] {verdict['reason']}"
                 expected_effect = (
@@ -1414,6 +1619,8 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
             result["approved"] += 1
             if is_probe:
                 result["probed"] += 1
+            if servo_used:
+                result["servo"] += 1
 
             try:
                 naver_execution_harness.execute(db, proposal.id, dry_run=False, now=now)

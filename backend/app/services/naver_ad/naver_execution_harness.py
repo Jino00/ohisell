@@ -33,7 +33,7 @@ from sqlalchemy.orm import Session
 
 from app.models import NaverCampaignSettings, NaverChangeLog, NaverEntity, NaverHourlySnapshot, NaverProposal
 from app.services.naver_ad import account_diagnosis, campaign_target_resolver, diary, guardrail_gate, naver_sa_writer
-from app.services.naver_ad.bid_step_types import BID_DOWN_TYPES, BID_UP_TYPES
+from app.services.naver_ad.bid_step_types import BID_DOWN_TYPES, BID_UP_TYPES, RANK_STEP_TYPES
 from app.services.naver_ad.diagnosis import correction_factor as compute_correction_factor
 from app.utils.kst import kst_now
 
@@ -42,6 +42,13 @@ log = logging.getLogger(__name__)
 # D+14 검증 예정일(D-NAO-14 "D+7/14 실측" · proposal_pipeline._PROPOSAL_EXPIRY_DAYS와 동일
 # 하한 채택) — proposal_scoreboard(Phase 6 루프1)가 이 날짜 이후 실측 대조를 수행한다.
 VERIFY_DAYS = 14
+
+# IU-R R1(P1-1): rank-step 서보 제안 신선도 상한(분). 서보는 시간당 레인에서 생성 직후 인라인
+# 실행되므로 정상 경로는 초 단위다. 이 상한을 넘겨 실행되려는 서보 제안 = 콘솔 재실행·위임·
+# 재시도로 나중에 살아난 stale 제안 — 그때는 경제성 상한/예산 pace가 재검증되지 않은 채 ±15%
+# 면제만 적용되므로 fail-closed로 죽인다(면제의 폐루프 밖 누출 봉쇄). 위임 경로는 이미
+# delegation_gate가 RANK_STEP_TYPES를 제외하므로, 이 게이트는 콘솔 재실행/재시도 잔존분 방어.
+_RANK_STEP_MAX_AGE_MINUTES = 10
 
 # guardrail_gate 컨텍스트의 실적 창(account_diagnosis.LOW_CLICK_LOOKBACK_DAYS 재사용 —
 # 신규 상수 아님, pause_candidates/resume_candidates와 동일 창으로 정합성 유지).
@@ -652,6 +659,29 @@ def _execute_update_bid(db: Session, proposal: NaverProposal, now: datetime) -> 
         reason = "target_bid 없음 — 구조 결함(구 제안이거나 격상 경로, 재생성 필요)"
         _guard_failure(db, proposal, now, "update_bid", reason)
         raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
+
+    # IU-R R1(P1-1) rank-step 서보 신선도 게이트 — 서보의 ±15% 면제가 폐루프(경제성 상한·pace)
+    # 밖에서 재사용되는 것을 봉쇄한다. 서보는 인라인 즉시 실행이라 정상 age는 초 단위 —
+    # _RANK_STEP_MAX_AGE_MINUTES(10분) 초과분은 콘솔 재실행/재시도로 나중에 살아난 stale
+    # 제안이므로 fail-closed 종결한다. created_at은 UTC 저장([[sqlite-server-default-now-is-utc]]) —
+    # now(kst_now, KST naive)와 비교하려면 +9h 해서 KST로 맞춘다(diary_outcome._kst_date 관례).
+    # created_at=None도 stale 취급(fail-closed) — 컬럼이 server default일 뿐 NOT NULL 제약이
+    # 없어 NULL 행이 가능하고, None을 통과시키면 신선도 게이트가 우회된다(codex R1 2R 단서).
+    if proposal.proposal_type in RANK_STEP_TYPES:
+        if proposal.created_at is None:
+            age_minutes = None
+        else:
+            created_at_kst = proposal.created_at + timedelta(hours=9)
+            age_minutes = (now - created_at_kst).total_seconds() / 60
+        if age_minutes is None or age_minutes > _RANK_STEP_MAX_AGE_MINUTES:
+            age_str = "미상(created_at 없음)" if age_minutes is None else f"{age_minutes:.0f}분 경과"
+            reason = (
+                f"서보 제안 신선도 초과(인라인 전용) — 생성 후 {age_str} "
+                f"(> {_RANK_STEP_MAX_AGE_MINUTES}분). 콘솔 재실행/재시도로 살아난 stale 제안은 "
+                "경제성 상한·예산 pace 재검증 없이 ±15% 면제만 적용되므로 차단(fail-closed)"
+            )
+            _guard_failure(db, proposal, now, "update_bid", reason)
+            raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
 
     # codex 소급[P2] 2026-07-20 — B3 카나리의 **최종 쓰기 경계** 이중화(D-NAO-13 optimizer
     # 쓰기 직전 하드 체크와 동형 관례): 카나리·방향 제한은 생성(proposal_writer)·위임

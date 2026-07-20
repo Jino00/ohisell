@@ -51,11 +51,13 @@ def test_get_default_returns_empty_delegated_and_delegable_list(client):
     assert resp.status_code == 200
     body = resp.json()
     assert body["delegated_types"] == []
-    # P3(D-NAO-42-f)로 예산(update_budget)까지 개방 — delegable도 자동 확장(sorted)
+    # P3(D-NAO-42-f)로 예산(update_budget)까지 개방 — delegable도 자동 확장(sorted).
+    # IU-R R1(P1-1): bid_up_servo(rank-step 서보)는 위임 제외(inline 전용) — delegable 목록에 없다.
     assert body["delegable_types"] == [
         "bid_down", "bid_up", "budget_down", "budget_up", "growth_bid_up",
         "negative_keyword", "pause", "resume",
     ]
+    assert "bid_up_servo" not in body["delegable_types"]
 
 
 def test_put_valid_type_saves_and_records_change_log(client, db):

@@ -10,18 +10,28 @@
 from __future__ import annotations
 
 # 상향 입찰 스텝 proposal_type(BEP·스톱로스·일예산 up-only 가드·일 1스텝 캡 카운터 트리거).
-BID_UP_TYPES: frozenset[str] = frozenset({"bid_up", "growth_bid_up"})
+# ★IU-R R1(D-NAO-67 원리③): 쇼핑검색 폐루프 순위 서보 타입 `bid_up_servo` 추가 — UP 의미
+#   (BEP·스톱로스·예산·쿨다운·일일상한·방향)는 bid_up과 완전히 동일하고, 다른 점은 ±15% 변경폭
+#   면제(CHANGE_PCT_EXEMPT_TYPES)와 rank-step 의미(RANK_STEP_TYPES)뿐이다. 이 한 곳 등록으로
+#   모든 가드(guardrail_gate up-only 검사·harness _build_guardrail_context up 브랜치·완전성
+#   게이트·_ACTION_BY_PROPOSAL_TYPE update_bid 매핑·auto_operator 일 1스텝 캡 카운터)가 서보를
+#   bid_up과 동형으로 인식한다(R0 레지스트리의 목적 — 부분 등록 시 fail-open 우회 차단, PLAN §1-3).
+BID_UP_TYPES: frozenset[str] = frozenset({"bid_up", "growth_bid_up", "bid_up_servo"})
 
 # 하향 입찰 스텝 proposal_type(안전방향 — 노출↓·지출↓). 종전 guardrail_gate._BID_DOWN_TYPES.
 BID_DOWN_TYPES: frozenset[str] = frozenset({"bid_down"})
 
 # D-NAO-20-③: ±15% 변경폭 상한(_MAX_CHANGE_PCT)만 면제되는 타입(신규/육성 트랙). BEP·스톱로스·
 # 일예산·쿨다운·일일상한은 전량 존치 — 면제되는 것은 변경폭 상한 하나뿐(종전 _EXEMPT_FROM_CHANGE_PCT).
-CHANGE_PCT_EXEMPT_TYPES: frozenset[str] = frozenset({"growth_bid_up"})
+# ★IU-R R1: `bid_up_servo`는 "한 순위 위"에 필요한 입찰폭이 15%보다 클 수 있어(PLAN §1-1) 변경폭
+#   면제 대상이다. 대체 상한 = 경제성 상한 + 서보 절대 스텝 캡 + 예산 pace 사전체크(harness/서보 측).
+CHANGE_PCT_EXEMPT_TYPES: frozenset[str] = frozenset({"growth_bid_up", "bid_up_servo"})
 
-# 순위(rank) 스텝 타입 — R1/R2에서 서보/estimate 타입(bid_up_servo·bid_up_rank)으로 채운다.
-# R0에서는 빈 셋으로 자리만 잡는다(행위 불변 — 아직 어떤 타입도 rank-step이 아님).
-RANK_STEP_TYPES: frozenset[str] = frozenset()
+# 순위(rank) 스텝 타입 — R1에서 쇼검 서보 타입 `bid_up_servo`로 채운다(R2에서 `bid_up_rank` 추가).
+# rank-step 타입은 스톱로스 base를 target_bid가 아니라 **스텝 전 current_bid**로 스위치한다
+# (guardrail_gate._check_bid) — 큰 스텝에서 target_bid가 커져 스톱로스가 실질 완화되는 것을 방지
+# (PLAN §2 R1 스톱로스 완화 방지, codex 엣지).
+RANK_STEP_TYPES: frozenset[str] = frozenset({"bid_up_servo"})
 
 
 def is_bid_up(proposal_type: str | None) -> bool:

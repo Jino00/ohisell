@@ -61,10 +61,11 @@ INFORMATIONAL_PROPOSAL_TYPES: frozenset[str] = frozenset({
 # 진실로 삼아야 하므로 여기서 14종으로 정정한다.
 _BID_UP = "bid_up"
 _BID_DOWN = "bid_down"
+_BID_UP_SERVO = "bid_up_servo"  # IU-R R1, 쇼검 폐루프 순위 서보(auto_operator.run_hourly_lane inline 생성)
 _BUDGET_DOWN = "budget_down"  # D-NAO-42-f, budget_up과 동형(감액은 자유 — guardrail_gate 참조)
 
 ALL_PROPOSAL_TYPES: frozenset[str] = frozenset({
-    _BID_UP, _BID_DOWN, _GROWTH_BID_UP, _NEGATIVE, _PAUSE, _RESUME,
+    _BID_UP, _BID_DOWN, _BID_UP_SERVO, _GROWTH_BID_UP, _NEGATIVE, _PAUSE, _RESUME,
     _BUDGET_UP, _BUDGET_DOWN, _BUDGET_PRE_EXHAUSTION,
     _ANOMALY, _ANOMALY_FRESHNESS, _ACCOUNT_BRIEF, PROPOSAL_TYPE_PACING, PROPOSAL_TYPE_CPC,
     _WISDOM_PROMOTED,  # D-NAO-54 P3(정보성) — INFORMATIONAL_PROPOSAL_TYPES <= ALL 불변 유지

@@ -2328,3 +2328,331 @@ def test_dl4_same_day_down_flood_leaks_up_slot_but_bid_down_stays_exempt():
         ctx, now=now,
     )
     assert down is None  # bid_down은 DL3 면제(쭉 낮추다가)
+
+
+# ══════════════════════ IU-R R1 쇼핑검색 폐루프 순위 서보 ══════════════════════
+# grain 라우팅(SHOPPING adgroup=서보 / BRAND_SEARCH adgroup=±15% / DOWN·probe·ad=기존),
+# bid_up_servo proposal_type·서보 스텝·예산 pace·데드밴드/최상단 hold·ad 누출 0·실집행.
+
+
+_SERVO_NOW = datetime(2026, 7, 20, 12, 20, 0)
+_SERVO_CORR = {"factor": Decimal("1"), "source": "actual_revenue_ratio"}
+
+
+def _servo_shopping_unit(db, *, campaign_type="SHOPPING", adgroup_id="grp-shop",
+                         settle_clk=20, settle_cost=7000, settle_conv=60000,
+                         snap_daily_budget=100000, snap_cost=0):
+    """서보 대상 쇼검(또는 BRAND_SEARCH) 광고그룹 시드 — 정착창 ROAS ok(UP 발동) + 핫셋 자격
+    + **현실적 당일 스냅샷(snapshot_hour=12=_SERVO_NOW.hour)**. P2-2 이후 서보 pace는
+    snapshot_hour<=now.hour만 쓰므로(미래 스냅샷 배제) _settings 기본 hour23은 서보 pace에서
+    배제된다 — 서보 테스트용 hour12 스냅샷을 여기서 별도 시드(서킷브레이커 신선·pace 소스 둘 다
+    충족). snap_daily_budget/snap_cost로 pace 시나리오(여유/차단/uncapped)를 제어한다."""
+    db.add(NaverEntity(entity_type="adgroup", entity_id=adgroup_id, parent_id=CAMPAIGN,
+                        campaign_id=CAMPAIGN, campaign_type=campaign_type, status="on"))
+    window_from, _ = _settlement_window()
+    _ad_row(db, adgroup_id=adgroup_id, keyword_id="", campaign_type=campaign_type,
+            ad_date=window_from, clk=settle_clk, cost=settle_cost, conv_direct_amt=settle_conv)
+    db.add(NaverHourlySnapshot(
+        snapshot_at=_SERVO_NOW, ad_date=TODAY, snapshot_hour=12, campaign_id=CAMPAIGN,
+        campaign_type=campaign_type, cost=snap_cost, clk=0, imp=0, daily_budget=snap_daily_budget,
+    ))
+    db.commit()
+
+
+def _servo_curve(avg_rank=5.0):
+    # imp=45(≥30)·avg_rank·오늘 CPC=300/6=50원<정착350×2(급등 아님)·오늘소진 작음.
+    return [
+        _hour(9, imp=15, clk=2, cost=100, avg_rank=avg_rank),
+        _hour(10, imp=15, clk=2, cost=100, avg_rank=avg_rank),
+        _hour(11, imp=15, clk=2, cost=100, avg_rank=avg_rank),
+    ]
+
+
+def test_hourly_lane_shopping_adgroup_up_routes_to_servo(db):
+    """UP∧SHOPPING adgroup → 순위 서보(bid_up_servo). 관측 4.9위→목표 4위·서보 스텝(콜드
+    1150=1000×1.15, 경제성 상한 1500·캡 1500 내). 정상 유닛은 hold되지 않는다(codex P1-2 봉인)."""
+    _settings(db, target_roas_override=Decimal("2.0"))
+    _servo_shopping_unit(db)  # rpc≈3000 → 경제성 상한 1500
+    curve = _servo_curve(avg_rank=4.9)
+    with patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 1000}), \
+         patch.object(auto_operator.effective_bid, "adgroup_effective_bid",
+                       return_value={"source": "group", "effective_bid": 1000}), \
+         patch.object(auto_operator.diagnosis, "correction_factor", return_value=_SERVO_CORR), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(db, now=_SERVO_NOW, fetch_intraday=lambda tid, d: curve)
+    mock_exec.assert_called_once()
+    assert result["servo"] == 1
+    assert result["held"] == []  # 정상 유닛 hold 아님(codex P1-2)
+    saved = db.get(NaverProposal, mock_exec.call_args[0][1])
+    assert saved.proposal_type == "bid_up_servo"
+    assert saved.target_bid == 1150
+    assert saved.target_type == "adgroup"
+    assert saved.approval_source == auto_operator.APPROVAL_SOURCE_HOURLY
+    assert saved.rationale.startswith("[순위서보]")
+
+
+def test_hourly_lane_brand_search_adgroup_up_uses_clamp_not_servo(db):
+    """UP∧BRAND_SEARCH adgroup → 기존 _clamp_step ±15%(codex P1-3, 서보 미적용·UP 회귀 아님).
+    proposal_type=bid_up(서보 아님)·target_bid=1150(±15%)."""
+    _settings(db, target_roas_override=Decimal("2.0"))
+    _servo_shopping_unit(db, campaign_type="BRAND_SEARCH", adgroup_id="grp-bs")
+    curve = _servo_curve(avg_rank=4.9)
+    with patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 1000}), \
+         patch.object(auto_operator.effective_bid, "adgroup_effective_bid",
+                       return_value={"source": "group", "effective_bid": 1000}), \
+         patch.object(auto_operator.diagnosis, "correction_factor", return_value=_SERVO_CORR), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(db, now=_SERVO_NOW, fetch_intraday=lambda tid, d: curve)
+    mock_exec.assert_called_once()
+    assert result["servo"] == 0
+    saved = db.get(NaverProposal, mock_exec.call_args[0][1])
+    assert saved.proposal_type == "bid_up"  # 서보 아님
+    assert saved.target_bid == 1150
+
+
+def test_hourly_lane_servo_deadband_converged_hold(db):
+    """관측 4.1위(목표 4·|4.1−4|=0.1≤데드밴드 0.3) → 서보 스텝 없음(진동 차단). execute 없음."""
+    _settings(db, target_roas_override=Decimal("2.0"))
+    _servo_shopping_unit(db)
+    curve = _servo_curve(avg_rank=4.1)
+    with patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 1000}), \
+         patch.object(auto_operator.effective_bid, "adgroup_effective_bid",
+                       return_value={"source": "group", "effective_bid": 1000}), \
+         patch.object(auto_operator.diagnosis, "correction_factor", return_value=_SERVO_CORR), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(db, now=_SERVO_NOW, fetch_intraday=lambda tid, d: curve)
+    mock_exec.assert_not_called()
+    assert result["servo"] == 0
+    assert any("[순위서보]" in h["reason"] and "데드밴드" in h["reason"] for h in result["held"])
+
+
+def test_hourly_lane_servo_top_of_page_hold(db):
+    """관측 1.2위(≤1+데드밴드) → converged hold(1위권은 더 올릴 순위 없음, codex P1-4)."""
+    _settings(db, target_roas_override=Decimal("2.0"))
+    _servo_shopping_unit(db)
+    curve = _servo_curve(avg_rank=1.2)
+    with patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 1000}), \
+         patch.object(auto_operator.effective_bid, "adgroup_effective_bid",
+                       return_value={"source": "group", "effective_bid": 1000}), \
+         patch.object(auto_operator.diagnosis, "correction_factor", return_value=_SERVO_CORR), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(db, now=_SERVO_NOW, fetch_intraday=lambda tid, d: curve)
+    mock_exec.assert_not_called()
+    assert result["servo"] == 0
+    assert any("[순위서보]" in h["reason"] and "최상단" in h["reason"] for h in result["held"])
+
+
+def test_hourly_lane_servo_budget_pace_blocks(db):
+    """서보 스텝은 나오지만 예산 pace(잔여시간 예상지출>잔여예산×0.8)로 사전 차단(codex P1-2).
+    hour12 스냅샷 daily_budget=1000(잔여 적음) → pace 초과. _budget_headroom_ok는 _settings
+    기본 hour23(budget 100000)으로 통과(pace가 유일 차단자)."""
+    _settings(db, target_roas_override=Decimal("2.0"))
+    _servo_shopping_unit(db, snap_daily_budget=1000)  # hour12 잔여 적음 → pace 차단
+    curve = _servo_curve(avg_rank=4.9)
+    with patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 1000}), \
+         patch.object(auto_operator.effective_bid, "adgroup_effective_bid",
+                       return_value={"source": "group", "effective_bid": 1000}), \
+         patch.object(auto_operator.diagnosis, "correction_factor", return_value=_SERVO_CORR), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(db, now=_SERVO_NOW, fetch_intraday=lambda tid, d: curve)
+    mock_exec.assert_not_called()
+    assert result["servo"] == 0
+    assert any("[순위서보]" in h["reason"] and "pace" in h["reason"] for h in result["held"])
+
+
+def test_hourly_lane_servo_budget_pace_uncapped_passes(db):
+    """hour12 스냅샷 daily_budget=0(uncapped) → 서보 pace 제약 없음, 서보 스텝 통과."""
+    _settings(db, target_roas_override=Decimal("2.0"))
+    _servo_shopping_unit(db, snap_daily_budget=0, snap_cost=999999)  # hour12 uncapped
+    curve = _servo_curve(avg_rank=4.9)
+    with patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 1000}), \
+         patch.object(auto_operator.effective_bid, "adgroup_effective_bid",
+                       return_value={"source": "group", "effective_bid": 1000}), \
+         patch.object(auto_operator.diagnosis, "correction_factor", return_value=_SERVO_CORR), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(db, now=_SERVO_NOW, fetch_intraday=lambda tid, d: curve)
+    mock_exec.assert_called_once()
+    assert result["servo"] == 1
+
+
+def test_hourly_lane_servo_not_used_when_ad_routed_up_held(db):
+    """ad-라우팅 유닛(실효=소재입찰)의 UP은 서보 진입 전에 이미 hold(카나리 2단계) — 서보
+    누출 0. bid_up_servo 제안 0건·execute 없음(codex ⑥ ad 카나리 UP 누출 0)."""
+    _settings(db, target_roas_override=Decimal("2.0"))
+    _servo_shopping_unit(db)
+    curve = _servo_curve(avg_rank=4.9)
+    with patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 1000}), \
+         patch.object(auto_operator.effective_bid, "adgroup_effective_bid",
+                       return_value={"source": "ad", "effective_bid": 900, "max_ad_id": "ad-1"}), \
+         patch.object(auto_operator.diagnosis, "correction_factor", return_value=_SERVO_CORR), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(db, now=_SERVO_NOW, fetch_intraday=lambda tid, d: curve)
+    mock_exec.assert_not_called()
+    assert result["servo"] == 0
+    assert db.query(NaverProposal).filter(NaverProposal.proposal_type == "bid_up_servo").count() == 0
+
+
+def test_hourly_lane_servo_hot_set_excludes_zero_click(db):
+    """codex P2-4 봉인: 정착창 clk<10 유닛은 핫셋에서 제외 → 서보가 clk=0 유닛에 절대 안 붙는다
+    (pooled_rpc가 상위 prior로 양수 상한을 만들 수 있어도 핫셋 게이트가 실무 방어)."""
+    _settings(db, target_roas_override=Decimal("2.0"))
+    _servo_shopping_unit(db, settle_clk=5, settle_cost=100, settle_conv=300)  # clk<10 → 핫셋 제외
+    curve = _servo_curve(avg_rank=4.9)
+    with patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 1000}), \
+         patch.object(auto_operator.effective_bid, "adgroup_effective_bid",
+                       return_value={"source": "group", "effective_bid": 1000}), \
+         patch.object(auto_operator.diagnosis, "correction_factor", return_value=_SERVO_CORR), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(db, now=_SERVO_NOW, fetch_intraday=lambda tid, d: curve)
+    mock_exec.assert_not_called()
+    assert result["reviewed"] == 0  # 핫셋 밖 → 심사 자체 없음
+    assert result["servo"] == 0
+
+
+def test_bid_up_servo_not_in_daily_lane_types():
+    """서보 타입은 시간당 레인 inline 전용 — 일 레인 pending 재처리 경로에 안 태운다(codex P2)."""
+    assert "bid_up_servo" not in auto_operator._DAILY_LANE_PROPOSAL_TYPES
+
+
+def test_hourly_lane_servo_real_execute_exceeds_15pct_passes_guardrail(db):
+    """실집행 배선(D-NAO-68) + ±15% 면제 실효: 서보 콜드 스텝을 +30%로 튜닝해 서보가 1300원을
+    산정 → 실제 execute(dry_run=False)가 real guardrail_gate.check(면제)를 통과해
+    update_adgroup_bid로 실쓰기. 대조 bid_up(+30%)은 guardrail 단위 테스트에서 차단됨."""
+    _settings(db, target_roas_override=Decimal("2.0"))
+    _servo_shopping_unit(db)  # 경제성 상한 1500 ≥ 1300
+    curve = _servo_curve(avg_rank=4.9)
+    write_result = auto_operator.naver_sa_writer.WriteResult(
+        action="update_adgroup_bid", before={"bidAmt": 1000}, response={"bidAmt": 1300},
+        after={"bidAmt": 1300}, created_ids=[],
+    )
+    # execute가 넘겨받을 guardrail 컨텍스트(완전·통과값) — 서보 스텝만 real guardrail로 검증.
+    clean_ctx = {
+        "current_bid": 1000, "current_budget": None, "roas_corrected": 3.0, "target_roas": 2.0,
+        "cost_today": 0, "daily_budget": 100_000, "unconverted_spend": 0,
+        "last_change_at": None, "changes_today_count": 0,
+    }
+    with patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 1000}), \
+         patch.object(auto_operator.effective_bid, "adgroup_effective_bid",
+                       return_value={"source": "group", "effective_bid": 1000}), \
+         patch.object(auto_operator.diagnosis, "correction_factor", return_value=_SERVO_CORR), \
+         patch.object(auto_operator.rank_servo, "_SERVO_DEFAULT_STEP_PCT", Decimal("0.30")), \
+         patch.object(auto_operator.naver_execution_harness, "_build_guardrail_context", return_value=clean_ctx), \
+         patch.object(auto_operator.naver_execution_harness, "_RANK_STEP_MAX_AGE_MINUTES", 10**9), \
+         patch.object(auto_operator.naver_execution_harness.naver_sa_writer, "update_adgroup_bid",
+                       return_value=write_result) as mock_write:
+        # ★신선도 게이트(P1-1) 무력화: 이 테스트는 면제/실쓰기 검증용 — created_at은 실시간
+        #   UTC인데 now는 합성(_SERVO_NOW)이라 age 비교가 실clock에 종속되므로 상한을 크게 둔다.
+        #   신선도 게이트 자체는 test_execute_servo_freshness_* 에서 created_at 제어로 별도 검증.
+        result = auto_operator.run_hourly_lane(db, now=_SERVO_NOW, fetch_intraday=lambda tid, d: curve)
+    assert result["servo"] == 1 and result["executed"] == 1
+    mock_write.assert_called_once_with("grp-shop", 1300)  # +30% 실쓰기(±15% 면제 실효)
+    log_row = db.query(NaverChangeLog).filter(
+        NaverChangeLog.action == "update_bid", NaverChangeLog.dry_run.is_(False),
+        NaverChangeLog.after_value.isnot(None),
+    ).order_by(NaverChangeLog.id.desc()).first()
+    assert log_row is not None and json.loads(log_row.after_value) == {"bidAmt": 1300}
+
+
+# ── P1-1(c) 신선도 게이트: stale 서보 제안(콘솔 재실행/재시도) fail-closed, 신선분 통과 ──
+def test_execute_servo_freshness_stale_fails_closed(db):
+    """생성 후 _RANK_STEP_MAX_AGE_MINUTES(10분) 초과 서보 제안 execute → fail-closed 종결
+    (경제성 상한·pace 재검증 없이 면제만 적용되는 stale 재실행 봉쇄, P1-1)."""
+    _settings(db)
+    now = datetime(2026, 7, 20, 12, 20, 0)  # KST
+    # created_at은 UTC 저장 → +9h가 KST. age 1h(>10분) 되게 created_at = now(KST)−9h−1h.
+    stale_utc = now - timedelta(hours=9) - timedelta(hours=1)
+    p = _proposal(db, proposal_type="bid_up_servo", target_type="adgroup", target_id="grp-1",
+                   target_bid=1150, status="approved", created_at=stale_utc)
+    with patch.object(auto_operator.naver_execution_harness.naver_sa_writer, "update_adgroup_bid") as mock_write:
+        with pytest.raises(auto_operator.naver_execution_harness.MissingExecutionTargetError):
+            auto_operator.naver_execution_harness.execute(db, p.id, dry_run=False, now=now)
+    mock_write.assert_not_called()  # writer 미호출(fail-closed)
+    db.refresh(p)
+    assert p.status == "failed"
+    log_row = db.query(NaverChangeLog).filter(NaverChangeLog.proposal_id == p.id).first()
+    assert log_row is not None and "신선도" in log_row.rationale and log_row.outcome == "failed"
+
+
+def test_execute_servo_freshness_fresh_passes(db):
+    """방금 생성(age≈0)한 서보 제안은 신선도 게이트 통과 → 실쓰기 도달(guardrail은 mock)."""
+    _settings(db)
+    now = datetime(2026, 7, 20, 12, 20, 0)
+    fresh_utc = now - timedelta(hours=9)  # created_at_kst ≈ now → age≈0
+    p = _proposal(db, proposal_type="bid_up_servo", target_type="adgroup", target_id="grp-1",
+                   target_bid=1150, status="approved", created_at=fresh_utc)
+    clean_ctx = {
+        "current_bid": 1000, "current_budget": None, "roas_corrected": 3.0, "target_roas": 2.0,
+        "cost_today": 0, "daily_budget": 100_000, "unconverted_spend": 0,
+        "last_change_at": None, "changes_today_count": 0,
+    }
+    write_result = auto_operator.naver_sa_writer.WriteResult(
+        action="update_adgroup_bid", before={"bidAmt": 1000}, response={"bidAmt": 1150},
+        after={"bidAmt": 1150}, created_ids=[],
+    )
+    with patch.object(auto_operator.naver_execution_harness, "_build_guardrail_context", return_value=clean_ctx), \
+         patch.object(auto_operator.naver_execution_harness.naver_sa_writer, "update_adgroup_bid",
+                       return_value=write_result) as mock_write:
+        log_entry = auto_operator.naver_execution_harness.execute(db, p.id, dry_run=False, now=now)
+    mock_write.assert_called_once_with("grp-1", 1150)
+    assert json.loads(log_entry.after_value) == {"bidAmt": 1150}
+
+
+# ── P1-2 예산 pace 관측 슬롯 분모: 자정 직후 hold·관측 슬롯만 나눔 ──
+def test_servo_budget_pace_midnight_holds_no_observed_slot(db):
+    """now.hour==0(완료 창 [−3,0)에 그날 버킷 없음) → observed=0 → fail-closed hold(자정 직후)."""
+    _settings(db, seed_snapshot=False)
+    db.add(NaverHourlySnapshot(
+        snapshot_at=datetime(2026, 7, 20, 0, 0, 0), ad_date=TODAY, snapshot_hour=0,
+        campaign_id=CAMPAIGN, campaign_type="SHOPPING", cost=0, clk=0, imp=0, daily_budget=100_000,
+    ))
+    db.commit()
+    now = datetime(2026, 7, 20, 0, 20, 0)  # hour0 → 완료 창 [−3,0) 비어 있음
+    curve = [_hour(0, imp=10, clk=1, cost=50, avg_rank=4.9)]  # 진행중 hour0(창 밖) — observed 0
+    ok, reason = auto_operator._servo_budget_pace_ok(
+        db, campaign_id=CAMPAIGN, curve=curve, now=now, target_bid=1150,
+    )
+    assert ok is False and "관측 0" in reason
+
+
+def test_servo_budget_pace_divides_by_observed_not_fixed_three(db):
+    """관측 슬롯 2개(imp>0)만 있으면 pace=clk합÷2(고정 3 아님) — 과소추정 방지(P1-2)."""
+    _settings(db, seed_snapshot=False)
+    db.add(NaverHourlySnapshot(
+        snapshot_at=_SERVO_NOW, ad_date=TODAY, snapshot_hour=11, campaign_id=CAMPAIGN,
+        campaign_type="SHOPPING", cost=0, clk=0, imp=0, daily_budget=100_000,
+    ))  # snapshot_hour<=now.hour(12) — P2-2 필터 통과
+    db.commit()
+    now = datetime(2026, 7, 20, 12, 20, 0)
+    # 완료 창 [9,12): 두 슬롯만 존재(imp>0), 각 clk=6 → clk합 12. observed=2 → pace=6/슬롯.
+    # 예상지출 = 6 × (24−12) × 1150 = 82,800 > 잔여 100,000×0.8=80,000 → 차단.
+    # 고정 3으로 나눴다면 pace=4 → 4×12×1150=55,200 ≤ 80,000 → 통과(과대 허용). 차등 봉인.
+    curve = [
+        _hour(10, imp=15, clk=6, cost=100, avg_rank=4.9),
+        _hour(11, imp=15, clk=6, cost=100, avg_rank=4.9),
+    ]
+    ok, reason = auto_operator._servo_budget_pace_ok(
+        db, campaign_id=CAMPAIGN, curve=curve, now=now, target_bid=1150,
+    )
+    assert ok is False and "관측 2슬롯" in reason
+
+
+def test_servo_budget_pace_ignores_future_snapshot(db):
+    """P2-2: 같은 ad_date 내 snapshot_hour>now.hour(미래) 스냅샷은 배제 — 과거 최신만 사용."""
+    _settings(db, seed_snapshot=False)
+    now = datetime(2026, 7, 20, 12, 20, 0)
+    # 미래(23시) 스냅샷 = daily_budget 큼(잘못 쓰면 통과) / 현재(12시) 스냅샷 = 잔여 적음(차단).
+    db.add(NaverHourlySnapshot(
+        snapshot_at=now, ad_date=TODAY, snapshot_hour=12, campaign_id=CAMPAIGN,
+        campaign_type="SHOPPING", cost=0, clk=0, imp=0, daily_budget=1000,
+    ))
+    db.add(NaverHourlySnapshot(
+        snapshot_at=now, ad_date=TODAY, snapshot_hour=23, campaign_id=CAMPAIGN,
+        campaign_type="SHOPPING", cost=0, clk=0, imp=0, daily_budget=10_000_000,
+    ))
+    db.commit()
+    curve = _servo_curve(avg_rank=4.9)  # 9,10,11 각 clk=2
+    ok, reason = auto_operator._servo_budget_pace_ok(
+        db, campaign_id=CAMPAIGN, curve=curve, now=now, target_bid=1150,
+    )
+    # 12시 스냅샷(잔여 1000) 사용 → 예상지출 크게 초과 → 차단(미래 23시 스냅샷 무시 증명).
+    assert ok is False and "pace 초과" in reason
