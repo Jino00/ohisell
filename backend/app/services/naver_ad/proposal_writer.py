@@ -171,7 +171,7 @@ def _ad_bid_proposal(
     target_type='ad'·target_id=nccAdId·adgroup_id 병기(harness가 부모 그룹으로 up BEP 컨텍스트를
     채운다). useGroupBidAmt는 건드리지 않는다(§0 강제 전환 금지 — writer가 false 유지만 검증).
     스텝 소실(방향 무의미·소재 at-floor)이면 None(호출부가 기존 대기/pause 경로로 폴백).
-    GATE P2-2: 카나리 1단계 방향 게이트(_AD_BID_CANARY_DIRECTIONS={"bid_down"}) — up은 None
+    GATE P2-2: 카나리 1단계 게이트(_AD_BID_CANARY_PROPOSAL_TYPES={"bid_down"}) — up은 None
     (2단계 개방 시 상수 확장만으로 열림). ★소급채점/diary는 target_type='ad'를 아직 전용
     grain으로 채점하지 않는다 — 부모 adgroup grain 채점이 정확(후속, adgroup_id 병기가 그 원료)."""
     target_bid = _ad_step_bid(current_ad_bid, direction)
@@ -179,8 +179,8 @@ def _ad_bid_proposal(
         return None
     proposal_type = _BID_UP if direction == "up" else _BID_DOWN
     # GATE P2-2 DOWN 한정 — 함수 레벨 import(순환 회피, build()의 _ad_bid_canary와 동일 관례).
-    from app.services.naver_ad.auto_operator import _AD_BID_CANARY_DIRECTIONS
-    if proposal_type not in _AD_BID_CANARY_DIRECTIONS:
+    from app.services.naver_ad.auto_operator import _AD_BID_CANARY_PROPOSAL_TYPES
+    if proposal_type not in _AD_BID_CANARY_PROPOSAL_TYPES:
         return None
     rationale = (
         f"[{board_name}·소재입찰] 레버 실연결(useGroupBidAmt=false 소재 {ad_id}) 소재입찰 "

@@ -13,11 +13,16 @@ from datetime import datetime
 from decimal import Decimal
 
 from app.services.naver_ad import growth_sweeper
+from app.services.naver_ad.bid_step_types import (
+    BID_DOWN_TYPES as _BID_DOWN_TYPES,
+    BID_UP_TYPES as _BID_UP_TYPES,
+    CHANGE_PCT_EXEMPT_TYPES as _EXEMPT_FROM_CHANGE_PCT,
+)
 
 # D-NAO-5: 회당 변경폭 상한(운영 키워드). D-NAO-20-③에 따라 신규/육성 트랙(growth_bid_up)은
 # 비적용 — 절대액 스톱로스가 실질 안전장치이므로 여기서는 변경폭 검사만 면제한다.
+# ★UP 타입·DOWN 타입·±15% 면제 집합은 bid_step_types 레지스트리(단일 소스, IU-R R0)에서 import.
 _MAX_CHANGE_PCT = Decimal("0.15")
-_EXEMPT_FROM_CHANGE_PCT = frozenset({"growth_bid_up"})
 
 # D-NAO-19 "동일 키워드 재변경 최소 간격" — 초기값 5h(trigger_watch 재사용)에서
 # ★D-NAO-55(2026-07-18 Jino 승인 "그렇게 하자")로 2h 단축. 근거: 순위 데이터가 시간 단위
@@ -35,8 +40,6 @@ _MIN_BID = 70
 _MAX_BID = 100_000
 _BID_INCREMENT = 10
 
-_BID_UP_TYPES = frozenset({"bid_up", "growth_bid_up"})
-_BID_DOWN_TYPES = frozenset({"bid_down"})
 _BID_TYPES = _BID_UP_TYPES | _BID_DOWN_TYPES
 _LOCK_TYPES = frozenset({"pause", "resume"})
 

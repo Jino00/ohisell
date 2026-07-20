@@ -33,6 +33,7 @@ from sqlalchemy.orm import Session
 
 from app.models import NaverCampaignSettings, NaverChangeLog, NaverEntity, NaverHourlySnapshot, NaverProposal
 from app.services.naver_ad import account_diagnosis, campaign_target_resolver, diary, guardrail_gate, naver_sa_writer
+from app.services.naver_ad.bid_step_types import BID_DOWN_TYPES, BID_UP_TYPES
 from app.services.naver_ad.diagnosis import correction_factor as compute_correction_factor
 from app.utils.kst import kst_now
 
@@ -105,9 +106,10 @@ class MissingExecutionTargetError(Exception):
 # guardrail_gate._check_budget이 구분한다.
 _ACTION_BY_PROPOSAL_TYPE = {
     "negative_keyword": "add_negative_keyword",
-    "bid_up": "update_bid",
-    "bid_down": "update_bid",
-    "growth_bid_up": "update_bid",
+    # bid 계열은 R0 레지스트리(bid_step_types)에서 파생 — 새 UP/DOWN 타입이 레지스트리에
+    # 등록되면 실행 매핑도 자동 인식된다(가드는 UP으로 인식하는데 여기 매핑 누락으로
+    # ActionNotExecutableError가 나는 어긋남 차단, codex R0 리뷰 P2).
+    **{t: "update_bid" for t in sorted(BID_UP_TYPES | BID_DOWN_TYPES)},
     "pause": "set_user_lock",
     "resume": "set_user_lock",
     "budget_up": "update_budget",
@@ -388,7 +390,7 @@ def _build_guardrail_context(db: Session, proposal: NaverProposal, now: datetime
         # S3(D-NAO-43 성장 확장): 증액(bid_up/growth_bid_up)만 up-only 가드 원료를 채운다 —
         # bid_down/pause/resume은 그 검사 자체가 면제라 여전히 None(회귀 없음, keyword/
         # campaign 브랜치와 동일 as_of=D-1 창 + diagnosis.correction_factor 공유).
-        if proposal.proposal_type in ("bid_up", "growth_bid_up"):
+        if proposal.proposal_type in BID_UP_TYPES:
             as_of = now.date() - timedelta(days=1)  # naver_ad_daily는 D-1까지만 확정
             window_from = as_of - timedelta(days=_GUARDRAIL_LOOKBACK_DAYS - 1)
             agg = account_diagnosis.adgroup_window_agg(db, proposal.target_id, window_from, as_of)
@@ -435,7 +437,7 @@ def _build_guardrail_context(db: Session, proposal: NaverProposal, now: datetime
         # agg로 BEP/스톱로스/일예산을 근사한다(소재-레벨 daily 부재 시 최선 근사 — down은 이
         # 검사가 면제라 여전히 None, keyword/adgroup up 브랜치와 동형 재사용). adgroup_id가
         # 없으면 roas_corrected가 None으로 남아 executor가 fail-closed로 막는다(아래 S3 가드).
-        if proposal.proposal_type in ("bid_up", "growth_bid_up") and proposal.adgroup_id:
+        if proposal.proposal_type in BID_UP_TYPES and proposal.adgroup_id:
             as_of = now.date() - timedelta(days=1)  # naver_ad_daily는 D-1까지만 확정
             window_from = as_of - timedelta(days=_GUARDRAIL_LOOKBACK_DAYS - 1)
             agg = account_diagnosis.adgroup_window_agg(db, proposal.adgroup_id, window_from, as_of)
@@ -659,15 +661,15 @@ def _execute_update_bid(db: Session, proposal: NaverProposal, now: datetime) -> 
     # 함수 레벨 import — delegation_gate와 동일 관례(auto_operator 모듈 결합 최소화).
     if proposal.target_type == "ad":
         from app.services.naver_ad.auto_operator import (
-            AD_BID_CANARY_CAMPAIGNS, _AD_BID_CANARY_DIRECTIONS,
+            AD_BID_CANARY_CAMPAIGNS, _AD_BID_CANARY_PROPOSAL_TYPES,
         )
         ad_guard = []
         if proposal.campaign_id not in AD_BID_CANARY_CAMPAIGNS:
             ad_guard.append("캠페인이 소재입찰 카나리 개방 대상 아님")
-        if proposal.proposal_type not in _AD_BID_CANARY_DIRECTIONS:
+        if proposal.proposal_type not in _AD_BID_CANARY_PROPOSAL_TYPES:
             ad_guard.append(
                 f"proposal_type={proposal.proposal_type!r}는 소재-레벨 미개방 방향"
-                f"(개방={sorted(_AD_BID_CANARY_DIRECTIONS)})"
+                f"(개방={sorted(_AD_BID_CANARY_PROPOSAL_TYPES)})"
             )
         if not proposal.adgroup_id:
             ad_guard.append("adgroup_id 없음(소재 제안 필수 컨텍스트)")
@@ -689,7 +691,7 @@ def _execute_update_bid(db: Session, proposal: NaverProposal, now: datetime) -> 
     # 키워드 UP의 BEP 바닥은 핫셋 클릭 게이트·정착창 검사와의 암묵적 커플링에 기대고 있었다.
     # IU가 장중-단독 UP(정산 판정불가 유닛)을 열었으므로 키워드도 컨텍스트 완전성(BEP 원료·
     # 일예산)을 명시적으로 보장한다(가드 약화 없음 — keyword 브랜치는 이 원료를 원래 채움).
-    if proposal.target_type in ("adgroup", "ad", "keyword") and proposal.proposal_type in ("bid_up", "growth_bid_up"):
+    if proposal.target_type in ("adgroup", "ad", "keyword") and proposal.proposal_type in BID_UP_TYPES:
         # guardrail_gate._check_bid의 up 전용 검사(BEP·스톱로스·일예산)는 그 원료가 None이면
         # 전부 fail-open(검사 건너뜀)이다 — 컨텍스트가 불완전한 채 넘기면 D-NAO-1 이익하한·
         # 일예산 상한이 조용히 우회된다. 각 원료의 소스가 달라(BEP/스톱로스=window_agg,
@@ -1058,14 +1060,14 @@ def real_write_blocker(proposal: NaverProposal) -> str | None:
         # 잔존 pending)이 콘솔에서 executable로 보이는 것을 막는다.
         if proposal.target_type == "ad":
             from app.services.naver_ad.auto_operator import (
-                AD_BID_CANARY_CAMPAIGNS, _AD_BID_CANARY_DIRECTIONS,
+                AD_BID_CANARY_CAMPAIGNS, _AD_BID_CANARY_PROPOSAL_TYPES,
             )
             if proposal.campaign_id not in AD_BID_CANARY_CAMPAIGNS:
                 return "소재(ad) 입찰은 카나리 캠페인만 실쓰기 가능(B3 개방 스코프 밖 — stale 제안 가능성)"
-            if proposal.proposal_type not in _AD_BID_CANARY_DIRECTIONS:
+            if proposal.proposal_type not in _AD_BID_CANARY_PROPOSAL_TYPES:
                 return (
                     f"소재(ad) {proposal.proposal_type}은 미개방 방향"
-                    f"(현재 개방={sorted(_AD_BID_CANARY_DIRECTIONS)}, 카나리 2단계에서 확장)"
+                    f"(현재 개방={sorted(_AD_BID_CANARY_PROPOSAL_TYPES)}, 카나리 2단계에서 확장)"
                 )
             if not proposal.adgroup_id:
                 return "adgroup_id 없음 — 소재 제안 필수 컨텍스트 부족(재생성 필요)"

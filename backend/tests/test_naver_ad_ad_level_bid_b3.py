@@ -289,7 +289,7 @@ def test_harness_ad_bid_up_blocked_when_bep_context_incomplete(db):
     # 카나리 2단계(up 개방) 가정 — 방향 게이트를 열어야 BEP 완전성 가드 자체를 검증 가능
     # (codex 소급[P2] 최종 경계 가드가 방향을 먼저 막으면 이 가드에 도달 못 함).
     with patch.object(auto_operator, "AD_BID_CANARY_CAMPAIGNS", frozenset({"cmp1"})), \
-         patch.object(auto_operator, "_AD_BID_CANARY_DIRECTIONS", frozenset({"bid_down", "bid_up"})), \
+         patch.object(auto_operator, "_AD_BID_CANARY_PROPOSAL_TYPES", frozenset({"bid_down", "bid_up"})), \
          patch.object(harness, "_build_guardrail_context",
                       return_value={"current_bid": 800, "roas_corrected": None, "target_roas": 2.0}), \
          patch.object(harness.guardrail_gate, "check") as mgate, \
@@ -308,7 +308,7 @@ def test_harness_ad_bid_up_success_when_context_complete(db):
     ctx = {"current_bid": 800, "roas_corrected": 5.0, "target_roas": 2.0, "unconverted_spend": 0,
            "cost_today": 1000, "daily_budget": 50_000, "last_change_at": None, "changes_today_count": 0}
     with patch.object(auto_operator, "AD_BID_CANARY_CAMPAIGNS", frozenset({"cmp1"})), \
-         patch.object(auto_operator, "_AD_BID_CANARY_DIRECTIONS", frozenset({"bid_down", "bid_up"})), \
+         patch.object(auto_operator, "_AD_BID_CANARY_PROPOSAL_TYPES", frozenset({"bid_down", "bid_up"})), \
          patch.object(harness, "_build_guardrail_context", return_value=ctx), \
          patch.object(harness.guardrail_gate, "check", return_value=None), \
          patch.object(harness.naver_sa_writer, "update_ad_bid",
@@ -478,7 +478,7 @@ def test_hourly_lane_canary_probe_up_holds_no_ad_routing(db):
 
 def test_hourly_lane_canary_up_holds_stage2(db):
     """[GATE P2-2 DOWN 한정] 카나리 + 미연결 그룹 + 비탐침 UP verdict → ad UP은 카나리
-    2단계(_AD_BID_CANARY_DIRECTIONS 밖) → hold, 제안 0."""
+    2단계(_AD_BID_CANARY_PROPOSAL_TYPES 밖) → hold, 제안 0."""
     _seed_hourly_shopping(db)
     _ad(db, "grp-hot", "p1", ad_id="nad-1", ad_bid_amt=800, use_group=False)
     db.commit()
@@ -654,7 +654,7 @@ def test_build_band_bep_non_canary_skips_disconnected(db):
 
 def test_build_band_growth_canary_up_not_routed_stage2(db):
     """[GATE P2-2 DOWN 한정] 성장(up)은 카나리 1단계에서 ad 라우팅 금지
-    (_AD_BID_CANARY_DIRECTIONS={"bid_down"}) — 카나리여도 미연결 up은 기존 skip(제안 0)."""
+    (_AD_BID_CANARY_PROPOSAL_TYPES={"bid_down"}) — 카나리여도 미연결 up은 기존 skip(제안 0)."""
     db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
     _ad(db, "grp-g", "p1", ad_id="nad-1", ad_bid_amt=800, use_group=False, campaign_id="cmp-ours")
     db.commit()
@@ -682,7 +682,7 @@ def test_canary_default_empty_set():
 
 def test_canary_directions_down_only():
     """[GATE P2-2] 카나리 1단계 방향 = bid_down만(2단계 개방 시 상수 확장)."""
-    assert auto_operator._AD_BID_CANARY_DIRECTIONS == frozenset({"bid_down"})
+    assert auto_operator._AD_BID_CANARY_PROPOSAL_TYPES == frozenset({"bid_down"})
 
 
 # ══════════════════════════════════════════════════════════════════

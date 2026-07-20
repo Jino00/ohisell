@@ -189,8 +189,8 @@ IU-R이 쓰는 입찰 손은 전부 구현돼 있다. 서보는 새 writer가 �
 
 ## §4 체크리스트
 
-- [ ] R0: `bid_step_types` 독립 상수 모듈(순환 import 회피) + 전 참조처(guardrail/harness 391·692/auto_operator 826/diary_outcome/ad 카나리) 교체 + **판정·매핑·direction·카운터 결과 동일 차등 테스트** + 회귀 0
-- [ ] R0 GATE PASS(레지스트리 누락 참조처 0 확인)
+- [x] R0: `bid_step_types` 독립 상수 모듈 + 전 참조처 교체(전수 감사로 계획 외 harness 438·카나리 소비처 6곳 추가 발견·이관, 카나리 상수 `_AD_BID_CANARY_PROPOSAL_TYPES` rename) + 차등 테스트 31개 + **2465 passed·회귀 0**
+- [x] R0 GATE PASS(codex review P1 0·P2 1 — `_ACTION_BY_PROPOSAL_TYPE` 리터럴 잔존 → 레지스트리 파생으로 수용 반영 + 누락 감지 테스트 추가)
 - [ ] R1: `rank_servo` SA(ceil−1·최상단 가드·데드밴드·서보 캡·경제성 상한[pooled_rpc→affordable_ceiling]·current-기준 스톱로스·예산 pace 사전체크·무영속 래칫) + `_judge_hourly` 구조화 verdict + `run_hourly_lane` 그레인 라우팅(BRAND_SEARCH=±15% fallback) + 공용 prefilter helper + `bid_up_servo` 레지스트리 등록(`_DAILY_LANE_PROPOSAL_TYPES` 제외) + **`execute(dry_run=False)` 실집행** + **다운스트림 정합(scoreboard/diary/retro/dedup/expiry/대시보드/real_write_blocker/delegation_gate)** + 단위/차등 테스트
 - [ ] R1 GATE(Opus 적대) PASS
 - [ ] R2: 시간당 estimate 배선(ceil−1·1~4 clamp) + agg precompute + `bid_up_rank` 등록 + estimate fail-closed/TOCTOU/예산캡 + `update_keyword_bid` 실집행 + 다운스트림 정합 + 테스트

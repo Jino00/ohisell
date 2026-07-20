@@ -33,6 +33,7 @@ from app.models import (
     NaverRetroSignal,
 )
 from app.services.naver_ad import campaign_target_resolver, diagnosis, diary, effective_bid, intraday_roas, naver_execution_harness, naver_sa_writer
+from app.services.naver_ad.bid_step_types import BID_UP_TYPES
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.services.naver_ad.guardrail_gate import _MAX_CHANGE_PCT
 from app.services.naver_ad.trigger_watch import CPC_SPIKE_RATIO
@@ -71,11 +72,13 @@ AD_BID_CANARY_CAMPAIGNS: frozenset[str] = frozenset({
     "cmp-a001-02-000000010769985",
 })
 
-# B3 GATE P2-2: 카나리 1단계 개방 방향 = **bid_down만**(안전방향 — 지출·노출 하향). ad UP은
+# B3 GATE P2-2: 카나리 1단계 개방 = **bid_down만**(안전방향 — 지출·노출 하향). ad UP은
 # 카나리 2단계(1단계 DOWN 실적 확인 후 상수 확장으로 개방). 탐침 UP은 방향과 별개로
 # CD3 되돌림 기계가 'ad' grain을 처리 못 해(_standing_probes의 before_value 최상위 bidAmt
 # 파싱 — ad는 adAttr JSON 문자열 중첩·_conv_direct_today grain 필터 부재) 별도 페이즈로 이월.
-_AD_BID_CANARY_DIRECTIONS: frozenset[str] = frozenset({"bid_down"})
+# ★이름 정정(IU-R R0, codex R3 P2-1): 값은 direction이 아니라 proposal_type("bid_down")이다 —
+# 이름을 _AD_BID_CANARY_PROPOSAL_TYPES로 정정(값·판별 로직 불변 = 행위 불변, rename만).
+_AD_BID_CANARY_PROPOSAL_TYPES: frozenset[str] = frozenset({"bid_down"})
 
 
 def _ad_bid_canary(campaign_id: str) -> bool:
@@ -823,7 +826,7 @@ def _executed_bid_ups_today(db: Session, target_type: str, target_id: str, now: 
             NaverChangeLog.dry_run.is_(False),
             NaverChangeLog.after_value.isnot(None),
             NaverChangeLog.changed_at >= today_start,
-            NaverProposal.proposal_type.in_(("bid_up", "growth_bid_up")),
+            NaverProposal.proposal_type.in_(sorted(BID_UP_TYPES)),
         )
         .scalar() or 0
     )
@@ -1283,7 +1286,7 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                         # 'ad' before_value(adAttr JSON 중첩)를 파싱 못 해 영원히 미회수 +
                         # _conv_direct_today grain 필터 부재. 탐침 ad 확장은 별도 페이즈.
                         hold_reason = "[레버 미연결] 탐침은 ad 미지원 — CD3 'ad' 확장 후"
-                    elif intended_action not in _AD_BID_CANARY_DIRECTIONS:
+                    elif intended_action not in _AD_BID_CANARY_PROPOSAL_TYPES:
                         # GATE P2-2: 카나리 1단계는 bid_down만 — ad UP은 카나리 2단계.
                         hold_reason = "[레버 미연결] ad UP은 카나리 2단계"
                     else:
