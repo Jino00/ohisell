@@ -1,5 +1,6 @@
 # 세션 인수인계: D-NAO-65 실행 — 스프린트 DL 완료·라이브 + 스프린트 B1/B2 라이브·B3 GATE 중
-> 저장일시: 2026-07-20 11:05 KST
+> 저장일시: 2026-07-20 11:05 KST · **최종 갱신 12:15 KST — §3 대체됨: B3·B4 완료·배포·병합(PR #67·#69), 스프린트 B 전 페이즈 종료.**
+> ★12:15 추가: B3 GATE 3R PASS→카나리 1호=맥세이프 개방(DOWN만·Confirm-only·위임/브리핑 전면 제외·자동발사 5경로 봉쇄). B4 GATE 2R PASS→바닥 재개 정책(>70=bid_down_first·70에서만 resume·재pause 3일 쿨다운·ML 제외). 2384 passed·main==prod `ceb638f`. **다음 세션 첫 행동: 07-21 08:00 후 MO(grp-…070109616) bid_down_first pending 생성 확인(소재 551485078, 800→680) → Jino 콘솔 Confirm 왕복 관측(B 라이브 합격 시작). 이후 UI→L2→L3.** MO 실측: 소재입찰 800=CPC 824 미스터리 완결. 운영 노트: 800→70은 Confirm ~15회(수 주) — 서두르려면 Jino 콘솔에서 소재입찰 직접 하향이 빠름.
 > 새 대화: 이 파일 → 트랙 `docs/tracks/active/track_naver-ad-optimization.md`(D-NAO-59~65) → 계획서 2개(`docs/PLAN_naver-ad-daily-loss-leash.md`·`docs/PLAN_naver-ad-ad-level-bid.md`) → 직전 HANDOFF(같은 폴더 `HANDOFF_ohisell-maxsafe-diag+D-NAO-64-floored-loss+daily-leash-direction_20260719.md`).
 > 모델 라우팅(Jino): 구조=Fable·설계/구현=Opus·단순=Sonnet, 옵션은 Claude 추천안 자동. "끝까지 자동 진행+handoff로 신선도 유지" 지시 하에 자동 진행 중.
 
