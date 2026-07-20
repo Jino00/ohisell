@@ -118,6 +118,12 @@ def build_diagnosis(db: Session, date_from: date, date_to: date) -> dict:
         "shopping_lever_resume_candidates": diag.shopping_lever_resume_candidates(
             db, date_to=date_to,
         ),
+        # UI3(D-NAO-65, DL2 GATE P3① 후속): 바닥 대기(at-floor 무액션) 관찰 보드 — 관찰 전용
+        # (제안·실행 경로에 절대 연결 안 됨, §0 금지선). shopping_pause_candidates와 같은
+        # date_from/date_to/bep_roas/factor를 주입해 창·임계를 일치시킨다(무액션 여집합 정합).
+        "floor_wait_units": diag.floor_wait_units(
+            db, date_from, date_to, bep_roas=bep_roas, correction_factor=factor,
+        ),
     }
 
     return {

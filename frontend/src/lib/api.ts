@@ -1671,6 +1671,27 @@ export interface NaverAdDiagnosisViciousCycleRow {
   prior_daily_clk: number;
 }
 
+// UI3(D-NAO-65, DL2 GATE P3① 후속): 바닥 대기(at-floor 무액션) 관찰 행 — 관찰 전용(실행 없음).
+export interface NaverAdDiagnosisFloorWaitRow {
+  campaign_id: string;
+  adgroup_id: string;
+  keyword_id: string | null;
+  target_type: "adgroup" | "keyword";
+  current_bid: number;
+  effective_bid: number;
+  effective_source: string;
+  cost: number;
+  clk: number;
+  conv_amt: number;
+  has_conv: boolean;
+  roas_corrected: number | null;
+  chronic_cpc: number | null;
+  stop_loss_amount: number;
+  window_days: number;
+  reason: string;
+  reason_label: string;
+}
+
 export interface NaverAdDiagnosisBoards {
   bleeding_keywords: NaverAdDiagnosisKeywordRow[];
   starving_winners: NaverAdDiagnosisKeywordRow[];
@@ -1679,6 +1700,8 @@ export interface NaverAdDiagnosisBoards {
   exclusion_candidates: NaverAdDiagnosisExclusionCandidateRow[];
   keyword_triage: NaverAdDiagnosisKeywordTriage;
   vicious_cycle: NaverAdDiagnosisViciousCycleRow[];
+  // UI3(D-NAO-65): 바닥 대기 관찰 보드(관찰 전용) — 백엔드 boards의 additive 필드.
+  floor_wait_units?: NaverAdDiagnosisFloorWaitRow[];
 }
 
 export interface NaverAdDiagnosis {
