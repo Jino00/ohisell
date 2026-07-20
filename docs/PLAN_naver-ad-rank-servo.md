@@ -187,6 +187,24 @@ IU-R이 쓰는 입찰 손은 전부 구현돼 있다. 서보는 새 writer가 �
 
 ---
 
+## §3.5 ±15% 초과 실쓰기 사전 봉투 (§3-4 요구 — 배포 전 확정, 2026-07-21 04:30 KST)
+
+> 실코드 상수 기준(rank_servo.py·auto_operator.py·guardrail_gate.py). 이 봉투 밖 실쓰기는 없다.
+
+1. **대상 유닛 선정 기준**:
+   - R1(`bid_up_servo`): SHOPPING **그룹입찰** 유닛만(`effective_bid` source='ad'인 ad-라우팅 유닛 제외 — 카나리 2단계까지). BRAND_SEARCH 제외(±15% fallback).
+   - R2(`bid_up_rank`): WEB_SITE 키워드 grain, estimate 유효 응답 유닛만(실패/이상 7종 = fail-closed hold).
+   - 공통 게이트(전부 통과해야 스텝): ROAS 게이트(intraday est≥target×1.2·tally≥2) ∧ 정산 거부권(below=veto) ∧ 쿨다운 2h 밖 ∧ 일일 변경 상한 3 내(정산 unknown 유닛은 장중-단독 일 1스텝 캡) ∧ 위임 게이트+신선도 10분 ∧ 데드밴드 밖(|wr−target|>0.3) ∧ imp_sum≥30.
+2. **최대 금액(스텝당)**: `target_bid ≤ min(current×1.50(_SERVO_MAX_STEP_PCT), economic_ceiling(pooled_rpc→affordable_ceiling), _MAX_BID 100,000)` → 10원 내림. R2는 추가로 `min(경제성 상한, estimate rank_bid)`. estimate 호출 런당 캡 50(`_RUN_ESTIMATE_BUDGET`)+캐시.
+3. **잔여예산 하한**: 예상 추가 지출(최근 3h clk pace × 잔여 활동시간 × target_bid) ≤ 잔여예산 × **0.8**(`_BUDGET_HEADROOM_SAFETY_RATIO`). pace 관측 슬롯 부재 = fail-closed hold. daily_budget=0(uncapped)만 통과.
+4. **실패 시 롤백 절차**:
+   - writer 실패·TOCTOU 마커 mismatch → **failed 종결**(자동 재시도 없음). 재산정은 다음 :20 레인의 fresh 재진입 몫.
+   - 사후 이상(CPC 급등·장중 loss) → 기존 DOWN 고삐가 자동 회수(서보는 DOWN에 관여하지 않음 — ±15% `_clamp_step` 경로 그대로).
+   - 수동 롤백: `naver_change_log`의 `before_value`(bidAmt)로 원복(콘솔 또는 update_bid) — change_log가 근거 보존(원칙25).
+   - 비상: 킬스위치 3중 방어(즉시 전 경로 차단).
+
+---
+
 ## §4 체크리스트
 
 - [x] R0: `bid_step_types` 독립 상수 모듈 + 전 참조처 교체(전수 감사로 계획 외 harness 438·카나리 소비처 6곳 추가 발견·이관, 카나리 상수 `_AD_BID_CANARY_PROPOSAL_TYPES` rename) + 차등 테스트 31개 + **2465 passed·회귀 0**
