@@ -1996,6 +1996,35 @@ class NaverEntitySnapshot(Base):
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())  # ★쓰기 시 kst_now 명시 주입(server_default는 UTC — 시간계산 미사용)
 
 
+class NaverAgencyOp(Base):
+    """대행사(및 계정 전체 외부) 조작 이벤트 1건 (SA-2, D-NAO-78 · BM 벤치마크 레이어).
+
+    naver_entity_snapshot의 D-1 vs D diff로 산출 — 결정적·리플레이 가능(bm_diff.py). 예외
+    브리핑(P5)의 원료. 관찰 전용 — 네이버 API 쓰기 0(diff는 DB-to-DB).
+    ★naver_change_log와 분리: change_log는 OUR 제안·집행의 피드백 루프(proposal_id·outcome·
+    verify)에 묶여 있어, 45캠페인 대행사 노이즈를 섞으면 학습 쿼리가 오염된다(§2 결정).
+    op_date+entity_id+op_type을 리플레이 키로 삼아 같은 날 재실행은 삭제-재생성(멱등).
+    """
+
+    __tablename__ = "naver_agency_op"
+    __table_args__ = (
+        Index("ix_naver_agency_op_date_campaign", "op_date", "campaign_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    op_date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)  # 조작 감지일(=오늘 스냅샷 날짜, KST)
+    detected_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)  # ★kst_now() 명시(server_default=UTC 회피)
+    entity_type: Mapped[str] = mapped_column(String(10), nullable=False)  # campaign/adgroup/keyword
+    entity_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    campaign_id: Mapped[str] = mapped_column(String(50), nullable=False, default="", index=True)
+    optimizer: Mapped[str] = mapped_column(String(8), nullable=False, default="none")  # 조작 주체 구분(대행사=none/mop, ours 자기변경 필터 대상)
+    op_type: Mapped[str] = mapped_column(String(24), nullable=False)  # bid_change/status_flip/keyword_add/keyword_remove/campaign_add/adgroup_add/campaign_remove/adgroup_remove/negative_add/negative_remove/creative_change/budget_change/extended_toggle
+    before_value: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    after_value: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    magnitude: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # 변화 크기(입찰 Δ%·예산 Δ%·키워드 증감 등 — 예외 랭킹용)
+    is_exception: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)  # 예외 브리핑에 올릴 이상치 여부(SA-2 필터 판정)
+
+
 class NaverSearchTermDaily(Base):
     """검색어 단위 일별 성과 — 쇼핑 SHOPPINGKEYWORD_DETAIL + 파워링크 EXPKEYWORD (P2-S1).
 
