@@ -387,3 +387,75 @@ def test_real_write_blocker_console_up_not_executable(db):
     p = _ad_proposal(db, proposal_type="bid_up_explore", approval_source=None)
     blocked = harness.real_write_blocker(p)
     assert blocked is not None and "탐색" in blocked
+
+
+# ══════════════════════════════════════════════════════════════════
+# GATE P1 수정: 탐색 스텝 explore_op 요구를 전 target_type로 대칭화
+# (ad-only가 아니라 adgroup/keyword도 explore_op 아니면 봉쇄 — 최약 UP 경로 차단)
+# ══════════════════════════════════════════════════════════════════
+def test_adgroup_console_exploration_up_rejected(db):
+    """GATE P1: bid_up_explore + adgroup + 콘솔(None) → 쓰기 직전 fail-closed(explore_op 미요구
+    구멍 차단). 수정 전엔 이 경로가 이익하한 면제 + killswitch 밖 최약 UP였다."""
+    p = _ad_proposal(db, proposal_type="bid_up_explore", target_type="adgroup", target_id=GRP_ID,
+                     approval_source=None)
+    _settings(db)
+    with patch.object(harness.naver_sa_writer, "update_adgroup_bid") as mag:
+        with pytest.raises(harness.MissingExecutionTargetError):
+            harness.execute(db, p.id, dry_run=False)
+    mag.assert_not_called()
+    db.refresh(p)
+    assert p.status == "failed"
+
+
+def test_keyword_none_exploration_up_rejected(db):
+    """GATE P1: bid_up_explore + keyword + None → fail-closed(전 target_type 대칭)."""
+    p = _ad_proposal(db, proposal_type="bid_up_explore", target_type="keyword", target_id="nkw-1",
+                     approval_source=None)
+    _settings(db)
+    with patch.object(harness.naver_sa_writer, "update_keyword_bid") as mkw:
+        with pytest.raises(harness.MissingExecutionTargetError):
+            harness.execute(db, p.id, dry_run=False)
+    mkw.assert_not_called()
+
+
+def test_adgroup_other_source_exploration_up_rejected(db):
+    """GATE P1: bid_up_explore + adgroup + auto_op_hr(비 explore_op) → fail-closed(킬스위치 ON이어도)."""
+    from app.services.naver_ad.auto_operator import APPROVAL_SOURCE_HOURLY
+    p = _ad_proposal(db, proposal_type="bid_up_explore", target_type="adgroup", target_id=GRP_ID,
+                     approval_source=APPROVAL_SOURCE_HOURLY)
+    _settings(db, auto_operate=True)
+    with patch.object(harness.naver_sa_writer, "update_adgroup_bid") as mag:
+        with pytest.raises(harness.MissingExecutionTargetError):
+            harness.execute(db, p.id, dry_run=False)
+    mag.assert_not_called()
+
+
+def test_adgroup_explore_op_exploration_up_writes(db):
+    """GATE P1 정상 경로: bid_up_explore + adgroup + explore_op(킬스위치 ON) → 통과(그룹 탐색 경로
+    살아있음 — BX3 source='group' 배선 전제). 이익하한 면제도 explore_op이라 정상 적용."""
+    p = _ad_proposal(db, proposal_type="bid_up_explore", target_type="adgroup", target_id=GRP_ID,
+                     approval_source=exploration.APPROVAL_SOURCE_EXPLORE)
+    _settings(db, auto_operate=True)
+    ctx = {"current_bid": 800, "roas_corrected": None, "target_roas": None, "unconverted_spend": None,
+           "cost_today": None, "daily_budget": None, "last_change_at": None, "changes_today_count": 0}
+    with patch.object(harness, "_build_guardrail_context", return_value=ctx), \
+         patch.object(harness.guardrail_gate, "check", return_value=None), \
+         patch.object(harness.naver_sa_writer, "update_adgroup_bid",
+                      return_value=_adgroup_write_result()) as mag:
+        harness.execute(db, p.id, dry_run=False)
+    mag.assert_called_once_with(GRP_ID, 1040)
+
+
+def test_real_write_blocker_four_quadrant_reprobe(db):
+    """GATE P1 재프로빙 — (AD/ADGROUP) × (console/explore_op) 4분면. 수정 전 ADGROUP+console이
+    None(통과)이던 구멍이 이제 차단(not None). 정상 경로(explore_op) 양쪽 None."""
+    def _p(target_type, target_id, source):
+        return _ad_proposal(db, proposal_type="bid_up_explore", target_type=target_type,
+                            target_id=target_id, approval_source=source)
+    EXP = exploration.APPROVAL_SOURCE_EXPLORE
+    # 콘솔(None) — 양쪽 차단
+    assert harness.real_write_blocker(_p("ad", "ad-q1", None)) is not None
+    assert harness.real_write_blocker(_p("adgroup", "grp-q2", None)) is not None  # ← GATE가 실증한 구멍
+    # explore_op — 양쪽 실행 가능(None)
+    assert harness.real_write_blocker(_p("ad", "ad-q3", EXP)) is None
+    assert harness.real_write_blocker(_p("adgroup", "grp-q4", EXP)) is None
