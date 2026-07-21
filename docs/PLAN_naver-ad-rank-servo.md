@@ -215,8 +215,9 @@ IU-R이 쓰는 입찰 손은 전부 구현돼 있다. 서보는 새 writer가 �
 - [x] R2 GATE PASS — Opus 적대(P1 1=bid 키 KeyError 레인 중단 → 수정·봉인 / P2 4) + codex 2R 왕복(P1 1=마커 부재 fail-closed 뒤집기·P2 3 전 수용) **PASS**. 부수: 자정 플레이크 테스트 근본수정·iCloud 중복 사본 제거
 - [x] R3: `bid_rank_curve` SA(change_log×NaverProposal×NaverKeywordHourly 조인·**마이그레이션 0**·h−1/h+1 결정론 버킷·중앙값 기울기 원/rank·오염 제외=성공 실쓰기 기준) + `NaverLearningState` scope="entity"/`bid_rank_slope` 규약(current_value/sample_n/confidence 3컬럼·명시 updated_at) + `learning_loops` 5스테이지 + 서보 prior 주입(precompute 1회) + 콜드스타트/무효 마킹 — **2554 passed·회귀 0**
 - [x] R3 GATE PASS — codex 3R 왕복(P1 2 수정: stale slope 이중 방어[쓰기 무효 마킹+읽기 4조건·3일 만료]·스캔-무쌍 유닛 무효 마킹 / P2 1 수정: 오염=성공 실쓰기만) **PASS**. slope 오염돼도 서보 캡·경제성 상한 clamp 방어선 확인됨
-- [ ] 배포 + 라이브(실쓰기 합격, §3-4): R0 배포 회귀 0 → R1 폐루프 한 바퀴 라이브 완주(실 `update_adgroup_bid`→다음 시간 순위 이동→데드밴드/래칫)·R2 ±15% 초과 1스텝 실쓰기·ad 카나리 UP 누출 0·사전 봉투 준수 — **다음 세션**
-- [ ] 자연 발동 상설 관측(서보 래칫·데드밴드·반응 곡선 적립·무반응 hold) — 상설
+- [x] **배포 완료·라이브 안전 검증**(2026-07-21 04:30 KST, safe_deploy CAS, 13파일): 05:20~11:20 시간당 레인 전부 `ok`·에러 0 / prod 서보 모듈 임포트·레지스트리(`bid_up_servo`/`bid_up_rank`) 확인 / **가드 무결성 라이브 실증** — probe bid_up(id 185)이 쿨다운 2h(1.5h<2h)에 정확히 차단(R0 레지스트리가 bid_up 가드 라우팅 안 깸)·shopping_group_bep bid_down 가드 차단 정상 / R3 스테이지 배선(learning_loops line 41)·08:10 잡 ok / 다운스트림(bid_up/bid_down/probe/resume/pacing/anomaly) 정상 처리 / **회귀 0**
+- [ ] **서보 실쓰기 폐루프 = 자연 발동 상설 관측**(§3-4 R1 폐루프 한 바퀴·R2 ±15% 초과 1스텝): 배포 후 첫 ~7h 동안 미발동 — SHOPPING 검색순위 그룹이 핫셋(그룹당 클릭≥10)+ROAS 게이트 UP 통과해야 발동(트래픽·성과 게이트). 새벽~오전 저집중 트래픽에서 hold=정상. **첫 자연 발동 시 change_log(action=update_bid·dry_run=0·proposal_type∈RANK_STEP_TYPES)로 포착 → 다음 시간 avg_rank 이동→래칫 재판정**. R3 slope는 첫 서보 실쓰기 후 익일 적립 시작(현재 콜드=정상).
+- [ ] MO 소재 bid_down_first: 07-21 진단은 bid_down_first 대신 **resume 후보 2건**(1367·1368, 정지 전 ROAS 2.92/3.72>목표 1.82) 산출 — 소재 실효입찰이 바닥이라 resume 경로(account_diagnosis 1363행 `eff_bid≤floor→resume`). 데이터 의존, 실패 아님. Confirm 왕복은 Jino 몫(상설).
 
 ---
 
