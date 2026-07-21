@@ -14,7 +14,7 @@
 
 ## 2. 이번(재개) 세션 완료
 - ✅ **EXPKEYWORD(파워링크 확장검색어) 수집기 근본수정·배포**(`278e5e1`): 구축(~07-07) 이후 **0행 전량 드롭 버그** 발견 — 16컬럼(SHOPPINGKEYWORD_DETAIL)과 같은 `ST_COL_*`로 파싱해 길이가드(`≤14`)가 12컬럼 EXPKEYWORD 전 행 스킵. `EXP_COL_*` 12컬럼 전용 상수 분기(imp/clk/cost=8/9/10, AD 합계 96.7~98.8% 대조·rank_sum 없음=0). 2758 passed. failure-memory 대상(미기록 — 다음 세션 기록 권장).
-- ✅ **파워링크 검색어 1년 백필 실행 중**(`/tmp/backfill_expkeyword.py`, pid 3176242): 2025-07-23~2026-07-21 주 단위. 07:25 기준 2025-10월·43.4만행 통과, 빠름. **완주 감시 모니터 가동(task be3kj5nm8)** — 완료 시 총행수·AD 합계 대조 검증할 것.
+- ✅ **파워링크 검색어 1년 백필 완주·검증 완료**(`/tmp/backfill_expkeyword.py`): 07:41 완료 total=**248만 행**·338일(2025-07-23~2026-07-21, 저활동일 일부 skip). **대조 검증**: 최대 캠페인(갤럭시 파워링크 cmp-a001-01-000000010206612) 07-19 클릭 61=61·비용 78,529=78,529원 **1원도 안 틀림=컬럼 매핑 확정**. 집계 총합은 expkeyword(클릭 143)가 naver_ad_daily WEB_SITE(96)보다 높은데, 최대 캠페인이 정확 일치하므로 이는 **expkeyword가 일부 소액 캠페인을 더 완전히 잡는 것**(naver_ad_daily 파워링크 커버리지 구멍을 메움 — 이 수집기 수정의 실가치). 정확 기전(확장검색 vs 수집 신선도)은 필요시 다음 세션 조사.
 - ✅ **ref36 파워링크 보고서 전수 실측**(`docs/references/36_powerlink_report_data_20260722.md`): 9종 보고서 컬럼 실측·`/stats` 필드 가용성·엔티티 필드·보존 1년·수집 갭 표. **미수집 데이터 발견**: `ctr·cpc·crto·viewCnt`(valid인데 미사용)·ADEXTENSION(_CONVERSION 확장소재 성과/전환)·CRITERION(_CONVERSION, 연령AG####·성별GNM/GNF/GNU 패턴 추정)·`/ncc/ad-extensions` 엔드포인트·그룹의 useExpSearch/expSearchBudgetRatio/aiAdsOptIn 설정.
 
 ## 3. 확정 결정 (트랙 D-N, 번복 금지)
