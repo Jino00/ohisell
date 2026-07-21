@@ -198,6 +198,73 @@ def test_daily_lane_bid_down_always_approved(db):
     assert p.approval_source == "auto_op"  # codex 2R[P1-1] String(12) 계약 준수 단축
 
 
+def test_daily_lane_bid_down_held_when_target_entity_deleted(db):
+    """deleted 엔티티 사전 제외(2026-07-21 실사고): shopping_group_bep 보드가 NaverAdDaily
+    집계만 보고 후보를 뽑아, naver_entity status='deleted'인 그룹(맥세이프 69087677/69089452)에
+    bid_down 제안이 생성됨 → 일 레인이 무조건 승인 → harness에서 네이버 API 404
+    (current_bid 미확보 fail-closed) 매일 반복. 일 레인 심사에서 status!='on' 타깃을 hold로
+    사전 제외해 404 실행 시도 자체를 없앤다."""
+    _settings(db)
+    db.add(NaverEntity(entity_type="adgroup", entity_id="grp-del", parent_id=CAMPAIGN,
+                        campaign_id=CAMPAIGN, status="deleted"))
+    db.commit()
+    p = _proposal(db, proposal_type="bid_down", target_type="adgroup", target_id="grp-del",
+                  target_bid=900)
+    with patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_daily_lane(db, now=NOW)
+    mock_exec.assert_not_called()
+    assert result["approved"] == 0
+    assert len(result["held"]) == 1
+    assert result["held"][0]["id"] == p.id
+    assert "deleted" in result["held"][0]["reason"]
+    db.refresh(p)
+    assert p.status == "rejected"  # codex 11R: hold분은 레인 말미 reject(익일 재생성 사이클)
+
+
+def test_daily_lane_bid_down_held_when_target_entity_off(db):
+    """status='off'(수동 정지)도 사전 제외 — 정지 그룹 입찰 조정은 무의미하고, 재개 판단은
+    별도 경로(resume) 몫."""
+    _settings(db)
+    db.add(NaverEntity(entity_type="adgroup", entity_id="grp-off", parent_id=CAMPAIGN,
+                        campaign_id=CAMPAIGN, status="off"))
+    db.commit()
+    _proposal(db, proposal_type="bid_down", target_type="adgroup", target_id="grp-off",
+              target_bid=900)
+    with patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_daily_lane(db, now=NOW)
+    mock_exec.assert_not_called()
+    assert result["approved"] == 0
+    assert len(result["held"]) == 1
+    assert "off" in result["held"][0]["reason"]
+
+
+def test_daily_lane_bid_down_approved_when_target_entity_on(db):
+    """경계(과차단 방지): status='on' 엔티티는 가드에 걸리지 않고 기존대로 무조건 승인."""
+    _settings(db)  # seed_chain이 grp-1(on) 시드
+    p = _proposal(db, proposal_type="bid_down", target_type="adgroup", target_id="grp-1",
+                  target_bid=900)
+    with patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_daily_lane(db, now=NOW)
+    mock_exec.assert_called_once_with(db, p.id, dry_run=False, now=NOW)
+    assert result["approved"] == 1
+    assert result["held"] == []
+
+
+def test_daily_lane_pause_held_when_target_entity_deleted(db):
+    """가드는 일 레인 전 타입 공통(bid_up/bid_down/pause) — deleted 타깃 pause도 404행."""
+    _settings(db)
+    db.add(NaverEntity(entity_type="keyword", entity_id="nkw-del", parent_id="grp-1",
+                        campaign_id=CAMPAIGN, status="deleted"))
+    db.commit()
+    _proposal(db, proposal_type="pause", target_type="keyword", target_id="nkw-del")
+    with patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_daily_lane(db, now=NOW)
+    mock_exec.assert_not_called()
+    assert result["approved"] == 0
+    assert len(result["held"]) == 1
+    assert "deleted" in result["held"][0]["reason"]
+
+
 def test_daily_lane_pause_held_when_recent_external_stop(db):
     _settings(db)
     p = _proposal(db, proposal_type="pause", target_type="keyword", target_id="nkw-pause")
