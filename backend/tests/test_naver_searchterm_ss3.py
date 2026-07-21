@@ -225,6 +225,84 @@ def test_daily_cap_toctou_rollback_failure_records_honestly(db):
     assert row.after_value is None
 
 
+# ── ②-c 실행 시점 전환 재검증(GATE ⑥, codex[P1] stale) ──
+def test_stale_conversion_reverify_rejects_before_writer(db):
+    # 판정(SS2) 후 Confirm 사이에 purchase 전환이 붙은 stale 후보 — 쓰기 직전 재조회로 §1-1
+    # 전환 보호 게이트를 다시 걸어 거부(writer 미호출).
+    _settings(db)
+    _entity(db, "grp-web", "WEB_SITE")
+    db.add(NaverSearchTermDaily(
+        ad_date=date(2026, 7, 22), campaign_id="cmp1", adgroup_id="grp-web",
+        search_term="전환붙은검색어", source="shopping", imp=100, clk=20, cost=6000, rank_sum=0,
+        conv_purchase_cnt=1, conv_direct_cnt=1, conv_purchase_amt=15900, cart_cnt=0, cart_amt=0,
+    ))
+    db.commit()
+    p = _proposal(db, adgroup_id="grp-web", term="전환붙은검색어")
+    with patch.object(harness.naver_sa_writer, "add_restricted_keywords") as mock_write:
+        with pytest.raises(harness.MissingExecutionTargetError):
+            harness.execute(db, p.id, dry_run=False, now=_NOW)
+    mock_write.assert_not_called()  # 쓰기 미호출(전환 보호)
+    db.refresh(p)
+    assert p.status == "failed"
+    row = db.query(NaverChangeLog).filter(NaverChangeLog.proposal_id == p.id).one()
+    assert "실행 시점 전환 발생" in row.rationale
+    assert row.after_value is None
+
+
+def test_stale_conversion_reverify_allows_when_no_conversion(db):
+    # 창 내 전환 0(성과행만)이면 재검증 통과 — 정상 제외 실쓰기.
+    _settings(db)
+    _entity(db, "grp-web", "WEB_SITE")
+    db.add(NaverSearchTermDaily(
+        ad_date=date(2026, 7, 22), campaign_id="cmp1", adgroup_id="grp-web",
+        search_term="무전환검색어", source="expkeyword", imp=100, clk=20, cost=6000, rank_sum=0,
+    ))
+    db.commit()
+    p = _proposal(db, adgroup_id="grp-web", term="무전환검색어")
+    with patch.object(harness.naver_sa_writer, "add_restricted_keywords",
+                      return_value=_write_result("무전환검색어")) as mock_write:
+        log_entry = harness.execute(db, p.id, dry_run=False, now=_NOW)
+    mock_write.assert_called_once()
+    assert log_entry.action == "exclude_search_term"
+
+
+# ── ②-d 캡 원자적 예약(codex[P1] TOCTOU) ──
+def test_atomic_cap_reservation_blocks_on_concurrent_executing(db):
+    # 9 커밋 성공 + 다른 executing 제외 제안 1건 존재 → 자기까지 executing이 되면
+    # 9 + 2(self + 기존) = 11 > 10 → 쓰기 전 원자 예약 초과로 중단(writer 미호출).
+    _settings(db)
+    _entity(db, "grp-web", "WEB_SITE")
+    for i in range(9):
+        _committed_exclude(db, f"seed{i}")
+    db.commit()
+    _proposal(db, adgroup_id="grp-web", term="동시진행", status="executing")  # 다른 executing 제안
+    p = _proposal(db, adgroup_id="grp-web", term="원자예약후보")
+    with patch.object(harness.naver_sa_writer, "add_restricted_keywords") as mock_write:
+        with pytest.raises(harness.MissingExecutionTargetError):
+            harness.execute(db, p.id, dry_run=False, now=_NOW)
+    mock_write.assert_not_called()  # 쓰기 미호출(캡 관통 원천 차단)
+    db.refresh(p)
+    assert p.status == "failed"
+    row = db.query(NaverChangeLog).filter(NaverChangeLog.proposal_id == p.id).one()
+    assert "원자 예약 초과" in row.rationale
+    assert row.after_value is None
+
+
+def test_atomic_cap_reservation_allows_exactly_at_cap(db):
+    # 9 커밋 + 자기 executing 1 = 10 = 캡 → 초과 아님(> 캡 false) → 10번째 쓰기 허용.
+    _settings(db)
+    _entity(db, "grp-web", "WEB_SITE")
+    for i in range(9):
+        _committed_exclude(db, f"seed{i}")
+    db.commit()
+    p = _proposal(db, adgroup_id="grp-web", term="10번째")
+    with patch.object(harness.naver_sa_writer, "add_restricted_keywords",
+                      return_value=_write_result("10번째")) as mock_write:
+        log_entry = harness.execute(db, p.id, dry_run=False, now=_NOW)
+    mock_write.assert_called_once()
+    assert log_entry.action == "exclude_search_term"
+
+
 # ── ③ Confirm 없는 자동 발사 0 ──
 def test_search_term_exclude_not_in_daily_lane_types():
     assert _TYPE not in auto_operator._DAILY_LANE_PROPOSAL_TYPES

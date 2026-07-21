@@ -242,3 +242,86 @@ def test_ingest_search_term_daily_includes_conversion_merge(db, monkeypatch):
     row = db.query(NaverSearchTermDaily).filter(NaverSearchTermDaily.source == "shopping").one()
     assert row.cost == 100  # 성과 병존
     assert row.conv_purchase_cnt == 1 and row.conv_purchase_amt == 15900  # 전환 병합
+
+
+# ── ⑤ 전환 보존 캐리포워드(fail-safe, SS2 전환 보호 게이트 데이터 보존) ──
+def _prior_shopping_row_with_conv(db):
+    """직전 런에서 적재된 shopping 성과행 + 전환(맥세이프, clk=12·cost=3000·purchase 전환 2)."""
+    db.add(NaverSearchTermDaily(
+        ad_date=date(2026, 7, 21), campaign_id="cmp-01", adgroup_id="grp-1",
+        search_term="맥세이프", source="shopping", imp=50, clk=12, cost=3000, rank_sum=15,
+        conv_purchase_cnt=2, conv_direct_cnt=1, conv_purchase_amt=31800, cart_cnt=1, cart_amt=5000,
+    ))
+    db.commit()
+
+
+def _fresh_shopping_perf(report_tp, date_from, date_to):
+    """SHOPPINGKEYWORD_DETAIL는 성과만 신선 수집(전환 컬럼 없음 → delete+insert가 0 초기화)."""
+    if report_tp == "SHOPPINGKEYWORD_DETAIL":
+        return [{"date": "2026-07-21", "campaign_id": "cmp-01", "adgroup_id": "grp-1",
+                  "search_term": "맥세이프", "imp": 60, "clk": 15, "cost": 3600, "rank_sum": 18}]
+    return []
+
+
+def test_ingest_daily_carryforward_preserves_conv_when_report_absent(db, monkeypatch):
+    """전환 보고서 일시 부재([]) 시에도 delete+insert 전 전환이 캐리포워드로 보존된다.
+    이게 없으면 성과행 교체로 전환이 0이 되어 SS2 전환 보호 게이트가 무력화된다."""
+    _prior_shopping_row_with_conv(db)
+    monkeypatch.setattr(search_term_ingest, "fetch_search_term_daily", _fresh_shopping_perf)
+    monkeypatch.setattr(search_term_ingest, "request_missing_expkeyword_reports", lambda a, b: [])
+    monkeypatch.setattr(search_term_ingest, "fetch_search_term_conversion", lambda a, b: [])  # 보고서 부재
+
+    result = search_term_ingest.ingest_search_term_daily(db, date(2026, 7, 21), date(2026, 7, 21))
+    assert result["conversion_carryforward"] == 1
+    assert result["conversion"] == {"conv_rows": 0, "merged": 0, "inserted": 0}
+
+    row = db.query(NaverSearchTermDaily).filter(NaverSearchTermDaily.source == "shopping").one()
+    assert row.imp == 60 and row.clk == 15 and row.cost == 3600  # 성과는 신선값으로 교체
+    # 전환은 캐리포워드로 보존(0으로 소실되지 않음)
+    assert row.conv_purchase_cnt == 2 and row.conv_direct_cnt == 1 and row.conv_purchase_amt == 31800
+    assert row.cart_cnt == 1 and row.cart_amt == 5000
+
+
+def test_ingest_daily_fresh_report_overwrites_carryforward(db, monkeypatch):
+    """캐리포워드 후 신선한 CONVERSION 보고서가 오면 최신값으로 SET(멱등 유지 — 3배 누적 없음)."""
+    _prior_shopping_row_with_conv(db)
+    monkeypatch.setattr(search_term_ingest, "fetch_search_term_daily", _fresh_shopping_perf)
+    monkeypatch.setattr(search_term_ingest, "request_missing_expkeyword_reports", lambda a, b: [])
+    monkeypatch.setattr(search_term_ingest, "fetch_search_term_conversion", lambda a, b: [
+        {"date": "2026-07-21", "campaign_id": "cmp-01", "adgroup_id": "grp-1", "search_term": "맥세이프",
+         "conv_purchase_cnt": 5, "conv_direct_cnt": 3, "conv_purchase_amt": 79500,
+         "cart_cnt": 4, "cart_amt": 12000},
+    ])
+
+    result = search_term_ingest.ingest_search_term_daily(db, date(2026, 7, 21), date(2026, 7, 21))
+    assert result["conversion_carryforward"] == 1     # 캐리포워드는 실행됐지만
+    assert result["conversion"]["merged"] == 1        # 보고서가 최신값으로 덮음
+
+    row = db.query(NaverSearchTermDaily).filter(NaverSearchTermDaily.source == "shopping").one()
+    # 캐리포워드값(2/1/31800/1/5000)이 아니라 신선 보고서값
+    assert row.conv_purchase_cnt == 5 and row.conv_direct_cnt == 3 and row.conv_purchase_amt == 79500
+    assert row.cart_cnt == 4 and row.cart_amt == 12000
+
+
+def test_ingest_daily_carryforward_reinserts_zero_perf_when_perf_dropped(db, monkeypatch):
+    """성과가 사라진(오늘 신선 보고서에 없는) 전환 grain은 0-성과 행으로 재삽입해 전환 보존."""
+    _prior_shopping_row_with_conv(db)
+
+    def _perf_without_maxsafe(report_tp, date_from, date_to):
+        if report_tp == "SHOPPINGKEYWORD_DETAIL":
+            # "맥세이프"는 오늘 성과 보고서에 없음 → delete로 사라짐 → 캐리포워드가 0-성과로 되살림
+            return [{"date": "2026-07-21", "campaign_id": "cmp-01", "adgroup_id": "grp-1",
+                      "search_term": "다른검색어", "imp": 10, "clk": 1, "cost": 100, "rank_sum": 3}]
+        return []
+    monkeypatch.setattr(search_term_ingest, "fetch_search_term_daily", _perf_without_maxsafe)
+    monkeypatch.setattr(search_term_ingest, "request_missing_expkeyword_reports", lambda a, b: [])
+    monkeypatch.setattr(search_term_ingest, "fetch_search_term_conversion", lambda a, b: [])
+
+    result = search_term_ingest.ingest_search_term_daily(db, date(2026, 7, 21), date(2026, 7, 21))
+    assert result["conversion_carryforward"] == 1
+
+    row = db.query(NaverSearchTermDaily).filter(
+        NaverSearchTermDaily.source == "shopping", NaverSearchTermDaily.search_term == "맥세이프",
+    ).one()
+    assert row.imp == 0 and row.clk == 0 and row.cost == 0  # 성과 소멸 → 0-성과 행
+    assert row.conv_purchase_cnt == 2 and row.conv_purchase_amt == 31800  # 전환 보존

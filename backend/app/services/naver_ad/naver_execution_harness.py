@@ -29,9 +29,17 @@ import json
 import logging
 from datetime import datetime, timedelta
 
+from sqlalchemy import func as sqlfunc
 from sqlalchemy.orm import Session
 
-from app.models import NaverCampaignSettings, NaverChangeLog, NaverEntity, NaverHourlySnapshot, NaverProposal
+from app.models import (
+    NaverCampaignSettings,
+    NaverChangeLog,
+    NaverEntity,
+    NaverHourlySnapshot,
+    NaverProposal,
+    NaverSearchTermDaily,
+)
 from app.services.naver_ad import (
     account_diagnosis,
     campaign_target_resolver,
@@ -668,6 +676,25 @@ def _count_search_term_excludes_today(db: Session, now: datetime) -> int:
     )
 
 
+def _search_term_conversions_in_window(db: Session, adgroup_id: str, search_term: str, now: datetime) -> int:
+    """실행 시점 전환 재검증(GATE ⑥, PLAN §3 SS3-A) — rolling 창 내 (adgroup_id, 검색어)
+    purchase 전환수 합. SS2 판정 창(search_term_judge._SS_WINDOW_DAYS)을 그대로 재사용해
+    판정↔실행 사이의 신선도 갭을 메운다. source를 가르지 않고 그룹+검색어로 합산한다
+    (파워링크 source는 전환이 항상 0이라 합산해도 무해, 보수적으로 그룹 내 전환을 전부 본다)."""
+    window_from = now.date() - timedelta(days=search_term_judge._SS_WINDOW_DAYS - 1)
+    total = (
+        db.query(sqlfunc.coalesce(sqlfunc.sum(NaverSearchTermDaily.conv_purchase_cnt), 0))
+        .filter(
+            NaverSearchTermDaily.adgroup_id == adgroup_id,
+            NaverSearchTermDaily.search_term == search_term,
+            NaverSearchTermDaily.ad_date >= window_from,
+            NaverSearchTermDaily.ad_date <= now.date(),
+        )
+        .scalar()
+    )
+    return int(total or 0)
+
+
 def _execute_search_term_exclude(db: Session, proposal: NaverProposal, now: datetime) -> NaverChangeLog:
     """검색어 제외 실쓰기 1건 (SS3-A, PLAN §3). naver_sa_writer.add_restricted_keywords로
     파워링크(WEB_SITE) 광고그룹에 제외키워드를 등록한다. _execute_add_negative_keyword와 동일
@@ -675,13 +702,18 @@ def _execute_search_term_exclude(db: Session, proposal: NaverProposal, now: date
       · SHOPPING 명시 거부(§실측-0): ncc restricted-keywords API가 SHOPPING 그룹 쓰기 불가
         (HTTP 400 code 3728 실측). writer도 WEB_SITE만 허용(fail-closed 최종 관문)이지만, 여기서
         엔티티 campaign_type='SHOPPING'을 먼저 걸러 무의미한 API 왕복·오해석을 차단(이중 방벽).
-      · 일일 캡(§1 4) 2단 검증(codex[P2] TOCTOU): 사전 캡 검사(쓰기 전 count)만으로는 원자적이지
-        않다 — 동시 Confirm 2건이 둘 다 사전 검사를 통과한 뒤 각자 네이버에 실제로 쓰기를
-        가할 수 있다(캡을 뚫음). 그래서 ①쓰기 전 카운트로 hold([실행 불가], 이 함수 앞부분)
-        + ②**쓰기 성공 직후 재카운트**로 최종 확정한다 — 재카운트가 캡에 이미 도달했다면
-        (이번 건의 log_entry는 아직 커밋 전이므로, 그 사이 다른 Confirm이 먼저 커밋됐다는 뜻)
-        방금 등록한 제외키워드를 delete_restricted_keywords로 즉시 롤백하고 failed 종결한다
-        (제외는 되돌림 비용 있는 비대칭 액션이라 runaway 방지, §1 4).
+      · 실행 시점 전환 재검증(GATE ⑥, codex[P1] stale): 판정(SS2)↔실행(Confirm) 사이에 새 전환이
+        붙을 수 있어, 쓰기 직전 rolling 창(SS2와 동일 창)으로 (adgroup_id, 검색어) purchase 전환을
+        재조회해 ≥1이면 §1-1 전환 보호 게이트로 거부한다(fail-closed, 살아있는 증거는 제외 불가).
+      · 일일 캡(§1 4) 3중 방어(codex[P1/P2] TOCTOU): 커밋된 change_log만 세는 검사는 동시 Confirm
+        2건이 둘 다 통과한 뒤 각자 쓰기를 가할 수 있는 원자성 공백이 있다. 그래서
+        ①**사전 hold**(쓰기 전 커밋 count ≥ 캡이면 claim 없이 조기 종료) +
+        ②**캡 원자 예약**(claim 커밋 후 "커밋된 성공 + 현재 executing 제외 제안 수(자기 포함)"가
+        캡 초과면 쓰기 전 중단 — executing 예약을 함께 세어 동시 2건이 서로를 보고 양쪽 다
+        중단하는 과보수 fail-closed로 캡 관통을 원천 차단, claim 해제·failed·사람 재승인 재시도) +
+        ③**쓰기 후 재카운트 롤백**(최후 방벽 — 쓰기 성공 직후 재카운트가 캡 도달이면 방금 등록한
+        제외키워드를 delete_restricted_keywords로 즉시 원복하고 failed 종결).
+        제외는 되돌림 비용 있는 비대칭 액션이라 runaway 방지(§1 4).
     재조회 검증(등록 후 GET)·change_log 전건·킬스위치·클레임은 add_restricted_keywords writer와
     _claim_executing이 그대로 담당(_execute_add_negative_keyword와 동형).
 
@@ -717,7 +749,21 @@ def _execute_search_term_exclude(db: Session, proposal: NaverProposal, now: date
         _guard_failure(db, proposal, now, "exclude_search_term", reason)
         raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
 
-    # 일일 캡(§1 4) — 오늘 성공 제외 수가 캡 도달이면 hold(비대칭 액션 runaway 방지).
+    # 실행 시점 전환 재검증(GATE ⑥, PLAN §3 — codex[P1] stale 후보) — pending 제안이 묵은 사이
+    # 새 전환이 붙었을 수 있어, 쓰기 직전 최신 데이터로 §1-1 전환 보호 게이트를 다시 확인한다.
+    # SS2 판정 시점엔 전환 0이라 후보가 됐어도, Confirm 시점에 purchase 전환≥1이면 "살아있는
+    # 증거"이므로 제외를 거부한다(fail-closed).
+    conv_now = _search_term_conversions_in_window(db, proposal.adgroup_id, proposal.target_id, now)
+    if conv_now >= 1:
+        reason = (
+            f"[검색어제외] 실행 시점 전환 발생 — 보호 게이트 재검증 거부(rolling "
+            f"{search_term_judge._SS_WINDOW_DAYS}일 purchase 전환={conv_now}건≥1, §1-1). 판정↔실행 "
+            "사이 전환이 붙은 stale 후보 — 전환은 살아있는 증거라 제외 불가(fail-closed)"
+        )
+        _guard_failure(db, proposal, now, "exclude_search_term", reason)
+        raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
+
+    # 일일 캡(§1 4) — 오늘 성공 제외 수가 캡 도달이면 hold(비대칭 액션 runaway 방지, 조기 종료).
     excludes_today = _count_search_term_excludes_today(db, now)
     if excludes_today >= _SS_DAILY_EXCLUDE_CAP:
         reason = (
@@ -728,6 +774,31 @@ def _execute_search_term_exclude(db: Session, proposal: NaverProposal, now: date
         raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
 
     _claim_executing(db, proposal)
+
+    # 캡 원자적 예약(codex[P1] TOCTOU) — 자기 claim 커밋 후 = 이 제안이 status='executing'으로
+    # DB에 반영된 시점. 캡 산정을 "오늘 커밋된 성공 제외 + 현재 executing인 search_term_exclude
+    # 제안(자기 포함)"으로 잡고, 합이 캡을 넘으면 **쓰기 전에** 중단한다(claim 해제·failed). 커밋된
+    # change_log만 세던 사전/사후 검사는 동시 2건이 둘 다 검사를 통과한 뒤 각자 쓰기를 가할 수
+    # 있는 원자성 공백이 있었다(캡 관통). executing 예약을 함께 세면 동시 2건은 서로의 executing을
+    # 보아 양쪽 다 초과를 보고 중단한다 — 과보수(둘 다 안 쓰는 fail-closed, 사람이 재승인으로
+    # 재시도 가능)이지만 캡 관통은 원천 차단된다. 아래 "쓰기 후 재카운트+롤백"은 최후 방벽으로 유지.
+    committed_today = _count_search_term_excludes_today(db, now)
+    executing_excludes = (
+        db.query(NaverProposal)
+        .filter(
+            NaverProposal.proposal_type == search_term_judge.SEARCH_TERM_EXCLUDE_TYPE,
+            NaverProposal.status == "executing",
+        )
+        .count()
+    )
+    if committed_today + executing_excludes > _SS_DAILY_EXCLUDE_CAP:
+        reason = (
+            f"검색어 제외 일일 캡 원자 예약 초과(커밋 {committed_today}+executing {executing_excludes}"
+            f">{_SS_DAILY_EXCLUDE_CAP}, §1 4) — 동시 Confirm 경합 방지 위해 쓰기 전 중단"
+            "(claim 해제·failed, 캡 여유 회복 후 재승인 재시도)"
+        )
+        _guard_failure(db, proposal, now, "exclude_search_term", reason)
+        raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
 
     try:
         result = naver_sa_writer.add_restricted_keywords(proposal.adgroup_id, [proposal.target_id])
