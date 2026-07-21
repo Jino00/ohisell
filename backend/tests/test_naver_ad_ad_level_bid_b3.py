@@ -206,9 +206,13 @@ def test_get_ad_bid_parses_adattr():
 # ══════════════════════════════════════════════════════════════════
 def _ad_proposal(db, *, proposal_type="bid_down", target_bid=680, adgroup_id=GRP_ID,
                  campaign_id="cmp1", status="approved", approval_source=None, ceiling=100_000):
-    # BX3(P2①): 탐색 스텝은 harness 쓰기-경계 하드 게이트가 ceiling 마커를 요구(성공 경로는 넉넉히).
-    from app.services.naver_ad.bid_step_types import encode_exploration_ceiling
-    effect = encode_exploration_ceiling("테스트", ceiling) if proposal_type == "bid_up_explore" else "테스트"
+    # BX3(P2①·codex P1): 탐색 스텝은 ceiling 마커 + base_bid 마커(TOCTOU, step_base=800=ctx current)를
+    # 요구(성공 경로는 넉넉한 ceiling·일치 base_bid).
+    from app.services.naver_ad.bid_step_types import encode_base_bid, encode_exploration_ceiling
+    if proposal_type == "bid_up_explore":
+        effect = encode_base_bid(encode_exploration_ceiling("테스트", ceiling), 800)
+    else:
+        effect = "테스트"
     p = NaverProposal(
         proposal_type=proposal_type, target_type="ad", target_id=AD_ID,
         campaign_id=campaign_id, adgroup_id=adgroup_id, rationale="테스트", expected_effect=effect,

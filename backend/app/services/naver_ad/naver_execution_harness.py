@@ -808,6 +808,30 @@ def _execute_update_bid(db: Session, proposal: NaverProposal, now: datetime) -> 
             _guard_failure(db, proposal, now, "update_bid", reason)
             raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
 
+    # BX3 codex P1(기울기 연속성·TOCTOU): 탐색 스텝도 제안 시점 step_base(적응 스텝 산정 기준가)를
+    # base_bid 마커로 실어 보낸다 — rank-step과 동형 TOCTOU. 제안 생성(라이브 재조회)→실행(라이브
+    # 재조회) 사이 소재/그룹 입찰이 MOP·사람·외부로 바뀌었으면 산정 전제가 깨졌으므로 fail-closed
+    # 중단(재산정 없이 다음 사이클 fresh current로 재진입). ★탐색은 RANK_STEP_TYPES가 아니라 위
+    # 블록을 안 타므로 별도 게이트. 마커 부재/오염도 fail-closed(경로 밖 생성/변조 차단).
+    if proposal.proposal_type in EXPLORATION_STEP_TYPES:
+        exp_base = decode_base_bid(proposal.expected_effect)
+        if exp_base is None:
+            reason = (
+                "탐색 base_bid 마커 부재/오염(fail-closed) — 적응 스텝 산정 기준가 검증 없이 실행 "
+                "금지. run_hourly_lane 밖 생성/변조 제안 차단(codex P1 기울기 연속성·TOCTOU)"
+            )
+            _guard_failure(db, proposal, now, "update_bid", reason)
+            raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
+        exp_live = context.get("current_bid")
+        if exp_live is not None and int(exp_live) != exp_base:
+            reason = (
+                f"탐색 TOCTOU 중단(fail-closed) — 제안 시점 base_bid={exp_base}원 ≠ 실행 시점 "
+                f"라이브 bid={exp_live}원. 적응 스텝 전제(레버 입찰)가 그 사이 외부 변경으로 깨짐 — "
+                "재산정 없이 중단(다음 탐색 사이클이 fresh current로 재진입, codex P1)"
+            )
+            _guard_failure(db, proposal, now, "update_bid", reason)
+            raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
+
     # S3(D-NAO-43 성장 확장): adgroup 증액(bid_up/growth_bid_up)은 guardrail_gate._check_bid의
     # BEP 검사(roas_corrected/target_roas)가 그 값이 None이면 fail-open(검사를 건너뜀)이라,
     # 컨텍스트가 완전히 채워지지 않은 채로 guardrail_gate에 넘기면 D-NAO-1 이익하한이 조용히
@@ -1233,6 +1257,13 @@ def real_write_blocker(proposal: NaverProposal) -> str | None:
                 return (
                     f"탐색 경제성 상한 초과 — target_bid={proposal.target_bid}원 > 상한 {ceiling}원"
                     "('클릭당 확정 손해' 진입 금지, 실행 버튼 비활성)"
+                )
+            # codex P1(TOCTOU): base_bid 마커 존재 정적 확인(라이브 비교는 _execute_update_bid).
+            # 마커 부재/오염 = 경로 밖 생성/변조 → 콘솔 실행 버튼 비활성(rank-step 마커 계약 동형).
+            if decode_base_bid(proposal.expected_effect) is None:
+                return (
+                    "탐색 base_bid 마커 부재/오염 — 적응 스텝 산정 기준가 없이 실행 금지"
+                    "(실행 버튼 비활성, codex P1 TOCTOU 정적 검증)"
                 )
         # BX2(D-NAO-70·71): 소재(ad) 실쓰기 구조 게이트(콘솔 executable 판정) — _execute_update_bid의
         # 최종 경계 가드와 동일 판정(이중 방벽). 정적 비교만(라이브 재조회 없음, 이 함수 설계 유지).

@@ -232,12 +232,30 @@ def test_ladder_reactivate_when_prior_click_but_24h_stagnant():
     assert verdict == "reactivate" and "재가동" in reason
 
 
-def test_ladder_not_reactivate_when_flow_alive():
-    """④ 대조: 정착 이력 있으나 최근 24h 클릭>0(흐름 살아있음) → step_up(정체 아님)."""
-    verdict, _ = exploration.ladder_judgment(
+def test_ladder_hold_when_flow_alive():
+    """④ 최근 24h 클릭 흐름 있음(recent_flow_clk>0) → stop_observe(흐름 살아있으면 이번 사이클
+    무클릭이어도 상향 정지 — codex P1 자정 리셋 수정)."""
+    verdict, reason = exploration.ladder_judgment(
         {"bid": 900, "rank": 4.5}, {"clk": 0, "avg_rank": 5.0}, ceiling=1600, current_bid=1000,
         recent_flow_clk=2, settled_clk=4)
-    assert verdict == "step_up"
+    assert verdict == "stop_observe" and "흐름" in reason
+
+
+def test_ladder_fail_toward_hold_when_flow_unavailable():
+    """codex P1: 롤링 24h 흐름 확정 불가(flow_available=False) → stop_observe(fail-toward-hold),
+    step_up/reactivate 대신 관측 유지(안전 방향)."""
+    verdict, reason = exploration.ladder_judgment(
+        {"bid": 900, "rank": 5.0}, {"clk": 0, "avg_rank": 6.0}, ceiling=1600, current_bid=1000,
+        recent_flow_clk=0, settled_clk=4, flow_available=False)
+    assert verdict == "stop_observe" and "fail-toward-hold" in reason
+
+
+def test_ladder_reactivate_requires_flow_available():
+    """대조: flow_available=True·흐름0 정체·과거 이력 → reactivate(정상 재가동)."""
+    verdict, _ = exploration.ladder_judgment(
+        {"bid": 900, "rank": 5.0}, {"clk": 0, "avg_rank": 6.0}, ceiling=1600, current_bid=1000,
+        recent_flow_clk=0, settled_clk=4, flow_available=True)
+    assert verdict == "reactivate"
 
 
 def test_ladder_reactivate_via_last_probe_had_click():

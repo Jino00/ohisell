@@ -102,11 +102,11 @@ def strip_base_bid_marker(expected_effect: str | None) -> str | None:
 # _execute_update_bid이 EXPLORATION_STEP_TYPES 실행 직전 이 상한을 디코드해 target_bid>상한이면
 # fail-closed 차단한다(D-NAO-71로 유일 가격 브레이크 = 이중 게이트). base_bid 마커와 동형(신규
 # 마이그레이션 금지 — 기존 Text 컬럼 재사용, 끝 anchor suffix·단일 매치 엄격 디코드).
-# ★탐색 스텝은 rank-step 아님(RANK_STEP_TYPES 서로소)이라 base_bid 마커를 달지 않는다 → 탐색
-#   expected_effect의 유일 suffix 마커는 이 ceiling 마커다(둘이 섞이지 않음).
+# ★탐색 스텝(codex P1)은 ceiling 마커 + base_bid 마커(TOCTOU) 둘 다 단다 — ceiling을 먼저 붙이고
+#   base_bid를 끝(suffix)에 붙인다(base_bid decode의 strict-suffix 계약 보존). 그래서 ceiling decode는
+#   suffix가 아니라 **정확히 1개 발생**(distinct tag)으로 판정한다(둘이 섞여도 각자 정확히 추출).
 _CEILING_TAG = "explore_ceiling"
 _CEILING_RE = re.compile(r"\[\[explore_ceiling=(\d+)\]\]")
-_CEILING_SUFFIX_RE = re.compile(r"\[\[explore_ceiling=(\d+)\]\]\s*$")
 
 
 def encode_exploration_ceiling(expected_effect: str | None, ceiling: int) -> str:
@@ -115,15 +115,15 @@ def encode_exploration_ceiling(expected_effect: str | None, ceiling: int) -> str
 
 
 def decode_exploration_ceiling(expected_effect: str | None) -> int | None:
-    """expected_effect에서 ceiling 마커를 추출 — **엄격 모드**(base_bid decode와 동형):
-    ① 마커 정확히 1개 ② suffix(끝) 위치여야 유효. 그 외(부재/중복/본문 오염)는 None —
-    소비자(harness 탐색 상한 게이트)가 None을 fail-closed로 처리한다."""
+    """expected_effect에서 ceiling 마커를 추출 — **정확히 1개 발생**이어야 유효(distinct tag이라
+    위치 무관·base_bid 마커가 뒤에 붙어도 정확 추출). 부재/중복(오염)은 None — 소비자(harness 탐색
+    상한 게이트)가 None을 fail-closed로 처리한다."""
     if not expected_effect:
         return None
-    if len(_CEILING_RE.findall(expected_effect)) != 1:
+    matches = _CEILING_RE.findall(expected_effect)
+    if len(matches) != 1:
         return None
-    m = _CEILING_SUFFIX_RE.search(expected_effect)
-    return int(m.group(1)) if m else None
+    return int(matches[0])
 
 
 def is_bid_up(proposal_type: str | None) -> bool:

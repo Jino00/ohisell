@@ -381,7 +381,7 @@ def exploration_trigger(
 
 def ladder_judgment(
     last_probe: dict | None, since_step_stats: dict, ceiling: int, current_bid: int,
-    *, recent_flow_clk: int = 0, settled_clk: int = 0,
+    *, recent_flow_clk: int = 0, settled_clk: int = 0, flow_available: bool = True,
 ) -> tuple[str, str]:
     """사이클 래더 판정(순수·PLAN §1 가드4, D-NAO-71 18:56+19:01) — **순위 피드백 상태 기계**.
     매 탐색 사이클(≥2h)마다 직전 스텝 이후의 순위·클릭으로 다음 수를 정한다(D+1 고정 아님).
@@ -396,8 +396,11 @@ def ladder_judgment(
                    avg_rank=None(imp=0 → 순위 관측 불가).
       ceiling:     경제성 상한(원, exploration_ceiling). 경제 증거 전무면 =current_bid(fail-closed).
       current_bid: 현(스텝 기준) 입찰가.
-      recent_flow_clk: 최근 24h(_EXPLORATION_FLOW_WINDOW_H) 클릭 합(정체 신호, 신선).
+      recent_flow_clk: **롤링 24h**(_EXPLORATION_FLOW_WINDOW_H, 자정 경계 넘음) 클릭 합 — 흐름/정체
+         신호. BX3 레인이 어제 시간별(NaverKeywordHourly)+오늘 curve로 조립(codex P1 자정 리셋 수정).
       settled_clk: 정착창(D-8~D-2) 클릭 합(과거 클릭 이력 = hold 상태 신호).
+      flow_available: 롤링 24h 창을 실제로 확정했는지(어제 시간별 데이터 가용). False면 정체를
+         확언할 수 없어 fail-toward-hold(스텝 대신 관측 — codex P1 안전 방향).
 
     상태 기계(우선순위 순):
       ⓪ last_probe None → 'start'(첫 탐색) — 단 current_bid≥ceiling이면 'capped'(발동 불가).
@@ -407,10 +410,12 @@ def ladder_judgment(
          진단 종료 — 상한까지 낭비 상향 차단, 파워링크 병리와 동형).
       ③ 무클릭 ∧ 2.5<rank≤4(밴드 도달) → 'stop_observe'(상향 정지·클릭 흐름 관측 — 과열밴드
          진입 금지).
-      ④ 무클릭 ∧ 밴드 밖(rank>4 또는 imp=0) ∧ current_bid≥ceiling → 'capped'(경제성 상한 도달·
-         탐색 종료).
-      ⑤ 무클릭 ∧ 밴드 밖 ∧ 상한 미도달: 과거 클릭 이력(settled_clk>0 또는 last_probe.had_click)
-         ∧ 최근 24h 클릭0 정체 → 'reactivate'([탐색UP·재가동]) / 아니면 'step_up'(적응 스텝 상향).
+      ④ 무클릭 ∧ 밴드 밖(rank>4 또는 imp=0) ∧ 최근 24h 클릭 흐름 있음(recent_flow_clk>0) →
+         'stop_observe'(흐름 살아있으면 이번 사이클 무클릭이어도 상향 정지, codex P1 자정 리셋 수정).
+         흐름 확정 불가(flow_available False)도 'stop_observe'(fail-toward-hold).
+      ⑤ 무클릭 ∧ 밴드 밖 ∧ 흐름 0 정체 ∧ current_bid≥ceiling → 'capped'(경제성 상한 도달).
+      ⑥ 무클릭 ∧ 밴드 밖 ∧ 흐름 0 정체 ∧ 상한 미도달: 과거 클릭 이력(settled_clk>0 또는
+         last_probe.had_click) → 'reactivate'([탐색UP·재가동]) / 아니면 'step_up'(적응 스텝 상향).
     """
     if last_probe is None:
         if current_bid >= ceiling:
@@ -440,16 +445,27 @@ def ladder_judgment(
                 f"밴드 도달(순위 {float(r):.2f}≤{_EXPLORATION_BAND_HIGH})·무클릭 — 상향 정지·클릭 흐름 관측(과열밴드 진입 금지)",
             )
 
-    # 밴드 밖(rank>4) 또는 imp=0(rank None) · 무클릭 — 상향 여지.
-    # ④ 경제성 상한 도달 → 탐색 종료.
-    if current_bid >= ceiling:
-        return ("capped", f"밴드 밖·무클릭·경제성 상한 도달(현 {current_bid}≥상한 {ceiling}) — 탐색 종료·관찰 표기")
+    # 밴드 밖(rank>4) 또는 imp=0(rank None) · 이번 사이클 무클릭 — 상향 여지 판정.
+    # ④ 최근 24h 클릭 흐름 있음 → 상향 정지·관측(흐름 살아있으면 이번 사이클 무클릭이어도 hold;
+    #    codex P1 자정 리셋 수정 — 어제 늦은 시각 클릭이 자정 후 사라져 오탐 step_up 되던 것 차단).
+    if recent_flow_clk > 0:
+        return (
+            "stop_observe",
+            f"최근 {_EXPLORATION_FLOW_WINDOW_H}h 클릭 흐름 있음(flow={recent_flow_clk}) — 상향 정지·관측(hold)",
+        )
+    # 흐름 확정 불가(어제 시간별 미가동) → fail-toward-hold(정체 확언 불가 = 안전방향 관측, codex P1).
+    if not flow_available:
+        return ("stop_observe", "롤링 24h 흐름 확정 불가(어제 시간별 미가동) — 관측 유지(fail-toward-hold)")
 
-    # ⑤ 재가동 vs 정상 스텝: 과거 클릭 이력 ∧ 최근 24h 클릭0 정체 → 재가동.
+    # ⑤ 흐름 0 정체 ∧ 경제성 상한 도달 → 탐색 종료.
+    if current_bid >= ceiling:
+        return ("capped", f"밴드 밖·흐름0 정체·경제성 상한 도달(현 {current_bid}≥상한 {ceiling}) — 탐색 종료·관찰 표기")
+
+    # ⑥ 흐름 0 정체 ∧ 상한 미도달: 과거 클릭 이력 → 재가동 / 아니면 정상 적응 스텝.
     had_prior_click = settled_clk > 0 or bool(last_probe.get("had_click"))
-    if had_prior_click and recent_flow_clk == 0:
+    if had_prior_click:
         return (
             "reactivate",
             f"[탐색UP·재가동] 과거 클릭 이력(정착 clk={settled_clk})·최근 {_EXPLORATION_FLOW_WINDOW_H}h 클릭0 정체 — 재가동 스텝",
         )
-    return ("step_up", f"밴드 밖·무클릭·상한 미도달(현 {current_bid}<상한 {ceiling}) — 적응 스텝 상향")
+    return ("step_up", f"밴드 밖·흐름0 정체·상한 미도달(현 {current_bid}<상한 {ceiling}) — 적응 스텝 상향")

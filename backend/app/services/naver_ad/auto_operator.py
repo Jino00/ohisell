@@ -30,6 +30,7 @@ from app.models import (
     NaverChangeLog,
     NaverEntity,
     NaverHourlySnapshot,
+    NaverKeywordHourly,
     NaverProposal,
     NaverRetroSignal,
 )
@@ -1535,7 +1536,35 @@ def _exploration_last_step(db: Session, adgroup_id: str) -> dict | None:
         "after_bid": _exploration_bid_from_change_value(row.after_value),
         "changed_at": row.changed_at,
         "target_type": row.entity_type,
+        "target_id": row.entity_id,  # codex P1: 기울기 연속성 판정용(직전 스텝의 실쓰기 대상)
     }
+
+
+def _exploration_yesterday_flow(db: Session, adgroup_id: str, yesterday: date, from_hour: int) -> int | None:
+    """어제 [from_hour, 23] 시간대 이 그룹 clk 합(롤링 24h 창의 어제 부분, codex P1 자정 리셋).
+    출처: NaverKeywordHourly(keyword_hourly_sweep이 SHOPPING 그룹을 keyword_id='' sentinel →
+    entity_type='adgroup'·entity_id=adgroup_id로 축적, 365일 보존). 반환:
+    - int: 어제 스윕이 돈 날(그 날짜 행 존재) → 이 그룹 clk 합(그룹 행 부재=무활동=0).
+    - None: 어제 스윕이 아예 안 돈 날(그 날짜 행 전무) → 롤링 창 확정 불가(fail-toward-hold 신호).
+    (전자와 후자를 구분: 그룹만 없으면 무활동 0, 날짜 전체가 없으면 파이프라인 갭 None.)"""
+    any_row = (
+        db.query(NaverKeywordHourly.id)
+        .filter(NaverKeywordHourly.ad_date == yesterday)
+        .first()
+    )
+    if any_row is None:
+        return None  # 어제 시간별 스윕 미가동 — 롤링 창 확정 불가
+    (clk,) = (
+        db.query(sqlfunc.coalesce(sqlfunc.sum(NaverKeywordHourly.clk), 0))
+        .filter(
+            NaverKeywordHourly.ad_date == yesterday,
+            NaverKeywordHourly.entity_type == "adgroup",
+            NaverKeywordHourly.entity_id == adgroup_id,
+            NaverKeywordHourly.hour >= from_hour,
+        )
+        .one()
+    )
+    return int(clk)
 
 
 def _exploration_weighted_rank(buckets: list[dict]) -> Decimal | None:
@@ -1550,21 +1579,23 @@ def _exploration_weighted_rank(buckets: list[dict]) -> Decimal | None:
     return weighted / Decimal(rank_imp)
 
 
-def _exploration_observe(curve: list[dict], now: datetime, last_step: dict | None) -> dict:
-    """시간별 관측 조립(PLAN §2) — 오늘 hh24 curve에서 래더/적응 스텝 원료를 뽑는다.
-    - since(직전 스텝 이후 사이클): [step_hour, now.hour) 완료 버킷의 imp/clk/cost + 가중 avg_rank
-      (직전 스텝이 오늘이면 step_hour=그 시각, 아니면 0=오늘 전체).
+def _exploration_observe(db: Session, adgroup_id: str, curve: list[dict], now: datetime, last_step: dict | None) -> dict:
+    """시간별 관측 조립(PLAN §2) — 오늘 hh24 curve(+어제 시간별)에서 래더/적응 스텝 원료를 뽑는다.
+    - since(직전 스텝 이후 사이클): (step_hour, now.hour) **완료 버킷만**(step_hour 버킷 제외 —
+      codex P2: 스텝 시각 버킷은 스텝 前 클릭이 섞여 false stop·기울기 오염). 직전 스텝이 오늘이
+      아니면 step_hour=-1(오늘 전체 [0, now.hour) 포함).
     - rank_before(적응 스텝 Δ순위/Δ입찰 기울기용): [0, step_hour) 완료 버킷 가중 avg_rank
       (직전 스텝이 오늘·step_hour>0일 때만 — 스텝 전 순위).
-    - flow_clk(최근 24h 정체 신호): [now.hour-24, now.hour) 완료 버킷 clk 합. ★curve가 오늘분만
-      이라 실효 창은 [0, now.hour) — 자정 넘는 24h는 단일 fetch 유지 위해 오늘 완료분으로 근사
-      (첫 주 실측 후 재판정, PLAN §실측). 반환 {"since","rank_before","flow_clk"}."""
+    - flow_clk(**롤링 24h** 정체 신호, codex P1 자정 리셋 수정): 오늘 [0, now.hour) + 어제
+      [now.hour, 23] 완료 버킷 clk 합. 어제 부분은 NaverKeywordHourly(어제 스윕). 어제 확정 불가
+      (스윕 미가동)면 flow_available=False → fail-toward-hold. 반환 {"since","rank_before",
+      "flow_clk","flow_available"}."""
     if (last_step is not None and last_step.get("changed_at") is not None
             and last_step["changed_at"].date() == now.date()):
         step_hour = last_step["changed_at"].hour
     else:
-        step_hour = 0
-    since = [h for h in curve if step_hour <= h["hour"] < now.hour]
+        step_hour = -1  # 오늘 스텝 없음 → 오늘 전체 완료분 포함(0시 버킷도)
+    since = [h for h in curve if step_hour < h["hour"] < now.hour]  # step_hour 버킷 제외(codex P2)
     since_stats = {
         "imp": sum(h["imp"] for h in since),
         "clk": sum(h["clk"] for h in since),
@@ -1575,9 +1606,15 @@ def _exploration_observe(curve: list[dict], now: datetime, last_step: dict | Non
         rank_before = _exploration_weighted_rank([h for h in curve if h["hour"] < step_hour])
     else:
         rank_before = None
-    fstart = max(0, now.hour - exploration._EXPLORATION_FLOW_WINDOW_H)
-    flow_clk = sum(h["clk"] for h in curve if fstart <= h["hour"] < now.hour)
-    return {"since": since_stats, "rank_before": rank_before, "flow_clk": flow_clk}
+
+    # 롤링 24h 흐름: 오늘 [0, now.hour) 완료분 + 어제 [now.hour, 23](24-now.hour 시간 = 24h 채움).
+    today_flow = sum(h["clk"] for h in curve if 0 <= h["hour"] < now.hour)
+    yesterday_flow = _exploration_yesterday_flow(db, adgroup_id, now.date() - timedelta(days=1), now.hour)
+    if yesterday_flow is None:
+        flow_clk, flow_available = today_flow, False  # 어제 확정 불가 — fail-toward-hold
+    else:
+        flow_clk, flow_available = today_flow + yesterday_flow, True
+    return {"since": since_stats, "rank_before": rank_before, "flow_clk": flow_clk, "flow_available": flow_available}
 
 
 def _run_exploration_for_campaign(
@@ -1647,14 +1684,26 @@ def _run_exploration_for_campaign(
             db, campaign_id, adgroup_id, step_base, window_from, window_to,
         )
 
-        obs = _exploration_observe(curve, now, last_step)
+        obs = _exploration_observe(db, adgroup_id, curve, now, last_step)
         current_rank = obs["since"]["avg_rank"]
-        last_probe = None
+        # ladder 존재 프로브: 직전 탐색 스텝이 있으면 not None(상태 기계 'start' 여부만 결정).
+        ladder_probe = None
         if last_step is not None:
-            last_probe = {"bid": last_step["before_bid"], "rank": obs["rank_before"]}
+            ladder_probe = {"bid": last_step["before_bid"], "rank": obs["rank_before"]}
+        # codex P1 기울기 연속성: 직전 성공 스텝의 대상(target_type/id)이 이번 발사 대상과 같고
+        # 현재 라이브 입찰 == 직전 after_bid일 때만 Δ순위/Δ입찰 기울기를 쓴다 — 레버 전환(ad↔group)·
+        # 외부 수동 변경으로 오염된 기울기로 30% 풀스텝이 나가는 것 차단(불일치 → slope 폐기·보수 10%).
+        continuity_ok = (
+            last_step is not None
+            and last_step.get("target_type") == exec_target_type
+            and last_step.get("target_id") == exec_target_id
+            and last_step.get("after_bid") is not None
+            and step_base == last_step["after_bid"]
+        )
+        slope_probe = {"bid": last_step["before_bid"], "rank": obs["rank_before"]} if continuity_ok else None
         verdict, vreason = exploration.ladder_judgment(
-            last_probe, obs["since"], ceiling, step_base,
-            recent_flow_clk=obs["flow_clk"], settled_clk=settled_clk,
+            ladder_probe, obs["since"], ceiling, step_base,
+            recent_flow_clk=obs["flow_clk"], settled_clk=settled_clk, flow_available=obs["flow_available"],
         )
 
         if verdict == "capped":
@@ -1676,9 +1725,10 @@ def _run_exploration_for_campaign(
             result["held"].append({"target_id": exec_target_id, "reason": f"[탐색] {vreason}"})
             continue
 
-        # start / step_up / reactivate → 적응 스텝 발사.
+        # start / step_up / reactivate → 적응 스텝 발사. 기울기는 연속성 검증된 slope_probe만 사용
+        # (불연속=None → 보수 10% 스텝, codex P1).
         target = exploration.adaptive_step(
-            step_base, current_rank, exploration._EXPLORATION_TARGET_BAND, last_probe,
+            step_base, current_rank, exploration._EXPLORATION_TARGET_BAND, slope_probe,
             exploration._EXPLORATION_STEP_PCT,
         )
         if target is None:
@@ -1707,11 +1757,17 @@ def _run_exploration_for_campaign(
             "2.5~4)에 최소 입찰로 진입시키는 적응 스텝(D-NAO-70·71). 되돌림=스톱로스/BEP/손실고삐 "
             "백스톱·2h 사이클 재평가."
         )
+        # expected_effect 마커: ceiling(쓰기경계 상한 재검증) 먼저, base_bid(TOCTOU, step_base) 끝에
+        # (base_bid의 strict-suffix 계약 보존 — codex P1 기울기 연속성·TOCTOU). harness가 실행 직전
+        # 라이브 입찰 == base_bid 재검증(외부 변경 시 fail-closed).
+        expected_effect = encode_base_bid(
+            encode_exploration_ceiling(effect_body, ceiling), step_base,
+        )
         proposal = NaverProposal(
             proposal_type="bid_up_explore", target_type=exec_target_type, target_id=exec_target_id,
             campaign_id=campaign_id, adgroup_id=adgroup_id,
             rationale=f"[{rank_tag}] {vreason}",
-            expected_effect=encode_exploration_ceiling(effect_body, ceiling),
+            expected_effect=expected_effect,
             status="approved", target_bid=target, approval_source=exploration.APPROVAL_SOURCE_EXPLORE,
         )
         db.add(proposal)

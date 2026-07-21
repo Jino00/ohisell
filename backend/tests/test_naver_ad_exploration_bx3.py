@@ -22,13 +22,23 @@ from app.models import (
     NaverChangeLog,
     NaverEntity,
     NaverHourlySnapshot,
+    NaverKeywordHourly,
     NaverProductBep,
     NaverProposal,
     NaverRetroSignal,
 )
 from app.services.naver_ad import auto_operator, exploration
 from app.services.naver_ad import naver_execution_harness as harness
-from app.services.naver_ad.bid_step_types import decode_exploration_ceiling, encode_exploration_ceiling
+from app.services.naver_ad.bid_step_types import (
+    decode_exploration_ceiling,
+    encode_base_bid,
+    encode_exploration_ceiling,
+)
+
+
+def _explore_effect(ceiling, base_bid):
+    """탐색 expected_effect(ceiling 먼저·base_bid 끝) — 레인 마커 조립과 동일."""
+    return encode_base_bid(encode_exploration_ceiling("x", ceiling), base_bid)
 
 CAMP = "cmp-shop"
 GRP = "ag-explore"
@@ -64,6 +74,19 @@ def _retro(db, *, target_id, board="shopping_group_bep", asof=ASOF_FRESH, direct
     db.commit()
 
 
+YESTERDAY = date(2026, 7, 20)  # NOW.date()-1 (롤링 24h 창의 어제 부분)
+
+
+def _hourly(db, *, adgroup_id, hour, clk, ad_date=YESTERDAY, imp=20, cost=0, avg_rank=None):
+    """어제 시간별 1행(NaverKeywordHourly, SHOPPING 그룹=entity_type='adgroup') — 롤링 24h 원료."""
+    db.add(NaverKeywordHourly(
+        ad_date=ad_date, hour=hour, entity_type="adgroup", entity_id=adgroup_id, adgroup_id="",
+        campaign_id=CAMP, campaign_type="SHOPPING", imp=imp, clk=clk, cost=cost, conv_cnt=0,
+        avg_rank=avg_rank,
+    ))
+    db.commit()
+
+
 def _setup(db, *, campaign_type="SHOPPING", settle_clk=3, settle_conv=30000, group_bid=1000,
            adgroup_id=GRP, bep_roas="0.5"):
     """탐색 후보 SHOPPING 그룹 시드 — 캠페인/그룹 엔티티(on)·정착창 실적(clk<10=핫셋 미달)·
@@ -90,6 +113,9 @@ def _setup(db, *, campaign_type="SHOPPING", settle_clk=3, settle_conv=30000, gro
     # GATE P2-risk6: daily 손실 게이트(_bleeding_hold_reason)는 소급채점 신선도(latest_asof≥today-1)를
     # 요구한다 — 신선 더미 신호(우리 그룹 아님)를 심어 신선도 통과 + 우리 그룹은 손실 보드 밖(=정상 탐색).
     _retro(db, target_id="dummy-fresh")
+    # codex P1: 롤링 24h 창의 어제 스윕이 돌았음을 표시(더미 그룹 1행) → flow_available=True.
+    # 우리 그룹은 어제 행 없음 = 무활동(yesterday_flow=0). 흐름 시나리오는 테스트별로 _hourly 추가.
+    _hourly(db, adgroup_id="dummy-hr", hour=10, clk=0)
 
 
 def _prior_step(db, *, adgroup_id=GRP, target_type="adgroup", target_id=GRP,
@@ -338,6 +364,99 @@ def test_lane_leash_skips_exploration(db):
     assert saved.rationale.startswith("[순위고삐]") and saved.proposal_type == "bid_down"
 
 
+# ══════════════════════ 롤링 24h 흐름 창(codex P1 자정 리셋) ══════════════════════
+
+def test_lane_rolling_flow_holds_when_yesterday_late_click(db):
+    """codex P1: 어제 23시 클릭·오늘 0클릭 → 00:20에 hold(step_up 아님). 자정 리셋 오탐 차단."""
+    _setup(db)
+    _prior_step(db, changed_at=NOW - timedelta(days=1, hours=2))  # 그저께 스텝(쿨다운 통과·오늘 아님)
+    _hourly(db, adgroup_id=GRP, hour=23, clk=2)  # 어제 23시 클릭(롤링 24h 안)
+    now0 = datetime(2026, 7, 21, 0, 20, 0)  # 00:20
+    with patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 1000}), \
+         patch.object(auto_operator.effective_bid, "adgroup_effective_bid",
+                      return_value={"source": "group", "effective_bid": 1000, "max_ad_id": None}), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(db, now=now0, fetch_intraday=lambda tid, d: [])
+    assert result["explored"] == 0 and result["explored_held"] == 1
+    mock_exec.assert_not_called()
+
+
+def test_lane_rolling_flow_reactivates_when_truly_24h_idle(db):
+    """codex P1 대조: 어제 시간별 있으나 24h 진짜 무클릭(어제 clk 0) → 재가동(정체)."""
+    _setup(db, settle_clk=4)
+    _prior_step(db, changed_at=NOW - timedelta(days=1))
+    _hourly(db, adgroup_id=GRP, hour=23, clk=0)  # 어제 클릭 0
+    curve = [_hour(5, imp=20, clk=0, cost=0, avg_rank=5.0),
+             _hour(6, imp=20, clk=0, cost=0, avg_rank=5.0)]
+    result, mock_exec = _run(db, curve)
+    assert result["explored"] == 1
+    p = db.get(NaverProposal, mock_exec.call_args[0][1])
+    assert p.rationale.startswith("[탐색UP·재가동]")
+
+
+def test_lane_fail_toward_hold_when_yesterday_sweep_missing(db):
+    """codex P1: 어제 시간별 스윕 미가동(그 날짜 행 전무) → fail-toward-hold(스텝 대신 관측)."""
+    _setup(db, settle_clk=4)
+    _prior_step(db, changed_at=NOW - timedelta(days=1))
+    # 어제 스윕 행 삭제(더미 포함) → yesterday_flow=None → flow_available=False
+    db.query(NaverKeywordHourly).filter(NaverKeywordHourly.ad_date == YESTERDAY).delete()
+    db.commit()
+    curve = [_hour(5, imp=20, clk=0, cost=0, avg_rank=5.0),
+             _hour(6, imp=20, clk=0, cost=0, avg_rank=5.0)]
+    result, mock_exec = _run(db, curve)
+    assert result["explored"] == 0 and result["explored_held"] == 1
+    mock_exec.assert_not_called()
+
+
+# ══════════════════════ 기울기 연속성·TOCTOU (codex P1) ══════════════════════
+
+_SLOPE_CURVE = [  # 스텝 前(hour1,2) rank 10 · 스텝 後(hour4,5) rank 8 → 기울기 100원/rank
+    _hour(1, imp=20, clk=0, cost=0, avg_rank=10.0),
+    _hour(2, imp=20, clk=0, cost=0, avg_rank=10.0),
+    _hour(4, imp=20, clk=0, cost=0, avg_rank=8.0),
+    _hour(5, imp=20, clk=0, cost=0, avg_rank=8.0),
+]
+
+
+def test_lane_slope_used_on_continuous_step(db):
+    """codex P1: 직전 스텝 대상=이번 대상·라이브==after_bid → 기울기 사용. 기울기=Δbid100/Δrank2=
+    50원/rank, 현 rank8·목표4 → 필요증분 50×(8-4)=200 → 1200. 보수 10%(1100)와 구별되는 값."""
+    _setup(db)
+    _prior_step(db, target_type="adgroup", target_id=GRP, before_bid=900, after_bid=1000,
+                changed_at=datetime(2026, 7, 21, 3, 30, 0))  # after 1000 == 라이브 1000(연속)
+    result, mock_exec = _run(db, _SLOPE_CURVE)
+    assert result["explored"] == 1
+    p = db.get(NaverProposal, mock_exec.call_args[0][1])
+    assert p.target_bid == 1200  # 기울기 50원/rank × (8-4)=200 → 1200 (≠보수 1100)
+
+
+def test_lane_slope_discarded_on_lever_switch(db):
+    """codex P1 대조: 직전 스텝이 소재(ad) 대상인데 이번은 그룹 발사 → 연속성 불일치 → 기울기 폐기·
+    보수 10%(=1100). 같은 곡선인데 위 연속 케이스(1300)와 다름 = 기울기 오염 차단 실증."""
+    _setup(db)
+    _prior_step(db, target_type="ad", target_id="ad-old", before_bid=900, after_bid=1000,
+                changed_at=datetime(2026, 7, 21, 3, 30, 0))  # ad 대상(이번 group과 불일치)
+    result, mock_exec = _run(db, _SLOPE_CURVE)  # group 발사(step_base=1000)
+    assert result["explored"] == 1
+    p = db.get(NaverProposal, mock_exec.call_args[0][1])
+    assert p.target_bid == 1100 and p.target_type == "adgroup"  # 보수 10%(기울기 폐기)
+
+
+# ══════════════════════ 스텝 시각 버킷 경계 (codex P2) ══════════════════════
+
+def test_observe_excludes_step_hour_bucket(db):
+    """codex P2 단위: _exploration_observe의 since가 step_hour 버킷을 제외(clk_cycle 오염 방지)."""
+    _hourly(db, adgroup_id="x", hour=1, clk=0)  # flow_available용 어제 행
+    curve = [_hour(3, imp=20, clk=5, cost=100, avg_rank=6.0),   # step_hour 버킷(제외 대상)
+             _hour(4, imp=20, clk=0, cost=0, avg_rank=5.0),     # 스텝 後
+             _hour(5, imp=20, clk=0, cost=0, avg_rank=5.0)]
+    last_step = {"changed_at": datetime(2026, 7, 21, 3, 30, 0), "before_bid": 900,
+                 "after_bid": 1000, "target_type": "adgroup", "target_id": GRP}
+    obs = auto_operator._exploration_observe(db, GRP, curve, NOW, last_step)
+    assert obs["since"]["clk"] == 0  # hour3 클릭 5 제외 → since 무클릭
+    assert float(obs["since"]["avg_rank"]) == 5.0  # 스텝 後(hour4,5)만
+
+
 # ══════════════════════ daily 손실상태 제외(GATE P2-risk6, 가드5 완성) ══════════════════════
 
 def test_lane_daily_bleeding_group_skipped(db):
@@ -409,13 +528,19 @@ def test_real_write_blocker_ceiling_four_quadrant():
     # ① 마커 부재
     assert harness.real_write_blocker(_blocker_proposal(1100, "마커 없음")) is not None
     # ② 마커 오염(중복 → decode None)
-    corrupt = encode_exploration_ceiling(encode_exploration_ceiling("x", 2000), 3000)
+    corrupt = encode_base_bid(encode_exploration_ceiling(encode_exploration_ceiling("x", 2000), 3000), 800)
     assert harness.real_write_blocker(_blocker_proposal(1100, corrupt)) is not None
     # ③ target_bid > 상한
-    b = harness.real_write_blocker(_blocker_proposal(1100, encode_exploration_ceiling("x", 1000)))
+    b = harness.real_write_blocker(_blocker_proposal(1100, _explore_effect(1000, 800)))
     assert b is not None and "상한 초과" in b
-    # ④ 정상(target ≤ 상한·단일 suffix 마커)
-    assert harness.real_write_blocker(_blocker_proposal(1000, encode_exploration_ceiling("x", 1500))) is None
+    # ④ 정상(target ≤ 상한·ceiling+base_bid 마커)
+    assert harness.real_write_blocker(_blocker_proposal(1000, _explore_effect(1500, 800))) is None
+
+
+def test_real_write_blocker_base_bid_marker_required():
+    """codex P1: ceiling은 있으나 base_bid 마커 부재 → 실행 버튼 비활성(정적 TOCTOU 검증)."""
+    b = harness.real_write_blocker(_blocker_proposal(1000, encode_exploration_ceiling("x", 1500)))
+    assert b is not None and "base_bid" in b
 
 
 # ══════════════════════ 쓰기-경계 하드 게이트(P2①, harness) ══════════════════════
@@ -462,9 +587,9 @@ def test_harness_ceiling_gate_blocks_target_over_ceiling(db):
 
 
 def test_harness_ceiling_gate_passes_within_ceiling(db):
-    """P2①: target_bid ≤ 상한 → 게이트 통과(그 후 guardrail mock None → 실쓰기)."""
+    """P2①: target_bid ≤ 상한 ∧ base_bid==라이브 → 게이트 통과(그 후 guardrail mock None → 실쓰기)."""
     _settings_only(db)
-    p = _explore_proposal(db, target_bid=1000, expected_effect=encode_exploration_ceiling("x", 1500))
+    p = _explore_proposal(db, target_bid=1000, expected_effect=_explore_effect(1500, 800))
     ctx = {"current_bid": 800, "roas_corrected": None, "target_roas": None, "unconverted_spend": None,
            "cost_today": None, "daily_budget": None, "last_change_at": None, "changes_today_count": 0}
     from app.services.naver_ad.naver_sa_writer import WriteResult
@@ -475,3 +600,31 @@ def test_harness_ceiling_gate_passes_within_ceiling(db):
          patch.object(harness.naver_sa_writer, "update_adgroup_bid", return_value=wr) as mag:
         harness.execute(db, p.id, dry_run=False)
     mag.assert_called_once_with(GRP, 1000)
+
+
+def test_harness_exploration_toctou_blocks_external_change(db):
+    """codex P1 TOCTOU: 제안 base_bid(800) ≠ 실행 시점 라이브(850) → fail-closed 중단(외부 변경)."""
+    _settings_only(db)
+    p = _explore_proposal(db, target_bid=1000, expected_effect=_explore_effect(1500, 800))
+    ctx = {"current_bid": 850, "roas_corrected": None, "target_roas": None, "unconverted_spend": None,
+           "cost_today": None, "daily_budget": None, "last_change_at": None, "changes_today_count": 0}
+    with patch.object(harness, "_build_guardrail_context", return_value=ctx), \
+         patch.object(harness.naver_sa_writer, "update_adgroup_bid") as mag:
+        with pytest.raises(harness.MissingExecutionTargetError):
+            harness.execute(db, p.id, dry_run=False)
+    mag.assert_not_called()
+    db.refresh(p)
+    assert p.status == "failed"
+
+
+def test_harness_exploration_missing_base_bid_marker_blocks(db):
+    """codex P1: ceiling만 있고 base_bid 마커 부재 → 실행 시점 fail-closed."""
+    _settings_only(db)
+    p = _explore_proposal(db, target_bid=1000, expected_effect=encode_exploration_ceiling("x", 1500))
+    ctx = {"current_bid": 800, "roas_corrected": None, "target_roas": None, "unconverted_spend": None,
+           "cost_today": None, "daily_budget": None, "last_change_at": None, "changes_today_count": 0}
+    with patch.object(harness, "_build_guardrail_context", return_value=ctx), \
+         patch.object(harness.naver_sa_writer, "update_adgroup_bid") as mag:
+        with pytest.raises(harness.MissingExecutionTargetError):
+            harness.execute(db, p.id, dry_run=False)
+    mag.assert_not_called()
