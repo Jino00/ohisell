@@ -38,6 +38,13 @@ _WISDOM_PROMOTED = "wisdom_promoted"  # D-NAO-54 P3 — 지혜 승격 보고(정
 # DECISION_ONLY_PROPOSAL_TYPES가 이 유형을 결정 전용으로 분기한다.
 PARAM_CHANGE = "param_change"
 
+# SS4(PLAN_naver-ad-searchterm-ss.md §3 SS4) — 검색어 승격 후보(정식 키워드 등록 제안). 정식
+# 등록 쓰기 손 자체가 L3 스코프라 실행 매핑이 없다(wisdom_promoted와 동일 모양 — 보고·열람
+# 전용, Jino가 콘솔 밖에서 수동 등록). 값의 단일 진실은 search_term_judge.SEARCH_TERM_
+# PROMOTE_TYPE(리터럴 중복이나 SS3의 _SEARCH_TERM_EXCLUDE와 동일하게 import 결합 회피 —
+# 드리프트는 test_all_proposal_types_constant_covers_every_emitted_type이 강제).
+_SEARCH_TERM_PROMOTE = "search_term_promote"
+
 # X1a T6(D-NAO-37): 정보성 제안 유형 5종 — 실행 대상 자체가 없는 제안(naver_execution_harness의
 # _ACTION_BY_PROPOSAL_TYPE에 매핑이 없는 유형과 의미상 같지만, 그 매핑에는 budget_up처럼 아직
 # OPEN_ACTIONS에 없을 뿐인 "실행형인데 미개방" 유형도 섞여 있어 "매핑에 없음"을 파생 조건으로
@@ -48,6 +55,7 @@ PARAM_CHANGE = "param_change"
 INFORMATIONAL_PROPOSAL_TYPES: frozenset[str] = frozenset({
     _ANOMALY, _ANOMALY_FRESHNESS, _ACCOUNT_BRIEF, PROPOSAL_TYPE_PACING, PROPOSAL_TYPE_CPC,
     _WISDOM_PROMOTED,  # D-NAO-54 P3 — 정보성(실행 개방 액션에 매핑 없음, Jino 콘솔 열람 전용)
+    _SEARCH_TERM_PROMOTE,  # SS4 — 정보성(등록 실행 매핑 없음, L3 스코프. 정의는 위 참조)
 })
 
 # D-NAO-47: 제안 유형 14종 단일 진실 — 프론트 라벨 맵이 이걸 진실로 삼는다.
@@ -76,6 +84,7 @@ ALL_PROPOSAL_TYPES: frozenset[str] = frozenset({
     _ANOMALY, _ANOMALY_FRESHNESS, _ACCOUNT_BRIEF, PROPOSAL_TYPE_PACING, PROPOSAL_TYPE_CPC,
     _WISDOM_PROMOTED,  # D-NAO-54 P3(정보성) — INFORMATIONAL_PROPOSAL_TYPES <= ALL 불변 유지
     PARAM_CHANGE,  # D-NAO-54 P4(결정 전용) — 정보성도 실행형도 아님(라우터 DECISION_ONLY 분기)
+    _SEARCH_TERM_PROMOTE,  # SS4(정보성) — INFORMATIONAL_PROPOSAL_TYPES <= ALL 불변 유지
 })
 
 # 보드 의미상 허용되는 방향(codex 지적, 라이브검증 후속): starving_winners(육성 의도, D-NAO-18)는

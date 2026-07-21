@@ -311,7 +311,8 @@ def test_all_proposal_types_constant_covers_every_emitted_type():
     # 않는다(지혜→실행 직접 쓰기 금지 금지선). wisdom_promoted는 정보성 집합에, param_change는
     # 어느 집합에도 넣지 않는다(결정 전용 — 라우터 DECISION_ONLY_PROPOSAL_TYPES가 분기).
     # ★SS3: search_term_exclude(검색어 제외, Confirm 전용·delegation 제외) → 20.
-    assert len(ALL_PROPOSAL_TYPES) == 20
+    # ★SS4: search_term_promote(검색어 승격, 정보성 — 등록 실행 매핑 없음, L3 스코프) → 21.
+    assert len(ALL_PROPOSAL_TYPES) == 21
     assert PARAM_CHANGE not in INFORMATIONAL_PROPOSAL_TYPES  # 결정 전용 ≠ 정보성
     assert PARAM_CHANGE not in _ACTION_BY_PROPOSAL_TYPE  # 금지선: 실행 매핑 부재
 

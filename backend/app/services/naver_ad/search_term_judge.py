@@ -29,6 +29,14 @@ SEARCH_TERM_EXCLUDE_TYPE = "search_term_exclude"
 # 미래 활성화 시점에 킬스위치 존중이 이미 보장되게 한다. String(12) 적합(10자).
 APPROVAL_SOURCE_SS_EXCLUDE = "ss_exclude"
 
+# SS4(PLAN §3 SS4, 전략 v2 로드맵 3번) — 전환 검색어 승격 제안(정식 키워드 등록 후보). 값의
+# 단일 진실은 여기(search_term_ss_lane이 참조). **제안만·영구 Confirm** — 등록 쓰기 손 자체는
+# L3 스코프라 실행자를 만들지 않는다. naver_execution_harness._ACTION_BY_PROPOSAL_TYPE에
+# 매핑이 없어 실행 요청되면 ActionNotExecutableError로 자연히 fail-closed 거부된다(실행자
+# 미구현이 안전장치 그 자체 — SS3처럼 별도 SHOPPING 명시 거부 코드가 필요 없음).
+# String(24) 적합(20자).
+SEARCH_TERM_PROMOTE_TYPE = "search_term_promote"
+
 # ── 안전 봉투 §1 상수(PLAN §1) — 초기값은 가설, SS1 실분포로 캘리브레이션(§실측 2) ──
 _SS_WINDOW_DAYS = 14   # rolling 창(§난제 2 — 저볼륨 롱테일 표본 누적, 보존 16일 내)
 _SS_MIN_CLICK = 10     # 최소 클릭 표본 게이트(§1 2, D-NAO-70 핫셋 게이트와 동일 값)
