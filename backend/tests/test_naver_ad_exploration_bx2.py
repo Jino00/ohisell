@@ -63,10 +63,15 @@ def _settings(db, *, campaign_id=CAMP, optimizer="ours", auto_operate=False):
 
 def _ad_proposal(db, *, proposal_type, target_bid=1040, adgroup_id=GRP_ID,
                  campaign_id=CAMP, target_type="ad", target_id=AD_ID,
-                 status="approved", approval_source=None):
+                 status="approved", approval_source=None, ceiling=100_000):
+    # BX3(P2①): 탐색 스텝(bid_up_explore)은 harness 쓰기-경계 하드 게이트가 expected_effect의
+    # 경제성 상한 마커를 요구한다 — 성공 경로 테스트는 넉넉한 상한 마커를 심는다(상한 초과 차단은
+    # 별도 테스트에서 낮은 ceiling으로 검증).
+    from app.services.naver_ad.bid_step_types import encode_exploration_ceiling
+    effect = encode_exploration_ceiling("탐색", ceiling) if proposal_type == "bid_up_explore" else "탐색"
     p = NaverProposal(
         proposal_type=proposal_type, target_type=target_type, target_id=target_id,
-        campaign_id=campaign_id, adgroup_id=adgroup_id, rationale="탐색", expected_effect="탐색",
+        campaign_id=campaign_id, adgroup_id=adgroup_id, rationale="탐색", expected_effect=effect,
         status=status, target_bid=target_bid, approval_source=approval_source,
     )
     db.add(p)

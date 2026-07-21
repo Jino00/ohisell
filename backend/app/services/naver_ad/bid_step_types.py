@@ -89,11 +89,41 @@ def decode_base_bid(expected_effect: str | None) -> int | None:
 
 
 def strip_base_bid_marker(expected_effect: str | None) -> str | None:
-    """표시용 — expected_effect에서 base_bid 마커 제거(콘솔/브리핑 사람 노출 방지, GATE R2 P2-1).
-    저장값은 건드리지 않는다(TOCTOU 원료 보존) — 표시 직전 레이어에서만 호출."""
+    """표시용 — expected_effect에서 기계판독 마커(base_bid·explore_ceiling) 제거(콘솔/브리핑 사람
+    노출 방지, GATE R2 P2-1). 저장값은 건드리지 않는다(TOCTOU·상한 원료 보존) — 표시 직전 레이어만."""
     if not expected_effect:
         return expected_effect
-    return _BASE_BID_RE.sub("", expected_effect).rstrip()
+    return _CEILING_RE.sub("", _BASE_BID_RE.sub("", expected_effect)).rstrip()
+
+
+# ── B-X BX3(D-NAO-70·71): 탐색 스텝 경제성 상한(ceiling) 마커(PLAN §3 BX2 GATE 이월 P2①) ──
+# 레인 계산을 불신하고 harness 쓰기-경계에서 재검증하기 위해, run_hourly_lane이 산정한 경제성
+# 상한(exploration.exploration_ceiling)을 expected_effect에 기계판독 마커로 실어 보낸다. harness
+# _execute_update_bid이 EXPLORATION_STEP_TYPES 실행 직전 이 상한을 디코드해 target_bid>상한이면
+# fail-closed 차단한다(D-NAO-71로 유일 가격 브레이크 = 이중 게이트). base_bid 마커와 동형(신규
+# 마이그레이션 금지 — 기존 Text 컬럼 재사용, 끝 anchor suffix·단일 매치 엄격 디코드).
+# ★탐색 스텝은 rank-step 아님(RANK_STEP_TYPES 서로소)이라 base_bid 마커를 달지 않는다 → 탐색
+#   expected_effect의 유일 suffix 마커는 이 ceiling 마커다(둘이 섞이지 않음).
+_CEILING_TAG = "explore_ceiling"
+_CEILING_RE = re.compile(r"\[\[explore_ceiling=(\d+)\]\]")
+_CEILING_SUFFIX_RE = re.compile(r"\[\[explore_ceiling=(\d+)\]\]\s*$")
+
+
+def encode_exploration_ceiling(expected_effect: str | None, ceiling: int) -> str:
+    """expected_effect 끝에 경제성 상한 마커를 붙여 반환(harness 쓰기-경계 재검증 원료 영속)."""
+    return f"{expected_effect or ''}\n[[{_CEILING_TAG}={int(ceiling)}]]"
+
+
+def decode_exploration_ceiling(expected_effect: str | None) -> int | None:
+    """expected_effect에서 ceiling 마커를 추출 — **엄격 모드**(base_bid decode와 동형):
+    ① 마커 정확히 1개 ② suffix(끝) 위치여야 유효. 그 외(부재/중복/본문 오염)는 None —
+    소비자(harness 탐색 상한 게이트)가 None을 fail-closed로 처리한다."""
+    if not expected_effect:
+        return None
+    if len(_CEILING_RE.findall(expected_effect)) != 1:
+        return None
+    m = _CEILING_SUFFIX_RE.search(expected_effect)
+    return int(m.group(1)) if m else None
 
 
 def is_bid_up(proposal_type: str | None) -> bool:

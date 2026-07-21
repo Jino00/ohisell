@@ -39,6 +39,7 @@ from app.services.naver_ad.bid_step_types import (
     EXPLORATION_STEP_TYPES,
     RANK_STEP_TYPES,
     decode_base_bid,
+    decode_exploration_ceiling,
 )
 from app.services.naver_ad.diagnosis import correction_factor as compute_correction_factor
 from app.utils.kst import kst_now
@@ -747,6 +748,31 @@ def _execute_update_bid(db: Session, proposal: NaverProposal, now: datetime) -> 
             )
         if ad_guard:
             reason = "소재(ad) 실쓰기 경계 차단(fail-closed) — " + " · ".join(ad_guard)
+            _guard_failure(db, proposal, now, "update_bid", reason)
+            raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
+
+    # BX3(D-NAO-70·71, PLAN §3 BX2 GATE 이월 P2①) — 탐색 스텝 경제성 상한 **쓰기-경계 하드
+    # 게이트**. D-NAO-71로 수량·빈도 캡이 사라져 경제성 상한이 **유일한 가격 브레이크**이므로,
+    # 레인 계산(run_hourly_lane의 min(step, ceiling) 클램프)을 불신하고 여기서 재검증한다 —
+    # 레인이 ceiling을 잘못 클램프하거나 경로 밖 생성/변조 제안이 최종 경계를 통과하는 fail-open
+    # 차단. ceiling은 run_hourly_lane이 expected_effect에 심은 마커(base_bid 마커 관례 동형, 신규
+    # 마이그레이션 금지). ★마커 부재/중복/오염 = fail-closed(경제 근거 없이 탐색 상향 금지) —
+    # run_hourly_lane 정상 생성분은 항상 단일 suffix 마커 보유 → 정상 경로 무영향. explore_op·
+    # 탐색 타입은 위 GATE P1 쌍방향 잠금을 이미 통과했으므로 여기 도달하는 탐색 스텝은 정상 경로다.
+    if proposal.proposal_type in EXPLORATION_STEP_TYPES:
+        ceiling = decode_exploration_ceiling(proposal.expected_effect)
+        if ceiling is None:
+            reason = (
+                "탐색 경제성 상한 마커 부재/오염(fail-closed) — D-NAO-71로 상한이 유일 가격 "
+                "브레이크. run_hourly_lane 밖 생성/변조 제안 차단(PLAN §3 BX2 GATE 이월 P2①)"
+            )
+            _guard_failure(db, proposal, now, "update_bid", reason)
+            raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
+        if proposal.target_bid > ceiling:
+            reason = (
+                f"탐색 경제성 상한 초과(fail-closed) — target_bid={proposal.target_bid}원 > 상한 "
+                f"{ceiling}원. '클릭당 확정 손해' 가격 진입 금지(PLAN §1 가드2, 쓰기-경계 재검증)"
+            )
             _guard_failure(db, proposal, now, "update_bid", reason)
             raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
 

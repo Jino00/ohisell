@@ -15,6 +15,7 @@
 #   probe_op로 태그(diary probe actor). 되돌림(CD3)·학습(CD4)은 이 파일 범위 밖.
 from __future__ import annotations
 
+import json
 import logging
 import re
 from datetime import date, datetime, timedelta
@@ -32,8 +33,8 @@ from app.models import (
     NaverProposal,
     NaverRetroSignal,
 )
-from app.services.naver_ad import bid_rank_curve, bid_simulator, campaign_target_resolver, diagnosis, diary, effective_bid, guardrail_gate, intraday_roas, naver_execution_harness, naver_sa_writer, rank_servo
-from app.services.naver_ad.bid_step_types import BID_UP_TYPES, encode_base_bid
+from app.services.naver_ad import bid_rank_curve, bid_simulator, campaign_target_resolver, diagnosis, diary, effective_bid, exploration, guardrail_gate, intraday_roas, naver_execution_harness, naver_sa_writer, rank_servo
+from app.services.naver_ad.bid_step_types import BID_UP_TYPES, EXPLORATION_STEP_TYPES, encode_base_bid, encode_exploration_ceiling
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.services.naver_ad.guardrail_gate import _MAX_CHANGE_PCT
 from app.services.naver_ad.trigger_watch import CPC_SPIKE_RATIO
@@ -1444,6 +1445,241 @@ def _learned_optimal_skip(
     )
 
 
+# ══════════════════ B-X BX3 저볼륨 그룹 탐색-UP 레인(PLAN §2·§3, D-NAO-70·71) ══════════════════
+
+
+def _exploration_bid_from_change_value(raw: str | None) -> int | None:
+    """change_log before/after_value(JSON)에서 bidAmt 추출 — 광고그룹({"bidAmt":N})·소재
+    ({"nccAdId":..,"adAttr":"{..bidAmt..}"} 중첩) 둘 다 지원(직전 탐색 스텝 입찰 파싱)."""
+    if not raw:
+        return None
+    try:
+        d = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(d, dict):
+        return None
+    if isinstance(d.get("bidAmt"), int):
+        return d["bidAmt"]
+    attr = d.get("adAttr")  # 소재(ad) — adAttr JSON 문자열 중첩
+    if attr:
+        try:
+            a = json.loads(attr) if isinstance(attr, str) else attr
+        except (ValueError, TypeError):
+            return None
+        if isinstance(a, dict) and a.get("bidAmt") is not None:
+            try:
+                return int(a["bidAmt"])
+            except (ValueError, TypeError):
+                return None
+    return None
+
+
+def _exploration_last_step(db: Session, adgroup_id: str) -> dict | None:
+    """이 그룹의 마지막 탐색 UP **성공 실쓰기**(change_log) — 직전 스텝 스냅샷(적응 스텝 기울기·
+    쿨다운 tz 계약 원료). NaverProposal(adgroup_id·proposal_type∈EXPLORATION_STEP_TYPES) ⋈
+    change_log(after_value 존재 = 성공 실쓰기, 가드실패는 after_value None). ★tz 계약(PLAN §3
+    이월 P2②): changed_at은 harness가 now(=kst_now, KST naive)로 심으므로 KST — 호출측 now(kst_now)
+    와 동일 tz. proposal.created_at(UTC)는 쓰지 않는다. 반환 {"before_bid","after_bid",
+    "changed_at","target_type"}|None(첫 탐색)."""
+    row = (
+        db.query(NaverChangeLog)
+        .join(NaverProposal, NaverChangeLog.proposal_id == NaverProposal.id)
+        .filter(
+            NaverProposal.adgroup_id == adgroup_id,
+            NaverProposal.proposal_type.in_(tuple(EXPLORATION_STEP_TYPES)),
+            NaverChangeLog.action == "update_bid",
+            NaverChangeLog.after_value.isnot(None),  # 성공 실쓰기만(가드실패=outcome failed·after None)
+        )
+        .order_by(NaverChangeLog.changed_at.desc())
+        .first()
+    )
+    if row is None:
+        return None
+    return {
+        "before_bid": _exploration_bid_from_change_value(row.before_value),
+        "after_bid": _exploration_bid_from_change_value(row.after_value),
+        "changed_at": row.changed_at,
+        "target_type": row.entity_type,
+    }
+
+
+def _exploration_weighted_rank(buckets: list[dict]) -> Decimal | None:
+    """imp-가중 avg_rank(rank None 버킷 제외) — _probe_window_stats와 동일 가중 규약.
+    rank 관측 버킷의 imp 합이 0이면 None(관측 근거 없음)."""
+    rank_imp = sum(h["imp"] for h in buckets if h.get("avg_rank") is not None)
+    if rank_imp <= 0:
+        return None
+    weighted = sum(
+        Decimal(str(h["avg_rank"])) * h["imp"] for h in buckets if h.get("avg_rank") is not None
+    )
+    return weighted / Decimal(rank_imp)
+
+
+def _exploration_observe(curve: list[dict], now: datetime, last_step: dict | None) -> dict:
+    """시간별 관측 조립(PLAN §2) — 오늘 hh24 curve에서 래더/적응 스텝 원료를 뽑는다.
+    - since(직전 스텝 이후 사이클): [step_hour, now.hour) 완료 버킷의 imp/clk/cost + 가중 avg_rank
+      (직전 스텝이 오늘이면 step_hour=그 시각, 아니면 0=오늘 전체).
+    - rank_before(적응 스텝 Δ순위/Δ입찰 기울기용): [0, step_hour) 완료 버킷 가중 avg_rank
+      (직전 스텝이 오늘·step_hour>0일 때만 — 스텝 전 순위).
+    - flow_clk(최근 24h 정체 신호): [now.hour-24, now.hour) 완료 버킷 clk 합. ★curve가 오늘분만
+      이라 실효 창은 [0, now.hour) — 자정 넘는 24h는 단일 fetch 유지 위해 오늘 완료분으로 근사
+      (첫 주 실측 후 재판정, PLAN §실측). 반환 {"since","rank_before","flow_clk"}."""
+    if (last_step is not None and last_step.get("changed_at") is not None
+            and last_step["changed_at"].date() == now.date()):
+        step_hour = last_step["changed_at"].hour
+    else:
+        step_hour = 0
+    since = [h for h in curve if step_hour <= h["hour"] < now.hour]
+    since_stats = {
+        "imp": sum(h["imp"] for h in since),
+        "clk": sum(h["clk"] for h in since),
+        "cost": sum(h["cost"] for h in since),
+        "avg_rank": _exploration_weighted_rank(since),
+    }
+    if last_step is not None and step_hour > 0:
+        rank_before = _exploration_weighted_rank([h for h in curve if h["hour"] < step_hour])
+    else:
+        rank_before = None
+    fstart = max(0, now.hour - exploration._EXPLORATION_FLOW_WINDOW_H)
+    flow_clk = sum(h["clk"] for h in curve if fstart <= h["hour"] < now.hour)
+    return {"since": since_stats, "rank_before": rank_before, "flow_clk": flow_clk}
+
+
+def _run_exploration_for_campaign(
+    db: Session, campaign_id: str, window_from: date, window_to: date,
+    now: datetime, fetch_intraday, result: dict,
+) -> None:
+    """탐색-UP 레인(핫셋 여집합 SHOPPING 그룹) — PLAN §2 구조. 캠페인 1개의 후보를 순회하며
+    트리거→관측→래더→발사(레버 맞춤: source='ad'→소재입찰 explore_op / source='group'→그룹입찰
+    explore_op). 실쓰기는 explore_op 자동 경로만(B3 Confirm 경계 유지). 손실고삐 발동 캠페인은
+    호출측이 제외(봉투#5) — 여기선 후보별 트리거·경제성 상한·킬스위치가 최종 방어선."""
+    today = now.date()
+    candidates = exploration.exploration_candidates(db, campaign_id, window_from, window_to)
+    for _etype, adgroup_id in candidates:
+        settled_clk = exploration._settlement_clk(db, adgroup_id, window_from, window_to)
+        last_step = _exploration_last_step(db, adgroup_id)
+        last_step_at = last_step["changed_at"] if last_step else None
+
+        # 트리거: 클릭 표본 부족 ∧ 쿨다운 2h(tz 계약 — last_step_at·now 둘 다 KST). 미발동은
+        # 조용히 skip(사이클 대기·표본 충분 = 관찰 소음, 일기 미기록).
+        fire, _reason = exploration.exploration_trigger({"clk": settled_clk}, last_step_at, now)
+        if not fire:
+            continue
+
+        try:
+            curve = fetch_intraday(adgroup_id, today)
+        except Exception as e:  # noqa: BLE001 — intraday 실패 skip(핫셋 레인과 동형)
+            result["skipped"] += 1
+            log.warning("auto_operator: 탐색 레인 intraday 조회 실패 target=%s: %s", adgroup_id, e)
+            continue
+
+        current_group_bid = _live_current_bid("adgroup", adgroup_id)
+        if current_group_bid is None:
+            result["held"].append({"target_id": adgroup_id, "reason": "탐색: 라이브 현재가 재조회 실패"})
+            continue
+
+        # 레버 맞춤 라우팅(effective_bid) — source='ad'면 소재입찰, 'group'이면 그룹입찰을 스텝한다.
+        try:
+            eff = effective_bid.adgroup_effective_bid(db, adgroup_id, current_group_bid)
+        except Exception as e:  # noqa: BLE001 — 파생 실패는 그룹입찰 폴백(fail-safe)
+            log.warning("auto_operator: 탐색 실효입찰 파생 실패 adgroup=%s: %s", adgroup_id, e)
+            eff = None
+        exec_target_type, exec_target_id, step_base = "adgroup", adgroup_id, current_group_bid
+        if eff is not None and eff["source"] == "ad" and eff.get("max_ad_id"):
+            try:
+                ad_live_bid = naver_sa_writer.get_ad_bid(eff["max_ad_id"])
+            except Exception as e:  # noqa: BLE001 — 소재 재조회 실패는 hold(fail-closed)
+                log.warning("auto_operator: 탐색 소재 입찰 재조회 실패 ad=%s: %s", eff["max_ad_id"], e)
+                ad_live_bid = None
+            if ad_live_bid is None:
+                result["held"].append({"target_id": adgroup_id, "reason": "탐색: 소재 입찰 라이브 재조회 실패"})
+                continue
+            exec_target_type, exec_target_id, step_base = "ad", eff["max_ad_id"], ad_live_bid
+
+        # 경제성 상한(유일 가격 브레이크) — 스텝 기준가 기반.
+        ceiling = exploration.exploration_ceiling(
+            db, campaign_id, adgroup_id, step_base, window_from, window_to,
+        )
+
+        obs = _exploration_observe(curve, now, last_step)
+        current_rank = obs["since"]["avg_rank"]
+        last_probe = None
+        if last_step is not None:
+            last_probe = {"bid": last_step["before_bid"], "rank": obs["rank_before"]}
+        verdict, vreason = exploration.ladder_judgment(
+            last_probe, obs["since"], ceiling, step_base,
+            recent_flow_clk=obs["flow_clk"], settled_clk=settled_clk,
+        )
+
+        if verdict == "capped":
+            result["explored_capped"] += 1
+            result["held"].append({"target_id": exec_target_id, "reason": f"[탐색] {vreason}"})
+            _record_blocked(db, campaign_id=campaign_id, actor=diary.ACTOR_EXPLORE, reason=vreason,
+                            now=now, target_type=exec_target_type, target_id=exec_target_id,
+                            adgroup_id=adgroup_id, action="bid_up")
+            continue
+        if verdict == "not_rank":
+            result["explored_not_rank"] += 1
+            result["held"].append({"target_id": exec_target_id, "reason": f"[탐색] {vreason}"})
+            _record_blocked(db, campaign_id=campaign_id, actor=diary.ACTOR_EXPLORE, reason=vreason,
+                            now=now, target_type=exec_target_type, target_id=exec_target_id,
+                            adgroup_id=adgroup_id, action="bid_up")
+            continue
+        if verdict == "stop_observe":
+            result["explored_held"] += 1
+            result["held"].append({"target_id": exec_target_id, "reason": f"[탐색] {vreason}"})
+            continue
+
+        # start / step_up / reactivate → 적응 스텝 발사.
+        target = exploration.adaptive_step(
+            step_base, current_rank, exploration._EXPLORATION_TARGET_BAND, last_probe,
+            exploration._EXPLORATION_STEP_PCT,
+        )
+        if target is None:
+            # 밴드 내(도달)·스텝 소실 — 상향 없음(관찰).
+            result["explored_held"] += 1
+            result["held"].append({"target_id": exec_target_id, "reason": "[탐색] 적응 스텝 소실(밴드 내/미세) — 관찰"})
+            continue
+        target = min(target, ceiling)  # 레인 1차 클램프(harness 쓰기-경계 하드 게이트가 재검증)
+        if target <= step_base:
+            result["explored_capped"] += 1
+            result["held"].append({"target_id": exec_target_id, "reason": "[탐색] 상한 클램프로 스텝 소실 — 종료"})
+            continue
+
+        # 킬스위치 실행 직전 재확인(핫셋 레인과 동형·즉시 정지 계약).
+        if not _auto_operate_now(db, campaign_id):
+            result["held"].append({"target_id": exec_target_id, "reason": "탐색: 킬스위치 OFF(실행 직전 재확인)"})
+            _record_blocked(db, campaign_id=campaign_id, actor=diary.ACTOR_EXPLORE,
+                            reason="킬스위치 OFF — auto_operate=False(탐색 실행 직전 재확인)", now=now,
+                            target_type=exec_target_type, target_id=exec_target_id,
+                            adgroup_id=adgroup_id, action="bid_up", event_type="kill_switch")
+            continue
+
+        rank_tag = "탐색UP·재가동" if verdict == "reactivate" else "탐색UP"
+        effect_body = (
+            "저볼륨 그룹 탐색 UP — 핫셋 미달(정착클릭<10) 그룹을 클릭 관측 순위대(이익 스팟 밴드 "
+            "2.5~4)에 최소 입찰로 진입시키는 적응 스텝(D-NAO-70·71). 되돌림=스톱로스/BEP/손실고삐 "
+            "백스톱·2h 사이클 재평가."
+        )
+        proposal = NaverProposal(
+            proposal_type="bid_up_explore", target_type=exec_target_type, target_id=exec_target_id,
+            campaign_id=campaign_id, adgroup_id=adgroup_id,
+            rationale=f"[{rank_tag}] {vreason}",
+            expected_effect=encode_exploration_ceiling(effect_body, ceiling),
+            status="approved", target_bid=target, approval_source=exploration.APPROVAL_SOURCE_EXPLORE,
+        )
+        db.add(proposal)
+        db.commit()
+
+        try:
+            naver_execution_harness.execute(db, proposal.id, dry_run=False, now=now)
+            result["explored"] += 1
+        except Exception as e:  # noqa: BLE001 — harness가 change_log/상태를 이미 확정(failed 등)
+            result["failed"] += 1
+            log.warning("auto_operator: 탐색 레인 실행 실패 proposal_id=%s: %s", proposal.id, e)
+
+
 def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=None) -> dict:
     """시간당 밴드 관제 실입찰(PLAN §4). 매시 :20 크론(catch-up 제외 — 시간성 소멸).
 
@@ -1486,6 +1722,11 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
         "ad_confirm_pending_dup_skipped": 0,  # B3 GATE 2R P2-B: 동일 pending 존재로 skip된 수
         "servo": 0,  # IU-R R1: 서보 스텝으로 승인된 쇼검 UP 제안 수(라이브 관측용)
         "rank_direct": 0,  # IU-R R2: estimate 직행 스텝으로 승인된 파워링크 UP 제안 수(라이브 관측용)
+        # B-X BX3(D-NAO-70·71) 탐색-UP 레인 카운터(라이브 관측용):
+        "explored": 0,          # 탐색 UP 실쓰기(start/step_up/reactivate) 수
+        "explored_capped": 0,   # 경제성 상한 도달로 종료
+        "explored_not_rank": 0,  # rank≤2.5·클릭0 = 순위 병리 아님 진단 종료
+        "explored_held": 0,     # 밴드 도달/클릭 hold(상향 정지·관측)
     }
     # IU-R R2: estimate 회당 캡·런 캐시(§난제4) — 실제 스텝 유닛에만 호출하고 (kw_id,position)
     # 중복은 캐시로 흡수. counter는 mutable dict로 helper와 공유(호출 수 봉인 테스트가 이 값 관측).
@@ -1519,6 +1760,11 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                 reason=breaker_reason, now=now,
             )
             continue
+
+        # BX3(D-NAO-70·71, PLAN §1 가드5): 이 캠페인에 장중 손실고삐(is_leash DOWN)가 이번 런에서
+        # 발동하면 탐색 UP을 제외한다(UP·DOWN 충돌 금지). 핫셋 루프가 이 플래그를 세우고, 탐색
+        # 레인은 루프 뒤에서 이를 읽는다(같은 캠페인 순회 안에서 순서 보장 — 핫셋 먼저·탐색 나중).
+        campaign_leashed = False
 
         for target_type, target_id in _hot_set_candidates(db, campaign_id, window_from, window_to):
             result["reviewed"] += 1
@@ -1569,6 +1815,8 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
             # 차단된 것"이므로 일기(blocked) 기록 대상(위의 판정 hold·imp 없음은 관찰 소음이라 제외).
             is_probe = verdict.get("probe", False)
             is_leash = verdict.get("leash", False)  # D-NAO-60 RL3 — 순위 고삐(장중 loss DOWN)
+            if is_leash:
+                campaign_leashed = True  # BX3 봉투#5: 손실고삐 발동 캠페인 → 탐색 UP 제외
             lane_actor = diary.ACTOR_PROBE if is_probe else diary.ACTOR_HOURLY  # 차단 일기 주체
             intended_action = "bid_up" if verdict["direction"] == "up" else "bid_down"
             current_bid = _live_current_bid(target_type, target_id)
@@ -1861,6 +2109,18 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
             except Exception as e:  # noqa: BLE001 — harness가 change_log/상태를 이미 확정(failed 등)
                 result["failed"] += 1
                 log.warning("auto_operator: 시간당 레인 실행 실패 proposal_id=%s: %s", proposal.id, e)
+
+        # BX3(D-NAO-70·71): 핫셋 처리 후 탐색-UP 레인(핫셋 여집합 SHOPPING 그룹). exploration_candidates
+        # 가 캠페인 엔티티 campaign_type='SHOPPING'만 통과시켜 WEB_SITE·BRAND_SEARCH는 자연 제외.
+        # 손실고삐 발동 캠페인(campaign_leashed)은 제외(봉투#5 — UP·DOWN 충돌 금지). fail-soft:
+        # 탐색 레인 예외가 핫셋 집행 결과를 오염시키지 않는다(bleed valve 관례 동형).
+        if not campaign_leashed:
+            try:
+                _run_exploration_for_campaign(
+                    db, campaign_id, window_from, window_to, now, fetch_intraday, result,
+                )
+            except Exception as e:  # noqa: BLE001 — 탐색 레인 실패는 fail-soft(핫셋 결과 불변)
+                log.warning("auto_operator: 탐색 레인 실패(fail-soft) campaign=%s: %s", campaign_id, e)
 
     # D-NAO-58 CD3 Stage 1: 탐침 실시간 출혈 밸브 — 당일 standing probe 회수(비용×3 급등∧즉시구매0).
     # lazy import(순환 회피 — probe_revert가 auto_operator를 import). 실패가 레인 결과를 오염시키지 않음.
