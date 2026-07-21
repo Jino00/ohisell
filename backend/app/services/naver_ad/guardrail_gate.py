@@ -17,6 +17,7 @@ from app.services.naver_ad.bid_step_types import (
     BID_DOWN_TYPES as _BID_DOWN_TYPES,
     BID_UP_TYPES as _BID_UP_TYPES,
     CHANGE_PCT_EXEMPT_TYPES as _EXEMPT_FROM_CHANGE_PCT,
+    EXPLORATION_STEP_TYPES as _EXPLORATION_STEP_TYPES,
     RANK_STEP_TYPES as _RANK_STEP_TYPES,
 )
 
@@ -24,6 +25,13 @@ from app.services.naver_ad.bid_step_types import (
 # 비적용 — 절대액 스톱로스가 실질 안전장치이므로 여기서는 변경폭 검사만 면제한다.
 # ★UP 타입·DOWN 타입·±15% 면제 집합은 bid_step_types 레지스트리(단일 소스, IU-R R0)에서 import.
 _MAX_CHANGE_PCT = Decimal("0.15")
+
+# B-X BX2(D-NAO-71): 탐색 스텝(EXPLORATION_STEP_TYPES)의 변경폭 상한 = 30%. "15%는 순위 실이동에
+# 너무 작음"(Jino 원문) — 목적은 순위가 실제로 오르내리는 크기. ★완전 면제가 아니라 상한을
+# 15%→30%로 바꾼 것뿐 — 30% 초과는 여전히 fail-closed 차단(탐색 폭주 방지). 잔여 가격 브레이크 =
+# product_bep 연동 경제성 상한(exploration.exploration_ceiling, BX3 레인에서 target_bid를 상한까지
+# 클램프). exploration.py의 _EXPLORATION_STEP_PCT(0.30)와 값이 일치해야 한다(정합 테스트로 고정).
+_EXPLORATION_MAX_CHANGE_PCT = Decimal("0.30")
 
 # D-NAO-19 "동일 키워드 재변경 최소 간격" — 초기값 5h(trigger_watch 재사용)에서
 # ★D-NAO-55(2026-07-18 Jino 승인 "그렇게 하자")로 2h 단축. 근거: 순위 데이터가 시간 단위
@@ -161,9 +169,12 @@ def _check_bid(proposal: dict, context: dict, proposal_type: str) -> str | None:
 
     if proposal_type not in _EXEMPT_FROM_CHANGE_PCT and current_bid > 0:
         change_pct = abs(Decimal(target_bid) - Decimal(current_bid)) / Decimal(current_bid)
-        if change_pct > _MAX_CHANGE_PCT:
+        # BX2(D-NAO-71): 탐색 스텝은 30% 상한, 그 외 15%. 탐색은 완전 면제(CHANGE_PCT_EXEMPT_TYPES)가
+        # 아니라 상한만 넓힌 것 — 30% 초과는 여전히 차단(폭주 방지, 탐색 스텝 상한 고정 테스트).
+        cap = _EXPLORATION_MAX_CHANGE_PCT if proposal_type in _EXPLORATION_STEP_TYPES else _MAX_CHANGE_PCT
+        if change_pct > cap:
             return (
-                f"변경폭 {float(change_pct):.1%} 초과(상한 {float(_MAX_CHANGE_PCT):.0%}, D-NAO-5) "
+                f"변경폭 {float(change_pct):.1%} 초과(상한 {float(cap):.0%}, D-NAO-5/71) "
                 f"— 현재={current_bid}원 목표={target_bid}원"
             )
 

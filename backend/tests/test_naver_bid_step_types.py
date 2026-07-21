@@ -20,6 +20,7 @@ from app.services.naver_ad.bid_step_types import (
     BID_DOWN_TYPES,
     BID_UP_TYPES,
     CHANGE_PCT_EXEMPT_TYPES,
+    EXPLORATION_STEP_TYPES,
     RANK_STEP_TYPES,
     direction_of,
     is_bid_up,
@@ -35,9 +36,12 @@ _GOLDEN_EXEMPT = frozenset({"growth_bid_up"})
 
 # IU-R R2 기대 상태 — R1 bid_up_servo(쇼검 서보) + R2 bid_up_rank(파워링크 estimate 직행)가
 # UP·±15%면제·rank-step 3셋에 등록됨.
-_R2_BID_UP = _GOLDEN_BID_UP | {"bid_up_servo", "bid_up_rank"}
+# ★BX2(D-NAO-70·71): 탐색 UP 타입 bid_up_explore가 **UP에는 추가**되나 ±15%면제·rank-step에는
+#   추가되지 않는다(30% 상한 = EXPLORATION_STEP_TYPES 별도 셋, 완전 면제도 rank-step도 아님).
+_BX2_BID_UP = _GOLDEN_BID_UP | {"bid_up_servo", "bid_up_rank", "bid_up_explore"}
 _R2_EXEMPT = _GOLDEN_EXEMPT | {"bid_up_servo", "bid_up_rank"}
 _R2_RANK_STEP = frozenset({"bid_up_servo", "bid_up_rank"})
+_BX2_EXPLORATION = frozenset({"bid_up_explore"})
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -45,7 +49,8 @@ _R2_RANK_STEP = frozenset({"bid_up_servo", "bid_up_rank"})
 # ══════════════════════════════════════════════════════════════════
 def test_registry_membership_sets():
     # IU-R R2: bid_up_servo·bid_up_rank가 UP·±15%면제 셋에 추가됨(DOWN은 불변).
-    assert BID_UP_TYPES == _R2_BID_UP
+    # BX2: bid_up_explore가 UP에 추가(±15%면제엔 미추가 — 30% 별도 상한).
+    assert BID_UP_TYPES == _BX2_BID_UP
     assert BID_DOWN_TYPES == _GOLDEN_BID_DOWN
     assert CHANGE_PCT_EXEMPT_TYPES == _R2_EXEMPT
 
@@ -55,6 +60,15 @@ def test_rank_step_types_filled_with_servo():
     assert RANK_STEP_TYPES == _R2_RANK_STEP
     # rank-step은 반드시 UP 타입의 부분집합(rank 스텝은 상향 스텝의 하위 의미).
     assert RANK_STEP_TYPES <= BID_UP_TYPES
+
+
+def test_exploration_step_types_registered_bx2():
+    # BX2(D-NAO-70·71): 탐색 스텝 타입 = bid_up_explore. UP의 부분집합이지만 ±15%완전면제도
+    # rank-step도 아님(30% 상한 별도 셋 — guardrail_gate가 이 셋을 보고 0.30 상한 적용).
+    assert EXPLORATION_STEP_TYPES == _BX2_EXPLORATION
+    assert EXPLORATION_STEP_TYPES <= BID_UP_TYPES
+    assert EXPLORATION_STEP_TYPES.isdisjoint(CHANGE_PCT_EXEMPT_TYPES)  # 완전 면제 아님
+    assert EXPLORATION_STEP_TYPES.isdisjoint(RANK_STEP_TYPES)  # rank-step 아님(고정 30% 래더)
 
 
 def test_registry_invariants():
@@ -88,7 +102,7 @@ def test_direction_of(pt, expected):
 # ══════════════════════════════════════════════════════════════════
 def test_guardrail_consumes_registry_sets():
     # guardrail_gate가 레지스트리를 별칭 import — R2 값과 동일(중복 정의 아님, 동일 객체).
-    assert guardrail_gate._BID_UP_TYPES == _R2_BID_UP
+    assert guardrail_gate._BID_UP_TYPES == _BX2_BID_UP
     assert guardrail_gate._BID_DOWN_TYPES == _GOLDEN_BID_DOWN
     assert guardrail_gate._EXEMPT_FROM_CHANGE_PCT == _R2_EXEMPT
     assert guardrail_gate._BID_UP_TYPES is BID_UP_TYPES  # 단일 소스(별칭)
@@ -193,6 +207,7 @@ def test_action_by_proposal_type_mapping_derived_with_servo():
         "growth_bid_up": "update_bid",
         "bid_up_servo": "update_bid",  # IU-R R1: 레지스트리 파생으로 자동 매핑
         "bid_up_rank": "update_bid",   # IU-R R2: 레지스트리 파생으로 자동 매핑
+        "bid_up_explore": "update_bid",  # BX2(D-NAO-70): 탐색 UP도 레지스트리 파생 자동 매핑
         "pause": "set_user_lock",
         "resume": "set_user_lock",
         "budget_up": "update_budget",

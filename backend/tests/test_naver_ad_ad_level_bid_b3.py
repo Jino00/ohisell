@@ -32,6 +32,7 @@ from app.models import (
 )
 from app.services.naver_ad import account_diagnosis as diag
 from app.services.naver_ad import auto_operator
+from app.services.naver_ad import exploration
 from app.services.naver_ad import naver_execution_harness as harness
 from app.services.naver_ad import naver_sa_writer as writer
 from app.services.naver_ad import proposal_writer
@@ -106,8 +107,10 @@ def test_update_ad_bid_success_roundtrip():
     assert mp.call_count == 1
 
 
-def test_update_ad_bid_body_is_adattr_json_string_ugba_false():
-    """body adAttr = JSON 문자열 {"bidAmt":N,"useGroupBidAmt":false} + fields=adAttr(부분교체)."""
+def test_update_ad_bid_body_is_full_object_adattr_dict_ugba_false():
+    """body = GET 원본 **전체 객체**(type 포함, update_adgroup_bid 동형) + adAttr만 JSON **객체**
+    {"bidAmt":N,"useGroupBidAmt":false}로 교체 + fields=adAttr. 라이브 실측(2026-07-21):
+    문자열 adAttr·최소 body({nccAdId,nccAdgroupId,adAttr}) 둘 다 400 code 3830, 전체 객체만 200."""
     before, parent, after = _ad_resp(800), _manual_parent(), _ad_resp(680)
     put_resp = FakeResp(200, after.json())
     with patch.object(writer.fetcher, "_get", side_effect=[before, parent, after]), \
@@ -116,8 +119,30 @@ def test_update_ad_bid_body_is_adattr_json_string_ugba_false():
     _, kwargs = mp.call_args
     assert kwargs["params"] == {"fields": "adAttr"}
     assert kwargs["json"]["nccAdId"] == AD_ID
-    assert isinstance(kwargs["json"]["adAttr"], str)  # JSON 문자열(공식 apidoc)
-    assert json.loads(kwargs["json"]["adAttr"]) == {"bidAmt": 680, "useGroupBidAmt": False}
+    assert kwargs["json"]["nccAdgroupId"] == GRP_ID  # 전체 객체라 before의 그룹 id 포함
+    assert kwargs["json"]["type"] == "SHOPPING_PRODUCT_AD"  # 전체 객체 마커(type 없으면 400 3830)
+    assert kwargs["json"]["userLock"] is False  # before의 여타 필드 그대로 동반 전송
+    ad_attr = kwargs["json"]["adAttr"]
+    assert isinstance(ad_attr, dict)  # JSON 객체(문자열 아님)
+    assert ad_attr["bidAmt"] == 680
+    assert ad_attr["useGroupBidAmt"] is False
+
+
+def test_update_ad_bid_body_preserves_other_adattr_subfields():
+    """before adAttr의 기타 서브필드(bidAmt/useGroupBidAmt 외)는 병합 보존된 채 bidAmt만 갱신."""
+    before = FakeResp(200, {
+        "nccAdId": AD_ID, "nccAdgroupId": GRP_ID, "type": "SHOPPING_PRODUCT_AD",
+        "adAttr": json.dumps({"bidAmt": 800, "useGroupBidAmt": False, "someOtherField": "keep-me"}),
+    })
+    parent, after = _manual_parent(), _ad_resp(680)
+    put_resp = FakeResp(200, after.json())
+    with patch.object(writer.fetcher, "_get", side_effect=[before, parent, after]), \
+         patch.object(writer.requests, "put", return_value=put_resp) as mp:
+        writer.update_ad_bid(AD_ID, 680)
+    ad_attr = mp.call_args.kwargs["json"]["adAttr"]
+    assert ad_attr["bidAmt"] == 680
+    assert ad_attr["useGroupBidAmt"] is False
+    assert ad_attr["someOtherField"] == "keep-me"  # 기타 서브필드 보존
 
 
 def test_update_ad_bid_rejects_use_group_bid_amt_true(db=None):
@@ -204,10 +229,17 @@ def test_get_ad_bid_parses_adattr():
 # (2) harness _execute_update_bid — 'ad' 분기
 # ══════════════════════════════════════════════════════════════════
 def _ad_proposal(db, *, proposal_type="bid_down", target_bid=680, adgroup_id=GRP_ID,
-                 campaign_id="cmp1", status="approved", approval_source=None):
+                 campaign_id="cmp1", status="approved", approval_source=None, ceiling=100_000):
+    # BX3(P2①·codex P1): 탐색 스텝은 ceiling 마커 + base_bid 마커(TOCTOU, step_base=800=ctx current)를
+    # 요구(성공 경로는 넉넉한 ceiling·일치 base_bid).
+    from app.services.naver_ad.bid_step_types import encode_base_bid, encode_exploration_ceiling
+    if proposal_type == "bid_up_explore":
+        effect = encode_base_bid(encode_exploration_ceiling("테스트", ceiling), 800)
+    else:
+        effect = "테스트"
     p = NaverProposal(
         proposal_type=proposal_type, target_type="ad", target_id=AD_ID,
-        campaign_id=campaign_id, adgroup_id=adgroup_id, rationale="테스트", expected_effect="테스트",
+        campaign_id=campaign_id, adgroup_id=adgroup_id, rationale="테스트", expected_effect=effect,
         status=status, target_bid=target_bid, approval_source=approval_source,
     )
     db.add(p)
@@ -302,14 +334,16 @@ def test_harness_ad_bid_up_blocked_when_bep_context_incomplete(db):
     assert p.status == "failed"
 
 
-def test_harness_ad_bid_up_success_when_context_complete(db):
-    p = _ad_proposal(db, proposal_type="bid_up", target_bid=920)
-    _settings(db, optimizer="ours")
-    ctx = {"current_bid": 800, "roas_corrected": 5.0, "target_roas": 2.0, "unconverted_spend": 0,
-           "cost_today": 1000, "daily_budget": 50_000, "last_change_at": None, "changes_today_count": 0}
-    with patch.object(auto_operator, "AD_BID_CANARY_CAMPAIGNS", frozenset({"cmp1"})), \
-         patch.object(auto_operator, "_AD_BID_CANARY_PROPOSAL_TYPES", frozenset({"bid_down", "bid_up"})), \
-         patch.object(harness, "_build_guardrail_context", return_value=ctx), \
+def test_harness_ad_bid_up_explore_success_when_gates_pass(db):
+    """BX2(D-NAO-70·71): 소재 UP은 explore_op + bid_up_explore 탐색 경로로만 실쓰기 성공(전 캠페인·
+    카나리 무관). ★ctx의 BEP 원료가 전부 None인데도 성공 = 탐색이 표본-기반 BEP 완전성 게이트에서
+    면제됨을 고정(콜드 그룹은 표본 없음 — 비탐색 UP이면 여기서 fail-closed 됐을 것)."""
+    p = _ad_proposal(db, proposal_type="bid_up_explore", target_bid=920,
+                     approval_source=exploration.APPROVAL_SOURCE_EXPLORE)
+    _settings(db, optimizer="ours", auto_operate=True)  # explore_op = 킬스위치 화이트리스트
+    ctx = {"current_bid": 800, "roas_corrected": None, "target_roas": None, "unconverted_spend": None,
+           "cost_today": None, "daily_budget": None, "last_change_at": None, "changes_today_count": 0}
+    with patch.object(harness, "_build_guardrail_context", return_value=ctx), \
          patch.object(harness.guardrail_gate, "check", return_value=None), \
          patch.object(harness.naver_sa_writer, "update_ad_bid",
                       return_value=_ad_write_result(800, 920)) as mad:
@@ -332,17 +366,19 @@ def test_real_write_blocker_ad_no_target_bid(db):
 # ══════════════════════════════════════════════════════════════════
 # (2b) codex 소급[P2] 2026-07-20 — 최종 쓰기 경계 가드(카나리·방향·adgroup_id)
 # ══════════════════════════════════════════════════════════════════
-def test_harness_ad_blocks_non_canary_campaign(db):
-    """카나리 밖 캠페인의 승인된 ad 제안(stale/수기) → 쓰기 직전 fail-closed·update_ad_bid
-    미호출·failed 감사(생성·위임 단계 가드의 최종 경계 이중화)."""
-    p = _ad_proposal(db, proposal_type="bid_down", target_bid=680)  # cmp1 = 비카나리
+def test_harness_ad_bid_down_executes_all_campaigns_canary_lifted(db):
+    """BX2(D-NAO-70②): 소재 bid_down은 카나리 1호(맥세이프) 제한 해제 — 전 캠페인 Confirm 실쓰기.
+    (B3에선 비카나리 캠페인이 최종 경계에서 fail-closed 차단됐으나 D-NAO-70으로 전 캠페인 개방.)"""
+    p = _ad_proposal(db, proposal_type="bid_down", target_bid=680)  # cmp1 = 과거 비카나리
     _settings(db, optimizer="ours")
-    with patch.object(harness.naver_sa_writer, "update_ad_bid") as mad:
-        with pytest.raises(harness.MissingExecutionTargetError):
-            harness.execute(db, p.id, dry_run=False)
-    mad.assert_not_called()
+    with patch.object(harness, "_build_guardrail_context", return_value={"current_bid": 800}), \
+         patch.object(harness.guardrail_gate, "check", return_value=None), \
+         patch.object(harness.naver_sa_writer, "update_ad_bid",
+                      return_value=_ad_write_result(800, 680)) as mad:
+        log_entry = harness.execute(db, p.id, dry_run=False)
+    mad.assert_called_once_with(AD_ID, 680)
     db.refresh(p)
-    assert p.status == "failed"
+    assert p.status == "approved" and p.executed_change_log_id == log_entry.id
 
 
 def test_harness_ad_blocks_undirectional_bid_up(db):
@@ -368,18 +404,17 @@ def test_harness_ad_blocks_missing_adgroup_id(db):
     mad.assert_not_called()
 
 
-def test_real_write_blocker_ad_non_canary_not_executable(db):
-    """콘솔 executable 판정도 동일 이중 방벽 — 카나리 밖 ad 제안은 실행 버튼 비활성."""
-    p = _ad_proposal(db, proposal_type="bid_down", target_bid=680)  # cmp1 = 비카나리(기본 상수)
+def test_real_write_blocker_ad_bid_down_executable_all_campaigns(db):
+    """BX2(D-NAO-70②): 카나리 제한 해제 — 소재 bid_down은 전 캠페인에서 실행 버튼 활성(None)."""
+    p = _ad_proposal(db, proposal_type="bid_down", target_bid=680)  # cmp1 = 과거 비카나리
+    assert harness.real_write_blocker(p) is None
+
+
+def test_real_write_blocker_ad_bid_up_non_explore_not_executable(db):
+    """BX2: 비탐색 승인원(콘솔 NULL)의 소재 UP은 미개방 — 실행 버튼 비활성(탐색 explore_op만)."""
+    p = _ad_proposal(db, proposal_type="bid_up", target_bid=920)  # approval_source=None
     blocked = harness.real_write_blocker(p)
-    assert blocked is not None and "카나리" in blocked
-
-
-def test_real_write_blocker_ad_bid_up_not_executable(db):
-    p = _ad_proposal(db, proposal_type="bid_up", target_bid=920)
-    with patch.object(auto_operator, "AD_BID_CANARY_CAMPAIGNS", frozenset({"cmp1"})):
-        blocked = harness.real_write_blocker(p)
-    assert blocked is not None and "미개방 방향" in blocked
+    assert blocked is not None and "탐색" in blocked
 
 
 def test_build_guardrail_context_ad_current_bid_from_live_ad(db):

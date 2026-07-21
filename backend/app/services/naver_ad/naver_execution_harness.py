@@ -33,7 +33,14 @@ from sqlalchemy.orm import Session
 
 from app.models import NaverCampaignSettings, NaverChangeLog, NaverEntity, NaverHourlySnapshot, NaverProposal
 from app.services.naver_ad import account_diagnosis, campaign_target_resolver, diary, guardrail_gate, naver_sa_writer
-from app.services.naver_ad.bid_step_types import BID_DOWN_TYPES, BID_UP_TYPES, RANK_STEP_TYPES, decode_base_bid
+from app.services.naver_ad.bid_step_types import (
+    BID_DOWN_TYPES,
+    BID_UP_TYPES,
+    EXPLORATION_STEP_TYPES,
+    RANK_STEP_TYPES,
+    decode_base_bid,
+    decode_exploration_ceiling,
+)
 from app.services.naver_ad.diagnosis import correction_factor as compute_correction_factor
 from app.utils.kst import kst_now
 
@@ -239,11 +246,13 @@ def _claim_executing(db: Session, proposal: NaverProposal) -> None:
 
     if proposal.approval_source is not None:
         from app.services.naver_ad import auto_operator as _auto_operator  # 지연 import(순환 회피, 7R과 동일)
+        from app.services.naver_ad.exploration import APPROVAL_SOURCE_EXPLORE  # BX2 탐색 승인원
 
         if proposal.approval_source in (
             _auto_operator.APPROVAL_SOURCE_DAILY, _auto_operator.APPROVAL_SOURCE_HOURLY,
             _auto_operator.APPROVAL_SOURCE_PROBE,  # D-NAO-58 CD2: 탐침도 동일 킬스위치 가드(우회 금지)
             _auto_operator.APPROVAL_SOURCE_REVERT,  # D-NAO-58 CD3: 되돌림도 킬스위치 통과(우회 금지)
+            APPROVAL_SOURCE_EXPLORE,  # BX2 D-NAO-70: 탐색 자동 실쓰기도 동일 킬스위치 가드(우회 금지, probe_op 관례)
         ) and not _auto_operator._auto_operate_now(db, proposal.campaign_id):
             proposal.status = "approved"  # 클레임 원복 — executing 잔존 방지(미실행 정직 상태)
             db.commit()
@@ -679,28 +688,91 @@ def _execute_update_bid(db: Session, proposal: NaverProposal, now: datetime) -> 
             _guard_failure(db, proposal, now, "update_bid", reason)
             raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
 
-    # codex 소급[P2] 2026-07-20 — B3 카나리의 **최종 쓰기 경계** 이중화(D-NAO-13 optimizer
-    # 쓰기 직전 하드 체크와 동형 관례): 카나리·방향 제한은 생성(proposal_writer)·위임
-    # (delegation_gate)에서 강제되지만, 실행자는 승인된 'ad' 제안을 재검증 없이 썼다 —
-    # stale 제안(카나리 상수 축소 후 잔존 pending)이나 경로 밖에서 생성된 제안이 콘솔
-    # 승인만으로 최종 경계를 통과하는 fail-open. 쓰기 직전 fail-closed로 재검증한다.
-    # 함수 레벨 import — delegation_gate와 동일 관례(auto_operator 모듈 결합 최소화).
-    if proposal.target_type == "ad":
-        from app.services.naver_ad.auto_operator import (
-            AD_BID_CANARY_CAMPAIGNS, _AD_BID_CANARY_PROPOSAL_TYPES,
-        )
-        ad_guard = []
-        if proposal.campaign_id not in AD_BID_CANARY_CAMPAIGNS:
-            ad_guard.append("캠페인이 소재입찰 카나리 개방 대상 아님")
-        if proposal.proposal_type not in _AD_BID_CANARY_PROPOSAL_TYPES:
-            ad_guard.append(
-                f"proposal_type={proposal.proposal_type!r}는 소재-레벨 미개방 방향"
-                f"(개방={sorted(_AD_BID_CANARY_PROPOSAL_TYPES)})"
+    # BX2 GATE P1 + codex P2(D-NAO-70·71) — **탐색 타입 ⟺ explore_op 승인원 쌍방향 잠금**(target_type
+    # 무관, 전 target_type 대칭 경계). 두 방향 모두 fail-closed:
+    #   (P1) 탐색 스텝인데 explore_op이 아니면 차단 — 없으면 bid_up_explore + adgroup/keyword + 콘솔/
+    #        기타 승인원 제안이 (BEP 완전성 면제 + 킬스위치 화이트리스트 밖) 최약 UP 경로로 샌다(GATE 실증).
+    #   (P2) explore_op인데 탐색 스텝이 아니면 차단 — explore_op은 탐색 UP 전용 승인원이므로 bid_down류
+    #        (소재 DOWN은 콘솔 Confirm/기타 승인원 몫)를 explore_op으로 실으면 승인원 오용(codex P2).
+    # 정상 경로(둘 다 참=탐색 UP / 둘 다 거짓=비탐색)만 통과. BX3 source='group' 그룹 탐색(adgroup)도
+    # explore_op으로만 발사되므로 이 게이트가 정상 경로를 막지 않는다(ad 분기 검사와 동형 이중, D-NAO-13).
+    from app.services.naver_ad.exploration import APPROVAL_SOURCE_EXPLORE
+    _is_explore_type = proposal.proposal_type in EXPLORATION_STEP_TYPES
+    _is_explore_src = proposal.approval_source == APPROVAL_SOURCE_EXPLORE
+    if _is_explore_type != _is_explore_src:
+        if _is_explore_type:
+            reason = (
+                f"탐색 스텝({proposal.proposal_type})은 explore_op 승인원 전용"
+                f"(승인원={proposal.approval_source!r}) — 콘솔·기타 승인원의 탐색 UP은 봉쇄"
+                "(fail-closed, GATE P1 전 target_type 대칭)"
             )
+        else:
+            reason = (
+                f"explore_op 승인원은 탐색 스텝 타입 전용(UP) — proposal_type="
+                f"{proposal.proposal_type!r}는 탐색 스텝 아님(소재 DOWN은 콘솔 Confirm 몫). "
+                "승인원 오용 봉쇄(fail-closed, codex P2 역방향 잠금)"
+            )
+        _guard_failure(db, proposal, now, "update_bid", reason)
+        raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
+
+    # BX2(D-NAO-70·71) — 소재(ad) 실쓰기 **최종 경계**(codex 소급[P2] 2026-07-20 이중화 계승,
+    # D-NAO-13 optimizer 쓰기 직전 하드 체크 동형). B3 개정:
+    #   ① 카나리 1호(맥세이프) 캠페인 제한 **해제** — 전 캠페인 개방(D-NAO-70②). AD_BID_CANARY_CAMPAIGNS
+    #      게이트 제거(그 상수는 auto_operator 레인 라우팅·delegation 봉쇄에서 계속 사용 — 여기선 미사용).
+    #   ② 방향: 하향(bid_down)은 기존 B3 Confirm 경로(승인원 무관·전 캠페인) 유지 / 상향은 탐색
+    #      자동 경로 전용 — approval_source='explore_op' ∧ 탐색 스텝 타입(EXPLORATION_STEP_TYPES)일
+    #      때만 개방(D-NAO-70③). 비탐색(성과) 소재 UP·다른 승인원(콘솔 NULL·auto_op·delegation)의
+    #      소재 UP은 여전히 봉쇄(Confirm 스코프 밖). 자동발사 봉쇄 약화 없음 — 승인원 화이트리스트만.
+    # stale 제안(경로 밖 생성·잔존 pending)이 콘솔 승인만으로 최종 경계를 통과하는 fail-open을 차단.
+    # 함수 레벨 import — delegation_gate와 동일 관례(모듈 결합 최소화·순환 회피).
+    if proposal.target_type == "ad":
+        from app.services.naver_ad.exploration import APPROVAL_SOURCE_EXPLORE
+        ad_guard = []
         if not proposal.adgroup_id:
             ad_guard.append("adgroup_id 없음(소재 제안 필수 컨텍스트)")
+        if proposal.proposal_type in BID_UP_TYPES:
+            if proposal.approval_source != APPROVAL_SOURCE_EXPLORE:
+                ad_guard.append(
+                    f"소재 UP은 탐색(explore_op) 자동 경로만 개방(승인원={proposal.approval_source!r}) "
+                    "— 비탐색 소재 UP은 Confirm 스코프 밖(D-NAO-70③)"
+                )
+            elif proposal.proposal_type not in EXPLORATION_STEP_TYPES:
+                ad_guard.append(
+                    f"explore_op 소재 UP은 탐색 스텝 타입만(개방={sorted(EXPLORATION_STEP_TYPES)}, "
+                    f"요청={proposal.proposal_type!r})"
+                )
+        elif proposal.proposal_type not in BID_DOWN_TYPES:
+            ad_guard.append(
+                f"proposal_type={proposal.proposal_type!r}는 소재-레벨 미지원 방향"
+                "(UP=탐색explore_op / DOWN=bid_down Confirm)"
+            )
         if ad_guard:
             reason = "소재(ad) 실쓰기 경계 차단(fail-closed) — " + " · ".join(ad_guard)
+            _guard_failure(db, proposal, now, "update_bid", reason)
+            raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
+
+    # BX3(D-NAO-70·71, PLAN §3 BX2 GATE 이월 P2①) — 탐색 스텝 경제성 상한 **쓰기-경계 하드
+    # 게이트**. D-NAO-71로 수량·빈도 캡이 사라져 경제성 상한이 **유일한 가격 브레이크**이므로,
+    # 레인 계산(run_hourly_lane의 min(step, ceiling) 클램프)을 불신하고 여기서 재검증한다 —
+    # 레인이 ceiling을 잘못 클램프하거나 경로 밖 생성/변조 제안이 최종 경계를 통과하는 fail-open
+    # 차단. ceiling은 run_hourly_lane이 expected_effect에 심은 마커(base_bid 마커 관례 동형, 신규
+    # 마이그레이션 금지). ★마커 부재/중복/오염 = fail-closed(경제 근거 없이 탐색 상향 금지) —
+    # run_hourly_lane 정상 생성분은 항상 단일 suffix 마커 보유 → 정상 경로 무영향. explore_op·
+    # 탐색 타입은 위 GATE P1 쌍방향 잠금을 이미 통과했으므로 여기 도달하는 탐색 스텝은 정상 경로다.
+    if proposal.proposal_type in EXPLORATION_STEP_TYPES:
+        ceiling = decode_exploration_ceiling(proposal.expected_effect)
+        if ceiling is None:
+            reason = (
+                "탐색 경제성 상한 마커 부재/오염(fail-closed) — D-NAO-71로 상한이 유일 가격 "
+                "브레이크. run_hourly_lane 밖 생성/변조 제안 차단(PLAN §3 BX2 GATE 이월 P2①)"
+            )
+            _guard_failure(db, proposal, now, "update_bid", reason)
+            raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
+        if proposal.target_bid > ceiling:
+            reason = (
+                f"탐색 경제성 상한 초과(fail-closed) — target_bid={proposal.target_bid}원 > 상한 "
+                f"{ceiling}원. '클릭당 확정 손해' 가격 진입 금지(PLAN §1 가드2, 쓰기-경계 재검증)"
+            )
             _guard_failure(db, proposal, now, "update_bid", reason)
             raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
 
@@ -736,6 +808,30 @@ def _execute_update_bid(db: Session, proposal: NaverProposal, now: datetime) -> 
             _guard_failure(db, proposal, now, "update_bid", reason)
             raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
 
+    # BX3 codex P1(기울기 연속성·TOCTOU): 탐색 스텝도 제안 시점 step_base(적응 스텝 산정 기준가)를
+    # base_bid 마커로 실어 보낸다 — rank-step과 동형 TOCTOU. 제안 생성(라이브 재조회)→실행(라이브
+    # 재조회) 사이 소재/그룹 입찰이 MOP·사람·외부로 바뀌었으면 산정 전제가 깨졌으므로 fail-closed
+    # 중단(재산정 없이 다음 사이클 fresh current로 재진입). ★탐색은 RANK_STEP_TYPES가 아니라 위
+    # 블록을 안 타므로 별도 게이트. 마커 부재/오염도 fail-closed(경로 밖 생성/변조 차단).
+    if proposal.proposal_type in EXPLORATION_STEP_TYPES:
+        exp_base = decode_base_bid(proposal.expected_effect)
+        if exp_base is None:
+            reason = (
+                "탐색 base_bid 마커 부재/오염(fail-closed) — 적응 스텝 산정 기준가 검증 없이 실행 "
+                "금지. run_hourly_lane 밖 생성/변조 제안 차단(codex P1 기울기 연속성·TOCTOU)"
+            )
+            _guard_failure(db, proposal, now, "update_bid", reason)
+            raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
+        exp_live = context.get("current_bid")
+        if exp_live is not None and int(exp_live) != exp_base:
+            reason = (
+                f"탐색 TOCTOU 중단(fail-closed) — 제안 시점 base_bid={exp_base}원 ≠ 실행 시점 "
+                f"라이브 bid={exp_live}원. 적응 스텝 전제(레버 입찰)가 그 사이 외부 변경으로 깨짐 — "
+                "재산정 없이 중단(다음 탐색 사이클이 fresh current로 재진입, codex P1)"
+            )
+            _guard_failure(db, proposal, now, "update_bid", reason)
+            raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
+
     # S3(D-NAO-43 성장 확장): adgroup 증액(bid_up/growth_bid_up)은 guardrail_gate._check_bid의
     # BEP 검사(roas_corrected/target_roas)가 그 값이 None이면 fail-open(검사를 건너뜀)이라,
     # 컨텍스트가 완전히 채워지지 않은 채로 guardrail_gate에 넘기면 D-NAO-1 이익하한이 조용히
@@ -747,7 +843,25 @@ def _execute_update_bid(db: Session, proposal: NaverProposal, now: datetime) -> 
     # 키워드 UP의 BEP 바닥은 핫셋 클릭 게이트·정착창 검사와의 암묵적 커플링에 기대고 있었다.
     # IU가 장중-단독 UP(정산 판정불가 유닛)을 열었으므로 키워드도 컨텍스트 완전성(BEP 원료·
     # 일예산)을 명시적으로 보장한다(가드 약화 없음 — keyword 브랜치는 이 원료를 원래 채움).
-    if proposal.target_type in ("adgroup", "ad", "keyword") and proposal.proposal_type in BID_UP_TYPES:
+    # BX2(D-NAO-70·71) 탐색 스텝 예외: EXPLORATION_STEP_TYPES는 콜드 그룹(정착 표본 없음)에서
+    # 도는 자동 실쓰기라 BEP를 못 잰다(표본 없는 그룹에 표본-기반 이익하한 강제 = 탐색 원천 봉쇄).
+    # 대체 가격 브레이크 = product_bep 연동 경제성 상한(exploration.exploration_ceiling, BX3 레인이
+    # target_bid를 상한까지 클램프) + 비용-기반 백스톱(무전환 스톱로스·일예산 — guardrail_gate의
+    # fail-open 검사로 탐색에도 그대로 작동). PLAN §1 가드6 "표본 없는 그룹에 표본 판단 금지".
+    # ★GATE P1: 면제 조건에 **explore_op 승인원까지 결합**(면제와 승인원을 한 지점에서 잠금) —
+    # 탐색 타입인데 explore_op이 아니면 면제 없이 기존 이익하한 검사가 정상 적용된다. 위 GATE P1
+    # 게이트가 이미 그런 제안을 fail-closed로 막지만(도달 불가), 이 이중 결합으로 "면제가 승인원과
+    # 분리돼 다른 target_type에서 새는" 클래스의 결함을 원천 차단한다(리뷰어 권고 1안).
+    from app.services.naver_ad.exploration import APPROVAL_SOURCE_EXPLORE as _EXPLORE_SRC
+    _exploration_exempt = (
+        proposal.proposal_type in EXPLORATION_STEP_TYPES
+        and proposal.approval_source == _EXPLORE_SRC
+    )
+    if (
+        proposal.target_type in ("adgroup", "ad", "keyword")
+        and proposal.proposal_type in BID_UP_TYPES
+        and not _exploration_exempt
+    ):
         # guardrail_gate._check_bid의 up 전용 검사(BEP·스톱로스·일예산)는 그 원료가 None이면
         # 전부 fail-open(검사 건너뜀)이다 — 컨텍스트가 불완전한 채 넘기면 D-NAO-1 이익하한·
         # 일예산 상한이 조용히 우회된다. 각 원료의 소스가 달라(BEP/스톱로스=window_agg,
@@ -1110,23 +1224,72 @@ def real_write_blocker(proposal: NaverProposal) -> str | None:
             )
         if proposal.target_bid is None:
             return "target_bid 없음 — 실행 대상 정보 부족(구 제안이거나 재생성 필요)"
-        # codex 소급[P2] 2026-07-20: 소재(ad) 실쓰기는 카나리 캠페인·개방 방향 안에서만 —
-        # _execute_update_bid의 최종 경계 가드와 동일 판정(이중 방벽). 정적 상수 비교라
-        # API 콜 없음(이 함수의 "라이브 재조회 금지" 설계 유지). stale 제안(카나리 축소 후
-        # 잔존 pending)이 콘솔에서 executable로 보이는 것을 막는다.
-        if proposal.target_type == "ad":
-            from app.services.naver_ad.auto_operator import (
-                AD_BID_CANARY_CAMPAIGNS, _AD_BID_CANARY_PROPOSAL_TYPES,
-            )
-            if proposal.campaign_id not in AD_BID_CANARY_CAMPAIGNS:
-                return "소재(ad) 입찰은 카나리 캠페인만 실쓰기 가능(B3 개방 스코프 밖 — stale 제안 가능성)"
-            if proposal.proposal_type not in _AD_BID_CANARY_PROPOSAL_TYPES:
+        # BX2 GATE P1 + codex P2: 탐색 타입 ⟺ explore_op 승인원 **쌍방향 잠금**(target_type 무관,
+        # _execute_update_bid 대칭). (P1) 탐색 타입인데 explore_op 아니면 executable=False —
+        # bid_up_explore + adgroup/keyword + 콘솔이 콘솔 Confirm으로 최약 UP 경로로 열리는 것 차단
+        # (적대 GATE 실증). (P2) explore_op인데 탐색 타입 아니면 executable=False — explore_op 승인원
+        # 오용(소재 DOWN 등)을 콘솔 판정에서도 봉쇄.
+        from app.services.naver_ad.exploration import APPROVAL_SOURCE_EXPLORE
+        _is_explore_type = proposal.proposal_type in EXPLORATION_STEP_TYPES
+        _is_explore_src = proposal.approval_source == APPROVAL_SOURCE_EXPLORE
+        if _is_explore_type != _is_explore_src:
+            if _is_explore_type:
                 return (
-                    f"소재(ad) {proposal.proposal_type}은 미개방 방향"
-                    f"(현재 개방={sorted(_AD_BID_CANARY_PROPOSAL_TYPES)}, 카나리 2단계에서 확장)"
+                    f"탐색 스텝({proposal.proposal_type})은 explore_op 승인원 전용 — 콘솔·기타 "
+                    "승인원의 탐색 UP은 실행 버튼 비활성(GATE P1 전 target_type 대칭)"
                 )
+            return (
+                f"explore_op 승인원은 탐색 스텝 타입 전용(UP) — proposal_type={proposal.proposal_type} "
+                "는 탐색 스텝 아님(승인원 오용, codex P2 역방향 잠금)"
+            )
+        # BX3 GATE P2-risk3: 탐색 스텝 경제성 상한 재검증 — _execute_update_bid의 쓰기-경계 하드
+        # 게이트와 **동일 정적 판정**(이중 방벽·콘솔 executable 대칭). 마커 decode+비교는 라이브
+        # 재조회가 필요 없는 순수 정적 비교라 이 함수 설계(정적만)에 부합한다(explore_op 잠금과 동형).
+        # 마커 부재/오염·target_bid>상한이면 콘솔 실행 버튼 비활성(경로 밖 생성/변조 제안 차단).
+        if _is_explore_type:
+            ceiling = decode_exploration_ceiling(proposal.expected_effect)
+            if ceiling is None:
+                return (
+                    "탐색 경제성 상한 마커 부재/오염 — 경제 근거 없이 상향 금지(실행 버튼 비활성, "
+                    "GATE P2-risk3 쓰기경계 대칭)"
+                )
+            if proposal.target_bid is not None and proposal.target_bid > ceiling:
+                return (
+                    f"탐색 경제성 상한 초과 — target_bid={proposal.target_bid}원 > 상한 {ceiling}원"
+                    "('클릭당 확정 손해' 진입 금지, 실행 버튼 비활성)"
+                )
+            # codex P1(TOCTOU): base_bid 마커 존재 정적 확인(라이브 비교는 _execute_update_bid).
+            # 마커 부재/오염 = 경로 밖 생성/변조 → 콘솔 실행 버튼 비활성(rank-step 마커 계약 동형).
+            if decode_base_bid(proposal.expected_effect) is None:
+                return (
+                    "탐색 base_bid 마커 부재/오염 — 적응 스텝 산정 기준가 없이 실행 금지"
+                    "(실행 버튼 비활성, codex P1 TOCTOU 정적 검증)"
+                )
+        # BX2(D-NAO-70·71): 소재(ad) 실쓰기 구조 게이트(콘솔 executable 판정) — _execute_update_bid의
+        # 최종 경계 가드와 동일 판정(이중 방벽). 정적 비교만(라이브 재조회 없음, 이 함수 설계 유지).
+        #   ① 카나리 캠페인 제한 해제(전 캠페인, D-NAO-70②).
+        #   ② UP=탐색(explore_op)+탐색 스텝 타입만 / DOWN(bid_down)=전 캠페인 Confirm. 비탐색 UP·다른
+        #      승인원 UP은 미개방(stale 제안·경로 밖 생성이 콘솔에서 executable로 보이는 것 차단).
+        if proposal.target_type == "ad":
+            from app.services.naver_ad.exploration import APPROVAL_SOURCE_EXPLORE
             if not proposal.adgroup_id:
                 return "adgroup_id 없음 — 소재 제안 필수 컨텍스트 부족(재생성 필요)"
+            if proposal.proposal_type in BID_UP_TYPES:
+                if proposal.approval_source != APPROVAL_SOURCE_EXPLORE:
+                    return (
+                        "소재(ad) UP은 탐색(explore_op) 자동 경로만 개방 — 비탐색 소재 UP은 "
+                        "Confirm 스코프 밖(D-NAO-70③, 콘솔 실행 버튼 비활성)"
+                    )
+                if proposal.proposal_type not in EXPLORATION_STEP_TYPES:
+                    return (
+                        f"explore_op 소재 UP은 탐색 스텝 타입만(개방={sorted(EXPLORATION_STEP_TYPES)}, "
+                        f"요청={proposal.proposal_type})"
+                    )
+            elif proposal.proposal_type not in BID_DOWN_TYPES:
+                return (
+                    f"소재(ad) {proposal.proposal_type}은 미지원 방향"
+                    "(UP=탐색explore_op / DOWN=bid_down Confirm)"
+                )
     elif action == "set_user_lock":
         if proposal.target_type not in ("keyword", "adgroup"):
             return (
@@ -1211,11 +1374,13 @@ def execute(db: Session, proposal_id: int, *, dry_run: bool = True, now: datetim
     # 레벨 독립 커넥션 조회(codex 6R)라 타 프로세스의 OFF 커밋이 항상 보인다.
     if proposal.approval_source is not None:
         from app.services.naver_ad import auto_operator as _auto_operator
+        from app.services.naver_ad.exploration import APPROVAL_SOURCE_EXPLORE  # BX2 탐색 승인원
 
         if proposal.approval_source in (
             _auto_operator.APPROVAL_SOURCE_DAILY, _auto_operator.APPROVAL_SOURCE_HOURLY,
             _auto_operator.APPROVAL_SOURCE_PROBE,  # D-NAO-58 CD2: 탐침도 동일 킬스위치 가드(우회 금지)
             _auto_operator.APPROVAL_SOURCE_REVERT,  # D-NAO-58 CD3: 되돌림도 진입 가드(probe_op와 동일 2중 harness 방어)
+            APPROVAL_SOURCE_EXPLORE,  # BX2 D-NAO-70: 탐색 자동 실쓰기도 진입 킬스위치 가드(우회 금지, probe_op 관례)
         ) and not _auto_operator._auto_operate_now(db, proposal.campaign_id):
             log.warning(
                 "naver_execution_harness: 킬스위치 OFF — proposal_id=%s(approval_source=%s, "

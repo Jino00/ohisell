@@ -2,7 +2,21 @@
 # 매 sprint 완료 시 Claude가 이 파일을 갱신합니다.
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
-## 최신 상태 (2026-07-21 11:45, 워크트리 knowledge-layer-inversion-phase0-77bb7d·브랜치 claude/iu-r-deploy-mo-bid-down-ce6c8d)
+## 최신 상태 (2026-07-21 23:20, 워크트리 session-dfd814·브랜치 claude/bx-exploration-ad-bid-400-fix-fb114e)
+- **★★update_ad_bid 400 code:3830 근본수정 완료 — 23:20 레인 라이브 합격(소재 10건 전건 성공)**: 1차 수정(7f9a570, adAttr 객체화+nccAdgroupId 병기)은 22:20 라이브 재실패. 2차 수정(f8d5757)이 진짜 원인 해소 — **GET 전체 객체를 받아 adAttr 필드만 교체해 PUT**(update_adgroup_bid와 동일 규율). 무해 프로브(현재값 재전송)로 200 확정 후 배포. **23:20 레인 관측: 소재 10건 전건 실쓰기 성공**(강화유리 8·04 2, 실패 0, change_log 213~222) — B-X 스프린트의 콜드 탐색 유일 레버(소재입찰) 실개통(D-NAO-75). 원칙22: 순위 반응→클릭 유입→ROAS 인계까지의 완주는 미관측·상설 관측 계속.
+- **과거 백필 러너 신설·실행**(`backend/scripts/backfill_naver_ad_daily_history.py`, Jino 승인): 그룹-그레인 일별 백필, 네이버 롤링 1년 한도 실측. 버그 2건 발견·수정 후 배포: ①AD_CONVERSION 보고서 NONE 종결상태=전환 0건 정상(실패 아님, conv=0 적재)(22905a9) ②`_safe_int`가 float 표기("9670.0")를 ValueError로 조용히 0 소실(f05d54d) ③보고서 빌드 타임아웃 60s→300s(0057c4f). prod에서 2025-07-22~2026-07-03 백필 실행 중.
+- **SS 스프린트(검색어 최적화) 착수 — SS0 실측 완료**(D-NAO-76, Jino "바로 마무리" 지시): 검색어×전환=`SHOPPINGKEYWORD_CONVERSION_DETAIL` 확정 / **쇼핑(SHOPPING) 캠페인은 제외키워드 API 쓰기 불가**(400 code 3728, 가역 프로브 확정) → SS3 분기 확정(A 파워링크=API 자동·B 쇼핑=브리핑+콘솔 수동). 계획서 `docs/PLAN_naver-ad-searchterm-ss.md`.
+- 테스트 2686 passed·prod 전부 배포·재시작 완료.
+- **미완**: ①과거 백필 완주 확인(진행 중 작업 결과 검증) ②SS1~SS4 구현 ③탐색 순위 반응→클릭→ROAS 완주 사이클 상설 관측 ④codex 소급 리뷰 07-23(B-X·400수정·백필·SS0 전 커밋).
+
+## (이전) 최신 상태 (2026-07-21 21:19, 워크트리 d-nao-58-click-probe-continue-979ca3·브랜치 claude/iur-live-coldgroup-investigation-c1a714)
+- **★스프린트 B-X(저볼륨 탐색 UP·순위 피드백 래더) 구현·검증·21:11 배포 완료 — 단 라이브 1사이클 미관측·PR 미생성**: BX1(탐색 SA)→BX2(소재입찰 UP 손 개방·explore_op 자동 승인원·카나리 전 캠페인·경제성 상한 product_bep)→BX1-rev(**순위 목표형 래더** 최저 CPC로 이익밴드 2.5~4 진입·적응 스텝(30%=상한)·과열 미진입·24h 롤링 재가동·rank≤2.5 무클릭=진단 종료)→BX3(레인 배선·레버 맞춤·ceiling 이중 게이트·daily 손실 제외·KST tz·TOCTOU base 마커). **적대 GATE 2R + codex 왕복 3R = P1 4·P2 5 전건 수정·전건 RESOLVED**. 2685 passed·회귀 0. safe_deploy CAS 14파일·마이그 `e7f8a9b0c1d2`·재시작·부팅 200. 결정 D-NAO-70(대상 전부·카나리 전캠·자동 실쓰기)·71(수량캡 제거·30% 스텝)·래더 순위목표형 교정.
+- **★D-NAO-72 GAVE 목적함수 배선**(ref 26 논문 ⑤): 1차 소급 채점(총이익 점수 S=min{(ROAS/BEP)^γ,1}×매출·γ=캠페인 다이얼)·2차 일 제안 GAVE 사전 정렬(방어 클래스 무조건 선순위·성장만 GAVE 정렬). flight_loop 3차는 후속.
+- **★D-NAO-73 MOP 갭 판정**: 키워드 예산 재분배=만든다(한계이익 정렬 수리최적화, SS 후 L2)·커스텀 ML=안 만든다(분포 예측 대체). **ref 35 대행사 통화**: MOP 3약점(7~30일 지연·수렴 5~6개월·페이지 개념 없음)=우리 설계 3자 검증. D-NAO-74 페이지 경계 비선형성 백로그.
+- **★★21:20 탐색 첫 라이브 발동 — 파이프라인 성공·소재 실쓰기 실패(원칙22)**: 탐색 레인 발동(bid_up_explore·explore_op·dry_run=0 11건, 게이트·래더·발사 라이브 작동)·**그룹입찰 1건 성공**(cmp8514959 grp44743917→1590). 그러나 **소재입찰 10건 전부 네이버 400 `code:3830 Invalid ad type`** — B3 update_ad_bid가 SHOPPING_PRODUCT_AD PUT을 라이브 첫 실쓰기에서 거부당함(격리만 통과했었음). fail-closed=사고 없음이나 소재 탐색 무력(콜드 18개 전부 소재-레벨). failure-memory 기록.
+- **다음 순서**: ①**★★update_ad_bid 소재 400 수정**(네이버 apidoc Ad PUT 스펙 확인·라이브 검증 — 콜드 탐색 핵심) ②소재 수정 후 재배포 ③**PR 생성·병합**(main==prod 복원) ④08:00 GAVE 정렬 라이브 ⑤첫 주 캘리브레이션. 상세 인계 = `.claude/memory/HANDOFF_bx-exploration-deployed+gave-wired_20260721.md`
+
+## (이전) 최신 상태 (2026-07-21 11:45, 워크트리 knowledge-layer-inversion-phase0-77bb7d·브랜치 claude/iu-r-deploy-mo-bid-down-ce6c8d)
 - **★스프린트 IU-R 배포·라이브 안전 검증 완료 — main==prod 복원(D-NAO-69)**: R0~R3 커밋(`daaddba`→`4582433`→`3cea1aa`→`f4a7be8`) + 사전 봉투(`79cca9e`). 04:30 KST safe_deploy CAS 13파일(계획 11 + 누락 발견 `models.py`·`diary_outcome.py`) 배포·pm2 재시작·기동 정상. **라이브 검증(원칙22, 05:20~11:20 레인 전부 `ok`·에러0)**: prod 서보 모듈 임포트·레지스트리 확인 / **가드 무결성 실증** — probe bid_up(change_log 185) 쿨다운 2h(1.5h<2h) 정확 차단 / R3 스테이지 배선·08:10 잡 ok(콜드 slope 정상) / 다운스트림 정상 / **회귀 0**.
 - **★미완 = 서보 실쓰기 폐루프(자연 발동 상설 관측)**: 첫 ~7h 미발동 — SHOPPING 검색순위 그룹이 핫셋(그룹당 클릭≥10)+ROAS UP 게이트 통과해야 발동(트래픽 게이트). 새벽~오전 저집중에서 hold=정상. **첫 자연 발동 시 change_log(action=update_bid·dry_run=0·proposal_type∈{bid_up_servo,bid_up_rank})로 포착 → 다음 시간 avg_rank 이동→래칫 재판정 = 폐루프 한 바퀴**. R3 slope는 첫 서보 실쓰기 후 익일 적립 시작.
 - **MO 소재 bid_down_first**: 07-21 진단은 resume 후보 2건(1367·1368, 정지 전 ROAS 2.92/3.72>목표 1.82)으로 산출 — 소재 실효입찰 바닥→resume 경로(account_diagnosis 1363행). 데이터 의존·실패 아님. Confirm 왕복은 Jino 몫.
