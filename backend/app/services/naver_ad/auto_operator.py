@@ -1447,6 +1447,40 @@ def _learned_optimal_skip(
 
 # ══════════════════ B-X BX3 저볼륨 그룹 탐색-UP 레인(PLAN §2·§3, D-NAO-70·71) ══════════════════
 
+# BX3 GATE P2-risk6(PLAN §1 가드5 완성): 탐색 UP 전 **활성 daily 손실 상태** 제외 대상 보드 —
+# account_diagnosis 어드그룹 손실 보드를 retro_snapshotter가 매일 스냅한 것이 원료다(추정 아님):
+#   · shopping_group_bep         = 정착 ROAS<BEP 바닥손실(일 레인 bid_up 게이트 _bleeding_hold_reason
+#                                  이 읽는 D-NAO-48 조건④ 보드 — down 방향).
+#   · shopping_pause_candidates  = 무전환 스톱로스/floored 후보(proposal_writer._stop_loss_proposal이
+#                                  읽는 DL 스톱로스 보드 — pause 방향).
+# 어제 daily 고삐(bid_down 스톱로스·floored pause)로 조인 그룹이 오늘 탐색 UP으로 역전되는 것을
+# 막는다(_bleeding_hold_reason의 asof 신선도 계약 재사용 — fail-closed).
+_ADGROUP_DAILY_LOSS_BOARDS = ("shopping_group_bep", "shopping_pause_candidates")
+
+
+def _exploration_daily_loss_reason(db: Session, adgroup_id: str, today: date) -> str | None:
+    """탐색 후보 그룹이 **활성 daily 손실 상태**면 제외 사유(문자열), 아니면 None(PLAN §1 가드5,
+    GATE P2-risk6). DL이 읽는 것과 **동일 보드/신선도**를 재사용한다:
+    - shopping_group_bep + asof 신선도 = 일 레인 bid_up 게이트(_bleeding_hold_reason, D-NAO-48 조건④)
+      를 그대로 호출(같은 판정 원료). 신선도 미달·bleeding이면 그 사유 반환(fail-closed).
+    - shopping_pause_candidates(스톱로스/floored 보드, _stop_loss_proposal 원료)에 이 그룹이 있으면
+      제외(같은 최신 asof — group_bep 통과 시 신선함이 보장됨).
+    ★탐색은 표본-기반 UP인데 daily 손실 조치는 비용-기반 백스톱이라, 후자가 조인 그룹을 전자가
+      역전하면 어제 조치가 무의미해진다(가드5: 손실 조치 그룹 UP 금지)."""
+    bep_reason = _bleeding_hold_reason(db, "adgroup", adgroup_id, today)
+    if bep_reason is not None:
+        return bep_reason  # shopping_group_bep bleeding OR asof stale/missing(fail-closed)
+    # group_bep 통과 = 신선 asof 확정 → 같은 최신 asof에서 스톱로스 보드도 확인.
+    latest_asof = db.query(sqlfunc.max(NaverRetroSignal.asof_date)).scalar()
+    on_stoploss = db.query(NaverRetroSignal.id).filter(
+        NaverRetroSignal.asof_date == latest_asof,
+        NaverRetroSignal.board == "shopping_pause_candidates",
+        NaverRetroSignal.target_id == adgroup_id,
+    ).first()
+    if on_stoploss is not None:
+        return "daily 스톱로스/floored 후보(shopping_pause_candidates) — 탐색 UP 제외(가드5)"
+    return None
+
 
 def _exploration_bid_from_change_value(raw: str | None) -> int | None:
     """change_log before/after_value(JSON)에서 bidAmt 추출 — 광고그룹({"bidAmt":N})·소재
@@ -1565,6 +1599,17 @@ def _run_exploration_for_campaign(
         # 조용히 skip(사이클 대기·표본 충분 = 관찰 소음, 일기 미기록).
         fire, _reason = exploration.exploration_trigger({"clk": settled_clk}, last_step_at, now)
         if not fire:
+            continue
+
+        # GATE P2-risk6(가드5 완성): 활성 daily 손실 상태(스톱로스/floored/바닥손실) 그룹 제외 —
+        # 어제 daily 고삐가 조인 그룹을 오늘 탐색 UP으로 역전하지 않는다(DL과 동일 보드·신선도).
+        loss_reason = _exploration_daily_loss_reason(db, adgroup_id, today)
+        if loss_reason is not None:
+            result["held"].append({"target_id": adgroup_id, "reason": f"[탐색] daily 손실상태 제외 — {loss_reason}"})
+            _record_blocked(db, campaign_id=campaign_id, actor=diary.ACTOR_EXPLORE,
+                            reason=f"daily 손실상태 제외 — {loss_reason}", now=now,
+                            target_type="adgroup", target_id=adgroup_id, adgroup_id=adgroup_id,
+                            action="bid_up")
             continue
 
         try:

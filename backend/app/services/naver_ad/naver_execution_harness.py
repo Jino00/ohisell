@@ -1218,6 +1218,22 @@ def real_write_blocker(proposal: NaverProposal) -> str | None:
                 f"explore_op 승인원은 탐색 스텝 타입 전용(UP) — proposal_type={proposal.proposal_type} "
                 "는 탐색 스텝 아님(승인원 오용, codex P2 역방향 잠금)"
             )
+        # BX3 GATE P2-risk3: 탐색 스텝 경제성 상한 재검증 — _execute_update_bid의 쓰기-경계 하드
+        # 게이트와 **동일 정적 판정**(이중 방벽·콘솔 executable 대칭). 마커 decode+비교는 라이브
+        # 재조회가 필요 없는 순수 정적 비교라 이 함수 설계(정적만)에 부합한다(explore_op 잠금과 동형).
+        # 마커 부재/오염·target_bid>상한이면 콘솔 실행 버튼 비활성(경로 밖 생성/변조 제안 차단).
+        if _is_explore_type:
+            ceiling = decode_exploration_ceiling(proposal.expected_effect)
+            if ceiling is None:
+                return (
+                    "탐색 경제성 상한 마커 부재/오염 — 경제 근거 없이 상향 금지(실행 버튼 비활성, "
+                    "GATE P2-risk3 쓰기경계 대칭)"
+                )
+            if proposal.target_bid is not None and proposal.target_bid > ceiling:
+                return (
+                    f"탐색 경제성 상한 초과 — target_bid={proposal.target_bid}원 > 상한 {ceiling}원"
+                    "('클릭당 확정 손해' 진입 금지, 실행 버튼 비활성)"
+                )
         # BX2(D-NAO-70·71): 소재(ad) 실쓰기 구조 게이트(콘솔 executable 판정) — _execute_update_bid의
         # 최종 경계 가드와 동일 판정(이중 방벽). 정적 비교만(라이브 재조회 없음, 이 함수 설계 유지).
         #   ① 카나리 캠페인 제한 해제(전 캠페인, D-NAO-70②).

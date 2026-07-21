@@ -24,6 +24,7 @@ from app.models import (
     NaverHourlySnapshot,
     NaverProductBep,
     NaverProposal,
+    NaverRetroSignal,
 )
 from app.services.naver_ad import auto_operator, exploration
 from app.services.naver_ad import naver_execution_harness as harness
@@ -51,6 +52,18 @@ def _hour(h, *, imp, clk, cost, avg_rank=None, conv_cnt=0):
     return {"hour": h, "imp": imp, "clk": clk, "cost": cost, "avg_rank": avg_rank, "conv_cnt": conv_cnt}
 
 
+ASOF_FRESH = date(2026, 7, 20)  # 기대 asof = today-1 = NOW.date()-1 (일 레인 신선도 계약)
+
+
+def _retro(db, *, target_id, board="shopping_group_bep", asof=ASOF_FRESH, direction="down"):
+    """소급채점 신호 1행(retro_snapshotter._BOARDS 스냅 형태) — daily 손실 보드 상태 시드."""
+    db.add(NaverRetroSignal(
+        created_at=NOW, asof_date=asof, board=board, direction=direction, grain="adgroup",
+        target_id=target_id, campaign_id=CAMP, cf_asof=1.0, bep_asof=1.5, target_asof=2.0, cost_asof=0,
+    ))
+    db.commit()
+
+
 def _setup(db, *, campaign_type="SHOPPING", settle_clk=3, settle_conv=30000, group_bid=1000,
            adgroup_id=GRP, bep_roas="0.5"):
     """탐색 후보 SHOPPING 그룹 시드 — 캠페인/그룹 엔티티(on)·정착창 실적(clk<10=핫셋 미달)·
@@ -74,6 +87,9 @@ def _setup(db, *, campaign_type="SHOPPING", settle_clk=3, settle_conv=30000, gro
         campaign_type=campaign_type, cost=0, clk=0, imp=0, daily_budget=100000,
     ))
     db.commit()
+    # GATE P2-risk6: daily 손실 게이트(_bleeding_hold_reason)는 소급채점 신선도(latest_asof≥today-1)를
+    # 요구한다 — 신선 더미 신호(우리 그룹 아님)를 심어 신선도 통과 + 우리 그룹은 손실 보드 밖(=정상 탐색).
+    _retro(db, target_id="dummy-fresh")
 
 
 def _prior_step(db, *, adgroup_id=GRP, target_type="adgroup", target_id=GRP,
@@ -320,6 +336,86 @@ def test_lane_leash_skips_exploration(db):
     assert result["explored"] == 0 and result["approved"] == 1
     saved = db.get(NaverProposal, mock_exec.call_args[0][1])
     assert saved.rationale.startswith("[순위고삐]") and saved.proposal_type == "bid_down"
+
+
+# ══════════════════════ daily 손실상태 제외(GATE P2-risk6, 가드5 완성) ══════════════════════
+
+def test_lane_daily_bleeding_group_skipped(db):
+    """어제 daily 바닥손실(shopping_group_bep) 보드에 오른 그룹 → 오늘 탐색 UP 제외(역전 금지)."""
+    _setup(db)
+    _retro(db, target_id=GRP, board="shopping_group_bep")  # 우리 그룹이 손실 보드에
+    curve = [_hour(5, imp=20, clk=0, cost=0, avg_rank=6.0),
+             _hour(6, imp=20, clk=0, cost=0, avg_rank=6.0)]
+    result, mock_exec = _run(db, curve)
+    assert result["explored"] == 0
+    mock_exec.assert_not_called()
+    assert any("daily 손실상태" in h.get("reason", "") for h in result["held"])
+
+
+def test_lane_daily_stoploss_group_skipped(db):
+    """어제 daily 스톱로스/floored(shopping_pause_candidates) 후보 그룹 → 탐색 UP 제외."""
+    _setup(db)
+    _retro(db, target_id=GRP, board="shopping_pause_candidates", direction="pause")
+    curve = [_hour(5, imp=20, clk=0, cost=0, avg_rank=6.0)]
+    result, mock_exec = _run(db, curve)
+    assert result["explored"] == 0
+    mock_exec.assert_not_called()
+
+
+def test_lane_non_loss_group_proceeds(db):
+    """대조: 손실 보드에 없고 소급채점 신선 → 정상 탐색(_setup의 더미 신선 신호만, 우리 그룹 밖)."""
+    _setup(db)
+    curve = [_hour(5, imp=20, clk=0, cost=0, avg_rank=6.0),
+             _hour(6, imp=20, clk=0, cost=0, avg_rank=6.0)]
+    result, mock_exec = _run(db, curve)
+    assert result["explored"] == 1
+    mock_exec.assert_called_once()
+
+
+def test_lane_stale_retro_fail_closed(db):
+    """소급채점 stale(latest_asof < today-1) → fail-closed 제외(손실 여부 검증 불가)."""
+    # _setup 없이 직접 시드(신선 더미 없음) — stale asof(today-2)만 존재.
+    db.add(NaverCampaignSettings(campaign_id=CAMP, auto_operate=True, optimizer="ours"))
+    db.add(NaverEntity(entity_type="campaign", entity_id=CAMP, campaign_id=CAMP,
+                       campaign_type="SHOPPING", status="on"))
+    db.add(NaverEntity(entity_type="adgroup", entity_id=GRP, parent_id=CAMP,
+                       campaign_id=CAMP, campaign_type="SHOPPING", status="on"))
+    db.add(NaverAdDaily(ad_date=date(2026, 7, 15), campaign_id=CAMP, campaign_type="SHOPPING",
+                        adgroup_id=GRP, keyword_id="-", imp=100, clk=3, cost=1000,
+                        conv_direct_amt=30000, conv_indirect_amt=0))
+    db.add(NaverHourlySnapshot(snapshot_at=NOW, ad_date=TODAY, snapshot_hour=23, campaign_id=CAMP,
+                               campaign_type="SHOPPING", cost=0, clk=0, imp=0, daily_budget=100000))
+    db.commit()
+    _retro(db, target_id="other", asof=date(2026, 7, 19))  # stale(< 기대 7/20)
+    curve = [_hour(5, imp=20, clk=0, cost=0, avg_rank=6.0)]
+    result, mock_exec = _run(db, curve)
+    assert result["explored"] == 0  # stale → fail-closed 제외
+    mock_exec.assert_not_called()
+
+
+# ══════════════════════ real_write_blocker ceiling 대칭(GATE P2-risk3, 4분면) ══════════════════════
+
+def _blocker_proposal(target_bid, expected_effect):
+    return NaverProposal(
+        proposal_type="bid_up_explore", target_type="adgroup", target_id=GRP,
+        campaign_id=CAMP, adgroup_id=GRP, rationale="탐색", expected_effect=expected_effect,
+        status="approved", target_bid=target_bid,
+        approval_source=exploration.APPROVAL_SOURCE_EXPLORE,
+    )
+
+
+def test_real_write_blocker_ceiling_four_quadrant():
+    """4분면: 마커 부재/오염/초과 → 실행 버튼 비활성(not None) · 정상 → None(쓰기경계 대칭)."""
+    # ① 마커 부재
+    assert harness.real_write_blocker(_blocker_proposal(1100, "마커 없음")) is not None
+    # ② 마커 오염(중복 → decode None)
+    corrupt = encode_exploration_ceiling(encode_exploration_ceiling("x", 2000), 3000)
+    assert harness.real_write_blocker(_blocker_proposal(1100, corrupt)) is not None
+    # ③ target_bid > 상한
+    b = harness.real_write_blocker(_blocker_proposal(1100, encode_exploration_ceiling("x", 1000)))
+    assert b is not None and "상한 초과" in b
+    # ④ 정상(target ≤ 상한·단일 suffix 마커)
+    assert harness.real_write_blocker(_blocker_proposal(1000, encode_exploration_ceiling("x", 1500))) is None
 
 
 # ══════════════════════ 쓰기-경계 하드 게이트(P2①, harness) ══════════════════════
