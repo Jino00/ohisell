@@ -106,11 +106,18 @@ def _changed_bid(p, c) -> list[dict]:
 
 
 def _changed_status(p, c) -> list[dict]:
-    """상태 on↔off 전이. deleted 전이는 _detect_removed가 처리(여기선 제외)."""
+    """상태 on↔off 전이. deleted 전이는 _detect_removed가 처리(여기선 제외).
+
+    ★캠페인 grain의 status_flip은 항상 is_exception=True로 승격(P2 리뷰 지적 반영, 2026-07-21
+    실사례 근거): 대행사가 맥세이프쇼검·폴드8/플립8 캠페인을 통째로 잠그는 것은 그날 최대
+    조작이었다 — 캠페인 정지/재개는 그룹 개별 flip과 무게가 다른 구조적 사건이라 대형변화
+    임계(§3-4a) 유무와 무관하게 예외 브리핑에 올린다. 그룹 grain flip은 기존대로 비예외
+    유지(대형변화·외부개입 판정에서만 예외 승격, §3 불변)."""
     ps, cs = (p.status or "on"), (c.status or "on")
     if ps == cs or "deleted" in (ps, cs):
         return []
-    return [_op(c, "status_flip", before=ps, after=cs, magnitude=None)]
+    is_campaign = c.entity_type == "campaign"
+    return [_op(c, "status_flip", before=ps, after=cs, magnitude=None, force_exc=is_campaign)]
 
 
 def _changed_keyword_count(p, c) -> list[dict]:

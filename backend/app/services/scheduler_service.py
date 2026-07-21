@@ -303,8 +303,9 @@ def run_naver_bm_layer_job():
     """BM(벤치마크) 학습 레이어 (07:37 KST, D-NAO-78, PLAN_naver-ad-bm-layer.md §7).
 
     07:35 entity_sync 직후 발화 — naver_entity(DB)를 읽어 계정 전체 45캠페인(대행사 포함)의
-    캠페인·그룹 grain 구조를 날짜별 스냅샷(SA-1, 0 GET·관찰 전용). run_bm_layer 내부가
-    전면 fail-open이라 catch-up 체인에는 넣지 않는다(관찰 잡, 놓치면 다음날 스냅샷이 이어짐)."""
+    캠페인·그룹 grain 구조를 날짜별 스냅샷(SA-1, Phase 3 예산·확장검색 GET 포함·관찰 전용).
+    run_bm_layer 내부가 전면 fail-open이라 catch-up 체인에는 넣지 않는다(관찰 잡, 놓치면
+    다음날 스냅샷이 이어짐)."""
     db = _get_own_db_session()
     try:
         from app.services.naver_ad.bm_harness import run_bm_layer
@@ -313,6 +314,24 @@ def run_naver_bm_layer_job():
         log.info("[스케줄러] naver bm_layer: %s", result)
     except Exception as e:
         log.exception("[스케줄러] run_naver_bm_layer_job 에러(fail-open): %s", e)
+    finally:
+        db.close()
+
+
+def run_naver_bm_deep_job():
+    """BM 벤치마크 레이어 주간 deep 차원 (일요일 09:20 KST, D-NAO-78, PLAN_naver-ad-bm-layer.md §7).
+
+    무거운 그룹별 GET(제외키워드·소재수, ~1,100 GET/주)을 일별 07:37 레인과 분리해 아침 집행
+    레인이 다 끝난 한산한 시간대(일요일)에 실행 — 07:40 검색어 잡 지연 방지(§7). run_bm_deep
+    내부가 전면 fail-open이라 catch-up 체인에는 넣지 않는다(관찰 잡, 놓쳐도 다음 주에 이어짐)."""
+    db = _get_own_db_session()
+    try:
+        from app.services.naver_ad.bm_harness import run_bm_deep
+
+        result = run_bm_deep(db)
+        log.info("[스케줄러] naver bm_deep: %s", result)
+    except Exception as e:
+        log.exception("[스케줄러] run_naver_bm_deep_job 에러(fail-open): %s", e)
     finally:
         db.close()
 
@@ -1158,6 +1177,7 @@ def _ensure_default_states(db):
         ("trigger_watch", "7 * * * *"),             # 조건발동 즉시알림(페이싱·CPC급등, 트랙 P4)
         ("sync_naver_entity", "35 7 * * *"),        # 엔티티 인벤토리 동기화 (트랙 P2-S1)
         ("run_naver_bm_layer", "37 7 * * *"),       # BM 벤치마크 레이어 SA-1 구조 스냅샷 (D-NAO-78, 관찰 전용·catch-up 제외)
+        ("run_naver_bm_deep", "20 9 * * 0"),        # BM 벤치마크 레이어 주간 deep(제외키워드·소재수, D-NAO-78, 관찰 전용·catch-up 제외)
         ("sync_naver_search_term", "40 7 * * *"),   # 검색어 단위 성과 수집 (트랙 P2-S1)
         ("sync_naver_keyword_volume", "0 9 * * 0"), # 저클릭 키워드 월검색량 (주1회, 일요일)
         ("run_naver_forecast_engine", "50 7 * * *"),  # 캠페인 grain 예측엔진(게이트→모델→채점, F1)
@@ -1385,6 +1405,7 @@ def job_func_for(job_name: str):
         "trigger_watch": trigger_watch_job,
         "sync_naver_entity": sync_naver_entity_job,
         "run_naver_bm_layer": run_naver_bm_layer_job,
+        "run_naver_bm_deep": run_naver_bm_deep_job,
         "shopping_ad_product_sync": shopping_ad_product_sync_job,
         "sync_naver_search_term": sync_naver_search_term_job,
         "sync_naver_keyword_volume": sync_naver_keyword_volume_job,

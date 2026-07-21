@@ -88,10 +88,11 @@ def test_realworld_20260722_group_adds_status_flip_bid_change(db):
     assert len(adds) == 3
     assert all(ops[k].is_exception is True for k in adds)  # 구조 신설=항상 예외
 
-    # 캠페인 정지(status_flip): 감지되되 대행사 소형 이벤트라 is_exception=False(§3 명시 임계 밖)
+    # 캠페인 정지(status_flip): 캠페인 grain은 항상 is_exception=True로 승격(P2 리뷰 반영 —
+    # 캠페인 통째 정지/재개는 구조적 대사건, 대형변화 임계와 무관하게 예외)
     flip = ops[("status_flip", "cmp-galaxy")]
     assert flip.before_value == "on" and flip.after_value == "off"
-    assert flip.is_exception is False
+    assert flip.is_exception is True
 
     # bid_change +10%: 감지되되 <20%라 is_exception=False, magnitude=Δ%
     bid = ops[("bid_change", "grp-old")]
@@ -99,8 +100,24 @@ def test_realworld_20260722_group_adds_status_flip_bid_change(db):
     assert bid.magnitude == pytest.approx(10.0)
     assert bid.is_exception is False
 
-    # 예외 = 신설 3건만
-    assert result["exceptions"] == 3
+    # 예외 = 신설 3건 + 캠페인 status flip 1건 = 4건
+    assert result["exceptions"] == 4
+
+
+# ── 2b. 캠페인 vs 그룹 status_flip 예외 승격 차등(P2 리뷰 지적, 2026-07-22) ──────────
+def test_campaign_status_flip_promoted_but_adgroup_flip_not(db):
+    """캠페인 grain status_flip = 항상 is_exception=True. 그룹 grain flip은 기존대로 False
+    (대형변화·외부개입 판정에서만 예외 승격) — 같은 op_type이라도 grain별 차등."""
+    _snap(db, D_PREV, "campaign", "cmp-a", campaign_type="WEB_SITE", status="on")
+    _snap(db, D_PREV, "adgroup", "grp-a", campaign_id="cmp-a", campaign_type="WEB_SITE", status="on", bid_amt=300)
+    _snap(db, D_CURR, "campaign", "cmp-a", campaign_type="WEB_SITE", status="off")   # 캠페인 flip
+    _snap(db, D_CURR, "adgroup", "grp-a", campaign_id="cmp-a", campaign_type="WEB_SITE", status="off", bid_amt=300)  # 그룹 flip
+    db.commit()
+
+    detect_agency_ops(db, op_date=D_CURR)
+    ops = _ops(db)
+    assert ops[("status_flip", "cmp-a")].is_exception is True    # 캠페인 = 항상 예외
+    assert ops[("status_flip", "grp-a")].is_exception is False   # 그룹 = 기존대로 비예외
 
 
 # ── 3. 입찰 지터(<3%) 무시 · 대형 입찰(≥20%) 예외 ────────────────────────────
