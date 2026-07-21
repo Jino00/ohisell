@@ -107,8 +107,9 @@ def test_update_ad_bid_success_roundtrip():
     assert mp.call_count == 1
 
 
-def test_update_ad_bid_body_is_adattr_json_string_ugba_false():
-    """body adAttr = JSON 문자열 {"bidAmt":N,"useGroupBidAmt":false} + fields=adAttr(부분교체)."""
+def test_update_ad_bid_body_is_adattr_json_object_ugba_false():
+    """body adAttr = JSON **객체** {"bidAmt":N,"useGroupBidAmt":false} (문자열 아님 — 공식
+    AdRequest JsonNode, 문자열 전송 시 400 code 3830 거부) + nccAdgroupId 병기 + fields=adAttr."""
     before, parent, after = _ad_resp(800), _manual_parent(), _ad_resp(680)
     put_resp = FakeResp(200, after.json())
     with patch.object(writer.fetcher, "_get", side_effect=[before, parent, after]), \
@@ -117,8 +118,28 @@ def test_update_ad_bid_body_is_adattr_json_string_ugba_false():
     _, kwargs = mp.call_args
     assert kwargs["params"] == {"fields": "adAttr"}
     assert kwargs["json"]["nccAdId"] == AD_ID
-    assert isinstance(kwargs["json"]["adAttr"], str)  # JSON 문자열(공식 apidoc)
-    assert json.loads(kwargs["json"]["adAttr"]) == {"bidAmt": 680, "useGroupBidAmt": False}
+    assert kwargs["json"]["nccAdgroupId"] == GRP_ID  # before 재조회의 그룹 id 병기
+    ad_attr = kwargs["json"]["adAttr"]
+    assert isinstance(ad_attr, dict)  # JSON 객체(문자열 아님)
+    assert ad_attr["bidAmt"] == 680
+    assert ad_attr["useGroupBidAmt"] is False
+
+
+def test_update_ad_bid_body_preserves_other_adattr_subfields():
+    """before adAttr의 기타 서브필드(bidAmt/useGroupBidAmt 외)는 병합 보존된 채 bidAmt만 갱신."""
+    before = FakeResp(200, {
+        "nccAdId": AD_ID, "nccAdgroupId": GRP_ID, "type": "SHOPPING_PRODUCT_AD",
+        "adAttr": json.dumps({"bidAmt": 800, "useGroupBidAmt": False, "someOtherField": "keep-me"}),
+    })
+    parent, after = _manual_parent(), _ad_resp(680)
+    put_resp = FakeResp(200, after.json())
+    with patch.object(writer.fetcher, "_get", side_effect=[before, parent, after]), \
+         patch.object(writer.requests, "put", return_value=put_resp) as mp:
+        writer.update_ad_bid(AD_ID, 680)
+    ad_attr = mp.call_args.kwargs["json"]["adAttr"]
+    assert ad_attr["bidAmt"] == 680
+    assert ad_attr["useGroupBidAmt"] is False
+    assert ad_attr["someOtherField"] == "keep-me"  # 기타 서브필드 보존
 
 
 def test_update_ad_bid_rejects_use_group_bid_amt_true(db=None):

@@ -689,7 +689,8 @@ def update_ad_bid(ncc_ad_id: str, bid_amt: int) -> WriteResult:
             useGroupBidAmt가 false 아님(그룹입찰 실효 소재) / 부모 그룹 ML 자동입찰·상태불명.
         WriteError: PUT이 2xx 아님(재시도 없음 — 비멱등 쓰기).
         WriteVerificationError: PUT은 2xx였는데 재조회에 bidAmt 미반영 / useGroupBidAmt가
-            false로 유지되지 않음(강제 전환 감지) / before에 nccAdgroupId 부재로 ML 재확인 불가.
+            false로 유지되지 않음(강제 전환 감지) / before에 nccAdgroupId 부재로 ML 재확인 불가 /
+            before adAttr을 dict로 정규화 불가(병합 기반 소실 — 요청 body 구성 전 fail-closed).
     """
     if not (_MIN_BID <= bid_amt <= _MAX_BID) or bid_amt % _BID_INCREMENT != 0:
         raise WriteValidationError(
@@ -728,10 +729,29 @@ def update_ad_bid(ncc_ad_id: str, bid_amt: int) -> WriteResult:
         )
 
     path = f"/ncc/ads/{ncc_ad_id}"
-    # adAttr는 JSON 문자열(공식 apidoc). useGroupBidAmt=false는 before와 동일값 재전송(불변 —
-    # 강제 전환 아님). fields=adAttr로 부분교체 명시(userLock 등 다른 필드 보존).
-    ad_attr = json.dumps({"bidAmt": bid_amt, "useGroupBidAmt": False}, ensure_ascii=False)
-    body = {"nccAdId": ncc_ad_id, "adAttr": ad_attr}
+    # adAttr는 요청 body에서 JSON 객체(공식 AdRequest 스키마의 JsonNode — 문자열로 전송하면
+    # 네이버가 400 code 3830 "Invalid ad type"으로 거부, 2026-07-21 라이브 실측). before adAttr의
+    # 다른 서브필드는 보존 병합하고 bidAmt만 갱신, useGroupBidAmt=false는 before와 동일값 재전송
+    # (불변 — 강제 전환 아님). nccAdgroupId 병기(검증된 실동작 패턴)·fields=adAttr로 부분교체 명시.
+    before_attr = before.get("adAttr")
+    if isinstance(before_attr, str):
+        try:
+            base_attr: object = json.loads(before_attr)
+        except (ValueError, TypeError):
+            base_attr = None
+    else:
+        base_attr = before_attr
+    if not isinstance(base_attr, dict):
+        # 여기 도달 시 위 _parse_ad_attr가 useGroupBidAmt=False를 이미 확인했으므로 adAttr은
+        # 정상 파싱 가능한 상태이나, 방어적으로 병합 기반 소실을 fail-closed(추정 금지).
+        raise WriteVerificationError(
+            f"update_ad_bid: 소재 {ncc_ad_id}의 before adAttr을 dict로 정규화 불가"
+            f"(type={type(before_attr).__name__}) — 병합 기반 소실, fail-closed"
+        )
+    ad_attr = dict(base_attr)
+    ad_attr["bidAmt"] = bid_amt
+    ad_attr["useGroupBidAmt"] = False
+    body = {"nccAdId": ncc_ad_id, "nccAdgroupId": parent_adgroup_id, "adAttr": ad_attr}
     log.info("Naver SA 쓰기 시도: update_ad_bid ad=%s bidAmt=%s", ncc_ad_id, bid_amt)
     resp = requests.put(
         fetcher.BASE_URL + path,
