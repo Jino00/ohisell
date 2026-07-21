@@ -170,46 +170,171 @@ def test_trigger_boundary_clk_10_blocked():
     assert fire is False
 
 
-# ══════════════════════ ladder_judgment (D-NAO-71: 사이클 판정 4분기) ══════════════════════
+# ══════════════════ ladder_judgment (BX1-rev: 순위 피드백 상태 기계) ══════════════════
+# 밴드 = rank 2.5~4. rank>4=밴드 밖(climbing) / 2.5<rank≤4=밴드 안 / rank≤2.5=과열(진입 금지).
+from decimal import Decimal
+
+_BAND = exploration._EXPLORATION_TARGET_BAND  # (2.5, 4.0)
+
 
 def test_ladder_start_when_no_prior_step():
-    verdict, reason = exploration.ladder_judgment(None, {"clk": 0}, ceiling=1600, current_bid=800)
+    verdict, reason = exploration.ladder_judgment(None, {"clk": 0, "avg_rank": 6.0}, ceiling=1600, current_bid=800)
     assert verdict == "start" and "첫 탐색" in reason
 
 
+def test_ladder_start_capped_when_ceiling_already_reached():
+    """ⓐ 첫 스텝이지만 경제 증거 전무(ceiling=current) → capped(발동 불가, codex P1 fail-closed 폐루프)."""
+    verdict, _ = exploration.ladder_judgment(None, {"clk": 0}, ceiling=800, current_bid=800)
+    assert verdict == "capped"
+
+
 def test_ladder_stop_observe_when_click_arrived():
+    """① 이번 사이클 클릭 발생 → 상향 정지·정착 ROAS 관측 인계(hold, 영구 아님)."""
     verdict, reason = exploration.ladder_judgment(
-        {"bid": 1040}, {"clk": 3, "cost": 2400}, ceiling=1600, current_bid=1040)
+        {"bid": 1040}, {"clk": 3, "cost": 2400, "avg_rank": 5.0}, ceiling=1600, current_bid=1040)
     assert verdict == "stop_observe" and "인계" in reason
 
 
-def test_ladder_step_up_when_no_click_below_ceiling():
+def test_ladder_not_rank_when_top_band_no_click():
+    """② 과열밴드(rank≤2.5)인데 클릭0 지속 → 순위 병리 아님 진단 종료(explored_not_rank)."""
+    verdict, reason = exploration.ladder_judgment(
+        {"bid": 1300, "rank": 3.0}, {"clk": 0, "avg_rank": 2.3}, ceiling=2000, current_bid=1300)
+    assert verdict == "not_rank" and "진단 종료" in reason
+
+
+def test_ladder_stop_observe_when_band_reached_no_click():
+    """③ 밴드 도달(2.5<rank≤4)·무클릭 → 상향 정지·관측(과열밴드 진입 금지)."""
+    verdict, reason = exploration.ladder_judgment(
+        {"bid": 1200, "rank": 5.0}, {"clk": 0, "avg_rank": 3.5}, ceiling=2000, current_bid=1200)
+    assert verdict == "stop_observe" and "밴드 도달" in reason
+
+
+def test_ladder_step_up_when_below_band_no_click():
+    """⑤ 밴드 밖(rank>4)·무클릭·상한 미도달·과거 클릭 이력 없음 → 정상 적응 스텝(step_up)."""
     verdict, _ = exploration.ladder_judgment(
-        {"bid": 1040}, {"clk": 0, "cost": 0}, ceiling=1600, current_bid=1040)
+        {"bid": 900, "rank": 7.0}, {"clk": 0, "avg_rank": 6.0}, ceiling=1600, current_bid=1000,
+        recent_flow_clk=0, settled_clk=0)
     assert verdict == "step_up"
 
 
-def test_ladder_capped_when_no_click_at_ceiling():
+def test_ladder_step_up_when_imp0_below_ceiling():
+    """imp=0(rank None)·무클릭·상한 미도달·이력 없음 → step_up(콜드 blind climbing)."""
+    verdict, _ = exploration.ladder_judgment(
+        {"bid": 900, "rank": None}, {"clk": 0, "avg_rank": None}, ceiling=1600, current_bid=1000)
+    assert verdict == "step_up"
+
+
+def test_ladder_reactivate_when_prior_click_but_24h_stagnant():
+    """④ 밴드 밖·무클릭·상한 미도달·과거 클릭 이력(정착>0)·최근 24h 클릭0 정체 → 재가동."""
     verdict, reason = exploration.ladder_judgment(
-        {"bid": 1600}, {"clk": 0, "cost": 0}, ceiling=1600, current_bid=1600)
+        {"bid": 900, "rank": 4.5}, {"clk": 0, "avg_rank": 5.0}, ceiling=1600, current_bid=1000,
+        recent_flow_clk=0, settled_clk=4)
+    assert verdict == "reactivate" and "재가동" in reason
+
+
+def test_ladder_not_reactivate_when_flow_alive():
+    """④ 대조: 정착 이력 있으나 최근 24h 클릭>0(흐름 살아있음) → step_up(정체 아님)."""
+    verdict, _ = exploration.ladder_judgment(
+        {"bid": 900, "rank": 4.5}, {"clk": 0, "avg_rank": 5.0}, ceiling=1600, current_bid=1000,
+        recent_flow_clk=2, settled_clk=4)
+    assert verdict == "step_up"
+
+
+def test_ladder_reactivate_via_last_probe_had_click():
+    """④ 프레시 신호: last_probe.had_click(정착창엔 아직 없는 최근 클릭)로도 재가동."""
+    verdict, _ = exploration.ladder_judgment(
+        {"bid": 900, "rank": 4.5, "had_click": True}, {"clk": 0, "avg_rank": 5.0},
+        ceiling=1600, current_bid=1000, recent_flow_clk=0, settled_clk=0)
+    assert verdict == "reactivate"
+
+
+def test_ladder_capped_when_below_band_at_ceiling():
+    """④ 밴드 밖·무클릭·경제성 상한 도달 → capped."""
+    verdict, reason = exploration.ladder_judgment(
+        {"bid": 1600, "rank": 6.0}, {"clk": 0, "avg_rank": 5.5}, ceiling=1600, current_bid=1600)
     assert verdict == "capped" and "상한" in reason
 
 
-def test_ladder_capped_when_above_ceiling():
-    verdict, _ = exploration.ladder_judgment(
-        {"bid": 1700}, {"clk": 0, "cost": 0}, ceiling=1600, current_bid=1700)
-    assert verdict == "capped"
+# ══════════════════ adaptive_step (BX1-rev: 순위 목표형 적응 스텝) ══════════════════
+
+def test_adaptive_step_conservative_when_imp0_blind():
+    """imp=0(rank None) → 보수적 소폭(+10%). 800→880(floor 10)."""
+    got = exploration.adaptive_step(800, None, _BAND, None, exploration._EXPLORATION_STEP_PCT)
+    assert got == 880  # 800×1.10=880
+
+
+def test_adaptive_step_conservative_first_step():
+    """첫 스텝(last_step None)·밴드 밖 → 보수적 소폭(+10%). 1000→1100."""
+    got = exploration.adaptive_step(1000, 7.0, _BAND, None, exploration._EXPLORATION_STEP_PCT)
+    assert got == 1100
+
+
+def test_adaptive_step_slope_responsive_targets_band():
+    """기울기 有(직전 900→1000에 rank 8→6=개선 2/100원): 목표 rank4까지 필요 개선폭 2 →
+    필요 증분 = (100/2)×2 = 100 → 1100. 밴드까지 '필요한 만큼만'(눈먼 30% 아님)."""
+    last = {"bid": 900, "rank": 8.0}
+    got = exploration.adaptive_step(1000, 6.0, _BAND, last, exploration._EXPLORATION_STEP_PCT)
+    assert got == 1100  # 1000 + (100원/rank)×(6-4)=1000+100
+
+
+def test_adaptive_step_shrinks_near_band():
+    """밴드 접근 시 스텝 축소(오버슈트 과지불 방지): rank 4.5(개선폭 0.5만 필요), 기울기 100원/rank
+    → 증분 = 100×0.5 = 50 → 1050(첫 스텝 10%=1100보다 작음)."""
+    last = {"bid": 900, "rank": 5.5}  # 1000에서 5.5 관측? 기울기 (5.5-4.5)/(1000-900)=1/100
+    got = exploration.adaptive_step(1000, 4.5, _BAND, last, exploration._EXPLORATION_STEP_PCT)
+    assert got == 1050  # 1000 + (100원/rank개선1)×(4.5-4.0)=1000+50
+
+
+def test_adaptive_step_escalates_when_unresponsive():
+    """순위 무반응(직전 900→1000인데 rank 6→6 개선0) → 직전 Δ입찰(100)×점증(1.5)=150 → 1150."""
+    last = {"bid": 900, "rank": 6.0}
+    got = exploration.adaptive_step(1000, 6.0, _BAND, last, exploration._EXPLORATION_STEP_PCT)
+    assert got == 1150  # 1000 + 100×1.5
+
+
+def test_adaptive_step_capped_at_30pct():
+    """적응 산정이 30% 상한을 넘으면 상한으로 클램프(1스텝 상한 = 30%, floor 10원)."""
+    last = {"bid": 900, "rank": 20.0}  # 큰 개선폭 → 큰 증분 요구
+    got = exploration.adaptive_step(1000, 18.0, _BAND, last, exploration._EXPLORATION_STEP_PCT)
+    assert got == 1300  # min(산정, 1000×1.30=1300)
+
+
+def test_adaptive_step_none_when_in_band():
+    """이미 밴드 내(rank≤4) → None(상향 불필요 = 밴드 도달)."""
+    assert exploration.adaptive_step(1000, 3.5, _BAND, None, exploration._EXPLORATION_STEP_PCT) is None
+
+
+def test_adaptive_step_never_overshoots_below_2_5():
+    """과열밴드 미진입: 목표는 밴드 하단(rank4)이므로 산정 증분이 rank<2.5로 오버슈트하지 않는다.
+    기울기 가팔라도(1원/rank) 목표=rank4까지만 → 증분 = 1×(6-4)=2원 → floor 소실 → None(hold)."""
+    last = {"bid": 999, "rank": 7.0}  # 기울기 (7-6)/(1000-999)=1/1 매우 가파름
+    got = exploration.adaptive_step(1000, 6.0, _BAND, last, exploration._EXPLORATION_STEP_PCT)
+    # 증분 = 1원/rank × (6-4)=2원 → 1002 → floor 10 → 1000 = 현재 이하 → None
+    assert got is None
+
+
+def test_adaptive_step_none_when_current_bid_invalid():
+    assert exploration.adaptive_step(0, 6.0, _BAND, None, exploration._EXPLORATION_STEP_PCT) is None
+
+
+def test_adaptive_step_floor_rounding_no_30pct_breach():
+    """floor(//10*10) 반올림 — 30% 상한 미세 초과 방지(P2③). 815×1.30=1059.5 → cap floor 1050."""
+    last = {"bid": 700, "rank": 30.0}
+    got = exploration.adaptive_step(815, 25.0, _BAND, last, exploration._EXPLORATION_STEP_PCT)
+    assert got == 1050 and got <= int(815 * 1.30)  # floor cap, ≤ 30%
 
 
 # ══════════════════════ 상수 ══════════════════════
 
 def test_constants_values():
-    from decimal import Decimal
     # D-NAO-71: 런당 캡 삭제 — 상수 부재를 고정
     assert not hasattr(exploration, "_EXPLORATION_RUN_CAP")
-    assert exploration._EXPLORATION_STEP_PCT == Decimal("0.30")  # D-NAO-71: 30%
+    assert exploration._EXPLORATION_STEP_PCT == Decimal("0.30")  # D-NAO-71: 30% 1스텝 상한
     assert exploration._EXPLORATION_CEILING_MULT == Decimal("2.0")
     assert exploration._EXPLORATION_COOLDOWN_HOURS == 2
+    assert exploration._EXPLORATION_BAND_LOW == Decimal("2.5")
+    assert exploration._EXPLORATION_BAND_HIGH == Decimal("4.0")
+    assert exploration._EXPLORATION_FLOW_WINDOW_H == 24
 
 
 def test_click_gate_consistent_with_hotset():

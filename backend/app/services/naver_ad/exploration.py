@@ -1,9 +1,10 @@
-# exploration.py — 저볼륨 그룹 탐색 UP 순수 SA (스프린트 B-X BX1, D-NAO-70·71)
+# exploration.py — 저볼륨 그룹 탐색 UP 순수 SA (스프린트 B-X BX1-rev, D-NAO-70·71)
 # 역할(SA·순수함수): 핫셋 게이트(정착 7일 클릭≥10) 밖 = "죽는 캠페인" 경로에 놓인 저볼륨
 #   SHOPPING 광고그룹을 능동 탐색 대상으로 골라내고(후보), 탐색을 발동할지 판정하며(트리거),
-#   전일 탐색분 D+1 결과로 래더 다음 수(시작/한 단/중단/상한)를 정한다(래더 판정). 이 파일은
-#   BX1 범위 = 순수 선정/판정만: 실쓰기(update_ad_bid UP·explore_op 승인원)는 BX2, 레인 배선·
-#   dedup·다운스트림은 BX3 몫. ★행위 불변 — 어떤 레인/실행 경로도 이 모듈을 아직 호출하지 않는다.
+#   **순위 피드백 상태 기계**(ladder_judgment)로 사이클마다 다음 수(시작/적응 스텝/재가동/상향
+#   정지/진단 종료/상한)를 정하고, **적응 스텝 크기**(adaptive_step)를 산정한다(D-NAO-71 19:01
+#   교정: 눈먼 % 상향이 아니라 최저 CPC로 밴드 진입). BX1-rev = 순수 선정/판정/스텝 산정만:
+#   실쓰기(update_ad_bid UP·explore_op 승인원)는 BX2, 레인 배선·관측 조립·다운스트림은 BX3 몫.
 #   ★import 정책: models + campaign_backfill(sentinel 상수·최말단) + 최말단 순수 SA
 #   (bid_simulator·campaign_target_resolver — 둘 다 models만 의존, auto_operator/exploration을
 #   import하지 않아 순환 없음)만 import한다. auto_operator는 import하지 않는다 — BX3에서
@@ -65,6 +66,110 @@ APPROVAL_SOURCE_EXPLORE = "explore_op"  # 10자 — String(12) 적합
 # 탐색을 발동하지 않는 게 안전하므로 0을 반환한다(ladder_judgment가 current_bid<ceiling=0을
 # 만족 못 해 step_up 안 함 → capped). 0은 "상한 근거 없음"의 표준 신호(affordable_ceiling 관례 동형).
 _CEILING_UNAVAILABLE = 0
+
+# ── BX1-rev: 순위 피드백 상태 기계 상수(PLAN §1 가드1·4, D-NAO-71 2026-07-21 19:01 Jino 교정) ──
+# 이익 스팟 밴드 = 클릭이 관측되는 순위대(rank 2.5~4). 목표 = 핫셋 미달 그룹을 이 밴드에 **최소
+# 입찰로** 진입시킨다("아무 목적없이 30%씩 가격만 올리는건 의미가 없다 — 최저의 CPC로 순위를
+# 조절하고 싶다", Jino 원문). 순위 숫자가 작을수록 상단(더 좋은 위치):
+#   · rank ≤ _EXPLORATION_BAND_LOW(2.5)   = 과열밴드(진입 금지). 클릭0이면 순위 병리 아님 진단 종료.
+#   · 2.5 < rank ≤ _EXPLORATION_BAND_HIGH(4.0) = 밴드 안(도달 — 상향 정지·관측, 과열밴드 진입 금지).
+#   · rank > 4.0 = 밴드 밖(climbing — 적응 스텝 상향).
+_EXPLORATION_BAND_LOW = Decimal("2.5")   # 밴드 상단(과열 경계, PLAN §1 가드4 "과열밴드 rank<2.5 진입 금지")
+_EXPLORATION_BAND_HIGH = Decimal("4.0")  # 밴드 하단(진입 목표 = 최소 입찰의 이익 스팟 밴드 진입점)
+_EXPLORATION_TARGET_BAND = (_EXPLORATION_BAND_LOW, _EXPLORATION_BAND_HIGH)
+
+# 콜드(imp=0=순위 관측 불가)·첫 스텝·기울기 부재 시 보수적 소폭 스텝(PLAN §1 가드1 "기울기 정보
+# 없으면 보수적 소폭(예: +10%)"). 순위 무반응(직전 스텝에 입찰 올렸는데 순위 개선 없음)이면 직전
+# Δ입찰 × 이 점증 계수로 스텝을 키운다(가드1 "순위 무반응이면 스텝 점증"). 두 산정 모두 상한
+# _EXPLORATION_STEP_PCT(0.30=1스텝 상한, 기본 아님) 안에서 클램프된다.
+_EXPLORATION_FIRST_STEP_PCT = Decimal("0.10")
+_EXPLORATION_UNRESPONSIVE_GROWTH = Decimal("1.5")
+
+# 흐름 정체 관측창(시간) — hold 중 이 창 안에 클릭이 0이면 정체로 보고 재가동 판단(PLAN §1 가드4
+# ④ "hold 중 최근 24h 클릭 0 정체 ∧ 정착클릭<10 → 재가동"). 클릭 발생(hold 진입)과 재가동을
+# 가르는 **신선** 신호 — 정착창(D-8~D-2)은 지연되므로 별개 창이 필요하다.
+_EXPLORATION_FLOW_WINDOW_H = 24
+
+_EXPLORATION_MIN_BID = 70       # 네이버 SA 유효 입찰가 하한(bid_simulator 규격)
+_EXPLORATION_MAX_BID = 100_000  # 유효 입찰가 상한
+_EXPLORATION_BID_INCREMENT = 10  # 10원 단위(스텝 반올림 = floor //10*10, PLAN §3 BX2 GATE 이월 P2③)
+
+
+def adaptive_step(
+    current_bid: int, current_rank, target_band: tuple, last_step: dict | None, cap_pct: Decimal,
+) -> int | None:
+    """순위 목표형 적응 스텝(순수·PLAN §1 가드1, D-NAO-71 19:01 교정) — 목표 밴드까지 **필요한
+    만큼만** 상향해 최소 입찰로 밴드에 진입시킨다(눈먼 % 상향 금지).
+
+    입력:
+      current_bid:  현재(스텝 기준) 입찰가(원). ≤0이면 None(근거 없음).
+      current_rank: 최근 사이클 imp-가중 avg_rank(Decimal|float|None). None = imp=0(순위 관측
+                    불가 = 유일한 눈먼 구간) → 보수적 소폭 스텝으로 노출 발생까지.
+      target_band:  (band_low, band_high) — (2.5, 4.0). band_high(밴드 하단=진입 목표)를 노린다.
+      last_step:    직전 스텝 스냅샷 {"bid": 직전(스텝 前) 입찰, "rank": 그때 관측 순위}|None.
+                    Δ순위/Δ입찰 관측 기울기 산정용. None(첫 스텝)이면 보수적 소폭.
+      cap_pct:      1스텝 변경폭 상한(=_EXPLORATION_STEP_PCT 0.30). **기본이 아니라 상한** —
+                    적응 산정이 이보다 작으면 그만큼만 오른다.
+
+    반환: target_bid(int, 10원 단위·현재 초과·70~100,000) / None(스텝 없음 = 밴드 내·산정 소실).
+
+    산정(PLAN §1 가드1):
+      ① 상한 = floor(current×(1+cap_pct))(10원 내림 — 30% 가드 미세 초과 방지, P2③).
+      ② imp=0(current_rank None) → 보수적 소폭(current×first_step_pct). 노출 살아날 때까지.
+      ③ 이미 밴드 내(current_rank ≤ band_high) → None(상향 불필요 — 밴드 도달, 상향 정지).
+      ④ Δrank_needed = current_rank − band_high(>0). 직전 스텝 기울기(Δrank/Δbid)가 있으면
+         (last_step.bid<current_bid ∧ rank 개선>0) 그 기울기로 목표까지 필요 증분을 근접
+         산정(밴드 접근할수록 delta_needed↓ → 스텝 자연 축소 = 오버슈트 과지불 방지). 순위
+         무반응(rank 개선≤0)이면 직전 Δ입찰×점증 계수(스텝 점증). 기울기 부재면 보수적 소폭.
+      ⑤ 산정 → 상한(cap_bid·_MAX_BID) 클램프 → 10원 내림 → 현재 초과·≥70원이어야 유효.
+    """
+    if current_bid <= 0:
+        return None
+    _, band_high = target_band
+    cap_bid = int((Decimal(current_bid) * (Decimal(1) + Decimal(str(cap_pct)))) // _EXPLORATION_BID_INCREMENT
+                  * _EXPLORATION_BID_INCREMENT)
+    cap_bid = min(cap_bid, _EXPLORATION_MAX_BID)
+
+    # ② imp=0(순위 관측 불가) — 유일한 눈먼 구간. 노출 발생까지 보수적 소폭 스텝.
+    if current_rank is None:
+        target = Decimal(current_bid) * (Decimal(1) + _EXPLORATION_FIRST_STEP_PCT)
+        return _finalize_step(target, current_bid, cap_bid)
+
+    cr = Decimal(str(current_rank))
+    band_high_d = Decimal(str(band_high))
+    # ③ 이미 밴드 내(도달) — 상향 안 함(상향 정지·관측은 ladder_judgment 몫).
+    if cr <= band_high_d:
+        return None
+
+    delta_needed = cr - band_high_d  # 밴드 하단까지 필요한 순위 개선폭(>0)
+
+    increment: Decimal | None = None
+    if last_step is not None:
+        prev_bid = last_step.get("bid")
+        prev_rank = last_step.get("rank")
+        if prev_bid is not None and prev_rank is not None and current_bid > int(prev_bid):
+            rank_gain = Decimal(str(prev_rank)) - cr    # 순위 개선(숫자 감소)이면 >0
+            bid_delta = Decimal(current_bid - int(prev_bid))
+            if rank_gain > 0:
+                # 반응함 — 입찰/순위개선 기울기 × 남은 필요 개선폭(밴드 접근 시 자연 축소).
+                increment = (bid_delta / rank_gain) * delta_needed
+            else:
+                # 순위 무반응 — 직전 Δ입찰 × 점증 계수(스텝 점증, PLAN §1 가드1).
+                increment = bid_delta * _EXPLORATION_UNRESPONSIVE_GROWTH
+    if increment is None or increment <= 0:
+        increment = Decimal(current_bid) * _EXPLORATION_FIRST_STEP_PCT  # 기울기 부재 — 보수적 소폭
+    target = Decimal(current_bid) + increment
+    return _finalize_step(target, current_bid, cap_bid)
+
+
+def _finalize_step(target: Decimal, current_bid: int, cap_bid: int) -> int | None:
+    """스텝 반올림·클램프(PLAN §3 BX2 GATE 이월 P2③): floor(//10*10) → 상한 클램프 →
+    현재 초과·최소입찰가 이상이어야 유효(아니면 None=스텝 소실)."""
+    stepped = int((target // _EXPLORATION_BID_INCREMENT) * _EXPLORATION_BID_INCREMENT)  # 10원 내림
+    stepped = min(stepped, cap_bid, _EXPLORATION_MAX_BID)
+    if stepped <= current_bid or stepped < _EXPLORATION_MIN_BID:
+        return None
+    return stepped
 
 
 def _grain_settlement_agg(
@@ -276,25 +381,75 @@ def exploration_trigger(
 
 def ladder_judgment(
     last_probe: dict | None, since_step_stats: dict, ceiling: int, current_bid: int,
+    *, recent_flow_clk: int = 0, settled_clk: int = 0,
 ) -> tuple[str, str]:
-    """사이클 래더 판정(순수·PLAN §1 가드4, D-NAO-71) — 4분기. 매 탐색 사이클(≥2h)마다
-    직전 스텝 이후의 성과로 래더 다음 수를 정한다(D+1 고정이 아니라 쿨다운 사이클 단위).
+    """사이클 래더 판정(순수·PLAN §1 가드4, D-NAO-71 18:56+19:01) — **순위 피드백 상태 기계**.
+    매 탐색 사이클(≥2h)마다 직전 스텝 이후의 순위·클릭으로 다음 수를 정한다(D+1 고정 아님).
 
-    - last_probe is None → ('start', ...): 직전 탐색 스텝 없음 = 첫 탐색 시작.
-    - since_step_stats clk > 0 → ('stop_observe', ...): 직전 스텝 이후 클릭 발생 → 래더 중단,
-      정착창 ROAS 평가 경로로 인계(증거 확보 = 목적 달성, money-action 경로가 이어받음).
-    - 무클릭·무비용 → 상한 판정: current_bid < ceiling 이면 ('step_up', ...) 한 단 추가,
-      아니면 ('capped', ...) 경제성 상한 도달·무클릭 → 탐색 종료·`explored_capped` 표기
-      (구조 문제=소재/관련성 신호).
+    verdict ∈ {'start','step_up','reactivate','stop_observe','capped','not_rank'} (BX3 카운터
+    매핑: start/step_up/reactivate→explored 실쓰기 / stop_observe→explored_held /
+    capped→explored_capped / not_rank→explored_not_rank).
 
-    순수함수: DB 접근 없음. last_probe(직전 탐색 스텝 스냅샷)·since_step_stats(직전 스텝 이후
-    성과 {"clk", "cost", ...})·ceiling(경제성 상한)·current_bid(현 입찰)는 전부 호출측(BX3)이
-    조회해 넘긴다. 반환 (verdict, 한국어 사유). verdict ∈ {'start','stop_observe','step_up','capped'}."""
+    입력(전부 호출측 BX3이 조회해 넘김 — DB 접근 없음):
+      last_probe:  직전 탐색 스텝 스냅샷 {"bid": 직전(前) 입찰, "rank": 그때 순위}|None(첫 스텝).
+      since_step_stats: 직전 스텝 이후 최근 사이클 관측 {"clk","imp","cost","avg_rank"}.
+                   avg_rank=None(imp=0 → 순위 관측 불가).
+      ceiling:     경제성 상한(원, exploration_ceiling). 경제 증거 전무면 =current_bid(fail-closed).
+      current_bid: 현(스텝 기준) 입찰가.
+      recent_flow_clk: 최근 24h(_EXPLORATION_FLOW_WINDOW_H) 클릭 합(정체 신호, 신선).
+      settled_clk: 정착창(D-8~D-2) 클릭 합(과거 클릭 이력 = hold 상태 신호).
+
+    상태 기계(우선순위 순):
+      ⓪ last_probe None → 'start'(첫 탐색) — 단 current_bid≥ceiling이면 'capped'(발동 불가).
+      ① 이번 사이클 클릭 발생(clk>0) → 'stop_observe'(상향 정지·정착 ROAS 관측 인계, hold —
+         영구 정지 아님. 목적=증거 확보 달성).
+      ② 무클릭 ∧ rank≤2.5(과열밴드인데 클릭0 지속) → 'not_rank'(순위 병리 아님=소재/관련성,
+         진단 종료 — 상한까지 낭비 상향 차단, 파워링크 병리와 동형).
+      ③ 무클릭 ∧ 2.5<rank≤4(밴드 도달) → 'stop_observe'(상향 정지·클릭 흐름 관측 — 과열밴드
+         진입 금지).
+      ④ 무클릭 ∧ 밴드 밖(rank>4 또는 imp=0) ∧ current_bid≥ceiling → 'capped'(경제성 상한 도달·
+         탐색 종료).
+      ⑤ 무클릭 ∧ 밴드 밖 ∧ 상한 미도달: 과거 클릭 이력(settled_clk>0 또는 last_probe.had_click)
+         ∧ 최근 24h 클릭0 정체 → 'reactivate'([탐색UP·재가동]) / 아니면 'step_up'(적응 스텝 상향).
+    """
     if last_probe is None:
-        return ("start", "직전 탐색 스텝 없음 — 첫 탐색 시작")
+        if current_bid >= ceiling:
+            return ("capped", f"첫 탐색이나 경제성 상한 이미 도달(현 {current_bid}≥상한 {ceiling}) — 발동 불가·관찰 표기")
+        return ("start", "직전 탐색 스텝 없음 — 첫 탐색 시작(적응 스텝)")
+
     clk = int(since_step_stats.get("clk", 0))
+    rank = since_step_stats.get("avg_rank")
+
+    # ① 이번 사이클 클릭 발생 → 상향 정지·정착 ROAS 관측 인계(hold, 영구 아님).
     if clk > 0:
-        return ("stop_observe", f"직전 스텝 이후 클릭 발생(clk={clk}) — 래더 중단·정착 ROAS 관측 인계")
-    if current_bid < ceiling:
-        return ("step_up", f"무클릭(clk=0)·상한 미도달(현 {current_bid}<상한 {ceiling}) — 한 단 추가")
-    return ("capped", f"무클릭(clk=0)·경제성 상한 도달(현 {current_bid}≥상한 {ceiling}) — 탐색 종료·관찰 표기")
+        return ("stop_observe", f"직전 스텝 이후 클릭 발생(clk={clk}) — 상향 정지·정착 ROAS 관측 인계")
+
+    # 무클릭. 순위 관측 가능하면 밴드/병리 판정(과열밴드 진입 금지).
+    if rank is not None:
+        r = Decimal(str(rank))
+        # ② 과열밴드(rank≤2.5)인데 클릭0 지속 → 순위 병리 아님(소재/관련성) 진단 종료.
+        if r <= _EXPLORATION_BAND_LOW:
+            return (
+                "not_rank",
+                f"순위 {float(r):.2f}≤{_EXPLORATION_BAND_LOW}인데 클릭0 지속 — 순위 병리 아님(소재/관련성) 진단 종료",
+            )
+        # ③ 밴드 도달(2.5<rank≤4)·무클릭 → 상향 정지·관측(과열밴드 진입 금지).
+        if r <= _EXPLORATION_BAND_HIGH:
+            return (
+                "stop_observe",
+                f"밴드 도달(순위 {float(r):.2f}≤{_EXPLORATION_BAND_HIGH})·무클릭 — 상향 정지·클릭 흐름 관측(과열밴드 진입 금지)",
+            )
+
+    # 밴드 밖(rank>4) 또는 imp=0(rank None) · 무클릭 — 상향 여지.
+    # ④ 경제성 상한 도달 → 탐색 종료.
+    if current_bid >= ceiling:
+        return ("capped", f"밴드 밖·무클릭·경제성 상한 도달(현 {current_bid}≥상한 {ceiling}) — 탐색 종료·관찰 표기")
+
+    # ⑤ 재가동 vs 정상 스텝: 과거 클릭 이력 ∧ 최근 24h 클릭0 정체 → 재가동.
+    had_prior_click = settled_clk > 0 or bool(last_probe.get("had_click"))
+    if had_prior_click and recent_flow_clk == 0:
+        return (
+            "reactivate",
+            f"[탐색UP·재가동] 과거 클릭 이력(정착 clk={settled_clk})·최근 {_EXPLORATION_FLOW_WINDOW_H}h 클릭0 정체 — 재가동 스텝",
+        )
+    return ("step_up", f"밴드 밖·무클릭·상한 미도달(현 {current_bid}<상한 {ceiling}) — 적응 스텝 상향")
