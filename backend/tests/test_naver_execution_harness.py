@@ -158,7 +158,7 @@ def test_open_actions_contains_negative_keyword_bid_lock_and_budget_p3(db):
     (D-NAO-34 금지선 개정). (구 test_open_actions_contains_negative_keyword_bid_and_lock_x1b를
     P3 계약에 따라 갱신.)"""
     assert harness.OPEN_ACTIONS == frozenset(
-        {"add_negative_keyword", "update_bid", "set_user_lock", "update_budget"}
+        {"add_negative_keyword", "update_bid", "set_user_lock", "update_budget", "exclude_search_term"}
     )
 
 

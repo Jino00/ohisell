@@ -884,6 +884,84 @@ def fetch_search_term_daily(report_tp: str, date_from: date, date_to: date) -> l
     return list(agg.values())
 
 
+# ── SHOPPINGKEYWORD_CONVERSION_DETAIL 컬럼(15열, 헤더없음, 실측 확정
+#    docs/PLAN_naver-ad-searchterm-ss.md §0.5) — AD_CONVERSION(CONV_COL_*, 13컬럼) 대비 +2
+#    오프셋이지만 기기 컬럼이 끼어들어 단순 +2가 col9 이후는 깨진다(±2 오프셋 함정,
+#    SS1 최대 실수 지점). 반드시 이 전용 상수만 쓴다 — CONV_COL_* 재사용 절대 금지.
+STCONV_COL_DATE = 0
+STCONV_COL_CAMPAIGN = 2
+STCONV_COL_ADGROUP = 3
+STCONV_COL_SEARCH_TERM = 4  # 검색어 텍스트(등록 키워드 아님)
+STCONV_COL_DEVICE = 10      # M/P — 이 함수는 기기 롤업 합산(참고용, 미사용)
+STCONV_COL_DIRINDIR = 11    # "1"=직접 / "2"=간접
+STCONV_COL_ACTION = 12      # purchase / add_to_cart
+STCONV_COL_CNT = 13
+STCONV_COL_VALUE = 14
+
+
+def fetch_search_term_conversion(date_from: date, date_to: date) -> list[dict]:
+    """SHOPPINGKEYWORD_CONVERSION_DETAIL 보고서에서 (일자×캠페인×그룹×검색어) grain 전환을 집계.
+
+    fetch_search_term_daily(위)와 동일 형태로 미러: ensure_reports_built 자기치유(없으면
+    생성요청+폴링, EXPKEYWORD식 관례) → _list_reports_by_type → _download_tsv. purchase/
+    add_to_cart를 분리 집계하고, purchase는 직접+간접을 합산해 conv_purchase_cnt/amt로
+    (제외 게이트=보수적 "전환 있으면 안 자름" 판정, 간접도 살아있는 증거), 직접전환수만
+    별도 conv_direct_cnt로도 축적(SS4 승격 신호=품질 있는 전환). 그 외 전환 액션(회원가입
+    등)은 무시. 파워링크는 검색어 컬럼이 항상 '-'(확장검색 버킷)라 이 보고서를 쓰지 않음
+    (§0.5 확정 — 호출측은 쇼핑에만 사용).
+
+    Returns: [{"date","campaign_id","adgroup_id","search_term",
+               "conv_purchase_cnt","conv_direct_cnt","conv_purchase_amt","cart_cnt","cart_amt"}, ...]
+    """
+    if not ACCESS_LICENSE or not SECRET_KEY_B64:
+        log.warning("Naver SA 자격증명 없음 — 검색어 전환 수집 건너뜀")
+        return []
+
+    ensure_reports_built("SHOPPINGKEYWORD_CONVERSION_DETAIL", date_from, date_to)
+    reports = _list_reports_by_type("SHOPPINGKEYWORD_CONVERSION_DETAIL", date_from, date_to)
+    if not reports:
+        log.warning("Naver SA: %s~%s SHOPPINGKEYWORD_CONVERSION_DETAIL 보고서 없음", date_from, date_to)
+        return []
+
+    agg: dict[tuple, dict] = {}
+    seen_dates: set[str] = set()
+    for rep in sorted(reports, key=lambda r: r["date"]):
+        if rep["date"] in seen_dates:
+            continue
+        seen_dates.add(rep["date"])
+        for cols in _download_tsv(rep["downloadUrl"]):
+            if len(cols) <= STCONV_COL_VALUE:
+                continue
+            action = cols[STCONV_COL_ACTION]
+            if action not in (CONV_PURCHASE_ACTION, CONV_ADDTOCART_ACTION):
+                continue  # 그 외 전환 액션은 수집 대상 아님
+            d = _row_date_iso(cols[STCONV_COL_DATE])
+            if d is None:
+                continue
+            key = (d, cols[STCONV_COL_CAMPAIGN], cols[STCONV_COL_ADGROUP], cols[STCONV_COL_SEARCH_TERM])
+            row = agg.get(key)
+            if row is None:
+                row = {"date": d, "campaign_id": cols[STCONV_COL_CAMPAIGN],
+                       "adgroup_id": cols[STCONV_COL_ADGROUP], "search_term": cols[STCONV_COL_SEARCH_TERM],
+                       "conv_purchase_cnt": 0, "conv_direct_cnt": 0, "conv_purchase_amt": 0,
+                       "cart_cnt": 0, "cart_amt": 0}
+                agg[key] = row
+            cnt = _safe_int(cols[STCONV_COL_CNT])
+            amt = _safe_int(cols[STCONV_COL_VALUE])
+            is_direct = cols[STCONV_COL_DIRINDIR] != "2"  # "1"=직접, 그 외는 직접 취급(기존 관례)
+            if action == CONV_PURCHASE_ACTION:
+                row["conv_purchase_cnt"] += cnt  # 직+간 합산(§1 게이트=보수적 판정)
+                row["conv_purchase_amt"] += amt
+                if is_direct:
+                    row["conv_direct_cnt"] += cnt  # 직접만(SS4 승격 신호)
+            else:  # add_to_cart — 직+간 합산, 회계 불활성(★매출 아님)
+                row["cart_cnt"] += cnt
+                row["cart_amt"] += amt
+
+    log.info("Naver SA 검색어 전환 %d행 집계 (%s~%s)", len(agg), date_from, date_to)
+    return list(agg.values())
+
+
 _STATS_BACKFILL_MAX_DAYS = 730  # 실측(원칙22): "데이터는 최근 730일 이내 기간에서만 조회 가능"
 _STATS_BACKFILL_CHUNK_DAYS = 90  # 실측: timeIncrement=1은 호출당 92일 한도(안전마진 90일)
 _BACKFILL_FIELDS = '["impCnt","clkCnt","salesAmt","ccnt","convAmt"]'

@@ -1968,6 +1968,10 @@ class NaverSearchTermDaily(Base):
     adgroup·동일 날짜 합계 대조: imp/clk 정확 일치, cost 1원 오차). EXPKEYWORD는 자동
     생성 안 됨 → POST /stat-reports로 생성 후 폴링(report_collector가 수행). avg_rank =
     rank_sum/imp.
+
+    SS1(docs/PLAN_naver-ad-searchterm-ss.md §3): SHOPPINGKEYWORD_CONVERSION_DETAIL 전환을
+    source='shopping' 행에 병합(conv_purchase_cnt/amt·conv_direct_cnt·cart_cnt/cart_amt).
+    파워링크(source='expkeyword')는 전환 귀속 불가(§0.5 확정)라 전환 컬럼은 항상 0.
     """
 
     __tablename__ = "naver_search_term_daily"
@@ -1988,6 +1992,15 @@ class NaverSearchTermDaily(Base):
     clk: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     cost: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     rank_sum: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # ── SS1(검색어 ROAS 레이어, docs/PLAN_naver-ad-searchterm-ss.md §3): 전환 병합 ──
+    # SHOPPINGKEYWORD_CONVERSION_DETAIL을 source='shopping' 성과행에 병합(전부 additive).
+    # conv_purchase_cnt/amt=직+간 합산(§1 제외 게이트=보수적 판정), conv_direct_cnt=직접만
+    # (SS4 승격 신호). cart_cnt/amt=직+간 합산 장바구니(선행지표, ★매출 아님·회계 불활성).
+    conv_purchase_cnt: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    conv_direct_cnt: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    conv_purchase_amt: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    cart_cnt: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    cart_amt: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 

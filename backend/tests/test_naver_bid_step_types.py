@@ -212,6 +212,7 @@ def test_action_by_proposal_type_mapping_derived_with_servo():
         "resume": "set_user_lock",
         "budget_up": "update_budget",
         "budget_down": "update_budget",
+        "search_term_exclude": "exclude_search_term",  # SS3: 검색어 제외(Confirm 전용)
     }
 
 
