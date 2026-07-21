@@ -321,6 +321,31 @@ def _settlement_roas_ok(
     return status == "ok", reason
 
 
+def _entity_status_hold_reason(db: Session, target_type: str, target_id: str) -> str | None:
+    """일 레인 공통 사전 가드(2026-07-21 실사고) — 타깃 엔티티가 naver_entity에서 status!='on'
+    (off/deleted)이면 hold 사유 반환, 아니면 None.
+
+    사고 경위: shopping_group_bep 보드는 NaverAdDaily 집계만으로 후보를 뽑아, 창 안에 지출이
+    남은 deleted 그룹(맥세이프 69087677/69089452)에도 bid_down 제안이 생성됨 → 일 레인
+    무조건 승인 → harness에서 네이버 API 404(current_bid 미확보 fail-closed) 매일 반복
+    (change_log 181·183). 실행 불가 타깃은 심사 단계에서 사유와 함께 hold → 레인 말미
+    sweep이 rejected 처리(codex 11R 일일 재생성 사이클과 동일 수명).
+
+    entity 행이 없으면 통과(None) — 기존 동작 보존. naver_entity는 keyword를 WEB_SITE만
+    동기화하는 등 커버리지 경계가 있어, '행 부재'를 fail-closed로 확대하면 정상 타깃까지
+    막을 수 있다(deleted는 물리 삭제 없이 행이 남으므로 이 사고 계열은 행 존재가 보장됨)."""
+    row = db.query(NaverEntity.status).filter(
+        NaverEntity.entity_type == target_type,
+        NaverEntity.entity_id == target_id,
+    ).first()
+    if row is not None and row[0] != "on":
+        return (
+            f"타깃 엔티티 status={row[0]!r}(≠on) — 실행 불가 대상 사전 제외"
+            "(deleted면 네이버 API 404행, 2026-07-21 실사고)"
+        )
+    return None
+
+
 def _bleeding_hold_reason(db: Session, target_type: str, target_id: str, today: date) -> str | None:
     """D-NAO-48 조건④(최신 소급채점에서 bleeding 아님) 판정 — 미충족 시 hold 사유, 통과 시
     None. retro_snapshotter._BOARDS가 매일 08:30 board별로 스냅샷하는 NaverRetroSignal의
@@ -473,6 +498,18 @@ def run_daily_lane(db: Session, *, now: datetime | None = None) -> dict:
 
     for p in candidates:
         result["reviewed"] += 1
+
+        # 전 타입 공통 사전 가드: 타깃 엔티티 status!='on'(off/deleted)이면 실행 불가 —
+        # deleted에 bid_down을 태우면 harness에서 404 fail-closed가 매일 반복(2026-07-21 실사고).
+        status_hold = _entity_status_hold_reason(db, p.target_type, p.target_id)
+        if status_hold:
+            result["held"].append({"id": p.id, "reason": status_hold})
+            _record_blocked(
+                db, campaign_id=p.campaign_id, actor=diary.ACTOR_DAILY, reason=status_hold,
+                now=now, target_type=p.target_type, target_id=p.target_id,
+                adgroup_id=p.adgroup_id, action=p.proposal_type,
+            )
+            continue
 
         if p.proposal_type == "bid_up":
             hold_reason = _check_bid_up_conditions(db, p, today)
