@@ -146,10 +146,23 @@
 
 ## §체크리스트
 
-- [ ] **SS0** 쇼핑 제외 쓰기 프로브 — **완료(§실측-0: 쇼핑 400 code 3728 / WEB_SITE 왕복 성공·원복)**
-- [ ] SS1 마이그레이션(head `e7f8a9b0c1d2` 기준) + `STCONV_COL_*` + `fetch_search_term_conversion` + `ingest_search_term_conversion` 크론 편입 (Sonnet)
-- [ ] SS2 `search_term_judge_sa` 순수함수 + 봉투 §1 게이트 + BEP 연동 + 단위 테스트 (Opus)
-- [ ] SS3 harness 배선(A 파워링크 자동/B 쇼핑 브리핑 분기) + `ss_exclude` 승인원 + 경계 차등 테스트 — GATE 적대 + codex 왕복 (Opus)
-- [ ] SS4 `search_term_promote_sa` 승격 제안(영구 Confirm) (Sonnet)
-- [ ] 배포(safe_deploy CAS) + 라이브 합격 실측(수집 행·후보 산출·첫 제외 또는 절제·브리핑)
+- [x] **SS0** 쇼핑 제외 쓰기 프로브 — **완료(§실측-0: 쇼핑 400 code 3728 / WEB_SITE 왕복 성공·원복)**
+- [x] SS1 마이그레이션(`f2a3b4c5d6e7`) + `STCONV_COL_*` + `fetch_search_term_conversion` + `ingest_search_term_conversion` 크론 편입 (Sonnet) — **완료(2026-07-22). 라이브 14일 프라이밍 백필 실측: 799행 병합·30행 신설.**
+- [x] SS2 `search_term_judge_sa` 순수함수 + 봉투 §1 게이트 + BEP 연동 + 단위 테스트 (Opus) — **완료. 봉투 §1 전 항목(전환 검색어 제외 절대금지·최소클릭표본·화이트리스트·일일캡) 강제 확인.**
+- [x] SS3 harness 배선(A 파워링크 자동/B 쇼핑 브리핑 분기) + `ss_exclude` 승인원 + 경계 차등 테스트 — GATE 적대 + codex 왕복 (Opus) — **완료·배포·라이브. 자동발사 0·전량 Confirm 전용(A 파워링크도 이번 착수는 Confirm 경계 유지). 라이브 첫 실행: 제외 후보 0건(표본 게이트 미달=정당 절제).**
+- [x] SS4 `search_term_promote_sa` 승격 제안(영구 Confirm) (Sonnet) — **완료. 라이브 첫 실행: 승격 후보 354건 산출 → 콘솔 범람 실측 → 일일 신규 상한 20 보강 배포.**
+- [x] 배포(safe_deploy CAS) + 라이브 합격 실측(수집 행·후보 산출·첫 제외 또는 절제·브리핑) — **완료(2026-07-22 01:35~01:50 KST). safe_deploy 11파일·alembic upgrade f2a3b4c5d6e7·재시작·부팅 200.**
 - [ ] 상수 실측 캘리브레이션(§실측 2·3·5 — 첫 주)
+
+---
+
+## §배포 기록 (2026-07-22)
+
+- **일시**: 2026-07-22 01:35~01:50 KST, safe_deploy CAS 11파일, alembic upgrade `f2a3b4c5d6e7`, pm2 재시작, 부팅 200 확인.
+- **검증**: GATE 적대 리뷰 PASS(P1 0·지적 3건 수정) + codex 왕복 3라운드 전건 수용·수정 —
+  - 1R P1×3: 전환 캐리포워드 누락·실행시점 재검증 부재·캡 원자적 예약 미보장.
+  - 2R P1×1+P2×2: `target_id` 50자 초과 fail-closed 미비·보고서 실재 날짜=진실 소스 미채택·캡이 "오늘 클레임"에 한정되지 않음.
+  - 3R P2×1: `report_dates`를 자기치유(BUILT) 이전에 계산해 stale 가능성 → fetch 이후로 재배열.
+  - 최종 **2756 passed·회귀 0**.
+- **라이브 1회 실행 실측**: 제외 후보 0건(SS3-A 표본 게이트 미달=정당 절제, 첫 주 캘리브레이션 대상) / 승격 후보 354건 → 콘솔 범람 실측 → 일일 신규 상한 20 보강 배포·기존 354건 정리(08:50 크론이 상한 로직으로 재생성 예정).
+- **전환 프라이밍**: 14일치 백필 799행 병합·30행 신설.
