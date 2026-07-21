@@ -52,8 +52,9 @@ def _has_detail_rows(db, d: date) -> bool:
 
 def backfill_one_date(db, d: date) -> str:
     """하루 백필: 보고서 2종 보장·확인 → 수집 → 적재. 반환=결과 상태 문자열(로그·집계용)."""
-    fetcher.ensure_reports_built("AD", d, d)
-    fetcher.ensure_reports_built("AD_CONVERSION", d, d)
+    # 과거 날짜 보고서는 신규 빌드라 기본 60s를 자주 초과(2026-03-15 실측) → 300s로 상향.
+    fetcher.ensure_reports_built("AD", d, d, timeout=300.0)
+    fetcher.ensure_reports_built("AD_CONVERSION", d, d, timeout=300.0)
     ad_reports = fetcher.list_ad_reports(d, d)
     conv_reports = fetcher._list_reports_by_type("AD_CONVERSION", d, d)
     if not ad_reports or not conv_reports:
