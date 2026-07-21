@@ -19,7 +19,7 @@ from app.models import (
 from app.services import naver_sa_ad_fetcher as fetcher
 from app.services.naver_ad import (
     anomaly_feed, bid_simulator, budget_allocator, campaign_target_resolver, diagnosis, gave_score,
-    growth_sweeper, proposal_writer, slack_notifier, trigger_watch,
+    growth_sweeper, proposal_writer, retro_snapshotter, slack_notifier, trigger_watch,
 )
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.utils.kst import kst_today
@@ -28,13 +28,10 @@ log = logging.getLogger(__name__)
 
 _TARGET_RANK_POSITION = 2  # 목표순위 기본값 — 진단 보드에 avg_rank가 아직 없어 고정값(P3+ 정교화 여지)
 
-# D-NAO-72-2: GAVE 사전 우선순위 배선 — proposal_writer.build()가 _tag_gave로 표시하는 6개
-# 보드(retro_snapshotter._BOARDS, D-NAO-45와 동일 대상. 그 상수는 module-private이라 여기서
-# 별도 나열 — 값이 갈리면 test_naver_proposal_pipeline의 회귀 테스트가 잡는다)와 정합해야 한다.
-_GAVE_SCORED_BOARDS = frozenset({
-    "bleeding_keywords", "starving_winners", "shopping_group_bep",
-    "shopping_group_growth", "pause_candidates", "shopping_pause_candidates",
-})
+# D-NAO-72-2: GAVE 사전 우선순위 배선 — proposal_writer.build()가 _tag_gave로 표시하는 보드는
+# retro_snapshotter.BOARD_DIRECTION(D-NAO-45 사후 채점 대상과 동일 소스, 공개 상수)의 키
+# 집합 그대로다 — 여기서 별도로 나열하지 않는다(하드코딩 중복 방지, codex[P2] 지적).
+_GAVE_SCORED_BOARDS = frozenset(retro_snapshotter.BOARD_DIRECTION)
 _GAVE_ROLLUP_SCOPE = "retro_board"  # retro_scorer._GAVE_ROLLUP_SCOPE와 동일 문자열(단일 진실)
 _GAVE_SAMPLE_MIN = 10  # 유형실적(gave_score_d7 평균)을 rationale에 신뢰 표기할 최소 채점 표본
 _PROPOSAL_EXPIRY_DAYS = 14  # 계획서 §0 "관찰 2~4주" 하한 채택 — 실행형 제안(폴백) pending 14일
@@ -520,17 +517,30 @@ def _gave_gamma_for(db: Session, campaign_id: str, cache: dict[str, Decimal]) ->
 
 def _apply_gave_priority(db: Session, diag: dict, candidates: list[dict]) -> None:
     """D-NAO-72-2 — 제안 후보의 기대 GAVE(정착창 매출·비용·계정BEP·캠페인γ)를 계산해 같은
-    회차 내 생성 순서를 GAVE 내림차순으로 재배치(in-place, 안정정렬 — 동점/미계산은 기존
-    상대순서 유지). 이 순서가 곧 naver_proposals.id 배정 순서이고, auto_operator.
-    run_daily_lane의 `.order_by(NaverProposal.id.asc())`가 그 순서 그대로 08:50 심사·집행
-    하므로(auto_operator.py는 이 스프린트 금지 파일이라 직접 확인만, 수정하지 않음) — 여기서
-    정한 순서가 "일일 캡이 물릴 때 총이익 기여 높은 제안이 먼저 집행"을 결정한다.
+    회차 내 생성 순서를 재배치(in-place)한다. 이 순서가 곧 naver_proposals.id 배정 순서이고,
+    auto_operator.run_daily_lane의 `.order_by(NaverProposal.id.asc())`가 그 순서 그대로
+    08:50 심사·집행하므로(auto_operator.py는 이 스프린트 금지 파일이라 직접 확인만, 수정하지
+    않음) — 여기서 정한 순서가 "일일 캡이 물릴 때 먼저 집행되는 제안"을 결정한다.
 
-    대상: proposal_writer.build()가 `_tag_gave`로 표시한 6개 보드(_GAVE_SCORED_BOARDS —
-    retro_snapshotter._BOARDS와 동일 소스, gave_score_d7 사후 롤업이 존재하는 유형)뿐이다.
-    그 외(negative_keyword/growth_bid_up/budget_*/anomaly_*/resume류 등)는 revenue/cost
-    기반이 없거나 이미 자체 정렬 근거(growth_sweeper gap, budget round envelope)가 있어
-    **손대지 않는다** — 원 위치 그대로(폴백).
+    ★codex[P2] 2클래스 정렬(D-NAO-72-2 수정): GAVE는 매출 기준 점수라 무전환
+    pause/스톱로스(bid_down) 후보는 revenue=0 → score=0으로 항상 꼴찌로 밀린다. 하지만
+    그 후보들은 회피 손실 자체가 가치인 **방어 액션**이라, 부분 실행(일일 캡·크론 중단 등)
+    상황에서 방어가 성장 뒤로 밀리면 위험이 역전된다. 그래서 GAVE 점수만으로 전역 정렬하지
+    않고 **방향(retro_snapshotter.BOARD_DIRECTION — D-NAO-45 사후채점 대상과 동일 소스,
+    하드코딩 나열 금지)으로 2클래스로 먼저 나눈다**:
+      - 방어 클래스(direction down/pause — bleeding_keywords/shopping_group_bep/
+        pause_candidates/shopping_pause_candidates): **무조건 선순위**, 원 생성 순서 그대로
+        유지(재정렬하지 않음 — 방어끼리의 우선순위까지 GAVE로 흔들 근거는 아직 없다).
+      - 성장 클래스(direction up — starving_winners/shopping_group_growth): 방어 클래스
+        전원보다 뒤에서, 클래스 내부만 GAVE 내림차순 재정렬.
+    두 클래스 다 rationale의 `[GAVE사전: 기대점수 …]` 주석은 그대로 남긴다(투명성 — 방어
+    후보의 점수가 낮다는 사실 자체는 유용한 정보, 정렬에만 안 쓸 뿐).
+
+    대상: proposal_writer.build()가 `_tag_gave`로 표시한 보드(_GAVE_SCORED_BOARDS =
+    retro_snapshotter.BOARD_DIRECTION의 키 전체, gave_score_d7 사후 롤업이 존재하는 유형)뿐
+    이다. 그 외(negative_keyword/growth_bid_up/budget_*/anomaly_*/resume류 등)는 revenue/
+    cost 기반이 없거나 이미 자체 정렬 근거(growth_sweeper gap, budget round envelope)가
+    있어 **손대지 않는다** — 원 위치 그대로(폴백).
 
     gave_score.score_batch(순수 SA, gave_score.py 불변)만 재사용한다 — 이 harness가 유일
     호출자(원칙18, SA간 직접 호출 금지). bep_roas는 D-NAO-72 1차(retro_scorer)와 동일하게
@@ -593,10 +603,21 @@ def _apply_gave_priority(db: Session, diag: dict, candidates: list[dict]) -> Non
                 f" [GAVE사전: 기대점수 {p['_gave_expected_score']}·유형실적 {perf_text}]"
             )
 
-        reordered = sorted(
-            (candidates[i] for i in scored_positions),
+        # codex[P2] 2클래스 정렬: 방어(down/pause)는 무조건 선순위·원 순서 유지, 성장(up)만
+        # 그 뒤에서 GAVE 내림차순. 리스트 컴프리헨션은 scored_positions(=candidates 원본
+        # 순서) 그대로 훑으므로 defense_items는 별도 정렬 없이 원 순서가 보존된다.
+        defense_items = [
+            candidates[i] for i in scored_positions
+            if retro_snapshotter.BOARD_DIRECTION.get(candidates[i]["_gave_board"]) != "up"
+        ]
+        growth_items = sorted(
+            (
+                candidates[i] for i in scored_positions
+                if retro_snapshotter.BOARD_DIRECTION.get(candidates[i]["_gave_board"]) == "up"
+            ),
             key=lambda p: p["_gave_expected_score"], reverse=True,
         )
+        reordered = defense_items + growth_items
         for pos, item in zip(scored_positions, reordered):
             candidates[pos] = item
     finally:

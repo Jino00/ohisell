@@ -27,6 +27,13 @@ _BOARDS: tuple[tuple[str, str, str], ...] = (
     ("shopping_pause_candidates", "adgroup", "pause"),
 )
 
+# D-NAO-72-2(codex P2): board→방향 공개 매핑 — proposal_pipeline._apply_gave_priority가
+# 방어(down/pause)/성장(up) 클래스 판정에 재사용하는 단일 진실 소스. _BOARDS는
+# (board, grain, direction) 3튜플이라 grain까지 노출하지 않고 필요한 부분(board→direction)만
+# 뽑아 공개 상수로 승격한다 — 하드코딩 문자열 나열 중복 방지(값이 갈리면 회귀 테스트가 잡는
+# 식의 사후 방어보다, 애초에 한 소스를 공유하는 편이 안전하다).
+BOARD_DIRECTION: dict[str, str] = {board: direction for board, _grain, direction in _BOARDS}
+
 
 def snapshot_signals(db: Session, asof: date) -> dict:
     """asof 시점 진단 보드를 리플레이해 naver_retro_signal에 스냅샷 행을 남긴다.

@@ -795,12 +795,13 @@ def _gave_item(campaign_id, board, revenue, cost, rationale="r"):
     }
 
 
-def test_apply_gave_priority_sorts_by_expected_gave_descending(db):
-    """ROAS가 BEP에 가까운(손실이 작은) 후보가 절대 비용이 작아도, ROAS가 BEP에서 훨씬 먼
-    (손실이 큰) 후보보다 기대 GAVE가 높으면 먼저 온다 — 단순 cost 재현이 아님을 검증."""
+def test_apply_gave_priority_sorts_growth_class_by_expected_gave_descending(db):
+    """codex[P2] 2클래스 정렬: 성장 클래스(direction=up 보드, 예 starving_winners)는 여전히
+    GAVE 내림차순 재정렬된다 — ROAS가 BEP에 가까운(손실이 작은) 후보가 절대 비용이 작아도,
+    ROAS가 BEP에서 훨씬 먼(손실이 큰) 후보보다 기대 GAVE가 높으면 먼저 온다."""
     diag = {"account_bep_roas": 2.0}
-    low = _gave_item("cmp1", "bleeding_keywords", revenue=10000, cost=10000, rationale="r-low")  # roas=1<2
-    high = _gave_item("cmp1", "bleeding_keywords", revenue=100000, cost=10000, rationale="r-high")  # roas=10>2
+    low = _gave_item("cmp1", "starving_winners", revenue=10000, cost=10000, rationale="r-low")  # roas=1<2
+    high = _gave_item("cmp1", "starving_winners", revenue=100000, cost=10000, rationale="r-high")  # roas=10>2
     candidates = [low, high]
 
     proposal_pipeline._apply_gave_priority(db, diag, candidates)
@@ -814,15 +815,63 @@ def test_apply_gave_priority_sorts_by_expected_gave_descending(db):
         assert "유형실적 데이터부족" in p["rationale"]  # NaverLearningState 미적재 → 폴백 표기
 
 
+def test_apply_gave_priority_defense_class_keeps_original_order_regardless_of_gave(db):
+    """codex[P2] 핵심 수정: 방어 클래스(direction=down/pause 보드)는 GAVE 점수와 무관하게
+    원래 생성 순서를 그대로 유지한다 — 무전환 pause/스톱로스는 revenue=0이라 GAVE로 정렬하면
+    항상 꼴찌로 밀리는데(회피 손실이 가치인 방어 액션이 매출 기준 점수로는 0), 방어끼리는
+    아예 재정렬하지 않아 이 역전을 원천 차단한다."""
+    diag = {"account_bep_roas": 2.0}
+    # low가 먼저 나왔지만 GAVE는 high가 훨씬 크다 — 그래도 순서는 안 바뀌어야 한다.
+    low_gave_first = _gave_item("cmp1", "bleeding_keywords", revenue=0, cost=10000, rationale="r-first")
+    high_gave_second = _gave_item("cmp1", "shopping_group_bep", revenue=100000, cost=10000, rationale="r-second")
+    candidates = [low_gave_first, high_gave_second]
+
+    proposal_pipeline._apply_gave_priority(db, diag, candidates)
+
+    assert candidates[0]["rationale"].startswith("r-first")
+    assert candidates[1]["rationale"].startswith("r-second")
+
+
+def test_apply_gave_priority_defense_class_precedes_growth_class_even_with_zero_gave(db):
+    """방어(GAVE=0) 후보가 성장(GAVE 매우 큼) 후보보다 항상 먼저 온다 — codex[P2] 지적 그대로
+    (부분 실행/일일 캡이 물리는 상황에서 방어가 성장 뒤로 밀리는 위험 역전 방지)."""
+    diag = {"account_bep_roas": 2.0}
+    growth_high = _gave_item("cmp1", "starving_winners", revenue=1_000_000, cost=1000, rationale="r-growth")
+    defense_zero = _gave_item("cmp1", "pause_candidates", revenue=0, cost=10000, rationale="r-defense")
+    candidates = [growth_high, defense_zero]  # 성장을 먼저 넣어도(원 순서상 유리) 결과는 방어가 먼저.
+
+    proposal_pipeline._apply_gave_priority(db, diag, candidates)
+
+    assert candidates[0]["rationale"].startswith("r-defense")
+    assert candidates[1]["rationale"].startswith("r-growth")
+
+
+def test_apply_gave_priority_mixed_defense_and_growth_classes(db):
+    """방어 다건 + 성장 다건이 섞여도: 방어는 원 순서 그대로 전부 앞에, 성장은 그 뒤에서
+    GAVE 내림차순 — 두 클래스가 서로의 정렬에 영향을 주지 않는다."""
+    diag = {"account_bep_roas": 2.0}
+    defense_a = _gave_item("cmp1", "bleeding_keywords", revenue=0, cost=5000, rationale="d-a")
+    growth_low = _gave_item("cmp1", "starving_winners", revenue=5000, cost=5000, rationale="g-low")
+    defense_b = _gave_item("cmp1", "shopping_pause_candidates", revenue=0, cost=3000, rationale="d-b")
+    growth_high = _gave_item("cmp1", "shopping_group_growth", revenue=500000, cost=5000, rationale="g-high")
+    candidates = [defense_a, growth_low, defense_b, growth_high]
+
+    proposal_pipeline._apply_gave_priority(db, diag, candidates)
+
+    assert [p["rationale"].split(" [GAVE사전")[0] for p in candidates] == ["d-a", "d-b", "g-high", "g-low"]
+
+
 def test_apply_gave_priority_respects_campaign_gamma_dial(db):
     """캠페인 γ(naver_campaign_settings.gamma)가 다르면 같은 revenue/cost라도 기대 GAVE가
-    달라져야 한다 — γ=0(벌칙 없음)이 기본값 γ=1(벌칙 적용)보다 항상 점수가 높다(D-NAO-2)."""
+    달라져야 한다 — γ=0(벌칙 없음)이 기본값 γ=1(벌칙 적용)보다 항상 점수가 높다(D-NAO-2).
+    성장 클래스(starving_winners)로 검증 — 방어 클래스는 GAVE로 정렬하지 않으므로 이 차이가
+    순서에 드러나지 않는다."""
     db.add(NaverCampaignSettings(campaign_id="cmp-g0", optimizer="ours", gamma=Decimal("0")))
     db.commit()
     diag = {"account_bep_roas": 2.0}
     # roas=6000/10000=0.6 < bep 2.0 → 벌칙 구간(두 캠페인 다 미달, 벌칙 강도만 다름)
-    default_gamma = _gave_item("cmp-default", "bleeding_keywords", revenue=6000, cost=10000, rationale="r-default")
-    zero_gamma = _gave_item("cmp-g0", "bleeding_keywords", revenue=6000, cost=10000, rationale="r-g0")
+    default_gamma = _gave_item("cmp-default", "starving_winners", revenue=6000, cost=10000, rationale="r-default")
+    zero_gamma = _gave_item("cmp-g0", "starving_winners", revenue=6000, cost=10000, rationale="r-g0")
     candidates = [default_gamma, zero_gamma]
 
     proposal_pipeline._apply_gave_priority(db, diag, candidates)
@@ -919,12 +968,12 @@ def test_apply_gave_priority_no_scored_candidates_is_noop(db):
     assert candidates == [{"campaign_id": "cmp1", "rationale": "u", "proposal_type": "anomaly"}]
 
 
-# ── D-NAO-72-2: run_daily 통합 — 보드 자체 정렬(cost desc)을 GAVE가 실제로 뒤집는지 검증 ──
-def test_run_daily_orders_bleeding_keyword_proposals_by_expected_gave(db, monkeypatch):
-    """bleeding_keywords 보드 자체 정렬은 cost 내림차순이라 kw-big(비용 10만)을 kw-small
-    (비용 8천)보다 먼저 만든다. 그러나 kw-small은 ROAS가 BEP에 훨씬 가까워(손실 작음) 기대
-    GAVE가 더 높다 — GAVE 사전 정렬이 실제로 08:00 생성 순서(=naver_proposals.id 배정 순서,
-    08:50 auto_operator.run_daily_lane이 이 순서로 심사)를 뒤집는지 종단 검증."""
+# ── D-NAO-72-2(codex[P2] 2클래스 정렬): run_daily 통합 검증 ──
+def test_run_daily_defense_class_bleeding_keywords_keep_original_board_cost_order(db, monkeypatch):
+    """bleeding_keywords는 방어 클래스(direction=down)다 — 보드 자체 정렬(cost 내림차순)이
+    그대로 최종 생성 순서가 되어야 한다. kw-small의 기대 GAVE가 kw-big보다 훨씬 높아도(ROAS가
+    BEP에 더 가까워 손실이 작음) **순서를 뒤집지 않는다** — codex[P2] 수정 후 방어 클래스는
+    GAVE로 재정렬하지 않는다는 핵심 회귀 근거."""
     _seed_bep(db)  # bep_roas=2.0
     db.add(NaverCampaignSettings(campaign_id="cmpA", optimizer="ours"))
     db.add(NaverCampaignSettings(campaign_id="cmpB", optimizer="ours"))
@@ -932,9 +981,11 @@ def test_run_daily_orders_bleeding_keyword_proposals_by_expected_gave(db, monkey
                         campaign_type="WEB_SITE", name="빅코스트", status="on", bid_amt=500))
     db.add(NaverEntity(entity_type="keyword", entity_id="kw-small", campaign_id="cmpB",
                         campaign_type="WEB_SITE", name="스몰코스트", status="on", bid_amt=500))
-    # kw-big: cost=100000, conv=5000 → roas≈0.05(BEP 2.0 대비 크게 미달, 손실 큼)
+    # kw-big: cost=100000, conv=5000 → roas≈0.05(BEP 2.0 대비 크게 미달, 손실 큼) — cost 최대라
+    # 보드 자체 정렬(cost desc)에서 1등.
     _row(db, AS_OF, "cmpA", "WEB_SITE", "grpA", "kw-big", 5000, 500, 100000, direct=5000)
-    # kw-small: cost=8000, conv=7500 → roas≈0.94(BEP 대비 미달폭 작음, 손실 작음)
+    # kw-small: cost=8000, conv=7500 → roas≈0.94(BEP 대비 미달폭 작음, 손실 작음, GAVE는 더 큼)
+    # — cost가 작아 보드 자체 정렬에서 2등.
     _row(db, AS_OF, "cmpB", "WEB_SITE", "grpB", "kw-small", 800, 80, 8000, direct=7500)
     db.commit()
 
@@ -952,7 +1003,86 @@ def test_run_daily_orders_bleeding_keyword_proposals_by_expected_gave(db, monkey
         .order_by(NaverProposal.id.asc())
         .all()
     )
-    assert [r.target_id for r in rows] == ["kw-small", "kw-big"]  # 보드 cost순(big먼저)의 반대
+    assert [r.target_id for r in rows] == ["kw-big", "kw-small"]  # 보드 cost순 그대로(방어 클래스)
     for r in rows:
+        assert "[GAVE사전: 기대점수" in r.rationale  # 주석은 유지(정렬에만 안 씀)
+        assert "[bleeding_keywords]" in r.rationale
+
+
+def test_run_daily_growth_class_orders_by_expected_gave(db, monkeypatch):
+    """starving_winners는 성장 클래스(direction=up)다 — 보드 자체 정렬(roas_corrected desc)과
+    달리 GAVE(=BEP 이상이면 절대매출 그대로 인정)로 재정렬된다. kw-hiroas는 ROAS가 훨씬
+    높지만(50) 절대매출이 작고, kw-hirevenue는 ROAS는 낮아도(10, 여전히 목표 이상) 절대매출이
+    커서 GAVE가 더 크다 — 보드 자체 정렬(hiroas가 1등)과 반대 결과가 나와야 진짜 재정렬임을
+    증명한다(우연한 일치가 아님)."""
+    _seed_bep(db)  # bep_roas=2.0, target_roas=2.5
+    db.add(NaverCampaignSettings(campaign_id="cmp1", optimizer="ours"))
+    db.add(NaverEntity(entity_type="keyword", entity_id="kw-hiroas", campaign_id="cmp1",
+                        campaign_type="WEB_SITE", name="고ROAS저매출", status="on", bid_amt=100))
+    db.add(NaverEntity(entity_type="keyword", entity_id="kw-hirevenue", campaign_id="cmp1",
+                        campaign_type="WEB_SITE", name="저ROAS고매출", status="on", bid_amt=100))
+    # 둘 다 15일 창 클릭 1건(굶는승자 조건 avg_daily_clk<1).
+    _row(db, AS_OF, "cmp1", "WEB_SITE", "grp1", "kw-hiroas", 500, 1, 100, direct=5000)  # roas=50
+    _row(db, AS_OF, "cmp1", "WEB_SITE", "grp1", "kw-hirevenue", 500, 1, 2000, direct=20000)  # roas=10
+    db.commit()
+
+    monkeypatch.setattr(
+        proposal_pipeline.fetcher, "estimate_average_position_bid",
+        lambda device, items: [{"nccKeywordId": it["key"], "bid": 50} for it in items],
+    )
+
+    out = proposal_pipeline.run_daily(db)
+    assert out["stage_status"]["proposal_writer"] == "ok"
+
+    rows = (
+        db.query(NaverProposal)
+        .filter(NaverProposal.target_id.in_(["kw-hiroas", "kw-hirevenue"]))
+        .order_by(NaverProposal.id.asc())
+        .all()
+    )
+    assert [r.target_id for r in rows] == ["kw-hirevenue", "kw-hiroas"]  # 보드 roas순의 반대
+    for r in rows:
+        assert r.proposal_type == "bid_up"
         assert "[GAVE사전: 기대점수" in r.rationale
-        assert "[bleeding_keywords]" in r.rationale  # 원 rationale(보드 근거)도 그대로 보존
+        assert "[starving_winners]" in r.rationale
+
+
+def test_run_daily_defense_class_precedes_growth_class_end_to_end(db, monkeypatch):
+    """codex[P2] 핵심 시나리오 — 무전환 방어(bleeding_keywords, GAVE≈0)가 고GAVE 성장
+    (starving_winners) 후보보다 항상 먼저 생성된다. 방어 액션은 회피 손실 자체가 가치인데
+    매출 기준 GAVE로는 0에 가까워, 순수 GAVE 정렬이면 성장 뒤로 밀려 부분 실행/일일 캡
+    상황에서 위험이 역전된다 — 2클래스 정렬이 이를 막는다는 종단 증거."""
+    _seed_bep(db)
+    db.add(NaverCampaignSettings(campaign_id="cmp-defend", optimizer="ours"))
+    db.add(NaverCampaignSettings(campaign_id="cmp-grow", optimizer="ours"))
+    db.add(NaverEntity(entity_type="keyword", entity_id="kw-bleed", campaign_id="cmp-defend",
+                        campaign_type="WEB_SITE", name="무전환출혈", status="on", bid_amt=500))
+    db.add(NaverEntity(entity_type="keyword", entity_id="kw-star", campaign_id="cmp-grow",
+                        campaign_type="WEB_SITE", name="굶는승자", status="on", bid_amt=100))
+    # kw-bleed: 무전환(conv=0), 비용만 발생 → GAVE≈0(방어). cost=3000 < 스톱로스 절대액
+    # (bid_amt 500×10=5000) — bleeding_keywords만 발동시키고 pause_candidates는 피해서
+    # kw-bleed가 정확히 1건만 생성되게 한다(assertion 단순화).
+    _row(db, AS_OF, "cmp-defend", "WEB_SITE", "grp-d", "kw-bleed", 300, 30, 3000, direct=0)
+    # kw-star: 저클릭 고ROAS 승자 → GAVE 매우 큼(성장).
+    _row(db, AS_OF, "cmp-grow", "WEB_SITE", "grp-g", "kw-star", 500, 1, 1000, direct=100_000)
+    db.commit()
+
+    monkeypatch.setattr(
+        proposal_pipeline.fetcher, "estimate_average_position_bid",
+        lambda device, items: [{"nccKeywordId": it["key"], "bid": 300} for it in items],
+    )
+
+    out = proposal_pipeline.run_daily(db)
+    assert out["stage_status"]["proposal_writer"] == "ok"
+
+    rows = (
+        db.query(NaverProposal)
+        .filter(NaverProposal.target_id.in_(["kw-bleed", "kw-star"]))
+        .order_by(NaverProposal.id.asc())
+        .all()
+    )
+    # kw-star는 starving_winners(GAVE 태깅) 외에 growth_sweeper(비태깅, 별도 로컬 스윕)에서도
+    # 독립적으로 growth_bid_up 후보가 하나 더 나올 수 있다(동일 키워드, 다른 보드) — 핵심
+    # 주장은 "kw-bleed가 kw-star의 어떤 제안보다도 먼저"이므로 첫 행만 고정 검증한다.
+    assert rows[0].target_id == "kw-bleed"  # 방어가 항상 먼저(GAVE 무관)
+    assert all(r.target_id == "kw-star" for r in rows[1:])
