@@ -1956,6 +1956,46 @@ class NaverEntity(Base):
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class NaverEntitySnapshot(Base):
+    """대행사 포함 45캠페인 구조의 날짜별 history (SA-1, D-NAO-78 · BM 벤치마크 레이어).
+
+    naver_entity는 upsert라 '현재 상태'만 남아 역사가 없다 → 이 테이블이 매일 07:37 캠페인·
+    그룹 grain 구조를 스냅샷(0 GET, naver_entity DB만 읽음). 관찰 전용 — 네이버 API 쓰기 0.
+    키워드 grain은 저장 안 함(90,150행/일 × 365 = 3,300만행/년 회피): 그룹 행에 키워드 집계
+    (keyword_count·keyword_avg_bid)만 남기고 개별 키워드 변화는 이벤트(naver_agency_op, P2)로
+    잡는다. optimizer는 naver_campaign_settings 조인(none=대행사 관찰 대상/ours/mop).
+
+    Phase 1(이 커밋)은 name/status/optimizer/bid_amt/keyword_count/keyword_avg_bid만 채운다.
+    daily_budget·extended_search(일별, P3)·negative_kw_count·ad_count(주간 deep, P3)는 additive
+    nullable — 미수집 시 NULL(하위호환·backfill 불필요). 보존 400일 롤링(P6).
+    """
+
+    __tablename__ = "naver_entity_snapshot"
+    __table_args__ = (
+        UniqueConstraint("snapshot_date", "entity_type", "entity_id", name="uq_naver_entity_snapshot"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    snapshot_date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)  # KST 스냅샷 날짜(kst_today, ★UTC 아님)
+    entity_type: Mapped[str] = mapped_column(String(10), nullable=False)  # campaign/adgroup
+    entity_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    parent_id: Mapped[str] = mapped_column(String(50), nullable=False, default="")  # adgroup→campaign_id
+    campaign_id: Mapped[str] = mapped_column(String(50), nullable=False, default="", index=True)
+    campaign_type: Mapped[str] = mapped_column(String(20), nullable=False, default="")  # WEB_SITE/SHOPPING/BRAND_SEARCH
+    optimizer: Mapped[str] = mapped_column(String(8), nullable=False, default="none")  # none/ours/mop(대행사 구분)
+    name: Mapped[str] = mapped_column(String(300), nullable=False, default="")
+    status: Mapped[str] = mapped_column(String(10), nullable=False, default="on")  # on/off/deleted
+    # ── 구조 지표(SA-3 벤치마크 원료) ──
+    daily_budget: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 캠페인 dailyBudget(get_campaigns_full, P3)
+    bid_amt: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 그룹 기본입찰
+    extended_search: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)  # 그룹 확장검색 on/off(get_adgroups, P3)
+    keyword_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 그룹 활성 키워드 수(naver_entity 집계, WEB_SITE만 유효)
+    keyword_avg_bid: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 그룹 키워드 평균 입찰(밴드 산출용)
+    negative_kw_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 제외키워드 수(주간 deep GET, P3)
+    ad_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 소재 수(주간 deep GET, P3)
+    synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())  # ★쓰기 시 kst_now 명시 주입(server_default는 UTC — 시간계산 미사용)
+
+
 class NaverSearchTermDaily(Base):
     """검색어 단위 일별 성과 — 쇼핑 SHOPPINGKEYWORD_DETAIL + 파워링크 EXPKEYWORD (P2-S1).
 
