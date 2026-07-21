@@ -687,22 +687,32 @@ def _execute_update_bid(db: Session, proposal: NaverProposal, now: datetime) -> 
             _guard_failure(db, proposal, now, "update_bid", reason)
             raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
 
-    # BX2 GATE P1(D-NAO-70·71) — 탐색 스텝(EXPLORATION_STEP_TYPES)은 **target_type 무관**하게
-    # explore_op 승인원을 요구한다(전 target_type 대칭 경계). 없으면 bid_up_explore + adgroup/keyword
-    # + 콘솔(None/기타 승인원) 제안이 (BEP 완전성 게이트 면제 + 킬스위치 화이트리스트 밖) 최약 UP
-    # 경로로 새어나간다(적대 GATE 실증). 탐색 타입인데 explore_op이 아니면 fail-closed — BX3의
-    # source='group' 그룹 탐색(target_type='adgroup')도 explore_op으로만 발사되므로 이 게이트가
-    # 정상 경로를 막지 않는다. 아래 ad 분기의 승인원 검사와 동형 이중이나 관례상 허용(D-NAO-13).
-    if proposal.proposal_type in EXPLORATION_STEP_TYPES:
-        from app.services.naver_ad.exploration import APPROVAL_SOURCE_EXPLORE
-        if proposal.approval_source != APPROVAL_SOURCE_EXPLORE:
+    # BX2 GATE P1 + codex P2(D-NAO-70·71) — **탐색 타입 ⟺ explore_op 승인원 쌍방향 잠금**(target_type
+    # 무관, 전 target_type 대칭 경계). 두 방향 모두 fail-closed:
+    #   (P1) 탐색 스텝인데 explore_op이 아니면 차단 — 없으면 bid_up_explore + adgroup/keyword + 콘솔/
+    #        기타 승인원 제안이 (BEP 완전성 면제 + 킬스위치 화이트리스트 밖) 최약 UP 경로로 샌다(GATE 실증).
+    #   (P2) explore_op인데 탐색 스텝이 아니면 차단 — explore_op은 탐색 UP 전용 승인원이므로 bid_down류
+    #        (소재 DOWN은 콘솔 Confirm/기타 승인원 몫)를 explore_op으로 실으면 승인원 오용(codex P2).
+    # 정상 경로(둘 다 참=탐색 UP / 둘 다 거짓=비탐색)만 통과. BX3 source='group' 그룹 탐색(adgroup)도
+    # explore_op으로만 발사되므로 이 게이트가 정상 경로를 막지 않는다(ad 분기 검사와 동형 이중, D-NAO-13).
+    from app.services.naver_ad.exploration import APPROVAL_SOURCE_EXPLORE
+    _is_explore_type = proposal.proposal_type in EXPLORATION_STEP_TYPES
+    _is_explore_src = proposal.approval_source == APPROVAL_SOURCE_EXPLORE
+    if _is_explore_type != _is_explore_src:
+        if _is_explore_type:
             reason = (
                 f"탐색 스텝({proposal.proposal_type})은 explore_op 승인원 전용"
                 f"(승인원={proposal.approval_source!r}) — 콘솔·기타 승인원의 탐색 UP은 봉쇄"
                 "(fail-closed, GATE P1 전 target_type 대칭)"
             )
-            _guard_failure(db, proposal, now, "update_bid", reason)
-            raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
+        else:
+            reason = (
+                f"explore_op 승인원은 탐색 스텝 타입 전용(UP) — proposal_type="
+                f"{proposal.proposal_type!r}는 탐색 스텝 아님(소재 DOWN은 콘솔 Confirm 몫). "
+                "승인원 오용 봉쇄(fail-closed, codex P2 역방향 잠금)"
+            )
+        _guard_failure(db, proposal, now, "update_bid", reason)
+        raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
 
     # BX2(D-NAO-70·71) — 소재(ad) 실쓰기 **최종 경계**(codex 소급[P2] 2026-07-20 이중화 계승,
     # D-NAO-13 optimizer 쓰기 직전 하드 체크 동형). B3 개정:
@@ -1164,16 +1174,24 @@ def real_write_blocker(proposal: NaverProposal) -> str | None:
             )
         if proposal.target_bid is None:
             return "target_bid 없음 — 실행 대상 정보 부족(구 제안이거나 재생성 필요)"
-        # BX2 GATE P1: 탐색 스텝은 **target_type 무관**하게 explore_op 승인원 요구(_execute_update_bid
-        # 대칭 — ad 분기 검사와 동형 이중). 없으면 bid_up_explore + adgroup/keyword + 콘솔 제안이
-        # executable=True로 보여 콘솔 Confirm으로 최약 UP 경로가 열린다(적대 GATE 실증).
-        if proposal.proposal_type in EXPLORATION_STEP_TYPES:
-            from app.services.naver_ad.exploration import APPROVAL_SOURCE_EXPLORE
-            if proposal.approval_source != APPROVAL_SOURCE_EXPLORE:
+        # BX2 GATE P1 + codex P2: 탐색 타입 ⟺ explore_op 승인원 **쌍방향 잠금**(target_type 무관,
+        # _execute_update_bid 대칭). (P1) 탐색 타입인데 explore_op 아니면 executable=False —
+        # bid_up_explore + adgroup/keyword + 콘솔이 콘솔 Confirm으로 최약 UP 경로로 열리는 것 차단
+        # (적대 GATE 실증). (P2) explore_op인데 탐색 타입 아니면 executable=False — explore_op 승인원
+        # 오용(소재 DOWN 등)을 콘솔 판정에서도 봉쇄.
+        from app.services.naver_ad.exploration import APPROVAL_SOURCE_EXPLORE
+        _is_explore_type = proposal.proposal_type in EXPLORATION_STEP_TYPES
+        _is_explore_src = proposal.approval_source == APPROVAL_SOURCE_EXPLORE
+        if _is_explore_type != _is_explore_src:
+            if _is_explore_type:
                 return (
                     f"탐색 스텝({proposal.proposal_type})은 explore_op 승인원 전용 — 콘솔·기타 "
                     "승인원의 탐색 UP은 실행 버튼 비활성(GATE P1 전 target_type 대칭)"
                 )
+            return (
+                f"explore_op 승인원은 탐색 스텝 타입 전용(UP) — proposal_type={proposal.proposal_type} "
+                "는 탐색 스텝 아님(승인원 오용, codex P2 역방향 잠금)"
+            )
         # BX2(D-NAO-70·71): 소재(ad) 실쓰기 구조 게이트(콘솔 executable 판정) — _execute_update_bid의
         # 최종 경계 가드와 동일 판정(이중 방벽). 정적 비교만(라이브 재조회 없음, 이 함수 설계 유지).
         #   ① 카나리 캠페인 제한 해제(전 캠페인, D-NAO-70②).

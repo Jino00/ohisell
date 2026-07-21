@@ -147,16 +147,21 @@ def exploration_ceiling(
       1) BEP ROAS 해석(_resolve_exploration_bep_roas): 그룹→캠페인→계정 순.
       2) pooled_rpc(정착창 grain 집계) > 0 ∧ BEP 있음 → economic = affordable_ceiling(rpc, bep).
       3) heuristic = current_bid × 2.0(병행 휴리스틱 캡, _EXPLORATION_CEILING_MULT).
-      4) 결합(보수): economic 있으면 min(economic, heuristic)(둘 다 상한) / economic 없으면(데이터
-         부재 = rpc≤0 또는 bep None) fail-closed로 heuristic만(휴리스틱=유일 상한, 보수값).
-      5) current_bid도 부재(≤0)면 heuristic=0 → 0(상한 근거 전무 = 탐색 발동 불가).
+      4) 결합(보수): economic 있으면 min(economic, heuristic)(둘 다 상한).
+      5) **경제 증거 전무(codex P1 fail-closed)**: 그룹→캠페인→계정 전 레벨에서 경제 증거(BEP와
+         RPC 둘 다)를 얻지 못하면(bep None 또는 economic≤0) → ceiling = **current_bid** 반환.
+         그러면 ladder_judgment가 current_bid ≥ ceiling → 'capped'로 판정해 상향 불가(fail-closed) —
+         휴리스틱(current×2)을 반환하면 current<ceiling이라 근거 없이 상향되는 fail-open이 됐다.
+         ★계정 BEP(D-NAO-57 account_default_bep_roas)가 정상 존재하는 한 bep_roas는 항상 해석되므로
+         이 분기는 실제로는 미발동(BEP 스냅샷이 통째로 비어야 도달) — 순수 안전망이다.
 
-    반환: 유효 입찰가(10원 단위, 70~100,000원) 또는 0(상한 근거 없음). 순수 판정(부수효과 없음)."""
+    반환: 유효 입찰가(10원 단위, 70~100,000원) / current_bid(경제 증거 전무=capped) / 0(current도
+      부재). 순수 판정(부수효과 없음)."""
     heuristic = _heuristic_ceiling(current_bid)
 
     bep_roas = _resolve_exploration_bep_roas(db, campaign_id, adgroup_id)
     if bep_roas is None:
-        return heuristic  # 데이터 부재(BEP 없음) — fail-closed 보수(휴리스틱만)
+        return current_bid  # 경제 증거 전무(BEP 없음) — fail-closed(ladder capped, codex P1)
 
     grp = _grain_settlement_agg(db, adgroup_id=adgroup_id, campaign_id=None, date_from=window_from, date_to=window_to)
     camp = _grain_settlement_agg(db, adgroup_id=None, campaign_id=campaign_id, date_from=window_from, date_to=window_to)
@@ -168,7 +173,7 @@ def exploration_ceiling(
     )
     economic = bid_simulator.affordable_ceiling(rpc_raw, bep_roas)  # rpc≤0이면 0 반환(division guard)
     if economic <= 0:
-        return heuristic  # 데이터 부재(rpc≤0, 심층 콜드) — fail-closed 보수(휴리스틱만)
+        return current_bid  # 경제 증거 전무(rpc≤0, 심층 콜드) — fail-closed(ladder capped, codex P1)
 
     if heuristic <= 0:
         return economic  # current_bid 부재지만 경제 근거는 있음 — 경제 상한 채택

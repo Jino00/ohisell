@@ -139,19 +139,40 @@ def test_explore_op_non_exploration_up_type_rejected(db):
 
 
 # ══════════════════════════════════════════════════════════════════
-# ② explore_op DOWN도 허용(손 자체는 양방향)
+# ② codex P2 역방향 잠금: explore_op은 탐색 UP 전용 승인원 — explore_op + bid_down 거부
+# (소재 DOWN은 콘솔 Confirm/기타 승인원 몫. 쌍방향 잠금: 탐색타입 ⟺ explore_op)
 # ══════════════════════════════════════════════════════════════════
-def test_explore_op_ad_down_allowed(db):
-    """② explore_op + bid_down 소재 DOWN → 허용(래더는 UP만 쓰지만 손 자체는 방향 무관)."""
+def test_explore_op_ad_down_rejected(db):
+    """codex P2: explore_op + bid_down → fail-closed(승인원 오용 — explore_op은 탐색 UP 전용)."""
     p = _ad_proposal(db, proposal_type="bid_down", target_bid=680,
                      approval_source=exploration.APPROVAL_SOURCE_EXPLORE)
     _settings(db, auto_operate=True)
+    with patch.object(harness.naver_sa_writer, "update_ad_bid") as mad:
+        with pytest.raises(harness.MissingExecutionTargetError):
+            harness.execute(db, p.id, dry_run=False)
+    mad.assert_not_called()
+    db.refresh(p)
+    assert p.status == "failed"
+
+
+def test_console_bid_down_still_allowed(db):
+    """대조: 콘솔(None) + bid_down은 여전히 허용(비탐색+비explore_op → 쌍방향 잠금 통과)."""
+    p = _ad_proposal(db, proposal_type="bid_down", target_bid=680, approval_source=None)
+    _settings(db)
     with patch.object(harness, "_build_guardrail_context", return_value={"current_bid": 800}), \
          patch.object(harness.guardrail_gate, "check", return_value=None), \
          patch.object(harness.naver_sa_writer, "update_ad_bid",
                       return_value=_ad_write_result(800, 680)) as mad:
         harness.execute(db, p.id, dry_run=False)
     mad.assert_called_once_with(AD_ID, 680)
+
+
+def test_real_write_blocker_explore_op_bid_down_rejected(db):
+    """codex P2(콘솔 판정): explore_op + bid_down → executable=False(승인원 오용)."""
+    p = _ad_proposal(db, proposal_type="bid_down", target_bid=680,
+                     approval_source=exploration.APPROVAL_SOURCE_EXPLORE)
+    blocked = harness.real_write_blocker(p)
+    assert blocked is not None and "탐색 스텝 타입 전용" in blocked
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -334,23 +355,35 @@ def test_ceiling_heuristic_below_economic(db):
     assert c == 1600
 
 
-def test_ceiling_failclosed_heuristic_when_no_bep(db):
-    # BEP 부재 → 경제성 계산 불가 → fail-closed 휴리스틱(800×2=1600)
+def test_ceiling_failclosed_current_bid_when_no_bep(db):
+    # codex P1: BEP 부재(경제 증거 전무) → ceiling = current_bid(800) → ladder capped(상향 불가).
+    # 휴리스틱(1600) 반환은 fail-open이라 금지(current<ceiling으로 근거 없이 상향됨).
     _settle(db, clk=100, conv_amt=100000)
     c = exploration.exploration_ceiling(db, CAMP, GRP_ID, 800, WIN_FROM, WIN_TO)
-    assert c == 1600
+    assert c == 800
 
 
-def test_ceiling_failclosed_heuristic_when_no_settlement(db):
-    # BEP 있으나 정착 실적 0(rpc≤0) → economic≤0 → fail-closed 휴리스틱
+def test_ceiling_failclosed_current_bid_when_no_settlement(db):
+    # codex P1: BEP 있으나 rpc≤0(경제 증거 전무) → ceiling = current_bid(800) → capped.
     _bep(db, pid="pidA", bep_roas="2.0")
     _map(db, adgroup_id=GRP_ID, pid="pidA")
     c = exploration.exploration_ceiling(db, CAMP, GRP_ID, 800, WIN_FROM, WIN_TO)
-    assert c == 1600
+    assert c == 800
+
+
+def test_ceiling_failclosed_capped_drives_ladder(db):
+    # codex P1 폐루프: 경제 증거 전무 → ceiling==current_bid → ladder_judgment가 'capped'(상향 불가).
+    _settle(db, clk=100, conv_amt=100000)  # BEP 없음 → 증거 전무
+    ceiling = exploration.exploration_ceiling(db, CAMP, GRP_ID, 800, WIN_FROM, WIN_TO)
+    assert ceiling == 800
+    verdict, _ = exploration.ladder_judgment(
+        last_probe={"bid": 800}, since_step_stats={"clk": 0}, ceiling=ceiling, current_bid=800,
+    )
+    assert verdict == "capped"
 
 
 def test_ceiling_zero_when_no_bep_and_no_current_bid(db):
-    # 상한 근거 전무(BEP None + current_bid≤0) → 0(탐색 발동 불가)
+    # 상한 근거 전무(BEP None + current_bid≤0) → current_bid(0) 반환 = 탐색 발동 불가
     c = exploration.exploration_ceiling(db, CAMP, GRP_ID, 0, WIN_FROM, WIN_TO)
     assert c == 0
 
