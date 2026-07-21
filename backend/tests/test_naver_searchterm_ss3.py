@@ -33,6 +33,9 @@ from app.services.naver_ad import search_term_ss_lane as lane
 from app.services.naver_ad.campaign_target_resolver import NAVER_CHANNEL_ID
 
 _NOW = datetime(2026, 7, 22, 9, 0, 0)
+# NaverProposal.created_at은 server_default=func.now()로 UTC 저장([[sqlite-server-default-now-is-utc]]).
+# _NOW(KST) 달력일에 해당하는 UTC 값 — 캡 예약 오늘-한정 필터(created_at 창) 안에 들도록 명시 세팅.
+_TODAY_UTC = _NOW - timedelta(hours=9)
 _TYPE = judge.SEARCH_TERM_EXCLUDE_TYPE
 
 
@@ -61,12 +64,15 @@ def _entity(db, adgroup_id, campaign_type):
     db.commit()
 
 
-def _proposal(db, *, adgroup_id="grp-web", term="무관검색어", status="approved", approval_source=None):
+def _proposal(db, *, adgroup_id="grp-web", term="무관검색어", status="approved",
+              approval_source=None, created_at=None):
     p = NaverProposal(
         proposal_type=_TYPE, target_type="search_term", target_id=term,
         campaign_id="cmp1", adgroup_id=adgroup_id, rationale="[검색어제외] 근거",
         expected_effect="효과", status=status, approval_source=approval_source,
     )
+    if created_at is not None:  # 캡 예약 오늘-한정 필터 검증용(server_default UTC 대신 명시 세팅)
+        p.created_at = created_at
     db.add(p)
     db.commit()
     db.refresh(p)
@@ -112,6 +118,25 @@ def test_shopping_exclude_rejected_before_writer(db):
     assert harness.GUARD_BLOCK_MARKER in row.rationale
     assert "SHOPPING" in row.rationale
     assert row.after_value is None  # 실쓰기 없음(광고 확실히 안 바뀜)
+
+
+# ── ①-b target_id 길이 초과 방어(codex 2R[P1]) ──
+def test_exclude_over_maxlen_target_id_blocked_before_writer(db):
+    # SQLite는 VARCHAR 길이를 강제하지 않아 초과 저장이 물리적으로 가능 → executor가 fail-closed.
+    _settings(db)
+    _entity(db, "grp-web", "WEB_SITE")
+    long_term = "가" * (harness._TARGET_ID_MAXLEN + 1)  # 51자
+    p = _proposal(db, adgroup_id="grp-web", term=long_term)
+    with patch.object(harness.naver_sa_writer, "add_restricted_keywords") as mock_write:
+        with pytest.raises(harness.MissingExecutionTargetError):
+            harness.execute(db, p.id, dry_run=False, now=_NOW)
+    mock_write.assert_not_called()  # 잘린/초과 텍스트로 실쓰기 없음
+    db.refresh(p)
+    assert p.status == "failed"
+    row = db.query(NaverChangeLog).filter(NaverChangeLog.proposal_id == p.id).one()
+    assert harness.GUARD_BLOCK_MARKER in row.rationale
+    assert str(harness._TARGET_ID_MAXLEN) in row.rationale
+    assert row.after_value is None
 
 
 # ── ② 일일 캡(§1 4) ──
@@ -275,8 +300,9 @@ def test_atomic_cap_reservation_blocks_on_concurrent_executing(db):
     for i in range(9):
         _committed_exclude(db, f"seed{i}")
     db.commit()
-    _proposal(db, adgroup_id="grp-web", term="동시진행", status="executing")  # 다른 executing 제안
-    p = _proposal(db, adgroup_id="grp-web", term="원자예약후보")
+    # 다른 executing 제안 + 자기 — 둘 다 오늘(_NOW KST일) 생성분(캡 예약 오늘-한정 필터 안)
+    _proposal(db, adgroup_id="grp-web", term="동시진행", status="executing", created_at=_TODAY_UTC)
+    p = _proposal(db, adgroup_id="grp-web", term="원자예약후보", created_at=_TODAY_UTC)
     with patch.object(harness.naver_sa_writer, "add_restricted_keywords") as mock_write:
         with pytest.raises(harness.MissingExecutionTargetError):
             harness.execute(db, p.id, dry_run=False, now=_NOW)
@@ -295,11 +321,31 @@ def test_atomic_cap_reservation_allows_exactly_at_cap(db):
     for i in range(9):
         _committed_exclude(db, f"seed{i}")
     db.commit()
-    p = _proposal(db, adgroup_id="grp-web", term="10번째")
+    p = _proposal(db, adgroup_id="grp-web", term="10번째", created_at=_TODAY_UTC)
     with patch.object(harness.naver_sa_writer, "add_restricted_keywords",
                       return_value=_write_result("10번째")) as mock_write:
         log_entry = harness.execute(db, p.id, dry_run=False, now=_NOW)
     mock_write.assert_called_once()
+    assert log_entry.action == "exclude_search_term"
+
+
+def test_atomic_cap_reservation_ignores_stale_yesterday_executing(db):
+    # 어제 생성돼 executing에 잔존한 stale 클레임(크래시 잔존)은 오늘 캡 예약에서 제외한다
+    # (codex 2R[P2]) — 이게 없으면 stale 1건이 매일 캡을 1씩 영구 잠식한다. 9 커밋 + 자기(오늘)
+    # 1 = 10 = 캡, 어제 stale은 미포함 → 통과(쓰기 허용).
+    _settings(db)
+    _entity(db, "grp-web", "WEB_SITE")
+    for i in range(9):
+        _committed_exclude(db, f"seed{i}")
+    db.commit()
+    # 어제 KST일에 생성된 stale executing(UTC로 -1일)
+    _proposal(db, adgroup_id="grp-web", term="어제잔존", status="executing",
+              created_at=_TODAY_UTC - timedelta(days=1))
+    p = _proposal(db, adgroup_id="grp-web", term="오늘10번째", created_at=_TODAY_UTC)
+    with patch.object(harness.naver_sa_writer, "add_restricted_keywords",
+                      return_value=_write_result("오늘10번째")) as mock_write:
+        log_entry = harness.execute(db, p.id, dry_run=False, now=_NOW)
+    mock_write.assert_called_once()  # 어제 stale 미포함 → 캡 여유 있음 → 쓰기 허용
     assert log_entry.action == "exclude_search_term"
 
 
@@ -424,3 +470,27 @@ def test_lane_dedup_skips_already_executed(db):
     res = lane.run_search_term_ss_lane(db, now=_NOW)
     assert res["proposals_created"] == 0
     assert res["deduped"] == 1
+
+
+def test_lane_skips_search_term_over_target_id_maxlen(db):
+    # target_id(String(50)) 초과 검색어는 제안 미생성(fail-closed skip) + skip 흔적 diary (codex 2R[P1]).
+    _map_product(db, "grp-web", "PW")
+    long_term = "가" * (lane._TARGET_ID_MAXLEN + 1)  # 51자
+    _term(db, term=long_term, source="expkeyword", adgroup_id="grp-web")
+    res = lane.run_search_term_ss_lane(db, now=_NOW)
+    assert res["proposals_created"] == 0
+    assert res["skipped_too_long"] == 1
+    assert db.query(NaverProposal).filter(NaverProposal.proposal_type == _TYPE).count() == 0
+    briefs = db.query(OpsDiaryEntry).filter(OpsDiaryEntry.event_type == "observe").all()
+    assert any("skip" in b.rationale for b in briefs)
+
+
+def test_lane_creates_proposal_at_exactly_maxlen(db):
+    # 정확히 50자(경계)는 제안 생성됨(초과만 skip).
+    _map_product(db, "grp-web", "PW")
+    exact_term = "가" * lane._TARGET_ID_MAXLEN  # 50자
+    _term(db, term=exact_term, source="expkeyword", adgroup_id="grp-web")
+    res = lane.run_search_term_ss_lane(db, now=_NOW)
+    assert res["proposals_created"] == 1
+    assert res["skipped_too_long"] == 0
+    assert db.query(NaverProposal).filter(NaverProposal.target_id == exact_term).count() == 1

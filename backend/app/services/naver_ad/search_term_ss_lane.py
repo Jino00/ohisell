@@ -26,6 +26,14 @@ log = logging.getLogger(__name__)
 # 브리핑 diary 요약에 나열할 쇼핑 후보 상위 건수(제안 자체는 전건 생성, 요약만 절삭).
 _BRIEF_TOP_N = 10
 
+# 제안화 가능한 검색어 최대 길이 = NaverProposal.target_id 컬럼 길이(String(50)) 단일 출처
+# (codex 2R[P1]). target_id에 검색어 전문을 저장하는데, 초과분을 넣으면 DB(Postgres)에서
+# 잘리거나 오류가 나 "잘린 텍스트로 실쓰기"가 발생한다. NaverProposal에 전문 페이로드 컬럼이
+# 없으므로(A안=skip), 초과 검색어는 후보에서 fail-closed로 제외한다 — 잘린 검색어를 실제
+# 제외키워드로 등록하면 엉뚱한 검색어가 잘려 등록되는 비대칭 사고가 되기 때문. 현실적으로
+# 손실 검색어 대부분은 짧아 skip 손실은 미미하다(harness executor에도 동일 방어 게이트 존재).
+_TARGET_ID_MAXLEN = NaverProposal.target_id.property.columns[0].type.length
+
 
 def _has_open_or_executed(db: Session, adgroup_id: str, search_term: str) -> bool:
     """같은 (adgroup, search_term)의 search_term_exclude 제안이 이미 살아있거나 실행됐는지.
@@ -79,16 +87,37 @@ def run_search_term_ss_lane(db: Session, *, now: datetime | None = None) -> dict
 
     created = 0
     deduped = 0
+    skipped_too_long = 0
     # ★쇼핑(shopping)은 제안을 만들지 않는다 — API 제외 불가(§실측-0)라 브리핑 diary(아래)만
     # 남긴다. 제안을 만들면 콘솔에서 approve+execute 시 harness가 422(SHOPPING 명시 거부)로
     # 튕기고 failed 감사 기록만 쌓이는 노이즈가 발생한다(PLAN §3 SS3-B "브리핑만" 사양).
     for cand in powerlink:
+        # target_id(String(50)) 초과 검색어는 fail-closed skip(codex 2R[P1]) — 잘린 텍스트로
+        # 실쓰기 경로 자체를 물리적으로 차단한다(전문 페이로드 컬럼 부재 → A안=skip).
+        if len(cand["search_term"]) > _TARGET_ID_MAXLEN:
+            skipped_too_long += 1
+            continue
         if _has_open_or_executed(db, cand["adgroup_id"], cand["search_term"]):
             deduped += 1
             continue
         _create_proposal(db, cand)
         created += 1
     db.commit()
+
+    # 표현 불가 후보 skip 기록(diary observe) — 길이 초과로 제안화하지 못한 파워링크 손실
+    # 검색어를 운영자가 콘솔 수동 제외할 수 있게 남긴다(fail-closed 흔적, diary는 fail-open 계약).
+    if skipped_too_long:
+        diary.write_diary_entry(
+            db, "observe", "",
+            actor=diary.ACTOR_DAILY,
+            action=search_term_judge.SEARCH_TERM_EXCLUDE_TYPE,
+            rationale=(
+                f"[검색어제외 skip] 파워링크 손실 검색어 {skipped_too_long}건 — 검색어 길이 "
+                f">{_TARGET_ID_MAXLEN}자로 제안 표현 불가(target_id String({_TARGET_ID_MAXLEN})), "
+                "콘솔 수동 제외 대상(codex 2R[P1] 잘린 텍스트 실쓰기 차단)"
+            ),
+            now=now,
+        )
 
     # 쇼핑 브리핑 diary(1건 요약, event_type='observe' 재사용 — 관측/브리핑 성격). API 제외 불가라
     # Jino 콘솔 수동이 필요한 후보를 상위 N개 나열(전건은 제안 테이블에 노출). fail-open(diary.py 계약).
@@ -113,6 +142,7 @@ def run_search_term_ss_lane(db: Session, *, now: datetime | None = None) -> dict
         "promote_candidates": len(promote),
         "proposals_created": created,
         "deduped": deduped,
+        "skipped_too_long": skipped_too_long,
     }
     log.info("search_term_ss_lane: %s", result)
     return result

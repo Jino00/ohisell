@@ -81,6 +81,12 @@ _GUARDRAIL_LOOKBACK_DAYS = account_diagnosis.LOW_CLICK_LOOKBACK_DAYS
 # 봉투 축소는 Jino 승인 후. account-wide 카운트(오늘 KST 성공한 exclude_search_term change_log).
 _SS_DAILY_EXCLUDE_CAP = 10
 
+# 검색어 제외 실쓰기 target_id 길이 상한 = NaverProposal.target_id 컬럼 길이(String(50)) 단일
+# 출처(codex 2R[P1]). 생성 레인(search_term_ss_lane)이 초과 검색어를 skip하지만, 여기서도
+# 방어 게이트를 둬 "잘린 텍스트로 실쓰기" 경로를 executor에서도 물리적으로 차단한다(SQLite는
+# VARCHAR 길이를 강제하지 않아 초과 저장이 가능 → 이중 방벽 fail-closed).
+_TARGET_ID_MAXLEN = NaverProposal.target_id.property.columns[0].type.length
+
 
 class OptimizerGuardError(Exception):
     """optimizer!='ours' 캠페인에 대한 실행 시도 — D-NAO-13 하드체크 위반."""
@@ -735,6 +741,17 @@ def _execute_search_term_exclude(db: Session, proposal: NaverProposal, now: date
         _guard_failure(db, proposal, now, "exclude_search_term", reason)
         raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
 
+    # target_id 길이 방어(codex 2R[P1]) — 생성 레인이 초과 검색어를 skip하지만, SQLite는 VARCHAR
+    # 길이를 강제하지 않아 초과 저장이 물리적으로 가능하다. 잘린/초과 검색어를 그대로 실제
+    # 제외키워드로 등록하면 엉뚱한 검색어가 차단되는 비대칭 사고이므로 writer 전에 fail-closed.
+    if len(proposal.target_id) > _TARGET_ID_MAXLEN:
+        reason = (
+            f"검색어 길이 {len(proposal.target_id)} > {_TARGET_ID_MAXLEN}자(target_id String"
+            f"({_TARGET_ID_MAXLEN})) — 잘린 텍스트로 실쓰기 방지(fail-closed, 생성 레인 skip 이중 방벽)"
+        )
+        _guard_failure(db, proposal, now, "exclude_search_term", reason)
+        raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
+
     # SHOPPING 명시 거부(§실측-0) — 엔티티 campaign_type이 SHOPPING이면 API 자동 제외 불가.
     entity = (
         db.query(NaverEntity)
@@ -783,11 +800,21 @@ def _execute_search_term_exclude(db: Session, proposal: NaverProposal, now: date
     # 보아 양쪽 다 초과를 보고 중단한다 — 과보수(둘 다 안 쓰는 fail-closed, 사람이 재승인으로
     # 재시도 가능)이지만 캡 관통은 원천 차단된다. 아래 "쓰기 후 재카운트+롤백"은 최후 방벽으로 유지.
     committed_today = _count_search_term_excludes_today(db, now)
+    # ★오늘(KST) 클레임만 센다(codex 2R[P2]): status='executing'만으로 세면 과거 크래시로
+    # executing에 잔존한 stale 클레임(사람 조사 대상, 자동 복구 안 함)이 일일 캡 예약을 영구
+    # 잠식한다(매일 캡이 1씩 줄어듦). 이 예약은 "지금 동시에 진행 중인 Confirm"만 봉쇄하면
+    # 되므로 오늘 생성분으로 한정한다 — NaverProposal.created_at은 server_default=func.now()로
+    # UTC 저장([[sqlite-server-default-now-is-utc]])이라, KST 오늘 [00:00, +1d)를 UTC 경계
+    # [today00:00-9h, +1d)로 변환해 비교한다(auto_operator._day_bounds_utc와 동일 패턴).
+    # 어제 이전 생성분의 동시 Confirm은 이 예약이 놓쳐도 쓰기-후 재카운트 롤백(③)이 최후 방벽.
+    day_start_utc = datetime.combine(now.date(), datetime.min.time()) - timedelta(hours=9)
     executing_excludes = (
         db.query(NaverProposal)
         .filter(
             NaverProposal.proposal_type == search_term_judge.SEARCH_TERM_EXCLUDE_TYPE,
             NaverProposal.status == "executing",
+            NaverProposal.created_at >= day_start_utc,
+            NaverProposal.created_at < day_start_utc + timedelta(days=1),
         )
         .count()
     )

@@ -230,6 +230,7 @@ def test_ingest_search_term_daily_includes_conversion_merge(db, monkeypatch):
 
     monkeypatch.setattr(search_term_ingest, "fetch_search_term_daily", fake_fetch)
     monkeypatch.setattr(search_term_ingest, "request_missing_expkeyword_reports", lambda a, b: [])
+    monkeypatch.setattr(search_term_ingest, "_conversion_report_dates", lambda a, b: set())  # 실HTTP 차단
     monkeypatch.setattr(search_term_ingest, "fetch_search_term_conversion", lambda a, b: [
         {"date": "2026-07-21", "campaign_id": "cmp-01", "adgroup_id": "grp-1", "search_term": "맥세이프",
          "conv_purchase_cnt": 1, "conv_direct_cnt": 1, "conv_purchase_amt": 15900,
@@ -269,6 +270,7 @@ def test_ingest_daily_carryforward_preserves_conv_when_report_absent(db, monkeyp
     _prior_shopping_row_with_conv(db)
     monkeypatch.setattr(search_term_ingest, "fetch_search_term_daily", _fresh_shopping_perf)
     monkeypatch.setattr(search_term_ingest, "request_missing_expkeyword_reports", lambda a, b: [])
+    monkeypatch.setattr(search_term_ingest, "_conversion_report_dates", lambda a, b: set())  # 보고서 부재
     monkeypatch.setattr(search_term_ingest, "fetch_search_term_conversion", lambda a, b: [])  # 보고서 부재
 
     result = search_term_ingest.ingest_search_term_daily(db, date(2026, 7, 21), date(2026, 7, 21))
@@ -287,6 +289,8 @@ def test_ingest_daily_fresh_report_overwrites_carryforward(db, monkeypatch):
     _prior_shopping_row_with_conv(db)
     monkeypatch.setattr(search_term_ingest, "fetch_search_term_daily", _fresh_shopping_perf)
     monkeypatch.setattr(search_term_ingest, "request_missing_expkeyword_reports", lambda a, b: [])
+    # 보고서 목록 조회 실패(fail-open) 경로: report_dates=set() → 캐리포워드 실행 후 신선 rows가 SET으로 덮음.
+    monkeypatch.setattr(search_term_ingest, "_conversion_report_dates", lambda a, b: set())
     monkeypatch.setattr(search_term_ingest, "fetch_search_term_conversion", lambda a, b: [
         {"date": "2026-07-21", "campaign_id": "cmp-01", "adgroup_id": "grp-1", "search_term": "맥세이프",
          "conv_purchase_cnt": 5, "conv_direct_cnt": 3, "conv_purchase_amt": 79500,
@@ -294,7 +298,7 @@ def test_ingest_daily_fresh_report_overwrites_carryforward(db, monkeypatch):
     ])
 
     result = search_term_ingest.ingest_search_term_daily(db, date(2026, 7, 21), date(2026, 7, 21))
-    assert result["conversion_carryforward"] == 1     # 캐리포워드는 실행됐지만
+    assert result["conversion_carryforward"] == 1     # 캐리포워드는 실행됐지만(fail-open 경로)
     assert result["conversion"]["merged"] == 1        # 보고서가 최신값으로 덮음
 
     row = db.query(NaverSearchTermDaily).filter(NaverSearchTermDaily.source == "shopping").one()
@@ -315,6 +319,7 @@ def test_ingest_daily_carryforward_reinserts_zero_perf_when_perf_dropped(db, mon
         return []
     monkeypatch.setattr(search_term_ingest, "fetch_search_term_daily", _perf_without_maxsafe)
     monkeypatch.setattr(search_term_ingest, "request_missing_expkeyword_reports", lambda a, b: [])
+    monkeypatch.setattr(search_term_ingest, "_conversion_report_dates", lambda a, b: set())  # 보고서 부재
     monkeypatch.setattr(search_term_ingest, "fetch_search_term_conversion", lambda a, b: [])
 
     result = search_term_ingest.ingest_search_term_daily(db, date(2026, 7, 21), date(2026, 7, 21))
@@ -325,3 +330,66 @@ def test_ingest_daily_carryforward_reinserts_zero_perf_when_perf_dropped(db, mon
     ).one()
     assert row.imp == 0 and row.clk == 0 and row.cost == 0  # 성과 소멸 → 0-성과 행
     assert row.conv_purchase_cnt == 2 and row.conv_purchase_amt == 31800  # 전환 보존
+
+
+# ── ⑥ 보고서 실재(BUILT) 날짜 = 보고서가 진실(전환 0 포함, codex 2R[P2]) ──
+def test_ingest_daily_report_present_disappeared_grain_reset_to_zero(db, monkeypatch):
+    """보고서 실재 날짜에서 grain이 소멸(전환 0 소급)하면 캐리포워드로 부활하지 않고 0으로 확정.
+    이전 버그: 캐리포워드가 옛 전환을 되살려 SS2 게이트가 반대로 오작동(잘못된 보존)."""
+    _prior_shopping_row_with_conv(db)  # 맥세이프 conv 2/1/31800/1/5000
+    monkeypatch.setattr(search_term_ingest, "fetch_search_term_daily", _fresh_shopping_perf)  # 맥세이프 성과만 신선
+    monkeypatch.setattr(search_term_ingest, "request_missing_expkeyword_reports", lambda a, b: [])
+    # 보고서는 실재(BUILT)하지만 rows는 0(전환이 소급 0이 됨) → 리셋만 적용, 병합 대상 없음.
+    monkeypatch.setattr(search_term_ingest, "_conversion_report_dates", lambda a, b: {date(2026, 7, 21)})
+    monkeypatch.setattr(search_term_ingest, "fetch_search_term_conversion", lambda a, b: [])
+
+    result = search_term_ingest.ingest_search_term_daily(db, date(2026, 7, 21), date(2026, 7, 21))
+    assert result["conversion_carryforward"] == 0  # 보고서 실재 날짜라 캐리포워드 스킵
+
+    row = db.query(NaverSearchTermDaily).filter(NaverSearchTermDaily.source == "shopping").one()
+    assert row.imp == 60 and row.clk == 15 and row.cost == 3600  # 성과는 신선값 유지
+    # 전환은 0으로 확정(보고서가 진실, 사라진 grain 부활 금지)
+    assert row.conv_purchase_cnt == 0 and row.conv_direct_cnt == 0 and row.conv_purchase_amt == 0
+    assert row.cart_cnt == 0 and row.cart_amt == 0
+
+
+def test_ingest_daily_report_present_surviving_grain_takes_report_value(db, monkeypatch):
+    """보고서 실재 날짜에서 살아남은 grain은 리셋 후 보고서 최신값으로 SET(캐리포워드 스킵)."""
+    _prior_shopping_row_with_conv(db)  # 맥세이프 conv 2/1/31800/1/5000
+    monkeypatch.setattr(search_term_ingest, "fetch_search_term_daily", _fresh_shopping_perf)
+    monkeypatch.setattr(search_term_ingest, "request_missing_expkeyword_reports", lambda a, b: [])
+    monkeypatch.setattr(search_term_ingest, "_conversion_report_dates", lambda a, b: {date(2026, 7, 21)})
+    monkeypatch.setattr(search_term_ingest, "fetch_search_term_conversion", lambda a, b: [
+        {"date": "2026-07-21", "campaign_id": "cmp-01", "adgroup_id": "grp-1", "search_term": "맥세이프",
+         "conv_purchase_cnt": 5, "conv_direct_cnt": 3, "conv_purchase_amt": 79500,
+         "cart_cnt": 4, "cart_amt": 12000},
+    ])
+
+    result = search_term_ingest.ingest_search_term_daily(db, date(2026, 7, 21), date(2026, 7, 21))
+    assert result["conversion_carryforward"] == 0  # 보고서 실재 날짜라 캐리포워드 스킵
+    assert result["conversion"]["merged"] == 1     # 리셋 후 보고서값으로 재적용
+
+    row = db.query(NaverSearchTermDaily).filter(NaverSearchTermDaily.source == "shopping").one()
+    assert row.conv_purchase_cnt == 5 and row.conv_direct_cnt == 3 and row.conv_purchase_amt == 79500
+    assert row.cart_cnt == 4 and row.cart_amt == 12000
+
+
+def test_ingest_daily_report_present_resets_conversion_only_row(db, monkeypatch):
+    """이 날짜에 신선 성과가 전혀 없어 delete+insert가 건드리지 못하는 0-성과(간접전환) 행도,
+    보고서 실재 날짜면 전환 0-리셋이 유일한 교정으로 작동해 옛 전환이 소실된다(codex 2R[P2])."""
+    db.add(NaverSearchTermDaily(
+        ad_date=date(2026, 7, 21), campaign_id="cmp-01", adgroup_id="grp-1",
+        search_term="간접전환어", source="shopping", imp=0, clk=0, cost=0, rank_sum=0,
+        conv_purchase_cnt=3, conv_direct_cnt=1, conv_purchase_amt=45000, cart_cnt=0, cart_amt=0,
+    ))
+    db.commit()
+    monkeypatch.setattr(search_term_ingest, "fetch_search_term_daily", lambda tp, a, b: [])  # 신선 성과 0
+    monkeypatch.setattr(search_term_ingest, "request_missing_expkeyword_reports", lambda a, b: [])
+    monkeypatch.setattr(search_term_ingest, "_conversion_report_dates", lambda a, b: {date(2026, 7, 21)})
+    monkeypatch.setattr(search_term_ingest, "fetch_search_term_conversion", lambda a, b: [])  # 전환 소급 0
+
+    search_term_ingest.ingest_search_term_daily(db, date(2026, 7, 21), date(2026, 7, 21))
+    row = db.query(NaverSearchTermDaily).filter(
+        NaverSearchTermDaily.source == "shopping", NaverSearchTermDaily.search_term == "간접전환어",
+    ).one()
+    assert row.conv_purchase_cnt == 0 and row.conv_direct_cnt == 0 and row.conv_purchase_amt == 0
