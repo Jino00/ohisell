@@ -57,9 +57,17 @@ def backfill_one_date(db, d: date) -> str:
     fetcher.ensure_reports_built("AD_CONVERSION", d, d, timeout=300.0)
     ad_reports = fetcher.list_ad_reports(d, d)
     conv_reports = fetcher._list_reports_by_type("AD_CONVERSION", d, d)
-    if not ad_reports or not conv_reports:
-        # 안전 규칙①: 한쪽 보고서라도 없으면 적재하지 않는다(전환 0 격하 방지, fail-closed).
-        return f"skip_no_report(ad={bool(ad_reports)},conv={bool(conv_reports)})"
+    if not conv_reports:
+        # AD_CONVERSION 잡의 종결 상태가 NONE이면 "그날 전환 0건"의 정상 표현(2026-07-21 실측:
+        # 03-15·03-23 NONE=우리 데이터 전환 0, 03-20·03-25 BUILT=전환 있음) → conv=0으로 적재
+        # 진행이 정당하다. NONE 확인이 안 되는 경우(빌드 실패·타임아웃 등)만 fail-closed skip
+        # (전환 0 격하 방지, 안전 규칙①).
+        conv_status = fetcher._report_status_by_kst_date("AD_CONVERSION").get(d.isoformat())
+        if not (conv_status and conv_status[0] == "NONE"):
+            return f"skip_no_report(ad={bool(ad_reports)},conv_status={conv_status and conv_status[0]})"
+    if not ad_reports:
+        # AD 성과 보고서 없이는 그날 행 자체를 만들 수 없다(fail-closed, 안전 규칙①).
+        return "skip_no_report(ad=False)"
     rows = collect_daily_rows(d, d)
     if not rows:
         # 안전 규칙②: 0행이면 ingest 호출 안 함 — 기존 행(센티널 포함) 보존.
