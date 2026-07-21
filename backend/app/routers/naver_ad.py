@@ -60,6 +60,7 @@ from app.models import (
     NaverRetroSignal,
     NaverSearchTermDaily,
 )
+from app.services.naver_ad import bid_step_types
 from app.services.naver_ad import campaign_roster
 from app.services.naver_ad import dashboard_overview
 from app.services.naver_ad import delegation_gate
@@ -257,7 +258,8 @@ def _serialize_proposal(
         # 띄우던 결함을 막는다. 정보성 유형은 매핑에 없어 자연히 None.
         "action": naver_execution_harness._ACTION_BY_PROPOSAL_TYPE.get(p.proposal_type),
         "rationale": p.rationale,
-        "expected_effect": p.expected_effect,
+        # GATE R2 P2-1: rank-step TOCTOU 마커([[servo_base_bid=N]])는 기계 원료 — 사람 화면엔 제거.
+        "expected_effect": bid_step_types.strip_base_bid_marker(p.expected_effect),
         "status": p.status,
         "slack_ts": p.slack_ts,
         "executed_change_log_id": p.executed_change_log_id,

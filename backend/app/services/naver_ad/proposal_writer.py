@@ -61,10 +61,12 @@ INFORMATIONAL_PROPOSAL_TYPES: frozenset[str] = frozenset({
 # 진실로 삼아야 하므로 여기서 14종으로 정정한다.
 _BID_UP = "bid_up"
 _BID_DOWN = "bid_down"
+_BID_UP_SERVO = "bid_up_servo"  # IU-R R1, 쇼검 폐루프 순위 서보(auto_operator.run_hourly_lane inline 생성)
+_BID_UP_RANK = "bid_up_rank"  # IU-R R2, 파워링크 estimate 직행(auto_operator.run_hourly_lane inline 생성)
 _BUDGET_DOWN = "budget_down"  # D-NAO-42-f, budget_up과 동형(감액은 자유 — guardrail_gate 참조)
 
 ALL_PROPOSAL_TYPES: frozenset[str] = frozenset({
-    _BID_UP, _BID_DOWN, _GROWTH_BID_UP, _NEGATIVE, _PAUSE, _RESUME,
+    _BID_UP, _BID_DOWN, _BID_UP_SERVO, _BID_UP_RANK, _GROWTH_BID_UP, _NEGATIVE, _PAUSE, _RESUME,
     _BUDGET_UP, _BUDGET_DOWN, _BUDGET_PRE_EXHAUSTION,
     _ANOMALY, _ANOMALY_FRESHNESS, _ACCOUNT_BRIEF, PROPOSAL_TYPE_PACING, PROPOSAL_TYPE_CPC,
     _WISDOM_PROMOTED,  # D-NAO-54 P3(정보성) — INFORMATIONAL_PROPOSAL_TYPES <= ALL 불변 유지
@@ -171,7 +173,7 @@ def _ad_bid_proposal(
     target_type='ad'·target_id=nccAdId·adgroup_id 병기(harness가 부모 그룹으로 up BEP 컨텍스트를
     채운다). useGroupBidAmt는 건드리지 않는다(§0 강제 전환 금지 — writer가 false 유지만 검증).
     스텝 소실(방향 무의미·소재 at-floor)이면 None(호출부가 기존 대기/pause 경로로 폴백).
-    GATE P2-2: 카나리 1단계 방향 게이트(_AD_BID_CANARY_DIRECTIONS={"bid_down"}) — up은 None
+    GATE P2-2: 카나리 1단계 게이트(_AD_BID_CANARY_PROPOSAL_TYPES={"bid_down"}) — up은 None
     (2단계 개방 시 상수 확장만으로 열림). ★소급채점/diary는 target_type='ad'를 아직 전용
     grain으로 채점하지 않는다 — 부모 adgroup grain 채점이 정확(후속, adgroup_id 병기가 그 원료)."""
     target_bid = _ad_step_bid(current_ad_bid, direction)
@@ -179,8 +181,8 @@ def _ad_bid_proposal(
         return None
     proposal_type = _BID_UP if direction == "up" else _BID_DOWN
     # GATE P2-2 DOWN 한정 — 함수 레벨 import(순환 회피, build()의 _ad_bid_canary와 동일 관례).
-    from app.services.naver_ad.auto_operator import _AD_BID_CANARY_DIRECTIONS
-    if proposal_type not in _AD_BID_CANARY_DIRECTIONS:
+    from app.services.naver_ad.auto_operator import _AD_BID_CANARY_PROPOSAL_TYPES
+    if proposal_type not in _AD_BID_CANARY_PROPOSAL_TYPES:
         return None
     rationale = (
         f"[{board_name}·소재입찰] 레버 실연결(useGroupBidAmt=false 소재 {ad_id}) 소재입찰 "

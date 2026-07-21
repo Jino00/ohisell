@@ -1,8 +1,8 @@
 # learning_loops.py — learning_loops Harness (듀얼모드 스프린트 Phase 6, D-NAO-14/23)
 # 역할: 학습루프 1(proposal_scoreboard)·2(estimate_calibrator)·3(conversion_maturity)·
-#   5(hourly_pattern) 4개 SA를 매일 순서 무관하게 조합 실행한다. proposal_pipeline.run_daily
-#   와 동일한 단계격리 원칙(원칙18-6, codex #11/#12 전례) — 한 루프가 실패해도 나머지는
-#   계속 진행하고 stage_status로 관측 가능하게 남긴다.
+#   5(hourly_pattern)·6(bid_rank_curve, IU-R R3) SA를 매일 순서 무관하게 조합 실행한다.
+#   proposal_pipeline.run_daily와 동일한 단계격리 원칙(원칙18-6, codex #11/#12 전례) — 한 루프가
+#   실패해도 나머지는 계속 진행하고 stage_status로 관측 가능하게 남긴다.
 from __future__ import annotations
 
 import logging
@@ -10,7 +10,9 @@ from datetime import date, timedelta
 
 from sqlalchemy.orm import Session
 
-from app.services.naver_ad import conversion_maturity, estimate_calibrator, hourly_pattern, proposal_scoreboard
+from app.services.naver_ad import (
+    bid_rank_curve, conversion_maturity, estimate_calibrator, hourly_pattern, proposal_scoreboard,
+)
 from app.utils.kst import kst_today
 
 log = logging.getLogger(__name__)
@@ -28,11 +30,15 @@ def run_all(db: Session, *, today: date | None = None) -> dict:
     today = today or kst_today()
     result: dict = {"stage_status": {}, "errors": []}
 
+    # IU-R R3: bid_rank_curve — 입찰→순위 반응 곡선. 원료 시계는 일 단위(NaverKeywordHourly D-1
+    # 스윕)라 08:10 일 1회 크론과 정합하고, 서보 첫 스텝 정교화는 "익일 반영"이다(당일 변경의
+    # h+1 버킷은 아직 미스윕 → 자연 제외, 다음 날 관측쌍화, PLAN §1-5). today 미지정 시 kst_today.
     for name, fn, kwargs in (
         ("proposal_scoreboard", proposal_scoreboard.run_daily, {"today": today}),
         ("estimate_calibrator", estimate_calibrator.run_daily, {"as_of": today - timedelta(days=1)}),
         ("conversion_maturity", conversion_maturity.run_daily, {"today": today}),
         ("hourly_pattern", hourly_pattern.run_daily, {"today": today}),
+        ("bid_rank_curve", bid_rank_curve.run_daily, {"today": today}),
     ):
         try:
             result[name] = fn(db, **kwargs)

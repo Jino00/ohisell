@@ -13,11 +13,17 @@ from datetime import datetime
 from decimal import Decimal
 
 from app.services.naver_ad import growth_sweeper
+from app.services.naver_ad.bid_step_types import (
+    BID_DOWN_TYPES as _BID_DOWN_TYPES,
+    BID_UP_TYPES as _BID_UP_TYPES,
+    CHANGE_PCT_EXEMPT_TYPES as _EXEMPT_FROM_CHANGE_PCT,
+    RANK_STEP_TYPES as _RANK_STEP_TYPES,
+)
 
 # D-NAO-5: 회당 변경폭 상한(운영 키워드). D-NAO-20-③에 따라 신규/육성 트랙(growth_bid_up)은
 # 비적용 — 절대액 스톱로스가 실질 안전장치이므로 여기서는 변경폭 검사만 면제한다.
+# ★UP 타입·DOWN 타입·±15% 면제 집합은 bid_step_types 레지스트리(단일 소스, IU-R R0)에서 import.
 _MAX_CHANGE_PCT = Decimal("0.15")
-_EXEMPT_FROM_CHANGE_PCT = frozenset({"growth_bid_up"})
 
 # D-NAO-19 "동일 키워드 재변경 최소 간격" — 초기값 5h(trigger_watch 재사용)에서
 # ★D-NAO-55(2026-07-18 Jino 승인 "그렇게 하자")로 2h 단축. 근거: 순위 데이터가 시간 단위
@@ -35,8 +41,6 @@ _MIN_BID = 70
 _MAX_BID = 100_000
 _BID_INCREMENT = 10
 
-_BID_UP_TYPES = frozenset({"bid_up", "growth_bid_up"})
-_BID_DOWN_TYPES = frozenset({"bid_down"})
 _BID_TYPES = _BID_UP_TYPES | _BID_DOWN_TYPES
 _LOCK_TYPES = frozenset({"pause", "resume"})
 
@@ -99,6 +103,20 @@ def check(proposal: dict, context: dict, *, now: datetime) -> str | None:
     return _check_lock(proposal, proposal_type)
 
 
+def precheck_cooldown_and_cap(
+    last_change_at: datetime | None, changes_today_count: int, now: datetime,
+    proposal_type: str | None,
+) -> str | None:
+    """쿨다운·일일상한 사전점검(IU-R R2 공용 — auto_operator.run_hourly_lane의 rank-step
+    prefilter가 estimate 호출 전 재사용). 임계·면제 규칙은 _check_cooldown_and_cap 단일 소스를
+    그대로 태운다(중복 금지) — prefilter와 실행 시점 guardrail이 **같은 판정**을 공유한다.
+    (차단사유, or None=통과). last_change_at/changes_today_count는 compute_change_cadence 산출."""
+    return _check_cooldown_and_cap(
+        {"last_change_at": last_change_at, "changes_today_count": changes_today_count},
+        now, proposal_type,
+    )
+
+
 def _check_cooldown_and_cap(context: dict, now: datetime, proposal_type: str | None) -> str | None:
     # 쿨다운 2h는 전 유형 공통(DL3 면제 대상 아님) — 방향 무관하게 항상 검사.
     last_change_at = context.get("last_change_at")
@@ -150,12 +168,18 @@ def _check_bid(proposal: dict, context: dict, proposal_type: str) -> str | None:
             )
 
     if proposal_type in _BID_UP_TYPES:
-        stop_loss_amount = target_bid * growth_sweeper.STOP_LOSS_CLICK_MULTIPLE
+        # IU-R R1 스톱로스 완화 방지(codex 엣지): rank-step 타입(bid_up_servo 등)은 스텝이
+        # ±15%를 넘을 수 있어 target_bid 기준 스톱로스가 실질 완화된다(target_bid↑ → 상한↑).
+        # rank-step은 **스텝 전 current_bid** 기준으로 산정해 더 보수적으로 막는다(PLAN §2 R1).
+        # 비-rank-step(bid_up/growth_bid_up)은 종전 target_bid 기준 유지(행위 불변).
+        stop_loss_base = current_bid if proposal_type in _RANK_STEP_TYPES else target_bid
+        stop_loss_amount = stop_loss_base * growth_sweeper.STOP_LOSS_CLICK_MULTIPLE
         unconverted_spend = context.get("unconverted_spend")
         if unconverted_spend is not None and unconverted_spend >= stop_loss_amount:
+            base_label = "current_bid" if proposal_type in _RANK_STEP_TYPES else "target_bid"
             return (
                 f"스톱로스 도달 — 무전환 지출 {unconverted_spend}원 ≥ 상한 {stop_loss_amount}원"
-                f"(D-NAO-20, target_bid×{growth_sweeper.STOP_LOSS_CLICK_MULTIPLE})"
+                f"(D-NAO-20, {base_label}×{growth_sweeper.STOP_LOSS_CLICK_MULTIPLE})"
             )
 
         roas_corrected = context.get("roas_corrected")
