@@ -823,7 +823,7 @@ def ensure_reports_built(
         cur += timedelta(days=1)
 
 
-# SHOPPINGKEYWORD_DETAIL/EXPKEYWORD 보고서 컬럼(16열, 실측 확정 docs/references/22):
+# SHOPPINGKEYWORD_DETAIL 보고서 컬럼(16열, 실측 확정 docs/references/22):
 #   0일자 1고객ID 2캠페인 3그룹 4검색어(텍스트) 5소재 6비즈채널 7·8(미상,불필요)
 #   9(품목/상품 식별자, 미상·불필요) 10기기(M/P) 11노출수 12클릭수 13비용 14순위합 15(미상)
 ST_COL_DATE = 0
@@ -835,20 +835,51 @@ ST_COL_CLK = 12
 ST_COL_COST = 13
 ST_COL_RANK_SUM = 14
 
+# EXPKEYWORD(파워링크 확장검색어) 보고서 컬럼(12열 — 실측 확정 docs/references/36 §0·§1.7.
+# ★SHOPPINGKEYWORD_DETAIL(16열)과 레이아웃이 다르다 — 소재ID·비즈채널ID 컬럼이 아예 없는 더 짧은
+# 구조. ST_COL_* 재사용 금지(2026-07-22까지 이 재사용 가정이 EXPKEYWORD 수집을 0행으로 전량
+# 드롭시킨 근본원인, 길이가드 `len(cols) <= ST_COL_RANK_SUM(14)`가 12열 행을 전부 스킵했다).
+# imp/clk/cost는 같은 날 AD 리포트 WEB_SITE 합계 대비 96.7%/97.3%/98.8% 일치로 col8/9/10 확정.
+# rank_sum에 해당하는 컬럼은 이 12열 레이아웃에 없음(idx7·idx11 둘 다 어떤 지표와도 정합 안 됨,
+# 미상) — EXPKEYWORD 행은 항상 rank_sum=0으로 적재:
+#   0일자 1고객ID 2캠페인 3그룹 4검색어(텍스트) 5미상 6기기(M/P) 7미상 8노출수 9클릭수 10비용 11미상
+EXP_COL_DATE = 0
+EXP_COL_CAMPAIGN = 2
+EXP_COL_ADGROUP = 3
+EXP_COL_SEARCH_TERM = 4
+EXP_COL_IMP = 8
+EXP_COL_CLK = 9
+EXP_COL_COST = 10
+
 
 def fetch_search_term_daily(report_tp: str, date_from: date, date_to: date) -> list[dict]:
     """SHOPPINGKEYWORD_DETAIL 또는 EXPKEYWORD 보고서를 (일자×캠페인×그룹×검색어) grain으로 집계.
 
     SHOPPINGKEYWORD_DETAIL은 매일 자동 BUILT(16일 보관, GET만). EXPKEYWORD는 자동 생성 안 되므로
     사전에 create_expkeyword_report로 생성+대기 후 호출해야 함(이 함수는 이미 BUILT된 리포트만 조회).
-    컬럼 실측: docs/references/22(prod naver_ad_daily 동일 adgroup·날짜 합계 대조, imp/clk 정확
-    일치·cost 1원 오차).
+    두 report_tp는 TSV 컬럼 레이아웃이 다르다(SHOPPINGKEYWORD_DETAIL=16열 vs EXPKEYWORD=12열) —
+    report_tp별로 ST_COL_*/EXP_COL_* 상수셋을 분기해서 파싱한다(docs/references/36 §0, 2026-07-22
+    수정 — 이전엔 EXPKEYWORD도 ST_COL_*를 재사용해 길이가드가 전 행을 스킵, 0행 적재됨).
+    컬럼 실측: SHOPPINGKEYWORD_DETAIL=docs/references/22, EXPKEYWORD=docs/references/36.
 
     Returns: [{"date","campaign_id","adgroup_id","search_term","imp","clk","cost","rank_sum"}, ...]
+    (EXPKEYWORD는 rank_sum 컬럼이 레이아웃에 없어 항상 0)
     """
     if not ACCESS_LICENSE or not SECRET_KEY_B64:
         log.warning("Naver SA 자격증명 없음 — 검색어 리포트 수집 건너뜀")
         return []
+
+    is_exp = report_tp == "EXPKEYWORD"
+    if is_exp:
+        col_date, col_campaign, col_adgroup, col_term = (
+            EXP_COL_DATE, EXP_COL_CAMPAIGN, EXP_COL_ADGROUP, EXP_COL_SEARCH_TERM)
+        col_imp, col_clk, col_cost = EXP_COL_IMP, EXP_COL_CLK, EXP_COL_COST
+        min_len_guard = EXP_COL_COST  # 12열 레이아웃 기준(len(cols) <= 10 → skip)
+    else:
+        col_date, col_campaign, col_adgroup, col_term = (
+            ST_COL_DATE, ST_COL_CAMPAIGN, ST_COL_ADGROUP, ST_COL_SEARCH_TERM)
+        col_imp, col_clk, col_cost = ST_COL_IMP, ST_COL_CLK, ST_COL_COST
+        min_len_guard = ST_COL_RANK_SUM  # 16열 레이아웃 기준(len(cols) <= 14 → skip)
 
     ensure_reports_built(report_tp, date_from, date_to)
     reports = _list_reports_by_type(report_tp, date_from, date_to)
@@ -863,22 +894,23 @@ def fetch_search_term_daily(report_tp: str, date_from: date, date_to: date) -> l
             continue
         seen_dates.add(rep["date"])
         for cols in _download_tsv(rep["downloadUrl"]):
-            if len(cols) <= ST_COL_RANK_SUM:
+            if len(cols) <= min_len_guard:
                 continue
-            d = _row_date_iso(cols[ST_COL_DATE])
+            d = _row_date_iso(cols[col_date])
             if d is None:
                 continue
-            key = (d, cols[ST_COL_CAMPAIGN], cols[ST_COL_ADGROUP], cols[ST_COL_SEARCH_TERM])
+            key = (d, cols[col_campaign], cols[col_adgroup], cols[col_term])
             row = agg.get(key)
             if row is None:
-                row = {"date": d, "campaign_id": cols[ST_COL_CAMPAIGN],
-                       "adgroup_id": cols[ST_COL_ADGROUP], "search_term": cols[ST_COL_SEARCH_TERM],
+                row = {"date": d, "campaign_id": cols[col_campaign],
+                       "adgroup_id": cols[col_adgroup], "search_term": cols[col_term],
                        "imp": 0, "clk": 0, "cost": 0, "rank_sum": 0}
                 agg[key] = row
-            row["imp"] += _safe_int(cols[ST_COL_IMP])
-            row["clk"] += _safe_int(cols[ST_COL_CLK])
-            row["cost"] += _safe_int(cols[ST_COL_COST])
-            row["rank_sum"] += _safe_int(cols[ST_COL_RANK_SUM])
+            row["imp"] += _safe_int(cols[col_imp])
+            row["clk"] += _safe_int(cols[col_clk])
+            row["cost"] += _safe_int(cols[col_cost])
+            if not is_exp:
+                row["rank_sum"] += _safe_int(cols[ST_COL_RANK_SUM])
 
     log.info("Naver SA %s 검색어 %d행 집계 (%s~%s)", report_tp, len(agg), date_from, date_to)
     return list(agg.values())
