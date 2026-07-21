@@ -359,7 +359,7 @@ def test_sync_entities_no_log_when_qi_unchanged(db):
     assert logs == []
 
 
-# ── 검색어 리포트 컬럼 파싱 (SHOPPINGKEYWORD_DETAIL/EXPKEYWORD 공통 16열) ──
+# ── 검색어 리포트 컬럼 파싱 (SHOPPINGKEYWORD_DETAIL=16열) ──
 def _st_row(date_s, camp, grp, term, imp, clk, cost, rank_sum):
     return [date_s, "1313769", camp, grp, term, "nad-x", "bsn-x", "03", "02",
             "8753", "M", str(imp), str(clk), str(cost), str(rank_sum), "0"]
@@ -381,6 +381,55 @@ def test_fetch_search_term_daily_aggregates(monkeypatch):
     assert len(out) == 1
     r = out[0]
     assert (r["imp"], r["clk"], r["cost"], r["rank_sum"]) == (673, 20, 33743, 2408)
+
+
+# ── 검색어 리포트 컬럼 파싱 (EXPKEYWORD=12열, docs/references/36 §0·§1.7 실측 —
+#    SHOPPINGKEYWORD_DETAIL과 레이아웃이 다르다. ST_COL_* 재사용 시 12<=14 길이가드가 전 행을
+#    드롭하던 실사고 회귀 방지) ──
+def _exp_row(date_s, camp, grp, term, imp, clk, cost):
+    # ref36 §1.7 실측 샘플 순서: 일자 고객ID 캠페인 그룹 검색어 미상(8753류) 기기 미상 imp clk cost 미상
+    return [date_s, "1313769", camp, grp, term, "8753", "M", "1", str(imp), str(clk), str(cost), "0"]
+
+
+def test_fetch_search_term_daily_expkeyword_12col_aggregates(monkeypatch):
+    monkeypatch.setattr(fetcher, "ACCESS_LICENSE", "x")
+    monkeypatch.setattr(fetcher, "SECRET_KEY_B64", "x")
+    monkeypatch.setattr(fetcher, "ensure_reports_built", lambda *a, **k: None)
+    monkeypatch.setattr(fetcher, "_list_reports_by_type",
+                        lambda tp, a, b: [{"date": "2026-07-19", "downloadUrl": "u"}])
+    rows = [
+        _exp_row("20260719", "cmp-a001-01-000000010236263", "grp-a001-01-000000060823768",
+                 "Z플립7여행촬영", 1, 1, 237),
+        _exp_row("20260719", "cmp-a001-01-000000010236263", "grp-a001-01-000000060823768",
+                 "Z플립7여행촬영", 2, 0, 88),  # 같은 검색어 → 합산
+        [],  # 완전 빈 행(방어)
+        ["20260719", "1313769", "cmp-x", "grp-x"],  # 짧은 행(방어, len<=EXP_COL_COST)
+    ]
+    monkeypatch.setattr(fetcher, "_download_tsv", lambda url: rows)
+
+    out = fetcher.fetch_search_term_daily("EXPKEYWORD", date(2026, 7, 19), date(2026, 7, 19))
+    assert len(out) == 1
+    r = out[0]
+    assert r["campaign_id"] == "cmp-a001-01-000000010236263"
+    assert r["adgroup_id"] == "grp-a001-01-000000060823768"
+    assert r["search_term"] == "Z플립7여행촬영"
+    assert (r["imp"], r["clk"], r["cost"], r["rank_sum"]) == (3, 1, 325, 0)  # rank_sum: 레이아웃에 없어 항상 0
+
+
+def test_fetch_search_term_daily_shopping_16col_unaffected_by_exp_change(monkeypatch):
+    # SHOPPINGKEYWORD_DETAIL 경로가 EXP_COL_* 분기 추가로 회귀하지 않는지 재확인(16열 그대로 파싱).
+    monkeypatch.setattr(fetcher, "ACCESS_LICENSE", "x")
+    monkeypatch.setattr(fetcher, "SECRET_KEY_B64", "x")
+    monkeypatch.setattr(fetcher, "ensure_reports_built", lambda *a, **k: None)
+    monkeypatch.setattr(fetcher, "_list_reports_by_type",
+                        lambda tp, a, b: [{"date": "2026-07-19", "downloadUrl": "u"}])
+    rows = [_st_row("20260719", "cmp-01", "grp-1", "검색어B", 5, 2, 900, 12)]
+    monkeypatch.setattr(fetcher, "_download_tsv", lambda url: rows)
+
+    out = fetcher.fetch_search_term_daily("SHOPPINGKEYWORD_DETAIL", date(2026, 7, 19), date(2026, 7, 19))
+    assert len(out) == 1
+    r = out[0]
+    assert (r["imp"], r["clk"], r["cost"], r["rank_sum"]) == (5, 2, 900, 12)
 
 
 def test_ingest_search_term_daily_snapshot_replace(db, monkeypatch):
