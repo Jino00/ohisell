@@ -40,15 +40,14 @@
 | `docs/references/35_agency_call_mop_limits_20260721.md` | 대행사 통화 정리 |
 
 ## 5. 알려진 이슈 / 주의사항
-- **원칙22: "탐색 루프 됐다" 아직 금지** — 배포·GATE·codex·부팅만 검증. **라이브 1사이클 실쓰기 미관측**(첫 탐색 발동 대기).
-- 배포 후 에러 로그의 traceback = **전부 기존 별건**(정산 API 400·deleted 그룹 404 2건 fail-closed). **탐색 경로 에러 0**.
-- 관측 백그라운드(task `bggs04bvz`) 진행 중 = 21:20 시간당 레인 후 탐색 change_log/proposal 캡처. 결과 미확인 상태로 세션 저장.
-- deleted 그룹 404(69087677·69089452)는 PR#75 필터가 일 레인 후보에만 적용돼 다른 경로에서 잔존 가능 — 별건.
+- **★★21:20 탐색 첫 라이브 발동 — 파이프라인 성공, 소재-레벨 실쓰기 실패(원칙22 교과서 사례)**: 탐색 레인이 발동해 `bid_up_explore`·`explore_op`·dry_run=0·`[탐색UP] 첫 탐색 시작` 11건 생성(게이트·래더·레버 판정·발사 전 과정 라이브 작동). **그룹입찰(adgroup) 1건 성공**(cmp 8514959 grp 44743917→1,590). 그러나 **소재입찰(ad) 10건 전부 네이버 400 `code:3830 Invalid ad type`**. 원인: B3 `update_ad_bid`(PUT /ncc/ads/{id}?fields=adAttr, `naver_sa_writer.py:675`)가 격리만 통과·라이브 첫 실쓰기가 오늘. 우리 사전가드(useGroupBidAmt=false·부모 ML) 전부 통과 후 네이버가 PUT 자체 거부. 실패 소재 전부 SHOPPING_PRODUCT_AD·useGroupBidAmt=0. **fail-closed라 사고 없음**(입찰 안 바뀜)·다운스트림 정상이나 **매시 :20 11건 400 소음 + 소재 탐색 실질 무력**(콜드 18개 전부 소재-레벨). failure-memory 기록됨.
+- **원칙22: "탐색 루프 됐다" 금지** — 파이프라인 라이브 발동은 확인, 소재 실쓰기는 실패. 그룹입찰 경로만 라이브 성공.
+- 배포 후 traceback 로그 = 기존 별건(정산 API 400·deleted 그룹 404 2건 fail-closed).
 - 병행 세션 흔적 `d4435f8`(GAVE-2, 파일 겹침 0) 정상 병합됨.
 
 ## 6. 다음에 할 작업 (미완료)
-- [ ] **★최우선: 라이브 합격 실측** — 첫 탐색 사이클(콜드/웜 그룹 explore_op 실쓰기 dry_run=0·`[탐색UP]` → 2h 후 avg_rank 이동 관측 → 클릭 유입 → stop_observe로 ROAS 인계). change_log에서 `proposal_type=bid_up_explore`·`approval_source=explore_op` 포착. 발동은 트래픽·데이터 게이트(핫셋 미달 SHOPPING 그룹 + 쿨다운 + daily 손실 미발동 + 09:20+ 런). **관측 task bggs04bvz 결과부터 확인.**
-- [ ] **PR 생성·병합** (25커밋, main==prod 복원). 배포는 이미 됨.
+- [ ] **★★최우선: update_ad_bid 소재-레벨 400 `Invalid ad type` 수정** — B3 손이 SHOPPING_PRODUCT_AD PUT을 네이버가 거부(§5). 조사: 네이버 SA 공식 apidoc의 Ad PUT 스펙(SHOPPING_PRODUCT_AD adAttr.bidAmt 수정에 필요한 payload — type 필드 포함/전체객체 요구/올바른 엔드포인트). **격리 아닌 라이브로 검증**(원칙22). 이게 막히면 콜드 탐색 전체가 무력(콜드 18개 전부 소재-레벨). 실패 소재 예: `nad-a001-02-000000373441859`(cmp 8492582). 그룹입찰 경로는 라이브 성공 확인됨.
+- [ ] **PR 생성·병합** (25커밋, main==prod 복원). 배포는 이미 됨. **단 위 소재 400 수정 후 함께 배포·PR 권장**(같은 스프린트).
 - [ ] 08:00 GAVE 사전 정렬 제안 확인(방어 선순위·성장 GAVE 정렬 라이브).
 - [ ] 첫 주 캘리브레이션(§실측 3 imp=0 그룹 실효·5 과열밴드 관통 빈도).
 - [ ] codex 소급 리뷰 07-23(IU-R R0~R3 + B-X 전 커밋).
