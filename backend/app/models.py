@@ -1777,6 +1777,15 @@ class NaverRetroSignal(Base):
     roas_c_post7: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     bleed_post7: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
+    # D-NAO-72: GAVE 페널티 점수(ref 26 ⑤) — 방향 채점(verdict)과 병렬로 남기는 크기 축.
+    #   S = min{(roas_c/bep_asof)^γ, 1} × (cf 보정 매출). roas_c가 bep_asof 이상이면 매출 전액,
+    #   미달이면 γ에 비례해 감점 = "이 제안이 실제 총이익에 얼마나 기여했나"(D-NAO-59·D-NAO-1
+    #   정식화). no_spend(cost_post=0)면 0. γ=naver_campaign_settings.gamma(캠페인 공격성
+    #   다이얼, 없으면 DEFAULT_GAMMA=1). penalty·roas_ratio는 roas_c_post/bep_asof로 재구성
+    #   가능하니 점수만 저장(최소 스키마). asof 렌즈(cf_asof/bep_asof/gamma) 그대로 = 채점 재현성.
+    gave_score_d3: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    gave_score_d7: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
 
 class NaverRetroPacingScore(Base):
     """trigger_pacing 경보(저속·과속) 소급 채점 1건
