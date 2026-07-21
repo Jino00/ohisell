@@ -393,3 +393,40 @@ def test_ingest_daily_report_present_resets_conversion_only_row(db, monkeypatch)
         NaverSearchTermDaily.source == "shopping", NaverSearchTermDaily.search_term == "간접전환어",
     ).one()
     assert row.conv_purchase_cnt == 0 and row.conv_direct_cnt == 0 and row.conv_purchase_amt == 0
+
+
+# ── ⑦ report_dates는 fetch_search_term_conversion **이후**에 계산돼야 한다(codex 3R[P2]) ──
+def test_ingest_daily_report_dates_computed_after_fetch_self_heal(db, monkeypatch):
+    """fetch_search_term_conversion 내부의 ensure_reports_built는 미생성 CONVERSION 보고서를
+    그 호출 도중 새로 BUILT시킬 수 있다(자기치유). report_dates를 fetch **전에** 계산하면 그
+    사이 새로 BUILT된 날짜를 여전히 '부재'로 오판해, 캐리포워드가 옛 전환을 되살리고 0-리셋을
+    건너뛴다. fetch가 실행되면 상태 플래그를 세우고 report_dates가 그 플래그를 관측하게 해
+    호출 순서를 직접 재현한다: fetch 전에 report_dates가 계산되면(버그) 항상 '부재'를 보고,
+    fetch 후에 계산되면(수정 후) '실재'를 정확히 보고한다."""
+    _prior_shopping_row_with_conv(db)  # 맥세이프 conv 2/1/31800/1/5000(옛 전환)
+    monkeypatch.setattr(search_term_ingest, "fetch_search_term_daily", _fresh_shopping_perf)
+    monkeypatch.setattr(search_term_ingest, "request_missing_expkeyword_reports", lambda a, b: [])
+
+    state = {"fetched": False}
+
+    def fake_fetch_conv(date_from, date_to):
+        state["fetched"] = True  # fetch 내부 ensure_reports_built 자기치유가 여기서 일어났다고 가정
+        return []  # 전환이 소급 0이 되어 rows는 비었지만 보고서 자체는 이제 BUILT
+
+    def fake_report_dates(date_from, date_to):
+        # fetch가 이미 일어난 뒤 호출됐어야 실재를 관측한다. 순서가 뒤바뀌면 항상 부재로 오판.
+        return {date(2026, 7, 21)} if state["fetched"] else set()
+
+    monkeypatch.setattr(search_term_ingest, "fetch_search_term_conversion", fake_fetch_conv)
+    monkeypatch.setattr(search_term_ingest, "_conversion_report_dates", fake_report_dates)
+
+    result = search_term_ingest.ingest_search_term_daily(db, date(2026, 7, 21), date(2026, 7, 21))
+
+    # 올바른 순서(fetch 먼저 → report_dates 나중)라면 report_dates가 실재를 정확히 관측해
+    # 캐리포워드를 스킵하고, 0-리셋만 적용돼 옛 전환이 되살아나지 않는다.
+    assert result["conversion_carryforward"] == 0
+
+    row = db.query(NaverSearchTermDaily).filter(NaverSearchTermDaily.source == "shopping").one()
+    assert row.imp == 60 and row.clk == 15 and row.cost == 3600  # 성과는 신선값 유지
+    assert row.conv_purchase_cnt == 0 and row.conv_direct_cnt == 0 and row.conv_purchase_amt == 0
+    assert row.cart_cnt == 0 and row.cart_amt == 0

@@ -183,7 +183,8 @@ def request_missing_expkeyword_reports(date_from: date, date_to: date) -> list[s
 
 
 def ingest_search_term_conversion(
-    db: Session, date_from: date, date_to: date, report_dates: set[date] | None = None,
+    db: Session, date_from: date, date_to: date,
+    report_dates: set[date] | None = None, conv_rows: list[dict] | None = None,
 ) -> dict:
     """SHOPPINGKEYWORD_CONVERSION_DETAIL 전환을 source='shopping' 성과행에 병합.
 
@@ -203,8 +204,16 @@ def ingest_search_term_conversion(
     다시 얻는다. report_dates=None이면 conv_rows에 실재하는 날짜에서 파생(단독 호출 하위호환) —
     이 경우 "보고서 있음=BUILT이지만 rows 0"인 빈-보고서 날짜는 감지 못하므로, 크론 경로는
     ingest_search_term_daily가 _list_reports_by_type로 계산한 report_dates를 반드시 넘긴다.
+
+    ★conv_rows 주입(codex 3R[P2]): 크론 경로(ingest_search_term_daily)는 report_dates를 계산하기
+    **전에** 이미 fetch_search_term_conversion을 호출해 두었으므로(그 호출 내부의
+    ensure_reports_built 자기치유가 새 보고서를 BUILT시킬 수 있어, report_dates는 그 이후에
+    계산해야 최신 상태를 반영한다), 그 결과를 conv_rows로 그대로 전달해 중복 fetch(및
+    ensure_reports_built 재호출)를 피한다. conv_rows=None이면(단독 호출 하위호환) 이 함수가
+    직접 fetch한다.
     """
-    conv_rows = fetch_search_term_conversion(date_from, date_to)
+    if conv_rows is None:
+        conv_rows = fetch_search_term_conversion(date_from, date_to)
 
     db.flush()  # 직전 _ingest_rows(shopping) delete+insert를 조회에 반영
 
@@ -274,31 +283,40 @@ def ingest_search_term_daily(db: Session, date_from: date, date_to: date) -> dic
     범위 내 아직 생성 안 된 날짜는 request_missing_expkeyword_reports로 생성 요청만 남긴다.
 
     ★전환 보존 순서(fail-safe, SS2 전환 보호 게이트 데이터 보존):
-      ⓪ _conversion_report_dates — 이 범위에서 CONVERSION 보고서가 실재(BUILT)하는 날짜 집합.
-         "보고서 있음=보고서가 진실(0 포함), 보고서 없음=이전 값 보존"의 기준(codex 2R[P2]).
       ① _snapshot_shopping_conversions — shopping delete+insert **전에** 기존 전환을 뜬다.
       ② _ingest_rows("shopping") — 성과행을 통째로 교체(전환 컬럼은 default 0으로 초기화).
-      ③ _apply_conversion_carryforward(report_dates) — 스냅샷 전환을 재삽입 행에 되살리되,
+      ③ fetch_search_term_conversion — conv_rows를 먼저 조회한다(내부 ensure_reports_built가
+         이 범위의 미생성 CONVERSION 보고서를 새로 BUILT 상태로 만들 수 있음 — 자기치유).
+      ④ _conversion_report_dates — ③ **이후**에 계산한다(codex 3R[P2]). ③ 이전에 계산하면
+         ③의 ensure_reports_built가 그 사이 새로 BUILT시킨 보고서를 report_dates가 "부재"로
+         오판해, ⑤ 캐리포워드가 그 날짜의 옛 전환을 되살리고 ⑥의 0-리셋을 건너뛰게 된다
+         (자기치유로 막 생긴 보고서의 전환 0 소급이 조용히 무시됨).
+      ⑤ _apply_conversion_carryforward(report_dates) — 스냅샷 전환을 재삽입 행에 되살리되,
          **보고서 부재 날짜에만** 적용한다(보고서 실재 날짜는 스킵 — 보고서가 진실).
-      ④ ingest_search_term_conversion(report_dates) — 보고서 실재 날짜의 전환을 0으로 리셋 후
-         보고서 rows로 재적용(SET, 멱등). 보고서에서 사라진 grain은 0으로 확정된다.
-    이 순서가 없으면 ②가 전환을 0으로 지운 직후 ④가 보고서 []를 받아 전환 기록이 사라지고,
+      ⑥ ingest_search_term_conversion(conv_rows, report_dates) — ③에서 이미 받은 conv_rows를
+         그대로 주입해(중복 fetch 없음) 보고서 실재 날짜의 전환을 0으로 리셋 후 재적용(SET,
+         멱등). 보고서에서 사라진 grain은 0으로 확정된다.
+    이 순서가 없으면 ②가 전환을 0으로 지운 직후 ⑥이 보고서 []를 받아 전환 기록이 사라지고,
     SS2의 "purchase 전환≥1 검색어 제외 금지" 게이트가 조용히 무력화된다(잘못된 제외 후보 진입).
-    반대로 report_dates 구분이 없으면(구버전) 보고서에서 grain이 소멸(전환 0 소급)해도 ③이
-    옛 전환을 되살려 SS2 게이트가 반대로 오작동한다 — ⓪이 두 방향을 모두 막는다.
+    반대로 report_dates 구분이 없으면(구버전) 보고서에서 grain이 소멸(전환 0 소급)해도 ⑤가
+    옛 전환을 되살려 SS2 게이트가 반대로 오작동한다 — ④를 ③ 이후에 두는 것이 두 방향을 모두 막는다.
     """
-    report_dates = _conversion_report_dates(date_from, date_to)  # ⓪ 보고서 실재 날짜
     shopping_rows = fetch_search_term_daily("SHOPPINGKEYWORD_DETAIL", date_from, date_to)
     shopping_dates = {date.fromisoformat(r["date"]) for r in shopping_rows}
     conv_snapshot = _snapshot_shopping_conversions(db, shopping_dates)  # ① delete 전 스냅샷
     n_shopping = _ingest_rows(db, "shopping", shopping_rows)            # ② 성과행 교체
-    n_carried = _apply_conversion_carryforward(db, conv_snapshot, report_dates)  # ③ 보고서 부재 날짜만
+
+    conv_rows = fetch_search_term_conversion(date_from, date_to)        # ③ fetch(자기치유 포함)
+    report_dates = _conversion_report_dates(date_from, date_to)         # ④ ③ 이후 계산(신규 BUILT 포함)
+    n_carried = _apply_conversion_carryforward(db, conv_snapshot, report_dates)  # ⑤ 보고서 부재 날짜만
 
     exp_rows = fetch_search_term_daily("EXPKEYWORD", date_from, date_to)
     n_exp = _ingest_rows(db, "expkeyword", exp_rows)
     requested = request_missing_expkeyword_reports(date_from, date_to)
 
-    conv_result = ingest_search_term_conversion(db, date_from, date_to, report_dates)  # ④ 리셋+병합
+    conv_result = ingest_search_term_conversion(
+        db, date_from, date_to, report_dates=report_dates, conv_rows=conv_rows,
+    )  # ⑥ 리셋+병합(conv_rows 재사용, 중복 fetch 없음)
 
     db.commit()
     log.info("naver_search_term_daily ingest: shopping=%d행 expkeyword=%d행 (%s~%s), 신규요청=%d, "
