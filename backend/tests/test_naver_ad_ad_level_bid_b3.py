@@ -107,9 +107,10 @@ def test_update_ad_bid_success_roundtrip():
     assert mp.call_count == 1
 
 
-def test_update_ad_bid_body_is_adattr_json_object_ugba_false():
-    """body adAttr = JSON **객체** {"bidAmt":N,"useGroupBidAmt":false} (문자열 아님 — 공식
-    AdRequest JsonNode, 문자열 전송 시 400 code 3830 거부) + nccAdgroupId 병기 + fields=adAttr."""
+def test_update_ad_bid_body_is_full_object_adattr_dict_ugba_false():
+    """body = GET 원본 **전체 객체**(type 포함, update_adgroup_bid 동형) + adAttr만 JSON **객체**
+    {"bidAmt":N,"useGroupBidAmt":false}로 교체 + fields=adAttr. 라이브 실측(2026-07-21):
+    문자열 adAttr·최소 body({nccAdId,nccAdgroupId,adAttr}) 둘 다 400 code 3830, 전체 객체만 200."""
     before, parent, after = _ad_resp(800), _manual_parent(), _ad_resp(680)
     put_resp = FakeResp(200, after.json())
     with patch.object(writer.fetcher, "_get", side_effect=[before, parent, after]), \
@@ -118,7 +119,9 @@ def test_update_ad_bid_body_is_adattr_json_object_ugba_false():
     _, kwargs = mp.call_args
     assert kwargs["params"] == {"fields": "adAttr"}
     assert kwargs["json"]["nccAdId"] == AD_ID
-    assert kwargs["json"]["nccAdgroupId"] == GRP_ID  # before 재조회의 그룹 id 병기
+    assert kwargs["json"]["nccAdgroupId"] == GRP_ID  # 전체 객체라 before의 그룹 id 포함
+    assert kwargs["json"]["type"] == "SHOPPING_PRODUCT_AD"  # 전체 객체 마커(type 없으면 400 3830)
+    assert kwargs["json"]["userLock"] is False  # before의 여타 필드 그대로 동반 전송
     ad_attr = kwargs["json"]["adAttr"]
     assert isinstance(ad_attr, dict)  # JSON 객체(문자열 아님)
     assert ad_attr["bidAmt"] == 680

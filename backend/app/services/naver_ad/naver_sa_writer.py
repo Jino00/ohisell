@@ -729,10 +729,13 @@ def update_ad_bid(ncc_ad_id: str, bid_amt: int) -> WriteResult:
         )
 
     path = f"/ncc/ads/{ncc_ad_id}"
-    # adAttr는 요청 body에서 JSON 객체(공식 AdRequest 스키마의 JsonNode — 문자열로 전송하면
-    # 네이버가 400 code 3830 "Invalid ad type"으로 거부, 2026-07-21 라이브 실측). before adAttr의
-    # 다른 서브필드는 보존 병합하고 bidAmt만 갱신, useGroupBidAmt=false는 before와 동일값 재전송
-    # (불변 — 강제 전환 아님). nccAdgroupId 병기(검증된 실동작 패턴)·fields=adAttr로 부분교체 명시.
+    # body = **GET 원본 전체 객체**에 adAttr만 dict로 교체(update_adgroup_bid와 동일 규율).
+    # 라이브 실측(2026-07-21, 원칙22): ①adAttr를 json.dumps 문자열로 보내면 400 code 3830
+    # "Invalid ad type" ②{nccAdId, nccAdgroupId, adAttr(객체)} 최소 body도 동일 400 ③GET 전체
+    # 객체 + adAttr(객체) 교체는 200(prod 무해 프로브로 확정 — type 등 전체 필드가 있어야
+    # 네이버가 소재 타입을 판정한다). adAttr는 before 서브필드 보존 병합 + bidAmt 갱신,
+    # useGroupBidAmt=false는 before와 동일값 재전송(불변 — 강제 전환 아님). fields=adAttr로
+    # 부분교체 명시(다른 필드는 전송돼도 수정 대상 아님).
     before_attr = before.get("adAttr")
     if isinstance(before_attr, str):
         try:
@@ -751,7 +754,8 @@ def update_ad_bid(ncc_ad_id: str, bid_amt: int) -> WriteResult:
     ad_attr = dict(base_attr)
     ad_attr["bidAmt"] = bid_amt
     ad_attr["useGroupBidAmt"] = False
-    body = {"nccAdId": ncc_ad_id, "nccAdgroupId": parent_adgroup_id, "adAttr": ad_attr}
+    body = dict(before)
+    body["adAttr"] = ad_attr
     log.info("Naver SA 쓰기 시도: update_ad_bid ad=%s bidAmt=%s", ncc_ad_id, bid_amt)
     resp = requests.put(
         fetcher.BASE_URL + path,
