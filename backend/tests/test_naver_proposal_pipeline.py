@@ -1,6 +1,7 @@
 # test_naver_proposal_pipeline.py — P2-S3 T5 proposal_pipeline(harness) 단위/통합 테스트
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
 from decimal import Decimal
 
@@ -12,7 +13,7 @@ from sqlalchemy.pool import StaticPool
 from app.database import Base
 from app.models import (
     NaverAdDaily, NaverCampaignSettings, NaverEntity, NaverForecastDaily, NaverHourlySnapshot,
-    NaverProductBep, NaverProposal, Order,
+    NaverLearningState, NaverProductBep, NaverProposal, Order,
 )
 from app.services.naver_ad import proposal_pipeline
 from app.utils.kst import kst_today
@@ -784,3 +785,174 @@ def test_freshness_gate_ok_and_stale(db):
     _row(db, AS_OF, "cmp1", "WEB_SITE", "grp1", "nkw-1", 10, 1, 100)
     db.commit()
     assert proposal_pipeline._freshness_gate(db, AS_OF)["ok"] is True
+
+
+# ── D-NAO-72-2: GAVE 사전 우선순위 배선(_apply_gave_priority) ──
+def _gave_item(campaign_id, board, revenue, cost, rationale="r"):
+    return {
+        "campaign_id": campaign_id, "rationale": rationale,
+        "_gave_board": board, "_gave_revenue": Decimal(str(revenue)), "_gave_cost": Decimal(str(cost)),
+    }
+
+
+def test_apply_gave_priority_sorts_by_expected_gave_descending(db):
+    """ROAS가 BEP에 가까운(손실이 작은) 후보가 절대 비용이 작아도, ROAS가 BEP에서 훨씬 먼
+    (손실이 큰) 후보보다 기대 GAVE가 높으면 먼저 온다 — 단순 cost 재현이 아님을 검증."""
+    diag = {"account_bep_roas": 2.0}
+    low = _gave_item("cmp1", "bleeding_keywords", revenue=10000, cost=10000, rationale="r-low")  # roas=1<2
+    high = _gave_item("cmp1", "bleeding_keywords", revenue=100000, cost=10000, rationale="r-high")  # roas=10>2
+    candidates = [low, high]
+
+    proposal_pipeline._apply_gave_priority(db, diag, candidates)
+
+    assert candidates[0]["rationale"].startswith("r-high")
+    assert candidates[1]["rationale"].startswith("r-low")
+    # 임시키는 정렬 후 반드시 제거(persist가 NaverProposal(**p)로 그대로 씀).
+    for p in candidates:
+        assert "_gave_board" not in p and "_gave_revenue" not in p and "_gave_cost" not in p
+        assert "[GAVE사전: 기대점수" in p["rationale"]
+        assert "유형실적 데이터부족" in p["rationale"]  # NaverLearningState 미적재 → 폴백 표기
+
+
+def test_apply_gave_priority_respects_campaign_gamma_dial(db):
+    """캠페인 γ(naver_campaign_settings.gamma)가 다르면 같은 revenue/cost라도 기대 GAVE가
+    달라져야 한다 — γ=0(벌칙 없음)이 기본값 γ=1(벌칙 적용)보다 항상 점수가 높다(D-NAO-2)."""
+    db.add(NaverCampaignSettings(campaign_id="cmp-g0", optimizer="ours", gamma=Decimal("0")))
+    db.commit()
+    diag = {"account_bep_roas": 2.0}
+    # roas=6000/10000=0.6 < bep 2.0 → 벌칙 구간(두 캠페인 다 미달, 벌칙 강도만 다름)
+    default_gamma = _gave_item("cmp-default", "bleeding_keywords", revenue=6000, cost=10000, rationale="r-default")
+    zero_gamma = _gave_item("cmp-g0", "bleeding_keywords", revenue=6000, cost=10000, rationale="r-g0")
+    candidates = [default_gamma, zero_gamma]
+
+    proposal_pipeline._apply_gave_priority(db, diag, candidates)
+
+    assert candidates[0]["rationale"].startswith("r-g0")  # γ=0 → 벌칙 없음 → 점수 더 높음
+
+
+def test_apply_gave_priority_leaves_untagged_candidates_in_place(db):
+    """_gave_board가 없는 후보(negative_keyword/budget/anomaly 등)는 GAVE 계산 대상이 아니라
+    원래 위치 그대로 남아야 한다(데이터 부재 시 폴백 = 기존 순서 유지)."""
+    diag = {"account_bep_roas": 2.0}
+    untagged_a = {"campaign_id": "cmp1", "rationale": "u-a", "proposal_type": "budget_up"}
+    scored = _gave_item("cmp1", "bleeding_keywords", revenue=100000, cost=1000, rationale="s")
+    untagged_b = {"campaign_id": "cmp1", "rationale": "u-b", "proposal_type": "anomaly"}
+    candidates = [untagged_a, scored, untagged_b]
+
+    proposal_pipeline._apply_gave_priority(db, diag, candidates)
+
+    assert candidates[0]["rationale"] == "u-a"
+    assert candidates[2]["rationale"] == "u-b"
+    assert candidates[1]["rationale"].startswith("s")
+
+
+def test_apply_gave_priority_annotates_board_perf_when_sample_sufficient(db):
+    db.add(NaverLearningState(
+        scope="retro_board", scope_key="bleeding_keywords", metric="gave_score_d7",
+        current_value=Decimal("1234.5000"), sample_n=15,
+    ))
+    db.commit()
+    diag = {"account_bep_roas": 2.0}
+    item = _gave_item("cmp1", "bleeding_keywords", revenue=100000, cost=1000)
+    candidates = [item]
+
+    proposal_pipeline._apply_gave_priority(db, diag, candidates)
+
+    assert "유형실적 1234.5(n=15)" in candidates[0]["rationale"]
+
+
+def test_apply_gave_priority_perf_text_shows_insufficient_sample(db):
+    """표본 < _GAVE_SAMPLE_MIN(10)이면 평균값을 신뢰 표기하지 않고 표본 부족을 명시한다."""
+    db.add(NaverLearningState(
+        scope="retro_board", scope_key="bleeding_keywords", metric="gave_score_d7",
+        current_value=Decimal("500.0000"), sample_n=3,
+    ))
+    db.commit()
+    diag = {"account_bep_roas": 2.0}
+    item = _gave_item("cmp1", "bleeding_keywords", revenue=100000, cost=1000)
+    candidates = [item]
+
+    proposal_pipeline._apply_gave_priority(db, diag, candidates)
+
+    assert "유형실적 n=3<10" in candidates[0]["rationale"]
+
+
+def test_apply_gave_priority_negative_board_perf_logs_warning_not_suppressed(db, caplog):
+    """유형실적(gave_score_d7 평균)이 0 이하로 명백히 음이어도 이번 스프린트 스코프는
+    관찰·정렬까지 — 생성을 억제하지 않고 로그 경고만 남긴다."""
+    db.add(NaverLearningState(
+        scope="retro_board", scope_key="bleeding_keywords", metric="gave_score_d7",
+        current_value=Decimal("-50.0000"), sample_n=12,
+    ))
+    db.commit()
+    diag = {"account_bep_roas": 2.0}
+    item = _gave_item("cmp1", "bleeding_keywords", revenue=100000, cost=1000)
+    candidates = [item]
+
+    with caplog.at_level(logging.WARNING, logger="app.services.naver_ad.proposal_pipeline"):
+        proposal_pipeline._apply_gave_priority(db, diag, candidates)
+
+    assert len(candidates) == 1  # 억제되지 않음 — 후보 그대로 유지
+    assert any("유형실적" in r.message and "0 이하" in r.message for r in caplog.records)
+
+
+def test_apply_gave_priority_strips_temp_keys_even_on_failure(db):
+    """중간에 예외가 나도(diag에 account_bep_roas 누락 등) 임시키는 반드시 제거된다 —
+    persist()가 NaverProposal(**p)로 그대로 ORM 생성하므로 임시키 잔존은 그 자체로
+    proposal_writer 단계 전체를 죽인다(원칙22: 실패를 조용히 삼키지 않되, persist는 안전해야)."""
+    diag = {}  # account_bep_roas 없음 → KeyError
+    item = _gave_item("cmp1", "bleeding_keywords", revenue=100000, cost=1000)
+    candidates = [item]
+
+    with pytest.raises(KeyError):
+        proposal_pipeline._apply_gave_priority(db, diag, candidates)
+
+    assert "_gave_board" not in candidates[0]
+    assert "_gave_revenue" not in candidates[0]
+    assert "_gave_cost" not in candidates[0]
+
+
+def test_apply_gave_priority_no_scored_candidates_is_noop(db):
+    diag = {"account_bep_roas": 2.0}
+    candidates = [{"campaign_id": "cmp1", "rationale": "u", "proposal_type": "anomaly"}]
+    proposal_pipeline._apply_gave_priority(db, diag, candidates)
+    assert candidates == [{"campaign_id": "cmp1", "rationale": "u", "proposal_type": "anomaly"}]
+
+
+# ── D-NAO-72-2: run_daily 통합 — 보드 자체 정렬(cost desc)을 GAVE가 실제로 뒤집는지 검증 ──
+def test_run_daily_orders_bleeding_keyword_proposals_by_expected_gave(db, monkeypatch):
+    """bleeding_keywords 보드 자체 정렬은 cost 내림차순이라 kw-big(비용 10만)을 kw-small
+    (비용 8천)보다 먼저 만든다. 그러나 kw-small은 ROAS가 BEP에 훨씬 가까워(손실 작음) 기대
+    GAVE가 더 높다 — GAVE 사전 정렬이 실제로 08:00 생성 순서(=naver_proposals.id 배정 순서,
+    08:50 auto_operator.run_daily_lane이 이 순서로 심사)를 뒤집는지 종단 검증."""
+    _seed_bep(db)  # bep_roas=2.0
+    db.add(NaverCampaignSettings(campaign_id="cmpA", optimizer="ours"))
+    db.add(NaverCampaignSettings(campaign_id="cmpB", optimizer="ours"))
+    db.add(NaverEntity(entity_type="keyword", entity_id="kw-big", campaign_id="cmpA",
+                        campaign_type="WEB_SITE", name="빅코스트", status="on", bid_amt=500))
+    db.add(NaverEntity(entity_type="keyword", entity_id="kw-small", campaign_id="cmpB",
+                        campaign_type="WEB_SITE", name="스몰코스트", status="on", bid_amt=500))
+    # kw-big: cost=100000, conv=5000 → roas≈0.05(BEP 2.0 대비 크게 미달, 손실 큼)
+    _row(db, AS_OF, "cmpA", "WEB_SITE", "grpA", "kw-big", 5000, 500, 100000, direct=5000)
+    # kw-small: cost=8000, conv=7500 → roas≈0.94(BEP 대비 미달폭 작음, 손실 작음)
+    _row(db, AS_OF, "cmpB", "WEB_SITE", "grpB", "kw-small", 800, 80, 8000, direct=7500)
+    db.commit()
+
+    monkeypatch.setattr(
+        proposal_pipeline.fetcher, "estimate_average_position_bid",
+        lambda device, items: [{"nccKeywordId": it["key"], "bid": 300} for it in items],
+    )
+
+    out = proposal_pipeline.run_daily(db)
+    assert out["stage_status"]["proposal_writer"] == "ok"
+
+    rows = (
+        db.query(NaverProposal)
+        .filter(NaverProposal.target_id.in_(["kw-big", "kw-small"]))
+        .order_by(NaverProposal.id.asc())
+        .all()
+    )
+    assert [r.target_id for r in rows] == ["kw-small", "kw-big"]  # 보드 cost순(big먼저)의 반대
+    for r in rows:
+        assert "[GAVE사전: 기대점수" in r.rationale
+        assert "[bleeding_keywords]" in r.rationale  # 원 rationale(보드 근거)도 그대로 보존

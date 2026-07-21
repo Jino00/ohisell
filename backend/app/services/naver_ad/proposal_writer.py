@@ -224,6 +224,22 @@ def _band_ad_route(
     )
 
 
+def _tag_gave(p: dict | None, board_name: str, row: dict, correction_factor: Decimal) -> dict | None:
+    """D-NAO-72-2: GAVE 사전 정렬용 임시 태그 — harness(proposal_pipeline._apply_gave_priority)가
+    읽어 기대 GAVE(gave_score.score_batch)를 계산·정렬한 뒤 persist 직전 제거한다
+    (NaverProposal 컬럼 아님 — build()의 budget_up "total_gap" 임시키와 동일 관례).
+    revenue는 D-NAO-21 보정계수를 적용(정착창 매출 근사) — retro_scorer.gave_score_d7
+    산출(revenue=conv_post×cf_asof)과 동일 정의라 사전 기대치·사후 실적을 같은 잣대로
+    비교할 수 있다. board_name은 retro_snapshotter._BOARDS와 동일 6종만 호출부에서 넘긴다
+    (그 외 보드는 사후 GAVE 롤업이 없어 태깅하지 않음 — 기존 순서 폴백)."""
+    if p is None:
+        return None
+    p["_gave_board"] = board_name
+    p["_gave_revenue"] = Decimal(row.get("conv_amt", 0)) * correction_factor
+    p["_gave_cost"] = row.get("cost", 0)
+    return p
+
+
 def _bid_proposal(
     row: dict, sim: dict | None, campaign_id: str, target_id: str, *,
     target_type: str, target_label: dict, board_name: str, forecast: dict | None = None,
@@ -935,6 +951,9 @@ def build(
     anomalies = anomalies or {}
     boards = diagnosis.get("boards") or {}
     ours = _ours_campaign_ids(db)
+    # D-NAO-72-2: GAVE 사전 태깅용 보정계수(_tag_gave) — diagnosis(harness가 미리 계산해
+    # 넘김) 재사용, 재조회 없음. compute_bid_sims의 correction_factor 추출과 동일 패턴.
+    gave_correction_factor = Decimal(str(diagnosis["correction_factor"]["factor"]))
     # UI1(D-NAO-65): 캠페인별 loss 정책을 회차당 1쿼리로 로드해 스톱로스 SA에 주입한다(허브
     # 역할 — SA는 DB를 직접 읽지 않는다). stoploss_pause만 실림(NULL/leash=기본, .get→None).
     loss_policies = _loss_policy_map(db)
@@ -972,6 +991,7 @@ def build(
         p = _bid_proposal(row, sim, cid, target_id, target_type="keyword",
                            target_label=labels.get(cid), board_name="bleeding_keywords",
                            forecast=forecast_data.get(("keyword", target_id)))
+        p = _tag_gave(p, "bleeding_keywords", row, gave_correction_factor)
         if p:
             proposals.append(p)
 
@@ -984,6 +1004,7 @@ def build(
         p = _bid_proposal(row, sim, cid, target_id, target_type="keyword",
                            target_label=labels.get(cid), board_name="starving_winners",
                            forecast=forecast_data.get(("keyword", target_id)))
+        p = _tag_gave(p, "starving_winners", row, gave_correction_factor)
         if p:
             proposals.append(p)
 
@@ -997,6 +1018,7 @@ def build(
             # 카나리면 실효 레버(max 소재) ad-레벨 제안, 비카나리는 hold(B2 억제).
             if _ad_bid_canary(cid):
                 ad_p = _band_ad_route(row, band_effs, cid, "shopping_group_bep", bid_sims)
+                ad_p = _tag_gave(ad_p, "shopping_group_bep", row, gave_correction_factor)
                 if ad_p:
                     proposals.append(ad_p)
             continue
@@ -1004,6 +1026,7 @@ def build(
         p = _bid_proposal(row, sim, cid, target_id, target_type="adgroup",
                            target_label=labels.get(cid), board_name="shopping_group_bep",
                            forecast=forecast_data.get(("adgroup", target_id)))
+        p = _tag_gave(p, "shopping_group_bep", row, gave_correction_factor)
         if p:
             proposals.append(p)
 
@@ -1020,6 +1043,7 @@ def build(
             # 카나리면 실효 레버(max 소재) ad-레벨 up 제안, 비카나리는 hold.
             if _ad_bid_canary(cid):
                 ad_p = _band_ad_route(row, band_effs, cid, "shopping_group_growth", bid_sims)
+                ad_p = _tag_gave(ad_p, "shopping_group_growth", row, gave_correction_factor)
                 if ad_p:
                     proposals.append(ad_p)
             continue
@@ -1027,6 +1051,7 @@ def build(
         p = _bid_proposal(row, sim, cid, target_id, target_type="adgroup",
                            target_label=labels.get(cid), board_name="shopping_group_growth",
                            forecast=forecast_data.get(("adgroup", target_id)))
+        p = _tag_gave(p, "shopping_group_growth", row, gave_correction_factor)
         if p:
             proposals.append(p)
 
@@ -1047,6 +1072,7 @@ def build(
         # DL2(D-NAO-65): at-floor는 바닥 대기(None) — 안전 필터링(제안 생성 안 함).
         # UI1: 캠페인 정책 주입(stoploss_pause면 고삐 대신 즉시 하드 정지).
         p = _stop_loss_proposal(row, loss_policy=loss_policies.get(cid))
+        p = _tag_gave(p, "pause_candidates", row, gave_correction_factor)
         if p is not None:
             proposals.append(p)
 
@@ -1074,6 +1100,7 @@ def build(
         p = _stop_loss_proposal(row, target_type="adgroup", manual_bid=manual_bid,
                                 ad_bid_canary=_ad_bid_canary(cid),
                                 loss_policy=loss_policies.get(cid))
+        p = _tag_gave(p, "shopping_pause_candidates", row, gave_correction_factor)
         if p is not None:
             proposals.append(p)
 
@@ -1195,6 +1222,12 @@ def persist(db: Session, proposals: list[dict]) -> list[NaverProposal]:
     다르면 별개 실행 대상 — adgroup_id 없는 유형은 None(IS NULL) 비교라 기존 동작 불변.
 
     단일 08:00 크론 가정 — 동시성/재시도 하드닝(DB 유니크 인덱스)은 P3(계획서 명시 연기).
+
+    D-NAO-72-2: `_tag_gave`가 붙인 `_gave_*` 임시키(GAVE 사전 정렬용, NaverProposal 컬럼
+    아님)는 harness(proposal_pipeline._apply_gave_priority)가 소비 후 제거하는 게 정상
+    경로지만, build()를 harness 없이 직접 호출하는 경로(단위테스트 등)도 있어 여기서 한 번
+    더 방어적으로 제거한다(build()가 낸 dict를 persist가 그대로 못 믿는 건 아니지만, 없는
+    컬럼으로 ORM 생성이 TypeError로 죽는 사고를 이 함수 하나가 막아준다).
     """
     saved: list[NaverProposal] = []
     for p in proposals:
@@ -1208,7 +1241,8 @@ def persist(db: Session, proposals: list[dict]) -> list[NaverProposal]:
         ).first()
         if exists:
             continue
-        obj = NaverProposal(**p)
+        clean = {k: v for k, v in p.items() if not k.startswith("_gave_")}
+        obj = NaverProposal(**clean)
         db.add(obj)
         saved.append(obj)
     db.flush()

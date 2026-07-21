@@ -13,11 +13,13 @@ from decimal import Decimal
 from sqlalchemy import func as sqlfunc
 from sqlalchemy.orm import Session
 
-from app.models import NaverAdDaily, NaverEntity, NaverForecastDaily, NaverLearningState, NaverProposal
+from app.models import (
+    NaverAdDaily, NaverCampaignSettings, NaverEntity, NaverForecastDaily, NaverLearningState, NaverProposal,
+)
 from app.services import naver_sa_ad_fetcher as fetcher
 from app.services.naver_ad import (
-    anomaly_feed, bid_simulator, budget_allocator, campaign_target_resolver, diagnosis, growth_sweeper,
-    proposal_writer, slack_notifier, trigger_watch,
+    anomaly_feed, bid_simulator, budget_allocator, campaign_target_resolver, diagnosis, gave_score,
+    growth_sweeper, proposal_writer, slack_notifier, trigger_watch,
 )
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.utils.kst import kst_today
@@ -25,6 +27,16 @@ from app.utils.kst import kst_today
 log = logging.getLogger(__name__)
 
 _TARGET_RANK_POSITION = 2  # 목표순위 기본값 — 진단 보드에 avg_rank가 아직 없어 고정값(P3+ 정교화 여지)
+
+# D-NAO-72-2: GAVE 사전 우선순위 배선 — proposal_writer.build()가 _tag_gave로 표시하는 6개
+# 보드(retro_snapshotter._BOARDS, D-NAO-45와 동일 대상. 그 상수는 module-private이라 여기서
+# 별도 나열 — 값이 갈리면 test_naver_proposal_pipeline의 회귀 테스트가 잡는다)와 정합해야 한다.
+_GAVE_SCORED_BOARDS = frozenset({
+    "bleeding_keywords", "starving_winners", "shopping_group_bep",
+    "shopping_group_growth", "pause_candidates", "shopping_pause_candidates",
+})
+_GAVE_ROLLUP_SCOPE = "retro_board"  # retro_scorer._GAVE_ROLLUP_SCOPE와 동일 문자열(단일 진실)
+_GAVE_SAMPLE_MIN = 10  # 유형실적(gave_score_d7 평균)을 rationale에 신뢰 표기할 최소 채점 표본
 _PROPOSAL_EXPIRY_DAYS = 14  # 계획서 §0 "관찰 2~4주" 하한 채택 — 실행형 제안(폴백) pending 14일
 # 초과 시 자동 만료.
 
@@ -493,6 +505,108 @@ def _expire_stale_pending(db: Session) -> int:
     return sum(by_type_counts.values())
 
 
+def _gave_gamma_for(db: Session, campaign_id: str, cache: dict[str, Decimal]) -> Decimal:
+    """캠페인 공격성 다이얼 γ(naver_campaign_settings.gamma) — retro_scorer._gamma_for(D-NAO-72
+    1차)와 동일 해석 규칙(없거나 NULL이면 gave_score.DEFAULT_GAMMA)을 이 harness 자체 캐시로
+    재현한다. retro_scorer의 함수는 module-private이라 크로스임포트하지 않는다 — 규칙이
+    갈리면 두 모듈의 회귀 테스트가 각각 잡는다(단일 진실은 gave_score.DEFAULT_GAMMA 상수 자체)."""
+    if campaign_id not in cache:
+        row = db.query(NaverCampaignSettings.gamma).filter(
+            NaverCampaignSettings.campaign_id == campaign_id,
+        ).first()
+        cache[campaign_id] = row[0] if row is not None and row[0] is not None else gave_score.DEFAULT_GAMMA
+    return cache[campaign_id]
+
+
+def _apply_gave_priority(db: Session, diag: dict, candidates: list[dict]) -> None:
+    """D-NAO-72-2 — 제안 후보의 기대 GAVE(정착창 매출·비용·계정BEP·캠페인γ)를 계산해 같은
+    회차 내 생성 순서를 GAVE 내림차순으로 재배치(in-place, 안정정렬 — 동점/미계산은 기존
+    상대순서 유지). 이 순서가 곧 naver_proposals.id 배정 순서이고, auto_operator.
+    run_daily_lane의 `.order_by(NaverProposal.id.asc())`가 그 순서 그대로 08:50 심사·집행
+    하므로(auto_operator.py는 이 스프린트 금지 파일이라 직접 확인만, 수정하지 않음) — 여기서
+    정한 순서가 "일일 캡이 물릴 때 총이익 기여 높은 제안이 먼저 집행"을 결정한다.
+
+    대상: proposal_writer.build()가 `_tag_gave`로 표시한 6개 보드(_GAVE_SCORED_BOARDS —
+    retro_snapshotter._BOARDS와 동일 소스, gave_score_d7 사후 롤업이 존재하는 유형)뿐이다.
+    그 외(negative_keyword/growth_bid_up/budget_*/anomaly_*/resume류 등)는 revenue/cost
+    기반이 없거나 이미 자체 정렬 근거(growth_sweeper gap, budget round envelope)가 있어
+    **손대지 않는다** — 원 위치 그대로(폴백).
+
+    gave_score.score_batch(순수 SA, gave_score.py 불변)만 재사용한다 — 이 harness가 유일
+    호출자(원칙18, SA간 직접 호출 금지). bep_roas는 D-NAO-72 1차(retro_scorer)와 동일하게
+    **계정 단일값**(diag["account_bep_roas"])을 쓴다 — 진단 보드 자체가 이 값으로 판정됐고
+    사후 채점(bep_asof)도 이 값이라, 사전 기대치도 같은 잣대를 써야 사전/사후 비교가
+    성립한다(캠페인별 상품파생 BEP를 새로 들여오면 1차 배선과 잣대가 갈린다).
+
+    board별 gave_score_d7 평균(NaverLearningState scope=retro_board)을 rationale에
+    `[GAVE사전: 기대점수 X·유형실적 Y]`로 병기한다(투명성, 원칙18-9 피드백 루프). 표본이
+    _GAVE_SAMPLE_MIN 미만이거나 채점 이력이 아직 없으면 "데이터부족"으로 정직 표기. 유형
+    실적이 0 이하로 명백히 음이어도 **생성을 억제하지 않는다** — 이번 스프린트 스코프는
+    관찰·정렬까지이고(로그 경고만), 억제는 후속 결정(Jino)의 몫이다.
+    """
+    scored_positions = [i for i, p in enumerate(candidates) if "_gave_board" in p]
+    if not scored_positions:
+        return
+
+    try:
+        bep_roas = Decimal(str(diag["account_bep_roas"]))
+        gamma_cache: dict[str, Decimal] = {}
+
+        by_campaign: dict[str, list[dict]] = {}
+        for i in scored_positions:
+            by_campaign.setdefault(candidates[i]["campaign_id"], []).append(candidates[i])
+
+        for campaign_id, items in by_campaign.items():
+            gamma = _gave_gamma_for(db, campaign_id, gamma_cache)
+            scored = gave_score.score_batch(
+                items, bep_roas=bep_roas, gamma=gamma,
+                revenue_key="_gave_revenue", cost_key="_gave_cost",
+            )
+            for s in scored:
+                s["item"]["_gave_expected_score"] = s["score"]
+
+        boards_present = {candidates[i]["_gave_board"] for i in scored_positions}
+        perf_by_board = {
+            row.scope_key: row
+            for row in db.query(NaverLearningState).filter(
+                NaverLearningState.scope == _GAVE_ROLLUP_SCOPE,
+                NaverLearningState.scope_key.in_(boards_present),
+                NaverLearningState.metric == "gave_score_d7",
+            ).all()
+        }
+
+        for i in scored_positions:
+            p = candidates[i]
+            board = p["_gave_board"]
+            perf = perf_by_board.get(board)
+            if perf is not None and perf.sample_n and perf.sample_n >= _GAVE_SAMPLE_MIN:
+                avg = float(perf.current_value)
+                perf_text = f"{avg:.1f}(n={perf.sample_n})"
+                if avg <= 0:
+                    log.warning(
+                        "proposal_pipeline: board=%s 유형실적 GAVE d7 평균 %.1f(n=%d) — 0 이하"
+                        "(생성 억제는 D-NAO-72-2 스코프 밖, 관찰만)", board, avg, perf.sample_n,
+                    )
+            else:
+                perf_text = "데이터부족" if perf is None else f"n={perf.sample_n}<{_GAVE_SAMPLE_MIN}"
+            p["rationale"] = (p.get("rationale") or "") + (
+                f" [GAVE사전: 기대점수 {p['_gave_expected_score']}·유형실적 {perf_text}]"
+            )
+
+        reordered = sorted(
+            (candidates[i] for i in scored_positions),
+            key=lambda p: p["_gave_expected_score"], reverse=True,
+        )
+        for pos, item in zip(scored_positions, reordered):
+            candidates[pos] = item
+    finally:
+        # 예외가 어느 단계에서 나든 임시키는 반드시 제거한다(persist()가 NaverProposal(**p)로
+        # 그대로 ORM 생성 — 임시키가 남으면 TypeError로 proposal_writer 단계 전체가 실패한다).
+        for p in candidates:
+            for key in ("_gave_board", "_gave_revenue", "_gave_cost", "_gave_expected_score"):
+                p.pop(key, None)
+
+
 def run_daily(db: Session, *, lookback_days: int = 15) -> dict:
     """08:00 엔트리 — freshness 게이트 → diagnosis → bid_simulator → proposal_writer →
     slack → 계정 브리프 싱글톤 → 만료 패스. 각 단계는 독립 try/except로 격리(부분 실패시
@@ -600,6 +714,11 @@ def run_daily(db: Session, *, lookback_days: int = 15) -> dict:
                 budget_signals=budget_signals, pre_exhaustion_signals=pre_exhaustion_signals,
                 forecast_data=forecast_data, anomalies=anomalies, as_of=as_of,
             )
+            try:
+                _apply_gave_priority(db, diag, candidates)
+            except Exception as e:  # noqa: BLE001 — GAVE 사전 정렬 실패는 저하만(생성 순서
+                # 원본 그대로 유지), 제안 생성 자체는 계속 진행(부분 실패 격리 원칙 동일 적용).
+                log.warning("proposal_pipeline: GAVE 사전 정렬 실패(생성 순서 원본 유지): %s", e)
             saved = proposal_writer.persist(db, candidates)
             proposal_writer.account_brief_singleton(db, diag, as_of)
             db.commit()
