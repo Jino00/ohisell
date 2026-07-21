@@ -31,6 +31,16 @@ log = logging.getLogger(__name__)
 # 브리핑 diary 요약에 나열할 쇼핑 후보 상위 건수(제안 자체는 전건 생성, 요약만 절삭).
 _BRIEF_TOP_N = 10
 
+# SS4 승격 제안 1회 생성 상한(라이브 첫 실행 실측: 2026-07-22 08:50 크론에서 354건 pending이
+# 한꺼번에 쏟아져 Jino 콘솔이 범람 — 운영 결함). conv_direct_cnt 내림차순(→ conv_purchase_amt
+# 내림차순 tie-break)으로 정렬해 근거가 가장 강한 후보부터 상위 20건만 신규 생성한다. dedup으로
+# 걸러진 기존 pending 건은 이 상한을 소모하지 않는다(신규 생성 건수만 ≤20으로 제한하는 게 목적 —
+# 이미 콘솔에 떠 있는 제안 수를 세는 게 아니라 "이번 실행이 콘솔에 새로 얹는 양"을 통제한다).
+# 나머지 후보는 다음 실행(익일 08:50)에서 갱신 데이터로 재평가되며 그 사이엔 promote_over_cap
+# 카운트로만 유실 없이 관측된다(diary 브리핑 없음 — 승격은 정보성 후보라 브리핑 노이즈보다 로그
+# 카운트로 충분, 필요 시 콘솔 promote_candidates 총량으로 잔여를 알 수 있음).
+_SS_PROMOTE_CAP = 20
+
 # 제안화 가능한 검색어 최대 길이 = NaverProposal.target_id 컬럼 길이(String(50)) 단일 출처
 # (codex 2R[P1]). target_id에 검색어 전문을 저장하는데, 초과분을 넣으면 DB(Postgres)에서
 # 잘리거나 오류가 나 "잘린 텍스트로 실쓰기"가 발생한다. NaverProposal에 전문 페이로드 컬럼이
@@ -120,7 +130,8 @@ def run_search_term_ss_lane(db: Session, *, now: datetime | None = None) -> dict
 
     반환: {"shopping_candidates","powerlink_candidates","promote_candidates",
            "proposals_created","deduped","skipped_too_long",
-           "promote_proposals_created","promote_deduped","promote_skipped_too_long"}."""
+           "promote_proposals_created","promote_deduped","promote_skipped_too_long",
+           "promote_over_cap"}."""
     now = now or kst_now()
     judged = search_term_judge.judge_search_terms(db, now=now)
     shopping = judged["exclude_candidates"]["shopping"]
@@ -151,10 +162,18 @@ def run_search_term_ss_lane(db: Session, *, now: datetime | None = None) -> dict
 
     # SS4 승격 후보 — 제외(SS3)와 동일한 표현 가능성 방어(target_id 길이) + dedup 규약을 그대로
     # 적용한다. 소스(shopping/expkeyword) 무관 전건 대상(judge가 이미 dconv≥1로 판정 완료).
+    # ★상한(_SS_PROMOTE_CAP): 근거가 가장 강한 후보부터 채우기 위해 conv_direct_cnt 내림차순 →
+    # conv_purchase_amt 내림차순으로 정렬 후 순회한다(라이브 콘솔 범람 방지, 상수 주석 참조).
+    promote_sorted = sorted(
+        promote,
+        key=lambda c: (c["conv_direct_cnt"], c["conv_purchase_amt"]),
+        reverse=True,
+    )
     promote_created = 0
     promote_deduped = 0
     promote_skipped_too_long = 0
-    for cand in promote:
+    promote_over_cap = 0
+    for cand in promote_sorted:
         if len(cand["search_term"]) > _TARGET_ID_MAXLEN:
             promote_skipped_too_long += 1
             continue
@@ -162,7 +181,11 @@ def run_search_term_ss_lane(db: Session, *, now: datetime | None = None) -> dict
             db, cand["adgroup_id"], cand["search_term"],
             proposal_type=search_term_judge.SEARCH_TERM_PROMOTE_TYPE,
         ):
+            # dedup은 상한을 소모하지 않는다 — 신규 생성 슬롯은 그대로 다음 후보로 넘어간다.
             promote_deduped += 1
+            continue
+        if promote_created >= _SS_PROMOTE_CAP:
+            promote_over_cap += 1
             continue
         _create_promote_proposal(db, cand)
         promote_created += 1
@@ -224,6 +247,7 @@ def run_search_term_ss_lane(db: Session, *, now: datetime | None = None) -> dict
         "promote_proposals_created": promote_created,
         "promote_deduped": promote_deduped,
         "promote_skipped_too_long": promote_skipped_too_long,
+        "promote_over_cap": promote_over_cap,
     }
     log.info("search_term_ss_lane: %s", result)
     return result

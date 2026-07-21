@@ -222,6 +222,83 @@ def test_search_term_promote_not_executable_via_real_write_blocker(db):
     assert harness.real_write_blocker(p) is not None  # 정보성(실행 대상 자체가 없음)
 
 
+# ── ⑦ 생성 상한(_SS_PROMOTE_CAP) — 라이브 콘솔 범람 방지(2026-07-22 354건 실측 사고) ──
+def test_promote_cap_limits_new_proposals_to_20(db):
+    # 후보 25개(전환수 다양) → 상위 20건만 신규 생성, 나머지 5건은 promote_over_cap으로 카운트.
+    for i in range(25):
+        adgroup_id = f"grp-{i}"
+        _map_product(db, adgroup_id=adgroup_id, cpid=f"P{i}")
+        _term(db, term=f"검색어{i:02d}", adgroup_id=adgroup_id, dconv=i + 1, pconv=i + 1, pamt=(i + 1) * 1000)
+    res = lane.run_search_term_ss_lane(db, now=_NOW)
+    assert res["promote_candidates"] == 25
+    assert res["promote_proposals_created"] == 20
+    assert res["promote_over_cap"] == 5
+    assert db.query(NaverProposal).filter(NaverProposal.proposal_type == _TYPE).count() == 20
+
+
+def test_promote_cap_keeps_highest_conv_direct_cnt_first(db):
+    # 정렬 검증: conv_direct_cnt 내림차순으로 상위 20건이 생성되므로, 최댓값 근처 후보들이
+    # 전부 살아남고 최솟값 근처 후보들이 잘려나간다.
+    for i in range(25):
+        adgroup_id = f"grp-{i}"
+        _map_product(db, adgroup_id=adgroup_id, cpid=f"P{i}")
+        _term(db, term=f"검색어{i:02d}", adgroup_id=adgroup_id, dconv=i + 1, pconv=i + 1, pamt=(i + 1) * 1000)
+    lane.run_search_term_ss_lane(db, now=_NOW)
+    created_terms = {
+        p.target_id for p in db.query(NaverProposal).filter(NaverProposal.proposal_type == _TYPE).all()
+    }
+    # dconv는 검색어XX의 XX+1 → 상위 20개는 i=5..24(검색어05~검색어24), 잘리는 건 i=0..4.
+    expected = {f"검색어{i:02d}" for i in range(5, 25)}
+    assert created_terms == expected
+    for skipped in ("검색어00", "검색어01", "검색어02", "검색어03", "검색어04"):
+        assert skipped not in created_terms
+
+
+def test_promote_cap_sorts_by_conv_purchase_amt_as_tiebreak(db):
+    # dconv 동률이면 conv_purchase_amt 내림차순 — 매출 큰 쪽이 상한 안에 남는다.
+    _map_product(db, adgroup_id="grp-hi", cpid="PH")
+    _map_product(db, adgroup_id="grp-lo", cpid="PL")
+    _term(db, term="매출높음", adgroup_id="grp-hi", dconv=3, pconv=3, pamt=90000)
+    _term(db, term="매출낮음", adgroup_id="grp-lo", dconv=3, pconv=3, pamt=10000)
+    # 상한을 1로 낮춰 확인할 수 없으므로(상수 직접 변경 지양), monkeypatch로 상한을 1로 조정.
+    import app.services.naver_ad.search_term_ss_lane as lane_mod
+    orig_cap = lane_mod._SS_PROMOTE_CAP
+    lane_mod._SS_PROMOTE_CAP = 1
+    try:
+        res = lane.run_search_term_ss_lane(db, now=_NOW)
+    finally:
+        lane_mod._SS_PROMOTE_CAP = orig_cap
+    assert res["promote_proposals_created"] == 1
+    assert res["promote_over_cap"] == 1
+    created = db.query(NaverProposal).filter(NaverProposal.proposal_type == _TYPE).one()
+    assert created.target_id == "매출높음"
+
+
+def test_promote_dedup_does_not_consume_cap_slot(db):
+    # 상한을 2로 낮추고, 3개 후보 중 1개는 이미 pending(dedup 대상) — dedup은 상한을 소모하지
+    # 않으므로 나머지 2개(신규)가 모두 생성돼야 한다(신규 생성 ≤ cap이 목적이지, dedup까지
+    # 합쳐 cap을 세는 게 아님).
+    import app.services.naver_ad.search_term_ss_lane as lane_mod
+    orig_cap = lane_mod._SS_PROMOTE_CAP
+    lane_mod._SS_PROMOTE_CAP = 2
+    try:
+        _map_product(db, adgroup_id="grp-a", cpid="PA")
+        _map_product(db, adgroup_id="grp-b", cpid="PB")
+        _map_product(db, adgroup_id="grp-c", cpid="PC")
+        _term(db, term="기존제안", adgroup_id="grp-a", dconv=5, pconv=5, pamt=50000)
+        _term(db, term="신규1", adgroup_id="grp-b", dconv=4, pconv=4, pamt=40000)
+        _term(db, term="신규2", adgroup_id="grp-c", dconv=3, pconv=3, pamt=30000)
+        _proposal(db, adgroup_id="grp-a", term="기존제안", status="pending")
+        res = lane.run_search_term_ss_lane(db, now=_NOW)
+    finally:
+        lane_mod._SS_PROMOTE_CAP = orig_cap
+    assert res["promote_deduped"] == 1
+    assert res["promote_proposals_created"] == 2
+    assert res["promote_over_cap"] == 0
+    terms = {p.target_id for p in db.query(NaverProposal).filter(NaverProposal.proposal_type == _TYPE).all()}
+    assert terms == {"기존제안", "신규1", "신규2"}
+
+
 # ── ⑥ drift 가드 — ALL_PROPOSAL_TYPES·INFORMATIONAL_PROPOSAL_TYPES 등록 확인 ──
 def test_search_term_promote_registered_in_drift_guards():
     from app.services.naver_ad.proposal_writer import ALL_PROPOSAL_TYPES, INFORMATIONAL_PROPOSAL_TYPES
