@@ -1541,30 +1541,58 @@ def _exploration_last_step(db: Session, adgroup_id: str) -> dict | None:
 
 
 def _exploration_yesterday_flow(db: Session, adgroup_id: str, yesterday: date, from_hour: int) -> int | None:
-    """어제 [from_hour, 23] 시간대 이 그룹 clk 합(롤링 24h 창의 어제 부분, codex P1 자정 리셋).
+    """어제 [from_hour, 23] 시간대 이 그룹 clk 합(롤링 24h 창의 어제 부분, codex P1 자정 리셋 +
+    신규 P1 유닛-레벨 교차확인). 반환 int=확정 clk / None=확정 불가(fail-toward-hold 신호).
+
     출처: NaverKeywordHourly(keyword_hourly_sweep이 SHOPPING 그룹을 keyword_id='' sentinel →
-    entity_type='adgroup'·entity_id=adgroup_id로 축적, 365일 보존). 반환:
-    - int: 어제 스윕이 돈 날(그 날짜 행 존재) → 이 그룹 clk 합(그룹 행 부재=무활동=0).
-    - None: 어제 스윕이 아예 안 돈 날(그 날짜 행 전무) → 롤링 창 확정 불가(fail-toward-hold 신호).
-    (전자와 후자를 구분: 그룹만 없으면 무활동 0, 날짜 전체가 없으면 파이프라인 갭 None.)"""
-    any_row = (
-        db.query(NaverKeywordHourly.id)
-        .filter(NaverKeywordHourly.ad_date == yesterday)
-        .first()
-    )
-    if any_row is None:
-        return None  # 어제 시간별 스윕 미가동 — 롤링 창 확정 불가
-    (clk,) = (
-        db.query(sqlfunc.coalesce(sqlfunc.sum(NaverKeywordHourly.clk), 0))
+    entity_type='adgroup'·entity_id=adgroup_id로 유닛별 hh24 통째 축적). ★keyword_hourly_sweep은
+    **유닛-부분적**(실패/캡 스킵 유닛만 빠지고 나머지 커밋) — "어제 아무 행이나 있으면 스윕 성공"의
+    날짜-레벨 판정은 이 그룹만 실패한 날 "flow 0" 오독을 낳는다(codex 신규 P1). 그래서:
+
+    ① 이 그룹의 어제 시간별 행 존재 = 이 유닛이 스윕됨(전 hh24 저장) → 창 합이 신뢰 가능(반환).
+    ② 이 그룹 시간별 부재 → 어제 naver_ad_daily(이 adgroup, sentinel 제외)로 유닛-레벨 교차확인:
+       - 이 그룹 daily clk>0 → 클릭 실재했는데 시간별만 누락(이 유닛 스윕 실패) → None(fail-toward-hold).
+       - 이 그룹 daily 행 있고 clk=0 → 일별 grain 확정 무클릭 → 0(정상 사용).
+       - 이 그룹 daily 행 없음 → 어제 daily가 **수집됐는지**(날짜-레벨 — daily는 원자적 일 수집)로 분기:
+         · 어제 daily 수집됨(다른 그룹 행 존재) → 이 그룹 무활동 확정 → 0.
+         · 어제 daily 미수집(새벽 07:30 전 등 전무) → 확인 불가 → None(fail-toward-hold, 안전 방향)."""
+    group_hourly = (
+        db.query(NaverKeywordHourly.clk, NaverKeywordHourly.hour)
         .filter(
             NaverKeywordHourly.ad_date == yesterday,
             NaverKeywordHourly.entity_type == "adgroup",
             NaverKeywordHourly.entity_id == adgroup_id,
-            NaverKeywordHourly.hour >= from_hour,
         )
-        .one()
+        .all()
     )
-    return int(clk)
+    if group_hourly:  # ① 이 유닛 스윕됨 → 시간별 창 합 신뢰
+        return sum(int(clk) for clk, hour in group_hourly if hour >= from_hour)
+
+    # ② 이 그룹 시간별 부재 → 어제 daily 증거로 교차확인.
+    group_daily = (
+        db.query(NaverAdDaily.clk)
+        .filter(
+            NaverAdDaily.ad_date == yesterday,
+            NaverAdDaily.adgroup_id == adgroup_id,
+            NaverAdDaily.adgroup_id != BACKFILL_SENTINEL_ADGROUP,
+        )
+        .all()
+    )
+    if group_daily:
+        total = sum(int(c) for (c,) in group_daily)
+        return None if total > 0 else 0  # clk>0=시간별만 누락(hold) / clk=0=확정 무클릭
+    # 이 그룹 어제 daily 행 없음 → 어제 daily가 수집됐는지(날짜-레벨) 확인.
+    any_daily = (
+        db.query(NaverAdDaily.id)
+        .filter(
+            NaverAdDaily.ad_date == yesterday,
+            NaverAdDaily.adgroup_id != BACKFILL_SENTINEL_ADGROUP,
+        )
+        .first()
+    )
+    if any_daily is not None:
+        return 0  # 어제 daily 수집됨·이 그룹 부재 = 무활동 확정
+    return None  # 어제 daily 미수집(새벽 등) → 확인 불가 → fail-toward-hold
 
 
 def _exploration_weighted_rank(buckets: list[dict]) -> Decimal | None:

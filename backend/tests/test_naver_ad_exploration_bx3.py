@@ -87,8 +87,18 @@ def _hourly(db, *, adgroup_id, hour, clk, ad_date=YESTERDAY, imp=20, cost=0, avg
     db.commit()
 
 
+def _yesterday_daily(db, *, adgroup_id, clk, campaign_id=CAMP, ad_date=YESTERDAY):
+    """어제 naver_ad_daily 1행(유닛-레벨 flow 교차확인 원료 — 시간별 부재 시 이 증거로 판정)."""
+    db.add(NaverAdDaily(
+        ad_date=ad_date, campaign_id=campaign_id, campaign_type="SHOPPING",
+        adgroup_id=adgroup_id, keyword_id="-", imp=50, clk=clk, cost=100,
+        conv_direct_amt=0, conv_indirect_amt=0,
+    ))
+    db.commit()
+
+
 def _setup(db, *, campaign_type="SHOPPING", settle_clk=3, settle_conv=30000, group_bid=1000,
-           adgroup_id=GRP, bep_roas="0.5"):
+           adgroup_id=GRP, bep_roas="0.5", yesterday_daily=True, yesterday_daily_clk=0):
     """탐색 후보 SHOPPING 그룹 시드 — 캠페인/그룹 엔티티(on)·정착창 실적(clk<10=핫셋 미달)·
     BEP 매핑(경제성 상한)·신선 스냅샷(서킷브레이커 통과)."""
     db.add(NaverCampaignSettings(campaign_id=CAMP, auto_operate=True, optimizer="ours"))
@@ -113,9 +123,11 @@ def _setup(db, *, campaign_type="SHOPPING", settle_clk=3, settle_conv=30000, gro
     # GATE P2-risk6: daily 손실 게이트(_bleeding_hold_reason)는 소급채점 신선도(latest_asof≥today-1)를
     # 요구한다 — 신선 더미 신호(우리 그룹 아님)를 심어 신선도 통과 + 우리 그룹은 손실 보드 밖(=정상 탐색).
     _retro(db, target_id="dummy-fresh")
-    # codex P1: 롤링 24h 창의 어제 스윕이 돌았음을 표시(더미 그룹 1행) → flow_available=True.
-    # 우리 그룹은 어제 행 없음 = 무활동(yesterday_flow=0). 흐름 시나리오는 테스트별로 _hourly 추가.
-    _hourly(db, adgroup_id="dummy-hr", hour=10, clk=0)
+    # codex 신규 P1: 롤링 24h 어제 부분의 유닛-레벨 flow 확정 원료 = 어제 naver_ad_daily(이 그룹).
+    # 기본 clk=0(어제 무클릭 확정) → flow_available=True·recent_flow 0. 흐름 시나리오는 테스트별로
+    # _hourly(시간별)·yesterday_daily_clk로 제어. yesterday_daily=False면 어제 daily 미수집(새벽) 재현.
+    if yesterday_daily:
+        _yesterday_daily(db, adgroup_id=adgroup_id, clk=yesterday_daily_clk)
 
 
 def _prior_step(db, *, adgroup_id=GRP, target_type="adgroup", target_id=GRP,
@@ -394,17 +406,43 @@ def test_lane_rolling_flow_reactivates_when_truly_24h_idle(db):
     assert p.rationale.startswith("[탐색UP·재가동]")
 
 
-def test_lane_fail_toward_hold_when_yesterday_sweep_missing(db):
-    """codex P1: 어제 시간별 스윕 미가동(그 날짜 행 전무) → fail-toward-hold(스텝 대신 관측)."""
-    _setup(db, settle_clk=4)
+# ── codex 신규 P1: 유닛-레벨 flow 교차확인(어제 daily 증거, 날짜-레벨 오독 차단) ──
+
+def test_lane_partial_sweep_failure_holds_via_daily_evidence(db):
+    """codex 신규 P1: 부분 스윕 실패 — 타 유닛 어제 시간별 존재·이 그룹 시간별 부재·이 그룹 어제
+    daily clk>0 → 날짜-레벨이면 'flow 0' 오독하나, 유닛-레벨 교차확인으로 flow 살아있음 → hold."""
+    _setup(db, settle_clk=4, yesterday_daily_clk=5)  # 이 그룹 어제 daily clk=5(클릭 실재)
     _prior_step(db, changed_at=NOW - timedelta(days=1))
-    # 어제 스윕 행 삭제(더미 포함) → yesterday_flow=None → flow_available=False
-    db.query(NaverKeywordHourly).filter(NaverKeywordHourly.ad_date == YESTERDAY).delete()
-    db.commit()
+    _hourly(db, adgroup_id="other-unit", hour=10, clk=3)  # 타 유닛만 스윕됨(이 그룹 시간별 없음)
     curve = [_hour(5, imp=20, clk=0, cost=0, avg_rank=5.0),
              _hour(6, imp=20, clk=0, cost=0, avg_rank=5.0)]
     result, mock_exec = _run(db, curve)
-    assert result["explored"] == 0 and result["explored_held"] == 1
+    assert result["explored"] == 0 and result["explored_held"] == 1  # 시간별만 누락 → hold
+    mock_exec.assert_not_called()
+
+
+def test_lane_daily_clk_zero_steps_normally(db):
+    """codex 신규 P1: 이 그룹 어제 daily clk=0(일별 grain 확정 무클릭)·시간별 부재 → 어제 0 정상
+    사용 → 스텝 발사(정체 재가동)."""
+    _setup(db, settle_clk=4, yesterday_daily_clk=0)  # 어제 daily clk=0
+    _prior_step(db, changed_at=NOW - timedelta(days=1))
+    curve = [_hour(5, imp=20, clk=0, cost=0, avg_rank=5.0),
+             _hour(6, imp=20, clk=0, cost=0, avg_rank=5.0)]
+    result, mock_exec = _run(db, curve)
+    assert result["explored"] == 1  # 확정 무클릭 → 정상 스텝
+    p = db.get(NaverProposal, mock_exec.call_args[0][1])
+    assert p.rationale.startswith("[탐색UP·재가동]")
+
+
+def test_lane_dawn_no_daily_yet_fail_toward_hold(db):
+    """codex 신규 P1: 새벽(07:30 전) — 어제 daily 미수집(전무)·이 그룹 시간별도 부재 →
+    확인 불가 → fail-toward-hold(관측 유지)."""
+    _setup(db, settle_clk=4, yesterday_daily=False)  # 어제 daily 미수집
+    _prior_step(db, changed_at=NOW - timedelta(days=1))
+    curve = [_hour(5, imp=20, clk=0, cost=0, avg_rank=5.0),
+             _hour(6, imp=20, clk=0, cost=0, avg_rank=5.0)]
+    result, mock_exec = _run(db, curve)
+    assert result["explored"] == 0 and result["explored_held"] == 1  # fail-toward-hold
     mock_exec.assert_not_called()
 
 
