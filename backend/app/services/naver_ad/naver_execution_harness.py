@@ -32,7 +32,14 @@ from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 
 from app.models import NaverCampaignSettings, NaverChangeLog, NaverEntity, NaverHourlySnapshot, NaverProposal
-from app.services.naver_ad import account_diagnosis, campaign_target_resolver, diary, guardrail_gate, naver_sa_writer
+from app.services.naver_ad import (
+    account_diagnosis,
+    campaign_target_resolver,
+    diary,
+    guardrail_gate,
+    naver_sa_writer,
+    search_term_judge,
+)
 from app.services.naver_ad.bid_step_types import (
     BID_DOWN_TYPES,
     BID_UP_TYPES,
@@ -60,6 +67,11 @@ _RANK_STEP_MAX_AGE_MINUTES = 10
 # guardrail_gate 컨텍스트의 실적 창(account_diagnosis.LOW_CLICK_LOOKBACK_DAYS 재사용 —
 # 신규 상수 아님, pause_candidates/resume_candidates와 동일 창으로 정합성 유지).
 _GUARDRAIL_LOOKBACK_DAYS = account_diagnosis.LOW_CLICK_LOOKBACK_DAYS
+
+# SS3-A(PLAN §1 4) 검색어 제외 자동 실쓰기 1일 신규 제외 캡. 제외는 되돌림 비용이 있는 비대칭
+# 액션(잘못 자르면 매출 소실)이라 BX(탐색)의 수량캡 제거(D-NAO-71)와 달리 캡을 유지한다 —
+# 봉투 축소는 Jino 승인 후. account-wide 카운트(오늘 KST 성공한 exclude_search_term change_log).
+_SS_DAILY_EXCLUDE_CAP = 10
 
 
 class OptimizerGuardError(Exception):
@@ -120,6 +132,11 @@ class MissingExecutionTargetError(Exception):
 # guardrail_gate._check_budget이 구분한다.
 _ACTION_BY_PROPOSAL_TYPE = {
     "negative_keyword": "add_negative_keyword",
+    # SS3(검색어 ROAS 레이어) — 검색어 제외. negative_keyword와 같은 restricted-keywords API를
+    # 쓰지만 별도 액션·별도 executor로 분리한다(SS 전용 봉투: SHOPPING 명시 거부·일일캡). 자동
+    # 승인원 배선 없음 — Jino 콘솔 Confirm(approval_source='console')만이 승인 경로. explore/rank
+    # 스텝처럼 delegation에서도 영구 제외(delegable_types()가 SEARCH_TERM_EXCLUDE_TYPE를 뺀다).
+    search_term_judge.SEARCH_TERM_EXCLUDE_TYPE: "exclude_search_term",
     # bid 계열은 R0 레지스트리(bid_step_types)에서 파생 — 새 UP/DOWN 타입이 레지스트리에
     # 등록되면 실행 매핑도 자동 인식된다(가드는 UP으로 인식하는데 여기 매핑 누락으로
     # ActionNotExecutableError가 나는 어긋남 차단, codex R0 리뷰 P2).
@@ -179,7 +196,7 @@ EXTERNAL_DETECTION_ACTIONS: frozenset[str] = frozenset({
 # 계획서 PLAN_naver-ad-budget-control.md §0). 안전가드레일(BEP 이익하한·스톱로스·클램프·
 # +100%캡)은 guardrail_gate._check_budget이 그대로 유지한다 — "무제한 ≠ 무분별".
 OPEN_ACTIONS: frozenset[str] = frozenset(
-    {"add_negative_keyword", "update_bid", "set_user_lock", "update_budget"}
+    {"add_negative_keyword", "update_bid", "set_user_lock", "update_budget", "exclude_search_term"}
 )
 
 
@@ -253,6 +270,7 @@ def _claim_executing(db: Session, proposal: NaverProposal) -> None:
             _auto_operator.APPROVAL_SOURCE_PROBE,  # D-NAO-58 CD2: 탐침도 동일 킬스위치 가드(우회 금지)
             _auto_operator.APPROVAL_SOURCE_REVERT,  # D-NAO-58 CD3: 되돌림도 킬스위치 통과(우회 금지)
             APPROVAL_SOURCE_EXPLORE,  # BX2 D-NAO-70: 탐색 자동 실쓰기도 동일 킬스위치 가드(우회 금지, probe_op 관례)
+            search_term_judge.APPROVAL_SOURCE_SS_EXCLUDE,  # SS3-A: 미래 자동 활성화 대비 사전 등록(현재 미배선)
         ) and not _auto_operator._auto_operate_now(db, proposal.campaign_id):
             proposal.status = "approved"  # 클레임 원복 — executing 잔존 방지(미실행 정직 상태)
             db.commit()
@@ -627,6 +645,178 @@ def _execute_add_negative_keyword(db: Session, proposal: NaverProposal, now: dat
 
     log.info(
         "naver_execution_harness: 실쓰기 성공 proposal_id=%s adgroup=%s keyword=%r created_ids=%s",
+        proposal.id, proposal.adgroup_id, proposal.target_id, result.created_ids,
+    )
+    return log_entry
+
+
+def _count_search_term_excludes_today(db: Session, now: datetime) -> int:
+    """오늘(KST) 성공한 exclude_search_term 실쓰기 수 — account-wide 일일 캡(§1 4) 카운트.
+    실제 쓰기 확정 행만(dry_run=False ∧ after_value 존재) 센다(_guard_failure의 [실행 불가]·
+    실패 행은 네이버 상태를 안 바꿨으므로 제외 — compute_change_cadence의 판별과 동일 규율).
+    changed_at은 executor가 now(kst_now, KST naive)로 심으므로 KST 자정 경계로 비교한다."""
+    today_start = datetime.combine(now.date(), datetime.min.time())
+    return (
+        db.query(NaverChangeLog)
+        .filter(
+            NaverChangeLog.action == "exclude_search_term",
+            NaverChangeLog.dry_run.is_(False),
+            NaverChangeLog.after_value.isnot(None),
+            NaverChangeLog.changed_at >= today_start,
+        )
+        .count()
+    )
+
+
+def _execute_search_term_exclude(db: Session, proposal: NaverProposal, now: datetime) -> NaverChangeLog:
+    """검색어 제외 실쓰기 1건 (SS3-A, PLAN §3). naver_sa_writer.add_restricted_keywords로
+    파워링크(WEB_SITE) 광고그룹에 제외키워드를 등록한다. _execute_add_negative_keyword와 동일
+    쓰기 손(restricted-keywords)이지만 **SS 전용 봉투**를 추가한다:
+      · SHOPPING 명시 거부(§실측-0): ncc restricted-keywords API가 SHOPPING 그룹 쓰기 불가
+        (HTTP 400 code 3728 실측). writer도 WEB_SITE만 허용(fail-closed 최종 관문)이지만, 여기서
+        엔티티 campaign_type='SHOPPING'을 먼저 걸러 무의미한 API 왕복·오해석을 차단(이중 방벽).
+      · 일일 캡(§1 4) 2단 검증(codex[P2] TOCTOU): 사전 캡 검사(쓰기 전 count)만으로는 원자적이지
+        않다 — 동시 Confirm 2건이 둘 다 사전 검사를 통과한 뒤 각자 네이버에 실제로 쓰기를
+        가할 수 있다(캡을 뚫음). 그래서 ①쓰기 전 카운트로 hold([실행 불가], 이 함수 앞부분)
+        + ②**쓰기 성공 직후 재카운트**로 최종 확정한다 — 재카운트가 캡에 이미 도달했다면
+        (이번 건의 log_entry는 아직 커밋 전이므로, 그 사이 다른 Confirm이 먼저 커밋됐다는 뜻)
+        방금 등록한 제외키워드를 delete_restricted_keywords로 즉시 롤백하고 failed 종결한다
+        (제외는 되돌림 비용 있는 비대칭 액션이라 runaway 방지, §1 4).
+    재조회 검증(등록 후 GET)·change_log 전건·킬스위치·클레임은 add_restricted_keywords writer와
+    _claim_executing이 그대로 담당(_execute_add_negative_keyword와 동형).
+
+    ★자동 발사 없음(PLAN §3): 이 스프린트에서 실쓰기 경로는 Jino 콘솔 Confirm
+    (approval_source='console')만이 이 함수에 도달한다. 자동 승인원(ss_exclude)은 정의만 돼 있고
+    (search_term_judge.APPROVAL_SOURCE_SS_EXCLUDE) 어디에서도 자동 승인을 배선하지 않는다."""
+    if proposal.target_type != "search_term":
+        reason = (
+            f"target_type={proposal.target_type!r} — 검색어 제외는 search_term 대상만 가능"
+            "(restricted-keywords는 검색어 텍스트 등록 API, fail-closed)"
+        )
+        _guard_failure(db, proposal, now, "exclude_search_term", reason)
+        raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
+
+    if not proposal.adgroup_id:
+        reason = (
+            "adgroup_id 없음 — restricted-keywords API는 adgroupId 필수(ref 27 §8-1, 재생성 필요)"
+        )
+        _guard_failure(db, proposal, now, "exclude_search_term", reason)
+        raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
+
+    # SHOPPING 명시 거부(§실측-0) — 엔티티 campaign_type이 SHOPPING이면 API 자동 제외 불가.
+    entity = (
+        db.query(NaverEntity)
+        .filter(NaverEntity.entity_type == "adgroup", NaverEntity.entity_id == proposal.adgroup_id)
+        .first()
+    )
+    if entity is not None and (entity.campaign_type or "") == "SHOPPING":
+        reason = (
+            "SHOPPING 광고그룹 제외키워드 API 쓰기 불가(§실측-0, HTTP 400 code 3728) — "
+            "쇼핑 제외는 콘솔 수동만(fail-closed 명시 거부, writer WEB_SITE 관문과 이중 방벽)"
+        )
+        _guard_failure(db, proposal, now, "exclude_search_term", reason)
+        raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
+
+    # 일일 캡(§1 4) — 오늘 성공 제외 수가 캡 도달이면 hold(비대칭 액션 runaway 방지).
+    excludes_today = _count_search_term_excludes_today(db, now)
+    if excludes_today >= _SS_DAILY_EXCLUDE_CAP:
+        reason = (
+            f"검색어 제외 일일 캡 도달({excludes_today}≥{_SS_DAILY_EXCLUDE_CAP}, §1 4) — "
+            "제외는 되돌림 비용 있는 비대칭 액션이라 일일 신규 제외 상한 유지(hold, 익일 재시도)"
+        )
+        _guard_failure(db, proposal, now, "exclude_search_term", reason)
+        raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
+
+    _claim_executing(db, proposal)
+
+    try:
+        result = naver_sa_writer.add_restricted_keywords(proposal.adgroup_id, [proposal.target_id])
+    except Exception as exc:  # WriteValidationError(SHOPPING/중복 등)/WriteError/WriteVerificationError
+        proposal.status = "failed"  # 자동 재시도 차단(approved 게이트) — 재승인만 재시도 경로
+        fail_entry = NaverChangeLog(
+            entity_type=proposal.target_type, entity_id=proposal.target_id,
+            campaign_id=proposal.campaign_id, action="exclude_search_term",
+            rationale=(
+                f"{proposal.rationale or ''} {WRITE_FAILURE_MARKER} {type(exc).__name__}: {str(exc)[:300]}"
+            ),
+            predicted_json=proposal.expected_effect, proposal_id=proposal.id,
+            dry_run=False, outcome="failed", changed_at=now, executed_at=now,
+        )
+        db.add(fail_entry)
+        db.commit()
+        log.error(
+            "naver_execution_harness: 검색어 제외 실쓰기 실패 proposal_id=%s adgroup=%s term=%r — %s: %s",
+            proposal.id, proposal.adgroup_id, proposal.target_id, type(exc).__name__, exc,
+        )
+        raise
+
+    # codex[P2] TOCTOU 2단 검증(§1 4, docstring 참조): 쓰기 성공 직후 재카운트 — 이 시점엔
+    # 이번 건의 log_entry가 아직 db에 없으므로, 재카운트가 캡에 이미 도달했다면 위 사전 검사
+    # 통과 후 동시 Confirm이 먼저 커밋된 것 → 이번 건을 더하면 캡 초과, 방금 등록한 키워드를
+    # 원복한다.
+    excludes_after_write = _count_search_term_excludes_today(db, now)
+    if excludes_after_write >= _SS_DAILY_EXCLUDE_CAP:
+        rollback_reason = (
+            f"일일 캡 동시성 초과 롤백(쓰기 후 재카운트 {excludes_after_write}≥{_SS_DAILY_EXCLUDE_CAP}, "
+            f"§1 4) — 사전 검사 통과 후 동시 Confirm 경합으로 캡 도달, 방금 등록한 제외키워드"
+            f"(created_ids={result.created_ids}) 원복"
+        )
+        try:
+            naver_sa_writer.delete_restricted_keywords(proposal.adgroup_id, result.created_ids)
+            rolled_back = True
+            rollback_reason += " | 롤백 성공(재조회로 삭제 확인, delete_restricted_keywords fail-closed)"
+        except Exception as rollback_exc:  # noqa: BLE001 — 롤백 실패도 fail-open 금지, 사실대로 기록
+            rolled_back = False
+            rollback_reason += (
+                f" | 롤백 실패({type(rollback_exc).__name__}: {str(rollback_exc)[:300]}) — "
+                "네이버 측에 제외키워드가 남아있을 수 있음, 수동 확인 필요"
+            )
+            log.error(
+                "naver_execution_harness: 캡 초과 롤백 실패 proposal_id=%s adgroup=%s created_ids=%s — %s: %s",
+                proposal.id, proposal.adgroup_id, result.created_ids,
+                type(rollback_exc).__name__, rollback_exc,
+            )
+        proposal.status = "failed"  # 자동 재시도 차단(approved 게이트) — 재승인만 재시도(캡 리셋 후)
+        # ★before_value/after_value를 채우지 않는다(의도적, _guard_failure·위 예외 실패 경로와
+        # 동일 규율) — _count_search_term_excludes_today는 dry_run=False ∧ after_value 존재만
+        # "네이버 상태가 바뀐 확정 행"으로 센다. 여기는 상태를 원복했으므로(성공이든 실패든) 그
+        # 카운트에 다시 잡히면 안 된다 — 롤백 세부는 rationale 텍스트로만 감사 기록한다.
+        fail_entry = NaverChangeLog(
+            entity_type=proposal.target_type, entity_id=proposal.target_id,
+            campaign_id=proposal.campaign_id, action="exclude_search_term",
+            rationale=f"{proposal.rationale or ''} {WRITE_FAILURE_MARKER} {rollback_reason}",
+            predicted_json=proposal.expected_effect, proposal_id=proposal.id,
+            dry_run=False, outcome="failed", changed_at=now, executed_at=now,
+        )
+        db.add(fail_entry)
+        db.commit()
+        log.error(
+            "naver_execution_harness: 검색어 제외 일일 캡 동시성 초과 proposal_id=%s adgroup=%s "
+            "term=%r rolled_back=%s",
+            proposal.id, proposal.adgroup_id, proposal.target_id, rolled_back,
+        )
+        raise naver_sa_writer.WriteError(rollback_reason)
+
+    # outcome 미기록 — proposal_scoreboard가 D+14까지 IS NULL로 식별(_execute_add_negative_keyword 주석).
+    log_entry = NaverChangeLog(
+        entity_type=proposal.target_type, entity_id=proposal.target_id,
+        campaign_id=proposal.campaign_id, action="exclude_search_term",
+        rationale=proposal.rationale, predicted_json=proposal.expected_effect,
+        proposal_id=proposal.id, dry_run=False,
+        before_value=json.dumps(result.before, ensure_ascii=False),
+        after_value=json.dumps(
+            {"after": result.after, "created_ids": result.created_ids}, ensure_ascii=False
+        ),
+        changed_at=now, executed_at=now, verify_date=(now + timedelta(days=VERIFY_DAYS)).date(),
+    )
+    db.add(log_entry)
+    db.flush()
+    proposal.executed_change_log_id = log_entry.id
+    proposal.status = "approved"  # 클레임 해제(복원) — 같은 커밋에 executed_change_log_id 연결
+    db.commit()
+
+    log.info(
+        "naver_execution_harness: 검색어 제외 실쓰기 성공 proposal_id=%s adgroup=%s term=%r created_ids=%s",
         proposal.id, proposal.adgroup_id, proposal.target_id, result.created_ids,
     )
     return log_entry
@@ -1151,6 +1341,7 @@ _WRITE_EXECUTORS = {
     "update_bid": _execute_update_bid,
     "set_user_lock": _execute_set_user_lock,
     "update_budget": _execute_update_budget,
+    "exclude_search_term": _execute_search_term_exclude,  # SS3-A(검색어 제외)
 }
 
 
@@ -1213,6 +1404,17 @@ def real_write_blocker(proposal: NaverProposal) -> str | None:
             return (
                 f"target_type={proposal.target_type!r} — negative_keyword 실행은 "
                 "search_term 대상만 가능(격상 경로 제안은 재생성 필요)"
+            )
+        if not proposal.adgroup_id:
+            return "adgroup_id 없음 — 실행 대상 정보 부족(구 제안이거나 재생성 필요)"
+    elif action == "exclude_search_term":
+        # SS3-A(검색어 제외) 구조 판정(콘솔 executable) — _execute_search_term_exclude의 구조
+        # 가드와 동일 정적 조건(이중 방벽). SHOPPING 명시 거부·일일캡은 라이브/집계가 필요한
+        # 실행시점 가드라 여기(정적 UI 판정)선 판정하지 않는다(add_negative_keyword의 ⚠️ 관례).
+        if proposal.target_type != "search_term":
+            return (
+                f"target_type={proposal.target_type!r} — 검색어 제외는 search_term 대상만 가능"
+                "(재생성 필요)"
             )
         if not proposal.adgroup_id:
             return "adgroup_id 없음 — 실행 대상 정보 부족(구 제안이거나 재생성 필요)"
@@ -1381,6 +1583,7 @@ def execute(db: Session, proposal_id: int, *, dry_run: bool = True, now: datetim
             _auto_operator.APPROVAL_SOURCE_PROBE,  # D-NAO-58 CD2: 탐침도 동일 킬스위치 가드(우회 금지)
             _auto_operator.APPROVAL_SOURCE_REVERT,  # D-NAO-58 CD3: 되돌림도 진입 가드(probe_op와 동일 2중 harness 방어)
             APPROVAL_SOURCE_EXPLORE,  # BX2 D-NAO-70: 탐색 자동 실쓰기도 진입 킬스위치 가드(우회 금지, probe_op 관례)
+            search_term_judge.APPROVAL_SOURCE_SS_EXCLUDE,  # SS3-A: 미래 자동 활성화 대비 사전 등록(현재 미배선)
         ) and not _auto_operator._auto_operate_now(db, proposal.campaign_id):
             log.warning(
                 "naver_execution_harness: 킬스위치 OFF — proposal_id=%s(approval_source=%s, "

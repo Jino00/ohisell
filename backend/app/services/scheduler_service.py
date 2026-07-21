@@ -590,6 +590,23 @@ def run_naver_auto_operator_daily_job():
     finally:
         db.close()
 
+    # SS3(검색어 제외 브리핑·제안 생성) — 일 레인과 같은 흐름에 편입(별 세션·fail-open:
+    # 브리핑 실패가 일 레인 집행을 막지 않는다). 실쓰기 0(Confirm 전용) — 제안·diary만 생성.
+    db2 = _get_own_db_session()
+    try:
+        from app.services.naver_ad.search_term_ss_lane import run_search_term_ss_lane
+
+        ss = run_search_term_ss_lane(db2)
+        log.info(
+            "[스케줄러] naver 검색어 제외 브리핑: shopping=%s powerlink=%s 제안생성=%s dedup=%s",
+            ss["shopping_candidates"], ss["powerlink_candidates"],
+            ss["proposals_created"], ss["deduped"],
+        )
+    except Exception as e:  # noqa: BLE001 — 브리핑 실패는 일 레인과 분리(fail-open)
+        log.exception("[스케줄러] run_search_term_ss_lane 에러(fail-open): %s", e)
+    finally:
+        db2.close()
+
 
 def run_naver_auto_operator_hourly_job():
     """auto_operator 시간당 레인 — 핫셋 intraday 밴드 관제 실입찰 (매시 :20 KST, D-NAO-49).
