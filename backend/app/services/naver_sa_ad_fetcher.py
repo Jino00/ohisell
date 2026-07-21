@@ -440,7 +440,12 @@ def _safe_int(v) -> int:
     try:
         return int(v)
     except (ValueError, TypeError):
-        return 0
+        # 과거 날짜 백필 보고서는 cost 등을 float 표기('9670.0')로 내려준다(2026-07-21 실측
+        # — int() 단독이면 ValueError→0으로 조용히 소실돼 cost=0 오적재). float 경유 재시도.
+        try:
+            return int(float(v))
+        except (ValueError, TypeError):
+            return 0
 
 
 def _row_date_iso(raw: str) -> str | None:
