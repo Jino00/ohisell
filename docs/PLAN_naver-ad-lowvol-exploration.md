@@ -68,6 +68,7 @@ run_hourly_lane (기존)
 - **BX1 (Opus)** — 후보·트리거·래더 순수함수 SA + 상수 + 단위 테스트(행위 불변·레인 미배선).
 - **BX2 (Opus·GATE)** — `update_ad_bid` UP 개방 + explore_op 승인원 + 카나리 전 캠페인 해제. 자동발사 경계 재검증(탐색 외 경로 여전히 봉쇄) — 적대 GATE + codex 왕복.
 - **BX3 (Opus·GATE)** — 레인 배선(핫셋 여집합 경로) + dedup + 래더 사이클 판정 + 다운스트림(diary·scoreboard·커맨드센터 표기).
+  - **BX2 GATE 이월 필수 항목**: ①경제성 상한을 레인 관례가 아닌 **쓰기-경계 하드 게이트**로 승격(ceiling 초과 target_bid는 harness에서 fail-closed 차단 — D-NAO-71로 유일 가격 브레이크) ②쿨다운 tz 계약: `last_step_at`(change_log=KST)과 `now`(kst_now) **동일 tz 주입** 검증([[sqlite-server-default-now-is-utc]] 재발 방지) ③스텝 반올림 = floor(`//10*10`) 고정 — 30% 상한 미세 초과 방지 ④`AD_BID_CANARY_CAMPAIGNS` 잔존 사용(auto_operator 생성 게이트) D-NAO-70② 정합 정리 ⑤`BID_UP_TYPES` 소비처(스톱로스 base·소급채점·diary)의 bid_up_explore 처리 회귀 확인.
 - **BX4** — 배포(safe_deploy)·라이브 합격: 탐색 UP 실집행(change_log dry_run=0·`[탐색UP]`) → 사이클 래더 판정 실측(2h) → 클릭 유입 그룹 1개 이상 ROAS 평가 경로 진입 관측.
 
 ## §난제 (착수 전 못박음)
