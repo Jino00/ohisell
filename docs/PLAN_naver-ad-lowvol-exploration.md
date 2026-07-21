@@ -97,7 +97,7 @@ run_hourly_lane (기존)
 ## §체크리스트
 
 - [x] BX1 순수 SA + 테스트 (행위 불변)
-- [x] BX2 소재 UP 손 개방(explore_op 승인원·카나리 전 캠페인·30% 면제·경제성 상한) + 경계 차등 테스트 — **GATE·codex 대기**
+- [x] BX2 소재 UP 손 개방(explore_op 승인원·카나리 전 캠페인·30% 면제·경제성 상한) + 경계 차등 테스트 — **GATE PASS(P1 1 수정·재검 확인) + codex 왕복 합의(P1 ceiling fail-closed·P2 쌍방향 잠금 RESOLVED, 커밋 `8c66284`·`da2ad3a`)**
 - [ ] BX3 레인 배선 + 래더 + 다운스트림 GATE PASS
 - [ ] BX4 배포 + 라이브 합격(탐색 1사이클 실측)
 - [ ] 상수 실측 캘리브레이션(첫 주)
