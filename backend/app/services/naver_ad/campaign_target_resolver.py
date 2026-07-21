@@ -123,6 +123,14 @@ def weighted_product_value_for_adgroup(db: Session, adgroup_id: str, column) -> 
     return _weighted_target_for_cpids(db, _cpids_for_adgroup(db, adgroup_id), column)
 
 
+def weighted_product_value_for_campaign(db: Session, campaign_id: str, column) -> Decimal | None:
+    """캠페인의 그룹들에 매핑된 상품의 column(bep_roas 등)을 최근 주문매출로 가중평균
+    (B-X BX2 — exploration_ceiling의 캠페인-grain BEP 폴백용, weighted_product_value_for_adgroup의
+    캠페인 대칭). has_cost=True(원가 확인) 상품만 대상, 매핑/대상 0개면 None. 사적 함수
+    `_weighted_target_for_cpids`를 다른 모듈이 직접 크로스임포트하지 않도록 이 공개 진입점을 둔다."""
+    return _weighted_target_for_cpids(db, _cpids_for_campaign(db, campaign_id), column)
+
+
 def resolve_adgroup_target_roas(db: Session, adgroup_id: str) -> dict:
     """광고그룹 grain의 목표 ROAS를 상품 파생(②)으로 해석. 반환: {target_roas, source}.
 

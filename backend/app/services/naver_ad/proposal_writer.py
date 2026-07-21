@@ -63,10 +63,11 @@ _BID_UP = "bid_up"
 _BID_DOWN = "bid_down"
 _BID_UP_SERVO = "bid_up_servo"  # IU-R R1, 쇼검 폐루프 순위 서보(auto_operator.run_hourly_lane inline 생성)
 _BID_UP_RANK = "bid_up_rank"  # IU-R R2, 파워링크 estimate 직행(auto_operator.run_hourly_lane inline 생성)
+_BID_UP_EXPLORE = "bid_up_explore"  # B-X BX2(D-NAO-70), 저볼륨 그룹 탐색 UP(exploration 레인 inline, BX3 배선)
 _BUDGET_DOWN = "budget_down"  # D-NAO-42-f, budget_up과 동형(감액은 자유 — guardrail_gate 참조)
 
 ALL_PROPOSAL_TYPES: frozenset[str] = frozenset({
-    _BID_UP, _BID_DOWN, _BID_UP_SERVO, _BID_UP_RANK, _GROWTH_BID_UP, _NEGATIVE, _PAUSE, _RESUME,
+    _BID_UP, _BID_DOWN, _BID_UP_SERVO, _BID_UP_RANK, _BID_UP_EXPLORE, _GROWTH_BID_UP, _NEGATIVE, _PAUSE, _RESUME,
     _BUDGET_UP, _BUDGET_DOWN, _BUDGET_PRE_EXHAUSTION,
     _ANOMALY, _ANOMALY_FRESHNESS, _ACCOUNT_BRIEF, PROPOSAL_TYPE_PACING, PROPOSAL_TYPE_CPC,
     _WISDOM_PROMOTED,  # D-NAO-54 P3(정보성) — INFORMATIONAL_PROPOSAL_TYPES <= ALL 불변 유지

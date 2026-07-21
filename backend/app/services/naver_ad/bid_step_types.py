@@ -22,7 +22,17 @@ import re
 # ★IU-R R2(D-NAO-67 원리③): 파워링크(WEB_SITE=키워드) estimate 직행 타입 `bid_up_rank` 추가 —
 #   목표 순위(현재−1)로 필요입찰(estimate)을 직행 산정하는 시간당 레인 inline UP. UP 의미는
 #   bid_up과 동일하고, ±15% 면제·rank-step 의미(스톱로스 current 기준·신선도·TOCTOU)만 다르다.
-BID_UP_TYPES: frozenset[str] = frozenset({"bid_up", "growth_bid_up", "bid_up_servo", "bid_up_rank"})
+# ★B-X BX2(D-NAO-70·71): 저볼륨 그룹 탐색 UP 타입 `bid_up_explore` 추가 — 핫셋 게이트(정착
+#   클릭≥10) 밖 "죽는 캠페인" 그룹에 클릭 표본을 사는 능동 탐색 스텝(+30% 고정). UP 의미
+#   (BEP·스톱로스·예산·쿨다운·방향)는 bid_up과 동일하나 두 가지가 다르다: ①±15% 변경폭
+#   대신 **30% 상한**(EXPLORATION_STEP_TYPES, guardrail_gate._EXPLORATION_MAX_CHANGE_PCT — 완전
+#   면제 아님, 30% 초과는 여전히 차단) ②표본-기반 BEP 완전성 게이트 면제(콜드 그룹은 정착 표본이
+#   없어 BEP를 못 재므로 — 대체 가격 브레이크 = product_bep 연동 경제성 상한, exploration_ceiling).
+#   rank-step 아님(estimate/서보 스텝 산정이 아니라 고정 +30% 래더 — base_bid 마커·신선도·TOCTOU
+#   기계 미적용). explore_op 자동 실쓰기 승인원(exploration.APPROVAL_SOURCE_EXPLORE)에서만 발사.
+BID_UP_TYPES: frozenset[str] = frozenset(
+    {"bid_up", "growth_bid_up", "bid_up_servo", "bid_up_rank", "bid_up_explore"}
+)
 
 # 하향 입찰 스텝 proposal_type(안전방향 — 노출↓·지출↓). 종전 guardrail_gate._BID_DOWN_TYPES.
 BID_DOWN_TYPES: frozenset[str] = frozenset({"bid_down"})
@@ -34,6 +44,12 @@ BID_DOWN_TYPES: frozenset[str] = frozenset({"bid_down"})
 # ★IU-R R2: `bid_up_rank`도 "목표 순위 한 단 위"의 estimate 필요입찰이 15%보다 클 수 있어(PLAN
 #   §1-1·D-NAO-20) 변경폭 면제. 대체 상한 = 경제성 상한(estimate>상한이면 상한까지) + 예산 pace.
 CHANGE_PCT_EXEMPT_TYPES: frozenset[str] = frozenset({"growth_bid_up", "bid_up_servo", "bid_up_rank"})
+
+# B-X BX2(D-NAO-70·71): 탐색 스텝 타입 — ±15% 대신 30% 변경폭 상한이 적용되는 UP 타입.
+# guardrail_gate가 이 집합을 보고 _MAX_CHANGE_PCT(0.15) 대신 _EXPLORATION_MAX_CHANGE_PCT(0.30)로
+# 변경폭을 검증한다(완전 면제 CHANGE_PCT_EXEMPT_TYPES와 **다름** — 30% 초과는 여전히 차단).
+# ★CHANGE_PCT_EXEMPT_TYPES·RANK_STEP_TYPES와 서로소여야 한다(면제도 rank-step도 아님, 아래 invariant 테스트).
+EXPLORATION_STEP_TYPES: frozenset[str] = frozenset({"bid_up_explore"})
 
 # 순위(rank) 스텝 타입 — R1 쇼검 서보 `bid_up_servo` + R2 파워링크 estimate 직행 `bid_up_rank`.
 # rank-step 타입은 (a) 스톱로스 base를 target_bid가 아니라 **스텝 전 current_bid**로 스위치하고

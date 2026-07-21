@@ -81,7 +81,8 @@ run_hourly_lane (기존)
 ## §실측 필요 (단정 금지)
 
 1. (제거됨 — D-NAO-71: 런당 캡 없음)
-2. 경제성 상한 산식 — product_bep(D-NAO-57) 연동: max_bid = f(공헌이익, 기대 CVR). **BX2 필수 구현**(휴리스틱 ×2 캡은 연동 전 임시 병행만).
+2. 경제성 상한 산식 — product_bep(D-NAO-57) 연동: max_bid = f(공헌이익, 기대 CVR). **BX2 필수 구현 완료**(`exploration.exploration_ceiling`): pooled_rpc(그룹→캠페인→계정 계층 수축, bid_simulator 재사용) ÷ BEP ROAS(그룹→캠페인→계정 폴백, campaign_target_resolver 재사용). 휴리스틱 ×2 캡은 병행(min 결합) — economic 부재 시 fail-closed 폴백.
+   - **보수 채택(추정 금지)**: `_servo_economic_ceiling` 선례는 rpc에 `diagnosis.correction_factor`(네이버 과소보고 상향 보정, >1)를 곱한다. 탐색 상한엔 **미적용** — 보정은 상한을 높이는데(덜 보수적), 탐색은 콜드 그룹 자동 실쓰기라 상한을 낮게 잡는 쪽이 안전하고, "탐색용 보정계수"는 문서/실코드에서 확인 안 됨 → 원칙(추정 금지) 상 raw rpc 채택. BX3 라이브 실측 후 재판정. (코드 주석 `exploration_ceiling` docstring에 명시.)
 3. **imp=0 그룹 포함 여부의 실효**: 노출 0 그룹은 상향해도 노출이 살아나는지(소재 연동 이상 AD_ABNORMAL_INTERLOCK류는 입찰 무관) — 첫 주 관측 후 established-serving 게이트 재도입 판정.
 4. 파워링크 확대 적합성(초기 제외 유지).
 
@@ -94,8 +95,8 @@ run_hourly_lane (기존)
 
 ## §체크리스트
 
-- [ ] BX1 순수 SA + 테스트 (행위 불변)
-- [ ] BX2 소재 UP 손 개방 + 경계 GATE PASS + codex
+- [x] BX1 순수 SA + 테스트 (행위 불변)
+- [x] BX2 소재 UP 손 개방(explore_op 승인원·카나리 전 캠페인·30% 면제·경제성 상한) + 경계 차등 테스트 — **GATE·codex 대기**
 - [ ] BX3 레인 배선 + 래더 + 다운스트림 GATE PASS
 - [ ] BX4 배포 + 라이브 합격(탐색 1사이클 실측)
 - [ ] 상수 실측 캘리브레이션(첫 주)
