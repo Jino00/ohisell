@@ -95,8 +95,21 @@ _EXPLORATION_MAX_BID = 100_000  # 유효 입찰가 상한
 _EXPLORATION_BID_INCREMENT = 10  # 10원 단위(스텝 반올림 = floor //10*10, PLAN §3 BX2 GATE 이월 P2③)
 
 
+def _apply_bm_anchor(target: Decimal, current_bid: int, bm_prior: int | None) -> Decimal:
+    """BM P4(D-NAO-78) 초기입찰 프라이어 — 기울기 부재(콜드/첫 스텝/무근거) 구간에서만 사용.
+
+    bm_prior = 대행사 고성과 그룹 입찰밴드 p50(bench_kind='bid_band', bm_benchmark). 눈먼 소폭
+    스텝 대신 "대행사가 검증한 밴드"를 향해 시드한다(눈먼 +10% 대신 근거 있는 시작점). 현재가
+    이하 앵커는 무시(하향 앵커 금지 — 탐색은 UP만). 상한 클램프는 호출측 _finalize_step(cap_bid)가
+    담당하므로 여기선 max만 취한다. bm_prior=None/현재가 이하면 target 그대로(fail-open·회귀 0)."""
+    if bm_prior is None or bm_prior <= current_bid:
+        return target
+    return max(target, Decimal(bm_prior))
+
+
 def adaptive_step(
     current_bid: int, current_rank, target_band: tuple, last_step: dict | None, cap_pct: Decimal,
+    *, bm_prior: int | None = None,
 ) -> int | None:
     """순위 목표형 적응 스텝(순수·PLAN §1 가드1, D-NAO-71 19:01 교정) — 목표 밴드까지 **필요한
     만큼만** 상향해 최소 입찰로 밴드에 진입시킨다(눈먼 % 상향 금지).
@@ -110,6 +123,11 @@ def adaptive_step(
                     Δ순위/Δ입찰 관측 기울기 산정용. None(첫 스텝)이면 보수적 소폭.
       cap_pct:      1스텝 변경폭 상한(=_EXPLORATION_STEP_PCT 0.30). **기본이 아니라 상한** —
                     적응 산정이 이보다 작으면 그만큼만 오른다.
+      bm_prior:     BM P4 초기입찰 프라이어(대행사 밴드 p50, optional). **기울기가 없는 눈먼
+                    구간**(콜드·첫 스텝·무근거 폴백)에서만 시드로 쓴다 — 실관측 기울기가 있으면
+                    무시(폐루프가 이미 정보 보유). None(기본)이면 전 구간 기존과 byte-동일(회귀 0,
+                    §0 금지선 4 fail-open). 상한(cap_bid)이 최종 클램프하므로 밴드가 멀어도 1스텝
+                    상한을 넘지 않는다(안전).
 
     반환: target_bid(int, 10원 단위·현재 초과·70~100,000) / None(스텝 없음 = 밴드 내·산정 소실).
 
@@ -130,9 +148,10 @@ def adaptive_step(
                   * _EXPLORATION_BID_INCREMENT)
     cap_bid = min(cap_bid, _EXPLORATION_MAX_BID)
 
-    # ② imp=0(순위 관측 불가) — 유일한 눈먼 구간. 노출 발생까지 보수적 소폭 스텝.
+    # ② imp=0(순위 관측 불가) — 유일한 눈먼 구간. 노출 발생까지 보수적 소폭 스텝(BM 프라이어 시드 대상).
     if current_rank is None:
         target = Decimal(current_bid) * (Decimal(1) + _EXPLORATION_FIRST_STEP_PCT)
+        target = _apply_bm_anchor(target, current_bid, bm_prior)
         return _finalize_step(target, current_bid, cap_bid)
 
     cr = Decimal(str(current_rank))
@@ -157,8 +176,11 @@ def adaptive_step(
                 # 순위 무반응 — 직전 Δ입찰 × 점증 계수(스텝 점증, PLAN §1 가드1).
                 increment = bid_delta * _EXPLORATION_UNRESPONSIVE_GROWTH
     if increment is None or increment <= 0:
-        increment = Decimal(current_bid) * _EXPLORATION_FIRST_STEP_PCT  # 기울기 부재 — 보수적 소폭
-    target = Decimal(current_bid) + increment
+        # 기울기 부재 — 보수적 소폭(BM 프라이어 시드 대상: 눈먼 소폭 대신 대행사 밴드로 시드).
+        increment = Decimal(current_bid) * _EXPLORATION_FIRST_STEP_PCT
+        target = _apply_bm_anchor(Decimal(current_bid) + increment, current_bid, bm_prior)
+        return _finalize_step(target, current_bid, cap_bid)
+    target = Decimal(current_bid) + increment  # 실관측 기울기 산정 — BM 앵커 미적용(폐루프 우선)
     return _finalize_step(target, current_bid, cap_bid)
 
 

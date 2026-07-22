@@ -16,8 +16,16 @@ from decimal import Decimal
 from sqlalchemy import func as sqlfunc
 from sqlalchemy.orm import Session
 
-from app.models import NaverProductBep, NaverSearchTermDaily
-from app.services.naver_ad import intraday_roas
+from app.models import (
+    NaverAdDaily,
+    NaverAdgroupProduct,
+    NaverCampaignSettings,
+    NaverEntity,
+    NaverProductBep,
+    NaverSearchTermDaily,
+)
+from app.services.naver_ad import campaign_target_resolver, intraday_roas
+from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.utils.kst import kst_now
 
 # ── 제안 유형·승인원 상수(SA 소유 — exploration.py의 APPROVAL_SOURCE_EXPLORE 관례) ──
@@ -54,6 +62,24 @@ _TOKEN_SPLIT_RE = re.compile(r"[^0-9A-Za-z가-힣]+")
 
 _SHOPPING_SOURCE = "shopping"
 _POWERLINK_SOURCE = "expkeyword"
+
+# ── PX1: 파워링크 전용 게이트 상수(PLAN_naver-ad-powerlink-autoexclude.md §1) ──
+# 파워링크(WEB_SITE, source='expkeyword')는 전환 귀속 불가(§0.5)라 쇼핑과 다른 봉투로 판정한다.
+# 쇼핑 게이트(_SS_WINDOW_DAYS 14·_SS_MIN_CLICK 10·margin fail-closed)는 그대로 두고(회귀 0),
+# 파워링크만 아래 상수로 분리 — 저볼륨 롱테일 표본 누적(30일)·낮은 클릭 표본(5)·margin 폴백.
+_PL_WINDOW_DAYS = 30            # rolling 창(§1 1 — 실측: 14d 최대 clk=5라 30d로 표본 확보, 보존 365일)
+_PL_MIN_CLICK = 5              # 최소 클릭 표본(§1 2 — 쇼핑 10과 분리)
+_PL_FALLBACK_MIN_COST = 10000  # margin 미확인 그룹의 최소 비용 하한(§1 3 — 확정원가 공헌이익 ~10,500 정렬)
+# 스코프 밖(대행사) 파워링크 고비용 검색어 브리핑 게이트(§4 2·관찰 전용, 실쓰기 0).
+_PL_AGENCY_MIN_COST = 30000
+_PL_AGENCY_MIN_CLICK = 10
+
+# 디바이스/브랜드 토큰 스톱리스트(§1 5) — 확장검색어는 거의 전부 디바이스명을 포함해 브랜드
+# substring 보호가 사문화된다(실측 2). 이 토큰들은 파워링크 화이트리스트 보호 집합에서 뺀다
+# (제품형 토큰 보호는 유지). casefold 저장(_is_whitelisted 짝 — 검색어도 casefold 비교).
+_PL_DEVICE_TOKENS: frozenset[str] = frozenset(
+    tok.casefold() for tok in ("아이폰", "아이패드", "갤럭시", "맥세이프", "삼성", "애플")
+)
 
 
 def _build_whitelist(db: Session) -> set[str]:
@@ -121,8 +147,11 @@ def judge_search_terms(
 
     산출:
       exclude_candidates.shopping   — source='shopping'(SS3-B 브리핑용, API 제외 불가 §실측-0).
-      exclude_candidates.powerlink  — source='expkeyword'. **전환 귀속 불가(§난제 5)라 전환게이트를
-        걸 수 없음** → confirm_required=True 마킹(자동 발사 대상 아님, SS3-A 초기 Confirm 전용).
+      exclude_candidates.powerlink  — source='expkeyword'. PX1: _judge_powerlink(30일 전용 게이트,
+        §1)가 스코프(auto_operate)·그룹 순손실·디바이스 토큰 제외 화이트리스트로 별도 판정한 자동
+        발사 후보(비용 기반, 전환 귀속 불가라 전환게이트 대신 그룹 순손실 프록시로 판정).
+      agency_powerlink              — 스코프 밖(비 auto_operate=대행사) 파워링크 고비용 검색어
+        (30d cost≥30,000 ∧ clk≥10). 실쓰기 없음·브리핑 전용(§4 2 관찰 산출물).
       promote_candidates            — conv_direct_cnt≥1(직접전환 품질) 검색어. SS4 원료(산출까지만).
 
     반환 dict의 각 후보: campaign_id·adgroup_id·search_term·source·근거 수치·reason. 결정적 정렬
@@ -161,7 +190,6 @@ def judge_search_terms(
     min_cost_cache: dict[str, Decimal | None] = {}
 
     shopping: list[dict] = []
-    powerlink: list[dict] = []
     promote: list[dict] = []
 
     for source, campaign_id, adgroup_id, term, imp, clk, cost, pconv, dconv, pamt in rows:
@@ -199,19 +227,227 @@ def judge_search_terms(
             "window_from": window_from.isoformat(), "window_to": as_of.isoformat(),
             "reason": _reason(clk, cost, min_cost, window_from, as_of),
         }
+        # PX1: 파워링크(source='expkeyword') 제외 판정은 이 14일 루프에서 분리한다 —
+        # _judge_powerlink(30일 전용 게이트, §1)가 스코프(auto_operate)·그룹 순손실·디바이스
+        # 토큰 제외 화이트리스트로 별도 판정한다. 여기 도달한 파워링크 행은 버린다(쇼핑 경로
+        # byte-동일 유지 — 이 continue 위 전 로직·shopping.append는 종전과 완전 동일).
         if source == _POWERLINK_SOURCE:
-            # 파워링크는 전환 귀속 불가(§난제 5) — 전환게이트 없이 성과만으로 판정 = 위험 →
-            # 자동 발사 대상 아님(Confirm 전용) 명시 마킹.
-            cand["confirm_required"] = True
-            powerlink.append(cand)
-        else:
-            shopping.append(cand)
+            continue
+        shopping.append(cand)
 
     def _sort(xs: list[dict]) -> list[dict]:
         return sorted(xs, key=lambda c: (-c["cost"], c["search_term"]))
 
+    powerlink = _judge_powerlink(db, now=now, as_of=as_of)
+
     return {
         "window": {"from": window_from.isoformat(), "to": as_of.isoformat(), "days": window_days},
-        "exclude_candidates": {"shopping": _sort(shopping), "powerlink": _sort(powerlink)},
+        "exclude_candidates": {"shopping": _sort(shopping), "powerlink": powerlink["powerlink"]},
+        "agency_powerlink": powerlink["agency_powerlink"],
         "promote_candidates": _sort(promote),
     }
+
+
+# ══════════════════════════════════════════════════════════════════
+# PX1 — 파워링크 전용 게이트(§1, 쇼핑과 분리, fail-closed)
+# ══════════════════════════════════════════════════════════════════
+def _pl_min_cost(db: Session, adgroup_id: str, cache: dict[str, Decimal | None]) -> Decimal:
+    """§1 3 최소 비용 하한 = 그룹 공헌이익(margin), margin 미확인 시 폴백(_PL_FALLBACK_MIN_COST).
+    쇼핑(_min_cost_for_adgroup, fail-closed)과 달리 파워링크는 폴백으로 게이트를 세운다(§실측 3
+    해소 — 아이패드 상품군 원가 미확정이라 margin unavailable이 게이트를 사문화하던 문제).
+    ★게이트 3이 margin 우선이므로 원가 확정 시 자동으로 실측 margin으로 전환된다(§체크리스트)."""
+    margin = _min_cost_for_adgroup(db, adgroup_id, cache)  # 쇼핑과 캐시 공유(그룹당 1회)
+    if margin is None or margin <= 0:
+        return Decimal(_PL_FALLBACK_MIN_COST)
+    return margin
+
+
+def _pl_group_net_loss(
+    db: Session, adgroup_id: str, window_from: date, as_of: date, cache: dict[str, bool],
+) -> bool:
+    """§1 4 그룹 순손실 프록시 — 그 그룹의 naver_ad_daily 30d (직+간 전환매출)/cost < 그룹 target
+    ROAS ∧ cost>0이면 True(순손실 = 그 그룹 확장검색어는 집합적으로 손해). sentinel(__backfill__)·
+    빈 그룹은 집계에서 제외(2배 함정 교훈). 판정 불가(cost 0·target 부재)는 fail-closed(False=
+    자르지 않음 — 표본/근거 없으면 오컷 방지). 그룹당 1회 조회 후 캐시."""
+    if adgroup_id in cache:
+        return cache[adgroup_id]
+    row = (
+        db.query(
+            sqlfunc.coalesce(
+                sqlfunc.sum(NaverAdDaily.conv_direct_amt + NaverAdDaily.conv_indirect_amt), 0
+            ),
+            sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.cost), 0),
+        )
+        .filter(
+            NaverAdDaily.adgroup_id == adgroup_id,
+            NaverAdDaily.adgroup_id != BACKFILL_SENTINEL_ADGROUP,
+            NaverAdDaily.adgroup_id != "",
+            NaverAdDaily.ad_date >= window_from,
+            NaverAdDaily.ad_date <= as_of,
+        )
+        .first()
+    )
+    conv_amt = int(row[0] or 0)
+    gcost = int(row[1] or 0)
+    result = False
+    if gcost > 0:
+        target = campaign_target_resolver.resolve_adgroup_target_roas(db, adgroup_id)["target_roas"]
+        if target is not None:
+            result = (Decimal(conv_amt) / Decimal(gcost)) < Decimal(str(target))
+    cache[adgroup_id] = result
+    return result
+
+
+def _pl_protect_tokens(
+    db: Session, adgroup_id: str, global_form_tokens: set[str], cache: dict[str, set[str]],
+) -> set[str]:
+    """§1 5 파워링크 보호 토큰 = (그룹 매핑 상품명 제품형 토큰 ∪ **그룹명 제품형 토큰** ∪ 전역
+    제품형 토큰) − 디바이스 토큰. global_form_tokens는 이미 (전역 화이트리스트 − 디바이스) casefold
+    집합. 그룹 매핑 상품 부재면 global_form_tokens + 그룹명 토큰(§1 5 폴백). 그룹당 1회 조회 후
+    캐시(casefold — _is_whitelisted 짝).
+
+    ★그룹명 토큰(P2-2 GATE 오컷 방지): 상품명뿐 아니라 그 adgroup의 NaverEntity.name(그룹명)도
+    제품형 의도를 담는다(예: P_Test `_종이질감`·`_6H BLC` 그룹은 상품명이 아니라 그룹명에만 종이질감
+    의도가 있어, "아이패드종이질감필름" 검색어가 종이질감 그룹에서 미보호로 잘릴 수 있었다 — §0.5
+    경고 케이스). 상품명과 동일한 토큰화(len≥2·비숫자·casefold·디바이스 토큰 제외)로 합산한다."""
+    if adgroup_id in cache:
+        return cache[adgroup_id]
+    tokens = set(global_form_tokens)
+    rows = (
+        db.query(NaverProductBep.product_name)
+        .join(
+            NaverAdgroupProduct,
+            NaverAdgroupProduct.mall_product_id == NaverProductBep.channel_product_id,
+        )
+        .filter(
+            NaverAdgroupProduct.adgroup_id == adgroup_id,
+            NaverProductBep.has_cost.is_(True),
+        )
+        .all()
+    )
+    # 그룹명(NaverEntity, entity_type='adgroup')을 상품명 토큰과 같은 소스로 합산 — 그룹당 1회.
+    grp = (
+        db.query(NaverEntity.name)
+        .filter(
+            NaverEntity.entity_type == "adgroup",
+            NaverEntity.entity_id == adgroup_id,
+        )
+        .first()
+    )
+    names = [name for (name,) in rows]
+    if grp is not None and grp[0]:
+        names.append(grp[0])
+    for name in names:
+        if not name:
+            continue
+        for tok in _TOKEN_SPLIT_RE.split(name):
+            cf = tok.casefold()
+            # 디바이스/브랜드 토큰은 보호에서 제외(§1 5 스톱리스트) — 제품형 토큰만 남긴다.
+            if len(tok) >= 2 and not tok.isdigit() and cf not in _PL_DEVICE_TOKENS:
+                tokens.add(cf)
+    cache[adgroup_id] = tokens
+    return tokens
+
+
+def _pl_reason(clk: int, cost: int, min_cost: Decimal, window_from: date, window_to: date) -> str:
+    return (
+        f"[검색어제외] 파워링크 낭비 검색어(전환귀속 불가·비용 기반) — rolling {window_from}~{window_to}: "
+        f"clk={clk}(≥{_PL_MIN_CLICK}), cost={cost}원(≥{int(min_cost)}원), 그룹 순손실(BEP 미달)·"
+        f"제품형 토큰 미포함 = 낭비비용 회수(PLAN §1). 자동 제외 후 in-out 재심사 루프가 자가 교정."
+    )
+
+
+def _judge_powerlink(db: Session, *, now: datetime, as_of: date) -> dict:
+    """파워링크(source='expkeyword') 제외 판정 — 30일 전용 게이트(§1, fail-closed). 순수·read-only.
+
+    스코프(⓪ auto_operate=1) 안 후보는 자동 발사 대상(powerlink), 밖(대행사)은 고비용 브리핑
+    후보(agency_powerlink)로 가른다 — 대행사 캠페인엔 절대 실쓰기 없음(§0 3). 게이트 순서(전부
+    fail-closed): ①창 30일 ②clk≥5 ③cost≥margin(폴백 10,000) ④그룹 순손실 프록시 ⑤제품형
+    토큰 화이트리스트(디바이스 토큰 제외). 전환 보호(§1-1)는 파워링크에서 구조적 0이나 게이트 유지."""
+    window_from = as_of - timedelta(days=_PL_WINDOW_DAYS - 1)
+    rows = (
+        db.query(
+            NaverSearchTermDaily.campaign_id,
+            NaverSearchTermDaily.adgroup_id,
+            NaverSearchTermDaily.search_term,
+            sqlfunc.coalesce(sqlfunc.sum(NaverSearchTermDaily.clk), 0),
+            sqlfunc.coalesce(sqlfunc.sum(NaverSearchTermDaily.cost), 0),
+            sqlfunc.coalesce(sqlfunc.sum(NaverSearchTermDaily.conv_purchase_cnt), 0),
+        )
+        .filter(
+            NaverSearchTermDaily.source == _POWERLINK_SOURCE,
+            NaverSearchTermDaily.ad_date >= window_from,
+            NaverSearchTermDaily.ad_date <= as_of,
+        )
+        .group_by(
+            NaverSearchTermDaily.campaign_id,
+            NaverSearchTermDaily.adgroup_id,
+            NaverSearchTermDaily.search_term,
+        )
+        .all()
+    )
+
+    # ⓪ 스코프: campaign auto_operate=1(ours)만 자동 발사 대상(§0 3). WEB_SITE 함의는
+    # source='expkeyword'가 이미 보장(파워링크 확장검색 버킷). 미등록 캠페인은 auto_operate=False.
+    auto_map = {
+        cid: bool(auto)
+        for cid, auto in db.query(
+            NaverCampaignSettings.campaign_id, NaverCampaignSettings.auto_operate,
+        ).all()
+    }
+    # 전역 제품형 토큰 = 전역 화이트리스트 − 디바이스 토큰(§1 5, 그룹 매핑 부재 시 폴백).
+    global_form = {tok.casefold() for tok in _SS_WHITELIST_TOKENS} - _PL_DEVICE_TOKENS
+    margin_cache: dict[str, Decimal | None] = {}
+    loss_cache: dict[str, bool] = {}
+    protect_cache: dict[str, set[str]] = {}
+
+    powerlink: list[dict] = []
+    agency: list[dict] = []
+
+    for campaign_id, adgroup_id, term, clk, cost, pconv in rows:
+        clk, cost, pconv = int(clk), int(cost), int(pconv)
+        # sentinel/빈 그룹은 그룹 grain 판정·실쓰기 불가 — 양쪽 경로 모두 fail-closed 제외.
+        if adgroup_id in ("", BACKFILL_SENTINEL_ADGROUP):
+            continue
+
+        if not auto_map.get(campaign_id, False):
+            # ⓪ 스코프 밖(대행사) — 실쓰기 절대 없음(§0 3). 고비용만 브리핑(§4 2, 관찰 산출물).
+            if cost >= _PL_AGENCY_MIN_COST and clk >= _PL_AGENCY_MIN_CLICK:
+                agency.append({
+                    "campaign_id": campaign_id, "adgroup_id": adgroup_id, "search_term": term,
+                    "source": _POWERLINK_SOURCE, "clk": clk, "cost": cost,
+                    "window_from": window_from.isoformat(), "window_to": as_of.isoformat(),
+                    "reason": (
+                        f"[파워링크 대행사 고비용] {window_from}~{as_of} cost={cost}원"
+                        f"(≥{_PL_AGENCY_MIN_COST})·clk={clk}(≥{_PL_AGENCY_MIN_CLICK}) — 대행사 "
+                        "캠페인이라 자동 제외 없음, Jino 전달 검토 대상(§4 2)"
+                    ),
+                })
+            continue
+
+        # 스코프 안(auto_operate=1) — §1 게이트 전부 fail-closed
+        if pconv >= 1:
+            continue  # §1-1 전환 보호(파워링크는 구조적 0이지만 게이트 유지 — 데이터 생기면 자동 보호)
+        if clk < _PL_MIN_CLICK:
+            continue  # ② 최소 클릭
+        min_cost = _pl_min_cost(db, adgroup_id, margin_cache)  # ③ margin(폴백 10,000)
+        if cost < min_cost:
+            continue
+        if not _pl_group_net_loss(db, adgroup_id, window_from, as_of, loss_cache):
+            continue  # ④ 그룹 순손실 프록시(BEP 이상 그룹은 안 자름 — 오컷 방지 1차)
+        protect = _pl_protect_tokens(db, adgroup_id, global_form, protect_cache)
+        if _is_whitelisted(term, protect):
+            continue  # ⑤ 제품형 토큰 보호(디바이스 토큰 제외 — 오컷 방지 2차)
+
+        powerlink.append({
+            "campaign_id": campaign_id, "adgroup_id": adgroup_id, "search_term": term,
+            "source": _POWERLINK_SOURCE, "clk": clk, "cost": cost,
+            "conv_purchase_cnt": pconv, "min_cost": int(min_cost),
+            "window_from": window_from.isoformat(), "window_to": as_of.isoformat(),
+            "reason": _pl_reason(clk, cost, min_cost, window_from, as_of),
+        })
+
+    def _sort(xs: list[dict]) -> list[dict]:
+        return sorted(xs, key=lambda c: (-c["cost"], c["search_term"]))
+
+    return {"powerlink": _sort(powerlink), "agency_powerlink": _sort(agency)}

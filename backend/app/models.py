@@ -1956,6 +1956,110 @@ class NaverEntity(Base):
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class NaverEntitySnapshot(Base):
+    """대행사 포함 45캠페인 구조의 날짜별 history (SA-1, D-NAO-78 · BM 벤치마크 레이어).
+
+    naver_entity는 upsert라 '현재 상태'만 남아 역사가 없다 → 이 테이블이 매일 07:37 캠페인·
+    그룹 grain 구조를 스냅샷(0 GET, naver_entity DB만 읽음). 관찰 전용 — 네이버 API 쓰기 0.
+    키워드 grain은 저장 안 함(90,150행/일 × 365 = 3,300만행/년 회피): 그룹 행에 키워드 집계
+    (keyword_count·keyword_avg_bid)만 남기고 개별 키워드 변화는 이벤트(naver_agency_op, P2)로
+    잡는다. optimizer는 naver_campaign_settings 조인(none=대행사 관찰 대상/ours/mop).
+
+    Phase 1(이 커밋)은 name/status/optimizer/bid_amt/keyword_count/keyword_avg_bid만 채운다.
+    daily_budget·extended_search(일별, P3)·negative_kw_count·ad_count(주간 deep, P3)는 additive
+    nullable — 미수집 시 NULL(하위호환·backfill 불필요). 보존 400일 롤링(P6).
+    """
+
+    __tablename__ = "naver_entity_snapshot"
+    __table_args__ = (
+        UniqueConstraint("snapshot_date", "entity_type", "entity_id", name="uq_naver_entity_snapshot"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    snapshot_date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)  # KST 스냅샷 날짜(kst_today, ★UTC 아님)
+    entity_type: Mapped[str] = mapped_column(String(10), nullable=False)  # campaign/adgroup
+    entity_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    parent_id: Mapped[str] = mapped_column(String(50), nullable=False, default="")  # adgroup→campaign_id
+    campaign_id: Mapped[str] = mapped_column(String(50), nullable=False, default="", index=True)
+    campaign_type: Mapped[str] = mapped_column(String(20), nullable=False, default="")  # WEB_SITE/SHOPPING/BRAND_SEARCH
+    optimizer: Mapped[str] = mapped_column(String(8), nullable=False, default="none")  # none/ours/mop(대행사 구분)
+    name: Mapped[str] = mapped_column(String(300), nullable=False, default="")
+    status: Mapped[str] = mapped_column(String(10), nullable=False, default="on")  # on/off/deleted
+    # ── 구조 지표(SA-3 벤치마크 원료) ──
+    daily_budget: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 캠페인 dailyBudget(get_campaigns_full, P3)
+    bid_amt: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 그룹 기본입찰
+    extended_search: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)  # 그룹 확장검색 on/off(get_adgroups, P3)
+    keyword_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 그룹 활성 키워드 수(naver_entity 집계, WEB_SITE만 유효)
+    keyword_avg_bid: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 그룹 키워드 평균 입찰(밴드 산출용)
+    negative_kw_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 제외키워드 수(주간 deep GET, P3)
+    ad_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 소재 수(주간 deep GET, P3)
+    synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())  # ★쓰기 시 kst_now 명시 주입(server_default는 UTC — 시간계산 미사용)
+
+
+class NaverAgencyOp(Base):
+    """대행사(및 계정 전체 외부) 조작 이벤트 1건 (SA-2, D-NAO-78 · BM 벤치마크 레이어).
+
+    naver_entity_snapshot의 D-1 vs D diff로 산출 — 결정적·리플레이 가능(bm_diff.py). 예외
+    브리핑(P5)의 원료. 관찰 전용 — 네이버 API 쓰기 0(diff는 DB-to-DB).
+    ★naver_change_log와 분리: change_log는 OUR 제안·집행의 피드백 루프(proposal_id·outcome·
+    verify)에 묶여 있어, 45캠페인 대행사 노이즈를 섞으면 학습 쿼리가 오염된다(§2 결정).
+    op_date+entity_id+op_type을 리플레이 키로 삼아 같은 날 재실행은 삭제-재생성(멱등).
+    """
+
+    __tablename__ = "naver_agency_op"
+    __table_args__ = (
+        Index("ix_naver_agency_op_date_campaign", "op_date", "campaign_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    op_date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)  # 조작 감지일(=오늘 스냅샷 날짜, KST)
+    detected_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)  # ★kst_now() 명시(server_default=UTC 회피)
+    entity_type: Mapped[str] = mapped_column(String(10), nullable=False)  # campaign/adgroup/keyword
+    entity_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    campaign_id: Mapped[str] = mapped_column(String(50), nullable=False, default="", index=True)
+    optimizer: Mapped[str] = mapped_column(String(8), nullable=False, default="none")  # 조작 주체 구분(대행사=none/mop, ours 자기변경 필터 대상)
+    op_type: Mapped[str] = mapped_column(String(24), nullable=False)  # bid_change/status_flip/keyword_add/keyword_remove/campaign_add/adgroup_add/campaign_remove/adgroup_remove/negative_add/negative_remove/creative_change/budget_change/extended_toggle
+    before_value: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    after_value: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    magnitude: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # 변화 크기(입찰 Δ%·예산 Δ%·키워드 증감 등 — 예외 랭킹용)
+    is_exception: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)  # 예외 브리핑에 올릴 이상치 여부(SA-2 필터 판정)
+
+
+class NaverBmBenchmark(Base):
+    """대행사 구조↔성과 상관을 벤치마크化한 프라이어 1행 (SA-3, D-NAO-78 · BM 벤치마크 레이어).
+
+    B-X(탐색 초기입찰)·SS4(승격 교차)·(향후)IU-R·L2가 optional 입력으로 소비한다 —
+    전부 fail-open(부재 시 기존 동일, §0 금지선 4). 매일 07:37 재산출(bench_kind 단위 교체
+    upsert) — 최신 벤치마크만 유지한다(naver_product_bep snapshot 교체 관례 계승). 관찰 전용 —
+    네이버 API 쓰기 0(DB만: naver_entity_snapshot + naver_ad_daily + naver_entity 조인 산출).
+
+    ★저장소 택일(§9-2, P4 Opus 결정 = 혼용): keyword_verified/bid_band/group_structure는 값이
+    구조(집합·[min,p50,max]·다차원)라 naver_learning_state의 단일 Numeric current_value에 안 맞아
+    이 신규 테이블 value_json에 담는다. naver_learning_state는 verify_harness가 유일 쓰기 주체라
+    (모델 docstring) 대행사 관찰값을 섞으면 학습 쿼리가 오염된다 — 관심사 분리. bid_rank_slope
+    프라이어(향후, IU-R)는 단일 기울기라 반대로 naver_learning_state(scope=entity/metric=
+    bid_rank_slope)에 써서 rank_servo가 기존 bid_rank_curve.load_response_priors로 무개조 소비한다
+    (§2-b 혼용 — 배선 재사용). 이번 스코프는 slope 미산출(agency_op 이벤트 0건=원료 없음).
+
+    bench_kind: keyword_verified(대행사 등록 키워드셋)/bid_band([min,p50,max])/group_structure
+      (고성과 그룹 구조 요약). bench_key: campaign_type 버킷(WEB_SITE/SHOPPING/BRAND_SEARCH 등).
+    value_json: 벤치마크 값(JSON 텍스트). sample_n/confidence: 표본 수·신뢰도(소비측 게이팅용).
+    """
+
+    __tablename__ = "naver_bm_benchmark"
+    __table_args__ = (
+        UniqueConstraint("bench_kind", "bench_key", name="uq_naver_bm_benchmark"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    bench_kind: Mapped[str] = mapped_column(String(24), nullable=False, index=True)  # keyword_verified/bid_band/group_structure
+    bench_key: Mapped[str] = mapped_column(String(120), nullable=False, default="")  # campaign_type 등 버킷 키
+    value_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 벤치마크 값(JSON)
+    sample_n: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    computed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)  # ★kst_now() 명시(server_default=UTC 회피)
+
+
 class NaverSearchTermDaily(Base):
     """검색어 단위 일별 성과 — 쇼핑 SHOPPINGKEYWORD_DETAIL + 파워링크 EXPKEYWORD (P2-S1).
 
@@ -2002,6 +2106,41 @@ class NaverSearchTermDaily(Base):
     cart_cnt: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     cart_amt: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class NaverSearchTermExclusion(Base):
+    """파워링크 검색어 자동 제외 in-out 상태기계 1행 (스프린트 PX,
+    docs/PLAN_naver-ad-powerlink-autoexclude.md §2). grain: (adgroup_id, search_term) — Unique.
+
+    상태 전이(제외 = 사형이 아니라 상태 전이·주기 재심사, 전략 v2 §1④ in-out 생태계):
+      excluded  — 자동 제외 실쓰기 완료(restrict_kwd_id 회수). next_review_at 도래 시 개방.
+      probation — next_review_at 도래로 제외키워드를 개방(delete)한 뒤 재노출 관찰창(+14일).
+      restored  — probation 만료 재판정에서 더는 §1 후보가 아님(성과 자가 교정, 행 보존=기억).
+    cycle: 최초 1, 재제외마다 +1(백오프 next_review_at = today + min(30×cycle, 90)일). 행 재사용
+    (restored/probation 행이 있는 (adgroup,term) 재제외 시 cycle 승계·upsert). restrict_kwd_id는
+    개방(delete_restricted_keywords)에 필수라 성공 실쓰기의 WriteResult.created_ids에서 회수 저장.
+    ★관측 전용 원장이 아니라 실쓰기와 짝(제외/개방 change_log와 1:1) — DB만 읽는 SA-1/2와 구분.
+    """
+
+    __tablename__ = "naver_search_term_exclusion"
+    __table_args__ = (
+        UniqueConstraint("adgroup_id", "search_term", name="uq_naver_search_term_exclusion"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    campaign_id: Mapped[str] = mapped_column(String(50), nullable=False, default="", index=True)
+    adgroup_id: Mapped[str] = mapped_column(String(50), nullable=False, default="")
+    search_term: Mapped[str] = mapped_column(String(300), nullable=False, default="")
+    restrict_kwd_id: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)  # 개방(delete)에 필수, WriteResult에서 회수
+    status: Mapped[str] = mapped_column(String(12), nullable=False, default="excluded", index=True)  # excluded/probation/restored
+    cycle: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    excluded_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)  # ★kst_now 주입(server_default 아님)
+    last_transition_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)  # 마지막 상태 전이 시각(KST)
+    next_review_at: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True, index=True)  # 재심사 개방 예정일(KST date)
+    probation_until: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True)  # probation 관찰창 종료일(KST date)
+    cost_at_exclusion: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")  # 제외 시점 30d cost(감사)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())  # ⚠️UTC(server_default)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())  # ⚠️UTC
 
 
 # ══════════════════════════════════════════════════════════════════

@@ -397,7 +397,7 @@ def test_real_write_blocker_structural(db):
 
 
 # ══════════════════════════════════════════════════════════════════
-# SS3 생성 레인
+# SS3 생성 레인 (쇼핑 브리핑만 — 파워링크 자동 발사는 test_naver_searchterm_px2.py)
 # ══════════════════════════════════════════════════════════════════
 def _map_product(db, adgroup_id, cpid, margin="500"):
     db.add(NaverProductBep(
@@ -418,79 +418,28 @@ def _term(db, *, term, source, adgroup_id, clk=20, cost=6000, ad_date=date(2026,
     db.commit()
 
 
-def test_lane_creates_powerlink_proposal_only_shopping_briefing_only(db):
-    # SS3-B(쇼핑) = 브리핑만, 제안 생성 없음(PLAN §3, §실측-0) — 파워링크만 pending 제안 생성.
+def test_lane_shopping_candidates_never_create_proposals(db):
+    # 쇼핑 후보만 있어도(파워링크 0건) 제안·자동 발사 0건 — briefing diary만 산출(SS3-B, §실측-0).
     _map_product(db, "grp-shop", "PS")
-    _map_product(db, "grp-web", "PW")
     _term(db, term="쇼핑손실", source="shopping", adgroup_id="grp-shop")
-    _term(db, term="파워손실", source="expkeyword", adgroup_id="grp-web")
     res = lane.run_search_term_ss_lane(db, now=_NOW)
-    assert res["proposals_created"] == 1
-    props = db.query(NaverProposal).filter(NaverProposal.proposal_type == _TYPE).all()
-    assert len(props) == 1
-    assert props[0].adgroup_id == "grp-web"  # 파워링크만 제안화, 쇼핑은 제안 자체가 없음
-    assert props[0].target_id == "파워손실"
-    assert props[0].status == "pending"
-    assert props[0].approval_source is None  # 자동 승인원 절대 배선 금지
-    # 쇼핑 브리핑 diary 1건(observe) — 제안 없이도 브리핑은 그대로 산출
+    assert res["shopping_candidates"] == 1
+    assert res["proposals_created"] == 0
+    assert res["powerlink_fired"] == 0
+    assert db.query(NaverProposal).filter(NaverProposal.proposal_type == _TYPE).count() == 0
     briefs = db.query(OpsDiaryEntry).filter(OpsDiaryEntry.event_type == "observe").all()
     assert len(briefs) == 1
     assert "검색어제외 브리핑" in briefs[0].rationale
     assert "쇼핑손실" in briefs[0].rationale
 
 
-def test_lane_shopping_candidates_never_create_proposals(db):
-    # 쇼핑 후보만 있어도(파워링크 0건) 제안은 0건 — briefing diary만 산출.
-    _map_product(db, "grp-shop", "PS")
-    _term(db, term="쇼핑손실", source="shopping", adgroup_id="grp-shop")
-    res = lane.run_search_term_ss_lane(db, now=_NOW)
-    assert res["shopping_candidates"] == 1
-    assert res["proposals_created"] == 0
-    assert db.query(NaverProposal).filter(NaverProposal.proposal_type == _TYPE).count() == 0
-    briefs = db.query(OpsDiaryEntry).filter(OpsDiaryEntry.event_type == "observe").all()
-    assert len(briefs) == 1
-
-
-def test_lane_dedup_skips_existing_pending(db):
+def test_lane_powerlink_out_of_scope_never_fires(db):
+    # 파워링크 후보라도 auto_operate 스코프 밖(settings 없음)이면 자동 발사 0(§0 3 대행사 무실쓰기).
     _map_product(db, "grp-web", "PW")
     _term(db, term="파워손실", source="expkeyword", adgroup_id="grp-web")
-    # 이미 pending 제안 존재
-    _proposal(db, adgroup_id="grp-web", term="파워손실", status="pending")
-    res = lane.run_search_term_ss_lane(db, now=_NOW)
-    assert res["proposals_created"] == 0
-    assert res["deduped"] == 1
-
-
-def test_lane_dedup_skips_already_executed(db):
-    _map_product(db, "grp-web", "PW")
-    _term(db, term="파워손실", source="expkeyword", adgroup_id="grp-web")
-    executed = _proposal(db, adgroup_id="grp-web", term="파워손실", status="approved")
-    executed.executed_change_log_id = 999
-    db.commit()
-    res = lane.run_search_term_ss_lane(db, now=_NOW)
-    assert res["proposals_created"] == 0
-    assert res["deduped"] == 1
-
-
-def test_lane_skips_search_term_over_target_id_maxlen(db):
-    # target_id(String(50)) 초과 검색어는 제안 미생성(fail-closed skip) + skip 흔적 diary (codex 2R[P1]).
-    _map_product(db, "grp-web", "PW")
-    long_term = "가" * (lane._TARGET_ID_MAXLEN + 1)  # 51자
-    _term(db, term=long_term, source="expkeyword", adgroup_id="grp-web")
-    res = lane.run_search_term_ss_lane(db, now=_NOW)
-    assert res["proposals_created"] == 0
-    assert res["skipped_too_long"] == 1
+    with patch.object(harness.naver_sa_writer, "add_restricted_keywords") as mock_write:
+        res = lane.run_search_term_ss_lane(db, now=_NOW)
+    mock_write.assert_not_called()
+    assert res["powerlink_fired"] == 0
+    assert res["powerlink_candidates"] == 0  # judge가 스코프 밖 후보를 powerlink에 넣지 않음
     assert db.query(NaverProposal).filter(NaverProposal.proposal_type == _TYPE).count() == 0
-    briefs = db.query(OpsDiaryEntry).filter(OpsDiaryEntry.event_type == "observe").all()
-    assert any("skip" in b.rationale for b in briefs)
-
-
-def test_lane_creates_proposal_at_exactly_maxlen(db):
-    # 정확히 50자(경계)는 제안 생성됨(초과만 skip).
-    _map_product(db, "grp-web", "PW")
-    exact_term = "가" * lane._TARGET_ID_MAXLEN  # 50자
-    _term(db, term=exact_term, source="expkeyword", adgroup_id="grp-web")
-    res = lane.run_search_term_ss_lane(db, now=_NOW)
-    assert res["proposals_created"] == 1
-    assert res["skipped_too_long"] == 0
-    assert db.query(NaverProposal).filter(NaverProposal.target_id == exact_term).count() == 1

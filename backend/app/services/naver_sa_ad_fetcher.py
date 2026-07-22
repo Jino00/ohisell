@@ -574,9 +574,15 @@ def fetch_conversion_daily(date_from: date, date_to: date) -> list[dict]:
 
 
 def get_adgroups(campaign_id: str) -> list[dict]:
-    """캠페인의 광고그룹 목록 (P2-S1 entity_sync). 실측(docs/references/22): 필드 확정.
+    """캠페인의 광고그룹 목록 (P2-S1 entity_sync + BM Phase 3 일별 차원, D-NAO-78). 기본 필드는
+    실측 확정(docs/references/22). daily_budget(dailyBudget)·extended_search(useExpSearch)는
+    BM Phase 3 추가 — 필드명은 네이버 공식 스키마(docs/references/data/ncc-heroes-ncc.json
+    Adgroup 정의: dailyBudget/useExpSearch/expSearchBudgetRatio)와 실측 관측(docs/references/36
+    §3.2, useExpSearch=true·expSearchBudgetRatio=100 관측 확인)으로 확정 — 추정 아님. 기존
+    호출부(entity_sync)는 두 신규 키를 안 써도 무해(dict 추가 키, 기존 키 제거 없음).
 
-    Returns: [{"adgroup_id","campaign_id","name","status","user_lock","bid_amt"}, ...]
+    Returns: [{"adgroup_id","campaign_id","name","status","user_lock","bid_amt",
+               "daily_budget","extended_search"}, ...]
     """
     resp = _get("/ncc/adgroups", {"nccCampaignId": campaign_id})
     resp.raise_for_status()
@@ -587,6 +593,8 @@ def get_adgroups(campaign_id: str) -> list[dict]:
         "status": a.get("status", ""),
         "user_lock": bool(a.get("userLock", False)),
         "bid_amt": a.get("bidAmt"),
+        "daily_budget": a.get("dailyBudget"),
+        "extended_search": a.get("useExpSearch"),
     } for a in resp.json()]
 
 
@@ -677,6 +685,41 @@ def get_ads(adgroup_id: str) -> list[dict]:
             "ad_user_lock": bool(a.get("userLock", False)),
         })
     return out
+
+
+# ── BM Phase 3 주간 deep 차원 GET 전용 함수 (D-NAO-78, bm_deep 레인) ──
+# 둘 다 읽기 전용(GET만). SA-1(bm_snapshot)이 실행 손(naver_sa_writer/naver_execution_harness)을
+# import하지 않고도 같은 엔드포인트를 쓸 수 있도록 이 순수 GET fetcher에 독립 구현한다
+# (§0 금지선 1 — BM은 실행 손을 import조차 하지 않는다, 원칙18-1 단일 책임).
+_RESTRICT_TYPE = "KEYWORD_PLUS_RESTRICT"  # naver_sa_writer._RESTRICT_TYPE과 동일 값(ref 27 §2-2)
+
+
+def get_restricted_keyword_count(adgroup_id: str) -> int:
+    """그룹의 제외키워드(KEYWORD_PLUS_RESTRICT) 등록 수. GET /ncc/adgroups/{id}/restricted-keywords.
+
+    엔드포인트·파라미터 실측 근거: naver_sa_writer.get_restricted_keywords(그 함수가 쓰기
+    재조회 검증에 쓰는 바로 그 GET, ref 27 §2-2)와 동일 경로 — 여기선 개수만 필요해 응답
+    길이만 반환한다(확인됨 — 추정 아님, 기존 쓰기 어댑터의 실동작 경로에서 실측).
+    WEB_SITE(파워링크) 광고그룹 전용 API(naver_execution_harness §실측-0 — SHOPPING은 HTTP 400
+    code 3728). 호출측(bm_snapshot.update_deep_dimensions)이 campaign_type=WEB_SITE인 그룹만
+    호출해 불필요한 400을 피한다.
+    """
+    resp = _get(f"/ncc/adgroups/{adgroup_id}/restricted-keywords", {"type": _RESTRICT_TYPE})
+    resp.raise_for_status()
+    return len(resp.json())
+
+
+def get_ad_count(adgroup_id: str) -> int:
+    """광고그룹의 전체 소재(ad) 개수. GET /ncc/ads(get_ads와 동일 엔드포인트, 새 API 아님).
+
+    get_ads()는 쇼핑 상품 소재(referenceData.mallProductId 보유)만 필터링해 반환하므로
+    파워링크(WEB_SITE) 소재 대부분이 걸러진다(get_ads 독스트링 참조) — 그대로 재사용하면
+    WEB_SITE 그룹의 소재 수가 사실상 항상 0으로 집계돼 creative_change diff가 무의미해진다.
+    순수 개수 집계는 그 필터를 거치지 않은 원본 응답 길이를 그대로 쓴다.
+    """
+    resp = _get("/ncc/ads", {"nccAdgroupId": adgroup_id})
+    resp.raise_for_status()
+    return len(resp.json())
 
 
 def create_stat_report(report_tp: str, stat_date: date) -> dict:

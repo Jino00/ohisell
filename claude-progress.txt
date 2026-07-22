@@ -2,7 +2,18 @@
 # 매 sprint 완료 시 Claude가 이 파일을 갱신합니다.
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
-## 최신 상태 (2026-07-22 07:25, 워크트리 session-dfd814·브랜치 claude/bx-exploration-ad-bid-400-fix-fb114e)
+## 최신 상태 (2026-07-22 14:00, 워크트리 bm-layer-p1-p6-deployment-0d68d5·브랜치 claude/bm-layer-p1-p6-deployment-0d68d5)
+- **★스프린트 PX(파워링크 검색어 자동 제외+in-out 재심사, D-NAO-80) 전 페이즈 구현·배포·라이브 검증 완료**: Jino 지시("성과 기반 자동, 수백 검색어 Confirm 불가") 실행층. 계획서 `docs/PLAN_naver-ad-powerlink-autoexclude.md`(§0.5 = prod 실측 3중 구조 차단: clk≥10 도달불가·화이트리스트 브랜드토큰 전량보호·margin 미매핑 fail-closed → 해소 설계). PX1 judge 파워링크 전용 게이트(30d·clk≥5·margin 폴백 1만·그룹 순손실 프록시·디바이스 토큰 제외) / PX2 NaverSearchTermExclusion(alembic `e0f1a2b3c4d5`)+자동 발사(ss_exclude 승인원 활성·harness 봉투 그대로) / PX3 재심사(excluded→probation 14d→restored, 백오프 30→60→90) / PX4 예외 브리핑(실행 있던 날만 diary+Slack)+대행사 주간 브리핑(일요)+GET /api/naver/ad/search-term/exclusions. **GATE 적대 리뷰 PASS(P1 0) → P2 3건 전건 수정(`48f4516`) → 2866 passed·회귀 0 → safe_deploy 13:52 KST(7파일·부팅 200)**. 라이브 judge 실측: ours 자동발사 후보 1건(아이패드종이필름·30d cost 22,854·그룹 ROAS 1.10<target)·대행사 브리핑 17건(실쓰기 0)·쇼핑/승격 회귀 0. **다음 관측: 익일 08:50 레인 첫 자동 제외 실쓰기**(change_log·상태 행·API 반영).
+- **예약 2건 신설**: 07-23 07:45 BM 관문 4개 자동 검증(`bm-layer-4gates-verify-0723` — 전 세션 "예약됨" 주장이 실제 없어서 생성, LESSONS 기록) / 07-23 09:30 codex 소급(`codex-retro-review-0723`: BM P1~P5+IU-R·B-X·SS·EXPKEYWORD+PX, challenge 권장).
+- PR #79(BM)는 오픈 유지. 이 브랜치=PR#79+PX 커밋(스택). PX PR은 #79 위에 생성.
+
+## (이전) 최신 상태 (2026-07-22 12:06, 워크트리 daily-rank-leash-profit-control-71b501·브랜치 claude/agency-learning-bm-layer-667d1b)
+- **★BM 벤치마크 레이어 P1~P6 구현·배포·라이브 검증 완료(D-NAO-78·79 실행층) — PR #79 생성**: 신규 3테이블(naver_entity_snapshot·naver_agency_op·naver_bm_benchmark, alembic 3체인 head d9e0f1a2b3c4)+SA-1/2/3+예외 브리핑(diary·Slack)+드릴다운 GET 3종+크론(07:37 일별·일요 09:20 deep). 관찰 전용·실쓰기 0·fail-open. 2814 passed·회귀 0. 라이브 실측: 스냅샷 45캠페인·1,008그룹·키워드 90,174 정합 / 프라이어 5행(대행사 검증 키워드 41,983·입찰 밴드·구조) / diary #371 "예외 없음". **내일 아침 남은 관문**: 07:37 첫 자율 발화→SA-2 첫 실diff(D-1·D)→브리핑 실발송→08:50 SS4 교차 플래그(자동 검증 예약, 07:45). 계획서 `docs/PLAN_naver-ad-bm-layer.md`.
+- **★대행사 교체 사후 조사 완료(오전)**: 신규 대행사(07-11~21) 실패 실측 — 컨텐츠 지면 노출 12배(CTR 0.06% vs 검색 1.9%)·신설 폴드8/플립8 캠페인 ROAS 0.06(콜드스타트·번아웃)·맥세이프 방치 65만. 원복 대행사(07-21 17:36~21:20)=검증된 캠페인에 신모델 그룹 6·키워드 85 등록·돈구멍 2캠페인 잠금 → 저녁 전환 +27~62%(시간별 실측). **entity_sync 사각 실증(그룹 신설·예산)=BM이 메꿈, 07-21 조작 전체=SA-2 수용 픽스처.** 미코드화 갭 2건(번아웃 곡선 조기경보·지면 노출 구성 감시) Jino 결정 대기.
+- **EXPKEYWORD 1년 백필 완결**: 248만행, 3월 갭 26일=NONE 종결(그날 데이터 없음, 정상) 확정. PR #78 병합(main==prod 복원). 6월 대조 99.99% 일치.
+- **미완**: 내일 아침 라이브 관문(예약됨) / codex 소급 리뷰 07-23(BM P1~P5 포함 전 커밋) / 파워링크 자동 제외 설계(EXPKEYWORD 데이터 흐르는 중) / SS 상수 캘리브레이션 / P4 bid_rank_slope(agency_op 데이터 쌓이면).
+
+## (이전) 최신 상태 (2026-07-22 07:25, 워크트리 session-dfd814·브랜치 claude/bx-exploration-ad-bid-400-fix-fb114e)
 - **★D-NAO-78 계정 전체(대행사 포함) 학습 방향 Jino 확정 + BM 벤치마크 레이어 승인**: 판단·학습이 ours 4개만 소비하던 갭 → 계정 45캠페인 전체(대행사 볼륨 캠페인 포함)를 관찰·학습. BM 레이어 구조 승인(SA-1 구조 스냅샷·SA-2 조작 diff·SA-3 성과 대조 → 프라이어+대행사 검증 키워드셋). 관찰 전용·실쓰기 0. **다음=Opus 계획서→구현**. 상세 HANDOFF `.claude/memory/HANDOFF_agency-wide-learning+expkeyword-fix+BM-layer_20260722.md`.
 - **★EXPKEYWORD(파워링크 검색어) 0행 버그 근본수정·배포(`278e5e1`)**: 구축 후 한 번도 적재 안 됨(16컬럼 가정이 12컬럼 전 행 드롭). EXP_COL_* 12컬럼 분리. **파워링크 검색어 1년 백필 완주·검증**(07:41 완료 248만행·338일, 최대 캠페인 AD리포트 1원도 안 틀림=매핑 확정, 집계차=expkeyword가 naver_ad_daily 파워링크 커버리지 구멍 메움). ref36 파워링크 보고서 전수 실측(미수집 데이터 다수).
 - **파워링크 자동 제외 설계 대기**: Jino "성과 기반 자동(수백 검색어 Confirm 불가)" 지시 → 비용 기반 컷+in-out 재심사 루프(전환 귀속 불가 보완, 14일 창 제안). EXPKEYWORD 데이터 흐른 후 착수.
