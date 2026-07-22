@@ -370,3 +370,61 @@ def test_step_pct_exceeds_guardrail_max_change():
     """D-NAO-71: 탐색 스텝 30% > guardrail_gate._MAX_CHANGE_PCT(15%) — ±15% 면제 타입으로
     발사돼야 함을 명시(면제 타입 등록·배선은 BX2)."""
     assert exploration._EXPLORATION_STEP_PCT > guardrail_gate._MAX_CHANGE_PCT
+
+
+# ══════════════════ VT4 (D-NAO-82①): 플로어 스텝 함정 수정 ══════════════════
+# 배경(07-22 prod 해부): 03 아이폰17프로 rank 6.39·bid 50·clk 0인데 탐색 발사 이력 0.
+# 원인 = adaptive_step cap=floor(50×1.3/10)×10=60이나 _finalize_step이 60<70(구 하한)으로 None
+# + 보수 10%(55)가 10원 내림에서 current(50)로 소실. 쇼핑 하한 50 + 최소 증분 보장으로 수정.
+
+def test_vt4_floor_step_50_to_60_conservative_first_step():
+    """★핵심 결함 수정: 50원 그룹 첫 스텝(밴드 밖·last_step None) — 보수 10%(55)가 내림에서
+    소실되던 것을 최소 증분(+10)으로 승격 → 50→60(cap_bid=60 이내)."""
+    got = exploration.adaptive_step(50, 6.39, _BAND, None, exploration._EXPLORATION_STEP_PCT)
+    assert got == 60  # 50×1.1=55→floor 50=current→+10 승격→60(=cap floor(50×1.3)=60)
+
+
+def test_vt4_floor_step_50_to_60_imp0_blind():
+    """imp=0(rank None) 눈먼 구간의 50원 그룹도 플로어 트랩 수정으로 50→60."""
+    got = exploration.adaptive_step(50, None, _BAND, None, exploration._EXPLORATION_STEP_PCT)
+    assert got == 60
+
+
+def test_vt4_min_increment_only_on_blind_paths():
+    """가드: 최소 증분 승격은 **눈먼 구간(첫 스텝·imp0·기울기 부재)** 에서만. 실관측 기울기
+    경로는 측정 소폭이 소실돼도 승격하지 않는다(강제 +10원의 과열밴드<2.5 오버슈트 방지)."""
+    # 눈먼 경로: 50→60 승격.
+    assert exploration.adaptive_step(50, 6.0, _BAND, None, exploration._EXPLORATION_STEP_PCT) == 60
+    # 실관측 기울기 경로: last={bid:40, rank:10.0} → 기울기 (10-6)/(50-40)=0.4 rank/원 →
+    # 증분=(10원/4rank)×(6-4)=5원 → 55 → floor 50 = current → None(승격 안 함).
+    last = {"bid": 40, "rank": 10.0}
+    assert exploration.adaptive_step(50, 6.0, _BAND, last, exploration._EXPLORATION_STEP_PCT) is None
+
+
+def test_vt4_min_increment_none_when_cap_below_current_plus_10():
+    """극단: 현 입찰이 상한(_MAX_BID) 근처라 cap_bid<current+10이면 승격 불가 → None 유지
+    (상한이 스텝을 막는 정상 동작)."""
+    got = exploration.adaptive_step(100_000, 6.0, _BAND, None, exploration._EXPLORATION_STEP_PCT)
+    # cap_bid=min(floor(100000×1.3),100000)=100000=current → +10(100010)>cap → 승격 불가 → None
+    assert got is None
+
+
+def test_vt4_70plus_paths_no_regression():
+    """70원↑ 실관측/보수 경로 회귀 없음: 하한 50 교체가 기존 70+ 결과를 바꾸지 않는다(스텝은
+    항상 current 초과=최소 80이라 50/70 하한 어느 쪽도 통과)."""
+    # 보수 첫 스텝 1000→1100(변화 없음)
+    assert exploration.adaptive_step(1000, 7.0, _BAND, None, exploration._EXPLORATION_STEP_PCT) == 1100
+    # 실관측 기울기 1000→1100(변화 없음)
+    assert exploration.adaptive_step(1000, 6.0, _BAND, {"bid": 900, "rank": 8.0},
+                                     exploration._EXPLORATION_STEP_PCT) == 1100
+
+
+def test_vt4_heuristic_ceiling_50won_no_70_floor():
+    """_heuristic_ceiling 70원 하한이 50원 입력을 막지 않음(raw=100→rounded=100≥70) — 고정."""
+    assert exploration._heuristic_ceiling(50) == 100
+
+
+def test_vt4_shopping_min_bid_constant():
+    """쇼핑 하한 상수 신설·키워드 하한(70) 보존 고정."""
+    assert exploration._EXPLORATION_MIN_BID_SHOPPING == 50
+    assert exploration._EXPLORATION_MIN_BID == 70  # (보존) 키워드 grain 출처

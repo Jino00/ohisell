@@ -90,7 +90,17 @@ _EXPLORATION_UNRESPONSIVE_GROWTH = Decimal("1.5")
 # 가르는 **신선** 신호 — 정착창(D-8~D-2)은 지연되므로 별개 창이 필요하다.
 _EXPLORATION_FLOW_WINDOW_H = 24
 
-_EXPLORATION_MIN_BID = 70       # 네이버 SA 유효 입찰가 하한(bid_simulator 규격)
+# ── 유효 입찰가 하한: grain별 규격 분리(VT4 D-NAO-82① 2026-07-22 라이브 해부 발견) ──
+# ★결함이었던 것: `_EXPLORATION_MIN_BID`(70)은 파워링크(WEB_SITE) **키워드 grain** 실측 역추적
+#   하한(bid_simulator._MIN_BID 출처)인데, 이 탐색 래더는 SHOPPING 전용(_EXPLORATION_CAMPAIGN_TYPE)
+#   이라 키워드 규격을 그대로 쓰면 안 됐다. prod 실측(2026-07-22): 쇼핑 그룹 158개가 bid=50으로
+#   라이브 노출 수신 중(70원 미만 입찰은 SHOPPING adgroup grain에만 존재·키워드 grain 0건) →
+#   **쇼핑검색 최소 유효입찰 = 50원**. 70원 하한을 쇼핑 래더에 적용해 50원 그룹의 스텝이 영구
+#   소실됐다(03 아이폰17프로 rank 6.39·bid 50·발사 이력 0의 근본 원인). → 래더 유효 하한을
+#   쇼핑 규격 50으로 교체한다. _EXPLORATION_MIN_BID(70)은 삭제하지 않고 출처 문서로 보존(키워드
+#   grain 규격·bid_simulator._MIN_BID 정합) — 래더 판정에는 아래 SHOPPING 하한을 쓴다.
+_EXPLORATION_MIN_BID = 70               # (보존) 파워링크 키워드 grain 유효 하한·bid_simulator 규격 출처
+_EXPLORATION_MIN_BID_SHOPPING = 50      # 쇼핑검색 adgroup grain 유효 하한(prod 158그룹 bid=50 라이브 실증, 2026-07-22)
 _EXPLORATION_MAX_BID = 100_000  # 유효 입찰가 상한
 _EXPLORATION_BID_INCREMENT = 10  # 10원 단위(스텝 반올림 = floor //10*10, PLAN §3 BX2 GATE 이월 P2③)
 
@@ -129,7 +139,9 @@ def adaptive_step(
                     §0 금지선 4 fail-open). 상한(cap_bid)이 최종 클램프하므로 밴드가 멀어도 1스텝
                     상한을 넘지 않는다(안전).
 
-    반환: target_bid(int, 10원 단위·현재 초과·70~100,000) / None(스텝 없음 = 밴드 내·산정 소실).
+    반환: target_bid(int, 10원 단위·현재 초과·50~100,000 쇼핑 유효입찰) / None(스텝 없음 = 밴드
+          내·산정 소실 = 상한이 막음). VT4(D-NAO-82①): 눈먼 소폭 구간의 저입찰(≤~50원) 스텝
+          소실 시 최소 증분(+10원)을 보장(50→60) — 상한 이내에서만.
 
     산정(PLAN §1 가드1):
       ① 상한 = floor(current×(1+cap_pct))(10원 내림 — 30% 가드 미세 초과 방지, P2③).
@@ -139,7 +151,7 @@ def adaptive_step(
          (last_step.bid<current_bid ∧ rank 개선>0) 그 기울기로 목표까지 필요 증분을 근접
          산정(밴드 접근할수록 delta_needed↓ → 스텝 자연 축소 = 오버슈트 과지불 방지). 순위
          무반응(rank 개선≤0)이면 직전 Δ입찰×점증 계수(스텝 점증). 기울기 부재면 보수적 소폭.
-      ⑤ 산정 → 상한(cap_bid·_MAX_BID) 클램프 → 10원 내림 → 현재 초과·≥70원이어야 유효.
+      ⑤ 산정 → 상한(cap_bid·_MAX_BID) 클램프 → 10원 내림 → 현재 초과·≥50원(쇼핑 하한)이어야 유효.
     """
     if current_bid <= 0:
         return None
@@ -152,7 +164,7 @@ def adaptive_step(
     if current_rank is None:
         target = Decimal(current_bid) * (Decimal(1) + _EXPLORATION_FIRST_STEP_PCT)
         target = _apply_bm_anchor(target, current_bid, bm_prior)
-        return _finalize_step(target, current_bid, cap_bid)
+        return _finalize_step(target, current_bid, cap_bid, allow_min_increment=True)  # 눈먼 소폭 — 플로어 스텝 보장
 
     cr = Decimal(str(current_rank))
     band_high_d = Decimal(str(band_high))
@@ -179,17 +191,35 @@ def adaptive_step(
         # 기울기 부재 — 보수적 소폭(BM 프라이어 시드 대상: 눈먼 소폭 대신 대행사 밴드로 시드).
         increment = Decimal(current_bid) * _EXPLORATION_FIRST_STEP_PCT
         target = _apply_bm_anchor(Decimal(current_bid) + increment, current_bid, bm_prior)
-        return _finalize_step(target, current_bid, cap_bid)
+        return _finalize_step(target, current_bid, cap_bid, allow_min_increment=True)  # 눈먼 소폭 — 플로어 스텝 보장
     target = Decimal(current_bid) + increment  # 실관측 기울기 산정 — BM 앵커 미적용(폐루프 우선)
+    # 실관측 기울기 경로는 min_increment 미적용(측정된 소폭 강제 +10원은 과열밴드 오버슈트 위험).
     return _finalize_step(target, current_bid, cap_bid)
 
 
-def _finalize_step(target: Decimal, current_bid: int, cap_bid: int) -> int | None:
+def _finalize_step(
+    target: Decimal, current_bid: int, cap_bid: int, *, allow_min_increment: bool = False,
+) -> int | None:
     """스텝 반올림·클램프(PLAN §3 BX2 GATE 이월 P2③): floor(//10*10) → 상한 클램프 →
-    현재 초과·최소입찰가 이상이어야 유효(아니면 None=스텝 소실)."""
+    현재 초과·최소입찰가(쇼핑 50원) 이상이어야 유효(아니면 None=스텝 소실).
+
+    allow_min_increment(VT4 D-NAO-82① 플로어 스텝 함정 수정): **눈먼 소폭 구간**(콜드 imp=0·
+    첫 스텝·기울기 부재 폴백)에서만 True. 이 구간의 보수 +10%는 저입찰(≤~50원)대에서 10원
+    내림하면 current와 같아져(예 50×1.1=55→floor 50=current) 스텝이 영구 소실됐다 — 프로그램이
+    50원 그룹을 절대 못 올리던 결함(prod 실측). 소실 시 **최소 유효 증분(current+10원)으로 승격**
+    한다. 단 cap_bid(30% 상한) 이내여야 하며 cap_bid<current+10이면 승격 불가(None 유지 =
+    상한이 스텝을 막는 정상 동작). ★실관측 기울기 산정 경로(adaptive_step ④ 반응함)에서는
+    False로 둔다 — 기울기가 "밴드까지 +N원만 필요"라고 말하면 강제 +10원이 과열밴드(rank<2.5)로
+    오버슈트할 수 있어(test_adaptive_step_never_overshoots_below_2_5·가드4 과열밴드 진입 금지),
+    측정된 소폭은 소실=hold가 옳다."""
     stepped = int((target // _EXPLORATION_BID_INCREMENT) * _EXPLORATION_BID_INCREMENT)  # 10원 내림
     stepped = min(stepped, cap_bid, _EXPLORATION_MAX_BID)
-    if stepped <= current_bid or stepped < _EXPLORATION_MIN_BID:
+    # VT4 플로어 스텝 함정 수정: 눈먼 소폭이 내림으로 소실됐고 원 target이 상향이면 최소 증분 보장.
+    if allow_min_increment and stepped <= current_bid and target > Decimal(current_bid):
+        bumped = current_bid + _EXPLORATION_BID_INCREMENT
+        if bumped <= cap_bid:  # 30% 상한 이내에서만 승격(상한이 막으면 None 유지)
+            stepped = bumped
+    if stepped <= current_bid or stepped < _EXPLORATION_MIN_BID_SHOPPING:
         return None
     return stepped
 
