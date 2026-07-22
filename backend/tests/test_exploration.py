@@ -370,3 +370,175 @@ def test_step_pct_exceeds_guardrail_max_change():
     """D-NAO-71: 탐색 스텝 30% > guardrail_gate._MAX_CHANGE_PCT(15%) — ±15% 면제 타입으로
     발사돼야 함을 명시(면제 타입 등록·배선은 BX2)."""
     assert exploration._EXPLORATION_STEP_PCT > guardrail_gate._MAX_CHANGE_PCT
+
+
+# ══════════════════ VT4 (D-NAO-82①): 플로어 스텝 함정 수정 ══════════════════
+# 배경(07-22 prod 해부): 03 아이폰17프로 rank 6.39·bid 50·clk 0인데 탐색 발사 이력 0.
+# 원인 = adaptive_step cap=floor(50×1.3/10)×10=60이나 _finalize_step이 60<70(구 하한)으로 None
+# + 보수 10%(55)가 10원 내림에서 current(50)로 소실. 쇼핑 하한 50 + 최소 증분 보장으로 수정.
+
+def _adgroup_bid(db, *, adgroup_id, bid_amt, campaign_id=CAMPAIGN, status="on"):
+    """bid_amt를 명시한 SHOPPING adgroup 엔티티(수요 우선 정렬 테스트용)."""
+    db.add(NaverEntity(entity_type="adgroup", entity_id=adgroup_id, parent_id=campaign_id,
+                       campaign_id=campaign_id, campaign_type="SHOPPING", status=status,
+                       bid_amt=bid_amt))
+    db.commit()
+
+
+def test_vt4_floor_step_50_to_60_conservative_first_step():
+    """★핵심 결함 수정: 50원 그룹 첫 스텝(밴드 밖·last_step None) — 보수 10%(55)가 내림에서
+    소실되던 것을 최소 증분(+10)으로 승격 → 50→60(cap_bid=60 이내)."""
+    got = exploration.adaptive_step(50, 6.39, _BAND, None, exploration._EXPLORATION_STEP_PCT)
+    assert got == 60  # 50×1.1=55→floor 50=current→+10 승격→60(=cap floor(50×1.3)=60)
+
+
+def test_vt4_floor_step_50_to_60_imp0_blind():
+    """imp=0(rank None) 눈먼 구간의 50원 그룹도 플로어 트랩 수정으로 50→60."""
+    got = exploration.adaptive_step(50, None, _BAND, None, exploration._EXPLORATION_STEP_PCT)
+    assert got == 60
+
+
+def test_vt4_min_increment_only_on_blind_paths():
+    """가드: 최소 증분 승격은 **눈먼 구간(첫 스텝·imp0·기울기 부재)** 에서만. 실관측 기울기
+    경로는 측정 소폭이 소실돼도 승격하지 않는다(강제 +10원의 과열밴드<2.5 오버슈트 방지)."""
+    # 눈먼 경로: 50→60 승격.
+    assert exploration.adaptive_step(50, 6.0, _BAND, None, exploration._EXPLORATION_STEP_PCT) == 60
+    # 실관측 기울기 경로: last={bid:40, rank:10.0} → 기울기 (10-6)/(50-40)=0.4 rank/원 →
+    # 증분=(10원/4rank)×(6-4)=5원 → 55 → floor 50 = current → None(승격 안 함).
+    last = {"bid": 40, "rank": 10.0}
+    assert exploration.adaptive_step(50, 6.0, _BAND, last, exploration._EXPLORATION_STEP_PCT) is None
+
+
+def test_vt4_min_increment_none_when_cap_below_current_plus_10():
+    """극단: 현 입찰이 상한(_MAX_BID) 근처라 cap_bid<current+10이면 승격 불가 → None 유지
+    (상한이 스텝을 막는 정상 동작)."""
+    got = exploration.adaptive_step(100_000, 6.0, _BAND, None, exploration._EXPLORATION_STEP_PCT)
+    # cap_bid=min(floor(100000×1.3),100000)=100000=current → +10(100010)>cap → 승격 불가 → None
+    assert got is None
+
+
+def test_vt4_70plus_paths_no_regression():
+    """70원↑ 실관측/보수 경로 회귀 없음: 하한 50 교체가 기존 70+ 결과를 바꾸지 않는다(스텝은
+    항상 current 초과=최소 80이라 50/70 하한 어느 쪽도 통과)."""
+    # 보수 첫 스텝 1000→1100(변화 없음)
+    assert exploration.adaptive_step(1000, 7.0, _BAND, None, exploration._EXPLORATION_STEP_PCT) == 1100
+    # 실관측 기울기 1000→1100(변화 없음)
+    assert exploration.adaptive_step(1000, 6.0, _BAND, {"bid": 900, "rank": 8.0},
+                                     exploration._EXPLORATION_STEP_PCT) == 1100
+
+
+def test_vt4_heuristic_ceiling_50won_no_70_floor():
+    """_heuristic_ceiling 70원 하한이 50원 입력을 막지 않음(raw=100→rounded=100≥70) — 고정."""
+    assert exploration._heuristic_ceiling(50) == 100
+
+
+def test_vt4_shopping_min_bid_constant():
+    """쇼핑 하한 상수 신설·키워드 하한(70) 보존 고정."""
+    assert exploration._EXPLORATION_MIN_BID_SHOPPING == 50
+    assert exploration._EXPLORATION_MIN_BID == 70  # (보존) 키워드 grain 출처
+
+
+# ══════════════════ VT4 (D-NAO-82①): 수요 우선 정렬 ══════════════════
+
+def test_vt4_floor_bid_max_constant():
+    """수요 우선 정렬의 플로어 판정 경계 상수 고정."""
+    assert exploration._EXPLORATION_FLOOR_BID_MAX == 100
+
+def test_vt4_prioritize_floor_high_demand_front(db):
+    """플로어(bid≤100)·표본 미달(clk<10) 그룹을 최근 7일 노출 내림차순으로 앞에, 비플로어는 뒤에."""
+    _campaign(db)
+    _adgroup_bid(db, adgroup_id="ag-floor-hi", bid_amt=50)
+    _adgroup_bid(db, adgroup_id="ag-floor-lo", bid_amt=60)
+    _adgroup_bid(db, adgroup_id="ag-normal", bid_amt=500)  # bid>100 → 비플로어(tier2)
+    _clicks(db, adgroup_id="ag-floor-hi", clk=0, imp=900)
+    _clicks(db, adgroup_id="ag-floor-lo", clk=0, imp=100)
+    _clicks(db, adgroup_id="ag-normal", clk=0, imp=50)
+    cands = exploration.exploration_candidates(db, CAMPAIGN, *WINDOW)  # entity_id 오름차순
+    got = exploration.prioritize_candidates(db, CAMPAIGN, cands, *WINDOW)
+    assert got == [("adgroup", "ag-floor-hi"), ("adgroup", "ag-floor-lo"), ("adgroup", "ag-normal")]
+
+
+def test_vt4_prioritize_sample_sufficient_excluded_from_tier1(db):
+    """정착 clk≥10(표본 충분)이면 플로어 입찰이어도 tier1 아님(순수 함수 게이트 검증)."""
+    _campaign(db)
+    _adgroup_bid(db, adgroup_id="ag-floor-new", bid_amt=50)
+    _adgroup_bid(db, adgroup_id="ag-floor-sat", bid_amt=50)
+    _clicks(db, adgroup_id="ag-floor-new", clk=0, imp=100)
+    _clicks(db, adgroup_id="ag-floor-sat", clk=10, imp=900)  # 표본 충분 → tier2
+    # exploration_candidates는 clk<10만 뽑으므로 sat는 후보에 없다 → 후보 리스트를 직접 구성해
+    # prioritize의 게이트 자체를 검증(순수 함수 계약).
+    cands = [("adgroup", "ag-floor-new"), ("adgroup", "ag-floor-sat")]
+    got = exploration.prioritize_candidates(db, CAMPAIGN, cands, *WINDOW)
+    assert got == [("adgroup", "ag-floor-new"), ("adgroup", "ag-floor-sat")]  # new=tier1, sat=tier2
+
+
+def test_vt4_prioritize_tie_impressions_entity_id_asc(db):
+    """동률 노출 → entity_id 오름차순(결정성)."""
+    _campaign(db)
+    _adgroup_bid(db, adgroup_id="ag-b", bid_amt=50)
+    _adgroup_bid(db, adgroup_id="ag-a", bid_amt=50)
+    _clicks(db, adgroup_id="ag-b", clk=0, imp=500)
+    _clicks(db, adgroup_id="ag-a", clk=0, imp=500)
+    cands = [("adgroup", "ag-b"), ("adgroup", "ag-a")]  # 일부러 역순 입력
+    got = exploration.prioritize_candidates(db, CAMPAIGN, cands, *WINDOW)
+    assert got == [("adgroup", "ag-a"), ("adgroup", "ag-b")]  # 동률 → id 오름
+
+
+def test_vt4_prioritize_non_floor_keeps_input_order(db):
+    """전부 비플로어(bid>100)면 입력 순서(entity_id 오름차순) 그대로."""
+    _campaign(db)
+    _adgroup_bid(db, adgroup_id="ag-1", bid_amt=300)
+    _adgroup_bid(db, adgroup_id="ag-2", bid_amt=400)
+    _clicks(db, adgroup_id="ag-1", clk=0, imp=10)
+    _clicks(db, adgroup_id="ag-2", clk=0, imp=900)  # 노출 크지만 비플로어라 재정렬 안 함
+    cands = exploration.exploration_candidates(db, CAMPAIGN, *WINDOW)
+    got = exploration.prioritize_candidates(db, CAMPAIGN, cands, *WINDOW)
+    assert got == [("adgroup", "ag-1"), ("adgroup", "ag-2")]  # 입력 순서 유지
+
+
+def test_vt4_prioritize_missing_bid_amt_conservative_tier2(db):
+    """bid_amt=None(미동기)은 플로어 판정 불가 → tier2(보수)."""
+    _campaign(db)
+    _adgroup_bid(db, adgroup_id="ag-none", bid_amt=None)
+    _adgroup_bid(db, adgroup_id="ag-floor", bid_amt=50)
+    _clicks(db, adgroup_id="ag-none", clk=0, imp=900)  # 노출 크지만 bid None → tier2
+    _clicks(db, adgroup_id="ag-floor", clk=0, imp=100)
+    cands = exploration.exploration_candidates(db, CAMPAIGN, *WINDOW)
+    got = exploration.prioritize_candidates(db, CAMPAIGN, cands, *WINDOW)
+    assert got == [("adgroup", "ag-floor"), ("adgroup", "ag-none")]
+
+
+def test_vt4_prioritize_cold_no_daily_after_high_demand(db):
+    """daily 행 부재(콜드 imp=0) 플로어 그룹은 imp=0으로 취급 → 고노출 플로어 뒤."""
+    _campaign(db)
+    _adgroup_bid(db, adgroup_id="ag-hi", bid_amt=50)
+    _adgroup_bid(db, adgroup_id="ag-cold", bid_amt=50)  # daily 행 없음
+    _clicks(db, adgroup_id="ag-hi", clk=0, imp=300)
+    cands = exploration.exploration_candidates(db, CAMPAIGN, *WINDOW)
+    got = exploration.prioritize_candidates(db, CAMPAIGN, cands, *WINDOW)
+    assert got == [("adgroup", "ag-hi"), ("adgroup", "ag-cold")]
+
+
+def test_vt4_prioritize_empty_and_no_adgroups():
+    """빈 입력·adgroup 없는 입력은 DB 접근 없이 그대로 반환(순수·결정성, N+1 방지 조기 반환)."""
+    assert exploration.prioritize_candidates(None, CAMPAIGN, [], None, None) == []
+    # adgroup이 하나도 없으면(키워드 등) 쿼리 전에 원본 순서 그대로 반환(db=None이어도 무접근).
+    kws = [("keyword", "kw-2"), ("keyword", "kw-1")]
+    assert exploration.prioritize_candidates(None, CAMPAIGN, kws, None, None) == kws
+
+
+def test_vt4_03_iphone17pro_mirror_end_to_end(db):
+    """03 실표본 미러: bid=50·rank 6.39·clk 0·고노출 그룹이 후보→수요 우선 맨 앞→ladder 'start'
+    →adaptive_step 유효 스텝(50→60)까지 관통 — 발사 이력 0의 근본 원인 해소 입증."""
+    _campaign(db)
+    _adgroup_bid(db, adgroup_id="ag-17pro", bid_amt=50)
+    _clicks(db, adgroup_id="ag-17pro", clk=0, imp=900)  # 노출 수요 상위·클릭 0
+    cands = exploration.exploration_candidates(db, CAMPAIGN, *WINDOW)
+    assert ("adgroup", "ag-17pro") in cands
+    pri = exploration.prioritize_candidates(db, CAMPAIGN, cands, *WINDOW)
+    assert pri[0] == ("adgroup", "ag-17pro")  # 수요 우선 맨 앞
+    verdict, _ = exploration.ladder_judgment(
+        None, {"clk": 0, "avg_rank": 6.39}, ceiling=200, current_bid=50)
+    assert verdict == "start"
+    step = exploration.adaptive_step(50, 6.39, _BAND, None, exploration._EXPLORATION_STEP_PCT)
+    assert step == 60

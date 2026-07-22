@@ -80,6 +80,52 @@ def test_target_bid_missing_blocked():
     assert "target_bid" in reason
 
 
+# ── VT4 P1-1: campaign_type 인지형 입찰 하한(SHOPPING 50 / 그 외 70) ──────────
+
+
+def test_shopping_bid_60_passes_min_bid():
+    """SHOPPING이면 하한 50 — 50→60 탐색 스텝(bid_up_explore, 변경폭 30% 상한)이 게이트 통과."""
+    reason = gate.check(
+        _bid_proposal("bid_up_explore", 60),
+        _ctx(current_bid=50, campaign_type="SHOPPING"),
+        now=NOW,
+    )
+    assert reason is None
+
+
+def test_non_shopping_bid_60_blocked_by_70_floor():
+    """campaign_type 미확보(None)면 보수 70 하한 — 60원은 유효 범위 밖으로 차단."""
+    reason = gate.check(
+        _bid_proposal("bid_up_explore", 60),
+        _ctx(current_bid=50, campaign_type=None),
+        now=NOW,
+    )
+    assert reason is not None
+    assert "70~100,000" in reason
+
+
+def test_web_site_bid_60_blocked_by_70_floor():
+    """WEB_SITE(파워링크 키워드 grain)는 70 하한 유지 — 60원 차단."""
+    reason = gate.check(
+        _bid_proposal("bid_up_explore", 60),
+        _ctx(current_bid=50, campaign_type="WEB_SITE"),
+        now=NOW,
+    )
+    assert reason is not None
+    assert "70~100,000" in reason
+
+
+def test_shopping_bid_40_still_blocked_below_50():
+    """SHOPPING이어도 50 미만(40원)은 차단 — 하한 표기가 동적으로 50~로 바뀐다."""
+    reason = gate.check(
+        _bid_proposal("bid_up_explore", 40),
+        _ctx(current_bid=40, campaign_type="SHOPPING"),
+        now=NOW,
+    )
+    assert reason is not None
+    assert "50~100,000" in reason
+
+
 # ── 변경폭 ±15% ───────────────────────────────────────────────────────────
 
 

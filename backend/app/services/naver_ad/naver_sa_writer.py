@@ -263,6 +263,12 @@ def delete_restricted_keywords(adgroup_id: str, restrict_kwd_ids: list[str]) -> 
 # 기록용으로만 유지한다(add_restricted_keywords와 동일 규율).
 
 _MIN_BID = 70
+# VT4 D-NAO-82①(codex 1R P1-1): adgroup/ad grain 유효 하한 = 50원(SHOPPING 쇼핑검색 최소 유효
+# 입찰, prod 158그룹 bid=50 라이브 실증 2026-07-22). keyword grain(update_keyword_bid)은 70원
+# 유지(파워링크 키워드 규격·bid_simulator._MIN_BID 정합). WEB_SITE 광고그룹에 50~60원을 쓰려는
+# 오용은 네이버 API 400이 fail-closed로 잡는다(이 어댑터는 grain 하한만 방어 — campaign_type을
+# 모르므로 grain 최저선까지 허용하고 API 거부에 위임, guardrail_gate가 상위에서 type 인지 차단).
+_MIN_BID_GROUP_AD = 50
 _MAX_BID = 100_000
 _BID_INCREMENT = 10
 
@@ -572,9 +578,9 @@ def update_adgroup_bid(ncc_adgroup_id: str, bid_amt: int) -> WriteResult:
     """PUT /ncc/adgroups/{nccAdgroupId}?fields=bidAmt — 쇼핑 광고그룹 입찰가 변경
     (swagger Adgroup.bidAmt, 실측 2026-07-14).
 
-    bid_amt 사전검증(70~100,000원, 10원 단위 — update_keyword_bid와 동일 상수)은 여기서도
-    반복한다(이중 방벽, 상위 guardrail_gate가 이미 걸렀어도 이 어댑터 단독 호출 시에도
-    무효 입찰가가 네이버에 그대로 전송되지 않도록 방어, fail-closed).
+    bid_amt 사전검증(50~100,000원, 10원 단위 — VT4 P1-1 adgroup grain 하한 50원,
+    _MIN_BID_GROUP_AD)은 여기서도 반복한다(이중 방벽, 상위 guardrail_gate가 이미 걸렀어도 이
+    어댑터 단독 호출 시에도 무효 입찰가가 네이버에 그대로 전송되지 않도록 방어, fail-closed).
 
     ML 자동입찰 충돌 사전가드: swagger Adgroup.systemBiddingType(NONE|ML)이 'NONE'이 아니거나
     autobidStrategy.isAutobidActive가 true면 시스템(ML) 자동입찰이 이미 이 그룹의 입찰을
@@ -587,9 +593,9 @@ def update_adgroup_bid(ncc_adgroup_id: str, bid_amt: int) -> WriteResult:
         WriteError: PUT이 2xx 아님(재시도 없음 — 비멱등 쓰기).
         WriteVerificationError: PUT은 2xx였는데 재조회에 반영 안 됨.
     """
-    if not (_MIN_BID <= bid_amt <= _MAX_BID) or bid_amt % _BID_INCREMENT != 0:
+    if not (_MIN_BID_GROUP_AD <= bid_amt <= _MAX_BID) or bid_amt % _BID_INCREMENT != 0:
         raise WriteValidationError(
-            f"update_adgroup_bid: bid_amt={bid_amt}는 유효 범위 밖(70~100,000원, 10원 단위)"
+            f"update_adgroup_bid: bid_amt={bid_amt}는 유효 범위 밖({_MIN_BID_GROUP_AD}~100,000원, 10원 단위)"
         )
 
     before = _get_adgroup(ncc_adgroup_id)
@@ -680,7 +686,7 @@ def update_ad_bid(ncc_ad_id: str, bid_amt: int) -> WriteResult:
     불명)면 그룹입찰이 실효라 개별 bidAmt 수정이 무의미·혼란 → fail-closed 거부
     (WriteValidationError). 부모 광고그룹이 ML 자동입찰이면 소재 bidAmt도 무시되므로
     update_adgroup_bid와 동일 사전가드(systemBiddingType/isAutobidActive)로 차단. bid_amt
-    사전검증(70~100,000원·10원 단위 — update_keyword_bid와 동일 상수, 이중 방벽). 성공 판정 =
+    사전검증(50~100,000원·10원 단위 — VT4 P1-1 ad grain 하한 50원 _MIN_BID_GROUP_AD, 이중 방벽). 성공 판정 =
     재조회 실측(after adAttr.bidAmt==요청 ∧ useGroupBidAmt==false, update_keyword_bid의
     useGroupBidAmt 이중확인 동형). DB 접근 없음(순수 어댑터).
 
@@ -692,9 +698,9 @@ def update_ad_bid(ncc_ad_id: str, bid_amt: int) -> WriteResult:
             false로 유지되지 않음(강제 전환 감지) / before에 nccAdgroupId 부재로 ML 재확인 불가 /
             before adAttr을 dict로 정규화 불가(병합 기반 소실 — 요청 body 구성 전 fail-closed).
     """
-    if not (_MIN_BID <= bid_amt <= _MAX_BID) or bid_amt % _BID_INCREMENT != 0:
+    if not (_MIN_BID_GROUP_AD <= bid_amt <= _MAX_BID) or bid_amt % _BID_INCREMENT != 0:
         raise WriteValidationError(
-            f"update_ad_bid: bid_amt={bid_amt}는 유효 범위 밖(70~100,000원, 10원 단위)"
+            f"update_ad_bid: bid_amt={bid_amt}는 유효 범위 밖({_MIN_BID_GROUP_AD}~100,000원, 10원 단위)"
         )
 
     before = get_ad(ncc_ad_id)

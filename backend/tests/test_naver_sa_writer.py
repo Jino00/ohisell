@@ -748,13 +748,29 @@ def test_update_adgroup_bid_body_shape():
 
 
 def test_update_adgroup_bid_below_min_raises_validation_error_no_http():
+    # VT4 P1-1: adgroup grain 하한 = 50원 → 40원은 여전히 차단(50 미만).
     with patch.object(writer.fetcher, "_get") as mock_get, \
          patch.object(writer.requests, "put") as mock_put:
         with pytest.raises(WriteValidationError):
-            writer.update_adgroup_bid(ADGROUP_ID, 60)
+            writer.update_adgroup_bid(ADGROUP_ID, 40)
 
     mock_get.assert_not_called()
     mock_put.assert_not_called()
+
+
+def test_update_adgroup_bid_50_passes_min_bid():
+    """VT4 P1-1: adgroup grain 하한 50원 — 50원 발사가 검증 통과(60원도 통과, prod 158그룹
+    bid=50 라이브 실증). keyword grain(70)과 달리 adgroup은 쇼핑검색 최소 유효입찰 50원."""
+    before = _adgroup_bid_resp(bid_amt=1200)
+    after = _adgroup_bid_resp(bid_amt=50)
+    put_resp = FakeResp(200, after.json())
+
+    with patch.object(writer.fetcher, "_get", side_effect=[before, after]), \
+         patch.object(writer.requests, "put", return_value=put_resp) as mock_put:
+        result = writer.update_adgroup_bid(ADGROUP_ID, 50)
+
+    assert result.action == "update_adgroup_bid"
+    assert mock_put.call_count == 1
 
 
 def test_update_adgroup_bid_above_max_raises_validation_error_no_http():

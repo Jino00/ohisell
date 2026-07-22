@@ -26,6 +26,7 @@ from app.models import (
     NaverProductBep,
     NaverProposal,
     NaverRetroSignal,
+    OpsDiaryEntry,
 )
 from app.services.naver_ad import auto_operator
 from app.services.naver_ad import bid_step_types, diary
@@ -717,6 +718,86 @@ def test_harness_kill_switch_flip_after_entry_check_blocks_writer(db):
     assert p.status == "approved"  # executing 클레임이 원복돼야 함(미실행 정직 상태)
     assert p.executed_change_log_id is None
     assert db.query(NaverChangeLog).filter(NaverChangeLog.proposal_id == p.id).count() == 0
+
+
+# ══════════════════════════ VT3(D-NAO-82②) 소재 CTR 경보 브리핑(일 레인) ══════════════════════════
+
+def _ctr_alert_rows(db, *, adgroup_id="grp-1", campaign_id=CAMPAIGN, imp=300, clk=0, rank=3.0):
+    """ctr_alert의 W3 창(D0-2..D0, D0=NOW.date()-1)에 들어가는 naver_ad_daily 3일 시드 —
+    누적 imp≥200·clk=0·avg_rank≤4.0(밴드 내) → 경보 발화."""
+    d0 = NOW.date() - timedelta(days=1)
+    for k in range(3):
+        db.add(NaverAdDaily(
+            ad_date=d0 - timedelta(days=k), campaign_id=campaign_id, campaign_type="SHOPPING",
+            adgroup_id=adgroup_id, keyword_id="", imp=imp, clk=clk, cost=0,
+            rank_sum=round(rank * imp),
+        ))
+    db.commit()
+
+
+def test_daily_lane_ctr_alert_briefing_emitted_when_alert_present(db):
+    """경보 있는 날 diary(observe·action=ctr_alert_briefing)+Slack 발화(PX·VT 브리핑 관례 미러)."""
+    _settings(db)
+    _ctr_alert_rows(db)
+    with patch.object(auto_operator.slack_notifier, "notify_text",
+                       return_value={"sent": True}) as mock_slack:
+        result = auto_operator.run_daily_lane(db, now=NOW)
+
+    assert result["ctr_alerts"] >= 1
+    briefs = db.query(OpsDiaryEntry).filter(
+        OpsDiaryEntry.action == auto_operator.ACTION_CTR_ALERT_BRIEFING
+    ).all()
+    assert len(briefs) == 1 and briefs[0].event_type == "observe"
+    assert "CTR" in briefs[0].rationale
+    mock_slack.assert_called_once()
+
+
+def test_daily_lane_ctr_alert_briefing_dedupes_w1_w3(db):
+    """codex 1R P2-2: 한 그룹이 W1·W3 동시 발화(clk=0 3일)해도 브리핑은 그룹당 1행(window
+    'W1+W3' 병기)·헤더 건수도 그룹 수(1) 기준(2건 중복 집계 금지)."""
+    _settings(db)
+    _ctr_alert_rows(db)  # clk=0 3일 → 같은 그룹 W1(D0 단일일)·W3(누적) 동시 발화
+    with patch.object(auto_operator.slack_notifier, "notify_text", return_value={"sent": True}):
+        auto_operator.run_daily_lane(db, now=NOW)
+
+    briefs = db.query(OpsDiaryEntry).filter(
+        OpsDiaryEntry.action == auto_operator.ACTION_CTR_ALERT_BRIEFING
+    ).all()
+    assert len(briefs) == 1
+    rationale = briefs[0].rationale
+    assert "경보 1건" in rationale            # 그룹 수 기준(2건 아님)
+    assert rationale.count("/grp-1(") == 1    # 그룹당 1행(중복 행 없음)
+    assert "W1+W3" in rationale               # window 병기
+
+
+def test_daily_lane_ctr_alert_briefing_silent_when_no_alert(db):
+    """경보 없는 날(추가 시드 0) → 완전 침묵(diary 0·Slack 0), 일 레인 본작업 결과는 불변."""
+    _settings(db)
+    with patch.object(auto_operator.slack_notifier, "notify_text") as mock_slack:
+        result = auto_operator.run_daily_lane(db, now=NOW)
+
+    assert result["ctr_alerts"] == 0
+    assert db.query(OpsDiaryEntry).filter(
+        OpsDiaryEntry.action == auto_operator.ACTION_CTR_ALERT_BRIEFING
+    ).count() == 0
+    mock_slack.assert_not_called()
+
+
+def test_daily_lane_ctr_alert_briefing_failure_is_fail_open(db):
+    """ctr_alert 산출 실패 → 브리핑만 fail-open(로그만) — 일 레인 본작업(승인/실행/stale
+    정리) 결과에는 영향 없음(예외가 run_daily_lane 밖으로 전파되지 않는다)."""
+    _settings(db)
+    p = _proposal(db, proposal_type="bid_down", target_bid=900)
+    with patch.object(auto_operator.ctr_alert, "detect_ctr_alerts",
+                       side_effect=RuntimeError("판정 실패")), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_daily_lane(db, now=NOW)
+
+    mock_exec.assert_called_once_with(db, p.id, dry_run=False, now=NOW)
+    assert result["approved"] == 1  # 본작업 정상 진행(브리핑 실패에 오염되지 않음)
+    assert db.query(OpsDiaryEntry).filter(
+        OpsDiaryEntry.action == auto_operator.ACTION_CTR_ALERT_BRIEFING
+    ).count() == 0
 
 
 # ══════════════════════════ 시간당 레인(A2+A3) ══════════════════════════

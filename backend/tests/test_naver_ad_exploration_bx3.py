@@ -666,3 +666,67 @@ def test_harness_exploration_missing_base_bid_marker_blocks(db):
         with pytest.raises(harness.MissingExecutionTargetError):
             harness.execute(db, p.id, dry_run=False)
     mag.assert_not_called()
+
+
+# ══════════════════════ VT3(D-NAO-82②) CTR 경보 → 래더 skip 게이트 ══════════════════════
+
+def _ctr_alert_daily(db, *, adgroup_id=GRP, campaign_id=CAMP, imp=300, clk=0, rank=3.0):
+    """ctr_alert의 W3 창(D0-2..D0, D0=NOW.date()-1)에 들어가는 naver_ad_daily 3일 시드 —
+    누적 imp≥200·clk=0·avg_rank≤4.0(밴드 내) → W1·W3 둘 다 발화(스코프 확인은 skip 쪽 관심사
+    아님, 발화 자체만 필요)."""
+    d0 = NOW.date() - timedelta(days=1)
+    for k in range(3):
+        db.add(NaverAdDaily(
+            ad_date=d0 - timedelta(days=k), campaign_id=campaign_id, campaign_type="SHOPPING",
+            adgroup_id=adgroup_id, keyword_id="", imp=imp, clk=clk, cost=0,
+            rank_sum=round(rank * imp),
+        ))
+    db.commit()
+
+
+def test_ctr_alert_active_group_skips_ladder(db):
+    """VT3: 그룹이 CTR 경보 활성이면 탐색 후보 순회에서 즉시 skip — 발사 0·held에
+    '[탐색] CTR경보' 기록·diary blocked 1건(사유에 'CTR경보 — 소재 처방 대상, 추가 UP 무의미')."""
+    from app.models import OpsDiaryEntry
+
+    _setup(db)
+    _ctr_alert_daily(db)  # W1·W3 경보 발화(입찰로 못 푸는 소재 CTR 문제)
+    curve = [_hour(5, imp=20, clk=0, cost=0, avg_rank=6.0),
+             _hour(6, imp=20, clk=0, cost=0, avg_rank=6.0),
+             _hour(7, imp=20, clk=0, cost=0, avg_rank=6.0)]
+    result, mock_exec = _run(db, curve)
+
+    assert result["explored"] == 0
+    mock_exec.assert_not_called()
+    assert any("CTR경보" in h["reason"] for h in result["held"])
+    blocked = db.query(OpsDiaryEntry).filter(
+        OpsDiaryEntry.event_type == "blocked", OpsDiaryEntry.adgroup_id == GRP,
+    ).all()
+    assert any("CTR경보" in (b.rationale or "") for b in blocked)
+
+
+def test_ctr_alert_inactive_group_proceeds_normally(db):
+    """CTR 경보 없음(정상 그룹, naver_ad_daily 추가 시드 없음) → 게이트 미적용, 기존 탐색
+    발사 동작 불변(회귀 0 — test_lane_step_up_below_band_fires와 동일 조건)."""
+    _setup(db)
+    curve = [_hour(5, imp=20, clk=0, cost=0, avg_rank=6.0),
+             _hour(6, imp=20, clk=0, cost=0, avg_rank=6.0),
+             _hour(7, imp=20, clk=0, cost=0, avg_rank=6.0)]
+    result, mock_exec = _run(db, curve)
+    assert result["explored"] == 1
+    mock_exec.assert_called_once()
+
+
+def test_ctr_alert_lookup_failure_rests_campaign_lane(db):
+    """codex 1R P1-2: ctr_alert.detect_ctr_alerts 예외 시 fail-open(게이트 없이 발사)이 아니라
+    캠페인 탐색 레인 보류(fail-soft 전파) — 예외가 _run_exploration_for_campaign 밖으로 나가
+    run_hourly_lane의 캠페인 try/except가 잡고 그 캠페인 탐색은 이번 런 실쓰기 0(안전 방향).
+    핫셋/시간당 본작업은 오염되지 않는다(run_hourly_lane이 정상 반환)."""
+    _setup(db)
+    curve = [_hour(5, imp=20, clk=0, cost=0, avg_rank=6.0),
+             _hour(6, imp=20, clk=0, cost=0, avg_rank=6.0),
+             _hour(7, imp=20, clk=0, cost=0, avg_rank=6.0)]
+    with patch.object(auto_operator.ctr_alert, "detect_ctr_alerts", side_effect=RuntimeError("판정 실패")):
+        result, mock_exec = _run(db, curve)
+    assert result["explored"] == 0  # 경보 산출 실패 → 캠페인 탐색 레인 보류(발사 0)
+    mock_exec.assert_not_called()   # 실쓰기 0(안전 방향)
