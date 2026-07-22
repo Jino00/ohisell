@@ -87,6 +87,20 @@ def test_px4_briefing_wired_with_independent_fail_open_try():
     assert "db3.close()" in src
 
 
+def test_px4_briefing_shares_lane_now_no_fresh_kst_now():
+    """C6(codex 1R[P2] 자정 경계): 레인·브리핑이 하나의 now(ss_now)를 공유한다 — 레인이
+    23:59:59에 돌고 브리핑이 방금 kst_now()로 자정을 넘기면 주간 일요일 게이트·오늘 카운트가
+    어긋난다. 소스 검증: ss_now=kst_now()를 1회 산출해 레인·두 브리핑에 그대로 전달하고,
+    브리핑 호출이 새 kst_now()를 만들지 않는다."""
+    src = inspect.getsource(scheduler_service.run_naver_auto_operator_daily_job)
+    assert "ss_now = kst_now()" in src
+    assert "run_search_term_ss_lane(db2, now=ss_now" in src
+    assert "run_exclusion_exception_briefing(db3, ss, now=ss_now)" in src
+    assert "run_agency_powerlink_weekly_briefing(db3, now=ss_now)" in src
+    # 브리핑 호출이 새 kst_now()를 만들지 않는다(자정 경계 봉합의 증거).
+    assert "now=kst_now())" not in src
+
+
 def test_default_cron_daily_is_0850_kst():
     src = inspect.getsource(scheduler_service._ensure_default_states)
     assert '("run_naver_auto_operator_daily", "50 8 * * *")' in src

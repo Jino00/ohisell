@@ -238,6 +238,77 @@ def test_upsert_exclusion_integrity_race_converges(db):
     assert r.next_review_at == date(2026, 7, 22) + timedelta(days=60)  # min(30×2,90)
 
 
+# ── C3(codex 1R[P2]): 자동 발사 진입부 adgroup 소속 검증 — 인벤토리 parent_id ≠ 후보 campaign_id면
+#   실쓰기 0(대행사 그룹 오염 차단, 스코프 과신 방지) ──
+def test_autofire_blocked_when_adgroup_membership_mismatch(db):
+    _scope(db)
+    _pl_term(db, term="파워손실", clk=10, cost=6000)
+    # 인벤토리 소속(parent_id)을 후보 campaign_id(cmp1)와 어긋나게 오염 — judge 스코프는
+    # NaverCampaignSettings.auto_operate로 판정하므로 후보 산출은 그대로, 실쓰기만 차단돼야 한다.
+    db.query(NaverEntity).filter(
+        NaverEntity.entity_type == "adgroup", NaverEntity.entity_id == "grp-web"
+    ).update({"parent_id": "cmp-대행사"}, synchronize_session=False)
+    db.commit()
+    with patch.object(harness.naver_sa_writer, "add_restricted_keywords") as mock_write:
+        res = lane.run_search_term_ss_lane(db, now=_NOW)
+    mock_write.assert_not_called()  # 소속 미검증 → 자동 제외 skip(fail-closed)
+    assert res["powerlink_fired"] == 0
+    assert res["autofire_failed"] == 1
+    assert db.query(NaverSearchTermExclusion).count() == 0
+
+
+# ── C4(codex 1R[P2] 기아 방지): 재심사(_run_reexamination)가 신규 파워링크 자동 발사보다 먼저 ──
+def test_reexamination_runs_before_new_autofire(db):
+    _scope(db)
+    _pl_term(db, term="새손실", clk=10, cost=6000)
+    calls: list[str] = []
+
+    def fake_reexam(db_, powerlink, now):
+        calls.append("reexam")
+        return {"opened": 0, "reexcluded": 0, "restored": 0, "healed": 0}
+
+    def fake_autofire(db_, cand, now):
+        calls.append("autofire")
+        return None  # 발사 안 함(상태 변화 없음) — 순서만 검증
+
+    with patch.object(lane, "_run_reexamination", side_effect=fake_reexam):
+        with patch.object(lane, "_autofire_exclude", side_effect=fake_autofire):
+            lane.run_search_term_ss_lane(db, now=_NOW)
+    assert "reexam" in calls and "autofire" in calls
+    assert calls.index("reexam") < calls.index("autofire")  # 재심사 먼저
+
+
+# ── C4: 재심사 재제외가 일일캡을 먼저 소비 → 신규 후보는 잔여 0으로 밀림(over_cap) ──
+def test_reexam_consumes_cap_before_new_candidates(db):
+    _scope(db)
+    _pl_term(db, term="새손실", clk=10, cost=6000)
+    # 오늘 이미 캡-1건 제외(잔여 1칸).
+    for i in range(harness._SS_DAILY_EXCLUDE_CAP - 1):
+        db.add(NaverChangeLog(
+            entity_type="search_term", entity_id=f"t{i}", campaign_id="cmp1",
+            action="exclude_search_term", dry_run=False, after_value="{}",
+            changed_at=_NOW, executed_at=_NOW,
+        ))
+    db.commit()
+
+    def fake_reexam(db_, powerlink, now):
+        # 재심사가 마지막 1칸을 재제외로 소비했다고 시뮬(exclude change_log 커밋).
+        db_.add(NaverChangeLog(
+            entity_type="search_term", entity_id="재제외", campaign_id="cmp1",
+            action="exclude_search_term", dry_run=False, after_value="{}",
+            changed_at=now, executed_at=now,
+        ))
+        db_.commit()
+        return {"opened": 0, "reexcluded": 1, "restored": 0, "healed": 0}
+
+    with patch.object(lane, "_run_reexamination", side_effect=fake_reexam):
+        with patch.object(harness.naver_sa_writer, "add_restricted_keywords") as mock_write:
+            res = lane.run_search_term_ss_lane(db, now=_NOW)
+    mock_write.assert_not_called()  # 재심사가 잔여 캡 소진 → 신규 발사 밀림
+    assert res["powerlink_fired"] == 0
+    assert res["autofire_over_cap"] == 1
+
+
 # ── P2-3: 경합이 아닌 진짜 무결성 위반(재조회도 없음)은 삼키지 않고 re-raise ──
 def test_upsert_exclusion_integrity_non_race_reraises(db):
     from sqlalchemy.exc import IntegrityError

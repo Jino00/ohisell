@@ -18,9 +18,11 @@ from app.models import (
     NaverCampaignSettings,
     NaverChangeLog,
     NaverEntity,
+    NaverProposal,
     NaverSearchTermExclusion,
 )
 from app.services.naver_ad import naver_sa_writer
+from app.services.naver_ad import search_term_judge as judge
 from app.services.naver_ad import search_term_ss_lane as lane
 
 _NOW = datetime(2026, 7, 22, 9, 0, 0)  # today = 2026-07-22
@@ -118,6 +120,123 @@ def test_open_exclusion_recount_backstop_blocks_at_cap(db):
     mock_del.assert_not_called()  # 쓰기 직전 재카운트 백스톱이 delete 차단
     db.refresh(row)
     assert row.status == "excluded"  # 상태 유지(다음 레인 재시도)
+
+
+# ── C1①(codex 1R[P1-1]): 킬스위치 delete 직전 재확인 — 루프 진입 후 OFF돼도 개방 0(fail-closed) ──
+def test_open_exclusion_killswitch_recheck_before_delete_blocks(db):
+    _scope(db, auto_operate=False)  # delete 직전 킬스위치 OFF 상황(직접 호출로 TOCTOU 재현)
+    row = _excl(db, term="복귀후보", next_review_at=date(2026, 7, 22))
+    with patch.object(lane.naver_sa_writer, "delete_restricted_keywords") as mock_del:
+        assert lane._open_exclusion(db, row, _NOW) is False
+    mock_del.assert_not_called()  # 킬스위치 재확인이 delete 차단
+    db.refresh(row)
+    assert row.status == "excluded"  # 상태 유지
+
+
+# ── C1②(codex 1R[P1-3]): adgroup 소속 미검증(상태 행 campaign_id 오염) → 개방 0(대행사 그룹 delete 차단) ──
+def test_open_exclusion_adgroup_membership_mismatch_blocks(db):
+    _scope(db)  # naver_entity: grp-web → cmp1
+    # 상태 행의 campaign_id가 실제 소속(cmp1)과 다른 오염 상황.
+    row = _excl(db, term="소속불일치", campaign_id="cmp-대행사", next_review_at=date(2026, 7, 22))
+    with patch.object(lane.naver_sa_writer, "delete_restricted_keywords") as mock_del:
+        assert lane._open_exclusion(db, row, _NOW) is False
+    mock_del.assert_not_called()  # parent_id(cmp1) ≠ campaign_id(cmp-대행사) → fail-closed
+    db.refresh(row)
+    assert row.status == "excluded"
+
+
+def test_open_exclusion_adgroup_entity_absent_blocks(db):
+    _scope(db)
+    # naver_entity에 없는 그룹(인벤토리 부재) — 소속 증명 불가 = fail-closed.
+    row = _excl(db, term="엔티티없음", adgroup_id="grp-미동기화", next_review_at=date(2026, 7, 22))
+    with patch.object(lane.naver_sa_writer, "delete_restricted_keywords") as mock_del:
+        assert lane._open_exclusion(db, row, _NOW) is False
+    mock_del.assert_not_called()
+    db.refresh(row)
+    assert row.status == "excluded"
+
+
+# ── C2(codex 1R[P1-2]): 클레임 경합(두 세션 시뮬) — 한쪽만 delete, 선점당한 러너는 skip ──
+def test_open_exclusion_claim_race_only_one_proceeds(db):
+    _scope(db)
+    row = _excl(db, term="경합개방", next_review_at=date(2026, 7, 22))
+
+    def steal(db_, adgroup_id, campaign_id):
+        # 소속 검증(claim 직전) 도중 다른 러너가 먼저 claim(excluded→probation)한 상황 재현.
+        db_.query(NaverSearchTermExclusion).filter(
+            NaverSearchTermExclusion.id == row.id
+        ).update({"status": "probation"}, synchronize_session=False)
+        db_.commit()
+        return True  # 소속은 정상(True) — 오직 claim rowcount만 0이 되게 한다
+
+    with patch.object(lane, "_adgroup_belongs_to_campaign", side_effect=steal):
+        with patch.object(lane.naver_sa_writer, "delete_restricted_keywords") as mock_del:
+            assert lane._open_exclusion(db, row, _NOW) is False
+    mock_del.assert_not_called()  # 선점당함 → 이 러너는 delete 안 함(이중 delete 방지)
+
+
+def test_open_exclusion_claim_rollback_on_delete_failure(db):
+    """delete 실패 시 클레임(probation) 롤백 → status='excluded' 복원(다음 레인 재시도)."""
+    _scope(db)
+    row = _excl(db, term="개방실패", next_review_at=date(2026, 7, 22))
+    with patch.object(lane.naver_sa_writer, "delete_restricted_keywords",
+                      side_effect=RuntimeError("API 500")):
+        assert lane._open_exclusion(db, row, _NOW) is False
+    db.refresh(row)
+    assert row.status == "excluded"  # 클레임 롤백(probation→excluded 복원)
+    # fail change_log는 after_value 없음 → _count_returns_today 미카운트
+    fail = db.query(NaverChangeLog).filter(NaverChangeLog.action == "restore_search_term").one()
+    assert fail.outcome == "failed" and fail.after_value is None
+
+
+# ── C5(codex 1R[P1-4]): 크래시 고아(상태 행 없는 확정 제외) 자가 치유 — 상태 행 재생성 ──
+def test_reconcile_orphan_exclusion_recreates_state_row(db):
+    _scope(db)
+    p = NaverProposal(
+        proposal_type=judge.SEARCH_TERM_EXCLUDE_TYPE, target_type="search_term",
+        target_id="고아검색어", campaign_id="cmp1", adgroup_id="grp-web",
+        approval_source=judge.APPROVAL_SOURCE_SS_EXCLUDE, status="approved",
+    )
+    db.add(p)
+    db.commit()
+    db.add(NaverChangeLog(
+        entity_type="search_term", entity_id="고아검색어", campaign_id="cmp1",
+        action="exclude_search_term", dry_run=False,
+        after_value='{"after": [], "created_ids": ["rkw-orphan"]}',
+        proposal_id=p.id, changed_at=_NOW, executed_at=_NOW,
+    ))
+    db.commit()  # 상태 행은 없음(=크래시 고아)
+
+    res = lane._run_reexamination(db, [], _NOW)
+    assert res["healed"] == 1
+    row = db.query(NaverSearchTermExclusion).filter(
+        NaverSearchTermExclusion.search_term == "고아검색어").one()
+    assert row.status == "excluded"
+    assert row.cycle == 1
+    assert row.restrict_kwd_id == "rkw-orphan"  # after_value created_ids에서 회수
+    assert row.next_review_at == date(2026, 7, 22) + timedelta(days=30)
+
+
+def test_reconcile_skips_when_state_row_exists(db):
+    """이미 상태 행이 있으면(어느 status든) 치유 대상 아님 — 중복 생성 0."""
+    _scope(db)
+    p = NaverProposal(
+        proposal_type=judge.SEARCH_TERM_EXCLUDE_TYPE, target_type="search_term",
+        target_id="이미있음", campaign_id="cmp1", adgroup_id="grp-web", status="approved",
+    )
+    db.add(p)
+    db.commit()
+    db.add(NaverChangeLog(
+        entity_type="search_term", entity_id="이미있음", campaign_id="cmp1",
+        action="exclude_search_term", dry_run=False,
+        after_value='{"created_ids": ["rkw-1"]}', proposal_id=p.id,
+        changed_at=_NOW, executed_at=_NOW,
+    ))
+    _excl(db, term="이미있음", status="restored", next_review_at=None)  # 이미 상태 행 존재
+    res = lane._run_reexamination(db, [], _NOW)
+    assert res["healed"] == 0
+    assert db.query(NaverSearchTermExclusion).filter(
+        NaverSearchTermExclusion.search_term == "이미있음").count() == 1
 
 
 def test_open_exclusion_recount_backstop_allows_below_cap(db):

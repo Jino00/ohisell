@@ -23,7 +23,7 @@ from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.models import NaverChangeLog, NaverProposal, NaverSearchTermExclusion
+from app.models import NaverChangeLog, NaverEntity, NaverProposal, NaverSearchTermExclusion
 from app.services.naver_ad import diary, naver_sa_writer, search_term_judge
 from app.utils.kst import kst_now
 
@@ -163,6 +163,23 @@ def _upsert_exclusion(db: Session, cand: dict, restrict_kwd_id: str | None, now:
         db.commit()
 
 
+def _adgroup_belongs_to_campaign(db: Session, adgroup_id: str, campaign_id: str) -> bool:
+    """실쓰기 직전 adgroup 소속 실검증(codex 1R[P1-3·P2]) — naver_entity에서 이 adgroup 행의
+    parent_id == campaign_id인지 확인. 상태 행(NaverSearchTermExclusion)·후보의 campaign_id는
+    판정 시점에 굳은 값이라, 그 사이 그룹이 다른 캠페인으로 옮겨졌거나 상태 행이 오염되면 대행사
+    그룹에 제외/개방 실쓰기가 갈 수 있다(§0 3 금지선 위반). 인벤토리(entity_type='adgroup')로
+    소속을 재확인한다. **행 부재·조회 실패는 fail-closed(False)** — 소속을 증명 못 하면 쓰지 않는다."""
+    try:
+        row = db.query(NaverEntity.parent_id).filter(
+            NaverEntity.entity_type == "adgroup",
+            NaverEntity.entity_id == adgroup_id,
+        ).first()
+    except Exception as e:  # noqa: BLE001 — 조회 실패도 fail-closed(소속 미증명 = 쓰지 않음)
+        log.warning("search_term_ss_lane: adgroup 소속 조회 실패 adgroup=%s: %s", adgroup_id, e)
+        return False
+    return row is not None and row[0] == campaign_id
+
+
 def _autofire_exclude(db: Session, cand: dict, now: datetime) -> NaverChangeLog | None:
     """파워링크 제외 후보 1건 자동 발사(exploration BX2 관례 복제): status='approved' +
     approval_source=APPROVAL_SOURCE_SS_EXCLUDE 제안 생성 → naver_execution_harness.execute()로
@@ -172,6 +189,17 @@ def _autofire_exclude(db: Session, cand: dict, now: datetime) -> NaverChangeLog 
     auto_operator가 이 모듈을 import하지 않지만 exploration 관례 유지)."""
     from app.services.naver_ad import exploration
     from app.services.naver_ad import naver_execution_harness as harness
+
+    # C3(codex 1R[P2]): 제안 생성 전 adgroup 소속 실검증 — 스코프 과신 방지. 상태 행/후보의
+    # campaign_id를 그대로 믿지 않고 인벤토리로 (adgroup→campaign) 소속을 재확인한다. 미검증이면
+    # fail-closed skip(대행사 그룹 실쓰기 절대 0, §0 3). 신규·재제외 양 경로가 이 게이트를 공유한다.
+    if not _adgroup_belongs_to_campaign(db, cand["adgroup_id"], cand["campaign_id"]):
+        log.warning(
+            "search_term_ss_lane: 자동 제외 skip(adgroup 소속 미검증) adgroup=%s campaign=%s term=%r "
+            "— fail-closed(대행사 그룹 실쓰기 차단)",
+            cand["adgroup_id"], cand["campaign_id"], cand["search_term"],
+        )
+        return None
 
     proposal = NaverProposal(
         proposal_type=search_term_judge.SEARCH_TERM_EXCLUDE_TYPE,
@@ -257,9 +285,49 @@ def _open_exclusion(db: Session, row: NaverSearchTermExclusion, now: datetime) -
             returns_today, _SS_DAILY_RETURN_CAP, row.adgroup_id, row.search_term,
         )
         return False
+    # C1①(codex 1R[P1-1]): 킬스위치 delete 직전 재확인 — TOCTOU 창 제거. _run_reexamination이
+    # 루프 진입 시 1회 스냅샷만 믿으면 여러 행 순회 도중 Jino가 OFF해도 남은 개방이 진행된다
+    # ("즉시 정지" 계약 위반). 엔진 독립 커넥션 조회라 타 프로세스 커밋이 항상 보인다.
+    from app.services.naver_ad import auto_operator
+    if not auto_operator._auto_operate_now(db, row.campaign_id):
+        log.info(
+            "search_term_ss_lane: 재심사 개방 중단(킬스위치 delete 직전 OFF) adgroup=%s term=%r "
+            "— fail-closed(상태 유지)", row.adgroup_id, row.search_term,
+        )
+        return False
+    # C1②(codex 1R[P1-3]): adgroup 소속 실검증 — 상태 행 campaign_id 오염/그룹 이동 시 대행사
+    # 그룹 delete 차단(§0 3). 조회 실패/행 부재 = fail-closed skip(상태 유지).
+    if not _adgroup_belongs_to_campaign(db, row.adgroup_id, row.campaign_id):
+        log.warning(
+            "search_term_ss_lane: 재심사 개방 중단(adgroup 소속 미검증) adgroup=%s campaign=%s "
+            "term=%r — fail-closed(상태 유지)", row.adgroup_id, row.campaign_id, row.search_term,
+        )
+        return False
+    # C2(codex 1R[P1-2] 부분 수용): delete 직전 낙관적 클레임(excluded→probation, status 게이트).
+    # 동시 실행(크론+catch-up 데몬)에서 두 러너가 같은 행을 각자 delete하면 두 번째가 404·복귀
+    # 이중 카운트를 낳는다. `UPDATE ... WHERE id ∧ status='excluded'`를 커밋해 rowcount==1인
+    # 러너만 진행(0=다른 러너 선점 → skip). 중간 상태를 새로 만들지 않고 최종 목표 상태(probation)로
+    # 원자 전이해 최소 diff를 유지한다(probation_until 등 나머지 필드는 _run_reexamination이 개방
+    # 성공 후 세팅 — 그 사이 probation_until=NULL이라 재판정 쿼리에 안 잡혀 안전).
+    claimed = db.query(NaverSearchTermExclusion).filter(
+        NaverSearchTermExclusion.id == row.id,
+        NaverSearchTermExclusion.status == "excluded",
+    ).update({"status": "probation"}, synchronize_session=False)
+    db.commit()
+    if claimed != 1:
+        log.info(
+            "search_term_ss_lane: 재심사 개방 skip(클레임 경합 — 다른 러너 선점) adgroup=%s term=%r",
+            row.adgroup_id, row.search_term,
+        )
+        return False
     try:
         result = naver_sa_writer.delete_restricted_keywords(row.adgroup_id, [row.restrict_kwd_id])
     except Exception as exc:  # noqa: BLE001 — 삭제 실패도 fail-open 금지, 사실대로 기록
+        # C2 롤백: 이 러너가 delete 못 했으니 클레임(probation) 되돌림(excluded 복원) — 다음
+        # 레인이 재시도한다. fail change_log는 after_value 없음 → _count_returns_today 미카운트.
+        db.query(NaverSearchTermExclusion).filter(
+            NaverSearchTermExclusion.id == row.id,
+        ).update({"status": "excluded"}, synchronize_session=False)
         fail = NaverChangeLog(
             entity_type="search_term", entity_id=row.search_term, campaign_id=row.campaign_id,
             action=_RESTORE_ACTION,
@@ -290,6 +358,68 @@ def _open_exclusion(db: Session, row: NaverSearchTermExclusion, now: datetime) -
     return True
 
 
+def _reconcile_orphan_exclusions(db: Session, now: datetime) -> int:
+    """C5(codex 1R[P1-4]) 크래시 고아 자가 치유. _autofire_exclude는 harness.execute()로 실쓰기·
+    change_log 커밋을 끝낸 **직후** _upsert_exclusion 커밋 전에 크래시하면, 네이버엔 제외됐는데
+    상태 행이 없는 고아가 남는다(다음 재심사가 이 제외를 영영 개방·재판정 못 함 = 영구 정지된 낭비
+    절단). 최근 3일 exclude_search_term change_log(dry_run=False ∧ after_value 존재 = 실쓰기 확정,
+    캡초과 롤백 fail 행은 after_value 없어 자동 제외) 중 대응 상태 행이 없는 (adgroup, term)을 찾아
+    상태 행 재생성(cycle=1·next_review=+30일). adgroup_id는 change_log에 없어 proposal 조인으로
+    회수(exclude change_log는 항상 proposal_id 보유). after_value에서 created_ids[0]=restrict_kwd_id
+    회수. **파싱 실패는 skip+경고(fail-open — 치유 실패가 레인을 죽이면 안 됨).** 경합 재생성
+    IntegrityError도 rollback 후 skip(다른 러너/치유가 먼저 만든 정상 케이스)."""
+    healed = 0
+    cutoff = datetime.combine((now - timedelta(days=3)).date(), datetime.min.time())
+    rows = (
+        db.query(NaverChangeLog, NaverProposal.adgroup_id)
+        .join(NaverProposal, NaverChangeLog.proposal_id == NaverProposal.id)
+        .filter(
+            NaverChangeLog.action == "exclude_search_term",
+            NaverChangeLog.dry_run.is_(False),
+            NaverChangeLog.after_value.isnot(None),
+            NaverChangeLog.changed_at >= cutoff,
+        )
+        .all()
+    )
+    for cl, adgroup_id in rows:
+        term = cl.entity_id  # exclude change_log의 entity_id = proposal.target_id = 검색어 전문
+        if not adgroup_id or not term:
+            continue
+        if db.query(NaverSearchTermExclusion.id).filter(
+            NaverSearchTermExclusion.adgroup_id == adgroup_id,
+            NaverSearchTermExclusion.search_term == term,
+        ).first() is not None:
+            continue  # 상태 행 존재(어느 status든) — 고아 아님
+        try:
+            payload = json.loads(cl.after_value) if cl.after_value else {}
+            created = payload.get("created_ids") or []
+            restrict_kwd_id = created[0] if created else None
+        except (ValueError, TypeError) as e:
+            log.warning(
+                "search_term_ss_lane: 고아 치유 파싱 실패(after_value) adgroup=%s term=%r: %s "
+                "— skip(fail-open)", adgroup_id, term, e,
+            )
+            continue
+        db.add(NaverSearchTermExclusion(
+            campaign_id=cl.campaign_id, adgroup_id=adgroup_id, search_term=term,
+            restrict_kwd_id=restrict_kwd_id, status="excluded", cycle=1,
+            excluded_at=now, last_transition_at=now,
+            next_review_at=now.date() + timedelta(days=30), probation_until=None,
+            cost_at_exclusion=0,
+        ))
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()  # 경합으로 다른 러너/치유가 방금 생성 — 정상, skip
+            continue
+        healed += 1
+        log.info(
+            "search_term_ss_lane: 고아 제외 상태 행 재생성 adgroup=%s term=%r restrict_kwd_id=%s "
+            "(change_log %s 실쓰기 확정·상태 행 부재)", adgroup_id, term, restrict_kwd_id, cl.id,
+        )
+    return healed
+
+
 def _run_reexamination(db: Session, powerlink: list[dict], now: datetime) -> dict:
     """PX3 in-out 재심사 루프(§2·§3) — 같은 08:50 레인 스텝. ①excluded ∧ next_review_at≤today →
     개방(delete)·probation 전이(일일 복귀 캡·킬스위치 존중). ②probation ∧ probation_until≤today →
@@ -298,6 +428,10 @@ def _run_reexamination(db: Session, powerlink: list[dict], now: datetime) -> dic
 
     powerlink = 이번 라운드 judge 산출 §1 통과 후보(재판정 재사용 — 같은 now라 재조회 불필요)."""
     from app.services.naver_ad import auto_operator
+
+    # C5: 재심사 스텝 시작부에 크래시 고아 자가 치유(상태 행 없는 확정 제외 재생성) — 개방·재판정
+    # 전에 돌려 고아가 상태기계에 복귀하도록 한다(이후 next_review 도래 시 정상 개방 대상이 됨).
+    healed = _reconcile_orphan_exclusions(db, now)
 
     today = now.date()
     opened = 0
@@ -356,7 +490,7 @@ def _run_reexamination(db: Session, powerlink: list[dict], now: datetime) -> dic
             db.commit()
             restored += 1
 
-    return {"opened": opened, "reexcluded": reexcluded, "restored": restored}
+    return {"opened": opened, "reexcluded": reexcluded, "restored": restored, "healed": healed}
 
 
 def _create_promote_proposal(db: Session, cand: dict, *, bm_verified: bool = False) -> NaverProposal:
@@ -421,6 +555,13 @@ def run_search_term_ss_lane(
     powerlink = judged["exclude_candidates"]["powerlink"]
     promote = judged["promote_candidates"]
 
+    # C4(codex 1R[P2] 기아 방지): PX3 재심사 루프를 신규 파워링크 자동 발사보다 **먼저** 돌린다.
+    # probation 만료된 기지 손실 검색어의 재제외가 신규 후보보다 일일캡 우선권을 갖게 하기 위함
+    # (같은 _SS_DAILY_EXCLUDE_CAP 공유 시, 이미 손실 실증된 기지가 하루 더 사는 것보다 재절단이
+    # 우선). judge 산출(powerlink 리스트)을 재판정에 재사용하므로 judge 호출은 그대로 앞에 둔다.
+    # 재제외가 오늘 캡을 소비하면 아래 remaining_cap 계산에 반영돼 신규는 잔여만큼만 발사된다.
+    reexam = _run_reexamination(db, powerlink, now)
+
     # ★쇼핑(shopping)은 제안을 만들지 않는다 — API 제외 불가(§실측-0)라 브리핑 diary(아래)만
     # 남긴다. ★파워링크(PX2): pending Confirm 경로 제거 — §1 통과 후보를 status='approved' +
     # approval_source=ss_exclude 제안으로 자동 발사(exploration BX2 관례). 일일캡·킬스위치·
@@ -463,10 +604,6 @@ def run_search_term_ss_lane(
         remaining_cap -= 1
         slot_cache[adg] = slot_cache.get(adg, _excluded_slot_count(db, adg) - 1) + 1
     db.commit()
-
-    # PX3 재심사 루프 — 같은 08:50 레인 스텝(§2·§3). 개방(excluded→probation)·재판정(probation→
-    # excluded 재제외 or restored). 킬스위치 OFF면 제외·복귀 양쪽 정지(미실행 정직 상태).
-    reexam = _run_reexamination(db, powerlink, now)
 
     # SS4 승격 후보 — 제외(SS3)와 동일한 표현 가능성 방어(target_id 길이) + dedup 규약을 그대로
     # 적용한다. 소스(shopping/expkeyword) 무관 전건 대상(judge가 이미 dconv≥1로 판정 완료).
@@ -573,6 +710,8 @@ def run_search_term_ss_lane(
         "reexam_opened": reexam["opened"],
         "reexam_reexcluded": reexam["reexcluded"],
         "reexam_restored": reexam["restored"],
+        "reexam_healed": reexam["healed"],  # C5: 크래시 고아 상태 행 재생성 건수
+
         "promote_proposals_created": promote_created,
         "promote_deduped": promote_deduped,
         "promote_skipped_too_long": promote_skipped_too_long,
