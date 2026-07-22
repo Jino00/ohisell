@@ -20,6 +20,7 @@ from app.models import (
     NaverAdDaily,
     NaverAdgroupProduct,
     NaverCampaignSettings,
+    NaverEntity,
     NaverProductBep,
     NaverSearchTermDaily,
 )
@@ -300,9 +301,15 @@ def _pl_group_net_loss(
 def _pl_protect_tokens(
     db: Session, adgroup_id: str, global_form_tokens: set[str], cache: dict[str, set[str]],
 ) -> set[str]:
-    """§1 5 파워링크 보호 토큰 = (그룹 매핑 상품명 제품형 토큰 ∪ 전역 제품형 토큰) − 디바이스 토큰.
-    global_form_tokens는 이미 (전역 화이트리스트 − 디바이스) casefold 집합. 그룹 매핑 상품 부재면
-    global_form_tokens만(§1 5 폴백). 그룹당 1회 조회 후 캐시(casefold — _is_whitelisted 짝)."""
+    """§1 5 파워링크 보호 토큰 = (그룹 매핑 상품명 제품형 토큰 ∪ **그룹명 제품형 토큰** ∪ 전역
+    제품형 토큰) − 디바이스 토큰. global_form_tokens는 이미 (전역 화이트리스트 − 디바이스) casefold
+    집합. 그룹 매핑 상품 부재면 global_form_tokens + 그룹명 토큰(§1 5 폴백). 그룹당 1회 조회 후
+    캐시(casefold — _is_whitelisted 짝).
+
+    ★그룹명 토큰(P2-2 GATE 오컷 방지): 상품명뿐 아니라 그 adgroup의 NaverEntity.name(그룹명)도
+    제품형 의도를 담는다(예: P_Test `_종이질감`·`_6H BLC` 그룹은 상품명이 아니라 그룹명에만 종이질감
+    의도가 있어, "아이패드종이질감필름" 검색어가 종이질감 그룹에서 미보호로 잘릴 수 있었다 — §0.5
+    경고 케이스). 상품명과 동일한 토큰화(len≥2·비숫자·casefold·디바이스 토큰 제외)로 합산한다."""
     if adgroup_id in cache:
         return cache[adgroup_id]
     tokens = set(global_form_tokens)
@@ -318,7 +325,19 @@ def _pl_protect_tokens(
         )
         .all()
     )
-    for (name,) in rows:
+    # 그룹명(NaverEntity, entity_type='adgroup')을 상품명 토큰과 같은 소스로 합산 — 그룹당 1회.
+    grp = (
+        db.query(NaverEntity.name)
+        .filter(
+            NaverEntity.entity_type == "adgroup",
+            NaverEntity.entity_id == adgroup_id,
+        )
+        .first()
+    )
+    names = [name for (name,) in rows]
+    if grp is not None and grp[0]:
+        names.append(grp[0])
+    for name in names:
         if not name:
             continue
         for tok in _TOKEN_SPLIT_RE.split(name):

@@ -127,6 +127,19 @@ def test_exclusions_empty_returns_zeroed_summary(client, db):
     assert body["rows"] == []
 
 
+# ── P3-2: summary_by_status를 GROUP BY 집계로 대체 — 상태별 다건에서도 정확 카운트(동작 불변) ──
+def test_exclusions_summary_group_by_counts_multiple_rows(client, db):
+    for i in range(5):
+        _row(db, term=f"e{i}", status="excluded")
+    for i in range(3):
+        _row(db, term=f"p{i}", status="probation")
+    for i in range(2):
+        _row(db, term=f"r{i}", status="restored")
+    body = client.get("/api/naver/ad/search-term/exclusions").json()
+    assert body["summary_by_status"] == {"excluded": 5, "probation": 3, "restored": 2}
+    assert body["total"] == 10
+
+
 def test_exclusions_row_shape_exposes_state_machine_fields(client, db):
     _row(db, term="필드검증", status="excluded", cost=7000, cycle=2,
          restrict_kwd_id="rkw-9", next_review_at=date(2026, 8, 21))

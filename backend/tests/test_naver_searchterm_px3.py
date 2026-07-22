@@ -96,6 +96,40 @@ def test_not_yet_due_not_opened(db):
     assert res["opened"] == 0
 
 
+def _restore_log(db, n, *, changed_at=_NOW):
+    """오늘 성공한 복귀(restore_search_term) change_log n건 시드 — _count_returns_today 카운트."""
+    for i in range(n):
+        db.add(NaverChangeLog(
+            entity_type="search_term", entity_id=f"r{i}", campaign_id="cmp1",
+            action=lane._RESTORE_ACTION, dry_run=False, after_value='{"after": []}',
+            changed_at=changed_at, executed_at=changed_at,
+        ))
+    db.commit()
+
+
+# ── P2-1 GATE: 복귀 캡 재카운트 백스톱 — delete 호출 직전 재카운트가 캡 도달이면 개방 0(fail-closed).
+#   동시 실행(크론+catch-up 데몬)에서 소프트 remaining_return이 놓치는 2배 개방을 차단한다. ──
+def test_open_exclusion_recount_backstop_blocks_at_cap(db):
+    _scope(db)
+    row = _excl(db, term="복귀후보", next_review_at=date(2026, 7, 22))
+    _restore_log(db, lane._SS_DAILY_RETURN_CAP)  # 이미 오늘 캡 도달
+    with patch.object(lane.naver_sa_writer, "delete_restricted_keywords") as mock_del:
+        assert lane._open_exclusion(db, row, _NOW) is False
+    mock_del.assert_not_called()  # 쓰기 직전 재카운트 백스톱이 delete 차단
+    db.refresh(row)
+    assert row.status == "excluded"  # 상태 유지(다음 레인 재시도)
+
+
+def test_open_exclusion_recount_backstop_allows_below_cap(db):
+    _scope(db)
+    row = _excl(db, term="복귀후보", next_review_at=date(2026, 7, 22))
+    _restore_log(db, lane._SS_DAILY_RETURN_CAP - 1)  # 캡 미만(1칸 여유)
+    with patch.object(lane.naver_sa_writer, "delete_restricted_keywords",
+                      return_value=_del_result()) as mock_del:
+        assert lane._open_exclusion(db, row, _NOW) is True
+    mock_del.assert_called_once()  # 백스톱이 정상 개방은 막지 않음
+
+
 # ── 일일 복귀 캡 ──
 def test_daily_return_cap(db):
     _scope(db)

@@ -46,7 +46,7 @@ from decimal import Decimal
 import requests
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import or_, tuple_
+from sqlalchemy import func, or_, tuple_
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -1589,9 +1589,14 @@ def get_search_term_exclusions(
     today_start = datetime.combine(today, datetime.min.time())
     tomorrow_start = today_start + timedelta(days=1)
 
-    summary: dict[str, int] = {}
-    for (st,) in db.query(NaverSearchTermExclusion.status).all():
-        summary[st] = summary.get(st, 0) + 1
+    # 상태별 건수는 GROUP BY 집계로(P3-2) — restored 영구 보존이라 단조 증가 테이블, 전 행 로드 회피.
+    summary: dict[str, int] = {
+        st: cnt
+        for st, cnt in db.query(
+            NaverSearchTermExclusion.status,
+            func.count(NaverSearchTermExclusion.id),
+        ).group_by(NaverSearchTermExclusion.status).all()
+    }
 
     def _today_count(target_status: str) -> int:
         return db.query(NaverSearchTermExclusion).filter(

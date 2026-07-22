@@ -20,6 +20,7 @@ import logging
 from datetime import datetime, timedelta
 
 from sqlalchemy import or_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models import NaverChangeLog, NaverProposal, NaverSearchTermExclusion
@@ -108,10 +109,31 @@ def _excluded_slot_count(db: Session, adgroup_id: str) -> int:
     ).count()
 
 
+def _apply_exclusion_fields(
+    row: NaverSearchTermExclusion, cand: dict, restrict_kwd_id: str | None, now: datetime, cycle: int,
+) -> None:
+    """제외 상태 행에 excluded 진입 필드를 세팅(§2 상태기계) — cycle·타임스탬프·백오프 next_review.
+    신규 insert 경로와 IntegrityError 수렴 경로가 동일 규칙을 공유하도록 분리한다."""
+    row.cycle = cycle
+    row.excluded_at = now
+    row.last_transition_at = now
+    row.restrict_kwd_id = restrict_kwd_id
+    row.status = "excluded"
+    row.probation_until = None
+    row.next_review_at = now.date() + timedelta(days=min(30 * cycle, 90))
+    row.cost_at_exclusion = int(cand.get("cost", 0))
+
+
 def _upsert_exclusion(db: Session, cand: dict, restrict_kwd_id: str | None, now: datetime) -> None:
     """제외 실쓰기 성공 후 상태 행 upsert(§2 상태기계). 같은 (adgroup, term) 행이 있으면 cycle
     승계(+1)·행 재사용(restored/probation 재제외 경로), 없으면 cycle=1 신규. next_review_at =
-    today + min(30×cycle, 90)일(백오프 30→60→90 cap). status='excluded'로 (재)진입."""
+    today + min(30×cycle, 90)일(백오프 30→60→90 cap). status='excluded'로 (재)진입.
+
+    ★IntegrityError 경합 수렴(P2-3): harness 실쓰기(네이버 등록)는 이미 끝난 뒤라, 여기 commit이
+    동시 insert 경합으로 uq_naver_search_term_exclusion 위반을 던지면 레인 전체가 중단되고
+    orphan(네이버엔 제외됐는데 상태 행 없음)이 남는다. commit을 try/except로 감싸 rollback→기존
+    행 재조회→cycle 승계 규칙(+1)로 갱신·재commit해 수렴시킨다(재조회도 없으면 진짜 이상이므로
+    re-raise). 이때 이미 존재하는 행은 다른 러너가 방금 커밋한 것이므로 else 분기와 동일하게 다룬다."""
     row = db.query(NaverSearchTermExclusion).filter(
         NaverSearchTermExclusion.adgroup_id == cand["adgroup_id"],
         NaverSearchTermExclusion.search_term == cand["search_term"],
@@ -120,21 +142,26 @@ def _upsert_exclusion(db: Session, cand: dict, restrict_kwd_id: str | None, now:
         cycle = 1
         row = NaverSearchTermExclusion(
             campaign_id=cand["campaign_id"], adgroup_id=cand["adgroup_id"],
-            search_term=cand["search_term"], cycle=cycle,
-            excluded_at=now, last_transition_at=now,
+            search_term=cand["search_term"],
         )
         db.add(row)
     else:
         cycle = row.cycle + 1
-        row.cycle = cycle
-        row.excluded_at = now
-        row.last_transition_at = now
-    row.restrict_kwd_id = restrict_kwd_id
-    row.status = "excluded"
-    row.probation_until = None
-    row.next_review_at = now.date() + timedelta(days=min(30 * cycle, 90))
-    row.cost_at_exclusion = int(cand.get("cost", 0))
-    db.commit()
+    _apply_exclusion_fields(row, cand, restrict_kwd_id, now, cycle)
+    try:
+        db.commit()
+    except IntegrityError:
+        # 동시 insert 경합(uq_naver_search_term_exclusion) — 다른 러너가 방금 같은 (adgroup, term)
+        # 행을 먼저 커밋. rollback 후 그 행을 재조회해 cycle 승계(+1)로 갱신·수렴(orphan 방지).
+        db.rollback()
+        existing = db.query(NaverSearchTermExclusion).filter(
+            NaverSearchTermExclusion.adgroup_id == cand["adgroup_id"],
+            NaverSearchTermExclusion.search_term == cand["search_term"],
+        ).first()
+        if existing is None:
+            raise  # 경합이 아닌 진짜 무결성 위반 — 삼키지 않는다
+        _apply_exclusion_fields(existing, cand, restrict_kwd_id, now, existing.cycle + 1)
+        db.commit()
 
 
 def _autofire_exclude(db: Session, cand: dict, now: datetime) -> NaverChangeLog | None:
@@ -215,6 +242,20 @@ def _open_exclusion(db: Session, row: NaverSearchTermExclusion, now: datetime) -
         log.warning(
             "search_term_ss_lane: 재심사 개방 불가(restrict_kwd_id 부재) adgroup=%s term=%r "
             "— 사람 조사 대상(상태 유지)", row.adgroup_id, row.search_term,
+        )
+        return False
+    # 복귀 캡 재카운트 백스톱(P2-1) — 제외 캡의 harness 관례(쓰기 직전 재카운트→초과 시 중단)를
+    # 미러한다. _run_reexamination의 로컬 remaining_return은 소프트 카운트라, 동시 실행(크론+
+    # catch-up 데몬 스레드 동시 발화) 시 각 러너가 remaining=cap을 보고 최대 2배 개방할 수 있다.
+    # delete 호출 직전 재카운트가 캡 이상이면 fail-closed로 개방 중단(완전 원자 예약은 불요 —
+    # 재카운트 백스톱이 최소 권고). ★재카운트는 change_log 커밋 기준(_count_returns_today가 dry_run
+    # =False ∧ after_value 존재 행을 센다) — 러너별 트랜잭션이 커밋 후 상호 가시화되어야 반영된다.
+    returns_today = _count_returns_today(db, now)
+    if returns_today >= _SS_DAILY_RETURN_CAP:
+        log.info(
+            "search_term_ss_lane: 재심사 개방 중단(복귀 캡 재카운트 %d≥%d, 동시 실행 백스톱) "
+            "adgroup=%s term=%r — fail-closed(상태 유지·다음 레인 재시도)",
+            returns_today, _SS_DAILY_RETURN_CAP, row.adgroup_id, row.search_term,
         )
         return False
     try:

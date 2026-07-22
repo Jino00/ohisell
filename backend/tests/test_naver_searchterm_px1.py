@@ -17,6 +17,7 @@ from app.models import (
     NaverAdDaily,
     NaverAdgroupProduct,
     NaverCampaignSettings,
+    NaverEntity,
     NaverProductBep,
     NaverSearchTermDaily,
 )
@@ -219,6 +220,38 @@ def test_global_form_token_protects_when_no_group_mapping(db):
     _pl_term(db, term="지문방지필름싼거", adgroup_id="grp-nomap", clk=10, cost=12000)
     out = judge.judge_search_terms(db, now=_NOW)
     assert "지문방지필름싼거" not in _pl(out)  # 전역 '지문방지' 보호(폴백)
+
+
+# ── P2-2 GATE: 그룹명 제품형 토큰 보호(오컷 방지) — 상품명엔 없고 그룹명(_종이질감)에만 있는
+#   제품형 의도가 검색어를 보호한다(§0.5 경고 케이스: "아이패드종이질감필름"이 종이질감 그룹에서
+#   미보호로 잘리던 문제). NaverEntity.name(adgroup) 토큰을 상품명 토큰과 같은 소스로 합산. ──
+def _group_name(db, adgroup_id, name, campaign_id="cmp1"):
+    db.add(NaverEntity(entity_type="adgroup", entity_id=adgroup_id, parent_id=campaign_id,
+                       campaign_id=campaign_id, campaign_type="WEB_SITE", name=name, status="on"))
+    db.commit()
+
+
+def test_group_name_form_token_protects(db):
+    _settings(db)
+    # 상품명엔 종이질감 없음(아이패드=디바이스, 정품=제품형이나 검색어에 없음) → 상품명만으론 미보호.
+    _product(db, adgroup_id="grp-web", margin="500", name="아이패드 정품")
+    _group_perf(db, adgroup_id="grp-web", cost=10000, conv_amt=1000)
+    _group_name(db, "grp-web", "10세대_종이질감")  # 그룹명에만 종이질감 의도
+    _pl_term(db, term="아이패드종이질감필름", adgroup_id="grp-web", clk=10, cost=6000)
+    out = judge.judge_search_terms(db, now=_NOW)
+    assert "아이패드종이질감필름" not in _pl(out)  # 그룹명 '종이질감' 토큰이 보호
+
+
+def test_group_name_absent_form_token_not_protected(db):
+    # 대조군: 그룹명에 제품형 토큰이 없으면(디바이스/숫자만) 같은 검색어는 후보로 남는다 —
+    # 그룹명 토큰이 실제 load-bearing임을 증명(상품명·전역 토큰만으론 미보호).
+    _settings(db)
+    _product(db, adgroup_id="grp-web", margin="500", name="아이패드 정품")
+    _group_perf(db, adgroup_id="grp-web", cost=10000, conv_amt=1000)
+    _group_name(db, "grp-web", "10세대")  # 제품형 토큰 없음(숫자+세대만)
+    _pl_term(db, term="아이패드종이질감필름", adgroup_id="grp-web", clk=10, cost=6000)
+    out = judge.judge_search_terms(db, now=_NOW)
+    assert "아이패드종이질감필름" in _pl(out)  # 미보호 → 후보
 
 
 # ── ⑥ 전환 보호(§1-1, 파워링크 구조적 0이나 게이트 유지) ──

@@ -200,3 +200,59 @@ def test_agency_powerlink_briefing_no_write(db):
     from app.models import OpsDiaryEntry
     briefs = db.query(OpsDiaryEntry).filter(OpsDiaryEntry.event_type == "observe").all()
     assert not any("대행사 고비용" in b.rationale for b in briefs)
+
+
+# ── P2-3 GATE: _upsert_exclusion commit이 동시 insert 경합(uq_naver_search_term_exclusion)으로
+#   IntegrityError를 던져도 rollback→재조회→cycle 승계 갱신으로 단일 행 수렴(orphan 0) ──
+def test_upsert_exclusion_integrity_race_converges(db):
+    from sqlalchemy.exc import IntegrityError
+
+    cand = {"campaign_id": "cmp1", "adgroup_id": "grp-web", "search_term": "경합검색어", "cost": 6000}
+    orig_commit = db.commit
+    calls = {"n": 0}
+
+    def racing_commit():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # 다른 러너가 먼저 같은 (adgroup, term) 행을 커밋한 상황 재현 → uq 위반.
+            db.expunge_all()  # 우리 pending 신규 행 폐기(플러시 전 — 승자만 남긴다)
+            db.add(NaverSearchTermExclusion(
+                campaign_id="cmp1", adgroup_id="grp-web", search_term="경합검색어",
+                status="excluded", cycle=1, restrict_kwd_id="rkw-win",
+                excluded_at=_NOW, last_transition_at=_NOW, cost_at_exclusion=5000,
+            ))
+            orig_commit()
+            raise IntegrityError("INSERT", {}, Exception("UNIQUE constraint failed"))
+        return orig_commit()
+
+    with patch.object(db, "commit", side_effect=racing_commit):
+        lane._upsert_exclusion(db, cand, "rkw-mine", _NOW)
+
+    rows = db.query(NaverSearchTermExclusion).filter(
+        NaverSearchTermExclusion.search_term == "경합검색어").all()
+    assert len(rows) == 1  # orphan 없이 단일 행으로 수렴
+    r = rows[0]
+    assert r.status == "excluded"
+    assert r.cycle == 2  # 기존 승자(cycle=1) 승계 +1
+    assert r.restrict_kwd_id == "rkw-mine"  # 내 개방 id로 갱신
+    assert r.next_review_at == date(2026, 7, 22) + timedelta(days=60)  # min(30×2,90)
+
+
+# ── P2-3: 경합이 아닌 진짜 무결성 위반(재조회도 없음)은 삼키지 않고 re-raise ──
+def test_upsert_exclusion_integrity_non_race_reraises(db):
+    from sqlalchemy.exc import IntegrityError
+
+    cand = {"campaign_id": "cmp1", "adgroup_id": "grp-web", "search_term": "진짜오류", "cost": 6000}
+    orig_commit = db.commit
+    calls = {"n": 0}
+
+    def failing_commit():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            db.expunge_all()  # 승자 행을 심지 않는다 → 재조회 시 None
+            raise IntegrityError("INSERT", {}, Exception("other"))
+        return orig_commit()
+
+    with patch.object(db, "commit", side_effect=failing_commit):
+        with pytest.raises(IntegrityError):
+            lane._upsert_exclusion(db, cand, "rkw-mine", _NOW)
