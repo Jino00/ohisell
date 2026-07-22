@@ -1983,6 +1983,13 @@ def _run_exploration_for_campaign(
         if verdict == "stop_observe":
             result["explored_held"] += 1
             result["held"].append({"target_id": exec_target_id, "reason": f"[탐색] {vreason}"})
+            # D-NAO-85 관측 갭②: 그동안 침묵이던 분기(매시 반복) — 상태 변화 시에만 저소음 observe 기록.
+            # (17프로 그룹 10회 연속 무기록 → 라이브 원인 규명에 표적 시뮬 필요했던 침묵 분기 해소.)
+            diary.write_observe_if_changed(
+                db, campaign_id, actor=diary.ACTOR_EXPLORE, adgroup_id=adgroup_id,
+                state=diary.OBSERVE_STOP, rationale=vreason,
+                target_type=exec_target_type, target_id=exec_target_id, now=now,
+            )
             continue
 
         # start / step_up / reactivate → 적응 스텝 발사. 기울기는 연속성 검증된 slope_probe만 사용
@@ -1994,12 +2001,26 @@ def _run_exploration_for_campaign(
         if target is None:
             # 밴드 내(도달)·스텝 소실 — 상향 없음(관찰).
             result["explored_held"] += 1
-            result["held"].append({"target_id": exec_target_id, "reason": "[탐색] 적응 스텝 소실(밴드 내/미세) — 관찰"})
+            _band_reason = "적응 스텝 소실(밴드 내/미세) — 관찰"
+            result["held"].append({"target_id": exec_target_id, "reason": f"[탐색] {_band_reason}"})
+            # D-NAO-85 관측 갭②: stop_observe와 동형 침묵 분기(밴드 도달 정상 상태) — 저소음 관측 기록.
+            diary.write_observe_if_changed(
+                db, campaign_id, actor=diary.ACTOR_EXPLORE, adgroup_id=adgroup_id,
+                state=diary.OBSERVE_BAND, rationale=_band_reason,
+                target_type=exec_target_type, target_id=exec_target_id, now=now,
+            )
             continue
         target = min(target, ceiling)  # 레인 1차 클램프(harness 쓰기-경계 하드 게이트가 재검증)
         if target <= step_base:
             result["explored_capped"] += 1
-            result["held"].append({"target_id": exec_target_id, "reason": "[탐색] 상한 클램프로 스텝 소실 — 종료"})
+            _ceiling_reason = "상한 클램프로 스텝 소실 — 종료"
+            result["held"].append({"target_id": exec_target_id, "reason": f"[탐색] {_ceiling_reason}"})
+            # D-NAO-85 관측 갭②: 침묵이던 상한 클램프 분기 — 상태 변화 시 저소음 관측 기록.
+            diary.write_observe_if_changed(
+                db, campaign_id, actor=diary.ACTOR_EXPLORE, adgroup_id=adgroup_id,
+                state=diary.OBSERVE_CEILING, rationale=_ceiling_reason,
+                target_type=exec_target_type, target_id=exec_target_id, now=now,
+            )
             continue
 
         # 킬스위치 실행 직전 재확인(핫셋 레인과 동형·즉시 정지 계약).

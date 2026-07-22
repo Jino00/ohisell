@@ -11,6 +11,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 import holidays
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import NaverHourlySnapshot, NaverKeywordHourly, OpsDiaryEntry
@@ -27,6 +28,13 @@ ACTOR_DELEGATION = "delegation"
 ACTOR_SYSTEM = "system"
 ACTOR_PROBE = "probe"  # D-NAO-58 CD2: 클릭 탐침(밴드 사각지대 능동 상향) 집행 주체
 ACTOR_EXPLORE = "explore"  # B-X BX3(D-NAO-70·71): 저볼륨 그룹 탐색 UP(핫셋 미달 능동 상향) 집행 주체
+
+# observe(관측) 상태 토큰(D-NAO-85 관측 갭②) — write_observe_if_changed가 event_type="observe" 행의
+# action 컬럼에 저장하는 안정 키. 시간당 탐색 레인이 스텝 없이 관측만 하는 정상 상태를 저소음
+# (상태 변화 시 1행)으로 남긴다. 매시 같은 그룹에서 반복 발동하는 분기라 무조건 기록하면 소음 폭주.
+OBSERVE_STOP = "observe_stop"        # ladder_judgment stop_observe(클릭 도착/밴드 도달/흐름 생존 → 상향 정지)
+OBSERVE_BAND = "observe_band"        # 적응 스텝 소실(밴드 내/미세) — 상향 없음(관찰)
+OBSERVE_CEILING = "observe_ceiling"  # 상한 클램프로 스텝 소실 — 종료
 
 # approval_source(naver_proposals) → actor 매핑. auto_operator.APPROVAL_SOURCE_DAILY/HOURLY/
 # PROBE의 실제 값('auto_op'/'auto_op_hr'/'probe_op', codex 2R[P1-1] 단축)을 여기 문자열
@@ -155,6 +163,32 @@ def _new_diary_session(db: Session) -> Session:
     return Session(bind=db.get_bind(), autoflush=False, autocommit=False)
 
 
+def _insert_diary_entry(
+    session: Session, event_type: str, campaign_id: str, *, actor: str,
+    target_type: str | None, target_id: str | None, adgroup_id: str | None,
+    action: str | None, before_value: str | None, after_value: str | None,
+    rationale: str | None, source_ref: int | None, now: datetime,
+) -> None:
+    """주어진 세션에 일기 1행을 env 스냅샷과 함께 insert+commit(순수 실행 — fail-open은 호출자 담당).
+    write_diary_entry / write_observe_if_changed가 공유(env 조회·행 구성 로직 단일화)."""
+    try:
+        env = env_snapshot_sa(session, now, campaign_id, target_type, target_id)
+    except Exception as e:  # noqa: BLE001 — env 실패해도 일기 행은 남긴다(컬럼 None)
+        log.warning("diary: env_snapshot 실패(env None으로 기록): campaign=%s: %s", campaign_id, e)
+        env = {}
+    entry = OpsDiaryEntry(
+        event_type=event_type, campaign_id=campaign_id or "", actor=actor,
+        target_type=target_type, target_id=target_id, adgroup_id=adgroup_id,
+        action=action, before_value=before_value, after_value=after_value,
+        rationale=rationale, source_ref=source_ref,
+        weekday=env.get("weekday"), is_kr_holiday=env.get("is_kr_holiday"),
+        season=env.get("season"), iphone_launch_offset_days=env.get("iphone_launch_offset_days"),
+        spend_pacing_pct=env.get("spend_pacing_pct"), avg_rank=env.get("avg_rank"),
+    )
+    session.add(entry)
+    session.commit()
+
+
 def write_diary_entry(
     db: Session, event_type: str, campaign_id: str, *, actor: str,
     target_type: str | None = None, target_id: str | None = None, adgroup_id: str | None = None,
@@ -170,24 +204,62 @@ def write_diary_entry(
         now = now or kst_now()
         session = _new_diary_session(db)
         try:
-            try:
-                env = env_snapshot_sa(session, now, campaign_id, target_type, target_id)
-            except Exception as e:  # noqa: BLE001 — env 실패해도 일기 행은 남긴다(컬럼 None)
-                log.warning("diary: env_snapshot 실패(env None으로 기록): campaign=%s: %s", campaign_id, e)
-                env = {}
-            entry = OpsDiaryEntry(
-                event_type=event_type, campaign_id=campaign_id or "", actor=actor,
-                target_type=target_type, target_id=target_id, adgroup_id=adgroup_id,
-                action=action, before_value=before_value, after_value=after_value,
-                rationale=rationale, source_ref=source_ref,
-                weekday=env.get("weekday"), is_kr_holiday=env.get("is_kr_holiday"),
-                season=env.get("season"), iphone_launch_offset_days=env.get("iphone_launch_offset_days"),
-                spend_pacing_pct=env.get("spend_pacing_pct"), avg_rank=env.get("avg_rank"),
+            _insert_diary_entry(
+                session, event_type, campaign_id, actor=actor, target_type=target_type,
+                target_id=target_id, adgroup_id=adgroup_id, action=action,
+                before_value=before_value, after_value=after_value, rationale=rationale,
+                source_ref=source_ref, now=now,
             )
-            session.add(entry)
-            session.commit()
         finally:
             session.close()
     except Exception as e:  # noqa: BLE001 — fail-open: 일기 실패가 집행을 막으면 안 됨
         log.warning("diary: write_diary_entry 실패(fail-open, 집행 계속): event=%s campaign=%s: %s",
                     event_type, campaign_id, e)
+
+
+def write_observe_if_changed(
+    db: Session, campaign_id: str, *, actor: str, adgroup_id: str, state: str,
+    rationale: str | None = None, target_type: str | None = None,
+    target_id: str | None = None, now: datetime | None = None,
+) -> bool:
+    """관측(observe) 1행을 '상태 변화가 있을 때만' 기록한다(저소음, D-NAO-85 관측 갭②).
+
+    시간당 탐색 레인의 stop_observe·밴드 도달·상한 클램프 분기는 매시 같은 그룹에서 반복
+    발동한다 — 무조건 기록하면 하루 수십~수백 행 소음(_record_blocked의 소음 차단 원칙 위반)이라
+    그동안 완전 침묵이었다(17프로 그룹 10회 연속 무기록 → 라이브 원인 규명에 표적 시뮬 필요).
+
+    dedup 규칙: 같은 (campaign_id, adgroup_id, actor)의 **가장 최근 일기 행**이 이미 같은 state의
+    observe면 skip(그 관측 상태가 계속 지속 중 = 소음). 직전 행이 실쓰기/차단/다른 관측 상태거나
+    아예 없으면(=상태 변화) 1행 기록한다. state는 action 컬럼에 저장하는 안정 토큰(OBSERVE_*).
+    → 정확히 '상태 전이' 시점에만 남는다(연속 stop_observe 10시간 = 1행).
+
+    반환: 실제로 기록하면 True, 소음 dedup으로 skip하면 False. fail-open(조회/기록 실패 시 예외를
+    던지지 않고 False 반환 — 레인 집행에 무영향)."""
+    try:
+        now = now or kst_now()
+        session = _new_diary_session(db)
+        try:
+            last = session.execute(
+                select(OpsDiaryEntry.event_type, OpsDiaryEntry.action)
+                .where(
+                    OpsDiaryEntry.campaign_id == (campaign_id or ""),
+                    OpsDiaryEntry.adgroup_id == adgroup_id,
+                    OpsDiaryEntry.actor == actor,
+                )
+                .order_by(OpsDiaryEntry.created_at.desc(), OpsDiaryEntry.id.desc())
+                .limit(1)
+            ).first()
+            if last is not None and last.event_type == "observe" and last.action == state:
+                return False  # 같은 관측 상태 지속 → 소음 dedup(기록 안 함)
+            _insert_diary_entry(
+                session, "observe", campaign_id, actor=actor, target_type=target_type,
+                target_id=target_id, adgroup_id=adgroup_id, action=state,
+                before_value=None, after_value=None, rationale=rationale, source_ref=None, now=now,
+            )
+            return True
+        finally:
+            session.close()
+    except Exception as e:  # noqa: BLE001 — fail-open: 관측 기록 실패가 집행을 막으면 안 됨
+        log.warning("diary: write_observe_if_changed 실패(fail-open): state=%s campaign=%s adgroup=%s: %s",
+                    state, campaign_id, adgroup_id, e)
+        return False

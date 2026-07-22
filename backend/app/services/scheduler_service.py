@@ -688,11 +688,17 @@ def run_naver_auto_operator_hourly_job():
         from app.services.naver_ad.auto_operator import run_hourly_lane
 
         result = run_hourly_lane(db)
+        # D-NAO-85 관측 갭①: 탐색/탐침 카운터도 함께 출력 — 레벨 소실(main.py에서 해소)에 더해,
+        # explored_ghost_hold 등 신규 카운터는 애초에 이 로그 라인에 없어 레벨만 고쳐선 안 보였다.
         log.info(
             "[스케줄러] naver auto_operator hourly: reviewed=%s approved=%s executed=%s "
-            "held=%s skipped=%s failed=%s",
+            "held=%s skipped=%s failed=%s probed=%s | explored=%s explored_held=%s "
+            "explored_capped=%s explored_not_rank=%s ghost_hold=%s(groups=%s)",
             result["reviewed"], result["approved"], result["executed"],
-            len(result["held"]), result["skipped"], result["failed"],
+            len(result["held"]), result["skipped"], result["failed"], result["probed"],
+            result["explored"], result["explored_held"], result["explored_capped"],
+            result["explored_not_rank"], result["explored_ghost_hold"],
+            len(result["ghost_hold_groups"]),
         )
     except Exception as e:
         log.exception("[스케줄러] run_naver_auto_operator_hourly_job 에러: %s", e)
