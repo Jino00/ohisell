@@ -467,8 +467,30 @@ def _check_bid_up_conditions(db: Session, p: NaverProposal, today: date) -> str 
     return None
 
 
+def _dedupe_ctr_alert_rows(alerts: list[dict]) -> list[dict]:
+    """VT3 codex 1R P2-2: 같은 (campaign_id, adgroup_id)가 W1·W3 동시 발화하면 브리핑에서
+    한 그룹 한 행으로 합친다(window는 'W1+W3'처럼 병기, 건수도 그룹 수 기준 — 중복 집계 금지).
+    래더 skip 게이트(auto_operator가 쓰는 set)는 이미 dedupe라 이 함수는 브리핑 표시 전용.
+    입력 순서(첫 등장 순)를 보존하고, 첫 발화 행의 reason을 대표로 유지한다(detect_ctr_alerts는
+    그룹당 W1을 먼저 append하므로 대표=W1, window는 뒤 발화(W3)를 병기)."""
+    merged: dict[tuple[str, str], dict] = {}
+    order: list[tuple[str, str]] = []
+    for a in alerts:
+        key = (a["campaign_id"], a["adgroup_id"])
+        existing = merged.get(key)
+        if existing is None:
+            merged[key] = dict(a)
+            order.append(key)
+        else:
+            windows = existing["window"].split("+")
+            if a["window"] not in windows:
+                existing["window"] = "+".join(windows + [a["window"]])
+    return [merged[k] for k in order]
+
+
 def _fmt_ctr_alert_rows(alerts: list[dict]) -> str:
-    """CTR 경보 상위 나열 — PX _fmt_rows 관례 미러(상위 N + "외 M건" 압축)."""
+    """CTR 경보 상위 나열 — PX _fmt_rows 관례 미러(상위 N + "외 M건" 압축). 입력은
+    _dedupe_ctr_alert_rows로 그룹당 1행 정규화된 목록을 받는다(P2-2)."""
     top = alerts[:_CTR_ALERT_BRIEFING_TOP_N]
     lines = [
         f"- {a['campaign_id']}/{a['adgroup_id']}({a['window']}): {a['reason']}"
@@ -482,12 +504,14 @@ def _fmt_ctr_alert_rows(alerts: list[dict]) -> str:
 
 def _emit_ctr_alert_briefing(db: Session, alerts: list[dict], now: datetime) -> None:
     """경보 있던 날만 diary(observe)+Slack — PX·VT 브리핑 관례 미러(호출부가 독립 try로
-    감싼다 — 이 함수 자체는 fail-open을 스스로 보장하지 않는다, _run_ctr_alert_briefing 참조)."""
+    감싼다 — 이 함수 자체는 fail-open을 스스로 보장하지 않는다, _run_ctr_alert_briefing 참조).
+    P2-2: 헤더 건수·행 모두 그룹 단위 dedupe(한 그룹이 W1·W3 동시 발화해도 1건·1행)."""
+    deduped = _dedupe_ctr_alert_rows(alerts)
     header = (
-        f"{now.date().isoformat()} 소재 CTR 경보 {len(alerts)}건(D-NAO-82②) — "
+        f"{now.date().isoformat()} 소재 CTR 경보 {len(deduped)}건(D-NAO-82②) — "
         "입찰로 못 푸는 소재 CTR 문제 — 사람 처방 대상(썸네일·가격·리뷰) — 해당 그룹 탐색 래더 추가 UP 중지"
     )
-    text = "\n".join([header, _fmt_ctr_alert_rows(alerts)])
+    text = "\n".join([header, _fmt_ctr_alert_rows(deduped)])
     diary.write_diary_entry(
         db, "observe", "", actor=diary.ACTOR_DAILY, action=ACTION_CTR_ALERT_BRIEFING,
         rationale=text, now=now,
@@ -1746,16 +1770,13 @@ def _run_exploration_for_campaign(
         bm_bid_anchor = None
     # VT3(D-NAO-82②): 소재 CTR 경보 — 캠페인당 1회 재산출(순회 밖, N+1 방지, PLAN §4.1).
     # 경보 활성 그룹은 아래 루프에서 skip(밴드 도달+CTR 경보=더 올려도 헛돎 — 사람 처방 대상).
-    # fail-open: ctr_alert(read-only SA) 판정 실패는 게이트 없이 진행(탐색 레인 본연 보존).
-    try:
-        ctr_signals = ctr_alert.detect_ctr_alerts(db, campaign_id, now=now)
-        ctr_alerted_groups = {a["adgroup_id"] for a in ctr_signals.get("alerts", [])}
-    except Exception as e:  # noqa: BLE001 — VT3 판정 실패는 fail-open(게이트 미적용)
-        log.warning(
-            "auto_operator: CTR 경보 산출 실패(fail-open, 게이트 미적용) campaign=%s: %s",
-            campaign_id, e,
-        )
-        ctr_alerted_groups = set()
+    # codex 1R P1-2: 정지 신호(CTR 경보) 산출 실패 시 fail-open(게이트 없이 진행)이 아니라 캠페인
+    # 레인 보류(fail-soft 전파)로 바꾼다 — 예외를 잡지 않고 그대로 올려 호출측(run_hourly_lane의
+    # 캠페인 try/except)이 캠페인 단위로 잡아 그 캠페인 탐색 레인 전체가 이번 런을 쉬게 한다
+    # (실쓰기 0 = 안전 방향, 기존 daily 손실상태 체크와 동일 관례). 경보 산출이 죽었는데 게이트만
+    # 건너뛰고 탐색 UP을 계속 쏘면 "사람 처방 대상" 그룹에 헛발사가 나가므로 fail-open은 위험.
+    ctr_signals = ctr_alert.detect_ctr_alerts(db, campaign_id, now=now)
+    ctr_alerted_groups = {a["adgroup_id"] for a in ctr_signals.get("alerts", [])}
     for _etype, adgroup_id in candidates:
         settled_clk = exploration._settlement_clk(db, adgroup_id, window_from, window_to)
         last_step = _exploration_last_step(db, adgroup_id)

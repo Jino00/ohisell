@@ -48,6 +48,10 @@ _TRAILING_CTR_DAYS = 30                         # 트레일링 CTR 창 길이
 _TRAILING_CTR_GAP_DAYS = 2                      # W3(D0-2..D0)와 겹치지 않게 D0-3까지에서 끝냄
 _GROUP_TRAILING_MIN_IMP = 1000                  # 그룹 트레일링 표본 하한(미달=캠페인 CTR 폴백)
 
+# ── D-1 부분적재 가드(VT3 codex 1R P2-1) ──
+_PARTIAL_LOAD_LOOKBACK_DAYS = 3                  # 직전 창 길이(vitality_signal._PARTIAL_LOAD_LOOKBACK_DAYS 동일)
+_PARTIAL_LOAD_MIN_RATIO = Decimal("0.5")         # D0 행수/직전 창 일평균 < 0.5 = 부분적재 의심
+
 
 def _to_date(d) -> date:
     """SQLite가 ad_date를 str로 돌려주는 환경 방어(vitality_signal._to_date와 동형 재구현 —
@@ -64,6 +68,56 @@ def _is_auto_operate_campaign(db: Session, campaign_id: str) -> bool:
         .first()
     )
     return bool(row and row[0])
+
+
+def _partial_load_suspected(db: Session, campaign_id: str, d0: date) -> tuple[bool, str | None]:
+    """부분적재 의심 가드(VT3 codex 1R P2-1) — 캠페인 스코프. D0(=as_of=D-1)의 실적재 행수가
+    직전 3일 일평균의 절반 미만이면 D0 신호가 절반만 적재된 상태로 의심(W1=최근 1일이 통째로
+    왜곡 → 클릭0 오탐) → 그 캠페인 경보 전체 억제(빈 alerts 반환은 호출부에서).
+
+    vitality_signal._partial_load_suspected(:313~353)·anomaly_feed.freshness_partial_load와
+    동일 로직의 **3번째 경량 재구현**이다(SA간 직접 import 금지, 원칙18-6 — 출처 명시). 차이:
+    여기선 campaign_id로 스코프한다(ctr_alert가 캠페인 1개 단위 판정이라). 근거: 부분적재는 D-1
+    sync가 절반만 돌고 죽은 경우 — 행 자체가 사라지므로 행수 비교로 잡힌다(CTR 가뭄은 행수
+    유지·clk만 하락이라 이와 직교, 오검출 없음). baseline 없으면(직전 창 데이터 0일) 가드
+    미적용(추정 금지 — vitality와 동일 False). sentinel 행 제외.
+
+    반환: (partial 여부, 사유 문자열|None)."""
+    window_from = d0 - timedelta(days=_PARTIAL_LOAD_LOOKBACK_DAYS)
+    window_to = d0 - timedelta(days=1)
+    as_of_count = int(
+        db.query(sqlfunc.count(NaverAdDaily.id))
+        .filter(
+            NaverAdDaily.campaign_id == campaign_id,
+            NaverAdDaily.ad_date == d0,
+            NaverAdDaily.adgroup_id != BACKFILL_SENTINEL_ADGROUP,
+        )
+        .scalar() or 0
+    )
+    daily_counts = dict(
+        db.query(NaverAdDaily.ad_date, sqlfunc.count(NaverAdDaily.id))
+        .filter(
+            NaverAdDaily.campaign_id == campaign_id,
+            NaverAdDaily.ad_date >= window_from, NaverAdDaily.ad_date <= window_to,
+            NaverAdDaily.adgroup_id != BACKFILL_SENTINEL_ADGROUP,
+        )
+        .group_by(NaverAdDaily.ad_date)
+        .all()
+    )
+    days_with_data = len(daily_counts)
+    if days_with_data == 0:
+        return False, None  # baseline 없음 = 비교 불가(추정 금지)
+    baseline_avg = Decimal(sum(daily_counts.values())) / Decimal(days_with_data)
+    if baseline_avg == 0:
+        return False, None
+    ratio = Decimal(as_of_count) / baseline_avg
+    if ratio < _PARTIAL_LOAD_MIN_RATIO:
+        return True, (
+            f"D0({d0.isoformat()}) 부분적재 의심 — 캠페인 {campaign_id} 행수 {as_of_count} vs "
+            f"직전 {days_with_data}일 평균 {float(round(baseline_avg, 1))}행"
+            f"({float(round(ratio * 100, 1))}%) → 경보 억제"
+        )
+    return False, None
 
 
 def _window_daily_by_group(
@@ -118,7 +172,12 @@ def _window_agg_by_group(
 
 
 def _avg_rank(rank_sum: int, imp: int) -> Decimal | None:
-    return (Decimal(rank_sum) / Decimal(imp)) if imp > 0 else None
+    # VT3 codex 1R P2-3: imp>0인데 rank_sum≤0이면 순위 소스 누락(순위 미상)이므로 None 반환 —
+    # rank 0.0을 "최상위 순위"로 오독해 과열밴드(≤2.5)로 오탐 발화하는 것 차단. rank None은
+    # _w1_alert/_w3_alert에서 이미 비발화 처리(순위 미상=경보 발화 금지, 추정 금지).
+    if imp <= 0 or rank_sum <= 0:
+        return None
+    return Decimal(rank_sum) / Decimal(imp)
 
 
 def _group_trailing_ctr(
@@ -202,6 +261,14 @@ def detect_ctr_alerts(db: Session, campaign_id: str, *, now: datetime | None = N
 
     now = now or kst_now()
     d0 = now.date() - timedelta(days=1)
+
+    # VT3 codex 1R P2-1: D0(=as_of) 부분적재 가드 — D0 행수가 직전 3일 일평균의 절반 미만이면
+    # W1(최근 1일)이 통째로 왜곡되므로(클릭0 오탐) 이 캠페인 경보 전체 억제. baseline 없으면 미적용.
+    partial, partial_reason = _partial_load_suspected(db, campaign_id, d0)
+    if partial:
+        log.warning("ctr_alert: %s", partial_reason)
+        return {"alerts": []}
+
     w3_start = d0 - timedelta(days=_W3_WINDOW_DAYS - 1)  # D0-2
     daily = _window_daily_by_group(db, campaign_id, w3_start, d0)
 

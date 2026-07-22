@@ -752,6 +752,24 @@ def test_daily_lane_ctr_alert_briefing_emitted_when_alert_present(db):
     mock_slack.assert_called_once()
 
 
+def test_daily_lane_ctr_alert_briefing_dedupes_w1_w3(db):
+    """codex 1R P2-2: 한 그룹이 W1·W3 동시 발화(clk=0 3일)해도 브리핑은 그룹당 1행(window
+    'W1+W3' 병기)·헤더 건수도 그룹 수(1) 기준(2건 중복 집계 금지)."""
+    _settings(db)
+    _ctr_alert_rows(db)  # clk=0 3일 → 같은 그룹 W1(D0 단일일)·W3(누적) 동시 발화
+    with patch.object(auto_operator.slack_notifier, "notify_text", return_value={"sent": True}):
+        auto_operator.run_daily_lane(db, now=NOW)
+
+    briefs = db.query(OpsDiaryEntry).filter(
+        OpsDiaryEntry.action == auto_operator.ACTION_CTR_ALERT_BRIEFING
+    ).all()
+    assert len(briefs) == 1
+    rationale = briefs[0].rationale
+    assert "경보 1건" in rationale            # 그룹 수 기준(2건 아님)
+    assert rationale.count("/grp-1(") == 1    # 그룹당 1행(중복 행 없음)
+    assert "W1+W3" in rationale               # window 병기
+
+
 def test_daily_lane_ctr_alert_briefing_silent_when_no_alert(db):
     """경보 없는 날(추가 시드 0) → 완전 침묵(diary 0·Slack 0), 일 레인 본작업 결과는 불변."""
     _settings(db)

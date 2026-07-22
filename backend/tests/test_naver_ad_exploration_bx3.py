@@ -717,14 +717,16 @@ def test_ctr_alert_inactive_group_proceeds_normally(db):
     mock_exec.assert_called_once()
 
 
-def test_ctr_alert_lookup_failure_is_fail_open(db):
-    """ctr_alert.detect_ctr_alerts 예외 시 fail-open(게이트 미적용) — 기존 탐색 레인이
-    CTR 경보 조회 실패로 전면 정지되지 않는다(탐색 레인 본연 동작 보존)."""
+def test_ctr_alert_lookup_failure_rests_campaign_lane(db):
+    """codex 1R P1-2: ctr_alert.detect_ctr_alerts 예외 시 fail-open(게이트 없이 발사)이 아니라
+    캠페인 탐색 레인 보류(fail-soft 전파) — 예외가 _run_exploration_for_campaign 밖으로 나가
+    run_hourly_lane의 캠페인 try/except가 잡고 그 캠페인 탐색은 이번 런 실쓰기 0(안전 방향).
+    핫셋/시간당 본작업은 오염되지 않는다(run_hourly_lane이 정상 반환)."""
     _setup(db)
     curve = [_hour(5, imp=20, clk=0, cost=0, avg_rank=6.0),
              _hour(6, imp=20, clk=0, cost=0, avg_rank=6.0),
              _hour(7, imp=20, clk=0, cost=0, avg_rank=6.0)]
     with patch.object(auto_operator.ctr_alert, "detect_ctr_alerts", side_effect=RuntimeError("판정 실패")):
         result, mock_exec = _run(db, curve)
-    assert result["explored"] == 1  # 게이트 미적용 → 정상 발사(fail-open)
-    mock_exec.assert_called_once()
+    assert result["explored"] == 0  # 경보 산출 실패 → 캠페인 탐색 레인 보류(발사 0)
+    mock_exec.assert_not_called()   # 실쓰기 0(안전 방향)

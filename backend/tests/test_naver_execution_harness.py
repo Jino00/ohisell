@@ -13,7 +13,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.database import Base
-from app.models import NaverCampaignSettings, NaverChangeLog, NaverProposal
+from app.models import NaverCampaignSettings, NaverChangeLog, NaverEntity, NaverProposal
 from app.services.naver_ad import naver_execution_harness as harness
 from app.services.naver_ad import naver_sa_writer
 from app.utils.kst import kst_now
@@ -1208,7 +1208,7 @@ def test_build_guardrail_context_non_keyword_target_all_none(db):
     assert ctx == {
         "current_bid": None, "current_budget": None, "roas_corrected": None, "target_roas": None,
         "cost_today": None, "daily_budget": None, "unconverted_spend": None,
-        "last_change_at": None, "changes_today_count": 0,
+        "last_change_at": None, "changes_today_count": 0, "campaign_type": None,
     }
 
 
@@ -1223,7 +1223,7 @@ def test_build_guardrail_context_adgroup_target_bid_budget_fields_none_no_prior_
     assert ctx == {
         "current_bid": None, "current_budget": None, "roas_corrected": None, "target_roas": None,
         "cost_today": None, "daily_budget": None, "unconverted_spend": None,
-        "last_change_at": None, "changes_today_count": 0,
+        "last_change_at": None, "changes_today_count": 0, "campaign_type": None,
     }
 
 
@@ -1262,6 +1262,28 @@ def test_build_guardrail_context_adgroup_current_bid_from_live_reread(db):
     assert ctx["current_budget"] is None
     assert ctx["roas_corrected"] is None
     assert ctx["target_roas"] is None
+
+
+def test_build_guardrail_context_populates_campaign_type_from_entity(db):
+    """VT4 P1-1: campaign 엔티티 행의 campaign_type이 context에 실린다(SHOPPING이면 guardrail이
+    50원 하한 적용). 엔티티 부재면 None(보수 70 하한)."""
+    db.add(NaverEntity(entity_type="campaign", entity_id="cmp1", campaign_id="cmp1",
+                       campaign_type="SHOPPING", status="on"))
+    db.commit()
+    p = _proposal(db, proposal_type="bid_down", target_type="adgroup", target_id="grp-shop-1")
+    with patch.object(harness.naver_sa_writer, "_get_adgroup",
+                       return_value={"bidAmt": 60, "systemBiddingType": "NONE"}):
+        ctx = harness._build_guardrail_context(db, p, kst_now())
+    assert ctx["campaign_type"] == "SHOPPING"
+
+
+def test_build_guardrail_context_campaign_type_none_when_entity_absent(db):
+    """campaign 엔티티 행 부재 → campaign_type None(보수 70 하한 유지, fail-closed)."""
+    p = _proposal(db, proposal_type="bid_down", target_type="adgroup", target_id="grp-shop-1")
+    with patch.object(harness.naver_sa_writer, "_get_adgroup",
+                       return_value={"bidAmt": 1200, "systemBiddingType": "NONE"}):
+        ctx = harness._build_guardrail_context(db, p, kst_now())
+    assert ctx["campaign_type"] is None
 
 
 def test_build_guardrail_context_adgroup_get_adgroup_failure_fail_closed(db):

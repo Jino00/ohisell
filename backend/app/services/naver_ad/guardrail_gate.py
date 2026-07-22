@@ -46,6 +46,12 @@ _COOLDOWN_HOURS = 2
 _MAX_DAILY_CHANGES = 3
 
 _MIN_BID = 70
+# VT4 D-NAO-82①(codex 1R P1-1): campaign_type 인지형 입찰 하한. SHOPPING adgroup grain은 50원
+# 유효입찰이 라이브(prod 158그룹 bid=50 실증, 2026-07-22 라이브 해부). _MIN_BID(70)은 파워링크
+# 키워드 grain·bid_simulator._MIN_BID 규격 출처로 보존 — context["campaign_type"]가 SHOPPING이
+# 아니거나 미확보(WEB_SITE·BRAND_SEARCH·None)면 70원(보수 fail-closed) 유지. 70원 하한을 쇼핑에
+# 적용해 50원 그룹의 60원 explore 발사가 "유효 범위 밖"으로 영구 차단되던 결함 수정.
+_MIN_BID_SHOPPING = 50
 _MAX_BID = 100_000
 _BID_INCREMENT = 10
 
@@ -84,7 +90,8 @@ def check(proposal: dict, context: dict, *, now: datetime) -> str | None:
        float|None(BEP×공격성), "cost_today": int|None(오늘 누적 소진), "daily_budget": int|None,
        "unconverted_spend": int|None(무전환 누적 지출, 스톱로스 원료), "last_change_at":
        datetime|None(이 대상의 마지막 change_log 시각, proposal_type 무관), "changes_today_count":
-       int(이 대상의 오늘 변경 건수)}.
+       int(이 대상의 오늘 변경 건수), "campaign_type": str|None(VT4 P1-1 — SHOPPING이면 입찰
+       하한 50원, 그 외/None이면 70원 보수 하한)}.
     now: kst_now() — harness가 한 번만 계산해 명시 전달(원칙: 자정 경계 레이스 방지,
       F2b codex 수정과 동일 패턴).
 
@@ -151,8 +158,11 @@ def _check_bid(proposal: dict, context: dict, proposal_type: str) -> str | None:
     target_bid = proposal.get("target_bid")
     if target_bid is None:
         return "target_bid 없음 — 구조 결함(재생성 필요)"
-    if not (_MIN_BID <= target_bid <= _MAX_BID) or target_bid % _BID_INCREMENT != 0:
-        return f"target_bid={target_bid}는 유효 범위 밖(70~100,000원, 10원 단위)"
+    # VT4 codex 1R P1-1: SHOPPING이면 50원, 그 외(WEB_SITE·BRAND_SEARCH·None·미확보)면 70원 하한.
+    # campaign_type은 harness가 _build_guardrail_context에서 채운다(부재 시 None → 보수 70).
+    min_bid = _MIN_BID_SHOPPING if context.get("campaign_type") == "SHOPPING" else _MIN_BID
+    if not (min_bid <= target_bid <= _MAX_BID) or target_bid % _BID_INCREMENT != 0:
+        return f"target_bid={target_bid}는 유효 범위 밖({min_bid}~100,000원, 10원 단위)"
 
     current_bid = context.get("current_bid")
     if current_bid is None:

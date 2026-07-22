@@ -446,8 +446,29 @@ def _build_guardrail_context(db: Session, proposal: NaverProposal, now: datetime
     context: dict = {
         "current_bid": None, "current_budget": None, "roas_corrected": None, "target_roas": None,
         "cost_today": None, "daily_budget": None, "unconverted_spend": None,
-        "last_change_at": None, "changes_today_count": 0,
+        "last_change_at": None, "changes_today_count": 0, "campaign_type": None,
     }
+    # VT4 codex 1R P1-1: guardrail_gate가 campaign_type 인지형 입찰 하한(SHOPPING 50·그 외 70)을
+    # 적용하려면 context에 campaign_type이 실려야 한다 — proposal.campaign_id의 campaign 엔티티
+    # 행에서 조회(부재/조회 실패 시 None → guardrail_gate가 보수 70 하한 유지, fail-closed). 세
+    # 실쓰기 경로(adgroup/ad·keyword·campaign)가 모두 이 함수를 거쳐 아래에서 분기 return 하므로,
+    # 분기 전 이 한 곳에서 채우면 세 경로 전부 커버된다(중복 조회·경로별 누락 방지).
+    try:
+        camp_row = (
+            db.query(NaverEntity.campaign_type)
+            .filter(
+                NaverEntity.entity_type == "campaign",
+                NaverEntity.entity_id == proposal.campaign_id,
+            )
+            .first()
+        )
+        if camp_row is not None:
+            context["campaign_type"] = camp_row[0] or None
+    except Exception as e:  # noqa: BLE001 — 조회 실패는 None 유지(보수 70 하한, fail-closed)
+        log.warning(
+            "naver_execution_harness: guardrail context campaign_type 조회 실패(보수 70 하한 유지) "
+            "campaign_id=%s: %s", proposal.campaign_id, e,
+        )
     if proposal.target_type == "adgroup":
         # X1b-S bid 확장(D-NAO-16 3단계 SHOPPING 대칭, shopping_group_bep 보드): current_bid는
         # naver_sa_writer._get_adgroup 라이브 재조회로 채운다(get_keyword의 adgroup 대칭 —

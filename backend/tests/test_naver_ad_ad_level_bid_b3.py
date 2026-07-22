@@ -211,13 +211,25 @@ def test_update_ad_bid_ugba_flipped_true_raises_verification():
             writer.update_ad_bid(AD_ID, 680)
 
 
-@pytest.mark.parametrize("bad_bid", [60, 100_010, 685])
+# VT4 P1-1: ad grain 하한 = 50원 → 40원은 여전히 차단(50 미만), 685=10원 단위 아님, 100_010=상한 초과.
+@pytest.mark.parametrize("bad_bid", [40, 100_010, 685])
 def test_update_ad_bid_invalid_bid_no_http(bad_bid):
     with patch.object(writer.fetcher, "_get") as mg, patch.object(writer.requests, "put") as mp:
         with pytest.raises(WriteValidationError):
             writer.update_ad_bid(AD_ID, bad_bid)
     mg.assert_not_called()
     mp.assert_not_called()
+
+
+def test_update_ad_bid_50_passes_min_bid():
+    """VT4 P1-1: ad grain 하한 50원 — 50원 발사가 검증 통과(prod 쇼핑검색 50원 유효입찰)."""
+    before, parent, after = _ad_resp(800), _manual_parent(), _ad_resp(50)
+    put_resp = FakeResp(200, after.json())
+    with patch.object(writer.fetcher, "_get", side_effect=[before, parent, after]), \
+         patch.object(writer.requests, "put", return_value=put_resp) as mp:
+        r = writer.update_ad_bid(AD_ID, 50)
+    assert r.action == "update_ad_bid"
+    assert mp.call_count == 1
 
 
 def test_get_ad_bid_parses_adattr():

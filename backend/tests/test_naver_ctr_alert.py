@@ -216,3 +216,41 @@ def test_unknown_campaign_scope_empty(db):
     """NaverCampaignSettings 행 자체 없음 — auto_operate 확인 불가 → 경보 0."""
     res = ctr_alert.detect_ctr_alerts(db, "cmp-unregistered", now=NOW)
     assert res["alerts"] == []
+
+
+# ══════════════════════════ P2-3(codex 1R): rank_sum≤0 오탐 차단 ══════════════════════════
+
+def test_rank_sum_zero_no_alert(db):
+    """imp>0인데 rank_sum≤0(순위 소스 누락 = 순위 미상)이면 W1·W3 둘 다 비발화 — rank 0.0을
+    과열밴드(≤2.5) 최상위 순위로 오독해 발화하던 것 차단(순위 미상=경보 발화 금지)."""
+    _settings(db)
+    # rank=0.0 → rank_sum=round(0×imp)=0. 나머지는 경보 조건 충족(imp 300·clk 0).
+    for d in (D0 - timedelta(days=2), D0 - timedelta(days=1), D0):
+        _daily(db, ad_date=d, imp=300, clk=0, rank=0.0)
+    res = ctr_alert.detect_ctr_alerts(db, CAMPAIGN, now=NOW)
+    assert res["alerts"] == []
+
+
+# ══════════════════════════ P2-1(codex 1R): D0 부분적재 가드 ══════════════════════════
+
+def test_partial_load_suppresses_alerts(db):
+    """D0 행수가 직전 3일 일평균의 절반 미만이면 부분적재 의심 → 캠페인 경보 전체 억제.
+    직전 창 4행/일 baseline, D0 1행(25%<50%)."""
+    _settings(db)
+    for d in (D0 - timedelta(days=3), D0 - timedelta(days=2), D0 - timedelta(days=1)):
+        for g in range(4):
+            _daily(db, ad_date=d, imp=300, clk=0, rank=3.0, adgroup_id=f"grp-{g}")
+    _daily(db, ad_date=D0, imp=300, clk=0, rank=3.0, adgroup_id="grp-0")  # D0=1행(부분적재)
+    res = ctr_alert.detect_ctr_alerts(db, CAMPAIGN, now=NOW)
+    assert res["alerts"] == []  # 부분적재 억제(경보 조건 충족해도 발화 안 함)
+
+
+def test_normal_load_still_fires(db):
+    """P2-1 대조: D0 행수가 baseline과 비등(ratio≥0.5)하면 가드 미적용 — 경보 정상 발화.
+    baseline 1행/일, D0 1행 → ratio 1.0."""
+    _settings(db)
+    for d in (D0 - timedelta(days=3), D0 - timedelta(days=2), D0 - timedelta(days=1)):
+        _daily(db, ad_date=d, imp=300, clk=0, rank=3.0, adgroup_id="grp-0")
+    _daily(db, ad_date=D0, imp=300, clk=0, rank=3.0, adgroup_id="grp-0")
+    res = ctr_alert.detect_ctr_alerts(db, CAMPAIGN, now=NOW)
+    assert _one(res["alerts"], "W1") is not None  # 가드 미적용 → W1 정상 발화
