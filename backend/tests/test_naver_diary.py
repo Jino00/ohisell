@@ -246,6 +246,102 @@ def test_write_diary_entry_records_row_even_when_env_snapshot_raises(db, monkeyp
     assert row.avg_rank is None
 
 
+# ══════════════════════════ write_observe_if_changed (D-NAO-85 관측 갭②) ══════════════════════════
+
+
+def _observe_rows(db, adgroup_id="ag-1"):
+    return (
+        db.query(OpsDiaryEntry)
+        .filter(OpsDiaryEntry.event_type == "observe", OpsDiaryEntry.adgroup_id == adgroup_id)
+        .order_by(OpsDiaryEntry.id.asc())
+        .all()
+    )
+
+
+def test_observe_if_changed_first_call_records(db):
+    """첫 관측(직전 행 없음) → observe 1행 기록·True 반환. action=state·rationale 보존."""
+    wrote = diary.write_observe_if_changed(
+        db, "cmp1", actor=diary.ACTOR_EXPLORE, adgroup_id="ag-1",
+        state=diary.OBSERVE_STOP, rationale="클릭 발생 — 상향 정지",
+        target_type="adgroup", target_id="ag-1",
+    )
+    assert wrote is True
+    rows = _observe_rows(db)
+    assert len(rows) == 1
+    assert rows[0].action == diary.OBSERVE_STOP
+    assert rows[0].actor == diary.ACTOR_EXPLORE
+    assert rows[0].rationale == "클릭 발생 — 상향 정지"
+
+
+def test_observe_if_changed_same_state_deduped(db):
+    """같은 state 반복(매시 stop_observe) → 첫 1행만·이후 skip(False). 소음 폭주 방지."""
+    for _ in range(5):
+        diary.write_observe_if_changed(
+            db, "cmp1", actor=diary.ACTOR_EXPLORE, adgroup_id="ag-1",
+            state=diary.OBSERVE_STOP, rationale="관측",
+        )
+    rows = _observe_rows(db)
+    assert len(rows) == 1  # 5회 호출 → 1행(상태 지속 dedup)
+
+
+def test_observe_if_changed_state_transition_records_new_row(db):
+    """다른 state로 전이(stop→ceiling) → 새 1행 기록(True). 상태 변화는 기록한다."""
+    assert diary.write_observe_if_changed(
+        db, "cmp1", actor=diary.ACTOR_EXPLORE, adgroup_id="ag-1", state=diary.OBSERVE_STOP,
+    ) is True
+    assert diary.write_observe_if_changed(
+        db, "cmp1", actor=diary.ACTOR_EXPLORE, adgroup_id="ag-1", state=diary.OBSERVE_STOP,
+    ) is False  # 지속 → skip
+    assert diary.write_observe_if_changed(
+        db, "cmp1", actor=diary.ACTOR_EXPLORE, adgroup_id="ag-1", state=diary.OBSERVE_CEILING,
+    ) is True  # 전이 → 기록
+    rows = _observe_rows(db)
+    assert [r.action for r in rows] == [diary.OBSERVE_STOP, diary.OBSERVE_CEILING]
+
+
+def test_observe_if_changed_intervening_action_resets_dedup(db):
+    """관측 사이에 실쓰기/차단(다른 event_type)이 끼면 같은 state여도 다시 기록(상태 변화 신호)."""
+    assert diary.write_observe_if_changed(
+        db, "cmp1", actor=diary.ACTOR_EXPLORE, adgroup_id="ag-1", state=diary.OBSERVE_STOP,
+    ) is True
+    # 그룹이 실쓰기(execute)로 상태 이탈 — 가장 최근 행이 observe가 아니게 된다.
+    diary.write_diary_entry(
+        db, "execute", "cmp1", actor=diary.ACTOR_EXPLORE, adgroup_id="ag-1",
+        target_type="adgroup", target_id="ag-1", action="bid_up",
+    )
+    # 다시 stop_observe로 복귀 → 직전 행이 execute라 상태 변화로 간주·기록.
+    assert diary.write_observe_if_changed(
+        db, "cmp1", actor=diary.ACTOR_EXPLORE, adgroup_id="ag-1", state=diary.OBSERVE_STOP,
+    ) is True
+    assert len(_observe_rows(db)) == 2
+
+
+def test_observe_if_changed_scoped_per_adgroup(db):
+    """dedup 키는 (campaign, adgroup, actor) — 다른 그룹은 서로 독립적으로 각자 첫 기록."""
+    assert diary.write_observe_if_changed(
+        db, "cmp1", actor=diary.ACTOR_EXPLORE, adgroup_id="ag-1", state=diary.OBSERVE_STOP,
+    ) is True
+    assert diary.write_observe_if_changed(
+        db, "cmp1", actor=diary.ACTOR_EXPLORE, adgroup_id="ag-2", state=diary.OBSERVE_STOP,
+    ) is True  # 다른 그룹 → 독립 기록
+    assert len(_observe_rows(db, "ag-1")) == 1
+    assert len(_observe_rows(db, "ag-2")) == 1
+
+
+def test_observe_if_changed_fail_open_returns_false_no_raise(db, monkeypatch, caplog):
+    """dedup 조회/기록 실패도 예외 전파 없음·False 반환(fail-open, 레인 집행 무영향)."""
+    def _boom(_db):
+        raise RuntimeError("모의 세션 실패")
+
+    monkeypatch.setattr(diary, "_new_diary_session", _boom)
+    with caplog.at_level("WARNING"):
+        result = diary.write_observe_if_changed(
+            db, "cmp1", actor=diary.ACTOR_EXPLORE, adgroup_id="ag-1", state=diary.OBSERVE_STOP,
+        )
+    assert result is False
+    assert any("fail-open" in r.message for r in caplog.records)
+
+
 # ══════════════════════════ actor_from_approval_source ══════════════════════════
 
 
