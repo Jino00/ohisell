@@ -34,7 +34,7 @@ from app.models import (
     NaverProposal,
     NaverRetroSignal,
 )
-from app.services.naver_ad import bid_rank_curve, bid_simulator, campaign_target_resolver, diagnosis, diary, effective_bid, exploration, guardrail_gate, intraday_roas, naver_execution_harness, naver_sa_writer, rank_servo, slack_notifier, vitality_signal
+from app.services.naver_ad import bid_rank_curve, bid_simulator, campaign_target_resolver, ctr_alert, diagnosis, diary, effective_bid, exploration, guardrail_gate, intraday_roas, naver_execution_harness, naver_sa_writer, rank_servo, slack_notifier, vitality_signal
 from app.services.naver_ad.bid_step_types import BID_UP_TYPES, EXPLORATION_STEP_TYPES, encode_base_bid, encode_exploration_ceiling
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.services.naver_ad.guardrail_gate import _MAX_CHANGE_PCT
@@ -74,6 +74,12 @@ _VITALITY_COOLDOWN_HOURS = 48      # §2 봉투: 같은 그룹 48h 재발사 쿨
 # D-1 스파이럴 신호로 발사 큐에 올랐어도, 당일 intraday 순위가 밴드(≤4.0)로 복귀했으면 skip.
 _VITALITY_INTRADAY_BAND_TOP = 4.0
 ACTION_VITALITY_BRIEFING = "vitality_spiral_briefing"  # diary observe action(브리핑 렌더용)
+
+# ── VT3(D-NAO-82② 소재 CTR 경보) ──
+# 새 권한 없음(§0 "브리핑+래더 중지뿐") — 실행 레버는 그대로, 브리핑 1개 + 탐색 래더 skip 1개.
+ACTION_CTR_ALERT_BRIEFING = "ctr_alert_briefing"  # diary observe action(브리핑 렌더용)
+_CTR_ALERT_BRIEFING_TOP_N = 20  # PX 브리핑 관례(_TOP_N=10)보다 넉넉히(창별 2건/그룹 가능)
+_CTR_ALERT_LADDER_SKIP_REASON = "CTR경보 — 소재 처방 대상, 추가 UP 무의미"
 
 # B3(D-NAO-65) 소재-레벨 입찰 제어 카나리 게이트. auto_operate 캠페인 중 이 집합에 든
 # 캠페인만 레버 미연결(source='ad') 그룹에서 ad-레벨 실쓰기(update_ad_bid)로 라우팅한다 —
@@ -461,6 +467,53 @@ def _check_bid_up_conditions(db: Session, p: NaverProposal, today: date) -> str 
     return None
 
 
+def _fmt_ctr_alert_rows(alerts: list[dict]) -> str:
+    """CTR 경보 상위 나열 — PX _fmt_rows 관례 미러(상위 N + "외 M건" 압축)."""
+    top = alerts[:_CTR_ALERT_BRIEFING_TOP_N]
+    lines = [
+        f"- {a['campaign_id']}/{a['adgroup_id']}({a['window']}): {a['reason']}"
+        for a in top
+    ]
+    remainder = len(alerts) - len(top)
+    if remainder > 0:
+        lines.append(f"- 외 {remainder}건")
+    return "\n".join(lines)
+
+
+def _emit_ctr_alert_briefing(db: Session, alerts: list[dict], now: datetime) -> None:
+    """경보 있던 날만 diary(observe)+Slack — PX·VT 브리핑 관례 미러(호출부가 독립 try로
+    감싼다 — 이 함수 자체는 fail-open을 스스로 보장하지 않는다, _run_ctr_alert_briefing 참조)."""
+    header = (
+        f"{now.date().isoformat()} 소재 CTR 경보 {len(alerts)}건(D-NAO-82②) — "
+        "입찰로 못 푸는 소재 CTR 문제 — 사람 처방 대상(썸네일·가격·리뷰) — 해당 그룹 탐색 래더 추가 UP 중지"
+    )
+    text = "\n".join([header, _fmt_ctr_alert_rows(alerts)])
+    diary.write_diary_entry(
+        db, "observe", "", actor=diary.ACTOR_DAILY, action=ACTION_CTR_ALERT_BRIEFING,
+        rationale=text, now=now,
+    )
+    slack_notifier.notify_text(text, log_label="소재 CTR 경보 브리핑")
+
+
+def _run_ctr_alert_briefing(db: Session, now: datetime, result: dict) -> None:
+    """VT3(D-NAO-82②) 소재 CTR 경보 브리핑 — 일 레인(08:50)에서 전 auto_operate 캠페인의
+    ctr_alert(SA)를 캠페인당 1회 호출해 수집, 경보가 있는 날만 브리핑(없는 날 완전 침묵).
+    fail-open: 이 스텝의 실패가 일 레인 본작업(승인/실행/stale 정리)을 막지 않는다(bleed
+    밸브·vitality 스텝과 동형 — 호출부는 독립 try로 감싸지 않고 이 함수가 직접 감싼다,
+    run_daily_lane 말미에서 반환값 없이 호출)."""
+    try:
+        alerts: list[dict] = []
+        for campaign_id in _auto_operate_campaign_ids(db):
+            signals = ctr_alert.detect_ctr_alerts(db, campaign_id, now=now)
+            alerts.extend(signals.get("alerts", []))
+        result["ctr_alerts"] = len(alerts)
+        if not alerts:
+            return  # 무경보 = 무브리핑(§4.1 "없는 날 침묵")
+        _emit_ctr_alert_briefing(db, alerts, now)
+    except Exception as e:  # noqa: BLE001 — VT3 브리핑 실패는 일 레인 본작업과 분리(fail-open)
+        log.warning("auto_operator: CTR 경보 브리핑 실패(fail-open): %s", e)
+
+
 def run_daily_lane(db: Session, *, now: datetime | None = None) -> dict:
     """D-NAO-48 정책의 서버 코드화 — auto_operate 캠페인의 당일 생성 pending 실행형
     (bid_up/bid_down/pause)을 심사·승인·집행(PLAN §3). 08:50 크론(catch-up 포함).
@@ -616,6 +669,12 @@ def run_daily_lane(db: Session, *, now: datetime | None = None) -> dict:
                     rationale="auto_op 보류/stale — 익일 08:00 재생성(D-NAO-49 일일 사이클, codex 11R)",
                     now=now,
                 )
+
+    # VT3(D-NAO-82②): 소재 CTR 경보 브리핑 — 핫셋/탐색과 독립, 실행형 심사 결과와 무관하게
+    # 항상 시도(auto_ids 재사용 — 위에서 이미 스코프 확정, 이 함수 내부에서 재조회는 안 하지만
+    # ctr_alert 자신도 자체 auto_operate 검증을 한다, 이중 방어). fail-open은 함수 내부에서 처리.
+    result["ctr_alerts"] = 0
+    _run_ctr_alert_briefing(db, now, result)
 
     return result
 
@@ -1665,7 +1724,11 @@ def _run_exploration_for_campaign(
     """탐색-UP 레인(핫셋 여집합 SHOPPING 그룹) — PLAN §2 구조. 캠페인 1개의 후보를 순회하며
     트리거→관측→래더→발사(레버 맞춤: source='ad'→소재입찰 explore_op / source='group'→그룹입찰
     explore_op). 실쓰기는 explore_op 자동 경로만(B3 Confirm 경계 유지). 손실고삐 발동 캠페인은
-    호출측이 제외(봉투#5) — 여기선 후보별 트리거·경제성 상한·킬스위치가 최종 방어선."""
+    호출측이 제외(봉투#5) — 여기선 후보별 트리거·경제성 상한·킬스위치가 최종 방어선.
+
+    VT3(D-NAO-82②): 후보 순회 전 ctr_alert(SA)를 캠페인당 1회 호출해 CTR 경보 활성 그룹
+    집합을 구한다 — 그 그룹은 순회에서 즉시 skip(밴드 도달+CTR 경보=추가 UP 무의미, 사람
+    처방 대상). 차단 범위는 이 탐색 래더뿐(시간당 밴드 레인·핫셋 레인·vitality 소생 불변)."""
     today = now.date()
     candidates = exploration.exploration_candidates(db, campaign_id, window_from, window_to)
     # BM P4(D-NAO-78): 대행사 고성과 SHOPPING 그룹 입찰밴드 p50을 콜드 탐색 초기입찰 프라이어로
@@ -1677,7 +1740,28 @@ def _run_exploration_for_campaign(
     except Exception as e:  # noqa: BLE001 — 프라이어 조회 실패는 None(탐색 레인 무영향)
         log.warning("auto_operator: 탐색 BM 입찰밴드 프라이어 조회 실패(None 폴백): %s", e)
         bm_bid_anchor = None
+    # VT3(D-NAO-82②): 소재 CTR 경보 — 캠페인당 1회 재산출(순회 밖, N+1 방지, PLAN §4.1).
+    # 경보 활성 그룹은 아래 루프에서 skip(밴드 도달+CTR 경보=더 올려도 헛돎 — 사람 처방 대상).
+    # fail-open: ctr_alert(read-only SA) 판정 실패는 게이트 없이 진행(탐색 레인 본연 보존).
+    try:
+        ctr_signals = ctr_alert.detect_ctr_alerts(db, campaign_id, now=now)
+        ctr_alerted_groups = {a["adgroup_id"] for a in ctr_signals.get("alerts", [])}
+    except Exception as e:  # noqa: BLE001 — VT3 판정 실패는 fail-open(게이트 미적용)
+        log.warning(
+            "auto_operator: CTR 경보 산출 실패(fail-open, 게이트 미적용) campaign=%s: %s",
+            campaign_id, e,
+        )
+        ctr_alerted_groups = set()
     for _etype, adgroup_id in candidates:
+        if adgroup_id in ctr_alerted_groups:
+            result["held"].append({
+                "target_id": adgroup_id, "reason": f"[탐색] {_CTR_ALERT_LADDER_SKIP_REASON}",
+            })
+            _record_blocked(db, campaign_id=campaign_id, actor=diary.ACTOR_EXPLORE,
+                            reason=_CTR_ALERT_LADDER_SKIP_REASON, now=now,
+                            target_type="adgroup", target_id=adgroup_id, adgroup_id=adgroup_id,
+                            action="bid_up")
+            continue
         settled_clk = exploration._settlement_clk(db, adgroup_id, window_from, window_to)
         last_step = _exploration_last_step(db, adgroup_id)
         last_step_at = last_step["changed_at"] if last_step else None
