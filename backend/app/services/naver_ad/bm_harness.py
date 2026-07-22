@@ -11,6 +11,7 @@ from datetime import date
 
 from sqlalchemy.orm import Session
 
+from app.services.naver_ad.bm_benchmark import compute_benchmarks
 from app.services.naver_ad.bm_diff import detect_agency_ops
 from app.services.naver_ad.bm_snapshot import snapshot_entities, update_deep_dimensions
 
@@ -25,7 +26,7 @@ def run_bm_layer(db: Session) -> dict:
     독립 try로 감싸 하나가 실패해도 나머지가 돈다. SA-2는 SA-1(오늘 스냅샷) 다음에 실행돼야
     당일 D 셋이 준비되지만, SA-1 실패 시에도 SA-2는 (전일까지의) D-1 vs D로 독립 시도한다.
     """
-    result: dict = {"snapshot": None, "agency_ops": None}
+    result: dict = {"snapshot": None, "agency_ops": None, "benchmarks": None}
 
     try:
         result["snapshot"] = snapshot_entities(db)
@@ -37,8 +38,15 @@ def run_bm_layer(db: Session) -> dict:
     except Exception as e:  # noqa: BLE001 — 관찰 잡 fail-open(§0-5)
         log.exception("[BM] SA-2 조작 감지 실패(fail-open): %s", e)
 
+    # SA-3(P4): 오늘 스냅샷+14일 성과로 벤치마크 프라이어 재산출. SA-1(오늘 스냅샷) 다음에
+    # 실행돼야 당일 D 셋을 대조하지만, 독립 try로 감싸 SA-1/2 실패와 무관하게(전일 스냅샷으로도)
+    # 시도한다 — 프라이어 소비는 전부 fail-open이라 벤치마크가 비어도 소비 SA는 기존대로 돈다.
+    try:
+        result["benchmarks"] = compute_benchmarks(db)
+    except Exception as e:  # noqa: BLE001 — 관찰 잡 fail-open(§0-5)
+        log.exception("[BM] SA-3 벤치마크 산출 실패(fail-open): %s", e)
+
     # ── 후속 Phase 자리(현재 미구현) ──
-    # P4: SA-3 벤치마크(bm_benchmark) + 프라이어 배선(B-X·IU-R·SS4)
     # P5: 예외 브리핑(bm_briefing) → ops_diary_entries(observe) + Slack 아침 푸시
     return result
 

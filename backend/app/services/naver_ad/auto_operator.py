@@ -1655,6 +1655,15 @@ def _run_exploration_for_campaign(
     호출측이 제외(봉투#5) — 여기선 후보별 트리거·경제성 상한·킬스위치가 최종 방어선."""
     today = now.date()
     candidates = exploration.exploration_candidates(db, campaign_id, window_from, window_to)
+    # BM P4(D-NAO-78): 대행사 고성과 SHOPPING 그룹 입찰밴드 p50을 콜드 탐색 초기입찰 프라이어로
+    # 1회 조회(후보 순회 밖·N+1 방지). 후보는 전부 SHOPPING(exploration_candidates 게이트).
+    # bid_band_anchor 자체 fail-open → 부재/실패 시 None → adaptive_step 기존 콜드스타트 폴백(회귀 0).
+    try:
+        from app.services.naver_ad import bm_benchmark
+        bm_bid_anchor = bm_benchmark.bid_band_anchor(db, exploration._EXPLORATION_CAMPAIGN_TYPE)
+    except Exception as e:  # noqa: BLE001 — 프라이어 조회 실패는 None(탐색 레인 무영향)
+        log.warning("auto_operator: 탐색 BM 입찰밴드 프라이어 조회 실패(None 폴백): %s", e)
+        bm_bid_anchor = None
     for _etype, adgroup_id in candidates:
         settled_clk = exploration._settlement_clk(db, adgroup_id, window_from, window_to)
         last_step = _exploration_last_step(db, adgroup_id)
@@ -1757,7 +1766,7 @@ def _run_exploration_for_campaign(
         # (불연속=None → 보수 10% 스텝, codex P1).
         target = exploration.adaptive_step(
             step_base, current_rank, exploration._EXPLORATION_TARGET_BAND, slope_probe,
-            exploration._EXPLORATION_STEP_PCT,
+            exploration._EXPLORATION_STEP_PCT, bm_prior=bm_bid_anchor,
         )
         if target is None:
             # 밴드 내(도달)·스텝 소실 — 상향 없음(관찰).

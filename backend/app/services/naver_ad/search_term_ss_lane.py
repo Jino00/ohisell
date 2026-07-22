@@ -92,15 +92,22 @@ def _create_proposal(db: Session, cand: dict) -> NaverProposal:
     return obj
 
 
-def _create_promote_proposal(db: Session, cand: dict) -> NaverProposal:
+def _create_promote_proposal(db: Session, cand: dict, *, bm_verified: bool = False) -> NaverProposal:
     """전환 검색어 승격 후보 1건 → pending 제안(SS4, PLAN §3 SS4·§0 4 영구 Confirm). rationale에
     근거 수치(전환수·매출·검색어·출처 그룹)를 병기한다 — judge가 산출한 판정 문구(cand["reason"])
     뒤에 원자료를 덧붙여 콘솔에서 숫자만 보고도 판단할 수 있게 한다.
+
+    ★bm_verified(BM P4, D-NAO-78 교차): 이 검색어가 대행사(사람)가 이미 정식 키워드로 등록한
+    셋(bench_kind='keyword_verified')에 있으면 rationale 앞에 교차 플래그를 붙여 확신도 가점을
+    표면화한다. **보조 신호일 뿐** — 전환 게이트(judge dconv≥1)를 대체하지 않고(§9-6), 승격은
+    여전히 제안만·영구 Confirm(자동 발사 없음). bm_verified=False(기본·프라이어 부재)면 rationale은
+    기존과 byte-동일(fail-open, §0 금지선 4).
 
     approval_source는 항상 None(자동 승인 절대 금지 — 생성류는 §0 4). ★실행 executor는 만들지
     않는다(L3 스코프, 모듈 상단 주석) — 이 제안이 실수로 approved되어 harness.execute()가
     호출돼도 proposal_type이 _ACTION_BY_PROPOSAL_TYPE에 없어 ActionNotExecutableError로
     fail-closed 거부된다(등록 자체를 안 하는 것이 안전장치)."""
+    cross = "[대행사 검증 키워드 교차 — 사람이 이미 등록한 정답지, 확신도↑] " if bm_verified else ""
     obj = NaverProposal(
         proposal_type=search_term_judge.SEARCH_TERM_PROMOTE_TYPE,
         target_type="search_term",
@@ -108,7 +115,7 @@ def _create_promote_proposal(db: Session, cand: dict) -> NaverProposal:
         campaign_id=cand["campaign_id"],
         adgroup_id=cand["adgroup_id"],
         rationale=(
-            f"{cand['reason']} 근거: 검색어='{cand['search_term']}'(출처그룹={cand['adgroup_id']}, "
+            f"{cross}{cand['reason']} 근거: 검색어='{cand['search_term']}'(출처그룹={cand['adgroup_id']}, "
             f"source={cand['source']}), 직접전환={cand['conv_direct_cnt']}건, "
             f"전체전환(직+간)={cand['conv_purchase_cnt']}건, 전환매출={cand['conv_purchase_amt']}원, "
             f"clk={cand['clk']}, cost={cand['cost']}원."
@@ -123,16 +130,25 @@ def _create_promote_proposal(db: Session, cand: dict) -> NaverProposal:
     return obj
 
 
-def run_search_term_ss_lane(db: Session, *, now: datetime | None = None) -> dict:
+def run_search_term_ss_lane(
+    db: Session, *, now: datetime | None = None, bm_prior: set[str] | None = None,
+) -> dict:
     """SS2 판단 → (SS3) 파워링크 제외 후보만 pending 제안 생성 + 쇼핑은 브리핑 diary만(제안
     생성 없음, PLAN §3 SS3-B) + (SS4) 승격 후보 전건 pending 제안 생성(영구 Confirm·실행 손
     없음). 실쓰기 0(전부 Confirm 전용).
 
+    ★bm_prior(BM P4, D-NAO-78 교차·optional): 대행사 등록 키워드 텍스트 셋(bench_kind=
+    'keyword_verified'). 승격 후보 중 이 셋에 든 검색어는 (a) 상한 슬롯을 먼저 채우도록 정렬
+    가점 + (b) rationale에 교차 플래그를 받는다("사람이 이미 등록한 정답지"). **보조 신호일
+    뿐** — 전환 게이트(judge)를 대체하지 않는다(§9-6). None(기본·프라이어 부재)이면 빈 셋으로
+    처리 → 정렬·rationale 모두 기존과 동일(회귀 0, §0 금지선 4 fail-open).
+
     반환: {"shopping_candidates","powerlink_candidates","promote_candidates",
            "proposals_created","deduped","skipped_too_long",
            "promote_proposals_created","promote_deduped","promote_skipped_too_long",
-           "promote_over_cap"}."""
+           "promote_over_cap","promote_bm_crossed"}."""
     now = now or kst_now()
+    verified = bm_prior or set()  # None → 빈 셋(교차 없음 = 기존 동일)
     judged = search_term_judge.judge_search_terms(db, now=now)
     shopping = judged["exclude_candidates"]["shopping"]
     powerlink = judged["exclude_candidates"]["powerlink"]
@@ -162,17 +178,20 @@ def run_search_term_ss_lane(db: Session, *, now: datetime | None = None) -> dict
 
     # SS4 승격 후보 — 제외(SS3)와 동일한 표현 가능성 방어(target_id 길이) + dedup 규약을 그대로
     # 적용한다. 소스(shopping/expkeyword) 무관 전건 대상(judge가 이미 dconv≥1로 판정 완료).
-    # ★상한(_SS_PROMOTE_CAP): 근거가 가장 강한 후보부터 채우기 위해 conv_direct_cnt 내림차순 →
-    # conv_purchase_amt 내림차순으로 정렬 후 순회한다(라이브 콘솔 범람 방지, 상수 주석 참조).
+    # ★상한(_SS_PROMOTE_CAP): 근거가 가장 강한 후보부터 채우기 위해 정렬 후 순회한다(라이브
+    # 콘솔 범람 방지, 상수 주석 참조). 정렬 키 최상위 = 대행사 검증 교차(bm_prior 든 검색어 우선)
+    # → 그다음 conv_direct_cnt 내림차순 → conv_purchase_amt 내림차순. verified가 빈 셋(프라이어
+    # 부재)이면 최상위 키가 전건 0이라 나머지 두 키가 기존과 동일 순서를 결정한다(회귀 0).
     promote_sorted = sorted(
         promote,
-        key=lambda c: (c["conv_direct_cnt"], c["conv_purchase_amt"]),
+        key=lambda c: (int(c["search_term"] in verified), c["conv_direct_cnt"], c["conv_purchase_amt"]),
         reverse=True,
     )
     promote_created = 0
     promote_deduped = 0
     promote_skipped_too_long = 0
     promote_over_cap = 0
+    promote_bm_crossed = 0
     for cand in promote_sorted:
         if len(cand["search_term"]) > _TARGET_ID_MAXLEN:
             promote_skipped_too_long += 1
@@ -187,8 +206,10 @@ def run_search_term_ss_lane(db: Session, *, now: datetime | None = None) -> dict
         if promote_created >= _SS_PROMOTE_CAP:
             promote_over_cap += 1
             continue
-        _create_promote_proposal(db, cand)
+        bm_verified = cand["search_term"] in verified
+        _create_promote_proposal(db, cand, bm_verified=bm_verified)
         promote_created += 1
+        promote_bm_crossed += int(bm_verified)
     db.commit()
 
     # 표현 불가 후보 skip 기록(diary observe) — 길이 초과로 제안화하지 못한 파워링크 손실
@@ -248,6 +269,7 @@ def run_search_term_ss_lane(db: Session, *, now: datetime | None = None) -> dict
         "promote_deduped": promote_deduped,
         "promote_skipped_too_long": promote_skipped_too_long,
         "promote_over_cap": promote_over_cap,
+        "promote_bm_crossed": promote_bm_crossed,  # BM P4: 승격 생성분 중 대행사 검증 교차 건수
     }
     log.info("search_term_ss_lane: %s", result)
     return result

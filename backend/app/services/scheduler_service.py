@@ -631,13 +631,19 @@ def run_naver_auto_operator_daily_job():
     # 브리핑 실패가 일 레인 집행을 막지 않는다). 실쓰기 0(Confirm 전용) — 제안·diary만 생성.
     db2 = _get_own_db_session()
     try:
+        from app.services.naver_ad import bm_benchmark
         from app.services.naver_ad.search_term_ss_lane import run_search_term_ss_lane
 
-        ss = run_search_term_ss_lane(db2)
+        # BM P4(D-NAO-78): 대행사 검증 키워드셋을 승격 교차 프라이어로 주입(harness 유통·optional).
+        # 조회 실패는 빈 셋(verified_keyword_set 자체 fail-open) → SS4 기존과 동일 출력(회귀 0).
+        bm_prior = bm_benchmark.verified_keyword_set(db2)
+        ss = run_search_term_ss_lane(db2, bm_prior=bm_prior)
         log.info(
-            "[스케줄러] naver 검색어 제외 브리핑: shopping=%s powerlink=%s 제안생성=%s dedup=%s",
+            "[스케줄러] naver 검색어 제외 브리핑: shopping=%s powerlink=%s 제안생성=%s dedup=%s "
+            "승격=%s bm교차=%s",
             ss["shopping_candidates"], ss["powerlink_candidates"],
             ss["proposals_created"], ss["deduped"],
+            ss["promote_proposals_created"], ss["promote_bm_crossed"],
         )
     except Exception as e:  # noqa: BLE001 — 브리핑 실패는 일 레인과 분리(fail-open)
         log.exception("[스케줄러] run_search_term_ss_lane 에러(fail-open): %s", e)

@@ -2025,6 +2025,41 @@ class NaverAgencyOp(Base):
     is_exception: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)  # 예외 브리핑에 올릴 이상치 여부(SA-2 필터 판정)
 
 
+class NaverBmBenchmark(Base):
+    """대행사 구조↔성과 상관을 벤치마크化한 프라이어 1행 (SA-3, D-NAO-78 · BM 벤치마크 레이어).
+
+    B-X(탐색 초기입찰)·SS4(승격 교차)·(향후)IU-R·L2가 optional 입력으로 소비한다 —
+    전부 fail-open(부재 시 기존 동일, §0 금지선 4). 매일 07:37 재산출(bench_kind 단위 교체
+    upsert) — 최신 벤치마크만 유지한다(naver_product_bep snapshot 교체 관례 계승). 관찰 전용 —
+    네이버 API 쓰기 0(DB만: naver_entity_snapshot + naver_ad_daily + naver_entity 조인 산출).
+
+    ★저장소 택일(§9-2, P4 Opus 결정 = 혼용): keyword_verified/bid_band/group_structure는 값이
+    구조(집합·[min,p50,max]·다차원)라 naver_learning_state의 단일 Numeric current_value에 안 맞아
+    이 신규 테이블 value_json에 담는다. naver_learning_state는 verify_harness가 유일 쓰기 주체라
+    (모델 docstring) 대행사 관찰값을 섞으면 학습 쿼리가 오염된다 — 관심사 분리. bid_rank_slope
+    프라이어(향후, IU-R)는 단일 기울기라 반대로 naver_learning_state(scope=entity/metric=
+    bid_rank_slope)에 써서 rank_servo가 기존 bid_rank_curve.load_response_priors로 무개조 소비한다
+    (§2-b 혼용 — 배선 재사용). 이번 스코프는 slope 미산출(agency_op 이벤트 0건=원료 없음).
+
+    bench_kind: keyword_verified(대행사 등록 키워드셋)/bid_band([min,p50,max])/group_structure
+      (고성과 그룹 구조 요약). bench_key: campaign_type 버킷(WEB_SITE/SHOPPING/BRAND_SEARCH 등).
+    value_json: 벤치마크 값(JSON 텍스트). sample_n/confidence: 표본 수·신뢰도(소비측 게이팅용).
+    """
+
+    __tablename__ = "naver_bm_benchmark"
+    __table_args__ = (
+        UniqueConstraint("bench_kind", "bench_key", name="uq_naver_bm_benchmark"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    bench_kind: Mapped[str] = mapped_column(String(24), nullable=False, index=True)  # keyword_verified/bid_band/group_structure
+    bench_key: Mapped[str] = mapped_column(String(120), nullable=False, default="")  # campaign_type 등 버킷 키
+    value_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 벤치마크 값(JSON)
+    sample_n: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    computed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)  # ★kst_now() 명시(server_default=UTC 회피)
+
+
 class NaverSearchTermDaily(Base):
     """검색어 단위 일별 성과 — 쇼핑 SHOPPINGKEYWORD_DETAIL + 파워링크 EXPKEYWORD (P2-S1).
 
