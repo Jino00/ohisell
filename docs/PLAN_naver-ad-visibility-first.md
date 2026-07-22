@@ -65,3 +65,18 @@ hourly lane (auto_operator._run_exploration_for_campaign)   ← 기존 Harness, 
 
 - VF1~VF3 구현 = **Opus** (새 SA + 다파일 배선 = 중요 코딩). 테스트 실행·수정 루프 = 에이전트 내에서 완결.
 - 배포·git 기계 작업 = Sonnet. 판정 종합 = Fable.
+
+## §6. 진행 기록 (2026-07-22 밤 — 완료·배포·라이브 합격)
+
+- **VF1~VF3 구현 완료**: `backend/app/services/naver_ad/visibility.py` 신규(classify_visibility·evidence_window·evidence_ceiling, 전부 §2 상수 소유·순수 판단·DB 읽기만) + `exploration.py`(`ladder_judgment`에 `ghost_hold` verdict 신설·`exploration_ceiling`에 evidence 경로 추가, optional 파라미터) + `auto_operator._run_exploration_for_campaign` 배선(evidence_window 산출→judgment/ceiling 전달·`explored_ghost_hold` 카운터·일 레인 유령 관측 브리핑 diary 라인).
+- **GATE**: pytest 전체 green(3008→3013 passed)·회귀 0. prod 시뮬 3종 확인(17프로 창 활성·상한 해방 / 뮤패드 CTR skip 선행 유지 / 158개 플로어 그룹 VT4 동작 불변).
+- **codex review(원칙19)**: 1R P1 1건 — 첫 사이클(그룹 최초 판정 시점)에 유령 스텝이 누수되는 경계 케이스 지적 → 수용·수정(첫 사이클도 `ghost_hold` 경로에 포함) → **2R AGREE-ALL**(신규 지적 0).
+- **배포**: safe_deploy.sh 22:23 KST(commit `0fdca1b`, visibility.py+exploration.py+auto_operator.py)·재시작·health 200.
+- **라이브 검증 — §4 완료 기준 5개 항목 대조(23:20 KST 첫 신코드 시간당 레인)**:
+  1. pytest 전체 green·회귀 0 — **충족**(3013 passed).
+  2. 17프로 그룹 evidence 창 활성 판정 + 상한이 기존 경제성 상한(2,290 부근)을 넘어 산출 — **충족**(시뮬 검증: 상한 2,290→3,010 해방).
+  3. 유령∧창 비활성 시나리오에서 스텝 미발생·`ghost_hold` 기록 — **충족**(라이브 실포착 2건: grp-…59830547 순위5.30·grp-…44743919 순위9.73, diary id 605·610).
+  4. 배포 후 실제 시간당 레인 1회 예외 없이 완주 + 카운터가 로그에 나타남 — **부분 충족**: 레인 완주·예외 0은 확인. **카운터 로그 표시는 기존 갭으로 미확인** — `main.py` 로깅 설정 부재로 시간당 레인 완료 INFO 라인이 root logger(WARNING 이상만)에 걸려 전 기간(VF 이전부터) 0회 출력. diary 기록(605·610)으로 `ghost_hold` 발동 자체는 재구성·확인함(로그 카운터가 아니라 diary가 실질 증거). 백로그 chip 발행(task_9f4ea74c) — 코드 수정은 이번 스코프 밖.
+  5. 기존 보호 불변(CTR 경보 skip·가드레일 30%·3/3·쿨다운·50원 하한) — **충족**(라이브에서 실쓰기 2건 동반 가드레일 차단 3건 확인, 회귀 테스트 green).
+- **17프로 결말(같은 밤 관측)**: 21시대 클릭1·전환1(D-NAO-84 N배송 첫 주문과 동일 건) 발생 → 장중 순위 3.8~4.1 밴드 진입 → 래더가 `stop_observe`로 전이(클릭 발생=증거 도착·통상 판정 인계, 설계 의도 그대로). 22:20 시점 "capped"였다가 23:20 "stop_observe"로 보인 것은 결함이 아니라 **클릭 데이터 집계 지연**(기지 cadence) 때문 — 표적 시뮬로 레인 단계별 재구성해 확인(교훈: LESSONS_LEARNED 참조).
+- **잔여 백로그**: 시간당 레인 INFO 로깅 설정(카운터 가시화) / `stop_observe`·step-capped 분기 diary 미기록(침묵 분기 관측 갭) — 둘 다 관찰성 개선, 판정 로직 변경 아님.

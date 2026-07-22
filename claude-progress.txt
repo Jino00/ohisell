@@ -2,7 +2,14 @@
 # 매 sprint 완료 시 Claude가 이 파일을 갱신합니다.
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
-## 최신 상태 (2026-07-22 21:45, 워크트리 session-409bd8) — ★세션 인계는 HANDOFF 우선
+## 최신 상태 (2026-07-22 23:40, 워크트리 vt34-deploy-visibility-first-7c103b) — ★세션 인계는 HANDOFF 우선
+- **HANDOFF: `.claude/memory/HANDOFF_vf-visibility-live+nbaesong-hook_20260722.md`** ← 새 세션은 이 파일 먼저.
+- **★VF 스프린트(D-NAO-83 가시성 우선) 구현·배포·라이브 합격**: 신규 SA `visibility.py`(classify_visibility·evidence_window·evidence_ceiling)+`ladder_judgment` `ghost_hold` verdict+`auto_operator` 배선. codex 1R P1×1 수용·수정→2R AGREE-ALL. 3013 passed. 배포 22:23 KST(`0fdca1b`). **라이브 합격**: ghost_hold 2건 실포착(diary 605·610)·실쓰기 2건+가드레일 차단 동반·17프로 시뮬 상한 2,290→3,010 해방 검증. **17프로 결말**: 같은 밤 클릭1·전환1 발생(N배송 주문과 동일건)→순위 밴드 진입→`stop_observe`(증거 도착=설계 의도, 22:20 capped→23:20 stop_observe 반전은 클릭 데이터 지연 때문).
+- **★D-NAO-84 완결(N배송 훅 실배선)**: 첫 N배송 주문(order id 11929) raw_data 실측 → **판별자 확정 = `deliveryAttributeType=="ARRIVAL_GUARANTEE"`**(동반 키 logisticsCompanyId"PG"·arrivalGuaranteeDate 등). `bep_calculator._order_shipping_cost` 훅 실배선(ARRIVAL_GUARANTEE→3,020/그 외→1,900 fail-safe). 테스트 5건 추가·codex AGREE-ALL. 배포 22:52 KST(`553e7b4`). 내일 07:30 BEP 재계산부터 반영. 잔류: expectedSettlementAmount 13,174에 배송비 3,000 미포함 — 실정산 도착 시 확인.
+- **관측 갭 2건 발견 → 백로그 chip(task_9f4ea74c)**: ①시간당 레인 INFO 카운터 로그가 root logger 미설정으로 전 기간 미출력 ②stop_observe/step-capped 분기 diary 미기록(침묵 분기 — 17프로 원인 규명에 표적 시뮬 필요했던 이유). 코드 수정은 스코프 밖.
+- PR 병합 완료(main==prod). **내일 자동**: 07:45 BM 관문 / 08:50 PX 첫 자동 제외+뮤패드 CTR 첫 브리핑+04 W1 경보 / 09:30 codex 소급(VT3·4·VF는 challenge 완료라 스코프 중복 주의). 이어서 Z8 발표일 확정 데이터 관찰(ref 37)·03/04/17프로 판정(17프로=전환1 반영 정착 데이터)·N배송 배송비 정산 라인 확인·B+C 스프린트 계획.
+
+## (이전) 최신 상태 (2026-07-22 21:45, 워크트리 session-409bd8) — ★세션 인계는 HANDOFF 우선
 - **HANDOFF: `.claude/memory/HANDOFF_vt34-deployed+visibility-first-D83_20260722.md`** ← 새 세션은 이 파일 먼저.
 - **★D-NAO-83 확정(Jino "노출이 기본")**: 가시성 우선 — 유령 지면(순위>5) 스텝 금지·증거 구매 창(주 3~5만/그룹)·콜드 상한 개혁. **근거 전량 실측 = `docs/references/38_visibility_first_analysis_20260722.md`**(가시 임계 4위·전환단가 순위 무관 평평 8~9천원·15프로 템플릿). **다음 세션 = 이 설계·구현이 주 작업.**
 - **★D-NAO-84**: 03 17프로강화유리(12382833885) 가격 재구성 13,900+배송3,000(N배송·멤버십 보전). N배송 첫 주문 raw_data→ _order_shipping_cost 훅 실배선 대기.
