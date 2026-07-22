@@ -34,7 +34,7 @@ from app.models import (
     NaverProposal,
     NaverRetroSignal,
 )
-from app.services.naver_ad import bid_rank_curve, bid_simulator, campaign_target_resolver, diagnosis, diary, effective_bid, exploration, guardrail_gate, intraday_roas, naver_execution_harness, naver_sa_writer, rank_servo
+from app.services.naver_ad import bid_rank_curve, bid_simulator, campaign_target_resolver, diagnosis, diary, effective_bid, exploration, guardrail_gate, intraday_roas, naver_execution_harness, naver_sa_writer, rank_servo, slack_notifier, vitality_signal
 from app.services.naver_ad.bid_step_types import BID_UP_TYPES, EXPLORATION_STEP_TYPES, encode_base_bid, encode_exploration_ceiling
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.services.naver_ad.guardrail_gate import _MAX_CHANGE_PCT
@@ -61,6 +61,19 @@ APPROVAL_SOURCE_DAILY = "auto_op"  # 7자
 APPROVAL_SOURCE_HOURLY = "auto_op_hr"  # 10자
 APPROVAL_SOURCE_PROBE = "probe_op"  # 8자 — D-NAO-58 CD2 클릭 탐침(String(12) 적합, diary probe actor)
 APPROVAL_SOURCE_REVERT = "revert_op"  # 9자 — D-NAO-58 CD3 탐침 되돌림(String(12) 적합, diary ACTOR_PROBE 재사용)
+
+# ── VT2(D-NAO-81 B축 스파이럴 복원) ──
+# 스파이럴 복원 발사는 새 approval_source·새 쓰기 경로를 만들지 않는다(§0 3 "새 권한 없음"):
+# 기존 시간당 밴드 UP 경로(APPROVAL_SOURCE_HOURLY·proposal_type='bid_up'·_clamp_step±15%·
+# naver_execution_harness.execute)를 그대로 태우고 rationale 접두 [스파이럴복원]로만 구분한다.
+# BEP 가드레일·킬스위치·쿨다운은 전부 harness가 최종 차단(우회 신규 경로 없음).
+VITALITY_RATIONALE_PREFIX = "[스파이럴복원]"
+_VITALITY_DAILY_CAP = 5            # §2 봉투: 캠페인당 복원 발사 그룹 ≤5/일
+_VITALITY_COOLDOWN_HOURS = 48      # §2 봉투: 같은 그룹 48h 재발사 쿨다운
+# C5(codex 1R): 당일 순위 재확인 밴드 상단 — vitality_signal._RANK_BAND_TOP(4.0)과 동일.
+# D-1 스파이럴 신호로 발사 큐에 올랐어도, 당일 intraday 순위가 밴드(≤4.0)로 복귀했으면 skip.
+_VITALITY_INTRADAY_BAND_TOP = 4.0
+ACTION_VITALITY_BRIEFING = "vitality_spiral_briefing"  # diary observe action(브리핑 렌더용)
 
 # B3(D-NAO-65) 소재-레벨 입찰 제어 카나리 게이트. auto_operate 캠페인 중 이 집합에 든
 # 캠페인만 레버 미연결(source='ad') 그룹에서 ad-레벨 실쓰기(update_ad_bid)로 라우팅한다 —
@@ -1818,6 +1831,207 @@ def _run_exploration_for_campaign(
             log.warning("auto_operator: 탐색 레인 실행 실패 proposal_id=%s: %s", proposal.id, e)
 
 
+def _vitality_daily_count(db: Session, campaign_id: str, now: datetime) -> int:
+    """오늘(KST) 이 캠페인의 스파이럴 복원 발사 수 — change_log에 확정된 [스파이럴복원] update_bid
+    행(dry_run=False·after_value 존재)만 센다. 이전 시간당 런의 발사 + 이번 런에서 execute가
+    이미 커밋한 발사를 모두 포함(캡을 하루 전체에 걸쳐 강제, §2 봉투 ≤5/일). changed_at은
+    executor가 KST naive로 심으므로 KST 자정 경계로 비교."""
+    day_start = datetime.combine(now.date(), datetime.min.time())
+    return (
+        db.query(sqlfunc.count(NaverChangeLog.id))
+        .filter(
+            NaverChangeLog.campaign_id == campaign_id,
+            NaverChangeLog.action == "update_bid",
+            NaverChangeLog.dry_run.is_(False),
+            NaverChangeLog.after_value.isnot(None),
+            NaverChangeLog.rationale.like(f"{VITALITY_RATIONALE_PREFIX}%"),
+            NaverChangeLog.changed_at >= day_start,
+        )
+        .scalar()
+    ) or 0
+
+
+def _vitality_group_on_cooldown(db: Session, adgroup_id: str, now: datetime) -> bool:
+    """같은 그룹 48h 재발사 쿨다운(§2 봉투) — [스파이럴복원] update_bid **시도** 행이 48h 내
+    있으면 True. change_log 접두로 카운트(별도 상태 테이블 없음, 마이그레이션 0).
+
+    ★GATE P2-2(재시도 폭풍 감쇠): 쿨다운은 성공(after_value 존재)뿐 아니라 실패·가드거부
+    (BEP 차단 등, after_value=None) 시도 행까지 전부 센다 — after_value 필터 없음. 근거: BEP
+    가드레일 차단은 시간 단위로 안 바뀌는 조건이라, 매시간 재발사 시도(라이브 GET 다발·failed
+    행 누적)를 봉투 보수 우선으로 시도 자체를 48h 감쇠한다. (일일 캡 ≤5는 반대로 성공만 센다 —
+    _vitality_daily_count 참조. 감쇠는 시도 기준, 캡은 실집행 기준으로 서로 다른 창을 지킨다.)"""
+    since = now - timedelta(hours=_VITALITY_COOLDOWN_HOURS)
+    row = (
+        db.query(NaverChangeLog.id)
+        .filter(
+            NaverChangeLog.entity_type == "adgroup",
+            NaverChangeLog.entity_id == adgroup_id,
+            NaverChangeLog.action == "update_bid",
+            NaverChangeLog.dry_run.is_(False),
+            NaverChangeLog.rationale.like(f"{VITALITY_RATIONALE_PREFIX}%"),
+            NaverChangeLog.changed_at >= since,
+        )
+        .first()
+    )
+    return row is not None
+
+
+def _vitality_intraday_recovered(db: Session, campaign_id: str, now: datetime) -> bool:
+    """C5(codex 1R): 당일 intraday 순위(NaverHourlySnapshot 오늘 최신 avg_rank·캠페인 grain)가
+    밴드(≤4.0)로 복귀했으면 True → 그 캠페인 소생 발사 skip("이미 회복"). D-1 스파이럴 신호로
+    큐에 올랐어도 당일 순위가 이미 회복됐으면 소생이 불필요·과잉이라 억제한다. 데이터 없으면
+    False(진행 — D-1 신호 기준, 당일 순위 미수집·avgRnk<=0→NULL은 판정 근거 아님)."""
+    row = (
+        db.query(NaverHourlySnapshot.avg_rank)
+        .filter(
+            NaverHourlySnapshot.campaign_id == campaign_id,
+            NaverHourlySnapshot.ad_date == now.date(),
+            NaverHourlySnapshot.avg_rank.isnot(None),
+        )
+        .order_by(NaverHourlySnapshot.snapshot_hour.desc())
+        .first()
+    )
+    if row is None or row[0] is None:
+        return False
+    return float(row[0]) <= _VITALITY_INTRADAY_BAND_TOP
+
+
+def _fire_vitality_revive(db: Session, target: dict, now: datetime, result: dict) -> None:
+    """소생 대상 그룹 1건을 기존 시간당 밴드 UP 경로로 발사(§2). 새 권한·우회 경로 없음 —
+    proposal_type='bid_up'·adgroup·target_bid=_clamp_step(라이브가, up)·approval_source=
+    APPROVAL_SOURCE_HOURLY·rationale 접두 [스파이럴복원], naver_execution_harness.execute()가
+    BEP 가드레일·킬스위치·쿨다운·일일상한을 전량 최종 검증(가드레일 우회 절대 없음)."""
+    campaign_id, adgroup_id = target["campaign_id"], target["adgroup_id"]
+    # GATE P3(회복력): execute 이전 준비 구간(_live_current_bid·_record_blocked·commit)도
+    # per-target try로 감싼다 — 한 타깃의 예외(라이브 GET 오류·DB 커밋 실패 등)가 남은 타깃과
+    # 브리핑까지 죽이지 않게(fail-soft, 로그·held). execute 자체는 아래 별도 try가 담당.
+    try:
+        # 킬스위치 실행 직전 재확인(시간당 레인 동형·즉시 정지 계약).
+        if not _auto_operate_now(db, campaign_id):
+            result["vitality_held"].append({"target_id": adgroup_id, "reason": "킬스위치 OFF(발사 직전 재확인)"})
+            _record_blocked(db, campaign_id=campaign_id, actor=diary.ACTOR_HOURLY,
+                            reason="[스파이럴복원] 킬스위치 OFF — auto_operate=False", now=now,
+                            target_type="adgroup", target_id=adgroup_id, action="bid_up",
+                            event_type="kill_switch")
+            return
+        # C4(codex 1R, 부분 수용): 발사 직전 캡 재카운트 백스톱 — _run_vitality_step의 루프 상단
+        # 캡 검사와 실제 커밋 사이 창(check-then-act)을 좁힌다. 완전 원자 예약은 하지 않는다
+        # (비례성: 시간당 크론 단일·catch-up 없음이라 잔여 리스크는 수동 중복 실행뿐 — 재카운트가
+        # 기존 harness 관례의 최소 백스톱). _vitality_daily_count는 커밋된 change_log만 세므로
+        # 같은 런 앞선 발사도 반영된다.
+        if _vitality_daily_count(db, campaign_id, now) >= _VITALITY_DAILY_CAP:
+            result["vitality_held"].append(
+                {"target_id": adgroup_id, "reason": "캠페인 일일 캡(발사 직전 재카운트) 도달"}
+            )
+            return
+        current_bid = _live_current_bid("adgroup", adgroup_id)
+        if current_bid is None:
+            result["vitality_held"].append({"target_id": adgroup_id, "reason": "라이브 현재가 재조회 실패"})
+            _record_blocked(db, campaign_id=campaign_id, actor=diary.ACTOR_HOURLY,
+                            reason="[스파이럴복원] 라이브 현재가 재조회 실패", now=now,
+                            target_type="adgroup", target_id=adgroup_id, action="bid_up")
+            return
+        step_bid = _clamp_step(current_bid, "up")
+        if step_bid is None:
+            result["vitality_held"].append({"target_id": adgroup_id, "reason": "UP 스텝 소실(상한 클램프)"})
+            return
+        proposal = NaverProposal(
+            proposal_type="bid_up", target_type="adgroup", target_id=adgroup_id,
+            campaign_id=campaign_id, adgroup_id=adgroup_id,
+            rationale=f"{VITALITY_RATIONALE_PREFIX} {target['reason']}",
+            expected_effect=(
+                "스파이럴 조기 복원 — 흐름 붕괴(노출·순위 궤적 하락) 검증 그룹의 밴드 복원 방향 "
+                "UP(D-NAO-81 B축). BEP 가드레일·킬스위치·쿨다운·48h 재발사 쿨다운이 백스톱."
+            ),
+            status="approved", target_bid=step_bid, approval_source=APPROVAL_SOURCE_HOURLY,
+        )
+        db.add(proposal)
+        db.commit()
+    except Exception as e:  # noqa: BLE001 — GATE P3 fail-soft: 준비 구간 예외는 이 타깃만 건너뛴다
+        db.rollback()
+        result["vitality_held"].append(
+            {"target_id": adgroup_id, "reason": f"발사 준비 예외(fail-soft): {type(e).__name__}"}
+        )
+        log.warning("auto_operator: 스파이럴 복원 발사 준비 실패 adgroup=%s(fail-soft): %s", adgroup_id, e)
+        return
+    try:
+        naver_execution_harness.execute(db, proposal.id, dry_run=False, now=now)
+        result["vitality_fired"] += 1
+    except Exception as e:  # noqa: BLE001 — harness가 change_log/상태를 이미 확정(failed 등)
+        result["failed"] += 1
+        log.warning("auto_operator: 스파이럴 복원 발사 실패 proposal_id=%s: %s", proposal.id, e)
+
+
+def _emit_vitality_briefing(
+    db: Session, alerts: list[dict], now: datetime, *, revive_hold_reason: str | None = None,
+) -> None:
+    """경보/발사가 있던 날만 diary(observe)+Slack — PX 브리핑 관례 미러(fail-open·독립 try·
+    없는 날 침묵). 호출부는 alerts 비어있지 않을 때만 부른다(무경보 무브리핑, §2).
+
+    revive_hold_reason(C3): 부분적재 전면 보류 사유가 있으면 헤더 아래 한 줄로 표기(발사 0 이유
+    명시). 캠페인별 revive_note(C2/C6 게이트 탈락 사유)는 해당 줄에 덧붙인다."""
+    try:
+        header = f"{now.date().isoformat()} 스파이럴 경보 {len(alerts)}캠페인 — B축 흐름 복원(D-NAO-81)"
+        parts = [header]
+        if revive_hold_reason:
+            parts.append(f"⚠️ {revive_hold_reason}")
+        for a in alerts:
+            s3 = "" if a.get("s3_low_qi_ratio") is None else f"·저품질비중 {a['s3_low_qi_ratio']}"
+            note = f"·{a['revive_note']}" if a.get("revive_note") else ""
+            parts.append(
+                f"- {a['campaign_id']}: 노출궤적 {a['imp_traj']}(누적 −{a['cum_drop_pct']}%)·"
+                f"순위 {a['avg_rank']}(궤적 {a['rank_traj']})·소생후보 {a['revive_group_count']}그룹{s3}{note}"
+            )
+        text = "\n".join(parts)
+        diary.write_diary_entry(
+            db, "observe", "", actor=diary.ACTOR_HOURLY, action=ACTION_VITALITY_BRIEFING,
+            rationale=text, now=now,
+        )
+        slack_notifier.notify_text(text, log_label="스파이럴 복원 브리핑")
+    except Exception as e:  # noqa: BLE001 — 브리핑 실패는 발사(실쓰기)와 분리(fail-open)
+        log.warning("auto_operator: 스파이럴 복원 브리핑 실패(fail-open): %s", e)
+
+
+def _run_vitality_step(db: Session, now: datetime, result: dict) -> None:
+    """VT2 vitality 스텝(§2) — vitality_signal(SA)이 낸 경보/소생 대상을 harness가 소비해
+    발사한다(원칙18-6 허브). 경보 없으면 완전 무동작·무브리핑. 발사는 봉투(캠페인당 ≤5/일·
+    같은 그룹 48h 쿨다운) 안에서만, 기존 시간당 밴드 UP 경로로. fail-soft: 이 스텝의 예외가
+    핫셋 레인 집행 결과를 오염시키지 않는다(bleed 밸브 관례 동형)."""
+    signals = vitality_signal.detect_spirals(db, now=now)
+    alerts = signals["alerts"]
+    result["vitality_alerts"] = len(alerts)
+    if not alerts:
+        return  # 무경보 = 무동작·무브리핑(§2)
+    revive_hold_reason = signals.get("revive_hold_reason")  # C3: 부분적재 전면 보류(전역)
+    breaker_cache: dict[str, str | None] = {}  # C1: 캠페인당 서킷브레이커 1회 평가 캐시
+    for target in signals["revive_targets"]:
+        campaign_id, adgroup_id = target["campaign_id"], target["adgroup_id"]
+        # C1(codex 1R): 발사 전 캠페인 소진 서킷브레이커 재사용 — 오늘 스냅샷 부재/스테일이면
+        # 그 캠페인 소생 발사 전면 hold(fail-closed). 경보·브리핑은 유지, 발사만 차단·사유 로그.
+        if campaign_id not in breaker_cache:
+            breaker_cache[campaign_id] = _check_spend_circuit_breaker(db, campaign_id, now)
+        breaker_reason = breaker_cache[campaign_id]
+        if breaker_reason is not None:
+            result["vitality_held"].append(
+                {"target_id": adgroup_id, "reason": f"소진 서킷브레이커 hold — {breaker_reason}"}
+            )
+            continue
+        # C5(codex 1R): 당일 intraday 순위가 밴드(≤4.0)로 복귀했으면 skip(이미 회복).
+        if _vitality_intraday_recovered(db, campaign_id, now):
+            result["vitality_held"].append(
+                {"target_id": adgroup_id, "reason": "당일 순위 회복(intraday ≤4.0) — 발사 skip"}
+            )
+            continue
+        if _vitality_daily_count(db, campaign_id, now) >= _VITALITY_DAILY_CAP:
+            result["vitality_held"].append({"target_id": adgroup_id, "reason": "캠페인 일일 캡(≤5) 초과"})
+            continue
+        if _vitality_group_on_cooldown(db, adgroup_id, now):
+            result["vitality_held"].append({"target_id": adgroup_id, "reason": "48h 재발사 쿨다운"})
+            continue
+        _fire_vitality_revive(db, target, now, result)
+    _emit_vitality_briefing(db, alerts, now, revive_hold_reason=revive_hold_reason)
+
+
 def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=None) -> dict:
     """시간당 밴드 관제 실입찰(PLAN §4). 매시 :20 크론(catch-up 제외 — 시간성 소멸).
 
@@ -1865,6 +2079,10 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
         "explored_capped": 0,   # 경제성 상한 도달로 종료
         "explored_not_rank": 0,  # rank≤2.5·클릭0 = 순위 병리 아님 진단 종료
         "explored_held": 0,     # 밴드 도달/클릭 hold(상향 정지·관측)
+        # VT2(D-NAO-81 B축 스파이럴 복원) 카운터(라이브 관측용):
+        "vitality_alerts": 0,   # S1∧S2 스파이럴 경보 캠페인 수
+        "vitality_fired": 0,    # 복원 UP 실쓰기(execute 성공) 수
+        "vitality_held": [],    # 캡·쿨다운·킬스위치·재조회실패로 미발사된 그룹
     }
     # IU-R R2: estimate 회당 캡·런 캐시(§난제4) — 실제 스텝 유닛에만 호출하고 (kw_id,position)
     # 중복은 캐시로 흡수. counter는 mutable dict로 helper와 공유(호출 수 봉인 테스트가 이 값 관측).
@@ -2268,5 +2486,12 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
     except Exception as e:  # noqa: BLE001 — 밸브 실패는 fail-soft(레인 집행 결과 불변)
         log.warning("auto_operator: 탐침 출혈 밸브 실패(fail-soft): %s", e)
         result["bleed"] = {"error": str(e)}
+
+    # VT2(D-NAO-81 B축): 스파이럴 조기 복원 스텝 — 핫셋/탐침 레인과 독립. fail-soft(경보 감지·
+    # 발사 예외가 위 레인 집행 결과를 오염시키지 않음, bleed 밸브 관례 동형).
+    try:
+        _run_vitality_step(db, now, result)
+    except Exception as e:  # noqa: BLE001 — vitality 스텝 실패는 fail-soft(레인 결과 불변)
+        log.warning("auto_operator: 스파이럴 복원 스텝 실패(fail-soft): %s", e)
 
     return result

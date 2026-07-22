@@ -2,7 +2,13 @@
 # 매 sprint 완료 시 Claude가 이 파일을 갱신합니다.
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
-## 최신 상태 (2026-07-22 14:00, 워크트리 bm-layer-p1-p6-deployment-0d68d5·브랜치 claude/bm-layer-p1-p6-deployment-0d68d5)
+## 최신 상태 (2026-07-22 16:05, 워크트리 bm-layer-p1-p6-deployment-0d68d5·브랜치 claude/bm-layer-p1-p6-deployment-0d68d5)
+- **★스프린트 VT(D-NAO-81 2축 분리 — B축 흐름 유지) 완결**: vitality_signal SA(S1 노출궤적∧S2 순위궤적·충돌방지 게이트)+시간당 레인 즉시 복원(`[스파이럴복원]`·캠페인당 5/일·48h 쿨다운·기존 가드레일 상속). GATE 적대 P1(충돌게이트 stale·죽은 토큰)→구조화 잠금 이벤트 권위로 경화→codex 2R AGREE-ALL→2921 passed→배포·라이브 합격(맥세이프 실스파이럴 −92% 감지 + 잠금 캠페인 소생 차단 실증). 03 백테스트=실제보다 3~4일 조기 경보 증명. **잔여 VT3(소재 CTR 경보)·VT4(신수요 개척) — 계획서 §4·D-NAO-82.**
+- **★PX(파워링크 자동 제외) codex 3R+최종 AGREE-ALL 완결·첫 실쓰기 라이브 합격**(아이패드종이필름·change_log 354·재심사 8/21). PR #80(BM #79 위 스택)에 PX+VT 전체.
+- **오늘 운영 실측**: 03 회복 개시(탐색UP 43건·장중 ROAS 6.11·순위 5.2), 04 밴드 내 클릭 가뭄(노출 790·클릭 0 — 저녁까지 0이면 소재 CTR 문제 확정→VT3 표본), 대행사 캠페인 이름 변경 소동(삭제 아님)·[P_삭제금지] 접두 3건 API 복원, 맥세이프=대행사 잠금 유지(Jino 판단 대기).
+- **내일 자동**: 07:45 BM 관문 4개 검증 / 08:50 PX 레인(중복발사 0 확인)+03·04 회복 판정 / 09:30 codex 소급(BM+전세션, PX·VT 제외).
+
+## (이전) 최신 상태 (2026-07-22 14:00, 워크트리 bm-layer-p1-p6-deployment-0d68d5·브랜치 claude/bm-layer-p1-p6-deployment-0d68d5)
 - **★스프린트 PX(파워링크 검색어 자동 제외+in-out 재심사, D-NAO-80) 전 페이즈 구현·배포·라이브 검증 완료**: Jino 지시("성과 기반 자동, 수백 검색어 Confirm 불가") 실행층. 계획서 `docs/PLAN_naver-ad-powerlink-autoexclude.md`(§0.5 = prod 실측 3중 구조 차단: clk≥10 도달불가·화이트리스트 브랜드토큰 전량보호·margin 미매핑 fail-closed → 해소 설계). PX1 judge 파워링크 전용 게이트(30d·clk≥5·margin 폴백 1만·그룹 순손실 프록시·디바이스 토큰 제외) / PX2 NaverSearchTermExclusion(alembic `e0f1a2b3c4d5`)+자동 발사(ss_exclude 승인원 활성·harness 봉투 그대로) / PX3 재심사(excluded→probation 14d→restored, 백오프 30→60→90) / PX4 예외 브리핑(실행 있던 날만 diary+Slack)+대행사 주간 브리핑(일요)+GET /api/naver/ad/search-term/exclusions. **GATE 적대 리뷰 PASS(P1 0) → P2 3건 전건 수정(`48f4516`) → 2866 passed·회귀 0 → safe_deploy 13:52 KST(7파일·부팅 200)**. 라이브 judge 실측: ours 자동발사 후보 1건(아이패드종이필름·30d cost 22,854·그룹 ROAS 1.10<target)·대행사 브리핑 17건(실쓰기 0)·쇼핑/승격 회귀 0. **다음 관측: 익일 08:50 레인 첫 자동 제외 실쓰기**(change_log·상태 행·API 반영).
 - **예약 2건 신설**: 07-23 07:45 BM 관문 4개 자동 검증(`bm-layer-4gates-verify-0723` — 전 세션 "예약됨" 주장이 실제 없어서 생성, LESSONS 기록) / 07-23 09:30 codex 소급(`codex-retro-review-0723`: BM P1~P5+IU-R·B-X·SS·EXPKEYWORD+PX, challenge 권장).
 - PR #79(BM)는 오픈 유지. 이 브랜치=PR#79+PX 커밋(스택). PX PR은 #79 위에 생성.

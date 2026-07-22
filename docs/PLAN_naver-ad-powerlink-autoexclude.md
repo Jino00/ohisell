@@ -105,6 +105,8 @@
 - [x] PX4 브리핑·드릴다운(Sonnet) — `07f58c5`(예외 브리핑=실행 있던 날만·대행사=일요 주간·GET /search-term/exclusions)
 - [x] GATE 적대 리뷰 + 전체 테스트 회귀 0 — **PASS(P1 0·P2 3건)** → P2 전건 수정 `48f4516`(복귀 캡 재카운트 백스톱·upsert 경합 수렴·그룹명 제품형 토큰 보호·summary GROUP BY) + 중복 상수 정리 `192537f`. 최종 **2866 passed·회귀 0**. 잔여 P3-1(개방 후 commit 실패 orphan=failed change_log로 관측 가능)·P3-3(lane skip 직접 테스트)은 기록만.
 - [x] safe_deploy 배포 + 라이브 검증(§검증) — **2026-07-22 13:52 KST** 7파일 CAS 통과·alembic `e0f1a2b3c4d5`·재시작·부팅 200. **라이브 judge 실측**: 자동발사 대상 1건(`아이패드종이필름`, 10세대_종이질감 그룹, 30d clk20·cost22,854·그룹 ROAS 1.10<target — 첫 자동 제외는 익일 08:50 레인) / 대행사 브리핑 17건(갤럭시S26필름 15.7만/30d 등·실쓰기 0) / 쇼핑 0·승격 378(기존 로직 불변). 3중 구조 차단(§0.5) 해소 실증.
-- [ ] 익일 08:50 레인 첫 자동 제외 라이브 관측(change_log dry_run=0·상태 행 excluded·restricted-keywords API 반영)
-- [ ] codex 소급 리뷰(07-23 09:30 예약됨, BM·SS 소급과 함께 — challenge 모드)
+- [x] **첫 자동 제외 라이브 합격(07-22 13:59 KST, 감독 하 조기 실행)**: `아이패드종이필름` — change_log 354(dry_run=0)·상태 행 excluded(cycle 1·재심사 08-21)·네이버 등록 실증(쓰기 직후 재조회 after_value). 익일 08:50 레인은 dedup으로 중복 발사 없음(테스트 고정).
+- [x] **codex challenge 왕복 완료(07-22, 한도 조기 회복 — 3R+최종확인 AGREE-ALL)**: 1R 8건(P1 4·P2 4) → 수용 6·부분수용 1·기각 1(형태소 유사어 — codex가 2R에서 수용) → 수정 `efaf4c2`(복귀 경계 3중 재검증·행 클레임·소속 검증 헬퍼·재심사 우선·고아 reconciliation·브리핑 now 공유) → 2R 잔여 P1 2건 → 수정 `a833018`(소속 검증 독립 커넥션·probation 클레임 크래시 창 치유) → 3R 정밀도 결함 1건 → 수정 `3e1ec13`(치유 증거 adgroup_id 매칭) → **AGREE-ALL**. 최종 2883 passed·회귀 0·전건 배포 완료.
+- [ ] BM P1~P5·전 세션(IU-R·B-X·SS·EXPKEYWORD) codex 소급(07-23 09:30 예약 유지 — PX는 완료라 스코프 제외)
+- [ ] 첫 재심사 창 발동 관측(08-21) — 복귀·probation·백오프 라이브
 - [ ] (후속) 아이패드 상품군 원가 확정 시 margin 폴백→실측 margin 자동 전환(코드 변경 불필요 — 게이트 3이 이미 margin 우선)
