@@ -23,7 +23,7 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.models import NaverChangeLog, NaverProposal, NaverSearchTermExclusion
-from app.services.naver_ad import diary, search_term_judge
+from app.services.naver_ad import diary, naver_sa_writer, search_term_judge
 from app.utils.kst import kst_now
 
 log = logging.getLogger(__name__)
@@ -39,6 +39,14 @@ _SS_DAILY_RETURN_CAP = 10
 # 수 — 라이브 restricted-keywords GET을 핫 레인마다 N회 유발하지 않기 위한 결정, 대행사/수동 등록
 # 키워드와 무관하게 우리 자동 제외 슬롯만 제한). 초과 그룹은 이번 라운드 스킵.
 _PL_GROUP_SLOT_CAP = 60
+
+# 재심사 개방(복귀) 실쓰기 change_log action·마커(PX3) — 제외(exclude_search_term)와 별도 액션으로
+# 분리해 일일 복귀 캡·감사를 독립 카운트한다(제외 캡과 상호 오염 방지).
+_SS_DAILY_RETURN_CAP = 10
+_RESTORE_ACTION = "restore_search_term"
+_RETURN_MARKER = "[검색어제외 복귀]"
+# probation 관찰창(§2) — 개방 후 재노출 관찰 기간(일).
+_PROBATION_DAYS = 14
 
 # SS4 승격 제안 1회 생성 상한(라이브 첫 실행 실측: 2026-07-22 08:50 크론에서 354건 pending이
 # 한꺼번에 쏟아져 Jino 콘솔이 범람 — 운영 결함). conv_direct_cnt 내림차순(→ conv_purchase_amt
@@ -185,6 +193,132 @@ def _remaining_exclude_cap(db: Session, now: datetime) -> int:
     return max(0, harness._SS_DAILY_EXCLUDE_CAP - harness._count_search_term_excludes_today(db, now))
 
 
+def _count_returns_today(db: Session, now: datetime) -> int:
+    """오늘(KST) 성공한 재심사 개방(복귀) 수 — 일일 복귀 캡(_SS_DAILY_RETURN_CAP) 카운트. 실제
+    쓰기 확정 행만(dry_run=False ∧ after_value 존재, restore_search_term). changed_at은 executor
+    가 now(KST naive)로 심으므로 KST 자정 경계로 비교(제외 캡 카운트와 동일 규율)."""
+    today_start = datetime.combine(now.date(), datetime.min.time())
+    return db.query(NaverChangeLog).filter(
+        NaverChangeLog.action == _RESTORE_ACTION,
+        NaverChangeLog.dry_run.is_(False),
+        NaverChangeLog.after_value.isnot(None),
+        NaverChangeLog.changed_at >= today_start,
+    ).count()
+
+
+def _open_exclusion(db: Session, row: NaverSearchTermExclusion, now: datetime) -> bool:
+    """재심사 개방 1건(§3) — delete_restricted_keywords로 제외키워드를 삭제하고 change_log 전건
+    기록([검색어제외 복귀]). 성공 시 True. restrict_kwd_id 부재(회수 실패 잔존)면 개방 불가(사람
+    조사 대상, 무한 재시도 방지 위해 False 반환·상태 유지). delete 실패는 fail-closed로 정직히
+    실패 기록 후 False(상태 유지 — 다음 레인 재시도)."""
+    if not row.restrict_kwd_id:
+        log.warning(
+            "search_term_ss_lane: 재심사 개방 불가(restrict_kwd_id 부재) adgroup=%s term=%r "
+            "— 사람 조사 대상(상태 유지)", row.adgroup_id, row.search_term,
+        )
+        return False
+    try:
+        result = naver_sa_writer.delete_restricted_keywords(row.adgroup_id, [row.restrict_kwd_id])
+    except Exception as exc:  # noqa: BLE001 — 삭제 실패도 fail-open 금지, 사실대로 기록
+        fail = NaverChangeLog(
+            entity_type="search_term", entity_id=row.search_term, campaign_id=row.campaign_id,
+            action=_RESTORE_ACTION,
+            rationale=f"{_RETURN_MARKER} 개방 실패({type(exc).__name__}: {str(exc)[:200]}) — 상태 유지·재시도",
+            dry_run=False, outcome="failed", changed_at=now, executed_at=now,
+        )
+        db.add(fail)
+        db.commit()
+        log.warning("search_term_ss_lane: 재심사 개방 실패 adgroup=%s id=%s: %s",
+                    row.adgroup_id, row.restrict_kwd_id, exc)
+        return False
+
+    entry = NaverChangeLog(
+        entity_type="search_term", entity_id=row.search_term, campaign_id=row.campaign_id,
+        action=_RESTORE_ACTION,
+        rationale=(
+            f"{_RETURN_MARKER} 재심사 개방(cycle={row.cycle}) — 제외키워드 삭제, +{_PROBATION_DAYS}일 "
+            "재노출 관찰(probation). 성과 자가 교정: 회복하면 복귀, 여전히 손실이면 재제외(§2)"
+        ),
+        dry_run=False,
+        before_value=json.dumps(result.before, ensure_ascii=False),
+        after_value=json.dumps({"after": result.after}, ensure_ascii=False),
+        changed_at=now, executed_at=now,
+    )
+    db.add(entry)
+    db.commit()
+    log.info("search_term_ss_lane: 재심사 개방 성공 adgroup=%s term=%r", row.adgroup_id, row.search_term)
+    return True
+
+
+def _run_reexamination(db: Session, powerlink: list[dict], now: datetime) -> dict:
+    """PX3 in-out 재심사 루프(§2·§3) — 같은 08:50 레인 스텝. ①excluded ∧ next_review_at≤today →
+    개방(delete)·probation 전이(일일 복귀 캡·킬스위치 존중). ②probation ∧ probation_until≤today →
+    §1 재판정: 여전히 후보면 재제외(자동 발사·cycle 승계), 아니면 restored. 킬스위치 OFF면 그
+    캠페인 상태기계 전체 동결(제외·복귀 양쪽 정지·미실행 정직 — 다음 레인 재시도).
+
+    powerlink = 이번 라운드 judge 산출 §1 통과 후보(재판정 재사용 — 같은 now라 재조회 불필요)."""
+    from app.services.naver_ad import auto_operator
+
+    today = now.date()
+    opened = 0
+    reexcluded = 0
+    restored = 0
+
+    # ① 개방(excluded → probation) — 일일 복귀 캡 잔여만큼, next_review 이른 순.
+    remaining_return = max(0, _SS_DAILY_RETURN_CAP - _count_returns_today(db, now))
+    due = (
+        db.query(NaverSearchTermExclusion)
+        .filter(
+            NaverSearchTermExclusion.status == "excluded",
+            NaverSearchTermExclusion.next_review_at.isnot(None),
+            NaverSearchTermExclusion.next_review_at <= today,
+        )
+        .order_by(NaverSearchTermExclusion.next_review_at)
+        .all()
+    )
+    for row in due:
+        if remaining_return <= 0:
+            break
+        if not auto_operator._auto_operate_now(db, row.campaign_id):
+            continue  # 킬스위치 OFF — 복귀 정지(미실행 정직)
+        if _open_exclusion(db, row, now):
+            row.status = "probation"
+            row.probation_until = today + timedelta(days=_PROBATION_DAYS)
+            row.last_transition_at = now
+            db.commit()
+            opened += 1
+            remaining_return -= 1
+
+    # ② probation 만료 재판정(probation → excluded 재제외 or restored).
+    pl_map = {(c["adgroup_id"], c["search_term"]): c for c in powerlink}
+    prob = (
+        db.query(NaverSearchTermExclusion)
+        .filter(
+            NaverSearchTermExclusion.status == "probation",
+            NaverSearchTermExclusion.probation_until.isnot(None),
+            NaverSearchTermExclusion.probation_until <= today,
+        )
+        .all()
+    )
+    for row in prob:
+        if not auto_operator._auto_operate_now(db, row.campaign_id):
+            continue  # 킬스위치 OFF — 재판정 동결(제외·복귀 양쪽 정지)
+        cand = pl_map.get((row.adgroup_id, row.search_term))
+        if cand is not None:
+            # 여전히 §1 후보 → 재제외(자동 발사, _upsert_exclusion이 cycle 승계·백오프 30→60→90).
+            if _autofire_exclude(db, cand, now) is not None:
+                reexcluded += 1
+            # 실패(일일캡 소진 등)면 probation 유지 — 다음 레인 재시도(카운트 미증가, 정직).
+        else:
+            # 성과 자가 교정: 더는 후보 아님 → restored(행 보존=기억, 재충족 시 일반 경로로 재제외).
+            row.status = "restored"
+            row.last_transition_at = now
+            db.commit()
+            restored += 1
+
+    return {"opened": opened, "reexcluded": reexcluded, "restored": restored}
+
+
 def _create_promote_proposal(db: Session, cand: dict, *, bm_verified: bool = False) -> NaverProposal:
     """전환 검색어 승격 후보 1건 → pending 제안(SS4, PLAN §3 SS4·§0 4 영구 Confirm). rationale에
     근거 수치(전환수·매출·검색어·출처 그룹)를 병기한다 — judge가 산출한 판정 문구(cand["reason"])
@@ -290,8 +424,9 @@ def run_search_term_ss_lane(
         slot_cache[adg] = slot_cache.get(adg, _excluded_slot_count(db, adg) - 1) + 1
     db.commit()
 
-    # PX3 재심사 루프(개방·probation·재제외/복귀)는 다음 페이즈에서 이 자리에 배선한다.
-    reexam = {"opened": 0, "reexcluded": 0, "restored": 0}
+    # PX3 재심사 루프 — 같은 08:50 레인 스텝(§2·§3). 개방(excluded→probation)·재판정(probation→
+    # excluded 재제외 or restored). 킬스위치 OFF면 제외·복귀 양쪽 정지(미실행 정직 상태).
+    reexam = _run_reexamination(db, powerlink, now)
 
     # SS4 승격 후보 — 제외(SS3)와 동일한 표현 가능성 방어(target_id 길이) + dedup 규약을 그대로
     # 적용한다. 소스(shopping/expkeyword) 무관 전건 대상(judge가 이미 dconv≥1로 판정 완료).
