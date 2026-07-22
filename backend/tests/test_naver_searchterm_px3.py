@@ -380,9 +380,10 @@ def test_probation_orphan_window2_restore_log_backfills_probation_until(db):
     _scope(db)
     lt = _NOW - timedelta(hours=1)  # 30분 창 밖(고아 확정)
     row = _prob_orphan(db, term="창2고아", last_transition_at=lt)
-    db.add(NaverChangeLog(  # 클레임(lt) 이후 커밋된 복귀 성공 로그(after_value 존재)
+    db.add(NaverChangeLog(  # 클레임(lt) 이후 커밋된 복귀 성공 로그(after_value에 adgroup_id 병기)
         entity_type="search_term", entity_id="창2고아", campaign_id="cmp1",
-        action=lane._RESTORE_ACTION, dry_run=False, after_value='{"after": []}',
+        action=lane._RESTORE_ACTION, dry_run=False,
+        after_value='{"after": [], "adgroup_id": "grp-web"}',
         changed_at=lt, executed_at=lt,
     ))
     db.commit()
@@ -411,9 +412,10 @@ def test_probation_orphan_only_stale_restore_log_treated_as_window1(db):
     _scope(db)
     lt = _NOW - timedelta(hours=1)
     row = _prob_orphan(db, term="과거로그", last_transition_at=lt)
-    db.add(NaverChangeLog(  # 클레임보다 앞선(2시간 전) 복귀 로그 — 이번 클레임의 증거가 아님
-        entity_type="search_term", entity_id="과거로그", campaign_id="cmp1",
-        action=lane._RESTORE_ACTION, dry_run=False, after_value='{"after": []}',
+    db.add(NaverChangeLog(  # 클레임보다 앞선(2시간 전) 복귀 로그 — adgroup은 맞지만 시각이 이전이라
+        entity_type="search_term", entity_id="과거로그", campaign_id="cmp1",  # 이번 클레임 증거 아님
+        action=lane._RESTORE_ACTION, dry_run=False,
+        after_value='{"after": [], "adgroup_id": "grp-web"}',
         changed_at=_NOW - timedelta(hours=2), executed_at=_NOW - timedelta(hours=2),
     ))
     db.commit()
@@ -433,6 +435,35 @@ def test_probation_orphan_fresh_claim_within_30min_untouched(db):
     db.refresh(row)
     assert row.status == "probation"
     assert row.probation_until is None
+
+
+def test_probation_orphan_adgroup_match_blocks_cross_group_same_term(db):
+    """codex 3R: 같은 캠페인 두 그룹에 동일 검색어. A그룹 복귀 로그(delete 성공)가 B그룹 행의
+    증거가 되면 안 된다 — after_value.adgroup_id 매칭으로 교차 오인 차단. A는 자기 로그로 정상
+    치유(창②→probation_until 소급), B는 자기 증거 없음으로 창①→excluded 보수 복원."""
+    _scope(db)  # grp-web → cmp1
+    db.add(NaverEntity(entity_type="adgroup", entity_id="grp-web2", parent_id="cmp1",
+                       campaign_id="cmp1", campaign_type="WEB_SITE", name="grp2", status="on"))
+    db.commit()
+    lt = _NOW - timedelta(hours=1)
+    row_a = _prob_orphan(db, term="공통검색어", adgroup_id="grp-web", last_transition_at=lt)
+    row_b = _prob_orphan(db, term="공통검색어", adgroup_id="grp-web2", last_transition_at=lt)
+    # A그룹 복귀 로그만 존재(delete 성공·adgroup_id=grp-web) — 같은 campaign+term이지만 B 증거 아님.
+    db.add(NaverChangeLog(
+        entity_type="search_term", entity_id="공통검색어", campaign_id="cmp1",
+        action=lane._RESTORE_ACTION, dry_run=False,
+        after_value='{"after": [], "adgroup_id": "grp-web"}',
+        changed_at=lt, executed_at=lt,
+    ))
+    db.commit()
+    healed = lane._reconcile_probation_orphans(db, _NOW)
+    assert healed == 2  # 둘 다 치유(A=창②, B=창①) — 판정만 다르다
+    db.refresh(row_a)
+    db.refresh(row_b)
+    assert row_a.status == "probation"  # 자기 그룹 로그 → 창② 정상 치유
+    assert row_a.probation_until == lt.date() + timedelta(days=lane._PROBATION_DAYS)
+    assert row_b.status == "excluded"  # A 로그는 B 증거 아님 → 창① 보수 복원
+    assert row_b.probation_until is None
 
 
 # ── F1(codex 2R[P1-b]): 소속 검증은 엔진 레벨 독립 커넥션 조회(auto_operator._auto_operate_now

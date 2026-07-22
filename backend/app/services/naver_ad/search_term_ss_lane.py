@@ -362,7 +362,10 @@ def _open_exclusion(db: Session, row: NaverSearchTermExclusion, now: datetime) -
         ),
         dry_run=False,
         before_value=json.dumps(result.before, ensure_ascii=False),
-        after_value=json.dumps({"after": result.after}, ensure_ascii=False),
+        # ★F2 후속(codex 3R): adgroup_id를 after_value에 명시 병기 — change_log는 adgroup_id 컬럼이
+        # 없어 entity_id(검색어)+campaign_id만으론 같은 캠페인 내 동일 검색어 두 그룹을 구분 못 한다.
+        # _reconcile_probation_orphans 창② 증거 판정이 이 필드로 그룹까지 일치를 확인한다(교차 오인 차단).
+        after_value=json.dumps({"after": result.after, "adgroup_id": row.adgroup_id}, ensure_ascii=False),
         changed_at=now, executed_at=now,
     )
     db.add(entry)
@@ -447,13 +450,17 @@ def _reconcile_probation_orphans(db: Session, now: datetime) -> int:
     대상: status='probation' ∧ probation_until IS NULL ∧ last_transition_at < now-30분
       (진행 중인 정상 클레임과 구분하는 안전 창 — _open_exclusion 한 번은 수 초 내 끝나므로
       30분 이상 이 상태로 머문 행만 고아로 본다).
-    판정(결정적): 그 (adgroup는 change_log에 없어 campaign+term으로) 복귀 change_log
-      (action=restore_search_term ∧ dry_run=False ∧ after_value 존재 = delete 성공 확정,
-      실패 fail 행은 after_value 없어 자동 제외)가 last_transition_at 이후에 있으면
+    판정(결정적): 그 행의 복귀 change_log(action=restore_search_term ∧ dry_run=False ∧
+      after_value 존재 = delete 성공 확정, 실패 fail 행은 after_value 없어 자동 제외)가
+      last_transition_at 이후에 있고 **after_value JSON의 adgroup_id까지 이 행과 일치**하면
       → 창②(delete 성공) → probation_until = last_transition_at + _PROBATION_DAYS일로 소급
       세팅(재판정 루프 복귀). 없으면 → 창①(delete 미실행, 키워드 등록 상태) → status='excluded'
-      복원(다음 재심사 주기가 정상 개방 재시도). **fail-open**(치유 실패가 레인을 죽이면 안 됨) —
-      행별 try/except로 격리하고 건수만 반환한다."""
+      복원(다음 재심사 주기가 정상 개방 재시도). ★adgroup_id 매칭(codex 3R): change_log는
+      adgroup_id 컬럼이 없어 entity_id(검색어)+campaign_id만으론 같은 캠페인 내 동일 검색어 두
+      그룹을 구분 못 한다 — A그룹 복귀 로그를 B그룹 행 증거로 오인하면 B가 잘못 probation_until
+      소급→restored로 흘러 네이버 제외키워드가 살아있는 채 영구 고아가 된다. after_value의
+      adgroup_id로 그룹까지 확인한다. **fail-open**(치유 실패가 레인을 죽이면 안 됨) — 행별
+      try/except로 격리하고 건수만 반환한다."""
     healed = 0
     stale_before = now - timedelta(minutes=30)
     rows = (
@@ -468,15 +475,26 @@ def _reconcile_probation_orphans(db: Session, now: datetime) -> int:
     for row in rows:
         try:
             # 복귀 change_log 증거(delete 성공 확정) — 이 행 클레임(last_transition_at) 이후에
-            # 커밋된 것만 인정한다(과거 사이클의 복귀 로그를 오증거로 쓰지 않기 위함).
-            delete_committed = db.query(NaverChangeLog.id).filter(
+            # 커밋된 것 중, after_value JSON의 adgroup_id가 이 행과 일치하는 것만 인정한다
+            # (codex 3R: 같은 캠페인 내 동일 검색어 두 그룹 교차 오인 차단). adgroup_id 키가 없는
+            # 구형/파싱불가 로그는 증거로 불인정(fail-safe: 창① 취급 → 키워드가 실제 살아있을
+            # 가능성에 보수적으로 excluded 복원).
+            cand_after = db.query(NaverChangeLog.after_value).filter(
                 NaverChangeLog.action == _RESTORE_ACTION,
                 NaverChangeLog.entity_id == row.search_term,
                 NaverChangeLog.campaign_id == row.campaign_id,
                 NaverChangeLog.dry_run.is_(False),
                 NaverChangeLog.after_value.isnot(None),
                 NaverChangeLog.changed_at >= row.last_transition_at,
-            ).first() is not None
+            ).all()
+            delete_committed = False
+            for (av,) in cand_after:
+                try:
+                    if (json.loads(av) or {}).get("adgroup_id") == row.adgroup_id:
+                        delete_committed = True
+                        break
+                except (ValueError, TypeError):
+                    continue  # 파싱 불가 로그는 증거로 불인정(보수적 — 창① 취급)
             if delete_committed:
                 # 창② — delete 성공. probation_until만 소급 세팅해 재판정 루프에 복귀시킨다.
                 # (클레임 시각 기준 +14일 — 원래 개방 성공 직후 세팅됐어야 할 값을 복원.)
