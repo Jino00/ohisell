@@ -4,6 +4,7 @@
 #   (C) 배송비 단가당 환산·평균수량·폴백·VAT 정합·config 상수.
 from __future__ import annotations
 
+import json
 from datetime import date, timedelta
 from decimal import Decimal
 
@@ -269,8 +270,73 @@ def test_ad_commission_rate_none_when_implausible(db):
 def test_shipping_config_constants():
     assert bep_calculator.SHIPPING_COST_NORMAL == Decimal("1900")
     assert bep_calculator.SHIPPING_COST_NBAESONG == Decimal("3020")
-    # 현시점 판별 훅은 전 건 일반배송(원칙22 — N배송 미시작)
+    # order_row 없음 → 일반배송 폴백(fail-safe)
     assert bep_calculator._order_shipping_cost(None) == Decimal("1900")
+
+
+def _entry_raw(delivery_attr=None, *, extra_po=None) -> str:
+    """네이버 주문 entry raw_data JSON 문자열(prod id 11929 실측 구조 미러).
+
+    저장 형태는 json.dumps(entry) — entry = {"productOrder": {...}, "order": {...}}.
+    """
+    po: dict = {"productOrderId": "po-1", "quantity": 1}
+    if delivery_attr is not None:
+        po["deliveryAttributeType"] = delivery_attr
+    if extra_po:
+        po.update(extra_po)
+    return json.dumps({"productOrder": po, "order": {"orderId": "o-1"}}, ensure_ascii=False)
+
+
+def test_order_shipping_cost_nbaesong_when_arrival_guarantee():
+    # D-NAO-84 실측: productOrder.deliveryAttributeType == "ARRIVAL_GUARANTEE" → N배송 3,020
+    row = {"raw_data": _entry_raw("ARRIVAL_GUARANTEE", extra_po={
+        "logisticsCompanyId": "PG", "deliveryTagType": "TOMORROW"})}
+    assert bep_calculator._order_shipping_cost(row) == Decimal("3020")
+
+
+def test_order_shipping_cost_normal_when_today():
+    # 과거 전 건 "TODAY" → 일반배송 1,900
+    row = {"raw_data": _entry_raw("TODAY")}
+    assert bep_calculator._order_shipping_cost(row) == Decimal("1900")
+
+
+def test_order_shipping_cost_fallbacks_to_normal():
+    # raw_data 부재/None/비JSON/키 부재 → 모두 일반배송 폴백(fail-safe)
+    assert bep_calculator._order_shipping_cost({"quantity": 1}) == Decimal("1900")          # raw_data 키 없음
+    assert bep_calculator._order_shipping_cost({"raw_data": None}) == Decimal("1900")       # None
+    assert bep_calculator._order_shipping_cost({"raw_data": "not json{"}) == Decimal("1900")  # 잘림/비JSON
+    assert bep_calculator._order_shipping_cost({"raw_data": _entry_raw(None)}) == Decimal("1900")  # 필드 부재
+    assert bep_calculator._order_shipping_cost({"raw_data": "[]"}) == Decimal("1900")       # dict 아님
+    # dict 형태 raw_data(직접 dict 저장 경로)도 지원
+    assert bep_calculator._order_shipping_cost(
+        {"raw_data": {"productOrder": {"deliveryAttributeType": "ARRIVAL_GUARANTEE"}}}
+    ) == Decimal("3020")
+
+
+def test_avg_logistics_nbaesong_used_in_computation(db):
+    # N배송 주문 1건(수량 1, 수취 0) → 지불 3,020 → net 3,020 → logistics 3,020
+    db.add(Order(channel_id=6, platform_product_id="p1", selling_price=Decimal("3000"), quantity=1,
+                 raw_data=_entry_raw("ARRIVAL_GUARANTEE"), order_date=date(2026, 7, 1), order_number="o1"))
+    db.commit()
+    out = bep_calculator._avg_qty_and_logistics(db)
+    assert out["p1"]["shipping"] == Decimal("3020")
+    assert out["p1"]["net_ship"] == Decimal("3020")
+    assert out["p1"]["logistics"] == Decimal("3020.00")
+
+
+def test_avg_logistics_mixed_shipping_weighted_average(db):
+    # 혼재: N배송 1건(3,020) + 일반 1건(TODAY, 1,900) → 지불 평균 (3020+1900)/2 = 2,460
+    db.add(Order(channel_id=6, platform_product_id="p1", selling_price=Decimal("3000"), quantity=1,
+                 raw_data=_entry_raw("ARRIVAL_GUARANTEE"), order_date=date(2026, 7, 1), order_number="o1"))
+    db.add(Order(channel_id=6, platform_product_id="p1", selling_price=Decimal("3000"), quantity=1,
+                 raw_data=_entry_raw("TODAY"), order_date=date(2026, 7, 2), order_number="o2"))
+    db.commit()
+    out = bep_calculator._avg_qty_and_logistics(db)
+    assert out["p1"]["avg_qty"] == Decimal("1")
+    assert out["p1"]["shipping"] == Decimal("2460")   # (3020+1900)/2
+    assert out["p1"]["collected"] == Decimal("0")
+    assert out["p1"]["net_ship"] == Decimal("2460")
+    assert out["p1"]["logistics"] == Decimal("2460.00")
 
 
 def test_avg_qty_and_logistics_per_unit(db):

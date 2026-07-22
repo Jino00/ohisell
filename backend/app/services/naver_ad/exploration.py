@@ -22,7 +22,7 @@ from sqlalchemy import func as sqlfunc
 from sqlalchemy.orm import Session
 
 from app.models import NaverAdDaily, NaverEntity, NaverProductBep
-from app.services.naver_ad import bid_simulator, campaign_target_resolver
+from app.services.naver_ad import bid_simulator, campaign_target_resolver, visibility
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 
 # ── 핫셋 여집합 게이트(출처: auto_operator._MIN_CLICK_FOR_APPROVAL=10, D-NAO-48 조건②/§4-1) ──
@@ -275,6 +275,13 @@ def _resolve_exploration_bep_roas(db: Session, campaign_id: str, adgroup_id: str
     return None
 
 
+def resolve_exploration_bep_roas(db: Session, campaign_id: str, adgroup_id: str):
+    """공개 래퍼(VF D-NAO-83) — 탐색 상한의 BEP ROAS 폴백 사다리를 레인(auto_operator)이
+    visibility.evidence_ceiling의 분모로 재사용할 수 있게 노출한다(원칙18-8 — SA간 정보 유통을
+    허브가 중계). 내부 산식은 _resolve_exploration_bep_roas 단일 소스(그룹→캠페인→계정)."""
+    return _resolve_exploration_bep_roas(db, campaign_id, adgroup_id)
+
+
 def _heuristic_ceiling(current_bid: int) -> int:
     """휴리스틱 병행 캡 = 현재입찰 × _EXPLORATION_CEILING_MULT(2.0), 유효 입찰가로 클램프
     (10원 단위 내림·70~100,000원). current_bid가 유효하지 않으면(≤0) 0(상한 근거 없음)."""
@@ -289,8 +296,14 @@ def _heuristic_ceiling(current_bid: int) -> int:
 
 def exploration_ceiling(
     db: Session, campaign_id: str, adgroup_id: str, current_bid: int, window_from, window_to,
+    *, evidence_ceiling_value: int | None = None,
 ) -> int:
     """탐색 UP 경제성 상한(원) — D-NAO-71로 수량 캡이 사라져 **유일한 가격 브레이크**(PLAN §1 가드2).
+
+    evidence_ceiling_value(VF D-NAO-83, optional·원칙18-8): 증거 구매 창이 활성인 그룹은 콜드
+    상한 순환논리를 캠페인 90일 실측 RPC로 해방한 대체 상한(visibility.evidence_ceiling)을
+    레인이 미리 산출해 주입한다. not None이면 그 값을 그대로 반환(이미 min(경제성,휴리스틱)을
+    내부에 담음). None(레거시·창 비활성·대체 산식 불가)이면 아래 기존 산식 그대로(회귀 0).
 
     산식(rank_servo._servo_economic_ceiling 선례 재사용): "클릭 가치 기반 최대 입찰가" =
       pooled_rpc(그룹→캠페인→계정 계층 수축) ÷ product_bep의 BEP ROAS. bid_simulator.pooled_rpc·
@@ -317,6 +330,11 @@ def exploration_ceiling(
 
     반환: 유효 입찰가(10원 단위, 70~100,000원) / current_bid(경제 증거 전무=capped) / 0(current도
       부재). 순수 판정(부수효과 없음)."""
+    # VF(D-NAO-83): 증거창 활성 그룹은 레인이 대체 상한을 주입 — 그 값을 그대로 채택(콜드 상한
+    # 순환논리 해방). 창 비활성/대체 산식 불가면 None → 아래 레거시 경로(회귀 0).
+    if evidence_ceiling_value is not None:
+        return evidence_ceiling_value
+
     heuristic = _heuristic_ceiling(current_bid)
 
     bep_roas = _resolve_exploration_bep_roas(db, campaign_id, adgroup_id)
@@ -519,13 +537,20 @@ def exploration_trigger(
 def ladder_judgment(
     last_probe: dict | None, since_step_stats: dict, ceiling: int, current_bid: int,
     *, recent_flow_clk: int = 0, settled_clk: int = 0, flow_available: bool = True,
+    evidence_active: bool | None = None,
 ) -> tuple[str, str]:
     """사이클 래더 판정(순수·PLAN §1 가드4, D-NAO-71 18:56+19:01) — **순위 피드백 상태 기계**.
     매 탐색 사이클(≥2h)마다 직전 스텝 이후의 순위·클릭으로 다음 수를 정한다(D+1 고정 아님).
 
-    verdict ∈ {'start','step_up','reactivate','stop_observe','capped','not_rank'} (BX3 카운터
-    매핑: start/step_up/reactivate→explored 실쓰기 / stop_observe→explored_held /
-    capped→explored_capped / not_rank→explored_not_rank).
+    verdict ∈ {'start','step_up','reactivate','stop_observe','capped','not_rank','ghost_hold'}
+    (BX3/VF 카운터 매핑: start/step_up/reactivate→explored 실쓰기 / stop_observe→explored_held /
+    capped→explored_capped / not_rank→explored_not_rank / ghost_hold→explored_ghost_hold).
+
+    evidence_active(VF D-NAO-83): 증거 구매 창 활성 여부(visibility.evidence_window). 유령 지면
+    (rank>_GHOST_RANK=5)에서 창이 비활성이면 스텝 금지('ghost_hold' — "보이는 자리를 사거나,
+    아예 안 사거나"). 창 활성이면 유령이어도 기존 판정 그대로(상한만 evidence_ceiling으로 해방돼
+    밴드까지 스텝). None(레거시 호출·미주입 테스트)은 True로 정규화 = 유령이어도 pass-through
+    (기존 동작 불변·회귀 0) — 레인(auto_operator)은 항상 명시적 bool을 주입한다.
 
     입력(전부 호출측 BX3이 조회해 넘김 — DB 접근 없음):
       last_probe:  직전 탐색 스텝 스냅샷 {"bid": 직전(前) 입찰, "rank": 그때 순위}|None(첫 스텝).
@@ -540,7 +565,10 @@ def ladder_judgment(
          확언할 수 없어 fail-toward-hold(스텝 대신 관측 — codex P1 안전 방향).
 
     상태 기계(우선순위 순):
-      ⓪ last_probe None → 'start'(첫 탐색) — 단 current_bid≥ceiling이면 'capped'(발동 불가).
+      ⓪ last_probe None(첫 탐색): 유령(rank>_GHOST_RANK=5)∧창 비활성이면 'ghost_hold'(첫 스텝
+         차단 — capped보다 우선, D-NAO-83·codex 1R P1) / current_bid≥ceiling이면 'capped'(발동
+         불가) / 그 외 'start'. rank None(imp=0 콜드)은 유령 판정 불가 → 기존 경로(VT4 플로어
+         눈먼 첫 스텝 회귀 방지).
       ① 이번 사이클 클릭 발생(clk>0) → 'stop_observe'(상향 정지·정착 ROAS 관측 인계, hold —
          영구 정지 아님. 목적=증거 확보 달성).
       ② 무클릭 ∧ rank≤2.5(과열밴드인데 클릭0 지속) → 'not_rank'(순위 병리 아님=소재/관련성,
@@ -554,7 +582,24 @@ def ladder_judgment(
       ⑥ 무클릭 ∧ 밴드 밖 ∧ 흐름 0 정체 ∧ 상한 미도달: 과거 클릭 이력(settled_clk>0 또는
          last_probe.had_click) → 'reactivate'([탐색UP·재가동]) / 아니면 'step_up'(적응 스텝 상향).
     """
+    # VF(D-NAO-83): 증거창 활성 여부 정규화 — None(레거시·미주입)은 True로 취급(pass-through,
+    # 회귀 0). 유령 스텝 금지는 evidence_active가 명시적 False일 때만 발동한다.
+    evidence_open = True if evidence_active is None else evidence_active
+
     if last_probe is None:
+        # ★VF(D-NAO-83, codex 1R P1 수용): 첫 탐색이라도 유령 지면(rank>5)∧증거창 비활성이면 스텝
+        # 금지(ghost_hold). 기존엔 last_probe None이 capped/start를 먼저 반환해 유령 그룹의 **첫
+        # 스텝**이 새어나갔다("보이는 자리를 사거나 아예 안 사거나" 위반). ghost_hold는 capped보다
+        # 우선한다(사유 "유령∧창없음"이 상한 도달보다 더 실행가능한 메시지). rank None(imp=0 눈먼
+        # 콜드 — 순위 관측 불가)은 유령 판정 불가 → 기존 경로 유지(VT4 플로어 그룹의 눈먼 첫 스텝
+        # 회귀 방지, §0 금지선 4).
+        first_rank = since_step_stats.get("avg_rank")
+        if first_rank is not None and Decimal(str(first_rank)) > visibility._GHOST_RANK and not evidence_open:
+            return (
+                "ghost_hold",
+                f"유령 지면(순위 {float(Decimal(str(first_rank))):.2f}>{visibility._GHOST_RANK})·증거창 비활성 — 첫 스텝 차단"
+                "(보이는 자리를 사거나 아예 안 사거나, D-NAO-83)",
+            )
         if current_bid >= ceiling:
             return ("capped", f"첫 탐색이나 경제성 상한 이미 도달(현 {current_bid}≥상한 {ceiling}) — 발동 불가·관찰 표기")
         return ("start", "직전 탐색 스텝 없음 — 첫 탐색 시작(적응 스텝)")
@@ -580,6 +625,16 @@ def ladder_judgment(
             return (
                 "stop_observe",
                 f"밴드 도달(순위 {float(r):.2f}≤{_EXPLORATION_BAND_HIGH})·무클릭 — 상향 정지·클릭 흐름 관측(과열밴드 진입 금지)",
+            )
+        # ★VF(D-NAO-83) 유령 스텝 금지: 유령 지면(rank>5)에 머무는데 증거창 비활성이면 스텝 금지
+        # ("보이는 자리를 사거나, 아예 안 사거나" — 학습가치 0 지면에서 소폭 상향 반복 차단).
+        # 창 활성(evidence_open True)이면 이 분기 미발동 → 아래 out-of-band 흐름(상한 해방돼 밴드
+        # 진입 스텝). not_rank(rank≤2.5)·밴드 도달(≤4)은 위에서 이미 처리 = 유령만 여기 도달.
+        if r > visibility._GHOST_RANK and not evidence_open:
+            return (
+                "ghost_hold",
+                f"유령 지면(순위 {float(r):.2f}>{visibility._GHOST_RANK})·증거창 비활성 — 스텝 금지"
+                "(보이는 자리를 사거나 아예 안 사거나, D-NAO-83)",
             )
 
     # 밴드 밖(rank>4) 또는 imp=0(rank None) · 이번 사이클 무클릭 — 상향 여지 판정.
