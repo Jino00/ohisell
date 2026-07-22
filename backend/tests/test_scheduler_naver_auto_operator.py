@@ -72,6 +72,21 @@ def test_hourly_job_function_exists_and_has_self_contained_session_pattern():
     assert "db.close()" in src
 
 
+def test_px4_briefing_wired_with_independent_fail_open_try():
+    """PX4(§4, docs/PLAN_naver-ad-powerlink-autoexclude.md): 파워링크 예외 브리핑·대행사
+    주간 브리핑이 08:50 일 레인에 배선되고, 자기만의 try/except·독립 세션(db3)으로 감싸여
+    있는지 소스 검증(test_naver_searchterm_px4.py가 함수 자체의 유/무 분기·침묵을 커버,
+    이 테스트는 "실패해도 일 레인을 못 죽인다"는 배선 계약만 확인 — apscheduler 미설치
+    환경에서도 실제 job을 실행하지 않고 정적 검증한다)."""
+    src = inspect.getsource(scheduler_service.run_naver_auto_operator_daily_job)
+    assert "run_exclusion_exception_briefing" in src
+    assert "run_agency_powerlink_weekly_briefing" in src
+    # PX4 블록이 run_search_term_ss_lane 블록과 분리된 자기 try/except를 가진다(한쪽 실패가
+    # 다른 쪽·일 레인 집행을 못 막게) — "PX4 브리핑 에러(fail-open)" 로그가 그 증거.
+    assert "PX4 브리핑 에러(fail-open)" in src
+    assert "db3.close()" in src
+
+
 def test_default_cron_daily_is_0850_kst():
     src = inspect.getsource(scheduler_service._ensure_default_states)
     assert '("run_naver_auto_operator_daily", "50 8 * * *")' in src

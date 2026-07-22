@@ -147,15 +147,16 @@ def test_rolling_window_accumulates_within_window(db):
     assert cands[0]["clk"] == 12 and cands[0]["cost"] == 8000
 
 
-# ── ⑥ 파워링크 confirm_required 마킹(§난제 5) ──
-def test_powerlink_candidate_marked_confirm_required(db):
+# ── ⑥ 파워링크는 30일 전용 게이트로 분리(PX1) — 스코프(auto_operate) 없으면 자동 후보 아님 ──
+def test_powerlink_out_of_scope_not_autofire_candidate(db):
+    # 캠페인 settings 없음(auto_operate=False) → 파워링크 자동 발사 후보 0(§0 3 대행사 무실쓰기).
+    # cost 6,000 < 대행사 브리핑 게이트(30,000)라 agency_powerlink도 비어 있음.
     _map_product(db, adgroup_id="grp-pl")
     _term(db, term="파워링크검색어", source="expkeyword", adgroup_id="grp-pl", clk=20, cost=6000)
     out = judge.judge_search_terms(db, now=_NOW)
     assert out["exclude_candidates"]["shopping"] == []
-    pl = out["exclude_candidates"]["powerlink"]
-    assert len(pl) == 1
-    assert pl[0]["confirm_required"] is True
+    assert out["exclude_candidates"]["powerlink"] == []
+    assert out["agency_powerlink"] == []
 
 
 # ── ⑦ 승격 후보(direct 전환) ──
