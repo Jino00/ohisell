@@ -1849,8 +1849,14 @@ def _vitality_daily_count(db: Session, campaign_id: str, now: datetime) -> int:
 
 
 def _vitality_group_on_cooldown(db: Session, adgroup_id: str, now: datetime) -> bool:
-    """같은 그룹 48h 재발사 쿨다운(§2 봉투) — [스파이럴복원] update_bid 확정 행이 48h 내
-    있으면 True. change_log 접두로 카운트(별도 상태 테이블 없음, 마이그레이션 0)."""
+    """같은 그룹 48h 재발사 쿨다운(§2 봉투) — [스파이럴복원] update_bid **시도** 행이 48h 내
+    있으면 True. change_log 접두로 카운트(별도 상태 테이블 없음, 마이그레이션 0).
+
+    ★GATE P2-2(재시도 폭풍 감쇠): 쿨다운은 성공(after_value 존재)뿐 아니라 실패·가드거부
+    (BEP 차단 등, after_value=None) 시도 행까지 전부 센다 — after_value 필터 없음. 근거: BEP
+    가드레일 차단은 시간 단위로 안 바뀌는 조건이라, 매시간 재발사 시도(라이브 GET 다발·failed
+    행 누적)를 봉투 보수 우선으로 시도 자체를 48h 감쇠한다. (일일 캡 ≤5는 반대로 성공만 센다 —
+    _vitality_daily_count 참조. 감쇠는 시도 기준, 캡은 실집행 기준으로 서로 다른 창을 지킨다.)"""
     since = now - timedelta(hours=_VITALITY_COOLDOWN_HOURS)
     row = (
         db.query(NaverChangeLog.id)
@@ -1859,7 +1865,6 @@ def _vitality_group_on_cooldown(db: Session, adgroup_id: str, now: datetime) -> 
             NaverChangeLog.entity_id == adgroup_id,
             NaverChangeLog.action == "update_bid",
             NaverChangeLog.dry_run.is_(False),
-            NaverChangeLog.after_value.isnot(None),
             NaverChangeLog.rationale.like(f"{VITALITY_RATIONALE_PREFIX}%"),
             NaverChangeLog.changed_at >= since,
         )
@@ -1874,37 +1879,48 @@ def _fire_vitality_revive(db: Session, target: dict, now: datetime, result: dict
     APPROVAL_SOURCE_HOURLY·rationale 접두 [스파이럴복원], naver_execution_harness.execute()가
     BEP 가드레일·킬스위치·쿨다운·일일상한을 전량 최종 검증(가드레일 우회 절대 없음)."""
     campaign_id, adgroup_id = target["campaign_id"], target["adgroup_id"]
-    # 킬스위치 실행 직전 재확인(시간당 레인 동형·즉시 정지 계약).
-    if not _auto_operate_now(db, campaign_id):
-        result["vitality_held"].append({"target_id": adgroup_id, "reason": "킬스위치 OFF(발사 직전 재확인)"})
-        _record_blocked(db, campaign_id=campaign_id, actor=diary.ACTOR_HOURLY,
-                        reason="[스파이럴복원] 킬스위치 OFF — auto_operate=False", now=now,
-                        target_type="adgroup", target_id=adgroup_id, action="bid_up",
-                        event_type="kill_switch")
+    # GATE P3(회복력): execute 이전 준비 구간(_live_current_bid·_record_blocked·commit)도
+    # per-target try로 감싼다 — 한 타깃의 예외(라이브 GET 오류·DB 커밋 실패 등)가 남은 타깃과
+    # 브리핑까지 죽이지 않게(fail-soft, 로그·held). execute 자체는 아래 별도 try가 담당.
+    try:
+        # 킬스위치 실행 직전 재확인(시간당 레인 동형·즉시 정지 계약).
+        if not _auto_operate_now(db, campaign_id):
+            result["vitality_held"].append({"target_id": adgroup_id, "reason": "킬스위치 OFF(발사 직전 재확인)"})
+            _record_blocked(db, campaign_id=campaign_id, actor=diary.ACTOR_HOURLY,
+                            reason="[스파이럴복원] 킬스위치 OFF — auto_operate=False", now=now,
+                            target_type="adgroup", target_id=adgroup_id, action="bid_up",
+                            event_type="kill_switch")
+            return
+        current_bid = _live_current_bid("adgroup", adgroup_id)
+        if current_bid is None:
+            result["vitality_held"].append({"target_id": adgroup_id, "reason": "라이브 현재가 재조회 실패"})
+            _record_blocked(db, campaign_id=campaign_id, actor=diary.ACTOR_HOURLY,
+                            reason="[스파이럴복원] 라이브 현재가 재조회 실패", now=now,
+                            target_type="adgroup", target_id=adgroup_id, action="bid_up")
+            return
+        step_bid = _clamp_step(current_bid, "up")
+        if step_bid is None:
+            result["vitality_held"].append({"target_id": adgroup_id, "reason": "UP 스텝 소실(상한 클램프)"})
+            return
+        proposal = NaverProposal(
+            proposal_type="bid_up", target_type="adgroup", target_id=adgroup_id,
+            campaign_id=campaign_id, adgroup_id=adgroup_id,
+            rationale=f"{VITALITY_RATIONALE_PREFIX} {target['reason']}",
+            expected_effect=(
+                "스파이럴 조기 복원 — 흐름 붕괴(노출·순위 궤적 하락) 검증 그룹의 밴드 복원 방향 "
+                "UP(D-NAO-81 B축). BEP 가드레일·킬스위치·쿨다운·48h 재발사 쿨다운이 백스톱."
+            ),
+            status="approved", target_bid=step_bid, approval_source=APPROVAL_SOURCE_HOURLY,
+        )
+        db.add(proposal)
+        db.commit()
+    except Exception as e:  # noqa: BLE001 — GATE P3 fail-soft: 준비 구간 예외는 이 타깃만 건너뛴다
+        db.rollback()
+        result["vitality_held"].append(
+            {"target_id": adgroup_id, "reason": f"발사 준비 예외(fail-soft): {type(e).__name__}"}
+        )
+        log.warning("auto_operator: 스파이럴 복원 발사 준비 실패 adgroup=%s(fail-soft): %s", adgroup_id, e)
         return
-    current_bid = _live_current_bid("adgroup", adgroup_id)
-    if current_bid is None:
-        result["vitality_held"].append({"target_id": adgroup_id, "reason": "라이브 현재가 재조회 실패"})
-        _record_blocked(db, campaign_id=campaign_id, actor=diary.ACTOR_HOURLY,
-                        reason="[스파이럴복원] 라이브 현재가 재조회 실패", now=now,
-                        target_type="adgroup", target_id=adgroup_id, action="bid_up")
-        return
-    step_bid = _clamp_step(current_bid, "up")
-    if step_bid is None:
-        result["vitality_held"].append({"target_id": adgroup_id, "reason": "UP 스텝 소실(상한 클램프)"})
-        return
-    proposal = NaverProposal(
-        proposal_type="bid_up", target_type="adgroup", target_id=adgroup_id,
-        campaign_id=campaign_id, adgroup_id=adgroup_id,
-        rationale=f"{VITALITY_RATIONALE_PREFIX} {target['reason']}",
-        expected_effect=(
-            "스파이럴 조기 복원 — 흐름 붕괴(노출·순위 궤적 하락) 검증 그룹의 밴드 복원 방향 "
-            "UP(D-NAO-81 B축). BEP 가드레일·킬스위치·쿨다운·48h 재발사 쿨다운이 백스톱."
-        ),
-        status="approved", target_bid=step_bid, approval_source=APPROVAL_SOURCE_HOURLY,
-    )
-    db.add(proposal)
-    db.commit()
     try:
         naver_execution_harness.execute(db, proposal.id, dry_run=False, now=now)
         result["vitality_fired"] += 1

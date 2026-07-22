@@ -161,17 +161,75 @@ def test_gate_excludes_paused_entity(db):
     assert res["revive_targets"] == []
 
 
-def test_gate_excludes_stoploss_history(db):
-    # change_log에 set_user_lock + [터미널정지] 이력 → 소생 금지(GATE ①②).
+def test_gate_excludes_policy_pause_lock(db):
+    # GATE P1-1: 실 policy_pause 사유문(proposal_writer._terminal_pause의
+    # '[스톱로스정지 — 캠페인 정책]' 접두)으로 시드된 성공 set_user_lock(after_value userLock:true)
+    # → 구조화 필드 판정으로 배제(사유 불문). rationale LIKE 매칭이 아닌 최종 잠금 상태로 판단.
     _seed_03(db)
     db.add(NaverChangeLog(
         entity_type="adgroup", entity_id=GROUP, campaign_id=CAMPAIGN, action="set_user_lock",
-        rationale="[터미널정지] 스톱로스 하드 정지", dry_run=False, after_value='{"userLock": true}',
-        changed_at=datetime(2026, 7, 10, 9, 0),
+        rationale=(
+            "[스톱로스정지 — 캠페인 정책] 스톱로스 발동 → 고삐 대신 정지"
+            "(loss_policy=stoploss_pause, D-NAO-65 UI1) clk=30."
+        ),
+        dry_run=False, after_value='{"userLock": true}',
+        changed_at=datetime(2026, 7, 10, 9, 0), executed_at=datetime(2026, 7, 10, 9, 0),
     ))
     db.commit()
     res = vitality_signal.detect_spirals(db, now=datetime(2026, 7, 19, 8, 20))
     assert res["revive_targets"] == []
+
+
+def test_gate_excludes_stale_status_on_with_recent_lock(db):
+    # GATE P1-1 sync-lag 창 재현: entity.status='on'(하루 1회 07:35 sync라 A축 08:50 정지 후
+    # ~23시간 stale) ∧ 최신 change_log 잠금(userLock:true) → change_log 권위 소스가 stale
+    # entity보다 우선(보수적 OR)해 배제. 캠페인 경보 자체는 유지(그룹 선정만 걸러짐).
+    _seed_03(db)  # entity status='on'(stale)
+    db.add(NaverChangeLog(
+        entity_type="adgroup", entity_id=GROUP, campaign_id=CAMPAIGN, action="set_user_lock",
+        rationale="[shopping_pause_candidates] 바닥 창 무전환 출혈 지속 → 정지(D-NAO-65 지속 밸브)",
+        dry_run=False, after_value='{"userLock": true}',
+        changed_at=datetime(2026, 7, 18, 9, 0), executed_at=datetime(2026, 7, 18, 9, 0),
+    ))
+    db.commit()
+    res = vitality_signal.detect_spirals(db, now=datetime(2026, 7, 19, 8, 20))
+    assert len(res["alerts"]) == 1
+    assert res["revive_targets"] == []
+
+
+def test_gate_allows_after_resume_when_status_on(db):
+    # GATE P1-1: 정지(pause userLock:true) 후 최신 이벤트가 재개(resume userLock:false) ∧
+    # entity status='on'이면 둘 다 정지 아님 → 통과(소생 허용). 구조화 판정이 최신 잠금 이벤트를
+    # 본다(오래된 정지 이벤트가 아니라).
+    _seed_03(db)
+    db.add(NaverChangeLog(
+        entity_type="adgroup", entity_id=GROUP, campaign_id=CAMPAIGN, action="set_user_lock",
+        rationale="[스톱로스정지 — 캠페인 정책] 정지", dry_run=False, after_value='{"userLock": true}',
+        changed_at=datetime(2026, 7, 15, 9, 0), executed_at=datetime(2026, 7, 15, 9, 0),
+    ))
+    db.add(NaverChangeLog(
+        entity_type="adgroup", entity_id=GROUP, campaign_id=CAMPAIGN, action="set_user_lock",
+        rationale="[재개] 소생 재개", dry_run=False, after_value='{"userLock": false}',
+        changed_at=datetime(2026, 7, 18, 9, 0), executed_at=datetime(2026, 7, 18, 9, 0),
+    ))
+    db.commit()
+    res = vitality_signal.detect_spirals(db, now=datetime(2026, 7, 19, 8, 20))
+    assert any(t["adgroup_id"] == GROUP for t in res["revive_targets"])
+
+
+def test_gate_ignores_failed_lock_attempt(db):
+    # 실패·가드거부 set_user_lock 행(dry_run=False ∧ after_value=None)은 네이버 상태를 안
+    # 바꿨으므로 잠금 이벤트로 세지 않는다(after_value 존재만 후보). status='on'이라 통과.
+    _seed_03(db)
+    db.add(NaverChangeLog(
+        entity_type="adgroup", entity_id=GROUP, campaign_id=CAMPAIGN, action="set_user_lock",
+        rationale="[스톱로스정지 — 캠페인 정책] 정지 [실쓰기 실패] WriteError",
+        dry_run=False, after_value=None,
+        changed_at=datetime(2026, 7, 18, 9, 0), executed_at=datetime(2026, 7, 18, 9, 0),
+    ))
+    db.commit()
+    res = vitality_signal.detect_spirals(db, now=datetime(2026, 7, 19, 8, 20))
+    assert any(t["adgroup_id"] == GROUP for t in res["revive_targets"])
 
 
 def test_gate_excludes_sufficient_sample_zero_conversion(db):

@@ -20,11 +20,12 @@
 #   블립에 견고한 "직전 2일 대비 악화 + 크기 게이트"로 정의한다.
 from __future__ import annotations
 
+import json
 import logging
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
-from sqlalchemy import func as sqlfunc, or_
+from sqlalchemy import func as sqlfunc
 from sqlalchemy.orm import Session
 
 from app.models import NaverAdDaily, NaverCampaignSettings, NaverChangeLog, NaverEntity
@@ -152,38 +153,68 @@ def _group_30d_stats(db: Session, adgroup_id: str, d0: date) -> dict:
     return {"clk": int(clk), "conv_cnt": int(conv_cnt), "conv_revenue": int(rev)}
 
 
+def _latest_lock_stopped(db: Session, adgroup_id: str) -> bool | None:
+    """그룹의 **최신 성공 set_user_lock 이벤트**의 최종 잠금 상태(GATE P1-1 구조화 판정).
+
+    권고안(GATE 적대 리뷰): rationale 부분 매칭(포맷 변화 취약·죽은 토큰) 대신 change_log의
+    구조화 필드로 판정한다. 성공 실쓰기 행(dry_run=False ∧ after_value 존재 — 실패·가드거부·
+    dry-run 행은 after_value를 안 채움)만 후보로, 가장 최근 이벤트의 after_value에서 userLock을
+    파싱한다(set_user_lock의 after_value = writer 재조회 dict, 최상위 userLock 키. pause↔resume
+    구분은 이 값 — bm_diff.py status_flip 관례와 동일: pause→true / resume→false).
+
+    반환: None=그런 이벤트 없음(우리가 정지·재개한 적 없음 — 판정 근거 없음).
+          True=최종 잠금(정지) 또는 파싱 불가(fail-closed — 정지로 간주).
+          False=최종 재개(resume, userLock=false — 소생 허용 가능)."""
+    ev = (
+        db.query(NaverChangeLog.after_value)
+        .filter(
+            NaverChangeLog.entity_type == "adgroup",
+            NaverChangeLog.entity_id == adgroup_id,
+            NaverChangeLog.action == "set_user_lock",
+            NaverChangeLog.dry_run.is_(False),
+            NaverChangeLog.after_value.isnot(None),
+        )
+        .order_by(NaverChangeLog.changed_at.desc(), NaverChangeLog.id.desc())
+        .first()
+    )
+    if ev is None:
+        return None
+    try:
+        parsed = json.loads(ev[0])
+    except (ValueError, TypeError):
+        return True  # 파싱 불가 = fail-closed(정지로 간주 → 배제)
+    if not isinstance(parsed, dict):
+        return True
+    lock = parsed.get("userLock")
+    if isinstance(lock, bool):
+        return lock
+    return True  # userLock 키 부재/비불리언 = fail-closed
+
+
 def _conflict_gate_pass(db: Session, adgroup_id: str, d0: date) -> bool:
     """충돌 방지 게이트(PLAN §0 2 — GATE 최우선). A축 확정 손실 개체는 소생 금지.
     fail-closed: 판단 불가(예외·엔티티 부재)는 전부 제외(False).
 
     ①naver_entity status≠'on'(off/deleted=userLock 병합) 제외 — 행 부재도 제외(fail-closed:
-      on을 확인 못 하면 소생 금지) ②change_log에 set_user_lock ∧ rationale에
-      [shopping_pause_candidates]/[터미널정지] 이력 있으면 제외(A축 스톱로스/터미널정지)
-      ③과거 30일 전환 ≥1 또는 클릭 표본 미달(<10)인 그룹만 통과(충분 표본 무전환=A축이 자른
-      것, 소생 금지)."""
+      on을 확인 못 하면 소생 금지). 단 sync가 하루 1회(07:35)라 A축 08:50 정지 후 ~23시간
+      'on'으로 stale일 수 있다.
+    ②change_log 잠금 이벤트를 **stale entity.status보다 우선하는 권위 소스**로 쓴다(GATE P1-1)
+      — 최신 성공 set_user_lock의 최종 userLock이 true(정지)면 사유 불문 배제. 정지↔재개
+      구분은 rationale 텍스트가 아니라 구조화 필드로(포맷 변화 취약성 원천 제거). ①②는
+      보수적 OR: 둘 중 하나라도 "정지"를 가리키면 배제. resume(userLock=false) 후이고
+      entity status도 'on'이면 둘 다 정지 아님 → 통과(소생 허용).
+    ③과거 30일 전환 ≥1 또는 클릭 표본 미달(<10)인 그룹만 통과(충분 표본 무전환=A축이 자른
+      것, 소생 금지 — §0 2 무전환 확정 게이트, ①②와 별개로 유지)."""
     try:
         row = (
             db.query(NaverEntity.status)
             .filter(NaverEntity.entity_type == "adgroup", NaverEntity.entity_id == adgroup_id)
             .first()
         )
-        if row is None or row[0] != "on":
-            return False
-        stopped = (
-            db.query(NaverChangeLog.id)
-            .filter(
-                NaverChangeLog.entity_type == "adgroup",
-                NaverChangeLog.entity_id == adgroup_id,
-                NaverChangeLog.action == "set_user_lock",
-                NaverChangeLog.dry_run.is_(False),
-                or_(
-                    NaverChangeLog.rationale.like("%[shopping_pause_candidates]%"),
-                    NaverChangeLog.rationale.like("%[터미널정지]%"),
-                ),
-            )
-            .first()
-        )
-        if stopped is not None:
+        entity_stopped = row is None or row[0] != "on"
+        changelog_stopped = _latest_lock_stopped(db, adgroup_id)  # None=이력 없음
+        # 보수적 OR: entity(stale 가능) 또는 change_log 권위 소스 중 하나라도 정지면 배제.
+        if entity_stopped or changelog_stopped is True:
             return False
         st = _group_30d_stats(db, adgroup_id, d0)
         return st["conv_cnt"] >= 1 or st["clk"] < _MIN_CLICK_SAMPLE

@@ -236,6 +236,47 @@ def test_cooldown_expired_allows_refire(db):
     mock_exec.assert_called_once()
 
 
+def test_cooldown_counts_blocked_attempts(db):
+    """GATE P2-2 재시도 폭풍 감쇠 — BEP 차단 등 실패·가드거부 시도 행(after_value=None)도 48h
+    쿨다운으로 재발사 억제(after_value 필터 없음). BEP 차단은 시간 단위로 안 바뀌는 조건이라
+    시도 자체를 봉투 보수 우선으로 감쇠 — 매시간 라이브 GET 다발·failed 행 누적을 막는다."""
+    _seed_spiral(db)
+    db.add(NaverChangeLog(
+        entity_type="adgroup", entity_id=GROUP, campaign_id=CAMPAIGN, action="update_bid",
+        rationale=f"{auto_operator.VITALITY_RATIONALE_PREFIX} 과거 시도 [실행 불가] 가드레일 차단 — BEP",
+        dry_run=False, after_value=None,
+        changed_at=NOW - timedelta(hours=1), executed_at=NOW - timedelta(hours=1),
+    ))
+    db.commit()
+    with patch.object(auto_operator, "_live_current_bid", return_value=1000), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec, \
+         patch.object(auto_operator.slack_notifier, "notify_text", return_value={"sent": True}):
+        result = _result()
+        auto_operator._run_vitality_step(db, NOW, result)
+
+    assert result["vitality_fired"] == 0
+    mock_exec.assert_not_called()
+    assert any("쿨다운" in h["reason"] for h in result["vitality_held"])
+
+
+# ══════════════════════════ GATE P3 회복력(발사 준비 fail-soft) ══════════════════════════
+
+def test_fire_prep_exception_is_fail_soft(db):
+    """GATE P3 — 준비 구간(_live_current_bid) 예외는 fail-soft: 해당 타깃만 held되고 예외가
+    전파되지 않아 브리핑은 정상 발화한다(한 타깃 예외가 남은 타깃·브리핑을 죽이지 않음)."""
+    _seed_spiral(db)
+    with patch.object(auto_operator, "_live_current_bid", side_effect=RuntimeError("라이브 GET 폭발")), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec, \
+         patch.object(auto_operator.slack_notifier, "notify_text", return_value={"sent": True}) as mock_slack:
+        result = _result()
+        auto_operator._run_vitality_step(db, NOW, result)  # 예외 전파 없음
+
+    assert result["vitality_fired"] == 0
+    mock_exec.assert_not_called()
+    assert any("fail-soft" in h["reason"] for h in result["vitality_held"])
+    mock_slack.assert_called_once()  # 브리핑은 살아있음(fail-soft)
+
+
 # ══════════════════════════ GATE ⑥ 기존 시간당 레인 회귀 0 ══════════════════════════
 
 def test_hourly_lane_carries_vitality_keys_and_no_alert_silent(db):
