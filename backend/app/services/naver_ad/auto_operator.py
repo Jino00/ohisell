@@ -34,7 +34,7 @@ from app.models import (
     NaverProposal,
     NaverRetroSignal,
 )
-from app.services.naver_ad import bid_rank_curve, bid_simulator, campaign_target_resolver, ctr_alert, diagnosis, diary, effective_bid, exploration, guardrail_gate, intraday_roas, naver_execution_harness, naver_sa_writer, rank_servo, slack_notifier, vitality_signal
+from app.services.naver_ad import bid_rank_curve, bid_simulator, campaign_target_resolver, ctr_alert, diagnosis, diary, effective_bid, exploration, guardrail_gate, intraday_roas, naver_execution_harness, naver_sa_writer, rank_servo, slack_notifier, visibility, vitality_signal
 from app.services.naver_ad.bid_step_types import BID_UP_TYPES, EXPLORATION_STEP_TYPES, encode_base_bid, encode_exploration_ceiling
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.services.naver_ad.guardrail_gate import _MAX_CHANGE_PCT
@@ -80,6 +80,11 @@ ACTION_VITALITY_BRIEFING = "vitality_spiral_briefing"  # diary observe action(�
 ACTION_CTR_ALERT_BRIEFING = "ctr_alert_briefing"  # diary observe action(브리핑 렌더용)
 _CTR_ALERT_BRIEFING_TOP_N = 20  # PX 브리핑 관례(_TOP_N=10)보다 넉넉히(창별 2건/그룹 가능)
 _CTR_ALERT_LADDER_SKIP_REASON = "CTR경보 — 소재 처방 대상, 추가 UP 무의미"
+
+# ── VF(D-NAO-83 가시성 우선) 유령∧창 비활성 관측(VT3b 최소형) ──
+# 새 권한 없음(§0.5 "관측 라인만·실쓰기 0") — 일 레인 diary observe 1개(경보 채널 규칙: diary만).
+ACTION_GHOST_VISIBILITY_BRIEFING = "ghost_visibility_briefing"  # diary observe action(관측 렌더용)
+_GHOST_VISIBILITY_BRIEFING_TOP_N = 20
 
 # B3(D-NAO-65) 소재-레벨 입찰 제어 카나리 게이트. auto_operate 캠페인 중 이 집합에 든
 # 캠페인만 레버 미연결(source='ad') 그룹에서 ad-레벨 실쓰기(update_ad_bid)로 라우팅한다 —
@@ -538,6 +543,69 @@ def _run_ctr_alert_briefing(db: Session, now: datetime, result: dict) -> None:
         log.warning("auto_operator: CTR 경보 브리핑 실패(fail-open): %s", e)
 
 
+def _run_ghost_visibility_briefing(db: Session, now: datetime, result: dict) -> None:
+    """VF(D-NAO-83 가시성 우선) 유령∧증거창 비활성 관측 — 일 레인(08:50)에서 D-1(어제)
+    naver_ad_daily의 SHOPPING 그룹 중 유령 지면(avg_rank>_GHOST_RANK=5)이면서 증거 구매 창이
+    비활성(경제성/예산/표본 사유)인 그룹을 diary observe로 관측 기록한다(VT3b 최소형·실쓰기 0).
+    Slack 없음(§0.5 "관측 라인만"·경보 채널 규칙 = diary만). 없는 날 완전 침묵.
+    fail-open: 이 스텝 실패가 일 레인 본작업(승인/실행/stale 정리)을 막지 않는다(CTR 브리핑 동형).
+    _run_ctr_alert_briefing과 완전 독립 — 자기 런에서 D-1 실측으로 파생(시간당 result 미참조)."""
+    try:
+        auto_ids = _auto_operate_campaign_ids(db)
+        if not auto_ids:
+            result["ghost_visibility_observed"] = 0
+            return
+        today = now.date()
+        yesterday = today - timedelta(days=1)
+        # D-1 SHOPPING 그룹별 노출·순위합(sentinel·그룹 sentinel '' 제외) — 유령 판별 원료.
+        rows = (
+            db.query(
+                NaverAdDaily.campaign_id, NaverAdDaily.adgroup_id,
+                sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.imp), 0),
+                sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.rank_sum), 0),
+            )
+            .filter(
+                NaverAdDaily.ad_date == yesterday,
+                NaverAdDaily.campaign_type == "SHOPPING",
+                NaverAdDaily.campaign_id.in_(auto_ids),
+                NaverAdDaily.adgroup_id != BACKFILL_SENTINEL_ADGROUP,
+                NaverAdDaily.adgroup_id != "",
+            )
+            .group_by(NaverAdDaily.campaign_id, NaverAdDaily.adgroup_id)
+            .all()
+        )
+        observed: list[str] = []
+        for camp_id, ag_id, imp_sum, rank_sum in rows:
+            imp_sum = int(imp_sum)
+            if imp_sum <= 0:
+                continue
+            avg_rank = Decimal(int(rank_sum)) / Decimal(imp_sum)
+            if avg_rank <= visibility._GHOST_RANK:
+                continue  # 유령 아님(가시권)
+            win = visibility.evidence_window(db, ag_id, camp_id, today)
+            if win["active"]:
+                continue  # 창 활성 = 증거 구매 진행 중(스텝 허용) — 관측 대상 아님
+            observed.append(f"- {camp_id}/{ag_id}(순위 {float(avg_rank):.2f}): {win['reason']}")
+        result["ghost_visibility_observed"] = len(observed)
+        if not observed:
+            return  # 관측 대상 없음 = 침묵
+        top = observed[:_GHOST_VISIBILITY_BRIEFING_TOP_N]
+        remainder = len(observed) - len(top)
+        if remainder > 0:
+            top.append(f"- 외 {remainder}건")
+        header = (
+            f"{today.isoformat()} 유령∧증거창 비활성 관측 {len(observed)}건(D-NAO-83) — "
+            "유령 지면(순위>5)에 머무나 증거 구매 창이 열리지 않은 그룹(스텝 금지 상태) — 관측 전용"
+        )
+        text = "\n".join([header] + top)
+        diary.write_diary_entry(
+            db, "observe", "", actor=diary.ACTOR_DAILY, action=ACTION_GHOST_VISIBILITY_BRIEFING,
+            rationale=text, now=now,
+        )
+    except Exception as e:  # noqa: BLE001 — VF 관측 실패는 일 레인 본작업과 분리(fail-open)
+        log.warning("auto_operator: 유령 가시성 관측 실패(fail-open): %s", e)
+
+
 def run_daily_lane(db: Session, *, now: datetime | None = None) -> dict:
     """D-NAO-48 정책의 서버 코드화 — auto_operate 캠페인의 당일 생성 pending 실행형
     (bid_up/bid_down/pause)을 심사·승인·집행(PLAN §3). 08:50 크론(catch-up 포함).
@@ -699,6 +767,10 @@ def run_daily_lane(db: Session, *, now: datetime | None = None) -> dict:
     # ctr_alert 자신도 자체 auto_operate 검증을 한다, 이중 방어). fail-open은 함수 내부에서 처리.
     result["ctr_alerts"] = 0
     _run_ctr_alert_briefing(db, now, result)
+
+    # VF(D-NAO-83): 유령∧증거창 비활성 관측(VT3b 최소형·diary만·실쓰기 0) — CTR 브리핑과 독립.
+    result["ghost_visibility_observed"] = 0
+    _run_ghost_visibility_briefing(db, now, result)
 
     return result
 
@@ -1843,9 +1915,19 @@ def _run_exploration_for_campaign(
                 continue
             exec_target_type, exec_target_id, step_base = "ad", eff["max_ad_id"], ad_live_bid
 
-        # 경제성 상한(유일 가격 브레이크) — 스텝 기준가 기반.
+        # VF(D-NAO-83): 증거 구매 창 판정(무테이블 파생) — 정착창 clk는 위에서 산출한 값 재사용
+        # (원칙18-8·재계산 회피). 창 활성 그룹만 콜드 상한을 캠페인 90일 실측 RPC로 해방한다.
+        win = visibility.evidence_window(db, adgroup_id, campaign_id, today, settlement_clk=settled_clk)
+        ev_ceiling = None
+        if win["active"]:
+            bep_roas = exploration.resolve_exploration_bep_roas(db, campaign_id, adgroup_id)
+            ev_ceiling = visibility.evidence_ceiling(db, campaign_id, bep_roas, step_base, today)
+
+        # 경제성 상한(유일 가격 브레이크) — 스텝 기준가 기반. 증거창 활성∧대체 상한 산출 시
+        # 그 상한을 주입(콜드 순환 해방), 아니면 레거시 경제성 상한(회귀 0).
         ceiling = exploration.exploration_ceiling(
             db, campaign_id, adgroup_id, step_base, window_from, window_to,
+            evidence_ceiling_value=(ev_ceiling if win["active"] and ev_ceiling is not None else None),
         )
 
         obs = _exploration_observe(db, adgroup_id, curve, now, last_step)
@@ -1868,8 +1950,22 @@ def _run_exploration_for_campaign(
         verdict, vreason = exploration.ladder_judgment(
             ladder_probe, obs["since"], ceiling, step_base,
             recent_flow_clk=obs["flow_clk"], settled_clk=settled_clk, flow_available=obs["flow_available"],
+            evidence_active=win["active"],
         )
 
+        # VF(D-NAO-83): 유령 지면(rank>5)·증거창 비활성 → 스텝 금지(기록만·실쓰기 0). 시간당
+        # 관측 라인으로도 수집(ghost_hold_groups) — 일 레인 브리핑과 별개(각자 자기 런에서 파생).
+        if verdict == "ghost_hold":
+            result["explored_ghost_hold"] += 1
+            result["ghost_hold_groups"].append({
+                "adgroup_id": adgroup_id, "rank": current_rank,
+                "current_bid": step_base, "reason": win["reason"],
+            })
+            result["held"].append({"target_id": exec_target_id, "reason": f"[탐색] {vreason}"})
+            _record_blocked(db, campaign_id=campaign_id, actor=diary.ACTOR_EXPLORE, reason=vreason,
+                            now=now, target_type=exec_target_type, target_id=exec_target_id,
+                            adgroup_id=adgroup_id, action="bid_up")
+            continue
         if verdict == "capped":
             result["explored_capped"] += 1
             result["held"].append({"target_id": exec_target_id, "reason": f"[탐색] {vreason}"})
@@ -2193,6 +2289,9 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
         "explored_capped": 0,   # 경제성 상한 도달로 종료
         "explored_not_rank": 0,  # rank≤2.5·클릭0 = 순위 병리 아님 진단 종료
         "explored_held": 0,     # 밴드 도달/클릭 hold(상향 정지·관측)
+        # VF(D-NAO-83 가시성 우선) 카운터·관측(라이브 관측용):
+        "explored_ghost_hold": 0,  # 유령 지면(rank>5)·증거창 비활성 → 스텝 금지
+        "ghost_hold_groups": [],   # 유령∧창 비활성 그룹 관측 라인(adgroup/rank/bid/사유)
         # VT2(D-NAO-81 B축 스파이럴 복원) 카운터(라이브 관측용):
         "vitality_alerts": 0,   # S1∧S2 스파이럴 경보 캠페인 수
         "vitality_fired": 0,    # 복원 UP 실쓰기(execute 성공) 수
