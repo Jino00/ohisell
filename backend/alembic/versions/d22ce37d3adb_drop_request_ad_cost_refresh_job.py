@@ -1,7 +1,7 @@
 """drop request_ad_cost_refresh job
 
 Revision ID: d22ce37d3adb
-Revises: u3v4w5x6y7z8
+Revises: e0f1a2b3c4d5
 Create Date: 2026-07-20 11:13:42.763818
 
 """
@@ -12,7 +12,10 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = 'd22ce37d3adb'
-down_revision: Union[str, None] = 'f2a3b4c5d6e7'
+# 3차 재부모화(2026-07-22): PR #68이 f2a3b4c5d6e7 위에 만들었으나, PR #79(BM 3체인)·#80(PX
+# e0f1a2b3c4d5)이 같은 부모 위로 먼저 prod에 적용돼 head가 2개로 갈라짐(prod alembic_version =
+# e0f1a2b3c4d5 단일 실측). 미적용 고아인 이쪽을 최신 head 위로 옮겨 단일 체인 복원(a7c9991 선례).
+down_revision: Union[str, None] = 'e0f1a2b3c4d5'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
