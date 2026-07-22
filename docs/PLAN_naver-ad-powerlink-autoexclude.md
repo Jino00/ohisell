@@ -99,11 +99,12 @@
 
 ## §체크리스트
 
-- [ ] PX1 judge 파워링크 게이트(Opus)
-- [ ] PX2 상태 테이블+자동 발사(Opus)
-- [ ] PX3 재심사 루프(Opus)
-- [ ] PX4 브리핑·드릴다운(Sonnet)
-- [ ] GATE 적대 리뷰 + 전체 테스트 회귀 0
-- [ ] safe_deploy 배포 + 라이브 검증(§검증)
-- [ ] codex 소급 리뷰(07-23, BM·SS 소급과 함께)
+- [x] PX1 judge 파워링크 게이트(Opus) — `cd44911`
+- [x] PX2 상태 테이블+자동 발사(Opus) — `373bee4`(alembic `e0f1a2b3c4d5`, restrict_kwd_id=WriteResult.created_ids 실측 회수, 슬롯=상태 테이블 근사)
+- [x] PX3 재심사 루프(Opus) — `c51028f`(킬스위치 OFF=상태기계 전면 동결·가장 보수적 해석)
+- [x] PX4 브리핑·드릴다운(Sonnet) — `07f58c5`(예외 브리핑=실행 있던 날만·대행사=일요 주간·GET /search-term/exclusions)
+- [x] GATE 적대 리뷰 + 전체 테스트 회귀 0 — **PASS(P1 0·P2 3건)** → P2 전건 수정 `48f4516`(복귀 캡 재카운트 백스톱·upsert 경합 수렴·그룹명 제품형 토큰 보호·summary GROUP BY) + 중복 상수 정리 `192537f`. 최종 **2866 passed·회귀 0**. 잔여 P3-1(개방 후 commit 실패 orphan=failed change_log로 관측 가능)·P3-3(lane skip 직접 테스트)은 기록만.
+- [x] safe_deploy 배포 + 라이브 검증(§검증) — **2026-07-22 13:52 KST** 7파일 CAS 통과·alembic `e0f1a2b3c4d5`·재시작·부팅 200. **라이브 judge 실측**: 자동발사 대상 1건(`아이패드종이필름`, 10세대_종이질감 그룹, 30d clk20·cost22,854·그룹 ROAS 1.10<target — 첫 자동 제외는 익일 08:50 레인) / 대행사 브리핑 17건(갤럭시S26필름 15.7만/30d 등·실쓰기 0) / 쇼핑 0·승격 378(기존 로직 불변). 3중 구조 차단(§0.5) 해소 실증.
+- [ ] 익일 08:50 레인 첫 자동 제외 라이브 관측(change_log dry_run=0·상태 행 excluded·restricted-keywords API 반영)
+- [ ] codex 소급 리뷰(07-23 09:30 예약됨, BM·SS 소급과 함께 — challenge 모드)
 - [ ] (후속) 아이패드 상품군 원가 확정 시 margin 폴백→실측 margin 자동 전환(코드 변경 불필요 — 게이트 3이 이미 margin 우선)

@@ -180,10 +180,11 @@
 
 ## 현재 진행 단계
 
-**★★최신(2026-07-22 오후, 워크트리 bm-layer-p1-p6-deployment-0d68d5): 스프린트 PX(파워링크 자동 제외+재심사, D-NAO-80) 진행 중.**
-- PR #79(BM 레이어) 브랜치를 이 브랜치에 병합(fast-forward — prod 코드와 정합, CAS 대비). PR #79 자체는 오픈 유지(병합=내일 관문 통과 후).
-- 계획서 `docs/PLAN_naver-ad-powerlink-autoexclude.md` 작성 완료(Fable, prod 라이브 실측 기반 — 3중 구조 차단 §0.5). PX1~PX3 구현=Opus 에이전트 진행 중, PX4=Sonnet 예정, GATE 적대 리뷰→전체 테스트→safe_deploy 순.
-- **예약 생성**: ①07-23 07:45 BM 관문 4개 자동 검증(scheduled-task `bm-layer-4gates-verify-0723` — 전 세션 HANDOFF의 "예약됨"이 실제 스케줄에 없어서 신규 생성) ②07-23 09:30 codex 소급 리뷰(`codex-retro-review-0723`, BM P1~P5+전 세션+PX, challenge 모드 권장).
+**★★최신(2026-07-22 오후, 워크트리 bm-layer-p1-p6-deployment-0d68d5): 스프린트 PX(파워링크 자동 제외+재심사, D-NAO-80) 전 페이즈 구현·배포·라이브 검증 완료.**
+- PR #79(BM 레이어) 브랜치를 이 브랜치에 병합(fast-forward — prod 코드와 정합, CAS 대비). PR #79 자체는 오픈 유지(병합=관문 통과 후).
+- 계획서 `docs/PLAN_naver-ad-powerlink-autoexclude.md`(Fable, prod 라이브 실측 기반 — 3중 구조 차단 §0.5). **PX1~PX4 구현 완료**(PX1~3=Opus `cd44911`/`373bee4`/`c51028f`, PX4=Sonnet `07f58c5`) → **GATE 적대 리뷰 PASS(P1 0·P2 3건)** → P2 전건 수정(`48f4516`) → **2866 passed·회귀 0** → **safe_deploy 배포 완료(13:52 KST, 7파일·alembic `e0f1a2b3c4d5`·부팅 200)**.
+- **라이브 judge 실측**: ours 자동발사 대상 1건(`아이패드종이필름`, 30d clk20·cost22,854·그룹 순손실 — 첫 자동 제외=익일 08:50 레인) / 대행사 브리핑 전용 17건(실쓰기 0) / 쇼핑 0·승격 로직 불변. 관측 잔여=익일 08:50 첫 실쓰기.
+- **예약 생성**: ①07-23 07:45 BM 관문 4개 자동 검증(scheduled-task `bm-layer-4gates-verify-0723` — 전 세션 HANDOFF의 "예약됨"이 실제 스케줄에 없어서 신규 생성, LESSONS 기록) ②07-23 09:30 codex 소급 리뷰(`codex-retro-review-0723`, BM P1~P5+전 세션+PX, challenge 모드 권장).
 
 **★(2026-07-22 오전, 워크트리 daily-rank-leash-profit-control): BM 벤치마크 레이어 스프린트(D-NAO-78 실행층) 진행 중.**
 - 계획서 `docs/PLAN_naver-ad-bm-layer.md` 완성(Opus)·Fable 검토 보강(캠페인/그룹 신설 감지 op_type 추가·§9-5 대행사 라벨 질문 해소=ours 식별만 필수).
