@@ -2,8 +2,15 @@
 # 매 sprint 완료 시 Claude가 이 파일을 갱신합니다.
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
-## 최신 상태 (2026-07-23 07:25, 워크트리 competent-brahmagupta-0125ba) — 관측 갭 2건 수리·배포·PR #86
-- **D-NAO-85 관측 갭 2건 수리(HANDOFF chip task_9f4ea74c 해소)** — 배포 완료(commit `c811652`, PR #86, main 미병합). 관측 전용·실행/가드레일 무접촉.
+## 최신 상태 (2026-07-23 07:35, 워크트리 vt34-deploy-visibility-first-7c103b) — ★세션 인계는 HANDOFF 우선
+- **HANDOFF: `.claude/memory/HANDOFF_ex-expansion-kickoff_20260723.md`** ← 새 세션은 이 파일 먼저.
+- **★D-NAO-85 확정(Jino 질책 — "RoAS 7% 올리면서 매출 52% 줄었는데 매출 극대화 전제는 어디 갔나")**: 03캠페인 6월 평균 대비 MOP 운영 후(07-19~21) 비교에서 약 ROAS 2.40→2.57(+7%)·매출 −52% 실측 → D-NAO-59(총이익 극대화, 한계ROAS≥BEP 볼륨확장) 위반 진단 동의(브레이크는 다수·즉각인데 액셀은 소폭·조건부뿐, 상설 확장 압력 메커니즘 부재). 귀속 주의: 하락 자체는 07-14~18 구MOP 말기 스파이럴 기원(우리가 인수는 바닥에서)이나 확장 압력 부재는 독립적으로 실재. **EX 스프린트 확정(Q1만 진행)** = 압력 존재 판정(캠페인 단위, 보정ROAS−BEP 갭)+압력 배분(그룹 단위, 밴드내 순위여유·고수요밴드밖·증거창 그룹 순 랭킹). **Q2(OG 자율개선 루프)는 Jino 지시로 보류**(백로그만, 재제안은 Jino 먼저). 이 세션은 기록·HANDOFF만 — 코드 변경 0.
+- **다음 세션 착수 순서(고정)**: ③07-22 포함 4일 재판정(03/04/17프로, 17프로=가격인하·N배송 첫주문·밴드진입 반영) → ②GAVE 목적함수 배선 실측(1차 소급채점만 배선·2차 flight_loop 미배선 확인) → ①EX 설계(Fable)·구현.
+- **승계(병행 관측)**: 07:45 BM 관문/08:50 PX+VF 유령 브리핑/09:30 codex 소급 · Z8 발표일 관찰(ref 37) · N배송 배송비 정산 라인 확인 · 관측 갭 2건 chip(task_9f4ea74c) · B+C 스프린트(EX 이후로 순연).
+- 상세=트랙 파일 D-NAO-85(`docs/tracks/active/track_naver-ad-optimization.md`) + 전 HANDOFF(아래) 참조.
+
+## 최신 상태 (2026-07-23 08:55, 워크트리 competent-brahmagupta-0125ba) — 관측 갭 2건 수리·배포·PR #86(병합대기)
+- **관측 갭 2건 수리 = chip task_9f4ea74c 구현** — 배포 완료(commit `c811652`, PR #86). 관측 전용·실행/가드레일 무접촉. ⚠️**번호 주의**: 이 세션 커밋이 "D-NAO-85" 태그를 달았으나 그 번호는 위 #87 세션의 **EX 스프린트**가 선점한 확정 결정이다. 이 관측 갭 수리는 트랙 결정번호가 아니라 chip 구현 — 커밋 태그는 오기(Jino 확인 필요, 필요시 후속 정정).
   - **갭①(로그 소실)**: `main.py`에 `logging.basicConfig(INFO, OHISELL_LOG_LEVEL override)` — root WARNING이라 `app.*` INFO 전량 소실이던 것 해소. uvicorn/uvicorn.access `propagate=False`(0.34.2 실측) 중복 없음·caplog 보존. + 시간당 로그 라인에 탐색/탐침 카운터(`explored`·`explored_ghost_hold` 등) 추가(레벨만 고쳐선 안 보이던 신규 카운터 표면화).
   - **갭②(침묵 관측분기)**: `diary.write_observe_if_changed()` 신설(상태 변화 시에만 저소음 observe 1행·매시 dedup) → `auto_operator._run_exploration_for_campaign`의 stop_observe·밴드도달·상한클램프 3분기 배선. state 토큰 observe_stop/band/ceiling.
   - 검증: 테스트 8건 추가(diary 6·레인 2)·**3020 passed 회귀 0**·`/codex review` GATE PASS. **라이브 합격(갭①)**: 07:21 재시작 후 prod pm2에 `app.*` INFO 신규 timestamped 포맷 출력·무에러 부팅. **08:20 시간당 라인 신규 카운터 출력 실측**: `...probed=0 | explored=0 explored_held=0 explored_capped=0 explored_not_rank=0 ghost_hold=0(groups=0)` — 갭① 완전 라이브 합격.
