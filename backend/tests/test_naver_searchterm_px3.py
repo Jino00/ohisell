@@ -357,3 +357,126 @@ def test_killswitch_off_freezes_reexamination(db):
     db.refresh(row_c)
     db.refresh(row_r)
     assert row_c.status == "probation" and row_r.status == "probation"  # 전면 동결
+
+
+# ── F2(codex 2R[P1-a]): 복귀 클레임 크래시 창(status='probation' ∧ probation_until IS NULL) 치유.
+#   _open_exclusion이 excluded→probation 클레임 커밋 후 ①delete 전 ②probation_until 세팅 전에
+#   크래시하면 개방·재판정·기존 고아 reconcile 어디에도 안 잡히는 좀비가 된다. change_log 증거로
+#   두 창을 구분해 복귀시킨다. ──
+def _prob_orphan(db, *, term, last_transition_at, adgroup_id="grp-web", campaign_id="cmp1"):
+    """probation ∧ probation_until=NULL 고아 1행(last_transition_at 지정)."""
+    row = _excl(db, term=term, adgroup_id=adgroup_id, campaign_id=campaign_id,
+                status="probation", restrict_kwd_id="rkw-1", next_review_at=date(2026, 7, 22),
+                probation_until=None)
+    row.last_transition_at = last_transition_at
+    db.commit()
+    return row
+
+
+def test_probation_orphan_window2_restore_log_backfills_probation_until(db):
+    """창②(delete·복귀 change_log 커밋 후 probation_until 세팅 전 크래시): 클레임 이후 커밋된
+    복귀 change_log(delete 성공 증거) 존재 → probation_until = last_transition_at + 14 소급 복원.
+    _run_reexamination 경유로 반환 dict 카운트(probation_healed)까지 검증."""
+    _scope(db)
+    lt = _NOW - timedelta(hours=1)  # 30분 창 밖(고아 확정)
+    row = _prob_orphan(db, term="창2고아", last_transition_at=lt)
+    db.add(NaverChangeLog(  # 클레임(lt) 이후 커밋된 복귀 성공 로그(after_value 존재)
+        entity_type="search_term", entity_id="창2고아", campaign_id="cmp1",
+        action=lane._RESTORE_ACTION, dry_run=False, after_value='{"after": []}',
+        changed_at=lt, executed_at=lt,
+    ))
+    db.commit()
+    res = lane._run_reexamination(db, [], _NOW)
+    assert res["probation_healed"] == 1
+    db.refresh(row)
+    assert row.status == "probation"  # delete는 성공했으므로 probation 유지
+    assert row.probation_until == lt.date() + timedelta(days=lane._PROBATION_DAYS)
+
+
+def test_probation_orphan_window1_no_restore_log_restores_excluded(db):
+    """창①(클레임 커밋 후 delete 전 크래시): 복귀 change_log 없음 → delete 미실행(키워드 등록
+    유지) → status='excluded' 복원(다음 재심사가 정상 개방 재시도). 직접 호출로 치유만 격리 검증."""
+    _scope(db)
+    row = _prob_orphan(db, term="창1고아", last_transition_at=_NOW - timedelta(hours=1))
+    healed = lane._reconcile_probation_orphans(db, _NOW)
+    assert healed == 1
+    db.refresh(row)
+    assert row.status == "excluded"
+    assert row.probation_until is None
+
+
+def test_probation_orphan_only_stale_restore_log_treated_as_window1(db):
+    """복귀 로그가 있어도 클레임(last_transition_at) *이전* 것(과거 사이클 잔재)이면 증거 아님 →
+    창①로 판정(excluded 복원). 결정 기준이 changed_at >= last_transition_at임을 못 박는다."""
+    _scope(db)
+    lt = _NOW - timedelta(hours=1)
+    row = _prob_orphan(db, term="과거로그", last_transition_at=lt)
+    db.add(NaverChangeLog(  # 클레임보다 앞선(2시간 전) 복귀 로그 — 이번 클레임의 증거가 아님
+        entity_type="search_term", entity_id="과거로그", campaign_id="cmp1",
+        action=lane._RESTORE_ACTION, dry_run=False, after_value='{"after": []}',
+        changed_at=_NOW - timedelta(hours=2), executed_at=_NOW - timedelta(hours=2),
+    ))
+    db.commit()
+    healed = lane._reconcile_probation_orphans(db, _NOW)
+    assert healed == 1
+    db.refresh(row)
+    assert row.status == "excluded"  # 과거 로그는 무시 → 창① 판정
+    assert row.probation_until is None
+
+
+def test_probation_orphan_fresh_claim_within_30min_untouched(db):
+    """30분 이내 신선 클레임(진행 중인 정상 개방)은 치유 대상 아님 — 상태 불변(오처리 방지)."""
+    _scope(db)
+    row = _prob_orphan(db, term="신선클레임", last_transition_at=_NOW - timedelta(minutes=10))
+    healed = lane._reconcile_probation_orphans(db, _NOW)
+    assert healed == 0
+    db.refresh(row)
+    assert row.status == "probation"
+    assert row.probation_until is None
+
+
+# ── F1(codex 2R[P1-b]): 소속 검증은 엔진 레벨 독립 커넥션 조회(auto_operator._auto_operate_now
+#   관례) — SQLite(WAL)에서 레인 세션이 먼저 읽기 트랜잭션을 연 뒤 entity_sync가 parent_id를
+#   커밋해도 스테일 스냅샷이 아니라 신선 값을 본다. ──
+def test_adgroup_belongs_reads_fresh_via_independent_connection(tmp_path):
+    from sqlalchemy import create_engine as _create_engine, event
+
+    db_file = tmp_path / "membership.db"
+    engine = _create_engine(f"sqlite:///{db_file}")
+
+    @event.listens_for(engine, "connect")
+    def _set_wal(dbapi_conn, _rec):  # WAL — 스냅샷 격리가 실재하는 모드로 검증
+        dbapi_conn.execute("PRAGMA journal_mode=WAL")
+
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+    seed = Session()
+    seed.add(NaverEntity(entity_type="adgroup", entity_id="grp-web", parent_id="cmp1",
+                         campaign_id="cmp1", campaign_type="WEB_SITE", name="grp", status="on"))
+    seed.commit()
+    seed.close()
+
+    lane_session = Session()
+    try:
+        # 레인이 조기 쿼리로 읽기 트랜잭션(스냅샷)을 연 상태 재현 — 처음엔 cmp1 소속.
+        assert lane_session.query(NaverEntity).filter(
+            NaverEntity.entity_id == "grp-web").one().parent_id == "cmp1"
+        assert lane._adgroup_belongs_to_campaign(lane_session, "grp-web", "cmp1") is True
+
+        # 타 프로세스(entity_sync)가 별도 커넥션으로 parent_id를 대행사 캠페인으로 이동 커밋.
+        with engine.connect() as other:
+            other.execute(
+                NaverEntity.__table__.update()
+                .where(NaverEntity.entity_id == "grp-web")
+                .values(parent_id="cmp-대행사")
+            )
+            other.commit()
+
+        # 독립 커넥션 조회 — 세션 스냅샷과 무관하게 신선한 소속(cmp1 아님·대행사)이 보여야 함.
+        assert lane._adgroup_belongs_to_campaign(lane_session, "grp-web", "cmp1") is False
+        assert lane._adgroup_belongs_to_campaign(lane_session, "grp-web", "cmp-대행사") is True
+        # 행 부재도 fail-closed(False) 유지.
+        assert lane._adgroup_belongs_to_campaign(lane_session, "grp-none", "cmp1") is False
+    finally:
+        lane_session.close()

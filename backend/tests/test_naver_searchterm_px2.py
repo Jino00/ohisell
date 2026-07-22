@@ -265,7 +265,7 @@ def test_reexamination_runs_before_new_autofire(db):
 
     def fake_reexam(db_, powerlink, now):
         calls.append("reexam")
-        return {"opened": 0, "reexcluded": 0, "restored": 0, "healed": 0}
+        return {"opened": 0, "reexcluded": 0, "restored": 0, "healed": 0, "probation_healed": 0}
 
     def fake_autofire(db_, cand, now):
         calls.append("autofire")
@@ -299,7 +299,7 @@ def test_reexam_consumes_cap_before_new_candidates(db):
             changed_at=now, executed_at=now,
         ))
         db_.commit()
-        return {"opened": 0, "reexcluded": 1, "restored": 0, "healed": 0}
+        return {"opened": 0, "reexcluded": 1, "restored": 0, "healed": 0, "probation_healed": 0}
 
     with patch.object(lane, "_run_reexamination", side_effect=fake_reexam):
         with patch.object(harness.naver_sa_writer, "add_restricted_keywords") as mock_write:
