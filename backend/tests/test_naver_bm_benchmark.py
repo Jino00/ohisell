@@ -214,7 +214,7 @@ def test_harness_runs_sa3_and_fail_open(db, monkeypatch):
     # SA-1/SA-2를 no-op으로 스텁(SA-3 단독 검증). SA-3는 이미 스냅샷을 시드했으므로 산출.
     monkeypatch.setattr(bm_harness, "snapshot_entities", lambda _db: {"ok": True})
     monkeypatch.setattr(bm_harness, "detect_agency_ops", lambda _db: {"ok": True})
-    out = bm_harness.run_bm_layer(db)
+    out = bm_harness.run_bm_layer(db, today=SDATE)  # 시드일 고정(달력일 무관 — 오늘 앵커 시 스냅샷 0매칭)
     assert out["benchmarks"] is not None
     assert db.query(NaverBmBenchmark).filter_by(bench_kind="bid_band").count() == 1
 

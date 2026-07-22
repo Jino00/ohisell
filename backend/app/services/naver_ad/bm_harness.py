@@ -20,9 +20,12 @@ from app.services.naver_ad.bm_snapshot import snapshot_entities, update_deep_dim
 log = logging.getLogger(__name__)
 
 
-def run_bm_layer(db: Session) -> dict:
+def run_bm_layer(db: Session, *, today: date | None = None) -> dict:
     """BM 레이어 1회 실행(07:37 KST, entity_sync 07:35 직후). P1 = SA-1 스냅샷(예산·확장검색
     Phase 3 일별 차원 포함), P2 = SA-2 diff.
+
+    today: SA-3 벤치마크 기준일(스냅샷일). None이면 compute_benchmarks가 kst_today()로 앵커한다.
+    테스트가 달력일과 무관하게 시드일을 고정할 수 있도록 주입 통로만 열어둔다(prod 호출은 None 유지).
 
     전면 fail-open: 각 SA 예외를 로깅 후 삼킨다(관찰 잡이 다른 크론을 못 막게). 각 SA는
     독립 try로 감싸 하나가 실패해도 나머지가 돈다. SA-2는 SA-1(오늘 스냅샷) 다음에 실행돼야
@@ -44,7 +47,7 @@ def run_bm_layer(db: Session) -> dict:
     # 실행돼야 당일 D 셋을 대조하지만, 독립 try로 감싸 SA-1/2 실패와 무관하게(전일 스냅샷으로도)
     # 시도한다 — 프라이어 소비는 전부 fail-open이라 벤치마크가 비어도 소비 SA는 기존대로 돈다.
     try:
-        result["benchmarks"] = compute_benchmarks(db)
+        result["benchmarks"] = compute_benchmarks(db, snapshot_date=today)
     except Exception as e:  # noqa: BLE001 — 관찰 잡 fail-open(§0-5)
         log.exception("[BM] SA-3 벤치마크 산출 실패(fail-open): %s", e)
 
