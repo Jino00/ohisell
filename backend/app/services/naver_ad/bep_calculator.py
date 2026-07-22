@@ -6,6 +6,7 @@
 # 참고 메모리: bep-roas-calculation-structure (BEP ROAS = 판매가 ÷ 공헌이익).
 from __future__ import annotations
 
+import json
 import logging
 import statistics
 from datetime import timedelta
@@ -32,7 +33,7 @@ _PRICE_WINDOW_DAYS = 120  # 대표 단가 산출 창(이 기간 주문 없으면
 # ── D-NAO-57 (C) 배송비: 건당 단가(부가세포함, Jino 확정 2026-07-18) ──
 # ★단가는 config 상수(단가 개정 대비), 적용은 주문 건별 배송방식 판별 기반(_order_shipping_cost).
 SHIPPING_COST_NORMAL = Decimal("1900")     # 일반배송 건당
-SHIPPING_COST_NBAESONG = Decimal("3020")   # N배송(품고 내일도착) 건당 — 곧 시작 예정
+SHIPPING_COST_NBAESONG = Decimal("3020")   # N배송(품고 내일도착/도착보장) 건당 — D-NAO-84 실배선
 SHIPPING_COST_BY_METHOD = {"normal": SHIPPING_COST_NORMAL, "nbaesong": SHIPPING_COST_NBAESONG}
 
 # ── D-NAO-57 (B) 광고 의사결정용 수수료율 분해 게이트 ──
@@ -141,16 +142,43 @@ def ad_commission_rate(db: Session) -> dict | None:
 
 
 def _order_shipping_cost(order_row=None) -> Decimal:
-    """주문 1건의 배송비(건당, 부가세포함) — 배송방식 판별 훅 (D-NAO-57 C).
+    """주문 1건의 배송비(건당, 부가세포함) — 배송방식 판별 훅 (D-NAO-57 C · D-NAO-84 실배선).
 
-    ★현시점 라이브 사실(원칙22): N배송(품고 내일도착)은 아직 시작 전이라 **전 건 일반배송(1,900)**
-    이 사실이다. N배송이 시작되면 배송방식이 혼재하므로("판매된 이력에서 배송방식을 확인하고
-    계산", Jino 2026-07-18) 원천 주문 응답의 배송방식 필드로 3,020을 판별해야 하는데, 그 확정
-    필드명이 아직 실측되지 않았다(원칙: 추정 금지 — Order 모델엔 전용 배송방식 컬럼이 없고
-    raw_data JSON의 expectedDeliveryMethod는 택배/직접 구분이지 N배송 판별이 아니다). 이 함수가
-    그 판별 훅 자리 — 필드 확정 후 (a) Order에 배송방식 컬럼 수집 확장 + (b) 여기서 order_row로
-    normal/nbaesong 판별만 하면 가중평균 구조(_avg_qty_and_logistics)가 그대로 혼재를 반영한다.
-    지금은 항상 일반배송을 반환한다."""
+    N배송(품고 내일도착/도착보장) 판별 필드가 실측되어(prod 주문 id 11929, 2026-07-22 21:52 KST
+    첫 N배송 주문 raw_data) 배선 완료. 판별자: 원천 주문 응답 entry(raw_data JSON)의
+    productOrder.deliveryAttributeType == "ARRIVAL_GUARANTEE" → N배송(3,020). 그 외(과거 전 건
+    "TODAY")·필드 부재 → 일반배송(1,900).
+
+    ★단일 판별자 원칙(원칙22, n=1 실측): 실측 주문엔 동반 키(logisticsCompanyId=="PG",
+    logisticsCenterId, arrivalGuaranteeDate, deliveryTagType=="TOMORROW")도 함께 관측됐으나,
+    프로그램 레벨 마커는 deliveryAttributeType 하나로 고정한다(동반 신호는 참고, 판별에 미사용 —
+    표본이 얇을 때 판별자를 늘리면 오탐 위험). 파싱 실패·raw_data 부재·필드 부재는 모두
+    일반배송으로 폴백(fail-safe — 종전 동작 보존, BEP를 낙관 쪽으로 흔들지 않음).
+
+    order_row: _avg_qty_and_logistics의 경량 행 dict({"raw_data": ...}) 또는 raw_data 속성을
+    가진 ORM 행. None이면 일반배송."""
+    if not order_row:
+        return SHIPPING_COST_NORMAL
+    if isinstance(order_row, dict):
+        rd = order_row.get("raw_data")
+    else:
+        rd = getattr(order_row, "raw_data", None)
+    parsed = None
+    if isinstance(rd, dict):
+        parsed = rd
+    elif isinstance(rd, str) and rd:
+        try:
+            obj = json.loads(rd)
+            parsed = obj if isinstance(obj, dict) else None
+        except (ValueError, TypeError):
+            parsed = None  # 잘림/비JSON → 폴백
+    if not isinstance(parsed, dict):
+        return SHIPPING_COST_NORMAL
+    po = parsed.get("productOrder")
+    if not isinstance(po, dict):
+        return SHIPPING_COST_NORMAL
+    if po.get("deliveryAttributeType") == "ARRIVAL_GUARANTEE":
+        return SHIPPING_COST_NBAESONG
     return SHIPPING_COST_NORMAL
 
 
@@ -159,8 +187,9 @@ def _avg_qty_and_logistics(db: Session) -> dict[str, dict]:
 
     logistics(단가당) = 상품별 순배송원가(건당) ÷ 평균 주문수량.
       순배송원가 net_ship = max(0, 지불 배송비 − 평균 수취 배송비)
-        - 지불 배송비: 주문 건별 배송방식 가중평균(현시점 전 건 일반배송 1,900,
-          _order_shipping_cost 훅 참조 — N배송 판별 필드 확정 시 혼재 자동 반영)
+        - 지불 배송비: 주문 건별 배송방식 가중평균(_order_shipping_cost가 raw_data의
+          productOrder.deliveryAttributeType로 일반배송 1,900 / N배송 3,020을 건별 판별 —
+          D-NAO-84 실배선. 혼재 주문이면 가중평균으로 자동 반영)
         - 수취 배송비: Order.shipping_cost(고객이 낸 deliveryFeeAmount) 실측 평균 —
           라이브 실측(120일): 채널 25.4% 주문이 수취(상품별 무료/유료 혼합이 사실).
         - ★max(0,·) 클램프 = 보수 방향: 수취가 지불을 초과해도 배송 마진을 이익(음수 물류비)으로
@@ -174,22 +203,27 @@ def _avg_qty_and_logistics(db: Session) -> dict[str, dict]:
     cutoff = kst_today() - timedelta(days=_PRICE_WINDOW_DAYS)
 
     def _collect(since):
-        # cpid → 주문 행(경량) 리스트. 배송방식 판별에 raw_data가 불필요해(전 건 일반배송)
-        # quantity+shipping_cost만 로드한다 — N배송 판별 필드 확정 시 여기에 그 컬럼을 추가한다.
-        qy = db.query(Order.platform_product_id, Order.quantity, Order.shipping_cost).filter(
+        # cpid → 주문 행(경량) 리스트. raw_data를 함께 로드해 _order_shipping_cost가 건별
+        # 배송방식(일반/N배송)을 판별한다(D-NAO-84). 상품당 주문 수는 제한적이라 행당 JSON 파싱
+        # 비용은 무시할 수준.
+        qy = db.query(
+            Order.platform_product_id, Order.quantity, Order.shipping_cost, Order.raw_data
+        ).filter(
             Order.channel_id == NAVER_CHANNEL_ID,
             Order.quantity > 0,
         )
         if since is not None:
             qy = qy.filter(Order.order_date >= since)
         acc: dict[str, list] = {}
-        for pid, qn, ship_in in qy.all():
+        for pid, qn, ship_in, raw in qy.all():
             if not pid:
                 continue
             acc.setdefault(pid, []).append({
                 "quantity": int(qn),
                 # 수취 배송비: None=배송비 포함 상품(수취 0 취급, Order 모델 주석과 정합)
                 "collected": Decimal(str(ship_in)) if ship_in else Decimal("0"),
+                # 지불 배송비 판별용 원천 응답(productOrder.deliveryAttributeType)
+                "raw_data": raw,
             })
         return acc
 
@@ -203,7 +237,7 @@ def _avg_qty_and_logistics(db: Session) -> dict[str, dict]:
         avg_qty = Decimal(total_qty) / Decimal(n) if n and total_qty > 0 else Decimal("1")
         if avg_qty <= 0:
             avg_qty = Decimal("1")
-        # 지불: 건별 배송방식 가중평균(현재 전 건 일반배송 → 1,900, 훅 확장 시 혼재 반영).
+        # 지불: 건별 배송방식 가중평균(_order_shipping_cost가 raw_data로 일반/N배송 판별).
         ship_sum = sum((_order_shipping_cost(r) for r in rows), Decimal("0"))
         shipping = (ship_sum / Decimal(n)) if n else SHIPPING_COST_NORMAL
         # 수취: 주문당 평균(COALESCE(shipping_cost,0) — 무료배송 주문은 0으로 평균에 포함).
