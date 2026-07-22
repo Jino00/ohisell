@@ -6,8 +6,8 @@
 - **D-NAO-85 관측 갭 2건 수리(HANDOFF chip task_9f4ea74c 해소)** — 배포 완료(commit `c811652`, PR #86, main 미병합). 관측 전용·실행/가드레일 무접촉.
   - **갭①(로그 소실)**: `main.py`에 `logging.basicConfig(INFO, OHISELL_LOG_LEVEL override)` — root WARNING이라 `app.*` INFO 전량 소실이던 것 해소. uvicorn/uvicorn.access `propagate=False`(0.34.2 실측) 중복 없음·caplog 보존. + 시간당 로그 라인에 탐색/탐침 카운터(`explored`·`explored_ghost_hold` 등) 추가(레벨만 고쳐선 안 보이던 신규 카운터 표면화).
   - **갭②(침묵 관측분기)**: `diary.write_observe_if_changed()` 신설(상태 변화 시에만 저소음 observe 1행·매시 dedup) → `auto_operator._run_exploration_for_campaign`의 stop_observe·밴드도달·상한클램프 3분기 배선. state 토큰 observe_stop/band/ceiling.
-  - 검증: 테스트 8건 추가(diary 6·레인 2)·**3020 passed 회귀 0**·`/codex review` GATE PASS. **라이브 합격(갭①)**: 07:21 재시작 후 prod pm2에 `app.*` INFO 신규 timestamped 포맷 출력 확인(구 코드 소실 라인)·무에러 부팅.
-  - **잔여 라이브 확인(갭②)**: 다음 시간당 레인 **08:20 KST** 실행 시 observe 행 첫 출현 + 새 카운터 로그 라인 관찰(catch-up 제외라 :20에만). 07:20 런은 재시작 직전이라 구코드로 돌았을 수 있음.
+  - 검증: 테스트 8건 추가(diary 6·레인 2)·**3020 passed 회귀 0**·`/codex review` GATE PASS. **라이브 합격(갭①)**: 07:21 재시작 후 prod pm2에 `app.*` INFO 신규 timestamped 포맷 출력·무에러 부팅. **08:20 시간당 라인 신규 카운터 출력 실측**: `...probed=0 | explored=0 explored_held=0 explored_capped=0 explored_not_rank=0 ghost_hold=0(groups=0)` — 갭① 완전 라이브 합격.
+  - **갭② 라이브**: 08:20 탐색 레인이 후보 순회하며 **blocked bid_up 240행을 리팩터된 `write_diary_entry→_insert_diary_entry` 경로로 실기록**(diary.py 리팩터 prod 정상 실증). 단, 전 후보가 상위 게이트(`daily 손실 stale`·`CTR경보`)에서 차단돼 ladder verdict(stop_observe 등)까지 미도달 → observe 행 0(explored=0, 정상·조건 미충족). observe 분기 로직은 레인 통합 테스트로 입증. **첫 실제 observe 행은 후보가 상위 게이트 통과+stop_observe/밴드/상한에 걸리는 첫 런에 출현**(08:30 retro 갱신 후 09:20~ 가능). 관찰 대상으로 남김.
 
 ## (이전) 최신 상태 (2026-07-22 23:40, 워크트리 vt34-deploy-visibility-first-7c103b) — ★세션 인계는 HANDOFF 우선
 - **HANDOFF: `.claude/memory/HANDOFF_vf-visibility-live+nbaesong-hook_20260722.md`** ← 새 세션은 이 파일 먼저.
