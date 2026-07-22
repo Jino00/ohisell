@@ -207,6 +207,40 @@ def test_ladder_visible_not_ghost_when_inactive(db):
     assert verdict == "step_up"
 
 
+# ── 첫 탐색(last_probe None) 유령 차단(codex 1R P1) — 첫 스텝도 유령이면 금지 ──
+
+def test_ladder_first_step_ghost_hold_when_inactive():
+    """last_probe None·유령(rank 6)·증거창 비활성 → ghost_hold(첫 스텝 차단, capped/start 앞)."""
+    verdict, reason = exploration.ladder_judgment(
+        None, {"clk": 0, "avg_rank": 6.0}, 5000, 1000, evidence_active=False,
+    )
+    assert verdict == "ghost_hold" and "첫 스텝 차단" in reason
+
+
+def test_ladder_first_step_start_when_active():
+    """last_probe None·유령(rank 6)·증거창 활성(True) → start(창 열림, 첫 스텝 허용)."""
+    verdict, _r = exploration.ladder_judgment(
+        None, {"clk": 0, "avg_rank": 6.0}, 5000, 1000, evidence_active=True,
+    )
+    assert verdict == "start"
+
+
+def test_ladder_first_step_start_when_legacy_none():
+    """last_probe None·유령(rank 6)·evidence_active=None(레거시) → start(pass-through 보존·회귀 0)."""
+    verdict, _r = exploration.ladder_judgment(
+        None, {"clk": 0, "avg_rank": 6.0}, 5000, 1000,
+    )
+    assert verdict == "start"
+
+
+def test_ladder_first_step_start_when_rank_none_blind():
+    """last_probe None·rank None(imp=0 눈먼 콜드)·증거창 비활성 → start(눈먼 첫 스텝 경로 보존, VT4)."""
+    verdict, _r = exploration.ladder_judgment(
+        None, {"clk": 0, "avg_rank": None}, 5000, 1000, evidence_active=False,
+    )
+    assert verdict == "start"
+
+
 # ══════════════════════ ⑤ exploration_ceiling 패스스루 ══════════════════════
 
 def test_exploration_ceiling_passthrough(db):

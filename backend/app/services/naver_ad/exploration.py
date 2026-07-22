@@ -565,7 +565,10 @@ def ladder_judgment(
          확언할 수 없어 fail-toward-hold(스텝 대신 관측 — codex P1 안전 방향).
 
     상태 기계(우선순위 순):
-      ⓪ last_probe None → 'start'(첫 탐색) — 단 current_bid≥ceiling이면 'capped'(발동 불가).
+      ⓪ last_probe None(첫 탐색): 유령(rank>_GHOST_RANK=5)∧창 비활성이면 'ghost_hold'(첫 스텝
+         차단 — capped보다 우선, D-NAO-83·codex 1R P1) / current_bid≥ceiling이면 'capped'(발동
+         불가) / 그 외 'start'. rank None(imp=0 콜드)은 유령 판정 불가 → 기존 경로(VT4 플로어
+         눈먼 첫 스텝 회귀 방지).
       ① 이번 사이클 클릭 발생(clk>0) → 'stop_observe'(상향 정지·정착 ROAS 관측 인계, hold —
          영구 정지 아님. 목적=증거 확보 달성).
       ② 무클릭 ∧ rank≤2.5(과열밴드인데 클릭0 지속) → 'not_rank'(순위 병리 아님=소재/관련성,
@@ -584,6 +587,19 @@ def ladder_judgment(
     evidence_open = True if evidence_active is None else evidence_active
 
     if last_probe is None:
+        # ★VF(D-NAO-83, codex 1R P1 수용): 첫 탐색이라도 유령 지면(rank>5)∧증거창 비활성이면 스텝
+        # 금지(ghost_hold). 기존엔 last_probe None이 capped/start를 먼저 반환해 유령 그룹의 **첫
+        # 스텝**이 새어나갔다("보이는 자리를 사거나 아예 안 사거나" 위반). ghost_hold는 capped보다
+        # 우선한다(사유 "유령∧창없음"이 상한 도달보다 더 실행가능한 메시지). rank None(imp=0 눈먼
+        # 콜드 — 순위 관측 불가)은 유령 판정 불가 → 기존 경로 유지(VT4 플로어 그룹의 눈먼 첫 스텝
+        # 회귀 방지, §0 금지선 4).
+        first_rank = since_step_stats.get("avg_rank")
+        if first_rank is not None and Decimal(str(first_rank)) > visibility._GHOST_RANK and not evidence_open:
+            return (
+                "ghost_hold",
+                f"유령 지면(순위 {float(Decimal(str(first_rank))):.2f}>{visibility._GHOST_RANK})·증거창 비활성 — 첫 스텝 차단"
+                "(보이는 자리를 사거나 아예 안 사거나, D-NAO-83)",
+            )
         if current_bid >= ceiling:
             return ("capped", f"첫 탐색이나 경제성 상한 이미 도달(현 {current_bid}≥상한 {ceiling}) — 발동 불가·관찰 표기")
         return ("start", "직전 탐색 스텝 없음 — 첫 탐색 시작(적응 스텝)")
