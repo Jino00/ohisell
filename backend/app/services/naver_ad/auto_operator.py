@@ -1757,15 +1757,6 @@ def _run_exploration_for_campaign(
         )
         ctr_alerted_groups = set()
     for _etype, adgroup_id in candidates:
-        if adgroup_id in ctr_alerted_groups:
-            result["held"].append({
-                "target_id": adgroup_id, "reason": f"[탐색] {_CTR_ALERT_LADDER_SKIP_REASON}",
-            })
-            _record_blocked(db, campaign_id=campaign_id, actor=diary.ACTOR_EXPLORE,
-                            reason=_CTR_ALERT_LADDER_SKIP_REASON, now=now,
-                            target_type="adgroup", target_id=adgroup_id, adgroup_id=adgroup_id,
-                            action="bid_up")
-            continue
         settled_clk = exploration._settlement_clk(db, adgroup_id, window_from, window_to)
         last_step = _exploration_last_step(db, adgroup_id)
         last_step_at = last_step["changed_at"] if last_step else None
@@ -1774,6 +1765,20 @@ def _run_exploration_for_campaign(
         # 조용히 skip(사이클 대기·표본 충분 = 관찰 소음, 일기 미기록).
         fire, _reason = exploration.exploration_trigger({"clk": settled_clk}, last_step_at, now)
         if not fire:
+            continue
+
+        # VT3(D-NAO-82②) CTR 경보 skip — 트리거 통과 **후**에 판정·기록한다(GATE 재배치):
+        # 탐색 레인은 시간당이라 트리거 앞에 두면 경보 그룹마다 매시 blocked 행이 쌓여
+        # _record_blocked의 소음 차단 원칙("의도된 액션이 차단된 것만")을 위반한다 — 손실상태
+        # 제외 블록과 동일 위치 관례(트리거 발동=액션 의도 성립 시에만 기록).
+        if adgroup_id in ctr_alerted_groups:
+            result["held"].append({
+                "target_id": adgroup_id, "reason": f"[탐색] {_CTR_ALERT_LADDER_SKIP_REASON}",
+            })
+            _record_blocked(db, campaign_id=campaign_id, actor=diary.ACTOR_EXPLORE,
+                            reason=_CTR_ALERT_LADDER_SKIP_REASON, now=now,
+                            target_type="adgroup", target_id=adgroup_id, adgroup_id=adgroup_id,
+                            action="bid_up")
             continue
 
         # GATE P2-risk6(가드5 완성): 활성 daily 손실 상태(스톱로스/floored/바닥손실) 그룹 제외 —
