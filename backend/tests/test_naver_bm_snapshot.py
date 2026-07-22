@@ -332,10 +332,13 @@ def test_update_deep_dimensions_per_group_fail_open(db, monkeypatch):
 
 
 def test_run_bm_deep_fail_open(db, monkeypatch):
-    """update_deep_dimensions이 예외를 던져도 run_bm_deep은 삼키고 정상 반환(§0 금지선 5)."""
+    """update_deep_dimensions이 예외를 던져도 run_bm_deep은 삼키고 정상 반환(§0 금지선 5).
+
+    ★Phase 5(D-NAO-79) 이후 run_bm_deep은 deep 갱신과 무관하게 주간 벤치마크 요약도 시도한다
+    (독립 try) — 벤치마크 0건인 빈 DB에서는 정상 산출되어 weekly_summary가 채워진다."""
     def _boom(*a, **k):
         raise RuntimeError("DB 폭발")
 
     monkeypatch.setattr(bm_harness, "update_deep_dimensions", _boom)
     result = bm_harness.run_bm_deep(db)  # 예외 전파 안 됨
-    assert result == {"deep": None}
+    assert result == {"deep": None, "weekly_summary": {"benchmarks": 0}}

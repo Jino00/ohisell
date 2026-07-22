@@ -31,6 +31,11 @@
 # GET /api/naver/ad/raw/search-terms  — 검색어 원자료(prod 114,285행), limit 상한 200 강제.
 # GET /api/naver/ad/raw/hourly        — 시간당 스냅샷 + daily_budget·spend_ratio(스펙 §1-4의
 #   "소진율 미노출" 해소). spend_ratio는 budget 없음/0이면 None(0 나눗셈 금지).
+# GET /api/naver/ad/bm/agency-ops     — BM SA-2 조작 이벤트 온디맨드 드릴다운(D-NAO-79 ③).
+# GET /api/naver/ad/bm/snapshot       — BM SA-1 구조 스냅샷 온디맨드 드릴다운(D-NAO-79 ③).
+# GET /api/naver/ad/bm/benchmark      — BM SA-3 벤치마크 프라이어 현황 온디맨드 드릴다운
+#   (D-NAO-79 ③). 3개 전부 단순 read — 예외 브리핑(주 UX)은 diary/vault/Slack이 맡고, 이
+#   라우터는 "필요할 때 열어보는" 전체 리포트(§완료기준: 예외 브리핑=주 UX·이건 온디맨드).
 from __future__ import annotations
 
 import json
@@ -47,9 +52,12 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import (
     NaverAccountSettings,
+    NaverAgencyOp,
+    NaverBmBenchmark,
     NaverCampaignSettings,
     NaverChangeLog,
     NaverEntity,
+    NaverEntitySnapshot,
     NaverExpertReview,
     NaverExpertReviewRun,
     NaverHourlySnapshot,
@@ -1415,3 +1423,143 @@ def campaigns_roster(
     if optimizer:
         rows = [r for r in rows if r["optimizer"] == optimizer]
     return {"total": len(rows), "rows": rows}
+
+
+# ══════════════════════════════════════════════════════════════════
+# BM(벤치마크) 학습 레이어 온디맨드 드릴다운 (Phase 5, D-NAO-78·79 ③)
+# ★주 UX는 예외 브리핑(diary/vault+Slack, bm_briefing.py) — 이 3개는 "초기 2~3주 전체검증
+#   +이후 필요할 때 열어보는" 온디맨드 전체 리포트다(§완료기준 불변 — 상설 배너 아님).
+# 전부 단순 read — 쓰기 없음, 실행 손(naver_execution_harness/naver_sa_writer) 무관.
+# ══════════════════════════════════════════════════════════════════
+_MAX_BM_LIMIT = 200
+
+
+def _bm_value_or_none(raw: str | None) -> dict | list | None:
+    """naver_bm_benchmark.value_json 파싱 — bench_kind별로 dict([min,p50,max]류)·list(검증
+    키워드셋)가 섞여 있어 _loads_or_none(dict 전용)을 그대로 못 쓴다. 쓰레기여도 500 대신 None."""
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    return parsed if isinstance(parsed, (dict, list)) else None
+
+
+@router.get("/bm/agency-ops")
+def get_bm_agency_ops(
+    date_param: date | None = Query(None, alias="date", description="조회 기준일(KST). 미지정시 오늘"),
+    days: int = Query(1, ge=1, le=365, description="date 기준 최근 N일(포함, KST)"),
+    campaign_id: str | None = Query(None),
+    is_exception: bool | None = Query(None, description="true=예외만/false=비예외만, 미지정=전체"),
+    limit: int = Query(100, ge=1, le=_MAX_BM_LIMIT),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+) -> dict:
+    """BM SA-2 조작 이벤트 드릴다운(naver_agency_op 단순 read). 예외 브리핑(주 UX)의 원자료를
+    필요할 때 전건 열람하는 온디맨드 창구(D-NAO-79 ③)."""
+    end = date_param or kst_today()
+    start = end - timedelta(days=days - 1)
+    q = db.query(NaverAgencyOp).filter(NaverAgencyOp.op_date >= start, NaverAgencyOp.op_date <= end)
+    if campaign_id:
+        q = q.filter(NaverAgencyOp.campaign_id == campaign_id)
+    if is_exception is not None:
+        q = q.filter(NaverAgencyOp.is_exception.is_(is_exception))
+    total = q.count()
+    rows = (
+        q.order_by(NaverAgencyOp.op_date.desc(), NaverAgencyOp.detected_at.desc())
+        .offset(offset).limit(limit).all()
+    )
+    camp_ids = {r.campaign_id for r in rows if r.campaign_id}
+    _, camp_names = _batch_entity_names(db, set(), camp_ids)
+    return {
+        "date_from": start.isoformat(), "date_to": end.isoformat(), "total": total,
+        "rows": [
+            {
+                "id": r.id,
+                "op_date": r.op_date.isoformat() if hasattr(r.op_date, "isoformat") else str(r.op_date),
+                "detected_at": r.detected_at.isoformat() if r.detected_at else None,
+                "entity_type": r.entity_type, "entity_id": r.entity_id,
+                "campaign_id": r.campaign_id, "campaign_name": camp_names.get(r.campaign_id),
+                "optimizer": r.optimizer, "op_type": r.op_type,
+                "before_value": r.before_value, "after_value": r.after_value,
+                "magnitude": r.magnitude, "is_exception": r.is_exception,
+            }
+            for r in rows
+        ],
+    }
+
+
+@router.get("/bm/snapshot")
+def get_bm_snapshot(
+    date_param: date | None = Query(None, alias="date", description="스냅샷 날짜(KST). 미지정시 오늘"),
+    entity_type: str | None = Query(None, pattern="^(campaign|adgroup)$"),
+    campaign_id: str | None = Query(None),
+    limit: int = Query(100, ge=1, le=_MAX_BM_LIMIT),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+) -> dict:
+    """BM SA-1 구조 스냅샷 드릴다운(naver_entity_snapshot 단순 read). 요약(유형×optimizer별
+    건수, 필터 무관 당일 전체 기준) + 페이징 원자료(D-NAO-79 ③)."""
+    d = date_param or kst_today()
+    day_rows = db.query(NaverEntitySnapshot).filter(NaverEntitySnapshot.snapshot_date == d).all()
+    summary: dict[str, dict[str, int]] = {}
+    for row in day_rows:
+        bucket = summary.setdefault(row.entity_type, {})
+        opt = row.optimizer or "none"
+        bucket[opt] = bucket.get(opt, 0) + 1
+
+    q = db.query(NaverEntitySnapshot).filter(NaverEntitySnapshot.snapshot_date == d)
+    if entity_type:
+        q = q.filter(NaverEntitySnapshot.entity_type == entity_type)
+    if campaign_id:
+        q = q.filter(NaverEntitySnapshot.campaign_id == campaign_id)
+    total = q.count()
+    rows = (
+        q.order_by(NaverEntitySnapshot.entity_type, NaverEntitySnapshot.entity_id)
+        .offset(offset).limit(limit).all()
+    )
+    return {
+        "snapshot_date": d.isoformat(), "total": total, "summary_by_type_optimizer": summary,
+        "rows": [
+            {
+                "entity_type": r.entity_type, "entity_id": r.entity_id, "parent_id": r.parent_id,
+                "campaign_id": r.campaign_id, "campaign_type": r.campaign_type,
+                "optimizer": r.optimizer, "name": r.name, "status": r.status,
+                "daily_budget": r.daily_budget, "bid_amt": r.bid_amt,
+                "extended_search": r.extended_search, "keyword_count": r.keyword_count,
+                "keyword_avg_bid": r.keyword_avg_bid, "negative_kw_count": r.negative_kw_count,
+                "ad_count": r.ad_count,
+            }
+            for r in rows
+        ],
+    }
+
+
+@router.get("/bm/benchmark")
+def get_bm_benchmark(
+    bench_kind: str | None = Query(None, description="keyword_verified/bid_band/group_structure"),
+    bench_key: str | None = Query(None, description="campaign_type 버킷(WEB_SITE 등)"),
+    db: Session = Depends(get_db),
+) -> dict:
+    """BM SA-3 벤치마크 프라이어 현황 드릴다운(naver_bm_benchmark 단순 read). 주간 요약(diary)
+    의 원자료를 최신 상태 그대로 열람(D-NAO-79 ③). 행 수가 campaign_type 버킷 단위라 페이징
+    불필요(무필터 시 전량, prod 기준 수십 행 규모)."""
+    q = db.query(NaverBmBenchmark)
+    if bench_kind:
+        q = q.filter(NaverBmBenchmark.bench_kind == bench_kind)
+    if bench_key:
+        q = q.filter(NaverBmBenchmark.bench_key == bench_key)
+    rows = q.order_by(NaverBmBenchmark.bench_kind, NaverBmBenchmark.bench_key).all()
+    return {
+        "total": len(rows),
+        "rows": [
+            {
+                "bench_kind": r.bench_kind, "bench_key": r.bench_key,
+                "value": _bm_value_or_none(r.value_json),
+                "sample_n": r.sample_n, "confidence": r.confidence,
+                "computed_at": r.computed_at.isoformat() if r.computed_at else None,
+            }
+            for r in rows
+        ],
+    }
