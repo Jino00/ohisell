@@ -639,10 +639,13 @@ def run_naver_auto_operator_daily_job():
         bm_prior = bm_benchmark.verified_keyword_set(db2)
         ss = run_search_term_ss_lane(db2, bm_prior=bm_prior)
         log.info(
-            "[스케줄러] naver 검색어 제외 브리핑: shopping=%s powerlink=%s 제안생성=%s dedup=%s "
-            "승격=%s bm교차=%s",
+            "[스케줄러] naver 검색어 제외: shopping=%s powerlink=%s 자동발사=%s dedup=%s slot=%s "
+            "capover=%s fail=%s / 재심사 개방=%s 재제외=%s 복귀=%s / 대행사=%s / 승격=%s bm교차=%s",
             ss["shopping_candidates"], ss["powerlink_candidates"],
-            ss["proposals_created"], ss["deduped"],
+            ss["powerlink_fired"], ss["deduped"], ss["slot_skipped"],
+            ss["autofire_over_cap"], ss["autofire_failed"],
+            ss["reexam_opened"], ss["reexam_reexcluded"], ss["reexam_restored"],
+            ss["agency_powerlink_candidates"],
             ss["promote_proposals_created"], ss["promote_bm_crossed"],
         )
     except Exception as e:  # noqa: BLE001 — 브리핑 실패는 일 레인과 분리(fail-open)

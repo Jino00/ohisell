@@ -2108,6 +2108,41 @@ class NaverSearchTermDaily(Base):
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class NaverSearchTermExclusion(Base):
+    """파워링크 검색어 자동 제외 in-out 상태기계 1행 (스프린트 PX,
+    docs/PLAN_naver-ad-powerlink-autoexclude.md §2). grain: (adgroup_id, search_term) — Unique.
+
+    상태 전이(제외 = 사형이 아니라 상태 전이·주기 재심사, 전략 v2 §1④ in-out 생태계):
+      excluded  — 자동 제외 실쓰기 완료(restrict_kwd_id 회수). next_review_at 도래 시 개방.
+      probation — next_review_at 도래로 제외키워드를 개방(delete)한 뒤 재노출 관찰창(+14일).
+      restored  — probation 만료 재판정에서 더는 §1 후보가 아님(성과 자가 교정, 행 보존=기억).
+    cycle: 최초 1, 재제외마다 +1(백오프 next_review_at = today + min(30×cycle, 90)일). 행 재사용
+    (restored/probation 행이 있는 (adgroup,term) 재제외 시 cycle 승계·upsert). restrict_kwd_id는
+    개방(delete_restricted_keywords)에 필수라 성공 실쓰기의 WriteResult.created_ids에서 회수 저장.
+    ★관측 전용 원장이 아니라 실쓰기와 짝(제외/개방 change_log와 1:1) — DB만 읽는 SA-1/2와 구분.
+    """
+
+    __tablename__ = "naver_search_term_exclusion"
+    __table_args__ = (
+        UniqueConstraint("adgroup_id", "search_term", name="uq_naver_search_term_exclusion"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    campaign_id: Mapped[str] = mapped_column(String(50), nullable=False, default="", index=True)
+    adgroup_id: Mapped[str] = mapped_column(String(50), nullable=False, default="")
+    search_term: Mapped[str] = mapped_column(String(300), nullable=False, default="")
+    restrict_kwd_id: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)  # 개방(delete)에 필수, WriteResult에서 회수
+    status: Mapped[str] = mapped_column(String(12), nullable=False, default="excluded", index=True)  # excluded/probation/restored
+    cycle: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    excluded_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)  # ★kst_now 주입(server_default 아님)
+    last_transition_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)  # 마지막 상태 전이 시각(KST)
+    next_review_at: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True, index=True)  # 재심사 개방 예정일(KST date)
+    probation_until: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True)  # probation 관찰창 종료일(KST date)
+    cost_at_exclusion: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")  # 제외 시점 30d cost(감사)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())  # ⚠️UTC(server_default)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())  # ⚠️UTC
+
+
 # ══════════════════════════════════════════════════════════════════
 # 예측·전문가 스프린트 F1 — forecast_engine (D-NAO-24, docs/PLAN_naver-ad-forecast-expert.md §3)
 # ══════════════════════════════════════════════════════════════════

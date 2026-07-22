@@ -1,28 +1,28 @@
-# search_term_ss_lane.py — 검색어 제외·승격 브리핑/제안 생성 레인 (SS3·SS4 생성층,
-#   docs/PLAN_naver-ad-searchterm-ss.md §3). 역할(Harness): SS2 판단(search_term_judge)을
-#   소비해 (SS3) **파워링크 제외 후보만** pending 제안(Confirm 전용)으로 생성하고 **쇼핑 후보는
-#   브리핑 diary만** 남기며(제안 생성 없음 — §실측-0 쇼핑 API 제외 불가·PLAN §3 SS3-B "브리핑만"),
-#   (SS4) **전환 검색어 승격 후보**를 별도 pending 제안(영구 Confirm·실행 손 없음)으로 생성한다.
-#   일 레인(auto_operator run_daily_lane)과 같은 08:50 흐름에 편입(scheduler).
+# search_term_ss_lane.py — 검색어 제외·승격 레인 (SS3·SS4 생성층 + PX 파워링크 자동 제외·재심사,
+#   docs/PLAN_naver-ad-powerlink-autoexclude.md §3). 역할(Harness): SS2 판단(search_term_judge)을
+#   소비해 (SS3-A/PX2) **파워링크 §1 통과 후보를 자동 발사**(status='approved' + approval_source=
+#   ss_exclude 제안 → naver_execution_harness.execute() 즉시 실행)하고, (PX3) in-out 재심사 루프
+#   (개방·probation·재제외/복귀)를 돌리며, **쇼핑 후보는 브리핑 diary만** 남기고(제안 생성 없음 —
+#   §실측-0 쇼핑 API 제외 불가), (SS4) **전환 검색어 승격 후보**는 pending 제안(영구 Confirm·실행
+#   손 없음)으로 생성한다. 일 레인(auto_operator run_daily_lane)과 같은 08:50 흐름에 편입(scheduler).
 #
-#   ★실쓰기 0 (PLAN §3 SS3·SS4): 이 레인은 **제안 생성·브리핑만** 한다 — 자동 승인(status=
-#   'approved') 배선 절대 없음. approval_source는 항상 None(Jino 콘솔 Confirm이 유일한 승인
-#   경로). 쇼핑은 API 제외 불가(§실측-0)라 제안 자체를 만들지 않고 브리핑+콘솔 수동만, 파워링크
-#   제외는 초기엔 Confirm 전용(§난제 5). 제외 실쓰기 손은 Confirm 후 naver_execution_harness의
-#   search_term_exclude 분기가 담당(쇼핑은 그 분기도 SHOPPING 명시 거부로 도달 자체가 없음).
-#   승격(SS4)은 실행 손 자체가 없다(L3 스코프, PLAN §3 SS4) — 정식 키워드 등록은 Jino가 콘솔
-#   밖에서 수동으로만 한다. proposal_type=search_term_promote는 naver_execution_harness의
-#   _ACTION_BY_PROPOSAL_TYPE에 절대 등록하지 않는다(등록하면 미구현 executor를 부르게 되어
-#   위험 — 매핑 부재 자체가 fail-closed 안전장치).
+#   ★파워링크 실쓰기 개방(PX): Jino 지시(D-NAO-78) "성과 기반 자동운영 — 수백 검색어 Confirm 불가"
+#   → SS3-A pending Confirm 경로 제거·비용(성과) 기반 자동 제외로 전환. 전환 귀속 불가는 in-out
+#   재심사 루프가 자가 교정(잘못 자른 것 복귀). 실쓰기는 auto_operate=1(ours)·파워링크(WEB_SITE)만
+#   (§0 3 대행사 무실쓰기) — 일일캡·킬스위치·SHOPPING 거부·전환 재검증은 harness가 최종 강제한다.
+#   승격(SS4)은 실행 손 자체가 없다(L3 스코프) — 정식 키워드 등록은 Jino 콘솔 밖 수동만.
+#   proposal_type=search_term_promote는 naver_execution_harness의 _ACTION_BY_PROPOSAL_TYPE에 절대
+#   등록하지 않는다(등록하면 미구현 executor를 부르게 되어 위험 — 매핑 부재 자체가 fail-closed).
 from __future__ import annotations
 
+import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from app.models import NaverProposal
+from app.models import NaverChangeLog, NaverProposal, NaverSearchTermExclusion
 from app.services.naver_ad import diary, search_term_judge
 from app.utils.kst import kst_now
 
@@ -30,6 +30,15 @@ log = logging.getLogger(__name__)
 
 # 브리핑 diary 요약에 나열할 쇼핑 후보 상위 건수(제안 자체는 전건 생성, 요약만 절삭).
 _BRIEF_TOP_N = 10
+
+# ── PX2·PX3: 파워링크 자동 제외 봉투(PLAN_naver-ad-powerlink-autoexclude.md §3) ──
+# 일일 복귀(재심사 개방) 캡 — 제외의 일일캡(harness._SS_DAILY_EXCLUDE_CAP=10)과 대칭. 복귀도
+# 되돌림 비용(재노출→다시 손실 가능)이 있는 비대칭 액션이라 상한을 둔다(§3 봉투).
+_SS_DAILY_RETURN_CAP = 10
+# 그룹당 제외 슬롯 — 롤링 큐레이션(§3). 상태 테이블 excluded 행 수로 근사(우리가 유지 중인 제외
+# 수 — 라이브 restricted-keywords GET을 핫 레인마다 N회 유발하지 않기 위한 결정, 대행사/수동 등록
+# 키워드와 무관하게 우리 자동 제외 슬롯만 제한). 초과 그룹은 이번 라운드 스킵.
+_PL_GROUP_SLOT_CAP = 60
 
 # SS4 승격 제안 1회 생성 상한(라이브 첫 실행 실측: 2026-07-22 08:50 크론에서 354건 pending이
 # 한꺼번에 쏟아져 Jino 콘솔이 범람 — 운영 결함). conv_direct_cnt 내림차순(→ conv_purchase_amt
@@ -72,24 +81,108 @@ def _has_open_or_executed(
     ).first() is not None
 
 
-def _create_proposal(db: Session, cand: dict) -> NaverProposal:
-    """파워링크 제외 후보 1건 → pending 제안(Confirm 전용). approval_source=None(자동 승인
-    절대 금지). ★쇼핑은 이 함수를 호출하지 않는다 — SS3-B는 브리핑만(PLAN §3, §실측-0)."""
-    obj = NaverProposal(
+def _active_exclusion_exists(db: Session, adgroup_id: str, search_term: str) -> bool:
+    """이미 살아있는 제외 상태 행(excluded/probation)이 있는지 — 중복 제외 방지(PX2). restored는
+    허용(성과 자가 교정 후 재충족 시 재제외 = 정상 in-out 롤링). probation 중 중복 제외 금지(GATE ⑥)."""
+    return db.query(NaverSearchTermExclusion.id).filter(
+        NaverSearchTermExclusion.adgroup_id == adgroup_id,
+        NaverSearchTermExclusion.search_term == search_term,
+        NaverSearchTermExclusion.status.in_(("excluded", "probation")),
+    ).first() is not None
+
+
+def _excluded_slot_count(db: Session, adgroup_id: str) -> int:
+    """그룹당 우리 자동 제외 슬롯 카운트(§3 근사) — 상태='excluded' 행 수. probation/restored는
+    제외키워드가 네이버에서 이미 개방됐거나 개방 예정이라 슬롯을 점유하지 않는다."""
+    return db.query(NaverSearchTermExclusion).filter(
+        NaverSearchTermExclusion.adgroup_id == adgroup_id,
+        NaverSearchTermExclusion.status == "excluded",
+    ).count()
+
+
+def _upsert_exclusion(db: Session, cand: dict, restrict_kwd_id: str | None, now: datetime) -> None:
+    """제외 실쓰기 성공 후 상태 행 upsert(§2 상태기계). 같은 (adgroup, term) 행이 있으면 cycle
+    승계(+1)·행 재사용(restored/probation 재제외 경로), 없으면 cycle=1 신규. next_review_at =
+    today + min(30×cycle, 90)일(백오프 30→60→90 cap). status='excluded'로 (재)진입."""
+    row = db.query(NaverSearchTermExclusion).filter(
+        NaverSearchTermExclusion.adgroup_id == cand["adgroup_id"],
+        NaverSearchTermExclusion.search_term == cand["search_term"],
+    ).first()
+    if row is None:
+        cycle = 1
+        row = NaverSearchTermExclusion(
+            campaign_id=cand["campaign_id"], adgroup_id=cand["adgroup_id"],
+            search_term=cand["search_term"], cycle=cycle,
+            excluded_at=now, last_transition_at=now,
+        )
+        db.add(row)
+    else:
+        cycle = row.cycle + 1
+        row.cycle = cycle
+        row.excluded_at = now
+        row.last_transition_at = now
+    row.restrict_kwd_id = restrict_kwd_id
+    row.status = "excluded"
+    row.probation_until = None
+    row.next_review_at = now.date() + timedelta(days=min(30 * cycle, 90))
+    row.cost_at_exclusion = int(cand.get("cost", 0))
+    db.commit()
+
+
+def _autofire_exclude(db: Session, cand: dict, now: datetime) -> NaverChangeLog | None:
+    """파워링크 제외 후보 1건 자동 발사(exploration BX2 관례 복제): status='approved' +
+    approval_source=APPROVAL_SOURCE_SS_EXCLUDE 제안 생성 → naver_execution_harness.execute()로
+    같은 흐름 즉시 실행. 성공 시 WriteResult(after_value.created_ids)에서 restrict_kwd_id 회수해
+    상태 행 upsert(§2). 실패(킬스위치/일일캡/SHOPPING/가드)는 harness가 change_log·상태를 확정
+    하므로 여기선 None 반환(브리핑 카운트만). 지연 import(순환 회피 — harness가 auto_operator를,
+    auto_operator가 이 모듈을 import하지 않지만 exploration 관례 유지)."""
+    from app.services.naver_ad import exploration
+    from app.services.naver_ad import naver_execution_harness as harness
+
+    proposal = NaverProposal(
         proposal_type=search_term_judge.SEARCH_TERM_EXCLUDE_TYPE,
-        target_type="search_term",
-        target_id=cand["search_term"],
-        campaign_id=cand["campaign_id"],
-        adgroup_id=cand["adgroup_id"],
+        target_type="search_term", target_id=cand["search_term"],
+        campaign_id=cand["campaign_id"], adgroup_id=cand["adgroup_id"],
         rationale=cand["reason"],
         expected_effect=(
-            f"제외 시 낭비비용 회수 추정(전환0·cost={cand['cost']}원). "
-            f"Confirm 후 파워링크 자동 제외(§난제 5)."
+            f"파워링크 자동 제외(전환0·cost={cand['cost']}원 낭비비용 회수). "
+            "in-out 재심사 루프가 주기적으로 개방·재판정(§2)."
         ),
-        status="pending",  # approval_source 미설정 = None(Jino 콘솔 Confirm이 유일 승인 경로)
+        status="approved",  # 자동 발사 — approval_source가 킬스위치·감사 경로를 그대로 탄다
+        approval_source=search_term_judge.APPROVAL_SOURCE_SS_EXCLUDE,
     )
-    db.add(obj)
-    return obj
+    db.add(proposal)
+    db.commit()
+
+    try:
+        log_entry = harness.execute(db, proposal.id, dry_run=False, now=now)
+    except Exception as e:  # noqa: BLE001 — harness가 change_log/상태 확정(failed/killswitch 등)
+        log.info("search_term_ss_lane: 파워링크 자동 제외 미실행 term=%r: %s", cand["search_term"], e)
+        return None
+
+    # restrict_kwd_id 회수 — 실행자가 남긴 change_log.after_value = {"after":[...],"created_ids":[...]}.
+    # created_ids[0] = add_restricted_keywords WriteResult의 nccAdgroupRestrictKwdId(개방에 필수).
+    restrict_kwd_id: str | None = None
+    try:
+        payload = json.loads(log_entry.after_value) if log_entry.after_value else {}
+        created = payload.get("created_ids") or []
+        restrict_kwd_id = created[0] if created else None
+    except (ValueError, TypeError) as e:
+        log.warning("search_term_ss_lane: restrict_kwd_id 회수 실패(after_value 파싱) term=%r: %s",
+                    cand["search_term"], e)
+
+    _upsert_exclusion(db, cand, restrict_kwd_id, now)
+    return log_entry
+
+
+def _remaining_exclude_cap(db: Session, now: datetime) -> int:
+    """오늘 남은 신규 제외 슬롯 = harness 일일 캡 − 오늘 성공 제외 수. harness가 최종 하드 강제
+    하지만(TOCTOU 3중 방어), 소진 후 무의미한 approved 제안·failed 노이즈를 줄이는 라운드 사전
+    제한(§3 봉투). harness의 단일 진실(_SS_DAILY_EXCLUDE_CAP·_count_search_term_excludes_today)
+    을 재사용해 캡 값이 갈라지지 않게 한다(지연 import — 순환 회피)."""
+    from app.services.naver_ad import naver_execution_harness as harness
+
+    return max(0, harness._SS_DAILY_EXCLUDE_CAP - harness._count_search_term_excludes_today(db, now))
 
 
 def _create_promote_proposal(db: Session, cand: dict, *, bm_verified: bool = False) -> NaverProposal:
@@ -154,27 +247,51 @@ def run_search_term_ss_lane(
     powerlink = judged["exclude_candidates"]["powerlink"]
     promote = judged["promote_candidates"]
 
-    created = 0
+    # ★쇼핑(shopping)은 제안을 만들지 않는다 — API 제외 불가(§실측-0)라 브리핑 diary(아래)만
+    # 남긴다. ★파워링크(PX2): pending Confirm 경로 제거 — §1 통과 후보를 status='approved' +
+    # approval_source=ss_exclude 제안으로 자동 발사(exploration BX2 관례). 일일캡·킬스위치·
+    # SHOPPING 거부·전환 재검증은 harness가 최종 강제(자동 경로도 동일 봉투).
+    fired = 0
     deduped = 0
     skipped_too_long = 0
-    # ★쇼핑(shopping)은 제안을 만들지 않는다 — API 제외 불가(§실측-0)라 브리핑 diary(아래)만
-    # 남긴다. 제안을 만들면 콘솔에서 approve+execute 시 harness가 422(SHOPPING 명시 거부)로
-    # 튕기고 failed 감사 기록만 쌓이는 노이즈가 발생한다(PLAN §3 SS3-B "브리핑만" 사양).
+    slot_skipped = 0
+    autofire_over_cap = 0
+    autofire_failed = 0
+    # 일일캡 잔여 — harness가 하드 강제하지만, 소진 후 무의미한 approved 제안·failed 노이즈를
+    # 줄이려 라운드 내 사전 제한(§3 봉투). 재심사 재제외(PX3)도 같은 캡을 소비한다.
+    remaining_cap = _remaining_exclude_cap(db, now)
+    slot_cache: dict[str, int] = {}
     for cand in powerlink:
-        # target_id(String(50)) 초과 검색어는 fail-closed skip(codex 2R[P1]) — 잘린 텍스트로
-        # 실쓰기 경로 자체를 물리적으로 차단한다(전문 페이로드 컬럼 부재 → A안=skip).
+        # target_id(String(50)) 초과 검색어는 fail-closed skip(codex 2R[P1]) — 잘린 텍스트 실쓰기 차단.
         if len(cand["search_term"]) > _TARGET_ID_MAXLEN:
             skipped_too_long += 1
             continue
+        if remaining_cap <= 0:
+            autofire_over_cap += 1
+            continue  # 일일 신규 제외 캡 소진 — 익일 재평가(harness도 하드 강제)
+        adg = cand["adgroup_id"]
+        # 그룹당 제외 슬롯(§3) — 상태 테이블 excluded 근사(캐시). 이번 라운드 발사분도 반영.
+        if slot_cache.get(adg, _excluded_slot_count(db, adg)) >= _PL_GROUP_SLOT_CAP:
+            slot_cache.setdefault(adg, _PL_GROUP_SLOT_CAP)
+            slot_skipped += 1
+            continue
+        # 중복 방지: 살아있는 제외 제안 or 활성 제외 상태 행(excluded/probation) 있으면 스킵.
         if _has_open_or_executed(
-            db, cand["adgroup_id"], cand["search_term"],
+            db, adg, cand["search_term"],
             proposal_type=search_term_judge.SEARCH_TERM_EXCLUDE_TYPE,
-        ):
+        ) or _active_exclusion_exists(db, adg, cand["search_term"]):
             deduped += 1
             continue
-        _create_proposal(db, cand)
-        created += 1
+        if _autofire_exclude(db, cand, now) is None:
+            autofire_failed += 1
+            continue
+        fired += 1
+        remaining_cap -= 1
+        slot_cache[adg] = slot_cache.get(adg, _excluded_slot_count(db, adg) - 1) + 1
     db.commit()
+
+    # PX3 재심사 루프(개방·probation·재제외/복귀)는 다음 페이즈에서 이 자리에 배선한다.
+    reexam = {"opened": 0, "reexcluded": 0, "restored": 0}
 
     # SS4 승격 후보 — 제외(SS3)와 동일한 표현 가능성 방어(target_id 길이) + dedup 규약을 그대로
     # 적용한다. 소스(shopping/expkeyword) 무관 전건 대상(judge가 이미 dconv≥1로 판정 완료).
@@ -258,13 +375,41 @@ def run_search_term_ss_lane(
             now=now,
         )
 
+    # 대행사 파워링크 고비용 검색어 브리핑(§4 2) — 스코프 밖(실쓰기 0) 관찰 산출물. 신규 진입만
+    # 노이즈 억제 없이 상위 N 나열(주 리듬 절삭은 PX4 몫, 여기선 후보 존재 시 diary 1건).
+    agency = judged.get("agency_powerlink", [])
+    if agency:
+        top = agency[:_BRIEF_TOP_N]
+        listed = "; ".join(f"{c['search_term']}(cost={c['cost']}·clk={c['clk']})" for c in top)
+        more = f" 외 {len(agency) - len(top)}건" if len(agency) > len(top) else ""
+        diary.write_diary_entry(
+            db, "observe", "",
+            actor=diary.ACTOR_DAILY,
+            action=search_term_judge.SEARCH_TERM_EXCLUDE_TYPE,
+            rationale=(
+                f"[파워링크 대행사 고비용 브리핑] {len(agency)}건(30d cost≥30,000·clk≥10) — 대행사 "
+                f"캠페인이라 자동 제외 없음, Jino 전달 검토: {listed}{more}"
+            ),
+            now=now,
+        )
+
     result = {
         "shopping_candidates": len(shopping),
         "powerlink_candidates": len(powerlink),
+        "agency_powerlink_candidates": len(agency),
         "promote_candidates": len(promote),
-        "proposals_created": created,
+        # PX2: 파워링크 자동 발사(pending 제안 대신) — 하위호환 위해 proposals_created 키 유지(=fired).
+        "proposals_created": fired,
+        "powerlink_fired": fired,
         "deduped": deduped,
         "skipped_too_long": skipped_too_long,
+        "slot_skipped": slot_skipped,
+        "autofire_over_cap": autofire_over_cap,
+        "autofire_failed": autofire_failed,
+        # PX3 재심사 루프
+        "reexam_opened": reexam["opened"],
+        "reexam_reexcluded": reexam["reexcluded"],
+        "reexam_restored": reexam["restored"],
         "promote_proposals_created": promote_created,
         "promote_deduped": promote_deduped,
         "promote_skipped_too_long": promote_skipped_too_long,
