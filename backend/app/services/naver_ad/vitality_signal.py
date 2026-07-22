@@ -41,6 +41,13 @@ _CONV_LOOKBACK_DAYS = 30               # 충돌 게이트·우선순위 과거 �
 _MIN_CLICK_SAMPLE = 10                 # 판정 표본 최소 클릭(미만=표본 미달, 소생 허용)
 _QI_LOW_GRADE = 3                      # S3 보조: qi_grade ≤3 = 저품질
 _REVIVE_WINDOW_DAYS = 7                # 소생 대상 "최근 노출 하락" 판정 창
+# C3(codex 1R): D-1 부분적재 오발 차단 — as_of 행수가 직전 창 평균 대비 이 비율 미만이면
+# 부분적재 의심(발사 전면 보류). anomaly_feed.freshness_partial_load와 동일 로직·임계값.
+_PARTIAL_LOAD_LOOKBACK_DAYS = 3
+_PARTIAL_LOAD_MIN_RATIO = Decimal("0.5")
+# C6(codex 1R): 소생 발사 허용 캠페인유형 — 발사는 adgroup grain(update_adgroup_bid)이라
+# 쇼핑/브랜드검색만(파워링크 WEB_SITE=keyword grain, 시간당 레인 grain 계약과 충돌).
+_REVIVE_ALLOWED_CAMPAIGN_TYPES = ("SHOPPING", "BRAND_SEARCH")
 
 
 def _to_date(d) -> date:
@@ -153,8 +160,10 @@ def _group_30d_stats(db: Session, adgroup_id: str, d0: date) -> dict:
     return {"clk": int(clk), "conv_cnt": int(conv_cnt), "conv_revenue": int(rev)}
 
 
-def _latest_lock_stopped(db: Session, adgroup_id: str) -> bool | None:
-    """그룹의 **최신 성공 set_user_lock 이벤트**의 최종 잠금 상태(GATE P1-1 구조화 판정).
+def _latest_lock_stopped(
+    db: Session, entity_id: str, *, entity_type: str = "adgroup",
+) -> bool | None:
+    """엔티티의 **최신 성공 set_user_lock 이벤트**의 최종 잠금 상태(GATE P1-1 구조화 판정).
 
     권고안(GATE 적대 리뷰): rationale 부분 매칭(포맷 변화 취약·죽은 토큰) 대신 change_log의
     구조화 필드로 판정한다. 성공 실쓰기 행(dry_run=False ∧ after_value 존재 — 실패·가드거부·
@@ -162,14 +171,18 @@ def _latest_lock_stopped(db: Session, adgroup_id: str) -> bool | None:
     파싱한다(set_user_lock의 after_value = writer 재조회 dict, 최상위 userLock 키. pause↔resume
     구분은 이 값 — bm_diff.py status_flip 관례와 동일: pause→true / resume→false).
 
+    entity_type: 'adgroup'(그룹 소생 게이트) 또는 'campaign'(C2 부모 체인 게이트) — set_user_lock
+    change_log는 target_type/target_id를 그대로 심으므로(naver_execution_harness) 캠페인 잠금도
+    entity_type='campaign'·entity_id=campaign_id로 동일 구조에서 재사용된다.
+
     반환: None=그런 이벤트 없음(우리가 정지·재개한 적 없음 — 판정 근거 없음).
           True=최종 잠금(정지) 또는 파싱 불가(fail-closed — 정지로 간주).
           False=최종 재개(resume, userLock=false — 소생 허용 가능)."""
     ev = (
         db.query(NaverChangeLog.after_value)
         .filter(
-            NaverChangeLog.entity_type == "adgroup",
-            NaverChangeLog.entity_id == adgroup_id,
+            NaverChangeLog.entity_type == entity_type,
+            NaverChangeLog.entity_id == entity_id,
             NaverChangeLog.action == "set_user_lock",
             NaverChangeLog.dry_run.is_(False),
             NaverChangeLog.after_value.isnot(None),
@@ -297,6 +310,98 @@ def _auto_operate_campaign_ids(db: Session) -> list[str]:
     return [r[0] for r in rows]
 
 
+def _partial_load_suspected(db: Session, d0: date) -> tuple[bool, str | None]:
+    """C3(codex 1R): D-1(d0) 실적재 행수가 직전 창 일평균 대비 −50%↓면 부분적재 의심.
+
+    anomaly_feed.freshness_partial_load(:53-102)와 **동일 로직**의 경량 재구현이다 — SA간 직접
+    import는 계층 결합(원칙18-6 SA 간 직접 호출 금지)이라, 같은 판정(as_of 행수 vs 직전 창
+    일평균, 비율 <0.5 = partial)을 이 SA 안에 독립 구현한다(sentinel 제외·baseline 없음이면
+    추정 금지 False). 근거: 부분적재는 D-1 sync가 절반만 돌고 죽은 경우 — 행 자체가 사라지므로
+    행수 비교로 잡힌다(스파이럴은 행수 유지·imp만 하락이라 이와 직교, 오검출 없음). partial이면
+    D-1 신호가 통째로 왜곡되므로 발사를 전면 보류(경보는 유지).
+
+    반환: (partial 여부, 사유 문자열|None)."""
+    window_from = d0 - timedelta(days=_PARTIAL_LOAD_LOOKBACK_DAYS)
+    window_to = d0 - timedelta(days=1)
+    as_of_count = int(
+        db.query(sqlfunc.count(NaverAdDaily.id))
+        .filter(NaverAdDaily.ad_date == d0, NaverAdDaily.adgroup_id != BACKFILL_SENTINEL_ADGROUP)
+        .scalar() or 0
+    )
+    daily_counts = dict(
+        db.query(NaverAdDaily.ad_date, sqlfunc.count(NaverAdDaily.id))
+        .filter(
+            NaverAdDaily.ad_date >= window_from, NaverAdDaily.ad_date <= window_to,
+            NaverAdDaily.adgroup_id != BACKFILL_SENTINEL_ADGROUP,
+        )
+        .group_by(NaverAdDaily.ad_date)
+        .all()
+    )
+    days_with_data = len(daily_counts)
+    if days_with_data == 0:
+        return False, None  # baseline 없음 = 비교 불가(추정 금지)
+    baseline_avg = Decimal(sum(daily_counts.values())) / Decimal(days_with_data)
+    if baseline_avg == 0:
+        return False, None
+    ratio = Decimal(as_of_count) / baseline_avg
+    if ratio < _PARTIAL_LOAD_MIN_RATIO:
+        return True, (
+            f"D-1({d0.isoformat()}) 부분적재 의심 — 행수 {as_of_count} vs 직전"
+            f"{days_with_data}일 평균 {float(round(baseline_avg, 1))}행"
+            f"({float(round(ratio * 100, 1))}%) → 발사 전면 보류"
+        )
+    return False, None
+
+
+def _campaign_type_from_daily(db: Session, campaign_id: str, d0: date) -> str | None:
+    """C6(codex 1R): 캠페인 campaign_type — naver_ad_daily 최근 실행 행(sentinel 제외·빈값 제외).
+    SA가 신뢰하는 확정 정본에서 읽는다(NaverEntity.campaign_type 동기화 의존 회피). None=미확보."""
+    start = d0 - timedelta(days=_CONV_LOOKBACK_DAYS - 1)
+    row = (
+        db.query(NaverAdDaily.campaign_type)
+        .filter(
+            NaverAdDaily.campaign_id == campaign_id,
+            NaverAdDaily.ad_date >= start,
+            NaverAdDaily.ad_date <= d0,
+            NaverAdDaily.adgroup_id != BACKFILL_SENTINEL_ADGROUP,
+            NaverAdDaily.campaign_type != "",
+        )
+        .order_by(NaverAdDaily.ad_date.desc())
+        .first()
+    )
+    return row[0] if row else None
+
+
+def _campaign_revive_gate(db: Session, campaign_id: str, d0: date) -> tuple[bool, str | None]:
+    """C2+C6(codex 1R) 캠페인 레벨 소생 게이트 — fail-closed. 통과(True, None) 또는 (False, 사유).
+    경보(스파이럴 관찰)는 유형·정지와 무관하게 유지하되, **소생 발사 대상**만 이 게이트로 거른다.
+
+    C2 부모 체인 정지(hot-set _hot_set_candidates 관례 동형 — 부모가 off/잠금이면 자식 소생 금지):
+      ①NaverEntity(campaign) 행 부재 또는 status≠'on' → 배제(fail-closed: on 확인 못 하면 소생 금지).
+      ②campaign 대상 최신 성공 set_user_lock userLock=true(잠금) → 배제(_latest_lock_stopped 캠페인
+        재사용, change_log 권위 소스). ①②는 보수적 OR.
+    C6 grain 계약(③): campaign_type ∈ {SHOPPING, BRAND_SEARCH}만 통과 — 발사가 adgroup grain이라
+      WEB_SITE(파워링크=keyword grain)·미확보는 배제(시간당 레인 grain 계약과 충돌 방지, 실측
+      스파이럴 표본 전부 쇼핑·파워링크 키워드-grain 소생은 후속)."""
+    try:
+        row = (
+            db.query(NaverEntity.status)
+            .filter(NaverEntity.entity_type == "campaign", NaverEntity.entity_id == campaign_id)
+            .first()
+        )
+        if row is None or row[0] != "on":
+            return False, "캠페인 엔티티 정지/행부재 — 소생 보류(fail-closed)"
+        if _latest_lock_stopped(db, campaign_id, entity_type="campaign") is True:
+            return False, "캠페인 잠금(set_user_lock) — 소생 보류"
+        ctype = _campaign_type_from_daily(db, campaign_id, d0)
+        if ctype not in _REVIVE_ALLOWED_CAMPAIGN_TYPES:
+            return False, f"campaign_type={ctype or '미확보'} — 소생 보류(쇼핑/브랜드 grain 한정)"
+        return True, None
+    except Exception as e:  # noqa: BLE001 — 판단 불가는 fail-closed(소생 보류)
+        log.warning("vitality_signal: 캠페인 소생 게이트 판정 실패 campaign=%s(보류): %s", campaign_id, e)
+        return False, "캠페인 게이트 판정 예외 — 소생 보류(fail-closed)"
+
+
 def detect_spirals(db: Session, *, now: datetime | None = None) -> dict:
     """스파이럴 경보 + 소생 대상 산출(PLAN §1). 순수 SA·read-only.
 
@@ -304,10 +409,17 @@ def detect_spirals(db: Session, *, now: datetime | None = None) -> dict:
     부분치라 제외, 코드베이스 as_of=D-1 관례). S3는 경보 dict에 부가 정보로만 싣는다.
 
     반환: {"alerts": [{campaign_id, imp_traj, cum_drop_pct, rank_traj, avg_rank,
-                       s3_low_qi_ratio, revive_group_count}],
-           "revive_targets": [{campaign_id, adgroup_id, conv_revenue_30d, reason}]}"""
+                       s3_low_qi_ratio, revive_group_count, revive_note?}],
+           "revive_targets": [{campaign_id, adgroup_id, conv_revenue_30d, reason}],
+           "revive_hold_reason": None|str}  # C3 부분적재 전면 보류 사유(전역)
+
+    C3(codex 1R): D-1 부분적재 의심이면 발사를 전면 보류 — 경보(관찰)는 그대로 산출하되
+    revive_targets를 비우고 revive_hold_reason에 사유를 싣는다(브리핑 표기용).
+    C2/C6(codex 1R): 캠페인 레벨 게이트(부모 체인 정지·잠금·grain 유형)를 통과한 캠페인만
+    소생 후보를 만든다. 게이트 탈락 캠페인은 경보에 revive_note를 달고 후보 0."""
     now = now or kst_now()
     d0 = now.date() - timedelta(days=1)
+    partial, partial_reason = _partial_load_suspected(db, d0)  # C3: 전역 부분적재 판정 1회
     alerts: list[dict] = []
     revive_targets: list[dict] = []
     for cid in _auto_operate_campaign_ids(db):
@@ -316,9 +428,15 @@ def detect_spirals(db: Session, *, now: datetime | None = None) -> dict:
         s2_fired, s2d = _signal_s2(rank_by, d0)
         if not (s1_fired and s2_fired):
             continue
-        cands = _revive_candidates(db, cid, d0)
+        # C2+C6 캠페인 레벨 게이트(경보는 유지, 소생 대상만 거른다). 부분적재면 게이트 판정도
+        # 생략하고 후보 0(C3 전면 보류 — 아래 revive_hold_reason이 사유를 대표).
+        if partial:
+            cands, revive_note = [], None
+        else:
+            gate_ok, revive_note = _campaign_revive_gate(db, cid, d0)
+            cands = _revive_candidates(db, cid, d0) if gate_ok else []
         s3 = _low_qi_ratio(db, [c["adgroup_id"] for c in cands])
-        alerts.append({
+        alert = {
             "campaign_id": cid,
             "imp_traj": s1d["imp_traj"],
             "cum_drop_pct": s1d["cum_drop_pct"],
@@ -326,10 +444,18 @@ def detect_spirals(db: Session, *, now: datetime | None = None) -> dict:
             "avg_rank": s2d["avg_rank"],
             "s3_low_qi_ratio": s3,
             "revive_group_count": len(cands),
-        })
+        }
+        if revive_note:
+            alert["revive_note"] = revive_note
+        alerts.append(alert)
         revive_targets.extend(cands)
     log.info(
-        "vitality_signal: detect_spirals as_of=%s 경보=%s 소생대상=%s",
+        "vitality_signal: detect_spirals as_of=%s 경보=%s 소생대상=%s%s",
         d0.isoformat(), len(alerts), len(revive_targets),
+        f" (부분적재 보류: {partial_reason})" if partial else "",
     )
-    return {"alerts": alerts, "revive_targets": revive_targets}
+    return {
+        "alerts": alerts,
+        "revive_targets": revive_targets,
+        "revive_hold_reason": partial_reason if partial else None,
+    }

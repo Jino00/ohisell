@@ -70,6 +70,9 @@ APPROVAL_SOURCE_REVERT = "revert_op"  # 9자 — D-NAO-58 CD3 탐침 되돌림(S
 VITALITY_RATIONALE_PREFIX = "[스파이럴복원]"
 _VITALITY_DAILY_CAP = 5            # §2 봉투: 캠페인당 복원 발사 그룹 ≤5/일
 _VITALITY_COOLDOWN_HOURS = 48      # §2 봉투: 같은 그룹 48h 재발사 쿨다운
+# C5(codex 1R): 당일 순위 재확인 밴드 상단 — vitality_signal._RANK_BAND_TOP(4.0)과 동일.
+# D-1 스파이럴 신호로 발사 큐에 올랐어도, 당일 intraday 순위가 밴드(≤4.0)로 복귀했으면 skip.
+_VITALITY_INTRADAY_BAND_TOP = 4.0
 ACTION_VITALITY_BRIEFING = "vitality_spiral_briefing"  # diary observe action(브리핑 렌더용)
 
 # B3(D-NAO-65) 소재-레벨 입찰 제어 카나리 게이트. auto_operate 캠페인 중 이 집합에 든
@@ -1873,6 +1876,26 @@ def _vitality_group_on_cooldown(db: Session, adgroup_id: str, now: datetime) -> 
     return row is not None
 
 
+def _vitality_intraday_recovered(db: Session, campaign_id: str, now: datetime) -> bool:
+    """C5(codex 1R): 당일 intraday 순위(NaverHourlySnapshot 오늘 최신 avg_rank·캠페인 grain)가
+    밴드(≤4.0)로 복귀했으면 True → 그 캠페인 소생 발사 skip("이미 회복"). D-1 스파이럴 신호로
+    큐에 올랐어도 당일 순위가 이미 회복됐으면 소생이 불필요·과잉이라 억제한다. 데이터 없으면
+    False(진행 — D-1 신호 기준, 당일 순위 미수집·avgRnk<=0→NULL은 판정 근거 아님)."""
+    row = (
+        db.query(NaverHourlySnapshot.avg_rank)
+        .filter(
+            NaverHourlySnapshot.campaign_id == campaign_id,
+            NaverHourlySnapshot.ad_date == now.date(),
+            NaverHourlySnapshot.avg_rank.isnot(None),
+        )
+        .order_by(NaverHourlySnapshot.snapshot_hour.desc())
+        .first()
+    )
+    if row is None or row[0] is None:
+        return False
+    return float(row[0]) <= _VITALITY_INTRADAY_BAND_TOP
+
+
 def _fire_vitality_revive(db: Session, target: dict, now: datetime, result: dict) -> None:
     """소생 대상 그룹 1건을 기존 시간당 밴드 UP 경로로 발사(§2). 새 권한·우회 경로 없음 —
     proposal_type='bid_up'·adgroup·target_bid=_clamp_step(라이브가, up)·approval_source=
@@ -1890,6 +1913,16 @@ def _fire_vitality_revive(db: Session, target: dict, now: datetime, result: dict
                             reason="[스파이럴복원] 킬스위치 OFF — auto_operate=False", now=now,
                             target_type="adgroup", target_id=adgroup_id, action="bid_up",
                             event_type="kill_switch")
+            return
+        # C4(codex 1R, 부분 수용): 발사 직전 캡 재카운트 백스톱 — _run_vitality_step의 루프 상단
+        # 캡 검사와 실제 커밋 사이 창(check-then-act)을 좁힌다. 완전 원자 예약은 하지 않는다
+        # (비례성: 시간당 크론 단일·catch-up 없음이라 잔여 리스크는 수동 중복 실행뿐 — 재카운트가
+        # 기존 harness 관례의 최소 백스톱). _vitality_daily_count는 커밋된 change_log만 세므로
+        # 같은 런 앞선 발사도 반영된다.
+        if _vitality_daily_count(db, campaign_id, now) >= _VITALITY_DAILY_CAP:
+            result["vitality_held"].append(
+                {"target_id": adgroup_id, "reason": "캠페인 일일 캡(발사 직전 재카운트) 도달"}
+            )
             return
         current_bid = _live_current_bid("adgroup", adgroup_id)
         if current_bid is None:
@@ -1929,17 +1962,25 @@ def _fire_vitality_revive(db: Session, target: dict, now: datetime, result: dict
         log.warning("auto_operator: 스파이럴 복원 발사 실패 proposal_id=%s: %s", proposal.id, e)
 
 
-def _emit_vitality_briefing(db: Session, alerts: list[dict], now: datetime) -> None:
+def _emit_vitality_briefing(
+    db: Session, alerts: list[dict], now: datetime, *, revive_hold_reason: str | None = None,
+) -> None:
     """경보/발사가 있던 날만 diary(observe)+Slack — PX 브리핑 관례 미러(fail-open·독립 try·
-    없는 날 침묵). 호출부는 alerts 비어있지 않을 때만 부른다(무경보 무브리핑, §2)."""
+    없는 날 침묵). 호출부는 alerts 비어있지 않을 때만 부른다(무경보 무브리핑, §2).
+
+    revive_hold_reason(C3): 부분적재 전면 보류 사유가 있으면 헤더 아래 한 줄로 표기(발사 0 이유
+    명시). 캠페인별 revive_note(C2/C6 게이트 탈락 사유)는 해당 줄에 덧붙인다."""
     try:
         header = f"{now.date().isoformat()} 스파이럴 경보 {len(alerts)}캠페인 — B축 흐름 복원(D-NAO-81)"
         parts = [header]
+        if revive_hold_reason:
+            parts.append(f"⚠️ {revive_hold_reason}")
         for a in alerts:
             s3 = "" if a.get("s3_low_qi_ratio") is None else f"·저품질비중 {a['s3_low_qi_ratio']}"
+            note = f"·{a['revive_note']}" if a.get("revive_note") else ""
             parts.append(
                 f"- {a['campaign_id']}: 노출궤적 {a['imp_traj']}(누적 −{a['cum_drop_pct']}%)·"
-                f"순위 {a['avg_rank']}(궤적 {a['rank_traj']})·소생후보 {a['revive_group_count']}그룹{s3}"
+                f"순위 {a['avg_rank']}(궤적 {a['rank_traj']})·소생후보 {a['revive_group_count']}그룹{s3}{note}"
             )
         text = "\n".join(parts)
         diary.write_diary_entry(
@@ -1961,8 +2002,26 @@ def _run_vitality_step(db: Session, now: datetime, result: dict) -> None:
     result["vitality_alerts"] = len(alerts)
     if not alerts:
         return  # 무경보 = 무동작·무브리핑(§2)
+    revive_hold_reason = signals.get("revive_hold_reason")  # C3: 부분적재 전면 보류(전역)
+    breaker_cache: dict[str, str | None] = {}  # C1: 캠페인당 서킷브레이커 1회 평가 캐시
     for target in signals["revive_targets"]:
         campaign_id, adgroup_id = target["campaign_id"], target["adgroup_id"]
+        # C1(codex 1R): 발사 전 캠페인 소진 서킷브레이커 재사용 — 오늘 스냅샷 부재/스테일이면
+        # 그 캠페인 소생 발사 전면 hold(fail-closed). 경보·브리핑은 유지, 발사만 차단·사유 로그.
+        if campaign_id not in breaker_cache:
+            breaker_cache[campaign_id] = _check_spend_circuit_breaker(db, campaign_id, now)
+        breaker_reason = breaker_cache[campaign_id]
+        if breaker_reason is not None:
+            result["vitality_held"].append(
+                {"target_id": adgroup_id, "reason": f"소진 서킷브레이커 hold — {breaker_reason}"}
+            )
+            continue
+        # C5(codex 1R): 당일 intraday 순위가 밴드(≤4.0)로 복귀했으면 skip(이미 회복).
+        if _vitality_intraday_recovered(db, campaign_id, now):
+            result["vitality_held"].append(
+                {"target_id": adgroup_id, "reason": "당일 순위 회복(intraday ≤4.0) — 발사 skip"}
+            )
+            continue
         if _vitality_daily_count(db, campaign_id, now) >= _VITALITY_DAILY_CAP:
             result["vitality_held"].append({"target_id": adgroup_id, "reason": "캠페인 일일 캡(≤5) 초과"})
             continue
@@ -1970,7 +2029,7 @@ def _run_vitality_step(db: Session, now: datetime, result: dict) -> None:
             result["vitality_held"].append({"target_id": adgroup_id, "reason": "48h 재발사 쿨다운"})
             continue
         _fire_vitality_revive(db, target, now, result)
-    _emit_vitality_briefing(db, alerts, now)
+    _emit_vitality_briefing(db, alerts, now, revive_hold_reason=revive_hold_reason)
 
 
 def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=None) -> dict:

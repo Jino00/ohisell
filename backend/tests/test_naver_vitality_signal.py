@@ -80,8 +80,16 @@ def _dec(x) -> Decimal:
     return Decimal(str(x))
 
 
+def _campaign_entity(db, *, campaign_id=CAMPAIGN, status="on", campaign_type="SHOPPING"):
+    """C2(codex 1R) 캠페인 레벨 게이트가 요구하는 campaign NaverEntity(status='on')."""
+    db.add(NaverEntity(entity_type="campaign", entity_id=campaign_id, parent_id="",
+                       campaign_id=campaign_id, status=status, campaign_type=campaign_type))
+    db.commit()
+
+
 def _seed_03(db, *, conv_days=None):
     _settings(db)
+    _campaign_entity(db)  # C2: 캠페인 부모 체인 'on'
     _entity(db)
     conv_days = conv_days if conv_days is not None else set(_IMP)
     for d, imp in _IMP.items():
@@ -259,4 +267,88 @@ def test_gate_scope_non_auto_operate_ignored(db):
     ).update({"auto_operate": False})
     db.commit()
     res = vitality_signal.detect_spirals(db, now=datetime(2026, 7, 19, 8, 20))
-    assert res == {"alerts": [], "revive_targets": []}
+    assert res["alerts"] == [] and res["revive_targets"] == []
+
+
+# ══════════════════════════ C2 캠페인 레벨 부모 체인 게이트 ══════════════════════════
+
+def test_c2_excludes_when_campaign_entity_off(db):
+    # 부모 캠페인 status=off → 소생 대상 0(경보는 유지, hot-set 관례 동형 fail-closed).
+    _seed_03(db)
+    db.query(NaverEntity).filter(NaverEntity.entity_type == "campaign").update({"status": "off"})
+    db.commit()
+    res = vitality_signal.detect_spirals(db, now=datetime(2026, 7, 19, 8, 20))
+    assert len(res["alerts"]) == 1  # 경보 유지
+    assert res["revive_targets"] == []
+    assert "소생 보류" in res["alerts"][0].get("revive_note", "")
+
+
+def test_c2_excludes_when_campaign_entity_absent(db):
+    # 캠페인 엔티티 행 부재 → on 확인 불가 → fail-closed 배제.
+    _settings(db)
+    _entity(db)  # adgroup만 시드, campaign 엔티티 미시드
+    for d, imp in _IMP.items():
+        _daily(db, ad_date=d, imp=imp, rank=_RANK[d])
+    res = vitality_signal.detect_spirals(db, now=datetime(2026, 7, 19, 8, 20))
+    assert len(res["alerts"]) == 1 and res["revive_targets"] == []
+
+
+def test_c2_excludes_when_campaign_locked(db):
+    # 캠페인 대상 최신 성공 set_user_lock(userLock:true) → 배제(캠페인 잠금 권위 소스).
+    _seed_03(db)
+    db.add(NaverChangeLog(
+        entity_type="campaign", entity_id=CAMPAIGN, campaign_id=CAMPAIGN, action="set_user_lock",
+        rationale="[캠페인 정책 정지]", dry_run=False, after_value='{"userLock": true}',
+        changed_at=datetime(2026, 7, 18, 9, 0), executed_at=datetime(2026, 7, 18, 9, 0),
+    ))
+    db.commit()
+    res = vitality_signal.detect_spirals(db, now=datetime(2026, 7, 19, 8, 20))
+    assert res["revive_targets"] == []
+
+
+# ══════════════════════════ C3 부분적재 오발 차단 ══════════════════════════
+
+def test_c3_partial_load_holds_all_fires(db):
+    # D-1 행수가 직전 3일 평균 대비 −50%↓면 부분적재 의심 → 경보 유지·revive_targets 전면 비움.
+    # baseline 행수는 별도 캠페인(cmp-other, non-auto)으로 올려 CAMPAIGN의 s1/s2 신호는 불변.
+    _seed_03(db)
+    for d in (date(2026, 7, 15), date(2026, 7, 16), date(2026, 7, 17)):
+        for extra in ("grp-a", "grp-b", "grp-c"):
+            _daily(db, ad_date=d, imp=100, rank=3.0, campaign_id="cmp-other", adgroup_id=extra)
+    res = vitality_signal.detect_spirals(db, now=datetime(2026, 7, 19, 8, 20))
+    assert len(res["alerts"]) == 1  # 스파이럴 경보 자체는 유지
+    assert res["revive_targets"] == []
+    assert res["revive_hold_reason"] is not None and "부분적재" in res["revive_hold_reason"]
+
+
+def test_c3_normal_load_does_not_hold(db):
+    # 균형 잡힌 행수(D-1도 정상)면 부분적재 아님 → revive_hold_reason None.
+    _seed_03(db)
+    res = vitality_signal.detect_spirals(db, now=datetime(2026, 7, 19, 8, 20))
+    assert res["revive_hold_reason"] is None
+    assert any(t["adgroup_id"] == GROUP for t in res["revive_targets"])
+
+
+# ══════════════════════════ C6 쇼핑/브랜드 한정(WEB_SITE 제외) ══════════════════════════
+
+def test_c6_excludes_web_site_campaign(db):
+    # WEB_SITE(파워링크) 캠페인은 소생 대상 0(경보는 유지 — grain 계약 충돌 방지).
+    _seed_03(db)
+    db.query(NaverAdDaily).update({NaverAdDaily.campaign_type: "WEB_SITE"})
+    db.query(NaverEntity).filter(NaverEntity.entity_type == "campaign").update(
+        {"campaign_type": "WEB_SITE"}
+    )
+    db.commit()
+    res = vitality_signal.detect_spirals(db, now=datetime(2026, 7, 19, 8, 20))
+    assert len(res["alerts"]) == 1  # 경보 유지
+    assert res["revive_targets"] == []
+    assert "grain" in res["alerts"][0].get("revive_note", "")
+
+
+def test_c6_allows_brand_search_campaign(db):
+    # BRAND_SEARCH도 adgroup grain 발사 허용 → 소생 대상 포함.
+    _seed_03(db)
+    db.query(NaverAdDaily).update({NaverAdDaily.campaign_type: "BRAND_SEARCH"})
+    db.commit()
+    res = vitality_signal.detect_spirals(db, now=datetime(2026, 7, 19, 8, 20))
+    assert any(t["adgroup_id"] == GROUP for t in res["revive_targets"])

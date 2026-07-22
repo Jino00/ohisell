@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 from unittest.mock import patch
 
 import pytest
@@ -20,6 +21,7 @@ from app.models import (
     NaverCampaignSettings,
     NaverChangeLog,
     NaverEntity,
+    NaverHourlySnapshot,
     NaverProposal,
     OpsDiaryEntry,
 )
@@ -57,9 +59,13 @@ def _result() -> dict:
     return {"failed": 0, "vitality_alerts": 0, "vitality_fired": 0, "vitality_held": []}
 
 
-def _seed_spiral(db, *, imp=None, auto_operate=True):
+def _seed_spiral(db, *, imp=None, auto_operate=True, snap=True,
+                 snap_hour=8, snap_cost=5000, snap_avg_rank=None):
     imp = imp or _IMP
     db.add(NaverCampaignSettings(campaign_id=CAMPAIGN, auto_operate=auto_operate, optimizer="ours"))
+    # C2(codex 1R): 캠페인 부모 체인 'on' 엔티티(소생 게이트 통과 조건).
+    db.add(NaverEntity(entity_type="campaign", entity_id=CAMPAIGN, parent_id="",
+                       campaign_id=CAMPAIGN, status="on", campaign_type="SHOPPING"))
     db.add(NaverEntity(entity_type="adgroup", entity_id=GROUP, parent_id=CAMPAIGN,
                        campaign_id=CAMPAIGN, status="on"))
     for d, v in imp.items():
@@ -67,6 +73,14 @@ def _seed_spiral(db, *, imp=None, auto_operate=True):
             ad_date=d, campaign_id=CAMPAIGN, campaign_type="SHOPPING", adgroup_id=GROUP,
             keyword_id="", imp=v, clk=20, cost=10000, rank_sum=round(_RANK[d] * v),
             conv_direct_cnt=2, conv_indirect_cnt=0, conv_direct_amt=50000, conv_indirect_amt=0,
+        ))
+    if snap:
+        # C1(codex 1R): 발사 전 서킷브레이커가 오늘 스냅샷을 요구(부재=fail-closed hold). 신선한
+        # 오늘 스냅샷(cost < 직전7일평균×3)을 시드해 정상 경로에선 발사가 진행되게 한다.
+        # C5: avg_rank None(기본)이면 당일 순위 판정 근거 없음 → 발사 진행(D-1 신호 기준).
+        db.add(NaverHourlySnapshot(
+            snapshot_at=NOW, ad_date=NOW.date(), snapshot_hour=snap_hour, campaign_id=CAMPAIGN,
+            campaign_type="SHOPPING", cost=snap_cost, clk=1, imp=100, avg_rank=snap_avg_rank,
         ))
     db.commit()
 
@@ -275,6 +289,106 @@ def test_fire_prep_exception_is_fail_soft(db):
     mock_exec.assert_not_called()
     assert any("fail-soft" in h["reason"] for h in result["vitality_held"])
     mock_slack.assert_called_once()  # 브리핑은 살아있음(fail-soft)
+
+
+# ══════════════════════════ C1 소진 서킷브레이커 재사용 ══════════════════════════
+
+def test_c1_missing_snapshot_holds_all_fires(db):
+    """오늘 소진 스냅샷 부재 → 그 캠페인 소생 발사 전면 hold(fail-closed). 경보·브리핑은 유지."""
+    _seed_spiral(db, snap=False)  # 오늘 NaverHourlySnapshot 미시드
+    with patch.object(auto_operator, "_live_current_bid", return_value=1000), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec, \
+         patch.object(auto_operator.slack_notifier, "notify_text", return_value={"sent": True}) as mock_slack:
+        result = _result()
+        auto_operator._run_vitality_step(db, NOW, result)
+
+    assert result["vitality_alerts"] == 1        # 경보 유지
+    assert result["vitality_fired"] == 0
+    mock_exec.assert_not_called()                # 발사만 차단
+    assert any("서킷브레이커" in h["reason"] for h in result["vitality_held"])
+    mock_slack.assert_called_once()              # 브리핑 유지
+
+
+def test_c1_fresh_snapshot_allows_fire(db):
+    """신선한 오늘 스냅샷(cost < 평균×3)이면 브레이커 통과 → 정상 발사."""
+    _seed_spiral(db)  # 기본 snap=True(cost=5000 < 10000×3)
+    with patch.object(auto_operator, "_live_current_bid", return_value=1000), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec, \
+         patch.object(auto_operator.slack_notifier, "notify_text", return_value={"sent": True}):
+        result = _result()
+        auto_operator._run_vitality_step(db, NOW, result)
+
+    assert result["vitality_fired"] == 1
+    mock_exec.assert_called_once()
+
+
+# ══════════════════════════ C4 캡 재카운트 백스톱 ══════════════════════════
+
+def test_c4_recount_backstop_blocks_at_cap(db):
+    """발사 직전 재카운트 — 이미 오늘 [스파이럴복원] 5건이면 _fire_vitality_revive가 커밋 전
+    held로 중단(check-then-act 창 백스톱). execute 미호출."""
+    _seed_spiral(db)
+    for i in range(5):
+        _seed_fire_log(db, entity_id=f"grp-x{i}", changed_at=datetime(2026, 7, 19, 3, 0))
+    target = {"campaign_id": CAMPAIGN, "adgroup_id": GROUP, "reason": "재카운트 테스트"}
+    with patch.object(auto_operator, "_live_current_bid", return_value=1000), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = _result()
+        auto_operator._fire_vitality_revive(db, target, NOW, result)
+
+    assert result["vitality_fired"] == 0
+    mock_exec.assert_not_called()
+    assert any("재카운트" in h["reason"] for h in result["vitality_held"])
+
+
+# ══════════════════════════ C5 당일 순위 재확인 ══════════════════════════
+
+def test_c5_intraday_recovery_skips_fire(db):
+    """당일 intraday 순위가 밴드(≤4.0)로 복귀 → 그 캠페인 소생 발사 skip(이미 회복)."""
+    _seed_spiral(db, snap_avg_rank=Decimal("3.5"))  # 오늘 순위 3.5(밴드 안)
+    with patch.object(auto_operator, "_live_current_bid", return_value=1000), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec, \
+         patch.object(auto_operator.slack_notifier, "notify_text", return_value={"sent": True}):
+        result = _result()
+        auto_operator._run_vitality_step(db, NOW, result)
+
+    assert result["vitality_fired"] == 0
+    mock_exec.assert_not_called()
+    assert any("순위 회복" in h["reason"] for h in result["vitality_held"])
+
+
+def test_c5_intraday_still_bad_proceeds(db):
+    """당일 순위가 여전히 밴드 밖(>4.0)이면 발사 진행(회복 아님)."""
+    _seed_spiral(db, snap_avg_rank=Decimal("4.7"))
+    with patch.object(auto_operator, "_live_current_bid", return_value=1000), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec, \
+         patch.object(auto_operator.slack_notifier, "notify_text", return_value={"sent": True}):
+        result = _result()
+        auto_operator._run_vitality_step(db, NOW, result)
+
+    assert result["vitality_fired"] == 1
+    mock_exec.assert_called_once()
+
+
+# ══════════════════════════ C3 부분적재 보류 브리핑 표기 ══════════════════════════
+
+def test_c3_briefing_notes_partial_hold(db):
+    """부분적재 보류(revive_hold_reason) 시 브리핑에 사유 표기(발사 0 이유 명시)."""
+    alerts = [{
+        "campaign_id": CAMPAIGN, "imp_traj": [1559, 924, 1175, 796], "cum_drop_pct": 49.0,
+        "rank_traj": [3.5, 3.9, 4.7], "avg_rank": 4.7, "s3_low_qi_ratio": None,
+        "revive_group_count": 0,
+    }]
+    with patch.object(auto_operator.slack_notifier, "notify_text", return_value={"sent": True}) as mock_slack:
+        auto_operator._emit_vitality_briefing(
+            db, alerts, NOW, revive_hold_reason="D-1(2026-07-18) 부분적재 의심 → 발사 전면 보류",
+        )
+
+    brief = db.query(OpsDiaryEntry).filter(
+        OpsDiaryEntry.action == auto_operator.ACTION_VITALITY_BRIEFING
+    ).one()
+    assert "부분적재" in brief.rationale
+    mock_slack.assert_called_once()
 
 
 # ══════════════════════════ GATE ⑥ 기존 시간당 레인 회귀 0 ══════════════════════════
