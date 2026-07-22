@@ -103,6 +103,9 @@ _EXPLORATION_MIN_BID = 70               # (보존) 파워링크 키워드 grain 
 _EXPLORATION_MIN_BID_SHOPPING = 50      # 쇼핑검색 adgroup grain 유효 하한(prod 158그룹 bid=50 라이브 실증, 2026-07-22)
 _EXPLORATION_MAX_BID = 100_000  # 유효 입찰가 상한
 _EXPLORATION_BID_INCREMENT = 10  # 10원 단위(스텝 반올림 = floor //10*10, PLAN §3 BX2 GATE 이월 P2③)
+# 플로어 입찰 상한(원) — VT4 수요 우선 정렬의 "신수요 개척 우선" 대상 판정 경계(D-NAO-82①).
+# 이 값 이하 입찰 ∧ 판정 표본 미달(clk<10) 그룹 = 아직 밴드 진입 안 한 방치된 신수요 후보.
+_EXPLORATION_FLOOR_BID_MAX = 100
 
 
 def _apply_bm_anchor(target: Decimal, current_bid: int, bm_prior: int | None) -> Decimal:
@@ -403,6 +406,88 @@ def exploration_candidates(
         if clk < _MIN_CLICK_FOR_EXPLORATION:
             out.append((e.entity_type, e.entity_id))
     return out
+
+
+def prioritize_candidates(
+    db: Session, campaign_id: str, candidates: list[tuple[str, str]], window_from, window_to,
+) -> list[tuple[str, str]]:
+    """탐색 후보 수요 우선 재정렬(순수·VT4 D-NAO-82① — 07-22 라이브 해부 발견).
+
+    근거 표본: 03 캠페인 아이폰17·17프로 — 노출 수요가 캠페인의 34%인데 bid 50원으로 방치돼
+    래더가 손도 못 댐(발사 이력 0). 후보를 entity_id 순으로만 순회하면 런당 관측/쿨다운 예산이
+    앞 순번에 쏠려 정작 신수요(고노출·저입찰) 그룹이 뒤로 밀린다 → **수요 크기를 순회 우선순위에
+    반영**한다. ★"순서만" 바꾼다 — 봉투·스텝 크기·경제성 상한·쿨다운·발동 조건 전부 불변
+    (새 권한 없음, PLAN §4.2). 재정렬은 exploration_candidates 결과에만 적용되고 다운스트림
+    판정(트리거·래더·상한)은 그대로다.
+
+    정렬 규칙:
+      1순위(신수요 개척): (현 그룹 입찰 bid_amt ≤ _EXPLORATION_FLOOR_BID_MAX(100원)) ∧ (정착창
+        clk < _MIN_CLICK_FOR_EXPLORATION(10)) 인 adgroup — 최근 7일(정착창) 노출 **내림차순**.
+        동률 노출은 entity_id 오름차순(결정성). = 아직 밴드 진입 못 한 채 방치된 고수요 플로어 그룹.
+      2순위: 나머지 — 입력 순서(exploration_candidates의 entity_id 오름차순) 그대로 유지(결정성 보존).
+
+    데이터 소스: bid_amt = naver_entity(그룹 기본가). 노출·clk = naver_ad_daily [window_from,
+    window_to] 합(sentinel 제외 — _grain_settlement_agg 관례 동일). 후보 adgroup을 **일괄
+    쿼리**(2회: daily 집계 GROUP BY + entity bid)로 뽑아 N+1을 피한다. bid_amt=None(미동기) 또는
+    daily 행 부재(콜드 imp=0) 그룹은 판정 가능한 신호만으로 평가(None 입찰 = 플로어 판정 불가 →
+    2순위 유지·보수적).
+
+    반환: 재정렬된 [(entity_type, entity_id), ...](입력과 동일 원소·개수, 순서만 변경)."""
+    if not candidates:
+        return list(candidates)
+    adgroup_ids = [eid for (etype, eid) in candidates if etype == "adgroup"]
+    if not adgroup_ids:
+        return list(candidates)
+
+    # ① 일괄 집계(N+1 방지): 후보 adgroup들의 정착창 clk·imp 합(sentinel 제외).
+    agg: dict[str, dict] = {}
+    rows = (
+        db.query(
+            NaverAdDaily.adgroup_id,
+            sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.clk), 0),
+            sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.imp), 0),
+        )
+        .filter(
+            NaverAdDaily.ad_date >= window_from,
+            NaverAdDaily.ad_date <= window_to,
+            NaverAdDaily.adgroup_id.in_(adgroup_ids),
+            NaverAdDaily.adgroup_id != BACKFILL_SENTINEL_ADGROUP,
+        )
+        .group_by(NaverAdDaily.adgroup_id)
+        .all()
+    )
+    for aid, clk, imp in rows:
+        agg[aid] = {"clk": int(clk), "imp": int(imp)}
+
+    # ② 후보 그룹 현재 입찰가 일괄 조회(naver_entity — 그룹 기본가 bid_amt).
+    bids: dict[str, int | None] = {}
+    for eid, bid in (
+        db.query(NaverEntity.entity_id, NaverEntity.bid_amt)
+        .filter(
+            NaverEntity.entity_type == "adgroup",
+            NaverEntity.entity_id.in_(adgroup_ids),
+        )
+        .all()
+    ):
+        bids[eid] = bid
+
+    tier1: list[tuple[int, str, tuple[str, str]]] = []  # (−imp, entity_id, cand) — 노출 내림·id 오름
+    tier2: list[tuple[str, str]] = []
+    for cand in candidates:
+        etype, eid = cand
+        a = agg.get(eid, {"clk": 0, "imp": 0})
+        bid = bids.get(eid)
+        is_floor_new_demand = (
+            etype == "adgroup"
+            and bid is not None and bid <= _EXPLORATION_FLOOR_BID_MAX
+            and a["clk"] < _MIN_CLICK_FOR_EXPLORATION
+        )
+        if is_floor_new_demand:
+            tier1.append((-a["imp"], eid, cand))  # −imp = 노출 내림차순 정렬키
+        else:
+            tier2.append(cand)  # 입력 순서 유지(entity_id 오름차순)
+    tier1.sort(key=lambda t: (t[0], t[1]))  # 노출 내림(−imp)·동률 entity_id 오름(결정성)
+    return [c for (_i, _e, c) in tier1] + tier2
 
 
 def exploration_trigger(

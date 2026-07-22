@@ -1731,6 +1731,10 @@ def _run_exploration_for_campaign(
     처방 대상). 차단 범위는 이 탐색 래더뿐(시간당 밴드 레인·핫셋 레인·vitality 소생 불변)."""
     today = now.date()
     candidates = exploration.exploration_candidates(db, campaign_id, window_from, window_to)
+    # VT4(D-NAO-82①): 수요 우선 재정렬 — 플로어(≤100원)·판정 표본 미달 그룹을 최근 7일 노출
+    # 내림차순으로 앞에 세운다(03 아이폰17프로 노출 34% 방치 발견). 봉투·스텝·상한·쿨다운·발동
+    # 조건 전부 불변("순서만"). 원소·개수 동일 — 다운스트림 순회 로직 무영향.
+    candidates = exploration.prioritize_candidates(db, campaign_id, candidates, window_from, window_to)
     # BM P4(D-NAO-78): 대행사 고성과 SHOPPING 그룹 입찰밴드 p50을 콜드 탐색 초기입찰 프라이어로
     # 1회 조회(후보 순회 밖·N+1 방지). 후보는 전부 SHOPPING(exploration_candidates 게이트).
     # bid_band_anchor 자체 fail-open → 부재/실패 시 None → adaptive_step 기존 콜드스타트 폴백(회귀 0).
