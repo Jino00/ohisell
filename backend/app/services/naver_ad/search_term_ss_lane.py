@@ -43,7 +43,6 @@ _PL_GROUP_SLOT_CAP = 60
 
 # 재심사 개방(복귀) 실쓰기 change_log action·마커(PX3) — 제외(exclude_search_term)와 별도 액션으로
 # 분리해 일일 복귀 캡·감사를 독립 카운트한다(제외 캡과 상호 오염 방지).
-_SS_DAILY_RETURN_CAP = 10
 _RESTORE_ACTION = "restore_search_term"
 _RETURN_MARKER = "[검색어제외 복귀]"
 # probation 관찰창(§2) — 개방 후 재노출 관찰 기간(일).
