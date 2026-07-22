@@ -2193,3 +2193,22 @@ export function putNaverCampaignLossPolicy(
     body: JSON.stringify({ campaign_id: campaignId, loss_policy: lossPolicy }),
   });
 }
+
+// 쿠팡 4스트림 수집 신선도(전역 배너 전용). 자동 트리거 제거 후 '낡음/실패' 가시화 유일 경로.
+export type CollectionState = "fresh" | "warn" | "critical" | "failed" | "in_flight";
+export interface CollectionStreamStatus {
+  key: "ofix_sales" | "ofix_ad" | "ohitech_ad" | "supplier_hub";
+  label: string;
+  state: CollectionState;
+  age_hours: number | null;
+  last_success_at: string | null;
+  last_error_at: string | null;
+  last_error: string | null;
+}
+export interface CollectionStatus {
+  streams: CollectionStreamStatus[];
+  as_of: string;
+}
+export function getCollectionStatus(): Promise<CollectionStatus> {
+  return fetchApi<CollectionStatus>("/api/coupang/ops/collection-status");
+}

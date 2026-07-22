@@ -727,10 +727,11 @@ def cmd_chrome(cfg: dict) -> int:
 
 
 def cmd_poll(cfg: dict, interval: int = 30) -> int:
-    """상주 poll 데몬 — UI '갱신' 요청 감지 + 일별 1회 자동 실행.
+    """상주 poll 데몬 — UI '갱신' 버튼 요청만 감지·실행(순수 on-demand).
 
-    ① 30초마다 /rocket/refresh-status 폴링 → 요청 있으면 claim → run.
-    ② last_success_at이 23시간 이상 오래됐으면 자동 run (일별 정기 수집).
+    30초마다 /rocket/refresh-status 폴링 → 요청 있으면 claim → run.
+    ★자동(일별 23h) 실행은 제거됨 — 창을 스스로 띄우지 않고 버튼 누를 때만 뜬다.
+    낡음/실패는 prod GET /collection-status → 전역 신선도 배너로 가시화(잊어버림 방지).
     launchd KeepAlive 데몬으로 실행. plist: com.ohisell.rocket.plist.
     """
     import time as _time
@@ -739,45 +740,27 @@ def cmd_poll(cfg: dict, interval: int = 30) -> int:
         log.error("poll엔 prod_base_url·ingest_token·vendor_id 설정 필요.")
         return 2
 
-    _DAILY_HOURS = 23  # 이 시간 이상 성공 없으면 자동 run
-    last_run_at: float = 0.0  # epoch seconds
     # 자가복구: 연속 폴링 실패가 쌓이면 종료 → launchd가 fresh 재기동(광고/Wing 페처 패턴).
     # sleep/wake 후 소켓 고착 자동 해소. 30s 간격 × 10 ≈ 5분.
     _MAX_CONSECUTIVE_FAILS = 10
     fails = 0
 
-    log.info("[poll] 시작 — 30초마다 갱신 요청 체크 + 23시간 마다 자동 실행")
+    log.info("[poll] 시작 — 30초마다 갱신 요청(버튼)만 체크·실행")
     while True:
         try:
             st = _prod_rocket_refresh_status(cfg)
             fails = 0
             needs_run = False
 
-            # UI 버튼 요청
+            # UI 버튼 요청 (유일한 트리거)
             if st.get("requested"):
                 claimed = _prod_rocket_claim(cfg).get("claimed", False)
                 if claimed:
                     log.info("[poll] UI 갱신 요청 소비 → 즉시 실행")
                     needs_run = True
 
-            # 일별 정기 실행 (마지막 성공 23h 초과)
-            if not needs_run:
-                now = _time.time()
-                suc_iso = st.get("last_success_at")
-                if suc_iso:
-                    import datetime as _dt
-                    suc_epoch = _dt.datetime.fromisoformat(suc_iso).timestamp()
-                    if (now - suc_epoch) > _DAILY_HOURS * 3600:
-                        log.info("[poll] last_success_at %s → 23h 초과 → 자동 실행", suc_iso)
-                        needs_run = True
-                elif (now - last_run_at) > _DAILY_HOURS * 3600:
-                    # 아직 성공 기록 없음 → 24h 이상 실행 안 했으면 1회
-                    log.info("[poll] last_success_at 없음 → 첫 자동 실행")
-                    needs_run = True
-
             if needs_run:
                 rc = cmd_run(cfg)
-                last_run_at = _time.time()
                 log.info("[poll] run 완료 rc=%d", rc)
 
         except Exception as e:  # noqa: BLE001

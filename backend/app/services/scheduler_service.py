@@ -948,24 +948,6 @@ def sync_coupang_ad_cost_job():
         db.close()
 
 
-def request_ad_cost_refresh_job():
-    """장중 오늘 광고비 자동 갱신 요청 (매시 10~20시 KST). prod는 advertising.coupang.com을
-    직접 못 가져오므로(Akamai 403 라이브 확인), 갱신 플래그만 set → Jino Mac 페처 데몬이
-    다음 폴링(~20초)에서 headful fetch 후 push. Mac이 꺼져 있으면 플래그는 다음 기동 시 소비
-    (무해·idempotent). 버튼 수동 클릭을 대체해 '오늘 광고비'가 장중 stale로 남지 않게 한다."""
-    db = _get_own_db_session()
-    try:
-        from app.services.coupang.ad_cost_sync import request_refresh
-
-        result = request_refresh(db)
-        log.info("[스케줄러] 쿠팡 광고비 장중 갱신 요청: %s", result)
-    except Exception as e:
-        log.exception("[스케줄러] request_ad_cost_refresh_job 에러: %s", e)
-        raise
-    finally:
-        db.close()
-
-
 def sync_coupang_coupons_job():
     """쿠팡 쿠폰 운영 현황 자동 동기화 (06:00 KST) — 즉시할인쿠폰+예산/계약(P5). 트랙 D-8: 서버 IP에서만."""
     db = _get_own_db_session()
@@ -1171,10 +1153,9 @@ def _ensure_default_states(db):
         ("sync_coupang_coupons", "0 6 * * *"),
         ("sync_coupang_cs", "5 6 * * *"),
         ("sync_coupang_ad_cost", "10 0 * * *"),
-        # 03:00 야간 브릿지 추가 — keycloak 세션(~12h)이 밤사이 만료되는 빈틈 제거.
-        # 20:00(마지막 주간 갱신)→03:00=7h, 03:00→10:00=7h, 둘 다 <12h라 세션이 끊기지 않는다.
-        # 03:00에 Mac이 깨어 있어야 페처가 갱신 처리(pmset repeat wakeorpoweron 02:58 필요).
-        ("request_ad_cost_refresh", "0 3,10-20 * * *"),
+        # ofix 광고비 장중 자동 갱신 크론은 제거됨 — 순수 on-demand 전환.
+        # 창을 스스로 띄우던 자동 트리거를 없애고, 갱신은 UI '광고비 갱신' 버튼으로만 한다.
+        # 낡음/실패는 GET /collection-status → 전역 신선도 배너로 가시화(잊어버림 방지).
     ]
     for name, cron in defaults:
         existing = db.query(SchedulerState).filter(
@@ -1397,7 +1378,6 @@ def job_func_for(job_name: str):
         "sync_coupang_coupons": sync_coupang_coupons_job,
         "sync_coupang_cs": sync_coupang_cs_job,
         "sync_coupang_ad_cost": sync_coupang_ad_cost_job,
-        "request_ad_cost_refresh": request_ad_cost_refresh_job,
     }.get(job_name)
 
 
