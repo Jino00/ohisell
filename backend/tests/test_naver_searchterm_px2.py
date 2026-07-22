@@ -178,9 +178,12 @@ def test_restrict_kwd_id_recovered_from_write_result(db):
     assert row.restrict_kwd_id == "rkw-777"
 
 
-# ── 대행사(스코프 밖) 고비용 파워링크 → agency 브리핑 diary, 실쓰기 0 ──
+# ── 대행사(스코프 밖) 고비용 파워링크 → 카운트만 반환, 실쓰기 0 ──
+# PX4: 대행사 브리핑 diary는 search_term_px_briefing.run_agency_powerlink_weekly_briefing(주간
+# 일요일 게이트)이 담당하도록 이전됐다(test_naver_searchterm_px4.py 참조) — 이 레인 자체는
+# agency_powerlink_candidates 카운트만 반환하고 diary를 쓰지 않는다(§4 2, D-NAO-79 노이즈 억제).
 def test_agency_powerlink_briefing_no_write(db):
-    # settings 없음(auto_operate=False) + 고비용 → agency_powerlink 브리핑만.
+    # settings 없음(auto_operate=False) + 고비용 → agency_powerlink 카운트만.
     db.add(NaverProductBep(
         channel_id=NAVER_CHANNEL_ID, channel_product_id="PW", has_cost=True, product_name="필름",
         selling_price=Decimal("1000"), contribution_margin=Decimal("500"), cost_price=0,
@@ -196,4 +199,4 @@ def test_agency_powerlink_briefing_no_write(db):
     assert res["agency_powerlink_candidates"] == 1
     from app.models import OpsDiaryEntry
     briefs = db.query(OpsDiaryEntry).filter(OpsDiaryEntry.event_type == "observe").all()
-    assert any("대행사 고비용" in b.rationale for b in briefs)
+    assert not any("대행사 고비용" in b.rationale for b in briefs)

@@ -629,6 +629,7 @@ def run_naver_auto_operator_daily_job():
 
     # SS3(검색어 제외 브리핑·제안 생성) — 일 레인과 같은 흐름에 편입(별 세션·fail-open:
     # 브리핑 실패가 일 레인 집행을 막지 않는다). 실쓰기 0(Confirm 전용) — 제안·diary만 생성.
+    ss: dict = {}  # PX4 브리핑이 이 라운드 결과를 소비(원칙18-8) — 위가 실패해도 빈 dict로 침묵.
     db2 = _get_own_db_session()
     try:
         from app.services.naver_ad import bm_benchmark
@@ -652,6 +653,25 @@ def run_naver_auto_operator_daily_job():
         log.exception("[스케줄러] run_search_term_ss_lane 에러(fail-open): %s", e)
     finally:
         db2.close()
+
+    # PX4(§4, D-NAO-80 후속): 파워링크 자동 제외/복귀 예외 브리핑 + 대행사 고비용 주간 브리핑.
+    # 별도 세션·독립 try(fail-open) — 위 레인이 이미 커밋을 끝낸 뒤라 이 블록 실패는 PX2/PX3
+    # 실쓰기를 되돌리지 않는다. ss가 빈 dict(위 실패)여도 run_exclusion_exception_briefing은
+    # 전부 0으로 읽어 조용히 침묵(완전 fail-open, §4 1).
+    db3 = _get_own_db_session()
+    try:
+        from app.services.naver_ad.search_term_px_briefing import (
+            run_agency_powerlink_weekly_briefing,
+            run_exclusion_exception_briefing,
+        )
+
+        excl_brief = run_exclusion_exception_briefing(db3, ss, now=kst_now())
+        agency_brief = run_agency_powerlink_weekly_briefing(db3, now=kst_now())
+        log.info("[스케줄러] naver PX4 브리핑: 제외/복귀=%s 대행사주간=%s", excl_brief, agency_brief)
+    except Exception as e:  # noqa: BLE001 — 브리핑 실패는 실쓰기 레인과 분리(fail-open)
+        log.exception("[스케줄러] PX4 브리핑 에러(fail-open): %s", e)
+    finally:
+        db3.close()
 
 
 def run_naver_auto_operator_hourly_job():

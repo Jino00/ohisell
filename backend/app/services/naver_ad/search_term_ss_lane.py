@@ -510,23 +510,11 @@ def run_search_term_ss_lane(
             now=now,
         )
 
-    # 대행사 파워링크 고비용 검색어 브리핑(§4 2) — 스코프 밖(실쓰기 0) 관찰 산출물. 신규 진입만
-    # 노이즈 억제 없이 상위 N 나열(주 리듬 절삭은 PX4 몫, 여기선 후보 존재 시 diary 1건).
+    # 대행사 파워링크 고비용 검색어 브리핑(§4 2)은 PX4(search_term_px_briefing.
+    # run_agency_powerlink_weekly_briefing)가 주간(일요일) 리듬으로 별도 담당한다 — 매일
+    # 무조건 diary를 쓰면 D-NAO-79 예외 브리핑 원칙(노이즈 억제)에 어긋나 이 자리를 정리했다
+    # (이 변수는 agency_powerlink_candidates 카운트에만 쓰인다, 원 diary 호출은 PX4로 이전).
     agency = judged.get("agency_powerlink", [])
-    if agency:
-        top = agency[:_BRIEF_TOP_N]
-        listed = "; ".join(f"{c['search_term']}(cost={c['cost']}·clk={c['clk']})" for c in top)
-        more = f" 외 {len(agency) - len(top)}건" if len(agency) > len(top) else ""
-        diary.write_diary_entry(
-            db, "observe", "",
-            actor=diary.ACTOR_DAILY,
-            action=search_term_judge.SEARCH_TERM_EXCLUDE_TYPE,
-            rationale=(
-                f"[파워링크 대행사 고비용 브리핑] {len(agency)}건(30d cost≥30,000·clk≥10) — 대행사 "
-                f"캠페인이라 자동 제외 없음, Jino 전달 검토: {listed}{more}"
-            ),
-            now=now,
-        )
 
     result = {
         "shopping_candidates": len(shopping),

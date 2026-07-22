@@ -67,6 +67,7 @@ from app.models import (
     NaverRetroPacingScore,
     NaverRetroSignal,
     NaverSearchTermDaily,
+    NaverSearchTermExclusion,
 )
 from app.services.naver_ad import bid_step_types
 from app.services.naver_ad import campaign_roster
@@ -1559,6 +1560,76 @@ def get_bm_benchmark(
                 "value": _bm_value_or_none(r.value_json),
                 "sample_n": r.sample_n, "confidence": r.confidence,
                 "computed_at": r.computed_at.isoformat() if r.computed_at else None,
+            }
+            for r in rows
+        ],
+    }
+
+
+# ══════════════════════════════════════════════════════════════════
+# 파워링크 검색어 자동 제외 in-out 재심사 드릴다운 (스프린트 PX4, §4 3,
+#   docs/PLAN_naver-ad-powerlink-autoexclude.md). 주 UX는 예외 브리핑(diary/Slack,
+#   search_term_px_briefing.py) — 이 1종은 상태기계 전 행을 열람하는 온디맨드 창구다.
+# 단순 read — 쓰기 없음, 실행 손(naver_execution_harness/naver_sa_writer) 무관.
+# ══════════════════════════════════════════════════════════════════
+
+
+@router.get("/search-term/exclusions")
+def get_search_term_exclusions(
+    status: str | None = Query(None, pattern="^(excluded|probation|restored)$"),
+    campaign_id: str | None = Query(None),
+    limit: int = Query(100, ge=1, le=_MAX_BM_LIMIT),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+) -> dict:
+    """파워링크 검색어 자동 제외 in-out 상태기계 드릴다운(naver_search_term_exclusion 단순
+    read, PX4 §4 3). 요약(status별 건수, 필터 무관 전체 기준) + 오늘(KST) 제외/복귀 건수
+    (last_transition_at 기준) + 페이징 원자료."""
+    today = kst_today()
+    today_start = datetime.combine(today, datetime.min.time())
+    tomorrow_start = today_start + timedelta(days=1)
+
+    summary: dict[str, int] = {}
+    for (st,) in db.query(NaverSearchTermExclusion.status).all():
+        summary[st] = summary.get(st, 0) + 1
+
+    def _today_count(target_status: str) -> int:
+        return db.query(NaverSearchTermExclusion).filter(
+            NaverSearchTermExclusion.status == target_status,
+            NaverSearchTermExclusion.last_transition_at >= today_start,
+            NaverSearchTermExclusion.last_transition_at < tomorrow_start,
+        ).count()
+
+    q = db.query(NaverSearchTermExclusion)
+    if status:
+        q = q.filter(NaverSearchTermExclusion.status == status)
+    if campaign_id:
+        q = q.filter(NaverSearchTermExclusion.campaign_id == campaign_id)
+    total = q.count()
+    rows = (
+        q.order_by(NaverSearchTermExclusion.last_transition_at.desc())
+        .offset(offset).limit(limit).all()
+    )
+    camp_ids = {r.campaign_id for r in rows if r.campaign_id}
+    _, camp_names = _batch_entity_names(db, set(), camp_ids)
+
+    return {
+        "total": total,
+        "summary_by_status": summary,
+        "today_excluded": _today_count("excluded"),
+        "today_opened": _today_count("probation"),
+        "today_restored": _today_count("restored"),
+        "rows": [
+            {
+                "id": r.id, "campaign_id": r.campaign_id,
+                "campaign_name": camp_names.get(r.campaign_id),
+                "adgroup_id": r.adgroup_id, "search_term": r.search_term,
+                "restrict_kwd_id": r.restrict_kwd_id, "status": r.status, "cycle": r.cycle,
+                "excluded_at": r.excluded_at.isoformat() if r.excluded_at else None,
+                "last_transition_at": r.last_transition_at.isoformat() if r.last_transition_at else None,
+                "next_review_at": r.next_review_at.isoformat() if r.next_review_at else None,
+                "probation_until": r.probation_until.isoformat() if r.probation_until else None,
+                "cost_at_exclusion": r.cost_at_exclusion,
             }
             for r in rows
         ],
