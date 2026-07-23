@@ -730,3 +730,49 @@ def test_ctr_alert_lookup_failure_rests_campaign_lane(db):
         result, mock_exec = _run(db, curve)
     assert result["explored"] == 0  # 경보 산출 실패 → 캠페인 탐색 레인 보류(발사 0)
     mock_exec.assert_not_called()   # 실쓰기 0(안전 방향)
+
+
+# ══════════════════════ 관측 침묵 분기 저소음 기록(D-NAO-85 관측 갭②) ══════════════════════
+
+def test_lane_stop_observe_records_low_noise_observe(db):
+    """stop_observe(밴드 도달·무클릭) 분기가 그동안 diary 무기록이던 것 → observe 1행 기록.
+    17프로 그룹이 10회 연속 무기록되던 침묵 분기 해소(라이브 원인 규명에 표적 시뮬 불필요화)."""
+    from app.models import OpsDiaryEntry
+    from app.services.naver_ad import diary
+
+    _setup(db)
+    _prior_step(db, changed_at=NOW - timedelta(days=1))  # 직전 스텝 존재 → 밴드 분기(stop_observe)
+    curve = [_hour(5, imp=20, clk=0, cost=0, avg_rank=3.5),
+             _hour(6, imp=20, clk=0, cost=0, avg_rank=3.5),
+             _hour(7, imp=20, clk=0, cost=0, avg_rank=3.5)]
+    result, _ = _run(db, curve)
+    assert result["explored_held"] == 1
+
+    obs = db.query(OpsDiaryEntry).filter(
+        OpsDiaryEntry.event_type == "observe", OpsDiaryEntry.adgroup_id == GRP,
+    ).all()
+    assert len(obs) == 1
+    assert obs[0].action == diary.OBSERVE_STOP
+    assert obs[0].actor == diary.ACTOR_EXPLORE
+    assert "밴드 도달" in (obs[0].rationale or "")
+
+
+def test_lane_stop_observe_deduped_across_repeated_runs(db):
+    """같은 stop_observe 상태로 레인이 반복 발동해도 observe 행은 1개만(매시 소음 폭주 방지).
+    상태가 지속되는 한 dedup — 침묵으로 되돌아가지 않으면서도 하루 수십 행 소음도 안 만든다."""
+    from app.models import OpsDiaryEntry
+    from app.services.naver_ad import diary
+
+    _setup(db)
+    _prior_step(db, changed_at=NOW - timedelta(days=1))
+    curve = [_hour(5, imp=20, clk=0, cost=0, avg_rank=3.5),
+             _hour(6, imp=20, clk=0, cost=0, avg_rank=3.5),
+             _hour(7, imp=20, clk=0, cost=0, avg_rank=3.5)]
+    for _ in range(4):  # 4시간 연속 stop_observe 재발동
+        _run(db, curve)
+
+    obs = db.query(OpsDiaryEntry).filter(
+        OpsDiaryEntry.event_type == "observe", OpsDiaryEntry.adgroup_id == GRP,
+        OpsDiaryEntry.action == diary.OBSERVE_STOP,
+    ).all()
+    assert len(obs) == 1  # 4회 발동 → 1행(상태 지속 dedup)
