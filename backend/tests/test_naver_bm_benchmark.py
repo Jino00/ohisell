@@ -209,11 +209,15 @@ def test_adaptive_step_real_gradient_ignores_anchor(db):
 
 # ── ⑤ harness fail-open(SA-3 예외 삼킴) ──────────────────────────
 def test_harness_runs_sa3_and_fail_open(db, monkeypatch):
-    from app.services.naver_ad import bm_harness
+    from app.services.naver_ad import bm_benchmark, bm_harness
     _seed_high_perf_shopping(db)
     # SA-1/SA-2를 no-op으로 스텁(SA-3 단독 검증). SA-3는 이미 스냅샷을 시드했으므로 산출.
     monkeypatch.setattr(bm_harness, "snapshot_entities", lambda _db: {"ok": True})
     monkeypatch.setattr(bm_harness, "detect_agency_ops", lambda _db: {"ok": True})
+    # run_bm_layer→compute_benchmarks(db)는 snapshot_date 미지정 시 bm_benchmark 모듈
+    # 네임스페이스의 kst_today()를 기본값으로 쓴다 — SDATE(시드 날짜)와 정렬해야
+    # 오늘 날짜와 무관하게 통과한다(날짜 고정 flaky 수정).
+    monkeypatch.setattr(bm_benchmark, "kst_today", lambda: SDATE)
     out = bm_harness.run_bm_layer(db)
     assert out["benchmarks"] is not None
     assert db.query(NaverBmBenchmark).filter_by(bench_kind="bid_band").count() == 1

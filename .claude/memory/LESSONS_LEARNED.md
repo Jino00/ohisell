@@ -229,7 +229,18 @@ CD4 학습층은 세분화 판사(LLM)의 판정 근거를 볼트에 남겨야 �
 ### 📌 교훈
 버그 수정 태스크가 파일·원인까지 지목해도, 착수 전 "그 코드가 지금 실제로 그런가"를 저장소+prod 양쪽에서 확인한다. 특히 다른 세션이 prod 셸에서 재현한 실증은 앱 코드 경로가 아닐 수 있다. 이미 맞는 코드를 다시 "고치는" 것은 무의미한 diff와 거짓 수정 보고를 낳는다. 또한 전체 스위트 실패 1건을 봤을 때 "내 변경 전 파일로 재실행"이 인과 판정의 가장 싼 방법이다.
 
-## 20. 판정 기대치는 판정과 같은 창·같은 보정으로 산출하라 — 원시 창 기대치는 라이브에서 "괴리"로 나타난다 (2026-07-23, EX 스프린트 라이브 스모크)
+## 20. 절대 날짜로 시드한 테스트가 하니스 기본값(오늘)과 어긋나 flaky — monkeypatch는 호출되는 모듈에 걸 것 (2026-07-23, BM 벤치마크 flaky 수정)
+
+### 🐛 이슈
+`test_naver_bm_benchmark.py::test_harness_runs_sa3_and_fail_open`이 2026-07-23부터 실패(assert bid_band count 1→0). 원인: 테스트가 `SDATE = date(2026, 7, 22)` 절대 날짜로 스냅샷을 시드하는데, `bm_harness.run_bm_layer` → `compute_benchmarks(db)`가 `snapshot_date` 인자 없이 호출돼 기본값 `kst_today()`(=오늘)를 사용했다. 07-22 당일에만 시드 날짜와 오늘이 우연히 일치해 통과하던 날짜 고정(flaky) 버그 — 같은 파일의 다른 테스트는 `compute_benchmarks(db, snapshot_date=SDATE)`로 명시 호출이라 무사했다.
+
+### ✅ 해결
+테스트 파일만 수정(프로덕션 무접촉). `compute_benchmarks`는 `app/services/naver_ad/bm_benchmark.py`가 자기 네임스페이스에서 `kst_today()`를 호출하므로, **소비 모듈의 심볼** `app.services.naver_ad.bm_benchmark.kst_today`를 `SDATE`로 monkeypatch해 시드 날짜와 정렬했다. 원본 정의 모듈 `app.utils.kst.kst_today`를 패치하면 안 먹히는 함정을 피했다(Python에서 `from x import f`로 가져온 이름은 정의처가 아니라 가져온 모듈의 네임스페이스에 바인딩되므로). 파일 14 passed, 전체 스위트 3021 passed 회귀 0(커밋 c7d4d2a, PR #91).
+
+### 📌 교훈
+**테스트에 하드코딩된 절대 날짜가 하니스 기본값(오늘)과 어긋나면 시간이 지나 반드시 터진다.** 하니스 경유 테스트는 (a) `kst_today`를 **소비(호출) 모듈**에서 monkeypatch하거나 (b) 시드를 `kst_today` 상대 날짜로 작성할 것 — 이 둘 중 하나가 아니면 "오늘 우연히 통과"하는 시한폭탄이 된다. monkeypatch는 반드시 함수가 **정의된 곳이 아니라 호출되는 모듈**의 심볼에 걸어야 한다(`unittest.mock.patch` 표준 함정과 동일 원리).
+
+## 21. 판정 기대치는 판정과 같은 창·같은 보정으로 산출하라 — 원시 창 기대치는 라이브에서 "괴리"로 나타난다 (2026-07-23, EX 스프린트 라이브 스모크)
 
 ### 🐛 이슈
 EX 압력 판정 라이브 스모크에서 03 roas_ratio 실측 1.383이 계획서 §6 기대치 ~1.9와 크게 어긋나 보였다. 순간 버그로 오인할 수 있는 상황.
