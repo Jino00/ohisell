@@ -22,7 +22,7 @@
 - **EX 본체**(`expansion_pressure.py`+`expansion_allocator.py`): 캠페인 압력 판정(정착창 clk≥30·보정계수 fail-closed·roas_ratio≥1.25, gave_score 재사용) → 그룹 3층 랭킹(밴드내→고수요밴드밖→증거창, 자기표본 below 제외·프라이어 폴백·cap 5/일·CTR경보 제외·과열밴드 제외).
 - **레인 배선**: 08:00 proposal_pipeline EX 단계([EX확장] bid_up, +15%·10원 내림) + 08:50 일 레인 P3 폴백(②③ unknown 한정 캠페인 프라이어, below 거부권 유지, **allocator 멤버십 재검증 이중 방어**) + EX·봉투 전용 Slack 통지.
 - **D-NAO-87 예산 봉투**(`budget_envelope.py`): max(30일 일평균×1.5, 5만)·target=min(봉투, 현재×2)·[예산봉투] budget_up 자동 심사(**KST 당일 1회 change_log 게이트**·라운드캡 게이트·stale pending 스윕·비태그 Confirm 전용 불변·자동 감액 없음).
-- **P4 밴드 동적화**: exploration deep_ok(기본 False) — ★**구조적 휴면**(후보 게이트 clk<10 vs deep_ok clk≥10 상호배타). Fable 판단: 정합적 보수성(졸업 그룹=핫셋 ROAS-UP에 순위캡 없음·밴드내 압력=EX tier1 담당). 후보 게이트 개방 여부는 Jino 판단 대기.
+- **P4 밴드 동적화**: exploration deep_ok(기본 False) — 구조적 휴면 발견 → **같은 날 11:35 Jino가 A안 확정(D-NAO-89)로 해소**: EX 배분기 과열밴드 제외에 증거 예외(①clk≥10∧cost>0 ②보정ROAS≥BEP×1.25 ③slope 프라이어 ④marginal_stop 아님 → rank≤2.5에서도 tier1 유지, 한계 ROAS가 BEP 접근 시 정지). codex 1R P1(deep 제안 멤버십 재검증 우회) 수용 — **재검증을 [EX확장] 전건 필수 게이트로 승격**(`f794cde`), 2R AGREE. 콜드 그룹 과열 진입 금지·exploration deep_ok 휴면 보존은 불변.
 
 ### codex 검증 (원칙 19, 총 4라운드)
 P1 review PASS / P2 review 1R P2×3→2R AGREE / P3+4 **challenge** 1R P1×2([EX확장] 위조·봉투 복리)+P2×1(Slack)→2R P2×1(봉투 pending 좌초)→3R P2×1(스윕 킬스위치 stale)→**4R AGREE-ALL**. 전건 수용·RED→GREEN. 테스트 최종 **3085 passed**(+72 신규).

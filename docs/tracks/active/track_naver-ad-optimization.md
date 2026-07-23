@@ -202,6 +202,7 @@
 - **codex challenge가 잡은 돈 경로 핵심 3건**: ①[EX확장] 텍스트 위조 → 08:50 allocator 멤버십 재검증 이중 방어 ②봉투 같은 날 복리 증액 → change_log 기반 KST 당일 1회 게이트(생성+심사 이중) ③EX·봉투 Slack 누락 → 전용 통지.
 - **★P4(밴드 동적화) 구조적 휴면 발견(원칙23 인라인 표면화)**: deep_ok는 clk≥10 요구·탐색 레인 후보는 clk<10만 통과 = 상호배타 → 현 레인에서 발동 불가. **Fable 구조 판단: 실질 결함 아님** — clk≥10 졸업 그룹은 핫셋 경로(D-NAO-66이 순위 캡 은퇴, ROAS 지배 UP)로 이관되고, 밴드 내 볼륨 압력은 EX 레인 tier1이 담당. 휴면 메커니즘으로 보존(후보 게이트 변경 여부는 Jino 판단 대기 항목).
 - **별건 chip 2건 발행**: test_naver_bm_benchmark 날짜 flake(task_718e0998) · 일 레인 stale sweep 킬스위치 fresh 재확인 하드닝(task_58af2547).
+- **D-NAO-89 구현 완료(11:35~12:15)**: EX 배분기 deep 예외(`7aed4e9`) + codex 1R P1(deep 제안이 own_clk≥10이라 멤버십 재검증 우회) 수용 → **멤버십 재검증을 [EX확장] 전건 필수 게이트로 승격**(`f794cde`) → 2R AGREE. 테스트 3095 passed(+10). P4 휴면 해소 — 이제 증거 4조건 그룹은 rank≤2.5에서도 EX tier1 유지, 정지는 marginal_stop(ratio<1.1)·가드레일.
 - **배포 완료·라이브 스모크 합격(11:12~11:20 KST)**: safe_deploy 8파일 CAS 전건 통과(`ca4644c`)·pm2 online. P7 catch-up 첫 실행(campaigns=4·보정 actual) / EX 압력 03=True(ratio 1.383, 정착창+보정 기준 — 원시 4일 1.9와의 차이는 창 차이, LESSONS 20)·04=True(1.427) / 봉투 04·10769985=3만→5만 필요(내일 08:00 제안 2건 예상) / 시간당 레인 정상·가드레일 생존. ⚠️prod Slack 웹훅 미설정(no-op) 후속 확인. **잔류 관문 = 07-24 08:00/08:50 첫 자동발사 실증** — HANDOFF `HANDOFF_ex-expansion-implemented-deployed_20260723.md` §4.
 
 **★★★★★★★(2026-07-23 아침, 워크트리 vt34-deploy-visibility-first-7c103b): D-NAO-86 제1회 전체 구조 감사 완료(ref 39) + 원칙23 명문화 — 기록만, 코드 변경 0.**
