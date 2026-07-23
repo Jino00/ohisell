@@ -21,7 +21,7 @@ import re
 from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_CEILING
 
-from sqlalchemy import func as sqlfunc, select
+from sqlalchemy import and_, exists, func as sqlfunc, select, update
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -606,6 +606,16 @@ def _run_ghost_visibility_briefing(db: Session, now: datetime, result: dict) -> 
         log.warning("auto_operator: 유령 가시성 관측 실패(fail-open): %s", e)
 
 
+def _sweep_precommit_seam(db: Session) -> None:
+    """잔존 pending 정리(sweep)의 TOCTOU 창을 결정론적으로 검증하기 위한 테스트 seam
+    (codex 12R[P2]). 프로덕션에선 no-op — 프레시 게이트(rollback) 직후·원자 UPDATE 직전에
+    호출되므로, 테스트가 이 지점을 patch해 "심사 종료 후~reject 커밋 전" 창 안에서 타
+    프로세스가 auto_operate=OFF를 커밋하는 상황을 실주입한다(run_hourly_lane의 fetch_intraday
+    주입 seam과 동형 — 실행 흐름에 봉합점을 두어 경합을 재현). no-op이라 프로덕션 경로·성능에
+    영향 없음."""
+    return None
+
+
 def run_daily_lane(db: Session, *, now: datetime | None = None) -> dict:
     """D-NAO-48 정책의 서버 코드화 — auto_operate 캠페인의 당일 생성 pending 실행형
     (bid_up/bid_down/pause)을 심사·승인·집행(PLAN §3). 08:50 크론(catch-up 포함).
@@ -718,49 +728,91 @@ def run_daily_lane(db: Session, *, now: datetime | None = None) -> dict:
 
     # codex 11R[P2]: 잔존 pending 정리(일일 재생성 사이클) — 오늘 hold분+이전 날 stale분을
     # rejected 처리해 persist dedup 좌초를 막는다. 킬스위치 OFF 캠페인은 제외(정지 ≠ 폐기 —
-    # 그 캠페인의 pending은 그대로 두고, 스위치 재가동 시 정상 사이클로 복귀): 레인 시작
-    # 시점 auto 집합(auto_ids)과 지금 재조회한 집합의 교집합만 정리 — 도중에 OFF 된
-    # 캠페인(킬스위치 skip분 포함)과 도중에 ON 된 캠페인(이번 레인이 심사 안 함) 둘 다 제외.
-    sweep_ids = auto_ids & _auto_operate_campaign_ids(db)
-    if sweep_ids:
-        leftovers = (
-            db.query(NaverProposal)
-            .filter(
-                NaverProposal.status == "pending",
-                NaverProposal.proposal_type.in_(_DAILY_LANE_PROPOSAL_TYPES),
-                # B3 GATE P2-2: ad-레벨 제안은 stale 정리에서도 제외 — pending은 "Confirm
-                # 대기" 정상 상태(rejected 처리하면 콘솔 승인 창 자체가 소멸). 만료는
-                # proposal_pipeline의 expiry가 담당(14일).
-                NaverProposal.target_type != "ad",
-                NaverProposal.campaign_id.in_(sweep_ids),
-                NaverProposal.created_at < day_end,
-            )
-            .all()
-        )
-        for lp in leftovers:
-            lp.status = "rejected"
-            lp.rationale = (
-                f"{lp.rationale or ''} [auto_op 보류 — 익일 08:00 생성기가 갱신 데이터로 "
-                "재생성(D-NAO-49 일일 사이클, codex 11R)]"
-            )
-            result["rejected_stale"] += 1
-        if leftovers:
-            # D-NAO-54 P1 일기(reject)용 원시값을 커밋 前 캡처(독립 리뷰 P2-1: 커밋이 ORM
-            # 인스턴스를 만료시켜, 커밋 후 lp.* 접근은 refresh SELECT(I/O)를 유발 — 그 예외는
-            # write_diary_entry의 try 밖(호출 프레임)이라 fail-open 계약을 뚫는다).
-            rejected_info = [
-                (lp.campaign_id, lp.target_type, lp.target_id, lp.adgroup_id, lp.proposal_type)
-                for lp in leftovers
-            ]
-            db.commit()
-            # 커밋 확정 후에만 기록(기록은 확정된 사실만) — 인자는 위에서 캡처한 원시값.
-            for c_id, t_type, t_id, ag_id, p_type in rejected_info:
-                diary.write_diary_entry(
-                    db, "reject", c_id, actor=diary.ACTOR_DAILY,
-                    target_type=t_type, target_id=t_id, adgroup_id=ag_id, action=p_type,
-                    rationale="auto_op 보류/stale — 익일 08:00 재생성(D-NAO-49 일일 사이클, codex 11R)",
-                    now=now,
+    # 그 캠페인의 pending은 그대로 두고, 스위치 재가동 시 정상 사이클로 복귀).
+    #
+    # codex 12R[P1 r2] TOCTOU 엄격 봉쇄("정지 ≠ 폐기" 계약) — 방언별 분기. 라운드 이력이
+    # 두 엔진에서 정반대로 안전했다:
+    #   · 라운드1(킬스위치를 EXISTS로 UPDATE WHERE에 바인딩, pre-SELECT 없음): UPDATE가 rollback
+    #     직후 fresh txn의 첫 문이라 SQLite에선 쓰기 직렬화+최신 스냅샷으로 창이 닫힌다(SAFE).
+    #     그러나 Postgres READ COMMITTED에선 단일 UPDATE 스냅샷이 문 시작에 고정 → 문 시작 후
+    #     ~COMMIT 전 외부 OFF는 EXISTS에 안 보여 잘못 reject(UNSAFE).
+    #   · 라운드2(라이브 집합을 with_for_update()로 먼저 SELECT-락 → campaign_id.in_(locked_live)):
+    #     Postgres는 FOR UPDATE로 OFF를 reject까지 직렬화(SAFE). 그러나 SQLite는 FOR UPDATE를
+    #     조용히 생략 → locked_live가 pre-SELECT로 굳은 파이썬 집합이 되고, 그 SELECT 後~UPDATE
+    #     前 외부 OFF는 이미 굳은 집합에 남아 잘못 reject(UNSAFE, 파일 WAL 실증).
+    # 결론: 각 엔진에 그 엔진에서 증명된 구조만 태운다.
+    #   (1) 프레시 게이트(공통): 정리 직전 세션의 열린 읽기 스냅샷을 종료(_auto_operate_now
+    #       docstring codex 6R[P1] 동형). 이 시점 커밋 안 된 세션 쓰기 없음(승인은 ~709 즉시 커밋,
+    #       hold 일기는 독립 세션 자체 커밋) → rollback이 버릴 상태 없음. rollback 선택 이유: 순수
+    #       스냅샷 폐기 의도가 명확하고, harness.execute가 예외로 남긴 세션 상태까지 리셋.
+    #   (2a) Postgres: 라이브 auto 집합(auto_operate IS TRUE ∩ auto_ids)을 with_for_update()로
+    #        행-락 → 외부 OFF는 락 획득 전이면 EvalPlanQual로 최신 False 재조회돼 제외, 락 획득
+    #        후면 우리 COMMIT까지 블록 → 문-스냅샷 창 소멸. EXISTS 분기는 여기서 안 탐(무관).
+    #   (2b) SQLite/기타: pre-SELECT 없이 킬스위치를 EXISTS로 UPDATE에 바인딩(라운드1) → UPDATE가
+    #        fresh txn의 첫 쓰기문이라 최신 커밋(창 안 OFF 포함)을 평가·직렬화 → 창 소멸.
+    #   auto_ids 교집합은 두 분기 모두 유지(Postgres=락 SELECT WHERE, SQLite=in_(auto_ids)) →
+    #   "도중에 ON 된 캠페인 제외" 의미 불변. RETURNING으로 실제 rejected 행을 돌려받아
+    #   rejected_stale 카운트+D-NAO-54 P1 일기 원시값을 단일 원자 문에서 얻는다(일기≡reject 일치).
+    db.rollback()  # (1) 프레시 게이트 — 열린 읽기 스냅샷 종료(버릴 세션 쓰기 없음, 위 주석 참조)
+    _sweep_precommit_seam(db)  # codex 12R 테스트 seam(prod no-op) — 단일 쓰기문 直前 창 OFF 재현점
+    if db.get_bind().dialect.name == "postgresql":
+        # (2a) FOR UPDATE 행-락 — 파이썬 집합으로 굳혀도 락이 reject까지 OFF를 직렬화(Postgres 전용).
+        locked_live = set(
+            db.execute(
+                select(NaverCampaignSettings.campaign_id)
+                .where(
+                    NaverCampaignSettings.auto_operate.is_(True),
+                    NaverCampaignSettings.campaign_id.in_(auto_ids),  # lane-start 교집합(도중 ON 제외)
                 )
+                .with_for_update()
+            ).scalars()
+        )
+        kill_switch_pred = NaverProposal.campaign_id.in_(locked_live)
+    else:
+        # (2b) SQLite/기타: pre-SELECT 없이 킬스위치를 UPDATE에 바인딩 — UPDATE가 fresh txn 첫
+        # 쓰기문이라 최신 커밋 상태로 원자 평가(쓰기 직렬화가 창을 닫는다).
+        kill_switch_pred = and_(
+            NaverProposal.campaign_id.in_(auto_ids),  # lane-start 교집합(도중 ON 제외)
+            exists().where(
+                NaverCampaignSettings.campaign_id == NaverProposal.campaign_id,
+                NaverCampaignSettings.auto_operate.is_(True),
+            ),
+        )
+    reject_pred = (
+        NaverProposal.status == "pending",
+        NaverProposal.proposal_type.in_(_DAILY_LANE_PROPOSAL_TYPES),
+        # B3 GATE P2-2: ad-레벨 제안은 stale 정리에서도 제외 — pending은 "Confirm 대기" 정상
+        # 상태(rejected 처리하면 콘솔 승인 창 자체가 소멸). 만료는 proposal_pipeline expiry(14일).
+        NaverProposal.target_type != "ad",
+        NaverProposal.created_at < day_end,
+        kill_switch_pred,  # 방언별 킬스위치 술어(정지 ≠ 폐기) — 위 분기 참조.
+    )
+    reject_stmt = (
+        update(NaverProposal)
+        .where(*reject_pred)
+        .values(
+            status="rejected",
+            # 원시 문자열 concat(NULL 안전 coalesce) — 초판 f"{lp.rationale or ''} …"와 동일 텍스트.
+            rationale=sqlfunc.coalesce(NaverProposal.rationale, "")
+            + " [auto_op 보류 — 익일 08:00 생성기가 갱신 데이터로 재생성(D-NAO-49 일일 사이클, codex 11R)]",
+        )
+        .returning(
+            NaverProposal.campaign_id, NaverProposal.target_type,
+            NaverProposal.target_id, NaverProposal.adgroup_id, NaverProposal.proposal_type,
+        )
+        .execution_options(synchronize_session=False)  # 로드된 인스턴스 재동기화 불필요(아래서 원시값만 사용)
+    )
+    rejected_rows = db.execute(reject_stmt).all()
+    result["rejected_stale"] += len(rejected_rows)  # 실제 UPDATE된 행 수(RETURNING = reject 집합)
+    db.commit()
+    # 커밋 확정 후에만 기록(기록은 확정된 사실만) — 인자는 RETURNING 원시값(원자 문 = 일기≡reject 일치).
+    for c_id, t_type, t_id, ag_id, p_type in rejected_rows:
+        diary.write_diary_entry(
+            db, "reject", c_id, actor=diary.ACTOR_DAILY,
+            target_type=t_type, target_id=t_id, adgroup_id=ag_id, action=p_type,
+            rationale="auto_op 보류/stale — 익일 08:00 재생성(D-NAO-49 일일 사이클, codex 11R)",
+            now=now,
+        )
 
     # VT3(D-NAO-82②): 소재 CTR 경보 브리핑 — 핫셋/탐색과 독립, 실행형 심사 결과와 무관하게
     # 항상 시도(auto_ids 재사용 — 위에서 이미 스코프 확정, 이 함수 내부에서 재조회는 안 하지만

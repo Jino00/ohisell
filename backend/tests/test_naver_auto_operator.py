@@ -572,6 +572,203 @@ def test_auto_operate_now_sees_external_commit_via_independent_connection(tmp_pa
         engine.dispose()
 
 
+def test_daily_lane_sweep_ad_level_pending_never_rejected(db):
+    """B3 GATE P2-2: ad-레벨(소재) pending은 sweep에서도 절대 rejected 안 됨 — 콘솔 Confirm
+    대기 정상 상태(rejected 처리하면 승인 창 자체가 소멸). 같은 캠페인의 non-ad stale은 정리됨."""
+    _settings(db)  # cmp-04 auto_operate=True
+    p_ad = _proposal(db, proposal_type="bid_down", target_type="ad", target_id="ad-1",
+                     created_at=DAY_START_UTC - timedelta(hours=1))
+    p_kw = _proposal(db, proposal_type="bid_down", target_type="keyword", target_id="nkw-z",
+                     created_at=DAY_START_UTC - timedelta(hours=1))
+    result = auto_operator.run_daily_lane(db, now=NOW)
+    assert result["rejected_stale"] == 1  # keyword만
+    db.refresh(p_ad)
+    db.refresh(p_kw)
+    assert p_ad.status == "pending"   # 소재 = Confirm 대기 보존
+    assert p_kw.status == "rejected"  # non-ad stale = 재생성 사이클
+
+
+def test_daily_lane_sweep_toctou_off_in_window_not_rejected(tmp_path):
+    """codex 12R[P2] "정지 ≠ 폐기" TOCTOU 엄격 봉쇄 — 회귀 테스트.
+
+    초판 버그: sweep이 auto_operate 집합을 파이썬으로 먼저 굳힌 뒤 그 정적 집합으로 UPDATE 해,
+    "심사 종료 후 ~ reject 커밋 전" 창에서 캠페인이 OFF로 뒤집혀도 그 pending을 여전히 rejected
+    처리한다. 수정: 프레시 게이트(rollback)로 스냅샷을 종료하고, 킬스위치(auto_operate IS TRUE)를
+    EXISTS 상관 서브쿼리로 원자 UPDATE에 바인딩 → 창 안에서 커밋된 OFF를 UPDATE가 실제로 본다.
+
+    결정론: 실스레드/sleep 없이 _sweep_precommit_seam(프레시 게이트 직후·UPDATE 직전 호출되는
+    prod no-op)을 patch해, 창 정확히 그 지점에서 타 프로세스(별도 커넥션)가 OFF를 커밋하도록
+    주입한다. 파일 기반 WAL DB 필수(in-memory StaticPool은 커넥션 공유라 '타 프로세스' 재현 불가,
+    _auto_operate_now 독립커넥션 테스트와 동일 이유).
+
+    검증: 창 안에서 OFF 된 캠페인(cmp-off)의 stale pending은 pending 유지, 여전히 ON인
+    캠페인(cmp-on)의 stale pending은 rejected. rejected_stale = 실제 UPDATE 행 수(cmp-on분만)."""
+    from sqlalchemy import create_engine as _create_engine, event
+
+    db_file = tmp_path / "sweep_toctou.db"
+    engine = _create_engine(f"sqlite:///{db_file}")
+
+    @event.listens_for(engine, "connect")
+    def _set_wal(dbapi_conn, _rec):  # WAL — 스냅샷 격리가 실재하는 모드
+        dbapi_conn.execute("PRAGMA journal_mode=WAL")
+
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+    C_OFF = "cmp-off"  # 창 안에서 OFF 될 캠페인
+    C_ON = "cmp-on"    # 계속 ON 인 캠페인
+    stale = DAY_START_UTC - timedelta(hours=1)  # 심사 대상 아님(당일 생성분만) → sweep 직행
+
+    seed = Session()
+    for cid in (C_OFF, C_ON):
+        seed.add(NaverCampaignSettings(campaign_id=cid, auto_operate=True, optimizer="ours"))
+    seed.commit()
+    made = {}
+    for cid in (C_OFF, C_ON):
+        for i in range(2):
+            p = NaverProposal(proposal_type="bid_down", target_type="keyword",
+                              target_id=f"{cid}-kw{i}", campaign_id=cid, status="pending")
+            seed.add(p)
+            seed.commit()
+            seed.query(NaverProposal).filter(NaverProposal.id == p.id).update({"created_at": stale})
+            made[(cid, i)] = p.id
+    # ad-레벨 pending(계속 ON 캠페인) — sweep 제외(Confirm 대기) 검증
+    p_ad = NaverProposal(proposal_type="bid_down", target_type="ad", target_id=f"{C_ON}-ad",
+                         campaign_id=C_ON, status="pending")
+    seed.add(p_ad)
+    seed.commit()
+    seed.query(NaverProposal).filter(NaverProposal.id == p_ad.id).update({"created_at": stale})
+    ad_id = p_ad.id
+    seed.commit()
+    seed.close()
+
+    lane_session = Session()
+    fired = {"n": 0}
+
+    def _external_off(_db_arg):
+        # 창 안(프레시 게이트 후~UPDATE 전)에서 타 프로세스가 cmp-off 킬스위치 OFF 커밋
+        fired["n"] += 1
+        with engine.connect() as other:
+            other.execute(
+                NaverCampaignSettings.__table__.update()
+                .where(NaverCampaignSettings.campaign_id == C_OFF)
+                .values(auto_operate=False)
+            )
+            other.commit()
+
+    try:
+        with patch.object(auto_operator, "_sweep_precommit_seam", side_effect=_external_off):
+            result = auto_operator.run_daily_lane(lane_session, now=NOW)
+
+        assert fired["n"] == 1  # seam이 실제로 창 안에서 발동했는지 확인(테스트 무효화 방지)
+        # cmp-off: 창 안 OFF → pending 유지(정지 ≠ 폐기)
+        for i in range(2):
+            row = lane_session.query(NaverProposal).filter(
+                NaverProposal.id == made[(C_OFF, i)]).one()
+            assert row.status == "pending", f"cmp-off pending #{i} 가 잘못 rejected 됨(TOCTOU)"
+        # cmp-on: 여전히 ON → rejected(재생성 사이클)
+        for i in range(2):
+            row = lane_session.query(NaverProposal).filter(
+                NaverProposal.id == made[(C_ON, i)]).one()
+            assert row.status == "rejected", f"cmp-on stale pending #{i} 는 정리돼야 함"
+            assert "일일 사이클" in row.rationale
+        # ad-레벨: Confirm 대기 보존
+        assert lane_session.query(NaverProposal).filter(
+            NaverProposal.id == ad_id).one().status == "pending"
+        # rejected_stale = 실제 UPDATE 행 수 = cmp-on non-ad 2건뿐
+        assert result["rejected_stale"] == 2
+    finally:
+        lane_session.close()
+        engine.dispose()
+
+
+def _capture_sweep_statements(db, *, force_dialect=None, monkeypatch=None):
+    """sweep이 실제 실행하는 statement를 모두 가로채 반환(방언 분기 배선 검증용).
+    force_dialect: 'postgresql'로 주면 bind dialect.name을 덮어 Postgres 분기를 태운다
+    (with_for_update()는 실제 sqlite 엔진에서 실행 시 무해히 생략되지만, 캡처한 Select를
+    postgresql dialect로 컴파일하면 FOR UPDATE 배선을 검증할 수 있다)."""
+    from sqlalchemy.orm import Session as _Session
+
+    _settings(db)
+    _proposal(db, proposal_type="bid_down", target_id="nkw-lock",
+              created_at=DAY_START_UTC - timedelta(hours=1))  # stale → sweep 직행
+
+    if force_dialect is not None:
+        monkeypatch.setattr(db.get_bind().dialect, "name", force_dialect)
+
+    captured = []
+    orig_execute = _Session.execute
+
+    def _spy(self, statement, *a, **k):
+        captured.append(statement)
+        return orig_execute(self, statement, *a, **k)
+
+    with patch.object(_Session, "execute", _spy):
+        result = auto_operator.run_daily_lane(db, now=NOW)
+    return captured, result
+
+
+def test_daily_lane_sweep_sqlite_uses_exists_no_for_update(db):
+    """codex 12R[P1 r2] SQLite 분기 배선 — pre-SELECT 없이 킬스위치를 EXISTS로 UPDATE에 바인딩.
+    SQLite는 FOR UPDATE를 조용히 생략하므로 pre-SELECT-락은 파이썬 집합을 굳혀 창을 재개방한다
+    (라운드2 결함). 따라서 SQLite에선 (a) naver_campaign_settings 대상 FOR UPDATE SELECT를
+    발행하지 않고, (b) reject UPDATE가 EXISTS(naver_campaign_settings)를 WHERE에 담아야 한다."""
+    from sqlalchemy.dialects import sqlite as sqlite_dialect
+    from sqlalchemy.sql import Update
+
+    captured, result = _capture_sweep_statements(db)
+    assert result["rejected_stale"] == 1  # sweep 실동작(EXISTS-bound UPDATE 관통)
+
+    def _sq(stmt):
+        try:
+            return str(stmt.compile(dialect=sqlite_dialect.dialect()))
+        except Exception:
+            return ""
+
+    # (a) settings 대상 FOR UPDATE SELECT 없음(sqlite는 아예 pre-SELECT-락을 안 씀)
+    assert not any("FOR UPDATE" in _sq(s) for s in captured), \
+        "SQLite 분기는 FOR UPDATE를 발행하면 안 됨(생략되어 창 재개방)"
+    # (b) reject UPDATE(naver_proposals 대상)가 EXISTS(naver_campaign_settings) 바인딩
+    reject_updates = [
+        s for s in captured
+        if isinstance(s, Update) and "naver_proposals" in (sql := _sq(s))
+        and "EXISTS" in sql.upper() and "naver_campaign_settings" in sql
+    ]
+    assert reject_updates, "SQLite 분기 reject UPDATE는 EXISTS(naver_campaign_settings)를 담아야 함"
+
+
+def test_daily_lane_sweep_postgres_uses_for_update_lock(db, monkeypatch):
+    """codex 12R[P1 r2] Postgres 분기 배선 — 라이브 auto 집합을 with_for_update()로 SELECT-락.
+    실제 동시-인터리빙 검증은 Postgres CI 필요(여기 없음) → dialect.name을 postgresql로 덮어
+    분기를 태우고, sweep이 발행한 settings SELECT를 postgresql dialect로 컴파일해 'FOR UPDATE'
+    배선을 정직하게 대체 검증한다. 이 분기의 reject UPDATE는 EXISTS가 아니라 in_(locked_live)."""
+    from sqlalchemy.dialects import postgresql
+    from sqlalchemy.sql import Select, Update
+
+    captured, result = _capture_sweep_statements(db, force_dialect="postgresql", monkeypatch=monkeypatch)
+    assert result["rejected_stale"] == 1  # sweep 실동작(락 SELECT → in_ UPDATE 관통)
+
+    def _pg(stmt):
+        try:
+            return str(stmt.compile(dialect=postgresql.dialect()))
+        except Exception:
+            return ""
+
+    for_update_selects = [
+        s for s in captured
+        if isinstance(s, Select) and "FOR UPDATE" in (sql := _pg(s))
+        and "naver_campaign_settings" in sql
+    ]
+    assert for_update_selects, (
+        "Postgres 분기는 라이브 auto 집합을 with_for_update()로 락 SELECT 해야 함 — "
+        "postgresql dialect 컴파일에서 naver_campaign_settings 대상 'FOR UPDATE'가 없음"
+    )
+    # reject UPDATE는 EXISTS 없이 in_(locked_live)만(락 SELECT가 이미 라이브 집합 확정)
+    reject_updates = [s for s in captured if isinstance(s, Update) and "naver_proposals" in _pg(s)]
+    assert reject_updates and all("EXISTS" not in _pg(s).upper() for s in reject_updates), \
+        "Postgres 분기 reject UPDATE는 EXISTS가 아니라 in_(locked_live)여야 함"
+
+
 def test_hourly_lane_kill_switch_mid_run_stops_remaining_executions(db):
     """시간당 레인 동일 — 첫 실행 부수효과로 OFF 시 두 번째 핫셋 유닛은 제안 생성/실행 없음."""
     _settings(db)
