@@ -2,6 +2,14 @@
 # 매 sprint 완료 시 Claude가 이 파일을 갱신합니다.
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
+## 최신 상태 (2026-07-23 13:40, 워크트리 ex-sprint-post-deployment-2e9656) — Jino 결정 대기 3건 응답 완료(문서 기록만, 코드 변경 0)
+- EX 스프린트(D-NAO-85·87·89)는 아래 블록에서 이미 구현·배포·병합·첫 자동발사 라이브 실증까지 완료된 상태 — 이 세션은 남아있던 결정 대기 3건을 트랙 파일(D-NAO-90 신설 + "현재 진행 단계"/"다음 액션" 갱신)에 반영.
+- **①봉투 vs BEP 안전선 충돌(10769985) → "현행 유지" 확정(D-NAO-90)**: Jino가 Fable 권고(현행 유지)를 그대로 선택. BEP 안전선이 봉투보다 항상 우선, 봉투 우선 예외 없음. 코드 변경 없음.
+- **②Slack 웹훅 → "지금 발급 절차 안내받기" 선택**: Jino가 Incoming Webhook 발급 후 전달 예정 — 수령 시 prod `.env`의 `NAVER_SLACK_WEBHOOK_URL` 설정+재시작 필요(후속 세션).
+- **③KX(D-NAO-88) 착수 시점 → "07-24 크론 무인 첫 회차 확인 후" 선택**: 내일 아침 08:00/08:40/08:50 크론이 무인으로 정상 완주하는지 먼저 확인 후, 정상이면 그 후 새 세션에서 KX 설계 착수.
+- **다음 액션 = ①07-24 08:00/08:40/08:50 크론 무인 첫 회차 확인 ②Slack 웹훅 수령 시 prod 설정 ③그 후 KX(D-NAO-88) 설계 착수.**
+- 상세=`docs/tracks/active/track_naver-ad-optimization.md` D-NAO-90 + "현재 진행 단계"/"다음 액션" 최신 블록.
+
 ## 최신 상태 (2026-07-23 정오, 워크트리 ex-expansion-sprint-d-nao-85-707081) — ★EX 스프린트 구현·배포·스모크 합격
 - **HANDOFF: `.claude/memory/HANDOFF_ex-expansion-implemented-deployed_20260723.md`** ← 새 세션은 이 파일 먼저.
 - D-NAO-85(EX 5갈래)+D-NAO-87(예산 봉투) 전량 구현·codex 4R 통과(P1×2·P2×8 전건 수용)·**prod 배포 완료(`ca4644c`, safe_deploy CAS 전건 통과)**·read-only 라이브 스모크 합격(03/04 확장모드 True·봉투 04+10769985 3만→5만 필요·P7 첫 실행 campaigns=4). 테스트 3085 passed.
