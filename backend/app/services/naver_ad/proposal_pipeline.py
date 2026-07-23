@@ -651,18 +651,27 @@ def _auto_operate_campaign_ids(db: Session) -> list[str]:
     return [r[0] for r in rows]
 
 
-def _build_expansion_bid_up(campaign_id: str, alloc: dict, pressure: dict, current_bid: int | None) -> dict | None:
+def _build_expansion_bid_up(
+    campaign_id: str, alloc: dict, pressure: dict, current_bid: int | None,
+) -> tuple[dict | None, str | None]:
     """EX 배분 그룹 1건 → bid_up 제안(D-NAO-85 §4-2 집행). target_bid = 현재입찰 ×(1+_MAX_CHANGE_PCT)
     10원 내림·쇼핑 유효범위[50, 100,000] 클램프(가드레일 스텝 정합) — 현재 이하로 소실되면 None
     (억지 제안 금지, 기존 _bid_proposal 스텝 클램프 관례 미러). rationale 접두 [EX확장] + clk=N
     (그룹 자기 정착창 clk, auto_operator._extract_rationale_clk `clk=(\\d+)` 규격) + tier·judged_by·
-    roas_ratio 병기. proposal_type='bid_up'(신규 유형 금지 — 일 레인 심사 자동 편입)."""
+    roas_ratio 병기. proposal_type='bid_up'(신규 유형 금지 — 일 레인 심사 자동 편입).
+    반환: (제안 dict|None, 스킵 사유|None) — 행동은 기존과 동일(None이면 제안 생성 안 함), 스킵
+    사유는 호출측 diary 관측 병기용(D-NAO-85 후속 소수정, EX 확장 스프린트 관측 갭). 호출처는
+    이 파일 안(run_expansion_stage)뿐이라 튜플 반환으로 바꿔도 외부 계약을 깨지 않는다."""
     if not current_bid or current_bid <= 0:
-        return None
+        return None, "현재입찰 미조회(bid_amt 없음)"
     target_bid = int((Decimal(current_bid) * (Decimal(1) + _MAX_CHANGE_PCT)) // 10) * 10
     target_bid = min(target_bid, _EX_MAX_BID)
-    if target_bid < _EX_SHOPPING_MIN_BID or target_bid <= current_bid:
-        return None  # 스텝 소실 — skip(가드레일 방향/하한에 어차피 막힘)
+    if target_bid < _EX_SHOPPING_MIN_BID:
+        return None, f"bid {current_bid}원 — target {target_bid}원<하한{_EX_SHOPPING_MIN_BID}원"
+    if target_bid <= current_bid:
+        # 스텝 소실 — skip(가드레일 방향/하한에 어차피 막힘). 예: 50~66원 구간은 15%
+        # 스텝이 10원 그리드 내림에서 원래 값으로 되돌아가 무변화(D-NAO-85 후속 실사례).
+        return None, f"bid {current_bid}원 — 15% 스텝이 10원 그리드 내림에서 무변화"
     rationale = (
         f"{expansion_pressure.EX_RATIONALE_PREFIX} clk={alloc['own_clk']} tier={alloc['rank_tier']} "
         f"judged_by={alloc['judged_by']} roas_ratio={pressure.get('roas_ratio')} — 확장 압력 배분"
@@ -683,22 +692,29 @@ def _build_expansion_bid_up(campaign_id: str, alloc: dict, pressure: dict, curre
         ),
         "status": "pending",
         "target_bid": target_bid,
-    }
+    }, None
 
 
-def run_expansion_stage(db: Session, *, today: date | None = None) -> int:
+_EX_SKIP_DETAIL_MAX = 3  # diary rationale에 나열할 스킵 그룹 상세 개수 상한(장문 방지, 나머지는 "…")
+
+
+def run_expansion_stage(db: Session, *, today: date | None = None) -> dict:
     """EX 확장 압력 레인(D-NAO-85 §4-2) — auto_operate 캠페인마다 압력 판정→(확장 모드면)프라이어
     1회 로드→그룹 배분→bid_up 제안 생성·persist. 캠페인별 판정을 diary observe 1건으로 기록
-    (확장 모드 여부·roas_ratio·배분 그룹 수). SA간 직접 호출 금지 — 이 harness가 pressure 출력을
-    allocator 입력으로 중계(원칙18-8). 반환: 생성(persist)된 제안 수."""
+    (확장 모드 여부·roas_ratio·배분 그룹 수·스텝소실 스킵 상세 — D-NAO-85 후속 소수정: 이전엔
+    "배분그룹 N개"만 남아 스킵 원인 조사에 prod 재현이 필요했다). SA간 직접 호출 금지 — 이
+    harness가 pressure 출력을 allocator 입력으로 중계(원칙18-8). 행동(제안 생성/집행) 불변 —
+    이 소수정은 관측만 추가한다. 반환: {"generated": persist된 제안 수, "skipped": 스텝소실 등
+    으로 제안이 생략된 배분 그룹 수}."""
     today = today if today is not None else kst_today()
     now = datetime.combine(today, datetime.min.time())
     auto_ids = _auto_operate_campaign_ids(db)
     if not auto_ids:
-        return 0
+        return {"generated": 0, "skipped": 0}
 
     response_priors: dict | None = None  # 확장 모드 캠페인이 하나라도 있을 때만 1회 로드(N+1 방지)
     proposals: list[dict] = []
+    total_skipped = 0
     for campaign_id in auto_ids:
         pressure = expansion_pressure.judge_campaign_pressure(db, campaign_id, today=today)
         allocations: list[dict] = []
@@ -708,31 +724,48 @@ def run_expansion_stage(db: Session, *, today: date | None = None) -> int:
             allocations = expansion_allocator.allocate_expansion(
                 db, campaign_id, today=today, pressure=pressure, response_priors=response_priors,
             )
-        # 캠페인 판정 관측(관측 렌더용) — diary는 fail-open(집행/생성 무관).
+        campaign_proposals: list[dict] = []
+        skip_details: list[str] = []  # "{adgroup_id} {사유}" — diary 관측용
+        if allocations:
+            adgroup_ids = [a["adgroup_id"] for a in allocations]
+            bid_amts = dict(
+                db.query(NaverEntity.entity_id, NaverEntity.bid_amt)
+                .filter(NaverEntity.entity_id.in_(adgroup_ids)).all()
+            )
+            for a in allocations:
+                p, skip_reason = _build_expansion_bid_up(
+                    campaign_id, a, pressure, bid_amts.get(a["adgroup_id"]),
+                )
+                if p is not None:
+                    campaign_proposals.append(p)
+                else:
+                    skip_details.append(f"{a['adgroup_id']} {skip_reason}")
+        proposals.extend(campaign_proposals)
+        total_skipped += len(skip_details)
+        # 캠페인 판정 관측(관측 렌더용) — diary는 fail-open(집행/생성 무관). 기본 문구는 기존과
+        # 동일(스킵 0건이면 완전 불변) — 스킵이 있을 때만 사유를 덧붙인다.
+        rationale = (
+            f"EX 압력 판정 — expansion_mode={pressure.get('expansion_mode')}·"
+            f"roas_ratio={pressure.get('roas_ratio')}·배분그룹 {len(allocations)}개 "
+            f"({pressure.get('reason')})"
+        )
+        if skip_details:
+            more = "…" if len(skip_details) > _EX_SKIP_DETAIL_MAX else ""
+            # "제안 후보"(persist dedup 전 개수) — codex P2: 재실행 시(기존 pending 존재) persist는
+            # 0건일 수 있어 "제안 N건"이라 쓰면 실제 생성 결과와 혼동된다. 이 값은 어디까지나
+            # candidate_proposals 개수이지 persist 결과가 아니다(관측 정직성).
+            rationale += (
+                f" — 제안 후보 {len(campaign_proposals)}건·스텝소실 스킵 {len(skip_details)}건: "
+                f"{', '.join(skip_details[:_EX_SKIP_DETAIL_MAX])}{more}"
+            )
         diary.write_diary_entry(
             db, "observe", campaign_id, actor=diary.ACTOR_DAILY, action=_EX_OBSERVE_ACTION,
-            rationale=(
-                f"EX 압력 판정 — expansion_mode={pressure.get('expansion_mode')}·"
-                f"roas_ratio={pressure.get('roas_ratio')}·배분그룹 {len(allocations)}개 "
-                f"({pressure.get('reason')})"
-            ),
-            now=now,
+            rationale=rationale, now=now,
         )
-        if not allocations:
-            continue
-        adgroup_ids = [a["adgroup_id"] for a in allocations]
-        bid_amts = dict(
-            db.query(NaverEntity.entity_id, NaverEntity.bid_amt)
-            .filter(NaverEntity.entity_id.in_(adgroup_ids)).all()
-        )
-        for a in allocations:
-            p = _build_expansion_bid_up(campaign_id, a, pressure, bid_amts.get(a["adgroup_id"]))
-            if p is not None:
-                proposals.append(p)
 
     saved = proposal_writer.persist(db, proposals)
     db.commit()
-    return len(saved)
+    return {"generated": len(saved), "skipped": total_skipped}
 
 
 def _build_envelope_budget_up(env: dict) -> dict:
@@ -983,8 +1016,11 @@ def run_daily(db: Session, *, lookback_days: int = 15) -> dict:
     # EX 확장 압력 레인(D-NAO-85) — auto_operate 캠페인 압력 판정→그룹 배분→bid_up 제안. 위
     # 기존 제안 생성은 이미 커밋됐으므로 이 단계 예외가 그것을 죽이지 않는다(fail-open, 원칙22).
     result["ex_generated"] = 0
+    result["ex_skipped"] = 0  # 스텝소실 등으로 제안이 생략된 배분 그룹 수(관측용, D-NAO-85 후속)
     try:
-        result["ex_generated"] = run_expansion_stage(db)
+        ex_stage = run_expansion_stage(db)
+        result["ex_generated"] = ex_stage["generated"]
+        result["ex_skipped"] = ex_stage["skipped"]
         result["stage_status"]["expansion"] = "ok"
     except Exception as e:  # noqa: BLE001
         db.rollback()
