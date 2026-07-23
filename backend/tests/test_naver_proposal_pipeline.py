@@ -119,6 +119,8 @@ def test_run_daily_full_happy_path_generates_proposal(db, monkeypatch):
         "freshness": "ok", "diagnosis": "ok", "bid_simulator": "ok", "growth_sweeper": "ok",
         "budget_allocator": "ok", "anomaly_feed": "ok",
         "proposal_writer": "ok", "slack": "ok", "expiry": "ok",
+        # EX 확장 압력·예산 봉투 단계(D-NAO-85·87) — auto_operate 캠페인 없어도 판정 단계 자체는 ok.
+        "expansion": "ok", "budget_envelope": "ok",
     }
     assert out["generated"] >= 1
     saved = db.query(NaverProposal).filter(NaverProposal.target_id == "nkw-1").all()

@@ -34,7 +34,7 @@ from app.models import (
     NaverProposal,
     NaverRetroSignal,
 )
-from app.services.naver_ad import bid_rank_curve, bid_simulator, campaign_target_resolver, ctr_alert, diagnosis, diary, effective_bid, exploration, guardrail_gate, intraday_roas, naver_execution_harness, naver_sa_writer, rank_servo, slack_notifier, visibility, vitality_signal
+from app.services.naver_ad import bid_rank_curve, bid_simulator, budget_envelope, campaign_target_resolver, ctr_alert, diagnosis, diary, effective_bid, exploration, expansion_allocator, expansion_pressure, gave_score, guardrail_gate, intraday_roas, naver_execution_harness, naver_sa_writer, rank_servo, slack_notifier, visibility, vitality_signal
 from app.services.naver_ad.bid_step_types import BID_UP_TYPES, EXPLORATION_STEP_TYPES, encode_base_bid, encode_exploration_ceiling
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.services.naver_ad.guardrail_gate import _MAX_CHANGE_PCT
@@ -432,16 +432,73 @@ def _has_recent_external_stop(db: Session, target_type: str, target_id: str) -> 
     return last.action == "external_status_change"
 
 
-def _check_bid_up_conditions(db: Session, p: NaverProposal, today: date) -> str | None:
+def _new_ex_review_ctx() -> dict:
+    """일 레인 EX 폴백 심사 컨텍스트(D-NAO-85 §4-4) — 캠페인당 압력·배분 1회 캐시 + 프라이어
+    lazy 로드 상태. run_daily_lane이 심사 루프 시작 시 1개 생성해 _check_bid_up_conditions에
+    넘긴다(반복 호출·재로드 금지)."""
+    return {"pressure": {}, "alloc": {}, "priors": None, "priors_loaded": False}
+
+
+def _ex_campaign_pressure(db: Session, campaign_id: str, today: date, ex_ctx: dict | None) -> dict:
+    """EX 캠페인 압력 판정(P3 프라이어 폴백용) — 캠페인당 1회 캐시. expansion_pressure는
+    auto_operator를 import하지 않으므로 순환 없음(모듈 상단 import)."""
+    cache = ex_ctx["pressure"] if ex_ctx is not None else None
+    if cache is not None and campaign_id in cache:
+        return cache[campaign_id]
+    pressure = expansion_pressure.judge_campaign_pressure(db, campaign_id, today=today)
+    if cache is not None:
+        cache[campaign_id] = pressure
+    return pressure
+
+
+def _ex_allocation_adgroups(
+    db: Session, campaign_id: str, today: date, pressure: dict, ex_ctx: dict | None,
+) -> set[str]:
+    """★P1 방어 심층(codex 적대 리뷰): [EX확장] 태그를 텍스트로만 믿지 않고, 08:50 심사 시각의
+    최신 데이터로 expansion_allocator.allocate_expansion을 캠페인당 1회 재실행해 배분 목록
+    (adgroup_id 집합)을 얻는다 — 폴백은 제안의 target_id가 이 목록에 있을 때만 허용한다(위조
+    태그 차단 + CTR/tier/cap을 최신 데이터로 재검증하는 이중 효과). response_priors는 폴백
+    후보가 실제 존재할 때(이 함수 최초 호출 시) 1회만 lazy 로드한다(N+1·불필요 로드 회피)."""
+    cache = ex_ctx["alloc"] if ex_ctx is not None else {}
+    if campaign_id in cache:
+        return cache[campaign_id]
+    if ex_ctx is not None and not ex_ctx.get("priors_loaded"):
+        ex_ctx["priors"] = bid_rank_curve.load_response_priors(db)
+        ex_ctx["priors_loaded"] = True
+    priors = ex_ctx.get("priors") if ex_ctx is not None else None
+    allocations = expansion_allocator.allocate_expansion(
+        db, campaign_id, today=today, pressure=pressure, response_priors=priors,
+    )
+    adgroups = {a["adgroup_id"] for a in allocations}
+    cache[campaign_id] = adgroups
+    return adgroups
+
+
+def _check_bid_up_conditions(
+    db: Session, p: NaverProposal, today: date, *, ex_ctx: dict | None = None,
+) -> str | None:
     """D-NAO-48 bid_up 4조건(PLAN §3) — 하나라도 미충족이면 hold 사유 문자열, 전부
-    충족이면 None(승인 가능)."""
+    충족이면 None(승인 가능).
+
+    ★EX 멤버십 재검증 필수 게이트(codex D-NAO-89 P1): [EX확장] 접두 bid_up **전건**(clk≥10 표준
+    clk_ok 경로 포함·폴백 필요 여부 무관)은 승인 전 08:50 최신 데이터로 allocator를 재실행한 배분
+    목록(_ex_allocation_adgroups)에 target_id가 있어야 한다 — 없으면 hold. 이전엔 clk≥10 deep/own
+    제안이 표준 clk_ok 경로를 타 이 재검증을 우회했다(과열밴드 deep 제안이 08:10 학습으로 slope
+    프라이어 무효화·deep 4조건 붕괴돼도 집행 가능한 구멍). 멤버십 재실행이 deep 4조건·CTR·tier·cap을
+    최신 데이터로 자연 재적용하므로 별도 deep 게이트를 중복 구현하지 않는다.
+
+    ★P3 EX 프라이어 폴백(D-NAO-85 §4-4): rationale이 [EX확장] 접두인 bid_up에 한해, 조건②
+    (clk≥10) 미달 ∧ 조건③이 'unknown'(표본 부족)일 때 캠페인 압력 판정(expansion_mode)으로 ②③를
+    대체 통과시킨다(멤버십 재검증은 위 필수 게이트가 clk_ok 경로와 공통 수행 — 중복 제거). 조건③이
+    'below'(명시적 미달)면 폴백 불가(거부권 유지 — DOWN 비대칭 보수성). 조건①(스텝 클램프)·
+    ④(bleeding)는 폴백 없음. 비EX bid_up은 4조건 현행 그대로(회귀 0)."""
     if p.target_bid is None:
         return "target_bid 없음 — 구조 결함(재생성 필요)"
 
     # ①스텝 클램프 정상 — target_bid가 라이브 현재가 대비 ±_MAX_CHANGE_PCT 이내인지 재확인.
     # (harness/guardrail_gate가 실행 직전 다시 검증하지만, 여기서 미리 걸러 실패를 예정된
     # 재시도가 가능한 'pending 유지'로 남긴다 — harness에 넘겨 fail-closed 'failed'로 영구
-    # 종결시키지 않기 위함.)
+    # 종결시키지 않기 위함.) ★폴백 없음(EX여도 스텝 클램프는 현행 유지).
     current_bid = _live_current_bid(p.target_type, p.target_id)
     if current_bid is None:
         return "①라이브 현재가 재조회 실패 — 스텝 클램프 검증 불가(fail-closed)"
@@ -454,17 +511,49 @@ def _check_bid_up_conditions(db: Session, p: NaverProposal, today: date) -> str 
             f"변경폭={float(change_pct):.1%}(상한 {float(_MAX_CHANGE_PCT):.0%})"
         )
 
-    # ②rationale 창 클릭 ≥10
+    # ②rationale 창 클릭 ≥10 + ③그룹 보정ROAS(정착창 D-8~D-2) ≥ target_roas.
     clk = _extract_rationale_clk(p.rationale)
-    if clk is None or clk < _MIN_CLICK_FOR_APPROVAL:
-        return f"②rationale 창 클릭 부족(clk={clk})"
+    clk_ok = clk is not None and clk >= _MIN_CLICK_FOR_APPROVAL
+    is_ex = (p.rationale or "").startswith(expansion_pressure.EX_RATIONALE_PREFIX)
 
-    # ③그룹 보정ROAS(정착창 D-8~D-2) ≥ target_roas
-    roas_ok, roas_reason = _settlement_roas_ok(db, p.target_type, p.target_id, p.campaign_id, today)
-    if not roas_ok:
-        return f"③{roas_reason}"
+    if clk_ok:
+        # 표본 충분 — 표준 ③(ok만 통과). 비EX·EX 공통·회귀 0.
+        roas_ok, roas_reason = _settlement_roas_ok(db, p.target_type, p.target_id, p.campaign_id, today)
+        if not roas_ok:
+            return f"③{roas_reason}"
+    else:
+        # ② 미달. 비EX는 즉시 hold(회귀 0). EX는 ③이 'unknown'(표본 부족)일 때만 캠페인 프라이어 폴백.
+        if not is_ex:
+            return f"②rationale 창 클릭 부족(clk={clk})"
+        status, roas_reason = _settlement_roas_status(db, p.target_type, p.target_id, p.campaign_id, today)
+        if status == "below":
+            return f"③{roas_reason}"  # 명시적 미달 — 거부권(폴백 불가, DOWN 비대칭 보수성)
+        if status == "ok":
+            # ③은 통과했으나 폴백 조건(③ unknown)이 아님 — ② 표준 hold(폴백은 ②미달∧③unknown 교집합만).
+            return f"②rationale 창 클릭 부족(clk={clk})"
+        # status == "unknown" — 캠페인 프라이어 폴백(캠페인당 1회 캐시). 여기선 폴백 자격(확장 모드)만
+        # 확인하고, 멤버십 재검증은 아래 EX 필수 게이트가 clk_ok 경로와 공통으로 수행한다(중복 제거).
+        pressure = _ex_campaign_pressure(db, p.campaign_id, today, ex_ctx)
+        if not pressure.get("expansion_mode"):
+            return (
+                f"②③ EX 프라이어 폴백 불가 — 캠페인 확장 모드 아님(clk={clk}, {pressure.get('reason')})"
+            )
+        # 폴백 자격 통과 → ②③ skip, 아래 EX 멤버십 게이트 → ④로 진행.
 
-    # ④최신 소급채점에서 bleeding 아님(asof 신선도 포함 — codex 4R[P1])
+    # ★EX 멤버십 재검증 필수 게이트(codex D-NAO-89 P1) — [EX확장] 태그 제안 전건(clk≥10 표준 clk_ok
+    # 경로·clk<10 프라이어 폴백 경로 무관)은 승인 전 08:50 최신 데이터로 allocator를 재실행한 배분
+    # 목록에 target_id가 있어야 한다. 이전엔 clk≥10 deep/own 제안이 표준 clk_ok 경로를 타 이 재검증을
+    # 우회했다(과열밴드 deep 제안이 08:10 학습으로 slope 프라이어 무효화·deep 4조건 붕괴돼도 집행
+    # 가능한 구멍). 멤버십 재실행(_ex_allocation_adgroups=allocate_expansion 재실행)이 deep 4조건·CTR·
+    # tier·cap을 최신 데이터로 자연 재적용하므로 별도 deep 게이트를 중복 구현하지 않는다. 캠페인당 1회
+    # 캐시(ex_ctx)라 폴백 경로가 위에서 이미 pressure를 산출했으면 재실행 비용 0. 비EX 제안은 무접촉.
+    if is_ex:
+        pressure = _ex_campaign_pressure(db, p.campaign_id, today, ex_ctx)
+        alloc_adgroups = _ex_allocation_adgroups(db, p.campaign_id, today, pressure, ex_ctx)
+        if p.target_id not in alloc_adgroups:
+            return f"EX 멤버십 재검증 실패 — 배분 목록에 없음(target={p.target_id}, clk={clk})"
+
+    # ④최신 소급채점에서 bleeding 아님(asof 신선도 포함 — codex 4R[P1]). ★폴백 없음.
     bleeding_reason = _bleeding_hold_reason(db, p.target_type, p.target_id, today)
     if bleeding_reason:
         return bleeding_reason
@@ -616,6 +705,130 @@ def _sweep_precommit_seam(db: Session) -> None:
     return None
 
 
+def _run_budget_envelope_lane(
+    db: Session, auto_ids: set[str], day_start: datetime, day_end: datetime,
+    now: datetime, result: dict,
+) -> None:
+    """D-NAO-87 예산 봉투 자동 심사 — [예산봉투] 접두 budget_up만 자동 승인·집행한다. **비태그
+    budget_up은 현행 Confirm 전용 불변**: _DAILY_LANE_PROPOSAL_TYPES에 budget_up을 넣지 않고
+    이 별도 스코프 쿼리(rationale 접두 필터)로만 처리한다(기존 의미 불변). 게이트: auto_operate ∧
+    당일 생성 ∧ 라운드 봉투 자율분(budget_auto_eligible=True — 회당 총 증가 ≤10만 캡 존속, 초과분은
+    Confirm 대기 pending 유지) ∧ 킬스위치 재확인 통과 → 승인(APPROVAL_SOURCE_DAILY)·harness.execute
+    경유(guardrail _check_budget이 +100%캡·스톱로스·BEP 재검증 — 신규 실쓰기 경로 0). fail-open은
+    호출부가 감싼다."""
+    if not auto_ids:
+        return
+    candidates = (
+        db.query(NaverProposal)
+        .filter(
+            NaverProposal.status == "pending",
+            NaverProposal.proposal_type == "budget_up",
+            NaverProposal.campaign_id.in_(auto_ids),
+            # [예산봉투] 접두만(SQLite/PG 공히 '['는 LIKE 리터럴 — %·_만 특수문자).
+            NaverProposal.rationale.like(f"{budget_envelope.BUDGET_ENVELOPE_PREFIX}%"),
+            # 라운드 봉투 캡 존속: 회당 총 증가 ≤10만 자율분(True)만 자동 집행(초과분 False는
+            # Confirm 대기 pending 유지 — _classify_budget_round_envelope 그리디 분류 결과 존중).
+            NaverProposal.budget_auto_eligible.is_(True),
+            NaverProposal.created_at >= day_start,
+            NaverProposal.created_at < day_end,
+        )
+        .order_by(NaverProposal.id.asc())
+        .all()
+    )
+    # ★P2 KST 당일 1회 게이트(복리 차단, codex 적대 리뷰) — 승인 전 재확인(생성 단계 skip과
+    # 이중 게이트). 이번 런에서 성공 집행한 캠페인도 즉시 추가해 같은 런 내 중복도 막는다.
+    raised_today = budget_envelope.campaigns_raised_today(db, today=now.date())
+    for p in candidates:
+        result["budget_reviewed"] += 1
+        if p.campaign_id in raised_today:
+            hold_reason = (
+                "예산 봉투 KST 당일 1회 게이트 — 오늘 이미 봉투 증액 성공 집행됨(복리 차단)"
+            )
+            result["held"].append({"id": p.id, "reason": hold_reason})
+            _record_blocked(
+                db, campaign_id=p.campaign_id, actor=diary.ACTOR_DAILY, reason=hold_reason,
+                now=now, target_type=p.target_type, target_id=p.target_id,
+                adgroup_id=p.adgroup_id, action=p.proposal_type,
+            )
+            continue
+        # 킬스위치 실행 직전 재확인(일 레인 실행형과 동일 계약).
+        if not _auto_operate_now(db, p.campaign_id):
+            hold_reason = "킬스위치 OFF — auto_operate=False(예산 봉투 실행 직전 재확인)"
+            result["held"].append({"id": p.id, "reason": hold_reason})
+            _record_blocked(
+                db, campaign_id=p.campaign_id, actor=diary.ACTOR_DAILY, reason=hold_reason,
+                now=now, target_type=p.target_type, target_id=p.target_id,
+                adgroup_id=p.adgroup_id, action=p.proposal_type, event_type="kill_switch",
+            )
+            continue
+        p.status = "approved"
+        p.approval_source = APPROVAL_SOURCE_DAILY
+        db.commit()
+        result["budget_approved"] += 1
+        try:
+            naver_execution_harness.execute(db, p.id, dry_run=False, now=now)
+            result["budget_executed"] += 1
+            raised_today.add(p.campaign_id)  # 같은 런 내 복리 차단(성공 집행분 즉시 반영)
+        except Exception as e:  # noqa: BLE001 — harness가 change_log/상태를 이미 확정(failed 등)
+            result["budget_failed"] += 1
+            log.warning("auto_operator: 예산 봉투 실행 실패 proposal_id=%s: %s", p.id, e)
+
+    # ★P2 잔존 pending 정리(codex 2R — persist dedup 좌초 방지): [예산봉투] budget_up은
+    # _DAILY_LANE_PROPOSAL_TYPES에 없어 위 leftovers sweep(codex 11R)이 안 건드린다. 오늘
+    # hold분(당일 게이트·킬스위치)+이전 날 stale분을 rejected 처리해 익일 08:00 생성기가 갱신
+    # 데이터로 재생성(persist pending dedup이 14일 만료까지 신규 봉투 제안을 막는 좌초 방지).
+    # 킬스위치 OFF 캠페인 제외(정지 ≠ 폐기). ★codex 3R: `auto_ids & _auto_operate_campaign_ids(db)`
+    # 는 **같은 세션 재조회**라 레인 도중 OFF 된 캠페인의 stale True를 볼 수 있다(SQLite WAL 리더는
+    # 트랜잭션 시작 스냅샷 — _auto_operate_now가 독립 커넥션을 쓰는 이유와 동일). auto_ids(레인 시작
+    # 스냅샷)로 1차 prefilter만 하고, **최종 폐기 게이트는 캠페인별 _auto_operate_now(독립 커넥션
+    # fresh 확인)**로 판정한다. ★비태그 budget_up(콘솔 Confirm 대기)은 접두 필터로 절대 안 건드린다.
+    if not auto_ids:
+        return
+    candidates_stale = (
+        db.query(NaverProposal)
+        .filter(
+            NaverProposal.status == "pending",
+            NaverProposal.proposal_type == "budget_up",
+            NaverProposal.rationale.like(f"{budget_envelope.BUDGET_ENVELOPE_PREFIX}%"),
+            NaverProposal.campaign_id.in_(auto_ids),
+            NaverProposal.created_at < day_end,
+        )
+        .all()
+    )
+    # 최종 게이트: 캠페인별 fresh 확인(독립 커넥션) — 도중 OFF 캠페인의 pending은 폐기하지 않는다.
+    # 캠페인당 1회만 조회(dedup으로 캠페인당 leftover ≤1이나 방어적 캐시).
+    fresh_on: dict[str, bool] = {}
+
+    def _still_auto(cid: str) -> bool:
+        if cid not in fresh_on:
+            fresh_on[cid] = _auto_operate_now(db, cid)
+        return fresh_on[cid]
+
+    leftovers = [lp for lp in candidates_stale if _still_auto(lp.campaign_id)]
+    for lp in leftovers:
+        lp.status = "rejected"
+        lp.rationale = (
+            f"{lp.rationale or ''} [예산봉투 보류/stale — 익일 08:00 생성기가 갱신 데이터로 "
+            "재생성(D-NAO-87 일일 사이클, codex 2R)]"
+        )
+        result["budget_rejected_stale"] += 1
+    if leftovers:
+        # 커밋 前 원시값 캡처(독립 리뷰 P2-1 패턴 — 커밋이 ORM 인스턴스 만료 → 커밋 후 lp.*
+        # 접근이 refresh SELECT를 유발, write_diary_entry try 밖이라 fail-open 계약을 뚫는다).
+        rejected_info = [
+            (lp.campaign_id, lp.target_type, lp.target_id, lp.adgroup_id, lp.proposal_type)
+            for lp in leftovers
+        ]
+        db.commit()
+        for c_id, t_type, t_id, ag_id, p_type in rejected_info:
+            diary.write_diary_entry(
+                db, "reject", c_id, actor=diary.ACTOR_DAILY,
+                target_type=t_type, target_id=t_id, adgroup_id=ag_id, action=p_type,
+                rationale="예산봉투 보류/stale — 익일 08:00 재생성(D-NAO-87 일일 사이클, codex 2R)",
+                now=now,
+            )
+
+
 def run_daily_lane(db: Session, *, now: datetime | None = None) -> dict:
     """D-NAO-48 정책의 서버 코드화 — auto_operate 캠페인의 당일 생성 pending 실행형
     (bid_up/bid_down/pause)을 심사·승인·집행(PLAN §3). 08:50 크론(catch-up 포함).
@@ -644,11 +857,17 @@ def run_daily_lane(db: Session, *, now: datetime | None = None) -> dict:
     result: dict = {
         "reviewed": 0, "approved": 0, "executed": 0, "held": [], "failed": 0,
         "rejected_stale": 0,
+        # D-NAO-87 예산 봉투 자동 심사(별도 스코프 — 비태그 budget_up 불변).
+        "budget_reviewed": 0, "budget_approved": 0, "budget_executed": 0, "budget_failed": 0,
+        "budget_rejected_stale": 0,
     }
 
     auto_ids = _auto_operate_campaign_ids(db)
     if not auto_ids:
         return result
+
+    # P3 EX 프라이어 폴백(D-NAO-85 §4-4) — 캠페인당 압력·배분 1회 캐시 + 프라이어 lazy 로드.
+    ex_ctx = _new_ex_review_ctx()
 
     candidates = (
         db.query(NaverProposal)
@@ -682,7 +901,7 @@ def run_daily_lane(db: Session, *, now: datetime | None = None) -> dict:
             continue
 
         if p.proposal_type == "bid_up":
-            hold_reason = _check_bid_up_conditions(db, p, today)
+            hold_reason = _check_bid_up_conditions(db, p, today, ex_ctx=ex_ctx)
             if hold_reason:
                 result["held"].append({"id": p.id, "reason": hold_reason})
                 _record_blocked(
@@ -817,6 +1036,13 @@ def run_daily_lane(db: Session, *, now: datetime | None = None) -> dict:
     # VT3(D-NAO-82②): 소재 CTR 경보 브리핑 — 핫셋/탐색과 독립, 실행형 심사 결과와 무관하게
     # 항상 시도(auto_ids 재사용 — 위에서 이미 스코프 확정, 이 함수 내부에서 재조회는 안 하지만
     # ctr_alert 자신도 자체 auto_operate 검증을 한다, 이중 방어). fail-open은 함수 내부에서 처리.
+    # D-NAO-87 예산 봉투 자동 심사([예산봉투] 접두 budget_up만) — 실행형 심사와 독립. fail-open:
+    # 봉투 레인 실패가 일 레인 본작업/브리핑을 막지 않는다(CTR·유령 브리핑과 동형).
+    try:
+        _run_budget_envelope_lane(db, auto_ids, day_start, day_end, now, result)
+    except Exception as e:  # noqa: BLE001 — 예산 봉투 레인 실패는 일 레인 본작업과 분리(fail-open)
+        log.warning("auto_operator: 예산 봉투 레인 실패(fail-open): %s", e)
+
     result["ctr_alerts"] = 0
     _run_ctr_alert_briefing(db, now, result)
 
@@ -1865,9 +2091,47 @@ def _exploration_observe(db: Session, adgroup_id: str, curve: list[dict], now: d
     return {"since": since_stats, "rank_before": rank_before, "flow_clk": flow_clk, "flow_available": flow_available}
 
 
+# P4 밴드 동적화(D-NAO-85 §4-3) deep 확장 게이트 — EX 압력 갭 상수 재사용(§4-3 "재사용 가능하면
+# 재사용"). 값의 단일 진실은 expansion_pressure.EX_PRESSURE_RATIO(=1.25).
+_EX_DEEP_RATIO = expansion_pressure.EX_PRESSURE_RATIO
+
+
+def _deep_expansion_ok(
+    db: Session, campaign_id: str, adgroup_id: str, today: date,
+    settled_clk: int, response_priors: dict | None,
+) -> bool:
+    """P4 밴드 동적화(D-NAO-85 §4-3) deep_ok 산출 — 셋 다 충족 시 True, 하나라도 미충족·판정
+    불가·보정계수 unavailable이면 False(정적 밴드 유지, fail-closed):
+      ① 그룹 자기 정착창 clk ≥ _MIN_CLICK_FOR_APPROVAL(10) — 자기 표본 충분.
+      ② 정착창 보정ROAS ≥ bep_roas × _EX_DEEP_RATIO(1.25) — 한계 여유 실증.
+      ③ bid_rank_slope 프라이어 존재(load_response_priors) — 한계 반응 학습 중.
+    ①(cost·correction 무관한 값 비교)을 먼저 봐 대부분의 콜드 후보를 조기 반환한다(불필요 DB 접근
+    회피 — 탐색 후보는 정착 clk<10이라 통상 여기서 False)."""
+    if settled_clk < _MIN_CLICK_FOR_APPROVAL:
+        return False
+    if not response_priors or response_priors.get(f"adgroup:{adgroup_id}") is None:
+        return False
+    bep_roas = exploration.resolve_exploration_bep_roas(db, campaign_id, adgroup_id)
+    if bep_roas is None or Decimal(str(bep_roas)) <= 0:
+        return False
+    window_from, window_to = _settlement_window(today)
+    agg = _settlement_agg(db, "adgroup", adgroup_id, window_from, window_to)
+    if agg["cost"] <= 0:
+        return False
+    factor_info = diagnosis.correction_factor(db, today - timedelta(days=1))
+    if factor_info.get("source") != "actual_revenue_ratio":
+        return False  # 보정계수 unavailable → 무보정 추정으로 과열 진입 금지(fail-closed)
+    factor = Decimal(str(factor_info["factor"]))
+    scored = gave_score.compute_gave_score(
+        revenue=Decimal(agg["conv_amt"]) * factor, cost=agg["cost"], bep_roas=Decimal(str(bep_roas)),
+    )
+    ratio = scored["roas_ratio"]
+    return ratio is not None and ratio >= _EX_DEEP_RATIO
+
+
 def _run_exploration_for_campaign(
     db: Session, campaign_id: str, window_from: date, window_to: date,
-    now: datetime, fetch_intraday, result: dict,
+    now: datetime, fetch_intraday, result: dict, response_priors: dict | None = None,
 ) -> None:
     """탐색-UP 레인(핫셋 여집합 SHOPPING 그룹) — PLAN §2 구조. 캠페인 1개의 후보를 순회하며
     트리거→관측→래더→발사(레버 맞춤: source='ad'→소재입찰 explore_op / source='group'→그룹입찰
@@ -1999,10 +2263,13 @@ def _run_exploration_for_campaign(
             and step_base == last_step["after_bid"]
         )
         slope_probe = {"bid": last_step["before_bid"], "rank": obs["rank_before"]} if continuity_ok else None
+        # P4 밴드 동적화(D-NAO-85 §4-3): 자기 표본·보정ROAS·slope 증거가 충분한 그룹은 정적 2.5
+        # 밴드 천장을 해제하고 상향 지속(한계 ROAS→BEP 동적 경계). 기본 False → 기존 판정 불변.
+        deep_ok = _deep_expansion_ok(db, campaign_id, adgroup_id, today, settled_clk, response_priors)
         verdict, vreason = exploration.ladder_judgment(
             ladder_probe, obs["since"], ceiling, step_base,
             recent_flow_clk=obs["flow_clk"], settled_clk=settled_clk, flow_available=obs["flow_available"],
-            evidence_active=win["active"],
+            evidence_active=win["active"], deep_ok=deep_ok,
         )
 
         # VF(D-NAO-83): 유령 지면(rank>5)·증거창 비활성 → 스텝 금지(기록만·실쓰기 0). 시간당
@@ -2048,7 +2315,7 @@ def _run_exploration_for_campaign(
         # (불연속=None → 보수 10% 스텝, codex P1).
         target = exploration.adaptive_step(
             step_base, current_rank, exploration._EXPLORATION_TARGET_BAND, slope_probe,
-            exploration._EXPLORATION_STEP_PCT, bm_prior=bm_bid_anchor,
+            exploration._EXPLORATION_STEP_PCT, bm_prior=bm_bid_anchor, deep_ok=deep_ok,
         )
         if target is None:
             # 밴드 내(도달)·스텝 소실 — 상향 없음(관찰).
@@ -2760,6 +3027,7 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
             try:
                 _run_exploration_for_campaign(
                     db, campaign_id, window_from, window_to, now, fetch_intraday, result,
+                    response_priors=response_priors,
                 )
             except Exception as e:  # noqa: BLE001 — 탐색 레인 실패는 fail-soft(핫셋 결과 불변)
                 log.warning("auto_operator: 탐색 레인 실패(fail-soft) campaign=%s: %s", campaign_id, e)
