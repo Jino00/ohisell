@@ -15,7 +15,7 @@
 #     별도로 고정한다(exploration 정합 테스트 관례 미러).
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy import func as sqlfunc
@@ -172,6 +172,13 @@ def _classify_tier(
         return 1, f"1층(밴드내 순위여유, 순위 {float(weighted_rank):.2f}∈({_BAND_LOW},{_BAND_HIGH}])"
     if weighted_rank is not None and weighted_rank > _BAND_HIGH and imp_7d >= EX_HIGH_DEMAND_IMP:
         return 2, f"2층(고수요·밴드밖, 순위 {float(weighted_rank):.2f}>{_BAND_HIGH}·7일노출 {imp_7d}≥{EX_HIGH_DEMAND_IMP})"
+    # ★과열밴드 fail-closed(codex P2-1): 순위가 **관측됐고** ≤ 2.5(과열 경계)면 증거창 평가 전에
+    # 후보 제외한다. exploration 밴드 의미론(rank≤2.5 = 과열밴드 진입 금지·상향 여지 없음)과 정합 —
+    # 이 fail-closed가 없으면 과열 그룹이 표본미달·고수요 조건만으로 evidence tier로 흘러 채택돼
+    # "상향 여지 없는 자리를 더 밀어올리는" 모순이 생긴다. 순위 미상(None)은 과열 단정 불가 →
+    # 아래 증거창이 판정(관측 근거 없이 과열 배제도 안 함).
+    if weighted_rank is not None and weighted_rank <= _BAND_LOW:
+        return None, f"후보 제외 — 과열밴드(순위 {float(weighted_rank):.2f}≤{_BAND_LOW}, 상향 여지 없음·fail-closed)"
     ev = visibility.evidence_window(db, adgroup_id, campaign_id, today, settlement_clk=own_clk)
     if ev["active"]:
         return 3, f"3층(증거창 활성 — {ev['reason']})"
@@ -214,8 +221,14 @@ def allocate_expansion(
     window_from, window_to = _settlement_window(today)
 
     # CTR 경보 그룹(캠페인 1회 조회) — 소재 처방 대상은 확장 후보에서 제외.
+    # ★판정 시각 정합(codex P2-2): detect_ctr_alerts는 now.date()−1을 as_of로 삼으므로(기본값
+    # kst_now()면 allocate_expansion(today=…)과 어긋나 재현 비결정) now에 today 기반 시각을 명시
+    # 전달한다 — now.date()==today면 ctr as_of = today−1로, 이 배분의 정착창/수요창(as_of=today−1)과
+    # 동일 완결일을 본다(재현 결정성).
+    ctr_now = datetime.combine(today, datetime.min.time())
     ctr_alerted = {
-        a["adgroup_id"] for a in ctr_alert.detect_ctr_alerts(db, campaign_id).get("alerts", [])
+        a["adgroup_id"]
+        for a in ctr_alert.detect_ctr_alerts(db, campaign_id, now=ctr_now).get("alerts", [])
     }
 
     # 보정계수(자기 그룹 보정ROAS 판정용) — 확장 모드면 actual_revenue_ratio 보장(pressure 게이트②)
@@ -242,9 +255,16 @@ def allocate_expansion(
         if tier is None:
             continue
 
-        # 그룹 판정 — 자기 증거(clk≥10∧cost>0∧보정계수 가용) vs 캠페인 프라이어 상속.
+        # 그룹 판정 — 자기 증거(clk≥10∧cost>0) vs 캠페인 프라이어 상속.
         own_ratio: Decimal | None = None
-        if own_clk >= _OWN_SAMPLE_CLK and agg["cost"] > 0 and factor is not None:
+        if own_clk >= _OWN_SAMPLE_CLK and agg["cost"] > 0:
+            # ★자기 표본 충분 fail-closed(codex P2-3): 자기 보정ROAS로 채택/반박을 판정해야 하는데
+            # 보정계수가 unavailable(factor None)이면 검증 불가 → **제외**한다. campaign_prior로
+            # 폴백하면 below-BEP 제외 게이트를 우회(검증 불가인데 확장)하는 구멍이 된다. 표본 미달
+            # 그룹의 prior 폴백은 pressure 게이트②가 이미 계정 보정계수를 검증한 문맥이라 안전하지만,
+            # 자기 표본이 있는 그룹은 그 자기 증거를 검증할 보정계수가 없으면 확장을 금지한다(fail-closed).
+            if factor is None:
+                continue
             scored = gave_score.compute_gave_score(
                 revenue=Decimal(agg["conv_amt"]) * factor, cost=agg["cost"], bep_roas=bep_roas,
             )

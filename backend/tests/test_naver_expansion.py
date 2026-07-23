@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 from decimal import Decimal
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from sqlalchemy import create_engine
@@ -322,6 +322,61 @@ def test_allocator_ctr_alert_group_excluded(db):
                        return_value={"alerts": [{"adgroup_id": "ag-ctr"}]}):
         got = expansion_allocator.allocate_expansion(db, CAMPAIGN, today=TODAY, pressure=_pressure())
     assert got == []
+
+
+# ══════════ codex P2-1: 과열밴드(rank≤2.5) fail-closed ══════════
+
+def test_allocator_overheated_band_excluded_before_evidence(db):
+    """관측된 순위 ≤ 2.5(과열밴드)는 증거창 평가 전에 제외(fail-closed) — evidence 조건을 모두
+    갖춰도 채택되지 않는다(exploration 밴드 의미론: 상향 여지 없음)."""
+    _campaign(db)
+    _adgroup(db, adgroup_id="ag-hot")
+    _hourly(db, adgroup_id="ag-hot", avg_rank=Decimal("2.0"), imp=100)  # 과열밴드
+    # 고수요·표본미달·예산여유·클릭미달 = 증거창 조건 충족(수정 전이라면 tier3로 채택됐을 것)
+    _daily(db, adgroup_id="ag-hot", ad_date=TODAY - timedelta(days=2), imp=200, clk=1, cost=1000, conv_amt=0)
+    with patch.object(expansion_allocator.diagnosis, "correction_factor", return_value=ACTUAL_FACTOR):
+        got = expansion_allocator.allocate_expansion(db, CAMPAIGN, today=TODAY, pressure=_pressure())
+    assert got == []
+
+
+# ══════════ codex P2-2: CTR 경보 판정 시각 정합 ══════════
+
+def test_allocator_ctr_alert_called_with_today_based_now(db):
+    """detect_ctr_alerts에 today 기반 now를 명시 전달(now.date()==today) — 재현 결정성."""
+    _campaign(db)
+    _adgroup(db, adgroup_id="ag-1")
+    _hourly(db, adgroup_id="ag-1", avg_rank=Decimal("3.0"), imp=100)
+    _daily(db, adgroup_id="ag-1", ad_date=IN_WINDOW, imp=100, clk=20, cost=1000, conv_amt=3000)
+    spy = MagicMock(return_value={"alerts": []})
+    with patch.object(expansion_allocator.diagnosis, "correction_factor", return_value=ACTUAL_FACTOR), \
+         patch.object(expansion_allocator.ctr_alert, "detect_ctr_alerts", spy):
+        expansion_allocator.allocate_expansion(db, CAMPAIGN, today=TODAY, pressure=_pressure())
+    spy.assert_called_once()
+    passed_now = spy.call_args.kwargs.get("now")
+    assert passed_now is not None, "now를 명시 전달해야 한다(기본 kst_now() 금지)"
+    assert passed_now.date() == TODAY
+
+
+# ══════════ codex P2-3: 보정계수 unavailable 시 자기표본 그룹 fail-closed ══════════
+
+def test_allocator_own_sample_excluded_when_correction_unavailable(db):
+    """보정계수 unavailable ∧ 자기 표본 충분(clk≥10∧cost>0) → 제외(검증 불가=확장 금지).
+    표본 미달 그룹의 campaign_prior 폴백은 이 문맥에서도 유지된다."""
+    _campaign(db)
+    # own 표본 충분 그룹 — 보정 불가면 제외되어야
+    _adgroup(db, adgroup_id="ag-own")
+    _hourly(db, adgroup_id="ag-own", avg_rank=Decimal("3.0"), imp=100)
+    _daily(db, adgroup_id="ag-own", ad_date=IN_WINDOW, imp=100, clk=20, cost=1000, conv_amt=3000)
+    # 표본 미달 그룹 — 보정 불가여도 campaign_prior로 채택 유지
+    _adgroup(db, adgroup_id="ag-thin")
+    _hourly(db, adgroup_id="ag-thin", avg_rank=Decimal("3.0"), imp=100)
+    _daily(db, adgroup_id="ag-thin", ad_date=IN_WINDOW, imp=100, clk=3, cost=200, conv_amt=100)
+    with patch.object(expansion_allocator.diagnosis, "correction_factor", return_value=UNAVAILABLE_FACTOR):
+        got = expansion_allocator.allocate_expansion(db, CAMPAIGN, today=TODAY, pressure=_pressure())
+    ids = [r["adgroup_id"] for r in got]
+    assert "ag-own" not in ids  # 자기표본 그룹 fail-closed 제외
+    assert ids == ["ag-thin"]   # 표본 미달 그룹은 campaign_prior 채택 유지
+    assert got[0]["judged_by"] == "campaign_prior"
 
 
 def test_allocator_untiered_group_excluded(db):
