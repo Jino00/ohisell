@@ -175,7 +175,7 @@ def test_A_step_loss_skip_recorded_without_changing_behavior(db):
     # ② diary rationale에 스킵 그룹·사유 병기.
     observe = db.query(OpsDiaryEntry).filter(OpsDiaryEntry.action == proposal_pipeline._EX_OBSERVE_ACTION).one()
     assert "배분그룹 5개" in observe.rationale
-    assert "제안 4건" in observe.rationale
+    assert "제안 후보 4건" in observe.rationale
     assert "스텝소실 스킵 1건" in observe.rationale
     assert "ag-skip" in observe.rationale
     assert "bid 50원" in observe.rationale
@@ -198,7 +198,7 @@ def test_A_zero_skip_rationale_unchanged(db):
     assert observe.rationale.startswith("EX 압력 판정 — expansion_mode=True·roas_ratio=")
     assert "배분그룹 1개" in observe.rationale
     assert "스텝소실" not in observe.rationale
-    assert "제안 1건" not in observe.rationale  # 접미사 자체가 안 붙음(기존 문구 완전 불변)
+    assert "제안 후보" not in observe.rationale  # 접미사 자체가 안 붙음(기존 문구 완전 불변)
 
 
 # ═══════════════════════ B. P3 UP게이트 프라이어 폴백 ═══════════════════════

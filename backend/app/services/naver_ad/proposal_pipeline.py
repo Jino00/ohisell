@@ -751,8 +751,11 @@ def run_expansion_stage(db: Session, *, today: date | None = None) -> dict:
         )
         if skip_details:
             more = "…" if len(skip_details) > _EX_SKIP_DETAIL_MAX else ""
+            # "제안 후보"(persist dedup 전 개수) — codex P2: 재실행 시(기존 pending 존재) persist는
+            # 0건일 수 있어 "제안 N건"이라 쓰면 실제 생성 결과와 혼동된다. 이 값은 어디까지나
+            # candidate_proposals 개수이지 persist 결과가 아니다(관측 정직성).
             rationale += (
-                f" — 제안 {len(campaign_proposals)}건·스텝소실 스킵 {len(skip_details)}건: "
+                f" — 제안 후보 {len(campaign_proposals)}건·스텝소실 스킵 {len(skip_details)}건: "
                 f"{', '.join(skip_details[:_EX_SKIP_DETAIL_MAX])}{more}"
             )
         diary.write_diary_entry(
