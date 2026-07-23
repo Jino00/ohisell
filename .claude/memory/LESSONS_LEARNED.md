@@ -217,3 +217,14 @@ CD4 학습층은 세분화 판사(LLM)의 판정 근거를 볼트에 남겨야 �
 
 ### 📌 교훈
 **"로그가 안 보인다"의 원인은 최소 3층이다 — ①레벨(핸들러/root 레벨), ②전파(propagate), ③애초에 그 값을 찍는 라인이 있는가.** 하나만 고치고 "관측 가능해졌다"고 단정하지 말 것(원칙22). 로깅 라이브러리 동작은 추정 말고 설치된 버전의 `LOGGING_CONFIG`를 직접 조회해 확인한다(원칙: 추정 금지). 전역 로깅 설정은 pytest caplog와 충돌할 수 있으니 `propagate=False`를 app 네임스페이스에 거는 대신 root를 구성하고, 검증은 pytest가 아니라 fresh 프로세스로 한다.
+
+## 19. 절대 날짜로 시드한 테스트가 하니스 기본값(오늘)과 어긋나 flaky — monkeypatch는 호출되는 모듈에 걸 것 (2026-07-23, BM 벤치마크 flaky 수정)
+
+### 🐛 이슈
+`test_naver_bm_benchmark.py::test_harness_runs_sa3_and_fail_open`이 2026-07-23부터 실패(assert bid_band count 1→0). 원인: 테스트가 `SDATE = date(2026, 7, 22)` 절대 날짜로 스냅샷을 시드하는데, `bm_harness.run_bm_layer` → `compute_benchmarks(db)`가 `snapshot_date` 인자 없이 호출돼 기본값 `kst_today()`(=오늘)를 사용했다. 07-22 당일에만 시드 날짜와 오늘이 우연히 일치해 통과하던 날짜 고정(flaky) 버그 — 같은 파일의 다른 테스트는 `compute_benchmarks(db, snapshot_date=SDATE)`로 명시 호출이라 무사했다.
+
+### ✅ 해결
+테스트 파일만 수정(프로덕션 무접촉). `compute_benchmarks`는 `app/services/naver_ad/bm_benchmark.py`가 자기 네임스페이스에서 `kst_today()`를 호출하므로, **소비 모듈의 심볼** `app.services.naver_ad.bm_benchmark.kst_today`를 `SDATE`로 monkeypatch해 시드 날짜와 정렬했다. 원본 정의 모듈 `app.utils.kst.kst_today`를 패치하면 안 먹히는 함정을 피했다(Python에서 `from x import f`로 가져온 이름은 정의처가 아니라 가져온 모듈의 네임스페이스에 바인딩되므로). 파일 14 passed, 전체 스위트 3021 passed 회귀 0(커밋 c7d4d2a, PR #91).
+
+### 📌 교훈
+**테스트에 하드코딩된 절대 날짜가 하니스 기본값(오늘)과 어긋나면 시간이 지나 반드시 터진다.** 하니스 경유 테스트는 (a) `kst_today`를 **소비(호출) 모듈**에서 monkeypatch하거나 (b) 시드를 `kst_today` 상대 날짜로 작성할 것 — 이 둘 중 하나가 아니면 "오늘 우연히 통과"하는 시한폭탄이 된다. monkeypatch는 반드시 함수가 **정의된 곳이 아니라 호출되는 모듈**의 심볼에 걸어야 한다(`unittest.mock.patch` 표준 함정과 동일 원리).
