@@ -110,8 +110,8 @@ def test_A_expansion_mode_generates_ex_bid_up(db):
          patch.object(expansion_pressure.diagnosis, "correction_factor", return_value=ACTUAL_FACTOR), \
          patch.object(expansion_allocator.diagnosis, "correction_factor", return_value=ACTUAL_FACTOR), \
          patch.object(expansion_allocator.ctr_alert, "detect_ctr_alerts", return_value={"alerts": []}):
-        n = proposal_pipeline.run_expansion_stage(db, today=TODAY)
-    assert n == 1
+        stage = proposal_pipeline.run_expansion_stage(db, today=TODAY)
+    assert stage == {"generated": 1, "skipped": 0}
     p = db.query(NaverProposal).filter(NaverProposal.proposal_type == "bid_up").one()
     assert p.target_type == "adgroup"
     assert p.target_id == "ag-1"
@@ -131,8 +131,8 @@ def test_A_non_expansion_generates_nothing_but_records_observe(db):
     _daily(db, adgroup_id="ag-1", ad_date=IN_WINDOW, clk=40, cost=1000, conv_amt=1000)
     with _patch_bep("1.5"), \
          patch.object(expansion_pressure.diagnosis, "correction_factor", return_value=ACTUAL_FACTOR):
-        n = proposal_pipeline.run_expansion_stage(db, today=TODAY)
-    assert n == 0
+        stage = proposal_pipeline.run_expansion_stage(db, today=TODAY)
+    assert stage == {"generated": 0, "skipped": 0}
     assert db.query(NaverProposal).filter(NaverProposal.proposal_type == "bid_up").count() == 0
     observe = db.query(OpsDiaryEntry).filter(OpsDiaryEntry.action == proposal_pipeline._EX_OBSERVE_ACTION).all()
     assert len(observe) == 1
@@ -140,7 +140,65 @@ def test_A_non_expansion_generates_nothing_but_records_observe(db):
 
 def test_A_no_auto_operate_returns_zero(db):
     """auto_operate 캠페인 없음 → 0(판정 스킵)."""
-    assert proposal_pipeline.run_expansion_stage(db, today=TODAY) == 0
+    assert proposal_pipeline.run_expansion_stage(db, today=TODAY) == {"generated": 0, "skipped": 0}
+
+
+def test_A_step_loss_skip_recorded_without_changing_behavior(db):
+    """★D-NAO-85 후속 소수정: 배분 5건 중 1건이 15% 스텝→10원 그리드 내림에서 무변화(bid 50원,
+    50×1.15=57.5→10원 내림=50=현재와 동일) → 제안은 여전히 4건만 생성(행동 불변)이지만
+    ①ex_skipped=1로 카운트되고 ②diary observe rationale에 스킵 그룹·사유가 병기된다."""
+    _settings(db)
+    _campaign_entity(db)
+    for i in range(1, 5):  # ag-2~ag-5: 정상 스텝(1000→1150)
+        _adgroup(db, adgroup_id=f"ag-{i+1}", bid_amt=1000)
+        _hourly_rank(db, adgroup_id=f"ag-{i+1}", avg_rank=Decimal("3.0"))
+        _daily(db, adgroup_id=f"ag-{i+1}", ad_date=IN_WINDOW, clk=40, cost=1000, conv_amt=4500)
+    _adgroup(db, adgroup_id="ag-skip", bid_amt=50)  # 50×1.15=57.5→10원 내림=50=무변화(스텝 소실)
+    _hourly_rank(db, adgroup_id="ag-skip", avg_rank=Decimal("3.0"))
+    _daily(db, adgroup_id="ag-skip", ad_date=IN_WINDOW, clk=40, cost=1000, conv_amt=4500)
+    alloc_ids = ["ag-2", "ag-3", "ag-4", "ag-5", "ag-skip"]
+    fixed_alloc = [
+        {"adgroup_id": aid, "rank_tier": 1, "own_clk": 40, "judged_by": "campaign_prior",
+         "marginal_stop": False, "reason": "x", "weighted_rank": Decimal("3.0")}
+        for aid in alloc_ids
+    ]
+    with _patch_bep("1.5"), \
+         patch.object(expansion_pressure.diagnosis, "correction_factor", return_value=ACTUAL_FACTOR), \
+         patch.object(expansion_allocator, "allocate_expansion", return_value=fixed_alloc):
+        stage = proposal_pipeline.run_expansion_stage(db, today=TODAY)
+    # ① 행동 불변 — 제안은 스텝 소실 1건을 제외한 4건만 생성.
+    assert stage == {"generated": 4, "skipped": 1}
+    assert db.query(NaverProposal).filter(NaverProposal.proposal_type == "bid_up").count() == 4
+    assert db.query(NaverProposal).filter(
+        NaverProposal.proposal_type == "bid_up", NaverProposal.target_id == "ag-skip",
+    ).count() == 0
+    # ② diary rationale에 스킵 그룹·사유 병기.
+    observe = db.query(OpsDiaryEntry).filter(OpsDiaryEntry.action == proposal_pipeline._EX_OBSERVE_ACTION).one()
+    assert "배분그룹 5개" in observe.rationale
+    assert "제안 4건" in observe.rationale
+    assert "스텝소실 스킵 1건" in observe.rationale
+    assert "ag-skip" in observe.rationale
+    assert "bid 50원" in observe.rationale
+
+
+def test_A_zero_skip_rationale_unchanged(db):
+    """스킵 0건이면 diary rationale 기존 문구가 그대로(스킵 관련 접미사 없음) — 회귀 방지."""
+    _settings(db)
+    _campaign_entity(db)
+    _adgroup(db, adgroup_id="ag-1", bid_amt=1000)
+    _hourly_rank(db, adgroup_id="ag-1", avg_rank=Decimal("3.0"))
+    _daily(db, adgroup_id="ag-1", ad_date=IN_WINDOW, clk=40, cost=1000, conv_amt=4500)
+    with _patch_bep("1.5"), \
+         patch.object(expansion_pressure.diagnosis, "correction_factor", return_value=ACTUAL_FACTOR), \
+         patch.object(expansion_allocator.diagnosis, "correction_factor", return_value=ACTUAL_FACTOR), \
+         patch.object(expansion_allocator.ctr_alert, "detect_ctr_alerts", return_value={"alerts": []}):
+        stage = proposal_pipeline.run_expansion_stage(db, today=TODAY)
+    assert stage == {"generated": 1, "skipped": 0}
+    observe = db.query(OpsDiaryEntry).filter(OpsDiaryEntry.action == proposal_pipeline._EX_OBSERVE_ACTION).one()
+    assert observe.rationale.startswith("EX 압력 판정 — expansion_mode=True·roas_ratio=")
+    assert "배분그룹 1개" in observe.rationale
+    assert "스텝소실" not in observe.rationale
+    assert "제안 1건" not in observe.rationale  # 접미사 자체가 안 붙음(기존 문구 완전 불변)
 
 
 # ═══════════════════════ B. P3 UP게이트 프라이어 폴백 ═══════════════════════
