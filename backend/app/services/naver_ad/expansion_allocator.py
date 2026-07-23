@@ -54,6 +54,13 @@ _BAND_HIGH = Decimal("4.0")  # 밴드 하단(진입 목표)
 # slope 프라이어가 없으면 정지 판정 불가 → marginal_stop=False(관측이 목적 — 배제하지 않고 스텝은
 # 기존 래더 클램프에 맡김, §4-2). 자기 ROAS 미측정(표본 미달)도 marginal_stop 불가 → False.
 EX_MARGINAL_STOP_RATIO = Decimal("1.1")
+# ── deep 예외 채택 문턱(과열밴드 우량 그룹, D-NAO-85 §4 Jino A안 확정 2026-07-23) ──
+# 자기 정착창 보정ROAS/BEP가 이 배수 이상이면(= 자기 증거상 한계ROAS≥BEP 여유가 확실) 과열밴드
+# (rank≤2.5) fail-closed를 뚫고 tier1 자격을 유지한다(_classify_tier deep 예외 ②). 출처:
+# expansion_pressure.EX_PRESSURE_RATIO=1.25 로컬 복제(expansion_pressure import 금지 — 순환·
+# 직접호출 금지, 정합은 test_naver_expansion.py가 고정). 캠페인 확장 게이트와 동일 문턱을 그룹
+# 자기증거에 재사용해 "캠페인이 확장 압력을 받는 문턱만큼 확실한 그룹만 과열밴드 예외" 정합.
+EX_PRESSURE_RATIO = Decimal("1.25")
 
 
 def _settlement_window(today: date) -> tuple[date, date]:
@@ -158,31 +165,64 @@ def _active_shopping_adgroups(db: Session, campaign_id: str) -> list[str]:
 def _classify_tier(
     db: Session, adgroup_id: str, campaign_id: str, today: date,
     weighted_rank: Decimal | None, imp_7d: int, own_clk: int,
-) -> tuple[int | None, str]:
-    """그룹을 3층 우선순위로 분류(PLAN §4-2 확정 순서) — (tier|None, 사유). None=어느 층에도
-    안 들어 후보에서 제외. 층 판정은 위→아래 우선(1층이면 3층 조건 무관).
+    *, own_sample: bool, own_ratio: Decimal | None, has_slope: bool,
+) -> tuple[int | None, str, bool]:
+    """그룹을 3층 우선순위로 분류(PLAN §4-2 확정 순서) — (tier|None, 사유, deep). None=어느 층에도
+    안 들어 후보에서 제외. deep=과열밴드 증거 예외로 tier1 채택됐는지(브리핑·diary 관측성). 층 판정은
+    위→아래 우선(1층이면 3층 조건 무관).
       1층(밴드내+순위 여유): 2.5 < weighted_rank ≤ 4.0 — 2.5 방향 이동 여지.
       2층(고수요·밴드밖): weighted_rank **관측됨** ∧ > 4.0 ∧ 7일 노출 ≥ EX_HIGH_DEMAND_IMP.
       3층(증거창): visibility.evidence_window 활성(고수요·표본미달·예산여유·클릭미달).
     ★순위 미상(weighted_rank None — 시간별 관측 부재)은 2층이 아니다: "밴드 밖(rank>4.0)"은
       순위를 실제로 관측했다는 근거가 있어야 한다(§4-2 "∧ rank > 4.0"). 순위 미상·고수요·표본미달
       그룹은 3층 증거창이 담당한다(관측 근거 없이 밴드밖 단정 금지 — 두 층의 역할 분리).
-    ★evidence_window는 3층 후보에서만 조회(1·2층이면 미조회 — 불필요 DB 접근 회피)."""
+    ★evidence_window는 3층 후보에서만 조회(1·2층이면 미조회 — 불필요 DB 접근 회피).
+    ★deep 예외 입력(harness 아닌 allocate_expansion 루프가 자기증거를 산출해 전달): own_sample=
+      자기 정착창 표본 충분(clk≥10∧cost>0), own_ratio=자기 보정ROAS/BEP(표본충분∧보정계수 available
+      일 때만; 그 외 None=검증 불가), has_slope=response_priors에 bid_rank_slope 프라이어 존재."""
     if weighted_rank is not None and _BAND_LOW < weighted_rank <= _BAND_HIGH:
-        return 1, f"1층(밴드내 순위여유, 순위 {float(weighted_rank):.2f}∈({_BAND_LOW},{_BAND_HIGH}])"
+        return 1, f"1층(밴드내 순위여유, 순위 {float(weighted_rank):.2f}∈({_BAND_LOW},{_BAND_HIGH}])", False
     if weighted_rank is not None and weighted_rank > _BAND_HIGH and imp_7d >= EX_HIGH_DEMAND_IMP:
-        return 2, f"2층(고수요·밴드밖, 순위 {float(weighted_rank):.2f}>{_BAND_HIGH}·7일노출 {imp_7d}≥{EX_HIGH_DEMAND_IMP})"
-    # ★과열밴드 fail-closed(codex P2-1): 순위가 **관측됐고** ≤ 2.5(과열 경계)면 증거창 평가 전에
-    # 후보 제외한다. exploration 밴드 의미론(rank≤2.5 = 과열밴드 진입 금지·상향 여지 없음)과 정합 —
-    # 이 fail-closed가 없으면 과열 그룹이 표본미달·고수요 조건만으로 evidence tier로 흘러 채택돼
-    # "상향 여지 없는 자리를 더 밀어올리는" 모순이 생긴다. 순위 미상(None)은 과열 단정 불가 →
-    # 아래 증거창이 판정(관측 근거 없이 과열 배제도 안 함).
+        return 2, f"2층(고수요·밴드밖, 순위 {float(weighted_rank):.2f}>{_BAND_HIGH}·7일노출 {imp_7d}≥{EX_HIGH_DEMAND_IMP})", False
+    # ★과열밴드 fail-closed(codex P2-1) + 증거 예외(deep, D-NAO-85 §4 Jino A안 2026-07-23):
+    # [원래 fail-closed] 순위가 **관측됐고** ≤ 2.5(과열 경계)면 원칙적으로 증거창 평가 전에 후보
+    #   제외한다. exploration 밴드 의미론(rank≤2.5 = 과열밴드 진입 금지·상향 여지 없음)과 정합 —
+    #   이 fail-closed가 없으면 과열 그룹이 표본미달·고수요 조건만으로 evidence tier로 흘러 채택돼
+    #   "상향 여지 없는 자리를 더 밀어올리는" 모순이 생긴다.
+    # [왜 예외를 뚫나] 그러나 이 제외가 자기 증거가 풍부·우량한 그룹까지 막으면 D-NAO-59(한계
+    #   ROAS≥BEP인 동안 계속 확장 = 한계 수렴 꼭짓점까지 볼륨 확장)가 발동될 자리가 사라진다. 그래서
+    #   아래 4조건을 **전부** 충족하는 그룹만 과열밴드에서도 tier1 자격을 유지한다(하나라도 미충족·
+    #   판정 불가 → 기존대로 fail-closed 제외):
+    #     ① own_sample — 자기 정착창 clk≥10 ∧ cost>0(자기 표본 존재)
+    #     ② own_ratio(자기 보정ROAS/BEP) is not None(=보정계수 available) ∧ ≥ EX_PRESSURE_RATIO(1.25)
+    #        — 자기 보정ROAS ≥ BEP×1.25(확장 게이트와 동일 문턱만큼 여유 확실)
+    #     ③ has_slope — response_priors에 bid_rank_slope 프라이어 존재(rank 반응 학습 중)
+    #     ④ marginal_stop 아님(own_ratio ≥ EX_MARGINAL_STOP_RATIO) — 한계 정지 근사가 최종 브레이크.
+    #        ★②(1.25) ≥ ④(1.1)이라 ②충족 시 ④는 자동 성립하나, 상수 변경 대비 명시 게이트로 남긴다.
+    # 보정계수 None이면 own_ratio None → ② 미충족 → 예외 불가(fail-closed). 순위 미상(None)은 과열
+    # 단정 불가 → 아래 증거창이 판정(관측 근거 없이 과열 배제도 안 함).
     if weighted_rank is not None and weighted_rank <= _BAND_LOW:
-        return None, f"후보 제외 — 과열밴드(순위 {float(weighted_rank):.2f}≤{_BAND_LOW}, 상향 여지 없음·fail-closed)"
+        deep_ok = (
+            own_sample
+            and own_ratio is not None
+            and own_ratio >= EX_PRESSURE_RATIO
+            and has_slope
+            and own_ratio >= EX_MARGINAL_STOP_RATIO
+        )
+        if deep_ok:
+            return 1, (
+                f"1층 deep 예외(과열밴드 순위 {float(weighted_rank):.2f}≤{_BAND_LOW}이나 자기 증거 우량 — "
+                f"보정ROAS/BEP {own_ratio}≥{EX_PRESSURE_RATIO}·slope 프라이어 존재·marginal_stop 아님, "
+                "D-NAO-59 한계 수렴)"
+            ), True
+        return None, (
+            f"후보 제외 — 과열밴드(순위 {float(weighted_rank):.2f}≤{_BAND_LOW}, "
+            "상향 여지 없음·fail-closed·deep 4조건 미충족)"
+        ), False
     ev = visibility.evidence_window(db, adgroup_id, campaign_id, today, settlement_clk=own_clk)
     if ev["active"]:
-        return 3, f"3층(증거창 활성 — {ev['reason']})"
-    return None, "후보 제외 — 어느 층에도 미해당(밴드밖·저수요·증거창 비활성)"
+        return 3, f"3층(증거창 활성 — {ev['reason']})", False
+    return None, "후보 제외 — 어느 층에도 미해당(밴드밖·저수요·증거창 비활성)", False
 
 
 def allocate_expansion(
@@ -191,7 +231,8 @@ def allocate_expansion(
 ) -> list[dict]:
     """확장 압력을 그룹에 배분(순수·판정/랭킹만, PLAN §4-2). 반환: 상위 EX_DAILY_GROUP_CAP개
       [{adgroup_id, rank_tier(1|2|3), weighted_rank: Decimal|None, own_clk: int,
-        judged_by("own"|"campaign_prior"), marginal_stop: bool, reason: str}, ...].
+        judged_by("own"|"campaign_prior"), marginal_stop: bool, deep: bool, reason: str}, ...].
+      deep=과열밴드(rank≤2.5) 증거 예외로 tier1 채택된 그룹 표시(D-NAO-85 §4 A안 관측성).
 
     입력 pressure = expansion_pressure.judge_campaign_pressure 출력(harness가 전달, 원칙18-8).
       expansion_mode=False면 [](배분 없음). bep_roas는 pressure에서 상속(재해석 안 함 — 판정
@@ -249,26 +290,36 @@ def allocate_expansion(
         weighted_rank = _weighted_rank_7d(db, adgroup_id, today)
         imp_7d = _demand_imp_7d(db, adgroup_id, today)
 
-        tier, tier_reason = _classify_tier(
-            db, adgroup_id, campaign_id, today, weighted_rank, imp_7d, own_clk,
-        )
-        if tier is None:
-            continue
-
-        # 그룹 판정 — 자기 증거(clk≥10∧cost>0) vs 캠페인 프라이어 상속.
+        # 자기 증거(정착창 보정ROAS/BEP) — deep 예외(_classify_tier)와 그룹 판정에서 함께 쓰므로
+        # ★한 번만 산출해 재사용한다(중복 gave_score 금지). own_sample=자기 표본 충분(clk≥10∧cost>0),
+        # own_ratio=자기 보정ROAS/BEP(표본충분∧보정계수 available일 때만; 그 외 None=검증 불가),
+        # slope=bid_rank_slope 프라이어(deep ③·marginal_stop 공용).
+        own_sample = own_clk >= _OWN_SAMPLE_CLK and agg["cost"] > 0
         own_ratio: Decimal | None = None
-        if own_clk >= _OWN_SAMPLE_CLK and agg["cost"] > 0:
-            # ★자기 표본 충분 fail-closed(codex P2-3): 자기 보정ROAS로 채택/반박을 판정해야 하는데
-            # 보정계수가 unavailable(factor None)이면 검증 불가 → **제외**한다. campaign_prior로
-            # 폴백하면 below-BEP 제외 게이트를 우회(검증 불가인데 확장)하는 구멍이 된다. 표본 미달
-            # 그룹의 prior 폴백은 pressure 게이트②가 이미 계정 보정계수를 검증한 문맥이라 안전하지만,
-            # 자기 표본이 있는 그룹은 그 자기 증거를 검증할 보정계수가 없으면 확장을 금지한다(fail-closed).
-            if factor is None:
-                continue
+        if own_sample and factor is not None:
             scored = gave_score.compute_gave_score(
                 revenue=Decimal(agg["conv_amt"]) * factor, cost=agg["cost"], bep_roas=bep_roas,
             )
             own_ratio = scored["roas_ratio"]  # = 자기 보정ROAS / BEP
+        slope = response_priors.get(f"adgroup:{adgroup_id}")
+
+        tier, tier_reason, deep = _classify_tier(
+            db, adgroup_id, campaign_id, today, weighted_rank, imp_7d, own_clk,
+            own_sample=own_sample, own_ratio=own_ratio, has_slope=slope is not None,
+        )
+        if tier is None:
+            continue
+
+        # 그룹 판정 — 자기 증거(clk≥10∧cost>0) vs 캠페인 프라이어 상속(위 own_sample/own_ratio 재사용).
+        if own_sample:
+            # ★자기 표본 충분 fail-closed(codex P2-3): 자기 보정ROAS로 채택/반박을 판정해야 하는데
+            # 보정계수가 unavailable(factor None → own_ratio None)이면 검증 불가 → **제외**한다.
+            # campaign_prior로 폴백하면 below-BEP 제외 게이트를 우회(검증 불가인데 확장)하는 구멍이
+            # 된다. 표본 미달 그룹의 prior 폴백은 pressure 게이트②가 이미 계정 보정계수를 검증한
+            # 문맥이라 안전하지만, 자기 표본이 있는 그룹은 그 자기 증거를 검증할 보정계수가 없으면
+            # 확장을 금지한다(fail-closed).
+            if factor is None:
+                continue
             if own_ratio is not None and own_ratio < Decimal(1):
                 continue  # 자기 보정ROAS < BEP — 자기 증거의 반박 존중, 제외
             judged_by = "own"
@@ -283,7 +334,6 @@ def allocate_expansion(
         # marginal_stop 보수 근사 — 자기 ROAS 측정 가능(own)이고 slope 프라이어 존재 ∧ BEP 근접일 때만.
         marginal_stop = False
         if judged_by == "own" and own_ratio is not None:
-            slope = response_priors.get(f"adgroup:{adgroup_id}")
             if slope is not None and own_ratio < EX_MARGINAL_STOP_RATIO:
                 marginal_stop = True
                 judge_reason += (
@@ -298,6 +348,7 @@ def allocate_expansion(
             "own_clk": own_clk,
             "judged_by": judged_by,
             "marginal_stop": marginal_stop,
+            "deep": deep,
             "reason": f"{tier_reason} · {judge_reason}",
             "_conv_amt": agg["conv_amt"],  # 정렬 전용(반환 전 제거)
         })

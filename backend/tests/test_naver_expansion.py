@@ -391,6 +391,118 @@ def test_allocator_untiered_group_excluded(db):
     assert got == []
 
 
+# ══════════ D-NAO-85 §4 A안: 과열밴드 deep 예외(우량 자기증거는 tier1 유지) ══════════
+
+def test_allocator_deep_exception_overheated_kept(db):
+    """과열밴드(rank≤2.5)라도 4조건(자기표본 clk≥10∧cost>0·보정ROAS/BEP≥1.25·slope 프라이어∧
+    marginal_stop 아님) 전부 충족 → tier1 채택(deep=True). D-NAO-59 한계 수렴 발동 자리."""
+    _campaign(db)
+    _adgroup(db, adgroup_id="ag-hotdeep")
+    _hourly(db, adgroup_id="ag-hotdeep", avg_rank=Decimal("2.0"), imp=100)  # 과열밴드
+    # clk 20(표본 충분)·보정ROAS/BEP = (3000/1000)/1.5 = 2.0 ≥ 1.25 ∧ ≥ 1.1
+    _daily(db, adgroup_id="ag-hotdeep", ad_date=IN_WINDOW, imp=100, clk=20, cost=1000, conv_amt=3000)
+    priors = {"adgroup:ag-hotdeep": Decimal("120.0")}  # slope 프라이어 존재
+    with patch.object(expansion_allocator.diagnosis, "correction_factor", return_value=ACTUAL_FACTOR):
+        got = expansion_allocator.allocate_expansion(
+            db, CAMPAIGN, today=TODAY, pressure=_pressure(), response_priors=priors,
+        )
+    assert len(got) == 1
+    assert got[0]["adgroup_id"] == "ag-hotdeep"
+    assert got[0]["rank_tier"] == 1
+    assert got[0]["deep"] is True
+    assert got[0]["judged_by"] == "own"
+    assert got[0]["marginal_stop"] is False
+
+
+def test_allocator_normal_tier1_deep_false(db):
+    """비과열 밴드내(rank∈(2.5,4]) 정상 채택 그룹은 deep=False(deep은 과열밴드 예외 전용 표시)."""
+    _campaign(db)
+    _adgroup(db, adgroup_id="ag-normal")
+    _hourly(db, adgroup_id="ag-normal", avg_rank=Decimal("3.0"), imp=100)
+    _daily(db, adgroup_id="ag-normal", ad_date=IN_WINDOW, imp=100, clk=20, cost=1000, conv_amt=3000)
+    priors = {"adgroup:ag-normal": Decimal("120.0")}
+    with patch.object(expansion_allocator.diagnosis, "correction_factor", return_value=ACTUAL_FACTOR):
+        got = expansion_allocator.allocate_expansion(
+            db, CAMPAIGN, today=TODAY, pressure=_pressure(), response_priors=priors,
+        )
+    assert len(got) == 1
+    assert got[0]["deep"] is False
+
+
+def test_allocator_deep_exception_denied_when_thin_sample(db):
+    """과열밴드 + 자기표본 미달(clk<10) → deep 불가 → 제외(기존 fail-closed 불변)."""
+    _campaign(db)
+    _adgroup(db, adgroup_id="ag-hotthin")
+    _hourly(db, adgroup_id="ag-hotthin", avg_rank=Decimal("2.0"), imp=100)
+    _daily(db, adgroup_id="ag-hotthin", ad_date=IN_WINDOW, imp=200, clk=3, cost=200, conv_amt=3000)
+    priors = {"adgroup:ag-hotthin": Decimal("120.0")}
+    with patch.object(expansion_allocator.diagnosis, "correction_factor", return_value=ACTUAL_FACTOR):
+        got = expansion_allocator.allocate_expansion(
+            db, CAMPAIGN, today=TODAY, pressure=_pressure(), response_priors=priors,
+        )
+    assert got == []
+
+
+def test_allocator_deep_exception_denied_when_ratio_below_pressure(db):
+    """과열밴드 + 자기표본 충분이나 보정ROAS/BEP < 1.25(여유 불충분) → deep 불가 → 제외.
+    (BEP 이상이라 비과열이면 tier1 채택됐을 그룹이 과열밴드에선 여유 문턱 미달로 제외)."""
+    _campaign(db)
+    _adgroup(db, adgroup_id="ag-hotmid")
+    _hourly(db, adgroup_id="ag-hotmid", avg_rank=Decimal("2.0"), imp=100)
+    # 보정ROAS/BEP = (1700/1000)/1.5 = 1.1333 ∈ [1, 1.25) → ② 미충족(≥1이라 below-BEP는 아님)
+    _daily(db, adgroup_id="ag-hotmid", ad_date=IN_WINDOW, imp=100, clk=20, cost=1000, conv_amt=1700)
+    priors = {"adgroup:ag-hotmid": Decimal("120.0")}
+    with patch.object(expansion_allocator.diagnosis, "correction_factor", return_value=ACTUAL_FACTOR):
+        got = expansion_allocator.allocate_expansion(
+            db, CAMPAIGN, today=TODAY, pressure=_pressure(), response_priors=priors,
+        )
+    assert got == []
+
+
+def test_allocator_deep_exception_denied_without_slope_prior(db):
+    """과열밴드 + 자기증거 우량(ROAS/BEP≥1.25)이나 slope 프라이어 없음 → deep 불가(③) → 제외."""
+    _campaign(db)
+    _adgroup(db, adgroup_id="ag-hotnoslope")
+    _hourly(db, adgroup_id="ag-hotnoslope", avg_rank=Decimal("2.0"), imp=100)
+    _daily(db, adgroup_id="ag-hotnoslope", ad_date=IN_WINDOW, imp=100, clk=20, cost=1000, conv_amt=3000)
+    with patch.object(expansion_allocator.diagnosis, "correction_factor", return_value=ACTUAL_FACTOR):
+        got = expansion_allocator.allocate_expansion(
+            db, CAMPAIGN, today=TODAY, pressure=_pressure(), response_priors={},
+        )
+    assert got == []
+
+
+def test_allocator_deep_exception_denied_when_marginal_stop(db):
+    """과열밴드 + 자기ROAS BEP 근접(ROAS/BEP<1.1, marginal_stop 영역) → deep 불가 → 제외
+    (② 문턱 1.25가 ④ 문턱 1.1을 포함 — 근접 그룹은 어느 게이트로도 제외)."""
+    _campaign(db)
+    _adgroup(db, adgroup_id="ag-hotmarg")
+    _hourly(db, adgroup_id="ag-hotmarg", avg_rank=Decimal("2.0"), imp=100)
+    # 보정ROAS/BEP = (1600/1000)/1.5 = 1.0667 < 1.1
+    _daily(db, adgroup_id="ag-hotmarg", ad_date=IN_WINDOW, imp=100, clk=20, cost=1000, conv_amt=1600)
+    priors = {"adgroup:ag-hotmarg": Decimal("120.0")}
+    with patch.object(expansion_allocator.diagnosis, "correction_factor", return_value=ACTUAL_FACTOR):
+        got = expansion_allocator.allocate_expansion(
+            db, CAMPAIGN, today=TODAY, pressure=_pressure(), response_priors=priors,
+        )
+    assert got == []
+
+
+def test_allocator_deep_exception_denied_when_correction_unavailable(db):
+    """과열밴드 + 자기표본 충분·slope 존재이나 보정계수 unavailable(own_ratio 검증 불가)
+    → deep 불가(②) → 제외(fail-closed)."""
+    _campaign(db)
+    _adgroup(db, adgroup_id="ag-hotnofac")
+    _hourly(db, adgroup_id="ag-hotnofac", avg_rank=Decimal("2.0"), imp=100)
+    _daily(db, adgroup_id="ag-hotnofac", ad_date=IN_WINDOW, imp=100, clk=20, cost=1000, conv_amt=3000)
+    priors = {"adgroup:ag-hotnofac": Decimal("120.0")}
+    with patch.object(expansion_allocator.diagnosis, "correction_factor", return_value=UNAVAILABLE_FACTOR):
+        got = expansion_allocator.allocate_expansion(
+            db, CAMPAIGN, today=TODAY, pressure=_pressure(), response_priors=priors,
+        )
+    assert got == []
+
+
 # ══════════ P4 밴드 동적화(D-NAO-85 §4-3) — ladder_judgment/adaptive_step deep_ok ══════════
 
 def test_ladder_band_reached_deep_ok_continues_up():
