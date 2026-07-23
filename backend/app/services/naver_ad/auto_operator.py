@@ -480,11 +480,18 @@ def _check_bid_up_conditions(
     """D-NAO-48 bid_up 4조건(PLAN §3) — 하나라도 미충족이면 hold 사유 문자열, 전부
     충족이면 None(승인 가능).
 
+    ★EX 멤버십 재검증 필수 게이트(codex D-NAO-89 P1): [EX확장] 접두 bid_up **전건**(clk≥10 표준
+    clk_ok 경로 포함·폴백 필요 여부 무관)은 승인 전 08:50 최신 데이터로 allocator를 재실행한 배분
+    목록(_ex_allocation_adgroups)에 target_id가 있어야 한다 — 없으면 hold. 이전엔 clk≥10 deep/own
+    제안이 표준 clk_ok 경로를 타 이 재검증을 우회했다(과열밴드 deep 제안이 08:10 학습으로 slope
+    프라이어 무효화·deep 4조건 붕괴돼도 집행 가능한 구멍). 멤버십 재실행이 deep 4조건·CTR·tier·cap을
+    최신 데이터로 자연 재적용하므로 별도 deep 게이트를 중복 구현하지 않는다.
+
     ★P3 EX 프라이어 폴백(D-NAO-85 §4-4): rationale이 [EX확장] 접두인 bid_up에 한해, 조건②
-    (clk≥10) 미달 ∧ 조건③이 'unknown'(표본 부족)일 때 캠페인 압력 판정(expansion_mode) +
-    **allocator 멤버십 재검증**(P1 방어 심층 — 배분 목록에 이 그룹이 있어야 함)으로 ②③를 대체
-    통과시킨다. 조건③이 'below'(명시적 미달)면 폴백 불가(거부권 유지 — DOWN 비대칭 보수성).
-    조건①(스텝 클램프)·④(bleeding)는 폴백 없음. 비EX bid_up은 4조건 현행 그대로(회귀 0)."""
+    (clk≥10) 미달 ∧ 조건③이 'unknown'(표본 부족)일 때 캠페인 압력 판정(expansion_mode)으로 ②③를
+    대체 통과시킨다(멤버십 재검증은 위 필수 게이트가 clk_ok 경로와 공통 수행 — 중복 제거). 조건③이
+    'below'(명시적 미달)면 폴백 불가(거부권 유지 — DOWN 비대칭 보수성). 조건①(스텝 클램프)·
+    ④(bleeding)는 폴백 없음. 비EX bid_up은 4조건 현행 그대로(회귀 0)."""
     if p.target_bid is None:
         return "target_bid 없음 — 구조 결함(재생성 필요)"
 
@@ -524,21 +531,27 @@ def _check_bid_up_conditions(
         if status == "ok":
             # ③은 통과했으나 폴백 조건(③ unknown)이 아님 — ② 표준 hold(폴백은 ②미달∧③unknown 교집합만).
             return f"②rationale 창 클릭 부족(clk={clk})"
-        # status == "unknown" — 캠페인 프라이어 폴백(캠페인당 1회 캐시).
+        # status == "unknown" — 캠페인 프라이어 폴백(캠페인당 1회 캐시). 여기선 폴백 자격(확장 모드)만
+        # 확인하고, 멤버십 재검증은 아래 EX 필수 게이트가 clk_ok 경로와 공통으로 수행한다(중복 제거).
         pressure = _ex_campaign_pressure(db, p.campaign_id, today, ex_ctx)
         if not pressure.get("expansion_mode"):
             return (
                 f"②③ EX 프라이어 폴백 불가 — 캠페인 확장 모드 아님(clk={clk}, {pressure.get('reason')})"
             )
-        # ★P1 방어 심층: allocator 멤버십 재검증 — 08:50 최신 데이터로 재실행한 배분 목록에 이
-        # 그룹이 있어야 폴백 허용(위조 [EX확장] 태그 차단 + CTR/tier/cap 최신 재검증). 목록에
-        # 없으면 hold(태그만 믿지 않는다).
+        # 폴백 자격 통과 → ②③ skip, 아래 EX 멤버십 게이트 → ④로 진행.
+
+    # ★EX 멤버십 재검증 필수 게이트(codex D-NAO-89 P1) — [EX확장] 태그 제안 전건(clk≥10 표준 clk_ok
+    # 경로·clk<10 프라이어 폴백 경로 무관)은 승인 전 08:50 최신 데이터로 allocator를 재실행한 배분
+    # 목록에 target_id가 있어야 한다. 이전엔 clk≥10 deep/own 제안이 표준 clk_ok 경로를 타 이 재검증을
+    # 우회했다(과열밴드 deep 제안이 08:10 학습으로 slope 프라이어 무효화·deep 4조건 붕괴돼도 집행
+    # 가능한 구멍). 멤버십 재실행(_ex_allocation_adgroups=allocate_expansion 재실행)이 deep 4조건·CTR·
+    # tier·cap을 최신 데이터로 자연 재적용하므로 별도 deep 게이트를 중복 구현하지 않는다. 캠페인당 1회
+    # 캐시(ex_ctx)라 폴백 경로가 위에서 이미 pressure를 산출했으면 재실행 비용 0. 비EX 제안은 무접촉.
+    if is_ex:
+        pressure = _ex_campaign_pressure(db, p.campaign_id, today, ex_ctx)
         alloc_adgroups = _ex_allocation_adgroups(db, p.campaign_id, today, pressure, ex_ctx)
         if p.target_id not in alloc_adgroups:
-            return (
-                f"EX 멤버십 재검증 실패 — 배분 목록에 없음(target={p.target_id}, clk={clk})"
-            )
-        # 폴백 통과 → ②③ skip, ④로 진행.
+            return f"EX 멤버십 재검증 실패 — 배분 목록에 없음(target={p.target_id}, clk={clk})"
 
     # ④최신 소급채점에서 bleeding 아님(asof 신선도 포함 — codex 4R[P1]). ★폴백 없음.
     bleeding_reason = _bleeding_hold_reason(db, p.target_type, p.target_id, today)

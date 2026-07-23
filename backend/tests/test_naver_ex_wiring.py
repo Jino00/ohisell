@@ -186,6 +186,49 @@ def test_B_ex_membership_reverify_fails_holds(db):
     assert got is not None and "멤버십 재검증 실패" in got
 
 
+def test_B_ex_clk_ok_deep_membership_reverify_fails_holds(db):
+    """★D-NAO-89 P1: [EX확장] clk≥10(표준 clk_ok 경로·roas_ok 통과)이라도 08:50 재실행 배분
+    목록에 없으면 hold — deep 제안이 멤버십 재검증을 우회하던 구멍 봉쇄(08:10 학습으로 slope
+    무효화·deep 4조건 붕괴 시 과열밴드 입찰 집행 차단)."""
+    p = _ex_proposal(20)  # clk≥10 → 표준 clk_ok 경로(폴백 아님)
+    with patch.object(auto_operator, "_live_current_bid", return_value=1000), \
+         patch.object(auto_operator, "_settlement_roas_ok", return_value=(True, "ok")), \
+         patch.object(auto_operator, "_bleeding_hold_reason", return_value=None), \
+         patch.object(expansion_pressure, "judge_campaign_pressure",
+                      return_value={"expansion_mode": True, "reason": "확장", "bep_roas": Decimal("1.5")}), \
+         patch.object(auto_operator.expansion_allocator, "allocate_expansion",
+                      return_value=_alloc("ag-other")):  # 재실행 목록에 ag-1 없음(deep 4조건 붕괴)
+        got = auto_operator._check_bid_up_conditions(db, p, TODAY, ex_ctx=auto_operator._new_ex_review_ctx())
+    assert got is not None and "멤버십 재검증 실패" in got
+
+
+def test_B_ex_clk_ok_deep_membership_reverify_passes(db):
+    """[EX확장] clk≥10 + roas_ok + 재실행 배분 목록에 포함 → 승인(None). 멤버십 게이트가 최신
+    데이터로 deep 4조건·CTR·tier·cap을 자연 재적용해 통과."""
+    p = _ex_proposal(20)
+    with patch.object(auto_operator, "_live_current_bid", return_value=1000), \
+         patch.object(auto_operator, "_settlement_roas_ok", return_value=(True, "ok")), \
+         patch.object(auto_operator, "_bleeding_hold_reason", return_value=None), \
+         patch.object(expansion_pressure, "judge_campaign_pressure",
+                      return_value={"expansion_mode": True, "reason": "확장", "bep_roas": Decimal("1.5")}), \
+         patch.object(auto_operator.expansion_allocator, "allocate_expansion",
+                      return_value=_alloc("ag-1")):
+        got = auto_operator._check_bid_up_conditions(db, p, TODAY, ex_ctx=auto_operator._new_ex_review_ctx())
+    assert got is None
+
+
+def test_B_non_ex_clk_ok_no_membership_gate(db):
+    """비EX bid_up + clk≥10 + roas_ok → 승인(None)·EX 멤버십 게이트 미적용(allocate_expansion 미호출)."""
+    p = _ex_proposal(20, rationale_prefix="[bleeding_keywords]")  # 비EX 접두
+    with patch.object(auto_operator, "_live_current_bid", return_value=1000), \
+         patch.object(auto_operator, "_settlement_roas_ok", return_value=(True, "ok")), \
+         patch.object(auto_operator, "_bleeding_hold_reason", return_value=None), \
+         patch.object(auto_operator.expansion_allocator, "allocate_expansion") as m_alloc:
+        got = auto_operator._check_bid_up_conditions(db, p, TODAY, ex_ctx=auto_operator._new_ex_review_ctx())
+    assert got is None
+    m_alloc.assert_not_called()  # 비EX는 멤버십 게이트 무접촉
+
+
 def test_B_ex_below_veto_holds(db):
     """[EX확장] + ②미달 + ③below(명시적 미달) → 폴백 불가·hold(거부권 유지, 배분 재검증 전 차단)."""
     p = _ex_proposal(3)
