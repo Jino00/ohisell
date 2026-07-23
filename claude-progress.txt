@@ -2,7 +2,14 @@
 # 매 sprint 완료 시 Claude가 이 파일을 갱신합니다.
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
-## 최신 상태 (2026-07-23 09:22, 워크트리 vt34-deploy-visibility-first-7c103b) — ref 39 Jino 결정 대기 2건 확정, 기록만
+## 최신 상태 (2026-07-23 정오, 워크트리 ex-expansion-sprint-d-nao-85-707081) — ★EX 스프린트 구현·배포·스모크 합격
+- **HANDOFF: `.claude/memory/HANDOFF_ex-expansion-implemented-deployed_20260723.md`** ← 새 세션은 이 파일 먼저.
+- D-NAO-85(EX 5갈래)+D-NAO-87(예산 봉투) 전량 구현·codex 4R 통과(P1×2·P2×8 전건 수용)·**prod 배포 완료(`ca4644c`, safe_deploy CAS 전건 통과)**·read-only 라이브 스모크 합격(03/04 확장모드 True·봉투 04+10769985 3만→5만 필요·P7 첫 실행 campaigns=4). 테스트 3085 passed.
+- **잔류 라이브 관문 = 07-24 아침 첫 자동발사**(08:00 EX·봉투 제안 생성→08:50 심사·집행→change_log 실증) — 관측 전까지 "자동발사 작동" 판정 금지.
+- ★P4 밴드 동적화는 구조적 휴면(후보 게이트 상호배타 — Fable 판단: 정합적 보수성, Jino 판단 대기). ⚠️prod NAVER_SLACK_WEBHOOK_URL 미설정으로 Slack no-op — 웹훅 확인 필요.
+- 별건 chip 2: bm_benchmark 날짜 flake(task_718e0998)·일 레인 스윕 킬스위치 하드닝(task_58af2547).
+
+## (이전) 최신 상태 (2026-07-23 09:22, 워크트리 vt34-deploy-visibility-first-7c103b) — ref 39 Jino 결정 대기 2건 확정, 기록만
 - **D-NAO-87 확정(예산 봉투 개방)**: Jino "예산은 각 캠페인별로 과거 1달간의 사용 금액 대비 150%로 설정하자. 단 최저 예산은 일 5만원으로 설정하자." → 캠페인 일 예산 = max(과거30일 일평균 지출×1.5, 50,000원), auto_operate=True만 실쓰기. EX 세션 스코프에 포함.
 - **D-NAO-88 확정(KX 착수 승인)**: Jino "2. 승인." — KX(신규 키워드·그룹 생성 레인) 설계 착수 승인. EX 완료 후 별도 스프린트. 파라미터는 KX 설계에서 확정.
 - ref 39(`docs/references/39_objective_audit_20260723.md`)·트랙 파일(D-NAO-87·88) 갱신 완료. 코드 변경 0 — 다음은 여전히 EX 세션(위 D-NAO-85 착수 순서).

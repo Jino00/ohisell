@@ -152,6 +152,19 @@ expansion_allocator 입력으로 전달. auto_operator는 rationale 태그·appr
 | 4 | P4 밴드 동적화(exploration) + budget_envelope SA | Opus | pytest + codex review |
 | 5 | 전체 회귀 + 배포(safe_deploy) + 라이브 합격 | Sonnet(관측) | 원칙22 라이브 증거 |
 
+**라이브 검증 결과(2026-07-23 11:12~11:20 KST 실측)**:
+- 배포: safe_deploy 8파일 CAS 전건 통과·pm2 online·crash 0(`ca4644c`).
+- P7 스코어카드: catch-up 즉시 첫 라이브 실행 — `campaigns=4, bep_unknown=0, source=actual_revenue_ratio`.
+  ⚠️Slack은 `NAVER_SLACK_WEBHOOK_URL` 미설정으로 no-op(코드 정상, 웹훅 설정 시 활성 — 후속 확인).
+- EX 압력 read-only 스모크: 03 expansion_mode=True(roas_ratio 1.383, 보정ROAS 2.193, clk 53) /
+  04 True(1.427, 2.257, clk 50). ★§6 기대치 1.9와의 괴리는 창 차이로 해명 — §6은 원시 4일 ROAS,
+  판정은 설계대로 정착창(D-8~D-2)+보정계수. 둘 다 1.25 게이트 통과 = 확장 모드 정상 발동.
+- 예산 봉투 스모크: 03=불요(5만=5만)·04=3만→5만 필요·10769985=3만→5만 필요·10236310=불요(30만>5만)
+  — §6 실계산과 일치.
+- 시간당 레인: 재시작 후 첫 :20 정상 완주, 가드레일 생존(failed=1은 배포 전부터 동일한 기존 조건).
+- **잔류 라이브 관문(내일 아침)**: 07-24 08:00 EX·봉투 제안 첫 자동 생성 → 08:50 심사·집행 →
+  change_log·diary 실증(아래 시나리오 1~3). 첫 실쓰기 관측 전까지 "자동발사 작동"이라 말하지 않는다.
+
 **라이브 합격 시나리오(착수 전 못박음, 원칙 22)**:
 1. 배포 후 첫 08:00 크론에서 EX 판정 로그·diary 기록 발생(확장 모드 캠페인 ≥ 0건이라도 판정 자체 기록).
 2. 03 캠페인(gap 1.66 실측)이 확장 모드로 판정되고 [EX확장] 제안 생성 → 08:50 일 레인 심사 통과
@@ -188,3 +201,20 @@ expansion_allocator 입력으로 전달. auto_operator는 rationale 태그·appr
 - **캘리브레이션 확정**: EX_PRESSURE_RATIO=1.25 유지(03=1.90·04=1.67 모두 초과, 여유 있음).
   EX_MIN_CAMPAIGN_CLK=30 유지(정착창 7일 기준 03≈42·04≈33 통과 — 표본 게이트가 현실 데이터와
   정합함을 확인).
+
+## GSTACK REVIEW REPORT
+
+| Review | Trigger | Why | Runs | Status | Findings |
+|--------|---------|-----|------|--------|----------|
+| CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | — (스코프=D-NAO-85/86/87 Jino 기확정) | — |
+| Codex Review | `/codex review` | Independent 2nd opinion | 4 | CLEAR (4R AGREE-ALL) | P1×2·P2×8 전건 수용·수정 |
+| Eng Review | `/plan-eng-review` | Architecture & tests | 0 | — (설계=Fable 인라인, codex 4R로 대체 검증) | — |
+| Design Review | `/plan-design-review` | UI/UX gaps | 0 | — (UI 변경 없음) | — |
+| DX Review | `/plan-devex-review` | Developer experience | 0 | — (해당 없음) | — |
+
+**CODEX:** Phase 1 review PASS(지적 0) / Phase 2 review 1R P2×3 수용·수정 → 2R AGREE-ALL /
+Phase 3+4 challenge 1R P1×2·P2×1 수용·수정 → 2R P2×1 수정 → 3R P2×1 수정 → 4R AGREE-ALL.
+**VERDICT:** CODEX CLEARED — 배포 진행. P4 휴면(구조 판단: 정합적 보수성)·일 레인 스윕 하드닝은
+Jino 판단 대기·별건 chip.
+
+NO UNRESOLVED DECISIONS
