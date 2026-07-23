@@ -540,6 +540,30 @@ def run_naver_diary_reflection_job():
         db.close()
 
 
+def run_naver_profit_scorecard_job():
+    """P7 일일 이익 스코어카드 — profit_scorecard.run_profit_scorecard (08:40 KST, D-NAO-85/
+    ref39 P7, run_naver_diary_reflection 08:35 뒤·run_naver_wisdom 08:45 앞).
+
+    목적함수(D-NAO-59 총이익 절대액)를 캠페인별로 매일 diary+Slack 표면화한다(관찰 전용,
+    실쓰기 0). diary_reflection이 어제 일기를 해석문으로 소급 기입한 뒤 돌아야 볼트 노트가
+    같은 날짜에 정합적으로 쌓인다(reflection 08:35 → 이 잡 08:40 → wisdom 08:45 순서).
+
+    ★fail-open(관찰 전용, 집행 아님): reflection/wisdom 잡과 동일 이유로 예외를 다시 던지지
+    않는다 — 스코어카드 실패가 catch-up 체인의 집행 잡(auto_operator_daily)을 막으면 안 된다
+    (D-NAO-54 금지선과 동형: "관찰 실패가 집행을 막으면 안 됨").
+    """
+    db = _get_own_db_session()
+    try:
+        from app.services.naver_ad.profit_scorecard import run_profit_scorecard
+
+        result = run_profit_scorecard(db)
+        log.info("[스케줄러] naver profit_scorecard: %s", result)
+    except Exception as e:  # noqa: BLE001 — fail-open: 관찰 전용 잡, 집행 체인 보호(raise 없음)
+        log.exception("[스케줄러] run_naver_profit_scorecard_job 에러(fail-open): %s", e)
+    finally:
+        db.close()
+
+
 def run_naver_wisdom_job():
     """운영 일기 지혜 승격·망각층 — wisdom_loop.run_daily_wisdom (08:45 KST, D-NAO-54 P3).
 
@@ -1207,6 +1231,7 @@ def _ensure_default_states(db):
         ("run_naver_learning_loops", "10 8 * * *"),  # 학습루프 4종(성적표·예측편향·전환성숙·시간대분포, 트랙 P6)
         ("run_naver_retro_scoring", "30 8 * * *"),  # 상설 소급 채점(진단 보드 as-of 리플레이 + 페이싱 경보, D-NAO-45)
         ("run_naver_diary_reflection", "35 8 * * *"),  # 운영 일기 해석층(결과 소급 기입+해석문, D-NAO-54 P2)
+        ("run_naver_profit_scorecard", "40 8 * * *"),  # P7 일일 이익 스코어카드(목적함수 표면화, D-NAO-85/ref39 P7, 관찰 전용)
         ("run_naver_wisdom", "45 8 * * *"),  # 운영 일기 지혜 승격·망각층(후보→판사→지혜+보고→망각, D-NAO-54 P3)
         ("run_naver_vault_export", "5 9 * * *"),  # 운영 일기·지혜 Obsidian 볼트 export(열람층, D-NAO-54 P5)
         ("shopping_ad_product_sync", "45 7 * * *"),  # 쇼핑 그룹↔상품 매핑(상품 파생 target 소스, D-NAO-57 A — 07:30 BEP 뒤·08:00 제안 앞. 07:45인 이유: 07:40 검색어 잡과 SQLite 라이터 충돌 회피, 리뷰 3R P3)
@@ -1264,6 +1289,7 @@ _CATCHUP_ORDER: tuple[str, ...] = (
     "run_naver_probe_settlement",  # 08:55 (D-NAO-58 CD3 Stage 2 — 일 레인(08:50) 집행 + 어제 naver_ad_daily 정산이 끝난 뒤라야 성과 판정이 정확)
     "run_naver_probe_learning",  # 09:03 (D-NAO-58 CD4 — 재계산이라 순서 무해하나 정산(08:55) 뒤·vault(09:05) 앞 의존 명시)
     "run_naver_diary_reflection",  # 08:35 크론이지만 catch-up은 집행(08:50) *뒤*(P2 리뷰 P2-1: LLM 재시도 최대 9분이 돈 잡 복구를 지연시키면 안 됨 — 관찰 전용이라 어제/D-2/D-8 버킷은 순서 무관. fail-open은 영구 블록만 막고 지연은 못 막는다)
+    "run_naver_profit_scorecard",  # 08:40 크론이지만 catch-up은 돈 잡(08:50)·reflection 뒤(D-NAO-85/ref39 P7): reflection이 어제 일기를 소급 해석한 뒤라야 같은 날짜의 볼트 노트가 정합적이고, 관찰 전용 잡이 집행 복구를 지연시키면 안 된다. fail-open은 영구 블록만 막고 지연은 못 막는다
     "sweep_naver_keyword_hourly",  # 09:10 (D-NAO-46②, 독립 잡이나 표준 cron catch-up 포함)
     "run_naver_wisdom",  # 08:45 크론이지만 catch-up은 돈 잡(08:50)·reflection 뒤(D-NAO-54 P3): reflection이 outcome을 소급 기입해야 후보 수확 결과가 최신 + LLM 판사(최대 회당 5×재시도)가 집행 복구를 지연시키면 안 됨. 관찰·보고 전용이라 맨 뒤 배치(diary_outcome 60일 하한 내면 하루 늦어도 무관). fail-open은 영구 블록만 막고 지연은 못 막는다
     "run_naver_vault_export",  # 09:05 크론이지만 catch-up은 맨 뒤(D-NAO-54 P5): 일기·지혜를 마크다운으로 재생성하는 열람 전용 잡이라 wisdom(승격)까지 끝난 뒤에 도는 게 볼트 최신성에 맞고, 파일 IO가 집행 복구를 지연시키면 안 된다. 매 실행 전체 재생성(멱등)이라 하루 늦어도 무해. fail-open은 영구 블록만 막고 지연은 못 막는다
@@ -1381,6 +1407,7 @@ def _catch_up_morning_batch():
         "shopping_ad_product_sync": shopping_ad_product_sync_job,
         "run_naver_retro_scoring": run_naver_retro_scoring_job,
         "run_naver_diary_reflection": run_naver_diary_reflection_job,
+        "run_naver_profit_scorecard": run_naver_profit_scorecard_job,
         "run_naver_auto_operator_daily": run_naver_auto_operator_daily_job,
         "run_naver_probe_settlement": run_naver_probe_settlement_job,
         "run_naver_probe_learning": run_naver_probe_learning_job,
@@ -1434,6 +1461,7 @@ def job_func_for(job_name: str):
         "run_naver_learning_loops": run_naver_learning_loops_job,
         "run_naver_retro_scoring": run_naver_retro_scoring_job,
         "run_naver_diary_reflection": run_naver_diary_reflection_job,
+        "run_naver_profit_scorecard": run_naver_profit_scorecard_job,
         "run_naver_wisdom": run_naver_wisdom_job,
         "run_naver_vault_export": run_naver_vault_export_job,
         "sweep_naver_keyword_hourly": sweep_naver_keyword_hourly_job,
