@@ -754,22 +754,34 @@ def _run_budget_envelope_lane(
     # _DAILY_LANE_PROPOSAL_TYPES에 없어 위 leftovers sweep(codex 11R)이 안 건드린다. 오늘
     # hold분(당일 게이트·킬스위치)+이전 날 stale분을 rejected 처리해 익일 08:00 생성기가 갱신
     # 데이터로 재생성(persist pending dedup이 14일 만료까지 신규 봉투 제안을 막는 좌초 방지).
-    # 킬스위치 OFF 캠페인 제외(정지 ≠ 폐기 — 레인 시작 auto_ids ∩ 지금 재조회). ★비태그
-    # budget_up(콘솔 Confirm 대기)은 접두 필터로 절대 건드리지 않는다.
-    sweep_ids = auto_ids & _auto_operate_campaign_ids(db)
-    if not sweep_ids:
+    # 킬스위치 OFF 캠페인 제외(정지 ≠ 폐기). ★codex 3R: `auto_ids & _auto_operate_campaign_ids(db)`
+    # 는 **같은 세션 재조회**라 레인 도중 OFF 된 캠페인의 stale True를 볼 수 있다(SQLite WAL 리더는
+    # 트랜잭션 시작 스냅샷 — _auto_operate_now가 독립 커넥션을 쓰는 이유와 동일). auto_ids(레인 시작
+    # 스냅샷)로 1차 prefilter만 하고, **최종 폐기 게이트는 캠페인별 _auto_operate_now(독립 커넥션
+    # fresh 확인)**로 판정한다. ★비태그 budget_up(콘솔 Confirm 대기)은 접두 필터로 절대 안 건드린다.
+    if not auto_ids:
         return
-    leftovers = (
+    candidates_stale = (
         db.query(NaverProposal)
         .filter(
             NaverProposal.status == "pending",
             NaverProposal.proposal_type == "budget_up",
             NaverProposal.rationale.like(f"{budget_envelope.BUDGET_ENVELOPE_PREFIX}%"),
-            NaverProposal.campaign_id.in_(sweep_ids),
+            NaverProposal.campaign_id.in_(auto_ids),
             NaverProposal.created_at < day_end,
         )
         .all()
     )
+    # 최종 게이트: 캠페인별 fresh 확인(독립 커넥션) — 도중 OFF 캠페인의 pending은 폐기하지 않는다.
+    # 캠페인당 1회만 조회(dedup으로 캠페인당 leftover ≤1이나 방어적 캐시).
+    fresh_on: dict[str, bool] = {}
+
+    def _still_auto(cid: str) -> bool:
+        if cid not in fresh_on:
+            fresh_on[cid] = _auto_operate_now(db, cid)
+        return fresh_on[cid]
+
+    leftovers = [lp for lp in candidates_stale if _still_auto(lp.campaign_id)]
     for lp in leftovers:
         lp.status = "rejected"
         lp.rationale = (

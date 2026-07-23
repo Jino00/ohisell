@@ -365,6 +365,20 @@ def test_C_lane_stale_sweep_excludes_kill_switch_off(db):
     assert result["budget_rejected_stale"] == 0
 
 
+def test_C_lane_stale_sweep_fresh_gate_off_mid_run(db):
+    """★codex 3R: 레인 시작 시 auto_ids에 든 캠페인이라도 도중 OFF(_auto_operate_now False)면
+    stale [예산봉투]는 폐기 안 함 — 최종 게이트는 같은 세션 재조회가 아니라 캠페인별 fresh 확인."""
+    _settings(db)  # cmp-shop auto_operate=True → 레인 시작 auto_ids 포함
+    stale = _budget_up_proposal(db, rationale=f"{budget_envelope.BUDGET_ENVELOPE_PREFIX} stale",
+                                budget_auto_eligible=True, created_at=DAY_START_UTC - timedelta(days=2))
+    # 레인 도중 OFF 재현: _auto_operate_now가 항상 False(독립 커넥션 fresh 확인이 OFF를 봄).
+    with patch.object(auto_operator, "_auto_operate_now", return_value=False):
+        result = auto_operator.run_daily_lane(db, now=NOW)
+    db.refresh(stale)
+    assert stale.status == "pending"             # fresh 게이트 False → 스윕 제외(정지 ≠ 폐기)
+    assert result["budget_rejected_stale"] == 0
+
+
 def _envelope_change_log(db, *, campaign_id=CAMPAIGN, changed_at=NOW):
     """오늘(KST) [예산봉투] 경로 성공 update_budget 집행 1건(복리 게이트 테스트용) —
     harness _execute_update_budget 성공 행 규격(dry_run=False·after_value 존재·접두 rationale)."""
