@@ -12,9 +12,12 @@ import re
 import time
 from datetime import date, timedelta
 from decimal import Decimal
+
 from urllib.parse import urlparse, parse_qs
 
 import requests
+
+from app.utils.kst import kst_today
 
 log = logging.getLogger(__name__)
 
@@ -1055,7 +1058,9 @@ def fetch_campaign_daily_backfill(campaign_id: str, date_from: date, date_to: da
         log.warning("Naver SA 자격증명 없음 — 백필 건너뜀")
         return []
 
-    earliest = date.today() - timedelta(days=_STATS_BACKFILL_MAX_DAYS - 1)
+    # 730일 한도의 "오늘"은 네이버(KST) 기준 — 서버가 UTC라 date.today()는 KST 00~09시에
+    # 하루 전을 반환해 클램프가 한도 밖 하루를 허용, 첫 청크 호출이 범위초과로 실패할 수 있다.
+    earliest = kst_today() - timedelta(days=_STATS_BACKFILL_MAX_DAYS - 1)
     if date_from < earliest:
         log.info("Naver SA 백필 %s: 요청 시작일 %s → API 한도로 %s로 조정", campaign_id, date_from, earliest)
         date_from = earliest
