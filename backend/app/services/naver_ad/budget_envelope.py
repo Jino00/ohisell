@@ -15,13 +15,13 @@
 #     (sentinel 행 제외 = 2배 집계 함정 방지).
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy import func as sqlfunc
 from sqlalchemy.orm import Session
 
-from app.models import NaverAdDaily, NaverCampaignSettings
+from app.models import NaverAdDaily, NaverCampaignSettings, NaverChangeLog
 from app.services.naver_ad import budget_allocator
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 
@@ -64,6 +64,30 @@ def _avg_spend_30d(db: Session, campaign_id: str, today: date) -> int:
     if observed_days <= 0:
         return 0
     return int(int(total_cost) / observed_days)
+
+
+def campaigns_raised_today(db: Session, *, today: date) -> set[str]:
+    """오늘(KST) [예산봉투] 경로로 **성공 집행**된 update_budget이 있는 캠페인 집합 — 같은 날
+    복리 증액 차단(08:00 캐치업 재실행이 증액 반영 스냅샷으로 또 제안·집행하는 것 방어).
+
+    성공 판별 = dry_run=False ∧ after_value 존재(harness _execute_update_budget 성공 행 규격,
+    naver_execution_harness:1434·compute_change_cadence:394와 동일 '실제 성공한 쓰기' 필터 —
+    실패·가드거부 행은 after_value=None). [예산봉투] 경로 판별 = change_log.rationale이
+    proposal.rationale(접두 [예산봉투])을 그대로 복사하므로 접두 포함(harness:1430·1437).
+    KST 당일 = changed_at ≥ 오늘 0시(harness가 changed_at=now(KST-naive)로 기록)."""
+    today_start = datetime.combine(today, datetime.min.time())
+    rows = (
+        db.query(NaverChangeLog.campaign_id)
+        .filter(
+            NaverChangeLog.action == "update_budget",
+            NaverChangeLog.dry_run.is_(False),
+            NaverChangeLog.after_value.isnot(None),
+            NaverChangeLog.rationale.like(f"%{BUDGET_ENVELOPE_PREFIX}%"),
+            NaverChangeLog.changed_at >= today_start,
+        )
+        .all()
+    )
+    return {r[0] for r in rows}
 
 
 def compute_envelopes(db: Session, *, today: date) -> list[dict]:

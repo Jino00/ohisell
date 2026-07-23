@@ -34,7 +34,7 @@ from app.models import (
     NaverProposal,
     NaverRetroSignal,
 )
-from app.services.naver_ad import bid_rank_curve, bid_simulator, budget_envelope, campaign_target_resolver, ctr_alert, diagnosis, diary, effective_bid, exploration, expansion_pressure, gave_score, guardrail_gate, intraday_roas, naver_execution_harness, naver_sa_writer, rank_servo, slack_notifier, visibility, vitality_signal
+from app.services.naver_ad import bid_rank_curve, bid_simulator, budget_envelope, campaign_target_resolver, ctr_alert, diagnosis, diary, effective_bid, exploration, expansion_allocator, expansion_pressure, gave_score, guardrail_gate, intraday_roas, naver_execution_harness, naver_sa_writer, rank_servo, slack_notifier, visibility, vitality_signal
 from app.services.naver_ad.bid_step_types import BID_UP_TYPES, EXPLORATION_STEP_TYPES, encode_base_bid, encode_exploration_ceiling
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.services.naver_ad.guardrail_gate import _MAX_CHANGE_PCT
@@ -432,12 +432,17 @@ def _has_recent_external_stop(db: Session, target_type: str, target_id: str) -> 
     return last.action == "external_status_change"
 
 
-def _ex_campaign_pressure(
-    db: Session, campaign_id: str, today: date, cache: dict | None = None,
-) -> dict:
-    """EX 캠페인 압력 판정(P3 프라이어 폴백용, D-NAO-85 §4-4) — 제안 심사 루프에서 캠페인당
-    1회만 판정하고 캐시한다(같은 캠페인 반복 호출 금지). expansion_pressure는 auto_operator를
-    import하지 않으므로 순환 없음(모듈 상단 import)."""
+def _new_ex_review_ctx() -> dict:
+    """일 레인 EX 폴백 심사 컨텍스트(D-NAO-85 §4-4) — 캠페인당 압력·배분 1회 캐시 + 프라이어
+    lazy 로드 상태. run_daily_lane이 심사 루프 시작 시 1개 생성해 _check_bid_up_conditions에
+    넘긴다(반복 호출·재로드 금지)."""
+    return {"pressure": {}, "alloc": {}, "priors": None, "priors_loaded": False}
+
+
+def _ex_campaign_pressure(db: Session, campaign_id: str, today: date, ex_ctx: dict | None) -> dict:
+    """EX 캠페인 압력 판정(P3 프라이어 폴백용) — 캠페인당 1회 캐시. expansion_pressure는
+    auto_operator를 import하지 않으므로 순환 없음(모듈 상단 import)."""
+    cache = ex_ctx["pressure"] if ex_ctx is not None else None
     if cache is not None and campaign_id in cache:
         return cache[campaign_id]
     pressure = expansion_pressure.judge_campaign_pressure(db, campaign_id, today=today)
@@ -446,16 +451,40 @@ def _ex_campaign_pressure(
     return pressure
 
 
+def _ex_allocation_adgroups(
+    db: Session, campaign_id: str, today: date, pressure: dict, ex_ctx: dict | None,
+) -> set[str]:
+    """★P1 방어 심층(codex 적대 리뷰): [EX확장] 태그를 텍스트로만 믿지 않고, 08:50 심사 시각의
+    최신 데이터로 expansion_allocator.allocate_expansion을 캠페인당 1회 재실행해 배분 목록
+    (adgroup_id 집합)을 얻는다 — 폴백은 제안의 target_id가 이 목록에 있을 때만 허용한다(위조
+    태그 차단 + CTR/tier/cap을 최신 데이터로 재검증하는 이중 효과). response_priors는 폴백
+    후보가 실제 존재할 때(이 함수 최초 호출 시) 1회만 lazy 로드한다(N+1·불필요 로드 회피)."""
+    cache = ex_ctx["alloc"] if ex_ctx is not None else {}
+    if campaign_id in cache:
+        return cache[campaign_id]
+    if ex_ctx is not None and not ex_ctx.get("priors_loaded"):
+        ex_ctx["priors"] = bid_rank_curve.load_response_priors(db)
+        ex_ctx["priors_loaded"] = True
+    priors = ex_ctx.get("priors") if ex_ctx is not None else None
+    allocations = expansion_allocator.allocate_expansion(
+        db, campaign_id, today=today, pressure=pressure, response_priors=priors,
+    )
+    adgroups = {a["adgroup_id"] for a in allocations}
+    cache[campaign_id] = adgroups
+    return adgroups
+
+
 def _check_bid_up_conditions(
-    db: Session, p: NaverProposal, today: date, *, pressure_cache: dict | None = None,
+    db: Session, p: NaverProposal, today: date, *, ex_ctx: dict | None = None,
 ) -> str | None:
     """D-NAO-48 bid_up 4조건(PLAN §3) — 하나라도 미충족이면 hold 사유 문자열, 전부
     충족이면 None(승인 가능).
 
     ★P3 EX 프라이어 폴백(D-NAO-85 §4-4): rationale이 [EX확장] 접두인 bid_up에 한해, 조건②
-    (clk≥10) 미달 ∧ 조건③이 'unknown'(표본 부족)일 때 캠페인 압력 판정(expansion_mode)으로
-    ②③를 대체 통과시킨다. 조건③이 'below'(명시적 미달)면 폴백 불가(거부권 유지 — DOWN 비대칭
-    보수성). 조건①(스텝 클램프)·④(bleeding)는 폴백 없음. 비EX bid_up은 4조건 현행 그대로(회귀 0)."""
+    (clk≥10) 미달 ∧ 조건③이 'unknown'(표본 부족)일 때 캠페인 압력 판정(expansion_mode) +
+    **allocator 멤버십 재검증**(P1 방어 심층 — 배분 목록에 이 그룹이 있어야 함)으로 ②③를 대체
+    통과시킨다. 조건③이 'below'(명시적 미달)면 폴백 불가(거부권 유지 — DOWN 비대칭 보수성).
+    조건①(스텝 클램프)·④(bleeding)는 폴백 없음. 비EX bid_up은 4조건 현행 그대로(회귀 0)."""
     if p.target_bid is None:
         return "target_bid 없음 — 구조 결함(재생성 필요)"
 
@@ -496,10 +525,18 @@ def _check_bid_up_conditions(
             # ③은 통과했으나 폴백 조건(③ unknown)이 아님 — ② 표준 hold(폴백은 ②미달∧③unknown 교집합만).
             return f"②rationale 창 클릭 부족(clk={clk})"
         # status == "unknown" — 캠페인 프라이어 폴백(캠페인당 1회 캐시).
-        pressure = _ex_campaign_pressure(db, p.campaign_id, today, pressure_cache)
+        pressure = _ex_campaign_pressure(db, p.campaign_id, today, ex_ctx)
         if not pressure.get("expansion_mode"):
             return (
                 f"②③ EX 프라이어 폴백 불가 — 캠페인 확장 모드 아님(clk={clk}, {pressure.get('reason')})"
+            )
+        # ★P1 방어 심층: allocator 멤버십 재검증 — 08:50 최신 데이터로 재실행한 배분 목록에 이
+        # 그룹이 있어야 폴백 허용(위조 [EX확장] 태그 차단 + CTR/tier/cap 최신 재검증). 목록에
+        # 없으면 hold(태그만 믿지 않는다).
+        alloc_adgroups = _ex_allocation_adgroups(db, p.campaign_id, today, pressure, ex_ctx)
+        if p.target_id not in alloc_adgroups:
+            return (
+                f"EX 멤버십 재검증 실패 — 배분 목록에 없음(target={p.target_id}, clk={clk})"
             )
         # 폴백 통과 → ②③ skip, ④로 진행.
 
@@ -675,8 +712,22 @@ def _run_budget_envelope_lane(
         .order_by(NaverProposal.id.asc())
         .all()
     )
+    # ★P2 KST 당일 1회 게이트(복리 차단, codex 적대 리뷰) — 승인 전 재확인(생성 단계 skip과
+    # 이중 게이트). 이번 런에서 성공 집행한 캠페인도 즉시 추가해 같은 런 내 중복도 막는다.
+    raised_today = budget_envelope.campaigns_raised_today(db, today=now.date())
     for p in candidates:
         result["budget_reviewed"] += 1
+        if p.campaign_id in raised_today:
+            hold_reason = (
+                "예산 봉투 KST 당일 1회 게이트 — 오늘 이미 봉투 증액 성공 집행됨(복리 차단)"
+            )
+            result["held"].append({"id": p.id, "reason": hold_reason})
+            _record_blocked(
+                db, campaign_id=p.campaign_id, actor=diary.ACTOR_DAILY, reason=hold_reason,
+                now=now, target_type=p.target_type, target_id=p.target_id,
+                adgroup_id=p.adgroup_id, action=p.proposal_type,
+            )
+            continue
         # 킬스위치 실행 직전 재확인(일 레인 실행형과 동일 계약).
         if not _auto_operate_now(db, p.campaign_id):
             hold_reason = "킬스위치 OFF — auto_operate=False(예산 봉투 실행 직전 재확인)"
@@ -694,6 +745,7 @@ def _run_budget_envelope_lane(
         try:
             naver_execution_harness.execute(db, p.id, dry_run=False, now=now)
             result["budget_executed"] += 1
+            raised_today.add(p.campaign_id)  # 같은 런 내 복리 차단(성공 집행분 즉시 반영)
         except Exception as e:  # noqa: BLE001 — harness가 change_log/상태를 이미 확정(failed 등)
             result["budget_failed"] += 1
             log.warning("auto_operator: 예산 봉투 실행 실패 proposal_id=%s: %s", p.id, e)
@@ -735,8 +787,8 @@ def run_daily_lane(db: Session, *, now: datetime | None = None) -> dict:
     if not auto_ids:
         return result
 
-    # P3 EX 프라이어 폴백(D-NAO-85 §4-4) — 캠페인당 압력 판정 1회 캐시(반복 호출 금지).
-    ex_pressure_cache: dict = {}
+    # P3 EX 프라이어 폴백(D-NAO-85 §4-4) — 캠페인당 압력·배분 1회 캐시 + 프라이어 lazy 로드.
+    ex_ctx = _new_ex_review_ctx()
 
     candidates = (
         db.query(NaverProposal)
@@ -770,7 +822,7 @@ def run_daily_lane(db: Session, *, now: datetime | None = None) -> dict:
             continue
 
         if p.proposal_type == "bid_up":
-            hold_reason = _check_bid_up_conditions(db, p, today, pressure_cache=ex_pressure_cache)
+            hold_reason = _check_bid_up_conditions(db, p, today, ex_ctx=ex_ctx)
             if hold_reason:
                 result["held"].append({"id": p.id, "reason": hold_reason})
                 _record_blocked(

@@ -761,7 +761,10 @@ def run_budget_envelope_stage(db: Session, *, today: date | None = None) -> int:
     round_envelope) 로직에 태워 캡 존속. **자동 감액 없음**(needs_raise만 대상). 반환: persist 수."""
     today = today if today is not None else kst_today()
     envelopes = budget_envelope.compute_envelopes(db, today=today)
-    raises = [e for e in envelopes if e.get("needs_raise")]
+    # KST 당일 1회 게이트(복리 차단) — 오늘 이미 [예산봉투] 증액을 성공 집행한 캠페인은 제안 생성
+    # skip(08:00 캐치업 재실행 방어). 일 레인 자동 심사에도 동일 재확인(이중 게이트).
+    raised_today = budget_envelope.campaigns_raised_today(db, today=today)
+    raises = [e for e in envelopes if e.get("needs_raise") and e["campaign_id"] not in raised_today]
     if not raises:
         return 0
     deltas: list[tuple[int, dict]] = []
@@ -775,6 +778,55 @@ def run_budget_envelope_stage(db: Session, *, today: date | None = None) -> int:
     saved = proposal_writer.persist(db, proposals)
     db.commit()
     return len(saved)
+
+
+def _notify_ex_budget(db: Session, *, ex_n: int, budget_n: int) -> None:
+    """EX 확장·예산 봉투 제안 요약 Slack 1건 통지(D-NAO-85·87, codex P2 — 두 스테이지가
+    slack_notifier.notify(기존 제안 요약)보다 늦게 돌아 기존 통지에서 누락됐다). 0건이면 통지
+    생략. fail-open(통지 실패가 파이프라인을 죽이지 않는다). 요약은 오늘(KST) 생성된 태그
+    제안(created_at ≥ KST 오늘 0시를 UTC 환산)만 집계 — [[sqlite-server-default-now-is-utc]]."""
+    if ex_n <= 0 and budget_n <= 0:
+        return
+    try:
+        today_start_utc = datetime.combine(kst_today(), datetime.min.time()) - timedelta(hours=9)
+        lines = ["[EX 확장 스프린트 08:00 생성] (D-NAO-85·87)"]
+        if ex_n > 0:
+            ex_rows = (
+                db.query(NaverProposal.campaign_id, NaverProposal.target_id)
+                .filter(
+                    NaverProposal.proposal_type == "bid_up",
+                    NaverProposal.status == "pending",
+                    NaverProposal.rationale.like(f"%{expansion_pressure.EX_RATIONALE_PREFIX}%"),
+                    NaverProposal.created_at >= today_start_utc,
+                )
+                .order_by(NaverProposal.campaign_id.asc(), NaverProposal.target_id.asc())
+                .all()
+            )
+            by_campaign: dict[str, list[str]] = {}
+            for cid, tid in ex_rows:
+                by_campaign.setdefault(cid, []).append(tid)
+            lines.append(f"확장 압력 UP 제안 {ex_n}건:")
+            for cid, groups in by_campaign.items():
+                more = "…" if len(groups) > 5 else ""
+                lines.append(f"  - {cid}: 그룹 {len(groups)}개({', '.join(groups[:5])}{more})")
+        if budget_n > 0:
+            bud_rows = (
+                db.query(NaverProposal.campaign_id, NaverProposal.target_budget)
+                .filter(
+                    NaverProposal.proposal_type == "budget_up",
+                    NaverProposal.status == "pending",
+                    NaverProposal.rationale.like(f"%{budget_envelope.BUDGET_ENVELOPE_PREFIX}%"),
+                    NaverProposal.created_at >= today_start_utc,
+                )
+                .order_by(NaverProposal.campaign_id.asc())
+                .all()
+            )
+            lines.append(f"예산 봉투 증액 제안 {budget_n}건:")
+            for cid, tb in bud_rows:
+                lines.append(f"  - {cid}: 목표 일예산 {tb}원")
+        slack_notifier.notify_text("\n".join(lines), log_label="EX 확장·예산 봉투 제안")
+    except Exception as e:  # noqa: BLE001 — 통지 실패는 파이프라인 무영향(fail-open)
+        log.warning("proposal_pipeline: EX·봉투 Slack 통지 실패(fail-open): %s", e)
 
 
 def run_daily(db: Session, *, lookback_days: int = 15) -> dict:
@@ -950,5 +1002,9 @@ def run_daily(db: Session, *, lookback_days: int = 15) -> dict:
         log.exception("proposal_pipeline 예산 봉투 단계 실패(fail-open): %s", e)
         result["stage_status"]["budget_envelope"] = "failed"
         result["errors"].append(f"budget_envelope: {e}")
+
+    # EX·봉투 제안 Slack 통지(codex P2) — 두 스테이지 완료 후 전용 1건(기존 slack 스테이지는
+    # 이 두 스테이지보다 먼저 돌아 누락). 0건이면 생략·fail-open(내부 처리).
+    _notify_ex_budget(db, ex_n=result["ex_generated"], budget_n=result["budget_envelope_generated"])
 
     return result

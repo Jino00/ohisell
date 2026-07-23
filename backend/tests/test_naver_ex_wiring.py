@@ -16,7 +16,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.database import Base
 from app.models import (
-    NaverAdDaily, NaverCampaignSettings, NaverEntity, NaverHourlySnapshot,
+    NaverAdDaily, NaverCampaignSettings, NaverChangeLog, NaverEntity, NaverHourlySnapshot,
     NaverKeywordHourly, NaverProposal, OpsDiaryEntry,
 )
 from app.services.naver_ad import (
@@ -152,25 +152,47 @@ def _ex_proposal(clk, *, rationale_prefix=expansion_pressure.EX_RATIONALE_PREFIX
     )
 
 
+def _alloc(*adgroup_ids):
+    return [{"adgroup_id": aid, "rank_tier": 1, "own_clk": 3, "judged_by": "campaign_prior",
+             "marginal_stop": False, "reason": "x", "weighted_rank": Decimal("3.0")}
+            for aid in adgroup_ids]
+
+
 def test_B_ex_unknown_prior_fallback_passes(db):
-    """[EX확장] + ②미달(clk<10) + ③unknown + 확장모드 → 폴백 통과(None)."""
+    """[EX확장] + ②미달(clk<10) + ③unknown + 확장모드 + 배분 목록에 포함 → 폴백 통과(None)."""
     p = _ex_proposal(3)
     with patch.object(auto_operator, "_live_current_bid", return_value=1000), \
          patch.object(auto_operator, "_settlement_roas_status", return_value=("unknown", "표본 부족")), \
          patch.object(auto_operator, "_bleeding_hold_reason", return_value=None), \
          patch.object(expansion_pressure, "judge_campaign_pressure",
-                      return_value={"expansion_mode": True, "reason": "확장"}):
-        got = auto_operator._check_bid_up_conditions(db, p, TODAY, pressure_cache={})
+                      return_value={"expansion_mode": True, "reason": "확장", "bep_roas": Decimal("1.5"),
+                                    "roas_ratio": Decimal("2.0")}), \
+         patch.object(auto_operator.expansion_allocator, "allocate_expansion", return_value=_alloc("ag-1")):
+        got = auto_operator._check_bid_up_conditions(db, p, TODAY, ex_ctx=auto_operator._new_ex_review_ctx())
     assert got is None
 
 
+def test_B_ex_membership_reverify_fails_holds(db):
+    """★P1: [EX확장] + 확장모드지만 08:50 재실행 배분 목록에 이 그룹이 없으면 → hold(태그만 안 믿음)."""
+    p = _ex_proposal(3)
+    with patch.object(auto_operator, "_live_current_bid", return_value=1000), \
+         patch.object(auto_operator, "_settlement_roas_status", return_value=("unknown", "표본 부족")), \
+         patch.object(auto_operator, "_bleeding_hold_reason", return_value=None), \
+         patch.object(expansion_pressure, "judge_campaign_pressure",
+                      return_value={"expansion_mode": True, "reason": "확장", "bep_roas": Decimal("1.5")}), \
+         patch.object(auto_operator.expansion_allocator, "allocate_expansion",
+                      return_value=_alloc("ag-other")):  # 배분 목록에 ag-1 없음(위조 태그/탈락)
+        got = auto_operator._check_bid_up_conditions(db, p, TODAY, ex_ctx=auto_operator._new_ex_review_ctx())
+    assert got is not None and "멤버십 재검증 실패" in got
+
+
 def test_B_ex_below_veto_holds(db):
-    """[EX확장] + ②미달 + ③below(명시적 미달) → 폴백 불가·hold(거부권 유지)."""
+    """[EX확장] + ②미달 + ③below(명시적 미달) → 폴백 불가·hold(거부권 유지, 배분 재검증 전 차단)."""
     p = _ex_proposal(3)
     with patch.object(auto_operator, "_live_current_bid", return_value=1000), \
          patch.object(auto_operator, "_settlement_roas_status", return_value=("below", "보정ROAS<목표")), \
          patch.object(auto_operator, "_bleeding_hold_reason", return_value=None):
-        got = auto_operator._check_bid_up_conditions(db, p, TODAY, pressure_cache={})
+        got = auto_operator._check_bid_up_conditions(db, p, TODAY, ex_ctx=auto_operator._new_ex_review_ctx())
     assert got is not None and got.startswith("③")
 
 
@@ -182,7 +204,7 @@ def test_B_ex_unknown_but_not_expansion_holds(db):
          patch.object(auto_operator, "_bleeding_hold_reason", return_value=None), \
          patch.object(expansion_pressure, "judge_campaign_pressure",
                       return_value={"expansion_mode": False, "reason": "갭 부족"}):
-        got = auto_operator._check_bid_up_conditions(db, p, TODAY, pressure_cache={})
+        got = auto_operator._check_bid_up_conditions(db, p, TODAY, ex_ctx=auto_operator._new_ex_review_ctx())
     assert got is not None and "폴백 불가" in got
 
 
@@ -191,7 +213,7 @@ def test_B_non_ex_unknown_regression_holds(db):
     p = _ex_proposal(3, rationale_prefix="[bleeding_keywords]")  # 비EX 접두
     with patch.object(auto_operator, "_live_current_bid", return_value=1000), \
          patch.object(auto_operator, "_settlement_roas_status") as m_status:
-        got = auto_operator._check_bid_up_conditions(db, p, TODAY, pressure_cache={})
+        got = auto_operator._check_bid_up_conditions(db, p, TODAY, ex_ctx=auto_operator._new_ex_review_ctx())
     assert got is not None and got.startswith("②")
     m_status.assert_not_called()  # 비EX·clk 미달은 ③ 판정 전 즉시 hold
 
@@ -308,6 +330,71 @@ def test_C_lane_auto_approves_tagged_only(db):
     assert tagged.status == "approved"
     assert untagged.status == "pending"  # 비태그 = Confirm 전용 불변
     assert overcap.status == "pending"   # 라운드캡 초과분 = Confirm 대기(캡 존속)
+
+
+def _envelope_change_log(db, *, campaign_id=CAMPAIGN, changed_at=NOW):
+    """오늘(KST) [예산봉투] 경로 성공 update_budget 집행 1건(복리 게이트 테스트용) —
+    harness _execute_update_budget 성공 행 규격(dry_run=False·after_value 존재·접두 rationale)."""
+    db.add(NaverChangeLog(
+        entity_type="campaign", entity_id=campaign_id, campaign_id=campaign_id,
+        action="update_budget", rationale=f"{budget_envelope.BUDGET_ENVELOPE_PREFIX} 봉투 램프",
+        dry_run=False, after_value='{"dailyBudget": 50000}', changed_at=changed_at, executed_at=changed_at,
+    ))
+    db.commit()
+
+
+def test_C_stage_skips_when_raised_today(db):
+    """★P2 복리 차단(생성 단계): 오늘 이미 [예산봉투] 성공 집행 → 제안 생성 skip(0건)."""
+    _settings(db)
+    _snapshot(db, daily_budget=30000)
+    _seed_30d_spend(db, per_day_cost=8115, days=1)
+    _envelope_change_log(db, changed_at=NOW)  # 오늘 이미 성공 집행
+    assert proposal_pipeline.run_budget_envelope_stage(db, today=TODAY) == 0
+
+
+def test_C_lane_kst_daily_gate_holds(db):
+    """★P2 복리 차단(일 레인 이중 게이트): 오늘 이미 성공 집행된 캠페인의 [예산봉투] pending은 hold."""
+    _settings(db)
+    tagged = _budget_up_proposal(db, rationale=f"{budget_envelope.BUDGET_ENVELOPE_PREFIX} 봉투 램프",
+                                 budget_auto_eligible=True)
+    _envelope_change_log(db, changed_at=NOW)
+    with patch.object(auto_operator, "_auto_operate_now", return_value=True), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as m_exec:
+        result = auto_operator.run_daily_lane(db, now=NOW)
+    assert result["budget_reviewed"] == 1
+    assert result["budget_approved"] == 0
+    m_exec.assert_not_called()
+    db.refresh(tagged)
+    assert tagged.status == "pending"  # 복리 게이트로 hold
+
+
+# ═══════════════════════ Slack 통지(codex P2) ═══════════════════════
+
+def test_slack_notify_emits_when_nonzero(db):
+    """EX/봉투 제안이 있으면 전용 notify_text 1건(요약)."""
+    sent = []
+    with patch.object(proposal_pipeline.slack_notifier, "notify_text",
+                      side_effect=lambda text, **kw: sent.append(text)):
+        proposal_pipeline._notify_ex_budget(db, ex_n=2, budget_n=1)
+    assert len(sent) == 1
+    assert "확장 압력 UP 제안 2건" in sent[0]
+    assert "예산 봉투 증액 제안 1건" in sent[0]
+
+
+def test_slack_notify_skips_when_zero(db):
+    """EX·봉투 둘 다 0건이면 통지 생략."""
+    sent = []
+    with patch.object(proposal_pipeline.slack_notifier, "notify_text",
+                      side_effect=lambda text, **kw: sent.append(text)):
+        proposal_pipeline._notify_ex_budget(db, ex_n=0, budget_n=0)
+    assert sent == []
+
+
+def test_slack_notify_fail_open(db):
+    """통지 실패는 파이프라인을 죽이지 않는다(fail-open — 예외 삼킴)."""
+    with patch.object(proposal_pipeline.slack_notifier, "notify_text",
+                      side_effect=RuntimeError("slack down")):
+        proposal_pipeline._notify_ex_budget(db, ex_n=1, budget_n=0)  # 예외 전파 안 됨
 
 
 # ═══════════════════════ D. deep_ok 산출(_deep_expansion_ok) ═══════════════════════
