@@ -38,6 +38,11 @@ from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 _SETTLEMENT_WINDOW_START_DAYS = 8  # 출처: auto_operator._SETTLEMENT_WINDOW_START_DAYS
 _SETTLEMENT_WINDOW_END_DAYS = 2    # 출처: auto_operator._SETTLEMENT_WINDOW_END_DAYS
 
+# rationale 접두(D-NAO-85) — EX 확장 배분이 만든 bid_up 제안의 태그. 일 레인 P3 프라이어 폴백
+# (auto_operator._check_bid_up_conditions)과 P4 배선이 이 접두로 EX 제안만 식별한다(비EX 회귀 0).
+# 단일 진실 소스(proposal_pipeline 생성·auto_operator 판정이 공유 import).
+EX_RATIONALE_PREFIX = "[EX확장]"
+
 # ── 판정 상수(PLAN §4-2·§6 캘리브레이션 확정) ──
 # 표본 게이트 — 정착창 7일 캠페인 클릭 하한(캠페인 질량 근거). §6 실측: 03≈42·04≈33 통과.
 EX_MIN_CAMPAIGN_CLK = 30

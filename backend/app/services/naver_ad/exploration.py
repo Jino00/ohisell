@@ -122,7 +122,7 @@ def _apply_bm_anchor(target: Decimal, current_bid: int, bm_prior: int | None) ->
 
 def adaptive_step(
     current_bid: int, current_rank, target_band: tuple, last_step: dict | None, cap_pct: Decimal,
-    *, bm_prior: int | None = None,
+    *, bm_prior: int | None = None, deep_ok: bool = False,
 ) -> int | None:
     """순위 목표형 적응 스텝(순수·PLAN §1 가드1, D-NAO-71 19:01 교정) — 목표 밴드까지 **필요한
     만큼만** 상향해 최소 입찰로 밴드에 진입시킨다(눈먼 % 상향 금지).
@@ -171,9 +171,18 @@ def adaptive_step(
 
     cr = Decimal(str(current_rank))
     band_high_d = Decimal(str(band_high))
-    # ③ 이미 밴드 내(도달) — 상향 안 함(상향 정지·관측은 ladder_judgment 몫).
+    # ③ 이미 밴드 내(도달) — 기본은 상향 안 함(상향 정지·관측은 ladder_judgment 몫).
     if cr <= band_high_d:
-        return None
+        if not deep_ok:
+            return None
+        # ★P4 밴드 동적화(D-NAO-85 §4-3): 자기 표본·보정ROAS·slope 증거가 충분한 그룹(deep_ok)은
+        # 밴드 내(2.5 상단 포함)에서도 상향 지속(정적 밴드 천장 해제 = 한계 ROAS→BEP 동적 경계).
+        # 보수 소폭(first_step_pct)만 — cap_bid(30% 상한)·경제성 상한(호출측 min 클램프)이 최종
+        # 브레이크. bm_prior 앵커는 미적용(콜드 시드용 — deep_ok는 증거 보유 구간). allow_min_
+        # increment=True로 저입찰대 스텝 소실 방지(deep_ok는 2.5 하향 진입이 의도이므로 오버슈트
+        # 우려가 정적 경계와 반대다).
+        target = Decimal(current_bid) * (Decimal(1) + _EXPLORATION_FIRST_STEP_PCT)
+        return _finalize_step(target, current_bid, cap_bid, allow_min_increment=True)
 
     delta_needed = cr - band_high_d  # 밴드 하단까지 필요한 순위 개선폭(>0)
 
@@ -537,7 +546,7 @@ def exploration_trigger(
 def ladder_judgment(
     last_probe: dict | None, since_step_stats: dict, ceiling: int, current_bid: int,
     *, recent_flow_clk: int = 0, settled_clk: int = 0, flow_available: bool = True,
-    evidence_active: bool | None = None,
+    evidence_active: bool | None = None, deep_ok: bool = False,
 ) -> tuple[str, str]:
     """사이클 래더 판정(순수·PLAN §1 가드4, D-NAO-71 18:56+19:01) — **순위 피드백 상태 기계**.
     매 탐색 사이클(≥2h)마다 직전 스텝 이후의 순위·클릭으로 다음 수를 정한다(D+1 고정 아님).
@@ -615,13 +624,24 @@ def ladder_judgment(
     if rank is not None:
         r = Decimal(str(rank))
         # ② 과열밴드(rank≤2.5)인데 클릭0 지속 → 순위 병리 아님(소재/관련성) 진단 종료.
+        # ★P4 밴드 동적화(D-NAO-85 §4-3): deep_ok(자기 표본·보정ROAS·slope 증거 충분)면 정적
+        # 2.5 천장을 해제하고 상향 지속 — 경제성 상한이 유일 브레이크(한계 ROAS→BEP 동적 경계).
         if r <= _EXPLORATION_BAND_LOW:
+            if deep_ok:
+                if current_bid >= ceiling:
+                    return ("capped", f"과열밴드 deep 확장이나 경제성 상한 도달(현 {current_bid}≥상한 {ceiling}) — 종료")
+                return ("step_up", f"순위 {float(r):.2f}≤{_EXPLORATION_BAND_LOW}·무클릭이나 deep 확장(자기 ROAS·slope 증거) — 정적 밴드 해제 상향(D-NAO-85 §4-3)")
             return (
                 "not_rank",
                 f"순위 {float(r):.2f}≤{_EXPLORATION_BAND_LOW}인데 클릭0 지속 — 순위 병리 아님(소재/관련성) 진단 종료",
             )
         # ③ 밴드 도달(2.5<rank≤4)·무클릭 → 상향 정지·관측(과열밴드 진입 금지).
+        # ★P4 밴드 동적화(D-NAO-85 §4-3): deep_ok면 밴드 도달 정지 대신 상향 지속(상한이 브레이크).
         if r <= _EXPLORATION_BAND_HIGH:
+            if deep_ok:
+                if current_bid >= ceiling:
+                    return ("capped", f"밴드 deep 확장이나 경제성 상한 도달(현 {current_bid}≥상한 {ceiling}) — 종료")
+                return ("step_up", f"밴드 도달(순위 {float(r):.2f}≤{_EXPLORATION_BAND_HIGH})·무클릭이나 deep 확장(자기 ROAS·slope 증거) — 밴드 지속 상향(D-NAO-85 §4-3)")
             return (
                 "stop_observe",
                 f"밴드 도달(순위 {float(r):.2f}≤{_EXPLORATION_BAND_HIGH})·무클릭 — 상향 정지·클릭 흐름 관측(과열밴드 진입 금지)",

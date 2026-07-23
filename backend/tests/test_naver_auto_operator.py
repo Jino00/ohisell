@@ -126,7 +126,9 @@ def test_daily_lane_reviews_nothing_when_no_auto_operate_campaign(db):
     _proposal(db)  # NaverCampaignSettings 행 자체 없음(auto_operate 기본 False 취급)
     result = auto_operator.run_daily_lane(db, now=NOW)
     assert result == {"reviewed": 0, "approved": 0, "executed": 0, "held": [], "failed": 0,
-                      "rejected_stale": 0}
+                      "rejected_stale": 0,
+                      "budget_reviewed": 0, "budget_approved": 0, "budget_executed": 0,
+                      "budget_failed": 0}
 
 
 def test_daily_lane_ignores_non_auto_operate_campaign(db):

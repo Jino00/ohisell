@@ -389,3 +389,50 @@ def test_allocator_untiered_group_excluded(db):
     with patch.object(expansion_allocator.diagnosis, "correction_factor", return_value=ACTUAL_FACTOR):
         got = expansion_allocator.allocate_expansion(db, CAMPAIGN, today=TODAY, pressure=_pressure())
     assert got == []
+
+
+# ══════════ P4 밴드 동적화(D-NAO-85 §4-3) — ladder_judgment/adaptive_step deep_ok ══════════
+
+def test_ladder_band_reached_deep_ok_continues_up():
+    """밴드 도달(2.5<rank≤4)·무클릭·deep_ok=True → step_up(정적 밴드 해제). deep_ok=False → stop_observe(회귀)."""
+    since = {"clk": 0, "imp": 100, "cost": 500, "avg_rank": Decimal("3.0")}
+    probe = {"bid": 100, "rank": Decimal("4.5")}
+    v_deep, _ = exploration.ladder_judgment(probe, since, ceiling=1000, current_bid=100, deep_ok=True)
+    v_static, _ = exploration.ladder_judgment(probe, since, ceiling=1000, current_bid=100, deep_ok=False)
+    assert v_deep == "step_up"
+    assert v_static == "stop_observe"
+
+
+def test_ladder_overheated_deep_ok_continues_up():
+    """과열밴드(rank≤2.5)·무클릭·deep_ok=True → step_up. deep_ok=False → not_rank(회귀)."""
+    since = {"clk": 0, "imp": 100, "cost": 500, "avg_rank": Decimal("2.0")}
+    probe = {"bid": 100, "rank": Decimal("3.0")}
+    v_deep, _ = exploration.ladder_judgment(probe, since, ceiling=1000, current_bid=100, deep_ok=True)
+    v_static, _ = exploration.ladder_judgment(probe, since, ceiling=1000, current_bid=100, deep_ok=False)
+    assert v_deep == "step_up"
+    assert v_static == "not_rank"
+
+
+def test_ladder_deep_ok_capped_when_ceiling_reached():
+    """deep_ok=True여도 경제성 상한 도달(current≥ceiling)이면 capped(상한이 유일 브레이크)."""
+    since = {"clk": 0, "imp": 100, "cost": 500, "avg_rank": Decimal("3.0")}
+    probe = {"bid": 100, "rank": Decimal("4.5")}
+    v, _ = exploration.ladder_judgment(probe, since, ceiling=100, current_bid=100, deep_ok=True)
+    assert v == "capped"
+
+
+def test_ladder_deep_ok_does_not_override_click_handoff():
+    """clk>0(증거 확보)은 deep_ok여도 stop_observe 유지(밴드 도달 정지 분기만 해제)."""
+    since = {"clk": 3, "imp": 100, "cost": 500, "avg_rank": Decimal("3.0")}
+    probe = {"bid": 100, "rank": Decimal("4.5")}
+    v, _ = exploration.ladder_judgment(probe, since, ceiling=1000, current_bid=100, deep_ok=True)
+    assert v == "stop_observe"
+
+
+def test_adaptive_step_in_band_deep_ok_steps_up():
+    """밴드 내(rank≤band_high)에서 deep_ok=True → 상향 스텝 산출, deep_ok=False → None(회귀)."""
+    band = exploration._EXPLORATION_TARGET_BAND
+    got_deep = exploration.adaptive_step(1000, Decimal("3.0"), band, None, Decimal("0.30"), deep_ok=True)
+    got_static = exploration.adaptive_step(1000, Decimal("3.0"), band, None, Decimal("0.30"), deep_ok=False)
+    assert got_static is None
+    assert got_deep is not None and got_deep > 1000

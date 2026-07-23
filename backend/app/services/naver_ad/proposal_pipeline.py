@@ -18,11 +18,21 @@ from app.models import (
 )
 from app.services import naver_sa_ad_fetcher as fetcher
 from app.services.naver_ad import (
-    anomaly_feed, bid_simulator, budget_allocator, campaign_target_resolver, diagnosis, gave_score,
-    growth_sweeper, proposal_writer, retro_snapshotter, slack_notifier, trigger_watch,
+    anomaly_feed, bid_rank_curve, bid_simulator, budget_allocator, budget_envelope,
+    campaign_target_resolver, diagnosis, diary, expansion_allocator, expansion_pressure,
+    gave_score, growth_sweeper, proposal_writer, retro_snapshotter, slack_notifier, trigger_watch,
 )
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
+# EX bid_up 스텝 상수(생성 단계 클램프) — 실행 가드레일과 단일 진실 소스(하드코딩 중복 금지).
+from app.services.naver_ad.guardrail_gate import _MAX_CHANGE_PCT
 from app.utils.kst import kst_today
+
+# EX bid_up 유효 입찰가 규격(쇼핑 adgroup grain) — 출처: exploration._EXPLORATION_MIN_BID_SHOPPING(50)·
+# _EXPLORATION_MAX_BID(100,000). 로컬 복제(순환 import 회피)·아래 상수는 exploration과 동일.
+_EX_SHOPPING_MIN_BID = 50
+_EX_MAX_BID = 100_000
+# EX 캠페인 압력 판정 diary observe action(관측 렌더용 — 확장 모드 여부·roas_ratio·배분 그룹 수).
+_EX_OBSERVE_ACTION = "expansion_pressure"
 
 log = logging.getLogger(__name__)
 
@@ -628,6 +638,145 @@ def _apply_gave_priority(db: Session, diag: dict, candidates: list[dict]) -> Non
                 p.pop(key, None)
 
 
+def _auto_operate_campaign_ids(db: Session) -> list[str]:
+    """auto_operate=True 캠페인 id(오름차순, 결정성) — EX·예산 봉투 단계 스코프.
+    auto_operator._auto_operate_campaign_ids와 동일 판정이나, 크로스임포트(순환·병렬 세션
+    금지 파일)를 피해 로컬 쿼리한다(NaverCampaignSettings는 이 모듈이 이미 import)."""
+    rows = (
+        db.query(NaverCampaignSettings.campaign_id)
+        .filter(NaverCampaignSettings.auto_operate.is_(True))
+        .order_by(NaverCampaignSettings.campaign_id.asc())
+        .all()
+    )
+    return [r[0] for r in rows]
+
+
+def _build_expansion_bid_up(campaign_id: str, alloc: dict, pressure: dict, current_bid: int | None) -> dict | None:
+    """EX 배분 그룹 1건 → bid_up 제안(D-NAO-85 §4-2 집행). target_bid = 현재입찰 ×(1+_MAX_CHANGE_PCT)
+    10원 내림·쇼핑 유효범위[50, 100,000] 클램프(가드레일 스텝 정합) — 현재 이하로 소실되면 None
+    (억지 제안 금지, 기존 _bid_proposal 스텝 클램프 관례 미러). rationale 접두 [EX확장] + clk=N
+    (그룹 자기 정착창 clk, auto_operator._extract_rationale_clk `clk=(\\d+)` 규격) + tier·judged_by·
+    roas_ratio 병기. proposal_type='bid_up'(신규 유형 금지 — 일 레인 심사 자동 편입)."""
+    if not current_bid or current_bid <= 0:
+        return None
+    target_bid = int((Decimal(current_bid) * (Decimal(1) + _MAX_CHANGE_PCT)) // 10) * 10
+    target_bid = min(target_bid, _EX_MAX_BID)
+    if target_bid < _EX_SHOPPING_MIN_BID or target_bid <= current_bid:
+        return None  # 스텝 소실 — skip(가드레일 방향/하한에 어차피 막힘)
+    rationale = (
+        f"{expansion_pressure.EX_RATIONALE_PREFIX} clk={alloc['own_clk']} tier={alloc['rank_tier']} "
+        f"judged_by={alloc['judged_by']} roas_ratio={pressure.get('roas_ratio')} — 확장 압력 배분"
+        f"(D-NAO-85) 입찰 {current_bid}→{target_bid}원. {alloc['reason']}"
+    )
+    return {
+        "proposal_type": "bid_up",
+        "target_type": "adgroup",
+        "target_id": alloc["adgroup_id"],
+        # adgroup 대상은 target_id 자체가 그 값 — adgroup_id 컬럼은 채우지 않는다(_bid_proposal
+        # adgroup 관례·persist dedup 정합). marginal_stop 그룹은 배분에서 걸러지지 않고 태그만
+        # 부착되므로 rationale에 남지만 스텝은 가드레일이 최종 방어(신규 실쓰기 경로 0).
+        "campaign_id": campaign_id,
+        "rationale": rationale,
+        "expected_effect": (
+            "확장 압력 배분 UP — 한계 ROAS≥BEP 구간 볼륨 확대(D-NAO-59 총이익). 일 레인 4조건"
+            "(P3 프라이어 폴백)·가드레일(스텝 클램프·쿨다운·BEP·스톱로스) 재검증."
+        ),
+        "status": "pending",
+        "target_bid": target_bid,
+    }
+
+
+def run_expansion_stage(db: Session, *, today: date | None = None) -> int:
+    """EX 확장 압력 레인(D-NAO-85 §4-2) — auto_operate 캠페인마다 압력 판정→(확장 모드면)프라이어
+    1회 로드→그룹 배분→bid_up 제안 생성·persist. 캠페인별 판정을 diary observe 1건으로 기록
+    (확장 모드 여부·roas_ratio·배분 그룹 수). SA간 직접 호출 금지 — 이 harness가 pressure 출력을
+    allocator 입력으로 중계(원칙18-8). 반환: 생성(persist)된 제안 수."""
+    today = today if today is not None else kst_today()
+    now = datetime.combine(today, datetime.min.time())
+    auto_ids = _auto_operate_campaign_ids(db)
+    if not auto_ids:
+        return 0
+
+    response_priors: dict | None = None  # 확장 모드 캠페인이 하나라도 있을 때만 1회 로드(N+1 방지)
+    proposals: list[dict] = []
+    for campaign_id in auto_ids:
+        pressure = expansion_pressure.judge_campaign_pressure(db, campaign_id, today=today)
+        allocations: list[dict] = []
+        if pressure.get("expansion_mode"):
+            if response_priors is None:
+                response_priors = bid_rank_curve.load_response_priors(db)
+            allocations = expansion_allocator.allocate_expansion(
+                db, campaign_id, today=today, pressure=pressure, response_priors=response_priors,
+            )
+        # 캠페인 판정 관측(관측 렌더용) — diary는 fail-open(집행/생성 무관).
+        diary.write_diary_entry(
+            db, "observe", campaign_id, actor=diary.ACTOR_DAILY, action=_EX_OBSERVE_ACTION,
+            rationale=(
+                f"EX 압력 판정 — expansion_mode={pressure.get('expansion_mode')}·"
+                f"roas_ratio={pressure.get('roas_ratio')}·배분그룹 {len(allocations)}개 "
+                f"({pressure.get('reason')})"
+            ),
+            now=now,
+        )
+        if not allocations:
+            continue
+        adgroup_ids = [a["adgroup_id"] for a in allocations]
+        bid_amts = dict(
+            db.query(NaverEntity.entity_id, NaverEntity.bid_amt)
+            .filter(NaverEntity.entity_id.in_(adgroup_ids)).all()
+        )
+        for a in allocations:
+            p = _build_expansion_bid_up(campaign_id, a, pressure, bid_amts.get(a["adgroup_id"]))
+            if p is not None:
+                proposals.append(p)
+
+    saved = proposal_writer.persist(db, proposals)
+    db.commit()
+    return len(saved)
+
+
+def _build_envelope_budget_up(env: dict) -> dict:
+    """예산 봉투(D-NAO-87 §4-5) budget_up 제안 1건 — rationale 접두 [예산봉투](일 레인 자동 심사가
+    이 접두로 봉투 제안만 자동 승인). target_budget = compute_envelopes가 정한 램프 목표(+100%캡
+    이내). budget_auto_eligible은 여기서 세팅하지 않는다 — 라운드 봉투 분류(_classify_budget_round_
+    envelope)가 run_budget_envelope_stage에서 별도 단계(회당 총 증가 ≤10만 캡 존속)."""
+    return {
+        "proposal_type": "budget_up",
+        "target_type": "campaign",
+        "target_id": env["campaign_id"],
+        "campaign_id": env["campaign_id"],
+        "rationale": f"{budget_envelope.BUDGET_ENVELOPE_PREFIX} {env['reason']}(D-NAO-87 예산 봉투, 자동 감액 없음).",
+        "expected_effect": (
+            "예산 천장 램프 — 봉투까지 +100%캡 이내 단계 확대(자동 감액 없음). 일 레인 자동 심사"
+            "·guardrail 재검증(스톱로스·BEP·+100%캡)."
+        ),
+        "status": "pending",
+        "target_budget": env["target_budget"],
+    }
+
+
+def run_budget_envelope_stage(db: Session, *, today: date | None = None) -> int:
+    """예산 봉투 레인(D-NAO-87 §4-5) — budget_envelope.compute_envelopes → needs_raise 캠페인마다
+    budget_up 제안 생성. 기존 라운드 봉투(회당 총 증가 ≤10만, proposal_writer._classify_budget_
+    round_envelope) 로직에 태워 캡 존속. **자동 감액 없음**(needs_raise만 대상). 반환: persist 수."""
+    today = today if today is not None else kst_today()
+    envelopes = budget_envelope.compute_envelopes(db, today=today)
+    raises = [e for e in envelopes if e.get("needs_raise")]
+    if not raises:
+        return 0
+    deltas: list[tuple[int, dict]] = []
+    proposals: list[dict] = []
+    for e in raises:
+        p = _build_envelope_budget_up(e)
+        deltas.append((e["target_budget"] - e["current_budget"], p))
+        proposals.append(p)
+    # 라운드 봉투 분류(회당 총 증가 ≤10만) — budget_auto_eligible in-place 세팅.
+    proposal_writer._classify_budget_round_envelope(deltas)
+    saved = proposal_writer.persist(db, proposals)
+    db.commit()
+    return len(saved)
+
+
 def run_daily(db: Session, *, lookback_days: int = 15) -> dict:
     """08:00 엔트리 — freshness 게이트 → diagnosis → bid_simulator → proposal_writer →
     slack → 계정 브리프 싱글톤 → 만료 패스. 각 단계는 독립 try/except로 격리(부분 실패시
@@ -778,5 +927,28 @@ def run_daily(db: Session, *, lookback_days: int = 15) -> dict:
         log.exception("proposal_pipeline expiry 단계 실패: %s", e)
         result["stage_status"]["expiry"] = "failed"
         result["errors"].append(f"expiry: {e}")
+
+    # EX 확장 압력 레인(D-NAO-85) — auto_operate 캠페인 압력 판정→그룹 배분→bid_up 제안. 위
+    # 기존 제안 생성은 이미 커밋됐으므로 이 단계 예외가 그것을 죽이지 않는다(fail-open, 원칙22).
+    result["ex_generated"] = 0
+    try:
+        result["ex_generated"] = run_expansion_stage(db)
+        result["stage_status"]["expansion"] = "ok"
+    except Exception as e:  # noqa: BLE001
+        db.rollback()
+        log.exception("proposal_pipeline EX 확장 단계 실패(fail-open): %s", e)
+        result["stage_status"]["expansion"] = "failed"
+        result["errors"].append(f"expansion: {e}")
+
+    # 예산 봉투(D-NAO-87) — needs_raise 캠페인 budget_up 제안(라운드 캡 존속·자동 감액 없음).
+    result["budget_envelope_generated"] = 0
+    try:
+        result["budget_envelope_generated"] = run_budget_envelope_stage(db)
+        result["stage_status"]["budget_envelope"] = "ok"
+    except Exception as e:  # noqa: BLE001
+        db.rollback()
+        log.exception("proposal_pipeline 예산 봉투 단계 실패(fail-open): %s", e)
+        result["stage_status"]["budget_envelope"] = "failed"
+        result["errors"].append(f"budget_envelope: {e}")
 
     return result
