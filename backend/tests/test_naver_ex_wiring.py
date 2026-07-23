@@ -291,7 +291,7 @@ def test_C_stage_generates_tagged_budget_up(db):
     assert p.budget_auto_eligible is True  # 라운드 봉투 분류(5만<10만 캡)
 
 
-def _budget_up_proposal(db, *, rationale, target_budget=50000, budget_auto_eligible=None):
+def _budget_up_proposal(db, *, rationale, target_budget=50000, budget_auto_eligible=None, created_at=None):
     p = NaverProposal(
         proposal_type="budget_up", target_type="campaign", target_id=CAMPAIGN,
         campaign_id=CAMPAIGN, rationale=rationale, expected_effect="x",
@@ -300,15 +300,15 @@ def _budget_up_proposal(db, *, rationale, target_budget=50000, budget_auto_eligi
     db.add(p)
     db.commit()
     db.refresh(p)
-    db.query(NaverProposal).filter(NaverProposal.id == p.id).update(
-        {"created_at": DAY_START_UTC + timedelta(hours=1)})
+    ts = created_at if created_at is not None else DAY_START_UTC + timedelta(hours=1)
+    db.query(NaverProposal).filter(NaverProposal.id == p.id).update({"created_at": ts})
     db.commit()
     return p
 
 
 def test_C_lane_auto_approves_tagged_only(db):
-    """일 레인 봉투 심사: [예산봉투]∧자율분 budget_up만 자동 승인·집행. 비태그·라운드캡 초과분은
-    pending 불변(Confirm 전용)."""
+    """일 레인 봉투 심사: [예산봉투]∧자율분 budget_up만 자동 승인·집행. 비태그는 pending 불변
+    (Confirm 전용). 라운드캡 초과분(자율분 아님)은 심사 대상 아님 → 잔존 정리로 rejected(익일 재생성)."""
     _settings(db)
     tagged = _budget_up_proposal(db, rationale=f"{budget_envelope.BUDGET_ENVELOPE_PREFIX} 봉투 램프",
                                  budget_auto_eligible=True)
@@ -320,7 +320,7 @@ def test_C_lane_auto_approves_tagged_only(db):
          patch.object(auto_operator.naver_execution_harness, "execute",
                       side_effect=lambda db, pid, **kw: executed.append(pid)):
         result = auto_operator.run_daily_lane(db, now=NOW)
-    assert result["budget_reviewed"] == 1  # 태그∧자율분만 스코프
+    assert result["budget_reviewed"] == 1  # 태그∧자율분만 심사 스코프
     assert result["budget_approved"] == 1
     assert result["budget_executed"] == 1
     assert executed == [tagged.id]
@@ -328,8 +328,41 @@ def test_C_lane_auto_approves_tagged_only(db):
     db.refresh(untagged)
     db.refresh(overcap)
     assert tagged.status == "approved"
-    assert untagged.status == "pending"  # 비태그 = Confirm 전용 불변
-    assert overcap.status == "pending"   # 라운드캡 초과분 = Confirm 대기(캡 존속)
+    assert untagged.status == "pending"   # 비태그 = 접두 필터로 스윕/심사 모두 제외(불변)
+    assert overcap.status == "rejected"   # [예산봉투] pending → 잔존 정리(익일 재생성, dedup 좌초 방지)
+    assert result["budget_rejected_stale"] == 1
+
+
+def test_C_lane_rejects_stale_tagged_keeps_untagged(db):
+    """★P2 dedup 좌초 방지: 이전 날 stale [예산봉투] pending은 rejected(익일 재생성), 비태그는 불변."""
+    _settings(db)
+    stale = _budget_up_proposal(db, rationale=f"{budget_envelope.BUDGET_ENVELOPE_PREFIX} 이전날 stale",
+                                budget_auto_eligible=True, created_at=DAY_START_UTC - timedelta(days=2))
+    untagged = _budget_up_proposal(db, rationale="[budget_allocator] 소진", budget_auto_eligible=True)
+    with patch.object(auto_operator, "_auto_operate_now", return_value=True), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as m_exec:
+        result = auto_operator.run_daily_lane(db, now=NOW)
+    db.refresh(stale)
+    db.refresh(untagged)
+    assert result["budget_reviewed"] == 0        # stale는 어제 생성 → 당일 심사 대상 아님
+    assert stale.status == "rejected"            # 스윕이 잔존 정리
+    assert untagged.status == "pending"          # 비태그 = Confirm 대기 불변
+    assert result["budget_rejected_stale"] == 1
+    m_exec.assert_not_called()
+
+
+def test_C_lane_stale_sweep_excludes_kill_switch_off(db):
+    """킬스위치 OFF 캠페인의 [예산봉투] pending은 스윕 제외(정지 ≠ 폐기)."""
+    _settings(db, campaign_id="cmp-off", auto_operate=False)
+    off_stale = _budget_up_proposal(db, rationale=f"{budget_envelope.BUDGET_ENVELOPE_PREFIX} off stale")
+    off_stale.campaign_id = "cmp-off"
+    off_stale.target_id = "cmp-off"
+    db.commit()
+    # auto_operate 캠페인 없음(cmp-off만) → 레인 조기 반환. off 캠페인 제안 불변.
+    result = auto_operator.run_daily_lane(db, now=NOW)
+    db.refresh(off_stale)
+    assert off_stale.status == "pending"
+    assert result["budget_rejected_stale"] == 0
 
 
 def _envelope_change_log(db, *, campaign_id=CAMPAIGN, changed_at=NOW):
@@ -353,7 +386,8 @@ def test_C_stage_skips_when_raised_today(db):
 
 
 def test_C_lane_kst_daily_gate_holds(db):
-    """★P2 복리 차단(일 레인 이중 게이트): 오늘 이미 성공 집행된 캠페인의 [예산봉투] pending은 hold."""
+    """★P2 복리 차단(일 레인 이중 게이트): 오늘 이미 성공 집행된 캠페인의 [예산봉투] pending은
+    승인·집행 안 됨(당일 게이트 hold). hold분은 잔존 정리로 rejected(익일 재생성·dedup 좌초 방지)."""
     _settings(db)
     tagged = _budget_up_proposal(db, rationale=f"{budget_envelope.BUDGET_ENVELOPE_PREFIX} 봉투 램프",
                                  budget_auto_eligible=True)
@@ -363,9 +397,10 @@ def test_C_lane_kst_daily_gate_holds(db):
         result = auto_operator.run_daily_lane(db, now=NOW)
     assert result["budget_reviewed"] == 1
     assert result["budget_approved"] == 0
-    m_exec.assert_not_called()
+    m_exec.assert_not_called()  # 복리 게이트로 집행 안 됨
     db.refresh(tagged)
-    assert tagged.status == "pending"  # 복리 게이트로 hold
+    assert tagged.status == "rejected"           # hold분 → 잔존 정리(익일 재생성)
+    assert result["budget_rejected_stale"] == 1
 
 
 # ═══════════════════════ Slack 통지(codex P2) ═══════════════════════

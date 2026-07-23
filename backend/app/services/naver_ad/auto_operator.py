@@ -750,6 +750,49 @@ def _run_budget_envelope_lane(
             result["budget_failed"] += 1
             log.warning("auto_operator: 예산 봉투 실행 실패 proposal_id=%s: %s", p.id, e)
 
+    # ★P2 잔존 pending 정리(codex 2R — persist dedup 좌초 방지): [예산봉투] budget_up은
+    # _DAILY_LANE_PROPOSAL_TYPES에 없어 위 leftovers sweep(codex 11R)이 안 건드린다. 오늘
+    # hold분(당일 게이트·킬스위치)+이전 날 stale분을 rejected 처리해 익일 08:00 생성기가 갱신
+    # 데이터로 재생성(persist pending dedup이 14일 만료까지 신규 봉투 제안을 막는 좌초 방지).
+    # 킬스위치 OFF 캠페인 제외(정지 ≠ 폐기 — 레인 시작 auto_ids ∩ 지금 재조회). ★비태그
+    # budget_up(콘솔 Confirm 대기)은 접두 필터로 절대 건드리지 않는다.
+    sweep_ids = auto_ids & _auto_operate_campaign_ids(db)
+    if not sweep_ids:
+        return
+    leftovers = (
+        db.query(NaverProposal)
+        .filter(
+            NaverProposal.status == "pending",
+            NaverProposal.proposal_type == "budget_up",
+            NaverProposal.rationale.like(f"{budget_envelope.BUDGET_ENVELOPE_PREFIX}%"),
+            NaverProposal.campaign_id.in_(sweep_ids),
+            NaverProposal.created_at < day_end,
+        )
+        .all()
+    )
+    for lp in leftovers:
+        lp.status = "rejected"
+        lp.rationale = (
+            f"{lp.rationale or ''} [예산봉투 보류/stale — 익일 08:00 생성기가 갱신 데이터로 "
+            "재생성(D-NAO-87 일일 사이클, codex 2R)]"
+        )
+        result["budget_rejected_stale"] += 1
+    if leftovers:
+        # 커밋 前 원시값 캡처(독립 리뷰 P2-1 패턴 — 커밋이 ORM 인스턴스 만료 → 커밋 후 lp.*
+        # 접근이 refresh SELECT를 유발, write_diary_entry try 밖이라 fail-open 계약을 뚫는다).
+        rejected_info = [
+            (lp.campaign_id, lp.target_type, lp.target_id, lp.adgroup_id, lp.proposal_type)
+            for lp in leftovers
+        ]
+        db.commit()
+        for c_id, t_type, t_id, ag_id, p_type in rejected_info:
+            diary.write_diary_entry(
+                db, "reject", c_id, actor=diary.ACTOR_DAILY,
+                target_type=t_type, target_id=t_id, adgroup_id=ag_id, action=p_type,
+                rationale="예산봉투 보류/stale — 익일 08:00 재생성(D-NAO-87 일일 사이클, codex 2R)",
+                now=now,
+            )
+
 
 def run_daily_lane(db: Session, *, now: datetime | None = None) -> dict:
     """D-NAO-48 정책의 서버 코드화 — auto_operate 캠페인의 당일 생성 pending 실행형
@@ -781,6 +824,7 @@ def run_daily_lane(db: Session, *, now: datetime | None = None) -> dict:
         "rejected_stale": 0,
         # D-NAO-87 예산 봉투 자동 심사(별도 스코프 — 비태그 budget_up 불변).
         "budget_reviewed": 0, "budget_approved": 0, "budget_executed": 0, "budget_failed": 0,
+        "budget_rejected_stale": 0,
     }
 
     auto_ids = _auto_operate_campaign_ids(db)

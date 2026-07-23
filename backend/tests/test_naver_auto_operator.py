@@ -128,7 +128,7 @@ def test_daily_lane_reviews_nothing_when_no_auto_operate_campaign(db):
     assert result == {"reviewed": 0, "approved": 0, "executed": 0, "held": [], "failed": 0,
                       "rejected_stale": 0,
                       "budget_reviewed": 0, "budget_approved": 0, "budget_executed": 0,
-                      "budget_failed": 0}
+                      "budget_failed": 0, "budget_rejected_stale": 0}
 
 
 def test_daily_lane_ignores_non_auto_operate_campaign(db):
