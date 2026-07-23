@@ -218,7 +218,18 @@ CD4 학습층은 세분화 판사(LLM)의 판정 근거를 볼트에 남겨야 �
 ### 📌 교훈
 **"로그가 안 보인다"의 원인은 최소 3층이다 — ①레벨(핸들러/root 레벨), ②전파(propagate), ③애초에 그 값을 찍는 라인이 있는가.** 하나만 고치고 "관측 가능해졌다"고 단정하지 말 것(원칙22). 로깅 라이브러리 동작은 추정 말고 설치된 버전의 `LOGGING_CONFIG`를 직접 조회해 확인한다(원칙: 추정 금지). 전역 로깅 설정은 pytest caplog와 충돌할 수 있으니 `propagate=False`를 app 네임스페이스에 거는 대신 root를 구성하고, 검증은 pytest가 아니라 fresh 프로세스로 한다.
 
-## 19. 절대 날짜로 시드한 테스트가 하니스 기본값(오늘)과 어긋나 flaky — monkeypatch는 호출되는 모듈에 걸 것 (2026-07-23, BM 벤치마크 flaky 수정)
+## 19. 버그 태스크의 실증도 전제 검증 대상 — "수정 대상" 지목이 코드에 없을 수 있다 (2026-07-23, 주문 날짜창 UTC 조사)
+
+### 🐛 이슈
+"주문 수집 날짜창 UTC 버그" 태스크가 실증(07:22 KST 주문 id 11946 누락, `date_to=date.today()`)과 함께 수정 대상 파일(scheduler_service·sync_service 호출부)까지 지목하며 발제됐다. 그러나 지목된 경로 전부가 이미 `kst_today()`로 통일돼 있었다(prod md5 대조 포함).
+
+### ✅ 해결
+지시대로 "고치기" 전에 원칙 22로 전제를 검증: 저장소 전수 grep + prod 실물 md5·배포 매니페스트·scheduler_state 대조 → 실증의 `date.today()`는 prod 셸 수동 실행분이고, 주문은 06:05 크론 *이후* 발생이라 미수집이 정상(케이던스 갭). 실제 잔존 비-KST는 SA 백필 클램프 1곳뿐 — 그것만 수정·배포(PR #90). 부수 발견: main의 날짜 고정형 flaky 테스트(test_harness_runs_sa3_and_fail_open, SDATE=07-22 고정)를 chip으로 분리.
+
+### 📌 교훈
+버그 수정 태스크가 파일·원인까지 지목해도, 착수 전 "그 코드가 지금 실제로 그런가"를 저장소+prod 양쪽에서 확인한다. 특히 다른 세션이 prod 셸에서 재현한 실증은 앱 코드 경로가 아닐 수 있다. 이미 맞는 코드를 다시 "고치는" 것은 무의미한 diff와 거짓 수정 보고를 낳는다. 또한 전체 스위트 실패 1건을 봤을 때 "내 변경 전 파일로 재실행"이 인과 판정의 가장 싼 방법이다.
+
+## 20. 절대 날짜로 시드한 테스트가 하니스 기본값(오늘)과 어긋나 flaky — monkeypatch는 호출되는 모듈에 걸 것 (2026-07-23, BM 벤치마크 flaky 수정)
 
 ### 🐛 이슈
 `test_naver_bm_benchmark.py::test_harness_runs_sa3_and_fail_open`이 2026-07-23부터 실패(assert bid_band count 1→0). 원인: 테스트가 `SDATE = date(2026, 7, 22)` 절대 날짜로 스냅샷을 시드하는데, `bm_harness.run_bm_layer` → `compute_benchmarks(db)`가 `snapshot_date` 인자 없이 호출돼 기본값 `kst_today()`(=오늘)를 사용했다. 07-22 당일에만 시드 날짜와 오늘이 우연히 일치해 통과하던 날짜 고정(flaky) 버그 — 같은 파일의 다른 테스트는 `compute_benchmarks(db, snapshot_date=SDATE)`로 명시 호출이라 무사했다.
