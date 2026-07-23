@@ -719,9 +719,19 @@ def run_daily_lane(db: Session, *, now: datetime | None = None) -> dict:
     # codex 11R[P2]: 잔존 pending 정리(일일 재생성 사이클) — 오늘 hold분+이전 날 stale분을
     # rejected 처리해 persist dedup 좌초를 막는다. 킬스위치 OFF 캠페인은 제외(정지 ≠ 폐기 —
     # 그 캠페인의 pending은 그대로 두고, 스위치 재가동 시 정상 사이클로 복귀): 레인 시작
-    # 시점 auto 집합(auto_ids)과 지금 재조회한 집합의 교집합만 정리 — 도중에 OFF 된
-    # 캠페인(킬스위치 skip분 포함)과 도중에 ON 된 캠페인(이번 레인이 심사 안 함) 둘 다 제외.
-    sweep_ids = auto_ids & _auto_operate_campaign_ids(db)
+    # 시점 auto 집합(auto_ids)에서 도중에 ON 된 캠페인은 원래 빠져 있고(이번 레인이 심사
+    # 안 함), 도중에 OFF 된 캠페인만 걸러내면 된다.
+    #   초판은 auto_ids & _auto_operate_campaign_ids(db)로 재조회 교집합을 썼으나, 재조회가
+    #   레인 Session 트랜잭션 안에서 돌아 SQLite(WAL) 리더 스냅샷 stale에 취약했다 — 레인이
+    #   열린 트랜잭션을 문 채 타 프로세스가 auto_operate=0을 커밋해도 세션엔 stale True로
+    #   보여, OFF 캠페인의 pending까지 폐기할 수 있었다(codex 6R[P1]과 동일 위협 모델 —
+    #   _auto_operate_now docstring 참조). 그래서 캠페인 단위 fresh 게이트(_auto_operate_now,
+    #   엔진 레벨 독립 커넥션 — 항상 타 프로세스 커밋을 봄)로 교체한다. auto_ids와의 결합은
+    #   유지되므로(fresh True인 것만 남김) "도중 ON 캠페인 제외" 의미도 그대로다.
+    #   부기: SQLite에선 stale 스냅샷의 쓰기 승격이 BUSY_SNAPSHOT으로 거부돼 조용한 폐기는
+    #   원리상 크래시+롤백으로 자기중화하지만(2026-07-23 실측), PostgreSQL 이행 대비 +
+    #   EX 레인 _run_budget_envelope_lane fresh-gate와의 패턴 일관성으로 fresh 게이트를 채택.
+    sweep_ids = {cid for cid in auto_ids if _auto_operate_now(db, cid)}
     if sweep_ids:
         leftovers = (
             db.query(NaverProposal)
