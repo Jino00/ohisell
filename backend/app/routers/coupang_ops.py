@@ -1717,6 +1717,9 @@ _VS_TYPES = {"NORMAL", "RFM"}  # ref 18: NORMAL=3P / RFM=RG
 # 허용 계정(codex P2): account=None 대조가 저장된 모든 계정 official을 합산하므로, 오타 account_key가
 # "전체" 합계를 오염시키되 계정 필터 뷰엔 안 보이는 사각 방지. command-center 허용 집합과 동일.
 _VS_ACCOUNTS = {"COUPANG_WING1", "COUPANG_WING2"}
+# ingest 값 방어 상한 — 음수는 정상(환불 순액), 이 절대값을 넘으면 malformed로 간주.
+_VS_GMV_ABS_MAX = 10_000_000_000  # 100억 원/일
+_VS_UNITS_ABS_MAX = 1_000_000  # 100만 개/일
 
 
 @router.post("/wing/vendor-summary/ingest")
@@ -1757,16 +1760,17 @@ def ingest_wing_vendor_summary(
         try:
             gmv = int(d.get("gmv") or 0)
             units_sold = int(d.get("units_sold") or 0)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):  # OverflowError: json은 Infinity를 허용한다
             raise HTTPException(status_code=400, detail="gmv/units_sold는 정수여야 함")
-        # ★gmv 음수 허용(2026-07-27 라이브 실측): gmv=판매액-환불액(쿠팡 공식 정의) → 환불이
-        # 판매를 초과하는 날은 정당하게 음수(WING1 07-02 -16,620·07-07 -12,900 실측). 원래 검증은
-        # e2c2560(S2 초기 구현)에서 ad-cost ingest 패턴을 그대로 복제한 것으로, "gmv도 비용처럼
-        # 항상 0 이상"이라는 근거 없는 가정이었다(주석·커밋에 그 가정을 뒷받침하는 근거 없음) —
-        # 그 결과 배치 전체가 400으로 거부되어 45일 자가치유 백필(PR #108)이 통째로 막혔다.
-        # units_sold(판매수량)는 음수가 비상식이므로 검증 유지 — 파싱 쓰레기 방어는 여기로 좁힌다.
-        if units_sold < 0:
-            raise HTTPException(status_code=400, detail="units_sold는 음수일 수 없음")
+        # ★음수 허용(2026-07-27 라이브 실측, 병행 세션 38d19c1과 합류): gmv=판매액-환불액(쿠팡
+        # 공식 정의) → 환불이 판매를 초과하는 날은 정당하게 음수(WING1 07-02 -16,620·07-07
+        # -12,900 실측). 원래 검증(e2c2560, S2 초기 구현)은 ad-cost ingest의 "비용은 항상
+        # 0 이상" 패턴을 그대로 복제한 것으로, 그 가정을 뒷받침하는 근거가 애초에 없었다 —
+        # 결과적으로 배치 전체가 400으로 거부되어 45일 자가치유 백필(PR #108)이 통째로 막혔다.
+        # units_sold도 순액 의미론(환불 수량 차감)일 수 있어 동일 정책 적용 — 절대값 상한만으로
+        # 파싱 깨짐(json Infinity 등)을 방어한다(일 GMV 실측 ~수백만 원 대비 수천 배 여유).
+        if abs(gmv) > _VS_GMV_ABS_MAX or abs(units_sold) > _VS_UNITS_ABS_MAX:
+            raise HTTPException(status_code=400, detail="gmv/units_sold 값이 비정상 범위")
         last_refresh = d.get("last_refresh")
         rows.append({
             "date": day_date, "registration_type": rt,
