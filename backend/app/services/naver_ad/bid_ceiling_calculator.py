@@ -9,9 +9,20 @@
 #                                   bep_roas     = 판매가 / contribution
 #     bid_simulator.affordable_ceiling(rpc, roas) = rpc / roas   (70~100,000원·10원 단위 내림)
 #   대조: RPC = 판매가 × CVR 이므로
-#         affordable_ceiling = (판매가 × CVR) / (판매가 / 공헌이익) = CVR × 공헌이익.  ∎
-#   → **두 정의는 동치**다. 따라서 이 모듈은 산식을 새로 만들지 않고 기존
-#     bid_simulator.affordable_ceiling을 그대로 재사용한다(정의 중복 = 미래의 불일치 사고).
+#         affordable_ceiling = (판매가 × CVR) / (판매가 / 공헌이익) = CVR × 공헌이익.
+#   → 이 모듈은 산식을 새로 만들지 않고 기존 bid_simulator.affordable_ceiling을 그대로
+#     재사용한다(정의 중복 = 미래의 불일치 사고).
+#
+#   ★단, 위 소거는 **RPC의 매출이 BEP 행과 같은 상품에서 나올 때만** 엄밀히 성립한다
+#     (적대적 리뷰 P2-8). 수량>1도 VAT도 문제없다 — RPC/판매가 = 클릭당 판매 수량이고, 지불·수취가
+#     모두 부가세포함이라 공헌이익의 ÷1.1과 소거된다. 문제는 **상품 혼합**이다:
+#     아래 사다리는 표본이 없으면 campaign → account로 내려가는데, 콜드 소재는 정의상 자기 실적이
+#     없어 그 폴백 층에 떨어지는 것이 **정상 경로**다. 그 층의 RPC는 판매가가 서로 다른 여러 상품의
+#     혼합이라 "판매가가 소거된다"는 유도가 그대로 서지 않는다(싼 상품이 비싼 상품과 같은 캠페인에
+#     있으면 상한이 과대 = 과지출 방향).
+#     → 완화책: `confident` 라벨을 계정 층에서 False로 내려보내고, cold_start_bid_decider가
+#       그 층 상한에 보수 계수(LOW_CONFIDENCE_CEILING_FACTOR)를 곱한다. 근본 해소(상품 단위
+#       RPC 좁히기)는 남은 과제다.
 #   RPC 형태를 채택한 이유: CVR·객단가를 따로 추정하면 "전환 1건이 몇 개인가"(수량) 모호성이
 #   생기는데, RPC(=매출/클릭)는 그 분해 자체가 필요 없다. 기존 코드도 같은 이유로 RPC를 쓴다
 #   (affordable_ceiling docstring 참조).

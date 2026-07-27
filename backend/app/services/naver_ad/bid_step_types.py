@@ -148,6 +148,34 @@ def decode_exploration_ceiling(expected_effect: str | None) -> int | None:
     return int(matches[0])
 
 
+# ── CS: 콜드 첫 입찰 상한(ceiling) 마커 ──────────────────────────────────────
+# 존재 이유(적대적 리뷰 P1-3): `bid_up_cold`는 ±15% **완전 면제**라 변경 폭을 제한하는 가드가
+# 하나도 없다. 유일한 가격 브레이크 = 레인이 산정한 min(이익상한, 목표순위 시장가). 그러므로
+# 탐색(explore_ceiling)과 **동일한 규약**으로 그 상한을 expected_effect에 실어 보내고, harness
+# 쓰기-경계에서 재검증한다 — 레인 계산을 불신하는 이 코드베이스의 확립된 규약을 CS만 어기면
+# 안 된다. 마커 부재/중복(오염) = fail-closed(경제 근거 없이 콜드 상향 금지).
+# 태그를 explore와 분리하는 이유: 한 제안이 두 성격을 동시에 갖는 일이 없어야 하고, 태그가
+# 같으면 explore 게이트와 CS 게이트가 서로의 마커를 소비해 교차 통과가 생긴다.
+_COLD_CEILING_TAG = "cold_ceiling"
+_COLD_CEILING_RE = re.compile(r"\[\[cold_ceiling=(\d+)\]\]")
+
+
+def encode_cold_ceiling(expected_effect: str | None, ceiling: int) -> str:
+    """expected_effect 끝에 콜드 첫 입찰 상한 마커를 붙여 반환(쓰기-경계 재검증 원료 영속)."""
+    return f"{expected_effect or ''}\n[[{_COLD_CEILING_TAG}={int(ceiling)}]]"
+
+
+def decode_cold_ceiling(expected_effect: str | None) -> int | None:
+    """expected_effect에서 콜드 상한 마커를 추출 — **정확히 1개 발생**이어야 유효.
+    부재/중복(오염)은 None → 소비자(harness CS 상한 게이트)가 fail-closed 처리."""
+    if not expected_effect:
+        return None
+    matches = _COLD_CEILING_RE.findall(expected_effect)
+    if len(matches) != 1:
+        return None
+    return int(matches[0])
+
+
 def is_bid_up(proposal_type: str | None) -> bool:
     """proposal_type이 상향 입찰 스텝인가(BID_UP_TYPES 멤버십)."""
     return proposal_type in BID_UP_TYPES

@@ -26,6 +26,7 @@ from app.models import (
 from app.services.naver_ad import (
     bid_ceiling_calculator, cold_start_bid_decider, market_bid_probe, naver_execution_harness,
 )
+from app.services.naver_ad.bid_step_types import encode_cold_ceiling
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.utils.kst import kst_now, kst_today
 
@@ -60,16 +61,27 @@ def _auto_campaigns(db: Session) -> list[str]:
 
 
 def _already_fired_ad_ids(db: Session) -> set[str]:
-    """CS가 **실집행**한 적 있는 소재 집합(첫 1회 제한의 상태 저장소).
+    """CS가 **실제로 입찰을 바꾼** 소재 집합(첫 1회 제한의 상태 저장소).
 
-    ★dry_run 행은 세지 않는다 — dry-run 관측이 소재의 '한 번'을 소진해 버리면, 실집행으로
-      전환했을 때 정작 아무것도 안 나온다(배포 절차상 첫 회차는 항상 dry-run이다).
+    ★적대적 리뷰 P1-2 수정 — 종전 구현은 `rationale LIKE '[콜드첫입찰]%' AND dry_run=False`만
+      봤는데, harness의 `_guard_failure`가 **제안 rationale을 그대로 앞에 붙여** 차단 행을
+      남긴다(`"[콜드첫입찰] … [실행 불가] …"`, dry_run=False). 그래서 **가드에 막힌 시도나
+      writer 예외까지 '첫 1회'를 소진**했다 — 원인을 고쳐도 그 소재는 영구히 대상에서 빠진다.
+      "시도 1회"가 아니라 "성공 1회"여야 한다.
+
+    판별을 제안 조인으로 바꾼다(텍스트 매칭보다 견고):
+      NaverChangeLog.proposal_id → NaverProposal.proposal_type == 'bid_up_cold'
+      ∧ dry_run=False            (dry-run 관측은 소진하지 않음 — 첫 회차는 항상 dry-run이다)
+      ∧ after_value IS NOT NULL  (= 쓰기가 실제로 확정됨. 가드 차단·writer 예외 행은 NULL)
     """
-    rows = db.query(NaverChangeLog.entity_id).filter(
+    rows = db.query(NaverChangeLog.entity_id).join(
+        NaverProposal, NaverProposal.id == NaverChangeLog.proposal_id,
+    ).filter(
         NaverChangeLog.entity_type == "ad",
         NaverChangeLog.action == "update_bid",
-        NaverChangeLog.rationale.like(f"{RATIONALE_PREFIX}%"),
         NaverChangeLog.dry_run.is_(False),
+        NaverChangeLog.after_value.isnot(None),  # 실제 쓰기 확정분만
+        NaverProposal.proposal_type == PROPOSAL_TYPE_COLD,
     ).all()
     return {r[0] for r in rows}
 
@@ -130,12 +142,15 @@ def select_cold_ads(db: Session, today: date) -> list[dict]:
     fired = _already_fired_ad_ids(db)
     imp7 = _adgroup_imp_7d(db, campaign_ids, today)
     gbids = _group_bids(db, {r[1] for r in rows})
-    # 우리가 소재 grain으로 입찰을 바꾼 이력(레인 무관 — CS 이외 경로 포함).
+    # 우리가 소재 grain으로 입찰을 **실제로 바꾼** 이력(레인 무관 — CS 이외 경로 포함).
+    # after_value IS NOT NULL = 쓰기 확정분만(리뷰 P1-2와 같은 이유 — 가드 차단·writer 예외 행이
+    # "우리가 손댔다"로 오인되면 콜드가 아닌 것으로 잘못 판정된다).
     touched = {
         r[0] for r in db.query(NaverChangeLog.entity_id).filter(
             NaverChangeLog.entity_type == "ad",
             NaverChangeLog.action == "update_bid",
             NaverChangeLog.dry_run.is_(False),
+            NaverChangeLog.after_value.isnot(None),
         ).all()
     }
 
@@ -191,6 +206,8 @@ def run_cold_start_lane(
         log.info("cold_start_bid_lane: 콜드 소재 없음 — 종료")
         return result
 
+    attempts = 0  # 라운드 캡 카운터(성공이 아니라 **시도** 기준 — 리뷰 P1-4)
+
     for c in cold:
         ceiling = bid_ceiling_calculator.compute_ceiling(
             db, c["ad_id"], c["adgroup_id"], c["campaign_id"], today
@@ -225,19 +242,27 @@ def run_cold_start_lane(
         )
         if dry_run:
             continue  # 관측만 — 제안 레코드도 만들지 않는다(dry-run은 순수 관측)
-        if result["executed"] >= max_proposals:
+        # ★리뷰 P1-4: 라운드 캡은 **시도** 기준이어야 한다. 종전엔 executed(성공)를 셌는데,
+        #   집행이 실패하면 카운터가 안 올라 캡이 영원히 안 걸렸다 — 가드가 전건을 막는 상황
+        #   (리뷰 P1-1 같은)에서 콜드 소재 전량에 제안·change_log·첫1회 소진이 한 회차에 발생.
+        if attempts >= max_proposals:
             result["held"] += 1
-            log.info("cold_start_bid_lane: 라운드 캡(%d) 도달 — 나머지 이월", max_proposals)
+            log.info("cold_start_bid_lane: 라운드 캡(%d 시도) 도달 — 나머지 이월", max_proposals)
             continue
+        attempts += 1
 
         proposal = NaverProposal(
             proposal_type=PROPOSAL_TYPE_COLD, target_type="ad", target_id=c["ad_id"],
             campaign_id=c["campaign_id"], adgroup_id=c["adgroup_id"],
             rationale=f"{RATIONALE_PREFIX} {decision['reason']}",
-            expected_effect=(
+            # ★리뷰 P1-3: 상한을 기계판독 마커로 실어 보낸다. bid_up_cold는 ±15% 완전 면제라
+            #   이 상한이 유일한 가격 브레이크이고, harness가 쓰기 직전 이 마커로 재검증한다
+            #   (레인 계산을 불신하는 규약 — 탐색 explore_ceiling과 동형). 마커 없으면 fail-closed.
+            expected_effect=encode_cold_ceiling(
                 "콜드 소재 첫 입찰 — 눈먼 래더(+10%/BM 프라이어) 대신 npla-estimate 실측 시장가와 "
                 "이익 상한 중 낮은 쪽으로 직행. 되돌림=기존 스톱로스/BEP/손실고삐 백스톱, "
-                "이후 입찰은 기존 레인(순위 서보·탐색UP)이 인수."
+                "이후 입찰은 기존 레인(순위 서보·탐색UP)이 인수.",
+                decision["target_bid"],
             ),
             status="approved", target_bid=decision["target_bid"],
             approval_source=APPROVAL_SOURCE_COLD,

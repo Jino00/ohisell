@@ -28,6 +28,15 @@ from decimal import Decimal
 DEFAULT_TARGET_POSITION = 3
 DEFAULT_DEVICE = "MOBILE"
 _BID_INCREMENT = 10
+# ★리뷰 P2-9/P2-8: 저신뢰 상한 할인 계수.
+#   SA1이 `confident=False`(계정 층 폴백)를 라벨로 돌려주는데 종전엔 그 라벨이 **어떤 판정도
+#   하지 않았다** — "표본 빈약이면 공격적 입찰 금지"라는 명세와 구현이 어긋나 있었다.
+#   계정 층 RPC는 판매가가 서로 다른 여러 상품의 혼합이라 "판매가가 소거된다"는 상한 유도가
+#   그 층에서는 엄밀히 성립하지 않는다(싼 상품이 비싼 상품과 섞이면 상한이 과대 산출 = 과지출
+#   방향). 그래서 그 층 상한에는 보수 계수를 곱한다. 0.7 = 임의 상수가 아니라 "혼합 층 상한은
+#   자기 층 상한보다 낙관적일 수 있으니 3할 깎는다"는 명시적 보수 선택 — 근거가 생기면(층별
+#   과대 편향 실측) 이 값을 교체할 것.
+LOW_CONFIDENCE_CEILING_FACTOR = Decimal("0.7")
 # 쇼핑 유효 입찰 하한(원) — exploration._EXPLORATION_MIN_BID_SHOPPING과 동일 출처.
 _MIN_BID_SHOPPING = 50
 
@@ -68,12 +77,20 @@ def decide_cold_start_bid(
     ceiling = ceiling or {}
     market = market or {}
     ladder = {int(k): int(v) for k, v in (market.get("ladder") or {}).items()}
-    ceiling_cpc = int(ceiling.get("ceiling_cpc") or 0)
+    raw_ceiling = int(ceiling.get("ceiling_cpc") or 0)
     exposure_min = market.get("exposure_min")
+
+    # 저신뢰(계정 층 폴백) 상한 할인 — 리뷰 P2-9/P2-8. 라벨이 판정에 실제로 쓰이게 한다.
+    confident = bool(ceiling.get("confident"))
+    if raw_ceiling > 0 and not confident:
+        ceiling_cpc = _round_down(Decimal(raw_ceiling) * LOW_CONFIDENCE_CEILING_FACTOR)
+    else:
+        ceiling_cpc = raw_ceiling
 
     out = {
         "decision": None, "target_bid": None, "reason": "",
         "ceiling_cpc": ceiling_cpc,
+        "raw_ceiling_cpc": raw_ceiling,
         "market_bid": ladder.get(target_position),
         "ladder_min": min(ladder.values()) if ladder else None,
         "ladder": ladder,
@@ -116,13 +133,25 @@ def decide_cold_start_bid(
         )
         return out
 
-    # ④ 정상 — min(상한, 목표순위 시장가). 목표순위 시세가 없으면 사다리에서 가장 가까운 순위로.
+    # ④ 정상 — min(상한, 목표순위 시장가). 목표순위 시세가 없으면 폴백.
+    #    ★리뷰 P2-10: 폴백은 **더 싼 쪽(하위 순위 = 큰 숫자)으로만** 허용한다. 종전엔 절대거리
+    #    최근접이라 3위가 없으면 2위(더 비싼 자리) 가격을 "3위 시세"로 지불할 수 있었다.
+    #    사다리 부분 실패(fetch_position_ladder가 순위별 배치 실패를 건너뜀)는 정상 동작이므로
+    #    이 상황은 실제로 발생한다. 더 싼 순위가 하나도 없으면 근거 부족으로 보류한다.
     market_bid = ladder.get(target_position)
     if market_bid is None:
-        nearest = min(ladder.keys(), key=lambda p: (abs(p - target_position), p))
+        cheaper = [p for p in ladder if p > target_position]
+        if not cheaper:
+            out["decision"] = DECISION_HOLD_NO_MARKET
+            out["reason"] = (
+                f"목표 {target_position}위 시세 부재 ∧ 그보다 하위(더 싼) 순위 시세도 없음"
+                f"(관측 순위={sorted(ladder)}) — 더 비싼 자리 가격을 목표가로 쓰지 않는다(보류)."
+            )
+            return out
+        nearest = min(cheaper)
         market_bid = ladder[nearest]
         out["market_bid"] = market_bid
-        out["reason"] = f"목표 {target_position}위 시세 부재 — 최근접 {nearest}위 시세 사용. "
+        out["reason"] = f"목표 {target_position}위 시세 부재 — 하위 최근접 {nearest}위 시세 사용. "
 
     target = _round_down(min(ceiling_cpc, market_bid))
     if target < _MIN_BID_SHOPPING:
@@ -149,7 +178,8 @@ def decide_cold_start_bid(
         f"콜드 첫 입찰 {target:,}원 = min(이익상한 {ceiling_cpc:,}, "
         f"{target_position}위 시장가 {market_bid:,}) — {bound}이 결정. "
         f"RPC 출처 {out['rpc_source']}(clk {out['sample_clk']}"
-        f"{'' if out['confident'] else '·표본 빈약'})"
+        f"{'' if confident else f'·표본 빈약 → 상한 {raw_ceiling:,}에 '
+                                f'{LOW_CONFIDENCE_CEILING_FACTOR} 할인 적용'})"
         + (f", 참고 최소노출가 {exposure_min:,}원" if exposure_min else "")
     )
     return out

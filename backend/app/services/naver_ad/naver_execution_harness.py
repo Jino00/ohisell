@@ -51,9 +51,11 @@ from app.services.naver_ad import (
 from app.services.naver_ad.bid_step_types import (
     BID_DOWN_TYPES,
     BID_UP_TYPES,
+    COLD_START_STEP_TYPES,
     EXPLORATION_STEP_TYPES,
     RANK_STEP_TYPES,
     decode_base_bid,
+    decode_cold_ceiling,
     decode_exploration_ceiling,
 )
 from app.services.naver_ad.diagnosis import correction_factor as compute_correction_factor
@@ -71,6 +73,13 @@ VERIFY_DAYS = 14
 # 면제만 적용되므로 fail-closed로 죽인다(면제의 폐루프 밖 누출 봉쇄). 위임 경로는 이미
 # delegation_gate가 RANK_STEP_TYPES를 제외하므로, 이 게이트는 콘솔 재실행/재시도 잔존분 방어.
 _RANK_STEP_MAX_AGE_MINUTES = 10
+
+# CS(적대적 리뷰 P2-7): 콜드 첫 입찰 제안 신선도 상한(분). 정상 경로는 일 레인에서 생성 직후
+# 인라인 실행이라 초 단위다. 이 상한을 넘겨 살아난 제안 = 킬스위치 OFF로 approved 잔존했다가
+# 콘솔 재실행/재시도로 나중에 깨어난 stale 제안 — **시장가는 매일 변하므로** 어제 시세로 오늘
+# 입찰하면 안 된다. rank-step보다 넉넉한 이유: 일 레인은 시장가 수집 → 레인 순으로 도는데 그
+# 수집이 소재 수만큼 HTTP를 도느라 수 분이 걸린다(같은 회차 안에서 죽지 않게).
+_COLD_STEP_MAX_AGE_MINUTES = 60
 
 # guardrail_gate 컨텍스트의 실적 창(account_diagnosis.LOW_CLICK_LOOKBACK_DAYS 재사용 —
 # 신규 상수 아님, pause_candidates/resume_candidates와 동일 창으로 정합성 유지).
@@ -1039,28 +1048,92 @@ def _execute_update_bid(db: Session, proposal: NaverProposal, now: datetime) -> 
     # stale 제안(경로 밖 생성·잔존 pending)이 콘솔 승인만으로 최종 경계를 통과하는 fail-open을 차단.
     # 함수 레벨 import — delegation_gate와 동일 관례(모듈 결합 최소화·순환 회피).
     if proposal.target_type == "ad":
+        from app.services.naver_ad.cold_start_bid_lane import APPROVAL_SOURCE_COLD
         from app.services.naver_ad.exploration import APPROVAL_SOURCE_EXPLORE
         ad_guard = []
         if not proposal.adgroup_id:
             ad_guard.append("adgroup_id 없음(소재 제안 필수 컨텍스트)")
         if proposal.proposal_type in BID_UP_TYPES:
-            if proposal.approval_source != APPROVAL_SOURCE_EXPLORE:
+            # 소재 UP 자동 경로 화이트리스트 — (승인원, 허용 타입 집합) 쌍방향 잠금.
+            # ★CS(적대적 리뷰 P1-1): bid_up_cold를 BID_UP_TYPES에 넣은 순간 이 경계가 전건
+            #   fail-closed로 막아 CS가 한 건도 집행되지 않았다. explore와 동일 규약으로 개방하되,
+            #   반드시 **쌍방향**이어야 한다(P1-3): cold_op는 bid_up_cold만, bid_up_cold는 cold_op만.
+            #   한쪽만 열면 다른 승인원(콘솔 NULL·delegation)이 bid_up_cold를 태워 ±15% 완전 면제를
+            #   무제한 상향으로 쓰는 구멍이 된다(리뷰 재현: 300원→90,000원).
+            _AD_UP_ROUTES = {
+                APPROVAL_SOURCE_EXPLORE: EXPLORATION_STEP_TYPES,   # BX2 D-NAO-70③
+                APPROVAL_SOURCE_COLD: COLD_START_STEP_TYPES,       # CS D-NAO-96
+            }
+            allowed = _AD_UP_ROUTES.get(proposal.approval_source)
+            if allowed is None:
                 ad_guard.append(
-                    f"소재 UP은 탐색(explore_op) 자동 경로만 개방(승인원={proposal.approval_source!r}) "
-                    "— 비탐색 소재 UP은 Confirm 스코프 밖(D-NAO-70③)"
+                    f"소재 UP은 자동 경로(explore_op/cold_op)만 개방(승인원={proposal.approval_source!r}) "
+                    "— 그 밖의 소재 UP은 Confirm 스코프 밖(D-NAO-70③·96)"
                 )
-            elif proposal.proposal_type not in EXPLORATION_STEP_TYPES:
+            elif proposal.proposal_type not in allowed:
                 ad_guard.append(
-                    f"explore_op 소재 UP은 탐색 스텝 타입만(개방={sorted(EXPLORATION_STEP_TYPES)}, "
-                    f"요청={proposal.proposal_type!r})"
+                    f"승인원 {proposal.approval_source!r} 소재 UP은 {sorted(allowed)} 타입만"
+                    f"(요청={proposal.proposal_type!r}) — 타입⟺승인원 쌍방향 잠금"
                 )
         elif proposal.proposal_type not in BID_DOWN_TYPES:
             ad_guard.append(
                 f"proposal_type={proposal.proposal_type!r}는 소재-레벨 미지원 방향"
-                "(UP=탐색explore_op / DOWN=bid_down Confirm)"
+                "(UP=탐색explore_op·콜드cold_op / DOWN=bid_down Confirm)"
             )
         if ad_guard:
             reason = "소재(ad) 실쓰기 경계 차단(fail-closed) — " + " · ".join(ad_guard)
+            _guard_failure(db, proposal, now, "update_bid", reason)
+            raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
+
+    # ★CS(적대적 리뷰 P1-3) — 콜드 스텝은 **target_type='ad' 강제**. 이 검사가 없으면
+    # target_type을 'adgroup'/'keyword'로 바꾼 bid_up_cold 제안이 위 소재 가드를 통째로 우회하고,
+    # ±15% 완전 면제라 변경 폭을 막는 가드가 하나도 남지 않는다(리뷰 재현: 그룹 300원→90,000원).
+    if proposal.proposal_type in COLD_START_STEP_TYPES and proposal.target_type != "ad":
+        reason = (
+            f"콜드 첫 입찰은 소재(ad) 전용(fail-closed) — target_type={proposal.target_type!r}. "
+            "그룹/키워드 grain으로는 소재 UP 경계·상한 게이트를 우회하게 된다"
+        )
+        _guard_failure(db, proposal, now, "update_bid", reason)
+        raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
+
+    # ★CS(적대적 리뷰 P1-3) — 콜드 상한 **쓰기-경계 하드 게이트**(탐색 게이트와 동형).
+    # bid_up_cold는 ±15% 완전 면제라 레인이 산정한 min(이익상한, 목표순위 시장가)이 유일한 가격
+    # 브레이크다. 레인 계산을 불신하고 여기서 재검증한다 — 경로 밖 생성·변조·낡은 제안 재생이
+    # 최종 경계를 통과하는 fail-open 차단. 마커 부재/중복(오염) = fail-closed.
+    if proposal.proposal_type in COLD_START_STEP_TYPES:
+        cold_ceiling = decode_cold_ceiling(proposal.expected_effect)
+        if cold_ceiling is None:
+            reason = (
+                "콜드 상한 마커 부재/오염(fail-closed) — bid_up_cold는 ±15% 완전 면제라 상한이 "
+                "유일 가격 브레이크. cold_start_bid_lane 밖 생성/변조 제안 차단(D-NAO-96)"
+            )
+            _guard_failure(db, proposal, now, "update_bid", reason)
+            raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
+        if proposal.target_bid > cold_ceiling:
+            reason = (
+                f"콜드 상한 초과(fail-closed) — target_bid={proposal.target_bid}원 > 상한 "
+                f"{cold_ceiling}원. '클릭당 확정 손해' 가격 진입 금지(쓰기-경계 재검증, D-NAO-96)"
+            )
+            _guard_failure(db, proposal, now, "update_bid", reason)
+            raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
+        # 신선도(리뷰 P2-7): 킬스위치 OFF 등으로 approved 상태로 남은 낡은 제안이 며칠 뒤 콘솔
+        # 클릭 한 번으로 낡은 target_bid를 집행하는 재생을 막는다(rank-step 신선도 게이트 동형).
+        # 시장가는 매일 변한다 — 어제 시세로 오늘 입찰하지 않는다.
+        # ★created_at은 **UTC 저장**([[sqlite-server-default-now-is-utc]]) — now(kst_now, KST naive)와
+        #   비교하려면 +9h 해서 KST로 맞춘다. 이걸 빼먹으면 모든 제안이 9시간(540분) 늙은 것으로
+        #   보여 게이트가 전건을 죽인다(실제로 이 구현의 첫 판에서 그렇게 났다).
+        # ★created_at=None도 stale 취급(fail-closed) — 컬럼에 NOT NULL 제약이 없어 NULL 행이
+        #   가능하고, None을 통과시키면 신선도 게이트가 우회된다(rank-step과 동일 판단).
+        if proposal.created_at is None:
+            age_min = None
+        else:
+            age_min = (now - (proposal.created_at + timedelta(hours=9))).total_seconds() / 60
+        if age_min is None or age_min > _COLD_STEP_MAX_AGE_MINUTES:
+            age_str = "미상(created_at 없음)" if age_min is None else f"{age_min:.0f}분 경과"
+            reason = (
+                f"콜드 제안 신선도 초과(fail-closed) — 생성 후 {age_str} "
+                f"(> {_COLD_STEP_MAX_AGE_MINUTES}분). 시장가는 매일 변하므로 낡은 시세로 집행 금지"
+            )
             _guard_failure(db, proposal, now, "update_bid", reason)
             raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
 
@@ -1170,10 +1243,23 @@ def _execute_update_bid(db: Session, proposal: NaverProposal, now: datetime) -> 
         proposal.proposal_type in EXPLORATION_STEP_TYPES
         and proposal.approval_source == _EXPLORE_SRC
     )
+    # ★CS: 콜드 첫 입찰도 같은 이유로 표본-기반 완전성 게이트 면제 — **콜드 소재는 정의상 정착
+    #   표본이 없어 BEP(roas_corrected)를 잴 수 없다**. 표본이 없는 대상에 표본 판단을 요구하면
+    #   레인이 전건 fail-closed로 죽는다(탐색이 같은 이유로 이미 면제받는다, PLAN §1 가드6).
+    #   대체 가격 브레이크 = 위에서 **이미 통과한** 콜드 상한 하드 게이트(min(이익상한, 시장가)를
+    #   expected_effect 마커로 재검증) — 면제가 무방비를 뜻하지 않는다.
+    #   면제는 탐색과 동일하게 **타입 ∧ 승인원**을 함께 잠근다(면제가 승인원과 분리돼 다른
+    #   target_type에서 새는 결함 클래스 원천 차단).
+    from app.services.naver_ad.cold_start_bid_lane import APPROVAL_SOURCE_COLD as _COLD_SRC
+    _cold_exempt = (
+        proposal.proposal_type in COLD_START_STEP_TYPES
+        and proposal.approval_source == _COLD_SRC
+    )
     if (
         proposal.target_type in ("adgroup", "ad", "keyword")
         and proposal.proposal_type in BID_UP_TYPES
         and not _exploration_exempt
+        and not _cold_exempt
     ):
         # guardrail_gate._check_bid의 up 전용 검사(BEP·스톱로스·일예산)는 그 원료가 None이면
         # 전부 fail-open(검사 건너뜀)이다 — 컨텍스트가 불완전한 채 넘기면 D-NAO-1 이익하한·
@@ -1596,24 +1682,43 @@ def real_write_blocker(proposal: NaverProposal) -> str | None:
         #   ② UP=탐색(explore_op)+탐색 스텝 타입만 / DOWN(bid_down)=전 캠페인 Confirm. 비탐색 UP·다른
         #      승인원 UP은 미개방(stale 제안·경로 밖 생성이 콘솔에서 executable로 보이는 것 차단).
         if proposal.target_type == "ad":
+            from app.services.naver_ad.cold_start_bid_lane import APPROVAL_SOURCE_COLD
             from app.services.naver_ad.exploration import APPROVAL_SOURCE_EXPLORE
             if not proposal.adgroup_id:
                 return "adgroup_id 없음 — 소재 제안 필수 컨텍스트 부족(재생성 필요)"
             if proposal.proposal_type in BID_UP_TYPES:
-                if proposal.approval_source != APPROVAL_SOURCE_EXPLORE:
+                # 타입⟺승인원 쌍방향 잠금(_execute_update_bid과 동일 판정 — 이중 방벽).
+                _routes = {
+                    APPROVAL_SOURCE_EXPLORE: EXPLORATION_STEP_TYPES,  # BX2 D-NAO-70③
+                    APPROVAL_SOURCE_COLD: COLD_START_STEP_TYPES,      # CS D-NAO-96
+                }
+                allowed = _routes.get(proposal.approval_source)
+                if allowed is None:
                     return (
-                        "소재(ad) UP은 탐색(explore_op) 자동 경로만 개방 — 비탐색 소재 UP은 "
-                        "Confirm 스코프 밖(D-NAO-70③, 콘솔 실행 버튼 비활성)"
+                        "소재(ad) UP은 자동 경로(explore_op/cold_op)만 개방 — 그 밖의 소재 UP은 "
+                        "Confirm 스코프 밖(D-NAO-70③·96, 콘솔 실행 버튼 비활성)"
                     )
-                if proposal.proposal_type not in EXPLORATION_STEP_TYPES:
+                if proposal.proposal_type not in allowed:
                     return (
-                        f"explore_op 소재 UP은 탐색 스텝 타입만(개방={sorted(EXPLORATION_STEP_TYPES)}, "
-                        f"요청={proposal.proposal_type})"
+                        f"승인원 {proposal.approval_source} 소재 UP은 {sorted(allowed)} 타입만"
+                        f"(요청={proposal.proposal_type}) — 타입⟺승인원 쌍방향 잠금"
                     )
             elif proposal.proposal_type not in BID_DOWN_TYPES:
                 return (
                     f"소재(ad) {proposal.proposal_type}은 미지원 방향"
-                    "(UP=탐색explore_op / DOWN=bid_down Confirm)"
+                    "(UP=탐색explore_op·콜드cold_op / DOWN=bid_down Confirm)"
+                )
+        # CS(리뷰 P1-3): 콜드 스텝 구조 게이트 — target_type 강제 + 상한 마커 존재(정적 판정).
+        if proposal.proposal_type in COLD_START_STEP_TYPES:
+            if proposal.target_type != "ad":
+                return (
+                    f"콜드 첫 입찰은 소재(ad) 전용 — target_type={proposal.target_type} "
+                    "(그룹/키워드 grain은 소재 UP 경계·상한 게이트 우회 경로)"
+                )
+            if decode_cold_ceiling(proposal.expected_effect) is None:
+                return (
+                    "콜드 상한 마커 부재/오염 — ±15% 완전 면제 타입이라 상한 없이 실행 금지"
+                    "(실행 버튼 비활성, D-NAO-96)"
                 )
     elif action == "set_user_lock":
         if proposal.target_type not in ("keyword", "adgroup"):

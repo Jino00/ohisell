@@ -175,8 +175,10 @@ def collect_daily(
     rows: [(ad_id, adgroup_id, campaign_id), ...]. devices 각각에 대해 사다리+최소노출을 조회한다.
     반환: {"ads": n, "rows": n, "floor_ads": n, "devices": [...]}.
 
-    ★이 함수는 예외를 밖으로 던지지 않는다 — 기존 일별 수집 크론 안에서 호출되므로
-      여기서 실패해도 다른 수집을 죽이면 안 된다(호출부도 try/except로 한 번 더 격리한다).
+    ★예외 계약(리뷰 P3-11 정정): 개별 HTTP 배치 실패는 내부에서 삼켜 건너뛰지만(전체 중단 금지),
+      **DB 예외(commit 등)는 그대로 전파된다.** 종전 docstring이 "예외를 밖으로 던지지 않는다"고
+      쓴 것은 사실이 아니었다. 격리는 호출부(cold_start_bid_lane.collect_market_bids_daily)의
+      try/except가 담당한다 — 그쪽이 rollback까지 한다.
     """
     result = {"ads": len(rows), "rows": 0, "floor_ads": 0, "devices": list(devices)}
     if not rows:
@@ -184,29 +186,44 @@ def collect_daily(
     meta = {ad_id: (adgroup_id, campaign_id) for ad_id, adgroup_id, campaign_id in rows}
     ad_ids = list(meta.keys())
 
-    # 당일 재실행 멱등: 오늘자 행을 먼저 지우고 다시 넣는다(유니크 충돌 방지).
-    db.execute(delete(NaverBidEstimateDaily).where(NaverBidEstimateDaily.date == today))
-
+    # ── 1단계: HTTP를 **전부** 먼저 끝낸다(DB 트랜잭션 밖) ──────────────────────
+    # ★리뷰 P2-6: 종전엔 DELETE로 트랜잭션을 연 채 전체 HTTP 시퀀스를 돌았다. SQLite는 DELETE
+    #   시점에 쓰기 락을 잡고 commit까지 유지하므로, devices×(positions+expmin)×배치 만큼의
+    #   `_estimate_post`(타임아웃 30s×3회 재시도 + backoff + sleep)를 도는 동안 다른 writer가
+    #   `database is locked`를 받는다(매시 :20 시간당 레인과 겹칠 수 있다).
+    pending: list[tuple] = []   # (ad_id, device, position, bid, is_floor)
     floor_ads: set[str] = set()
     for device in devices:
         probed = probe_market_bids(ad_ids, device)
         for ad_id, info in probed.items():
-            adgroup_id, campaign_id = meta[ad_id]
             if info["is_floor"]:
                 floor_ads.add(ad_id)
             for position, bid in sorted(info["ladder"].items()):
-                db.add(NaverBidEstimateDaily(
-                    date=today, ad_id=ad_id, adgroup_id=adgroup_id, campaign_id=campaign_id,
-                    device=device, position=position, bid=int(bid), is_floor=info["is_floor"],
-                ))
-                result["rows"] += 1
+                pending.append((ad_id, device, position, int(bid), info["is_floor"]))
             if info["exposure_min"] is not None:
-                db.add(NaverBidEstimateDaily(
-                    date=today, ad_id=ad_id, adgroup_id=adgroup_id, campaign_id=campaign_id,
-                    device=device, position=POSITION_EXPOSURE_MIN,
-                    bid=int(info["exposure_min"]), is_floor=info["is_floor"],
-                ))
-                result["rows"] += 1
+                pending.append((ad_id, device, POSITION_EXPOSURE_MIN,
+                                int(info["exposure_min"]), info["is_floor"]))
+
+    # ★리뷰 P2-5: 수집분이 0행이면 **기존 오늘자 데이터를 지우지 않는다.**
+    #   부분/전면 API 실패는 배치 단위로 삼켜져 정상 종료하므로(전체 중단 금지 설계), 종전 구현은
+    #   "DELETE 후 0건 INSERT 후 commit" = 정상 수집분 전소로 조용히 끝났다. 아침 배치 재시도가
+    #   있는 시스템이라 실제로 발생 가능하다. 빈 결과는 no-op이 옳다.
+    if not pending:
+        log.warning(
+            "market_bid_probe: 시장가 수집 0행(전면 실패 추정) — 오늘자 기존 행 보존(no-op)"
+        )
+        result["floor_ads"] = len(floor_ads)
+        return result
+
+    # ── 2단계: 짧은 트랜잭션 하나로 교체(DELETE + INSERT + commit) ──────────────
+    db.execute(delete(NaverBidEstimateDaily).where(NaverBidEstimateDaily.date == today))
+    for ad_id, device, position, bid, is_floor in pending:
+        adgroup_id, campaign_id = meta[ad_id]
+        db.add(NaverBidEstimateDaily(
+            date=today, ad_id=ad_id, adgroup_id=adgroup_id, campaign_id=campaign_id,
+            device=device, position=position, bid=bid, is_floor=is_floor,
+        ))
+        result["rows"] += 1
     db.commit()
     result["floor_ads"] = len(floor_ads)
     log.info(
