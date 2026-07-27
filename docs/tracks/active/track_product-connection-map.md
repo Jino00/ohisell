@@ -113,7 +113,7 @@ DB: `backend/ohisell.db` (dev), 엑셀: `.../15. 기획/상품 리스트/ohisell
 - **codex review 완료(gate PASS, P1 0건)**: P2 3건 중 2건 반영(① `unmapped_order_options` 50건 캡을 API 계약에서 숨기지 않도록 `limit` 쿼리파라미터 추가 ② `platform_product_id=""` 주문이 coverage=1.0으로 은폐되는 문제를 `blank_option_id_orders` 필드로 별도 노출), N+1 쿼리 최적화 1건은 현재 규모(채널 7개·주문 최대 1,300여 건)에서 실익 없다고 판단해 기각.
 
 ## 📍 현재 진행 단계
-S1+S2 완료·커밋·PR. 다음: PR 머지 후 S3(통합 손익 조망 Harness) 착수.
+S1+S2 완료·커밋·PR #1 머지 완료(main `3e3624a`). 다음: S3(통합 손익 조망 Harness) 착수.
 
 ## ▶️ 다음 액션
 1. S1 계획 상세화(엑셀 컬럼 정규화 규칙·upsert 멱등 계약·무결성 리포트 스키마·sell_type 마이그레이션) → /plan-eng-review.

@@ -18,8 +18,14 @@ from app.models import (
     CoupangRocketPurchaseOrder,
     CoupangRocketPurchaseOrderItem,
     CoupangRocketSettlement,
+    CoupangWingCookie,
 )
 from app.utils.kst import kst_now
+
+# 로켓배송 페처 heartbeat/refresh 상태 행 (Wing 페처 패턴 복제, vendor_summary_sync 참고).
+# CoupangWingCookie 테이블을 재사용(가상 account_key).
+_ROCKET_FETCHER_ACCOUNT = "COUPANG_ROCKET_FETCHER"
+_STALE_HOURS = 26  # 이 시간 이상 push 없으면 stale (야간 off 오탐 방지)
 
 log = logging.getLogger(__name__)
 
@@ -159,3 +165,89 @@ def ingest_po_items(db: Session, purchase_order_seq: int, vendor_id: str, rows: 
     db.commit()
     log.info("rocket PO 발주상세 ingest: po=%d vendor=%s skus=%d", purchase_order_seq, vendor_id, len(recs))
     return {"ingested": len(recs), "purchase_order_seq": purchase_order_seq}
+
+
+# ════════════════════════════════════════════════
+# 로켓 페처 heartbeat / 갱신 트리거 (Wing 패턴 복제)
+# ════════════════════════════════════════════════
+def _state_row(db: Session):
+    return (
+        db.query(CoupangWingCookie)
+        .filter(CoupangWingCookie.account_key == _ROCKET_FETCHER_ACCOUNT)
+        .first()
+    )
+
+
+def _ensure_state_row(db: Session):
+    row = _state_row(db)
+    if row is None:
+        row = CoupangWingCookie(account_key=_ROCKET_FETCHER_ACCOUNT)
+        db.add(row)
+    return row
+
+
+def rocket_fetcher_status(db: Session) -> dict:
+    """로켓 페처 push 상태(민감값 없음). last_success_at=마지막 push, stale=push 끊김."""
+    row = _state_row(db)
+    if row is None:
+        return {"account": _ROCKET_FETCHER_ACCOUNT, "status": "none",
+                "last_success_at": None, "age_hours": None, "stale": False}
+    age_hours = None
+    stale = False
+    if row.last_success_at:
+        age_hours = max(0.0, round((kst_now() - row.last_success_at).total_seconds() / 3600, 1))
+        stale = age_hours > _STALE_HOURS
+    return {
+        "account": _ROCKET_FETCHER_ACCOUNT,
+        "status": row.status,
+        "last_success_at": row.last_success_at.isoformat() if row.last_success_at else None,
+        "last_error": row.last_error,
+        "age_hours": age_hours,
+        "stale": stale,
+    }
+
+
+def request_rocket_refresh(db: Session) -> dict:
+    """UI '로켓 갱신' 버튼 → 갱신 요청 플래그 set. 페처가 다음 실행에서 소비."""
+    row = _ensure_state_row(db)
+    row.refresh_requested_at = kst_now()
+    db.commit()
+    return {"requested": True, "requested_at": row.refresh_requested_at.isoformat()}
+
+
+def rocket_refresh_status(db: Session) -> dict:
+    """갱신 요청/완료 상태. UI 폴링·페처 소비 공용."""
+    row = _state_row(db)
+    if row is None:
+        return {"requested": False, "requested_at": None, "last_success_at": None,
+                "status": "none", "last_error": None}
+    return {
+        "requested": row.refresh_requested_at is not None,
+        "requested_at": row.refresh_requested_at.isoformat() if row.refresh_requested_at else None,
+        "last_success_at": row.last_success_at.isoformat() if row.last_success_at else None,
+        "status": row.status,
+        "last_error": row.last_error,
+    }
+
+
+def claim_rocket_refresh(db: Session) -> dict:
+    """로켓 페처가 갱신 요청을 '소비'(플래그 clear). 원자적 조건부 UPDATE."""
+    from sqlalchemy import update
+
+    res = db.execute(
+        update(CoupangWingCookie)
+        .where(CoupangWingCookie.account_key == _ROCKET_FETCHER_ACCOUNT)
+        .where(CoupangWingCookie.refresh_requested_at.isnot(None))
+        .values(refresh_requested_at=None)
+    )
+    db.commit()
+    return {"claimed": (res.rowcount or 0) > 0}
+
+
+def mark_rocket_fetch_success(db: Session) -> None:
+    """페처 실행 완료 시 last_success_at 갱신."""
+    row = _ensure_state_row(db)
+    row.last_success_at = kst_now()
+    row.status = "green"
+    row.last_error = None
+    db.commit()

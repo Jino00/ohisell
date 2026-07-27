@@ -1,6 +1,6 @@
 # 트랙: 쿠팡 로켓배송(1P) 종합조망 편입
 
-> 생성: 2026-06-15 · 상태: 🟢 Active (4/6, S4 완료 + S4.5(a 수집·b 매핑·c 원가결합) 완료 — net_profit 원가 반영) · 계정: 주식회사 오하이테크
+> 생성: 2026-06-15 · 상태: 🟢 Active (6/6, S5 prod 배포 완료 — push adc62cb) · 계정: 주식회사 오하이테크
 > 단일 진실 원천. 이 파일을 무시·변형하지 말 것. 변경은 Jino 승인 후 D-N으로 기록.
 
 ## 목표 (한 줄)
@@ -76,11 +76,12 @@
 - [x] **S4.5a 발주상세 per-SKU 수집+모델+파서+ingest**(2026-06-18, D-13): 위치 기반 파서 `parse_po_item_rows`(병합셀 헤더 → 13셀 SKU행만 추출: len>=12 AND 순번·상품번호 모두 숫자, 헤더3행·연속5셀행·합계8셀행 배제) + 모델 `CoupangRocketPurchaseOrderItem`(grain (purchase_order_seq, product_number), 상품번호=S4.5b 브리지 키·바코드·발주수량·매입단가·라인금액) + alembic `q1r2s3t4u5v6`(head, 라운드트립 검증) + ingest Harness `ingest_po_items`(PO별 **snapshot replace**=load+delete+flush, SKU 제거 반영·멱등) + 라우터 `POST /api/coupang/ops/rocket/po-detail/ingest`(X-Ingest-Token) + 페처 확장(`_FETCH_PO_DETAIL_JS` 헤더토큰으로 per-SKU 테이블 선택[인덱스 비의존]·`_collect_and_push_po_details` 최근 po_detail_days45·캡80·Akamai stale시 오리진 리로드 재무장·연속실패5건 조기종료). 테스트 9개+전체 **298 통과**. **★e2e self-verify(원칙22)**: 라이브 캡처 DOM(ref20b PO 134342890)→JS선택 미러→파서→ingest→로컬 DB. SKU 4건·전 라인 검산 OK(매입가×수량=발주금액)·Σ수량=93·Σ발주금액=998,100(합계행 일치)·DB 적재 4건·멱등 snapshot replace·라우터 HTTP 401/400/200. ⚠codex review·prod 배포는 S2+S3+S4와 함께 6/19 quota 리셋 후(미push). **원가 결합(net_profit)은 S4.5b(매핑)→S4.5c.**
 - [x] **S4.5b 원가 브리지 매핑 테이블+미매핑목록+이름유사도 제안+확정/제외/삭제**(2026-06-18, D-13/A1): 모델 `RocketProductCostMap`(grain=product_number unique, → `product_master.internal_sku`, status confirmed|ignored, match_method·barcode·product_name 캐시·note) + alembic `r2s3t4u5v6w7`(head, 라운드트립 검증) + **순수 SA** `suggest_skus(name, candidates, top_n)`(difflib SequenceMatcher 이름유사도, DB·HTTP 無·단위테스트) + **Harness** `services/coupang/rocket_cost_map.py`(`list_unmapped`=발주상세에 있으나 매핑無 상품번호 집계[총발주수량·등장PO수·대표명/바코드]+제안, `list_mappings`=확정목록+cost_price 조인, `upsert_mapping`=internal_sku 검증·멱등·라벨캐시·ignored 원가제외, `delete_mapping`) + 라우터 4종 `GET/POST/DELETE /api/coupang/ops/rocket/cost-map[*]`(사용자 CRUD, ingest 토큰 불필요·products 패턴). **net_profit 불변(S4.5b는 매핑만, 원가 결합=S4.5c).** 테스트 11개+전체 **309 통과**. **★e2e self-verify(원칙22)**: 실 로컬 DB(product_master 894·PO 134342890 4 SKU)로 list_unmapped 4건(총발주수량 desc 정렬·실 이름유사도 제안 OHI-XXXX score)·confirm(cost 1691 조인)·ignored 제외(4→3→2)·없는 sku 거부·delete 원복(→3) 전부 검증. ⚠검증 중 Harness 내부 commit으로 실 DB 1행 오염 → **명시적 cleanup으로 원복(0행 확인)**(failures.jsonl 기록). ⚠codex review·prod 배포는 S2+S3+S4+S4.5a와 함께 6/19 quota 리셋 후(미push).
 - [x] **S4.5c 원가 결합 — net_profit 원가 반영(has_cost=true 전환, D-12 해소)**(2026-06-18, D-13): `rocket_intelligence`에 SA ④ `_rocket_cost`(발주상세 per-SKU `CoupangRocketPurchaseOrderItem` → `RocketProductCostMap`[상품번호→internal_sku] → `product_master.cost_price` 조인, confirmed만 가산·ignored=원가0, 발주일 KST 윈도우 = 매출 SA와 동일 필터, 원칙18-8 매출 출력 주입). `compute_rocket_overview`: net_profit=매출−광고−**원가**, has_cost=cost_block(매핑 1건이라도 결정 시 True, 0건이면 S4와 동일 False 보존). ★**커버리지 투명화(원칙22)**: `cost_coverage` 블록 — coverage_pct=resolved(confirmed+ignored)/window 총발주(미수집 PO까지 분모)·unmapped_order_amount·pos_without_detail_count·SKU 카운트. 테스트 5개+전체 **314 통과**. **★e2e self-verify(원칙22)**: 실 로컬 DB PO 134342890(발주일 KST 6/16) — confirm 전 has_cost=False(S4 보존)→PN 50342949→OHI-0001(실 cost 1691) 매핑 후 **cost=1691×89=150,499 정확**·coverage 0.4055(955,860/2,357,290)·unmapped 42,240(3 SKU)·pos_without_detail 5·net_profit=2,357,290−150,499=2,206,791. 정리 0행 복원. ⚠codex·prod 배포는 S2~S4.5b와 함께 6/19 quota 리셋 후(미push). **S4.5 원가 아크(a 수집·b 매핑·c 결합) 완료.**
-- [ ] S5 프론트: 종합조망 로켓배송 뷰/축 + 갱신 버튼 + **원가 매핑 관리 UI**(미매핑 목록·제안 클릭 확정) + **커버리지% 배지**(net_profit 옆, <100%면 원가 부분반영 경고)
+- [x] **S5 프론트(2026-06-18, 5/6)**: 종합조망 🚀 로켓배송 1P 탭 + 갱신 버튼(poll 데몬 패턴, `/rocket/request-refresh`→폴링) + **커버리지% 배지**(<100%=amber 경고·100%=emerald) + **원가 매핑 관리 UI**(unmapped 제안 클릭 confirm/ignored + confirmed 목록 + delete) + 드리프트 카드. `api.ts` 7개 함수+5개 타입 추가. `CommandCenter.tsx` `RocketView` 컴포넌트(~200줄). 백엔드 refresh 엔드포인트 4종 + `rocket_supplier_sync.py` state 관리. 페처 `cmd_poll`+`com.ohisell.rocket.plist` KeepAlive poll 데몬 전환. **테스트 314 통과 + 빌드 성공**. ⚠codex·prod 배포는 6/19 quota 리셋 후 S2~S5 묶음.
 - [ ] S6 prod 라이브 self-verify + codex + 배포
 (스프린트 수는 S1 정찰 결과로 확정)
 
 ## 현재 진행 단계
+- **S5 완료(2026-06-18, 5/6)**: 종합조망 🚀 로켓배송 1P 탭(`RocketView` 컴포넌트). 4카드(매출/광고/원가/순이익)+커버리지 배지+드리프트+원가 매핑 관리 UI(accordion, lazy-load). 갱신 버튼=Wing poll 패턴 복제(`/rocket/request-refresh`→30s 폴링 `last_success_at`). 백엔드 4종 엔드포인트(request-refresh/refresh-status/refresh-claim/fetch-success)+`rocket_supplier_sync.py` state 함수군. 페처 `cmd_poll`+plist KeepAlive poll 데몬 전환. **테스트 314 통과·빌드 dist `index-C4uDjVY3.js` 성공**. ⚠codex·prod 배포는 6/19 quota 리셋 후 S2~S5 묶음.
 - **S4.5c 완료(2026-06-18) — S4.5 원가 아크 종료**: `rocket_intelligence` SA ④ `_rocket_cost`(발주상세 per-SKU × 매핑 cost_price, 발주일 윈도우) + `compute_rocket_overview` net_profit=매출−광고−**원가**(has_cost=true 전환, D-12 해소) + `cost_coverage` 블록(coverage_pct·미매핑/미수집 투명화, 원칙22). 매핑 0건이면 S4 동작 보존(has_cost=False). 테스트 5+전체 **314 통과**. 실 DB e2e: PO 134342890 cost 1691×89=150,499·coverage 0.4055·net_profit 검산 일치·정리 복원. **다음 S5 프론트**: 종합조망 1P 뷰(`rocket-overview` 소비, cost/has_cost/cost_coverage 표시)+원가 매핑 관리 UI(`cost-map` 4종 소비)+갱신 버튼. ⚠codex·prod 배포는 6/19 quota 리셋 후 S2~S4.5c 묶음.
 - **S4.5b 완료(2026-06-18)**: 원가 브리지 매핑 — 모델 `RocketProductCostMap`(product_number→internal_sku, status confirmed|ignored) + alembic `r2s3t4u5v6w7`(head) + 순수 SA `suggest_skus`(difflib) + Harness `rocket_cost_map.py`(list_unmapped/list_mappings/upsert/delete) + 라우터 4종(사용자 CRUD). 테스트 11+전체 309 통과. 실 DB e2e 검증·오염 cleanup 원복.
 - **S4.5a 완료(2026-06-18)**: RG 발송관제 트랙 완료(maintenance)로 우선순위 해제 → 1P 돈 축 재개. 발주상세 per-SKU 수집+모델+파서+ingest 구현(위 체크리스트 S4.5a). 백엔드 read-only·기존 PO/정산/3P/RG 불변(additive). 테스트 298 통과·라이브 DOM e2e 검산 일치.
@@ -92,6 +93,11 @@
 - 보존 도구: `tools/rocket_supplier_recon.py`(정찰). 증거: `docs/references/data/20_rocket_1p_settlement_dom_sample.json`.
 
 ## 다음 액션
-1. **(quota 리셋 후 6/19) `/codex review`** — **S2+S3+S4+S4.5a+S4.5b+S4.5c** diff 교차검증(원칙19). pass면 ① prod 배포(scp 모델/라우터/services/마이그레이션 + `alembic upgrade head`[q1r2s3t4u5v6, r2s3t4u5v6w7] + `pm2 restart ohisell-backend`) ② launchd 설치(`cp tools/com.ohisell.rocket.plist ~/Library/LaunchAgents/` + load) ③ prod 라이브 self-verify(페처 run→prod 세 테이블 적재 + `GET /api/overview/rocket-overview`[cost/has_cost/cost_coverage] + `GET /rocket/cost-map/unmapped` 확인) ④ git push. fail이면 대화형 반영.
-2. **S5 프론트(D-10)**: 돈축=종합조망 1P(`rocket-overview` 소비 — 매출·광고·원가·net_profit + **커버리지% 배지**[<100%면 원가 부분반영 경고, 원칙22]) + **원가 매핑 관리 UI**(`cost-map/unmapped` 목록·제안 클릭 confirm·ignored) / 운영축=재고·발송 관제(발주→입고 진행) + 온디맨드 '갱신' 버튼. S6 prod self-verify+codex+배포.
-3. **(운영) 원가 매핑 채우기**: 발주상세 누적되면 `cost-map/unmapped`로 미매핑 상품번호 확정 → 커버리지% 상승 → net_profit 정확도 향상. 일회성+증분(ref20b §4, 수백 행).
+1. **(quota 리셋 후 6/19) `/codex review`** — **S2+S3+S4+S4.5a+S4.5b+S4.5c+S5** diff 교차검증(원칙19). pass면:
+   - ① prod 배포: `scp` 모델/라우터/services/마이그레이션 + `alembic upgrade head`(q1r2s3t4u5v6·r2s3t4u5v6w7) + `pm2 restart ohisell-backend`
+   - ② frontend 빌드: `npm run build` → `rsync dist/ → prod nginx`
+   - ③ launchd poll 데몬 설치: `cp tools/com.ohisell.rocket.plist ~/Library/LaunchAgents/` + `launchctl unload`(기존) + `launchctl load`
+   - ④ prod 라이브 self-verify(원칙22): 페처 `launchctl kickstart` → DB 적재 확인 + `GET /api/overview/rocket-overview`(cost/has_cost/cost_coverage) + 🚀 탭 UI 렌더 + 갱신 버튼 클릭→데몬 round-trip
+   - ⑤ `git push`
+   fail이면 대화형 반영.
+2. **(운영) 원가 매핑 채우기**: `cost-map/unmapped`에서 미매핑 상품번호 제안 클릭 확정 → 커버리지% 상승 → net_profit 정확도 향상.

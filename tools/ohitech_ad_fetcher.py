@@ -526,6 +526,30 @@ def cmd_chrome_supervise(cfg: dict) -> int:
     return 0
 
 
+def _daily_due(last_success_at: str | None, last_auto_ts: float, now_ts: float,
+               now_kst: datetime, daily_hours: int, backoff_s: int) -> bool:
+    """일별 자동 갱신을 지금 실행할지 판정(순수 함수 — 테스트 가능).
+
+    조건 = ⓐ prod last_success_at이 daily_hours 초과(또는 성공기록 없음/파싱실패)로 '오래됨'
+           AND ⓑ 직전 자동 시도(last_auto_ts) 후 backoff_s 초과.
+    ⓑ 백오프가 핵심: 세션 만료로 run이 실패하면 last_success_at이 갱신 안 돼 ⓐ가 영구 참이
+    되는데, 백오프가 없으면 매 폴(~60s)마다 재시도 → Chrome 로그인 팝업·알림 스팸
+    (2026-06-24 라이브 버그). backoff_s로 stale 상태에서도 재시도를 드물게(기본 1h) 제한한다.
+    """
+    stale = True
+    if last_success_at:
+        try:
+            suc_dt = datetime.fromisoformat(last_success_at)
+            if suc_dt.tzinfo is None:
+                suc_dt = suc_dt.replace(tzinfo=KST)
+            stale = (now_kst - suc_dt).total_seconds() > daily_hours * 3600
+        except (ValueError, TypeError):
+            stale = True  # 파싱 실패 → 오래됨으로 간주(단 백오프 적용)
+    if not stale:
+        return False
+    return (now_ts - last_auto_ts) > backoff_s
+
+
 def cmd_poll(cfg: dict) -> int:
     """상주 poll 데몬 — '광고비 갱신' 버튼 요청 감지 + 일별 자동 실행 (S3, 트랙 D-11).
 
@@ -540,9 +564,12 @@ def cmd_poll(cfg: dict) -> int:
     interval = int(cfg.get("poll_interval_s", 60))
     cooldown = int(cfg.get("min_fetch_interval_s", 60))
     daily_hours = int(cfg.get("daily_run_hours", 23))
+    # stale 상태(세션 만료 등으로 last_success 미갱신)에서 일별 자동 재시도 최소 간격(기본 1h).
+    # 백오프 — 죽은 세션을 매분 재시도해 Chrome 팝업·알림을 스팸하던 버그 차단(2026-06-24).
+    retry_backoff_s = int(cfg.get("stale_retry_backoff_s", 3600))
     _MAX_FAILS = 10
     last_fetch = 0.0   # time.monotonic — 해머링 방지 쿨다운
-    last_auto = 0.0    # time.time — last_success_at 없을 때 자동실행 디바운스
+    last_auto = 0.0    # time.time — 직전 자동(daily) 시도 시각(백오프 디바운스)
     net_fails = 0
     auth_alerted = False  # claim 401 알림 디바운스(성공 claim 시 해제) — 토큰 불일치 스팸 방지
     log.info("[poll] 시작 — %ds 간격 갱신요청 확인 + %dh 자동실행(버튼/일별), 포트 %s",
@@ -554,22 +581,11 @@ def cmd_poll(cfg: dict) -> int:
             trigger = None  # "button" | "daily"
             if st.get("requested"):
                 trigger = "button"
-            else:
-                suc = st.get("last_success_at")
-                if suc:
-                    # last_success_at은 prod가 naive KST(kst_now)로 기록 → KST로 명시 해석해 비교
-                    # (Mac 로컬 TZ에 의존하지 않도록, 리뷰 P2 — TZ 휴리스틱 제거).
-                    try:
-                        suc_dt = datetime.fromisoformat(suc)
-                        if suc_dt.tzinfo is None:
-                            suc_dt = suc_dt.replace(tzinfo=KST)
-                        age_s = (datetime.now(KST) - suc_dt).total_seconds()
-                    except (ValueError, TypeError):
-                        age_s = daily_hours * 3600 + 1  # 파싱 실패 → 자동 실행 유도
-                    if age_s > daily_hours * 3600:
-                        trigger = "daily"
-                elif (_time.time() - last_auto) > daily_hours * 3600:
-                    trigger = "daily"  # 성공 기록 없음 → 첫 자동 실행
+            elif _daily_due(st.get("last_success_at"), last_auto, _time.time(),
+                            datetime.now(KST), daily_hours, retry_backoff_s):
+                # last_success_at은 prod가 naive KST로 기록 → _daily_due가 KST로 해석.
+                # stale + 백오프(retry_backoff_s) 경과 시에만 daily 트리거(매분 재시도 차단).
+                trigger = "daily"
 
             if trigger:
                 if _time.monotonic() - last_fetch < cooldown:

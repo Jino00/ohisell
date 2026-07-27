@@ -220,6 +220,26 @@ export default function CoupangOps() {
     }
   }
 
+  // 화면 진입 시 자동 1회 광고비 갱신 — 매시 백그라운드 cron을 대체(Jino: "화면 볼 때만 업데이트").
+  // 신선도 가드: 마지막 성공이 STALE_MIN분 이내면 스킵 → 화면 왔다갔다할 때 중복 갱신(Chrome 팝업) 방지.
+  // last_success_at은 prod naive KST → +09:00로 해석해 나이 계산.
+  const AUTO_REFRESH_STALE_MIN = 30;
+  async function maybeAutoRefreshAdCost() {
+    try {
+      const st = await getAdCostRefreshStatus();
+      const suc = st.last_success_at;
+      let ageMin = Infinity;
+      if (suc) {
+        const iso = /[zZ+]|[+-]\d\d:\d\d$/.test(suc) ? suc : `${suc}+09:00`;
+        const t = new Date(iso).getTime();
+        if (!isNaN(t)) ageMin = (Date.now() - t) / 60000;
+      }
+      if (ageMin >= AUTO_REFRESH_STALE_MIN) {
+        await refreshAdCostNow();  // 오래됐을 때만 자동 갱신(그때만 Mac 페처/Chrome 동작)
+      }
+    } catch { /* 조용히 실패 — 버튼으로 수동 갱신 가능 */ }
+  }
+
   async function syncNow() {
     setSyncing(true);
     setSyncMsg(null);
@@ -255,7 +275,10 @@ export default function CoupangOps() {
     setSyncing(true);
     (async () => {
       try { await triggerSync(); } catch { /* sync 실패해도 기존 데이터 표시 */ }
-      if (!cancelled) { setSyncing(false); load(company, days); loadAdCookieStatus(); loadTodayAdCost(); }
+      if (!cancelled) {
+        setSyncing(false); load(company, days); loadAdCookieStatus(); loadTodayAdCost();
+        maybeAutoRefreshAdCost();  // 화면 진입 자동 1회 갱신(신선도 가드)
+      }
     })();
     return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps

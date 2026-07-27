@@ -3,7 +3,14 @@
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
 ## 현재 상태
-- 날짜: 2026-06-22 (★오하이테크 광고 트랙 **S3 상주 자동화 완료·라이브 e2e 검증** — 트랙 거의 완료)
+- 날짜: 2026-07-07 (★**네이버 SA 광고 최적화 트랙 P0 완료·prod 배포·라이브 검증** — 1/6)
+- ★**네이버 SA 광고 P0 수집 파이프라인 완료**: 신규 8테이블 마이그레이션(`u5v6w7x8y9z0`, prod head) + fetcher 확장(AD/AD_CONVERSION 키워드·그룹 grain·직간접 전환 분리·/stats·429 백오프) + report_collector_sa + ad_daily_ingest Harness + bep_calculator_sa + hourly_snapshot + cron 2개(`sync_naver_ad_daily` 07:30·`snapshot_naver_ad_hourly` :05, APScheduler next_run 등록 확인). 브랜치 `claude/admiring-solomon-b4f056` 커밋 `3fae154`. prod(sellc:8001) scp 배포+alembic+pm2 재시작.
+  - **라이브 검증(원칙22)**: naver_ad_daily 3788행(7/05 cost **858,719 = prod ad_costs 정확일치**·직간접전환 분리·파워링크3050+쇼핑738) / naver_product_bep **706행(497 actionable bep_roas**·실효수수료율 4.17%) / hourly 43캠페인. 테스트 9신규+전체508 pass.
+  - **원칙22 정정**: 계획서의 "죽은 sync 2개(ad_costs 6/13·orders 4/15)"는 유령 — stale 로컬 dev DB 오판, prod는 정상(7/05·7/06). "죽은 sync 수리" 작업 삭제.
+  - **라이브 버그 발견·수정**: BEP가 중복 channel_product_id 매핑(22건)에서 UNIQUE 위반 → dedupe 수정(failures.jsonl 기록). 로컬 테스트는 중복 없어 미검출, prod 라이브에서만 발현.
+  - **잔여**: ①07:30 daily 자동 크론이 7/06(어제) 적재 확인(지금은 수동 트리거로 검증, 7/06 리포트는 네이버가 오전 생성) ②codex review(원칙19) ③actionable BEP 497<500은 미주문 196상품 판매가 부재 탓(orders 도출) → 네이버 상품 API 가격 동기화 검토. 트랙=`docs/tracks/active/track_naver-ad-optimization.md`, recon=`docs/references/21`.
+- ─────────────────────────────────────────────
+- (이전) 날짜: 2026-06-22 (★오하이테크 광고 트랙 **S3 상주 자동화 완료·라이브 e2e 검증** — 트랙 거의 완료)
 - ★**오하이테크(1P) 광고비 수집 S3 완료(트랙 `docs/tracks/active/track_coupang-ohitech-ad.md`, D-11)**: 전용 포트 9224 상주 Chrome(launchd `com.ohisell.ohitech-chrome` KeepAlive self-heal) + 버튼-poll 데몬(`com.ohisell.ohitech-ad`, 60s 버튼 + 23h 일별) + 백엔드 4엔드포인트(`/rocket/ad-cost/{request-refresh,refresh-status,refresh-claim,fetch-success}`) + 프론트 '광고비 갱신' 버튼(rocket-overview). 커밋 `2f92620`+`be5ffd3`(feat `feat/ohitech-ad-cost`, **미push·미머지**).
   - ★**포트 9223→9224 개정(D-11, Jino 승인)**: 라이브 9223은 rocket·wing2가 수동 공유 중(9222=WING1 상주) → ohitech 상주화하면 충돌→오벤더 push 위험 → 전용 9224.
   - 백엔드 테스트 +4(전체 **439 passed**). 페처 compile+ruff clean. 프론트 build OK.

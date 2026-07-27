@@ -24,6 +24,9 @@
   - **트리거(Jino 선택 '버튼-poll')**: D-8ⓒ의 스케줄 1회성을 폐기하고 **상주 poll 데몬**(adcost/rocket 패턴) — 30초 폴 `refresh-status`→요청 시 claim→run + last_success 23h 초과 시 자동 run. `com.ohisell.ohitech-ad.plist`(poll). → 백엔드 refresh-status/claim/request 엔드포인트 + 프론트 '광고비 갱신' 버튼(rocket-overview) 신규 배선 필요.
   - **세션만료 신호**: 기존 cmd_run의 `_notify_mac`(로그인HTML/비201/일별맵아님 시 알림) 유지. 별도 쿠키 freshness 워치독은 Phase1.5로 보류.
 
+- **D-12 Phase 2 = 수집만, 표시는 기존 재사용(2026-06-22, Jino 승인 "그래" — 라이브 정찰 기반, 원칙22)**: Phase 2(상품별 옵션 광고비)는 **신규 화면을 만들지 않는다**. 라이브 정찰로 확인 — 상품별 옵션 광고비 표시 화면이 **이미 존재**(`frontend/src/pages/CoupangOps.tsx` 🔧 쿠팡 운영 패널: 상품명+옵션 테이블·광고비·광고전환매출·RoAS·이익·**회사 탭 전체/오픽스/오하이테크**·채널 필터·기간·정렬·검색·모바일카드, prod 라이브). 백엔드도 `GET /api/coupang/ops/sales-summary`(company 필터)가 `coupang_ad_option_daily ⨝ coupang_product_item`로 옵션 광고비를 이미 조인. **진짜 공백 = 수집**: prod `coupang_ad_option_daily`에 오픽스(A01564720, 3P, 2,920행)만 있고 **오하이테크(A01029796) 0행** → 오하이테크 탭 광고비 컬럼이 빔. 조인 연결점 확인: `get_coupang_config(COUPANG_WING2).vendor_id == A01029796`(product_sync D-8) → 옵션행 vendor_id='A01029796' 적재 시 sales-summary 오하이테크 필터 자동 통과 + ad_option_id ⨝ CoupangProductItem.vendor_item_id 상품명 조인. → **Phase 2 = 오하이테크 Billboard 옵션 데이터를 `coupang_ad_option_daily`에 적재(sell_type='Retail')하는 수집 작업뿐.** (앞선 대화의 '통합+계정 토글'은 이미 패널이 충족 → 별도 D 불요.)
+- **D-13 S0 라이브 정찰을 코딩 게이트로(2026-06-22, 추정 금지·D-8ⓔ 패턴 계승)**: 오하이테크 **1P 로켓배송 광고가 옵션(keyword) granularity Billboard 보고서를 제공하는지 미확인**(1P 광고는 마켓플레이스 PA와 다른 상품일 수 있음). → S1 페처 코드 작성 전 **9224 세션에서 Billboard 흐름 라이브 캡처**(getCampaignList→requestReport(daily/keyword)→reportList 폴→excel-report 다운로드) 필수. 검증 3: ⓐ 옵션 granularity 보고서 생성 여부 ⓑ XLSX가 오픽스 keyword 포맷(레퍼런스 16, 44열·[8]광고집행 옵션ID·[10]전환 옵션ID)과 동일해 기존 파서 호환 ⓒ 옵션ID가 오하이테크 vendor_item_id와 조인(CoupangProductItem에 오하이테크 옵션 존재). **GATE: 옵션 분해 미지원이면 즉시 중단·Jino 보고**(Phase 2 불가, 계정단위 유지 대안 논의).
+
 ## 사용자 원문 인용
 - "2P 로켓그로스, 3P 판매자배송은 오픽스에서만 운영, 광고도 진행중이야. 그리고 오하이테크는 1P로켓배송만을 운영중이어서 광고도 로켓배송만 운영되고 있어"
 - 범위: "너의 권장대로 진행"(Phase 1) · 로그인: "A"
@@ -42,14 +45,30 @@
 - [x] **S3: 상주 자동화 완료·라이브 검증(2026-06-22, 원칙22)** — 전용 포트 9224(D-11) + chrome-supervise(launchd `com.ohisell.ohitech-chrome`, KeepAlive self-heal) + 버튼-poll(`com.ohisell.ohitech-ad`, poll: 버튼 claim + 23h 자동) + 백엔드 4엔드포인트(`/rocket/ad-cost/{request-refresh,refresh-status,refresh-claim,fetch-success}`) + 프론트 '광고비 갱신' 버튼(rocket-overview). 커밋 `2f92620`(feat, 미push). **라이브 증거**: ①백엔드 7/7 라운드트립(원자claim·토큰401·소비) ②수동9223 Chrome 은퇴→9224 상주 3초 기동 ③run end-to-end 29일 push(5/24~6/21, 22,431,687) ④heartbeat last_success green ⑤**버튼 라운드트립**(request→poll 60s 감지→claim→run→push→소비) ⑥머니패스 rocket-overview ad_spend 3,393,330·net_profit 5,107,684 ⑦**self-heal**(SIGKILL→3초 복구). Claude 적대적리뷰 P1(config 9223→9224 갱신)·P2(TZ KST·adopt정지알림·실패가시성) 반영. codex 사후리뷰 6/26.
   - ⚠️**잔존**: ① Chrome 기동 직후 첫 run은 리다이렉트 전환으로 1회 false '세션만료' 알림 가능(다음 poll 자동복구) ② 세션 완전만료 시 Jino가 9224 창에서 1회 로그인(D-7, 불가피) ③ feat `feat/ohitech-ad-cost` 미push·미머지(Jino 결정).
 - [x] 라이브 검증: 수집값=화면 1:1(4,039,603)·순이익 반영(0→3,393,330 차감) 확인
-- [ ] (Phase 2) 상품별 옵션 단위 광고비 표시(Billboard 리포트)
+- [ ] **(Phase 2) 오하이테크 옵션 광고비 수집** (D-12·D-13, 표시는 기존 운영패널 재사용):
+  - [ ] S0 라이브 정찰(★GATE): 9224 세션 Billboard 흐름 캡처 → 옵션 granularity·파서 호환·옵션ID 조인 3검증. 미지원 시 중단·보고.
+  - [ ] S1 페처: `ohitech_ad_fetcher.py`에 Billboard 옵션 흐름 추가(오픽스 GraphQL 복제)→`A01029796_pa_daily_keyword_*.xlsx`→기존 `/ad-cost/option-ingest` push. poll 일별 분기 1일1회.
+  - [ ] S2 정합·이중계상 가드: vendor_id A01029796 sell_type='Retail' 적재→sales-summary 통과 확인. 계정단위(coupang_ad_report)↔옵션단위(coupang_ad_option_daily) 머니 비중복 라이브 확인.
+  - [ ] S3 라이브 검증·배포: 운영패널 오하이테크 탭 광고비≠0·RoAS·Σ옵션≈계정값(4,039,603) 정합→launchd 외과적 갱신→codex.
 - [ ] (선택) 세션만료 워치독 — 현재 run의 `_notify_mac`(만료·rc2·401 알림)로 표면화. 별도 쿠키 freshness 워치독은 Phase1.5 보류.
 
 ## 현재 진행 단계
 **S1+S2+S3 완료·prod 배포·라이브 e2e 검증 끝(2026-06-22).** 오하이테크 광고비가 1P 순이익에 반영(누락 해소)되고, **수집이 무중단 자동화**됨: 전용 포트 9224 상주 Chrome(launchd KeepAlive self-heal) + 버튼-poll 데몬(`com.ohisell.ohitech-ad`, 60s 폴 버튼 + 23h 일별 자동). 종합조망 '광고비 갱신' 버튼으로 즉시 갱신. Mac launchd 2잡 설치·가동 확인(외과적 설치 — WING1/rocket/adcost 미접촉). 백엔드 prod 배포(백업 `/home/ubuntu/ohisell_bak/ohitech_s3_20260622_130228`). **남은 단발 개입은 세션 완전만료 시 9224 창 1회 로그인뿐(D-7).** feat 브랜치 미push·미머지.
 
 ## 다음 액션
-1. **(git) feat `feat/ohitech-ad-cost` → main 머지·push** (Jino 결정). prod는 이미 이 코드 실행 중(scp) — 레포 정합 위해 머지 권장.
-2. **(6/26) codex 사후리뷰** — quota 리셋 후 `/codex review`(feat 대비 main).
-3. (관찰) 첫 run false-만료 알림 빈도 — 잦으면 cmd_run에 1회 재시도 추가 검토.
-4. (Phase 2) 상품별 옵션 단위 광고비 표시(Billboard 리포트).
+1. ~~(git) feat → main 머지·push~~ **완료**(2026-06-22 확인): `main`=`feat/ohitech-ad-cost`=`origin/main`=`b766812` 전부 정합. git 미결 없음.
+2. **(Phase 2 진행 중)** 구조 승인 완료(Jino "그래", D-12·D-13). 스펙 문서→writing-plans→**S0 라이브 정찰(GATE)**부터. 표시 화면 신규 제작 없음(기존 운영패널 재사용).
+3. **(6/26) codex 사후리뷰** — quota 리셋 후 `/codex review`(S1~S3 diff). 원칙19 의무 잔여.
+4. (관찰) 첫 run false-만료 알림 빈도 — 잦으면 cmd_run에 1회 재시도 추가 검토.
+
+### ⚠️ 2026-06-24 운영 상태 (세션 재개 — 반드시 확인)
+- **오하이테크 광고 세션 만료**(06-22 13:06 마지막 성공 이후 ~2일 죽음). advertising.coupang.com 로그인 리다이렉트(라이브 3회 확인). → **Phase 2 S0 정찰 블로킹** + 수집 0.
+- **★백오프 버그 발견·수정 완료(2026-06-24)**: `ohitech_ad_fetcher.cmd_poll`의 daily 자동 트리거가 **세션 만료(rc=1) 시 백오프 없이 ~64초마다 재시도** → 매분 9224 Chrome 로그인 팝업 + `_notify_mac` 스팸(14:57~15:12 라이브 확인). last_success가 실패 시 안 갱신돼 age>23h 영구참. **수정**: `_daily_due` 순수함수 추출 + `last_auto` 기반 `stale_retry_backoff_s`(기본 3600s) 디바운스 → stale 상태에서도 재시도 최소 1h 간격. 단위테스트 11건 PASS(`tools/test_ohitech_poll_backoff.py`), ruff clean, `~/.ohisell/tools/`에 배포. failures.jsonl 기록. (라이브 루프 검증은 데몬 재가동 시.)
+- **임시 조치**: `launchctl bootout com.ohisell.ohitech-ad`로 **수집 데몬 정지**(소음 중단, 루프 종료 확인). **`com.ohisell.ohitech-chrome`(9224 상주)는 유지**(로그인 창). → ⚠️ **재가동 필요**: `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ohisell.ohitech-ad.plist`.
+- **별건 처리**: 오픽스 매시 광고 팝업 → prod 스케줄러 `request_ad_cost_refresh` 토글 OFF(enabled=False) + 운영패널(CoupangOps) **화면 진입 자동 1회 갱신**(30분 신선도 가드) 배선·prod 배포(index-CjmlhFPu.js). Jino "화면 볼 때만 업데이트".
+- **다음(복구 순서)**: ① Jino 9224 Chrome 로그인(D-7) → ② ~~백오프 버그 수정~~ **완료** → ③ 데몬 재가동(`bootstrap`) → ④ Phase 2 S0 정찰.
+
+### 라이브 헬스 재확인 (2026-06-22, 세션 재개 시점, 원칙22)
+- launchd: `com.ohisell.ohitech-ad`(poll, exit 0) + `com.ohisell.ohitech-chrome`(supervisor, exit 0) 가동
+- 9224 상주 Chrome LISTEN(PID 21206) · prod heartbeat `status green` `last_success 2026-06-22T13:06:45`
+- → 무중단 자동화 정상 동작 중. 잔여 단발개입 = 세션 완전만료 시 9224 창 1회 로그인(D-7)뿐.
