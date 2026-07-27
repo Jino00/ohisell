@@ -1310,20 +1310,44 @@ def _cdp_alive(port: int) -> bool:
 
 
 def _profile_owner_pid(profile: str) -> int | None:
-    """이 프로필을 점유 중인 Chrome **브라우저 프로세스 PID** (SingletonLock 심볼릭링크 타깃).
+    """이 프로필을 **지금** 점유 중인 Chrome 브라우저 프로세스 PID. stale이면 None.
 
     Chrome은 user-data-dir 안 SingletonLock을 'hostname-PID'로 건다. 그 PID가 곧 DevTools
-    포트를 LISTEN하는 브라우저 프로세스다. 프로필 디렉터리는 우리 것이므로 이 값은 권위 있다.
+    포트를 LISTEN하는 브라우저 프로세스다(Chromium ProcessSingleton / RemoteDebuggingServer).
+
+    ★심볼릭링크만 믿으면 안 된다(codex R5): Chrome이 크래시하면 SingletonLock이 남고, macOS가
+    그 PID를 무관한 프로세스에 재사용할 수 있다. 그 프로세스가 마침 우리 CDP 포트를 LISTEN하면
+    PID가 같다는 이유로 adopt돼 버린다. 그래서 3중으로 확인한다:
+      ① PID 파싱 ② 그 PID가 살아 있음 ③ 그 프로세스가 **우리 프로필로 도는 Chrome**임(cmdline).
+    ③은 단독 증거로는 약하지만(ps가 argv를 flatten — codex R4) 여기서는 ①②와 **AND**라
+    위조하려면 우리 프로필 lock의 PID까지 차지해야 한다.
+    (호스트명은 검사하지 않는다 — macOS는 `.local` 이름이 바뀌는 일이 있어 오거부 위험이 더 크다.)
     """
+    prof = os.path.expanduser(profile)
     try:
-        target = os.readlink(os.path.join(os.path.expanduser(profile), "SingletonLock"))
+        target = os.readlink(os.path.join(prof, "SingletonLock"))
     except OSError:
         return None
     try:
         pid = int(target.rsplit("-", 1)[-1])   # 호스트명에 '-'가 있어도 마지막만
     except ValueError:
         return None
-    return pid if pid > 0 else None
+    if pid <= 0:
+        return None
+    try:
+        os.kill(pid, 0)                        # 시그널 0 = 존재만 확인
+    except ProcessLookupError:
+        return None                            # 죽은 PID = 크래시 잔재 lock
+    except PermissionError:
+        return None                            # 타 유저 소유 = 우리 Chrome 아님
+    try:
+        cmdline = subprocess.run(
+            ["ps", "-o", "command=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=3,
+        ).stdout
+    except Exception:  # noqa: BLE001 — 확인 불가 → 소유 미확정
+        return None
+    return pid if _cmdline_has_profile(cmdline, profile) else None
 
 
 def _cmdline_has_profile(cmdline: str, profile: str) -> bool:
@@ -1346,6 +1370,9 @@ def _profile_chrome_alive(profile: str) -> bool:
     user-data-dir를 점유 중이면 lock 청소·중복 launch가 프로필을 손상시킨다(codex P2#1).
     Chrome의 SingletonLock 심볼릭링크 타깃은 'hostname-PID' 형식 → 끝 PID로 생존 판정.
     """
+    # ※_profile_owner_pid와 로직이 겹치지만 **통합하지 않는다**: 이쪽은 PermissionError(타 유저
+    #   Chrome이 프로필 점유)를 "점유 중"으로 봐서 기동을 막아야 안전하고, 저쪽은 "우리 것 아님"으로
+    #   봐서 adopt를 막아야 안전하다. 실패의 안전한 방향이 서로 반대다.
     lock = os.path.join(profile, "SingletonLock")
     try:
         target = os.readlink(lock)  # 예: "Jino-MacBookPro.local-19029"

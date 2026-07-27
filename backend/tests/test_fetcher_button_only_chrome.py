@@ -265,38 +265,78 @@ def test_port_owner_unverified_is_refused_by_default(fetcher, tmp_path, monkeypa
         raise OSError("lsof 없음")
 
     profile = str(tmp_path / "profile")
-    os.makedirs(profile, exist_ok=True)
-    os.symlink("myhost-4242", os.path.join(profile, "SingletonLock"))
+    _mk_lock(profile, os.getpid())
     monkeypatch.setattr(fetcher.subprocess, "run", _boom)
     assert fetcher._port_owner_foreign(9299, profile) is True
     # 현장 오판 시 설정으로 옛 동작 복귀 가능.
     assert fetcher._port_owner_foreign(9299, profile, True) is False
 
 
+def _mk_lock(profile: str, pid: int) -> None:
+    os.makedirs(profile, exist_ok=True)
+    lp = os.path.join(profile, "SingletonLock")
+    if os.path.islink(lp) or os.path.exists(lp):
+        os.unlink(lp)
+    os.symlink(f"myhost-{pid}", lp)
+
+
+class _R:
+    def __init__(self, out): self.stdout = out
+
+
 def test_port_owner_verified_by_pid_identity(fetcher, tmp_path, monkeypatch):
     """소유 판정은 PID 동일성으로 — cmdline 문자열 대조는 argv 경계를 복원할 수 없다(codex R4).
 
     macOS `ps -o command=`는 argv를 공백으로 flatten하므로 공백을 품은 인자 하나와 진짜 인자
-    두 개를 구분할 수 없다. 그래서 '우리 프로필의 SingletonLock PID == LISTEN PID'만 양성 증거다.
+    두 개를 구분할 수 없다. 그래서 '우리 프로필 lock의 살아있는 PID == LISTEN PID'가 양성 증거다.
     """
     profile = str(tmp_path / "profile")
-    os.makedirs(profile, exist_ok=True)
-    os.symlink("myhost-4242", os.path.join(profile, "SingletonLock"))
+    live = os.getpid()                       # 살아있는 PID(테스트 프로세스)
+    _mk_lock(profile, live)
 
-    class _R:
-        def __init__(self, out): self.stdout = out
+    def _run(argv, *_a, **_k):
+        if argv[0] == "lsof":
+            return _R(f"{live}\n")
+        return _R(f"chrome --user-data-dir={profile} --no-first-run\n")   # ps
 
-    # ① LISTEN PID가 프로필 점유 PID와 같음 → adopt 정당
-    monkeypatch.setattr(fetcher.subprocess, "run", lambda *_a, **_k: _R("4242\n"))
-    assert fetcher._port_owner_foreign(9299, profile) is False
-    # ② 다른 PID가 그 포트를 잡고 있음 → 거부(남의 Chrome)
-    monkeypatch.setattr(fetcher.subprocess, "run", lambda *_a, **_k: _R("9999\n"))
+    monkeypatch.setattr(fetcher.subprocess, "run", _run)
+    assert fetcher._port_owner_foreign(9299, profile) is False   # 일치 → adopt 정당
+
+    def _run_other(argv, *_a, **_k):
+        if argv[0] == "lsof":
+            return _R("999999\n")           # 다른 프로세스가 포트를 잡음
+        return _R(f"chrome --user-data-dir={profile} --no-first-run\n")
+
+    monkeypatch.setattr(fetcher.subprocess, "run", _run_other)
+    assert fetcher._port_owner_foreign(9299, profile) is True    # 불일치 → 거부
+
+
+def test_stale_lock_pid_reuse_is_refused(fetcher, tmp_path, monkeypatch):
+    """★크래시 잔재 lock의 PID가 무관한 프로세스에 재사용된 경우 adopt 거부(codex R5).
+
+    SingletonLock이 남은 채 macOS가 그 PID를 다른 프로세스에 재배정하고, 하필 그 프로세스가
+    우리 CDP 포트를 LISTEN하면 'PID 동일'만으로는 남의 리스너를 adopt하게 된다.
+    → PID 생존 + 그 PID가 실제로 우리 프로필의 Chrome인지(cmdline)까지 AND로 확인한다.
+    """
+    profile = str(tmp_path / "profile")
+    live = os.getpid()
+    _mk_lock(profile, live)                  # PID는 살아있지만 우리 Chrome이 아님
+
+    def _run(argv, *_a, **_k):
+        if argv[0] == "lsof":
+            return _R(f"{live}\n")          # 재사용된 PID가 포트를 LISTEN 중
+        return _R("/usr/bin/some-unrelated-daemon --serve\n")   # ps: Chrome도 아니고 우리 프로필도 아님
+
+    monkeypatch.setattr(fetcher.subprocess, "run", _run)
+    assert fetcher._profile_owner_pid(profile) is None
     assert fetcher._port_owner_foreign(9299, profile) is True
-    # ③ cmdline 위조로는 뚫을 수 없다 — 문자열을 아무리 넣어도 PID가 다르면 거부
-    monkeypatch.setattr(fetcher.subprocess, "run",
-                        lambda *_a, **_k: _R("9999\n") if "lsof" in _a[0][0]
-                        else _R(f"chrome --user-data-dir={profile}\n"))
-    assert fetcher._port_owner_foreign(9299, profile) is True
+
+
+def test_dead_lock_pid_is_stale(fetcher, tmp_path):
+    """죽은 PID의 lock은 stale — 소유자 없음으로 본다(그 자체로 adopt 거부 사유)."""
+    profile = str(tmp_path / "profile")
+    _mk_lock(profile, 999999)                # 존재하지 않을 PID
+    assert fetcher._profile_owner_pid(profile) is None
 
 
 def test_port_owner_refused_without_singleton_lock(fetcher, tmp_path, monkeypatch):
