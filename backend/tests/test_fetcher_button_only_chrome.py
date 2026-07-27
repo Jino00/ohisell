@@ -206,6 +206,133 @@ def test_wing_rg_daily_schedule_removed(tmp_path_factory):
     assert 'cfg.get("rg_daily_hour"' not in code
 
 
+# ── ④ 이중 기동·오adopt·시그널 누수 방어(codex R1 P1#2~#4) ─────────────
+def test_launch_is_serialized_by_profile_lock(fetcher, tmp_path, monkeypatch):
+    """기동 결정 구간이 프로필 lock 안에서 일어나야 한다 — 두 프로세스 이중 기동=프로필 손상.
+
+    lock을 이미 잡고 있으면(=다른 프로세스가 기동 중) launch를 시도조차 하지 않는다.
+    """
+    import fcntl
+
+    cfg = _cfg(tmp_path)
+    profile = cfg["cdp_profile"]
+    launched = []
+    monkeypatch.setattr(fetcher, "_cdp_alive", lambda _p: False)
+    monkeypatch.setattr(fetcher, "_profile_chrome_alive", lambda _p: False)
+    monkeypatch.setattr(fetcher, "_launch_chrome", lambda _c: launched.append(1))
+    # 외부 프로세스가 같은 프로필 lock을 점유한 상황 재현.
+    fd = os.open(profile.rstrip("/") + ".launchlock", os.O_WRONLY | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        with pytest.raises(RuntimeError):
+            with fetcher._owned_chrome({**cfg, "chrome_launch_lock_timeout_s": 1}):
+                pass
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+    assert launched == [], "프로필 lock 점유 중인데 Chrome을 이중 기동했다"
+
+
+def test_profile_launch_lock_is_outside_profile_dir(fetcher, tmp_path):
+    """lock 파일은 프로필 디렉터리 *밖*에 — 안에 두면 프로필 재생성 시 사라져 무력화된다."""
+    profile = str(tmp_path / "profile")
+    with fetcher._profile_launch_lock(profile, timeout_s=5):
+        pass
+    assert os.path.exists(profile + ".launchlock")
+    assert not os.path.exists(os.path.join(profile, ".launchlock"))
+
+
+def test_refuses_adopting_chrome_of_another_profile(fetcher, tmp_path, monkeypatch):
+    """포트가 살아 있어도 그 Chrome이 '다른 프로필'이면 adopt 거부 — 남의 계정 데이터 적재 차단."""
+    monkeypatch.setattr(fetcher, "_cdp_alive", lambda _p: True)
+    monkeypatch.setattr(fetcher, "_port_owner_foreign", lambda _p, _pr: True)
+    monkeypatch.setattr(fetcher, "_launch_chrome", lambda _c: pytest.fail("기동하면 안 됨"))
+    monkeypatch.setattr(fetcher, "_notify_mac", lambda *_a, **_k: None, raising=False)
+    with pytest.raises(RuntimeError):
+        with fetcher._owned_chrome(_cfg(tmp_path)):
+            pass
+
+
+def test_port_owner_foreign_only_on_positive_evidence(fetcher, monkeypatch):
+    """확인 불가(lsof 실패)면 기존 동작(adopt) 유지 — 오탐으로 정상 수집을 막지 않는다."""
+    def _boom(*_a, **_k):
+        raise OSError("lsof 없음")
+
+    monkeypatch.setattr(fetcher.subprocess, "run", _boom)
+    assert fetcher._port_owner_foreign(9299, "/tmp/p") is False
+
+
+def test_signal_cleanup_closes_owned_chrome(fetcher, monkeypatch):
+    """SIGTERM 경로(=finally가 안 도는 경로)에서도 내가 띄운 Chrome을 회수해야 한다."""
+    closed = []
+    monkeypatch.setattr(fetcher, "_close_chrome", lambda p, grace_s=15: closed.append(p))
+    owner = fetcher._ChromeOwner()
+    owner.proc = _FakeProc()
+    fetcher._LIVE_OWNERS.append(owner)
+    try:
+        fetcher._cleanup_owned_chromes()   # signum=None → os._exit 안 함
+    finally:
+        if owner in fetcher._LIVE_OWNERS:
+            fetcher._LIVE_OWNERS.remove(owner)
+    assert closed and owner.proc is None
+
+
+def test_signal_cleanup_keeps_login_window(fetcher, monkeypatch):
+    """keep_open(사람이 로그인 중) 창은 시그널 경로에서도 닫지 않는다."""
+    closed = []
+    monkeypatch.setattr(fetcher, "_close_chrome", lambda p, grace_s=15: closed.append(p))
+    owner = fetcher._ChromeOwner()
+    owner.proc = _FakeProc()
+    owner.keep_open = True
+    fetcher._LIVE_OWNERS.append(owner)
+    try:
+        fetcher._cleanup_owned_chromes()
+    finally:
+        if owner in fetcher._LIVE_OWNERS:
+            fetcher._LIVE_OWNERS.remove(owner)
+    assert closed == []
+
+
+def test_signal_handler_installed_in_main(fetcher):
+    """main()이 시그널 회수를 설치하지 않으면 SIGTERM 누수 방어가 죽은 코드가 된다."""
+    src = _code_only(fetcher.main)
+    assert "_install_signal_cleanup()" in src
+
+
+def test_owner_unregistered_after_normal_run(fetcher, tmp_path, monkeypatch):
+    """정상 종료 후 _LIVE_OWNERS가 비어야 한다 — 안 비면 이미 죽은 proc을 재차 종료 시도."""
+    proc = _FakeProc()
+    state = {"alive": False}
+
+    def _launch(_c):
+        state["alive"] = True
+        return proc
+
+    monkeypatch.setattr(fetcher, "_cdp_alive", lambda _p: state["alive"])
+    monkeypatch.setattr(fetcher, "_profile_chrome_alive", lambda _p: False)
+    monkeypatch.setattr(fetcher, "_launch_chrome", _launch)
+    monkeypatch.setattr(fetcher, "_close_chrome", lambda p, grace_s=15: None)
+    before = len(fetcher._LIVE_OWNERS)
+    with fetcher._owned_chrome(_cfg(tmp_path)):
+        assert len(fetcher._LIVE_OWNERS) == before + 1
+    assert len(fetcher._LIVE_OWNERS) == before
+
+
+# ── ⑤ launchd 전환(구 supervisor 실제 제거) ──────────────────────────
+def test_installer_removes_deprecated_supervisor_jobs():
+    """설치 스크립트가 구 supervisor 잡을 실제로 bootout·plist 삭제해야 한다.
+
+    설치 목록에서 빼기만 하면 이미 로드된 구 잡은 계속 Chrome을 상주시킨다(codex R1 P1#1).
+    """
+    installer = (TOOLS / "install_local_runtime.sh").read_text(encoding="utf-8")
+    for label in ("wing-chrome", "ohitech-chrome", "rocket-chrome"):
+        assert label in installer, f"구 supervisor 정리 대상 누락: {label}"
+    assert "launchctl bootout" in installer
+    assert "rm -f \"$_dep_plist\"" in installer
+    # 제거 실패를 조용히 넘기면 안 된다 — 설치를 실패로 끝내야 한다.
+    assert "설치 중단" in installer and "exit 1" in installer
+
+
 def test_supervisor_plists_deleted():
     """상주 supervisor plist는 repo에서 삭제 — 재설치되면 KeepAlive 부활."""
     assert not (TOOLS / "com.ohisell.wing-chrome.plist").exists()

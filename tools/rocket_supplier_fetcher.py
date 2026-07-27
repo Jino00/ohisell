@@ -34,6 +34,7 @@ import fcntl
 import json
 import logging
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -252,6 +253,73 @@ def _profile_chrome_alive(profile: str) -> bool:
     return f"--user-data-dir={profile}" in cmdline
 
 
+def _port_owner_foreign(port: int, profile: str) -> bool:
+    """CDP 포트를 LISTEN 중인 Chrome이 '다른 user-data-dir'임이 **확인되면** True.
+
+    왜(codex R1 P1#3): `/json/version` 200만 보고 adopt하면, 같은 포트에 뜬 무관한 Chrome
+    (다른 계정 프로필·다른 자동화 도구)의 컨텍스트로 수집해 **남의 vendor 데이터를 우리
+    account_key로 적재**할 수 있다. 포트는 설정값이라 다계정 인스턴스가 포트를 안 바꾸면 실제로 겹친다.
+    판정 불가(lsof 없음·권한·헬퍼만 잡힘)면 False = 기존 동작(adopt) — 오탐으로 정상 수집을
+    막지 않는다. '다른 프로필이 확인된' 양성 증거가 있을 때만 거부한다.
+    """
+    try:
+        out = subprocess.run(
+            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout
+    except Exception:  # noqa: BLE001 — 확인 불가 → 기존 동작 유지
+        return False
+    foreign = False
+    for pid in [p for p in out.split() if p.isdigit()]:
+        try:
+            cmdline = subprocess.run(
+                ["ps", "-o", "command=", "-p", pid],
+                capture_output=True, text=True, timeout=3,
+            ).stdout
+        except Exception:  # noqa: BLE001
+            return False
+        if f"--user-data-dir={profile}" in cmdline:
+            return False            # 우리 프로필의 Chrome → adopt 정당
+        if "--user-data-dir=" in cmdline:
+            foreign = True          # 다른 프로필임이 확인됨
+    return foreign
+
+
+@contextlib.contextmanager
+def _profile_launch_lock(profile: str, timeout_s: int = 90):
+    """프로필 단위 기동 직렬화 — '점검 → stale lock 청소 → launch → CDP 대기' 전 구간을 감싼다.
+
+    왜(codex R1 P1#2): 페처별 flock은 *작업* 단위라 같은 프로필을 쓰는 다른 커맨드(login/chrome)나
+    lock 파일이 분리된 다계정 인스턴스와는 배타되지 않는다. 둘 다 "비어 있음"을 보고 Singleton
+    파일을 지운 뒤 Chrome을 이중 기동하면 프로필·쿠키 DB가 손상된다. lock 경로는 프로필에서
+    결정되므로 프로세스·페처가 달라도 같은 파일을 놓고 배타된다.
+    (프로필 디렉터리 *안*에 두지 않는다 — Chrome이 지우거나 프로필 재생성 시 사라진다.)
+    """
+    lock_path = os.path.expanduser(profile).rstrip("/") + ".launchlock"
+    fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600)
+    acquired = False
+    try:
+        waited = 0
+        while waited < timeout_s:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+                break
+            except OSError:
+                time.sleep(1)
+                waited += 1
+        if not acquired:
+            log.error("Chrome 기동 lock 대기 초과(%ds) — 다른 프로세스가 같은 프로필 기동 중: %s",
+                      timeout_s, lock_path)
+            raise RuntimeError("chrome_launch_lock_timeout")
+        yield
+    finally:
+        if acquired:
+            with contextlib.suppress(Exception):
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
 def _chrome_argv(cfg: dict) -> list[str]:
     """Chrome 기동 커맨드라인 — 수동 'chrome' 커맨드와 per-fetch 기동이 반드시 동일해야 한다
     (포트·프로필·플래그가 갈리면 세션/핑거프린트가 갈린다)."""
@@ -298,19 +366,56 @@ def _wait_cdp(port: int, timeout_s: int = 60) -> bool:
     return False
 
 
-def _close_chrome(proc) -> None:
-    """내가 띄운 Chrome 종료(SIGTERM → 15s 대기 → SIGKILL)."""
+def _close_chrome(proc, grace_s: int = 15) -> None:
+    """내가 띄운 Chrome 종료(SIGTERM → grace_s 대기 → SIGKILL).
+
+    SIGTERM은 Chrome의 정상 종료 경로다(핸들러 보유 → 세션·쿠키 flush). SIGKILL은 무응답 시
+    최후수단이며, 그때 남는 Singleton 잔재는 다음 기동의 stale lock 청소가 처리한다.
+    """
     log.info("작업 완료 — 내가 띄운 Chrome(PID %s) 종료.", getattr(proc, "pid", "?"))
     with contextlib.suppress(Exception):
         proc.terminate()
     try:
-        proc.wait(timeout=15)
+        proc.wait(timeout=grace_s)
     except Exception:  # noqa: BLE001 — SIGTERM 무응답
         log.warning("Chrome SIGTERM 무응답 — SIGKILL.")
         with contextlib.suppress(Exception):
             proc.kill()
         with contextlib.suppress(Exception):
             proc.wait(timeout=5)
+
+
+# 시그널/비정상 종료 시 회수할 '내가 띄운' Chrome 목록(_owned_chrome이 등록·해제).
+_LIVE_OWNERS: list = []
+
+
+def _cleanup_owned_chromes(_signum=None, _frame=None) -> None:
+    """SIGTERM/SIGHUP·프로세스 종료 시 내가 띄운 Chrome 회수.
+
+    왜(codex R1 P1#4): 파이썬 기본 SIGTERM 처리는 예외를 던지지 않고 즉시 죽으므로
+    `_owned_chrome`의 finally가 **실행되지 않는다.** 설치 스크립트는 배포마다 poll 데몬을
+    `launchctl bootout`하므로, fetch 중 재설치하면 데몬만 죽고 Chrome이 남는다 → 다음 데몬은
+    그 Chrome을 adopt(=닫을 책임 없음)해 버튼-only인데도 창이 영구 잔류한다.
+    keep_open 창은 사람이 로그인 중일 수 있으므로 평소 규칙대로 남긴다.
+    """
+    for owner in list(_LIVE_OWNERS):
+        if owner.owned and not owner.keep_open:
+            with contextlib.suppress(Exception):
+                _close_chrome(owner.proc, grace_s=5)   # 시그널 경로는 짧게
+            owner.proc = None
+    if _signum is not None:
+        os._exit(128 + int(_signum))
+
+
+def _install_signal_cleanup() -> None:
+    """SIGTERM/SIGHUP 회수 핸들러 + 정상 종료 경로(atexit) 등록. main()에서 1회 호출."""
+    import atexit
+
+    for _sig in (signal.SIGTERM, signal.SIGHUP):
+        with contextlib.suppress(Exception):
+            signal.signal(_sig, _cleanup_owned_chromes)
+    # KeyboardInterrupt·sys.exit 등 정상 종료 경로(핸들러가 안 도는 경우) 커버.
+    atexit.register(_cleanup_owned_chromes)
 
 
 class _ChromeOwner:
@@ -338,31 +443,43 @@ def _owned_chrome(cfg: dict, owner: "_ChromeOwner | None" = None):
     owner = owner if owner is not None else _ChromeOwner()
     port = int(cfg.get("cdp_port", 9223))
     profile = os.path.expanduser(cfg.get("cdp_profile", "~/.ohisell_supplier_chrome"))
-    if _cdp_alive(port):
-        log.info("기존 Chrome(CDP %d) 감지 — adopt(내가 닫지 않음).", port)
-    elif _profile_chrome_alive(profile):
-        # CDP는 죽었는데 프로필은 점유 중 = 다른 포트/수동 Chrome. 중복 launch는 프로필 손상.
-        log.error("프로필 점유 중이나 CDP(%d) 미응답 — 수동 Chrome 종료 필요(%s).", port, profile)
-        raise RuntimeError("chrome_profile_busy")
-    else:
-        proc = _launch_chrome(cfg)
-        if proc is None:
-            raise RuntimeError("chrome_launch_failed")
-        owner.proc = proc
-        log.info("Chrome 기동(PID %d, CDP %d) — 작업 후 닫음.", proc.pid, port)
-        if not _wait_cdp(port):
-            log.error("Chrome CDP(%d) 기동 대기 초과 — 종료.", port)
-            _close_chrome(proc)
-            owner.proc = None
-            raise RuntimeError("cdp_not_ready")
+    # 점검~기동~CDP대기 전 구간을 프로필 lock으로 직렬화(이중 기동=프로필 손상 차단).
+    with _profile_launch_lock(profile, int(cfg.get("chrome_launch_lock_timeout_s", 90))):
+        if _cdp_alive(port):
+            if _port_owner_foreign(port, profile):
+                log.error("CDP %d를 다른 프로필의 Chrome이 점유 — adopt 거부(세션 오적재 방지).", port)
+                raise RuntimeError("chrome_port_foreign")
+            log.info("기존 Chrome(CDP %d) 감지 — adopt(내가 닫지 않음).", port)
+        elif _profile_chrome_alive(profile):
+            # CDP는 죽었는데 프로필은 점유 중 = 다른 포트/수동 Chrome. 중복 launch는 프로필 손상.
+            log.error("프로필 점유 중이나 CDP(%d) 미응답 — 수동 Chrome 종료 필요(%s).", port, profile)
+            raise RuntimeError("chrome_profile_busy")
+        else:
+            proc = _launch_chrome(cfg)
+            if proc is None:
+                raise RuntimeError("chrome_launch_failed")
+            owner.proc = proc
+            _LIVE_OWNERS.append(owner)   # 시그널 종료 시 회수 대상
+            log.info("Chrome 기동(PID %d, CDP %d) — 작업 후 닫음.", proc.pid, port)
+            if not _wait_cdp(port):
+                log.error("Chrome CDP(%d) 기동 대기 초과 — 종료.", port)
+                _close_chrome(proc)
+                owner.proc = None
+                with contextlib.suppress(ValueError):
+                    _LIVE_OWNERS.remove(owner)
+                raise RuntimeError("cdp_not_ready")
     try:
         yield owner
     finally:
-        if owner.owned:
-            if owner.keep_open:
-                log.info("로그인 대기 위해 Chrome 창 유지 — 로그인 후 '갱신' 버튼을 다시 누르세요.")
-            else:
-                _close_chrome(owner.proc)
+        try:
+            if owner.owned:
+                if owner.keep_open:
+                    log.info("로그인 대기 위해 Chrome 창 유지 — 로그인 후 '갱신' 버튼을 다시 누르세요.")
+                else:
+                    _close_chrome(owner.proc)
+        finally:
+            with contextlib.suppress(ValueError):
+                _LIVE_OWNERS.remove(owner)
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -949,6 +1066,7 @@ def cmd_poll(cfg: dict, interval: int = 30) -> int:
 
 
 def main() -> None:
+    _install_signal_cleanup()   # SIGTERM(launchd bootout) 시 내가 띄운 Chrome 회수
     cfg = load_config()
     arg = sys.argv[1] if len(sys.argv) >= 2 else "run"
     if arg == "chrome":

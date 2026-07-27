@@ -48,11 +48,40 @@ UID_NUM="$(id -u)"
 # ★2026-07-27: Chrome 상주 supervisor 잡(wing-chrome·ohitech-chrome·rocket-chrome)은 폐기됐다.
 #   창을 닫아도 launchd가 Chrome을 되살리던 원인 → 이제 poll 데몬이 fetch 때만 Chrome을 띄우고
 #   닫는다. 남는 잡은 poll 데몬 4개뿐(adcost·wing·rocket·ohitech-ad).
-#   ※ 이미 설치된 구 supervisor 잡은 이 스크립트가 지우지 않는다 — 1회 수동 정리 필요:
-#       launchctl bootout gui/$(id -u)/com.ohisell.wing-chrome
-#       launchctl bootout gui/$(id -u)/com.ohisell.ohitech-chrome
-#       launchctl bootout gui/$(id -u)/com.ohisell.rocket-chrome
-#       rm -f ~/Library/LaunchAgents/com.ohisell.{wing,ohitech,rocket}-chrome.plist
+#
+# ★구 supervisor 잡 자동 제거(codex R1 P1#1): 설치 목록에서 빼기만 하면 **이미 로드된 구 잡은
+#   그대로 살아남는다** — 실행 중인 파이썬 프로세스는 아래 cp가 스크립트를 덮어써도 교체되지 않아
+#   구 코드가 계속 Chrome을 상주시킨다(= 이번 전환의 목적이 통째로 무효화). 문서 안내로는 세 번
+#   못 막았다(원칙: 부탁이 아니라 구조로) → 여기서 bootout·plist 삭제까지 수행하고, 잔존하면
+#   설치를 실패로 끝낸다. no-op 스텁(chrome-supervise)은 이 정리를 못 한 Mac을 위한 2차 방어일 뿐.
+_deprecated_left=0
+for _dep in wing-chrome ohitech-chrome rocket-chrome; do
+  _dep_plist="$LAUNCH_AGENTS/com.ohisell.$_dep.plist"
+  _dep_loaded=0
+  launchctl print "gui/$UID_NUM/com.ohisell.$_dep" >/dev/null 2>&1 && _dep_loaded=1
+  if [ "$_dep_loaded" = "1" ]; then
+    launchctl bootout "gui/$UID_NUM/com.ohisell.$_dep" 2>/dev/null || true
+    for _i in $(seq 1 25); do
+      launchctl print "gui/$UID_NUM/com.ohisell.$_dep" >/dev/null 2>&1 || break
+      sleep 1
+    done
+    if launchctl print "gui/$UID_NUM/com.ohisell.$_dep" >/dev/null 2>&1; then
+      echo "    ⚠️ 구 supervisor com.ohisell.$_dep bootout 실패 — 상주 Chrome이 남는다."
+      _deprecated_left=1
+      continue
+    fi
+    echo "    구 supervisor com.ohisell.$_dep → bootout 완료"
+  fi
+  if [ -f "$_dep_plist" ]; then
+    rm -f "$_dep_plist"
+    echo "    구 plist 삭제: $_dep_plist"
+  fi
+done
+if [ "$_deprecated_left" = "1" ]; then
+  echo "==> ❌ 설치 중단: 구 Chrome supervisor 잡을 제거하지 못했습니다."
+  echo "    수동: launchctl bootout gui/$UID_NUM/com.ohisell.<label> 후 재실행"
+  exit 1
+fi
 for pair in "adcost:ad_cost_browser_fetcher.py" "wing:wing_browser_fetcher.py" "rocket:rocket_supplier_fetcher.py" "ohitech-ad:ohitech_ad_fetcher.py"; do
   name="${pair%%:*}"
   script="${pair##*:}"
