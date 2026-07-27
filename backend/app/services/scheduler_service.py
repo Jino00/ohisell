@@ -988,14 +988,25 @@ def sync_coupang_rg_inbound_job():
 def sync_coupang_rg_settlement_job():
     """RG 정산 수수료 자동 동기화 (05:30 KST) — 윙 내부 API(status/api). D-10: 매출인식일 기준.
 
-    쿠키 만료(WingAuthError)는 fail-soft(status red). 예상치 못한 예외만 raise."""
+    ★P5(2026-07-27, green-while-dead 수리): SA는 쿠키 만료를 fail-soft로
+    {"status": "auth_error"|"read_error"|"parse_error", ...}로 돌려준다(raise 안 함) — 이걸
+    log.info로만 찍고 삼키면 잡 자체는 예외가 없어 EVENT_JOB_EXECUTED로 기록되고 스케줄러 상
+    'ok'가 된다(실사고: 죽은 서버측 쿠키 경로가 50일간 green으로 보임). 다른 쿠팡 RG 잡들의
+    `_coupang_failed` 관례와 동일하게, status!=ok인 계정이 하나라도 있으면 잡을 raise로
+    실패 표면화한다(EVENT_JOB_ERROR)."""
     db = _get_own_db_session()
     try:
         from app.services.coupang.rg_settlement_sync import sync_rg_settlement, RG_ACCOUNTS
 
+        results = []
         for account_key in RG_ACCOUNTS:
             result = sync_rg_settlement(db, account_key)
             log.info("[스케줄러] RG 정산 sync (%s): %s", account_key, result)
+            results.append(result)
+
+        failed = [r for r in results if r.get("status") != "ok"]
+        if failed:
+            raise RuntimeError(f"쿠팡 RG 정산 sync 실패 계정: {failed}")
 
     except Exception as e:
         log.exception("[스케줄러] sync_coupang_rg_settlement_job 에러: %s", e)
@@ -1008,7 +1019,13 @@ def auto_download_rg_settlement_job():
     """RG 정산 엑셀 자동 다운로드·적재 (06:15 KST) — Wing 3단계(request→poll→S3 GET).
 
     WAREHOUSING_SHIPPING(입출고·배송비) 옵션 단위 적재. 이미 적재된 기간은 idempotent.
-    쿠키 만료(WingAuthError)는 fail-soft(per-account error 반환). 예상치 못한 예외만 raise."""
+    쿠키 만료(WingAuthError)는 fail-soft(per-account error 반환). 예상치 못한 예외만 raise.
+
+    ★P5(2026-07-27, green-while-dead 수리 — sync_coupang_rg_settlement_job과 같은 패턴): SA
+    결과 dict의 status를 로그만 찍고 삼키면 잡이 실제로는 죽은 상태에서도 EVENT_JOB_EXECUTED로
+    green 기록된다. 단 이 SA는 "no_periods"(status/api가 아직 정산 기간을 못 채운 정상 상태 —
+    실패 아님)를 legitimate 결과로 돌려주므로, ok와 함께 '실패 아님'으로 취급한다. 그 외
+    (auth_error/all_failed/partial/failed 등)는 실패로 raise한다."""
     db = _get_own_db_session()
     try:
         from app.services.coupang.rg_settlement_sync import auto_download_all, RG_ACCOUNTS
@@ -1023,6 +1040,10 @@ def auto_download_rg_settlement_job():
             log.info("[스케줄러] RG 엑셀 자동 다운로드 (%s): requested=%s completed=%s ingested=%s errors=%d",
                      r.get("account_key"), r.get("requested"), r.get("completed"),
                      r.get("ingested"), len(r.get("errors", [])))
+
+        failed = [r for r in results if r.get("status") not in ("ok", "no_periods")]
+        if failed:
+            raise RuntimeError(f"RG 엑셀 자동 다운로드 실패 계정: {failed}")
 
     except Exception as e:
         log.exception("[스케줄러] auto_download_rg_settlement_job 에러: %s", e)
