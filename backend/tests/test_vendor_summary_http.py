@@ -88,6 +88,47 @@ def test_ingest_then_reconcile_roundtrip(client):
     assert body["drift"]["pct_3p"] == "-100"
 
 
+def test_ingest_accepts_negative_gmv_refund_day(client):
+    """환불>판매 순액 음수일 허용(2026-07-27 라이브 실증: WING1 07-02 3P GMV=-16,620).
+
+    ★페처는 45일 창을 한 번의 push로 보낸다 — 음수 하루를 거부하면 배치 전체가 all-or-nothing으로
+    소멸해 PR#108 자가치유가 발동 자체를 못 한다. 음수는 정상 데이터로 저장돼야 한다.
+    """
+    y = _yesterday()
+    d2 = (kst_today() - timedelta(days=2)).isoformat()
+    r = client.post("/api/coupang/ops/wing/vendor-summary/ingest",
+                    headers={"X-Ingest-Token": _TOKEN}, json={
+                        "account_key": "COUPANG_WING1",
+                        "days": [
+                            {"date": d2, "registration_type": "NORMAL", "gmv": -16620, "units_sold": -1},
+                            {"date": d2, "registration_type": "RFM", "gmv": 1326580, "units_sold": 30},
+                            {"date": y, "registration_type": "NORMAL", "gmv": 12900, "units_sold": 1},
+                        ],
+                    })
+    assert r.status_code == 200, r.text
+    assert r.json()["ingested"] == 3
+
+    rr = client.get(f"/api/overview/revenue-reconcile?from={d2}&to={y}&account=COUPANG_WING1")
+    assert rr.status_code == 200, rr.text
+    body = rr.json()
+    assert body["official"]["gmv_3p"] == -16620 + 12900  # 음수일이 합계에 그대로 반영
+    assert body["official"]["gmv_rg"] == 1326580
+
+
+def test_ingest_rejects_absurd_magnitude(client):
+    """음수 허용으로 열린 문은 절대값 상한이 지킨다 — 파싱 깨짐 수준의 값은 여전히 400."""
+    y = _yesterday()
+    hdr = {"X-Ingest-Token": _TOKEN}
+    for bad in ({"gmv": -10_000_000_001, "units_sold": 1},
+                {"gmv": 1, "units_sold": 2_000_000}):
+        r = client.post("/api/coupang/ops/wing/vendor-summary/ingest", headers=hdr, json={
+            "account_key": "COUPANG_WING1",
+            "days": [{"date": y, "registration_type": "NORMAL", **bad}],
+        })
+        assert r.status_code == 400, r.text
+        assert "비정상" in r.json()["detail"]
+
+
 def test_reconcile_today_only_no_closed_days(client):
     today = kst_today().isoformat()
     rr = client.get(f"/api/overview/revenue-reconcile?from={today}&to={today}&account=COUPANG_WING1")

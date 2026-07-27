@@ -1717,6 +1717,9 @@ _VS_TYPES = {"NORMAL", "RFM"}  # ref 18: NORMAL=3P / RFM=RG
 # 허용 계정(codex P2): account=None 대조가 저장된 모든 계정 official을 합산하므로, 오타 account_key가
 # "전체" 합계를 오염시키되 계정 필터 뷰엔 안 보이는 사각 방지. command-center 허용 집합과 동일.
 _VS_ACCOUNTS = {"COUPANG_WING1", "COUPANG_WING2"}
+# ingest 값 방어 상한 — 음수는 정상(환불 순액), 이 절대값을 넘으면 malformed로 간주.
+_VS_GMV_ABS_MAX = 10_000_000_000  # 100억 원/일
+_VS_UNITS_ABS_MAX = 1_000_000  # 100만 개/일
 
 
 @router.post("/wing/vendor-summary/ingest")
@@ -1757,10 +1760,13 @@ def ingest_wing_vendor_summary(
         try:
             gmv = int(d.get("gmv") or 0)
             units_sold = int(d.get("units_sold") or 0)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):  # OverflowError: json은 Infinity를 허용한다
             raise HTTPException(status_code=400, detail="gmv/units_sold는 정수여야 함")
-        if gmv < 0 or units_sold < 0:
-            raise HTTPException(status_code=400, detail="값은 음수일 수 없음")
+        # 음수 허용(2026-07-27): 환불>판매 순액 음수는 실데이터(WING1 07-02 3P GMV=-16,620 실측).
+        # 이 배치는 all-or-nothing이라 음수 거부 시 하루 때문에 45일 창 전체가 소멸 — 파싱 깨짐
+        # 수준의 절대값만 거부한다(일 GMV 실측 ~수백만 원 대비 수천 배 여유).
+        if abs(gmv) > _VS_GMV_ABS_MAX or abs(units_sold) > _VS_UNITS_ABS_MAX:
+            raise HTTPException(status_code=400, detail="gmv/units_sold 값이 비정상 범위")
         last_refresh = d.get("last_refresh")
         rows.append({
             "date": day_date, "registration_type": rt,
