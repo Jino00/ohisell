@@ -452,3 +452,21 @@ codex가 [P1]으로 잡았다(우리 테스트는 전부 초록이었다 — 유
 (`_mark_heartbeat`)은 계정 무구분이었다 → WING2 ingest가 WING1 행에 성공을 찍고 WING1의 실패 흔적까지
 지운다. **상태를 계정(또는 어떤 차원이든)으로 쪼갤 때는 성공 경로와 실패 경로를 같이 쪼갠다** — 한쪽만
 쪼개면 남의 성공이 내 신선도가 되는 조용한 위조가 생긴다.
+
+## 35. 정보성 fetch-error 절충은 한 라운드짜리 — 성공 no-op은 성공 채널로
+
+### 🐛 이슈
+wing 페처 fetch-error 보고 스프린트(codex 5R)에서, RG 정산주기 0건(성공적 no-op)을
+"실패 아님"이라는 메시지를 담은 fetch-error POST로 처리하는 절충(R3)을 골랐다.
+codex R4가 뒤집음: 소비자(UI)는 last_error_at 변동 자체를 실패로 렌더하므로
+메시지에 "실패 아님"이라 써도 ❌로 표시된다 — 채널이 메시지를 이긴다.
+
+### ✅ 해결
+rocket/fetch-success 선례를 따라 /wing/rg-settlement/fetch-success 신설(rg_mark_heartbeat)
++ 데몬 rc 3 → fetch-success. 안전성은 실측으로 확인(RG는 _STREAMS·WATCHDOG 비포함,
+실데이터 신선도는 recognition_date_to 감시라 heartbeat가 못 가림).
+
+### 📌 교훈
+신호 채널의 의미(성공/실패)는 payload 텍스트로 뒤집을 수 없다. 성공적 no-op에
+터미널 신호가 필요하면 성공 채널을 만들어라(선례 endpoint가 있으면 그 패턴).
+"백엔드 변경 회피" 절충은 소비자 렌더링까지 확인한 뒤에만 유효하다.
