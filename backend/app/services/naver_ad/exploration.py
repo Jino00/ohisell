@@ -267,7 +267,10 @@ def _resolve_exploration_bep_roas(db: Session, campaign_id: str, adgroup_id: str
     """탐색 경제성 상한의 분모 BEP ROAS 폴백 사다리(D-NAO-71 "product_bep의 BEP ROAS(상품 미연결
     시 캠페인 기본 BEP)"): ① 그룹 매핑 상품 BEP → ② 캠페인 매핑 상품 BEP → ③ 계정 기본 BEP.
     전부 부재면 None(→ 경제성 상한 계산 불가 → 휴리스틱 캡만 남음). has_cost=True 상품만 대상
-    (원가 미확인 상품 추정 금지) — campaign_target_resolver 단일 소스 재사용."""
+    (원가 미확인 상품 추정 금지) — campaign_target_resolver 단일 소스 재사용.
+    ★has_cost=True가 "실거래 관측이 있다"를 뜻하지는 않는다(D-NAO-95): 주문 0건 신규 상품도
+    매핑에 판매가를 적어 넣으면 원가와 함께 has_cost=True가 된다. 원가·판매가 모두 사람이
+    확인한 값이라는 보증은 유지되지만, 실거래 검증은 아니다."""
     bep = campaign_target_resolver.weighted_product_value_for_adgroup(
         db, adgroup_id, NaverProductBep.bep_roas,
     )

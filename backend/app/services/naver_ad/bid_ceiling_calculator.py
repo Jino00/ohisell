@@ -55,13 +55,17 @@ def _rpc_for(
 ) -> tuple[int, Decimal | None]:
     """지정 grain의 [today-90, today-1] 클릭 합과 RPC(= 전환매출 / 클릭). 둘 다 None 필터면 계정 전체.
 
-    전환매출 = conv_direct_amt + conv_indirect_amt(간접 전환 포함 — 기존 evidence_ceiling과 동일).
+    ★전환매출 = **직접전환만**(conv_direct_amt). 간접전환 제외 = D-NAO-95(ref 40 §2)가 표준화한
+      보수 규칙을 그대로 따른다: "간접전환 포함은 귀속이 느슨해 상한을 낙관 쪽으로 부풀린다"
+      (네이버 convAmt가 실주문 대비 과대하다는 D-NAO-7/21 선례와 같은 방향의 편향).
+      ※ 기존 visibility.evidence_ceiling은 direct+indirect를 쓴다 — **의도적으로 다르다.**
+        그쪽은 "증거 구매 창"을 여는 완화 산식이고, 여기는 콜드 소재에 큰 폭 상향(±15% 완전 면제)을
+        태우는 산식이라 더 보수적이어야 한다. 두 값이 다른 것은 버그가 아니라 설계다.
     backfill sentinel 행은 제외한다(naver_ad_daily 2배 계상 함정 — 메모리 naver-ad-data-cadence).
     """
     q = db.query(
         sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.clk), 0),
         sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.conv_direct_amt), 0),
-        sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.conv_indirect_amt), 0),
     ).filter(
         NaverAdDaily.ad_date >= today - timedelta(days=RPC_WINDOW_DAYS),
         NaverAdDaily.ad_date <= today - timedelta(days=1),
@@ -71,11 +75,11 @@ def _rpc_for(
         q = q.filter(NaverAdDaily.adgroup_id == adgroup_id)
     if campaign_id is not None:
         q = q.filter(NaverAdDaily.campaign_id == campaign_id)
-    clk, direct, indirect = q.one()
+    clk, direct = q.one()
     clk = int(clk)
     if clk <= 0:
         return 0, None
-    return clk, Decimal(int(direct) + int(indirect)) / Decimal(clk)
+    return clk, Decimal(int(direct)) / Decimal(clk)
 
 
 def resolve_rpc(db: Session, adgroup_id: str, campaign_id: str, today: date) -> dict:
