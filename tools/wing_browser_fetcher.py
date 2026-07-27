@@ -654,10 +654,18 @@ def cmd_login(cfg: dict, wait_secs: int = 600) -> int:
         return 1
     log.info("로그인 감지·세션 저장 완료: %s", state)
     summ = _summarize(res.get("body") or "")
-    if summ:
-        _log_summary("[login]", summ, _vs_payload(cfg))
-        if _push_configured(cfg):
-            return _push(cfg, summ)   # 첫 데이터 즉시 push
+    if not summ:
+        # ★codex R3 [P2]: _is_success는 saleSummaryByDate '키 존재'만 보고, _summarize는 그 값이
+        #   list일 때만 요약한다 — 200 JSON이지만 값이 dict/null이면 세션은 저장됐어도 push할
+        #   데이터가 없다. 여기서 0을 반환하면 claim된 poll 회차가 성공(_push)도 실패도 보고하지
+        #   않아 prod에 흔적이 없고, UI가 215초 헛기다린 뒤 'Mac 응답 없음'(Mac 꺼짐)으로 오진한다.
+        #   → 보고 가능한 실패로 만든다. 세션 파일은 이미 저장됐으므로 다음 회차는 _do_run 분기로
+        #   가서 같은 사유를 rc=1로 보고한다(무한 재로그인 루프 없음).
+        log.error("vendor-summary 파싱 실패 — 응답 형태 변경 의심: %s", (res.get("body") or "")[:160])
+        return 1
+    _log_summary("[login]", summ, _vs_payload(cfg))
+    if _push_configured(cfg):
+        return _push(cfg, summ)   # 첫 데이터 즉시 push
     return 0
 
 
@@ -947,7 +955,18 @@ def cmd_poll(cfg: dict) -> int:
                             else:
                                 rc, reason = _run_claimed(
                                     lambda: _do_rg_run(cfg, state, login_wait_secs=_LOGIN_WAIT_S))
-                                if rc != 0:
+                                if rc == _RG_RC_NO_PERIODS:
+                                    # ★codex R3 [P2]: 정산주기 0개면 업로드가 없어 heartbeat
+                                    #   (upload-xlsx→rg_mark_heartbeat)가 안 움직인다. 성공 전용
+                                    #   신호가 없으므로(RG엔 fetch-success 엔드포인트 없음) 이
+                                    #   fetch-error로 last_error_at을 움직여 UI 폴링을 진실하게
+                                    #   끝낸다 — 사유 문구가 '실패 아님'을 명시한다. status는
+                                    #   건드리지 않으므로(rg_mark_fetch_error) 쿠키만료 배너는 안 뜬다.
+                                    _prod_report_fetch_error(
+                                        cfg, "/api/coupang/ops/wing/rg-settlement/fetch-error",
+                                        "RG: 정산주기 없음 — 다운로드 대상 0건"
+                                        "(실패 아님, 조회는 완주)")
+                                elif rc != 0:
                                     _prod_report_fetch_error(
                                         cfg, "/api/coupang/ops/wing/rg-settlement/fetch-error",
                                         reason or f"RG run 실패 rc={rc}")
@@ -999,6 +1018,11 @@ CONFIRMED_SELLER_REPORT_TYPES = [
 RG_REPORT_TYPES_DEFAULT = ["WAREHOUSING_SHIPPING"]
 _RG_POLL_INTERVAL_S = 8       # download-list 폴링 간격
 _RG_POLL_TIMEOUT_S = 300      # 생성 완료 최대 대기(5분)
+# _do_rg_run 전용 종료코드 — '완주했으나 업로드 0건'(정산주기 없음). 실패(1·2)와 구분해야 한다:
+# 성공 신호(last_success_at)는 upload-xlsx만 움직이므로 업로드가 0건이면 아무 시각도 안 움직이고,
+# claim된 버튼 요청은 이미 소비돼 UI가 215초 헛기다린 뒤 'Mac 응답 없음'으로 오진한다(codex R3 [P2]).
+# cmd_poll이 이 코드를 정보성 사유로 보고해 폴링을 진실하게 끝낸다. CLI(cmd_rg)는 nonzero=주의 신호.
+_RG_RC_NO_PERIODS = 3
 _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
@@ -1257,6 +1281,9 @@ def _do_rg_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
     """state 로드 → 정산 페이지 → 정산주기 열거 → (key×reportType) 다운로드 → prod push.
 
     push 설정 필수(다운로드만 하고 버릴 이유 없음). 세션 판정·만료 회복은 정산 status/api 기반.
+
+    반환: 0=업로드 1건 이상 성공(=prod heartbeat 갱신) / 1=실패 / 2=설정 누락 /
+          3=_RG_RC_NO_PERIODS(조회는 완주, 정산주기 0개 → 업로드 0건. 실패 아님).
     """
     if not _push_configured(cfg):
         log.error("RG 다운로드엔 push 설정(account_key·prod_base_url·ingest_token) 필요.")
@@ -1308,8 +1335,10 @@ def _do_rg_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
                     log.error("RG status/api 열거 실패: %s", e)
                     return 1
                 if not periods:
+                    # 완주했지만 업로드 0건 → 성공 시각(upload-xlsx heartbeat)이 안 움직인다.
+                    # 0으로 뭉개면 cmd_poll이 침묵해 UI가 무응답으로 오진한다 → 구분되는 코드.
                     log.info("RG: status/api에 정산주기 없음 — 다운로드 건너뜀.")
-                    return 0
+                    return _RG_RC_NO_PERIODS
                 periods.sort(key=lambda x: x["period_end"], reverse=True)
                 targets = periods[:max_periods]
                 log.info("RG: 정산주기 %d개 중 최근 %d개 처리 → %s",
@@ -1338,7 +1367,11 @@ def _do_rg_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
 
 
 def cmd_rg(cfg: dict) -> int:
-    """1회 RG 정산 엑셀 자동 다운로드(state 로드 → 다운로드 → prod push). 세션 없으면 fail-fast."""
+    """1회 RG 정산 엑셀 자동 다운로드(state 로드 → 다운로드 → prod push). 세션 없으면 fail-fast.
+
+    종료코드는 _do_rg_run과 동일 — 3=정산주기 0개(실패 아님·업로드 없음)도 nonzero다.
+    수동 실행 전용 명령이라(plist·크론은 전부 `poll`) 운영에 영향 없음.
+    """
     state = os.path.expanduser(cfg["state_file"])
     if not Path(state).is_file():
         log.error("세션 파일 없음 — 먼저 'login' 실행: %s", state)

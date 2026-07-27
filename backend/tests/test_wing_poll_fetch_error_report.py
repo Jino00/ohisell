@@ -1,6 +1,7 @@
 # test_wing_poll_fetch_error_report.py — cmd_poll이 run 실패를 prod fetch-error로 보고하는지 가드.
 #   ★존재 이유(2026-07-27): claim 후 _do_run/_do_rg_run이 실패하면 플래그는 이미 clear라 prod에
 #   흔적이 없어 UI가 215초 헛기다린 뒤 'Mac 응답 없음'으로 오진했다. 이 회귀를 막는다.
+import contextlib
 import importlib.util
 import os
 import sys
@@ -57,10 +58,16 @@ class _StopPoll(Exception):
 
 
 class _RespStub:
-    """requests.post의 성공 응답 스텁 — raise_for_status는 no-op."""
+    """requests.post의 성공 응답 스텁 — raise_for_status는 no-op, _push의 200 검사도 통과."""
+
+    status_code = 200
+    text = ""
 
     def raise_for_status(self) -> None:
         return None
+
+    def json(self) -> dict:
+        return {}
 
 
 def _cfg(tmp_path) -> dict:
@@ -376,3 +383,123 @@ def test_claimed_run_exception_does_not_count_as_net_fail(fetcher, tmp_path, mon
 
     with pytest.raises(_StopPoll):   # 종료(rc=1)가 아니라 루프 계속
         fetcher.cmd_poll(cfg)
+
+
+# ── ⑪ 로그인은 됐지만 응답 파싱 실패도 보고(codex R3 [P2]) ─────────────────
+#   _is_success는 saleSummaryByDate '키 존재'만 보므로 값이 list가 아니면 로그인은 감지되고
+#   _summarize만 None이 된다. 예전엔 cmd_login이 조용히 0을 돌려 claim된 회차가 성공도 실패도
+#   보고하지 않았다 → UI 215초 헛기다림 후 'Mac 응답 없음' 오진. cmd_login 실제 코드로 태운다.
+class _PageStub:
+    url = "https://wing.coupang.com/tenants/seller-web/"
+
+    def goto(self, *_a, **_k) -> None:
+        return None
+
+    def wait_for_timeout(self, *_a, **_k) -> None:
+        return None
+
+
+@contextlib.contextmanager
+def _noop_cm(*_a, **_k):
+    yield None
+
+
+def _patch_login_browser(fetcher, monkeypatch, body: str):
+    """cmd_login의 브라우저 층만 스텁 — _summarize/분기 판정은 실제 코드가 돈다."""
+    monkeypatch.setattr(fetcher, "sync_playwright", _noop_cm)
+
+    @contextlib.contextmanager
+    def _fake_chrome(*_a, **_k):
+        yield (_PageStub(), object(), lambda: None)
+
+    monkeypatch.setattr(fetcher, "_chrome", _fake_chrome)
+    monkeypatch.setattr(
+        fetcher, "_login_wait_loop",
+        lambda *_a, **_k: {"status": 200, "body": body},   # 로그인은 감지됨(state 저장 완료)
+    )
+
+
+def test_login_unparseable_response_reports_fetch_error(fetcher, tmp_path, monkeypatch):
+    cfg = _cfg_no_state(tmp_path)
+    _patch_common(fetcher, monkeypatch, vs_requested=True, rg_requested=False)
+    calls = _install_recorder(fetcher, monkeypatch)
+    # 200 JSON + saleSummaryByDate 키는 있으나 list가 아님 → _is_success True / _summarize None
+    _patch_login_browser(fetcher, monkeypatch, '{"saleSummaryByDate": {"oops": 1}}')
+
+    with pytest.raises(_StopPoll):
+        fetcher.cmd_poll(cfg)
+
+    vs_calls = [c for c in calls if c["url"].endswith("/vendor-summary/fetch-error")]
+    assert len(vs_calls) == 1, "파싱 실패가 침묵하면 UI가 'Mac 응답 없음'으로 오진한다"
+    assert "파싱 실패" in vs_calls[0]["json"]["error"]
+    # ingest push는 없었다(보낼 데이터가 없으므로)
+    assert not [c for c in calls if c["url"].endswith("/vendor-summary/ingest")]
+
+
+def test_login_parseable_response_pushes_and_reports_nothing(fetcher, tmp_path, monkeypatch):
+    """같은 경로의 정상 응답: push(=heartbeat)만 나가고 fetch-error는 없다."""
+    cfg = _cfg_no_state(tmp_path)
+    _patch_common(fetcher, monkeypatch, vs_requested=True, rg_requested=False)
+    calls = _install_recorder(fetcher, monkeypatch)
+    _patch_login_browser(
+        fetcher, monkeypatch,
+        '{"saleSummaryByDate": [{"date": "2026-07-26", "registrationType": "RFM",'
+        ' "gmv": 1000, "unitsSold": 2}]}',
+    )
+
+    with pytest.raises(_StopPoll):
+        fetcher.cmd_poll(cfg)
+
+    assert len([c for c in calls if c["url"].endswith("/vendor-summary/ingest")]) == 1
+    assert not [c for c in calls if c["url"].endswith("/vendor-summary/fetch-error")]
+
+
+def test_cmd_login_returns_1_on_unparseable_response(fetcher, tmp_path, monkeypatch):
+    """CLI 'login' 단독 호출도 nonzero — 세션은 저장됐어도 데이터가 없으면 사람이 알아야 한다."""
+    cfg = _cfg_no_state(tmp_path)
+    _patch_login_browser(fetcher, monkeypatch, '{"saleSummaryByDate": null}')
+    monkeypatch.setattr(fetcher.requests, "post", lambda *_a, **_k: _RespStub())
+
+    assert fetcher.cmd_login(cfg, wait_secs=1) == 1
+
+
+# ── ⑫ RG '정산주기 0개'는 완주지만 신호가 없다 → 정보성 보고(codex R3 [P2]) ──
+#   업로드가 없으면 heartbeat(upload-xlsx→rg_mark_heartbeat)가 안 움직이고, claim은 이미
+#   요청을 소비했다 → 침묵하면 UI가 215초 헛기다린 뒤 'Mac 응답 없음' 오진.
+def test_rg_no_periods_reports_informational_reason(fetcher, tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    _patch_common(fetcher, monkeypatch, vs_requested=False, rg_requested=True)
+    calls = _install_recorder(fetcher, monkeypatch)
+    monkeypatch.setattr(
+        fetcher, "_do_rg_run",
+        lambda _cfg, _state, login_wait_secs=0: fetcher._RG_RC_NO_PERIODS,
+    )
+
+    with pytest.raises(_StopPoll):
+        fetcher.cmd_poll(cfg)
+
+    rg_calls = [c for c in calls if c["url"].endswith("/rg-settlement/fetch-error")]
+    assert len(rg_calls) == 1
+    reason = rg_calls[0]["json"]["error"]
+    assert "정산주기 없음" in reason
+    assert "실패 아님" in reason          # 사람이 '고장'으로 읽지 않게 문구가 진실을 말한다
+    assert "rc=" not in reason            # 뭉뚱그린 실패 문구로 새지 않는다
+
+
+def test_rg_success_reports_nothing(fetcher, tmp_path, monkeypatch):
+    """업로드 성공(rc=0)이면 heartbeat가 이미 움직였다 — 보고 없음."""
+    cfg = _cfg(tmp_path)
+    _patch_common(fetcher, monkeypatch, vs_requested=False, rg_requested=True)
+    calls = _install_recorder(fetcher, monkeypatch)
+    monkeypatch.setattr(fetcher, "_do_rg_run", lambda _cfg, _state, login_wait_secs=0: 0)
+
+    with pytest.raises(_StopPoll):
+        fetcher.cmd_poll(cfg)
+
+    assert calls == []
+
+
+def test_rg_no_periods_return_code_is_distinct_from_failure(fetcher):
+    """계약 고정: 3은 실패(1·2)·성공(0)과 겹치지 않는다."""
+    assert fetcher._RG_RC_NO_PERIODS == 3
+    assert fetcher._RG_RC_NO_PERIODS not in (0, 1, 2)
