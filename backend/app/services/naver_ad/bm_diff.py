@@ -1,14 +1,28 @@
 # bm_diff.py — SA-2 조작 감지기 (BM 벤치마크 레이어, D-NAO-78)
 # 역할: naver_entity_snapshot의 D-1 vs D 두 날짜 셋을 diff(DB-to-DB, 0 GET·결정적·리플레이)
 #   → naver_agency_op 이벤트 생성. 계정 전체 45캠페인(대행사 포함)의 일일 조작을 관찰 전용
-#   피드로 축적한다(§3). 노이즈 필터 4종(ours 자기변경 제외·deleted 가드·bootstrap 가드·
-#   is_exception 판정). 네이버 API 호출 0 — 실행 손(naver_execution_harness/naver_sa_writer)을
-#   import조차 안 한다(§0 금지선 1 · 원칙18-1 단일 책임).
+#   피드로 축적한다(§3). 노이즈 필터 5종(우리 변경의 지연 반영(echo) 제외·ours 자기변경
+#   제외·deleted 가드·bootstrap 가드·is_exception 판정). 네이버 API 호출 0 — 실행 손
+#   (naver_execution_harness/naver_sa_writer)을 import조차 안 한다(§0 금지선 1 · 원칙18-1).
+#
+# ★echo 필터(2026-07-27 오탐 수정): 스냅샷은 매일 07:37 KST에 naver_entity를 복사하므로
+#   우리 실집행(예: 07-23 21:51 EX확장 bid 1,970→2,260, 07-24 탐색UP 90→180→270 래더)이
+#   1~2일 늦게 diff에 나타난다. 구 코드는 (a) optimizer=='ours' 행만 change_log와 대조하고
+#   (b) 대조해도 action 종류·시간창만 봤기 때문에, D-NAO-92로 optimizer=none이 된 03 캠페인의
+#   우리 변경 7건이 전부 "대행사 조작"으로 기록됐다(실측). 이제 optimizer와 무관하게 모든 op에
+#   대해 "우리 실집행 after 값과 일치하는가"를 먼저 검사한다. 시간창 앵커도 kst_now가 아니라
+#   **그 날 스냅샷의 관측 시각(synced_at)**이다 — 과거 날짜 리플레이가 같은 결과를 내야 하고
+#   (멱등·리플레이 계약), 스냅샷 이후에 일어난 우리 쓰기는 이 diff에 반영될 수 없기 때문이다.
+#   억제가 과하지 않도록 세 겹의 브레이크를 둔다: 값 일치 필수 · 외부 귀속 기록
+#   (external_bid_change 등) 우선 · 되돌림(우리 최종값에서 이탈) 판별.
 from __future__ import annotations
 
+import json
 import logging
 from collections import defaultdict
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
+from decimal import Decimal, InvalidOperation
+from typing import Callable, NamedTuple
 
 from sqlalchemy.orm import Session
 
@@ -22,7 +36,9 @@ BID_JITTER_PCT = 3.0        # |Δ%| < 3% = 입찰 반올림 지터 무시
 BUDGET_JITTER_PCT = 5.0     # |Δ%| < 5% = 예산 지터 무시
 BID_EXCEPTION_PCT = 20.0    # 입찰 |Δ%| ≥ 20% → is_exception
 BUDGET_EXCEPTION_PCT = 30.0  # 예산 |Δ%| ≥ 30% → is_exception
-OURS_MATCH_WINDOW_H = 48    # ours 자기변경 매칭 창(최근 48h change_log)
+OURS_MATCH_WINDOW_H = 48    # ours 자기변경 매칭 창(op_date 종료 기준 48h)
+ECHO_LOOKBACK_D = 3         # echo(지연 반영) 조회창 — 실측 지연 1~2일을 덮는 3일
+_ID_CHUNK = 400             # change_log IN 절 분할(SQLite 바인딩 상한 방어)
 
 # op_type → 우리(ours)가 API로 쓰는 change_log.action 집합(매칭 대상). 여기 없는 op_type은
 # 우리가 API로 안 쓰는 종류 → ours여도 매칭 불가 = 외부 개입으로 간주(§3-1 후단).
@@ -31,6 +47,19 @@ _OURS_ACTION_MATCH = {
     "status_flip": {"set_user_lock", "external_status_change"},
     "budget_change": {"update_budget"},
     "negative_add": {"add_negative_keyword"},
+}
+
+# ★echo 근거에서 제외하는 action: entity_sync가 "외부(MOP/사람)가 바꿨다"를 관측해 남기는
+# 기록이라 우리 손의 증거가 아니다. 이걸 echo로 인정하면 대행사 정지/재개가 그대로 묻힌다.
+_ECHO_EXCLUDED_ACTIONS = frozenset({"external_status_change"})
+
+# op_type → entity_sync가 남기는 **외부 귀속 증거** action(after_value 형태는 우리 쓰기와 동일:
+# {"bidAmt":N} / {"userLock":bool}). 같은 값에 대해 외부 기록이 있으면 그쪽이 이긴다 —
+# entity_sync는 07:35 동기화 시점에 "우리 쓰기로 설명 안 되는 변화"만 남기므로 더 시의적절하고
+# 강한 근거다(codex[P1] R1). 우리 stale 로그가 외부 개입을 덮는 경로를 여기서 끊는다.
+_EXTERNAL_ACTION_MATCH = {
+    "bid_change": frozenset({"external_bid_change"}),
+    "status_flip": frozenset({"external_status_change"}),
 }
 
 
@@ -185,33 +214,249 @@ def _detect_changed(curr: dict, prev: dict) -> list[dict]:
     return ops
 
 
-def _load_ours_change_logs(db: Session, ops: list[dict]) -> dict[tuple[str, str], list[tuple[str, datetime]]]:
-    """ops 중 optimizer='ours' 엔티티에 한해 우리 실집행 change_log(dry_run=False)를 적재.
+class _ChangeRec(NamedTuple):
+    """change_log 1행의 매칭용 축약(entity_type/action/시각/before·after 원문 JSON)."""
 
-    ours 엔티티만 대상이라 소량(하루 변경 건). 시간창은 파이썬에서 판정(changed_at은 우리
-    실집행이 kst_now 명시 기록 — naver_execution_harness). (entity_type, entity_id)→[(action, at)]."""
-    ids = {o["entity_id"] for o in ops if o["optimizer"] == "ours"}
-    if not ids:
-        return {}
-    rows = (
-        db.query(NaverChangeLog)
-        .filter(NaverChangeLog.dry_run.is_(False), NaverChangeLog.entity_id.in_(ids))
-        .all()
+    entity_type: str
+    action: str
+    changed_at: datetime | None
+    before_value: str | None
+    after_value: str | None
+
+
+class _Window(NamedTuple):
+    """change_log 조회·매칭 창. 앵커는 D 스냅샷의 관측 시각 — kst_now 금지(리플레이 멱등, §9-1).
+
+    until = D 스냅샷 synced_at. echo_from = until − 3일, ours_from = until − 48h."""
+
+    echo_from: datetime
+    ours_from: datetime
+    until: datetime
+
+
+def _window(d: date, curr: dict) -> _Window:
+    """op_date d의 change_log 조회창.
+
+    ★상한은 D 스냅샷이 실제로 관측한 시각(synced_at의 최대값, 보통 07:37 KST)이다.
+    "D 종료(D+1 00:00)"로 잡으면 스냅샷 이후(예: 같은 날 20시)의 우리 쓰기가 **아직 이 diff에
+    반영될 수 없는데도** 매칭 후보가 되어, 값이 우연히 겹치는 대행사 조작을 소급해 지운다
+    (codex[P1] R1). synced_at은 스냅샷 행에 저장된 값이라 리플레이해도 같다 — 실행 시각
+    의존이 없다. 스냅샷이 비었거나 synced_at이 전부 NULL이면 D+1 00:00로 폴백(bm_snapshot이
+    전 행에 kst_now를 명시 주입하므로 curr가 빈 경우 외엔 도달하지 않고, 그때는 값 변화 op
+    자체가 없다).
+
+    ★알려진 잔여 오차(codex[P1] R2, 수용·미해결): synced_at은 스냅샷 **복사 시각**이지 필드별
+    관측 시각이 아니다. 입찰·상태는 앞선 07:35 entity_sync가 본 값이고(=07:35~07:37 사이의 우리
+    쓰기는 반영 안 됐는데 창 안), 예산·확장검색 GET은 07:37 직후에 돈다(=그 몇 분 사이 쓰기는
+    반영됐는데 창 밖). 두 밴드 모두 우리 쓰기 레인(시간당 :20 · 일 08:50)과 겹치지 않아 현재
+    스케줄에선 비어 있다. 정확히 닫으려면 스냅샷에 필드별 관측 시각을 저장해야 한다(스키마
+    변경 — 이 수정의 스코프 밖)."""
+    stamps = [r.synced_at for r in curr.values() if getattr(r, "synced_at", None) is not None]
+    until = max(stamps) if stamps else datetime.combine(d + timedelta(days=1), time.min)
+    return _Window(
+        echo_from=until - timedelta(days=ECHO_LOOKBACK_D),
+        ours_from=until - timedelta(hours=OURS_MATCH_WINDOW_H),
+        until=until,
     )
-    out: dict[tuple[str, str], list[tuple[str, datetime]]] = defaultdict(list)
-    for r in rows:
-        out[(r.entity_type, r.entity_id)].append((r.action, r.changed_at))
+
+
+def _json_dict(raw: str | None) -> dict | None:
+    """change_log.after_value(JSON 문자열) → dict. 파싱 실패/비-dict는 None(fail-safe)."""
+    if not raw:
+        return None
+    try:
+        v = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    return v if isinstance(v, dict) else None
+
+
+def _num_str(v) -> str | None:
+    """수치 값 → 무손실 문자열. int 캐스팅으로 절삭하지 않는다(2260.9를 2260으로 만들어
+    잘못 일치시키던 문제, codex[P2]). bool은 거부(True==1 오탐 방지). 수치가 아니면 None."""
+    if v is None or isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float, Decimal)):
+        return str(v)
+    if isinstance(v, str):
+        s = v.strip()
+        try:
+            Decimal(s)
+        except InvalidOperation:
+            return None
+        return s
+    return None
+
+
+def _after_bid(after: dict | None) -> str | None:
+    """우리 update_bid의 after → 입찰가 문자열. 광고그룹({"bidAmt":N})·소재(adAttr 중첩) 둘 다
+    지원(auto_operator._exploration_bid_from_change_value와 같은 규약)."""
+    if after is None:
+        return None
+    bid = after.get("bidAmt")
+    if bid is None:
+        attr = after.get("adAttr")
+        if isinstance(attr, str):
+            attr = _json_dict(attr)
+        bid = attr.get("bidAmt") if isinstance(attr, dict) else None
+    return _num_str(bid)
+
+
+def _after_budget(after: dict | None) -> str | None:
+    """우리 update_budget의 after → 일예산 문자열({"dailyBudget":N}, writer가 재조회 응답 그대로)."""
+    return _num_str(after.get("dailyBudget")) if after is not None else None
+
+
+def _after_status(after: dict | None) -> str | None:
+    """우리 set_user_lock의 after → 스냅샷 status 표기로 환산(userLock True=off / False=on).
+
+    ★진짜 bool만 받는다 — 문자열 "false"는 bool()로 True가 되어 정지로 오인된다(codex[P2]).
+    entity_sync._status와 같은 규약 — deleted는 여기서 나올 수 없다(status_flip은 deleted 제외)."""
+    if after is None:
+        return None
+    lock = after.get("userLock")
+    if not isinstance(lock, bool):
+        return None
+    return "off" if lock else "on"
+
+
+# op_type → change_log.after_value에서 "스냅샷 after와 같은 축"의 값을 뽑는 함수. 여기 없는
+# op_type(키워드/제외/소재 수 증감 등)은 값 비교가 불가능한 집계라 echo 판정 대상이 아니다.
+_ECHO_AFTER: dict[str, Callable[[dict | None], str | None]] = {
+    "bid_change": _after_bid,
+    "budget_change": _after_budget,
+    "status_flip": _after_status,
+}
+
+
+def _same_after(op_val: str | None, log_val: str | None) -> bool:
+    """스냅샷 값 vs change_log 값 동치 판정. 수치는 Decimal로 **정확 비교**("1970" == 1970,
+    "2260.9" != "2260" — float 절삭/오차 없음), 그 외는 문자열 비교(on/off). 어느 쪽이든
+    None이면 불일치(근거 없음 = echo 아님)."""
+    if op_val is None or log_val is None:
+        return False
+    a, b = op_val.strip(), log_val.strip()
+    try:
+        return Decimal(a) == Decimal(b)
+    except InvalidOperation:
+        return a == b
+
+
+def _load_change_logs(db: Session, ops: list[dict], win: _Window) -> dict[str, list[_ChangeRec]]:
+    """이번 diff에 등장한 **전체** 엔티티의 우리 실집행 change_log(dry_run=False)를 적재.
+
+    ★optimizer='ours' 한정을 걷어낸 것이 이번 수정의 핵심(구 코드는 optimizer=none으로 바뀐
+    캠페인의 우리 변경을 대조조차 못 했다). 하루 diff 건수라 소량이고, 조회창 하한(echo_from)을
+    SQL에서 걸어 바운드한다. entity_id는 IN 절 상한 방어로 분할 조회.
+
+    반환 키는 entity_id — change_log.entity_type은 proposal.target_type 기반이라 스냅샷 grain
+    표기와 어긋날 수 있고, 네이버 id는 타입 접두사(cmp-/grp-/nkw-/nad-)로 전역 유일하다.
+    entity_type이 필요한 ours 분기는 _ChangeRec.entity_type으로 따로 좁힌다.
+
+    ★tz 계약: change_log를 쓰는 경로(naver_execution_harness·entity_sync 등 26곳)는 전부
+    changed_at을 kst_now()로 명시 기록한다 — server_default(func.now()=UTC)에 기대는 행이
+    없으므로 KST naive끼리 직접 비교해도 안전하다."""
+    ids = sorted({o["entity_id"] for o in ops if o["entity_id"]})
+    out: dict[str, list[_ChangeRec]] = defaultdict(list)
+    for i in range(0, len(ids), _ID_CHUNK):
+        rows = (
+            db.query(NaverChangeLog)
+            .filter(
+                NaverChangeLog.dry_run.is_(False),
+                NaverChangeLog.entity_id.in_(ids[i:i + _ID_CHUNK]),
+                NaverChangeLog.changed_at >= win.echo_from,
+                NaverChangeLog.changed_at < win.until,
+            )
+            .all()
+        )
+        for r in rows:
+            out[r.entity_id].append(
+                _ChangeRec(r.entity_type, r.action, r.changed_at, r.before_value, r.after_value)
+            )
     return out
 
 
-def _matches_our_write(op: dict, ours_logs: dict, now: datetime) -> bool:
-    """이 조작이 최근 48h 우리 실집행 change_log와 매칭되는가(= 우리 손, 대행사 아님)."""
+def _in(at: datetime | None, lo: datetime, hi: datetime) -> bool:
+    """창 [lo, hi) 포함 여부. changed_at NULL은 판정 불가 → False."""
+    return at is not None and lo <= at < hi
+
+
+def _is_our_echo(op: dict, logs: dict, win: _Window) -> bool:
+    """이 diff가 '우리 실집행의 지연 반영'인가 — optimizer와 무관하게 먼저 검사한다.
+
+    인정 조건(셋 다):
+      (1) 창 안 우리 실집행 로그 중 after 값이 스냅샷 after와 일치하는 것이 있다. 래더
+          (90→180→270)는 중간 스텝이 diff에 걸리므로 최신 1건이 아니라 **전체 중 하나라도**.
+      (2) 같은 값에 대한 외부 귀속 기록(external_bid_change 등)이 없다 — 있으면 그쪽이 이긴다.
+      (3) 되돌림이 아니다: 우리 마지막 쓰기값과 스냅샷 after가 다르면서 **스냅샷 before가
+          우리 마지막 쓰기값**이면, 그건 우리가 옮겨둔 상태에서 누군가 되돌린 전이다
+          (우리 270 뒤 대행사 270→180). 옛 로그의 after=180이 우연히 맞아도 echo 아님
+          (codex[P1] R1 — 래더 인정과 되돌림 탐지를 동시에 만족시키는 규칙).
+      (4) 인과 정합: 스냅샷 before가 **우리 상태 궤적**(창 안 우리 쓰기의 before/after 값들)
+          안에 있어야 한다. 예산처럼 외부 귀속 기록(external_*)이 아예 없는 차원에서, 우리가
+          한 번도 쓴 적 없는 제3의 값(30,000)에서 우리 옛 값(50,000)으로 되돌아온 외부 조작이
+          옛 로그 때문에 묻히던 경로를 끊는다(codex[P1] R3). ★궤적의 **시작**을 모르면
+          건너뛴다(fail-open) — 창 안 첫 쓰기의 before를 파싱 못 하면 그 앞 상태를 알 수 없어
+          "지나온 적 없다"를 말할 수 없다(codex[P2] R4).
+          잔여: 래더의 첫 스텝이 조회창(3일)보다 오래되면 궤적이 잘려 정당한 echo를 오탐할 수
+          있다. 실측 지연이 1~2일이라 3일 창이 이를 덮는다는 가정 위에 서 있다.
+    """
+    extract = _ECHO_AFTER.get(op["op_type"])
+    if extract is None or op["after_value"] is None:
+        return False  # 값 비교 불가한 집계 op(키워드/소재 수 등) → echo 판정 대상 아님
+    ours_actions = _OURS_ACTION_MATCH.get(op["op_type"], set()) - _ECHO_EXCLUDED_ACTIONS
+    if not ours_actions:
+        return False
+    ext_actions = _EXTERNAL_ACTION_MATCH.get(op["op_type"], frozenset())
+
+    mine: list[tuple[datetime, str, str | None]] = []  # (changed_at, after, before)
+    external: list[tuple[datetime, str]] = []
+    for rec in logs.get(op["entity_id"], ()):
+        if not _in(rec.changed_at, win.echo_from, win.until):
+            continue
+        after = extract(_json_dict(rec.after_value))
+        if after is None:
+            continue
+        if rec.action in ours_actions:
+            mine.append((rec.changed_at, after, extract(_json_dict(rec.before_value))))
+        elif rec.action in ext_actions:
+            external.append((rec.changed_at, after))
+
+    hits = [t for t, v, _ in mine if _same_after(op["after_value"], v)]
+    if not hits:
+        return False  # (1) 우리 손의 값 근거 없음
+    # (2) 외부 귀속 기록은 **우리 매칭 쓰기 이후**의 것만 veto한다. 우리보다 먼저 있었던 같은
+    # 값의 외부 기록까지 veto하면, 그 뒤 우리가 같은 값을 쓴 진짜 echo를 오탐한다(codex[P2] R2).
+    ours_at = max(hits)
+    if any(t >= ours_at and _same_after(op["after_value"], v) for t, v in external):
+        return False
+    mine.sort(key=lambda r: (r[0], r[1]))  # 시각·값 순 — 동시각도 결정적(리플레이 멱등)
+    last_after = mine[-1][1]
+    if not _same_after(op["after_value"], last_after) and _same_after(op["before_value"], last_after):
+        return False  # (3) 우리 최종값에서 이탈한 전이 = 되돌림
+    if mine[0][2] is not None:  # 궤적의 시작을 아는 경우에만 (4) 적용
+        trail = [b for _, _, b in mine if b is not None] + [v for _, v, _ in mine]
+        if not any(_same_after(op["before_value"], v) for v in trail):
+            return False  # (4) 우리가 지나온 적 없는 값에서 출발한 전이 = 우리 손 아님
+    return True
+
+
+def _matches_our_write(op: dict, logs: dict, win: _Window) -> bool:
+    """(ours 전용 분기) 이 조작이 48h 내 우리 실집행 change_log와 매칭되는가(= 우리 손).
+
+    action 종류·시간창만 보는 느슨한 매칭이라 **값 비교가 불가능한 op_type에만** 남긴다
+    (제외키워드 수 증감 등). 값 비교가 되는 op(입찰·예산·상태)에서 이 경로를 살려두면
+    _is_our_echo가 세운 브레이크 3개(값 일치·외부 veto·되돌림 판별)를 ours 캠페인에서만
+    통째로 우회한다 — 특히 _OURS_ACTION_MATCH에 external_status_change가 들어 있어 "외부
+    기록만 있는데 우리 손으로 판정"까지 났다(codex[P1] R2). echo 창이 48h보다 넓으므로
+    (3일) 값 근거가 있는 우리 변경은 이 경로 없이도 전부 걸린다."""
     actions = _OURS_ACTION_MATCH.get(op["op_type"])
-    if not actions:
-        return False  # 우리가 API로 안 쓰는 종류 → 매칭 불가(외부로 간주)
-    cutoff = now - timedelta(hours=OURS_MATCH_WINDOW_H)
-    for action, changed_at in ours_logs.get((op["entity_type"], op["entity_id"]), ()):
-        if action in actions and changed_at is not None and changed_at >= cutoff:
+    if not actions or op["op_type"] in _ECHO_AFTER:
+        return False  # 우리가 API로 안 쓰는 종류·값 비교 가능한 종류 → 이 경로 사용 안 함
+    for rec in logs.get(op["entity_id"], ()):
+        if rec.entity_type != op["entity_type"]:
+            continue
+        if rec.action in actions and _in(rec.changed_at, win.ours_from, win.until):
             return True
     return False
 
@@ -228,10 +473,21 @@ def _magnitude_exception(op: dict) -> bool:
     return False
 
 
-def _classify(op: dict, ours_logs: dict, now: datetime) -> tuple[bool, bool]:
-    """(기록 여부, is_exception). §3-1: ours 자기변경은 매칭 시 제외, 미매칭 시 외부 개입 예외."""
+def _classify(op: dict, logs: dict, win: _Window) -> tuple[bool, bool]:
+    """(기록 여부, is_exception).
+
+    순서: ①echo(우리 변경의 지연 반영) 제외 — optimizer 무관, 값 일치 근거 필요.
+    ②§3-1 ours 자기변경은 매칭 시 제외, 미매칭 시 외부 개입 예외(단 값 비교가 되는 op는 ①이
+    유일한 제외 경로 — _matches_our_write 참조). ③그 외는 기록."""
+    if _is_our_echo(op, logs, win):
+        log.info(
+            "[BM] 우리 변경의 지연 반영(echo) — agency_op 제외: %s %s %s %s→%s (optimizer=%s)",
+            op["entity_type"], op["entity_id"], op["op_type"],
+            op["before_value"], op["after_value"], op["optimizer"],
+        )
+        return False, False
     if op["optimizer"] == "ours":
-        if _matches_our_write(op, ours_logs, now):
+        if _matches_our_write(op, logs, win):
             return False, False  # 우리 손 — agency_op에서 제외
         return True, True        # 매칭 안 됨 = 우리 캠페인에 대한 외부 개입 → 예외 승격
     return True, bool(op["force_exc"] or _magnitude_exception(op))
@@ -241,7 +497,9 @@ def detect_agency_ops(db: Session, *, op_date: date | None = None) -> dict:
     """스냅샷 D-1 vs D를 diff해 naver_agency_op 이벤트를 산출(멱등·리플레이, 0 GET).
 
     bootstrap 가드: D-1 스냅샷이 없으면 전건 add 폭주를 막기 위해 스킵. 멱등: 같은 op_date
-    기존 이벤트를 삭제 후 재생성(결정적이라 재도출=동일 결과, §9-1 병존 정책).
+    기존 이벤트를 삭제 후 재생성(결정적이라 재도출=동일 결과, §9-1 병존 정책). change_log
+    대조창은 D 스냅샷 관측 시각(synced_at) 앵커라 과거 날짜 리플레이도 같은 결과를 낸다
+    (kst_now는 detected_at 기록에만 쓴다).
     """
     d = op_date or kst_today()
     prev = _snapshot_map(db, d - timedelta(days=1))
@@ -251,13 +509,14 @@ def detect_agency_ops(db: Session, *, op_date: date | None = None) -> dict:
 
     curr = _snapshot_map(db, d)
     now = kst_now()
+    win = _window(d, curr)
     raw = _detect_added(curr, prev) + _detect_removed(curr, prev) + _detect_changed(curr, prev)
-    ours_logs = _load_ours_change_logs(db, raw)
+    logs = _load_change_logs(db, raw, win)
 
     db.query(NaverAgencyOp).filter(NaverAgencyOp.op_date == d).delete()  # 멱등 재생성
     n_event = n_exc = 0
     for op in raw:
-        keep, is_exc = _classify(op, ours_logs, now)
+        keep, is_exc = _classify(op, logs, win)
         if not keep:
             continue
         db.add(NaverAgencyOp(
