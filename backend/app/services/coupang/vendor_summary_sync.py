@@ -16,6 +16,7 @@ from sqlalchemy import func as sqlfunc
 from sqlalchemy.orm import Session
 
 from app.models import CoupangVendorSummaryDaily, CoupangWingCookie
+from app.services.coupang import refresh_contract
 from app.utils.kst import kst_now
 
 log = logging.getLogger(__name__)
@@ -69,6 +70,8 @@ def _ensure_state_row(db: Session, account_key: str = "COUPANG_WING1") -> Coupan
 def _mark_heartbeat(db: Session, account_key: str = "COUPANG_WING1") -> None:
     """push 성공 시각 갱신(=배너 staleness 기준). ingest 성공마다 호출.
 
+    ★lease 계약(refresh_contract): 갱신 요청이 소멸하는 정상 경로는 여기 하나뿐이다
+    (claim은 더 이상 요청을 소비하지 않는다 — 실패 시 재시도해야 하므로).
     ★계정별(codex R1 [P2], 2026-07-27): 실패 보고(mark_fetch_error)만 계정 차원이고 성공은 아니면
     비대칭이 생긴다 — WING2 ingest(예: wing2 인스턴스의 1회 실행·cmd_login 직후 push)가 WING1 행에
     성공을 찍고 WING1의 실패 흔적까지 지운다. 오픽스는 실제로 안 왔는데 배너는 '신선'이라 말한다.
@@ -79,9 +82,11 @@ def _mark_heartbeat(db: Session, account_key: str = "COUPANG_WING1") -> None:
     row.last_error_at = None  # 성공 = 실패 흔적 클리어(안 지우면 오래된 실패가 화면에 남는다)
     row.last_success_at = kst_now()
     db.commit()
+    refresh_contract.mark_success(db, _vs_state_key(account_key))
 
 
-def mark_fetch_error(db: Session, error: str, account_key: str = "COUPANG_WING1") -> None:
+def mark_fetch_error(db: Session, error: str, account_key: str = "COUPANG_WING1",
+                     kind: str | None = None, lease: str | None = None) -> None:
     """Wing 페처 run 실패 보고 → last_error/last_error_at 기록(UI가 실패를 감지하는 유일 경로).
 
     ★존재 이유(PR #30이 광고비에서 먼저 고친 것과 같은 구멍): 페처가 갱신 요청을 claim한
@@ -93,11 +98,13 @@ def mark_fetch_error(db: Session, error: str, account_key: str = "COUPANG_WING1"
     곧바로 "쿠키 만료(재설정 필요)" + 쿠키 재설정 CTA로 렌더된다(Layout.tsx:201/206).
     브라우저 크래시는 쿠키 문제가 아니라 재설정해도 헛수고다. 지속 실패는 워치독이
     last_success_at 경과로 잡는다(status 미의존).
+
+    ★kind(옵션): "login_required"면 재시도하지 않고 요청을 소멸시킨다(§0 금지선 — 재시도해도
+    실패하고 창만 반복해서 뜬다). 그 외 실패는 lease만 반납해 다음 폴에서 재시도된다.
     """
-    row = _ensure_state_row(db, account_key)
-    row.last_error = error[:300]  # 컬럼 한계 — 긴 스택트레이스로 보고 자체가 날아가면 안 된다
-    row.last_error_at = kst_now()
-    db.commit()
+    _ensure_state_row(db, account_key)
+    db.commit()  # 행이 없던 경우를 대비(계약 SA는 기존 행에만 쓴다)
+    refresh_contract.report_failure(db, _vs_state_key(account_key), error, kind, lease=lease)
 
 
 # ════════════════════════════════════════════════
@@ -226,15 +233,12 @@ def vs_status(db: Session) -> dict:
 
 
 def request_refresh(db: Session, account_key: str = "COUPANG_WING1") -> dict:
-    """UI '판매분석 갱신' 버튼 → 갱신 요청 플래그 set. 해당 계정 데몬이 다음 폴링에서 소비.
+    """UI '판매분석 갱신' 버튼 → 갱신 요청 set. 성공하거나 3회 실패할 때까지 살아있다(lease 계약).
 
     ★UI는 WING1만 요청한다(WING2 판매분석은 휴면 — 요청이 안 생기니 WING2 데몬은 claim할 게 없다).
     시그니처만 계정 차원으로 맞춰 두어 나중에 WING2를 켤 때 여기만 열면 되게 한다.
     """
-    row = _ensure_state_row(db, account_key)
-    row.refresh_requested_at = kst_now()
-    db.commit()
-    return {"requested": True, "requested_at": row.refresh_requested_at.isoformat()}
+    return refresh_contract.request_refresh(db, _vs_state_key(account_key))
 
 
 def refresh_status(db: Session, account_key: str = "COUPANG_WING1") -> dict:
@@ -246,7 +250,8 @@ def refresh_status(db: Session, account_key: str = "COUPANG_WING1") -> dict:
     row = _state_row(db, account_key)
     if row is None:
         return {"requested": False, "requested_at": None, "last_success_at": None,
-                "status": "none", "last_error": None, "last_error_at": None}
+                "status": "none", "last_error": None, "last_error_at": None,
+                **refresh_contract.status_fields(None)}
     return {
         "requested": row.refresh_requested_at is not None,
         "requested_at": row.refresh_requested_at.isoformat() if row.refresh_requested_at else None,
@@ -254,21 +259,13 @@ def refresh_status(db: Session, account_key: str = "COUPANG_WING1") -> dict:
         "status": row.status,
         "last_error": row.last_error,
         "last_error_at": row.last_error_at.isoformat() if row.last_error_at else None,
+        **refresh_contract.status_fields(row),
     }
 
 
 def claim_refresh(db: Session, account_key: str = "COUPANG_WING1") -> dict:
-    """Wing 페처가 갱신 요청을 '소비'(플래그 clear). 원자적 조건부 UPDATE(광고 패턴, codex P2).
+    """Wing 페처가 갱신 요청을 **임대**(lease)한다. 플래그는 성공/소진까지 보존(refresh_contract).
 
     ★account_key로 상태행이 갈리므로 WING2 데몬이 WING1의 버튼 요청을 훔쳐가지 않는다(큐 격리).
     """
-    from sqlalchemy import update
-
-    res = db.execute(
-        update(CoupangWingCookie)
-        .where(CoupangWingCookie.account_key == _vs_state_key(account_key))
-        .where(CoupangWingCookie.refresh_requested_at.isnot(None))
-        .values(refresh_requested_at=None)
-    )
-    db.commit()
-    return {"claimed": (res.rowcount or 0) > 0}
+    return refresh_contract.claim_refresh(db, _vs_state_key(account_key))

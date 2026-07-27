@@ -27,7 +27,7 @@ from app.database import get_db
 from app.models import Channel, CoupangAdCostDaily, CoupangAdOptionDaily, CoupangProductItem, CoupangRevenueFee, CoupangRgInbound, CoupangRgOrderItem, CoupangRgSettlementFee, Order, ProductChannelMapping, ProductMaster
 from app.routers._coupang_write_http import handle_write as _handle_write
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
-from app.services.coupang import ad_cost_sync, coupon_write, coupang_seller_cost as _seller_cost_harness, demand_classifier, in_transit_estimator, lead_time_estimator, ohitech_ad_sync, product_write, rg_fee_audit, rg_inbound_sync, rg_product_size_sync, rg_replenishment, rg_settlement_sync, replenishment_backtest, rocket_cost_map, rocket_supplier_sync, rg_cost_reader as _rg_reader, sales_velocity_estimator, vendor_summary_sync
+from app.services.coupang import ad_cost_sync, coupon_write, refresh_contract, coupang_seller_cost as _seller_cost_harness, demand_classifier, in_transit_estimator, lead_time_estimator, ohitech_ad_sync, product_write, rg_fee_audit, rg_inbound_sync, rg_product_size_sync, rg_replenishment, rg_settlement_sync, replenishment_backtest, rocket_cost_map, rocket_supplier_sync, rg_cost_reader as _rg_reader, sales_velocity_estimator, vendor_summary_sync
 from app.utils.crypto import CookieCryptoError
 
 log = logging.getLogger(__name__)
@@ -1464,7 +1464,11 @@ def rocket_refresh_claim(
     x_ingest_token: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    """로켓 페처가 갱신 요청을 소비(플래그 clear). 토큰 인증(ingest와 동일 — 페처 전용 뮤테이션)."""
+    """로켓 페처가 갱신 요청을 **임대**(lease). 토큰 인증(ingest와 동일 — 페처 전용 뮤테이션).
+
+    2026-07-27부터 claim은 플래그를 지우지 않는다 — 성공/3회 소진/로그인 필요일 때만
+    소멸한다(refresh_contract). 시그니처·응답 키(claimed)는 불변.
+    """
     _check_ingest_token(x_ingest_token)
     return rocket_supplier_sync.claim_rocket_refresh(db)
 
@@ -1503,7 +1507,13 @@ def rocket_fetch_error(
     """
     _check_ingest_token(x_ingest_token)
     error = str(body.get("error") or "").strip() or "unknown"
-    rocket_supplier_sync.mark_rocket_fetch_error(db, error)
+    # kind(옵션, 하위호환): 구버전 페처는 안 보낸다 → None = 평범한 실패 = 재시도 대상.
+    # "login_required"만 특별 취급(재시도 제외, PLAN §0 금지선).
+    kind = str(body.get("kind") or "").strip() or None
+    # lease(옵션, codex 1R[P1]): claim 응답의 임대 식별자. 지금 유효한 임대와 다르면 stale
+    # 보고로 무시한다(20분 넘게 멈췄던 옛 시도가 남의 임대를 반납하는 것 차단). 없으면 기존 동작.
+    lease = str(body.get("lease") or "").strip() or None
+    rocket_supplier_sync.mark_rocket_fetch_error(db, error, kind=kind, lease=lease)
     return {"ok": True}
 
 
@@ -1529,7 +1539,11 @@ def ohitech_ad_refresh_claim(
     x_ingest_token: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    """Mac 페처가 갱신 요청을 소비(플래그 clear)하고 작업 시작. 토큰 인증(ingest와 동일)."""
+    """Mac 페처가 갱신 요청을 **임대**(lease)하고 작업 시작. 토큰 인증(ingest와 동일).
+
+    claim은 플래그를 지우지 않는다(2026-07-27 lease 계약) — 응답의 lease를 실패 보고에
+    되돌려주면 stale 보고가 걸러진다.
+    """
     _check_ingest_token(x_ingest_token)
     return ohitech_ad_sync.claim_refresh(db)
 
@@ -1558,7 +1572,13 @@ def ohitech_ad_fetch_error(
     """
     _check_ingest_token(x_ingest_token)
     error = str(body.get("error") or "").strip() or "unknown"
-    ohitech_ad_sync.mark_fetch_error(db, error)
+    # kind(옵션, 하위호환): 구버전 페처는 안 보낸다 → None = 평범한 실패 = 재시도 대상.
+    # "login_required"만 특별 취급(재시도 제외, PLAN §0 금지선).
+    kind = str(body.get("kind") or "").strip() or None
+    # lease(옵션, codex 1R[P1]): claim 응답의 임대 식별자. 지금 유효한 임대와 다르면 stale
+    # 보고로 무시한다(20분 넘게 멈췄던 옛 시도가 남의 임대를 반납하는 것 차단). 없으면 기존 동작.
+    lease = str(body.get("lease") or "").strip() or None
+    ohitech_ad_sync.mark_fetch_error(db, error, kind=kind, lease=lease)
     return {"ok": True}
 
 
@@ -1634,7 +1654,11 @@ def claim_ad_cost_refresh(
     x_ingest_token: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    """Mac 페처가 갱신 요청을 소비(플래그 clear)하고 작업 시작. 토큰 인증(ingest와 동일)."""
+    """Mac 페처가 갱신 요청을 **임대**(lease)하고 작업 시작. 토큰 인증(ingest와 동일).
+
+    claim은 플래그를 지우지 않는다(2026-07-27 lease 계약) — 응답의 lease를 실패 보고에
+    되돌려주면 stale 보고가 걸러진다.
+    """
     import secrets as _secrets
 
     expected = os.getenv("AD_INGEST_TOKEN", "").strip()
@@ -1657,7 +1681,13 @@ def report_ad_cost_fetch_error(
     """
     _check_ingest_token(x_ingest_token)
     error = str(body.get("error") or "").strip() or "unknown"
-    ad_cost_sync.mark_fetch_error(db, error)
+    # kind(옵션, 하위호환): 구버전 페처는 안 보낸다 → None = 평범한 실패 = 재시도 대상.
+    # "login_required"만 특별 취급(재시도 제외, PLAN §0 금지선).
+    kind = str(body.get("kind") or "").strip() or None
+    # lease(옵션, codex 1R[P1]): claim 응답의 임대 식별자. 지금 유효한 임대와 다르면 stale
+    # 보고로 무시한다(20분 넘게 멈췄던 옛 시도가 남의 임대를 반납하는 것 차단). 없으면 기존 동작.
+    lease = str(body.get("lease") or "").strip() or None
+    ad_cost_sync.mark_fetch_error(db, error, kind=kind, lease=lease)
     return {"ok": True}
 
 
@@ -1777,8 +1807,9 @@ def claim_wing_vendor_summary_refresh(
     x_ingest_token: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    """Wing 페처가 갱신 요청을 소비(플래그 clear). 토큰 인증(ingest와 동일).
+    """Wing 페처가 갱신 요청을 **임대**(lease). 토큰 인증(ingest와 동일).
 
+    claim은 플래그를 지우지 않는다(2026-07-27 lease 계약).
     ★account_key 격리: WING2 데몬이 WING1의 버튼 요청을 훔쳐가지 못한다(claim 경쟁 차단).
     """
     _require_ingest_token(x_ingest_token)
@@ -1800,7 +1831,14 @@ def wing_vendor_summary_fetch_error(
     """
     _require_ingest_token(x_ingest_token)
     error = str(body.get("error") or "").strip() or "unknown"
-    vendor_summary_sync.mark_fetch_error(db, error, _require_rg_account(account_key))
+    # kind(옵션, 하위호환): 구버전 페처는 안 보낸다 → None = 평범한 실패 = 재시도 대상.
+    # "login_required"만 특별 취급(재시도 제외, PLAN §0 금지선).
+    kind = str(body.get("kind") or "").strip() or None
+    # lease(옵션, codex 1R[P1]): claim 응답의 임대 식별자. 지금 유효한 임대와 다르면 stale
+    # 보고로 무시한다(20분 넘게 멈췄던 옛 시도가 남의 임대를 반납하는 것 차단). 없으면 기존 동작.
+    lease = str(body.get("lease") or "").strip() or None
+    vendor_summary_sync.mark_fetch_error(
+        db, error, account_key=_require_rg_account(account_key), kind=kind, lease=lease)
     return {"ok": True}
 
 
@@ -1831,8 +1869,10 @@ def claim_wing_rg_settlement_refresh(
     x_ingest_token: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    """Wing 페처가 RG 갱신 요청을 소비(플래그 clear). 토큰 인증(ingest와 동일).
+    """Wing 페처가 RG 갱신 요청을 **임대**(lease). 토큰 인증(ingest와 동일).
 
+    claim은 플래그를 지우지 않는다(2026-07-27 lease 계약) — RG는 run이 끝날 때
+    refresh-complete로 요청을 소멸시킨다.
     ★account_key 격리: WING2 데몬이 WING1의 버튼 요청을 훔쳐가지 못한다(claim 경쟁 차단).
     """
     _require_ingest_token(x_ingest_token)
@@ -1854,8 +1894,42 @@ def wing_rg_settlement_fetch_error(
     """
     _require_ingest_token(x_ingest_token)
     error = str(body.get("error") or "").strip() or "unknown"
-    rg_settlement_sync.rg_mark_fetch_error(db, error, _require_rg_account(account_key))
+    # kind(옵션, 하위호환): 구버전 페처는 안 보낸다 → None = 평범한 실패 = 재시도 대상.
+    # "login_required"만 특별 취급(재시도 제외, PLAN §0 금지선).
+    kind = str(body.get("kind") or "").strip() or None
+    # lease(옵션, codex 1R[P1]): claim 응답의 임대 식별자. 지금 유효한 임대와 다르면 stale
+    # 보고로 무시한다(20분 넘게 멈췄던 옛 시도가 남의 임대를 반납하는 것 차단). 없으면 기존 동작.
+    lease = str(body.get("lease") or "").strip() or None
+    rg_settlement_sync.rg_mark_fetch_error(
+        db, error, account_key=_require_rg_account(account_key), kind=kind, lease=lease)
     return {"ok": True}
+
+
+@router.post("/wing/rg-settlement/refresh-complete")
+def wing_rg_settlement_refresh_complete(
+    body: dict[str, Any] = Body(default={}),
+    x_ingest_token: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """RG run이 성공으로 끝났음을 알려 갱신 요청을 소멸시킨다(lease 계약의 '요청 완료' 신호).
+
+    ★왜 별도 신호가 필요한가: RG의 성공 heartbeat는 엑셀 upload-xlsx에서만 찍힌다. 그런데
+    "이번 주 정산주기가 없어 받을 게 없었다"처럼 **정상 완주했지만 업로드가 0건**인 회차가
+    있다. lease 계약에선 요청이 성공 신호로만 소멸하므로, 이 신호가 없으면 그런 회차가
+    재시도 3회(=창 3번)를 유발한 뒤 "재시도 3회 소진"이라는 거짓 실패로 끝난다.
+    ★last_success_at(데이터 신선도 시계)은 건드리지 않는다 — 받은 게 없으면 데이터는 그대로다.
+    이미 업로드가 요청을 소멸시킨 뒤라면 이 호출은 무해한 no-op.
+    """
+    _require_ingest_token(x_ingest_token)
+    # clear_error=True(codex 2R[P2]): 1회차가 실패하고 2회차가 "받을 게 없어" 정상 종료하면
+    # last_error_at만 바뀐 채 요청이 사라진다 → UI가 성공한 회차를 실패로 읽는다. 실패 흔적을
+    # 함께 지우되 last_success_at(데이터 신선도 시계)은 그대로 둔다.
+    # lease(옵션): 내 임대에 대해서만 완료 처리(codex 3R[P2]). 20분 넘게 끌던 옛 run이
+    # 임대를 넘긴 뒤 뒤늦게 완료를 외쳐 새 요청을 지우는 것을 막는다. 없으면 기존 동작.
+    lease = str(body.get("lease") or "").strip() or None
+    ok = refresh_contract.mark_success(
+        db, rg_settlement_sync._RG_STATE_ACCOUNT, clear_error=True, lease=lease)
+    return {"ok": ok}
 
 
 # ════════════════════════════════════════════════════════════════════

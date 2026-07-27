@@ -22,6 +22,7 @@ from app.clients.coupang.rg_settlement import (
     CoupangWingRgSettlementClient,
 )
 from app.models import CoupangRgSettlementFee, CoupangWingCookie
+from app.services.coupang import refresh_contract
 from app.utils.crypto import decrypt_secret
 from app.utils.kst import kst_now
 
@@ -939,7 +940,13 @@ def _rg_ensure_state_row(db: Session, account_key: str = "COUPANG_WING1") -> Cou
 
 
 def rg_mark_heartbeat(db: Session, account_key: str = "COUPANG_WING1") -> None:
-    """RG 엑셀 push(업로드) 성공 시각 갱신(staleness·스케줄 중복방지 기준). 라우터가 ingest 성공 후 호출."""
+    """RG 엑셀 push(업로드) 성공 시각 갱신(staleness·스케줄 중복방지 기준). 라우터가 ingest 성공 후 호출.
+
+    ★갱신 요청은 여기서 소멸시키지 않는다(codex 1R[P1]): RG 한 회차는 (정산주기 × 리포트종류)
+    여러 엑셀을 올린다. 첫 업로드에서 요청을 지우면 뒤이은 다운로드·push가 실패해도 재시도할
+    요청이 남아있지 않아 정산 데이터가 반쪽으로 남는다. 요청 소멸은 run 전체가 끝난 뒤
+    refresh-complete(=/wing/rg-settlement/refresh-complete)가 한다.
+    """
     row = _rg_ensure_state_row(db, account_key)
     row.status = "green"
     row.last_error = None
@@ -948,7 +955,8 @@ def rg_mark_heartbeat(db: Session, account_key: str = "COUPANG_WING1") -> None:
     db.commit()
 
 
-def rg_mark_fetch_error(db: Session, error: str, account_key: str = "COUPANG_WING1") -> None:
+def rg_mark_fetch_error(db: Session, error: str, account_key: str = "COUPANG_WING1",
+                        kind: str | None = None, lease: str | None = None) -> None:
     """Wing 페처 RG run 실패 보고 → last_error/last_error_at 기록(UI가 실패를 감지하는 유일 경로).
 
     ★존재 이유(PR #30이 광고비에서 먼저 고친 것과 같은 구멍): 페처가 갱신 요청을 claim한
@@ -960,19 +968,18 @@ def rg_mark_fetch_error(db: Session, error: str, account_key: str = "COUPANG_WIN
     곧바로 "쿠키 만료(재설정 필요)" + 쿠키 재설정 CTA로 렌더된다(Layout.tsx:201/206).
     브라우저 크래시는 쿠키 문제가 아니라 재설정해도 헛수고다. 지속 실패는 워치독이
     last_success_at 경과로 잡는다(status 미의존).
+
+    ★kind(옵션): "login_required"면 재시도하지 않고 요청 소멸(§0 금지선). 그 외는 lease만
+    반납해 다음 폴에서 재시도된다(최대 3회).
     """
-    row = _rg_ensure_state_row(db, account_key)
-    row.last_error = error[:300]  # 컬럼 한계 — 긴 스택트레이스로 보고 자체가 날아가면 안 된다
-    row.last_error_at = kst_now()
-    db.commit()
+    _rg_ensure_state_row(db, account_key)
+    db.commit()  # 행이 없던 경우 대비(계약 SA는 기존 행에만 쓴다)
+    refresh_contract.report_failure(db, _rg_state_key(account_key), error, kind, lease=lease)
 
 
 def rg_request_refresh(db: Session, account_key: str = "COUPANG_WING1") -> dict:
-    """UI 'RG 정산 갱신' 버튼/스케줄 → 갱신 요청 플래그 set. 해당 계정 데몬이 다음 폴링에서 소비."""
-    row = _rg_ensure_state_row(db, account_key)
-    row.refresh_requested_at = kst_now()
-    db.commit()
-    return {"requested": True, "requested_at": row.refresh_requested_at.isoformat()}
+    """UI 'RG 정산 갱신' 버튼/스케줄 → 갱신 요청 set. 성공하거나 3회 실패할 때까지 살아있다(lease 계약)."""
+    return refresh_contract.request_refresh(db, _rg_state_key(account_key))
 
 
 def rg_refresh_status(db: Session, account_key: str = "COUPANG_WING1") -> dict:
@@ -985,7 +992,8 @@ def rg_refresh_status(db: Session, account_key: str = "COUPANG_WING1") -> dict:
     if row is None:
         return {"requested": False, "requested_at": None, "last_success_at": None,
                 "status": "none", "last_error": None, "last_error_at": None,
-                "age_hours": None, "stale": False}
+                "age_hours": None, "stale": False,
+                **refresh_contract.status_fields(None)}
     age_hours = None
     stale = False
     if row.last_success_at:
@@ -1000,21 +1008,17 @@ def rg_refresh_status(db: Session, account_key: str = "COUPANG_WING1") -> dict:
         "last_error_at": row.last_error_at.isoformat() if row.last_error_at else None,
         "age_hours": age_hours,
         "stale": stale,
+        **refresh_contract.status_fields(row),
     }
 
 
 def rg_claim_refresh(db: Session, account_key: str = "COUPANG_WING1") -> dict:
-    """Wing 페처가 RG 갱신 요청을 '소비'(플래그 clear). 원자적 조건부 UPDATE(광고/vendor-summary 패턴).
+    """Wing 페처가 RG 갱신 요청을 **임대**(lease)한다. 플래그는 성공/소진까지 보존(refresh_contract).
 
     ★account_key로 상태행이 갈리므로 계정별 데몬이 서로의 요청을 훔쳐가지 않는다(큐 격리).
+    ★settle_on_success_heartbeat=False(codex 4R[P1]): RG 한 회차는 (정산주기×리포트종류) 여러
+    엑셀을 올린다. 첫 엑셀의 heartbeat를 "완주"로 읽으면 나머지 리포트를 영영 재시도하지 않는다.
+    RG의 완주 신호는 run 종료 시의 refresh-complete 하나뿐이다.
     """
-    from sqlalchemy import update
-
-    res = db.execute(
-        update(CoupangWingCookie)
-        .where(CoupangWingCookie.account_key == _rg_state_key(account_key))
-        .where(CoupangWingCookie.refresh_requested_at.isnot(None))
-        .values(refresh_requested_at=None)
-    )
-    db.commit()
-    return {"claimed": (res.rowcount or 0) > 0}
+    return refresh_contract.claim_refresh(db, _rg_state_key(account_key),
+                                          settle_on_success_heartbeat=False)

@@ -87,11 +87,22 @@ async function runRgRefreshForAccount(
     // ★성공 우선(순서 바꾸지 말 것): 둘 다 변했으면 성공이 이긴다. 라이브 실측
     // (2026-07-17 RG): 업로드가 클라 타임아웃(60s)을 넘겨 페처는 실패로 보고했지만
     // 서버는 완주해 success/error가 138ms 차로 함께 갱신됐다 — 데이터는 실제로 들어왔다.
-    if (st.last_success_at && st.last_success_at !== baseline) return { done: true, failed: null };
-    // 페처가 실패를 보고하면 즉시 이탈 — 이게 없으면 이미 끝난 실패를 215초 헛기다린다.
-    if (st.last_error_at && st.last_error_at !== errBaseline) {
+    // ★RG만 !requested를 함께 요구한다(codex 3R[P1]): RG 한 회차는 (정산주기×리포트종류)
+    // 여러 엑셀을 올린다. 첫 엑셀에서 last_success_at이 오르므로 그것만 보고 이탈하면
+    // 뒤 엑셀이 실패한 반쪽 run을 "완료"로 표시한다. 요청 소멸(=run 종료)까지 기다린다.
+    if (st.last_success_at && st.last_success_at !== baseline && !st.requested) {
+      return { done: true, failed: null };
+    }
+    // 페처가 **종료된** 실패를 보고하면 즉시 이탈 — 이게 없으면 이미 끝난 실패를 215초 헛기다린다.
+    // ★requested가 아직 true면 재시도가 남아 있다는 뜻(lease 계약, 2026-07-27) — 여기서
+    // 이탈하면 1회차 실패를 최종 실패로 오보한다. 요청이 소멸(=재시도 소진/로그인 필요)한
+    // 뒤에야 실패로 판정한다. last_error에는 소멸 사유가 들어 있다.
+    if (st.last_error_at && st.last_error_at !== errBaseline && !st.requested) {
       return { done: false, failed: st.last_error || "원인 미상" };
     }
+    // 새 실패 없이 요청만 사라졌다 = 수집이 정상 종료됐다(예: RG "받을 정산주기 없음").
+    // 이 분기가 없으면 성공한 무작업 회차를 타임아웃까지 기다린 뒤 "응답 없음"으로 오보한다.
+    if (!st.requested) return { done: true, failed: null };
   }
   return { done: false, failed: null }; // 타임아웃 = 그 계정 Mac 데몬 무응답(미설치·꺼짐·로그인 전)
 }
@@ -178,11 +189,17 @@ export default function CommandCenter() {
         // (2026-07-17 RG): 업로드가 클라 타임아웃(60s)을 넘겨 페처는 실패로 보고했지만
         // 서버는 완주해 success/error가 138ms 차로 함께 갱신됐다 — 데이터는 실제로 들어왔다.
         if (st.last_success_at && st.last_success_at !== baseline) { done = true; break; }
-        // 페처가 실패를 보고하면 즉시 이탈 — 이게 없으면 이미 끝난 실패를 215초 헛기다린다.
-        if (st.last_error_at && st.last_error_at !== errBaseline) {
+        // 페처가 **종료된** 실패를 보고하면 즉시 이탈 — 이게 없으면 이미 끝난 실패를 215초 헛기다린다.
+        // ★requested가 아직 true면 재시도가 남아 있다는 뜻(lease 계약, 2026-07-27) — 여기서
+        // 이탈하면 1회차 실패를 최종 실패로 오보한다. 요청이 소멸(=재시도 소진/로그인 필요)한
+        // 뒤에야 실패로 판정한다. last_error에는 소멸 사유가 들어 있다.
+        if (st.last_error_at && st.last_error_at !== errBaseline && !st.requested) {
           failed = st.last_error || "원인 미상";
           break;
         }
+        // 새 실패 없이 요청만 사라졌다 = 수집이 정상 종료됐다(예: RG "받을 정산주기 없음").
+        // 이 분기가 없으면 성공한 무작업 회차를 타임아웃까지 기다린 뒤 "응답 없음"으로 오보한다.
+        if (!st.requested) { done = true; break; }
       }
       if (done) {
         // 대기 중 사용자가 계정/기간을 바꿨을 수 있음 → 현재 선택(selRef)으로 재조회(codex S3 P1).
@@ -263,11 +280,17 @@ export default function CommandCenter() {
         // (2026-07-17 RG): 업로드가 클라 타임아웃(60s)을 넘겨 페처는 실패로 보고했지만
         // 서버는 완주해 success/error가 138ms 차로 함께 갱신됐다 — 데이터는 실제로 들어왔다.
         if (st.last_success_at && st.last_success_at !== baseline) { done = true; break; }
-        // 페처가 실패를 보고하면 즉시 이탈 — 이게 없으면 이미 끝난 실패를 180초 헛기다린다.
-        if (st.last_error_at && st.last_error_at !== errBaseline) {
+        // 페처가 **종료된** 실패를 보고하면 즉시 이탈 — 이게 없으면 이미 끝난 실패를 180초 헛기다린다.
+        // ★requested가 아직 true면 재시도가 남아 있다는 뜻(lease 계약, 2026-07-27) — 여기서
+        // 이탈하면 1회차 실패를 최종 실패로 오보한다. 요청이 소멸(=재시도 소진/로그인 필요)한
+        // 뒤에야 실패로 판정한다. last_error에는 소멸 사유가 들어 있다.
+        if (st.last_error_at && st.last_error_at !== errBaseline && !st.requested) {
           failed = st.last_error || "원인 미상";
           break;
         }
+        // 새 실패 없이 요청만 사라졌다 = 수집이 정상 종료됐다(예: RG "받을 정산주기 없음").
+        // 이 분기가 없으면 성공한 무작업 회차를 타임아웃까지 기다린 뒤 "응답 없음"으로 오보한다.
+        if (!st.requested) { done = true; break; }
       }
       if (done) {
         const sel = selRef.current;
@@ -307,11 +330,17 @@ export default function CommandCenter() {
         // (2026-07-17 RG): 업로드가 클라 타임아웃(60s)을 넘겨 페처는 실패로 보고했지만
         // 서버는 완주해 success/error가 138ms 차로 함께 갱신됐다 — 데이터는 실제로 들어왔다.
         if (st.last_success_at && st.last_success_at !== baseline) { done = true; break; }
-        // 페처가 실패를 보고하면 즉시 이탈 — 이게 없으면 이미 끝난 실패를 180초 헛기다린다.
-        if (st.last_error_at && st.last_error_at !== errBaseline) {
+        // 페처가 **종료된** 실패를 보고하면 즉시 이탈 — 이게 없으면 이미 끝난 실패를 180초 헛기다린다.
+        // ★requested가 아직 true면 재시도가 남아 있다는 뜻(lease 계약, 2026-07-27) — 여기서
+        // 이탈하면 1회차 실패를 최종 실패로 오보한다. 요청이 소멸(=재시도 소진/로그인 필요)한
+        // 뒤에야 실패로 판정한다. last_error에는 소멸 사유가 들어 있다.
+        if (st.last_error_at && st.last_error_at !== errBaseline && !st.requested) {
           failed = st.last_error || "원인 미상";
           break;
         }
+        // 새 실패 없이 요청만 사라졌다 = 수집이 정상 종료됐다(예: RG "받을 정산주기 없음").
+        // 이 분기가 없으면 성공한 무작업 회차를 타임아웃까지 기다린 뒤 "응답 없음"으로 오보한다.
+        if (!st.requested) { done = true; break; }
       }
       if (done) {
         const sel = selRef.current;
