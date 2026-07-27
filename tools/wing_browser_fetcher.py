@@ -27,7 +27,9 @@
 #   {"account_key":"COUPANG_WING1","prod_base_url":"https://sellc.ohitech.co.kr","ingest_token":"<AD_INGEST_TOKEN>","vs_days":7,
 #    "vendor_id":"A01564720","rg_report_types":["WAREHOUSING_SHIPPING"],"rg_max_periods":1,"rg_days":21,
 #    "rg_status_days":35,"rg_min_interval_s":3600}
-#   (vendor_id·rg_* 는 'rg' 명령·poll 데몬 RG 분기용. account_key=WING1→vendor_id A01564720(오픽스),
+#   (vs_days=판매분석 롤링 창 폭(기본 45, 미지정 시). vs_chunk_days=한 요청 최대 폭(기본 7).
+#    ★config에 vs_days가 남아 있으면 config가 이긴다 — 7로 박혀 있으면 자가치유가 안 된다(지우거나 45로).
+#    vendor_id·rg_* 는 'rg' 명령·poll 데몬 RG 분기용. account_key=WING1→vendor_id A01564720(오픽스),
 #    WING2→A01029796(오하이테크). rg_daily_hour은 무시됨(폐기·버튼-only), rg_min_interval_s=RG 실행 최소간격.
 #    rg_status_days=층1 계정 수수료 push 윈도우(기본 35, 백필 시 90으로 1회 실행). rg_days=엑셀 열거 윈도우.)
 # 다계정 인스턴스 분리 env(D-7): OHISELL_WING_CONFIG(config)·OHISELL_WING_LOG(로그)·OHISELL_WING_LOCK(lock).
@@ -133,15 +135,58 @@ def _push_configured(cfg: dict) -> bool:
     return bool(cfg.get("account_key") and cfg.get("prod_base_url") and cfg.get("ingest_token"))
 
 
-def _vs_payload(cfg: dict) -> dict:
+# ── 판매분석 요청 창 (2026-07-27 자가치유 수정) ──────────────────────────
+# 왜 45일인가: 수집이 순수 버튼-only(사람이 누를 때만)라, 요청 창이 7일이면 버튼 간격이 7일을
+#   넘는 순간 그 사이 날짜는 "영구 누락"된다(실측: prod coupang_vendor_summary_daily에 06-20~07-09
+#   20일·07-17~07-19 3일 구멍). 그 구멍 때문에 revenue_canonical의 완결성 게이트
+#   (days_with_data >= expected_days)가 거의 항상 False → Wing 정본화가 조용히 주문기반 폴백.
+#   창을 45일 롤링으로 넓히면 45일 이내 공백은 다음 버튼 클릭에서 자동으로 메워진다(자가치유).
+# 왜 청크인가: 45일 범위를 한 번에 받아본 근거가 없다. 로그(~/.ohisell_wing_fetcher.log) 전 이력이
+#   7일 창뿐이고(2026-06-07~ 2026-07-26 전 회차), 쿠팡 문서·코드 어디에도 허용 범위 명시가 없다.
+#   "아마 되겠지"로 넓히면 400 한 방에 수집 전체가 죽으므로, 라이브로 실증된 유일한 폭(7일)을
+#   단위로 잘라 여러 번 요청한다. 각 청크 push는 기존 upsert 경로 그대로 — 멱등이라 중복 안전.
+_VS_DEFAULT_DAYS = 45        # 롤링 창 전체 폭(자가치유 가능한 공백 한도)
+_VS_DEFAULT_CHUNK_DAYS = 7   # 한 요청의 최대 폭 — 라이브로 검증된 값
+
+
+def _cfg_int(cfg: dict, key: str, default: int) -> int:
+    """config 정수값 — 없음·0·None·오타 문자열이면 기본값(설정 오타가 수집을 죽이지 않게)."""
+    try:
+        v = int(cfg.get(key) or default)
+    except (TypeError, ValueError):
+        log.warning("설정 %s 값이 정수가 아님(%r) — 기본값 %d 사용", key, cfg.get(key), default)
+        return default
+    return v if v > 0 else default
+
+
+def _vs_windows(cfg: dict) -> list[tuple[object, object]]:
+    """어제까지 롤링 vs_days일을 vs_chunk_days 단위로 자른 (start, end) 목록. 최신 청크가 맨 앞.
+
+    최신 우선인 이유: 중간에 세션이 끊겨도 가장 중요한 최근 날짜는 이미 받아둔 상태가 된다.
+    config의 vs_days가 있으면 그 값이 우선(기존 계약 유지).
+    ★vs_chunk_days는 '줄이는' 방향만 허용한다(≤7). 실증된 폭을 config 한 줄로 넘겨버리면
+      최신 청크부터 400으로 죽어 수집 전체가 멈춘다 — 넓히려면 라이브 증거와 함께 코드로(원칙 22).
+    """
+    days = _cfg_int(cfg, "vs_days", _VS_DEFAULT_DAYS)
+    chunk = min(_cfg_int(cfg, "vs_chunk_days", _VS_DEFAULT_CHUNK_DAYS), _VS_DEFAULT_CHUNK_DAYS)
+    end = datetime.now(KST).date() - timedelta(days=1)  # 어제(오늘은 sync 시차로 부정확 → 제외, D-3)
+    first = end - timedelta(days=days - 1)
+    windows: list[tuple[object, object]] = []
+    cur_end = end
+    while cur_end >= first:
+        cur_start = max(first, cur_end - timedelta(days=chunk - 1))
+        windows.append((cur_start, cur_end))
+        cur_end = cur_start - timedelta(days=1)
+    return windows
+
+
+def _vs_payload(cfg: dict, window: tuple | None = None) -> dict:
     """vendor-summary body — 닫힌 과거일 윈도우(D-3, 어제까지). registrationTypes=3P+RG 전체.
 
-    days 기본 7(검증용 작은 윈도우). YYYY-MM-DD 문자열(ref 18).
+    window=None이면 가장 최근 청크(기존 호출부 호환 — 로그인 감지 프로브 등이 쓰는 가벼운 1회분).
+    YYYY-MM-DD 문자열(ref 18).
     """
-    days = int(cfg.get("vs_days", 7))
-    today = datetime.now(KST).date()
-    end = today - timedelta(days=1)            # 어제(오늘은 sync 시차로 부정확 → 제외, D-3)
-    start = end - timedelta(days=days - 1)
+    start, end = window if window else _vs_windows(cfg)[0]
     return {
         "startDate": start.isoformat(),
         "endDate": end.isoformat(),
@@ -533,8 +578,11 @@ def _summarize(body: str) -> dict | None:
     }
 
 
-def _fetch_vendor_summary(page, cfg: dict, retries: int = 2):
-    """판매분석 페이지 이동 후 same-origin vendor-summary fetch. 반환: res dict 또는 None(로그아웃)."""
+def _fetch_vendor_summary(page, cfg: dict, retries: int = 2, window: tuple | None = None):
+    """판매분석 페이지 이동 후 same-origin vendor-summary fetch. 반환: res dict 또는 None(로그아웃).
+
+    window=None이면 가장 최근 청크(_vs_payload 기본).
+    """
     page.goto(DASH_URL, wait_until="domcontentloaded", timeout=40000)
     page.wait_for_timeout(3000)  # Cloudflare/Akamai JS 챌린지·세션 안정화
     if _is_logged_out(page.url):
@@ -542,13 +590,65 @@ def _fetch_vendor_summary(page, cfg: dict, retries: int = 2):
     last_exc = None
     for attempt in range(1, retries + 1):
         try:
-            return page.evaluate(_POST_JSON_JS, [_vs_payload(cfg), VENDOR_SUMMARY_PATH])
+            return page.evaluate(_POST_JSON_JS, [_vs_payload(cfg, window), VENDOR_SUMMARY_PATH])
         except Exception as e:  # noqa: BLE001 — 봇감지 순간차단 재시도
             last_exc = e
             if attempt < retries:
                 log.warning("fetch 일시 실패(%d/%d) 재시도: %s", attempt, retries, str(e)[:80])
                 page.wait_for_timeout(2500)
     raise last_exc
+
+
+def _fetch_older_windows(page, cfg: dict, windows: list | None = None) -> list[str]:
+    """최신 청크 성공 후, 나머지 과거 청크들을 같은 페이지에서 이어서 fetch. 반환: 성공한 body 목록.
+
+    windows=받을 과거 창 목록(호출자가 한 번 계산해 넘긴다 — 실행 중 KST 자정을 넘겨도 기준일이
+    흔들리지 않게. None이면 지금 기준으로 계산한 창의 과거분).
+    best-effort — 한 청크가 실패해도 나머지는 계속(그 날짜는 다음 버튼 클릭에서 다시 시도된다).
+    세션 만료 신호가 뜨면 더 눌러봐야 소용없으므로 중단한다.
+    """
+    bodies: list[str] = []
+    for start, end in (windows if windows is not None else _vs_windows(cfg)[1:]):
+        try:
+            page.wait_for_timeout(500)  # 연속 POST 완화(봇감지)
+            res = page.evaluate(_POST_JSON_JS, [_vs_payload(cfg, (start, end)), VENDOR_SUMMARY_PATH])
+        except Exception as e:  # noqa: BLE001 — 한 청크 실패가 전체를 죽이지 않는다
+            log.warning("과거창 fetch 오류 %s~%s: %s", start, end, str(e)[:80])
+            continue
+        if _is_success(res):
+            bodies.append(res.get("body") or "")
+            continue
+        if _is_auth_expired(res):
+            log.warning("과거창 fetch 중 세션 만료 신호 — 남은 창 중단(%s~%s)", start, end)
+            break
+        log.warning("과거창 fetch 실패 %s~%s status=%s", start, end, res.get("status") if res else None)
+    return bodies
+
+
+def _merge_summary(base: dict, other: dict) -> dict:
+    """과거창 요약을 base에 합친다(날짜 단위 합집합). 같은 날짜가 겹치면 나중 값으로 덮어쓴다.
+
+    같은 날짜를 두 청크가 담는 일은 없지만(창이 겹치지 않음), 겹쳐도 합산이 아닌 대체라 이중계상 없음.
+    """
+    for d, by_type in (other.get("dates") or {}).items():
+        base.setdefault("dates", {})[d] = by_type
+    # 합계는 병합된 dates에서 재계산(원 응답의 summaryMetrics는 청크별이라 못 쓴다).
+    gmv_3p = gmv_rg = 0.0
+    for by_type in base.get("dates", {}).values():
+        gmv_3p += float(by_type.get("NORMAL", {}).get("gmv", 0) or 0)
+        gmv_rg += float(by_type.get("RFM", {}).get("gmv", 0) or 0)
+    base["gmv_3p"] = gmv_3p
+    base["gmv_rg"] = gmv_rg
+    base["total_gmv"] = gmv_3p + gmv_rg
+    return base
+
+
+def _observed_span(summ: dict, cfg: dict) -> dict:
+    """로그용 — 실제로 받아온 날짜의 span(요청한 창이 아니라 '받은 것'을 찍는다, 원칙 22)."""
+    dates = sorted(summ.get("dates") or {})
+    if not dates:
+        return _vs_payload(cfg)
+    return {"startDate": dates[0], "endDate": dates[-1]}
 
 
 def _log_summary(tag: str, summ: dict, payload: dict) -> None:
@@ -610,8 +710,13 @@ def _push(cfg: dict, summ: dict) -> int:
     return 0
 
 
-def _login_wait_loop(page, ctx, cfg: dict, state: str, wait_secs: int, *, cdp: bool = False):
-    """열린 page에서 사용자 로그인을 자동 감지(vendor-summary 200). 성공 시 state 저장 후 res 반환."""
+def _login_wait_loop(page, ctx, cfg: dict, state: str, wait_secs: int, *, cdp: bool = False,
+                     window: tuple | None = None):
+    """열린 page에서 사용자 로그인을 자동 감지(vendor-summary 200). 성공 시 state 저장 후 res 반환.
+
+    window=프로브가 쓸 최신 청크(호출자가 실행 시작 시점에 계산해 넘긴다). 로그인 대기 중 KST 자정을
+    넘겨도 이 res와 뒤이어 받는 과거창이 어긋나지 않게 — 고정된 창을 쓴다(넘어간 하루는 다음 회차 몫).
+    """
     waited = 0
     while waited < wait_secs:
         try:
@@ -619,7 +724,7 @@ def _login_wait_loop(page, ctx, cfg: dict, state: str, wait_secs: int, *, cdp: b
             waited += 5
             if _is_logged_out(page.url):
                 continue
-            res = page.evaluate(_POST_JSON_JS, [_vs_payload(cfg), VENDOR_SUMMARY_PATH])
+            res = page.evaluate(_POST_JSON_JS, [_vs_payload(cfg, window), VENDOR_SUMMARY_PATH])
         except Exception as e:  # noqa: BLE001
             if "closed" in str(e).lower():
                 log.error("브라우저 창이 닫혔습니다 — 로그인 미완료(창을 닫지 말고 로그인만 하세요).")
@@ -645,10 +750,16 @@ def cmd_login(cfg: dict, wait_secs: int = 600) -> int:
     mode_label = "Chrome(CDP)" if cdp else "Playwright Chromium(모바일 UA)"
     log.info("[login] %s 실행 — wing.coupang.com에 로그인하세요(자동 감지, 최대 %d초).", mode_label, wait_secs)
     res = None
+    older_bodies: list[str] = []
+    windows = _vs_windows(cfg)   # 프로브·과거창이 같은 기준일을 쓰도록 1회만 계산(자정 경계)
     with sync_playwright() as p:
         with _chrome(p, cfg, state, load_state=False, owner=owner) as (page, ctx, _save):
             page.goto(DASH_URL, wait_until="domcontentloaded", timeout=40000)
-            res = _login_wait_loop(page, ctx, cfg, state, wait_secs, cdp=cdp)
+            res = _login_wait_loop(page, ctx, cfg, state, wait_secs, cdp=cdp, window=windows[0])
+            # 로그인 감지 프로브는 최신 청크 1회분이다. 여기서 멈추면 "로그인이 버튼 요청을
+            # 소비한" 회차는 자가치유를 못 타고 7일만 push된다 → 로그인 성공 직후 과거창도 이어 받는다.
+            if res is not None:
+                older_bodies = _fetch_older_windows(page, cfg, windows[1:])
     if res is None:
         log.error("제한 시간 내 로그인 감지 실패 — 다시 시도하세요.")
         return RC_LOGIN_REQUIRED   # ★로그인 자체가 안 된 경우만 '로그인 필요'(codex 1R[P2])
@@ -657,7 +768,11 @@ def cmd_login(cfg: dict, wait_secs: int = 600) -> int:
     # 멀쩡한 세션을 두고 요청이 소멸한다(거짓 로그인 문제).
     summ = _summarize(res.get("body") or "")
     if summ:
-        _log_summary("[login]", summ, _vs_payload(cfg))
+        for body in older_bodies:
+            older = _summarize(body)
+            if older:
+                _merge_summary(summ, older)
+        _log_summary("[login]", summ, _observed_span(summ, cfg))
         if _push_configured(cfg):
             return _push(cfg, summ)   # 첫 데이터 즉시 push
     return 0
@@ -689,15 +804,19 @@ def _do_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
     cdp = _cdp_mode(cfg)
     owner = _ChromeOwner()   # 창 소유권 — 로그인 미완료 시 창을 남기기 위해 직접 만든다
     res = None
+    older_bodies: list[str] = []   # 과거 청크들(자가치유 창) — 최신 청크 성공 후에만 채워진다
+    # 창은 실행 시작 시점에 한 번만 계산한다 — 실행 중 KST 자정을 넘겨도 청크가 하루 밀려
+    # 겹치거나(중복) 새 어제가 빠지지(누락) 않게.
+    windows = _vs_windows(cfg)
     login_needed = False     # 사람 로그인이 필요한 실패인지(=재시도해도 소용없음, §0)
     try:
         with sync_playwright() as p:
             with _chrome(p, cfg, state, owner=owner) as (page, ctx, save):
-                res = _fetch_vendor_summary(page, cfg)
+                res = _fetch_vendor_summary(page, cfg, window=windows[0])
                 if _is_auth_expired(res):
                     # 세션 만료 의심 → 대시보드 재진입으로 챌린지 자동해소 후 1회 재시도.
                     log.info("세션 만료 의심 — 대시보드 재진입 후 재fetch 시도")
-                    res2 = _fetch_vendor_summary(page, cfg)
+                    res2 = _fetch_vendor_summary(page, cfg, window=windows[0])
                     if _is_success(res2):
                         save()  # 회전 쿠키 보존 (CDP: no-op)
                         res = res2
@@ -705,7 +824,8 @@ def _do_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
                         log.info("자동 회복 실패 — 창에서 로그인하세요(자동 감지, 최대 %d초).", login_wait_secs)
                         with contextlib.suppress(Exception):
                             page.goto(DASH_URL, wait_until="domcontentloaded", timeout=40000)
-                        relogin = _login_wait_loop(page, ctx, cfg, state, login_wait_secs, cdp=cdp)
+                        relogin = _login_wait_loop(page, ctx, cfg, state, login_wait_secs, cdp=cdp,
+                                                   window=windows[0])
                         res = relogin if relogin is not None else res2
                         if relogin is None:
                             owner.keep_open = True   # 로그인 미완료 → 창 남김(이어서 로그인 가능)
@@ -716,6 +836,9 @@ def _do_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
                         login_needed = True
                 elif _is_success(res):
                     save()  # 회전된 세션쿠키 갱신 (CDP: no-op)
+                # 최신 청크가 살아있을 때만 과거 청크를 이어 받는다(자가치유 — 버튼 공백 메우기).
+                if _is_success(res):
+                    older_bodies = _fetch_older_windows(page, cfg, windows[1:])
     except Exception as e:  # noqa: BLE001
         log.error("브라우저 fetch 오류: %s", e)
         return 1
@@ -730,7 +853,11 @@ def _do_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
     if not summ:
         log.error("vendor-summary 파싱 실패 — 응답 형태 변경 의심: %s", (res.get("body") or "")[:160])
         return 1
-    _log_summary("[run]", summ, _vs_payload(cfg))
+    for body in older_bodies:
+        older = _summarize(body)
+        if older:
+            _merge_summary(summ, older)
+    _log_summary("[run]", summ, _observed_span(summ, cfg))
     if _push_configured(cfg):
         return _push(cfg, summ)   # push 성공이 heartbeat(prod staleness 기준)
     return 0
