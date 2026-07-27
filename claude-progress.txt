@@ -2,7 +2,36 @@
 # 매 sprint 완료 시 Claude가 이 파일을 갱신합니다.
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
-## 최신 상태 (2026-07-27 23:xx, 워크트리 agent-a0d4b0f9f34968c6a) — CS 스프린트(콜드 첫 입찰 레인) PR #123
+## 최신 상태 (2026-07-28 08:xx, 워크트리 musing-germain-a6e240) — D-NAO-97 외부변경 감지기 오탐 수정(배포 완료)
+- **증상**: `naver_change_log` id 847 — 03 캠페인이 07-27 22:46에 `external_status_change`
+  (userLock false→true, "외부(MOP/사람) 상태 변경")로 기록. 라이브는 `userLock=false` ·
+  `statusReason=CAMPAIGN_LIMITED_BY_BUDGET`(일예산 5만 소진) — **네이버가 멈춘 것을 사람 탓으로 기록**했다.
+- **원인 한 줄**: `get_campaigns_full()`이 `userLock`을 안 넘겨 `collect_entities`가 `status=="PAUSED"`로
+  **역추론**. 그룹·키워드는 처음부터 실 `userLock`을 써서 **캠페인 행에만** 있던 비대칭 결함.
+- **수정**: 캠페인 status = `userLock`만(역추론 금지) / fetcher가 3계층 전부 `statusReason` 전달 /
+  시스템 사유는 별도 액션 `system_status_change`(dry_run, **캠페인 행만** — 쓰기 폭증 방어) /
+  `_log_external_status_change` 2중 안전장치 / `naver_entity.status_reason` 컬럼(alembic `a7b9c1d3e5f7`).
+- **분류표는 화이트리스트**: 공식 스키마(ncc-heroes-ncc.json) enum + 라이브 실측. ★공식 문서에 **없는**
+  값 2종을 실측(ELIGIBLE · BUSINESS_CHANNEL_ABNORMAL_INTERLOCK) → 표는 완전할 수 없다 →
+  **미지의 사유는 '사람 조작 아님'으로 실패**하게 설계.
+- **소급 집계**: 캠페인 external_status_change 5건 중 **오탐 1건**(id 847). 나머지 4건은 라이브 userLock=true
+  + 해당일 광고비 0~3,130원(일예산 미달)로 진짜 조작 확정. 그룹·키워드 26건은 구조적으로 오탐 불가.
+  ★1건뿐인 이유 = entity_sync 크론이 **07:35 KST 단독**이라 예산 소진(저녁)과 안 겹쳤을 뿐 —
+  저녁에 sync를 돌릴 때마다 재발할 구조적 노출이었다(07-27 22:46 = 크론 밖 수동 실행).
+- **배포·라이브 검증 완료**: safe_deploy 4파일 + alembic `a7b9c1d3e5f7` + pm2 재시작.
+  07-28 07:37:43 크론 완주 → 92,152행 status_reason 적재(라이브 API 분포와 100% 일치)·신규 change_log **0건**·
+  캠페인 status(on 30/off 16)가 라이브 userLock과 정확히 일치. 배포된 prod 코드로 id 847 재생 →
+  `external_status_change` 0건, `system_status_change` 1건("캠페인 일예산 소진")으로 **재분류 확인**.
+  오탐이 남긴 잘못된 행 1건(03 status='off')은 라이브 대조 후 교정(유령 '외부 재개' 방지).
+- **미결**: ①`/codex review` 미이행(한도 소진, 리셋 08-02 — 원칙19 부채) ②**실제 예산 소진 순간의 라이브 발화 확인은
+  오늘 저녁 이후**(다음 세션 확인 쿼리 ↓) ③change_log id 847 행의 사후 처리(삭제/라벨 정정)는 **Jino 판단 대기**.
+  ```sql
+  -- 저녁 sync 이후 실행: 유령 0건 + 시스템 이벤트가 대신 잡혔는지
+  SELECT action, dry_run, entity_id, changed_at, after_value, rationale
+  FROM naver_change_log WHERE changed_at >= '2026-07-28' ORDER BY changed_at;
+  ```
+
+## (이전) 최신 상태 (2026-07-27 23:xx, 워크트리 agent-a0d4b0f9f34968c6a) — CS 스프린트(콜드 첫 입찰 레인) PR #123
 - **D-NAO-96 / ref 41**: D-NAO-95(ref 40)가 표준화한 "신규 소재 첫 입찰가 산출 절차"를 **자동운영 레인으로 배선**.
   구조(원칙18): Harness `cold_start_bid_lane` ← SA1 `bid_ceiling_calculator`(상한=RPC÷BEP) + SA2 `market_bid_probe`
   (쇼핑 전용 `/npla-estimate/*` 래퍼·일별 축적 `naver_bid_estimate_daily`) + SA3 `cold_start_bid_decider`
