@@ -1,8 +1,11 @@
 # bep_calculator.py — bep_calculator_sa (단일 책임: 네이버 상품별 BEP ROAS 산출)
 # D-NAO-8: product_master 원가 × orders 실거래 단가 × 실효 수수료율 → 상품별 손익분기 ROAS.
 #   target_roas = bep_roas × 공격성 배수(안전1.3/표준1.15/공격1.05, D-NAO-2).
-# 판매가 소스: 매핑엔 네이버 판매가가 없어(전부 0) orders 실거래가에서 단가 산출.
-#   orders.selling_price는 라인총액 → 수량으로 나눠 단가 정규화, 상품별 median(프로모 완화).
+# 판매가 소스: ①orders 실거래가(기본) — selling_price는 라인총액이라 수량으로 나눠 단가
+#   정규화 후 상품별 median(프로모 완화). ②주문 0건이면 product_channel_mapping.selling_price
+#   폴백(D-NAO-95, 신규 상품 온보딩용 — 사람이 커머스API 실판매가를 적어 넣는 자리).
+#   ★②로 산출된 행은 "실거래로 검증된 판매가"가 아니다(운영자 입력값) — 주문이 한 건이라도
+#   생기면 ①이 이겨 자동 은퇴한다. 행 단위 출처 컬럼은 아직 없다(스키마 변경 별건).
 # 참고 메모리: bep-roas-calculation-structure (BEP ROAS = 판매가 ÷ 공헌이익).
 from __future__ import annotations
 
@@ -312,9 +315,14 @@ def calculate_bep(db: Session, *, aggressiveness: str = "standard") -> dict:
     ).order_by(ProductChannelMapping.product_id).all()
 
     # 같은 channel_product_id에 중복 매핑 존재(라이브 22건, 실측: 네이버 옵션 1개가 기기
-    # variant별 SKU 여러 개에 매핑된 경우 — 원가는 항상 동일해 금액에는 영향 없음).
-    # cpid당 1개로 dedupe: 원가 있는 매핑 우선(BEP 산출 가능), 동률이면 product_id 최솟값
-    # (위 order_by로 고정) → 재실행해도 같은 SKU가 결정적으로 선택됨.
+    # variant별 SKU 여러 개에 매핑된 경우 — 원가는 항상 동일).
+    # cpid당 1개로 dedupe: ①원가 있는 매핑 우선(BEP 산출 가능) ②원가 동률이면 판매가 있는
+    # 매핑 우선 ③그래도 동률이면 product_id 최솟값(위 order_by로 고정) → 재실행 결정적.
+    # ★②는 D-NAO-95에서 추가. 종전 주석은 "원가는 항상 동일해 금액에는 영향 없음"을 근거로
+    # 타이브레이크가 무해하다고 적었는데, 판매가 폴백이 생긴 뒤로 그 근거가 깨졌다 —
+    # 중복 매핑 중 값이 적힌 행이 지면 (ⓐ)판매가를 적어도 조용히 무시되고, 반대로 낡은 값이
+    # 이기면 (ⓑ)상한이 부풀어 과지출 방향으로 틀어진다. ②로 ⓐ를 막고, 값이 서로 다른
+    # 중복은 경고로 표면화해 ⓑ가 조용히 지나가지 않게 한다.
     best: dict[str, ProductChannelMapping] = {}
     for m in mappings:
         cur = best.get(m.channel_product_id)
@@ -323,15 +331,40 @@ def calculate_bep(db: Session, *, aggressiveness: str = "standard") -> dict:
             continue
         cur_cost = masters.get(cur.product_id, (Decimal("0"), ""))[0]
         new_cost = masters.get(m.product_id, (Decimal("0"), ""))[0]
+        cur_price = Decimal(str(cur.selling_price or 0))
+        new_price = Decimal(str(m.selling_price or 0))
+        if cur_price > 0 and new_price > 0 and cur_price != new_price:
+            log.warning(
+                "naver_product_bep: cpid=%s 중복 매핑의 판매가 불일치(%s vs %s) — 낡은 값이 "
+                "BEP 상한을 왜곡할 수 있음. 매핑 정리 필요.",
+                m.channel_product_id, cur_price, new_price,
+            )
         if new_cost > 0 and cur_cost <= 0:
+            best[m.channel_product_id] = m
+        elif (new_cost > 0) == (cur_cost > 0) and new_price > 0 and cur_price <= 0:
             best[m.channel_product_id] = m
 
     db.execute(delete(NaverProductBep).where(NaverProductBep.channel_id == NAVER_CHANNEL_ID))
     now = kst_now()
     n_total = 0
     n_bep = 0
+    n_mapped_price = 0      # 판매가를 매핑 폴백에서 가져온 행 수
+    n_mapped_with_bep = 0   # 그중 실제로 BEP까지 산출된 행 수(원가까지 있어야 함)
     for m in best.values():
+        # 판매가 우선순위: ①orders 실거래 중앙값(기본 — 실제로 팔린 값이 가장 정직하다)
+        # ②매핑에 손으로 넣은 판매가(product_channel_mapping.selling_price).
+        # ②는 **주문 이력이 아직 0건인 신규 상품** 전용 폴백이다(D-NAO-95). 종전엔 신규 상품이
+        # sp=0 → has_cost=0 → bep_roas=NULL로 남았고, 그 상태의 캠페인은 상한 산출이 계정 평균
+        # BEP로 내려앉는다(guardrail_gate._check_bid 주석 참조) — 즉 "판매가를 모른다"가 아니라
+        # "판매가를 넣을 자리가 없다"가 문제였다. 추정이 아니라 커머스API 실판매가를 매핑에
+        # 적어 넣는 경로이며, 주문이 한 건이라도 쌓이면 ①이 자동으로 이긴다(폴백은 스스로 은퇴).
         sp = prices.get(m.channel_product_id, Decimal("0"))
+        price_basis = "orders"
+        if sp <= 0 and m.selling_price:
+            mapped = Decimal(str(m.selling_price))
+            if mapped > 0:
+                sp = mapped
+                price_basis = "mapping"
         cost, master_name = masters.get(m.product_id, (Decimal("0"), ""))
         name = (m.channel_product_name or master_name or "")[:300]
         # D-NAO-57 (C): 상품별 단가당 순물류비(순배송원가 ÷ 평균 주문수량, 수취 배송비 차감).
@@ -348,6 +381,10 @@ def calculate_bep(db: Session, *, aggressiveness: str = "standard") -> dict:
             bep = (sp / contribution).quantize(Decimal("0.0001"), ROUND_HALF_UP)
             target = (bep * mult).quantize(Decimal("0.0001"), ROUND_HALF_UP)
             n_bep += 1
+            if price_basis == "mapping":
+                n_mapped_with_bep += 1
+        if price_basis == "mapping":
+            n_mapped_price += 1
         db.add(NaverProductBep(
             channel_id=NAVER_CHANNEL_ID,
             channel_product_id=m.channel_product_id,
@@ -367,8 +404,10 @@ def calculate_bep(db: Session, *, aggressiveness: str = "standard") -> dict:
         ))
         n_total += 1
     db.commit()
-    log.info("naver_product_bep 산출: %d행(bep %d) rate=%.4f 기준=%s 공격성=%s",
-             n_total, n_bep, float(rate), commission_basis, aggressiveness)
-    return {"rows": n_total, "with_bep": n_bep,
+    log.info("naver_product_bep 산출: %d행(bep %d, 매핑판매가 %d→bep %d) rate=%.4f 기준=%s 공격성=%s",
+             n_total, n_bep, n_mapped_price, n_mapped_with_bep, float(rate), commission_basis,
+             aggressiveness)
+    return {"rows": n_total, "with_bep": n_bep, "mapped_price_rows": n_mapped_price,
+            "mapped_price_with_bep": n_mapped_with_bep,
             "commission_rate": float(rate), "commission_basis": commission_basis,
             "aggressiveness": aggressiveness}

@@ -770,12 +770,32 @@ def _login_wait_loop(page, ctx, cfg: dict, state: str, wait_secs: int, *, cdp: b
     return None
 
 
-def cmd_login(cfg: dict, wait_secs: int = 600) -> int:
+def _rg_applicable(cfg: dict) -> bool:
+    """이 인스턴스가 RG(정산) 레인을 실제로 쓰는가 — `_do_rg_run`의 전제조건과 같은 판별.
+
+    RG는 vendor_id(정산주기 열거 키)와 push 3종이 모두 있어야 돌아간다(_do_rg_run 진입부에서
+    둘 중 하나라도 없으면 rc=2로 fail-fast). 둘이 없는 인스턴스는 RG를 아예 안 쓰므로
+    데스크톱(wing.coupang.com) 세션을 요구할 이유가 없다 — 프로브를 걸면 "쓰지도 않는 레인"
+    때문에 로그인이 실패로 보고된다.
+    """
+    return bool(str(cfg.get("vendor_id") or "").strip()) and _push_configured(cfg)
+
+
+def cmd_login(cfg: dict, wait_secs: int = 600, rg_probe: bool = True) -> int:
     """로그인 세션 초기화 + 자동 감지(vendor-summary 200) → state 저장 + 첫 파싱.
 
     CDP 모드: Chrome(없으면 기동)의 새 탭에서 wing.coupang.com 열고 로그인 감지.
       사람이 조작하는 명령이므로 창은 남긴다(keep_open) — 세션은 Chrome 프로필이 보관.
     레거시 모드: Playwright Chromium 헤드풀 창(모바일 UA) 새로 실행.
+
+    ★rg_probe(2026-07-27 라이브 실측): 판매분석(m-wing, 모바일)과 정산(wing.coupang.com,
+      데스크톱 xauth SSO)은 **세션이 따로 논다**. 같은 Chrome에서 vendor-summary=200인데
+      정산 goto는 xauth 로그인 페이지로 리다이렉트되고 status/api는 404인 상태가 실제로
+      관측됐다. VS 프로브만으로 "로그인 완료"를 선언하면 그 침묵이 데스크톱 세션 만료를
+      가리고, 직후 `rg`(login_wait_secs=0)가 _rg_session_ok 실패로 fail-fast한다.
+      → 창이 아직 열려 있는 동안 정산 세션까지 확인하고, 없으면 사람에게 마저 로그인시킨다
+      (워밍 네비게이션으로는 해결 불가 — 사람 재로그인만 가능).
+      rg_probe=False는 데몬 VS 레인용(cmd_poll 주석 참조).
     """
     state = os.path.expanduser(cfg["state_file"])
     cdp = _cdp_mode(cfg)
@@ -785,6 +805,13 @@ def cmd_login(cfg: dict, wait_secs: int = 600) -> int:
     log.info("[login] %s 실행 — wing.coupang.com에 로그인하세요(자동 감지, 최대 %d초).", mode_label, wait_secs)
     res = None
     older_bodies: list[str] = []
+    # ★레거시(비CDP) 모드는 프로브 대상이 아니다: cmd_login이 load_state=False로 fresh context를
+    #   열기 때문에 사람이 반드시 실제 xauth SSO 로그인을 수행하고, 그 결과 두 호스트 쿠키가
+    #   함께 fresh해진다. "기존 세션이 VS 프로브를 즉시 통과해 사람이 로그인을 건너뛴다"는
+    #   마스킹 시나리오 자체가 원리적으로 생기지 않는다(=프로브가 잡을 것이 없다).
+    probe_rg = bool(rg_probe and cdp and _rg_applicable(cfg))
+    rg_ok = True             # 프로브 미수행이면 기존 동작 그대로(성공 취급)
+    started = time.monotonic()
     windows = _vs_windows(cfg)   # 프로브·과거창이 같은 기준일을 쓰도록 1회만 계산(자정 경계)
     with sync_playwright() as p:
         with _chrome(p, cfg, state, load_state=False, owner=owner) as (page, ctx, _save):
@@ -794,10 +821,29 @@ def cmd_login(cfg: dict, wait_secs: int = 600) -> int:
             # 소비한" 회차는 자가치유를 못 타고 7일만 push된다 → 로그인 성공 직후 과거창도 이어 받는다.
             if res is not None:
                 older_bodies = _fetch_older_windows(page, cfg, windows[1:])
+                if probe_rg:
+                    # 창이 아직 열려 있는 이 블록 안에서만 가능하다 — 밖으로 나가면 사람이
+                    # 이어서 로그인할 창이 없다. 프로브 자체가 터져도(창 닫힘 등) VS 결과
+                    # 처리는 계속한다: 이미 받은 데이터를 버리면 버튼 요청 한 회차가 증발한다.
+                    try:
+                        page.goto(RG_DASH_URL, wait_until="domcontentloaded", timeout=40000)
+                        page.wait_for_timeout(3500)   # Cloudflare/Akamai JS 챌린지 안정화
+                        rg_ok = _rg_session_ok(page)
+                        if not rg_ok:
+                            remaining = max(0, wait_secs - int(time.monotonic() - started))
+                            log.info(
+                                "판매분석(VS) 세션은 정상 — RG(정산) 데스크톱 세션 만료. "
+                                "같은 창에서 wing.coupang.com에 로그인하세요(자동 감지, 최대 %d초).",
+                                remaining)
+                            rg_ok = _rg_login_wait(page, ctx, state, remaining, cdp=cdp)
+                    except Exception as e:  # noqa: BLE001 — 프로브 실패는 VS 결과를 무효화하지 않는다
+                        log.error("RG(정산) 세션 프로브 실패: %s", str(e)[:160])
+                        rg_ok = False
     if res is None:
         log.error("제한 시간 내 로그인 감지 실패 — 다시 시도하세요.")
         return RC_LOGIN_REQUIRED   # ★로그인 자체가 안 된 경우만 '로그인 필요'(codex 1R[P2])
-    log.info("로그인 감지·세션 저장 완료: %s", state)
+    log.info("로그인 감지·세션 저장 완료: %s%s", state,
+             " (RG 정산 데스크톱 세션도 확인됨)" if (probe_rg and rg_ok) else "")
     # 로그인은 됐는데 push가 실패한 경우는 재시도 대상 — login_required로 보고하면
     # 멀쩡한 세션을 두고 요청이 소멸한다(거짓 로그인 문제).
     summ = _summarize(res.get("body") or "")
@@ -818,7 +864,19 @@ def cmd_login(cfg: dict, wait_secs: int = 600) -> int:
             _merge_summary(summ, older)
     _log_summary("[login]", summ, _observed_span(summ, cfg))
     if _push_configured(cfg):
-        return _push(cfg, summ)   # 첫 데이터 즉시 push
+        rc = _push(cfg, summ)   # 첫 데이터 즉시 push
+        if rc != 0:
+            # push 실패가 우선이다 — VS 레인이 실제로 실패했고 재시도 대상이다.
+            # RG 미확보는 그 위에 얹힌 부가 상태이므로 로그로만 남긴다.
+            if not rg_ok:
+                log.error("(추가) RG(정산) 데스크톱 로그인도 미완 — push 재시도 성공 후 'rg' 전에 로그인 필요.")
+            return rc
+    if not rg_ok:
+        # VS는 전부 성공(로그인·파싱·push)했지만 정산 데스크톱 세션만 못 잡았다. 0을 돌려주면
+        # 그 침묵이 그대로 'rg' fail-fast로 이어진다(이 프로브가 존재하는 이유).
+        log.error("판매분석(VS) 로그인·push 완료 — RG(정산) 데스크톱 로그인 미완(창은 열어 둠, "
+                  "'login' 재실행 또는 창에서 로그인 후 'rg' 실행).")
+        return RC_RG_LOGIN_REQUIRED
     return 0
 
 
@@ -925,6 +983,10 @@ RC_LOGIN_REQUIRED = 3
 # 4=이번 회차는 중복 요청(dedup)에 막혀 받지 못했다 — 실패도 성공도 아니고 "나중에 다시".
 # 30초 뒤 재시도는 여전히 dedup 윈도우 안이므로 긴 백오프를 쓴다(codex 4R[P1]).
 RC_RETRY_LATER = 4
+# 5=VS(판매분석) 로그인·push는 전부 성공했으나 RG(정산) 데스크톱 세션만 미확보 —
+# 사람이 wing.coupang.com에 다시 로그인해야 한다. **cmd_login CLI 전용**이다: 데몬 VS 레인은
+# rg_probe=False로 호출하므로 이 코드가 올라오지 않는다(RG 실패로 VS 요청이 오보되면 안 됨).
+RC_RG_LOGIN_REQUIRED = 5
 _VS_ERROR_PATH = "/api/coupang/ops/wing/vendor-summary/fetch-error"
 _RG_ERROR_PATH = "/api/coupang/ops/wing/rg-settlement/fetch-error"
 _RG_COMPLETE_PATH = "/api/coupang/ops/wing/rg-settlement/refresh-complete"
@@ -1146,8 +1208,14 @@ def cmd_poll(cfg: dict) -> int:
                                 # _run_claimed: 예외도 rc=1로 정규화하고 사유(마지막 log.error)를
                                 # 함께 돌려준다 — 조용한 탈출로 임대가 20분 묶이는 것을 막는다(R1).
                                 if not Path(state).is_file():
+                                    # ★rg_probe=False: 이 레인에서 "성공"의 의미는 VS 수집 완료
+                                    #   =버튼 요청 소비다. RG 데스크톱 세션 미확보(rc=5)까지
+                                    #   여기서 실패로 접으면 멀쩡히 받은 판매분석이 fetch-error로
+                                    #   오보된다. RG 레인은 _do_rg_run(login_wait_secs=180)의
+                                    #   자가회복 경로를 따로 갖고 있다.
                                     rc, reason = _run_claimed(
-                                        lambda: cmd_login(cfg, wait_secs=_LOGIN_WAIT_S))
+                                        lambda: cmd_login(cfg, wait_secs=_LOGIN_WAIT_S,
+                                                          rg_probe=False))
                                 else:
                                     rc, reason = _run_claimed(   # 락 보유 중
                                         lambda: _do_run(cfg, state, login_wait_secs=_LOGIN_WAIT_S))
