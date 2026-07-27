@@ -205,19 +205,27 @@ def _cdp_mode(cfg: dict) -> bool:
 #   띄운 창 등)은 adopt만 하고 절대 닫지 않는다.
 # (_cdp_alive·_profile_chrome_alive는 파일 하단 정의 — 호출 시점에 해석된다.)
 def _port_owner_foreign(port: int, profile: str, allow_unverified: bool = False) -> bool:
-    """CDP 포트 LISTEN 소유자가 '우리 프로필의 Chrome'임을 **확인하지 못하면** True(=adopt 거부).
+    """CDP 포트를 LISTEN 중인 프로세스가 '우리 프로필의 Chrome'임을 **확인하지 못하면** True(=adopt 거부).
 
     왜(codex R1 P1#3): `/json/version` 200만 보고 adopt하면, 같은 포트에 뜬 무관한 Chrome
     (다른 계정 프로필·다른 자동화 도구)의 컨텍스트로 수집해 **남의 vendor 데이터를 우리
     account_key로 적재**할 수 있다. 포트는 설정값이라 다계정 인스턴스가 포트를 안 바꾸면 실제로 겹친다.
 
-    왜 fail-closed인가(codex R2 재반박 수용): 우리가 adopt할 정당한 창은 수동 `chrome` 커맨드든
-    per-fetch 기동이든 전부 `_chrome_argv`로 뜬다 → cmdline에 항상 `--user-data-dir=<프로필>`이 있다.
-    따라서 '확인 불가'는 정상 케이스가 아니라 남의 Chrome이라는 신호다. 오적재는 조용하고 되돌리기
-    어렵지만 거부는 로그·알림으로 시끄럽다. 현장에서 오판이 나면 설정 `adopt_unverified_chrome:true`로
-    옛 동작(확인 불가 시 adopt)으로 되돌릴 수 있다.
+    판정 방식 = **PID 동일성**(codex R4): LISTEN PID == 우리 프로필의 SingletonLock PID인지만 본다.
+    cmdline 문자열 대조는 쓰지 않는다 — macOS `ps -o command=`는 argv를 공백으로 flatten하므로
+    공백을 품은 인자 하나(`"https://x/a --user-data-dir=<우리경로>"`)와 진짜 인자 두 개를
+    구분할 수 없다(정규식 경계로는 원리적으로 해소 불가). PID 비교엔 그 모호성이 없다.
+
+    왜 fail-closed(codex R2): 우리가 adopt할 정당한 창은 수동 `chrome` 커맨드든 per-fetch 기동이든
+    전부 `_chrome_argv`로 우리 프로필에 뜬다 → SingletonLock PID가 항상 존재한다. 따라서
+    '확인 불가'는 정상 케이스가 아니라 남의 Chrome 신호다. 오적재는 조용하고 되돌리기 어렵지만
+    거부는 로그·알림으로 시끄럽다. 현장 오판 시 설정 `adopt_unverified_chrome:true`로 옛 동작 복귀.
     """
     verdict = "adopt(설정 허용)" if allow_unverified else "adopt 거부"
+    owner_pid = _profile_owner_pid(profile)
+    if owner_pid is None:
+        log.warning("프로필(%s) SingletonLock 없음 — CDP %d 소유자 확인 불가 → %s", profile, port, verdict)
+        return not allow_unverified
     try:
         out = subprocess.run(
             ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
@@ -226,21 +234,14 @@ def _port_owner_foreign(port: int, profile: str, allow_unverified: bool = False)
     except Exception:  # noqa: BLE001
         log.warning("CDP %d 소유자 확인 불가(lsof 실행 실패) — %s", port, verdict)
         return not allow_unverified
-    pids = [p for p in out.split() if p.isdigit()]
+    pids = {p for p in out.split() if p.isdigit()}
     if not pids:
         log.warning("CDP %d LISTEN PID를 찾지 못함 — %s", port, verdict)
         return not allow_unverified
-    for pid in pids:
-        try:
-            cmdline = subprocess.run(
-                ["ps", "-o", "command=", "-p", pid],
-                capture_output=True, text=True, timeout=3,
-            ).stdout
-        except Exception:  # noqa: BLE001
-            continue
-        if _cmdline_has_profile(cmdline, profile):
-            return False            # 우리 프로필의 Chrome임이 확인됨 → adopt 정당
-    log.warning("CDP %d 소유자가 우리 프로필(%s)이 아님 — %s", port, profile, verdict)
+    if str(owner_pid) in pids:
+        return False            # LISTEN 프로세스 = 우리 프로필을 점유한 Chrome → adopt 정당
+    log.warning("CDP %d LISTEN PID %s가 우리 프로필 점유 PID %d와 불일치 — %s",
+                port, sorted(pids), owner_pid, verdict)
     return not allow_unverified
 
 
@@ -1306,6 +1307,23 @@ def _cdp_alive(port: int) -> bool:
             return r.status == 200
     except Exception:
         return False
+
+
+def _profile_owner_pid(profile: str) -> int | None:
+    """이 프로필을 점유 중인 Chrome **브라우저 프로세스 PID** (SingletonLock 심볼릭링크 타깃).
+
+    Chrome은 user-data-dir 안 SingletonLock을 'hostname-PID'로 건다. 그 PID가 곧 DevTools
+    포트를 LISTEN하는 브라우저 프로세스다. 프로필 디렉터리는 우리 것이므로 이 값은 권위 있다.
+    """
+    try:
+        target = os.readlink(os.path.join(os.path.expanduser(profile), "SingletonLock"))
+    except OSError:
+        return None
+    try:
+        pid = int(target.rsplit("-", 1)[-1])   # 호스트명에 '-'가 있어도 마지막만
+    except ValueError:
+        return None
+    return pid if pid > 0 else None
 
 
 def _cmdline_has_profile(cmdline: str, profile: str) -> bool:

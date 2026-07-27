@@ -255,7 +255,7 @@ def test_refuses_adopting_chrome_of_another_profile(fetcher, tmp_path, monkeypat
             pass
 
 
-def test_port_owner_unverified_is_refused_by_default(fetcher, monkeypatch):
+def test_port_owner_unverified_is_refused_by_default(fetcher, tmp_path, monkeypatch):
     """소유자 확인 불가 = adopt 거부(fail-closed).
 
     우리가 adopt할 정당한 창은 전부 _chrome_argv로 떠서 cmdline에 프로필이 있다 → '확인 불가'는
@@ -264,10 +264,47 @@ def test_port_owner_unverified_is_refused_by_default(fetcher, monkeypatch):
     def _boom(*_a, **_k):
         raise OSError("lsof 없음")
 
+    profile = str(tmp_path / "profile")
+    os.makedirs(profile, exist_ok=True)
+    os.symlink("myhost-4242", os.path.join(profile, "SingletonLock"))
     monkeypatch.setattr(fetcher.subprocess, "run", _boom)
-    assert fetcher._port_owner_foreign(9299, "/tmp/p") is True
+    assert fetcher._port_owner_foreign(9299, profile) is True
     # 현장 오판 시 설정으로 옛 동작 복귀 가능.
-    assert fetcher._port_owner_foreign(9299, "/tmp/p", True) is False
+    assert fetcher._port_owner_foreign(9299, profile, True) is False
+
+
+def test_port_owner_verified_by_pid_identity(fetcher, tmp_path, monkeypatch):
+    """소유 판정은 PID 동일성으로 — cmdline 문자열 대조는 argv 경계를 복원할 수 없다(codex R4).
+
+    macOS `ps -o command=`는 argv를 공백으로 flatten하므로 공백을 품은 인자 하나와 진짜 인자
+    두 개를 구분할 수 없다. 그래서 '우리 프로필의 SingletonLock PID == LISTEN PID'만 양성 증거다.
+    """
+    profile = str(tmp_path / "profile")
+    os.makedirs(profile, exist_ok=True)
+    os.symlink("myhost-4242", os.path.join(profile, "SingletonLock"))
+
+    class _R:
+        def __init__(self, out): self.stdout = out
+
+    # ① LISTEN PID가 프로필 점유 PID와 같음 → adopt 정당
+    monkeypatch.setattr(fetcher.subprocess, "run", lambda *_a, **_k: _R("4242\n"))
+    assert fetcher._port_owner_foreign(9299, profile) is False
+    # ② 다른 PID가 그 포트를 잡고 있음 → 거부(남의 Chrome)
+    monkeypatch.setattr(fetcher.subprocess, "run", lambda *_a, **_k: _R("9999\n"))
+    assert fetcher._port_owner_foreign(9299, profile) is True
+    # ③ cmdline 위조로는 뚫을 수 없다 — 문자열을 아무리 넣어도 PID가 다르면 거부
+    monkeypatch.setattr(fetcher.subprocess, "run",
+                        lambda *_a, **_k: _R("9999\n") if "lsof" in _a[0][0]
+                        else _R(f"chrome --user-data-dir={profile}\n"))
+    assert fetcher._port_owner_foreign(9299, profile) is True
+
+
+def test_port_owner_refused_without_singleton_lock(fetcher, tmp_path, monkeypatch):
+    """프로필에 SingletonLock이 없으면 소유 확인 불가 → fail-closed(설정으로만 완화)."""
+    profile = str(tmp_path / "noprofile")
+    monkeypatch.setattr(fetcher.subprocess, "run", lambda *_a, **_k: None)
+    assert fetcher._port_owner_foreign(9299, profile) is True
+    assert fetcher._port_owner_foreign(9299, profile, True) is False
 
 
 def test_profile_match_is_not_prefix_substring(fetcher):
