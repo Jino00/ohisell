@@ -732,6 +732,33 @@ def _prod_claim(cfg: dict) -> dict:
     return r.json()
 
 
+# run 반환코드 — 3=로그인 필요(재시도 무의미: 재시도해도 실패하고 창만 반복해서 뜬다, §0).
+# 1=그 외 실패(재시도 대상), 2=Chrome 기동 실패, 0=성공.
+RC_LOGIN_REQUIRED = 3
+
+
+def _report_fetch_failure(cfg: dict, error: str, kind: str | None = None) -> None:
+    """run 실패를 prod에 보고 → 재시도 판정의 입력(lease 계약, PLAN_coupang-claim-retry-lease).
+
+    보고가 없으면 lease TTL(기본 20분)이 지나야 재시도된다 — 보고하면 다음 폴에서 곧바로.
+    kind="login_required"면 prod가 재시도 없이 요청을 소멸시킨다(§0 금지선). best-effort.
+    """
+    body = {"error": str(error)[:300]}
+    if kind:
+        body["kind"] = kind
+    try:
+        r = requests.post(
+            _prod_base(cfg) + "/fetch-error",
+            json=body,
+            headers={"X-Ingest-Token": cfg["ingest_token"]},
+            timeout=15,
+        )
+        if r.status_code != 200:
+            log.warning("fetch-error 비200(무시): %s %s", r.status_code, r.text[:120])
+    except requests.RequestException as e:
+        log.warning("fetch-error 네트워크 오류(무시): %s", str(e)[:120])
+
+
 def _mark_fetch_success(cfg: dict) -> None:
     """run 성공 후 prod last_success_at 갱신(best-effort — 머니데이터는 이미 push됨).
 
@@ -770,7 +797,7 @@ def cmd_run(cfg: dict) -> int:
                 log.error("세션 만료(로그인 페이지) — Chrome 창에서 오하이테크 재로그인 필요.")
                 _notify_mac("오하이테크 광고 로그인 필요", "광고비 수집 세션 만료 — Chrome 창에서 재로그인하세요.")
                 owner.keep_open = True   # 로그인할 창이 필요 → 닫지 않음
-                return 1
+                return RC_LOGIN_REQUIRED
             res = page.evaluate(_SALES_FETCH_JS, _sales_payload(cfg))
             status = res.get("status") if res else None
             body = (res or {}).get("body") or ""
@@ -779,8 +806,8 @@ def cmd_run(cfg: dict) -> int:
                     log.error("세션 만료(로그인 HTML) — 재로그인 필요.")
                     _notify_mac("오하이테크 광고 로그인 필요", "광고비 수집 세션 만료 — Chrome 창에서 재로그인하세요.")
                     owner.keep_open = True
-                else:
-                    log.error("report/SALES 비정상 status=%s — %s", status, body[:160].replace("\n", " "))
+                    return RC_LOGIN_REQUIRED
+                log.error("report/SALES 비정상 status=%s — %s", status, body[:160].replace("\n", " "))
                 return 1
             days = _parse_sales_days(body)
             if days is None:
@@ -788,7 +815,7 @@ def cmd_run(cfg: dict) -> int:
                 log.error("report/SALES 응답이 유효한 SALES 데이터 아님(세션 만료 가능) — 갱신 실패.")
                 _notify_mac("오하이테크 광고 수집 실패", "report/SALES 응답 비정상(세션 만료 가능) — Chrome 창에서 재로그인 확인.")
                 owner.keep_open = True   # 세션 만료 가능 → 확인·로그인할 창 유지
-                return 1
+                return RC_LOGIN_REQUIRED
     except RuntimeError:
         return 2
     except Exception as e:  # noqa: BLE001
@@ -870,6 +897,12 @@ def cmd_poll(cfg: dict) -> int:
                                 log.info("[poll] %s 트리거 → run", trigger)
                                 rc = cmd_run(cfg)
                                 log.info("[poll] run 완료 rc=%d", rc)
+                                if rc != 0:
+                                    # 실패 보고 = 재시도 판정의 입력(lease 계약). rc==3(로그인
+                                    # 필요)이면 prod가 재시도 없이 요청을 소멸시킨다(§0).
+                                    _report_fetch_failure(
+                                        cfg, f"오하이테크 광고비 수집 실패(rc={rc})",
+                                        kind=("login_required" if rc == RC_LOGIN_REQUIRED else None))
                                 # 실패 가시성(리뷰 P3): rc==1(세션만료)은 cmd_run이 이미 알림.
                                 # rc==2=Chrome 기동 실패/프로필 점유 충돌 → 사일런트 정지 방지 알림.
                                 if rc == 2:

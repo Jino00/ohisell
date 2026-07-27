@@ -684,6 +684,7 @@ def _do_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
     cdp = _cdp_mode(cfg)
     owner = _ChromeOwner()   # 창 소유권 — 로그인 미완료 시 창을 남기기 위해 직접 만든다
     res = None
+    login_needed = False     # 사람 로그인이 필요한 실패인지(=재시도해도 소용없음, §0)
     try:
         with sync_playwright() as p:
             with _chrome(p, cfg, state, owner=owner) as (page, ctx, save):
@@ -703,9 +704,11 @@ def _do_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
                         res = relogin if relogin is not None else res2
                         if relogin is None:
                             owner.keep_open = True   # 로그인 미완료 → 창 남김(이어서 로그인 가능)
+                            login_needed = True
                     else:
                         res = res2
                         owner.keep_open = True       # 로그인 대기 없는 경로 → 창 남김
+                        login_needed = True
                 elif _is_success(res):
                     save()  # 회전된 세션쿠키 갱신 (CDP: no-op)
     except Exception as e:  # noqa: BLE001
@@ -717,7 +720,7 @@ def _do_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
         body = (res.get("body") if res else "") or ""
         log.error("vendor-summary 실패 status=%s — %s. 'login' 재실행 필요.",
                   status, body[:160].replace("\n", " "))
-        return 1
+        return RC_LOGIN_REQUIRED if login_needed else 1
     summ = _summarize(res.get("body") or "")
     if not summ:
         log.error("vendor-summary 파싱 실패 — 응답 형태 변경 의심: %s", (res.get("body") or "")[:160])
@@ -740,6 +743,12 @@ def cmd_run(cfg: dict) -> int:
             return 0
         return _do_run(cfg, state, login_wait_secs=0)
 
+
+# run 반환코드 — 3=로그인 필요(재시도 무의미: 창만 반복해서 뜬다, §0). 1=그 외 실패(재시도 대상).
+RC_LOGIN_REQUIRED = 3
+_VS_ERROR_PATH = "/api/coupang/ops/wing/vendor-summary/fetch-error"
+_RG_ERROR_PATH = "/api/coupang/ops/wing/rg-settlement/fetch-error"
+_RG_COMPLETE_PATH = "/api/coupang/ops/wing/rg-settlement/refresh-complete"
 
 _POLL_INTERVAL_S = 15       # 갱신 요청 확인 간격(창 안 뜸, 가벼운 GET)
 _LOGIN_WAIT_S = 180         # 세션 만료 시 헤드풀 창 로그인 대기 한도
@@ -787,6 +796,43 @@ def _prod_rg_claim(cfg: dict) -> dict:
     return r.json()
 
 
+def _prod_notify_rg_complete(cfg: dict) -> None:
+    """RG run 정상 완주 → 갱신 요청 소멸(lease 계약). 업로드가 이미 소멸시켰으면 무해한 no-op."""
+    if not _push_configured(cfg):
+        return
+    try:
+        requests.post(
+            cfg["prod_base_url"].rstrip("/") + _RG_COMPLETE_PATH,
+            headers={"X-Ingest-Token": cfg["ingest_token"]},
+            timeout=10,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("RG refresh-complete 보고 실패(무시): %s", str(e)[:120])
+
+
+def _prod_report_failure(cfg: dict, path: str, error: str, kind: str | None = None) -> None:
+    """run 실패를 prod에 보고 → 재시도 판정의 입력(lease 계약, PLAN_coupang-claim-retry-lease).
+
+    보고가 없으면 lease TTL(기본 20분)이 지나야 재시도된다 — 보고하면 다음 폴에서 곧바로.
+    kind="login_required"면 prod가 재시도 없이 요청을 소멸시킨다(§0 금지선: 재시도해도
+    실패하고 창만 반복해서 뜬다). best-effort — 보고 실패가 run을 더 망가뜨리면 안 된다.
+    """
+    if not _push_configured(cfg):
+        return
+    body = {"error": str(error)[:300]}
+    if kind:
+        body["kind"] = kind
+    try:
+        requests.post(
+            cfg["prod_base_url"].rstrip("/") + path,
+            json=body,
+            headers={"X-Ingest-Token": cfg["ingest_token"]},
+            timeout=10,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("fetch-error 보고 실패(무시): %s", str(e)[:120])
+
+
 def cmd_poll(cfg: dict) -> int:
     """상주 데몬(별도 plist com.ohisell.wing, D-5) — 갱신 '버튼' 요청이 있을 때만 headful 창.
 
@@ -828,9 +874,16 @@ def cmd_poll(cfg: dict) -> int:
                             last_fetch = time.monotonic()
                             log.info("갱신 요청 감지 — fetch 시작")
                             if not Path(state).is_file():
-                                cmd_login(cfg, wait_secs=_LOGIN_WAIT_S)
+                                if cmd_login(cfg, wait_secs=_LOGIN_WAIT_S) != 0:
+                                    _prod_report_failure(cfg, _VS_ERROR_PATH,
+                                                         "로그인 미완료(세션 없음)",
+                                                         kind="login_required")
                             else:
-                                _do_run(cfg, state, login_wait_secs=_LOGIN_WAIT_S)  # 락 보유 중
+                                rc = _do_run(cfg, state, login_wait_secs=_LOGIN_WAIT_S)  # 락 보유 중
+                                if rc != 0:
+                                    _prod_report_failure(
+                                        cfg, _VS_ERROR_PATH, f"판매분석 수집 실패(rc={rc})",
+                                        kind=("login_required" if rc == RC_LOGIN_REQUIRED else None))
         except requests.RequestException as e:
             net_fails += 1
             log.warning("폴 확인 실패(네트워크) %d/%d: %s", net_fails, _MAX_CONSECUTIVE_NET_FAILS, str(e)[:80])
@@ -857,8 +910,19 @@ def cmd_poll(cfg: dict) -> int:
                             log.info("RG 정산 다운로드 트리거(버튼)")
                             if not Path(state).is_file():
                                 log.warning("RG: 세션 파일 없음 — 'login' 필요(이번 회차 스킵)")
+                                _prod_report_failure(cfg, _RG_ERROR_PATH,
+                                                     "세션 파일 없음 — 로그인 필요",
+                                                     kind="login_required")
                             else:
-                                _do_rg_run(cfg, state, login_wait_secs=_LOGIN_WAIT_S)
+                                rc = _do_rg_run(cfg, state, login_wait_secs=_LOGIN_WAIT_S)
+                                if rc != 0:
+                                    _prod_report_failure(
+                                        cfg, _RG_ERROR_PATH, f"RG 정산 수집 실패(rc={rc})",
+                                        kind=("login_required" if rc == RC_LOGIN_REQUIRED else None))
+                                else:
+                                    # 정상 완주 신호 — 받을 게 없어 업로드 0건이었어도 요청은
+                                    # 여기서 소멸한다(없으면 창을 3번 더 띄운 뒤 거짓 실패).
+                                    _prod_notify_rg_complete(cfg)
         except requests.RequestException as e:
             log.warning("RG 폴 확인 실패(네트워크): %s", str(e)[:80])
         except Exception as e:  # noqa: BLE001 — 데몬은 어떤 오류에도 죽지 않는다
@@ -1189,11 +1253,11 @@ def _do_rg_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
                     owner.keep_open = True    # 로그인할 창이 필요 → 닫지 않음
                     if login_wait_secs <= 0:
                         log.error("RG: 세션 만료(정산 status/api 미응답). 'login' 또는 데몬 로그인 필요.")
-                        return 1
+                        return RC_LOGIN_REQUIRED
                     log.info("RG: 세션 만료 — 창에서 로그인하세요(자동 감지, 최대 %d초).", login_wait_secs)
                     if not _rg_login_wait(page, ctx, state, login_wait_secs, cdp=cdp):
                         log.error("RG: 로그인 감지 실패.")
-                        return 1
+                        return RC_LOGIN_REQUIRED
                     owner.keep_open = False   # 로그인 성공 → 평소대로 작업 후 창 닫음
                 else:
                     save()  # 세션 유효 → 회전 쿠키 보존 (CDP: no-op)

@@ -766,14 +766,14 @@ def _do_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
                             log.error("로그인 시간 초과/취소 — 갱신 취소.")
                             _notify_mac("쿠팡 광고 로그인 미완료",
                                         "시간 초과로 광고비 갱신이 취소됐습니다. 대시보드에서 '광고비 갱신'을 다시 누르세요.")
-                            return 1
+                            return RC_LOGIN_REQUIRED
                         log.info("로그인 완료 — fetch")
                         res = _fetch(page, cfg)
                         if res is not None and res.get("status") == 201:
                             _save_state(ctx, state)
                     else:
                         log.error("세션 만료 — keycloak 세션도 만료. 'login' 재실행 필요.")
-                        return 1
+                        return RC_LOGIN_REQUIRED
                 elif res.get("status") == 201:
                     _save_state(ctx, state)  # 회전된 세션쿠키 갱신
                 # 인증 성공(201) 시: 메인(report/cost)+SALES를 먼저 push해 UI를 즉시 unblock한 뒤,
@@ -816,14 +816,14 @@ def _do_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
 
     if res is None:
         log.error("세션 만료 — 로그인 페이지로 리다이렉트. 'login' 재실행 필요.")
-        return 1
+        return RC_LOGIN_REQUIRED
     status = res.get("status")
     if status != 201:
         body = res.get("body") or ""
         if status == 200 and any(x in body.lower() for x in ("login", "signin", "kccontext")):
             log.error("세션 만료(로그인 HTML 반환) — 'login' 재실행 필요. status=200")
-        else:
-            log.error("fetch 비정상 status=%s — %s", status, body[:160].replace("\n", " "))
+            return RC_LOGIN_REQUIRED
+        log.error("fetch 비정상 status=%s — %s", status, body[:160].replace("\n", " "))
         return 1
     # 옵션보고서 push(컨텍스트 밖 — 바이트는 확보됨). best-effort, 성공 시에만 마커.
     if option_payload:
@@ -835,6 +835,10 @@ def _do_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
         return 1
     return main_rc
 
+
+# run 반환코드 — 3=로그인 필요(재시도 무의미: 재시도해도 실패하고 창만 반복해서 뜬다, §0).
+# 1=그 외 실패(재시도 대상), 2=설정/세션파일 없음, 0=성공.
+RC_LOGIN_REQUIRED = 3
 
 _POLL_INTERVAL_S = 15      # 데몬이 갱신 요청을 확인하는 간격(창 안 뜸, 가벼운 GET)
 _LOGIN_WAIT_S = 180        # 버튼 클릭 시 keycloak 만료면 로그인 대기 한도
@@ -862,6 +866,30 @@ def _prod_claim(cfg: dict) -> dict:
     )
     r.raise_for_status()
     return r.json()
+
+
+def _prod_report_failure(cfg: dict, error: str, kind: str | None = None) -> None:
+    """run 실패를 prod에 보고 → 재시도 판정의 입력(lease 계약, PLAN_coupang-claim-retry-lease).
+
+    보고가 없으면 요청은 lease TTL(기본 20분)이 지나야 재시도된다 — 보고하면 다음 폴(15s)에
+    곧바로 재시도된다. kind="login_required"면 prod가 재시도 없이 요청을 소멸시킨다(§0 금지선:
+    재시도해도 실패하고 창만 반복해서 뜬다).
+    best-effort — 보고 실패가 run을 더 망가뜨리면 안 된다(TTL 안전망이 받아준다).
+    """
+    if not (cfg.get("prod_base_url") and cfg.get("ingest_token")):
+        return
+    body = {"error": str(error)[:300]}
+    if kind:
+        body["kind"] = kind
+    try:
+        requests.post(
+            cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/ad-cost/fetch-error",
+            json=body,
+            headers={"X-Ingest-Token": cfg["ingest_token"]},
+            timeout=10,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("fetch-error 보고 실패(무시): %s", str(e)[:120])
 
 
 def cmd_poll(cfg: dict) -> int:
@@ -895,9 +923,17 @@ def cmd_poll(cfg: dict) -> int:
                             if not Path(state).is_file():
                                 # 세션 없음 → 로그인부터. 대기는 UI 폴링 윈도우(215s) 안인
                                 # _LOGIN_WAIT_S로 맞춤 — 기본 600s면 UI가 먼저 포기(codex P2).
-                                cmd_login(cfg, wait_secs=_LOGIN_WAIT_S)
+                                rc = cmd_login(cfg, wait_secs=_LOGIN_WAIT_S)
+                                if rc != 0:
+                                    _prod_report_failure(cfg, "로그인 미완료(세션 없음)",
+                                                         kind="login_required")
                             else:
-                                _do_run(cfg, state, login_wait_secs=_LOGIN_WAIT_S)  # 락 보유 중
+                                rc = _do_run(cfg, state, login_wait_secs=_LOGIN_WAIT_S)  # 락 보유 중
+                                if rc != 0:
+                                    # rc==3 = 로그인 필요 → prod가 재시도 없이 요청을 소멸시킨다.
+                                    _prod_report_failure(
+                                        cfg, f"광고비 수집 실패(rc={rc})",
+                                        kind=("login_required" if rc == RC_LOGIN_REQUIRED else None))
         except requests.RequestException as e:
             net_fails += 1
             log.warning("폴 확인 실패(네트워크) %d/%d: %s", net_fails, _MAX_CONSECUTIVE_NET_FAILS, str(e)[:80])

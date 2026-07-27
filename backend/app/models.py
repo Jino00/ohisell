@@ -698,9 +698,15 @@ class CoupangWingCookie(Base):
     # last_success_at의 짝 — 마지막 실패 시각. Mac 페처가 실패를 보고할 때 찍고, 성공 시 클리어.
     # ★없으면 UI가 "실패"와 "아직 진행 중"을 구분 못 한다(같은 문구로 반복 실패 시 특히).
     last_error_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
-    # 대시보드 "광고비 갱신" 버튼이 set, Mac 페처 데몬이 claim(=None)으로 소비.
-    # 이 값이 있으면 다음 폴링에서 페처가 headful fetch를 1회 수행한다(버튼 트리거 방식).
+    # 대시보드 "광고비 갱신" 버튼이 set. 이 값이 있으면 페처가 다음 폴링에서 headful fetch를 수행.
+    # ★2026-07-27부터 claim은 이 값을 지우지 않는다(lease 방식) — 성공(mark_success) 또는
+    #   재시도 소진/로그인필요(report_failure)에서만 소멸한다. refresh_contract.py 참조.
     refresh_requested_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # lease(임대) 취득 시각 — "지금 페처가 이 요청을 붙잡고 일하는 중". TTL(기본 20분) 지나면
+    # 만료로 보고 다른 폴이 재claim한다(데몬이 보고 없이 죽는 경우의 안전망).
+    claimed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # 이 요청으로 claim된 횟수(1-based). MAX_ATTEMPTS(3) 도달 후 실패하면 요청을 소멸시킨다.
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 

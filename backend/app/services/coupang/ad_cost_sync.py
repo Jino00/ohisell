@@ -13,6 +13,7 @@ import requests
 from sqlalchemy.orm import Session
 
 from app.models import CoupangAdCostDaily, CoupangWingCookie
+from app.services.coupang import refresh_contract
 from app.utils.crypto import CookieCryptoError, decrypt_secret, encrypt_secret
 from app.utils.kst import kst_now
 
@@ -133,9 +134,12 @@ def _mark_cookie(db: Session, *, status: str | None, error: str | None,
         row.last_error = None
         row.last_error_at = None  # 성공하면 과거 실패 흔적을 남기지 않는다(배너 오진단 방지)
     db.commit()
+    if success:
+        # ★lease 계약: 갱신 요청이 소멸하는 정상 경로는 성공 하나뿐(claim은 더 이상 소비 안 함).
+        refresh_contract.mark_success(db, _ADS_ACCOUNT)
 
 
-def mark_fetch_error(db: Session, error: str) -> None:
+def mark_fetch_error(db: Session, error: str, kind: str | None = None) -> None:
     """Mac 페처 run 실패 보고 → last_error/last_error_at 기록(UI가 실패를 감지하는 유일 경로).
 
     ★존재 이유(2026-07-17 13:02 실사고): 페처가 브라우저 에러로 죽어도 prod에 알리는 경로가
@@ -148,8 +152,11 @@ def mark_fetch_error(db: Session, error: str) -> None:
     브라우저 크래시·Mac 세션 만료는 쿠키 문제가 아니라 재설정해도 헛수고다(07-17에 실제로
     그 헛수고를 했다 — 쿠키는 멀쩡했고 창이 닫힌 게 원인이었다). 지속 실패는 워치독이
     last_success_at 경과로 잡고(status 미의존), 배너는 stale→"로컬 페처 확인 필요"로 흐른다.
+
+    ★kind(옵션): "login_required"면 재시도하지 않고 요청 소멸(§0 금지선 — 재시도해도 실패하고
+    창만 반복해서 뜬다). 그 외 실패는 lease만 반납해 다음 폴에서 재시도된다(최대 3회).
     """
-    _mark_cookie(db, status=None, error=error)
+    refresh_contract.report_failure(db, _ADS_ACCOUNT, error, kind)
 
 
 # ════════════════════════════════════════════════
@@ -291,6 +298,7 @@ def ingest_ad_cost(db: Session, cost_date: date, vendors: list[dict]) -> dict:
     row.last_error_at = None  # 성공 = 실패 흔적 클리어(_mark_cookie(success=True)와 동일 규칙)
     row.last_success_at = kst_now()
     db.commit()
+    refresh_contract.mark_success(db, _ADS_ACCOUNT)  # 갱신 요청 소멸(성공만이 소멸시킨다)
     log.info("광고비 ingest: %s vendors=%d", cost_date, n)
     return {"date": str(cost_date), "ingested": n}
 
@@ -350,6 +358,7 @@ def ingest_ad_cost_days(db: Session, days: list[dict]) -> dict:
     row.last_error_at = None  # 성공 = 실패 흔적 클리어(_mark_cookie(success=True)와 동일 규칙)
     row.last_success_at = kst_now()
     db.commit()
+    refresh_contract.mark_success(db, _ADS_ACCOUNT)  # 갱신 요청 소멸(성공만이 소멸시킨다)
     log.info("광고비 ingest(SALES): days=%d", n)
     return {"ingested_days": n, "all_cost_missing": all_cost_missing,
             "all_cost_clamped": all_cost_clamped}
@@ -359,14 +368,11 @@ def ingest_ad_cost_days(db: Session, days: list[dict]) -> dict:
 # 갱신 트리거 (대시보드 버튼 → Mac 페처 데몬, "볼 때만 클릭" 방식)
 # ════════════════════════════════════════════════
 def request_refresh(db: Session) -> dict:
-    """대시보드 '광고비 갱신' 버튼 → 갱신 요청 플래그 set. Mac 페처가 다음 폴링에서 소비."""
-    row = _cookie_row(db)
-    if row is None:
-        row = CoupangWingCookie(account_key=_ADS_ACCOUNT)
-        db.add(row)
-    row.refresh_requested_at = kst_now()
-    db.commit()
-    return {"requested": True, "requested_at": row.refresh_requested_at.isoformat()}
+    """대시보드 '광고비 갱신' 버튼 → 갱신 요청 set.
+
+    ★버튼 1회 = 성공하거나 3회 실패할 때까지 살아있는 요청(lease 계약, refresh_contract).
+    """
+    return refresh_contract.request_refresh(db, _ADS_ACCOUNT)
 
 
 def refresh_status(db: Session) -> dict:
@@ -379,7 +385,8 @@ def refresh_status(db: Session) -> dict:
     row = _cookie_row(db)
     if row is None:
         return {"requested": False, "requested_at": None, "last_success_at": None,
-                "status": "none", "last_error": None, "last_error_at": None}
+                "status": "none", "last_error": None, "last_error_at": None,
+                **refresh_contract.status_fields(None)}
     return {
         "requested": row.refresh_requested_at is not None,
         "requested_at": row.refresh_requested_at.isoformat() if row.refresh_requested_at else None,
@@ -387,26 +394,20 @@ def refresh_status(db: Session) -> dict:
         "status": row.status,
         "last_error": row.last_error,
         "last_error_at": row.last_error_at.isoformat() if row.last_error_at else None,
+        **refresh_contract.status_fields(row),
     }
 
 
 def claim_refresh(db: Session) -> dict:
-    """Mac 페처가 갱신 요청을 '소비'(플래그 clear)하고 작업 시작. 중복 트리거/루프 방지.
+    """Mac 페처가 갱신 요청을 **임대**(lease)하고 작업 시작. 중복 claim은 여전히 한쪽만 성공.
 
-    원자적 조건부 UPDATE(refresh_requested_at IS NOT NULL인 행만 NULL로)로 처리해,
-    데몬이 둘 이상 동시에 돌아도 정확히 한쪽만 claimed=True(rowcount=1)가 된다(codex P2).
-    claim 후 fetch가 실패(예: 로그인 필요)해도 플래그는 이미 clear라 창이 반복해 뜨지 않는다.
+    ★2026-07-27 변경(PLAN_coupang-claim-retry-lease): 예전엔 여기서 플래그를 즉시 지웠고,
+    claim 직후 페처가 죽으면 요청이 통째로 유실됐다(버튼 1회 = 시도 1회). 이제 요청은
+    성공(mark_success)하거나 3회 실패/로그인필요일 때만 소멸한다.
+    로그인 필요는 여전히 창이 반복해 뜨지 않는다 — 페처가 kind="login_required"로 보고하면
+    즉시 요청이 소멸하기 때문(refresh_contract.report_failure).
     """
-    from sqlalchemy import update
-
-    res = db.execute(
-        update(CoupangWingCookie)
-        .where(CoupangWingCookie.account_key == _ADS_ACCOUNT)
-        .where(CoupangWingCookie.refresh_requested_at.isnot(None))
-        .values(refresh_requested_at=None)
-    )
-    db.commit()
-    return {"claimed": (res.rowcount or 0) > 0}
+    return refresh_contract.claim_refresh(db, _ADS_ACCOUNT)
 
 
 # ════════════════════════════════════════════════

@@ -48,6 +48,13 @@ export interface AdCostRefreshStatus {
   status: string; // green | red | unknown | none
   last_error: string | null;
   last_error_at: string | null; // 페처 실패 보고 시각 — 이게 변하면 실패(성공만 기다리면 215초 헛대기)
+  // ── 갱신 요청 lease 계약(2026-07-27, PLAN_coupang-claim-retry-lease) ──
+  // 버튼 1회 = 성공하거나 3회 실패할 때까지 살아있는 요청. requested=true인 동안은 아직
+  // 끝나지 않은 것(재시도 대기 포함) — 실패 판정은 requested=false가 된 뒤에 한다.
+  attempt_count: number;   // 이번 요청으로 시도한 횟수(0~3)
+  max_attempts: number;    // 상한(3)
+  claimed_at: string | null;
+  in_flight: boolean;      // 지금 페처가 잡고 일하는 중(임대 유효)
 }
 
 export function requestAdCostRefresh(): Promise<{ requested: boolean; requested_at: string }> {
@@ -102,6 +109,13 @@ export interface WingVendorSummaryRefreshStatus {
   status: string; // green | red | unknown | none
   last_error: string | null;
   last_error_at: string | null; // 페처 실패 보고 시각 — 이게 변하면 실패(성공만 기다리면 215초 헛대기)
+  // ── 갱신 요청 lease 계약(2026-07-27, PLAN_coupang-claim-retry-lease) ──
+  // 버튼 1회 = 성공하거나 3회 실패할 때까지 살아있는 요청. requested=true인 동안은 아직
+  // 끝나지 않은 것(재시도 대기 포함) — 실패 판정은 requested=false가 된 뒤에 한다.
+  attempt_count: number;   // 이번 요청으로 시도한 횟수(0~3)
+  max_attempts: number;    // 상한(3)
+  claimed_at: string | null;
+  in_flight: boolean;      // 지금 페처가 잡고 일하는 중(임대 유효)
 }
 
 export function requestWingVendorSummaryRefresh(): Promise<{ requested: boolean; requested_at: string }> {
@@ -122,6 +136,13 @@ export interface WingRgSettlementRefreshStatus {
   status: string; // green | red | unknown | none
   last_error: string | null;
   last_error_at: string | null; // 페처 실패 보고 시각 — 이게 변하면 실패(성공만 기다리면 215초 헛대기)
+  // ── 갱신 요청 lease 계약(2026-07-27, PLAN_coupang-claim-retry-lease) ──
+  // 버튼 1회 = 성공하거나 3회 실패할 때까지 살아있는 요청. requested=true인 동안은 아직
+  // 끝나지 않은 것(재시도 대기 포함) — 실패 판정은 requested=false가 된 뒤에 한다.
+  attempt_count: number;   // 이번 요청으로 시도한 횟수(0~3)
+  max_attempts: number;    // 상한(3)
+  claimed_at: string | null;
+  in_flight: boolean;      // 지금 페처가 잡고 일하는 중(임대 유효)
 }
 
 export function requestWingRgSettlementRefresh(): Promise<{ requested: boolean; requested_at: string }> {
@@ -959,6 +980,13 @@ export interface RocketRefreshStatus {
   status: string;
   last_error: string | null;
   last_error_at: string | null; // 페처 실패 보고 시각 — 이게 변하면 실패(성공만 기다리면 180초 헛대기)
+  // ── 갱신 요청 lease 계약(2026-07-27, PLAN_coupang-claim-retry-lease) ──
+  // 버튼 1회 = 성공하거나 3회 실패할 때까지 살아있는 요청. requested=true인 동안은 아직
+  // 끝나지 않은 것(재시도 대기 포함) — 실패 판정은 requested=false가 된 뒤에 한다.
+  attempt_count: number;   // 이번 요청으로 시도한 횟수(0~3)
+  max_attempts: number;    // 상한(3)
+  claimed_at: string | null;
+  in_flight: boolean;      // 지금 페처가 잡고 일하는 중(임대 유효)
 }
 
 export function requestRocketRefresh(): Promise<{ requested: boolean; requested_at: string }> {
@@ -980,6 +1008,13 @@ export interface OhitechAdRefreshStatus {
   status: string;
   last_error: string | null;
   last_error_at: string | null; // 페처 실패 보고 시각 — 이게 변하면 실패(성공만 기다리면 헛대기)
+  // ── 갱신 요청 lease 계약(2026-07-27, PLAN_coupang-claim-retry-lease) ──
+  // 버튼 1회 = 성공하거나 3회 실패할 때까지 살아있는 요청. requested=true인 동안은 아직
+  // 끝나지 않은 것(재시도 대기 포함) — 실패 판정은 requested=false가 된 뒤에 한다.
+  attempt_count: number;   // 이번 요청으로 시도한 횟수(0~3)
+  max_attempts: number;    // 상한(3)
+  claimed_at: string | null;
+  in_flight: boolean;      // 지금 페처가 잡고 일하는 중(임대 유효)
 }
 
 export function requestOhitechAdRefresh(): Promise<{ requested: boolean; requested_at: string }> {

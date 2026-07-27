@@ -981,11 +981,11 @@ def _do_run(cfg: dict) -> int:
                     if not _goto_origin(page):
                         log.error("supplier 로그아웃 상태(url=%s) — 이 창에서 로그인 후 다시 '갱신'을 누르세요.", page.url)
                         owner.keep_open = True   # 로그인할 창이 필요 → 닫지 않음
-                        return 1
+                        return RC_LOGIN_REQUIRED
                     if not _session_ok(page, cfg):
                         log.error("발주 list 세션 미응답 — 세션 만료. 이 창에서 로그인 후 다시 '갱신'을 누르세요.")
                         owner.keep_open = True
-                        return 1
+                        return RC_LOGIN_REQUIRED
                     pages = _collect_po_pages(page, cfg)
                     try:
                         settle_rows = _collect_settlement_rows(page, cfg)
@@ -1019,6 +1019,33 @@ def _do_run(cfg: dict) -> int:
         except Exception:  # noqa: BLE001
             pass
     return rc
+
+
+# run 반환코드 — 3=로그인 필요(재시도 무의미: 재시도해도 실패하고 창만 반복해서 뜬다, §0).
+# 1=그 외 실패(재시도 대상), 2=설정 누락, 0=성공.
+RC_LOGIN_REQUIRED = 3
+
+
+def _prod_report_failure(cfg: dict, error: str, kind: str | None = None) -> None:
+    """run 실패를 prod에 보고 → 재시도 판정의 입력(lease 계약, PLAN_coupang-claim-retry-lease).
+
+    보고가 없으면 lease TTL(기본 20분)이 지나야 재시도된다 — 보고하면 다음 폴(30s)에 곧바로.
+    kind="login_required"면 prod가 재시도 없이 요청을 소멸시킨다(§0 금지선). best-effort.
+    """
+    if not _push_configured(cfg):
+        return
+    body = {"error": str(error)[:300]}
+    if kind:
+        body["kind"] = kind
+    try:
+        requests.post(
+            cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/rocket/fetch-error",
+            json=body,
+            headers={"X-Ingest-Token": cfg["ingest_token"]},
+            timeout=10,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("fetch-error 보고 실패(무시): %s", str(e)[:120])
 
 
 def _prod_rocket_refresh_status(cfg: dict) -> dict:
@@ -1171,6 +1198,12 @@ def cmd_poll(cfg: dict, interval: int = 30) -> int:
             if needs_run:
                 rc = cmd_run(cfg)
                 log.info("[poll] run 완료 rc=%d", rc)
+                if rc != 0:
+                    # 실패 보고 = 재시도 판정의 입력(lease 계약). rc==3(로그인 필요)이면
+                    # prod가 재시도 없이 요청을 소멸시킨다(§0 — 창만 반복해서 뜬다).
+                    _prod_report_failure(
+                        cfg, f"로켓 발주/정산 수집 실패(rc={rc})",
+                        kind=("login_required" if rc == RC_LOGIN_REQUIRED else None))
 
         except Exception as e:  # noqa: BLE001
             fails += 1

@@ -96,16 +96,25 @@ def test_reconcile_today_only_no_closed_days(client):
 
 
 def test_refresh_trigger_claim_flow(client):
-    """request-refresh(무토큰 UI) → refresh-status requested=True → claim(토큰) → requested=False."""
-    assert client.get("/api/coupang/ops/wing/vendor-summary/refresh-status").json()["requested"] is False
-    assert client.post("/api/coupang/ops/wing/vendor-summary/request-refresh").status_code == 200
-    assert client.get("/api/coupang/ops/wing/vendor-summary/refresh-status").json()["requested"] is True
+    """request-refresh(무토큰 UI) → status requested=True → claim(토큰) → 요청은 보존(lease).
+
+    ★2026-07-27 계약 변경: claim이 요청을 소비하던 것을 임대로 바꿨다(실패 시 재시도 보장).
+    요청이 사라지는 것은 성공(ingest) 또는 3회 실패/로그인필요일 때뿐이다.
+    """
+    base = "/api/coupang/ops/wing/vendor-summary"
+    assert client.get(f"{base}/refresh-status").json()["requested"] is False
+    assert client.post(f"{base}/request-refresh").status_code == 200
+    assert client.get(f"{base}/refresh-status").json()["requested"] is True
     # claim은 토큰 필요
-    assert client.post("/api/coupang/ops/wing/vendor-summary/refresh-claim").status_code == 401
-    claimed = client.post("/api/coupang/ops/wing/vendor-summary/refresh-claim",
-                          headers={"X-Ingest-Token": _TOKEN})
+    assert client.post(f"{base}/refresh-claim").status_code == 401
+    claimed = client.post(f"{base}/refresh-claim", headers={"X-Ingest-Token": _TOKEN})
     assert claimed.status_code == 200 and claimed.json()["claimed"] is True
-    assert client.get("/api/coupang/ops/wing/vendor-summary/refresh-status").json()["requested"] is False
+
+    st = client.get(f"{base}/refresh-status").json()
+    assert st["requested"] is True and st["in_flight"] is True   # ★임대 중(진행 중)
+    # 같은 요청을 두 번 claim하지는 못한다(창 2회 방지 성질 유지)
+    again = client.post(f"{base}/refresh-claim", headers={"X-Ingest-Token": _TOKEN})
+    assert again.json()["claimed"] is False
 
 
 # ── RG 정산 자동 다운로드 (S4-P2) ──
@@ -206,7 +215,10 @@ def test_rg_settlement_upload_corrupt_file_returns_422(client):
 
 
 def test_rg_settlement_refresh_trigger_claim_flow(client):
-    """request-refresh(무토큰 UI) → status requested=True → claim(토큰) → requested=False. (vendor-summary 미러)"""
+    """request-refresh(무토큰 UI) → status requested=True → claim(토큰) → 요청 보존(lease).
+
+    (vendor-summary 미러 — 2026-07-27 계약 변경 동일 적용)
+    """
     base = "/api/coupang/ops/wing/rg-settlement"
     assert client.get(f"{base}/refresh-status").json()["requested"] is False
     assert client.post(f"{base}/request-refresh").status_code == 200
@@ -214,7 +226,9 @@ def test_rg_settlement_refresh_trigger_claim_flow(client):
     assert client.post(f"{base}/refresh-claim").status_code == 401          # 토큰 필요
     claimed = client.post(f"{base}/refresh-claim", headers={"X-Ingest-Token": _TOKEN})
     assert claimed.status_code == 200 and claimed.json()["claimed"] is True
-    assert client.get(f"{base}/refresh-status").json()["requested"] is False
+
+    st = client.get(f"{base}/refresh-status").json()
+    assert st["requested"] is True and st["in_flight"] is True
 
 
 # ── 층1: RG status/api 계정 단위 인제스트 (Mac 상주 브라우저, 쿠키 이관) ──

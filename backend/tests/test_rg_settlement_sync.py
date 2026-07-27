@@ -1114,12 +1114,18 @@ def test_rg_request_refresh_sets_flag():
 
 
 def test_rg_claim_refresh_atomic_once():
-    """claim은 요청 있을 때 1회만 claimed=True, 이후 False(원자적 소비·중복 fetch 방지)."""
+    """claim은 요청 있을 때 1회만 claimed=True, 이후 False(중복 fetch 방지).
+
+    ★2026-07-27: claim은 요청을 소비하지 않고 **임대**한다(재시도 보장) — 두 번째 claim이
+    False인 이유가 "이미 clear돼서"에서 "lease가 살아있어서"로 바뀌었다. 요청은 성공하거나
+    3회 실패/로그인필요일 때 소멸한다.
+    """
     db = _db()
     rg_request_refresh(db)
     assert rg_claim_refresh(db)["claimed"] is True
-    assert rg_claim_refresh(db)["claimed"] is False   # 두 번째는 이미 clear됨
-    assert rg_refresh_status(db)["requested"] is False
+    assert rg_claim_refresh(db)["claimed"] is False   # lease 보유 중 → 중복 claim 차단
+    assert rg_refresh_status(db)["requested"] is True  # ★요청은 살아있다
+    assert rg_refresh_status(db)["in_flight"] is True
 
 
 def test_rg_claim_without_request_is_false():
