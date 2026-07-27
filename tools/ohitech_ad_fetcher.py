@@ -32,6 +32,7 @@ import fcntl
 import json
 import logging
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -101,6 +102,16 @@ def _cdp_alive(port: int) -> bool:
         return False
 
 
+def _cmdline_has_profile(cmdline: str, profile: str) -> bool:
+    """cmdline에 '--user-data-dir=<정확히 이 프로필>'이 있는지 — 접두 오탐 차단.
+
+    단순 substring이면 프로필 `/tmp/p`가 남의 `/tmp/profile`에 매칭돼 무관한 Chrome을 우리 것으로
+    오인한다(codex R2 신규 P1). 값 뒤가 공백이거나 줄 끝이어야 한다.
+    """
+    prof = os.path.expanduser(profile).rstrip("/")
+    return re.search(r"--user-data-dir=" + re.escape(prof) + r"/?(\s|$)", cmdline) is not None
+
+
 def _profile_chrome_alive(profile: str) -> bool:
     """프로필을 점유 중인 살아있는 Chrome이 있는지 — SingletonLock PID 생존+cmdline 확인.
 
@@ -133,7 +144,7 @@ def _profile_chrome_alive(profile: str) -> bool:
         ).stdout
     except Exception:  # noqa: BLE001
         return False
-    return f"--user-data-dir={profile}" in cmdline
+    return _cmdline_has_profile(cmdline, profile)
 
 
 def _notify_mac(title: str, message: str, sound: str = "Glass") -> None:
@@ -197,35 +208,44 @@ def _cdp_page(cfg: dict):
 #   poll 데몬이 요청을 claim한 뒤 스스로 Chrome을 띄우고 작업이 끝나면 닫는다.
 # ★소유권 규칙: 내가 띄운 Chrome만 내가 닫는다. 이미 떠 있던 Chrome(사람이 로그인하려고
 #   띄운 창 등)은 adopt만 하고 절대 닫지 않는다.
-def _port_owner_foreign(port: int, profile: str) -> bool:
-    """CDP 포트를 LISTEN 중인 Chrome이 '다른 user-data-dir'임이 **확인되면** True.
+def _port_owner_foreign(port: int, profile: str, allow_unverified: bool = False) -> bool:
+    """CDP 포트 LISTEN 소유자가 '우리 프로필의 Chrome'임을 **확인하지 못하면** True(=adopt 거부).
 
     왜(codex R1 P1#3): `/json/version` 200만 보고 adopt하면, 같은 포트에 뜬 무관한 Chrome
-    (다른 계정 프로필·다른 자동화 도구)의 컨텍스트로 수집해 **남의 계정 데이터를 우리
-    account_key로 적재**할 수 있다. 판정 불가(lsof 없음·권한·헬퍼만 잡힘)면 False = 기존
-    동작(adopt) — 오탐으로 정상 수집을 막지 않는다. '다른 프로필' 양성 증거가 있을 때만 거부.
+    (다른 계정 프로필·다른 자동화 도구)의 컨텍스트로 수집해 **남의 vendor 데이터를 우리
+    account_key로 적재**할 수 있다. 포트는 설정값이라 다계정 인스턴스가 포트를 안 바꾸면 실제로 겹친다.
+
+    왜 fail-closed인가(codex R2 재반박 수용): 우리가 adopt할 정당한 창은 수동 `chrome` 커맨드든
+    per-fetch 기동이든 전부 `_chrome_argv`로 뜬다 → cmdline에 항상 `--user-data-dir=<프로필>`이 있다.
+    따라서 '확인 불가'는 정상 케이스가 아니라 남의 Chrome이라는 신호다. 오적재는 조용하고 되돌리기
+    어렵지만 거부는 로그·알림으로 시끄럽다. 현장에서 오판이 나면 설정 `adopt_unverified_chrome:true`로
+    옛 동작(확인 불가 시 adopt)으로 되돌릴 수 있다.
     """
+    verdict = "adopt(설정 허용)" if allow_unverified else "adopt 거부"
     try:
         out = subprocess.run(
             ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
             capture_output=True, text=True, timeout=5,
         ).stdout
-    except Exception:  # noqa: BLE001 — 확인 불가 → 기존 동작 유지
-        return False
-    foreign = False
-    for pid in [p for p in out.split() if p.isdigit()]:
+    except Exception:  # noqa: BLE001
+        log.warning("CDP %d 소유자 확인 불가(lsof 실행 실패) — %s", port, verdict)
+        return not allow_unverified
+    pids = [p for p in out.split() if p.isdigit()]
+    if not pids:
+        log.warning("CDP %d LISTEN PID를 찾지 못함 — %s", port, verdict)
+        return not allow_unverified
+    for pid in pids:
         try:
             cmdline = subprocess.run(
                 ["ps", "-o", "command=", "-p", pid],
                 capture_output=True, text=True, timeout=3,
             ).stdout
         except Exception:  # noqa: BLE001
-            return False
-        if f"--user-data-dir={profile}" in cmdline:
-            return False            # 우리 프로필의 Chrome → adopt 정당
-        if "--user-data-dir=" in cmdline:
-            foreign = True          # 다른 프로필임이 확인됨
-    return foreign
+            continue
+        if _cmdline_has_profile(cmdline, profile):
+            return False            # 우리 프로필의 Chrome임이 확인됨 → adopt 정당
+    log.warning("CDP %d 소유자가 우리 프로필(%s)이 아님 — %s", port, profile, verdict)
+    return not allow_unverified
 
 
 @contextlib.contextmanager
@@ -333,6 +353,11 @@ def _cleanup_owned_chromes(_signum=None, _frame=None) -> None:
     그 Chrome을 adopt(=닫을 책임 없음)해 버튼-only인데도 창이 영구 잔류한다.
     keep_open 창은 사람이 로그인 중일 수 있으므로 평소 규칙대로 남긴다.
     """
+    if _signum is not None:
+        # 재진입 차단(codex R2): 정리 도중 두 번째 시그널이 들어오면 handler가 겹쳐 돈다.
+        for _s in (signal.SIGTERM, signal.SIGHUP):
+            with contextlib.suppress(Exception):
+                signal.signal(_s, signal.SIG_IGN)
     for owner in list(_LIVE_OWNERS):
         if owner.owned and not owner.keep_open:
             with contextlib.suppress(Exception):
@@ -381,7 +406,7 @@ def _owned_chrome(cfg: dict, owner: "_ChromeOwner | None" = None):
     # 점검~기동~CDP대기 전 구간을 프로필 lock으로 직렬화(이중 기동=프로필 손상 차단).
     with _profile_launch_lock(profile, int(cfg.get("chrome_launch_lock_timeout_s", 90))):
         if _cdp_alive(port):
-            if _port_owner_foreign(port, profile):
+            if _port_owner_foreign(port, profile, bool(cfg.get("adopt_unverified_chrome", False))):
                 log.error("CDP %d를 다른 프로필의 Chrome이 점유 — adopt 거부(세션 오적재 방지).", port)
                 _notify_mac("오하이테크 광고 수집 불가",
                             f"포트 {port}를 다른 프로필의 Chrome이 점유 — 그 Chrome 종료 필요.")
@@ -430,12 +455,17 @@ def cmd_chrome(cfg: dict) -> int:
     """
     port = int(cfg["cdp_port"])
     profile = os.path.expanduser(cfg["cdp_profile"])
-    if _cdp_alive(port):
-        log.info("CDP Chrome(%d) 이미 실행 중 — 그 창에서 로그인하세요.", port)
-        return 0
-    proc = _launch_chrome(cfg)
-    if proc is None:
-        return 1
+    # ★수동 경로도 같은 프로필 lock 안에서(codex R2) — 이중 기동=프로필 손상.
+    with _profile_launch_lock(profile, int(cfg.get("chrome_launch_lock_timeout_s", 90))):
+        if _cdp_alive(port):
+            log.info("CDP Chrome(%d) 이미 실행 중 — 그 창에서 로그인하세요.", port)
+            return 0
+        if _profile_chrome_alive(profile):
+            log.error("프로필 점유 중이나 CDP(%d) 미응답 — 그 Chrome을 먼저 종료하세요(%s).", port, profile)
+            return 1
+        proc = _launch_chrome(cfg)
+        if proc is None:
+            return 1
     log.info("Chrome 실행됨 (PID %d, CDP %d, 프로필 %s) — 창에서 오하이테크 광고센터 로그인.",
              proc.pid, port, profile)
     return 0

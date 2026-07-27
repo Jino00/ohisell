@@ -82,6 +82,7 @@ def test_adopts_existing_chrome_and_never_closes_it(fetcher, tmp_path, monkeypat
     """이미 떠 있는 Chrome(사람이 띄운 창 등)은 adopt만 — 띄우지도, 닫지도 않는다."""
     closed, launched = [], []
     monkeypatch.setattr(fetcher, "_cdp_alive", lambda _p: True)
+    monkeypatch.setattr(fetcher, "_port_owner_foreign", lambda *_a: False)   # 우리 프로필 확인됨
     monkeypatch.setattr(fetcher, "_launch_chrome", lambda _c: launched.append(1))
     monkeypatch.setattr(fetcher, "_close_chrome", lambda p: closed.append(p))
     with fetcher._owned_chrome(_cfg(tmp_path)) as owner:
@@ -168,8 +169,9 @@ def test_cdp_never_ready_closes_launched_chrome(fetcher, tmp_path, monkeypatch):
 def test_no_chrome_supervisor_launch(fetcher):
     """chrome-supervise가 남아 있다면 no-op이어야 한다(Chrome을 띄우면 KeepAlive 부활)."""
     fn = getattr(fetcher, "cmd_chrome_supervise", None)
-    if fn is None:
-        return  # 완전 제거된 페처(rocket)
+    # rocket 포함 3종 모두 필수: Jino Mac에 com.ohisell.rocket-chrome(chrome-supervise, KeepAlive)가
+    # 실재한다(2026-07-27 실측). 커맨드가 없으면 새 .py 설치 즉시 usage 에러 → 30초 크래시 루프.
+    assert fn is not None, "chrome-supervise 스텁 없음 — 구 plist가 크래시 루프에 빠진다"
     src = _code_only(fn)
     assert "Popen" not in src
     assert "_launch_chrome" not in src
@@ -245,7 +247,7 @@ def test_profile_launch_lock_is_outside_profile_dir(fetcher, tmp_path):
 def test_refuses_adopting_chrome_of_another_profile(fetcher, tmp_path, monkeypatch):
     """포트가 살아 있어도 그 Chrome이 '다른 프로필'이면 adopt 거부 — 남의 계정 데이터 적재 차단."""
     monkeypatch.setattr(fetcher, "_cdp_alive", lambda _p: True)
-    monkeypatch.setattr(fetcher, "_port_owner_foreign", lambda _p, _pr: True)
+    monkeypatch.setattr(fetcher, "_port_owner_foreign", lambda *_a: True)
     monkeypatch.setattr(fetcher, "_launch_chrome", lambda _c: pytest.fail("기동하면 안 됨"))
     monkeypatch.setattr(fetcher, "_notify_mac", lambda *_a, **_k: None, raising=False)
     with pytest.raises(RuntimeError):
@@ -253,13 +255,59 @@ def test_refuses_adopting_chrome_of_another_profile(fetcher, tmp_path, monkeypat
             pass
 
 
-def test_port_owner_foreign_only_on_positive_evidence(fetcher, monkeypatch):
-    """확인 불가(lsof 실패)면 기존 동작(adopt) 유지 — 오탐으로 정상 수집을 막지 않는다."""
+def test_port_owner_unverified_is_refused_by_default(fetcher, monkeypatch):
+    """소유자 확인 불가 = adopt 거부(fail-closed).
+
+    우리가 adopt할 정당한 창은 전부 _chrome_argv로 떠서 cmdline에 프로필이 있다 → '확인 불가'는
+    정상 케이스가 아니라 남의 Chrome 신호다(codex R2). 오적재는 조용하고 거부는 시끄럽다.
+    """
     def _boom(*_a, **_k):
         raise OSError("lsof 없음")
 
     monkeypatch.setattr(fetcher.subprocess, "run", _boom)
-    assert fetcher._port_owner_foreign(9299, "/tmp/p") is False
+    assert fetcher._port_owner_foreign(9299, "/tmp/p") is True
+    # 현장 오판 시 설정으로 옛 동작 복귀 가능.
+    assert fetcher._port_owner_foreign(9299, "/tmp/p", True) is False
+
+
+def test_profile_match_is_not_prefix_substring(fetcher):
+    """'--user-data-dir=/tmp/profile'이 프로필 '/tmp/p'로 매칭되면 남의 Chrome을 adopt한다."""
+    line = "/Applications/Google Chrome --user-data-dir=/tmp/profile --no-first-run"
+    assert fetcher._cmdline_has_profile(line, "/tmp/profile") is True
+    assert fetcher._cmdline_has_profile(line, "/tmp/p") is False, "접두 오탐 — 경계 검사 필요"
+    assert fetcher._cmdline_has_profile(line, "/tmp/profile/") is True   # 끝 슬래시 정규화
+    # 줄 끝 케이스
+    assert fetcher._cmdline_has_profile("chrome --user-data-dir=/tmp/p", "/tmp/p") is True
+
+
+def test_cmd_chrome_takes_profile_launch_lock(fetcher, tmp_path, monkeypatch):
+    """수동 chrome 커맨드도 프로필 lock 안에서 — 여기서 새면 fetch와 겹쳐 이중 기동된다."""
+    import fcntl
+
+    cfg = {**_cfg(tmp_path), "chrome_launch_lock_timeout_s": 1}
+    launched = []
+    monkeypatch.setattr(fetcher, "_cdp_alive", lambda _p: False)
+    monkeypatch.setattr(fetcher, "_profile_chrome_alive", lambda _p: False)
+    monkeypatch.setattr(fetcher, "_launch_chrome", lambda _c: launched.append(1))
+    fd = os.open(cfg["cdp_profile"].rstrip("/") + ".launchlock", os.O_WRONLY | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        with pytest.raises(RuntimeError):
+            fetcher.cmd_chrome(cfg)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+    assert launched == [], "lock 점유 중인데 수동 chrome이 이중 기동했다"
+
+
+def test_cmd_chrome_refuses_when_profile_busy(fetcher, tmp_path, monkeypatch):
+    """CDP 미응답인데 프로필이 점유 중이면 수동 chrome도 기동 거부(Singleton 삭제=손상)."""
+    launched = []
+    monkeypatch.setattr(fetcher, "_cdp_alive", lambda _p: False)
+    monkeypatch.setattr(fetcher, "_profile_chrome_alive", lambda _p: True)
+    monkeypatch.setattr(fetcher, "_launch_chrome", lambda _c: launched.append(1))
+    assert fetcher.cmd_chrome(_cfg(tmp_path)) == 1
+    assert launched == []
 
 
 def test_signal_cleanup_closes_owned_chrome(fetcher, monkeypatch):

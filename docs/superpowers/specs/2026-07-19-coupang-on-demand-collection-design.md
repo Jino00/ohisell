@@ -201,3 +201,23 @@ supervisor와 다른 점: **되살아나지 않는다** — Jino가 닫으면 �
   CDP 대기 상한 60s. 프론트 폴링 윈도우(광고 215s)와 비교해 여유는 있으나 체감 지연은 증가.
 - **stale lock 오판**: `_profile_chrome_alive`(SingletonLock PID+cmdline 검증)로 방어. 다른 Chrome이
   같은 프로필을 점유하면 기동을 **거부**(사일런트 손상 대신 명시적 실패 + 알림).
+
+## R-6. codex 교차검증(2026-07-27, 2라운드)에서 추가된 방어장치
+
+리뷰 대화는 R1 P1 4건 전건 수용 → R2에서 2건 잔여 반박 + 신규 1건 수용으로 종결(P2 3건은 근거와 함께
+기각/보류). 아래가 그 결과로 코드에 들어간 것들이다.
+
+| 방어 | 무엇을 막나 |
+|---|---|
+| 설치 스크립트의 **구 supervisor 자동 bootout·plist 삭제·실패 시 exit 1** | 설치 목록에서 빼기만 하면 **이미 로드된 잡은 계속 산다** — 실행 중 프로세스는 .py를 덮어써도 안 바뀌므로 구 코드가 Chrome을 계속 상주시킨다(전환 목적 무효화). 문서 안내가 아니라 구조로 막는다. |
+| `_profile_launch_lock(profile)` — `_owned_chrome`과 **수동 `chrome` 커맨드 둘 다** | 페처별 flock은 *작업* 단위라 같은 프로필의 다른 커맨드(login/chrome)·다계정 인스턴스와 배타되지 않는다. 둘 다 "비어 있음"을 보고 Singleton을 지운 뒤 이중 기동 → 프로필·쿠키 DB 손상. |
+| `_port_owner_foreign()` — **fail-closed** (설정 `adopt_unverified_chrome`로 해제) | 포트 200만 보고 adopt하면 같은 포트의 무관한 Chrome으로 수집해 **남의 vendor 데이터를 우리 account_key로 적재**한다. 정당한 창은 전부 `_chrome_argv`로 떠서 cmdline에 프로필이 있으므로 '확인 불가'는 남의 Chrome 신호. |
+| `_cmdline_has_profile()` 경계 검사 | 단순 substring이면 프로필 `/tmp/p`가 남의 `/tmp/profile`에 매칭돼 오adopt. |
+| `_LIVE_OWNERS` + SIGTERM/SIGHUP·atexit 회수(재진입 가드 포함) | 파이썬 기본 SIGTERM은 `finally`를 **실행하지 않는다.** 설치 스크립트는 배포마다 poll 데몬을 bootout하므로 fetch 중 재설치하면 데몬만 죽고 Chrome이 남고, 다음 데몬은 그걸 adopt해 닫을 책임을 갖지 않는다 → 버튼-only인데 창 영구 잔류. |
+| rocket에도 `chrome-supervise` no-op 스텁 | ★실측: repo엔 없지만 **Jino Mac에 `com.ohisell.rocket-chrome`가 실제로 로드돼 있었다**(2026-07-17 생성, 포트 9225). 새 .py엔 이 서브커맨드가 없어 설치 즉시 usage 에러 → KeepAlive+Throttle 30 → **30초 크래시 루프**. |
+
+**Jino 판단 대기(스코프 밖으로 보류)**: RG/vendor-summary의 `refresh-claim`은 성공 *전에* 요청을
+소비하므로 실행 실패 시 버튼 요청이 유실된다(§R-3에서 일일예약이라는 사실상의 재시도가 사라져 노출됨).
+제대로 고치려면 claim→lease(ack/release) 또는 실패 보고 엔드포인트가 필요한데 **둘 다 prod 백엔드
+계약 변경**이라 이 작업 범위 밖이다(현재 실패 보고 엔드포인트 없음). codex도 "페처 단독으로는
+exactly-once 복구 불가"에 동의. 당분간은 실패 시 사람이 버튼을 다시 누르고, 낡음은 전역 신선도 배너가 표면화.
