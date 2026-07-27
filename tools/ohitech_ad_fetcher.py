@@ -767,16 +767,22 @@ def _mark_fetch_success(cfg: dict) -> None:
 
     실패해도 run은 성공으로 둔다(heartbeat용일 뿐). UI 버튼 폴링이 완료를 감지하는 신호.
     """
-    try:
-        r = requests.post(
-            _prod_base(cfg) + "/fetch-success",
-            headers={"X-Ingest-Token": cfg["ingest_token"]},
-            timeout=15,
-        )
-        if r.status_code != 200:
-            log.warning("fetch-success 비200(무시): %s %s", r.status_code, r.text[:120])
-    except requests.RequestException as e:
-        log.warning("fetch-success 네트워크 오류(무시): %s", str(e)[:120])
+    # ★완료 신호는 몇 번 재시도한다(codex 5R[P1]): 유실되면 요청이 임대된 채 남아 UI가
+    #   헛기다리고 TTL 뒤 중복 수집으로 이어진다.
+    for attempt in range(3):
+        try:
+            r = requests.post(
+                _prod_base(cfg) + "/fetch-success",
+                headers={"X-Ingest-Token": cfg["ingest_token"]},
+                timeout=15,
+            )
+            if r.status_code == 200:
+                return
+            log.warning("fetch-success 비200(%s) — 재시도 %d/3", r.status_code, attempt + 1)
+        except requests.RequestException as e:
+            log.warning("fetch-success 네트워크 오류(%s) — 재시도 %d/3", str(e)[:80], attempt + 1)
+        time.sleep(2 * (attempt + 1))
+    log.error("fetch-success 최종 실패 — 요청이 임대된 채 남는다(TTL 후 자동 완료/재시도).")
 
 
 def cmd_run(cfg: dict) -> int:

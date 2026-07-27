@@ -1014,14 +1014,21 @@ def _do_run(cfg: dict) -> int:
     log.info("run 완료 — 발주 push rc=%d / 정산 push rc=%d / 발주상세 실패=%d", rc_po, rc_st, detail_failed)
     # 성공 시 last_success_at 갱신 (UI 폴링 완료 감지용)
     if rc == 0 and _push_configured(cfg):
-        try:
-            requests.post(
-                cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/rocket/fetch-success",
-                headers={"X-Ingest-Token": cfg["ingest_token"]},
-                timeout=10,
-            )
-        except Exception:  # noqa: BLE001
-            pass
+        # ★완료 신호는 몇 번 재시도한다(codex 5R[P1]): 유실되면 요청이 임대된 채 남아
+        #   UI가 헛기다리고 TTL 뒤 중복 수집으로 이어진다.
+        for _attempt in range(3):
+            try:
+                r = requests.post(
+                    cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/rocket/fetch-success",
+                    headers={"X-Ingest-Token": cfg["ingest_token"]},
+                    timeout=10,
+                )
+                if r.status_code == 200:
+                    break
+                log.warning("fetch-success 비200(%s) — 재시도 %d/3", r.status_code, _attempt + 1)
+            except Exception as e:  # noqa: BLE001
+                log.warning("fetch-success 실패(%s) — 재시도 %d/3", str(e)[:80], _attempt + 1)
+            time.sleep(2 * (_attempt + 1))
     return rc
 
 

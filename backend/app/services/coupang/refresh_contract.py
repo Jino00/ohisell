@@ -264,19 +264,38 @@ def mark_success(db: Session, account_key: str, *, clear_error: bool = False,
     row = _row(db, account_key)
     if row is None:
         return False
-    if lease is not None and _lease_of(row) != lease:
-        # ★stale 완료 신호 무시(codex 3R[P2]): 임대를 넘긴 옛 run이 뒤늦게 "끝났다"고 말하면
-        # 지금 일하는 run의 임대나 사용자의 새 요청을 지운다.
-        log.info("stale 완료 신호 무시: %s (보고 lease=%s, 현재=%s)",
-                 account_key, lease, _lease_of(row))
-        return False
-    row.refresh_requested_at = None
-    row.claimed_at = None
-    row.attempt_count = 0
+    values: dict = {"refresh_requested_at": None, "claimed_at": None, "attempt_count": 0}
     if clear_error:
-        row.last_error = None
-        row.last_error_at = None
+        values["last_error"] = None
+        values["last_error_at"] = None
+
+    if lease is None:
+        # 레거시 경로(데이터 ingest가 알리는 성공) — 조건 없이 닫는다.
+        for k, v in values.items():
+            setattr(row, k, v)
+        db.commit()
+        return True
+
+    # ★stale 완료 신호 무시(codex 3R[P2]) + 검사·쓰기 원자화(codex 5R[P2]):
+    # 임대를 넘긴 옛 run이 뒤늦게 "끝났다"고 말하면 지금 일하는 run의 임대나 사용자의 새
+    # 요청을 지운다. SELECT로 확인하고 따로 쓰면 그 사이에 임대가 바뀔 수 있으므로,
+    # 관측한 claimed_at과 일치할 때만 쓰는 조건부 UPDATE로 처리하고 rowcount로 판정한다.
+    try:
+        lease_dt = datetime.fromisoformat(lease)
+    except (TypeError, ValueError):
+        log.info("완료 신호의 lease 형식 오류 — 무시: %s (%s)", account_key, lease)
+        return False
+    res = db.execute(
+        update(CoupangWingCookie)
+        .where(CoupangWingCookie.account_key == account_key)
+        .where(CoupangWingCookie.claimed_at == lease_dt)
+        .values(**values)
+    )
     db.commit()
+    if (res.rowcount or 0) == 0:
+        log.info("stale 완료 신호 무시: %s (보고 lease=%s, 현재=%s)",
+                 account_key, lease, _lease_of(_row(db, account_key)))
+        return False
     return True
 
 

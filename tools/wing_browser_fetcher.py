@@ -809,15 +809,23 @@ def _prod_notify_rg_complete(cfg: dict, lease: str | None = None) -> None:
     if not _push_configured(cfg):
         return
     body = {"lease": lease} if lease else {}
-    try:
-        requests.post(
-            cfg["prod_base_url"].rstrip("/") + _RG_COMPLETE_PATH,
-            json=body,
-            headers={"X-Ingest-Token": cfg["ingest_token"]},
-            timeout=10,
-        )
-    except Exception as e:  # noqa: BLE001
-        log.warning("RG refresh-complete 보고 실패(무시): %s", str(e)[:120])
+    # ★완료 신호는 몇 번 재시도한다(codex 5R[P1]): 이 한 번의 POST가 유실되면 요청이 임대된
+    #   채 남아 UI 타임아웃·중복 수집·거짓 소진으로 번진다(RG는 자동완료 안전망도 꺼져 있다).
+    for attempt in range(3):
+        try:
+            r = requests.post(
+                cfg["prod_base_url"].rstrip("/") + _RG_COMPLETE_PATH,
+                json=body,
+                headers={"X-Ingest-Token": cfg["ingest_token"]},
+                timeout=10,
+            )
+            if r.status_code == 200:
+                return
+            log.warning("RG refresh-complete 비200(%s) — 재시도 %d/3", r.status_code, attempt + 1)
+        except Exception as e:  # noqa: BLE001
+            log.warning("RG refresh-complete 실패(%s) — 재시도 %d/3", str(e)[:80], attempt + 1)
+        time.sleep(2 * (attempt + 1))
+    log.error("RG refresh-complete 최종 실패 — 요청이 임대된 채 남는다(TTL 후 재시도됨).")
 
 
 def _prod_report_failure(cfg: dict, path: str, error: str, kind: str | None = None,
@@ -1289,14 +1297,19 @@ def _do_rg_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
                 page.goto(RG_DASH_URL, wait_until="domcontentloaded", timeout=40000)
                 page.wait_for_timeout(3500)   # Cloudflare/Akamai JS 챌린지 안정화
                 if not _rg_session_ok(page):
+                    # ★재시도 대상으로 둔다(codex 5R[P1], rocket _session_ok와 같은 원칙):
+                    #   _rg_session_ok는 로그아웃뿐 아니라 status/api의 일시적 비200·깨진 JSON·
+                    #   Playwright evaluate 실패까지 전부 False로 접는다. 로그아웃이 확증된 게
+                    #   아니므로 login_required로 1회 만에 소멸시키면 안 된다. 창은 열어 두므로
+                    #   사람이 늦게 로그인해도 다음 재시도가 자동으로 이어받는다.
                     owner.keep_open = True    # 로그인할 창이 필요 → 닫지 않음
                     if login_wait_secs <= 0:
-                        log.error("RG: 세션 만료(정산 status/api 미응답). 'login' 또는 데몬 로그인 필요.")
-                        return RC_LOGIN_REQUIRED
-                    log.info("RG: 세션 만료 — 창에서 로그인하세요(자동 감지, 최대 %d초).", login_wait_secs)
+                        log.error("RG: 세션 만료 의심(정산 status/api 미응답). 'login' 또는 데몬 로그인 필요.")
+                        return 1
+                    log.info("RG: 세션 만료 의심 — 창에서 로그인하세요(자동 감지, 최대 %d초).", login_wait_secs)
                     if not _rg_login_wait(page, ctx, state, login_wait_secs, cdp=cdp):
-                        log.error("RG: 로그인 감지 실패.")
-                        return RC_LOGIN_REQUIRED
+                        log.error("RG: 로그인 감지 실패(창은 열어 둠 — 다음 재시도가 이어받는다).")
+                        return 1
                     owner.keep_open = False   # 로그인 성공 → 평소대로 작업 후 창 닫음
                 else:
                     save()  # 세션 유효 → 회전 쿠키 보존 (CDP: no-op)
