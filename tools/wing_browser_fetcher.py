@@ -1578,22 +1578,6 @@ def _profile_chrome_alive(profile: str) -> bool:
     return _cmdline_has_profile(cmdline, profile)
 
 
-def cmd_chrome_supervise(cfg: dict) -> int:
-    """[폐기됨 2026-07-27] Chrome 상주 supervisor — 이제 아무 것도 띄우지 않는다.
-
-    왜 폐기: launchd KeepAlive로 Chrome 수명을 붙잡는 구조라, Jino가 창을 닫으면 10~30초 뒤
-    되살아났다(불편의 실측 범인). 버튼-only 모델에서 Chrome은 poll 데몬이 fetch 때만 띄운다.
-
-    커맨드를 지우지 않고 남기는 이유(전환 안전): Mac에 구 plist(com.ohisell.wing-chrome)가
-    아직 남아 있는 상태에서 스크립트만 갱신되면 usage 에러 → KeepAlive 크래시 루프가 된다.
-    그래서 "Chrome을 띄우지 않고 그냥 block"한다. 전환 절차는 이 잡을 bootout·plist 삭제.
-    """
-    log.warning("[deprecated] chrome-supervise는 폐기됨(버튼-only 전환) — Chrome을 띄우지 않고 대기만 합니다. "
-                "launchctl bootout gui/$(id -u)/com.ohisell.wing-chrome 후 plist를 삭제하세요.")
-    while True:  # launchd가 bootout할 때까지 no-op block(재기동 폭주 방지)
-        time.sleep(3600)
-
-
 def main() -> None:
     _install_signal_cleanup()   # SIGTERM(launchd bootout) 시 내가 띄운 Chrome 회수
     cfg = load_config()
@@ -1602,8 +1586,6 @@ def main() -> None:
         sys.exit(cmd_login(cfg))
     if arg == "chrome":
         sys.exit(cmd_chrome(cfg))
-    if arg == "chrome-supervise":  # [폐기] 구 plist 전환 안전용 no-op block
-        sys.exit(cmd_chrome_supervise(cfg))
     if arg == "rg":
         sys.exit(cmd_rg(cfg))
     if arg == "poll":

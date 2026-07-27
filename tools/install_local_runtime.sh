@@ -53,7 +53,8 @@ UID_NUM="$(id -u)"
 #   그대로 살아남는다** — 실행 중인 파이썬 프로세스는 아래 cp가 스크립트를 덮어써도 교체되지 않아
 #   구 코드가 계속 Chrome을 상주시킨다(= 이번 전환의 목적이 통째로 무효화). 문서 안내로는 세 번
 #   못 막았다(원칙: 부탁이 아니라 구조로) → 여기서 bootout·plist 삭제까지 수행하고, 잔존하면
-#   설치를 실패로 끝낸다. no-op 스텁(chrome-supervise)은 이 정리를 못 한 Mac을 위한 2차 방어일 뿐.
+#   설치를 실패로 끝낸다. (구 plist 소멸을 재확인한 뒤 2026-07-27 no-op 스텁 chrome-supervise는
+#   페처 코드에서 완전히 제거했다 — 이 bootout·plist 삭제 로직만이 유일한 방어선이다.)
 _deprecated_left=0
 for _dep in wing-chrome ohitech-chrome rocket-chrome; do
   _dep_plist="$LAUNCH_AGENTS/com.ohisell.$_dep.plist"

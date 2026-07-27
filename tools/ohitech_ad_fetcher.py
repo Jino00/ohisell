@@ -849,24 +849,6 @@ def cmd_run(cfg: dict) -> int:
     return rc
 
 
-def cmd_chrome_supervise(cfg: dict) -> int:
-    """[폐기됨 2026-07-27] Chrome 상주 supervisor — 이제 아무 것도 띄우지 않는다.
-
-    왜 폐기: launchd KeepAlive로 Chrome 수명을 붙잡는 구조라, Jino가 창을 닫으면 10~30초 뒤
-    되살아났다(불편의 실측 범인). 버튼-only 모델에서 Chrome은 poll 데몬이 fetch 때만 띄운다.
-
-    커맨드를 지우지 않고 남기는 이유(전환 안전): Mac에 구 plist(com.ohisell.ohitech-chrome)가
-    아직 남아 있는 상태에서 스크립트만 갱신되면 usage 에러 → KeepAlive 크래시 루프가 된다.
-    그래서 "Chrome을 띄우지 않고 그냥 block"한다. 전환 절차는 이 잡을 bootout·plist 삭제.
-    """
-    import time as _time
-
-    log.warning("[deprecated] chrome-supervise는 폐기됨(버튼-only 전환) — Chrome을 띄우지 않고 대기만 합니다. "
-                "launchctl bootout gui/$(id -u)/com.ohisell.ohitech-chrome 후 plist를 삭제하세요.")
-    while True:  # launchd가 bootout할 때까지 no-op block(재기동 폭주 방지)
-        _time.sleep(3600)
-
-
 def cmd_poll(cfg: dict) -> int:
     """상주 poll 데몬 — '광고비 갱신' 버튼 요청만 감지·실행(순수 on-demand, S3 트랙 D-11).
 
@@ -952,8 +934,6 @@ def main() -> None:
     arg = sys.argv[1] if len(sys.argv) >= 2 else ""
     if arg == "chrome":  # Chrome 기동은 락 불필요(즉시 리턴)
         sys.exit(cmd_chrome(cfg))
-    if arg == "chrome-supervise":  # [폐기] 구 plist 전환 안전용 no-op block
-        sys.exit(cmd_chrome_supervise(cfg))
     if arg == "poll":  # 상주 데몬 — 락은 run마다 내부에서 획득(전체 점유 금지)
         try:
             sys.exit(cmd_poll(cfg))

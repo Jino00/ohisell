@@ -1232,32 +1232,12 @@ def cmd_poll(cfg: dict, interval: int = 30) -> int:
         _time.sleep(interval)
 
 
-def cmd_chrome_supervise(cfg: dict) -> int:
-    """[폐기됨 2026-07-27] Chrome 상주 supervisor — 이제 아무 것도 띄우지 않는다.
-
-    ★이 스텁이 rocket에도 필요한 이유(2026-07-27 실측): repo에는 rocket-chrome plist가 없어
-    "rocket은 supervisor가 없다"고 보였지만, **Jino Mac에는 `com.ohisell.rocket-chrome`가 실제로
-    로드돼 있었다**(~/Library/LaunchAgents, 2026-07-17 생성, 포트 9225,
-    ProgramArguments = `rocket_supplier_fetcher.py chrome-supervise`).
-    이 커맨드가 없으면 설치 스크립트가 새 .py를 복사하는 순간 usage 에러(exit 2) →
-    KeepAlive + ThrottleInterval 30 → **30초마다 영구 크래시 루프**가 된다.
-    설치 스크립트가 이 잡을 bootout·삭제하지만(1차 방어), 스크립트를 안 거치는 경로를 위해
-    wing·ohitech와 동일한 2차 방어를 둔다. Chrome은 띄우지 않고 block만 한다.
-    """
-    log.warning("[deprecated] chrome-supervise는 폐기됨(버튼-only 전환) — Chrome을 띄우지 않고 대기만 합니다. "
-                "launchctl bootout gui/$(id -u)/com.ohisell.rocket-chrome 후 plist를 삭제하세요.")
-    while True:  # launchd가 bootout할 때까지 no-op block(재기동 폭주 방지)
-        time.sleep(3600)
-
-
 def main() -> None:
     _install_signal_cleanup()   # SIGTERM(launchd bootout) 시 내가 띄운 Chrome 회수
     cfg = load_config()
     arg = sys.argv[1] if len(sys.argv) >= 2 else "run"
     if arg == "chrome":
         sys.exit(cmd_chrome(cfg))
-    if arg == "chrome-supervise":  # [폐기] 구 plist 전환 안전용 no-op block
-        sys.exit(cmd_chrome_supervise(cfg))
     if arg == "login":
         sys.exit(cmd_login(cfg))
     if arg in ("run", ""):
