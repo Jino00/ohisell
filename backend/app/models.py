@@ -1965,8 +1965,8 @@ class NaverEntity(Base):
 class NaverEntitySnapshot(Base):
     """대행사 포함 45캠페인 구조의 날짜별 history (SA-1, D-NAO-78 · BM 벤치마크 레이어).
 
-    naver_entity는 upsert라 '현재 상태'만 남아 역사가 없다 → 이 테이블이 매일 07:37 캠페인·
-    그룹 grain 구조를 스냅샷(0 GET, naver_entity DB만 읽음). 관찰 전용 — 네이버 API 쓰기 0.
+    naver_entity는 upsert라 '현재 상태'만 남아 역사가 없다 → 이 테이블이 매일 아침(entity_sync
+    완료 직후 체이닝) 캠페인·그룹 grain 구조를 스냅샷(0 GET, naver_entity DB만 읽음). 관찰 전용 — 네이버 API 쓰기 0.
     키워드 grain은 저장 안 함(90,150행/일 × 365 = 3,300만행/년 회피): 그룹 행에 키워드 집계
     (keyword_count·keyword_avg_bid)만 남기고 개별 키워드 변화는 이벤트(naver_agency_op, P2)로
     잡는다. optimizer는 naver_campaign_settings 조인(none=대행사 관찰 대상/ours/mop).
@@ -2035,8 +2035,8 @@ class NaverBmBenchmark(Base):
     """대행사 구조↔성과 상관을 벤치마크化한 프라이어 1행 (SA-3, D-NAO-78 · BM 벤치마크 레이어).
 
     B-X(탐색 초기입찰)·SS4(승격 교차)·(향후)IU-R·L2가 optional 입력으로 소비한다 —
-    전부 fail-open(부재 시 기존 동일, §0 금지선 4). 매일 07:37 재산출(bench_kind 단위 교체
-    upsert) — 최신 벤치마크만 유지한다(naver_product_bep snapshot 교체 관례 계승). 관찰 전용 —
+    전부 fail-open(부재 시 기존 동일, §0 금지선 4). 매일 아침(entity_sync 완료 직후 체이닝)
+    재산출(bench_kind 단위 교체 upsert) — 최신 벤치마크만 유지한다(naver_product_bep snapshot 교체 관례 계승). 관찰 전용 —
     네이버 API 쓰기 0(DB만: naver_entity_snapshot + naver_ad_daily + naver_entity 조인 산출).
 
     ★저장소 택일(§9-2, P4 Opus 결정 = 혼용): keyword_verified/bid_band/group_structure는 값이
