@@ -179,7 +179,7 @@ def test_vs_missing_state_login_exception_reports(fetcher, tmp_path, monkeypatch
     _patch_common(fetcher, monkeypatch, vs_requested=True, rg_requested=False)
     calls = _install_recorder(fetcher, monkeypatch)
 
-    def _boom(_cfg, wait_secs=0):
+    def _boom(_cfg, wait_secs=0, rg_probe=True):   # rg_probe=데몬 VS 레인은 False로 부른다
         raise RuntimeError("chrome_profile_busy")
 
     monkeypatch.setattr(fetcher, "cmd_login", _boom)
