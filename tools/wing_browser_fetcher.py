@@ -1315,7 +1315,10 @@ def _cmdline_has_profile(cmdline: str, profile: str) -> bool:
     오인한다(codex R2 신규 P1). 값 뒤가 공백이거나 줄 끝이어야 한다.
     """
     prof = os.path.expanduser(profile).rstrip("/")
-    return re.search(r"--user-data-dir=" + re.escape(prof) + r"/?(\s|$)", cmdline) is not None
+    # 선행 경계도 필수(codex R3): 뒤만 보면 `--some-option=--user-data-dir=/tmp/p`나 URL 안에
+    # 같은 문자열이 섞인 무관한 인자가 '우리 프로필 확인'으로 통과해 fail-closed를 뚫는다.
+    return re.search(r"(?:^|\s)--user-data-dir=" + re.escape(prof) + r"/?(?=\s|$)",
+                     cmdline) is not None
 
 
 def _profile_chrome_alive(profile: str) -> bool:

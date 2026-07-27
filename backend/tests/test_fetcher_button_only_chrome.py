@@ -278,6 +278,13 @@ def test_profile_match_is_not_prefix_substring(fetcher):
     assert fetcher._cmdline_has_profile(line, "/tmp/profile/") is True   # 끝 슬래시 정규화
     # 줄 끝 케이스
     assert fetcher._cmdline_has_profile("chrome --user-data-dir=/tmp/p", "/tmp/p") is True
+    # 선행 경계(codex R3): 다른 인자 값 안에 문자열이 박혀 있으면 소유 확인으로 쳐선 안 된다.
+    assert fetcher._cmdline_has_profile(
+        "chrome --some-option=--user-data-dir=/tmp/p", "/tmp/p") is False
+    assert fetcher._cmdline_has_profile(
+        "chrome --url=http://x/?a=--user-data-dir=/tmp/p ", "/tmp/p") is False
+    # 탭 구분자도 인자 경계
+    assert fetcher._cmdline_has_profile("chrome\t--user-data-dir=/tmp/p", "/tmp/p") is True
 
 
 def test_cmd_chrome_takes_profile_launch_lock(fetcher, tmp_path, monkeypatch):
