@@ -878,7 +878,15 @@ def cmd_poll(cfg: dict) -> int:
                             last_fetch = time.monotonic()
                             log.info("갱신 요청 감지 — fetch 시작")
                             if not Path(state).is_file():
-                                cmd_login(cfg, wait_secs=_LOGIN_WAIT_S)
+                                # 세션 없음 → 이 창이 로그인 겸 첫 fetch(성공 시 _push가 heartbeat).
+                                # ★실패도 반드시 보고: claim으로 플래그는 이미 clear라 침묵하면
+                                #   prod에 흔적이 없어 UI가 215초 헛기다린 뒤 'Mac 응답 없음' 오진.
+                                with _capture_last_error() as cap:
+                                    rc = cmd_login(cfg, wait_secs=_LOGIN_WAIT_S)
+                                if rc != 0:
+                                    _prod_report_fetch_error(
+                                        cfg, "/api/coupang/ops/wing/vendor-summary/fetch-error",
+                                        cap.last or f"세션 없음 — login 실패 rc={rc}")
                             else:
                                 with _capture_last_error() as cap:
                                     rc = _do_run(cfg, state, login_wait_secs=_LOGIN_WAIT_S)  # 락 보유 중
@@ -911,7 +919,12 @@ def cmd_poll(cfg: dict) -> int:
                             last_rg = time.monotonic()
                             log.info("RG 정산 다운로드 트리거(버튼)")
                             if not Path(state).is_file():
+                                # 이번 회차는 스킵하되 침묵하지 않는다 — claim이 이미 요청을 소비해
+                                # prod에 흔적이 없으면 UI가 215초 헛기다린 뒤 'Mac 응답 없음' 오진.
                                 log.warning("RG: 세션 파일 없음 — 'login' 필요(이번 회차 스킵)")
+                                _prod_report_fetch_error(
+                                    cfg, "/api/coupang/ops/wing/rg-settlement/fetch-error",
+                                    "RG: 세션 파일 없음 — 'login' 필요")
                             else:
                                 with _capture_last_error() as cap:
                                     rc = _do_rg_run(cfg, state, login_wait_secs=_LOGIN_WAIT_S)

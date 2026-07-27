@@ -74,6 +74,13 @@ def _cfg(tmp_path) -> dict:
     }
 
 
+def _cfg_no_state(tmp_path) -> dict:
+    """state 파일이 '없는' 설정 — 세션 없음 분기(cmd_login / RG 스킵)를 태운다."""
+    cfg = _cfg(tmp_path)
+    Path(cfg["state_file"]).unlink()
+    return cfg
+
+
 def _patch_common(fetcher, monkeypatch, *, vs_requested: bool, rg_requested: bool):
     monkeypatch.setattr(fetcher, "_prod_refresh_status", lambda _cfg: {"requested": vs_requested})
     monkeypatch.setattr(fetcher, "_prod_claim", lambda _cfg: {"claimed": vs_requested})
@@ -203,3 +210,59 @@ def test_fallback_reason_when_nothing_logged(fetcher, tmp_path, monkeypatch):
     vs_calls = [c for c in calls if c["url"].endswith("/vendor-summary/fetch-error")]
     assert len(vs_calls) == 1
     assert vs_calls[0]["json"]["error"] == "vendor-summary run 실패 rc=1"
+
+
+# ── ⑦ 세션 없음 + login 실패도 보고(codex R1 P2) ────────────────────────
+def test_vs_missing_state_login_failure_reports(fetcher, tmp_path, monkeypatch):
+    cfg = _cfg_no_state(tmp_path)
+    _patch_common(fetcher, monkeypatch, vs_requested=True, rg_requested=False)
+    calls = _install_recorder(fetcher, monkeypatch)
+
+    def _fake_login(_cfg, wait_secs=0):
+        fetcher.log.error("제한 시간 내 로그인 감지 실패 — 다시 시도하세요.")
+        return 1
+
+    monkeypatch.setattr(fetcher, "cmd_login", _fake_login)
+
+    with pytest.raises(_StopPoll):
+        fetcher.cmd_poll(cfg)
+
+    vs_calls = [c for c in calls if c["url"].endswith("/vendor-summary/fetch-error")]
+    assert len(vs_calls) == 1
+    assert vs_calls[0]["params"] == {"account_key": "COUPANG_WING1"}
+    assert vs_calls[0]["headers"]["X-Ingest-Token"] == "tok"
+    assert "로그인 감지 실패" in vs_calls[0]["json"]["error"]
+
+
+def test_vs_missing_state_login_success_reports_nothing(fetcher, tmp_path, monkeypatch):
+    """login 성공 시엔 _push가 last_success_at을 움직인다 — 별도 보고 없음."""
+    cfg = _cfg_no_state(tmp_path)
+    _patch_common(fetcher, monkeypatch, vs_requested=True, rg_requested=False)
+    calls = _install_recorder(fetcher, monkeypatch)
+    monkeypatch.setattr(fetcher, "cmd_login", lambda _cfg, wait_secs=0: 0)
+
+    with pytest.raises(_StopPoll):
+        fetcher.cmd_poll(cfg)
+
+    assert calls == []
+
+
+# ── ⑧ RG 세션 없음 스킵도 보고(codex R1 P2) ────────────────────────────
+def test_rg_missing_state_reports_fetch_error(fetcher, tmp_path, monkeypatch):
+    cfg = _cfg_no_state(tmp_path)
+    _patch_common(fetcher, monkeypatch, vs_requested=False, rg_requested=True)
+    calls = _install_recorder(fetcher, monkeypatch)
+
+    def _must_not_run(*_a, **_k):
+        raise AssertionError("세션 없음인데 RG run이 실행됐다")
+
+    monkeypatch.setattr(fetcher, "_do_rg_run", _must_not_run)
+
+    with pytest.raises(_StopPoll):
+        fetcher.cmd_poll(cfg)
+
+    rg_calls = [c for c in calls if c["url"].endswith("/rg-settlement/fetch-error")]
+    assert len(rg_calls) == 1
+    assert rg_calls[0]["params"] == {"account_key": "COUPANG_WING1"}
+    assert rg_calls[0]["headers"]["X-Ingest-Token"] == "tok"
+    assert "세션 파일 없음" in rg_calls[0]["json"]["error"]
