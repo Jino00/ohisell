@@ -722,6 +722,12 @@ def ingest_settlement_xlsx(db: Session, account_key: str, content: bytes) -> dic
 #     STORAGE_FEE(보관비)                → 시트 '보관비'            → storage
 #     CRETURN_PICKUP_RESTOCKING(반품 회수/재입고) → '반품 회수비'+'반품 재입고비' → return_shipping
 #     VRETURN_HANDLING(반출비)           → 시트 '반출비'            → return_handling
+# ★근거 강도 정직 고지(원칙22, 적대적 리뷰 R1 [P2-7]): **라이브 실측으로 시트 구성이 확인된 것은
+#   WAREHOUSING_SHIPPING 1종뿐**이다(입출고비/배송비 2시트). 나머지 4종은 드롭다운 **리포트 이름**과
+#   시트명을 이어 붙인 **추론(미검증)**이다 — 특히 CRETURN_PICKUP_RESTOCKING→return_shipping은
+#   층1 필드와 엑셀 2시트('반품 회수비'+'반품 재입고비')의 범위가 같다는 가정에 의존한다.
+#   어긋나면 영구 재다운로드(결손이 안 닫힘) 또는 영구 미치유가 된다. 현재 라이브 config에는
+#   WAREHOUSING_SHIPPING만 들어 있어 무해하나, 4종을 실제로 켜기 전에 라이브 검증이 선행돼야 한다.
 # 나머지(INVENTORY_COMPENSATION·BARCODE_LABELING_FEE·PRODUCT_SIZE_COMPARISON·VRETURN_SHIPPING)는
 #   파서에 시트 매핑이 없어 결손을 판정할 수 없다 → 응답에 unmapped로 밝히고 결손으로 세지 않는다
 #   (모르면서 "결손"이라 부르면 매 회차 못 읽을 엑셀을 다시 받는 무한 루프가 된다).
@@ -764,7 +770,11 @@ def layer2_gaps(
         days = LAYER2_GAP_DEFAULT_DAYS
     days = max(1, min(days, _LAYER2_GAP_MAX_DAYS))
 
-    requested = list(report_types) if report_types else list(_REPORT_TYPE_FEE_TYPES)
+    # 중복 제거(순서 보존) — 중복이 그대로 missing_report_types에 반복되면 페처가 같은 리포트를
+    #   두 번 요청해 두 번째가 duplicateRequest → skipped>0 → RC_RETRY_LATER(긴 백오프)로 끝난다.
+    #   config 오타 한 줄로 회차가 낭비된다(적대적 리뷰 R1 [P2-8]).
+    _raw_req = list(report_types) if report_types else list(_REPORT_TYPE_FEE_TYPES)
+    requested = list(dict.fromkeys(rt for rt in _raw_req if rt))
     mapped = [rt for rt in requested if rt in _REPORT_TYPE_FEE_TYPES]
     unmapped = [rt for rt in requested if rt not in _REPORT_TYPE_FEE_TYPES]
     covered: set[str] = set()

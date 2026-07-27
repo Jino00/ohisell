@@ -140,6 +140,15 @@ def test_missing_report_types_are_per_report(db):
     assert [g["missing_report_types"] for g in res["gaps"]] == [["CATEGORY_TR"]]
 
 
+def test_duplicate_report_types_are_deduped(db):
+    """중복이 missing에 반복되면 페처가 같은 리포트를 두 번 요청 → dup → 긴 백오프(리뷰 [P2-8])."""
+    p = _period(3)
+    _acct(db, p, "warehousing")
+    out = layer2_gaps(db, _ACC, days=35, report_types=[_WS, _WS, _WS])
+    assert out["report_types"] == [_WS]
+    assert out["gaps"][0]["missing_report_types"] == [_WS]
+
+
 def test_unmapped_report_types_are_reported_not_guessed(db):
     """파서 없는 리포트는 결손 판정 불가 — 결손으로 세지 않고 목록으로만 밝힌다."""
     p = _period(10)
