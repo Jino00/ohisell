@@ -25,13 +25,19 @@
 #
 # 설정 파일 ~/.ohisell_wing_fetcher.json (push용):
 #   {"account_key":"COUPANG_WING1","prod_base_url":"https://sellc.ohitech.co.kr","ingest_token":"<AD_INGEST_TOKEN>","vs_days":7,
-#    "vendor_id":"A01564720","rg_report_types":["WAREHOUSING_SHIPPING"],"rg_max_periods":1,"rg_days":21,
+#    "vendor_id":"A01564720","rg_report_types":["WAREHOUSING_SHIPPING"],"rg_max_targets":3,
 #    "rg_status_days":35,"rg_min_interval_s":3600}
 #   (vs_days=판매분석 롤링 창 폭(기본 45, 미지정 시). vs_chunk_days=한 요청 최대 폭(기본 7).
 #    ★config에 vs_days가 남아 있으면 config가 이긴다 — 7로 박혀 있으면 자가치유가 안 된다(지우거나 45로).
 #    vendor_id·rg_* 는 'rg' 명령·poll 데몬 RG 분기용. account_key=WING1→vendor_id A01564720(오픽스),
 #    WING2→A01029796(오하이테크). rg_daily_hour은 무시됨(폐기·버튼-only), rg_min_interval_s=RG 실행 최소간격.
-#    rg_status_days=층1 계정 수수료 push 윈도우(기본 35, 백필 시 90으로 1회 실행). rg_days=엑셀 열거 윈도우.)
+#    rg_status_days=층1(계정 수수료) push 윈도우 **겸 층2 결손 조회 창**(기본 35, 백필 시 90으로 1회 실행).
+#    rg_max_targets=한 회차에 받을 결손 주기 수 상한(기본 3).
+#    ★죽은 키(설정에 남아 있어도 무시됨): rg_max_periods — 구 '최근 1주만' 상한이었고 그것이
+#      영구 공백(WING1 층2 04-20~05-03 등)의 원인이었다. 지금은 결손 주도로 고른다.
+#      rg_days — 층1/층2 통합 후 아무도 읽지 않는다.)
+# 층2(옵션 엑셀) 자가치유(2026-07-27): 층1 push 후 prod에 결손 주기를 묻고(layer2-gaps) 결손만
+#   최신 우선으로 rg_max_targets개까지 받는다. 조회 실패 시 기존 동작(최신 1주기)으로 안전 저하.
 # 다계정 인스턴스 분리 env(D-7): OHISELL_WING_CONFIG(config)·OHISELL_WING_LOG(로그)·OHISELL_WING_LOCK(lock).
 #   WING2(오하이테크) 인스턴스: tools/com.ohisell.wing2.plist 참조(env 3종 + 별도 state_file).
 #   ★버튼 큐도 계정 차원이라 두 인스턴스가 경쟁하지 않는다 — refresh-status/claim은 cfg["account_key"]를
@@ -1216,7 +1222,9 @@ def cmd_poll(cfg: dict) -> int:
 # S4: RG 정산 엑셀 자동 다운로드 (Wing 세션 자동화 트랙 D-8)
 # ════════════════════════════════════════════════════════════════════
 # 흐름(전부 살아있는 브라우저 세션 same-origin POST, D-5/D-6):
-#   ① status/api          → 정산주기(settlementGroupKey) 목록 열거(어떤 주를 받을지)
+#   ① status/api          → 정산주기(settlementGroupKey) 목록 열거(무엇을 받을 수 있나)
+#   ①' (Mac→prod) GET /api/coupang/ops/wing/rg-settlement/layer2-gaps → 결손 주기(무엇이 비었나).
+#       ①∩①' = 이번 회차 대상. 결손이 0이면 다운로드도 0(정상 완주).
 #   ② request-download/api → 엑셀 생성요청(requestTime=내가 정한 고유값)
 #   ③ download-list/api 폴링 → downloadStatus=="COMPLETED" + 내 requestTime 매칭
 #   ④ download/api/v2     → S3 presigned url
@@ -1236,6 +1244,8 @@ RG_DOWNLOAD_LIST_PATH = "/tenants/rfm/v2/settlements/download-list/api"
 RG_DOWNLOAD_V2_PATH = "/tenants/rfm/v2/settlements/download/api/v2"
 RG_UPLOAD_PATH = "/api/coupang/ops/rg/settlement/upload-xlsx"
 RG_PRODUCT_SIZE_UPLOAD_PATH = "/api/coupang/ops/rg/product-size/upload-xlsx"
+# 층2 결손 조회(읽기 전용) — "옵션 엑셀이 비어 있는 주기"를 prod에 묻는다(자가치유 D1).
+RG_LAYER2_GAPS_PATH = "/api/coupang/ops/wing/rg-settlement/layer2-gaps"
 # 전체 sellerReportType 목록 (ExcelModal.js i18n에서 확보, 2026-06-15 라이브 API 검증 완료).
 # 파서 검증 완료: WAREHOUSING_SHIPPING(입출고/배송비). 나머지 8종은 API 200 확인·파서 미구현.
 # 설정 파일 rg_report_types로 override 가능.
@@ -1251,6 +1261,10 @@ CONFIRMED_SELLER_REPORT_TYPES = [
     "VRETURN_SHIPPING",        # 반출 배송 서비스비 리포트
 ]
 RG_REPORT_TYPES_DEFAULT = ["WAREHOUSING_SHIPPING"]
+# 회차당 다운로드 주기 상한(config rg_max_targets로 조정). 층2는 주기×리포트당 최대 300초
+# 폴링이라 무상한이면 한 회차가 폭주한다 — 결손이 더 많으면 최신 우선으로 자르고 나머지는
+# 다음 회차가 이어받는다(자연 롤링). 3 = 최악 3주기×1리포트×300초 ≈ 15분(TTL 20분 안).
+_RG_DEFAULT_MAX_TARGETS = 3
 _RG_POLL_INTERVAL_S = 8       # download-list 폴링 간격
 _RG_POLL_TIMEOUT_S = 300      # 생성 완료 최대 대기(5분)
 _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -1261,14 +1275,24 @@ def _kst_date_to_utc_iso(kst_date) -> str:
     return f"{kst_date.isoformat()}T15:00:00.000Z"
 
 
+def _rg_status_days(cfg: dict) -> int:
+    """층1 status/api 조회 창(일). 기본 35(월경계 분할 주기+여유), 백필 시 config로 90 등 오버라이드.
+
+    ★층2 결손 조회(_prod_rg_layer2_gaps)도 같은 값을 쓴다 — 열거된 주기와 결손 판정 창이
+      어긋나면 "결손이라는데 열거엔 없는 주기"가 생겨 영영 못 메운다.
+    """
+    return _cfg_int(cfg, "rg_status_days", 35)
+
+
 def _rg_status_payload(cfg: dict, days: int | None = None) -> dict:
     """status/api body — 최근 윈도우(매출인식일 SALES, D-10). 정산주기 열거·계정 수집 공용.
 
-    days=None이면 기존 동작 유지(cfg['rg_days'], 기본 21 — 다운로드 열거용, 기존 호출 불변).
-    층1 계정 수집(_rg_fetch_status_raw)은 rg_status_days(기본 35, 백필 시 90)를 명시 전달한다.
+    days=None이면 21일 — 세션 판정 프로브(_rg_session_ok)가 빈 cfg로 부르는 가벼운 기본값이다.
+    (config의 rg_days는 층1/층2 통합 후 아무도 읽지 않는다 — 죽은 키. 설정에 남아 있어도 무시.)
+    층1 계정 수집(_rg_fetch_status_raw)은 _rg_status_days(기본 35, 백필 시 90)를 명시 전달한다.
     """
     if days is None:
-        days = int(cfg.get("rg_days", 21))   # 최근 ~3주 → 닫힌 주별 정산 여러 건 포함
+        days = 21   # 프로브 전용 폭 — 닫힌 주별 정산 여러 건 포함
     today = datetime.now(KST).date()
     return {
         "startDate": _kst_date_to_utc_iso(today - timedelta(days=days)),
@@ -1284,8 +1308,7 @@ def _rg_fetch_status_raw(page, cfg: dict) -> dict | None:
     200이 아니거나 로그인 HTML이면 None(_rg_json 규칙). 호출자가 None을 세션 이상으로 처리.
     ★이 함수가 유일한 status/api 소스여야 push와 열거가 같은 raw를 공유(이중 호출 금지, §1.6).
     """
-    days = int(cfg.get("rg_status_days", 35))
-    res = _rg_post(page, RG_STATUS_PATH, _rg_status_payload(cfg, days=days))
+    res = _rg_post(page, RG_STATUS_PATH, _rg_status_payload(cfg, days=_rg_status_days(cfg)))
     return _rg_json(res)
 
 
@@ -1367,6 +1390,76 @@ def _rg_enumerate_group_keys(raw: dict, vendor_id: str) -> list[dict]:
         seen.add(gk)
         out.append({"group_key": gk, "period_end": end})
     return out
+
+
+def _prod_rg_layer2_gaps(cfg: dict, report_types: list[str], days: int) -> dict | None:
+    """prod에 "층2(옵션 엑셀)가 비어 있는 주기"를 묻는다(읽기 전용). 실패=None → 호출자가 폴백.
+
+    ★수집이 멈추면 안 된다(D5): 네트워크·비200·JSON 깨짐 등 어떤 이유로든 못 물어보면 None을
+      돌려주고, 호출자는 기존 동작(최신 1주기)으로 안전 저하한다.
+    """
+    if not _push_configured(cfg):
+        return None
+    try:
+        r = requests.get(
+            cfg["prod_base_url"].rstrip("/") + RG_LAYER2_GAPS_PATH,
+            params={"account_key": cfg["account_key"], "days": days,
+                    "report_types": list(report_types)},
+            headers={"X-Ingest-Token": cfg["ingest_token"]},
+            timeout=20,
+        )
+    except Exception as e:  # noqa: BLE001 — 조회 실패는 수집을 죽이지 않는다
+        log.warning("RG 층2 결손 조회 실패(네트워크) — 최신 1주기로 폴백: %s", str(e)[:120])
+        return None
+    if r.status_code != 200:
+        log.warning("RG 층2 결손 조회 비200(%s) — 최신 1주기로 폴백: %s",
+                    r.status_code, r.text[:120])
+        return None
+    try:
+        data = r.json()
+    except ValueError:
+        log.warning("RG 층2 결손 조회 응답이 JSON 아님 — 최신 1주기로 폴백.")
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _rg_select_targets(periods: list[dict], gaps: dict | None,
+                       report_types: list[str], max_targets: int) -> list[dict]:
+    """열거된 정산주기 + prod 결손 목록 → 이번 회차 다운로드 대상(최신 우선·회차 상한).
+
+    periods: [{group_key, period_end}] — 호출자가 최신 우선으로 정렬해 넘긴다.
+    gaps: prod 응답 dict, None이면 조회 실패(판정 불가).
+    반환: [{group_key, period_end, report_types}] — 주기마다 **결손인 리포트만** 받는다.
+
+    폴백(D5): gaps=None이거나 커버 fee_type이 하나도 없으면(요청 리포트 전부 미매핑) 기존
+      동작인 '최신 1주기 × 전체 report_types'로 되돌린다 — 판정을 못 한다고 수집을 멈추지 않는다.
+    ★결손인데 열거에 없는 주기는 group_key가 없어 요청할 수 없다 → 조용히 건너뛴다.
+      (옛 주기를 메우려면 rg_status_days를 넓혀 층1 열거 창부터 키워야 한다.)
+    """
+    fallback = [{"group_key": p["group_key"], "period_end": p["period_end"],
+                 "report_types": list(report_types)} for p in periods[:1]]
+    if not isinstance(gaps, dict) or not gaps.get("covered_fee_types"):
+        return fallback
+
+    missing_by_end: dict[str, list[str]] = {}
+    for g in gaps.get("gaps") or []:
+        if not isinstance(g, dict):
+            continue
+        end = str(g.get("recognition_date_to") or "")
+        want = [rt for rt in (g.get("missing_report_types") or []) if rt in report_types]
+        if end and want:
+            missing_by_end[end] = want
+
+    targets: list[dict] = []
+    for p in periods:
+        want = missing_by_end.get(str(p["period_end"]))
+        if not want:
+            continue
+        targets.append({"group_key": p["group_key"], "period_end": p["period_end"],
+                        "report_types": want})
+        if len(targets) >= max_targets:
+            break   # 나머지는 다음 회차로(자연 롤링) — 주기당 최대 300초 폴링이라 회차가 폭주한다
+    return targets
 
 
 def _rg_find_completed(page, from_ms: int, want: str):
@@ -1521,9 +1614,11 @@ def _rg_login_wait(page, ctx, state: str, secs: int, *, cdp: bool = False) -> bo
 
 
 def _do_rg_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
-    """state 로드 → 정산 페이지 → 정산주기 열거 → (key×reportType) 다운로드 → prod push.
+    """state 로드 → 정산 페이지 → 층1 push → **결손 조회** → 결손 주기만 다운로드 → prod push.
 
     push 설정 필수(다운로드만 하고 버릴 이유 없음). 세션 판정·만료 회복은 정산 status/api 기반.
+    반환: 0=완주 / 1=실패(재시도) / RC_RETRY_LATER=dup에 막힘(긴 백오프) /
+          RC_LOGIN_REQUIRED=층2 루프 중 세션 만료(재시도 제외, 창 유지).
     """
     if not _push_configured(cfg):
         log.error("RG 다운로드엔 push 설정(account_key·prod_base_url·ingest_token) 필요.")
@@ -1533,12 +1628,15 @@ def _do_rg_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
         log.error("RG 다운로드엔 설정에 vendor_id 필요(예 A01564720).")
         return 2
     report_types = cfg.get("rg_report_types") or RG_REPORT_TYPES_DEFAULT
-    max_periods = int(cfg.get("rg_max_periods", 1))   # P1: 최근 1주(dup 모호성 회피)
+    # ★rg_max_periods(구 '최근 1주만')는 더 이상 읽지 않는다 — 그 상한이 바로 영구 공백의 원인이다.
+    #   config에 남아 있어도 무시된다. 이제 상한은 '결손 중 몇 개까지 한 회차에'(rg_max_targets)다.
+    max_targets = _cfg_int(cfg, "rg_max_targets", _RG_DEFAULT_MAX_TARGETS)
     poll_timeout = int(cfg.get("rg_poll_timeout_s", _RG_POLL_TIMEOUT_S))
 
     cdp = _cdp_mode(cfg)
     owner = _ChromeOwner()   # 창 소유권 — 로그인 미완료 시 창을 남기기 위해 직접 만든다
     pushed = failed = skipped = 0
+    session_lost = False     # 층2 루프 도중 세션 만료(D3) — 남은 주기 중단 + 로그인 필요로 보고
     try:
         with sync_playwright() as p:
             with _chrome(p, cfg, state, owner=owner) as (page, ctx, save):
@@ -1583,14 +1681,30 @@ def _do_rg_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
                     log.info("RG: status/api에 정산주기 없음 — 다운로드 건너뜀.")
                     return 0
                 periods.sort(key=lambda x: x["period_end"], reverse=True)
-                targets = periods[:max_periods]
-                log.info("RG: 정산주기 %d개 중 최근 %d개 처리 → %s",
-                         len(periods), len(targets), [t["group_key"] for t in targets])
+                # 결손 주도 선택(D1): prod에 "층2가 빈 주기"를 묻고 그것만 받는다. 조회 실패 시
+                #   기존 동작(최신 1주기)으로 안전 저하 — 수집이 아예 멈추면 안 된다(D5).
+                gaps = _prod_rg_layer2_gaps(cfg, report_types, _rg_status_days(cfg))
+                targets = _rg_select_targets(periods, gaps, report_types, max_targets)
+                if not targets:
+                    log.info("RG: 층2 결손 없음 — 다운로드 없음(주기 %d개 확인).", len(periods))
+                else:
+                    log.info("RG: 정산주기 %d개 중 결손 %d개 처리(상한 %d) → %s",
+                             len(periods), len(targets), max_targets,
+                             [(t["group_key"], t["report_types"]) for t in targets])
 
                 base_ms = int(time.time() * 1000)
                 idx = 0
-                for t in targets:
-                    for rt in report_types:
+                for n, t in enumerate(targets):
+                    # ★주기 사이 세션 재확인(D3): 층2는 주기×리포트당 최대 300초 폴링이라, 진입 시
+                    #   1회 확인만으로는 루프 도중 만료를 못 잡는다 — 남은 주기가 통째로 헛돈다.
+                    #   이미 받아 push한 주기는 그대로 두고(멱등 적재), 남은 주기만 중단한다.
+                    if n > 0 and not _rg_session_ok(page):
+                        log.error("RG: 층2 루프 중 세션 만료 — 남은 주기 %d개 중단(로그인 필요).",
+                                  len(targets) - n)
+                        owner.keep_open = True   # 사람이 로그인할 창을 남긴다
+                        session_lost = True
+                        break
+                    for rt in t["report_types"]:
                         req_time = base_ms + idx
                         idx += 1
                         got = _rg_download_one(page, t["group_key"], rt, req_time, poll_timeout)
@@ -1604,11 +1718,18 @@ def _do_rg_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
                             pushed += 1
                         else:
                             failed += 1
-                save()  # 회전 쿠키 보존 (CDP: no-op)
+                if not session_lost:
+                    save()  # 회전 쿠키 보존 (CDP: no-op)
+                # ★세션이 죽은 뒤엔 저장하지 않는다 — 로그아웃된 쿠키로 state 파일을 덮으면
+                #   다음 회차가 물려받을 게 없다(창은 열어 두었으니 사람이 로그인하면 갱신된다).
     except Exception as e:  # noqa: BLE001 — 브라우저 오류는 1로 보고(데몬은 죽지 않음)
         log.error("RG 브라우저 실행 오류: %s", e)
         return 1
     log.info("RG 다운로드 완료 — push 성공 %d / 실패 %d / 중복스킵 %d", pushed, failed, skipped)
+    # ★세션 만료가 최우선(D3): 재시도해도 실패하고 창만 반복해서 뜬다 → lease 계약의
+    #   login_required 경로로 보고한다(재시도 예산 소진이 아니라 요청 소멸 + 사람 안내).
+    if session_lost:
+        return RC_LOGIN_REQUIRED
     if failed:
         return 1
     # ★dup만 있고 실패가 없어도 '완료'가 아니다(codex 4R[P1]): 그 리포트는 이번에도 못 받았다.
