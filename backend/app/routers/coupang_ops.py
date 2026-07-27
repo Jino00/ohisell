@@ -1951,6 +1951,27 @@ def wing_rg_settlement_refresh_complete(
     return {"ok": ok}
 
 
+@router.get("/wing/rg-settlement/layer2-gaps")
+def wing_rg_settlement_layer2_gaps(
+    account_key: str = Query(default="COUPANG_WING1", description="COUPANG_WING1/2"),
+    days: int = Query(default=rg_settlement_sync.LAYER2_GAP_DEFAULT_DAYS, ge=1, le=400,
+                      description="조회 창(일) — 페처의 rg_status_days와 짝"),
+    report_types: list[str] | None = Query(default=None, description="sellerReportType 반복 파라미터"),
+    x_ingest_token: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """층2(옵션 엑셀) 결손 주기 조회 — **읽기 전용**(PLAN_rg-layer2-gap-driven-selfheal D1).
+
+    Mac 페처가 층1 push 직후 호출해 "무엇이 비었는지"를 받아 결손 주기만 다운로드한다.
+    이게 없으면 페처는 매 회차 최신 1주기만 받아 캐던스가 느려질 때마다 영구 공백이 생긴다.
+    인증은 형제 페처용 엔드포인트(refresh-claim·ingest)와 동일한 X-Ingest-Token — 이 응답은
+    페처 전용이고 UI는 쓰지 않는다.
+    """
+    _require_ingest_token(x_ingest_token)
+    return rg_settlement_sync.layer2_gaps(
+        db, _require_rg_account(account_key), days=days, report_types=report_types)
+
+
 # ════════════════════════════════════════════════════════════════════
 # RG 정산 옵션 단위 수집 (S6 — 종류별 엑셀 수동 업로드, D-2)
 # ════════════════════════════════════════════════════════════════════

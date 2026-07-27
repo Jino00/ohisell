@@ -706,6 +706,132 @@ def ingest_settlement_xlsx(db: Session, account_key: str, content: bytes) -> dic
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# 층2 결손 조회 (결손 주도 자가치유, PLAN_rg-layer2-gap-driven-selfheal D1)
+# ═══════════════════════════════════════════════════════════════════════
+# ★왜 필요한가: Mac 페처의 층2(옵션 엑셀)는 매 회차 "최신 1주기"만 받았다(rg_max_periods=1).
+#   버튼/크론 캐던스가 정산주기 생성 속도보다 느려지는 순간 그 사이 주기는 **영구 공백**이 된다
+#   (실측: WING1 층2 04-20~05-03 3주기, WING2 04-27~05-03 2주기 — 층1은 두 계정 모두 완전 존재).
+#   여기서 "무엇이 비었는지"를 알려주면 페처가 결손만 받아 스스로 메운다(자가치유).
+# 읽기 전용 — 이 섹션의 함수는 DB에 쓰지 않는다.
+
+# sellerReportType → 그 엑셀이 커버하는 fee_type 집합.
+# 근거(코드 교차): 리포트 이름 = tools/wing_browser_fetcher.py CONFIRMED_SELLER_REPORT_TYPES 주석,
+#   시트→fee_type = 이 파일의 _SHEET_FEE_TYPE_MAP. 둘을 리포트 이름으로 이어 붙인 것이다.
+#     WAREHOUSING_SHIPPING(입출고/배송비) → 시트 '입출고비'+'배송비' → warehousing+delivery
+#     CATEGORY_TR(판매수수료)            → 시트 '판매수수료'        → sale_fee
+#     STORAGE_FEE(보관비)                → 시트 '보관비'            → storage
+#     CRETURN_PICKUP_RESTOCKING(반품 회수/재입고) → '반품 회수비'+'반품 재입고비' → return_shipping
+#     VRETURN_HANDLING(반출비)           → 시트 '반출비'            → return_handling
+# 나머지(INVENTORY_COMPENSATION·BARCODE_LABELING_FEE·PRODUCT_SIZE_COMPARISON·VRETURN_SHIPPING)는
+#   파서에 시트 매핑이 없어 결손을 판정할 수 없다 → 응답에 unmapped로 밝히고 결손으로 세지 않는다
+#   (모르면서 "결손"이라 부르면 매 회차 못 읽을 엑셀을 다시 받는 무한 루프가 된다).
+_REPORT_TYPE_FEE_TYPES: dict[str, frozenset[str]] = {
+    "WAREHOUSING_SHIPPING": frozenset({"warehousing", "delivery"}),
+    "CATEGORY_TR": frozenset({"sale_fee"}),
+    "STORAGE_FEE": frozenset({"storage"}),
+    "CRETURN_PICKUP_RESTOCKING": frozenset({"return_shipping"}),
+    "VRETURN_HANDLING": frozenset({"return_handling"}),
+}
+# 층2 결손 조회 기본 창(일) — 페처 rg_status_days 기본값과 같은 35일(층1 열거 창과 짝).
+LAYER2_GAP_DEFAULT_DAYS = 35
+_LAYER2_GAP_MAX_DAYS = 400   # 백필 오버라이드 상한(폭주 방지)
+
+
+def layer2_gaps(
+    db: Session,
+    account_key: str,
+    *,
+    days: int = LAYER2_GAP_DEFAULT_DAYS,
+    report_types: list[str] | None = None,
+) -> dict:
+    """층1 주기 중 **층2 옵션 행이 0건인 주기**를 report_type별로 반환(최신 우선).
+
+    grain 사실: 층1=vendor_item_id=''(계정 단위), 층2=vendor_item_id=옵션ID. 층2 적재는
+      _resolve_period_start로 층1의 from을 차용하므로 두 층의 (from,to)가 정확히 일치한다
+      → 주기 매칭은 recognition_date_to 하나로 충분하다.
+
+    판정: (주기 × report_type)에서 그 리포트가 커버하는 fee_type **전부**의 옵션 행이 0건이면 결손.
+      ★일부만 0건은 결손으로 세지 않는다 — 그 주 배송비가 실제로 0이면(옵션 행 자체가 없음)
+        영구 재다운로드 루프가 된다. 전부 0건일 때만 "이 리포트를 아직 못 받았다"가 확실하다.
+    빈 주기 가드: 커버 fee_type의 층1 계정 행 amount가 전부 0이면 항목화할 게 없다 → 결손 아님.
+      (이 가드가 없으면 "정말로 비어 있는 주기"를 매 회차 다시 받는다.)
+    """
+    if account_key not in RG_ACCOUNTS:
+        raise ValueError(f"지원하지 않는 account_key: {account_key}")
+    try:
+        days = int(days)
+    except (TypeError, ValueError):
+        days = LAYER2_GAP_DEFAULT_DAYS
+    days = max(1, min(days, _LAYER2_GAP_MAX_DAYS))
+
+    requested = list(report_types) if report_types else list(_REPORT_TYPE_FEE_TYPES)
+    mapped = [rt for rt in requested if rt in _REPORT_TYPE_FEE_TYPES]
+    unmapped = [rt for rt in requested if rt not in _REPORT_TYPE_FEE_TYPES]
+    covered: set[str] = set()
+    for rt in mapped:
+        covered |= _REPORT_TYPE_FEE_TYPES[rt]
+
+    cutoff = kst_now().date() - timedelta(days=days)
+
+    # 층1(계정 단위) 주기 + fee_type별 금액 — 주기 목록과 '빈 주기 가드'의 소스.
+    acct_amount: dict[tuple[date, date, str], Decimal] = {}
+    periods: set[tuple[date, date]] = set()
+    for pfrom, pto, ft, amount in db.query(
+        CoupangRgSettlementFee.recognition_date_from,
+        CoupangRgSettlementFee.recognition_date_to,
+        CoupangRgSettlementFee.fee_type,
+        CoupangRgSettlementFee.amount,
+    ).filter(
+        CoupangRgSettlementFee.account_key == account_key,
+        CoupangRgSettlementFee.vendor_item_id == "",
+        CoupangRgSettlementFee.recognition_date_to >= cutoff,
+    ):
+        periods.add((pfrom, pto))
+        acct_amount[(pfrom, pto, ft)] = _dec(amount)
+
+    # 층2(옵션 단위)가 이미 있는 (주기 종료일, fee_type) 집합.
+    have: set[tuple[date, str]] = set()
+    if covered:
+        for pto, ft in db.query(
+            CoupangRgSettlementFee.recognition_date_to,
+            CoupangRgSettlementFee.fee_type,
+        ).filter(
+            CoupangRgSettlementFee.account_key == account_key,
+            CoupangRgSettlementFee.vendor_item_id != "",
+            CoupangRgSettlementFee.fee_type.in_(sorted(covered)),
+            CoupangRgSettlementFee.recognition_date_to >= cutoff,
+        ).distinct():
+            have.add((pto, ft))
+
+    gaps: list[dict] = []
+    for pfrom, pto in periods:
+        missing = [
+            rt for rt in mapped
+            if all((pto, ft) not in have for ft in _REPORT_TYPE_FEE_TYPES[rt])
+            and any(acct_amount.get((pfrom, pto, ft), Decimal(0)) != 0
+                    for ft in _REPORT_TYPE_FEE_TYPES[rt])
+        ]
+        if missing:
+            gaps.append({
+                "recognition_date_from": pfrom.isoformat(),
+                "recognition_date_to": pto.isoformat(),
+                "missing_report_types": missing,
+            })
+    # 최신 우선 — 페처가 앞에서부터 상한만큼 잘라 쓴다(가장 중요한 최근 주기가 먼저 메워진다).
+    gaps.sort(key=lambda g: (g["recognition_date_to"], g["recognition_date_from"]), reverse=True)
+
+    return {
+        "account_key": account_key,
+        "days": days,
+        "report_types": requested,
+        "covered_fee_types": sorted(covered),
+        "unmapped_report_types": unmapped,
+        "periods_checked": len(periods),
+        "gaps": gaps,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # S6-auto: 엑셀 자동 다운로드 + 적재
 # ═══════════════════════════════════════════════════════════════════════
 
