@@ -31,6 +31,9 @@
 #    WING2→A01029796(오하이테크). rg_daily_hour은 무시됨(폐기·버튼-only), rg_min_interval_s=RG 실행 최소간격.
 #    rg_status_days=층1 계정 수수료 push 윈도우(기본 35, 백필 시 90으로 1회 실행). rg_days=엑셀 열거 윈도우.)
 # 다계정 인스턴스 분리 env(D-7): OHISELL_WING_CONFIG(config)·OHISELL_WING_LOG(로그)·OHISELL_WING_LOCK(lock).
+#   WING2(오하이테크) 인스턴스: tools/com.ohisell.wing2.plist 참조(env 3종 + 별도 state_file).
+#   ★버튼 큐도 계정 차원이라 두 인스턴스가 경쟁하지 않는다 — refresh-status/claim은 cfg["account_key"]를
+#     쿼리로 보내고 백엔드가 계정별 상태행으로 가른다(2026-07-27).
 from __future__ import annotations
 
 import contextlib
@@ -749,9 +752,13 @@ _MIN_FETCH_INTERVAL_S = 45  # fetch(창) 최소 간격 — 요청 폭주로 창 
 _MAX_CONSECUTIVE_NET_FAILS = 20  # 15s 간격 × 20 ≈ 5분
 
 
+# ★버튼 큐는 계정 차원(2026-07-27, WING2 인스턴스 편입): account_key를 안 보내면 백엔드가
+#   WING1 큐로 해석한다 → WING2 인스턴스가 오픽스(WING1) 버튼 요청을 claim해 가져가는 도난이
+#   난다(claim=원자적, 먼저 집는 쪽이 이김). 아래 4개 호출 모두 자기 계정을 명시한다.
 def _prod_refresh_status(cfg: dict) -> dict:
     r = requests.get(
         cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/wing/vendor-summary/refresh-status",
+        params={"account_key": cfg["account_key"]},
         timeout=15,
     )
     r.raise_for_status()
@@ -761,6 +768,7 @@ def _prod_refresh_status(cfg: dict) -> dict:
 def _prod_claim(cfg: dict) -> dict:
     r = requests.post(
         cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/wing/vendor-summary/refresh-claim",
+        params={"account_key": cfg["account_key"]},
         headers={"X-Ingest-Token": cfg["ingest_token"]},
         timeout=15,
     )
@@ -771,6 +779,7 @@ def _prod_claim(cfg: dict) -> dict:
 def _prod_rg_refresh_status(cfg: dict) -> dict:
     r = requests.get(
         cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/wing/rg-settlement/refresh-status",
+        params={"account_key": cfg["account_key"]},
         timeout=15,
     )
     r.raise_for_status()
@@ -780,6 +789,7 @@ def _prod_rg_refresh_status(cfg: dict) -> dict:
 def _prod_rg_claim(cfg: dict) -> dict:
     r = requests.post(
         cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/wing/rg-settlement/refresh-claim",
+        params={"account_key": cfg["account_key"]},
         headers={"X-Ingest-Token": cfg["ingest_token"]},
         timeout=15,
     )

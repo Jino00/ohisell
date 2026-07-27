@@ -217,6 +217,61 @@ def test_rg_settlement_refresh_trigger_claim_flow(client):
     assert client.get(f"{base}/refresh-status").json()["requested"] is False
 
 
+# ── 버튼 큐 계정 분리 (2026-07-27 — WING2 데몬 편입) ──
+# 큐가 계정 무구분이면 WING2 데몬이 WING1 버튼 요청을 claim해 간다. HTTP 레이어에서 고정.
+_RG = "/api/coupang/ops/wing/rg-settlement"
+_VS = "/api/coupang/ops/wing/vendor-summary"
+
+
+@pytest.mark.parametrize("base", [_RG, _VS])
+def test_refresh_queue_account_isolation(client, base):
+    """WING1 요청을 WING2가 claim 못 하고, 그 반대도 못 한다(RG·판매분석 둘 다)."""
+    hdr = {"X-Ingest-Token": _TOKEN}
+    assert client.post(f"{base}/request-refresh?account_key=COUPANG_WING1").status_code == 200
+    # 남의 계정으로는 못 가져감 — 요청은 그대로 살아있어야 한다.
+    assert client.post(f"{base}/refresh-claim?account_key=COUPANG_WING2",
+                       headers=hdr).json()["claimed"] is False
+    assert client.get(f"{base}/refresh-status?account_key=COUPANG_WING2").json()["requested"] is False
+    assert client.get(f"{base}/refresh-status?account_key=COUPANG_WING1").json()["requested"] is True
+    # 주인만 소비 가능.
+    assert client.post(f"{base}/refresh-claim?account_key=COUPANG_WING1",
+                       headers=hdr).json()["claimed"] is True
+
+
+@pytest.mark.parametrize("base", [_RG, _VS])
+def test_refresh_queue_default_account_is_wing1(client, base):
+    """account_key 생략 = WING1 — 파라미터 없는 구버전 페처 하위호환(배포 순서 무관)."""
+    assert client.post(f"{base}/request-refresh").status_code == 200
+    assert client.get(f"{base}/refresh-status?account_key=COUPANG_WING1").json()["requested"] is True
+    claimed = client.post(f"{base}/refresh-claim", headers={"X-Ingest-Token": _TOKEN})
+    assert claimed.json()["claimed"] is True
+
+
+@pytest.mark.parametrize("base", [_RG, _VS])
+@pytest.mark.parametrize("path,method", [
+    ("request-refresh", "post"), ("refresh-status", "get"),
+    ("refresh-claim", "post"), ("fetch-error", "post"),
+])
+def test_refresh_queue_bad_account_key_400(client, base, path, method):
+    """RG_ACCOUNTS 밖 account_key → 400(오타로 유령 상태행이 생기지 않게)."""
+    url = f"{base}/{path}?account_key=TYPO"
+    kwargs = {"headers": {"X-Ingest-Token": _TOKEN}}
+    if path == "fetch-error":
+        kwargs["json"] = {"error": "boom"}
+    r = client.get(url, **kwargs) if method == "get" else client.post(url, **kwargs)
+    assert r.status_code == 400, r.text
+
+
+@pytest.mark.parametrize("base", [_RG, _VS])
+def test_fetch_error_is_per_account(client, base):
+    """실패 보고도 계정별 — WING2 실패가 WING1 화면에 뜨면 원인 오진단."""
+    r = client.post(f"{base}/fetch-error?account_key=COUPANG_WING2",
+                    headers={"X-Ingest-Token": _TOKEN}, json={"error": "chrome crash"})
+    assert r.status_code == 200
+    assert client.get(f"{base}/refresh-status?account_key=COUPANG_WING2").json()["last_error"] == "chrome crash"
+    assert client.get(f"{base}/refresh-status?account_key=COUPANG_WING1").json()["last_error"] is None
+
+
 # ── 층1: RG status/api 계정 단위 인제스트 (Mac 상주 브라우저, 쿠키 이관) ──
 _STATUS = "/api/coupang/ops/wing/rg-settlement/ingest-status"
 

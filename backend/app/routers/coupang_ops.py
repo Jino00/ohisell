@@ -1740,31 +1740,55 @@ def ingest_wing_vendor_summary(
     return vendor_summary_sync.ingest_vendor_summary(db, account_key, rows)
 
 
+# ── 버튼 큐 계정 파라미터 (2026-07-27, WING2 데몬 편입) ──
+# 갱신 버튼 큐(판매분석·RG 정산)는 계정 차원이다. account_key 기본값=COUPANG_WING1이라
+# 파라미터를 안 보내는 구버전 페처도 기존과 똑같이 동작한다(배포 순서 무관).
+def _require_rg_account(account_key: str) -> str:
+    """버튼 큐 account_key 검증(RG_ACCOUNTS). 밖이면 400 — 오타로 유령 상태행이 생기지 않게."""
+    if account_key not in rg_settlement_sync.RG_ACCOUNTS:
+        raise HTTPException(status_code=400, detail=f"지원하지 않는 account_key: {account_key}")
+    return account_key
+
+
 @router.post("/wing/vendor-summary/request-refresh")
-def request_wing_vendor_summary_refresh(db: Session = Depends(get_db)):
-    """UI '판매분석 갱신' 버튼 → 갱신 요청 플래그 set. Wing 페처 데몬이 다음 폴링에서 소비."""
-    return vendor_summary_sync.request_refresh(db)
+def request_wing_vendor_summary_refresh(
+    account_key: str = Query(default="COUPANG_WING1", description="COUPANG_WING1/2"),
+    db: Session = Depends(get_db),
+):
+    """UI '판매분석 갱신' 버튼 → 갱신 요청 플래그 set. 해당 계정 데몬이 다음 폴링에서 소비.
+
+    ★UI는 WING1만 요청한다(WING2 판매분석은 휴면) — 파라미터는 큐 차원을 맞추기 위한 것.
+    """
+    return vendor_summary_sync.request_refresh(db, _require_rg_account(account_key))
 
 
 @router.get("/wing/vendor-summary/refresh-status")
-def wing_vendor_summary_refresh_status(db: Session = Depends(get_db)):
+def wing_vendor_summary_refresh_status(
+    account_key: str = Query(default="COUPANG_WING1", description="COUPANG_WING1/2"),
+    db: Session = Depends(get_db),
+):
     """갱신 요청/완료 상태. UI(버튼 후 폴링)·Wing 페처(요청 확인) 공용."""
-    return vendor_summary_sync.refresh_status(db)
+    return vendor_summary_sync.refresh_status(db, _require_rg_account(account_key))
 
 
 @router.post("/wing/vendor-summary/refresh-claim")
 def claim_wing_vendor_summary_refresh(
+    account_key: str = Query(default="COUPANG_WING1", description="COUPANG_WING1/2"),
     x_ingest_token: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    """Wing 페처가 갱신 요청을 소비(플래그 clear). 토큰 인증(ingest와 동일)."""
+    """Wing 페처가 갱신 요청을 소비(플래그 clear). 토큰 인증(ingest와 동일).
+
+    ★account_key 격리: WING2 데몬이 WING1의 버튼 요청을 훔쳐가지 못한다(claim 경쟁 차단).
+    """
     _require_ingest_token(x_ingest_token)
-    return vendor_summary_sync.claim_refresh(db)
+    return vendor_summary_sync.claim_refresh(db, _require_rg_account(account_key))
 
 
 @router.post("/wing/vendor-summary/fetch-error")
 def wing_vendor_summary_fetch_error(
     body: dict[str, Any] = Body(...),
+    account_key: str = Query(default="COUPANG_WING1", description="COUPANG_WING1/2"),
     x_ingest_token: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ):
@@ -1776,38 +1800,49 @@ def wing_vendor_summary_fetch_error(
     """
     _require_ingest_token(x_ingest_token)
     error = str(body.get("error") or "").strip() or "unknown"
-    vendor_summary_sync.mark_fetch_error(db, error)
+    vendor_summary_sync.mark_fetch_error(db, error, _require_rg_account(account_key))
     return {"ok": True}
 
 
 # ── RG 정산 자동 다운로드 갱신 트리거 (Wing 세션 자동화 트랙 S4-P2, D-8) ──
-# vendor-summary와 동일 메커니즘이되 상태행 분리(COUPANG_WING_RG). 페처 데몬이 claim 후
+# vendor-summary와 동일 메커니즘이되 상태행 분리(COUPANG_WING_RG/_RG2). 페처 데몬이 claim 후
 # 정산 엑셀 브라우저측 다운로드 → /rg/settlement/upload-xlsx 로 push(기존 ingest 재사용).
 @router.post("/wing/rg-settlement/request-refresh")
-def request_wing_rg_settlement_refresh(db: Session = Depends(get_db)):
-    """UI 'RG 정산 갱신' 버튼/스케줄 → 갱신 요청 플래그 set. Wing 페처 데몬이 다음 폴링에서 소비."""
-    return rg_settlement_sync.rg_request_refresh(db)
+def request_wing_rg_settlement_refresh(
+    account_key: str = Query(default="COUPANG_WING1", description="COUPANG_WING1/2"),
+    db: Session = Depends(get_db),
+):
+    """UI 'RG 정산 갱신' 버튼/스케줄 → 갱신 요청 플래그 set. 해당 계정 데몬이 다음 폴링에서 소비."""
+    return rg_settlement_sync.rg_request_refresh(db, _require_rg_account(account_key))
 
 
 @router.get("/wing/rg-settlement/refresh-status")
-def wing_rg_settlement_refresh_status(db: Session = Depends(get_db)):
+def wing_rg_settlement_refresh_status(
+    account_key: str = Query(default="COUPANG_WING1", description="COUPANG_WING1/2"),
+    db: Session = Depends(get_db),
+):
     """RG 정산 갱신 요청/완료 상태. UI(버튼 후 폴링)·Wing 페처(요청 확인) 공용."""
-    return rg_settlement_sync.rg_refresh_status(db)
+    return rg_settlement_sync.rg_refresh_status(db, _require_rg_account(account_key))
 
 
 @router.post("/wing/rg-settlement/refresh-claim")
 def claim_wing_rg_settlement_refresh(
+    account_key: str = Query(default="COUPANG_WING1", description="COUPANG_WING1/2"),
     x_ingest_token: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    """Wing 페처가 RG 갱신 요청을 소비(플래그 clear). 토큰 인증(ingest와 동일)."""
+    """Wing 페처가 RG 갱신 요청을 소비(플래그 clear). 토큰 인증(ingest와 동일).
+
+    ★account_key 격리: WING2 데몬이 WING1의 버튼 요청을 훔쳐가지 못한다(claim 경쟁 차단).
+    """
     _require_ingest_token(x_ingest_token)
-    return rg_settlement_sync.rg_claim_refresh(db)
+    return rg_settlement_sync.rg_claim_refresh(db, _require_rg_account(account_key))
 
 
 @router.post("/wing/rg-settlement/fetch-error")
 def wing_rg_settlement_fetch_error(
     body: dict[str, Any] = Body(...),
+    account_key: str = Query(default="COUPANG_WING1", description="COUPANG_WING1/2"),
     x_ingest_token: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ):
@@ -1819,7 +1854,7 @@ def wing_rg_settlement_fetch_error(
     """
     _require_ingest_token(x_ingest_token)
     error = str(body.get("error") or "").strip() or "unknown"
-    rg_settlement_sync.rg_mark_fetch_error(db, error)
+    rg_settlement_sync.rg_mark_fetch_error(db, error, _require_rg_account(account_key))
     return {"ok": True}
 
 
@@ -1892,7 +1927,9 @@ async def upload_rg_settlement_xlsx(
     except WingReadError as e:
         raise HTTPException(status_code=422, detail=f"엑셀 파싱 실패: {e}")
     # S4-P2: 자동 다운로드(Mac 페처 push)·수동 업로드 모두 freshness 갱신(스케줄 중복방지·상태표시).
-    rg_settlement_sync.rg_mark_heartbeat(db)
+    # ★계정별 상태행에 기록(2026-07-27): WING2 push가 WING1 행을 갱신하면 오픽스가 실제론 안
+    #   왔는데 "갱신 완료"로 보이고(UI 폴링이 남의 성공에 종료됨) 신선도 배너도 거짓말한다.
+    rg_settlement_sync.rg_mark_heartbeat(db, account_key)
     return result
 
 
@@ -1909,7 +1946,7 @@ def ingest_rg_settlement_status(
     받던 status/api JSON을 그대로 push해 계정 row를 적재(새 인증·새 세션 없음). 회계(net_profit
     소스) 변경 엔드포인트이므로 upload-xlsx와 동일 방어 수위 — X-Ingest-Token 필수 +
     account_key ∈ RG_ACCOUNTS + body=raw JSON dict. 스키마 드리프트(WingReadError)는 422.
-    ★rg_mark_heartbeat 호출 안 함: 그건 엑셀 push 캐던스 상태행 전용(COUPANG_WING_RG)이다.
+    ★rg_mark_heartbeat 호출 안 함: 그건 엑셀 push 캐던스 상태행 전용(계정별 COUPANG_WING_RG/_RG2)이다.
     이 경로의 신선도는 적재된 데이터 자체(data_stale 감시)로 검증한다. 프론트 호출 없음.
     """
     _require_ingest_token(x_ingest_token)

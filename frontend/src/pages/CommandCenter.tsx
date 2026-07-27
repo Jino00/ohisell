@@ -64,6 +64,38 @@ const ACCOUNTS = [
   { value: "COUPANG_WING2", label: "오하이테크" },
 ];
 
+// 'RG 정산 갱신' 버튼이 깨우는 계정(2026-07-27 WING2 편입). 버튼은 하나지만 큐는 계정별로
+// 갈려 있어(백엔드 상태행 분리) 각 계정 데몬이 자기 요청만 claim한다 → 요청·폴링도 계정별.
+const RG_REFRESH_ACCOUNTS = [
+  { key: "COUPANG_WING1", label: "오픽스" },
+  { key: "COUPANG_WING2", label: "오하이테크" },
+];
+
+// 한 계정의 RG 갱신 1건: 요청 → last_success_at/last_error_at 변화 폴링 → 결과 판정.
+// 판정 규칙은 판매분석 갱신과 동일(성공 우선·실패 보고 즉시 이탈·215초 한도).
+async function runRgRefreshForAccount(
+  accountKey: string,
+): Promise<{ done: boolean; failed: string | null }> {
+  const before = await getWingRgSettlementRefreshStatus(accountKey);
+  const baseline = before.last_success_at;
+  const errBaseline = before.last_error_at; // 실패도 감지해야 "진행 중"과 구분된다
+  await requestWingRgSettlementRefresh(accountKey);
+  const deadline = Date.now() + 215000;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 3000));
+    const st = await getWingRgSettlementRefreshStatus(accountKey);
+    // ★성공 우선(순서 바꾸지 말 것): 둘 다 변했으면 성공이 이긴다. 라이브 실측
+    // (2026-07-17 RG): 업로드가 클라 타임아웃(60s)을 넘겨 페처는 실패로 보고했지만
+    // 서버는 완주해 success/error가 138ms 차로 함께 갱신됐다 — 데이터는 실제로 들어왔다.
+    if (st.last_success_at && st.last_success_at !== baseline) return { done: true, failed: null };
+    // 페처가 실패를 보고하면 즉시 이탈 — 이게 없으면 이미 끝난 실패를 215초 헛기다린다.
+    if (st.last_error_at && st.last_error_at !== errBaseline) {
+      return { done: false, failed: st.last_error || "원인 미상" };
+    }
+  }
+  return { done: false, failed: null }; // 타임아웃 = 그 계정 Mac 데몬 무응답(미설치·꺼짐·로그인 전)
+}
+
 export default function CommandCenter() {
   const today = isoKST(new Date());
   const ago = (n: number) => {
@@ -170,41 +202,33 @@ export default function CommandCenter() {
     }
   }
 
-  // "RG 정산 갱신" — Mac Wing 데몬(com.ohisell.wing)이 RG 정산 XLSX를 다운로드·push.
+  // "RG 정산 갱신" — Mac Wing 데몬(com.ohisell.wing / .wing2)이 RG 정산 XLSX를 다운로드·push.
+  // 두 계정을 함께 깨우되 큐·결과는 계정별 — 한쪽만 성공/실패해도 어느 쪽인지 문구로 보인다.
   async function refreshRgSettlementNow() {
     setRgRefreshing(true);
-    setRgRefreshMsg("Mac에서 RG 정산 가져오는 중… (~30초)");
+    setRgRefreshMsg("Mac에서 RG 정산 가져오는 중… (~30초, 계정 2곳)");
     try {
-      const before = await getWingRgSettlementRefreshStatus();
-      const baseline = before.last_success_at;
-      const errBaseline = before.last_error_at; // 실패도 감지해야 "진행 중"과 구분된다
-      await requestWingRgSettlementRefresh();
-      const deadline = Date.now() + 215000;
-      let done = false;
-      let failed: string | null = null;
-      while (Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 3000));
-        const st = await getWingRgSettlementRefreshStatus();
-        // ★성공 우선(순서 바꾸지 말 것): 둘 다 변했으면 성공이 이긴다. 라이브 실측
-        // (2026-07-17 RG): 업로드가 클라 타임아웃(60s)을 넘겨 페처는 실패로 보고했지만
-        // 서버는 완주해 success/error가 138ms 차로 함께 갱신됐다 — 데이터는 실제로 들어왔다.
-        if (st.last_success_at && st.last_success_at !== baseline) { done = true; break; }
-        // 페처가 실패를 보고하면 즉시 이탈 — 이게 없으면 이미 끝난 실패를 215초 헛기다린다.
-        if (st.last_error_at && st.last_error_at !== errBaseline) {
-          failed = st.last_error || "원인 미상";
-          break;
-        }
-      }
-      if (done) {
+      const results = await Promise.all(
+        // 한 계정의 요청 실패가 다른 계정 결과를 삼키면 안 된다 → 계정별로 catch.
+        RG_REFRESH_ACCOUNTS.map((a) =>
+          runRgRefreshForAccount(a.key).catch((e: any) => ({
+            done: false, failed: e?.message || "요청 실패",
+          })),
+        ),
+      );
+      // 하나라도 성공했으면 데이터가 들어온 것 → 현재 선택(selRef)으로 재조회(codex S3 P1).
+      if (results.some((r) => r.done)) {
         const sel = selRef.current;
         doFetch(sel.from, sel.to, sel.account);
-        setRgRefreshMsg("✅ RG 정산 갱신 완료");
-        setTimeout(() => setRgRefreshMsg(null), 4000);
-      } else if (failed) {
-        setRgRefreshMsg("❌ Mac 페처 실패: " + failed);
-      } else {
-        setRgRefreshMsg("⚠️ Mac 응답 없음 — Mac이 켜져 있는지 확인하세요.");
       }
+      setRgRefreshMsg(results.map((r, i) => {
+        const label = RG_REFRESH_ACCOUNTS[i].label;
+        if (r.done) return `✅ ${label} 완료`;
+        if (r.failed) return `❌ ${label} 실패(${r.failed})`;
+        return `⚠️ ${label} 응답 없음`;  // Mac 꺼짐·데몬 미설치·첫 로그인 전
+      }).join(" · "));
+      // 전건 성공일 때만 자동 소거 — 실패/무응답 문구는 남겨서 Jino가 보게 한다.
+      if (results.every((r) => r.done)) setTimeout(() => setRgRefreshMsg(null), 4000);
     } catch (e: any) {
       setRgRefreshMsg("❌ 갱신 요청 실패: " + (e?.message || ""));
     } finally {
