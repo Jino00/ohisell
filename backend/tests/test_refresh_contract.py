@@ -316,6 +316,65 @@ def test_malformed_lease_is_treated_as_stale(db):
     assert _row(db).claimed_at is not None
 
 
+def test_satisfied_request_is_closed_without_opening_a_window(db):
+    """★codex 3R[P1]: 데이터가 이미 들어온 요청은 창을 열기 전에 조용히 닫는다.
+
+    성공 신호를 못 보내는 페처(백엔드만 먼저 배포된 구버전, 업로드 후 죽은 run)의 요청이
+    남아 재시도를 유발하면 — 데이터는 이미 들어왔는데 창이 두세 번 더 뜨고 "3회 소진"이라는
+    거짓 실패로 끝난다.
+    """
+    rc.request_refresh(db, ACC)
+    rc.claim_refresh(db, ACC)
+    row = _row(db)
+    row.last_success_at = kst_now()                                  # 업로드는 성공했다
+    row.claimed_at = kst_now() - timedelta(minutes=rc.lease_ttl_minutes() + 1)  # 신호 없이 종료
+    db.commit()
+
+    out = rc.claim_refresh(db, ACC)
+    assert out["claimed"] is False          # 창을 열지 않는다
+    row = _row(db)
+    assert row.refresh_requested_at is None  # 요청은 완료로 닫힌다
+    assert row.last_error is None            # 거짓 실패를 남기지 않는다
+
+
+def test_released_lease_after_partial_success_still_retries(db):
+    """부분 성공 뒤 실패를 '보고한' 경우는 자동 완료로 닫지 않는다 — 재시도해야 정산이 완전해진다."""
+    rc.request_refresh(db, ACC)
+    rc.claim_refresh(db, ACC)
+    row = _row(db)
+    row.last_success_at = kst_now()      # 첫 엑셀 업로드는 성공
+    db.commit()
+    rc.report_failure(db, ACC, "두 번째 엑셀 실패")   # 명시적 실패 보고 = 임대 반납
+
+    assert rc.claim_refresh(db, ACC)["claimed"] is True   # 재시도가 살아있다
+
+
+def test_live_lease_is_not_settled_by_partial_success(db):
+    """여러 파일을 올리는 run의 중간 업로드를 '완료'로 오인하지 않는다(임대가 살아 있으면 대기)."""
+    rc.request_refresh(db, ACC)
+    rc.claim_refresh(db, ACC)
+    row = _row(db)
+    row.last_success_at = kst_now()   # 첫 엑셀 업로드 성공, run은 계속 진행 중
+    db.commit()
+
+    assert rc.claim_refresh(db, ACC)["claimed"] is False   # 임대 살아있음 → 중복 claim 없음
+    assert _row(db).refresh_requested_at is not None       # 요청도 그대로(아직 run 중)
+
+
+def test_stale_completion_signal_is_ignored(db):
+    """★codex 3R[P2]: 임대를 넘긴 옛 run의 뒤늦은 '완료'가 새 임대·새 요청을 지우면 안 된다."""
+    rc.request_refresh(db, ACC)
+    stale_lease = rc.claim_refresh(db, ACC)["lease"]
+    row = _row(db)
+    row.claimed_at = kst_now() - timedelta(minutes=rc.lease_ttl_minutes() + 1)
+    db.commit()
+    rc.claim_refresh(db, ACC)   # 2회차가 재claim
+
+    assert rc.mark_success(db, ACC, lease=stale_lease) is False
+    assert _row(db).refresh_requested_at is not None   # 새 임대의 요청은 살아있다
+    assert rc.mark_success(db, ACC, lease=_row(db).claimed_at.isoformat()) is True
+
+
 def test_mark_success_can_clear_error_trace(db):
     """무작업 정상 종료(RG 정산주기 없음)는 지난 실패 흔적을 지운다 — UI 오보 방지(codex 2R[P2])."""
     rc.request_refresh(db, ACC)

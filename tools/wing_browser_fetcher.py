@@ -798,13 +798,18 @@ def _prod_rg_claim(cfg: dict) -> dict:
     return r.json()
 
 
-def _prod_notify_rg_complete(cfg: dict) -> None:
-    """RG run 정상 완주 → 갱신 요청 소멸(lease 계약). 업로드가 이미 소멸시켰으면 무해한 no-op."""
+def _prod_notify_rg_complete(cfg: dict, lease: str | None = None) -> None:
+    """RG run 정상 완주 → 갱신 요청 소멸(lease 계약). 업로드가 이미 소멸시켰으면 무해한 no-op.
+
+    lease: 내 임대에 대해서만 완료 처리(20분 넘긴 run이 남의 요청을 지우는 것 차단).
+    """
     if not _push_configured(cfg):
         return
+    body = {"lease": lease} if lease else {}
     try:
         requests.post(
             cfg["prod_base_url"].rstrip("/") + _RG_COMPLETE_PATH,
+            json=body,
             headers={"X-Ingest-Token": cfg["ingest_token"]},
             timeout=10,
         )
@@ -914,10 +919,9 @@ def cmd_poll(cfg: dict) -> int:
                     if not acquired:
                         log.info("RG: 다른 fetch 진행 중 — 보류(다음 폴)")
                     else:
-                        # claim으로 원자적 소비(요청 유실 방지).
-                        # NOTE(codex P2): claim은 실행 성공 전에 이뤄져 실패 시 버튼요청이 유실된다
-                        #   (vendor-summary와 동일 패턴). 일일예약이 재시도로 덮어주던 것이 사라졌으므로,
-                        #   실패 시에는 사람이 버튼을 다시 누른다(낡음은 전역 신선도 배너가 표면화).
+                        # claim = 원자적 임대(요청 플래그는 보존, 2026-07-27 lease 계약).
+                        #   실패를 보고하면 임대만 반납돼 다음 폴에서 자동 재시도된다(최대 3회).
+                        #   로그인 필요는 재시도 제외 — 창만 반복해서 뜨기 때문(PLAN §0).
                         _rg_claimed = _prod_rg_claim(cfg)
                         if _rg_claimed.get("claimed", False):
                             rg_lease = _rg_claimed.get("lease")
@@ -943,7 +947,7 @@ def cmd_poll(cfg: dict) -> int:
                                 else:
                                     # 정상 완주 신호 — 받을 게 없어 업로드 0건이었어도 요청은
                                     # 여기서 소멸한다(없으면 창을 3번 더 띄운 뒤 거짓 실패).
-                                    _prod_notify_rg_complete(cfg)
+                                    _prod_notify_rg_complete(cfg, lease=rg_lease)
         except requests.RequestException as e:
             log.warning("RG 폴 확인 실패(네트워크): %s", str(e)[:80])
         except Exception as e:  # noqa: BLE001 — 데몬은 어떤 오류에도 죽지 않는다
@@ -1128,6 +1132,10 @@ def _rg_find_completed(page, from_ms: int, want: str):
     return None
 
 
+# dup(이미 접수된 생성요청) 표식 — 실패가 아니라 "이번 회차 스킵"이다(codex 3R[P1]).
+RG_DUP_SKIP = object()
+
+
 def _rg_download_one(page, group_key: str, report_type: str, req_time_ms: int, poll_timeout: int):
     """단일 (group_key, report_type): 생성요청 → 폴링 → v2. 반환 {url, request_time} 또는 None."""
     res = _rg_post(page, RG_REQUEST_DOWNLOAD_PATH, {
@@ -1145,8 +1153,11 @@ def _rg_download_one(page, group_key: str, report_type: str, req_time_ms: int, p
         # ★dup 스킵(codex P1): 기존 생성분은 download-list로 기간 식별 불가 → 오업로드 위험.
         #   일일 캐던스(>24h)는 dedup 윈도우 밖이라 dup이 거의 없음. dup이면 이번 회차만 건너뛰고
         #   직전(생성 당시 fresh)·다음 fresh 실행에 맡긴다. 빠른 재실행 시 스킵이 안전한 선택.
+        # ★실패로 세지 않는다(codex 3R[P1]): 재시도는 30초 뒤라 dedup 윈도우 안이라 항상 dup이
+        #   된다 — 실패로 세면 재시도 3회를 dup으로 소진하고 "3회 소진"이라는 거짓 실패로 끝난다.
+        #   dup은 "이미 생성 요청이 접수됨"이라는 의도된 no-op이므로 스킵으로 분류한다.
         log.info("RG 중복 요청(기간 안전식별 불가) — 스킵 %s/%s", report_type, group_key)
-        return None
+        return RG_DUP_SKIP
     want = str(req_time_ms)
     from_ms = req_time_ms - 24 * 3600 * 1000
 
@@ -1264,7 +1275,7 @@ def _do_rg_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
 
     cdp = _cdp_mode(cfg)
     owner = _ChromeOwner()   # 창 소유권 — 로그인 미완료 시 창을 남기기 위해 직접 만든다
-    pushed = failed = 0
+    pushed = failed = skipped = 0
     try:
         with sync_playwright() as p:
             with _chrome(p, cfg, state, owner=owner) as (page, ctx, save):
@@ -1315,6 +1326,9 @@ def _do_rg_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
                         req_time = base_ms + idx
                         idx += 1
                         got = _rg_download_one(page, t["group_key"], rt, req_time, poll_timeout)
+                        if got is RG_DUP_SKIP:
+                            skipped += 1   # 실패 아님 — 재시도해도 계속 dup이다
+                            continue
                         if not got:
                             failed += 1
                             continue
@@ -1326,7 +1340,7 @@ def _do_rg_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
     except Exception as e:  # noqa: BLE001 — 브라우저 오류는 1로 보고(데몬은 죽지 않음)
         log.error("RG 브라우저 실행 오류: %s", e)
         return 1
-    log.info("RG 다운로드 완료 — push 성공 %d / 실패 %d", pushed, failed)
+    log.info("RG 다운로드 완료 — push 성공 %d / 실패 %d / 중복스킵 %d", pushed, failed, skipped)
     return 0 if failed == 0 else 1
 
 

@@ -1068,7 +1068,7 @@ def _prod_rocket_refresh_status(cfg: dict) -> dict:
 
 
 def _prod_rocket_claim(cfg: dict) -> dict:
-    """백엔드 rocket refresh-claim — 요청 플래그 clear."""
+    """백엔드 rocket refresh-claim — 요청 임대(lease). 플래그는 성공/소진까지 보존."""
     try:
         r = requests.post(
             cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/rocket/refresh-claim",

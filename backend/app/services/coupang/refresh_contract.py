@@ -129,6 +129,10 @@ def claim_refresh(db: Session, account_key: str) -> dict:
     """
     now = kst_now()
     cutoff = now - timedelta(minutes=_LEASE_TTL_MIN)
+    pre = _row(db, account_key)
+    if pre is not None and _settle_if_satisfied(db, pre, cutoff):
+        return {"claimed": False, "attempt": int(pre.attempt_count or 0),
+                "max_attempts": MAX_ATTEMPTS, "lease": None}
     res = db.execute(
         update(CoupangWingCookie)
         .where(CoupangWingCookie.account_key == account_key)
@@ -161,6 +165,32 @@ def claim_refresh(db: Session, account_key: str) -> dict:
     }
 
 
+def _settle_if_satisfied(db: Session, row: CoupangWingCookie, cutoff) -> bool:
+    """"이미 데이터가 들어온" 요청을 창을 열기 전에 조용히 닫는다. 닫았으면 True.
+
+    ★왜(codex 3R[P1]): 성공 신호를 못 보내는 페처(예: 백엔드만 먼저 배포돼 아직 refresh-complete를
+    모르는 구버전, 또는 업로드까지 마치고 죽은 run)의 요청이 남아 재시도를 유발한다 — 데이터는
+    이미 들어왔는데 창이 두세 번 더 뜨고 끝내 "3회 소진"이라는 거짓 실패로 끝난다.
+    판정: 요청 이후에 성공 heartbeat(last_success_at)가 찍혔고 ∧ **임대가 만료된 채로 방치**됨.
+    - 임대가 살아 있으면 손대지 않는다 — 여러 파일을 올리는 run의 중간 업로드를 완료로 오인 금지.
+    - 임대가 **반납된**(claimed_at IS NULL) 경우도 손대지 않는다 — 그건 페처가 실패를 명시적으로
+      보고해 재시도를 기다리는 상태다(부분 성공 후 뒷단 실패 = 재시도해야 정산이 완전해진다).
+    즉 "아무도 20분간 아무 말이 없는데 데이터는 들어와 있다"일 때만 닫는다.
+    """
+    if row.refresh_requested_at is None or row.last_success_at is None:
+        return False
+    if row.claimed_at is None or row.claimed_at >= cutoff:
+        return False  # 아직 일하는 중이거나, 실패 보고로 반납돼 재시도 대기 중
+    if row.last_success_at < row.refresh_requested_at:
+        return False  # 이번 요청보다 오래된 성공 — 무관
+    row.refresh_requested_at = None
+    row.claimed_at = None
+    row.attempt_count = 0
+    db.commit()
+    log.info("refresh 요청 자동 완료(성공 heartbeat 확인): %s", row.account_key)
+    return True
+
+
 def _reap_exhausted(
     db: Session, row: CoupangWingCookie, now, cutoff
 ) -> None:
@@ -168,6 +198,10 @@ def _reap_exhausted(
 
     조건: 요청 살아있음 ∧ attempt_count>=MAX ∧ 임대가 없거나 만료됨(=일하는 중이 아님).
     이게 없으면 요청이 영원히 requested=true로 남아 UI가 "진행 중"을 무한히 표시한다.
+
+    ★조건부 UPDATE로 쓴다(codex 3R[P2]): 폴이 여럿이면 A가 수확한 뒤 사용자가 새 버튼을 눌러
+    새 요청이 생겼는데 B의 낡은 ORM 행이 뒤늦게 커밋되며 그 새 요청을 지울 수 있다.
+    소진 당시의 (요청시각·시도횟수·임대)와 일치할 때만 쓴다.
     """
     if row.refresh_requested_at is None:
         return
@@ -175,20 +209,32 @@ def _reap_exhausted(
         return
     if row.claimed_at is not None and row.claimed_at >= cutoff:
         return  # 마지막 시도가 아직 살아 일하는 중 — 기다린다
-    row.refresh_requested_at = None
-    row.claimed_at = None
-    row.last_error = (
-        f"재시도 {MAX_ATTEMPTS}회 소진 — 마지막 시도가 보고 없이 종료(응답 없음)"
-    )[:300]
-    row.last_error_at = now
+    stmt = (
+        update(CoupangWingCookie)
+        .where(CoupangWingCookie.account_key == row.account_key)
+        .where(CoupangWingCookie.refresh_requested_at == row.refresh_requested_at)
+        .where(CoupangWingCookie.attempt_count == row.attempt_count)
+    )
+    if row.claimed_at is None:
+        stmt = stmt.where(CoupangWingCookie.claimed_at.is_(None))
+    else:
+        stmt = stmt.where(CoupangWingCookie.claimed_at == row.claimed_at)
+    res = db.execute(stmt.values(
+        refresh_requested_at=None,
+        claimed_at=None,
+        last_error=(f"재시도 {MAX_ATTEMPTS}회 소진 — 마지막 시도가 보고 없이 종료(응답 없음)")[:300],
+        last_error_at=now,
+    ))
     db.commit()
-    log.warning("refresh 요청 소멸(reaper): %s attempt=%d", row.account_key, row.attempt_count)
+    if (res.rowcount or 0) > 0:
+        log.warning("refresh 요청 소멸(reaper): %s attempt=%d", row.account_key, row.attempt_count)
 
 
 # ════════════════════════════════════════════════
 # ③ success — 여기서만 요청이 소멸한다
 # ════════════════════════════════════════════════
-def mark_success(db: Session, account_key: str, *, clear_error: bool = False) -> None:
+def mark_success(db: Session, account_key: str, *, clear_error: bool = False,
+                 lease: str | None = None) -> bool:
     """수집 성공 → 요청 소멸 + lease 해제 + 시도 카운터 리셋.
 
     ★요청이 사라지는 정상 경로는 여기 하나뿐이다(claim은 이제 소비하지 않는다).
@@ -201,7 +247,13 @@ def mark_success(db: Session, account_key: str, *, clear_error: bool = False) ->
     """
     row = _row(db, account_key)
     if row is None:
-        return
+        return False
+    if lease is not None and _lease_of(row) != lease:
+        # ★stale 완료 신호 무시(codex 3R[P2]): 임대를 넘긴 옛 run이 뒤늦게 "끝났다"고 말하면
+        # 지금 일하는 run의 임대나 사용자의 새 요청을 지운다.
+        log.info("stale 완료 신호 무시: %s (보고 lease=%s, 현재=%s)",
+                 account_key, lease, _lease_of(row))
+        return False
     row.refresh_requested_at = None
     row.claimed_at = None
     row.attempt_count = 0
@@ -209,6 +261,7 @@ def mark_success(db: Session, account_key: str, *, clear_error: bool = False) ->
         row.last_error = None
         row.last_error_at = None
     db.commit()
+    return True
 
 
 # ════════════════════════════════════════════════

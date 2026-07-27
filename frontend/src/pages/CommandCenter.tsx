@@ -194,7 +194,10 @@ export default function CommandCenter() {
         // ★성공 우선(순서 바꾸지 말 것): 둘 다 변했으면 성공이 이긴다. 라이브 실측
         // (2026-07-17 RG): 업로드가 클라 타임아웃(60s)을 넘겨 페처는 실패로 보고했지만
         // 서버는 완주해 success/error가 138ms 차로 함께 갱신됐다 — 데이터는 실제로 들어왔다.
-        if (st.last_success_at && st.last_success_at !== baseline) { done = true; break; }
+        // ★RG만 !requested를 함께 요구한다(codex 3R[P1]): RG 한 회차는 (정산주기×리포트종류)
+        // 여러 엑셀을 올린다. 첫 엑셀에서 last_success_at이 오르므로 그것만 보고 이탈하면
+        // 뒤 엑셀이 실패한 반쪽 run을 "완료"로 표시한다. 요청 소멸(=run 종료)까지 기다린다.
+        if (st.last_success_at && st.last_success_at !== baseline && !st.requested) { done = true; break; }
         // 페처가 **종료된** 실패를 보고하면 즉시 이탈 — 이게 없으면 이미 끝난 실패를 215초 헛기다린다.
         // ★requested가 아직 true면 재시도가 남아 있다는 뜻(lease 계약, 2026-07-27) — 여기서
         // 이탈하면 1회차 실패를 최종 실패로 오보한다. 요청이 소멸(=재시도 소진/로그인 필요)한

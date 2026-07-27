@@ -1464,7 +1464,11 @@ def rocket_refresh_claim(
     x_ingest_token: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    """로켓 페처가 갱신 요청을 소비(플래그 clear). 토큰 인증(ingest와 동일 — 페처 전용 뮤테이션)."""
+    """로켓 페처가 갱신 요청을 **임대**(lease). 토큰 인증(ingest와 동일 — 페처 전용 뮤테이션).
+
+    2026-07-27부터 claim은 플래그를 지우지 않는다 — 성공/3회 소진/로그인 필요일 때만
+    소멸한다(refresh_contract). 시그니처·응답 키(claimed)는 불변.
+    """
     _check_ingest_token(x_ingest_token)
     return rocket_supplier_sync.claim_rocket_refresh(db)
 
@@ -1535,7 +1539,11 @@ def ohitech_ad_refresh_claim(
     x_ingest_token: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    """Mac 페처가 갱신 요청을 소비(플래그 clear)하고 작업 시작. 토큰 인증(ingest와 동일)."""
+    """Mac 페처가 갱신 요청을 **임대**(lease)하고 작업 시작. 토큰 인증(ingest와 동일).
+
+    claim은 플래그를 지우지 않는다(2026-07-27 lease 계약) — 응답의 lease를 실패 보고에
+    되돌려주면 stale 보고가 걸러진다.
+    """
     _check_ingest_token(x_ingest_token)
     return ohitech_ad_sync.claim_refresh(db)
 
@@ -1646,7 +1654,11 @@ def claim_ad_cost_refresh(
     x_ingest_token: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    """Mac 페처가 갱신 요청을 소비(플래그 clear)하고 작업 시작. 토큰 인증(ingest와 동일)."""
+    """Mac 페처가 갱신 요청을 **임대**(lease)하고 작업 시작. 토큰 인증(ingest와 동일).
+
+    claim은 플래그를 지우지 않는다(2026-07-27 lease 계약) — 응답의 lease를 실패 보고에
+    되돌려주면 stale 보고가 걸러진다.
+    """
     import secrets as _secrets
 
     expected = os.getenv("AD_INGEST_TOKEN", "").strip()
@@ -1775,7 +1787,10 @@ def claim_wing_vendor_summary_refresh(
     x_ingest_token: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    """Wing 페처가 갱신 요청을 소비(플래그 clear). 토큰 인증(ingest와 동일)."""
+    """Wing 페처가 갱신 요청을 **임대**(lease). 토큰 인증(ingest와 동일).
+
+    claim은 플래그를 지우지 않는다(2026-07-27 lease 계약).
+    """
     _require_ingest_token(x_ingest_token)
     return vendor_summary_sync.claim_refresh(db)
 
@@ -1824,7 +1839,11 @@ def claim_wing_rg_settlement_refresh(
     x_ingest_token: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    """Wing 페처가 RG 갱신 요청을 소비(플래그 clear). 토큰 인증(ingest와 동일)."""
+    """Wing 페처가 RG 갱신 요청을 **임대**(lease). 토큰 인증(ingest와 동일).
+
+    claim은 플래그를 지우지 않는다(2026-07-27 lease 계약) — RG는 run이 끝날 때
+    refresh-complete로 요청을 소멸시킨다.
+    """
     _require_ingest_token(x_ingest_token)
     return rg_settlement_sync.rg_claim_refresh(db)
 
@@ -1855,6 +1874,7 @@ def wing_rg_settlement_fetch_error(
 
 @router.post("/wing/rg-settlement/refresh-complete")
 def wing_rg_settlement_refresh_complete(
+    body: dict[str, Any] = Body(default={}),
     x_ingest_token: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ):
@@ -1871,8 +1891,12 @@ def wing_rg_settlement_refresh_complete(
     # clear_error=True(codex 2R[P2]): 1회차가 실패하고 2회차가 "받을 게 없어" 정상 종료하면
     # last_error_at만 바뀐 채 요청이 사라진다 → UI가 성공한 회차를 실패로 읽는다. 실패 흔적을
     # 함께 지우되 last_success_at(데이터 신선도 시계)은 그대로 둔다.
-    refresh_contract.mark_success(db, rg_settlement_sync._RG_STATE_ACCOUNT, clear_error=True)
-    return {"ok": True}
+    # lease(옵션): 내 임대에 대해서만 완료 처리(codex 3R[P2]). 20분 넘게 끌던 옛 run이
+    # 임대를 넘긴 뒤 뒤늦게 완료를 외쳐 새 요청을 지우는 것을 막는다. 없으면 기존 동작.
+    lease = str(body.get("lease") or "").strip() or None
+    ok = refresh_contract.mark_success(
+        db, rg_settlement_sync._RG_STATE_ACCOUNT, clear_error=True, lease=lease)
+    return {"ok": ok}
 
 
 # ════════════════════════════════════════════════════════════════════
