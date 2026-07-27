@@ -82,9 +82,39 @@ if [ "$_deprecated_left" = "1" ]; then
   echo "    수동: launchctl bootout gui/$UID_NUM/com.ohisell.<label> 후 재실행"
   exit 1
 fi
-for pair in "adcost:ad_cost_browser_fetcher.py" "wing:wing_browser_fetcher.py" "rocket:rocket_supplier_fetcher.py" "ohitech-ad:ohitech_ad_fetcher.py"; do
+# ★wing2(2026-07-27, codex R1 [P1]): WING2=오하이테크 인스턴스. 같은 스크립트를 env로 분리 기동한다.
+#   이 loop에 없으면 plist의 __PYTHON__/__SCRIPT__가 치환되지 않은 채로만 존재해 데몬이 영영 안 뜬다
+#   (= WING2 RG 갱신 요청이 아무도 claim하지 않는다 = 이번 스프린트가 라이브에서 무효).
+for pair in "adcost:ad_cost_browser_fetcher.py" "wing:wing_browser_fetcher.py" "wing2:wing_browser_fetcher.py" "rocket:rocket_supplier_fetcher.py" "ohitech-ad:ohitech_ad_fetcher.py"; do
   name="${pair%%:*}"
   script="${pair##*:}"
+  # ★설정 없는 Mac에 wing2를 올리면 poll이 fail-fast(exit 2) → KeepAlive가 10초마다 되살리는
+  #   크래시 루프가 된다. 계정 설정 파일이 생긴 뒤에 설치한다(재실행하면 그때 붙는다 — 멱등).
+  if [ "$name" = "wing2" ] && [ ! -f "$HOME/.ohisell_wing2_fetcher.json" ]; then
+    # ★그냥 건너뛰지 않고 '내린다'(codex R2 [P2]): 예전에 수동 cp/load 했거나 나중에 설정을
+    #   지운 Mac에서는 건너뛰기만 하면 크래시 루프가 그대로 살아남는다. 설정 없음 = 이 잡은
+    #   존재하면 안 되는 상태이므로 bootout + plist 삭제까지가 '설정 없음'의 올바른 수렴점.
+    # ★내렸다고 '말하지' 말고 내려간 걸 '확인'한다(codex R3 [P2]): bootout은 실패해도 조용하다
+    #   (2>/dev/null || true). 검증 없이 성공을 출력하고 plist까지 지우면 크래시 루프는 그대로인데
+    #   화면만 깨끗해지고, 파일이 없어져 다음 실행이 문제를 볼 근거마저 사라진다. 위 구 supervisor
+    #   정리와 같은 패턴(대기·재확인·실패 시 설치 중단)을 쓴다.
+    if launchctl print "gui/$UID_NUM/com.ohisell.wing2" >/dev/null 2>&1; then
+      launchctl bootout "gui/$UID_NUM/com.ohisell.wing2" 2>/dev/null || true
+      for _i in $(seq 1 25); do
+        launchctl print "gui/$UID_NUM/com.ohisell.wing2" >/dev/null 2>&1 || break
+        sleep 1
+      done
+      if launchctl print "gui/$UID_NUM/com.ohisell.wing2" >/dev/null 2>&1; then
+        echo "==> ❌ 설치 중단: com.ohisell.wing2 bootout 실패 — 설정 없는 잡이 크래시 루프로 남습니다."
+        echo "    수동: launchctl bootout gui/$UID_NUM/com.ohisell.wing2 후 재실행"
+        exit 1   # plist는 남긴다 — 지우면 다음 실행이 문제를 못 본다
+      fi
+      echo "    com.ohisell.wing2 → bootout 완료(설정 없음 — 크래시 루프 방지)"
+    fi
+    rm -f "$LAUNCH_AGENTS/com.ohisell.wing2.plist"
+    echo "    (건너뜀: com.ohisell.wing2 — ~/.ohisell_wing2_fetcher.json 없음. 설정 후 이 스크립트 재실행)"
+    continue
+  fi
   cp -f "$REPO_TOOLS/$script" "$LOCAL_TOOLS/$script"
   echo "    $script 복사"
   tmpl="$REPO_TOOLS/com.ohisell.$name.plist"

@@ -124,13 +124,22 @@ export interface WingRgSettlementRefreshStatus {
   last_error_at: string | null; // 페처 실패 보고 시각 — 이게 변하면 실패(성공만 기다리면 215초 헛대기)
 }
 
-export function requestWingRgSettlementRefresh(): Promise<{ requested: boolean; requested_at: string }> {
-  return fetchApi("/api/coupang/ops/wing/rg-settlement/request-refresh", { method: "POST" });
+// ★버튼 큐는 계정 차원(2026-07-27): WING1(오픽스)·WING2(오하이테크) 데몬이 각자 자기 큐만 본다.
+// accountKey 생략 시 WING1 — 기존 호출부 하위호환.
+export function requestWingRgSettlementRefresh(
+  accountKey = "COUPANG_WING1",
+): Promise<{ requested: boolean; requested_at: string }> {
+  return fetchApi(
+    `/api/coupang/ops/wing/rg-settlement/request-refresh?account_key=${encodeURIComponent(accountKey)}`,
+    { method: "POST" },
+  );
 }
 
-export function getWingRgSettlementRefreshStatus(): Promise<WingRgSettlementRefreshStatus> {
+export function getWingRgSettlementRefreshStatus(
+  accountKey = "COUPANG_WING1",
+): Promise<WingRgSettlementRefreshStatus> {
   return fetchApi<WingRgSettlementRefreshStatus>(
-    "/api/coupang/ops/wing/rg-settlement/refresh-status",
+    `/api/coupang/ops/wing/rg-settlement/refresh-status?account_key=${encodeURIComponent(accountKey)}`,
   );
 }
 
