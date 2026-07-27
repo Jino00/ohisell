@@ -1986,6 +1986,10 @@ class NaverEntity(Base):
     campaign_type: Mapped[str] = mapped_column(String(20), nullable=False, default="")  # WEB_SITE/SHOPPING/BRAND_SEARCH
     name: Mapped[str] = mapped_column(String(300), nullable=False, default="")  # 캠페인/그룹명 또는 키워드 텍스트
     status: Mapped[str] = mapped_column(String(10), nullable=False, default="on")  # on/off/deleted
+    # 네이버 statusReason 원문(D-NAO-97) — status가 'on'인데 실제로 안 도는 이유를 담는 유일한 필드
+    # (CAMPAIGN_LIMITED_BY_BUDGET=일예산 소진 / CAMPAIGN_PAUSED=상위 캠페인 OFF / *_UNDER_REVIEW 등).
+    # ★status(on/off)는 사람의 On/Off 스위치(userLock)만 반영한다 — 이 둘을 섞지 않는다.
+    status_reason: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     bid_amt: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 그룹 기본가·키워드 개별입찰
     monthly_volume: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # keywordstool PC+Mobile 합
     competition: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)  # low/mid/high
