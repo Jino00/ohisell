@@ -1759,8 +1759,14 @@ def ingest_wing_vendor_summary(
             units_sold = int(d.get("units_sold") or 0)
         except (TypeError, ValueError):
             raise HTTPException(status_code=400, detail="gmv/units_sold는 정수여야 함")
-        if gmv < 0 or units_sold < 0:
-            raise HTTPException(status_code=400, detail="값은 음수일 수 없음")
+        # ★gmv 음수 허용(2026-07-27 라이브 실측): gmv=판매액-환불액(쿠팡 공식 정의) → 환불이
+        # 판매를 초과하는 날은 정당하게 음수(WING1 07-02 -16,620·07-07 -12,900 실측). 원래 검증은
+        # e2c2560(S2 초기 구현)에서 ad-cost ingest 패턴을 그대로 복제한 것으로, "gmv도 비용처럼
+        # 항상 0 이상"이라는 근거 없는 가정이었다(주석·커밋에 그 가정을 뒷받침하는 근거 없음) —
+        # 그 결과 배치 전체가 400으로 거부되어 45일 자가치유 백필(PR #108)이 통째로 막혔다.
+        # units_sold(판매수량)는 음수가 비상식이므로 검증 유지 — 파싱 쓰레기 방어는 여기로 좁힌다.
+        if units_sold < 0:
+            raise HTTPException(status_code=400, detail="units_sold는 음수일 수 없음")
         last_refresh = d.get("last_refresh")
         rows.append({
             "date": day_date, "registration_type": rt,

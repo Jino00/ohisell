@@ -62,6 +62,38 @@ def test_ingest_bad_account_key_rejected(client):
     assert r.status_code == 400
 
 
+def test_ingest_allows_negative_gmv(client):
+    """★2026-07-27 라이브 실측 결함 재현: 환불이 판매를 초과하는 날은 gmv가 정당하게 음수다
+    (WING1 07-02 -16,620·07-07 -12,900). 배치 전체가 400으로 거부되면 안 된다."""
+    y = _yesterday()
+    r = client.post("/api/coupang/ops/wing/vendor-summary/ingest",
+                    headers={"X-Ingest-Token": _TOKEN}, json={
+                        "account_key": "COUPANG_WING1",
+                        "days": [
+                            {"date": y, "registration_type": "NORMAL", "gmv": -16620, "units_sold": 0},
+                        ],
+                    })
+    assert r.status_code == 200, r.text
+    assert r.json()["ingested"] == 1
+
+    rr = client.get(f"/api/overview/revenue-reconcile?from={y}&to={y}&account=COUPANG_WING1")
+    assert rr.status_code == 200, rr.text
+    assert rr.json()["official"]["gmv_3p"] == -16620
+
+
+def test_ingest_rejects_negative_units_sold(client):
+    """units_sold(판매수량)는 음수가 비상식 — 검증은 그대로 유지."""
+    y = _yesterday()
+    r = client.post("/api/coupang/ops/wing/vendor-summary/ingest",
+                    headers={"X-Ingest-Token": _TOKEN}, json={
+                        "account_key": "COUPANG_WING1",
+                        "days": [
+                            {"date": y, "registration_type": "NORMAL", "gmv": 100, "units_sold": -1},
+                        ],
+                    })
+    assert r.status_code == 400, r.text
+
+
 def test_ingest_then_reconcile_roundtrip(client):
     """토큰 ingest → reconcile read-back: official GMV가 그대로 조회되고 드리프트 계산됨(우리 매출 0)."""
     y = _yesterday()
