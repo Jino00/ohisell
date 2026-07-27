@@ -1762,13 +1762,9 @@ def ingest_wing_vendor_summary(
             units_sold = int(d.get("units_sold") or 0)
         except (TypeError, ValueError, OverflowError):  # OverflowError: json은 Infinity를 허용한다
             raise HTTPException(status_code=400, detail="gmv/units_sold는 정수여야 함")
-        # ★음수 허용(2026-07-27 라이브 실측, 병행 세션 38d19c1과 합류): gmv=판매액-환불액(쿠팡
-        # 공식 정의) → 환불이 판매를 초과하는 날은 정당하게 음수(WING1 07-02 -16,620·07-07
-        # -12,900 실측). 원래 검증(e2c2560, S2 초기 구현)은 ad-cost ingest의 "비용은 항상
-        # 0 이상" 패턴을 그대로 복제한 것으로, 그 가정을 뒷받침하는 근거가 애초에 없었다 —
-        # 결과적으로 배치 전체가 400으로 거부되어 45일 자가치유 백필(PR #108)이 통째로 막혔다.
-        # units_sold도 순액 의미론(환불 수량 차감)일 수 있어 동일 정책 적용 — 절대값 상한만으로
-        # 파싱 깨짐(json Infinity 등)을 방어한다(일 GMV 실측 ~수백만 원 대비 수천 배 여유).
+        # 음수 허용(2026-07-27): 환불>판매 순액 음수는 실데이터(WING1 07-02 3P GMV=-16,620 실측).
+        # 이 배치는 all-or-nothing이라 음수 거부 시 하루 때문에 45일 창 전체가 소멸 — 파싱 깨짐
+        # 수준의 절대값만 거부한다(일 GMV 실측 ~수백만 원 대비 수천 배 여유).
         if abs(gmv) > _VS_GMV_ABS_MAX or abs(units_sold) > _VS_UNITS_ABS_MAX:
             raise HTTPException(status_code=400, detail="gmv/units_sold 값이 비정상 범위")
         last_refresh = d.get("last_refresh")
@@ -1918,7 +1914,6 @@ def wing_rg_settlement_fetch_error(
 @router.post("/wing/rg-settlement/refresh-complete")
 def wing_rg_settlement_refresh_complete(
     body: dict[str, Any] = Body(default={}),
-    account_key: str = Query(default="COUPANG_WING1", description="COUPANG_WING1/2"),
     x_ingest_token: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ):
@@ -1930,13 +1925,6 @@ def wing_rg_settlement_refresh_complete(
     재시도 3회(=창 3번)를 유발한 뒤 "재시도 3회 소진"이라는 거짓 실패로 끝난다.
     ★last_success_at(데이터 신선도 시계)은 건드리지 않는다 — 받은 게 없으면 데이터는 그대로다.
     이미 업로드가 요청을 소멸시킨 뒤라면 이 호출은 무해한 no-op.
-
-    ★account_key(R3, 2026-07-27 버그 수정): 형제 엔드포인트(request/status/claim/fetch-error)는
-    모두 계정별 상태행을 쓰는데 이 완료 신호만 WING1 행을 하드코딩하고 있었다 — WING2 run이
-    완주하면 (a)자기 요청은 안 지워져 창 3번 뒤 거짓 '3회 소진'으로 끝나고 (b)신호는 WING1 행으로
-    가서 lease 불일치로 버려졌다(mark_success가 stale로 접음). 즉 이 엔드포인트가 막으려고
-    만들어진 바로 그 거짓 실패가 WING2에서 그대로 재현된다. 기본값 WING1로 하위호환 유지 —
-    account_key를 안 보내는 구버전 페처는 지금과 똑같이 동작한다.
     """
     _require_ingest_token(x_ingest_token)
     # clear_error=True(codex 2R[P2]): 1회차가 실패하고 2회차가 "받을 게 없어" 정상 종료하면
@@ -1946,8 +1934,7 @@ def wing_rg_settlement_refresh_complete(
     # 임대를 넘긴 뒤 뒤늦게 완료를 외쳐 새 요청을 지우는 것을 막는다. 없으면 기존 동작.
     lease = str(body.get("lease") or "").strip() or None
     ok = refresh_contract.mark_success(
-        db, rg_settlement_sync._rg_state_key(_require_rg_account(account_key)),
-        clear_error=True, lease=lease)
+        db, rg_settlement_sync._RG_STATE_ACCOUNT, clear_error=True, lease=lease)
     return {"ok": ok}
 
 
