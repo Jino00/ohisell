@@ -107,10 +107,16 @@ def test_refresh_status_none_when_no_row(db):
     assert st["status"] == "none"
 
 
-def test_request_then_claim_consumes_flag(db):
-    """request_refresh가 플래그 set → claim 1회만 소비(원자적), 재claim은 False."""
+def test_request_then_claim_leases_flag(db):
+    """request_refresh가 플래그 set → claim 1회만 성공(원자적), 재claim은 False.
+
+    ★2026-07-27 계약 변경(PLAN_coupang-claim-retry-lease): claim은 이제 요청을 **소비하지
+    않고 임대**한다 — 실패해도 재시도가 남아야 하므로. 중복 claim 차단(창 2회 방지) 성질은
+    lease가 살아있는 동안 그대로 유지된다.
+    """
     from app.services.coupang.ohitech_ad_sync import (
         claim_refresh,
+        mark_fetch_success,
         refresh_status,
         request_refresh,
     )
@@ -119,9 +125,13 @@ def test_request_then_claim_consumes_flag(db):
     assert r["requested"] is True and r["requested_at"]
     assert refresh_status(db)["requested"] is True
 
-    assert claim_refresh(db)["claimed"] is True       # 첫 claim 소비
-    assert refresh_status(db)["requested"] is False    # 플래그 clear됨
-    assert claim_refresh(db)["claimed"] is False       # 요청 없으면 미소비(중복 방지)
+    assert claim_refresh(db)["claimed"] is True        # 첫 claim = lease 취득
+    assert refresh_status(db)["requested"] is True     # ★요청은 보존(성공 전까진 안 지운다)
+    assert claim_refresh(db)["claimed"] is False       # lease 살아있는 동안 중복 claim 차단
+
+    mark_fetch_success(db)                             # 성공만이 요청을 소멸시킨다
+    assert refresh_status(db)["requested"] is False
+    assert claim_refresh(db)["claimed"] is False
 
 
 def test_mark_fetch_success_bumps_last_success(db):

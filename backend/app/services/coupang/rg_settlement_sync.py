@@ -22,6 +22,7 @@ from app.clients.coupang.rg_settlement import (
     CoupangWingRgSettlementClient,
 )
 from app.models import CoupangRgSettlementFee, CoupangWingCookie
+from app.services.coupang import refresh_contract
 from app.utils.crypto import decrypt_secret
 from app.utils.kst import kst_now
 
@@ -899,30 +900,54 @@ def auto_download_all(db: Session, vendor_id_map: dict[str, str]) -> list[dict]:
 #   - refresh_status:  UI 폴링·페처 데몬 공용(요청 여부 + 마지막 push 시각)
 #   - claim_refresh:   페처가 요청 소비(원자적 조건부 UPDATE)
 #   - mark_heartbeat:  업로드(push) 성공 시 last_success_at 갱신(라우터 경계에서 호출 — 머니코드 불변)
+# 위 5개는 모두 account_key(COUPANG_WING1/2) 차원 — 계정별 데몬이 자기 큐만 본다(아래 매핑 참조).
 _RG_STATE_ACCOUNT = "COUPANG_WING_RG"
+# ★계정 차원 큐 분리(2026-07-27, WING2 편입): 상태행이 계정 무구분 1개면 WING2 데몬 인스턴스를
+#   띄우는 순간 두 데몬이 같은 요청을 놓고 claim 경쟁을 한다(claim=원자적 조건부 UPDATE → 먼저
+#   집는 쪽이 이김). 오픽스 갱신 버튼이 오하이테크 창을 띄우고 오픽스는 영영 안 오는 오배치.
+#   계정별 상태행으로 큐 자체를 나눈다. WING1은 기존 행(COUPANG_WING_RG) 그대로 재사용 —
+#   기존 last_success_at·데이터·하위호환 보존. WING2 행은 첫 요청 때 on-demand 생성(마이그레이션 없음).
+_RG_STATE_ACCOUNT_BY_ACCOUNT: dict[str, str] = {
+    "COUPANG_WING1": _RG_STATE_ACCOUNT,
+    "COUPANG_WING2": "COUPANG_WING_RG2",
+}
 # RG 정산은 주 단위 → 30일 무push까지 stale 아님(주간 캐던스 + Mac 야간 off 오탐 방지).
 _RG_STALE_HOURS = 30 * 24
 
 
-def _rg_state_row(db: Session) -> CoupangWingCookie | None:
+def _rg_state_key(account_key: str) -> str:
+    """계정(COUPANG_WING1/2) → RG 상태행 account_key. RG_ACCOUNTS 밖이면 ValueError(라우터가 400)."""
+    key = _RG_STATE_ACCOUNT_BY_ACCOUNT.get(account_key)
+    if key is None:
+        raise ValueError(f"지원하지 않는 account_key: {account_key}")
+    return key
+
+
+def _rg_state_row(db: Session, account_key: str = "COUPANG_WING1") -> CoupangWingCookie | None:
     return (
         db.query(CoupangWingCookie)
-        .filter(CoupangWingCookie.account_key == _RG_STATE_ACCOUNT)
+        .filter(CoupangWingCookie.account_key == _rg_state_key(account_key))
         .first()
     )
 
 
-def _rg_ensure_state_row(db: Session) -> CoupangWingCookie:
-    row = _rg_state_row(db)
+def _rg_ensure_state_row(db: Session, account_key: str = "COUPANG_WING1") -> CoupangWingCookie:
+    row = _rg_state_row(db, account_key)
     if row is None:
-        row = CoupangWingCookie(account_key=_RG_STATE_ACCOUNT)
+        row = CoupangWingCookie(account_key=_rg_state_key(account_key))
         db.add(row)
     return row
 
 
-def rg_mark_heartbeat(db: Session) -> None:
-    """RG 엑셀 push(업로드) 성공 시각 갱신(staleness·스케줄 중복방지 기준). 라우터가 ingest 성공 후 호출."""
-    row = _rg_ensure_state_row(db)
+def rg_mark_heartbeat(db: Session, account_key: str = "COUPANG_WING1") -> None:
+    """RG 엑셀 push(업로드) 성공 시각 갱신(staleness·스케줄 중복방지 기준). 라우터가 ingest 성공 후 호출.
+
+    ★갱신 요청은 여기서 소멸시키지 않는다(codex 1R[P1]): RG 한 회차는 (정산주기 × 리포트종류)
+    여러 엑셀을 올린다. 첫 업로드에서 요청을 지우면 뒤이은 다운로드·push가 실패해도 재시도할
+    요청이 남아있지 않아 정산 데이터가 반쪽으로 남는다. 요청 소멸은 run 전체가 끝난 뒤
+    refresh-complete(=/wing/rg-settlement/refresh-complete)가 한다.
+    """
+    row = _rg_ensure_state_row(db, account_key)
     row.status = "green"
     row.last_error = None
     row.last_error_at = None  # 성공 = 실패 흔적 클리어(안 지우면 오래된 실패가 화면에 남는다)
@@ -930,7 +955,8 @@ def rg_mark_heartbeat(db: Session) -> None:
     db.commit()
 
 
-def rg_mark_fetch_error(db: Session, error: str) -> None:
+def rg_mark_fetch_error(db: Session, error: str, account_key: str = "COUPANG_WING1",
+                        kind: str | None = None, lease: str | None = None) -> None:
     """Wing 페처 RG run 실패 보고 → last_error/last_error_at 기록(UI가 실패를 감지하는 유일 경로).
 
     ★존재 이유(PR #30이 광고비에서 먼저 고친 것과 같은 구멍): 페처가 갱신 요청을 claim한
@@ -942,32 +968,32 @@ def rg_mark_fetch_error(db: Session, error: str) -> None:
     곧바로 "쿠키 만료(재설정 필요)" + 쿠키 재설정 CTA로 렌더된다(Layout.tsx:201/206).
     브라우저 크래시는 쿠키 문제가 아니라 재설정해도 헛수고다. 지속 실패는 워치독이
     last_success_at 경과로 잡는다(status 미의존).
+
+    ★kind(옵션): "login_required"면 재시도하지 않고 요청 소멸(§0 금지선). 그 외는 lease만
+    반납해 다음 폴에서 재시도된다(최대 3회).
     """
-    row = _rg_ensure_state_row(db)
-    row.last_error = error[:300]  # 컬럼 한계 — 긴 스택트레이스로 보고 자체가 날아가면 안 된다
-    row.last_error_at = kst_now()
-    db.commit()
+    _rg_ensure_state_row(db, account_key)
+    db.commit()  # 행이 없던 경우 대비(계약 SA는 기존 행에만 쓴다)
+    refresh_contract.report_failure(db, _rg_state_key(account_key), error, kind, lease=lease)
 
 
-def rg_request_refresh(db: Session) -> dict:
-    """UI 'RG 정산 갱신' 버튼/스케줄 → 갱신 요청 플래그 set. Wing 페처 데몬이 다음 폴링에서 소비."""
-    row = _rg_ensure_state_row(db)
-    row.refresh_requested_at = kst_now()
-    db.commit()
-    return {"requested": True, "requested_at": row.refresh_requested_at.isoformat()}
+def rg_request_refresh(db: Session, account_key: str = "COUPANG_WING1") -> dict:
+    """UI 'RG 정산 갱신' 버튼/스케줄 → 갱신 요청 set. 성공하거나 3회 실패할 때까지 살아있다(lease 계약)."""
+    return refresh_contract.request_refresh(db, _rg_state_key(account_key))
 
 
-def rg_refresh_status(db: Session) -> dict:
+def rg_refresh_status(db: Session, account_key: str = "COUPANG_WING1") -> dict:
     """RG 갱신 요청/완료 상태. UI(버튼 후 폴링)·Wing 페처(요청 확인) 공용. 민감값 없음.
 
     last_error_at=마지막 실패 시각(버튼 후 이 값이 올라가면 갱신 실패) — UI가 성공/실패 둘 중
     무엇이 왔는지 이 두 시각의 변화로 가른다. 없으면 실패를 못 보고 폴링 창을 헛기다린다.
     """
-    row = _rg_state_row(db)
+    row = _rg_state_row(db, account_key)
     if row is None:
         return {"requested": False, "requested_at": None, "last_success_at": None,
                 "status": "none", "last_error": None, "last_error_at": None,
-                "age_hours": None, "stale": False}
+                "age_hours": None, "stale": False,
+                **refresh_contract.status_fields(None)}
     age_hours = None
     stale = False
     if row.last_success_at:
@@ -982,18 +1008,17 @@ def rg_refresh_status(db: Session) -> dict:
         "last_error_at": row.last_error_at.isoformat() if row.last_error_at else None,
         "age_hours": age_hours,
         "stale": stale,
+        **refresh_contract.status_fields(row),
     }
 
 
-def rg_claim_refresh(db: Session) -> dict:
-    """Wing 페처가 RG 갱신 요청을 '소비'(플래그 clear). 원자적 조건부 UPDATE(광고/vendor-summary 패턴)."""
-    from sqlalchemy import update
+def rg_claim_refresh(db: Session, account_key: str = "COUPANG_WING1") -> dict:
+    """Wing 페처가 RG 갱신 요청을 **임대**(lease)한다. 플래그는 성공/소진까지 보존(refresh_contract).
 
-    res = db.execute(
-        update(CoupangWingCookie)
-        .where(CoupangWingCookie.account_key == _RG_STATE_ACCOUNT)
-        .where(CoupangWingCookie.refresh_requested_at.isnot(None))
-        .values(refresh_requested_at=None)
-    )
-    db.commit()
-    return {"claimed": (res.rowcount or 0) > 0}
+    ★account_key로 상태행이 갈리므로 계정별 데몬이 서로의 요청을 훔쳐가지 않는다(큐 격리).
+    ★settle_on_success_heartbeat=False(codex 4R[P1]): RG 한 회차는 (정산주기×리포트종류) 여러
+    엑셀을 올린다. 첫 엑셀의 heartbeat를 "완주"로 읽으면 나머지 리포트를 영영 재시도하지 않는다.
+    RG의 완주 신호는 run 종료 시의 refresh-complete 하나뿐이다.
+    """
+    return refresh_contract.claim_refresh(db, _rg_state_key(account_key),
+                                          settle_on_success_heartbeat=False)

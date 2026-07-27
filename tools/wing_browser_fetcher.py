@@ -31,6 +31,9 @@
 #    WING2→A01029796(오하이테크). rg_daily_hour은 무시됨(폐기·버튼-only), rg_min_interval_s=RG 실행 최소간격.
 #    rg_status_days=층1 계정 수수료 push 윈도우(기본 35, 백필 시 90으로 1회 실행). rg_days=엑셀 열거 윈도우.)
 # 다계정 인스턴스 분리 env(D-7): OHISELL_WING_CONFIG(config)·OHISELL_WING_LOG(로그)·OHISELL_WING_LOCK(lock).
+#   WING2(오하이테크) 인스턴스: tools/com.ohisell.wing2.plist 참조(env 3종 + 별도 state_file).
+#   ★버튼 큐도 계정 차원이라 두 인스턴스가 경쟁하지 않는다 — refresh-status/claim은 cfg["account_key"]를
+#     쿼리로 보내고 백엔드가 계정별 상태행으로 가른다(2026-07-27).
 from __future__ import annotations
 
 import contextlib
@@ -648,8 +651,10 @@ def cmd_login(cfg: dict, wait_secs: int = 600) -> int:
             res = _login_wait_loop(page, ctx, cfg, state, wait_secs, cdp=cdp)
     if res is None:
         log.error("제한 시간 내 로그인 감지 실패 — 다시 시도하세요.")
-        return 1
+        return RC_LOGIN_REQUIRED   # ★로그인 자체가 안 된 경우만 '로그인 필요'(codex 1R[P2])
     log.info("로그인 감지·세션 저장 완료: %s", state)
+    # 로그인은 됐는데 push가 실패한 경우는 재시도 대상 — login_required로 보고하면
+    # 멀쩡한 세션을 두고 요청이 소멸한다(거짓 로그인 문제).
     summ = _summarize(res.get("body") or "")
     if summ:
         _log_summary("[login]", summ, _vs_payload(cfg))
@@ -684,6 +689,7 @@ def _do_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
     cdp = _cdp_mode(cfg)
     owner = _ChromeOwner()   # 창 소유권 — 로그인 미완료 시 창을 남기기 위해 직접 만든다
     res = None
+    login_needed = False     # 사람 로그인이 필요한 실패인지(=재시도해도 소용없음, §0)
     try:
         with sync_playwright() as p:
             with _chrome(p, cfg, state, owner=owner) as (page, ctx, save):
@@ -703,9 +709,11 @@ def _do_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
                         res = relogin if relogin is not None else res2
                         if relogin is None:
                             owner.keep_open = True   # 로그인 미완료 → 창 남김(이어서 로그인 가능)
+                            login_needed = True
                     else:
                         res = res2
                         owner.keep_open = True       # 로그인 대기 없는 경로 → 창 남김
+                        login_needed = True
                 elif _is_success(res):
                     save()  # 회전된 세션쿠키 갱신 (CDP: no-op)
     except Exception as e:  # noqa: BLE001
@@ -717,7 +725,7 @@ def _do_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
         body = (res.get("body") if res else "") or ""
         log.error("vendor-summary 실패 status=%s — %s. 'login' 재실행 필요.",
                   status, body[:160].replace("\n", " "))
-        return 1
+        return RC_LOGIN_REQUIRED if login_needed else 1
     summ = _summarize(res.get("body") or "")
     if not summ:
         log.error("vendor-summary 파싱 실패 — 응답 형태 변경 의심: %s", (res.get("body") or "")[:160])
@@ -741,6 +749,15 @@ def cmd_run(cfg: dict) -> int:
         return _do_run(cfg, state, login_wait_secs=0)
 
 
+# run 반환코드 — 3=로그인 필요(재시도 무의미: 창만 반복해서 뜬다, §0). 1=그 외 실패(재시도 대상).
+RC_LOGIN_REQUIRED = 3
+# 4=이번 회차는 중복 요청(dedup)에 막혀 받지 못했다 — 실패도 성공도 아니고 "나중에 다시".
+# 30초 뒤 재시도는 여전히 dedup 윈도우 안이므로 긴 백오프를 쓴다(codex 4R[P1]).
+RC_RETRY_LATER = 4
+_VS_ERROR_PATH = "/api/coupang/ops/wing/vendor-summary/fetch-error"
+_RG_ERROR_PATH = "/api/coupang/ops/wing/rg-settlement/fetch-error"
+_RG_COMPLETE_PATH = "/api/coupang/ops/wing/rg-settlement/refresh-complete"
+
 _POLL_INTERVAL_S = 15       # 갱신 요청 확인 간격(창 안 뜸, 가벼운 GET)
 _LOGIN_WAIT_S = 180         # 세션 만료 시 헤드풀 창 로그인 대기 한도
 _MIN_FETCH_INTERVAL_S = 45  # fetch(창) 최소 간격 — 요청 폭주로 창 스팸 방지(광고 패턴)
@@ -749,9 +766,13 @@ _MIN_FETCH_INTERVAL_S = 45  # fetch(창) 최소 간격 — 요청 폭주로 창 
 _MAX_CONSECUTIVE_NET_FAILS = 20  # 15s 간격 × 20 ≈ 5분
 
 
+# ★버튼 큐는 계정 차원(2026-07-27, WING2 인스턴스 편입): account_key를 안 보내면 백엔드가
+#   WING1 큐로 해석한다 → WING2 인스턴스가 오픽스(WING1) 버튼 요청을 claim해 가져가는 도난이
+#   난다(claim=원자적, 먼저 집는 쪽이 이김). 아래 4개 호출 모두 자기 계정을 명시한다.
 def _prod_refresh_status(cfg: dict) -> dict:
     r = requests.get(
         cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/wing/vendor-summary/refresh-status",
+        params={"account_key": cfg["account_key"]},
         timeout=15,
     )
     r.raise_for_status()
@@ -761,6 +782,7 @@ def _prod_refresh_status(cfg: dict) -> dict:
 def _prod_claim(cfg: dict) -> dict:
     r = requests.post(
         cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/wing/vendor-summary/refresh-claim",
+        params={"account_key": cfg["account_key"]},
         headers={"X-Ingest-Token": cfg["ingest_token"]},
         timeout=15,
     )
@@ -771,6 +793,7 @@ def _prod_claim(cfg: dict) -> dict:
 def _prod_rg_refresh_status(cfg: dict) -> dict:
     r = requests.get(
         cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/wing/rg-settlement/refresh-status",
+        params={"account_key": cfg["account_key"]},
         timeout=15,
     )
     r.raise_for_status()
@@ -780,11 +803,65 @@ def _prod_rg_refresh_status(cfg: dict) -> dict:
 def _prod_rg_claim(cfg: dict) -> dict:
     r = requests.post(
         cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/wing/rg-settlement/refresh-claim",
+        params={"account_key": cfg["account_key"]},
         headers={"X-Ingest-Token": cfg["ingest_token"]},
         timeout=15,
     )
     r.raise_for_status()
     return r.json()
+
+
+def _prod_notify_rg_complete(cfg: dict, lease: str | None = None) -> None:
+    """RG run 정상 완주 → 갱신 요청 소멸(lease 계약). 업로드가 이미 소멸시켰으면 무해한 no-op.
+
+    lease: 내 임대에 대해서만 완료 처리(20분 넘긴 run이 남의 요청을 지우는 것 차단).
+    """
+    if not _push_configured(cfg):
+        return
+    body = {"lease": lease} if lease else {}
+    # ★완료 신호는 몇 번 재시도한다(codex 5R[P1]): 이 한 번의 POST가 유실되면 요청이 임대된
+    #   채 남아 UI 타임아웃·중복 수집·거짓 소진으로 번진다(RG는 자동완료 안전망도 꺼져 있다).
+    for attempt in range(3):
+        try:
+            r = requests.post(
+                cfg["prod_base_url"].rstrip("/") + _RG_COMPLETE_PATH,
+                json=body,
+                headers={"X-Ingest-Token": cfg["ingest_token"]},
+                timeout=10,
+            )
+            if r.status_code == 200:
+                return
+            log.warning("RG refresh-complete 비200(%s) — 재시도 %d/3", r.status_code, attempt + 1)
+        except Exception as e:  # noqa: BLE001
+            log.warning("RG refresh-complete 실패(%s) — 재시도 %d/3", str(e)[:80], attempt + 1)
+        time.sleep(2 * (attempt + 1))
+    log.error("RG refresh-complete 최종 실패 — 요청이 임대된 채 남는다(TTL 후 재시도됨).")
+
+
+def _prod_report_failure(cfg: dict, path: str, error: str, kind: str | None = None,
+                        lease: str | None = None) -> None:
+    """run 실패를 prod에 보고 → 재시도 판정의 입력(lease 계약, PLAN_coupang-claim-retry-lease).
+
+    보고가 없으면 lease TTL(기본 20분)이 지나야 재시도된다 — 보고하면 다음 폴에서 곧바로.
+    kind="login_required"면 prod가 재시도 없이 요청을 소멸시킨다(§0 금지선: 재시도해도
+    실패하고 창만 반복해서 뜬다). best-effort — 보고 실패가 run을 더 망가뜨리면 안 된다.
+    """
+    if not _push_configured(cfg):
+        return
+    body = {"error": str(error)[:300]}
+    if kind:
+        body["kind"] = kind
+    if lease:
+        body["lease"] = lease   # 내 임대에 대해서만 보고(stale 보고 차단, codex 1R[P1])
+    try:
+        requests.post(
+            cfg["prod_base_url"].rstrip("/") + path,
+            json=body,
+            headers={"X-Ingest-Token": cfg["ingest_token"]},
+            timeout=10,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("fetch-error 보고 실패(무시): %s", str(e)[:120])
 
 
 def cmd_poll(cfg: dict) -> int:
@@ -809,6 +886,13 @@ def cmd_poll(cfg: dict) -> int:
     # RG 정산(S4-P2): 온디맨드 버튼만. RG는 주 단위·느림(생성 대기) → 별도 쿨다운 유지.
     rg_cooldown = int(cfg.get("rg_min_interval_s", 3600))   # RG 실행 최소 간격(실패 재시도 폭주 방지)
     last_rg = 0.0
+    # ★재시도용 짧은 백오프(codex 2R[P1]): RG 쿨다운은 1시간이라, 재시도 가능한 실패 뒤
+    # 다음 시도가 1시간 뒤가 된다 — UI는 215초에 포기하고 3회 소진에 2시간이 걸린다.
+    # 실패로 임대를 반납한 경우에 한해 쿨다운을 이 시각까지 면제한다(요청이 살아있는 동안만).
+    rg_retry_at: float | None = None
+    rg_retry_backoff = int(cfg.get("rg_retry_backoff_s", 30))
+    # 중복 요청(dedup)에 막힌 회차용 긴 백오프 — 30초 뒤 재시도는 반드시 또 dup이 된다.
+    rg_dup_backoff = int(cfg.get("rg_dup_backoff_s", 900))
     log.info("Wing 폴 데몬 시작 — %ds 간격 확인, fetch 최소간격 %ds. RG 버튼 전용·간격 %ds(창은 버튼 요청 시에만 뜸).",
              interval, cooldown, rg_cooldown)
     net_fails = 0  # 연속 네트워크 실패 카운터(vendor-summary 폴 기준) — 성공 시 리셋
@@ -824,13 +908,21 @@ def cmd_poll(cfg: dict) -> int:
                     with _try_fetch_lock() as acquired:
                         if not acquired:
                             log.info("다른 fetch 진행 중 — 요청 보류(다음 폴에서 처리)")
-                        elif _prod_claim(cfg).get("claimed"):
-                            last_fetch = time.monotonic()
-                            log.info("갱신 요청 감지 — fetch 시작")
-                            if not Path(state).is_file():
-                                cmd_login(cfg, wait_secs=_LOGIN_WAIT_S)
-                            else:
-                                _do_run(cfg, state, login_wait_secs=_LOGIN_WAIT_S)  # 락 보유 중
+                        else:
+                            _claim = _prod_claim(cfg)
+                            if _claim.get("claimed"):
+                                lease = _claim.get("lease")   # 내 임대 식별자(실패 보고에 첨부)
+                                last_fetch = time.monotonic()
+                                log.info("갱신 요청 감지 — fetch 시작")
+                                if not Path(state).is_file():
+                                    rc = cmd_login(cfg, wait_secs=_LOGIN_WAIT_S)
+                                else:
+                                    rc = _do_run(cfg, state, login_wait_secs=_LOGIN_WAIT_S)  # 락 보유 중
+                                if rc != 0:
+                                    _prod_report_failure(
+                                        cfg, _VS_ERROR_PATH, f"판매분석 수집 실패(rc={rc})",
+                                        kind=("login_required" if rc == RC_LOGIN_REQUIRED else None),
+                                        lease=lease)
         except requests.RequestException as e:
             net_fails += 1
             log.warning("폴 확인 실패(네트워크) %d/%d: %s", net_fails, _MAX_CONSECUTIVE_NET_FAILS, str(e)[:80])
@@ -843,22 +935,44 @@ def cmd_poll(cfg: dict) -> int:
         # ── RG 정산 다운로드: 버튼 요청만 소비(2026-07-27 — 새벽 일일예약 제거, 순수 버튼-only) ──
         try:
             rg_st = _prod_rg_refresh_status(cfg)
-            if bool(rg_st.get("requested")) and (time.monotonic() - last_rg >= rg_cooldown):
+            _rg_ready = (time.monotonic() - last_rg >= rg_cooldown) or (
+                rg_retry_at is not None and time.monotonic() >= rg_retry_at)
+            if bool(rg_st.get("requested")) and _rg_ready:
                 with _try_fetch_lock() as acquired:
                     if not acquired:
                         log.info("RG: 다른 fetch 진행 중 — 보류(다음 폴)")
                     else:
-                        # claim으로 원자적 소비(요청 유실 방지).
-                        # NOTE(codex P2): claim은 실행 성공 전에 이뤄져 실패 시 버튼요청이 유실된다
-                        #   (vendor-summary와 동일 패턴). 일일예약이 재시도로 덮어주던 것이 사라졌으므로,
-                        #   실패 시에는 사람이 버튼을 다시 누른다(낡음은 전역 신선도 배너가 표면화).
-                        if _prod_rg_claim(cfg).get("claimed", False):
+                        # claim = 원자적 임대(요청 플래그는 보존, 2026-07-27 lease 계약).
+                        #   실패를 보고하면 임대만 반납돼 다음 폴에서 자동 재시도된다(최대 3회).
+                        #   로그인 필요는 재시도 제외 — 창만 반복해서 뜨기 때문(PLAN §0).
+                        _rg_claimed = _prod_rg_claim(cfg)
+                        if _rg_claimed.get("claimed", False):
+                            rg_lease = _rg_claimed.get("lease")
                             last_rg = time.monotonic()
+                            rg_retry_at = None   # 이번 시도가 시작됨 — 면제 소진
                             log.info("RG 정산 다운로드 트리거(버튼)")
                             if not Path(state).is_file():
                                 log.warning("RG: 세션 파일 없음 — 'login' 필요(이번 회차 스킵)")
+                                _prod_report_failure(cfg, _RG_ERROR_PATH,
+                                                     "세션 파일 없음 — 로그인 필요",
+                                                     kind="login_required", lease=rg_lease)
                             else:
-                                _do_rg_run(cfg, state, login_wait_secs=_LOGIN_WAIT_S)
+                                rc = _do_rg_run(cfg, state, login_wait_secs=_LOGIN_WAIT_S)
+                                if rc != 0:
+                                    _prod_report_failure(
+                                        cfg, _RG_ERROR_PATH, f"RG 정산 수집 실패(rc={rc})",
+                                        kind=("login_required" if rc == RC_LOGIN_REQUIRED else None),
+                                        lease=rg_lease)
+                                    if rc != RC_LOGIN_REQUIRED:
+                                        # 재시도 가능한 실패 → 1시간 쿨다운을 면제하고 곧 다시
+                                        # 시도한다(요청이 살아있을 때만 실제로 claim된다).
+                                        # dedup에 막힌 회차는 짧은 재시도가 무의미 → 긴 백오프.
+                                        rg_retry_at = time.monotonic() + (
+                                            rg_dup_backoff if rc == RC_RETRY_LATER else rg_retry_backoff)
+                                else:
+                                    # 정상 완주 신호 — 받을 게 없어 업로드 0건이었어도 요청은
+                                    # 여기서 소멸한다(없으면 창을 3번 더 띄운 뒤 거짓 실패).
+                                    _prod_notify_rg_complete(cfg, lease=rg_lease)
         except requests.RequestException as e:
             log.warning("RG 폴 확인 실패(네트워크): %s", str(e)[:80])
         except Exception as e:  # noqa: BLE001 — 데몬은 어떤 오류에도 죽지 않는다
@@ -1043,6 +1157,10 @@ def _rg_find_completed(page, from_ms: int, want: str):
     return None
 
 
+# dup(이미 접수된 생성요청) 표식 — 실패가 아니라 "이번 회차 스킵"이다(codex 3R[P1]).
+RG_DUP_SKIP = object()
+
+
 def _rg_download_one(page, group_key: str, report_type: str, req_time_ms: int, poll_timeout: int):
     """단일 (group_key, report_type): 생성요청 → 폴링 → v2. 반환 {url, request_time} 또는 None."""
     res = _rg_post(page, RG_REQUEST_DOWNLOAD_PATH, {
@@ -1060,8 +1178,11 @@ def _rg_download_one(page, group_key: str, report_type: str, req_time_ms: int, p
         # ★dup 스킵(codex P1): 기존 생성분은 download-list로 기간 식별 불가 → 오업로드 위험.
         #   일일 캐던스(>24h)는 dedup 윈도우 밖이라 dup이 거의 없음. dup이면 이번 회차만 건너뛰고
         #   직전(생성 당시 fresh)·다음 fresh 실행에 맡긴다. 빠른 재실행 시 스킵이 안전한 선택.
+        # ★실패로 세지 않는다(codex 3R[P1]): 재시도는 30초 뒤라 dedup 윈도우 안이라 항상 dup이
+        #   된다 — 실패로 세면 재시도 3회를 dup으로 소진하고 "3회 소진"이라는 거짓 실패로 끝난다.
+        #   dup은 "이미 생성 요청이 접수됨"이라는 의도된 no-op이므로 스킵으로 분류한다.
         log.info("RG 중복 요청(기간 안전식별 불가) — 스킵 %s/%s", report_type, group_key)
-        return None
+        return RG_DUP_SKIP
     want = str(req_time_ms)
     from_ms = req_time_ms - 24 * 3600 * 1000
 
@@ -1179,20 +1300,25 @@ def _do_rg_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
 
     cdp = _cdp_mode(cfg)
     owner = _ChromeOwner()   # 창 소유권 — 로그인 미완료 시 창을 남기기 위해 직접 만든다
-    pushed = failed = 0
+    pushed = failed = skipped = 0
     try:
         with sync_playwright() as p:
             with _chrome(p, cfg, state, owner=owner) as (page, ctx, save):
                 page.goto(RG_DASH_URL, wait_until="domcontentloaded", timeout=40000)
                 page.wait_for_timeout(3500)   # Cloudflare/Akamai JS 챌린지 안정화
                 if not _rg_session_ok(page):
+                    # ★재시도 대상으로 둔다(codex 5R[P1], rocket _session_ok와 같은 원칙):
+                    #   _rg_session_ok는 로그아웃뿐 아니라 status/api의 일시적 비200·깨진 JSON·
+                    #   Playwright evaluate 실패까지 전부 False로 접는다. 로그아웃이 확증된 게
+                    #   아니므로 login_required로 1회 만에 소멸시키면 안 된다. 창은 열어 두므로
+                    #   사람이 늦게 로그인해도 다음 재시도가 자동으로 이어받는다.
                     owner.keep_open = True    # 로그인할 창이 필요 → 닫지 않음
                     if login_wait_secs <= 0:
-                        log.error("RG: 세션 만료(정산 status/api 미응답). 'login' 또는 데몬 로그인 필요.")
+                        log.error("RG: 세션 만료 의심(정산 status/api 미응답). 'login' 또는 데몬 로그인 필요.")
                         return 1
-                    log.info("RG: 세션 만료 — 창에서 로그인하세요(자동 감지, 최대 %d초).", login_wait_secs)
+                    log.info("RG: 세션 만료 의심 — 창에서 로그인하세요(자동 감지, 최대 %d초).", login_wait_secs)
                     if not _rg_login_wait(page, ctx, state, login_wait_secs, cdp=cdp):
-                        log.error("RG: 로그인 감지 실패.")
+                        log.error("RG: 로그인 감지 실패(창은 열어 둠 — 다음 재시도가 이어받는다).")
                         return 1
                     owner.keep_open = False   # 로그인 성공 → 평소대로 작업 후 창 닫음
                 else:
@@ -1230,6 +1356,9 @@ def _do_rg_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
                         req_time = base_ms + idx
                         idx += 1
                         got = _rg_download_one(page, t["group_key"], rt, req_time, poll_timeout)
+                        if got is RG_DUP_SKIP:
+                            skipped += 1   # 실패 아님 — 재시도해도 계속 dup이다
+                            continue
                         if not got:
                             failed += 1
                             continue
@@ -1241,8 +1370,12 @@ def _do_rg_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
     except Exception as e:  # noqa: BLE001 — 브라우저 오류는 1로 보고(데몬은 죽지 않음)
         log.error("RG 브라우저 실행 오류: %s", e)
         return 1
-    log.info("RG 다운로드 완료 — push 성공 %d / 실패 %d", pushed, failed)
-    return 0 if failed == 0 else 1
+    log.info("RG 다운로드 완료 — push 성공 %d / 실패 %d / 중복스킵 %d", pushed, failed, skipped)
+    if failed:
+        return 1
+    # ★dup만 있고 실패가 없어도 '완료'가 아니다(codex 4R[P1]): 그 리포트는 이번에도 못 받았다.
+    #   완료로 보고하면 요청이 닫혀 영영 안 받는다 → 재시도 대상(긴 백오프)으로 돌린다.
+    return RC_RETRY_LATER if skipped else 0
 
 
 def cmd_rg(cfg: dict) -> int:

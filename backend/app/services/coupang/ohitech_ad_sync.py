@@ -23,6 +23,7 @@ from decimal import Decimal, InvalidOperation
 from sqlalchemy.orm import Session
 
 from app.models import CoupangAdReport, CoupangWingCookie
+from app.services.coupang import refresh_contract
 from app.utils.kst import kst_now
 
 log = logging.getLogger("ohitech_ad_sync")
@@ -138,11 +139,8 @@ def _ensure_state_row(db: Session):
 
 
 def request_refresh(db: Session) -> dict:
-    """UI '광고비 갱신' 버튼 → 갱신 요청 플래그 set. Mac poll 데몬이 다음 폴에서 소비."""
-    row = _ensure_state_row(db)
-    row.refresh_requested_at = kst_now()
-    db.commit()
-    return {"requested": True, "requested_at": row.refresh_requested_at.isoformat()}
+    """UI '광고비 갱신' 버튼 → 갱신 요청 set. 성공하거나 3회 실패할 때까지 살아있다(lease 계약)."""
+    return refresh_contract.request_refresh(db, _OHITECH_AD_ACCOUNT)
 
 
 def refresh_status(db: Session) -> dict:
@@ -154,7 +152,8 @@ def refresh_status(db: Session) -> dict:
     row = _state_row(db)
     if row is None:
         return {"requested": False, "requested_at": None, "last_success_at": None,
-                "status": "none", "last_error": None, "last_error_at": None}
+                "status": "none", "last_error": None, "last_error_at": None,
+                **refresh_contract.status_fields(None)}
     return {
         "requested": row.refresh_requested_at is not None,
         "requested_at": row.refresh_requested_at.isoformat() if row.refresh_requested_at else None,
@@ -162,34 +161,30 @@ def refresh_status(db: Session) -> dict:
         "status": row.status,
         "last_error": row.last_error,
         "last_error_at": row.last_error_at.isoformat() if row.last_error_at else None,
+        **refresh_contract.status_fields(row),
     }
 
 
 def claim_refresh(db: Session) -> dict:
-    """페처가 갱신 요청을 '소비'(플래그 clear). 원자적 조건부 UPDATE(중복 claim 방지)."""
-    from sqlalchemy import update
-
-    res = db.execute(
-        update(CoupangWingCookie)
-        .where(CoupangWingCookie.account_key == _OHITECH_AD_ACCOUNT)
-        .where(CoupangWingCookie.refresh_requested_at.isnot(None))
-        .values(refresh_requested_at=None)
-    )
-    db.commit()
-    return {"claimed": (res.rowcount or 0) > 0}
+    """페처가 갱신 요청을 **임대**(lease). 플래그는 성공/소진까지 보존(refresh_contract)."""
+    return refresh_contract.claim_refresh(db, _OHITECH_AD_ACCOUNT)
 
 
 def mark_fetch_success(db: Session) -> None:
-    """페처 run 성공 시 last_success_at 갱신(UI 폴링 완료 감지 + poll 23h 자동실행 기준)."""
+    """페처 run 성공 시 last_success_at 갱신(UI 폴링 완료 감지).
+
+    ★lease 계약: 갱신 요청이 소멸하는 정상 경로는 여기 하나뿐이다(claim은 소비하지 않는다).
+    """
     row = _ensure_state_row(db)
     row.last_success_at = kst_now()
     row.status = "green"
     row.last_error = None
     row.last_error_at = None  # 성공 = 실패 흔적 클리어(안 지우면 오래된 실패가 화면에 남는다)
     db.commit()
+    refresh_contract.mark_success(db, _OHITECH_AD_ACCOUNT)
 
 
-def mark_fetch_error(db: Session, error: str) -> None:
+def mark_fetch_error(db: Session, error: str, kind: str | None = None, lease: str | None = None) -> None:
     """페처 run 실패 보고 → last_error/last_error_at 기록(UI가 실패를 감지하는 유일 경로).
 
     ★존재 이유(PR #30이 광고비에서 먼저 고친 것과 같은 구멍): 페처가 갱신 요청을 claim한
@@ -202,8 +197,10 @@ def mark_fetch_error(db: Session, error: str) -> None:
     곧바로 "쿠키 만료(재설정 필요)" + 쿠키 재설정 CTA로 렌더된다(Layout.tsx:201/206).
     브라우저 크래시는 쿠키 문제가 아니라 재설정해도 헛수고다. 지속 실패는 워치독이
     last_success_at 경과로 잡는다(status 미의존).
+
+    ★kind(옵션): "login_required"면 재시도하지 않고 요청 소멸(§0 금지선 — 재시도해도 실패하고
+    창만 반복해서 뜬다). 그 외 실패는 lease만 반납해 다음 폴에서 재시도된다(최대 3회).
     """
-    row = _ensure_state_row(db)
-    row.last_error = error[:300]  # 컬럼 한계 — 긴 스택트레이스로 보고 자체가 날아가면 안 된다
-    row.last_error_at = kst_now()
-    db.commit()
+    _ensure_state_row(db)
+    db.commit()  # 행이 없던 경우 대비(계약 SA는 기존 행에만 쓴다)
+    refresh_contract.report_failure(db, _OHITECH_AD_ACCOUNT, error, kind, lease=lease)

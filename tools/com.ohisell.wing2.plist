@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- launchd: 쿠팡 Wing 페처 WING2(오하이테크) 인스턴스 — RG 정산 버튼 큐 소비 (Jino Mac). -->
+<!-- com.ohisell.wing(WING1=오픽스)과 같은 스크립트를 env로 인스턴스 분리해 띄운다(D-7): -->
+<!--   config/log/lock 3종 경로가 전부 달라야 두 인스턴스가 서로를 죽이지 않는다 -->
+<!--   (lock이 겹치면 한쪽 flock이 상대의 실행을 통째로 건너뛰게 한다). -->
+<!-- ★버튼 큐 자체도 계정 차원이라(2026-07-27) 이 인스턴스는 WING2 요청만 claim한다 — -->
+<!--   WING1의 '판매분석 갱신'·'RG 정산 갱신' 요청을 훔쳐갈 수 없다. -->
+<!-- ★설치는 tools/install_local_runtime.sh 로만 한다(codex R1 [P1]): 이 파일은 템플릿이라 -->
+<!--   __PYTHON__/__SCRIPT__ 자리표시자를 품고 있다. 그대로 cp+load 하면 launchd가 실행 파일을 -->
+<!--   못 찾아 KeepAlive로 10초마다 재시도하는 크래시 루프가 된다. 스크립트가 치환·bootstrap까지 -->
+<!--   수행하며, ~/.ohisell_wing2_fetcher.json 이 있을 때만 이 잡을 설치한다. -->
+<!-- 설치:  bash tools/install_local_runtime.sh -->
+<!-- 코드 변경 후 재배포:  launchctl kickstart -k gui/$(id -u)/com.ohisell.wing2 -->
+<!-- 경로(python/스크립트)는 설치 전 실제 경로로 치환되어야 함. -->
+<!-- ~/.ohisell_wing2_fetcher.json 필수 항목: account_key=COUPANG_WING2, vendor_id=A01029796(오하이테크), -->
+<!--   prod_base_url·ingest_token(없으면 poll 데몬 fail-fast), state_file=~/.ohisell_wing2_state.json -->
+<!--   (★state_file을 WING1과 공유하면 세션이 서로 덮어써 로그인이 계속 풀린다). -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.ohisell.wing2</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__PYTHON__</string>
+    <string>__SCRIPT__</string>
+    <string>poll</string>
+  </array>
+  <!-- 인스턴스 분리(D-7): config·log·lock을 WING1과 다른 경로로. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>OHISELL_WING_CONFIG</key>
+    <string>/Users/jino/.ohisell_wing2_fetcher.json</string>
+    <key>OHISELL_WING_LOG</key>
+    <string>/Users/jino/.ohisell_wing2_fetcher.log</string>
+    <key>OHISELL_WING_LOCK</key>
+    <string>/Users/jino/.ohisell_wing2_fetcher.lock</string>
+  </dict>
+  <!-- 상주 데몬: 죽으면 자동 재시작(crash·네트워크 끊김·Mac sleep 복귀 대비). -->
+  <key>KeepAlive</key>
+  <true/>
+  <key>RunAtLoad</key>
+  <true/>
+  <!-- 재시작 폭주 방지: 비정상 종료 시 최소 10초 후 재기동. -->
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/jino/.ohisell_wing2_fetcher.launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/jino/.ohisell_wing2_fetcher.launchd.log</string>
+</dict>
+</plist>

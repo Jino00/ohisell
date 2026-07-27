@@ -219,11 +219,17 @@ export default function CoupangOps() {
         await new Promise((r) => setTimeout(r, 3000));
         const st = await getAdCostRefreshStatus();
         if (st.last_success_at && st.last_success_at !== baseline) { done = true; break; }
-        // 페처가 실패를 보고하면 즉시 이탈 — 이게 없으면 이미 끝난 실패를 215초 헛기다린다.
-        if (st.last_error_at && st.last_error_at !== errBaseline) {
+        // 페처가 **종료된** 실패를 보고하면 즉시 이탈 — 이게 없으면 이미 끝난 실패를 215초 헛기다린다.
+        // ★requested가 아직 true면 재시도가 남아 있다는 뜻(lease 계약, 2026-07-27) — 여기서
+        // 이탈하면 1회차 실패를 최종 실패로 오보한다. 요청이 소멸(=재시도 소진/로그인 필요)한
+        // 뒤에야 실패로 판정한다. last_error에는 소멸 사유가 들어 있다.
+        if (st.last_error_at && st.last_error_at !== errBaseline && !st.requested) {
           failed = st.last_error || "원인 미상";
           break;
         }
+        // 새 실패 없이 요청만 사라졌다 = 수집이 정상 종료됐다(예: RG "받을 정산주기 없음").
+        // 이 분기가 없으면 성공한 무작업 회차를 타임아웃까지 기다린 뒤 "응답 없음"으로 오보한다.
+        if (!st.requested) { done = true; break; }
       }
       if (done) {
         await loadTodayAdCost();
