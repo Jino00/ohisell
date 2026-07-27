@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from app.utils.kst import kst_now, kst_today
 from datetime import date, datetime, timedelta
@@ -732,6 +733,53 @@ def run_naver_auto_operator_daily_job():
         log.exception("[스케줄러] PX4 브리핑 에러(fail-open): %s", e)
     finally:
         db3.close()
+
+    # CS(콜드 스타트 첫 입찰) — ① 시장가 사다리 수집(npla-estimate) → ② 콜드 소재 첫 입찰 레인.
+    # 별도 세션·독립 try(fail-open, 위 블록들과 동일 관례) — 이 레인이 실패해도 이미 커밋된
+    # 일 레인/SS/PX 결과를 되돌리지 않는다. 수집(①)이 실패해도 레인(②)은 돌린다 —
+    # load_today_ladder가 행 없음을 "시세 없음"으로 읽어 전건 보류하므로 안전하게 no-op이 된다.
+    #
+    # ★dry_run 기본값 = True(관측만·쓰기 없음). 실집행 전환은 prod .env에
+    #   `NAVER_CS_DRY_RUN=0`을 넣고 재시작하는 것으로만 열린다(코드 배포 없이 되돌릴 수 있게).
+    #   첫 배포 후에는 반드시 dry-run 회차의 제안값을 눈으로 확인한 뒤 전환한다.
+    db4 = _get_own_db_session()
+    try:
+        from app.services.naver_ad.cold_start_bid_lane import (
+            collect_market_bids_daily, run_cold_start_lane,
+        )
+
+        # ★리뷰 P3-13: today를 now(ss_now)에서 파생시킨다. 종전엔 now=ss_now(과거 시각)와
+        #   today=kst_today()(호출 시점)를 섞어 자정 경계에서 어긋났다 — 바로 위 693줄이 정확히
+        #   이 문제(C6) 때문에 ss_now를 도입했는데 CS가 그 계약을 깼다.
+        cs_today = ss_now.date()
+        collected = collect_market_bids_daily(db4, today=cs_today)
+        log.info(
+            "[스케줄러] naver CS 시장가 수집: 소재=%s 행=%s floor=%s",
+            collected.get("ads"), collected.get("rows"), collected.get("floor_ads"),
+        )
+        cs_dry_run = os.getenv("NAVER_CS_DRY_RUN", "1") != "0"
+        cs = run_cold_start_lane(db4, dry_run=cs_dry_run, now=ss_now, today=cs_today)
+        log.info(
+            "[스케줄러] naver CS 콜드 첫 입찰(dry_run=%s): 후보=%s 제안=%s 집행=%s 실패=%s "
+            "경제성없음=%s 보류=%s",
+            cs_dry_run, cs["candidates"], cs["proposed"], cs["executed"], cs["failed"],
+            cs["not_viable"], cs["held"],
+        )
+        # 상세는 제안/경보 건만 남긴다(리뷰 P3-15: 소재 수백 개면 전건 로깅은 폭주).
+        # 단순 보류(시세 없음·상한 없음·상향 아님)는 위 집계 카운터로 충분하다.
+        _CS_LOUD = {"propose", "not_viable"}
+        for r in (x for x in cs["rows"] if x["decision"] in _CS_LOUD):
+            log.info(
+                "[스케줄러] naver CS 상세: ad=%s grp=%s 현재=%s 판정=%s 목표=%s "
+                "상한=%s 시장가=%s 사다리최저=%s RPC출처=%s(clk=%s) — %s",
+                r["ad_id"], r["adgroup_id"], r["current_bid"], r["decision"], r["target_bid"],
+                r["ceiling_cpc"], r["market_bid"], r["ladder_min"], r["rpc_source"],
+                r["sample_clk"], r["reason"],
+            )
+    except Exception as e:  # noqa: BLE001 — CS 실패는 다른 레인과 분리(fail-open)
+        log.exception("[스케줄러] naver CS 레인 에러(fail-open): %s", e)
+    finally:
+        db4.close()
 
 
 def run_naver_auto_operator_hourly_job():
