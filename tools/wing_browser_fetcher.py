@@ -1273,7 +1273,9 @@ _RG_GAPS_MAX_DAYS = 400
 #   예산을 건다. ★refresh_contract._LEASE_TTL_MIN(기본 20분)과 결합 — 그쪽이 바뀌면 여기도.
 _RG_LEASE_TTL_S = 1200
 _RG_ONE_REPORT_TAIL_S = 150   # S3 GET(90s) + prod push(60s) — 폴링 뒤에 항상 따라붙는 꼬리
-_RG_BUDGET_SLACK_S = 60
+# 여유분 90s: 브라우저 teardown(~25s) + refresh-complete 통지 + 주기 사이 세션 재확인 지연(5s×n).
+#   경계 확인 — 예산 660 + 최악 1건 450 + teardown 25 = 1135 < TTL 1200.
+_RG_BUDGET_SLACK_S = 90
 _RG_POLL_INTERVAL_S = 8       # download-list 폴링 간격
 _RG_POLL_TIMEOUT_S = 300      # 생성 완료 최대 대기(5분)
 _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -1518,6 +1520,10 @@ def _rg_select_targets(periods: list[dict], gaps: dict | None,
                 t["report_types"] += [rt for rt in riders if rt not in t["report_types"]]
                 break
         else:
+            # ★index 0의 트레이드오프: 예산이 빠듯한 회차엔 floor 1건을 rider가 가져가 그 회차
+            #   결손 치유가 0이 될 수 있다. 그래도 앞에 두는 이유 — PRODUCT_SIZE는 매번 전량
+            #   스냅샷이라 하루 밀려도 무손실이지만, 끊기면 되살릴 방법이 없다([P1-2] 재발).
+            #   결손 주기 쪽은 다음 회차가 그대로 이어받는다(D2 자연 롤링).
             targets.insert(0, {"group_key": newest["group_key"],
                                "period_end": newest["period_end"],
                                "report_types": list(riders)})
@@ -1703,6 +1709,11 @@ def _do_rg_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
       실제로 진전됐고 남은 결손은 다음 버튼/크론이 이어받는다(D2의 '나머지는 다음 회차'). 1로
       두면 재시도 예산 3회를 갉아먹을 뿐 더 받지 못한다.
     """
+    # ★시계는 **함수 진입 시각**부터다(리뷰 R5). TTL은 claim부터 도는데 cmd_poll은 claim 직후
+    #   곧바로 여기를 부르므로 진입 ≈ claim이다. 브라우저 기동(프로필 락 대기·CDP 접속·goto)과
+    #   층1 push·결손 조회에만 최악 ~300초가 든다 — 그걸 시계 밖에 두면 예산을 다 지켜도
+    #   claim 기준으로는 TTL을 넘겨 보고가 stale로 폐기된다(창 재출현).
+    run_started = time.monotonic()
     if not _push_configured(cfg):
         log.error("RG 다운로드엔 push 설정(account_key·prod_base_url·ingest_token) 필요.")
         return 2
@@ -1796,7 +1807,6 @@ def _do_rg_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
                 #   '검사 통과 직후 1건 최악'이어도 TTL 안에서 끝난다.
                 budget_s = max(60, _RG_LEASE_TTL_S - (poll_timeout + _RG_ONE_REPORT_TAIL_S)
                                - _RG_BUDGET_SLACK_S)
-                run_started = time.monotonic()
                 planned = sum(len(t["report_types"]) for t in targets)
                 done = 0
                 budget_out = False
