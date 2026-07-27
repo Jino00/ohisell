@@ -1265,6 +1265,15 @@ RG_REPORT_TYPES_DEFAULT = ["WAREHOUSING_SHIPPING"]
 # 폴링이라 무상한이면 한 회차가 폭주한다 — 결손이 더 많으면 최신 우선으로 자르고 나머지는
 # 다음 회차가 이어받는다(자연 롤링). 3 = 최악 3주기×1리포트×300초 ≈ 15분(TTL 20분 안).
 _RG_DEFAULT_MAX_TARGETS = 3
+# 결손 조회 창 상한 — 백엔드 라우터의 days le=400과 같은 값(넘기면 422 → 조용한 폴백).
+_RG_GAPS_MAX_DAYS = 400
+# 회차 시간 예산 근거(리뷰 R3 [P2-1]): lease TTL 20분을 넘기면 mark_success/report_failure가
+#   claimed_at 불일치로 폐기되고 요청이 살아남아 재claim → 창이 다시 뜬다(lease 계약이 막으려던
+#   증상 그 자체). 상한의 *단위*는 D2 확정("회차당 주기 수")이라 건드리지 않고, 직교하는 시간
+#   예산을 건다. ★refresh_contract._LEASE_TTL_MIN(기본 20분)과 결합 — 그쪽이 바뀌면 여기도.
+_RG_LEASE_TTL_S = 1200
+_RG_ONE_REPORT_TAIL_S = 150   # S3 GET(90s) + prod push(60s) — 폴링 뒤에 항상 따라붙는 꼬리
+_RG_BUDGET_SLACK_S = 60
 _RG_POLL_INTERVAL_S = 8       # download-list 폴링 간격
 _RG_POLL_TIMEOUT_S = 300      # 생성 완료 최대 대기(5분)
 _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -1358,6 +1367,31 @@ def _rg_json(res):
         return None
 
 
+def _rg_kst_date_str(value) -> str:
+    """쿠팡 정산 날짜(UTC ISO "YYYY-MM-DDTHH:mm:ssZ") → KST 날짜 "YYYY-MM-DD". 실패=''.
+
+    ★백엔드 `rg_settlement_sync._parse_date`와 **같은 규칙**이어야 한다. 쿠팡은 정산주기 경계일을
+      KST 자정(= D-1T15:00:00Z)으로 주므로 앞 10자를 그대로 쓰면 **항상 하루 이르다**.
+      백엔드는 KST로 변환해 `recognition_date_to`에 저장하는데, 층2 결손 매칭은 그 값과 여기서
+      만든 문자열을 대조한다 → 앞 10자를 쓰면 매칭이 **상시 100% 실패**하고, 그런데도 "결손 없음"
+      으로 조용히 완주해 층2 수집이 통째로 멈춘다(적대적 리뷰 R1 [P1-1] 실행 재현).
+      실측: `settlementPeriodEndDate="2026-04-11T15:00:00Z"` ↔ `settlementGroupKey`
+      `"A01564720-2026-04-06-2026-04-12"` — group_key 자체가 KST라는 증거다.
+    ★백엔드에서 import하지 않는다 — 페처는 prod 코드를 못 읽는 독립 스크립트다. 규칙 동기화는
+      실측 포맷 계약 테스트(test_rg_gap_driven_fetcher)로 고정한다.
+    ★파싱 실패는 예외가 아니라 ''다 — 리포트 한 건의 날짜 이상이 회차 전체를 rc=1로 죽이면 안 된다.
+    """
+    if not value:
+        return ""
+    s = str(value).strip()
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        log.warning("RG 정산 날짜 파싱 실패(해당 값만 무시): %s", s[:40])
+        return ""
+    return dt.astimezone(KST).date().isoformat()
+
+
 def _rg_enumerate_group_keys(raw: dict, vendor_id: str) -> list[dict]:
     """status/api raw dict → [{group_key, period_end}]. settlementGroupKey 우선, 없으면 vendorId-start-end.
 
@@ -1376,8 +1410,12 @@ def _rg_enumerate_group_keys(raw: dict, vendor_id: str) -> list[dict]:
     for rep in reports:
         if not isinstance(rep, dict):
             continue
-        start = str(rep.get("settlementPeriodStartDate") or "")[:10]
-        end = str(rep.get("settlementPeriodEndDate") or "")[:10]
+        # ★UTC→KST 변환 필수(앞 10자 절단 금지) — 이유는 _rg_kst_date_str docstring.
+        #   start/end는 settlementGroupKey 부재 시 합성 키의 재료이기도 하다. 합성 키는 라벨이
+        #   아니라 `settlementGroupKeys`로 쿠팡에 **전송**되므로(_rg_download_one) 여기서
+        #   KST가 아니면 존재하지 않는 주기를 요청하게 된다(리뷰 R3).
+        start = _rg_kst_date_str(rep.get("settlementPeriodStartDate"))
+        end = _rg_kst_date_str(rep.get("settlementPeriodEndDate"))
         gk = str(rep.get("settlementGroupKey") or "").strip()
         if not gk:
             if not (start and end):
@@ -1400,6 +1438,9 @@ def _prod_rg_layer2_gaps(cfg: dict, report_types: list[str], days: int) -> dict 
     """
     if not _push_configured(cfg):
         return None
+    # ★엔드포인트 상한(400일)으로 클램프 — 넘기면 422가 나고 조용히 폴백만 남는다. 백필하려고
+    #   rg_status_days를 크게 준 회차에서 오히려 자가치유가 꺼지는 역설이 된다(리뷰 R1 [P2-4]).
+    days = max(1, min(int(days), _RG_GAPS_MAX_DAYS))
     try:
         r = requests.get(
             cfg["prod_base_url"].rstrip("/") + RG_LAYER2_GAPS_PATH,
@@ -1435,6 +1476,10 @@ def _rg_select_targets(periods: list[dict], gaps: dict | None,
       동작인 '최신 1주기 × 전체 report_types'로 되돌린다 — 판정을 못 한다고 수집을 멈추지 않는다.
     ★결손인데 열거에 없는 주기는 group_key가 없어 요청할 수 없다 → 조용히 건너뛴다.
       (옛 주기를 메우려면 rg_status_days를 넓혀 층1 열거 창부터 키워야 한다.)
+    ★미매핑 리포트는 결손 판정 대상이 아니라 '최신 주기 의무 동반'이다 — 파서가 없어 결손 목록에
+      **절대 뜨지 않으므로**, 결손 주도로만 고르면 영구 미수집이 된다. 라이브 config가 정확히 그
+      조합(WAREHOUSING_SHIPPING + PRODUCT_SIZE_COMPARISON)이라 실제로 PRODUCT_SIZE가 끊긴다
+      (적대적 리뷰 R1 [P1-2]). 구 동작(최신 1주기 × 전체 report_types)을 그 리포트에 한해 유지한다.
     """
     fallback = [{"group_key": p["group_key"], "period_end": p["period_end"],
                  "report_types": list(report_types)} for p in periods[:1]]
@@ -1456,9 +1501,26 @@ def _rg_select_targets(periods: list[dict], gaps: dict | None,
         if not want:
             continue
         targets.append({"group_key": p["group_key"], "period_end": p["period_end"],
-                        "report_types": want})
+                        "report_types": list(want)})
         if len(targets) >= max_targets:
             break   # 나머지는 다음 회차로(자연 롤링) — 주기당 최대 300초 폴링이라 회차가 폭주한다
+
+    # 판정 불가(미매핑) 리포트를 최신 주기에 동반시킨다 — 상한과 무관한 의무 항목이다.
+    #   상한이 이걸 밀어내면 다시 영구 미수집이 되므로 결손 슬롯을 소모시키지 않는다.
+    riders = [rt for rt in report_types
+              if rt in set(gaps.get("unmapped_report_types") or [])]
+    if riders and periods:
+        newest = periods[0]
+        for t in targets:
+            # 최신 주기가 이미 결손 target이면 거기에 합류 — 같은 group_key로 target을 둘 만들면
+            #   상한 한 칸을 헛되이 쓴다(리뷰 R3).
+            if t["group_key"] == newest["group_key"]:
+                t["report_types"] += [rt for rt in riders if rt not in t["report_types"]]
+                break
+        else:
+            targets.insert(0, {"group_key": newest["group_key"],
+                               "period_end": newest["period_end"],
+                               "report_types": list(riders)})
     return targets
 
 
@@ -1590,6 +1652,24 @@ def _rg_session_ok(page) -> bool:
     return isinstance(data, dict) and "settlementStatusReports" in data
 
 
+def _rg_session_ok_confirmed(page, *, delay_s: float = 5.0) -> bool:
+    """_rg_session_ok를 (실패 시) 짧은 지연 후 1회 재확인 — 둘 다 False일 때만 '세션 만료'.
+
+    ★왜(적대적 리뷰 R1 [P2-2]): _rg_session_ok는 로그아웃뿐 아니라 비200·깨진 JSON·evaluate 예외
+      까지 전부 False로 접는다(진입 경로 주석이 스스로 인정한 사실, codex 5R[P1]). 루프 도중의
+      False를 곧장 RC_LOGIN_REQUIRED(요청 소멸·재시도 제외)로 승격하면, 300초 폴링 직후의 blip
+      한 번이 남은 결손 충전을 통째로 취소하고 사용자에게 "로그인 필요"를 오보한다 — 다운로드
+      실패(rc=1·재시도 가능)보다 세션 프로브 blip이 더 치명이 되는 역전이다.
+    ★lease 계약과 충돌하지 않는다: 계약은 (버튼1회=재시도 3회 / login_required는 재시도 제외 /
+      TTL 20분)만 규정하고 '무엇을 login_required로 분류할지'는 규정하지 않는다. 비용은 회차당
+      최대 ~5초로, 진입 경로가 같은 TTL 안에서 쓰는 로그인 대기(_LOGIN_WAIT_S)보다 훨씬 작다.
+    """
+    if _rg_session_ok(page):
+        return True
+    time.sleep(delay_s)
+    return _rg_session_ok(page)
+
+
 def _rg_login_wait(page, ctx, state: str, secs: int, *, cdp: bool = False) -> bool:
     """정산 페이지에서 사용자 로그인 자동 감지(status/api 200). 성공 시 state 저장. (데몬 회복 경로)
 
@@ -1619,6 +1699,9 @@ def _do_rg_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
     push 설정 필수(다운로드만 하고 버릴 이유 없음). 세션 판정·만료 회복은 정산 status/api 기반.
     반환: 0=완주 / 1=실패(재시도) / RC_RETRY_LATER=dup에 막힘(긴 백오프) /
           RC_LOGIN_REQUIRED=층2 루프 중 세션 만료(재시도 제외, 창 유지).
+    ★회차 시간예산(_RG_LEASE_TTL_S 주석)에 걸려 대상을 다 못 돌아도 **0(완주)**이다 — 이번 몫은
+      실제로 진전됐고 남은 결손은 다음 버튼/크론이 이어받는다(D2의 '나머지는 다음 회차'). 1로
+      두면 재시도 예산 3회를 갉아먹을 뿐 더 받지 못한다.
     """
     if not _push_configured(cfg):
         log.error("RG 다운로드엔 push 설정(account_key·prod_base_url·ingest_token) 필요.")
@@ -1670,8 +1753,12 @@ def _do_rg_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
                     log.error("RG status/api 응답 비정상(200/JSON 아님) — 세션·챌린지 확인.")
                     return 1
                 # 계정 단위 수수료 push는 엑셀 흐름과 독립(fail-soft): 실패해도 다운로드는 계속.
+                # ★단 결손 판정은 층1 DB를 소스로 삼는다 — push가 실패한 회차엔 최신 주기가 층1에
+                #   없어 "결손 아님"으로 보이고 다운로드가 0이 된다(리뷰 R1 [P2-3]).
+                #   그럴 땐 결손 조회를 건너뛰고 폴백(최신 1주기)을 타서 기존 동작을 지킨다.
+                layer1_pushed = True
                 if _push_configured(cfg):
-                    _rg_push_status(cfg, raw)
+                    layer1_pushed = (_rg_push_status(cfg, raw) == 0)
                 try:
                     periods = _rg_enumerate_group_keys(raw, vendor_id)
                 except Exception as e:  # noqa: BLE001 — 응답 비정상 → 실패 보고
@@ -1683,14 +1770,36 @@ def _do_rg_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
                 periods.sort(key=lambda x: x["period_end"], reverse=True)
                 # 결손 주도 선택(D1): prod에 "층2가 빈 주기"를 묻고 그것만 받는다. 조회 실패 시
                 #   기존 동작(최신 1주기)으로 안전 저하 — 수집이 아예 멈추면 안 된다(D5).
-                gaps = _prod_rg_layer2_gaps(cfg, report_types, _rg_status_days(cfg))
-                targets = _rg_select_targets(periods, gaps, report_types, max_targets)
-                if not targets:
-                    log.info("RG: 층2 결손 없음 — 다운로드 없음(주기 %d개 확인).", len(periods))
+                if layer1_pushed:
+                    gaps = _prod_rg_layer2_gaps(cfg, report_types, _rg_status_days(cfg))
                 else:
-                    log.info("RG: 정산주기 %d개 중 결손 %d개 처리(상한 %d) → %s",
-                             len(periods), len(targets), max_targets,
+                    log.warning("RG: 층1 push 실패 회차 — 결손 조회 생략하고 최신 1주기로 폴백.")
+                    gaps = None
+                targets = _rg_select_targets(periods, gaps, report_types, max_targets)
+                # ★관측(리뷰 R1 [P2-5]): '결손 0'과 '결손은 있는데 하나도 매칭 못 함'을 같은
+                #   문장으로 찍으면, 날짜 규칙이 어긋난 전면 고장이 완전히 건강한 로그로 보인다
+                #   (실제로 [P1-1]이 그랬다). 결손 건수와 매칭 건수를 함께 남긴다.
+                gap_n = len((gaps or {}).get("gaps") or []) if isinstance(gaps, dict) else -1
+                if not targets:
+                    log.info("RG: 다운로드 대상 없음 — 열거 주기 %d개 / prod 결손 %s / 매칭 0개.",
+                             len(periods), gap_n if gap_n >= 0 else "조회실패")
+                    if gap_n > 0:
+                        log.error("RG: ★결손 %d개인데 열거와 하나도 매칭되지 않았다 — 주기 날짜 "
+                                  "규칙 불일치 의심(period_end↔recognition_date_to).", gap_n)
+                else:
+                    log.info("RG: 열거 %d개 / prod 결손 %s → 대상 %d개(상한 %d) %s",
+                             len(periods), gap_n if gap_n >= 0 else "조회실패",
+                             len(targets), max_targets,
                              [(t["group_key"], t["report_types"]) for t in targets])
+
+                # 회차 시간 예산 — 상수 근거는 _RG_LEASE_TTL_S 주석. 리포트 1건 최악을 뺀 값이라
+                #   '검사 통과 직후 1건 최악'이어도 TTL 안에서 끝난다.
+                budget_s = max(60, _RG_LEASE_TTL_S - (poll_timeout + _RG_ONE_REPORT_TAIL_S)
+                               - _RG_BUDGET_SLACK_S)
+                run_started = time.monotonic()
+                planned = sum(len(t["report_types"]) for t in targets)
+                done = 0
+                budget_out = False
 
                 base_ms = int(time.time() * 1000)
                 idx = 0
@@ -1698,15 +1807,28 @@ def _do_rg_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
                     # ★주기 사이 세션 재확인(D3): 층2는 주기×리포트당 최대 300초 폴링이라, 진입 시
                     #   1회 확인만으로는 루프 도중 만료를 못 잡는다 — 남은 주기가 통째로 헛돈다.
                     #   이미 받아 push한 주기는 그대로 두고(멱등 적재), 남은 주기만 중단한다.
-                    if n > 0 and not _rg_session_ok(page):
+                    #   ★blip 1회로 승격하지 않는다(리뷰 [P2-2]) — _rg_session_ok_confirmed 참조.
+                    if n > 0 and not _rg_session_ok_confirmed(page):
                         log.error("RG: 층2 루프 중 세션 만료 — 남은 주기 %d개 중단(로그인 필요).",
                                   len(targets) - n)
+                        # keep_open은 CDP 모드에서만 실효(레거시 _chrome 경로는 finally에서 무조건
+                        #   닫는다) — 라이브는 CDP라 의도대로 동작한다(리뷰 [P2-9]).
                         owner.keep_open = True   # 사람이 로그인할 창을 남긴다
                         session_lost = True
                         break
                     for rt in t["report_types"]:
+                        # ★예산 검사는 '리포트 하나를 시작하기 전마다'다(리뷰 R3 [P2-1]).
+                        #   주기 단위로만 재면, 예산을 아슬하게 통과한 마지막 주기가 리포트 여러 건을
+                        #   통째로 돌려 TTL을 넘길 수 있다. 첫 1건은 무조건 실행(floor) — 아무것도
+                        #   못 하고 끝나면 결손이 영영 안 준다.
+                        if done and time.monotonic() - run_started > budget_s:
+                            log.info("RG: 회차 시간예산 %ds 초과 — 남은 결손 %d건은 다음 회차로"
+                                     "(자연 롤링).", budget_s, planned - done)
+                            budget_out = True
+                            break
                         req_time = base_ms + idx
                         idx += 1
+                        done += 1
                         got = _rg_download_one(page, t["group_key"], rt, req_time, poll_timeout)
                         if got is RG_DUP_SKIP:
                             skipped += 1   # 실패 아님 — 재시도해도 계속 dup이다
@@ -1718,6 +1840,8 @@ def _do_rg_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
                             pushed += 1
                         else:
                             failed += 1
+                    if budget_out:
+                        break
                 if not session_lost:
                     save()  # 회전 쿠키 보존 (CDP: no-op)
                 # ★세션이 죽은 뒤엔 저장하지 않는다 — 로그아웃된 쿠키로 state 파일을 덮으면
