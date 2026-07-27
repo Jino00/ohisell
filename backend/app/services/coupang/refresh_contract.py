@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from sqlalchemy import update
 from sqlalchemy.orm import Session
@@ -188,11 +188,16 @@ def _reap_exhausted(
 # ════════════════════════════════════════════════
 # ③ success — 여기서만 요청이 소멸한다
 # ════════════════════════════════════════════════
-def mark_success(db: Session, account_key: str) -> None:
+def mark_success(db: Session, account_key: str, *, clear_error: bool = False) -> None:
     """수집 성공 → 요청 소멸 + lease 해제 + 시도 카운터 리셋.
 
     ★요청이 사라지는 정상 경로는 여기 하나뿐이다(claim은 이제 소비하지 않는다).
     commit은 호출자 쪽 heartbeat와 함께 일어나도 무해하도록 여기서도 한다.
+
+    clear_error(codex 2R[P2]): 지난 시도의 실패 흔적까지 지운다. 데이터 heartbeat를 동반하지
+    않는 성공(=받을 게 없어 정상 종료한 회차)에서 필요하다 — 안 지우면 last_error_at만
+    바뀐 상태로 요청이 사라져 UI가 성공한 회차를 '실패'로 읽는다. heartbeat를 찍는 경로는
+    호출자가 이미 지우므로 기본값 False.
     """
     row = _row(db, account_key)
     if row is None:
@@ -200,6 +205,9 @@ def mark_success(db: Session, account_key: str) -> None:
     row.refresh_requested_at = None
     row.claimed_at = None
     row.attempt_count = 0
+    if clear_error:
+        row.last_error = None
+        row.last_error_at = None
     db.commit()
 
 
@@ -233,13 +241,19 @@ def report_failure(
     if row is None:
         return {"retry": False, "attempt": 0, "reason": None}
 
-    if lease is not None and _lease_of(row) != lease:
-        log.info(
-            "stale 실패 보고 무시: %s (보고 lease=%s, 현재=%s)",
-            account_key, lease, _lease_of(row),
-        )
-        return {"retry": False, "attempt": int(row.attempt_count or 0),
-                "reason": None, "stale": True}
+    lease_dt = None
+    if lease is not None:
+        try:
+            lease_dt = datetime.fromisoformat(lease)
+        except (TypeError, ValueError):
+            lease_dt = None
+        if lease_dt is None or _lease_of(row) != lease:
+            log.info(
+                "stale 실패 보고 무시: %s (보고 lease=%s, 현재=%s)",
+                account_key, lease, _lease_of(row),
+            )
+            return {"retry": False, "attempt": int(row.attempt_count or 0),
+                    "reason": None, "stale": True}
 
     attempt = int(row.attempt_count or 0)
     reason: str | None = None
@@ -249,19 +263,31 @@ def report_failure(
         reason = f"재시도 {MAX_ATTEMPTS}회 소진"
 
     message = f"{error} [{reason}]" if reason else error
-    row.last_error = message[:300]  # 컬럼 한계 — 긴 스택트레이스로 보고 자체가 날아가면 안 된다
-    row.last_error_at = kst_now()
+    values: dict = {
+        # 컬럼 한계 — 긴 스택트레이스로 보고 자체가 날아가면 안 된다
+        "last_error": message[:300],
+        "last_error_at": kst_now(),
+        "claimed_at": None,   # lease 반납 → 다음 폴에서 재claim(소멸 케이스에도 해제)
+    }
+    if reason is not None:
+        values["refresh_requested_at"] = None   # 요청 소멸(더 이상 재시도하지 않는다)
+        # attempt_count는 남긴다(진단용). 다음 버튼(request_refresh)이 0으로 리셋한다.
+
+    # ★조건부 UPDATE로 전이한다(codex 2R[P2]): lease 확인(SELECT)과 쓰기 사이에 다른 폴이
+    # 재claim했다면 rowcount=0으로 걸러진다. SELECT만 믿고 무조건 쓰면 중복·지연된 실패
+    # 핸들러 둘이 각각 검사를 통과해 새 임대를 반납하고 시도 예산을 갉아먹을 수 있다.
+    stmt = update(CoupangWingCookie).where(CoupangWingCookie.account_key == account_key)
+    if lease_dt is not None:
+        stmt = stmt.where(CoupangWingCookie.claimed_at == lease_dt)
+    res = db.execute(stmt.values(**values))
+    db.commit()
+    if (res.rowcount or 0) == 0:
+        log.info("stale 실패 보고 무시(경합): %s lease=%s", account_key, lease)
+        return {"retry": False, "attempt": attempt, "reason": None, "stale": True}
 
     if reason is not None:
-        row.refresh_requested_at = None   # 요청 소멸(더 이상 재시도하지 않는다)
-        row.claimed_at = None
-        # attempt_count는 남긴다(진단용). 다음 버튼(request_refresh)이 0으로 리셋한다.
-        db.commit()
         log.warning("refresh 요청 소멸: %s attempt=%d 사유=%s", account_key, attempt, reason)
         return {"retry": False, "attempt": attempt, "reason": reason}
-
-    row.claimed_at = None  # lease 반납 → 다음 폴에서 재claim
-    db.commit()
     log.info("refresh 재시도 예약: %s attempt=%d/%d", account_key, attempt, MAX_ATTEMPTS)
     return {"retry": True, "attempt": attempt, "reason": None}
 

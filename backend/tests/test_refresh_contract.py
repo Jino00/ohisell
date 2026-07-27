@@ -291,6 +291,45 @@ def test_report_without_lease_is_backward_compatible(db):
     assert rc.report_failure(db, ACC, "boom")["retry"] is True
 
 
+def test_duplicate_failure_report_does_not_release_new_lease(db):
+    """★codex 2R[P2]: 같은 lease로 두 번 보고돼도 두 번째가 새 임대를 반납하면 안 된다.
+
+    검사(SELECT)와 쓰기가 분리돼 있으면, 첫 보고가 임대를 반납 → 폴이 재claim → 지연된
+    두 번째 보고가 그 새 임대를 또 반납한다(창 중복 + 시도 예산 낭비). 조건부 UPDATE로 막는다.
+    """
+    rc.request_refresh(db, ACC)
+    lease = rc.claim_refresh(db, ACC)["lease"]
+    assert rc.report_failure(db, ACC, "boom", lease=lease)["retry"] is True
+    rc.claim_refresh(db, ACC)                      # 폴이 재claim(2회차, 새 임대)
+    new_lease = _row(db).claimed_at
+
+    dup = rc.report_failure(db, ACC, "지연된 중복 보고", lease=lease)
+    assert dup.get("stale") is True
+    assert _row(db).claimed_at == new_lease        # 2회차 임대 그대로
+
+
+def test_malformed_lease_is_treated_as_stale(db):
+    rc.request_refresh(db, ACC)
+    rc.claim_refresh(db, ACC)
+    out = rc.report_failure(db, ACC, "boom", lease="not-a-timestamp")
+    assert out.get("stale") is True
+    assert _row(db).claimed_at is not None
+
+
+def test_mark_success_can_clear_error_trace(db):
+    """무작업 정상 종료(RG 정산주기 없음)는 지난 실패 흔적을 지운다 — UI 오보 방지(codex 2R[P2])."""
+    rc.request_refresh(db, ACC)
+    rc.claim_refresh(db, ACC)
+    rc.report_failure(db, ACC, "1회차 실패")
+    rc.claim_refresh(db, ACC)
+
+    rc.mark_success(db, ACC, clear_error=True)
+    row = _row(db)
+    assert row.refresh_requested_at is None
+    assert row.last_error is None and row.last_error_at is None
+    assert row.last_success_at is None   # 데이터 신선도 시계는 건드리지 않는다
+
+
 def test_ttl_default_is_20_minutes(monkeypatch):
     """실측 최장 수집 684s(11.4분)보다 넉넉해야 이중 기동이 없다 — 기본 20분."""
     assert rc.lease_ttl_minutes() >= 12

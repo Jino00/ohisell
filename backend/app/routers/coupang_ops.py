@@ -1868,7 +1868,10 @@ def wing_rg_settlement_refresh_complete(
     이미 업로드가 요청을 소멸시킨 뒤라면 이 호출은 무해한 no-op.
     """
     _require_ingest_token(x_ingest_token)
-    refresh_contract.mark_success(db, rg_settlement_sync._RG_STATE_ACCOUNT)
+    # clear_error=True(codex 2R[P2]): 1회차가 실패하고 2회차가 "받을 게 없어" 정상 종료하면
+    # last_error_at만 바뀐 채 요청이 사라진다 → UI가 성공한 회차를 실패로 읽는다. 실패 흔적을
+    # 함께 지우되 last_success_at(데이터 신선도 시계)은 그대로 둔다.
+    refresh_contract.mark_success(db, rg_settlement_sync._RG_STATE_ACCOUNT, clear_error=True)
     return {"ok": True}
 
 

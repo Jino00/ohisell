@@ -818,7 +818,11 @@ def cmd_run(cfg: dict) -> int:
                 log.error("report/SALES 응답이 유효한 SALES 데이터 아님(세션 만료 가능) — 갱신 실패.")
                 _notify_mac("오하이테크 광고 수집 실패", "report/SALES 응답 비정상(세션 만료 가능) — Chrome 창에서 재로그인 확인.")
                 owner.keep_open = True   # 세션 만료 가능 → 확인·로그인할 창 유지
-                return RC_LOGIN_REQUIRED
+                # ★재시도 대상으로 둔다(codex 2R[P2]): _parse_sales_days는 세션 만료뿐 아니라
+                # 스키마 변경·에러 envelope·깨진 JSON에도 None을 준다. 로그아웃이 확증된 게
+                # 아니므로 login_required로 1회 만에 소멸시키면 안 된다(위 로그인HTML/URL
+                # 분기가 진짜 로그아웃을 잡는다).
+                return 1
     except RuntimeError:
         return 2
     except Exception as e:  # noqa: BLE001

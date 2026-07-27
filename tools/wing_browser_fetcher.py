@@ -860,6 +860,11 @@ def cmd_poll(cfg: dict) -> int:
     # RG 정산(S4-P2): 온디맨드 버튼만. RG는 주 단위·느림(생성 대기) → 별도 쿨다운 유지.
     rg_cooldown = int(cfg.get("rg_min_interval_s", 3600))   # RG 실행 최소 간격(실패 재시도 폭주 방지)
     last_rg = 0.0
+    # ★재시도용 짧은 백오프(codex 2R[P1]): RG 쿨다운은 1시간이라, 재시도 가능한 실패 뒤
+    # 다음 시도가 1시간 뒤가 된다 — UI는 215초에 포기하고 3회 소진에 2시간이 걸린다.
+    # 실패로 임대를 반납한 경우에 한해 쿨다운을 이 시각까지 면제한다(요청이 살아있는 동안만).
+    rg_retry_at: float | None = None
+    rg_retry_backoff = int(cfg.get("rg_retry_backoff_s", 30))
     log.info("Wing 폴 데몬 시작 — %ds 간격 확인, fetch 최소간격 %ds. RG 버튼 전용·간격 %ds(창은 버튼 요청 시에만 뜸).",
              interval, cooldown, rg_cooldown)
     net_fails = 0  # 연속 네트워크 실패 카운터(vendor-summary 폴 기준) — 성공 시 리셋
@@ -902,7 +907,9 @@ def cmd_poll(cfg: dict) -> int:
         # ── RG 정산 다운로드: 버튼 요청만 소비(2026-07-27 — 새벽 일일예약 제거, 순수 버튼-only) ──
         try:
             rg_st = _prod_rg_refresh_status(cfg)
-            if bool(rg_st.get("requested")) and (time.monotonic() - last_rg >= rg_cooldown):
+            _rg_ready = (time.monotonic() - last_rg >= rg_cooldown) or (
+                rg_retry_at is not None and time.monotonic() >= rg_retry_at)
+            if bool(rg_st.get("requested")) and _rg_ready:
                 with _try_fetch_lock() as acquired:
                     if not acquired:
                         log.info("RG: 다른 fetch 진행 중 — 보류(다음 폴)")
@@ -915,6 +922,7 @@ def cmd_poll(cfg: dict) -> int:
                         if _rg_claimed.get("claimed", False):
                             rg_lease = _rg_claimed.get("lease")
                             last_rg = time.monotonic()
+                            rg_retry_at = None   # 이번 시도가 시작됨 — 면제 소진
                             log.info("RG 정산 다운로드 트리거(버튼)")
                             if not Path(state).is_file():
                                 log.warning("RG: 세션 파일 없음 — 'login' 필요(이번 회차 스킵)")
@@ -928,6 +936,10 @@ def cmd_poll(cfg: dict) -> int:
                                         cfg, _RG_ERROR_PATH, f"RG 정산 수집 실패(rc={rc})",
                                         kind=("login_required" if rc == RC_LOGIN_REQUIRED else None),
                                         lease=rg_lease)
+                                    if rc != RC_LOGIN_REQUIRED:
+                                        # 재시도 가능한 실패 → 1시간 쿨다운을 면제하고 곧 다시
+                                        # 시도한다(요청이 살아있을 때만 실제로 claim된다).
+                                        rg_retry_at = time.monotonic() + rg_retry_backoff
                                 else:
                                     # 정상 완주 신호 — 받을 게 없어 업로드 0건이었어도 요청은
                                     # 여기서 소멸한다(없으면 창을 3번 더 띄운 뒤 거짓 실패).
