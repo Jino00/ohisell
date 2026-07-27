@@ -837,6 +837,25 @@ def _capture_last_error():
         log.removeHandler(h)
 
 
+def _run_claimed(fn) -> tuple[int, str | None]:
+    """claim 후 실행되는 작업을 돌린다 → (rc, 사유). 예외도 rc=1로 정규화한다.
+
+    ★왜(codex R2 P2): claim이 이미 요청을 소비했으므로 예외로 조용히 빠져나가면 prod에 흔적이
+    없어 UI가 215초 헛기다린 뒤 'Mac 응답 없음'(Mac 꺼짐)으로 오진한다. rc!=0과 똑같이 보고해야
+    한다. cmd_login은 자체 try/except가 없어 Chrome 기동 실패(_owned_chrome RuntimeError:
+    chrome_profile_busy·chrome_launch_failed·cdp_not_ready 등)·page.goto 타임아웃이 그대로
+    올라오고, _do_run/_do_rg_run도 브라우저 블록 밖(설정 int 변환·_push)은 덮이지 않는다.
+    사유는 마지막 log.error 우선(행동지침이 담긴다), 없으면 예외 텍스트.
+    """
+    with _capture_last_error() as cap:
+        try:
+            return fn(), cap.last
+        except Exception as e:  # noqa: BLE001 — 데몬은 죽지 않는다. 대신 반드시 보고한다.
+            reason = cap.last or f"{type(e).__name__}: {e}"
+            log.error("claim된 작업 예외 — 실패로 보고: %s", str(e)[:160])
+            return 1, reason
+
+
 def cmd_poll(cfg: dict) -> int:
     """상주 데몬(별도 plist com.ohisell.wing, D-5) — 갱신 '버튼' 요청이 있을 때만 headful 창.
 
@@ -881,19 +900,19 @@ def cmd_poll(cfg: dict) -> int:
                                 # 세션 없음 → 이 창이 로그인 겸 첫 fetch(성공 시 _push가 heartbeat).
                                 # ★실패도 반드시 보고: claim으로 플래그는 이미 clear라 침묵하면
                                 #   prod에 흔적이 없어 UI가 215초 헛기다린 뒤 'Mac 응답 없음' 오진.
-                                with _capture_last_error() as cap:
-                                    rc = cmd_login(cfg, wait_secs=_LOGIN_WAIT_S)
+                                rc, reason = _run_claimed(
+                                    lambda: cmd_login(cfg, wait_secs=_LOGIN_WAIT_S))
                                 if rc != 0:
                                     _prod_report_fetch_error(
                                         cfg, "/api/coupang/ops/wing/vendor-summary/fetch-error",
-                                        cap.last or f"세션 없음 — login 실패 rc={rc}")
+                                        reason or f"세션 없음 — login 실패 rc={rc}")
                             else:
-                                with _capture_last_error() as cap:
-                                    rc = _do_run(cfg, state, login_wait_secs=_LOGIN_WAIT_S)  # 락 보유 중
+                                rc, reason = _run_claimed(
+                                    lambda: _do_run(cfg, state, login_wait_secs=_LOGIN_WAIT_S))  # 락 보유 중
                                 if rc != 0:
                                     _prod_report_fetch_error(
                                         cfg, "/api/coupang/ops/wing/vendor-summary/fetch-error",
-                                        cap.last or f"vendor-summary run 실패 rc={rc}")
+                                        reason or f"vendor-summary run 실패 rc={rc}")
         except requests.RequestException as e:
             net_fails += 1
             log.warning("폴 확인 실패(네트워크) %d/%d: %s", net_fails, _MAX_CONSECUTIVE_NET_FAILS, str(e)[:80])
@@ -926,12 +945,12 @@ def cmd_poll(cfg: dict) -> int:
                                     cfg, "/api/coupang/ops/wing/rg-settlement/fetch-error",
                                     "RG: 세션 파일 없음 — 'login' 필요")
                             else:
-                                with _capture_last_error() as cap:
-                                    rc = _do_rg_run(cfg, state, login_wait_secs=_LOGIN_WAIT_S)
+                                rc, reason = _run_claimed(
+                                    lambda: _do_rg_run(cfg, state, login_wait_secs=_LOGIN_WAIT_S))
                                 if rc != 0:
                                     _prod_report_fetch_error(
                                         cfg, "/api/coupang/ops/wing/rg-settlement/fetch-error",
-                                        cap.last or f"RG run 실패 rc={rc}")
+                                        reason or f"RG run 실패 rc={rc}")
         except requests.RequestException as e:
             log.warning("RG 폴 확인 실패(네트워크): %s", str(e)[:80])
         except Exception as e:  # noqa: BLE001 — 데몬은 어떤 오류에도 죽지 않는다

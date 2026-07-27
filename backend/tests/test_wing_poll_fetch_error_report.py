@@ -266,3 +266,113 @@ def test_rg_missing_state_reports_fetch_error(fetcher, tmp_path, monkeypatch):
     assert rg_calls[0]["params"] == {"account_key": "COUPANG_WING1"}
     assert rg_calls[0]["headers"]["X-Ingest-Token"] == "tok"
     assert "세션 파일 없음" in rg_calls[0]["json"]["error"]
+
+
+# ── ⑨ claim된 작업이 '예외'로 죽어도 보고(codex R2 P2) ─────────────────
+#   cmd_login엔 자체 try/except가 없어 Chrome 기동 실패(_owned_chrome RuntimeError)·
+#   page.goto 타임아웃이 그대로 올라온다 → 예외도 rc!=0과 똑같이 보고해야 한다.
+def test_vs_run_exception_reports_fetch_error(fetcher, tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    _patch_common(fetcher, monkeypatch, vs_requested=True, rg_requested=False)
+    calls = _install_recorder(fetcher, monkeypatch)
+
+    def _boom_do_run(_cfg, _state, login_wait_secs=0):
+        raise RuntimeError("chrome_profile_busy")
+
+    monkeypatch.setattr(fetcher, "_do_run", _boom_do_run)
+
+    with pytest.raises(_StopPoll):   # 예외를 먹고 루프가 계속돼야 한다(sleep 도달)
+        fetcher.cmd_poll(cfg)
+
+    vs_calls = [c for c in calls if c["url"].endswith("/vendor-summary/fetch-error")]
+    assert len(vs_calls) == 1
+    assert vs_calls[0]["params"] == {"account_key": "COUPANG_WING1"}
+    assert "chrome_profile_busy" in vs_calls[0]["json"]["error"]
+
+
+def test_vs_missing_state_login_exception_reports(fetcher, tmp_path, monkeypatch):
+    """세션 없음 경로: cmd_login이 Chrome 기동 실패로 예외를 던져도 보고된다."""
+    cfg = _cfg_no_state(tmp_path)
+    _patch_common(fetcher, monkeypatch, vs_requested=True, rg_requested=False)
+    calls = _install_recorder(fetcher, monkeypatch)
+
+    def _boom_login(_cfg, wait_secs=0):
+        raise RuntimeError("cdp_not_ready")
+
+    monkeypatch.setattr(fetcher, "cmd_login", _boom_login)
+
+    with pytest.raises(_StopPoll):
+        fetcher.cmd_poll(cfg)
+
+    vs_calls = [c for c in calls if c["url"].endswith("/vendor-summary/fetch-error")]
+    assert len(vs_calls) == 1
+    assert "cdp_not_ready" in vs_calls[0]["json"]["error"]
+
+
+def test_rg_run_exception_reports_fetch_error(fetcher, tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    _patch_common(fetcher, monkeypatch, vs_requested=False, rg_requested=True)
+    calls = _install_recorder(fetcher, monkeypatch)
+
+    def _boom_rg(_cfg, _state, login_wait_secs=0):
+        raise RuntimeError("chrome_launch_failed")
+
+    monkeypatch.setattr(fetcher, "_do_rg_run", _boom_rg)
+
+    with pytest.raises(_StopPoll):
+        fetcher.cmd_poll(cfg)
+
+    rg_calls = [c for c in calls if c["url"].endswith("/rg-settlement/fetch-error")]
+    assert len(rg_calls) == 1
+    assert "chrome_launch_failed" in rg_calls[0]["json"]["error"]
+
+
+def test_exception_reason_prefers_last_logged_error(fetcher, tmp_path, monkeypatch):
+    """예외 전에 남긴 log.error가 있으면 그것이 사유 — 행동지침이 담긴 쪽이 유용하다."""
+    cfg = _cfg(tmp_path)
+    _patch_common(fetcher, monkeypatch, vs_requested=True, rg_requested=False)
+    calls = _install_recorder(fetcher, monkeypatch)
+
+    def _boom_do_run(_cfg, _state, login_wait_secs=0):
+        fetcher.log.error("프로필 점유 중이나 CDP(9222) 미응답 — 수동 Chrome 종료 필요")
+        raise RuntimeError("chrome_profile_busy")
+
+    monkeypatch.setattr(fetcher, "_do_run", _boom_do_run)
+
+    with pytest.raises(_StopPoll):
+        fetcher.cmd_poll(cfg)
+
+    vs_calls = [c for c in calls if c["url"].endswith("/vendor-summary/fetch-error")]
+    assert len(vs_calls) == 1
+    assert "수동 Chrome 종료 필요" in vs_calls[0]["json"]["error"]
+
+
+# ── ⑩ net_fails 자가복구는 그대로(폴 GET 네트워크 실패만 카운트) ──────────
+def test_poll_network_failure_still_counts_toward_self_restart(fetcher, tmp_path, monkeypatch):
+    """_prod_refresh_status의 RequestException은 여전히 net_fails → 한도 도달 시 프로세스 종료."""
+    cfg = _cfg(tmp_path)
+    monkeypatch.setattr(fetcher, "_MAX_CONSECUTIVE_NET_FAILS", 1)
+
+    def _boom_status(_cfg):
+        raise fetcher.requests.RequestException("Max retries exceeded")
+
+    monkeypatch.setattr(fetcher, "_prod_refresh_status", _boom_status)
+    monkeypatch.setattr(fetcher.time, "sleep", lambda _s: (_ for _ in ()).throw(_StopPoll()))
+
+    assert fetcher.cmd_poll(cfg) == 1   # sleep 도달 전 즉시 종료 → launchd fresh 재기동
+
+
+def test_claimed_run_exception_does_not_count_as_net_fail(fetcher, tmp_path, monkeypatch):
+    """claim된 작업의 예외는 폴 GET 실패가 아니다 — 자가복구 카운터를 건드리지 않는다."""
+    cfg = _cfg(tmp_path)
+    monkeypatch.setattr(fetcher, "_MAX_CONSECUTIVE_NET_FAILS", 1)
+    _patch_common(fetcher, monkeypatch, vs_requested=True, rg_requested=False)
+    _install_recorder(fetcher, monkeypatch)
+
+    def _boom_do_run(_cfg, _state, login_wait_secs=0):
+        raise fetcher.requests.RequestException("push 도중 네트워크 오류")
+
+    monkeypatch.setattr(fetcher, "_do_run", _boom_do_run)
+
+    with pytest.raises(_StopPoll):   # 종료(rc=1)가 아니라 루프 계속
+        fetcher.cmd_poll(cfg)
