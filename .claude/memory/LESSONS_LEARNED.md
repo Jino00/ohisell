@@ -452,3 +452,15 @@ codex가 [P1]으로 잡았다(우리 테스트는 전부 초록이었다 — 유
 (`_mark_heartbeat`)은 계정 무구분이었다 → WING2 ingest가 WING1 행에 성공을 찍고 WING1의 실패 흔적까지
 지운다. **상태를 계정(또는 어떤 차원이든)으로 쪼갤 때는 성공 경로와 실패 경로를 같이 쪼갠다** — 한쪽만
 쪼개면 남의 성공이 내 신선도가 되는 조용한 위조가 생긴다.
+
+## 35. 격리 안 된 단위 테스트는 .env 없는 환경에서 "통과"로 위장한다 (2026-07-27, PR #110)
+
+### 🐛 이슈
+`test_ingest_search_term_daily_snapshot_replace`(test_naver_ad_p2s1.py)가 `ingest_search_term_daily`를 호출하면서 `fetch_search_term_daily`·`request_missing_expkeyword_reports`만 mock하고 `fetch_search_term_conversion`·`_conversion_report_dates`(내부 `_list_reports_by_type`)를 안 막아 **실 네이버 API를 호출**. 워크트리(.env 없음)에서는 항상 통과 → CI/워크트리 검증이 이 결함을 전혀 못 잡음. backend/.env가 있는 프로젝트 루트에서만 프로덕션 전환 데이터 97건이 섞여 실패.
+
+### ✅ 해결
+ss1 파일의 표준 패턴(두 함수 모두 monkeypatch, "실HTTP 차단" 주석)과 동일하게 2줄 추가. 실 .env를 워크트리에 복사해 동일 조건에서 23/3292 전건 통과 확인.
+
+### 📌 교훈
+- `ingest_search_term_daily`처럼 여러 fetcher를 부르는 상위 함수를 테스트할 때는 **그 함수가 부르는 네트워크 진입점 전부**를 patch해야 한다 — 현재 4개: `fetch_search_term_daily`, `request_missing_expkeyword_reports`, `fetch_search_term_conversion`, `_conversion_report_dates`. 기존 격리 패턴이 있는 파일(ss1)을 먼저 보고 그대로 따를 것.
+- "테스트가 통과한다"는 .env 없는 환경의 결과일 수 있다 — 네트워크 격리 검증은 **실 크리덴셜이 있는 환경**에서 한 번 돌려야 완결(원칙 22의 테스트판).
