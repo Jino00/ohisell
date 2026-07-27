@@ -1908,6 +1908,7 @@ def wing_rg_settlement_fetch_error(
 @router.post("/wing/rg-settlement/refresh-complete")
 def wing_rg_settlement_refresh_complete(
     body: dict[str, Any] = Body(default={}),
+    account_key: str = Query(default="COUPANG_WING1", description="COUPANG_WING1/2"),
     x_ingest_token: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ):
@@ -1919,6 +1920,13 @@ def wing_rg_settlement_refresh_complete(
     재시도 3회(=창 3번)를 유발한 뒤 "재시도 3회 소진"이라는 거짓 실패로 끝난다.
     ★last_success_at(데이터 신선도 시계)은 건드리지 않는다 — 받은 게 없으면 데이터는 그대로다.
     이미 업로드가 요청을 소멸시킨 뒤라면 이 호출은 무해한 no-op.
+
+    ★account_key(R3, 2026-07-27 버그 수정): 형제 엔드포인트(request/status/claim/fetch-error)는
+    모두 계정별 상태행을 쓰는데 이 완료 신호만 WING1 행을 하드코딩하고 있었다 — WING2 run이
+    완주하면 (a)자기 요청은 안 지워져 창 3번 뒤 거짓 '3회 소진'으로 끝나고 (b)신호는 WING1 행으로
+    가서 lease 불일치로 버려졌다(mark_success가 stale로 접음). 즉 이 엔드포인트가 막으려고
+    만들어진 바로 그 거짓 실패가 WING2에서 그대로 재현된다. 기본값 WING1로 하위호환 유지 —
+    account_key를 안 보내는 구버전 페처는 지금과 똑같이 동작한다.
     """
     _require_ingest_token(x_ingest_token)
     # clear_error=True(codex 2R[P2]): 1회차가 실패하고 2회차가 "받을 게 없어" 정상 종료하면
@@ -1928,7 +1936,8 @@ def wing_rg_settlement_refresh_complete(
     # 임대를 넘긴 뒤 뒤늦게 완료를 외쳐 새 요청을 지우는 것을 막는다. 없으면 기존 동작.
     lease = str(body.get("lease") or "").strip() or None
     ok = refresh_contract.mark_success(
-        db, rg_settlement_sync._RG_STATE_ACCOUNT, clear_error=True, lease=lease)
+        db, rg_settlement_sync._rg_state_key(_require_rg_account(account_key)),
+        clear_error=True, lease=lease)
     return {"ok": ok}
 
 
