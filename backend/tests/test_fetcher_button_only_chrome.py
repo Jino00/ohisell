@@ -166,15 +166,21 @@ def test_cdp_never_ready_closes_launched_chrome(fetcher, tmp_path, monkeypatch):
 
 
 # ── ③ 자동 창 트리거 부재(회귀 가드) ──────────────────────────────────
-def test_no_chrome_supervisor_launch(fetcher):
-    """chrome-supervise가 남아 있다면 no-op이어야 한다(Chrome을 띄우면 KeepAlive 부활)."""
-    fn = getattr(fetcher, "cmd_chrome_supervise", None)
-    # rocket 포함 3종 모두 필수: Jino Mac에 com.ohisell.rocket-chrome(chrome-supervise, KeepAlive)가
-    # 실재한다(2026-07-27 실측). 커맨드가 없으면 새 .py 설치 즉시 usage 에러 → 30초 크래시 루프.
-    assert fn is not None, "chrome-supervise 스텁 없음 — 구 plist가 크래시 루프에 빠진다"
-    src = _code_only(fn)
-    assert "Popen" not in src
-    assert "_launch_chrome" not in src
+def test_chrome_supervise_stub_removed(fetcher):
+    """chrome-supervise no-op 스텁은 완전히 제거됐다(2026-07-27 재확인: 구 plist 소멸 확정).
+
+    ★2026-07-27 도입 당시엔 "구 plist가 아직 Mac에 남아 있을 수 있으니 usage 에러로 인한
+    KeepAlive 크래시 루프를 막는 2차 방어"로 no-op 스텁을 남겼다. 이후 재점검에서
+    ~/Library/LaunchAgents·/Library/LaunchAgents·/Library/LaunchDaemons·launchctl list 전부에서
+    wing-chrome/ohitech-chrome/rocket-chrome supervisor 잡이 실재하지 않음을 확인 →
+    2차 방어의 존재 이유가 소멸해 스텁·라우팅을 제거했다. 되돌아오면(=재추가) 회귀다.
+    """
+    assert getattr(fetcher, "cmd_chrome_supervise", None) is None, (
+        "chrome-supervise 스텁이 되살아났다 — 구 plist 소멸을 재확인하지 않고 재추가했다면 회귀"
+    )
+    src = _code_only(fetcher.main)
+    assert "chrome-supervise" not in src
+    assert "cmd_chrome_supervise" not in src
 
 
 def _code_only(fn) -> str:
