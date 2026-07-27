@@ -154,6 +154,9 @@ export default function CommandCenter() {
           failed = st.last_error || "원인 미상";
           break;
         }
+        // 새 실패 없이 요청만 사라졌다 = 수집이 정상 종료됐다(예: RG "받을 정산주기 없음").
+        // 이 분기가 없으면 성공한 무작업 회차를 타임아웃까지 기다린 뒤 "응답 없음"으로 오보한다.
+        if (!st.requested) { done = true; break; }
       }
       if (done) {
         // 대기 중 사용자가 계정/기간을 바꿨을 수 있음 → 현재 선택(selRef)으로 재조회(codex S3 P1).
@@ -200,6 +203,9 @@ export default function CommandCenter() {
           failed = st.last_error || "원인 미상";
           break;
         }
+        // 새 실패 없이 요청만 사라졌다 = 수집이 정상 종료됐다(예: RG "받을 정산주기 없음").
+        // 이 분기가 없으면 성공한 무작업 회차를 타임아웃까지 기다린 뒤 "응답 없음"으로 오보한다.
+        if (!st.requested) { done = true; break; }
       }
       if (done) {
         const sel = selRef.current;
@@ -246,6 +252,9 @@ export default function CommandCenter() {
           failed = st.last_error || "원인 미상";
           break;
         }
+        // 새 실패 없이 요청만 사라졌다 = 수집이 정상 종료됐다(예: RG "받을 정산주기 없음").
+        // 이 분기가 없으면 성공한 무작업 회차를 타임아웃까지 기다린 뒤 "응답 없음"으로 오보한다.
+        if (!st.requested) { done = true; break; }
       }
       if (done) {
         const sel = selRef.current;
@@ -293,6 +302,9 @@ export default function CommandCenter() {
           failed = st.last_error || "원인 미상";
           break;
         }
+        // 새 실패 없이 요청만 사라졌다 = 수집이 정상 종료됐다(예: RG "받을 정산주기 없음").
+        // 이 분기가 없으면 성공한 무작업 회차를 타임아웃까지 기다린 뒤 "응답 없음"으로 오보한다.
+        if (!st.requested) { done = true; break; }
       }
       if (done) {
         const sel = selRef.current;

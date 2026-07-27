@@ -139,7 +139,7 @@ def _mark_cookie(db: Session, *, status: str | None, error: str | None,
         refresh_contract.mark_success(db, _ADS_ACCOUNT)
 
 
-def mark_fetch_error(db: Session, error: str, kind: str | None = None) -> None:
+def mark_fetch_error(db: Session, error: str, kind: str | None = None, lease: str | None = None) -> None:
     """Mac 페처 run 실패 보고 → last_error/last_error_at 기록(UI가 실패를 감지하는 유일 경로).
 
     ★존재 이유(2026-07-17 13:02 실사고): 페처가 브라우저 에러로 죽어도 prod에 알리는 경로가
@@ -156,7 +156,7 @@ def mark_fetch_error(db: Session, error: str, kind: str | None = None) -> None:
     ★kind(옵션): "login_required"면 재시도하지 않고 요청 소멸(§0 금지선 — 재시도해도 실패하고
     창만 반복해서 뜬다). 그 외 실패는 lease만 반납해 다음 폴에서 재시도된다(최대 3회).
     """
-    refresh_contract.report_failure(db, _ADS_ACCOUNT, error, kind)
+    refresh_contract.report_failure(db, _ADS_ACCOUNT, error, kind, lease=lease)
 
 
 # ════════════════════════════════════════════════

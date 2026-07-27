@@ -648,8 +648,10 @@ def cmd_login(cfg: dict, wait_secs: int = 600) -> int:
             res = _login_wait_loop(page, ctx, cfg, state, wait_secs, cdp=cdp)
     if res is None:
         log.error("제한 시간 내 로그인 감지 실패 — 다시 시도하세요.")
-        return 1
+        return RC_LOGIN_REQUIRED   # ★로그인 자체가 안 된 경우만 '로그인 필요'(codex 1R[P2])
     log.info("로그인 감지·세션 저장 완료: %s", state)
+    # 로그인은 됐는데 push가 실패한 경우는 재시도 대상 — login_required로 보고하면
+    # 멀쩡한 세션을 두고 요청이 소멸한다(거짓 로그인 문제).
     summ = _summarize(res.get("body") or "")
     if summ:
         _log_summary("[login]", summ, _vs_payload(cfg))
@@ -810,7 +812,8 @@ def _prod_notify_rg_complete(cfg: dict) -> None:
         log.warning("RG refresh-complete 보고 실패(무시): %s", str(e)[:120])
 
 
-def _prod_report_failure(cfg: dict, path: str, error: str, kind: str | None = None) -> None:
+def _prod_report_failure(cfg: dict, path: str, error: str, kind: str | None = None,
+                        lease: str | None = None) -> None:
     """run 실패를 prod에 보고 → 재시도 판정의 입력(lease 계약, PLAN_coupang-claim-retry-lease).
 
     보고가 없으면 lease TTL(기본 20분)이 지나야 재시도된다 — 보고하면 다음 폴에서 곧바로.
@@ -822,6 +825,8 @@ def _prod_report_failure(cfg: dict, path: str, error: str, kind: str | None = No
     body = {"error": str(error)[:300]}
     if kind:
         body["kind"] = kind
+    if lease:
+        body["lease"] = lease   # 내 임대에 대해서만 보고(stale 보고 차단, codex 1R[P1])
     try:
         requests.post(
             cfg["prod_base_url"].rstrip("/") + path,
@@ -870,20 +875,21 @@ def cmd_poll(cfg: dict) -> int:
                     with _try_fetch_lock() as acquired:
                         if not acquired:
                             log.info("다른 fetch 진행 중 — 요청 보류(다음 폴에서 처리)")
-                        elif _prod_claim(cfg).get("claimed"):
-                            last_fetch = time.monotonic()
-                            log.info("갱신 요청 감지 — fetch 시작")
-                            if not Path(state).is_file():
-                                if cmd_login(cfg, wait_secs=_LOGIN_WAIT_S) != 0:
-                                    _prod_report_failure(cfg, _VS_ERROR_PATH,
-                                                         "로그인 미완료(세션 없음)",
-                                                         kind="login_required")
-                            else:
-                                rc = _do_run(cfg, state, login_wait_secs=_LOGIN_WAIT_S)  # 락 보유 중
+                        else:
+                            _claim = _prod_claim(cfg)
+                            if _claim.get("claimed"):
+                                lease = _claim.get("lease")   # 내 임대 식별자(실패 보고에 첨부)
+                                last_fetch = time.monotonic()
+                                log.info("갱신 요청 감지 — fetch 시작")
+                                if not Path(state).is_file():
+                                    rc = cmd_login(cfg, wait_secs=_LOGIN_WAIT_S)
+                                else:
+                                    rc = _do_run(cfg, state, login_wait_secs=_LOGIN_WAIT_S)  # 락 보유 중
                                 if rc != 0:
                                     _prod_report_failure(
                                         cfg, _VS_ERROR_PATH, f"판매분석 수집 실패(rc={rc})",
-                                        kind=("login_required" if rc == RC_LOGIN_REQUIRED else None))
+                                        kind=("login_required" if rc == RC_LOGIN_REQUIRED else None),
+                                        lease=lease)
         except requests.RequestException as e:
             net_fails += 1
             log.warning("폴 확인 실패(네트워크) %d/%d: %s", net_fails, _MAX_CONSECUTIVE_NET_FAILS, str(e)[:80])
@@ -905,20 +911,23 @@ def cmd_poll(cfg: dict) -> int:
                         # NOTE(codex P2): claim은 실행 성공 전에 이뤄져 실패 시 버튼요청이 유실된다
                         #   (vendor-summary와 동일 패턴). 일일예약이 재시도로 덮어주던 것이 사라졌으므로,
                         #   실패 시에는 사람이 버튼을 다시 누른다(낡음은 전역 신선도 배너가 표면화).
-                        if _prod_rg_claim(cfg).get("claimed", False):
+                        _rg_claimed = _prod_rg_claim(cfg)
+                        if _rg_claimed.get("claimed", False):
+                            rg_lease = _rg_claimed.get("lease")
                             last_rg = time.monotonic()
                             log.info("RG 정산 다운로드 트리거(버튼)")
                             if not Path(state).is_file():
                                 log.warning("RG: 세션 파일 없음 — 'login' 필요(이번 회차 스킵)")
                                 _prod_report_failure(cfg, _RG_ERROR_PATH,
                                                      "세션 파일 없음 — 로그인 필요",
-                                                     kind="login_required")
+                                                     kind="login_required", lease=rg_lease)
                             else:
                                 rc = _do_rg_run(cfg, state, login_wait_secs=_LOGIN_WAIT_S)
                                 if rc != 0:
                                     _prod_report_failure(
                                         cfg, _RG_ERROR_PATH, f"RG 정산 수집 실패(rc={rc})",
-                                        kind=("login_required" if rc == RC_LOGIN_REQUIRED else None))
+                                        kind=("login_required" if rc == RC_LOGIN_REQUIRED else None),
+                                        lease=rg_lease)
                                 else:
                                     # 정상 완주 신호 — 받을 게 없어 업로드 0건이었어도 요청은
                                     # 여기서 소멸한다(없으면 창을 3번 더 띄운 뒤 거짓 실패).

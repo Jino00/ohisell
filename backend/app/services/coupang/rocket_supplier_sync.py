@@ -235,7 +235,7 @@ def mark_rocket_fetch_success(db: Session) -> None:
     refresh_contract.mark_success(db, _ROCKET_ACCOUNT)
 
 
-def mark_rocket_fetch_error(db: Session, error: str, kind: str | None = None) -> None:
+def mark_rocket_fetch_error(db: Session, error: str, kind: str | None = None, lease: str | None = None) -> None:
     """페처 run 실패 보고 → last_error/last_error_at 기록(UI가 실패를 감지하는 유일 경로).
 
     ★존재 이유(PR #30이 광고비에서 먼저 고친 것과 같은 구멍): 페처가 갱신 요청을 claim한
@@ -254,4 +254,4 @@ def mark_rocket_fetch_error(db: Session, error: str, kind: str | None = None) ->
     """
     _ensure_rocket_state_row(db)
     db.commit()  # 행이 없던 경우 대비(계약 SA는 기존 행에만 쓴다)
-    refresh_contract.report_failure(db, _ROCKET_ACCOUNT, error, kind)
+    refresh_contract.report_failure(db, _ROCKET_ACCOUNT, error, kind, lease=lease)

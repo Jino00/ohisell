@@ -108,12 +108,24 @@ def request_refresh(db: Session, account_key: str) -> dict:
 # ════════════════════════════════════════════════
 # ② claim — 페처가 작업 시작(lease 취득)
 # ════════════════════════════════════════════════
+def _lease_of(row: CoupangWingCookie | None) -> str | None:
+    """현재 임대 식별자(=claimed_at ISO). 페처가 claim 응답으로 받아 실패 보고에 되돌려준다."""
+    if row is None or row.claimed_at is None:
+        return None
+    return row.claimed_at.isoformat()
+
+
 def claim_refresh(db: Session, account_key: str) -> dict:
     """페처가 요청을 **임대**한다(플래그는 보존). 원자적 조건부 UPDATE.
 
-    조건: 요청이 살아있고 ∧ (임대 없음 ∨ 임대 만료(TTL 초과)).
+    조건: 요청이 살아있고 ∧ 시도 예산이 남았고(attempt_count < MAX) ∧ (임대 없음 ∨ 임대 만료).
     데몬이 둘 이상 동시에 돌아도 rowcount=1인 한쪽만 claimed=True가 된다(기존 codex P2 성질 유지).
-    반환 attempt=이번 시도가 몇 번째인지(1-based). claimed=False면 attempt는 현재 값 그대로.
+
+    ★attempt_count 조건이 필요한 이유(codex 1R[P1]): 데몬이 **보고 없이 죽는** 경로에서는
+    report_failure를 안 거치므로 TTL 만료만으로 계속 재claim된다 — 상한이 무력해지고 Chrome이
+    영원히 반복해서 뜬다. 예산을 다 쓴 요청은 여기서 소멸시킨다(폴이 곧 reaper 역할).
+
+    반환 attempt=이번 시도가 몇 번째인지(1-based), lease=이번 임대 식별자(실패 보고에 되돌려줌).
     """
     now = kst_now()
     cutoff = now - timedelta(minutes=_LEASE_TTL_MIN)
@@ -121,6 +133,7 @@ def claim_refresh(db: Session, account_key: str) -> dict:
         update(CoupangWingCookie)
         .where(CoupangWingCookie.account_key == account_key)
         .where(CoupangWingCookie.refresh_requested_at.isnot(None))
+        .where(CoupangWingCookie.attempt_count < MAX_ATTEMPTS)
         .where(
             (CoupangWingCookie.claimed_at.is_(None))
             | (CoupangWingCookie.claimed_at < cutoff)
@@ -138,7 +151,38 @@ def claim_refresh(db: Session, account_key: str) -> dict:
     attempt = int(row.attempt_count or 0) if row is not None else 0
     if claimed:
         log.info("refresh claim: %s attempt=%d/%d", account_key, attempt, MAX_ATTEMPTS)
-    return {"claimed": claimed, "attempt": attempt, "max_attempts": MAX_ATTEMPTS}
+    elif row is not None:
+        _reap_exhausted(db, row, now, cutoff)
+    return {
+        "claimed": claimed,
+        "attempt": attempt,
+        "max_attempts": MAX_ATTEMPTS,
+        "lease": _lease_of(row) if claimed else None,
+    }
+
+
+def _reap_exhausted(
+    db: Session, row: CoupangWingCookie, now, cutoff
+) -> None:
+    """예산을 다 쓰고 마지막 시도가 보고 없이 사라진 요청을 소멸시킨다(claim 경로의 reaper).
+
+    조건: 요청 살아있음 ∧ attempt_count>=MAX ∧ 임대가 없거나 만료됨(=일하는 중이 아님).
+    이게 없으면 요청이 영원히 requested=true로 남아 UI가 "진행 중"을 무한히 표시한다.
+    """
+    if row.refresh_requested_at is None:
+        return
+    if int(row.attempt_count or 0) < MAX_ATTEMPTS:
+        return
+    if row.claimed_at is not None and row.claimed_at >= cutoff:
+        return  # 마지막 시도가 아직 살아 일하는 중 — 기다린다
+    row.refresh_requested_at = None
+    row.claimed_at = None
+    row.last_error = (
+        f"재시도 {MAX_ATTEMPTS}회 소진 — 마지막 시도가 보고 없이 종료(응답 없음)"
+    )[:300]
+    row.last_error_at = now
+    db.commit()
+    log.warning("refresh 요청 소멸(reaper): %s attempt=%d", row.account_key, row.attempt_count)
 
 
 # ════════════════════════════════════════════════
@@ -167,12 +211,18 @@ def report_failure(
     account_key: str,
     error: str,
     kind: str | None = None,
+    lease: str | None = None,
 ) -> dict:
     """페처 run 실패 보고. 재시도 여부를 계약대로 판정한다.
 
     - kind="login_required" → 재시도 없음(창만 반복해서 뜸, §0 금지선). 요청 소멸.
     - attempt_count >= MAX_ATTEMPTS → 재시도 예산 소진. 요청 소멸.
     - 그 외 → claimed_at=None으로 lease만 반납 → 다음 폴에서 페처가 자동 재claim(=재시도).
+
+    ★lease(옵션, codex 1R[P1]): claim 응답으로 받은 임대 식별자. 지금 유효한 임대와 다르면
+    **stale 보고**로 보고 무시한다 — 20분 넘게 멈춰 있던 옛 시도가 뒤늦게 깨어나 (a)남의
+    임대를 반납해 창을 두 번 띄우거나 (b)이미 성공한 요청 위에 실패 흔적을 남기는 것을 막는다.
+    미전달(구버전 페처)이면 기존대로 동작(하위호환).
 
     반환 {"retry": bool, "attempt": n, "reason": str|None}. reason은 소멸 사유(재시도면 None).
     ★last_error/last_error_at은 어느 경우든 기록한다 — 재시도 중에도 무슨 일이 있었는지 남긴다.
@@ -182,6 +232,14 @@ def report_failure(
     row = _row(db, account_key)
     if row is None:
         return {"retry": False, "attempt": 0, "reason": None}
+
+    if lease is not None and _lease_of(row) != lease:
+        log.info(
+            "stale 실패 보고 무시: %s (보고 lease=%s, 현재=%s)",
+            account_key, lease, _lease_of(row),
+        )
+        return {"retry": False, "attempt": int(row.attempt_count or 0),
+                "reason": None, "stale": True}
 
     attempt = int(row.attempt_count or 0)
     reason: str | None = None

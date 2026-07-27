@@ -737,7 +737,8 @@ def _prod_claim(cfg: dict) -> dict:
 RC_LOGIN_REQUIRED = 3
 
 
-def _report_fetch_failure(cfg: dict, error: str, kind: str | None = None) -> None:
+def _report_fetch_failure(cfg: dict, error: str, kind: str | None = None,
+                          lease: str | None = None) -> None:
     """run 실패를 prod에 보고 → 재시도 판정의 입력(lease 계약, PLAN_coupang-claim-retry-lease).
 
     보고가 없으면 lease TTL(기본 20분)이 지나야 재시도된다 — 보고하면 다음 폴에서 곧바로.
@@ -746,6 +747,8 @@ def _report_fetch_failure(cfg: dict, error: str, kind: str | None = None) -> Non
     body = {"error": str(error)[:300]}
     if kind:
         body["kind"] = kind
+    if lease:
+        body["lease"] = lease   # 내 임대에 대해서만 보고(stale 보고 차단, codex 1R[P1])
     try:
         r = requests.post(
             _prod_base(cfg) + "/fetch-error",
@@ -888,7 +891,9 @@ def cmd_poll(cfg: dict) -> int:
                         else:
                             # claim 실패 = 요청 없음/타 데몬 선점 → run 스킵(요청 유실 방지).
                             # claim이 raise(401 등)하면 아래 except가 처리. 200이면 인증 정상.
-                            proceed = _prod_claim(cfg).get("claimed", False)
+                            _claim = _prod_claim(cfg)
+                            proceed = _claim.get("claimed", False)
+                            lease = _claim.get("lease")   # 내 임대 식별자(실패 보고에 첨부)
                             auth_alerted = False
                             if not proceed:
                                 log.info("[poll] claim 미획득 — 보류")
@@ -902,7 +907,8 @@ def cmd_poll(cfg: dict) -> int:
                                     # 필요)이면 prod가 재시도 없이 요청을 소멸시킨다(§0).
                                     _report_fetch_failure(
                                         cfg, f"오하이테크 광고비 수집 실패(rc={rc})",
-                                        kind=("login_required" if rc == RC_LOGIN_REQUIRED else None))
+                                        kind=("login_required" if rc == RC_LOGIN_REQUIRED else None),
+                                        lease=lease)
                                 # 실패 가시성(리뷰 P3): rc==1(세션만료)은 cmd_run이 이미 알림.
                                 # rc==2=Chrome 기동 실패/프로필 점유 충돌 → 사일런트 정지 방지 알림.
                                 if rc == 2:

@@ -924,7 +924,10 @@ def _rg_ensure_state_row(db: Session) -> CoupangWingCookie:
 def rg_mark_heartbeat(db: Session) -> None:
     """RG 엑셀 push(업로드) 성공 시각 갱신(staleness·스케줄 중복방지 기준). 라우터가 ingest 성공 후 호출.
 
-    ★lease 계약(refresh_contract): 갱신 요청이 소멸하는 정상 경로는 여기 하나뿐이다.
+    ★갱신 요청은 여기서 소멸시키지 않는다(codex 1R[P1]): RG 한 회차는 (정산주기 × 리포트종류)
+    여러 엑셀을 올린다. 첫 업로드에서 요청을 지우면 뒤이은 다운로드·push가 실패해도 재시도할
+    요청이 남아있지 않아 정산 데이터가 반쪽으로 남는다. 요청 소멸은 run 전체가 끝난 뒤
+    refresh-complete(=/wing/rg-settlement/refresh-complete)가 한다.
     """
     row = _rg_ensure_state_row(db)
     row.status = "green"
@@ -932,10 +935,9 @@ def rg_mark_heartbeat(db: Session) -> None:
     row.last_error_at = None  # 성공 = 실패 흔적 클리어(안 지우면 오래된 실패가 화면에 남는다)
     row.last_success_at = kst_now()
     db.commit()
-    refresh_contract.mark_success(db, _RG_STATE_ACCOUNT)
 
 
-def rg_mark_fetch_error(db: Session, error: str, kind: str | None = None) -> None:
+def rg_mark_fetch_error(db: Session, error: str, kind: str | None = None, lease: str | None = None) -> None:
     """Wing 페처 RG run 실패 보고 → last_error/last_error_at 기록(UI가 실패를 감지하는 유일 경로).
 
     ★존재 이유(PR #30이 광고비에서 먼저 고친 것과 같은 구멍): 페처가 갱신 요청을 claim한
@@ -953,7 +955,7 @@ def rg_mark_fetch_error(db: Session, error: str, kind: str | None = None) -> Non
     """
     _rg_ensure_state_row(db)
     db.commit()  # 행이 없던 경우 대비(계약 SA는 기존 행에만 쓴다)
-    refresh_contract.report_failure(db, _RG_STATE_ACCOUNT, error, kind)
+    refresh_contract.report_failure(db, _RG_STATE_ACCOUNT, error, kind, lease=lease)
 
 
 def rg_request_refresh(db: Session) -> dict:

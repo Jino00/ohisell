@@ -1506,7 +1506,10 @@ def rocket_fetch_error(
     # kind(옵션, 하위호환): 구버전 페처는 안 보낸다 → None = 평범한 실패 = 재시도 대상.
     # "login_required"만 특별 취급(재시도 제외, PLAN §0 금지선).
     kind = str(body.get("kind") or "").strip() or None
-    rocket_supplier_sync.mark_rocket_fetch_error(db, error, kind=kind)
+    # lease(옵션, codex 1R[P1]): claim 응답의 임대 식별자. 지금 유효한 임대와 다르면 stale
+    # 보고로 무시한다(20분 넘게 멈췄던 옛 시도가 남의 임대를 반납하는 것 차단). 없으면 기존 동작.
+    lease = str(body.get("lease") or "").strip() or None
+    rocket_supplier_sync.mark_rocket_fetch_error(db, error, kind=kind, lease=lease)
     return {"ok": True}
 
 
@@ -1564,7 +1567,10 @@ def ohitech_ad_fetch_error(
     # kind(옵션, 하위호환): 구버전 페처는 안 보낸다 → None = 평범한 실패 = 재시도 대상.
     # "login_required"만 특별 취급(재시도 제외, PLAN §0 금지선).
     kind = str(body.get("kind") or "").strip() or None
-    ohitech_ad_sync.mark_fetch_error(db, error, kind=kind)
+    # lease(옵션, codex 1R[P1]): claim 응답의 임대 식별자. 지금 유효한 임대와 다르면 stale
+    # 보고로 무시한다(20분 넘게 멈췄던 옛 시도가 남의 임대를 반납하는 것 차단). 없으면 기존 동작.
+    lease = str(body.get("lease") or "").strip() or None
+    ohitech_ad_sync.mark_fetch_error(db, error, kind=kind, lease=lease)
     return {"ok": True}
 
 
@@ -1666,7 +1672,10 @@ def report_ad_cost_fetch_error(
     # kind(옵션, 하위호환): 구버전 페처는 안 보낸다 → None = 평범한 실패 = 재시도 대상.
     # "login_required"만 특별 취급(재시도 제외, PLAN §0 금지선).
     kind = str(body.get("kind") or "").strip() or None
-    ad_cost_sync.mark_fetch_error(db, error, kind=kind)
+    # lease(옵션, codex 1R[P1]): claim 응답의 임대 식별자. 지금 유효한 임대와 다르면 stale
+    # 보고로 무시한다(20분 넘게 멈췄던 옛 시도가 남의 임대를 반납하는 것 차단). 없으면 기존 동작.
+    lease = str(body.get("lease") or "").strip() or None
+    ad_cost_sync.mark_fetch_error(db, error, kind=kind, lease=lease)
     return {"ok": True}
 
 
@@ -1788,7 +1797,10 @@ def wing_vendor_summary_fetch_error(
     # kind(옵션, 하위호환): 구버전 페처는 안 보낸다 → None = 평범한 실패 = 재시도 대상.
     # "login_required"만 특별 취급(재시도 제외, PLAN §0 금지선).
     kind = str(body.get("kind") or "").strip() or None
-    vendor_summary_sync.mark_fetch_error(db, error, kind=kind)
+    # lease(옵션, codex 1R[P1]): claim 응답의 임대 식별자. 지금 유효한 임대와 다르면 stale
+    # 보고로 무시한다(20분 넘게 멈췄던 옛 시도가 남의 임대를 반납하는 것 차단). 없으면 기존 동작.
+    lease = str(body.get("lease") or "").strip() or None
+    vendor_summary_sync.mark_fetch_error(db, error, kind=kind, lease=lease)
     return {"ok": True}
 
 
@@ -1834,7 +1846,10 @@ def wing_rg_settlement_fetch_error(
     # kind(옵션, 하위호환): 구버전 페처는 안 보낸다 → None = 평범한 실패 = 재시도 대상.
     # "login_required"만 특별 취급(재시도 제외, PLAN §0 금지선).
     kind = str(body.get("kind") or "").strip() or None
-    rg_settlement_sync.rg_mark_fetch_error(db, error, kind=kind)
+    # lease(옵션, codex 1R[P1]): claim 응답의 임대 식별자. 지금 유효한 임대와 다르면 stale
+    # 보고로 무시한다(20분 넘게 멈췄던 옛 시도가 남의 임대를 반납하는 것 차단). 없으면 기존 동작.
+    lease = str(body.get("lease") or "").strip() or None
+    rg_settlement_sync.rg_mark_fetch_error(db, error, kind=kind, lease=lease)
     return {"ok": True}
 
 

@@ -23,6 +23,12 @@ from app.services.coupang import (
 
 _TOKEN = "test-token-123"
 
+
+def _rg_success(db) -> None:
+    """RG run 전체 성공 = 업로드 heartbeat + refresh-complete(요청 소멸)."""
+    rg_settlement_sync.rg_mark_heartbeat(db)
+    rc.mark_success(db, rg_settlement_sync._RG_STATE_ACCOUNT)
+
 # (id, account_key, request, claim, status, error, success, fetch-error URL)
 STREAMS = [
     (
@@ -36,7 +42,9 @@ STREAMS = [
         "rg_settlement", rg_settlement_sync._RG_STATE_ACCOUNT,
         rg_settlement_sync.rg_request_refresh, rg_settlement_sync.rg_claim_refresh,
         rg_settlement_sync.rg_refresh_status, rg_settlement_sync.rg_mark_fetch_error,
-        rg_settlement_sync.rg_mark_heartbeat,
+        # RG의 "성공"은 업로드 heartbeat + run 종료 신호(refresh-complete)의 합이다 —
+        # 업로드 하나만으로 요청을 지우면 나머지 엑셀 실패를 재시도할 수 없다(codex 1R[P1]).
+        _rg_success,
         "/api/coupang/ops/wing/rg-settlement/fetch-error",
     ),
     (
@@ -183,6 +191,24 @@ def test_router_passes_login_required_kind(client, _, acc, request_fn, claim_fn,
 
     seed.expire_all()
     assert _row(seed, acc).refresh_requested_at is None   # 재시도 없이 소멸
+
+
+def test_rg_upload_heartbeat_alone_keeps_request(client):
+    """★codex 1R[P1]: RG는 (정산주기×리포트종류) 여러 엑셀을 올린다 — 첫 업로드가 요청을
+    지우면 뒤 엑셀이 실패해도 재시도할 요청이 없어 정산이 반쪽으로 남는다.
+    """
+    _c, seed = client
+    rg_settlement_sync.rg_request_refresh(seed)
+    rg_settlement_sync.rg_claim_refresh(seed)
+    rg_settlement_sync.rg_mark_heartbeat(seed)      # 첫 엑셀 업로드 성공
+
+    row = _row(seed, rg_settlement_sync._RG_STATE_ACCOUNT)
+    assert row.last_success_at is not None           # 신선도는 올라간다
+    assert row.refresh_requested_at is not None      # 요청은 run이 끝날 때까지 살아있다
+
+    # 뒤 엑셀이 실패하면 재시도가 가능해야 한다
+    rg_settlement_sync.rg_mark_fetch_error(seed, "두 번째 리포트 다운로드 실패")
+    assert rg_settlement_sync.rg_claim_refresh(seed)["claimed"] is True
 
 
 def test_rg_refresh_complete_extinguishes_request(client):

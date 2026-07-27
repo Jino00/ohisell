@@ -120,7 +120,8 @@ def test_failure_returns_lease_and_allows_retry(db):
     assert out["retry"] is True and out["attempt"] == 1
     assert _row(db).refresh_requested_at is not None
     assert _row(db).claimed_at is None
-    assert rc.claim_refresh(db, ACC) == {"claimed": True, "attempt": 2, "max_attempts": rc.MAX_ATTEMPTS}
+    again = rc.claim_refresh(db, ACC)
+    assert again["claimed"] is True and again["attempt"] == 2 and again["lease"]
 
 
 def test_failure_records_error_message_and_time(db):
@@ -221,19 +222,73 @@ def test_lease_just_inside_ttl_is_not_reclaimed(db):
     assert rc.claim_refresh(db, ACC)["claimed"] is False
 
 
-def test_ttl_expiry_still_respects_attempt_cap(db):
-    """TTL만으로 무한 재시도가 되지 않는다 — 상한은 claim 횟수 기준으로 동작한다."""
+def test_ttl_expiry_respects_attempt_cap(db):
+    """★codex 1R[P1]: 데몬이 '보고 없이' 죽는 경로에서도 상한이 지켜져야 한다.
+
+    보고가 없으면 report_failure를 안 거치므로, TTL 만료만으로 재claim이 무한 반복될 수
+    있었다(=Chrome이 영원히 다시 뜸). claim 조건에 attempt_count<MAX가 있어야 멈춘다.
+    """
     rc.request_refresh(db, ACC)
-    for _ in range(rc.MAX_ATTEMPTS):
-        assert rc.claim_refresh(db, ACC)["claimed"] is True
+    for i in range(rc.MAX_ATTEMPTS):
+        assert rc.claim_refresh(db, ACC)["claimed"] is True, f"{i+1}회차"
         row = _row(db)
         row.claimed_at = kst_now() - timedelta(minutes=rc.lease_ttl_minutes() + 1)
         db.commit()
-    # 3회 다 썼지만 아직 보고가 없었다 → TTL 만료로 4번째 claim은 가능하되,
-    # 실패 보고가 오면 즉시 소멸한다(상한 초과 상태).
+
+    out = rc.claim_refresh(db, ACC)          # 4번째 시도는 없다
+    assert out["claimed"] is False
+    row = _row(db)
+    assert row.refresh_requested_at is None  # reaper가 소멸시킨다(무한 "진행 중" 방지)
+    assert "재시도 3회 소진" in row.last_error
+    assert row.last_error_at is not None
+
+
+def test_reaper_waits_while_last_attempt_is_alive(db):
+    """마지막 시도가 아직 살아 일하는 중이면 소멸시키지 않는다(정상 완료를 기다린다)."""
+    rc.request_refresh(db, ACC)
+    for _ in range(rc.MAX_ATTEMPTS):
+        rc.claim_refresh(db, ACC)
+        if int(_row(db).attempt_count) < rc.MAX_ATTEMPTS:
+            rc.report_failure(db, ACC, "boom")
+    # 3회차 lease는 살아있다(방금 claim) → 아직 소멸 금지
+    assert rc.claim_refresh(db, ACC)["claimed"] is False
+    assert _row(db).refresh_requested_at is not None
+
+    rc.mark_success(db, ACC)                  # 3회차가 성공으로 끝남
+    assert _row(db).refresh_requested_at is None
+
+
+# ── lease 펜스(stale 보고 차단) ────────────────────────
+def test_stale_failure_report_is_ignored(db):
+    """★codex 1R[P1]: 20분 넘게 멈췄던 옛 시도가 뒤늦게 깨어나 남의 임대를 반납하면 안 된다."""
+    rc.request_refresh(db, ACC)
+    stale_lease = rc.claim_refresh(db, ACC)["lease"]
+
+    row = _row(db)                            # 1회차가 응답 없이 멈춤 → TTL 만료
+    row.claimed_at = kst_now() - timedelta(minutes=rc.lease_ttl_minutes() + 1)
+    db.commit()
+    fresh_lease = rc.claim_refresh(db, ACC)["lease"]   # 2회차가 재claim(=지금 일하는 중)
+    assert fresh_lease != stale_lease
+
+    out = rc.report_failure(db, ACC, "옛 시도의 뒤늦은 실패", lease=stale_lease)
+    assert out.get("stale") is True
+    row = _row(db)
+    assert row.claimed_at is not None         # 2회차 임대 그대로(반납되지 않음)
+    assert row.last_error is None             # 실패 흔적도 남기지 않는다
+
+
+def test_matching_lease_report_is_applied(db):
+    rc.request_refresh(db, ACC)
+    lease = rc.claim_refresh(db, ACC)["lease"]
+    assert rc.report_failure(db, ACC, "boom", lease=lease)["retry"] is True
+    assert _row(db).claimed_at is None
+
+
+def test_report_without_lease_is_backward_compatible(db):
+    """구버전 페처(lease 미전달)는 기존대로 동작한다."""
+    rc.request_refresh(db, ACC)
     rc.claim_refresh(db, ACC)
-    out = rc.report_failure(db, ACC, "boom")
-    assert out["retry"] is False
+    assert rc.report_failure(db, ACC, "boom")["retry"] is True
 
 
 def test_ttl_default_is_20_minutes(monkeypatch):

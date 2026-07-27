@@ -983,9 +983,13 @@ def _do_run(cfg: dict) -> int:
                         owner.keep_open = True   # 로그인할 창이 필요 → 닫지 않음
                         return RC_LOGIN_REQUIRED
                     if not _session_ok(page, cfg):
-                        log.error("발주 list 세션 미응답 — 세션 만료. 이 창에서 로그인 후 다시 '갱신'을 누르세요.")
+                        # ★재시도 대상으로 둔다(codex 1R[P2]): _session_ok는 Playwright 예외·
+                        # Akamai 챌린지·일시적 비200까지 전부 False로 접는다. 로그아웃이 확증된
+                        # 것이 아니므로 login_required로 소멸시키면 멀쩡한 세션의 일시 장애가
+                        # 요청을 지운다. 진짜 로그아웃은 위 _goto_origin(URL 판정)이 잡는다.
+                        log.error("발주 list 세션 미응답 — 세션 만료 의심. 이 창에서 로그인 후 다시 '갱신'을 누르세요.")
                         owner.keep_open = True
-                        return RC_LOGIN_REQUIRED
+                        return 1
                     pages = _collect_po_pages(page, cfg)
                     try:
                         settle_rows = _collect_settlement_rows(page, cfg)
@@ -1026,7 +1030,8 @@ def _do_run(cfg: dict) -> int:
 RC_LOGIN_REQUIRED = 3
 
 
-def _prod_report_failure(cfg: dict, error: str, kind: str | None = None) -> None:
+def _prod_report_failure(cfg: dict, error: str, kind: str | None = None,
+                        lease: str | None = None) -> None:
     """run 실패를 prod에 보고 → 재시도 판정의 입력(lease 계약, PLAN_coupang-claim-retry-lease).
 
     보고가 없으면 lease TTL(기본 20분)이 지나야 재시도된다 — 보고하면 다음 폴(30s)에 곧바로.
@@ -1037,6 +1042,8 @@ def _prod_report_failure(cfg: dict, error: str, kind: str | None = None) -> None
     body = {"error": str(error)[:300]}
     if kind:
         body["kind"] = kind
+    if lease:
+        body["lease"] = lease   # 내 임대에 대해서만 보고(stale 보고 차단, codex 1R[P1])
     try:
         requests.post(
             cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/rocket/fetch-error",
@@ -1189,10 +1196,12 @@ def cmd_poll(cfg: dict, interval: int = 30) -> int:
             needs_run = False
 
             # UI 버튼 요청 (유일한 트리거)
+            lease = None
             if st.get("requested"):
-                claimed = _prod_rocket_claim(cfg).get("claimed", False)
-                if claimed:
-                    log.info("[poll] UI 갱신 요청 소비 → 즉시 실행")
+                _claim = _prod_rocket_claim(cfg)
+                if _claim.get("claimed", False):
+                    lease = _claim.get("lease")   # 내 임대 식별자(실패 보고에 첨부)
+                    log.info("[poll] UI 갱신 요청 임대 → 즉시 실행")
                     needs_run = True
 
             if needs_run:
@@ -1203,7 +1212,8 @@ def cmd_poll(cfg: dict, interval: int = 30) -> int:
                     # prod가 재시도 없이 요청을 소멸시킨다(§0 — 창만 반복해서 뜬다).
                     _prod_report_failure(
                         cfg, f"로켓 발주/정산 수집 실패(rc={rc})",
-                        kind=("login_required" if rc == RC_LOGIN_REQUIRED else None))
+                        kind=("login_required" if rc == RC_LOGIN_REQUIRED else None),
+                        lease=lease)
 
         except Exception as e:  # noqa: BLE001
             fails += 1

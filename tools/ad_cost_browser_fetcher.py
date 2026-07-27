@@ -572,8 +572,10 @@ def cmd_login(cfg: dict, wait_secs: int = 600) -> int:
             browser.close()
     if ok_data is None:
         log.error("제한 시간 내 로그인 감지 실패 — 다시 시도하세요.")
-        return 1
+        return RC_LOGIN_REQUIRED   # ★로그인 자체가 안 된 경우만 '로그인 필요'(codex 1R[P2])
     log.info("로그인 감지·세션 저장 완료: %s", state)
+    # 로그인은 됐는데 push가 실패한 경우는 **재시도 대상**이다 — 여기서 login_required로
+    # 보고하면 멀쩡한 세션을 두고 요청이 소멸한다(거짓 로그인 문제).
     return _push(cfg, ok_data)  # 첫 데이터 즉시 push
 
 
@@ -868,7 +870,8 @@ def _prod_claim(cfg: dict) -> dict:
     return r.json()
 
 
-def _prod_report_failure(cfg: dict, error: str, kind: str | None = None) -> None:
+def _prod_report_failure(cfg: dict, error: str, kind: str | None = None,
+                        lease: str | None = None) -> None:
     """run 실패를 prod에 보고 → 재시도 판정의 입력(lease 계약, PLAN_coupang-claim-retry-lease).
 
     보고가 없으면 요청은 lease TTL(기본 20분)이 지나야 재시도된다 — 보고하면 다음 폴(15s)에
@@ -881,6 +884,8 @@ def _prod_report_failure(cfg: dict, error: str, kind: str | None = None) -> None
     body = {"error": str(error)[:300]}
     if kind:
         body["kind"] = kind
+    if lease:
+        body["lease"] = lease   # 내 임대에 대해서만 보고(stale 보고 차단, codex 1R[P1])
     try:
         requests.post(
             cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/ad-cost/fetch-error",
@@ -917,23 +922,25 @@ def cmd_poll(cfg: dict) -> int:
                     with _try_fetch_lock() as acquired:
                         if not acquired:
                             log.info("다른 fetch 진행 중 — 요청 보류(다음 폴에서 처리)")
-                        elif _prod_claim(cfg).get("claimed"):
-                            last_fetch = time.monotonic()
-                            log.info("갱신 요청 감지 — fetch 시작")
-                            if not Path(state).is_file():
-                                # 세션 없음 → 로그인부터. 대기는 UI 폴링 윈도우(215s) 안인
-                                # _LOGIN_WAIT_S로 맞춤 — 기본 600s면 UI가 먼저 포기(codex P2).
-                                rc = cmd_login(cfg, wait_secs=_LOGIN_WAIT_S)
-                                if rc != 0:
-                                    _prod_report_failure(cfg, "로그인 미완료(세션 없음)",
-                                                         kind="login_required")
-                            else:
-                                rc = _do_run(cfg, state, login_wait_secs=_LOGIN_WAIT_S)  # 락 보유 중
+                        else:
+                            _claim = _prod_claim(cfg)
+                            if _claim.get("claimed"):
+                                lease = _claim.get("lease")   # 내 임대 식별자(실패 보고에 첨부)
+                                last_fetch = time.monotonic()
+                                log.info("갱신 요청 감지 — fetch 시작")
+                                if not Path(state).is_file():
+                                    # 세션 없음 → 로그인부터. 대기는 UI 폴링 윈도우(215s) 안인
+                                    # _LOGIN_WAIT_S로 맞춤 — 기본 600s면 UI가 먼저 포기(codex P2).
+                                    rc = cmd_login(cfg, wait_secs=_LOGIN_WAIT_S)
+                                else:
+                                    rc = _do_run(cfg, state, login_wait_secs=_LOGIN_WAIT_S)  # 락 보유 중
                                 if rc != 0:
                                     # rc==3 = 로그인 필요 → prod가 재시도 없이 요청을 소멸시킨다.
+                                    # 그 외 실패는 재시도 대상(로그인 후 push 실패 등).
                                     _prod_report_failure(
                                         cfg, f"광고비 수집 실패(rc={rc})",
-                                        kind=("login_required" if rc == RC_LOGIN_REQUIRED else None))
+                                        kind=("login_required" if rc == RC_LOGIN_REQUIRED else None),
+                                        lease=lease)
         except requests.RequestException as e:
             net_fails += 1
             log.warning("폴 확인 실패(네트워크) %d/%d: %s", net_fails, _MAX_CONSECUTIVE_NET_FAILS, str(e)[:80])
