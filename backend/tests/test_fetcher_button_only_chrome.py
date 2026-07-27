@@ -266,6 +266,7 @@ def test_port_owner_unverified_is_refused_by_default(fetcher, tmp_path, monkeypa
 
     profile = str(tmp_path / "profile")
     _mk_lock(profile, os.getpid())
+    monkeypatch.setattr(fetcher, "_proc_start_epoch", lambda _p: 0.0)
     monkeypatch.setattr(fetcher.subprocess, "run", _boom)
     assert fetcher._port_owner_foreign(9299, profile) is True
     # 현장 오판 시 설정으로 옛 동작 복귀 가능.
@@ -300,6 +301,7 @@ def test_port_owner_verified_by_pid_identity(fetcher, tmp_path, monkeypatch):
         return _R(f"chrome --user-data-dir={profile} --no-first-run\n")   # ps
 
     monkeypatch.setattr(fetcher.subprocess, "run", _run)
+    monkeypatch.setattr(fetcher, "_proc_start_epoch", lambda _p: 0.0)   # lock보다 먼저 시작
     assert fetcher._port_owner_foreign(9299, profile) is False   # 일치 → adopt 정당
 
     def _run_other(argv, *_a, **_k):
@@ -308,7 +310,48 @@ def test_port_owner_verified_by_pid_identity(fetcher, tmp_path, monkeypatch):
         return _R(f"chrome --user-data-dir={profile} --no-first-run\n")
 
     monkeypatch.setattr(fetcher.subprocess, "run", _run_other)
+    monkeypatch.setattr(fetcher, "_proc_start_epoch", lambda _p: 0.0)
     assert fetcher._port_owner_foreign(9299, profile) is True    # 불일치 → 거부
+
+
+def test_pid_reuse_refused_even_if_cmdline_matches(fetcher, tmp_path, monkeypatch):
+    """★codex R6: 재사용된 PID는 ①생존·④cmdline을 모두 통과할 수 있다 — 시작 시각으로 판별.
+
+    stale lock의 PID가 재배정되면 '살아있음'은 자동 충족이고, cmdline은 ps의 argv flatten 때문에
+    단독 판별자가 될 수 없다(R4). 재사용을 직접 가르는 유일한 사실은 **그 프로세스가 lock보다
+    나중에 시작했다**는 것이다.
+    """
+    profile = str(tmp_path / "profile")
+    live = os.getpid()
+    _mk_lock(profile, live)
+    lock_mtime = os.lstat(os.path.join(profile, "SingletonLock")).st_mtime
+
+    # cmdline은 우리 프로필과 완전히 일치(위조 성공 상황) — 그래도 거부돼야 한다.
+    monkeypatch.setattr(fetcher.subprocess, "run",
+                        lambda argv, *_a, **_k: _R(f"{live}\n") if argv[0] == "lsof"
+                        else _R(f"chrome --user-data-dir={profile}\n"))
+    # 프로세스가 lock보다 1시간 늦게 시작 = PID 재사용
+    monkeypatch.setattr(fetcher, "_proc_start_epoch", lambda _p: lock_mtime + 3600)
+    assert fetcher._profile_owner_pid(profile) is None
+    assert fetcher._port_owner_foreign(9299, profile) is True
+    # 정상: lock보다 먼저 시작한 프로세스는 통과
+    monkeypatch.setattr(fetcher, "_proc_start_epoch", lambda _p: lock_mtime - 1)
+    assert fetcher._profile_owner_pid(profile) == live
+    # 시작 시각 확인 불가 → 재사용을 배제할 수 없으므로 거부
+    monkeypatch.setattr(fetcher, "_proc_start_epoch", lambda _p: None)
+    assert fetcher._profile_owner_pid(profile) is None
+
+
+def test_proc_start_epoch_parses_ps_etime(fetcher, monkeypatch):
+    """macOS ps etime([[dd-]hh:]mm:ss) 파싱 — etimes(초)는 macOS에 없다."""
+    import time as _t
+
+    for etime, secs in (("00:03", 3), ("05:09", 309), ("01:02:03", 3723), ("01-23:04:49", 169489)):
+        monkeypatch.setattr(fetcher.subprocess, "run", lambda *_a, _e=etime, **_k: _R(_e + "\n"))
+        got = fetcher._proc_start_epoch(1234)
+        assert abs((_t.time() - secs) - got) < 2, etime
+    monkeypatch.setattr(fetcher.subprocess, "run", lambda *_a, **_k: _R("garbage\n"))
+    assert fetcher._proc_start_epoch(1234) is None
 
 
 def test_stale_lock_pid_reuse_is_refused(fetcher, tmp_path, monkeypatch):
@@ -328,7 +371,8 @@ def test_stale_lock_pid_reuse_is_refused(fetcher, tmp_path, monkeypatch):
         return _R("/usr/bin/some-unrelated-daemon --serve\n")   # ps: Chrome도 아니고 우리 프로필도 아님
 
     monkeypatch.setattr(fetcher.subprocess, "run", _run)
-    assert fetcher._profile_owner_pid(profile) is None
+    monkeypatch.setattr(fetcher, "_proc_start_epoch", lambda _p: 0.0)   # 시작시각은 정상이라 가정
+    assert fetcher._profile_owner_pid(profile) is None                  # cmdline 불일치로 거부
     assert fetcher._port_owner_foreign(9299, profile) is True
 
 

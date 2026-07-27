@@ -1309,6 +1309,32 @@ def _cdp_alive(port: int) -> bool:
         return False
 
 
+# PID 재사용 판별 허용오차: ps etime은 1초 해상도라 '시작 == lock 생성' 동시간대를 흡수한다.
+# 재사용 PID는 원 Chrome이 죽은 뒤에야 배정되므로 실제로는 분·시간 단위로 벌어진다.
+_PID_REUSE_TOLERANCE_S = 5
+
+
+def _proc_start_epoch(pid: int) -> float | None:
+    """PID의 프로세스 시작 시각(epoch 초). 확인 불가면 None.
+
+    macOS ps에는 `etimes`(초)가 없다 — `etime`([[dd-]hh:]mm:ss)을 파싱해 now-경과로 환산한다.
+    (`lstart`는 로케일 의존 텍스트라 파싱이 더 취약하다.)
+    """
+    try:
+        et = subprocess.run(
+            ["ps", "-o", "etime=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=3,
+        ).stdout.strip()
+    except Exception:  # noqa: BLE001
+        return None
+    m = re.fullmatch(r"(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)", et)
+    if not m:
+        return None
+    d, h, mi, sec = m.groups()
+    elapsed = int(d or 0) * 86400 + int(h or 0) * 3600 + int(mi) * 60 + int(sec)
+    return time.time() - elapsed
+
+
 def _profile_owner_pid(profile: str) -> int | None:
     """이 프로필을 **지금** 점유 중인 Chrome 브라우저 프로세스 PID. stale이면 None.
 
@@ -1317,29 +1343,43 @@ def _profile_owner_pid(profile: str) -> int | None:
 
     ★심볼릭링크만 믿으면 안 된다(codex R5): Chrome이 크래시하면 SingletonLock이 남고, macOS가
     그 PID를 무관한 프로세스에 재사용할 수 있다. 그 프로세스가 마침 우리 CDP 포트를 LISTEN하면
-    PID가 같다는 이유로 adopt돼 버린다. 그래서 3중으로 확인한다:
-      ① PID 파싱 ② 그 PID가 살아 있음 ③ 그 프로세스가 **우리 프로필로 도는 Chrome**임(cmdline).
-    ③은 단독 증거로는 약하지만(ps가 argv를 flatten — codex R4) 여기서는 ①②와 **AND**라
-    위조하려면 우리 프로필 lock의 PID까지 차지해야 한다.
+    PID가 같다는 이유로 adopt돼 버린다. 그래서 4중으로 확인한다:
+
+      ① PID 파싱  ② 그 PID가 살아 있음
+      ③ ★PID 재사용 아님 — 그 프로세스의 **시작 시각이 lock 생성 시각보다 앞**이어야 한다.
+         정상 Chrome은 뜬 직후 lock을 걸므로 start < lock_mtime이다. 반대로 재사용된 PID는
+         **lock이 만들어진 뒤에** 시작했으므로 start > lock_mtime이 되어 걸러진다.
+         이것이 재사용을 직접 판별하는 유일한 조건이다(codex R6: ①②는 재사용으로 자동 충족되고
+         cmdline은 ps의 argv flatten 때문에 단독 판별자가 될 수 없다 — R4).
+      ④ 그 프로세스가 우리 프로필로 도는 Chrome임(cmdline) — ③ 위에 얹는 방어 심화.
+
     (호스트명은 검사하지 않는다 — macOS는 `.local` 이름이 바뀌는 일이 있어 오거부 위험이 더 크다.)
     """
     prof = os.path.expanduser(profile)
+    lock = os.path.join(prof, "SingletonLock")
     try:
-        target = os.readlink(os.path.join(prof, "SingletonLock"))
+        target = os.readlink(lock)
+        lock_mtime = os.lstat(lock).st_mtime      # 심볼릭링크 자체의 생성 시각
     except OSError:
         return None
     try:
-        pid = int(target.rsplit("-", 1)[-1])   # 호스트명에 '-'가 있어도 마지막만
+        pid = int(target.rsplit("-", 1)[-1])       # 호스트명에 '-'가 있어도 마지막만
     except ValueError:
         return None
     if pid <= 0:
         return None
     try:
-        os.kill(pid, 0)                        # 시그널 0 = 존재만 확인
+        os.kill(pid, 0)                            # 시그널 0 = 존재만 확인
     except ProcessLookupError:
-        return None                            # 죽은 PID = 크래시 잔재 lock
+        return None                                # 죽은 PID = 크래시 잔재 lock
     except PermissionError:
-        return None                            # 타 유저 소유 = 우리 Chrome 아님
+        return None                                # 타 유저 소유 = 우리 Chrome 아님
+    started = _proc_start_epoch(pid)
+    if started is None:
+        return None                                # 시작 시각 확인 불가 → 재사용 배제 못 함
+    if started > lock_mtime + _PID_REUSE_TOLERANCE_S:
+        # lock보다 나중에 시작한 프로세스 = PID 재사용. 원래 Chrome은 이미 죽었다.
+        return None
     try:
         cmdline = subprocess.run(
             ["ps", "-o", "command=", "-p", str(pid)],
