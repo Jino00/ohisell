@@ -2,6 +2,13 @@
 # 매 sprint 완료 시 Claude가 이 파일을 갱신합니다.
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
+## 최신 상태 (2026-07-27 14:30, 워크트리 sleepy-turing-843601) — WING2(오하이테크) RG 정산 편입 스프린트: 코드·배포 완료, Jino 로그인 대기
+- 원인 확정: WING2 정산은 서버측 쿠키 경로(sync_rg_settlement, 05:30 크론)로만 수집되다 06-10 쿠키 만료(red)로 사망(마지막 행 06-07). 06-20 로컬 페처 이관(D-7)은 로그인 미완·launchd 미설치로 방치. 버튼 큐(COUPANG_WING_RG)가 계정 무구분이라 WING2 데몬 단순 기동 시 WING1과 claim 경쟁 구조.
+- 구현·배포(PR #105 병합=main `c0e880c`==prod): RG/VS 버튼 큐 계정 파라미터화(상태행 WING1=COUPANG_WING_RG 재사용·WING2=COUPANG_WING_RG2 신설, account_key 기본값 WING1=하위호환), 페처 4개 prod 호출에 account_key 전달, com.ohisell.wing2 plist+install_local_runtime.sh 편입, 프론트 'RG 정산 갱신' 버튼 2계정 동시 요청·계정별 결과 표기. pytest 3204·tsc 0err·vitest 77. codex 4R PASS(P1: 설치 스크립트 누락=라이브 死코드 방지).
+- 로컬: com.ohisell.wing 재기동 + com.ohisell.wing2 신규 기동 확인(둘 다 폴 데몬 시작 로그). WING2는 state 파일 없음=로그인 전 대기.
+- ▶다음 액션: ①Jino가 WING2 로그인 1회(명령은 세션 대화 참조: OHISELL_WING_CONFIG 등 env 3종 + login) ②로그인 후 ~/.ohisell_wing2_fetcher.json에 rg_status_days=90·rg_days=60·rg_max_periods=8 임시 설정 → rg 1회 실행(층1 계정단위+층2 옵션단위 06-08~현재 백필) → 값 원복(35/21/1) ③prod coupang_rg_settlement_fee WING2 행 검증·주황 배너 소멸 확인.
+- 미결(Jino 판단 대기): 페처 fetch-error 배선 부재(codex R4 P2, 전 이력에 원래 없음 — 실패 시 UI 215초 타임아웃으로만 표면화). collection_status _STREAMS에 RG 정산 스트림 부재(스코프 밖 제안).
+
 ## 최신 상태 (2026-07-23 13:40, 워크트리 ex-sprint-post-deployment-2e9656) — Jino 결정 대기 3건 응답 완료(문서 기록만, 코드 변경 0)
 - EX 스프린트(D-NAO-85·87·89)는 아래 블록에서 이미 구현·배포·병합·첫 자동발사 라이브 실증까지 완료된 상태 — 이 세션은 남아있던 결정 대기 3건을 트랙 파일(D-NAO-90 신설 + "현재 진행 단계"/"다음 액션" 갱신)에 반영.
 - **①봉투 vs BEP 안전선 충돌(10769985) → "현행 유지" 확정(D-NAO-90)**: Jino가 Fable 권고(현행 유지)를 그대로 선택. BEP 안전선이 봉투보다 항상 우선, 봉투 우선 예외 없음. 코드 변경 없음.
