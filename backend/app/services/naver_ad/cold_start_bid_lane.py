@@ -26,14 +26,17 @@ from app.models import (
 from app.services.naver_ad import (
     bid_ceiling_calculator, cold_start_bid_decider, market_bid_probe, naver_execution_harness,
 )
-from app.services.naver_ad.bid_step_types import encode_cold_ceiling
+from app.services.naver_ad.bid_step_types import (
+    APPROVAL_SOURCE_COLD,  # 재수출 — 단일 소스는 bid_step_types(리뷰 P3-12: harness가 무의존 경로로 읽게)
+    encode_cold_ceiling,
+)
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.utils.kst import kst_now, kst_today
 
 log = logging.getLogger(__name__)
 
-# 승인원(String(12) 제약 — 11자). 킬스위치 재확인 대상으로 naver_execution_harness에 등록돼 있다.
-APPROVAL_SOURCE_COLD = "cold_op"
+# 승인원(APPROVAL_SOURCE_COLD)의 단일 소스는 bid_step_types — 위에서 재수출만 한다.
+# 킬스위치 재확인·소재 UP 경계·면제 판정 대상으로 naver_execution_harness에 등록돼 있다.
 PROPOSAL_TYPE_COLD = "bid_up_cold"
 # change_log에서 "이 소재는 이미 CS가 발사했다"를 되찾는 rationale 접두(기존 [스파이럴복원] 관례).
 RATIONALE_PREFIX = "[콜드첫입찰]"

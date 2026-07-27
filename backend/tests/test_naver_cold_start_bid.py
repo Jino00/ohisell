@@ -466,16 +466,34 @@ def test_cold_type_is_never_delegable():
     assert lane.PROPOSAL_TYPE_COLD not in delegation_gate.delegable_types()
 
 
-def test_cold_approval_source_is_killswitch_guarded():
-    """★보안 불변: cold_op가 harness 킬스위치 화이트리스트에 등록돼 있어야 한다.
+def test_cold_approval_source_is_killswitch_guarded(db, writer_stub):
+    """★보안 불변(행위 검증): 킬스위치 OFF면 콜드 제안이 쓰기까지 못 간다.
 
-    미등록이면 auto_operate=False(킬스위치 OFF)인데도 CS가 쓰기를 계속한다 —
-    메모리에 기록된 '킬스위치 사각' 재발 방지."""
-    import inspect
+    cold_op가 harness 킬스위치 화이트리스트에 없으면 auto_operate=False인데도 CS가 쓰기를
+    계속한다 — 메모리에 기록된 '킬스위치 사각' 재발 방지. 소스 문자열 세기가 아니라
+    실제 실행으로 못박는다(import 방식이 바뀌어도 계약은 유지)."""
+    from app.models import NaverProposal
     from app.services.naver_ad import naver_execution_harness as h
-    src = inspect.getsource(h)
-    # 두 곳(진입 가드 + 쓰기 직전 최종 확인) 모두에 등록돼야 한다.
-    assert src.count("APPROVAL_SOURCE_COLD,") == 2
+    from app.services.naver_ad.bid_step_types import encode_cold_ceiling
+    _seed(db)
+    db.query(NaverCampaignSettings).update({"auto_operate": False})
+    db.commit()
+    p = NaverProposal(
+        proposal_type="bid_up_cold", target_type="ad", target_id=AD, campaign_id=CID,
+        adgroup_id=GID, rationale="킬스위치 테스트",
+        expected_effect=encode_cold_ceiling("x", 5000),
+        status="approved", target_bid=900, approval_source=lane.APPROVAL_SOURCE_COLD,
+    )
+    db.add(p); db.commit()
+    with pytest.raises(h.KillSwitchEngagedError):
+        h.execute(db, p.id, dry_run=False)
+    assert writer_stub == []
+
+
+def test_cold_approval_source_single_source():
+    """승인원 상수의 단일 소스는 bid_step_types(리뷰 P3-12) — lane은 재수출만."""
+    from app.services.naver_ad import bid_step_types
+    assert lane.APPROVAL_SOURCE_COLD is bid_step_types.APPROVAL_SOURCE_COLD
 
 
 def test_cold_action_maps_to_update_bid():

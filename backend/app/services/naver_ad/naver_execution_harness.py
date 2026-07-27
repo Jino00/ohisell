@@ -49,6 +49,7 @@ from app.services.naver_ad import (
     search_term_judge,
 )
 from app.services.naver_ad.bid_step_types import (
+    APPROVAL_SOURCE_COLD,
     BID_DOWN_TYPES,
     BID_UP_TYPES,
     COLD_START_STEP_TYPES,
@@ -286,9 +287,6 @@ def _claim_executing(db: Session, proposal: NaverProposal) -> None:
 
     if proposal.approval_source is not None:
         from app.services.naver_ad import auto_operator as _auto_operator  # 지연 import(순환 회피, 7R과 동일)
-        # CS 콜드 첫 입찰 승인원. cold_start_bid_lane이 이 모듈을 module-level import 하므로
-        # 반드시 함수 안에서만 import 한다(역방향 = 순환, 위 auto_operator와 동일 관례).
-        from app.services.naver_ad.cold_start_bid_lane import APPROVAL_SOURCE_COLD
         from app.services.naver_ad.exploration import APPROVAL_SOURCE_EXPLORE  # BX2 탐색 승인원
 
         if proposal.approval_source in (
@@ -1048,7 +1046,6 @@ def _execute_update_bid(db: Session, proposal: NaverProposal, now: datetime) -> 
     # stale 제안(경로 밖 생성·잔존 pending)이 콘솔 승인만으로 최종 경계를 통과하는 fail-open을 차단.
     # 함수 레벨 import — delegation_gate와 동일 관례(모듈 결합 최소화·순환 회피).
     if proposal.target_type == "ad":
-        from app.services.naver_ad.cold_start_bid_lane import APPROVAL_SOURCE_COLD
         from app.services.naver_ad.exploration import APPROVAL_SOURCE_EXPLORE
         ad_guard = []
         if not proposal.adgroup_id:
@@ -1250,10 +1247,9 @@ def _execute_update_bid(db: Session, proposal: NaverProposal, now: datetime) -> 
     #   expected_effect 마커로 재검증) — 면제가 무방비를 뜻하지 않는다.
     #   면제는 탐색과 동일하게 **타입 ∧ 승인원**을 함께 잠근다(면제가 승인원과 분리돼 다른
     #   target_type에서 새는 결함 클래스 원천 차단).
-    from app.services.naver_ad.cold_start_bid_lane import APPROVAL_SOURCE_COLD as _COLD_SRC
     _cold_exempt = (
         proposal.proposal_type in COLD_START_STEP_TYPES
-        and proposal.approval_source == _COLD_SRC
+        and proposal.approval_source == APPROVAL_SOURCE_COLD
     )
     if (
         proposal.target_type in ("adgroup", "ad", "keyword")
@@ -1682,7 +1678,6 @@ def real_write_blocker(proposal: NaverProposal) -> str | None:
         #   ② UP=탐색(explore_op)+탐색 스텝 타입만 / DOWN(bid_down)=전 캠페인 Confirm. 비탐색 UP·다른
         #      승인원 UP은 미개방(stale 제안·경로 밖 생성이 콘솔에서 executable로 보이는 것 차단).
         if proposal.target_type == "ad":
-            from app.services.naver_ad.cold_start_bid_lane import APPROVAL_SOURCE_COLD
             from app.services.naver_ad.exploration import APPROVAL_SOURCE_EXPLORE
             if not proposal.adgroup_id:
                 return "adgroup_id 없음 — 소재 제안 필수 컨텍스트 부족(재생성 필요)"
@@ -1804,9 +1799,6 @@ def execute(db: Session, proposal_id: int, *, dry_run: bool = True, now: datetim
     # 레벨 독립 커넥션 조회(codex 6R)라 타 프로세스의 OFF 커밋이 항상 보인다.
     if proposal.approval_source is not None:
         from app.services.naver_ad import auto_operator as _auto_operator
-        # CS 콜드 첫 입찰 승인원. cold_start_bid_lane이 이 모듈을 module-level import 하므로
-        # 반드시 함수 안에서만 import 한다(역방향 = 순환, 위 auto_operator와 동일 관례).
-        from app.services.naver_ad.cold_start_bid_lane import APPROVAL_SOURCE_COLD
         from app.services.naver_ad.exploration import APPROVAL_SOURCE_EXPLORE  # BX2 탐색 승인원
 
         if proposal.approval_source in (

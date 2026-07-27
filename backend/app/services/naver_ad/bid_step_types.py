@@ -73,6 +73,14 @@ EXPLORATION_STEP_TYPES: frozenset[str] = frozenset({"bid_up_explore"})
 # (approval_source='delegation'은 미등록). 영구 제외로 봉쇄한다.
 COLD_START_STEP_TYPES: frozenset[str] = frozenset({"bid_up_cold"})
 
+# CS 승인원 상수(String(12) 제약 — 7자). ★여기 두는 이유(적대적 리뷰 P3-12): harness가 킬스위치
+# 확인·소재 UP 경계·면제 판정마다 이 값을 읽는데, 이 상수를 cold_start_bid_lane에 두면
+# harness → cold_start_bid_lane → market_bid_probe → naver_sa_ad_fetcher(requests·자격증명) 체인을
+# 매번 지연 import 하게 된다. 그 체인 어디가 깨지면 CS뿐 아니라 **approval_source가 있는 모든
+# 제안 집행**이 죽는다. 승인원 상수는 의존 없는 최말단 모듈(이 파일)에 둔다.
+# cold_start_bid_lane은 이 값을 재수출만 한다(호출부 호환).
+APPROVAL_SOURCE_COLD = "cold_op"
+
 # 순위(rank) 스텝 타입 — R1 쇼검 서보 `bid_up_servo` + R2 파워링크 estimate 직행 `bid_up_rank`.
 # rank-step 타입은 (a) 스톱로스 base를 target_bid가 아니라 **스텝 전 current_bid**로 스위치하고
 # (guardrail_gate._check_bid — 큰 스텝에서 target_bid가 커져 스톱로스가 실질 완화되는 것 방지),
