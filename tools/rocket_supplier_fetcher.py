@@ -12,14 +12,16 @@
 #   - 발주/납품 = /po-web/app/purchase-order/list (JSON) → page 루프 → raw 페이지 그대로 push.
 #   - 정산     = /scm/settlement/general/purchase/account (SSR HTML) → DOMParser로 <table> rows 추출 → push.
 #
-# 데몬 방식 (Option A 시간예약형, Jino 승인 2026-06-17): launchd StartCalendarInterval로 매일 'run' 1회.
-#   1P 데이터는 느리게 변함(발주는 때때로·정산은 주 단위) → 상주 poll 불필요. 온디맨드 버튼은 S5에서.
+# 데몬 방식 (2026-07-27 개정 — 순수 버튼-only): launchd KeepAlive 상주 poll 데몬 1개(com.ohisell.rocket).
+#   평소엔 30초마다 가벼운 GET만(창 안 뜸). UI '갱신' 버튼 요청을 claim했을 때만 Chrome을 띄우고
+#   작업이 끝나면 닫는다. ★Chrome 상주 supervisor(com.ohisell.rocket-chrome, KeepAlive)는 폐기 —
+#   Jino가 창을 닫아도 launchd가 되살리던 원인이었다(설계문서 2026-07-27 개정 참조).
 #
 # 사용:
-#   전용 Chrome:  backend/.venv/bin/python3 tools/rocket_supplier_fetcher.py chrome   # 9223 실행→로그인
+#   전용 Chrome:  backend/.venv/bin/python3 tools/rocket_supplier_fetcher.py chrome   # 수동 기동→로그인
 #   세션 감지:    backend/.venv/bin/python3 tools/rocket_supplier_fetcher.py login    # PO list 200 자동감지
 #   실행(1회):    backend/.venv/bin/python3 tools/rocket_supplier_fetcher.py          # run: fetch→push
-#   (launchd):    backend/.venv/bin/python3 tools/rocket_supplier_fetcher.py run
+#   (launchd):    backend/.venv/bin/python3 tools/rocket_supplier_fetcher.py poll     # 버튼 요청만 소비
 #
 # 설정 파일 ~/.ohisell_rocket_fetcher.json (push용):
 #   {"cdp_port":9223, "cdp_profile":"~/.ohisell_supplier_chrome",
@@ -32,8 +34,10 @@ import fcntl
 import json
 import logging
 import os
+import subprocess
 import sys
 import time
+import urllib.request
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -51,6 +55,9 @@ PO_LIST_PATH = "/po-web/app/purchase-order/list"               # 발주+납품 J
 SETTLEMENT_PATH = "/scm/settlement/general/purchase/account"   # 정산 SSR HTML (ref20 §4)
 PO_DETAIL_PATH = "/scm/purchase/order/get"                     # 발주상세 per-SKU SSR HTML (ref20b, S4.5a)
 
+# ★실제 Google Chrome 고정(Playwright 번들 Chromium 금지): supplier.coupang.com은 Akamai가
+#   Chrome for Testing 핑거프린트를 차단한다(트랙 rocket-1p D-1 실측).
+CHROME_BIN = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 KST = ZoneInfo("Asia/Seoul")
 
 # prod ingest 엔드포인트(S2/S4.5a 라우터, 무변경)
@@ -189,6 +196,173 @@ def _try_fetch_lock():
         if acquired:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
         os.close(lock_fd)
+
+
+# ════════════════════════════════════════════════════════════════════
+# per-fetch Chrome 수명 (2026-07-27 — supervisor 폐기, 버튼 누를 때만 창)
+# ════════════════════════════════════════════════════════════════════
+# 왜: 상주 supervisor(launchd KeepAlive=true)는 Jino가 창을 닫으면 10~30초 뒤 Chrome을
+#   되살렸다(세션 보온의 대가). 버튼-only 모델에서 창은 "버튼 누른 그 순간 1회"만 떠야 하므로,
+#   poll 데몬이 요청을 claim한 뒤 스스로 Chrome을 띄우고 작업이 끝나면 닫는다.
+# ★소유권 규칙: 내가 띄운 Chrome만 내가 닫는다. 이미 떠 있던 Chrome(사람이 로그인하려고
+#   띄운 창 등)은 adopt만 하고 절대 닫지 않는다.
+def _cdp_alive(port: int) -> bool:
+    """CDP 디버깅 엔드포인트가 200이면 True (/json/version HTTP 프로브).
+
+    TCP LISTEN만 보면 행(hang)·기동 중 Chrome을 살아있다 오판하므로 실제 응답을 확인한다.
+    """
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=3) as r:
+            return r.status == 200
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _profile_chrome_alive(profile: str) -> bool:
+    """프로필을 점유 중인 살아있는 Chrome이 있는지 — SingletonLock PID 생존+cmdline 확인.
+
+    CDP가 행(hang)/기동 중이라 _cdp_alive가 거짓이어도 Chrome이 user-data-dir을 점유 중이면
+    lock 청소·중복 launch가 프로필을 손상시킨다(wing/ohitech 페처 codex 교훈 복제). PID 생존만으론
+    부족하므로(PID 재사용) 그 PID의 cmdline에 이 프로필이 있어야만 점유로 인정한다.
+    """
+    lock = os.path.join(profile, "SingletonLock")
+    try:
+        target = os.readlink(lock)  # 예: "Jino-MacBookPro.local-19029"
+    except OSError:
+        return False
+    try:
+        pid = int(target.rsplit("-", 1)[-1])
+    except ValueError:
+        return False
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    try:
+        cmdline = subprocess.run(
+            ["ps", "-o", "command=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=3,
+        ).stdout
+    except Exception:  # noqa: BLE001
+        return False
+    return f"--user-data-dir={profile}" in cmdline
+
+
+def _chrome_argv(cfg: dict) -> list[str]:
+    """Chrome 기동 커맨드라인 — 수동 'chrome' 커맨드와 per-fetch 기동이 반드시 동일해야 한다
+    (포트·프로필·플래그가 갈리면 세션/핑거프린트가 갈린다)."""
+    port = int(cfg.get("cdp_port", 9223))
+    profile = os.path.expanduser(cfg.get("cdp_profile", "~/.ohisell_supplier_chrome"))
+    return [
+        CHROME_BIN,
+        f"--remote-debugging-port={port}",
+        f"--user-data-dir={profile}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        SUPPLIER_ORIGIN,
+    ]
+
+
+def _launch_chrome(cfg: dict):
+    """실제 Chrome을 백그라운드 자식으로 기동. 반환 Popen(실패 시 None). stale lock은 먼저 청소."""
+    if not os.path.exists(CHROME_BIN):
+        log.error("Chrome을 찾을 수 없습니다: %s", CHROME_BIN)
+        return None
+    profile = os.path.expanduser(cfg.get("cdp_profile", "~/.ohisell_supplier_chrome"))
+    # 살아있는 Chrome 없음을 확인한 뒤에만 호출된다 → 크래시 잔재 lock 안전 제거.
+    for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+        lock = os.path.join(profile, name)
+        with contextlib.suppress(OSError):
+            if os.path.islink(lock) or os.path.exists(lock):
+                os.unlink(lock)
+    os.makedirs(profile, exist_ok=True)
+    return subprocess.Popen(
+        _chrome_argv(cfg),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _wait_cdp(port: int, timeout_s: int = 60) -> bool:
+    """Chrome 기동 후 CDP가 응답할 때까지 대기(1초 간격). 콜드 스타트 여유."""
+    waited = 0
+    while waited < timeout_s:
+        if _cdp_alive(port):
+            return True
+        time.sleep(1)
+        waited += 1
+    return False
+
+
+def _close_chrome(proc) -> None:
+    """내가 띄운 Chrome 종료(SIGTERM → 15s 대기 → SIGKILL)."""
+    log.info("작업 완료 — 내가 띄운 Chrome(PID %s) 종료.", getattr(proc, "pid", "?"))
+    with contextlib.suppress(Exception):
+        proc.terminate()
+    try:
+        proc.wait(timeout=15)
+    except Exception:  # noqa: BLE001 — SIGTERM 무응답
+        log.warning("Chrome SIGTERM 무응답 — SIGKILL.")
+        with contextlib.suppress(Exception):
+            proc.kill()
+        with contextlib.suppress(Exception):
+            proc.wait(timeout=5)
+
+
+class _ChromeOwner:
+    """이번 작업 동안의 Chrome 소유권. proc=None이면 adopt(남의 창) → 절대 닫지 않는다.
+
+    keep_open=True면 내가 띄운 창이라도 남긴다(세션 만료 → 사람이 그 창에서 로그인해야 하는 경우).
+    """
+
+    def __init__(self) -> None:
+        self.proc = None
+        self.keep_open = False
+
+    @property
+    def owned(self) -> bool:
+        return self.proc is not None
+
+
+@contextlib.contextmanager
+def _owned_chrome(cfg: dict, owner: "_ChromeOwner | None" = None):
+    """Chrome 가용 보장 컨텍스트 — 없으면 띄우고(소유), 있으면 adopt. 종료 시 소유분만 닫는다.
+
+    yield owner(_ChromeOwner). 호출자는 owner.keep_open=True로 창 유지를 요청할 수 있다.
+    기동 실패·프로필 점유 충돌은 RuntimeError(호출자의 기존 오류 경로가 처리).
+    """
+    owner = owner if owner is not None else _ChromeOwner()
+    port = int(cfg.get("cdp_port", 9223))
+    profile = os.path.expanduser(cfg.get("cdp_profile", "~/.ohisell_supplier_chrome"))
+    if _cdp_alive(port):
+        log.info("기존 Chrome(CDP %d) 감지 — adopt(내가 닫지 않음).", port)
+    elif _profile_chrome_alive(profile):
+        # CDP는 죽었는데 프로필은 점유 중 = 다른 포트/수동 Chrome. 중복 launch는 프로필 손상.
+        log.error("프로필 점유 중이나 CDP(%d) 미응답 — 수동 Chrome 종료 필요(%s).", port, profile)
+        raise RuntimeError("chrome_profile_busy")
+    else:
+        proc = _launch_chrome(cfg)
+        if proc is None:
+            raise RuntimeError("chrome_launch_failed")
+        owner.proc = proc
+        log.info("Chrome 기동(PID %d, CDP %d) — 작업 후 닫음.", proc.pid, port)
+        if not _wait_cdp(port):
+            log.error("Chrome CDP(%d) 기동 대기 초과 — 종료.", port)
+            _close_chrome(proc)
+            owner.proc = None
+            raise RuntimeError("cdp_not_ready")
+    try:
+        yield owner
+    finally:
+        if owner.owned:
+            if owner.keep_open:
+                log.info("로그인 대기 위해 Chrome 창 유지 — 로그인 후 '갱신' 버튼을 다시 누르세요.")
+            else:
+                _close_chrome(owner.proc)
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -562,38 +736,44 @@ def _json_or_text(resp):
 # run / login / chrome 커맨드
 # ════════════════════════════════════════════════════════════════════
 def _do_run(cfg: dict) -> int:
-    """살아있는 Chrome 연결 → 발주+정산 수집 → prod push. push 부분실패는 비0 반환."""
+    """Chrome 기동(없으면)→연결 → 발주+정산 수집 → prod push → 내가 띄운 창은 닫기.
+
+    push 부분실패는 비0 반환. 세션 만료면 창을 남겨(사람이 그 창에서 로그인) 1을 반환한다.
+    """
     if not _push_configured(cfg):
         log.error("run엔 prod_base_url·ingest_token·vendor_id 설정 필요(~/.ohisell_rocket_fetcher.json).")
         return 2
     pages: list[dict] = []
     settle_rows: list[list] = []
     try:
-        with sync_playwright() as p:
-            with _chrome(p, cfg) as page:
-                if not _goto_origin(page):
-                    log.error("supplier 로그아웃 상태(url=%s) — 'login' 또는 'chrome' 후 로그인 필요.", page.url)
-                    return 1
-                if not _session_ok(page, cfg):
-                    log.error("발주 list 세션 미응답 — 세션 만료. 'login' 재실행 필요.")
-                    return 1
-                pages = _collect_po_pages(page, cfg)
-                try:
-                    settle_rows = _collect_settlement_rows(page, cfg)
-                except Exception as e:  # noqa: BLE001 — 정산 실패는 발주 push를 막지 않음
-                    log.error("정산 수집 실패(발주는 계속 push): %s", e)
-                    settle_rows = []
-                # 발주 push 먼저(상세는 PO 적재 후가 안전·드리프트 무관) → 그다음 발주상세
-                rc_po = _push_po(cfg, pages)
-                rc_st = _push_settlement(cfg, settle_rows)
-                detail_failed = 0
-                if cfg.get("collect_po_detail", True):
+        with _owned_chrome(cfg) as owner:
+            with sync_playwright() as p:
+                with _chrome(p, cfg) as page:
+                    if not _goto_origin(page):
+                        log.error("supplier 로그아웃 상태(url=%s) — 이 창에서 로그인 후 다시 '갱신'을 누르세요.", page.url)
+                        owner.keep_open = True   # 로그인할 창이 필요 → 닫지 않음
+                        return 1
+                    if not _session_ok(page, cfg):
+                        log.error("발주 list 세션 미응답 — 세션 만료. 이 창에서 로그인 후 다시 '갱신'을 누르세요.")
+                        owner.keep_open = True
+                        return 1
+                    pages = _collect_po_pages(page, cfg)
                     try:
-                        _, detail_failed = _collect_and_push_po_details(page, cfg, pages)
-                    except Exception as e:  # noqa: BLE001 — 상세 실패는 발주/정산 push를 무효화하지 않음
-                        log.error("발주상세 수집 실패(발주/정산은 push됨): %s", e)
-                        detail_failed = -1
-    except Exception as e:  # noqa: BLE001 — 브라우저/수집 오류
+                        settle_rows = _collect_settlement_rows(page, cfg)
+                    except Exception as e:  # noqa: BLE001 — 정산 실패는 발주 push를 막지 않음
+                        log.error("정산 수집 실패(발주는 계속 push): %s", e)
+                        settle_rows = []
+                    # 발주 push 먼저(상세는 PO 적재 후가 안전·드리프트 무관) → 그다음 발주상세
+                    rc_po = _push_po(cfg, pages)
+                    rc_st = _push_settlement(cfg, settle_rows)
+                    detail_failed = 0
+                    if cfg.get("collect_po_detail", True):
+                        try:
+                            _, detail_failed = _collect_and_push_po_details(page, cfg, pages)
+                        except Exception as e:  # noqa: BLE001 — 상세 실패는 발주/정산 push를 무효화하지 않음
+                            log.error("발주상세 수집 실패(발주/정산은 push됨): %s", e)
+                            detail_failed = -1
+    except Exception as e:  # noqa: BLE001 — Chrome 기동/브라우저/수집 오류
         log.error("브라우저 수집 오류: %s", e)
         return 1
 
@@ -658,29 +838,34 @@ def cmd_run(cfg: dict) -> int:
 
 
 def cmd_login(cfg: dict, wait_secs: int = 600) -> int:
-    """전용 Chrome(CDP)의 새 탭에서 supplier 진입 → 사용자 로그인 자동 감지(PO list 200)."""
+    """전용 Chrome(없으면 기동)의 새 탭에서 supplier 진입 → 사용자 로그인 자동 감지(PO list 200).
+
+    사람이 조작하는 명령이므로 창은 남긴다(keep_open) — 세션은 Chrome 프로필이 보관.
+    """
     log.info("[login] supplier.coupang.com에 로그인하세요(자동 감지, 최대 %d초).", wait_secs)
     ok = False
     try:
-        with sync_playwright() as p:
-            with _chrome(p, cfg) as page:
-                with contextlib.suppress(Exception):
-                    page.goto(SUPPLIER_ORIGIN, wait_until="domcontentloaded", timeout=40000)
-                waited = 0
-                while waited < wait_secs:
-                    try:
-                        page.wait_for_timeout(5000)
-                        waited += 5
-                        if _is_logged_out(page.url):
+        with _owned_chrome(cfg) as owner:
+            owner.keep_open = True   # 로그인 창은 사람 것 — 자동으로 닫지 않는다
+            with sync_playwright() as p:
+                with _chrome(p, cfg) as page:
+                    with contextlib.suppress(Exception):
+                        page.goto(SUPPLIER_ORIGIN, wait_until="domcontentloaded", timeout=40000)
+                    waited = 0
+                    while waited < wait_secs:
+                        try:
+                            page.wait_for_timeout(5000)
+                            waited += 5
+                            if _is_logged_out(page.url):
+                                continue
+                            if _session_ok(page, cfg):
+                                ok = True
+                                break
+                        except Exception as e:  # noqa: BLE001
+                            if "closed" in str(e).lower():
+                                log.error("탭이 닫혔습니다 — 로그인 미완료(탭을 닫지 말고 로그인만 하세요).")
+                                return 1
                             continue
-                        if _session_ok(page, cfg):
-                            ok = True
-                            break
-                    except Exception as e:  # noqa: BLE001
-                        if "closed" in str(e).lower():
-                            log.error("탭이 닫혔습니다 — 로그인 미완료(탭을 닫지 말고 로그인만 하세요).")
-                            return 1
-                        continue
     except Exception as e:  # noqa: BLE001
         log.error("로그인 감지 오류: %s", e)
         return 1
@@ -692,31 +877,19 @@ def cmd_login(cfg: dict, wait_secs: int = 600) -> int:
 
 
 def cmd_chrome(cfg: dict) -> int:
-    """CDP용 전용 Chrome 실행(--remote-debugging-port). recon과 같은 프로필 9223 재사용.
+    """CDP용 전용 Chrome 수동 실행(--remote-debugging-port). recon과 같은 프로필 재사용.
 
     실행 후 브라우저에서 supplier.coupang.com 로그인 → 'login' 명령으로 세션 감지.
+    커맨드라인은 per-fetch 기동과 동일(_chrome_argv) — 갈리면 세션/핑거프린트가 갈린다.
     """
-    import subprocess
-
     port = int(cfg.get("cdp_port", 9223))
     profile = os.path.expanduser(cfg.get("cdp_profile", "~/.ohisell_supplier_chrome"))
-    chrome_bin = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-    if not os.path.exists(chrome_bin):
-        log.error("Chrome을 찾을 수 없습니다: %s", chrome_bin)
+    if _cdp_alive(port):
+        log.info("CDP Chrome(%d) 이미 실행 중 — 그 창에서 로그인하세요.", port)
+        return 0
+    proc = _launch_chrome(cfg)
+    if proc is None:
         return 1
-    os.makedirs(profile, exist_ok=True)
-    proc = subprocess.Popen(
-        [
-            chrome_bin,
-            f"--remote-debugging-port={port}",
-            f"--user-data-dir={profile}",
-            "--no-first-run",
-            "--no-default-browser-check",
-            SUPPLIER_ORIGIN,
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
     log.info(
         "Chrome 실행됨 (PID %d, CDP port %d, 프로필 %s)\n"
         "  1. 브라우저에서 supplier.coupang.com 로그인\n"
@@ -729,8 +902,10 @@ def cmd_chrome(cfg: dict) -> int:
 def cmd_poll(cfg: dict, interval: int = 30) -> int:
     """상주 poll 데몬 — UI '갱신' 버튼 요청만 감지·실행(순수 on-demand).
 
-    30초마다 /rocket/refresh-status 폴링 → 요청 있으면 claim → run.
+    30초마다 /rocket/refresh-status 폴링(가벼운 GET, 창 안 뜸) → 요청 있으면 claim → run.
     ★자동(일별 23h) 실행은 제거됨 — 창을 스스로 띄우지 않고 버튼 누를 때만 뜬다.
+    ★Chrome은 이 데몬이 run 때만 띄웠다 닫는다(supervisor 폐기, 2026-07-27) — 창이 뜨는
+    유일한 순간 = 버튼 클릭 직후 1회.
     낡음/실패는 prod GET /collection-status → 전역 신선도 배너로 가시화(잊어버림 방지).
     launchd KeepAlive 데몬으로 실행. plist: com.ohisell.rocket.plist.
     """
