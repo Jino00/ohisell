@@ -45,11 +45,15 @@ echo "==> 페처 복사 + plist 설치"
 LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
 mkdir -p "$LAUNCH_AGENTS"
 UID_NUM="$(id -u)"
-# wing-chrome = 같은 wing 스크립트를 'chrome-supervise' 인자로 도는 별도 launchd 잡
-# (CDP Chrome 9222 상주화, S5a). cp는 멱등(동일 파일), plist만 별도 렌더.
-# ohitech-chrome/ohitech-ad = 오하이테크 광고 수집(S3, 트랙 D-11): 같은 ohitech 스크립트를
-#   chrome-supervise(9224 상주)·poll(버튼-poll+일별)로 도는 두 잡. cp 멱등(동일 파일).
-for pair in "adcost:ad_cost_browser_fetcher.py" "wing:wing_browser_fetcher.py" "wing-chrome:wing_browser_fetcher.py" "rocket:rocket_supplier_fetcher.py" "ohitech-chrome:ohitech_ad_fetcher.py" "ohitech-ad:ohitech_ad_fetcher.py"; do
+# ★2026-07-27: Chrome 상주 supervisor 잡(wing-chrome·ohitech-chrome·rocket-chrome)은 폐기됐다.
+#   창을 닫아도 launchd가 Chrome을 되살리던 원인 → 이제 poll 데몬이 fetch 때만 Chrome을 띄우고
+#   닫는다. 남는 잡은 poll 데몬 4개뿐(adcost·wing·rocket·ohitech-ad).
+#   ※ 이미 설치된 구 supervisor 잡은 이 스크립트가 지우지 않는다 — 1회 수동 정리 필요:
+#       launchctl bootout gui/$(id -u)/com.ohisell.wing-chrome
+#       launchctl bootout gui/$(id -u)/com.ohisell.ohitech-chrome
+#       launchctl bootout gui/$(id -u)/com.ohisell.rocket-chrome
+#       rm -f ~/Library/LaunchAgents/com.ohisell.{wing,ohitech,rocket}-chrome.plist
+for pair in "adcost:ad_cost_browser_fetcher.py" "wing:wing_browser_fetcher.py" "rocket:rocket_supplier_fetcher.py" "ohitech-ad:ohitech_ad_fetcher.py"; do
   name="${pair%%:*}"
   script="${pair##*:}"
   cp -f "$REPO_TOOLS/$script" "$LOCAL_TOOLS/$script"
@@ -64,9 +68,9 @@ for pair in "adcost:ad_cost_browser_fetcher.py" "wing:wing_browser_fetcher.py" "
   # 리로드 검증용 구 잡 PID 캡처(label은 list의 3번째 컬럼).
   _old_pid="$(launchctl list 2>/dev/null | awk -v n="com.ohisell.$name" '$3==n{print $1}')"
   launchctl bootout "gui/$UID_NUM/com.ohisell.$name" 2>/dev/null || true
-  # bootout 완료 대기 — 고정 sleep은 느린 SIGTERM 핸들러(wing-chrome는 Chrome 종료를
-  # 최대 10초 기다림)와 레이스로 bootstrap이 '미로드'로 조용히 실패한다. 잡이 실제로
-  # 사라질 때까지(launchctl print 실패) 최대 25초 폴링.
+  # bootout 완료 대기 — 고정 sleep은 느린 종료(fetch 중인 데몬이 Chrome을 최대 15초 정리)와
+  # 레이스로 bootstrap이 '미로드'로 조용히 실패한다. 잡이 실제로 사라질 때까지
+  # (launchctl print 실패) 최대 25초 폴링.
   for _i in $(seq 1 25); do
     launchctl print "gui/$UID_NUM/com.ohisell.$name" >/dev/null 2>&1 || break
     sleep 1
@@ -89,7 +93,7 @@ for pair in "adcost:ad_cost_browser_fetcher.py" "wing:wing_browser_fetcher.py" "
   fi
 done
 
-# 6. 스케줄러 워치독 폴 데몬(S5b S5) — 별도 블록(loop 미수정 → main의 wing-chrome 추가와 머지 안전).
+# 6. 스케줄러 워치독 폴 데몬(S5b S5) — 별도 블록(위 loop와 독립).
 #    브라우저/플레이라이트 불필요(requests만). prod /api/scheduler/health 폴 → 비정상 시 Mac 알림.
 echo "==> 스케줄러 워치독 폴 설치"
 WD_SCRIPT="scheduler_watchdog_poll.py"

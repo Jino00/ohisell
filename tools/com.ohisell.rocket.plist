@@ -2,13 +2,13 @@
 <!-- launchd: 쿠팡 로켓배송(1P) supplier 페처 — poll 데몬 (Jino Mac, 트랙 rocket-1p S5).
      S3에서 시간예약형(StartCalendarInterval 08:00)이었으나 S5 UI 갱신 버튼 지원을 위해
      상주 poll 모드로 전환(Wing 페처 패턴 복제).
-     poll 커맨드: 30초마다 /rocket/refresh-status 폴링 → 요청 시 claim → run.
-     또한 last_success_at 23h 초과 시 자동 run(일별 정기 수집 — 기존 08:00 역할 대체).
+     poll 커맨드: 30초마다 /rocket/refresh-status 폴링(가벼운 GET, 창 안 뜸) → 요청 시 claim → run.
+     ★자동 트리거 없음(2026-07-27, 순수 버튼-only): 23h 자동 run 제거 + Chrome 상주 supervisor
+       (com.ohisell.rocket-chrome, KeepAlive) 폐기. 이 데몬이 run 때만 Chrome을 띄우고 닫는다
+       → 창이 뜨는 유일한 순간 = 버튼 클릭 직후 1회.
      광고/Wing 데몬과 별도 프로세스·별도 Chrome 프로필(~/.ohisell_supplier_chrome).
 
-     설치:  cp tools/com.ohisell.rocket.plist ~/Library/LaunchAgents/
-            launchctl unload ~/Library/LaunchAgents/com.ohisell.rocket.plist 2>/dev/null
-            launchctl load ~/Library/LaunchAgents/com.ohisell.rocket.plist
+     설치:  tools/install_local_runtime.sh 실행(placeholder 치환·bootstrap 자동).
      즉시 1회 실행(테스트):  launchctl kickstart -k gui/$(id -u)/com.ohisell.rocket
      경로(python/스크립트)는 설치 전 실제 경로로 확인(아래 경로는 Jino Mac 기준). -->
 <plist version="1.0">
