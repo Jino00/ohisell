@@ -30,8 +30,19 @@ import re
 #   없어 BEP를 못 재므로 — 대체 가격 브레이크 = product_bep 연동 경제성 상한, exploration_ceiling).
 #   rank-step 아님(estimate/서보 스텝 산정이 아니라 고정 +30% 래더 — base_bid 마커·신선도·TOCTOU
 #   기계 미적용). explore_op 자동 실쓰기 승인원(exploration.APPROVAL_SOURCE_EXPLORE)에서만 발사.
+# ★CS(콜드 스타트): 콜드 소재 첫 입찰 타입 `bid_up_cold` 추가. UP 의미(BEP·스톱로스·예산·
+#   쿨다운·일일상한·방향)는 bid_up과 동일하고 ±15% 변경폭만 면제된다(CHANGE_PCT_EXEMPT_TYPES).
+#   ★왜 면제인가: 이 타입의 존재 이유가 "50~300원에 방치된 신규 소재를 실제 시장가(수천 원)로
+#   **한 번에** 올리는 것"이다. ±15%(또는 30%) 상한을 걸면 시장가까지 수십 일이 걸려(30% 상한
+#   기준 300→1,400원에 6스텝·12시간 쿨다운) 레인 자체가 무의미해진다 — 그 느린 눈먼 래더가
+#   바로 CS가 대체하려는 종전 동작이다(exploration.adaptive_step).
+#   대체 브레이크(변경폭 상한을 대신하는 것들 — 면제가 무방비를 뜻하지 않음):
+#     ① 경제성 상한: 첫 입찰 = min(이익상한, 목표순위 시장가) — 상한 초과 자체가 불가(SA3).
+#     ② 소재당 **첫 1회만** 발사(cold_start_bid_lane이 change_log로 재발동 차단).
+#     ③ BEP·스톱로스·일예산·쿨다운·일일상한 가드레일 전량 존치(면제는 변경폭 하나뿐).
+#   rank-step 아님(estimate 순위 서보 산정이 아니라 시장가 직행 — base_bid TOCTOU 기계 미적용).
 BID_UP_TYPES: frozenset[str] = frozenset(
-    {"bid_up", "growth_bid_up", "bid_up_servo", "bid_up_rank", "bid_up_explore"}
+    {"bid_up", "growth_bid_up", "bid_up_servo", "bid_up_rank", "bid_up_explore", "bid_up_cold"}
 )
 
 # 하향 입찰 스텝 proposal_type(안전방향 — 노출↓·지출↓). 종전 guardrail_gate._BID_DOWN_TYPES.
@@ -43,13 +54,24 @@ BID_DOWN_TYPES: frozenset[str] = frozenset({"bid_down"})
 #   면제 대상이다. 대체 상한 = 경제성 상한 + 서보 절대 스텝 캡 + 예산 pace 사전체크(harness/서보 측).
 # ★IU-R R2: `bid_up_rank`도 "목표 순위 한 단 위"의 estimate 필요입찰이 15%보다 클 수 있어(PLAN
 #   §1-1·D-NAO-20) 변경폭 면제. 대체 상한 = 경제성 상한(estimate>상한이면 상한까지) + 예산 pace.
-CHANGE_PCT_EXEMPT_TYPES: frozenset[str] = frozenset({"growth_bid_up", "bid_up_servo", "bid_up_rank"})
+# ★CS: `bid_up_cold`도 변경폭 완전 면제(위 BID_UP_TYPES 주석의 ①②③이 대체 브레이크).
+CHANGE_PCT_EXEMPT_TYPES: frozenset[str] = frozenset(
+    {"growth_bid_up", "bid_up_servo", "bid_up_rank", "bid_up_cold"}
+)
 
 # B-X BX2(D-NAO-70·71): 탐색 스텝 타입 — ±15% 대신 30% 변경폭 상한이 적용되는 UP 타입.
 # guardrail_gate가 이 집합을 보고 _MAX_CHANGE_PCT(0.15) 대신 _EXPLORATION_MAX_CHANGE_PCT(0.30)로
 # 변경폭을 검증한다(완전 면제 CHANGE_PCT_EXEMPT_TYPES와 **다름** — 30% 초과는 여전히 차단).
 # ★CHANGE_PCT_EXEMPT_TYPES·RANK_STEP_TYPES와 서로소여야 한다(면제도 rank-step도 아님, 아래 invariant 테스트).
 EXPLORATION_STEP_TYPES: frozenset[str] = frozenset({"bid_up_explore"})
+
+# CS(콜드 스타트): 콜드 첫 입찰 스텝 타입 — **위임 경로 영구 제외** 대상(delegation_gate가 이
+# 셋을 차집합으로 뺀다). rank-step·explore와 동일 철학이며, CS는 그 둘보다 이유가 더 강하다:
+# 이 타입은 ±15% 변경폭이 **완전 면제**라(CHANGE_PCT_EXEMPT_TYPES) 유일한 상한이 레인이 산정한
+# min(이익상한, 목표순위 시장가)이다. 위임(Ava agree 자동승인) 경로로 새면 그 산정 없이
+# 무제한 상향이 되고, 킬스위치 화이트리스트(cold_op 전용)도 우회한다
+# (approval_source='delegation'은 미등록). 영구 제외로 봉쇄한다.
+COLD_START_STEP_TYPES: frozenset[str] = frozenset({"bid_up_cold"})
 
 # 순위(rank) 스텝 타입 — R1 쇼검 서보 `bid_up_servo` + R2 파워링크 estimate 직행 `bid_up_rank`.
 # rank-step 타입은 (a) 스톱로스 base를 target_bid가 아니라 **스텝 전 current_bid**로 스위치하고

@@ -312,7 +312,8 @@ def test_all_proposal_types_constant_covers_every_emitted_type():
     # 어느 집합에도 넣지 않는다(결정 전용 — 라우터 DECISION_ONLY_PROPOSAL_TYPES가 분기).
     # ★SS3: search_term_exclude(검색어 제외, Confirm 전용·delegation 제외) → 20.
     # ★SS4: search_term_promote(검색어 승격, 정보성 — 등록 실행 매핑 없음, L3 스코프) → 21.
-    assert len(ALL_PROPOSAL_TYPES) == 21
+    # ★CS: bid_up_cold(콜드 소재 첫 입찰, cold_start_bid_lane inline·위임 영구 제외) → 22.
+    assert len(ALL_PROPOSAL_TYPES) == 22
     assert PARAM_CHANGE not in INFORMATIONAL_PROPOSAL_TYPES  # 결정 전용 ≠ 정보성
     assert PARAM_CHANGE not in _ACTION_BY_PROPOSAL_TYPE  # 금지선: 실행 매핑 부재
 

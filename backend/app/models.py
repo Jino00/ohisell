@@ -1570,6 +1570,38 @@ class NaverAdgroupProduct(Base):
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class NaverBidEstimateDaily(Base):
+    """네이버 쇼핑 소재별 시장가 사다리 일별 축적 (CS 스프린트 SA2, market_bid_probe).
+
+    grain: (date, ad_id, device, position). 소스: /npla-estimate/average-position-bid/id
+    (순위 1~4 필요 입찰가) + /npla-estimate/exposure-minimum-bid/id(최소노출입찰가).
+
+    position: 1~4 = 평균 노출순위별 필요 입찰가. **0 = 최소노출입찰가**(별도 엔드포인트 값을
+      같은 테이블 grain에 담기 위한 가상 position — 실제 API position이 아니다).
+      ★position 5 이상은 API가 400으로 거부한다(라이브 실측) — 사다리는 1~4가 전부.
+    is_floor: 시세 무의미 표식(50원 이하 관측 또는 순위별 차등 없음). True인 행의 bid를
+      실제 시장가로 오인해 입찰에 쓰면 안 된다(market_bid_probe.detect_floor 참조).
+
+    ★신규 테이블 = 신규 grain. naver_ad_daily(그룹/키워드 grain)는 건드리지 않는다.
+    """
+
+    __tablename__ = "naver_bid_estimate_daily"
+    __table_args__ = (
+        UniqueConstraint("date", "ad_id", "device", "position", name="uq_naver_bid_estimate_daily"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)  # 관례: Date 컬럼도 Mapped[datetime](기존 테이블 동일)
+    ad_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)  # nccAdId(소재)
+    adgroup_id: Mapped[str] = mapped_column(String(50), nullable=False, default="", index=True)
+    campaign_id: Mapped[str] = mapped_column(String(50), nullable=False, default="", index=True)
+    device: Mapped[str] = mapped_column(String(8), nullable=False)  # MOBILE/PC
+    position: Mapped[int] = mapped_column(Integer, nullable=False)  # 1~4 순위 / 0=최소노출입찰가
+    bid: Mapped[int] = mapped_column(Integer, nullable=False)
+    is_floor: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    collected_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 class NaverCampaignSettings(Base):
     """캠페인별 관리 주체·모드 (D-NAO-13). 진단·리포트는 전 캠페인, 제안·실행은 optimizer='ours'만.
 

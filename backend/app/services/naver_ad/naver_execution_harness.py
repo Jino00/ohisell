@@ -277,6 +277,9 @@ def _claim_executing(db: Session, proposal: NaverProposal) -> None:
 
     if proposal.approval_source is not None:
         from app.services.naver_ad import auto_operator as _auto_operator  # 지연 import(순환 회피, 7R과 동일)
+        # CS 콜드 첫 입찰 승인원. cold_start_bid_lane이 이 모듈을 module-level import 하므로
+        # 반드시 함수 안에서만 import 한다(역방향 = 순환, 위 auto_operator와 동일 관례).
+        from app.services.naver_ad.cold_start_bid_lane import APPROVAL_SOURCE_COLD
         from app.services.naver_ad.exploration import APPROVAL_SOURCE_EXPLORE  # BX2 탐색 승인원
 
         if proposal.approval_source in (
@@ -284,6 +287,7 @@ def _claim_executing(db: Session, proposal: NaverProposal) -> None:
             _auto_operator.APPROVAL_SOURCE_PROBE,  # D-NAO-58 CD2: 탐침도 동일 킬스위치 가드(우회 금지)
             _auto_operator.APPROVAL_SOURCE_REVERT,  # D-NAO-58 CD3: 되돌림도 킬스위치 통과(우회 금지)
             APPROVAL_SOURCE_EXPLORE,  # BX2 D-NAO-70: 탐색 자동 실쓰기도 동일 킬스위치 가드(우회 금지, probe_op 관례)
+            APPROVAL_SOURCE_COLD,  # CS: 콜드 첫 입찰도 동일 킬스위치 가드(우회 금지 — 자동 실쓰기 레인)
             search_term_judge.APPROVAL_SOURCE_SS_EXCLUDE,  # SS3-A: 미래 자동 활성화 대비 사전 등록(현재 미배선)
         ) and not _auto_operator._auto_operate_now(db, proposal.campaign_id):
             proposal.status = "approved"  # 클레임 원복 — executing 잔존 방지(미실행 정직 상태)
@@ -1695,6 +1699,9 @@ def execute(db: Session, proposal_id: int, *, dry_run: bool = True, now: datetim
     # 레벨 독립 커넥션 조회(codex 6R)라 타 프로세스의 OFF 커밋이 항상 보인다.
     if proposal.approval_source is not None:
         from app.services.naver_ad import auto_operator as _auto_operator
+        # CS 콜드 첫 입찰 승인원. cold_start_bid_lane이 이 모듈을 module-level import 하므로
+        # 반드시 함수 안에서만 import 한다(역방향 = 순환, 위 auto_operator와 동일 관례).
+        from app.services.naver_ad.cold_start_bid_lane import APPROVAL_SOURCE_COLD
         from app.services.naver_ad.exploration import APPROVAL_SOURCE_EXPLORE  # BX2 탐색 승인원
 
         if proposal.approval_source in (
@@ -1702,6 +1709,7 @@ def execute(db: Session, proposal_id: int, *, dry_run: bool = True, now: datetim
             _auto_operator.APPROVAL_SOURCE_PROBE,  # D-NAO-58 CD2: 탐침도 동일 킬스위치 가드(우회 금지)
             _auto_operator.APPROVAL_SOURCE_REVERT,  # D-NAO-58 CD3: 되돌림도 진입 가드(probe_op와 동일 2중 harness 방어)
             APPROVAL_SOURCE_EXPLORE,  # BX2 D-NAO-70: 탐색 자동 실쓰기도 진입 킬스위치 가드(우회 금지, probe_op 관례)
+            APPROVAL_SOURCE_COLD,  # CS: 콜드 첫 입찰도 진입 킬스위치 가드(우회 금지 — 자동 실쓰기 레인)
             search_term_judge.APPROVAL_SOURCE_SS_EXCLUDE,  # SS3-A: 미래 자동 활성화 대비 사전 등록(현재 미배선)
         ) and not _auto_operator._auto_operate_now(db, proposal.campaign_id):
             log.warning(

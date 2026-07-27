@@ -38,8 +38,10 @@ _GOLDEN_EXEMPT = frozenset({"growth_bid_up"})
 # UP·±15%면제·rank-step 3셋에 등록됨.
 # ★BX2(D-NAO-70·71): 탐색 UP 타입 bid_up_explore가 **UP에는 추가**되나 ±15%면제·rank-step에는
 #   추가되지 않는다(30% 상한 = EXPLORATION_STEP_TYPES 별도 셋, 완전 면제도 rank-step도 아님).
-_BX2_BID_UP = _GOLDEN_BID_UP | {"bid_up_servo", "bid_up_rank", "bid_up_explore"}
-_R2_EXEMPT = _GOLDEN_EXEMPT | {"bid_up_servo", "bid_up_rank"}
+# ★CS(콜드 스타트): `bid_up_cold`가 UP + ±15%완전면제 두 셋에 추가된다(rank-step·탐색 셋에는
+#   미추가 — 시장가 직행이라 rank 서보도 30% 래더도 아니다).
+_BX2_BID_UP = _GOLDEN_BID_UP | {"bid_up_servo", "bid_up_rank", "bid_up_explore", "bid_up_cold"}
+_R2_EXEMPT = _GOLDEN_EXEMPT | {"bid_up_servo", "bid_up_rank", "bid_up_cold"}
 _R2_RANK_STEP = frozenset({"bid_up_servo", "bid_up_rank"})
 _BX2_EXPLORATION = frozenset({"bid_up_explore"})
 
@@ -208,6 +210,7 @@ def test_action_by_proposal_type_mapping_derived_with_servo():
         "bid_up_servo": "update_bid",  # IU-R R1: 레지스트리 파생으로 자동 매핑
         "bid_up_rank": "update_bid",   # IU-R R2: 레지스트리 파생으로 자동 매핑
         "bid_up_explore": "update_bid",  # BX2(D-NAO-70): 탐색 UP도 레지스트리 파생 자동 매핑
+        "bid_up_cold": "update_bid",  # CS: 콜드 첫 입찰도 레지스트리 파생 자동 매핑
         "pause": "set_user_lock",
         "resume": "set_user_lock",
         "budget_up": "update_budget",
