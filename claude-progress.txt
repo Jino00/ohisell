@@ -2,6 +2,29 @@
 # 매 sprint 완료 시 Claude가 이 파일을 갱신합니다.
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
+## 최신 상태 (2026-07-27 23:xx, 워크트리 agent-a0d4b0f9f34968c6a) — CS 스프린트(콜드 첫 입찰 레인) PR #123
+- **D-NAO-96 / ref 41**: D-NAO-95(ref 40)가 표준화한 "신규 소재 첫 입찰가 산출 절차"를 **자동운영 레인으로 배선**.
+  구조(원칙18): Harness `cold_start_bid_lane` ← SA1 `bid_ceiling_calculator`(상한=RPC÷BEP) + SA2 `market_bid_probe`
+  (쇼핑 전용 `/npla-estimate/*` 래퍼·일별 축적 `naver_bid_estimate_daily`) + SA3 `cold_start_bid_decider`
+  (min(상한, 목표순위 시장가), 목표=모바일 3위). 실집행은 기존 `naver_execution_harness.execute()` 관문 경유(쓰기 경로 신설 0).
+- **쇼핑 시세를 프로그램이 처음 본다**: 기존 estimate 배선은 전부 파워링크 키워드 grain이라 콜드 소재는
+  눈먼 래더(현재가×1.1·BM 프라이어)로만 올랐다(`npla` 문자열 코드베이스 0건이었음).
+- **★라이브 실측이 ref 40 전제 2건 정정**(원칙22): ①배치 상한은 **200**이다 — ref 40의 "1~2개씩 나눠 호출"은 틀렸고,
+  그 400은 실제로 **position 5 오류**였다(두 에러 문구가 `invalid collections size`로 동일해 오독됨).
+  ②**최소노출입찰가는 사다리의 하한이 아니다**(pos3=2,810인데 expmin=3,270) — 게이트로 쓰면 현재 정상 노출 중인
+  소재까지 전량 차단. 경제성 판정을 **사다리 최저가** 기준으로 바꿨다. ③`naver_ad_daily`에 ad grain이 없어
+  "소재 자기이력 CVR"은 원리적으로 불가 → 그룹→캠페인→계정 사다리.
+- **★라이브 경제성 결론**: 08514959 상한 **1,110~1,230원** vs 4위 시장가 **2,280~3,010원** → **이익 내며 쇼핑 1~4위
+  노출 불가**(2~2.7배 부족, 간접전환 포함해 낙관해도 동일). CS의 주 산출물은 입찰 변경이 아니라 `not_viable` **경보**다.
+  D-NAO-91을 전 소재로 일반화한 결과.
+- **안전**: `bid_up_cold`는 ±15% 완전 면제(시장가 직행이 목적) → **위임 경로 영구 제외**(`COLD_START_STEP_TYPES`) +
+  `cold_op` 킬스위치 화이트리스트 2곳 등록(테스트로 못박음). 기본 `dry_run=True`, 전환은 prod `.env` `NAVER_CS_DRY_RUN=0`만.
+  소재당 첫 1회(dry-run은 소진 안 함)·라운드 캡 5·예산 미변경(금지선).
+- **미결**: ①`/codex review` 미이행(한도 소진, 리셋 08-02) — 독립 적대적 리뷰로 대체, **원칙19 부채로 남음**.
+  ②신규 갤럭시Z 캠페인(10907625) 소재가 `naver_adgroup_product`에 아직 0행(검수 중·mallProductId null) → 콜드 편입은 검수 후 확인 필요.
+  ③현재 소재 중 1,450~2,270원 입찰분은 이미 상한 초과 상태(CS 스코프 밖 — 콜드 아님, 별도 검토 필요).
+- 전체 테스트 3,422 passed. PR #123.
+
 ## 최신 상태 (2026-07-27 19:50, repo 루트 main) — 13:30 블록의 "남은 것" 4건 전부 완결 + 후속 5건
 - **claim lease 재시도 계약 구현·배포**(PR #106, D=버튼 1회=재시도 3회·login_required 제외, TTL 20분, `refresh_contract.py` 공용 SA, 계획서=docs/PLAN_coupang-claim-retry-lease.md, codex 5R 22건 중 21수용/1기각-후속보류). 페처 4종 실패보고 첫 배선.
 - **WING2 완전 복구**: 로그인 개통→RG 정산 49일(8주기) 백필(계정 98행+옵션 엑셀, prod 24주기=WING1 동일)+판매분석 재개통. 상시 배선(P1 계정분리·P2 버튼·P3 wing2 데몬)은 병행 세션이 기구현 — 잔여 P4(CDP login 마커 버그)·P5(green-while-dead 크론 2개 raise+toggle 비활성)를 PR #114로 완결. 계획서=docs/PLAN_wing2-standing-wiring.md.
