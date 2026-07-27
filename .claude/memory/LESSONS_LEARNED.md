@@ -541,3 +541,17 @@ ss1 파일의 표준 패턴(두 함수 모두 monkeypatch, "실HTTP 차단" 주�
 ### 📌 교훈
 - `ingest_search_term_daily`처럼 여러 fetcher를 부르는 상위 함수를 테스트할 때는 **그 함수가 부르는 네트워크 진입점 전부**를 patch해야 한다 — 현재 4개: `fetch_search_term_daily`, `request_missing_expkeyword_reports`, `fetch_search_term_conversion`, `_conversion_report_dates`. 기존 격리 패턴이 있는 파일(ss1)을 먼저 보고 그대로 따를 것.
 - "테스트가 통과한다"는 .env 없는 환경의 결과일 수 있다 — 네트워크 격리 검증은 **실 크리덴셜이 있는 환경**에서 한 번 돌려야 완결(원칙 22의 테스트판).
+
+## 36. 관찰 diff의 "우리 손" 판정은 값 대조 없이는 성립하지 않는다 (2026-07-27, PR #116)
+
+### 🐛 이슈
+bm_diff(대행사 조작 감지기)가 03 캠페인에서 07-25~26 "대행사 bid_change" 7건을 기록했는데 전부 우리 실집행의 echo. 구멍 세 겹: ①ours 자기변경 대조가 스냅샷 행의 `optimizer=='ours'`일 때만 발동 — D-NAO-92로 03이 optimizer=none이 되자 그 이전 우리 실집행의 지연 반영이 대조 없이 대행사로 기록. ②대조 자체도 action 종류+48h만 보고 after 값 비교가 없었음. ③시간창 앵커가 `kst_now()`라 "결정적·리플레이"라던 docstring과 달리 과거 op_date 리플레이 시 판정이 달라짐. 근원 지연은 크론 경합: sync_naver_entity(35 7)의 commit이 5/5일 모두 run_naver_bm_layer(37 7)의 스냅샷 commit **이후**(순차 fetch ~91k행 후 단일 commit) → 스냅샷(D)=entity_sync(D-1) 값 = 구조적 +1일 지연.
+
+### ✅ 해결
+`_is_our_echo` 신설(optimizer 무관·분류 최우선): dry_run=0 change_log 중 **after 값 일치**(Decimal 정확비교) + 시간창 앵커=해당 스냅샷 `synced_at`(ECHO_LOOKBACK 3일 — 실측 지연 2일+α를 덮음) + 되돌림 판별·외부기록 veto·인과 정합(우리 상태 궤적) 규칙. 래더 중간 스텝은 창 안 로그 전체 대조. codex 4R(P1 6건 수정·반려 1건은 codex가 재반박해 철회). 배포 후 07-25/26 리플레이로 오탐 7건 제거·정당 이벤트(extended_toggle 2·status_flip 4) 보존 실증.
+
+### 📌 교훈
+- **"우리가 했나" 판정은 (값, 시각) 쌍으로 해야 한다.** action 종류+시간창만으로는 우리 창 안에서 벌어진 외부 조작을 숨기고(위음성), 값이 맞아도 창 밖이면 오탐(위양성). 값 일치가 강한 신호, 시간창은 바운드.
+- **"결정적·리플레이"를 표방하는 함수에 `kst_now()` 앵커를 넣으면 그 계약은 이미 깨져 있다.** 리플레이 가능 판정의 시간 기준은 전부 op_date/스냅샷 시각에서 파생시킬 것.
+- **엔티티의 소유권 라벨(optimizer)은 시점 함수다.** 현재 라벨로 과거 변경의 귀속을 판정하면 소유권 전환 직후 반드시 오탐이 난다 — 귀속은 라벨이 아니라 이력(change_log)으로.
+- 크론 2분 간격은 순서 보장이 아니다(35 7 잡이 37 7 잡보다 늦게 commit). 선후 의존이 있으면 체이닝으로 묶을 것.
