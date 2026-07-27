@@ -330,8 +330,22 @@ def calculate_bep(db: Session, *, aggressiveness: str = "standard") -> dict:
     now = kst_now()
     n_total = 0
     n_bep = 0
+    n_mapped_price = 0  # 판매가를 매핑 폴백에서 가져온 행 수(신규 상품 관측용)
     for m in best.values():
+        # 판매가 우선순위: ①orders 실거래 중앙값(기본 — 실제로 팔린 값이 가장 정직하다)
+        # ②매핑에 손으로 넣은 판매가(product_channel_mapping.selling_price).
+        # ②는 **주문 이력이 아직 0건인 신규 상품** 전용 폴백이다(D-NAO-95). 종전엔 신규 상품이
+        # sp=0 → has_cost=0 → bep_roas=NULL로 남았고, 그 상태의 캠페인은 상한 산출이 계정 평균
+        # BEP로 내려앉는다(guardrail_gate._check_bid 주석 참조) — 즉 "판매가를 모른다"가 아니라
+        # "판매가를 넣을 자리가 없다"가 문제였다. 추정이 아니라 커머스API 실판매가를 매핑에
+        # 적어 넣는 경로이며, 주문이 한 건이라도 쌓이면 ①이 자동으로 이긴다(폴백은 스스로 은퇴).
         sp = prices.get(m.channel_product_id, Decimal("0"))
+        price_basis = "orders"
+        if sp <= 0 and m.selling_price:
+            mapped = Decimal(str(m.selling_price))
+            if mapped > 0:
+                sp = mapped
+                price_basis = "mapping"
         cost, master_name = masters.get(m.product_id, (Decimal("0"), ""))
         name = (m.channel_product_name or master_name or "")[:300]
         # D-NAO-57 (C): 상품별 단가당 순물류비(순배송원가 ÷ 평균 주문수량, 수취 배송비 차감).
@@ -339,6 +353,8 @@ def calculate_bep(db: Session, *, aggressiveness: str = "standard") -> dict:
         logistics = logistics_by_pid.get(
             m.channel_product_id, {"logistics": SHIPPING_COST_NORMAL}
         )["logistics"]
+        if price_basis == "mapping":
+            n_mapped_price += 1
         has_cost = sp > 0 and cost > 0
         commission = sp * rate
         contribution = (sp - commission - cost - logistics) / VAT_DIVISOR if has_cost else Decimal("0")
@@ -367,8 +383,8 @@ def calculate_bep(db: Session, *, aggressiveness: str = "standard") -> dict:
         ))
         n_total += 1
     db.commit()
-    log.info("naver_product_bep 산출: %d행(bep %d) rate=%.4f 기준=%s 공격성=%s",
-             n_total, n_bep, float(rate), commission_basis, aggressiveness)
-    return {"rows": n_total, "with_bep": n_bep,
+    log.info("naver_product_bep 산출: %d행(bep %d, 매핑판매가 %d) rate=%.4f 기준=%s 공격성=%s",
+             n_total, n_bep, n_mapped_price, float(rate), commission_basis, aggressiveness)
+    return {"rows": n_total, "with_bep": n_bep, "mapped_price_rows": n_mapped_price,
             "commission_rate": float(rate), "commission_basis": commission_basis,
             "aggressiveness": aggressiveness}
