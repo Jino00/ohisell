@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- launchd: 오하이테크(1P 로켓배송) 광고비 페처 "상주 poll 데몬" (S3, 트랙 ohitech-ad D-11). -->
 <!-- 버튼-poll 방식: 평소엔 60s마다 prod refresh-status만 확인(창 안 뜸), 종합조망의 '광고비 갱신' -->
-<!--   버튼을 누르면 claim 후 CDP Chrome(9224)에 attach해 report/SALES fetch→push(~수초). -->
-<!--   또한 마지막 성공 23h 초과 시 자동 run(버튼 안 눌러도 하루 1회 신선도 유지). -->
+<!--   버튼을 누르면 claim 후 Chrome(9224)을 띄워 report/SALES fetch→push하고 창을 닫는다. -->
+<!-- ★2026-07-27 순수 버튼-only: 23h 자동 run 제거 + Chrome 상주 supervisor -->
+<!--   (com.ohisell.ohitech-chrome, KeepAlive) 폐기 → 창이 뜨는 유일한 순간 = 버튼 클릭 직후 1회. -->
 <!-- 광고비는 prod 직접 fetch 불가(Akamai, D-4) → 이 데몬이 유일한 갱신 경로. -->
-<!-- CDP Chrome은 com.ohisell.ohitech-chrome(9224)가 상주시킴 — 이 데몬은 attach만 함(독립·공존). -->
 <!-- 설치:  tools/install_local_runtime.sh 실행(placeholder 치환·bootstrap 자동). -->
 <!-- 즉시 1회 테스트:  launchctl kickstart -k gui/$(id -u)/com.ohisell.ohitech-ad -->
 <plist version="1.0">
