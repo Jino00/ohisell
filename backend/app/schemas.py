@@ -169,10 +169,19 @@ class OrderOut(BaseModel):
     platform_product_name: Optional[str] = None
     quantity: int
     selling_price: Decimal
-    shipping_cost: Optional[Decimal] = None
+    shipping_cost: Optional[Decimal] = None  # 고객이 낸 배송비(의미 불변). None=배송비 포함 상품
     order_date: datetime
     status: str
     created_at: datetime
+    # ── 배송 구분(Jino 지시 2026-07-28, 필드 추가 방식 — 기존 응답 형태 유지) ──
+    # NULL = 판별 불가(네이버 주문 아님·raw_data 부재·JSON 잘림). 추정값 아님.
+    delivery_attribute_type: Optional[str] = None   # ARRIVAL_GUARANTEE(N배송)/TODAY/NORMAL
+    delivery_policy_type: Optional[str] = None      # 유료/무료/조건부무료
+    shipping_fee_type: Optional[str] = None         # 선결제/무료 …
+    logistics_company_id: Optional[str] = None      # N배송 물류사(PG 등)
+    is_nbaesong: bool = False                       # 단일 판별자 결과
+    shipping_cost_paid: Optional[Decimal] = None    # 우리가 지불한 배송비(건별 스냅샷)
+    shipping_cost_net: Optional[Decimal] = None     # 실부담 = paid − COALESCE(수취,0) (파생값)
 
     model_config = {"from_attributes": True}
 
@@ -182,6 +191,33 @@ class OrderListResponse(BaseModel):
     total: int
     page: int
     page_size: int
+
+
+# ── 배송 구분 집계 (Jino 지시 2026-07-28) ──
+class DeliveryBreakdownRow(BaseModel):
+    """배송방식 × 배송비 부담 교차표 한 칸.
+
+    두 축은 독립이다 — N배송이라고 항상 유료가 아니고, 일반배송에도 수취가 있다."""
+    delivery_attribute_type: Optional[str] = None  # None = 판별 불가(백필 못 한 행)
+    is_nbaesong: bool = False
+    customer_paid: bool = False        # 고객이 배송비를 냈는가(shipping_cost > 0)
+    orders: int = 0
+    collected_total: Decimal = Decimal("0")   # 고객 수취 합
+    paid_total: Decimal = Decimal("0")        # 우리 지불 합(판별된 행만)
+    net_total: Decimal = Decimal("0")         # 실부담 합(clamp 없음 — 음수 가능)
+    unresolved_paid: int = 0                  # 지불 배송비 미판별 건수(paid/net에서 제외됨)
+
+
+class DeliveryBreakdownResponse(BaseModel):
+    channel_id: Optional[int] = None
+    date_from: Optional[str] = None
+    date_to: Optional[str] = None
+    rows: list[DeliveryBreakdownRow] = []
+    total_orders: int = 0
+    total_collected: Decimal = Decimal("0")
+    total_paid: Decimal = Decimal("0")
+    total_net: Decimal = Decimal("0")
+    unresolved_orders: int = 0  # delivery_attribute_type IS NULL 건수
 
 
 # ── Sync ──
