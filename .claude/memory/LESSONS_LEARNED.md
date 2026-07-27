@@ -408,3 +408,36 @@ proposal.status(`approved` vs `failed`)와 **라이브 재조회**로 최종 확
 ### 📌 교훈
 로그 행의 존재는 시도의 증거이지 결과의 증거가 아니다. 원칙 22의 "라이브 증거"는 우리 자체 로그에도 적용된다.
 같은 날 발견한 자매 함정: `naver_proposals.created_at`이 **KST(앱 명시, 마이크로초 있음)와 UTC(DB 기본값, 마이크로초 없음) 혼재** — 한 테이블 안에서도 규약이 갈린다(LESSON 31 확장). `date(created_at)='오늘'`은 파이프라인 생성분을 통째로 놓친다.
+
+## 34. 새 launchd 잡은 "plist를 만들었다"가 아니라 "설치 스크립트가 렌더한다"까지가 배포 (2026-07-27, WING2 데몬 편입 codex 리뷰)
+
+### 🐛 이슈
+d546243이 WING2 버튼 큐 분리를 구현하면서 `tools/com.ohisell.wing2.plist`를 신설했다. 코드·테스트는
+전부 통과했고(3203 passed) 계정별 claim 격리도 양방향으로 고정돼 있었다. 그런데 **잡이 뜰 수가 없었다** —
+`tools/install_local_runtime.sh`의 렌더/설치 loop가 `adcost·wing·rocket·ohitech-ad`만 돌아서
+plist의 `__PYTHON__`/`__SCRIPT__` 자리표시자가 영영 치환되지 않는다. plist 헤더가 안내한 `cp + launchctl load`
+그대로 하면 launchd가 실행 파일을 못 찾고 `KeepAlive` + `ThrottleInterval 10`으로 10초마다 재시도하는
+크래시 루프가 된다. 결과: WING2 RG 갱신 요청을 아무도 claim하지 않는다 = **스프린트 전체가 라이브에서 死코드**.
+codex가 [P1]으로 잡았다(우리 테스트는 전부 초록이었다 — 유닛/HTTP 테스트는 launchd 설치 경로를 안 본다).
+
+### ✅ 해결
+- 설치 loop에 `wing2:wing_browser_fetcher.py` 편입(같은 스크립트를 env로 인스턴스 분리하는 D-7 패턴).
+- 설정 파일(`~/.ohisell_wing2_fetcher.json`) 없으면 건너뛰되, **그냥 건너뛰지 않고 bootout + plist 삭제**까지 —
+  안 그러면 예전에 수동 설치했거나 나중에 설정을 지운 Mac에서 크래시 루프가 살아남는다(codex R2).
+- 그 bootout도 **확인한다**: `2>/dev/null || true`는 실패해도 조용하다. 검증 없이 성공을 출력하고 plist까지
+  지우면 루프는 그대로인데 화면만 깨끗해지고 다음 실행이 문제를 볼 근거마저 사라진다 → 같은 파일의 구
+  supervisor 정리 패턴(bootout → 25초 소멸 대기 → 재확인 → 잔존 시 `exit 1`) 재사용, 잔존 시 plist는 남긴다(codex R3).
+- plist 헤더의 설치 안내를 `cp + load`(자리표시자 잔존)에서 `bash tools/install_local_runtime.sh`로 교체.
+
+### 📌 교훈
+**데몬/크론/launchd 잡을 새로 만들면 "설치 경로에 편입됐는가"가 완료 기준의 일부다.** 파일을 만든 것은
+배포가 아니다 — 원칙 22의 "라이브 증거"가 코드뿐 아니라 **기동 경로**에도 적용된다. 자동 테스트가 절대 못
+보는 층이라 리뷰에서 명시적으로 물어야 한다: *이 잡은 어떤 명령으로 설치되며, 그 명령이 이 잡을 알고 있는가?*
+자매 교훈: 정리(cleanup) 코드는 **"내렸다"고 말하지 말고 내려간 것을 확인**해야 한다. 관측을 지우는 정리는
+문제를 고치는 게 아니라 숨긴다.
+
+### 🔁 부수 패턴 — 성공/실패 비대칭
+같은 리뷰에서 [P2]로 나온 것: 판매분석 실패 보고(`mark_fetch_error`)만 계정 차원이고 성공
+(`_mark_heartbeat`)은 계정 무구분이었다 → WING2 ingest가 WING1 행에 성공을 찍고 WING1의 실패 흔적까지
+지운다. **상태를 계정(또는 어떤 차원이든)으로 쪼갤 때는 성공 경로와 실패 경로를 같이 쪼갠다** — 한쪽만
+쪼개면 남의 성공이 내 신선도가 되는 조용한 위조가 생긴다.
