@@ -490,6 +490,40 @@ def test_cold_approval_source_is_killswitch_guarded(db, writer_stub):
     assert writer_stub == []
 
 
+def test_cold_killswitch_second_guard_point_at_writer(db, writer_stub, monkeypatch):
+    """★리뷰 3R P3: 킬스위치 **두 번째** 지점(writer 직전 최종 확인)도 cold_op를 막는가.
+
+    첫 지점(진입 가드)만 덮으면 codex 8R이 두 번째 지점을 넣은 이유 — 진입 체크와 PUT 사이
+    수백 ms 레이스(그 사이 Jino가 스위치를 내림) — 가 회귀로 안 잡힌다.
+    `_auto_operate_now`를 '첫 호출 True → 이후 False'로 만들어 진입은 통과시키고 최종 확인에서
+    잡히게 한다."""
+    from app.models import NaverProposal
+    from app.services.naver_ad import auto_operator, naver_execution_harness as h
+    from app.services.naver_ad.bid_step_types import encode_cold_ceiling
+    _seed(db)
+    p = NaverProposal(
+        proposal_type="bid_up_cold", target_type="ad", target_id=AD, campaign_id=CID,
+        adgroup_id=GID, rationale="TOCTOU 킬스위치",
+        expected_effect=encode_cold_ceiling("x", 5000),
+        status="approved", target_bid=900, approval_source=lane.APPROVAL_SOURCE_COLD,
+    )
+    db.add(p); db.commit()
+
+    seen = {"n": 0}
+
+    def flaky(_db, _campaign_id):
+        seen["n"] += 1
+        return seen["n"] == 1  # 진입은 통과, 그 다음(최종 확인)부터 OFF
+
+    monkeypatch.setattr(auto_operator, "_auto_operate_now", flaky)
+    with pytest.raises(h.KillSwitchEngagedError):
+        h.execute(db, p.id, dry_run=False)
+    assert seen["n"] >= 2, "두 번째 가드 지점에 도달하지 않았다(첫 지점만 덮인 테스트)"
+    assert writer_stub == []            # 쓰기 없음
+    db.refresh(p)
+    assert p.status == "approved"       # 클레임 원복(executing 잔존 없음)
+
+
 def test_cold_approval_source_single_source():
     """승인원 상수의 단일 소스는 bid_step_types(리뷰 P3-12) — lane은 재수출만."""
     from app.services.naver_ad import bid_step_types
