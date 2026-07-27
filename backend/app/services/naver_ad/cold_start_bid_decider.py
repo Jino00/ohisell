@@ -124,10 +124,14 @@ def decide_cold_start_bid(
     #    = 이 상품은 현재 시장에서 이익을 내며 사다리 안(1~4위)에 노출될 수 없다는 뜻.
     #    ★중요한 신호이므로 조용히 보류하지 않고 별도 판정값으로 올린다.
     if ceiling_cpc < ladder_min:
+        # ★f-string 안에 같은 따옴표 f-string/첨자를 중첩하지 말 것(PEP 701 = Python 3.12+,
+        #   **prod는 3.10**). 조각을 미리 만들어 쓴다 — tests/test_prod_python_syntax_compat.py 참조.
+        _rpc = ceiling.get("rpc")
+        rpc_note = f"{_rpc:.0f}" if _rpc else "미상"
         out["decision"] = DECISION_NOT_VIABLE
         out["reason"] = (
             f"경제성 없음 — 이익 상한 {ceiling_cpc:,}원 < 사다리 최저가(4위권) {ladder_min:,}원. "
-            f"현 RPC({ceiling.get('rpc') and f'{ceiling['rpc']:.0f}'}원·출처 {out['rpc_source']}·"
+            f"현 RPC({rpc_note}원·출처 {out['rpc_source']}·"
             f"clk {out['sample_clk']})·BEP {ceiling.get('bep_roas')} 로는 1~4위 어디에도 "
             "이익 내며 노출 불가."
         )
@@ -172,14 +176,19 @@ def decide_cold_start_bid(
         return out
 
     bound = "상한" if ceiling_cpc <= market_bid else f"시장가({target_position}위)"
+    # ★f-string 안에 **같은 따옴표** f-string을 중첩하지 말 것 — PEP 701(Python 3.12+) 문법인데
+    #   **prod는 Python 3.10**이다(로컬 3.14에서는 통과해 테스트가 못 잡았고, 배포 후 이 줄에서
+    #   SyntaxError로 모듈 import가 통째로 죽었다). 조각을 미리 만들어 붙인다.
+    conf_note = "" if confident else (
+        f"·표본 빈약 → 상한 {raw_ceiling:,}에 {LOW_CONFIDENCE_CEILING_FACTOR} 할인 적용"
+    )
+    expmin_note = f", 참고 최소노출가 {exposure_min:,}원" if exposure_min else ""
     out["decision"] = DECISION_PROPOSE
     out["target_bid"] = target
     out["reason"] += (
         f"콜드 첫 입찰 {target:,}원 = min(이익상한 {ceiling_cpc:,}, "
         f"{target_position}위 시장가 {market_bid:,}) — {bound}이 결정. "
-        f"RPC 출처 {out['rpc_source']}(clk {out['sample_clk']}"
-        f"{'' if confident else f'·표본 빈약 → 상한 {raw_ceiling:,}에 '
-                                f'{LOW_CONFIDENCE_CEILING_FACTOR} 할인 적용'})"
-        + (f", 참고 최소노출가 {exposure_min:,}원" if exposure_min else "")
+        f"RPC 출처 {out['rpc_source']}(clk {out['sample_clk']}{conf_note})"
+        + expmin_note
     )
     return out
