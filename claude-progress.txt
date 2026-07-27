@@ -2,6 +2,12 @@
 # 매 sprint 완료 시 Claude가 이 파일을 갱신합니다.
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
+## 최신 상태 (2026-07-28 07:40, repo 루트 main) — RG 층2 결손 주도 자가치유 배포 완료
+- **RG 층2 결손 주도 자가치유 배포**(PR #124 병합 `cdfc91d`, safe_deploy CAS 통과, Mac 런타임 bootout+bootstrap 갱신): 층2 병목 `rg_max_periods=1` 폐기 → prod 결손 조회 엔드포인트(`GET /api/coupang/ops/wing/rg-settlement/layer2-gaps`) 기반 gap-driven 선택(회차 상한 `rg_max_targets=3`)+최신 주기 rider(PRODUCT_SIZE 영구 미수집 P1 수정)+claim 기준 시간예산(TTL 20분 부등식)+층2 루프 세션 재확인. 계획서=`docs/PLAN_rg-layer2-gap-driven-selfheal.md`(알려진 한계 2건 명문화).
+- 교차 리뷰: **codex CLI 한도 소진(리셋 08-02)** → Jino 07-18 승인 방식(적대적 Claude 리뷰어 Opus 단일)으로 대체, 5라운드 — 지적 14건(수용 11·절충 3·미합의 0), 배포 차단급 P1 2건(결손 매칭 KST 날짜 불일치 상시 실패·PRODUCT_SIZE 영구 미수집) 리뷰가 잡음. 테스트 3440 passed.
+- 라이브 실증: WING1 07-27 23:08 완주 — gap-driven 대상 선택 정상 + PRODUCT_SIZE 129행 첫 적재(P1 수정 라이브 작동). 35일 창 내 결손 0(기백필 상태 확인).
+- **차단/잔여**: WING1·WING2 Wing 데스크톱 세션 밤사이 만료(login_required·재시도 3회 소진) → ①WING2 결손 트리거 재확인 ②WING1 04-20~05-03 옛 공백 백필(`rg_status_days:100` 1회 오버라이드 — 시도했다 세션 만료로 미완, config 원복 확인됨) — 둘 다 **Jino의 Wing 재로그인 선행 필요**. chip task_2a26d430은 이 스프린트의 층2 루프 세션 재확인으로 코드 확인分 해소.
+
 ## 최신 상태 (2026-07-27 23:xx, 워크트리 agent-a0d4b0f9f34968c6a) — CS 스프린트(콜드 첫 입찰 레인) PR #123
 - **D-NAO-96 / ref 41**: D-NAO-95(ref 40)가 표준화한 "신규 소재 첫 입찰가 산출 절차"를 **자동운영 레인으로 배선**.
   구조(원칙18): Harness `cold_start_bid_lane` ← SA1 `bid_ceiling_calculator`(상한=RPC÷BEP) + SA2 `market_bid_probe`

@@ -656,3 +656,26 @@ bm_diff(대행사 조작 감지기)가 03 캠페인에서 07-25~26 "대행사 bi
 - **"결정적·리플레이"를 표방하는 함수에 `kst_now()` 앵커를 넣으면 그 계약은 이미 깨져 있다.** 리플레이 가능 판정의 시간 기준은 전부 op_date/스냅샷 시각에서 파생시킬 것.
 - **엔티티의 소유권 라벨(optimizer)은 시점 함수다.** 현재 라벨로 과거 변경의 귀속을 판정하면 소유권 전환 직후 반드시 오탐이 난다 — 귀속은 라벨이 아니라 이력(change_log)으로.
 - 크론 2분 간격은 순서 보장이 아니다(35 7 잡이 37 7 잡보다 늦게 commit). 선후 의존이 있으면 체이닝으로 묶을 것.
+
+## 46. wing 데몬 배포는 kickstart가 아니라 install_local_runtime.sh다 (2026-07-27, PR #118)
+
+### 🐛 이슈
+PR #118 병합 후 repo 루트 main pull + `launchctl kickstart -k`로 wing·wing2 데몬을 재시작했는데, 데몬은 정상 기동 로그를 찍으면서도 **구코드로 돌고 있었다**. 데몬의 실행 파일은 repo(iCloud)가 아니라 `~/.ohisell/tools/`의 로컬 사본(iCloud dataless 추방 회피 구조)이고, kickstart는 프로세스만 재시작할 뿐 사본을 갱신하지 않는다. 기동 로그가 새 타임스탬프라 "새 코드 라이브"로 착각하기 딱 좋은 green-while-stale.
+
+### ✅ 해결
+`bash tools/install_local_runtime.sh`(멱등) 실행 — 사본 복사+plist 재설치+데몬 5종 bootout→bootstrap까지 일괄 수행. 검증은 `grep -c "RC_RG_LOGIN_REQUIRED" ~/.ohisell/tools/wing_browser_fetcher.py`(마커 grep)+mtime+PID 갱신으로.
+
+### 📌 교훈
+launchd 데몬 코드 변경의 라이브 판정은 "재시작 성공·기동 로그"가 아니라 **실행 중인 프로세스의 실제 스크립트 경로(`ps -o command`)와 그 파일의 내용/mtime**으로 한다. tools/*.py 계열(adcost·wing·wing2·rocket·ohitech-ad) 배포는 전부 install_local_runtime.sh 경유가 정답 — adcost의 "kickstart만 하면 됨" 기억(06-14)은 사본 구조 도입 이후로는 불완전하다.
+
+## 47. 서브에이전트 "bounded poll" 자체도 스톨한다 (2026-07-28, RG 층2 자가치유 배포)
+
+### 🐛 이슈
+배포 에이전트에 "모든 대기에 timeout"을 지시했음에도, 에이전트가 내부에 건 15분 상한 폴링이 통지 없이 2회 정지했다(1차는 Monitor 대기로 8시간 무응답). 에이전트 내부 timeout 지시만으로는 위임 측이 실제로 멈추지 않는다는 보장이 없다.
+
+### ✅ 해결
+오케스트레이터 쪽에 독립 fallback 타이머(background sleep)를 걸어 "에이전트 내부 timeout"과 "오케스트레이터 자체 타이머" 중 먼저 오는 쪽에서 nudge — 회수 지시는 "완결까지 대기"가 아니라 "최종 보고를 지금 작성하고 미완은 미완으로 명시하라"로 보내 즉시 회수.
+
+### 📌 교훈
+장시간 관측이 낀 위임은 에이전트 내부 timeout만 믿지 말고 오케스트레이터가 자체 타이머로 이중화한다. 회수 지시의 문구도 중요 — "대기 계속"이 아니라 "현재 사실로 종결"로 보내야 스톨된 에이전트가 즉시 응답한다.
+- 병기(실행 커맨드 보강): 루트 pytest는 `PYTHONPATH=backend`가 필요하다 — `cd backend && pytest tests/`만으로는 `ModuleNotFoundError`가 난다. 루트에서 돌릴 때는 `PYTHONPATH=backend pytest backend/tests/` 형태로 고정할 것.
