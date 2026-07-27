@@ -767,14 +767,24 @@ def cmd_login(cfg: dict, wait_secs: int = 600) -> int:
     # 로그인은 됐는데 push가 실패한 경우는 재시도 대상 — login_required로 보고하면
     # 멀쩡한 세션을 두고 요청이 소멸한다(거짓 로그인 문제).
     summ = _summarize(res.get("body") or "")
-    if summ:
-        for body in older_bodies:
-            older = _summarize(body)
-            if older:
-                _merge_summary(summ, older)
-        _log_summary("[login]", summ, _observed_span(summ, cfg))
-        if _push_configured(cfg):
-            return _push(cfg, summ)   # 첫 데이터 즉시 push
+    if not summ:
+        # ★파싱 실패는 0이 아니다(R2): _is_success는 saleSummaryByDate '키 존재'만 보고,
+        #   _summarize는 그 값이 list일 때만 요약한다 — 200 JSON이지만 값이 dict/null이면
+        #   세션은 저장됐어도 push할 데이터가 없다. 여기서 0을 반환하면 claim된 회차가 성공
+        #   (_push→heartbeat)도 실패(fetch-error)도 보고하지 않아 요청이 임대된 채 남고,
+        #   UI는 215초 헛기다린 뒤 'Mac 응답 없음'(Mac 꺼짐)으로 오진한다(lease TTL 20분).
+        #   → 보고 가능한 실패로 만든다. 세션 파일은 이미 저장됐으므로 다음 재시도는 _do_run
+        #   분기로 가서 같은 사유를 rc=1로 보고한다(무한 재로그인 루프 없음).
+        #   RC_LOGIN_REQUIRED가 아닌 1인 이유: 로그인 자체는 됐다 — 재시도 대상이다.
+        log.error("vendor-summary 파싱 실패 — 응답 형태 변경 의심: %s", (res.get("body") or "")[:160])
+        return 1
+    for body in older_bodies:
+        older = _summarize(body)
+        if older:
+            _merge_summary(summ, older)
+    _log_summary("[login]", summ, _observed_span(summ, cfg))
+    if _push_configured(cfg):
+        return _push(cfg, summ)   # 첫 데이터 즉시 push
     return 0
 
 
@@ -952,6 +962,7 @@ def _prod_notify_rg_complete(cfg: dict, lease: str | None = None) -> None:
         try:
             r = requests.post(
                 cfg["prod_base_url"].rstrip("/") + _RG_COMPLETE_PATH,
+                params={"account_key": cfg["account_key"]},   # ★계정 명시 — 아래 R3 주석 참조
                 json=body,
                 headers={"X-Ingest-Token": cfg["ingest_token"]},
                 timeout=10,
@@ -972,6 +983,13 @@ def _prod_report_failure(cfg: dict, path: str, error: str, kind: str | None = No
     보고가 없으면 lease TTL(기본 20분)이 지나야 재시도된다 — 보고하면 다음 폴에서 곧바로.
     kind="login_required"면 prod가 재시도 없이 요청을 소멸시킨다(§0 금지선: 재시도해도
     실패하고 창만 반복해서 뜬다). best-effort — 보고 실패가 run을 더 망가뜨리면 안 된다.
+
+    ★account_key를 반드시 보낸다(R3, 2026-07-27 버그 수정): 버튼 큐는 계정 차원인데(WING2
+    인스턴스 편입) 이 호출만 계정을 안 보내고 있었다 — 엔드포인트 기본값이 WING1이라 WING2
+    데몬의 실패 보고가 WING1 상태행으로 갔다. 거기엔 내 lease가 없으니 report_failure가
+    'stale 실패 보고 무시'로 접었고(refresh_contract), 결과적으로 WING2의 실패는 **아무데도
+    기록되지 않고 사라졌다** — 임대는 TTL 20분까지 살아남아 UI가 'Mac 응답 없음' 오진.
+    (같은 누락이 _prod_notify_rg_complete에도 있었다. status·claim 4개 호출은 이미 명시 중.)
     """
     if not _push_configured(cfg):
         return
@@ -983,12 +1001,62 @@ def _prod_report_failure(cfg: dict, path: str, error: str, kind: str | None = No
     try:
         requests.post(
             cfg["prod_base_url"].rstrip("/") + path,
+            params={"account_key": cfg["account_key"]},
             json=body,
             headers={"X-Ingest-Token": cfg["ingest_token"]},
             timeout=10,
         )
     except Exception as e:  # noqa: BLE001
         log.warning("fetch-error 보고 실패(무시): %s", str(e)[:120])
+
+
+class _LastErrorCapture(logging.Handler):
+    """run 동안 마지막 log.error 메시지를 붙잡는다 — fetch-error 보고의 사유로 쓴다."""
+
+    def __init__(self) -> None:
+        super().__init__(logging.ERROR)
+        self.last: str | None = None
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.last = record.getMessage()
+
+
+@contextlib.contextmanager
+def _capture_last_error():
+    h = _LastErrorCapture()
+    log.addHandler(h)
+    try:
+        yield h
+    finally:
+        log.removeHandler(h)
+
+
+def _run_claimed(fn) -> tuple[int, str | None]:
+    """claim 후 실행되는 작업을 돌린다 → (rc, 사유). 예외도 rc=1로 정규화한다.
+
+    ★왜 예외를 잡는가(R1): claim은 요청을 소비하지 않지만 **임대**를 잡는다. 예외로 조용히
+    폴 루프의 외곽 핸들러까지 빠져나가면 실패 보고가 없어 임대가 TTL(기본 20분)까지 살아있고,
+    그 뒤 재claim → 또 20분 → 3회 소진 reaper까지 40~60분이 걸린다. UI는 215초에 포기하므로
+    그동안 'Mac 응답 없음'(Mac 꺼짐/미설치)으로 오진하고, 창은 3번 뜬다. 보고하면 임대만
+    반납돼 다음 폴에서 곧바로 재시도된다 — rc!=0과 똑같이 취급해야 한다.
+      실제 탈출 경로: cmd_login은 자체 try/except가 없어 Chrome 기동 실패(_owned_chrome
+      RuntimeError: chrome_profile_busy·chrome_launch_failed·cdp_not_ready 등)·page.goto
+      타임아웃이 그대로 올라온다. _do_run/_do_rg_run도 브라우저 블록 **밖**(설정 int 변환·
+      꼬리의 _push)은 자체 try에 덮이지 않는다.
+
+    ★왜 사유를 캡처하는가(R1): 호출자가 아는 것은 rc뿐이라 보고 문구가 "…실패(rc=1)"에
+    그친다 — UI에 원인이 안 뜬다. 실패 경로는 직전에 반드시 log.error로 사유를 남기므로
+    (예: "vendor-summary 실패 status=403 … 'login' 재실행 필요") 그것을 사유로 쓴다.
+    없으면 예외 텍스트, 그것도 없으면 호출자의 일반 문구로 폴백한다.
+    """
+    with _capture_last_error() as cap:
+        try:
+            return fn(), cap.last
+        except Exception as e:  # noqa: BLE001 — 데몬은 죽지 않는다. 대신 반드시 보고한다.
+            # 사유는 log.error '전에' 확정한다 — 아래 로그가 cap.last를 덮어쓰면 안 된다.
+            reason = cap.last or f"{type(e).__name__}: {e}"
+            log.error("claim된 작업 예외 — 실패로 보고: %s", str(e)[:160])
+            return 1, reason
 
 
 def cmd_poll(cfg: dict) -> int:
@@ -1041,13 +1109,18 @@ def cmd_poll(cfg: dict) -> int:
                                 lease = _claim.get("lease")   # 내 임대 식별자(실패 보고에 첨부)
                                 last_fetch = time.monotonic()
                                 log.info("갱신 요청 감지 — fetch 시작")
+                                # _run_claimed: 예외도 rc=1로 정규화하고 사유(마지막 log.error)를
+                                # 함께 돌려준다 — 조용한 탈출로 임대가 20분 묶이는 것을 막는다(R1).
                                 if not Path(state).is_file():
-                                    rc = cmd_login(cfg, wait_secs=_LOGIN_WAIT_S)
+                                    rc, reason = _run_claimed(
+                                        lambda: cmd_login(cfg, wait_secs=_LOGIN_WAIT_S))
                                 else:
-                                    rc = _do_run(cfg, state, login_wait_secs=_LOGIN_WAIT_S)  # 락 보유 중
+                                    rc, reason = _run_claimed(   # 락 보유 중
+                                        lambda: _do_run(cfg, state, login_wait_secs=_LOGIN_WAIT_S))
                                 if rc != 0:
                                     _prod_report_failure(
-                                        cfg, _VS_ERROR_PATH, f"판매분석 수집 실패(rc={rc})",
+                                        cfg, _VS_ERROR_PATH,
+                                        reason or f"판매분석 수집 실패(rc={rc})",
                                         kind=("login_required" if rc == RC_LOGIN_REQUIRED else None),
                                         lease=lease)
         except requests.RequestException as e:
@@ -1084,10 +1157,14 @@ def cmd_poll(cfg: dict) -> int:
                                                      "세션 파일 없음 — 로그인 필요",
                                                      kind="login_required", lease=rg_lease)
                             else:
-                                rc = _do_rg_run(cfg, state, login_wait_secs=_LOGIN_WAIT_S)
+                                # _run_claimed: 예외도 rc=1·사유 동반으로 정규화(R1) — 조용한
+                                # 탈출로 임대가 TTL 20분 묶이면 UI가 'Mac 응답 없음'으로 오진.
+                                rc, reason = _run_claimed(
+                                    lambda: _do_rg_run(cfg, state, login_wait_secs=_LOGIN_WAIT_S))
                                 if rc != 0:
                                     _prod_report_failure(
-                                        cfg, _RG_ERROR_PATH, f"RG 정산 수집 실패(rc={rc})",
+                                        cfg, _RG_ERROR_PATH,
+                                        reason or f"RG 정산 수집 실패(rc={rc})",
                                         kind=("login_required" if rc == RC_LOGIN_REQUIRED else None),
                                         lease=rg_lease)
                                     if rc != RC_LOGIN_REQUIRED:
