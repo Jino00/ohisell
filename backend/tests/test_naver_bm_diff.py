@@ -27,6 +27,16 @@ IN_OURS = datetime(2026, 7, 20, 9, 0)        # 48h·3일 창 모두 안
 IN_ECHO_ONLY = datetime(2026, 7, 19, 0, 0)   # 3일 창 안·48h 창 밖(=지연 반영 구간)
 AFTER_SNAP = datetime(2026, 7, 21, 20, 0)    # D 스냅샷 이후 — 이 diff에 반영될 수 없음
 OUT_ALL = datetime(2026, 7, 17, 12, 0)       # 두 창 모두 밖
+# ★D-NAO-93 필드 출처별 관측 시각(실측: entity_sync 커밋이 bm 스냅샷보다 늦어 D 스냅샷의
+# 입찰·상태는 D-1 07:35 관측값 / 예산·확장검색은 스냅샷 시작 몇 분 뒤 P3 GET 관측값)
+ENTITY_OBS = datetime(2026, 7, 20, 7, 35)    # D 스냅샷의 entity 관측 시각
+P3_OBS = datetime(2026, 7, 21, 7, 42)        # D 스냅샷의 P3 GET 관측 시각
+IN_ENTITY_LAG = IN_OURS                      # entity 관측 후 ~ 스냅샷 복사 전 = 구 코드의 미탐 밴드
+IN_P3_LAG = datetime(2026, 7, 21, 7, 40)     # 스냅샷 복사 후 ~ P3 GET 전 = 구 코드의 오탐 밴드
+# P3는 캠페인별 순차 GET이라 행마다 관측 시각이 다르다(전역 max 금지 — codex[P1])
+P3_OBS_EARLY = datetime(2026, 7, 21, 7, 38)  # 먼저 관측된 캠페인
+P3_OBS_LATE = datetime(2026, 7, 21, 7, 50)   # 나중 관측된 캠페인
+IN_P3_ROW_GAP = datetime(2026, 7, 21, 7, 45)  # early 관측 후 · late 관측 전
 
 
 @pytest.fixture
@@ -43,9 +53,11 @@ def db():
 
 def _snap(db, sdate, entity_type, entity_id, *, campaign_id="", campaign_type="", optimizer="none",
           status="on", bid_amt=None, keyword_count=None, daily_budget=None, extended_search=None,
-          negative_kw_count=None, ad_count=None, name="", synced_at=None):
+          negative_kw_count=None, ad_count=None, name="", synced_at=None,
+          entity_observed_at=None, p3_observed_at=None):
     # synced_at 기본값 = 그 날 07:37(실제 스냅샷 크론 시각). change_log 조회창의 상한이므로
     # kst_now()가 아니라 스냅샷 날짜에 묶어야 리플레이가 결정적이다.
+    # entity_observed_at·p3_observed_at 기본값 = NULL(구 행) → bm_diff가 synced_at으로 폴백.
     synced_at = synced_at or datetime.combine(sdate, time(SNAP_H, SNAP_M))
     db.add(NaverEntitySnapshot(
         snapshot_date=sdate, entity_type=entity_type, entity_id=entity_id,
@@ -54,6 +66,7 @@ def _snap(db, sdate, entity_type, entity_id, *, campaign_id="", campaign_type=""
         name=name, status=status, bid_amt=bid_amt, keyword_count=keyword_count,
         daily_budget=daily_budget, extended_search=extended_search,
         negative_kw_count=negative_kw_count, ad_count=ad_count, synced_at=synced_at,
+        entity_observed_at=entity_observed_at, p3_observed_at=p3_observed_at,
     ))
 
 
@@ -565,3 +578,111 @@ def test_echo_judgement_is_replay_deterministic(db):
     assert ops1 == ops2 and r1 == r2
     assert ("bid_change", "grp-echo") not in ops1   # 창 안 실집행 → echo 제외
     assert ("bid_change", "grp-now") in ops1        # 창 밖(오늘) 로그 → 판정에 영향 없음
+
+
+# ── 9. ★D-NAO-93 필드 출처별 관측 시각 앵커 ──────────────────────────────────
+# 구 코드는 창 상한이 synced_at(스냅샷 **복사** 시각) 하나였다. 입찰·상태는 그보다 앞선
+# entity_sync 관측값이라 창이 ~24h 과대(미탐), 예산·확장검색은 스냅샷 시작 몇 분 뒤 P3 GET
+# 관측값이라 창이 과소(오탐)였다. 이제 op_type별로 맞는 관측 시각을 상한으로 쓴다.
+def test_null_observed_at_falls_back_to_synced_at(db):
+    """하위호환: 관측 시각 컬럼이 NULL인 구 행은 상한이 synced_at(07:37) — 종전 동작 그대로.
+    entity 관측(D-1 07:35) 이후의 우리 쓰기도 창 안이라 echo로 억제된다(구 판정 보존)."""
+    _snap(db, D_PREV, "campaign", "cmp-a", campaign_type="WEB_SITE", optimizer="none")
+    _snap(db, D_PREV, "adgroup", "grp-a", campaign_id="cmp-a", optimizer="none", bid_amt=1970)
+    _snap(db, D_CURR, "campaign", "cmp-a", campaign_type="WEB_SITE", optimizer="none")
+    _snap(db, D_CURR, "adgroup", "grp-a", campaign_id="cmp-a", optimizer="none", bid_amt=2260)
+    _log(db, "grp-a", "update_bid", {"bidAmt": 2260}, before={"bidAmt": 1970}, at=IN_ENTITY_LAG)
+    db.commit()
+
+    result = detect_agency_ops(db, op_date=D_CURR)
+    assert ("bid_change", "grp-a") not in _ops(db)
+    assert result["events"] == 0
+
+
+def test_entity_observed_at_closes_missed_detection_band(db):
+    """미탐 해소: 입찰은 entity_sync(D-1 07:35)가 관측한 값이다. 그 이후 ~ 스냅샷 복사(D 07:37)
+    사이의 우리 쓰기는 이 스냅샷에 반영될 수 없으므로, 값이 우연히 겹쳐도 대행사 조작을
+    지우면 안 된다(같은 픽스처가 NULL일 때는 위 테스트처럼 억제됐다)."""
+    _snap(db, D_PREV, "campaign", "cmp-a", campaign_type="WEB_SITE", optimizer="none")
+    _snap(db, D_PREV, "adgroup", "grp-a", campaign_id="cmp-a", optimizer="none", bid_amt=1970)
+    _snap(db, D_CURR, "campaign", "cmp-a", campaign_type="WEB_SITE", optimizer="none",
+          entity_observed_at=ENTITY_OBS)
+    _snap(db, D_CURR, "adgroup", "grp-a", campaign_id="cmp-a", optimizer="none", bid_amt=2260,
+          entity_observed_at=ENTITY_OBS)
+    _log(db, "grp-a", "update_bid", {"bidAmt": 2260}, before={"bidAmt": 1970}, at=IN_ENTITY_LAG)
+    db.commit()
+
+    detect_agency_ops(db, op_date=D_CURR)
+    op = _ops(db)[("bid_change", "grp-a")]
+    assert op.before_value == "1970" and op.after_value == "2260"
+
+
+def test_p3_lagged_write_without_observed_at_is_false_positive(db):
+    """오탐 재현(구 동작): p3_observed_at이 NULL이면 상한이 07:37이라, 07:37~P3 GET(07:42)
+    사이의 우리 update_budget이 창 밖으로 밀려 대행사 조작으로 오기록된다."""
+    _snap(db, D_PREV, "campaign", "cmp-b", campaign_type="WEB_SITE", optimizer="none",
+          daily_budget=30000)
+    _snap(db, D_CURR, "campaign", "cmp-b", campaign_type="WEB_SITE", optimizer="none",
+          daily_budget=50000)
+    _log(db, "cmp-b", "update_budget", {"dailyBudget": 50000}, before={"dailyBudget": 30000},
+         at=IN_P3_LAG, entity_type="campaign", campaign_id="cmp-b")
+    db.commit()
+
+    detect_agency_ops(db, op_date=D_CURR)
+    assert ("budget_change", "cmp-b") in _ops(db)
+
+
+def test_p3_observed_at_closes_false_positive_band(db):
+    """오탐 해소: 예산은 스냅샷 시작 몇 분 뒤 그 행의 P3 GET(07:42)이 관측한다. **그 행 관측
+    이전**(07:40)의 우리 쓰기는 이미 스냅샷에 반영된 값이므로 echo로 억제돼야 한다."""
+    _snap(db, D_PREV, "campaign", "cmp-b", campaign_type="WEB_SITE", optimizer="none",
+          daily_budget=30000)
+    _snap(db, D_CURR, "campaign", "cmp-b", campaign_type="WEB_SITE", optimizer="none",
+          daily_budget=50000, p3_observed_at=P3_OBS)
+    _log(db, "cmp-b", "update_budget", {"dailyBudget": 50000}, before={"dailyBudget": 30000},
+         at=IN_P3_LAG, entity_type="campaign", campaign_id="cmp-b")
+    db.commit()
+
+    result = detect_agency_ops(db, op_date=D_CURR)
+    assert ("budget_change", "cmp-b") not in _ops(db)
+    assert result["events"] == 0
+
+
+def test_p3_band_uses_row_own_observation_not_global_max(db):
+    """★codex[P1]: P3 GET은 캠페인별 순차라 행마다 관측 시각이 다르다. 전역 max(07:50)를 상한으로
+    쓰면 먼저 관측된 행(07:38)에서 **아직 반영될 수 없는** 07:45 쓰기까지 창 안에 들어와 억제된다
+    — 상한은 그 행 자신의 p3_observed_at이어야 한다. 같은 시각의 동일 쓰기가 행에 따라 갈린다."""
+    for cid in ("cmp-early", "cmp-late"):
+        _snap(db, D_PREV, "campaign", cid, campaign_type="WEB_SITE", optimizer="none",
+              daily_budget=30000)
+        _log(db, cid, "update_budget", {"dailyBudget": 50000}, before={"dailyBudget": 30000},
+             at=IN_P3_ROW_GAP, entity_type="campaign", campaign_id=cid)
+    _snap(db, D_CURR, "campaign", "cmp-early", campaign_type="WEB_SITE", optimizer="none",
+          daily_budget=50000, p3_observed_at=P3_OBS_EARLY)
+    _snap(db, D_CURR, "campaign", "cmp-late", campaign_type="WEB_SITE", optimizer="none",
+          daily_budget=50000, p3_observed_at=P3_OBS_LATE)
+    db.commit()
+
+    detect_agency_ops(db, op_date=D_CURR)
+    ops = _ops(db)
+    assert ("budget_change", "cmp-early") in ops      # 그 행 관측(07:38) 이후 쓰기 → 반영 불가 → 기록
+    assert ("budget_change", "cmp-late") not in ops   # 그 행 관측(07:50) 이전 쓰기 → 반영됨 → echo
+
+
+def test_external_log_at_observation_boundary_still_vetoes(db):
+    """★codex[P1]: entity_sync는 external_bid_change의 changed_at과 NaverEntity.synced_at에
+    **같은 now**를 쓴다. 상한이 반개구간이면 '그 관측이 남긴 외부 귀속 증거'가 경계에서 탈락해
+    veto가 사라지고, 과거 우리 쓰기의 값이 우연히 같을 때 대행사 변경이 echo로 오억제된다.
+    외부 증거는 상한을 닫아 판정한다(우리 쓰기는 반개구간 유지)."""
+    _snap(db, D_PREV, "campaign", "cmp-a", campaign_type="WEB_SITE", optimizer="none")
+    _snap(db, D_PREV, "adgroup", "grp-a", campaign_id="cmp-a", optimizer="none", bid_amt=1000)
+    _snap(db, D_CURR, "campaign", "cmp-a", campaign_type="WEB_SITE", optimizer="none",
+          entity_observed_at=ENTITY_OBS)
+    _snap(db, D_CURR, "adgroup", "grp-a", campaign_id="cmp-a", optimizer="none", bid_amt=1500,
+          entity_observed_at=ENTITY_OBS)
+    _log(db, "grp-a", "update_bid", {"bidAmt": 1500}, at=IN_ECHO_ONLY)         # 우리 옛 쓰기
+    _log(db, "grp-a", "external_bid_change", {"bidAmt": 1500}, at=ENTITY_OBS)  # 관측과 동시각
+    db.commit()
+
+    detect_agency_ops(db, op_date=D_CURR)
+    assert ("bid_change", "grp-a") in _ops(db)

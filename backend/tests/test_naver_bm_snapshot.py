@@ -3,7 +3,7 @@
 #   조인 none/ours/mop, WEB_SITE만 키워드 집계·타 유형 NULL), run_bm_layer fail-open.
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 
 import pytest
 from sqlalchemy import create_engine
@@ -17,6 +17,7 @@ from app.services.naver_ad.bm_snapshot import snapshot_entities, update_deep_dim
 from app.utils.kst import kst_now
 
 SDATE = date(2026, 7, 22)
+ENT_OBS = datetime(2026, 7, 21, 7, 35)  # 앞선 entity_sync 관측 시각(D-NAO-93 실측: 스냅샷보다 이름)
 # Phase 3(예산·확장검색)은 미주입 시 실제 네이버 GET을 호출한다 — 유닛 테스트는 항상 빈 값을
 # 주입해 라이브 네트워크 호출을 피한다(entity_sync.collect_entities와 동일 관례, 원칙18-8).
 _NO_GET = {"campaigns_full": [], "adgroups_by_campaign": {}}
@@ -239,6 +240,8 @@ def test_phase3_campaign_budget_get_failure_is_fail_open(db, monkeypatch):
     assert result["campaigns"] == 3  # 실패해도 스냅샷 자체는 완료
     assert rows[("campaign", "cmp-web")].daily_budget is None
     assert result["get_calls"] == 0  # 실패 시 GET 성공 카운트 0(§실측)
+    # ★D-NAO-93: 관측 못 한 필드는 관측 시각도 NULL — bm_diff의 synced_at 폴백이 성립해야 한다
+    assert rows[("campaign", "cmp-web")].p3_observed_at is None
 
 
 def test_phase3_adgroup_dims_get_failure_for_one_campaign_is_isolated(db, monkeypatch):
@@ -260,6 +263,69 @@ def test_phase3_adgroup_dims_get_failure_for_one_campaign_is_isolated(db, monkey
     assert rows[("adgroup", "grp-shop1")].daily_budget is None  # 실패한 캠페인 소속 → NULL 유지
     assert result["campaigns"] == 3  # 실패해도 스냅샷 자체는 완료
     assert result["get_calls"] == 2  # cmp-web·cmp-agency 성공(cmp-shop 실패는 미포함)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# D-NAO-93 — 필드 출처별 관측 시각(bm_diff 대조창 앵커)
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_observed_at_recorded_per_field_source(db):
+    """entity_observed_at은 전 행에 NaverEntity.synced_at 복사(=entity_sync 관측 시각),
+    p3_observed_at은 **P3 데이터를 실제로 받은 행**만 채운다(못 받은 행은 NULL → 폴백)."""
+    _seed(db)
+    for e in db.query(NaverEntity).all():  # entity_sync가 D-1 07:35에 관측했다고 가정
+        e.synced_at = ENT_OBS
+    db.commit()
+
+    campaigns_full = [
+        {"campaign_id": "cmp-web", "daily_budget": 50000},
+        {"campaign_id": "cmp-shop", "daily_budget": None},  # 무제한이어도 '관측됨'
+    ]
+    adgroups_by_campaign = {
+        "cmp-web": [{"adgroup_id": "grp-web1", "daily_budget": 20000, "extended_search": True}],
+    }
+    snapshot_entities(db, snapshot_date=SDATE, campaigns_full=campaigns_full,
+                      adgroups_by_campaign=adgroups_by_campaign)
+    rows = _rows(db)
+
+    assert all(r.entity_observed_at == ENT_OBS for r in rows.values())
+    # 스냅샷 복사 시각(synced_at)보다 P3 관측이 늦다 — 이 순서가 bm_diff 오탐 밴드의 근거
+    web = rows[("campaign", "cmp-web")]
+    assert web.p3_observed_at is not None and web.p3_observed_at >= web.synced_at
+    assert rows[("campaign", "cmp-shop")].p3_observed_at is not None  # 값 None ≠ 미관측
+    assert rows[("adgroup", "grp-web1")].p3_observed_at is not None
+    # P3 응답에 없던 행 → NULL(관측 안 됨)
+    assert rows[("campaign", "cmp-agency")].p3_observed_at is None
+    assert rows[("adgroup", "grp-shop1")].p3_observed_at is None
+    assert rows[("adgroup", "grp-agency1")].p3_observed_at is None
+
+
+def test_p3_observed_at_is_per_campaign_not_global(db, monkeypatch):
+    """★codex[P1]: 그룹 dims는 캠페인별 순차 GET이라 관측 시각이 **캠페인마다 다르다**.
+    전역 1개로 뭉치면 먼저 관측된 캠페인 소속 그룹에 늦은 시각이 찍혀 bm_diff 밴드가 되살아난다.
+    캠페인 예산 GET(첫 GET) 시각은 그룹 GET 시각보다 이르다."""
+    stamps = iter([
+        datetime(2026, 7, 22, 7, 36),  # snapshot_entities 시작(synced_at)
+        datetime(2026, 7, 22, 7, 37),  # get_campaigns_full 직후
+        datetime(2026, 7, 22, 7, 38),  # cmp-web 그룹 GET 직후
+        datetime(2026, 7, 22, 7, 39),  # cmp-shop 그룹 GET 직후
+        datetime(2026, 7, 22, 7, 50),  # cmp-agency 그룹 GET 직후
+    ])
+    monkeypatch.setattr(bm_snapshot, "kst_now", lambda: next(stamps))
+    monkeypatch.setattr(bm_snapshot, "get_adgroups", lambda cid: [
+        {"adgroup_id": f"grp-{cid.split('-')[1]}1", "daily_budget": 10000, "extended_search": True},
+    ])
+    _seed(db)
+    snapshot_entities(db, snapshot_date=SDATE, campaigns_full=[
+        {"campaign_id": "cmp-web", "daily_budget": 50000},
+    ])
+    rows = _rows(db)
+
+    # 캠페인 행 = 예산 GET 시각(첫 GET) / 그룹 행 = **그 캠페인의** dims GET 시각
+    assert rows[("campaign", "cmp-web")].p3_observed_at == datetime(2026, 7, 22, 7, 37)
+    assert rows[("adgroup", "grp-web1")].p3_observed_at == datetime(2026, 7, 22, 7, 38)
+    assert rows[("adgroup", "grp-shop1")].p3_observed_at == datetime(2026, 7, 22, 7, 39)
+    assert rows[("adgroup", "grp-agency1")].p3_observed_at == datetime(2026, 7, 22, 7, 50)
 
 
 # ══════════════════════════════════════════════════════════════════════════

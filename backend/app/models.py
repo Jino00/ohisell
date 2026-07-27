@@ -1974,6 +1974,8 @@ class NaverEntitySnapshot(Base):
     Phase 1(이 커밋)은 name/status/optimizer/bid_amt/keyword_count/keyword_avg_bid만 채운다.
     daily_budget·extended_search(일별, P3)·negative_kw_count·ad_count(주간 deep, P3)는 additive
     nullable — 미수집 시 NULL(하위호환·backfill 불필요). 보존 400일 롤링(P6).
+    entity_observed_at·p3_observed_at(D-NAO-93)은 필드 출처별 **관측** 시각 — bm_diff가 op_type별로
+    맞는 change_log 대조창 상한을 잡는 데 쓴다(구 행 NULL이면 synced_at 폴백).
     """
 
     __tablename__ = "naver_entity_snapshot"
@@ -2000,6 +2002,13 @@ class NaverEntitySnapshot(Base):
     negative_kw_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 제외키워드 수(주간 deep GET, P3)
     ad_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 소재 수(주간 deep GET, P3)
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())  # ★쓰기 시 kst_now 명시 주입(server_default는 UTC — 시간계산 미사용)
+    # ── 필드 출처별 관측 시각(D-NAO-93 · bm_diff 대조창 앵커) ──
+    # synced_at은 스냅샷 **복사** 시각이라 필드별 실관측 시각과 어긋난다: 입찰·상태·키워드집계는
+    # 앞선 entity_sync가 본 값(실측상 D-1 관측)이고, 예산·확장검색은 스냅샷 시작 몇 분 뒤 P3 GET
+    # 값이다. 둘 다 additive nullable — 구 행은 NULL이고 bm_diff가 synced_at으로 폴백(종전 동작
+    # 그대로, backfill 불필요).
+    entity_observed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)  # bid_amt/status/name/keyword_* 관측 시각(=NaverEntity.synced_at 복사, ★KST naive)
+    p3_observed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)  # daily_budget/extended_search 관측 시각(P3 GET 직후 kst_now, ★KST naive)
 
 
 class NaverAgencyOp(Base):

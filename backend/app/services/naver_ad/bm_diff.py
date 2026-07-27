@@ -11,10 +11,16 @@
 #   (b) 대조해도 action 종류·시간창만 봤기 때문에, D-NAO-92로 optimizer=none이 된 03 캠페인의
 #   우리 변경 7건이 전부 "대행사 조작"으로 기록됐다(실측). 이제 optimizer와 무관하게 모든 op에
 #   대해 "우리 실집행 after 값과 일치하는가"를 먼저 검사한다. 시간창 앵커도 kst_now가 아니라
-#   **그 날 스냅샷의 관측 시각(synced_at)**이다 — 과거 날짜 리플레이가 같은 결과를 내야 하고
+#   **그 날 스냅샷에 저장된 관측 시각**이다 — 과거 날짜 리플레이가 같은 결과를 내야 하고
 #   (멱등·리플레이 계약), 스냅샷 이후에 일어난 우리 쓰기는 이 diff에 반영될 수 없기 때문이다.
 #   억제가 과하지 않도록 세 겹의 브레이크를 둔다: 값 일치 필수 · 외부 귀속 기록
 #   (external_bid_change 등) 우선 · 되돌림(우리 최종값에서 이탈) 판별.
+#
+# ★op별 창 앵커(D-NAO-93): 상한을 필드 출처별·**행별** 관측 시각으로 나눈다 — 입찰·상태·키워드는
+#   그 행의 entity_observed_at(entity_sync 관측), 예산·확장검색은 그 행의 p3_observed_at(P3 GET).
+#   synced_at 하나로 잡던 구 코드는 그 차이만큼 미탐(entity 밴드가 ~24h 과대)·오탐(p3 밴드가 몇 분
+#   과소)을 남겼다. P3는 캠페인별 순차 GET이라 전역 max로 뭉치는 것도 금지(codex[P1]).
+#   구 스냅샷 행(두 컬럼 NULL)은 synced_at 폴백 — 종전 동작 그대로. §_window 참조.
 from __future__ import annotations
 
 import json
@@ -89,6 +95,10 @@ def _op(row, op_type: str, *, before, after, magnitude, force_exc: bool = False)
         "after_value": None if after is None else str(after),
         "magnitude": magnitude,
         "force_exc": force_exc,
+        # ★이 행의 필드 출처별 관측 시각(D-NAO-93) — 창 상한을 **행별로** 유도한다(전역 max 금지:
+        # P3는 캠페인별 순차 GET이라 먼저 관측된 행에 늦은 시각을 쓰면 밴드가 되살아난다).
+        "entity_observed_at": getattr(row, "entity_observed_at", None),
+        "p3_observed_at": getattr(row, "p3_observed_at", None),
     }
 
 
@@ -224,39 +234,90 @@ class _ChangeRec(NamedTuple):
     after_value: str | None
 
 
-class _Window(NamedTuple):
-    """change_log 조회·매칭 창. 앵커는 D 스냅샷의 관측 시각 — kst_now 금지(리플레이 멱등, §9-1).
+class _Band(NamedTuple):
+    """한 관측 앵커에서 파생된 change_log 조회·매칭 창.
 
-    until = D 스냅샷 synced_at. echo_from = until − 3일, ours_from = until − 48h."""
+    until = 그 필드군의 관측 시각. echo_from = until − 3일, ours_from = until − 48h."""
 
     echo_from: datetime
     ours_from: datetime
     until: datetime
 
 
-def _window(d: date, curr: dict) -> _Window:
-    """op_date d의 change_log 조회창.
+# op_type → 그 op의 상한으로 쓸 **행 자신의** 관측 시각 컬럼. 여기 없는 op_type(구조
+# add/remove·주간 deep negative_*·creative_change)은 fallback 밴드(스냅샷 복사 시각) 유지 —
+# 주간 deep은 별도 레인(일요일 GET)이라 이 수정의 대상이 아니다.
+_OP_STAMP = {
+    "bid_change": "entity_observed_at",
+    "status_flip": "entity_observed_at",
+    "keyword_add": "entity_observed_at",
+    "keyword_remove": "entity_observed_at",
+    "budget_change": "p3_observed_at",
+    "extended_toggle": "p3_observed_at",
+}
 
-    ★상한은 D 스냅샷이 실제로 관측한 시각(synced_at의 최대값, 보통 07:37 KST)이다.
-    "D 종료(D+1 00:00)"로 잡으면 스냅샷 이후(예: 같은 날 20시)의 우리 쓰기가 **아직 이 diff에
-    반영될 수 없는데도** 매칭 후보가 되어, 값이 우연히 겹치는 대행사 조작을 소급해 지운다
-    (codex[P1] R1). synced_at은 스냅샷 행에 저장된 값이라 리플레이해도 같다 — 실행 시각
-    의존이 없다. 스냅샷이 비었거나 synced_at이 전부 NULL이면 D+1 00:00로 폴백(bm_snapshot이
-    전 행에 kst_now를 명시 주입하므로 curr가 빈 경우 외엔 도달하지 않고, 그때는 값 변화 op
-    자체가 없다).
 
-    ★알려진 잔여 오차(codex[P1] R2, 수용·미해결): synced_at은 스냅샷 **복사 시각**이지 필드별
-    관측 시각이 아니다. 입찰·상태는 앞선 07:35 entity_sync가 본 값이고(=07:35~07:37 사이의 우리
-    쓰기는 반영 안 됐는데 창 안), 예산·확장검색 GET은 07:37 직후에 돈다(=그 몇 분 사이 쓰기는
-    반영됐는데 창 밖). 두 밴드 모두 우리 쓰기 레인(시간당 :20 · 일 08:50)과 겹치지 않아 현재
-    스케줄에선 비어 있다. 정확히 닫으려면 스냅샷에 필드별 관측 시각을 저장해야 한다(스키마
-    변경 — 이 수정의 스코프 밖)."""
-    stamps = [r.synced_at for r in curr.values() if getattr(r, "synced_at", None) is not None]
-    until = max(stamps) if stamps else datetime.combine(d + timedelta(days=1), time.min)
-    return _Window(
+class _Window(NamedTuple):
+    """change_log 적재창 + op별 밴드 해석기. 앵커는 전부 스냅샷 **저장값** — kst_now 금지
+    (리플레이 멱등, §9-1).
+
+    fallback = 스냅샷 복사 시각(synced_at) 밴드 — 구조·주간 deep op와, 관측 시각이 NULL인 구
+    행의 폴백. load_from/load_until은 전 op 밴드를 덮는 최광 창(적재 1회용)."""
+
+    fallback: _Band
+    load_from: datetime
+    load_until: datetime
+
+    def band(self, op: dict) -> _Band:
+        """이 op의 창 — **그 op가 나온 스냅샷 행 자신의** 관측 시각이 상한(없으면 fallback)."""
+        stamp = _OP_STAMP.get(op["op_type"])
+        at = op.get(stamp) if stamp else None
+        return _band(at) if at is not None else self.fallback
+
+
+def _max_stamp(curr: dict, attr: str) -> datetime | None:
+    """스냅샷 행들의 attr 최대값(전부 NULL이면 None)."""
+    stamps = [s for r in curr.values() if (s := getattr(r, attr, None)) is not None]
+    return max(stamps) if stamps else None
+
+
+def _band(until: datetime) -> _Band:
+    return _Band(
         echo_from=until - timedelta(days=ECHO_LOOKBACK_D),
         ours_from=until - timedelta(hours=OURS_MATCH_WINDOW_H),
         until=until,
+    )
+
+
+def _window(d: date, curr: dict) -> _Window:
+    """op_date d의 change_log 적재창 + 폴백 밴드. 실제 판정 상한은 op별(_Window.band).
+
+    "D 종료(D+1 00:00)"로 잡으면 스냅샷 이후(예: 같은 날 20시)의 우리 쓰기가 **아직 이 diff에
+    반영될 수 없는데도** 매칭 후보가 되어, 값이 우연히 겹치는 대행사 조작을 소급해 지운다
+    (codex[P1] R1). 앵커는 전부 스냅샷 행에 저장된 값이라 리플레이해도 같다 — 실행 시각
+    의존이 없다.
+
+    ★D-NAO-93: 상한을 필드 출처별·**행별**로 나눈다. 입찰·상태·키워드집계는 앞선 entity_sync가
+    관측한 값이므로 그 행의 entity_observed_at(실측상 D-1 07:35 — bm 스냅샷 07:37보다
+    entity_sync 커밋이 늦는 경합), 예산·확장검색은 스냅샷이 도는 중 P3 GET이 관측하므로 그 행의
+    p3_observed_at을 쓴다. P3는 캠페인별 순차 GET이라 행마다 시각이 다르다 — 전역 max로 뭉치면
+    먼저 관측된 행에 "반영 안 됐는데 창 안" 밴드가 되살아난다(codex[P1]).
+    행 값이 NULL인 구 행은 synced_at 폴백 → 종전 동작 그대로. 그것도 없으면 D+1 00:00 폴백
+    (curr가 빈 경우 외엔 도달하지 않고, 그때는 값 변화 op 자체가 없다).
+
+    ★알려진 잔여 오차: ①entity_observed_at은 entity_sync **런 시작 시각**이라 그 런이 도는
+    동안(분 단위)의 우리 쓰기와는 여전히 어긋날 수 있다. ②주간 deep 필드(negative_*·
+    creative_change)는 일요일 별도 레인이 채우므로 관측 시각을 따로 두지 않았다 — 종전대로
+    fallback 밴드. ③구 행은 NULL → synced_at 폴백이라 이 정밀화가 소급 적용되지 않는다."""
+    fallback_at = _max_stamp(curr, "synced_at") or datetime.combine(d + timedelta(days=1), time.min)
+    # 적재창은 **모든 행·모든 앵커**의 상한을 덮어야 한다(행별 밴드가 갈라지므로 최소~최대 전부).
+    untils = [fallback_at]
+    for attr in dict.fromkeys(_OP_STAMP.values()):
+        untils += [s for r in curr.values() if (s := getattr(r, attr, None)) is not None]
+    return _Window(
+        fallback=_band(fallback_at),
+        load_from=min(untils) - timedelta(days=ECHO_LOOKBACK_D),
+        load_until=max(untils),
     )
 
 
@@ -346,8 +407,9 @@ def _load_change_logs(db: Session, ops: list[dict], win: _Window) -> dict[str, l
     """이번 diff에 등장한 **전체** 엔티티의 우리 실집행 change_log(dry_run=False)를 적재.
 
     ★optimizer='ours' 한정을 걷어낸 것이 이번 수정의 핵심(구 코드는 optimizer=none으로 바뀐
-    캠페인의 우리 변경을 대조조차 못 했다). 하루 diff 건수라 소량이고, 조회창 하한(echo_from)을
+    캠페인의 우리 변경을 대조조차 못 했다). 하루 diff 건수라 소량이고, 조회창 하한(load_from)을
     SQL에서 걸어 바운드한다. entity_id는 IN 절 상한 방어로 분할 조회.
+    적재는 **전 밴드를 덮는 가장 넓은 창**으로 1회 — 밴드별 좁힘은 판정부(_in)에서 한다.
 
     반환 키는 entity_id — change_log.entity_type은 proposal.target_type 기반이라 스냅샷 grain
     표기와 어긋날 수 있고, 네이버 id는 타입 접두사(cmp-/grp-/nkw-/nad-)로 전역 유일하다.
@@ -364,8 +426,8 @@ def _load_change_logs(db: Session, ops: list[dict], win: _Window) -> dict[str, l
             .filter(
                 NaverChangeLog.dry_run.is_(False),
                 NaverChangeLog.entity_id.in_(ids[i:i + _ID_CHUNK]),
-                NaverChangeLog.changed_at >= win.echo_from,
-                NaverChangeLog.changed_at < win.until,
+                NaverChangeLog.changed_at >= win.load_from,
+                NaverChangeLog.changed_at <= win.load_until,  # ★상한 닫힘 — 관측과 동시각인 외부 귀속 로그를 실어야 veto가 산다(codex[P1])
             )
             .all()
         )
@@ -379,6 +441,17 @@ def _load_change_logs(db: Session, ops: list[dict], win: _Window) -> dict[str, l
 def _in(at: datetime | None, lo: datetime, hi: datetime) -> bool:
     """창 [lo, hi) 포함 여부. changed_at NULL은 판정 불가 → False."""
     return at is not None and lo <= at < hi
+
+
+def _in_closed(at: datetime | None, lo: datetime, hi: datetime) -> bool:
+    """창 [lo, hi] 포함 여부(**상한 닫힘**) — 외부 귀속 증거 전용.
+
+    ★codex[P1]: entity_sync는 external_* 로그의 changed_at과 NaverEntity.synced_at에 같은 now를
+    기록한다. 상한이 그 synced_at(=entity_observed_at)인데 반개구간으로 보면, **바로 그 관측이
+    남긴 외부 귀속 증거**가 경계에서 탈락한다 → veto가 사라져, 과거 우리 쓰기의 after가 우연히
+    같으면 실제 대행사 변경이 echo로 오억제된다. 우리 쓰기(mine)는 반개구간 유지 — 관측과
+    동시각인 우리 쓰기가 그 관측에 반영됐다는 보장이 없어 보수적으로 제외한다."""
+    return at is not None and lo <= at <= hi
 
 
 def _is_our_echo(op: dict, logs: dict, win: _Window) -> bool:
@@ -408,19 +481,20 @@ def _is_our_echo(op: dict, logs: dict, win: _Window) -> bool:
     if not ours_actions:
         return False
     ext_actions = _EXTERNAL_ACTION_MATCH.get(op["op_type"], frozenset())
+    band = win.band(op)  # 이 행이 그 필드를 실제 관측한 시각 기준 창(D-NAO-93)
 
     mine: list[tuple[datetime, str, str | None]] = []  # (changed_at, after, before)
     external: list[tuple[datetime, str]] = []
     for rec in logs.get(op["entity_id"], ()):
-        if not _in(rec.changed_at, win.echo_from, win.until):
-            continue
         after = extract(_json_dict(rec.after_value))
         if after is None:
             continue
         if rec.action in ours_actions:
-            mine.append((rec.changed_at, after, extract(_json_dict(rec.before_value))))
+            if _in(rec.changed_at, band.echo_from, band.until):  # 우리 쓰기 = 반개구간
+                mine.append((rec.changed_at, after, extract(_json_dict(rec.before_value))))
         elif rec.action in ext_actions:
-            external.append((rec.changed_at, after))
+            if _in_closed(rec.changed_at, band.echo_from, band.until):  # 외부 증거 = 상한 닫힘
+                external.append((rec.changed_at, after))
 
     hits = [t for t, v, _ in mine if _same_after(op["after_value"], v)]
     if not hits:
@@ -453,10 +527,11 @@ def _matches_our_write(op: dict, logs: dict, win: _Window) -> bool:
     actions = _OURS_ACTION_MATCH.get(op["op_type"])
     if not actions or op["op_type"] in _ECHO_AFTER:
         return False  # 우리가 API로 안 쓰는 종류·값 비교 가능한 종류 → 이 경로 사용 안 함
+    band = win.band(op)
     for rec in logs.get(op["entity_id"], ()):
         if rec.entity_type != op["entity_type"]:
             continue
-        if rec.action in actions and _in(rec.changed_at, win.ours_from, win.until):
+        if rec.action in actions and _in(rec.changed_at, band.ours_from, band.until):
             return True
     return False
 
@@ -498,8 +573,8 @@ def detect_agency_ops(db: Session, *, op_date: date | None = None) -> dict:
 
     bootstrap 가드: D-1 스냅샷이 없으면 전건 add 폭주를 막기 위해 스킵. 멱등: 같은 op_date
     기존 이벤트를 삭제 후 재생성(결정적이라 재도출=동일 결과, §9-1 병존 정책). change_log
-    대조창은 D 스냅샷 관측 시각(synced_at) 앵커라 과거 날짜 리플레이도 같은 결과를 낸다
-    (kst_now는 detected_at 기록에만 쓴다).
+    대조창은 D 스냅샷에 저장된 관측 시각 앵커(op_type별, §_window)라 과거 날짜 리플레이도 같은
+    결과를 낸다(kst_now는 detected_at 기록에만 쓴다).
     """
     d = op_date or kst_today()
     prev = _snapshot_map(db, d - timedelta(days=1))
