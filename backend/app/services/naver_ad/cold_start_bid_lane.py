@@ -258,14 +258,20 @@ def run_cold_start_lane(
             proposal_type=PROPOSAL_TYPE_COLD, target_type="ad", target_id=c["ad_id"],
             campaign_id=c["campaign_id"], adgroup_id=c["adgroup_id"],
             rationale=f"{RATIONALE_PREFIX} {decision['reason']}",
-            # ★리뷰 P1-3: 상한을 기계판독 마커로 실어 보낸다. bid_up_cold는 ±15% 완전 면제라
-            #   이 상한이 유일한 가격 브레이크이고, harness가 쓰기 직전 이 마커로 재검증한다
-            #   (레인 계산을 불신하는 규약 — 탐색 explore_ceiling과 동형). 마커 없으면 fail-closed.
+            # ★리뷰 P1-3/P2-B: 상한을 기계판독 마커로 실어 보낸다. bid_up_cold는 ±15% 완전
+            #   면제라 이 상한이 유일한 가격 브레이크이고, harness가 쓰기 직전 이 마커로
+            #   재검증한다(레인 계산을 불신하는 규약 — 탐색 explore_ceiling과 동형).
+            #   ★마커에 담는 값은 **경제 상한(ceiling_cpc)** 이지 target_bid가 아니다.
+            #     첫 판은 target_bid를 담았는데, target_bid = min(상한, 시장가)이므로 경계 검사
+            #     `target_bid > ceiling`이 `X > X` = **항상 False**인 동어반복이었다(리뷰 P2-B).
+            #     그러면 게이트가 실제로 거르는 것은 "마커 유무"뿐이고 레인의 클램프는 아무것도
+            #     재검증되지 않는다. 상한을 담아야 "레인이 상한을 제대로 씌웠나"가 실질 단언이 된다
+            #     (탐색도 `min(target, ceiling)` **뒤에** ceiling을 담는다 — 서로 다른 양).
             expected_effect=encode_cold_ceiling(
                 "콜드 소재 첫 입찰 — 눈먼 래더(+10%/BM 프라이어) 대신 npla-estimate 실측 시장가와 "
                 "이익 상한 중 낮은 쪽으로 직행. 되돌림=기존 스톱로스/BEP/손실고삐 백스톱, "
                 "이후 입찰은 기존 레인(순위 서보·탐색UP)이 인수.",
-                decision["target_bid"],
+                decision["ceiling_cpc"],
             ),
             status="approved", target_bid=decision["target_bid"],
             approval_source=APPROVAL_SOURCE_COLD,

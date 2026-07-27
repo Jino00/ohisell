@@ -1247,6 +1247,10 @@ def _execute_update_bid(db: Session, proposal: NaverProposal, now: datetime) -> 
     #   expected_effect 마커로 재검증) — 면제가 무방비를 뜻하지 않는다.
     #   면제는 탐색과 동일하게 **타입 ∧ 승인원**을 함께 잠근다(면제가 승인원과 분리돼 다른
     #   target_type에서 새는 결함 클래스 원천 차단).
+    #   ★면제되는 것은 "컨텍스트 **완전성 요구**" 하나뿐이다 — 검사 자체는 그대로 돈다.
+    #     라이브 확인(리뷰 2R): 표본 없는 콜드는 통과하되, 무전환 지출 큰 그룹은 **스톱로스가**,
+    #     적자 그룹(보정ROAS<target)은 **BEP 하한이** 그대로 차단한다. 단 target_roas가 미해석
+    #     (None)이면 BEP 검사는 fail-open이다(guardrail_gate 성질 — 탐색도 동일).
     _cold_exempt = (
         proposal.proposal_type in COLD_START_STEP_TYPES
         and proposal.approval_source == APPROVAL_SOURCE_COLD
@@ -1710,9 +1714,17 @@ def real_write_blocker(proposal: NaverProposal) -> str | None:
                     f"콜드 첫 입찰은 소재(ad) 전용 — target_type={proposal.target_type} "
                     "(그룹/키워드 grain은 소재 UP 경계·상한 게이트 우회 경로)"
                 )
-            if decode_cold_ceiling(proposal.expected_effect) is None:
+            _cold_ceiling = decode_cold_ceiling(proposal.expected_effect)
+            if _cold_ceiling is None:
                 return (
                     "콜드 상한 마커 부재/오염 — ±15% 완전 면제 타입이라 상한 없이 실행 금지"
+                    "(실행 버튼 비활성, D-NAO-96)"
+                )
+            # 리뷰 P3: 상한 초과 정적 검사도 여기 둔다(탐색엔 있는데 CS엔 없었다) — 없으면
+            # 콘솔엔 "실행 가능"으로 보이다가 클릭하면 executor가 죽인다(UI 거짓말).
+            if proposal.target_bid is not None and proposal.target_bid > _cold_ceiling:
+                return (
+                    f"콜드 상한 초과 — target_bid={proposal.target_bid}원 > 상한 {_cold_ceiling}원"
                     "(실행 버튼 비활성, D-NAO-96)"
                 )
     elif action == "set_user_lock":

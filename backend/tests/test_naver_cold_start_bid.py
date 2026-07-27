@@ -556,15 +556,45 @@ def test_lane_real_execution_reaches_writer(db, writer_stub):
     assert p.executed_change_log_id is not None
 
 
-def test_ceiling_marker_is_embedded_and_enforced(db, writer_stub):
-    """★P1-3 회귀: 상한 마커가 제안에 실리고, 쓰기 경계가 그 상한을 강제한다."""
+def test_ceiling_marker_carries_ceiling_not_target_bid(db, writer_stub):
+    """★P2-B 회귀: 마커에는 **경제 상한**이 담겨야 한다(target_bid가 아니라).
+
+    target_bid = min(상한, 시장가)이므로 마커에 target_bid를 담으면 쓰기 경계 검사
+    `target_bid > ceiling`이 `X > X` = 항상 False인 **동어반복**이 된다 — 게이트가 실제로
+    거르는 건 '마커 유무'뿐이고 레인의 클램프는 아무것도 재검증되지 않는다."""
     from app.models import NaverProposal
     from app.services.naver_ad.bid_step_types import decode_cold_ceiling
     _seed(db)
-    _market_rows(db)
+    _market_rows(db)  # 3위 시장가 900, 상한 1390 → target_bid=900
     lane.run_cold_start_lane(db, dry_run=False, today=TODAY)
     p = db.query(NaverProposal).one()
-    assert decode_cold_ceiling(p.expected_effect) == p.target_bid
+    marker = decode_cold_ceiling(p.expected_effect)
+    assert marker == 1390, marker          # 경제 상한
+    assert p.target_bid == 900             # min(상한, 시장가)
+    assert marker != p.target_bid          # ★동어반복이 아니어야 한다
+    assert p.target_bid <= marker          # 경계 검사가 실질 단언
+
+
+def test_lane_clamp_bug_would_be_caught_by_write_boundary(db, writer_stub):
+    """★P2-B의 목적: '레인이 상한을 잘못 씌웠다'를 쓰기 경계가 잡아낸다.
+
+    레인 버그를 흉내내 target_bid만 상한 위로 올린 제안을 만들면 경계가 죽여야 한다."""
+    from app.models import NaverProposal
+    from app.services.naver_ad import naver_execution_harness as h
+    from app.services.naver_ad.bid_step_types import encode_cold_ceiling
+    _seed(db)
+    p = NaverProposal(
+        proposal_type="bid_up_cold", target_type="ad", target_id=AD, campaign_id=CID,
+        adgroup_id=GID, rationale="레인 클램프 버그 흉내",
+        expected_effect=encode_cold_ceiling("x", 1390),  # 상한 1390
+        status="approved", target_bid=3000,               # 그런데 3000을 쓰려 함
+        approval_source=lane.APPROVAL_SOURCE_COLD,
+    )
+    db.add(p); db.commit()
+    assert h.real_write_blocker(p) is not None      # 콘솔에도 비활성으로 보여야 한다
+    with pytest.raises(Exception):
+        h.execute(db, p.id, dry_run=False)
+    assert writer_stub == []
 
 
 def test_cold_without_ceiling_marker_is_fail_closed(db, writer_stub):
