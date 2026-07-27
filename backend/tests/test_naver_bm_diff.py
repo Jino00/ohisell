@@ -16,7 +16,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.database import Base
 from app.models import NaverAgencyOp, NaverChangeLog, NaverEntitySnapshot
-from app.services.naver_ad.bm_diff import detect_agency_ops
+from app.services.naver_ad.bm_diff import ECHO_LOOKBACK_D, _window, detect_agency_ops
 from app.utils.kst import kst_now
 
 D_PREV = date(2026, 7, 20)  # D-1
@@ -30,6 +30,7 @@ OUT_ALL = datetime(2026, 7, 17, 12, 0)       # 두 창 모두 밖
 # ★D-NAO-93 필드 출처별 관측 시각(실측: entity_sync 커밋이 bm 스냅샷보다 늦어 D 스냅샷의
 # 입찰·상태는 D-1 07:35 관측값 / 예산·확장검색은 스냅샷 시작 몇 분 뒤 P3 GET 관측값)
 ENTITY_OBS = datetime(2026, 7, 20, 7, 35)    # D 스냅샷의 entity 관측 시각
+ENTITY_OBS_LATE = datetime(2026, 7, 21, 7, 38)  # 스냅샷 복사(07:37)보다 늦은 관측 = load_until 경계
 P3_OBS = datetime(2026, 7, 21, 7, 42)        # D 스냅샷의 P3 GET 관측 시각
 IN_ENTITY_LAG = IN_OURS                      # entity 관측 후 ~ 스냅샷 복사 전 = 구 코드의 미탐 밴드
 IN_P3_LAG = datetime(2026, 7, 21, 7, 40)     # 스냅샷 복사 후 ~ P3 GET 전 = 구 코드의 오탐 밴드
@@ -686,3 +687,62 @@ def test_external_log_at_observation_boundary_still_vetoes(db):
 
     detect_agency_ops(db, op_date=D_CURR)
     assert ("bid_change", "grp-a") in _ops(db)
+
+
+def test_external_log_at_load_until_boundary_is_loaded(db):
+    """★codex[P2]: 적재창 상한(load_until)도 닫혀야 한다. 밴드 상한이 곧 load_until인 경계
+    (entity 관측이 스냅샷 복사보다 늦고 P3 스탬프가 없는 날 — bm_snapshot은 now를 NaverEntity
+    조회 **전에** 잡으므로 그 틈에 entity_sync가 커밋하면 발생)에서 그 시각의 외부 귀속 로그가
+    SQL 적재부터 탈락하면, _in_closed까지 갈 기회조차 없이 veto가 사라진다."""
+    _snap(db, D_PREV, "campaign", "cmp-a", campaign_type="WEB_SITE", optimizer="none")
+    _snap(db, D_PREV, "adgroup", "grp-a", campaign_id="cmp-a", optimizer="none", bid_amt=1000)
+    _snap(db, D_CURR, "campaign", "cmp-a", campaign_type="WEB_SITE", optimizer="none",
+          entity_observed_at=ENTITY_OBS_LATE)
+    _snap(db, D_CURR, "adgroup", "grp-a", campaign_id="cmp-a", optimizer="none", bid_amt=1500,
+          entity_observed_at=ENTITY_OBS_LATE)  # > synced_at(07:37) → load_until = 이 값
+    _log(db, "grp-a", "update_bid", {"bidAmt": 1500}, at=IN_ECHO_ONLY)
+    _log(db, "grp-a", "external_bid_change", {"bidAmt": 1500}, at=ENTITY_OBS_LATE)  # == load_until
+    db.commit()
+
+    detect_agency_ops(db, op_date=D_CURR)
+    assert ("bid_change", "grp-a") in _ops(db)
+
+
+def test_deleted_zombie_stamp_does_not_widen_load_window(db):
+    """★codex[P2]: entity_sync는 deleted 전이 때 synced_at을 갱신하지 않는데 bm_snapshot은
+    deleted 행도 스냅샷한다 → entity_observed_at이 수개월 전인 좀비가 curr에 남는다(실측 82일).
+    그 행은 remove op(=fallback 밴드)만 만들어 판정 기여가 0인데, 적재창 하한이 그걸 집으면
+    change_log를 수개월 스캔한다(entity_id 인덱스 없음)."""
+    _snap(db, D_CURR, "adgroup", "grp-live", campaign_id="cmp-a", optimizer="none",
+          bid_amt=1000, entity_observed_at=ENTITY_OBS)
+    _snap(db, D_CURR, "adgroup", "grp-zombie", campaign_id="cmp-a", optimizer="none",
+          status="deleted", entity_observed_at=datetime(2026, 4, 30, 7, 35))  # 82일 전 좀비
+    db.commit()
+
+    curr = {
+        (r.entity_type, r.entity_id): r
+        for r in db.query(NaverEntitySnapshot).filter(
+            NaverEntitySnapshot.snapshot_date == D_CURR).all()
+    }
+    win = _window(D_CURR, curr)
+    assert win.load_from == ENTITY_OBS - timedelta(days=ECHO_LOOKBACK_D)  # 좀비 스탬프 무시
+
+
+def test_band_until_is_clamped_into_load_window(db):
+    """★codex[P2]: op은 prev(D-1) 행 스탬프를 실을 수 있는데(_detect_removed) _window는 curr만
+    스캔한다. 지금은 remove가 _OP_STAMP에 없어 도달하지 않지만, 미래에 누가 넣으면 밴드 상한이
+    적재창 밖으로 나가 '적재되지 않은 구간을 판정'하게 되어 조용히 틀린다 — 구조로 클램프한다."""
+    _snap(db, D_CURR, "adgroup", "grp-a", campaign_id="cmp-a", optimizer="none",
+          bid_amt=1000, entity_observed_at=ENTITY_OBS)
+    db.commit()
+    curr = {
+        (r.entity_type, r.entity_id): r
+        for r in db.query(NaverEntitySnapshot).filter(
+            NaverEntitySnapshot.snapshot_date == D_CURR).all()
+    }
+    win = _window(D_CURR, curr)
+
+    too_late = {"op_type": "bid_change", "entity_observed_at": win.load_until + timedelta(days=9)}
+    too_early = {"op_type": "bid_change", "entity_observed_at": win.load_from - timedelta(days=9)}
+    assert win.band(too_late).until == win.load_until
+    assert win.band(too_early).until == win.load_from

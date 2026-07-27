@@ -43,7 +43,14 @@ BUDGET_JITTER_PCT = 5.0     # |Δ%| < 5% = 예산 지터 무시
 BID_EXCEPTION_PCT = 20.0    # 입찰 |Δ%| ≥ 20% → is_exception
 BUDGET_EXCEPTION_PCT = 30.0  # 예산 |Δ%| ≥ 30% → is_exception
 OURS_MATCH_WINDOW_H = 48    # ours 자기변경 매칭 창(op_date 종료 기준 48h)
-ECHO_LOOKBACK_D = 3         # echo(지연 반영) 조회창 — 실측 지연 1~2일을 덮는 3일
+# echo(지연 반영) 조회창 — 실측 지연 1~2일을 덮는 3일.
+# ★D-NAO-93 이후 의미 변화(재캘리브레이션은 후속 과제 — 값 자체는 이번 스프린트에서 안 건드림):
+#   앵커가 synced_at(D 07:37)에서 **행별 관측 시각**(체이닝 전 데이터는 D-1 07:35)으로 당겨지며
+#   lookback 하단도 같이 밀렸다. 원리상 필요한 구간은 (직전 관측, 이번 관측] ≈ 24h이므로 3일은
+#   그만큼이 여유폭이고, 그 여유는 그대로 **미탐 표면**이다: 창 안 어딘가의 우리 옛 쓰기 값이
+#   우연히 스냅샷 after와 같으면 대행사 조작이 echo로 지워질 수 있다. 특히 budget_change는
+#   외부 귀속 기록(external_*)이 없어 veto 브레이크가 안 걸리고 인과 규칙(4)만 남는다.
+ECHO_LOOKBACK_D = 3
 _ID_CHUNK = 400             # change_log IN 절 분할(SQLite 바인딩 상한 방어)
 
 # op_type → 우리(ours)가 API로 쓰는 change_log.action 집합(매칭 대상). 여기 없는 op_type은
@@ -269,10 +276,18 @@ class _Window(NamedTuple):
     load_until: datetime
 
     def band(self, op: dict) -> _Band:
-        """이 op의 창 — **그 op가 나온 스냅샷 행 자신의** 관측 시각이 상한(없으면 fallback)."""
+        """이 op의 창 — **그 op가 나온 스냅샷 행 자신의** 관측 시각이 상한(없으면 fallback).
+
+        ★상한은 적재창 [load_from, load_until] 안으로 클램프한다. op은 prev(D-1) 행 스탬프를
+        실을 수 있는데(_detect_removed) _window는 curr만 스캔하므로, 그 스탬프가 상한이 되면
+        적재되지 않은 구간을 판정하게 되어 **조용히** 틀린다(적재 안 된 로그는 판정에서 통째로
+        사라짐 = 근거 없음 = echo 아님으로 흐름). 지금은 remove가 _OP_STAMP에 없어 도달하지
+        않지만, 미래에 누가 넣어도 깨지지 않도록 구조로 막는다."""
         stamp = _OP_STAMP.get(op["op_type"])
         at = op.get(stamp) if stamp else None
-        return _band(at) if at is not None else self.fallback
+        if at is None:
+            return self.fallback
+        return _band(min(max(at, self.load_from), self.load_until))
 
 
 def _max_stamp(curr: dict, attr: str) -> datetime | None:
@@ -311,9 +326,14 @@ def _window(d: date, curr: dict) -> _Window:
     fallback 밴드. ③구 행은 NULL → synced_at 폴백이라 이 정밀화가 소급 적용되지 않는다."""
     fallback_at = _max_stamp(curr, "synced_at") or datetime.combine(d + timedelta(days=1), time.min)
     # 적재창은 **모든 행·모든 앵커**의 상한을 덮어야 한다(행별 밴드가 갈라지므로 최소~최대 전부).
+    # ★deleted 행 제외: entity_sync는 deleted 전이 때 synced_at을 갱신하지 않는데 bm_snapshot은
+    # deleted 행도 스냅샷하므로, entity_observed_at이 수개월 전인 좀비가 curr에 남는다(실측 82일).
+    # 그 행은 remove op(=fallback 밴드)만 만들어 판정 기여가 0인데, min()이 그걸 집으면 적재창
+    # 하한이 수개월로 벌어져 change_log를 통째로 스캔한다(entity_id 인덱스 없음).
+    live = [r for r in curr.values() if (getattr(r, "status", "") or "") != "deleted"]
     untils = [fallback_at]
     for attr in dict.fromkeys(_OP_STAMP.values()):
-        untils += [s for r in curr.values() if (s := getattr(r, attr, None)) is not None]
+        untils += [s for r in live if (s := getattr(r, attr, None)) is not None]
     return _Window(
         fallback=_band(fallback_at),
         load_from=min(untils) - timedelta(days=ECHO_LOOKBACK_D),

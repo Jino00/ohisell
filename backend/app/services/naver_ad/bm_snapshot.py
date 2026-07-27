@@ -81,6 +81,7 @@ def _keyword_aggregates(entities: list[NaverEntity]) -> dict[str, tuple[int, int
 
 def _fetch_campaign_budgets(
     campaigns_full: list[dict] | None,
+    observed_at: datetime | None = None,
 ) -> tuple[dict[str, int | None], datetime | None, int]:
     """캠페인 dailyBudget(get_campaigns_full, +1 GET, Phase 3 일별) → campaign_id→daily_budget.
 
@@ -89,9 +90,13 @@ def _fetch_campaign_budgets(
     그대로 진행, §0 금지선 5).
     ★관측 시각(D-NAO-93)은 이 GET 반환 **직후** 1회 채취한다 — 뒤이어 도는 그룹별 GET 시각을
     캠페인 행에 찍으면 그 사이 우리 쓰기가 '반영 안 됐는데 창 안'이 된다(codex[P1]).
+    주입 경로는 observed_at으로 **그 데이터가 실제 관측된 시각**을 함께 넘길 수 있다. 미제공 시
+    호출 시점 kst_now()로 폴백 — 즉 "주입 시각 = 관측 시각"으로 간주한다(테스트는 무해하지만,
+    캐시·재사용 배선을 붙일 때 이걸 안 넘기면 밴드가 되살아난다).
     Returns: (campaign_id→daily_budget, 관측 시각|None, 실제 GET 호출 수)."""
     if campaigns_full is not None:
-        return {c["campaign_id"]: c.get("daily_budget") for c in campaigns_full}, kst_now(), 0
+        return ({c["campaign_id"]: c.get("daily_budget") for c in campaigns_full},
+                observed_at or kst_now(), 0)
     try:
         rows = get_campaigns_full()
     except Exception as e:  # noqa: BLE001 — Phase3 GET 실패가 SA-1 전체를 막지 않음
@@ -103,6 +108,7 @@ def _fetch_campaign_budgets(
 def _fetch_adgroup_dims(
     campaign_ids: list[str],
     adgroups_by_campaign: dict[str, list[dict]] | None,
+    observed_at: datetime | None = None,
 ) -> tuple[dict[str, dict], int]:
     """그룹별 daily_budget·extended_search(get_adgroups 확장, 캠페인당 +1 GET, Phase 3 일별).
 
@@ -110,7 +116,8 @@ def _fetch_adgroup_dims(
     소속 그룹은 이번 회차 NULL 유지). adgroups_by_campaign 주입 시 GET 생략(테스트/재사용).
     ★관측 시각(D-NAO-93)은 **캠페인별 GET 반환 직후** 채취해 그 캠페인 소속 그룹에만 찍는다 —
     순차 GET이라 먼저 관측된 캠페인에 마지막 시각을 찍으면 그 사이 우리 쓰기가 '반영 안 됐는데
-    창 안'이 된다(codex[P1]).
+    창 안'이 된다(codex[P1]). 주입 경로는 observed_at으로 그 데이터의 실제 관측 시각을 넘길 수
+    있고, 미제공 시 호출 시점 kst_now() 폴백(= "주입 시각 = 관측 시각" 간주, 위와 같은 규약).
     Returns: ({adgroup_id: {"daily_budget","extended_search","observed_at"}}, 실제 GET 호출 수)."""
     out: dict[str, dict] = {}
     get_count = 0
@@ -118,18 +125,19 @@ def _fetch_adgroup_dims(
         try:
             if adgroups_by_campaign is not None:
                 ags = adgroups_by_campaign.get(cid) or []
+                cid_observed_at = observed_at or kst_now()  # 주입: 넘어온 관측 시각(없으면 주입 시각)
             else:
                 ags = get_adgroups(cid)
                 get_count += 1
+                cid_observed_at = kst_now()  # 라이브: **이 캠페인** GET 직후
         except Exception as e:  # noqa: BLE001 — 캠페인 1건 GET 실패는 skip(§0 금지선 5)
             log.warning("[BM] SA-1 P3 그룹 확장차원 GET 실패(campaign=%s, skip): %s", cid, e)
             continue
-        observed_at = kst_now()
         for a in ags:
             out[a["adgroup_id"]] = {
                 "daily_budget": a.get("daily_budget"),
                 "extended_search": a.get("extended_search"),
-                "observed_at": observed_at,
+                "observed_at": cid_observed_at,
             }
     return out, get_count
 
@@ -188,6 +196,7 @@ def snapshot_entities(
     snapshot_date: date | None = None,
     campaigns_full: list[dict] | None = None,
     adgroups_by_campaign: dict[str, list[dict]] | None = None,
+    p3_observed_at: datetime | None = None,
 ) -> dict:
     """naver_entity를 읽어 캠페인·그룹 grain 스냅샷을 upsert(멱등, 일 1회).
 
@@ -201,6 +210,9 @@ def snapshot_entities(
     p3_observed_at=**그 행의** P3 GET 직후 시각(캠페인=예산 GET / 그룹=그 캠페인의 dims GET).
     P3는 캠페인별 순차 GET이라 행마다 시각이 다르다 — 전역 1개로 뭉치면 먼저 관측된 행에
     "아직 반영 안 됐는데 창 안"인 밴드가 그대로 재생산된다(codex[P1]).
+    ★주입(campaigns_full/adgroups_by_campaign) 시 p3_observed_at으로 **그 데이터가 실제 관측된
+    시각**을 함께 넘길 수 있다. 미제공이면 호출 시점 kst_now()로 폴백 = "주입 시각 = 관측 시각"
+    간주 — 캐시·재사용 배선을 붙이면서 이걸 안 넘기면 그 시차만큼 밴드가 되살아난다(codex[P2]).
     """
     sdate = snapshot_date or kst_today()
     now = kst_now()
@@ -208,11 +220,12 @@ def snapshot_entities(
     opt_map = _optimizer_map(db)
     kw_agg = _keyword_aggregates(entities)
 
-    budget_map, budget_at, n_budget_get = _fetch_campaign_budgets(campaigns_full)
+    budget_map, budget_at, n_budget_get = _fetch_campaign_budgets(campaigns_full, p3_observed_at)
     campaign_ids = [
         e.entity_id for e in entities if e.entity_type == "campaign" and e.status != "deleted"
     ]
-    adgroup_dims, n_adgroup_get = _fetch_adgroup_dims(campaign_ids, adgroups_by_campaign)
+    adgroup_dims, n_adgroup_get = _fetch_adgroup_dims(
+        campaign_ids, adgroups_by_campaign, p3_observed_at)
 
     existing = {
         (s.entity_type, s.entity_id): s

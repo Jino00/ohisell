@@ -328,6 +328,26 @@ def test_p3_observed_at_is_per_campaign_not_global(db, monkeypatch):
     assert rows[("adgroup", "grp-agency1")].p3_observed_at == datetime(2026, 7, 22, 7, 50)
 
 
+def test_injected_p3_observed_at_overrides_call_time(db):
+    """★codex[P2]: 주입 데이터는 언제 관측됐든 호출 시점이 찍혀 '반영 안 됐는데 창 안' 밴드를
+    부활시킬 수 있다 — p3_observed_at으로 실제 관측 시각을 함께 넘길 수 있어야 한다
+    (미제공 시 호출 시점 kst_now() 폴백 = '주입 시각 = 관측 시각' 규약)."""
+    _seed(db)
+    injected_at = datetime(2026, 7, 22, 6, 0)  # 스냅샷 실행보다 이른 실제 관측 시각
+    snapshot_entities(
+        db, snapshot_date=SDATE, p3_observed_at=injected_at,
+        campaigns_full=[{"campaign_id": "cmp-web", "daily_budget": 50000}],
+        adgroups_by_campaign={
+            "cmp-web": [{"adgroup_id": "grp-web1", "daily_budget": 20000, "extended_search": True}],
+        },
+    )
+    rows = _rows(db)
+
+    assert rows[("campaign", "cmp-web")].p3_observed_at == injected_at
+    assert rows[("adgroup", "grp-web1")].p3_observed_at == injected_at
+    assert rows[("campaign", "cmp-agency")].p3_observed_at is None  # 미관측은 그대로 NULL
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # Phase 3 — 주간 deep 차원(제외키워드·소재수) 테스트 (D-NAO-78, bm_deep 레인)
 # ══════════════════════════════════════════════════════════════════════════
