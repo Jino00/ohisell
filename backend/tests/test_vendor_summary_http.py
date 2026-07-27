@@ -262,6 +262,27 @@ def test_refresh_queue_bad_account_key_400(client, base, path, method):
     assert r.status_code == 400, r.text
 
 
+def test_vs_ingest_heartbeat_is_per_account(client):
+    """판매분석 ingest 성공 heartbeat도 계정별(codex R1 [P2]).
+
+    성공만 계정 무구분이면 WING2 push가 WING1 행에 last_success_at을 찍고 WING1의 실패 흔적까지
+    지운다 — 오픽스는 실제로 안 왔는데 배너·폴링은 '갱신됨'이라 말한다(신선도 위조).
+    """
+    hdr = {"X-Ingest-Token": _TOKEN}
+    y = _yesterday()
+    # WING1에 먼저 실패를 남긴다 — WING2 성공이 이걸 지우면 안 된다.
+    client.post(f"{_VS}/fetch-error?account_key=COUPANG_WING1", headers=hdr, json={"error": "boom"})
+    r = client.post(f"{_VS}/ingest", headers=hdr, json={
+        "account_key": "COUPANG_WING2",
+        "days": [{"date": y, "registration_type": "NORMAL", "gmv": 1000, "units_sold": 1}],
+    })
+    assert r.status_code == 200, r.text
+    assert client.get(f"{_VS}/refresh-status?account_key=COUPANG_WING2").json()["last_success_at"] is not None
+    st1 = client.get(f"{_VS}/refresh-status?account_key=COUPANG_WING1").json()
+    assert st1["last_success_at"] is None      # 남의 성공이 내 신선도가 되지 않는다
+    assert st1["last_error"] == "boom"         # 남의 성공이 내 실패 흔적을 지우지 않는다
+
+
 @pytest.mark.parametrize("base", [_RG, _VS])
 def test_fetch_error_is_per_account(client, base):
     """실패 보고도 계정별 — WING2 실패가 WING1 화면에 뜨면 원인 오진단."""

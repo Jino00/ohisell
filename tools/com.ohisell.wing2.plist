@@ -5,9 +5,11 @@
 <!--   (lock이 겹치면 한쪽 flock이 상대의 실행을 통째로 건너뛰게 한다). -->
 <!-- ★버튼 큐 자체도 계정 차원이라(2026-07-27) 이 인스턴스는 WING2 요청만 claim한다 — -->
 <!--   WING1의 '판매분석 갱신'·'RG 정산 갱신' 요청을 훔쳐갈 수 없다. -->
-<!-- 설치:  cp tools/com.ohisell.wing2.plist ~/Library/LaunchAgents/ -->
-<!--        launchctl unload ~/Library/LaunchAgents/com.ohisell.wing2.plist 2>/dev/null -->
-<!--        launchctl load ~/Library/LaunchAgents/com.ohisell.wing2.plist -->
+<!-- ★설치는 tools/install_local_runtime.sh 로만 한다(codex R1 [P1]): 이 파일은 템플릿이라 -->
+<!--   __PYTHON__/__SCRIPT__ 자리표시자를 품고 있다. 그대로 cp+load 하면 launchd가 실행 파일을 -->
+<!--   못 찾아 KeepAlive로 10초마다 재시도하는 크래시 루프가 된다. 스크립트가 치환·bootstrap까지 -->
+<!--   수행하며, ~/.ohisell_wing2_fetcher.json 이 있을 때만 이 잡을 설치한다. -->
+<!-- 설치:  bash tools/install_local_runtime.sh -->
 <!-- 코드 변경 후 재배포:  launchctl kickstart -k gui/$(id -u)/com.ohisell.wing2 -->
 <!-- 경로(python/스크립트)는 설치 전 실제 경로로 치환되어야 함. -->
 <!-- ~/.ohisell_wing2_fetcher.json 필수 항목: account_key=COUPANG_WING2, vendor_id=A01029796(오하이테크), -->

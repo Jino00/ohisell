@@ -208,27 +208,34 @@ export default function CommandCenter() {
     setRgRefreshing(true);
     setRgRefreshMsg("Mac에서 RG 정산 가져오는 중… (~30초, 계정 2곳)");
     try {
-      const results = await Promise.all(
-        // 한 계정의 요청 실패가 다른 계정 결과를 삼키면 안 된다 → 계정별로 catch.
-        RG_REFRESH_ACCOUNTS.map((a) =>
-          runRgRefreshForAccount(a.key).catch((e: any) => ({
-            done: false, failed: e?.message || "요청 실패",
-          })),
-        ),
-      );
-      // 하나라도 성공했으면 데이터가 들어온 것 → 현재 선택(selRef)으로 재조회(codex S3 P1).
-      if (results.some((r) => r.done)) {
-        const sel = selRef.current;
-        doFetch(sel.from, sel.to, sel.account);
-      }
-      setRgRefreshMsg(results.map((r, i) => {
-        const label = RG_REFRESH_ACCOUNTS[i].label;
-        if (r.done) return `✅ ${label} 완료`;
-        if (r.failed) return `❌ ${label} 실패(${r.failed})`;
-        return `⚠️ ${label} 응답 없음`;  // Mac 꺼짐·데몬 미설치·첫 로그인 전
+      // ★계정별로 '정착하는 즉시' 반영한다(codex R1 [P2]): Promise.all 결과를 한꺼번에 쓰면
+      //   한쪽 데몬이 꺼져 있을 때 이미 끝난 쪽의 데이터·문구가 상대의 215초 타임아웃까지
+      //   인질로 잡힌다(오픽스 30초 완료 → 3분 넘게 화면에 아무것도 안 뜸).
+      const results: ({ done: boolean; failed: string | null } | null)[] =
+        RG_REFRESH_ACCOUNTS.map(() => null);
+      const render = () => setRgRefreshMsg(RG_REFRESH_ACCOUNTS.map((a, i) => {
+        const r = results[i];
+        if (!r) return `⏳ ${a.label} 진행 중`;      // 아직 정착 안 된 계정
+        if (r.done) return `✅ ${a.label} 완료`;
+        if (r.failed) return `❌ ${a.label} 실패(${r.failed})`;
+        return `⚠️ ${a.label} 응답 없음`;            // Mac 꺼짐·데몬 미설치·첫 로그인 전
       }).join(" · "));
+      await Promise.all(
+        // 한 계정의 요청 실패가 다른 계정 결과를 삼키면 안 된다 → 계정별로 catch.
+        RG_REFRESH_ACCOUNTS.map(async (a, i) => {
+          results[i] = await runRgRefreshForAccount(a.key).catch((e: any) => ({
+            done: false, failed: e?.message || "요청 실패",
+          }));
+          // 성공한 계정의 데이터는 곧바로 반영 — 현재 선택(selRef)으로 재조회(codex S3 P1).
+          if (results[i]!.done) {
+            const sel = selRef.current;
+            doFetch(sel.from, sel.to, sel.account);
+          }
+          render();
+        }),
+      );
       // 전건 성공일 때만 자동 소거 — 실패/무응답 문구는 남겨서 Jino가 보게 한다.
-      if (results.every((r) => r.done)) setTimeout(() => setRgRefreshMsg(null), 4000);
+      if (results.every((r) => r?.done)) setTimeout(() => setRgRefreshMsg(null), 4000);
     } catch (e: any) {
       setRgRefreshMsg("❌ 갱신 요청 실패: " + (e?.message || ""));
     } finally {

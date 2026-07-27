@@ -66,9 +66,14 @@ def _ensure_state_row(db: Session, account_key: str = "COUPANG_WING1") -> Coupan
     return row
 
 
-def _mark_heartbeat(db: Session) -> None:
-    """push 성공 시각 갱신(=배너 staleness 기준). ingest 성공마다 호출."""
-    row = _ensure_state_row(db)
+def _mark_heartbeat(db: Session, account_key: str = "COUPANG_WING1") -> None:
+    """push 성공 시각 갱신(=배너 staleness 기준). ingest 성공마다 호출.
+
+    ★계정별(codex R1 [P2], 2026-07-27): 실패 보고(mark_fetch_error)만 계정 차원이고 성공은 아니면
+    비대칭이 생긴다 — WING2 ingest(예: wing2 인스턴스의 1회 실행·cmd_login 직후 push)가 WING1 행에
+    성공을 찍고 WING1의 실패 흔적까지 지운다. 오픽스는 실제로 안 왔는데 배너는 '신선'이라 말한다.
+    """
+    row = _ensure_state_row(db, account_key)
     row.status = "green"
     row.last_error = None
     row.last_error_at = None  # 성공 = 실패 흔적 클리어(안 지우면 오래된 실패가 화면에 남는다)
@@ -141,7 +146,7 @@ def ingest_vendor_summary(db: Session, account_key: str, rows: list[dict]) -> di
         )
         n += 1
     db.commit()
-    _mark_heartbeat(db)
+    _mark_heartbeat(db, account_key)  # ★적재한 계정의 행에 찍는다(codex R1 [P2] — 남의 신선도 위조 방지)
     log.info("vendor-summary ingest: account=%s rows=%d", account_key, n)
     return {"account_key": account_key, "ingested": n}
 
