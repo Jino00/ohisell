@@ -216,6 +216,15 @@ supervisor와 다른 점: **되살아나지 않는다** — Jino가 닫으면 �
 | `_LIVE_OWNERS` + SIGTERM/SIGHUP·atexit 회수(재진입 가드 포함) | 파이썬 기본 SIGTERM은 `finally`를 **실행하지 않는다.** 설치 스크립트는 배포마다 poll 데몬을 bootout하므로 fetch 중 재설치하면 데몬만 죽고 Chrome이 남고, 다음 데몬은 그걸 adopt해 닫을 책임을 갖지 않는다 → 버튼-only인데 창 영구 잔류. |
 | rocket에도 `chrome-supervise` no-op 스텁 | ★실측: repo엔 없지만 **Jino Mac에 `com.ohisell.rocket-chrome`가 실제로 로드돼 있었다**(2026-07-17 생성, 포트 9225). 새 .py엔 이 서브커맨드가 없어 설치 즉시 usage 에러 → KeepAlive+Throttle 30 → **30초 크래시 루프**. |
 
+**라이브 미검증(원칙 22) — 첫 버튼 클릭 때 로그로 확인할 것**: adopt 게이트는 이제
+"프로필 SingletonLock PID == CDP 포트 LISTEN PID"에 의존한다. 검증된 절반: SingletonLock 타깃 PID가
+**브라우저 프로세스**(헬퍼 아님)임을 실행 중 Chrome으로 실측(2026-07-27, 기본 프로필 → PID 1040 =
+`Google Chrome` 본체). 미검증 절반: 그 브라우저 프로세스가 `--remote-debugging-port`를 LISTEN하는
+프로세스와 동일한지(디버깅 포트 Chrome 기동이 이 환경에서 차단돼 실측 불가). Chrome 구조상 DevTools
+HTTP 서버는 브라우저 프로세스에 있으므로 성립할 것으로 보지만 **단정하지 않는다.**
+어긋날 경우의 방향은 안전하다: adopt **거부** → 수집이 시끄럽게 멈추고(로그·ohitech는 Mac 알림),
+`adopt_unverified_chrome:true`로 즉시 완화 가능. 조용한 오적재로는 이어지지 않는다.
+
 **Jino 판단 대기(스코프 밖으로 보류)**: RG/vendor-summary의 `refresh-claim`은 성공 *전에* 요청을
 소비하므로 실행 실패 시 버튼 요청이 유실된다(§R-3에서 일일예약이라는 사실상의 재시도가 사라져 노출됨).
 제대로 고치려면 claim→lease(ack/release) 또는 실패 보고 엔드포인트가 필요한데 **둘 다 prod 백엔드
