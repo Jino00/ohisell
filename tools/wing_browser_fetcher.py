@@ -797,6 +797,46 @@ def _prod_rg_claim(cfg: dict) -> dict:
     return r.json()
 
 
+def _prod_report_fetch_error(cfg: dict, path: str, reason: str) -> None:
+    """run 실패를 prod에 보고(last_error/last_error_at) — 보고 실패는 로그만(데몬 생존 우선).
+
+    ★claim의 짝: claim 후 run이 실패하면 플래그는 이미 clear라 prod에 흔적이 없어
+    UI가 215초 헛기다린 뒤 'Mac 응답 없음'(Mac 꺼짐)으로 오진한다. 실패는 이 POST가 알린다.
+    """
+    try:
+        r = requests.post(
+            cfg["prod_base_url"].rstrip("/") + path,
+            params={"account_key": cfg["account_key"]},
+            headers={"X-Ingest-Token": cfg["ingest_token"]},
+            json={"error": reason[:300]},  # 백엔드 컬럼 절단(300)과 동일 — 보고 자체가 길어서 죽지 않게
+            timeout=15,
+        )
+        r.raise_for_status()
+    except Exception as e:  # noqa: BLE001 — 보고 실패로 데몬을 죽이지 않는다
+        log.warning("fetch-error 보고 실패(%s): %s", path, str(e)[:120])
+
+
+class _LastErrorCapture(logging.Handler):
+    """run 동안 마지막 log.error 메시지를 붙잡는다 — fetch-error 보고의 사유로 쓴다."""
+
+    def __init__(self) -> None:
+        super().__init__(logging.ERROR)
+        self.last: str | None = None
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.last = record.getMessage()
+
+
+@contextlib.contextmanager
+def _capture_last_error():
+    h = _LastErrorCapture()
+    log.addHandler(h)
+    try:
+        yield h
+    finally:
+        log.removeHandler(h)
+
+
 def cmd_poll(cfg: dict) -> int:
     """상주 데몬(별도 plist com.ohisell.wing, D-5) — 갱신 '버튼' 요청이 있을 때만 headful 창.
 
@@ -840,7 +880,12 @@ def cmd_poll(cfg: dict) -> int:
                             if not Path(state).is_file():
                                 cmd_login(cfg, wait_secs=_LOGIN_WAIT_S)
                             else:
-                                _do_run(cfg, state, login_wait_secs=_LOGIN_WAIT_S)  # 락 보유 중
+                                with _capture_last_error() as cap:
+                                    rc = _do_run(cfg, state, login_wait_secs=_LOGIN_WAIT_S)  # 락 보유 중
+                                if rc != 0:
+                                    _prod_report_fetch_error(
+                                        cfg, "/api/coupang/ops/wing/vendor-summary/fetch-error",
+                                        cap.last or f"vendor-summary run 실패 rc={rc}")
         except requests.RequestException as e:
             net_fails += 1
             log.warning("폴 확인 실패(네트워크) %d/%d: %s", net_fails, _MAX_CONSECUTIVE_NET_FAILS, str(e)[:80])
@@ -868,7 +913,12 @@ def cmd_poll(cfg: dict) -> int:
                             if not Path(state).is_file():
                                 log.warning("RG: 세션 파일 없음 — 'login' 필요(이번 회차 스킵)")
                             else:
-                                _do_rg_run(cfg, state, login_wait_secs=_LOGIN_WAIT_S)
+                                with _capture_last_error() as cap:
+                                    rc = _do_rg_run(cfg, state, login_wait_secs=_LOGIN_WAIT_S)
+                                if rc != 0:
+                                    _prod_report_fetch_error(
+                                        cfg, "/api/coupang/ops/wing/rg-settlement/fetch-error",
+                                        cap.last or f"RG run 실패 rc={rc}")
         except requests.RequestException as e:
             log.warning("RG 폴 확인 실패(네트워크): %s", str(e)[:80])
         except Exception as e:  # noqa: BLE001 — 데몬은 어떤 오류에도 죽지 않는다
