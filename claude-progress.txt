@@ -2,6 +2,13 @@
 # 매 sprint 완료 시 Claude가 이 파일을 갱신합니다.
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
+## 최신 상태 (2026-07-27 저녁, 워크트리 elated-hawking-cd94ea) — wing-fetcher lease 계약 잔여 3건 PR #111 병합, 배포는 병행 #106 세션 몫
+- **PR #109 경위**: `claude/elated-hawking-cd94ea`(fix-error/success 보고, 6커밋) 병합 시도 → main이 그 사이 `feat/claim-retry-lease`(PR #106)로 앞서가 `coupang_ops.py`·`wing_browser_fetcher.py` 동일 파일에 대규모 충돌 → 임의 해소 없이 STOP·리포트. 코디네이터 확인 결과 PR #106이 #109의 대부분을 이미 흡수 → **#109는 superseded로 클로즈**.
+- **갭 분석 → 잔여 3건 재구현**: 같은 워크트리에서 main 기준 새 브랜치 `claude/wing-report-residual-cd94ea`(commit `20d198e`)로 ①claim된 작업 예외 즉시 보고(`_run_claimed` 래퍼, 기존 TTL 3회 소진 40~60분 침묵→"Mac 응답 없음" 오진) ②cmd_login 파싱실패 rc 0→1(retryable 정정) ③★`_prod_report_failure`·`_prod_notify_rg_complete`·refresh-complete 라우터 account_key 누락 수정(WING2 실패보고가 WING1 행에 조용히 폐기·RG 완료신호 유실 원인). 테스트 25개 신설(가드 검증: 소스 되돌리면 15/25 실패)·전체 3317 passed·codex review 클린.
+- **PR #111 병합 완료**: https://github.com/Jino00/ohisell/pull/111 — merge SHA `11e68e3e8d9d20308f22a63468cd062e23ae4f60` (main).
+- **배포 미수행(의도적)**: PR #106 병행 세션이 fetcher-first 순서·alembic 마이그레이션 포함 prod 배포를 전담 — 이번 잔여분(#111)은 그쪽 배포가 이 병합 이후에 나가면 함께 반영됨. 이 세션은 scp/safe_deploy/데몬 재시작 전부 스킵.
+- **다음 액션**: #106 세션의 prod 배포가 #111 병합 커밋을 포함해 나갔는지 확인(safe_deploy 로그·prod git rev 대조) → 아직이면 배포 필요 여부를 그쪽 세션/Jino와 조율.
+
 ## 최신 상태 (2026-07-23 13:40, 워크트리 ex-sprint-post-deployment-2e9656) — Jino 결정 대기 3건 응답 완료(문서 기록만, 코드 변경 0)
 - EX 스프린트(D-NAO-85·87·89)는 아래 블록에서 이미 구현·배포·병합·첫 자동발사 라이브 실증까지 완료된 상태 — 이 세션은 남아있던 결정 대기 3건을 트랙 파일(D-NAO-90 신설 + "현재 진행 단계"/"다음 액션" 갱신)에 반영.
 - **①봉투 vs BEP 안전선 충돌(10769985) → "현행 유지" 확정(D-NAO-90)**: Jino가 Fable 권고(현행 유지)를 그대로 선택. BEP 안전선이 봉투보다 항상 우선, 봉투 우선 예외 없음. 코드 변경 없음.
