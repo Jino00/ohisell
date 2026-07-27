@@ -460,3 +460,94 @@ def test_calculate_bep_no_orders_product_gets_full_shipping(db):
     row = db.query(NaverProductBep).filter(NaverProductBep.channel_product_id == "noorder").one()
     assert row.logistics_cost == Decimal("1900.00")
     assert row.has_cost is False  # 단가 없음
+
+
+# ── D-NAO-95: 주문 이력 0건 신규 상품의 판매가 폴백(매핑 selling_price) ──
+
+def test_calculate_bep_no_orders_falls_back_to_mapping_price(db):
+    """주문 0건이어도 매핑에 판매가가 적혀 있으면 그 값으로 BEP를 산출한다(D-NAO-95).
+
+    신규 상품 온보딩 경로 — 종전엔 sp=0 → has_cost=False → bep_roas=NULL로 남아
+    상한 산출이 계정 평균 BEP로 내려앉았다. 손계산 대조(거울 방지):
+      sp=15,800 / rate=0.05(채널 5%) / cost=4,300 / logistics=1,900(주문 없음 → 전액 폴백)
+      contribution = (15800 − 790 − 4300 − 1900)/1.1 = 8810/1.1 = 8009.09...→ 8009.09
+      bep = 15800/8009.09 = 1.97276... → 1.9728
+    """
+    db.add(Channel(id=6, name="네이버", code="NAVER", platform="naver", commission_rate=Decimal("5.0")))
+    pm = ProductMaster(internal_sku="SKU-NEW8", product_name="폴드8", cost_price=Decimal("4300"))
+    db.add(pm)
+    db.flush()
+    db.add(ProductChannelMapping(product_id=pm.id, channel_id=6, channel_product_id="new8",
+                                 channel_product_name="폴드8", selling_price=Decimal("15800"),
+                                 is_active=True))
+    db.commit()
+    res = bep_calculator.calculate_bep(db)
+    row = db.query(NaverProductBep).filter(NaverProductBep.channel_product_id == "new8").one()
+    assert row.selling_price == Decimal("15800.00")
+    assert row.logistics_cost == Decimal("1900.00")  # 주문 없음 → 배송비 전액(보수)
+    assert row.has_cost is True
+    assert row.contribution_margin == Decimal("8009.09")
+    assert row.bep_roas == Decimal("1.9728")
+    assert res["mapped_price_rows"] == 1
+
+
+def test_calculate_bep_orders_win_over_mapping_price(db):
+    """주문 실거래가가 있으면 매핑 판매가는 무시된다(폴백은 신규 상품 전용, 스스로 은퇴)."""
+    pm = ProductMaster(internal_sku="SKU-BOTH", product_name="both", cost_price=Decimal("5000"))
+    db.add(pm)
+    db.flush()
+    db.add(ProductChannelMapping(product_id=pm.id, channel_id=6, channel_product_id="both1",
+                                 channel_product_name="both", selling_price=Decimal("99000"),
+                                 is_active=True))
+    db.add(Order(channel_id=6, platform_product_id="both1", selling_price=Decimal("10000"),
+                 quantity=1, order_date=kst_today() - timedelta(days=1), order_number="ob1"))
+    db.commit()
+    res = bep_calculator.calculate_bep(db)
+    row = db.query(NaverProductBep).filter(NaverProductBep.channel_product_id == "both1").one()
+    assert row.selling_price == Decimal("10000.00")  # 매핑 99,000이 아니라 주문 실거래가
+    assert res["mapped_price_rows"] == 0
+
+
+def test_calculate_bep_duplicate_mapping_prefers_priced_row(db):
+    """같은 cpid에 중복 매핑이 있고 원가가 동률이면 **판매가가 적힌 행**이 이긴다.
+
+    리뷰 P2: 종전 타이브레이크는 product_id 최솟값이라, 사람이 판매가를 적어 넣어도 값이 없는
+    쪽 행이 이기면 조용히 무시됐다(신규 상품 온보딩이 이유 없이 실패). product_id가 더 큰 쪽에
+    판매가를 넣어 "최솟값 우선"이었다면 실패하도록 배치한다.
+    """
+    pm_a = ProductMaster(internal_sku="SKU-DUP-A", product_name="dupA", cost_price=Decimal("4300"))
+    pm_b = ProductMaster(internal_sku="SKU-DUP-B", product_name="dupB", cost_price=Decimal("4300"))
+    db.add_all([pm_a, pm_b])
+    db.flush()
+    lo, hi = sorted([pm_a.id, pm_b.id])
+    # 판매가는 product_id가 큰 쪽(hi)에만 — 최솟값 우선이면 0이 이겨 has_cost False가 된다.
+    db.add(ProductChannelMapping(product_id=lo, channel_id=6, channel_product_id="dup1",
+                                 channel_product_name="dup", selling_price=Decimal("0"),
+                                 is_active=True))
+    db.add(ProductChannelMapping(product_id=hi, channel_id=6, channel_product_id="dup1",
+                                 channel_product_name="dup", selling_price=Decimal("15800"),
+                                 is_active=True))
+    db.commit()
+    res = bep_calculator.calculate_bep(db)
+    row = db.query(NaverProductBep).filter(NaverProductBep.channel_product_id == "dup1").one()
+    assert row.selling_price == Decimal("15800.00")
+    assert row.has_cost is True
+    assert res["mapped_price_rows"] == 1
+    assert res["mapped_price_with_bep"] == 1
+
+
+def test_calculate_bep_mapped_price_without_cost_counts_separately(db):
+    """판매가만 있고 원가가 없으면 BEP는 안 나온다 — 두 카운터가 그 차이를 드러낸다(리뷰 P3)."""
+    pm = ProductMaster(internal_sku="SKU-NOCOST", product_name="nocost", cost_price=Decimal("0"))
+    db.add(pm)
+    db.flush()
+    db.add(ProductChannelMapping(product_id=pm.id, channel_id=6, channel_product_id="nocost1",
+                                 channel_product_name="nocost", selling_price=Decimal("15800"),
+                                 is_active=True))
+    db.commit()
+    res = bep_calculator.calculate_bep(db)
+    row = db.query(NaverProductBep).filter(NaverProductBep.channel_product_id == "nocost1").one()
+    assert row.has_cost is False
+    assert row.bep_roas is None
+    assert res["mapped_price_rows"] == 1        # 판매가는 매핑에서 왔지만
+    assert res["mapped_price_with_bep"] == 0    # BEP까지 간 건 0 — "3개 넣었는데 왜 0개?"가 보인다
