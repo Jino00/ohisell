@@ -441,6 +441,8 @@ def test_ingest_search_term_daily_snapshot_replace(db, monkeypatch):
 
     monkeypatch.setattr(search_term_ingest, "fetch_search_term_daily", fake_fetch)
     monkeypatch.setattr(search_term_ingest, "request_missing_expkeyword_reports", lambda a, b: [])
+    monkeypatch.setattr(search_term_ingest, "_conversion_report_dates", lambda a, b: set())  # 실HTTP 차단
+    monkeypatch.setattr(search_term_ingest, "fetch_search_term_conversion", lambda a, b: [])  # 실HTTP 차단
 
     result = search_term_ingest.ingest_search_term_daily(db, date(2026, 7, 5), date(2026, 7, 5))
     assert result["shopping_rows"] == 1

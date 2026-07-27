@@ -107,6 +107,11 @@ plist는 `poll` 인자 + `KeepAlive`(죽으면 자동 재시작)로 상주 데�
 - **배너**: prod 대시보드는 status=red 또는 마지막 push 26h 초과(stale)면 전역 빨간 배너로 알림.
 - **Mac 상주 필요**: Mac이 꺼져 있으면 버튼을 눌러도 데몬이 못 받는다(데이터는 마지막 값 유지).
 - **데몬 로그**: `~/.ohisell_ad_fetcher.log`. launchd stdout/err: `~/.ohisell_ad_fetcher.launchd.log`.
+- **다른 3개 브라우저 스트림도 같은 모델**(2026-07-27 전환): Wing 판매분석·RG 정산(`wing_browser_fetcher.py`),
+  로켓 발주/정산(`rocket_supplier_fetcher.py`), 오하이테크 광고(`ohitech_ad_fetcher.py`)도 **버튼 요청만**
+  소비한다. 이 페처와 다른 점은 CDP(실제 Chrome)를 쓴다는 것뿐이며, Chrome도 **fetch 때만 띄웠다 닫는다**
+  (구 `*-chrome` 상주 supervisor plist는 폐기 — 창을 닫아도 launchd가 되살리던 원인).
+  세션 만료로 사람이 로그인해야 하는 경우에만 그 창을 남긴다. 설계: `docs/superpowers/specs/2026-07-19-coupang-on-demand-collection-design.md`.
 
 ## 참고: curl 방식(ad_cost_local_fetcher.py)은 1회용으로 폐기
 같은 디렉터리의 `ad_cost_local_fetcher.py`는 curl 재생 방식이라 1회만 동작한다(위 근거).

@@ -173,7 +173,8 @@ def test_run_bm_layer_fail_open(db, monkeypatch):
 def test_run_bm_layer_happy_path(db, monkeypatch):
     """정상 경로: run_bm_layer가 SA-1을 호출해 스냅샷 결과를 반환.
 
-    run_bm_layer는 파라미터 없이 snapshot_entities(db)를 호출한다(prod 07:37 실경로 — Phase 3가
+    run_bm_layer는 파라미터 없이 snapshot_entities(db)를 호출한다(prod 실경로 = entity_sync 완료
+    직후 체이닝, 구 07:37 크론 — Phase 3가
     실제 GET을 시도). 유닛 테스트는 라이브 네트워크를 피하기 위해 fetcher 함수를 모듈 스코프에서
     monkeypatch(entity_sync 테스트 관례와 동일 목적, 원칙18-8)."""
     monkeypatch.setattr(bm_snapshot, "get_campaigns_full", lambda: [])

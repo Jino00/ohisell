@@ -2,6 +2,22 @@
 # 매 sprint 완료 시 Claude가 이 파일을 갱신합니다.
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
 
+## 최신 상태 (2026-07-27 19:50, repo 루트 main) — 13:30 블록의 "남은 것" 4건 전부 완결 + 후속 5건
+- **claim lease 재시도 계약 구현·배포**(PR #106, D=버튼 1회=재시도 3회·login_required 제외, TTL 20분, `refresh_contract.py` 공용 SA, 계획서=docs/PLAN_coupang-claim-retry-lease.md, codex 5R 22건 중 21수용/1기각-후속보류). 페처 4종 실패보고 첫 배선.
+- **WING2 완전 복구**: 로그인 개통→RG 정산 49일(8주기) 백필(계정 98행+옵션 엑셀, prod 24주기=WING1 동일)+판매분석 재개통. 상시 배선(P1 계정분리·P2 버튼·P3 wing2 데몬)은 병행 세션이 기구현 — 잔여 P4(CDP login 마커 버그)·P5(green-while-dead 크론 2개 raise+toggle 비활성)를 PR #114로 완결. 계획서=docs/PLAN_wing2-standing-wiring.md.
+- **vendor-summary 45일 자가치유**(PR #108, 7일 청크×롤링, vs_days config 제거) + **음수 GMV 400 완화**(PR #115 — 환불>판매일 정당, 병행 세션 동시수정을 CAS가 감지→합류·정합화). chrome-supervise 스텁 제거(PR #107).
+- **3P GMV=0 chip 종결**: 오픽스 3P 필름 라인 06-26경 RG 이관 = Jino 확정 의도(메모리 ofix-3p-moved-to-rg). 병행 세션 PR #104와 결론 합치.
+- **WING1 백필 최종 실증 완료(21:19)**: 로그인 재개통→90일 push 성공→prod 실측 06-20~07-09 40행 충전+음수 GMV 2행(-16,620/-12,900) 정상 수록. 오늘 배포 전 항목 라이브 합격.
+- **후속 백로그**: chip 세션들(RG 데스크톱 호스트 세션 갭 task_2a26d430 진행 중·테스트 격리 task_5e916148 완료·task_41a3cb55는 PR #115로 기해결=중복 주의) / lease 성공경로 전달(codex 기각 1건, 후속 판단).
+- 전체 테스트 3336 passed. main==prod(f0474a0 계열, deploy-manifest 기록).
+
+## 최신 상태 (2026-07-27 13:30, repo 루트 main) — RG 수수료 정정 + 쿠팡 버튼-only 전환 완결
+- **HANDOFF: `.claude/memory/HANDOFF_ohisell-ondemand-button-only-complete_20260727.md`** ← 새 세션은 이 파일 먼저.
+- **RG 수수료율 정정**: RG1/RG2 commission_rate 10.8%→**7.8%** 확정(WING1 06-15~21 정산 실측 8.586%=7.8%×1.1 일치). seed.py+prod DB 반영, PR #103.
+- **쿠팡 브라우저 수집 4종 버튼-only 전환 완결**: PR #68의 chrome supervisor(KeepAlive 상주, "창 닫아도 30초 뒤 부활"의 범인) 폐기 → per-fetch 수명(_chrome_argv/_launch_chrome/_owned_chrome/_ChromeOwner). 소유권 판정 최종형 = PID 동일성+시간순서(프로세스 시작<lock 생성). codex 6R(수용12/기각3/보류1). 테스트 29→92. PR #103 병합·prod 배포(safe_deploy CAS 통과). supervisor plist 3개 완전 삭제(재부팅 부활 차단), poll 데몬 4개 재가동.
+- **라이브 검증 합격**(Jino 실버튼): ofix판매분석/RG정산(35행)/ofix광고비(SSO 자동재발급·29일 백필)/ohitech광고(1,457만원 백필)/로켓(발주486+정산90+상세80) — 13:31 collection-status 4스트림 전부 fresh.
+- **남은 것**: WING2 RG 정산 06-20부터 누락(chip 발행) / wing 판매분석 3P GMV=0 모순(chip 발행) / claim 재시도 계약(백엔드 변경 필요, codex와 보류 합의) / chrome-supervise 스텁 제거.
+
 ## 최신 상태 (2026-07-24 11:2x KST, 워크트리 ex-sprint-post-deployment-2e9656) — 03 캠페인 우리 자동운영 정지(D-NAO-92, 문서 기록만·코드 변경 0)
 - **Jino 지시**: "운영중이던 03 캠페인 정지해줘" → 범위 확인 결과 **"우리 자동운영만 정지"** 선택(캠페인 OFF 아님, 광고는 계속 노출·집행).
 - **실행(03 = `cmp-a001-02-000000008492582`)**: `optimizer` ours→**none**(정식 라우터, change_log **639**) + `auto_operate` 1→**0**(라우터 없어 prod DB 직접 UPDATE, 감사용 change_log **640** 수동 기록).

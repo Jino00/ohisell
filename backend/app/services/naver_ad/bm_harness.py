@@ -1,5 +1,6 @@
 # bm_harness.py — BM(벤치마크) 학습 레이어 Harness (관찰 전용, D-NAO-78)
-# 역할: SA 조합·프라이어 유통 허브(원칙18-6). run_bm_layer(일별 07:37)=SA-1 스냅샷+SA-2 diff+
+# 역할: SA 조합·프라이어 유통 허브(원칙18-6). run_bm_layer(일별, entity_sync 완료 직후 체이닝
+#   — 구 07:37 크론 폐지)=SA-1 스냅샷+SA-2 diff+
 #   SA-3 벤치마크+예외 브리핑(Phase 5). run_bm_deep(주간 bm_deep 레인, 일요일 09:20)=SA-1의
 #   제외키워드·소재수 차원 보강(Phase 3)+주간 벤치마크 요약(Phase 5).
 #   전면 fail-open — 관찰·열람 전용 잡이라 어떤 실패도 아침배치 catch-up 체인·집행 잡을
@@ -21,8 +22,12 @@ log = logging.getLogger(__name__)
 
 
 def run_bm_layer(db: Session) -> dict:
-    """BM 레이어 1회 실행(07:37 KST, entity_sync 07:35 직후). P1 = SA-1 스냅샷(예산·확장검색
-    Phase 3 일별 차원 포함), P2 = SA-2 diff.
+    """BM 레이어 1회 실행(일별 아침 — entity_sync 완료(단일 commit) 직후 스케줄러가 체이닝
+    호출). P1 = SA-1 스냅샷(예산·확장검색 Phase 3 일별 차원 포함), P2 = SA-2 diff.
+
+    ★체이닝 이유: 구 07:37 독립 크론은 entity_sync(07:35)의 맨 끝 단일 commit보다 먼저 발화해
+    스냅샷(D)이 항상 entity_sync(D-1) 값을 담았다(5/5일 실측). 이제 스냅샷은 당일 sync 결과를
+    본다(scheduler_service.sync_naver_entity_job 참조).
 
     전면 fail-open: 각 SA 예외를 로깅 후 삼킨다(관찰 잡이 다른 크론을 못 막게). 각 SA는
     독립 try로 감싸 하나가 실패해도 나머지가 돈다. SA-2는 SA-1(오늘 스냅샷) 다음에 실행돼야

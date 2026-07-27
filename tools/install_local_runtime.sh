@@ -45,13 +45,77 @@ echo "==> 페처 복사 + plist 설치"
 LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
 mkdir -p "$LAUNCH_AGENTS"
 UID_NUM="$(id -u)"
-# wing-chrome = 같은 wing 스크립트를 'chrome-supervise' 인자로 도는 별도 launchd 잡
-# (CDP Chrome 9222 상주화, S5a). cp는 멱등(동일 파일), plist만 별도 렌더.
-# ohitech-chrome/ohitech-ad = 오하이테크 광고 수집(S3, 트랙 D-11): 같은 ohitech 스크립트를
-#   chrome-supervise(9224 상주)·poll(버튼-poll+일별)로 도는 두 잡. cp 멱등(동일 파일).
-for pair in "adcost:ad_cost_browser_fetcher.py" "wing:wing_browser_fetcher.py" "wing-chrome:wing_browser_fetcher.py" "rocket:rocket_supplier_fetcher.py" "ohitech-chrome:ohitech_ad_fetcher.py" "ohitech-ad:ohitech_ad_fetcher.py"; do
+# ★2026-07-27: Chrome 상주 supervisor 잡(wing-chrome·ohitech-chrome·rocket-chrome)은 폐기됐다.
+#   창을 닫아도 launchd가 Chrome을 되살리던 원인 → 이제 poll 데몬이 fetch 때만 Chrome을 띄우고
+#   닫는다. 남는 잡은 poll 데몬 4개뿐(adcost·wing·rocket·ohitech-ad).
+#
+# ★구 supervisor 잡 자동 제거(codex R1 P1#1): 설치 목록에서 빼기만 하면 **이미 로드된 구 잡은
+#   그대로 살아남는다** — 실행 중인 파이썬 프로세스는 아래 cp가 스크립트를 덮어써도 교체되지 않아
+#   구 코드가 계속 Chrome을 상주시킨다(= 이번 전환의 목적이 통째로 무효화). 문서 안내로는 세 번
+#   못 막았다(원칙: 부탁이 아니라 구조로) → 여기서 bootout·plist 삭제까지 수행하고, 잔존하면
+#   설치를 실패로 끝낸다. (구 plist 소멸을 재확인한 뒤 2026-07-27 no-op 스텁 chrome-supervise는
+#   페처 코드에서 완전히 제거했다 — 이 bootout·plist 삭제 로직만이 유일한 방어선이다.)
+_deprecated_left=0
+for _dep in wing-chrome ohitech-chrome rocket-chrome; do
+  _dep_plist="$LAUNCH_AGENTS/com.ohisell.$_dep.plist"
+  _dep_loaded=0
+  launchctl print "gui/$UID_NUM/com.ohisell.$_dep" >/dev/null 2>&1 && _dep_loaded=1
+  if [ "$_dep_loaded" = "1" ]; then
+    launchctl bootout "gui/$UID_NUM/com.ohisell.$_dep" 2>/dev/null || true
+    for _i in $(seq 1 25); do
+      launchctl print "gui/$UID_NUM/com.ohisell.$_dep" >/dev/null 2>&1 || break
+      sleep 1
+    done
+    if launchctl print "gui/$UID_NUM/com.ohisell.$_dep" >/dev/null 2>&1; then
+      echo "    ⚠️ 구 supervisor com.ohisell.$_dep bootout 실패 — 상주 Chrome이 남는다."
+      _deprecated_left=1
+      continue
+    fi
+    echo "    구 supervisor com.ohisell.$_dep → bootout 완료"
+  fi
+  if [ -f "$_dep_plist" ]; then
+    rm -f "$_dep_plist"
+    echo "    구 plist 삭제: $_dep_plist"
+  fi
+done
+if [ "$_deprecated_left" = "1" ]; then
+  echo "==> ❌ 설치 중단: 구 Chrome supervisor 잡을 제거하지 못했습니다."
+  echo "    수동: launchctl bootout gui/$UID_NUM/com.ohisell.<label> 후 재실행"
+  exit 1
+fi
+# ★wing2(2026-07-27, codex R1 [P1]): WING2=오하이테크 인스턴스. 같은 스크립트를 env로 분리 기동한다.
+#   이 loop에 없으면 plist의 __PYTHON__/__SCRIPT__가 치환되지 않은 채로만 존재해 데몬이 영영 안 뜬다
+#   (= WING2 RG 갱신 요청이 아무도 claim하지 않는다 = 이번 스프린트가 라이브에서 무효).
+for pair in "adcost:ad_cost_browser_fetcher.py" "wing:wing_browser_fetcher.py" "wing2:wing_browser_fetcher.py" "rocket:rocket_supplier_fetcher.py" "ohitech-ad:ohitech_ad_fetcher.py"; do
   name="${pair%%:*}"
   script="${pair##*:}"
+  # ★설정 없는 Mac에 wing2를 올리면 poll이 fail-fast(exit 2) → KeepAlive가 10초마다 되살리는
+  #   크래시 루프가 된다. 계정 설정 파일이 생긴 뒤에 설치한다(재실행하면 그때 붙는다 — 멱등).
+  if [ "$name" = "wing2" ] && [ ! -f "$HOME/.ohisell_wing2_fetcher.json" ]; then
+    # ★그냥 건너뛰지 않고 '내린다'(codex R2 [P2]): 예전에 수동 cp/load 했거나 나중에 설정을
+    #   지운 Mac에서는 건너뛰기만 하면 크래시 루프가 그대로 살아남는다. 설정 없음 = 이 잡은
+    #   존재하면 안 되는 상태이므로 bootout + plist 삭제까지가 '설정 없음'의 올바른 수렴점.
+    # ★내렸다고 '말하지' 말고 내려간 걸 '확인'한다(codex R3 [P2]): bootout은 실패해도 조용하다
+    #   (2>/dev/null || true). 검증 없이 성공을 출력하고 plist까지 지우면 크래시 루프는 그대로인데
+    #   화면만 깨끗해지고, 파일이 없어져 다음 실행이 문제를 볼 근거마저 사라진다. 위 구 supervisor
+    #   정리와 같은 패턴(대기·재확인·실패 시 설치 중단)을 쓴다.
+    if launchctl print "gui/$UID_NUM/com.ohisell.wing2" >/dev/null 2>&1; then
+      launchctl bootout "gui/$UID_NUM/com.ohisell.wing2" 2>/dev/null || true
+      for _i in $(seq 1 25); do
+        launchctl print "gui/$UID_NUM/com.ohisell.wing2" >/dev/null 2>&1 || break
+        sleep 1
+      done
+      if launchctl print "gui/$UID_NUM/com.ohisell.wing2" >/dev/null 2>&1; then
+        echo "==> ❌ 설치 중단: com.ohisell.wing2 bootout 실패 — 설정 없는 잡이 크래시 루프로 남습니다."
+        echo "    수동: launchctl bootout gui/$UID_NUM/com.ohisell.wing2 후 재실행"
+        exit 1   # plist는 남긴다 — 지우면 다음 실행이 문제를 못 본다
+      fi
+      echo "    com.ohisell.wing2 → bootout 완료(설정 없음 — 크래시 루프 방지)"
+    fi
+    rm -f "$LAUNCH_AGENTS/com.ohisell.wing2.plist"
+    echo "    (건너뜀: com.ohisell.wing2 — ~/.ohisell_wing2_fetcher.json 없음. 설정 후 이 스크립트 재실행)"
+    continue
+  fi
   cp -f "$REPO_TOOLS/$script" "$LOCAL_TOOLS/$script"
   echo "    $script 복사"
   tmpl="$REPO_TOOLS/com.ohisell.$name.plist"
@@ -64,9 +128,9 @@ for pair in "adcost:ad_cost_browser_fetcher.py" "wing:wing_browser_fetcher.py" "
   # 리로드 검증용 구 잡 PID 캡처(label은 list의 3번째 컬럼).
   _old_pid="$(launchctl list 2>/dev/null | awk -v n="com.ohisell.$name" '$3==n{print $1}')"
   launchctl bootout "gui/$UID_NUM/com.ohisell.$name" 2>/dev/null || true
-  # bootout 완료 대기 — 고정 sleep은 느린 SIGTERM 핸들러(wing-chrome는 Chrome 종료를
-  # 최대 10초 기다림)와 레이스로 bootstrap이 '미로드'로 조용히 실패한다. 잡이 실제로
-  # 사라질 때까지(launchctl print 실패) 최대 25초 폴링.
+  # bootout 완료 대기 — 고정 sleep은 느린 종료(fetch 중인 데몬이 Chrome을 최대 15초 정리)와
+  # 레이스로 bootstrap이 '미로드'로 조용히 실패한다. 잡이 실제로 사라질 때까지
+  # (launchctl print 실패) 최대 25초 폴링.
   for _i in $(seq 1 25); do
     launchctl print "gui/$UID_NUM/com.ohisell.$name" >/dev/null 2>&1 || break
     sleep 1
@@ -89,7 +153,7 @@ for pair in "adcost:ad_cost_browser_fetcher.py" "wing:wing_browser_fetcher.py" "
   fi
 done
 
-# 6. 스케줄러 워치독 폴 데몬(S5b S5) — 별도 블록(loop 미수정 → main의 wing-chrome 추가와 머지 안전).
+# 6. 스케줄러 워치독 폴 데몬(S5b S5) — 별도 블록(위 loop와 독립).
 #    브라우저/플레이라이트 불필요(requests만). prod /api/scheduler/health 폴 → 비정상 시 Mac 알림.
 echo "==> 스케줄러 워치독 폴 설치"
 WD_SCRIPT="scheduler_watchdog_poll.py"

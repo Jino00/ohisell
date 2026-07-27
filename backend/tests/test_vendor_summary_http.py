@@ -62,6 +62,25 @@ def test_ingest_bad_account_key_rejected(client):
     assert r.status_code == 400
 
 
+def test_ingest_allows_negative_gmv(client):
+    """★2026-07-27 라이브 실측 결함 재현: 환불이 판매를 초과하는 날은 gmv가 정당하게 음수다
+    (WING1 07-02 -16,620·07-07 -12,900). 배치 전체가 400으로 거부되면 안 된다."""
+    y = _yesterday()
+    r = client.post("/api/coupang/ops/wing/vendor-summary/ingest",
+                    headers={"X-Ingest-Token": _TOKEN}, json={
+                        "account_key": "COUPANG_WING1",
+                        "days": [
+                            {"date": y, "registration_type": "NORMAL", "gmv": -16620, "units_sold": 0},
+                        ],
+                    })
+    assert r.status_code == 200, r.text
+    assert r.json()["ingested"] == 1
+
+    rr = client.get(f"/api/overview/revenue-reconcile?from={y}&to={y}&account=COUPANG_WING1")
+    assert rr.status_code == 200, rr.text
+    assert rr.json()["official"]["gmv_3p"] == -16620
+
+
 def test_ingest_then_reconcile_roundtrip(client):
     """토큰 ingest → reconcile read-back: official GMV가 그대로 조회되고 드리프트 계산됨(우리 매출 0)."""
     y = _yesterday()
@@ -88,6 +107,47 @@ def test_ingest_then_reconcile_roundtrip(client):
     assert body["drift"]["pct_3p"] == "-100"
 
 
+def test_ingest_accepts_negative_gmv_refund_day(client):
+    """환불>판매 순액 음수일 허용(2026-07-27 라이브 실증: WING1 07-02 3P GMV=-16,620).
+
+    ★페처는 45일 창을 한 번의 push로 보낸다 — 음수 하루를 거부하면 배치 전체가 all-or-nothing으로
+    소멸해 PR#108 자가치유가 발동 자체를 못 한다. 음수는 정상 데이터로 저장돼야 한다.
+    """
+    y = _yesterday()
+    d2 = (kst_today() - timedelta(days=2)).isoformat()
+    r = client.post("/api/coupang/ops/wing/vendor-summary/ingest",
+                    headers={"X-Ingest-Token": _TOKEN}, json={
+                        "account_key": "COUPANG_WING1",
+                        "days": [
+                            {"date": d2, "registration_type": "NORMAL", "gmv": -16620, "units_sold": -1},
+                            {"date": d2, "registration_type": "RFM", "gmv": 1326580, "units_sold": 30},
+                            {"date": y, "registration_type": "NORMAL", "gmv": 12900, "units_sold": 1},
+                        ],
+                    })
+    assert r.status_code == 200, r.text
+    assert r.json()["ingested"] == 3
+
+    rr = client.get(f"/api/overview/revenue-reconcile?from={d2}&to={y}&account=COUPANG_WING1")
+    assert rr.status_code == 200, rr.text
+    body = rr.json()
+    assert body["official"]["gmv_3p"] == -16620 + 12900  # 음수일이 합계에 그대로 반영
+    assert body["official"]["gmv_rg"] == 1326580
+
+
+def test_ingest_rejects_absurd_magnitude(client):
+    """음수 허용으로 열린 문은 절대값 상한이 지킨다 — 파싱 깨짐 수준의 값은 여전히 400."""
+    y = _yesterday()
+    hdr = {"X-Ingest-Token": _TOKEN}
+    for bad in ({"gmv": -10_000_000_001, "units_sold": 1},
+                {"gmv": 1, "units_sold": 2_000_000}):
+        r = client.post("/api/coupang/ops/wing/vendor-summary/ingest", headers=hdr, json={
+            "account_key": "COUPANG_WING1",
+            "days": [{"date": y, "registration_type": "NORMAL", **bad}],
+        })
+        assert r.status_code == 400, r.text
+        assert "비정상" in r.json()["detail"]
+
+
 def test_reconcile_today_only_no_closed_days(client):
     today = kst_today().isoformat()
     rr = client.get(f"/api/overview/revenue-reconcile?from={today}&to={today}&account=COUPANG_WING1")
@@ -96,16 +156,25 @@ def test_reconcile_today_only_no_closed_days(client):
 
 
 def test_refresh_trigger_claim_flow(client):
-    """request-refresh(무토큰 UI) → refresh-status requested=True → claim(토큰) → requested=False."""
-    assert client.get("/api/coupang/ops/wing/vendor-summary/refresh-status").json()["requested"] is False
-    assert client.post("/api/coupang/ops/wing/vendor-summary/request-refresh").status_code == 200
-    assert client.get("/api/coupang/ops/wing/vendor-summary/refresh-status").json()["requested"] is True
+    """request-refresh(무토큰 UI) → status requested=True → claim(토큰) → 요청은 보존(lease).
+
+    ★2026-07-27 계약 변경: claim이 요청을 소비하던 것을 임대로 바꿨다(실패 시 재시도 보장).
+    요청이 사라지는 것은 성공(ingest) 또는 3회 실패/로그인필요일 때뿐이다.
+    """
+    base = "/api/coupang/ops/wing/vendor-summary"
+    assert client.get(f"{base}/refresh-status").json()["requested"] is False
+    assert client.post(f"{base}/request-refresh").status_code == 200
+    assert client.get(f"{base}/refresh-status").json()["requested"] is True
     # claim은 토큰 필요
-    assert client.post("/api/coupang/ops/wing/vendor-summary/refresh-claim").status_code == 401
-    claimed = client.post("/api/coupang/ops/wing/vendor-summary/refresh-claim",
-                          headers={"X-Ingest-Token": _TOKEN})
+    assert client.post(f"{base}/refresh-claim").status_code == 401
+    claimed = client.post(f"{base}/refresh-claim", headers={"X-Ingest-Token": _TOKEN})
     assert claimed.status_code == 200 and claimed.json()["claimed"] is True
-    assert client.get("/api/coupang/ops/wing/vendor-summary/refresh-status").json()["requested"] is False
+
+    st = client.get(f"{base}/refresh-status").json()
+    assert st["requested"] is True and st["in_flight"] is True   # ★임대 중(진행 중)
+    # 같은 요청을 두 번 claim하지는 못한다(창 2회 방지 성질 유지)
+    again = client.post(f"{base}/refresh-claim", headers={"X-Ingest-Token": _TOKEN})
+    assert again.json()["claimed"] is False
 
 
 # ── RG 정산 자동 다운로드 (S4-P2) ──
@@ -206,7 +275,10 @@ def test_rg_settlement_upload_corrupt_file_returns_422(client):
 
 
 def test_rg_settlement_refresh_trigger_claim_flow(client):
-    """request-refresh(무토큰 UI) → status requested=True → claim(토큰) → requested=False. (vendor-summary 미러)"""
+    """request-refresh(무토큰 UI) → status requested=True → claim(토큰) → 요청 보존(lease).
+
+    (vendor-summary 미러 — 2026-07-27 계약 변경 동일 적용)
+    """
     base = "/api/coupang/ops/wing/rg-settlement"
     assert client.get(f"{base}/refresh-status").json()["requested"] is False
     assert client.post(f"{base}/request-refresh").status_code == 200
@@ -214,7 +286,85 @@ def test_rg_settlement_refresh_trigger_claim_flow(client):
     assert client.post(f"{base}/refresh-claim").status_code == 401          # 토큰 필요
     claimed = client.post(f"{base}/refresh-claim", headers={"X-Ingest-Token": _TOKEN})
     assert claimed.status_code == 200 and claimed.json()["claimed"] is True
-    assert client.get(f"{base}/refresh-status").json()["requested"] is False
+
+    st = client.get(f"{base}/refresh-status").json()
+    assert st["requested"] is True and st["in_flight"] is True
+
+
+# ── 버튼 큐 계정 분리 (2026-07-27 — WING2 데몬 편입) ──
+# 큐가 계정 무구분이면 WING2 데몬이 WING1 버튼 요청을 claim해 간다. HTTP 레이어에서 고정.
+_RG = "/api/coupang/ops/wing/rg-settlement"
+_VS = "/api/coupang/ops/wing/vendor-summary"
+
+
+@pytest.mark.parametrize("base", [_RG, _VS])
+def test_refresh_queue_account_isolation(client, base):
+    """WING1 요청을 WING2가 claim 못 하고, 그 반대도 못 한다(RG·판매분석 둘 다)."""
+    hdr = {"X-Ingest-Token": _TOKEN}
+    assert client.post(f"{base}/request-refresh?account_key=COUPANG_WING1").status_code == 200
+    # 남의 계정으로는 못 가져감 — 요청은 그대로 살아있어야 한다.
+    assert client.post(f"{base}/refresh-claim?account_key=COUPANG_WING2",
+                       headers=hdr).json()["claimed"] is False
+    assert client.get(f"{base}/refresh-status?account_key=COUPANG_WING2").json()["requested"] is False
+    assert client.get(f"{base}/refresh-status?account_key=COUPANG_WING1").json()["requested"] is True
+    # 주인만 소비 가능.
+    assert client.post(f"{base}/refresh-claim?account_key=COUPANG_WING1",
+                       headers=hdr).json()["claimed"] is True
+
+
+@pytest.mark.parametrize("base", [_RG, _VS])
+def test_refresh_queue_default_account_is_wing1(client, base):
+    """account_key 생략 = WING1 — 파라미터 없는 구버전 페처 하위호환(배포 순서 무관)."""
+    assert client.post(f"{base}/request-refresh").status_code == 200
+    assert client.get(f"{base}/refresh-status?account_key=COUPANG_WING1").json()["requested"] is True
+    claimed = client.post(f"{base}/refresh-claim", headers={"X-Ingest-Token": _TOKEN})
+    assert claimed.json()["claimed"] is True
+
+
+@pytest.mark.parametrize("base", [_RG, _VS])
+@pytest.mark.parametrize("path,method", [
+    ("request-refresh", "post"), ("refresh-status", "get"),
+    ("refresh-claim", "post"), ("fetch-error", "post"),
+])
+def test_refresh_queue_bad_account_key_400(client, base, path, method):
+    """RG_ACCOUNTS 밖 account_key → 400(오타로 유령 상태행이 생기지 않게)."""
+    url = f"{base}/{path}?account_key=TYPO"
+    kwargs = {"headers": {"X-Ingest-Token": _TOKEN}}
+    if path == "fetch-error":
+        kwargs["json"] = {"error": "boom"}
+    r = client.get(url, **kwargs) if method == "get" else client.post(url, **kwargs)
+    assert r.status_code == 400, r.text
+
+
+def test_vs_ingest_heartbeat_is_per_account(client):
+    """판매분석 ingest 성공 heartbeat도 계정별(codex R1 [P2]).
+
+    성공만 계정 무구분이면 WING2 push가 WING1 행에 last_success_at을 찍고 WING1의 실패 흔적까지
+    지운다 — 오픽스는 실제로 안 왔는데 배너·폴링은 '갱신됨'이라 말한다(신선도 위조).
+    """
+    hdr = {"X-Ingest-Token": _TOKEN}
+    y = _yesterday()
+    # WING1에 먼저 실패를 남긴다 — WING2 성공이 이걸 지우면 안 된다.
+    client.post(f"{_VS}/fetch-error?account_key=COUPANG_WING1", headers=hdr, json={"error": "boom"})
+    r = client.post(f"{_VS}/ingest", headers=hdr, json={
+        "account_key": "COUPANG_WING2",
+        "days": [{"date": y, "registration_type": "NORMAL", "gmv": 1000, "units_sold": 1}],
+    })
+    assert r.status_code == 200, r.text
+    assert client.get(f"{_VS}/refresh-status?account_key=COUPANG_WING2").json()["last_success_at"] is not None
+    st1 = client.get(f"{_VS}/refresh-status?account_key=COUPANG_WING1").json()
+    assert st1["last_success_at"] is None      # 남의 성공이 내 신선도가 되지 않는다
+    assert st1["last_error"] == "boom"         # 남의 성공이 내 실패 흔적을 지우지 않는다
+
+
+@pytest.mark.parametrize("base", [_RG, _VS])
+def test_fetch_error_is_per_account(client, base):
+    """실패 보고도 계정별 — WING2 실패가 WING1 화면에 뜨면 원인 오진단."""
+    r = client.post(f"{base}/fetch-error?account_key=COUPANG_WING2",
+                    headers={"X-Ingest-Token": _TOKEN}, json={"error": "chrome crash"})
+    assert r.status_code == 200
+    assert client.get(f"{base}/refresh-status?account_key=COUPANG_WING2").json()["last_error"] == "chrome crash"
+    assert client.get(f"{base}/refresh-status?account_key=COUPANG_WING1").json()["last_error"] is None
 
 
 # ── 층1: RG status/api 계정 단위 인제스트 (Mac 상주 브라우저, 쿠키 이관) ──
