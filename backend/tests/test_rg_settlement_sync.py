@@ -1153,3 +1153,70 @@ def test_rg_state_isolated_from_vendor_summary():
     # vendor-summary refresh_status는 RG 요청에 오염되지 않아야 함
     assert vss.refresh_status(db)["requested"] is False
     assert _RG_STATE_ACCOUNT != vss._VS_ACCOUNT
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 버튼 큐 계정 분리 (2026-07-27 — WING2 데몬 편입)
+#   상태행 1개를 두 계정이 공유하면 WING2 데몬이 WING1 버튼 요청을 claim해 가져간다.
+#   아래는 그 도난이 구조적으로 불가능함을 고정하는 회귀 테스트.
+# ═══════════════════════════════════════════════════════════════════════
+from app.services.coupang.rg_settlement_sync import (  # noqa: E402
+    _RG_STATE_ACCOUNT_BY_ACCOUNT,
+    _rg_state_key,
+    rg_mark_fetch_error,
+)
+
+_W1 = "COUPANG_WING1"
+_W2 = "COUPANG_WING2"
+
+
+def test_rg_state_key_maps_and_rejects_unknown():
+    """WING1은 기존 행 재사용(하위호환), WING2는 별도 행. 그 밖의 값은 ValueError(라우터가 400)."""
+    assert _rg_state_key(_W1) == _RG_STATE_ACCOUNT      # 기존 데이터 그대로 이어씀
+    assert _rg_state_key(_W2) == "COUPANG_WING_RG2"
+    assert _RG_STATE_ACCOUNT_BY_ACCOUNT[_W1] != _RG_STATE_ACCOUNT_BY_ACCOUNT[_W2]
+    with pytest.raises(ValueError):
+        _rg_state_key("COUPANG_WING9")
+
+
+def test_rg_default_account_is_wing1_backcompat():
+    """account_key 생략 = WING1 — 파라미터 없는 구버전 페처가 기존과 똑같이 동작(배포 순서 무관)."""
+    db = _db()
+    rg_request_refresh(db)                       # 생략
+    assert rg_refresh_status(db, _W1)["requested"] is True
+    assert rg_claim_refresh(db)["claimed"] is True  # 생략 claim이 WING1 요청을 소비
+
+
+def test_rg_wing2_cannot_claim_wing1_request():
+    """WING1 요청을 WING2 claim이 가져가지 못한다(큐 도난 차단 — 이 스프린트의 존재 이유)."""
+    db = _db()
+    rg_request_refresh(db, _W1)
+    assert rg_claim_refresh(db, _W2)["claimed"] is False
+    assert rg_refresh_status(db, _W1)["requested"] is True   # 요청은 그대로 살아있다
+    assert rg_claim_refresh(db, _W1)["claimed"] is True      # 주인만 소비 가능
+
+
+def test_rg_wing1_cannot_claim_wing2_request():
+    """역방향도 동일 — WING2 요청을 WING1(=기본값) 데몬이 훔쳐가지 못한다."""
+    db = _db()
+    rg_request_refresh(db, _W2)
+    assert rg_claim_refresh(db)["claimed"] is False          # 생략=WING1
+    assert rg_refresh_status(db, _W2)["requested"] is True
+    assert rg_claim_refresh(db, _W2)["claimed"] is True
+
+
+def test_rg_heartbeat_is_per_account():
+    """heartbeat는 계정별 상태행에 기록 — WING2 push가 WING1을 '갱신 완료'로 위장하면 안 된다."""
+    db = _db()
+    rg_mark_heartbeat(db, _W2)
+    assert rg_refresh_status(db, _W2)["last_success_at"] is not None
+    st1 = rg_refresh_status(db, _W1)
+    assert st1["last_success_at"] is None and st1["status"] == "none"
+
+
+def test_rg_fetch_error_is_per_account():
+    """실패 보고도 계정별 — 남의 실패가 내 화면에 뜨면 원인 오진단."""
+    db = _db()
+    rg_mark_fetch_error(db, "chrome crash", _W2)
+    assert rg_refresh_status(db, _W2)["last_error"] == "chrome crash"
+    assert rg_refresh_status(db, _W1)["last_error"] is None
