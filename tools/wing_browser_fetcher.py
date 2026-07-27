@@ -230,8 +230,28 @@ def _is_auth_expired(res) -> bool:
 
 
 def _save_state(context, path: str, *, cdp: bool = False) -> None:
-    """storage_state(세션쿠키 포함)를 0600으로 저장. CDP 모드에서는 Chrome이 세션을 보관하므로 no-op."""
+    """storage_state(세션쿠키 포함)를 0600으로 저장.
+
+    CDP 모드(P4, 2026-07-27 수정): 실제 쿠키는 Chrome 프로필 디렉터리가 보관하므로 여기서
+    쓰는 파일은 세션 자체가 아니라 "로그인 완료" 마커일 뿐이다. ★이전에는 이 분기가 완전
+    no-op이라 state_file이 전혀 생기지 않았고, `rg`/`run`의 존재 게이트(`Path(state).is_file()`)가
+    매 회차 fail-fast했다(07-27 13:54 실사고 — WING1은 CDP 전환 이전 구식 파일이 우연히 남아
+    통과했고, WING2는 수동 스텁으로 임시 우회 중이었다). 마커를 실제로 생성해 게이트를 통과시킨다.
+    포맷은 legacy(비-CDP) 경로가 이 파일을 storage_state로 오독해도 깨지지 않도록 빈
+    storage_state 형태(cookies/origins 빈 배열)에 메타를 얹는다.
+    """
     if cdp:
+        marker = {
+            "cookies": [],
+            "origins": [],
+            "cdp_marker": True,
+            "logged_in_at": datetime.now(KST).isoformat(),
+        }
+        try:
+            Path(path).write_text(json.dumps(marker), encoding="utf-8")
+            os.chmod(path, 0o600)
+        except OSError as e:
+            log.error("CDP 로그인 마커 저장 실패(%s): %s — 다음 실행도 게이트에 막힐 수 있음", path, e)
         return
     context.storage_state(path=path)
     with contextlib.suppress(OSError):
@@ -716,6 +736,12 @@ def _login_wait_loop(page, ctx, cfg: dict, state: str, wait_secs: int, *, cdp: b
 
     window=프로브가 쓸 최신 청크(호출자가 실행 시작 시점에 계산해 넘긴다). 로그인 대기 중 KST 자정을
     넘겨도 이 res와 뒤이어 받는 과거창이 어긋나지 않게 — 고정된 창을 쓴다(넘어간 하루는 다음 회차 몫).
+
+    ★codex 1R[P2](P4 후속): `_save_state`의 CDP 마커 저장이 실패(디스크 풀·권한 등 OSError)해도
+    호출부가 그걸 무시하고 성공으로 리턴하면 "로그인 감지·세션 저장 완료" 로그가 거짓이 되고,
+    이 함수가 고치려는 바로 그 게이트(P4)를 다음 회차에 다시 막는다(green-while-dead와 동일 계열
+    실수). 저장 직후 실제로 파일이 생겼는지 확인하고, 안 생겼으면 성공으로 리턴하지 않고 남은
+    시간 동안 재시도한다(로그인 자체는 이미 됐으니 다음 폴에서 같은 세션으로 저장만 재시도).
     """
     waited = 0
     while waited < wait_secs:
@@ -732,7 +758,9 @@ def _login_wait_loop(page, ctx, cfg: dict, state: str, wait_secs: int, *, cdp: b
             continue
         if _is_success(res):
             _save_state(ctx, state, cdp=cdp)
-            return res
+            if os.path.exists(state):
+                return res
+            log.error("로그인은 확인됐으나 세션 마커 저장 실패(%s) — 재시도 대기", state)
     return None
 
 
@@ -1470,7 +1498,11 @@ def _rg_session_ok(page) -> bool:
 
 
 def _rg_login_wait(page, ctx, state: str, secs: int, *, cdp: bool = False) -> bool:
-    """정산 페이지에서 사용자 로그인 자동 감지(status/api 200). 성공 시 state 저장. (데몬 회복 경로)"""
+    """정산 페이지에서 사용자 로그인 자동 감지(status/api 200). 성공 시 state 저장. (데몬 회복 경로)
+
+    ★codex 1R[P2](P4 후속, _login_wait_loop와 동일 수리): 저장 직후 파일이 실제로 생겼는지
+    확인 — CDP 마커 저장이 조용히 실패(OSError)했는데 True를 리턴하면 게이트가 다음 회차도 막힌다.
+    """
     waited = 0
     while waited < secs:
         try:
@@ -1478,7 +1510,9 @@ def _rg_login_wait(page, ctx, state: str, secs: int, *, cdp: bool = False) -> bo
             waited += 5
             if _rg_session_ok(page):
                 _save_state(ctx, state, cdp=cdp)
-                return True
+                if os.path.exists(state):
+                    return True
+                log.error("RG 로그인은 확인됐으나 세션 마커 저장 실패(%s) — 재시도 대기", state)
         except Exception as e:  # noqa: BLE001
             if "closed" in str(e).lower():
                 log.error("브라우저 창이 닫혔습니다 — RG 로그인 미완료.")
