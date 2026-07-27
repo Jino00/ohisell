@@ -463,10 +463,12 @@ def test_cmd_login_returns_1_on_unparseable_response(fetcher, tmp_path, monkeypa
     assert fetcher.cmd_login(cfg, wait_secs=1) == 1
 
 
-# ── ⑫ RG '정산주기 0개'는 완주지만 신호가 없다 → 정보성 보고(codex R3 [P2]) ──
+# ── ⑫ RG '정산주기 0개'는 완주 → 성공 전용 신호로 보고(codex R4 [P2]) ──
 #   업로드가 없으면 heartbeat(upload-xlsx→rg_mark_heartbeat)가 안 움직이고, claim은 이미
 #   요청을 소비했다 → 침묵하면 UI가 215초 헛기다린 뒤 'Mac 응답 없음' 오진.
-def test_rg_no_periods_reports_informational_reason(fetcher, tmp_path, monkeypatch):
+#   R3처럼 fetch-error에 '실패 아님' 문구를 실어 보내도 프론트는 last_error_at 변화를 전부
+#   실패로 읽어 ❌ 실패로 렌더한다 → 소비자가 구분할 수 있는 fetch-success로 보고한다.
+def test_rg_no_periods_reports_fetch_success(fetcher, tmp_path, monkeypatch):
     cfg = _cfg(tmp_path)
     _patch_common(fetcher, monkeypatch, vs_requested=False, rg_requested=True)
     calls = _install_recorder(fetcher, monkeypatch)
@@ -478,12 +480,31 @@ def test_rg_no_periods_reports_informational_reason(fetcher, tmp_path, monkeypat
     with pytest.raises(_StopPoll):
         fetcher.cmd_poll(cfg)
 
-    rg_calls = [c for c in calls if c["url"].endswith("/rg-settlement/fetch-error")]
-    assert len(rg_calls) == 1
-    reason = rg_calls[0]["json"]["error"]
-    assert "정산주기 없음" in reason
-    assert "실패 아님" in reason          # 사람이 '고장'으로 읽지 않게 문구가 진실을 말한다
-    assert "rc=" not in reason            # 뭉뚱그린 실패 문구로 새지 않는다
+    ok_calls = [c for c in calls if c["url"].endswith("/rg-settlement/fetch-success")]
+    assert len(ok_calls) == 1
+    assert ok_calls[0]["url"] == "http://prod.test/api/coupang/ops/wing/rg-settlement/fetch-success"
+    assert ok_calls[0]["params"] == {"account_key": "COUPANG_WING1"}
+    assert ok_calls[0]["headers"]["X-Ingest-Token"] == "tok"
+    # ★실패로 보고하지 않는다 — 완주한 무작업이 ❌로 렌더되는 것이 R4 지적의 핵심.
+    assert not [c for c in calls if c["url"].endswith("/rg-settlement/fetch-error")]
+
+
+def test_rg_no_periods_success_report_failure_does_not_kill_daemon(fetcher, tmp_path, monkeypatch):
+    """성공 보고 POST가 네트워크로 죽어도 데몬은 살아서 루프를 계속한다(보고는 best-effort)."""
+    cfg = _cfg(tmp_path)
+    _patch_common(fetcher, monkeypatch, vs_requested=False, rg_requested=True)
+    monkeypatch.setattr(
+        fetcher, "_do_rg_run",
+        lambda _cfg, _state, login_wait_secs=0: fetcher._RG_RC_NO_PERIODS,
+    )
+
+    def _boom(*_a, **_k):
+        raise fetcher.requests.RequestException("network down")
+
+    monkeypatch.setattr(fetcher.requests, "post", _boom)
+
+    with pytest.raises(_StopPoll):
+        fetcher.cmd_poll(cfg)
 
 
 def test_rg_success_reports_nothing(fetcher, tmp_path, monkeypatch):

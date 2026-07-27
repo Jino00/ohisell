@@ -1858,6 +1858,31 @@ def wing_rg_settlement_fetch_error(
     return {"ok": True}
 
 
+@router.post("/wing/rg-settlement/fetch-success")
+def wing_rg_settlement_fetch_success(
+    account_key: str = Query(default="COUPANG_WING1", description="COUPANG_WING1/2"),
+    x_ingest_token: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """Wing RG 정산 페처 run '완주' 보고 → last_success_at 갱신. 토큰 인증(claim과 동일).
+
+    ★정상 경로의 성공은 upload-xlsx(rg_mark_heartbeat)가 알린다 — 이 엔드포인트는 그 짝이
+    아니라 **업로드가 0건인 완주**(정산주기 없음)만을 위한 것이다. 주 단위 정산이라 버튼을
+    누른 시점에 새 정산주기가 아예 없는 회차가 정상적으로 존재하는데, 그때는 push가 없어
+    heartbeat가 안 움직이고 claim은 이미 요청을 소비했다 → 침묵하면 UI가 215초 헛기다린 뒤
+    'Mac 응답 없음'(Mac 꺼짐) 오진, fetch-error로 대신 알리면 완주한 무작업이 ❌ 실패로 렌더된다
+    (last_error_at 변화를 프론트가 전부 실패로 읽는다). 둘 다 거짓말이므로 성공 전용 신호를 준다.
+
+    ★heartbeat를 움직여도 신선도를 속이지 않는다: RG 상태행(COUPANG_WING_RG/_RG2)의
+    last_success_at은 워치독(WATCHDOG_COOKIES)·전역 신선도 배너(collection_status)의 입력이
+    아니고, RG 돈 데이터의 낡음은 DATA_FRESHNESS_RULES(적재된 recognition_date_to — 거짓말 불가)가
+    전담한다. 이 값의 소비자는 갱신 버튼 폴링뿐 — '페처 살아있음 + 조회 완주'가 정확히 사실이다.
+    """
+    _require_ingest_token(x_ingest_token)
+    rg_settlement_sync.rg_mark_heartbeat(db, _require_rg_account(account_key))
+    return {"ok": True}
+
+
 # ════════════════════════════════════════════════════════════════════
 # RG 정산 옵션 단위 수집 (S6 — 종류별 엑셀 수동 업로드, D-2)
 # ════════════════════════════════════════════════════════════════════

@@ -824,6 +824,26 @@ def _prod_report_fetch_error(cfg: dict, path: str, reason: str) -> None:
         log.warning("fetch-error 보고 실패(%s): %s", path, str(e)[:120])
 
 
+def _prod_report_fetch_success(cfg: dict, path: str) -> None:
+    """run 완주를 prod에 보고(last_success_at) — 보고 실패는 로그만(데몬 생존 우선).
+
+    ★'업로드 0건 완주'(RG 정산주기 없음) 전용: 정상 성공은 push(ingest/upload-xlsx)가 이미
+    heartbeat를 움직인다. 업로드가 없는 회차만 이 성공 신호가 필요하다 — fetch-error로 알리면
+    완주한 무작업이 UI에서 ❌ 실패로 렌더되고(프론트는 last_error_at 변화를 전부 실패로 읽는다),
+    침묵하면 215초 헛기다림 뒤 'Mac 응답 없음' 오진이다.
+    """
+    try:
+        r = requests.post(
+            cfg["prod_base_url"].rstrip("/") + path,
+            params={"account_key": cfg["account_key"]},
+            headers={"X-Ingest-Token": cfg["ingest_token"]},
+            timeout=15,
+        )
+        r.raise_for_status()
+    except Exception as e:  # noqa: BLE001 — 보고 실패로 데몬을 죽이지 않는다
+        log.warning("fetch-success 보고 실패(%s): %s", path, str(e)[:120])
+
+
 class _LastErrorCapture(logging.Handler):
     """run 동안 마지막 log.error 메시지를 붙잡는다 — fetch-error 보고의 사유로 쓴다."""
 
@@ -956,16 +976,14 @@ def cmd_poll(cfg: dict) -> int:
                                 rc, reason = _run_claimed(
                                     lambda: _do_rg_run(cfg, state, login_wait_secs=_LOGIN_WAIT_S))
                                 if rc == _RG_RC_NO_PERIODS:
-                                    # ★codex R3 [P2]: 정산주기 0개면 업로드가 없어 heartbeat
-                                    #   (upload-xlsx→rg_mark_heartbeat)가 안 움직인다. 성공 전용
-                                    #   신호가 없으므로(RG엔 fetch-success 엔드포인트 없음) 이
-                                    #   fetch-error로 last_error_at을 움직여 UI 폴링을 진실하게
-                                    #   끝낸다 — 사유 문구가 '실패 아님'을 명시한다. status는
-                                    #   건드리지 않으므로(rg_mark_fetch_error) 쿠키만료 배너는 안 뜬다.
-                                    _prod_report_fetch_error(
-                                        cfg, "/api/coupang/ops/wing/rg-settlement/fetch-error",
-                                        "RG: 정산주기 없음 — 다운로드 대상 0건"
-                                        "(실패 아님, 조회는 완주)")
+                                    # ★codex R4 [P2]: 정산주기 0개면 업로드가 없어 heartbeat
+                                    #   (upload-xlsx→rg_mark_heartbeat)가 안 움직인다. R3에선
+                                    #   fetch-error에 '실패 아님' 문구를 실어 보냈지만, 프론트는
+                                    #   last_error_at 변화를 전부 실패로 읽어(runRgRefreshForAccount)
+                                    #   완주한 무작업이 ❌ 실패로 렌더됐다 — 문구가 무슨 말을 하든
+                                    #   소비자는 구분할 수 없다. 성공 전용 종단 신호로 보고한다.
+                                    _prod_report_fetch_success(
+                                        cfg, "/api/coupang/ops/wing/rg-settlement/fetch-success")
                                 elif rc != 0:
                                     _prod_report_fetch_error(
                                         cfg, "/api/coupang/ops/wing/rg-settlement/fetch-error",
@@ -1021,7 +1039,9 @@ _RG_POLL_TIMEOUT_S = 300      # 생성 완료 최대 대기(5분)
 # _do_rg_run 전용 종료코드 — '완주했으나 업로드 0건'(정산주기 없음). 실패(1·2)와 구분해야 한다:
 # 성공 신호(last_success_at)는 upload-xlsx만 움직이므로 업로드가 0건이면 아무 시각도 안 움직이고,
 # claim된 버튼 요청은 이미 소비돼 UI가 215초 헛기다린 뒤 'Mac 응답 없음'으로 오진한다(codex R3 [P2]).
-# cmd_poll이 이 코드를 정보성 사유로 보고해 폴링을 진실하게 끝낸다. CLI(cmd_rg)는 nonzero=주의 신호.
+# cmd_poll이 이 코드를 성공 전용 신호(rg-settlement/fetch-success)로 보고해 폴링을 진실하게 끝낸다
+# (R3의 '실패 아님' 문구 실은 fetch-error는 프론트가 ❌ 실패로 렌더했다 — codex R4 [P2]).
+# CLI(cmd_rg)는 nonzero=주의 신호.
 _RG_RC_NO_PERIODS = 3
 _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 

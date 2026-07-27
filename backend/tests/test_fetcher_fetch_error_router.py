@@ -103,3 +103,73 @@ def test_missing_error_field_records_unknown(env, url, account):
     row = _row(seed, account)
     assert row.last_error == "unknown"
     assert row.last_error_at is not None
+
+
+# ══════════════════════════════════════════════════════════════════════
+# RG 정산 fetch-success — '업로드 0건 완주'(정산주기 없음) 전용 성공 신호 (codex R4 [P2])
+#   정상 성공은 upload-xlsx(rg_mark_heartbeat)가 알린다. 업로드가 0건인 회차만 이 신호가
+#   필요하다: 침묵하면 UI 215초 헛기다림('Mac 응답 없음'), fetch-error로 알리면 완주한
+#   무작업이 ❌ 실패로 렌더된다(프론트는 last_error_at 변화를 전부 실패로 읽는다).
+# ══════════════════════════════════════════════════════════════════════
+_RG_SUCCESS_URL = "/api/coupang/ops/wing/rg-settlement/fetch-success"
+
+
+def test_rg_fetch_success_moves_heartbeat(env):
+    """토큰 있으면 200 + last_success_at 기록(=프론트 폴링이 ✅로 종료되는 유일 경로)."""
+    client, seed = env
+    r = client.post(_RG_SUCCESS_URL, headers={"X-Ingest-Token": _TOKEN})
+    assert r.status_code == 200
+
+    row = _row(seed, rg_settlement_sync._RG_STATE_ACCOUNT)
+    assert row.last_success_at is not None
+    assert row.status == "green"
+
+
+def test_rg_fetch_success_clears_previous_error(env):
+    """직전 실패 흔적을 지운다 — 안 지우면 성공/실패 판정 순서에 기대는 화면이 오래된 ❌를 남긴다."""
+    client, seed = env
+    assert client.post("/api/coupang/ops/wing/rg-settlement/fetch-error",
+                       json={"error": "chrome crash"},
+                       headers={"X-Ingest-Token": _TOKEN}).status_code == 200
+    assert client.post(_RG_SUCCESS_URL, headers={"X-Ingest-Token": _TOKEN}).status_code == 200
+
+    row = _row(seed, rg_settlement_sync._RG_STATE_ACCOUNT)
+    assert row.last_error is None and row.last_error_at is None
+    assert row.last_success_at is not None
+
+
+def test_rg_fetch_success_rejects_without_token(env):
+    client, seed = env
+    r = client.post(_RG_SUCCESS_URL)
+    assert r.status_code == 401
+    assert _row(seed, rg_settlement_sync._RG_STATE_ACCOUNT).last_success_at is None
+
+
+def test_rg_fetch_success_rejects_wrong_token(env):
+    client, seed = env
+    r = client.post(_RG_SUCCESS_URL, headers={"X-Ingest-Token": "wrong"})
+    assert r.status_code == 401
+    assert _row(seed, rg_settlement_sync._RG_STATE_ACCOUNT).last_success_at is None
+
+
+def test_rg_fetch_success_is_per_account(env):
+    """WING2 완주가 WING1을 '갱신 완료'로 위장하지 못한다(계정별 상태행 — 큐 격리와 같은 불변식)."""
+    client, seed = env
+    r = client.post(_RG_SUCCESS_URL, params={"account_key": "COUPANG_WING2"},
+                    headers={"X-Ingest-Token": _TOKEN})
+    assert r.status_code == 200
+
+    seed.expire_all()
+    w2 = seed.query(CoupangWingCookie).filter_by(
+        account_key=rg_settlement_sync._RG_STATE_ACCOUNT_BY_ACCOUNT["COUPANG_WING2"]).one()
+    assert w2.last_success_at is not None
+    assert _row(seed, rg_settlement_sync._RG_STATE_ACCOUNT).last_success_at is None
+
+
+def test_rg_fetch_success_rejects_unknown_account(env):
+    """RG_ACCOUNTS 밖 account_key는 400 — 오타로 유령 상태행이 생기지 않게."""
+    client, seed = env
+    r = client.post(_RG_SUCCESS_URL, params={"account_key": "COUPANG_WING9"},
+                    headers={"X-Ingest-Token": _TOKEN})
+    assert r.status_code == 400
+    assert _row(seed, rg_settlement_sync._RG_STATE_ACCOUNT).last_success_at is None
