@@ -981,9 +981,13 @@ def _do_run(cfg: dict) -> int:
                     if not _goto_origin(page):
                         log.error("supplier 로그아웃 상태(url=%s) — 이 창에서 로그인 후 다시 '갱신'을 누르세요.", page.url)
                         owner.keep_open = True   # 로그인할 창이 필요 → 닫지 않음
-                        return 1
+                        return RC_LOGIN_REQUIRED
                     if not _session_ok(page, cfg):
-                        log.error("발주 list 세션 미응답 — 세션 만료. 이 창에서 로그인 후 다시 '갱신'을 누르세요.")
+                        # ★재시도 대상으로 둔다(codex 1R[P2]): _session_ok는 Playwright 예외·
+                        # Akamai 챌린지·일시적 비200까지 전부 False로 접는다. 로그아웃이 확증된
+                        # 것이 아니므로 login_required로 소멸시키면 멀쩡한 세션의 일시 장애가
+                        # 요청을 지운다. 진짜 로그아웃은 위 _goto_origin(URL 판정)이 잡는다.
+                        log.error("발주 list 세션 미응답 — 세션 만료 의심. 이 창에서 로그인 후 다시 '갱신'을 누르세요.")
                         owner.keep_open = True
                         return 1
                     pages = _collect_po_pages(page, cfg)
@@ -1010,15 +1014,52 @@ def _do_run(cfg: dict) -> int:
     log.info("run 완료 — 발주 push rc=%d / 정산 push rc=%d / 발주상세 실패=%d", rc_po, rc_st, detail_failed)
     # 성공 시 last_success_at 갱신 (UI 폴링 완료 감지용)
     if rc == 0 and _push_configured(cfg):
-        try:
-            requests.post(
-                cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/rocket/fetch-success",
-                headers={"X-Ingest-Token": cfg["ingest_token"]},
-                timeout=10,
-            )
-        except Exception:  # noqa: BLE001
-            pass
+        # ★완료 신호는 몇 번 재시도한다(codex 5R[P1]): 유실되면 요청이 임대된 채 남아
+        #   UI가 헛기다리고 TTL 뒤 중복 수집으로 이어진다.
+        for _attempt in range(3):
+            try:
+                r = requests.post(
+                    cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/rocket/fetch-success",
+                    headers={"X-Ingest-Token": cfg["ingest_token"]},
+                    timeout=10,
+                )
+                if r.status_code == 200:
+                    break
+                log.warning("fetch-success 비200(%s) — 재시도 %d/3", r.status_code, _attempt + 1)
+            except Exception as e:  # noqa: BLE001
+                log.warning("fetch-success 실패(%s) — 재시도 %d/3", str(e)[:80], _attempt + 1)
+            time.sleep(2 * (_attempt + 1))
     return rc
+
+
+# run 반환코드 — 3=로그인 필요(재시도 무의미: 재시도해도 실패하고 창만 반복해서 뜬다, §0).
+# 1=그 외 실패(재시도 대상), 2=설정 누락, 0=성공.
+RC_LOGIN_REQUIRED = 3
+
+
+def _prod_report_failure(cfg: dict, error: str, kind: str | None = None,
+                        lease: str | None = None) -> None:
+    """run 실패를 prod에 보고 → 재시도 판정의 입력(lease 계약, PLAN_coupang-claim-retry-lease).
+
+    보고가 없으면 lease TTL(기본 20분)이 지나야 재시도된다 — 보고하면 다음 폴(30s)에 곧바로.
+    kind="login_required"면 prod가 재시도 없이 요청을 소멸시킨다(§0 금지선). best-effort.
+    """
+    if not _push_configured(cfg):
+        return
+    body = {"error": str(error)[:300]}
+    if kind:
+        body["kind"] = kind
+    if lease:
+        body["lease"] = lease   # 내 임대에 대해서만 보고(stale 보고 차단, codex 1R[P1])
+    try:
+        requests.post(
+            cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/rocket/fetch-error",
+            json=body,
+            headers={"X-Ingest-Token": cfg["ingest_token"]},
+            timeout=10,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("fetch-error 보고 실패(무시): %s", str(e)[:120])
 
 
 def _prod_rocket_refresh_status(cfg: dict) -> dict:
@@ -1034,7 +1075,7 @@ def _prod_rocket_refresh_status(cfg: dict) -> dict:
 
 
 def _prod_rocket_claim(cfg: dict) -> dict:
-    """백엔드 rocket refresh-claim — 요청 플래그 clear."""
+    """백엔드 rocket refresh-claim — 요청 임대(lease). 플래그는 성공/소진까지 보존."""
     try:
         r = requests.post(
             cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/rocket/refresh-claim",
@@ -1162,15 +1203,24 @@ def cmd_poll(cfg: dict, interval: int = 30) -> int:
             needs_run = False
 
             # UI 버튼 요청 (유일한 트리거)
+            lease = None
             if st.get("requested"):
-                claimed = _prod_rocket_claim(cfg).get("claimed", False)
-                if claimed:
-                    log.info("[poll] UI 갱신 요청 소비 → 즉시 실행")
+                _claim = _prod_rocket_claim(cfg)
+                if _claim.get("claimed", False):
+                    lease = _claim.get("lease")   # 내 임대 식별자(실패 보고에 첨부)
+                    log.info("[poll] UI 갱신 요청 임대 → 즉시 실행")
                     needs_run = True
 
             if needs_run:
                 rc = cmd_run(cfg)
                 log.info("[poll] run 완료 rc=%d", rc)
+                if rc != 0:
+                    # 실패 보고 = 재시도 판정의 입력(lease 계약). rc==3(로그인 필요)이면
+                    # prod가 재시도 없이 요청을 소멸시킨다(§0 — 창만 반복해서 뜬다).
+                    _prod_report_failure(
+                        cfg, f"로켓 발주/정산 수집 실패(rc={rc})",
+                        kind=("login_required" if rc == RC_LOGIN_REQUIRED else None),
+                        lease=lease)
 
         except Exception as e:  # noqa: BLE001
             fails += 1
@@ -1182,32 +1232,12 @@ def cmd_poll(cfg: dict, interval: int = 30) -> int:
         _time.sleep(interval)
 
 
-def cmd_chrome_supervise(cfg: dict) -> int:
-    """[폐기됨 2026-07-27] Chrome 상주 supervisor — 이제 아무 것도 띄우지 않는다.
-
-    ★이 스텁이 rocket에도 필요한 이유(2026-07-27 실측): repo에는 rocket-chrome plist가 없어
-    "rocket은 supervisor가 없다"고 보였지만, **Jino Mac에는 `com.ohisell.rocket-chrome`가 실제로
-    로드돼 있었다**(~/Library/LaunchAgents, 2026-07-17 생성, 포트 9225,
-    ProgramArguments = `rocket_supplier_fetcher.py chrome-supervise`).
-    이 커맨드가 없으면 설치 스크립트가 새 .py를 복사하는 순간 usage 에러(exit 2) →
-    KeepAlive + ThrottleInterval 30 → **30초마다 영구 크래시 루프**가 된다.
-    설치 스크립트가 이 잡을 bootout·삭제하지만(1차 방어), 스크립트를 안 거치는 경로를 위해
-    wing·ohitech와 동일한 2차 방어를 둔다. Chrome은 띄우지 않고 block만 한다.
-    """
-    log.warning("[deprecated] chrome-supervise는 폐기됨(버튼-only 전환) — Chrome을 띄우지 않고 대기만 합니다. "
-                "launchctl bootout gui/$(id -u)/com.ohisell.rocket-chrome 후 plist를 삭제하세요.")
-    while True:  # launchd가 bootout할 때까지 no-op block(재기동 폭주 방지)
-        time.sleep(3600)
-
-
 def main() -> None:
     _install_signal_cleanup()   # SIGTERM(launchd bootout) 시 내가 띄운 Chrome 회수
     cfg = load_config()
     arg = sys.argv[1] if len(sys.argv) >= 2 else "run"
     if arg == "chrome":
         sys.exit(cmd_chrome(cfg))
-    if arg == "chrome-supervise":  # [폐기] 구 plist 전환 안전용 no-op block
-        sys.exit(cmd_chrome_supervise(cfg))
     if arg == "login":
         sys.exit(cmd_login(cfg))
     if arg in ("run", ""):
