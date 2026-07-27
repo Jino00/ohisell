@@ -115,7 +115,8 @@ def _lease_of(row: CoupangWingCookie | None) -> str | None:
     return row.claimed_at.isoformat()
 
 
-def claim_refresh(db: Session, account_key: str) -> dict:
+def claim_refresh(db: Session, account_key: str, *,
+                  settle_on_success_heartbeat: bool = True) -> dict:
     """페처가 요청을 **임대**한다(플래그는 보존). 원자적 조건부 UPDATE.
 
     조건: 요청이 살아있고 ∧ 시도 예산이 남았고(attempt_count < MAX) ∧ (임대 없음 ∨ 임대 만료).
@@ -125,12 +126,17 @@ def claim_refresh(db: Session, account_key: str) -> dict:
     report_failure를 안 거치므로 TTL 만료만으로 계속 재claim된다 — 상한이 무력해지고 Chrome이
     영원히 반복해서 뜬다. 예산을 다 쓴 요청은 여기서 소멸시킨다(폴이 곧 reaper 역할).
 
+    settle_on_success_heartbeat(codex 4R[P1]): "요청 이후 성공 heartbeat가 있고 임대가 만료된 채
+    방치" = 자동 완료. **한 회차가 산출물 하나인 스트림에서만 참**이다. RG 정산처럼 한 회차가
+    여러 엑셀을 올리는 스트림은 첫 엑셀 heartbeat를 완주로 오인하므로 False로 끈다(그 대신
+    run 종료 신호 refresh-complete를 쓴다).
+
     반환 attempt=이번 시도가 몇 번째인지(1-based), lease=이번 임대 식별자(실패 보고에 되돌려줌).
     """
     now = kst_now()
     cutoff = now - timedelta(minutes=_LEASE_TTL_MIN)
     pre = _row(db, account_key)
-    if pre is not None and _settle_if_satisfied(db, pre, cutoff):
+    if settle_on_success_heartbeat and pre is not None and _settle_if_satisfied(db, pre, cutoff):
         return {"claimed": False, "attempt": int(pre.attempt_count or 0),
                 "max_attempts": MAX_ATTEMPTS, "lease": None}
     res = db.execute(
@@ -183,10 +189,20 @@ def _settle_if_satisfied(db: Session, row: CoupangWingCookie, cutoff) -> bool:
         return False  # 아직 일하는 중이거나, 실패 보고로 반납돼 재시도 대기 중
     if row.last_success_at < row.refresh_requested_at:
         return False  # 이번 요청보다 오래된 성공 — 무관
-    row.refresh_requested_at = None
-    row.claimed_at = None
-    row.attempt_count = 0
+    # 조건부 UPDATE(codex 4R[P2]): 폴이 여럿이면 A가 닫은 뒤 사용자가 새 버튼을 눌렀는데
+    # B의 낡은 행이 뒤늦게 커밋되며 그 새 요청을 지울 수 있다. 관측한 (요청시각·임대·시도횟수)와
+    # 일치할 때만 쓴다.
+    res = db.execute(
+        update(CoupangWingCookie)
+        .where(CoupangWingCookie.account_key == row.account_key)
+        .where(CoupangWingCookie.refresh_requested_at == row.refresh_requested_at)
+        .where(CoupangWingCookie.claimed_at == row.claimed_at)
+        .where(CoupangWingCookie.attempt_count == row.attempt_count)
+        .values(refresh_requested_at=None, claimed_at=None, attempt_count=0)
+    )
     db.commit()
+    if (res.rowcount or 0) == 0:
+        return False
     log.info("refresh 요청 자동 완료(성공 heartbeat 확인): %s", row.account_key)
     return True
 

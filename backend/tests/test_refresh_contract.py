@@ -349,6 +349,22 @@ def test_released_lease_after_partial_success_still_retries(db):
     assert rc.claim_refresh(db, ACC)["claimed"] is True   # 재시도가 살아있다
 
 
+def test_multi_artifact_stream_opts_out_of_auto_settlement(db):
+    """★codex 4R[P1]: RG처럼 한 회차에 여러 엑셀을 올리는 스트림은 첫 heartbeat를 완주로
+    읽으면 안 된다 — 남은 리포트를 영영 재시도하지 않는다.
+    """
+    rc.request_refresh(db, ACC)
+    rc.claim_refresh(db, ACC, settle_on_success_heartbeat=False)
+    row = _row(db)
+    row.last_success_at = kst_now()   # 첫 엑셀만 성공
+    row.claimed_at = kst_now() - timedelta(minutes=rc.lease_ttl_minutes() + 1)  # 그 뒤 크래시
+    db.commit()
+
+    out = rc.claim_refresh(db, ACC, settle_on_success_heartbeat=False)
+    assert out["claimed"] is True      # 남은 리포트를 위해 재시도한다
+    assert _row(db).refresh_requested_at is not None
+
+
 def test_live_lease_is_not_settled_by_partial_success(db):
     """여러 파일을 올리는 run의 중간 업로드를 '완료'로 오인하지 않는다(임대가 살아 있으면 대기)."""
     rc.request_refresh(db, ACC)

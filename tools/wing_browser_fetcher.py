@@ -748,6 +748,9 @@ def cmd_run(cfg: dict) -> int:
 
 # run 반환코드 — 3=로그인 필요(재시도 무의미: 창만 반복해서 뜬다, §0). 1=그 외 실패(재시도 대상).
 RC_LOGIN_REQUIRED = 3
+# 4=이번 회차는 중복 요청(dedup)에 막혀 받지 못했다 — 실패도 성공도 아니고 "나중에 다시".
+# 30초 뒤 재시도는 여전히 dedup 윈도우 안이므로 긴 백오프를 쓴다(codex 4R[P1]).
+RC_RETRY_LATER = 4
 _VS_ERROR_PATH = "/api/coupang/ops/wing/vendor-summary/fetch-error"
 _RG_ERROR_PATH = "/api/coupang/ops/wing/rg-settlement/fetch-error"
 _RG_COMPLETE_PATH = "/api/coupang/ops/wing/rg-settlement/refresh-complete"
@@ -870,6 +873,8 @@ def cmd_poll(cfg: dict) -> int:
     # 실패로 임대를 반납한 경우에 한해 쿨다운을 이 시각까지 면제한다(요청이 살아있는 동안만).
     rg_retry_at: float | None = None
     rg_retry_backoff = int(cfg.get("rg_retry_backoff_s", 30))
+    # 중복 요청(dedup)에 막힌 회차용 긴 백오프 — 30초 뒤 재시도는 반드시 또 dup이 된다.
+    rg_dup_backoff = int(cfg.get("rg_dup_backoff_s", 900))
     log.info("Wing 폴 데몬 시작 — %ds 간격 확인, fetch 최소간격 %ds. RG 버튼 전용·간격 %ds(창은 버튼 요청 시에만 뜸).",
              interval, cooldown, rg_cooldown)
     net_fails = 0  # 연속 네트워크 실패 카운터(vendor-summary 폴 기준) — 성공 시 리셋
@@ -943,7 +948,9 @@ def cmd_poll(cfg: dict) -> int:
                                     if rc != RC_LOGIN_REQUIRED:
                                         # 재시도 가능한 실패 → 1시간 쿨다운을 면제하고 곧 다시
                                         # 시도한다(요청이 살아있을 때만 실제로 claim된다).
-                                        rg_retry_at = time.monotonic() + rg_retry_backoff
+                                        # dedup에 막힌 회차는 짧은 재시도가 무의미 → 긴 백오프.
+                                        rg_retry_at = time.monotonic() + (
+                                            rg_dup_backoff if rc == RC_RETRY_LATER else rg_retry_backoff)
                                 else:
                                     # 정상 완주 신호 — 받을 게 없어 업로드 0건이었어도 요청은
                                     # 여기서 소멸한다(없으면 창을 3번 더 띄운 뒤 거짓 실패).
@@ -1341,7 +1348,11 @@ def _do_rg_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
         log.error("RG 브라우저 실행 오류: %s", e)
         return 1
     log.info("RG 다운로드 완료 — push 성공 %d / 실패 %d / 중복스킵 %d", pushed, failed, skipped)
-    return 0 if failed == 0 else 1
+    if failed:
+        return 1
+    # ★dup만 있고 실패가 없어도 '완료'가 아니다(codex 4R[P1]): 그 리포트는 이번에도 못 받았다.
+    #   완료로 보고하면 요청이 닫혀 영영 안 받는다 → 재시도 대상(긴 백오프)으로 돌린다.
+    return RC_RETRY_LATER if skipped else 0
 
 
 def cmd_rg(cfg: dict) -> int:

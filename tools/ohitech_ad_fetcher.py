@@ -804,12 +804,15 @@ def cmd_run(cfg: dict) -> int:
             res = page.evaluate(_SALES_FETCH_JS, _sales_payload(cfg))
             status = res.get("status") if res else None
             body = (res or {}).get("body") or ""
+            # ★로그인 HTML은 status와 무관하게 먼저 판정한다(codex 4R[P2]): 쿠팡은 로그인
+            # 페이지를 200으로 주기도 한다 — 아래 status 분기 안에만 두면 200 로그인 HTML이
+            # 파싱 단계로 새어 '재시도 대상'이 되고 창이 세 번 뜬다.
+            if any(x in body.lower() for x in ("login", "signin", "kccontext")):
+                log.error("세션 만료(로그인 HTML, status=%s) — 재로그인 필요.", status)
+                _notify_mac("오하이테크 광고 로그인 필요", "광고비 수집 세션 만료 — Chrome 창에서 재로그인하세요.")
+                owner.keep_open = True
+                return RC_LOGIN_REQUIRED
             if status not in (200, 201):
-                if status == 200 and any(x in body.lower() for x in ("login", "signin", "kccontext")):
-                    log.error("세션 만료(로그인 HTML) — 재로그인 필요.")
-                    _notify_mac("오하이테크 광고 로그인 필요", "광고비 수집 세션 만료 — Chrome 창에서 재로그인하세요.")
-                    owner.keep_open = True
-                    return RC_LOGIN_REQUIRED
                 log.error("report/SALES 비정상 status=%s — %s", status, body[:160].replace("\n", " "))
                 return 1
             days = _parse_sales_days(body)

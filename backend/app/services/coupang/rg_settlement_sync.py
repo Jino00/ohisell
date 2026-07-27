@@ -994,5 +994,11 @@ def rg_refresh_status(db: Session) -> dict:
 
 
 def rg_claim_refresh(db: Session) -> dict:
-    """Wing 페처가 RG 갱신 요청을 **임대**(lease)한다. 플래그는 성공/소진까지 보존(refresh_contract)."""
-    return refresh_contract.claim_refresh(db, _RG_STATE_ACCOUNT)
+    """Wing 페처가 RG 갱신 요청을 **임대**(lease)한다. 플래그는 성공/소진까지 보존(refresh_contract).
+
+    ★settle_on_success_heartbeat=False(codex 4R[P1]): RG 한 회차는 (정산주기×리포트종류) 여러
+    엑셀을 올린다. 첫 엑셀의 heartbeat를 "완주"로 읽으면 나머지 리포트를 영영 재시도하지 않는다.
+    RG의 완주 신호는 run 종료 시의 refresh-complete 하나뿐이다.
+    """
+    return refresh_contract.claim_refresh(db, _RG_STATE_ACCOUNT,
+                                          settle_on_success_heartbeat=False)
