@@ -34,7 +34,11 @@ CHANNELS = [
         "channel_type": "marketplace",
         "account_label": "로켓그로스 2P #1",
         "company": "개인회사 오픽스",
-        "commission_rate": 10.8,
+        # RG 판매수수료도 3P와 동일 7.8%(Jino 확정 2026-07-27). 정산 실측 대조:
+        # WING1 2026-06-15~21 sale_fee(VAT포함) 303,449 / RG매출 3,534,160 = 8.586% = 7.8%×1.1 정확 일치.
+        # 누적(06-01~07-19) 3,056,638/38,072,570 = 8.03% → ÷1.1 = 명목 7.3%(분모=paid_at 기준이라 인식일과 어긋난 오차).
+        # 10.8%였다면 VAT포함 11.88%가 나와야 하나 어느 주도 8.6%를 넘지 않음.
+        "commission_rate": 7.8,
         "api_type": "hmac",
         "api_config_key": "COUPANG_RG1",
         "sell_type": "RG",
@@ -46,7 +50,7 @@ CHANNELS = [
         "channel_type": "marketplace",
         "account_label": "로켓그로스 2P #2",
         "company": "주식회사 오하이테크",
-        "commission_rate": 10.8,
+        "commission_rate": 7.8,  # RG1과 동일(Jino 확정 2026-07-27) — RG2는 정산 표본 부족으로 RG1 실측 준용
         "api_type": "hmac",
         "api_config_key": "COUPANG_RG2",
         "sell_type": "RG",
