@@ -1,3 +1,19 @@
+## ✅ 2026-07-28 오후 — EXECUTION_ACTIONS가 BP 라벨을 못 세던 결함 수정·배포 (main `ae0d049`, PR #152·#155)
+
+BP(예산 페이싱, D-NAO-102 ⑥)는 실행 경로가 `update_budget` 하나인데 change_log에는 `budget_up_pacing`/`budget_down_pacing`이라는 별도 라벨을 남긴다. `EXECUTION_ACTIONS`가 `_ACTION_BY_PROPOSAL_TYPE` 값에서만 파생되어 그 라벨을 몰랐고, `/change-log?actor=ours`·커맨드센터 1층 "우리 조작 N회"·`_execution_state` 배지가 BP 실집행을 통째로 못 셌다(0을 정직하게 말하려던 필터가 반대 방향으로 거짓말 — D-47-h 위반).
+
+- **수정 위치 = 라우터가 아니라 파생 규칙 자체.** `EXECUTION_ACTIONS = frozenset(_ACTION_BY_PROPOSAL_TYPE.values()) | frozenset(PACING_ACTIONS)`. 라우터에 합집합을 하나 더 만들면 다음 소비자가 같은 구멍에 빠진다 — 실제로 `perf_today_harness.TODAY_ACTIONS`가 이미 자기 자리에서 우회하고 있었고, 그 **우회 사본이 원본 결함을 "처리된 것처럼" 은폐**했다. 사본은 제거(이제 EXECUTION_ACTIONS만 참조).
+- **소비처 전수조사**: EXECUTION_ACTIONS 소비자는 라우터 2곳뿐(`actor=ours` 필터 · `_execution_state`). 쿨다운(`compute_change_cadence`)은 action을 아예 안 보므로 **가드레일에는 구멍 없음**(코드로 확인).
+- 프론트 `describeChange()`에 BP 라벨 2케이스 추가 — 없으면 `default`로 떨어져 영문 원문(`budget_up_pacing`)이 표에 노출된다.
+- 회귀 4건(신규 3·수정 1). 구조 가드는 목록을 다시 적지 않고 `_budget_log_action`을 직접 호출해 검사. **수정 전 4건 전부 실패함을 확인**. 전체 3,847 passed.
+- **라이브 검증(원칙22)**: prod 파이썬에서 `budget_up_pacing in EXECUTION_ACTIONS: True`·`TODAY_ACTIONS == EXECUTION_ACTIONS: True` 직접 확인. `/change-log?actor=ours`·`&include_blocked=true`·`/performance/today` 전부 200, pm2 online·재시작 후 예외 0.
+- ★**당장 눈에 보이는 변화 0 — 선행 수정이다.** prod 이력 전체에 BP 행 0건·`approval_source='pace_op'` 제안 0건(레인은 매시 20분 정상 가동하나 소진율 90% 미도달). BP 첫 발사 시점부터 제대로 세어진다.
+- PR #154는 squash 병합으로 merge-base가 갈려 diff가 오염 → 닫고 main 기준 새 브랜치로 #155 재발행(LESSONS #55).
+- codex 소급 부채 **4건째**(08-02 쿼터 리셋 후 일괄 재실행).
+- 다음 액션: BP 실제 증액 발동(소진율≥90%) 시 커맨드센터 1층·성과 뷰에 BP 행이 한글 라벨로 뜨는지 확인.
+
+---
+
 ## ✅ 2026-07-28 밤 — 로켓 1P 통합 대사 화면 배포 완료 (main `4c4a883`, PR #153)
 
 발주↔납품↔거래명세서↔계산서 SKU 대사 화면(`/rocket-recon`) + 조회전용 API(`GET /api/overview/rocket-recon`) 신설. 경량 2R 리뷰 합의(MAJOR 4건 수용, 미합의 0) 후 병합. alembic head 확인(prod `4b66ae3706e6`) 후 backend 2파일 + frontend `safe_deploy.sh` 배포, pm2 재시작 정상. 라이브 실측(ssh localhost:8001): PO 491건·수량드리프트 181건 중 정산단계(CI) 드리프트 105건, SKU 249종(발주상세 커버리지 49.5%), SKU 상세 응답 정상. 프론트 신규 번들(`index-C7VY_nkE.js`) 서빙 확인. 후속 이관 4건(RI 장기체류 알림·TS↔TI 부가세 검증·기간필터 UI·RG 교차대사)은 트랙 스코프 밖.
