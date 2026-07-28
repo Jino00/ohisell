@@ -1284,7 +1284,7 @@ def _fetch_sales_page(page, cfg: dict, day: date, page_no: int):
     return (payload if isinstance(payload, dict) else None), status, text
 
 
-def _collect_sales_day(page, cfg: dict, day: date):
+def _collect_sales_day(page, cfg: dict, day: date, today: date | None = None):
     """한 날짜의 전 페이지 수집. 반환 (rows, period_hint|None, raw_items).
 
     period_hint는 400 INVALID_DATE에서 읽은 유효 구간(호출자가 나머지 날짜를 클램프).
@@ -1341,7 +1341,7 @@ def _collect_sales_day(page, cfg: dict, day: date):
         #   들어오면 totalResults가 커진다. 당일을 hard-raise하면 장사가 잘 되는 날마다 그날을
         #   버리게 된다 — 경보가 정상 상태를 실패로 만드는 전형. 과거일은 확정치라 어긋나면
         #   진짜 절단이므로 그대로 올린다.
-        if day >= datetime.now(KST).date():
+        if day >= (today if today is not None else datetime.now(KST).date()):
             log.warning(
                 "판매분석 %s(당일): totalResults=%d vs 수신 %d — 수집 중 신규 판매로 보고 "
                 "수집분을 유지한다(과거일이면 실패로 올린다)", day, total_results, raw_items,
@@ -1387,6 +1387,9 @@ def _collect_sales_rows(page, cfg: dict) -> tuple[list[dict], dict]:
     stats = {
         "days_requested": len(pending), "days_collected": 0,
         "days_out_of_range": 0, "days_failed": 0, "days_abandoned": 0,
+        # 당일을 뺀 '닫힌 날' 수집 수. 접근차단 추론의 분모는 이쪽이다 — 당일은 이른 아침에
+        #   정당하게 비어 있을 수 있어 증거로 쓰면 안 된다(5R).
+        "days_collected_closed": 0,
         "failed_dates": [], "raw_items": 0, "rows": 0,
     }
     period: tuple[date, date] | None = None
@@ -1411,7 +1414,7 @@ def _collect_sales_rows(page, cfg: dict) -> tuple[list[dict], dict]:
             stats["days_out_of_range"] += 1
             continue
         try:
-            day_rows, hint, raw_items = _collect_sales_day(page, cfg, day)
+            day_rows, hint, raw_items = _collect_sales_day(page, cfg, day, today)
         except _SalesAccessDenied:
             raise                      # 접근 차단은 창 전체의 문제 — 그대로 올린다
         except Exception as e:         # noqa: BLE001 — 하루 실패가 나머지 날을 죽이지 않는다
@@ -1446,6 +1449,8 @@ def _collect_sales_rows(page, cfg: dict) -> tuple[list[dict], dict]:
         rows.extend(day_rows)
         stats["raw_items"] += raw_items
         stats["days_collected"] += 1
+        if day < today:
+            stats["days_collected_closed"] += 1
         page.wait_for_timeout(300)
     stats["rows"] = len(rows)
     log.info(
@@ -1472,10 +1477,13 @@ def _collect_sales_rows(page, cfg: dict) -> tuple[list[dict], dict]:
         and stats["days_abandoned"] == 0
         and stats["days_collected"] + stats["days_out_of_range"] == stats["days_requested"]
     )
-    if fully_observed and stats["days_collected"] > 0:
+    # ★분모는 '닫힌 날'이다(5R): 창을 빠짐없이 봤더라도 그게 **당일 하나뿐**이면 빈 결과는
+    #   증거가 못 된다(새벽엔 정당하게 0건). 그 경우까지 소멸시키면 아침마다 요청이 죽는다.
+    if fully_observed and stats["days_collected_closed"] > 0:
         if stats["raw_items"] == 0:
             raise _SalesAccessDenied(
-                f"판매분석 {stats['days_collected']}일을 빠짐없이 조회했는데(실패·미조회 0일) "
+                f"판매분석 {stats['days_collected']}일(확정 {stats['days_collected_closed']}일)을 "
+                "빠짐없이 조회했는데(실패·미조회 0일) "
                 "vendorItems가 전부 0개 — 판매가 없는 게 아니라 접근이 끊긴 것으로 본다"
                 "(D-CPP-5). 구독 상태(무료체험 종료일)를 확인할 것"
             )
@@ -1795,6 +1803,13 @@ def _do_run(cfg: dict) -> int:
 
     push 부분실패는 비0 반환. 세션 만료면 창을 남겨(사람이 그 창에서 로그인) 1을 반환한다.
     """
+    # ★진단 상태는 **어떤 return보다 먼저** 비운다(적대적 리뷰 5R): 아래에는 조기 return이
+    #   네 갈래(설정 누락·로그인 필요·세션 미응답·브라우저 오류) 있고, 그 경로로 나가면
+    #   _LAST_RUN_ERROR가 **직전 실행의 텍스트**로 남아 있어 새 실패에 옛 사유가 붙는다
+    #   (예: 어제의 "판매분석 접근 차단"이 오늘의 로그인 실패 보고에 실린다).
+    global _LAST_RUN_ERROR, _LAST_RUN_KIND
+    _LAST_RUN_ERROR = ""
+    _LAST_RUN_KIND = None
     if not _push_configured(cfg):
         log.error("run엔 prod_base_url·ingest_token·vendor_id 설정 필요(~/.ohisell_rocket_fetcher.json).")
         return 2
@@ -1855,9 +1870,7 @@ def _do_run(cfg: dict) -> int:
     if detail_failed > 0:
         reasons.append(f"발주상세 실패 {detail_failed}건")
     reasons.extend(promo_failures)
-    global _LAST_RUN_ERROR, _LAST_RUN_KIND
     _LAST_RUN_ERROR = " / ".join(reasons) if reasons else ""
-    _LAST_RUN_KIND = None
 
     if not core_failed and rc_promo_pnl == 0:
         rc = 0

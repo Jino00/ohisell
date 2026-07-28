@@ -1428,7 +1428,7 @@ def ingest_rocket_sales(
                 "(실패 날짜 %s) — 롤링 창이 다음 회차에 메우는지 확인할 것",
                 vendor_id, cs.get("days_requested"), cs.get("days_collected"),
                 cs.get("days_out_of_range"), cs.get("days_failed"), cs.get("days_abandoned"),
-                ",".join(cs.get("failed_dates") or [])[:200],
+                ",".join(map(str, cs.get("failed_dates") or []))[:200],
             )
     return out
 

@@ -710,3 +710,36 @@ def test_budget_exhaustion_counts_abandoned_days(fetcher, frozen_today, monkeypa
     assert stats["days_abandoned"] > 0
     assert (stats["days_collected"] + stats["days_out_of_range"]
             + stats["days_failed"] + stats["days_abandoned"]) == stats["days_requested"]
+
+
+def test_empty_today_only_window_is_not_access_denied(fetcher, frozen_today):
+    """★분모는 '닫힌 날'이다(5R): 창이 당일 하나뿐이면 빈 결과는 증거가 못 된다.
+
+    sales_days=1이면 창은 당일 하나다. 새벽에 아직 판매가 없으면 vendorItems=0인데,
+    이걸 접근 차단으로 단정하면 **아침마다 갱신 요청이 소멸한다**.
+    """
+    cfg = dict(_CFG, sales_days=1)
+
+    def responder(arg):
+        return {"status": 200, "body": json.dumps(
+            {"vendorItems": [], "paginationDetails": {"pageNumber": 0, "totalPages": 1,
+                                                      "totalResults": 0}})}
+
+    rows, stats = fetcher._collect_sales_rows(FakePage(responder), cfg)
+    assert rows == []
+    assert stats["days_collected"] == 1 and stats["days_collected_closed"] == 0
+    # 예외 없음 = 요청이 소멸되지 않는다
+
+
+def test_last_run_error_does_not_leak_into_a_later_run(fetcher, monkeypatch):
+    """★진단 텍스트는 어떤 조기 return보다 먼저 비운다(5R).
+
+    _do_run에는 조기 return이 여럿이라, 리셋이 아래쪽에 있으면 **직전 실행의 사유**가
+    남아 새 실패에 오귀속된다(어제의 '판매분석 접근 차단'이 오늘의 설정 누락 보고에 붙는다).
+    """
+    fetcher._LAST_RUN_ERROR = "직전 실행의 판매분석 접근 차단"
+    fetcher._LAST_RUN_KIND = "access_denied"
+    # 설정 누락 경로(가장 이른 return)로 빠지게 한다
+    assert fetcher._do_run({}) == 2
+    assert fetcher._LAST_RUN_ERROR == ""
+    assert fetcher._LAST_RUN_KIND is None
