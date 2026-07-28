@@ -759,3 +759,43 @@ LESSONS #41(착수 전 PR·chip 확인)대로 `gh pr list`로 열린 PR 2건을 
 **#49 추가 실사고 (같은 날 2건째)** — 내가 등록한 chip `task_a0c65677`(safe_deploy alembic 가드)이 **이미 구현돼 있던 기능을 다시 만들게 했다.** 전날 22:35 다른 세션이 같은 가드를 테스트 2개까지 붙여 `fb5311a`(브랜치 `claude/quizzical-jones-1b538a`)로 커밋해 뒀는데, **미푸시·미병합이라 `gh pr list`에도 `docs/`에도 흔적이 없었다.** 결과: 오늘 세션이 처음부터 재구현해 main에 병합(`a516951`), 어제 것은 고아 브랜치로 남음. 게다가 병합된 쪽은 **테스트가 없고**(커밋 메시지가 언급한 회귀 하니스를 커밋하지 않음) 고아 쪽에만 커밋된 하니스가 있는, 정확히 거꾸로 된 상태가 됐다.
 → **chip을 등록하기 전에도 겹침 확인을 하라.** chip은 "미래의 나"에게 보내는 지시라 착수 게이트가 한 번 더 필요하다. 최소한 `git log --all --oneline -- <대상파일>`은 돌린다. 파일 하나를 지목하는 chip이면 이 한 줄이면 충분하다.
 → **"검증했다"는 커밋 메시지를 테스트 존재의 증거로 읽지 마라.** 일회용 하니스로 검증하고 커밋하지 않으면 다음 사람에겐 무테스트다. `git ls-tree -r --name-only origin/main | grep <대상>`으로 확인.
+
+## 50. alembic revision ID를 손으로 짓는다 — 그래서 서로 다른 마이그레이션이 같은 ID를 갖는다 (2026-07-28, 로켓 1P M1 배포 차단)
+
+### 🐛 이슈
+로켓 1P 파서 컬럼 복원(PR #130)을 prod 배포하려는데 `safe_deploy.sh --migrate` 가 **차단**했다:
+"prod에 아직 없는 마이그레이션 파일이 배포 목록에서 빠졌습니다: `a1c3e5f7b9d1_add_coupang_promo_pnl_phase1.py`".
+그런데 prod DB는 이미 `alembic_version = a1c3e5f7b9d1` 로 스탬프돼 있었다. 모순을 파보니 —
+
+**서로 다른 두 마이그레이션이 같은 revision ID `a1c3e5f7b9d1` 을 쓰고 있었다.**
+
+| | 파일 | 상태 |
+|---|---|---|
+| prod | `a1c3e5f7b9d1_merge_status_reason_and_delivery_cols.py` (merge revision, 부모 = `a7b9c1d3e5f7` + `f6a8c0e2b4d6`) | **적용됨** |
+| main | `a1c3e5f7b9d1_add_coupang_promo_pnl_phase1.py` (promo-pnl Phase1) | **미적용**(prod에 promo 테이블 0개) |
+
+그대로 배포했다면 prod의 `versions/` 에 같은 revision을 정의하는 파일이 2개가 되어 **alembic 호출 전체가
+`Duplicate revision` 으로 죽는다** — 우리 컬럼이 아니라 **모든 마이그레이션·모든 배포**가 막히는 사고였다.
+
+근본 원인: 이 저장소의 revision ID가 `alembic revision` 이 뽑는 난수가 아니라 **손(또는 LLM)으로 지은 값**이다.
+실제 목록을 보면 패턴이 뻔하다 — `e5f7a9c1b3d5`, `a1c3e5f7b9d1`, `f6a8c0b2d4e6`, `a7b9c1d3e5f7`,
+`c4e6a8b0d2f4`, `f6a8c0e2b4d6`. 사실상 같은 12개 hex 문자를 재배열하고 있어서 표본공간이 극도로 좁다.
+**두 번째 near-miss도 같은 날 나왔다**: 우리 `f6a8c0b2d4e6` vs prod `f6a8c0e2b4d6`(같은 문자 재배열).
+
+곁가지로 드러난 것: `e5f7a9c1b3d5` 를 부모로 문 마이그레이션이 **4개**(a7b9c1d3e5f7 · f6a8c0e2b4d6 ·
+promo-pnl · 우리 것)였다. 병행 세션이 많을수록 같은 부모에 형제가 쌓인다(LESSONS #49).
+
+### ✅ 해결
+배포 중단. **prod 무변경 확인**(두 컬럼 여전히 없음·`alembic_version` 불변·배포 락 잔여 없음). 가드가
+파일을 하나도 전송하기 전에 멈췄다 — D-NAO-49 계열 구조 가드가 실제 사고를 막은 첫 사례.
+
+### 📌 교훈
+- **revision ID를 손으로 짓지 마라.** `alembic revision -m "..."` 로 생성하거나, 최소한
+  `python3 -c "import uuid;print(uuid.uuid4().hex[:12])"` 로 뽑아라. 사람이 "그럴듯한 hex"를 지으면
+  표본공간이 수십 개로 줄어 충돌한다 — 확률 문제가 아니라 **구조 문제**다.
+- 새 마이그레이션을 만들 때 **전 브랜치·prod 양쪽에서 ID 중복을 확인**하라:
+  `git log --all --oneline -- backend/alembic/versions/` + `ssh <prod> ls .../versions/`.
+  `alembic heads` 는 브랜치-로컬이라 이걸 못 잡는다(#49).
+- **"prod에 먼저 배포하고 PR은 나중에" 관례가 마이그레이션 그래프를 쪼갠다.** 이번엔 prod에만 있는
+  마이그가 3개, main에만 있는 게 2개, 충돌 ID 1쌍, 미푸시 워크트리 2개에 걸쳐 있었다. 코드는
+  CAS 가드가 막지만 **마이그레이션 그래프는 CAS로 못 막는다** — PR 병합 순서로만 수렴한다.

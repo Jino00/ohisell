@@ -1,3 +1,14 @@
+## 🔴 prod 배포 차단 — alembic revision ID 충돌 (2026-07-28 11:45, main 기준)
+- **PR #130(로켓 1P 파서 컬럼 2건)·PR #132(safe_deploy 회귀 하니스) 둘 다 main 병합 완료.** 그러나 **prod 배포는 차단됨 — prod 무변경.**
+- **차단 사유**: 서로 다른 두 마이그레이션이 **같은 revision ID `a1c3e5f7b9d1`** 을 쓴다.
+  - prod: `a1c3e5f7b9d1_merge_status_reason_and_delivery_cols.py`(merge revision, 부모 `a7b9c1d3e5f7`+`f6a8c0e2b4d6`) — **적용됨**(`alembic_version=a1c3e5f7b9d1`)
+  - main: `a1c3e5f7b9d1_add_coupang_promo_pnl_phase1.py`(promo-pnl Phase1) — **미적용**(prod에 promo 테이블 0개)
+  - 배포했다면 prod `versions/`에 같은 revision 정의 2개 → **alembic 전체 `Duplicate revision` 사망**(모든 마이그·배포 차단). `safe_deploy.sh --migrate` 가드가 **파일 전송 전 차단** — D-NAO-49 계열 구조 가드가 실사고를 막은 첫 사례.
+- **prod 무변경 실측**: `tax_invoice_transmitted`·`vendor_confirmed_qty` 둘 다 없음(불변) / `alembic_version=a1c3e5f7b9d1` 불변 / `.deploy-lock` 잔여 없음.
+- **그래프 분열**: prod에만 3개(`a7b9c1d3e5f7`·`f6a8c0e2b4d6`·`a1c3e5f7b9d1`-merge, 전부 prod 선배포·미병합 — 생성 커밋 `f7e2108`은 **미푸시 워크트리** `worktree-agent-a2fe33dc69941c21e`/`aca8c40c8d32c1725`에만) / main에만 2개(promo-pnl·로켓 M1). ⚠**PR #127(열림)은 `a7b9c1d3e5f7` 하나만 담아 그대로 병합하면 또 형제 head 발생.**
+- **권고 순서(Jino 판단 — 다른 트랙 소유 마이그 개명 포함)**: ①main promo-pnl revision을 난수 신규 ID로 개명(미적용이라 안전) ②로켓 `f6a8c0b2d4e6` down_revision 재연결 ③prod 선배포 3개 main 편입(#127 병합 + `f7e2108` 푸시) ④promo-NEW 부모를 `a1c3e5f7b9d1`(prod merge point)로 → 직렬 단일 체인 ⑤배포.
+- **근본 원인**: revision ID를 손으로 지어 표본공간이 좁다(`e5f7a9c1b3d5`/`a1c3e5f7b9d1`/`f6a8c0b2d4e6`/`a7b9c1d3e5f7`/`f6a8c0e2b4d6` — 같은 hex 재배열). 같은 날 near-miss 2건째: 우리 `f6a8c0b2d4e6` vs prod `f6a8c0e2b4d6`. → **LESSONS #50**.
+
 ## 최신 상태 (2026-07-28 11:10, 워크트리 cool-driscoll-31712d) — 로켓 1P 파서 누락 컬럼 2건 복원, PR #130 오픈(미병합·미배포)
 - **PR #130** https://github.com/Jino00/ohisell/pull/130 — 트랙 `track_coupang-rocket-1p.md` M1(유지보수). 커밋 `85967cf`→`e3da1f6`→`39c1c39`(코드)+`a386614`·`ddb2c02`(문서).
 - 복원 ①: 정산 마지막 링크 컬럼(헤더명=빈 문자열, ref20 §4 #16) → `coupang_rocket_settlement.tax_invoice_transmitted`(Boolean nullable). 버튼 토큰 정확일치 제거 후 잔여로 판정(`전송성공`=True / 없음=False / 셀부재·미관측=None+warning). 공백소실 폴백은 `전송성공` 정확일치일 때만 True — **어느 경로로도 틀린 False를 만들지 않음**. ★**False = "전송실패"가 아니라 "전송성공 미표기"**(샘플 10행에서 미표기 행은 확정일도 `-`, "확정됐는데 미전송" 표본 0건).
