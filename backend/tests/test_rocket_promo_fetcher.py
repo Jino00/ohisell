@@ -308,15 +308,21 @@ def test_fetcher_rows_ingest_is_idempotent(db, fetcher):
 
 
 def test_resync_does_not_wipe_manual_unit_discount(db, fetcher):
-    """★수기 입력(D-CPP-7)은 재수집에 지워지면 안 된다 — 페처는 그 칸을 쓰지 않는다."""
+    """★수기 입력은 재수집에 지워지면 안 된다 — 페처는 그 칸들을 쓰지 않는다.
+
+    두 칸 모두 검사한다: unit_discount_amount(D-CPP-7)와 target_sku_ids(Phase 2).
+    후자는 적대적 리뷰 F10에서 "계약이 문서에만 있고 가드가 없다"고 지적된 자리다.
+    """
     rows = [fetcher._promotion_record(_PROMO_ITEM)]
     sync.ingest_rocket_promotions(db, "A01029796", rows)
     row = db.query(CoupangRocketPromotion).one()
     row.unit_discount_amount = Decimal("3000")
+    row.target_sku_ids = ["62178970", "69411570"]
     db.commit()
     sync.ingest_rocket_promotions(db, "A01029796", rows)   # 재수집(상태 변화 반영)
     row = db.query(CoupangRocketPromotion).one()
     assert row.unit_discount_amount == Decimal("3000")
+    assert row.target_sku_ids == ["62178970", "69411570"]
     assert row.status == "COMPLETE"
 
 
@@ -353,11 +359,14 @@ def client(monkeypatch):
     app.dependency_overrides.clear()
 
 
-def test_patch_unit_discount_requires_token(client):
+def test_patch_unit_discount_is_user_crud_not_token_gated(client):
+    """Phase 2에서 토큰을 뗐다 — 이 경로는 **사람이 sellC 화면에서 확정하는 입력**이고,
+    브라우저에 ingest 토큰을 심을 수 없다(심으면 비밀이 아니다). 같은 성격의
+    `/rocket/cost-map`이 이미 토큰 없는 사용자 CRUD다. 토큰이 있든 없든 200이어야 한다."""
     c, _ = client
-    assert c.patch(_PATCH, json={"unit_discount_amount": 3000}).status_code == 401
+    assert c.patch(_PATCH, json={"unit_discount_amount": 3000}).status_code == 200
     assert c.patch(_PATCH, json={"unit_discount_amount": 3000},
-                   headers={"X-Ingest-Token": "wrong"}).status_code == 401
+                   headers={"X-Ingest-Token": "wrong"}).status_code == 200
 
 
 def test_patch_unit_discount_sets_value(client):
@@ -631,7 +640,7 @@ def test_promotion_detail_exception_falls_back_instead_of_losing_everything(fetc
     assert rows[0]["request_id"] == "687878"
 
 
-def test_ingest_source_never_assigns_unit_discount_amount():
+def test_ingest_source_never_assigns_manual_columns():
     """★수기값 보존을 '동작'이 아니라 '소스'로도 못박는다(적대적 리뷰 2R).
 
     `test_resync_does_not_wipe_manual_unit_discount`는 진짜 동작 테스트지만, 미래의 누군가가
@@ -639,10 +648,11 @@ def test_ingest_source_never_assigns_unit_discount_amount():
     있다. 페처 경로가 이 칸을 **쓰지 않는다**는 것이 D-CPP-7의 계약이므로 소스에 걸어 둔다.
     """
     src = Path(sync.__file__).read_text(encoding="utf-8")
-    assert "unit_discount_amount" not in src, (
-        "rocket_promo_sync가 unit_discount_amount를 건드린다 — 수기 입력(D-CPP-7)이 "
-        "재수집에 지워진다. 페처 경로는 이 칸을 절대 쓰지 않아야 한다."
-    )
+    for col in ("unit_discount_amount", "target_sku_ids"):
+        assert col not in src, (
+            f"rocket_promo_sync가 {col}을 건드린다 — 수기 입력이 재수집에 지워진다. "
+            "페처 경로는 이 칸들을 절대 쓰지 않아야 한다."
+        )
 
 
 def test_empty_today_after_transient_failures_is_not_access_denied(fetcher, frozen_today):

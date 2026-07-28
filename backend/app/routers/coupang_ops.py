@@ -1486,17 +1486,66 @@ def ingest_coupon_used_amount(
 #   것은 아니다: SQLite는 통과시켜 합계를 오염시키고 PostgreSQL은 commit을 죽인다).
 _MAX_UNIT_DISCOUNT = Decimal(10) ** 10
 
+# 대상 SKU 지정(Phase 2) 방어값. product_number는 String(30)이고, 한 프로모션의 적용상품은
+#   실측 1~3개다(prod 7건 전수). 상한은 넉넉히 두되 무한 리스트는 막는다.
+_MAX_TARGET_SKUS = 200
+_MAX_SKU_LEN = 30
+
+
+def _normalize_target_sku_ids(raw: Any) -> list[str] | None:
+    """대상 SKU 리스트 정규화 — 공백 제거·중복 제거(순서 보존)·빈 값 제거.
+
+    ★길이 초과 ID는 **자르지 않고 거부한다**(400): 잘린 ID는 '다른 ID'가 되어 영원히 엉뚱한
+      판매 행에 붙는다(파서 `_sid`와 같은 이유). 손익이 통째로 틀리면서 대사되지 않는다.
+    ★빈 리스트([])는 삭제(=미지정)로 취급해 None으로 저장한다 — '지정했는데 0개'라는 상태는
+      의미가 없고, target_sku_missing 판정을 한 갈래로 유지한다.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        raise HTTPException(status_code=400, detail="target_sku_ids는 배열이어야 합니다(삭제는 null 또는 [])")
+    if len(raw) > _MAX_TARGET_SKUS:
+        raise HTTPException(status_code=400, detail=f"target_sku_ids 최대 {_MAX_TARGET_SKUS}개")
+    out: list[str] = []
+    for v in raw:
+        if isinstance(v, bool) or not isinstance(v, (str, int)):
+            raise HTTPException(status_code=400, detail=f"target_sku_ids 원소는 문자열이어야 합니다: {v!r}")
+        s = str(v).strip()
+        if not s:
+            continue
+        if len(s) > _MAX_SKU_LEN:
+            raise HTTPException(
+                status_code=400,
+                detail=f"target_sku_ids 항목 길이 초과(<={_MAX_SKU_LEN}자): {s[:40]}",
+            )
+        if s not in out:
+            out.append(s)
+    return out or None
+
 
 @router.patch("/rocket/promotion/{request_id}/unit-discount")
 def patch_promotion_unit_discount(
     request_id: str = Path(...),
     body: dict[str, Any] = Body(...),
-    x_ingest_token: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    """프로모션당 **단위 할인액**(D-CPP-7) 수기 입력 — 기존 프로모션 행만 갱신.
+    """프로모션 **수기 입력** 갱신 — 개당 할인액(D-CPP-7) + 대상 SKU(Phase 2). 기존 행만 갱신.
 
-    body: {"unit_discount_amount": 3000}   # null이면 값 삭제(모름 상태로 되돌림)
+    ★X-Ingest-Token을 걸지 않는다(Phase 2에서 해제 — 아래 이유): 이 경로는 페처가 쓰는 ingest가
+      아니라 **사람이 sellC 화면에서 확정하는 입력**이고, 브라우저에는 ingest 토큰을 줄 수 없다
+      (프론트에 심으면 그 순간 비밀이 아니다). 같은 성격의 `/rocket/cost-map`(원가 매핑 확정)이
+      이미 토큰 없이 사용자 CRUD로 열려 있고, 프로젝트 전체가 IP 허용목록 뒤에 있다 —
+      한 화면의 두 수기 입력이 서로 다른 인증을 갖는 쪽이 오히려 사고를 부른다.
+      Phase 1에 토큰이 걸려 있었지만 이 라우트는 **prod 미배포**라 기존 호출자가 없다.
+
+    body: {"unit_discount_amount": 3000, "target_sku_ids": ["62178970", "69411570"]}
+      - 두 키는 **각각 선택**이다(둘 다 없으면 400). 보낸 키만 갱신한다 — 할인액만 고칠 때
+        SKU가 지워지지 않는다(반대도 마찬가지).
+      - `null`(또는 SKU는 `[]`)이면 그 값 삭제 = '모름'으로 되돌림(0원 할인·0개 지정과 구분).
+
+    ★target_sku_ids가 왜 수기인가(2026-07-28 prod raw 실측): 프로모션 API 응답에 **적용 상품
+      목록이 없다** — `detailCount`(적용상품 수)만 있다. 손익은 "이 창에서 어느 SKU가 팔렸나"를
+      알아야 계산되는데, 이름 유사도·기간 겹침 같은 추정 매핑은 틀려도 대사되지 않는다(원칙22).
 
     ★왜 수기인가(2026-07-28 라이브 실측): 공급자허브 프로모션 목록/상세 API에 상품별·단위
       할인액 필드가 **없다**(discountBudget=총예산, supplierFundRate=분담%뿐). Jino 확정:
@@ -1505,28 +1554,39 @@ def patch_promotion_unit_discount(
       어떤 수집으로도 대사되지 않는다(원칙22).
     ★페처는 이 칸을 쓰지 않는다 → 재수집(snapshot upsert)이 수기 값을 지우지 않는다.
     """
-    _check_ingest_token(x_ingest_token)
     rid = str(request_id or "").strip()
     if not rid or len(rid) > 30:   # String(30) 그레인 키
         raise HTTPException(status_code=400, detail="request_id 필요(<=30자)")
-    if "unit_discount_amount" not in body:
-        raise HTTPException(status_code=400, detail="unit_discount_amount 필요(삭제는 null)")
-    raw = body.get("unit_discount_amount")
-    amount: Decimal | None
-    if raw is None or (isinstance(raw, str) and raw.strip() == ""):
-        amount = None   # 명시적 삭제 = '모른다'로 되돌림(0원 할인과 구분)
-    else:
-        try:
-            amount = Decimal(str(raw).replace(",", "").strip())
-        except (ArithmeticError, ValueError):
-            raise HTTPException(status_code=400, detail="unit_discount_amount 숫자 아님")
-        if not amount.is_finite() or amount < 0 or amount >= _MAX_UNIT_DISCOUNT:
-            # 음수 할인액은 존재하지 않는다 — 입력 사고를 조용히 저장하지 않는다.
-            raise HTTPException(status_code=400, detail="unit_discount_amount 범위 오류(0 이상, 10^10 미만)")
-        # ★목적지 컬럼 그레인(Numeric(12,2))으로 먼저 맞춘다: SQLite는 준 대로 담고
-        #   PostgreSQL은 반올림해서 담아, 같은 입력이 DB에 따라 다르게 저장된다. 여기서
-        #   접어 두면 응답으로 돌려주는 값이 실제 저장값과 항상 같다. (`-0`도 `0.00`으로 정규화)
-        amount = amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) + Decimal(0)
+    has_amount = "unit_discount_amount" in body
+    has_skus = "target_sku_ids" in body
+    if not has_amount and not has_skus:
+        raise HTTPException(
+            status_code=400,
+            detail="unit_discount_amount 또는 target_sku_ids 필요(각각 삭제는 null)",
+        )
+
+    amount: Decimal | None = None
+    if has_amount:
+        raw = body.get("unit_discount_amount")
+        if raw is None or (isinstance(raw, str) and raw.strip() == ""):
+            amount = None   # 명시적 삭제 = '모른다'로 되돌림(0원 할인과 구분)
+        else:
+            try:
+                amount = Decimal(str(raw).replace(",", "").strip())
+            except (ArithmeticError, ValueError):
+                raise HTTPException(status_code=400, detail="unit_discount_amount 숫자 아님")
+            if not amount.is_finite() or amount < 0 or amount >= _MAX_UNIT_DISCOUNT:
+                # 음수 할인액은 존재하지 않는다 — 입력 사고를 조용히 저장하지 않는다.
+                raise HTTPException(status_code=400, detail="unit_discount_amount 범위 오류(0 이상, 10^10 미만)")
+            # ★목적지 컬럼 그레인(Numeric(12,2))으로 먼저 맞춘다: SQLite는 준 대로 담고
+            #   PostgreSQL은 반올림해서 담아, 같은 입력이 DB에 따라 다르게 저장된다. 여기서
+            #   접어 두면 응답으로 돌려주는 값이 실제 저장값과 항상 같다. (`-0`도 `0.00`으로 정규화)
+            amount = amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) + Decimal(0)
+
+    skus: list[str] | None = None
+    if has_skus:
+        skus = _normalize_target_sku_ids(body.get("target_sku_ids"))
+
     row = (
         db.query(CoupangRocketPromotion)
         .filter(CoupangRocketPromotion.request_id == rid)
@@ -1534,12 +1594,21 @@ def patch_promotion_unit_discount(
     )
     if row is None:
         raise HTTPException(status_code=404, detail=f"프로모션 {rid} 없음(먼저 수집되어야 합니다)")
-    row.unit_discount_amount = amount
+    if has_amount:
+        row.unit_discount_amount = amount
+    if has_skus:
+        row.target_sku_ids = skus
     db.commit()
-    log.info("프로모션 단위 할인액 수기 갱신: request_id=%s amount=%s", rid, amount)
+    log.info(
+        "프로모션 수기 갱신: request_id=%s amount=%s(set=%s) target_skus=%s(set=%s)",
+        rid, amount, has_amount, skus, has_skus,
+    )
     return {
         "request_id": rid,
-        "unit_discount_amount": str(amount) if amount is not None else None,
+        "unit_discount_amount": (
+            str(row.unit_discount_amount) if row.unit_discount_amount is not None else None
+        ),
+        "target_sku_ids": row.target_sku_ids,
         "promotion_name": row.promotion_name,
         "applied_product_count": row.applied_product_count,
     }
