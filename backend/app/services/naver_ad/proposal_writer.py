@@ -11,7 +11,9 @@ from decimal import Decimal, ROUND_CEILING
 from sqlalchemy.orm import Session
 
 from app.models import NaverCampaignSettings, NaverProposal
-from app.services.naver_ad import campaign_target_resolver, effective_bid, growth_sweeper, naver_sa_writer
+from app.services.naver_ad import (
+    campaign_target_resolver, effective_bid, forecast_source, growth_sweeper, naver_sa_writer,
+)
 # 라이브[P1] DOA 수정: 생성 단계 스텝 클램프의 스텝 상수는 실행 가드레일과 단일 진실 소스
 # (하드코딩 0.15 중복 금지 — 드리프트 방지). guardrail_gate는 이 모듈을 import하지 않아 순환 없음.
 from app.services.naver_ad.guardrail_gate import _MAX_CHANGE_PCT
@@ -142,14 +144,24 @@ class _TargetLabelCache:
         return self._cache[campaign_id]
 
 
-def _forecast_evidence_suffix(forecast: dict | None) -> str:
+def _forecast_evidence_suffix(forecast: dict | None, grain: str) -> str:
     """예측치(F2b ⓐ, D-NAO-26)가 있으면 rationale에 병기할 문구 — 없으면 빈 문자열(정직 경계,
-    fallback/미가동 타겟에 억지로 예측을 만들지 않음). 입찰 산식(D-NAO-19)에는 관여하지 않는다."""
+    fallback/미가동 타겟에 억지로 예측을 만들지 않음). 입찰 산식(D-NAO-19)에는 관여하지 않는다.
+
+    ★conv_amt 기준 병기(라벨 정정, 2026-07-28): pred_conv_amt의 회계 의미가 grain마다 다르다 —
+    campaign은 sentinel(/stats) 소스라 **구매+장바구니 합**이고(03 캠페인 07-27 +64% 과대),
+    adgroup/keyword는 상세 행이라 구매만이다. 기준을 안 적으면 캠페인 제안 근거에서 예상매출이
+    부풀어 보인다. 라벨의 단일 진실 소스는 forecast_source.CONV_AMT_BASIS_LABEL(문구를 여기서
+    지어내면 드리프트). 값 자체는 건드리지 않는다 — forecast_scorer의 예측·실측이 같은 소스라
+    내부 일관성이 이미 성립하고, 예측은 산식에 물려 있지 않다.
+    """
     if forecast is None:
         return ""
+    basis = forecast_source.CONV_AMT_BASIS_LABEL.get(grain)
+    basis_note = f"({basis})" if basis else ""
     return (
         f" 예측(오늘): clk={forecast['pred_clk']}, cost={forecast['pred_cost']}원, "
-        f"conv_amt={forecast['pred_conv_amt']}원."
+        f"conv_amt{basis_note}={forecast['pred_conv_amt']}원."
     )
 
 
@@ -324,7 +336,7 @@ def _bid_proposal(
         f"target_roas 근거={target_label['source']}"
         + (f"({target_label['target_roas']})" if target_label.get("target_roas") is not None else "")
         + "."
-        + _forecast_evidence_suffix(forecast)
+        + _forecast_evidence_suffix(forecast, target_type)
     )
 
     # codex[P2] 클램프 후 예측치 정합: sim의 예측 텍스트(예상 클릭·매출)는 원 추천 입찰가
@@ -375,7 +387,7 @@ def _growth_proposal(
         + (f"({target_label['target_roas']})" if target_label.get("target_roas") is not None else "")
         + f". D-NAO-20 스톱로스={stop_loss_amount}원"
         f"(무전환 {growth_sweeper.STOP_LOSS_CLICK_MULTIPLE}클릭 상당 지출 도달 시 재검토 신호)."
-        + _forecast_evidence_suffix(forecast)
+        + _forecast_evidence_suffix(forecast, "keyword")
     )
     return {
         "proposal_type": _GROWTH_BID_UP,
@@ -842,7 +854,7 @@ def _budget_proposal(signal: dict, target_label: dict, *, forecast: dict | None 
         f"존재(합산 입찰여력 gap={signal['total_gap']}원). target_roas 근거={target_label['source']}"
         + (f"({target_label['target_roas']})" if target_label.get("target_roas") is not None else "")
         + f". 목표 일예산={target_budget}원(D-NAO-42-f 사이징, §5-G)."
-        + _forecast_evidence_suffix(forecast)
+        + _forecast_evidence_suffix(forecast, "campaign")
     )
     return {
         "proposal_type": _BUDGET_UP,
