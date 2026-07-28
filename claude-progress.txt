@@ -1,3 +1,11 @@
+## 로켓배송(1P) M2 — DOM 셀 공백 의존 제거 (2026-07-28 11:40 KST, 워크트리 focused-torvalds-27d4ae, 브랜치 claude/focused-torvalds-27d4ae, 미푸시)
+- **기전**: `DOMParser` 문서는 렌더링되지 않아 `td.innerText`가 `textContent`로 떨어지고, textContent는 **요소 경계에 공백을 넣지 않는다**. 셀 안 공백은 쿠팡 SSR 마크업 들여쓰기 덕이라 미니파이 한 번이면 사라지고, 그 순간 `parse_po_item_rows`의 `partition(" ")`이 **인덱스 걸린 `barcode` 컬럼에 상품명을 넣고** `product_name=None`으로 만든다(조용한 오염).
+- **수정**(커밋 `412042e`): ①페처 두 추출기를 공용 `_CELL_HELPERS_JS`로 통일 — 자손 텍스트노드 명시적 `' '` 조인(ul>li·div·a·button 전부), ★`<br>`은 비분리자(헤더 `상품<br>번호` 토큰 계약 보존, 아니면 rows=[] 무성 전손), 표 선택은 `noWs()`로 공백 무시. ②파서 `_split_barcode_name` — 판정 기준은 "공백 유무"가 아니라 **"선두 토큰이 바코드꼴인가"**(상품명 자체에 공백 있음). ③정산 헤더 매핑 공백 무시 + `_to_int/_to_dec/_to_date` 공백 복구(조용한 0 방지). ④신규 `tools/verify_rocket_dom_extract.py`(브라우저 실증 하니스 — 백엔드 스위트는 브라우저를 띄우지 않는 방침).
+- **라이브 증거(원칙22)**: ①라이브 정산 마크업(CDP **9225** supplier 세션, 기록 샘플과 동일 URL 재fetch·읽기전용) 수정 전(ddb2c02)·후 **11행 셀 단위 완전 일치** = 회귀 0. 기록 `20_..json`과의 차이는 전부 데이터 변동(신규 계산서 2건 06-17 유입으로 page1 뒤 2건이 page2로 밀림 + 30025494 확정일 `-`→`2026-06-18`). ②ref20b 발주상세: 원본 == `_PO_DETAIL_ROWS` 13행, **태그 사이 공백 전부 제거한 HTML도 동일 rows**(공백 독립성). ③테스트 **3515 passed**.
+- **배포**: `tools/install_local_runtime.sh` — `~/.ohisell/tools/rocket_supplier_fetcher.py` byte-identical, `com.ohisell.rocket` pid 20786→44099. 실행 전 나머지 4종이 워크트리와 동일함을 확인(미푸시 형제 브랜치 다운그레이드 0). **백엔드 파서는 prod 미배포** — 이 트랙 백엔드 자체가 미배포·alembic `f6a8c0b2d4e6` 미적용이라 순서가 깨진다(컬럼 없는 DB에 코드만 올리면 ingest 전체 침묵). 페처 신버전은 현행 마크업에서 구 파서와 동일 rows라 이 비대칭은 안전.
+- **codex 게이트 면제** — Jino 판단(07-28, 원문 "이번건은 codex review를 건너뛰어줘"). M1의 codex 부채(쿼터 08-02 해제)는 유효.
+- **잔여**: ①미푸시·PR 없음(M1 5커밋 + M2 3커밋) — **promo-pnl 워크트리의 alembic `a1c3e5f7b9d1`과 부모(`e5f7a9c1b3d5`)가 같아 병합 순서 결정 선행**(나중 병합 쪽이 down_revision 재연결) ②prod 배포(alembic → 코드 순, 별도 세션) ③LESSONS #50 기록됨.
+
 ## 04 자동운영 감사 D+N (2026-07-28 08:55 KST, 자동 루틴 D-NAO-51 — 감사 전용·쓰기 0건)
 - **서버 레인 전부 ok** (daily 08:50:15 / hourly 08:20:07 / generator 08:00:15 / entity_sync 07:38 / retro 08:30 / wisdom 08:45 / probe_settlement 08:55).
 - **실집행 5건, 라이브 5/5 일치**: auto_op 1건(grp70109620 맥세이프_컨텐츠 140→120, [shopping_group_bep], 라이브 120 MATCH) + **cold_op 4건 = CS 콜드스타트 레인(D-NAO-96) 첫 실집행 성공** — nad…411558870 300→1900 / …375630000 590→1150 / …375632395 900→2350 / …375632396 900→2300, 4건 전부 라이브 `adAttr.bidAmt` 일치. 원칙22 라이브 합격.
