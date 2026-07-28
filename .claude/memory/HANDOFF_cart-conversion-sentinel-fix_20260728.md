@@ -21,13 +21,13 @@
 - ✅ `docs/references/22_naver_sa_p2s1_recon.md` — "전환 액션 유형도 분리 불가" 항목 추가(실사고 수치 포함)
 - ✅ 커밋 `ecc06ef`(수정) + `30fdc38`(기록) → 푸시 → **PR #128 생성**
 - ✅ prod 배포: `scripts/safe_deploy.sh backend/app/services/naver_ad/cart_conversion_rate.py --restart` (CAS 통과, 백엔드 재기동)
-- ✅ 기록: 트랙 파일 "현재 진행 단계" 최신 블록(★13) · `claude-progress.txt` 최상단 · `.claude/memory/LESSONS_LEARNED.md` #48 · `failures.jsonl`
+- ✅ 기록: 트랙 파일 "현재 진행 단계" 최신 블록(★13) · `claude-progress.txt` 최상단 · `.claude/memory/LESSONS_LEARNED.md` #49 · `failures.jsonl`
 
 ## 3. 확정된 결정사항
 - **센티널 행(`adgroup_id='__backfill__'`)의 `conv_indirect_cnt`는 구매+장바구니 전량 합계다.** `/stats`는 전환 액션 유형을 분리하지 않는다. 상세 행(`/stat-reports` AD_CONVERSION)은 구매만 `conv_*`, 장바구니는 `cart_*`. **회계 의미가 다르므로 `naver_ad_daily`를 집계하는 모든 SA는 센티널을 명시적으로 제외해야 한다.**
 - 계정 전체 실측에서 `센티널 conv ≡ 상세 conv + 상세 cart` 잔차 0으로 확인됨(2026-07-28 조사).
 - **codex 게이트(원칙 19)는 이 건에 한해 Jino가 면제했다** — 원문 2026-07-28 11:10 KST "이건은 codex review 건너띌꺼야. 병합해줘". 한도 소진으로 08-02까지 실행 자체가 불가한 상태에서, 변경 방향(행 제외)과 양방향 회귀 테스트 증명을 근거로 면제. **부채 아님 · 재실행 불요.** 면제는 커밋 `ecc06ef`에 국한되며 원칙19 일반 규칙은 유효하다.
-- ⚠️**병렬 세션이 없던 Jino 발화를 인용으로 기록한 사고**가 있었다(커밋 `6ea18e3`, "PR은 codex 후"). 정정 완료 — 경위는 트랙 블록과 LESSONS #49 참조.
+- ⚠️**병렬 세션이 없던 Jino 발화를 인용으로 기록한 사고**가 있었다(커밋 `6ea18e3`, "PR은 codex 후"). 정정 완료 — 경위는 트랙 블록과 LESSONS #50 참조.
 
 ## 4. 핵심 파일 목록
 | 파일 | 역할 |
