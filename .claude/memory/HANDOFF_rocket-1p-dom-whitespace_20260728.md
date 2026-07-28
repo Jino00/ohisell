@@ -3,7 +3,7 @@
 - 일시: 2026-07-28 KST
 - 워크트리: `focused-torvalds-27d4ae`
 - 브랜치: `claude/focused-torvalds-27d4ae`
-- **origin에 푸시 완료**(tip `db3e7a2`). main 대비 9커밋 = M1 5개 + M2 4개. **PR 미생성**.
+- ✅ **종결(12:20 실측)**: **PR #137 병합**(main `a99bdbf`) + 문서 정정 **PR #139 병합**(main `4031294`). 미푸시 0·작업트리 clean. M1은 별도로 PR #130으로 병합됨.
 
 ## 1. 작업 개요
 
@@ -34,7 +34,7 @@
 
 ★실행 전에 나머지 4종 페처가 워크트리와 byte-identical임을 확인했다 — 이 스크립트는 5종을 전부 복사하므로 미푸시 형제 브랜치(`claude/elated-hawking-cd94ea` 5커밋·`claude/lucid-darwin-ed234e` 1커밋이 wing 페처를 건드림)의 작업을 덮을 위험이 있었다. 다운그레이드 0.
 
-**백엔드 파서는 prod 미배포**(의도적) — 이 트랙 백엔드(S2~S4.5c) 자체가 prod 미배포·alembic `f6a8c0b2d4e6` 미적용 상태라 파서만 단독 배포하면 순서가 깨진다(컬럼 없는 DB에 코드만 올라가면 정산·발주상세 ingest 전체가 OperationalError로 침묵). 페처 신버전은 현행 마크업에서 구 파서와 동일 rows를 내므로 이 비대칭은 안전.
+**백엔드 파서도 prod 배포 완료(12:13:52 KST)** — 병행 세션 `claude/final-deploy`가 `c9d6aae`(M2 포함)로 3파일 배포+재기동(03:13:53Z). prod 3파일 main과 byte-identical·파서에 `_split_barcode_name` 라이브·alembic head `f6a8c0b2d4e6` 적용·두 컬럼 실존·promo 테이블 5종 실존. ~~(옛 기록) 파서만 단독 배포하면 순서가 깨진다(컬럼 없는 DB에 코드만 올라가면 정산·발주상세 ingest 전체가 OperationalError로 침묵). 페처 신버전은 현행 마크업에서 구 파서와 동일 rows를 내므로 이 비대칭은 안전.
 
 ## 6. codex 게이트
 
@@ -42,21 +42,29 @@ M2는 **Jino 판단으로 면제**(2026-07-28, 원문 "이번건은 codex review
 
 ## 7. git 상태
 
-브랜치 `claude/focused-torvalds-27d4ae`, origin에 **푸시 완료**(tip `db3e7a2`). main 대비 커밋 9개 = M1 5개(`85967cf`·`e3da1f6`·`39c1c39`·`a386614`·`ddb2c02`, 다른 세션 작업 위에 스택) + M2 4개(`412042e` 수정, `d7a1c84` 트랙·LESSONS, `806ea8a` codex 면제, `db3e7a2` progress). **PR 미생성**.
+브랜치 `claude/focused-torvalds-27d4ae` → **PR #137 병합**(main `a99bdbf`) + 문서 정정 **PR #139 병합**(main `4031294`). M1 5커밋은 별도로 **PR #130으로 이미 병합**됐다(내 브랜치의 M1 커밋은 전부 main 조상). M2 고유분 = `412042e`(수정) + 문서 4커밋. 미푸시 0·작업트리 clean.
 
 기록: `.claude/memory/LESSONS_LEARNED.md` #50, `docs/tracks/active/track_coupang-rocket-1p.md` 체크리스트 M2, `failures.jsonl`에 pytest playwright 스텁 사고 1건.
 
 ## 8. 다음 세션이 즉시 할 일
 
-1. **PR/병합 결정** — ★promo-pnl 워크트리(`worktree-agent-a77a1755db4c87ada`)의 alembic `a1c3e5f7b9d1`이 우리 `f6a8c0b2d4e6`과 **부모가 같다**(`e5f7a9c1b3d5`). 각 브랜치는 단일 head지만 둘 다 main에 들어가면 head 2개가 된다 → **나중에 병합하는 쪽이 자기 `down_revision`을 먼저 병합된 revision으로 재연결**(merge revision보다 재연결 선호).
-2. **prod 배포는 `alembic upgrade head` → 코드 순서 강제.** `scripts/safe_deploy.sh`에 alembic 단계가 없으므로 PR 본문에 순서를 명시할 것.
-3. **M1 codex 부채 소화**(08-02 이후, OpenAI 쿼터 해제 후).
-4. **트랙 다음 스프린트는 S5 프론트.**
+**M1·M2 관련해서는 남은 것이 없다**(2026-07-28 12:20 실측 종결).
+
+- ✅ PR #137·#139 병합(main `4031294`) / prod 코드·마이그레이션 배포 완료 / 로컬 런타임 배포 완료
+- ✅ alembic **단일 head** `f6a8c0b2d4e6` — revision ID 충돌은 병행 세션 `claude/alembic-graph-reconcile`이 promo-pnl `a1c3e5f7b9d1` → **`c2998cfe1f7c`** 개명·재부모로 해소(내가 실행하려던 트랙의 "권고 복구 순서 5단계"는 착수 시점에 이미 **stale** — LESSONS #52)
+- ✅ codex: M2 면제(Jino 판단, 부채 아님)
+
+남은 것(이 트랙의 다음 스프린트, M2와 무관):
+1. **S5 프론트** — 종합조망 1P 뷰(`rocket-overview` 소비: 매출·광고·원가·net_profit + 커버리지% 배지) + 원가 매핑 관리 UI + 갱신 버튼.
+2. **M1 codex 부채**(08-02 쿼터 해제 후) — M1 소유 세션의 기록 참조.
+3. (운영) 원가 매핑 채우기 → 커버리지% 상승.
+
+⚠️ 병행 세션이 많다. 착수 전 `git fetch` + 라이브(prod alembic·매니페스트·락) 재확인 — 문서에 적힌 계획의 전제부터 검증할 것(LESSONS #52).
 
 ## 9. 새 세션 시작 프롬프트 (복사용)
 
 ```
 HANDOFF `.claude/memory/HANDOFF_rocket-1p-dom-whitespace_20260728.md` 읽고 이어서 진행해줘.
-핵심: 로켓 1P M2(DOM 셀 공백 의존 제거) 완료·라이브 회귀 0·codex 면제(Jino 판단)·origin 푸시 완료(db3e7a2)·PR 미생성.
-다음: promo-pnl과 alembic head 충돌 정리 후 PR/병합 결정 → prod는 alembic 먼저 → 코드. M1 codex 부채는 08-02 이후.
+핵심: 로켓 1P M2(DOM 셀 공백 의존 제거) **완료·종결** — 라이브 회귀 0 · codex 면제(Jino 판단) · PR #137·#139 병합(main 4031294) · prod 배포 완료(c9d6aae, 12:13:52 KST) · 로컬 런타임 배포 완료.
+다음: M1·M2 잔여 없음. 트랙 다음 스프린트 = S5 프론트. M1 codex 부채는 08-02 이후. alembic 단일 head f6a8c0b2d4e6(revision ID 충돌은 병행 세션이 개명·재부모로 해소).
 ```
