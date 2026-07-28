@@ -266,12 +266,36 @@ class Order(Base):
         Numeric(12, 2), nullable=True
     )
     raw_data: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # ── 배송 구분(Jino 지시 2026-07-28) — raw_data JSON 안에만 있던 값을 조회 가능하게 영속화.
+    #    판별·파싱은 services/order_delivery.py 한 곳에서만 한다(SA). 배송방식과 배송비 부담은
+    #    독립 축이라 각각 저장한다. NULL = 판별 불가(네이버 주문 아님·raw_data 부재·JSON 잘림).
+    # 원본 그대로: ARRIVAL_GUARANTEE(N배송) / TODAY / NORMAL …
+    delivery_attribute_type: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    delivery_policy_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)   # 유료/무료/조건부무료
+    shipping_fee_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)      # 선결제/무료 …
+    logistics_company_id: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)   # N배송 물류사(PG 등)
+    # ★우리가 지불한 배송비(건별 스냅샷). 단가는 코드 상수라 개정되면 과거 원가가 소급 왜곡된다
+    #   → 주문 시점 판정 단가를 행에 박아 둔다. 고객 수취액은 기존 shipping_cost(의미 불변).
+    #   실부담 = shipping_cost_paid − COALESCE(shipping_cost,0) → 조회 시 계산(중복 저장 금지).
+    shipping_cost_paid: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now()
     )
 
     channel: Mapped[Channel] = relationship(back_populates="orders")
     product: Mapped[Optional[ProductMaster]] = relationship()
+
+    @property
+    def shipping_cost_net(self) -> Optional[Decimal]:
+        """실부담 배송비(우리 지불 − 고객 수취). 지불 미판별이면 None(파생값, 저장 안 함)."""
+        if self.shipping_cost_paid is None:
+            return None
+        return Decimal(str(self.shipping_cost_paid)) - Decimal(str(self.shipping_cost or 0))
+
+    @property
+    def is_nbaesong(self) -> bool:
+        """N배송(도착보장) 주문인가 — 단일 판별자(deliveryAttributeType)."""
+        return self.delivery_attribute_type == "ARRIVAL_GUARANTEE"
 
 
 class SyncLog(Base):
@@ -1368,6 +1392,10 @@ class CoupangRocketPurchaseOrderItem(Base):
     product_name: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
     purchase_type: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)  # 일반매입/직매입
     order_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 발주수량(원가 산정용)
+    # 업체납품가능수량(발주상세 인덱스 5, ref 20b §2) — 우리가 확인한 납품 가능분.
+    #   PO그레인 CoupangRocketPurchaseOrder.vendor_confirmed_qty(sumOfVendorConfirmedQty)의 per-SKU 판.
+    #   nullable: 이 컬럼 신설 이전에 적재된 기존 행은 값 없음(백필 전까지 NULL).
+    vendor_confirmed_qty: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     # 금액(gross/net, 원 단위) — 쿠팡→우리 매입(매출), 우리 원가 아님(원가는 product_master)
     unit_purchase_price: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)  # 매입 단가
     line_order_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)  # 라인 발주금액(gross)
@@ -1404,6 +1432,12 @@ class CoupangRocketSettlement(Base):
     tax_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)  # 과세유형
     first_payment_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)  # 1차지급액
     second_payment_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)  # 2차지급액
+    # 전자세금계산서 전송성공 여부 — 정산 테이블 마지막(헤더명 빈) 링크 컬럼에서 파싱(ref 20 §4 #16).
+    #   True='전송성공' 표기 / False='전송성공' **미표기** / None=셀 부재·미관측 토큰(판별 불가).
+    #   ★False를 '전송실패'로 읽지 말 것. 실측 10행에서 False인 유일한 행은 세금계산서 확정일도
+    #     '-'(미확정)이라, 관측된 사실은 "확정 전에는 상태 텍스트가 없다"까지다. '확정됐는데 미전송'
+    #     표본은 0건 — 진짜 실패와 미발행을 구분하려면 별도 근거가 필요하다.
+    tax_invoice_transmitted: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
@@ -1648,8 +1682,13 @@ class NaverProductBep(Base):
     aggressiveness: Mapped[str] = mapped_column(String(12), nullable=False, default="standard")  # safe/standard/aggressive
     target_roas: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4), nullable=True)  # bep_roas × 공격성 배수
     has_cost: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    # D-NAO-57(B): 광고 의사결정 BEP에 쓴 수수료율 기준 — ad_case(정산 유형별 실측 분해=주문관리+
-    # 매출연동 언디루션) / blended(기존 전체 회계 실효율 폴백). None=산출 전/폴백 미판정.
+    # 광고 의사결정 BEP에 쓴 수수료율 기준(행 단위). None=산출 전/폴백 미판정.
+    #   delivery_case — N1(D-NAO-99) 기본. **그 상품의** 건별 정산 실측(주문관리+기저 매출연동)
+    #                   + 1.5%p × N배송 혼합비. 상품 표본 ≥5건일 때.
+    #   delivery_acct  — 위와 같은 실측이되 상품 표본이 얇아(<5건) 계정 실측을 쓴 행.
+    #   ad_case        — D-NAO-57(B) 유형별 분해(매출연동 언디루션). 정산 표본이 상품에 귀속되지
+    #                   않을 때의 계정 단일 요율 폴백. ★언디루션은 라이브에서 항등(ref 42 §6, N3).
+    #   blended        — 전체 회계 실효율(|Σcomm|/(Σsettle+|Σcomm|)) 최종 폴백.
     commission_basis: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     calculated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
@@ -2104,6 +2143,10 @@ class NaverEntity(Base):
     campaign_type: Mapped[str] = mapped_column(String(20), nullable=False, default="")  # WEB_SITE/SHOPPING/BRAND_SEARCH
     name: Mapped[str] = mapped_column(String(300), nullable=False, default="")  # 캠페인/그룹명 또는 키워드 텍스트
     status: Mapped[str] = mapped_column(String(10), nullable=False, default="on")  # on/off/deleted
+    # 네이버 statusReason 원문(D-NAO-97) — status가 'on'인데 실제로 안 도는 이유를 담는 유일한 필드
+    # (CAMPAIGN_LIMITED_BY_BUDGET=일예산 소진 / CAMPAIGN_PAUSED=상위 캠페인 OFF / *_UNDER_REVIEW 등).
+    # ★status(on/off)는 사람의 On/Off 스위치(userLock)만 반영한다 — 이 둘을 섞지 않는다.
+    status_reason: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     bid_amt: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 그룹 기본가·키워드 개별입찰
     monthly_volume: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # keywordstool PC+Mobile 합
     competition: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)  # low/mid/high

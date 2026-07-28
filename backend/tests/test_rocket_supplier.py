@@ -4,8 +4,11 @@
 #   ingest(인메모리 SQLite): snapshot upsert 멱등.
 from __future__ import annotations
 
+import json
+import re
 from datetime import date, datetime
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine
@@ -19,6 +22,10 @@ from app.models import (
 )
 from app.clients.coupang import rocket_supplier as rs
 from app.services.coupang import rocket_supplier_sync as sync
+
+
+# 저장소 루트(backend/tests/ → ../..) — 원본 증거 파일(docs/references/data) 직접 파싱용.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 # ─── 실측 fixture (ref 20) ─────────────────────────────
@@ -72,9 +79,11 @@ _SETTLE_ROWS = [
     ["30025494", "주식회사 오하이테크", "2026-06-16", "2026-08-14", "과세", "일반", "입고",
      "역발행", "510,819", "51,081", "561,900", "-", "-", "0", "561900", "발주현황 입고상세내역"],
     ["30015106", "주식회사 오하이테크", "2026-06-15", "2026-08-14", "과세", "일반", "입고",
-     "역발행", "204,437", "20,443", "224,880", "2026-06-16", "-", "0", "224880", "전송성공"],
+     "역발행", "204,437", "20,443", "224,880", "2026-06-16", "-", "0", "224880",
+     "발주현황 입고상세내역 전송성공"],
     ["30003353", "주식회사 오하이테크", "2026-06-14", "2026-08-12", "과세", "일반", "입고",
-     "역발행", "1,101,800", "110,180", "1,211,980", "2026-06-15", "-", "0", "1211980", "전송성공"],
+     "역발행", "1,101,800", "110,180", "1,211,980", "2026-06-15", "-", "0", "1211980",
+     "발주현황 입고상세내역 전송성공"],
 ]
 
 
@@ -162,11 +171,128 @@ def test_parse_settlement_header_order_independent():
     assert recs[0]["payment_amount"] == Decimal("561900")
     assert recs[0]["supply_amount"] == Decimal("510819")
 
+def test_parse_settlement_header_whitespace_variants():
+    # ★페처 셀 추출이 요소 경계마다 공백을 넣으므로(fetcher _CELL_HELPERS_JS) 쿠팡이 헤더를
+    #   인라인 요소로 쪼개면 공백만 다른 변형이 온다 → 컬럼이 조용히 사라지면 안 된다.
+    header = ["계 산 서 번 호", "세금계산서확정일", "1차지급액", "지급예정금액"]
+    rows = [header, ["30025494", "2026-06-16", "0", "561,900"]]
+    recs = rs.parse_settlement_rows(rows)
+    assert len(recs) == 1
+    assert recs[0]["invoice_seq"] == 30025494
+    assert recs[0]["tax_invoice_confirmed_date"] == date(2026, 6, 16)  # 헤더 공백 변형에도 매핑
+    assert recs[0]["payment_amount"] == Decimal("561900")
+
+
+def test_settlement_money_survives_stray_space():
+    # 숫자 셀에 공백이 끼어들어도(요소로 쪼개진 금액) 조용한 0이 되지 않는다
+    rows = [["계산서번호", "공급가액", "작성일자"], ["30025494", "510 819", "2026-06 -16"]]
+    recs = rs.parse_settlement_rows(rows)
+    assert recs[0]["supply_amount"] == Decimal("510819")
+    assert recs[0]["issue_date"] == date(2026, 6, 16)
+    # 숫자꼴이 아닌 문자열은 건드리지 않는다(쓰레기를 몰래 뭉개지 않음)
+    assert rs._to_dec("발주현황 입고상세내역") == Decimal(0)
+    assert rs._to_int("510 819") == 510819
+
+
 def test_parse_settlement_header_only():
     assert rs.parse_settlement_rows([_SETTLE_HEADER]) == []
 
 def test_parse_settlement_missing_invoice_header():
     assert rs.parse_settlement_rows([["거래처명", "공급가액"], ["X", "100"]]) == []
+
+
+# ═══ 전자세금계산서 전송상태(마지막 빈-헤더 링크 컬럼) ═══
+def test_to_transmitted_variants():
+    # 실측 2변형(DOM 샘플 10행 전수) + 방어 케이스
+    assert rs._to_transmitted("발주현황 입고상세내역 전송성공") is True
+    assert rs._to_transmitted("발주현황 입고상세내역") is False  # 상태 표기 없음 = 미전송
+    assert rs._to_transmitted("전송성공") is True               # 버튼 라벨 없이 상태만 온 경우
+    assert rs._to_transmitted("") is None                      # 빈 셀 = 판별 불가
+    assert rs._to_transmitted(None) is None
+    # 미관측 토큰은 True/False로 뭉개지 않고 None(D-13)
+    assert rs._to_transmitted("발주현황 입고상세내역 전송실패") is None
+
+
+def test_parse_settlement_transmitted_column():
+    recs = rs.parse_settlement_rows(_SETTLE_ROWS)
+    # 30025494 = 확정일 '-' + 전송성공 표기 없음 → False, 나머지 2건은 확정일 있음 + 전송성공 → True
+    assert recs[0]["tax_invoice_transmitted"] is False
+    assert recs[0]["tax_invoice_confirmed_date"] is None
+    assert recs[1]["tax_invoice_transmitted"] is True
+    assert recs[2]["tax_invoice_transmitted"] is True
+
+
+def test_to_transmitted_button_label_drift_never_yields_false():
+    # ★버튼 라벨이 드리프트해도 잔여를 잘라 먹지 않는다(토큰 정확 일치).
+    #   부분문자열 replace였다면 잔여가 비어 False로 오판할 수 있는 자리.
+    assert rs._to_transmitted("발주현황조회 입고상세내역 전송성공") is None  # 미관측 토큰 → None
+    assert rs._to_transmitted("발주 현황 입고상세내역") is None            # 라벨 분리 → 판별 불가
+    # 정상 라벨에서는 여전히 판정된다(회귀 방어)
+    assert rs._to_transmitted("발주현황 입고상세내역 전송성공") is True
+
+
+def test_to_transmitted_no_whitespace_between_links():
+    # ★페처는 DOMParser 문서의 innerText(=textContent)로 셀을 뽑아 <a> 사이 공백을 보장받지 못한다.
+    #   쿠팡 마크업이 미니파이되면 라벨+상태가 한 토큰으로 붙는다 → 그때도 전송성공은 살려낸다.
+    assert rs._to_transmitted("발주현황입고상세내역전송성공") is True
+    # 다만 붙어 있는데 상태 토큰이 없으면 False로 승격시키지 않는다(라벨 드리프트와 구분 불가)
+    assert rs._to_transmitted("발주현황입고상세내역") is None
+
+
+def test_to_transmitted_warns_once_per_token():
+    # 미관측 토큰 warning은 파싱 1회당 토큰당 1줄(정산 최대 100p×50행 → 로그 폭주 방지)
+    seen: set[str] = set()
+    for _ in range(5):
+        assert rs._to_transmitted("발주현황 입고상세내역 전송실패", seen) is None
+    assert seen == {"전송실패"}
+
+
+def test_parse_settlement_transmitted_missing_column(caplog):
+    # 링크 컬럼(빈 헤더) 자체가 없는 DOM → None(다른 필드 파싱은 정상) + **소리내어** 경고
+    rows = [["계산서번호", "공급가액"], ["30025494", "510,819"]]
+    with caplog.at_level("WARNING"):
+        recs = rs.parse_settlement_rows(rows)
+    assert recs[0]["tax_invoice_transmitted"] is None
+    assert recs[0]["supply_amount"] == Decimal("510819")
+    assert any("링크 컬럼" in r.getMessage() for r in caplog.records)
+
+
+def test_parse_settlement_transmitted_leading_blank_header():
+    # 앞쪽에 빈 헤더가 끼어도 링크 컬럼(마지막)을 정확히 집는다
+    header = [""] + _SETTLE_HEADER
+    row = ["x"] + _SETTLE_ROWS[1]
+    recs = rs.parse_settlement_rows([header, row])
+    assert len(recs) == 1
+    assert recs[0]["invoice_seq"] == 30025494
+    assert recs[0]["tax_invoice_transmitted"] is False
+
+
+def test_parse_settlement_ambiguous_blank_headers_warns(caplog):
+    # 빈 헤더가 2개 이상이면 '마지막을 링크 컬럼으로 가정'했음을 소리내어 밝힌다
+    header = _SETTLE_HEADER + [""]
+    row = _SETTLE_ROWS[2] + ["발주현황 입고상세내역 전송성공"]
+    with caplog.at_level("WARNING"):
+        recs = rs.parse_settlement_rows([header, row])
+    assert recs[0]["tax_invoice_transmitted"] is True
+    assert any("빈 헤더" in r.getMessage() for r in caplog.records)
+
+
+def test_parse_settlement_from_live_dom_sample():
+    """★원본 증거 파일 직접 파싱(ref 20 §4): 10행 중 9행 전송성공 / 1행 미전송."""
+    sample = _REPO_ROOT / "docs" / "references" / "data" / "20_rocket_1p_settlement_dom_sample.json"
+    if not sample.exists():
+        # skip이 아니라 fail: 이 파일은 git 추적 중이고, 파싱 규칙의 **유일한** 근거다.
+        #   사라졌는데 스위트가 green이면 구현 베끼기 테스트만 남는다.
+        pytest.fail(f"원본 DOM 샘플이 없다(git 추적 파일): {sample}")
+    recs = rs.parse_settlement_rows(json.loads(sample.read_text(encoding="utf-8"))["rows"])
+    assert len(recs) == 10
+    flags = [r["tax_invoice_transmitted"] for r in recs]
+    assert flags.count(True) == 9
+    assert flags.count(False) == 1
+    assert flags.count(None) == 0  # 전 행 판별 성공(미관측 토큰 없음)
+    # 전송성공 ⟺ 세금계산서 확정일 존재(실측 상관, ref 20 §4)
+    for r in recs:
+        assert r["tax_invoice_transmitted"] is (r["tax_invoice_confirmed_date"] is not None)
 
 
 # ═══ ingest Harness (인메모리 SQLite) ═══
@@ -208,6 +334,8 @@ def test_ingest_settlement(db):
     inv = db.query(CoupangRocketSettlement).filter_by(invoice_seq=30025494).one()
     assert inv.vendor_id == "A01029796"  # 계정축 주입
     assert inv.payment_amount == Decimal("561900")
+    assert inv.tax_invoice_transmitted is False  # 전송성공 표기 없는 행
+    assert db.query(CoupangRocketSettlement).filter_by(invoice_seq=30015106).one().tax_invoice_transmitted is True
     # 멱등
     sync.ingest_settlements(db, "A01029796", _SETTLE_ROWS)
     assert db.query(CoupangRocketSettlement).count() == 3
@@ -255,6 +383,7 @@ def test_parse_po_items_fields():
     assert it["product_name"].startswith("오하이 풀커버 강화유리")
     assert it["purchase_type"] == "일반매입 과세"
     assert it["order_qty"] == 89
+    assert it["vendor_confirmed_qty"] == 89  # 업체납품가능수량(인덱스 5)
     assert it["unit_purchase_price"] == Decimal("10740")  # 쿠팡→우리 매입 단가(gross)
     assert it["line_order_amount"] == Decimal("955860")    # line gross
     assert it["line_supply_amount"] == Decimal("868996")   # net
@@ -275,10 +404,61 @@ def test_parse_po_items_barcode_internal_code():
     assert items[2]["product_name"].startswith("오하이 일미리")
 
 
+def test_parse_po_items_vendor_confirmed_qty_distinct_from_order_qty():
+    # 발주수량(인덱스 4)과 업체납품가능수량(인덱스 5)이 다른 행 → 인덱스 혼동 방지
+    partial = [
+        ["1", "50342949", "8800252590227 오하이 풀커버", "일반매입 과세",
+         "89", "40", "10,740", "9,764", "976", "955,860", "868,996", "86,864", ""],
+    ]
+    it = rs.parse_po_item_rows(partial)[0]
+    assert it["order_qty"] == 89
+    assert it["vendor_confirmed_qty"] == 40  # 부분 확인(발주분 일부만 납품 가능)
+
+
 def test_parse_po_items_total_qty_matches_summary():
     # Σ발주수량 = 합계행(93)
     items = rs.parse_po_item_rows(_PO_DETAIL_ROWS)
     assert sum(it["order_qty"] for it in items) == 93
+
+
+def test_parse_po_items_glued_barcode_name(caplog):
+    # ★공백 소실 폴백: 셀 안 공백이 사라져도 바코드 컬럼(인덱스 걸림)에 상품명이 섞이지 않는다.
+    #   근본 수정은 페처 쪽(_CELL_HELPERS_JS)이고 이건 그 뒤의 안전망 — 조용히 오염되지 않는지만 본다.
+    glued = [
+        ["1", "37350957", "8809465525057오하이 지문방지 풀커버", "일반매입 과세",
+         "1", "1", "12,000", "10,909", "1,091", "12,000", "10,909", "1,091", ""],
+        ["2", "63408012", "R237867070002오하이 일미리 맥세이프", "직매입 과세",
+         "2", "2", "10,080", "9,164", "916", "20,160", "18,328", "1,832", ""],
+    ]
+    with caplog.at_level("WARNING"):
+        items = rs.parse_po_item_rows(glued)
+    assert [it["barcode"] for it in items] == ["8809465525057", "R237867070002"]
+    assert items[0]["product_name"] == "오하이 지문방지 풀커버"
+    assert items[1]["product_name"] == "오하이 일미리 맥세이프"
+    # 소리내어 남긴다 — 다만 종류당 1줄(발주 다수 × SKU 80건 로그 폭주 방지)
+    warned = [r.getMessage() for r in caplog.records if "공백 소실" in r.getMessage()]
+    assert len(warned) == 1
+
+
+def test_parse_po_items_unsplittable_barcode_warns(caplog):
+    # 바코드꼴 선두 토큰이 없으면 **추측하지 않는다** — 현행 동작(전체를 barcode) + 경고
+    row = [["1", "37350957", "ABC오하이지문방지", "일반매입 과세",
+            "1", "1", "12,000", "10,909", "1,091", "12,000", "10,909", "1,091", ""]]
+    with caplog.at_level("WARNING"):
+        it = rs.parse_po_item_rows(row)[0]
+    assert it["barcode"] == "ABC오하이지문방지"
+    assert it["product_name"] is None
+    assert any("분리 불가" in r.getMessage() for r in caplog.records)
+
+
+def test_parse_po_items_barcode_only_cell_is_not_an_anomaly(caplog):
+    # 상품명 없이 바코드만 있는 셀은 정상 입력 — 경고 없이 name=None
+    row = [["1", "37350957", "8809465525057", "일반매입 과세",
+            "1", "1", "12,000", "10,909", "1,091", "12,000", "10,909", "1,091", ""]]
+    with caplog.at_level("WARNING"):
+        it = rs.parse_po_item_rows(row)[0]
+    assert (it["barcode"], it["product_name"]) == ("8809465525057", None)
+    assert not [r for r in caplog.records if "바코드" in r.getMessage()]
 
 
 def test_parse_po_items_empty_and_garbage():
@@ -286,6 +466,51 @@ def test_parse_po_items_empty_and_garbage():
     assert rs.parse_po_item_rows([["합계", "93"], ["", ""]]) == []
     # 상품번호가 숫자 아닌 행은 스킵(헤더 방어)
     assert rs.parse_po_item_rows([["1", "ABC", "x", "y", "1", "1", "1", "1", "1", "1", "1", "1", ""]]) == []
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 페처 DOM 추출 JS 자체의 계약 (tools/rocket_supplier_fetcher.py)
+# ═══════════════════════════════════════════════════════════════════
+# 위 fixture들은 "페처가 뽑아준 rows"를 입력으로 받는다 — 그 rows를 만드는 JS가 조용히 달라지면
+# 파서 테스트는 전부 green인데 데이터가 오염된다(2026-07-28 리뷰 지적: DOMParser 문서는 렌더링되지
+# 않아 innerText=textContent, textContent는 요소 사이에 공백을 넣지 않는다).
+# → 실제 증거 HTML(ref20b)을 실제 브라우저에서 실제 추출 함수로 돌려 fixture와 대조한다.
+def _fetcher_js() -> dict:
+    """tools/rocket_supplier_fetcher.py의 JS 상수만 추출(모듈 import 부작용 없이 — 로깅·락 회피)."""
+    import ast
+    src = (_REPO_ROOT / "tools" / "rocket_supplier_fetcher.py").read_text(encoding="utf-8")
+    want = {"_CELL_HELPERS_JS", "_FETCH_SETTLEMENT_JS", "_FETCH_PO_DETAIL_JS"}
+    ns: dict = {}
+    for node in ast.parse(src).body:
+        if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id in want for t in node.targets):
+            exec(compile(ast.Module(body=[node], type_ignores=[]), "<fetcher-js>", "exec"), ns)
+    missing = want - set(ns)
+    if missing:
+        pytest.fail(f"페처에서 JS 상수를 찾지 못했다(이름이 바뀌었나?): {missing}")
+    return ns
+
+
+def test_fetcher_cell_extraction_never_relies_on_markup_whitespace():
+    """★두 추출기가 공용 헬퍼(명시적 공백 조인)를 쓰고 innerText로 되돌아가지 않는지 소스로 고정.
+
+    실동작(회귀 0 + 공백 독립성)은 브라우저가 필요해 이 스위트에서 검증하지 않는다
+    (test_fetcher_button_only_chrome.py의 방침: 테스트는 브라우저를 띄우지 않는다).
+      → 실증 하니스: `python3 tools/verify_rocket_dom_extract.py`
+        (ref20b 원본/미니파이 HTML을 실제 Chromium에서 실제 추출 함수로 돌려 _PO_DETAIL_ROWS와 대조)
+    여기서는 '조용히 옛 패턴으로 돌아가는 것'만 막는다.
+    """
+    js = _fetcher_js()
+    for name in ("_FETCH_SETTLEMENT_JS", "_FETCH_PO_DETAIL_JS"):
+        src = js[name]
+        # innerText = DOMParser 문서에서 textContent로 떨어져 요소 사이 공백을 보장하지 못한다
+        assert "innerText" not in src, f"{name}: innerText 회귀(요소 사이 공백 미보장)"
+        assert "tableRows(" in src, f"{name}: 공용 셀 추출 헬퍼를 쓰지 않는다"
+        assert "cellText" in src, f"{name}: 공용 셀 추출 헬퍼가 인라인되지 않았다"
+        # 표 선택 토큰 매칭은 공백 무시로 — 정산은 noWs(c), 발주상세는 .map(noWs)
+        assert re.search(r"noWs[(\)]|\(noWs\)", src), f"{name}: 표 선택 토큰 매칭이 공백에 민감하다"
+    # <br>은 분리자가 아니어야 한다(헤더 '상품<br>번호'·'세액<br>부가세' 토큰 계약)
+    assert "'BR'" in js["_CELL_HELPERS_JS"]
 
 
 # ═══ 발주상세 ingest Harness (snapshot replace) ═══
@@ -300,6 +525,7 @@ def test_ingest_po_items_snapshot_replace(db):
     )
     assert it.vendor_id == "A01029796"
     assert it.order_qty == 89
+    assert it.vendor_confirmed_qty == 89  # 업체납품가능수량 적재
     assert it.line_order_amount == Decimal("955860")
     # 멱등: 같은 PO 재수신 시 snapshot replace(중복 누적 없이 4건 유지)
     sync.ingest_po_items(db, 134342890, "A01029796", _PO_DETAIL_ROWS)

@@ -11,8 +11,16 @@
 3) coupang_coupon.used_amount / used_amount_source / used_amount_synced_at
    — 2P RG 셀러 부담 실사용 할인액(D-CPP-3 권위값). 쿠팡 Open API엔 없어 ingest로만 채운다.
 
-Revision ID: a1c3e5f7b9d1
-Revises: e5f7a9c1b3d5
+★revision ID 개명 이력(2026-07-28): 최초 ID는 `a1c3e5f7b9d1` 이었다. 그런데 **완전히 다른**
+   마이그레이션(`a1c3e5f7b9d1_merge_status_reason_and_delivery_cols.py`, 병행 세션이 만든 merge
+   revision)이 **같은 ID**로 이미 prod에 적용돼 있었다. 두 파일이 한 versions/ 에 공존하면 alembic이
+   `Duplicate revision` 으로 죽어 **모든 마이그레이션·배포가 막힌다**(safe_deploy 가드가 배포 직전 차단).
+   이 마이그레이션은 어디에도 적용된 적이 없었으므로(prod에 promo 테이블 0개) 안전하게 개명했고,
+   ID는 수기가 아니라 `uuid.uuid4().hex[:12]` 로 뽑았다. 부모도 `e5f7a9c1b3d5` → `a1c3e5f7b9d1`
+   (prod merge point)로 옮겨 그래프를 직렬 단일 체인으로 복구했다. LESSONS #50 참조.
+
+Revision ID: c2998cfe1f7c
+Revises: a1c3e5f7b9d1
 Create Date: 2026-07-28
 """
 from typing import Sequence, Union
@@ -20,8 +28,8 @@ from typing import Sequence, Union
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = 'a1c3e5f7b9d1'
-down_revision: Union[str, None] = 'e5f7a9c1b3d5'
+revision: str = 'c2998cfe1f7c'
+down_revision: Union[str, None] = 'a1c3e5f7b9d1'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

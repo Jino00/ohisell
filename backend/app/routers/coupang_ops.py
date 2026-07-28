@@ -1508,6 +1508,10 @@ def patch_promotion_unit_discount(
         if not amount.is_finite() or amount < 0 or amount >= _MAX_UNIT_DISCOUNT:
             # 음수 할인액은 존재하지 않는다 — 입력 사고를 조용히 저장하지 않는다.
             raise HTTPException(status_code=400, detail="unit_discount_amount 범위 오류(0 이상, 10^10 미만)")
+        # ★목적지 컬럼 그레인(Numeric(12,2))으로 먼저 맞춘다: SQLite는 준 대로 담고
+        #   PostgreSQL은 반올림해서 담아, 같은 입력이 DB에 따라 다르게 저장된다. 여기서
+        #   접어 두면 응답으로 돌려주는 값이 실제 저장값과 항상 같다. (`-0`도 `0.00`으로 정규화)
+        amount = amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) + Decimal(0)
     row = (
         db.query(CoupangRocketPromotion)
         .filter(CoupangRocketPromotion.request_id == rid)

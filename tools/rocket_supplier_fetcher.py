@@ -121,6 +121,49 @@ _FETCH_JSON_POST_JS = """async (args) => {
   } finally { clearTimeout(t); }
 }"""
 
+# ── 셀 텍스트 추출 헬퍼 (정산·발주상세 두 추출기 공용 — 구현이 갈라지지 않게 한 곳에서만 정의)
+# ★요소 사이 공백을 마크업 들여쓰기에 의존하지 않는다(2026-07-28 리뷰 지적).
+#   DOMParser 문서는 **렌더링되지 않아** innerText가 textContent로 떨어지고, textContent는
+#   요소 경계에 공백을 넣지 않는다: <li>바코드</li><li>상품명</li> → "바코드상품명".
+#   지금 셀 안에 공백이 있는 것은 순전히 쿠팡 SSR 마크업의 들여쓰기 덕분이며, 쿠팡이 HTML을
+#   미니파이하면 사라진다. 그러면 파서가 조용히 오염된다(발주상세 barcode/상품명 분리 실패 →
+#   인덱스 걸린 barcode 컬럼에 상품명까지 들어감 / 정산 전송상태 토큰 붙음).
+#   → 자손 **텍스트노드**를 모아 명시적으로 ' '로 조인한다(깊이 무관: ul>li·div·a 전부 커버).
+# ★단 <br>은 분리자로 취급하지 않는다(공백 없이 붙인다):
+#   헤더가 '상품<br>번호'·'세액<br>부가세'로 조립돼 있어(ref20b §2 실측) 공백을 넣으면
+#   '상품번호' 토큰 매칭이 깨져 표 선택이 실패하고(rows=[] 무성 전손), 백엔드 위치 기반
+#   파서의 헤더 fixture도 전부 달라진다. textContent와 동일하게 붙여 현행 계약을 보존한다.
+_CELL_HELPERS_JS = r"""
+      const cellText = (el) => {
+        const parts = [];
+        let glue = false;                       // 직전 경계가 <br> = 앞 조각에 붙인다
+        const walk = (node) => {
+          for (const c of node.childNodes) {
+            if (c.nodeType === 3) {             // 텍스트노드
+              const raw = c.textContent || '';
+              const t = raw.trim();
+              if (!t) { if (raw) glue = false; continue; }  // 공백뿐 = textContent도 공백을 주던 자리
+              if (glue && parts.length) parts[parts.length - 1] += t;
+              else parts.push(t);
+              glue = false;
+              continue;
+            }
+            if (c.nodeType !== 1) continue;     // 주석 등 무시
+            const tag = c.tagName;
+            if (tag === 'SCRIPT' || tag === 'STYLE') continue;  // 화면에 안 나오는 내용
+            if (tag === 'BR') { glue = true; continue; }        // 분리자 아님(헤더 토큰 계약 보존)
+            walk(c);
+          }
+        };
+        walk(el);
+        return parts.join(' ').replace(/\s+/g, ' ').trim();
+      };
+      const tableRows = (tb) => [...tb.querySelectorAll('tr')].map(
+        tr => [...tr.querySelectorAll('td,th')].map(cellText));
+      // 표 선택용 토큰 매칭은 공백을 무시한다 — 마크업 드리프트로 토큰이 쪼개져도 표를 놓치지 않게.
+      const noWs = (s) => String(s == null ? '' : s).replace(/\s+/g, '');
+"""
+
 # 정산 SSR HTML GET — fetch한 HTML을 DOMParser로 파싱해 '계산서번호' 헤더를 가진 <table> rows를
 # 추출(헤더+데이터, 셀 텍스트 배열). 네비게이션 없이 fetch만(Akamai 재챌린지 회피).
 # 인자=[path]. 반환 {status, rows:[[셀...],...], looksLogin}.
@@ -136,12 +179,12 @@ _FETCH_SETTLEMENT_JS = r"""async (args) => {
                        (lower.includes('password') || lower.includes('passport'));
     let rows = [];
     try {
+      __CELL_HELPERS__
       const doc = new DOMParser().parseFromString(html, 'text/html');
       const tables = [...doc.querySelectorAll('table')];
       for (const tb of tables) {
-        const trs = [...tb.querySelectorAll('tr')].map(tr =>
-          [...tr.querySelectorAll('td,th')].map(td => td.innerText.trim().replace(/\s+/g, ' ')));
-        if (trs.length && trs[0].some(c => c.indexOf('계산서번호') >= 0)) {
+        const trs = tableRows(tb);
+        if (trs.length && trs[0].some(c => noWs(c).indexOf('계산서번호') >= 0)) {
           rows = trs;
           break;
         }
@@ -149,7 +192,7 @@ _FETCH_SETTLEMENT_JS = r"""async (args) => {
     } catch (e) { /* 파싱 실패 시 rows=[] */ }
     return { status: r.status, rows, looksLogin };
   } finally { clearTimeout(t); }
-}"""
+}""".replace("__CELL_HELPERS__", _CELL_HELPERS_JS)
 
 # 발주상세 SSR HTML GET(S4.5a) — fetch한 HTML을 DOMParser로 파싱해 per-SKU <table>(헤더에
 # '상품번호'·'발주금액'·'매입가' 토큰을 모두 가진 표=ref20b Table[7])의 rows를 추출. 인덱스 대신
@@ -166,12 +209,12 @@ _FETCH_PO_DETAIL_JS = r"""async (args) => {
                        (lower.includes('password') || lower.includes('passport'));
     let rows = [];
     try {
+      __CELL_HELPERS__
       const doc = new DOMParser().parseFromString(html, 'text/html');
       const tables = [...doc.querySelectorAll('table')];
       for (const tb of tables) {
-        const trs = [...tb.querySelectorAll('tr')].map(tr =>
-          [...tr.querySelectorAll('td,th')].map(td => td.innerText.trim().replace(/\s+/g, ' ')));
-        const flat = trs.flat().join('|');
+        const trs = tableRows(tb);
+        const flat = trs.flat().map(noWs).join('|');
         if (flat.indexOf('상품번호') >= 0 && flat.indexOf('발주금액') >= 0 && flat.indexOf('매입가') >= 0) {
           rows = trs;
           break;
@@ -180,7 +223,7 @@ _FETCH_PO_DETAIL_JS = r"""async (args) => {
     } catch (e) { /* 파싱 실패 시 rows=[] */ }
     return { status: r.status, rows, looksLogin };
   } finally { clearTimeout(t); }
-}"""
+}""".replace("__CELL_HELPERS__", _CELL_HELPERS_JS)
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -214,6 +257,9 @@ def load_config() -> dict:
     cfg.setdefault("sales_backfill_days", 0)
     cfg.setdefault("sales_page_size", 20)
     cfg.setdefault("sales_max_pages", 40)
+    # 판매분석 시간 예산(분). lease TTL이 20분이라 그 안에서 끝나야 prod가 요청을 재무장하고
+    #   Chrome을 한 번 더 띄우는 일이 없다. 초과하면 모은 것만 push하고 남은 날은 다음 회차로.
+    cfg.setdefault("sales_budget_min", 10)
     # 프로모션: 전량 upsert(2026-07-28 실측 totalElements=7 — 계정 전체가 한 페이지에 들어온다).
     cfg.setdefault("collect_promotion", True)
     cfg.setdefault("promo_page_size", 25)
@@ -797,9 +843,9 @@ def _settle_query(cfg: dict, page_no: int) -> str:
 
 
 def _invoice_idx(header: list) -> int:
-    """헤더에서 '계산서번호' 컬럼 인덱스(없으면 -1)."""
+    """헤더에서 '계산서번호' 컬럼 인덱스(없으면 -1). 공백 무시(마크업이 토큰을 쪼개도 찾는다)."""
     for i, c in enumerate(header):
-        if "계산서번호" in str(c):
+        if "계산서번호" in re.sub(r"\s+", "", str(c)):
             return i
     return -1
 
@@ -1020,7 +1066,22 @@ def _json_or_text(resp):
 #     조용히 0행이 되어 "안 팔린 날"로 보인다 → 구독 조회·403을 **실패로 표면화**한다.
 # ════════════════════════════════════════════════════════════════════
 class _SalesAccessDenied(RuntimeError):
-    """판매분석 접근 차단(구독 만료·권한 회수·403). 조용한 skip 금지 신호(D-CPP-5)."""
+    """판매분석 접근 차단(구독 만료·권한 회수·403). 조용한 skip 금지 신호(D-CPP-5).
+
+    ★**영구적** 실패다 — 재시도해도 40초 뒤에 구독이 되살아나지 않는다. 그래서 이 예외만
+      prod에 kind="access_denied"로 보고해 요청을 즉시 소멸시킨다(재시도 0회). 안 그러면
+      버튼 1회가 Chrome을 3번 띄우고 매번 같은 자리에서 죽는다(refresh_contract 참조).
+    """
+
+
+class _SalesMappingError(RuntimeError):
+    """서버는 vendorItems를 줬는데 우리 매핑이 레코드를 하나도 못 만든 상태.
+
+    _SalesAccessDenied와 **반드시 구분한다**: 이건 구독이 아니라 코드 문제(쿠팡 필드명 변경)라
+    처방이 정반대다. 접근차단으로 뭉뚱그리면 구독을 갱신하며 코드 버그를 쫓게 된다.
+    이쪽은 **일시적이지 않지만 재시도로 고칠 수도 없다** → 재시도는 하지 않되 access_denied와
+    달리 사람이 코드를 봐야 한다는 사실이 메시지에 드러나야 한다.
+    """
 
 
 def _sales_window_days(cfg: dict, today: date) -> list[date]:
@@ -1128,8 +1189,35 @@ def _sales_records(payload: dict, day: date) -> list[dict]:
     return out
 
 
-def _sales_access_ok(page) -> tuple[bool, str]:
-    """D-CPP-5 구독 게이트 확인. (True,"") / (False,사유). 사유는 실패 보고에 그대로 실린다."""
+# 판매분석을 실제로 볼 수 있는 권한 등급(2026-07-28 실측: BASIC + 무료체험). 목록에 없는
+#   등급은 **모르는 등급 = 차단**으로 본다 — 새 등급이 생겨 오탐이 나면 그건 로그에 이름이
+#   찍히므로 한 줄로 고칠 수 있지만, 반대로 열어두면 만료를 조용히 통과시킨다(D-CPP-5).
+_SALES_PERMITTED_LEVELS = {"BASIC", "PREMIUM", "FULL", "PRO"}
+
+
+def _parse_trial_end(v) -> date | None:
+    """freeTrialEndDate(실측 '2026.08.20' — 점 구분) → date. 못 읽으면 None(판단 보류)."""
+    s = str(v or "").strip().replace(".", "-").replace("/", "-").rstrip("-")
+    if not s:
+        return None
+    try:
+        return date.fromisoformat(s[:10])
+    except ValueError:
+        return None
+
+
+def _sales_access_ok(page, today: date | None = None) -> tuple[bool, str]:
+    """D-CPP-5 구독 게이트. (True,"") / (False,사유). 사유는 실패 보고에 그대로 실린다.
+
+    ★읽은 값으로 **판정한다**(적대적 리뷰 2R). 이전 판은 permittedLevel/freeTrialEndDate를
+      로그로 찍고 무조건 True를 돌려줬다 — 즉 게이트가 아니라 장식이었고, 유일한 실집행은
+      검색 API의 403뿐이었다. 그런데 D-CPP-5가 겁내는 실패 모드는 정확히 "403이 아니라
+      **조용히 0행**"이다(무료체험 종료 2026-08-20). 403에만 거는 것은 D-CPP-5가 걸지 말라는
+      쪽에 거는 것이다.
+    ★단, 이 함수만으로는 부족하다: 등급이 멀쩡한데 응답이 비는 경우가 있어
+      `_collect_sales_rows`의 창 전체 판정(vendorItems 0 → 접근차단 / vendorItems>0인데
+      레코드 0 → 매핑 파손)과 **짝으로만** 성립한다. 둘 중 하나만 넣지 말 것.
+    """
     res = _eval_retry(page, _FETCH_TEXT_JS, [SUBSCRIPTION_PATH])
     status = (res or {}).get("status")
     body = (res or {}).get("body") or ""
@@ -1143,13 +1231,29 @@ def _sales_access_ok(page) -> tuple[bool, str]:
     if not isinstance(data, dict) or not data:
         return False, f"구독 상태 data 없음: {body[:160]}"
     info = data.get("detailInfo") or {}
+    level = str(data.get("permittedLevel") or "").strip().upper()
+    subscribed = (info or {}).get("subscribedLevel")
+    trial_end_raw = (info or {}).get("freeTrialEndDate")
     log.info(
-        "판매분석 구독 게이트: permittedLevel=%s subscribed=%s freeTrialEnd=%s "
-        "(D-CPP-5 — 만료되면 수집이 조용히 0행이 된다)",
-        data.get("permittedLevel"),
-        (info or {}).get("subscribedLevel"),
-        (info or {}).get("freeTrialEndDate"),
+        "판매분석 구독 게이트: permittedLevel=%s subscribed=%s freeTrialEnd=%s",
+        level or None, subscribed, trial_end_raw,
     )
+    if not level:
+        return False, f"구독 등급(permittedLevel) 없음 — 접근 불가로 본다: {body[:160]}"
+    if level not in _SALES_PERMITTED_LEVELS:
+        return False, (
+            f"판매분석 권한 등급 '{level}'은 수집 가능 등급이 아니다"
+            f"(허용 {sorted(_SALES_PERMITTED_LEVELS)}) — 구독 상태 확인 필요"
+        )
+    # 무료체험만으로 보고 있는데 종료일이 지났다 → 조용한 0행이 되기 전에 먼저 잡는다.
+    trial_end = _parse_trial_end(trial_end_raw)
+    if trial_end is not None and str(subscribed or "").strip().upper() == "FREE":
+        ref = today or datetime.now(KST).date()
+        if ref > trial_end:
+            return False, (
+                f"판매분석 무료체험 종료({trial_end}) — subscribedLevel=FREE 상태로 "
+                f"오늘({ref})은 유효 구독이 없다(D-CPP-5)"
+            )
     return True, ""
 
 
@@ -1181,14 +1285,27 @@ def _fetch_sales_page(page, cfg: dict, day: date, page_no: int):
 
 
 def _collect_sales_day(page, cfg: dict, day: date):
-    """한 날짜의 전 페이지 수집. 반환 (rows, period_hint|None).
+    """한 날짜의 전 페이지 수집. 반환 (rows, period_hint|None, raw_items).
 
     period_hint는 400 INVALID_DATE에서 읽은 유효 구간(호출자가 나머지 날짜를 클램프).
     403(구독/권한)은 _SalesAccessDenied로 올린다 — 조용히 0행으로 접지 않는다(D-CPP-5).
+    raw_items = 서버가 준 vendorItems 원소 수(매핑 전). rows(매핑 후)와 **갈라서 세는** 이유는
+      "권한이 끊겨 서버가 빈 목록을 줬다"와 "목록은 왔는데 우리 매핑이 필드명을 놓쳤다"가
+      완전히 다른 사고이고 처방도 다르기 때문이다(전자=구독 확인, 후자=코드 한 줄).
+
+    ★페이지네이션 자기검증(적대적 리뷰 2R): 응답의 pageNumber/totalResults는 이미 우리 손에
+      들어와 있는 **확인 수단**인데 이전 판은 파싱만 하고 버렸다(원칙14).
+      - pageNumber 에코가 요청과 다르면 서버가 페이징을 무시하고 같은 페이지를 다시 주는 것 →
+        무한 루프는 max_pages가 막지만 같은 행을 N번 세게 되므로 즉시 끊는다.
+      - 마지막에 len(rows) != totalResults 면 **조용한 절단**이다 → 그 날을 실패로 올린다.
+      - max_pages 소진도 절단이다 → 이전 판은 정상 종료와 구분이 안 됐다.
     """
     max_pages = int(cfg.get("sales_max_pages", 40))
     rows: list[dict] = []
+    raw_items = 0
+    total_results = 0
     page_no = 0
+    truncated = True     # 루프를 정상 종료(break)로 빠져나가면 False로 내린다
     while page_no < max_pages:
         payload, status, text = _fetch_sales_page(page, cfg, day, page_no)
         if status == 403:
@@ -1196,16 +1313,35 @@ def _collect_sales_day(page, cfg: dict, day: date):
         if payload is None:
             period = _parse_viewable_period(text) if status == 400 else None
             if period is not None:
-                return rows, period
+                return rows, period, raw_items
             raise RuntimeError(f"판매분석 {day} page={page_no} 비정상(status={status}): {text[:160]}")
+        items = (payload or {}).get("vendorItems") or []
+        raw_items += len(items) if isinstance(items, list) else 0
         rows.extend(_sales_records(payload, day))
         meta = _sales_page_meta(payload)
+        if meta["page_number"] != page_no:
+            raise RuntimeError(
+                f"판매분석 {day}: 요청 page={page_no}인데 응답 pageNumber={meta['page_number']} — "
+                "서버가 페이징을 무시했다(같은 행을 중복 계수할 수 있어 중단한다)"
+            )
+        total_results = meta["total_results"] or total_results
         total_pages = meta["total_pages"]
         if total_pages <= 0 or page_no + 1 >= total_pages:
+            truncated = False
             break
         page_no += 1
         page.wait_for_timeout(300)   # 폴라이트 간격
-    return rows, None
+    if truncated:
+        raise RuntimeError(
+            f"판매분석 {day}: 페이지 상한(sales_max_pages={max_pages}) 소진 — 절단된 하루를 "
+            "정상 수집으로 세지 않는다(upsert라 빠진 옵션은 옛 값으로 남는다)"
+        )
+    if total_results and raw_items != total_results:
+        raise RuntimeError(
+            f"판매분석 {day}: totalResults={total_results}인데 수신 vendorItems={raw_items} — "
+            "페이지 누락/중복 의심(조용한 절단 방지)"
+        )
+    return rows, None, raw_items
 
 
 def _collect_sales_rows(page, cfg: dict) -> tuple[list[dict], dict]:
@@ -1213,42 +1349,118 @@ def _collect_sales_rows(page, cfg: dict) -> tuple[list[dict], dict]:
 
     유효 구간을 처음 알게 되면(400 응답) 남은 날짜를 즉시 클램프하고, 그 날짜가 구간 안이면
     **한 번만** 재시도한다(무한 재시도 금지 — 같은 400이 반복되면 그날은 포기하고 계속).
+
+    ★하루의 실패가 그날만 죽인다(적대적 리뷰 2R). 이전 판은 어떤 날이 raise하면 그 예외가
+      함수를 뚫고 나가 **이미 수집한 앞날들까지 통째로 버렸다**(push 자체가 일어나지 않음).
+      롤링 7일이면 다음 실행이 메우지만 sales_backfill_days=45로 돌리면 44일째의 일시적
+      500 하나가 43일치를 버린다. 날짜끼리는 독립이고 ingest가 멱등 upsert이므로, 성공한
+      날은 성공한 대로 밀어 넣고 실패한 날만 센다.
+    ★days_out_of_range(정상: 유효 구간 밖)와 days_failed(비정상: 구간 안인데 못 가져옴)를
+      **가른다**. 이전 판은 둘을 days_clamped 한 칸에 뭉쳐 "N일 범위밖"으로 찍었다 — 두 번
+      실패한 날이 정상 스킵으로 위장됐고 rc는 0이었다(원칙22 조용한 성공). 이 저장소의 기존
+      계약과도 어긋난다(ingest_coupon_used_amount: 일시적/영구적을 한 숫자로 뭉치지 않는다).
+    ★창 전체 판정(적대적 리뷰 3R) — 셋을 구분한다:
+        vendorItems 합계 0        → 접근 차단(구독/권한). _SalesAccessDenied.
+        vendorItems>0 & 레코드 0  → 매핑 파손(쿠팡 필드명 변경). _SalesMappingError.
+      전자는 사람이 결제로, 후자는 커밋으로 고친다. 뭉치면 구독을 갱신하며 코드 버그를 쫓는다.
+      (레코드 0이면 push가 없어 백엔드의 blank_qty 경보도 accepted=0으로 침묵한다 —
+       그래서 이 판정이 그 사각을 메우는 유일한 자리다.)
+    ★rc 규칙(적대적 리뷰 3R): 일부 날 실패는 rc를 올리지 않는다 — 롤링 창이 다음 실행에
+      스스로 메우고, 같은 서버 조건에 40초 뒤 재시도해봐야 결과가 달라지지 않기 때문이다.
+      **전 날짜 실패**만 rc≠0(계통 고장).
     """
     ok, why = _sales_access_ok(page)
     if not ok:
         raise _SalesAccessDenied(f"판매분석 접근 불가(D-CPP-5): {why}")
     today = datetime.now(KST).date()
     pending = _sales_window_days(cfg, today)
-    stats = {"days_requested": len(pending), "days_collected": 0, "days_clamped": 0, "rows": 0}
+    stats = {
+        "days_requested": len(pending), "days_collected": 0,
+        "days_out_of_range": 0, "days_failed": 0,
+        "failed_dates": [], "raw_items": 0, "rows": 0,
+    }
     period: tuple[date, date] | None = None
     retried: set = set()
     rows: list[dict] = []
+    budget_min = int(cfg.get("sales_budget_min", 10) or 10)
+    deadline = time.monotonic() + max(1, budget_min) * 60
     while pending:
+        # ★시간 예산(적대적 리뷰 2R): 백필 창이 넓으면 이 스트림 하나가 lease TTL(20분)을
+        #   넘겨 prod가 요청을 재무장하고 Chrome이 한 번 더 뜬다. 모은 것은 밀어 넣고 멈춘다.
+        if time.monotonic() > deadline:
+            log.warning(
+                "판매분석 시간 예산(%d분) 초과 — 남은 %d일을 이번 회차에서 포기한다"
+                "(수집분은 push하고, 롤링 창이 다음 실행에 메운다)", budget_min, len(pending) + 1,
+            )
+            break
         day = pending.pop(0)
         if period and not (period[0] <= day <= period[1]):
-            stats["days_clamped"] += 1
+            stats["days_out_of_range"] += 1
             continue
-        day_rows, hint = _collect_sales_day(page, cfg, day)
-        if hint is not None and period is None:
+        try:
+            day_rows, hint, raw_items = _collect_sales_day(page, cfg, day)
+        except _SalesAccessDenied:
+            raise                      # 접근 차단은 창 전체의 문제 — 그대로 올린다
+        except Exception as e:         # noqa: BLE001 — 하루 실패가 나머지 날을 죽이지 않는다
+            log.error("판매분석 %s 수집 실패(다른 날짜는 계속): %s", day, str(e)[:200])
+            stats["days_failed"] += 1
+            stats["failed_dates"].append(day.isoformat())
+            continue
+        if hint is not None and (period is None or hint != period):
+            # ★조건 없이 최신 힌트를 채택한다: 롤링 창이 실행 중 자정을 넘기면 구간이 하루
+            #   밀린다. 이전 판은 첫 힌트만 붙들어 낡은 경계로 재시도 판정을 했다.
             period = hint
             log.info("판매분석 유효 구간 수신: %s ~ %s — 창을 자동 보정한다(하드코딩 아님)", *period)
+            # ★잘려나간 날도 센다: 그냥 pending에서 지우면 days_requested와 세 카운터의 합이
+            #   맞지 않아, 로그만 보고는 "요청 7일인데 3일만 수집됐다"의 나머지 4일이
+            #   범위밖인지 유실인지 알 수 없다.
+            before = len(pending)
             pending = _clamp_days(pending, period)
+            stats["days_out_of_range"] += before - len(pending)
         if hint is not None:
-            # 이 날짜 자체가 400이었다. 구간 안이면 1회만 재시도, 아니면 클램프로 계산.
+            # 이 날짜 자체가 400이었다. 구간 안이면 1회만 재시도, 아니면 구간 밖으로 계산.
             if period and period[0] <= day <= period[1] and day not in retried:
                 retried.add(day)
                 pending.insert(0, day)
+            elif period and period[0] <= day <= period[1]:
+                # 구간 안인데 재시도까지 400 — 이건 '범위밖'이 아니라 **실패**다.
+                log.error("판매분석 %s: 유효 구간 안인데 재시도도 400 — 실패로 센다", day)
+                stats["days_failed"] += 1
+                stats["failed_dates"].append(day.isoformat())
             else:
-                stats["days_clamped"] += 1
+                stats["days_out_of_range"] += 1
             continue
         rows.extend(day_rows)
+        stats["raw_items"] += raw_items
         stats["days_collected"] += 1
         page.wait_for_timeout(300)
     stats["rows"] = len(rows)
     log.info(
-        "판매분석 수집: %d일 요청 → %d일 수집·%d일 범위밖, 레코드 %d건",
-        stats["days_requested"], stats["days_collected"], stats["days_clamped"], len(rows),
+        "판매분석 수집: %d일 요청 → %d일 수집·%d일 범위밖·%d일 실패, vendorItems %d개 → 레코드 %d건",
+        stats["days_requested"], stats["days_collected"], stats["days_out_of_range"],
+        stats["days_failed"], stats["raw_items"], len(rows),
     )
+    if stats["days_failed"]:
+        log.warning("판매분석 실패 날짜: %s", ",".join(stats["failed_dates"]))
+    if stats["days_failed"] and stats["days_failed"] >= stats["days_requested"]:
+        # 전 날짜 실패 = 계통 고장(세션 만료·서버 장애). 일부 실패와 달리 롤링 창이 못 메운다.
+        raise RuntimeError(
+            f"판매분석 {stats['days_requested']}일 전부 실패 — 계통 고장으로 본다"
+            f"(실패 날짜: {','.join(stats['failed_dates'][:10])})"
+        )
+    if stats["days_collected"] > 0:
+        if stats["raw_items"] == 0:
+            raise _SalesAccessDenied(
+                f"판매분석 {stats['days_collected']}일을 모두 정상 조회했는데 vendorItems가 "
+                "전부 0개 — 판매가 없는 게 아니라 접근이 끊긴 것으로 본다(D-CPP-5). "
+                "구독 상태(무료체험 종료일)를 확인할 것"
+            )
+        if len(rows) == 0:
+            raise _SalesMappingError(
+                f"판매분석 vendorItems {stats['raw_items']}개를 받았는데 레코드가 0건 — "
+                "구독이 아니라 **매핑 파손**이다(쿠팡이 vendorItemId 등 필드명을 바꿨을 때). "
+                "결제가 아니라 _sales_records를 고쳐야 한다"
+            )
     return rows, stats
 
 
@@ -1318,8 +1530,19 @@ def _promotion_record(item: dict) -> dict | None:
 
 
 def _fetch_promotion_detail(page, request_id: str) -> dict | None:
-    """프로모션 상세 1건. 실패(비200·비JSON)면 None — 목록 항목으로 폴백한다."""
-    res = _eval_retry(page, _FETCH_TEXT_JS, [f"{PROMOTION_DETAIL_PATH}/{request_id}"])
+    """프로모션 상세 1건. 실패면 None — 목록 항목으로 폴백한다.
+
+    ★**예외까지** 삼킨다(적대적 리뷰 2R). 이전 판은 비200·비JSON만 None으로 접고 `_eval_retry`가
+      2회 후 재발생시키는 예외는 그대로 통과시켰다 — 7건 중 4번째에서 Playwright가 한 번
+      흔들리면(`Execution context was destroyed`) `_collect_promotion_rows`를 뚫고 나가
+      **7건 전부**가 push되지 않았다. docstring은 "그 건만 폴백"이라고 약속하는데 실제로는
+      아니었다. 상세는 어디까지나 보강이고 목록만으로도 레코드가 성립하므로 여기서 끊는다.
+    """
+    try:
+        res = _eval_retry(page, _FETCH_TEXT_JS, [f"{PROMOTION_DETAIL_PATH}/{request_id}"])
+    except Exception as e:  # noqa: BLE001 — 상세 1건 실패가 수집 전체를 죽이지 않는다
+        log.warning("프로모션 상세 %s 조회 예외 — 목록 값으로 폴백: %s", request_id, str(e)[:120])
+        return None
     if (res or {}).get("status") != 200:
         return None
     try:
@@ -1356,6 +1579,13 @@ def _collect_promotion_rows(page, cfg: dict) -> tuple[list[dict], dict]:
         if not content or meta["last"] or (meta["total_pages"] > 0 and page_no + 1 >= meta["total_pages"]):
             break
         page.wait_for_timeout(300)
+    else:
+        # for가 break 없이 끝났다 = 상한 소진 = **조용한 절단**. 이전 판은 정상 종료와
+        # 구분되지 않아, 프로모션이 늘면 뒤쪽이 아무 신호 없이 빠진 채 성공으로 보였다.
+        log.error(
+            "프로모션 목록 페이지 상한(promo_max_pages=%d) 소진 — 뒤쪽 프로모션이 누락됐을 수 "
+            "있다(상한을 올리거나 원인을 확인할 것)", max_pages,
+        )
     rows: list[dict] = []
     detail_ok = 0
     detail_fail = 0
@@ -1364,7 +1594,11 @@ def _collect_promotion_rows(page, cfg: dict) -> tuple[list[dict], dict]:
         if i < detail_max:
             detail = _fetch_promotion_detail(page, str(item.get("requestId")))
             if detail is not None:
-                merged = {**item, **detail}   # 상세가 이긴다(같은 필드면 더 최신·정본)
+                # ★None인 필드는 목록 값을 지우지 않는다(적대적 리뷰 2R). dict 언패킹은 값이
+                #   아니라 **키 존재**로 덮으므로, 상세가 discountBudget:null을 주면 목록의
+                #   정상 값이 None으로 밀려나고 ingest는 그 None을 그대로 컬럼에 쓴다
+                #   (skip도 경보도 없음). "상세가 이긴다"는 값이 있을 때만 참이다.
+                merged = {**item, **{k: v for k, v in detail.items() if v is not None}}
                 detail_ok += 1
             else:
                 detail_fail += 1
@@ -1459,31 +1693,64 @@ def _push_promotions(cfg: dict, rows: list[dict]) -> int:
     return 0
 
 
-def _collect_and_push_promo_pnl(page, cfg: dict) -> int:
-    """판매분석·프로모션 두 스트림을 수집→push. 반환 rc(0=성공, 1=하나라도 실패).
+def _collect_and_push_promo_pnl(page, cfg: dict) -> tuple[int, list[str], bool]:
+    """판매분석·프로모션 두 스트림을 수집→push. 반환 (rc, 실패요약, 영구실패여부).
 
     두 스트림은 서로 독립이다 — 한쪽 실패가 다른 쪽 push를 막지 않는다(발주/정산 패턴과 동일).
     ★판매분석 접근 차단(D-CPP-5)은 **실패로 남긴다**: 조용히 넘기면 테이블이 멈춘 걸 아무도 모른다.
+    ★실패요약을 돌려주는 이유(적대적 리뷰 2R): 호출부가 prod에 보고하는 문구가
+      "로켓 발주/정산 수집 실패"로 **고정**되어 있었다. 이 스트림이 붙은 뒤로 그 문구는 거짓이
+      된다 — 발주/정산은 멀쩡히 push됐는데 운영자는 그쪽을 뒤지게 된다. 어느 스트림이
+      죽었는지 이름을 실어 보낸다.
+    ★영구실패여부(적대적 리뷰 3R): 구독/권한 만료와 매핑 파손은 재시도로 낫지 않는다.
+      True면 호출부가 kind="access_denied"로 보고해 재시도 0회로 소멸시킨다 — 안 그러면
+      버튼 1회가 Chrome을 3번 띄우고 매번 같은 자리에서 죽는다(발주/정산은 매번 성공하는데도).
     """
     rc = 0
+    failures: list[str] = []
+    permanent = False
     if cfg.get("collect_sales", True):
         try:
-            rows, _stats = _collect_sales_rows(page, cfg)
-            rc |= _push_sales(cfg, rows)
+            rows, stats = _collect_sales_rows(page, cfg)
+            if _push_sales(cfg, rows):
+                rc = 1
+                failures.append("판매분석 push 실패")
+            elif stats.get("days_failed"):
+                # 일부 날짜 실패는 rc를 올리지 않는다(롤링 창이 다음 실행에 메운다) — 다만
+                # 조용히 넘기지도 않는다. 실패 날짜를 로그에 남기고 요약에만 싣는다.
+                log.warning(
+                    "판매분석 부분 성공: %d/%d일 수집(실패 %s) — 롤링 창이 다음 회차에 메운다",
+                    stats["days_collected"], stats["days_requested"],
+                    ",".join(stats["failed_dates"][:10]),
+                )
         except _SalesAccessDenied as e:
             log.error("판매분석 수집 차단(D-CPP-5, 구독/권한 확인 필요): %s", e)
             rc = 1
+            permanent = True
+            failures.append(f"판매분석 접근 차단(구독/권한): {str(e)[:120]}")
+        except _SalesMappingError as e:
+            log.error("판매분석 매핑 파손(코드 수정 필요, 구독 문제 아님): %s", e)
+            rc = 1
+            permanent = True
+            failures.append(f"판매분석 매핑 파손(코드 수정 필요): {str(e)[:120]}")
         except Exception as e:  # noqa: BLE001 — 판매분석 실패가 프로모션 수집을 막지 않는다
             log.error("판매분석 수집 실패: %s", e)
             rc = 1
+            failures.append(f"판매분석 수집 실패: {str(e)[:120]}")
     if cfg.get("collect_promotion", True):
         try:
             rows, _stats = _collect_promotion_rows(page, cfg)
-            rc |= _push_promotions(cfg, rows)
+            if _push_promotions(cfg, rows):
+                rc = 1
+                failures.append("프로모션 push 실패")
         except Exception as e:  # noqa: BLE001
             log.error("프로모션 수집 실패: %s", e)
             rc = 1
-    return rc
+            failures.append(f"프로모션 수집 실패: {str(e)[:120]}")
+    # 두 스트림 중 하나라도 일시적 실패가 섞였으면 재시도가 의미 있다 → 영구 처리하지 않는다.
+    if rc and len(failures) > 1:
+        permanent = False
+    return rc, failures, permanent
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -1500,6 +1767,8 @@ def _do_run(cfg: dict) -> int:
     pages: list[dict] = []
     settle_rows: list[list] = []
     rc_promo_pnl = 0
+    promo_failures: list[str] = []
+    promo_permanent = False
     try:
         with _owned_chrome(cfg) as owner:
             with sync_playwright() as p:
@@ -1534,14 +1803,38 @@ def _do_run(cfg: dict) -> int:
                             detail_failed = -1
                     # 프로모션 손익 레이어(판매분석·프로모션) — 위 스트림들과 독립. 실패해도
                     #   발주/정산 push는 이미 끝났고, rc로만 실패가 드러난다(조용한 성공 금지).
-                    rc_promo_pnl = _collect_and_push_promo_pnl(page, cfg)
+                    rc_promo_pnl, promo_failures, promo_permanent = (
+                        _collect_and_push_promo_pnl(page, cfg)
+                    )
     except Exception as e:  # noqa: BLE001 — Chrome 기동/브라우저/수집 오류
         log.error("브라우저 수집 오류: %s", e)
         return 1
 
-    rc = 0 if (rc_po == 0 and rc_st == 0 and detail_failed <= 0 and rc_promo_pnl == 0) else 1
-    log.info("run 완료 — 발주 push rc=%d / 정산 push rc=%d / 발주상세 실패=%d / 프로모션손익 rc=%d",
-             rc_po, rc_st, detail_failed, rc_promo_pnl)
+    # ★실패 사유를 문자열로 남긴다(적대적 리뷰 2R): 보고 문구가 "발주/정산 수집 실패"로
+    #   고정돼 있어, 프로모션손익만 죽어도 운영자가 발주/정산을 뒤지게 된다.
+    core_failed = (rc_po != 0 or rc_st != 0 or detail_failed > 0)
+    reasons: list[str] = []
+    if rc_po:
+        reasons.append("발주 push 실패")
+    if rc_st:
+        reasons.append("정산 push 실패")
+    if detail_failed > 0:
+        reasons.append(f"발주상세 실패 {detail_failed}건")
+    reasons.extend(promo_failures)
+    global _LAST_RUN_ERROR
+    _LAST_RUN_ERROR = " / ".join(reasons) if reasons else ""
+
+    if not core_failed and rc_promo_pnl == 0:
+        rc = 0
+    elif not core_failed and promo_permanent:
+        # 발주/정산은 성공했고 프로모션손익만 **영구** 실패(구독 만료·매핑 파손). 재시도해도
+        # 같은 자리에서 죽으므로 재시도 대상에서 뺀다(요청 소멸 + 사유 안내). 실패로는 남는다.
+        rc = RC_ACCESS_DENIED
+    else:
+        rc = 1
+    log.info("run 완료 — 발주 push rc=%d / 정산 push rc=%d / 발주상세 실패=%d / 프로모션손익 rc=%d%s",
+             rc_po, rc_st, detail_failed, rc_promo_pnl,
+             f" / 사유: {_LAST_RUN_ERROR}" if _LAST_RUN_ERROR else "")
     # 성공 시 last_success_at 갱신 (UI 폴링 완료 감지용)
     if rc == 0 and _push_configured(cfg):
         # ★완료 신호는 몇 번 재시도한다(codex 5R[P1]): 유실되면 요청이 임대된 채 남아
@@ -1563,8 +1856,14 @@ def _do_run(cfg: dict) -> int:
 
 
 # run 반환코드 — 3=로그인 필요(재시도 무의미: 재시도해도 실패하고 창만 반복해서 뜬다, §0).
+# 4=프로모션손익 영구 실패(구독/권한 만료·매핑 파손). 발주/정산은 성공했고 이것만 죽은 경우로,
+#   재시도해도 같은 자리에서 죽으므로 login_required와 같은 이유로 재시도에서 뺀다(3R).
 # 1=그 외 실패(재시도 대상), 2=설정 누락, 0=성공.
 RC_LOGIN_REQUIRED = 3
+RC_ACCESS_DENIED = 4
+
+# 직전 run의 실패 사유(어느 스트림이 죽었는지). 보고 문구를 고정 문자열로 두면 거짓말이 된다.
+_LAST_RUN_ERROR = ""
 
 
 def _prod_report_failure(cfg: dict, error: str, kind: str | None = None,
@@ -1747,9 +2046,17 @@ def cmd_poll(cfg: dict, interval: int = 30) -> int:
                 if rc != 0:
                     # 실패 보고 = 재시도 판정의 입력(lease 계약). rc==3(로그인 필요)이면
                     # prod가 재시도 없이 요청을 소멸시킨다(§0 — 창만 반복해서 뜬다).
+                    # ★사유를 실어 보낸다: "발주/정산 수집 실패" 고정 문구는 프로모션손익
+                    #   스트림이 붙은 뒤로 **거짓**이다(발주/정산은 성공했는데 운영자를
+                    #   엉뚱한 곳으로 보낸다). _LAST_RUN_ERROR가 어느 스트림인지 담는다.
+                    detail = _LAST_RUN_ERROR or "사유 미상"
                     _prod_report_failure(
-                        cfg, f"로켓 발주/정산 수집 실패(rc={rc})",
-                        kind=("login_required" if rc == RC_LOGIN_REQUIRED else None),
+                        cfg, f"로켓 수집 실패(rc={rc}): {detail}",
+                        kind=(
+                            "login_required" if rc == RC_LOGIN_REQUIRED
+                            else "access_denied" if rc == RC_ACCESS_DENIED
+                            else None
+                        ),
                         lease=lease)
 
         except Exception as e:  # noqa: BLE001

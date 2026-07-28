@@ -101,6 +101,7 @@ def _upsert_settlement(db: Session, vendor_id: str, rec: dict) -> None:
     row.tax_type = rec["tax_type"]
     row.first_payment_amount = rec["first_payment_amount"]
     row.second_payment_amount = rec["second_payment_amount"]
+    row.tax_invoice_transmitted = rec["tax_invoice_transmitted"]
     row.synced_at = kst_now()
 
 
@@ -152,6 +153,7 @@ def ingest_po_items(db: Session, purchase_order_seq: int, vendor_id: str, rows: 
             product_name=rec["product_name"],
             purchase_type=rec["purchase_type"],
             order_qty=rec["order_qty"],
+            vendor_confirmed_qty=rec["vendor_confirmed_qty"],
             unit_purchase_price=rec["unit_purchase_price"],
             line_order_amount=rec["line_order_amount"],
             line_supply_amount=rec["line_supply_amount"],

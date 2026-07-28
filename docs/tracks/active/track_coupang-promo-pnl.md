@@ -92,11 +92,12 @@ prod SELECT 실측 결과:
       **전부 특정**(위 "확정된 API 스펙" 표). 엑셀 폴백은 **불필요해짐**(JSON API로 충분)
 - [x] 수집기(페처) 확장 — `tools/rocket_supplier_fetcher.py`에 두 스트림 추가(판매분석 일별 롤링·
       프로모션 전량). 라이브 실증: 88레코드/2일·프로모션 7건, 파서 계약 통과(skip 0·blank 0)
-- [x] D-CPP-7 수기 단위 할인액 — 컬럼(alembic `b2d4f6a8c0e2`) + `PATCH /rocket/promotion/{id}/unit-discount`
+- [x] D-CPP-7 수기 단위 할인액 — 컬럼(alembic `df7b34a2f46e`) + `PATCH /rocket/promotion/{id}/unit-discount`
 - [x] D-CPP-5 접근불가 감지 배선 — 구독 조회 실패·판매분석 403을 `_SalesAccessDenied`로 올려
       run rc≠0 → 기존 `fetch-error` 보고 경로로 표면화(조용한 skip 없음)
 - [ ] **prod 배포 + push 실증** — 라이브 확인 결과 prod에 Phase 1 라우트가 **아직 없다**(404).
-      순서: 마이그(`a1c3e5f7b9d1`→`b2d4f6a8c0e2`) → 코드 → 재시작(`safe_deploy.sh --migrate --restart`)
+      순서: 마이그(`df7b34a2f46e` 1건 — Phase1 `c2998cfe1f7c`는 prod 적용 완료) → 코드 → 재시작
+      (`safe_deploy.sh --migrate --restart`) → **페처 데몬 재기동**(아래 "다음 액션" 2·3 참조)
 - [ ] RG 쿠폰 "사용 금액" 수집 경로 확정 (Open API에 없음 — 계획서 §3 참조)
 - [ ] sellC UI에서 단위 할인액 입력(Phase 2) — 지금은 PATCH 엔드포인트만
 
@@ -128,12 +129,22 @@ push 경로는 유닛 테스트로만 검증된 상태.
 
 ## 다음 액션
 
-1. **prod 배포**(오케스트레이터): `scripts/safe_deploy.sh` 로 ①마이그 2건(`a1c3e5f7b9d1`,`b2d4f6a8c0e2`)
+1. **prod 배포**(오케스트레이터): `scripts/safe_deploy.sh` 로 ①마이그 **1건** `df7b34a2f46e`
+   (Phase1 `c2998cfe1f7c`는 prod 적용 완료 — prod `alembic_version`이 `f6a8c0b2d4e6`인지 먼저 확인)
    → `alembic upgrade head` → ②`models.py`·`routers/coupang_ops.py`·`services/…`·`clients/…` → 재시작.
    순서 위반 시 ORM이 `no such column`으로 그 테이블 ingest를 통째로 죽인다(프로젝트 CLAUDE.md).
-2. 배포 후 **라이브 push 실증**: 로켓 '갱신' 버튼 1회 → `~/.ohisell_rocket_fetcher.log`에서
+2. **★페처 데몬 재기동 — 버튼을 누르기 전에 반드시 먼저.** `tools/rocket_supplier_fetcher.py`는
+   `com.ohisell.rocket`(launchd KeepAlive 상주)이 **프로세스 시작 시 1회만** 로드한다. 재기동 없이
+   3번을 하면 **구코드가 돌아** 판매분석·프로모션 로그가 아예 안 나오고, 그것이 "새 스트림이 안 붙었다"로
+   오독된다(com.ohisell.adcost 2026-06-14 동일 사고).
+   ```
+   launchctl kickstart -k gui/$(id -u)/com.ohisell.rocket
+   launchctl print gui/$(id -u)/com.ohisell.rocket | grep -E 'pid|state'   # pid가 바뀌었는지 확인
+   ```
+3. 재기동 확인 후 **라이브 push 실증**: 로켓 '갱신' 버튼 1회 → `~/.ohisell_rocket_fetcher.log`에서
    "판매분석 push 성공 / 프로모션 push 성공" + `skipped=0` 확인 → prod DB 행 수 대조.
-3. 프로모션별 `unit_discount_amount` 수기 입력(D-CPP-7) — 지금은 PATCH, UI는 Phase 2.
+   ★`판매분석 수집: N일 요청 → M일 수집·K일 범위밖·F일 실패` 줄에서 **F=0**인지도 본다(F>0이면 rc≠0).
+4. 프로모션별 `unit_discount_amount` 수기 입력(D-CPP-7) — 지금은 PATCH, UI는 Phase 2.
 4. 9월 1P 정산서 도착 시 D-CPP-4 대사.
 
 ## 마지막 구조 감사

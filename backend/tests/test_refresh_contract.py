@@ -423,3 +423,24 @@ def test_status_fields_report_in_flight(db):
 
     rc.report_failure(db, ACC, "boom")
     assert rc.status_fields(_row(db))["in_flight"] is False   # 재시도 대기 중
+
+
+def test_access_denied_extinguishes_immediately(db):
+    """★구독/권한 만료는 **영구적** — 재시도해도 40초 뒤에 되살아나지 않는다.
+
+    배경(트랙 coupang-promo-pnl 적대적 리뷰 3R): 로켓 페처에 판매분석 스트림이 붙으면서
+    "영구 실패"가 처음으로 재시도 루프에 들어왔다(무료체험 종료 2026-08-20). 그대로 두면
+    갱신 버튼 1회가 Chrome을 MAX_ATTEMPTS(3)번 띄우고 매번 같은 자리에서 죽는데,
+    그동안 발주/정산은 매번 성공한다. login_required와 같은 이유로 재시도에서 뺀다.
+    ★단 실패로는 남긴다(D-CPP-5 "조용한 skip 금지") — last_error에 사유가 남아야 한다.
+    """
+    rc.request_refresh(db, ACC)
+    rc.claim_refresh(db, ACC)
+    out = rc.report_failure(db, ACC, "판매분석 접근 차단", kind=rc.KIND_ACCESS_DENIED)
+
+    assert out["retry"] is False and out["attempt"] == 1
+    assert "구독" in out["reason"]
+    row = _row(db)
+    assert row.refresh_requested_at is None          # 요청 소멸 = 재시도 0회
+    assert "판매분석 접근 차단" in row.last_error     # 사유는 남는다(조용하지 않다)
+    assert rc.claim_refresh(db, ACC)["claimed"] is False

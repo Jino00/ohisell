@@ -42,6 +42,15 @@ MAX_ATTEMPTS = 3
 # 실패하고 창만 반복해서 뜬다(§0 금지선) → 즉시 요청 소멸 + 사람에게 안내.
 KIND_LOGIN_REQUIRED = "login_required"
 
+# ★access_denied(2026-07-28, 트랙 coupang-promo-pnl 적대적 리뷰 3R) — 구독/권한 만료처럼
+#   **영구적인** 접근 차단. 재시도해도 40초 뒤에 되살아나지 않는다(판매분석 무료체험 종료
+#   2026-08-20이 눈앞). login_required와 같은 이유로 재시도에서 뺀다: 안 그러면 갱신 버튼
+#   1회가 Chrome을 3번 띄우고 매번 같은 곳에서 죽으며, 그 사이 발주/정산은 계속 성공한다.
+#   ★단 실패로는 남는다(D-CPP-5 "조용한 skip 금지") — 요청만 소멸시키고 last_error에 사유를 적는다.
+#   일시적/영구적을 가르는 이 저장소의 기존 계약과 같은 결(ingest_coupon_used_amount의
+#   not_found=일시적 / wrong_kind=영구적 분리).
+KIND_ACCESS_DENIED = "access_denied"
+
 # lease TTL(분) — "데몬이 보고도 못 하고 죽었다"고 간주하기까지의 시간.
 # ★실측 근거(2026-07-27, Mac 페처 로그 ~/.ohisell_*_fetcher.log의 claim→활동종료 구간):
 #     ad_cost   run=227회  median 22s  p90 76s  max 684s(11.4분, 2026-06-17 로그인 대기 포함)
@@ -312,6 +321,7 @@ def report_failure(
     """페처 run 실패 보고. 재시도 여부를 계약대로 판정한다.
 
     - kind="login_required" → 재시도 없음(창만 반복해서 뜸, §0 금지선). 요청 소멸.
+    - kind="access_denied" → 재시도 없음(구독/권한 만료는 영구적). 요청 소멸.
     - attempt_count >= MAX_ATTEMPTS → 재시도 예산 소진. 요청 소멸.
     - 그 외 → claimed_at=None으로 lease만 반납 → 다음 폴에서 페처가 자동 재claim(=재시도).
 
@@ -347,6 +357,8 @@ def report_failure(
     reason: str | None = None
     if kind == KIND_LOGIN_REQUIRED:
         reason = "로그인 필요 — 재시도 안 함(로그인 후 다시 갱신을 눌러주세요)"
+    elif kind == KIND_ACCESS_DENIED:
+        reason = "접근 권한/구독 만료 — 재시도 안 함(구독 상태를 확인한 뒤 다시 갱신을 눌러주세요)"
     elif attempt >= MAX_ATTEMPTS:
         reason = f"재시도 {MAX_ATTEMPTS}회 소진"
 

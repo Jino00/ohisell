@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import sys
 import types
@@ -221,10 +222,36 @@ def test_promotion_record_maps_live_fields(fetcher):
 
 
 def test_promotion_record_leaves_absent_fields_none(fetcher):
-    """없는 필드를 지어내지 않는다(D-CPP-7): 단위 할인액·정산일은 API에 없다."""
+    """없는 필드를 지어내지 않는다(D-CPP-7): 단위 할인액·정산일은 API에 없다.
+
+    ★이전 판은 **동어반복**이었다(적대적 리뷰 2R): `_promotion_record`가 두 키를 하드코딩
+      `None`으로 넣으므로 fixture가 무엇이든 통과했고, 쿠팡이 그 필드를 실제로 추가해도
+      계속 통과했다 — 즉 docstring이 말하는 위험을 원리적으로 못 잡는다.
+      그래서 **실측 응답에 그 필드가 정말 없다**는 전제부터 검증한다. 쿠팡이 단위 할인액을
+      주기 시작하면 이 테스트가 깨지고, 그때가 D-CPP-7(수기 1칸)을 재검토할 시점이다.
+    """
+    for absent in ("discountValue", "unitDiscountAmount", "settlementDate", "discountPrice"):
+        assert absent not in _PROMO_ITEM, (
+            f"실측 응답에 {absent}가 생겼다 — D-CPP-7(수기 입력) 전제가 깨졌으니 재검토할 것"
+        )
     rec = fetcher._promotion_record(_PROMO_ITEM)
     assert rec["discount_value"] is None
     assert rec["settlement_date"] is None
+
+
+def test_promotion_detail_null_does_not_erase_list_value(fetcher):
+    """상세의 null이 목록의 정상 값을 지우면 안 된다(적대적 리뷰 2R).
+
+    dict 언패킹은 **키 존재**로 덮으므로 `{**item, **detail}`은 detail의 null까지 이긴다.
+    그러면 ingest가 그 None을 컬럼에 그대로 써서(skip도 경보도 없이) 좋은 값이 사라진다.
+    """
+    detail = {"requestId": 687878, "discountBudget": None, "supplierFundRate": None,
+              "status": "CLOSED"}
+    merged = {**_PROMO_ITEM, **{k: v for k, v in detail.items() if v is not None}}
+    rec = fetcher._promotion_record(merged)
+    assert rec["budget_amount"] == 1000000     # 목록 값 보존
+    assert rec["share_ratio"] == 100           # 목록 값 보존
+    assert rec["status"] == "CLOSED"           # 값이 있는 필드는 상세가 이긴다
 
 
 def test_promotion_record_requires_request_id(fetcher):
@@ -369,3 +396,250 @@ def test_patch_unit_discount_unknown_promotion_is_404_not_created(client):
                 headers={"X-Ingest-Token": _TOKEN}, json={"unit_discount_amount": 1000})
     assert r.status_code == 404
     assert s.query(CoupangRocketPromotion).count() == 1
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# ⑦ 제어 흐름(수집 루프) — 적대적 리뷰 2R/3R로 추가
+# ───────────────────────────────────────────────────────────────────────
+# ★왜 이 절이 생겼나: 이전 판의 371줄은 **순수 매핑 함수만** 덮고 있었고
+#   `_collect_sales_day/_collect_sales_rows/_collect_promotion_rows/_fetch_promotion_detail/
+#   _sales_access_ok` 등 실제 판정을 내리는 9개 함수는 참조조차 없었다. 발견된 결함 대부분이
+#   정확히 그 층에 있었다(부분 실패 시 전량 유실·실패를 '범위밖'으로 위장·조용한 절단).
+#   그래서 스크립트된 가짜 page로 그 층을 직접 돌린다 — 브라우저는 쓰지 않는다.
+# ═══════════════════════════════════════════════════════════════════════
+_SUB_OK = json.dumps({"data": {"permittedLevel": "BASIC",
+                               "detailInfo": {"subscribedLevel": "FREE",
+                                              "freeTrialEndDate": "2026.08.20"}}})
+
+
+class FakePage:
+    """`page.evaluate(js, arg)`만 흉내낸다. 응답은 호출자가 함수로 지정한다."""
+
+    def __init__(self, responder, sub_body: str = _SUB_OK):
+        self._responder = responder
+        self._sub_body = sub_body
+        self.calls: list = []
+
+    def wait_for_timeout(self, ms):    # 폴라이트 간격 — 테스트에선 즉시
+        pass
+
+    def evaluate(self, js, arg):
+        path = arg[0]
+        if path == "/rpd/v2/supplier/subscription/detail":
+            return {"status": 200, "body": self._sub_body}
+        self.calls.append(arg)
+        return self._responder(arg)
+
+
+def _sales_ok_body(day: str, *, items=1, total_pages=1, page_number=0, total_results=None):
+    vis = [{"vendorItemDetails": {"vendorItemId": f"V{day}-{i}", "externalSkuIds": ["S1"],
+                                  "itemName": "opt"},
+            "businessInsightsMetricsResponse": {"totalUnitsSold": 2, "totalGmv": 1000,
+                                                "totalUniqueVisitor": 5, "pvToOrder": 0.1}}
+           for i in range(items)]
+    return json.dumps({"vendorItems": vis,
+                       "paginationDetails": {"pageNumber": page_number,
+                                             "totalPages": total_pages,
+                                             "totalResults": items if total_results is None
+                                             else total_results}})
+
+
+_CFG = {"sales_days": 7, "sales_backfill_days": 0, "sales_page_size": 20,
+        "sales_max_pages": 40, "sales_budget_min": 10}
+
+
+@pytest.fixture
+def frozen_today(fetcher, monkeypatch):
+    """KST 오늘을 2026-07-28로 고정(창 계산이 실행일에 흔들리지 않게)."""
+    import datetime as _dt
+
+    class _DT(_dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return _dt.datetime(2026, 7, 28, 15, 0, tzinfo=tz)
+
+    monkeypatch.setattr(fetcher, "datetime", _DT)
+    return date(2026, 7, 28)
+
+
+def test_one_bad_day_does_not_discard_the_other_days(fetcher, frozen_today):
+    """★한 날의 500이 이미 수집한 앞날들을 버리면 안 된다(적대적 리뷰 2R).
+
+    이전 판은 예외가 `_collect_sales_rows`를 뚫고 나가 **push 자체가 일어나지 않았다** —
+    롤링 7일이면 다음 회차가 메우지만 백필 45일이면 44일째 실패가 43일치를 버렸다.
+    """
+    bad = "2026-07-24"
+
+    def responder(arg):
+        day = arg[1]["startDate"]
+        if day == bad:
+            return {"status": 500, "body": "boom"}
+        return {"status": 200, "body": _sales_ok_body(day)}
+
+    rows, stats = fetcher._collect_sales_rows(FakePage(responder), dict(_CFG))
+    assert stats["days_requested"] == 7
+    assert stats["days_collected"] == 6          # 나머지 6일은 살아남는다
+    assert stats["days_failed"] == 1
+    assert stats["failed_dates"] == [bad]
+    assert len(rows) == 6                        # ★그리고 push할 행이 남아 있다
+
+
+def test_failed_day_is_not_laundered_as_out_of_range(fetcher, frozen_today):
+    """유효 구간 '안'인데 재시도까지 400 = 실패다. '범위밖'으로 세면 조용한 성공이 된다."""
+    bad = "2026-07-24"
+    period = "[2026-06-01 ~ 2026-07-28]"          # 7일 전부 유효 구간 안
+
+    def responder(arg):
+        day = arg[1]["startDate"]
+        if day == bad:
+            return {"status": 400, "body": json.dumps(
+                {"code": "INVALID_DATE",
+                 "message": f"[vendorId:A01029796] Date {day} outside the viewable period {period}"})}
+        return {"status": 200, "body": _sales_ok_body(day)}
+
+    rows, stats = fetcher._collect_sales_rows(FakePage(responder), dict(_CFG))
+    assert stats["days_failed"] == 1              # 실패로 센다
+    assert stats["days_out_of_range"] == 0        # ★'범위밖'이 아니다
+    assert stats["failed_dates"] == [bad]
+    assert stats["days_collected"] == 6 and len(rows) == 6
+
+
+def test_genuinely_out_of_range_days_are_clamped_not_failed(fetcher, frozen_today):
+    """진짜 구간 밖은 실패가 아니다 — 롤링 창의 정상 동작(오탐이면 rc가 흔들린다)."""
+    period = "[2026-07-26 ~ 2026-07-28]"          # 7일 중 앞 4일이 구간 밖
+
+    def responder(arg):
+        day = arg[1]["startDate"]
+        if day < "2026-07-26":
+            return {"status": 400, "body": json.dumps(
+                {"code": "INVALID_DATE",
+                 "message": f"Date {day} is outside the viewable period {period}"})}
+        return {"status": 200, "body": _sales_ok_body(day)}
+
+    rows, stats = fetcher._collect_sales_rows(FakePage(responder), dict(_CFG))
+    assert stats["days_out_of_range"] == 4
+    assert stats["days_failed"] == 0
+    assert stats["days_collected"] == 3
+    # ★세 카운터의 합 = 요청 일수. 안 맞으면 어딘가로 하루가 조용히 새고 있다는 뜻이다.
+    assert (stats["days_collected"] + stats["days_out_of_range"]
+            + stats["days_failed"]) == stats["days_requested"]
+
+
+def test_all_days_failing_is_systemic_and_raises(fetcher, frozen_today):
+    """전 날짜 실패 = 계통 고장 → rc≠0으로 올라가야 한다(부분 실패와 다르다, 3R 규칙)."""
+    page = FakePage(lambda arg: {"status": 500, "body": "down"})
+    with pytest.raises(RuntimeError, match="전부 실패"):
+        fetcher._collect_sales_rows(page, dict(_CFG))
+
+
+def test_empty_vendoritems_is_access_denied_not_a_quiet_zero(fetcher, frozen_today):
+    """★D-CPP-5: 전 날짜가 200인데 vendorItems가 전부 비면 '안 팔린 날'이 아니라 접근 차단."""
+    def responder(arg):
+        return {"status": 200, "body": json.dumps(
+            {"vendorItems": [], "paginationDetails": {"pageNumber": 0, "totalPages": 1,
+                                                      "totalResults": 0}})}
+
+    with pytest.raises(fetcher._SalesAccessDenied):
+        fetcher._collect_sales_rows(FakePage(responder), dict(_CFG))
+
+
+def test_items_present_but_zero_records_is_mapping_error_not_access(fetcher, frozen_today):
+    """★쿠팡이 vendorItemId를 개명하면 '구독 만료'가 아니라 '매핑 파손'이어야 한다(3R).
+
+    둘을 뭉치면 운영자가 결제를 갱신하며 코드 버그를 쫓는다. 게다가 레코드가 0이라 push가
+    없으므로 백엔드의 blank_qty 경보(accepted 분모)도 침묵한다 — 여기가 유일한 탐지 자리다.
+    """
+    def responder(arg):
+        return {"status": 200, "body": json.dumps({
+            "vendorItems": [{"vendorItemDetails": {"vendorItemIdRENAMED": 1},
+                             "businessInsightsMetricsResponse": {"totalUnitsSold": 5}}],
+            "paginationDetails": {"pageNumber": 0, "totalPages": 1, "totalResults": 1}})}
+
+    with pytest.raises(fetcher._SalesMappingError):
+        fetcher._collect_sales_rows(FakePage(responder), dict(_CFG))
+
+
+def test_page_number_echo_mismatch_stops_instead_of_double_counting(fetcher, frozen_today):
+    """서버가 페이징을 무시하고 page 0을 계속 주면 같은 행을 N번 센다 — 즉시 끊는다."""
+    def responder(arg):
+        day = arg[1]["startDate"]
+        return {"status": 200, "body": _sales_ok_body(day, total_pages=5, page_number=0)}
+
+    # 매 날짜가 에코 불일치로 끊기고, 전 날짜 실패이므로 계통 고장으로 올라간다.
+    with pytest.raises(RuntimeError, match="전부 실패"):
+        fetcher._collect_sales_rows(FakePage(responder), dict(_CFG))
+
+
+def test_total_results_mismatch_is_reported_not_silently_truncated(fetcher, frozen_today):
+    """totalResults와 실제 수신량이 다르면 조용한 절단이다 — 그 날을 실패로 올린다."""
+    truncated_day = "2026-07-25"
+
+    def responder(arg):
+        day = arg[1]["startDate"]
+        if day == truncated_day:
+            # totalPages=1이라 1페이지에서 끝나는데 서버는 51건이 있다고 말한다
+            return {"status": 200, "body": _sales_ok_body(day, items=1, total_pages=1,
+                                                          total_results=51)}
+        return {"status": 200, "body": _sales_ok_body(day)}
+
+    _rows, stats = fetcher._collect_sales_rows(FakePage(responder), dict(_CFG))
+    assert stats["days_failed"] == 1                    # 절단된 하루만 실패
+    assert stats["failed_dates"] == [truncated_day]
+    assert stats["days_collected"] == 6                 # 나머지는 정상 수집
+
+
+def test_expired_free_trial_is_blocked_before_collection(fetcher, frozen_today):
+    """★게이트가 값을 '읽고 판정'하는지 — 이전 판은 로그만 찍고 무조건 True였다(2R)."""
+    expired = json.dumps({"data": {"permittedLevel": "BASIC",
+                                   "detailInfo": {"subscribedLevel": "FREE",
+                                                  "freeTrialEndDate": "2026.07.01"}}})
+    page = FakePage(lambda arg: {"status": 200, "body": _sales_ok_body("x")}, sub_body=expired)
+    ok, why = fetcher._sales_access_ok(page, today=date(2026, 7, 28))
+    assert ok is False and "무료체험 종료" in why
+    with pytest.raises(fetcher._SalesAccessDenied):
+        fetcher._collect_sales_rows(page, dict(_CFG))
+
+
+def test_unknown_permitted_level_is_blocked(fetcher):
+    """모르는 등급은 통과시키지 않는다(열어두면 만료가 조용히 지나간다)."""
+    body = json.dumps({"data": {"permittedLevel": "NONE", "detailInfo": {}}})
+    ok, why = fetcher._sales_access_ok(FakePage(lambda a: None, sub_body=body),
+                                       today=date(2026, 7, 28))
+    assert ok is False and "NONE" in why
+
+
+def test_promotion_detail_exception_falls_back_instead_of_losing_everything(fetcher):
+    """★상세 1건의 예외가 7건 전부를 날리면 안 된다(적대적 리뷰 2R).
+
+    이전 판은 비200/비JSON만 접고 `_eval_retry`의 재발생 예외는 통과시켜, 4번째에서 흔들리면
+    `_collect_promotion_rows`를 뚫고 나가 아무것도 push되지 않았다.
+    """
+    calls = {"n": 0}
+
+    def responder(arg):
+        path = arg[0]
+        if path.startswith("/promotion/promotion-request?"):
+            return {"status": 200, "body": json.dumps(_PROMO_PAGE)}
+        calls["n"] += 1
+        raise RuntimeError("Execution context was destroyed")
+
+    rows, stats = fetcher._collect_promotion_rows(
+        FakePage(responder), {"promo_page_size": 25, "promo_max_pages": 20, "promo_detail_max": 100})
+    assert stats["listed"] == 1
+    assert stats["detail_failed"] == 1
+    assert len(rows) == 1                       # ★목록 값으로 살아남는다
+    assert rows[0]["request_id"] == "687878"
+
+
+def test_ingest_source_never_assigns_unit_discount_amount():
+    """★수기값 보존을 '동작'이 아니라 '소스'로도 못박는다(적대적 리뷰 2R).
+
+    `test_resync_does_not_wipe_manual_unit_discount`는 진짜 동작 테스트지만, 미래의 누군가가
+    upsert에 `row.unit_discount_amount = rec[...]` 한 줄을 넣으면 그 테스트도 같이 고쳐질 수
+    있다. 페처 경로가 이 칸을 **쓰지 않는다**는 것이 D-CPP-7의 계약이므로 소스에 걸어 둔다.
+    """
+    src = Path(sync.__file__).read_text(encoding="utf-8")
+    assert "unit_discount_amount" not in src, (
+        "rocket_promo_sync가 unit_discount_amount를 건드린다 — 수기 입력(D-CPP-7)이 "
+        "재수집에 지워진다. 페처 경로는 이 칸을 절대 쓰지 않아야 한다."
+    )
