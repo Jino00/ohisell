@@ -1534,6 +1534,13 @@ class CoupangRocketPromotion(Base):
     unit_discount_amount: Mapped[Optional[Decimal]] = mapped_column(
         Numeric(12, 2), nullable=True
     )  # ★수기 입력(D-CPP-7) — 프로모션당 단위 할인액. 아래 주석 참조
+    # ★대상 SKU(=발주 product_number) 목록, **수기 입력**(Phase 2 손익 엔진).
+    #   왜 수기인가: 프로모션 API 응답에 **적용 상품 목록이 없다**(2026-07-28 prod raw 실측 —
+    #   detailCount=적용상품 '수'만 있고 배열 없음). 손익은 "이 창에서 어느 SKU가 팔렸나"를
+    #   알아야 계산되는데, 이름 유사도·기간 겹침 같은 **추정 매핑은 금지**한다: 틀린 SKU를
+    #   물면 손익·BEP ROAS가 통째로 틀리면서 어디서도 대사되지 않는다(원칙22).
+    #   unit_discount_amount와 같이 페처가 손대지 않는 칸이라 재수집에 지워지지 않는다.
+    target_sku_ids: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     budget_amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)  # 예산
     settlement_date: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True)  # 정산일
     applied_product_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 적용상품 수

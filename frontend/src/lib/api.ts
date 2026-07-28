@@ -926,6 +926,170 @@ export function fetchRocketOverview(from: string, to: string): Promise<RocketOve
   return fetchApi<RocketOverview>(`/api/overview/rocket-overview?from=${from}&to=${to}`);
 }
 
+// ── 쿠팡 프로모션 손익 레이어 (트랙 coupang-promo-pnl Phase 2) ──
+// ★읽기 전용 신규 API. 종합조망 net_profit 회계는 이 블록과 무관하게 그대로다.
+// ★null = **모름**이지 0이 아니다(원칙22). 화면에서 0으로 렌더하지 말 것 — 미상은 "—"로.
+export interface PromoSkuRow {
+  sku_id: string;
+  product_name: string | null;
+  option_ids: string[];
+  sales_days: number;
+  qty: number;
+  realized_revenue: string;             // 소비자 실현가(회계 매출 아님, D-CPP-2)
+  realized_unit_price: string | null;
+  supply_unit_price: string | null;     // 납품 단가(최신 발주)
+  supply_price_po_seq: number | null;   // 그 단가가 온 발주번호(창 이후 발주일 수 있다 — 대사용)
+  supply_revenue: string | null;
+  cost_price: string | null;
+  cost: string | null;
+  funding: string | null;               // 분담금 = 판매량 × 개당 할인액
+  unit_contribution: string | null;     // 납품단가 − 원가 − 개당 분담금
+  bep_ad_spend: string | null;
+  bep_roas: string | null;
+  resolved: boolean;
+  unresolved_reasons: string[];
+}
+
+export interface PromoTotals {
+  qty: number;                          // 손익에 들어간 분(해결된 SKU)
+  qty_all: number;                      // 대상 SKU 전체 판매량
+  realized_revenue: string;
+  realized_revenue_all: string;
+  supply_revenue: string | null;
+  cost: string | null;
+  funding: string | null;
+  ad_cost: string | null;               // null = 옵션 귀속 불가(0 아님)
+  net_profit: string | null;
+  bep_ad_spend: string | null;          // 이 값을 넘는 광고비 = 적자
+  bep_roas: string | null;              // ★진짜 BEP ROAS
+  // ★"최악값"이 아니다 — **해결된 SKU만의** 하한이다. 미해결 SKU가 적자였다면 참값은 이 밑이고,
+  //   경계일 과대 포함도 이 값을 낙관 방향으로 민다. 반드시 "≥ …(미해결 N건 제외)"로 렌더할 것.
+  net_profit_lower_bound_resolved_only: string | null;
+  lower_bound_excludes_unresolved: boolean;
+  resolved_sku_count: number;
+  unresolved_sku_ids: string[];
+  unresolved_qty: number;
+  qty_is_lower_bound: boolean;          // ★창 부분 커버 — 수량·손익은 확정값이 아니라 하한
+  not_started: boolean;                 // 창 전체 미도래(시작 전/집계 전) — 결손이 아니다
+  basis: string;
+}
+
+export interface PromoPnlCard {
+  request_id: string;
+  vendor_id: string;
+  promotion_name: string | null;
+  promotion_type: string | null;
+  status: string | null;
+  start_at: string | null;
+  end_at: string | null;
+  share_ratio: string | null;
+  budget_amount: string | null;
+  applied_product_count: number | null;
+  unit_discount_amount: string | null;
+  unit_discount_missing: boolean;
+  target_sku_ids: string[];
+  target_sku_missing: boolean;
+  window: {
+    from: string; to: string; days: number;
+    window_days: number; covered_days: number;
+    missing_days: string[];             // 수집 결손(메울 수 있는 구멍)
+    pending_days: string[];             // 아직 확정 전 — 결손이 아니다
+    data_through: string;
+    sales_through: string | null;       // 판매 데이터가 실제로 닿은 마지막 날
+    in_flight: boolean;
+    complete: boolean;
+    null_sku_rows: number;
+  } | null;
+  window_basis: string;
+  skus: PromoSkuRow[];
+  totals: PromoTotals | null;
+  ad: {
+    available: boolean;
+    attributed: string | null;
+    attributed_partial: string | null;  // 부분 귀속분(참고용 — 확정 순이익에 쓰지 않는다)
+    by_option: Record<string, string>;
+    ad_days_covered: number;
+    ad_days_judged: number;             // pending 제외한 판정 대상 일수
+    ad_days_total: number;
+    option_vs_account_ratio: Record<string, string>;
+    options_with_spend: number;
+    options_total: number;
+    account_window_spend: string;       // 계정 전체 Retail — **상한 프록시**
+    basis: string;
+  } | null;
+  blockers: string[];
+}
+
+export interface PromoFreshness {
+  today: string;
+  window: { from: string; to: string; days: number };
+  window_days_basis: string;
+  latest_date: string | null;
+  stale_days: number | null;
+  missing_count: number;
+  missing_dates: { date: string; days_until_expiry: number }[];
+  urgent_count: number;
+  subscription: {
+    free_trial_end: string | null;
+    days_left: number | null;
+    warn: boolean;
+    expired: boolean;
+    basis: string;
+  };
+}
+
+export interface RgCouponRow {
+  coupon_id: string;
+  account_key: string;
+  promotion_name: string | null;
+  status: string | null;
+  discount_type: string | null;
+  discount: string | null;
+  start_at: string | null;
+  end_at: string | null;
+  option_count: number;
+  used_amount: string | null;
+  used_amount_source: string | null;
+  used_amount_pending: boolean;         // ★true = 미수집(0이 아님)
+}
+
+export interface PromoPnlResponse {
+  vendor_id: string | null;
+  promotions: PromoPnlCard[];
+  promotion_count: number;
+  freshness: PromoFreshness;
+  rg_coupons: {
+    coupons: RgCouponRow[]; count: number; pending_count: number;
+    window: { from: string | null; to: string | null } | null;
+    window_note: string | null;
+    account_key: string | null;
+    limit: number;
+    note: string;
+  };
+  accounting_note: string;
+}
+
+export function fetchRocketPromoPnl(limit = 20): Promise<PromoPnlResponse> {
+  return fetchApi<PromoPnlResponse>(`/api/overview/rocket-promo-pnl?limit=${limit}`);
+}
+
+/** 프로모션 수기 입력(개당 할인액·대상 SKU). 보낸 키만 갱신된다 — 한쪽이 다른 쪽을 지우지 않는다. */
+export function patchPromotionManual(
+  requestId: string,
+  body: { unit_discount_amount?: string | number | null; target_sku_ids?: string[] | null },
+): Promise<{
+  request_id: string;
+  unit_discount_amount: string | null;
+  target_sku_ids: string[] | null;
+  promotion_name: string | null;
+  applied_product_count: number | null;
+}> {
+  return fetchApi(
+    `/api/coupang/ops/rocket/promotion/${encodeURIComponent(requestId)}/unit-discount`,
+    { method: "PATCH", body: JSON.stringify(body) },
+  );
+}
+
 // ── 로켓배송(1P) 원가 매핑 (S4.5b) ──
 export interface RocketUnmappedItem {
   product_number: string;

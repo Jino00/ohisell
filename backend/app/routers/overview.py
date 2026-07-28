@@ -18,6 +18,7 @@ from app.services.coupang.intelligence import compute_command_center
 from app.services.coupang.revenue_canonical import compute_canonical_revenue
 from app.services.coupang.revenue_reconcile import reconcile_revenue
 from app.services.coupang.rocket_intelligence import compute_rocket_overview
+from app.services.coupang.rocket_promo_pnl import compute_promo_pnl_overview
 
 log = logging.getLogger(__name__)
 
@@ -132,4 +133,27 @@ def rocket_overview(
     if dfrom > dto:
         raise HTTPException(status_code=422, detail="from이 to보다 늦습니다")
     result = compute_rocket_overview(db, dfrom, dto, _ROCKET_VENDOR_ID)
+    return _jsonify(result)
+
+
+@router.get("/rocket-promo-pnl")
+def rocket_promo_pnl(
+    limit: int = Query(20, ge=1, le=100, description="최근 프로모션 N건"),
+    request_id: str | None = Query(None, description="한 건만 보기(프로모션 Request ID)"),
+    db: Session = Depends(get_db),
+):
+    """쿠팡 프로모션 손익 레이어 (트랙 coupang-promo-pnl Phase 2) — 프로모션별 진짜 손익·BEP ROAS.
+
+    ★읽기 전용 신규 API다. 기존 net_profit·종합조망 회계는 **한 톨도 바뀌지 않는다**
+      (1P 회계 매출은 여전히 발주 납품금액 축, D-CPP-2 / 분담금은 청구방식 미확정, D-CPP-4).
+
+    기간 파라미터가 없는 이유: 창은 사용자가 고르는 게 아니라 **프로모션 행사기간이 정한다.**
+      임의 기간을 받으면 프로모션 밖 판매가 손익에 섞인다.
+
+    응답: promotions[](카드) · freshness(판매분석 결손·구독 체험 경고) · rg_coupons(나열).
+    미상은 전부 null + 사유(blockers/unresolved_reasons)로 온다 — 0으로 접지 않는다(원칙22).
+    """
+    result = compute_promo_pnl_overview(
+        db, _ROCKET_VENDOR_ID, limit=limit, request_id=(request_id or None)
+    )
     return _jsonify(result)
