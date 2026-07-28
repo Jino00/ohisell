@@ -679,3 +679,16 @@ launchd 데몬 코드 변경의 라이브 판정은 "재시작 성공·기동 �
 ### 📌 교훈
 장시간 관측이 낀 위임은 에이전트 내부 timeout만 믿지 말고 오케스트레이터가 자체 타이머로 이중화한다. 회수 지시의 문구도 중요 — "대기 계속"이 아니라 "현재 사실로 종결"로 보내야 스톨된 에이전트가 즉시 응답한다.
 - 병기(실행 커맨드 보강): 루트 pytest는 `PYTHONPATH=backend`가 필요하다 — `cd backend && pytest tests/`만으로는 `ModuleNotFoundError`가 난다. 루트에서 돌릴 때는 `PYTHONPATH=backend pytest backend/tests/` 형태로 고정할 것.
+
+## 49. 착수 전 겹침 확인은 "열린 PR"만으론 부족 — 미푸시 병행 워크트리가 형제 마이그레이션을 만든다 (2026-07-28, 로켓 1P 파서 M1)
+
+### 🐛 이슈
+LESSONS #41(착수 전 PR·chip 확인)대로 `gh pr list`로 열린 PR 2건을 확인하고 "겹침 없음"으로 착수했다. 지시서가 지목한 `docs/tracks/active/track_coupang-promo-pnl.md`도 실제로 없어서 "그 트랙 없음"으로 결론냈다. 그런데 promo-pnl 작업은 **다른 워크트리 브랜치(`worktree-agent-a77a1755db4c87ada`)에 미푸시 커밋으로 살아 있었고**, 자기 alembic 마이그레이션 `a1c3e5f7b9d1`을 우리 `f6a8c0b2d4e6`과 **같은 부모 `e5f7a9c1b3d5`**에 물려 놓은 상태였다. 각 브랜치는 `alembic heads` 단일이라 양쪽 다 "단일 head 유지" 검증을 통과한다 — **둘 다 main에 들어간 뒤에야 head 2개가 된다.**
+
+### ✅ 해결
+`git log --all --grep`으로 관련 커밋을 찾고 `git branch -a --contains`로 소속 브랜치를, 각 마이그레이션의 `down_revision`을 직접 대조해 충돌을 식별. 코드는 그대로 두고(어느 쪽도 아직 main 아님) 트랙 파일·TRACKS.md에 "나중에 병합하는 쪽이 `down_revision`을 재연결" 지침을 남겼다.
+
+### 📌 교훈
+- 트랙 **파일이 없다 ≠ 그 작업이 없다.** 트랙 문서화 전에 코드가 먼저 나가는 경우가 있으므로, 파일 부재를 겹침 없음의 근거로 쓰지 않는다.
+- 겹침 확인은 `gh pr list`에 더해 **`git worktree list` + `git log --all --grep=<도메인>` + `git branch -a --contains`**까지 본다. 누수는 푸시 안 된 병행 워크트리에서 생긴다.
+- **`alembic heads` 단일 확인은 브랜치-로컬 검사라 형제 마이그레이션을 원리적으로 못 잡는다.** 마이그레이션을 새로 만들 때는 "내 브랜치의 head"가 아니라 **`git log --all -- backend/alembic/versions/`로 다른 브랜치의 최근 revision까지** 훑고 `down_revision` 중복을 확인할 것.
