@@ -926,6 +926,170 @@ export function fetchRocketOverview(from: string, to: string): Promise<RocketOve
   return fetchApi<RocketOverview>(`/api/overview/rocket-overview?from=${from}&to=${to}`);
 }
 
+// ──────────────────────────────────────────────
+// 로켓배송(1P) 통합 대사 — 발주·납품·거래명세서 단계·계산서를 상품 한 표로 (조회 전용)
+// ★null = **모름**이지 0이 아니다(원칙22). 화면에서 0으로 렌더하지 말 것 — 미상은 "—"로.
+//   특히 received_qty/drift_qty의 null은 "멀티SKU 발주라 상품별 입고를 쪼갤 근거가 없다"는 뜻이다.
+// ──────────────────────────────────────────────
+export interface ReconStatusRow {
+  status: string | null;                 // CI/PA/RP …
+  status_description: string | null;     // 거래명세서확인 / 발주확정 / 거래처확인요청
+  is_settled_stage: boolean;             // true=입고 끝난 단계(드리프트가 진짜 신호)
+  po_count: number;
+  order_qty: number;
+  received_qty: number;
+  order_amount: string;                  // Decimal → string
+  receiving_amount: string;
+  drift_po_count: number;
+}
+
+export interface ReconInvoiceSummary {
+  po_without_invoice_count: number;      // 아직 계산서에 안 묶인 발주
+  mapped_invoice_count: number;
+  invoice_missing_row_count: number;     // 번호는 있는데 정산행 미수집(≠미발행)
+  invoice_unconfirmed_count: number;     // 세금계산서 확정일 없음
+  invoice_not_marked_transmitted_count: number; // 전송 '미표기'(실패 아님)
+  settled_amount: string;
+  note: string;
+}
+
+export interface ReconDetailCoverage {
+  pos_with_detail_count: number;
+  pos_without_detail_count: number;      // 발주상세(SKU) 미수집 PO
+  // 0~1 분수. null=윈도우 PO 0건(0%가 아님). ★Decimal이라 JSON에선 문자열("0.0036")로 온다.
+  po_coverage_pct: string | null;
+  line_count: number;
+  sku_count: number;
+  lines_missing_confirmed_qty: number;
+  note: string;
+}
+
+export interface ReconSummary {
+  po_count: number;
+  order_qty: number;
+  received_qty: number;
+  unreceived_qty: number;
+  order_amount: string;
+  receiving_amount: string;
+  unreceived_amount: string;
+  drift_po_count: number;                // 전체(입고 전 단계의 당연한 불일치 포함)
+  drift_po_count_settled_stage: number;  // ★핵심: 거래명세서확인인데 발주≠입고
+  settled_stage_po_count: number;
+  no_date_po_count: number;
+  by_status: ReconStatusRow[];
+  invoice: ReconInvoiceSummary;
+  detail_coverage: ReconDetailCoverage;
+}
+
+export interface ReconSkuRow {
+  product_number: string;
+  product_name: string | null;
+  barcode: string | null;
+  po_count: number;
+  line_count: number;
+  order_qty: number;
+  order_amount: string;
+  confirmed_qty: number;                 // 납품가능(업체확인) — 미수집 라인은 빠져 있다
+  confirmed_missing_lines: number;
+  received_qty: number | null;           // ★단일SKU 발주 귀속분만. null=귀속 불가(모름)
+  received_attributable_po_count: number;
+  received_unattributable_po_count: number;
+  attributable_order_qty: number | null;
+  drift_qty: number | null;              // 귀속 가능분 발주−입고(입고 전 단계 포함=참고값). null=산출 불가
+  // ★진짜 신호 — 입고 완료 단계(CI·RI) 귀속분만. null=판정 근거 없음(0 아님). 빨강은 이 값에만.
+  drift_qty_settled_stage: number | null;
+  // 수량이 상쇄돼 0이어도 건수가 >0이면 불일치는 실재한다(요약 타일과 같은 단위).
+  drift_po_count_settled_stage: number;
+  settled_stage_attributable_po_count: number;
+  invoice_count: number;
+  // ↓ 계산서 카운터는 **이 SKU가 속한 발주** 기준 — 요약 타일(기간 전체 중복 제거)과 분모가 다르다.
+  //   계산서 1건이 멀티SKU 발주에 걸리면 SKU마다 잡히므로 행 합계 > 요약. 같은 이름이지만 다른 수다.
+  po_without_invoice_count: number;
+  invoice_missing_row_count: number;
+  invoice_unconfirmed_count: number;
+  invoice_not_marked_transmitted_count: number;
+}
+
+export interface RocketRecon {
+  period: { from: string; to: string; vendor_id?: string };
+  channel: string;
+  summary: ReconSummary;
+  filters: {
+    drift_only: boolean;
+    unconfirmed_only: boolean;
+    sku_count_total: number;
+    sku_count_shown: number;
+    // 발주≠입고를 판정할 근거가 없는 SKU 수 — drift_only가 '정상이라서'가 아니라 '몰라서' 제외한다.
+    sku_count_unknown_drift: number;
+  };
+  skus: ReconSkuRow[];
+  note: string;
+}
+
+export interface ReconInvoice {
+  invoice_seq: number;
+  found: boolean;                        // false=번호만 있고 정산행 미수집
+  issue_date: string | null;
+  payment_date: string | null;
+  tax_invoice_confirmed_date: string | null;
+  tax_invoice_transmitted: boolean | null; // null/false=미표기(실패 아님)
+  payment_amount: string | null;
+  supply_amount: string | null;
+  vat: string | null;
+  bill_issue_type: string | null;
+  settlement_type: string | null;
+}
+
+export interface ReconSkuPoRow {
+  product_name: string | null;
+  purchase_order_seq: number;
+  po_created_date: string | null;        // 발주일(KST)
+  expected_delivery_date: string | null;
+  status: string | null;
+  status_description: string | null;
+  is_settled_stage: boolean;
+  center_name: string | null;
+  purchase_type: string | null;
+  sku_count: number;
+  po_order_qty: number;                  // PO 전체(이 SKU만의 값이 아니다)
+  po_received_qty: number;
+  po_order_amount: string;
+  po_receiving_amount: string;
+  po_drift_qty: number;
+  line_order_qty: number;                // 이 SKU 라인
+  line_confirmed_qty: number | null;     // null=미수집(0 아님)
+  line_order_amount: string;
+  unit_purchase_price: string;
+  invoices: ReconInvoice[];
+}
+
+export interface RocketReconSku {
+  period: { from: string; to: string; vendor_id?: string };
+  product_number: string;
+  product_name: string | null;
+  po_count: number;
+  rows: ReconSkuPoRow[];
+  note: string;
+}
+
+export function fetchRocketRecon(params: {
+  from: string; to: string; driftOnly?: boolean; unconfirmedOnly?: boolean;
+}): Promise<RocketRecon> {
+  const q = new URLSearchParams({ from: params.from, to: params.to });
+  if (params.driftOnly) q.set("drift_only", "true");
+  if (params.unconfirmedOnly) q.set("unconfirmed_only", "true");
+  return fetchApi<RocketRecon>(`/api/overview/rocket-recon?${q.toString()}`);
+}
+
+export function fetchRocketReconSku(
+  productNumber: string, from: string, to: string,
+): Promise<RocketReconSku> {
+  const q = new URLSearchParams({ from, to });
+  return fetchApi<RocketReconSku>(
+    `/api/overview/rocket-recon/sku/${encodeURIComponent(productNumber)}?${q.toString()}`,
+  );
+}
+
 // ── 쿠팡 프로모션 손익 레이어 (트랙 coupang-promo-pnl Phase 2) ──
 // ★읽기 전용 신규 API. 종합조망 net_profit 회계는 이 블록과 무관하게 그대로다.
 // ★null = **모름**이지 0이 아니다(원칙22). 화면에서 0으로 렌더하지 말 것 — 미상은 "—"로.
