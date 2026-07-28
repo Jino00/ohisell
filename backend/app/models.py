@@ -266,12 +266,36 @@ class Order(Base):
         Numeric(12, 2), nullable=True
     )
     raw_data: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # ── 배송 구분(Jino 지시 2026-07-28) — raw_data JSON 안에만 있던 값을 조회 가능하게 영속화.
+    #    판별·파싱은 services/order_delivery.py 한 곳에서만 한다(SA). 배송방식과 배송비 부담은
+    #    독립 축이라 각각 저장한다. NULL = 판별 불가(네이버 주문 아님·raw_data 부재·JSON 잘림).
+    # 원본 그대로: ARRIVAL_GUARANTEE(N배송) / TODAY / NORMAL …
+    delivery_attribute_type: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    delivery_policy_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)   # 유료/무료/조건부무료
+    shipping_fee_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)      # 선결제/무료 …
+    logistics_company_id: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)   # N배송 물류사(PG 등)
+    # ★우리가 지불한 배송비(건별 스냅샷). 단가는 코드 상수라 개정되면 과거 원가가 소급 왜곡된다
+    #   → 주문 시점 판정 단가를 행에 박아 둔다. 고객 수취액은 기존 shipping_cost(의미 불변).
+    #   실부담 = shipping_cost_paid − COALESCE(shipping_cost,0) → 조회 시 계산(중복 저장 금지).
+    shipping_cost_paid: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now()
     )
 
     channel: Mapped[Channel] = relationship(back_populates="orders")
     product: Mapped[Optional[ProductMaster]] = relationship()
+
+    @property
+    def shipping_cost_net(self) -> Optional[Decimal]:
+        """실부담 배송비(우리 지불 − 고객 수취). 지불 미판별이면 None(파생값, 저장 안 함)."""
+        if self.shipping_cost_paid is None:
+            return None
+        return Decimal(str(self.shipping_cost_paid)) - Decimal(str(self.shipping_cost or 0))
+
+    @property
+    def is_nbaesong(self) -> bool:
+        """N배송(도착보장) 주문인가 — 단일 판별자(deliveryAttributeType)."""
+        return self.delivery_attribute_type == "ARRIVAL_GUARANTEE"
 
 
 class SyncLog(Base):
@@ -1986,6 +2010,10 @@ class NaverEntity(Base):
     campaign_type: Mapped[str] = mapped_column(String(20), nullable=False, default="")  # WEB_SITE/SHOPPING/BRAND_SEARCH
     name: Mapped[str] = mapped_column(String(300), nullable=False, default="")  # 캠페인/그룹명 또는 키워드 텍스트
     status: Mapped[str] = mapped_column(String(10), nullable=False, default="on")  # on/off/deleted
+    # 네이버 statusReason 원문(D-NAO-97) — status가 'on'인데 실제로 안 도는 이유를 담는 유일한 필드
+    # (CAMPAIGN_LIMITED_BY_BUDGET=일예산 소진 / CAMPAIGN_PAUSED=상위 캠페인 OFF / *_UNDER_REVIEW 등).
+    # ★status(on/off)는 사람의 On/Off 스위치(userLock)만 반영한다 — 이 둘을 섞지 않는다.
+    status_reason: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     bid_amt: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 그룹 기본가·키워드 개별입찰
     monthly_volume: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # keywordstool PC+Mobile 합
     competition: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)  # low/mid/high

@@ -19,12 +19,91 @@ log = logging.getLogger(__name__)
 
 
 def _status(raw_status: str, user_lock: bool) -> str:
-    """네이버 status(ELIGIBLE 등)+userLock(수동 OFF)을 on/off/deleted로 정규화."""
+    """네이버 status(ELIGIBLE 등)+userLock(수동 OFF)을 on/off/deleted로 정규화.
+
+    ★off의 정의는 **userLock(사람이 내린 On/Off 스위치)**이지 "지금 노출 중인가"가 아니다.
+    네이버 status는 자기 잠금 외의 사유로도 PAUSED가 된다 — 일예산 소진·부모 캠페인 정지·
+    검수 중·비즈채널 이상. 그것들을 off로 접으면 "누가 껐다"는 신호가 오염된다(_STATUS_REASON
+    분류표 주석 참조).
+    """
     if raw_status in ("DELETED", ""):
         return "deleted"
     if user_lock:
         return "off"
     return "on"
+
+
+# ── statusReason 분류표 (D-NAO-97) ────────────────────────────────────────────
+# 출처(추정 아님): 네이버 공식 스키마 docs/references/data/ncc-heroes-ncc.json
+#   Campaign.statusReason  = CAMPAIGN_PAUSED / CAMPAIGN_PENDING / CAMPAIGN_ENDED /
+#                            CAMPAIGN_LIMITED_BY_BUDGET
+#   Adgroup.statusReason   = 위 4종 + BUSINESS_CHANNEL_{PAUSED,DISAPPROVED,UNDER_REVIEW} +
+#                            {PC,MOBILE}_BUSINESS_CHANNEL_{APPROVED,DISAPPROVED,UNDER_REVIEW} +
+#                            GROUP_DELETED / GROUP_PAUSED / GROUP_LIMITED_BY_BUDGET
+#   AdKeyword.statusReason = KEYWORD_DELETED / KEYWORD_PAUSED / KEYWORD_DISAPPROVED /
+#                            KEYWORD_UNDER_REVIEW
+#
+# ★라이브 실측(2026-07-28 07:10 KST, 46캠페인·1,007그룹)이 **문서에 없는 값 2종**을 확인했다:
+#   'ELIGIBLE'(정상 노출 중 — 전 캠페인 30건·전 그룹 459건이 이 값) 과
+#   'BUSINESS_CHANNEL_ABNORMAL_INTERLOCK'(그룹 3건).
+#   → 이 표는 **완전할 수 없다**. 그래서 판정은 화이트리스트로만 한다: "자기 잠금 사유"로
+#     명시된 값이 아니면 전부 '사람이 끈 것이 아님'으로 본다(모르는 사유를 사람 탓으로
+#     돌리지 않는다 = 유령 신호를 만들지 않는 방향으로 실패한다).
+#
+# 자기 잠금(userLock=true와 짝) 사유 — 엔티티 타입마다 다르다. 같은 'CAMPAIGN_PAUSED'라도
+# 캠페인 행에서는 자기 잠금이지만 **그룹 행에서는 부모 정지 상속**이다(실측: 그룹 331건이
+# CAMPAIGN_PAUSED인데 userLock=false).
+_SELF_PAUSE_REASON = {
+    "campaign": "CAMPAIGN_PAUSED",
+    "adgroup": "GROUP_PAUSED",
+    "keyword": "KEYWORD_PAUSED",
+}
+# 노출 중(정지 사유 없음)으로 관측되는 값. 빈 문자열·None도 같은 취급(사유 미제공).
+_SERVING_REASONS = frozenset({"", "ELIGIBLE", "LIMITED_ELIGIBLE"})
+
+# 사람이 읽을 사유 설명 — 없으면 원문 코드를 그대로 쓴다(지어내지 않는다).
+_REASON_KO = {
+    "CAMPAIGN_LIMITED_BY_BUDGET": "캠페인 일예산 소진",
+    "GROUP_LIMITED_BY_BUDGET": "광고그룹 일예산 소진",
+    "CAMPAIGN_PENDING": "캠페인 시작 전",
+    "CAMPAIGN_ENDED": "캠페인 기간 종료",
+    "CAMPAIGN_PAUSED": "상위 캠페인 OFF",
+    "GROUP_PAUSED": "상위 광고그룹 OFF",
+    "KEYWORD_DISAPPROVED": "키워드 검수 반려",
+    "KEYWORD_UNDER_REVIEW": "키워드 검수 중",
+    "BUSINESS_CHANNEL_PAUSED": "비즈채널 정지",
+    "BUSINESS_CHANNEL_DISAPPROVED": "비즈채널 검수 반려",
+    "BUSINESS_CHANNEL_UNDER_REVIEW": "비즈채널 검수 중",
+    "BUSINESS_CHANNEL_ABNORMAL_INTERLOCK": "비즈채널 연동 이상",
+}
+
+
+def _campaign_status(c: dict) -> str:
+    """캠페인 dict → on/off/deleted. off의 근거는 userLock 하나뿐이다(D-NAO-97).
+
+    `_status()`를 그대로 쓰지 않는 이유: `_status`는 raw_status가 빈 문자열이면 deleted로
+    본다. 캠페인 경로에서는 status 필드 부재가 곧 삭제라고 볼 근거가 없고(구버전은 ""를 on으로
+    취급했다), 잘못 deleted로 접으면 로스터·진단·스냅샷에서 캠페인이 통째로 사라진다.
+    """
+    raw = str(c.get("status", "")).upper()
+    if raw == "DELETED":
+        return "deleted"
+    lock = c["user_lock"] if "user_lock" in c else raw == "PAUSED"
+    return "off" if lock else "on"
+
+
+def _is_system_reason(entity_type: str, reason) -> bool:
+    """이 사유가 '시스템/상속 사유'인가(= 사람이 이 엔티티를 끈 것이 아닌가).
+
+    True인 경우: 예산 소진, 부모 정지 상속, 검수·비즈채널, 그리고 **문서에 없는 미지의 사유**.
+    False인 경우: 노출 중(_SERVING_REASONS) 또는 이 엔티티 자신의 OFF 스위치(_SELF_PAUSE_REASON).
+    """
+    if reason is None:
+        return False
+    r = str(reason).upper()
+    if r in _SERVING_REASONS:
+        return False
+    return r != _SELF_PAUSE_REASON.get(entity_type)
 
 
 def _norm_bid(v) -> int | None:
@@ -69,7 +148,16 @@ def collect_entities(
         rows.append({
             "entity_type": "campaign", "entity_id": cid, "parent_id": "",
             "campaign_id": cid, "campaign_type": ctype, "name": c.get("name", ""),
-            "status": "off" if str(c.get("status", "")).upper() == "PAUSED" else "on",
+            # ★D-NAO-97: 캠페인도 그룹·키워드와 **똑같이 userLock을 그대로** 쓴다.
+            #   구버전은 `status == "PAUSED"` → off로 역추론해서, 일예산 소진 자동정지
+            #   (PAUSED · CAMPAIGN_LIMITED_BY_BUDGET · userLock=false)를 사람 조작으로
+            #   오분류했다(prod change_log id 847 — 03 캠페인, 2026-07-27 22:46).
+            #   ⚠️ user_lock 키가 **아예 없는** 입력(구버전 fetcher·레거시 주입 rows)에서는
+            #   옛 규칙으로 되돌아간다. "키가 없다"를 False로 읽으면 사람이 실제로 끈
+            #   캠페인이 on으로 뒤집혀 유령 '외부 재개'가 생기기 때문 — 없는 정보를
+            #   기본값으로 지어내지 않는다.
+            "status": _campaign_status(c),
+            "status_reason": c.get("status_reason"),
             "bid_amt": None,
         })
 
@@ -80,6 +168,7 @@ def collect_entities(
                 "entity_type": "adgroup", "entity_id": aid, "parent_id": cid,
                 "campaign_id": cid, "campaign_type": ctype, "name": ag.get("name", ""),
                 "status": _status(ag.get("status", ""), ag.get("user_lock", False)),
+                "status_reason": ag.get("status_reason"),
                 "bid_amt": ag.get("bid_amt"),
             })
 
@@ -91,6 +180,7 @@ def collect_entities(
                     "entity_type": "keyword", "entity_id": kw["keyword_id"], "parent_id": aid,
                     "campaign_id": cid, "campaign_type": ctype, "name": kw.get("keyword", ""),
                     "status": _status(kw.get("status", ""), kw.get("user_lock", False)),
+                    "status_reason": kw.get("status_reason"),
                     "bid_amt": kw.get("bid_amt"),
                     "qi_grade": kw.get("qi_grade"),  # D-NAO-46②: 품질지수 1~7(get_keywords 무상 편승)
                 })
@@ -102,7 +192,9 @@ def collect_entities(
     return rows
 
 
-def _log_external_status_change(db: Session, entity: NaverEntity, new_status: str, now) -> None:
+def _log_external_status_change(
+    db: Session, entity: NaverEntity, new_status: str, now, status_reason=None,
+) -> None:
     """D-NAO-40: 우리 change_log에 없는 외부 상태 변경을 감지하면 기록한다.
     우리 실행으로 인한 변경(최근 set_user_lock 성공 기록과 방향이 일치 **그리고** 그 쓰기가
     지난 관측(entity.synced_at) 이후에 실제로 일어났을 때)이면 건너뛴다.
@@ -121,10 +213,23 @@ def _log_external_status_change(db: Session, entity: NaverEntity, new_status: st
     가능(SQLite server_default=func.now()는 UTC라 다르지만 여기선 둘 다 명시 값만 사용).
     entity.synced_at이 없거나(비정상 데이터) 판단 근거가 불충분하면 fail-closed로 스킵하지
     않는다 — 최악의 경우도 "우리가 방금 한 변경을 외부로 오기록"일 뿐이라 resume_candidates가
-    그 이후 재개를 보수적으로 건너뛰게 만들 뿐 안전하다."""
+    그 이후 재개를 보수적으로 건너뛰게 만들 뿐 안전하다.
+
+    ★D-NAO-97 2중 안전장치(status_reason): 정지 방향(→off)인데 네이버가 준 사유가 '시스템/상속
+    사유'(예산 소진·검수·부모 정지 등)면 사람 조작으로 기록하지 않는다. 정상 경로에서는 이미
+    collect_entities가 userLock을 그대로 쓰므로 예산 정지는 여기까지 오지도 않는다 — 이 가드는
+    userLock을 못 받는 경로(구버전 fetcher·레거시 주입)에서만 발화하는 **벨트 위의 멜빵**이다.
+    재개 방향(→on)에는 걸지 않는다: 잠금 해제는 사유 필드와 무관하게 실제 상태 변화다."""
     old_lock = entity.status == "off"
     new_lock = new_status == "off"
     if old_lock == new_lock:
+        return
+
+    if new_lock and _is_system_reason(entity.entity_type, status_reason):
+        log.info(
+            "external_status_change 억제(시스템 사유): %s %s reason=%s — 사람 조작 아님",
+            entity.entity_type, entity.entity_id, status_reason,
+        )
         return
 
     last_our_write = (
@@ -166,6 +271,55 @@ def _log_external_status_change(db: Session, entity: NaverEntity, new_status: st
     ))
     log.info("external_status_change detected: %s %s %s→%s",
              entity.entity_type, entity.entity_id, entity.status, new_status)
+
+
+def _log_system_status_change(db: Session, entity: NaverEntity, new_reason, now) -> None:
+    """D-NAO-97: 네이버가 시스템 사유로 캠페인을 멈추거나 다시 돌리면 **관찰**로 기록한다.
+
+    ★왜 별도 액션인가: 이 사건들은 지금까지 두 가지 방식으로만 다뤄졌다 — 캠페인은 '사람이
+    잠갔다'로 **오분류**(id 847)되고, 그룹·키워드는 아예 **기록되지 않았다**. 둘 다 틀렸다.
+    일예산 소진은 진짜로 일어난 일이고(D-NAO-59 목적함수에서 "볼륨을 남기고 멈춘 순간"이다),
+    사람 조작과 같은 통에 담으면 안 된다. 그래서 액션 이름을 나눈다.
+
+    `budget_exhausted_pause`가 아니라 `system_status_change`인 이유: 같은 자리에서 예산 소진
+    외에 검수 중·기간 종료·비즈채널 이상·**문서에 없는 미지의 사유**도 나온다(_is_system_reason
+    주석). 사유는 payload에 원문 그대로 싣고, 액션 이름은 사유를 미리 단정하지 않는다.
+
+    ⚠️ 캠페인 행만 기록한다(쓰기 폭증 방어): 부모 캠페인 하나가 멈추면 그 밑 그룹 수백 개가
+    동시에 CAMPAIGN_PAUSED로 바뀐다(실측 331그룹). 키워드까지 열면 91,005행 크론에서
+    입찰 밸브가 막으려던 폭증이 그대로 재현된다. 캠페인은 46행이라 상한이 구조적으로 막힌다.
+    그룹·키워드의 사유는 naver_entity.status_reason 컬럼에 현재값으로 남아 조회 가능하다.
+
+    dry_run=True(관찰 — 네이버 API 쓰기가 아님, `_log_external_qi_change`와 같은 규약).
+    EXTERNAL_DETECTION_ACTIONS에도 넣지 않는다: 커맨드센터의 actor=external은 "MOP/사람이
+    바꿨다"는 뜻이고, 시스템 정지는 행위자가 없다.
+
+    호출 계약: `e.status`·`e.status_reason` 대입 **전**(옛값 비교 — 다른 밸브와 동일).
+    """
+    if entity.entity_type != "campaign":
+        return
+    was_system = entity.status != "off" and _is_system_reason(entity.entity_type, entity.status_reason)
+    now_system = entity.status != "deleted" and _is_system_reason(entity.entity_type, new_reason)
+    if was_system == now_system:
+        return
+
+    reason = str(new_reason or "") if now_system else str(entity.status_reason or "")
+    gloss = _REASON_KO.get(reason.upper(), reason or "사유 미제공")
+    verb = "시작" if now_system else "해제"
+    db.add(NaverChangeLog(
+        entity_type=entity.entity_type,
+        entity_id=entity.entity_id,
+        campaign_id=entity.campaign_id,
+        action="system_status_change",
+        proposal_id=None,
+        dry_run=True,
+        changed_at=now,
+        before_value=json.dumps({"statusReason": entity.status_reason}, ensure_ascii=False),
+        after_value=json.dumps({"statusReason": new_reason}, ensure_ascii=False),
+        rationale=f"entity_sync 감지: 시스템 사유 정지 {verb} — {gloss}({reason or 'N/A'})",
+    ))
+    log.info("system_status_change detected: %s %s %s→%s (%s)",
+             entity.entity_type, entity.entity_id, entity.status_reason, new_reason, verb)
 
 
 def _load_our_bid_writes(db: Session) -> dict[tuple[str, str], NaverChangeLog]:
@@ -468,7 +622,8 @@ def sync_entities(db: Session, *, rows: list[dict] | None = None) -> dict:
             db.add(NaverEntity(
                 entity_type=r["entity_type"], entity_id=r["entity_id"], parent_id=r["parent_id"],
                 campaign_id=r["campaign_id"], campaign_type=r["campaign_type"], name=r["name"],
-                status=r["status"], bid_amt=r.get("bid_amt"), qi_grade=r.get("qi_grade"), synced_at=now,
+                status=r["status"], status_reason=r.get("status_reason"),
+                bid_amt=r.get("bid_amt"), qi_grade=r.get("qi_grade"), synced_at=now,
             ))
         else:
             if r["entity_type"] == "keyword":
@@ -485,7 +640,9 @@ def sync_entities(db: Session, *, rows: list[dict] | None = None) -> dict:
                         "campaign_id": e.campaign_id, "bid": _norm_bid(e.bid_amt),
                     })
             if e.status != r["status"] and e.status != "deleted":
-                _log_external_status_change(db, e, r["status"], now)
+                _log_external_status_change(db, e, r["status"], now, r.get("status_reason"))
+            # D-NAO-97: 시스템 사유 정지(예산 소진 등) 관찰 — 캠페인 행만, dry_run=True.
+            _log_system_status_change(db, e, r.get("status_reason"), now)
             # ★두 밸브 모두 **대입 전**에 호출한다 — entity의 옛값을 읽어야 diff가 나온다.
             #   (D-NAO-47 입찰가 / D-NAO-46② 품질지수. 병합 2026-07-17: 두 세션이 서로 모르는
             #   채 같은 자리에 같은 패턴을 만들었고, 관심사가 달라 둘 다 유지한다.)
@@ -496,6 +653,9 @@ def sync_entities(db: Session, *, rows: list[dict] | None = None) -> dict:
             e.campaign_type = r["campaign_type"]
             e.name = r["name"]
             e.status = r["status"]
+            if "status_reason" in r:
+                # 키가 없는 레거시 주입 rows는 마지막 관측 사유를 지우지 않는다(qi와 같은 규약).
+                e.status_reason = r["status_reason"]
             e.bid_amt = r.get("bid_amt")
             if r.get("qi_grade") is not None:
                 # codex[P2] D-NAO-46②: qi는 느리게 변하는 관측치 — API가 일시적으로 nccQi를
