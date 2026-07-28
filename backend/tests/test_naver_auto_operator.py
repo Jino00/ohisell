@@ -923,8 +923,13 @@ def test_harness_kill_switch_flip_after_entry_check_blocks_writer(db):
 
 def _ctr_alert_rows(db, *, adgroup_id="grp-1", campaign_id=CAMPAIGN, imp=300, clk=0, rank=3.0):
     """ctr_alert의 W3 창(D0-2..D0, D0=NOW.date()-1)에 들어가는 naver_ad_daily 3일 시드 —
-    누적 imp≥200·clk=0·avg_rank≤4.0(밴드 내) → 경보 발화."""
+    누적 imp≥200·clk=0·avg_rank≤4.0(밴드 내) → 경보 발화. D-NAO-103 이후에는 기대클릭
+    게이트(≥2)가 있어 트레일링 창(~D0-3]의 기준 CTR 시드가 함께 있어야 발화한다."""
     d0 = NOW.date() - timedelta(days=1)
+    db.add(NaverAdDaily(  # 트레일링 기준 CTR 2%(imp 1000·clk 20) → 기대클릭 = 0.02 × 창 노출
+        ad_date=d0 - timedelta(days=10), campaign_id=campaign_id, campaign_type="SHOPPING",
+        adgroup_id=adgroup_id, keyword_id="", imp=1000, clk=20, cost=0, rank_sum=3000,
+    ))
     for k in range(3):
         db.add(NaverAdDaily(
             ad_date=d0 - timedelta(days=k), campaign_id=campaign_id, campaign_type="SHOPPING",
@@ -943,6 +948,7 @@ def test_daily_lane_ctr_alert_briefing_emitted_when_alert_present(db):
         result = auto_operator.run_daily_lane(db, now=NOW)
 
     assert result["ctr_alerts"] >= 1
+    assert result["ctr_alerts_fired"] >= 1  # 첫 판정 = 신규 진입 → 즉시 발화
     briefs = db.query(OpsDiaryEntry).filter(
         OpsDiaryEntry.action == auto_operator.ACTION_CTR_ALERT_BRIEFING
     ).all()
@@ -952,21 +958,53 @@ def test_daily_lane_ctr_alert_briefing_emitted_when_alert_present(db):
 
 
 def test_daily_lane_ctr_alert_briefing_dedupes_w1_w3(db):
-    """codex 1R P2-2: 한 그룹이 W1·W3 동시 발화(clk=0 3일)해도 브리핑은 그룹당 1행(window
-    'W1+W3' 병기)·헤더 건수도 그룹 수(1) 기준(2건 중복 집계 금지)."""
+    """한 그룹이 W1·W3 동시 발화(clk=0 3일)해도 브리핑은 그룹당 1건 — 건수도 그룹 수(1) 기준
+    (2건 중복 집계 금지). D-NAO-103: 창 표기는 사람 말('최근 1일·3일')로 나간다."""
     _settings(db)
     _ctr_alert_rows(db)  # clk=0 3일 → 같은 그룹 W1(D0 단일일)·W3(누적) 동시 발화
     with patch.object(auto_operator.slack_notifier, "notify_text", return_value={"sent": True}):
-        auto_operator.run_daily_lane(db, now=NOW)
+        result = auto_operator.run_daily_lane(db, now=NOW)
 
+    assert result["ctr_alerts"] == 1  # 그룹 수 기준(2건 아님)
     briefs = db.query(OpsDiaryEntry).filter(
         OpsDiaryEntry.action == auto_operator.ACTION_CTR_ALERT_BRIEFING
     ).all()
     assert len(briefs) == 1
     rationale = briefs[0].rationale
-    assert "경보 1건" in rationale            # 그룹 수 기준(2건 아님)
-    assert rationale.count("/grp-1(") == 1    # 그룹당 1행(중복 행 없음)
-    assert "W1+W3" in rationale               # window 병기
+    assert "새로 생긴 문제 1건" in rationale
+    assert rationale.count("grp-1") == 1      # 그룹당 1행(중복 행 없음)
+    assert "최근 1일·3일" in rationale         # 내부 창 코드(W1/W3) 노출 금지
+    assert "W1" not in rationale and "W3" not in rationale
+    assert "D-NAO" not in rationale           # 내부 결정 코드 노출 금지
+
+
+def test_daily_lane_ctr_alert_repeat_is_suppressed_next_day(db):
+    """D-NAO-103 핵심: 같은 그룹이 이튿날에도 판정되면 개별 발화하지 않는다(만성 = 주간 요약행).
+    이튿날(화요일)엔 브리핑 자체가 없다 — 판정은 그대로 1건, 발화만 0."""
+    _settings(db)
+    _ctr_alert_rows(db)
+    with patch.object(auto_operator.slack_notifier, "notify_text", return_value={"sent": True}):
+        auto_operator.run_daily_lane(db, now=NOW)
+
+    # 이튿날 같은 조건(창이 하루 밀리도록 D0+1 행 추가) — 화요일이라 주간 요약도 아님.
+    next_now = NOW + timedelta(days=1)
+    db.add(NaverAdDaily(
+        ad_date=next_now.date() - timedelta(days=1), campaign_id=CAMPAIGN,
+        campaign_type="SHOPPING", adgroup_id="grp-1", keyword_id="",
+        imp=300, clk=0, cost=0, rank_sum=900,
+    ))
+    db.commit()
+    with patch.object(auto_operator.slack_notifier, "notify_text",
+                       return_value={"sent": True}) as mock_slack2:
+        result2 = auto_operator.run_daily_lane(db, now=next_now)
+
+    assert result2["ctr_alerts"] == 1              # 판정은 그대로(래더 skip 게이트는 계속 작동)
+    assert result2["ctr_alerts_fired"] == 0        # 사람에게는 안 알림
+    assert result2["ctr_alerts_suppressed"] == 1
+    mock_slack2.assert_not_called()
+    assert db.query(OpsDiaryEntry).filter(
+        OpsDiaryEntry.action == auto_operator.ACTION_CTR_ALERT_BRIEFING
+    ).count() == 1  # 첫날 1건 그대로(이튿날 추가 없음)
 
 
 def test_daily_lane_ctr_alert_briefing_silent_when_no_alert(db):
