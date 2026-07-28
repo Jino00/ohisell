@@ -11,6 +11,11 @@
 #   파싱·머니수학은 백엔드(clients/coupang/rocket_supplier.py)가 담당. 이 페처는 원시 수집+push만.
 #   - 발주/납품 = /po-web/app/purchase-order/list (JSON) → page 루프 → raw 페이지 그대로 push.
 #   - 정산     = /scm/settlement/general/purchase/account (SSR HTML) → DOMParser로 <table> rows 추출 → push.
+#   - 판매분석 = /retail-insight/api/business-insight/vi-detail-search (POST JSON) → **하루 단위**
+#                루프 → 우리 레코드 계약으로 매핑해 push (트랙 coupang-promo-pnl, D-CPP-2/5).
+#   - 프로모션 = /promotion/promotion-request (목록+상세) → 레코드 계약 매핑 → push (D-CPP-1/7).
+#     ※ 이 두 스트림만 예외적으로 페처가 매핑한다: 백엔드 파서(clients/coupang/rocket_promo.py)의
+#       입력은 "우리 레코드 계약"이고, 쿠팡 원시 스키마를 아는 유일한 층이 여기이기 때문(PLAN §0.1).
 #
 # 데몬 방식 (2026-07-27 개정 — 순수 버튼-only): launchd KeepAlive 상주 poll 데몬 1개(com.ohisell.rocket).
 #   평소엔 30초마다 가벼운 GET만(창 안 뜸). UI '갱신' 버튼 요청을 claim했을 때만 Chrome을 띄우고
@@ -57,6 +62,13 @@ PO_LIST_PATH = "/po-web/app/purchase-order/list"               # 발주+납품 J
 SETTLEMENT_PATH = "/scm/settlement/general/purchase/account"   # 정산 SSR HTML (ref20 §4)
 PO_DETAIL_PATH = "/scm/purchase/order/get"                     # 발주상세 per-SKU SSR HTML (ref20b, S4.5a)
 
+# ── 프로모션 손익 레이어(트랙 coupang-promo-pnl) 경로 — 2026-07-28 라이브 정찰 실측 ──
+#   ★추측 아님: 아래 셋 다 살아있는 세션에서 200 응답과 필드를 직접 확인하고 적었다.
+SALES_SEARCH_PATH = "/retail-insight/api/business-insight/vi-detail-search"   # 판매분석 POST JSON
+SUBSCRIPTION_PATH = "/rpd/v2/supplier/subscription/detail"                    # 구독 게이트(D-CPP-5)
+PROMOTION_LIST_PATH = "/promotion/promotion-request"                          # 프로모션 목록(Spring Page)
+PROMOTION_DETAIL_PATH = "/promotion/promotion-request"                        # + /{requestId}
+
 # ★실제 Google Chrome 고정(Playwright 번들 Chromium 금지): supplier.coupang.com은 Akamai가
 #   Chrome for Testing 핑거프린트를 차단한다(트랙 rocket-1p D-1 실측).
 CHROME_BIN = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
@@ -66,6 +78,8 @@ KST = ZoneInfo("Asia/Seoul")
 PO_INGEST_PATH = "/api/coupang/ops/rocket/po/ingest"
 SETTLEMENT_INGEST_PATH = "/api/coupang/ops/rocket/settlement/ingest"
 PO_DETAIL_INGEST_PATH = "/api/coupang/ops/rocket/po-detail/ingest"
+SALES_INGEST_PATH = "/api/coupang/ops/rocket/sales/ingest"            # 트랙 coupang-promo-pnl Phase 1
+PROMOTION_INGEST_PATH = "/api/coupang/ops/rocket/promotion/ingest"    # 〃
 
 logging.basicConfig(
     level=logging.INFO,
@@ -86,6 +100,23 @@ _FETCH_TEXT_JS = """async (args) => {
   const t = setTimeout(() => ctrl.abort(), 25000);
   try {
     const r = await fetch(path, { credentials: 'include', signal: ctrl.signal });
+    return { status: r.status, body: await r.text() };
+  } finally { clearTimeout(t); }
+}"""
+
+# JSON POST — 판매분석(vi-detail-search)은 검색 조건을 body로 받는다. **조회 전용**(상태 변경 없음).
+# 인자=[path, bodyObj]. 반환 {status, body}. 비200(400 INVALID_DATE·403 구독)도 body를 그대로 준다 —
+#   호출자가 그 본문에서 유효 구간을 읽어 창을 보정하고, 구독 차단을 실패로 표면화한다(D-CPP-5).
+_FETCH_JSON_POST_JS = """async (args) => {
+  const [path, body] = args;
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 25000);
+  try {
+    const r = await fetch(path, {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body), signal: ctrl.signal,
+    });
     return { status: r.status, body: await r.text() };
   } finally { clearTimeout(t); }
 }"""
@@ -174,6 +205,20 @@ def load_config() -> dict:
     cfg.setdefault("collect_po_detail", True)
     cfg.setdefault("po_detail_days", 45)
     cfg.setdefault("po_detail_max", 80)
+    # ── 프로모션 손익 레이어(트랙 coupang-promo-pnl Phase 1) ──
+    # 판매분석: 기본은 **최근 7일 롤링 재수집**(멱등 upsert라 매 실행 덮어써도 안전 — 확정 전
+    #   수치가 뒤늦게 정정되는 것을 따라잡는다). sales_backfill_days>0이면 그 일수로 창을 넓힌다
+    #   (서버가 알려주는 유효 구간으로 자동 클램프 — 롤링 창이라 하드코딩하면 반드시 틀어진다).
+    cfg.setdefault("collect_sales", True)
+    cfg.setdefault("sales_days", 7)
+    cfg.setdefault("sales_backfill_days", 0)
+    cfg.setdefault("sales_page_size", 20)
+    cfg.setdefault("sales_max_pages", 40)
+    # 프로모션: 전량 upsert(2026-07-28 실측 totalElements=7 — 계정 전체가 한 페이지에 들어온다).
+    cfg.setdefault("collect_promotion", True)
+    cfg.setdefault("promo_page_size", 25)
+    cfg.setdefault("promo_max_pages", 20)
+    cfg.setdefault("promo_detail_max", 100)
     return cfg
 
 
@@ -962,6 +1007,486 @@ def _json_or_text(resp):
 
 
 # ════════════════════════════════════════════════════════════════════
+# ④ 판매분석 옵션×일 수집 (트랙 coupang-promo-pnl Phase 1, D-CPP-2/5)
+# ────────────────────────────────────────────────────────────────────
+# 원천: POST /retail-insight/api/business-insight/vi-detail-search (2026-07-28 라이브 실측).
+#   ★그레인 주의: 이 API는 **요청 구간을 합산해서** 준다(7일 요청 = 7일 합계 1행). 옵션×일을
+#     만들려면 startDate=endDate로 **하루씩** 호출하는 수밖에 없다. 구간을 그대로 넣고 일별이라
+#     믿으면 같은 값이 7일에 복제되어 조용히 7배가 된다.
+#   ★유효 구간은 롤링이다(실측 [2026-06-01 ~ 2026-07-27], 약 57일). 범위 밖 날짜는 400
+#     INVALID_DATE와 함께 **서버가 유효 구간을 본문에 적어 준다** → 그걸 파싱해 창을 보정한다.
+#     일수를 하드코딩하면 매일 하루씩 틀어진다.
+#   ★D-CPP-5(구독 게이트): 판매분석은 BETA + 무료체험(현재 종료일 2026-08-20). 접근이 끊기면
+#     조용히 0행이 되어 "안 팔린 날"로 보인다 → 구독 조회·403을 **실패로 표면화**한다.
+# ════════════════════════════════════════════════════════════════════
+class _SalesAccessDenied(RuntimeError):
+    """판매분석 접근 차단(구독 만료·권한 회수·403). 조용한 skip 금지 신호(D-CPP-5)."""
+
+
+def _sales_window_days(cfg: dict, today: date) -> list[date]:
+    """수집 대상 날짜 목록(오래된 날 → 최신). 기본 = 최근 sales_days일 롤링 재수집.
+
+    ★오늘을 포함한다: 오늘치가 아직 없으면 서버가 400으로 유효 구간을 알려주고 그때 잘린다.
+      'D-1까지'를 코드에 박으면 쿠팡이 마감 시각을 바꾼 날 조용히 하루를 잃는다.
+    sales_backfill_days>0이면 그 일수로 창을 넓힌다(유효 구간을 넘으면 자동 클램프).
+    """
+    backfill = int(cfg.get("sales_backfill_days", 0) or 0)
+    n = backfill if backfill > 0 else int(cfg.get("sales_days", 7) or 7)
+    n = max(1, n)
+    return [today - timedelta(days=i) for i in range(n - 1, -1, -1)]
+
+
+def _parse_viewable_period(body: str) -> tuple[date, date] | None:
+    """400 응답 본문에서 서버가 알려준 유효 구간 `[YYYY-MM-DD ~ YYYY-MM-DD]`을 뽑는다.
+
+    실측 본문: {"code":"INVALID_DATE","message":"[vendorId:A01029796] Date 2025-01-01 is
+                outside the viewable period [2026-06-01 ~ 2026-07-27]"}
+    ★`[vendorId:...]`도 대괄호지만 '날짜 ~ 날짜' 형태가 아니라서 이 정규식엔 걸리지 않는다.
+    """
+    m = re.search(r"\[\s*(\d{4}-\d{2}-\d{2})\s*~\s*(\d{4}-\d{2}-\d{2})\s*\]", body or "")
+    if not m:
+        return None
+    try:
+        lo = date.fromisoformat(m.group(1))
+        hi = date.fromisoformat(m.group(2))
+    except ValueError:
+        return None
+    return (lo, hi) if lo <= hi else (hi, lo)
+
+
+def _clamp_days(days: list[date], period: tuple[date, date] | None) -> list[date]:
+    """유효 구간 밖 날짜 제거. period가 없으면 그대로(아직 모르는 상태)."""
+    if not period:
+        return list(days)
+    lo, hi = period
+    return [d for d in days if lo <= d <= hi]
+
+
+def _sales_page_meta(payload: dict) -> dict:
+    """vi-detail-search 응답의 paginationDetails(실측 {pageSize,pageNumber,totalResults,totalPages})."""
+    pd = (payload or {}).get("paginationDetails") or {}
+
+    def _i(v):
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return 0
+
+    return {
+        "page_number": _i(pd.get("pageNumber")),
+        "total_pages": _i(pd.get("totalPages")),
+        "total_results": _i(pd.get("totalResults")),
+    }
+
+
+def _sales_records(payload: dict, day: date) -> list[dict]:
+    """쿠팡 원시 vendorItems → **우리 레코드 계약**(PLAN §4 sales). 순수 함수(HTTP 없음).
+
+    실측 매핑(2026-07-28):
+      option_id       ← vendorItemDetails.vendorItemId   (쿠팡 옵션ID = 우리 그레인 키)
+      sku_id          ← vendorItemDetails.externalSkuIds[0] (= 발주 product_number, 실측 62178970)
+      qty             ← businessInsightsMetricsResponse.totalUnitsSold
+      revenue         ← 〃.totalGmv        ★소비자 실현가 — 회계 매출 아님(D-CPP-2)
+      visitors        ← 〃.totalUniqueVisitor
+      conversion_rate ← 〃.pvToOrder       ★이미 0~1 소수다(실측 검산: 140주문/1141PV=0.12269…와
+                                            pvToOrder 0.12269938650306748이 자릿수까지 일치).
+                                            계약이 0~1을 요구하므로 100으로 나누지 않는다.
+      product_name    ← itemName(옵션명; 없으면 productName)
+    ★qty/revenue 키는 **항상 넣는다**(값이 None이어도): 백엔드 파서는 '키 없음 = 매핑이 필드명을
+      놓침'으로 보고 행을 skip하고, '키 있음 + 빈 값 = 0판매일'로 본다. 쿠팡이 필드명을 바꾸면
+      전 행의 값이 None이 되어 배치 경보(blank_qty==accepted)가 울린다 — 이게 유일한 탐지 경로다.
+    ★sku_id는 externalSkuIds가 **정확히 하나일 때만** 채운다: 여러 개면 원가 브리지 키를 하나로
+      고를 수 없다. 아무거나 고르면 영원히 잘못된 원가에 붙는다(잘못 붙느니 비워 둔다).
+    ★vendorItemDetails.vendorId(실측 A00010028)는 **상품의 리테일 vendor**이지 우리 계정축이
+      아니다(우리 계정 = A01029796). 계정축 vendor_id는 push 때 설정에서 주입한다.
+    """
+    out: list[dict] = []
+    for it in (payload or {}).get("vendorItems") or []:
+        if not isinstance(it, dict):
+            continue
+        det = it.get("vendorItemDetails") or {}
+        met = it.get("businessInsightsMetricsResponse") or {}
+        if not isinstance(det, dict) or not isinstance(met, dict):
+            continue
+        vi = det.get("vendorItemId")
+        if vi is None or str(vi).strip() == "":
+            continue
+        skus = det.get("externalSkuIds") or []
+        sku = None
+        if isinstance(skus, list) and len(skus) == 1 and skus[0] not in (None, ""):
+            sku = str(skus[0])
+        out.append({
+            "option_id": str(vi),
+            "date": day.isoformat(),
+            "sku_id": sku,
+            "qty": met.get("totalUnitsSold"),
+            "revenue": met.get("totalGmv"),
+            "visitors": met.get("totalUniqueVisitor"),
+            "conversion_rate": met.get("pvToOrder"),
+            "product_name": det.get("itemName") or det.get("productName"),
+        })
+    return out
+
+
+def _sales_access_ok(page) -> tuple[bool, str]:
+    """D-CPP-5 구독 게이트 확인. (True,"") / (False,사유). 사유는 실패 보고에 그대로 실린다."""
+    res = _eval_retry(page, _FETCH_TEXT_JS, [SUBSCRIPTION_PATH])
+    status = (res or {}).get("status")
+    body = (res or {}).get("body") or ""
+    if status != 200:
+        return False, f"구독 상태 조회 HTTP {status}: {body[:160]}"
+    try:
+        payload = json.loads(body)
+    except (ValueError, TypeError):
+        return False, "구독 상태 응답이 JSON 아님(로그인 HTML 의심)"
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, dict) or not data:
+        return False, f"구독 상태 data 없음: {body[:160]}"
+    info = data.get("detailInfo") or {}
+    log.info(
+        "판매분석 구독 게이트: permittedLevel=%s subscribed=%s freeTrialEnd=%s "
+        "(D-CPP-5 — 만료되면 수집이 조용히 0행이 된다)",
+        data.get("permittedLevel"),
+        (info or {}).get("subscribedLevel"),
+        (info or {}).get("freeTrialEndDate"),
+    )
+    return True, ""
+
+
+def _fetch_sales_page(page, cfg: dict, day: date, page_no: int):
+    """판매분석 한 날짜·한 페이지 fetch. 반환 (payload|None, status, body).
+
+    body는 400일 때 유효 구간을 읽기 위해 그대로 돌려준다.
+    """
+    body = {
+        "startDate": day.isoformat(),
+        "endDate": day.isoformat(),          # ★하루 단위 — 위 섹션 주석(구간 합산 함정) 참조
+        "registrationTypes": ["RETAIL"],
+        "pageNumber": page_no,
+        "pageSize": int(cfg.get("sales_page_size", 20)),
+        "sortBy": "GMV",
+        "sortOrder": "DESC",
+        "isKanCategoryCode": True,
+    }
+    res = _eval_retry(page, _FETCH_JSON_POST_JS, [SALES_SEARCH_PATH, body])
+    status = (res or {}).get("status")
+    text = (res or {}).get("body") or ""
+    if status != 200:
+        return None, status, text
+    try:
+        payload = json.loads(text)
+    except (ValueError, TypeError):
+        return None, status, text
+    return (payload if isinstance(payload, dict) else None), status, text
+
+
+def _collect_sales_day(page, cfg: dict, day: date):
+    """한 날짜의 전 페이지 수집. 반환 (rows, period_hint|None).
+
+    period_hint는 400 INVALID_DATE에서 읽은 유효 구간(호출자가 나머지 날짜를 클램프).
+    403(구독/권한)은 _SalesAccessDenied로 올린다 — 조용히 0행으로 접지 않는다(D-CPP-5).
+    """
+    max_pages = int(cfg.get("sales_max_pages", 40))
+    rows: list[dict] = []
+    page_no = 0
+    while page_no < max_pages:
+        payload, status, text = _fetch_sales_page(page, cfg, day, page_no)
+        if status == 403:
+            raise _SalesAccessDenied(f"판매분석 403(구독/권한) {day}: {text[:160]}")
+        if payload is None:
+            period = _parse_viewable_period(text) if status == 400 else None
+            if period is not None:
+                return rows, period
+            raise RuntimeError(f"판매분석 {day} page={page_no} 비정상(status={status}): {text[:160]}")
+        rows.extend(_sales_records(payload, day))
+        meta = _sales_page_meta(payload)
+        total_pages = meta["total_pages"]
+        if total_pages <= 0 or page_no + 1 >= total_pages:
+            break
+        page_no += 1
+        page.wait_for_timeout(300)   # 폴라이트 간격
+    return rows, None
+
+
+def _collect_sales_rows(page, cfg: dict) -> tuple[list[dict], dict]:
+    """설정 창의 날짜를 하루씩 수집 → 레코드 계약 리스트. 반환 (rows, stats).
+
+    유효 구간을 처음 알게 되면(400 응답) 남은 날짜를 즉시 클램프하고, 그 날짜가 구간 안이면
+    **한 번만** 재시도한다(무한 재시도 금지 — 같은 400이 반복되면 그날은 포기하고 계속).
+    """
+    ok, why = _sales_access_ok(page)
+    if not ok:
+        raise _SalesAccessDenied(f"판매분석 접근 불가(D-CPP-5): {why}")
+    today = datetime.now(KST).date()
+    pending = _sales_window_days(cfg, today)
+    stats = {"days_requested": len(pending), "days_collected": 0, "days_clamped": 0, "rows": 0}
+    period: tuple[date, date] | None = None
+    retried: set = set()
+    rows: list[dict] = []
+    while pending:
+        day = pending.pop(0)
+        if period and not (period[0] <= day <= period[1]):
+            stats["days_clamped"] += 1
+            continue
+        day_rows, hint = _collect_sales_day(page, cfg, day)
+        if hint is not None and period is None:
+            period = hint
+            log.info("판매분석 유효 구간 수신: %s ~ %s — 창을 자동 보정한다(하드코딩 아님)", *period)
+            pending = _clamp_days(pending, period)
+        if hint is not None:
+            # 이 날짜 자체가 400이었다. 구간 안이면 1회만 재시도, 아니면 클램프로 계산.
+            if period and period[0] <= day <= period[1] and day not in retried:
+                retried.add(day)
+                pending.insert(0, day)
+            else:
+                stats["days_clamped"] += 1
+            continue
+        rows.extend(day_rows)
+        stats["days_collected"] += 1
+        page.wait_for_timeout(300)
+    stats["rows"] = len(rows)
+    log.info(
+        "판매분석 수집: %d일 요청 → %d일 수집·%d일 범위밖, 레코드 %d건",
+        stats["days_requested"], stats["days_collected"], stats["days_clamped"], len(rows),
+    )
+    return rows, stats
+
+
+# ════════════════════════════════════════════════════════════════════
+# ⑤ 프로모션 신청 수집 (트랙 coupang-promo-pnl Phase 1, D-CPP-1/7)
+# ────────────────────────────────────────────────────────────────────
+# 원천: GET /promotion/promotion-request?requestType=COMMON&page&size (Spring Page) + 상세 /{id}.
+#   실측(2026-07-28): totalElements=7 — 계정 전체가 한 페이지에 들어온다. 전량 upsert가 싸다.
+#   ★상세 응답은 목록 항목과 **필드가 동일**했다(신규 필드 없음). 그래도 상세를 부르는 이유는
+#     ①raw 보존의 정본을 상세로 고정하고 ②쿠팡이 상세에만 필드를 추가할 때 자동으로 따라가기 위함.
+#   ★단위 할인액은 목록에도 상세에도 **없다** → D-CPP-7(수기 1칸). 페처는 그 칸을 쓰지 않는다.
+# ════════════════════════════════════════════════════════════════════
+def _promo_page_meta(payload: dict) -> dict:
+    """Spring Page 메타(totalPages/last/number)."""
+    def _i(v):
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return 0
+
+    return {
+        "total_pages": _i((payload or {}).get("totalPages")),
+        "number": _i((payload or {}).get("number")),
+        "last": bool((payload or {}).get("last")),
+    }
+
+
+def _promotion_record(item: dict) -> dict | None:
+    """쿠팡 원시 프로모션 항목 → **우리 레코드 계약**(PLAN §4 promotion). 순수 함수.
+
+    실측 매핑(2026-07-28, Request 687878):
+      request_id  ← requestId          promotion_name ← title
+      contract_id ← contractId         promotion_type ← promotionType (INSTANT_DISCOUNT)
+      status      ← status (COMPLETE)  discount_method ← discountType (FIXED_AMOUNT_WITH_QUANTITY)
+      start_at    ← effectiveDate      end_at ← expiryDate      ★둘 다 tz(+09:00) 포함 ISO —
+                    백엔드 파서가 KST로 환산해 naive로 저장한다(초 단위 보존).
+      share_ratio ← supplierFundRate (100 = 전액 셀러 부담)
+      budget_amount ← discountBudget (총예산 — 단위 할인액이 아니다)
+      applied_product_count ← detailCount     requested_at ← createdAt
+      raw         ← 원본 전체(detailStatus·bmInfoList 등 미매핑 필드 사후 복구용)
+    ★없는 것을 지어내지 않는다:
+      - discount_value(단위 할인액): 응답에 없다 → None. 수기 unit_discount_amount로 받는다(D-CPP-7).
+      - settlement_date(정산일): 목록·상세 어디에도 없다 → None. 화면에만 있는 값이면 추후 별도 정찰.
+    """
+    if not isinstance(item, dict):
+        return None
+    rid = item.get("requestId")
+    if rid is None or str(rid).strip() == "":
+        return None
+    return {
+        "request_id": str(rid),
+        "contract_id": None if item.get("contractId") is None else str(item.get("contractId")),
+        "promotion_name": item.get("title"),
+        "promotion_type": item.get("promotionType"),
+        "status": item.get("status"),
+        "start_at": item.get("effectiveDate"),
+        "end_at": item.get("expiryDate"),
+        "share_ratio": item.get("supplierFundRate"),
+        "discount_method": item.get("discountType"),
+        "discount_value": None,          # API에 없음(D-CPP-7) — 추측 금지
+        "budget_amount": item.get("discountBudget"),
+        "settlement_date": None,         # API에 없음(2026-07-28 실측)
+        "applied_product_count": item.get("detailCount"),
+        "requested_at": item.get("createdAt"),
+        "raw": item,
+    }
+
+
+def _fetch_promotion_detail(page, request_id: str) -> dict | None:
+    """프로모션 상세 1건. 실패(비200·비JSON)면 None — 목록 항목으로 폴백한다."""
+    res = _eval_retry(page, _FETCH_TEXT_JS, [f"{PROMOTION_DETAIL_PATH}/{request_id}"])
+    if (res or {}).get("status") != 200:
+        return None
+    try:
+        payload = json.loads((res or {}).get("body") or "")
+    except (ValueError, TypeError):
+        return None
+    return payload if isinstance(payload, dict) and payload.get("requestId") is not None else None
+
+
+def _collect_promotion_rows(page, cfg: dict) -> tuple[list[dict], dict]:
+    """프로모션 목록(+상세 병합) → 레코드 계약 리스트. 반환 (rows, stats).
+
+    상세 실패는 그 건만 목록 값으로 폴백(수집 자체를 죽이지 않는다). 목록 실패는 RuntimeError.
+    """
+    size = int(cfg.get("promo_page_size", 25))
+    max_pages = int(cfg.get("promo_max_pages", 20))
+    detail_max = int(cfg.get("promo_detail_max", 100))
+    items: list[dict] = []
+    for page_no in range(max_pages):
+        q = urlencode({"requestType": "COMMON", "page": page_no, "size": size})
+        res = _eval_retry(page, _FETCH_TEXT_JS, [f"{PROMOTION_LIST_PATH}?{q}"])
+        status = (res or {}).get("status")
+        text = (res or {}).get("body") or ""
+        if status != 200:
+            raise RuntimeError(f"프로모션 목록 page={page_no} HTTP {status}: {text[:160]}")
+        try:
+            payload = json.loads(text)
+        except (ValueError, TypeError):
+            raise RuntimeError(f"프로모션 목록 page={page_no} 비JSON(세션 만료 의심): {text[:120]}")
+        content = (payload or {}).get("content") or []
+        items.extend([c for c in content if isinstance(c, dict)])
+        meta = _promo_page_meta(payload)
+        # 빈 페이지를 종료 조건의 정본으로 둔다(실측: page=99도 200 + content=[]).
+        if not content or meta["last"] or (meta["total_pages"] > 0 and page_no + 1 >= meta["total_pages"]):
+            break
+        page.wait_for_timeout(300)
+    rows: list[dict] = []
+    detail_ok = 0
+    detail_fail = 0
+    for i, item in enumerate(items):
+        merged = item
+        if i < detail_max:
+            detail = _fetch_promotion_detail(page, str(item.get("requestId")))
+            if detail is not None:
+                merged = {**item, **detail}   # 상세가 이긴다(같은 필드면 더 최신·정본)
+                detail_ok += 1
+            else:
+                detail_fail += 1
+            page.wait_for_timeout(200)
+        rec = _promotion_record(merged)
+        if rec is not None:
+            rows.append(rec)
+    stats = {"listed": len(items), "rows": len(rows),
+             "detail_ok": detail_ok, "detail_failed": detail_fail}
+    log.info("프로모션 수집: 목록 %d건 → 레코드 %d건(상세 성공 %d·실패 %d)",
+             len(items), len(rows), detail_ok, detail_fail)
+    if detail_fail:
+        log.warning("프로모션 상세 실패 %d건 — 목록 값으로 폴백(필드 누락 가능)", detail_fail)
+    return rows, stats
+
+
+# ════════════════════════════════════════════════════════════════════
+# 프로모션 손익 레이어 push
+# ════════════════════════════════════════════════════════════════════
+_SALES_PUSH_CHUNK = 500   # 백필(수십 일 × 수십 옵션)이 한 요청에 몰려 타임아웃/메모리를 때리지 않게.
+
+
+def _warn_ingest_health(label: str, resp) -> None:
+    """ingest 응답의 수집 건강 신호를 페처 로그에도 남긴다(백엔드 로그만 보면 놓친다).
+
+    skipped>0 = 계약 위반(매핑 점검). blank_qty/blank_revenue == accepted = **매핑 사고**
+    (0판매일이 아니다 — 쿠팡 필드명 변경 등으로 전 행의 값이 비었다는 뜻).
+    """
+    if not isinstance(resp, dict):
+        return
+    if resp.get("skipped"):
+        log.warning("%s ingest: 계약 위반 skip %s건 — 매핑 점검 필요", label, resp.get("skipped"))
+    accepted = resp.get("accepted") or 0
+    if accepted and (resp.get("blank_qty") == accepted or resp.get("blank_revenue") == accepted):
+        log.error(
+            "%s ingest: 배치 %d행 전부에서 수량/매출이 빈 값 — 0판매일이 아니라 응답 필드명 변경을 "
+            "의심할 것(blank_qty=%s blank_revenue=%s)",
+            label, accepted, resp.get("blank_qty"), resp.get("blank_revenue"),
+        )
+
+
+def _push_sales(cfg: dict, rows: list[dict]) -> int:
+    """판매분석 레코드 → prod ingest(멱등 upsert). 0=성공/1=실패. 빈 수집은 push 안 함."""
+    if not rows:
+        log.info("판매분석 push: 레코드 0건 — 건너뜀")
+        return 0
+    rc = 0
+    for i in range(0, len(rows), _SALES_PUSH_CHUNK):
+        chunk = rows[i:i + _SALES_PUSH_CHUNK]
+        try:
+            pr = requests.post(
+                cfg["prod_base_url"].rstrip("/") + SALES_INGEST_PATH,
+                json={"vendor_id": cfg["vendor_id"], "source": "sales_analysis", "rows": chunk},
+                headers={"X-Ingest-Token": cfg["ingest_token"]},
+                timeout=60,
+            )
+        except requests.RequestException as e:
+            log.error("판매분석 push 네트워크 오류(%d~): %s", i, e)
+            rc = 1
+            continue
+        if pr.status_code != 200:
+            log.error("판매분석 push 실패 HTTP %s — %s", pr.status_code, pr.text[:200])
+            rc = 1
+            continue
+        body = _json_or_text(pr)
+        log.info("판매분석 push 성공 %d건 → %s", len(chunk), body)
+        _warn_ingest_health("판매분석", body)
+    return rc
+
+
+def _push_promotions(cfg: dict, rows: list[dict]) -> int:
+    """프로모션 레코드 → prod ingest(멱등 upsert, grain=request_id). 0=성공/1=실패."""
+    if not rows:
+        log.info("프로모션 push: 레코드 0건 — 건너뜀")
+        return 0
+    try:
+        pr = requests.post(
+            cfg["prod_base_url"].rstrip("/") + PROMOTION_INGEST_PATH,
+            json={"vendor_id": cfg["vendor_id"], "rows": rows},
+            headers={"X-Ingest-Token": cfg["ingest_token"]},
+            timeout=60,
+        )
+    except requests.RequestException as e:
+        log.error("프로모션 push 네트워크 오류: %s", e)
+        return 1
+    if pr.status_code != 200:
+        log.error("프로모션 push 실패 HTTP %s — %s", pr.status_code, pr.text[:200])
+        return 1
+    body = _json_or_text(pr)
+    log.info("프로모션 push 성공 %d건 → %s", len(rows), body)
+    _warn_ingest_health("프로모션", body)
+    return 0
+
+
+def _collect_and_push_promo_pnl(page, cfg: dict) -> int:
+    """판매분석·프로모션 두 스트림을 수집→push. 반환 rc(0=성공, 1=하나라도 실패).
+
+    두 스트림은 서로 독립이다 — 한쪽 실패가 다른 쪽 push를 막지 않는다(발주/정산 패턴과 동일).
+    ★판매분석 접근 차단(D-CPP-5)은 **실패로 남긴다**: 조용히 넘기면 테이블이 멈춘 걸 아무도 모른다.
+    """
+    rc = 0
+    if cfg.get("collect_sales", True):
+        try:
+            rows, _stats = _collect_sales_rows(page, cfg)
+            rc |= _push_sales(cfg, rows)
+        except _SalesAccessDenied as e:
+            log.error("판매분석 수집 차단(D-CPP-5, 구독/권한 확인 필요): %s", e)
+            rc = 1
+        except Exception as e:  # noqa: BLE001 — 판매분석 실패가 프로모션 수집을 막지 않는다
+            log.error("판매분석 수집 실패: %s", e)
+            rc = 1
+    if cfg.get("collect_promotion", True):
+        try:
+            rows, _stats = _collect_promotion_rows(page, cfg)
+            rc |= _push_promotions(cfg, rows)
+        except Exception as e:  # noqa: BLE001
+            log.error("프로모션 수집 실패: %s", e)
+            rc = 1
+    return rc
+
+
+# ════════════════════════════════════════════════════════════════════
 # run / login / chrome 커맨드
 # ════════════════════════════════════════════════════════════════════
 def _do_run(cfg: dict) -> int:
@@ -974,6 +1499,7 @@ def _do_run(cfg: dict) -> int:
         return 2
     pages: list[dict] = []
     settle_rows: list[list] = []
+    rc_promo_pnl = 0
     try:
         with _owned_chrome(cfg) as owner:
             with sync_playwright() as p:
@@ -1006,12 +1532,16 @@ def _do_run(cfg: dict) -> int:
                         except Exception as e:  # noqa: BLE001 — 상세 실패는 발주/정산 push를 무효화하지 않음
                             log.error("발주상세 수집 실패(발주/정산은 push됨): %s", e)
                             detail_failed = -1
+                    # 프로모션 손익 레이어(판매분석·프로모션) — 위 스트림들과 독립. 실패해도
+                    #   발주/정산 push는 이미 끝났고, rc로만 실패가 드러난다(조용한 성공 금지).
+                    rc_promo_pnl = _collect_and_push_promo_pnl(page, cfg)
     except Exception as e:  # noqa: BLE001 — Chrome 기동/브라우저/수집 오류
         log.error("브라우저 수집 오류: %s", e)
         return 1
 
-    rc = 0 if (rc_po == 0 and rc_st == 0 and detail_failed <= 0) else 1
-    log.info("run 완료 — 발주 push rc=%d / 정산 push rc=%d / 발주상세 실패=%d", rc_po, rc_st, detail_failed)
+    rc = 0 if (rc_po == 0 and rc_st == 0 and detail_failed <= 0 and rc_promo_pnl == 0) else 1
+    log.info("run 완료 — 발주 push rc=%d / 정산 push rc=%d / 발주상세 실패=%d / 프로모션손익 rc=%d",
+             rc_po, rc_st, detail_failed, rc_promo_pnl)
     # 성공 시 last_success_at 갱신 (UI 폴링 완료 감지용)
     if rc == 0 and _push_configured(cfg):
         # ★완료 신호는 몇 번 재시도한다(codex 5R[P1]): 유실되면 요청이 임대된 채 남아
