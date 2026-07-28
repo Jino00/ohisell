@@ -1,3 +1,9 @@
+## ✅ 2026-07-28 밤 — 로켓 1P 통합 대사 화면 배포 완료 (main `4c4a883`, PR #153)
+
+발주↔납품↔거래명세서↔계산서 SKU 대사 화면(`/rocket-recon`) + 조회전용 API(`GET /api/overview/rocket-recon`) 신설. 경량 2R 리뷰 합의(MAJOR 4건 수용, 미합의 0) 후 병합. alembic head 확인(prod `4b66ae3706e6`) 후 backend 2파일 + frontend `safe_deploy.sh` 배포, pm2 재시작 정상. 라이브 실측(ssh localhost:8001): PO 491건·수량드리프트 181건 중 정산단계(CI) 드리프트 105건, SKU 249종(발주상세 커버리지 49.5%), SKU 상세 응답 정상. 프론트 신규 번들(`index-C7VY_nkE.js`) 서빙 확인. 후속 이관 4건(RI 장기체류 알림·TS↔TI 부가세 검증·기간필터 UI·RG 교차대사)은 트랙 스코프 밖.
+
+---
+
 ## ✅ 2026-07-28 밤 — 광고 성과(사장님 뷰) Phase 1 배포 완료 (main `11bf3d4`, PR #151, D-NAO-104)
 
 오늘 한눈에(캠페인 카드 46개) + 오늘 시스템이 한 일(당일 자동 실행/차단 이벤트) 구현·prod 배포·라이브 검증 완료. 적대적 리뷰 1R PASS(공유 상품 매출 분할 분모 단일화 반영). PR #149·#150을 먼저 merge 후 병합(api.ts 1곳만 겹침, 자동 해소) — 재검증 3,844 passed. `safe_deploy.sh`로 백엔드 8파일+frontend 배포, pm2 online·예외 0. API 200(campaigns 46·today_actions 실행16/차단4) + 브라우저 QA로 카드 렌더·"오늘 시스템이 한 일"·파워링크 ROAS `—` 표기 확인(스크린샷 세션 스크래치패드). 다음: Phase 2(개선 전/후 추적). codex 소급 부채 4건째 누적(08-02 리셋 후).
