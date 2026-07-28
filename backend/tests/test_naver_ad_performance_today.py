@@ -185,6 +185,39 @@ def test_proxy_revenue_splits_shared_product(db):
 
 # ─────────────────────────── SA: change_log_narrator ───────────────────────────
 
+def test_proxy_revenue_denominator_ignores_request_scope(db):
+    """분모는 "그 상품을 매핑한 **모든** 캠페인 수"다 — 조회 범위에 따라 달라지면 같은 날
+    같은 캠페인의 매출이 화면마다 다른 값이 된다(P2-1)."""
+    _seed_baseline(db)
+    db.add(NaverAdgroupProduct(adgroup_id="grp-2", campaign_id="cmp-shopping-2",
+                               mall_product_id=PRODUCT_ID, product_name="같은 상품"))
+    db.commit()
+    _seed_order(db, amount=30000)
+
+    # 03만 단독 조회해도 분모는 2 — 범위를 좁혔다고 매출이 커지지 않는다.
+    solo = today_proxy_revenue.build(db, [SHOPPING_CAMPAIGN], kst_today())
+    both = today_proxy_revenue.build(db, [SHOPPING_CAMPAIGN, "cmp-shopping-2"], kst_today())
+    assert solo[SHOPPING_CAMPAIGN]["revenue"] == 15000
+    assert solo[SHOPPING_CAMPAIGN] == both[SHOPPING_CAMPAIGN]
+
+
+def test_shared_denominator_counts_non_auto_operate_campaigns(db):
+    """자동운영이 아닌 캠페인(대행사·수동)이 같은 상품을 광고해도 분모에 든다.
+    BP가 auto_operate만 세던 탓에 자기 몫을 과대 계상하던 구멍의 회귀 방지(P2-1/P3-5)."""
+    from app.services.naver_ad import budget_pacing, product_campaign_share
+
+    _seed_baseline(db)  # SHOPPING_CAMPAIGN = auto_operate=True
+    db.add(NaverAdgroupProduct(adgroup_id="grp-agency", campaign_id="cmp-agency",
+                               mall_product_id=PRODUCT_ID, product_name="대행사가 파는 같은 상품"))
+    db.commit()
+
+    assert product_campaign_share.campaigns_per_product(db, [PRODUCT_ID])[PRODUCT_ID] == 2
+    # BP도 같은 분모를 쓴다(auto_operate 캠페인만 넘겨도 대행사 몫이 분모에 반영된다).
+    assert budget_pacing.product_campaign_counts(db, [SHOPPING_CAMPAIGN])[PRODUCT_ID] == 2
+    _seed_order(db, amount=30000)
+    assert today_proxy_revenue.build(db, [SHOPPING_CAMPAIGN], kst_today())[SHOPPING_CAMPAIGN]["revenue"] == 15000
+
+
 def test_narrator_bid_up_sentence_has_names_not_ids(db):
     _seed_baseline(db)
     row = _seed_change(db, before={"bidAmt": 2290}, after={"bidAmt": 3060},
@@ -287,6 +320,9 @@ def test_bracket_label_prefix_survives_cleaning(db):
     assert alert_humanizer.clean_name("[P_삭제금지]04. 아이폰_지문방지") == "[P_삭제금지]04. 아이폰_지문방지"
     assert alert_humanizer.clean_name("○ P. 아이패드 파워링크") == "P. 아이패드 파워링크"
     assert alert_humanizer.clean_name("[짝없는 여는 괄호") == "짝없는 여는 괄호"
+    # 소괄호도 같은 클래스 — 짝이 있으면 라벨, 없으면 장식(P3-1)
+    assert alert_humanizer.clean_name("● (보류)02. 갤럭시") == "(보류)02. 갤럭시"
+    assert alert_humanizer.clean_name("(짝없는 소괄호") == "짝없는 소괄호"
 
 
 def test_marker_constants_match_execution_harness():

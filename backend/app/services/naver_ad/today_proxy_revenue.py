@@ -18,9 +18,10 @@ mall_product_id == orders.platform_product_id)으로만 성립하고, 그 매핑
   selling_price=라인총액이라 ×수량 2중계상 없음). 여기서만 다르게 굴면 같은 날 두 화면이
   다른 매출을 말한다.
 
-★한 상품이 여러 캠페인에 매핑돼 있으면 매출을 캠페인 수로 **균등 분할**한다.
-  실제 기여 비율은 알 수 없고(추정 금지), 양쪽에 100%씩 계상하면 계정 합계가 실제 매출을
-  넘어버린다. budget_pacing.product_campaign_counts가 같은 상황에 쓰는 것과 동일한 보수 규약.
+★한 상품이 여러 캠페인에 매핑돼 있으면 매출을 캠페인 수로 **균등 분할**한다. 실제 기여
+  비율은 알 수 없고(추정 금지), 양쪽에 100%씩 계상하면 계정 합계가 실제 매출을 넘어버린다.
+  분모는 `product_campaign_share.campaigns_per_product` **한 곳에서만** 온다(P2-1) — 여기서
+  요청 범위 안의 캠페인만 세면 조회 범위에 따라 같은 캠페인의 매출이 달라진다.
 """
 from __future__ import annotations
 
@@ -32,6 +33,7 @@ from sqlalchemy.orm import Session
 
 from app.models import NaverAdgroupProduct, Order
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
+from app.services.naver_ad import product_campaign_share
 
 NAVER_CHANNEL_ID = 6
 
@@ -101,19 +103,18 @@ def build(db: Session, campaign_ids: list[str], day: date) -> dict[str, dict]:
     if not pids_by_campaign:
         return result
 
-    # 상품별 "요청 범위 안에서 그 상품을 매핑한 캠페인 수" — 분모(균등 분할).
-    campaigns_per_product: dict[str, int] = {}
-    for pids in pids_by_campaign.values():
-        for pid in pids:
-            campaigns_per_product[pid] = campaigns_per_product.get(pid, 0) + 1
-
-    revenue_by_product = _revenue_by_product(db, sorted(campaigns_per_product), day)
+    # 분모 = "그 상품을 매핑한 **모든** 캠페인 수"(요청 범위·자동운영 여부 무관, P2-1).
+    # ★요청 범위 안에서만 세면 안 된다: 같은 캠페인을 단독 조회할 때와 전체 조회할 때 매출이
+    #   달라진다(범위가 좁으면 분모가 작아져 과대 계상).
+    all_pids = sorted({pid for pids in pids_by_campaign.values() for pid in pids})
+    shares = product_campaign_share.campaigns_per_product(db, all_pids)
+    revenue_by_product = _revenue_by_product(db, all_pids, day)
 
     for cid, pids in pids_by_campaign.items():
         total = Decimal(0)
         shared = 0
         for pid in pids:
-            share = campaigns_per_product.get(pid, 1) or 1
+            share = shares.get(pid, 1) or 1
             if share > 1:
                 shared += 1
             total += revenue_by_product.get(pid, Decimal(0)) / Decimal(share)

@@ -42,7 +42,7 @@ from app.models import (
     Order,
 )
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
-from app.services.naver_ad import campaign_target_resolver
+from app.services.naver_ad import campaign_target_resolver, product_campaign_share
 
 log = logging.getLogger(__name__)
 
@@ -182,23 +182,29 @@ def campaign_product_ids(db: Session, campaign_id: str) -> list[str]:
 
 
 def product_campaign_counts(db: Session, campaign_ids: list[str]) -> dict[str, int]:
-    """상품별 "그 상품을 매핑한 auto_operate 캠페인 수"(리뷰 P2-3 이중계상 방어).
+    """주어진 캠페인들이 광고하는 상품별 "그 상품을 매핑한 **모든** 캠페인 수"
+    (리뷰 P2-3 이중계상 방어 + P2-1/P3-5 분모 통일).
 
-    한 상품이 auto_operate 캠페인 두 곳에 매핑돼 있으면 당일 매출을 양쪽에 100%씩 계상해
-    두 캠페인 모두 ROAS 게이트를 부당 통과한다. 보수적으로 캠페인 수만큼 균등 분할한다
-    (실제 기여 비율은 알 수 없다 — 추정 금지 원칙상 균등이 가장 정직한 보수 배분)."""
+    한 상품이 캠페인 두 곳에 매핑돼 있으면 당일 매출을 양쪽에 100%씩 계상해 두 캠페인 모두
+    ROAS 게이트를 부당 통과한다. 보수적으로 캠페인 수만큼 균등 분할한다(실제 기여 비율은
+    알 수 없다 — 추정 금지 원칙상 균등이 가장 정직한 보수 배분).
+
+    ★분모는 auto_operate 여부를 **보지 않는다**(2026-07-28 정정, product_campaign_share):
+    종전엔 auto_operate 캠페인만 셌는데, 같은 상품을 대행사·수동 캠페인이 함께 광고하면
+    그 몫이 분모에서 빠져 **자기 매출을 과대 계상**했다(증액이 부당 통과하는 방향). 분모는
+    조회 목적과 무관한 사실이어야 하고, 성과 뷰(today_proxy_revenue)도 같은 값을 쓴다.
+    ★동작 변화 방향은 보수화(분모 ≥ 종전 → 프록시 ROAS ≤ 종전 → 증액이 덜 열린다)다."""
     if not campaign_ids:
         return {}
-    rows = (
-        db.query(
-            NaverAdgroupProduct.mall_product_id,
-            sqlfunc.count(sqlfunc.distinct(NaverAdgroupProduct.campaign_id)),
-        )
+    pids = [
+        r[0]
+        for r in db.query(NaverAdgroupProduct.mall_product_id)
         .filter(NaverAdgroupProduct.campaign_id.in_(campaign_ids))
-        .group_by(NaverAdgroupProduct.mall_product_id)
+        .distinct()
         .all()
-    )
-    return {pid: int(n) for pid, n in rows if pid}
+        if r[0]
+    ]
+    return product_campaign_share.campaigns_per_product(db, pids)
 
 
 def today_proxy_revenue(
