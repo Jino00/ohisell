@@ -6,7 +6,7 @@
 - prod: alembic `f6a8c0b2d4e6`(head) · API 200 · 스케줄러 정상 · 에러 0 · 락 없음. Mac 페처 런타임 `install_local_runtime.sh` 갱신(사본 해시=repo 일치, M2 `childNodes` 마커 확인).
 - **부수 성과 — alembic 그래프 정상화**: revision ID 충돌 `a1c3e5f7b9d1`(서로 다른 두 마이그가 같은 ID, 그대로 배포했으면 prod 전 마이그가 `Duplicate revision`으로 정지) 발견·해소. promo-pnl을 **uuid4 `c2998cfe1f7c`**로 개명 + prod 선배포 3개 main 흡수 → **직렬 단일 체인**. safe_deploy 가드가 파일 전송 전 차단한 것이 발견 계기(구조 가드의 첫 실사고 방어).
 - 병합: #130·#132·#134·#135·#136·#137·#138 (#127은 #135가 흡수해 자동 종료). 최종 테스트 **3647 passed**(기존 cwd 의존 4 errors만 동반).
-- ⚠**잔여 부채**: codex 게이트 미이행(쿼터 2026-08-02 21:52 해제) — 오늘 것들은 Opus 독립 적대적 리뷰로 대체. 원칙19 사각지대 잔존.
+- **codex 게이트 = Jino 결정으로 스킵(2026-07-28 확정)**. 부채 아님 — 8/2 쿼터 해제 후 소급 리뷰 **불필요**. 이 스프린트의 교차검증은 **Opus 독립 적대적 리뷰**(로켓 2R·safe_deploy 2R, 미합의 0)로 갈음한다. 원칙19의 교차모델 사각지대는 남지만 **감수하기로 한 리스크**다.
 - 교훈: **LESSONS #49**(형제 마이그·미푸시 워크트리 확인 절차) · **#50**(alembic revision ID를 손으로 짓지 말 것 — `alembic revision` 또는 `uuid4().hex[:12]`).
 
 ## 🟡 로켓 1P M1 — 마이그레이션 prod 적용 완료 / 코드 배포만 CAS 대기 (2026-07-28 12:10) — ★N1 세션이 12:1x main 병합으로 해소(아래 N1 배포 완료 블록 참조, e1f659e가 main 조상 편입)
@@ -36,7 +36,7 @@
 - **수정**(커밋 `412042e`): ①페처 두 추출기를 공용 `_CELL_HELPERS_JS`로 통일 — 자손 텍스트노드 명시적 `' '` 조인(ul>li·div·a·button 전부), ★`<br>`은 비분리자(헤더 `상품<br>번호` 토큰 계약 보존, 아니면 rows=[] 무성 전손), 표 선택은 `noWs()`로 공백 무시. ②파서 `_split_barcode_name` — 판정 기준은 "공백 유무"가 아니라 **"선두 토큰이 바코드꼴인가"**(상품명 자체에 공백 있음). ③정산 헤더 매핑 공백 무시 + `_to_int/_to_dec/_to_date` 공백 복구(조용한 0 방지). ④신규 `tools/verify_rocket_dom_extract.py`(브라우저 실증 하니스 — 백엔드 스위트는 브라우저를 띄우지 않는 방침).
 - **라이브 증거(원칙22)**: ①라이브 정산 마크업(CDP **9225** supplier 세션, 기록 샘플과 동일 URL 재fetch·읽기전용) 수정 전(ddb2c02)·후 **11행 셀 단위 완전 일치** = 회귀 0. 기록 `20_..json`과의 차이는 전부 데이터 변동(신규 계산서 2건 06-17 유입으로 page1 뒤 2건이 page2로 밀림 + 30025494 확정일 `-`→`2026-06-18`). ②ref20b 발주상세: 원본 == `_PO_DETAIL_ROWS` 13행, **태그 사이 공백 전부 제거한 HTML도 동일 rows**(공백 독립성). ③테스트 **3515 passed**.
 - **배포**: `tools/install_local_runtime.sh` — `~/.ohisell/tools/rocket_supplier_fetcher.py` byte-identical, `com.ohisell.rocket` pid 20786→44099. 실행 전 나머지 4종이 워크트리와 동일함을 확인(미푸시 형제 브랜치 다운그레이드 0). **백엔드 파서는 prod 미배포** — 이 트랙 백엔드 자체가 미배포·alembic `f6a8c0b2d4e6` 미적용이라 순서가 깨진다(컬럼 없는 DB에 코드만 올리면 ingest 전체 침묵). 페처 신버전은 현행 마크업에서 구 파서와 동일 rows라 이 비대칭은 안전.
-- **codex 게이트 면제** — Jino 판단(07-28, 원문 "이번건은 codex review를 건너뛰어줘"). M1의 codex 부채(쿼터 08-02 해제)는 유효.
+- **codex 게이트 면제** — Jino 판단(07-28, 원문 "이번건은 codex review를 건너뛰어줘"). ★**M1도 동일하게 스킵 확정**(07-28 12:22 Jino 재확인) — 로켓 1P M1/M2 모두 codex 부채 없음, 08-02 소급 리뷰 불필요.
 - **종결(2026-07-28 12:20 실측)**: ①**PR #137 병합 완료**(main `a99bdbf`) ②**revision ID 충돌 해소됨** — 병행 세션 `claude/alembic-graph-reconcile`이 promo-pnl을 `a1c3e5f7b9d1`→`c2998cfe1f7c`로 개명·재부모 → 단일 head `f6a8c0b2d4e6`(prod 적용 완료·promo 테이블 5종 실존) ③**prod 배포 완료** — 병행 세션 `claude/final-deploy`가 `c9d6aae`(M2 포함)로 3파일 배포+재시작(12:13:52), prod 파서에 `_split_barcode_name` 라이브·백엔드 12:13:53 재기동. ★내가 실행하려던 '권고 복구 순서'는 그 사이 **stale**해졌고(prod가 이미 f6a8c0b2d4e6 적용), models.py 배포는 **safe_deploy CAS가 차단**해 병행 세션의 N1 컬럼 clobber를 막았다(가드 2번째 실사고 방어).
 ## 최신 상태 (2026-07-28 11:10, 워크트리 cool-driscoll-31712d) — 로켓 1P 파서 누락 컬럼 2건 복원, PR #130 오픈(미병합·미배포)
 - **PR #130** https://github.com/Jino00/ohisell/pull/130 — 트랙 `track_coupang-rocket-1p.md` M1(유지보수). 커밋 `85967cf`→`e3da1f6`→`39c1c39`(코드)+`a386614`·`ddb2c02`(문서).
