@@ -90,6 +90,49 @@ _FETCH_TEXT_JS = """async (args) => {
   } finally { clearTimeout(t); }
 }"""
 
+# ── 셀 텍스트 추출 헬퍼 (정산·발주상세 두 추출기 공용 — 구현이 갈라지지 않게 한 곳에서만 정의)
+# ★요소 사이 공백을 마크업 들여쓰기에 의존하지 않는다(2026-07-28 리뷰 지적).
+#   DOMParser 문서는 **렌더링되지 않아** innerText가 textContent로 떨어지고, textContent는
+#   요소 경계에 공백을 넣지 않는다: <li>바코드</li><li>상품명</li> → "바코드상품명".
+#   지금 셀 안에 공백이 있는 것은 순전히 쿠팡 SSR 마크업의 들여쓰기 덕분이며, 쿠팡이 HTML을
+#   미니파이하면 사라진다. 그러면 파서가 조용히 오염된다(발주상세 barcode/상품명 분리 실패 →
+#   인덱스 걸린 barcode 컬럼에 상품명까지 들어감 / 정산 전송상태 토큰 붙음).
+#   → 자손 **텍스트노드**를 모아 명시적으로 ' '로 조인한다(깊이 무관: ul>li·div·a 전부 커버).
+# ★단 <br>은 분리자로 취급하지 않는다(공백 없이 붙인다):
+#   헤더가 '상품<br>번호'·'세액<br>부가세'로 조립돼 있어(ref20b §2 실측) 공백을 넣으면
+#   '상품번호' 토큰 매칭이 깨져 표 선택이 실패하고(rows=[] 무성 전손), 백엔드 위치 기반
+#   파서의 헤더 fixture도 전부 달라진다. textContent와 동일하게 붙여 현행 계약을 보존한다.
+_CELL_HELPERS_JS = r"""
+      const cellText = (el) => {
+        const parts = [];
+        let glue = false;                       // 직전 경계가 <br> = 앞 조각에 붙인다
+        const walk = (node) => {
+          for (const c of node.childNodes) {
+            if (c.nodeType === 3) {             // 텍스트노드
+              const raw = c.textContent || '';
+              const t = raw.trim();
+              if (!t) { if (raw) glue = false; continue; }  // 공백뿐 = textContent도 공백을 주던 자리
+              if (glue && parts.length) parts[parts.length - 1] += t;
+              else parts.push(t);
+              glue = false;
+              continue;
+            }
+            if (c.nodeType !== 1) continue;     // 주석 등 무시
+            const tag = c.tagName;
+            if (tag === 'SCRIPT' || tag === 'STYLE') continue;  // 화면에 안 나오는 내용
+            if (tag === 'BR') { glue = true; continue; }        // 분리자 아님(헤더 토큰 계약 보존)
+            walk(c);
+          }
+        };
+        walk(el);
+        return parts.join(' ').replace(/\s+/g, ' ').trim();
+      };
+      const tableRows = (tb) => [...tb.querySelectorAll('tr')].map(
+        tr => [...tr.querySelectorAll('td,th')].map(cellText));
+      // 표 선택용 토큰 매칭은 공백을 무시한다 — 마크업 드리프트로 토큰이 쪼개져도 표를 놓치지 않게.
+      const noWs = (s) => String(s == null ? '' : s).replace(/\s+/g, '');
+"""
+
 # 정산 SSR HTML GET — fetch한 HTML을 DOMParser로 파싱해 '계산서번호' 헤더를 가진 <table> rows를
 # 추출(헤더+데이터, 셀 텍스트 배열). 네비게이션 없이 fetch만(Akamai 재챌린지 회피).
 # 인자=[path]. 반환 {status, rows:[[셀...],...], looksLogin}.
@@ -105,12 +148,12 @@ _FETCH_SETTLEMENT_JS = r"""async (args) => {
                        (lower.includes('password') || lower.includes('passport'));
     let rows = [];
     try {
+      __CELL_HELPERS__
       const doc = new DOMParser().parseFromString(html, 'text/html');
       const tables = [...doc.querySelectorAll('table')];
       for (const tb of tables) {
-        const trs = [...tb.querySelectorAll('tr')].map(tr =>
-          [...tr.querySelectorAll('td,th')].map(td => td.innerText.trim().replace(/\s+/g, ' ')));
-        if (trs.length && trs[0].some(c => c.indexOf('계산서번호') >= 0)) {
+        const trs = tableRows(tb);
+        if (trs.length && trs[0].some(c => noWs(c).indexOf('계산서번호') >= 0)) {
           rows = trs;
           break;
         }
@@ -118,7 +161,7 @@ _FETCH_SETTLEMENT_JS = r"""async (args) => {
     } catch (e) { /* 파싱 실패 시 rows=[] */ }
     return { status: r.status, rows, looksLogin };
   } finally { clearTimeout(t); }
-}"""
+}""".replace("__CELL_HELPERS__", _CELL_HELPERS_JS)
 
 # 발주상세 SSR HTML GET(S4.5a) — fetch한 HTML을 DOMParser로 파싱해 per-SKU <table>(헤더에
 # '상품번호'·'발주금액'·'매입가' 토큰을 모두 가진 표=ref20b Table[7])의 rows를 추출. 인덱스 대신
@@ -135,12 +178,12 @@ _FETCH_PO_DETAIL_JS = r"""async (args) => {
                        (lower.includes('password') || lower.includes('passport'));
     let rows = [];
     try {
+      __CELL_HELPERS__
       const doc = new DOMParser().parseFromString(html, 'text/html');
       const tables = [...doc.querySelectorAll('table')];
       for (const tb of tables) {
-        const trs = [...tb.querySelectorAll('tr')].map(tr =>
-          [...tr.querySelectorAll('td,th')].map(td => td.innerText.trim().replace(/\s+/g, ' ')));
-        const flat = trs.flat().join('|');
+        const trs = tableRows(tb);
+        const flat = trs.flat().map(noWs).join('|');
         if (flat.indexOf('상품번호') >= 0 && flat.indexOf('발주금액') >= 0 && flat.indexOf('매입가') >= 0) {
           rows = trs;
           break;
@@ -149,7 +192,7 @@ _FETCH_PO_DETAIL_JS = r"""async (args) => {
     } catch (e) { /* 파싱 실패 시 rows=[] */ }
     return { status: r.status, rows, looksLogin };
   } finally { clearTimeout(t); }
-}"""
+}""".replace("__CELL_HELPERS__", _CELL_HELPERS_JS)
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -752,9 +795,9 @@ def _settle_query(cfg: dict, page_no: int) -> str:
 
 
 def _invoice_idx(header: list) -> int:
-    """헤더에서 '계산서번호' 컬럼 인덱스(없으면 -1)."""
+    """헤더에서 '계산서번호' 컬럼 인덱스(없으면 -1). 공백 무시(마크업이 토큰을 쪼개도 찾는다)."""
     for i, c in enumerate(header):
-        if "계산서번호" in str(c):
+        if "계산서번호" in re.sub(r"\s+", "", str(c)):
             return i
     return -1
 

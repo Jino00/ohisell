@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -169,6 +170,29 @@ def test_parse_settlement_header_order_independent():
     assert recs[0]["invoice_seq"] == 30025494
     assert recs[0]["payment_amount"] == Decimal("561900")
     assert recs[0]["supply_amount"] == Decimal("510819")
+
+def test_parse_settlement_header_whitespace_variants():
+    # ★페처 셀 추출이 요소 경계마다 공백을 넣으므로(fetcher _CELL_HELPERS_JS) 쿠팡이 헤더를
+    #   인라인 요소로 쪼개면 공백만 다른 변형이 온다 → 컬럼이 조용히 사라지면 안 된다.
+    header = ["계 산 서 번 호", "세금계산서확정일", "1차지급액", "지급예정금액"]
+    rows = [header, ["30025494", "2026-06-16", "0", "561,900"]]
+    recs = rs.parse_settlement_rows(rows)
+    assert len(recs) == 1
+    assert recs[0]["invoice_seq"] == 30025494
+    assert recs[0]["tax_invoice_confirmed_date"] == date(2026, 6, 16)  # 헤더 공백 변형에도 매핑
+    assert recs[0]["payment_amount"] == Decimal("561900")
+
+
+def test_settlement_money_survives_stray_space():
+    # 숫자 셀에 공백이 끼어들어도(요소로 쪼개진 금액) 조용한 0이 되지 않는다
+    rows = [["계산서번호", "공급가액", "작성일자"], ["30025494", "510 819", "2026-06 -16"]]
+    recs = rs.parse_settlement_rows(rows)
+    assert recs[0]["supply_amount"] == Decimal("510819")
+    assert recs[0]["issue_date"] == date(2026, 6, 16)
+    # 숫자꼴이 아닌 문자열은 건드리지 않는다(쓰레기를 몰래 뭉개지 않음)
+    assert rs._to_dec("발주현황 입고상세내역") == Decimal(0)
+    assert rs._to_int("510 819") == 510819
+
 
 def test_parse_settlement_header_only():
     assert rs.parse_settlement_rows([_SETTLE_HEADER]) == []
@@ -397,11 +421,96 @@ def test_parse_po_items_total_qty_matches_summary():
     assert sum(it["order_qty"] for it in items) == 93
 
 
+def test_parse_po_items_glued_barcode_name(caplog):
+    # ★공백 소실 폴백: 셀 안 공백이 사라져도 바코드 컬럼(인덱스 걸림)에 상품명이 섞이지 않는다.
+    #   근본 수정은 페처 쪽(_CELL_HELPERS_JS)이고 이건 그 뒤의 안전망 — 조용히 오염되지 않는지만 본다.
+    glued = [
+        ["1", "37350957", "8809465525057오하이 지문방지 풀커버", "일반매입 과세",
+         "1", "1", "12,000", "10,909", "1,091", "12,000", "10,909", "1,091", ""],
+        ["2", "63408012", "R237867070002오하이 일미리 맥세이프", "직매입 과세",
+         "2", "2", "10,080", "9,164", "916", "20,160", "18,328", "1,832", ""],
+    ]
+    with caplog.at_level("WARNING"):
+        items = rs.parse_po_item_rows(glued)
+    assert [it["barcode"] for it in items] == ["8809465525057", "R237867070002"]
+    assert items[0]["product_name"] == "오하이 지문방지 풀커버"
+    assert items[1]["product_name"] == "오하이 일미리 맥세이프"
+    # 소리내어 남긴다 — 다만 종류당 1줄(발주 다수 × SKU 80건 로그 폭주 방지)
+    warned = [r.getMessage() for r in caplog.records if "공백 소실" in r.getMessage()]
+    assert len(warned) == 1
+
+
+def test_parse_po_items_unsplittable_barcode_warns(caplog):
+    # 바코드꼴 선두 토큰이 없으면 **추측하지 않는다** — 현행 동작(전체를 barcode) + 경고
+    row = [["1", "37350957", "ABC오하이지문방지", "일반매입 과세",
+            "1", "1", "12,000", "10,909", "1,091", "12,000", "10,909", "1,091", ""]]
+    with caplog.at_level("WARNING"):
+        it = rs.parse_po_item_rows(row)[0]
+    assert it["barcode"] == "ABC오하이지문방지"
+    assert it["product_name"] is None
+    assert any("분리 불가" in r.getMessage() for r in caplog.records)
+
+
+def test_parse_po_items_barcode_only_cell_is_not_an_anomaly(caplog):
+    # 상품명 없이 바코드만 있는 셀은 정상 입력 — 경고 없이 name=None
+    row = [["1", "37350957", "8809465525057", "일반매입 과세",
+            "1", "1", "12,000", "10,909", "1,091", "12,000", "10,909", "1,091", ""]]
+    with caplog.at_level("WARNING"):
+        it = rs.parse_po_item_rows(row)[0]
+    assert (it["barcode"], it["product_name"]) == ("8809465525057", None)
+    assert not [r for r in caplog.records if "바코드" in r.getMessage()]
+
+
 def test_parse_po_items_empty_and_garbage():
     assert rs.parse_po_item_rows([]) == []
     assert rs.parse_po_item_rows([["합계", "93"], ["", ""]]) == []
     # 상품번호가 숫자 아닌 행은 스킵(헤더 방어)
     assert rs.parse_po_item_rows([["1", "ABC", "x", "y", "1", "1", "1", "1", "1", "1", "1", "1", ""]]) == []
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 페처 DOM 추출 JS 자체의 계약 (tools/rocket_supplier_fetcher.py)
+# ═══════════════════════════════════════════════════════════════════
+# 위 fixture들은 "페처가 뽑아준 rows"를 입력으로 받는다 — 그 rows를 만드는 JS가 조용히 달라지면
+# 파서 테스트는 전부 green인데 데이터가 오염된다(2026-07-28 리뷰 지적: DOMParser 문서는 렌더링되지
+# 않아 innerText=textContent, textContent는 요소 사이에 공백을 넣지 않는다).
+# → 실제 증거 HTML(ref20b)을 실제 브라우저에서 실제 추출 함수로 돌려 fixture와 대조한다.
+def _fetcher_js() -> dict:
+    """tools/rocket_supplier_fetcher.py의 JS 상수만 추출(모듈 import 부작용 없이 — 로깅·락 회피)."""
+    import ast
+    src = (_REPO_ROOT / "tools" / "rocket_supplier_fetcher.py").read_text(encoding="utf-8")
+    want = {"_CELL_HELPERS_JS", "_FETCH_SETTLEMENT_JS", "_FETCH_PO_DETAIL_JS"}
+    ns: dict = {}
+    for node in ast.parse(src).body:
+        if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id in want for t in node.targets):
+            exec(compile(ast.Module(body=[node], type_ignores=[]), "<fetcher-js>", "exec"), ns)
+    missing = want - set(ns)
+    if missing:
+        pytest.fail(f"페처에서 JS 상수를 찾지 못했다(이름이 바뀌었나?): {missing}")
+    return ns
+
+
+def test_fetcher_cell_extraction_never_relies_on_markup_whitespace():
+    """★두 추출기가 공용 헬퍼(명시적 공백 조인)를 쓰고 innerText로 되돌아가지 않는지 소스로 고정.
+
+    실동작(회귀 0 + 공백 독립성)은 브라우저가 필요해 이 스위트에서 검증하지 않는다
+    (test_fetcher_button_only_chrome.py의 방침: 테스트는 브라우저를 띄우지 않는다).
+      → 실증 하니스: `python3 tools/verify_rocket_dom_extract.py`
+        (ref20b 원본/미니파이 HTML을 실제 Chromium에서 실제 추출 함수로 돌려 _PO_DETAIL_ROWS와 대조)
+    여기서는 '조용히 옛 패턴으로 돌아가는 것'만 막는다.
+    """
+    js = _fetcher_js()
+    for name in ("_FETCH_SETTLEMENT_JS", "_FETCH_PO_DETAIL_JS"):
+        src = js[name]
+        # innerText = DOMParser 문서에서 textContent로 떨어져 요소 사이 공백을 보장하지 못한다
+        assert "innerText" not in src, f"{name}: innerText 회귀(요소 사이 공백 미보장)"
+        assert "tableRows(" in src, f"{name}: 공용 셀 추출 헬퍼를 쓰지 않는다"
+        assert "cellText" in src, f"{name}: 공용 셀 추출 헬퍼가 인라인되지 않았다"
+        # 표 선택 토큰 매칭은 공백 무시로 — 정산은 noWs(c), 발주상세는 .map(noWs)
+        assert re.search(r"noWs[(\)]|\(noWs\)", src), f"{name}: 표 선택 토큰 매칭이 공백에 민감하다"
+    # <br>은 분리자가 아니어야 한다(헤더 '상품<br>번호'·'세액<br>부가세' 토큰 계약)
+    assert "'BR'" in js["_CELL_HELPERS_JS"]
 
 
 # ═══ 발주상세 ingest Harness (snapshot replace) ═══
