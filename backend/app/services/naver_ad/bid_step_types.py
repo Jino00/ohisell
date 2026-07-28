@@ -88,6 +88,28 @@ APPROVAL_SOURCE_COLD = "cold_op"
 # 시점 라이브 bid면 fail-closed 중단) 대상이다(PLAN §2 R1·R2, codex 엣지·P1-5).
 RANK_STEP_TYPES: frozenset[str] = frozenset({"bid_up_servo", "bid_up_rank"})
 
+# 반응곡선(bid_rank_curve) 학습 원료 타입 — "Δ입찰 → Δ순위" 관측쌍으로 삼을 실집행 스텝.
+# ★왜 RANK_STEP_TYPES를 재사용하면 안 되는가(2026-07-28 실측 사고): bid_rank_curve.
+#   build_observations가 원료 필터로 RANK_STEP_TYPES를 쓰고 있었는데, 그 셋의 의미는 "스톱로스
+#   base를 current_bid로 스위치 + harness 신선도/TOCTOU 기계 적용 대상"이지 "곡선 학습 표본"이
+#   아니다. 서로 다른 세 의미가 한 셋에 얹혀 있었고, 그 결과 prod에서
+#     · `bid_up_servo`·`bid_up_rank` = 역사상 실집행 **0건**(원료로 인정되지만 존재하지 않음)
+#     · 실제 219건 실집행된 `bid_up_explore` + 평시 주력 `bid_up`·`growth_bid_up` = **원료에서 제외**
+#   가 되어 NaverLearningState(metric="bid_rank_slope")가 **0행**이었다. 원료가 없으니
+#   rank_servo는 항상 콜드스타트 상수(_COLD_START_SLOPE)로 폴백하고, EX의 marginal_stop 판정과
+#   D-NAO-89 deep 예외(③bid_rank_slope 프라이어 존재)도 프라이어 부재로 함께 휴면했다.
+#   → 곡선 원료라는 **세 번째 의미를 이 셋으로 분리**한다. RANK_STEP_TYPES는 가드레일/TOCTOU
+#     의미 그대로 두므로 탐색·콜드에 신선도·base_bid TOCTOU 기계가 딸려 들어가지 않는다
+#     (그 기계는 estimate 기반 순위 스텝 전용 — 위 BID_UP_TYPES 주석의 "rank-step 아님" 계약 보존).
+# 곡선이 재는 것은 경매의 물리량(입찰을 올리면 순위가 얼마나 오르는가)이고, **스텝의 동기(서보·
+# 탐색·육성·콜드)는 그 물리량과 무관**하다. 따라서 성공 실집행된 상향 스텝은 전부 표본이다.
+# BID_UP_TYPES 별칭인 이유: 앞으로 새 UP 타입이 생기면 곡선 원료에도 자동 편입되는 것이 옳은
+# 기본값이다(이번 사고가 정확히 "새 타입을 일부 셋에만 등록"해서 생긴 부분등록 누락이다).
+# ★하향(bid_down)은 아직 제외: 부호가 반대인 사분면(Δbid<0 ∧ 순위 악화)이라 _fit_slope의 유효쌍
+#   정의(개선폭>0 ∧ Δbid>0)를 함께 넓혀야 하고, 인하 시 순위 반응이 상향과 대칭이라는 근거가
+#   아직 없다(경매 히스테리시스). 표본을 2배로 늘릴 후보이나 별도 검증 후 편입한다.
+CURVE_SAMPLE_TYPES: frozenset[str] = BID_UP_TYPES
+
 
 # ── rank-step TOCTOU 방어용 base_bid 마커(PLAN §2 R2 point6, codex P1-5) ──
 # 제안 시점 current_bid(스텝 산정 기준가)를 expected_effect 텍스트에 기계판독 마커로 실어 보낸다.

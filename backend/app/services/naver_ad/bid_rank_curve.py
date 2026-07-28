@@ -1,5 +1,5 @@
 # bid_rank_curve.py — 입찰→순위 반응 곡선 학습 SA (스프린트 IU-R R3, D-NAO-67 원리③).
-#   역할(SA·순수 집계): NaverChangeLog(rank-step 실집행) × NaverKeywordHourly(변경 전/후 완결
+#   역할(SA·순수 집계): NaverChangeLog(상향 스텝 실집행 = CURVE_SAMPLE_TYPES) × NaverKeywordHourly(변경 전/후 완결
 #   버킷 순위)를 조인해 유닛별 (입찰변경→순위개선) 관측쌍을 만들고, 기울기(원/rank개선 1.0,
 #   양수)를 적합해 NaverLearningState(scope="entity", metric="bid_rank_slope")에 저장한다.
 #   서보(rank_servo)가 이 기울기를 response_prior로 소비해 콜드스타트 대신 "한 단 위 필요
@@ -42,7 +42,7 @@ from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
 from app.models import NaverChangeLog, NaverKeywordHourly, NaverLearningState, NaverProposal
-from app.services.naver_ad.bid_step_types import RANK_STEP_TYPES
+from app.services.naver_ad.bid_step_types import CURVE_SAMPLE_TYPES
 from app.services.naver_ad.naver_execution_harness import WRITE_FAILURE_MARKER
 from app.utils.kst import kst_today
 
@@ -180,8 +180,14 @@ def build_observations(db: Session, *, today: date) -> dict:
     window_end = datetime(today.year, today.month, today.day)  # 오늘 00:00(KST naive) — D-1까지만
     window_start = window_end - timedelta(days=_LOOKBACK_DAYS)
 
-    # rank-step 실집행 원료 — proposal join으로 proposal_type ∈ RANK_STEP_TYPES 필터(change_log엔
+    # 상향 스텝 실집행 원료 — proposal join으로 proposal_type ∈ CURVE_SAMPLE_TYPES 필터(change_log엔
     # proposal_type 컬럼이 없어 proposal_id로 조인). 성공 실쓰기만(dry_run=False ∧ after_value 존재).
+    # ★2026-07-28 정정: 종전엔 RANK_STEP_TYPES(={bid_up_servo, bid_up_rank})로 걸렀는데 그 둘은
+    #   prod 실집행 0건이고, 실제로 실행된 bid_up_explore(219건)·bid_up·growth_bid_up이 전부 원료
+    #   밖이라 slope가 0행이었다. 필터 의미를 "가드레일 rank-step"이 아니라 "곡선 표본"으로 분리
+    #   (bid_step_types.CURVE_SAMPLE_TYPES 주석 참조). 조인 버킷·오염·실패 배제 규칙은 불변 —
+    #   넓어진 것은 원료 타입 하나뿐이고, 관측쌍 품질 게이트(±버킷 존재·비오염·유효쌍 ≥ _MIN_PAIRS)는
+    #   그대로라 표본이 늘어도 무근거 slope가 생기지는 않는다.
     rows = (
         db.query(NaverChangeLog, NaverProposal.proposal_type)
         .join(NaverProposal, NaverChangeLog.proposal_id == NaverProposal.id)
@@ -191,7 +197,7 @@ def build_observations(db: Session, *, today: date) -> dict:
             NaverChangeLog.after_value.isnot(None),
             NaverChangeLog.changed_at >= window_start,
             NaverChangeLog.changed_at < window_end,
-            NaverProposal.proposal_type.in_(tuple(RANK_STEP_TYPES)),
+            NaverProposal.proposal_type.in_(tuple(CURVE_SAMPLE_TYPES)),
         )
         .all()
     )
