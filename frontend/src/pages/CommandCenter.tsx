@@ -17,6 +17,8 @@ import {
   fetchRocketCostMap,
   upsertRocketCostMap,
   deleteRocketCostMap,
+  fetchRocketPromoPnl,
+  patchPromotionManual,
   syncRealtime,
   type OverviewResponse,
   type RevenueReconcile,
@@ -24,6 +26,8 @@ import {
   type RocketOverview,
   type RocketUnmappedItem,
   type RocketMappingItem,
+  type PromoPnlResponse,
+  type PromoPnlCard,
 } from "../lib/api";
 
 function isoKST(d: Date): string {
@@ -1334,6 +1338,364 @@ function RocketView({
           </div>
         </>
       )}
+
+      {/* 프로모션 손익 레이어 (트랙 coupang-promo-pnl Phase 2) — data 유무와 무관하게 항상 렌더:
+          신선도·구독 경고는 로켓 조망이 비어 있을 때도 보여야 한다(그때가 더 위험하다). */}
+      <PromoPnlBlock />
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════
+// 프로모션 손익 블록 (트랙 coupang-promo-pnl Phase 2)
+// ──────────────────────────────────────────────────────────────────
+// ★null = **모름**이다. 0으로 렌더하면 "광고비 0원 → 흑자"가 조용히 태어난다(원칙22).
+//   미상은 전부 "—"로 두고, 사유(blockers·unresolved_reasons)를 함께 보여준다.
+// ★기간 셀렉터를 두지 않는다: 창은 사용자가 고르는 게 아니라 프로모션 행사기간이 정한다.
+// ══════════════════════════════════════════════════════════════════
+function PromoPnlBlock() {
+  const [data, setData] = useState<PromoPnlResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [open, setOpen] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [editing, setEditing] = useState<Record<string, { disc: string; skus: string }>>({});
+  const [saving, setSaving] = useState<string | null>(null);
+
+  function load() {
+    setLoading(true);
+    setErr(null);
+    fetchRocketPromoPnl(20)
+      .then((d) => {
+        setData(d);
+        // 입력 칸 초기값을 서버 값으로 채운다(수기값이 화면에서 지워져 보이지 않도록).
+        const init: Record<string, { disc: string; skus: string }> = {};
+        for (const p of d.promotions) {
+          init[p.request_id] = {
+            disc: p.unit_discount_amount != null ? String(Number(p.unit_discount_amount)) : "",
+            skus: (p.target_sku_ids || []).join(", "),
+          };
+        }
+        setEditing(init);
+      })
+      .catch((e) => setErr(e.message))
+      .finally(() => setLoading(false));
+  }
+
+  function toggle() {
+    const next = !open;
+    setOpen(next);
+    if (next && !loaded) { setLoaded(true); load(); }
+  }
+
+  async function save(requestId: string) {
+    const e = editing[requestId];
+    if (!e) return;
+    setSaving(requestId);
+    setMsg(null);
+    try {
+      const discRaw = e.disc.trim();
+      const skus = e.skus.split(",").map((s) => s.trim()).filter(Boolean);
+      await patchPromotionManual(requestId, {
+        // 빈 칸 = '모름'으로 되돌림(0원 할인과 구분 — 백엔드가 null을 그렇게 해석한다).
+        unit_discount_amount: discRaw === "" ? null : discRaw,
+        target_sku_ids: skus,
+      });
+      setMsg(`✅ ${requestId} 저장`);
+      load();
+      setTimeout(() => setMsg(null), 4000);
+    } catch (ex: any) {
+      setMsg("❌ 저장 실패: " + (ex?.message || ""));
+    } finally {
+      setSaving(null);
+    }
+  }
+
+  const fr = data?.freshness;
+  const sub = fr?.subscription;
+
+  return (
+    <div className="mt-6 border-t border-gray-200 pt-4">
+      <button
+        onClick={toggle}
+        className="w-full flex items-center justify-between px-3 py-2 bg-purple-50 border border-purple-200 rounded-lg hover:bg-purple-100"
+      >
+        <span className="text-sm font-semibold text-purple-800">
+          🏷 프로모션 손익 — 진짜 BEP ROAS (셀러 부담 즉시할인)
+        </span>
+        <span className="text-xs text-purple-600">{open ? "접기 ▲" : "펼치기 ▼"}</span>
+      </button>
+
+      {open && (
+        <div className="mt-3">
+          {loading && <div className="text-sm text-gray-500 p-3">불러오는 중…</div>}
+          {err && (
+            <div className="text-xs text-red-700 bg-red-50 border border-red-200 rounded px-2 py-1 mb-3">
+              손익 조회 실패: {err} — prod 미배포 상태면 404가 납니다(Phase 1 배포 선행 필요).
+            </div>
+          )}
+          {msg && (
+            <div className="text-xs text-purple-700 bg-purple-50 border border-purple-200 rounded px-2 py-1 mb-3">{msg}</div>
+          )}
+
+          {/* ② 구독 체험 종료 경고 (D-CPP-5) — 끊기면 판매분석이 조용히 멈춘다 */}
+          {sub && (sub.warn || sub.expired) && (
+            <div className={`rounded-lg border p-3 mb-3 text-xs ${sub.expired ? "bg-red-50 border-red-300 text-red-800" : "bg-amber-50 border-amber-300 text-amber-800"}`}>
+              <div className="font-semibold">
+                {sub.expired
+                  ? `⛔ 판매분석 무료체험 종료됨 (${sub.free_trial_end}) — 수집이 조용히 멈출 수 있습니다`
+                  : `⚠️ 판매분석 무료체험 종료 D-${sub.days_left} (${sub.free_trial_end})`}
+              </div>
+              <div className="mt-0.5 text-gray-600">{sub.basis}</div>
+            </div>
+          )}
+
+          {/* ① 판매분석 유효구간 내 결손 배너 — 창 밖으로 밀리기 전에만 메울 수 있다 */}
+          {fr && fr.missing_count > 0 && (
+            <div className="rounded-lg border p-3 mb-3 text-xs bg-amber-50 border-amber-200 text-amber-800">
+              <div className="font-semibold mb-1">
+                📉 판매분석 결손 {fr.missing_count}일 / 유효구간 {fr.window.from}~{fr.window.to}
+                {fr.urgent_count > 0 && ` — ⚠ ${fr.urgent_count}일이 7일 내 만료`}
+              </div>
+              <div className="text-gray-700">
+                최신 수집일 <b>{fr.latest_date || "—"}</b>
+                {fr.stale_days != null && fr.stale_days > 0 && (
+                  <span className="text-amber-700"> (어제 대비 {fr.stale_days}일 뒤처짐)</span>
+                )}
+              </div>
+              <div className="mt-1 text-gray-600">
+                만료 임박:{" "}
+                {fr.missing_dates.slice(0, 10).map((m) => (
+                  <span key={m.date} className={`inline-block mr-1.5 px-1 rounded ${m.days_until_expiry <= 7 ? "bg-amber-200" : "bg-gray-100"}`}>
+                    {m.date}(D-{m.days_until_expiry})
+                  </span>
+                ))}
+                {fr.missing_dates.length > 10 && <span>… 외 {fr.missing_dates.length - 10}일</span>}
+              </div>
+              <p className="mt-1 text-amber-700">
+                롤링 창을 벗어난 날짜는 영원히 못 채웁니다. 위 '로켓 갱신'으로 재수집하세요.
+              </p>
+            </div>
+          )}
+
+          {data && data.promotion_count === 0 && !loading && (
+            <div className="text-sm text-gray-500 bg-gray-50 border border-gray-200 rounded-lg p-4">
+              수집된 프로모션이 없습니다.
+            </div>
+          )}
+
+          {data?.promotions.map((p) => (
+            <PromoCard
+              key={p.request_id}
+              p={p}
+              edit={editing[p.request_id] || { disc: "", skus: "" }}
+              onEdit={(v) => setEditing((s) => ({ ...s, [p.request_id]: v }))}
+              onSave={() => save(p.request_id)}
+              saving={saving === p.request_id}
+            />
+          ))}
+
+          {/* RG(2P) 쿠폰 — 나열 수준(used_amount 원천 미확정, 계획서 §3) */}
+          {data && data.rg_coupons.count > 0 && (
+            <div className="mt-4 bg-white border border-gray-200 rounded-lg p-3">
+              <div className="text-sm font-semibold text-gray-700 mb-1">
+                🎟 RG(2P) 즉시할인 쿠폰 {data.rg_coupons.count}건
+                {data.rg_coupons.pending_count > 0 && (
+                  <span className="ml-2 text-xs text-amber-700">
+                    · 사용금액 미수집 {data.rg_coupons.pending_count}건
+                  </span>
+                )}
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-left text-gray-500 border-b border-gray-200">
+                      <th className="py-1 pr-2">쿠폰</th>
+                      <th className="py-1 pr-2">기간</th>
+                      <th className="py-1 pr-2">상태</th>
+                      <th className="py-1 pr-2 text-right">옵션</th>
+                      <th className="py-1 pr-2 text-right">사용 금액(우리 부담)</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.rg_coupons.coupons.map((c) => (
+                      <tr key={c.account_key + c.coupon_id} className="border-b border-gray-50">
+                        <td className="py-1.5 pr-2 text-gray-700">
+                          {c.promotion_name || c.coupon_id}
+                          <span className="ml-1 text-gray-400 font-mono">{c.coupon_id}</span>
+                        </td>
+                        <td className="py-1.5 pr-2 text-gray-500">
+                          {(c.start_at || "").slice(0, 10)}~{(c.end_at || "").slice(0, 10)}
+                        </td>
+                        <td className="py-1.5 pr-2 text-gray-500">{c.status || "—"}</td>
+                        <td className="py-1.5 pr-2 text-right text-gray-500">{c.option_count}</td>
+                        <td className="py-1.5 pr-2 text-right">
+                          {c.used_amount_pending ? (
+                            <span className="text-amber-700">미수집</span>
+                          ) : (
+                            <b>{won(c.used_amount)}</b>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <p className="mt-1 text-xs text-gray-500">{data.rg_coupons.note}</p>
+            </div>
+          )}
+
+          {data && <p className="mt-3 text-xs text-gray-400">{data.accounting_note}</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PromoCard({
+  p, edit, onEdit, onSave, saving,
+}: {
+  p: PromoPnlCard;
+  edit: { disc: string; skus: string };
+  onEdit: (v: { disc: string; skus: string }) => void;
+  onSave: () => void;
+  saving: boolean;
+}) {
+  const t = p.totals;
+  // ★BEP 광고비 vs 실광고비. 실광고비가 미상이면(옵션 귀속 불가) 계정 전체를 상한으로 비교한다.
+  const adKnown = !!p.ad?.available;
+  const adShown = adKnown ? p.ad!.attributed : p.ad?.account_window_spend ?? null;
+  const overBep =
+    t?.bep_ad_spend != null && adShown != null && Number(adShown) > Number(t.bep_ad_spend);
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-lg p-3 mb-3">
+      <div className="flex items-start justify-between gap-2 mb-2">
+        <div>
+          <span className="text-sm font-semibold text-gray-800">{p.promotion_name || p.request_id}</span>
+          <span className="ml-2 text-xs text-gray-400 font-mono">{p.request_id}</span>
+          <div className="text-xs text-gray-500 mt-0.5">
+            {p.window ? `${p.window.from} ~ ${p.window.to} (${p.window.days}일)` : "기간 미상"}
+            {p.share_ratio != null && ` · 분담 ${Number(p.share_ratio)}%`}
+            {p.status && ` · ${p.status}`}
+            {p.applied_product_count != null && ` · 적용상품 ${p.applied_product_count}`}
+          </div>
+        </div>
+        {t?.bep_roas != null && (
+          <div className="text-right shrink-0">
+            <div className="text-xs text-gray-500">진짜 BEP ROAS</div>
+            <div className="text-lg font-bold text-purple-700">{ratioX(t.bep_roas)}</div>
+            <div className="text-xs text-gray-400">이 이상이어야 본전</div>
+          </div>
+        )}
+      </div>
+
+      {p.blockers.length > 0 && (
+        <div className="text-xs bg-amber-50 border border-amber-200 rounded px-2 py-1 mb-2 text-amber-800">
+          {p.blockers.map((b, i) => <div key={i}>⚠ {b}</div>)}
+        </div>
+      )}
+
+      {t && (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-2">
+          <Card
+            label="판매량"
+            value={num(t.qty_all)}
+            sub={t.qty_all !== t.qty ? `손익 반영 ${num(t.qty)} (미해결 ${num(t.unresolved_qty)})` : undefined}
+          />
+          <Card label="순이익" value={won(t.net_profit)}
+                sub={t.net_profit == null ? "광고비 미상 → 산출 불가" : "납품매출−원가−분담금−광고비"} />
+          <Card label="BEP 광고비" value={won(t.bep_ad_spend)}
+                sub="이 금액을 넘으면 적자" />
+          <Card
+            label={adKnown ? "실광고비" : "계정 광고비(상한)"}
+            value={won(adShown)}
+            sub={adKnown ? "옵션 귀속" : "★옵션 귀속 불가 — 상한 프록시"}
+          />
+        </div>
+      )}
+
+      {t && overBep && (
+        <div className="text-xs bg-red-50 border border-red-200 rounded px-2 py-1 mb-2 text-red-700">
+          {adKnown
+            ? `실광고비가 BEP 광고비를 초과 — 이 창은 적자입니다.`
+            : `계정 전체 광고비(${won(adShown)})가 BEP 광고비를 넘습니다. 상한 비교라 적자 확정은 아니지만, 이 프로모션 SKU에 계정 광고비의 ${t.bep_ad_spend && Number(adShown) > 0 ? Math.round((Number(t.bep_ad_spend) / Number(adShown)) * 100) : "?"}% 넘게 쓰였다면 적자입니다.`}
+        </div>
+      )}
+
+      {/* SKU 분해 */}
+      {p.skus.length > 0 && (
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-left text-gray-500 border-b border-gray-200">
+                <th className="py-1 pr-2">SKU</th>
+                <th className="py-1 pr-2 text-right">판매</th>
+                <th className="py-1 pr-2 text-right">실현단가</th>
+                <th className="py-1 pr-2 text-right">납품단가</th>
+                <th className="py-1 pr-2 text-right">원가</th>
+                <th className="py-1 pr-2 text-right">분담금</th>
+                <th className="py-1 pr-2 text-right">개당 공헌이익</th>
+                <th className="py-1 pr-2 text-right">BEP ROAS</th>
+              </tr>
+            </thead>
+            <tbody>
+              {p.skus.map((s) => (
+                <tr key={s.sku_id} className={`border-b border-gray-50 ${s.resolved ? "" : "bg-amber-50/40"}`}>
+                  <td className="py-1.5 pr-2 text-gray-700">
+                    <span className="font-mono">{s.sku_id}</span>
+                    {s.product_name && <div className="text-gray-400">{s.product_name.slice(0, 30)}</div>}
+                    {!s.resolved && (
+                      <div className="text-amber-700">{s.unresolved_reasons.join(" / ")}</div>
+                    )}
+                  </td>
+                  <td className="py-1.5 pr-2 text-right text-gray-600">{num(s.qty)}</td>
+                  <td className="py-1.5 pr-2 text-right text-gray-600">{won(s.realized_unit_price)}</td>
+                  <td className="py-1.5 pr-2 text-right text-gray-600">{won(s.supply_unit_price)}</td>
+                  <td className="py-1.5 pr-2 text-right text-gray-600">{won(s.cost_price)}</td>
+                  <td className="py-1.5 pr-2 text-right text-gray-600">{won(s.funding)}</td>
+                  <td className="py-1.5 pr-2 text-right text-gray-700 font-semibold">{won(s.unit_contribution)}</td>
+                  <td className="py-1.5 pr-2 text-right text-purple-700 font-semibold">{ratioX(s.bep_roas)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* 수기 입력 — 개당 할인액(D-CPP-7) + 대상 SKU(API에 적용상품 목록이 없다) */}
+      <div className="mt-2 pt-2 border-t border-gray-100 flex flex-wrap items-end gap-2">
+        <label className="text-xs text-gray-500">
+          개당 할인액(원)
+          <input
+            value={edit.disc}
+            onChange={(e) => onEdit({ ...edit, disc: e.target.value })}
+            placeholder="예: 4000"
+            className="block mt-0.5 w-28 px-2 py-1 text-xs border border-gray-300 rounded"
+          />
+        </label>
+        <label className="text-xs text-gray-500 flex-1 min-w-[220px]">
+          대상 SKU(상품번호, 쉼표 구분)
+          <input
+            value={edit.skus}
+            onChange={(e) => onEdit({ ...edit, skus: e.target.value })}
+            placeholder="예: 62178970, 69411570"
+            className="block mt-0.5 w-full px-2 py-1 text-xs border border-gray-300 rounded"
+          />
+        </label>
+        <button
+          onClick={onSave}
+          disabled={saving}
+          className="px-3 py-1 text-xs bg-purple-600 text-white rounded hover:bg-purple-700 disabled:opacity-50"
+        >
+          {saving ? "저장 중…" : "저장"}
+        </button>
+      </div>
+      <p className="mt-1 text-xs text-gray-400">
+        빈 칸은 <b>0이 아니라 '모름'</b>으로 저장됩니다. 프로모션 API에 적용상품 목록이 없어 대상
+        SKU는 수기 지정입니다(추정 매핑 금지). {p.window_basis}
+      </p>
     </div>
   );
 }

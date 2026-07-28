@@ -353,11 +353,14 @@ def client(monkeypatch):
     app.dependency_overrides.clear()
 
 
-def test_patch_unit_discount_requires_token(client):
+def test_patch_unit_discount_is_user_crud_not_token_gated(client):
+    """Phase 2에서 토큰을 뗐다 — 이 경로는 **사람이 sellC 화면에서 확정하는 입력**이고,
+    브라우저에 ingest 토큰을 심을 수 없다(심으면 비밀이 아니다). 같은 성격의
+    `/rocket/cost-map`이 이미 토큰 없는 사용자 CRUD다. 토큰이 있든 없든 200이어야 한다."""
     c, _ = client
-    assert c.patch(_PATCH, json={"unit_discount_amount": 3000}).status_code == 401
+    assert c.patch(_PATCH, json={"unit_discount_amount": 3000}).status_code == 200
     assert c.patch(_PATCH, json={"unit_discount_amount": 3000},
-                   headers={"X-Ingest-Token": "wrong"}).status_code == 401
+                   headers={"X-Ingest-Token": "wrong"}).status_code == 200
 
 
 def test_patch_unit_discount_sets_value(client):

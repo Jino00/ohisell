@@ -438,8 +438,8 @@ def test_promo_pnl_route_filters_by_request_id(client):
 
 
 def _patch(c, body):
-    return c.patch("/api/coupang/ops/rocket/promotion/687878/unit-discount",
-                   json=body, headers={"X-Ingest-Token": _TOKEN})
+    # 토큰 없이 호출한다 — 이 경로는 사용자 CRUD다(cost-map과 같은 축, Phase 2에서 해제).
+    return c.patch("/api/coupang/ops/rocket/promotion/687878/unit-discount", json=body)
 
 
 def test_patch_sets_target_skus_and_dedupes(client):
@@ -478,9 +478,10 @@ def test_patch_rejects_bad_target_skus(client):
     assert _patch(c, {}).status_code == 400                                    # 두 키 다 없음
 
 
-def test_patch_still_requires_token(client):
+def test_patch_unknown_promotion_is_404_not_created(client):
+    """수기 입력이 **유령 프로모션을 만들면 안 된다** — 어떤 수집으로도 대사되지 않는다."""
     c, seed = client
     _seed(seed)
-    r = c.patch("/api/coupang/ops/rocket/promotion/687878/unit-discount",
+    r = c.patch("/api/coupang/ops/rocket/promotion/999999/unit-discount",
                 json={"target_sku_ids": ["62178970"]})
-    assert r.status_code == 401
+    assert r.status_code == 404

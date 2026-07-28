@@ -1527,10 +1527,16 @@ def _normalize_target_sku_ids(raw: Any) -> list[str] | None:
 def patch_promotion_unit_discount(
     request_id: str = Path(...),
     body: dict[str, Any] = Body(...),
-    x_ingest_token: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ):
     """프로모션 **수기 입력** 갱신 — 개당 할인액(D-CPP-7) + 대상 SKU(Phase 2). 기존 행만 갱신.
+
+    ★X-Ingest-Token을 걸지 않는다(Phase 2에서 해제 — 아래 이유): 이 경로는 페처가 쓰는 ingest가
+      아니라 **사람이 sellC 화면에서 확정하는 입력**이고, 브라우저에는 ingest 토큰을 줄 수 없다
+      (프론트에 심으면 그 순간 비밀이 아니다). 같은 성격의 `/rocket/cost-map`(원가 매핑 확정)이
+      이미 토큰 없이 사용자 CRUD로 열려 있고, 프로젝트 전체가 IP 허용목록 뒤에 있다 —
+      한 화면의 두 수기 입력이 서로 다른 인증을 갖는 쪽이 오히려 사고를 부른다.
+      Phase 1에 토큰이 걸려 있었지만 이 라우트는 **prod 미배포**라 기존 호출자가 없다.
 
     body: {"unit_discount_amount": 3000, "target_sku_ids": ["62178970", "69411570"]}
       - 두 키는 **각각 선택**이다(둘 다 없으면 400). 보낸 키만 갱신한다 — 할인액만 고칠 때
@@ -1548,7 +1554,6 @@ def patch_promotion_unit_discount(
       어떤 수집으로도 대사되지 않는다(원칙22).
     ★페처는 이 칸을 쓰지 않는다 → 재수집(snapshot upsert)이 수기 값을 지우지 않는다.
     """
-    _check_ingest_token(x_ingest_token)
     rid = str(request_id or "").strip()
     if not rid or len(rid) > 30:   # String(30) 그레인 키
         raise HTTPException(status_code=400, detail="request_id 필요(<=30자)")
