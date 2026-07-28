@@ -1,18 +1,20 @@
-# 세션 인수인계: 학습 배관 수리 2차 + 라이브 검증 (2026-07-29 새벽)
+# 세션 인수인계: 학습 배관 수리 2차 + 라이브 검증 (2026-07-29 새벽~아침)
 
-> 저장일시: 2026-07-29 05:30 KST
+> 저장일시: 2026-07-29 05:30 KST / **갱신: 2026-07-29 07:40 KST(세션 후반부 이어붙임)**
 > 세션 모델: Opus. 트랙: `docs/tracks/active/track_naver-ad-optimization.md` (D-NAO-111)
 > 전 세션: `.claude/memory/HANDOFF_learning-loop-repair+z8-takeover_20260728.md` (D-NAO-106~110)
+> ★07:40 갱신 요약: prod 배포 총 4회 완료(23:48/05:28/06:38/07:28). PR 4건 정리 — #159·#162·#163 병합, #121은 alembic head 분기로 보류. §0·§3·§4·§6·§7·§8 갱신 + 신규 §9 참조.
 
 ---
 
 ## 0. 가장 먼저 알아야 할 것 (놓치면 안 되는 것)
 
-1. **PR #161이 아직 미병합이다.** 워크트리 `.claude/worktrees/learning-loop-repair`, 브랜치 `claude/learning-loop-repair`, HEAD `9b6df55`(main 병합 포함). 병합 판단은 Jino 몫.
-2. **prod 배포는 2회 완료됐지만, 미배포 항목이 2개 남아 있다** — `scheduler_service.py`(CAS 거부, 다른 세션 소유 추정)와 `dd73a59`(conv_delay 곡선 퇴화 미해소로 의도적 보류). "고쳤다"가 "전부 배포됐다"를 뜻하지 않는다.
-3. **`scheduler_service.py`의 CAS 거부는 원인 미파악 상태로 남아 있다.** prod의 현재 내용이 우리 브랜치·main·로컬 어느 브랜치 역사에도 없다 — 다른 세션이 배포했는데 아직 PR을 안 낸 것으로 추정된다. 다음 세션이 그 세션의 정체와 변경 내용을 파악해야 한다.
+1. **PR #161** — 이 HANDOFF 앞부분(§1) 작업의 PR. 07:40 갱신 시점 기준 "열려 있던 PR"로 취급·정리된 것은 **#159·#162·#163·#121 4건**(§9)이며, 그 목록에 #161은 포함되지 않는다 — #161 자체의 이후 상태(병합 여부)는 이번 갱신 정보에 포함되지 않았으니 다음 세션이 `gh pr view 161`로 직접 확인할 것.
+2. **prod 배포는 총 4회 완료됐다**(23:48 / 05:28 / 06:38 / 07:28, §9 표). **미배포 항목은 `dd73a59` 1건만 남았다** — conv_delay 곡선 퇴화의 근본 원인(정착 스냅샷 필터 버그)은 이번 후반부에서 찾아 **수정·배포까지 완료**했지만, `dd73a59`(전환 정착 보정 배수 자체) 배포는 깨끗한 코호트가 새로 쌓일 때까지 여전히 보류다(§3, §9-4).
+3. **`scheduler_service.py`의 CAS 거부는 ★해소됐다.** 원인은 **PR #159**(시간별 주문 동기화, 타 세션)였다 — blob 해시 `642619658baf…` 일치 확인 후 병합, main==prod 회복(§9-2).
 4. **적대적 리뷰는 Jino 지시로 이번 세션은 2회로 캡됐다** ("적대적리뷰는 2번만 해"). 1건은 중단(대상이 466bbc5), 1건은 NEEDS-CHANGES 판정 후 지적 6건 전량 반영 완료. 중단된 리뷰의 몫은 메인 루프가 직접 코드를 재확인해 대체했다(§4 참조).
-5. **아침 관측 3건은 별도 에이전트가 관측 중이며 이 HANDOFF 작성 시점엔 결과가 없다** — 07:45 매핑 적재 / 08:10 `bid_rank_slope` 첫 적립 / 08:50 갤럭시 68그룹 손실 브레이크. 다음 세션이 결과를 확인해야 한다.
+5. **아침 관측 3건은 다음 세션 시작 시점에도 여전히 미확인이다**(별도 폴링 에이전트가 관측 중이었으나 결과 미회수) — 07:45 매핑 적재 / 08:10 `bid_rank_slope` 첫 적립 / 08:50 갤럭시 68그룹 손실 브레이크. **다음 세션 최우선 과제.**
+6. **PR #121(BM 관측시각, 타 세션)은 병합 보류다** — alembic head가 2개로 갈라져(`4b66ae3706e6` vs `d5f7b9c1e3a6`) 그대로 배포하면 원격 `alembic upgrade head`가 실패한다. 코드 충돌은 0건, 트랙 파일 충돌 1건만 해소 가능 확인·**4,026 passed**(alembic 테스트만 실패) — 브랜치 소유 세션 몫이라 손대지 않고 PR에 사유 코멘트만 남겼다. 워크트리는 `git reset --hard`로 원상복구 확인(§9-2).
 
 ---
 
@@ -61,7 +63,8 @@ Jino "적대적리뷰는 2번만 해"로 캡. 2건 띄웠고 1건은 중단됨(4
 ## 3. ★새로 표면화된 구조적 사실 (다음 세션이 알아야 할 것)
 
 - **학습밴드 스코프 불일치 — ★해소·배포 완료(2026-07-29 06:38 KST)**: 09:03 학습 잡 `run_probe_learning(db)`은 `campaign_id`를 안 넘겨 **계정 전체** 집계를 승격·일기에 기록하는데, 실제 게이트는 **캠페인별**로 재계산한다. 오늘 계정 전체는 `1.0-2.0`이 승격돼 있지만 **ours 6개 중 그 밴드를 소비하는 캠페인은 0개**였다. → `probe_learning_loop.gate_bands()`로 기록 정정(캠페인별 실제 적용값 라벨링) + `_account_band_fallback_ok`로 **BEP 확인되는 유닛에만** 계정 밴드 폴백 허용. Jino 원문 *"2.0~2.5로 올린다고 해도 bep 보다 손실이면 알아서 입찰가를 내릴거 아니야?"* → 사전 상한(`affordable_ceiling`)+사후 고삐(`_intraday_loss_leash`) 이중 방어 확인 후 *"그러자"*로 승인. 브랜치 `claude/learned-band-scope` 커밋 `530a88b`, PR #162, 4,001 passed, prod 배포 완료(`auto_operator.py`·`probe_learning_loop.py`, pm2 재시작 278). 트랙 D-NAO-117.
-- **conv_delay 곡선 퇴화 기전 확정**: `conversion_maturity.compute_curve:109`가 코호트별 비율의 **단순 평균**이라, 성숙 코호트 7개 중 4개가 비율 1.0·3개가 0.0이면 평균이 정확히 4/7=0.5714로 고정된다. day 8~18 11칸 동일값의 정체가 이것이고, `dd73a59`의 최댓값 1.75배가 바로 이 구간에서 나온다. → 배포 보류 유지. 선결: 퇴화 해소 → 배수 분포 재측정 → Jino 배포 판단.
+  - **영향 실측(추가)**: 하한이 2.5→2.0으로 내려가는 캠페인은 5개 중 3개. 그 3개의 on 그룹 32개 중 **BEP 확인된 13개만** 실제 대상(`_account_band_fallback_ok` 조건 충족분). 나머지 한 캠페인은 19그룹 전부 BEP 미등록이라 통째로 자동 제외됐다.
+- **conv_delay 곡선 퇴화 — 근본 원인 규명·수정·배포 완료(D-NAO-118 후반, 2026-07-29 07:28 KST)**: `conversion_maturity.compute_curve:109`가 코호트별 비율의 단순 평균이라 day 8~18이 정확히 4/7=0.5714로 고정되는 **증상**은 전 세션에서 이미 확정했었다. 이번 후반부에서 그 **원인**을 찾았다 — `take_daily_snapshot`의 존재 판정(스킵용)은 백필 sentinel까지 셌는데 금액 집계는 sentinel을 제외해서, **sentinel 행만 있는 ad_date가 "진짜 전환 0원"으로 기록**되고 있었다(docstring이 막으려던 바로 그 일). 이 필터 불일치가 4/7 고정의 실체였다. **수정·배포 완료**(`conversion_maturity.py`, pm2 재시작 279) — 그러나 `dd73a59`(전환 정착 보정 배수) 자체의 배포는 여전히 보류: 과거 오염 행은 삭제하지 않기로 확정했으므로, 오늘부터 쌓이는 깨끗한 코호트가 21일 누적된 뒤(대략 8월 중순) 배수 분포를 재측정하고서야 Jino 배포 판단이 가능하다.
 - **인수 유지 조건 ① 자동 해결 예정**: `shopping_ad_product_sync`(매일 07:45)가 `optimizer='ours'` 캠페인만 훑는데 갤럭시 캠페인은 `campaign_type=SHOPPING`이고 22:36에 ours가 됐다 → 07:45에 68그룹 매핑 자동 적재 예상, 그것이 08:50 일 레인보다 앞선다. 원가·BEP(6,090 / 2.0365)는 이미 등록돼 있어 **사람 입력 불필요**.
 - **`466bbc5` 배포 근거(리뷰 대체 자체 확인)**: `_fit_slope`의 유효쌍 정의가 `개선폭>0 ∧ Δbid>0` 한쪽 사분면이라 slope는 **구조적으로 양수**, 유효쌍 3개 미만이면 `None`(콜드스타트 강제), 추정량은 평균이 아닌 **중앙값**. NULL이면 `load_response_priors`가 안 읽어 종전 폴백 유지. slope "존재"만으로 열리는 유일한 게이트(확장 deep 예외)는 **4조건 AND**라 나머지 3개(`clk≥10`·`보정ROAS/BEP ≥ 1.25`·marginal_stop 아님)가 독립적으로 살아 있다.
 
@@ -78,6 +81,10 @@ Jino "적대적리뷰는 2번만 해"로 캡. 2건 띄웠고 1건은 중단됨(4
 | 5 | 전 세션의 "dry_run 해제는 위험하다" | **틀렸다.** `flight_loop`엔 입찰을 바꾸는 코드가 **아예 없다**(writer import 0건, 호출자는 스케줄러 1개·기본값). docstring이 약속한 실행 경로는 구현된 적이 없다. **해제 대상이 없다 — 위험해서가 아니라 연결된 게 없어서.** |
 | 6 | "`bid_rank_slope` 테이블이 prod에 없다"(정찰 보고) | **오탐.** 전용 테이블이 아니라 `naver_learning_state`의 metric 행이다. 마이그레이션 불필요. |
 | 7 | 커밋 1건에 3개 변경을 섞어 메시지와 내용이 어긋남 | 즉시 reset 후 3개로 분리. |
+| 8 | ★"오염 스냅샷 203행(48%)을 지워야 한다" | **실행 전 폐기.** `naver_ad_daily.synced_at`을 "최초 도착 시각"으로 가정했으나, `ad_daily_ingest`가 매 수집마다 해당 날짜를 전량 delete-후-재삽입하며 새로 찍으므로 실제로는 **"마지막 재수집 시각"**이다. 그 규칙대로면 정상 관측 행까지 오염으로 오판·삭제할 뻔했다 → LESSONS #66. |
+| 9 | "하한을 완화하면(2.0으로 낮추면) 손실 위험이 커진다"(막연한 우려) | **Jino 지적이 맞았다.** *"2.0~2.5로 올려도 BEP보다 손실이면 알아서 입찰가를 내릴 거 아니냐"*는 반문에 코드를 확인하니, 사전 상한(`affordable_ceiling`, pooled RPC 계층 수축으로 상시 계산)과 사후 고삐(RL3 `_intraday_loss_leash`)가 **이미 이중으로** 존재했다. Claude가 위험을 과대평가했던 것 — 남은 진짜 틈은 "BEP 미확인 유닛이면 RL3가 fail-closed로 침묵" 하나뿐이었고, 그 조건 하나만 `_account_band_fallback_ok`로 막았다. |
+
+**추가(D-NAO-118 전반)**: flight_loop docstring에 남아 있던 미래형 약속("dry_run=False: 입찰 변경 실행")도 같은 계열의 실수였다 — 실제로 α(캠페인 전체 입찰 배수)를 만들면 위(`budget_pacing` 예산)·아래(`auto_operator` 유닛별 입찰)가 이미 차 있어 유닛별 정교함을 덮어쓴다. 그 약속을 삭제하고 `dry_run`을 "기록 라벨"로 재정의, **AST 계약 테스트**(`test_flight_loop_has_no_write_path`)로 구조를 고정했다(쓰기 경로가 들어오면 실패 — 주입→실패→원복→통과로 가드 실효성 실증). §9-3 참조.
 
 ---
 
@@ -91,15 +98,16 @@ Jino "적대적리뷰는 2번만 해"로 캡. 2건 띄웠고 1건은 중단됨(4
 
 ---
 
-## 6. 다음 세션 할 일 (우선순위)
+## 6. 다음 세션 할 일 (우선순위) — ★07:40 갱신
 
-1. **아침 관측 3건 결과 확인**(별도 에이전트 관측 중): 07:45 매핑 적재 / 08:10 `bid_rank_slope` 첫 적립 / 08:50 갤럭시 68그룹 손실 브레이크 + 신형식 경보.
-2. **PR #161 병합 판단**(Jino).
-3. **`scheduler_service.py` CAS 거부 해소** — prod 버전을 배포한 세션 찾기, 로그 한 줄 변경 반영.
-4. **Jino 판단 대기 2건** (학습밴드 스코프 불일치는 2026-07-29 06:38 D-NAO-117로 해소·배포 완료 — 목록에서 제거):
-   - ① `dd73a59` 배포(곡선 퇴화 해소 후, §3).
-   - ② `flight_loop` 실행 경로를 만들 것인가(dry_run 해제의 진짜 질문 — §4-#5).
-5. **D-NAO-109 수명주기 국면 판정 구조(SA1~SA3)는 여전히 ★미승인** — 착수 전 Jino 승인 필요. 학습 예산 = "오늘과 같게"(Jino 22:53).
+1. **아침 관측 3건 결과 확인**(여전히 미확인, 최우선): 07:45 `shopping_ad_product_sync` 매핑 적재(갤럭시 68그룹, 특히 `70451363`/`70523564`/`70523694`) / 08:10 `run_naver_learning_loops`의 `bid_rank_slope` 사상 첫 적립(값 분포, 특히 음수·0 유무) / 08:50 `run_naver_auto_operator_daily` 갤럭시 68그룹 손실 브레이크 첫 적용(저반사 3종 1,000/1,000/1,900원 → BEP 상한 ≈470/620/620원까지 내려가는지)+신형식 Slack 경보 본문.
+2. **PR #161 상태 확인** — `gh pr view 161`로 직접(§0-1 참조, 이번 갱신 정보에 미포함).
+3. **PR #121 alembic 재부모** — `d5f7b9c1e3a6`(`add_naver_entity_snapshot_observed_at`)의 `down_revision`을 현 prod head `4b66ae3706e6`으로 재부모하거나 병합 리비전을 추가해야 병합 가능. **브랜치 소유 세션 몫** — 손대지 않고 PR 코멘트만 남겨둠(§9-2).
+4. ~~`scheduler_service.py` CAS 거부 해소~~ → **해소됨**(PR #159 병합, §0-3).
+5. ~~학습밴드 스코프 불일치~~ → **해소·배포 완료**(D-NAO-117, §3). ~~`flight_loop` 실행 경로를 만들 것인가~~ → **결론 확정**: 만들지 않는다(§4 추가 항목, AST 계약 테스트로 구조 고정). 남은 Jino 판단 대기는 아래 1건뿐.
+6. **Jino 판단 대기(유일)**: `dd73a59`(전환 정착 보정 배수) 배포 — 근본 원인(정착 스냅샷 필터 버그)은 수정·배포 완료됐으나, 과거 오염 행을 지우지 않기로 확정했으므로 깨끗한 코호트가 21일 쌓인 뒤(대략 8월 중순) 배수 재측정 후 판단(§3).
+7. **D-NAO-109 수명주기 국면 판정 구조(SA1~SA3)는 여전히 ★미승인** — 착수 전 Jino 승인 필요. 학습 예산 = "오늘과 같게"(Jino 22:53).
+8. flight_loop 근본의 **정책 상수 2개는 미변경**(`DEMOTE_MAPE_THRESHOLD=0.50`, 강등 쿨다운) — 관측기 확정으로 완화 필요성이 사라졌다는 게 이 세션 결론. 나중에 예측이 필요해지면 상수 완화가 아니라 **강등 캠페인 폴백 예측**이 맞는 방향(§9-5).
 
 ---
 
@@ -109,31 +117,70 @@ Jino "적대적리뷰는 2번만 해"로 캡. 2건 띄웠고 1건은 중단됨(4
 |---|---|
 | `docs/tracks/active/track_naver-ad-optimization.md` | D-NAO-111 갱신(이번 세션 배포·라이브 검증·리뷰 반영 추가) |
 | `.claude/worktrees/learning-loop-repair` | 이번 세션 작업 워크트리, 브랜치 `claude/learning-loop-repair` |
-| `backend/app/services/naver_ad/flight_loop.py` | 관측성 수정(c58f430)·prod 배포 완료 |
-| `backend/app/services/naver_ad/auto_operator.py` | 탐침 하한 학습화(223f138)·prod 배포 완료 |
+| `backend/app/services/naver_ad/flight_loop.py` | 관측성 수정(c58f430)·prod 배포 완료 + 후반부 관측기 확정(§9-3)·AST 계약 테스트로 구조 고정 |
+| `backend/app/services/naver_ad/auto_operator.py` | 탐침 하한 학습화(223f138)·prod 배포 완료. 07-29 06:38 재배포(학습밴드 스코프 해소분) |
+| `backend/app/services/naver_ad/probe_learning_loop.py` | `gate_bands()` 신설(D-NAO-117), prod 배포 완료(06:38) |
 | `backend/app/services/naver_ad/bid_rank_curve.py` | prod 배포 완료(05:28) |
 | `backend/app/services/naver_ad/bid_step_types.py` | prod 배포 완료(05:28) |
-| `backend/app/services/naver_ad/conversion_maturity.py` | 정착 보정 주석 철회(e2ecd29) — dd73a59는 미배포 |
-| `backend/app/services/naver_ad/bid_ceiling_calculator.py` | dd73a59 소속, 미배포(곡선 퇴화 해소 대기) |
-| `backend/app/services/naver_ad/scheduler_service.py` | CAS 거부로 미배포 — 다음 세션 조사 대상 |
+| `backend/app/services/naver_ad/conversion_maturity.py` | 정착 보정 주석 철회(e2ecd29) + 정착 스냅샷 필터 버그 수정(D-NAO-118 후반)·**prod 배포 완료(07:28, pm2 279)**. `dd73a59`(배수 자체)는 여전히 미배포 |
+| `backend/app/services/naver_ad/bid_ceiling_calculator.py` | dd73a59 소속, 미배포(깨끗한 코호트 21일 누적 대기) |
+| `backend/app/services/naver_ad/scheduler_service.py` | ★CAS 거부 해소됨 — PR #159(타 세션) 병합으로 정리 완료 |
+| `test_flight_loop_has_no_write_path`(신규 회귀) | flight_loop에 쓰기 경로가 들어오면 실패하는 AST 계약 테스트 |
 
 ---
 
-## 8. 새 세션 시작 프롬프트
+## 9. ★세션 후반부 작업 상세 (2026-07-29 07:40 갱신)
+
+### 9-1. prod 배포 이력 전체(4회, 전부 `safe_deploy.sh` CAS 통과 — main==prod blob 해시 대조로 확인)
+
+| 시각 KST | 파일 | pm2 재시작 |
+|---|---|---|
+| 07-28 23:48 | `flight_loop.py` · `auto_operator.py` | 276 |
+| 07-29 05:28 | `bid_rank_curve.py` · `bid_step_types.py` | 277 |
+| 07-29 06:38 | `auto_operator.py` · `probe_learning_loop.py` | 278 |
+| 07-29 07:28 | `conversion_maturity.py` | 279 |
+
+### 9-2. PR 정리 — 열린 4건 중 3건 병합, 1건 보류
+
+- **#159**(시간별 주문 동기화, 타 세션) ✅ 병합. ★이것이 §0-3의 정체였다 — `scheduler_service.py` CAS 거부는 이 PR이 prod에만 배포되고 아직 main에 없던 상태였을 뿐. blob `642619658baf…` 일치 확인 후 병합, main==prod 회복.
+- **#162**(학습밴드 스코프, D-NAO-117) ✅ 병합, prod 배포 완료(§9-1 06:38).
+- **#163**(flight_loop 관측기 확정 + 정착 스냅샷 필터 버그, D-NAO-118) ✅ 병합, 필터 수정분 prod 배포 완료(§9-1 07:28).
+- **#121**(BM 관측시각, 타 세션) ❌ **병합 보류** — main 병합 시도 결과 alembic head가 2개로 갈라짐: `4b66ae3706e6`(현 prod head) vs `d5f7b9c1e3a6`(이 PR의 `add_naver_entity_snapshot_observed_at`). 그대로 배포하면 원격 `alembic upgrade head`가 실패한다. 그 외엔 문제 없음 — 코드 충돌 0(자동 병합), 트랙 파일 충돌 1건은 해소 가능(D-NAO-93 고유 내용 보존 확인), **4,026 passed**(alembic 테스트만 실패). 필요 조치: `d5f7b9c1e3a6`의 `down_revision`을 `4b66ae3706e6`으로 재부모하거나 병합 리비전 추가 — **브랜치 소유 세션 몫이라 손대지 않았다.** PR에 사유 코멘트 남김. 워크트리는 `git reset --hard`로 원상복구, 원격과 동일 확인(손상 0).
+
+### 9-3. flight_loop 관측기 확정(D-NAO-118 전반)
+
+미래형 약속("dry_run=False: 입찰 변경 실행")을 docstring에서 삭제. 만들지 않는 이유: α는 캠페인 전체 입찰 배수인데 위(`budget_pacing` 예산)와 아래(`auto_operator` 유닛별 입찰)가 이미 차 있어 유닛별 정교함을 덮어쓴다. `dry_run`은 기록 라벨로 재정의. **AST 계약 테스트**(`test_flight_loop_has_no_write_path`)로 구조 고정 — 쓰기 경로가 들어오면 실패. 가드 실효성은 주입→실패→원복→통과로 실증.
+
+### 9-4. 정착 스냅샷 필터 불일치 버그(D-NAO-118 후반)
+
+`take_daily_snapshot`의 존재 판정(스킵용)은 백필 sentinel까지 셌고 금액 집계는 sentinel을 제외해서, **sentinel 행만 있는 ad_date가 "진짜 전환 0원"으로 기록**됐다. docstring이 막으려던 바로 그 일. 이것이 conv_delay 곡선이 days 8~18에서 4/7=0.5714로 고정된 정체였다. 수정·배포 완료(§3, §9-1).
+
+### 9-5. 남은 Jino 판단·후속
+
+- `dd73a59`(전환 정착 보정) **계속 보류** — 필터 버그 수정으로 오늘부터 코호트가 깨끗해지므로, 깨끗한 성숙 코호트가 21일 누적된 뒤(대략 8월 중순) 곡선 재측정 후 배포 판단. 과거 오염 행은 삭제하지 않기로 확정.
+- flight_loop 근본의 **정책 상수 2개 미변경**(`DEMOTE_MAPE_THRESHOLD=0.50`·강등 쿨다운) — 관측기 확정으로 "예측이 없어도 손해가 없어" 완화 필요성이 사라졌다는 것이 이 세션의 결론이나, 나중에 예측이 필요해지면 상수 완화가 아니라 **강등 캠페인 폴백 예측**이 맞는 방향.
+- **D-NAO-109(수명주기 국면 판정 구조 SA1~SA3)는 여전히 ★미승인** — 착수 전 Jino 승인 필요.
+- #121 alembic 재부모(§9-2).
+
+---
+
+## 10. 새 세션 시작 프롬프트 (07:40 갱신판)
 
 ```
 .claude/memory/HANDOFF_learning-loop-repair-2nd+live-verified_20260729.md 읽고 이어서 작업해줘.
-★먼저 §0(놓치면 안 되는 것)과 §4(내가 틀렸다 정정한 7건)을 읽을 것.
+★먼저 §0(놓치면 안 되는 것)·§4(내가 틀렸다 정정한 9건)·§9(세션 후반부 작업)를 읽을 것.
 
 【현재 상태】
-· PR #161 미병합 (브랜치 claude/learning-loop-repair, HEAD 9b6df55).
-· prod 배포 2회 완료(23:48 flight_loop+auto_operator, 05:28 bid_rank_curve+bid_step_types).
-· 미배포 2건: scheduler_service.py(CAS 거부, 원인 미파악) / dd73a59(conv_delay 곡선 퇴화 미해소로 보류).
-· 라이브 검증 3건 전부 성공(BP 원복 실전·flight_loop 신버전 정확 스킵·auto_operator 무예외).
+· prod 배포 4회 완료(23:48/05:28/06:38/07:28 — §9-1).
+· PR 정리: #159·#162·#163 병합 완료(main==prod). #121은 alembic head 분기(4b66ae3706e6 vs d5f7b9c1e3a6)로 보류 — 브랜치 소유 세션이 재부모해야 함.
+· 미배포는 dd73a59(conv_delay 배수) 1건뿐 — 근본 원인(정착 스냅샷 필터 버그)은 수정·배포 완료, 배수 자체는 깨끗한 코호트 21일 누적(대략 8월 중순) 후 판단.
+· 학습밴드 스코프(D-NAO-117)·flight_loop 실행 경로 문제는 해소·확정 완료.
+· 라이브 검증 전부 성공(BP 원복 실전·flight_loop 신버전 정확 스킵·auto_operator 무예외).
 
-【순서】
-1. 아침 관측 3건 결과 확인 (07:45 매핑 적재 / 08:10 bid_rank_slope 첫 적립 / 08:50 갤럭시 손실 브레이크)
-2. scheduler_service.py CAS 거부 원인 파악 — prod 배포한 세션 특정
-3. PR #161 병합 여부는 Jino 판단
-4. Jino 판단 대기 3건(학습밴드 스코프·dd73a59 배포·flight_loop 실행 경로) 확인
+【순서 — 최우선은 1번】
+1. 아침 관측 3건 결과 확인 (07:45 매핑 적재 / 08:10 bid_rank_slope 첫 적립 / 08:50 갤럭시 손실 브레이크) — 아직 미확인.
+2. PR #161 상태 확인(gh pr view 161).
+3. PR #121 alembic 재부모 필요 여부/방법 확인(브랜치 소유 세션과 조율).
+4. Jino 판단 대기(유일): dd73a59 배포 시점.
+5. D-NAO-109 착수 전 Jino 승인 필요.
 ```

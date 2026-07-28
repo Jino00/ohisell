@@ -1,4 +1,18 @@
-## 📌 세션 인계: `.claude/memory/HANDOFF_learning-loop-repair-2nd+live-verified_20260729.md` (2026-07-29 새벽 — 학습 배관 수리 2차 + 라이브 검증 완료, PR #161 미병합)
+## 📌 세션 인계: `.claude/memory/HANDOFF_learning-loop-repair-2nd+live-verified_20260729.md` (2026-07-29 새벽~아침, 07:40 갱신 — prod 배포 4회 완료·PR 3건 병합·PR #121 alembic 분기로 보류. 다음 세션 최우선 = 아침 관측 3건 회수)
+
+## ✅ 2026-07-29 아침(07:40) — 학습 배관 수리 2차 후반부: PR 정리 3건 병합 + prod 배포 4회 완료 (D-NAO-117·118, 워크트리 `learning-loop-repair`)
+
+**prod 배포 총 4회**(전부 `safe_deploy.sh` CAS 통과): 23:48 `flight_loop.py`+`auto_operator.py`(276) · 05:28 `bid_rank_curve.py`+`bid_step_types.py`(277) · 06:38 `auto_operator.py`+`probe_learning_loop.py`(278) · 07:28 `conversion_maturity.py`(279).
+
+**PR 정리 — 열린 4건 중 3건 병합**: ①**#159**(시간별 주문 동기화, 타 세션) 병합 — 이것이 그동안 `scheduler_service.py` CAS 거부의 정체였다(blob 해시 일치 확인, main==prod 회복). ②**#162**(학습밴드 스코프, D-NAO-117) 병합·배포 완료 — 영향 실측: 하한 2.5→2.0 대상 캠페인 5개 중 3개, 그 on 그룹 32개 중 BEP 확인 13개만 실제 적용. ③**#163**(flight_loop 관측기 확정 + 정착 스냅샷 필터 버그, D-NAO-118) 병합·배포 완료 — conv_delay 곡선이 4/7=0.5714로 고정되던 근본 원인(스냅샷 존재판정은 sentinel 포함·금액집계는 sentinel 제외) 규명·수정. **④#121(BM 관측시각, 타 세션)은 병합 보류** — alembic head 2개 분기(`4b66ae3706e6` vs `d5f7b9c1e3a6`), 코드 충돌 0·4,026 passed(alembic만 실패), 브랜치 소유 세션 몫이라 PR 코멘트만 남기고 재부모는 하지 않음.
+
+`dd73a59`(conv_delay 보정 배수 자체)는 여전히 미배포 — 근본 버그는 고쳤으나 과거 오염 행을 지우지 않기로 확정했으므로 깨끗한 코호트가 21일 쌓인 뒤(대략 8월 중순) 재측정 후 배포 판단. flight_loop 실행 경로 신설 여부는 **AST 계약 테스트**(`test_flight_loop_has_no_write_path`)로 "만들지 않는다"가 구조로 확정.
+
+**다음 세션 최우선**: ①아침 관측 3건 결과 확인(07:45 매핑 적재 / 08:10 `bid_rank_slope` 첫 적립 / 08:50 갤럭시 68그룹 손실 브레이크 — 아직 미확인) ②PR #161 상태 확인(`gh pr view 161`) ③PR #121 alembic 재부모 조율.
+
+트랙 파일·상세는 HANDOFF §9(세션 후반부 작업 상세)·§10(새 세션 시작 프롬프트) 참조.
+
+---
 
 ## ✅ 2026-07-29 새벽 — 학습 배관 수리 2차 배포·라이브 검증 완료 (D-NAO-111, 워크트리 `learning-loop-repair`, PR #161 미병합)
 
