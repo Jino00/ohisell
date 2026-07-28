@@ -17,7 +17,9 @@ from app.models import (
     NaverProductBep, Order,
 )
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
-from app.services.naver_ad.flight_loop import run_flight_loop
+from app.services.naver_ad.flight_loop import (
+    SKIP_CAMPAIGN_OFF, SKIP_FORECAST_MISSING, run_flight_loop,
+)
 
 
 @pytest.fixture
@@ -89,7 +91,7 @@ def test_flight_loop_skips_campaign_without_forecast(db):
     db.add(NaverCampaignSettings(campaign_id="cmp-no-forecast", optimizer="ours"))
     db.commit()
     result = run_flight_loop(db, today=date(2026, 7, 11), current_hour=10)
-    assert result["decisions"][0].get("skipped") == "forecast 없음"
+    assert result["decisions"][0].get("skipped") == SKIP_FORECAST_MISSING
 
 
 def test_flight_loop_alpha_within_bounds(db):
@@ -312,3 +314,88 @@ def test_flight_loop_error_in_one_campaign_doesnt_block_others(db):
     bad = [d for d in result["decisions"] if d["campaign_id"] == "cmp-bad"]
     assert "alpha" in good[0]
     assert "skipped" in bad[0] or "error" in bad[0]
+
+
+# ══════════════════════════════════════════════════════════════════
+# 무성 실패 관측성 (2026-07-28) — 07-25~28 실사고 회귀
+#   크론은 매 2시간 ok, 예외 로그 0건인데 결정은 4일간 0건이었다.
+#   "N캠페인 처리"만 찍혀 전원 스킵이 정상 완주와 구별되지 않은 것이 원인.
+# ══════════════════════════════════════════════════════════════════
+
+def test_flight_loop_summary_counts_decided_skipped_errors(db):
+    """요약이 결정/스킵/오류를 분해해서 낸다 — 이게 없으면 전원 스킵이 안 보인다."""
+    _setup_campaign(db, campaign_id="cmp-good")
+    db.add(NaverCampaignSettings(campaign_id="cmp-no-forecast", optimizer="ours"))
+    db.commit()
+    result = run_flight_loop(db, today=date(2026, 7, 11), current_hour=10)
+    assert result["campaigns_processed"] == 2
+    assert result["decided"] == 1
+    assert result["skipped"] == 1
+    assert result["skip_breakdown"] == {SKIP_FORECAST_MISSING: 1}
+    assert result["errors"] == 0
+
+
+def test_flight_loop_off_campaign_skipped_with_named_reason(db):
+    """★대상 정의 불일치 회귀: status='off' 캠페인은 forecast_engine이 예측을 만들지 않아
+    영원히 스킵된다. 'forecast 없음'으로 뭉뚱그리면 원인이 안 보인다."""
+    _setup_campaign(db, campaign_id="cmp-off")
+    db.query(NaverEntity).filter(NaverEntity.entity_id == "cmp-off").update({"status": "off"})
+    db.commit()
+    result = run_flight_loop(db, today=date(2026, 7, 11), current_hour=10)
+    d = result["decisions"][0]
+    assert d["skipped"] == SKIP_CAMPAIGN_OFF
+    assert "status=off" in d["skip_detail"]
+    assert result["skip_breakdown"] == {SKIP_CAMPAIGN_OFF: 1}
+    # 예측이 있어도 status=off면 결정하지 않는다(_setup_campaign이 예측을 심어둔 상태).
+    assert result["decided"] == 0
+
+
+def test_flight_loop_all_skipped_leaves_diagnostic_change_log(db):
+    """전원 무결정이면 change_log에 진단 행 1개(run당 1행) — 무성 실패를 유성으로."""
+    db.add(NaverCampaignSettings(campaign_id="cmp-a", optimizer="ours"))
+    db.add(NaverCampaignSettings(campaign_id="cmp-b", optimizer="ours"))
+    db.commit()
+    run_flight_loop(db, today=date(2026, 7, 11), current_hour=10)
+    rows = db.query(NaverChangeLog).filter(
+        NaverChangeLog.action == "flight_pacing_silent"
+    ).all()
+    assert len(rows) == 1
+    assert rows[0].entity_type == "system"
+    # 캠페인 단위 조회에 섞이지 않는다(모델이 None을 ''로 정규화하므로 falsy로 확인).
+    assert not rows[0].campaign_id
+    assert rows[0].dry_run is True
+    detail = json.loads(rows[0].after_value)
+    assert detail["decided"] == 0
+    assert detail["skip_breakdown"] == {SKIP_FORECAST_MISSING: 2}
+
+
+def test_flight_loop_healthy_run_leaves_no_diagnostic_row(db):
+    """정상 run(결정 ≥1)에는 진단 행이 남지 않는다 — 화면 오염 방지."""
+    _setup_campaign(db, campaign_id="cmp-good")
+    db.add(NaverCampaignSettings(campaign_id="cmp-no-forecast", optimizer="ours"))
+    db.commit()
+    run_flight_loop(db, today=date(2026, 7, 11), current_hour=10)
+    rows = db.query(NaverChangeLog).filter(
+        NaverChangeLog.action == "flight_pacing_silent"
+    ).all()
+    assert rows == []
+
+
+def test_flight_loop_forecast_missing_carries_gate_hint(db):
+    """예측 부재 사유에 gate_status 단서가 붙는다(강등 vs 이력부족은 대응이 다르다)."""
+    from app.models import NaverForecastModel
+
+    db.add(NaverCampaignSettings(campaign_id="cmp-demoted", optimizer="ours"))
+    db.add(NaverForecastModel(
+        grain="campaign", scope_key="cmp-demoted", gate_status="demoted", sample_days=14,
+    ))
+    db.commit()
+    result = run_flight_loop(db, today=date(2026, 7, 11), current_hour=10)
+    assert result["decisions"][0]["skip_detail"] == "gate_status=demoted"
+
+
+def test_flight_loop_no_campaigns_returns_full_summary_shape(db):
+    """캠페인 0개 조기반환도 같은 키 집합을 낸다 — 소비자가 KeyError 안 나게."""
+    result = run_flight_loop(db, today=date(2026, 7, 11), current_hour=10)
+    for key in ("campaigns_processed", "decided", "skipped", "skip_breakdown", "errors", "dry_run"):
+        assert key in result

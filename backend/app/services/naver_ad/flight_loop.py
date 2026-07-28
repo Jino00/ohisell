@@ -31,12 +31,58 @@ log = logging.getLogger(__name__)
 _Q4 = Decimal("0.0001")
 
 
-def _ours_campaigns(db: Session) -> list[NaverCampaignSettings]:
-    return (
-        db.query(NaverCampaignSettings)
+# 스킵 사유 코드 — 로그·요약·change_log에서 같은 이름을 쓴다(문자열 중복 방지).
+SKIP_CAMPAIGN_OFF = "campaign_off"
+SKIP_FORECAST_MISSING = "forecast_missing"
+
+
+def _ours_campaigns(db: Session) -> list[tuple[NaverCampaignSettings, str | None]]:
+    """optimizer='ours' 설정 행을 그 캠페인의 `NaverEntity.status`와 함께 반환.
+
+    ★대상 정의 불일치(2026-07-28 규명): `forecast_engine._active_scopes`는 status='on'인
+    엔티티만 예측 대상으로 삼는데(forecast_engine.py:40-46) 여기서는 status를 보지 않았다.
+    그래서 정지된 캠페인이 optimizer='ours'로 남아 있으면 예측이 영원히 생기지 않고,
+    이 루프는 2시간마다 그것을 "forecast 없음"으로 조용히 넘겼다.
+    prod 실측(2026-07-28 23:0x): optimizer='ours' 6개 중 `cmp-a001-02-000000010769985`가
+    entity status='off' 상태로 이 경로에 걸려 있었다.
+
+    빼지 않고 status를 함께 읽어오는 이유: 쿼리에서 제외하면 그 캠페인이 리포트에서
+    통째로 사라져 관측성이 오히려 나빠진다. 루프 안에서 `campaign_off`로 **이름 붙여**
+    스킵한다 — 무성 실패를 유성 실패로 바꾸는 것이 이 수정의 목적이다.
+    """
+    rows = (
+        db.query(NaverCampaignSettings, NaverEntity.status)
+        .outerjoin(
+            NaverEntity,
+            (NaverEntity.entity_id == NaverCampaignSettings.campaign_id)
+            & (NaverEntity.entity_type == "campaign"),
+        )
         .filter(NaverCampaignSettings.optimizer == "ours")
         .all()
     )
+    return [(cs, status) for cs, status in rows]
+
+
+def _forecast_gate_hint(db: Session, campaign_id: str) -> str | None:
+    """예측이 없을 때 '왜 없는지'의 단서 — 모델 원장의 gate_status.
+
+    active/fallback/demoted 중 무엇인지가 대응을 가른다(강등이면 쿨다운 대기, fallback이면
+    이력 부족). 조회 실패는 진단 부가정보이므로 삼켜서 본 루프를 막지 않는다.
+    """
+    try:
+        from app.models import NaverForecastModel
+
+        row = (
+            db.query(NaverForecastModel.gate_status)
+            .filter(
+                NaverForecastModel.grain == "campaign",
+                NaverForecastModel.scope_key == campaign_id,
+            )
+            .first()
+        )
+        return row[0] if row else None
+    except Exception:  # noqa: BLE001 — 진단 부가정보. 실패해도 루프는 계속.
+        return None
 
 
 def _today_forecast(db: Session, campaign_id: str, today: date) -> dict | None:
@@ -167,6 +213,33 @@ def _log_flight_decision(
     ))
 
 
+def _log_flight_silence(db: Session, *, summary: dict, now) -> None:
+    """한 run에서 **결정이 하나도 안 나온 경우에만** 남기는 진단 행(무성 실패 → 유성 실패).
+
+    캠페인별 스킵을 매번 change_log에 적지 않는 이유: 6캠페인 × 12run = 하루 72행이 쌓여
+    "시스템이 오늘 한 일"을 읽는 화면들을 오염시킨다. 대신 병리 상태(전원 무결정)일 때만
+    run당 1행 — 정상일 때 0행, 고장났을 때 하루 최대 12행으로 자기 제한된다.
+    `entity_type='system'`이라 캠페인 단위 조회에 섞이지 않고, action도 실행 액션 집합
+    (`naver_execution_harness.EXECUTION_ACTIONS`)에 없어 성과 화면 집계에 들어가지 않는다.
+    """
+    db.add(NaverChangeLog(
+        entity_type="system",
+        entity_id="flight_loop",
+        campaign_id=None,
+        action="flight_pacing_silent",
+        proposal_id=None,
+        dry_run=True,  # 진단 기록 — 아무것도 바꾸지 않았다.
+        changed_at=now,
+        before_value=None,
+        after_value=json.dumps(summary, default=str),
+        rationale=(
+            f"{summary.get('campaigns_processed', 0)}개 캠페인 전원 무결정 — "
+            f"스킵 {summary.get('skipped', 0)}({summary.get('skip_breakdown', {})}) "
+            f"오류 {summary.get('errors', 0)}"
+        ),
+    ))
+
+
 def run_flight_loop(
     db: Session,
     *,
@@ -187,11 +260,15 @@ def run_flight_loop(
     campaigns = _ours_campaigns(db)
     if not campaigns:
         log.info("flight_loop: optimizer='ours' 캠페인 없음 — 스킵")
-        return {"campaigns_processed": 0, "decisions": []}
+        return {
+            "campaigns_processed": 0, "decided": 0, "skipped": 0,
+            "skip_breakdown": {}, "errors": 0, "decisions": [], "dry_run": dry_run,
+        }
 
     weekday = today.weekday()
     weights = _hourly_weights(db, weekday)
     decisions = []
+    skip_breakdown: dict[str, int] = {}
 
     # D-NAO-44: 완결도 곡선 run당 1회 pre-compute(캠페인 루프 밖, 원칙18-6 — harness가
     # 원료를 유통하고 SA는 서로 모른다). /stats 당일누적은 시각별로 체계적 저평가라
@@ -199,12 +276,31 @@ def run_flight_loop(
     # 쓰면 예산제약(αB)이 남은예산을 과대평가해 α가 과속 편향된다(PLAN §0).
     curve_by_hour = completeness_curve.build_curve(db, today=today)
 
-    for cs in campaigns:
+    for cs, entity_status in campaigns:
         cid = cs.campaign_id
         try:
+            # 정지된 캠페인은 예측 자체가 생성되지 않는다(_ours_campaigns docstring 참조).
+            # "forecast 없음"으로 뭉뚱그리면 대응이 갈리지 않으므로 사유를 분리한다.
+            if entity_status is not None and entity_status != "on":
+                skip_breakdown[SKIP_CAMPAIGN_OFF] = skip_breakdown.get(SKIP_CAMPAIGN_OFF, 0) + 1
+                decisions.append({
+                    "campaign_id": cid,
+                    "skipped": SKIP_CAMPAIGN_OFF,
+                    "skip_detail": f"NaverEntity.status={entity_status}",
+                })
+                continue
+
             forecast = _today_forecast(db, cid, today)
             if forecast is None:
-                decisions.append({"campaign_id": cid, "skipped": "forecast 없음"})
+                gate = _forecast_gate_hint(db, cid)
+                skip_breakdown[SKIP_FORECAST_MISSING] = (
+                    skip_breakdown.get(SKIP_FORECAST_MISSING, 0) + 1
+                )
+                decisions.append({
+                    "campaign_id": cid,
+                    "skipped": SKIP_FORECAST_MISSING,
+                    "skip_detail": f"gate_status={gate}" if gate else "gate_status=미등록",
+                })
                 continue
 
             actuals = _today_actuals(db, cid, today)
@@ -324,6 +420,32 @@ def run_flight_loop(
             log.exception("flight_loop: campaign %s 처리 실패: %s", cid, e)
             decisions.append({"campaign_id": cid, "error": str(e)})
 
+    decided = sum(1 for d in decisions if "alpha" in d)
+    errors = sum(1 for d in decisions if "error" in d)
+    skipped = sum(skip_breakdown.values())
+    summary = {
+        "campaigns_processed": len(decisions),
+        "decided": decided,
+        "skipped": skipped,
+        "skip_breakdown": skip_breakdown,
+        "errors": errors,
+        "dry_run": dry_run,
+    }
+
+    # ★"N캠페인 처리"만 찍으면 전원 스킵도 정상 완주로 보인다(2026-07-25~28 실사고:
+    # 크론은 매 2시간 ok였고 예외 로그도 0건인데 결정은 4일간 하나도 없었다).
+    # 결정 0 = 이 루프의 존재 이유가 사라진 상태이므로 로그 레벨을 올리고 진단 행을 남긴다.
+    if decided == 0:
+        log.warning(
+            "flight_loop: %d캠페인 전원 무결정 — 스킵 %d %s, 오류 %d (dry_run=%s)",
+            len(decisions), skipped, skip_breakdown, errors, dry_run,
+        )
+        _log_flight_silence(db, summary=summary, now=now)
+    else:
+        log.info(
+            "flight_loop: %d캠페인 처리 — 결정 %d, 스킵 %d %s, 오류 %d (dry_run=%s)",
+            len(decisions), decided, skipped, skip_breakdown, errors, dry_run,
+        )
+
     db.commit()
-    log.info("flight_loop: %d캠페인 처리 (dry_run=%s)", len(decisions), dry_run)
-    return {"campaigns_processed": len(decisions), "decisions": decisions, "dry_run": dry_run}
+    return {**summary, "decisions": decisions}
