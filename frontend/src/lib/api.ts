@@ -2854,3 +2854,151 @@ export function fetchNaverPerformanceBudget(
   const qs = q.toString();
   return fetchApi<NaverPerformanceBudget>(`/api/naver/ad/performance/budget${qs ? `?${qs}` : ""}`);
 }
+
+// ── ⑤ BEP 구성 — 성과뷰 Phase 3 (D-NAO-104, 계획서 §4-ⓓ) ──────────────
+// ★새 산식 없음 — bep_breakdown.py는 매일 저장된 naver_product_bep 값을 되짚어 보여줄 뿐이다.
+//   화면 산술은 저장값끼리의 자명한 조합(수수료액=판매가×요율, 세전잔액=판매가−수수료−원가−
+//   물류비)이고, 공헌이익은 그걸 ÷vat_divisor 한 값이다(뺄셈이 안 맞아 보이는 이유를 화면에서
+//   설명해야 한다 — 컴포넌트 쪽 요구사항 참조).
+export interface NaverPerformanceBepRow {
+  product_name: string;
+  /** ★화면에 절대 렌더 금지(내부값) — ad_count로만 개수를 보여준다. */
+  campaign_ids: string[];
+  ad_count: number;
+  selling_price: number;
+  /** 분수(0~1). pctFromFraction 계약. */
+  commission_rate: number | null;
+  commission_won: number;
+  /** null = 원가 미입력 — 0으로 렌더하지 않는다. */
+  cost_price: number | null;
+  logistics_cost: number;
+  /** 분수(0~1). */
+  nbaesong_share: number | null;
+  nbaesong_sample: number | null;
+  /** 판매가−수수료−원가−물류비. null = 원가 미입력이라 산출 불가. */
+  pre_vat_margin: number | null;
+  /** pre_vat_margin ÷ vat_divisor. */
+  contribution_margin: number | null;
+  bep_roas: number | null;
+  target_roas: number | null;
+  /** null = 상한 산출 불가(blocked_reason 또는 ceiling_basis에 사유). */
+  ceiling_bid: number | null;
+  /** true = 이 행의 ceiling_bid가 이 상품 자체 표본이 아니라 **계정 평균을 빌려** 계산된
+   *  값이라 실제보다 후하게(낙관적으로) 나왔을 수 있다. marketBidTone에서 이 값이 true면
+   *  good/bad 색 판정을 건너뛰고 중립(idle)으로 렌더한다(근거 없는 확신을 색으로 주지 않는다). */
+  ceiling_is_borrowed: boolean;
+  /** 마크다운 `**` 포함 가능 — stripBoldMarkers로 정제 후 렌더할 것. */
+  ceiling_basis: string;
+  market_bid: number | null;
+  market_bid_position: number | null;
+  /** "" = 문제 없음. 비어있지 않으면 상한을 계산할 수 없었던 이유. */
+  blocked_reason: string;
+  sentence: string;
+}
+
+export interface NaverPerformanceBepBreakdown {
+  rows: NaverPerformanceBepRow[];
+  missing_cost_count: number;
+  vat_divisor: number;
+  data_note: string;
+  campaign_id: string | null;
+  as_of: string;
+}
+
+export function fetchNaverPerformanceBepBreakdown(
+  params: { campaignId?: string; onlyActionable?: boolean } = {},
+): Promise<NaverPerformanceBepBreakdown> {
+  const q = new URLSearchParams();
+  if (params.campaignId) q.set("campaign_id", params.campaignId);
+  if (params.onlyActionable !== undefined) {
+    q.set("only_actionable", params.onlyActionable ? "true" : "false");
+  }
+  const qs = q.toString();
+  return fetchApi<NaverPerformanceBepBreakdown>(
+    `/api/naver/ad/performance/bep-breakdown${qs ? `?${qs}` : ""}`,
+  );
+}
+
+// ── ⑥ 개선 타임라인 — 성과뷰 Phase 3 (D-NAO-104, 계획서 §4-ⓔ) ──────────
+// ★인과 주장 없음 — perf_timeline_harness.build_timeline은 "이 변경 전후 기간이 이랬다"는
+//   관찰만 낸다. sentence/data_note는 백엔드가 쓴 문장을 그대로 렌더한다(정직 규약은
+//   백엔드에 있다 — 프론트가 다시 쓰지 않는다).
+export interface NaverPerformanceTimelineEvent {
+  /** ★화면에 렌더 금지 — React key 용도로만 쓴다. */
+  ref_key: string;
+  label_ko: string;
+  /** 빈 문자열일 수 있다. */
+  detail_ko: string;
+  effective_confidence: "commit" | "assumed" | "log" | "unknown";
+  scope: "account" | "campaign";
+  source: "track" | "change_log";
+  curated: boolean;
+  /** campaign_id가 있을 때만 존재. */
+  campaign_name?: string;
+}
+
+export interface NaverPerformanceTimelineWindow {
+  days: number;
+  /** 달력상 일수(days) 중 실제로 적재된 행이 있었던 날짜 수. days_with_data === 0이면
+   *  cost/conv_amt/roas는 전부 null(측정된 0이 아니라 데이터 없음 — 원칙22). */
+  days_with_data: number;
+  /** null = 측정 안 됨(0이 아니다 — 원칙22). */
+  cost: number | null;
+  conv_amt: number | null;
+  roas: number | null;
+}
+
+export interface NaverPerformanceTimelineImpact {
+  pre: NaverPerformanceTimelineWindow;
+  post: NaverPerformanceTimelineWindow & { complete: boolean };
+  /** 최대 5개까지만 — 전체 개수는 confounded_count로 따로 나간다. */
+  confounded_with: string[];
+  /** ★다른 날의 변경만 센다(같은 날 함께 확정된 변경은 same_day_count로 따로 낸다). */
+  confounded_count: number;
+  /** 그날 함께 확정된 변경 수(자기 자신 포함). > 1이면 그 결정들을 서로 떼어 볼 수 없다는 뜻. */
+  same_day_count: number;
+  sentence: string;
+}
+
+export interface NaverPerformanceTimelineDay {
+  date: string;
+  events: NaverPerformanceTimelineEvent[];
+  /** null = 날짜 파싱 실패로 전후 비교를 못 낸 것. */
+  impact: NaverPerformanceTimelineImpact | null;
+}
+
+export interface NaverPerformanceTimeline {
+  as_of: string;
+  days: number;
+  campaign_id: string | null;
+  /** false여도 에러가 아니다 — 트랙 결정 목록 없이 라이브 변경만 나온다는 뜻. */
+  catalog_available: boolean;
+  undated_catalog_count: number;
+  event_count: number;
+  /** 날짜 오름차순. */
+  timeline: NaverPerformanceTimelineDay[];
+  retro: {
+    window_days: number;
+    n: number;
+    correct: number;
+    gray: number;
+    wrong: number;
+    no_spend: number;
+    precision_spenders: number | null;
+    bleed_sum: number | null;
+    sentence: string;
+  };
+  data_note: string;
+}
+
+export function fetchNaverPerformanceTimeline(
+  params: { days?: number; campaignId?: string } = {},
+): Promise<NaverPerformanceTimeline> {
+  const q = new URLSearchParams();
+  if (params.days !== undefined) q.set("days", String(params.days));
+  if (params.campaignId) q.set("campaign_id", params.campaignId);
+  const qs = q.toString();
+  return fetchApi<NaverPerformanceTimeline>(
+    `/api/naver/ad/performance/timeline${qs ? `?${qs}` : ""}`,
+  );
+}

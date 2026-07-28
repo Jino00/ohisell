@@ -150,21 +150,16 @@ def resolve_bep(db: Session, ad_id: str) -> dict:
     }
 
 
-def compute_ceiling(db: Session, ad_id: str, adgroup_id: str, campaign_id: str, today: date) -> dict:
-    """콜드 소재의 이익 CPC 상한 = affordable_ceiling(RPC, bep_roas)  (= CVR × 공헌이익, 위 증명).
+def ceiling_from(db: Session, ad_id: str, rpc_info: dict) -> dict:
+    """이미 구한 RPC로 상한만 낸다 — RPC 사다리를 **재사용**하고 싶을 때의 진입점.
 
-    반환 dict:
-      ceiling_cpc:   int  — 유효 입찰 규격(10원 단위 내림). 0 = 상한 못 세움.
-      rpc / rpc_source / sample_clk / confident  — 근거와 신뢰도(호출부까지 반드시 전달).
-      bep_roas / contribution_margin / product_name
-      reason: 상한을 못 세운 사유(ceiling_cpc>0이면 "").
-
-    ★confident=False(계정 층 폴백)여도 상한 자체는 낸다 — 다만 라벨을 그대로 실어 보내고,
-      제안 여부는 호출부(cold_start_bid_decider)가 판단한다. 표본 빈약이 조용히 묻히면
-      "신뢰도 낮은 상한으로 공격적 입찰"이 되므로 라벨은 절대 떨어뜨리지 않는다.
+    RPC는 (광고그룹·캠페인)에만 의존하는데 compute_ceiling은 소재마다 사다리를 다시 돈다.
+    상품 여러 개·소재 수십 개를 한 화면에 그리는 호출부(성과뷰 ⑤)에서는 같은 계정 전체 집계가
+    소재 수만큼 반복된다(라이브 54회 — 리뷰 P2-10). 호출부가 resolve_rpc를 캐시해 넘기면
+    이 함수가 나머지(상품 BEP 조인 + affordable_ceiling)만 한다.
+    ★산식은 compute_ceiling과 **같은 한 벌**이다 — 아래 compute_ceiling이 이 함수를 호출한다.
     """
     bep = resolve_bep(db, ad_id)
-    rpc_info = resolve_rpc(db, adgroup_id, campaign_id, today)
     out = {
         "ad_id": ad_id, "ceiling_cpc": 0, "reason": "",
         **rpc_info, **{k: bep[k] for k in ("bep_roas", "contribution_margin", "product_name")},
@@ -187,3 +182,19 @@ def compute_ceiling(db: Session, ad_id: str, adgroup_id: str, campaign_id: str, 
         return out
     out["ceiling_cpc"] = ceiling
     return out
+
+
+def compute_ceiling(db: Session, ad_id: str, adgroup_id: str, campaign_id: str, today: date) -> dict:
+    """콜드 소재의 이익 CPC 상한 = affordable_ceiling(RPC, bep_roas)  (= CVR × 공헌이익, 위 증명).
+
+    반환 dict:
+      ceiling_cpc:   int  — 유효 입찰 규격(10원 단위 내림). 0 = 상한 못 세움.
+      rpc / rpc_source / sample_clk / confident  — 근거와 신뢰도(호출부까지 반드시 전달).
+      bep_roas / contribution_margin / product_name
+      reason: 상한을 못 세운 사유(ceiling_cpc>0이면 "").
+
+    ★confident=False(계정 층 폴백)여도 상한 자체는 낸다 — 다만 라벨을 그대로 실어 보내고,
+      제안 여부는 호출부(cold_start_bid_decider)가 판단한다. 표본 빈약이 조용히 묻히면
+      "신뢰도 낮은 상한으로 공격적 입찰"이 되므로 라벨은 절대 떨어뜨리지 않는다.
+    """
+    return ceiling_from(db, ad_id, resolve_rpc(db, adgroup_id, campaign_id, today))
