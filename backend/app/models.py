@@ -1398,7 +1398,10 @@ class CoupangRocketSettlement(Base):
     first_payment_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)  # 1차지급액
     second_payment_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)  # 2차지급액
     # 전자세금계산서 전송성공 여부 — 정산 테이블 마지막(헤더명 빈) 링크 컬럼에서 파싱(ref 20 §4 #16).
-    #   True='전송성공' 표기 / False=표기 없음(미전송) / None=셀 부재·미관측 토큰(판별 불가).
+    #   True='전송성공' 표기 / False='전송성공' **미표기** / None=셀 부재·미관측 토큰(판별 불가).
+    #   ★False를 '전송실패'로 읽지 말 것. 실측 10행에서 False인 유일한 행은 세금계산서 확정일도
+    #     '-'(미확정)이라, 관측된 사실은 "확정 전에는 상태 텍스트가 없다"까지다. '확정됐는데 미전송'
+    #     표본은 0건 — 진짜 실패와 미발행을 구분하려면 별도 근거가 필요하다.
     tax_invoice_transmitted: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 

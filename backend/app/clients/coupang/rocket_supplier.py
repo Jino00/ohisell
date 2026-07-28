@@ -171,29 +171,35 @@ _SETTLE_LINK_BUTTONS = ("발주현황", "입고상세내역")
 _TRANSMIT_SUCCESS = "전송성공"
 
 
-def _to_transmitted(v: Any) -> bool | None:
+def _to_transmitted(v: Any, seen: set[str] | None = None) -> bool | None:
     """정산 마지막(빈 헤더) 링크 셀 → 전자세금계산서 전송성공 여부(bool|None).
 
     실측 변형(20_rocket_1p_settlement_dom_sample.json 10행 전수):
       "발주현황 입고상세내역 전송성공" (9행 — 전부 세금계산서 확정일 있음) → True
-      "발주현황 입고상세내역"          (1행 — 확정일 '-' = 미확정)        → False(전송 이력 없음)
+      "발주현황 입고상세내역"          (1행 — 확정일 '-' = 미확정)        → False(전송성공 미표기)
     셀 부재(컬럼 없음/행 짧음)·빈 문자열 → None(판별 불가).
-    버튼 라벨 제거 후 남은 토큰이 미관측 상태면 → None + warning(True/False로 뭉개지 않음, D-13).
+    잔여 토큰이 미관측 상태면 → None + warning(True/False로 뭉개지 않음, D-13).
+
+    버튼 라벨은 **토큰 단위 정확 일치**로만 걸러낸다(부분문자열 replace 금지):
+      replace는 라벨이 드리프트하면 상태 토큰을 잘라 먹고, 잔여가 비면 False로 **오판**한다.
+      토큰 일치는 잔여를 원형 그대로 남겨 미관측이면 반드시 None으로 떨어진다.
+    seen: 미관측 토큰 warning 중복 억제 집합(파싱 1회당 토큰당 1줄).
+      정산은 최대 100페이지×50행 → 행마다 찍으면 수천 줄이 쏟아진다.
     """
     if v is None:
         return None
     s = str(v).strip()
     if not s:
         return None
-    rest = s
-    for btn in _SETTLE_LINK_BUTTONS:
-        rest = rest.replace(btn, " ")
-    rest = " ".join(rest.split())
+    rest = " ".join(t for t in s.split() if t not in _SETTLE_LINK_BUTTONS)
     if not rest:
-        return False  # 버튼만 = 전송상태 미표기 = 미전송
+        return False  # 버튼만 = 전송성공 미표기
     if rest == _TRANSMIT_SUCCESS:
         return True
-    log.warning("rocket 정산 파서: 미관측 전송상태 토큰=%r (셀 원문=%r) → None", rest, s)
+    if seen is None or rest not in seen:
+        if seen is not None:
+            seen.add(rest)
+        log.warning("rocket 정산 파서: 미관측 전송상태 토큰=%r (셀 원문=%r) → None", rest, s)
     return None
 
 
@@ -211,11 +217,21 @@ def parse_settlement_rows(rows: list[list[str]]) -> list[dict]:
     for col_name, key in _SETTLE_COL.items():
         if col_name not in header:
             continue
-        # 빈 헤더('')는 링크 컬럼 = 항상 **마지막** → 앞쪽 빈 헤더가 끼어도 뒤에서 찾는다(방어).
-        idx[key] = (len(header) - 1 - header[::-1].index(col_name)) if col_name == "" else header.index(col_name)
+        if col_name == "":
+            # 빈 헤더('')는 링크 컬럼 = 문서상 항상 **마지막**(ref 20 §4 #16) → 뒤에서 찾는다.
+            #   빈 헤더가 둘 이상이면 헤더만으로는 구분 불가 → 가정을 소리내어 밝히고 마지막을 택한다.
+            if header.count("") > 1:
+                log.warning("rocket 정산 파서: 빈 헤더 %d개 → 마지막을 링크 컬럼으로 가정. header=%s",
+                            header.count(""), header)
+            idx[key] = len(header) - 1 - header[::-1].index("")
+        else:
+            idx[key] = header.index(col_name)
     if "invoice_seq" not in idx:
         log.warning("rocket 정산 파서: '계산서번호' 헤더 없음 → 파싱 중단. header=%s", header[:6])
         return []
+    if "transmit_cell" not in idx:
+        # 조용히 전 행 None이 되는 것을 막는다 — 이 커밋이 존재하는 이유가 '컬럼이 소리 없이 사라짐'이다.
+        log.warning("rocket 정산 파서: 링크 컬럼(빈 헤더) 없음 → 전송상태 전 행 None. header=%s", header)
 
     def cell(row: list, key: str) -> Any:
         i = idx.get(key)
@@ -224,6 +240,7 @@ def parse_settlement_rows(rows: list[list[str]]) -> list[dict]:
         return row[i]
 
     records: list[dict] = []
+    unknown_transmit: set[str] = set()  # 미관측 전송상태 토큰 — 파싱 1회당 토큰당 warning 1줄
     for row in rows[1:]:
         if not isinstance(row, (list, tuple)) or not row:
             continue
@@ -244,7 +261,7 @@ def parse_settlement_rows(rows: list[list[str]]) -> list[dict]:
             "tax_type": (str(cell(row, "tax_type")).strip() or None) if cell(row, "tax_type") else None,
             "first_payment_amount": _to_dec(cell(row, "first_payment_amount")),
             "second_payment_amount": _to_dec(cell(row, "second_payment_amount")),
-            "tax_invoice_transmitted": _to_transmitted(cell(row, "transmit_cell")),
+            "tax_invoice_transmitted": _to_transmitted(cell(row, "transmit_cell"), unknown_transmit),
         })
     return records
 

@@ -198,19 +198,60 @@ def test_parse_settlement_transmitted_column():
     assert recs[2]["tax_invoice_transmitted"] is True
 
 
-def test_parse_settlement_transmitted_missing_column():
-    # 링크 컬럼(빈 헤더) 자체가 없는 DOM → None(다른 필드 파싱은 정상)
+def test_to_transmitted_button_label_drift_never_yields_false():
+    # ★버튼 라벨이 드리프트해도 잔여를 잘라 먹지 않는다(토큰 정확 일치).
+    #   부분문자열 replace였다면 잔여가 비어 False로 오판할 수 있는 자리.
+    assert rs._to_transmitted("발주현황조회 입고상세내역 전송성공") is None  # 미관측 토큰 → None
+    assert rs._to_transmitted("발주 현황 입고상세내역") is None            # 라벨 분리 → 판별 불가
+    # 정상 라벨에서는 여전히 판정된다(회귀 방어)
+    assert rs._to_transmitted("발주현황 입고상세내역 전송성공") is True
+
+
+def test_to_transmitted_warns_once_per_token():
+    # 미관측 토큰 warning은 파싱 1회당 토큰당 1줄(정산 최대 100p×50행 → 로그 폭주 방지)
+    seen: set[str] = set()
+    for _ in range(5):
+        assert rs._to_transmitted("발주현황 입고상세내역 전송실패", seen) is None
+    assert seen == {"전송실패"}
+
+
+def test_parse_settlement_transmitted_missing_column(caplog):
+    # 링크 컬럼(빈 헤더) 자체가 없는 DOM → None(다른 필드 파싱은 정상) + **소리내어** 경고
     rows = [["계산서번호", "공급가액"], ["30025494", "510,819"]]
-    recs = rs.parse_settlement_rows(rows)
+    with caplog.at_level("WARNING"):
+        recs = rs.parse_settlement_rows(rows)
     assert recs[0]["tax_invoice_transmitted"] is None
     assert recs[0]["supply_amount"] == Decimal("510819")
+    assert any("링크 컬럼" in r.getMessage() for r in caplog.records)
+
+
+def test_parse_settlement_transmitted_leading_blank_header():
+    # 앞쪽에 빈 헤더가 끼어도 링크 컬럼(마지막)을 정확히 집는다
+    header = [""] + _SETTLE_HEADER
+    row = ["x"] + _SETTLE_ROWS[1]
+    recs = rs.parse_settlement_rows([header, row])
+    assert len(recs) == 1
+    assert recs[0]["invoice_seq"] == 30025494
+    assert recs[0]["tax_invoice_transmitted"] is False
+
+
+def test_parse_settlement_ambiguous_blank_headers_warns(caplog):
+    # 빈 헤더가 2개 이상이면 '마지막을 링크 컬럼으로 가정'했음을 소리내어 밝힌다
+    header = _SETTLE_HEADER + [""]
+    row = _SETTLE_ROWS[2] + ["발주현황 입고상세내역 전송성공"]
+    with caplog.at_level("WARNING"):
+        recs = rs.parse_settlement_rows([header, row])
+    assert recs[0]["tax_invoice_transmitted"] is True
+    assert any("빈 헤더" in r.getMessage() for r in caplog.records)
 
 
 def test_parse_settlement_from_live_dom_sample():
     """★원본 증거 파일 직접 파싱(ref 20 §4): 10행 중 9행 전송성공 / 1행 미전송."""
     sample = _REPO_ROOT / "docs" / "references" / "data" / "20_rocket_1p_settlement_dom_sample.json"
     if not sample.exists():
-        pytest.skip(f"원본 DOM 샘플 없음: {sample}")
+        # skip이 아니라 fail: 이 파일은 git 추적 중이고, 파싱 규칙의 **유일한** 근거다.
+        #   사라졌는데 스위트가 green이면 구현 베끼기 테스트만 남는다.
+        pytest.fail(f"원본 DOM 샘플이 없다(git 추적 파일): {sample}")
     recs = rs.parse_settlement_rows(json.loads(sample.read_text(encoding="utf-8"))["rows"])
     assert len(recs) == 10
     flags = [r["tax_invoice_transmitted"] for r in recs]
