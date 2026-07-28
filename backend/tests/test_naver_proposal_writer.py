@@ -1255,7 +1255,28 @@ def test_build_growth_candidate_appends_forecast_evidence_when_available(db):
     )
     assert len(out) == 1
     assert "예측(오늘)" in out[0]["rationale"]
-    assert "conv_amt=90000원" in out[0]["rationale"]
+    # keyword grain = 상세 행 소스라 conv_*는 구매만 — 기준 라벨도 "구매"(라벨 정정 2026-07-28)
+    assert "conv_amt(구매)=90000원" in out[0]["rationale"]
+
+
+def test_build_campaign_forecast_evidence_labels_conv_amt_basis_as_all_actions(db):
+    """★라벨 정정(2026-07-28): campaign grain pred_conv_amt는 sentinel(/stats) 소스라
+    구매+장바구니 합이다 — 기준을 안 적으면 제안 근거에서 예상매출이 부풀어 보인다
+    (03 캠페인 07-27 +64%). 값은 그대로 두고 라벨만 붙인다(forecast_scorer 내부 일관성 보존).
+    """
+    db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
+    db.commit()
+    diagnosis = _diagnosis()
+    forecast_data = {("campaign", "cmp-ours"): {"pred_clk": 40, "pred_cost": 18_000, "pred_conv_amt": 90_000}}
+
+    out = proposal_writer.build(
+        db, diagnosis, budget_signals=[_budget_signal(daily_budget=10_000)],
+        forecast_data=forecast_data, as_of=AS_OF,
+    )
+    assert len(out) == 1
+    assert "conv_amt(전 전환액션=구매+장바구니)=90000원" in out[0]["rationale"]
+    # 값 자체는 불변(계산 변경 금지 — 라벨만 정정)
+    assert "=90000원" in out[0]["rationale"]
 
 
 def test_build_growth_candidate_skips_non_ours_campaign(db):
