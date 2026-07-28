@@ -51,6 +51,11 @@ KIND_LOGIN_REQUIRED = "login_required"
 #   not_found=일시적 / wrong_kind=영구적 분리).
 KIND_ACCESS_DENIED = "access_denied"
 
+# ★mapping_broken(4R) — 수집기 매핑이 깨져 응답은 오는데 레코드가 0인 상태. access_denied와
+#   **재시도 정책은 같지만(0회) 처방이 정반대**다: 이쪽은 결제가 아니라 코드를 고쳐야 한다.
+#   한 kind로 뭉치면 운영자가 멀쩡한 구독을 갱신하며 코드 버그를 쫓는다.
+KIND_MAPPING_BROKEN = "mapping_broken"
+
 # lease TTL(분) — "데몬이 보고도 못 하고 죽었다"고 간주하기까지의 시간.
 # ★실측 근거(2026-07-27, Mac 페처 로그 ~/.ohisell_*_fetcher.log의 claim→활동종료 구간):
 #     ad_cost   run=227회  median 22s  p90 76s  max 684s(11.4분, 2026-06-17 로그인 대기 포함)
@@ -322,6 +327,7 @@ def report_failure(
 
     - kind="login_required" → 재시도 없음(창만 반복해서 뜸, §0 금지선). 요청 소멸.
     - kind="access_denied" → 재시도 없음(구독/권한 만료는 영구적). 요청 소멸.
+    - kind="mapping_broken" → 재시도 없음(수집기 매핑 파손). 요청 소멸. 처방은 코드 수정.
     - attempt_count >= MAX_ATTEMPTS → 재시도 예산 소진. 요청 소멸.
     - 그 외 → claimed_at=None으로 lease만 반납 → 다음 폴에서 페처가 자동 재claim(=재시도).
 
@@ -359,6 +365,8 @@ def report_failure(
         reason = "로그인 필요 — 재시도 안 함(로그인 후 다시 갱신을 눌러주세요)"
     elif kind == KIND_ACCESS_DENIED:
         reason = "접근 권한/구독 만료 — 재시도 안 함(구독 상태를 확인한 뒤 다시 갱신을 눌러주세요)"
+    elif kind == KIND_MAPPING_BROKEN:
+        reason = "수집기 매핑 파손 — 재시도 안 함(구독 문제가 아니라 코드 수정이 필요합니다)"
     elif attempt >= MAX_ATTEMPTS:
         reason = f"재시도 {MAX_ATTEMPTS}회 소진"
 

@@ -522,7 +522,7 @@ def test_genuinely_out_of_range_days_are_clamped_not_failed(fetcher, frozen_toda
     assert stats["days_collected"] == 3
     # ★세 카운터의 합 = 요청 일수. 안 맞으면 어딘가로 하루가 조용히 새고 있다는 뜻이다.
     assert (stats["days_collected"] + stats["days_out_of_range"]
-            + stats["days_failed"]) == stats["days_requested"]
+            + stats["days_failed"] + stats["days_abandoned"]) == stats["days_requested"]
 
 
 def test_all_days_failing_is_systemic_and_raises(fetcher, frozen_today):
@@ -643,3 +643,70 @@ def test_ingest_source_never_assigns_unit_discount_amount():
         "rocket_promo_sync가 unit_discount_amount를 건드린다 — 수기 입력(D-CPP-7)이 "
         "재수집에 지워진다. 페처 경로는 이 칸을 절대 쓰지 않아야 한다."
     )
+
+
+def test_empty_today_after_transient_failures_is_not_access_denied(fetcher, frozen_today):
+    """★내가 만든 회귀(적대적 리뷰 4R): 못 본 창은 증거가 아니다.
+
+    6일이 일시적 500 + 오늘은 정상 200인데 아직 판매 0(이른 아침) — 완전히 정당한 상태다.
+    그런데 창 전체 판정이 `days_failed`를 무시하면 "vendorItems 전부 0 = 접근 차단"으로
+    단정하고, 그 결과 rc가 RC_ACCESS_DENIED가 되어 **재시도 0회로 요청이 영구 소멸**한다.
+    수정 전 코드보다 나쁜 상태 — 빈 창은 '관측된 빈 창'일 때만 증거다.
+    """
+    def responder(arg):
+        day = arg[1]["startDate"]
+        if day != "2026-07-28":
+            return {"status": 500, "body": "transient"}
+        return {"status": 200, "body": json.dumps(
+            {"vendorItems": [], "paginationDetails": {"pageNumber": 0, "totalPages": 1,
+                                                      "totalResults": 0}})}
+
+    rows, stats = fetcher._collect_sales_rows(FakePage(responder), dict(_CFG))
+    assert rows == []
+    assert stats["days_failed"] == 6 and stats["days_collected"] == 1
+    # ★핵심: 예외가 나지 않는다(= 요청이 소멸되지 않는다)
+
+
+def test_access_denied_still_fires_when_window_fully_observed(fetcher, frozen_today):
+    """반대 방향도 지킨다 — 빠짐없이 관측한 빈 창은 여전히 접근 차단으로 올린다."""
+    def responder(arg):
+        return {"status": 200, "body": json.dumps(
+            {"vendorItems": [], "paginationDetails": {"pageNumber": 0, "totalPages": 1,
+                                                      "totalResults": 0}})}
+
+    with pytest.raises(fetcher._SalesAccessDenied):
+        fetcher._collect_sales_rows(FakePage(responder), dict(_CFG))
+
+
+def test_today_total_results_race_keeps_rows_instead_of_failing(fetcher, frozen_today):
+    """★당일은 페이지 사이 신규 판매로 totalResults가 정상적으로 어긋난다(4R).
+
+    당일까지 hard-raise하면 장사가 잘 되는 날마다 그날을 버린다 — 경보가 정상을 실패로 만든다.
+    과거일은 확정치라 그대로 실패로 올린다.
+    """
+    def responder(arg):
+        day = arg[1]["startDate"]
+        # 모든 날: 1건 받았는데 서버는 2건이라고 말한다(당일은 레이스, 과거일은 절단)
+        return {"status": 200, "body": _sales_ok_body(day, items=1, total_pages=1,
+                                                      total_results=2)}
+
+    _rows, stats = fetcher._collect_sales_rows(FakePage(responder), dict(_CFG))
+    assert stats["days_collected"] == 1                  # 오늘(07-28)만 살아남는다
+    assert stats["days_failed"] == 6                     # 과거 6일은 절단으로 실패
+    assert "2026-07-28" not in stats["failed_dates"]
+
+
+def test_budget_exhaustion_counts_abandoned_days(fetcher, frozen_today, monkeypatch):
+    """예산 초과로 포기한 날도 센다 — 안 세면 '창을 다 봤다'고 착각한다(4R)."""
+    import itertools
+    # 첫 호출 이후 시계를 예산 밖으로 밀어버린다
+    ticks = itertools.chain([0.0, 1.0], itertools.repeat(10_000.0))
+    monkeypatch.setattr(fetcher.time, "monotonic", lambda: next(ticks))
+
+    def responder(arg):
+        return {"status": 200, "body": _sales_ok_body(arg[1]["startDate"])}
+
+    _rows, stats = fetcher._collect_sales_rows(FakePage(responder), dict(_CFG))
+    assert stats["days_abandoned"] > 0
+    assert (stats["days_collected"] + stats["days_out_of_range"]
+            + stats["days_failed"] + stats["days_abandoned"]) == stats["days_requested"]

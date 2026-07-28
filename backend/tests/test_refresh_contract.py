@@ -444,3 +444,18 @@ def test_access_denied_extinguishes_immediately(db):
     assert row.refresh_requested_at is None          # 요청 소멸 = 재시도 0회
     assert "판매분석 접근 차단" in row.last_error     # 사유는 남는다(조용하지 않다)
     assert rc.claim_refresh(db, ACC)["claimed"] is False
+
+
+def test_mapping_broken_extinguishes_but_says_code_not_subscription(db):
+    """★재시도 정책은 access_denied와 같지만 **처방이 정반대**다(4R).
+
+    응답은 오는데 레코드가 0이면 구독이 아니라 수집기 매핑이 깨진 것이다. 한 kind로 뭉치면
+    운영자가 멀쩡한 구독을 갱신하며 코드 버그를 쫓는다.
+    """
+    rc.request_refresh(db, ACC)
+    rc.claim_refresh(db, ACC)
+    out = rc.report_failure(db, ACC, "판매분석 매핑 파손", kind=rc.KIND_MAPPING_BROKEN)
+
+    assert out["retry"] is False
+    assert "코드 수정" in out["reason"] and "구독" not in out["reason"].split("(")[0]
+    assert _row(db).refresh_requested_at is None

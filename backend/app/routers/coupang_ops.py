@@ -1415,7 +1415,22 @@ def ingest_rocket_sales(
     if not isinstance(rows, list) or not rows:
         raise HTTPException(status_code=400, detail="rows[] 필요")
     source = str(body.get("source") or "sales_analysis").strip() or "sales_analysis"
-    return rocket_promo_sync.ingest_rocket_sales(db, vendor_id, rows, source=source)
+    out = rocket_promo_sync.ingest_rocket_sales(db, vendor_id, rows, source=source)
+    # ★수집 통계를 prod 로그에 남긴다(적대적 리뷰 4R): 실패·미조회 날짜가 Mac 로컬 로그에만
+    #   있으면 아무도 안 본다 — RG 26일 침묵이 정확히 그 형태였다(감지는 되는데 표면이 없음).
+    #   페처가 안 보내는 구버전이면 빈 dict라 그냥 조용하다(하위호환).
+    cs = body.get("collection_stats")
+    if isinstance(cs, dict) and cs:
+        out["collection_stats"] = cs
+        if cs.get("days_failed") or cs.get("days_abandoned"):
+            log.warning(
+                "1P 판매 수집 부분 성공: vendor=%s 요청 %s일 → 수집 %s·범위밖 %s·실패 %s·미조회 %s "
+                "(실패 날짜 %s) — 롤링 창이 다음 회차에 메우는지 확인할 것",
+                vendor_id, cs.get("days_requested"), cs.get("days_collected"),
+                cs.get("days_out_of_range"), cs.get("days_failed"), cs.get("days_abandoned"),
+                ",".join(cs.get("failed_dates") or [])[:200],
+            )
+    return out
 
 
 @router.post("/rocket/promotion/ingest")

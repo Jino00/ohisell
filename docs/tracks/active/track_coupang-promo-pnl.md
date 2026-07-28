@@ -183,6 +183,10 @@ codex CLI 쿼터 소진(08-02 해제)으로 **신선 컨텍스트 Opus 리뷰어
    (Phase1 `c2998cfe1f7c`는 prod 적용 완료 — prod `alembic_version`이 `f6a8c0b2d4e6`인지 먼저 확인)
    → `alembic upgrade head` → ②`models.py`·`routers/coupang_ops.py`·`services/…`·`clients/…` → 재시작.
    순서 위반 시 ORM이 `no such column`으로 그 테이블 ingest를 통째로 죽인다(프로젝트 CLAUDE.md).
+   ★**순서 고정: prod 백엔드가 먼저, Mac 페처가 나중.** 페처가 새로 보내는
+   `kind="access_denied"|"mapping_broken"`을 모르는 구버전 `refresh_contract`는 그것을
+   **평범한 재시도 대상**으로 처리한다(하위호환이라 죽지는 않지만, 영구 실패가 재시도 3회를
+   그대로 태워 우리가 없앤 Chrome 3연발이 그동안 살아난다). 반대 순서면 잠깐 그 상태가 된다.
 2. **★페처 데몬 재기동 — 버튼을 누르기 전에 반드시 먼저.** `tools/rocket_supplier_fetcher.py`는
    `com.ohisell.rocket`(launchd KeepAlive 상주)이 **프로세스 시작 시 1회만** 로드한다. 재기동 없이
    3번을 하면 **구코드가 돌아** 판매분석·프로모션 로그가 아예 안 나오고, 그것이 "새 스트림이 안 붙었다"로

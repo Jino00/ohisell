@@ -1337,10 +1337,20 @@ def _collect_sales_day(page, cfg: dict, day: date):
             "정상 수집으로 세지 않는다(upsert라 빠진 옵션은 옛 값으로 남는다)"
         )
     if total_results and raw_items != total_results:
-        raise RuntimeError(
-            f"판매분석 {day}: totalResults={total_results}인데 수신 vendorItems={raw_items} — "
-            "페이지 누락/중복 의심(조용한 절단 방지)"
-        )
+        # ★오늘치는 **정상적으로도** 어긋난다(적대적 리뷰 4R): 페이지를 넘기는 사이에 새 주문이
+        #   들어오면 totalResults가 커진다. 당일을 hard-raise하면 장사가 잘 되는 날마다 그날을
+        #   버리게 된다 — 경보가 정상 상태를 실패로 만드는 전형. 과거일은 확정치라 어긋나면
+        #   진짜 절단이므로 그대로 올린다.
+        if day >= datetime.now(KST).date():
+            log.warning(
+                "판매분석 %s(당일): totalResults=%d vs 수신 %d — 수집 중 신규 판매로 보고 "
+                "수집분을 유지한다(과거일이면 실패로 올린다)", day, total_results, raw_items,
+            )
+        else:
+            raise RuntimeError(
+                f"판매분석 {day}: totalResults={total_results}인데 수신 vendorItems={raw_items} — "
+                "페이지 누락/중복 의심(조용한 절단 방지)"
+            )
     return rows, None, raw_items
 
 
@@ -1376,7 +1386,7 @@ def _collect_sales_rows(page, cfg: dict) -> tuple[list[dict], dict]:
     pending = _sales_window_days(cfg, today)
     stats = {
         "days_requested": len(pending), "days_collected": 0,
-        "days_out_of_range": 0, "days_failed": 0,
+        "days_out_of_range": 0, "days_failed": 0, "days_abandoned": 0,
         "failed_dates": [], "raw_items": 0, "rows": 0,
     }
     period: tuple[date, date] | None = None
@@ -1388,9 +1398,12 @@ def _collect_sales_rows(page, cfg: dict) -> tuple[list[dict], dict]:
         # ★시간 예산(적대적 리뷰 2R): 백필 창이 넓으면 이 스트림 하나가 lease TTL(20분)을
         #   넘겨 prod가 요청을 재무장하고 Chrome이 한 번 더 뜬다. 모은 것은 밀어 넣고 멈춘다.
         if time.monotonic() > deadline:
+            # ★포기한 날도 센다(4R): 안 세면 세 카운터 합이 요청 일수에 못 미쳐, 아래
+            #   "창을 빠짐없이 봤는가" 판정이 못 본 날을 본 것으로 착각한다.
+            stats["days_abandoned"] = len(pending)
             log.warning(
                 "판매분석 시간 예산(%d분) 초과 — 남은 %d일을 이번 회차에서 포기한다"
-                "(수집분은 push하고, 롤링 창이 다음 실행에 메운다)", budget_min, len(pending) + 1,
+                "(수집분은 push하고, 롤링 창이 다음 실행에 메운다)", budget_min, len(pending),
             )
             break
         day = pending.pop(0)
@@ -1436,9 +1449,10 @@ def _collect_sales_rows(page, cfg: dict) -> tuple[list[dict], dict]:
         page.wait_for_timeout(300)
     stats["rows"] = len(rows)
     log.info(
-        "판매분석 수집: %d일 요청 → %d일 수집·%d일 범위밖·%d일 실패, vendorItems %d개 → 레코드 %d건",
+        "판매분석 수집: %d일 요청 → %d일 수집·%d일 범위밖·%d일 실패·%d일 미조회, "
+        "vendorItems %d개 → 레코드 %d건",
         stats["days_requested"], stats["days_collected"], stats["days_out_of_range"],
-        stats["days_failed"], stats["raw_items"], len(rows),
+        stats["days_failed"], stats["days_abandoned"], stats["raw_items"], len(rows),
     )
     if stats["days_failed"]:
         log.warning("판매분석 실패 날짜: %s", ",".join(stats["failed_dates"]))
@@ -1448,12 +1462,22 @@ def _collect_sales_rows(page, cfg: dict) -> tuple[list[dict], dict]:
             f"판매분석 {stats['days_requested']}일 전부 실패 — 계통 고장으로 본다"
             f"(실패 날짜: {','.join(stats['failed_dates'][:10])})"
         )
-    if stats["days_collected"] > 0:
+    # ★창 **전체를 빠짐없이 관측했을 때만** 추론한다(적대적 리뷰 4R — 내가 만든 회귀).
+    #   앞선 판은 days_failed를 무시해서, "6일이 일시적 500 + 오늘은 정상인데 아직 판매 0"
+    #   이라는 **완전히 정당한 이른 아침 상태**에서 접근차단으로 단정했다. 그러면 rc가
+    #   RC_ACCESS_DENIED가 되어 **재시도 0회로 요청이 영구 소멸**한다 — 수정 전보다 나쁘다.
+    #   빈 창은 "관측된 빈 창"일 때만 증거이지, "못 본 창"은 아무 증거도 아니다.
+    fully_observed = (
+        stats["days_failed"] == 0
+        and stats["days_abandoned"] == 0
+        and stats["days_collected"] + stats["days_out_of_range"] == stats["days_requested"]
+    )
+    if fully_observed and stats["days_collected"] > 0:
         if stats["raw_items"] == 0:
             raise _SalesAccessDenied(
-                f"판매분석 {stats['days_collected']}일을 모두 정상 조회했는데 vendorItems가 "
-                "전부 0개 — 판매가 없는 게 아니라 접근이 끊긴 것으로 본다(D-CPP-5). "
-                "구독 상태(무료체험 종료일)를 확인할 것"
+                f"판매분석 {stats['days_collected']}일을 빠짐없이 조회했는데(실패·미조회 0일) "
+                "vendorItems가 전부 0개 — 판매가 없는 게 아니라 접근이 끊긴 것으로 본다"
+                "(D-CPP-5). 구독 상태(무료체험 종료일)를 확인할 것"
             )
         if len(rows) == 0:
             raise _SalesMappingError(
@@ -1640,8 +1664,14 @@ def _warn_ingest_health(label: str, resp) -> None:
         )
 
 
-def _push_sales(cfg: dict, rows: list[dict]) -> int:
-    """판매분석 레코드 → prod ingest(멱등 upsert). 0=성공/1=실패. 빈 수집은 push 안 함."""
+def _push_sales(cfg: dict, rows: list[dict], stats: dict | None = None) -> int:
+    """판매분석 레코드 → prod ingest(멱등 upsert). 0=성공/1=실패. 빈 수집은 push 안 함.
+
+    ★stats를 함께 보낸다(적대적 리뷰 4R): 실패 날짜·미조회 일수가 **Mac 로컬 로그에만** 남으면
+      아무도 안 본다 — RG 26일 침묵이 정확히 그 형태였다(감지·알림이 있어도 상설 표면이 없으면
+      방치). 기존 ingest 경로에 한 필드 얹는 것이라 새 배선이 없다. 백엔드가 모르는 키를
+      무시해도 손해가 없고, 나중에 배너로 끌어올릴 때 데이터가 이미 거기 있다.
+    """
     if not rows:
         log.info("판매분석 push: 레코드 0건 — 건너뜀")
         return 0
@@ -1651,7 +1681,8 @@ def _push_sales(cfg: dict, rows: list[dict]) -> int:
         try:
             pr = requests.post(
                 cfg["prod_base_url"].rstrip("/") + SALES_INGEST_PATH,
-                json={"vendor_id": cfg["vendor_id"], "source": "sales_analysis", "rows": chunk},
+                json={"vendor_id": cfg["vendor_id"], "source": "sales_analysis", "rows": chunk,
+                      "collection_stats": stats or {}},
                 headers={"X-Ingest-Token": cfg["ingest_token"]},
                 timeout=60,
             )
@@ -1702,17 +1733,18 @@ def _collect_and_push_promo_pnl(page, cfg: dict) -> tuple[int, list[str], bool]:
       "로켓 발주/정산 수집 실패"로 **고정**되어 있었다. 이 스트림이 붙은 뒤로 그 문구는 거짓이
       된다 — 발주/정산은 멀쩡히 push됐는데 운영자는 그쪽을 뒤지게 된다. 어느 스트림이
       죽었는지 이름을 실어 보낸다.
-    ★영구실패여부(적대적 리뷰 3R): 구독/권한 만료와 매핑 파손은 재시도로 낫지 않는다.
-      True면 호출부가 kind="access_denied"로 보고해 재시도 0회로 소멸시킨다 — 안 그러면
-      버튼 1회가 Chrome을 3번 띄우고 매번 같은 자리에서 죽는다(발주/정산은 매번 성공하는데도).
+    ★영구실패 kind(적대적 리뷰 3R·4R): 구독/권한 만료와 매핑 파손은 재시도로 낫지 않는다.
+      None이 아니면 호출부가 그 kind로 보고해 재시도 0회로 소멸시킨다 — 안 그러면 버튼 1회가
+      Chrome을 3번 띄우고 매번 같은 자리에서 죽는다(발주/정산은 매번 성공하는데도).
+      kind는 "access_denied"(결제로 해결) / "mapping_broken"(코드로 해결)으로 갈린다.
     """
     rc = 0
     failures: list[str] = []
-    permanent = False
+    permanent_kind: str | None = None
     if cfg.get("collect_sales", True):
         try:
             rows, stats = _collect_sales_rows(page, cfg)
-            if _push_sales(cfg, rows):
+            if _push_sales(cfg, rows, stats):
                 rc = 1
                 failures.append("판매분석 push 실패")
             elif stats.get("days_failed"):
@@ -1726,12 +1758,14 @@ def _collect_and_push_promo_pnl(page, cfg: dict) -> tuple[int, list[str], bool]:
         except _SalesAccessDenied as e:
             log.error("판매분석 수집 차단(D-CPP-5, 구독/권한 확인 필요): %s", e)
             rc = 1
-            permanent = True
+            permanent_kind = "access_denied"
             failures.append(f"판매분석 접근 차단(구독/권한): {str(e)[:120]}")
         except _SalesMappingError as e:
             log.error("판매분석 매핑 파손(코드 수정 필요, 구독 문제 아님): %s", e)
             rc = 1
-            permanent = True
+            # ★access_denied와 재시도 정책은 같지만(0회) 처방이 정반대다 — 결제가 아니라
+            #   코드 수정. 운영자에게 나가는 문구가 갈리도록 kind를 따로 쓴다(4R).
+            permanent_kind = "mapping_broken"
             failures.append(f"판매분석 매핑 파손(코드 수정 필요): {str(e)[:120]}")
         except Exception as e:  # noqa: BLE001 — 판매분석 실패가 프로모션 수집을 막지 않는다
             log.error("판매분석 수집 실패: %s", e)
@@ -1749,8 +1783,8 @@ def _collect_and_push_promo_pnl(page, cfg: dict) -> tuple[int, list[str], bool]:
             failures.append(f"프로모션 수집 실패: {str(e)[:120]}")
     # 두 스트림 중 하나라도 일시적 실패가 섞였으면 재시도가 의미 있다 → 영구 처리하지 않는다.
     if rc and len(failures) > 1:
-        permanent = False
-    return rc, failures, permanent
+        permanent_kind = None
+    return rc, failures, permanent_kind
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -1768,7 +1802,7 @@ def _do_run(cfg: dict) -> int:
     settle_rows: list[list] = []
     rc_promo_pnl = 0
     promo_failures: list[str] = []
-    promo_permanent = False
+    promo_permanent_kind: str | None = None
     try:
         with _owned_chrome(cfg) as owner:
             with sync_playwright() as p:
@@ -1803,7 +1837,7 @@ def _do_run(cfg: dict) -> int:
                             detail_failed = -1
                     # 프로모션 손익 레이어(판매분석·프로모션) — 위 스트림들과 독립. 실패해도
                     #   발주/정산 push는 이미 끝났고, rc로만 실패가 드러난다(조용한 성공 금지).
-                    rc_promo_pnl, promo_failures, promo_permanent = (
+                    rc_promo_pnl, promo_failures, promo_permanent_kind = (
                         _collect_and_push_promo_pnl(page, cfg)
                     )
     except Exception as e:  # noqa: BLE001 — Chrome 기동/브라우저/수집 오류
@@ -1821,12 +1855,14 @@ def _do_run(cfg: dict) -> int:
     if detail_failed > 0:
         reasons.append(f"발주상세 실패 {detail_failed}건")
     reasons.extend(promo_failures)
-    global _LAST_RUN_ERROR
+    global _LAST_RUN_ERROR, _LAST_RUN_KIND
     _LAST_RUN_ERROR = " / ".join(reasons) if reasons else ""
+    _LAST_RUN_KIND = None
 
     if not core_failed and rc_promo_pnl == 0:
         rc = 0
-    elif not core_failed and promo_permanent:
+    elif not core_failed and promo_permanent_kind:
+        _LAST_RUN_KIND = promo_permanent_kind
         # 발주/정산은 성공했고 프로모션손익만 **영구** 실패(구독 만료·매핑 파손). 재시도해도
         # 같은 자리에서 죽으므로 재시도 대상에서 뺀다(요청 소멸 + 사유 안내). 실패로는 남는다.
         rc = RC_ACCESS_DENIED
@@ -1864,6 +1900,9 @@ RC_ACCESS_DENIED = 4
 
 # 직전 run의 실패 사유(어느 스트림이 죽었는지). 보고 문구를 고정 문자열로 두면 거짓말이 된다.
 _LAST_RUN_ERROR = ""
+# 직전 run의 영구 실패 kind(access_denied / mapping_broken). 재시도 정책은 같지만 운영자에게
+#   나가는 처방이 정반대라 문구를 가른다(4R).
+_LAST_RUN_KIND: str | None = None
 
 
 def _prod_report_failure(cfg: dict, error: str, kind: str | None = None,
@@ -2054,8 +2093,8 @@ def cmd_poll(cfg: dict, interval: int = 30) -> int:
                         cfg, f"로켓 수집 실패(rc={rc}): {detail}",
                         kind=(
                             "login_required" if rc == RC_LOGIN_REQUIRED
-                            else "access_denied" if rc == RC_ACCESS_DENIED
-                            else None
+                            else (_LAST_RUN_KIND or "access_denied")
+                            if rc == RC_ACCESS_DENIED else None
                         ),
                         lease=lease)
 
