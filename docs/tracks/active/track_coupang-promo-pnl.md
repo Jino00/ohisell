@@ -1,6 +1,6 @@
 # TRACK — 쿠팡 프로모션 손익 레이어 (coupang-promo-pnl)
 
-> 생성 2026-07-28 · 상태 🟢 Active · Phase 1(수집 신설) 진행 중
+> 생성 2026-07-28 · 상태 🟢 Active · Phase 1(수집) 라이브 · **Phase 2(손익 엔진·뷰) 구현 완료·배포 대기**
 > 원칙 20/21 형식. **확정 결정(D-CPP-N)은 Jino 승인분 — 번복 금지, 변경은 새 D-CPP-N으로.**
 
 ---
@@ -108,20 +108,93 @@ Jino 원문: *"원가가 환율에 따라서 조금씩 변해. 그래서, 항상
 - [x] D-CPP-7 수기 단위 할인액 — 컬럼(alembic `df7b34a2f46e`) + `PATCH /rocket/promotion/{id}/unit-discount`
 - [x] D-CPP-5 접근불가 감지 배선 — 구독 조회 실패·판매분석 403을 `_SalesAccessDenied`로 올려
       run rc≠0 → 기존 `fetch-error` 보고 경로로 표면화(조용한 skip 없음)
-- [ ] **prod 배포 + push 실증** — 라이브 확인 결과 prod에 Phase 1 라우트가 **아직 없다**(404).
-      순서: 마이그(`df7b34a2f46e` 1건 — Phase1 `c2998cfe1f7c`는 prod 적용 완료) → 코드 → 재시작
-      (`safe_deploy.sh --migrate --restart`) → **페처 데몬 재기동**(아래 "다음 액션" 2·3 참조)
+- [x] **prod 배포 + push 실증 — 완료 확인**(2026-07-28 저녁 prod SELECT): `alembic_version` =
+      `df7b34a2f46e`, `coupang_rocket_sales_daily` **271행**(06-22~07-27 중 6일), `coupang_rocket_promotion`
+      **7건**(687878 포함, `unit_discount_amount`=4000 실재). Phase 1은 라이브 가동 중이다.
 - [ ] RG 쿠폰 "사용 금액" 수집 경로 확정 (Open API에 없음 — 계획서 §3 참조)
-- [ ] sellC UI에서 단위 할인액 입력(Phase 2) — 지금은 PATCH 엔드포인트만
+- [x] sellC UI에서 단위 할인액 입력 — **Phase 2에서 완료**(카드 내 입력 + PATCH 배선)
 
-### Phase 2 — 손익 엔진·뷰 (**착수 금지** — Phase 1 완료 후 별도 승인)
-- [ ] 프로모션 창 ⨝ 판매/주문 조인
-- [ ] 채널별 프로모션 기간 손익 계산
-- [ ] 화면
+### Phase 2 — 손익 엔진·뷰 (2026-07-28 오케스트레이터 스프린트 지시로 착수 — 구현 완료, prod 배포 대기)
+- [x] 프로모션 창 ⨝ 판매 조인 — `services/coupang/rocket_promo_pnl.py`
+- [x] 1P 프로모션 기간 손익 계산 + **진짜 BEP ROAS**
+- [x] 대상 SKU 수기 지정(`target_sku_ids`, alembic `890f276375e3`) — API에 적용상품 목록이 없어 추정 금지
+- [x] 읽기 전용 API `GET /api/overview/rocket-promo-pnl`
+- [x] 화면 — 커맨드센터 rocket 탭 "프로모션 손익" 블록(카드·SKU 분해·수기 입력)
+- [x] 신선도·감시 2종 — 판매분석 결손(만료 임박순) · 구독 체험 종료 D-7 경고
+- [x] 테스트 26건(값은 prod 실측 고정) · 전체 3,723 passed · 프론트 빌드 통과
+- [ ] **prod 배포** — 마이그 1건 `890f276375e3` + 코드(prod는 이미 `df7b34a2f46e`)
+- [ ] RG 쿠폰 손익 엔진 편입 — `used_amount` 원천 확정 후(지금은 나열 수준)
+- [ ] 광고비 옵션 귀속 — 1P(Retail)는 `coupang_ad_option_daily`에 **0행**이라 순이익이 N/A다
+      (아래 "Phase 2 실측 결과" ③). 빌보드 옵션 수집이 Retail을 채우면 엔진은 **코드 변경 없이**
+      순이익을 내기 시작한다(테스트로 고정).
+
+### Phase 2 실측 결과 (2026-07-28 prod SELECT — 추측 아님)
+
+프로모션 **687878**(07-24 00:01:00~07-26 23:59:59, 분담 100%, 개당 할인액 4,000)로 스모크:
+
+| | 62178970 (17프로 강화유리) | 69411570 (S26U 지문방지) |
+|---|---|---|
+| 창 내 판매 | 62개 / 실현매출 1,057,800 | 19개 / 실현매출 302,100 |
+| 실현 소비자가 | 17,061.29 | 15,900 |
+| 납품단가 | 10,740 | **없음**(발주 이력 0건, 신상품) |
+| 원가 | 3,400 | 2,351 (OHI-0497 — 07-28 매핑 등록됨) |
+| 개당 공헌이익 | **3,340** | N/A (납품가가 없어 산출 불가) |
+| **진짜 BEP ROAS** | **5.11배** | N/A |
+
+> 69411570은 **원가는 알지만 납품가가 없다**(발주 이력 0건 — 아직 한 번도 납품 안 한 신상품).
+> 한 조각만 없어도 손익은 성립하지 않으므로 미해결로 빠지고, 사유가 화면에 뜬다.
+> 첫 발주가 들어오면 자동으로 해결된다.
+
+- BEP 광고비(해결분) = 665,880 − 210,800 − 248,000 = **207,080원**.
+- ★**순이익은 N/A다** — 계정 Retail 광고비(창 3일 합 **2,270,306**)는 있지만 **옵션 귀속이 안 된다**
+  (`coupang_ad_option_daily`에 A01029796·Retail **0행**, 3P 계정만 수집 중). 0으로 접으면 207,080원
+  흑자로 보이므로 **null + 사유**로 둔다(원칙22). 계정 합은 **상한 프록시**로만 제공한다.
+- ★"광고 ROAS 5.11배 이상이어야 본전" — 이 값이 이 레이어의 존재 이유다(소비자가 기준 ROAS 왜곡 보정, D-CPP-2).
+- ⚠️ **신선도 실측: 유효구간 [06-01~07-27] 57일 중 51일이 비어 있다**(수집된 날 = 07-22~07-27 6일).
+  최신일은 07-27이라 "수집이 멈췄다"는 신호는 없지만, **06-01분은 오늘이 마지막 회수 기회**(D-0)이고
+  8일치가 7일 내 만료된다. 배포 후 배너에 이것이 뜬다 — 과거분을 메울지는 Jino 판단.
+
+### Phase 2 설계 판단 (지시와 다르게 간 지점 — Jino 확인 필요)
+
+1. **대상 SKU = 신규 컬럼 수기 지정.** 지시가 준 두 선택지 중 "PATCH에 함께 저장" 쪽을 택했다
+   (조회 시 파라미터로 받으면 매번 다시 입력해야 하고 어디에도 남지 않는다). 페처가 손대지
+   않는 칸이라 재수집이 지우지 않는다 — `unit_discount_amount`와 같은 성격.
+2. **수기 입력 PATCH의 X-Ingest-Token 해제.** 브라우저에 ingest 토큰을 심을 수 없는데 지시는
+   "PATCH 배선"된 입력 UI를 요구한다. 같은 성격의 `/rocket/cost-map`이 이미 토큰 없는 사용자
+   CRUD이고 앱 전체가 IP 허용목록 뒤에 있다. 이 라우트는 **prod 미배포**라 기존 호출자가 없다.
+   (404 = 유령 프로모션 생성 방지는 그대로 유지.)
+3. **순이익을 계산하지 않고 N/A로 둔다.** 지시 공식은 `순이익 = 납품매출−원가−분담금−광고비`인데
+   광고비가 옵션 귀속 불가다. "조용히 0 처리 금지"라는 지시에 따라 **null + blockers**로 올리고,
+   대신 `net_profit_lower_bound`(계정 광고비 전액을 이 프로모션에 물린 최악값)를 함께 낸다.
 
 ---
 
-## 현재 진행 단계 (2026-07-28 오후 — 페처 확장 완료, prod 배포 대기)
+## 현재 진행 단계 (2026-07-28 저녁 — Phase 2 손익 엔진·뷰 구현 완료, prod 배포 대기)
+
+Phase 2(손익 엔진 + 커맨드센터 뷰)를 오케스트레이터 스프린트 지시로 착수해 **구현을 끝냈다**
+(브랜치 `claude/coupang-promo-pnl-phase2`, 커밋 2건). 위 "Phase 2 실측 결과"가 라이브 근거다.
+
+- 엔진 `services/coupang/rocket_promo_pnl.py` — 창 조인·손익·진짜 BEP ROAS·신선도·RG 쿠폰 나열
+- API `GET /api/overview/rocket-promo-pnl`(읽기 전용) + `PATCH .../unit-discount` 확장(대상 SKU)
+- 뷰 — 커맨드센터 rocket 탭 "프로모션 손익" 블록(배너 2종 포함)
+- alembic `890f276375e3`(target_sku_ids) — 단일 head 유지, upgrade/downgrade 왕복 검증
+- 테스트 26건 신규 · 전체 **3,723 passed** · 프론트 `tsc -b && vite build` 통과
+
+⚠️ **prod에 필요한 것(2026-07-28 저녁 prod SELECT로 확인)**: prod `alembic_version` =
+   **`df7b34a2f46e`**(Phase 1 전량 적용 완료 — `unit_discount_amount` 컬럼 실재, 판매 271행·
+   프로모션 7건 적재됨). 따라서 Phase 2 배포는 **마이그 1건 `890f276375e3`** + 코드다:
+   `safe_deploy.sh backend/alembic/versions/890f276375e3_*.py backend/app/models.py \
+    backend/app/services/coupang/rocket_promo_pnl.py backend/app/routers/overview.py \
+    backend/app/routers/coupang_ops.py --migrate --restart` → 프론트 `--frontend`.
+   ★`models.py`를 마이그보다 먼저 올리면 ORM이 `no such column: target_sku_ids`로
+   **프로모션 테이블 전체 접근이 죽는다**(프로젝트 CLAUDE.md) — `--migrate`가 순서를 강제한다.
+
+⚠️ **회계 무변경 확인**: 신규 엔진은 회계 코드에서 참조 0(테스트로 고정 —
+   `test_pnl_engine_is_not_referenced_by_accounting_code`). net_profit·종합조망 숫자 불변.
+
+---
+
+## 이전 진행 단계 (2026-07-28 오후 — 페처 확장 완료, prod 배포 대기)
 
 Phase 1 **수집 골격 + 수집기 완성**. 오전 세션의 백엔드 골격(테이블·파서·ingest·원가 시드)에
 이어, supplier 세션 복구 후 **정찰을 끝내고 페처 두 스트림을 붙였다.** 예측이 아니라 라이브 실증:
