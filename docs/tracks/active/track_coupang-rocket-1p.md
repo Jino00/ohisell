@@ -83,13 +83,13 @@
   - 수정 ③**실증 하니스 신규** `tools/verify_rocket_dom_extract.py` — 백엔드 스위트는 브라우저를 띄우지 않는 방침(`test_fetcher_button_only_chrome.py`가 playwright를 sys.modules 스텁으로 막는다)이라, pytest에는 소스 가드(innerText 회귀 금지)만 두고 실동작 증명은 이 스크립트가 담당.
   - **★라이브 증거(원칙22)** — ①**라이브 정산 마크업**(CDP 9225 supplier 세션, 기록 샘플과 **동일 URL** 재fetch, 읽기전용 GET): 수정 전(`ddb2c02`)·후 추출이 **11행 셀 단위 완전 일치**(회귀 0). 기록 `20_..json`과의 차이는 전부 데이터 변동 — 신규 계산서 2건(30037461·30037460, 작성일자 06-17)이 앞에 붙어 page1 뒤 2건(29952005·29952004)이 page2로 밀렸고, 30025494의 세금계산서 확정일이 `-`→`2026-06-18`로 확정됨. ②**발주상세**(ref20b 증거 HTML): 원본 추출 == `_PO_DETAIL_ROWS`(기록된 현행 출력) 13행 일치, **태그 사이 공백을 전부 제거한 HTML도 동일한 rows**(공백 독립성). 미니파이에서 수정 전은 barcode가 `8809465525057오하이`로 오염 → 수정 후 분리 유지. ③테스트 파서 54 + 루트 전체 **3515 passed**.
   - **배포**: `tools/install_local_runtime.sh` 실행 완료 — `~/.ohisell/tools/rocket_supplier_fetcher.py`가 워크트리와 byte-identical, `com.ohisell.rocket` pid 20786→44099 교체(green-while-stale 아님). 나머지 4종은 실행 전 워크트리와 byte-identical 확인(다운그레이드 0). **백엔드 파서 변경은 prod 미배포** — 이 트랙 백엔드(S2~S4.5c) 자체가 prod 미배포·alembic `f6a8c0b2d4e6` 미적용 상태라 단독 배포하면 순서가 깨진다(위 M1 ⚠배포 순서 강제 참조). 페처 신버전은 현행 마크업에서 구 파서와 동일 rows를 내므로 이 비대칭은 안전.
-  - ⚠**codex 게이트 미실행**(원칙19): OpenAI 쿼터 2026-08-02 21:52까지 소진 → M1과 함께 부채. 대체 리뷰 없음(M1은 Opus 독립 적대적 리뷰 2R로 대체했으나 M2는 미실시).
+  - **codex 게이트 면제 — Jino 판단(2026-07-28)**: 원문 *"이번건은 codex review를 건너뛰어줘"*. 원칙19 게이트를 이 건에 한해 생략(부채로 남기지 않음·후속 칩 없음). 근거로 남는 검증은 위 라이브 증거 3종 + 3515 passed. **M1의 codex 부채(쿼터 08-02 해제)는 그대로 유효** — 이 면제는 M2에만 적용된다.
 - [ ] S5 프론트: 종합조망 로켓배송 뷰/축 + 갱신 버튼 + **원가 매핑 관리 UI**(미매핑 목록·제안 클릭 확정) + **커버리지% 배지**(net_profit 옆, <100%면 원가 부분반영 경고)
 - [ ] S6 prod 라이브 self-verify + codex + 배포
 (스프린트 수는 S1 정찰 결과로 확정)
 
 ## 현재 진행 단계
-- **M2 유지보수 완료(2026-07-28, 브랜치 `claude/focused-torvalds-27d4ae` = M1 위에 스택, 미푸시)**: DOM 셀 추출의 마크업 공백 의존 제거(체크리스트 M2). 커밋 `412042e`. 라이브 정산 마크업으로 회귀 0 실증·로컬 런타임 배포 완료. **codex 부채 2건(M1·M2) 08-02 이후 함께 소화.** 실증 재실행: `python3 tools/verify_rocket_dom_extract.py`.
+- **M2 유지보수 완료(2026-07-28, 브랜치 `claude/focused-torvalds-27d4ae` = M1 위에 스택, 미푸시)**: DOM 셀 추출의 마크업 공백 의존 제거(체크리스트 M2). 커밋 `412042e`. 라이브 정산 마크업으로 회귀 0 실증·로컬 런타임 배포 완료. **M2는 Jino 판단으로 codex 게이트 면제(2026-07-28) — 부채 아님.** M1의 codex 부채(08-02 쿼터 해제 후)는 유효. 실증 재실행: `python3 tools/verify_rocket_dom_extract.py`.
   - ⚠**M1의 병합 지침이 그대로 유효**: promo-pnl(`worktree-agent-a77a1755db4c87ada`)과 형제 마이그레이션(같은 부모 `e5f7a9c1b3d5`) — 나중에 병합하는 쪽이 `down_revision` 재연결.
 - **M1 유지보수 완료(2026-07-28, 미푸시)**: 파서 누락 컬럼 2건 복원(체크리스트 M1 참조). 커밋 `85967cf`→`e3da1f6`→`39c1c39`, alembic `f6a8c0b2d4e6` **단일 head**, 루트 전체 3505 passed.
   - ★**교차 트랙 충돌 발견 — 병합 순서 주의**: 병행 워크트리 `worktree-agent-a77a1755db4c87ada`(promo-pnl: 1P 판매·프로모션·쿠폰 수집 3종, 커밋 `fca7a1c`·`536e7cf`·`b24026a`)의 마이그레이션 **`a1c3e5f7b9d1`이 우리와 같은 부모 `e5f7a9c1b3d5`를 물고 있다.** 각 브랜치는 단일 head지만 **둘 다 main에 들어가면 head가 2개**가 된다. → **나중에 병합하는 쪽이 자기 `down_revision`을 먼저 병합된 revision으로 재연결**할 것(merge revision보다 재연결 선호). 두 브랜치의 공통 수정 파일은 `backend/app/models.py` 하나뿐이고 서로 다른 클래스라 논리 충돌은 없다(텍스트 충돌만 가능).
