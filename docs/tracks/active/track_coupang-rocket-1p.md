@@ -83,7 +83,7 @@
 
 ## 현재 진행 단계
 - **M1 유지보수 완료(2026-07-28, 미푸시)**: 파서 누락 컬럼 2건 복원(체크리스트 M1 참조). 커밋 `85967cf`→`e3da1f6`→`39c1c39`, alembic `f6a8c0b2d4e6` **단일 head**, 루트 전체 3505 passed.
-  - ★**교차 트랙 충돌 발견 — 병합 순서 주의**: 병행 워크트리 `worktree-agent-a77a1755db4c87ada`(promo-pnl: 1P 판매·프로모션·쿠폰 수집 3종, 커밋 `fca7a1c`·`536e7cf`·`b24026a`)의 마이그레이션 **`a1c3e5f7b9d1`이 우리와 같은 부모 `e5f7a9c1b3d5`를 물고 있다.** 각 브랜치는 단일 head지만 **둘 다 main에 들어가면 head가 2개**가 된다. → **나중에 병합하는 쪽이 자기 `down_revision`을 먼저 병합된 revision으로 재연결**할 것(merge revision보다 재연결 선호). 두 브랜치의 공통 수정 파일은 `backend/app/models.py` 하나뿐이고 서로 다른 클래스라 논리 충돌은 없다(텍스트 충돌만 가능).
+  - ★**교차 트랙 alembic 형제 head 충돌 → 해소됨(2026-07-28 11:40)**: promo-pnl 마이그레이션 `a1c3e5f7b9d1`이 우리와 **같은 부모 `e5f7a9c1b3d5`**를 물고 PR #131로 **먼저 병합**돼 main 단일 head가 됨. 우리가 "나중에 병합하는 쪽"이므로 `f6a8c0b2d4e6`의 `down_revision`을 **`e5f7a9c1b3d5` → `a1c3e5f7b9d1`로 재연결**(merge revision 대신 직렬). 체인 = `e5f7a9c1b3d5 → a1c3e5f7b9d1 → f6a8c0b2d4e6(head)`. promo-pnl 마이그는 우리 두 테이블 미참조(grep 0건)라 무간섭. main 22커밋 병합 후 루트 전체 **3557 passed**. **교훈: `alembic heads` 단일 확인은 브랜치-로컬 검사라 형제 관계를 원리적으로 못 잡는다**(LESSONS #49).
   - ⚠**배포 순서 강제**: `alembic upgrade head` → 코드 순. ingest 경로가 엔티티를 통째 SELECT하므로 컬럼 없는 DB에 `models.py`만 올라가면 신규 필드가 아니라 **정산·발주상세 ingest 전체가 OperationalError로 침묵**한다.
     - **해소됨(2026-07-28 11:09, main `a516951`)**: `scripts/safe_deploy.sh`에 alembic 순서 가드 병합 — 마이그 대기 상태에서 코드 배포/재시작 거부, `--migrate` 주면 마이그 선배포→`upgrade head`→코드 전송(upgrade 실패 시 코드 미전송). 이 M1의 실측(`no such column` 2경로 동시 사망)이 그 가드의 근거가 됐다. 배포 커맨드는 PR #130 본문 참조.
     - ⚠그 가드는 **자동 테스트 없이 병합**됐다(커밋 메시지의 12시나리오 하니스는 미커밋). 미병합 고아 브랜치 `claude/quizzical-jones-1b538a`(`fb5311a`)에 커밋된 하니스 2개가 있어 **그것만 살려 main 구현에 맞추는 작업 진행 중**(그쪽 `safe_deploy.sh` 구현은 미채택).
