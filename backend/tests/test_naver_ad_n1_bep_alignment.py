@@ -47,77 +47,139 @@ def _order(db, pid, *, days_ago, price="10000", qty=1, nbaesong=False, collected
 
 
 # ══════════════════════════════════════════════════════════════════
-# ① 적응형 창 선택
+# ① 레짐 표본 = 최근 N건(달력 상한 120일) — D-NAO-100 / ref 43 E5c
 # ══════════════════════════════════════════════════════════════════
 def _rows(*specs):
-    """(days_ago, nbaesong) 목록 → _adaptive_rows 입력 형태."""
+    """(days_ago, nbaesong) 목록 → _recent_sample 입력 형태(날짜 내림차순)."""
     return sorted(
         [{"order_date": kst_today() - timedelta(days=d), "nbaesong": nb, "quantity": 1,
           "unit_price": Decimal("10000"), "collected": Decimal("0")} for d, nb in specs],
         key=lambda r: r["order_date"], reverse=True)
 
 
-def test_adaptive_window_picks_shortest_window_meeting_nmin():
-    rows = _rows(*[(1, False)] * 10, *[(50, False)] * 10)
-    sub, window = bep_calculator._adaptive_rows(rows, 10)
-    assert window == 7 and len(sub) == 10        # 7일 창이 이미 10건 → 최단 창 채택
+def test_recent_sample_takes_exactly_n_most_recent():
+    rows = _rows(*[(1, False)] * 5, *[(20, False)] * 10)
+    sub, fresh = bep_calculator._recent_sample(rows)
+    assert fresh and len(sub) == 10                       # 15건 중 최근 10건만
+    assert all(r["order_date"] >= kst_today() - timedelta(days=20) for r in sub)
 
 
-def test_adaptive_window_falls_down_the_ladder():
-    # 7d 3건 / 14d 누적 6건 / 30d 누적 12건 → nmin=10이면 30일 창
-    rows = _rows(*[(2, False)] * 3, *[(10, False)] * 3, *[(25, False)] * 6)
-    sub, window = bep_calculator._adaptive_rows(rows, 10)
-    assert window == 30 and len(sub) == 12
+def test_recent_sample_boundary_at_ten():
+    """경계: 10건이면 그대로, 11건이면 가장 오래된 1건이 밀려난다."""
+    exactly = _rows(*[(3, False)] * 10)
+    assert len(bep_calculator._recent_sample(exactly)[0]) == 10
+    eleven = _rows(*[(3, False)] * 10, (60, False))
+    sub = bep_calculator._recent_sample(eleven)[0]
+    assert len(sub) == 10
+    assert all(r["order_date"] == kst_today() - timedelta(days=3) for r in sub)
 
 
-def test_adaptive_window_falls_back_to_alltime_when_all_windows_thin():
-    rows = _rows((3, False), (200, False))       # 어떤 창도 nmin 미달
-    sub, window = bep_calculator._adaptive_rows(rows, 10)
-    assert window is None and len(sub) == 2
+def test_recent_sample_applies_120d_calendar_cap():
+    """달력 상한: 120일 밖 주문은 후보에서 빠진다(최근 10건을 못 채워도)."""
+    rows = _rows(*[(10, False)] * 3, *[(200, False)] * 20)
+    sub, fresh = bep_calculator._recent_sample(rows)
+    assert fresh and len(sub) == 3                        # 상한 내 3건뿐 → 있는 만큼
 
 
-def test_adaptive_window_nmin_changes_selection():
-    rows = _rows(*[(1, False)] * 5, *[(20, False)] * 20)
-    assert bep_calculator._adaptive_rows(rows, 5)[1] == 7    # 5건이면 7일 창으로 충분
-    assert bep_calculator._adaptive_rows(rows, 10)[1] == 30  # 10건이면 30일 창까지 내려간다
+def test_recent_sample_falls_back_to_alltime_when_cap_empty():
+    """상한 안에 0건이면 전기간 최근 N건 — 표본을 비우면 BEP 행이 통째로 사라진다."""
+    rows = _rows(*[(200, False)] * 15)
+    sub, fresh = bep_calculator._recent_sample(rows)
+    assert not fresh and len(sub) == 10
 
 
-def test_adaptive_nmin_default_is_ten():
-    """Jino 승인 처분(ref 42 §8-2): nmin=10."""
-    assert bep_calculator._ADAPTIVE_MIN_ORDERS == 10
-    assert bep_calculator._ADAPTIVE_WINDOW_LADDER == (7, 14, 30, 60, 120)
+def test_recent_sample_size_default_is_ten():
+    """ref 43 §5: N=10이 내부 최적점(N=5는 편향↑, N≥20은 정확도 붕괴)."""
+    assert bep_calculator._RECENT_SAMPLE_SIZE == 10
+    assert bep_calculator._RECENT_SAMPLE_MAX_AGE_DAYS == 120
+    assert not hasattr(bep_calculator, "_adaptive_rows")  # 사다리 폐기 확인
 
 
 # ══════════════════════════════════════════════════════════════════
-# ② 판매가·물류비 — 레짐 변수만 최근 창
+# ② 판매가·물류비 — 레짐 변수만 최근 표본
 # ══════════════════════════════════════════════════════════════════
-def test_unit_price_uses_recent_window_not_120d_median(db):
-    # 인하 전 18,900 × 40건(90일 전) vs 인하 후 15,900 × 12건(3일 전).
-    # 120일 median이면 18,900이 이기지만, 적응형 창(7d 미달 → 14d 12건)은 15,900을 본다.
+def test_unit_price_uses_recent_ten_not_120d_median(db):
+    # 인하 전 18,900 × 40건(90일 전) vs 인하 후 15,900 × 12건(10일 전).
+    # 120일 median이면 18,900이 이기지만, 최근 10건은 전부 15,900이다.
     _order(db, "p1", days_ago=90, price="18900", n=40)
     _order(db, "p1", days_ago=10, price="15900", n=12)
     db.commit()
     assert bep_calculator._unit_prices(db)["p1"] == Decimal("15900")
 
 
-def test_unit_price_keeps_wide_window_when_recent_sample_thin(db):
-    # 최근 주문이 nmin 미달 → 전기간 폴백(잡음 방지). 3건뿐이라 median은 전체 기준.
-    _order(db, "p1", days_ago=90, price="18900", n=40)
-    _order(db, "p1", days_ago=2, price="15900", n=3)
+def test_unit_price_uses_available_rows_when_fewer_than_ten(db):
+    """상한 내 주문이 10건 미만이면 있는 만큼으로 중앙값(옛 표본을 끌어오지 않는다)."""
+    _order(db, "p1", days_ago=200, price="18900", n=40)   # 상한 밖
+    _order(db, "p1", days_ago=2, price="15900", n=3)      # 상한 내 3건뿐
     db.commit()
-    assert bep_calculator._unit_prices(db)["p1"] == Decimal("18900")
+    assert bep_calculator._unit_prices(db)["p1"] == Decimal("15900")
+
+
+def test_unit_price_moves_monotonically_without_round_trip(db):
+    """★사다리 폐기의 핵심 성질(ref 43 §0-2·§3): 표본이 한 건씩 밀려 나가는 **연속 이동**.
+
+    옛 18,900 10건 위로 새 15,900 주문이 하나씩 쌓이는 리플레이. 최근 10건 median은
+    18,900 → (5건째 17,400) → 15,900으로 **단조 하락**하고 되돌아오지 않는다.
+    사다리는 여기서 창이 계단 점프하며 15,900 → 18,900으로 왕복했다.
+    """
+    _order(db, "p1", days_ago=15, price="18900", n=10)
+    db.commit()
+    seen = [bep_calculator._unit_prices(db)["p1"]]
+    for k in range(1, 13):
+        _order(db, "p1", days_ago=1, price="15900", n=1)
+        db.commit()
+        # 같은 날짜 주문이 여러 건이라 order_number가 겹치지 않도록 n=1씩, k로 구분
+        db.query(Order).filter(Order.order_number == "o-p1-1-0-15900").update(
+            {"order_number": f"o-p1-1-{k}-15900"})
+        db.commit()
+        seen.append(bep_calculator._unit_prices(db)["p1"])
+    assert seen[0] == Decimal("18900")
+    assert seen[-1] == Decimal("15900")
+    assert all(a >= b for a, b in zip(seen, seen[1:])), f"왕복 발생: {seen}"
+
+
+def test_unit_price_ignores_orders_older_than_120d_when_fresh_exist(db):
+    _order(db, "p1", days_ago=200, price="9900", n=30)
+    _order(db, "p1", days_ago=5, price="15900", n=2)
+    db.commit()
+    assert bep_calculator._unit_prices(db)["p1"] == Decimal("15900")
+
+
+def test_unit_price_falls_back_to_alltime_when_no_recent_orders(db):
+    """120일 내 주문이 0건인 상품(라이브 45종)도 판매가를 잃지 않는다."""
+    _order(db, "p1", days_ago=200, price="9900", n=30)
+    db.commit()
+    assert bep_calculator._unit_prices(db)["p1"] == Decimal("9900")
+
+
+def test_unit_price_absent_without_any_order(db):
+    """주문 0건이면 여기서 값을 내지 않는다 → 호출부의 매핑 판매가 폴백(D-NAO-95)이 받는다."""
+    assert "p-none" not in bep_calculator._unit_prices(db)
 
 
 def test_logistics_uses_recent_nbaesong_share(db):
-    # 오래된 일반배송 40건 + 최근 N배송 12건 → 혼합비는 최근 창 기준 100%
+    # 오래된 일반배송 40건 + 최근 N배송 12건 → 최근 10건은 전부 N배송 → 혼합비 100%
     _order(db, "p1", days_ago=90, n=40)
     _order(db, "p1", days_ago=3, nbaesong=True, n=12)
     db.commit()
     out = bep_calculator._avg_qty_and_logistics(db)["p1"]
     assert out["nb_share"] == Decimal("1")
     assert out["shipping"] == Decimal("3020")     # 1,900 + 1,120 × 1
-    # ★평균 수량·수취 배송비는 넓은 창(52건 전부) — 혼합비만 최근 창이다
+    assert out["nb_sample"] == 10
+    # ★평균 수량·수취 배송비는 넓은 창(52건 전부) — 혼합비만 최근 표본이다
     assert out["orders"] == 52
+
+
+def test_logistics_nbaesong_share_uses_same_sample_as_price(db):
+    """혼합비와 판매가는 **같은 최근 10건**을 본다(레짐 표본 통일, D-NAO-100)."""
+    _order(db, "p1", days_ago=60, price="18900", n=20)               # 옛 일반배송
+    _order(db, "p1", days_ago=2, price="15900", nbaesong=True, n=6)  # 최근 N배송
+    _order(db, "p1", days_ago=3, price="15900", nbaesong=False, n=4)
+    db.commit()
+    out = bep_calculator._avg_qty_and_logistics(db)["p1"]
+    assert out["nb_sample"] == 10
+    assert out["nb_share"] == Decimal("0.6")      # 최근 10건 중 6건
+    assert bep_calculator._unit_prices(db)["p1"] == Decimal("15900")
 
 
 def test_logistics_paid_is_linear_in_nbaesong_share(db):

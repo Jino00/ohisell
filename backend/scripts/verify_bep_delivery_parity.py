@@ -90,13 +90,13 @@ def logistics_recompute(db: Session) -> int:
     """[2] 상품별 물류비를 원자료에서 독립 재계산해 대조."""
     produced = bep_calculator._avg_qty_and_logistics(db)
     raw_rows = bep_calculator._naver_order_rows(db)
-    nmin = bep_calculator._ADAPTIVE_MIN_ORDERS
+    n = bep_calculator._RECENT_SAMPLE_SIZE
     wide_cut = bep_calculator.kst_today() - bep_calculator.timedelta(
         days=bep_calculator._PRICE_WINDOW_DAYS)
     diffs = 0
     for pid, rows in raw_rows.items():
         wide = [r for r in rows if r["order_date"] and r["order_date"] >= wide_cut] or rows
-        recent, _w = bep_calculator._adaptive_rows(rows, nmin)
+        recent, _fresh = bep_calculator._recent_sample(rows, n)
         share = (Decimal(sum(1 for r in recent if r["nbaesong"])) / Decimal(len(recent))
                  if recent else Decimal("0"))
         paid = Decimal("1900") + Decimal("1120") * share

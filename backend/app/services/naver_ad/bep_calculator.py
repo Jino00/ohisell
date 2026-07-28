@@ -8,7 +8,7 @@
 #   생기면 ①이 이겨 자동 은퇴한다. 행 단위 출처 컬럼은 아직 없다(스키마 변경 별건).
 # 참고 메모리: bep-roas-calculation-structure (BEP ROAS = 판매가 ÷ 공헌이익).
 # ★N1 (D-NAO-99, ref 42): 이 모듈은 harness다 — 입력 3개를 각각의 SA에서 받아 조합한다.
-#   판매가·N배송 혼합비 = 적응형 최근 창(레짐 변수) / 평균수량·수취배송비 = 넓은 창(표본 민감) /
+#   판매가·N배송 혼합비 = 최근 10건 표본(레짐 변수, D-NAO-100) / 평균수량·수취배송비 = 넓은 창 /
 #   수수료율 = product_commission SA(상품별 실측 + N배송 프리미엄). 산식 자체는 불변.
 from __future__ import annotations
 
@@ -37,11 +37,15 @@ AGG_MULT = {"safe": Decimal("1.30"), "standard": Decimal("1.15"), "aggressive": 
 _DEFAULT_COMMISSION_RATE = Decimal("0.055")  # 정산·채널 모두 없을 때 최종 폴백
 _PRICE_WINDOW_DAYS = 120  # 넓은 창 — 표본 민감 항목(평균 수량·수취 배송비) 전용
 
-# ── N1 (D-NAO-99, ref 42): 레짐 변수용 적응형 최근 창 ──
-# 판매가·N배송 혼합비만 이 창으로 뽑는다. 사다리 중 주문 수 ≥ _ADAPTIVE_MIN_ORDERS 인 최단 창.
-# nmin=10은 Jino 승인 처분(ref 42 §8-2 — 5/10/20 민감도 차이 미미, 10 권장).
-_ADAPTIVE_WINDOW_LADDER = (7, 14, 30, 60, 120)
-_ADAPTIVE_MIN_ORDERS = 10
+# ── D-NAO-100 (ref 43): 레짐 변수 표본 = 최근 N건(달력 상한 120일) — 백테스트 승자 E5c ──
+# 판매가·N배송 혼합비를 **같은 최근 10건**에서 뽑는다. 종전 N1의 적응형 사다리(7→14→30→60→120,
+# nmin=10)는 폐기 — 창이 계단으로 점프하며 표본을 통째로 갈아치워 일간 ±10~17% 왕복을 만들었다
+# (레짐 변동 25종 공정구간 왕복 12회). 최근 N건은 주문이 하나 들어오고 하나 나가는 연속 이동이라
+# 같은 실효 창 길이에서도 왕복이 2회뿐이고, 정확도(MAPE 3.50 vs 4.03)·인하 감지(20일 7/7 vs
+# 25일 6/7)까지 사다리를 3축 전부에서 지배한다(ref 43 §0·§2·§4).
+# N=10은 내부 최적점(N=5는 편향 +1.21%, N=20↑는 정확도 붕괴). 사다리와 달리 N에 둔감하다(§5).
+_RECENT_SAMPLE_SIZE = 10          # E5c의 N
+_RECENT_SAMPLE_MAX_AGE_DAYS = 120  # 달력 상한 — 신선도 하한을 잃지 않기 위한 안전장치(§6)
 _EPOCH_DATE = date(1970, 1, 1)  # order_date 결측 행 정렬용 sentinel
 
 # ── D-NAO-57 (C) 배송비: 건당 단가(부가세포함, Jino 확정 2026-07-18) ──
@@ -187,8 +191,8 @@ def _is_nbaesong(row) -> bool:
 def _naver_order_rows(db: Session) -> dict[str, list[dict]]:
     """네이버 주문(수량>0)을 상품별로 1회만 적재 — 날짜 내림차순.
 
-    ★종전엔 창별로 같은 스캔을 여러 번 돌렸다. 적응형 창(N1)은 상품마다 창이 달라 창별
-    선-집계가 불가능하므로, 한 번 읽고 파이썬에서 창을 잘라 쓴다(주문 1만 건 규모).
+    ★종전엔 창별로 같은 스캔을 여러 번 돌렸다. 레짐 표본은 상품마다 "최근 N건"이라 SQL에서
+    창을 미리 자를 수 없으므로, 한 번 읽고 파이썬에서 잘라 쓴다(주문 1만 건 규모).
 
     행 dict: quantity / unit_price(None=판매가 0) / collected(고객 수취) / nbaesong(배송방식) /
              order_date. 지불 배송비는 값이 아니라 **혼합비**로 쓰므로 방식만 남긴다.
@@ -219,36 +223,41 @@ def _naver_order_rows(db: Session) -> dict[str, list[dict]]:
     return out
 
 
-def _adaptive_rows(rows: list[dict], nmin: int) -> tuple[list[dict], int | None]:
-    """레짐 변수용 적응형 최근 창 (N1 · D-NAO-99, ref 42 §3).
+def _recent_sample(rows: list[dict], n: int = _RECENT_SAMPLE_SIZE) -> tuple[list[dict], bool]:
+    """레짐 변수 표본 = **최근 n건**(달력 상한 _RECENT_SAMPLE_MAX_AGE_DAYS 내). D-NAO-100 · ref 43.
 
-    사다리 7→14→30→60→120일 중 **주문 수 ≥ nmin 인 가장 짧은 창**. 전부 미달이면 전기간.
-    ★왜 창을 그냥 짧게 하지 않는가(ref 42 §0-6): 고정창을 14/30일로 일괄 단축하면 BEP가 1%
-    넘게 움직이는 상품이 206~230종으로 폭증하는데 대부분이 표본 부족 잡음이다(저볼륨 상품이
-    창 안에서 "수취 0·수량 1"로 찍혀 물류비가 상한으로 튐). nmin이 그 잡음을 걸러낸다.
-    """
+    rows는 날짜 내림차순이라 슬라이스가 곧 "최근 n건"이다(무상태 — `ORDER BY order_date DESC
+    LIMIT n`과 같은 물건). n건 미만이면 상한 내 있는 만큼 쓴다.
+    상한 안에 **0건이면 전기간 최근 n건**으로 폴백한다(ref 43 §7) — 상한은 신선도 하한이지
+    표본을 없애는 장치가 아니다. 라이브 45개 상품이 120일간 주문이 없어, 여기서 표본을 비우면
+    판매가가 매핑 폴백(대개 미입력)으로 떨어져 BEP 행이 통째로 사라진다.
+
+    반환: (표본, 달력상한_내부인가). 두 번째 값은 진단·로그용."""
     if not rows:
-        return [], None
-    today = kst_today()
-    for window in _ADAPTIVE_WINDOW_LADDER:
-        cut = today - timedelta(days=window)
-        sub = [r for r in rows if r["order_date"] and r["order_date"] >= cut]
-        if len(sub) >= nmin:
-            return sub, window
-    return rows, None
+        return [], True
+    cut = kst_today() - timedelta(days=_RECENT_SAMPLE_MAX_AGE_DAYS)
+    fresh = [r for r in rows if r["order_date"] and r["order_date"] >= cut]
+    if fresh:
+        return fresh[:n], True
+    return rows[:n], False
 
 
 def _avg_qty_and_logistics(db: Session, *, orders_by_pid: dict[str, list[dict]] | None = None,
-                           nmin: int = _ADAPTIVE_MIN_ORDERS) -> dict[str, dict]:
+                           sample_size: int = _RECENT_SAMPLE_SIZE) -> dict[str, dict]:
     """네이버 상품(channel_product_id)별 평균 주문수량 + 단가당 **순**물류비(D-NAO-57 C, 리뷰 P2-1).
 
     logistics(단가당) = 상품별 순배송원가(건당) ÷ 평균 주문수량.
       순배송원가 net_ship = max(0, 지불 배송비 − 평균 수취 배송비)
         - 지불 배송비 = 1,900 + 1,120 × **N배송 혼합비** (N1 · D-NAO-99).
-          ★혼합비만 적응형 최근 창에서 뽑는다 — N배송은 2026-07-22 시작이라 120일 창이
-          이 레짐 전환을 1~29%로 희석해, 전환 상품의 물류비를 최대 −766원 낙관 쪽으로
-          틀어 놓았다(ref 42 §2-①). 값 자체는 종전과 같은 가중평균 형태다
+          ★혼합비는 **레짐 변수라 최근 10건 표본**에서 뽑는다(D-NAO-100 — 판매가와 같은 행
+          집합). N배송은 2026-07-22 시작이라 120일 창이 이 레짐 전환을 1~29%로 희석해,
+          전환 상품의 물류비를 최대 −766원 낙관 쪽으로 틀어 놓았다(ref 42 §2-①).
+          값 자체는 종전과 같은 가중평균 형태다
           (mean(paid) = 1,900·(1−p) + 3,020·p = 1,900 + 1,120p).
+          ★비율은 창이 바뀔 때 판매가보다 더 크게 튄다 — 사다리를 판매가에서만 걷어내면
+          물류비가 계속 계단 진동을 탄다(ref 43 §7 말미). 그래서 함께 교체했다.
+          단 N배송은 07-22 시작이라 백테스트할 과거가 없다 — 근거는 "같은 메커니즘이니 같은
+          병에 걸린다"는 구조 논증이지 실측이 아니다(ref 43 §8-4).
         - 수취 배송비: Order.shipping_cost(고객이 낸 deliveryFeeAmount) 실측 평균 —
           라이브 실측(120일): 채널 25.4% 주문이 수취(상품별 무료/유료 혼합이 사실).
         - ★max(0,·) 클램프 = 보수 방향: 수취가 지불을 초과해도 배송 마진을 이익(음수 물류비)으로
@@ -258,7 +267,7 @@ def _avg_qty_and_logistics(db: Session, *, orders_by_pid: dict[str, list[dict]] 
     (= 배송비 전액 차감, 보수적).
 
     반환: {cpid: {"avg_qty", "shipping"(지불), "collected"(수취 평균), "net_ship",
-                  "logistics"(단가당), "orders", "nb_share", "nb_window"}}
+                  "logistics"(단가당), "orders", "nb_share", "nb_sample", "nb_fresh"}}
     """
     by_pid = orders_by_pid if orders_by_pid is not None else _naver_order_rows(db)
     cutoff = kst_today() - timedelta(days=_PRICE_WINDOW_DAYS)
@@ -271,8 +280,8 @@ def _avg_qty_and_logistics(db: Session, *, orders_by_pid: dict[str, list[dict]] 
         avg_qty = Decimal(total_qty) / Decimal(n) if n and total_qty > 0 else Decimal("1")
         if avg_qty <= 0:
             avg_qty = Decimal("1")
-        # 지불: 적응형 창의 N배송 혼합비 × 단가차(레짐 변수).
-        recent, window = _adaptive_rows(all_rows, nmin)
+        # 지불: 최근 10건 표본의 N배송 혼합비 × 단가차(레짐 변수 — 판매가와 같은 행 집합).
+        recent, fresh = _recent_sample(all_rows, sample_size)
         nb_share = (Decimal(sum(1 for r in recent if r["nbaesong"])) / Decimal(len(recent))
                     if recent else Decimal("0"))
         shipping = SHIPPING_COST_NORMAL + (SHIPPING_COST_NBAESONG - SHIPPING_COST_NORMAL) * nb_share
@@ -282,33 +291,35 @@ def _avg_qty_and_logistics(db: Session, *, orders_by_pid: dict[str, list[dict]] 
         logistics = (net_ship / avg_qty).quantize(Decimal("0.01"), ROUND_HALF_UP)
         out[pid] = {"avg_qty": avg_qty, "shipping": shipping, "collected": collected,
                     "net_ship": net_ship, "logistics": logistics, "orders": n,
-                    "nb_share": nb_share, "nb_window": window}
+                    "nb_share": nb_share, "nb_sample": len(recent), "nb_fresh": fresh}
     return out
 
 
 def _unit_prices(db: Session, *, orders_by_pid: dict[str, list[dict]] | None = None,
-                 nmin: int = _ADAPTIVE_MIN_ORDERS) -> dict[str, Decimal]:
-    """네이버 상품(channel_product_id)별 대표 단가 = median(selling_price/quantity).
+                 sample_size: int = _RECENT_SAMPLE_SIZE) -> dict[str, Decimal]:
+    """네이버 상품(channel_product_id)별 대표 단가 = **최근 10건 median**(D-NAO-100 · ref 43 E5c).
 
-    ★N1(D-NAO-99): 판매가는 **레짐 변수**라 적응형 최근 창(_adaptive_rows)에서 뽑는다.
-    120일 median은 인하 전 구가격을 오래 붙들어(예: 16프로 18,900 vs 실제 15,900) BEP를
-    최대 −12.4% 낙관 쪽으로 틀어 놓았다(ref 42 §2-③ · §4 요인분해 ①).
-    적응형 창에 유효 판매가가 없으면 넓은 창(_PRICE_WINDOW_DAYS, 없으면 전기간)으로 폴백.
-    원 단위 반올림.
+    판매가는 레짐 변수다. 120일 median은 인하 전 구가격을 오래 붙들어(예: 16프로 18,900 vs
+    실제 15,900) BEP를 낙관 쪽으로 틀고, 인하 7건 중 5건을 끝내 못 따라갔다(중앙 84일).
+    반대로 N1의 적응형 사다리는 창 계단을 점프하며 하루 만에 왕복했다(왕복 12회).
+    최근 N건은 표본이 한 건씩 밀려 나가는 연속 이동이라 **정확도·안정성·전환 감지 3축 전부에서**
+    사다리를 이긴다(MAPE 3.50 vs 4.03 / 왕복 2 vs 12 / 인하 20일 7/7 vs 25일 6/7).
+
+    표본 = _recent_sample(달력 상한 120일, 없으면 전기간 최근 N건). 그중 판매가가 있는 주문의
+    단가 median, 원 단위 반올림. 표본에 유효 판매가가 하나도 없으면(데이터 이상) 전기간
+    최근 N건의 판매가 있는 주문으로 폴백한다. 주문 자체가 0건이면 여기서 값을 내지 않고
+    호출부의 매핑 판매가 폴백(D-NAO-95)이 받는다.
     """
     by_pid = orders_by_pid if orders_by_pid is not None else _naver_order_rows(db)
-    cutoff = kst_today() - timedelta(days=_PRICE_WINDOW_DAYS)
     prices: dict[str, Decimal] = {}
     for pid, all_rows in by_pid.items():
         priced = [r for r in all_rows if r["unit_price"] is not None]
         if not priced:
             continue
-        recent, _ = _adaptive_rows(all_rows, nmin)
+        recent, _fresh = _recent_sample(all_rows, sample_size)
         src = [r["unit_price"] for r in recent if r["unit_price"] is not None]
-        if not src:  # 적응형 창에 판매가 있는 주문이 없다 → 종전 창 규칙으로 폴백
-            src = [r["unit_price"] for r in priced
-                   if r["order_date"] and r["order_date"] >= cutoff] or [
-                       r["unit_price"] for r in priced]
+        if not src:  # 표본 전부가 판매가 0(데이터 이상) → 판매가 있는 최근 N건으로 폴백
+            src = [r["unit_price"] for r in _recent_sample(priced, sample_size)[0]]
         prices[pid] = Decimal(statistics.median(src)).quantize(Decimal("1"), ROUND_HALF_UP)
     return prices
 
@@ -329,12 +340,13 @@ def calculate_bep(db: Session, *, aggressiveness: str = "standard") -> dict:
 
     ★N1 (D-NAO-99, ref 42) — 배송방식 인지형 정합. **산식(공헌이익·BEP 정의)은 불변**이고,
     3개 입력의 산출 창·입자도만 바뀐다:
-      ① 판매가        → 적응형 최근 창의 median (레짐 변수)
-      ② N배송 혼합비  → 적응형 최근 창 비율 → 지불 배송비 = 1,900 + 1,120 × 혼합비
+      ① 판매가        → 최근 10건 표본의 median (레짐 변수)
+      ② N배송 혼합비  → 같은 표본의 비율 → 지불 배송비 = 1,900 + 1,120 × 혼합비
       ③ 수수료율      → 계정 단일값 폐기, product_commission SA의 상품별 실측
                         (주문관리 + 기저 매출연동 + 1.5%p × N배송 혼합비)
-    셋은 곱셈적으로 결합해 N배송 전환 + 가격 인하가 겹친 라인에서 BEP를 최대 +21.7%
-    (입찰 상한 −15.9%) 움직인다. 라이브 영향 상품은 525종 중 25종(중앙값 +0.08%).
+    셋은 곱셈적으로 결합해 N배송 전환 + 가격 인하가 겹친 라인에서 BEP를 크게 움직인다
+    (레짐 변동 25종 안팎, 나머지 500종은 |Δ|<1%).
+    ★①②의 표본 규칙은 D-NAO-100(ref 43 백테스트)에서 적응형 사다리 → 최근 N건으로 교체됐다.
     ③의 실측 표본이 없으면(정산 미수집 환경·테스트) 종전 계정 단일 요율로 폴백해 회귀 0.
     ★언디루션 무효(ad_commission_rate가 shopping_share=1.0이라 항등)는 N1 범위 밖 — N3 이월
     (ref 42 §6). 배송비 수취분에 붙는 주문관리 수수료(건당 81원)도 미모델링(§7-7, 별건).
@@ -465,9 +477,9 @@ def calculate_bep(db: Session, *, aggressiveness: str = "standard") -> dict:
         n_total += 1
     db.commit()
     log.info("naver_product_bep 산출: %d행(bep %d, 매핑판매가 %d→bep %d, 상품실측요율 %d) "
-             "rate=%.4f 기준=%s 공격성=%s nmin=%d",
+             "rate=%.4f 기준=%s 공격성=%s 표본=최근%d건",
              n_total, n_bep, n_mapped_price, n_mapped_with_bep, n_case_rate, float(rate),
-             commission_basis, aggressiveness, _ADAPTIVE_MIN_ORDERS)
+             commission_basis, aggressiveness, _RECENT_SAMPLE_SIZE)
     return {"rows": n_total, "with_bep": n_bep, "mapped_price_rows": n_mapped_price,
             "mapped_price_with_bep": n_mapped_with_bep,
             "product_rate_rows": n_case_rate,
