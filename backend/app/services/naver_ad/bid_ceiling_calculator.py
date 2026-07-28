@@ -36,14 +36,14 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy import func as sqlfunc
 from sqlalchemy.orm import Session
 
 from app.models import NaverAdDaily, NaverAdgroupProduct, NaverProductBep
-from app.services.naver_ad import bid_simulator
+from app.services.naver_ad import bid_simulator, conversion_maturity
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 
 log = logging.getLogger(__name__)
@@ -73,8 +73,18 @@ def _rpc_for(
         그쪽은 "증거 구매 창"을 여는 완화 산식이고, 여기는 콜드 소재에 큰 폭 상향(±15% 완전 면제)을
         태우는 산식이라 더 보수적이어야 한다. 두 값이 다른 것은 버그가 아니라 설계다.
     backfill sentinel 행은 제외한다(naver_ad_daily 2배 계상 함정 — 메모리 naver-ad-data-cadence).
+
+    ★전환 정착 보정(2026-07-28): 창의 각 날짜를 **성숙 시점 추정치로 환산**한 뒤 합산한다
+      (conversion_maturity.maturity_multiplier = 1/m(d)). 종전엔 창 전체를 단일 SUM으로 더해서,
+      아직 정착 중인 최근 며칠이 과소계상된 채로 RPC를 끌어내렸다. 수요가 평평하면 작은 편향이나
+      **수요가 오르는 구간에서는 가장 뜨거운 최근 며칠이 가장 덜 집계돼** 상한을 계통적으로 낮춘다.
+      특히 **신규 상품은 90일 창 안의 데이터가 전부 최근**이라 편향을 100% 맞는다 — 정작 공격적으로
+      사야 할 신제품 런칭에서 상한이 가장 보수적으로 나오던 원인이다.
+      곡선이 없으면(코호트 부족) 배수 1.0이라 **종전과 동일한 값**을 낸다(fail-safe).
     """
+    curve = conversion_maturity.load_curve(db)
     q = db.query(
+        NaverAdDaily.ad_date,
         sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.clk), 0),
         sqlfunc.coalesce(sqlfunc.sum(NaverAdDaily.conv_direct_amt), 0),
     ).filter(
@@ -86,11 +96,17 @@ def _rpc_for(
         q = q.filter(NaverAdDaily.adgroup_id == adgroup_id)
     if campaign_id is not None:
         q = q.filter(NaverAdDaily.campaign_id == campaign_id)
-    clk, direct = q.one()
-    clk = int(clk)
+    clk = 0
+    revenue = Decimal(0)
+    for ad_date, day_clk, day_direct in q.group_by(NaverAdDaily.ad_date).all():
+        clk += int(day_clk)
+        d = ad_date.date() if isinstance(ad_date, datetime) else ad_date
+        revenue += Decimal(int(day_direct)) * conversion_maturity.maturity_multiplier(
+            curve, (today - d).days,
+        )
     if clk <= 0:
         return 0, None
-    return clk, Decimal(int(direct)) / Decimal(clk)
+    return clk, revenue / Decimal(clk)
 
 
 def resolve_rpc(db: Session, adgroup_id: str, campaign_id: str, today: date) -> dict:

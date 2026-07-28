@@ -112,6 +112,58 @@ def compute_curve(db: Session) -> dict:
     return {"curve": curve, "cohort_n": len(mature_ad_dates), "skipped_reason": None}
 
 
+# 성숙 환산 배수 상한 — 곡선이 망가져(m(d)가 0에 가깝게) 상한을 폭주시키는 것을 막는 fail-safe.
+# 3배 = 관측 시점에 최종 매출의 1/3만 보이는 경우까지 허용. 그보다 심한 지연은 곡선을 의심한다.
+_MAX_MATURITY_MULTIPLIER = Decimal("3")
+
+
+def load_curve(db: Session) -> dict[int, Decimal]:
+    """m(d) 곡선 로드 — {days_since: 성숙(D+21) 대비 그날 시점 관측 비율}. 미산출이면 빈 dict.
+
+    run_daily가 NaverLearningState(scope="global", scope_key="day_<d>", metric="conv_delay")에
+    적립한 것을 그대로 읽는다. 코호트 부족으로 곡선이 없으면 빈 dict → 소비자는 보정 없이(배수 1.0)
+    기존 동작을 유지한다(fail-safe — 없는 곡선을 추정으로 만들지 않는다)."""
+    rows = (
+        db.query(NaverLearningState.scope_key, NaverLearningState.current_value)
+        .filter(
+            NaverLearningState.scope == "global",
+            NaverLearningState.metric == METRIC,
+            NaverLearningState.current_value.isnot(None),
+        )
+        .all()
+    )
+    out: dict[int, Decimal] = {}
+    for scope_key, value in rows:
+        if not scope_key or not scope_key.startswith("day_"):
+            continue
+        try:
+            out[int(scope_key[4:])] = Decimal(value)
+        except (ValueError, TypeError):
+            continue
+    return out
+
+
+def maturity_multiplier(curve: dict[int, Decimal], days_since: int) -> Decimal:
+    """관측 매출 → **성숙 시점 추정 매출**로 환산하는 배수(= 1/m(d)).
+
+    ★왜 필요한가: 전환은 ad_date로부터 며칠에 걸쳐 정착하므로, 최근 며칠의 conv_amt는 항상
+    과소계상 상태다. 그 값을 그대로 쓰면 최근 성과가 실제보다 나쁘게 보인다. 수요가 평평할 때는
+    이 편향이 작지만 **수요가 오르는 구간(신제품 런칭 등)에서는 가장 뜨거운 최근 며칠이 가장 덜
+    집계된 상태로 들어와** 계통적 하향 편향이 된다 — 그리고 신규 상품은 **모든 데이터가 최근**이라
+    편향을 100% 맞는다. 이 보정은 그래서 신규/런칭 상품에 가장 크게 작동한다(의도된 표적성).
+
+    fail-safe 규칙(하나라도 걸리면 배수 1.0 = 보정 없음, 기존 동작):
+      · 곡선 없음(코호트 부족)  · days_since ≥ MATURITY_DAYS(이미 성숙)
+      · m(d)가 0 이하(정의 불가)  · m(d) ≥ 1(이미 다 찼거나 이상값)
+    상한은 _MAX_MATURITY_MULTIPLIER — 망가진 곡선이 이익 상한을 폭주시키지 못하게 한다."""
+    if days_since < 0 or days_since >= MATURITY_DAYS or not curve:
+        return Decimal(1)
+    m = curve.get(days_since)
+    if m is None or m <= 0 or m >= 1:
+        return Decimal(1)
+    return min(Decimal(1) / m, _MAX_MATURITY_MULTIPLIER)
+
+
 def _upsert_learning_state(db: Session, *, scope_key: str, value: Decimal, sample_n: int, confidence: Decimal) -> None:
     row = db.query(NaverLearningState).filter(
         NaverLearningState.scope == "global", NaverLearningState.scope_key == scope_key,
