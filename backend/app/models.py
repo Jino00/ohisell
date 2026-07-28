@@ -1554,8 +1554,13 @@ class NaverProductBep(Base):
     aggressiveness: Mapped[str] = mapped_column(String(12), nullable=False, default="standard")  # safe/standard/aggressive
     target_roas: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4), nullable=True)  # bep_roas × 공격성 배수
     has_cost: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    # D-NAO-57(B): 광고 의사결정 BEP에 쓴 수수료율 기준 — ad_case(정산 유형별 실측 분해=주문관리+
-    # 매출연동 언디루션) / blended(기존 전체 회계 실효율 폴백). None=산출 전/폴백 미판정.
+    # 광고 의사결정 BEP에 쓴 수수료율 기준(행 단위). None=산출 전/폴백 미판정.
+    #   delivery_case — N1(D-NAO-99) 기본. **그 상품의** 건별 정산 실측(주문관리+기저 매출연동)
+    #                   + 1.5%p × N배송 혼합비. 상품 표본 ≥5건일 때.
+    #   delivery_acct  — 위와 같은 실측이되 상품 표본이 얇아(<5건) 계정 실측을 쓴 행.
+    #   ad_case        — D-NAO-57(B) 유형별 분해(매출연동 언디루션). 정산 표본이 상품에 귀속되지
+    #                   않을 때의 계정 단일 요율 폴백. ★언디루션은 라이브에서 항등(ref 42 §6, N3).
+    #   blended        — 전체 회계 실효율(|Σcomm|/(Σsettle+|Σcomm|)) 최종 폴백.
     commission_basis: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     calculated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 

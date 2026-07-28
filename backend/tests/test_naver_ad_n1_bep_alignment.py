@@ -146,14 +146,21 @@ def test_logistics_wide_window_still_drives_qty_and_collected(db):
 # ══════════════════════════════════════════════════════════════════
 # ③ product_commission SA
 # ══════════════════════════════════════════════════════════════════
-def _settled(db, pid, *, i, gross, mgmt_rate, interlock_rate, nbaesong=False, days_ago=10):
+def _settled(db, pid, *, i, gross, mgmt_rate, interlock_rate, nbaesong=False, days_ago=10,
+             order_number=None, line_id=None, product_order_id=None):
+    """주문 1행 + 그에 대응하는 건별 정산 1행.
+
+    기본은 라이브 규약대로 platform_order_line_id == product_order_id(원자 주문라인 그레인).
+    """
     g = Decimal(str(gross))
-    oid = f"ord-{pid}-{i}"
-    db.add(Order(channel_id=6, platform_product_id=pid, order_number=oid, quantity=1,
+    onum = order_number or f"ord-{pid}-{i}"
+    line = line_id if line_id is not None else f"po-{pid}-{i}"
+    db.add(Order(channel_id=6, platform_product_id=pid, order_number=onum,
+                 platform_order_line_id=line, quantity=1,
                  selling_price=g, order_date=kst_today() - timedelta(days=days_ago),
                  delivery_attribute_type=AG if nbaesong else "TODAY"))
     db.add(NaverSettlementCase(
-        product_order_id=f"po-{pid}-{i}", order_id=oid, product_id=pid,
+        product_order_id=product_order_id or f"po-{pid}-{i}", order_id=onum, product_id=pid,
         product_order_type="PROD_ORDER", pay_settle_amount=g,
         total_pay_commission=-(g * Decimal(str(mgmt_rate))),
         selling_interlock_commission=-(g * Decimal(str(interlock_rate))),
@@ -229,6 +236,136 @@ def test_measure_rejects_implausible_rate(db):
         _settled(db, "p1", i=i, gross=10000, mgmt_rate="0.20", interlock_rate="0.20")
     db.commit()
     assert not product_commission.measure(db).available
+
+
+@pytest.mark.parametrize("n_rows,expected_basis", [(4, "delivery_acct"), (5, "delivery_case")])
+def test_measure_min_rows_boundary(db, n_rows, expected_basis):
+    """표본 경계: 4건이면 계정 폴백, 5건이면 상품 실측(min_rows=5의 등호 방향 고정)."""
+    for i in range(10):  # 계정 표본
+        _settled(db, "base", i=i, gross=10000, mgmt_rate="0.02724", interlock_rate="0.01")
+    for i in range(n_rows):
+        _settled(db, "p2", i=i, gross=10000, mgmt_rate="0.02724", interlock_rate="0.03")
+    db.commit()
+    t = product_commission.measure(db)
+    assert t.products["p2"].rows == n_rows
+    assert t.rate_for("p2")[1] == expected_basis
+
+
+def test_measure_split_order_lines_are_not_double_counted(db):
+    """★P2-1 회귀 가드: 같은 주문+상품이 2개 productOrderId로 쪼개진 케이스.
+
+    (order_number, product_id) 조인은 정산 2행 × 주문 2행 = 4행으로 부풀고, 배송구분이 섞여
+    있으면 N배송 프리미엄 제거가 과도해져 기저 매출연동이 낙관(=상한 과대) 쪽으로 오염된다.
+    정확 키(product_order_id ↔ platform_order_line_id)는 2행 그대로여야 한다.
+    """
+    onum = "ord-split-1"
+    # 라인 A = 일반배송(매출연동 3.0%), 라인 B = N배송(4.5% = 기저 3.0% + 1.5%p)
+    _settled(db, "p1", i=0, gross=10000, mgmt_rate="0.02724", interlock_rate="0.03",
+             order_number=onum, line_id="poA", product_order_id="poA")
+    _settled(db, "p1", i=1, gross=10000, mgmt_rate="0.02724", interlock_rate="0.045",
+             nbaesong=True, order_number=onum, line_id="poB", product_order_id="poB")
+    db.commit()
+    t = product_commission.measure(db)
+    comp = t.products["p1"]
+    assert comp.rows == 2                      # 4가 아니다(데카르트 중복 없음)
+    assert comp.gross == Decimal("20000")
+    assert comp.mgmt_rate == Decimal("0.02724")
+    assert comp.base_interlock_rate == Decimal("0.03")   # 두 라인 모두 기저 3.0%
+    assert t.matched_by_line == 2 and t.matched_by_fallback == 0 and t.unmatched == 0
+
+
+def test_measure_fallback_matches_when_single_candidate(db):
+    """정확 키가 안 맞는 정산 행(라이브 0.19%)은 후보가 유일할 때만 폴백 매칭."""
+    _settled(db, "p1", i=0, gross=10000, mgmt_rate="0.02724", interlock_rate="0.03",
+             order_number="ord-1", line_id="line-1", product_order_id="mismatched-1")
+    db.commit()
+    t = product_commission.measure(db)
+    assert t.matched_by_line == 0 and t.matched_by_fallback == 1 and t.unmatched == 0
+    assert t.products["p1"].rows == 1
+
+
+def test_measure_drops_ambiguous_fallback(db):
+    """후보가 2건 이상(분할 주문)이면 귀속이 애매 → 억지로 붙이지 않고 제외한다."""
+    onum = "ord-amb"
+    _settled(db, "p1", i=0, gross=10000, mgmt_rate="0.02724", interlock_rate="0.03",
+             order_number=onum, line_id="line-a", product_order_id="line-a")
+    _settled(db, "p1", i=1, gross=10000, mgmt_rate="0.02724", interlock_rate="0.03",
+             order_number=onum, line_id="line-b", product_order_id="nope-b")
+    db.commit()
+    t = product_commission.measure(db)
+    assert t.matched_by_line == 1 and t.unmatched == 1
+    assert t.products["p1"].rows == 1
+
+
+def test_measure_window_default_is_120_days(db):
+    """ref 42 §3: 기저 요율 창 = 120일. 창 밖 표본만 있는 상품은 전기간 폴백으로 살린다."""
+    assert product_commission._COMMISSION_WINDOW_DAYS == 120
+    for i in range(6):  # 창 안 — 매출연동 3.0%
+        _settled(db, "p1", i=i, gross=10000, mgmt_rate="0.02724", interlock_rate="0.03",
+                 days_ago=10)
+    for i in range(6):  # 창 밖(200일 전) — 매출연동 1.0%, 기본 창에선 제외돼야 한다
+        _settled(db, "p1", i=100 + i, gross=10000, mgmt_rate="0.02724", interlock_rate="0.01",
+                 days_ago=200)
+    for i in range(6):  # 창 밖 표본만 있는 상품 → 전기간 폴백
+        _settled(db, "p2", i=i, gross=10000, mgmt_rate="0.02724", interlock_rate="0.01",
+                 days_ago=200)
+    db.commit()
+    t = product_commission.measure(db)
+    assert t.products["p1"].rows == 6
+    assert t.products["p1"].base_interlock_rate == Decimal("0.03")
+    assert t.products["p2"].rows == 6      # 창 밖뿐이지만 폴백으로 살아남는다
+    assert t.products["p2"].base_interlock_rate == Decimal("0.01")
+
+
+def test_rate_for_accepts_non_decimal_share(db):
+    """P3-4: float/int/str 혼합비도 Decimal로 강제 변환(TypeError로 BEP 전체가 죽지 않게)."""
+    for i in range(10):
+        _settled(db, "p1", i=i, gross=10000, mgmt_rate="0.02724", interlock_rate="0.03")
+    db.commit()
+    t = product_commission.measure(db)
+    assert t.rate_for("p1", 0.5)[0] == t.rate_for("p1", Decimal("0.5"))[0]
+    assert t.rate_for("p1", 1)[0] == t.rate_for("p1", Decimal("1"))[0]
+    assert t.rate_for("p1", "0.25")[0] == t.rate_for("p1", Decimal("0.25"))[0]
+    # 범위 밖·이상값은 보수적으로 클램프
+    assert t.rate_for("p1", 5)[0] == t.rate_for("p1", Decimal("1"))[0]
+    assert t.rate_for("p1", -1)[0] == t.rate_for("p1", Decimal("0"))[0]
+    assert t.rate_for("p1", "nonsense")[0] == t.rate_for("p1", Decimal("0"))[0]
+
+
+# ══════════════════════════════════════════════════════════════════
+# _is_nbaesong — 영속 컬럼 우선 · raw_data 폴백
+# ══════════════════════════════════════════════════════════════════
+def test_is_nbaesong_prefers_persisted_column():
+    assert bep_calculator._is_nbaesong({"delivery_attribute_type": AG, "raw_data": None})
+    assert not bep_calculator._is_nbaesong({"delivery_attribute_type": "TODAY", "raw_data":
+                                            '{"productOrder": {"deliveryAttributeType": "%s"}}' % AG})
+
+
+def test_is_nbaesong_falls_back_to_raw_data_when_column_null():
+    # 백필 이전·판별 불가 행: 컬럼 NULL → raw_data 파싱
+    assert bep_calculator._is_nbaesong(
+        {"delivery_attribute_type": None,
+         "raw_data": '{"productOrder": {"deliveryAttributeType": "%s"}}' % AG})
+    assert not bep_calculator._is_nbaesong(
+        {"delivery_attribute_type": None,
+         "raw_data": '{"productOrder": {"deliveryAttributeType": "TODAY"}}'})
+    # 파싱 실패·부재는 일반배송 fail-safe
+    assert not bep_calculator._is_nbaesong({"delivery_attribute_type": None, "raw_data": "not json{"})
+    assert not bep_calculator._is_nbaesong({"delivery_attribute_type": None, "raw_data": None})
+
+
+def test_logistics_uses_raw_data_fallback_for_unbackfilled_rows(db):
+    """컬럼 미충전 주문도 혼합비에 반영된다(raw_data 폴백이 살아 있는가)."""
+    for i in range(10):
+        db.add(Order(channel_id=6, platform_product_id="p1", order_number=f"o{i}",
+                     platform_order_line_id=f"l{i}", quantity=1, selling_price=Decimal("10000"),
+                     order_date=kst_today() - timedelta(days=2),
+                     delivery_attribute_type=None,
+                     raw_data='{"productOrder": {"deliveryAttributeType": "%s"}}' % AG))
+    db.commit()
+    out = bep_calculator._avg_qty_and_logistics(db)["p1"]
+    assert out["nb_share"] == Decimal("1")
+    assert out["shipping"] == Decimal("3020")
 
 
 # ══════════════════════════════════════════════════════════════════
