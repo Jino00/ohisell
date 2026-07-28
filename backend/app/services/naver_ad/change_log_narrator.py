@@ -161,8 +161,36 @@ def execution_state(row: NaverChangeLog) -> str:
     return STATE_UNKNOWN  # 접두사 없음 = 판별 불가 → 모름(보수)
 
 
-def _block_reason(rationale: str | None) -> str:
-    """가드 거부 사유를 사람 말로. 내부 원문(D-NAO 코드·변수명)은 절대 그대로 안 내보낸다."""
+# 방향(올림/내림)이라는 축이 있는 액션. 정지/재개·검색어 제외는 '올렸다/내렸다'가 성립하지
+# 않는다 — 여기 없는 액션에 방향을 붙이면 화면이 없는 사실을 말하게 된다.
+_DIRECTIONAL_ACTIONS = frozenset({
+    "update_bid", "update_budget", "budget_up_pacing", "budget_down_pacing",
+})
+
+
+def change_direction(row: NaverChangeLog) -> int:
+    """+1 상향 / -1 하향 / 0 방향 없음(또는 값 부재로 단언 불가).
+
+    ★공개 함수다(D-NAO-105 Phase 2): 그룹 상태 배지가 "최근에 올렸나"를 판단할 때 쓴다.
+    before/after 파싱 규약(소재는 adAttr.bidAmt)이 이 모듈에만 있으므로 여기 둔다 — 밖에서
+    다시 파싱하면 소재-레벨 입찰(쇼핑의 실제 레버, 실측 96%)을 통째로 놓친다."""
+    if row.action not in _DIRECTIONAL_ACTIONS:
+        return 0
+    before, after = _loads(row.before_value), _loads(row.after_value)
+    if row.action == "update_bid":
+        b, a = _bid_of(before), _bid_of(after)
+    else:
+        b, a = _budget_of(before), _budget_of(after)
+    if b is None or a is None or a == b:
+        return 0
+    return 1 if a > b else -1
+
+
+def block_reason(rationale: str | None) -> str:
+    """가드 거부 사유를 사람 말로. 내부 원문(D-NAO 코드·변수명)은 절대 그대로 안 내보낸다.
+
+    ★공개 함수다(D-NAO-105 Phase 2): 그룹 상태 배지(group_state_badge)의 '차단됨' 사유도
+    같은 사전을 써야 한다. 두 벌로 번역하면 같은 차단이 화면마다 다른 말로 나온다."""
     text = rationale or ""
     tail = text.split(GUARD_BLOCK_MARKER, 1)[1] if GUARD_BLOCK_MARKER in text else text
     for needle, human in _BLOCK_REASON_RULES:
@@ -312,7 +340,7 @@ def narrate(
         elif state == STATE_BLOCKED:
             body = (
                 f"{prefix}{phrase}{_eul_reul(phrase)} 하려다 멈췄습니다 "
-                f"— {_block_reason(row.rationale)}."
+                f"— {block_reason(row.rationale)}."
             )
         else:
             body = (

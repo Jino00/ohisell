@@ -101,6 +101,20 @@ def campaign_type_label(campaign_type: str | None) -> str:
     return _CAMPAIGN_TYPE_WORDS.get(str(campaign_type or ""), "")
 
 
+def managed_by_label(optimizer: str | None, auto_operate: bool) -> str:
+    """관리 주체 한 줄. optimizer와 auto_operate는 **다른 축**이다 — 우리 소유인데 자동 레인이
+    꺼진 상태(D-NAO-92의 03)가 실재하므로 하나로 뭉뚱그리지 않는다.
+
+    ★한 곳에 둔 이유(D-NAO-105 리뷰): 성과 카드(①)와 캠페인 상세(③)가 같은 캠페인을 두고
+    "우리가 자동으로 운영"과 "우리가 더 키우지 않고 있습니다"처럼 **서로 다른 주체**를 말하면
+    화면이 모순된다. 라벨도 판정도 이 함수 하나를 본다."""
+    if optimizer == "ours":
+        return "우리가 자동으로 운영" if auto_operate else "우리 담당 · 자동 운영은 꺼둠"
+    if optimizer == "mop":
+        return "대행사가 운영"
+    return "직접 관리(자동 운영 안 함)"
+
+
 def rank_label(avg_rank: float | Decimal | None, *, band_top: float = 4.0) -> str:
     """'밴드 내≤4.0' 같은 내부 표기 대신 사람 말로. 순위 미상이면 '순위 확인 불가'."""
     if avg_rank is None:
