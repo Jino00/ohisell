@@ -804,8 +804,41 @@ def run_naver_auto_operator_hourly_job():
             result["explored_not_rank"], result["explored_ghost_hold"],
             len(result["ghost_hold_groups"]),
         )
+        # BP(D-NAO-102) 예산 페이싱 카운터 — 별도 라인(위 라인이 이미 길어 소실 위험).
+        log.info(
+            "[스케줄러] naver BP 예산페이싱: reviewed=%s raised=%s failed=%s dry_run=%s "
+            "held=%s | restore reviewed=%s restored=%s failed=%s",
+            result["budget_pacing_reviewed"], result["budget_pacing_raised"],
+            result["budget_pacing_failed"], result["budget_pacing_dry_run"],
+            len(result["budget_pacing_held"]), result["budget_pacing_restore_reviewed"],
+            result["budget_pacing_restored"], result["budget_pacing_restore_failed"],
+        )
     except Exception as e:
         log.exception("[스케줄러] run_naver_auto_operator_hourly_job 에러: %s", e)
+        raise
+    finally:
+        db.close()
+
+
+def run_naver_budget_pacing_reset_job():
+    """BP 익일 예산 원복 — auto_operator._run_budget_pacing_restore (매일 00:05 KST, D-NAO-102 ⑤).
+
+    전날 장중 페이싱 증액분을 naver_campaign_settings.base_daily_budget으로 되돌린다.
+    ★멱등·자가치유: 판정이 change_log 이력 기반이라 이 잡이 죽어도 시간당 레인(:20)이 같은
+    함수를 호출해 따라잡는다 — catch-up 목록(아침배치 전용)에 넣지 않는 이유."""
+    db = _get_own_db_session()
+    try:
+        from app.services.naver_ad.auto_operator import run_budget_pacing_reset_lane
+
+        result = run_budget_pacing_reset_lane(db)
+        log.info(
+            "[스케줄러] naver BP 예산 원복: reviewed=%s restored=%s failed=%s dry_run=%s held=%s",
+            result["budget_pacing_restore_reviewed"], result["budget_pacing_restored"],
+            result["budget_pacing_restore_failed"], result["budget_pacing_dry_run"],
+            len(result["budget_pacing_held"]),
+        )
+    except Exception as e:
+        log.exception("[스케줄러] run_naver_budget_pacing_reset_job 에러: %s", e)
         raise
     finally:
         db.close()
@@ -1340,6 +1373,7 @@ def _ensure_default_states(db):
         ("run_naver_probe_learning", "3 9 * * *"),  # CD4 환경별 학습·세분화층(정산 08:55 뒤·vault 09:05 앞 재계산 → observe 요약이 당일 볼트에 포함, D-NAO-58 CD4)
         ("sweep_naver_keyword_hourly", "10 9 * * *"),  # 키워드/쇼핑그룹 시간별(hh24) 축적, D-1 스윕(D-NAO-46②)
         ("run_naver_auto_operator_hourly", "20 * * * *"),  # 시간당 밴드 관제 실입찰(catch-up 제외, D-NAO-49)
+        ("run_naver_budget_pacing_reset", "5 0 * * *"),  # BP 익일 예산 원복(D-NAO-102 ⑤ — 멱등, 시간당 레인이 자가치유하므로 catch-up 제외)
         ("run_naver_flight_loop", "15 */2 * * *"),  # 당일 플라이트 루프 2시간 주기(X2, dry_run=True)
         ("sync_naver_settlement", "25 5 * * *"),
         ("sync_naver_case_settlement", "30 5 * * *"),
@@ -1580,6 +1614,7 @@ def job_func_for(job_name: str):
         "sweep_naver_keyword_hourly": sweep_naver_keyword_hourly_job,
         "run_naver_auto_operator_daily": run_naver_auto_operator_daily_job,
         "run_naver_auto_operator_hourly": run_naver_auto_operator_hourly_job,
+        "run_naver_budget_pacing_reset": run_naver_budget_pacing_reset_job,
         "run_naver_probe_settlement": run_naver_probe_settlement_job,
         "run_naver_probe_learning": run_naver_probe_learning_job,
         "generate_expert_desk": generate_expert_desk_job,

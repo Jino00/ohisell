@@ -42,6 +42,7 @@ from app.models import (
 )
 from app.services.naver_ad import (
     account_diagnosis,
+    budget_pacing,
     campaign_target_resolver,
     diary,
     guardrail_gate,
@@ -1443,6 +1444,22 @@ def _execute_set_user_lock(db: Session, proposal: NaverProposal, now: datetime) 
     return log_entry
 
 
+def _budget_log_action(proposal: NaverProposal) -> str:
+    """change_log.action 라벨 — BP(예산 페이싱, D-NAO-102 ⑥) 쓰기만 세분화한다.
+
+    'update_budget'(기본, 봉투·콘솔 Confirm 경로) vs 'budget_up_pacing'/'budget_down_pacing'
+    (BP 레인). ★실행 경로·가드레일·디스패치 키(_WRITE_EXECUTORS/'update_budget')는 전부
+    그대로다 — 이 함수가 바꾸는 건 사후 식별용 라벨뿐이라 초크포인트는 여전히 하나다.
+    판별은 approval_source(구조화 컬럼)로 한다 — rationale 텍스트 파싱 금지 원칙 준수."""
+    if proposal.approval_source != budget_pacing.APPROVAL_SOURCE_PACING:
+        return "update_budget"
+    return (
+        budget_pacing.ACTION_BUDGET_DOWN_PACING
+        if proposal.proposal_type == "budget_down"
+        else budget_pacing.ACTION_BUDGET_UP_PACING
+    )
+
+
 def _execute_update_budget(db: Session, proposal: NaverProposal, now: datetime) -> NaverChangeLog:
     """캠페인 일예산 실쓰기 1건 (P3, D-NAO-16 4단계, D-NAO-42-f). budget_up/budget_down 공용 —
     target_budget 컬럼(P1, proposal_writer가 구조화 저장)을 그대로 쓴다(rationale 텍스트
@@ -1457,16 +1474,19 @@ def _execute_update_budget(db: Session, proposal: NaverProposal, now: datetime) 
     라운드 봉투(budget_auto_eligible, §5-E)는 여기서 소비하지 않는다 — 오늘은 반자동이라
     Jino 콘솔 승인(status='approved')이 실행 전 유일한 게이트이고, 라운드 봉투는 자율(위임)
     승급 후 자동발사 경로에서만 실효(PLAN §5-E 주석)."""
+    # BP(D-NAO-102 ⑥) 라벨 분기 — 실행 경로 불변, change_log.action만 세분화.
+    log_action = _budget_log_action(proposal)
+
     if proposal.target_type != "campaign":
         reason = (
             f"target_type={proposal.target_type!r} — 캠페인 단위 예산만 구현됨(정직 경계)"
         )
-        _guard_failure(db, proposal, now, "update_budget", reason)
+        _guard_failure(db, proposal, now, log_action, reason)
         raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
 
     if proposal.target_budget is None:
         reason = "target_budget 없음 — 구조 결함(구 제안이거나 재생성 필요)"
-        _guard_failure(db, proposal, now, "update_budget", reason)
+        _guard_failure(db, proposal, now, log_action, reason)
         raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
 
     # codex[P1, Fix 2]: 캠페인 단위 예산 쓰기는 target_id==campaign_id가 불변이어야 한다
@@ -1479,7 +1499,7 @@ def _execute_update_budget(db: Session, proposal: NaverProposal, now: datetime) 
             "둘 중 하나가 비어있음) — 캠페인 예산 쓰기는 target_id==campaign_id가 불변, "
             "stale/malformed 제안(fail-closed)"
         )
-        _guard_failure(db, proposal, now, "update_budget", reason)
+        _guard_failure(db, proposal, now, log_action, reason)
         raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
 
     context = _build_guardrail_context(db, proposal, now)
@@ -1490,7 +1510,7 @@ def _execute_update_budget(db: Session, proposal: NaverProposal, now: datetime) 
     block_reason = guardrail_gate.check(gate_proposal, context, now=now)
     if block_reason is not None:
         reason = f"가드레일 차단 — {block_reason}"
-        _guard_failure(db, proposal, now, "update_budget", reason)
+        _guard_failure(db, proposal, now, log_action, reason)
         raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
 
     _claim_executing(db, proposal)
@@ -1501,7 +1521,7 @@ def _execute_update_budget(db: Session, proposal: NaverProposal, now: datetime) 
         proposal.status = "failed"  # 자동 재시도 차단(approved 게이트) — 재승인만 재시도 경로
         fail_entry = NaverChangeLog(
             entity_type=proposal.target_type, entity_id=proposal.target_id,
-            campaign_id=proposal.campaign_id, action="update_budget",
+            campaign_id=proposal.campaign_id, action=log_action,
             rationale=(
                 f"{proposal.rationale or ''} {WRITE_FAILURE_MARKER} {type(exc).__name__}: {str(exc)[:300]}"
             ),
@@ -1523,7 +1543,7 @@ def _execute_update_budget(db: Session, proposal: NaverProposal, now: datetime) 
     # _execute_add_negative_keyword 주석 참조).
     log_entry = NaverChangeLog(
         entity_type=proposal.target_type, entity_id=proposal.target_id,
-        campaign_id=proposal.campaign_id, action="update_budget",
+        campaign_id=proposal.campaign_id, action=log_action,
         rationale=rationale, predicted_json=proposal.expected_effect,
         proposal_id=proposal.id, dry_run=False,
         before_value=json.dumps(result.before, ensure_ascii=False),
@@ -1785,6 +1805,9 @@ def execute(db: Session, proposal_id: int, *, dry_run: bool = True, now: datetim
         raise ActionNotExecutableError(
             f"proposal_type={proposal.proposal_type!r}는 정보성 제안이라 실행 대상이 아님"
         )
+    # BP(D-NAO-102 ⑥): 기록 라벨만 세분화 — 디스패치/OPEN_ACTIONS 키는 계속 `action`
+    # (초크포인트 불변). dry-run change_log·일기도 같은 라벨을 써야 BP 레인이 사후 식별된다.
+    log_action = _budget_log_action(proposal) if action == "update_budget" else action
 
     if proposal.status != "approved":
         raise ProposalNotApprovedError(
@@ -1817,6 +1840,7 @@ def execute(db: Session, proposal_id: int, *, dry_run: bool = True, now: datetim
             _auto_operator.APPROVAL_SOURCE_DAILY, _auto_operator.APPROVAL_SOURCE_HOURLY,
             _auto_operator.APPROVAL_SOURCE_PROBE,  # D-NAO-58 CD2: 탐침도 동일 킬스위치 가드(우회 금지)
             _auto_operator.APPROVAL_SOURCE_REVERT,  # D-NAO-58 CD3: 되돌림도 진입 가드(probe_op와 동일 2중 harness 방어)
+            budget_pacing.APPROVAL_SOURCE_PACING,  # BP D-NAO-102: 예산 페이싱 증액·원복도 킬스위치 가드(우회 금지)
             APPROVAL_SOURCE_EXPLORE,  # BX2 D-NAO-70: 탐색 자동 실쓰기도 진입 킬스위치 가드(우회 금지, probe_op 관례)
             APPROVAL_SOURCE_COLD,  # CS: 콜드 첫 입찰도 진입 킬스위치 가드(우회 금지 — 자동 실쓰기 레인)
             search_term_judge.APPROVAL_SOURCE_SS_EXCLUDE,  # SS3-A: 미래 자동 활성화 대비 사전 등록(현재 미배선)
@@ -1833,7 +1857,7 @@ def execute(db: Session, proposal_id: int, *, dry_run: bool = True, now: datetim
                     db, "kill_switch", proposal.campaign_id,
                     actor=diary.actor_from_approval_source(proposal.approval_source),
                     target_type=proposal.target_type, target_id=proposal.target_id,
-                    adgroup_id=proposal.adgroup_id, action=action,
+                    adgroup_id=proposal.adgroup_id, action=log_action,
                     rationale="킬스위치 OFF(쓰기 직전 재확인)", now=now,
                 )
             except Exception as diary_err:  # noqa: BLE001 — fail-open(인자 평가 포함)
@@ -1861,7 +1885,7 @@ def execute(db: Session, proposal_id: int, *, dry_run: bool = True, now: datetim
                 db, "execute", proposal.campaign_id,
                 actor=diary.actor_from_approval_source(proposal.approval_source),
                 target_type=proposal.target_type, target_id=proposal.target_id,
-                adgroup_id=proposal.adgroup_id, action=action,
+                adgroup_id=proposal.adgroup_id, action=log_action,
                 before_value=log_entry.before_value, after_value=log_entry.after_value,
                 rationale=proposal.rationale, source_ref=log_entry.id, now=now,
             )
@@ -1871,7 +1895,7 @@ def execute(db: Session, proposal_id: int, *, dry_run: bool = True, now: datetim
 
     log_entry = NaverChangeLog(
         entity_type=proposal.target_type, entity_id=proposal.target_id,
-        campaign_id=proposal.campaign_id, action=action,
+        campaign_id=proposal.campaign_id, action=log_action,
         rationale=proposal.rationale, predicted_json=proposal.expected_effect,
         proposal_id=proposal.id, dry_run=effective_dry_run, changed_at=now, executed_at=now,
         verify_date=(now + timedelta(days=VERIFY_DAYS)).date(),
