@@ -20,7 +20,7 @@ from sqlalchemy import func as sqlfunc
 from sqlalchemy.orm import Session
 
 from app.models import NaverAdDaily
-from app.services.naver_ad import alert_humanizer, ctr_alert_state
+from app.services.naver_ad import alert_humanizer, ctr_alert, ctr_alert_state
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 
 log = logging.getLogger(__name__)
@@ -50,10 +50,29 @@ def dedupe_alerts(alerts: list[dict]) -> list[dict]:
         if a["window"] not in windows:
             existing["window"] = "+".join(windows + [a["window"]])
         if int(a.get("imp", 0)) > int(existing.get("imp", 0)):
-            for f in ("imp", "clk", "avg_rank", "expected_clk"):
+            for f in ("imp", "clk", "avg_rank", "expected_clk", "kind", "trailing_imp"):
                 if f in a:
                     existing[f] = a[f]
     return [merged[k] for k in order]
+
+
+def _escalated(alert: dict, baseline: dict | None) -> bool:
+    """만성이라 조용히 있던 건이 "눈에 띄게 나빠졌나" 판정(P2-2).
+
+    직전 **통지 시점** 대비 노출 또는 기대클릭이 배수 이상으로 커졌으면 다시 알린다 —
+    같은 문제라도 규모가 3배가 되면 그건 새 소식이다. 기준선이 없으면(통지 이력 없음)
+    에스컬레이션하지 않는다(억제 유지)."""
+    if not baseline:
+        return False
+    base_imp = int(baseline.get("imp") or 0)
+    if base_imp > 0 and int(alert.get("imp", 0)) >= base_imp * ctr_alert_state.ESCALATION_MULTIPLE:
+        return True
+    base_exp = baseline.get("expected_clk")
+    cur_exp = alert.get("expected_clk")
+    return (
+        base_exp is not None and base_exp > 0 and cur_exp is not None
+        and float(cur_exp) >= float(base_exp) * ctr_alert_state.ESCALATION_MULTIPLE
+    )
 
 
 def _recent_campaign_stats(db: Session, campaign_id: str, as_of: date) -> dict:
@@ -94,19 +113,28 @@ def _group_detail(label: str, a: dict, streak: int | None) -> str:
     win = alert_humanizer.window_label(a.get("window", ""))
     imp = alert_humanizer.count(a.get("imp"))
     clk = int(a.get("clk", 0) or 0)
+    streak_txt = f" {alert_humanizer.streak_label(streak)}" if streak and streak > 1 else ""
+    if a.get("kind") == ctr_alert.KIND_NO_RESPONSE:
+        # 기대클릭이 0이라 "평소라면 N건"이 무의미하다 — 누적 노출로 심각도를 말한다.
+        tr_imp = alert_humanizer.count(a.get("trailing_imp"))
+        return (f"{label} — {win} 노출 {imp}·클릭 0 / 지금까지 노출 {tr_imp}회 동안 "
+                f"클릭이 한 번도 없음{streak_txt}")
     expected = a.get("expected_clk")
     expect_txt = f", 평소라면 {expected}건" if expected is not None else ""
-    streak_txt = f" {alert_humanizer.streak_label(streak)}" if streak and streak > 1 else ""
     return f"{label} — {win} 노출 {imp}·클릭 {clk}{expect_txt}{streak_txt}"
 
 
-def _prescription(campaign_type: str) -> str:
+def _prescription(campaign_type: str, *, has_no_response: bool) -> str:
     """권하는 행동 1줄. 쇼핑에만 탐색 래더 문구를 붙인다 — 파워링크·브랜드검색에는 탐색
     래더 자체가 적용되지 않으므로(SHOPPING 전용) 그 문구는 거짓이 된다(D-NAO-103 ③)."""
     if campaign_type == "SHOPPING":
-        return ("상품 썸네일·가격·리뷰를 점검해 주세요. "
+        base = ("상품 썸네일·가격·리뷰를 점검해 주세요. "
                 "자동 탐색 입찰 인상은 이 그룹들에서 중지됩니다.")
-    return "광고 문구(제목·설명)와 연결 페이지를 점검해 주세요."
+    else:
+        base = "광고 문구(제목·설명)와 연결 페이지를 점검해 주세요."
+    if has_no_response:
+        base += " 반응이 아예 없는 그룹은 손보는 것보다 소재 교체가 빠릅니다."
+    return base
 
 
 def _campaign_block(
@@ -149,7 +177,11 @@ def _campaign_block(
 
     rank = _weighted_rank(alerts)
     rank_txt = alert_humanizer.rank_label(rank, band_top=_RANK_BAND_TOP)
-    lines.append(f"{_INDENT}{rank_txt} — 입찰로 풀 문제가 아닙니다. {_prescription(ctype)}")
+    has_dead = any(a.get("kind") == ctr_alert.KIND_NO_RESPONSE for a in alerts)
+    lines.append(
+        f"{_INDENT}{rank_txt} — 입찰로 풀 문제가 아닙니다. "
+        f"{_prescription(ctype, has_no_response=has_dead)}"
+    )
 
     stats = _recent_campaign_stats(db, campaign_id, as_of)
     lines.append(
@@ -176,7 +208,8 @@ def build_briefing(db: Session, alerts: list[dict], *, now: datetime) -> dict:
     """브리핑 텍스트 조립 + 판정 이력 기록.
 
     반환: {"text": str|None, "total": 판정 그룹 수, "fired": 메시지에 실린 그룹 수,
-           "suppressed": 억제된 그룹 수, "new": 신규 진입 수, "chronic": 만성 수}.
+           "suppressed": 억제된 그룹 수, "new": 신규 진입 수, "escalated": 악화 재발화 수,
+           "chronic": 억제된 만성 수}.
     text가 None이면 호출부는 완전 침묵한다(diary·Slack 둘 다 없음).
 
     as_of는 detect_ctr_alerts와 같은 D0(=now.date()−1)를 쓴다 — 상태 테이블의 "전일"이
@@ -187,6 +220,12 @@ def build_briefing(db: Session, alerts: list[dict], *, now: datetime) -> dict:
         return {"text": None, "total": 0, "fired": 0, "suppressed": 0, "new": 0, "chronic": 0}
 
     new_alerts, chronic, streaks = ctr_alert_state.classify(db, deduped, as_of)
+    # P2-2: 만성 중 "직전 통지 대비 3배 이상 커진" 건은 주간까지 기다리지 않고 오늘 알린다.
+    baselines = ctr_alert_state.last_notified_metrics(db, as_of)
+    escalated = [a for a in chronic if _escalated(a, baselines.get((a["campaign_id"], a["adgroup_id"])))]
+    escalated_keys = {(a["campaign_id"], a["adgroup_id"]) for a in escalated}
+    chronic = [a for a in chronic if (a["campaign_id"], a["adgroup_id"]) not in escalated_keys]
+
     sections: list[str] = []
     notified: set[tuple[str, str]] = set()
 
@@ -196,6 +235,15 @@ def build_briefing(db: Session, alerts: list[dict], *, now: datetime) -> dict:
             header=f"[{as_of.isoformat()} 소재 CTR 경보] 새로 생긴 문제 {len(new_alerts)}건",
         ))
         notified |= {(a["campaign_id"], a["adgroup_id"]) for a in new_alerts}
+
+    if escalated:
+        sections.append(_render_section(
+            db, escalated, streaks, as_of,
+            header=(f"[{as_of.isoformat()} 소재 CTR 경보] 눈에 띄게 나빠진 문제 "
+                    f"{len(escalated)}건 — 규모가 직전 알림의 "
+                    f"{ctr_alert_state.ESCALATION_MULTIPLE}배 이상"),
+        ))
+        notified |= escalated_keys
 
     if chronic and now.weekday() == _WEEKLY_WEEKDAY:
         sections.append(_render_section(
@@ -212,11 +260,11 @@ def build_briefing(db: Session, alerts: list[dict], *, now: datetime) -> dict:
         "text": "\n\n".join(sections) if sections else None,
         "total": len(deduped), "fired": len(notified),
         "suppressed": len(deduped) - len(notified),
-        "new": len(new_alerts), "chronic": len(chronic),
+        "new": len(new_alerts), "chronic": len(chronic), "escalated": len(escalated),
     }
     log.info(
-        "ctr_alert_briefing: as_of=%s 판정=%s 발화=%s 억제=%s(신규 %s·만성 %s)",
+        "ctr_alert_briefing: as_of=%s 판정=%s 발화=%s 억제=%s(신규 %s·악화 %s·만성 %s)",
         as_of.isoformat(), result["total"], result["fired"], result["suppressed"],
-        result["new"], result["chronic"],
+        result["new"], result["escalated"], result["chronic"],
     )
     return result

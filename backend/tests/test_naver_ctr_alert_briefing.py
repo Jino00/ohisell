@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from unittest.mock import PropertyMock, patch
 
 import pytest
 from sqlalchemy import create_engine
@@ -14,7 +15,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.database import Base
 from app.models import NaverAdDaily, NaverCtrAlertLog, NaverEntity
-from app.services.naver_ad import alert_humanizer, ctr_alert_briefing
+from app.services.naver_ad import alert_humanizer, ctr_alert, ctr_alert_briefing, ctr_alert_state
 
 CAMPAIGN = "cmp-a001-01-000000010236310"
 MONDAY = datetime(2026, 7, 27, 8, 50, 0)   # weekday()==0 → 주간 요약 발송일
@@ -125,6 +126,80 @@ def test_new_and_chronic_both_sections_on_monday(db):
     assert "계속 이어지는 문제 1건" in res["text"]
 
 
+def test_chronic_survives_a_missing_day(db):
+    """P3-2: 레인이 하루 쉬어 결번이 생겨도 억제가 리셋되지 않는다(조회 창 7일).
+    이력이 as_of−3일에만 있어도 만성으로 이어진다."""
+    _entity(db, "campaign", CAMPAIGN, "아이패드 파워링크")
+    db.add(NaverCtrAlertLog(
+        as_of_date=D0_TUE - timedelta(days=3), campaign_id=CAMPAIGN, adgroup_id="adg-1",
+        window="W3", imp=1200, clk=0, streak_days=2, notified=True,
+    ))
+    db.commit()
+    res = ctr_alert_briefing.build_briefing(db, [_alert("adg-1")], now=TUESDAY)
+    assert res["chronic"] == 1 and res["new"] == 0 and res["text"] is None
+
+
+def test_history_lookup_failure_falls_open_to_firing(db):
+    """P3-1: 이력 조회가 깨지면 전면 침묵이 아니라 **전부 신규로 발화**한다(한 번 더 알리는
+    쪽이 안전). previous_state 내부 예외를 강제한다."""
+    _entity(db, "campaign", CAMPAIGN, "아이패드 파워링크")
+    db.add(NaverCtrAlertLog(
+        as_of_date=D0_TUE - timedelta(days=1), campaign_id=CAMPAIGN, adgroup_id="adg-1",
+        window="W3", imp=1200, clk=0, streak_days=4, notified=False,
+    ))
+    db.commit()
+    with patch.object(ctr_alert_state.NaverCtrAlertLog, "as_of_date",
+                      new_callable=PropertyMock, side_effect=RuntimeError("이력 테이블 장애")):
+        res = ctr_alert_briefing.build_briefing(db, [_alert("adg-1")], now=TUESDAY)
+    assert res["new"] == 1 and res["text"] is not None
+
+
+def test_escalation_refires_chronic_when_scale_triples(db):
+    """P2-2: 만성이라 조용하던 건도 직전 통지 대비 노출이 3배 이상 커지면 오늘 다시 알린다."""
+    _entity(db, "campaign", CAMPAIGN, "아이패드 파워링크")
+    _entity(db, "adgroup", "adg-1", "프로M4 11인치")
+    db.add(NaverCtrAlertLog(
+        as_of_date=D0_TUE - timedelta(days=1), campaign_id=CAMPAIGN, adgroup_id="adg-1",
+        window="W3", imp=400, clk=0, expected_clk=2.0, streak_days=3, notified=True,
+    ))
+    db.commit()
+    res = ctr_alert_briefing.build_briefing(
+        db, [_alert("adg-1", imp=1300, expected=6.5)], now=TUESDAY,
+    )
+    assert res["escalated"] == 1 and res["chronic"] == 0 and res["fired"] == 1
+    assert "눈에 띄게 나빠진 문제 1건" in res["text"]
+
+
+def test_escalation_does_not_fire_below_multiple(db):
+    """같은 조건에서 2배 증가는 에스컬레이션 아님 — 억제 유지."""
+    _entity(db, "campaign", CAMPAIGN, "아이패드 파워링크")
+    db.add(NaverCtrAlertLog(
+        as_of_date=D0_TUE - timedelta(days=1), campaign_id=CAMPAIGN, adgroup_id="adg-1",
+        window="W3", imp=600, clk=0, expected_clk=3.0, streak_days=3, notified=True,
+    ))
+    db.commit()
+    res = ctr_alert_briefing.build_briefing(
+        db, [_alert("adg-1", imp=1200, expected=6.0)], now=TUESDAY,
+    )
+    assert res["escalated"] == 0 and res["text"] is None
+
+
+# ══════════════════════════ 완전 무반응 소재 문구 ══════════════════════════
+
+def test_no_response_alert_reads_as_dead_creative(db):
+    """P2-1: 기대클릭이 0인 완전 무반응 건은 '평소라면 0건'이 아니라 누적 노출로 말한다."""
+    _entity(db, "campaign", CAMPAIGN, "아이패드 파워링크")
+    _entity(db, "adgroup", "adg-1", "프로M4 11인치")
+    a = _alert("adg-1", imp=1200, expected=0.0)
+    a["kind"] = ctr_alert.KIND_NO_RESPONSE
+    a["trailing_imp"] = 99500
+    res = ctr_alert_briefing.build_briefing(db, [a], now=TUESDAY)
+
+    assert "노출 99,500회 동안 클릭이 한 번도 없음" in res["text"]
+    assert "평소라면" not in res["text"]
+    assert "소재 교체가 빠릅니다" in res["text"]
+
+
 # ══════════════════════════ 캠페인 단위 압축 ══════════════════════════
 
 def test_campaign_compression_for_three_or_more_groups(db):
@@ -216,11 +291,38 @@ def test_empty_alerts_is_total_silence(db):
 
 # ══════════════════════════ humanizer 단위 ══════════════════════════
 
-def test_humanizer_clean_name_strips_operational_prefixes():
-    assert alert_humanizer.clean_name("○ P. 아이패드 파워링크") == "아이패드 파워링크"
-    assert alert_humanizer.clean_name("04. 아이폰 필름") == "아이폰 필름"
+def test_humanizer_clean_name_strips_only_decorations():
+    """장식 기호만 걷어내고 코드 접두("02. ", "51 ", "P. ")는 **보존**한다 — 그 코드가 사람이
+    그룹을 구분하는 유일한 표식인 경우가 많다(적대적 리뷰 P2-3)."""
+    assert alert_humanizer.clean_name("○ P. 아이패드 파워링크") == "P. 아이패드 파워링크"
+    assert alert_humanizer.clean_name("04. 아이폰 필름") == "04. 아이폰 필름"
+    assert alert_humanizer.clean_name("51 거치대") == "51 거치대"
+    assert alert_humanizer.clean_name("A4.용지") == "A4.용지"   # 코드가 아닌 본문을 안 자른다
     assert alert_humanizer.clean_name("  ") == ""
     assert alert_humanizer.clean_name(None) == ""
+
+
+# prod naver_entity 이름에서 뽑은 실표본 — 구 로직(코드 접두 제거)이 서로 다른 그룹을 같은
+# 라벨로 뭉개던 조합들이다(prod 892개 고유 이름 중 26종 53개가 충돌했다).
+_PROD_NAME_SAMPLE = [
+    "00. 지문방지필름", "00. 강화유리필름", "00. 사생활보호필름", "00. 일반필름",
+    "01. 갤럭시", "02. 아이폰_카메라", "51 거치대", "08. 방수팩", "56. 방수팩", "방수팩",
+    "강화유리필름", "사생활보호필름", "일반필름", "A4.용지", "○ P. 아이패드 파워링크",
+]
+
+
+def test_clean_name_has_zero_label_collisions_on_prod_sample():
+    """실표본에서 서로 다른 이름이 같은 표시 라벨로 뭉개지지 않는다(충돌 0)."""
+    labels = [alert_humanizer.clean_name(n) for n in _PROD_NAME_SAMPLE]
+    assert len(set(labels)) == len(set(_PROD_NAME_SAMPLE))
+
+
+def test_entity_names_keep_distinct_labels_for_code_prefixed_groups(db):
+    """조회 경로(entity_names)에서도 코드 접두가 살아 서로 다른 그룹이 구분된다."""
+    for i, nm in enumerate(["08. 방수팩", "56. 방수팩", "방수팩"]):
+        _entity(db, "adgroup", f"adg-c{i}", nm)
+    got = alert_humanizer.entity_names(db, "adgroup", ["adg-c0", "adg-c1", "adg-c2"])
+    assert sorted(got.values()) == ["08. 방수팩", "56. 방수팩", "방수팩"]
 
 
 def test_humanizer_window_and_rank_and_money():

@@ -16,10 +16,12 @@ from sqlalchemy.orm import Session
 
 from app.models import NaverEntity
 
-# 캠페인/그룹 이름 앞에 붙는 운영 접두(○ / ■ / 04. / P. 등)를 걷어낸다 — 사람이 부르는
-# 이름만 남기기 위한 표시용 정리. 원본 이름은 절대 바꾸지 않는다(표시 문자열만 가공).
+# 이름 앞의 **장식 기호만**(○ ● ◎ ■ ▶ 등) 걷어낸다 — 표시용 정리, 원본은 안 바꾼다.
+# ★숫자·문자 코드 접두("02. ", "51 ", "P. ")는 **절대 지우지 않는다**(적대적 리뷰 P2-3):
+# prod 엔티티 이름 1,057개는 "00. 지문방지필름 / 01. 갤럭시 / 02. 아이폰_카메라"처럼 코드가
+# 유일한 구분자인 경우가 155종이라, 접두를 지우면 서로 다른 그룹이 같은 라벨로 뭉개진다
+# ("A4.용지"처럼 코드가 아닌 본문을 잘라먹는 오작동도 함께 발생).
 _LEADING_DECOR = re.compile(r"^[^0-9A-Za-z가-힣]+")
-_LEADING_CODE = re.compile(r"^[0-9A-Za-z]{1,4}[.)]\s*")
 
 # 내부 창 코드 → 일상어. 브리핑 harness가 dedupe하면서 'W1+W3'처럼 병기하므로 조합도 처리한다.
 _WINDOW_WORDS = {"W1": "최근 1일", "W3": "최근 3일"}
@@ -33,11 +35,11 @@ _CAMPAIGN_TYPE_WORDS = {
 
 
 def clean_name(name: str | None) -> str:
-    """표시용 이름 정리 — 앞머리 장식/코드 제거 후 공백 정돈. 빈 값이면 ''(호출부가 ID 폴백)."""
+    """표시용 이름 정리 — 앞머리 **장식 기호만** 제거하고 공백 정돈. 코드 접두는 보존한다
+    (그것이 사람이 그룹을 구분하는 유일한 표식인 경우가 많다). 빈 값이면 ''(호출부가 ID 폴백)."""
     if not name:
         return ""
     s = _LEADING_DECOR.sub("", str(name)).strip()
-    s = _LEADING_CODE.sub("", s).strip()
     return " ".join(s.split())
 
 

@@ -220,6 +220,47 @@ def test_trailing_ctr_uses_full_history_not_30_days(db):
     assert w1 is not None and w1["expected_clk"] == 2.0  # 0.5% × 400 = 그룹 CTR 그대로 적용
 
 
+# ══════════ P2-1(적대적 리뷰): 완전 무반응 소재는 기대클릭 필터를 통과한다 ══════════
+
+def test_no_response_group_still_fires_despite_zero_expected(db):
+    """누적 노출 99,500에 클릭 0 = 트레일링 CTR 정확히 0 → 기대클릭 0. 기대클릭≥2 규칙만
+    있으면 이 그룹은 **영원히 침묵**한다(가장 심한 상태인데 가장 조용해지는 사각).
+    별도 종류(KIND_NO_RESPONSE)로 계속 발화해야 한다."""
+    _settings(db)
+    for k in range(5):  # 트레일링(~D0-3]: 총 노출 99,500·클릭 0
+        _daily(db, ad_date=D0 - timedelta(days=10 + k), imp=19_900, clk=0, rank=3.0)
+    _daily(db, ad_date=D0, imp=500, clk=0, rank=3.0)
+    res = ctr_alert.detect_ctr_alerts(db, CAMPAIGN, now=NOW)
+
+    w1 = _one(res["alerts"], "W1")
+    assert w1 is not None
+    assert w1["kind"] == ctr_alert.KIND_NO_RESPONSE
+    assert w1["trailing_imp"] == 99_500 and w1["expected_clk"] == 0.0
+    assert "완전 무반응" in w1["reason"] and "소재 교체" in w1["reason"]
+
+
+def test_no_response_requires_minimum_trailing_sample(db):
+    """표본이 얕으면(누적 노출 <1,000) '무반응'이라 단정하지 않는다 — 캠페인 CTR 폴백을 타고
+    기대클릭 게이트가 그대로 적용된다(여기선 캠페인 표본도 없어 비발화)."""
+    _settings(db)
+    _daily(db, ad_date=D0 - timedelta(days=10), imp=900, clk=0, rank=3.0)
+    _daily(db, ad_date=D0, imp=500, clk=0, rank=3.0)
+    res = ctr_alert.detect_ctr_alerts(db, CAMPAIGN, now=NOW)
+    assert res["alerts"] == []
+
+
+def test_no_response_kind_downgrades_when_window_has_clicks(db):
+    """트레일링은 무반응이어도 최근 창에 클릭이 생겼으면 '완전 무반응'이 아니다 —
+    기대치 미달(−80%↓) 쪽으로 말한다. 여기선 클릭이 생겨 W3가 아예 비발화."""
+    _settings(db)
+    for k in range(5):
+        _daily(db, ad_date=D0 - timedelta(days=10 + k), imp=19_900, clk=0, rank=3.0)
+    _daily(db, ad_date=D0 - timedelta(days=1), imp=400, clk=3, rank=3.0)
+    _daily(db, ad_date=D0, imp=500, clk=2, rank=3.0)
+    res = ctr_alert.detect_ctr_alerts(db, CAMPAIGN, now=NOW)
+    assert res["alerts"] == []  # 창에 클릭 5 → 무반응 분기·클릭0 분기 둘 다 미해당
+
+
 # ══════════════════════════ 게이트: imp<200 / rank>4.0 ══════════════════════════
 
 def test_imp_below_200_no_alert(db):
