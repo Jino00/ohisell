@@ -8,7 +8,8 @@
 ## §0 방향 고정 (이 스프린트 동안 불변)
 
 1. **추측으로 파서를 짓지 않는다.** 쿠팡 원시 응답 스키마를 모르면 모른다고 쓰고, 우리가 정의한 **레코드 계약**으로 ingest를 먼저 세운다. 페처가 나중에 `raw → 계약` 매핑만 채운다.
-2. **회계축 불변.** 이번 스프린트는 net_profit·종합조망 숫자를 **한 톨도 바꾸지 않는다.** 새 테이블은 전부 신규 CREATE, 기존 소비자 0.
+2. **회계축 불변 — 단, 수집 레이어에 한한다.** 새 테이블·ingest·라우트는 net_profit·종합조망 숫자를 **한 톨도 바꾸지 않는다**(전부 신규 CREATE, 기존 소비자 0).
+   ⚠️ **예외: §5 원가 시드는 회계 숫자를 움직인다.** `product_master.cost_price`는 주문 시점에 박제되는 값이 아니라 **조회 때마다 소급 적용**된다(코드 실측: `services/profit_calculator.py:462·598·778`, `services/naver_ad/bep_calculator.py:310`). 따라서 62178970의 3,400→3,500 갱신은 ①그 SKU **과거 주문 전체**의 종합조망 net_profit을 낮추고 ②아이폰17프로 강화유리 광고의 **BEP ROAS를 올린다**(자동 운영 루프가 읽는 값). 값 자체는 Jino 확정이므로 바꾸지 않되, **적용은 "숫자가 바뀐다"를 알고** 해야 한다 — `--apply` 시 전후 종합조망 델타를 기록할 것. (2026-07-28 적대적 리뷰 지적 — 원래 이 줄은 "한 톨도 안 바꾼다"고 단정했고, 그것은 틀린 말이었다.)
 3. **1P 매출 = 납품가**(D-CPP-2). 판매분석 revenue는 회계 매출이 아니다.
 4. **분담금 청구 방식 미확정**(D-CPP-4) — 어떤 비용 라인에도 자동 반영하지 않는다.
 5. **prod는 SELECT만.** 배포·마이그레이션 실행은 이 스프린트 밖(오케스트레이터).
@@ -99,13 +100,21 @@
 
 ### 레코드 계약 (우리 것 — 쿠팡 스키마 아님)
 ```
-sales     : {option_id*, date*, sku_id, qty, revenue, visitors, conversion_rate, product_name}
+sales     : {option_id*, date*, (qty|revenue 중 하나 이상)*, sku_id, visitors, conversion_rate, product_name}
 promotion : {request_id*, contract_id, promotion_name, promotion_type, status,
              start_at, end_at, share_ratio, discount_method, discount_value,
              budget_amount, settlement_date, applied_product_count, requested_at, raw}
-coupon    : {coupon_id*, used_amount*}
+coupon    : {coupon_id*, used_amount*}   ← **즉시할인(INSTANT) 쿠폰만**
 ```
 (*=필수. 없으면 그 행만 skip하고 계속 — 한 행이 배치를 죽이지 않는다.)
+
+**계약 규약 (페처가 지켜야 할 것 — 2026-07-28 적대적 리뷰 반영)**
+- **시각은 KST**. tz가 붙어 오면 KST로 환산해 저장한다(`...T00:01:00Z` → 09:01). tz를 그냥 떼면 9시간 틀어진다.
+- **`qty`도 `revenue`도 없는 sales 행은 skip**된다. "0원 팔린 날"과 "매핑이 필드명을 놓친 날"을 구분하기 위해서다. 진짜 0은 `qty: 0`을 **명시**해서 보낸다.
+- **식별자(option_id·sku_id·request_id·coupon_id·contract_id)는 길이 초과 시 잘리지 않고 버려진다.** 잘린 ID는 '다른 ID'가 되어 영원히 잘못된 행에 붙는다.
+- **NaN/Infinity는 값이 없는 것으로 접힌다**(엑셀 폴백의 빈 셀 = `float('nan')`). 배치 전체가 죽지 않는다.
+- 응답의 `skipped`(계약 위반)와 `deduped`(같은 그레인 중복 흡수)는 **다른 숫자**다. `skipped>0`은 수집 건강 경보.
+- 쿠폰 사용금액은 `coupon_kind='INSTANT'` 행에만 붙는다. 없으면 `not_found`로 돌려주고 행을 만들지 않는다.
 
 ---
 
@@ -125,7 +134,9 @@ coupon    : {coupon_id*, used_amount*}
 
 - `PYTHONPATH=backend python3 -m pytest backend/tests -q` 전체 통과(homebrew python3, `backend/.venv` 사용 금지. `test_migration_one_running_index` 4 errors는 기존 환경 이슈).
 - alembic head 단일 유지(신규 리비전 `a1c3e5f7b9d1`, down_revision=`e5f7a9c1b3d5`).
-- 신규 테이블은 기존 조회·회계 코드에서 **참조 0**(net_profit 불변).
+- 신규 테이블은 기존 조회·회계 코드에서 **참조 0**(수집 레이어 net_profit 불변).
+  확인: `grep -rn "coupang_rocket_sales_daily\|CoupangRocketSalesDaily\|coupang_rocket_promotion\|CoupangRocketPromotion\|used_amount" backend/app` → 신규 3파일(models·파서·sync)과 라우터 외 히트 0.
+- §5 원가 시드는 위 불변식의 **명시적 예외**(§0.2) — 실행 시 종합조망 델타를 기록한다.
 
 ## §7 잔여 (다음 세션)
 1. supplier 세션 복구 후 §2 절차로 정찰 재시도.
