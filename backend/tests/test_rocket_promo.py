@@ -9,11 +9,13 @@ from datetime import date, datetime
 from decimal import Decimal
 
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from app.clients.coupang import rocket_promo as rp
-from app.database import Base
+from app.database import Base, get_db
 from app.models import CoupangCoupon, CoupangRocketPromotion, CoupangRocketSalesDaily
 from app.services.coupang import rocket_promo_sync as sync
 
@@ -75,16 +77,57 @@ def test_parse_sales_missing_optional_fields_stay_none_not_zero():
 
 
 def test_parse_sales_last_row_wins_on_duplicate_grain():
+    stats: dict = {}
     recs = rp.parse_sales_rows([
         {"option_id": "A", "date": "2026-07-24", "qty": 1},
         {"option_id": "A", "date": "2026-07-24", "qty": 9},
-    ])
+    ], stats=stats)
     assert len(recs) == 1 and recs[0]["qty"] == 9
+    # 중복 흡수는 '계약 위반'이 아니다 — 따로 센다(수집 건강 신호를 중복 뒤에 숨기지 않는다)
+    assert stats == {"skipped": 0, "deduped": 1}
 
 
 def test_parse_sales_source_label_propagates():
-    recs = rp.parse_sales_rows([{"option_id": "A", "date": "2026-07-24"}], source="excel")
+    recs = rp.parse_sales_rows([{"option_id": "A", "date": "2026-07-24", "qty": 0}], source="excel")
     assert recs[0]["source"] == "excel"
+
+
+def test_parse_sales_skips_rows_with_no_observation():
+    """qty도 revenue도 없는 행 = '0원 팔린 날'이 아니라 **관측 없음**.
+
+    0으로 접으면 페처 매핑이 필드명을 놓쳤을 때 0원 테이블이 조용히 쌓인다(원칙22).
+    """
+    stats: dict = {}
+    assert rp.parse_sales_rows(
+        [{"option_id": "A", "date": "2026-07-24", "visitors": 10}], stats=stats
+    ) == []
+    assert stats["skipped"] == 1
+    # 명시적 0은 관측이므로 통과한다
+    assert len(rp.parse_sales_rows([{"option_id": "A", "date": "2026-07-24", "qty": 0}])) == 1
+
+
+def test_parse_sales_nan_does_not_kill_batch():
+    """엑셀 폴백의 빈 숫자셀은 float('nan') — int(nan)/Decimal('NaN')이 배치를 죽이면 안 된다."""
+    recs = rp.parse_sales_rows([
+        {"option_id": "A", "date": "2026-07-24", "qty": float("nan"), "revenue": 1000},
+        {"option_id": "B", "date": "2026-07-24", "qty": float("inf"), "revenue": 2000},
+        {"option_id": "C", "date": "2026-07-24", "qty": 5, "revenue": "nan"},
+    ])
+    assert len(recs) == 3
+    by = {r["option_id"]: r for r in recs}
+    assert by["A"]["qty"] == 0 and by["A"]["revenue"] == Decimal("1000")
+    assert by["B"]["qty"] == 0
+    assert by["C"]["revenue"] == Decimal(0)   # NaN이 NUMERIC 컬럼에 적재되지 않는다
+
+
+def test_parse_sales_oversized_identifier_is_not_truncated():
+    """식별자는 자르지 않는다 — 잘린 ID는 '다른 ID'가 되어 조용히 잘못된 행에 붙는다."""
+    long_id = "9" * 31
+    assert rp.parse_sales_rows([{"option_id": long_id, "date": "2026-07-24", "qty": 1}]) == []
+    rec = rp.parse_sales_rows(
+        [{"option_id": "A", "sku_id": long_id, "date": "2026-07-24", "qty": 1}]
+    )[0]
+    assert rec["sku_id"] is None   # 선택 키는 NULL로 눈에 보이게 남는다
 
 
 def test_parse_sales_garbage_input():
@@ -128,6 +171,24 @@ def test_parse_coupon_usage_skips_missing_and_negative():
 def test_parse_coupon_usage_strips_comma():
     rec = rp.parse_coupon_usage_rows([{"coupon_id": "94177420", "used_amount": "156,000"}])[0]
     assert rec["used_amount"] == Decimal("156000")
+
+
+def test_parse_promotion_tz_is_converted_to_kst_not_stripped():
+    """'...T00:01:00Z'는 KST 09:01이다. tz를 그냥 떼면 9시간 틀어진다(초 단위 보존과 모순)."""
+    rec = rp.parse_promotion_rows([
+        {"request_id": "1", "start_at": "2026-07-24T00:01:00+00:00"},
+    ])[0]
+    assert rec["start_at"] == datetime(2026, 7, 24, 9, 1, 0)
+
+
+def test_parse_coupon_usage_nan_does_not_kill_batch():
+    """Decimal('NaN')은 예외 없이 생기고 `< 0` 비교에서 InvalidOperation으로 배치를 죽인다."""
+    recs = rp.parse_coupon_usage_rows([
+        {"coupon_id": "A", "used_amount": "nan"},
+        {"coupon_id": "B", "used_amount": float("inf")},
+        {"coupon_id": "94177420", "used_amount": 156000},
+    ])
+    assert [r["coupon_id"] for r in recs] == ["94177420"]   # 못 읽은 값은 skip(0으로 접지 않음)
 
 
 def test_parse_coupon_usage_zero_is_kept():
@@ -237,3 +298,125 @@ def test_ingest_coupon_used_amount_source_label(db):
         db, "COUPANG_WING1", [{"coupon_id": "94177420", "used_amount": 1}], source="manual"
     )
     assert db.query(CoupangCoupon).one().used_amount_source == "manual"
+
+
+def test_ingest_coupon_used_amount_does_not_touch_download_kind(db):
+    """같은 coupon_id의 DOWNLOAD 행에는 붙지 않는다 — 그레인은 (account, kind, coupon_id)다.
+
+    DOWNLOAD는 이미 usage_amount(다운로드쿠폰 사용량)라는 다른 축을 들고 있어, 셀러부담
+    권위값(D-CPP-3)이 거기 앉으면 어느 쪽이 우리 실부담인지 영영 구분되지 않는다.
+    """
+    db.add(CoupangCoupon(
+        account_key="COUPANG_WING1", vendor_id="A00123456",
+        coupon_kind="DOWNLOAD", coupon_id="94177420",
+    ))
+    db.commit()
+    r = sync.ingest_coupon_used_amount(
+        db, "COUPANG_WING1", [{"coupon_id": "94177420", "used_amount": 156000}]
+    )
+    assert r["updated"] == 0 and r["not_found"] == 1          # 조용히 붙지 않고 표면화
+    assert db.query(CoupangCoupon).one().used_amount is None
+
+
+def test_ingest_coupon_used_amount_freezes_collection_stamp(db):
+    """수집 시각(synced_at)은 이 push로 갱신되지 않는다 — 죽은 수집기가 신선해 보이면 안 된다."""
+    _seed_coupon(db, "94177420")
+    row = db.query(CoupangCoupon).one()
+    before = row.synced_at
+    assert before is not None
+    sync.ingest_coupon_used_amount(
+        db, "COUPANG_WING1", [{"coupon_id": "94177420", "used_amount": 156000}]
+    )
+    db.expire_all()
+    row = db.query(CoupangCoupon).one()
+    assert row.synced_at == before                 # 수집 시각 동결
+    assert row.used_amount_synced_at is not None   # push 시각은 따로 남는다
+
+
+# ═══ 라우트 3종 (X-Ingest-Token) ═══
+# 인증·입력검증은 형제 ingest 라우트(/rocket/po, /rocket/settlement)와 같은 규칙이어야 한다.
+#   토큰 미설정·불일치 모두 401(서버 상태 비노출), 계약 위반 body는 500이 아니라 400.
+_TOKEN = "test-token-123"
+_BASE = "/api/coupang/ops"
+_ROUTES = ["/rocket/sales/ingest", "/rocket/promotion/ingest", "/coupon/used-amount/ingest"]
+
+
+@pytest.fixture
+def client(monkeypatch):
+    monkeypatch.setenv("AD_INGEST_TOKEN", _TOKEN)
+    from app.main import app
+
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    Base.metadata.create_all(engine)
+    TestingSession = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+    def _override_get_db():
+        s = TestingSession()
+        try:
+            yield s
+        finally:
+            s.close()
+
+    app.dependency_overrides[get_db] = _override_get_db
+    seed = TestingSession()
+    yield TestClient(app), seed
+    seed.close()
+    app.dependency_overrides.clear()
+
+
+@pytest.mark.parametrize("url", _ROUTES)
+def test_route_requires_token(client, url):
+    c, _ = client
+    body = {"vendor_id": "A01029796", "account_key": "COUPANG_WING1", "rows": [{"x": 1}]}
+    assert c.post(_BASE + url, json=body).status_code == 401                       # 헤더 없음
+    assert c.post(_BASE + url, json=body,
+                  headers={"X-Ingest-Token": "wrong"}).status_code == 401          # 불일치
+
+
+@pytest.mark.parametrize("url", _ROUTES)
+def test_route_rejects_bad_body_with_400_not_500(client, url):
+    c, _ = client
+    h = {"X-Ingest-Token": _TOKEN}
+    assert c.post(_BASE + url, json={}, headers=h).status_code == 400              # 계정축 없음
+    key = "account_key" if "coupon" in url else "vendor_id"
+    val = "COUPANG_WING1" if "coupon" in url else "A01029796"
+    assert c.post(_BASE + url, json={key: val}, headers=h).status_code == 400       # rows 없음
+    assert c.post(_BASE + url, json={key: val, "rows": "nope"},
+                  headers=h).status_code == 400                                     # rows 비-리스트
+
+
+def test_route_sales_ingest_happy_path_and_source_label(client):
+    c, s = client
+    r = c.post(_BASE + "/rocket/sales/ingest", headers={"X-Ingest-Token": _TOKEN}, json={
+        "vendor_id": "A01029796", "source": "excel",
+        "rows": [{"option_id": "95536607339", "date": "2026-07-24", "qty": 18,
+                  "revenue": "304200", "sku_id": "62178970"}],
+    })
+    assert r.status_code == 200 and r.json()["ingested"] == 1
+    row = s.query(CoupangRocketSalesDaily).one()
+    assert row.vendor_id == "A01029796" and row.source == "excel"   # 폴백 경로 라벨 보존
+
+
+def test_route_promotion_ingest_happy_path(client):
+    c, s = client
+    r = c.post(_BASE + "/rocket/promotion/ingest", headers={"X-Ingest-Token": _TOKEN}, json={
+        "vendor_id": "A01029796",
+        "rows": [{"request_id": "687878", "start_at": "2026-07-24 00:01:00",
+                  "end_at": "2026-07-26 23:59:59", "share_ratio": "100"}],
+    })
+    assert r.status_code == 200 and r.json()["ingested"] == 1
+    assert s.query(CoupangRocketPromotion).one().end_at == datetime(2026, 7, 26, 23, 59, 59)
+
+
+def test_route_coupon_used_amount_reports_not_found(client):
+    """없는 쿠폰은 200 + not_found로 표면화 — 행을 지어내지 않는다."""
+    c, s = client
+    r = c.post(_BASE + "/coupon/used-amount/ingest", headers={"X-Ingest-Token": _TOKEN}, json={
+        "account_key": "COUPANG_WING1",
+        "rows": [{"coupon_id": "94177420", "used_amount": 156000}],
+    })
+    assert r.status_code == 200
+    assert r.json()["updated"] == 0 and r.json()["not_found"] == 1
+    assert s.query(CoupangCoupon).count() == 0
