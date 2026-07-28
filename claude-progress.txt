@@ -1,5 +1,16 @@
 ## 📌 세션 인계: `.claude/memory/HANDOFF_ohisell-promo-pnl-layer+rg-selfheal-complete_20260728.md` (2026-07-28 밤 — RG 층2 자가치유 완결 + 프로모션 손익 레이어 Phase 1~2·통합 대사 화면)
 
+## ✅ 2026-07-28 저녁 — 광고 성과(사장님 뷰) Phase 3(⑤⑥) 구현·배포·라이브 검증 완료 (PR #158, D-NAO-106) — ★PR 미병합, Jino 승인 대기
+
+⑤BEP 구성 + ⑥개선 타임라인 구현 완료. `scripts/gen_naver_improvement_events.py` 생성 스크립트 + `docs/naver_ad_improvement_events.json` 카탈로그(99건) 신규 커밋. 계획 대비 교정 3건(파서 정규식→6형식 흡수 파서, 이벤트 단위→날짜 단위 응답, 상한 문장 단정 제거) — 상세는 `docs/PLAN_naver-ad-performance-view.md` §6·§8 참조. 라이브 검증 6항 전부 확인(파서 parsed=99 skipped=0, 멱등+curated 보존, D-NAO-101 타임라인 카드 confounded 표기, 원가 미입력 20건 추정치 없이 null 표기, 카탈로그 파일 제거해도 500 아닌 catalog_available:false 폴백, pytest 3,956/vitest 123 통과). `EventMarker` 차트 마커는 이번 슬라이스 미구현(카드 목록만) — 트랙 D-NAO-106에 부채로 기록.
+
+**다음 액션**:
+1. PR #158 병합 여부 — Jino 판단 대기.
+2. 내일 아침 3종 확인: ①08:50 새 형식 Slack 경보 실발화 ②03 ROAS가 08:20 매핑 sync 후 성과 페이지에 표시 시작 ③밤사이 BP 증액 발동 여부(오늘 17:20 평가 시점 03 소진율 74.5%로 미발동).
+3. codex 소급 리뷰 부채 — 08-02 쿼터 리셋 이후 5건 일괄 재실행(N1·프로모션 손익·BP+VT3·성과뷰 Phase 1·Phase 2에 이어 Phase 3 포함).
+
+---
+
 ## ✅ 2026-07-28 밤 — 광고 성과(사장님 뷰) Phase 2 배포 완료 (main `948188f`, PR #157, D-NAO-105)
 
 캠페인 선택기 + 날짜 선택(기준일) + 기준일vs비교일 증감 비교 + 섹션③(캠페인 상세 ROAS 추이 vs BEP선) + 섹션④(시간별 예산 소진 곡선) 구현·prod 배포·라이브 검증 완료. 적대적 리뷰 1R PASS + P2 지적 3건 반영(암전 검출 재설계·배지 정확성 2건). 워크트리 `agent-aba1a0c1fde5d288a`(HEAD `75286a0`)를 main(`4b65044`)에 병합 시 `perf_today_harness.py` 1건 충돌 — `TODAY_ACTIONS` 파생은 main 쪽(PR #152가 이미 고친 `EXECUTION_ACTIONS` 파생 규칙만 참조)을 채택, HEAD의 구식 `budget_pacing.PACING_ACTIONS` 합집합 우회는 폐기(LESSONS #55와 동일 계열 — 우회 사본을 다시 들이지 않음). 재검증 **3,920 passed**(백엔드) + **88 passed**(vitest).
