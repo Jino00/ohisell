@@ -67,6 +67,16 @@ _TRIAL_WARN_DAYS = 7
 #   클램프됐다). 그래서 "최신이어야 할 날짜" = 어제.
 _EXPECTED_LAG_DAYS = 1
 
+# 옵션×일 광고비가 그 날 "완결됐다"고 볼 최소 정합 비율 = 옵션 합 ÷ 계정 롤업 합.
+#   1.0을 요구하지 않는 이유: 두 소스(빌보드 옵션 XLSX / report SALES)는 반올림 그레인이 달라
+#   완결된 날에도 소수 오차가 난다. 0.95는 **휴리스틱**이지 실측 임계값이 아니다 — 그래서
+#   일별 실비율을 option_vs_account_ratio로 함께 내보내 판정을 사후 검증할 수 있게 둔다.
+_AD_COVERAGE_MIN = Decimal(os.getenv("ROCKET_AD_OPTION_COVERAGE_MIN") or "0.95")
+
+# missing_dates 응답 캡. ★_WINDOW_DAYS를 쓰면 자기가 캡하려는 리스트와 같은 변수로 커져서
+#   실제 바운드가 아니다(env로 창을 365일로 늘리면 캡도 365) — 고정 상수로 둔다(3R-F15).
+_MAX_MISSING_DATES = 200
+
 
 def _f(v) -> Decimal:
     if v is None:
@@ -146,59 +156,133 @@ def _sales_by_sku(
         return {}
     S = CoupangRocketSalesDaily
     q = db.query(
-        S.sku_id, S.option_id, S.qty, S.revenue, S.product_name
+        S.sku_id, S.option_id, S.qty, S.revenue, S.product_name, S.date
     ).filter(S.sku_id.in_(sku_ids), S.date >= dfrom, S.date <= dto)
     if vendor_id is not None:
         q = q.filter(S.vendor_id == vendor_id)
 
     out: dict[str, dict] = {}
-    for sku, option_id, qty, revenue, name in q.all():
+    for sku, option_id, qty, revenue, name, d in q.all():
         e = out.setdefault(
             sku,
-            {"qty": 0, "revenue": _Z, "option_ids": set(), "days": 0, "product_name": None},
+            {"qty": 0, "revenue": _Z, "option_ids": set(), "dates": set(),
+             "days": 0, "product_name": None},
         )
         e["qty"] += int(qty or 0)
         e["revenue"] += _f(revenue)
-        e["days"] += 1
+        # ★행 수가 아니라 **날짜 수**를 센다. 이 테이블 그레인은 (vendor, option, date)라
+        #   한 SKU에 옵션이 N개면 하루에 N행이 생긴다 — 행을 세면 sales_days가 창 길이를
+        #   넘는 값이 나온다(옵션 2개·3일 창 → 6). 일평균 계산에 쓰이면 그대로 틀린다.
+        e["dates"].add(_as_date(d))
         if option_id:
             e["option_ids"].add(option_id)
         if e["product_name"] is None and name:
             e["product_name"] = name
     for e in out.values():
         e["option_ids"] = sorted(e["option_ids"])
+        e["days"] = len(e["dates"])
+        del e["dates"]
     return out
+
+
+# ════════════════════════════════════════════════
+# ②-b 창 커버리지 — '수집 안 됨' / '아직 안 옴' / '진짜 0판매'를 가른다
+# ════════════════════════════════════════════════
+def _window_coverage(
+    db: Session, vendor_id: str | None, dfrom: date, dto: date, today: date | None = None
+) -> dict:
+    """창의 각 날짜를 covered / missing(수집 결손) / pending(아직 확정 전)으로 분류.
+
+    ★왜 필요한가(적대적 리뷰 F1·F5): 판매행이 없다는 사실 하나로는 **"안 팔렸다"와 "수집이
+      안 됐다"를 구분할 수 없다.** 구분 없이 qty=0으로 접으면 51일 결손이 알려진 이 시스템에서
+      "판매 0·BEP 광고비 0원"짜리 유령 손익이 조용히 태어난다(원칙22 정면 위반).
+    ⇒ 창 안에 **어떤 SKU든** 판매행이 있는 날 = 그 날 수집이 돈 날. 그 날 특정 SKU에 행이
+      없으면 그건 진짜 0판매다. 반대로 아무 행도 없는 날은 판정 불가(missing)다.
+    ⇒ 판매분석 확정 최신일은 어제(_EXPECTED_LAG_DAYS)라, 그 뒤 날짜는 결손이 아니라 **pending**
+      이다(진행 중 프로모션). 둘을 섞으면 진행 중 행사가 '수집 사고'로 보인다.
+
+    null_sku_rows: sku_id가 NULL인 창 내 판매행 수. SKU 조인에서 조용히 빠지는 분(과소 방향).
+    """
+    today = today or kst_today()
+    data_through = today - timedelta(days=_EXPECTED_LAG_DAYS)
+
+    S = CoupangRocketSalesDaily
+    q = db.query(S.date).filter(S.date >= dfrom, S.date <= dto)
+    nq = db.query(func.count(S.id)).filter(
+        S.date >= dfrom, S.date <= dto, S.sku_id.is_(None)
+    )
+    if vendor_id is not None:
+        q = q.filter(S.vendor_id == vendor_id)
+        nq = nq.filter(S.vendor_id == vendor_id)
+    covered = {_as_date(r[0]) for r in q.distinct().all() if r[0] is not None}
+
+    missing: list[str] = []
+    pending: list[str] = []
+    d = dfrom
+    while d <= dto:
+        if d not in covered:
+            (pending if d > data_through else missing).append(d.isoformat())
+        d += timedelta(days=1)
+
+    total = (dto - dfrom).days + 1
+    return {
+        "window_days": total,
+        "covered_days": total - len(missing) - len(pending),
+        "missing_days": missing,          # 수집 결손 — 판매량이 실제보다 적다
+        "pending_days": pending,          # 아직 확정 전(진행 중 행사) — 결손이 아니다
+        "data_through": min(dto, data_through).isoformat(),
+        # 창 안에서 판매 데이터가 실제로 닿은 마지막 날 — 광고 지평선(ad_days_covered)과
+        #   어긋나면 순이익이 서로 다른 기간을 섞는다(3R-N1). 두 값을 나란히 내보내 대조하게 둔다.
+        "sales_through": max(covered).isoformat() if covered else None,
+        "in_flight": bool(pending),
+        "complete": not missing and not pending,
+        "null_sku_rows": int(nq.scalar() or 0),
+    }
 
 
 # ════════════════════════════════════════════════
 # ③ 납품가 (최신 발주 단가)
 # ════════════════════════════════════════════════
-def _supply_price_by_sku(db: Session, sku_ids: list[str]) -> dict[str, Decimal]:
-    """SKU(=product_number)별 **최신 발주의 단가**(unit_purchase_price).
+def _supply_price_by_sku(
+    db: Session, sku_ids: list[str], vendor_id: str | None = None
+) -> dict[str, dict]:
+    """SKU(=product_number)별 **최신 발주의 단가**(unit_purchase_price) + 그 발주번호.
 
+    반환 {sku: {"price": Decimal, "po_seq": int}}.
     "최신" = purchase_order_seq 최대. 발주번호는 쿠팡이 증가시키는 값이라 시간 순서를 대신한다
-    (po_created_at은 발주상세 라인에 없다 — 라인은 PO에 종속).
+    (po_created_at은 발주상세 라인에 없다 — 라인은 PO에 종속). `purchase_order_seq`는 Integer라
+    수치 비교이고, UniqueConstraint(purchase_order_seq, product_number)가 동점 라인을 배제하므로
+    선택은 **결정적**이다.
+    ★날짜 필터가 없다 = **창 이후 발주의 단가가 과거 창에 소급 적용될 수 있다.** 원가 쪽 같은
+      성격의 근사(D-CPP-8)와 짝이며, 어느 발주에서 왔는지 대사할 수 있도록 po_seq를 함께 낸다.
     ★발주 이력이 없는 SKU는 **키가 없다**(0이 아니다). 신상품(예: 69411570)이 여기 해당한다 —
       0으로 접으면 "납품매출 0원짜리 프로모션"이 조용히 손익에 앉는다.
+    ★쿼리 1회(서브쿼리 조인). SKU마다 1회씩 돌면 프로모션 20건 × SKU 200개 = 4천 쿼리가 된다.
     """
     if not sku_ids:
         return {}
     I = CoupangRocketPurchaseOrderItem
     latest = (
-        db.query(I.product_number, func.max(I.purchase_order_seq))
+        db.query(I.product_number.label("pn"),
+                 func.max(I.purchase_order_seq).label("seq"))
         .filter(I.product_number.in_(sku_ids))
-        .group_by(I.product_number)
+    )
+    if vendor_id is not None:
+        latest = latest.filter(I.vendor_id == vendor_id)
+    latest = latest.group_by(I.product_number).subquery()
+
+    rows = (
+        db.query(I.product_number, I.purchase_order_seq, I.unit_purchase_price)
+        .join(
+            latest,
+            (I.product_number == latest.c.pn) & (I.purchase_order_seq == latest.c.seq),
+        )
         .all()
     )
-    out: dict[str, Decimal] = {}
-    for pn, seq in latest:
-        price = (
-            db.query(I.unit_purchase_price)
-            .filter(I.product_number == pn, I.purchase_order_seq == seq)
-            .order_by(I.line_no)
-            .first()
-        )
-        if price is not None and price[0] is not None:
-            out[pn] = _f(price[0])
+    out: dict[str, dict] = {}
+    for pn, seq, price in rows:
+        if price is not None:
+            out[pn] = {"price": _f(price), "po_seq": int(seq)}
     return out
 
 
@@ -244,7 +328,8 @@ def _cost_by_sku(db: Session, sku_ids: list[str]) -> dict[str, dict]:
 # ⑤ 광고비 (옵션 귀속 시도 → 실패 시 계정단위 상한 프록시)
 # ════════════════════════════════════════════════
 def _ad_spend_window(
-    db: Session, vendor_id: str | None, dfrom: date, dto: date, option_ids: list[str]
+    db: Session, vendor_id: str | None, dfrom: date, dto: date, option_ids: list[str],
+    pending_days: list[str] | None = None,
 ) -> dict:
     """창 내 광고비. **옵션 귀속이 되면 그것을, 안 되면 계정단위 합을 상한으로** 돌려준다.
 
@@ -257,19 +342,70 @@ def _ad_spend_window(
       상한과 BEP 광고비를 나란히 놓으면 "최악의 경우에도 남는가"를 판정할 수 있다.
     옵션 데이터가 나중에 들어오면(빌보드 옵션 ingest가 Retail을 채우면) 이 함수가 자동으로
       available=True로 바뀐다 — 코드 변경 없이 전환된다.
+
+    ★귀속 완전성 판정자 = **창 내 모든 날짜에 이 계정(Retail) 옵션행이 있는가**(적대적 리뷰 F2).
+      "행이 있는 옵션 전부"를 판정자로 쓰면 안 된다: `coupang_ad_option_daily`는 집행이 있어야
+      행이 생기므로 **광고비가 진짜 0원인 옵션은 행이 없다** — 옵션 집합으로 판정하면 빌보드가
+      완전히 붙어도 available이 영원히 False가 된다.
+      반대로 '한 행이라도 있으면 완전 귀속'도 안 된다: 두 옵션 중 하나만 들어온 상태에서
+      계정 광고비 2.27M 중 1천 원만 물린 채 "순이익 확정 흑자"가 나온다(리뷰 재현).
+      날짜 커버리지는 둘 다 피한다 — 그 날 ingest가 돌았으면 그 날 행이 없는 옵션은 정당한 0원,
+      ingest가 안 돈 날이 하나라도 있으면 **부분 귀속**이라 확정값을 내지 않는다.
+
+    ★단, "그 날 행이 있다"는 완결의 **프록시지 증거가 아니다**(적대적 리뷰 3R-a): 하루치가 부분
+      적재되면(페이지네이션 중단·일부 캠페인만 export) 존재 판정은 통과하는데 우리 옵션만 빠질 수
+      있다 — F2 원본 사고가 하루 안으로 숨는다. 그래서 존재가 아니라 **금액 정합**으로 판정한다:
+        그 날 옵션 합(계정 전체 옵션) ≥ 그 날 계정 롤업(coupang_ad_report) × _AD_COVERAGE_MIN
+      계정 롤업이 그 날 0이면(집행 자체가 없던 날) **자명하게 커버된 날**이다(3R-c).
+      아직 확정 전인 날(pending)은 결손이 아니므로 분모에서 뺀다(3R-d) — 안 그러면 진행 중
+      프로모션이 구조적으로 전부 net_profit을 잃는다.
     """
-    account = db.query(func.coalesce(func.sum(CoupangAdReport.ad_spend), 0)).filter(
-        CoupangAdReport.report_date >= dfrom,
-        CoupangAdReport.report_date <= dto,
-        CoupangAdReport.sell_type == ROCKET_AD_SELL_TYPE,
+    A = CoupangAdReport
+    aq = db.query(A.report_date, func.coalesce(func.sum(A.ad_spend), 0)).filter(
+        A.report_date >= dfrom,
+        A.report_date <= dto,
+        A.sell_type == ROCKET_AD_SELL_TYPE,
     )
     if vendor_id is not None:
-        account = account.filter(CoupangAdReport.vendor_id == vendor_id)
-    account_spend = _f(account.scalar())
+        aq = aq.filter(A.vendor_id == vendor_id)
+    account_by_day: dict[date, Decimal] = {
+        _as_date(d): _f(v) for d, v in aq.group_by(A.report_date).all() if d is not None
+    }
+    account_spend = sum(account_by_day.values(), _Z)
+
+    O = CoupangAdOptionDaily
+    # 그 날 **계정 전체** 옵션 광고비 합(우리 옵션만이 아니다 — 완결성 판정용 분자).
+    dq = db.query(O.report_date, func.coalesce(func.sum(O.ad_spend), 0)).filter(
+        O.report_date >= dfrom, O.report_date <= dto, O.sell_type == ROCKET_AD_SELL_TYPE
+    )
+    if vendor_id is not None:
+        dq = dq.filter(O.vendor_id == vendor_id)
+    option_by_day: dict[date, Decimal] = {
+        _as_date(d): _f(v) for d, v in dq.group_by(O.report_date).all() if d is not None
+    }
+
+    pending = set(pending_days or [])
+    window_days = (dto - dfrom).days + 1
+    judged_days = 0
+    days_covered = 0
+    day_ratios: dict[str, str] = {}
+    for i in range(window_days):
+        d = dfrom + timedelta(days=i)
+        if d.isoformat() in pending:      # 아직 올 시간이 안 된 날 — 결손 아님(3R-d)
+            continue
+        judged_days += 1
+        acct = account_by_day.get(d, _Z)
+        opt = option_by_day.get(d, _Z)
+        if acct <= 0:                     # 그 날 계정 집행 0 — 자명하게 커버(3R-c)
+            days_covered += 1
+            continue
+        ratio = opt / acct
+        day_ratios[d.isoformat()] = str(ratio.quantize(_Q4))
+        if ratio >= _AD_COVERAGE_MIN:     # 금액 정합으로 판정(3R-b)
+            days_covered += 1
 
     by_option: dict[str, Decimal] = {}
     if option_ids:
-        O = CoupangAdOptionDaily
         oq = db.query(O.ad_option_id, func.coalesce(func.sum(O.ad_spend), 0)).filter(
             O.report_date >= dfrom,
             O.report_date <= dto,
@@ -281,21 +417,40 @@ def _ad_spend_window(
         for opt, spend in oq.group_by(O.ad_option_id).all():
             by_option[opt] = _f(spend)
 
-    available = bool(by_option)
+    attributed_sum = sum(by_option.values(), _Z)
+    available = judged_days > 0 and days_covered == judged_days
+    partial = bool(by_option) and not available
     return {
         "available": available,
-        "attributed": sum(by_option.values(), _Z) if available else None,
+        "attributed": attributed_sum if available else None,
+        # 부분 귀속분은 **버리지 않고** 별도 칸으로 보인다(있는 사실을 숨기지 않되 확정값으로
+        #   쓰지 않는다). 확정 순이익은 available일 때만 산출된다.
+        "attributed_partial": attributed_sum if partial else None,
         "by_option": {k: str(v) for k, v in by_option.items()},
+        "ad_days_covered": days_covered,
+        "ad_days_judged": judged_days,          # pending 제외한 판정 대상 일수
+        "ad_days_total": window_days,
+        "option_vs_account_ratio": day_ratios,  # 일별 옵션합÷계정합 — 부분 적재를 숫자로 노출
+        "options_with_spend": len(by_option),
+        "options_total": len(option_ids),
         "account_window_spend": account_spend,
         "basis": (
-            "옵션 귀속 광고비(coupang_ad_option_daily, sell_type=Retail)"
+            f"옵션 귀속 광고비(coupang_ad_option_daily, sell_type=Retail) — 판정 대상 "
+            f"{judged_days}일 전부에서 옵션 합이 계정 롤업의 {_AD_COVERAGE_MIN} 이상이라 완전 "
+            "귀속으로 본다. 커버된 날에 행이 없는 옵션은 그 날 집행이 없었다는 뜻이라 0원이다."
             if available
             else (
-                "★옵션 귀속 불가 — coupang_ad_option_daily에 이 계정(Retail) 행이 없다"
-                "(2026-07-28 prod 실측: 옵션×일 광고비는 3P 계정만 수집 중). 프로모션 SKU에 "
-                "얼마가 쓰였는지는 **모른다** → 0으로 접지 않고 미상으로 둔다. "
-                "account_window_spend는 계정 전체 Retail 광고비이며, 프로모션 SKU는 그 부분집합이라 "
-                "**상한(upper bound)**으로만 읽을 것."
+                f"★옵션 귀속 불완전 — 판정 대상 {judged_days}일 중 {days_covered}일만 옵션×일 "
+                "광고비가 계정 롤업과 정합한다"
+                + (
+                    "(2026-07-28 prod 실측: 옵션×일 광고비는 3P 계정만 수집 중). "
+                    if days_covered == 0
+                    else "(빌보드 옵션 ingest가 창을 다 못 채웠거나 하루치가 부분 적재됐다 — "
+                         "option_vs_account_ratio 참조). "
+                )
+                + "빠진 날에 이 SKU들이 얼마를 썼는지는 **모른다** → 0으로 접지 않고 미상으로 둔다"
+                  "(부분 합계는 attributed_partial로만 참고). account_window_spend는 계정 전체 "
+                  "Retail 광고비이며, 프로모션 SKU는 그 부분집합이라 **상한(upper bound)**으로만 읽을 것."
             )
         ),
     }
@@ -305,7 +460,8 @@ def _ad_spend_window(
 # 결합 — 프로모션 1건 손익
 # ════════════════════════════════════════════════
 def compute_promotion_pnl(
-    db: Session, promo: CoupangRocketPromotion, vendor_id: str | None = None
+    db: Session, promo: CoupangRocketPromotion, vendor_id: str | None = None,
+    today: date | None = None,
 ) -> dict:
     """프로모션 1건의 손익 + SKU별 분해.
 
@@ -367,21 +523,64 @@ def compute_promotion_pnl(
         return base
 
     dfrom, dto = window
+    cov = _window_coverage(db, vendor_id, dfrom, dto, today=today)
     base["window"] = {"from": dfrom.isoformat(), "to": dto.isoformat(),
-                      "days": (dto - dfrom).days + 1}
+                      "days": (dto - dfrom).days + 1, **cov}
+
+    # ★3상태로 가른다(적대적 리뷰 F1 + 3R-N2 과잉교정 경보). 2상태로 만들면 안 된다:
+    #   "결손이 하나라도 있으면 전부 미해결"로 가면 알려진 51일 결손 동안 기능이 통째로 빈
+    #   화면이 된다 — 모르는 걸 0으로 접는 것(F1)의 거울상이고 똑같이 원칙22 위반이다.
+    #     ① 창 완전 커버 + 판매행 0  → **진짜 0판매**. resolved, 손익 확정.
+    #     ② 창 부분 커버 + 판매행 有  → resolved + qty_is_lower_bound(수량·손익은 "≥" 의미).
+    #     ③ 창 부분 커버 + 판매행 0   → **판정 불가**. unresolved. ← F1이 뚫린 지점은 여기뿐.
+    #     ④ 창 전부 pending          → '시작 전/집계 전'이지 결손이 아니다(별도 상태).
+    sales_trustworthy = not cov["missing_days"] and not cov["pending_days"]
+    qty_is_lower_bound = not sales_trustworthy
+    not_started = bool(cov["pending_days"]) and cov["covered_days"] == 0 and not cov["missing_days"]
+    if cov["missing_days"]:
+        blockers.append(
+            f"판매분석 결손 {len(cov['missing_days'])}일 / 창 {cov['window_days']}일 — "
+            f"판매량이 실제보다 적다(누락일: {', '.join(cov['missing_days'][:5])}"
+            f"{' 외' if len(cov['missing_days']) > 5 else ''}). "
+            "행 없는 SKU는 '안 팔림'이 아니라 **판정 불가**로 둔다"
+        )
+    if cov["pending_days"]:
+        blockers.append(
+            (
+                "아직 시작 전이거나 첫 집계 전 — 창 전체가 미확정이다"
+                f"(확정 최신일 {cov['data_through']}). 결손이 아니다"
+            )
+            if not_started
+            else (
+                f"진행 중 — 창 {cov['window_days']}일 중 {len(cov['pending_days'])}일이 아직 확정 전"
+                f"(확정 최신일 {cov['data_through']}). 손익은 **부분 창**의 값이다"
+            )
+        )
+    if cov["null_sku_rows"]:
+        blockers.append(
+            f"sku_id 없는 판매행 {cov['null_sku_rows']}건 — SKU 조인에서 빠진다(판매량 과소)"
+        )
 
     sales = _sales_by_sku(db, vendor_id, target_skus, dfrom, dto)
-    supply = _supply_price_by_sku(db, target_skus)
+    supply = _supply_price_by_sku(db, target_skus, vendor_id)
     costs = _cost_by_sku(db, target_skus)
 
     all_option_ids: list[str] = []
     for e in sales.values():
         all_option_ids.extend(e["option_ids"])
-    ad = _ad_spend_window(db, vendor_id, dfrom, dto, sorted(set(all_option_ids)))
+    ad = _ad_spend_window(db, vendor_id, dfrom, dto, sorted(set(all_option_ids)),
+                          pending_days=cov["pending_days"])
     base["ad"] = {
         "available": ad["available"],
         "attributed": ad["attributed"],
+        "attributed_partial": ad["attributed_partial"],
         "by_option": ad["by_option"],
+        "ad_days_covered": ad["ad_days_covered"],
+        "ad_days_judged": ad["ad_days_judged"],
+        "ad_days_total": ad["ad_days_total"],
+        "option_vs_account_ratio": ad["option_vs_account_ratio"],
+        "options_with_spend": ad["options_with_spend"],
+        "options_total": ad["options_total"],
         "account_window_spend": ad["account_window_spend"],
         "basis": ad["basis"],
     }
@@ -400,13 +599,19 @@ def compute_promotion_pnl(
         s = sales.get(sku)
         qty = int(s["qty"]) if s else 0
         realized = s["revenue"] if s else _Z
-        sp = supply.get(sku)
+        sup = supply.get(sku)
+        sp = sup["price"] if sup else None
         cm = costs.get(sku)
         cost_price = cm["cost_price"] if cm else None
 
         reasons: list[str] = []
-        if s is None:
-            reasons.append("창 내 판매분석 행 없음(미수집이거나 판매 0)")
+        # ★행이 없다 ≠ 안 팔렸다. 창이 완전할 때만 '진짜 0판매'로 읽고 해결 처리한다(F1).
+        sales_known = s is not None or sales_trustworthy
+        if s is None and not sales_trustworthy:
+            reasons.append(
+                "창 내 판매분석 행 없음 + 창에 결손/미확정일 존재 — '안 팔림'인지 "
+                "'수집 안 됨'인지 **판정 불가**(0으로 접지 않는다)"
+            )
         if sp is None:
             reasons.append("납품가 미상 — 발주(발주상세) 이력 없음")
         if cost_price is None:
@@ -418,7 +623,9 @@ def compute_promotion_pnl(
         if not unit_disc_known:
             reasons.append("개당 할인액 미입력")
 
-        resolved = sp is not None and cost_price is not None and unit_disc_known
+        resolved = (
+            sales_known and sp is not None and cost_price is not None and unit_disc_known
+        )
         supply_rev = _q2(sp * qty) if sp is not None else None
         cost_amt = _q2(cost_price * qty) if cost_price is not None else None
         funding = _q2(_f(unit_disc) * qty) if unit_disc_known else None
@@ -457,6 +664,7 @@ def compute_promotion_pnl(
             "realized_revenue": _q2(realized),
             "realized_unit_price": realized_unit_price,
             "supply_unit_price": sp,
+            "supply_price_po_seq": sup["po_seq"] if sup else None,   # 어느 발주에서 왔나(대사용)
             "supply_revenue": supply_rev,
             "cost_price": cost_price,
             "cost": cost_amt,
@@ -503,22 +711,45 @@ def compute_promotion_pnl(
         "net_profit": net_profit,
         "bep_ad_spend": bep_ad_total,                 # 이 값을 넘는 광고비 = 적자
         "bep_roas": bep_roas_total,                   # ★진짜 BEP ROAS(광고 ROAS가 이 값 이상이어야 본전)
-        "net_profit_lower_bound": net_lower,          # 계정 전체 광고비를 이 프로모션에 전부 물린 최악값
+        # ★이름에 scope를 박는다(적대적 리뷰 F4): 이건 **해결된 SKU만의** 하한이지 프로모션
+        #   전체의 하한이 아니다. 미해결 SKU가 실제로 적자였다면 참값은 이 밑으로 뚫린다.
+        #   경계일 과대 포함(window_basis)도 이 값을 낙관 방향으로 민다. "최악값"이라 부르면 거짓말.
+        "net_profit_lower_bound_resolved_only": net_lower,
+        "lower_bound_excludes_unresolved": bool(unresolved_skus),
         "resolved_sku_count": resolved_count,
         "unresolved_sku_ids": unresolved_skus,
         "unresolved_qty": unresolved_qty,
+        # ★창이 부분 커버면 qty·손익은 확정값이 아니라 **하한**이다(3R-N2 ② 상태).
+        #   화면은 이 플래그를 보고 "≥" 의미로 렌더해야 한다.
+        "qty_is_lower_bound": qty_is_lower_bound,
+        "not_started": not_started,
         "basis": (
             "납품매출=최신 발주단가×판매량 / 원가=product_master.cost_price×판매량(D-CPP-8: 단일 "
             "현재값의 소급 적용 — 승인된 근사) / 분담금=판매량×개당 할인액(D-CPP-7 수기) / "
             "순이익=납품매출−원가−분담금−광고비 / BEP 광고비=납품매출−원가−분담금 / "
             "BEP ROAS=Σ실현 소비자가÷Σ개당 공헌이익. ★미해결 SKU는 합계에서 빠진다"
-            "(unresolved_* 참조) — 0으로 접지 않는다(원칙22)."
+            "(unresolved_* 참조) — 0으로 접지 않는다(원칙22). "
+            "★납품단가는 **최신 발주**(supply_price_po_seq)에서 오며 창 이후 발주일 수 있다 — "
+            "원가(D-CPP-8)와 같은 성격의 소급 근사다. "
+            "★net_profit_lower_bound_resolved_only는 **해결된 SKU만의** 하한이다: 미해결 SKU가 "
+            "적자였다면 참값은 그 밑이고, 경계일 과대 포함도 이 값을 낙관 방향으로 민다."
         ),
     }
+    # ★지평선 정렬(3R-N1): 광고가 완전 귀속(available)일 때만 순이익이 나오는데, 판매 쪽이
+    #   부분 커버면 **N일치 마진 − 창 전체 광고비**가 된다. 방향은 항상 **과소**(마진만 빠진다)라
+    #   운영자를 흑자로 오도하지 않지만, 그래도 숨기지 않는다.
+    if net_profit is not None and qty_is_lower_bound:
+        blockers.append(
+            f"지평선 불일치 — 판매는 {base['window'].get('sales_through') or '미도달'}까지인데 "
+            f"광고비는 창 전체({ad['ad_days_judged']}일)를 물린다. 순이익은 **과소 방향**으로 "
+            "치우친 하한이다"
+        )
     if not ad["available"]:
         blockers.append(
-            "광고비 옵션 귀속 불가 — 순이익은 미상(N/A). 계정 전체 광고비를 상한으로 본 "
-            "net_profit_lower_bound만 제공한다"
+            f"광고비 옵션 귀속 불완전(판정 대상 {ad['ad_days_judged']}일 중 "
+            f"{ad['ad_days_covered']}일만 계정 롤업과 정합) — 순이익은 미상(N/A). "
+            "계정 전체 광고비를 상한으로 본 "
+            "net_profit_lower_bound_resolved_only만 제공한다"
         )
     if unresolved_skus:
         blockers.append(
@@ -590,7 +821,7 @@ def compute_sales_freshness(db: Session, vendor_id: str | None = None,
         "latest_date": latest.isoformat() if latest else None,
         "stale_days": stale_days,           # 어제 대비 며칠 뒤처졌나(0=최신)
         "missing_count": len(missing),
-        "missing_dates": missing[:_WINDOW_DAYS],
+        "missing_dates": missing[:_MAX_MISSING_DATES],
         "urgent_count": sum(1 for m in missing if m["days_until_expiry"] <= 7),
         # ② 구독 체험 종료 경고 (D-CPP-5)
         "subscription": {
@@ -611,7 +842,7 @@ def compute_sales_freshness(db: Session, vendor_id: str | None = None,
 # RG(2P) 쿠폰 — 메타 + used_amount 나열 (엔진 확장은 used_amount 수집 후)
 # ════════════════════════════════════════════════
 def list_rg_coupons(db: Session, dfrom: date | None = None, dto: date | None = None,
-                    limit: int = 50) -> dict:
+                    limit: int = 50, account_key: str | None = None) -> dict:
     """즉시할인(INSTANT) 쿠폰 메타 + used_amount 나열.
 
     ★D-CPP-3: 우리 실부담의 권위값은 쿠폰 "사용 금액"이고, 쿠팡 Open API에는 그 값이 없다
@@ -621,10 +852,16 @@ def list_rg_coupons(db: Session, dfrom: date | None = None, dto: date | None = N
     """
     C = CoupangCoupon
     q = db.query(C).filter(C.coupon_kind == "INSTANT")
+    if account_key is not None:
+        q = q.filter(C.account_key == account_key)
+    # ★start_at/end_at은 **DateTime**인데 창은 date다. `start_at <= dto`로 비교하면 dto가
+    #   자정으로 바인딩돼 **종료일 당일에 시작한 쿠폰이 통째로 빠진다**(07-26 09:00 시작 쿠폰이
+    #   창[07-24,07-26]에서 0건). 엔진의 다른 모든 경계는 양끝 포함이므로 여기만 배타면 안 된다.
+    #   → 다음 날 자정 미만으로 바꿔 '종료일 하루 전체'를 포함시킨다.
     if dfrom is not None:
         q = q.filter((C.end_at.is_(None)) | (C.end_at >= dfrom))
     if dto is not None:
-        q = q.filter((C.start_at.is_(None)) | (C.start_at <= dto))
+        q = q.filter((C.start_at.is_(None)) | (C.start_at < dto + timedelta(days=1)))
     # SQLite/PostgreSQL 모두 DESC에서 NULL 위치가 다르지만(SQLite=마지막, PG=처음), 이 목록은
     #   표시 순서일 뿐 계산에 쓰이지 않으므로 nullslast를 강요하지 않는다(방언 의존 제거).
     rows = q.order_by(C.start_at.desc(), C.id.desc()).limit(limit).all()
@@ -659,6 +896,20 @@ def list_rg_coupons(db: Session, dfrom: date | None = None, dto: date | None = N
         "coupons": out,
         "count": len(out),
         "pending_count": sum(1 for c in out if c["used_amount_pending"]),
+        # ★어느 창으로 걸렀는지 명시(3R-F8 라이더): 1P 프로모션 카드가 0건이거나 전부 기간
+        #   미상이면 창이 None이 되어 **무제한 목록**이 뜬다 — 화면의 쿠폰이 어느 기간 것인지
+        #   정의되지 않은 상태가 조용히 생긴다. account_key도 마찬가지로 명시한다.
+        "window": (
+            {"from": dfrom.isoformat() if dfrom else None,
+             "to": dto.isoformat() if dto else None}
+            if (dfrom or dto) else None
+        ),
+        "window_note": (
+            None if (dfrom or dto)
+            else "★창 없음 — 1P 프로모션 카드에서 기간을 못 얻어 기간 필터 없이 최근 N건을 낸다"
+        ),
+        "account_key": account_key,
+        "limit": limit,
         "note": (
             "RG(2P) 쿠폰은 **나열 수준**이다. 우리 실부담 권위값 = 쿠폰 '사용 금액'(D-CPP-3)인데 "
             "쿠팡 Open API에 그 필드가 없어(ref 06 §E) 아직 수집 경로가 없다 → used_amount는 "
@@ -691,7 +942,7 @@ def compute_promo_pnl_overview(
         CoupangRocketPromotion.id.desc(),
     ).limit(limit).all()
 
-    cards = [compute_promotion_pnl(db, p, vendor_id) for p in promos]
+    cards = [compute_promotion_pnl(db, p, vendor_id, today=today) for p in promos]
     fresh = compute_sales_freshness(db, vendor_id, today=today)
 
     dfrom = dto = None

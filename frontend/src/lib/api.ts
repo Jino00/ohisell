@@ -938,6 +938,7 @@ export interface PromoSkuRow {
   realized_revenue: string;             // 소비자 실현가(회계 매출 아님, D-CPP-2)
   realized_unit_price: string | null;
   supply_unit_price: string | null;     // 납품 단가(최신 발주)
+  supply_price_po_seq: number | null;   // 그 단가가 온 발주번호(창 이후 발주일 수 있다 — 대사용)
   supply_revenue: string | null;
   cost_price: string | null;
   cost: string | null;
@@ -961,10 +962,15 @@ export interface PromoTotals {
   net_profit: string | null;
   bep_ad_spend: string | null;          // 이 값을 넘는 광고비 = 적자
   bep_roas: string | null;              // ★진짜 BEP ROAS
-  net_profit_lower_bound: string | null;
+  // ★"최악값"이 아니다 — **해결된 SKU만의** 하한이다. 미해결 SKU가 적자였다면 참값은 이 밑이고,
+  //   경계일 과대 포함도 이 값을 낙관 방향으로 민다. 반드시 "≥ …(미해결 N건 제외)"로 렌더할 것.
+  net_profit_lower_bound_resolved_only: string | null;
+  lower_bound_excludes_unresolved: boolean;
   resolved_sku_count: number;
   unresolved_sku_ids: string[];
   unresolved_qty: number;
+  qty_is_lower_bound: boolean;          // ★창 부분 커버 — 수량·손익은 확정값이 아니라 하한
+  not_started: boolean;                 // 창 전체 미도래(시작 전/집계 전) — 결손이 아니다
   basis: string;
 }
 
@@ -983,14 +989,31 @@ export interface PromoPnlCard {
   unit_discount_missing: boolean;
   target_sku_ids: string[];
   target_sku_missing: boolean;
-  window: { from: string; to: string; days: number } | null;
+  window: {
+    from: string; to: string; days: number;
+    window_days: number; covered_days: number;
+    missing_days: string[];             // 수집 결손(메울 수 있는 구멍)
+    pending_days: string[];             // 아직 확정 전 — 결손이 아니다
+    data_through: string;
+    sales_through: string | null;       // 판매 데이터가 실제로 닿은 마지막 날
+    in_flight: boolean;
+    complete: boolean;
+    null_sku_rows: number;
+  } | null;
   window_basis: string;
   skus: PromoSkuRow[];
   totals: PromoTotals | null;
   ad: {
     available: boolean;
     attributed: string | null;
+    attributed_partial: string | null;  // 부분 귀속분(참고용 — 확정 순이익에 쓰지 않는다)
     by_option: Record<string, string>;
+    ad_days_covered: number;
+    ad_days_judged: number;             // pending 제외한 판정 대상 일수
+    ad_days_total: number;
+    option_vs_account_ratio: Record<string, string>;
+    options_with_spend: number;
+    options_total: number;
     account_window_spend: string;       // 계정 전체 Retail — **상한 프록시**
     basis: string;
   } | null;
@@ -1035,7 +1058,14 @@ export interface PromoPnlResponse {
   promotions: PromoPnlCard[];
   promotion_count: number;
   freshness: PromoFreshness;
-  rg_coupons: { coupons: RgCouponRow[]; count: number; pending_count: number; note: string };
+  rg_coupons: {
+    coupons: RgCouponRow[]; count: number; pending_count: number;
+    window: { from: string | null; to: string | null } | null;
+    window_note: string | null;
+    account_key: string | null;
+    limit: number;
+    note: string;
+  };
   accounting_note: string;
 }
 

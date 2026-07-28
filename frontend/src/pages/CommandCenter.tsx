@@ -520,7 +520,9 @@ export default function CommandCenter() {
   );
 }
 
-function Card({ label, value, sub }: { label: string; value: string; sub?: string }) {
+// value가 ReactNode인 이유: 손익 카드가 음수를 빨강으로, 하한을 "≥ …"로 렌더해야 한다
+//   (적대적 리뷰 F3·F13). 기존 호출부는 전부 문자열이라 그대로 호환된다.
+function Card({ label, value, sub }: { label: string; value: React.ReactNode; sub?: string }) {
   return (
     <div className="bg-white rounded-lg border border-gray-200 p-3">
       <div className="text-xs text-gray-500">{label}</div>
@@ -1361,6 +1363,8 @@ function PromoPnlBlock() {
   const [loaded, setLoaded] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [editing, setEditing] = useState<Record<string, { disc: string; skus: string }>>({});
+  // 서버가 준 값 원본 — 저장 시 "무엇이 바뀌었나"를 판정하는 기준(F14).
+  const [baseline, setBaseline] = useState<Record<string, { disc: string; skus: string }>>({});
   const [saving, setSaving] = useState<string | null>(null);
 
   function load() {
@@ -1378,6 +1382,7 @@ function PromoPnlBlock() {
           };
         }
         setEditing(init);
+        setBaseline(init);
       })
       .catch((e) => setErr(e.message))
       .finally(() => setLoading(false));
@@ -1391,17 +1396,28 @@ function PromoPnlBlock() {
 
   async function save(requestId: string) {
     const e = editing[requestId];
-    if (!e) return;
+    const base = baseline[requestId];
+    // ★서버 값을 못 받은 상태(baseline 없음)에서 저장하면 두 수기값을 동시에 지운다.
+    if (!e || !base) return;
     setSaving(requestId);
     setMsg(null);
     try {
       const discRaw = e.disc.trim();
       const skus = e.skus.split(",").map((s) => s.trim()).filter(Boolean);
-      await patchPromotionManual(requestId, {
+      // ★바뀐 키만 보낸다. 백엔드는 "보낸 키만 갱신"을 보장하는데 UI가 항상 둘 다 보내면
+      //   그 설계가 무력화되고, 한쪽만 고치려다 다른 쪽을 덮어쓰는 경로가 생긴다(F14).
+      const body: { unit_discount_amount?: string | null; target_sku_ids?: string[] | null } = {};
+      if (e.disc.trim() !== base.disc.trim()) {
         // 빈 칸 = '모름'으로 되돌림(0원 할인과 구분 — 백엔드가 null을 그렇게 해석한다).
-        unit_discount_amount: discRaw === "" ? null : discRaw,
-        target_sku_ids: skus,
-      });
+        body.unit_discount_amount = discRaw === "" ? null : discRaw;
+      }
+      if (e.skus.trim() !== base.skus.trim()) body.target_sku_ids = skus;
+      if (Object.keys(body).length === 0) {
+        setMsg("변경사항 없음");
+        setTimeout(() => setMsg(null), 3000);
+        return;
+      }
+      await patchPromotionManual(requestId, body);
       setMsg(`✅ ${requestId} 저장`);
       load();
       setTimeout(() => setMsg(null), 4000);
@@ -1512,6 +1528,7 @@ function PromoPnlBlock() {
                   <thead>
                     <tr className="text-left text-gray-500 border-b border-gray-200">
                       <th className="py-1 pr-2">쿠폰</th>
+                      <th className="py-1 pr-2">계정</th>
                       <th className="py-1 pr-2">기간</th>
                       <th className="py-1 pr-2">상태</th>
                       <th className="py-1 pr-2 text-right">옵션</th>
@@ -1525,6 +1542,7 @@ function PromoPnlBlock() {
                           {c.promotion_name || c.coupon_id}
                           <span className="ml-1 text-gray-400 font-mono">{c.coupon_id}</span>
                         </td>
+                        <td className="py-1.5 pr-2 text-gray-500">{c.account_key}</td>
                         <td className="py-1.5 pr-2 text-gray-500">
                           {(c.start_at || "").slice(0, 10)}~{(c.end_at || "").slice(0, 10)}
                         </td>
@@ -1542,6 +1560,11 @@ function PromoPnlBlock() {
                   </tbody>
                 </table>
               </div>
+              <p className="mt-1 text-xs text-gray-500">
+                {data.rg_coupons.window
+                  ? `적용 창 ${data.rg_coupons.window.from ?? "—"} ~ ${data.rg_coupons.window.to ?? "—"}`
+                  : data.rg_coupons.window_note}
+              </p>
               <p className="mt-1 text-xs text-gray-500">{data.rg_coupons.note}</p>
             </div>
           )}
@@ -1551,6 +1574,14 @@ function PromoPnlBlock() {
       )}
     </div>
   );
+}
+
+/** 손익용 금액 렌더 — ★음수를 빨강으로. won()은 마이너스 기호 하나로만 구분돼서
+ *  적자를 흑자 옆에 나란히 두면 눈으로 안 걸린다(적대적 리뷰 F13). */
+function Money({ v, prefix }: { v: string | null | undefined; prefix?: string }) {
+  if (v == null) return <span className="text-gray-400">—</span>;
+  const neg = Number(v) < 0;
+  return <span className={neg ? "text-red-600" : undefined}>{prefix}{won(v)}</span>;
 }
 
 function PromoCard({
@@ -1568,6 +1599,11 @@ function PromoCard({
   const adShown = adKnown ? p.ad!.attributed : p.ad?.account_window_spend ?? null;
   const overBep =
     t?.bep_ad_spend != null && adShown != null && Number(adShown) > Number(t.bep_ad_spend);
+  // ★공헌이익이 이미 음수면 광고비 0원이어도 확정 적자다. 이걸 상한 비교 문구("적자 확정은
+  //   아니지만")로 덮으면 운영자를 안심시키고, 퍼센트도 음수가 찍힌다(적대적 리뷰 F6).
+  const bepNonPositive = t?.bep_ad_spend != null && Number(t.bep_ad_spend) <= 0;
+  const lb = t?.net_profit_lower_bound_resolved_only ?? null;
+  const w = p.window;
 
   return (
     <div className="bg-white border border-gray-200 rounded-lg p-3 mb-3">
@@ -1576,7 +1612,17 @@ function PromoCard({
           <span className="text-sm font-semibold text-gray-800">{p.promotion_name || p.request_id}</span>
           <span className="ml-2 text-xs text-gray-400 font-mono">{p.request_id}</span>
           <div className="text-xs text-gray-500 mt-0.5">
-            {p.window ? `${p.window.from} ~ ${p.window.to} (${p.window.days}일)` : "기간 미상"}
+            {w ? `${w.from} ~ ${w.to} (${w.days}일)` : "기간 미상"}
+            {w && w.in_flight && (
+              <span className="ml-1 px-1 rounded bg-blue-100 text-blue-700">
+                진행 중 · {w.data_through}까지 확정
+              </span>
+            )}
+            {w && w.missing_days.length > 0 && (
+              <span className="ml-1 px-1 rounded bg-amber-200 text-amber-900">
+                판매 결손 {w.missing_days.length}일 — 수량은 하한
+              </span>
+            )}
             {p.share_ratio != null && ` · 분담 ${Number(p.share_ratio)}%`}
             {p.status && ` · ${p.status}`}
             {p.applied_product_count != null && ` · 적용상품 ${p.applied_product_count}`}
@@ -1604,23 +1650,48 @@ function PromoCard({
             value={num(t.qty_all)}
             sub={t.qty_all !== t.qty ? `손익 반영 ${num(t.qty)} (미해결 ${num(t.unresolved_qty)})` : undefined}
           />
-          <Card label="순이익" value={won(t.net_profit)}
-                sub={t.net_profit == null ? "광고비 미상 → 산출 불가" : "납품매출−원가−분담금−광고비"} />
-          <Card label="BEP 광고비" value={won(t.bep_ad_spend)}
-                sub="이 금액을 넘으면 적자" />
+          <Card
+            label="순이익"
+            // ★N/A일 때 하한을 부등호로 보여준다 — 이 지표의 존재 이유("최악에도 남는가")가
+            //   백엔드에만 있고 화면에 없으면 전달되지 않는다(F3).
+            value={
+              t.net_profit != null ? <Money v={t.net_profit} />
+                : lb != null ? <Money v={lb} prefix="≥ " />
+                : <span className="text-gray-400">—</span>
+            }
+            sub={
+              t.net_profit != null
+                ? (t.qty_is_lower_bound ? "판매 결손분 제외 — 과소 방향 하한" : "납품매출−원가−분담금−광고비")
+                : lb != null
+                  ? `광고비 미상 → 계정 전체를 물린 하한${t.lower_bound_excludes_unresolved ? ` (미해결 ${t.unresolved_sku_ids.length}건 제외)` : ""}`
+                  : "광고비 미상 → 산출 불가"
+            }
+          />
+          <Card label="BEP 광고비" value={<Money v={t.bep_ad_spend} />}
+                sub={bepNonPositive ? "★0 이하 — 광고비와 무관하게 적자" : "이 금액을 넘으면 적자"} />
           <Card
             label={adKnown ? "실광고비" : "계정 광고비(상한)"}
-            value={won(adShown)}
-            sub={adKnown ? "옵션 귀속" : "★옵션 귀속 불가 — 상한 프록시"}
+            value={<Money v={adShown} />}
+            sub={
+              adKnown
+                ? `옵션 귀속 (${p.ad!.ad_days_covered}/${p.ad!.ad_days_judged}일 정합)`
+                : `★옵션 귀속 불완전(${p.ad?.ad_days_covered ?? 0}/${p.ad?.ad_days_judged ?? 0}일) — 상한 프록시`
+            }
           />
         </div>
       )}
 
-      {t && overBep && (
+      {t && bepNonPositive && (
+        <div className="text-xs bg-red-50 border border-red-300 rounded px-2 py-1 mb-2 text-red-800 font-semibold">
+          BEP 광고비가 0 이하입니다 — 광고비를 한 푼도 안 써도 팔수록 손해인 창입니다
+          (개당 공헌이익 ≤ 0). 본전 ROAS는 존재하지 않습니다.
+        </div>
+      )}
+      {t && overBep && !bepNonPositive && (
         <div className="text-xs bg-red-50 border border-red-200 rounded px-2 py-1 mb-2 text-red-700">
           {adKnown
             ? `실광고비가 BEP 광고비를 초과 — 이 창은 적자입니다.`
-            : `계정 전체 광고비(${won(adShown)})가 BEP 광고비를 넘습니다. 상한 비교라 적자 확정은 아니지만, 이 프로모션 SKU에 계정 광고비의 ${t.bep_ad_spend && Number(adShown) > 0 ? Math.round((Number(t.bep_ad_spend) / Number(adShown)) * 100) : "?"}% 넘게 쓰였다면 적자입니다.`}
+            : `계정 전체 광고비(${won(adShown)})가 BEP 광고비를 넘습니다. 상한 비교라 적자 확정은 아니지만, 이 프로모션 SKU에 계정 광고비의 ${Number(adShown) > 0 ? Math.round((Number(t.bep_ad_spend) / Number(adShown)) * 100) : "?"}% 넘게 쓰였다면 적자입니다.`}
         </div>
       )}
 
@@ -1655,7 +1726,7 @@ function PromoCard({
                   <td className="py-1.5 pr-2 text-right text-gray-600">{won(s.supply_unit_price)}</td>
                   <td className="py-1.5 pr-2 text-right text-gray-600">{won(s.cost_price)}</td>
                   <td className="py-1.5 pr-2 text-right text-gray-600">{won(s.funding)}</td>
-                  <td className="py-1.5 pr-2 text-right text-gray-700 font-semibold">{won(s.unit_contribution)}</td>
+                  <td className="py-1.5 pr-2 text-right text-gray-700 font-semibold"><Money v={s.unit_contribution} /></td>
                   <td className="py-1.5 pr-2 text-right text-purple-700 font-semibold">{ratioX(s.bep_roas)}</td>
                 </tr>
               ))}
