@@ -2455,6 +2455,12 @@ export interface NaverPerformanceCampaignCard {
   shared_product_count: number; // 여러 캠페인이 공유해 매출을 나눠 계상한 상품 수
   active_today: boolean;
   verdict_sentence: string;
+  // ★출처 라벨(D-NAO-105): 같은 칸에 오늘=실주문 프록시와 과거=네이버 확정치가 번갈아 들어온다.
+  //   무엇을 보고 있는지는 **백엔드가 정한 라벨**이 말한다 — 프론트가 다시 판단하지 않는다.
+  source: "today_proxy" | "settling" | "confirmed";
+  source_label: string;   // 오늘 추정 / 확정 중 / 확정
+  roas_label: string;     // 오늘 ROAS(추정) / ROAS(확정 중) / ROAS(확정)
+  revenue_label: string;  // 오늘 매출(추정) / 전환매출(확정 중) / 전환매출(확정)
 }
 
 export type NaverPerformanceActionState = "executed" | "blocked" | "unknown";
@@ -2486,4 +2492,192 @@ export interface NaverPerformanceToday {
 
 export function fetchNaverPerformanceToday(): Promise<NaverPerformanceToday> {
   return fetchApi<NaverPerformanceToday>("/api/naver/ad/performance/today");
+}
+
+// ── 광고 성과 Phase 2 — 날짜 선택·비교·캠페인 상세·예산 (D-NAO-105, 계획서 §4-ⓑⓒ) ──
+// ★날짜에 따라 숫자의 **출처가 다르다**: 오늘=실주문 상한 프록시 / 과거=네이버 확정 전환매출.
+//   `source_label`·`roas_label`·`revenue_label`은 백엔드가 정한 라벨이다 — 프론트가 다시
+//   판단하지 않는다(표기 규칙이 두 벌이 되면 갈라진다).
+
+/** today_proxy=오늘 추정 · settling=확정 중(간접전환 유입 중) · confirmed=확정 */
+export type NaverPerformanceSource = "today_proxy" | "settling" | "confirmed";
+
+export interface NaverPerformanceCampaignOption {
+  campaign_id: string;  // select의 value 전용 — 사람이 읽는 자리엔 절대 안 나간다
+  name: string;
+  type_label: string;
+  managed_by_label: string;
+  cost_30d: number;
+}
+
+export interface NaverPerformanceCampaignOptions {
+  campaigns: NaverPerformanceCampaignOption[];
+  window_days: number;
+}
+
+export function fetchNaverPerformanceCampaignOptions(): Promise<NaverPerformanceCampaignOptions> {
+  return fetchApi<NaverPerformanceCampaignOptions>("/api/naver/ad/performance/campaigns");
+}
+
+/** 날짜 일반화 응답. Phase 1의 `/today`와 같은 모양 + 출처 라벨이 더 붙는다. */
+export interface NaverPerformanceDay extends NaverPerformanceToday {
+  is_today: boolean;
+  source: NaverPerformanceSource;
+  source_label: string;
+  campaign_filter: string | null;
+  /** 과거 날짜인데 확정 기록이 한 줄도 없을 때만 채워진다 — "0원 집행"과 "수집 안 됨"은 다르다. */
+  data_gap_note: string | null;
+}
+
+export function fetchNaverPerformanceDay(
+  params: { date?: string; campaignId?: string } = {},
+): Promise<NaverPerformanceDay> {
+  const q = new URLSearchParams();
+  if (params.date) q.set("date", params.date);
+  if (params.campaignId) q.set("campaign_id", params.campaignId);
+  const qs = q.toString();
+  return fetchApi<NaverPerformanceDay>(`/api/naver/ad/performance/day${qs ? `?${qs}` : ""}`);
+}
+
+/** 증감. `pct`는 **분수**(0.12=+12%) — `pctFromFraction` 계약. 한쪽이라도 모르면 둘 다 null. */
+export interface NaverPerformanceDelta {
+  abs: number | null;
+  pct: number | null;
+}
+
+export interface NaverPerformanceDayMetrics {
+  spend: number;
+  imp: number;
+  clk: number;
+  revenue: number | null;
+  roas: number | null;
+}
+
+export interface NaverPerformanceCompareSide {
+  date: string;
+  source: NaverPerformanceSource;
+  source_label: string;
+  data_note: string;
+  totals: NaverPerformanceDayMetrics & { revenue_unknown_campaigns: number };
+}
+
+export type NaverPerformanceCompareMetric = "spend" | "imp" | "clk" | "revenue" | "roas";
+
+export interface NaverPerformanceCompareRow {
+  campaign_id: string;
+  name: string;
+  type_label: string;
+  base: NaverPerformanceDayMetrics;
+  against: NaverPerformanceDayMetrics;
+  deltas: Record<NaverPerformanceCompareMetric, NaverPerformanceDelta>;
+}
+
+export interface NaverPerformanceCompare {
+  base: NaverPerformanceCompareSide;
+  against: NaverPerformanceCompareSide;
+  deltas: Record<NaverPerformanceCompareMetric, NaverPerformanceDelta>;
+  campaign_filter: string | null;
+  rows: NaverPerformanceCompareRow[];
+  /** 오늘(프록시) vs 과거(확정)처럼 **정의가 다른** 값끼리의 비교일 때만 채워진다. */
+  mixed_source_note: string | null;
+  /** 한쪽이 아직 전환 정착 중일 때. 정의 불일치는 아니다(둘 다 확정치). */
+  settling_note: string | null;
+  empty_reason: string | null;
+}
+
+export function fetchNaverPerformanceCompare(
+  base: string, against: string, campaignId?: string,
+): Promise<NaverPerformanceCompare> {
+  const q = new URLSearchParams({ base, against });
+  if (campaignId) q.set("campaign_id", campaignId);
+  return fetchApi<NaverPerformanceCompare>(`/api/naver/ad/performance/compare?${q}`);
+}
+
+/** 4상태 내부 코드. 화면에는 `state_label`만 쓴다(D-NAO-103②). */
+export type NaverPerformanceGroupState = "expanding" | "watching" | "hold" | "blocked";
+
+export interface NaverPerformanceGroup {
+  adgroup_id: string;   // title 속성 전용
+  name: string;
+  state: NaverPerformanceGroupState;
+  state_label: string;  // 확장 중 / 관망 / 증액 보류 / 차단됨
+  reason_sentence: string;
+  cost: number;
+  imp: number;
+  clk: number;
+  conv_amt: number;
+  roas: number | null;
+}
+
+export interface NaverPerformanceSeriesPoint {
+  date: string;
+  cost: number;
+  imp: number;
+  clk: number;
+  conv_amt: number;
+  /** 네이버 확정 기준(직+간접). 광고비 0이면 null — 0으로 그리지 않는다. */
+  roas: number | null;
+  avg_rank: number | null;
+}
+
+export interface NaverPerformanceCampaignDetail {
+  campaign_id: string;
+  name: string;
+  type_label: string;
+  window: { from: string; to: string; days: number };
+  change_window_days: number;
+  lines: { target_roas: number | null; bep_roas: number | null };
+  series: NaverPerformanceSeriesPoint[];
+  series_note: string;
+  groups: NaverPerformanceGroup[];
+  totals: { cost: number; conv_amt: number; roas: number | null; imp: number; clk: number };
+}
+
+export function fetchNaverPerformanceCampaign(
+  campaignId: string, days = 30,
+): Promise<NaverPerformanceCampaignDetail> {
+  return fetchApi<NaverPerformanceCampaignDetail>(
+    `/api/naver/ad/performance/campaign/${encodeURIComponent(campaignId)}?days=${days}`,
+  );
+}
+
+export interface NaverPerformanceBudgetPoint {
+  hour: number;
+  cost: number;      // 그 시각까지의 **누적**
+  hour_cost: number; // 그 한 시간 지출(차분)
+  spend_ratio: number | null;
+  imp: number;
+  clk: number;
+}
+
+export interface NaverPerformanceBudgetCurve {
+  campaign_id: string;
+  campaign_name: string;
+  daily_budget: number | null;
+  spend_total: number;
+  spend_ratio: number | null;
+  points: NaverPerformanceBudgetPoint[];
+  /** 예산을 다 써서 광고가 멈춘 시각들(음영 구간). 빈 배열 = 멈춘 적 없음. */
+  blackout_hours: number[];
+  blackout_sentence: string | null;
+}
+
+export interface NaverPerformanceBudget {
+  date: string;
+  is_today: boolean;
+  curves: NaverPerformanceBudgetCurve[];
+  budget_changes: (NaverPerformanceActionItem & { hour: number | null })[];
+  /** 빈 배열은 정상이다 — 왜 비었는지 말한다(D-47-h). */
+  budget_changes_empty_reason: string | null;
+  data_note: string;
+}
+
+export function fetchNaverPerformanceBudget(
+  params: { date?: string; campaignId?: string } = {},
+): Promise<NaverPerformanceBudget> {
+  const q = new URLSearchParams();
+  if (params.date) q.set("date", params.date);
+  if (params.campaignId) q.set("campaign_id", params.campaignId);
+  const qs = q.toString();
+  return fetchApi<NaverPerformanceBudget>(`/api/naver/ad/performance/budget${qs ? `?${qs}` : ""}`);
 }
