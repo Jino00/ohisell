@@ -75,7 +75,10 @@ def build_response_curve(
 ) -> dict:
     """캠페인 당일 응답곡선: α → (cost, revenue, ROAS).
 
-    forecast: {pred_clk, pred_cost, pred_conv_amt} — NaverForecastDaily 오늘 예측.
+    forecast: {pred_clk, pred_cost} — NaverForecastDaily 오늘 예측. pred_conv_amt는
+        의도적으로 쓰지 않는다: campaign grain의 conv_amt는 센티널(`__backfill__`, /stats)
+        회계라 구매+장바구니 합이라서 매출로 쓸 수 없다(forecast_source.CONV_AMT_BASIS_LABEL
+        참조). 수익은 rpc(구매 기준 클릭당매출)로만 계산한다.
     hourly_weights: [{hour, cost_fraction}] — hourly_pattern 원료.
     actuals: {cost, clk, imp, conv_amt} — hourly_snapshot 당일 누적.
     current_hour: KST 0-23.
@@ -90,7 +93,6 @@ def build_response_curve(
 
     pred_cost = forecast.get("pred_cost", 0)
     pred_clk = forecast.get("pred_clk", 0)
-    pred_conv_amt = forecast.get("pred_conv_amt", 0)
 
     cost_so_far = actuals.get("cost", 0)
     clk_so_far = actuals.get("clk", 0)
