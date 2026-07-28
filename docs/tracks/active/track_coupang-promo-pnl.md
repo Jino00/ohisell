@@ -48,6 +48,16 @@ prod SELECT 실측 결과:
 1칸을 **수기 입력**(ops PATCH)으로 받는다. 페처는 이 칸을 절대 쓰지 않으므로 재수집이 수기값을 지우지 않는다.
 > "한 프로모션당 할인하는 가격이 하나로 정해지게 되어 있어. 그래서, 한 프로모션에 제품은 여러개가 들어갈 수 있지만 할인 가격은 모두 같은게 맞아."
 
+### D-CPP-8 — 원가는 환율에 따라 상시 변동 → 시드 스크립트 폐기, 단일 진실은 `product_master.cost_price`
+Jino 원문: *"원가가 환율에 따라서 조금씩 변해. 그래서, 항상 약간씩 변해."* 원가를 특정 스크립트에
+고정값으로 박아 넣는 방식(`backend/scripts/seed_promo_pnl_costs_20260728.py`)은 이 현실과 맞지 않는다
+→ **폐기(삭제)**. 원가의 단일 진실 원천은 sellC `product_master.cost_price`(수기 관리)이며, 스크립트가
+아니라 이 값을 그때그때 고친다. `product_master.cost_price`는 조회 시점마다 소급 적용되는 값이므로
+(`profit_calculator.py`·`bep_calculator.py` 실측 — D-CPP-4 시드 스크립트 주석 참조), **단일 현재값의
+소급 적용은 승인된 근사**로 취급한다(과거 시점 원가와 정확히 일치하지 않을 수 있음을 알고 쓴다).
+시점별 원가를 이력화(환율 변동에 따른 원가 스냅샷 저장)하는 것은 **필요성이 확인되면 별도 D-CPP-N으로
+재론**한다 — 지금은 착수하지 않는다.
+
 ---
 
 ## 확정된 API 스펙 (2026-07-28 라이브 정찰 — 추측 아님)
@@ -80,7 +90,10 @@ prod SELECT 실측 결과:
 - [x] 신규 테이블 3종 (`coupang_rocket_sales_daily`, `coupang_rocket_promotion`, `coupang_coupon.used_amount*`) + alembic
 - [x] 정규화 파서 SA (`clients/coupang/rocket_promo.py`) — **레코드 계약은 우리 것**(쿠팡 원시 스키마 추측 안 함)
 - [x] ingest Harness + 라우터 3종 (X-Ingest-Token)
-- [x] 원가 시드 스크립트 (SKU 62178970 / 69411570)
+- [x] 원가 시드 스크립트 (SKU 62178970 / 69411570) — ★**폐기됨(D-CPP-8)**. 69411570→OHI-0497 매핑은
+      `POST /api/coupang/ops/rocket/cost-map`으로 직접 등록 완료(2026-07-28, prod 실측). 62178970 원가
+      갱신(3,400→3,500)은 스크립트와 함께 미실행 상태로 폐기 — 필요 시 `product_master.cost_price`를
+      직접 갱신(D-CPP-8 방침).
 - [x] 테스트 (파서 fixture · ingest 멱등 · 라우트 3종) — 50건
 - [x] **적대적 교차 리뷰 4라운드 — PASS** (2026-07-28). codex는 계정 한도 소진(리셋 08-02)이라
       **적대적 Claude 리뷰어 1기(신선 컨텍스트)로 대체**(Jino 승인 방식 2026-07-18).
@@ -175,34 +188,24 @@ codex CLI 쿼터 소진(08-02 해제)으로 **신선 컨텍스트 Opus 리뷰어
 
 > ⚠️ 계획서 §0.6 금지선("기존 rocket 페처 수정 금지")은 **이번 스프린트 지시로 해제**됐다
 > (같은 파일에 스트림 추가). 라이브 데몬 파일이므로 배포 시 페처 재기동 필요.
-> ⚠️ §5 원가 시드 `--apply`는 여전히 미실행 — 실행 시 과거 net_profit·BEP ROAS가 움직인다(계획서 §0.2).
+> ⚠️ §5 원가 시드 스크립트는 **폐기됨(D-CPP-8, 2026-07-28)** — 원가는 환율에 따라 상시 변동하므로
+> 스크립트 고정값이 아니라 `product_master.cost_price`(수기 관리)가 단일 진실 원천이다. 69411570 매핑은
+> API로 등록 완료, 62178970 원가 갱신(3,400→3,500)은 미실행인 채로 스크립트만 삭제됨.
 
 ## 다음 액션
 
-1. **prod 배포**(오케스트레이터): `scripts/safe_deploy.sh` 로 ①마이그 **1건** `df7b34a2f46e`
-   (Phase1 `c2998cfe1f7c`는 prod 적용 완료 — prod `alembic_version`이 `f6a8c0b2d4e6`인지 먼저 확인)
-   → `alembic upgrade head` → ②`models.py`·`routers/coupang_ops.py`·`services/…`·`clients/…` → 재시작.
-   순서 위반 시 ORM이 `no such column`으로 그 테이블 ingest를 통째로 죽인다(프로젝트 CLAUDE.md).
-   ★**순서 고정: prod 백엔드가 먼저, Mac 페처가 나중.** 페처가 새로 보내는
-   `kind="access_denied"|"mapping_broken"`을 모르는 구버전 `refresh_contract`는 그것을
-   **평범한 재시도 대상**으로 처리한다(하위호환이라 죽지는 않지만, 영구 실패가 재시도 3회를
-   그대로 태워 우리가 없앤 Chrome 3연발이 그동안 살아난다). 반대 순서면 잠깐 그 상태가 된다.
-2. **★페처 데몬 재기동 — 버튼을 누르기 전에 반드시 먼저.** `tools/rocket_supplier_fetcher.py`는
-   `com.ohisell.rocket`(launchd KeepAlive 상주)이 **프로세스 시작 시 1회만** 로드한다. 재기동 없이
-   3번을 하면 **구코드가 돌아** 판매분석·프로모션 로그가 아예 안 나오고, 그것이 "새 스트림이 안 붙었다"로
-   오독된다(com.ohisell.adcost 2026-06-14 동일 사고).
-   ```
-   launchctl kickstart -k gui/$(id -u)/com.ohisell.rocket
-   launchctl print gui/$(id -u)/com.ohisell.rocket | grep -E 'pid|state'   # pid가 바뀌었는지 확인
-   ```
-3. 재기동 확인 후 **라이브 push 실증**: 로켓 '갱신' 버튼 1회 → `~/.ohisell_rocket_fetcher.log`에서
-   "판매분석 push 성공 / 프로모션 push 성공" + `skipped=0` 확인 → prod DB 행 수 대조.
-   ★`판매분석 수집: N일 요청 → M일 수집·K일 범위밖·F일 실패` 줄에서 **M+K+F=N**인지 본다
-   (안 맞으면 하루가 조용히 새는 것). F는 0이 정상이지만 **일부 실패는 rc를 올리지 않는다** —
-   롤링 7일 창이 다음 회차에 스스로 메우기 때문. F가 회차를 넘겨 같은 날짜로 반복되면 그때 조사.
-   전 날짜 실패·vendorItems 전무(접근 차단)·레코드 0(매핑 파손)만 rc≠0으로 올라온다.
-4. 프로모션별 `unit_discount_amount` 수기 입력(D-CPP-7) — 지금은 PATCH, UI는 Phase 2.
-4. 9월 1P 정산서 도착 시 D-CPP-4 대사.
+> **2026-07-28 갱신(D-CPP-8 기록 세션)** — prod 라이브 실측으로 아래 1~3(prod 배포·페처 재기동·
+> push 실증)은 **완료 확인됨**: `coupang_rocket_sales_daily` 271행·`coupang_rocket_promotion` 7건이
+> prod DB에 실재(위 "확정된 API 스펙"·"현재 진행 단계"의 라이브 수치와 일치). Phase 1은 사실상 마감.
+> **우선순위 순으로 아래를 다음 액션으로 삼는다**:
+>
+> 1. **Phase 2 착수 — 손익 엔진·뷰.** 프로모션 창 ⨝ 판매/주문 조인 → 채널별 프로모션 기간 손익
+>    계산 → 화면(체크리스트 Phase 2 3항목). 착수 전 계획서 갱신 필요(원칙4).
+> 2. **발주→납품→명세서→계산서 통합 대사 화면** — 선행조건(로켓 1P M1, PR #130) prod 배포 완료로
+>    착수 가능. Phase 2와 순서·우선순위는 Jino 확인 후 확정.
+> 3. RG 쿠폰 "사용 금액" 수집 경로 확정(Open API에 없음 — 계획서 §3) — 미해결 채 남아있음.
+> 4. 프로모션별 `unit_discount_amount` 수기 입력(D-CPP-7) — 지금은 PATCH, UI는 Phase 2.
+> 5. 9월 1P 정산서 도착 시 D-CPP-4 대사.
 
 ## 마지막 구조 감사
 - (없음 — 트랙 개설일 2026-07-28)
