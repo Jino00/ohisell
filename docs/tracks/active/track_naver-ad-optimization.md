@@ -221,6 +221,15 @@
 
 **마지막 구조 감사: 2026-07-23 · ref 39 (차기 ~07-30)** — 원칙23(주기 재심 권한) 첫 시행, 세션 시작 시 이 라인으로 다음 감사 주기 여부를 확인할 것.
 
+**★★★★★★★★★★★★★★★★최신(2026-07-28 15:0x KST, 워크트리 `agent-adeb27dfe7e3d773f`, PR #151 병합 `11bf3d4`): "광고 성과(사장님 뷰)" Phase 1 prod 배포·라이브 검증 완료.**
+- **범위**: `docs/PLAN_naver-ad-performance-view.md` 6섹션 중 ①오늘 한눈에 ②오늘 시스템이 한 일. D-NAO-103 가독성 원칙(ID/내부 용어 노출 금지·문장형) 적용. 신규 SA 3(`change_log_narrator.py`·`product_campaign_share.py`·`today_proxy_revenue.py`) + Harness(`perf_today_harness.py`) + 기존 SA 확장(`alert_humanizer.py`·`budget_pacing.py`·`campaign_roster.py`) + 라우터(`naver_ad.py` `/api/naver/ad/performance/today`) + 프론트 `NaverAdPerformance.tsx`(`/naver-ad/performance`).
+- **리뷰**: 적대적 리뷰 1라운드 PASS. 지적 반영 — 공유 상품 매출 분할 분모 단일화(`product_campaign_share.py`, 과대계상 방향 제거)·Phase 1 당일 프록시 커버리지(46개 캠페인 중 스마트스토어 실주문 매핑 2개뿐) 고지 누락 보완.
+- **병합**: main에 그 사이 병합된 PR #149(BP/VT3)·#150(promo-pnl Phase 2)를 먼저 merge — `frontend/src/lib/api.ts` 한 곳만 겹쳤고 서로 다른 위치 append라 자동 병합. 병합 후 재검증 **3,844 passed**. 스키마 변경 없음(마이그레이션 無).
+- **배포**: `scripts/safe_deploy.sh` — 백엔드 8개 파일(CAS 전부 통과, 신규 4건) `--restart` + `--frontend`(dist rsync). pm2 online(재시작 269회째), 재시작 후 예외 0.
+- **라이브 검증(원칙22)**: `GET /api/naver/ad/performance/today` 200 — `campaigns` 46개·`totals.spend_today` 493,247원·`today_actions` 실행 16/차단 4/미상 0(문장형 이벤트 20건, 08:50 자동 입찰 조정 실사례 포함). 브라우저 QA(`$B` headless)로 `/naver-ad/performance` 실제 렌더 확인 — 캠페인 카드·"오늘 시스템이 한 일" 섹션·파워링크 ROAS `—`(0.00배 아님, roas_unknown_reason 문장 노출) 전부 정상. 스크린샷: 세션 스크래치패드 `perf_page_live.png`.
+- **codex 소급 부채**: 08-02 쿼터 리셋 후 일괄 재실행 대상에 이번 배포분 추가(N1·프로모션 손익·BP+VT3 통합에 이어 4건째).
+- **다음 액션**: Phase 2(개선 전/후 추적)·Phase 3(주간 요약·발송) 대기 — 계획서 §4 순서대로 진행.
+
 **★★★★★★★★★★★★★★★최신(2026-07-28 14:2x KST, 워크트리 통합 배포 세션, PR #149 병합 `74cf050`): BP(D-NAO-102)+VT3(D-NAO-103) 통합 병합·prod 배포·라이브 검증 완료.**
 - **통합 배경**: 두 스프린트 모두 `auto_operator.py`를 수정해(BP=hourly 배선, VT3=브리핑 이관) 별도 워크트리에서 각자 codex 대체 리뷰 2라운드까지 마친 뒤, 신규 통합 브랜치(`integrate/bp-vt3-D-NAO-102-103`)에서 main 기준으로 순차 병합.
 - **병합 충돌**: `auto_operator.py` import 문 1건뿐(union으로 해소, 양쪽 로직 보존 확인). 그 외 파일은 전부 자동 병합(ort strategy).
@@ -542,6 +551,12 @@
 - **D-NAO-38 X1b 착수 — 정지·재개는 생성기까지 포함해 완전 작동, 정찰로 3개 구조적 갭 확정** (2026-07-10, Opus 설계·Jino 승인). X1a 전부 완료·prod 배포 후 X1b(정지·재개→입찰 개방+가드레일 실효화) 착수. **Jino 스코프 결정 원문**: 정지·재개 제안 생성기 부재를 알리고 "어디까지 할까요?"(쓰기경로만/최소생성기/입찰만) 물음에 → **"완벽히 작동하도록 해줘"** = 정지·재개도 생성기까지 만들어 end-to-end 완전 작동(입찰은 생성기 기존재). **정찰(Opus, ref 27·기존 코드 실독)로 확정한 3개 갭**: ①입찰 목표값이 구조화 필드에 없음 — bid_up/bid_down/growth_bid_up 제안이 추천입찰가를 rationale 텍스트에만 담음(proposal_writer.py:108). 실행자가 텍스트 파싱 금지 → 신규 컬럼 필요(X1a T3의 adgroup_id 컬럼 신설과 동일 선례). ②정지·재개 proposal_type·생성기 전무(현 7종에 pause/resume 없음) — Jino 결정대로 생성기까지 구축. ③가드레일 미실효 — 클램프(70~100,000·10원)는 bid_simulator 제안생성 시점에만, ±15%·쿨다운·일일상한·스톱로스 절대액·BEP증액금지는 어디에도 강제 안 됨 → 실행 직전 guardrail_gate SA가 X1b의 새 핵심. **확정 구조(D-NAO-16 순서 준수, 계획서 §3 X1b 갱신)**: T1 스키마+writer 확장(target_bid/target_lock 컬럼 마이그레이션 + naver_sa_writer에 update_keyword_bid[PUT fields=bidAmt]·set_user_lock[키워드/그룹/캠페인 3계층] before/after 재조회 계약) → T2 guardrail_gate SA(순수 판정, 가드레일 전부) → T3 proposal_writer가 target_bid 구조화 저장 + 정지·재개 생성기 → T4 execution_harness OPEN_ACTIONS 확장+실행자 2개+MOP 충돌감지(D-NAO-13) → T5 D+7/14 채점 배선 확인. 각 태스크 TDD+codex(원칙19), 라이브 왕복은 카나리 지정 후. 방향 임의 변경 금지 — 이 D-N이 X1b 착수의 승인 기록.
 
 ## 다음 액션
+
+> **★★★★★★★★★★★★★★★2026-07-28 15:0x 추가(D-NAO-104 Phase 1 prod 배포·라이브 검증 완료, PR #151)** — **다음 액션(우선순위 순)**:
+> 1. **Phase 2(개선 전/후 추적) 설계·구현** — 계획서 `docs/PLAN_naver-ad-performance-view.md` §4 순서대로. Phase 1의 `change_log_narrator`/`perf_today_harness` 골격 재사용 가능.
+> 2. **당일 프록시 커버리지 확장** — 현재 46개 캠페인 중 스마트스토어 실주문 매핑 2개뿐(파워링크 등 나머지는 `roas_today_proxy: null`). 매핑 확장 여부는 별도 판단(D-NAO-104 스코프 밖, 상품 연결맵 트랙 소관 가능성).
+> 3. **15:20 시간당 레인 확인** — BP(D-NAO-102) 분모 단일화 반영분(`product_campaign_share.py`)이 실제 크론에 영향 없는지(성과 뷰 전용 SA라 무관 예상이나 배포 직후 첫 사이클 예외 유무 확인).
+> 4. **codex 소급 부채 4건째(N1·프로모션 손익·BP+VT3·성과뷰 Phase 1) 08-02 쿼터 리셋 후 일괄 재실행.**
 
 > **★★★★★★★★★★★★★★2026-07-28 14:2x 추가(BP+VT3 통합 병합·prod 배포·라이브 검증 완료, PR #149)** — 워크트리 통합 배포 세션. **다음 액션(우선순위 순)**:
 > 1. **VT3 실발화 검증(내일 08:50)** — `_run_ctr_alert_briefing`이 daily lane에서 실제로 브리핑 텍스트를 생성·발송하는지, 억제 로직(신규 진입만 즉시·만성은 월요일 요약)이 라이브 데이터로 의도대로 동작하는지 확인. 확인 방법: `naver_ctr_alert_log` 신규 행 + Slack 실수신 + `ops_diary_entries`(action=CTR_ALERT_BRIEFING).
