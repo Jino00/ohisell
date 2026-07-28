@@ -222,7 +222,7 @@ def test_stale_market_bid_is_not_quoted(client_and_session):
     out = perf_timeline_harness.build_bep_breakdown(db, campaign_id=CAMPAIGN)
     row = next(r for r in out["rows"] if r["cost_price"] is not None)
     assert row["market_bid"] is None
-    assert "관측되지 않았습니다" in row["sentence"]
+    assert "최근에 관측된 값이 없습니다" in row["sentence"]
 
 
 def test_campaign_filter_excludes_other_campaign_products(client_and_session):
@@ -281,3 +281,45 @@ def test_http_only_actionable_false_includes_unlinked_products(client_and_sessio
     assert res.status_code == 200, res.text
     names = [r["product_name"] for r in res.json()["rows"]]
     assert "광고에 없는 상품" in names
+
+
+def test_market_bid_uses_binding_constraint_not_the_cheapest(client_and_session):
+    """★시장가는 최근 관측일의 **최댓값**이다(리뷰 P2-5 교정).
+
+    상한은 이미 최솟값(가장 빡빡한 소재)을 쓴다. 시장가까지 최솟값으로 잡으면 비교의 두 항이
+    서로 반대 방향으로 낙관/보수가 되어 "살 만하다" 판정이 체계적으로 후해진다. 실제로 그
+    순위를 사려면 기기·소재 중 가장 비싼 쪽을 지불해야 한다.
+    """
+    _client, db = client_and_session
+    _seed(db)
+    today = kst_today()
+    for device, bid in (("PC", 1200), ("MOBILE", 2800)):
+        db.add(NaverBidEstimateDaily(date=today, ad_id=AD_A, adgroup_id=GROUP_A,
+                                     campaign_id=CAMPAIGN, device=device, position=4,
+                                     bid=bid, is_floor=False))
+    db.commit()
+    out = perf_timeline_harness.build_bep_breakdown(db, campaign_id=CAMPAIGN)
+    row = next(r for r in out["rows"] if r["cost_price"] is not None)
+    assert row["market_bid"] == 2800          # 1200(PC)이 아니다
+    assert row["market_bid_device"] == "MOBILE"
+    assert row["market_bid_observed_on"] == today.isoformat()
+    assert "모바일 4위" in row["sentence"]
+    assert "관측)" in row["sentence"]          # 언제 본 값인지 화면이 말한다
+
+
+def test_market_bid_prefers_latest_observation_day(client_and_session):
+    """어제 비싸게 관측됐어도 오늘 값이 있으면 오늘 것을 쓴다(최댓값은 같은 날 안에서만)."""
+    _client, db = client_and_session
+    _seed(db)
+    today = kst_today()
+    db.add(NaverBidEstimateDaily(date=today - timedelta(days=2), ad_id=AD_A, adgroup_id=GROUP_A,
+                                 campaign_id=CAMPAIGN, device="MOBILE", position=4,
+                                 bid=9999, is_floor=False))
+    db.add(NaverBidEstimateDaily(date=today, ad_id=AD_A, adgroup_id=GROUP_A,
+                                 campaign_id=CAMPAIGN, device="MOBILE", position=4,
+                                 bid=1500, is_floor=False))
+    db.commit()
+    out = perf_timeline_harness.build_bep_breakdown(db, campaign_id=CAMPAIGN)
+    row = next(r for r in out["rows"] if r["cost_price"] is not None)
+    assert row["market_bid"] == 1500
+    assert row["market_bid_observed_on"] == today.isoformat()

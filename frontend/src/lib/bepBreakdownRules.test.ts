@@ -1,6 +1,9 @@
 // bepBreakdownRules.test.ts — ⑤BEP 구성 순수 로직 가드(D-NAO-104 Phase 3).
 import { describe, it, expect } from "vitest";
-import { stripBoldMarkers, marketBidTone } from "./bepBreakdownRules";
+import {
+  stripBoldMarkers, marketBidTone,
+  marketBidDeviceLabel, shortObservedDate, marketBidCaption,
+} from "./bepBreakdownRules";
 
 describe("stripBoldMarkers — 마크다운 굵게 제거", () => {
   it("굵게 마커가 없으면 원문 그대로", () => {
@@ -82,5 +85,55 @@ describe("marketBidTone — 시장가 vs 상한 톤 판정", () => {
   it("값을 모르면 ceilingIsBorrowed와 무관하게 idle", () => {
     expect(marketBidTone(null, 1397, true)).toBe("idle");
     expect(marketBidTone(2280, null, true)).toBe("idle");
+  });
+});
+
+describe("marketBidDeviceLabel — 기기 코드 표기 변환", () => {
+  it("MOBILE은 모바일", () => {
+    expect(marketBidDeviceLabel("MOBILE")).toBe("모바일");
+  });
+
+  it("PC는 PC", () => {
+    expect(marketBidDeviceLabel("PC")).toBe("PC");
+  });
+
+  it("알 수 없는 값은 빈 문자열", () => {
+    expect(marketBidDeviceLabel("TABLET")).toBe("");
+  });
+
+  it("null/undefined도 빈 문자열", () => {
+    expect(marketBidDeviceLabel(null)).toBe("");
+    expect(marketBidDeviceLabel(undefined)).toBe("");
+  });
+});
+
+describe("shortObservedDate — 관측일 축약 표기", () => {
+  it("YYYY-MM-DD를 MM-DD로 줄인다", () => {
+    expect(shortObservedDate("2026-07-28")).toBe("07-28");
+  });
+
+  it("형식이 다르면 추측하지 않고 원문 그대로", () => {
+    expect(shortObservedDate("2026-07")).toBe("2026-07");
+    expect(shortObservedDate("not-a-date")).toBe("not-a-date");
+  });
+});
+
+describe("marketBidCaption — 시장가 셀 캡션(기기 + 관측일)", () => {
+  it("기기+관측일 모두 있으면 '모바일 · 07-28 관측'", () => {
+    expect(marketBidCaption("MOBILE", "2026-07-28")).toBe("모바일 · 07-28 관측");
+  });
+
+  it("PC 기기면 'PC · 07-28 관측'", () => {
+    expect(marketBidCaption("PC", "2026-07-28")).toBe("PC · 07-28 관측");
+  });
+
+  it("기기를 모르면 관측일만", () => {
+    expect(marketBidCaption(null, "2026-07-28")).toBe("07-28 관측");
+  });
+
+  it("관측일이 없으면(=market_bid null) 빈 문자열 — 아무것도 렌더하지 않는다", () => {
+    expect(marketBidCaption("MOBILE", null)).toBe("");
+    expect(marketBidCaption(null, null)).toBe("");
+    expect(marketBidCaption(null, undefined)).toBe("");
   });
 });

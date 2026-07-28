@@ -19,7 +19,7 @@
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 from sqlalchemy.orm import Session
@@ -61,25 +61,46 @@ def product_ad_links(db: Session, *, campaign_id: str | None = None) -> dict[str
     return out
 
 
-def _market_bid(db: Session, ad_ids: list[str], today: date) -> int | None:
-    """소재들의 최근 4위 시장가 중 **가장 낮은 값**(가장 싸게 그 순위에 닿는 소재 기준).
+def _market_bid(db: Session, ad_ids: list[str], today: date) -> dict:
+    """상품의 4위 시장가 — **가장 최근 관측일**의 값 중 **가장 높은 값**(구속 조건).
+
+    반환: {"bid": int|None, "device": str|None, "observed_on": str|None}
+
+    ★최솟값이 아니라 최댓값이다(리뷰 P2-5 교정). 상한은 이미 최솟값(가장 빡빡한 소재)을 쓴다.
+      시장가까지 최솟값으로 잡으면 **비교의 두 항이 서로 반대 방향으로 낙관/보수**가 되어
+      "시장가 ≤ 상한(= 살 만하다)" 판정이 체계적으로 후하게 나온다. 실제로 그 순위를 사려면
+      기기·소재 중 가장 비싼 쪽을 지불해야 하므로 최댓값이 실제 구속 조건이다.
+
+    ★기기(MOBILE/PC)를 섞어 최솟값을 뽑던 것도 같은 문제였다 — PC가 싸다고 모바일 노출이
+      그 값에 되는 게 아니다. 어느 기기 기준인지 함께 낸다.
+
+    ★관측일을 함께 낸다. 최대 7일 전 값을 "지금 시장가"라고 부르면서 언제 본 값인지 숨기면
+      화면이 없는 신선도를 주장하는 것이다(원칙22).
 
     is_floor 행은 제외한다 — 시세가 무의미하다는 표식이라 이걸 "시장가"라고 부르면 거짓이다.
     """
+    empty = {"bid": None, "device": None, "observed_on": None}
     if not ad_ids:
-        return None
+        return empty
     rows = (
-        db.query(NaverBidEstimateDaily.bid)
+        db.query(NaverBidEstimateDaily.bid, NaverBidEstimateDaily.device,
+                 NaverBidEstimateDaily.date)
         .filter(
             NaverBidEstimateDaily.ad_id.in_(ad_ids),
             NaverBidEstimateDaily.position == MARKET_BID_POSITION,
             NaverBidEstimateDaily.is_floor.is_(False),
-            NaverBidEstimateDaily.date >= today.fromordinal(today.toordinal() - MARKET_BID_MAX_AGE_DAYS),
+            NaverBidEstimateDaily.date >= today - timedelta(days=MARKET_BID_MAX_AGE_DAYS),
         )
         .all()
     )
-    bids = [int(r[0]) for r in rows if r[0]]
-    return min(bids) if bids else None
+    seen = [(int(b), dev, d) for b, dev, d in rows if b]
+    if not seen:
+        return empty
+    latest = max(d for _b, _dev, d in seen)
+    on_latest = [(b, dev) for b, dev, d in seen if d == latest]
+    bid, device = max(on_latest, key=lambda x: x[0])
+    observed = latest.date() if hasattr(latest, "date") else latest
+    return {"bid": bid, "device": device, "observed_on": observed.isoformat()}
 
 
 def _pick_ceiling(ads: list[dict], ceilings: dict[str, dict] | None) -> tuple[int | None, str]:
@@ -113,7 +134,11 @@ def _pick_ceiling(ads: list[dict], ceilings: dict[str, dict] | None) -> tuple[in
     return min(values), basis
 
 
-def _sentence(name: str, ceiling: int | None, market: int | None, basis: str, blocked: str) -> str:
+def _device_label(device: str | None) -> str:
+    return {"MOBILE": "모바일", "PC": "PC"}.get((device or "").upper(), "")
+
+
+def _sentence(name: str, ceiling: int | None, market: dict, basis: str, blocked: str) -> str:
     """사장님 문장(D-NAO-103③: 무슨 일 → 숫자 근거 → 권하는 행동).
 
     ★"사면 손해입니다"라고 단정하지 않는다(원칙22 · 계획서 R1). 이 상한의 RPC는
@@ -126,16 +151,21 @@ def _sentence(name: str, ceiling: int | None, market: int | None, basis: str, bl
     if ceiling is None:
         return f"{name}: 남는 선을 계산할 수 있지만, 클릭당 상한은 {basis}"
     head = f"{name}: 보수적으로 보면 클릭당 {money(ceiling)}까지가 남는 선입니다."
-    if market is None:
-        return f"{head} 지금 시장가는 아직 관측되지 않았습니다. {basis}"
-    if market > ceiling:
-        gap = market - ceiling
+    bid = market.get("bid")
+    if bid is None:
+        return f"{head} 시장가는 최근에 관측된 값이 없습니다. {basis}"
+    dev = _device_label(market.get("device"))
+    where = f"{dev} 4위" if dev else "4위"
+    when = market.get("observed_on") or ""
+    tail = f"({when} 관측) " if when else ""
+    if bid > ceiling:
+        gap = bid - ceiling
         return (
-            f"{head} 지금 시장가(4위)는 {money(market)}이라 {money(gap)} 높습니다 — "
+            f"{head} {where} 시장가는 {money(bid)}이라 {money(gap)} 높습니다 {tail}— "
             f"이 순위를 사려면 남는 선을 넘습니다. {basis}"
         )
     return (
-        f"{head} 지금 시장가(4위)는 {money(market)}으로 그 선 안쪽입니다. {basis}"
+        f"{head} {where} 시장가는 {money(bid)}으로 그 선 안쪽입니다 {tail}. {basis}"
     )
 
 
@@ -194,7 +224,7 @@ def build(
             blocked = "판매가에서 비용을 빼면 남는 게 없어(공헌이익 0 이하) 광고로 팔수록 손해입니다."
 
         ceiling, basis = (None, "")
-        market = None
+        market: dict = {"bid": None, "device": None, "observed_on": None}
         borrowed = False
         if not blocked:
             ceiling, basis = _pick_ceiling(ads, ceilings)
@@ -233,8 +263,10 @@ def build(
             "target_roas": float(bep.target_roas) if bep.target_roas is not None else None,
             "ceiling_bid": ceiling,
             "ceiling_basis": basis,
-            "market_bid": market,
-            "market_bid_position": MARKET_BID_POSITION if market is not None else None,
+            "market_bid": market["bid"],
+            "market_bid_device": market["device"],
+            "market_bid_observed_on": market["observed_on"],
+            "market_bid_position": MARKET_BID_POSITION if market["bid"] is not None else None,
             "blocked_reason": blocked,
             "ceiling_is_borrowed": borrowed,
             "sentence": _sentence(name, ceiling, market, basis, blocked),

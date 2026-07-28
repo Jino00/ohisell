@@ -7,12 +7,17 @@
 //   마지막 점만 정의가 다른 선이 된다.
 // ★null(광고비 0인 날)은 **점을 찍지 않는다**. connectNulls를 켜서 선을 이어버리면 "그날도
 //   이 정도였다"는 없는 사실을 그리게 된다(원칙22).
+// ★Phase 3 후속: events(개선 이벤트 마커) — 인과 주장 없음. "이 날 결정이 있었다"는 표식뿐,
+//   그 결정이 뒤 구간의 변화를 "설명한다"는 판단은 이 차트도, EventMarker도 하지 않는다
+//   (해석 문장은 ⑥ 타임라인 카드의 백엔드 sentence 몫).
 import {
   CartesianGrid, ComposedChart, Legend, Line, ReferenceLine, ResponsiveContainer,
   Tooltip, XAxis, YAxis,
 } from "recharts";
 import type { NaverPerformanceSeriesPoint } from "../lib/api";
 import { NO_DATA, roasX, won } from "../lib/format";
+import { filterMarkersInRange, type ChartEventMarker } from "../lib/timelineRules";
+import { EventMarker } from "./ui/EventMarker";
 
 const COLOR_ROAS = "#2563eb";
 const COLOR_COST = "#9ca3af";
@@ -26,11 +31,14 @@ function shortDate(iso: string): string {
 }
 
 export function PerfCampaignTrendChart({
-  series, bepRoas, targetRoas,
+  series, bepRoas, targetRoas, events = [],
 }: {
   series: NaverPerformanceSeriesPoint[];
   bepRoas: number | null;
   targetRoas: number | null;
+  /** 개선 이벤트 마커(없으면 아무것도 그리지 않는다). 시리즈 날짜 범위 밖은 이 컴포넌트가
+   *  자체적으로 걸러낸다(filterMarkersInRange) — 호출부가 이미 걸렀어도 다시 확인한다. */
+  events?: ChartEventMarker[];
 }) {
   if (series.length === 0) {
     return (
@@ -40,6 +48,7 @@ export function PerfCampaignTrendChart({
     );
   }
   const rows = series.map((p) => ({ ...p, label: shortDate(p.date) }));
+  const visibleEvents = filterMarkersInRange(events, series.map((p) => p.date));
 
   return (
     <div>
@@ -71,6 +80,13 @@ export function PerfCampaignTrendChart({
               label={{ value: `목표 ${targetRoas.toFixed(2)}배`, position: "insideBottomLeft",
                        fontSize: 11, fill: COLOR_TARGET }} />
           )}
+          {/* 개선 이벤트 마커 — x는 XAxis의 dataKey("label", shortDate 형식)와 맞춰야 한다.
+              yAxisId를 명시하지 않으면 recharts 기본값 0으로 떨어지는데, 이 차트엔 id=0인
+              YAxis가 없어(둘 다 "roas"/"cost") 그 경우 세로 스팬을 못 구해 렌더되지 않는다. */}
+          {visibleEvents.map((ev) => (
+            <EventMarker key={ev.date} date={shortDate(ev.date)} label={ev.label}
+              count={ev.count} yAxisId="roas" />
+          ))}
           <Line yAxisId="cost" type="monotone" dataKey="cost" name="광고비"
                 stroke={COLOR_COST} strokeWidth={1} dot={false} />
           {/* connectNulls 없음 — 값이 없는 날은 선을 끊는다(없는 사실을 그리지 않는다). */}

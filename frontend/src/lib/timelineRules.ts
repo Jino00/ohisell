@@ -8,7 +8,9 @@
 //   전부 "몇 번째 날짜인지/무슨 뜻인지"를 알려주는 라벨일 뿐, 판단/단정 문구가 아니다.
 //   회귀 테스트(timelineRules.test.ts)가 "개선/덕분/효과" 금지어를 지킨다.
 
-import type { NaverPerformanceTimelineImpact, NaverPerformanceTimelineWindow } from "./api";
+import type {
+  NaverPerformanceTimelineDay, NaverPerformanceTimelineImpact, NaverPerformanceTimelineWindow,
+} from "./api";
 
 /** effective_confidence → 화면에 붙일 꼬리표.
  *  · "commit" — 그 결정을 인용한 첫 커밋 날짜이지 실제 배포/적용 시각이 아니다. 무표기로
@@ -47,4 +49,48 @@ export function partialDataNote(
 ): string | null {
   if (pre.days_with_data >= pre.days && post.days_with_data >= post.days) return null;
   return `기록이 있는 날만 셌습니다 (전 ${pre.days_with_data}일 · 후 ${post.days_with_data}일)`;
+}
+
+// ── ③차트 마커 — timeline 응답을 PerfCampaignTrendChart의 events prop으로 (Phase 3 후속) ──
+// ★인과 주장 없음(이 파일 상단 규약 그대로) — 여기서 만드는 건 "그날 결정이 있었다"는 표식과
+//   개수뿐이다. "그래서 좋아졌다" 류 해석은 이 함수들의 책임이 아니다.
+
+export interface ChartEventMarker {
+  date: string;
+  /** 그날 첫 이벤트의 label_ko — 여러 건이어도 대표로 하나만. 개수는 count로 따로 낸다. */
+  label: string;
+  count: number;
+}
+
+/** 이미 만든 마커 목록 중 seriesDates(차트에 실제로 그려지는 날짜들)의 첫~마지막 범위 밖인
+ *  것만 제거한다. seriesDates가 비어있으면(집행 이력 없음) 그릴 축 자체가 없으므로 빈 배열.
+ *  ★차트 컴포넌트가 호출부와 무관하게 스스로도 거는 방어적 필터 — 범위 밖 마커가 하나라도
+ *  섞이면 차트 x축이 그 마커 때문에 늘어난다(계획서 §5 요구사항). */
+export function filterMarkersInRange(
+  markers: ChartEventMarker[],
+  seriesDates: string[],
+): ChartEventMarker[] {
+  if (seriesDates.length === 0) return [];
+  const first = seriesDates[0];
+  const last = seriesDates[seriesDates.length - 1];
+  return markers.filter((m) => m.date >= first && m.date <= last);
+}
+
+/** timeline 응답(날짜별 이벤트 묶음)을 차트 마커로 변환하고, 곧바로 seriesDates 범위로
+ *  걸러낸다. 이벤트가 없는 날은 마커를 만들지 않는다. */
+export function toChartMarkers(
+  timeline: NaverPerformanceTimelineDay[],
+  seriesDates: string[],
+): ChartEventMarker[] {
+  const markers = timeline
+    .filter((day) => day.events.length > 0)
+    .map((day) => ({ date: day.date, label: day.events[0].label_ko, count: day.events.length }));
+  return filterMarkersInRange(markers, seriesDates);
+}
+
+/** 차트 마커 라벨 — 12자를 넘으면 자른다(차트가 라벨로 덮이면 못 읽는다). count>1이면
+ *  "{label} 외 {count-1}건"이 아니라 "{label} +{count-1}"로(공간 절약). */
+export function formatEventMarkerLabel(label: string, count: number): string {
+  const short = label.length > 12 ? label.slice(0, 12) : label;
+  return count > 1 ? `${short} +${count - 1}` : short;
 }

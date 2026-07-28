@@ -19,8 +19,10 @@ import { PerfBudgetCurveChart } from "../components/PerfBudgetCurveChart";
 import { PerfCampaignTrendChart } from "../components/PerfCampaignTrendChart";
 import { num, won, roasX, pctFromFraction, isoKST, NO_DATA } from "../lib/format";
 import { baseDateError, compareDateError, defaultCompareDate } from "../lib/perfDateRules";
-import { stripBoldMarkers, marketBidTone } from "../lib/bepBreakdownRules";
-import { confidenceLabel, observationBadge, deltaText, partialDataNote } from "../lib/timelineRules";
+import { stripBoldMarkers, marketBidTone, marketBidCaption } from "../lib/bepBreakdownRules";
+import {
+  confidenceLabel, observationBadge, deltaText, partialDataNote, toChartMarkers,
+} from "../lib/timelineRules";
 import { useAsyncData } from "../lib/useAsyncData";
 import {
   fetchNaverPerformanceBudget,
@@ -206,6 +208,12 @@ function CampaignDetailSection({ campaignId, days }: { campaignId: string; days:
   const { data, error } = useAsyncData(
     () => fetchNaverPerformanceCampaign(campaignId, days), [campaignId, days],
   );
+  // ③ 차트 마커용 타임라인 — 별도 호출·별도 에러 상태다. 이게 실패해도 위 차트 자체는
+  // 그대로 그리고 마커만 생략한다(타임라인 하나 때문에 ③ 섹션 전체가 죽으면 안 된다).
+  const { data: timelineData } = useAsyncData(
+    () => fetchNaverPerformanceTimeline({ days, campaignId: campaignId || undefined }),
+    [campaignId, days],
+  );
   if (error) {
     return (
       <Card title="이 광고 자세히 보기">
@@ -214,6 +222,8 @@ function CampaignDetailSection({ campaignId, days }: { campaignId: string; days:
     );
   }
   if (data === null) return <Card title="이 광고 자세히 보기"><Loading rows={4} /></Card>;
+
+  const events = timelineData ? toChartMarkers(timelineData.timeline, data.series.map((p) => p.date)) : [];
 
   return (
     <Card
@@ -249,7 +259,7 @@ function CampaignDetailSection({ campaignId, days }: { campaignId: string; days:
         </div>
 
         <PerfCampaignTrendChart series={data.series} bepRoas={data.lines.bep_roas}
-          targetRoas={data.lines.target_roas} />
+          targetRoas={data.lines.target_roas} events={events} />
         <p className="text-xs text-gray-500 break-keep border-l-2 border-gray-200 pl-2">
           {data.series_note}
         </p>
@@ -374,6 +384,9 @@ function BepRowView({ r }: { r: NaverPerformanceBepRow }) {
   const noCeilingReason = r.ceiling_bid == null
     ? stripBoldMarkers(r.blocked_reason || r.ceiling_basis || "")
     : "";
+  const marketBidCaptionText = r.market_bid == null
+    ? ""
+    : marketBidCaption(r.market_bid_device, r.market_bid_observed_on);
   return (
     <tr>
       <Td>
@@ -420,6 +433,9 @@ function BepRowView({ r }: { r: NaverPerformanceBepRow }) {
         <span className={`tabular-nums ${MARKET_BID_TONE_TEXT[tone]}`}>
           {r.market_bid == null ? NO_DATA : won(r.market_bid)}
         </span>
+        {marketBidCaptionText && (
+          <div className="text-xs text-gray-400">{marketBidCaptionText}</div>
+        )}
       </Td>
     </tr>
   );
@@ -475,7 +491,7 @@ function BepBreakdownSection({ campaignId }: { campaignId: string }) {
               <Th right>손익분기</Th>
               <Th right>목표</Th>
               <Th right>클릭당 상한</Th>
-              <Th right>지금 시장가</Th>
+              <Th right>4위 시장가</Th>
             </>
           }>
             {data.rows.map((r, i) => (
