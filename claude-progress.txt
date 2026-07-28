@@ -1,3 +1,14 @@
+## 🟡 로켓 1P M1 — 마이그레이션 prod 적용 완료 / 코드 배포만 CAS 대기 (2026-07-28 12:10)
+- **alembic 그래프 복구 완료(PR #135 병합)**: revision ID 충돌 `a1c3e5f7b9d1` 해소 — promo-pnl을 **`c2998cfe1f7c`**(uuid4 생성)로 개명, prod 선배포 3개(`a7b9c1d3e5f7`·`f6a8c0e2b4d6`·`a1c3e5f7b9d1`-merge, 브랜치 `worktree-agent-aca8c40c8d32c1725` 5커밋)를 main 흡수. **직렬 단일 체인** `e5f7a9c1b3d5 → {a7b9,f6a8c0e2} → a1c3(merge) → c2998cfe1f7c → f6a8c0b2d4e6(head)`. 테스트 **3607 passed**.
+- **prod 마이그레이션 적용 완료(실측)**: `alembic current = f6a8c0b2d4e6` / `coupang_rocket_settlement.tax_invoice_transmitted` 있음 / `coupang_rocket_purchase_order_item.vendor_confirmed_qty` 있음 / `coupang_coupon.used_amount` 있음 / promo 테이블 2종(`coupang_rocket_sales_daily`·`coupang_rocket_promotion`) 생성. 백엔드 online, 배포 락 없음.
+- 🟡 **남은 것 = 코드 4파일 배포(models.py·rocket_supplier.py·rocket_supplier_sync.py + 마이그는 이미 감)**. `safe_deploy` **CAS가 차단** — prod의 `models.py`가 **미푸시 N1 브랜치 `worktree-agent-a2fe33dc69941c21e`**(10커밋, D-NAO-99/100 **진행 중**) 버전이라 우리 역사에 없음.
+  - 실측 대조: prod-only 내용은 **주석 7줄뿐, 기능 코드 차이 0**(prod models.py ⊂ main models.py). 즉 지금 덮어도 죽는 기능은 없지만 **CAS를 우회하지 않았다**(07-17 clobber 사고의 판단 방식이 바로 그것).
+  - ⚠**역방향 위험이 더 크다**: N1 브랜치는 main보다 뒤처져 있어, 그쪽이 먼저 models.py를 재배포하면 **우리 컬럼 매핑 + promo 매핑이 통째로 지워진다.**
+  - **해결 = N1 세션이 main을 자기 브랜치에 병합**(또는 그 브랜치를 main에 병합). 그 뒤 아래 한 줄이면 끝:
+    `scripts/safe_deploy.sh backend/app/models.py backend/app/clients/coupang/rocket_supplier.py backend/app/services/coupang/rocket_supplier_sync.py --restart`
+  - 급하지 않다: prod DB는 컬럼만 먼저 생긴 **안전한 방향**이고, 로켓 페처(매일 08:00)는 구 파서로 돌아 신규 컬럼만 NULL로 남는다. 깨지는 것 없음.
+- **PR 이력**: #130(로켓 M1)·#132(safe_deploy 하니스)·#134(충돌 기록)·#135(그래프 복구) 전부 병합. #127은 #135가 내용을 흡수 → 정리 대상.
+
 ## 🔴 prod 배포 차단 — alembic revision ID 충돌 (2026-07-28 11:45, main 기준)
 - **PR #130(로켓 1P 파서 컬럼 2건)·PR #132(safe_deploy 회귀 하니스) 둘 다 main 병합 완료.** 그러나 **prod 배포는 차단됨 — prod 무변경.**
 - **차단 사유**: 서로 다른 두 마이그레이션이 **같은 revision ID `a1c3e5f7b9d1`** 을 쓴다.
