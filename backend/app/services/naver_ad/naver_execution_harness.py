@@ -173,10 +173,12 @@ _ACTION_BY_PROPOSAL_TYPE = {
 }
 
 # D-NAO-47(codex[P2] 2026-07-17): **우리가 실제로 광고 API에 쓴 것**의 action 집합.
-# 위 매핑의 값에서 파생한다 — 하드코딩하면 새 제안 유형이 배선될 때 조용히 어긋난다.
+# 위 매핑의 값 **+ 라벨 세분화분**에서 파생한다 — 하드코딩하면 새 제안 유형이 배선될 때
+# 조용히 어긋난다.
 #
 # ★왜 필요한가: naver_change_log에는 세 부류가 섞여 있다.
 #   ① 우리 실집행        — update_bid / add_negative_keyword / set_user_lock / update_budget
+#                          (+ 같은 경로의 세분화 라벨 budget_up_pacing / budget_down_pacing)
 #   ② 외부 변경 **감지**  — external_bid_change / external_status_change (entity_sync가 기록.
 #                          MOP·사람이 바꾼 걸 우리가 관측한 것이지 우리가 한 게 아니다)
 #   ③ 우리 시스템 내부 설정 — optimizer_change / update_expert_delegation / flight_pacing
@@ -185,7 +187,20 @@ _ACTION_BY_PROPOSAL_TYPE = {
 # prod 실측(2026-07-17) change_log의 dry_run=False 행 15건은 **전부 ②**이고 우리 실집행은
 # 0건이라, 필터 없이 세면 "우리 조작 15회"라고 표시된다. 0을 0이라고 말하는 게 그 화면의
 # 존재 이유다(D-47-h).
-EXECUTION_ACTIONS: frozenset[str] = frozenset(_ACTION_BY_PROPOSAL_TYPE.values())
+#
+# ★PACING_ACTIONS를 합치는 이유(D-NAO-102 ⑥): BP(예산 페이싱) 레인의 쓰기는 **제안유형도
+#   실행 경로도 budget_up/budget_down → _execute_update_budget 그대로**이고, 달라지는 건
+#   change_log에 남기는 라벨뿐이다(`_budget_log_action`). 그래서 이 집합을 매핑 값에서만
+#   파생시키면 BP의 실집행이 ①인데도 ①로 안 세어진다 — actor=ours 조회와 커맨드 센터 1층
+#   "우리 조작 N회"가 **실제로 광고를 바꿔놓고 0이라고 말한다**. 0을 0이라 말하려고 만든
+#   필터가 정반대 방향의 같은 거짓말을 하는 것이라 D-47-h 위반은 동일하다.
+#   (성공행만이 아니다 — 가드 거부·쓰기 실패 행도 같은 라벨을 달므로 `_execution_state`의
+#    blocked/unknown 배지까지 통째로 사라진다.)
+# ★새 라벨을 또 세분화한다면 여기 합집합에 추가하는 것이 계약이다. 라우터·프론트에서
+#   각자 합집합을 만들면(퍼진 사본) 다음 소비자가 같은 구멍에 빠진다.
+EXECUTION_ACTIONS: frozenset[str] = frozenset(_ACTION_BY_PROPOSAL_TYPE.values()) | frozenset(
+    budget_pacing.PACING_ACTIONS
+)
 
 # ══════════════════════════════════════════════════════════════════
 # 실패 rationale 접두사(D-NAO-54) — **두 사건은 다르다. 섞으면 화면이 거짓말한다.**
