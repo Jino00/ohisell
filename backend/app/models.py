@@ -1465,6 +1465,12 @@ class NaverAdDaily(Base):
     avg_rank = rank_sum / imp (0 노출이면 미정의). cost/conv_amt = 원 단위(VAT 별도).
     같은 날짜 재수집 시 확정치로 교체(snapshot upsert). D-NAO-9: 키워드 단위 일 판단은
     통계적 불가(0.88클릭/일) → 이 테이블은 누적 저장용, 판단은 7~30일 창 풀링.
+
+    ★adgroup_id='__backfill__'(BACKFILL_SENTINEL_ADGROUP) 행은 회계 의미가 다르다 — 소스가
+    /stats(캠페인 grain 장기 백필)라 conv_indirect_cnt/amt에 구매+장바구니 등 전환 액션
+    **전량 합계**가 들어있고(액션 유형 분리 불가) cart_*=0이다. 상세 행은 구매만 conv_*,
+    장바구니는 cart_*로 분리되므로, 둘을 함께 합산하면 분자가 이중가산된다.
+    → 집계하는 SA는 sentinel 행을 명시적으로 제외할 것(제외 안 한 채 배포된 사례: D-NAO-58 CD1).
     """
 
     __tablename__ = "naver_ad_daily"

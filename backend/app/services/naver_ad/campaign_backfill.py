@@ -62,8 +62,12 @@ def backfill_campaign_daily(
             adgroup_id=BACKFILL_SENTINEL_ADGROUP, keyword_id="",
             imp=r["imp"], clk=r["clk"], cost=r["cost"], rank_sum=0,
             # /stats는 직접/간접을 분리하지 않음 — 합계를 conv_indirect_*에 몰아 저장
-            # (direct=0 고정, 합산 총액은 정확·구성비만 미상. P0 실단위 행과 sentinel로 구분되어 있어
-            # 리포트 집계 시 이중가산 없음. 컬럼 재활용에 불과, "간접전환"이란 의미는 아님).
+            # (direct=0 고정, 합산 총액은 정확·구성비만 미상. 컬럼 재활용에 불과, "간접전환"이란
+            # 의미는 아님).
+            # ★그리고 이 전환수는 구매+장바구니 등 전환 액션 **전량 합계**다(/stats는 액션 유형을
+            # 분리하지 않음). 상세 행(/stat-reports AD_CONVERSION)은 구매만 conv_*, 장바구니는
+            # cart_*로 나뉘므로 회계 의미가 다르다 — sentinel 행은 P0 실단위 행과 물리적으로
+            # 구분돼 있을 뿐이고, 집계 SA가 명시적으로 제외해야 이중가산이 없다.
             conv_direct_cnt=0, conv_indirect_cnt=r["conv_cnt"],
             conv_direct_amt=0, conv_indirect_amt=r["conv_amt"],
             synced_at=now,
