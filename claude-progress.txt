@@ -1,3 +1,5 @@
+## 📌 세션 인계: `.claude/memory/HANDOFF_ohisell-promo-pnl-layer+rg-selfheal-complete_20260728.md` (2026-07-28 밤 — RG 층2 자가치유 완결 + 프로모션 손익 레이어 Phase 1~2·통합 대사 화면)
+
 ## ✅ 2026-07-28 오후 — EXECUTION_ACTIONS가 BP 라벨을 못 세던 결함 수정·배포 (main `ae0d049`, PR #152·#155)
 
 BP(예산 페이싱, D-NAO-102 ⑥)는 실행 경로가 `update_budget` 하나인데 change_log에는 `budget_up_pacing`/`budget_down_pacing`이라는 별도 라벨을 남긴다. `EXECUTION_ACTIONS`가 `_ACTION_BY_PROPOSAL_TYPE` 값에서만 파생되어 그 라벨을 몰랐고, `/change-log?actor=ours`·커맨드센터 1층 "우리 조작 N회"·`_execution_state` 배지가 BP 실집행을 통째로 못 셌다(0을 정직하게 말하려던 필터가 반대 방향으로 거짓말 — D-47-h 위반).
