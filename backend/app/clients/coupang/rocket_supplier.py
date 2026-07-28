@@ -196,6 +196,18 @@ def _to_transmitted(v: Any, seen: set[str] | None = None) -> bool | None:
         return False  # 버튼만 = 전송성공 미표기
     if rest == _TRANSMIT_SUCCESS:
         return True
+    # 공백 소실 폴백: 페처는 td.innerText로 셀을 뽑지만(fetcher :112·:142) DOMParser 문서는
+    #   렌더링되지 않아 innerText가 textContent로 떨어진다 → 쿠팡이 <a> 사이를 공백 없이
+    #   렌더하면 라벨+상태가 한 토큰으로 붙는다("발주현황입고상세내역전송성공").
+    #   현재 공백은 쿠팡 마크업 들여쓰기 덕이라 미니파이 한 번이면 사라진다.
+    #   이때만 부분문자열 제거로 재시도하되 **'전송성공' 정확 일치일 때만** 채택한다.
+    #   잔여가 비어도 False로 승격시키지 않는다 — 라벨 드리프트가 상태 토큰을 잘라먹은 경우와
+    #   구분할 수 없어서다(부분문자열 replace의 '조용한 False 오판'을 되살리지 않는다).
+    squashed = rest
+    for btn in _SETTLE_LINK_BUTTONS:
+        squashed = squashed.replace(btn, "")
+    if squashed.strip() == _TRANSMIT_SUCCESS:
+        return True
     if seen is None or rest not in seen:
         if seen is not None:
             seen.add(rest)

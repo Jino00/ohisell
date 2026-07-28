@@ -207,6 +207,14 @@ def test_to_transmitted_button_label_drift_never_yields_false():
     assert rs._to_transmitted("발주현황 입고상세내역 전송성공") is True
 
 
+def test_to_transmitted_no_whitespace_between_links():
+    # ★페처는 DOMParser 문서의 innerText(=textContent)로 셀을 뽑아 <a> 사이 공백을 보장받지 못한다.
+    #   쿠팡 마크업이 미니파이되면 라벨+상태가 한 토큰으로 붙는다 → 그때도 전송성공은 살려낸다.
+    assert rs._to_transmitted("발주현황입고상세내역전송성공") is True
+    # 다만 붙어 있는데 상태 토큰이 없으면 False로 승격시키지 않는다(라벨 드리프트와 구분 불가)
+    assert rs._to_transmitted("발주현황입고상세내역") is None
+
+
 def test_to_transmitted_warns_once_per_token():
     # 미관측 토큰 warning은 파싱 1회당 토큰당 1줄(정산 최대 100p×50행 → 로그 폭주 방지)
     seen: set[str] = set()
