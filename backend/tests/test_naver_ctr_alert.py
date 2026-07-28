@@ -1,7 +1,10 @@
-# test_naver_ctr_alert.py — VT3 ctr_alert SA 단위테스트 (D-NAO-82② §4.1).
+# test_naver_ctr_alert.py — VT3 ctr_alert SA 단위테스트 (D-NAO-82② §4.1 + D-NAO-103 개편).
 # 커버: W1(최근1일)·W3(rolling 3일) 창별 독립 발화·기대클릭 −80%↓ 분기·트레일링 CTR 폴백
-#   사다리(그룹→캠페인→None)·기대클릭<5 −80%분기 비활성·imp<200/rank>4.0 미발화·
-#   as_of=D-1 경계(오늘 데이터 미사용)·auto_operate 스코프.
+#   사다리(그룹→캠페인→None)·기대클릭<5 −80%분기 비활성·기대클릭<2 클릭0분기 비활성(D-NAO-103)·
+#   imp<200/rank>4.0 미발화·as_of=D-1 경계(오늘 데이터 미사용)·auto_operate 스코프.
+# ★D-NAO-103 이후 판정 전제가 바뀌었다: 트레일링 CTR 표본이 없으면 "이례적인지"를 말할 수
+#   없으므로 **아무 경보도 발화하지 않는다**(구 동작은 클릭0만으로 발화). 그래서 대부분의
+#   케이스는 트레일링 창(~D0-3]에 기준 CTR 시드를 깔아야 한다(_trailing 헬퍼).
 # 실 API 0 — 순수 read-only SA라 mock 불필요(naver_ad_daily/campaign_settings 시드만).
 from __future__ import annotations
 
@@ -50,6 +53,13 @@ def _daily(db, *, ad_date, imp, clk, rank, campaign_id=CAMPAIGN, adgroup_id=GROU
     db.commit()
 
 
+def _trailing(db, *, imp=1000, clk=20, adgroup_id=GROUP, campaign_id=CAMPAIGN, days_ago=10):
+    """트레일링 창(~D0-3]에 기준 CTR 시드 1행 — D-NAO-103 기대클릭 게이트의 분모.
+    기본 imp 1000(그룹 표본 하한 충족)·clk 20 = CTR 2%."""
+    _daily(db, ad_date=D0 - timedelta(days=days_ago), imp=imp, clk=clk, rank=3.0,
+           adgroup_id=adgroup_id, campaign_id=campaign_id)
+
+
 def _one(alerts: list[dict], window: str) -> dict | None:
     matches = [a for a in alerts if a["window"] == window]
     return matches[0] if matches else None
@@ -59,8 +69,11 @@ def _one(alerts: list[dict], window: str) -> dict | None:
 
 def test_w1_fires_w3_not_fired_by_existing_clicks(db):
     """04 실표본 미러: W1(단일일 850노출·클릭0·rank 3.8) 발화 ∧ 같은 그룹 W3에 클릭 2 있으면
-    W3 비발화(트레일링 CTR 원료 없음 → 기대클릭 게이트 생략, clk≠0이라 clk=0 분기도 미해당)."""
+    W3 비발화. 트레일링 CTR 0.5%(imp 2000·clk 10) — W1 기대클릭 4.25(≥2 발화) / W3 기대클릭
+    5.25인데 실클릭 2 > 5.25×0.2=1.05라 −80%↓ 분기도 미충족."""
     _settings(db)
+    _trailing(db, imp=1000, clk=5, days_ago=10)
+    _trailing(db, imp=1000, clk=5, days_ago=20)
     _daily(db, ad_date=D0 - timedelta(days=2), imp=100, clk=1, rank=3.5)
     _daily(db, ad_date=D0 - timedelta(days=1), imp=100, clk=1, rank=3.5)
     _daily(db, ad_date=D0, imp=850, clk=0, rank=3.8)
@@ -69,6 +82,7 @@ def test_w1_fires_w3_not_fired_by_existing_clicks(db):
     w1 = _one(res["alerts"], "W1")
     assert w1 is not None
     assert w1["imp"] == 850 and w1["clk"] == 0 and w1["avg_rank"] == 3.8
+    assert w1["expected_clk"] == 4.2  # 0.5% × 850(소수 1자리 반올림)
     assert "입찰로 못 푸는" in w1["reason"]
     assert _one(res["alerts"], "W3") is None  # 클릭 2건 존재 → W3 미발화
 
@@ -139,21 +153,16 @@ def test_trailing_ctr_falls_back_to_campaign_when_group_sample_thin(db):
     assert w3["expected_clk"] == 50.0  # 캠페인 CTR(5%) 폴백 적용
 
 
-def test_no_trailing_data_only_zero_click_branch_fires(db):
-    """트레일링 데이터 전무(그룹·캠페인 둘 다) → expected_clk 게이트 생략, clk=0 분기만 유효.
-    클릭 1이면 미발화(−80% 분기 자체가 없음), 클릭 0이면 발화."""
+def test_no_trailing_data_no_alert_at_all(db):
+    """D-NAO-103 전제 변경: 트레일링 데이터 전무(그룹·캠페인 둘 다)면 기대클릭을 구할 수
+    없으므로 클릭이 0이어도 **아무것도 발화하지 않는다**(구 동작은 clk=0 분기가 발화했다).
+    "이례적인지"를 말할 근거가 없는 상태에서 경보를 내는 것이 반복 발화의 뿌리였다."""
     _settings(db)
-    _daily(db, ad_date=D0 - timedelta(days=2), imp=100, clk=1, rank=3.0)
+    _daily(db, ad_date=D0 - timedelta(days=2), imp=100, clk=0, rank=3.0)
     _daily(db, ad_date=D0 - timedelta(days=1), imp=100, clk=0, rank=3.0)
     _daily(db, ad_date=D0, imp=100, clk=0, rank=3.0)
     res = ctr_alert.detect_ctr_alerts(db, CAMPAIGN, now=NOW)
-    assert _one(res["alerts"], "W3") is None  # 누적 클릭 1(≠0)·기대클릭 게이트 없음 → 미발화
-
-    db.query(NaverAdDaily).filter(NaverAdDaily.ad_date == D0 - timedelta(days=2)).update({"clk": 0})
-    db.commit()
-    res2 = ctr_alert.detect_ctr_alerts(db, CAMPAIGN, now=NOW)
-    w3 = _one(res2["alerts"], "W3")
-    assert w3 is not None and w3["clk"] == 0 and "expected_clk" not in w3
+    assert res["alerts"] == []
 
 
 def test_expected_click_below_min_disables_ratio_branch(db):
@@ -169,6 +178,46 @@ def test_expected_click_below_min_disables_ratio_branch(db):
     _daily(db, ad_date=D0, imp=50, clk=1, rank=3.0)
     res = ctr_alert.detect_ctr_alerts(db, CAMPAIGN, now=NOW)
     assert _one(res["alerts"], "W3") is None
+
+
+# ══════════════ D-NAO-103: 기대클릭≥2 게이트(클릭0 분기) 경계 ══════════════
+
+def test_zero_click_suppressed_when_expected_below_two(db):
+    """만성 저CTR 재현 — 트레일링 CTR 0.5%(imp 2000·clk 10)·당일 노출 300 → 기대클릭 1.5(<2).
+    "클릭 0"이 통계적으로 평범한 날이므로 W1·W3 둘 다 비발화(반복 발화의 실체를 차단)."""
+    _settings(db)
+    _trailing(db, imp=1000, clk=5, days_ago=10)
+    _trailing(db, imp=1000, clk=5, days_ago=20)
+    _daily(db, ad_date=D0, imp=300, clk=0, rank=3.0)
+    res = ctr_alert.detect_ctr_alerts(db, CAMPAIGN, now=NOW)
+    assert res["alerts"] == []
+
+
+def test_zero_click_fires_when_expected_at_least_two(db):
+    """같은 조건에서 당일 노출만 400으로 올리면 기대클릭 2.0(=경계) → W1 발화.
+    경계값 2.0은 발화 쪽(≥2)이다."""
+    _settings(db)
+    _trailing(db, imp=1000, clk=5, days_ago=10)
+    _trailing(db, imp=1000, clk=5, days_ago=20)
+    _daily(db, ad_date=D0, imp=400, clk=0, rank=3.0)
+    res = ctr_alert.detect_ctr_alerts(db, CAMPAIGN, now=NOW)
+
+    w1 = _one(res["alerts"], "W1")
+    assert w1 is not None and w1["expected_clk"] == 2.0
+    assert w1["campaign_type"] == "SHOPPING"  # 브리핑 문구 분기 재료가 실려 나온다
+
+
+def test_trailing_ctr_uses_full_history_not_30_days(db):
+    """트레일링 창은 가용 전 기간 — 100일 전 표본도 분모에 든다(구 30일 창이었으면 그룹 표본
+    미달로 캠페인 CTR 폴백돼 기대클릭이 달라졌을 자리)."""
+    _settings(db)
+    _trailing(db, imp=1000, clk=5, days_ago=100)   # 100일 전(구 30일 창 밖)
+    _trailing(db, imp=1000, clk=5, days_ago=120)
+    _daily(db, ad_date=D0, imp=400, clk=0, rank=3.0)
+    res = ctr_alert.detect_ctr_alerts(db, CAMPAIGN, now=NOW)
+
+    w1 = _one(res["alerts"], "W1")
+    assert w1 is not None and w1["expected_clk"] == 2.0  # 0.5% × 400 = 그룹 CTR 그대로 적용
 
 
 # ══════════════════════════ 게이트: imp<200 / rank>4.0 ══════════════════════════
@@ -196,6 +245,7 @@ def test_today_data_not_used(db):
     """오늘(now.date())의 행은 as_of=D0(=today-1)에 포함되지 않는다 — 오늘 값을 경보 밴드
     밖(클릭 있음)으로 심어도 무관, D0(어제)만으로 판정."""
     _settings(db)
+    _trailing(db)  # 트레일링 CTR 2% → 기대클릭 6(≥2)
     _daily(db, ad_date=D0, imp=300, clk=0, rank=3.0)  # D0(어제) — 경보 조건 충족
     _daily(db, ad_date=NOW.date(), imp=999, clk=999, rank=1.0)  # 오늘 — 무시돼야 함
     res = ctr_alert.detect_ctr_alerts(db, CAMPAIGN, now=NOW)
@@ -249,6 +299,7 @@ def test_normal_load_still_fires(db):
     """P2-1 대조: D0 행수가 baseline과 비등(ratio≥0.5)하면 가드 미적용 — 경보 정상 발화.
     baseline 1행/일, D0 1행 → ratio 1.0."""
     _settings(db)
+    _trailing(db)  # 트레일링 CTR 기준선(D-NAO-103 기대클릭 게이트 통과용)
     for d in (D0 - timedelta(days=3), D0 - timedelta(days=2), D0 - timedelta(days=1)):
         _daily(db, ad_date=d, imp=300, clk=0, rank=3.0, adgroup_id="grp-0")
     _daily(db, ad_date=D0, imp=300, clk=0, rank=3.0, adgroup_id="grp-0")
