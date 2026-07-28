@@ -30,9 +30,11 @@
    되었다. 그대로 두면 이 브랜치 병합 시 head가 2개가 되므로(각 브랜치의 `alembic heads` 는
    브랜치-로컬 검사라 이 형제 관계를 못 잡는다), 나중에 병합하는 쪽인 이 파일의 부모를
    `a1c3e5f7b9d1` 로 재연결했다(merge revision 대신 직렬 재연결). LESSONS #49 참조.
+   ★그 뒤 그 promo 마이그레이션이 **ID 충돌로 개명**되어(prod에 같은 ID의 다른 마이그가 이미 적용)
+   이 파일의 부모도 `c2998cfe1f7c` 로 다시 옮겼다. LESSONS #50 참조.
 
 Revision ID: f6a8c0b2d4e6
-Revises: a1c3e5f7b9d1
+Revises: c2998cfe1f7c
 """
 from typing import Sequence, Union
 
@@ -40,7 +42,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = 'f6a8c0b2d4e6'
-down_revision: Union[str, None] = 'a1c3e5f7b9d1'
+down_revision: Union[str, None] = 'c2998cfe1f7c'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
