@@ -1407,8 +1407,10 @@ def ingest_rocket_sales(
     """
     _check_ingest_token(x_ingest_token)
     vendor_id = str(body.get("vendor_id") or "").strip()
-    if not vendor_id:
-        raise HTTPException(status_code=400, detail="vendor_id 필요")
+    # 길이도 본다: vendor_id는 String(20) 그레인 키다. SQLite는 초과를 통과시켜 **평행 계정축**을
+    #   만들고, PostgreSQL에선 배치 전체가 죽는다(파서가 식별자에 적용하는 규칙과 같은 이유).
+    if not vendor_id or len(vendor_id) > 20:
+        raise HTTPException(status_code=400, detail="vendor_id 필요(<=20자)")
     rows = body.get("rows")
     if not isinstance(rows, list) or not rows:
         raise HTTPException(status_code=400, detail="rows[] 필요")
@@ -1433,8 +1435,8 @@ def ingest_rocket_promotion(
     """
     _check_ingest_token(x_ingest_token)
     vendor_id = str(body.get("vendor_id") or "").strip()
-    if not vendor_id:
-        raise HTTPException(status_code=400, detail="vendor_id 필요")
+    if not vendor_id or len(vendor_id) > 20:   # String(20) 그레인 키 — 위 sales와 같은 이유
+        raise HTTPException(status_code=400, detail="vendor_id 필요(<=20자)")
     rows = body.get("rows")
     if not isinstance(rows, list) or not rows:
         raise HTTPException(status_code=400, detail="rows[] 필요")
@@ -1456,8 +1458,8 @@ def ingest_coupon_used_amount(
     """
     _check_ingest_token(x_ingest_token)
     account_key = str(body.get("account_key") or "").strip()
-    if not account_key:
-        raise HTTPException(status_code=400, detail="account_key 필요")
+    if not account_key or len(account_key) > 20:   # coupang_coupon.account_key = String(20)
+        raise HTTPException(status_code=400, detail="account_key 필요(<=20자)")
     rows = body.get("rows")
     if not isinstance(rows, list) or not rows:
         raise HTTPException(status_code=400, detail="rows[] 필요")

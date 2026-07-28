@@ -78,6 +78,9 @@ def ingest_rocket_sales(
         "ingested": len(recs),
         "skipped": skipped,
         "deduped": stats.get("deduped", 0),
+        # 빈 관측(키는 있는데 qty·revenue 둘 다 빈 값) 행 수. ingested와 같아지면 0판매일이
+        #   아니라 페처 매핑 사고를 의심해야 한다 — 응답에 실어 페처·운영자가 보게 한다.
+        "blank_observations": stats.get("blank_observations", 0),
         "vendor_id": vendor_id,
     }
 

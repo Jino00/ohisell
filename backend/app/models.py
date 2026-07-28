@@ -1438,17 +1438,20 @@ class CoupangRocketSalesDaily(Base):
         String(30), nullable=True, index=True
     )  # = 발주상세 product_number(원가 브리지 키)
     date: Mapped[Optional[datetime]] = mapped_column(Date, nullable=False, index=True)  # 판매일(KST)
-    qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 판매수량
+    qty: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )  # 판매수량
     revenue: Mapped[Decimal] = mapped_column(
-        Numeric(14, 2), nullable=False, default=0
+        Numeric(14, 2), nullable=False, default=0, server_default="0"
     )  # ★소비자 실현가 기준 매출(회계축 아님 — 위 주석)
     visitors: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 유입수(있으면)
     conversion_rate: Mapped[Optional[Decimal]] = mapped_column(
         Numeric(7, 4), nullable=True
-    )  # 전환율(있으면, 0~1 또는 % — 수집기가 계약대로 정규화)
+    )  # 전환율 — **0~1 소수**(3.52% → 0.0352). % 표기는 페처가 100으로 나눠 보낸다(PLAN §4)
     product_name: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
     source: Mapped[str] = mapped_column(
-        String(20), nullable=False, default="sales_analysis"
+        String(20), nullable=False, default="sales_analysis",
+        server_default="sales_analysis",
     )  # sales_analysis | excel (원천 라벨 — 폴백 경로 추적)
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 

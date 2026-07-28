@@ -84,7 +84,7 @@ def test_parse_sales_last_row_wins_on_duplicate_grain():
     ], stats=stats)
     assert len(recs) == 1 and recs[0]["qty"] == 9
     # 중복 흡수는 '계약 위반'이 아니다 — 따로 센다(수집 건강 신호를 중복 뒤에 숨기지 않는다)
-    assert stats == {"skipped": 0, "deduped": 1}
+    assert stats["skipped"] == 0 and stats["deduped"] == 1
 
 
 def test_parse_sales_source_label_propagates():
@@ -140,6 +140,44 @@ def test_parse_sales_oversized_number_does_not_reach_db():
     assert rp.parse_coupon_usage_rows([{"coupon_id": "A", "used_amount": "1e999"}]) == []
 
 
+def test_parse_sales_infinity_is_an_accident_not_a_blank_cell():
+    """Inf는 '안 적힌 값'이 아니라 계산 사고 — 0으로 접으면 18개 팔린 날이 매출 0원이 된다.
+
+    빈 셀은 엑셀에서 NaN으로 오지 Inf로 오지 않는다. 상한 초과(1E+999)를 사고로 보면서
+    한 자리 더 간 Inf를 0으로 접으면 앞뒤가 안 맞는다.
+    """
+    stats: dict = {}
+    assert rp.parse_sales_rows([
+        {"option_id": "A", "date": "2026-07-24", "qty": 18, "revenue": float("inf")},
+    ], stats=stats) == []
+    assert stats["skipped"] == 1
+
+
+def test_parse_sales_all_blank_batch_raises_alarm(caplog):
+    """행 단위로는 전부 합법인데 배치 전체가 빈 관측 = 페처 매핑 사고(dict 리터럴 + 컬럼명 변경).
+
+    키 존재 gate는 {"qty": row.get("판매수량")} 꼴을 구조적으로 못 잡는다 — 배치로 봐야 보인다.
+    """
+    stats: dict = {}
+    recs = rp.parse_sales_rows([
+        {"option_id": "A", "date": "2026-07-24", "qty": None, "revenue": None},
+        {"option_id": "B", "date": "2026-07-24", "qty": None, "revenue": None},
+    ], stats=stats)
+    assert len(recs) == 2                      # 행은 살린다(0판매일일 수도 있으므로)
+    assert stats["blank_observations"] == 2    # 그러나 전부 빈 관측이면
+    assert "매핑 사고" in caplog.text          # 경보를 울린다
+
+
+def test_parse_sales_partial_blank_batch_is_quiet():
+    """일부만 빈 관측이면 정상(그날 안 팔린 옵션) — 거짓 경보를 울리지 않는다."""
+    stats: dict = {}
+    rp.parse_sales_rows([
+        {"option_id": "A", "date": "2026-07-24", "qty": None, "revenue": None},
+        {"option_id": "B", "date": "2026-07-24", "qty": 7, "revenue": "111300"},
+    ], stats=stats)
+    assert stats["blank_observations"] == 1
+
+
 def test_parse_sales_date_tz_is_converted_before_grain():
     """date는 그레인 키 — tz를 환산하지 않으면 **다른 날 행**에 적재된다."""
     rec = rp.parse_sales_rows(
@@ -149,16 +187,20 @@ def test_parse_sales_date_tz_is_converted_before_grain():
 
 
 def test_parse_sales_nan_does_not_kill_batch():
-    """엑셀 폴백의 빈 숫자셀은 float('nan') — int(nan)/Decimal('NaN')이 배치를 죽이면 안 된다."""
+    """엑셀 폴백의 빈 숫자셀은 float('nan') — int(nan)/Decimal('NaN')이 배치를 죽이면 안 된다.
+
+    NaN은 빈 셀이므로 0으로 적재하고 행을 살린다. 반면 Inf는 계산 사고라 행을 skip한다
+    (둘을 같이 취급하면 '18개 팔렸는데 매출 0원'이 조용히 쌓인다).
+    """
+    stats: dict = {}
     recs = rp.parse_sales_rows([
         {"option_id": "A", "date": "2026-07-24", "qty": float("nan"), "revenue": 1000},
         {"option_id": "B", "date": "2026-07-24", "qty": float("inf"), "revenue": 2000},
         {"option_id": "C", "date": "2026-07-24", "qty": 5, "revenue": "nan"},
-    ])
-    assert len(recs) == 3
+    ], stats=stats)
     by = {r["option_id"]: r for r in recs}
+    assert set(by) == {"A", "C"} and stats["skipped"] == 1   # B(Inf)만 사고로 skip
     assert by["A"]["qty"] == 0 and by["A"]["revenue"] == Decimal("1000")
-    assert by["B"]["qty"] == 0
     assert by["C"]["revenue"] == Decimal(0)   # NaN이 NUMERIC 컬럼에 적재되지 않는다
 
 
@@ -417,6 +459,18 @@ def test_route_requires_token(client, url):
     assert c.post(_BASE + url, json=body).status_code == 401                       # 헤더 없음
     assert c.post(_BASE + url, json=body,
                   headers={"X-Ingest-Token": "wrong"}).status_code == 401          # 불일치
+
+
+@pytest.mark.parametrize("url", _ROUTES)
+def test_route_rejects_oversized_grain_key(client, url):
+    """계정축도 그레인 키다 — SQLite는 초과를 통과시켜 평행 축을 만들고 PG는 배치를 죽인다."""
+    c, _ = client
+    key = "account_key" if "coupon" in url else "vendor_id"
+    r = c.post(_BASE + url, headers={"X-Ingest-Token": _TOKEN},
+               json={key: "X" * 21, "rows": [{"coupon_id": "1", "used_amount": 1,
+                                              "option_id": "1", "date": "2026-07-24", "qty": 1,
+                                              "request_id": "1"}]})
+    assert r.status_code == 400
 
 
 @pytest.mark.parametrize("url", _ROUTES)

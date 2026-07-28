@@ -55,7 +55,12 @@ _INT64_MAX = 2**63 - 1   # SQLite INTEGER 상한. 넘으면 flush 때 OverflowEr
 
 
 # 빈 숫자셀의 텍스트 표현들. 엑셀/판다스가 문자열로 직렬화되면 이 꼴로 온다.
-_BLANK_TOKENS = {"", "-", "nan", "-nan", "inf", "-inf", "infinity", "-infinity", "none", "null"}
+#   ★Infinity는 여기 없다(의도적): 엑셀 빈 셀은 **NaN**으로 오지 Inf로 오지 않는다. Inf는
+#     "안 적힌 값"이 아니라 **계산 사고**(0으로 나눔·오버플로)다. 빈 셀로 분류해 0으로 접으면
+#     "18개 팔렸는데 매출 0원"이 아무 신호 없이 적재된다 — 상한 초과(1E+999)는 사고로 보면서
+#     한 자리 더 간 Inf는 0으로 접는 건 앞뒤가 안 맞는다. Inf는 아래에서 '적혀 있음'으로
+#     떨어져 파싱 실패 → 행 skip으로 눈에 보이게 남는다.
+_BLANK_TOKENS = {"", "-", "nan", "-nan", "none", "null"}
 
 
 def _present(v: Any) -> bool:
@@ -63,12 +68,13 @@ def _present(v: Any) -> bool:
 
     빈 셀과 '읽으려다 실패한 값'을 가르는 데 쓴다. 전자는 0(관측된 0판매일), 후자는 사고다.
     NaN은 숫자로 오든 그 문자열 표현으로 오든 **빈 셀**이다 — 직렬화 방식이 의미를 바꾸면 안 된다.
+    반대로 Inf는 **적혀 있는 값**으로 본다(위 _BLANK_TOKENS 주석).
     """
     if v is None:
         return False
-    if isinstance(v, float) and not math.isfinite(v):
+    if isinstance(v, float) and math.isnan(v):
         return False
-    if isinstance(v, Decimal) and not v.is_finite():
+    if isinstance(v, Decimal) and v.is_nan():
         return False
     return str(v).strip().lower() not in _BLANK_TOKENS
 
@@ -165,7 +171,10 @@ def _date(v: Any) -> date | None:
     if s in ("", "-"):
         return None
     s = s.replace("/", "-")
-    parsed = _dt(s)          # tz가 붙어 있으면 KST로 환산된 뒤 날짜가 나온다
+    # warn=False: 날짜 전용 표기('2026-07-24 (수)' 등)는 아래 fromisoformat 폴백이 정상
+    #   처리한다. 여기서 _dt가 "일시 파싱 실패"를 찍으면 성공한 파싱을 실패로 보고하는
+    #   거짓 경보가 된다(경보가 거짓말하면 아무도 안 본다).
+    parsed = _dt(s, warn=False)   # tz가 붙어 있으면 KST로 환산된 뒤 날짜가 나온다
     if parsed is not None:
         return parsed.date()
     try:
@@ -174,7 +183,7 @@ def _date(v: Any) -> date | None:
         return None
 
 
-def _dt(v: Any) -> datetime | None:
+def _dt(v: Any, *, warn: bool = True) -> datetime | None:
     """'2026-07-24 00:01:00' / ISO / 'YYYY-MM-DD' → naive datetime|None.
 
     ★초를 버리지 않는다(D-CPP-4 인접): 프로모션 행사기간은 초 단위라
@@ -203,7 +212,8 @@ def _dt(v: Any) -> datetime | None:
             return datetime.strptime(s[:len("2026-07-24 00:01:00")], fmt)
         except ValueError:
             continue
-    log.warning("프로모션 일시 파싱 실패 → None: %r", v)
+    if warn:
+        log.warning("프로모션 일시 파싱 실패 → None: %r", v)
     return None
 
 
@@ -227,6 +237,7 @@ def parse_sales_rows(
     out: dict[tuple[str, date], dict] = {}
     skipped = 0
     accepted = 0
+    blank_obs = 0
     for r in rows or []:
         if not isinstance(r, dict):
             skipped += 1
@@ -249,6 +260,8 @@ def parse_sales_rows(
             skipped += 1
             continue
         accepted += 1
+        if not _present(r.get("qty")) and not _present(r.get("revenue")):
+            blank_obs += 1   # 키는 있는데 둘 다 빈 셀 — 배치 전체가 이러면 매핑 사고 신호
         out[(option_id, d)] = {
             "option_id": option_id,
             "date": d,
@@ -265,9 +278,19 @@ def parse_sales_rows(
         log.warning("1P 판매 레코드 skip %d건(option_id/date/관측값 누락)", skipped)
     if deduped:
         log.info("1P 판매 레코드 중복 흡수 %d건(같은 option_id×date — 뒤 행 우선)", deduped)
+    # ★배치 수준 경보(행 수준 gate로는 못 잡는 것): 페처 매핑이 dict 리터럴로 짜이면
+    #   {"qty": row.get("판매수량")} 처럼 **키는 항상 있고 값만 None**이 된다. 쿠팡이 컬럼명을
+    #   바꾸면 행 단위로는 전부 합법(키 존재·빈 셀=0)이라 skipped=0으로 조용히 0원 테이블이
+    #   쌓인다. 전 행이 빈 관측이면 그건 0판매일이 아니라 매핑 사고다 — 배치로 봐야 보인다.
+    if accepted and blank_obs == accepted:
+        log.warning(
+            "1P 판매: 배치 %d행 **전부** qty·revenue가 빈 값 — 0판매일이 아니라 페처 매핑 사고를"
+            " 의심할 것(쿠팡 컬럼명 변경 등)", accepted,
+        )
     if stats is not None:
         stats["skipped"] = skipped
         stats["deduped"] = deduped
+        stats["blank_observations"] = blank_obs
     return list(out.values())
 
 
