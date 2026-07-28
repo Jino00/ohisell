@@ -187,6 +187,52 @@ def test_actor_excludes_settings_changes_from_ours(client, db):
     assert client.get("/api/naver/ad/change-log?actor=ours").json()["total"] == 0
 
 
+def _seed_budget_pacing(db, *, outcome=None, executed=True, rationale="[예산페이싱] 테스트 근거"):
+    """BP(D-NAO-102) 레인이 남기는 모양 그대로 — action은 세분화 라벨, 실행 경로는
+    _execute_update_budget 하나라 성공행은 before/after가 채워지고 캠페인 단위다."""
+    from app.services.naver_ad.budget_pacing import ACTION_BUDGET_UP_PACING
+
+    row = NaverChangeLog(
+        entity_type="campaign", entity_id="cmp-1", campaign_id="cmp-1",
+        action=ACTION_BUDGET_UP_PACING, dry_run=False, changed_at=kst_now(),
+        before_value=json.dumps({"dailyBudget": 30000}) if executed else None,
+        after_value=json.dumps({"dailyBudget": 50000}) if executed else None,
+        rationale=rationale, outcome=outcome,
+    )
+    db.add(row)
+    db.commit()
+    return row
+
+
+def test_actor_ours_counts_budget_pacing_writes(client, db):
+    """★D-NAO-102 ⑥ 회귀: BP 레인은 change_log에 'budget_up_pacing'이라는 **다른 라벨**을
+    남기지만 실행 경로는 update_budget 하나 — 광고 일예산을 실제로 바꾼 우리 실집행이다.
+    EXECUTION_ACTIONS가 라벨을 모르면 actor=ours가 이 행을 못 세고, 커맨드 센터 1층이
+    "우리 조작 0회"라 말한다(D-47-h는 0을 0이라 말하라는 것이지, 한 일을 안 했다고
+    말하라는 게 아니다)."""
+    _seed_budget_pacing(db)
+    body = client.get("/api/naver/ad/change-log?actor=ours").json()
+    assert body["total"] == 1
+    assert body["rows"][0]["action"] == "budget_up_pacing"
+    # 두 번째 소비처(_execution_state)도 같은 집합을 쓴다 — 배지가 살아 있어야 한다.
+    assert body["rows"][0]["execution_state"] == "executed"
+
+
+def test_actor_ours_include_blocked_shows_budget_pacing_guard_block(client, db):
+    """BP도 가드 거부 행에 **같은 라벨**을 단다(harness `_guard_failure(…, log_action, …)`).
+    라벨이 집합 밖이면 '가드레일이 BP 증액을 막은 것'도 화면에서 통째로 사라진다."""
+    from app.services.naver_ad.naver_execution_harness import GUARD_BLOCK_MARKER
+
+    _seed_budget_pacing(
+        db, executed=False, outcome="failed",
+        rationale=f"[예산페이싱] 증액 {GUARD_BLOCK_MARKER} 가드레일 차단 — BEP 이익하한",
+    )
+    assert client.get("/api/naver/ad/change-log?actor=ours").json()["total"] == 0  # 미집행
+    body = client.get("/api/naver/ad/change-log?actor=ours&include_blocked=true").json()
+    assert body["total"] == 1
+    assert body["rows"][0]["execution_state"] == "blocked"
+
+
 def test_actor_all_is_default(client, db):
     _seed(db, action="external_status_change")
     _seed(db, action="update_bid")
@@ -200,14 +246,40 @@ def test_actor_rejects_unknown_value(client):
 
 def test_execution_actions_derives_from_harness_mapping():
     """★드리프트 방지: 실행 액션 목록을 프론트나 라우터가 하드코딩하면 새 제안 유형이
-    배선될 때 조용히 어긋난다. harness의 _ACTION_BY_PROPOSAL_TYPE이 단일 진실이다."""
+    배선될 때 조용히 어긋난다. 단일 진실은 harness의 _ACTION_BY_PROPOSAL_TYPE(제안유형→액션)
+    + 라벨 세분화분(BP의 PACING_ACTIONS)이다."""
+    from app.services.naver_ad.budget_pacing import PACING_ACTIONS
     from app.services.naver_ad.naver_execution_harness import (
         EXECUTION_ACTIONS, _ACTION_BY_PROPOSAL_TYPE,
     )
-    assert EXECUTION_ACTIONS == frozenset(_ACTION_BY_PROPOSAL_TYPE.values())
+    assert EXECUTION_ACTIONS == frozenset(_ACTION_BY_PROPOSAL_TYPE.values()) | frozenset(
+        PACING_ACTIONS
+    )
     assert "external_bid_change" not in EXECUTION_ACTIONS
     assert "external_status_change" not in EXECUTION_ACTIONS
     assert "optimizer_change" not in EXECUTION_ACTIONS
+
+
+def test_execution_actions_covers_every_budget_log_label():
+    """★구조 가드: `_budget_log_action`이 낼 수 있는 라벨은 **전부** EXECUTION_ACTIONS에
+    있어야 한다. 이 관계가 깨지면 우리가 광고를 실제로 바꿔놓고 actor=ours가 0이라 말한다
+    (D-NAO-102 ⑥ BP 라벨 분리 때 실제로 일어난 일). 목록을 다시 적지 않고 **함수를 직접
+    호출해** 확인한다 — 사본을 만들면 그 사본이 다음 드리프트의 자리가 된다."""
+    from app.models import NaverProposal
+    from app.services.naver_ad import budget_pacing
+    from app.services.naver_ad.naver_execution_harness import (
+        EXECUTION_ACTIONS, _budget_log_action,
+    )
+
+    for approval_source in (None, "console", budget_pacing.APPROVAL_SOURCE_PACING):
+        for proposal_type in ("budget_up", "budget_down"):
+            label = _budget_log_action(
+                NaverProposal(proposal_type=proposal_type, approval_source=approval_source)
+            )
+            assert label in EXECUTION_ACTIONS, (
+                f"{approval_source=} {proposal_type=} → {label!r}가 EXECUTION_ACTIONS 밖 — "
+                "actor=ours가 이 실집행을 못 센다"
+            )
 
 
 def test_actor_ours_excludes_failed_writes(client, db):

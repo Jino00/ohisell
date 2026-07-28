@@ -33,7 +33,6 @@ from app.models import (
     NaverProductBep,
 )
 from app.services.naver_ad import (
-    budget_pacing,
     campaign_roster,
     campaign_target_resolver,
     change_log_narrator,
@@ -52,14 +51,14 @@ DATA_NOTE = (
 
 QUIET_REASON = "오늘은 바꿀 만한 신호가 없었습니다."
 
-# ② "오늘 시스템이 한 일"이 세는 액션 집합.
-#   · EXECUTION_ACTIONS  = 우리가 광고 API에 실제로 쓴 것(update_bid/update_budget/…)
-#   · budget_pacing.PACING_ACTIONS = BP 레인이 **라벨만 분리해** 남기는 예산 증액/원복
-#     (budget_up_pacing 등). 실행 경로는 update_budget 하나지만 change_log에 다른 이름으로
-#     찍히므로 EXECUTION_ACTIONS만 보면 **BP가 한 일이 통째로 안 보인다**(D-NAO-102 ⑥).
-TODAY_ACTIONS: frozenset[str] = frozenset(
-    naver_execution_harness.EXECUTION_ACTIONS | set(budget_pacing.PACING_ACTIONS)
-)
+# ② "오늘 시스템이 한 일"이 세는 액션 집합 = 우리가 광고 API에 실제로 쓴 것 전부.
+# ★여기서 PACING_ACTIONS를 따로 합치지 않는다: BP의 라벨 분리(budget_up_pacing 등)는
+#   EXECUTION_ACTIONS 파생 규칙 자체가 이미 흡수한다(naver_execution_harness:196~203).
+#   이 파일이 처음 쓰일 때는 그 규칙에 구멍이 있어 여기서 합집합으로 우회했는데, 사본을
+#   남겨두면 **다음 소비자는 우회가 있는 줄 모르고 EXECUTION_ACTIONS만 보다 같은 구멍에
+#   빠진다**(실제로 /change-log의 actor=ours가 그렇게 빠져 있었다). 구멍은 파생 규칙에서
+#   메우고 소비자는 하나만 본다.
+TODAY_ACTIONS: frozenset[str] = naver_execution_harness.EXECUTION_ACTIONS
 
 # 네이버 statusReason → 사람 말(D-NAO-97 원문 → D-NAO-103 표기). 모르는 코드는 **원문을
 # 노출하지 않고** status(on/off)만으로 말한다 — 내부 코드가 화면에 새는 것보다 덜 구체적인
