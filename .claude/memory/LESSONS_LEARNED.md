@@ -713,3 +713,123 @@ launchd 데몬 코드 변경의 라이브 판정은 "재시작 성공·기동 �
 ### 📌 교훈
 장시간 관측이 낀 위임은 에이전트 내부 timeout만 믿지 말고 오케스트레이터가 자체 타이머로 이중화한다. 회수 지시의 문구도 중요 — "대기 계속"이 아니라 "현재 사실로 종결"로 보내야 스톨된 에이전트가 즉시 응답한다.
 - 병기(실행 커맨드 보강): 루트 pytest는 `PYTHONPATH=backend`가 필요하다 — `cd backend && pytest tests/`만으로는 `ModuleNotFoundError`가 난다. 루트에서 돌릴 때는 `PYTHONPATH=backend pytest backend/tests/` 형태로 고정할 것.
+
+---
+
+## 48. 인프로세스 마이그레이션이 없으면 "코드 먼저 배포"가 테이블 하나를 통째로 침묵시킨다 (2026-07-28, safe_deploy 마이그 가드)
+
+### 🐛 이슈
+`scripts/safe_deploy.sh`에 `alembic` 문자열이 0건이고 `app/main.py`도 부팅 시 마이그레이션을
+하지 않는다(`alembic/env.py` 주석에 명시). 그래서 `models.py`를 마이그레이션보다 먼저 배포하면
+**nullable 컬럼 추가라도** SQLAlchemy ORM이 엔티티를 통째로 SELECT 하다 실패한다 — 신규 필드만
+못 읽는 게 아니라 **그 경로 전체**가 죽는다. rocket-1p 리뷰 실측(커밋 85967cf):
+`settlement ingest FAIL: no such column: coupang_rocket_settlement.tax_invoice_transmitted`,
+`po_items ingest FAIL: no such column: coupang_rocket_purchase_order_item.vendor_confirmed_qty`.
+올바른 순서는 마이그레이션 파일 docstring과 HANDOFF에만 적혀 있었다 — RG 26일 침묵·쿠팡 광고비
+크론과 같은 "조용한 수집 침묵" 계열 사고를 문서로 막으려던 것.
+
+### ✅ 해결
+D-NAO-49(CAS 가드)와 같은 방식으로 **문서를 구조로 옮겼다**. safe_deploy.sh가
+①`backend/alembic/*`를 코드보다 먼저 배포 → ②prod `alembic current` vs `heads` 비교 →
+③대기 상태면 `--migrate` 로 원격 `upgrade head` 실행(없으면 **코드 배포·재시작 거부**) →
+④코드 배포 → ⑤재시작. 커밋된 로컬 마이그 파일이 prod에 없는데 배포 목록에도 없으면 그것도 거부.
+스텁 ssh/scp/alembic 하니스로 10개 시나리오 17개 단언 검증(prod 무접촉) + 실 prod 읽기전용 프로브.
+
+### 📌 교훈
+- **"prod가 내 로컬 head와 같은가"로 비교하면 안 된다.** 워크트리 브랜치는 main보다 뒤처져 있는
+  게 정상이라(실측: 로컬 66개 vs prod 69개 마이그 파일) 매 배포가 오탐으로 막힌다. 올바른 판정은
+  **①내 커밋된 마이그 파일이 전부 prod에 있는가 + ②prod 자신의 `current`가 자기 `heads`와 같은가**.
+- `alembic current/heads`의 INFO 로그는 **stderr**로 나간다 → `2>/dev/null` 후 stdout만 파싱하면 됨.
+- 배포 순서 강제는 additive 마이그레이션 기준이다. 컬럼 삭제처럼 구코드를 깨는 변경은 순서가
+  반대이므로 `--migrate` 금지·수동 조율(스크립트 헤더에 명시).
+
+## 49. 같은 테이블 안에 회계 의미가 다른 두 소스가 섞이면 clamp가 버그를 숨긴다 (2026-07-28, cart_conversion_rate 센티널 이중계산)
+
+### 🐛 이슈
+`naver_ad_daily`는 두 소스를 한 테이블에 담는다 — 상세 행(`/stat-reports`)은 구매만 `conv_*`·장바구니는 `cart_*`로 분리하고, 센티널 행(`__backfill__`, `/stats`)은 **구매+장바구니 전량 합계를 `conv_indirect_cnt` 하나에** 몰아넣고 `cart_*=0`이다. `cart_conversion_rates()`가 센티널 필터 없이 둘을 합산해 분자만 이중가산했다(실질 (2P+C)/C). 계정 12개 SA가 이미 같은 필터를 쓰고 있었는데 이 하나만 빠져 있었다.
+
+### ✅ 해결
+세 grain(by_product·by_campaign·global) 전부에 `adgroup_id != BACKFILL_SENTINEL_ADGROUP` 추가. 회귀 테스트는 항등식(`센티널 conv = 상세 conv + 상세 cart`)대로 센티널 행을 심어, 필터를 빼면 반드시 실패하도록 구성해 실제로 실패하는 것까지 확인했다.
+
+### 📌 교훈
+**clamp는 방어장치이면서 동시에 은폐장치다.** 이 버그의 글로벌 전환율은 수정 전 3.998, 수정 후 1.675 — 둘 다 `clamp(x,0,1)`이라 **화면상 1.0으로 똑같았다**. 라이브 영향은 캠페인 grain 6개(1.0 → 0.0~0.833)에서만 드러났다. 지표가 상한에 붙어 있으면 "정상"이 아니라 "분자를 못 보고 있다"는 신호로 읽고, clamp 이전의 원시 분자/분모를 따로 확인한다. 그리고 한 테이블에 소스가 둘이면 "이 컬럼의 회계 의미가 소스마다 같은가"를 집계 SA마다 묻는다 — 필터 하나가 12곳에 있고 1곳에 없으면, 없는 쪽이 버그다.
+
+## 50. 병렬 세션이 "없던 Jino 발화"를 인용으로 기록했다 (2026-07-28, cart_conversion_rate 세션)
+
+### 🐛 이슈
+codex 정산용으로 띄운 별도 세션이 **같은 워크트리·같은 브랜치**에서 돌면서, 트랙 파일과 progress에 `PR은 원칙19에 따라 codex pass 전까지 생성 금지 — Jino 결정(07-28): "브랜치만 푸시, PR은 codex 후"`를 커밋(`6ea18e3`)했다. **그런 발화는 없었다.** 그 세션은 이미 PR #128이 생성돼 있는 것을 몰랐고, 원칙19에서 "Jino라면 이렇게 결정했을 것"을 역산해 인용문 형태로 적었다. 원칙21이 "사용자 원문 인용"을 요구하는 이유가 왜곡 방지인데, 지어낸 인용은 그 방어를 정반대로 무기화한다.
+
+### ✅ 해결
+Jino의 실제 지시(11:10 "이건은 codex review 건너띌꺼야. 병합해줘")로 트랙·progress·HANDOFF를 정정하고, 오염 사실 자체를 트랙 블록에 남겼다(지운 기록은 다음 세션이 검증할 수 없으므로 삭제가 아니라 정정+경위 병기).
+
+### 📌 교훈
+①**인용부호는 실제 발화에만 쓴다.** 추론한 의도는 "추정"이라고 쓰거나 아예 쓰지 않는다 — 다음 세션은 인용을 확정 사실로 취급한다. ②**같은 워크트리·브랜치에 두 세션을 붙이지 않는다**(원칙20 "트랙 동시 작업 금지"의 워크트리 판). 칩으로 후속 작업을 띄울 때는 새 워크트리를 쓰게 하거나, 지금 세션이 끝난 뒤에 띄운다. ③**칩으로 띄운 세션은 띄운 시점의 상태를 물려받는다** — 그 뒤 상황이 바뀌면(여기선 PR 생성·게이트 면제) 즉시 중단시켜야 한다. 안 그러면 낡은 전제로 기록을 덮어쓴다.
+
+### 🔧 정정 (2026-07-28 11:2x — 지목된 codex 세션 본인이 기록)
+위 "🐛 이슈"의 **발생 기전 서술이 부정확하다.** 실제 경위는 이렇다 — 그 세션은 `AskUserQuestion`으로 Jino에게 물었고(선택지: `브랜치만 푸시, PR은 codex 후 (권장)` / `지금 PR 생성(codex 보류 명시)` / `그대로 둠`), **Jino가 첫 번째를 선택했다.** 즉 "원칙19에서 Jino라면 이렇게 했을 것을 역산해 지어낸" 것이 아니라 **Jino가 실제로 내린 결정**이었고, 11:10에 Jino가 codex 면제로 뒤집기 전까지는 유효했다.
+
+틀린 것은 결정의 존재가 아니라 **표기 방식**이다: `Jino 결정(07-28): "브랜치만 푸시, PR은 codex 후"` — 이 문구는 **내가 작성한 선택지 라벨**이지 Jino가 타이핑한 문장이 아닌데 인용부호를 씌웠다. 그래서 병렬 세션이 "원문 인용"으로 읽고 대조에 실패했다.
+
+**따라서 진짜 교훈은 ①보다 좁고 날카롭다 — `AskUserQuestion`의 선택 결과는 "Jino의 결정"이지 "Jino의 말"이 아니다.** 기록할 때 인용부호 대신 출처를 명시한다:
+- ❌ `Jino 결정: "브랜치만 푸시, PR은 codex 후"`
+- ✅ `Jino 선택(AskUserQuestion 선택지 라벨 — 원문 아님): 브랜치만 푸시 · PR은 codex 후`
+- ✅ 채팅 입력일 때만 → `Jino 원문(11:10): "이건은 codex review 건너띌꺼야. 병합해줘"`
+
+교훈 ②③은 그대로 유효하다 — 그 세션이 PR #128 존재를 모른 채 낡은 전제로 돌았다는 지적은 사실이고, 그것이 이 혼선의 실제 원인이다.
+
+## 49. 착수 전 겹침 확인은 "열린 PR"만으론 부족 — 미푸시 병행 워크트리가 형제 마이그레이션을 만든다 (2026-07-28, 로켓 1P 파서 M1)
+
+### 🐛 이슈
+LESSONS #41(착수 전 PR·chip 확인)대로 `gh pr list`로 열린 PR 2건을 확인하고 "겹침 없음"으로 착수했다. 지시서가 지목한 `docs/tracks/active/track_coupang-promo-pnl.md`도 실제로 없어서 "그 트랙 없음"으로 결론냈다. 그런데 promo-pnl 작업은 **다른 워크트리 브랜치(`worktree-agent-a77a1755db4c87ada`)에 미푸시 커밋으로 살아 있었고**, 자기 alembic 마이그레이션 `a1c3e5f7b9d1`을 우리 `f6a8c0b2d4e6`과 **같은 부모 `e5f7a9c1b3d5`**에 물려 놓은 상태였다. 각 브랜치는 `alembic heads` 단일이라 양쪽 다 "단일 head 유지" 검증을 통과한다 — **둘 다 main에 들어간 뒤에야 head 2개가 된다.**
+
+### ✅ 해결
+`git log --all --grep`으로 관련 커밋을 찾고 `git branch -a --contains`로 소속 브랜치를, 각 마이그레이션의 `down_revision`을 직접 대조해 충돌을 식별. 코드는 그대로 두고(어느 쪽도 아직 main 아님) 트랙 파일·TRACKS.md에 "나중에 병합하는 쪽이 `down_revision`을 재연결" 지침을 남겼다.
+
+### 📌 교훈
+- 트랙 **파일이 없다 ≠ 그 작업이 없다.** 트랙 문서화 전에 코드가 먼저 나가는 경우가 있으므로, 파일 부재를 겹침 없음의 근거로 쓰지 않는다.
+- 겹침 확인은 `gh pr list`에 더해 **`git worktree list` + `git log --all --grep=<도메인>` + `git branch -a --contains`**까지 본다. 누수는 푸시 안 된 병행 워크트리에서 생긴다.
+- **`alembic heads` 단일 확인은 브랜치-로컬 검사라 형제 마이그레이션을 원리적으로 못 잡는다.** 마이그레이션을 새로 만들 때는 "내 브랜치의 head"가 아니라 **`git log --all -- backend/alembic/versions/`로 다른 브랜치의 최근 revision까지** 훑고 `down_revision` 중복을 확인할 것.
+
+**#49 추가 실사고 (같은 날 2건째)** — 내가 등록한 chip `task_a0c65677`(safe_deploy alembic 가드)이 **이미 구현돼 있던 기능을 다시 만들게 했다.** 전날 22:35 다른 세션이 같은 가드를 테스트 2개까지 붙여 `fb5311a`(브랜치 `claude/quizzical-jones-1b538a`)로 커밋해 뒀는데, **미푸시·미병합이라 `gh pr list`에도 `docs/`에도 흔적이 없었다.** 결과: 오늘 세션이 처음부터 재구현해 main에 병합(`a516951`), 어제 것은 고아 브랜치로 남음. 게다가 병합된 쪽은 **테스트가 없고**(커밋 메시지가 언급한 회귀 하니스를 커밋하지 않음) 고아 쪽에만 커밋된 하니스가 있는, 정확히 거꾸로 된 상태가 됐다.
+→ **chip을 등록하기 전에도 겹침 확인을 하라.** chip은 "미래의 나"에게 보내는 지시라 착수 게이트가 한 번 더 필요하다. 최소한 `git log --all --oneline -- <대상파일>`은 돌린다. 파일 하나를 지목하는 chip이면 이 한 줄이면 충분하다.
+→ **"검증했다"는 커밋 메시지를 테스트 존재의 증거로 읽지 마라.** 일회용 하니스로 검증하고 커밋하지 않으면 다음 사람에겐 무테스트다. `git ls-tree -r --name-only origin/main | grep <대상>`으로 확인.
+
+## 50. alembic revision ID를 손으로 짓는다 — 그래서 서로 다른 마이그레이션이 같은 ID를 갖는다 (2026-07-28, 로켓 1P M1 배포 차단)
+
+### 🐛 이슈
+로켓 1P 파서 컬럼 복원(PR #130)을 prod 배포하려는데 `safe_deploy.sh --migrate` 가 **차단**했다:
+"prod에 아직 없는 마이그레이션 파일이 배포 목록에서 빠졌습니다: `a1c3e5f7b9d1_add_coupang_promo_pnl_phase1.py`".
+그런데 prod DB는 이미 `alembic_version = a1c3e5f7b9d1` 로 스탬프돼 있었다. 모순을 파보니 —
+
+**서로 다른 두 마이그레이션이 같은 revision ID `a1c3e5f7b9d1` 을 쓰고 있었다.**
+
+| | 파일 | 상태 |
+|---|---|---|
+| prod | `a1c3e5f7b9d1_merge_status_reason_and_delivery_cols.py` (merge revision, 부모 = `a7b9c1d3e5f7` + `f6a8c0e2b4d6`) | **적용됨** |
+| main | `a1c3e5f7b9d1_add_coupang_promo_pnl_phase1.py` (promo-pnl Phase1) | **미적용**(prod에 promo 테이블 0개) |
+
+그대로 배포했다면 prod의 `versions/` 에 같은 revision을 정의하는 파일이 2개가 되어 **alembic 호출 전체가
+`Duplicate revision` 으로 죽는다** — 우리 컬럼이 아니라 **모든 마이그레이션·모든 배포**가 막히는 사고였다.
+
+근본 원인: 이 저장소의 revision ID가 `alembic revision` 이 뽑는 난수가 아니라 **손(또는 LLM)으로 지은 값**이다.
+실제 목록을 보면 패턴이 뻔하다 — `e5f7a9c1b3d5`, `a1c3e5f7b9d1`, `f6a8c0b2d4e6`, `a7b9c1d3e5f7`,
+`c4e6a8b0d2f4`, `f6a8c0e2b4d6`. 사실상 같은 12개 hex 문자를 재배열하고 있어서 표본공간이 극도로 좁다.
+**두 번째 near-miss도 같은 날 나왔다**: 우리 `f6a8c0b2d4e6` vs prod `f6a8c0e2b4d6`(같은 문자 재배열).
+
+곁가지로 드러난 것: `e5f7a9c1b3d5` 를 부모로 문 마이그레이션이 **4개**(a7b9c1d3e5f7 · f6a8c0e2b4d6 ·
+promo-pnl · 우리 것)였다. 병행 세션이 많을수록 같은 부모에 형제가 쌓인다(LESSONS #49).
+
+### ✅ 해결
+배포 중단. **prod 무변경 확인**(두 컬럼 여전히 없음·`alembic_version` 불변·배포 락 잔여 없음). 가드가
+파일을 하나도 전송하기 전에 멈췄다 — D-NAO-49 계열 구조 가드가 실제 사고를 막은 첫 사례.
+
+### 📌 교훈
+- **revision ID를 손으로 짓지 마라.** `alembic revision -m "..."` 로 생성하거나, 최소한
+  `python3 -c "import uuid;print(uuid.uuid4().hex[:12])"` 로 뽑아라. 사람이 "그럴듯한 hex"를 지으면
+  표본공간이 수십 개로 줄어 충돌한다 — 확률 문제가 아니라 **구조 문제**다.
+- 새 마이그레이션을 만들 때 **전 브랜치·prod 양쪽에서 ID 중복을 확인**하라:
+  `git log --all --oneline -- backend/alembic/versions/` + `ssh <prod> ls .../versions/`.
+  `alembic heads` 는 브랜치-로컬이라 이걸 못 잡는다(#49).
+- **"prod에 먼저 배포하고 PR은 나중에" 관례가 마이그레이션 그래프를 쪼갠다.** 이번엔 prod에만 있는
+  마이그가 3개, main에만 있는 게 2개, 충돌 ID 1쌍, 미푸시 워크트리 2개에 걸쳐 있었다. 코드는
+  CAS 가드가 막지만 **마이그레이션 그래프는 CAS로 못 막는다** — PR 병합 순서로만 수렴한다.

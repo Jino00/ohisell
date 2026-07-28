@@ -1,3 +1,33 @@
+## 🔴 prod 배포 차단 — alembic revision ID 충돌 (2026-07-28 11:45, main 기준)
+- **PR #130(로켓 1P 파서 컬럼 2건)·PR #132(safe_deploy 회귀 하니스) 둘 다 main 병합 완료.** 그러나 **prod 배포는 차단됨 — prod 무변경.**
+- **차단 사유**: 서로 다른 두 마이그레이션이 **같은 revision ID `a1c3e5f7b9d1`** 을 쓴다.
+  - prod: `a1c3e5f7b9d1_merge_status_reason_and_delivery_cols.py`(merge revision, 부모 `a7b9c1d3e5f7`+`f6a8c0e2b4d6`) — **적용됨**(`alembic_version=a1c3e5f7b9d1`)
+  - main: `a1c3e5f7b9d1_add_coupang_promo_pnl_phase1.py`(promo-pnl Phase1) — **미적용**(prod에 promo 테이블 0개)
+  - 배포했다면 prod `versions/`에 같은 revision 정의 2개 → **alembic 전체 `Duplicate revision` 사망**(모든 마이그·배포 차단). `safe_deploy.sh --migrate` 가드가 **파일 전송 전 차단** — D-NAO-49 계열 구조 가드가 실사고를 막은 첫 사례.
+- **prod 무변경 실측**: `tax_invoice_transmitted`·`vendor_confirmed_qty` 둘 다 없음(불변) / `alembic_version=a1c3e5f7b9d1` 불변 / `.deploy-lock` 잔여 없음.
+- **그래프 분열**: prod에만 3개(`a7b9c1d3e5f7`·`f6a8c0e2b4d6`·`a1c3e5f7b9d1`-merge, 전부 prod 선배포·미병합 — 생성 커밋 `f7e2108`은 **미푸시 워크트리** `worktree-agent-a2fe33dc69941c21e`/`aca8c40c8d32c1725`에만) / main에만 2개(promo-pnl·로켓 M1). ⚠**PR #127(열림)은 `a7b9c1d3e5f7` 하나만 담아 그대로 병합하면 또 형제 head 발생.**
+- **권고 순서(Jino 판단 — 다른 트랙 소유 마이그 개명 포함)**: ①main promo-pnl revision을 난수 신규 ID로 개명(미적용이라 안전) ②로켓 `f6a8c0b2d4e6` down_revision 재연결 ③prod 선배포 3개 main 편입(#127 병합 + `f7e2108` 푸시) ④promo-NEW 부모를 `a1c3e5f7b9d1`(prod merge point)로 → 직렬 단일 체인 ⑤배포.
+- **근본 원인**: revision ID를 손으로 지어 표본공간이 좁다(`e5f7a9c1b3d5`/`a1c3e5f7b9d1`/`f6a8c0b2d4e6`/`a7b9c1d3e5f7`/`f6a8c0e2b4d6` — 같은 hex 재배열). 같은 날 near-miss 2건째: 우리 `f6a8c0b2d4e6` vs prod `f6a8c0e2b4d6`. → **LESSONS #50**.
+
+## 최신 상태 (2026-07-28 11:10, 워크트리 cool-driscoll-31712d) — 로켓 1P 파서 누락 컬럼 2건 복원, PR #130 오픈(미병합·미배포)
+- **PR #130** https://github.com/Jino00/ohisell/pull/130 — 트랙 `track_coupang-rocket-1p.md` M1(유지보수). 커밋 `85967cf`→`e3da1f6`→`39c1c39`(코드)+`a386614`·`ddb2c02`(문서).
+- 복원 ①: 정산 마지막 링크 컬럼(헤더명=빈 문자열, ref20 §4 #16) → `coupang_rocket_settlement.tax_invoice_transmitted`(Boolean nullable). 버튼 토큰 정확일치 제거 후 잔여로 판정(`전송성공`=True / 없음=False / 셀부재·미관측=None+warning). 공백소실 폴백은 `전송성공` 정확일치일 때만 True — **어느 경로로도 틀린 False를 만들지 않음**. ★**False = "전송실패"가 아니라 "전송성공 미표기"**(샘플 10행에서 미표기 행은 확정일도 `-`, "확정됐는데 미전송" 표본 0건).
+- 복원 ②: 발주상세 인덱스 5 → `coupang_rocket_purchase_order_item.vendor_confirmed_qty`(Integer nullable) = SKU 단위 입고/납품수량 비교 개통. PO그레인 `sumOfVendorConfirmedQty`의 per-SKU 판.
+- alembic **`f6a8c0b2d4e6`**(ADD COLUMN 2건, upgrade/downgrade 실증). 테스트 파서 48 / 루트 전체 **3505 passed**(동반 4 errors=`test_migration_one_running_index.py` cwd 의존 **기존** 결함, `cd backend`에선 4 passed). 라이브 증거(원칙22): DOM 샘플 10행 전수 — 빈 헤더 1개·셀 변형 2종·"전송성공 ⟺ 확정일 존재" 10/10.
+- **★배포 순서 강제**: `alembic upgrade head` → 코드 → 재시작. ingest가 엔티티를 통째 SELECT하므로 컬럼 없는 DB에 `models.py`만 올라가면 **정산·발주상세 ingest 전체가 OperationalError로 침묵**. → **구조로 해소됨(main `a516951`, 11:09)**: `safe_deploy.sh --migrate`가 순서를 강제(대기 상태 코드배포 거부·upgrade 실패 시 코드 미전송). 이 M1의 실측이 그 가드의 근거. ⚠단 그 가드는 **무테스트 병합** — 고아 브랜치 `claude/quizzical-jones-1b538a`의 하니스만 살려 main 구현에 맞추는 작업 별도 진행 중.
+- **★alembic 형제 head 충돌 → 해소됨(11:40)**: promo-pnl `a1c3e5f7b9d1`이 **같은 부모**를 물고 PR #131로 먼저 병합 → 우리가 "나중"이므로 `f6a8c0b2d4e6`의 `down_revision`을 `a1c3e5f7b9d1`로 **재연결**. 체인 `e5f7a9c1b3d5 → a1c3e5f7b9d1 → f6a8c0b2d4e6(head)`. main 22커밋 병합 완료, 루트 전체 **3557 passed**. PR #130 재푸시됨.
+- **safe_deploy 하니스 PR #132**(별도 브랜치 `claude/safe-deploy-harness`, MERGEABLE): main의 alembic 가드가 무테스트 병합돼 고아 브랜치 `claude/quizzical-jones-1b538a`의 하니스를 main 구현에 맞춰 이식. 11시나리오·42단언, 부정 대조군(게이트 무력화 사본)에서 7건 정확히 실패 = 회귀 감지 실증. main `safe_deploy.sh` 본문 무수정·결함 없음 보고.
+- **codex 게이트: Jino 판단으로 건너뜀**(쿼터 08-02 해제). 대체=Opus 독립 적대적 리뷰 2R → PASS·미합의 0. 원칙19 부채로 기록(LESSONS #49).
+- 후속 chip 2건 **다른 세션에서 실행 중**: `task_a0c65677`(safe_deploy alembic 가드)·`task_2cee6f8d`(페처 셀 공백 보장 — `parse_po_item_rows`의 `barcode_name` 분리가 더 위험한 자리). ⚠`task_2cee6f8d`는 같은 파서/테스트 파일을 건드릴 수 있어 PR #130 기준 리베이스 필요.
+- **남은 것(Jino 판단)**: PR #130 병합 시점(promo-pnl과의 순서) · 병합 후 prod 배포(마이그레이션 선행 필수). **prod DB에 마이그레이션 미적용 상태.**
+
+## cart_conversion_rate 센티널 이중계산 수정 (2026-07-28 11:0x KST, 워크트리 `eager-curie-13aa53`, 커밋 `ecc06ef` — prod 배포 완료·PR #128 병합)
+- **버그**: `__backfill__` 센티널 행(`/stats`)은 `conv_indirect_cnt`에 구매+장바구니 합계·`cart_*=0`인데, `cart_conversion_rates()`가 상세 행과 함께 합산해 **분자만 이중가산**. by_campaign·global 블록에 센티널 필터 누락(계정 내 다른 12개 SA는 이미 필터 보유).
+- **수정·검증**: 세 grain 전부 필터 추가 + 회귀 테스트 2건(필터 제거 시 clamp 1.0으로 실패하는 것 확인). 백엔드 전체 **3501 passed**.
+- **prod 라이브 실측(원칙22)**: 30일 창 분자 4881→2045(분모 1221 불변). 글로벌은 1.675도 clamp 1.0이라 표면상 무변화 — **실제 변화는 캠페인 grain 6/28개가 clamp 1.0 고정에서 하강**(10769985 →0.4, 8336372 →0.3, 9577882·10852962 →0.0, 8790976 →0.8, 6006664 →0.833). `probe_signal`/`probe_revert` 확장 낙관 편향 해소.
+- **✅종결**: PR #128 병합(main == prod). **codex 게이트는 Jino가 이 건 한정 면제** — 원문 11:10 KST "이건은 codex review 건너띌꺼야. 병합해줘". 근거=한도 소진으로 08-02까지 실행 불가 + 필터 추가(행 제외) 방향 + 양방향 회귀 테스트 증명 + 3501 passed + prod 라이브 실측. **08-03 재실행 불요.** ⚠️병렬 codex 세션이 커밋 `6ea18e3`에 "PR은 codex 후"를 Jino 인용으로 기록한 것을 정정함 → LESSONS #50. **↳ 재정정(11:2x)**: 그건 *없던 발화*가 아니라 **`AskUserQuestion` 선택지를 Jino가 실제 선택한 결정**(11:10 면제로 뒤집히기 전까지 유효)이었고, 잘못은 내가 쓴 선택지 라벨에 인용부호를 씌운 **표기**에 있었다 → 규칙: 선택 결과는 "Jino 선택(라벨 — 원문 아님)", 인용부호는 채팅 원문에만.
+- 기록: 트랙 파일 "현재 진행 단계" 최신 블록 · LESSONS #49 · failures.jsonl.
+
 ## 04 자동운영 감사 D+N (2026-07-28 08:55 KST, 자동 루틴 D-NAO-51 — 감사 전용·쓰기 0건)
 - **서버 레인 전부 ok** (daily 08:50:15 / hourly 08:20:07 / generator 08:00:15 / entity_sync 07:38 / retro 08:30 / wisdom 08:45 / probe_settlement 08:55).
 - **실집행 5건, 라이브 5/5 일치**: auto_op 1건(grp70109620 맥세이프_컨텐츠 140→120, [shopping_group_bep], 라이브 120 MATCH) + **cold_op 4건 = CS 콜드스타트 레인(D-NAO-96) 첫 실집행 성공** — nad…411558870 300→1900 / …375630000 590→1150 / …375632395 900→2350 / …375632396 900→2300, 4건 전부 라이브 `adAttr.bidAmt` 일치. 원칙22 라이브 합격.
@@ -27,6 +57,8 @@
 - 교차 리뷰: **codex CLI 한도 소진(리셋 08-02)** → Jino 07-18 승인 방식(적대적 Claude 리뷰어 Opus 단일)으로 대체, 5라운드 — 지적 14건(수용 11·절충 3·미합의 0), 배포 차단급 P1 2건(결손 매칭 KST 날짜 불일치 상시 실패·PRODUCT_SIZE 영구 미수집) 리뷰가 잡음. 테스트 3440 passed.
 - 라이브 실증: WING1 07-27 23:08 완주 — gap-driven 대상 선택 정상 + PRODUCT_SIZE 129행 첫 적재(P1 수정 라이브 작동). 35일 창 내 결손 0(기백필 상태 확인).
 - **차단/잔여**: WING1·WING2 Wing 데스크톱 세션 밤사이 만료(login_required·재시도 3회 소진) → ①WING2 결손 트리거 재확인 ②WING1 04-20~05-03 옛 공백 백필(`rg_status_days:100` 1회 오버라이드 — 시도했다 세션 만료로 미완, config 원복 확인됨) — 둘 다 **Jino의 Wing 재로그인 선행 필요**. chip task_2a26d430은 이 스프린트의 층2 루프 세션 재확인으로 코드 확인分 해소.
+
+## (이전) 최신 상태 (2026-07-27 23:xx, 워크트리 agent-a0d4b0f9f34968c6a) — CS 스프린트(콜드 첫 입찰 레인) PR #123
 
 ## (이전) 최신 상태 (2026-07-28 08:xx, 워크트리 musing-germain-a6e240) — D-NAO-97 외부변경 감지기 오탐 수정(배포 완료)
 - **증상**: `naver_change_log` id 847 — 03 캠페인이 07-27 22:46에 `external_status_change`

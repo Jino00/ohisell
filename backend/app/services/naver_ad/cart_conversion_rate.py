@@ -31,6 +31,7 @@ from sqlalchemy import func as sqlfunc
 from sqlalchemy.orm import Session
 
 from app.models import NaverAdDaily, NaverAdgroupProduct
+from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.utils.kst import kst_today
 
 SHOPPING_TYPE = "SHOPPING"
@@ -81,6 +82,9 @@ def cart_conversion_rates(
     conv_expr = NaverAdDaily.conv_direct_cnt + NaverAdDaily.conv_indirect_cnt
     cart_expr = NaverAdDaily.cart_direct_cnt + NaverAdDaily.cart_indirect_cnt
     in_window = (NaverAdDaily.ad_date >= date_from) & (NaverAdDaily.ad_date <= as_of)
+    # ★__backfill__ sentinel 행 제외 — /stats 소스라 conv_indirect_*에 purchase+cart 합산이
+    # 들어있고 cart_*=0이라, 포함 시 상세 행의 conv를 이중가산한다(분자만 부풀림).
+    not_sentinel = NaverAdDaily.adgroup_id != BACKFILL_SENTINEL_ADGROUP
 
     # ── by_product: 쇼핑 행을 adgroup 단위로 합산 → 1:1 매핑 상품으로 롤업 ──
     ag_map = _one_to_one_adgroup_product(db)
@@ -92,7 +96,7 @@ def cart_conversion_rates(
                 sqlfunc.coalesce(sqlfunc.sum(conv_expr), 0),
                 sqlfunc.coalesce(sqlfunc.sum(cart_expr), 0),
             )
-            .filter(in_window, NaverAdDaily.campaign_type == SHOPPING_TYPE)
+            .filter(in_window, not_sentinel, NaverAdDaily.campaign_type == SHOPPING_TYPE)
             .group_by(NaverAdDaily.adgroup_id)
             .all()
         )
@@ -116,7 +120,7 @@ def cart_conversion_rates(
             sqlfunc.coalesce(sqlfunc.sum(conv_expr), 0),
             sqlfunc.coalesce(sqlfunc.sum(cart_expr), 0),
         )
-        .filter(in_window)
+        .filter(in_window, not_sentinel)
         .group_by(NaverAdDaily.campaign_id)
         .all()
     )
@@ -131,7 +135,7 @@ def cart_conversion_rates(
             sqlfunc.coalesce(sqlfunc.sum(conv_expr), 0),
             sqlfunc.coalesce(sqlfunc.sum(cart_expr), 0),
         )
-        .filter(in_window)
+        .filter(in_window, not_sentinel)
         .first()
     )
     g_conv, g_cart = int(g[0]), int(g[1])

@@ -161,7 +161,58 @@ _SETTLE_COL = {
     "세금계산서 확정일": "tax_invoice_confirmed_date",
     "1차 지급액": "first_payment_amount",
     "2차 지급액": "second_payment_amount",
+    # ★마지막 링크 컬럼: 헤더명이 **빈 문자열**(ref 20 §4 표 #16 · DOM 샘플 실측).
+    #   셀 = 상시 버튼 라벨('발주현황'·'입고상세내역') + 전자세금계산서 전송상태 텍스트.
+    "": "transmit_cell",
 }
+
+# 링크 컬럼의 상시 버튼 라벨(전송상태 아님) — 제거 후 남는 토큰이 전송상태.
+_SETTLE_LINK_BUTTONS = ("발주현황", "입고상세내역")
+_TRANSMIT_SUCCESS = "전송성공"
+
+
+def _to_transmitted(v: Any, seen: set[str] | None = None) -> bool | None:
+    """정산 마지막(빈 헤더) 링크 셀 → 전자세금계산서 전송성공 여부(bool|None).
+
+    실측 변형(20_rocket_1p_settlement_dom_sample.json 10행 전수):
+      "발주현황 입고상세내역 전송성공" (9행 — 전부 세금계산서 확정일 있음) → True
+      "발주현황 입고상세내역"          (1행 — 확정일 '-' = 미확정)        → False(전송성공 미표기)
+    셀 부재(컬럼 없음/행 짧음)·빈 문자열 → None(판별 불가).
+    잔여 토큰이 미관측 상태면 → None + warning(True/False로 뭉개지 않음, D-13).
+
+    버튼 라벨은 **토큰 단위 정확 일치**로만 걸러낸다(부분문자열 replace 금지):
+      replace는 라벨이 드리프트하면 상태 토큰을 잘라 먹고, 잔여가 비면 False로 **오판**한다.
+      토큰 일치는 잔여를 원형 그대로 남겨 미관측이면 반드시 None으로 떨어진다.
+    seen: 미관측 토큰 warning 중복 억제 집합(파싱 1회당 토큰당 1줄).
+      정산은 최대 100페이지×50행 → 행마다 찍으면 수천 줄이 쏟아진다.
+    """
+    if v is None:
+        return None
+    s = str(v).strip()
+    if not s:
+        return None
+    rest = " ".join(t for t in s.split() if t not in _SETTLE_LINK_BUTTONS)
+    if not rest:
+        return False  # 버튼만 = 전송성공 미표기
+    if rest == _TRANSMIT_SUCCESS:
+        return True
+    # 공백 소실 폴백: 페처는 td.innerText로 셀을 뽑지만(fetcher :112·:142) DOMParser 문서는
+    #   렌더링되지 않아 innerText가 textContent로 떨어진다 → 쿠팡이 <a> 사이를 공백 없이
+    #   렌더하면 라벨+상태가 한 토큰으로 붙는다("발주현황입고상세내역전송성공").
+    #   현재 공백은 쿠팡 마크업 들여쓰기 덕이라 미니파이 한 번이면 사라진다.
+    #   이때만 부분문자열 제거로 재시도하되 **'전송성공' 정확 일치일 때만** 채택한다.
+    #   잔여가 비어도 False로 승격시키지 않는다 — 라벨 드리프트가 상태 토큰을 잘라먹은 경우와
+    #   구분할 수 없어서다(부분문자열 replace의 '조용한 False 오판'을 되살리지 않는다).
+    squashed = rest
+    for btn in _SETTLE_LINK_BUTTONS:
+        squashed = squashed.replace(btn, "")
+    if squashed.strip() == _TRANSMIT_SUCCESS:
+        return True
+    if seen is None or rest not in seen:
+        if seen is not None:
+            seen.add(rest)
+        log.warning("rocket 정산 파서: 미관측 전송상태 토큰=%r (셀 원문=%r) → None", rest, s)
+    return None
 
 
 def parse_settlement_rows(rows: list[list[str]]) -> list[dict]:
@@ -176,11 +227,23 @@ def parse_settlement_rows(rows: list[list[str]]) -> list[dict]:
     # 헤더명 → 컬럼 인덱스
     idx: dict[str, int] = {}
     for col_name, key in _SETTLE_COL.items():
-        if col_name in header:
+        if col_name not in header:
+            continue
+        if col_name == "":
+            # 빈 헤더('')는 링크 컬럼 = 문서상 항상 **마지막**(ref 20 §4 #16) → 뒤에서 찾는다.
+            #   빈 헤더가 둘 이상이면 헤더만으로는 구분 불가 → 가정을 소리내어 밝히고 마지막을 택한다.
+            if header.count("") > 1:
+                log.warning("rocket 정산 파서: 빈 헤더 %d개 → 마지막을 링크 컬럼으로 가정. header=%s",
+                            header.count(""), header)
+            idx[key] = len(header) - 1 - header[::-1].index("")
+        else:
             idx[key] = header.index(col_name)
     if "invoice_seq" not in idx:
         log.warning("rocket 정산 파서: '계산서번호' 헤더 없음 → 파싱 중단. header=%s", header[:6])
         return []
+    if "transmit_cell" not in idx:
+        # 조용히 전 행 None이 되는 것을 막는다 — 이 커밋이 존재하는 이유가 '컬럼이 소리 없이 사라짐'이다.
+        log.warning("rocket 정산 파서: 링크 컬럼(빈 헤더) 없음 → 전송상태 전 행 None. header=%s", header)
 
     def cell(row: list, key: str) -> Any:
         i = idx.get(key)
@@ -189,6 +252,7 @@ def parse_settlement_rows(rows: list[list[str]]) -> list[dict]:
         return row[i]
 
     records: list[dict] = []
+    unknown_transmit: set[str] = set()  # 미관측 전송상태 토큰 — 파싱 1회당 토큰당 warning 1줄
     for row in rows[1:]:
         if not isinstance(row, (list, tuple)) or not row:
             continue
@@ -209,6 +273,7 @@ def parse_settlement_rows(rows: list[list[str]]) -> list[dict]:
             "tax_type": (str(cell(row, "tax_type")).strip() or None) if cell(row, "tax_type") else None,
             "first_payment_amount": _to_dec(cell(row, "first_payment_amount")),
             "second_payment_amount": _to_dec(cell(row, "second_payment_amount")),
+            "tax_invoice_transmitted": _to_transmitted(cell(row, "transmit_cell"), unknown_transmit),
         })
     return records
 
@@ -228,6 +293,7 @@ _PO_ITEM_COL = {
     "barcode_name": 2,      # "바코드 상품명"(첫 토큰=바코드)
     "purchase_type": 3,     # 매입유형(일반매입/직매입 + 과세)
     "order_qty": 4,         # 발주수량
+    "vendor_confirmed_qty": 5,  # 업체납품가능수량(ref 20b §2) = PO그레인 sumOfVendorConfirmedQty의 per-SKU 판
     "unit_purchase_price": 6,   # 매입가(단가, gross=쿠팡 지급 단가)
     "line_order_amount": 9,     # 발주금액(라인, gross)
     "line_supply_amount": 10,   # 공급가액(라인, net)
@@ -262,6 +328,7 @@ def parse_po_item_rows(rows: list[list[str]]) -> list[dict]:
             "product_name": name.strip() or None,
             "purchase_type": str(row[_PO_ITEM_COL["purchase_type"]] or "").strip() or None,
             "order_qty": _to_int(row[_PO_ITEM_COL["order_qty"]]),
+            "vendor_confirmed_qty": _to_int(row[_PO_ITEM_COL["vendor_confirmed_qty"]]),
             "unit_purchase_price": _to_dec(row[_PO_ITEM_COL["unit_purchase_price"]]),
             "line_order_amount": _to_dec(row[_PO_ITEM_COL["line_order_amount"]]),
             "line_supply_amount": _to_dec(row[_PO_ITEM_COL["line_supply_amount"]]),

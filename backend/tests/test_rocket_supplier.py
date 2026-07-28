@@ -4,8 +4,10 @@
 #   ingest(인메모리 SQLite): snapshot upsert 멱등.
 from __future__ import annotations
 
+import json
 from datetime import date, datetime
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine
@@ -19,6 +21,10 @@ from app.models import (
 )
 from app.clients.coupang import rocket_supplier as rs
 from app.services.coupang import rocket_supplier_sync as sync
+
+
+# 저장소 루트(backend/tests/ → ../..) — 원본 증거 파일(docs/references/data) 직접 파싱용.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 # ─── 실측 fixture (ref 20) ─────────────────────────────
@@ -72,9 +78,11 @@ _SETTLE_ROWS = [
     ["30025494", "주식회사 오하이테크", "2026-06-16", "2026-08-14", "과세", "일반", "입고",
      "역발행", "510,819", "51,081", "561,900", "-", "-", "0", "561900", "발주현황 입고상세내역"],
     ["30015106", "주식회사 오하이테크", "2026-06-15", "2026-08-14", "과세", "일반", "입고",
-     "역발행", "204,437", "20,443", "224,880", "2026-06-16", "-", "0", "224880", "전송성공"],
+     "역발행", "204,437", "20,443", "224,880", "2026-06-16", "-", "0", "224880",
+     "발주현황 입고상세내역 전송성공"],
     ["30003353", "주식회사 오하이테크", "2026-06-14", "2026-08-12", "과세", "일반", "입고",
-     "역발행", "1,101,800", "110,180", "1,211,980", "2026-06-15", "-", "0", "1211980", "전송성공"],
+     "역발행", "1,101,800", "110,180", "1,211,980", "2026-06-15", "-", "0", "1211980",
+     "발주현황 입고상세내역 전송성공"],
 ]
 
 
@@ -169,6 +177,100 @@ def test_parse_settlement_missing_invoice_header():
     assert rs.parse_settlement_rows([["거래처명", "공급가액"], ["X", "100"]]) == []
 
 
+# ═══ 전자세금계산서 전송상태(마지막 빈-헤더 링크 컬럼) ═══
+def test_to_transmitted_variants():
+    # 실측 2변형(DOM 샘플 10행 전수) + 방어 케이스
+    assert rs._to_transmitted("발주현황 입고상세내역 전송성공") is True
+    assert rs._to_transmitted("발주현황 입고상세내역") is False  # 상태 표기 없음 = 미전송
+    assert rs._to_transmitted("전송성공") is True               # 버튼 라벨 없이 상태만 온 경우
+    assert rs._to_transmitted("") is None                      # 빈 셀 = 판별 불가
+    assert rs._to_transmitted(None) is None
+    # 미관측 토큰은 True/False로 뭉개지 않고 None(D-13)
+    assert rs._to_transmitted("발주현황 입고상세내역 전송실패") is None
+
+
+def test_parse_settlement_transmitted_column():
+    recs = rs.parse_settlement_rows(_SETTLE_ROWS)
+    # 30025494 = 확정일 '-' + 전송성공 표기 없음 → False, 나머지 2건은 확정일 있음 + 전송성공 → True
+    assert recs[0]["tax_invoice_transmitted"] is False
+    assert recs[0]["tax_invoice_confirmed_date"] is None
+    assert recs[1]["tax_invoice_transmitted"] is True
+    assert recs[2]["tax_invoice_transmitted"] is True
+
+
+def test_to_transmitted_button_label_drift_never_yields_false():
+    # ★버튼 라벨이 드리프트해도 잔여를 잘라 먹지 않는다(토큰 정확 일치).
+    #   부분문자열 replace였다면 잔여가 비어 False로 오판할 수 있는 자리.
+    assert rs._to_transmitted("발주현황조회 입고상세내역 전송성공") is None  # 미관측 토큰 → None
+    assert rs._to_transmitted("발주 현황 입고상세내역") is None            # 라벨 분리 → 판별 불가
+    # 정상 라벨에서는 여전히 판정된다(회귀 방어)
+    assert rs._to_transmitted("발주현황 입고상세내역 전송성공") is True
+
+
+def test_to_transmitted_no_whitespace_between_links():
+    # ★페처는 DOMParser 문서의 innerText(=textContent)로 셀을 뽑아 <a> 사이 공백을 보장받지 못한다.
+    #   쿠팡 마크업이 미니파이되면 라벨+상태가 한 토큰으로 붙는다 → 그때도 전송성공은 살려낸다.
+    assert rs._to_transmitted("발주현황입고상세내역전송성공") is True
+    # 다만 붙어 있는데 상태 토큰이 없으면 False로 승격시키지 않는다(라벨 드리프트와 구분 불가)
+    assert rs._to_transmitted("발주현황입고상세내역") is None
+
+
+def test_to_transmitted_warns_once_per_token():
+    # 미관측 토큰 warning은 파싱 1회당 토큰당 1줄(정산 최대 100p×50행 → 로그 폭주 방지)
+    seen: set[str] = set()
+    for _ in range(5):
+        assert rs._to_transmitted("발주현황 입고상세내역 전송실패", seen) is None
+    assert seen == {"전송실패"}
+
+
+def test_parse_settlement_transmitted_missing_column(caplog):
+    # 링크 컬럼(빈 헤더) 자체가 없는 DOM → None(다른 필드 파싱은 정상) + **소리내어** 경고
+    rows = [["계산서번호", "공급가액"], ["30025494", "510,819"]]
+    with caplog.at_level("WARNING"):
+        recs = rs.parse_settlement_rows(rows)
+    assert recs[0]["tax_invoice_transmitted"] is None
+    assert recs[0]["supply_amount"] == Decimal("510819")
+    assert any("링크 컬럼" in r.getMessage() for r in caplog.records)
+
+
+def test_parse_settlement_transmitted_leading_blank_header():
+    # 앞쪽에 빈 헤더가 끼어도 링크 컬럼(마지막)을 정확히 집는다
+    header = [""] + _SETTLE_HEADER
+    row = ["x"] + _SETTLE_ROWS[1]
+    recs = rs.parse_settlement_rows([header, row])
+    assert len(recs) == 1
+    assert recs[0]["invoice_seq"] == 30025494
+    assert recs[0]["tax_invoice_transmitted"] is False
+
+
+def test_parse_settlement_ambiguous_blank_headers_warns(caplog):
+    # 빈 헤더가 2개 이상이면 '마지막을 링크 컬럼으로 가정'했음을 소리내어 밝힌다
+    header = _SETTLE_HEADER + [""]
+    row = _SETTLE_ROWS[2] + ["발주현황 입고상세내역 전송성공"]
+    with caplog.at_level("WARNING"):
+        recs = rs.parse_settlement_rows([header, row])
+    assert recs[0]["tax_invoice_transmitted"] is True
+    assert any("빈 헤더" in r.getMessage() for r in caplog.records)
+
+
+def test_parse_settlement_from_live_dom_sample():
+    """★원본 증거 파일 직접 파싱(ref 20 §4): 10행 중 9행 전송성공 / 1행 미전송."""
+    sample = _REPO_ROOT / "docs" / "references" / "data" / "20_rocket_1p_settlement_dom_sample.json"
+    if not sample.exists():
+        # skip이 아니라 fail: 이 파일은 git 추적 중이고, 파싱 규칙의 **유일한** 근거다.
+        #   사라졌는데 스위트가 green이면 구현 베끼기 테스트만 남는다.
+        pytest.fail(f"원본 DOM 샘플이 없다(git 추적 파일): {sample}")
+    recs = rs.parse_settlement_rows(json.loads(sample.read_text(encoding="utf-8"))["rows"])
+    assert len(recs) == 10
+    flags = [r["tax_invoice_transmitted"] for r in recs]
+    assert flags.count(True) == 9
+    assert flags.count(False) == 1
+    assert flags.count(None) == 0  # 전 행 판별 성공(미관측 토큰 없음)
+    # 전송성공 ⟺ 세금계산서 확정일 존재(실측 상관, ref 20 §4)
+    for r in recs:
+        assert r["tax_invoice_transmitted"] is (r["tax_invoice_confirmed_date"] is not None)
+
+
 # ═══ ingest Harness (인메모리 SQLite) ═══
 @pytest.fixture
 def db():
@@ -208,6 +310,8 @@ def test_ingest_settlement(db):
     inv = db.query(CoupangRocketSettlement).filter_by(invoice_seq=30025494).one()
     assert inv.vendor_id == "A01029796"  # 계정축 주입
     assert inv.payment_amount == Decimal("561900")
+    assert inv.tax_invoice_transmitted is False  # 전송성공 표기 없는 행
+    assert db.query(CoupangRocketSettlement).filter_by(invoice_seq=30015106).one().tax_invoice_transmitted is True
     # 멱등
     sync.ingest_settlements(db, "A01029796", _SETTLE_ROWS)
     assert db.query(CoupangRocketSettlement).count() == 3
@@ -255,6 +359,7 @@ def test_parse_po_items_fields():
     assert it["product_name"].startswith("오하이 풀커버 강화유리")
     assert it["purchase_type"] == "일반매입 과세"
     assert it["order_qty"] == 89
+    assert it["vendor_confirmed_qty"] == 89  # 업체납품가능수량(인덱스 5)
     assert it["unit_purchase_price"] == Decimal("10740")  # 쿠팡→우리 매입 단가(gross)
     assert it["line_order_amount"] == Decimal("955860")    # line gross
     assert it["line_supply_amount"] == Decimal("868996")   # net
@@ -273,6 +378,17 @@ def test_parse_po_items_barcode_internal_code():
     items = rs.parse_po_item_rows(_PO_DETAIL_ROWS)
     assert items[2]["barcode"] == "R237867070002"
     assert items[2]["product_name"].startswith("오하이 일미리")
+
+
+def test_parse_po_items_vendor_confirmed_qty_distinct_from_order_qty():
+    # 발주수량(인덱스 4)과 업체납품가능수량(인덱스 5)이 다른 행 → 인덱스 혼동 방지
+    partial = [
+        ["1", "50342949", "8800252590227 오하이 풀커버", "일반매입 과세",
+         "89", "40", "10,740", "9,764", "976", "955,860", "868,996", "86,864", ""],
+    ]
+    it = rs.parse_po_item_rows(partial)[0]
+    assert it["order_qty"] == 89
+    assert it["vendor_confirmed_qty"] == 40  # 부분 확인(발주분 일부만 납품 가능)
 
 
 def test_parse_po_items_total_qty_matches_summary():
@@ -300,6 +416,7 @@ def test_ingest_po_items_snapshot_replace(db):
     )
     assert it.vendor_id == "A01029796"
     assert it.order_qty == 89
+    assert it.vendor_confirmed_qty == 89  # 업체납품가능수량 적재
     assert it.line_order_amount == Decimal("955860")
     # 멱등: 같은 PO 재수신 시 snapshot replace(중복 누적 없이 4건 유지)
     sync.ingest_po_items(db, 134342890, "A01029796", _PO_DETAIL_ROWS)
