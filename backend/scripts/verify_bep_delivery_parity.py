@@ -82,7 +82,9 @@ def verdict_parity(db: Session) -> int:
           "(원천 부재·잘림으로 대조불가 %d · 컬럼 미충전 %d)"
           % (len(rows), n_compared, diffs, n_no_raw, n_raw_only))
     if n_compared == 0:
-        print("  ⚠ 실제로 대조한 행이 0건이다 — 이 실행의 [1]은 아무것도 증명하지 않는다")
+        # ★무증명 실행은 초록불로 끝내지 않는다 — "아무것도 못 봤다"는 PASS가 아니라 FAIL이다.
+        print("  ✗ 실제로 대조한 행이 0건이다 — 이 실행의 [1]은 아무것도 증명하지 않는다")
+        diffs += 1
     return diffs
 
 

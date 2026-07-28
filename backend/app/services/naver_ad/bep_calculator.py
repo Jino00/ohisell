@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 import statistics
-from datetime import date, timedelta
+from datetime import datetime, time, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 
 from sqlalchemy import delete, func as sqlfunc
@@ -46,7 +46,7 @@ _PRICE_WINDOW_DAYS = 120  # 넓은 창 — 표본 민감 항목(평균 수량·�
 # N=10은 내부 최적점(N=5는 편향 +1.21%, N=20↑는 정확도 붕괴). 사다리와 달리 N에 둔감하다(§5).
 _RECENT_SAMPLE_SIZE = 10          # E5c의 N
 _RECENT_SAMPLE_MAX_AGE_DAYS = 120  # 달력 상한 — 신선도 하한을 잃지 않기 위한 안전장치(§6)
-_EPOCH_DATE = date(1970, 1, 1)  # order_date 결측 행 정렬용 sentinel
+_EPOCH_DATETIME = datetime(1970, 1, 1)  # order_date 결측 행 정렬용 sentinel(항상 뒤로)
 
 # ── D-NAO-57 (C) 배송비: 건당 단가(부가세포함, Jino 확정 2026-07-18) ──
 # ★단가·판별의 단일 진실 원천 = services/order_delivery.py (Jino 지시 2026-07-28로 이관).
@@ -189,38 +189,59 @@ def _is_nbaesong(row) -> bool:
 
 
 def _naver_order_rows(db: Session) -> dict[str, list[dict]]:
-    """네이버 주문(수량>0)을 상품별로 1회만 적재 — 날짜 내림차순.
+    """네이버 주문(수량>0)을 상품별로 1회만 적재 — 최신순.
 
     ★종전엔 창별로 같은 스캔을 여러 번 돌렸다. 레짐 표본은 상품마다 "최근 N건"이라 SQL에서
     창을 미리 자를 수 없으므로, 한 번 읽고 파이썬에서 잘라 쓴다(주문 1만 건 규모).
 
+    ★정렬키 = (order_date **전체 datetime**, id) 내림차순. 일 단위 date로 자르면 같은 날
+    주문이 여러 건일 때 "최근 10건"의 경계가 **DB 물리 행 순서**에 좌우된다 — 지금 SQLite에선
+    삽입 순서와 우연히 일치하지만, Postgres 이관·백필·VACUUM 뒤엔 조용히 달라질 수 있다.
+    id 타이브레이크로 어떤 엔진에서도 결정적이 되게 고정한다(라이브 델타 0으로 확인).
+
     행 dict: quantity / unit_price(None=판매가 0) / collected(고객 수취) / nbaesong(배송방식) /
-             order_date. 지불 배송비는 값이 아니라 **혼합비**로 쓰므로 방식만 남긴다.
+             order_date(달력 상한 비교용 date) / order_at(정렬용 원본) / id.
+             지불 배송비는 값이 아니라 **혼합비**로 쓰므로 방식만 남긴다.
     """
     rows = db.query(
-        Order.platform_product_id, Order.quantity, Order.selling_price, Order.shipping_cost,
-        Order.order_date, Order.delivery_attribute_type, Order.raw_data,
+        Order.id, Order.platform_product_id, Order.quantity, Order.selling_price,
+        Order.shipping_cost, Order.order_date, Order.delivery_attribute_type, Order.raw_data,
     ).filter(
         Order.channel_id == NAVER_CHANNEL_ID,
         Order.quantity > 0,
     ).all()
     out: dict[str, list[dict]] = {}
-    for pid, qn, sp, ship_in, od, attr, raw in rows:
+    for oid, pid, qn, sp, ship_in, od, attr, raw in rows:
         if not pid:
             continue
         qty = int(qn)
         price = Decimal(str(sp)) if sp else Decimal("0")
         out.setdefault(pid, []).append({
+            "id": oid,
             "quantity": qty,
             "unit_price": (price / Decimal(qty)) if price > 0 else None,
             # 수취 배송비: None=배송비 포함 상품(수취 0 취급, Order 모델 주석과 정합)
             "collected": Decimal(str(ship_in)) if ship_in else Decimal("0"),
             "nbaesong": _is_nbaesong({"delivery_attribute_type": attr, "raw_data": raw}),
             "order_date": od.date() if hasattr(od, "date") else od,
+            "order_at": od,
         })
     for lst in out.values():
-        lst.sort(key=lambda r: r["order_date"] or _EPOCH_DATE, reverse=True)
+        lst.sort(key=_order_sort_key, reverse=True)
     return out
+
+
+def _order_sort_key(row: dict) -> tuple:
+    """최신순 정렬키 — (주문 시각, id). 결측·date-only 값도 datetime으로 정규화해 비교 가능하게.
+
+    date와 datetime은 서로 비교하면 TypeError라, 어느 쪽이 들어와도 datetime으로 맞춘다
+    (SQLite는 컬럼 타입과 무관하게 저장된 형태를 그대로 돌려준다)."""
+    at = row.get("order_at") or row.get("order_date")
+    if at is None:
+        at = _EPOCH_DATETIME
+    elif not isinstance(at, datetime):
+        at = datetime.combine(at, time.min)
+    return (at, row.get("id") or 0)
 
 
 def _recent_sample(rows: list[dict], n: int = _RECENT_SAMPLE_SIZE) -> tuple[list[dict], bool]:

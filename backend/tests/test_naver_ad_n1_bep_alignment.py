@@ -1,11 +1,13 @@
-# test_naver_ad_n1_bep_alignment.py — N1 BEP 배송방식 인지형 정합 (D-NAO-99, ref 42)
-# 커버: ① 적응형 최근 창 선택(사다리·nmin·전기간 폴백) ② 판매가·N배송 혼합비만 적응형,
-#   평균수량·수취배송비는 넓은 창 유지 ③ product_commission SA(주문관리·기저 매출연동 분해,
-#   N배송 프리미엄 1.5%p 제거·재부과, 표본<5 계정 폴백, 표본 없음 → 계정 단일 요율 폴백)
-#   ④ calculate_bep 통합 손계산.
+# test_naver_ad_n1_bep_alignment.py — N1 BEP 배송방식 인지형 정합 (D-NAO-99 ref 42 · D-NAO-100 ref 43)
+# 커버: ① 레짐 표본 = **최근 10건 중앙값**(달력 상한 120일, E5c) — 10건 경계·상한 걸림·10건 미만·
+#   상한 내 0건일 때 전기간 폴백·주문 0건, 그리고 표본이 한 건씩 밀려 나가는 **왕복 없는 단조 이동**
+#   (폐기된 적응형 사다리의 계단 진동이 재발하지 않는지) ② 판매가와 N배송 혼합비가 같은 표본을 쓰고,
+#   평균수량·수취배송비는 넓은 창(120일)을 유지 ③ product_commission SA(주문관리·기저 매출연동 분해,
+#   N배송 프리미엄 1.5%p 제거·재부과, 정확 키 매칭·분할 라인 중복 방지, 표본<5 계정 폴백,
+#   표본 없음 → 계정 단일 요율 폴백) ④ calculate_bep 통합 손계산.
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, time as dt_time, timedelta
 from decimal import Decimal
 
 import pytest
@@ -86,6 +88,24 @@ def test_recent_sample_falls_back_to_alltime_when_cap_empty():
     rows = _rows(*[(200, False)] * 15)
     sub, fresh = bep_calculator._recent_sample(rows)
     assert not fresh and len(sub) == 10
+
+
+def test_order_rows_sorted_by_datetime_then_id(db):
+    """정렬키 = (주문 시각, id) — 같은 날 주문이 여러 건이어도 DB 물리 행 순서에 의존하지 않는다.
+
+    같은 날짜의 시각 다른 주문 3건을 **역순으로 삽입**해도 최신순이 시각 기준으로 나와야 한다.
+    """
+    for hour, num in ((9, "b"), (18, "c"), (3, "a")):
+        db.add(Order(channel_id=6, platform_product_id="p1", order_number=f"o-{num}",
+                     platform_order_line_id=f"l-{num}", quantity=1, selling_price=Decimal("10000"),
+                     order_date=datetime.combine(kst_today() - timedelta(days=1),
+                                                 dt_time(hour, 0))))
+    db.commit()
+    rows = bep_calculator._naver_order_rows(db)["p1"]
+    assert [r["order_at"].hour for r in rows] == [18, 9, 3]
+    # 시각이 완전히 같으면 id 내림차순(결정적) — 물리 행 순서가 아니라 키로 결정된다
+    same = [{"order_at": datetime(2026, 7, 1, 12), "id": i} for i in (1, 3, 2)]
+    assert [r["id"] for r in sorted(same, key=bep_calculator._order_sort_key, reverse=True)] == [3, 2, 1]
 
 
 def test_recent_sample_size_default_is_ten():
