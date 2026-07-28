@@ -486,6 +486,50 @@ def test_A3_cooldown_blocked_restore_retries_successfully_next_hour(db):
     assert db.query(NaverCampaignSettings).one().base_daily_budget == 100_000
 
 
+def test_H1_manual_budget_change_after_failed_restore_is_not_reverted(db):
+    """★리뷰 R2 P2-R2-1(H1): 원복 실패 뒤 Jino가 콘솔에서 50,000→200,000으로 올린 상황.
+
+    change_log 순서만 보면 200,000을 '우리 미복원 증액'으로 오인해 되돌린다(사람 조작 침범).
+    증액 행의 after_value(150,000)와 현재 예산(200,000)이 다르므로 우리 증액은 더 이상
+    서 있지 않다 → ①원복 후보 제외 ②base를 200,000으로 정상 재시드(교착 해소)."""
+    _settings(db, base_daily_budget=100_000)
+    _mapping(db)
+    _bep(db)
+    _pacing_log(db, changed_at=datetime(2026, 7, 26, 20, 20), after='{"dailyBudget": 150000}')
+    # 원복 실패(성공 budget_down_pacing 없음) + 사람이 200,000으로 수동 변경
+    _snap(db, 12, 10_000, 200_000)
+
+    assert budget_pacing.restore_candidates(db, now=datetime(2026, 7, 27, 12, 20)) == []
+    d = budget_pacing.evaluate(db, now=datetime(2026, 7, 27, 12, 20))[0]
+    assert d["base_budget"] == 200_000
+    assert d["base_seeded"] is True
+    assert d["base_keep_reason"] == ""
+
+
+def test_manual_change_detection_does_not_weaken_ratchet_defense(db):
+    """우리 증액값이 그대로 서 있으면(사람 개입 없음) 래칫 방어는 그대로 작동한다."""
+    _settings(db, base_daily_budget=100_000)
+    _mapping(db)
+    _bep(db)
+    _pacing_log(db, changed_at=datetime(2026, 7, 26, 20, 20), after='{"dailyBudget": 150000}')
+    _snap(db, 12, 10_000, 150_000)  # 우리가 설정한 값 그대로
+    assert len(budget_pacing.restore_candidates(db, now=datetime(2026, 7, 27, 12, 20))) == 1
+    d = budget_pacing.evaluate(db, now=datetime(2026, 7, 27, 12, 20))[0]
+    assert d["base_budget"] == 100_000 and d["base_seeded"] is False
+
+
+def test_unparseable_after_value_stays_conservative(db):
+    """after_value를 못 읽으면 대조를 포기하고 보수적으로 '미복원'으로 남긴다."""
+    _settings(db, base_daily_budget=100_000)
+    _mapping(db)
+    _bep(db)
+    _pacing_log(db, changed_at=datetime(2026, 7, 26, 20, 20), after="not-json")
+    _snap(db, 12, 10_000, 200_000)
+    assert len(budget_pacing.restore_candidates(db, now=datetime(2026, 7, 27, 12, 20))) == 1
+    d = budget_pacing.evaluate(db, now=datetime(2026, 7, 27, 12, 20))[0]
+    assert d["base_budget"] == 100_000 and "미복원" in d["base_keep_reason"]
+
+
 def test_restore_candidate_survives_stale_snapshot_at_midnight(db):
     """★리뷰 P2-1: 23:20 증액 → 00:05 리셋이 보는 최신 스냅샷은 23:05분 것(증액 전 예산).
     그 관측으로 'observed ≤ base'라고 판단해 skip하면 리셋 잡이 영원히 헛돈다."""

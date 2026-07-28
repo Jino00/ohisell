@@ -268,8 +268,18 @@ def _last_pacing_write(db: Session, campaign_id: str, action: str) -> NaverChang
     )
 
 
-def unrestored_raise(db: Session, campaign_id: str) -> NaverChangeLog | None:
+def unrestored_raise(
+    db: Session, campaign_id: str, *, current_budget: int | None = None
+) -> NaverChangeLog | None:
     """아직 base로 되돌려지지 않은 마지막 BP 증액(없으면 None) — 리뷰 P1-1의 핵심 판정.
+
+    current_budget을 주면 **우리 증액이 지금도 서 있는지**까지 확인한다(리뷰 R2 P2-R2-1):
+    change_log 순서만 보면, 원복 실패 후 Jino가 콘솔에서 예산을 올려놓은 경우(50,000→200,000)
+    그 200,000을 "우리 미복원 증액"으로 오인해 되돌려버린다(사람 조작 침범 + base 영구 교착).
+    증액 행의 after_value.dailyBudget(우리가 설정한 값)과 현재 예산이 다르면 우리 증액은 더
+    이상 서 있지 않다 — None을 돌려 ①원복 후보에서 빠지고 ②base가 정상 재시드된다(사람이
+    정한 값을 새 base로 흡수 — ⑤ 재시드 철학 그대로).
+    ★after_value 파싱 불가(값을 못 읽음)면 대조를 포기하고 보수적으로 "미복원"으로 남긴다.
 
     ★왜 필요한가: base 재시드를 "오늘 증액했는가"로만 막으면, **어제 증액 + 원복 실패**
     상태에서 다음 날 첫 평가가 부풀린 예산을 새 base로 흡수해버린다. 그러면
@@ -286,6 +296,11 @@ def unrestored_raise(db: Session, campaign_id: str) -> NaverChangeLog | None:
     last_restore = _last_pacing_write(db, campaign_id, ACTION_BUDGET_DOWN_PACING)
     if last_restore is not None and last_restore.changed_at >= last_raise.changed_at:
         return None
+    if current_budget is not None:
+        our_value = _budget_from_value(last_raise.after_value)
+        if our_value is not None and int(current_budget) != our_value:
+            # 우리 증액값이 더 이상 서 있지 않다 = 그 사이 사람이 예산을 바꿨다.
+            return None
     return last_raise
 
 
@@ -442,7 +457,7 @@ def evaluate(db: Session, *, now: datetime) -> list[dict]:
         elif (
             stored_base
             and int(current_budget) > int(stored_base)
-            and unrestored_raise(db, campaign_id) is not None
+            and unrestored_raise(db, campaign_id, current_budget=int(current_budget)) is not None
         ):
             base_budget = int(stored_base)
             keep_reason = "미복원 BP 증액 존재 — 재시드 금지(래칫 방어, 리뷰 P1-1)"
@@ -604,7 +619,10 @@ def restore_candidates(db: Session, *, now: datetime) -> list[dict]:
       ① base_daily_budget이 시드돼 있고 auto_operate=True
       ② 마지막 **성공** 증액(budget_up_pacing)이 존재하고 그 날짜 < 오늘(KST) — 오늘 올린 건 유지
       ③ 그 증액 이후 성공한 원복(budget_down_pacing)이 없음(이미 되돌렸으면 skip) = unrestored_raise
-      ④ 최신 스냅샷의 daily_budget > base(사전 점검 — 사람이 이미 내렸으면 skip).
+      ④ 최신 스냅샷의 daily_budget > base(사전 점검 — 사람이 이미 내렸으면 skip)
+      ⑤ 그 관측 예산 == 우리 증액 행의 after_value(우리 증액이 지금도 서 있는가, 리뷰 R2).
+         다르면 원복 실패 뒤 사람이 따로 올려둔 값이라 되돌리지 않는다(사람 조작 침범 금지 +
+         base 영구 교착 차단 — evaluate가 그 값을 새 base로 재시드한다).
          ★단 그 스냅샷 as-of가 **마지막 증액 시각보다 오래됐으면 skip하지 않는다**(리뷰 P2-1):
          23:20 증액 → 00:05 리셋 잡이 보는 최신 스냅샷은 23:05분 것이라 증액 전 예산을 담고
          있다. 그걸 근거로 "이미 base다"라고 판단하면 리셋 잡이 매번 헛돈다. 스냅샷이 stale
@@ -631,7 +649,7 @@ def restore_candidates(db: Session, *, now: datetime) -> list[dict]:
         if not base:
             continue
 
-        last_raise = unrestored_raise(db, campaign_id)  # ②③ 통합 판정
+        last_raise = unrestored_raise(db, campaign_id)  # ②③ 통합 판정(순서만)
         if last_raise is None or last_raise.changed_at.date() >= today:
             continue
 
@@ -652,8 +670,19 @@ def restore_candidates(db: Session, *, now: datetime) -> list[dict]:
             if latest else None
         )
         snapshot_stale = snapshot_as_of is None or snapshot_as_of < last_raise.changed_at
-        if observed is not None and observed <= int(base) and not snapshot_stale:
-            continue
+        if observed is not None and not snapshot_stale:
+            if observed <= int(base):
+                continue  # ④ 사람이 이미 내렸음
+            # ⑤(리뷰 R2 P2-R2-1) 우리 증액이 지금도 서 있는가 — after_value와 현재 예산 대조.
+            # 다르면 원복 실패 뒤 사람이 따로 올려둔 값이다. 그걸 되돌리면 사람 조작 침범이라
+            # 후보에서 제외한다(같은 판정으로 evaluate는 그 값을 새 base로 정상 재시드한다).
+            our_value = _budget_from_value(last_raise.after_value)
+            if our_value is not None and int(observed) != our_value:
+                log.info(
+                    "budget_pacing: %s 원복 skip — 우리 증액값 %s원이 현재 %s원과 불일치"
+                    "(사람 개입으로 판단, 되돌리지 않음)", campaign_id, our_value, observed,
+                )
+                continue
 
         out.append({
             "campaign_id": campaign_id,
