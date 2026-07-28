@@ -40,6 +40,12 @@
 # GET /api/naver/ad/performance/campaign/{id} — ③캠페인 상세(일별 ROAS·기준선·그룹 배지).
 # GET /api/naver/ad/performance/budget    — ④예산 소진 곡선·암전 구간·예산 변경 이력.
 #   위 5개 전부 perf_today_harness / perf_campaign_harness 경유·**읽기 전용**(계획서 §0-1).
+# GET /api/naver/ad/performance/bep-breakdown — ⑤BEP 구성(Phase 3). 상품별 판매가·수수료·원가·
+#   물류비 → 공헌이익 → 이익 CPC 상한의 **근거 표**. perf_timeline_harness 경유·읽기 전용.
+#   원가 미입력 상품은 추정치로 채우지 않고 "산출 불가"로 나간다(원칙22).
+# GET /api/naver/ad/performance/timeline — ⑥개선 타임라인(Phase 3). 트랙 결정 카탈로그 ∪
+#   라이브 구조 변경 + 이벤트별 전후 7일. **인과 주장 금지** — 겹친 변경을 전부 표기하고
+#   사후 창이 안 찼으면 "관찰 중"으로 말한다(계획서 §3-3).
 # GET /api/naver/ad/bm/agency-ops     — BM SA-2 조작 이벤트 온디맨드 드릴다운(D-NAO-79 ③).
 # GET /api/naver/ad/bm/snapshot       — BM SA-1 구조 스냅샷 온디맨드 드릴다운(D-NAO-79 ③).
 # GET /api/naver/ad/bm/benchmark      — BM SA-3 벤치마크 프라이어 현황 온디맨드 드릴다운
@@ -86,6 +92,8 @@ from app.services.naver_ad import metrics_aggregator
 from app.services.naver_ad import naver_execution_harness
 from app.services.naver_ad import naver_sa_writer
 from app.services.naver_ad import perf_campaign_harness
+from app.services.naver_ad import perf_timeline_harness
+from app.services.naver_ad import retro_rollup
 from app.services.naver_ad import perf_today_harness
 from app.services.naver_ad import proposal_writer
 from app.services.naver_ad.ad_report import build_report
@@ -884,33 +892,6 @@ def expert_delegation_put(body: ExpertDelegationIn, db: Session = Depends(get_db
     return _delegation_response(db)
 
 
-_RETRO_VERDICTS = ("correct", "gray", "wrong", "no_spend")
-
-
-def _retro_board_rollup(rows: list[NaverRetroSignal], horizon: int) -> dict:
-    """단일 보드·단일 지평(d3/d7)의 rollup — PLAN §5: n, correct/gray/wrong/no_spend,
-    precision_spenders(=correct/(correct+gray+wrong), no_spend 제외 — 지출 지속 타깃 기준),
-    bleed_sum(down/pause & verdict=correct 행의 양수 bleed 합, ref 31 §1-c와 동일 산식)."""
-    verdict_attr, bleed_attr = f"verdict_d{horizon}", f"bleed_post{horizon}"
-    counts = dict.fromkeys(_RETRO_VERDICTS, 0)
-    bleed_sum = 0
-    for row in rows:
-        verdict = getattr(row, verdict_attr)
-        if verdict is None:  # 아직 채점 전(사후창 미도달) — rollup 대상 아님
-            continue
-        counts[verdict] = counts.get(verdict, 0) + 1
-        if row.direction in ("down", "pause") and verdict == "correct":
-            bleed_sum += max(0, getattr(row, bleed_attr) or 0)
-    spenders = counts["correct"] + counts["gray"] + counts["wrong"]
-    precision = round(counts["correct"] / spenders, 4) if spenders else None
-    return {
-        "n": spenders + counts["no_spend"],
-        "correct": counts["correct"], "gray": counts["gray"],
-        "wrong": counts["wrong"], "no_spend": counts["no_spend"],
-        "precision_spenders": precision, "bleed_sum": bleed_sum,
-    }
-
-
 @router.get("/retro-scorecard")
 def retro_scorecard(
     days: int = Query(28, ge=1, le=180, description="조회 창(일, asof_date/alert_date 기준)"),
@@ -930,7 +911,8 @@ def retro_scorecard(
     for row in signal_rows:
         by_board.setdefault(row.board, []).append(row)
     boards = {
-        board: {"d3": _retro_board_rollup(rows, 3), "d7": _retro_board_rollup(rows, 7)}
+        board: {"d3": retro_rollup.board_rollup(rows, 3),
+                "d7": retro_rollup.board_rollup(rows, 7)}
         for board, rows in by_board.items()
     }
 
@@ -1766,3 +1748,42 @@ def performance_budget(
     """
     day = _validate_performance_date(date_, field="date") if date_ else None
     return perf_campaign_harness.build_budget(db, day=day, campaign_id=campaign_id)
+
+
+@router.get("/performance/bep-breakdown")
+def performance_bep_breakdown(
+    campaign_id: str | None = Query(None, description="특정 광고의 상품만(선택기용)"),
+    only_actionable: bool = Query(True, description="광고에 연결된 상품만(false=네이버 전 상품)"),
+    db: Session = Depends(get_db),
+) -> dict:
+    """⑤BEP 구성 — "이 상품은 클릭당 얼마까지 써야 남나"의 **근거 표**(Phase 3, 계획서 §4-ⓓ).
+
+    판매가 − 수수료 − 원가 − 물류비 = 세전 잔액, 거기서 부가세(÷1.1)를 걷어낸 것이 공헌이익이고,
+    손익분기 ROAS = 판매가 ÷ 공헌이익이다. 화면에서 뺄셈이 맞도록 VAT 단계를 응답에 명시한다.
+
+    ★새 산식을 만들지 않는다 — 전부 매일 저장되는 `naver_product_bep` 스냅샷 값을 되짚어
+    보여줄 뿐이다. 원가가 없는 상품은 **추정치로 채우지 않고** 산출 불가 사유를 문장으로 낸다.
+    """
+    return perf_timeline_harness.build_bep_breakdown(
+        db, campaign_id=campaign_id, only_actionable=only_actionable
+    )
+
+
+@router.get("/performance/timeline")
+def performance_timeline(
+    days: int = Query(perf_timeline_harness.DEFAULT_TIMELINE_DAYS, ge=1,
+                      le=perf_timeline_harness.MAX_TIMELINE_DAYS,
+                      description="조회 창(일, 기본 90)"),
+    campaign_id: str | None = Query(None, description="특정 광고만(계정 전체 변경은 항상 포함)"),
+    db: Session = Depends(get_db),
+) -> dict:
+    """⑥개선 타임라인 — "우리가 뭘 바꿨고, 그 전후 7일은 어땠나"(Phase 3, 계획서 §4-ⓔ).
+
+    ★인과를 주장하지 않는다(계획서 §3-3 · 원칙22). 이 시스템은 변경이 거의 매일 나와 전후
+    7일 창이 서로 겹친다 — 겹친 다른 변경을 `confounded_with`로 **전부** 표기하고, 사후
+    7일이 아직 안 지난 이벤트는 "관찰 중 (N/7일)"로 말한다. "개선됐습니다"라고 쓰지 않는다.
+
+    ★카탈로그(`docs/naver_ad_improvement_events.json`)가 prod에 없어도 500이 아니다 —
+    `catalog_available:false`로 말하고 라이브 설정 변경만 낸다(계획서 §6 Phase3 완료기준 5).
+    """
+    return perf_timeline_harness.build_timeline(db, days=days, campaign_id=campaign_id)
