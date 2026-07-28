@@ -316,6 +316,20 @@ def _avg_qty_and_logistics(db: Session, *, orders_by_pid: dict[str, list[dict]] 
     return out
 
 
+def delivery_composition(db: Session) -> dict[str, dict]:
+    """상품별 배송 구성(N배송 혼합비·지불/수취 배송비·평균 수량·단가당 물류비) — **읽기 전용 공개창**.
+
+    _avg_qty_and_logistics를 그대로 노출한다(새 산식 없음). 스냅샷(naver_product_bep)은
+    `logistics_cost`(= 순배송원가 ÷ 평균수량)만 저장하고 **nb_share를 버린다**. 그래서 BEP를
+    "무엇으로 이 숫자가 됐는지" 화면(성과뷰 ⑤ · 계획서 §4-ⓓ)에서 되짚으려면 조회 시점에
+    같은 함수로 다시 구하는 수밖에 없다.
+    ★logistics_cost에서 nb_share를 **역산하지 않는다**: 저장값은 (지불−수취)÷수량이라
+      1,900+1,120p 를 두 번(수취·수량) 가려 놓아 역산이 성립하지 않는다. 억지로 역산하면
+      배송비 상수가 바뀌는 날 조용히 틀린 비율을 화면에 띄운다.
+    """
+    return _avg_qty_and_logistics(db)
+
+
 def _unit_prices(db: Session, *, orders_by_pid: dict[str, list[dict]] | None = None,
                  sample_size: int = _RECENT_SAMPLE_SIZE) -> dict[str, Decimal]:
     """네이버 상품(channel_product_id)별 대표 단가 = **최근 10건 median**(D-NAO-100 · ref 43 E5c).

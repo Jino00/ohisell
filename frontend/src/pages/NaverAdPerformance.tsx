@@ -19,6 +19,10 @@ import { PerfBudgetCurveChart } from "../components/PerfBudgetCurveChart";
 import { PerfCampaignTrendChart } from "../components/PerfCampaignTrendChart";
 import { num, won, roasX, pctFromFraction, isoKST, NO_DATA } from "../lib/format";
 import { baseDateError, compareDateError, defaultCompareDate } from "../lib/perfDateRules";
+import { stripBoldMarkers, marketBidTone, marketBidCaption } from "../lib/bepBreakdownRules";
+import {
+  confidenceLabel, observationBadge, deltaText, partialDataNote, toChartMarkers,
+} from "../lib/timelineRules";
 import { useAsyncData } from "../lib/useAsyncData";
 import {
   fetchNaverPerformanceBudget,
@@ -26,11 +30,16 @@ import {
   fetchNaverPerformanceCampaignOptions,
   fetchNaverPerformanceCompare,
   fetchNaverPerformanceDay,
+  fetchNaverPerformanceBepBreakdown,
+  fetchNaverPerformanceTimeline,
   type NaverPerformanceCampaignCard,
   type NaverPerformanceActionItem,
   type NaverPerformanceCompareRow,
   type NaverPerformanceDelta,
   type NaverPerformanceGroup,
+  type NaverPerformanceBepRow,
+  type NaverPerformanceTimelineDay,
+  type NaverPerformanceTimelineEvent,
 } from "../lib/api";
 
 /** 성과 색: 목표 이상=좋음 / 손익분기 위=주의 / 손익분기 아래=나쁨 / 모름=회색.
@@ -199,6 +208,12 @@ function CampaignDetailSection({ campaignId, days }: { campaignId: string; days:
   const { data, error } = useAsyncData(
     () => fetchNaverPerformanceCampaign(campaignId, days), [campaignId, days],
   );
+  // ③ 차트 마커용 타임라인 — 별도 호출·별도 에러 상태다. 이게 실패해도 위 차트 자체는
+  // 그대로 그리고 마커만 생략한다(타임라인 하나 때문에 ③ 섹션 전체가 죽으면 안 된다).
+  const { data: timelineData } = useAsyncData(
+    () => fetchNaverPerformanceTimeline({ days, campaignId: campaignId || undefined }),
+    [campaignId, days],
+  );
   if (error) {
     return (
       <Card title="이 광고 자세히 보기">
@@ -207,6 +222,8 @@ function CampaignDetailSection({ campaignId, days }: { campaignId: string; days:
     );
   }
   if (data === null) return <Card title="이 광고 자세히 보기"><Loading rows={4} /></Card>;
+
+  const events = timelineData ? toChartMarkers(timelineData.timeline, data.series.map((p) => p.date)) : [];
 
   return (
     <Card
@@ -242,7 +259,7 @@ function CampaignDetailSection({ campaignId, days }: { campaignId: string; days:
         </div>
 
         <PerfCampaignTrendChart series={data.series} bepRoas={data.lines.bep_roas}
-          targetRoas={data.lines.target_roas} />
+          targetRoas={data.lines.target_roas} events={events} />
         <p className="text-xs text-gray-500 break-keep border-l-2 border-gray-200 pl-2">
           {data.series_note}
         </p>
@@ -349,6 +366,335 @@ function BudgetSection({ date, campaignId }: { date: string; campaignId: string 
         <p className="text-xs text-gray-500 break-keep border-l-2 border-gray-200 pl-2">
           {data.data_note}
         </p>
+      </div>
+    </Card>
+  );
+}
+
+// ── ⑤ BEP 구성 ────────────────────────────────────────────────────
+const MARKET_BID_TONE_TEXT: Record<string, string> = {
+  good: "text-judge-good",
+  bad: "text-judge-bad",
+  idle: "text-gray-400",
+};
+
+function BepRowView({ r }: { r: NaverPerformanceBepRow }) {
+  const tone = marketBidTone(r.market_bid, r.ceiling_bid, r.ceiling_is_borrowed);
+  // 상한을 못 세운 행만 사유를 상품명 아래 붙인다(blocked_reason 우선, 없으면 ceiling_basis).
+  const noCeilingReason = r.ceiling_bid == null
+    ? stripBoldMarkers(r.blocked_reason || r.ceiling_basis || "")
+    : "";
+  const marketBidCaptionText = r.market_bid == null
+    ? ""
+    : marketBidCaption(r.market_bid_device, r.market_bid_observed_on);
+  return (
+    <tr>
+      <Td>
+        <div className="font-medium text-gray-900 break-keep">{r.product_name}</div>
+        <div className="mt-0.5 text-xs text-gray-400">광고 {r.ad_count}곳</div>
+        {noCeilingReason && (
+          <div className="mt-0.5 text-xs text-gray-500 break-keep">{noCeilingReason}</div>
+        )}
+      </Td>
+      <Td right>{won(r.selling_price)}</Td>
+      <Td right>
+        {won(r.commission_won)}
+        <div className="text-xs text-gray-400">{pctFromFraction(r.commission_rate)}</div>
+      </Td>
+      <Td right>{r.cost_price == null ? NO_DATA : won(r.cost_price)}</Td>
+      <Td right>
+        {won(r.logistics_cost)}
+        {r.nbaesong_share != null && (
+          <div className="text-xs text-gray-400">
+            도착보장 {pctFromFraction(r.nbaesong_share)}
+          </div>
+        )}
+      </Td>
+      <Td right>{r.pre_vat_margin == null ? NO_DATA : won(r.pre_vat_margin)}</Td>
+      <Td right>{r.contribution_margin == null ? NO_DATA : won(r.contribution_margin)}</Td>
+      <Td right>{r.bep_roas == null ? NO_DATA : roasX(r.bep_roas)}</Td>
+      <Td right>{r.target_roas == null ? NO_DATA : roasX(r.target_roas)}</Td>
+      <Td right>
+        {r.ceiling_bid == null ? NO_DATA : (
+          <span className="inline-flex items-center gap-1 justify-end">
+            {won(r.ceiling_bid)}
+            {r.ceiling_is_borrowed && (
+              <span
+                className="rounded-full bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-500"
+                title="이 상품 자체의 광고 실적이 얇아 계정 평균으로 계산한 값입니다 — 실제보다 후하게(낙관적으로) 나왔을 수 있습니다."
+              >
+                빌린 값
+              </span>
+            )}
+          </span>
+        )}
+      </Td>
+      <Td right>
+        <span className={`tabular-nums ${MARKET_BID_TONE_TEXT[tone]}`}>
+          {r.market_bid == null ? NO_DATA : won(r.market_bid)}
+        </span>
+        {marketBidCaptionText && (
+          <div className="text-xs text-gray-400">{marketBidCaptionText}</div>
+        )}
+      </Td>
+    </tr>
+  );
+}
+
+function BepBreakdownSection({ campaignId }: { campaignId: string }) {
+  const { data, error } = useAsyncData(
+    () => fetchNaverPerformanceBepBreakdown({ campaignId: campaignId || undefined }),
+    [campaignId],
+  );
+  const title = "이 상품, 클릭당 얼마까지 써야 남나";
+
+  if (error) {
+    return (
+      <Card title={title}>
+        <EmptyState reason={`불러오지 못했습니다: ${error}`} hint="잠시 후 다시 시도하세요." />
+      </Card>
+    );
+  }
+  if (data === null) return <Card title={title}><Loading rows={4} /></Card>;
+
+  return (
+    <Card
+      title={title}
+      right={<span className="text-xs text-gray-400 tabular-nums">{data.as_of} 기준</span>}
+    >
+      <div className="p-4 space-y-3">
+        <p className="text-xs text-gray-500 break-keep border-l-2 border-gray-200 pl-2">
+          {stripBoldMarkers(data.data_note)}
+        </p>
+        {data.missing_cost_count > 0 && (
+          <p className="text-xs text-judge-warn break-keep border-l-2 border-judge-warn pl-2">
+            원가가 아직 입력되지 않은 상품 {num(data.missing_cost_count)}개는 상한을 계산하지
+            못했습니다.
+          </p>
+        )}
+
+        {data.rows.length === 0 ? (
+          <EmptyState
+            reason="광고에 연결된 상품이 없어 상한 근거를 보여줄 수 없습니다."
+            hint="상품-광고 연결이 생기면 이 표에 나타납니다."
+          />
+        ) : (
+          <Table head={
+            <>
+              <Th>상품</Th>
+              <Th right>판매가</Th>
+              <Th right>수수료</Th>
+              <Th right>원가</Th>
+              <Th right>물류비</Th>
+              <Th right>세전 잔액</Th>
+              <Th right>{`공헌이익 (÷${vatDivisorLabel(data.vat_divisor)})`}</Th>
+              <Th right>손익분기</Th>
+              <Th right>목표</Th>
+              <Th right>클릭당 상한</Th>
+              <Th right>4위 시장가</Th>
+            </>
+          }>
+            {data.rows.map((r, i) => (
+              <BepRowView key={`${r.product_name}-${i}`} r={r} />
+            ))}
+          </Table>
+        )}
+      </div>
+    </Card>
+  );
+}
+
+/** 1.1 → "1.1". vat_divisor는 항상 소수 1자리대 값이라 불필요한 꼬리 0을 만들지 않는다. */
+function vatDivisorLabel(n: number): string {
+  return n.toLocaleString("ko-KR", { maximumFractionDigits: 3 });
+}
+
+// ── ⑥ 개선 타임라인 ───────────────────────────────────────────────
+// ★정직 규약(계획서 §3-3·원칙22): "개선됐습니다"류 단정 문구를 이 섹션에서 만들지 않는다.
+//   sentence/data_note는 백엔드가 준 문장을 그대로 렌더한다. campaign_id·ref_key는 화면에
+//   렌더하지 않는다(ref_key는 React key로만 쓴다).
+const TIMELINE_WINDOW_OPTIONS = [30, 90, 180] as const;
+const TIMELINE_INITIAL_SHOWN = 10;
+
+function TimelineEventRow({ ev }: { ev: NaverPerformanceTimelineEvent }) {
+  const confTag = confidenceLabel(ev.effective_confidence);
+  return (
+    <li className="py-1.5">
+      <div className="flex flex-wrap items-center gap-1.5">
+        {ev.source === "change_log" ? (
+          <Badge tone="owner">실제 설정 변경</Badge>
+        ) : (
+          <Badge>결정</Badge>
+        )}
+        <span className="text-sm text-gray-900 break-keep">{ev.label_ko}</span>
+        {confTag && <span className="text-xs text-gray-400">({confTag})</span>}
+      </div>
+      {ev.detail_ko && (
+        <div className="mt-0.5 line-clamp-2 text-xs text-gray-500 break-keep">
+          {ev.detail_ko}
+        </div>
+      )}
+      {ev.campaign_name && (
+        <div className="mt-0.5 text-xs text-gray-400">{ev.campaign_name}</div>
+      )}
+    </li>
+  );
+}
+
+function TimelineDayCard({ day }: { day: NaverPerformanceTimelineDay }) {
+  const impact = day.impact;
+  const badge = observationBadge(impact);
+  const partialNote = impact ? partialDataNote(impact.pre, impact.post) : null;
+  return (
+    <div className="rounded-lg border border-gray-200 p-3 space-y-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-sm font-semibold text-gray-900 tabular-nums">{day.date}</span>
+        <span className="text-xs text-gray-500">결정 {day.events.length}건</span>
+        {impact && impact.same_day_count > 1 && (
+          <span className="px-2 py-0.5 text-xs rounded-full bg-gray-100 text-gray-500">
+            함께 바꾼 {num(impact.same_day_count)}건
+          </span>
+        )}
+        {badge && (
+          <span className="px-2 py-0.5 text-xs rounded-full bg-gray-100 text-judge-warn">
+            {badge}
+          </span>
+        )}
+      </div>
+
+      {impact && (
+        <div className="space-y-1 text-xs text-gray-600">
+          <div>
+            광고비 {deltaText(
+              impact.pre.cost == null ? NO_DATA : won(impact.pre.cost),
+              impact.post.cost == null ? NO_DATA : won(impact.post.cost),
+            )}
+          </div>
+          <div>
+            매출 {deltaText(
+              impact.pre.conv_amt == null ? NO_DATA : won(impact.pre.conv_amt),
+              impact.post.conv_amt == null ? NO_DATA : won(impact.post.conv_amt),
+            )}
+          </div>
+          <div>
+            ROAS {deltaText(
+              impact.pre.roas == null ? NO_DATA : roasX(impact.pre.roas),
+              impact.post.roas == null ? NO_DATA : roasX(impact.post.roas),
+            )}
+          </div>
+          {partialNote && (
+            <p className="text-gray-400">{partialNote}</p>
+          )}
+          <p className="break-keep text-gray-500">{impact.sentence}</p>
+          {impact.confounded_count > 0 && (
+            <p className="text-gray-400">같은 기간 다른 변경 {num(impact.confounded_count)}건</p>
+          )}
+        </div>
+      )}
+
+      <ul className="divide-y divide-gray-100">
+        {day.events.map((ev) => (
+          <TimelineEventRow key={ev.ref_key} ev={ev} />
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function ImprovementTimelineSection({ campaignId }: { campaignId: string }) {
+  const [days, setDays] = useState<number>(90);
+  const [showAll, setShowAll] = useState(false);
+  const { data, error } = useAsyncData(
+    () => fetchNaverPerformanceTimeline({ days, campaignId: campaignId || undefined }),
+    [days, campaignId],
+  );
+  const title = "우리가 바꾼 것들과 그 전후";
+
+  const windowButtons = (
+    <div className="flex items-center gap-1">
+      {TIMELINE_WINDOW_OPTIONS.map((d) => (
+        <button key={d} type="button" onClick={() => setDays(d)}
+          className={`px-2 py-1 text-xs rounded border ${
+            days === d
+              ? "bg-blue-600 text-white border-blue-600"
+              : "text-gray-600 border-gray-300 hover:bg-gray-50"
+          }`}>
+          {d}일
+        </button>
+      ))}
+    </div>
+  );
+
+  if (error) {
+    return (
+      <Card title={title} right={windowButtons}>
+        <EmptyState reason={`불러오지 못했습니다: ${error}`} hint="잠시 후 다시 시도하세요." />
+      </Card>
+    );
+  }
+  if (data === null) return <Card title={title} right={windowButtons}><Loading rows={4} /></Card>;
+
+  // 최신이 위 — timeline은 오름차순으로 오므로 역순으로 뒤집는다.
+  const reversed = [...data.timeline].reverse();
+  const shown = showAll ? reversed : reversed.slice(0, TIMELINE_INITIAL_SHOWN);
+  const remaining = reversed.length - shown.length;
+
+  return (
+    <Card
+      title={title}
+      right={
+        <div className="flex items-center gap-2">
+          {windowButtons}
+          <span className="text-xs text-gray-400 tabular-nums">
+            {data.as_of} 기준 · {data.days}일 창
+          </span>
+        </div>
+      }
+    >
+      <div className="p-4 space-y-3">
+        <p className="text-xs text-gray-500 break-keep border-l-2 border-gray-200 pl-2">
+          {stripBoldMarkers(data.data_note)}
+        </p>
+
+        <div className="rounded border border-gray-200 bg-gray-50 p-2 text-xs text-gray-600 break-keep">
+          {data.retro.sentence}
+        </div>
+
+        {!data.catalog_available && (
+          <p className="text-xs text-judge-warn break-keep border-l-2 border-judge-warn pl-2">
+            결정 목록 파일을 아직 읽지 못해, 실제 설정 변경 기록만 표시합니다.
+          </p>
+        )}
+
+        {reversed.length === 0 ? (
+          <EmptyState
+            reason="이 창에는 표시할 변경이 없습니다."
+            hint="창 길이를 늘리면 더 이전 변경을 볼 수 있습니다."
+          />
+        ) : (
+          <div className="space-y-2">
+            {shown.map((day) => (
+              <TimelineDayCard key={day.date} day={day} />
+            ))}
+          </div>
+        )}
+
+        {remaining > 0 && (
+          <button
+            type="button"
+            onClick={() => setShowAll(true)}
+            className="text-xs text-gray-500 underline underline-offset-2"
+          >
+            {`더 보기 (${remaining}일 더)`}
+          </button>
+        )}
+
+        {data.undated_catalog_count > 0 && (
+          <p className="text-xs text-gray-400 break-keep">
+            날짜를 알 수 없어 타임라인에 올리지 못한 결정이 {num(data.undated_catalog_count)}개
+            있습니다.
+          </p>
+        )}
       </div>
     </Card>
   );
@@ -699,6 +1045,12 @@ export default function NaverAdPerformance() {
 
       {/* ④ 예산 */}
       <BudgetSection date={date} campaignId={campaignId} />
+
+      {/* ⑤ BEP 구성 */}
+      <BepBreakdownSection campaignId={campaignId} />
+
+      {/* ⑥ 개선 타임라인 */}
+      <ImprovementTimelineSection campaignId={campaignId} />
     </div>
   );
 }

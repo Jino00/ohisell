@@ -304,6 +304,13 @@ Harness: `perf_today_harness.build(db)` · 파라미터 없음(오늘 고정).
   5. `docs/naver_ad_improvement_events.json`을 prod에서 지운 상태로 호출 → **500이 아니라** `catalog_available:false` + change_log 이벤트만 반환.
   6. pytest 회귀 0.
 - **규모 추정**: 스크립트 ~200줄 / 백엔드 신규 ~520줄 / 프론트 신규 ~420줄 / 테스트 ~300줄. **1.5~2 세션**.
+- **라이브 검증 완료(2026-07-28 19:0x, PR #158, prod 배포)**:
+  1. ✅ 파서 `parsed=99 skipped=0 duplicate=10 commit_matched=88 no_date=5`
+  2. ✅ 재실행 멱등(해시 `ec1be351…` 일치) + curated 라벨 주입 후 재생성해도 보존(`curated_kept=1`)
+  3. ✅ prod 응답에서 `D-NAO-101`(03 재가동)이 2026-07-28 카드에 포함, `confounded_count=28`·`same_day_count=9`, 문장 "바꾼 지 하루가 지나지 않아 아직 비교할 수치가 없습니다."
+  4. ✅ prod에서 원가 미입력 20건 전부 `cost_price: null` + "원가가 입력되지 않아 남는 선을 계산할 수 없습니다" (추정치 없음). 산술 검산 `15900-687-2351-1900=10962 == pre_vat_margin`
+  5. ✅ prod에서 카탈로그 파일을 임시 이동 후 호출 → **HTTP 200 + `catalog_available:false` + change_log 이벤트 27건만**. 복구 후 `true` 복귀 확인
+  6. ✅ pytest 3,956 passed / vitest 123 passed / tsc 0
 
 ---
 
@@ -420,14 +427,25 @@ Harness: `perf_today_harness.build(db)` · 파라미터 없음(오늘 고정).
   `cost>0 and roas is None` 분기는 `cost<=0` 선행 처리로 **도달 가능한 단일 조건**으로 정리.
 
 ### Phase 3 — ⑤BEP 구성 + ⑥개선 타임라인
-- [ ] ⏳ P3-1 `scripts/gen_naver_improvement_events.py` (파서 + git 매칭 + curated 보존 + skipped>0 → exit 1)
-- [ ] ⏳ P3-2 `docs/naver_ad_improvement_events.json` 최초 생성·검수·커밋
-- [ ] ⏳ P3-3 SA `bep_breakdown.py` (조립만 — 새 산식 금지)
-- [ ] ⏳ P3-4 SA `improvement_events.py` · SA `event_impact_scorer.py`
-- [ ] ⏳ P3-5 Harness `perf_timeline_harness.py` + 라우터 ⓓⓔ
-- [ ] ⏳ P3-6 프론트 섹션⑤⑥
-- [ ] ⏳ P3-7 pytest(카탈로그 부재 폴백 · 멱등 · confounded) + `/codex review`
-- [ ] ⏳ P3-8 배포 + §6 Phase 3 라이브 6항 확인
+- [x] ✅ P3-1 `scripts/gen_naver_improvement_events.py` (파서 + git 매칭 + curated 보존 + skipped>0 → exit 1) — parsed=99 skipped=0, 멱등(해시 일치), curated 보존 실증
+- [x] ✅ P3-2 `docs/naver_ad_improvement_events.json` 최초 생성·검수·커밋 — 99건, 화면 금지어 잔여 0
+- [x] ✅ P3-3 SA `bep_breakdown.py` (조립만 — 새 산식 금지) — 조립만(새 산식 0), 라이브 54행
+- [x] ✅ P3-4 SA `improvement_events.py` · SA `event_impact_scorer.py`
+- [x] ✅ P3-5 Harness `perf_timeline_harness.py` + 라우터 ⓓⓔ
+- [ ] ⏳ P3-6 프론트 섹션⑤⑥ — 카드 목록 구현 완료. **차트 마커 `EventMarker`는 미구현**(이번 슬라이스는 카드 목록만, 마커는 후속 슬라이스로 이월)
+- [x] ✅ P3-7 pytest 29건 신규 + 적대적 리뷰 2R (codex는 08-02 쿼터 리셋 후 소급)
+- [x] ✅ P3-8 배포 + 라이브 6항 확인
+
+#### Phase 3 계획 대비 변경 3건(계획서 자신의 오차 기록)
+
+- **①§3-2 파서 정규식 폐기 → 6형식 흡수 파서.** 원안 정규식은 라이브 트랙 헤더 114개 중
+  **24개만 매칭**해 완료기준 `skipped=0`을 원리적으로 통과할 수 없었다.
+- **②§4-ⓔ 응답 단위를 이벤트 단위 → 날짜 단위로 접었다.** 같은 날 결정들은 전후 창이 완전히
+  동일해 같은 숫자가 수십 번 반복됐다(라이브 30일 100건·평균 겹침 34건). 마커는 날짜에 찍고,
+  그 날의 결정들은 카드 안 목록으로 펼친다.
+- **③§4-ⓓ 상한 문장에서 "사면 손해입니다" 단정을 제거했다.** 이 상한의 RPC는
+  `bid_ceiling_calculator`가 **직접전환만** 세는 보수값이라, 단정하면 실제로는 남는 광고를
+  끄게 만드는 오지시가 된다.
 
 ### Phase 1 한계 — 당일 프록시 ROAS 커버리지(정직 고지)
 
