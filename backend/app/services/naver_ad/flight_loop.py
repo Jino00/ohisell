@@ -34,6 +34,13 @@ _Q4 = Decimal("0.0001")
 # 스킵 사유 코드 — 로그·요약·change_log에서 같은 이름을 쓴다(문자열 중복 방지).
 SKIP_CAMPAIGN_OFF = "campaign_off"
 SKIP_FORECAST_MISSING = "forecast_missing"
+# ★`forecast_pending` ≠ `forecast_missing`. 섞으면 화면이 거짓말한다.
+#   pending = 그날 예측 생성 잡(`run_naver_forecast_engine`, 07:50)이 아직 안 돌았다.
+#             flight_loop은 2시간 주기(*:15)라 **00·02·04·06시 네 번은 항상 07:50보다 앞선다** —
+#             즉 하루 12회 중 4회는 스케줄상 전원 스킵이 정상이다. 이걸 병리로 세면
+#             건강한 시스템에서도 진단 행이 매일 4개 쌓여 경보가 배경소음이 된다.
+#   missing = 예측 생성은 돌았는데 **이 캠페인만** 예측이 없다(게이트 강등/콜드스타트 등) = 진짜 신호.
+SKIP_FORECAST_PENDING = "forecast_pending"
 
 
 def _ours_campaigns(db: Session) -> list[tuple[NaverCampaignSettings, str | None]]:
@@ -61,6 +68,19 @@ def _ours_campaigns(db: Session) -> list[tuple[NaverCampaignSettings, str | None
         .all()
     )
     return [(cs, status) for cs, status in rows]
+
+
+def _forecast_generated_today(db: Session, today: date) -> bool:
+    """그날 예측 생성 잡이 이미 돌았는가(= target_date=today 예측이 grain 무관하게 1행이라도).
+
+    캠페인별 유무가 아니라 **그날 배치의 실행 여부**를 본다 — 개별 캠페인이 강등돼 예측을
+    못 받은 것과, 아직 07:50이 안 지난 것은 완전히 다른 사건이다(상수 docstring 참조).
+    """
+    return db.query(
+        db.query(NaverForecastDaily.id)
+        .filter(NaverForecastDaily.target_date == today)
+        .exists()
+    ).scalar() is True
 
 
 def _forecast_gate_hint(db: Session, campaign_id: str) -> str | None:
@@ -262,13 +282,16 @@ def run_flight_loop(
         log.info("flight_loop: optimizer='ours' 캠페인 없음 — 스킵")
         return {
             "campaigns_processed": 0, "decided": 0, "skipped": 0,
-            "skip_breakdown": {}, "errors": 0, "decisions": [], "dry_run": dry_run,
+            "skip_breakdown": {}, "errors": 0, "forecast_ready": None,
+            "decisions": [], "dry_run": dry_run,
         }
 
     weekday = today.weekday()
     weights = _hourly_weights(db, weekday)
     decisions = []
     skip_breakdown: dict[str, int] = {}
+    # run당 1회 — 캠페인 루프 안에서 부르면 같은 답을 N번 묻는다.
+    forecast_ready = _forecast_generated_today(db, today)
 
     # D-NAO-44: 완결도 곡선 run당 1회 pre-compute(캠페인 루프 밖, 원칙18-6 — harness가
     # 원료를 유통하고 SA는 서로 모른다). /stats 당일누적은 시각별로 체계적 저평가라
@@ -292,6 +315,16 @@ def run_flight_loop(
 
             forecast = _today_forecast(db, cid, today)
             if forecast is None:
+                if not forecast_ready:
+                    skip_breakdown[SKIP_FORECAST_PENDING] = (
+                        skip_breakdown.get(SKIP_FORECAST_PENDING, 0) + 1
+                    )
+                    decisions.append({
+                        "campaign_id": cid,
+                        "skipped": SKIP_FORECAST_PENDING,
+                        "skip_detail": "그날 예측 생성 전(07:50 배치 이전) — 정상",
+                    })
+                    continue
                 gate = _forecast_gate_hint(db, cid)
                 skip_breakdown[SKIP_FORECAST_MISSING] = (
                     skip_breakdown.get(SKIP_FORECAST_MISSING, 0) + 1
@@ -429,13 +462,17 @@ def run_flight_loop(
         "skipped": skipped,
         "skip_breakdown": skip_breakdown,
         "errors": errors,
+        "forecast_ready": forecast_ready,
         "dry_run": dry_run,
     }
 
     # ★"N캠페인 처리"만 찍으면 전원 스킵도 정상 완주로 보인다(2026-07-25~28 실사고:
     # 크론은 매 2시간 ok였고 예외 로그도 0건인데 결정은 4일간 하나도 없었다).
     # 결정 0 = 이 루프의 존재 이유가 사라진 상태이므로 로그 레벨을 올리고 진단 행을 남긴다.
-    if decided == 0:
+    # 단 **그날 예측 배치 전(pending)은 병리가 아니다** — 하루 12회 중 00·02·04·06시 4회는
+    # 07:50보다 앞서므로 구조적으로 전원 스킵이며, 이걸 세면 진단 행이 매일 4개 쌓여
+    # 경보가 배경소음이 된다(정상 0행·고장 시에만 쌓인다는 자기 제한이 깨진다).
+    if decided == 0 and forecast_ready:
         log.warning(
             "flight_loop: %d캠페인 전원 무결정 — 스킵 %d %s, 오류 %d (dry_run=%s)",
             len(decisions), skipped, skip_breakdown, errors, dry_run,

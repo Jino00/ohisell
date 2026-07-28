@@ -18,7 +18,7 @@ from app.models import (
 )
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.services.naver_ad.flight_loop import (
-    SKIP_CAMPAIGN_OFF, SKIP_FORECAST_MISSING, run_flight_loop,
+    SKIP_CAMPAIGN_OFF, SKIP_FORECAST_MISSING, SKIP_FORECAST_PENDING, run_flight_loop,
 )
 
 
@@ -59,6 +59,16 @@ def _setup_campaign(db, campaign_id="cmp-test", daily_budget=100000):
     db.commit()
 
 
+def _mark_forecast_batch_ran(db, day=date(2026, 7, 11)):
+    """그날 예측 배치가 이미 돌았음을 표시(다른 스코프의 예측 1행).
+    이게 없으면 forecast 부재가 `forecast_pending`(배치 전 = 정상)으로 분류된다."""
+    db.add(NaverForecastDaily(
+        target_date=day, grain="campaign", scope_key="cmp-batch-marker",
+        pred_clk=1, pred_cost=1, pred_conv_amt=1,
+    ))
+    db.commit()
+
+
 def test_flight_loop_no_ours_campaigns(db):
     result = run_flight_loop(db, today=date(2026, 7, 11), current_hour=10)
     assert result["campaigns_processed"] == 0
@@ -90,6 +100,7 @@ def test_flight_loop_records_change_log(db):
 def test_flight_loop_skips_campaign_without_forecast(db):
     db.add(NaverCampaignSettings(campaign_id="cmp-no-forecast", optimizer="ours"))
     db.commit()
+    _mark_forecast_batch_ran(db)  # 배치는 돌았다 → 이 캠페인만 없는 것 = missing
     result = run_flight_loop(db, today=date(2026, 7, 11), current_hour=10)
     assert result["decisions"][0].get("skipped") == SKIP_FORECAST_MISSING
 
@@ -355,6 +366,7 @@ def test_flight_loop_all_skipped_leaves_diagnostic_change_log(db):
     db.add(NaverCampaignSettings(campaign_id="cmp-a", optimizer="ours"))
     db.add(NaverCampaignSettings(campaign_id="cmp-b", optimizer="ours"))
     db.commit()
+    _mark_forecast_batch_ran(db)
     run_flight_loop(db, today=date(2026, 7, 11), current_hour=10)
     rows = db.query(NaverChangeLog).filter(
         NaverChangeLog.action == "flight_pacing_silent"
@@ -390,6 +402,7 @@ def test_flight_loop_forecast_missing_carries_gate_hint(db):
         grain="campaign", scope_key="cmp-demoted", gate_status="demoted", sample_days=14,
     ))
     db.commit()
+    _mark_forecast_batch_ran(db)
     result = run_flight_loop(db, today=date(2026, 7, 11), current_hour=10)
     assert result["decisions"][0]["skip_detail"] == "gate_status=demoted"
 
@@ -399,3 +412,34 @@ def test_flight_loop_no_campaigns_returns_full_summary_shape(db):
     result = run_flight_loop(db, today=date(2026, 7, 11), current_hour=10)
     for key in ("campaigns_processed", "decided", "skipped", "skip_breakdown", "errors", "dry_run"):
         assert key in result
+
+
+def test_flight_loop_pending_is_not_pathology(db):
+    """★그날 예측 배치 전(07:50 이전)의 전원 스킵은 정상 — 진단 행을 남기지 않는다.
+    flight_loop은 *:15 주기라 00·02·04·06시 4회는 구조적으로 배치보다 앞선다."""
+    db.add(NaverCampaignSettings(campaign_id="cmp-a", optimizer="ours"))
+    db.add(NaverCampaignSettings(campaign_id="cmp-b", optimizer="ours"))
+    db.commit()  # 오늘자 예측 0행 = 배치 전
+    result = run_flight_loop(db, today=date(2026, 7, 11), current_hour=0)
+    assert result["forecast_ready"] is False
+    assert result["skip_breakdown"] == {SKIP_FORECAST_PENDING: 2}
+    assert db.query(NaverChangeLog).filter(
+        NaverChangeLog.action == "flight_pacing_silent"
+    ).all() == []
+
+
+def test_flight_loop_missing_after_batch_is_pathology(db):
+    """같은 전원 스킵이라도 배치가 돈 뒤라면 진짜 신호 — forecast_missing + 진단 행."""
+    db.add(NaverCampaignSettings(campaign_id="cmp-a", optimizer="ours"))
+    # 다른 캠페인의 오늘자 예측이 존재 = 배치는 돌았다
+    db.add(NaverForecastDaily(
+        target_date=date(2026, 7, 11), grain="campaign", scope_key="cmp-other",
+        pred_clk=1, pred_cost=1, pred_conv_amt=1,
+    ))
+    db.commit()
+    result = run_flight_loop(db, today=date(2026, 7, 11), current_hour=10)
+    assert result["forecast_ready"] is True
+    assert result["skip_breakdown"] == {SKIP_FORECAST_MISSING: 1}
+    assert len(db.query(NaverChangeLog).filter(
+        NaverChangeLog.action == "flight_pacing_silent"
+    ).all()) == 1
