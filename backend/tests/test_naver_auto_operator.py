@@ -3481,3 +3481,75 @@ def test_learned_band_of_swallows_lookup_failure(monkeypatch):
     assert auto_operator._learned_band_of(
         None, datetime(2026, 7, 20, 8, 20, 0), "cmp-x",
     ) is None
+
+
+# ═══════ 학습밴드 스코프 불일치 해소 (2026-07-29, Jino 확정) ═══════
+# 09:03 학습 잡은 계정 전체 밴드를 승격시키는데 게이트는 캠페인별만 읽어서,
+# 학습해놓고 아무도 안 읽는 상태였다. 자기 밴드가 없을 때만 계정 밴드를 빌리되
+# **사후 고삐(RL3)가 발동 가능한 유닛(BEP 확인)에만** 연다.
+
+def test_account_band_fallback_requires_bep(monkeypatch):
+    """BEP 미확인 유닛은 폴백을 안 쓴다 — 사후 고삐가 fail-closed로 침묵하기 때문."""
+    from app.services.naver_ad import intraday_roas
+
+    monkeypatch.setattr(auto_operator, "_resolve_adgroup_id", lambda *a, **kw: "grp-1")
+    monkeypatch.setattr(intraday_roas, "adgroup_unit_price",
+                        lambda db, aid: {"price": None, "bep_roas": None})
+    ok, why = auto_operator._account_band_fallback_ok(None, "keyword", "kw-1")
+    assert ok is False
+    assert "BEP 미확인" in why
+
+    monkeypatch.setattr(intraday_roas, "adgroup_unit_price",
+                        lambda db, aid: {"price": 16800, "bep_roas": Decimal("2.03")})
+    ok, why = auto_operator._account_band_fallback_ok(None, "keyword", "kw-1")
+    assert ok is True
+
+
+def test_account_band_fallback_blocked_when_adgroup_unresolved(monkeypatch):
+    """adgroup 해석 실패도 fail-closed — 근거 없이 빌린 값으로 올리지 않는다."""
+    monkeypatch.setattr(auto_operator, "_resolve_adgroup_id", lambda *a, **kw: None)
+    ok, _ = auto_operator._account_band_fallback_ok(None, "keyword", "kw-1")
+    assert ok is False
+
+
+def test_account_band_fallback_swallows_lookup_error(monkeypatch):
+    """BEP 조회가 터져도 레인을 막지 않고 폴백만 보류한다."""
+    from app.services.naver_ad import intraday_roas
+
+    def _boom(*a, **kw):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(auto_operator, "_resolve_adgroup_id", lambda *a, **kw: "grp-1")
+    monkeypatch.setattr(intraday_roas, "adgroup_unit_price", _boom)
+    ok, why = auto_operator._account_band_fallback_ok(None, "keyword", "kw-1")
+    assert ok is False and "조회 실패" in why
+
+
+def test_learned_bands_of_returns_own_and_account(monkeypatch):
+    """(자기 밴드, 계정 밴드) 둘 다 반환 — 호출부가 조건부로 고를 수 있게."""
+    calls = []
+
+    def _fake(db, now, campaign_id):
+        calls.append(campaign_id)
+        return "1.0-2.0" if campaign_id is None else None
+
+    monkeypatch.setattr(auto_operator, "_learned_band_of", _fake)
+    own, acct = auto_operator._learned_bands_of(None, datetime(2026, 7, 29, 10, 0), "cmp-x")
+    assert own is None and acct == "1.0-2.0"
+    assert calls == ["cmp-x", None]  # 자기 → 계정 순서
+
+
+def test_probe_floor_uses_account_band_only_via_fallback():
+    """★핵심: 계정 밴드가 1.0-2.0이어도 그것을 '쓰기로 결정'해야만 하한이 내려간다.
+    폴백이 막히면(BEP 미확인) 하한은 종전 프라이어 2.5 그대로다."""
+    from decimal import Decimal as D
+    now = datetime(2026, 7, 20, 8, 20, 0)
+    curve = [_hour(6, imp=20, clk=0, cost=200, avg_rank=2.2),
+             _hour(7, imp=20, clk=0, cost=200, avg_rank=2.2)]
+    # 폴백 차단 → band=None → 하한 2.5 → 미발동(종전과 동일)
+    assert auto_operator._probe_trigger(
+        curve, now, rank_floor=auto_operator._probe_rank_floor(None))[0] is False
+    # 폴백 허용 → band='1.0-2.0' → 하한 2.0 → 발동
+    fired, reason = auto_operator._probe_trigger(
+        curve, now, rank_floor=auto_operator._probe_rank_floor("1.0-2.0"))
+    assert fired is True and "학습밴드" in reason

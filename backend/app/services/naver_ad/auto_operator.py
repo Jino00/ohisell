@@ -1872,8 +1872,59 @@ def _probe_rank_floor(learned_band: str | None) -> Decimal | None:
     return band_high
 
 
-def _learned_band_of(db: Session, now: datetime, campaign_id: str) -> str | None:
-    """그 캠페인·오늘 환경셀의 승격된 최적 밴드 라벨(없으면 None).
+def _account_band_fallback_ok(
+    db: Session, target_type: str, target_id: str,
+) -> tuple[bool, str]:
+    """이 유닛에 **계정 밴드 폴백**을 적용해도 되는가 = 사후 고삐가 실제로 발동 가능한가.
+
+    ★조건은 하나: 상품 단가·BEP가 확인될 것(Jino 확정 2026-07-29).
+    근거 — 브레이크는 두 겹인데 그중 하나가 이 조건에 걸려 있다.
+      · 사전 상한(`bid_simulator.affordable_ceiling` = 보정RPC ÷ target ROAS)은 자기 이력이
+        없어도 `pooled_rpc`의 계층 수축으로 항상 계산된다. 즉 BEP를 넘는 입찰가로는 애초에
+        못 올라간다. **다만 그 RPC는 빌린 값**이라 자기 CVR이 계정 평균보다 나쁘면 상한이
+        자기 기준으론 관대하다(트랙 실측: 신규 그룹에서 계정 풀링 상한이 약 22% 관대).
+      · 그 관대함을 회수하는 것이 사후 고삐(`_intraday_loss_leash`, 장중 ROAS<BEP → 한 등
+        하향)인데, 그 함수는 `price`·`bep_roas`가 **둘 다** 있어야 판정하고 없으면
+        fail-closed로 **침묵**한다. 즉 BEP 미확인 유닛은 사전 상한만 남고 회수 장치가 없다.
+    그래서 BEP가 확인되는 유닛에만 폴백을 연다 — 브레이크가 두 겹 다 살아 있는 곳에서만
+    빌린 학습값으로 올라간다.
+
+    자기 캠페인이 직접 승격시킨 밴드가 있으면 이 검사를 타지 않는다(그건 빌린 값이 아니다).
+    """
+    adgroup_id = _resolve_adgroup_id(db, target_type, target_id)
+    if adgroup_id is None:
+        return False, "adgroup 해석 불가 — 계정밴드 폴백 보류"
+    try:
+        info = intraday_roas.adgroup_unit_price(db, adgroup_id)
+    except Exception:  # noqa: BLE001 — 판정 불가는 fail-closed(폴백 안 함)
+        log.exception("auto_operator: 폴백 BEP 확인 실패 adgroup=%s", adgroup_id)
+        return False, "BEP 조회 실패 — 계정밴드 폴백 보류"
+    if info.get("price") is None or info.get("bep_roas") is None:
+        return False, "상품 단가/BEP 미확인 — 사후 고삐 불가라 계정밴드 폴백 보류"
+    return True, "BEP 확인 — 계정밴드 폴백 허용"
+
+
+def _learned_bands_of(
+    db: Session, now: datetime, campaign_id: str,
+) -> tuple[str | None, str | None]:
+    """(그 캠페인 자신의 승격 밴드, 계정 전체 승격 밴드). 각각 없으면 None.
+
+    ★스코프 불일치 해소(Jino 확정 2026-07-29): 09:03 학습 잡은 `campaign_id` 없이 돌아
+    **계정 전체** 밴드를 승격·기록하는데 게이트는 **캠페인별** 값만 읽었다. 그래서 계정에
+    학습값이 있어도 캠페인이 자기 승격에 못 미치면 그 캠페인은 하드코딩 프라이어(2.5)로
+    동작했다 — 학습해놓고 아무도 안 읽는 상태(2026-07-29 실측: ours 6개 중 계정 승격
+    밴드 `1.0-2.0`을 쓰는 캠페인 0개).
+    이제 둘 다 돌려주고, **자기 값이 없을 때만** 호출부가 조건부로 계정 값을 쓴다
+    (조건 = `_account_band_fallback_ok`).
+    """
+    return (
+        _learned_band_of(db, now, campaign_id),
+        _learned_band_of(db, now, None),
+    )
+
+
+def _learned_band_of(db: Session, now: datetime, campaign_id: str | None) -> str | None:
+    """그 캠페인(또는 campaign_id=None이면 계정 전체)·오늘 환경셀의 승격된 최적 밴드 라벨.
 
     `_learned_optimal_skip`이 하던 조회를 밖으로 뽑은 것 — 탐침 하한(`_probe_rank_floor`)과
     CD5 게이트가 **같은 값**을 봐야 서로 어긋나지 않는다. 조회 실패는 삼키고 None(=학습값
@@ -2948,17 +2999,28 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                 # (SA는 db를 모른다, 원칙18-6) 캠페인당 1회만 — `learned_probe_rank`는
                 # 내부에서 30일 aggregate를 도는 무거운 호출이라 유닛마다 부르면 N+1이 된다.
                 if campaign_id not in _probe_band_cache:
-                    _probe_band_cache[campaign_id] = _learned_band_of(db, now, campaign_id)
+                    _probe_band_cache[campaign_id] = _learned_bands_of(db, now, campaign_id)
+                own_band, account_band = _probe_band_cache[campaign_id]
+                # 자기 캠페인이 승격시킨 밴드가 우선. 없을 때만 계정 밴드를 빌리되,
+                # **사후 고삐가 발동 가능한 유닛(BEP 확인)에만** 연다(Jino 확정 2026-07-29,
+                # `_account_band_fallback_ok` docstring에 근거).
+                band, band_note = own_band, ""
+                if band is None and account_band is not None:
+                    ok, why = _account_band_fallback_ok(db, target_type, target_id)
+                    band_note = f" · {why}"
+                    if ok:
+                        band = account_band
                 probe_fired, probe_reason = _probe_trigger(
-                    curve, now,
-                    rank_floor=_probe_rank_floor(_probe_band_cache[campaign_id]),
+                    curve, now, rank_floor=_probe_rank_floor(band),
                 )
+                if band_note:
+                    probe_reason = f"{probe_reason}{band_note}"
                 if probe_fired:
                     # D-NAO-60 RL5(CD5): 학습된 최적 밴드에 이미 도달했으면 상향 생략(과climb
                     # 방지). guardrail 우회 없음 — 통과한 제안도 execute() 전량을 그대로 탄다.
                     skip, skip_reason = _learned_optimal_skip(
                         db, curve, now, campaign_id,
-                        learned_band=_probe_band_cache[campaign_id], band_resolved=True,
+                        learned_band=band, band_resolved=True,
                     )
                     if skip:
                         result["held"].append({"target_id": target_id, "reason": skip_reason})
