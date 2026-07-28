@@ -1,3 +1,15 @@
+## ✅ 2026-07-28 오늘 전체 요약 — N1 배포 → 03 재가동 → BP·VT3 통합 배포·라이브 검증 (main `74cf050`, PR #149)
+
+- **N1(BEP 배송방식 인지형 정합, D-NAO-99·100)** prod 배포·라이브 검증 완료(PR #138) — 앵커 5종 대조·`verify_bep_delivery_parity.py` PASS.
+- **03 캠페인 자동운영 재가동(D-NAO-101)** — D-NAO-92 정지(07-23) 번복, N1 상한 재산출 전제조건 충족 확인 후 재가동.
+- **BP(Budget Pacing) 레인(D-NAO-102) + VT3 소재 CTR 경보 개편(D-NAO-103)** — 각각 별도 워크트리에서 구현·codex 대체 리뷰 2라운드 후, 통합 브랜치(`integrate/bp-vt3-D-NAO-102-103`)에서 병합(auto_operator.py import 충돌 1건만, union으로 해소) → alembic 3-way head(BP·VT3·기존 promo-pnl 헤드가 동일 부모 공유) → 병합 리비전 `96e8319324f5` 생성·왕복검증 → `safe_deploy.sh`로 마이그레이션 선배포·코드 배포·재시작(CAS 전부 통과) → PR #149 병합.
+  - **라이브 검증(원칙22)**: prod DB에 `base_daily_budget` 컬럼·`naver_ctr_alert_log` 테이블 실존, pm2 온라인·재시작 후 예외 0. 14:20 KST 시간당 레인 완주 — `naver BP 예산페이싱: reviewed=5 raised=0 failed=0` (5개 auto_operate 캠페인 전부 평가, base_daily_budget 최초 자가시드 확인, 소진율<90%라 미발동은 정상). VT3 실발화는 내일 08:50 확인 예정(오늘은 임포트·마이그·크론 등록까지 확인).
+- **전체 테스트 3785 passed.** ruff는 프로젝트 설정 파일 부재로 기본값 노이즈뿐(베이스라인 비교로 확인) — 신규 코드의 실결함(병합 리비전 미사용 import·불필요 pass)만 수정.
+- **codex 소급 부채 3건째 누적**(N1 → 프로모션 손익 페처 → BP+VT3, 전부 08-02 쿼터 리셋 후 일괄 재실행 대상).
+- 다음 액션: VT3 08:50 실발화 확인, BP 실제 증액 발동(소진율≥90% 도달 시) 확인, D-NAO-104(광고 성과 뷰) Phase 1 착수 가능(차단 해소).
+
+---
+
 RG 옛 공백(04-20~05-03) Jino 종결 승인(13:34) — 공백 아님(배송비 실제 0원+PRODUCT_SIZE 설계 제외) 확정, HANDOFF 미결 항목 닫힘.
 
 ## ✅ 네이버 광고 — forecast `pred_conv_amt` 라벨 정정 완료 (2026-07-28 12:5x, main `fcec2c5`, prod 배포 완료)
