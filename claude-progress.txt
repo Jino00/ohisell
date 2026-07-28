@@ -1,3 +1,15 @@
+## ✅ 네이버 광고 — forecast `pred_conv_amt` 라벨 정정 완료 (2026-07-28 12:5x, main `fcec2c5`, prod 배포 완료)
+- **원 요청**: 07-28 센티널 조사(PR #128)의 우선순위 3 — 제안 근거의 예상매출이 부풀어 보이는 문제. → **완료·prod 라이브 확인.**
+- **핵심 발견(브리프 보정)**: conv_amt의 회계 기준이 **grain마다 다르다** — campaign만 sentinel(`/stats`)이라 구매+장바구니 합(03 기준 +64%), adgroup/keyword는 상세 행이라 구매만. 브리프대로 일괄 라벨을 붙였으면 **키워드·그룹 표기가 새로 틀렸다.**
+- **채택안 = (a) 라벨만, 계산 변경 0.** 소비처 전수 확인으로 "표시 문제"임을 증명: `_budget_proposal` 사이징=`pred_cost`만 · `response_curve_builder`는 `pred_conv_amt` **미사용**(수익은 rpc) · `flight_loop` rpc는 이미 센티널 제외 · 프론트 0건 → **입찰 산식(D-NAO-19) 무관.** 값을 바꾸면 forecast_scorer의 예측·실측이 같은 소스라 성립하던 내부 일관성이 깨진다.
+- **구현**: `forecast_source.CONV_AMT_BASIS_LABEL`(라벨 단일 진실 소스) + `proposal_writer._forecast_evidence_suffix(forecast, grain)`. 회귀 2건(campaign 라벨 / SUPPORTED_GRAINS↔라벨 드리프트 가드). **3653 passed** — forecast_scorer·model_builder 전량 무변경 통과 = 값 불변 증명.
+- **prod 라이브 증거(원칙22)**: safe_deploy CAS 통과·pm2 재기동 후, prod 실 인터프리터로 **오늘 실 forecast 32행** 렌더 → campaign `conv_amt(전 전환액션=구매+장바구니)=45394원` / adgroup `conv_amt(구매)=1176원` / keyword `conv_amt(구매)=0원`. `/health` 200 · 최근 로그 예외 0건.
+- 병합: PR #144(코드) · #145(트랙·LESSONS). DB 변경 없음(`--migrate` 불요).
+- **codex 게이트 = Jino 결정으로 스킵**(계산 변경 0인 라벨 건 + 쿼터 08-02 차단). **부채 아님 · 소급 재실행 불요.**
+- 교훈 **LESSONS #53**(grain마다 의미가 다른 값에 일괄 라벨은 새 오류 — 브리프가 정확해도 갈래는 안 적혀 있다).
+- **다음 액션**: 내일 08:00 제안 라운드에서 실제 생성된 rationale에 기준 표기가 들어갔는지 콘솔에서 확인(선택 — 라이브 렌더는 이미 검증됨).
+- 별건 후보(미조치): `response_curve_builder.build_response_curve`의 `pred_conv_amt` 지역변수가 할당만 되고 미사용인데 docstring은 입력으로 명시 → 읽는 사람 오도.
+
 ## ✅ 로켓 1P M1 완료 — prod 배포·라이브 검증 종료 (2026-07-28 12:17, main)
 - **원 요청**: 로켓배송(1P) 공급자허브 파서가 원본 DOM에 있는데 매핑 누락으로 버리던 컬럼 2개 복원. → **완료·prod 라이브 동작 확인.**
 - **라이브 증거(원칙22)**: 배포 후 페처 실수집 완주(발주 490·정산 90·발주상세 80·실패 0) → prod DB 실측:
