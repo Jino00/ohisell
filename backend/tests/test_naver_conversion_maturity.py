@@ -151,3 +151,84 @@ def test_run_daily_writes_curve_when_sufficient_cohorts(db):
     ).first()
     assert row is not None
     assert float(row.current_value) == 0.4
+
+
+# ── 전환 정착 보정(2026-07-28): m(d) 곡선 로드·환산 배수·상한 계산기 배선 ──
+from decimal import Decimal  # noqa: E402
+
+from app.services.naver_ad import bid_ceiling_calculator as bcc  # noqa: E402
+
+
+def _seed_curve(db, mapping):
+    """{days_since: m(d)} 를 NaverLearningState(global/conv_delay/day_N)에 심는다."""
+    for d, m in mapping.items():
+        db.add(NaverLearningState(
+            scope="global", scope_key=f"day_{d}", metric=cm.METRIC,
+            current_value=Decimal(str(m)), sample_n=5, confidence=Decimal("1"),
+        ))
+    db.commit()
+
+
+def test_load_curve_reads_only_conv_delay_day_rows(db):
+    _seed_curve(db, {0: 0.5, 3: 0.9})
+    db.add(NaverLearningState(scope="global", scope_key="day_0", metric="other_metric",
+                              current_value=Decimal("0.1"), sample_n=5))
+    db.add(NaverLearningState(scope="global", scope_key="not_a_day", metric=cm.METRIC,
+                              current_value=Decimal("0.1"), sample_n=5))
+    db.commit()
+    assert cm.load_curve(db) == {0: Decimal("0.5"), 3: Decimal("0.9")}
+
+
+@pytest.mark.parametrize(("curve", "d", "expected"), [
+    ({}, 0, Decimal("1")),                       # 곡선 없음 → 보정 없음(fail-safe)
+    ({0: Decimal("0.5")}, 0, Decimal("2")),      # 절반만 보임 → 2배
+    ({0: Decimal("0.5")}, 1, Decimal("1")),      # 해당 일 없음 → 보정 없음
+    ({0: Decimal("0.1")}, 0, Decimal("3")),      # 1/0.1=10 이나 상한 3으로 클램프
+    ({0: Decimal("0")}, 0, Decimal("1")),        # m=0 → 정의 불가 → 보정 없음
+    ({0: Decimal("1")}, 0, Decimal("1")),        # 이미 다 참 → 보정 없음
+    ({0: Decimal("1.4")}, 0, Decimal("1")),      # 이상값(>1) → 보정 없음
+])
+def test_maturity_multiplier_failsafes(curve, d, expected):
+    assert cm.maturity_multiplier(curve, d) == expected
+
+
+def test_maturity_multiplier_ignores_settled_days():
+    curve = {cm.MATURITY_DAYS: Decimal("0.5")}
+    assert cm.maturity_multiplier(curve, cm.MATURITY_DAYS) == Decimal("1")
+    assert cm.maturity_multiplier(curve, -1) == Decimal("1")
+
+
+def _seed_ad_day(db, *, ad_date, clk, direct):
+    db.add(NaverAdDaily(
+        ad_date=ad_date, campaign_id="cmp1", campaign_type="SHOPPING", adgroup_id="grp1",
+        imp=100, clk=clk, cost=1000, conv_direct_amt=direct, conv_indirect_amt=0,
+    ))
+
+
+def test_rpc_unchanged_when_no_curve(db):
+    """곡선이 없으면 종전과 동일한 RPC를 낸다(fail-safe — 회귀 방어)."""
+    _seed_ad_day(db, ad_date=TODAY - timedelta(days=1), clk=10, direct=10_000)
+    db.commit()
+    clk, rpc = bcc._rpc_for(db, TODAY, adgroup_id="grp1")
+    assert clk == 10 and rpc == Decimal(1000)
+
+
+def test_rpc_projects_unsettled_recent_days_upward(db):
+    """정착 중인 최근 날짜는 성숙 추정치로 환산돼 RPC가 올라간다."""
+    _seed_curve(db, {1: 0.5})  # D+1 시점엔 최종 매출의 절반만 보인다
+    _seed_ad_day(db, ad_date=TODAY - timedelta(days=1), clk=10, direct=10_000)
+    db.commit()
+    clk, rpc = bcc._rpc_for(db, TODAY, adgroup_id="grp1")
+    assert clk == 10
+    assert rpc == Decimal(2000)  # 10,000 × 2 ÷ 10클릭 — 보정 없으면 1,000
+
+
+def test_rpc_corrects_each_day_separately(db):
+    """창 안의 날짜별로 서로 다른 배수가 적용된다(단일 SUM이면 불가능한 동작)."""
+    _seed_curve(db, {1: 0.5, 2: 1.0})   # D+1만 미정착, D+2는 이미 성숙
+    _seed_ad_day(db, ad_date=TODAY - timedelta(days=1), clk=10, direct=10_000)  # ×2
+    _seed_ad_day(db, ad_date=TODAY - timedelta(days=2), clk=10, direct=10_000)  # ×1
+    db.commit()
+    clk, rpc = bcc._rpc_for(db, TODAY, adgroup_id="grp1")
+    assert clk == 20
+    assert rpc == Decimal(1500)  # (20,000 + 10,000) / 20 — 일괄 보정이면 2,000, 무보정이면 1,000

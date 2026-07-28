@@ -293,3 +293,17 @@ def test_executed_bid_ups_today_excludes_dryrun_and_yesterday(db):
     _seed_executed(db, "bid_up", changed_at=today, after_value=None)  # 제외(미실쓰기)
     _seed_executed(db, "growth_bid_up", changed_at=yesterday)         # 제외(어제)
     assert auto_operator._executed_bid_ups_today(db, "adgroup", "grp-1", now) == 1
+
+
+# ── 곡선 원료 셋 불변식(2026-07-28 사고 회귀) ──────────────────────────────
+def test_curve_sample_types_cover_every_upward_step():
+    """곡선 원료는 "모든 상향 스텝" — RANK_STEP_TYPES(가드레일/TOCTOU 의미)와 혼동 금지.
+    이 둘을 한 셋으로 겸용해서 bid_rank_slope가 prod 0행이 된 사고의 회귀 가드."""
+    from app.services.naver_ad.bid_step_types import CURVE_SAMPLE_TYPES
+
+    assert CURVE_SAMPLE_TYPES == BID_UP_TYPES
+    # 실집행 0건이던 rank-step 둘만이 아니라, 실제로 실행되는 타입들이 반드시 포함돼야 한다.
+    for t in ("bid_up", "growth_bid_up", "bid_up_explore", "bid_up_cold"):
+        assert t in CURVE_SAMPLE_TYPES, f"{t}가 곡선 원료에서 빠지면 slope가 다시 굶는다"
+    assert RANK_STEP_TYPES < CURVE_SAMPLE_TYPES  # 진부분집합 — 겸용 금지
+    assert "bid_down" not in CURVE_SAMPLE_TYPES  # 하향은 아직 미편입(반대 사분면)

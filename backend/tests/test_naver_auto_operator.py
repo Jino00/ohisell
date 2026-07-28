@@ -3416,3 +3416,68 @@ def test_bid_up_rank_not_in_daily_lane_types():
 def test_bid_up_rank_excluded_from_delegation():
     from app.services.naver_ad import delegation_gate
     assert "bid_up_rank" not in delegation_gate.delegable_types()  # rank-step 위임 영구 제외(inline)
+
+
+# ═════════════ 학습밴드 vs 하드코딩 2.5 충돌 해소 (2026-07-28) ═════════════
+# 상수 2.5가 학습된 최적밴드(1.0-2.0)를 이겨서 탐침이 자기 최적점에 도달하지 못하고,
+# 그것을 막으려던 CD5 게이트도 2.5>2.0이라 영원히 발동하지 않던 구조를 해소한다.
+
+def test_probe_rank_floor_lowers_only_for_learned_band_below_prior():
+    """학습밴드 상한이 2.5보다 좋을 때만 하한을 낮춘다 — 그 외는 전부 종전 그대로."""
+    from decimal import Decimal as D
+    assert auto_operator._probe_rank_floor("1.0-2.0") == D("2")   # ★유일하게 값이 바뀌는 경우
+    assert auto_operator._probe_rank_floor("2.0-2.5") is None     # band_high==2.5 = 프라이어와 동일
+    assert auto_operator._probe_rank_floor("2.5-3.0") is None     # 느슨한 쪽으로 완화하지 않는다
+    assert auto_operator._probe_rank_floor("3.0-4.0") is None
+    assert auto_operator._probe_rank_floor("4.0+") is None        # 개방 밴드 = CD5가 담당(종전 경로)
+    assert auto_operator._probe_rank_floor(None) is None          # 학습값 없음 = 프라이어 유지
+
+
+def test_probe_rank_floor_unknown_label_falls_back_to_prior():
+    """알 수 없는 라벨은 예외를 밖으로 던지지 않고 프라이어로 폴백(조용한 오판정 방지)."""
+    assert auto_operator._probe_rank_floor("존재하지-않는-밴드") is None
+
+
+def test_probe_trigger_reaches_learned_optimum_when_floor_lowered():
+    """★핵심 회귀: 학습밴드 1.0-2.0이면 rank 2.0~2.5 구간에서도 탐침이 발동한다.
+    이 구간이 막혀 있어서 탐침이 학습 최적점(2.0)에 구조적으로 도달할 수 없었다."""
+    from decimal import Decimal as D
+    now = datetime(2026, 7, 20, 8, 20, 0)
+    curve = [_hour(6, imp=20, clk=0, cost=200, avg_rank=2.2),
+             _hour(7, imp=20, clk=0, cost=200, avg_rank=2.2)]
+    # 종전(하한 2.5): 미발동
+    assert auto_operator._probe_trigger(curve, now)[0] is False
+    # 학습밴드 1.0-2.0 반영(하한 2.0): 발동
+    fired, reason = auto_operator._probe_trigger(
+        curve, now, rank_floor=auto_operator._probe_rank_floor("1.0-2.0"),
+    )
+    assert fired is True
+    assert "학습밴드" in reason  # 근거가 하드코딩이 아니라 학습값임이 사유에 남는다
+    # 학습 최적점 안쪽(2.0 미만)까지 오면 다시 멈춘다 — 무한 상승 아님
+    inner = [_hour(6, imp=20, clk=0, cost=200, avg_rank=1.5),
+             _hour(7, imp=20, clk=0, cost=200, avg_rank=1.5)]
+    assert auto_operator._probe_trigger(inner, now, rank_floor=D("2"))[0] is False
+
+
+def test_probe_trigger_default_floor_unchanged_without_learned_band():
+    """학습밴드가 없으면 종전과 완전히 동일(rank 2.2는 미발동, 3.0은 발동)."""
+    now = datetime(2026, 7, 20, 8, 20, 0)
+    below = [_hour(6, imp=20, clk=0, cost=200, avg_rank=2.2),
+             _hour(7, imp=20, clk=0, cost=200, avg_rank=2.2)]
+    above = [_hour(6, imp=20, clk=0, cost=200, avg_rank=3.0),
+             _hour(7, imp=20, clk=0, cost=200, avg_rank=3.0)]
+    assert auto_operator._probe_trigger(below, now, rank_floor=None)[0] is False
+    assert auto_operator._probe_trigger(above, now, rank_floor=None)[0] is True
+
+
+def test_learned_band_of_swallows_lookup_failure(monkeypatch):
+    """학습밴드 조회 실패가 시간당 레인 전체를 막지 않는다(None 폴백)."""
+    from app.services.naver_ad import probe_learning_loop
+
+    def _boom(*a, **kw):
+        raise RuntimeError("aggregate 실패")
+
+    monkeypatch.setattr(probe_learning_loop, "learned_probe_rank", _boom)
+    assert auto_operator._learned_band_of(
+        None, datetime(2026, 7, 20, 8, 20, 0), "cmp-x",
+    ) is None

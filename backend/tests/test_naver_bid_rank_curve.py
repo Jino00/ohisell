@@ -373,3 +373,45 @@ def test_scanned_unit_all_pairs_dropped_still_invalidated(db):
 def test_run_daily_no_data(db):
     res = bid_rank_curve.run_daily(db, today=TODAY)
     assert res == {"units": 0, "upserted": 0, "invalidated": 0}
+
+
+# ── 곡선 원료 타입 회귀(2026-07-28): 원료 필터가 RANK_STEP_TYPES가 아니라 CURVE_SAMPLE_TYPES ──
+# 배경: 종전 필터 RANK_STEP_TYPES={bid_up_servo, bid_up_rank}는 prod 실집행 0건인 타입뿐이라,
+# 실제로 219건 실행된 bid_up_explore와 평시 주력 bid_up/growth_bid_up이 통째로 원료에서 빠져
+# bid_rank_slope가 0행이었다(→ rank_servo 영구 콜드스타트·EX deep 예외 휴면). 아래 테스트는
+# 필터를 RANK_STEP_TYPES로 되돌리면 전부 실패한다.
+@pytest.mark.parametrize(
+    "ptype", ["bid_up_explore", "bid_up", "growth_bid_up", "bid_up_cold", "bid_up_servo", "bid_up_rank"],
+)
+def test_all_upward_step_types_are_curve_samples(db, ptype):
+    d = date(2026, 7, 10)
+    _clean_obs(db, ad_date=d, hour=10, before_bid=1000, after_bid=1500,
+               rank_before=5.0, rank_after=4.0, proposal_type=ptype)
+    db.commit()
+    obs = bid_rank_curve.build_observations(db, today=TODAY)
+    pairs = obs[("adgroup", "grp-1")]
+    assert len(pairs) == 1, f"{ptype} 실집행이 곡선 원료에서 누락됨"
+    assert pairs[0]["delta_bid"] == 500
+    assert pairs[0]["improvement"] == Decimal("1.0")
+
+
+def test_explore_steps_alone_can_fit_a_slope(db):
+    """탐색 스텝만으로도 유효쌍 _MIN_PAIRS를 채우면 slope가 적립된다(prod 219건이 이 경로)."""
+    d = date(2026, 7, 10)
+    for i, hour in enumerate((3, 9, 15)):  # 쿨다운·오염창(±2h) 겹치지 않게 이격.
+        _clean_obs(db, ad_date=d + timedelta(days=i), hour=hour, before_bid=1000, after_bid=1300,
+                   rank_before=5.0, rank_after=4.0, proposal_type="bid_up_explore")
+    db.commit()
+    res = bid_rank_curve.run_daily(db, today=TODAY)
+    assert res["upserted"] == 1 and res["invalidated"] == 0
+    priors = bid_rank_curve.load_response_priors(db)
+    assert priors["adgroup:grp-1"] == Decimal("300.0000")  # Δbid 300 / 개선폭 1.0
+
+
+def test_bid_down_is_not_a_curve_sample(db):
+    """하향은 아직 원료가 아니다(반대 사분면 — _fit_slope 유효쌍 정의를 함께 넓혀야 함)."""
+    d = date(2026, 7, 10)
+    _clean_obs(db, ad_date=d, hour=10, before_bid=1500, after_bid=1000,
+               rank_before=4.0, rank_after=5.0, proposal_type="bid_down")
+    db.commit()
+    assert bid_rank_curve.build_observations(db, today=TODAY) == {}

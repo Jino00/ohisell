@@ -475,8 +475,14 @@ def run_naver_flight_loop_job():
         from app.services.naver_ad.flight_loop import run_flight_loop
 
         result = run_flight_loop(db)
-        log.info("[스케줄러] naver flight_loop: %d캠페인, dry_run=%s",
-                 result["campaigns_processed"], result.get("dry_run", True))
+        # ★breakdown 없이 캠페인 수만 찍으면 전원 스킵도 정상 완주로 읽힌다(flight_loop
+        # 실사고 2026-07-25~28). 결정/스킵/오류를 분해해서 남긴다 — 잡 로그만 보고도
+        # "돌긴 돌았는데 아무 결정도 안 났다"가 보여야 한다.
+        log.info(
+            "[스케줄러] naver flight_loop: %d캠페인 (결정 %s, 스킵 %s %s, 오류 %s), dry_run=%s",
+            result["campaigns_processed"], result.get("decided"), result.get("skipped"),
+            result.get("skip_breakdown"), result.get("errors"), result.get("dry_run", True),
+        )
     except Exception as e:
         log.exception("[스케줄러] run_naver_flight_loop_job 에러: %s", e)
         raise
