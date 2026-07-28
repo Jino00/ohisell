@@ -2889,7 +2889,14 @@ export interface NaverPerformanceBepRow {
   ceiling_is_borrowed: boolean;
   /** 마크다운 `**` 포함 가능 — stripBoldMarkers로 정제 후 렌더할 것. */
   ceiling_basis: string;
+  /** 최근 관측일의 **최댓값**(구속 조건) — 최솟값이 아니다. 그 순위를 사려면 기기·소재 중
+   *  가장 비싼 쪽을 지불해야 실제로 닿는다(bep_breakdown.py `_market_bid` 참고). */
   market_bid: number | null;
+  /** market_bid를 낸 기기. "MOBILE" | "PC" | null. */
+  market_bid_device: string | null;
+  /** market_bid를 관측한 날짜(YYYY-MM-DD). 최대 7일 전일 수 있다 — 화면에 반드시 함께
+   *  표기해 "지금" 값처럼 보이지 않게 한다(원칙22). */
+  market_bid_observed_on: string | null;
   market_bid_position: number | null;
   /** "" = 문제 없음. 비어있지 않으면 상한을 계산할 수 없었던 이유. */
   blocked_reason: string;

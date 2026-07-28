@@ -34,3 +34,35 @@ export function marketBidTone(
   if (ceilingIsBorrowed) return "idle";
   return marketBid > ceilingBid ? "bad" : "good";
 }
+
+// ── ⑤ "N위 시장가" 캡션 — market_bid_device/observed_on 표기(Phase 3 후속) ──
+// 시장가는 "최근 관측일의 최댓값"이라 최대 7일 전 값일 수 있다. 기기·관측일 없이 숫자만
+// 보여주면 신선도가 없는데 있는 척하는 것이다(원칙22) — 그래서 셀 아래 작은 글씨로 함께 낸다.
+
+/** device 코드 → 화면 표기. 알려진 두 값 외(빈 값 포함)는 빈 문자열 — 배지를 만들지 않는다. */
+export function marketBidDeviceLabel(device: string | null | undefined): string {
+  if (device === "MOBILE") return "모바일";
+  if (device === "PC") return "PC";
+  return "";
+}
+
+/** 'YYYY-MM-DD' → 'MM-DD'. 형식이 다르면(추정 금지) 원문을 그대로 돌려준다 — 억지로 잘라
+ *  틀린 날짜를 만들지 않는다. */
+export function shortObservedDate(iso: string): string {
+  const match = /^\d{4}-(\d{2})-(\d{2})$/.exec(iso);
+  if (!match) return iso;
+  return `${match[1]}-${match[2]}`;
+}
+
+/** ⑤ 표 "N위 시장가" 셀 아래 붙일 캡션. 관측일이 없으면(market_bid가 null인 행) 빈 문자열 —
+ *  호출부는 이 값이 ""면 아무것도 렌더하지 않는다(NO_DATA만 남는다). 기기를 모르면 관측일만
+ *  보여준다("07-28 관측"). */
+export function marketBidCaption(
+  device: string | null | undefined,
+  observedOn: string | null | undefined,
+): string {
+  if (!observedOn) return "";
+  const dev = marketBidDeviceLabel(device);
+  const when = `${shortObservedDate(observedOn)} 관측`;
+  return dev ? `${dev} · ${when}` : when;
+}

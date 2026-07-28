@@ -1,7 +1,13 @@
 // timelineRules.test.ts — ⑥개선 타임라인 순수 로직 가드(D-NAO-104 Phase 3).
 import { describe, it, expect } from "vitest";
-import { confidenceLabel, observationBadge, deltaText, partialDataNote } from "./timelineRules";
-import type { NaverPerformanceTimelineImpact, NaverPerformanceTimelineWindow } from "./api";
+import {
+  confidenceLabel, observationBadge, deltaText, partialDataNote,
+  filterMarkersInRange, toChartMarkers, formatEventMarkerLabel,
+  type ChartEventMarker,
+} from "./timelineRules";
+import type {
+  NaverPerformanceTimelineDay, NaverPerformanceTimelineImpact, NaverPerformanceTimelineWindow,
+} from "./api";
 
 describe("confidenceLabel — 신뢰도 꼬리표", () => {
   it("assumed는 적용 시점 추정", () => {
@@ -135,5 +141,120 @@ describe("화면 문구 금지어 회귀 — '개선/덕분/효과' 없음", () 
     for (const word of FORBIDDEN) {
       expect(out).not.toContain(word);
     }
+  });
+});
+
+// ── ③차트 마커 순수 로직 ───────────────────────────────────────────
+function makeEvent(overrides: Partial<NaverPerformanceTimelineDay["events"][number]> = {}):
+  NaverPerformanceTimelineDay["events"][number] {
+  return {
+    ref_key: "ref-1",
+    label_ko: "03 재가동",
+    detail_ko: "",
+    effective_confidence: "log",
+    scope: "campaign",
+    source: "change_log",
+    curated: true,
+    ...overrides,
+  };
+}
+
+function makeDay(date: string, events: NaverPerformanceTimelineDay["events"] = [makeEvent()]):
+  NaverPerformanceTimelineDay {
+  return { date, events, impact: null };
+}
+
+describe("filterMarkersInRange — 시리즈 날짜 범위 밖 마커 제거", () => {
+  const seriesDates = ["2026-07-20", "2026-07-21", "2026-07-22", "2026-07-28"];
+
+  it("범위 안의 마커만 남긴다", () => {
+    const markers: ChartEventMarker[] = [
+      { date: "2026-07-15", label: "범위 밖(이전)", count: 1 },
+      { date: "2026-07-21", label: "범위 안", count: 1 },
+      { date: "2026-08-01", label: "범위 밖(이후)", count: 1 },
+    ];
+    expect(filterMarkersInRange(markers, seriesDates)).toEqual([
+      { date: "2026-07-21", label: "범위 안", count: 1 },
+    ]);
+  });
+
+  it("경계값(첫 날짜·마지막 날짜)은 포함한다", () => {
+    const markers: ChartEventMarker[] = [
+      { date: "2026-07-20", label: "첫날", count: 1 },
+      { date: "2026-07-28", label: "마지막날", count: 1 },
+    ];
+    expect(filterMarkersInRange(markers, seriesDates)).toEqual(markers);
+  });
+
+  it("seriesDates가 비어있으면(집행 이력 없음) 빈 배열 — 그릴 축이 없다", () => {
+    const markers: ChartEventMarker[] = [{ date: "2026-07-21", label: "x", count: 1 }];
+    expect(filterMarkersInRange(markers, [])).toEqual([]);
+  });
+
+  it("마커가 비어있으면 빈 배열 그대로", () => {
+    expect(filterMarkersInRange([], seriesDates)).toEqual([]);
+  });
+});
+
+describe("toChartMarkers — timeline 응답 → 차트 마커", () => {
+  const seriesDates = ["2026-07-20", "2026-07-21", "2026-07-22", "2026-07-28"];
+
+  it("이벤트가 있는 날만 마커로 변환하고, 첫 이벤트의 label_ko를 대표 라벨로 쓴다", () => {
+    const timeline: NaverPerformanceTimelineDay[] = [
+      makeDay("2026-07-21", [makeEvent({ label_ko: "03 재가동" })]),
+      makeDay("2026-07-23", []),
+    ];
+    expect(toChartMarkers(timeline, seriesDates)).toEqual([
+      { date: "2026-07-21", label: "03 재가동", count: 1 },
+    ]);
+  });
+
+  it("한 날짜에 이벤트가 여러 건이면 count에 전부 반영한다", () => {
+    const timeline: NaverPerformanceTimelineDay[] = [
+      makeDay("2026-07-22", [
+        makeEvent({ label_ko: "첫 결정" }),
+        makeEvent({ ref_key: "ref-2", label_ko: "두번째 결정" }),
+      ]),
+    ];
+    expect(toChartMarkers(timeline, seriesDates)).toEqual([
+      { date: "2026-07-22", label: "첫 결정", count: 2 },
+    ]);
+  });
+
+  it("이벤트가 없는 날은 마커를 만들지 않는다", () => {
+    const timeline: NaverPerformanceTimelineDay[] = [makeDay("2026-07-21", [])];
+    expect(toChartMarkers(timeline, seriesDates)).toEqual([]);
+  });
+
+  it("timeline에 있어도 seriesDates 범위 밖이면 걸러진다(D-NAO-101 마커가 07-28 위치에만 뜨는 것의 근거)", () => {
+    const timeline: NaverPerformanceTimelineDay[] = [
+      makeDay("2026-06-01", [makeEvent({ label_ko: "훨씬 이전 결정" })]),
+      makeDay("2026-07-28", [makeEvent({ label_ko: "03 재가동" })]),
+    ];
+    expect(toChartMarkers(timeline, seriesDates)).toEqual([
+      { date: "2026-07-28", label: "03 재가동", count: 1 },
+    ]);
+  });
+});
+
+describe("formatEventMarkerLabel — 차트 마커 라벨(12자 제한 + 개수 압축)", () => {
+  it("12자 이내면 그대로", () => {
+    expect(formatEventMarkerLabel("03 재가동", 1)).toBe("03 재가동");
+  });
+
+  it("12자를 넘으면 자른다", () => {
+    const long = "아주아주아주아주아주아주긴라벨입니다";
+    expect(formatEventMarkerLabel(long, 1)).toBe(long.slice(0, 12));
+    expect(formatEventMarkerLabel(long, 1).length).toBe(12);
+  });
+
+  it("count가 1을 넘으면 '외 N건'이 아니라 '+N'으로 압축한다", () => {
+    expect(formatEventMarkerLabel("03 재가동", 3)).toBe("03 재가동 +2");
+    expect(formatEventMarkerLabel("03 재가동", 3)).not.toContain("외");
+    expect(formatEventMarkerLabel("03 재가동", 3)).not.toContain("건");
+  });
+
+  it("count가 1이면 접미사 없음", () => {
+    expect(formatEventMarkerLabel("03 재가동", 1)).toBe("03 재가동");
   });
 });
