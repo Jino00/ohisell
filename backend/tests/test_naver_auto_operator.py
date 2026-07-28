@@ -3422,7 +3422,7 @@ def test_bid_up_rank_excluded_from_delegation():
 # 상수 2.5가 학습된 최적밴드(1.0-2.0)를 이겨서 탐침이 자기 최적점에 도달하지 못하고,
 # 그것을 막으려던 CD5 게이트도 2.5>2.0이라 영원히 발동하지 않던 구조를 해소한다.
 
-def test_probe_rank_floor_tightens_only_for_learned_band_below_prior():
+def test_probe_rank_floor_lowers_only_for_learned_band_below_prior():
     """학습밴드 상한이 2.5보다 좋을 때만 하한을 낮춘다 — 그 외는 전부 종전 그대로."""
     from decimal import Decimal as D
     assert auto_operator._probe_rank_floor("1.0-2.0") == D("2")   # ★유일하게 값이 바뀌는 경우

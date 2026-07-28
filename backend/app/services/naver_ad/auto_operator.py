@@ -1837,8 +1837,24 @@ def _probe_rank_floor(learned_band: str | None) -> Decimal | None:
 
     이 코드베이스의 일관된 규약대로 **학습값이 있으면 학습값이, 없으면 하드코딩 프라이어가**
     이긴다. 단 방향은 `min`으로만 — 학습밴드가 2.5보다 느슨해도(2.5-3.0/3.0-4.0/4.0+)
-    하한을 **완화하지 않는다**(그 경우 종전과 완전히 동일하게 동작하고, 과climb 억제는
+    하한 **값**을 키우지 않는다(그 경우 종전과 완전히 동일하게 동작하고, 과climb 억제는
     기존 CD5가 그대로 담당한다). 즉 이 함수가 실제로 값을 바꾸는 경우는 `1.0-2.0` 하나다.
+
+    ★★위험 방향을 정확히 적는다(리뷰 L-1 정정). 하한 **값**은 안 커지지만 하한이 내려가면
+    **탐침 발동 집합은 엄격히 커진다** — 학습밴드가 `1.0-2.0`인 캠페인에서 rank 2.0~2.5
+    구간이 새로 열리고, 그건 입찰 **상향** 제안이 늘어난다는 뜻이다(라이브 광고비 방향).
+    "느슨해지지 않는다"는 값 이야기지 노출 이야기가 아니다. 새로 열리는 2.0~2.5는 실측
+    이익극대 스팟밴드(2.5~4)보다 **위쪽**이라 이익 관점에선 검증되지 않은 구간이다 —
+    그래서 학습이 그 캠페인에 대해 직접 승격시킨 밴드가 있을 때만 열린다.
+    제안이 실제 집행되려면 ±15% 클램프·킬스위치 재확인·쿨다운 2h·일일상한·BEP 하한·
+    스톱로스를 전부 통과해야 한다(우회 없음).
+
+    ★CD5와의 관계도 정확히 적는다(리뷰 H-2 정정). floor를 band_high로 맞췄으므로 탐침
+    발동(rank ≥ band_high)과 CD5 생략(rank < band_high)은 **정확한 여집합**이 된다 —
+    즉 `1.0-2.0`에서 CD5는 여전히 한 번도 발동하지 않는다. 달성된 것은 "탐침이 학습
+    최적점에서 멈춘다"이지 "CD5가 되살아난다"가 아니다. CD5의 역할은 이제 트리거 자신이
+    수행하고, CD5는 중복 방어로 남는다. (floor를 band_high보다 낮추면 탐침이 최적점을
+    **넘어서** 계속 오르므로 그 방향은 취하지 않는다.)
 
     상한 개방 밴드("4.0+", hi=None)는 종전 경로 유지 — 탐침이 발동한 뒤 CD5가 생략시키며,
     그 편이 "학습 최적밴드 도달" 사유가 일기에 남아 관측성이 낫다.
@@ -1877,6 +1893,7 @@ def _learned_band_of(db: Session, now: datetime, campaign_id: str) -> str | None
 
 def _learned_optimal_skip(
     db: Session, curve: list[dict], now: datetime, campaign_id: str,
+    learned_band: str | None = None, band_resolved: bool = False,
 ) -> tuple[bool, str]:
     """D-NAO-59/60 RL5(CD5) — 탐침(`_probe_trigger`)이 발동한 직후 게이트. **탐침 전용**.
     ★밴드=탐침 프라이어, ROAS-UP 캡 아님(D-NAO-66). IU2 이후 ROAS-driven 일반 UP은 이 게이트를
@@ -1900,7 +1917,11 @@ def _learned_optimal_skip(
         return False, "순위 근거 없음 — 게이트 미적용"
 
     env_cell = probe_cell_aggregate.env_cell_of_date(now.date())
-    learned = probe_learning_loop.learned_probe_rank(
+    # ★호출부가 이미 해결한 값이 있으면 그것을 쓴다(리뷰 M-1). 재조회하면 ①유닛마다
+    # 30일 aggregate를 도는 N+1이 그대로 남고 ②탐침 하한과 이 게이트가 **서로 다른 값**을
+    # 볼 수 있다(하한은 run 시작값 고정, 여기는 매번 재계산) — 두 게이트가 같은 밴드를
+    # 봐야 어긋나지 않는다는 게 이 배선의 전제다.
+    learned = learned_band if band_resolved else probe_learning_loop.learned_probe_rank(
         db, env_cell=env_cell, as_of=now.date(), campaign_id=campaign_id,
     )
     if learned is None:
@@ -2827,9 +2848,10 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
     fetch_intraday = fetch_intraday or fetch_entity_hh24
     today = now.date()
     window_from, window_to = _settlement_window(today)
-    # 캠페인별 학습밴드 → 탐침 하한 캐시(run 1회 한정). 조회가 30일 aggregate라 유닛마다
+    # 캠페인별 **학습밴드 라벨** 캐시(run 1회 한정). 조회가 30일 aggregate라 유닛마다
     # 부르면 N+1 — 캠페인당 1회로 묶는다. None도 캐시한다("학습값 없음"도 확정된 답).
-    _probe_floor_cache: dict[str, Decimal | None] = {}
+    # 하한(`_probe_rank_floor`)과 CD5(`_learned_optimal_skip`)가 **이 하나의 값을 공유**한다.
+    _probe_band_cache: dict[str, str | None] = {}
 
     result: dict = {
         "reviewed": 0, "approved": 0, "executed": 0, "held": [], "skipped": 0, "failed": 0,
@@ -2925,17 +2947,19 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                 # 막던 충돌 해소 — `_probe_rank_floor` docstring). 조회는 harness 몫이고
                 # (SA는 db를 모른다, 원칙18-6) 캠페인당 1회만 — `learned_probe_rank`는
                 # 내부에서 30일 aggregate를 도는 무거운 호출이라 유닛마다 부르면 N+1이 된다.
-                if campaign_id not in _probe_floor_cache:
-                    _probe_floor_cache[campaign_id] = _probe_rank_floor(
-                        _learned_band_of(db, now, campaign_id)
-                    )
+                if campaign_id not in _probe_band_cache:
+                    _probe_band_cache[campaign_id] = _learned_band_of(db, now, campaign_id)
                 probe_fired, probe_reason = _probe_trigger(
-                    curve, now, rank_floor=_probe_floor_cache[campaign_id],
+                    curve, now,
+                    rank_floor=_probe_rank_floor(_probe_band_cache[campaign_id]),
                 )
                 if probe_fired:
                     # D-NAO-60 RL5(CD5): 학습된 최적 밴드에 이미 도달했으면 상향 생략(과climb
                     # 방지). guardrail 우회 없음 — 통과한 제안도 execute() 전량을 그대로 탄다.
-                    skip, skip_reason = _learned_optimal_skip(db, curve, now, campaign_id)
+                    skip, skip_reason = _learned_optimal_skip(
+                        db, curve, now, campaign_id,
+                        learned_band=_probe_band_cache[campaign_id], band_resolved=True,
+                    )
                     if skip:
                         result["held"].append({"target_id": target_id, "reason": skip_reason})
                         continue

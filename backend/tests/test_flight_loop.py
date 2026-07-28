@@ -443,3 +443,39 @@ def test_flight_loop_missing_after_batch_is_pathology(db):
     assert len(db.query(NaverChangeLog).filter(
         NaverChangeLog.action == "flight_pacing_silent"
     ).all()) == 1
+
+
+# ── 적대적 리뷰 지적 회귀 (2026-07-28) ──
+
+def test_flight_loop_all_demoted_day_is_still_pathology(db):
+    """★H-1 회귀: 예측 배치가 '성공했지만 0행'인 날(ours 전원 강등)은 침묵하면 안 된다.
+    데이터 프록시만 보면 pending(정상)으로 읽혀 하루 12회 전부 조용히 넘어간다 —
+    그게 이 수정이 고치려던 무성 실패의 총체판이다."""
+    from app.models import NaverForecastModel, SchedulerState
+    from app.services.naver_ad.flight_loop import FORECAST_JOB_NAME
+
+    db.add(NaverCampaignSettings(campaign_id="cmp-a", optimizer="ours"))
+    db.add(NaverForecastModel(
+        grain="campaign", scope_key="cmp-a", gate_status="demoted", sample_days=14,
+    ))
+    # 배치는 돌았다(스케줄러 기록) — 그러나 강등이라 예측 행은 0개
+    db.add(SchedulerState(
+        job_name=FORECAST_JOB_NAME, cron_expression="50 7 * * *", is_enabled=True,
+        last_run_at=datetime(2026, 7, 11, 7, 50), last_status="ok",
+    ))
+    db.commit()
+    result = run_flight_loop(db, today=date(2026, 7, 11), current_hour=14)
+    assert result["forecast_ready"] is True, "배치가 돌았으면 0행이어도 병리 판정을 켜야 한다"
+    assert result["skip_breakdown"] == {SKIP_FORECAST_MISSING: 1}
+    assert len(db.query(NaverChangeLog).filter(
+        NaverChangeLog.action == "flight_pacing_silent"
+    ).all()) == 1
+
+
+def test_flight_loop_no_ours_campaigns_is_not_silent(db):
+    """★M-2 회귀: 관리 대상이 통째로 사라진 것은 가장 치명적인 무성 실패다."""
+    result = run_flight_loop(db, today=date(2026, 7, 11), current_hour=10)
+    assert result["campaigns_processed"] == 0
+    assert len(db.query(NaverChangeLog).filter(
+        NaverChangeLog.action == "flight_pacing_silent"
+    ).all()) == 1

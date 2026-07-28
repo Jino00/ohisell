@@ -70,12 +70,37 @@ def _ours_campaigns(db: Session) -> list[tuple[NaverCampaignSettings, str | None
     return [(cs, status) for cs, status in rows]
 
 
-def _forecast_generated_today(db: Session, today: date) -> bool:
-    """그날 예측 생성 잡이 이미 돌았는가(= target_date=today 예측이 grain 무관하게 1행이라도).
+FORECAST_JOB_NAME = "run_naver_forecast_engine"
 
-    캠페인별 유무가 아니라 **그날 배치의 실행 여부**를 본다 — 개별 캠페인이 강등돼 예측을
-    못 받은 것과, 아직 07:50이 안 지난 것은 완전히 다른 사건이다(상수 docstring 참조).
+
+def _forecast_generated_today(db: Session, today: date) -> bool:
+    """그날 예측 생성 배치가 이미 돌았는가.
+
+    ★초판은 "target_date=today 예측이 1행이라도 있는가"라는 **데이터 프록시**만 봤다.
+    적대적 리뷰가 그 구멍을 잡았다: `forecast_model_builder`는 게이트가 active가 아니면
+    (demoted/fallback) `NaverForecastDaily` 행을 **아예 쓰지 않는다.** 그래서
+    **'ours' 캠페인이 전부 강등된 날**에는 배치가 정상 완주해도 0행 → 프록시가
+    "아직 안 돌았다(정상)"로 읽어 **하루 12회 전부 침묵**한다. 그건 이 수정이 고치려던
+    07-25~28 무성 실패의 총체판이고, 잡은 `last_status='ok'`라 워치독도 못 잡는다.
+
+    그래서 **사실을 직접 본다**: 스케줄러가 기록한 그 잡의 마지막 실행일(KST)이 오늘인가.
+    데이터 프록시는 OR로 남겨 폴백으로만 쓴다 — 잡 이름이 바뀌거나 조회가 실패해도
+    종전 동작으로 떨어질 뿐이고, 둘 중 하나라도 "돌았다"고 하면 병리 판정을 켠다
+    (켜지는 방향이 안전 — 침묵보다 오탐이 낫다).
     """
+    try:
+        from app.models import SchedulerState
+
+        last_run = (
+            db.query(SchedulerState.last_run_at)
+            .filter(SchedulerState.job_name == FORECAST_JOB_NAME)
+            .scalar()
+        )
+        if last_run is not None and last_run.date() == today:
+            return True
+    except Exception:  # noqa: BLE001 — 폴백이 있으므로 삼키되 흔적은 남긴다.
+        log.exception("flight_loop: 예측 배치 실행일 조회 실패 — 데이터 프록시로 폴백")
+
     return db.query(
         db.query(NaverForecastDaily.id)
         .filter(NaverForecastDaily.target_date == today)
@@ -245,7 +270,7 @@ def _log_flight_silence(db: Session, *, summary: dict, now) -> None:
     db.add(NaverChangeLog(
         entity_type="system",
         entity_id="flight_loop",
-        campaign_id=None,
+        campaign_id="",  # 모델이 None을 ''로 정규화 — 캠페인 조인에 안 걸리는 값
         action="flight_pacing_silent",
         proposal_id=None,
         dry_run=True,  # 진단 기록 — 아무것도 바꾸지 않았다.
@@ -279,12 +304,18 @@ def run_flight_loop(
 
     campaigns = _ours_campaigns(db)
     if not campaigns:
-        log.info("flight_loop: optimizer='ours' 캠페인 없음 — 스킵")
-        return {
+        # ★조기반환도 침묵하지 않는다(리뷰 지적): 관리 대상이 통째로 사라진 것은
+        # 개별 캠페인 스킵보다 치명적인 무성 실패인데, 초판은 이 경로만 종전대로
+        # log.info 후 조용히 반환했다 — 새 관측성을 정작 최악의 케이스가 비껴갔다.
+        summary = {
             "campaigns_processed": 0, "decided": 0, "skipped": 0,
             "skip_breakdown": {}, "errors": 0, "forecast_ready": None,
-            "decisions": [], "dry_run": dry_run,
+            "dry_run": dry_run,
         }
+        log.warning("flight_loop: optimizer='ours' 캠페인이 하나도 없다 — 관리 대상 소실 의심")
+        _log_flight_silence(db, summary=summary, now=now)
+        db.commit()
+        return {**summary, "decisions": []}
 
     weekday = today.weekday()
     weights = _hourly_weights(db, weekday)
@@ -445,9 +476,10 @@ def run_flight_loop(
                 "projection_factor": projection,
                 "projected_final_cost": projected_final_cost,
             }
-            decisions.append(decision)
-
+            # ★기록 먼저, append 나중(리뷰 L-3): 반대 순서면 `_log_flight_decision`이
+            # 던졌을 때 같은 캠페인이 decided 1 + error 1로 두 번 세어진다.
             _log_flight_decision(db, campaign_id=cid, result=decision, dry_run=dry_run, now=now)
+            decisions.append(decision)
 
         except Exception as e:
             log.exception("flight_loop: campaign %s 처리 실패: %s", cid, e)
