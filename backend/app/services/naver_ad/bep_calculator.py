@@ -9,7 +9,6 @@
 # 참고 메모리: bep-roas-calculation-structure (BEP ROAS = 판매가 ÷ 공헌이익).
 from __future__ import annotations
 
-import json
 import logging
 import statistics
 from datetime import timedelta
@@ -22,6 +21,7 @@ from app.models import (
     Channel, NaverProductBep, NaverSettlementCase, NaverSettlementDaily, Order,
     ProductChannelMapping, ProductMaster,
 )
+from app.services import order_delivery
 from app.utils.kst import kst_now, kst_today
 
 log = logging.getLogger(__name__)
@@ -34,10 +34,11 @@ _DEFAULT_COMMISSION_RATE = Decimal("0.055")  # 정산·채널 모두 없을 때 
 _PRICE_WINDOW_DAYS = 120  # 대표 단가 산출 창(이 기간 주문 없으면 전기간 폴백)
 
 # ── D-NAO-57 (C) 배송비: 건당 단가(부가세포함, Jino 확정 2026-07-18) ──
-# ★단가는 config 상수(단가 개정 대비), 적용은 주문 건별 배송방식 판별 기반(_order_shipping_cost).
-SHIPPING_COST_NORMAL = Decimal("1900")     # 일반배송 건당
-SHIPPING_COST_NBAESONG = Decimal("3020")   # N배송(품고 내일도착/도착보장) 건당 — D-NAO-84 실배선
-SHIPPING_COST_BY_METHOD = {"normal": SHIPPING_COST_NORMAL, "nbaesong": SHIPPING_COST_NBAESONG}
+# ★단가·판별의 단일 진실 원천 = services/order_delivery.py (Jino 지시 2026-07-28로 이관).
+#   여기서는 이름만 재수출한다 — 기존 소비자·테스트가 그대로 동작하도록.
+SHIPPING_COST_NORMAL = order_delivery.SHIPPING_COST_NORMAL      # 일반배송 건당 1,900
+SHIPPING_COST_NBAESONG = order_delivery.SHIPPING_COST_NBAESONG  # N배송 건당 3,020 (D-NAO-84)
+SHIPPING_COST_BY_METHOD = order_delivery.SHIPPING_COST_BY_METHOD
 
 # ── D-NAO-57 (B) 광고 의사결정용 수수료율 분해 게이트 ──
 _AD_COMM_MIN_CASE_ROWS = 30       # 건별 정산 표본이 이보다 적으면 분해 신뢰 불가 → 블렌드 폴백
@@ -145,44 +146,17 @@ def ad_commission_rate(db: Session) -> dict | None:
 
 
 def _order_shipping_cost(order_row=None) -> Decimal:
-    """주문 1건의 배송비(건당, 부가세포함) — 배송방식 판별 훅 (D-NAO-57 C · D-NAO-84 실배선).
+    """주문 1건의 배송비(건당, 부가세포함) — 배송방식 판별 (D-NAO-57 C · D-NAO-84 실배선).
 
-    N배송(품고 내일도착/도착보장) 판별 필드가 실측되어(prod 주문 id 11929, 2026-07-22 21:52 KST
-    첫 N배송 주문 raw_data) 배선 완료. 판별자: 원천 주문 응답 entry(raw_data JSON)의
-    productOrder.deliveryAttributeType == "ARRIVAL_GUARANTEE" → N배송(3,020). 그 외(과거 전 건
-    "TODAY")·필드 부재 → 일반배송(1,900).
+    ★판별 로직은 services/order_delivery.py로 이관됐다(Jino 지시 2026-07-28 — 동기화·백필·BEP가
+    같은 함수를 쓰게). 이 함수는 그 SA로 위임하는 얇은 훅이고, **계약은 그대로**다:
+      orders.shipping_cost_paid(영속 컬럼, 주문 시점 단가 스냅샷) 우선 →
+      없으면 raw_data의 productOrder.deliveryAttributeType == "ARRIVAL_GUARANTEE" → N배송(3,020) →
+      그 외·필드 부재·파싱 실패·raw_data 부재 → 일반배송(1,900) fail-safe.
+    백필이 쓰는 값 = 폴백 파싱이 내는 값이라 두 경로의 산출은 항상 같다(회귀 0).
 
-    ★단일 판별자 원칙(원칙22, n=1 실측): 실측 주문엔 동반 키(logisticsCompanyId=="PG",
-    logisticsCenterId, arrivalGuaranteeDate, deliveryTagType=="TOMORROW")도 함께 관측됐으나,
-    프로그램 레벨 마커는 deliveryAttributeType 하나로 고정한다(동반 신호는 참고, 판별에 미사용 —
-    표본이 얇을 때 판별자를 늘리면 오탐 위험). 파싱 실패·raw_data 부재·필드 부재는 모두
-    일반배송으로 폴백(fail-safe — 종전 동작 보존, BEP를 낙관 쪽으로 흔들지 않음).
-
-    order_row: _avg_qty_and_logistics의 경량 행 dict({"raw_data": ...}) 또는 raw_data 속성을
-    가진 ORM 행. None이면 일반배송."""
-    if not order_row:
-        return SHIPPING_COST_NORMAL
-    if isinstance(order_row, dict):
-        rd = order_row.get("raw_data")
-    else:
-        rd = getattr(order_row, "raw_data", None)
-    parsed = None
-    if isinstance(rd, dict):
-        parsed = rd
-    elif isinstance(rd, str) and rd:
-        try:
-            obj = json.loads(rd)
-            parsed = obj if isinstance(obj, dict) else None
-        except (ValueError, TypeError):
-            parsed = None  # 잘림/비JSON → 폴백
-    if not isinstance(parsed, dict):
-        return SHIPPING_COST_NORMAL
-    po = parsed.get("productOrder")
-    if not isinstance(po, dict):
-        return SHIPPING_COST_NORMAL
-    if po.get("deliveryAttributeType") == "ARRIVAL_GUARANTEE":
-        return SHIPPING_COST_NBAESONG
-    return SHIPPING_COST_NORMAL
+    order_row: _avg_qty_and_logistics의 경량 행 dict 또는 같은 속성을 가진 ORM 행. None이면 일반배송."""
+    return order_delivery.order_shipping_cost(order_row)
 
 
 def _avg_qty_and_logistics(db: Session) -> dict[str, dict]:
@@ -206,11 +180,12 @@ def _avg_qty_and_logistics(db: Session) -> dict[str, dict]:
     cutoff = kst_today() - timedelta(days=_PRICE_WINDOW_DAYS)
 
     def _collect(since):
-        # cpid → 주문 행(경량) 리스트. raw_data를 함께 로드해 _order_shipping_cost가 건별
-        # 배송방식(일반/N배송)을 판별한다(D-NAO-84). 상품당 주문 수는 제한적이라 행당 JSON 파싱
-        # 비용은 무시할 수준.
+        # cpid → 주문 행(경량) 리스트. 지불 배송비는 영속 컬럼 shipping_cost_paid를 먼저 읽고
+        # (주문 시점 단가 스냅샷), 백필 이전·판별 불가 행을 위해 raw_data도 폴백으로 함께 싣는다
+        # — 두 경로가 같은 값을 내므로 백필 진행 여부와 무관하게 산출이 동일하다(회귀 0).
         qy = db.query(
-            Order.platform_product_id, Order.quantity, Order.shipping_cost, Order.raw_data
+            Order.platform_product_id, Order.quantity, Order.shipping_cost,
+            Order.shipping_cost_paid, Order.raw_data,
         ).filter(
             Order.channel_id == NAVER_CHANNEL_ID,
             Order.quantity > 0,
@@ -218,14 +193,15 @@ def _avg_qty_and_logistics(db: Session) -> dict[str, dict]:
         if since is not None:
             qy = qy.filter(Order.order_date >= since)
         acc: dict[str, list] = {}
-        for pid, qn, ship_in, raw in qy.all():
+        for pid, qn, ship_in, ship_paid, raw in qy.all():
             if not pid:
                 continue
             acc.setdefault(pid, []).append({
                 "quantity": int(qn),
                 # 수취 배송비: None=배송비 포함 상품(수취 0 취급, Order 모델 주석과 정합)
                 "collected": Decimal(str(ship_in)) if ship_in else Decimal("0"),
-                # 지불 배송비 판별용 원천 응답(productOrder.deliveryAttributeType)
+                # 지불 배송비: 영속 컬럼(우선) + 원천 응답(폴백)
+                "shipping_cost_paid": ship_paid,
                 "raw_data": raw,
             })
         return acc
