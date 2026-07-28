@@ -2593,8 +2593,10 @@ export function fetchNaverPerformanceCompare(
   return fetchApi<NaverPerformanceCompare>(`/api/naver/ad/performance/compare?${q}`);
 }
 
-/** 4상태 내부 코드. 화면에는 `state_label`만 쓴다(D-NAO-103②). */
-export type NaverPerformanceGroupState = "expanding" | "watching" | "hold" | "blocked";
+/** 상태 내부 코드. 화면에는 `state_label`만 쓴다(D-NAO-103②).
+ *  `observed` = 우리가 운영하지 않는 광고 → 성과 사실만 진술(능동 관리 문장 금지). */
+export type NaverPerformanceGroupState =
+  | "expanding" | "watching" | "hold" | "blocked" | "observed";
 
 export interface NaverPerformanceGroup {
   adgroup_id: string;   // title 속성 전용
@@ -2624,6 +2626,10 @@ export interface NaverPerformanceCampaignDetail {
   campaign_id: string;
   name: string;
   type_label: string;
+  managed_by_label: string;
+  managed_by_us: boolean;
+  /** 우리가 운영하지 않는 광고일 때만 채워진다 — 성과를 우리 조치로 읽지 않도록. */
+  managed_note: string | null;
   window: { from: string; to: string; days: number };
   change_window_days: number;
   lines: { target_roas: number | null; bep_roas: number | null };
@@ -2657,9 +2663,12 @@ export interface NaverPerformanceBudgetCurve {
   spend_total: number;
   spend_ratio: number | null;
   points: NaverPerformanceBudgetPoint[];
-  /** 예산을 다 써서 광고가 멈춘 시각들(음영 구간). 빈 배열 = 멈춘 적 없음. */
+  /** 예산을 다 써서 광고가 멈춘 시각들(음영 구간). 빈 배열 = 멈춘 적 없음.
+   *  트리거는 "증분 0이 2시간 연속", 예산 귀속은 멈추기 **직전** 소진율 ≥90%가 근거다. */
   blackout_hours: number[];
   blackout_sentence: string | null;
+  /** 멈추긴 했는데 예산 탓이라 단언할 근거가 없는 구간(소진율 60~90%). 원인을 말하지 않는다. */
+  stall_sentence: string | null;
 }
 
 export interface NaverPerformanceBudget {

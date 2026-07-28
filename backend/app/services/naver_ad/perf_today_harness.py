@@ -45,7 +45,11 @@ from app.services.naver_ad import (
     naver_execution_harness,
     today_proxy_revenue,
 )
-from app.services.naver_ad.alert_humanizer import campaign_type_label, clean_name
+from app.services.naver_ad.alert_humanizer import (
+    campaign_type_label,
+    clean_name,
+    managed_by_label,
+)
 from app.utils.kst import kst_now
 
 ROSTER_WINDOW_DAYS = 30
@@ -168,14 +172,9 @@ def _status_labels(status: str | None, status_reason: str | None) -> tuple[str, 
     return label, review
 
 
-def _managed_by_label(optimizer: str, auto_operate: bool) -> str:
-    """관리 주체 한 줄. optimizer와 auto_operate는 **다른 축**이다 — 우리 소유인데 자동 레인이
-    꺼진 상태(D-NAO-92의 03)가 실재하므로 하나로 뭉뚱그리지 않는다."""
-    if optimizer == "ours":
-        return "우리가 자동으로 운영" if auto_operate else "우리 담당 · 자동 운영은 꺼둠"
-    if optimizer == "mop":
-        return "대행사가 운영"
-    return "직접 관리(자동 운영 안 함)"
+# 관리 주체 라벨은 alert_humanizer가 유일 출처다(D-NAO-105 리뷰) — ③캠페인 상세의 그룹 배지도
+# 같은 함수를 봐야 "우리가 자동으로 운영"과 "직접 관리"가 화면마다 갈리지 않는다.
+_managed_by_label = managed_by_label
 
 
 def _latest_snapshots(db: Session, day: date) -> dict[str, NaverHourlySnapshot]:

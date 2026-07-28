@@ -25,13 +25,16 @@ from app.services.naver_ad import campaign_target_resolver
 
 
 def resolve(
-    db: Session, campaign_ids: list[str], *, mapped_campaign_ids: Iterable[str] = ()
+    db: Session, campaign_ids: list[str], *, mapped_campaign_ids: Iterable[str]
 ) -> dict[str, dict[str, float | None]]:
     """{campaign_id: {"target_roas": float|None, "bep_roas": float|None}}.
 
     mapped_campaign_ids: 상품 매핑이 있는 캠페인 집합(호출부가 today_proxy_revenue에서 구해
       넘긴다 — 이 SA가 직접 부르면 SA간 직접호출이 된다, 원칙18-6/18-8). 매핑이 없는 캠페인은
       상품 가중 파생을 시도조차 하지 않는다(쿼리 낭비 + 항상 None).
+      ★기본값 없는 **필수 인자**다(리뷰 P3-1): 빈 집합이 기본이면 호출부가 인자를 빠뜨렸을 때
+      전 캠페인이 조용히 **계정 기본값**으로 떨어진다 — 화면엔 그럴듯한 숫자가 그대로 뜨고
+      아무도 눈치채지 못한다. 빈 집합을 넘기려면 `mapped_campaign_ids=()`라고 **써야** 한다.
 
     값이 None이면 **알 수 없음**이다 — 0으로 대체하지 않는다(원칙22). 원가 미입력 상품만 있는
     계정에서는 계정 기본값 자체가 None일 수 있고, 그때 화면은 "비교할 목표치가 없다"고 말해야지

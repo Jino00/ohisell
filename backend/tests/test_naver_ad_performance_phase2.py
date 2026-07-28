@@ -331,6 +331,7 @@ def _judge(**kw):
         name="17프로", status="on", status_reason=None, cost=10_000, roas=2.0,
         bep_roas=1.4758, target_roas=1.72, blocked_reasons=[], raised_recently=False,
         lowered_recently=False, unknown_recently=False, window_days=30,
+        managed_by_us=True,
     )
     base.update(kw)
     return group_state_badge.judge(**base)
@@ -356,11 +357,11 @@ def test_badge_hold_below_bep():
     assert "1.48배" in out["reason_sentence"]
 
 
-def test_badge_hold_when_spent_but_no_conversion():
-    """돈은 썼는데 전환이 없으면 ROAS가 None이다 — '모름'을 '좋음'으로 넘기지 않는다."""
+def test_badge_hold_when_spent_but_roas_unknown():
+    """돈은 썼는데 ROAS를 못 구하면 '모름'을 '좋음'으로 넘기지 않는다."""
     out = _judge(roas=None)
     assert out["state"] == group_state_badge.STATE_HOLD
-    assert "전환이 잡히지 않아" in out["reason_sentence"]
+    assert "성과를 확인할 수 없어" in out["reason_sentence"]
 
 
 def test_badge_expanding_only_when_we_actually_raised():
@@ -369,6 +370,47 @@ def test_badge_expanding_only_when_we_actually_raised():
     out = _judge(roas=3.0, raised_recently=True)
     assert out["state"] == group_state_badge.STATE_EXPANDING
     assert "노출을 넓히는 중" in out["reason_sentence"]
+
+
+def test_badge_zero_spend_is_never_expanding_even_after_a_raise():
+    """★리뷰 실측 회귀 고정: 노출·클릭·지출이 전부 0인데 "반응이 나오는지 보는 중"은 거짓이다.
+    올린 이력이 있어도 집행이 0이면 확장 중이 아니다(원칙22 — '확장 중' 규칙의 거울상)."""
+    out = _judge(cost=0, roas=None, raised_recently=True)
+    assert out["state"] == group_state_badge.STATE_WATCHING
+    assert out["reason_sentence"] == "입찰을 올려두었지만 아직 집행이 없습니다."
+    assert "반응이 나오는지" not in out["reason_sentence"]
+
+
+def test_badge_zero_spend_beats_hold_and_blocked_reasons_stay_first():
+    """판정 순서 계약: 차단 > 집행0 > 증액보류 > 확장 > 관망."""
+    # 차단 이력은 집행 0원보다 먼저다(광고가 안 나간 이유를 말해주는 쪽이 더 유용).
+    assert _judge(cost=0, roas=None, blocked_reasons=["쿨다운"])["state"] \
+        == group_state_badge.STATE_BLOCKED
+    # 집행 0원은 증액 보류(BEP 미달)보다 먼저다 — 성과 자체가 없으니 BEP 비교가 성립 안 한다.
+    assert _judge(cost=0, roas=None)["state"] == group_state_badge.STATE_WATCHING
+
+
+def test_badge_observed_when_campaign_is_not_ours():
+    """★리뷰 실측 회귀 고정: 46캠페인 중 43개가 optimizer='none'인데 그 그룹에도
+    "더 키우지 않고 있습니다"가 붙었다 — 하지도 않는 관리를 한다고 말하는 것."""
+    out = _judge(managed_by_us=False, roas=3.0, raised_recently=True)
+    assert out["state"] == group_state_badge.STATE_OBSERVED
+    assert out["state_label"] == "관찰만"
+    assert out["reason_sentence"].startswith(group_state_badge.NOT_OURS_PREFIX)
+    # 능동 관리 동사가 한 개도 없어야 한다.
+    for phrase in ("키우지 않고 있습니다", "유지하고 있습니다", "넓히는 중",
+                   "지켜보는 중", "막았습니다", "올려두었지만"):
+        assert phrase not in out["reason_sentence"]
+
+
+def test_badge_observed_states_the_performance_fact():
+    below = _judge(managed_by_us=False, roas=1.0)
+    assert "남는 기준(1.48배) 아래입니다" in below["reason_sentence"]
+    idle = _judge(managed_by_us=False, cost=0, roas=None)
+    assert "집행이 없었습니다" in idle["reason_sentence"]
+    off = _judge(managed_by_us=False, status="off", status_reason="ADGROUP_PAUSED")
+    assert off["state"] == group_state_badge.STATE_OBSERVED
+    assert "멈춰 있습니다" in off["reason_sentence"]
 
 
 def test_badge_watching_when_write_result_unknown():
@@ -386,12 +428,43 @@ def test_badge_watching_when_no_spend():
 
 def test_badge_labels_have_no_internal_codes():
     for state in group_state_badge.STATE_LABEL.values():
-        assert state in ("확장 중", "관망", "증액 보류", "차단됨")
+        assert state in ("확장 중", "관망", "증액 보류", "차단됨", "관찰만")
 
 
 # ══════════════════════════════════════════════════════════════════
 # ③ 캠페인 상세 API
 # ══════════════════════════════════════════════════════════════════
+
+def test_campaign_detail_not_ours_downgrades_badges_to_observation(client, db):
+    """★리뷰 실측 회귀 고정: 우리가 운영하지 않는 캠페인에 능동 관리 문장을 붙이지 않는다."""
+    _seed_entities(db)
+    # 03을 우리 소유에서 빼고(=대다수 캠페인의 실제 모습) 성과만 남긴다.
+    db.query(NaverCampaignSettings).filter(
+        NaverCampaignSettings.campaign_id == SHOPPING
+    ).delete()
+    db.commit()
+    _daily(db, kst_today() - timedelta(days=1), cost=10_000, conv_direct_amt=30_000)
+
+    body = client.get(f"/api/naver/ad/performance/campaign/{SHOPPING}").json()
+    assert body["managed_by_us"] is False
+    assert body["managed_by_label"] == "직접 관리(자동 운영 안 함)"
+    assert body["managed_note"] is not None
+    for g in body["groups"]:
+        assert g["state"] == group_state_badge.STATE_OBSERVED
+        assert g["state_label"] == "관찰만"
+        assert "키우지 않고 있습니다" not in g["reason_sentence"]
+        assert "유지하고 있습니다" not in g["reason_sentence"]
+
+
+def test_campaign_detail_ours_keeps_active_badges(client, db):
+    _seed_entities(db)
+    _daily(db, kst_today() - timedelta(days=1), cost=10_000, conv_direct_amt=30_000)
+    body = client.get(f"/api/naver/ad/performance/campaign/{SHOPPING}").json()
+    assert body["managed_by_us"] is True
+    assert body["managed_by_label"] == "우리가 자동으로 운영"
+    assert body["managed_note"] is None
+    assert all(g["state"] != group_state_badge.STATE_OBSERVED for g in body["groups"])
+
 
 def test_campaign_detail_series_lines_and_group_badges(client, db):
     _seed_entities(db)
@@ -453,7 +526,7 @@ def test_campaign_detail_404_for_unknown_campaign(client, db):
 # ══════════════════════════════════════════════════════════════════
 
 def test_budget_curve_blackout_detected_after_budget_exhausted(client, db):
-    """증분 0 **이고** 직전 소진율 ≥0.98일 때만 '예산 때문에 멈췄다'고 말한다."""
+    """1차 신호 = 증분 0 연속 2시간, 2차 신호 = 멈추기 직전 소진율."""
     _seed_entities(db)
     today = kst_today()
     for hour, cost in ((9, 10_000), (12, 30_000), (13, 50_000), (14, 50_000), (15, 50_000)):
@@ -468,6 +541,24 @@ def test_budget_curve_blackout_detected_after_budget_exhausted(client, db):
     assert [p["hour_cost"] for p in curve["points"]] == [10_000, 20_000, 20_000, 0, 0]
 
 
+def test_budget_curve_catches_stall_below_98_percent(client, db):
+    """★리뷰 실측 회귀 고정(03 아이폰_강화유리 2026-07-27): 19시에 48,699원(예산 50,000의
+    97.4%)을 쓰고 20~23시 4시간을 멈췄다. 옛 규칙(소진율 ≥0.98)은 0.6%p 차이로 **한 건도
+    못 잡았다** — 네이버는 100%를 채우고 멈추지 않는다."""
+    _seed_entities(db)
+    today = kst_today()
+    for hour, cost in ((18, 43_812), (19, 48_699), (20, 48_699), (21, 48_699),
+                       (22, 48_699), (23, 48_699)):
+        _snapshot(db, today, hour, cost=cost, budget=50_000)
+
+    body = client.get("/api/naver/ad/performance/budget").json()
+    curve = next(c for c in body["curves"] if c["campaign_id"] == SHOPPING)
+    assert curve["blackout_hours"] == [20, 21, 22, 23]
+    assert "오후 8시" in curve["blackout_sentence"]
+    assert "4시간" in curve["blackout_sentence"]
+    assert "적어도" not in curve["blackout_sentence"]  # 결번 없음 → 단정해도 된다
+
+
 def test_budget_curve_no_blackout_when_early_hours_are_quiet(client, db):
     """새벽 무노출(증분 0)을 '예산 소진'으로 오판하면 안 된다."""
     _seed_entities(db)
@@ -478,6 +569,85 @@ def test_budget_curve_no_blackout_when_early_hours_are_quiet(client, db):
     curve = next(c for c in body["curves"] if c["campaign_id"] == SHOPPING)
     assert curve["blackout_hours"] == []
     assert curve["blackout_sentence"] is None
+
+
+def test_budget_curve_low_ratio_stall_is_not_attributed_to_budget(client, db):
+    """★07-27 실측: 증분 0 구간 37건 중 대부분이 소진율 1~19%다. 트리거만 보고 예산 탓으로
+    돌리면 매일 전 캠페인이 '예산 소진'이 된다 — 귀속 근거 없으면 말하지 않는다."""
+    _seed_entities(db)
+    today = kst_today()
+    for hour, cost in ((9, 1_000), (10, 1_000), (11, 1_000), (12, 1_000)):
+        _snapshot(db, today, hour, cost=cost, budget=50_000)  # 소진율 2%
+    body = client.get("/api/naver/ad/performance/budget").json()
+    curve = next(c for c in body["curves"] if c["campaign_id"] == SHOPPING)
+    assert curve["blackout_hours"] == []
+    assert curve["blackout_sentence"] is None
+    assert curve["stall_sentence"] is None  # 2%는 애매 구간도 아니다 — 아예 말하지 않는다
+
+
+def test_budget_curve_uncertain_stall_states_fact_without_cause(client, db):
+    """소진율 60~90%에서 멈추면 사실만 말하고 **원인은 말하지 않는다**(원칙22)."""
+    _seed_entities(db)
+    today = kst_today()
+    for hour, cost in ((9, 35_000), (10, 35_000), (11, 35_000)):
+        _snapshot(db, today, hour, cost=cost, budget=50_000)  # 70%
+    body = client.get("/api/naver/ad/performance/budget").json()
+    curve = next(c for c in body["curves"] if c["campaign_id"] == SHOPPING)
+    assert curve["blackout_hours"] == []
+    assert "예산의 70%" in curve["stall_sentence"]
+    assert "확실하지 않습니다" in curve["stall_sentence"]
+    assert "다 써서" not in curve["stall_sentence"]
+
+
+def test_budget_curve_single_zero_hour_is_not_a_blackout(client, db):
+    """1시간짜리 증분 0은 그냥 한산한 시간이다 — MIN_BLACKOUT_HOURS 계약."""
+    _seed_entities(db)
+    today = kst_today()
+    for hour, cost in ((9, 49_000), (10, 49_000), (11, 50_000)):
+        _snapshot(db, today, hour, cost=cost, budget=50_000)
+    body = client.get("/api/naver/ad/performance/budget").json()
+    curve = next(c for c in body["curves"] if c["campaign_id"] == SHOPPING)
+    assert curve["blackout_hours"] == []
+
+
+def test_budget_curve_gap_in_collection_does_not_invent_hours(client, db):
+    """수집 결번: 시각이 안 이어지면 구간을 잇지 않는다. 잘렸으면 '적어도 N시간'으로 물러선다."""
+    _seed_entities(db)
+    today = kst_today()
+    # 19시 97.4% → 20·21시 정지 → 22시 결번 → 23시 관측(여전히 같은 누적)
+    for hour, cost in ((19, 48_699), (20, 48_699), (21, 48_699), (23, 48_699)):
+        _snapshot(db, today, hour, cost=cost, budget=50_000)
+    body = client.get("/api/naver/ad/performance/budget").json()
+    curve = next(c for c in body["curves"] if c["campaign_id"] == SHOPPING)
+    # 23시는 21시와 이어지지 않으므로 같은 구간으로 세지 않는다(없는 시간을 만들지 않는다).
+    assert curve["blackout_hours"] == [20, 21]
+    assert "적어도 2시간" in curve["blackout_sentence"]
+    assert "기록이 빠진 시간대" in curve["blackout_sentence"]
+
+
+def test_find_stall_runs_uses_hour_adjacency_not_list_order():
+    """순수 함수 계약 — 리스트 인접이 아니라 **시각 인접**으로 구간을 만든다."""
+    points = [
+        {"hour": 9, "cost": 1_000, "spend_ratio": 0.02},
+        {"hour": 14, "cost": 1_000, "spend_ratio": 0.02},   # 5시간 건너뜀 → 구간 아님
+        {"hour": 15, "cost": 1_000, "spend_ratio": 0.02},
+        {"hour": 16, "cost": 1_000, "spend_ratio": 0.02},
+    ]
+    runs = budget_pacing_view.find_stall_runs(points)
+    assert [r["hours"] for r in runs] == [[15, 16]]
+    assert runs[0]["ratio_before"] == 0.02
+
+
+def test_find_stall_runs_ignores_cost_correction_downward():
+    """누적이 **줄어든** 시각은 '멈춤'이 아니라 재집계 보정이다."""
+    points = [
+        {"hour": 9, "cost": 10_000, "spend_ratio": 0.2},
+        {"hour": 10, "cost": 9_000, "spend_ratio": 0.18},   # 보정(감소)
+        {"hour": 11, "cost": 9_000, "spend_ratio": 0.18},   # 여기부터 진짜 정지
+        {"hour": 12, "cost": 9_000, "spend_ratio": 0.18},
+    ]
+    runs = budget_pacing_view.find_stall_runs(points)
+    assert [r["hours"] for r in runs] == [[11, 12]]
 
 
 def test_budget_curve_without_daily_budget_refuses_to_judge(client, db):

@@ -28,6 +28,7 @@ from sqlalchemy.orm import Session
 
 from app.models import (
     NaverAdgroupProduct,
+    NaverCampaignSettings,
     NaverChangeLog,
     NaverEntity,
 )
@@ -41,7 +42,11 @@ from app.services.naver_ad import (
     naver_execution_harness,
     today_proxy_revenue,
 )
-from app.services.naver_ad.alert_humanizer import campaign_type_label, clean_name
+from app.services.naver_ad.alert_humanizer import (
+    campaign_type_label,
+    clean_name,
+    managed_by_label,
+)
 from app.utils.kst import kst_now, kst_today
 
 DEFAULT_SERIES_DAYS = 30
@@ -163,6 +168,18 @@ def build_campaign(
     lines = campaign_roas_lines.resolve(db, [campaign_id], mapped_campaign_ids=mapped).get(
         campaign_id, {"target_roas": None, "bep_roas": None}
     )
+    # ★관리 주체(D-NAO-105 리뷰): 46캠페인 전부에 이 API가 열려 있는데 43개는 우리가 손대지
+    #   않는 광고다. 그 그룹에 "우리가 …하고 있습니다"를 붙이면 하지도 않는 관리를 한다고
+    #   말하는 것이라, 배지를 성과 서술('관찰만')로 강등한다. 설정 행이 없으면 optimizer='none'
+    #   (naver_execution_harness._resolve_optimizer와 같은 시맨틱 — 단일 진실).
+    settings = (
+        db.query(NaverCampaignSettings)
+        .filter(NaverCampaignSettings.campaign_id == campaign_id)
+        .one_or_none()
+    )
+    optimizer = settings.optimizer if settings else "none"
+    auto_operate = bool(settings.auto_operate) if settings else False
+    managed_by_us = optimizer == "ours"
 
     date_agg = metrics_aggregator.aggregate(
         db, date_from, date_to, grain="date", campaign_filter=campaign_id
@@ -214,6 +231,7 @@ def build_campaign(
             lowered_recently=bool(sig.get("lowered")),
             unknown_recently=bool(sig.get("unknown")),
             window_days=days,
+            managed_by_us=managed_by_us,
         )
         groups.append({
             **badge,
@@ -230,6 +248,13 @@ def build_campaign(
         "campaign_id": campaign_id,
         "name": clean_name(entity.name) or "이름 없는 광고",
         "type_label": campaign_type_label(entity.campaign_type) or "기타 지면",
+        "managed_by_label": managed_by_label(optimizer, auto_operate),
+        "managed_by_us": managed_by_us,
+        "managed_note": (
+            None if managed_by_us else
+            "이 광고는 우리 시스템이 운영하지 않습니다. 아래는 성과를 보여줄 뿐, 우리가 한 "
+            "조치가 아닙니다."
+        ),
         "window": {"from": date_from.isoformat(), "to": date_to.isoformat(), "days": days},
         "change_window_days": CHANGE_WINDOW_DAYS,
         "lines": lines,

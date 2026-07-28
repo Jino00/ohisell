@@ -178,7 +178,9 @@ function DeltaCell({ delta, format }: {
 
 // ── ③ 캠페인 상세 ────────────────────────────────────────────────
 const GROUP_TONE: Record<string, "owner" | "neutral"> = {
+  // owner(파랑) = **우리가 하고 있는 일**. observed는 우리가 손대지 않는 광고라 중립이다.
   expanding: "owner", watching: "neutral", hold: "neutral", blocked: "neutral",
+  observed: "neutral",
 };
 
 function GroupBadgeRow({ g }: { g: NaverPerformanceGroup }) {
@@ -210,12 +212,21 @@ function CampaignDetailSection({ campaignId, days }: { campaignId: string; days:
     <Card
       title={`${data.name} — 최근 ${data.window.days}일 흐름`}
       right={
-        <span className="text-xs text-gray-400 tabular-nums">
-          {data.window.from} ~ {data.window.to}
+        <span className="flex items-center gap-2">
+          <Badge tone={data.managed_by_us ? "owner" : "neutral"}>{data.managed_by_label}</Badge>
+          <span className="text-xs text-gray-400 tabular-nums">
+            {data.window.from} ~ {data.window.to}
+          </span>
         </span>
       }
     >
       <div className="p-4 space-y-4">
+        {/* 우리가 운영하지 않는 광고임을 먼저 말한다 — 아래 성과를 우리 조치로 읽지 않도록. */}
+        {data.managed_note && (
+          <p className="text-xs text-judge-warn break-keep border-l-2 border-judge-warn pl-2">
+            {data.managed_note}
+          </p>
+        )}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
           <Stat label="쓴 광고비" value={won(data.totals.cost)}
             isEmpty={data.totals.cost === 0} reason="이 기간에 집행된 광고비가 없습니다."
@@ -305,6 +316,10 @@ function BudgetSection({ date, campaignId }: { date: string; campaignId: string 
               />
               {c.blackout_sentence && (
                 <p className="mt-1 text-sm text-gray-700 break-keep">{c.blackout_sentence}</p>
+              )}
+              {/* 멈추긴 했는데 예산 탓이라 단언할 근거가 없는 구간 — 원인을 말하지 않는다. */}
+              {c.stall_sentence && (
+                <p className="mt-1 text-xs text-gray-500 break-keep">{c.stall_sentence}</p>
               )}
             </div>
           ))
