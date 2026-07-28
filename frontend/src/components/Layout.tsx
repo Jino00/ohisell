@@ -80,6 +80,7 @@ const NAV_ITEMS = [
   { to: "/orders", label: "주문 관리", icon: "📋" },
   { to: "/products", label: "상품 관리", icon: "📦" },
   { to: "/product-connection-map", label: "상품 연결맵", icon: "🔗" },
+  { to: "/rocket-recon", label: "로켓 발주·정산 대사", icon: "🚀" },
   { to: "/inventory", label: "재고 관리", icon: "🏭" },
   { to: "/settlements", label: "정산 관리", icon: "💰" },
   { to: "/ad-report", label: "광고 리포트", icon: "📈" },
