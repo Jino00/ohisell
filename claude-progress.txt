@@ -1,4 +1,22 @@
-## 📌 세션 인계: `.claude/memory/HANDOFF_learning-loop-repair+z8-takeover_20260728.md` (2026-07-28 밤 — 학습 배관 수리 조사 + 갤럭시Z 8시리즈 인수, ★코딩 중단·인계 — 커밋 2건 prod 미배포)
+## 📌 세션 인계: `.claude/memory/HANDOFF_learning-loop-repair-2nd+live-verified_20260729.md` (2026-07-29 새벽 — 학습 배관 수리 2차 + 라이브 검증 완료, PR #161 미병합)
+
+## ✅ 2026-07-29 새벽 — 학습 배관 수리 2차 배포·라이브 검증 완료 (D-NAO-111, 워크트리 `learning-loop-repair`, PR #161 미병합)
+
+**PR #161**(브랜치 `claude/learning-loop-repair`, HEAD `9b6df55`) 생성됨(미병합). 커밋 5건(전 세션 `466bbc5`·`dd73a59` 위에 쌓임): `c58f430` flight_loop 무성 실패 관측성+대상 정의 불일치 해소 / `223f138` 탐침 하한 학습밴드 우선 / `e2ecd29` 정착 보정 주석 표적성 단정 철회 / `72b0628` forecast_pending≠forecast_missing / `09f7943` 적대적 리뷰 지적 6건 반영 / `9b6df55` main 병합(문서 충돌 2건은 main 채택).
+
+**prod 배포 2회 완료**(`safe_deploy.sh`, CAS 통과): 23:48 `flight_loop.py`+`auto_operator.py`(pm2 재시작 276) · 05:28 `bid_rank_curve.py`+`bid_step_types.py`(pm2 재시작 277). **미배포 2건**: ①`scheduler_service.py` — CAS 거부(prod 내용이 우리 브랜치·main·로컬 어느 브랜치에도 없음 = 다른 세션이 배포·PR 미생성 추정, 원인 파악 다음 세션 과제) ②`dd73a59`(conversion_maturity·bid_ceiling_calculator) — conv_delay 곡선 퇴화(day 8~18이 정확히 4/7=0.5714로 고정, `compute_curve` 단순평균 기전 확정) 미해소로 계속 보류.
+
+**적대적 리뷰는 Jino 지시로 2회 캡**("적대적리뷰는 2번만 해"). 1건 중단(대상 466bbc5, 메인 루프가 코드 직접 재확인으로 대체), 1건 완료 후 NEEDS-CHANGES → 지적 6건 전량 반영.
+
+**라이브 검증(원칙22) 3건 전부 성공**: ①인수 후 첫 시간당 레인(23:20) 갤럭시 `update_bid` 9건 전부 `[실행 불가]` 가드레일 차단(writer 미호출) ②**00:05 BP 원복 사상 첫 실전** — 03 캠페인 52,700→50,000원 실집행 ③**flight_loop 신버전**(00:15/02:15/04:15) 로그 `결정 0, 스킵 6 {forecast_pending: 5, campaign_off: 1}`이 정정된 예측과 정확히 일치, 진단행 0건. auto_operator 신버전 05:20까지 무예외. **아직 미확인**(별도 에이전트 관측 중): 07:45 매핑 적재·08:10 slope 첫 적립·08:50 갤럭시 손실 브레이크.
+
+**기록 사고 복원**(main `056afcf`): D-NAO-108 번호 충돌로 소실됐던 codex 면제 결정(19:49 Jino 지시)을 D-NAO-110으로 복원. **LESSONS #61**(D-NAO 채번은 git log까지 확인) · **#62**(스위치 존재≠기능 존재) 추가(main `837be34`). 테스트 3,994 passed.
+
+**다음 액션(우선순위)**: ①아침 관측 3건 결과 확인(07:45/08:10/08:50) ②PR #161 병합 판단(Jino) ③`scheduler_service.py` CAS 거부 원인 파악 ④Jino 판단 대기 3건(학습밴드 스코프 통일·dd73a59 배포·flight_loop 실행 경로 신설 여부) ⑤D-NAO-109(수명주기 국면 판정 구조)는 여전히 미승인, 착수 전 승인 필요.
+
+트랙 파일 `docs/tracks/active/track_naver-ad-optimization.md` D-NAO-111 항목 갱신 완료.
+
+---
 
 ## ⚠️ 2026-07-28 밤 — 학습 배관 수리 조사 + 갤럭시Z 8시리즈 대행사 캠페인 인수 (D-NAO-106~109, 워크트리 `learning-loop-repair`, 코딩 중단·인계)
 
