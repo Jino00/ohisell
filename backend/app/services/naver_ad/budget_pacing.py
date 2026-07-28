@@ -25,8 +25,10 @@
 """
 from __future__ import annotations
 
+import json
+import logging
 import os
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time
 from decimal import Decimal
 
 from sqlalchemy import func as sqlfunc
@@ -41,6 +43,8 @@ from app.models import (
 )
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
 from app.services.naver_ad import campaign_target_resolver
+
+log = logging.getLogger(__name__)
 
 # rationale 접두 — change_log.rationale에 그대로 복사되므로(harness:1430·1437) 이 접두가
 # BP 레인의 유일한 식별자다. 예산 봉투([예산봉투], D-NAO-87)와 스코프가 겹치지 않게 분리.
@@ -74,6 +78,17 @@ BUDGET_ROUND_INCREMENT = 100               # 100원 단위(네이버 침묵 반�
 # 전 캠페인 증액 합계가 이 값을 넘지 못한다. 값의 단일 진실은 proposal_writer이나 순환/무거운
 # import를 피해 배수만 로컬 상수로 두고 테스트가 정합을 고정한다(budget_envelope 관례 동형).
 ROUND_BUDGET_CAP = 100_000
+
+# 계정 단위 BP 일일 총량 캡(리뷰 P2-4) — 하루 동안 BP가 계정 전체에서 늘릴 수 있는 총액.
+# 라운드 봉투(회당 ≤10만)는 "한 번의 런"만 제한하므로 매시 발동이 쌓이면 하루 총액이 무한정
+# 커진다. change_log의 당일 budget_up_pacing Δ 합으로 판정한다(성공 집행분만).
+DAILY_ACCOUNT_RAISE_CAP = 100_000
+
+# 프록시 최소 볼륨 게이트(리뷰 P2-2) — 표본이 얇으면 자연판매 하나로 ROAS가 폭등해 증액이
+# 통과한다(실사고 재현: 2,900원 소진 + 자연판매 50만 → ROAS 172). 당일 클릭·소진 둘 다
+# 최소치를 넘어야 프록시 ROAS를 판정 재료로 쓴다(미달 = fail-closed).
+MIN_CLICKS_FOR_PROXY = 5
+MIN_COST_FOR_PROXY = 5_000
 
 _DRY_RUN_ENV = "NAVER_BP_DRY_RUN"
 
@@ -149,9 +164,12 @@ def remaining_hours(now: datetime) -> Decimal:
 def campaign_product_ids(db: Session, campaign_id: str) -> list[str]:
     """캠페인에 매핑된 판매 상품(mall_product_id = orders.platform_product_id) 목록.
 
-    소스 = naver_adgroup_product(shopping_ad_product_sync 스냅샷). 매핑이 없으면 빈 목록
-    → 프록시 ROAS 판정 불가(fail-closed). 03처럼 방금 재가동돼 다음 08:20 sync 전인
-    캠페인이 이 케이스다."""
+    소스 = naver_adgroup_product(shopping_ad_product_sync 스냅샷 — optimizer='ours' 캠페인만
+    적재한다). 매핑이 없으면 빈 목록 → 프록시 ROAS 판정 불가(fail-closed).
+    ★07-27 03 리플레이 실측: 03은 D-NAO-92로 auto_operate=0이라 **애초에 이 레인의 1단계
+    (auto_operate 필터)에서 제외**됐고, 강제 편입해도 optimizer='none'이라 매핑이 0행이라
+    19:20 여기서 다시 막힌다(이중 방어). 갓 'ours'로 전환돼 다음 sync 전인 캠페인도 같은
+    케이스 — 매핑이 도착할 때까지 증액하지 않는다."""
     return sorted(
         {
             r[0]
@@ -163,18 +181,46 @@ def campaign_product_ids(db: Session, campaign_id: str) -> list[str]:
     )
 
 
-def today_proxy_revenue(db: Session, product_ids: list[str], today: date) -> int:
+def product_campaign_counts(db: Session, campaign_ids: list[str]) -> dict[str, int]:
+    """상품별 "그 상품을 매핑한 auto_operate 캠페인 수"(리뷰 P2-3 이중계상 방어).
+
+    한 상품이 auto_operate 캠페인 두 곳에 매핑돼 있으면 당일 매출을 양쪽에 100%씩 계상해
+    두 캠페인 모두 ROAS 게이트를 부당 통과한다. 보수적으로 캠페인 수만큼 균등 분할한다
+    (실제 기여 비율은 알 수 없다 — 추정 금지 원칙상 균등이 가장 정직한 보수 배분)."""
+    if not campaign_ids:
+        return {}
+    rows = (
+        db.query(
+            NaverAdgroupProduct.mall_product_id,
+            sqlfunc.count(sqlfunc.distinct(NaverAdgroupProduct.campaign_id)),
+        )
+        .filter(NaverAdgroupProduct.campaign_id.in_(campaign_ids))
+        .group_by(NaverAdgroupProduct.mall_product_id)
+        .all()
+    )
+    return {pid: int(n) for pid, n in rows if pid}
+
+
+def today_proxy_revenue(
+    db: Session, product_ids: list[str], today: date, *, shares: dict[str, int] | None = None
+) -> tuple[int, list[str]]:
     """당일(KST) 그 상품들의 스마트스토어 실주문 매출 합(원) — **상한 프록시**.
 
     actual_revenue.naver_order_revenue와 동일 회계 규약(채널6·매출제외 상태 제외·
     selling_price=라인총액이라 ×수량 2중계상 없음)이되, 상품 필터가 추가된 캠페인 스코프판.
-    광고 귀속이 아니라 전체 판매액이므로 과대추정 방향(모듈 docstring 정직 경계)."""
+    광고 귀속이 아니라 전체 판매액이므로 과대추정 방향(모듈 docstring 정직 경계).
+
+    shares: {상품: 그 상품을 매핑한 auto_operate 캠페인 수}. 2 이상이면 그 상품 매출을
+    캠페인 수로 나눠 계상한다(리뷰 P2-3). 반환 = (매출, 분할된 상품 목록)."""
     if not product_ids:
-        return 0
+        return 0, []
     start = datetime.combine(today, time.min)
     end = datetime.combine(today, time.max)
-    revenue = (
-        db.query(sqlfunc.coalesce(sqlfunc.sum(Order.selling_price), 0))
+    rows = (
+        db.query(
+            Order.platform_product_id,
+            sqlfunc.coalesce(sqlfunc.sum(Order.selling_price), 0),
+        )
         .filter(
             Order.channel_id == _NAVER_CHANNEL_ID,
             Order.status.notin_(tuple(REVENUE_EXCLUDED)),
@@ -182,9 +228,19 @@ def today_proxy_revenue(db: Session, product_ids: list[str], today: date) -> int
             Order.order_date >= start,
             Order.order_date <= end,
         )
-        .scalar()
+        .group_by(Order.platform_product_id)
+        .all()
     )
-    return int(revenue or 0)
+    total = Decimal(0)
+    split: list[str] = []
+    for pid, revenue in rows:
+        amount = Decimal(str(revenue or 0))
+        n = int((shares or {}).get(pid, 1) or 1)
+        if n > 1 and amount > 0:
+            split.append(f"{pid}÷{n}")
+            amount = amount / Decimal(n)
+        total += amount
+    return int(total), sorted(split)
 
 
 def resolve_target_roas(db: Session, campaign_id: str) -> Decimal | None:
@@ -194,6 +250,86 @@ def resolve_target_roas(db: Session, campaign_id: str) -> Decimal | None:
     if target is None:
         target = campaign_target_resolver.account_default_target_roas(db)
     return Decimal(str(target)) if target is not None else None
+
+
+def _last_pacing_write(db: Session, campaign_id: str, action: str) -> NaverChangeLog | None:
+    """캠페인의 마지막 **성공** BP 쓰기 1건(dry_run=False ∧ after_value 존재 — harness
+    _execute_update_budget 성공 행 규격. 실패·가드거부 행은 after_value=None)."""
+    return (
+        db.query(NaverChangeLog)
+        .filter(
+            NaverChangeLog.campaign_id == campaign_id,
+            NaverChangeLog.action == action,
+            NaverChangeLog.dry_run.is_(False),
+            NaverChangeLog.after_value.isnot(None),
+        )
+        .order_by(NaverChangeLog.changed_at.desc())
+        .first()
+    )
+
+
+def unrestored_raise(db: Session, campaign_id: str) -> NaverChangeLog | None:
+    """아직 base로 되돌려지지 않은 마지막 BP 증액(없으면 None) — 리뷰 P1-1의 핵심 판정.
+
+    ★왜 필요한가: base 재시드를 "오늘 증액했는가"로만 막으면, **어제 증액 + 원복 실패**
+    상태에서 다음 날 첫 평가가 부풀린 예산을 새 base로 흡수해버린다. 그러면
+    restore_candidates의 ④(observed ≤ base)가 성립해 원복 후보가 **영구 소멸**하고,
+    base×2 캡의 기준선도 부풀어 오른 채 굳는다(래칫). 실제 발동 경로 2개:
+      ① 원복 시 get_campaign/PUT 예외로 실쓰기 실패
+      ② **가드레일 쿨다운 2h** — 23:20 증액 → 00:20 원복이 쿨다운으로 차단(그 다음 재시도
+         시각인 01:20에는 이미 base가 재시드돼 후보가 사라져 있었다). 늦은 저녁 증액이면
+         언제나 성립하는 경로라 이론적 코너케이스가 아니다.
+    그래서 "미복원 증액이 남아 있으면 재시드 금지"가 불변식이다."""
+    last_raise = _last_pacing_write(db, campaign_id, ACTION_BUDGET_UP_PACING)
+    if last_raise is None:
+        return None
+    last_restore = _last_pacing_write(db, campaign_id, ACTION_BUDGET_DOWN_PACING)
+    if last_restore is not None and last_restore.changed_at >= last_raise.changed_at:
+        return None
+    return last_raise
+
+
+def _budget_from_value(raw: str | None) -> int | None:
+    """change_log before/after_value({"dailyBudget": N}, writer 재조회 응답 그대로) → 정수."""
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    value = parsed.get("dailyBudget")
+    return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def raised_amount_today(db: Session, *, today: date) -> int:
+    """오늘(KST) BP가 계정 전체에서 성공적으로 늘린 총액(원) — DAILY_ACCOUNT_RAISE_CAP 판정 원료.
+
+    Δ = after.dailyBudget − before.dailyBudget(성공 행만). 파싱 불가 행은 0으로 취급하지
+    않고 **건너뛰지 않는다** — 값을 못 읽으면 캡을 과소집계하게 되므로, 그런 행은 보수적으로
+    캡 소진으로 볼 수 없어 로그만 남기고 0으로 센다(값 부재는 봉투 계산의 원료가 없는 상태)."""
+    today_start = datetime.combine(today, time.min)
+    rows = (
+        db.query(NaverChangeLog.before_value, NaverChangeLog.after_value)
+        .filter(
+            NaverChangeLog.action == ACTION_BUDGET_UP_PACING,
+            NaverChangeLog.dry_run.is_(False),
+            NaverChangeLog.after_value.isnot(None),
+            NaverChangeLog.changed_at >= today_start,
+        )
+        .all()
+    )
+    total = 0
+    for before_raw, after_raw in rows:
+        before = _budget_from_value(before_raw)
+        after = _budget_from_value(after_raw)
+        if before is None or after is None:
+            log.warning("budget_pacing: 당일 캡 집계 — 예산 값 파싱 불가(before=%r after=%r)",
+                        before_raw, after_raw)
+            continue
+        total += max(after - before, 0)
+    return total
 
 
 def campaigns_raised_today(db: Session, *, today: date) -> set[str]:
@@ -231,9 +367,9 @@ def evaluate(db: Session, *, now: datetime) -> list[dict]:
     """auto_operate 캠페인별 BP 판정(순수·판정만). 반환(campaign_id 오름차순):
 
       [{campaign_id, needs_raise, reason, current_budget, base_budget, base_seeded,
-        cost_today, depletion_ratio, spend_rate, spend_rate_note, remaining_hours,
-        extra_needed, target_budget, proxy_revenue, proxy_roas, target_roas,
-        product_count}, ...]
+        cost_today, clicks_today, depletion_ratio, spend_rate, spend_rate_note,
+        remaining_hours, extra_needed, target_budget, proxy_revenue, proxy_roas,
+        proxy_shared_products, target_roas, product_count}, ...]
 
     needs_raise=True인 행만 하니스가 제안·집행 대상으로 삼는다. base_seeded=True면
     하니스가 naver_campaign_settings.base_daily_budget을 base_budget으로 갱신해야 한다
@@ -245,6 +381,7 @@ def evaluate(db: Session, *, now: datetime) -> list[dict]:
 
     today = now.date()
     raised_today = campaigns_raised_today(db, today=today)
+    share_counts = product_campaign_counts(db, campaign_ids)
     settings_by_id = {
         s.campaign_id: s
         for s in db.query(NaverCampaignSettings)
@@ -257,10 +394,11 @@ def evaluate(db: Session, *, now: datetime) -> list[dict]:
         record = {
             "campaign_id": campaign_id, "needs_raise": False, "reason": "",
             "current_budget": None, "base_budget": None, "base_seeded": False,
-            "cost_today": None, "depletion_ratio": None, "spend_rate": None,
-            "spend_rate_note": "", "remaining_hours": None, "extra_needed": None,
-            "target_budget": None, "proxy_revenue": None, "proxy_roas": None,
-            "target_roas": None, "product_count": 0,
+            "cost_today": None, "clicks_today": None, "depletion_ratio": None,
+            "spend_rate": None, "spend_rate_note": "", "remaining_hours": None,
+            "extra_needed": None, "target_budget": None, "proxy_revenue": None,
+            "proxy_roas": None, "proxy_shared_products": [], "target_roas": None,
+            "product_count": 0,
         }
 
         rows = _today_snapshots(db, campaign_id, today)
@@ -272,8 +410,10 @@ def evaluate(db: Session, *, now: datetime) -> list[dict]:
         latest = rows[-1]
         current_budget = latest.daily_budget
         cost_today = int(latest.cost or 0)
+        clicks_today = int(latest.clk or 0)
         record["current_budget"] = current_budget
         record["cost_today"] = cost_today
+        record["clicks_today"] = clicks_today
 
         if current_budget is None:
             record["reason"] = "일예산 미확보(daily_budget=None) — 소진율 판정 불가(fail-closed)"
@@ -286,15 +426,31 @@ def evaluate(db: Session, *, now: datetime) -> list[dict]:
             out.append(record)
             continue
 
-        # base 예산: 오늘 BP 증액이 아직 없으면 현재 예산을 그날 기준으로 (재)시드한다 —
-        # 사람이 콘솔에서 바꾼 값도 이때 흡수된다. 이미 올렸으면 저장된 base를 유지(복리 금지).
-        stored_base = settings_by_id.get(campaign_id).base_daily_budget if settings_by_id.get(campaign_id) else None
+        # ── base 예산 결정(리뷰 P1-1 래칫 방어) ──
+        # 원칙: 현재 예산을 그날 기준으로 (재)시드해 사람이 콘솔에서 바꾼 값을 흡수한다.
+        # 단 **아래 두 경우엔 저장된 base를 그대로 유지**한다 — 재시드하면 우리가 부풀린
+        # 예산이 새 기준선으로 굳어(래칫) 캡이 무력화되고 원복 후보가 사라진다.
+        #   ① 오늘 이미 BP 증액 성공(복리 금지 — 같은 날 재발동은 허용하되 기준선은 고정)
+        #   ② **미복원 증액이 남아 있음**(어제 증액 + 원복 실패/쿨다운 차단) — unrestored_raise
+        #      docstring 참조. 현재 예산이 stored_base보다 클 때만 성립(사람이 이미 내렸으면
+        #      재시드해도 래칫이 아니다).
+        setting = settings_by_id.get(campaign_id)
+        stored_base = setting.base_daily_budget if setting else None
+        keep_reason = ""
         if campaign_id in raised_today and stored_base:
+            base_budget, keep_reason = int(stored_base), "오늘 BP 증액분 반영 전 기준선 유지"
+        elif (
+            stored_base
+            and int(current_budget) > int(stored_base)
+            and unrestored_raise(db, campaign_id) is not None
+        ):
             base_budget = int(stored_base)
+            keep_reason = "미복원 BP 증액 존재 — 재시드 금지(래칫 방어, 리뷰 P1-1)"
         else:
             base_budget = int(current_budget)
             record["base_seeded"] = stored_base != base_budget
         record["base_budget"] = base_budget
+        record["base_keep_reason"] = keep_reason
 
         depletion = Decimal(cost_today) / Decimal(current_budget)
         record["depletion_ratio"] = depletion
@@ -338,14 +494,35 @@ def evaluate(db: Session, *, now: datetime) -> list[dict]:
             out.append(record)
             continue
 
-        proxy_revenue = today_proxy_revenue(db, product_ids, today)
+        # 최소 볼륨 게이트(리뷰 P2-2) — 표본이 얇으면 자연판매 1건이 ROAS를 폭등시켜 게이트가
+        # 무의미해진다(2,900원 소진 + 자연판매 50만 → ROAS 172 통과 실사례). fail-closed.
+        if clicks_today < MIN_CLICKS_FOR_PROXY or cost_today < MIN_COST_FOR_PROXY:
+            record["reason"] = (
+                f"프록시 표본 미달 — 당일 클릭 {clicks_today}건(최소 {MIN_CLICKS_FOR_PROXY})·"
+                f"소진 {cost_today}원(최소 {MIN_COST_FOR_PROXY}원) (fail-closed, 얇은 표본에서 "
+                "자연판매가 ROAS를 부풀리는 것 방지)"
+            )
+            out.append(record)
+            continue
+
+        proxy_revenue, shared = today_proxy_revenue(db, product_ids, today, shares=share_counts)
         proxy_roas = (Decimal(proxy_revenue) / Decimal(cost_today)).quantize(Decimal("0.0001"))
         record["proxy_revenue"] = proxy_revenue
         record["proxy_roas"] = proxy_roas
+        record["proxy_shared_products"] = shared
+        shared_note = (
+            f" ※공유상품 {len(shared)}종 균등분할({', '.join(shared[:5])}"
+            f"{' 외' if len(shared) > 5 else ''})" if shared else ""
+        )
+        if shared:
+            log.info(
+                "budget_pacing: %s 공유상품 매출 균등분할 %s", campaign_id, ", ".join(shared),
+            )
         if proxy_roas < target_roas:
             record["reason"] = (
                 f"프록시 ROAS {proxy_roas} < 목표 {target_roas} — 증액 조건 미달"
-                f"(당일 매출 {proxy_revenue}원/소진 {cost_today}원, 상품 {len(product_ids)}종 상한 프록시)"
+                f"(당일 매출 {proxy_revenue}원/소진 {cost_today}원, 상품 {len(product_ids)}종 "
+                f"상한 프록시{shared_note})"
             )
             out.append(record)
             continue
@@ -384,8 +561,9 @@ def evaluate(db: Session, *, now: datetime) -> list[dict]:
         record["reason"] = (
             f"소진율 {depletion:.1%}(당일 {cost_today}원/예산 {current_budget}원) ≥ "
             f"{TRIGGER_DEPLETION_RATIO:.0%} · 프록시 ROAS {proxy_roas} ≥ 목표 {target_roas}"
-            f"(당일 매출 {proxy_revenue}원, 상품 {len(product_ids)}종 — ★광고 귀속이 아닌 "
-            f"전체 판매액 상한 프록시) · {rate_note} × 잔여 {left:.1f}시간 × 여유 {SAFETY_FACTOR} "
+            f"(당일 매출 {proxy_revenue}원, 클릭 {clicks_today}건, 상품 {len(product_ids)}종 — "
+            f"★광고 귀속이 아닌 전체 판매액 상한 프록시{shared_note}) · "
+            f"{rate_note} × 잔여 {left:.1f}시간 × 여유 {SAFETY_FACTOR} "
             f"= 추가 필요 {extra_needed:.0f}원 → 목표 {target_budget}원"
             f"(캡 base {base_budget}원×{BASE_BUDGET_MAX_MULTIPLE}={cap}원)"
         )
@@ -394,12 +572,16 @@ def evaluate(db: Session, *, now: datetime) -> list[dict]:
     return out
 
 
-def apply_round_cap(candidates: list[dict]) -> None:
+def apply_round_cap(candidates: list[dict], *, cap: int | None = None) -> None:
     """회당 라운드 봉투(≤10만원) 그리디 배정 — in-place로 각 후보에 'round_eligible'을 세팅.
 
     proposal_writer._classify_budget_round_envelope와 동일 알고리즘(증액분 큰 순으로 정렬 후
     누적, 캡을 넘기는 후보만 False). BP는 캡 초과분을 pending으로 남기지 않고 **그냥 건너뛴다**
-    (매시 재평가라 다음 정시에 다시 기회가 온다 — 매몰되는 Confirm 큐를 만들지 않는다)."""
+    (매시 재평가라 다음 정시에 다시 기회가 온다 — 매몰되는 Confirm 큐를 만들지 않는다).
+
+    cap: 이번 런에 허용된 총 증액(원). 하니스가 min(회당 봉투, 계정 일일 잔여)를 넘긴다
+    (리뷰 P2-4 — 회당 캡만으로는 매시 발동이 쌓여 하루 총액이 무한정 커진다)."""
+    limit = ROUND_BUDGET_CAP if cap is None else max(int(cap), 0)
     ordered = sorted(
         candidates,
         key=lambda c: (c.get("target_budget") or 0) - (c.get("current_budget") or 0),
@@ -408,7 +590,7 @@ def apply_round_cap(candidates: list[dict]) -> None:
     cumulative = 0
     for c in ordered:
         delta = (c.get("target_budget") or 0) - (c.get("current_budget") or 0)
-        if cumulative + delta <= ROUND_BUDGET_CAP:
+        if delta > 0 and cumulative + delta <= limit:
             c["round_eligible"] = True
             cumulative += delta
         else:
@@ -420,9 +602,13 @@ def restore_candidates(db: Session, *, now: datetime) -> list[dict]:
 
     판정(캠페인별):
       ① base_daily_budget이 시드돼 있고 auto_operate=True
-      ② 마지막 **성공** [예산페이싱] 증액이 존재하고 그 날짜 < 오늘(KST) — 오늘 올린 건 유지
-      ③ 그 증액 이후 성공한 [예산페이싱복원]이 없음(이미 되돌렸으면 skip)
-      ④ 최신 스냅샷의 daily_budget > base(사전 점검 — 사람이 이미 내렸으면 skip)
+      ② 마지막 **성공** 증액(budget_up_pacing)이 존재하고 그 날짜 < 오늘(KST) — 오늘 올린 건 유지
+      ③ 그 증액 이후 성공한 원복(budget_down_pacing)이 없음(이미 되돌렸으면 skip) = unrestored_raise
+      ④ 최신 스냅샷의 daily_budget > base(사전 점검 — 사람이 이미 내렸으면 skip).
+         ★단 그 스냅샷 as-of가 **마지막 증액 시각보다 오래됐으면 skip하지 않는다**(리뷰 P2-1):
+         23:20 증액 → 00:05 리셋 잡이 보는 최신 스냅샷은 23:05분 것이라 증액 전 예산을 담고
+         있다. 그걸 근거로 "이미 base다"라고 판단하면 리셋 잡이 매번 헛돈다. 스냅샷이 stale
+         이면 관측을 신뢰하지 않고 후보로 올린 뒤, 방향 검증은 실행 직전 가드레일에 맡긴다.
     ★멱등·자가치유: 00:05 잡이 죽어도 다음 시간당 레인이 같은 판정으로 따라잡는다.
     ★최종 방향 검증은 guardrail_gate._check_budget(budget_down 방향 일치)이 실행 직전에 한다.
     """
@@ -445,36 +631,12 @@ def restore_candidates(db: Session, *, now: datetime) -> list[dict]:
         if not base:
             continue
 
-        last_raise = (
-            db.query(NaverChangeLog)
-            .filter(
-                NaverChangeLog.campaign_id == campaign_id,
-                NaverChangeLog.action == ACTION_BUDGET_UP_PACING,
-                NaverChangeLog.dry_run.is_(False),
-                NaverChangeLog.after_value.isnot(None),
-            )
-            .order_by(NaverChangeLog.changed_at.desc())
-            .first()
-        )
+        last_raise = unrestored_raise(db, campaign_id)  # ②③ 통합 판정
         if last_raise is None or last_raise.changed_at.date() >= today:
             continue
 
-        last_restore = (
-            db.query(NaverChangeLog)
-            .filter(
-                NaverChangeLog.campaign_id == campaign_id,
-                NaverChangeLog.action == ACTION_BUDGET_DOWN_PACING,
-                NaverChangeLog.dry_run.is_(False),
-                NaverChangeLog.after_value.isnot(None),
-            )
-            .order_by(NaverChangeLog.changed_at.desc())
-            .first()
-        )
-        if last_restore is not None and last_restore.changed_at >= last_raise.changed_at:
-            continue
-
-        latest_budget = (
-            db.query(NaverHourlySnapshot.daily_budget)
+        latest = (
+            db.query(NaverHourlySnapshot)
             .filter(
                 NaverHourlySnapshot.campaign_id == campaign_id,
                 NaverHourlySnapshot.daily_budget.isnot(None),
@@ -484,18 +646,26 @@ def restore_candidates(db: Session, *, now: datetime) -> list[dict]:
             )
             .first()
         )
-        observed = latest_budget[0] if latest_budget else None
-        if observed is not None and observed <= int(base):
+        observed = latest.daily_budget if latest else None
+        snapshot_as_of = (
+            datetime.combine(latest.ad_date, time.min).replace(hour=latest.snapshot_hour)
+            if latest else None
+        )
+        snapshot_stale = snapshot_as_of is None or snapshot_as_of < last_raise.changed_at
+        if observed is not None and observed <= int(base) and not snapshot_stale:
             continue
 
         out.append({
             "campaign_id": campaign_id,
             "base_budget": int(base),
             "observed_budget": observed,
+            "observed_stale": snapshot_stale,
             "last_raise_at": last_raise.changed_at,
             "reason": (
                 f"익일 원복 — {last_raise.changed_at:%Y-%m-%d %H:%M} BP 증액분을 base "
-                f"{int(base)}원으로 복귀(관측 {observed}원)"
+                f"{int(base)}원으로 복귀(관측 {observed}원"
+                + (", 스냅샷 stale — 관측 불신뢰, 가드레일 방향검증에 위임" if snapshot_stale else "")
+                + ")"
             ),
         })
     return out
@@ -506,7 +676,9 @@ __all__ = [
     "PACING_ACTIONS",
     "BUDGET_PACING_PREFIX", "BUDGET_PACING_RESTORE_PREFIX", "TRIGGER_DEPLETION_RATIO",
     "SAFETY_FACTOR", "BASE_BUDGET_MAX_MULTIPLE", "RECENT_HOURS", "ROUND_BUDGET_CAP",
+    "DAILY_ACCOUNT_RAISE_CAP", "MIN_CLICKS_FOR_PROXY", "MIN_COST_FOR_PROXY",
     "dry_run_enabled", "evaluate", "apply_round_cap", "restore_candidates",
-    "campaigns_raised_today", "spend_rate_per_hour", "remaining_hours",
-    "campaign_product_ids", "today_proxy_revenue", "resolve_target_roas",
+    "campaigns_raised_today", "raised_amount_today", "unrestored_raise",
+    "spend_rate_per_hour", "remaining_hours", "campaign_product_ids",
+    "product_campaign_counts", "today_proxy_revenue", "resolve_target_roas",
 ]

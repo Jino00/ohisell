@@ -5,7 +5,7 @@ import logging
 import os
 import threading
 from app.utils.kst import kst_now, kst_today
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 
 from apscheduler.events import (
     EVENT_JOB_ERROR,
@@ -1141,7 +1141,7 @@ def auto_download_rg_settlement_job():
     (auth_error/all_failed/partial/failed 등)는 실패로 raise한다."""
     db = _get_own_db_session()
     try:
-        from app.services.coupang.rg_settlement_sync import auto_download_all, RG_ACCOUNTS
+        from app.services.coupang.rg_settlement_sync import auto_download_all
 
         vendor_id_map = {}
         import os

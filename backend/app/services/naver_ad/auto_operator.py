@@ -2692,14 +2692,36 @@ def _run_budget_pacing_lane(db: Session, now: datetime, result: dict) -> None:
     if not candidates:
         return
 
-    budget_pacing.apply_round_cap(candidates)
+    # 이번 런의 총 증액 한도 = min(회당 라운드 봉투 10만, 계정 일일 잔여 10만 − 오늘 집행분).
+    # 회당 캡만으로는 매시 발동이 누적돼 하루 총액이 무한정 커진다(리뷰 P2-4).
+    raised_amount = budget_pacing.raised_amount_today(db, today=now.date())
+    daily_left = budget_pacing.DAILY_ACCOUNT_RAISE_CAP - raised_amount
+    run_cap = min(budget_pacing.ROUND_BUDGET_CAP, daily_left)
+    result["budget_pacing_daily_left"] = daily_left
+    if run_cap <= 0:
+        hold_reason = (
+            f"계정 BP 일일 총량 캡 소진 — 오늘 이미 {raised_amount}원 증액"
+            f"(한도 {budget_pacing.DAILY_ACCOUNT_RAISE_CAP}원)"
+        )
+        for d in candidates:
+            result["budget_pacing_held"].append(
+                {"campaign_id": d["campaign_id"], "reason": hold_reason}
+            )
+            _record_blocked(
+                db, campaign_id=d["campaign_id"], actor=diary.ACTOR_PACING, reason=hold_reason,
+                now=now, target_type="campaign", target_id=d["campaign_id"], action="budget_up",
+            )
+        return
+
+    budget_pacing.apply_round_cap(candidates, cap=run_cap)
 
     for d in candidates:
         campaign_id = d["campaign_id"]
         if not d.get("round_eligible", True):
             hold_reason = (
-                f"회당 라운드 봉투 초과(≤{budget_pacing.ROUND_BUDGET_CAP}원) — 이번 회차 배정 "
-                f"불가(다음 정시 재평가). 목표 {d['target_budget']}원/현재 {d['current_budget']}원"
+                f"이번 회차 증액 한도 초과(한도 {run_cap}원 = min(회당 봉투 "
+                f"{budget_pacing.ROUND_BUDGET_CAP}, 계정 일일 잔여 {daily_left})) — 배정 불가"
+                f"(다음 정시 재평가). 목표 {d['target_budget']}원/현재 {d['current_budget']}원"
             )
             result["budget_pacing_held"].append({"campaign_id": campaign_id, "reason": hold_reason})
             _record_blocked(
@@ -2807,7 +2829,8 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
         "budget_pacing_raised": 0,    # 증액 실쓰기 성공 수
         "budget_pacing_failed": 0,    # 증액 실행 실패(가드레일 차단 포함)
         "budget_pacing_dry_run": 0,   # NAVER_BP_DRY_RUN=1로 제안만 기록한 수
-        "budget_pacing_held": [],     # 라운드 봉투 초과·서킷브레이커·킬스위치로 미발사
+        "budget_pacing_held": [],     # 회차/일일 캡 초과·서킷브레이커·킬스위치로 미발사
+        "budget_pacing_daily_left": None,  # 계정 BP 일일 총량 캡 잔여(원, 관측용)
         "budget_pacing_restore_reviewed": 0,  # 익일 원복 후보 수
         "budget_pacing_restored": 0,          # 원복 실쓰기 성공 수
         "budget_pacing_restore_failed": 0,    # 원복 실행 실패

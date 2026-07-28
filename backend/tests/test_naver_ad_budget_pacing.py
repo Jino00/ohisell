@@ -60,11 +60,13 @@ def _settings(db, *, campaign_id=CAMPAIGN, auto_operate=True, optimizer="ours",
     db.commit()
 
 
-def _snap(db, hour, cost, budget=100_000, *, campaign_id=CAMPAIGN, ad_date=TODAY):
+def _snap(db, hour, cost, budget=100_000, *, campaign_id=CAMPAIGN, ad_date=TODAY, clk=20):
+    """clk 기본 20 = 프록시 최소 볼륨 게이트(MIN_CLICKS_FOR_PROXY=5) 기본 통과.
+    표본 게이트 자체를 검증하는 테스트만 clk를 낮춘다."""
     db.add(NaverHourlySnapshot(
         snapshot_at=datetime.combine(ad_date, datetime.min.time()) + timedelta(hours=hour),
         ad_date=ad_date, snapshot_hour=hour, campaign_id=campaign_id, campaign_type="SHOPPING",
-        cost=cost, clk=0, imp=0, daily_budget=budget,
+        cost=cost, clk=clk, imp=0, daily_budget=budget,
     ))
     db.commit()
 
@@ -181,7 +183,10 @@ def test_uncapped_budget_is_not_a_pacing_case(db):
 
 
 def test_fail_closed_no_product_mapping(db):
-    """03처럼 방금 재가동돼 08:20 sync 전이라 매핑이 없는 캠페인 — 증액하지 않는다."""
+    """매핑 sync 전(optimizer 갓 전환/신규) 캠페인 — 증액하지 않는다.
+
+    ★07-27 03은 auto_operate=0이라 1단계에서 이미 제외였고, 강제 편입해도 여기서 또 막힌다
+    (매핑 부재는 03 배제의 1차 사유가 아니라 2차 방어선)."""
     _settings(db)
     _bep(db)
     _snap(db, 20, 95_000, 100_000)
@@ -236,7 +241,7 @@ def test_proxy_revenue_excludes_cancelled_and_other_days(db):
     _order(db, 999_999, status="cancelled", n=2)
     _order(db, 888_888, when=datetime.combine(TODAY - timedelta(days=1), datetime.min.time()), n=3)
     _order(db, 777_777, cpid="other-product", n=4)
-    assert budget_pacing.today_proxy_revenue(db, [CPID], TODAY) == 250_000
+    assert budget_pacing.today_proxy_revenue(db, [CPID], TODAY)[0] == 250_000
 
 
 def test_no_raise_when_kill_switch_off(db):
@@ -348,16 +353,261 @@ def test_base_kept_when_raised_today(db):
     assert d["target_budget"] <= 200_000
 
 
-def test_yesterdays_raise_does_not_block_reseed(db):
+def test_restored_yesterday_raise_allows_reseed(db):
+    """어제 증액이 **원복까지 끝났으면** 오늘의 현재 예산이 정상 base로 재시드된다."""
     _settings(db, base_daily_budget=100_000)
     _mapping(db)
     _bep(db)
     _snap(db, 20, 140_000, 150_000)
     _order(db, 400_000)
-    _pacing_log(db, changed_at=datetime(2026, 7, 26, 15, 20))  # 어제
+    _pacing_log(db, changed_at=datetime(2026, 7, 26, 15, 20))
+    _pacing_log(db, changed_at=datetime(2026, 7, 27, 0, 5),
+                action=budget_pacing.ACTION_BUDGET_DOWN_PACING, after='{"dailyBudget": 100000}')
     d = budget_pacing.evaluate(db, now=NOW)[0]
-    assert d["base_budget"] == 150_000
+    assert d["base_budget"] == 150_000  # 사람이 150,000으로 올려둔 상태를 흡수
     assert d["base_seeded"] is True
+
+
+# ══════════════════════ P1-1 회귀: 원복 실패 래칫 방어 ══════════════════════
+def test_unrestored_raise_blocks_reseed(db):
+    """★리뷰 P1-1: 어제 증액 + 원복 실패 상태에서 다음 날 첫 평가가 부풀린 예산을 base로
+    흡수하면(래칫) 원복 후보가 영구 소멸하고 캡 기준선도 굳는다 — 재시드 금지."""
+    _settings(db, base_daily_budget=100_000)
+    _mapping(db)
+    _bep(db)
+    _snap(db, 20, 140_000, 150_000)  # 어제 증액분 150,000이 그대로 남아 있음
+    _order(db, 400_000)
+    _pacing_log(db, changed_at=datetime(2026, 7, 26, 23, 20))  # 어제 증액, 원복 없음
+    d = budget_pacing.evaluate(db, now=NOW)[0]
+    assert d["base_budget"] == 100_000
+    assert d["base_seeded"] is False
+    assert "미복원" in d["base_keep_reason"]
+    # 원복 후보도 살아 있어야 한다(소멸 금지)
+    assert [c["campaign_id"] for c in budget_pacing.restore_candidates(db, now=NOW)] == [CAMPAIGN]
+
+
+def test_A1_restore_api_failure_keeps_base_and_candidate_until_retry_succeeds(db):
+    """A1: D1 증액 → D2 원복이 get_campaign 예외로 실패 → D2·D3 base 불변·후보 유지 →
+    재시도 성공 시 후보 소멸. (복리 없음 — 캡 기준선이 100,000 그대로)"""
+    from app.services.naver_ad import naver_sa_writer as writer
+
+    _settings(db, base_daily_budget=100_000)
+    _mapping(db)
+    _bep(db)
+    _snap(db, 23, 145_000, 150_000, ad_date=date(2026, 7, 26))
+    _pacing_log(db, changed_at=datetime(2026, 7, 26, 20, 20))
+
+    # D2 00:05 원복 시도 → 라이브 재조회 실패(fail-closed)
+    d2 = datetime(2026, 7, 27, 0, 5)
+    result = _new_result()
+    with patch.object(auto_operator.naver_execution_harness, "compute_correction_factor",
+                      return_value={"factor": Decimal("1")}), \
+         patch.object(auto_operator.naver_execution_harness.naver_sa_writer, "get_campaign",
+                      side_effect=RuntimeError("network")), \
+         patch.object(auto_operator.naver_execution_harness.naver_sa_writer,
+                      "update_campaign_budget") as mock_write:
+        auto_operator._run_budget_pacing_restore(db, d2, result)
+    assert mock_write.call_count == 0
+    assert result["budget_pacing_restore_failed"] == 1
+
+    # D2 낮 평가: base 재시드 금지 + 후보 유지
+    _snap(db, 12, 10_000, 150_000, ad_date=date(2026, 7, 27))
+    d = budget_pacing.evaluate(db, now=datetime(2026, 7, 27, 12, 20))[0]
+    assert d["base_budget"] == 100_000 and d["base_seeded"] is False
+    assert len(budget_pacing.restore_candidates(db, now=datetime(2026, 7, 27, 12, 20))) == 1
+
+    # D3에도 여전히 유지
+    d3 = datetime(2026, 7, 28, 0, 5)
+    assert len(budget_pacing.restore_candidates(db, now=d3)) == 1
+
+    # D3 재시도 성공 → 후보 소멸
+    write_result = writer.WriteResult(
+        action="update_budget", before={"dailyBudget": 150_000}, response={},
+        after={"dailyBudget": 100_000}, created_ids=[],
+    )
+    result = _new_result()
+    with patch.object(auto_operator.naver_execution_harness, "compute_correction_factor",
+                      return_value={"factor": Decimal("1")}), \
+         patch.object(auto_operator.naver_execution_harness.naver_sa_writer, "get_campaign",
+                      return_value={"dailyBudget": 150_000, "sharedBudgetId": None}), \
+         patch.object(auto_operator.naver_execution_harness.naver_sa_writer,
+                      "update_campaign_budget", return_value=write_result) as mock_write:
+        auto_operator._run_budget_pacing_restore(db, d3, result)
+    assert mock_write.call_args[0] == (CAMPAIGN, 100_000)
+    assert result["budget_pacing_restored"] == 1
+    assert budget_pacing.restore_candidates(db, now=datetime(2026, 7, 28, 1, 5)) == []
+
+
+def test_A3_cooldown_blocked_restore_retries_successfully_next_hour(db):
+    """A3: 23:20 증액 → 00:20 원복이 가드레일 쿨다운 2h로 차단 → 01:20 재시도 성공.
+    ★쿨다운 차단 뒤에도 base가 재시드되지 않아야 후보가 살아남는다(P1-1 불변식)."""
+    from app.services.naver_ad import naver_sa_writer as writer
+
+    _settings(db, base_daily_budget=100_000)
+    _mapping(db)
+    _bep(db)
+    _snap(db, 23, 145_000, 150_000, ad_date=date(2026, 7, 26))
+    _pacing_log(db, changed_at=datetime(2026, 7, 26, 23, 20))
+
+    # 00:20 — 마지막 변경(어제 23:20)에서 1시간 경과 → 쿨다운 2h 차단
+    t1 = datetime(2026, 7, 27, 0, 20)
+    result = _new_result()
+    with patch.object(auto_operator.naver_execution_harness, "compute_correction_factor",
+                      return_value={"factor": Decimal("1")}), \
+         patch.object(auto_operator.naver_execution_harness.naver_sa_writer, "get_campaign",
+                      return_value={"dailyBudget": 150_000, "sharedBudgetId": None}), \
+         patch.object(auto_operator.naver_execution_harness.naver_sa_writer,
+                      "update_campaign_budget") as mock_write:
+        auto_operator._run_budget_pacing_restore(db, t1, result)
+    assert mock_write.call_count == 0
+    assert result["budget_pacing_restore_failed"] == 1
+    assert "쿨다운" in (db.query(NaverChangeLog).order_by(NaverChangeLog.id.desc()).first().rationale or "")
+
+    # 01:20 재시도 — 쿨다운 해제(2h 경과) → 성공. 그 사이 평가가 돌아도 base 불변.
+    _snap(db, 1, 500, 150_000, ad_date=date(2026, 7, 27))
+    mid = budget_pacing.evaluate(db, now=datetime(2026, 7, 27, 1, 20))[0]
+    assert mid["base_budget"] == 100_000 and mid["base_seeded"] is False
+
+    write_result = writer.WriteResult(
+        action="update_budget", before={"dailyBudget": 150_000}, response={},
+        after={"dailyBudget": 100_000}, created_ids=[],
+    )
+    result = _new_result()
+    with patch.object(auto_operator.naver_execution_harness, "compute_correction_factor",
+                      return_value={"factor": Decimal("1")}), \
+         patch.object(auto_operator.naver_execution_harness.naver_sa_writer, "get_campaign",
+                      return_value={"dailyBudget": 150_000, "sharedBudgetId": None}), \
+         patch.object(auto_operator.naver_execution_harness.naver_sa_writer,
+                      "update_campaign_budget", return_value=write_result) as mock_write:
+        auto_operator._run_budget_pacing_restore(db, datetime(2026, 7, 27, 1, 25), result)
+    assert result["budget_pacing_restored"] == 1
+    assert mock_write.call_args[0] == (CAMPAIGN, 100_000)
+    # 복리 없음: 원복 후 base는 여전히 100,000이고 캡도 200,000
+    assert db.query(NaverCampaignSettings).one().base_daily_budget == 100_000
+
+
+def test_restore_candidate_survives_stale_snapshot_at_midnight(db):
+    """★리뷰 P2-1: 23:20 증액 → 00:05 리셋이 보는 최신 스냅샷은 23:05분 것(증액 전 예산).
+    그 관측으로 'observed ≤ base'라고 판단해 skip하면 리셋 잡이 영원히 헛돈다."""
+    _settings(db, base_daily_budget=100_000)
+    _snap(db, 23, 99_000, 100_000, ad_date=date(2026, 7, 26))  # 증액 전 값
+    _pacing_log(db, changed_at=datetime(2026, 7, 26, 23, 20))
+    cands = budget_pacing.restore_candidates(db, now=datetime(2026, 7, 27, 0, 5))
+    assert len(cands) == 1
+    assert cands[0]["observed_stale"] is True
+    assert "stale" in cands[0]["reason"]
+
+
+# ══════════════════════ P2-2 프록시 최소 볼륨 게이트 ══════════════════════
+def test_thin_sample_natural_sales_cannot_pass_roas_gate(db):
+    """★리뷰 P2-2 재현: 2,900원 소진 + 자연판매 50만 → ROAS 172로 통과하던 구멍."""
+    _settings(db)
+    _mapping(db)
+    _bep(db, target_roas="2.0")
+    _snap(db, 20, 2_900, 3_000, clk=2)  # 소진율 96.7%(트리거는 통과)
+    _order(db, 500_000)
+    d = budget_pacing.evaluate(db, now=NOW)[0]
+    assert d["needs_raise"] is False
+    assert "표본 미달" in d["reason"]
+    assert d["proxy_roas"] is None  # ROAS를 계산조차 하지 않는다
+
+
+def test_volume_gate_clicks_boundary(db):
+    _settings(db)
+    _mapping(db)
+    _bep(db, target_roas="2.0")
+    _snap(db, 17, 80_000, 100_000, clk=4)
+    _snap(db, 20, 95_000, 100_000, clk=4)  # 클릭 4 < 5
+    _order(db, 250_000)
+    assert budget_pacing.evaluate(db, now=NOW)[0]["needs_raise"] is False
+    db.query(NaverHourlySnapshot).update({"clk": budget_pacing.MIN_CLICKS_FOR_PROXY})
+    db.commit()
+    assert budget_pacing.evaluate(db, now=NOW)[0]["needs_raise"] is True
+
+
+def test_volume_gate_cost_boundary(db):
+    _settings(db)
+    _mapping(db)
+    _bep(db, target_roas="2.0")
+    _snap(db, 20, 4_999, 5_000, clk=20)  # 소진 4,999 < 5,000
+    _order(db, 250_000)
+    d = budget_pacing.evaluate(db, now=NOW)[0]
+    assert d["needs_raise"] is False and "표본 미달" in d["reason"]
+    assert budget_pacing.MIN_COST_FOR_PROXY == 5_000
+
+
+# ══════════════════════ P2-3 상품 공유 캠페인 이중계상 ══════════════════════
+def test_shared_product_revenue_is_split_between_campaigns(db):
+    """같은 상품이 auto_operate 캠페인 2곳에 매핑되면 당일 매출을 균등 분할한다."""
+    _settings(db)
+    _settings(db, campaign_id="cmp-bp2")
+    _mapping(db)
+    _mapping(db, campaign_id="cmp-bp2", adgroup_id="grp-2")  # 같은 CPID
+    _bep(db, target_roas="2.0")
+    _snap(db, 17, 80_000, 100_000)
+    _snap(db, 20, 95_000, 100_000)
+    _snap(db, 17, 80_000, 100_000, campaign_id="cmp-bp2")
+    _snap(db, 20, 95_000, 100_000, campaign_id="cmp-bp2")
+    _order(db, 300_000)
+
+    counts = budget_pacing.product_campaign_counts(db, [CAMPAIGN, "cmp-bp2"])
+    assert counts[CPID] == 2
+    revenue, shared = budget_pacing.today_proxy_revenue(db, [CPID], TODAY, shares=counts)
+    assert revenue == 150_000  # 300,000 ÷ 2
+    assert shared == [f"{CPID}÷2"]
+
+    for d in budget_pacing.evaluate(db, now=NOW):
+        assert d["proxy_revenue"] == 150_000
+        assert d["proxy_shared_products"] == [f"{CPID}÷2"]
+        assert "균등분할" in d["reason"]
+
+
+def test_unshared_product_is_not_split(db):
+    _ready(db, revenue=250_000)
+    d = budget_pacing.evaluate(db, now=NOW)[0]
+    assert d["proxy_revenue"] == 250_000
+    assert d["proxy_shared_products"] == []
+
+
+# ══════════════════════ P2-4 계정 일일 총량 캡 ══════════════════════
+def test_raised_amount_today_sums_deltas(db):
+    _settings(db)
+    _pacing_log(db, changed_at=datetime(2026, 7, 27, 10, 0), after='{"dailyBudget": 130000}')
+    _pacing_log(db, changed_at=datetime(2026, 7, 27, 14, 0), after='{"dailyBudget": 160000}')
+    _pacing_log(db, changed_at=datetime(2026, 7, 26, 14, 0), after='{"dailyBudget": 900000}')
+    # before는 헬퍼 기본 100,000 → Δ 30,000 + 60,000 (어제분 제외)
+    assert budget_pacing.raised_amount_today(db, today=TODAY) == 90_000
+
+
+def test_lane_blocks_when_account_daily_cap_exhausted(db):
+    _ready(db)
+    _pacing_log(db, changed_at=datetime(2026, 7, 27, 10, 0), after='{"dailyBudget": 200000}')
+    result = _new_result()
+    with patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        auto_operator._run_budget_pacing_lane(db, NOW, result)
+    assert mock_exec.call_count == 0
+    assert any("일일 총량 캡 소진" in h["reason"] for h in result["budget_pacing_held"])
+    assert result["budget_pacing_daily_left"] <= 0
+
+
+def test_lane_partial_daily_cap_left(db):
+    """오늘 이미 90,000 증액 → 잔여 10,000. 22,000 증액 후보는 배정 불가."""
+    _ready(db)
+    _pacing_log(db, changed_at=datetime(2026, 7, 27, 10, 0), after='{"dailyBudget": 190000}')
+    result = _new_result()
+    with patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        auto_operator._run_budget_pacing_lane(db, NOW, result)
+    assert mock_exec.call_count == 0
+    assert result["budget_pacing_daily_left"] == 10_000
+    assert any("증액 한도 초과" in h["reason"] for h in result["budget_pacing_held"])
+
+
+def test_round_cap_respects_explicit_cap():
+    cands = [{"campaign_id": "a", "current_budget": 100_000, "target_budget": 130_000}]
+    budget_pacing.apply_round_cap(cands, cap=20_000)
+    assert cands[0]["round_eligible"] is False
+    budget_pacing.apply_round_cap(cands, cap=30_000)
+    assert cands[0]["round_eligible"] is True
 
 
 # ══════════════════════ SA: 라운드 봉투 ══════════════════════
@@ -493,7 +743,7 @@ def test_lane_skips_round_cap_overflow(db):
     with patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
         auto_operator._run_budget_pacing_lane(db, NOW, result)
     assert mock_exec.call_count == 1  # 큰 쪽만 배정, 작은 쪽은 봉투 초과로 skip
-    assert any("라운드 봉투 초과" in h["reason"] for h in result["budget_pacing_held"])
+    assert any("증액 한도 초과" in h["reason"] for h in result["budget_pacing_held"])
 
 
 def test_lane_restores_base_next_day(db):
@@ -651,7 +901,7 @@ def test_scheduler_registers_budget_pacing_reset_job(db):
 def _new_result() -> dict:
     return {
         "budget_pacing_reviewed": 0, "budget_pacing_raised": 0, "budget_pacing_failed": 0,
-        "budget_pacing_dry_run": 0, "budget_pacing_held": [],
+        "budget_pacing_dry_run": 0, "budget_pacing_held": [], "budget_pacing_daily_left": None,
         "budget_pacing_restore_reviewed": 0, "budget_pacing_restored": 0,
         "budget_pacing_restore_failed": 0,
     }
