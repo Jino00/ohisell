@@ -1,3 +1,14 @@
+## 최신 상태 (2026-07-28 11:10, 워크트리 cool-driscoll-31712d) — 로켓 1P 파서 누락 컬럼 2건 복원, PR #130 오픈(미병합·미배포)
+- **PR #130** https://github.com/Jino00/ohisell/pull/130 — 트랙 `track_coupang-rocket-1p.md` M1(유지보수). 커밋 `85967cf`→`e3da1f6`→`39c1c39`(코드)+`a386614`·`ddb2c02`(문서).
+- 복원 ①: 정산 마지막 링크 컬럼(헤더명=빈 문자열, ref20 §4 #16) → `coupang_rocket_settlement.tax_invoice_transmitted`(Boolean nullable). 버튼 토큰 정확일치 제거 후 잔여로 판정(`전송성공`=True / 없음=False / 셀부재·미관측=None+warning). 공백소실 폴백은 `전송성공` 정확일치일 때만 True — **어느 경로로도 틀린 False를 만들지 않음**. ★**False = "전송실패"가 아니라 "전송성공 미표기"**(샘플 10행에서 미표기 행은 확정일도 `-`, "확정됐는데 미전송" 표본 0건).
+- 복원 ②: 발주상세 인덱스 5 → `coupang_rocket_purchase_order_item.vendor_confirmed_qty`(Integer nullable) = SKU 단위 입고/납품수량 비교 개통. PO그레인 `sumOfVendorConfirmedQty`의 per-SKU 판.
+- alembic **`f6a8c0b2d4e6`**(ADD COLUMN 2건, upgrade/downgrade 실증). 테스트 파서 48 / 루트 전체 **3505 passed**(동반 4 errors=`test_migration_one_running_index.py` cwd 의존 **기존** 결함, `cd backend`에선 4 passed). 라이브 증거(원칙22): DOM 샘플 10행 전수 — 빈 헤더 1개·셀 변형 2종·"전송성공 ⟺ 확정일 존재" 10/10.
+- **★배포 순서 강제**: `alembic upgrade head` → 코드 → 재시작. ingest가 엔티티를 통째 SELECT하므로 컬럼 없는 DB에 `models.py`만 올라가면 **정산·발주상세 ingest 전체가 OperationalError로 침묵**. `safe_deploy.sh`에 alembic 단계 **0건**(grep 실측)이라 자동 보장 없음.
+- **★병합 순서 충돌**: 병행 워크트리 `worktree-agent-a77a1755db4c87ada`(promo-pnl)의 마이그레이션 `a1c3e5f7b9d1`이 **같은 부모 `e5f7a9c1b3d5`**를 뭄. 각자는 단일 head지만 둘 다 main 들어가면 head 2개 → **나중에 병합하는 쪽이 `down_revision` 재연결**. 공통 파일은 `models.py` 하나(다른 클래스, 논리 충돌 없음).
+- **codex 게이트: Jino 판단으로 건너뜀**(쿼터 08-02 해제). 대체=Opus 독립 적대적 리뷰 2R → PASS·미합의 0. 원칙19 부채로 기록(LESSONS #49).
+- 후속 chip 2건 **다른 세션에서 실행 중**: `task_a0c65677`(safe_deploy alembic 가드)·`task_2cee6f8d`(페처 셀 공백 보장 — `parse_po_item_rows`의 `barcode_name` 분리가 더 위험한 자리). ⚠`task_2cee6f8d`는 같은 파서/테스트 파일을 건드릴 수 있어 PR #130 기준 리베이스 필요.
+- **남은 것(Jino 판단)**: PR #130 병합 시점(promo-pnl과의 순서) · 병합 후 prod 배포(마이그레이션 선행 필수). **prod DB에 마이그레이션 미적용 상태.**
+
 ## 04 자동운영 감사 D+N (2026-07-28 08:55 KST, 자동 루틴 D-NAO-51 — 감사 전용·쓰기 0건)
 - **서버 레인 전부 ok** (daily 08:50:15 / hourly 08:20:07 / generator 08:00:15 / entity_sync 07:38 / retro 08:30 / wisdom 08:45 / probe_settlement 08:55).
 - **실집행 5건, 라이브 5/5 일치**: auto_op 1건(grp70109620 맥세이프_컨텐츠 140→120, [shopping_group_bep], 라이브 120 MATCH) + **cold_op 4건 = CS 콜드스타트 레인(D-NAO-96) 첫 실집행 성공** — nad…411558870 300→1900 / …375630000 590→1150 / …375632395 900→2350 / …375632396 900→2300, 4건 전부 라이브 `adAttr.bidAmt` 일치. 원칙22 라이브 합격.
