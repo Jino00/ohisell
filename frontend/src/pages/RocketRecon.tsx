@@ -434,20 +434,25 @@ function SkuRows({ row, open, onToggle, from, to }: {
         <Td right>
           {/* 빨강은 '입고가 끝난 단계(CI·RI)'의 불일치에만 — 입고 전 단계의 차이는 당연하므로 회색. */}
           {row.drift_qty_settled_stage == null ? (
-            <>
-              <span className="text-gray-400" title="입고가 끝난 단계의 귀속 가능 발주가 없어 판정할 수 없습니다 (0이 아니라 '모름')">
-                {NO_DATA}
-              </span>
-              {row.drift_qty != null && row.drift_qty !== 0 && (
-                <div className="text-xs text-gray-400" title="아직 입고 전 단계라 발주≠입고가 정상입니다">
-                  입고 전 {n(row.drift_qty)}
-                </div>
-              )}
-            </>
+            <span className="text-gray-400" title="입고가 끝난 단계의 귀속 가능 발주가 없어 판정할 수 없습니다 (0이 아니라 '모름')">
+              {NO_DATA}
+            </span>
           ) : row.drift_qty_settled_stage === 0 ? (
             <span className="text-gray-400">0</span>
           ) : (
             <span className="text-judge-bad font-medium">{n(row.drift_qty_settled_stage)}</span>
+          )}
+          {/* ★수량이 상쇄돼 0이어도 불일치 발주가 있으면 그 사실을 지운 채 두지 않는다. */}
+          {row.drift_qty_settled_stage === 0 && row.drift_po_count_settled_stage > 0 && (
+            <div className="text-xs text-judge-bad" title="초과입고와 미입고가 섞여 수량 합이 0이 됐을 뿐, 발주별로는 불일치합니다">
+              발주 {n(row.drift_po_count_settled_stage)}건 불일치(상쇄)
+            </div>
+          )}
+          {/* 입고 전 단계의 차이 — null 분기 안에 가두면 settled=0일 때 정보가 사라진다(R2-2). */}
+          {row.drift_qty != null && row.drift_qty !== row.drift_qty_settled_stage && (
+            <div className="text-xs text-gray-400" title="아직 입고 전 단계라 발주≠입고가 정상입니다">
+              입고 전 {n(row.drift_qty - (row.drift_qty_settled_stage ?? 0))}
+            </div>
           )}
         </Td>
         <Td right>{won(row.order_amount)}</Td>

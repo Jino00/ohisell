@@ -300,6 +300,26 @@ def test_drift_only_excludes_pre_receiving_stage(db):
     assert r["filters"]["sku_count_unknown_drift"] == 1
 
 
+def test_settled_drift_qty_cancellation_still_reports_po_count(db):
+    """수량 순합이 상쇄돼 0이어도 불일치 발주 건수는 남는다 — 요약(건수)과 행(순합)의 어긋남 방지.
+
+    초과입고 PO와 미입고 PO가 섞이면 Σ(발주−입고)=0이 되어 '불일치 없음'으로 보이지만,
+    요약 타일은 건수를 세므로 2건으로 잡힌다. 행에서만 사라지면 대사가 어긋난다.
+    """
+    _po(db, 1, status="CI", desc="거래명세서확인", order_qty=10, recv_qty=7, sku_count=1)
+    _item(db, 1, "YYY", qty=10, amt=100000)
+    _po(db, 2, status="CI", desc="거래명세서확인", order_qty=10, recv_qty=13, sku_count=1)
+    _item(db, 2, "YYY", qty=10, amt=100000)
+    db.commit()
+    r = compute_rocket_recon(db, *WIN)
+    row = r["skus"][0]
+    assert row["drift_qty_settled_stage"] == 0        # 순합은 상쇄
+    assert row["drift_po_count_settled_stage"] == 2   # ★건수는 남는다
+    assert r["summary"]["drift_po_count_settled_stage"] == 2  # 요약과 같은 단위
+    # 상쇄됐다고 drift_only에서 사라지면 안 된다.
+    assert [x["product_number"] for x in compute_rocket_recon(db, *WIN, drift_only=True)["skus"]] == ["YYY"]
+
+
 def test_sku_invoice_counters_are_sku_scoped_not_window_distinct(db):
     """행 배지 합 ≠ 요약 타일 — 계산서 1건이 멀티SKU 발주에 걸리면 SKU마다 잡힌다.
 

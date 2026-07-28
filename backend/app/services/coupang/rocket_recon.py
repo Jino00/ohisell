@@ -352,6 +352,13 @@ def _sku_aggregate(db: Session, po_by_seq: dict[int, CoupangRocketPurchaseOrder]
                         if po_by_seq[s].purchase_order_status in SETTLED_STAGE_STATUSES}
         settled_received = sum(int(po_by_seq[s].receiving_qty or 0) for s in settled_seqs)
         settled_order = sum(int(po_by_seq[s].order_qty or 0) for s in settled_seqs)
+        # ★수량 순합은 상쇄된다 — 초과입고 PO와 미입고 PO가 섞이면 합이 0이 되어 "불일치 없음"으로
+        #   보인다. 요약 타일은 **건수**를 세므로 그쪽엔 잡히고 여기만 사라지는 어긋남이 생긴다.
+        #   그래서 건수도 함께 낸다(요약과 같은 단위).
+        settled_drift_pos = sum(
+            1 for s in settled_seqs
+            if int(po_by_seq[s].order_qty or 0) != int(po_by_seq[s].receiving_qty or 0)
+        )
         # 계산서 상태 — **이 SKU가 속한 PO들** 기준(윈도우 전체가 아니다).
         # ★행 배지의 합 ≠ summary.invoice 타일: 1계산서가 멀티SKU 발주에 걸리면 그 계산서가
         #   SKU마다 한 번씩 잡힌다(inv_seen은 SKU 안에서만 중복 제거). summary는 윈도우 전체
@@ -396,6 +403,8 @@ def _sku_aggregate(db: Session, po_by_seq: dict[int, CoupangRocketPurchaseOrder]
             "drift_qty": (attr_order - received) if attr_seqs else None,
             # ★진짜 신호 — 입고 완료 단계(CI·RI) 귀속분만. 해당 PO 0건이면 None(0 아님).
             "drift_qty_settled_stage": (settled_order - settled_received) if settled_seqs else None,
+            # 수량이 상쇄돼 0이어도 건수가 >0이면 불일치는 실재한다(요약 타일과 같은 단위).
+            "drift_po_count_settled_stage": settled_drift_pos,
             "settled_stage_attributable_po_count": len(settled_seqs),
             "invoice_count": len(inv_seen),
             "po_without_invoice_count": no_inv,
@@ -546,7 +555,11 @@ def compute_rocket_recon(db: Session, dfrom: date, dto: date,
     #   몇 건이 그렇게 빠졌는지 세어서 응답에 싣는다(화면이 "나머지는 정상"으로 읽히지 않게).
     unknown_drift = sum(1 for r in sku_rows if r["drift_qty_settled_stage"] is None)
     if drift_only:
-        sku_rows = [r for r in sku_rows if r["drift_qty_settled_stage"] not in (None, 0)]
+        # 수량 상쇄로 0이 된 SKU도 남긴다 — 건수가 있으면 불일치는 실재한다(R2-1).
+        sku_rows = [
+            r for r in sku_rows
+            if r["drift_qty_settled_stage"] not in (None, 0) or r["drift_po_count_settled_stage"] > 0
+        ]
     if unconfirmed_only:
         sku_rows = [
             r for r in sku_rows

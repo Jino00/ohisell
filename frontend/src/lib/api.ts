@@ -998,6 +998,8 @@ export interface ReconSkuRow {
   drift_qty: number | null;              // 귀속 가능분 발주−입고(입고 전 단계 포함=참고값). null=산출 불가
   // ★진짜 신호 — 입고 완료 단계(CI·RI) 귀속분만. null=판정 근거 없음(0 아님). 빨강은 이 값에만.
   drift_qty_settled_stage: number | null;
+  // 수량이 상쇄돼 0이어도 건수가 >0이면 불일치는 실재한다(요약 타일과 같은 단위).
+  drift_po_count_settled_stage: number;
   settled_stage_attributable_po_count: number;
   invoice_count: number;
   // ↓ 계산서 카운터는 **이 SKU가 속한 발주** 기준 — 요약 타일(기간 전체 중복 제거)과 분모가 다르다.
