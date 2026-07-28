@@ -312,17 +312,17 @@ Harness: `perf_today_harness.build(db)` · 파라미터 없음(오늘 고정).
 ## §8 체크리스트 (태스크 완료 즉시 갱신 — 원칙 20 보강 룰)
 
 ### Phase 0 — 선결
-- [ ] ⏳ P0-1 `alert_humanizer.py` main 병합 확인 (`backend/app/services/naver_ad/alert_humanizer.py` 존재)
+- [x] ✅ P0-1 `alert_humanizer.py` main 병합 확인(PR #149로 편입 완료)
 - [ ] ⏳ P0-2 트랙 파일에 이 계획서 링크 + D-N 기록(승인 시)
 
 ### Phase 1 — ①오늘 한눈에 + ②오늘 시스템이 한 일
-- [ ] ⏳ P1-1 `campaign_roster.build` 확장 — `auto_operate` · `status_reason`
-- [ ] ⏳ P1-2 SA `today_proxy_revenue.py` (캠페인별 당일 프록시 매출, 매핑 없으면 None)
-- [ ] ⏳ P1-3 SA `change_log_narrator.py` (변경 이력 → 한글 문장, humanizer 재사용)
-- [ ] ⏳ P1-4 Harness `perf_today_harness.py`
-- [ ] ⏳ P1-5 라우터 ⓐ `GET /performance/today`
-- [ ] ⏳ P1-6 프론트 `NaverAdPerformance.tsx` 섹션①② + 라우트 + LayerNav + api.ts
-- [ ] ⏳ P1-7 pytest (프록시 None 경로 · 문장 0건 경로 · 창 관례)
+- [x] ✅ P1-1 `campaign_roster.build` 확장 — `auto_operate` · `status_reason`(additive, 기존 키 불변)
+- [x] ✅ P1-2 SA `today_proxy_revenue.py` — 매핑 없으면 None+사유, 공유 상품은 캠페인 수로 균등 분할
+- [x] ✅ P1-3 SA `change_log_narrator.py` — 집행/차단/모름 3상태를 서로 다른 문장으로, 소재(ad)는 상품명 폴백
+- [x] ✅ P1-4 Harness `perf_today_harness.py` — BP 라벨(budget_up_pacing)까지 ②가 세도록 액션 집합 확장
+- [x] ✅ P1-5 라우터 ⓐ `GET /performance/today`
+- [x] ✅ P1-6 프론트 `NaverAdPerformance.tsx` 섹션①② + 라우트 + LayerNav('성과' 첫 탭) + api.ts
+- [x] ✅ P1-7 pytest 21건 신규(프록시 None/0 구분 · 차단/실패 문장 · dry-run·외부 제외 · ID 누출 0) — 전체 3,806 통과
 - [ ] ⏳ P1-8 `/codex review` (원칙 19)
 - [ ] ⏳ P1-9 배포 + §6 Phase 1 라이브 5항 확인
 
@@ -344,6 +344,25 @@ Harness: `perf_today_harness.build(db)` · 파라미터 없음(오늘 고정).
 - [ ] ⏳ P3-6 프론트 섹션⑤⑥
 - [ ] ⏳ P3-7 pytest(카탈로그 부재 폴백 · 멱등 · confounded) + `/codex review`
 - [ ] ⏳ P3-8 배포 + §6 Phase 3 라이브 6항 확인
+
+### Phase 1 한계 — 당일 프록시 ROAS 커버리지(정직 고지)
+
+- **현재 산출 가능 = 46캠페인 중 2개**(04 아이폰_지문방지 · 15 갤럭시Z). 나머지 44개는
+  `roas_today_proxy=null`(알 수 없음)로 나간다 — 값이 없는 것이지 성과가 0인 것이 아니다.
+- 원인은 구조다: 배분의 유일한 근거인 `naver_adgroup_product`를 `shopping_ad_product_sync`가
+  **optimizer='ours' 쇼핑 캠페인만** 적재한다. 대행사·수동 캠페인(대다수)과 파워링크·
+  브랜드검색(매핑 개념 자체가 없음)은 원천적으로 빠진다.
+- **03 아이폰_강화유리**: 07-28 12:44 자동운영 재가동(D-NAO-101)이라 그날 08:20 sync 시점엔
+  아직 'ours'가 아니었다 → **익일(07-29) sync부터 편입**된다. 당일 null은 정상 동작이다.
+- 전 캠페인 커버리지 확대는 **Phase 2 후보**다(동기화 범위 변경이 선행 조건 — 적재 대상을
+  넓히면 `product_campaign_share`의 분모가 코드 변경 없이 더 정확해진다). 파워링크의 매출
+  귀속은 별도 문제로 §9 승계 큐 1번에 남아 있다.
+
+### Phase 1 라이브 실측 메모(2026-07-28, prod 읽기 전용 추출 스모크)
+- 오늘 문장 20건 = 실행 16 · 차단 4(라이브 change_log와 건수 일치). 08:50 첫입찰·09:20/11:20 탐색·13:20 03 편입 5+차단 2·14:20 차단 1이 전부 한글 문장으로 나옴.
+- 프록시 산출 2/46(위 '한계' 항목). 파워링크 5캠페인 전부 `roas_today_proxy=null`(0.00배 아님). 03은 12:44 'ours' 전환 직후라 상품 매핑 sync 전 → 역시 null + 사유 문장.
+- 화면 노출 문자열에 ID·내부 용어 0건(grep).
+- 교정 3건: ⓪공유 상품 매출 분할 분모를 `product_campaign_share` 한 곳으로 통일(성과뷰=조회범위 의존 / BP=auto_operate만 세던 두 갈래 해소) ①`● [P_삭제금지]…` 이름에서 여는 괄호까지 지워져 깨지던 것 → `alert_humanizer.clean_name`이 대괄호 라벨 보존 ②캠페인 자신이 대상인 행에서 캠페인명 2회 반복 제거.
 
 ### 마감
 - [ ] ⏳ Z-1 트랙 파일 D-N · `claude-progress.txt` 갱신
