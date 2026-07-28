@@ -28,6 +28,7 @@ ACTOR_DELEGATION = "delegation"
 ACTOR_SYSTEM = "system"
 ACTOR_PROBE = "probe"  # D-NAO-58 CD2: 클릭 탐침(밴드 사각지대 능동 상향) 집행 주체
 ACTOR_EXPLORE = "explore"  # B-X BX3(D-NAO-70·71): 저볼륨 그룹 탐색 UP(핫셋 미달 능동 상향) 집행 주체
+ACTOR_PACING = "pacing"  # BP(D-NAO-102): 예산 페이싱 자동 증액·익일 원복 집행 주체
 
 # observe(관측) 상태 토큰(D-NAO-85 관측 갭②) — write_observe_if_changed가 event_type="observe" 행의
 # action 컬럼에 저장하는 안정 키. 시간당 탐색 레인이 스텝 없이 관측만 하는 정상 상태를 저소음
@@ -45,6 +46,7 @@ _APPROVAL_SOURCE_TO_ACTOR = {
     "probe_op": ACTOR_PROBE,     # APPROVAL_SOURCE_PROBE (D-NAO-58 CD2)
     "revert_op": ACTOR_PROBE,    # APPROVAL_SOURCE_REVERT (D-NAO-58 CD3 되돌림 — 같은 주체)
     "explore_op": ACTOR_EXPLORE,  # APPROVAL_SOURCE_EXPLORE (B-X BX3 탐색 UP — exploration.py 소유 상수 값 복제)
+    "pace_op": ACTOR_PACING,     # APPROVAL_SOURCE_PACING (BP D-NAO-102 예산 페이싱)
 }
 
 # 공휴일 판정 — sales_velocity_estimator._KR_HOLIDAYS와 동일 라이브러리(holidays.SouthKorea).

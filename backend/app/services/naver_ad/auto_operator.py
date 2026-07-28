@@ -34,7 +34,7 @@ from app.models import (
     NaverProposal,
     NaverRetroSignal,
 )
-from app.services.naver_ad import bid_rank_curve, bid_simulator, budget_envelope, campaign_target_resolver, ctr_alert, diagnosis, diary, effective_bid, exploration, expansion_allocator, expansion_pressure, gave_score, guardrail_gate, intraday_roas, naver_execution_harness, naver_sa_writer, rank_servo, slack_notifier, visibility, vitality_signal
+from app.services.naver_ad import bid_rank_curve, bid_simulator, budget_envelope, budget_pacing, campaign_target_resolver, ctr_alert, diagnosis, diary, effective_bid, exploration, expansion_allocator, expansion_pressure, gave_score, guardrail_gate, intraday_roas, naver_execution_harness, naver_sa_writer, rank_servo, slack_notifier, visibility, vitality_signal
 from app.services.naver_ad.bid_step_types import BID_UP_TYPES, EXPLORATION_STEP_TYPES, encode_base_bid, encode_exploration_ceiling
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.services.naver_ad.guardrail_gate import _MAX_CHANGE_PCT
@@ -61,6 +61,9 @@ APPROVAL_SOURCE_DAILY = "auto_op"  # 7자
 APPROVAL_SOURCE_HOURLY = "auto_op_hr"  # 10자
 APPROVAL_SOURCE_PROBE = "probe_op"  # 8자 — D-NAO-58 CD2 클릭 탐침(String(12) 적합, diary probe actor)
 APPROVAL_SOURCE_REVERT = "revert_op"  # 9자 — D-NAO-58 CD3 탐침 되돌림(String(12) 적합, diary ACTOR_PROBE 재사용)
+# BP(D-NAO-102) 예산 페이싱 승인원 — 값의 집은 budget_pacing SA(harness가 auto_operator를
+# module-level import하면 순환이라 SA 쪽이 소유). 여기선 다른 레인 상수와 같은 자리에 재노출만.
+APPROVAL_SOURCE_PACING = budget_pacing.APPROVAL_SOURCE_PACING  # 'pace_op'(7자, diary ACTOR_PACING)
 
 # ── VT2(D-NAO-81 B축 스파이럴 복원) ──
 # 스파이럴 복원 발사는 새 approval_source·새 쓰기 경로를 만들지 않는다(§0 3 "새 권한 없음"):
@@ -2582,6 +2585,191 @@ def _run_vitality_step(db: Session, now: datetime, result: dict) -> None:
     _emit_vitality_briefing(db, alerts, now, revive_hold_reason=revive_hold_reason)
 
 
+def _bp_fire(
+    db: Session, *, campaign_id: str, proposal_type: str, target_budget: int,
+    rationale: str, expected_effect: str, now: datetime, result: dict,
+    ok_key: str, fail_key: str,
+) -> bool:
+    """BP(D-NAO-102) 예산 쓰기 1건 — 제안 생성→승인→naver_execution_harness.execute 경유.
+
+    새 쓰기 경로를 만들지 않는다(원칙18-6 초크포인트): guardrail_gate._check_budget이
+    +100%캡·스톱로스·BEP 이익하한·쿨다운2h·일일상한을 실행 직전에 다시 검증하고, harness가
+    킬스위치 최종 가드(approval_source=pace_op)를 건다. 여기서 하는 추가 방어는 승인 직전
+    킬스위치 재확인 하나(다른 레인과 동일 계약)뿐이다.
+
+    NAVER_BP_DRY_RUN=1이면 execute(dry_run=True) — 실쓰기 없이 change_log에 제안만 남긴다.
+    """
+    if not _auto_operate_now(db, campaign_id):
+        hold_reason = "킬스위치 OFF — auto_operate=False(BP 실행 직전 재확인)"
+        result["budget_pacing_held"].append({"campaign_id": campaign_id, "reason": hold_reason})
+        _record_blocked(
+            db, campaign_id=campaign_id, actor=diary.ACTOR_PACING, reason=hold_reason,
+            now=now, target_type="campaign", target_id=campaign_id,
+            action=proposal_type, event_type="kill_switch",
+        )
+        return False
+
+    proposal = NaverProposal(
+        proposal_type=proposal_type, target_type="campaign", target_id=campaign_id,
+        campaign_id=campaign_id, rationale=rationale, expected_effect=expected_effect,
+        status="pending", target_budget=target_budget,
+        # 라운드 봉투 분류는 BP 레인이 이미 apply_round_cap으로 소비했다(초과분은 제안 자체를
+        # 만들지 않는다) — 여기까지 온 건 전부 자율분.
+        budget_auto_eligible=True,
+    )
+    db.add(proposal)
+    db.flush()
+    proposal.status = "approved"
+    proposal.approval_source = APPROVAL_SOURCE_PACING
+    db.commit()
+
+    dry_run = budget_pacing.dry_run_enabled()
+    try:
+        naver_execution_harness.execute(db, proposal.id, dry_run=dry_run, now=now)
+        if dry_run:
+            result["budget_pacing_dry_run"] += 1
+        else:
+            result[ok_key] += 1
+        return True
+    except Exception as e:  # noqa: BLE001 — harness가 change_log/상태를 이미 확정(failed 등)
+        result[fail_key] += 1
+        log.warning(
+            "auto_operator: BP %s 실행 실패 campaign=%s proposal_id=%s: %s",
+            proposal_type, campaign_id, proposal.id, e,
+        )
+        return False
+
+
+def _run_budget_pacing_restore(db: Session, now: datetime, result: dict) -> None:
+    """BP 익일 원복 — 어제 이전 BP 증액분을 base_daily_budget으로 되돌린다(D-NAO-102 ⑤).
+
+    00:05 전용 잡이 아니라 **멱등 판정**이라 시간당 레인도 같은 함수를 호출한다(00:05 잡이
+    죽어도 다음 정시가 따라잡는 자가치유). 감액이라 guardrail은 방향·클램프만 본다."""
+    for cand in budget_pacing.restore_candidates(db, now=now):
+        result["budget_pacing_restore_reviewed"] += 1
+        rationale = f"{budget_pacing.BUDGET_PACING_RESTORE_PREFIX} {cand['reason']}"
+        _bp_fire(
+            db, campaign_id=cand["campaign_id"], proposal_type="budget_down",
+            target_budget=cand["base_budget"], rationale=rationale,
+            expected_effect=(
+                "BP 익일 원복 — 장중 페이싱 증액분을 그날 기준(base) 예산으로 복귀"
+                "(감액은 가드레일 면제 대상이라 방향·클램프만 검증)."
+            ),
+            now=now, result=result,
+            ok_key="budget_pacing_restored", fail_key="budget_pacing_restore_failed",
+        )
+
+
+def _run_budget_pacing_lane(db: Session, now: datetime, result: dict) -> None:
+    """BP 장중 증액 레인(D-NAO-102) — auto_operate 전 캠페인 전역 레인(캠페인 하드코딩 없음).
+
+    ①익일 원복 자가치유 ②budget_pacing.evaluate 판정(소진율≥90% ∧ 프록시ROAS≥target)
+    ③회당 라운드 봉투(≤10만) 그리디 배정 ④소진 서킷브레이커 통과분만 ⑤제안·승인·execute.
+
+    ★소진 서킷브레이커(§4-6, 당일 소진 > 직전7일 일평균×3)를 증액에도 적용한다 — 이미
+    폭주 중인 캠페인의 천장을 더 여는 것은 브레이커의 취지와 정면 충돌한다.
+    ★base 시드는 판정 결과(base_seeded)를 하니스가 반영한다(SA는 DB 쓰기 금지).
+    """
+    _run_budget_pacing_restore(db, now, result)
+
+    decisions = budget_pacing.evaluate(db, now=now)
+    if not decisions:
+        return
+
+    # base 시드/재시드 반영(오늘 BP 증액이 없던 캠페인은 현재 예산이 그날 기준값).
+    seeded = [d for d in decisions if d.get("base_seeded") and d.get("base_budget")]
+    if seeded:
+        for d in seeded:
+            db.query(NaverCampaignSettings).filter(
+                NaverCampaignSettings.campaign_id == d["campaign_id"]
+            ).update({"base_daily_budget": int(d["base_budget"])}, synchronize_session=False)
+        db.commit()
+
+    # 트리거 미달·uncapped 같은 일상 관찰은 일기에 남기지 않는다(_record_blocked 선별 규약 —
+    # 매시×캠페인 hold를 전부 적으면 일기가 소음으로 매몰된다). 결과 dict에만 집계.
+    result["budget_pacing_reviewed"] += len(decisions)
+    candidates = [d for d in decisions if d["needs_raise"]]
+    if not candidates:
+        return
+
+    # 이번 런의 총 증액 한도 = min(회당 라운드 봉투 10만, 계정 일일 잔여 10만 − 오늘 집행분).
+    # 회당 캡만으로는 매시 발동이 누적돼 하루 총액이 무한정 커진다(리뷰 P2-4).
+    raised_amount = budget_pacing.raised_amount_today(db, today=now.date())
+    daily_left = budget_pacing.DAILY_ACCOUNT_RAISE_CAP - raised_amount
+    run_cap = min(budget_pacing.ROUND_BUDGET_CAP, daily_left)
+    result["budget_pacing_daily_left"] = daily_left
+    if run_cap <= 0:
+        hold_reason = (
+            f"계정 BP 일일 총량 캡 소진 — 오늘 이미 {raised_amount}원 증액"
+            f"(한도 {budget_pacing.DAILY_ACCOUNT_RAISE_CAP}원)"
+        )
+        for d in candidates:
+            result["budget_pacing_held"].append(
+                {"campaign_id": d["campaign_id"], "reason": hold_reason}
+            )
+            _record_blocked(
+                db, campaign_id=d["campaign_id"], actor=diary.ACTOR_PACING, reason=hold_reason,
+                now=now, target_type="campaign", target_id=d["campaign_id"], action="budget_up",
+            )
+        return
+
+    budget_pacing.apply_round_cap(candidates, cap=run_cap)
+
+    for d in candidates:
+        campaign_id = d["campaign_id"]
+        if not d.get("round_eligible", True):
+            hold_reason = (
+                f"이번 회차 증액 한도 초과(한도 {run_cap}원 = min(회당 봉투 "
+                f"{budget_pacing.ROUND_BUDGET_CAP}, 계정 일일 잔여 {daily_left})) — 배정 불가"
+                f"(다음 정시 재평가). 목표 {d['target_budget']}원/현재 {d['current_budget']}원"
+            )
+            result["budget_pacing_held"].append({"campaign_id": campaign_id, "reason": hold_reason})
+            _record_blocked(
+                db, campaign_id=campaign_id, actor=diary.ACTOR_PACING, reason=hold_reason,
+                now=now, target_type="campaign", target_id=campaign_id, action="budget_up",
+            )
+            continue
+
+        breaker_reason = _check_spend_circuit_breaker(db, campaign_id, now)
+        if breaker_reason:
+            hold_reason = f"소진 서킷브레이커 — 증액 금지: {breaker_reason}"
+            result["budget_pacing_held"].append({"campaign_id": campaign_id, "reason": hold_reason})
+            _record_blocked(
+                db, campaign_id=campaign_id, actor=diary.ACTOR_PACING, reason=hold_reason,
+                now=now, target_type="campaign", target_id=campaign_id, action="budget_up",
+            )
+            continue
+
+        _bp_fire(
+            db, campaign_id=campaign_id, proposal_type="budget_up",
+            target_budget=int(d["target_budget"]),
+            rationale=f"{budget_pacing.BUDGET_PACING_PREFIX} {d['reason']}",
+            expected_effect=(
+                "예산 페이싱 자동 증액(D-NAO-102) — 당일 소진 속도로 자정까지 필요분을 추정해 "
+                "예산 소진에 의한 조기 정지를 막는다. 성과 판정은 스마트스토어 실주문 기반 "
+                "상한 프록시(광고 귀속 아님)이며, 실집행 방어선은 guardrail_gate(BEP·스톱로스·"
+                "+100%캡·쿨다운)."
+            ),
+            now=now, result=result,
+            ok_key="budget_pacing_raised", fail_key="budget_pacing_failed",
+        )
+
+
+def run_budget_pacing_reset_lane(db: Session, *, now: datetime | None = None) -> dict:
+    """BP 익일 원복 전용 공개 엔트리 — 00:05 크론(run_naver_budget_pacing_reset_job)이 호출.
+
+    시간당 레인도 같은 판정 함수를 태우므로(자가치유) 이 잡이 죽어도 다음 정시가 따라잡는다
+    — catch-up 목록(아침배치 전용 체인)에 넣지 않는 이유."""
+    now = now or kst_now()
+    result = {
+        "budget_pacing_restore_reviewed": 0, "budget_pacing_restored": 0,
+        "budget_pacing_restore_failed": 0, "budget_pacing_dry_run": 0,
+        "budget_pacing_held": [],
+    }
+    _run_budget_pacing_restore(db, now, result)
+    return result
+
+
 def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=None) -> dict:
     """시간당 밴드 관제 실입찰(PLAN §4). 매시 :20 크론(catch-up 제외 — 시간성 소멸).
 
@@ -2636,6 +2824,16 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
         "vitality_alerts": 0,   # S1∧S2 스파이럴 경보 캠페인 수
         "vitality_fired": 0,    # 복원 UP 실쓰기(execute 성공) 수
         "vitality_held": [],    # 캡·쿨다운·킬스위치·재조회실패로 미발사된 그룹
+        # BP(D-NAO-102 예산 페이싱) 카운터(라이브 관측용):
+        "budget_pacing_reviewed": 0,  # 판정한 auto_operate 캠페인 수
+        "budget_pacing_raised": 0,    # 증액 실쓰기 성공 수
+        "budget_pacing_failed": 0,    # 증액 실행 실패(가드레일 차단 포함)
+        "budget_pacing_dry_run": 0,   # NAVER_BP_DRY_RUN=1로 제안만 기록한 수
+        "budget_pacing_held": [],     # 회차/일일 캡 초과·서킷브레이커·킬스위치로 미발사
+        "budget_pacing_daily_left": None,  # 계정 BP 일일 총량 캡 잔여(원, 관측용)
+        "budget_pacing_restore_reviewed": 0,  # 익일 원복 후보 수
+        "budget_pacing_restored": 0,          # 원복 실쓰기 성공 수
+        "budget_pacing_restore_failed": 0,    # 원복 실행 실패
     }
     # IU-R R2: estimate 회당 캡·런 캐시(§난제4) — 실제 스텝 유닛에만 호출하고 (kw_id,position)
     # 중복은 캐시로 흡수. counter는 mutable dict로 helper와 공유(호출 수 봉인 테스트가 이 값 관측).
@@ -3047,5 +3245,12 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
         _run_vitality_step(db, now, result)
     except Exception as e:  # noqa: BLE001 — vitality 스텝 실패는 fail-soft(레인 결과 불변)
         log.warning("auto_operator: 스파이럴 복원 스텝 실패(fail-soft): %s", e)
+
+    # BP(D-NAO-102): 예산 페이싱 증액 + 익일 원복 자가치유. 핫셋/탐색 레인과 독립·맨 뒤
+    # (그 시각까지의 소진을 다 보고 판정) · fail-soft(BP 실패가 입찰 집행 결과를 오염시키지 않음).
+    try:
+        _run_budget_pacing_lane(db, now, result)
+    except Exception as e:  # noqa: BLE001 — BP 레인 실패는 fail-soft(레인 결과 불변)
+        log.warning("auto_operator: 예산 페이싱 레인 실패(fail-soft): %s", e)
 
     return result

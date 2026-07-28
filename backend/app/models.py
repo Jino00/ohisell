@@ -1783,6 +1783,11 @@ class NaverCampaignSettings(Base):
     # 고삐라 additive nullable(기존 행 무영향·회귀 0). ★쓰기는 Router PUT /campaign-settings/
     # loss-policy 하나뿐 — 위임·자동 레인 어디서도 이 값을 바꾸지 않는다(§0 금지선).
     loss_policy: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    # BP(D-NAO-102): 예산 페이싱 레인의 그날 기준 일예산(장중 증액 직전 값). ①증액 캡 =
+    # base×2(같은 날 여러 번 증액해도 복리 금지) ②익일 00:05 원복 목표값. NULL=미시드
+    # (BP 레인이 그날 첫 평가에서 현재 예산으로 시드 — 사람이 콘솔에서 바꾼 값도 이때 흡수).
+    # ★쓰기 주체는 BP 레인(auto_operator._run_budget_pacing_lane) 하나뿐.
+    base_daily_budget: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
