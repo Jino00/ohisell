@@ -2485,6 +2485,47 @@ class NaverAccountSettings(Base):
 
 
 # ══════════════════════════════════════════════════════════════════
+# D-NAO-103 — 소재 CTR 경보 이력(발화 억제 상태) (VT3 개편)
+# ══════════════════════════════════════════════════════════════════
+class NaverCtrAlertLog(Base):
+    """소재 CTR 경보의 **판정 이력** 1행 — "어제도 경보였나"를 알기 위한 유일한 상태(D-NAO-103).
+
+    왜 필요한가: 개편 전 VT3는 만성 저CTR 그룹을 매일 재발화해(07-23~28 파워링크 5~8그룹/일)
+    Jino가 읽기를 포기했다. "신규 진입만 개별 발화 · 만성은 주 1회 요약"으로 바꾸려면 전일
+    **판정 집합**이 필요한데, ops_diary_entries의 브리핑 본문은 (a)억제된 건이 애초에 안 적히고
+    (b)사람이 읽는 이름 표기로 바뀌어 ID 역파싱이 불가능하다 → 별도 이력 테이블.
+
+    ★기록 대상은 **발화한 것이 아니라 판정된 것 전부**다. 억제된 만성 건을 안 남기면 다음날
+    "전일 집합에 없음 = 신규"로 되살아나 억제가 매일 무효화된다(설계상 가장 쉬운 함정).
+
+    grain: (as_of_date, campaign_id, adgroup_id). as_of_date = detect_ctr_alerts의 D0(=today−1),
+    브리핑 실행일이 아니다(레인이 하루 걸러 돌아도 창 의미가 유지된다).
+    streak_days = 연속 판정 일수(전일 행이 있으면 +1, 없으면 1) — 브리핑의 "N일째" 근거.
+    notified = 그날 개별/주간 메시지에 실제로 실렸는지(관측용, 억제율 사후 확인).
+    """
+
+    __tablename__ = "naver_ctr_alert_log"
+    __table_args__ = (
+        UniqueConstraint("as_of_date", "campaign_id", "adgroup_id", name="uq_naver_ctr_alert_log"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    as_of_date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)  # D0(=today−1, KST)
+    campaign_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    adgroup_id: Mapped[str] = mapped_column(String(50), nullable=False, default="")
+    window: Mapped[str] = mapped_column(String(8), nullable=False, default="")  # W1/W3/W1+W3
+    imp: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    clk: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    avg_rank: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
+    expected_clk: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
+    streak_days: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    notified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # ⚠️UTC — server_default=func.now()는 UTC([[sqlite-server-default-now-is-utc]]). 날짜 판단은
+    # 전부 as_of_date(KST 파생)로 한다 — created_at은 감사용 타임스탬프일 뿐 계산에 쓰지 않는다.
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+# ══════════════════════════════════════════════════════════════════
 # D-NAO-54 P1 — 운영 일기(기록층) (docs/PLAN_naver-ad-diary-wisdom.md §P1)
 # ══════════════════════════════════════════════════════════════════
 class OpsDiaryEntry(Base):

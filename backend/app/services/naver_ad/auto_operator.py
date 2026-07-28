@@ -34,7 +34,7 @@ from app.models import (
     NaverProposal,
     NaverRetroSignal,
 )
-from app.services.naver_ad import bid_rank_curve, bid_simulator, budget_envelope, budget_pacing, campaign_target_resolver, ctr_alert, diagnosis, diary, effective_bid, exploration, expansion_allocator, expansion_pressure, gave_score, guardrail_gate, intraday_roas, naver_execution_harness, naver_sa_writer, rank_servo, slack_notifier, visibility, vitality_signal
+from app.services.naver_ad import bid_rank_curve, bid_simulator, budget_envelope, budget_pacing, campaign_target_resolver, ctr_alert, ctr_alert_briefing, diagnosis, diary, effective_bid, exploration, expansion_allocator, expansion_pressure, gave_score, guardrail_gate, intraday_roas, naver_execution_harness, naver_sa_writer, rank_servo, slack_notifier, visibility, vitality_signal
 from app.services.naver_ad.bid_step_types import BID_UP_TYPES, EXPLORATION_STEP_TYPES, encode_base_bid, encode_exploration_ceiling
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.services.naver_ad.guardrail_gate import _MAX_CHANGE_PCT
@@ -81,7 +81,8 @@ ACTION_VITALITY_BRIEFING = "vitality_spiral_briefing"  # diary observe action(�
 # ── VT3(D-NAO-82② 소재 CTR 경보) ──
 # 새 권한 없음(§0 "브리핑+래더 중지뿐") — 실행 레버는 그대로, 브리핑 1개 + 탐색 래더 skip 1개.
 ACTION_CTR_ALERT_BRIEFING = "ctr_alert_briefing"  # diary observe action(브리핑 렌더용)
-_CTR_ALERT_BRIEFING_TOP_N = 20  # PX 브리핑 관례(_TOP_N=10)보다 넉넉히(창별 2건/그룹 가능)
+# D-NAO-103: 브리핑 문안·압축·발화 억제는 ctr_alert_briefing(harness)으로 이관했다
+# (구 _dedupe_ctr_alert_rows/_fmt_ctr_alert_rows/_CTR_ALERT_BRIEFING_TOP_N 폐기).
 _CTR_ALERT_LADDER_SKIP_REASON = "CTR경보 — 소재 처방 대상, 추가 UP 무의미"
 
 # ── VF(D-NAO-83 가시성 우선) 유령∧창 비활성 관측(VT3b 최소형) ──
@@ -564,61 +565,14 @@ def _check_bid_up_conditions(
     return None
 
 
-def _dedupe_ctr_alert_rows(alerts: list[dict]) -> list[dict]:
-    """VT3 codex 1R P2-2: 같은 (campaign_id, adgroup_id)가 W1·W3 동시 발화하면 브리핑에서
-    한 그룹 한 행으로 합친다(window는 'W1+W3'처럼 병기, 건수도 그룹 수 기준 — 중복 집계 금지).
-    래더 skip 게이트(auto_operator가 쓰는 set)는 이미 dedupe라 이 함수는 브리핑 표시 전용.
-    입력 순서(첫 등장 순)를 보존하고, 첫 발화 행의 reason을 대표로 유지한다(detect_ctr_alerts는
-    그룹당 W1을 먼저 append하므로 대표=W1, window는 뒤 발화(W3)를 병기)."""
-    merged: dict[tuple[str, str], dict] = {}
-    order: list[tuple[str, str]] = []
-    for a in alerts:
-        key = (a["campaign_id"], a["adgroup_id"])
-        existing = merged.get(key)
-        if existing is None:
-            merged[key] = dict(a)
-            order.append(key)
-        else:
-            windows = existing["window"].split("+")
-            if a["window"] not in windows:
-                existing["window"] = "+".join(windows + [a["window"]])
-    return [merged[k] for k in order]
-
-
-def _fmt_ctr_alert_rows(alerts: list[dict]) -> str:
-    """CTR 경보 상위 나열 — PX _fmt_rows 관례 미러(상위 N + "외 M건" 압축). 입력은
-    _dedupe_ctr_alert_rows로 그룹당 1행 정규화된 목록을 받는다(P2-2)."""
-    top = alerts[:_CTR_ALERT_BRIEFING_TOP_N]
-    lines = [
-        f"- {a['campaign_id']}/{a['adgroup_id']}({a['window']}): {a['reason']}"
-        for a in top
-    ]
-    remainder = len(alerts) - len(top)
-    if remainder > 0:
-        lines.append(f"- 외 {remainder}건")
-    return "\n".join(lines)
-
-
-def _emit_ctr_alert_briefing(db: Session, alerts: list[dict], now: datetime) -> None:
-    """경보 있던 날만 diary(observe)+Slack — PX·VT 브리핑 관례 미러(호출부가 독립 try로
-    감싼다 — 이 함수 자체는 fail-open을 스스로 보장하지 않는다, _run_ctr_alert_briefing 참조).
-    P2-2: 헤더 건수·행 모두 그룹 단위 dedupe(한 그룹이 W1·W3 동시 발화해도 1건·1행)."""
-    deduped = _dedupe_ctr_alert_rows(alerts)
-    header = (
-        f"{now.date().isoformat()} 소재 CTR 경보 {len(deduped)}건(D-NAO-82②) — "
-        "입찰로 못 푸는 소재 CTR 문제 — 사람 처방 대상(썸네일·가격·리뷰) — 해당 그룹 탐색 래더 추가 UP 중지"
-    )
-    text = "\n".join([header, _fmt_ctr_alert_rows(deduped)])
-    diary.write_diary_entry(
-        db, "observe", "", actor=diary.ACTOR_DAILY, action=ACTION_CTR_ALERT_BRIEFING,
-        rationale=text, now=now,
-    )
-    slack_notifier.notify_text(text, log_label="소재 CTR 경보 브리핑")
-
-
 def _run_ctr_alert_briefing(db: Session, now: datetime, result: dict) -> None:
-    """VT3(D-NAO-82②) 소재 CTR 경보 브리핑 — 일 레인(08:50)에서 전 auto_operate 캠페인의
-    ctr_alert(SA)를 캠페인당 1회 호출해 수집, 경보가 있는 날만 브리핑(없는 날 완전 침묵).
+    """VT3(D-NAO-82② → D-NAO-103 개편) 소재 CTR 경보 브리핑 — 일 레인(08:50)에서 전
+    auto_operate 캠페인의 ctr_alert(SA)를 캠페인당 1회 호출해 수집하고, 조립·발화 억제는
+    ctr_alert_briefing(harness)에 위임한다. 이 함수는 수집·발송·집계만 한다(원칙18 — 레인은
+    SA/harness를 엮을 뿐 문안을 만들지 않는다).
+
+    D-NAO-103: 매일 같은 만성 건을 반복 발화하던 것을 "신규 진입만 즉시, 만성은 월요일 요약"
+    으로 바꿨다. 발화할 게 없는 날은 여전히 완전 침묵(diary·Slack 둘 다 없음).
     fail-open: 이 스텝의 실패가 일 레인 본작업(승인/실행/stale 정리)을 막지 않는다(bleed
     밸브·vitality 스텝과 동형 — 호출부는 독립 try로 감싸지 않고 이 함수가 직접 감싼다,
     run_daily_lane 말미에서 반환값 없이 호출)."""
@@ -627,10 +581,18 @@ def _run_ctr_alert_briefing(db: Session, now: datetime, result: dict) -> None:
         for campaign_id in _auto_operate_campaign_ids(db):
             signals = ctr_alert.detect_ctr_alerts(db, campaign_id, now=now)
             alerts.extend(signals.get("alerts", []))
-        result["ctr_alerts"] = len(alerts)
-        if not alerts:
-            return  # 무경보 = 무브리핑(§4.1 "없는 날 침묵")
-        _emit_ctr_alert_briefing(db, alerts, now)
+        brief = ctr_alert_briefing.build_briefing(db, alerts, now=now)
+        result["ctr_alerts"] = brief["total"]              # 판정된 그룹 수(창 중복 합산 아님)
+        result["ctr_alerts_fired"] = brief["fired"]        # 실제 메시지에 실린 그룹 수
+        result["ctr_alerts_suppressed"] = brief["suppressed"]  # 만성 반복이라 억제된 수
+        text = brief["text"]
+        if not text:
+            return  # 신규 진입 0(+주간 요약일 아님) = 완전 침묵
+        diary.write_diary_entry(
+            db, "observe", "", actor=diary.ACTOR_DAILY, action=ACTION_CTR_ALERT_BRIEFING,
+            rationale=text, now=now,
+        )
+        slack_notifier.notify_text(text, log_label="소재 CTR 경보 브리핑")
     except Exception as e:  # noqa: BLE001 — VT3 브리핑 실패는 일 레인 본작업과 분리(fail-open)
         log.warning("auto_operator: CTR 경보 브리핑 실패(fail-open): %s", e)
 
