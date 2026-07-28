@@ -52,9 +52,20 @@ def take_daily_snapshot(db: Session, *, today: date | None = None) -> dict:
         # naver_ad_daily에 이 ad_date 행 자체가 없으면(미수집/07:30 크론 아직 안 돎) 스킵 —
         # "진짜 전환 0원 확정"과 "아직 안 채워짐"을 구분 못 하면 곡선이 왜곡된다. days_since=0
         # (오늘)도 예외 없이 동일 규칙 적용(오늘 데이터가 아직 안 들어왔으면 관측 자체가 불가).
+        # ★2026-07-29 수정: 이 존재 판정과 아래 금액 집계가 **서로 다른 필터**를 쓰고 있었다.
+        # 존재 판정은 백필 sentinel(`__backfill__`) 행까지 셌고 금액은 sentinel을 제외했다.
+        # 그래서 **sentinel 행만 있는 ad_date**가 "행이 있다 → 스킵 안 함 → 금액 0"으로 흘러
+        # 위 docstring이 막으려던 바로 그 일("아직 안 채워짐"을 "진짜 0원"으로 기록)이 일어났다.
+        # 실측 피해: 07-01·07-02·07-03 코호트가 days_since 8~20에 0으로 박힌 뒤 실단위 데이터가
+        # 도착한 날(07-21) 한 번에 점프하는 인위적 계단이 됐고, `compute_curve`가 그것을
+        # "전환이 원래 느리게 붙는다"로 읽어 곡선이 days 8~18에서 정확히 4/7로 고정됐다.
+        # 두 쿼리가 같은 모집단을 봐야 한다 — 금액 쪽과 동일한 sentinel 제외를 여기에도 건다.
         existing_any = (
             db.query(sqlfunc.count(NaverAdDaily.id))
-            .filter(NaverAdDaily.ad_date == ad_date).scalar() or 0
+            .filter(
+                NaverAdDaily.ad_date == ad_date,
+                NaverAdDaily.adgroup_id != BACKFILL_SENTINEL_ADGROUP,
+            ).scalar() or 0
         )
         if existing_any == 0:
             continue

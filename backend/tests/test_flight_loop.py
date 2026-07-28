@@ -479,3 +479,57 @@ def test_flight_loop_no_ours_campaigns_is_not_silent(db):
     assert len(db.query(NaverChangeLog).filter(
         NaverChangeLog.action == "flight_pacing_silent"
     ).all()) == 1
+
+
+# ═══ 관측기 계약 (2026-07-29, Jino 확정) ═══
+# 이 레인은 입찰을 바꾸지 않는다. 문서로만 적으면 다음 사람이 또 "dry_run을 해제할까"를
+# 존재하지 않는 기능을 놓고 논의한다(실제로 두 세션이 그랬다 — LESSONS #64).
+# 그래서 구조로 못 박는다: 쓰기 경로가 생기면 이 테스트가 깨지고, 깨뜨리려면
+# budget_pacing·auto_operator와의 레버 중복을 먼저 결정해야 한다.
+
+def test_flight_loop_has_no_write_path():
+    """★계약: flight_loop은 실행 하네스·writer를 import하지도 호출하지도 않는다.
+
+    ★주석 산문이 아니라 **AST의 실제 import·속성 접근**만 본다 — 모듈 docstring이
+    "naver_execution_harness import가 0건이다"라고 설명하는 것까지 잡으면 안 된다.
+    """
+    import ast, inspect
+    from app.services.naver_ad import flight_loop
+
+    tree = ast.parse(inspect.getsource(flight_loop))
+    FORBIDDEN = {"naver_execution_harness", "naver_sa_writer", "naver_sa_ad_fetcher"}
+    hits = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                hits |= FORBIDDEN & set(a.name.split("."))
+        elif isinstance(node, ast.ImportFrom):
+            hits |= FORBIDDEN & set((node.module or "").split("."))
+            hits |= FORBIDDEN & {a.name for a in node.names}
+        elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            hits |= FORBIDDEN & {node.value.id}
+
+    assert hits == set(), (
+        f"flight_loop에 쓰기 경로가 생겼다: {sorted(hits)}. 이 레인은 관측기로 확정돼 있다"
+        "(모듈 docstring). 실행 경로를 열려면 budget_pacing(캠페인 예산)·auto_operator"
+        "(유닛별 입찰)와의 레버 중복을 먼저 해결하고 Jino 승인을 받아야 한다."
+    )
+
+
+def test_flight_loop_dry_run_false_still_writes_nothing(db):
+    """dry_run=False로 불러도 입찰·설정이 바뀌지 않는다 — 라벨일 뿐이다."""
+    _setup_campaign(db, campaign_id="cmp-obs")
+    before = {
+        c.campaign_id: (c.optimizer, c.auto_operate)
+        for c in db.query(NaverCampaignSettings).all()
+    }
+    result = run_flight_loop(db, today=date(2026, 7, 11), current_hour=10, dry_run=False)
+    assert result["decided"] == 1
+    after = {
+        c.campaign_id: (c.optimizer, c.auto_operate)
+        for c in db.query(NaverCampaignSettings).all()
+    }
+    assert before == after, "관측기가 설정을 바꿨다"
+    # 기록된 행은 dry_run 라벨만 False로 남는다(감사 로그의 정직성 — 그래서 기본값 True 유지)
+    logs = db.query(NaverChangeLog).filter(NaverChangeLog.action == "flight_pacing").all()
+    assert len(logs) == 1 and logs[0].dry_run is False

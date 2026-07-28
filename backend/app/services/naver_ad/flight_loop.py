@@ -1,8 +1,29 @@
 # flight_loop.py — flight_loop Harness (X2 T3, D-NAO-34; 완결도 보정 D-NAO-44)
+#
+# ★★이 레인은 **관측기다. 입찰을 바꾸지 않는다**(Jino 확정 2026-07-29).
+#   초판 docstring은 "α에 따른 실제 입찰 변경은 dry-run 1주 확인 후 Jino 전환 결정"이라고
+#   약속했으나 **그 실행 경로는 끝내 구현되지 않았다** — 이 모듈에는 naver_execution_harness·
+#   naver_sa_writer import가 0건이고 쓰기 호출도 0건이다. 그 미래형 약속 때문에 두 세션이
+#   "dry_run을 해제할 것인가"를 **존재하지 않는 기능을 놓고** 평가했다(LESSONS #64).
+#   그래서 약속을 지우고 성격을 못박는다.
+#
+#   왜 만들지 않기로 했나 — α는 **캠페인 전체 입찰에 곱하는 배수**인데 그 위아래가 이미 차 있다:
+#     · 위: `budget_pacing`이 캠페인 예산을 조절한다(D-NAO-102, 라이브 작동 중 —
+#           2026-07-28 21:20 증액 → 07-29 00:05 원복 실증).
+#     · 아래: `auto_operator` 시간당 레인이 **유닛별로** BEP 상한 안에서 입찰을 조절한다.
+#   α는 그 사이에서 유닛별 정교함을 캠페인 단위로 덮어쓴다. 게다가 α의 원료인 예측 모델은
+#   optimizer='ours' 6개 중 4개가 강등·콜드스타트다(2026-07-29 실측) — 약한 신호로 정교한
+#   제어를 덮는 구조다.
+#
+#   ★대신 이 레인의 산출물은 **예측 정확도 관측치**다. α와 그 근거(pace_ratio·elasticity·
+#   binding_constraint·projection)를 매 2시간 기록해 두면 예측 모델이 쓸 만한지를 사후에
+#   대조할 수 있고, 지금 필요한 정보가 정확히 그것이다(6개 중 4개 강등 상태의 원인 판정).
+#   `dry_run` 파라미터는 **기록 라벨**로만 남는다 — False로 불러도 입찰은 바뀌지 않는다.
+#   실행 경로를 새로 만들려면 위 중복 문제부터 해결해야 하며 그것은 Jino 결정 사항이다.
+#
 # 역할(Harness): response_curve_builder(T1)와 pacing_controller(T2) SA를 조합해
-#   2시간 주기로 캠페인별 최적 입찰배수(α)를 산출한다. 원료 pre-compute → SA 호출 →
-#   결과 기록(naver_change_log, dry_run=True). α에 따른 실제 입찰 변경은 dry-run 1주
-#   확인 후 Jino 전환 결정(D-NAO-5, PLAN §3 X2 완료기준).
+#   2시간 주기로 캠페인별 최적 입찰배수(α)를 산출·기록한다(원료 pre-compute → SA 호출 →
+#   naver_change_log 기록).
 #   SA간 직접 호출 금지(원칙18-6) — SA를 조합하고 원료를 유통하는 게 harness의 본연.
 #   D-NAO-44: completeness_curve(T4) SA를 run당 1회 pre-compute해 오늘 보이는 cost의
 #   저평가를 보정한 뒤 response_curve_builder에 전달한다(PLAN_naver-ad-pacing-correction.md).
@@ -292,10 +313,15 @@ def run_flight_loop(
     current_hour: int | None = None,
     dry_run: bool = True,
 ) -> dict:
-    """2시간 주기 플라이트 루프: 캠페인별 α 산출 + change_log 기록.
+    """2시간 주기 플라이트 루프: 캠페인별 α 산출 + change_log 기록. **입찰은 바꾸지 않는다.**
 
-    dry_run=True(기본): 결정만 기록, 실제 입찰 변경 없음.
-    dry_run=False: α에 따른 입찰 변경 실행(X2 완료기준 달성 후 Jino 전환).
+    ★이 함수는 관측기다(모듈 docstring 참조, Jino 확정 2026-07-29). 어떤 인자로 불러도
+    입찰·예산·상태를 쓰지 않는다 — 이 모듈에 쓰기 경로 자체가 없다.
+
+    `dry_run`은 **기록 라벨**일 뿐이다(change_log 행의 `dry_run` 컬럼에 그대로 들어간다).
+    False로 불러도 집행되지 않으므로, 기본값 True를 그대로 두는 것이 정직하다 — False로
+    부르면 감사 로그가 "실집행"이라고 거짓말한다. 실행 경로를 새로 만들려면 budget_pacing·
+    auto_operator와의 레버 중복부터 해결해야 하고 그건 Jino 결정 사항이다.
     """
     today = today or kst_today()
     now = kst_now()
