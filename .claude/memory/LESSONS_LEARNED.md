@@ -679,3 +679,32 @@ launchd 데몬 코드 변경의 라이브 판정은 "재시작 성공·기동 �
 ### 📌 교훈
 장시간 관측이 낀 위임은 에이전트 내부 timeout만 믿지 말고 오케스트레이터가 자체 타이머로 이중화한다. 회수 지시의 문구도 중요 — "대기 계속"이 아니라 "현재 사실로 종결"로 보내야 스톨된 에이전트가 즉시 응답한다.
 - 병기(실행 커맨드 보강): 루트 pytest는 `PYTHONPATH=backend`가 필요하다 — `cd backend && pytest tests/`만으로는 `ModuleNotFoundError`가 난다. 루트에서 돌릴 때는 `PYTHONPATH=backend pytest backend/tests/` 형태로 고정할 것.
+
+---
+
+## 48. 인프로세스 마이그레이션이 없으면 "코드 먼저 배포"가 테이블 하나를 통째로 침묵시킨다 (2026-07-28, safe_deploy 마이그 가드)
+
+### 🐛 이슈
+`scripts/safe_deploy.sh`에 `alembic` 문자열이 0건이고 `app/main.py`도 부팅 시 마이그레이션을
+하지 않는다(`alembic/env.py` 주석에 명시). 그래서 `models.py`를 마이그레이션보다 먼저 배포하면
+**nullable 컬럼 추가라도** SQLAlchemy ORM이 엔티티를 통째로 SELECT 하다 실패한다 — 신규 필드만
+못 읽는 게 아니라 **그 경로 전체**가 죽는다. rocket-1p 리뷰 실측(커밋 85967cf):
+`settlement ingest FAIL: no such column: coupang_rocket_settlement.tax_invoice_transmitted`,
+`po_items ingest FAIL: no such column: coupang_rocket_purchase_order_item.vendor_confirmed_qty`.
+올바른 순서는 마이그레이션 파일 docstring과 HANDOFF에만 적혀 있었다 — RG 26일 침묵·쿠팡 광고비
+크론과 같은 "조용한 수집 침묵" 계열 사고를 문서로 막으려던 것.
+
+### ✅ 해결
+D-NAO-49(CAS 가드)와 같은 방식으로 **문서를 구조로 옮겼다**. safe_deploy.sh가
+①`backend/alembic/*`를 코드보다 먼저 배포 → ②prod `alembic current` vs `heads` 비교 →
+③대기 상태면 `--migrate` 로 원격 `upgrade head` 실행(없으면 **코드 배포·재시작 거부**) →
+④코드 배포 → ⑤재시작. 커밋된 로컬 마이그 파일이 prod에 없는데 배포 목록에도 없으면 그것도 거부.
+스텁 ssh/scp/alembic 하니스로 10개 시나리오 17개 단언 검증(prod 무접촉) + 실 prod 읽기전용 프로브.
+
+### 📌 교훈
+- **"prod가 내 로컬 head와 같은가"로 비교하면 안 된다.** 워크트리 브랜치는 main보다 뒤처져 있는
+  게 정상이라(실측: 로컬 66개 vs prod 69개 마이그 파일) 매 배포가 오탐으로 막힌다. 올바른 판정은
+  **①내 커밋된 마이그 파일이 전부 prod에 있는가 + ②prod 자신의 `current`가 자기 `heads`와 같은가**.
+- `alembic current/heads`의 INFO 로그는 **stderr**로 나간다 → `2>/dev/null` 후 stdout만 파싱하면 됨.
+- 배포 순서 강제는 additive 마이그레이션 기준이다. 컬럼 삭제처럼 구코드를 깨는 변경은 순서가
+  반대이므로 `--migrate` 금지·수동 조율(스크립트 헤더에 명시).
