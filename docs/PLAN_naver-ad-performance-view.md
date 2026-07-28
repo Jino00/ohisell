@@ -350,7 +350,7 @@ Harness: `perf_today_harness.build(db)` · 파라미터 없음(오늘 고정).
 - [x] ✅ P2-6 pytest 50건 신규(날짜 소스 분기·비교 산출·뱃지 4상태·필터·암전·수집공백·ID 누출 0,
       전체 3,894 통과) + vitest 11건 신규(전체 88 통과)
 - [x] ✅ P2-6b `/codex review` — 적대적 리뷰 1R PASS, P2 지적 3건 반영(암전 검출 재설계·배지 정확성 2건)
-- [ ] ⏳ P2-7 배포(PR #157 병합 완료, main==948188f) + §6 Phase 2 라이브 4항 확인 — 배포·검증 진행 중
+- [x] ✅ P2-7 배포(PR #157 병합·main `948188f`·safe_deploy 백엔드 8+frontend·pm2 재시작 예외 0) + §6 Phase 2 라이브 7항 전부 확인(위 참조)
 
 #### D-NAO-105 확장(Jino 2026-07-28 "메뉴에 내가 보고 싶은 광고를 고를 수 있도록 하고 날짜 선택, 날짜 비교")
 - **날짜 일반화**: `perf_today_harness.build(day=…, campaign_id=…)`. 날짜에 따라 **숫자의 출처가
