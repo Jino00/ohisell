@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session
 from app.clients.coupang.inbound import WingReadError
 from app.config import get_coupang_config
 from app.database import get_db
-from app.models import Channel, CoupangAdCostDaily, CoupangAdOptionDaily, CoupangProductItem, CoupangRevenueFee, CoupangRgInbound, CoupangRgOrderItem, CoupangRgSettlementFee, Order, ProductChannelMapping, ProductMaster
+from app.models import Channel, CoupangAdCostDaily, CoupangAdOptionDaily, CoupangProductItem, CoupangRevenueFee, CoupangRgInbound, CoupangRgOrderItem, CoupangRgSettlementFee, CoupangRocketPromotion, Order, ProductChannelMapping, ProductMaster
 from app.routers._coupang_write_http import handle_write as _handle_write
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
 from app.services.coupang import ad_cost_sync, coupon_write, refresh_contract, coupang_seller_cost as _seller_cost_harness, demand_classifier, in_transit_estimator, lead_time_estimator, ohitech_ad_sync, product_write, rg_fee_audit, rg_inbound_sync, rg_product_size_sync, rg_replenishment, rg_settlement_sync, replenishment_backtest, rocket_cost_map, rocket_promo_sync, rocket_supplier_sync, rg_cost_reader as _rg_reader, sales_velocity_estimator, vendor_summary_sync
@@ -1415,7 +1415,22 @@ def ingest_rocket_sales(
     if not isinstance(rows, list) or not rows:
         raise HTTPException(status_code=400, detail="rows[] 필요")
     source = str(body.get("source") or "sales_analysis").strip() or "sales_analysis"
-    return rocket_promo_sync.ingest_rocket_sales(db, vendor_id, rows, source=source)
+    out = rocket_promo_sync.ingest_rocket_sales(db, vendor_id, rows, source=source)
+    # ★수집 통계를 prod 로그에 남긴다(적대적 리뷰 4R): 실패·미조회 날짜가 Mac 로컬 로그에만
+    #   있으면 아무도 안 본다 — RG 26일 침묵이 정확히 그 형태였다(감지는 되는데 표면이 없음).
+    #   페처가 안 보내는 구버전이면 빈 dict라 그냥 조용하다(하위호환).
+    cs = body.get("collection_stats")
+    if isinstance(cs, dict) and cs:
+        out["collection_stats"] = cs
+        if cs.get("days_failed") or cs.get("days_abandoned"):
+            log.warning(
+                "1P 판매 수집 부분 성공: vendor=%s 요청 %s일 → 수집 %s·범위밖 %s·실패 %s·미조회 %s "
+                "(실패 날짜 %s) — 롤링 창이 다음 회차에 메우는지 확인할 것",
+                vendor_id, cs.get("days_requested"), cs.get("days_collected"),
+                cs.get("days_out_of_range"), cs.get("days_failed"), cs.get("days_abandoned"),
+                ",".join(map(str, cs.get("failed_dates") or []))[:200],
+            )
+    return out
 
 
 @router.post("/rocket/promotion/ingest")
@@ -1465,6 +1480,69 @@ def ingest_coupon_used_amount(
         raise HTTPException(status_code=400, detail="rows[] 필요")
     source = str(body.get("source") or "wing_ui").strip() or "wing_ui"
     return rocket_promo_sync.ingest_coupon_used_amount(db, account_key, rows, source=source)
+
+
+# 목적지 컬럼 Numeric(12,2)의 정수부 상한 — 파서의 _MAX_DISCOUNT와 같은 이유(유한하다고 담기는
+#   것은 아니다: SQLite는 통과시켜 합계를 오염시키고 PostgreSQL은 commit을 죽인다).
+_MAX_UNIT_DISCOUNT = Decimal(10) ** 10
+
+
+@router.patch("/rocket/promotion/{request_id}/unit-discount")
+def patch_promotion_unit_discount(
+    request_id: str = Path(...),
+    body: dict[str, Any] = Body(...),
+    x_ingest_token: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """프로모션당 **단위 할인액**(D-CPP-7) 수기 입력 — 기존 프로모션 행만 갱신.
+
+    body: {"unit_discount_amount": 3000}   # null이면 값 삭제(모름 상태로 되돌림)
+
+    ★왜 수기인가(2026-07-28 라이브 실측): 공급자허브 프로모션 목록/상세 API에 상품별·단위
+      할인액 필드가 **없다**(discountBudget=총예산, supplierFundRate=분담%뿐). Jino 확정:
+      "한 프로모션에 제품은 여러개가 들어갈 수 있지만 할인 가격은 모두 같은게 맞아" → 1칸이면 족하다.
+    ★행을 만들지 않는다: 없는 request_id는 404. 수기 입력이 유령 프로모션을 만들면 그 값은
+      어떤 수집으로도 대사되지 않는다(원칙22).
+    ★페처는 이 칸을 쓰지 않는다 → 재수집(snapshot upsert)이 수기 값을 지우지 않는다.
+    """
+    _check_ingest_token(x_ingest_token)
+    rid = str(request_id or "").strip()
+    if not rid or len(rid) > 30:   # String(30) 그레인 키
+        raise HTTPException(status_code=400, detail="request_id 필요(<=30자)")
+    if "unit_discount_amount" not in body:
+        raise HTTPException(status_code=400, detail="unit_discount_amount 필요(삭제는 null)")
+    raw = body.get("unit_discount_amount")
+    amount: Decimal | None
+    if raw is None or (isinstance(raw, str) and raw.strip() == ""):
+        amount = None   # 명시적 삭제 = '모른다'로 되돌림(0원 할인과 구분)
+    else:
+        try:
+            amount = Decimal(str(raw).replace(",", "").strip())
+        except (ArithmeticError, ValueError):
+            raise HTTPException(status_code=400, detail="unit_discount_amount 숫자 아님")
+        if not amount.is_finite() or amount < 0 or amount >= _MAX_UNIT_DISCOUNT:
+            # 음수 할인액은 존재하지 않는다 — 입력 사고를 조용히 저장하지 않는다.
+            raise HTTPException(status_code=400, detail="unit_discount_amount 범위 오류(0 이상, 10^10 미만)")
+        # ★목적지 컬럼 그레인(Numeric(12,2))으로 먼저 맞춘다: SQLite는 준 대로 담고
+        #   PostgreSQL은 반올림해서 담아, 같은 입력이 DB에 따라 다르게 저장된다. 여기서
+        #   접어 두면 응답으로 돌려주는 값이 실제 저장값과 항상 같다. (`-0`도 `0.00`으로 정규화)
+        amount = amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) + Decimal(0)
+    row = (
+        db.query(CoupangRocketPromotion)
+        .filter(CoupangRocketPromotion.request_id == rid)
+        .first()
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"프로모션 {rid} 없음(먼저 수집되어야 합니다)")
+    row.unit_discount_amount = amount
+    db.commit()
+    log.info("프로모션 단위 할인액 수기 갱신: request_id=%s amount=%s", rid, amount)
+    return {
+        "request_id": rid,
+        "unit_discount_amount": str(amount) if amount is not None else None,
+        "promotion_name": row.promotion_name,
+        "applied_product_count": row.applied_product_count,
+    }
 
 
 # ════════════════════════════════════════════════

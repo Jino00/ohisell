@@ -1502,6 +1502,15 @@ class CoupangRocketPromotion(Base):
       (coupang_rocket_settlement)에 흔적 없음. 따라서 이 테이블은 **사실 기록일 뿐 비용 라인이
       아니다** — 어떤 손익 계산에도 자동 반영하지 않는다. 9월 정산서 도착 후 대사해서 확정.
     raw: 원본 응답 보존(스키마 드리프트·미매핑 필드 사후 복구용).
+
+    ★unit_discount_amount(D-CPP-7, 2026-07-28 확정) — **프로모션당 단위 할인액(원), 수기 입력.**
+      Jino 원문: "한 프로모션당 할인하는 가격이 하나로 정해지게 되어 있어. 그래서, 한 프로모션에
+      제품은 여러개가 들어갈 수 있지만 할인 가격은 모두 같은게 맞아."
+      왜 수기인가(라이브 실측 2026-07-28): 공급자허브 프로모션 목록/상세 API 응답에 **상품별·단위
+      할인액 필드가 없다**(discountBudget=총예산, supplierFundRate=분담%, discountType=할인방식뿐).
+      없는 필드를 추측해서 읽으면 조용히 틀린 값이 권위값 자리에 앉는다 → 페처는 이 칸을 절대
+      건드리지 않고, `PATCH /rocket/promotion/{request_id}/unit-discount`로만 채운다.
+      ⇒ **페처의 snapshot upsert가 이 칸을 덮어쓰지 않는다**(수기 입력이 재수집에 지워지면 안 됨).
     """
 
     __tablename__ = "coupang_rocket_promotion"
@@ -1522,6 +1531,9 @@ class CoupangRocketPromotion(Base):
         String(40), nullable=True
     )  # 할인방식(정액수량 / 할인액 등)
     discount_value: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+    unit_discount_amount: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(12, 2), nullable=True
+    )  # ★수기 입력(D-CPP-7) — 프로모션당 단위 할인액. 아래 주석 참조
     budget_amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)  # 예산
     settlement_date: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True)  # 정산일
     applied_product_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 적용상품 수

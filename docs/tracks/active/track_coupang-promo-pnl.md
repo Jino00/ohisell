@@ -41,6 +41,24 @@ prod SELECT 실측 결과:
 
 **판정**: "saleAmount가 셀러부담 할인 차감 전인지 후인지"는 **표본이 없어 확정 불가**. 다만 구조적으로 **RG 판매에는 revenue-history 자체가 없으므로 그 경로는 RG 분담금의 권위값이 될 수 없다** → D-CPP-3(쿠폰 사용 금액)이 유일 권위값이라는 근거가 강해졌다. 3P 판매에서 셀러쿠폰이 걸린 표본이 생기면 재측정한다.
 
+### D-CPP-7 — 프로모션당 할인액은 **단일값** → 수기 입력 1칸 (2026-07-28 Jino 확정)
+한 프로모션에 상품이 여러 개 들어가도 **할인 가격은 모두 같다.** 그리고 공급자허브 프로모션
+목록·상세 API에는 **상품별·단위 할인액 필드가 없다**(라이브 실측 — 있는 건 `discountBudget`(총예산),
+`supplierFundRate`(분담%), `discountType`(할인방식)뿐). ⇒ `coupang_rocket_promotion.unit_discount_amount`
+1칸을 **수기 입력**(ops PATCH)으로 받는다. 페처는 이 칸을 절대 쓰지 않으므로 재수집이 수기값을 지우지 않는다.
+> "한 프로모션당 할인하는 가격이 하나로 정해지게 되어 있어. 그래서, 한 프로모션에 제품은 여러개가 들어갈 수 있지만 할인 가격은 모두 같은게 맞아."
+
+---
+
+## 확정된 API 스펙 (2026-07-28 라이브 정찰 — 추측 아님)
+
+| 스트림 | 호출 | 확인된 사실 |
+|--------|------|-------------|
+| 판매분석 | `POST /retail-insight/api/business-insight/vi-detail-search` body `{startDate,endDate,registrationTypes:["RETAIL"],pageNumber,pageSize,sortBy:"GMV",sortOrder:"DESC",isKanCategoryCode:true}` | ★**요청 구간을 합산해** 준다 → 옵션×일을 만들려면 **하루 단위 호출**. 응답 `vendorItems[] + paginationDetails{pageSize,pageNumber,totalResults,totalPages}`. 옵션ID=`vendorItemId`, SKU=`externalSkuIds[0]`, 수량=`totalUnitsSold`, GMV=`totalGmv`, 유입=`totalUniqueVisitor`, 전환=`pvToOrder`(**이미 0~1 소수** — 140/1141 검산 일치) |
+| 유효 구간 | 범위 밖 날짜 요청 시 `400 {"code":"INVALID_DATE","message":"... viewable period [2026-06-01 ~ 2026-07-27]"}` | **롤링 창(약 57일)** — 서버가 본문에 구간을 적어 준다. 페처가 파싱해 자동 보정(일수 하드코딩 금지) |
+| 프로모션 | `GET /promotion/promotion-request?requestType=COMMON&page&size` (Spring Page) + `GET /promotion/promotion-request/{id}` | 실측 `totalElements=7`(계정 전체가 1페이지). **상세 = 목록과 필드 동일**(신규 필드 없음). `settlement_date`(정산일)는 **API에 없다** → NULL |
+| 구독 게이트 | `GET /rpd/v2/supplier/subscription/detail` | 200 `data.permittedLevel=BASIC`, `detailInfo.subscribedLevel=FREE`, **`freeTrialEndDate=2026.08.20`** — 이 날짜 이후 조용히 끊길 수 있다(D-CPP-5) |
+
 ---
 
 ## 사용자 원문 인용 (왜곡 방지)
@@ -70,10 +88,18 @@ prod SELECT 실측 결과:
       실사고급 3건: ①원가 시드가 회계를 움직이는데 계획서가 "한 톨도 안 바꾼다"고 단정(§0.2 정정)
       ②쿠폰 사용금액이 coupon_kind를 안 걸어 DOWNLOAD 행에 권위값이 앉을 수 있었음(D-CPP-3 무력화 경로)
       ③NaN/Inf·상한 초과가 배치를 죽이거나 NUMERIC을 오염(엑셀 폴백 경로에서 실재).
-- [ ] **정찰 재시도** — supplier 세션 복구 후 ①판매분석 데이터 API ②프로모션 목록/상세 API 특정
-- [ ] 수집기(페처) 확장 — 위 정찰 확정 후. 엑셀 다운로드 경로가 폴백
+- [x] **정찰 재시도 — 완료**(2026-07-28, 세션 복구 후). ①판매분석 ②프로모션 목록·상세 ③구독 게이트
+      **전부 특정**(위 "확정된 API 스펙" 표). 엑셀 폴백은 **불필요해짐**(JSON API로 충분)
+- [x] 수집기(페처) 확장 — `tools/rocket_supplier_fetcher.py`에 두 스트림 추가(판매분석 일별 롤링·
+      프로모션 전량). 라이브 실증: 88레코드/2일·프로모션 7건, 파서 계약 통과(skip 0·blank 0)
+- [x] D-CPP-7 수기 단위 할인액 — 컬럼(alembic `df7b34a2f46e`) + `PATCH /rocket/promotion/{id}/unit-discount`
+- [x] D-CPP-5 접근불가 감지 배선 — 구독 조회 실패·판매분석 403을 `_SalesAccessDenied`로 올려
+      run rc≠0 → 기존 `fetch-error` 보고 경로로 표면화(조용한 skip 없음)
+- [ ] **prod 배포 + push 실증** — 라이브 확인 결과 prod에 Phase 1 라우트가 **아직 없다**(404).
+      순서: 마이그(`df7b34a2f46e` 1건 — Phase1 `c2998cfe1f7c`는 prod 적용 완료) → 코드 → 재시작
+      (`safe_deploy.sh --migrate --restart`) → **페처 데몬 재기동**(아래 "다음 액션" 2·3 참조)
 - [ ] RG 쿠폰 "사용 금액" 수집 경로 확정 (Open API에 없음 — 계획서 §3 참조)
-- [ ] D-CPP-5 접근불가 감지 배선 (403/구독오류 → fetch-error)
+- [ ] sellC UI에서 단위 할인액 입력(Phase 2) — 지금은 PATCH 엔드포인트만
 
 ### Phase 2 — 손익 엔진·뷰 (**착수 금지** — Phase 1 완료 후 별도 승인)
 - [ ] 프로모션 창 ⨝ 판매/주문 조인
@@ -82,19 +108,100 @@ prod SELECT 실측 결과:
 
 ---
 
-## 현재 진행 단계 (2026-07-28)
+## 현재 진행 단계 (2026-07-28 오후 — 페처 확장 완료, prod 배포 대기)
 
-Phase 1의 **백엔드 수집 골격 완료**(테이블·파서·ingest·테스트·원가 시드). 실제 수집기는 **정찰 미완**으로 미착수 — supplier.coupang.com 세션이 만료(SSO 로그인 화면으로 리다이렉트)되어 판매분석/프로모션 API를 특정하지 못했다. 추측 금지 원칙에 따라 파서를 지어내지 않고, **우리가 정의한 레코드 계약**으로 ingest를 먼저 완성했다.
+Phase 1 **수집 골격 + 수집기 완성**. 오전 세션의 백엔드 골격(테이블·파서·ingest·원가 시드)에
+이어, supplier 세션 복구 후 **정찰을 끝내고 페처 두 스트림을 붙였다.** 예측이 아니라 라이브 실증:
 
-> 2026-07-28 적대적 리뷰 4라운드 완료(PASS). ⚠️ **`--apply` 전 알 것**: §5 원가 시드는
-> `product_master.cost_price`가 소급 적용되므로 **과거 net_profit과 광고 BEP ROAS를 움직인다**
-> (계획서 §0.2 예외 조항). 값 3,500은 Jino 확정이므로 유지하되, 적용 시 전후 종합조망 델타를 기록할 것.
+- 판매분석 3일 창 요청 → 서버가 유효구간 `[2026-06-01 ~ 2026-07-27]`을 돌려줘 오늘(07-28)이
+  자동 클램프됨 → **2일 수집 88레코드**(07-26: 51옵션·146개·GMV 2,585,750 / 07-27: 37옵션·121개·GMV 2,064,750),
+  sku_id 채움 88/88. 백엔드 파서 통과 시 skipped 0 · blank_qty 0 · blank_revenue 0.
+- 프로모션 목록 7건 전부 상세 병합 성공(687878 = 07-24 00:01:00~07-26 23:59:59, 분담 100%, 예산 100만, 적용상품 2).
+- 구독 게이트: BASIC / 무료체험 종료 **2026-08-20**(D-CPP-5 시한이 눈에 보이는 상태).
+
+⚠️ **push는 실증하지 못했다** — prod에 Phase 1 라우트가 **아직 배포되지 않았다**(`/rocket/sales/ingest`
+404 vs 기존 `/rocket/po/ingest` 401). 즉 "Mac IP 차단"이 아니라 **미배포**가 원인이다(prod 자체는 200 응답).
+push 경로는 유닛 테스트로만 검증된 상태.
+
+### 적대적 교차 리뷰 3라운드 (2026-07-28) — codex 대체
+
+codex CLI 쿼터 소진(08-02 해제)으로 **신선 컨텍스트 Opus 리뷰어 1기**와 왕복(원칙19 형식).
+지적 12건: 전면 수용 9 · 부분 3 · 결함 기각 0. 반영 후 전체 스위트 **3,684 passed**.
+
+**BLOCKER 2건**
+1. **alembic 그래프 파손** — 우리 신규 마이그가 `a1c3e5f7b9d1`을 부모로 물었는데, 병행 세션이
+   PR #135로 그 ID 충돌을 해소하며 우리 Phase 1을 `c2998cfe1f7c`로 개명한 뒤였다. 그대로
+   병합하면 ①중복 정의로 **alembic 전체 사망** ②형제 head 2개 ③테이블을 만드는
+   `c2998cfe1f7c`보다 먼저 돌아 없는 테이블에 ADD COLUMN. → main 편입 + revision ID를
+   `uuid4()`로 재생성(`df7b34a2f46e`, LESSONS #50) + 부모를 main head `f6a8c0b2d4e6`로 재배선.
+   **실측 검증**: 72리비전 중복 0 · head 단일 · 임시 DB에 upgrade/downgrade 왕복 성공.
+2. **구독 게이트가 장식이었다** — `permittedLevel`/`freeTrialEndDate`를 읽어 로그만 찍고 무조건
+   통과시켰고, 실집행은 403뿐이었다. 그런데 D-CPP-5가 겁내는 실패 모드는 정확히 "403이 아니라
+   조용히 0행"이다(체험 종료 08-20). → 읽은 값으로 판정 + 창 전체 판정 추가.
+
+**MAJOR — 조용한 실패 계열 (전부 "성공으로 보이던" 것들)**
+- 하루 실패가 **이미 수집한 앞날 전부를 버렸다**(백필 45일이면 44일째 실패가 43일치 유실) → 날짜별 격리.
+- 구간 안인데 두 번 400난 날을 **"범위밖"으로 위장**하고 rc=0 → `days_out_of_range`/`days_failed` 분리.
+  세 카운터 합 = 요청 일수 불변식을 테스트로 고정(어긋나면 하루가 새는 것).
+- 프로모션 상세 1건의 **예외**가 7건 전부를 날렸다(비200만 폴백하고 raise는 통과) → 예외도 폴백.
+- `{**item, **detail}`이 상세의 **null로 목록의 정상 값을 덮었다**(ingest는 그 None을 그대로 저장) → None 제외 병합.
+- `pageNumber`/`totalResults`를 파싱만 하고 **버렸다** → 에코 검증·수신량 대조로 조용한 절단 차단(원칙14).
+- 페이지 상한 소진이 **정상 종료와 구분 불가**했다 → 절단으로 판정·경보.
+- 실패 보고 문구가 `"로켓 발주/정산 수집 실패"`로 **고정** — 이 스트림이 붙은 뒤로 거짓말이다
+  (발주/정산은 성공했는데 운영자를 엉뚱한 곳으로 보낸다) → 어느 스트림인지 실어 보낸다.
+- `stats`가 전량 폐기됐다(`_stats`) → 부분 성공·실패 날짜를 로그·판정에 반영.
+
+**설계 판단 (리뷰어 제안을 기각하고 대안 채택)**
+- 리뷰어: "프로모션손익을 rc에서 빼라". **기각** — D-CPP-5가 실패의 표면화를 요구하고, 기존
+  `detail_failed<=0`(발주상세)이 이미 같은 방식이라 새 스트림만 약하게 만든다. 리뷰어 3R에서 철회.
+- 대신 **영구/일시 실패를 가른다**: 구독 만료·매핑 파손은 재시도해도 40초 뒤에 낫지 않는데
+  버튼 1회가 Chrome을 3번 띄운다 → `RC_ACCESS_DENIED` + `kind="access_denied"`로 재시도 0회
+  소멸(기존 `login_required`와 같은 결). **실패로는 남는다.**
+- **부분 실패는 rc를 올리지 않는다**: 롤링 7일 창이 다음 회차에 스스로 메우고, 같은 서버 조건에
+  40초 뒤 재시도는 무의미. 전 날짜 실패만 계통 고장으로 rc≠0.
+- **접근 차단 ≠ 매핑 파손**: vendorItems가 0이면 구독(사람이 결제로 해결), vendorItems는 왔는데
+  레코드가 0이면 필드명 변경(사람이 커밋으로 해결). 뭉치면 구독을 갱신하며 코드 버그를 쫓는다.
+  ★레코드 0이면 push가 없어 백엔드 `blank_qty` 경보가 `accepted=0`으로 침묵하므로 여기가 유일한 탐지 자리.
+
+**테스트** — 371줄이 순수 매핑만 덮고 제어 흐름 9개 함수는 **참조 0**이었다(결함 대부분이 그 층).
+스크립트된 가짜 `page`로 제어 흐름 12건 추가 + 동어반복 테스트 1건 교정
+(`_promotion_record`의 하드코딩 `None`을 assert하던 것 → 실측 응답에 그 필드가 없다는 전제를 검증)
++ 수기값 보존을 소스 가드로 고정.
+
+미해결(Jino 판단 필요, 스코프 밖):
+- `collect_sales=false`로 스트림을 끄면 **아무 잔여 신호가 없다** — 의도적 중단인지 고장인지
+  prod가 구분 못 한다. 신선도 배너에 "의도적 비활성" 표시를 넣을지.
+- 롤링 창이 못 메운 영구 구멍(창 밖으로 밀려난 빈 날짜) 탐지는 페처가 아니라 prod 쪽이 맞다(Phase 2).
+
+> ⚠️ 계획서 §0.6 금지선("기존 rocket 페처 수정 금지")은 **이번 스프린트 지시로 해제**됐다
+> (같은 파일에 스트림 추가). 라이브 데몬 파일이므로 배포 시 페처 재기동 필요.
+> ⚠️ §5 원가 시드 `--apply`는 여전히 미실행 — 실행 시 과거 net_profit·BEP ROAS가 움직인다(계획서 §0.2).
 
 ## 다음 액션
 
-1. Jino가 supplier.coupang.com 재로그인(로켓 갱신 버튼 → 창에서 로그인). **Claude는 로그인 시도 금지.**
-2. 세션 복구 확인 후 정찰 재시도 → 계획서 §2의 캡처 절차 그대로.
-3. 정찰 결과로 페처 확장(raw → 레코드 계약 매핑)만 추가. **테이블·ingest는 그대로 재사용**.
+1. **prod 배포**(오케스트레이터): `scripts/safe_deploy.sh` 로 ①마이그 **1건** `df7b34a2f46e`
+   (Phase1 `c2998cfe1f7c`는 prod 적용 완료 — prod `alembic_version`이 `f6a8c0b2d4e6`인지 먼저 확인)
+   → `alembic upgrade head` → ②`models.py`·`routers/coupang_ops.py`·`services/…`·`clients/…` → 재시작.
+   순서 위반 시 ORM이 `no such column`으로 그 테이블 ingest를 통째로 죽인다(프로젝트 CLAUDE.md).
+   ★**순서 고정: prod 백엔드가 먼저, Mac 페처가 나중.** 페처가 새로 보내는
+   `kind="access_denied"|"mapping_broken"`을 모르는 구버전 `refresh_contract`는 그것을
+   **평범한 재시도 대상**으로 처리한다(하위호환이라 죽지는 않지만, 영구 실패가 재시도 3회를
+   그대로 태워 우리가 없앤 Chrome 3연발이 그동안 살아난다). 반대 순서면 잠깐 그 상태가 된다.
+2. **★페처 데몬 재기동 — 버튼을 누르기 전에 반드시 먼저.** `tools/rocket_supplier_fetcher.py`는
+   `com.ohisell.rocket`(launchd KeepAlive 상주)이 **프로세스 시작 시 1회만** 로드한다. 재기동 없이
+   3번을 하면 **구코드가 돌아** 판매분석·프로모션 로그가 아예 안 나오고, 그것이 "새 스트림이 안 붙었다"로
+   오독된다(com.ohisell.adcost 2026-06-14 동일 사고).
+   ```
+   launchctl kickstart -k gui/$(id -u)/com.ohisell.rocket
+   launchctl print gui/$(id -u)/com.ohisell.rocket | grep -E 'pid|state'   # pid가 바뀌었는지 확인
+   ```
+3. 재기동 확인 후 **라이브 push 실증**: 로켓 '갱신' 버튼 1회 → `~/.ohisell_rocket_fetcher.log`에서
+   "판매분석 push 성공 / 프로모션 push 성공" + `skipped=0` 확인 → prod DB 행 수 대조.
+   ★`판매분석 수집: N일 요청 → M일 수집·K일 범위밖·F일 실패` 줄에서 **M+K+F=N**인지 본다
+   (안 맞으면 하루가 조용히 새는 것). F는 0이 정상이지만 **일부 실패는 rc를 올리지 않는다** —
+   롤링 7일 창이 다음 회차에 스스로 메우기 때문. F가 회차를 넘겨 같은 날짜로 반복되면 그때 조사.
+   전 날짜 실패·vendorItems 전무(접근 차단)·레코드 0(매핑 파손)만 rc≠0으로 올라온다.
+4. 프로모션별 `unit_discount_amount` 수기 입력(D-CPP-7) — 지금은 PATCH, UI는 Phase 2.
 4. 9월 1P 정산서 도착 시 D-CPP-4 대사.
 
 ## 마지막 구조 감사
