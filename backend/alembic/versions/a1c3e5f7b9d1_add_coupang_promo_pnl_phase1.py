@@ -40,7 +40,7 @@ def upgrade() -> None:
         sa.Column('conversion_rate', sa.Numeric(7, 4), nullable=True),
         sa.Column('product_name', sa.String(length=300), nullable=True),
         sa.Column('source', sa.String(length=20), nullable=False, server_default='sales_analysis'),
-        sa.Column('synced_at', sa.DateTime(), server_default=sa.func.now(), nullable=True),
+        sa.Column('synced_at', sa.DateTime(), server_default=sa.func.now(), nullable=False),
         sa.PrimaryKeyConstraint('id'),
         sa.UniqueConstraint('vendor_id', 'option_id', 'date',
                             name='uq_coupang_rocket_sales_daily'),
@@ -73,7 +73,7 @@ def upgrade() -> None:
         sa.Column('applied_product_count', sa.Integer(), nullable=True),
         sa.Column('requested_at', sa.DateTime(), nullable=True),
         sa.Column('raw', sa.JSON(), nullable=True),
-        sa.Column('synced_at', sa.DateTime(), server_default=sa.func.now(), nullable=True),
+        sa.Column('synced_at', sa.DateTime(), server_default=sa.func.now(), nullable=False),
         sa.PrimaryKeyConstraint('id'),
     )
     op.create_index('ix_coupang_rocket_promotion_request_id',

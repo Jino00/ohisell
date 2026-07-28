@@ -16,12 +16,23 @@
 #               → 매핑만 선등록하면 된다. 발주상세 행이 없어도 매핑 등록은 가능하다
 #                 (rocket_cost_map.upsert_mapping이 라벨 캐시를 optional로 다룸 — 코드 실측).
 #
+# ⚠️⚠️ 이 스크립트는 **회계 숫자를 움직인다** — Phase 1의 "회계축 불변"은 신규 테이블·ingest에
+#   해당하는 말이고, 이 원가 시드는 예외다. product_master.cost_price는 주문 시점에 박제되는
+#   값이 아니라 **조회 때마다 소급 적용**되기 때문이다(코드 실측 2026-07-28):
+#     - services/profit_calculator.py:462·598·778  bucket["cost"] += cost_price * quantity
+#     - services/naver_ad/bep_calculator.py:310     BEP ROAS의 공헌이익 분모
+#   ⇒ 62178970(OHI-TGLASS-IP17PRO) 3,400→3,500 갱신은 ①그 SKU의 **과거 주문 전체**에서 종합조망
+#      net_profit을 낮추고 ②아이폰17프로 강화유리를 파는 광고 캠페인의 **BEP ROAS를 올린다**
+#      (자동 운영 루프가 읽는 값). 3,500이 옳은 값이라는 것은 Jino 확정이지만, 적용은
+#      "숫자가 바뀐다는 것을 알고" 해야 한다 — 적용 전후 종합조망 델타를 기록할 것.
+#
 # 멱등: 이미 원하는 상태면 건너뛴다. 기본 --dry-run(실제 쓰기는 --apply 명시).
 # 실행 위치: prod 서버(같은 DB 파일). 이 스크립트는 저장소에만 두고 실행은 배포 시점에.
 #   $ python3 backend/scripts/seed_promo_pnl_costs_20260728.py            # dry-run
 #   $ python3 backend/scripts/seed_promo_pnl_costs_20260728.py --apply
 import argparse
 import json
+import os
 import sqlite3
 import sys
 from datetime import datetime
@@ -45,7 +56,7 @@ def _fetch_state(cur) -> dict:
         )
         m = cur.fetchone()
         cur.execute(
-            "SELECT internal_sku, product_name, cost_price FROM product_master "
+            "SELECT id, internal_sku, product_name, cost_price FROM product_master "
             "WHERE internal_sku = ?", (sku,),
         )
         p = cur.fetchone()
@@ -62,10 +73,20 @@ def main() -> int:
     ap.add_argument("--apply", action="store_true", help="실제 쓰기(미지정 시 dry-run)")
     args = ap.parse_args()
 
+    # sqlite3.connect은 없는 경로를 **빈 DB로 만들어 버린다** — 엉뚱한 기계에서 돌리면 유령
+    #   파일만 남기고 "no such table"로 죽는다. 존재하는 DB에만 붙는다.
+    if not os.path.isfile(args.db):
+        print(f"✗ DB 파일 없음: {args.db} (prod에서 실행하거나 --db로 경로를 주세요)")
+        return 2
+
     con = sqlite3.connect(args.db)
     con.row_factory = sqlite3.Row
     cur = con.cursor()
 
+    print(
+        "⚠️ 이 시드는 product_master.cost_price를 바꾸며, 그 값은 과거 주문에 **소급 적용**된다"
+        " — 종합조망 net_profit과 광고 BEP ROAS가 함께 움직인다. 적용 전후 델타를 기록할 것."
+    )
     before = _fetch_state(cur)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     print(f"[before] {json.dumps(before, ensure_ascii=False, default=str)}")
@@ -78,8 +99,26 @@ def main() -> int:
             continue
         # ① 원가 갱신(다를 때만)
         cur_cost = st["master"]["cost_price"]
-        if cur_cost is None or int(cur_cost) != cost:
-            planned.append(f"UPDATE product_master SET cost_price={cost} WHERE internal_sku='{sku}' (현재 {cur_cost})")
+        if cur_cost is None or float(cur_cost) != float(cost):
+            # 블라스트 반경을 **먼저 눈에 보이게** 한다: 이 UPDATE가 몇 행을 건드리는지,
+            #   그 SKU의 과거 주문이 몇 건인지(= 소급 재계산될 net_profit 범위).
+            n_master = cur.execute(
+                "SELECT COUNT(*) c FROM product_master WHERE internal_sku = ?", (sku,)
+            ).fetchone()["c"]
+            try:
+                n_orders = cur.execute(
+                    "SELECT COUNT(*) c FROM orders WHERE product_id = ?",
+                    (st["master"]["id"],),
+                ).fetchone()["c"]
+            except sqlite3.Error:
+                n_orders = "?"
+            if n_master != 1:
+                print(f"  ✗ {pn}: internal_sku={sku} 행이 {n_master}개 — 안전하지 않아 건너뜀")
+                continue
+            planned.append(
+                f"UPDATE product_master SET cost_price={cost} WHERE internal_sku='{sku}' "
+                f"(현재 {cur_cost}, master {n_master}행, ★소급 영향 주문 {n_orders}건)"
+            )
             if args.apply:
                 cur.execute(
                     "UPDATE product_master SET cost_price = ? WHERE internal_sku = ?", (cost, sku)
