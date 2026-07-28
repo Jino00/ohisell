@@ -151,7 +151,10 @@ def ingest_coupon_used_amount(
     ★coupang_coupon.synced_at(=쿠폰 **수집** 시각, onupdate=now)은 건드리지 않는다: 이 경로는
       수집이 아니라 별도 push다. 그대로 두면 죽은 수집기가 이 push 덕에 신선해 보인다
       (원칙22·RG 26일 침묵 교훈). 사용금액의 시각은 used_amount_synced_at이 따로 들고 있다.
-    반환: {updated, not_found, skipped, deduped, account_key, source}.
+    ★not_found와 wrong_kind를 가른다: 전자는 **일시적**(쿠폰 메타가 아직 안 들어옴 → 다음
+      회차에 붙는다), 후자는 **영구적**(그 id는 DOWNLOAD 쿠폰이라 영원히 안 붙는다).
+      한 숫자로 뭉치면 운영자가 "기다리면 되는 것"과 "고쳐야 하는 것"을 구분할 수 없다.
+    반환: {updated, not_found, wrong_kind, skipped, deduped, account_key, source}.
     """
     stats: dict = {}
     recs = parser.parse_coupon_usage_rows(rows, stats=stats)
@@ -160,6 +163,7 @@ def ingest_coupon_used_amount(
     now = kst_now()
     updated = 0
     not_found: list[str] = []
+    wrong_kind: list[str] = []
     for rec in recs:
         row = (
             db.query(CoupangCoupon)
@@ -172,7 +176,16 @@ def ingest_coupon_used_amount(
             .first()
         )
         if row is None:
-            not_found.append(rec["coupon_id"])
+            # kind만 빼고 다시 찾아본다 — 있으면 '아직 안 들어온 것'이 아니라 '다른 축'이다.
+            other = (
+                db.query(CoupangCoupon)
+                .filter(
+                    CoupangCoupon.account_key == account_key,
+                    CoupangCoupon.coupon_id == rec["coupon_id"],
+                )
+                .first()
+            )
+            (wrong_kind if other is not None else not_found).append(rec["coupon_id"])
             continue
         row.used_amount = rec["used_amount"]
         row.used_amount_source = src
@@ -182,13 +195,21 @@ def ingest_coupon_used_amount(
         updated += 1
     db.commit()
     log.info(
-        "쿠폰 사용금액 ingest: account=%s kind=%s updated=%d not_found=%d skipped=%d source=%s",
-        account_key, _COUPON_KIND, updated, len(not_found), skipped, src,
+        "쿠폰 사용금액 ingest: account=%s kind=%s updated=%d not_found=%d wrong_kind=%d "
+        "skipped=%d source=%s",
+        account_key, _COUPON_KIND, updated, len(not_found), len(wrong_kind), skipped, src,
     )
+    if wrong_kind:
+        log.warning(
+            "쿠폰 사용금액: %s가 아닌 쿠폰 %d건 — 재시도해도 안 붙는다(계약 확인 필요): %s",
+            _COUPON_KIND, len(wrong_kind), wrong_kind[:10],
+        )
     return {
         "updated": updated,
         "not_found": len(not_found),
         "not_found_coupon_ids": not_found[:50],  # 진단용 상한(응답 비대화 방지)
+        "wrong_kind": len(wrong_kind),
+        "wrong_kind_coupon_ids": wrong_kind[:50],
         "skipped": skipped,
         "deduped": stats.get("deduped", 0),
         "account_key": account_key,

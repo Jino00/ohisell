@@ -51,12 +51,36 @@ def _sid(v: Any, limit: int) -> str | None:
     return s
 
 
+_INT64_MAX = 2**63 - 1   # SQLite INTEGER 상한. 넘으면 flush 때 OverflowError로 배치가 죽는다.
+
+
+# 빈 숫자셀의 텍스트 표현들. 엑셀/판다스가 문자열로 직렬화되면 이 꼴로 온다.
+_BLANK_TOKENS = {"", "-", "nan", "-nan", "inf", "-inf", "infinity", "-infinity", "none", "null"}
+
+
+def _present(v: Any) -> bool:
+    """값이 '적혀 있는가' — 빈 셀(None·''·'-'·NaN·'nan')이 아닌가.
+
+    빈 셀과 '읽으려다 실패한 값'을 가르는 데 쓴다. 전자는 0(관측된 0판매일), 후자는 사고다.
+    NaN은 숫자로 오든 그 문자열 표현으로 오든 **빈 셀**이다 — 직렬화 방식이 의미를 바꾸면 안 된다.
+    """
+    if v is None:
+        return False
+    if isinstance(v, float) and not math.isfinite(v):
+        return False
+    if isinstance(v, Decimal) and not v.is_finite():
+        return False
+    return str(v).strip().lower() not in _BLANK_TOKENS
+
+
 def _int(v: Any, default: int | None = 0) -> int | None:
     """'1,234' / 1234 / None → int. 실패는 default('없음' 필드는 None을 넘긴다).
 
     ★NaN/Inf 방어: 엑셀 폴백 경로(PLAN §2.5)의 빈 숫자셀은 float('nan')으로 온다.
       int(nan)은 ValueError, int(inf)는 OverflowError로 **배치 전체를 죽인다**.
       한 행이 배치를 죽이지 않는다는 이 모듈의 계약을 지키려면 여기서 접어야 한다.
+    ★크기 상한도 본다: 유한하다고 담을 수 있는 건 아니다. int64를 넘는 값은 파싱 사고이지
+      판매수량이 아니다 — 파싱 시점에 접어야 flush 시점에 배치가 죽지 않는다.
     """
     if v is None:
         return default
@@ -65,7 +89,8 @@ def _int(v: Any, default: int | None = 0) -> int | None:
     if isinstance(v, (int, float)):
         if isinstance(v, float) and not math.isfinite(v):
             return default
-        return int(v)
+        n = int(v)
+        return n if abs(n) <= _INT64_MAX else default
     s = str(v).strip().replace(",", "").replace("%", "")
     if s in ("", "-"):
         return default
@@ -73,15 +98,22 @@ def _int(v: Any, default: int | None = 0) -> int | None:
         f = float(s)
     except (ValueError, TypeError):
         return default
-    return int(f) if math.isfinite(f) else default
+    if not math.isfinite(f):
+        return default
+    n = int(f)
+    return n if abs(n) <= _INT64_MAX else default
 
 
-def _dec(v: Any, default: Decimal | None = None) -> Decimal | None:
+def _dec(v: Any, default: Decimal | None = None, *, max_abs: Decimal | None = None) -> Decimal | None:
     """'12,345.6' / Decimal / None → Decimal. 실패는 default. 통화기호·콤마·% 제거.
 
     ★NaN/Inf 방어: Decimal('nan')·Decimal('Infinity')는 **예외 없이 생성된다** — 아래
       except가 잡지 못한다. 그대로 흘리면 ①NUMERIC 컬럼에 NaN이 적재되고(Phase 2 합계 오염)
       ②`amount < 0` 같은 비교에서 InvalidOperation으로 배치가 죽는다. 유한값만 통과시킨다.
+    ★max_abs(크기 상한)도 본다: **유한한 것과 담기는 것은 다르다.** Decimal('1E+999')는
+      is_finite()를 통과하지만 SQLite에선 inf로 적재돼 sum()을 오염시키고(NaN 방어와 같은
+      사고가 자리만 옮긴 것), PostgreSQL에선 NUMERIC 정밀도 초과로 commit이 통째로 죽는다.
+      호출자가 목적지 컬럼의 정밀도를 넘겨준다(아래 _MAX_* 상수).
     """
     d: Decimal | None
     if v is None:
@@ -102,21 +134,40 @@ def _dec(v: Any, default: Decimal | None = None) -> Decimal | None:
             return default
     if d is None or not d.is_finite():
         return default
+    if max_abs is not None and abs(d) >= max_abs:
+        log.warning("수치 크기 상한 초과(>=%s) → 없는 값 처리: %r", max_abs, v)
+        return default
     return d
 
 
+# 목적지 NUMERIC(precision, scale)의 정수부 상한 = 10**(precision-scale).
+_MAX_AMOUNT = Decimal(10) ** 12    # NUMERIC(14,2): revenue · budget_amount · used_amount
+_MAX_DISCOUNT = Decimal(10) ** 10  # NUMERIC(12,2): discount_value
+_MAX_RATIO = Decimal(10) ** 5      # NUMERIC(7,2) : share_ratio
+_MAX_RATE = Decimal(10) ** 3       # NUMERIC(7,4) : conversion_rate
+
+
 def _date(v: Any) -> date | None:
-    """'2026-07-24' / '2026-07-24 00:01:00' / date / datetime → date|None."""
+    """'2026-07-24' / '2026-07-24 00:01:00' / date / datetime → date|None.
+
+    ★tz 환산 후 날짜를 딴다(_dt 경유). date는 판매 테이블의 **그레인 키**라, tz가 붙은
+      '2026-07-24T23:00:00Z'(=KST 07-25 08:00)를 07-24로 적으면 **다른 날 행에 적재**되고
+      페처 포맷이 바뀔 때마다 멱등성이 깨진다. 시각만 KST로 맞추고 날짜를 빼먹으면
+      계약(§4 "시각은 KST")이 반만 지켜진다.
+    """
     if v is None:
         return None
     if isinstance(v, datetime):
-        return v.date()
+        return _dt(v).date() if v.tzinfo else v.date()
     if isinstance(v, date):
         return v
     s = str(v).strip()
     if s in ("", "-"):
         return None
     s = s.replace("/", "-")
+    parsed = _dt(s)          # tz가 붙어 있으면 KST로 환산된 뒤 날짜가 나온다
+    if parsed is not None:
+        return parsed.date()
     try:
         return date.fromisoformat(s[:10])
     except ValueError:
@@ -182,9 +233,19 @@ def parse_sales_rows(
             continue
         option_id = _sid(r.get("option_id"), 30)
         d = _date(r.get("date"))
+        # 관측 유무는 **키 존재**로 본다(값이 아니라). 빈 셀('-'·NaN)은 '0으로 팔린 날'이라는
+        #   관측이므로 살리고(visitors 같은 동반 신호까지 버리지 않는다), 키 자체가 없는 것만
+        #   '페처 매핑이 필드명을 놓쳤다'로 보고 skip한다 — 이 둘을 값으로 판별하면 정상적인
+        #   0판매일이 매번 skipped에 잡혀 수집 건강 경보가 상시 거짓말을 한다.
+        has_observation = "qty" in r or "revenue" in r
         qty = _int(r.get("qty"), None)
-        revenue = _dec(r.get("revenue"), None)
-        if not option_id or d is None or (qty is None and revenue is None):
+        revenue = _dec(r.get("revenue"), None, max_abs=_MAX_AMOUNT)
+        # 값이 **적혀 있는데 못 읽은** 경우(쓰레기 문자열·상한 초과)는 빈 셀과 다르다. 0으로
+        #   접으면 파싱 사고가 '0원 팔린 날'로 둔갑한다 → 행을 skip해서 눈에 보이게 남긴다.
+        botched = (_present(r.get("qty")) and qty is None) or (
+            _present(r.get("revenue")) and revenue is None
+        )
+        if not option_id or d is None or not has_observation or botched:
             skipped += 1
             continue
         accepted += 1
@@ -195,7 +256,7 @@ def parse_sales_rows(
             "qty": qty if qty is not None else 0,
             "revenue": revenue if revenue is not None else Decimal(0),
             "visitors": _int(r.get("visitors"), None),
-            "conversion_rate": _dec(r.get("conversion_rate"), None),
+            "conversion_rate": _dec(r.get("conversion_rate"), None, max_abs=_MAX_RATE),
             "product_name": _s(r.get("product_name"), 300),
             "source": _s(source, 20) or "sales_analysis",
         }
@@ -246,10 +307,10 @@ def parse_promotion_rows(rows: list[dict], *, stats: dict | None = None) -> list
             "status": _s(r.get("status"), 30),
             "start_at": _dt(r.get("start_at")),
             "end_at": _dt(r.get("end_at")),
-            "share_ratio": _dec(r.get("share_ratio"), None),
+            "share_ratio": _dec(r.get("share_ratio"), None, max_abs=_MAX_RATIO),
             "discount_method": _s(r.get("discount_method"), 40),
-            "discount_value": _dec(r.get("discount_value"), None),
-            "budget_amount": _dec(r.get("budget_amount"), None),
+            "discount_value": _dec(r.get("discount_value"), None, max_abs=_MAX_DISCOUNT),
+            "budget_amount": _dec(r.get("budget_amount"), None, max_abs=_MAX_AMOUNT),
             "settlement_date": _date(r.get("settlement_date")),
             "applied_product_count": _int(r.get("applied_product_count"), None),
             "requested_at": _dt(r.get("requested_at")),
@@ -286,7 +347,7 @@ def parse_coupon_usage_rows(rows: list[dict], *, stats: dict | None = None) -> l
             skipped += 1
             continue
         coupon_id = _sid(r.get("coupon_id"), 30)
-        amount = _dec(r.get("used_amount"), None)
+        amount = _dec(r.get("used_amount"), None, max_abs=_MAX_AMOUNT)
         if not coupon_id or amount is None or amount < 0:
             skipped += 1
             continue

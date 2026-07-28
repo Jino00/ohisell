@@ -93,9 +93,10 @@ def test_parse_sales_source_label_propagates():
 
 
 def test_parse_sales_skips_rows_with_no_observation():
-    """qty도 revenue도 없는 행 = '0원 팔린 날'이 아니라 **관측 없음**.
+    """관측 유무는 **키 존재**로 본다 — 매핑이 필드명을 놓친 것(키 없음)만 skip.
 
-    0으로 접으면 페처 매핑이 필드명을 놓쳤을 때 0원 테이블이 조용히 쌓인다(원칙22).
+    값으로 판별하면 빈 셀('-'·NaN)로 오는 정상적인 0판매일이 매번 skipped에 잡혀
+    수집 건강 경보가 상시 거짓말을 하고, 동반 신호(visitors)까지 함께 버려진다.
     """
     stats: dict = {}
     assert rp.parse_sales_rows(
@@ -104,6 +105,47 @@ def test_parse_sales_skips_rows_with_no_observation():
     assert stats["skipped"] == 1
     # 명시적 0은 관측이므로 통과한다
     assert len(rp.parse_sales_rows([{"option_id": "A", "date": "2026-07-24", "qty": 0}])) == 1
+
+
+def test_parse_sales_blank_cell_is_zero_not_dropped():
+    """키가 있고 값이 빈 셀('-'·NaN)이면 '0으로 팔린 날'이다 — visitors까지 버리지 않는다."""
+    rec = rp.parse_sales_rows([
+        {"option_id": "A", "date": "2026-07-24", "qty": "-", "revenue": float("nan"),
+         "visitors": 120},
+    ])[0]
+    assert rec["qty"] == 0 and rec["revenue"] == Decimal(0)
+    assert rec["visitors"] == 120        # 유입은 있는데 전환이 0 — 이 테이블의 핵심 신호
+
+
+def test_parse_sales_botched_value_is_skipped_not_zeroed():
+    """값이 **적혀 있는데 못 읽은** 경우는 빈 셀과 다르다 — 0으로 접으면 사고가 사실로 둔갑."""
+    stats: dict = {}
+    assert rp.parse_sales_rows([
+        {"option_id": "A", "date": "2026-07-24", "qty": "십팔개", "revenue": "1000"},
+    ], stats=stats) == []
+    assert stats["skipped"] == 1
+
+
+def test_parse_sales_oversized_number_does_not_reach_db():
+    """Decimal('1E+999')는 is_finite()를 통과한다 — 유한한 것과 담기는 것은 다르다.
+
+    NUMERIC(14,2) 상한을 넘는 값은 SQLite에선 inf로 적재돼 sum()을 오염시키고,
+    PostgreSQL에선 commit 자체를 죽인다. 파싱 시점에 접는다.
+    """
+    stats: dict = {}
+    assert rp.parse_sales_rows(
+        [{"option_id": "A", "date": "2026-07-24", "revenue": "1e999"}], stats=stats
+    ) == []
+    assert stats["skipped"] == 1
+    assert rp.parse_coupon_usage_rows([{"coupon_id": "A", "used_amount": "1e999"}]) == []
+
+
+def test_parse_sales_date_tz_is_converted_before_grain():
+    """date는 그레인 키 — tz를 환산하지 않으면 **다른 날 행**에 적재된다."""
+    rec = rp.parse_sales_rows(
+        [{"option_id": "A", "date": "2026-07-24T23:00:00+00:00", "qty": 1}]
+    )[0]
+    assert rec["date"] == date(2026, 7, 25)   # KST 07-25 08:00
 
 
 def test_parse_sales_nan_does_not_kill_batch():
@@ -255,10 +297,13 @@ def test_ingest_promotion_updates_status_on_resync(db):
     assert row.raw == {"requestId": 687878}   # raw는 미제공 시 기존값 보존
 
 
-def _seed_coupon(db, coupon_id: str, account_key: str = "COUPANG_WING1"):
+_OLD_STAMP = datetime(2020, 1, 1, 0, 0, 0)   # '오래 전에 수집됨' — 초 단위 해상도 함정 회피
+
+
+def _seed_coupon(db, coupon_id: str, account_key: str = "COUPANG_WING1", kind: str = "INSTANT"):
     db.add(CoupangCoupon(
         account_key=account_key, vendor_id="A00123456",
-        coupon_kind="INSTANT", coupon_id=coupon_id,
+        coupon_kind=kind, coupon_id=coupon_id, synced_at=_OLD_STAMP,
     ))
     db.commit()
 
@@ -306,30 +351,29 @@ def test_ingest_coupon_used_amount_does_not_touch_download_kind(db):
     DOWNLOAD는 이미 usage_amount(다운로드쿠폰 사용량)라는 다른 축을 들고 있어, 셀러부담
     권위값(D-CPP-3)이 거기 앉으면 어느 쪽이 우리 실부담인지 영영 구분되지 않는다.
     """
-    db.add(CoupangCoupon(
-        account_key="COUPANG_WING1", vendor_id="A00123456",
-        coupon_kind="DOWNLOAD", coupon_id="94177420",
-    ))
-    db.commit()
+    _seed_coupon(db, "94177420", kind="DOWNLOAD")
     r = sync.ingest_coupon_used_amount(
         db, "COUPANG_WING1", [{"coupon_id": "94177420", "used_amount": 156000}]
     )
-    assert r["updated"] == 0 and r["not_found"] == 1          # 조용히 붙지 않고 표면화
+    assert r["updated"] == 0
+    # ★영구적 실패(wrong_kind)와 일시적 실패(not_found)를 가른다 — 전자는 재시도해도 안 붙는다
+    assert r["wrong_kind"] == 1 and r["not_found"] == 0
     assert db.query(CoupangCoupon).one().used_amount is None
 
 
 def test_ingest_coupon_used_amount_freezes_collection_stamp(db):
-    """수집 시각(synced_at)은 이 push로 갱신되지 않는다 — 죽은 수집기가 신선해 보이면 안 된다."""
+    """수집 시각(synced_at)은 이 push로 갱신되지 않는다 — 죽은 수집기가 신선해 보이면 안 된다.
+
+    ★_OLD_STAMP로 심는 이유: server_default(CURRENT_TIMESTAMP)는 초 해상도라, 같은 초 안에
+      끝나는 테스트에서는 onupdate가 발동해도 값이 같아 **가드가 통과해 버린다**(빈 테스트).
+    """
     _seed_coupon(db, "94177420")
-    row = db.query(CoupangCoupon).one()
-    before = row.synced_at
-    assert before is not None
     sync.ingest_coupon_used_amount(
         db, "COUPANG_WING1", [{"coupon_id": "94177420", "used_amount": 156000}]
     )
     db.expire_all()
     row = db.query(CoupangCoupon).one()
-    assert row.synced_at == before                 # 수집 시각 동결
+    assert row.synced_at == _OLD_STAMP             # 수집 시각 동결(onupdate=now를 이긴다)
     assert row.used_amount_synced_at is not None   # push 시각은 따로 남는다
 
 
