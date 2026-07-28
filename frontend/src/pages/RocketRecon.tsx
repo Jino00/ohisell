@@ -32,7 +32,12 @@ const won = (v: string | number | null | undefined) => {
   const num = typeof v === "string" ? Number(v) : v;
   return Number.isFinite(num) ? `${Math.round(num).toLocaleString("ko-KR")}원` : NO_DATA;
 };
-const pct = (v: number | null | undefined) => (v == null ? NO_DATA : `${(v * 100).toFixed(1)}%`);
+/** 비율도 Decimal → 문자열("0.0036")로 온다. 암묵 강제변환에 기대지 않고 명시적으로 변환한다. */
+const pct = (v: string | number | null | undefined) => {
+  if (v == null) return NO_DATA;
+  const num = typeof v === "string" ? Number(v) : v;
+  return Number.isFinite(num) ? `${(num * 100).toFixed(1)}%` : NO_DATA;
+};
 
 function isoKST(d: Date): string {
   const kst = new Date(d.toLocaleString("en-US", { timeZone: "Asia/Seoul" }));
@@ -189,17 +194,17 @@ function SummaryTiles({ data }: { data: RocketRecon }) {
           zeroReason="발주 수량이 전부 입고되었습니다."
         />
         <CountStat
-          label="발주≠입고 (명세서 확인 단계)"
+          label="발주≠입고 (입고 완료 단계)"
           value={`${n(s.drift_po_count_settled_stage)}건`}
           sub={`해당 단계 발주 ${n(s.settled_stage_po_count)}건 중`}
           tone="bad"
           isZero={s.drift_po_count_settled_stage === 0}
-          zeroReason="거래명세서 확인까지 간 발주는 전부 발주=입고입니다."
+          zeroReason="입고가 끝난 발주는 전부 발주=입고입니다."
         />
         <CountStat
           label="계산서 미연결 발주"
           value={`${n(inv.po_without_invoice_count)}건`}
-          sub={`매핑된 계산서 ${n(inv.mapped_invoice_count)}건 · ${won(inv.settled_amount)}`}
+          sub={`매핑된 계산서 ${n(inv.mapped_invoice_count)}건 · ${won(inv.settled_amount)} (묶음 정산이라 기간 밖 발주분 포함 가능)`}
           tone="warn"
           isZero={inv.po_without_invoice_count === 0}
           zeroReason="기간 내 모든 발주가 계산서에 묶였습니다."
@@ -235,7 +240,7 @@ function SummaryTiles({ data }: { data: RocketRecon }) {
           label="발주상세(상품별) 수집률"
           value={pct(cov.po_coverage_pct)}
           sub={`${n(cov.pos_with_detail_count)}/${n(cov.pos_with_detail_count + cov.pos_without_detail_count)} 발주 · ${n(cov.sku_count)} SKU`}
-          tone={(cov.po_coverage_pct ?? 1) < 1 ? "warn" : "good"}
+          tone={Number(cov.po_coverage_pct ?? 1) < 1 ? "warn" : "good"}
         />
       </div>
 
@@ -249,7 +254,8 @@ function SummaryTiles({ data }: { data: RocketRecon }) {
         </p>
         <p>
           발주≠입고 전체는 {n(s.drift_po_count)}건이지만, 입고 전 단계(발주확정·거래처확인요청)의
-          불일치는 당연합니다. 위 타일은 <b>거래명세서 확인까지 간 발주</b>만 셉니다.
+          불일치는 당연합니다. 위 타일은 <b>입고가 끝난 단계</b>(거래명세서확인·거래명세서확인요청)의
+          발주만 셉니다.
         </p>
         {s.no_date_po_count > 0 && (
           <p>발주일 미상 발주 {n(s.no_date_po_count)}건은 어떤 기간에도 잡히지 않습니다.</p>
@@ -357,11 +363,25 @@ function SkuTable({ data, from, to }: { data: RocketRecon; from: string; to: str
           />
         ))}
       </Table>
-      <p className="px-4 py-3 text-xs text-gray-400">
-        <b>입고</b> 열은 <b>단일 상품 발주에서만</b> 채워집니다 — 여러 상품이 섞인 발주는 입고수량이
-        발주 단위로만 와서 상품별로 나눌 근거가 없기 때문입니다(&ldquo;{NO_DATA}&rdquo;는 0이 아니라
-        &lsquo;모름&rsquo;). 각 상품의 발주 단위 실제 입고는 행을 펼쳐 확인하세요.
-      </p>
+      <div className="px-4 py-3 text-xs text-gray-400 space-y-1">
+        <p>
+          <b>입고</b> 열은 <b>단일 상품 발주에서만</b> 채워집니다 — 여러 상품이 섞인 발주는 입고수량이
+          발주 단위로만 와서 상품별로 나눌 근거가 없기 때문입니다(&ldquo;{NO_DATA}&rdquo;는 0이 아니라
+          &lsquo;모름&rsquo;). 각 상품의 발주 단위 실제 입고는 행을 펼쳐 확인하세요.
+        </p>
+        <p>
+          <b>발주−입고</b>는 <b>입고가 끝난 단계</b>(거래명세서확인·확인요청)의 귀속분만 붉게 표시합니다.
+          입고 전 단계의 차이는 당연하므로 회색 &lsquo;입고 전&rsquo;으로만 적습니다.
+          {f.sku_count_unknown_drift > 0 && (
+            <> 판정 근거가 아예 없는 상품이 {n(f.sku_count_unknown_drift)}건 있으며, &lsquo;발주≠입고만&rsquo;
+            필터를 켜면 <b>정상이라서가 아니라 모르기 때문에</b> 빠집니다.</>
+          )}
+        </p>
+        <p>
+          <b>계산서</b> 배지는 <b>그 상품이 속한 발주</b> 기준입니다 — 계산서 1건이 여러 상품에 걸치므로
+          행 배지를 모두 더하면 위 요약 타일보다 큽니다(요약은 기간 전체 중복 제거). 둘은 분모가 다릅니다.
+        </p>
+      </div>
     </Card>
   );
 }
@@ -387,9 +407,14 @@ function SkuRows({ row, open, onToggle, from, to }: {
         </Td>
         <Td right>{n(row.order_qty)}</Td>
         <Td right>
-          {row.confirmed_missing_lines > 0 && row.confirmed_qty === 0
-            ? NO_DATA
-            : n(row.confirmed_qty)}
+          {row.confirmed_missing_lines > 0 && row.confirmed_qty === 0 ? (
+            NO_DATA
+          ) : row.confirmed_missing_lines > 0 ? (
+            // 일부 라인만 수집된 부분합 — 완전한 수로 오독되지 않게 '≥'로 하한임을 표시.
+            <span title="일부 라인이 미수집이라 이 값은 하한입니다">≥ {n(row.confirmed_qty)}</span>
+          ) : (
+            n(row.confirmed_qty)
+          )}
           {row.confirmed_missing_lines > 0 && (
             <div className="text-xs text-gray-400">미수집 {n(row.confirmed_missing_lines)}줄</div>
           )}
@@ -407,12 +432,22 @@ function SkuRows({ row, open, onToggle, from, to }: {
           )}
         </Td>
         <Td right>
-          {row.drift_qty == null ? (
-            <span className="text-gray-400">{NO_DATA}</span>
-          ) : row.drift_qty === 0 ? (
+          {/* 빨강은 '입고가 끝난 단계(CI·RI)'의 불일치에만 — 입고 전 단계의 차이는 당연하므로 회색. */}
+          {row.drift_qty_settled_stage == null ? (
+            <>
+              <span className="text-gray-400" title="입고가 끝난 단계의 귀속 가능 발주가 없어 판정할 수 없습니다 (0이 아니라 '모름')">
+                {NO_DATA}
+              </span>
+              {row.drift_qty != null && row.drift_qty !== 0 && (
+                <div className="text-xs text-gray-400" title="아직 입고 전 단계라 발주≠입고가 정상입니다">
+                  입고 전 {n(row.drift_qty)}
+                </div>
+              )}
+            </>
+          ) : row.drift_qty_settled_stage === 0 ? (
             <span className="text-gray-400">0</span>
           ) : (
-            <span className="text-judge-bad font-medium">{n(row.drift_qty)}</span>
+            <span className="text-judge-bad font-medium">{n(row.drift_qty_settled_stage)}</span>
           )}
         </Td>
         <Td right>{won(row.order_amount)}</Td>

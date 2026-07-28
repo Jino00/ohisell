@@ -956,7 +956,8 @@ export interface ReconInvoiceSummary {
 export interface ReconDetailCoverage {
   pos_with_detail_count: number;
   pos_without_detail_count: number;      // 발주상세(SKU) 미수집 PO
-  po_coverage_pct: number | null;        // 0~1 분수. null=윈도우 PO 0건(0%가 아님)
+  // 0~1 분수. null=윈도우 PO 0건(0%가 아님). ★Decimal이라 JSON에선 문자열("0.0036")로 온다.
+  po_coverage_pct: string | null;
   line_count: number;
   sku_count: number;
   lines_missing_confirmed_qty: number;
@@ -994,8 +995,13 @@ export interface ReconSkuRow {
   received_attributable_po_count: number;
   received_unattributable_po_count: number;
   attributable_order_qty: number | null;
-  drift_qty: number | null;              // 귀속 가능분 발주−입고. null=산출 불가
+  drift_qty: number | null;              // 귀속 가능분 발주−입고(입고 전 단계 포함=참고값). null=산출 불가
+  // ★진짜 신호 — 입고 완료 단계(CI·RI) 귀속분만. null=판정 근거 없음(0 아님). 빨강은 이 값에만.
+  drift_qty_settled_stage: number | null;
+  settled_stage_attributable_po_count: number;
   invoice_count: number;
+  // ↓ 계산서 카운터는 **이 SKU가 속한 발주** 기준 — 요약 타일(기간 전체 중복 제거)과 분모가 다르다.
+  //   계산서 1건이 멀티SKU 발주에 걸리면 SKU마다 잡히므로 행 합계 > 요약. 같은 이름이지만 다른 수다.
   po_without_invoice_count: number;
   invoice_missing_row_count: number;
   invoice_unconfirmed_count: number;
@@ -1011,6 +1017,8 @@ export interface RocketRecon {
     unconfirmed_only: boolean;
     sku_count_total: number;
     sku_count_shown: number;
+    // 발주≠입고를 판정할 근거가 없는 SKU 수 — drift_only가 '정상이라서'가 아니라 '몰라서' 제외한다.
+    sku_count_unknown_drift: number;
   };
   skus: ReconSkuRow[];
   note: string;

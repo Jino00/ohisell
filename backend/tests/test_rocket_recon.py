@@ -125,9 +125,30 @@ def test_drift_split_by_stage(db):
     assert by["PA"]["drift_po_count"] == 1
 
 
-def test_settled_stage_constant_is_ci_only(db):
-    """새 상태 코드는 추정하지 않는다 — CI만 '입고 완료 단계'."""
-    assert SETTLED_STAGE_STATUSES == frozenset({"CI"})
+def test_settled_stage_constant_is_received_stages_only(db):
+    """입고 완료 단계 = CI + RI. 나머지 새 코드는 추정하지 않는다.
+
+    RI(거래명세서확인요청)는 이름이 CI보다 앞서 보이지만 라이브 전수 입고율이 더 높다
+    (0.993 > 0.910) — 물건은 이미 들어온 뒤다. 실측 근거는 모듈 상단 주석 참조.
+    """
+    assert SETTLED_STAGE_STATUSES == frozenset({"CI", "RI"})
+
+
+def test_ri_stage_drift_is_a_real_signal(db):
+    """RI 단계의 발주≠입고는 '입고 전이라 당연'이 아니라 진짜 신호로 잡힌다(회귀 방지).
+
+    라이브 PO 134001752 축소판: 212 발주 / 210 입고 — 납품가능수량까지 210으로 확정된 미입고 2개.
+    """
+    _po(db, 1, status="RI", desc="거래명세서확인요청", order_qty=212, recv_qty=210)
+    _po(db, 2, status="RP", desc="거래처확인요청", order_qty=10, recv_qty=0)
+    db.commit()
+    s = compute_rocket_recon(db, *WIN)["summary"]
+    assert s["drift_po_count"] == 2                  # 전체는 둘 다 불일치
+    assert s["drift_po_count_settled_stage"] == 1    # ★진짜 신호는 RI 1건
+    assert s["settled_stage_po_count"] == 1
+    by = {r["status"]: r for r in s["by_status"]}
+    assert by["RI"]["is_settled_stage"] is True
+    assert by["RP"]["is_settled_stage"] is False
 
 
 # ── ③ SKU별 입고 = 단일SKU PO에서만 귀속 ─────────────────────────
@@ -252,6 +273,48 @@ def test_drift_only_filter(db):
     assert [x["product_number"] for x in r["skus"]] == ["BBB"]
     assert r["filters"]["sku_count_total"] == 4
     assert r["filters"]["sku_count_shown"] == 1
+    # ★제외된 CCC/DDD는 '드리프트 없음'이 아니라 '판정 불가' — 그 사실이 응답에 남아야 한다.
+    assert r["filters"]["sku_count_unknown_drift"] == 2
+
+
+def test_drift_only_excludes_pre_receiving_stage(db):
+    """입고 전 단계(PA·RP)의 발주≠입고는 드리프트가 아니다 — 필터·빨강 표시에 태우지 않는다.
+
+    이 화면이 존재하는 이유가 '당연한 불일치'와 '진짜 신호'를 가르는 것인데, 상품표가
+    단계를 무시하면 매일 보는 표가 오탐으로 가득 찬다(라이브 PA 58 + RP 13건).
+    """
+    _po(db, 1, status="PA", desc="발주확정", order_qty=10, recv_qty=0, sku_count=1)
+    _item(db, 1, "PRE", qty=10, amt=100000)
+    _po(db, 2, status="CI", desc="거래명세서확인", order_qty=10, recv_qty=6, sku_count=1)
+    _item(db, 2, "REAL", qty=10, amt=100000)
+    db.commit()
+    rows = {x["product_number"]: x for x in compute_rocket_recon(db, *WIN)["skus"]}
+    # 입고 전 단계: 참고값 drift_qty는 10이지만 '진짜 신호'는 판정 불가(None)
+    assert rows["PRE"]["drift_qty"] == 10
+    assert rows["PRE"]["drift_qty_settled_stage"] is None
+    assert rows["PRE"]["settled_stage_attributable_po_count"] == 0
+    # 입고 완료 단계: 진짜 신호
+    assert rows["REAL"]["drift_qty_settled_stage"] == 4
+    r = compute_rocket_recon(db, *WIN, drift_only=True)
+    assert [x["product_number"] for x in r["skus"]] == ["REAL"]
+    assert r["filters"]["sku_count_unknown_drift"] == 1
+
+
+def test_sku_invoice_counters_are_sku_scoped_not_window_distinct(db):
+    """행 배지 합 ≠ 요약 타일 — 계산서 1건이 멀티SKU 발주에 걸리면 SKU마다 잡힌다.
+
+    버그가 아니라 분모가 다른 것이다(요약=기간 전체 중복 제거). 화면 각주가 이 사실을
+    고지하므로, 그 전제가 코드에서 바뀌면 각주가 거짓말이 된다 → 여기서 고정한다.
+    """
+    _po(db, 1, seqs=[900], sku_count=3)
+    _item(db, 1, "AAA", qty=5, amt=50000, line_no=1)
+    _item(db, 1, "BBB", qty=5, amt=50000, line_no=2)
+    _item(db, 1, "CCC", qty=5, amt=50000, line_no=3)
+    _settle(db, 900, 150000, confirmed=None)   # 미확정 계산서 1건
+    db.commit()
+    r = compute_rocket_recon(db, *WIN)
+    assert r["summary"]["invoice"]["invoice_unconfirmed_count"] == 1   # 윈도우 distinct
+    assert sum(x["invoice_unconfirmed_count"] for x in r["skus"]) == 3  # SKU 스코프 반복
 
 
 def test_unconfirmed_only_filter(db):

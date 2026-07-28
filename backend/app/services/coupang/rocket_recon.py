@@ -48,11 +48,18 @@ _Z = Decimal("0")
 _Q4 = Decimal("0.0001")
 _KST = timedelta(hours=9)
 
-# 거래명세서 확인까지 도달한 상태 = 입고가 끝난 단계(라이브 실측 상태 3종: CI/PA/RP).
-#   CI 거래명세서확인 / PA 발주확정 / RP 거래처확인요청.
-# ★CI만 "입고 완료"로 본다 — 나머지는 입고 전이라 발주≠입고가 정상이다.
-#   새 상태 코드가 관측되면 여기 추가하기 전까지 '진행 중'으로 분류된다(추정 금지).
-SETTLED_STAGE_STATUSES = frozenset({"CI"})
+# 입고가 끝난 단계 = 발주≠입고가 "진짜 신호"인 단계. 라이브 실측 상태 **4종**(2026-07-28,
+#   coupang_rocket_purchase_order 651건 전수 — 입고율 = Σreceiving_qty/Σorder_qty):
+#     RI 거래명세서확인요청  2건  입고율 0.993  ← 입고 끝남
+#     CI 거래명세서확인    578건  입고율 0.910  ← 입고 끝남
+#     PA 발주확정           58건  입고율 0.190  ← 입고 전/중
+#     RP 거래처확인요청     13건  입고율 0.000  ← 입고 전
+# ★CI와 RI를 "입고 완료"로 본다. RI는 거래명세서 확인을 **요청**한 단계라 이름만 앞서 보이지만,
+#   실측 입고율이 CI보다 높다(0.993 > 0.910) — 물건은 이미 들어온 뒤다. RI를 빼면 그 단계의
+#   발주≠입고가 "입고 전이라 당연한 불일치" 회색 처리로 묻힌다(실제 PO 134001752: 212→210,
+#   납품가능수량도 210으로 확정된 진짜 미입고 2개). 추정이 아니라 전수 실측에 근거한 편입이다.
+# ★여기 없는 새 상태 코드는 '진행 중'으로 분류된다(추정 금지) — 관측되면 입고율을 재고 후 추가한다.
+SETTLED_STAGE_STATUSES = frozenset({"CI", "RI"})
 
 
 def _f(v) -> Decimal:
@@ -198,12 +205,18 @@ def _load_settlements(db: Session, invoice_seqs: set[int]) -> dict[int, CoupangR
     """계산서번호 집합 → {invoice_seq: 정산행}. 없는 번호는 키 자체가 없다(=미수집, 0 아님)."""
     if not invoice_seqs:
         return {}
-    rows = (
-        db.query(CoupangRocketSettlement)
-        .filter(CoupangRocketSettlement.invoice_seq.in_(invoice_seqs))
-        .all()
-    )
-    return {r.invoice_seq: r for r in rows}
+    # 발주상세 조회와 같은 이유로 청크 분할 — 윈도우는 사용자 입력이라 상한이 없고,
+    # 계산서번호는 PO당 ~1개라 긴 기간이면 IN 목록이 그대로 PO 수만큼 커진다(SQLite 변수 한계).
+    seqs = sorted(invoice_seqs)
+    out: dict[int, CoupangRocketSettlement] = {}
+    for i in range(0, len(seqs), 500):
+        rows = (
+            db.query(CoupangRocketSettlement)
+            .filter(CoupangRocketSettlement.invoice_seq.in_(seqs[i:i + 500]))
+            .all()
+        )
+        out.update({r.invoice_seq: r for r in rows})
+    return out
 
 
 def _agg_invoices(mapping: dict[int, list[int]], po_without_invoice: int,
@@ -332,7 +345,18 @@ def _sku_aggregate(db: Session, po_by_seq: dict[int, CoupangRocketPurchaseOrder]
         attr_seqs = r["_attr_po_seqs"]
         received = sum(int(po_by_seq[s].receiving_qty or 0) for s in attr_seqs)
         attr_order = sum(int(po_by_seq[s].order_qty or 0) for s in attr_seqs)
-        # 계산서 상태 — 이 SKU가 속한 PO들 기준.
+        # ★단계별 드리프트 — 요약 타일의 drift_po_count / drift_po_count_settled_stage와 같은 가름.
+        #   입고 전 단계(PA·RP) 발주는 입고 0이 정상이라 그 차이를 '드리프트'로 칠하면 오탐이 된다.
+        #   진짜 신호는 입고가 끝난 단계(CI·RI)의 귀속분 발주≠입고뿐이다.
+        settled_seqs = {s for s in attr_seqs
+                        if po_by_seq[s].purchase_order_status in SETTLED_STAGE_STATUSES}
+        settled_received = sum(int(po_by_seq[s].receiving_qty or 0) for s in settled_seqs)
+        settled_order = sum(int(po_by_seq[s].order_qty or 0) for s in settled_seqs)
+        # 계산서 상태 — **이 SKU가 속한 PO들** 기준(윈도우 전체가 아니다).
+        # ★행 배지의 합 ≠ summary.invoice 타일: 1계산서가 멀티SKU 발주에 걸리면 그 계산서가
+        #   SKU마다 한 번씩 잡힌다(inv_seen은 SKU 안에서만 중복 제거). summary는 윈도우 전체
+        #   distinct라 항상 더 작다. 같은 이름의 po_without_invoice_count도 분모가 다르다
+        #   (여기=이 SKU가 속한 PO 중 / summary=윈도우 전체 PO 중). 화면 각주로도 고지한다.
         no_inv = unconf = not_marked = miss = 0
         inv_seen: set[int] = set()
         for s in r["po_seqs"]:
@@ -368,7 +392,11 @@ def _sku_aggregate(db: Session, po_by_seq: dict[int, CoupangRocketPurchaseOrder]
             "received_attributable_po_count": len(attr_seqs),
             "received_unattributable_po_count": len(r["_unattr_po_seqs"]),
             "attributable_order_qty": attr_order if attr_seqs else None,
+            # 전체 귀속분 차이 — 입고 전 단계를 포함하므로 그 자체로는 '문제'가 아니다(참고값).
             "drift_qty": (attr_order - received) if attr_seqs else None,
+            # ★진짜 신호 — 입고 완료 단계(CI·RI) 귀속분만. 해당 PO 0건이면 None(0 아님).
+            "drift_qty_settled_stage": (settled_order - settled_received) if settled_seqs else None,
+            "settled_stage_attributable_po_count": len(settled_seqs),
             "invoice_count": len(inv_seen),
             "po_without_invoice_count": no_inv,
             "invoice_missing_row_count": miss,
@@ -513,8 +541,12 @@ def compute_rocket_recon(db: Session, dfrom: date, dto: date,
     sku_rows, coverage = _sku_aggregate(db, po_by_seq, invoice_map, settlements)
 
     total_sku_count = len(sku_rows)
+    # ★드리프트 '미상'을 '없음'으로 접지 않는다(원칙22) — 귀속 가능 PO가 없거나 입고 완료 단계
+    #   PO가 없는 SKU는 발주≠입고 여부를 **알 수 없다**. drift_only는 그런 SKU를 걸러내지만,
+    #   몇 건이 그렇게 빠졌는지 세어서 응답에 싣는다(화면이 "나머지는 정상"으로 읽히지 않게).
+    unknown_drift = sum(1 for r in sku_rows if r["drift_qty_settled_stage"] is None)
     if drift_only:
-        sku_rows = [r for r in sku_rows if r["drift_qty"] not in (None, 0)]
+        sku_rows = [r for r in sku_rows if r["drift_qty_settled_stage"] not in (None, 0)]
     if unconfirmed_only:
         sku_rows = [
             r for r in sku_rows
@@ -541,6 +573,8 @@ def compute_rocket_recon(db: Session, dfrom: date, dto: date,
             "unconfirmed_only": unconfirmed_only,
             "sku_count_total": total_sku_count,
             "sku_count_shown": len(sku_rows),
+            # 발주≠입고를 판정할 근거 자체가 없는 SKU 수(0이 아니라 '모름') — drift_only가 제외한다.
+            "sku_count_unknown_drift": unknown_drift,
         },
         "skus": sku_rows,
         "note": (

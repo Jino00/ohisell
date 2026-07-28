@@ -186,8 +186,8 @@ def rocket_recon(
     응답: summary(PO 그레인 요약 타일 + 상태별 + 계산서 + 발주상세 커버리지) · skus[](상품 행).
       - 요약 타일은 윈도우 발주 **전체**(PO 그레인), 상품표는 **발주상세 수집분만**(SKU 그레인).
         둘의 합계가 다른 것은 정상이며 그 차이가 summary.detail_coverage다.
-      - drift_po_count_settled_stage = 거래명세서확인 단계인데 발주≠입고(진짜 신호).
-        drift_po_count(전체)는 입고 전 단계의 당연한 불일치를 포함한다.
+      - drift_po_count_settled_stage = **입고 완료 단계**(CI 거래명세서확인 · RI 거래명세서확인요청)
+        인데 발주≠입고(진짜 신호). drift_po_count(전체)는 입고 전 단계(PA·RP)의 당연한 불일치를 포함한다.
       - SKU별 입고수량은 원천에 없어 **단일SKU PO에서만** 귀속하고 나머지는 미귀속으로 표기한다.
         미수집(납품가능수량 NULL·정산행 없음)은 0이 아니라 별도 카운트로 온다(원칙22).
 
