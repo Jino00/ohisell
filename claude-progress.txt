@@ -76,9 +76,9 @@
 - 라이브 실증: WING1 07-27 23:08 완주 — gap-driven 대상 선택 정상 + PRODUCT_SIZE 129행 첫 적재(P1 수정 라이브 작동). 35일 창 내 결손 0(기백필 상태 확인).
 - **차단/잔여**: WING1·WING2 Wing 데스크톱 세션 밤사이 만료(login_required·재시도 3회 소진) → ①WING2 결손 트리거 재확인 ②WING1 04-20~05-03 옛 공백 백필(`rg_status_days:100` 1회 오버라이드 — 시도했다 세션 만료로 미완, config 원복 확인됨) — 둘 다 **Jino의 Wing 재로그인 선행 필요**. chip task_2a26d430은 이 스프린트의 층2 루프 세션 재확인으로 코드 확인分 해소.
 
-## 최신 상태 (2026-07-27 23:xx, 워크트리 agent-a0d4b0f9f34968c6a) — CS 스프린트(콜드 첫 입찰 레인) PR #123
+## (이전) 최신 상태 (2026-07-27 23:xx, 워크트리 agent-a0d4b0f9f34968c6a) — CS 스프린트(콜드 첫 입찰 레인) PR #123
 
-## 최신 상태 (2026-07-28 08:xx, 워크트리 musing-germain-a6e240) — D-NAO-97 외부변경 감지기 오탐 수정(배포 완료)
+## (이전) 최신 상태 (2026-07-28 08:xx, 워크트리 musing-germain-a6e240) — D-NAO-97 외부변경 감지기 오탐 수정(배포 완료)
 - **증상**: `naver_change_log` id 847 — 03 캠페인이 07-27 22:46에 `external_status_change`
   (userLock false→true, "외부(MOP/사람) 상태 변경")로 기록. 라이브는 `userLock=false` ·
   `statusReason=CAMPAIGN_LIMITED_BY_BUDGET`(일예산 5만 소진) — **네이버가 멈춘 것을 사람 탓으로 기록**했다.
