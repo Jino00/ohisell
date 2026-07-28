@@ -27,7 +27,7 @@ from app.database import get_db
 from app.models import Channel, CoupangAdCostDaily, CoupangAdOptionDaily, CoupangProductItem, CoupangRevenueFee, CoupangRgInbound, CoupangRgOrderItem, CoupangRgSettlementFee, Order, ProductChannelMapping, ProductMaster
 from app.routers._coupang_write_http import handle_write as _handle_write
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
-from app.services.coupang import ad_cost_sync, coupon_write, refresh_contract, coupang_seller_cost as _seller_cost_harness, demand_classifier, in_transit_estimator, lead_time_estimator, ohitech_ad_sync, product_write, rg_fee_audit, rg_inbound_sync, rg_product_size_sync, rg_replenishment, rg_settlement_sync, replenishment_backtest, rocket_cost_map, rocket_supplier_sync, rg_cost_reader as _rg_reader, sales_velocity_estimator, vendor_summary_sync
+from app.services.coupang import ad_cost_sync, coupon_write, refresh_contract, coupang_seller_cost as _seller_cost_harness, demand_classifier, in_transit_estimator, lead_time_estimator, ohitech_ad_sync, product_write, rg_fee_audit, rg_inbound_sync, rg_product_size_sync, rg_replenishment, rg_settlement_sync, replenishment_backtest, rocket_cost_map, rocket_promo_sync, rocket_supplier_sync, rg_cost_reader as _rg_reader, sales_velocity_estimator, vendor_summary_sync
 from app.utils.crypto import CookieCryptoError
 
 log = logging.getLogger(__name__)
@@ -1383,6 +1383,86 @@ def ingest_rocket_po_detail(
     if not isinstance(rows, list) or not rows:
         raise HTTPException(status_code=400, detail="rows[] 필요")
     return rocket_supplier_sync.ingest_po_items(db, po_seq, vendor_id, rows)
+
+
+# ════════════════════════════════════════════════
+# 프로모션 손익 레이어 ingest (트랙 coupang-promo-pnl Phase 1, D-CPP-1~6)
+# ────────────────────────────────────────────────
+# body의 rows는 **우리 레코드 계약**(PLAN_coupang-promo-pnl-phase1.md §4)이지 쿠팡 원시 응답이
+#   아니다. 2026-07-28 정찰에서 supplier 세션이 만료돼 원시 스키마를 특정하지 못했고, 모르는
+#   스키마의 파서를 지어내지 않기로 했다(추측 금지). 페처가 raw→계약 매핑을 담당한다.
+# ★회계축 불변: 여기로 들어온 값은 net_profit·종합조망에 결합되지 않는다(D-CPP-2/D-CPP-4).
+# ════════════════════════════════════════════════
+@router.post("/rocket/sales/ingest")
+def ingest_rocket_sales(
+    body: dict[str, Any] = Body(...),
+    x_ingest_token: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """로켓배송(1P) 옵션×일 소비자 판매(판매분석) push → snapshot upsert(멱등).
+
+    body: {"vendor_id":"A01029796", "source":"sales_analysis|excel",
+           "rows":[{"option_id","date","sku_id","qty","revenue","visitors","conversion_rate","product_name"}, ...]}
+    vendor_id는 계정축(판매분석 행에 없어 주입). ★revenue는 소비자 실현가 — 회계 매출 아님(D-CPP-2).
+    """
+    _check_ingest_token(x_ingest_token)
+    vendor_id = str(body.get("vendor_id") or "").strip()
+    if not vendor_id:
+        raise HTTPException(status_code=400, detail="vendor_id 필요")
+    rows = body.get("rows")
+    if not isinstance(rows, list) or not rows:
+        raise HTTPException(status_code=400, detail="rows[] 필요")
+    source = str(body.get("source") or "sales_analysis").strip() or "sales_analysis"
+    return rocket_promo_sync.ingest_rocket_sales(db, vendor_id, rows, source=source)
+
+
+@router.post("/rocket/promotion/ingest")
+def ingest_rocket_promotion(
+    body: dict[str, Any] = Body(...),
+    x_ingest_token: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """로켓배송(1P) 프로모션 신청(공급자허브) push → snapshot upsert(멱등, grain=request_id).
+
+    body: {"vendor_id":"A01029796",
+           "rows":[{"request_id","contract_id","promotion_name","promotion_type","status",
+                    "start_at","end_at","share_ratio","discount_method","discount_value",
+                    "budget_amount","settlement_date","applied_product_count","requested_at","raw"}, ...]}
+    행사기간(start_at/end_at)은 **초 단위**를 보존한다. ★분담금 청구 방식은 미확정(D-CPP-4) —
+    이 데이터는 사실 기록이며 어떤 비용 라인에도 자동 반영되지 않는다.
+    """
+    _check_ingest_token(x_ingest_token)
+    vendor_id = str(body.get("vendor_id") or "").strip()
+    if not vendor_id:
+        raise HTTPException(status_code=400, detail="vendor_id 필요")
+    rows = body.get("rows")
+    if not isinstance(rows, list) or not rows:
+        raise HTTPException(status_code=400, detail="rows[] 필요")
+    return rocket_promo_sync.ingest_rocket_promotions(db, vendor_id, rows)
+
+
+@router.post("/coupon/used-amount/ingest")
+def ingest_coupon_used_amount(
+    body: dict[str, Any] = Body(...),
+    x_ingest_token: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """쿠폰별 실사용 할인액(= 셀러 실부담, D-CPP-3 권위값) push → 기존 coupang_coupon 행 갱신.
+
+    body: {"account_key":"COUPANG_WING1", "source":"wing_ui|wing_api|manual",
+           "rows":[{"coupon_id":"94177420","used_amount":156000}, ...]}
+    ★쿠팡 Open API(fms)에는 이 값이 없다(ref 06 §E 전수 대조) → coupon_sync가 아니라 이 경로로만
+      들어온다. 없는 쿠폰은 행을 만들지 않고 not_found로 돌려준다(유령 행 방지).
+    """
+    _check_ingest_token(x_ingest_token)
+    account_key = str(body.get("account_key") or "").strip()
+    if not account_key:
+        raise HTTPException(status_code=400, detail="account_key 필요")
+    rows = body.get("rows")
+    if not isinstance(rows, list) or not rows:
+        raise HTTPException(status_code=400, detail="rows[] 필요")
+    source = str(body.get("source") or "wing_ui").strip() or "wing_ui"
+    return rocket_promo_sync.ingest_coupon_used_amount(db, account_key, rows, source=source)
 
 
 # ════════════════════════════════════════════════
