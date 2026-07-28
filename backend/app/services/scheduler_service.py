@@ -40,6 +40,11 @@ scheduler = BackgroundScheduler(
 # 5분(:20 잡이 :25 내에 못 돌면 폐기)만 허용. 일 레인(08:50)은 전역 기본+catch-up 정책 유지.
 _AUTO_OPERATOR_HOURLY_MISFIRE_GRACE = 300
 
+# 네이버 시간별 주문 동기화 전용 misfire 유예 — 전역 3600s를 상속하면 재시작 직후 최대
+# 1시간 늦게 발화한다. 근시간 보정 레인이라 그 시점엔 이미 다음 정시가 임박했으므로
+# _AUTO_OPERATOR_HOURLY_MISFIRE_GRACE와 같은 패턴으로 300초만 허용(catch-up 정책과 정합).
+_NAVER_ORDERS_HOURLY_MISFIRE_GRACE = 300
+
 
 def _get_own_db_session():
     """FastAPI Depends 없이 직접 DB 세션 생성"""
@@ -150,6 +155,60 @@ def sync_all_channels_job():
 
     except Exception as e:
         log.exception("[스케줄러] sync_all_channels_job 에러: %s", e)
+        raise  # 삼킴 정렬(S5b): EVENT_JOB_ERROR/HTTP500로 실패 표면화(16일 침묵 사고 방지)
+    finally:
+        db.close()
+
+
+def sync_naver_orders_hourly_job():
+    """네이버 스마트스토어 주문 시간별 동기화 (스케줄러 작업) — 근시간 공백 메움 전용.
+
+    ★왜 스마트스토어 전용인가: 2026-07-28 실사고 — 근시간 동기화의 유일한 트리거가
+    프런트엔드 마운트 시 호출되는 POST /api/sync/realtime였고, 서버 자동 실행은
+    auto_sync_orders 일 1회(06:00)뿐이라, 아무도 대시보드를 열지 않으면 7시간 넘게
+    동기화 시도 자체가 0건이었다(sync_log 6채널 전부 공백 실증). 네이버 광고 성과를
+    당일 스마트스토어 실주문으로 대조하는 작업이 이 공백에 막혀 스마트스토어부터
+    좁혀서 잡는다(Jino 확정 2026-07-28). 쿠팡(Wing/RG)·cafe24는 같은 공백에 걸리지만
+    이번 스코프 밖 — "이왕 하는 김에" 확대하지 않는다.
+    ★왜 7일 창(date_from=None)인가: sync_channel_orders 기본창(kst_today()-7일)을 그대로
+    쓴다. 06:00 일 배치(sync_all_channels_job)는 취소 반영을 위해 30일 넓은 창을 쓰지만,
+    그건 하루 1회면 충분한 몫이다. 이 잡은 시간마다 도는 좁은 보정 레인이라 좁은 창으로
+    충분하고, 30일 창을 매시간 돌리면 불필요한 API 부하만 늘어난다.
+    ★왜 RG 미포함인가: RG 주문 동기화(sync_all_rg_orders)는 이번 스코프 밖(Jino 확정) —
+    sync_all_channels_job을 참고 삼되 그 호출은 절대 가져오지 않는다.
+    ★왜 catch-up 제외인가: 시간성이 소멸하는 근시간 보정 레인이다. 놓친 회차를 뒤늦게
+    따라잡아 봐야 그 시각의 "근시간" 가치가 없다 — 다음 정시가 재기회(_AUTO_OPERATOR_HOURLY_MISFIRE_GRACE와
+    같은 사상, run_naver_auto_operator_hourly_job 참고).
+    역할 분담: 06:00 일 배치 = 넓은 30일 창 + 전 채널 + RG(취소 정합 포함) / 이 잡 = 좁은
+    7일 창 + 스마트스토어 단독(근시간 공백 메움).
+    """
+    db = _get_own_db_session()
+    try:
+        from app.services.sync_service import sync_channel_orders
+
+        # ★channel_id 하드코딩 금지(DB 시퀀스라 취약) — platform으로 대상 선정.
+        # api_type != "excel"은 방어적 계약 명시(현재 네이버 채널은 excel 아님이 라이브 실측이나,
+        # 엑셀 전용 채널이 실수로 naver platform으로 등록돼도 sync_channel_orders 호출을 막는다).
+        channels = db.query(Channel).filter(
+            Channel.platform == "naver", Channel.api_type != "excel"
+        ).all()
+        if not channels:
+            log.info("[스케줄러] sync_naver_orders_hourly_job: 대상 네이버 채널 없음 — 건너뜀")
+            return
+
+        for ch in channels:
+            try:
+                result = sync_channel_orders(db, ch.id, None, None)
+                log.info(
+                    "[스케줄러] 네이버 시간별 주문 동기화 완료: 채널 %s → %s (신규: %s, 취소반영: %s)",
+                    ch.name, result.get("status"), result.get("new_orders"),
+                    result.get("reconciled_cancelled"),
+                )
+            except Exception as e:
+                log.error("[스케줄러] 네이버 시간별 주문 동기화 채널 %s 에러: %s", ch.name, e)
+
+    except Exception as e:
+        log.exception("[스케줄러] sync_naver_orders_hourly_job 에러: %s", e)
         raise  # 삼킴 정렬(S5b): EVENT_JOB_ERROR/HTTP500로 실패 표면화(16일 침묵 사고 방지)
     finally:
         db.close()
@@ -1354,6 +1413,10 @@ def _ensure_default_states(db):
     """기본 스케줄러 상태 DB 레코드 생성"""
     defaults = [
         ("auto_sync_orders", "0 6 * * *"),
+        # 네이버 스마트스토어 시간별 주문 동기화(근시간 공백 메움, 2026-07-28 실사고 대응).
+        # :45인 이유: 기존 시간별 잡이 :5(snapshot)·:7(trigger_watch)·:15(flight_loop 2h)·
+        # :20(auto_operator_hourly)에 몰려 있어 SQLite 라이터 충돌을 피하려는 것.
+        ("sync_naver_orders_hourly", "45 * * * *"),
         ("auto_profit_calc", "30 6 * * *"),
         ("cafe24_token_refresh", "*/30 * * * *"),
         ("sync_naver_sa_ad_costs", "0 7 * * *"),
@@ -1596,6 +1659,7 @@ def job_func_for(job_name: str):
     """
     return {
         "auto_sync_orders": sync_all_channels_job,
+        "sync_naver_orders_hourly": sync_naver_orders_hourly_job,
         "auto_profit_calc": recalculate_profit_job,
         "cafe24_token_refresh": cafe24_proactive_refresh_job,
         "sync_naver_sa_ad_costs": sync_naver_sa_ad_costs_job,
@@ -1651,6 +1715,8 @@ def job_kwargs_for(job_name: str) -> dict:
     """
     if job_name == "run_naver_auto_operator_hourly":
         return {"misfire_grace_time": _AUTO_OPERATOR_HOURLY_MISFIRE_GRACE}
+    if job_name == "sync_naver_orders_hourly":
+        return {"misfire_grace_time": _NAVER_ORDERS_HOURLY_MISFIRE_GRACE}
     return {}
 
 
