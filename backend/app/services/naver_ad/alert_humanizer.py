@@ -36,10 +36,19 @@ _CAMPAIGN_TYPE_WORDS = {
 
 def clean_name(name: str | None) -> str:
     """표시용 이름 정리 — 앞머리 **장식 기호만** 제거하고 공백 정돈. 코드 접두는 보존한다
-    (그것이 사람이 그룹을 구분하는 유일한 표식인 경우가 많다). 빈 값이면 ''(호출부가 ID 폴백)."""
+    (그것이 사람이 그룹을 구분하는 유일한 표식인 경우가 많다). 빈 값이면 ''(호출부가 ID 폴백).
+
+    ★대괄호 라벨 접두는 통째로 보존한다(D-NAO-104 라이브 실측): prod 캠페인명
+    `● [P_삭제금지]03. 아이폰_강화유리`에서 장식(`● `)과 함께 여는 괄호까지 지우면 화면에
+    `P_삭제금지]03. …`라는 **깨진 이름**이 남는다(닫는 괄호만 덩그러니). 뒤에 짝이 되는
+    `]`가 있으면 그 `[`는 장식이 아니라 라벨의 시작이다 — 짝 없는 `[`만 장식으로 지운다."""
     if not name:
         return ""
-    s = _LEADING_DECOR.sub("", str(name)).strip()
+    s = str(name).strip()
+    lead = _LEADING_DECOR.match(s)
+    if lead:
+        decor, rest = lead.group(0), s[lead.end():]
+        s = decor[decor.index("["):] + rest if ("[" in decor and "]" in rest) else rest
     return " ".join(s.split())
 
 

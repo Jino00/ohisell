@@ -17,6 +17,7 @@ import NaverAdCommandCenter from "./pages/NaverAdCommandCenter";
 import NaverAdDiagnosisBoard from "./pages/NaverAdDiagnosisBoard";
 import NaverAdOptimizationConsole from "./pages/NaverAdOptimizationConsole";
 import NaverAdRawExplorer from "./pages/NaverAdRawExplorer";
+import NaverAdPerformance from "./pages/NaverAdPerformance";
 
 export default function App() {
   return (
@@ -35,6 +36,7 @@ export default function App() {
           <Route path="settings" element={<Settings />} />
           <Route path="ad-report" element={<AdReport />} />
           <Route path="naver-ad" element={<NaverAdCommandCenter />} />
+          <Route path="naver-ad/performance" element={<NaverAdPerformance />} />
           <Route path="naver-ad/report" element={<NaverAdReport />} />
           <Route path="naver-ad/diagnosis" element={<NaverAdDiagnosisBoard />} />
           <Route path="naver-ad/console" element={<NaverAdOptimizationConsole />} />

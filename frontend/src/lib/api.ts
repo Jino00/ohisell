@@ -2199,6 +2199,12 @@ export interface NaverCampaignRosterRow {
   optimizer: NaverAdOptimizer;
   /** D-NAO-65 UI2 — loss 대응 정책. null=미설정 → 콘솔이 '기본(고삐)'로 해석. */
   loss_policy: NaverLossPolicy | null;
+  /** D-NAO-104 P1-1(additive) — 자동 운영 레인 대상인가. optimizer와 **다른 축**이다
+   *  (우리 소유인데 자동 레인만 꺼둔 상태가 실재한다). */
+  auto_operate: boolean;
+  /** D-NAO-97 statusReason 원문(ELIGIBLE/CAMPAIGN_PAUSED/CAMPAIGN_LIMITED_BY_BUDGET…).
+   *  한글화는 성과 뷰(백엔드)가 하고, 여기선 원문 그대로 온다. null=미수집. */
+  status_reason: string | null;
   window_days: number;
 }
 
@@ -2255,4 +2261,65 @@ export interface CollectionStatus {
 }
 export function getCollectionStatus(): Promise<CollectionStatus> {
   return fetchApi<CollectionStatus>("/api/coupang/ops/collection-status");
+}
+
+// ── 광고 성과(사장님 뷰) — D-NAO-104 Phase 1 (docs/PLAN_naver-ad-performance-view.md §4-ⓐ) ──
+// ★이 응답의 한국어 문자열은 **백엔드가 이미 D-NAO-103 규칙으로 조립한 것**이다(ID·내부 용어
+//   없음, 문장). 프론트는 그대로 렌더한다 — 여기서 문장을 다시 만들면 표기 규칙이 두 벌이 된다.
+// ★null은 전부 "알 수 없음"이다. 0으로 대체하거나 `?? 0`으로 삼키지 말 것(원칙22).
+export interface NaverPerformanceCampaignCard {
+  /** 화면 미표시(딥링크·title 속성 전용). D-NAO-103①: 사람에겐 이름만 보여준다. */
+  campaign_id: string;
+  name: string;
+  type_label: string;          // 쇼핑검색 / 파워링크 …
+  status_label: string;        // 정상 노출 중 / 정지됨 / 오늘 예산을 다 써서 멈춤 …
+  review_label: string | null; // "검수 중"(정상 노출과 배타가 아닌 별도 축)
+  managed_by_label: string;    // 우리가 자동으로 운영 / 대행사가 운영 / 직접 관리…
+  auto_operate: boolean;
+  spend_today: number;
+  daily_budget: number | null; // null = 일예산 미설정(무제한)
+  spend_ratio: number | null;  // 분수(0~1). 일예산 없으면 null
+  imp_today: number;
+  clk_today: number;
+  /** 상한 프록시 매출(그 상품의 전체 판매액). 상품 매핑이 없으면 null. */
+  revenue_today_proxy: number | null;
+  /** 상한 프록시 ROAS. null = 알 수 없음 — **0.00배로 렌더 금지**(파워링크가 항상 이 경우). */
+  roas_today_proxy: number | null;
+  roas_unknown_reason: string | null;
+  target_roas: number | null;
+  bep_roas: number | null;
+  shared_product_count: number; // 여러 캠페인이 공유해 매출을 나눠 계상한 상품 수
+  active_today: boolean;
+  verdict_sentence: string;
+}
+
+export type NaverPerformanceActionState = "executed" | "blocked" | "unknown";
+
+export interface NaverPerformanceActionItem {
+  at: string | null;
+  time_label: string;
+  state: NaverPerformanceActionState;
+  campaign_id: string | null;
+  campaign_name: string | null;
+  sentence: string;
+}
+
+export interface NaverPerformanceToday {
+  as_of: string;
+  date: string;
+  data_note: string;
+  campaigns: NaverPerformanceCampaignCard[];
+  totals: { spend_today: number; campaigns_active_today: number; campaigns_total: number };
+  today_actions: {
+    executed_count: number;
+    blocked_count: number;
+    unknown_count: number;
+    items: NaverPerformanceActionItem[];
+    /** 0건일 때만 채워진다 — 0을 숨기지 않고 왜 0인지 말한다(D-47-h). */
+    quiet_reason: string | null;
+  };
+}
+
+export function fetchNaverPerformanceToday(): Promise<NaverPerformanceToday> {
+  return fetchApi<NaverPerformanceToday>("/api/naver/ad/performance/today");
 }

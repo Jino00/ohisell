@@ -31,6 +31,9 @@
 # GET /api/naver/ad/raw/search-terms  — 검색어 원자료(prod 114,285행), limit 상한 200 강제.
 # GET /api/naver/ad/raw/hourly        — 시간당 스냅샷 + daily_budget·spend_ratio(스펙 §1-4의
 #   "소진율 미노출" 해소). spend_ratio는 budget 없음/0이면 None(0 나눗셈 금지).
+# GET /api/naver/ad/performance/today — 광고 성과(사장님 뷰) ①오늘 한눈에 + ②오늘 시스템이
+#   한 일(D-NAO-104 Phase 1). perf_today_harness 경유·읽기 전용. 응답 문자열은 D-NAO-103
+#   표기 규칙(ID·내부 용어 금지, 문장)을 통과한 상태로 나간다 — 프론트는 조립하지 않는다.
 # GET /api/naver/ad/bm/agency-ops     — BM SA-2 조작 이벤트 온디맨드 드릴다운(D-NAO-79 ③).
 # GET /api/naver/ad/bm/snapshot       — BM SA-1 구조 스냅샷 온디맨드 드릴다운(D-NAO-79 ③).
 # GET /api/naver/ad/bm/benchmark      — BM SA-3 벤치마크 프라이어 현황 온디맨드 드릴다운
@@ -76,6 +79,7 @@ from app.services.naver_ad import delegation_gate
 from app.services.naver_ad import metrics_aggregator
 from app.services.naver_ad import naver_execution_harness
 from app.services.naver_ad import naver_sa_writer
+from app.services.naver_ad import perf_today_harness
 from app.services.naver_ad import proposal_writer
 from app.services.naver_ad.ad_report import build_report
 from app.services.naver_ad.diagnosis import build_diagnosis
@@ -1639,3 +1643,26 @@ def get_search_term_exclusions(
             for r in rows
         ],
     }
+
+
+# ══════════════════════════════════════════════════════════════════
+# 광고 성과(사장님 뷰) — D-NAO-104 Phase 1 (docs/PLAN_naver-ad-performance-view.md §4-ⓐ)
+# ★읽기 전용 페이지 전용 API다. 조작(관리주체 스위치·승인·예산 변경)은 커맨드 센터와
+#   최적화 콘솔이 계속 담당한다 — 여기에 쓰기 엔드포인트를 추가하지 말 것(계획서 §0-1).
+# ★응답 문자열은 전부 D-NAO-103 규칙을 통과한 것이다(ID·내부 용어 없음, 문장). 프론트는
+#   문장을 조립하지 않고 그대로 렌더한다 — 표기 규칙이 두 벌이 되면 갈라진다.
+# ══════════════════════════════════════════════════════════════════
+
+
+@router.get("/performance/today")
+def performance_today(db: Session = Depends(get_db)) -> dict:
+    """오늘 한눈에(캠페인 카드) + 오늘 시스템이 한 일(한글 문장). 파라미터 없음(오늘 고정).
+
+    당일 숫자의 원천은 시간별 스냅샷(비용·노출·클릭)과 스마트스토어 실주문(매출 프록시)이다
+    — naver_ad_daily는 그날 확정 적재 전이라 쓰지 않는다(계획서 §4 창 관례).
+
+    ★`roas_today_proxy`는 **상한 프록시**다(그 상품의 전체 판매액 / 광고비). 상품 매핑이 없는
+    지면(파워링크·브랜드검색)은 배분이 원리적으로 불가능해 **null**로 나간다 — 0으로 채우면
+    "성과가 바닥"이라는 거짓 단언이 된다(원칙22). 프론트는 null을 '—'로 렌더한다.
+    """
+    return perf_today_harness.build(db)
