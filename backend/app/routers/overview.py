@@ -19,6 +19,7 @@ from app.services.coupang.revenue_canonical import compute_canonical_revenue
 from app.services.coupang.revenue_reconcile import reconcile_revenue
 from app.services.coupang.rocket_intelligence import compute_rocket_overview
 from app.services.coupang.rocket_promo_pnl import compute_promo_pnl_overview
+from app.services.coupang.rocket_recon import compute_rocket_recon, compute_rocket_recon_sku
 
 log = logging.getLogger(__name__)
 
@@ -156,4 +157,63 @@ def rocket_promo_pnl(
     result = compute_promo_pnl_overview(
         db, _ROCKET_VENDOR_ID, limit=limit, request_id=(request_id or None)
     )
+    return _jsonify(result)
+
+
+def _recon_window(from_: str | None, to: str | None) -> tuple[date, date]:
+    """대사 화면 기간 파싱 — 기본 최근 90일(발주 기준). 다른 조망(7일)보다 긴 이유:
+    발주→입고→거래명세서→계산서 확정까지 수 주가 걸려, 7일 창은 대사 자체가 성립하지 않는다."""
+    today = kst_today()
+    dto = _parse_date(to, today)
+    dfrom = _parse_date(from_, dto - timedelta(days=89))
+    if dfrom > dto:
+        raise HTTPException(status_code=422, detail="from이 to보다 늦습니다")
+    return dfrom, dto
+
+
+@router.get("/rocket-recon")
+def rocket_recon(
+    from_: str | None = Query(None, alias="from"),
+    to: str | None = Query(None),
+    drift_only: bool = Query(False, description="발주≠입고인 상품만(귀속 가능분 기준)"),
+    unconfirmed_only: bool = Query(False, description="계산서 미연결·미확정·전송 미표기 상품만"),
+    db: Session = Depends(get_db),
+):
+    """로켓배송(1P) 통합 대사 — 발주·납품·거래명세서 단계·계산서를 상품(SKU) 한 표로. 조회 전용.
+
+    ★읽기 전용 신규 API다. 기존 회계·종합조망·수집 경로는 한 톨도 바뀌지 않는다.
+
+    응답: summary(PO 그레인 요약 타일 + 상태별 + 계산서 + 발주상세 커버리지) · skus[](상품 행).
+      - 요약 타일은 윈도우 발주 **전체**(PO 그레인), 상품표는 **발주상세 수집분만**(SKU 그레인).
+        둘의 합계가 다른 것은 정상이며 그 차이가 summary.detail_coverage다.
+      - drift_po_count_settled_stage = 거래명세서확인 단계인데 발주≠입고(진짜 신호).
+        drift_po_count(전체)는 입고 전 단계의 당연한 불일치를 포함한다.
+      - SKU별 입고수량은 원천에 없어 **단일SKU PO에서만** 귀속하고 나머지는 미귀속으로 표기한다.
+        미수집(납품가능수량 NULL·정산행 없음)은 0이 아니라 별도 카운트로 온다(원칙22).
+
+    기본 기간 = 최근 90일(발주일 KST).
+    """
+    dfrom, dto = _recon_window(from_, to)
+    result = compute_rocket_recon(
+        db, dfrom, dto, _ROCKET_VENDOR_ID,
+        drift_only=drift_only, unconfirmed_only=unconfirmed_only,
+    )
+    return _jsonify(result)
+
+
+@router.get("/rocket-recon/sku/{product_number}")
+def rocket_recon_sku(
+    product_number: str,
+    from_: str | None = Query(None, alias="from"),
+    to: str | None = Query(None),
+    db: Session = Depends(get_db),
+):
+    """한 상품(SKU)이 속한 발주 목록 — 행 확장용. 조회 전용, 윈도우 계약은 /rocket-recon과 동일.
+
+    각 행: PO번호·발주일·상태(거래명세서 단계 포함)·PO 발주/입고 수량·이 SKU 라인 수량·
+      연결 계산서(번호·작성일·확정일·전송 표기·지급예정). 계산서 found=false = 번호는 있으나
+      정산행 미수집(발행 안 됨이 아니다).
+    """
+    dfrom, dto = _recon_window(from_, to)
+    result = compute_rocket_recon_sku(db, product_number, dfrom, dto, _ROCKET_VENDOR_ID)
     return _jsonify(result)
