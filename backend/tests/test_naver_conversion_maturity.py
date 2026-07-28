@@ -232,3 +232,51 @@ def test_rpc_corrects_each_day_separately(db):
     clk, rpc = bcc._rpc_for(db, TODAY, adgroup_id="grp1")
     assert clk == 20
     assert rpc == Decimal(1500)  # (20,000 + 10,000) / 20 — 일괄 보정이면 2,000, 무보정이면 1,000
+
+
+# ═══ 스킵 판정 ↔ 금액 집계 필터 정합 (2026-07-29) ═══
+# 두 쿼리가 서로 다른 모집단을 보면 "아직 안 채워짐"이 "진짜 0원"으로 기록된다.
+# 실측 피해: 07-01~03 코호트가 인위적 계단이 되어 곡선이 days 8~18에서 4/7로 고정됨.
+
+def test_snapshot_skips_ad_date_with_only_backfill_sentinel_rows(db):
+    """★회귀: sentinel 행만 있는 ad_date는 '미수집'이므로 0으로 기록하지 않고 스킵한다."""
+    from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
+    from app.services.naver_ad.conversion_maturity import take_daily_snapshot
+    from app.models import NaverAdDaily, NaverConversionMaturitySnapshot
+
+    ad_date = date(2026, 7, 20)
+    db.add(NaverAdDaily(
+        ad_date=ad_date, campaign_id="cmp-x", campaign_type="SHOPPING",
+        adgroup_id=BACKFILL_SENTINEL_ADGROUP, keyword_id="",
+        imp=100, clk=10, cost=1000, conv_direct_amt=0, conv_indirect_amt=0,
+    ))
+    db.commit()
+    take_daily_snapshot(db, today=date(2026, 7, 28))
+    rows = db.query(NaverConversionMaturitySnapshot).filter(
+        NaverConversionMaturitySnapshot.ad_date == ad_date).all()
+    assert rows == [], "sentinel만 있는 날을 '관측된 0'으로 기록했다"
+
+
+def test_snapshot_records_when_real_rows_exist(db):
+    """실단위 행이 있으면 정상 기록 — 위 수정이 정상 경로를 막지 않는다."""
+    from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
+    from app.services.naver_ad.conversion_maturity import take_daily_snapshot
+    from app.models import NaverAdDaily, NaverConversionMaturitySnapshot
+
+    ad_date = date(2026, 7, 20)
+    db.add(NaverAdDaily(  # sentinel(금액 집계에서 제외됨)
+        ad_date=ad_date, campaign_id="cmp-x", campaign_type="SHOPPING",
+        adgroup_id=BACKFILL_SENTINEL_ADGROUP, keyword_id="",
+        imp=100, clk=10, cost=1000, conv_direct_amt=999_999, conv_indirect_amt=0,
+    ))
+    db.add(NaverAdDaily(  # 실단위
+        ad_date=ad_date, campaign_id="cmp-x", campaign_type="SHOPPING",
+        adgroup_id="grp-1", keyword_id="kw-1",
+        imp=100, clk=10, cost=1000, conv_direct_amt=50_000, conv_indirect_amt=10_000,
+    ))
+    db.commit()
+    take_daily_snapshot(db, today=date(2026, 7, 28))
+    rows = db.query(NaverConversionMaturitySnapshot).filter(
+        NaverConversionMaturitySnapshot.ad_date == ad_date).all()
+    assert len(rows) == 1
+    assert rows[0].total_amt == 60_000, "sentinel 금액이 섞이면 안 된다"
