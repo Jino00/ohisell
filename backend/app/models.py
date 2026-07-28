@@ -1368,6 +1368,10 @@ class CoupangRocketPurchaseOrderItem(Base):
     product_name: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
     purchase_type: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)  # 일반매입/직매입
     order_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 발주수량(원가 산정용)
+    # 업체납품가능수량(발주상세 인덱스 5, ref 20b §2) — 우리가 확인한 납품 가능분.
+    #   PO그레인 CoupangRocketPurchaseOrder.vendor_confirmed_qty(sumOfVendorConfirmedQty)의 per-SKU 판.
+    #   nullable: 이 컬럼 신설 이전에 적재된 기존 행은 값 없음(백필 전까지 NULL).
+    vendor_confirmed_qty: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     # 금액(gross/net, 원 단위) — 쿠팡→우리 매입(매출), 우리 원가 아님(원가는 product_master)
     unit_purchase_price: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)  # 매입 단가
     line_order_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)  # 라인 발주금액(gross)
@@ -1404,6 +1408,12 @@ class CoupangRocketSettlement(Base):
     tax_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)  # 과세유형
     first_payment_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)  # 1차지급액
     second_payment_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)  # 2차지급액
+    # 전자세금계산서 전송성공 여부 — 정산 테이블 마지막(헤더명 빈) 링크 컬럼에서 파싱(ref 20 §4 #16).
+    #   True='전송성공' 표기 / False='전송성공' **미표기** / None=셀 부재·미관측 토큰(판별 불가).
+    #   ★False를 '전송실패'로 읽지 말 것. 실측 10행에서 False인 유일한 행은 세금계산서 확정일도
+    #     '-'(미확정)이라, 관측된 사실은 "확정 전에는 상태 텍스트가 없다"까지다. '확정됐는데 미전송'
+    #     표본은 0건 — 진짜 실패와 미발행을 구분하려면 별도 근거가 필요하다.
+    tax_invoice_transmitted: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
