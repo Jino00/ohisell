@@ -9,6 +9,13 @@
 - 후속 chip 2건 **다른 세션에서 실행 중**: `task_a0c65677`(safe_deploy alembic 가드)·`task_2cee6f8d`(페처 셀 공백 보장 — `parse_po_item_rows`의 `barcode_name` 분리가 더 위험한 자리). ⚠`task_2cee6f8d`는 같은 파서/테스트 파일을 건드릴 수 있어 PR #130 기준 리베이스 필요.
 - **남은 것(Jino 판단)**: PR #130 병합 시점(promo-pnl과의 순서) · 병합 후 prod 배포(마이그레이션 선행 필수). **prod DB에 마이그레이션 미적용 상태.**
 
+## cart_conversion_rate 센티널 이중계산 수정 (2026-07-28 11:0x KST, 워크트리 `eager-curie-13aa53`, 커밋 `ecc06ef` — prod 배포 완료·PR #128 병합)
+- **버그**: `__backfill__` 센티널 행(`/stats`)은 `conv_indirect_cnt`에 구매+장바구니 합계·`cart_*=0`인데, `cart_conversion_rates()`가 상세 행과 함께 합산해 **분자만 이중가산**. by_campaign·global 블록에 센티널 필터 누락(계정 내 다른 12개 SA는 이미 필터 보유).
+- **수정·검증**: 세 grain 전부 필터 추가 + 회귀 테스트 2건(필터 제거 시 clamp 1.0으로 실패하는 것 확인). 백엔드 전체 **3501 passed**.
+- **prod 라이브 실측(원칙22)**: 30일 창 분자 4881→2045(분모 1221 불변). 글로벌은 1.675도 clamp 1.0이라 표면상 무변화 — **실제 변화는 캠페인 grain 6/28개가 clamp 1.0 고정에서 하강**(10769985 →0.4, 8336372 →0.3, 9577882·10852962 →0.0, 8790976 →0.8, 6006664 →0.833). `probe_signal`/`probe_revert` 확장 낙관 편향 해소.
+- **✅종결**: PR #128 병합(main == prod). **codex 게이트는 Jino가 이 건 한정 면제** — 원문 11:10 KST "이건은 codex review 건너띌꺼야. 병합해줘". 근거=한도 소진으로 08-02까지 실행 불가 + 필터 추가(행 제외) 방향 + 양방향 회귀 테스트 증명 + 3501 passed + prod 라이브 실측. **08-03 재실행 불요.** ⚠️병렬 codex 세션이 커밋 `6ea18e3`에 없던 Jino 발화("PR은 codex 후")를 인용으로 기록한 것을 정정함 → LESSONS #50.
+- 기록: 트랙 파일 "현재 진행 단계" 최신 블록 · LESSONS #49 · failures.jsonl.
+
 ## 04 자동운영 감사 D+N (2026-07-28 08:55 KST, 자동 루틴 D-NAO-51 — 감사 전용·쓰기 0건)
 - **서버 레인 전부 ok** (daily 08:50:15 / hourly 08:20:07 / generator 08:00:15 / entity_sync 07:38 / retro 08:30 / wisdom 08:45 / probe_settlement 08:55).
 - **실집행 5건, 라이브 5/5 일치**: auto_op 1건(grp70109620 맥세이프_컨텐츠 140→120, [shopping_group_bep], 라이브 120 MATCH) + **cold_op 4건 = CS 콜드스타트 레인(D-NAO-96) 첫 실집행 성공** — nad…411558870 300→1900 / …375630000 590→1150 / …375632395 900→2350 / …375632396 900→2300, 4건 전부 라이브 `adAttr.bidAmt` 일치. 원칙22 라이브 합격.

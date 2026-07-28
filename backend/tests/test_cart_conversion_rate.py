@@ -1,7 +1,7 @@
 # test_cart_conversion_rate.py — D-NAO-58 CD1 상품별 장바구니→구매 전환율 SA 테스트
 # 커버: by_product(1:1 adgroup 매핑만), 다상품 adgroup은 by_product 제외·by_campaign 포함,
 #   구매>장바구니면 1.0 클램프, 장바구니 0 grain은 키 없음, 창 필터, 파워링크 campaign grain,
-#   global 폴백, min_carts 임계.
+#   global 폴백, min_carts 임계, __backfill__ sentinel 이중가산 제외(회귀).
 from __future__ import annotations
 
 from datetime import date
@@ -14,6 +14,7 @@ from sqlalchemy.pool import StaticPool
 from app.database import Base
 from app.models import NaverAdDaily, NaverAdgroupProduct
 from app.services.naver_ad import cart_conversion_rate
+from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 
 AS_OF = date(2026, 7, 15)
 IN_WINDOW = date(2026, 7, 10)      # 30일 창 안
@@ -118,6 +119,36 @@ def test_empty_db_global_none(db):
     res = cart_conversion_rate.cart_conversion_rates(db, window_days=30, as_of=AS_OF)
     assert res["by_product"] == {} and res["by_campaign"] == {}
     assert res["global"] is None
+
+
+def test_backfill_sentinel_not_double_counted(db):
+    # 회귀: __backfill__ sentinel(/stats 소스)의 conv_indirect_cnt는 구매+장바구니 전량 합계라
+    # 상세 행과 더하면 분자만 이중가산된다(prod 실측 global 1.675 → 3.998).
+    _seed(db)
+    # 항등식(센티널 = 상세conv + 상세cart)대로 심기. cart_*=0 이므로 분모는 안 늘고 분자만 늘어남
+    db.add(_ad(IN_WINDOW, "C_SHOP", BACKFILL_SENTINEL_ADGROUP, "", "SHOPPING",
+               0, 12 + 17, 0, 300000, 0, 0, 0, 0))
+    db.add(_ad(IN_WINDOW, "C_PL", BACKFILL_SENTINEL_ADGROUP, "", "WEB_SITE",
+               0, 1 + 4, 0, 50000, 0, 0, 0, 0))
+    db.commit()
+    res = cart_conversion_rate.cart_conversion_rates(db, window_days=30, as_of=AS_OF)
+    # 미제외 시: C_SHOP (12+29)/17=2.41→clamp 1.0, C_PL (1+5)/4=1.5→clamp 1.0, global 2.24→1.0
+    assert res["by_campaign"]["C_SHOP"] == pytest.approx(12 / 17, abs=1e-4)
+    assert res["by_campaign"]["C_PL"] == pytest.approx(0.25)
+    assert res["global"] == pytest.approx(13 / 21, abs=1e-4)
+    assert res["by_product"]["100"] == pytest.approx(0.3)
+
+
+def test_backfill_sentinel_excluded_from_by_product_even_if_mapped(db):
+    # by_product는 sentinel이 adgroup 매핑에 없어 우연히 안전하지만, 매핑이 생겨도 막혀야 한다
+    _seed(db)
+    db.add(_ad(IN_WINDOW, "C_SHOP", BACKFILL_SENTINEL_ADGROUP, "", "SHOPPING",
+               0, 29, 0, 300000, 0, 0, 0, 0))
+    db.add(NaverAdgroupProduct(adgroup_id=BACKFILL_SENTINEL_ADGROUP, campaign_id="C_SHOP",
+                               mall_product_id="100"))
+    db.commit()
+    res = cart_conversion_rate.cart_conversion_rates(db, window_days=30, as_of=AS_OF)
+    assert res["by_product"]["100"] == pytest.approx(0.3)   # 29 가산되면 (3+29)/10 → clamp 1.0
 
 
 def test_zero_cart_grain_no_key(db):

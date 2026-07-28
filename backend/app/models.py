@@ -1029,6 +1029,17 @@ class CoupangCoupon(Base):
     wow_exclusive: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)  # 즉시: 와우회원 전용
     applied_option_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 다운로드: 적용 옵션수
     usage_amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)  # 다운로드: 사용량
+    # ── 프로모션 손익 레이어(트랙 coupang-promo-pnl, D-CPP-3) ──
+    # ★셀러 부담 실사용 할인액의 **권위값**. Wing 화면의 쿠폰별 "사용 금액"(예: 94177420 = 156,000원).
+    #   위 usage_amount(다운로드쿠폰 '사용량')와는 다른 축이라 컬럼을 분리한다 — 의미를 겹치면
+    #   나중에 어느 쪽이 우리 실부담인지 구분할 수 없다.
+    #   ⚠️ 쿠팡 Open API(fms)에는 이 값이 없다(ref 06 §E 전수 대조) → coupon_sync가 채우지 않는다.
+    #   ingest 경로(/coupon/used-amount/ingest)로만 들어오며, 출처는 used_amount_source로 항상 라벨링.
+    used_amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)
+    used_amount_source: Mapped[Optional[str]] = mapped_column(
+        String(20), nullable=True
+    )  # wing_ui | wing_api | manual (추정값 금지 — 출처 없는 값은 넣지 않는다)
+    used_amount_synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     synced_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
     )
@@ -1406,6 +1417,95 @@ class CoupangRocketSettlement(Base):
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class CoupangRocketSalesDaily(Base):
+    """쿠팡 로켓배송(1P) 옵션×일 소비자 판매 — supplier 애널리틱스>판매 분석 (트랙 coupang-promo-pnl, Phase 1).
+
+    소스: `https://supplier.coupang.com/rpd/web-v2/basic/web-view?type=SALES_ANALYSIS` (BETA).
+    런타임 경계(rocket-1p D-1과 동일): Akamai 봇방어 → 백엔드 직접 fetch 금지. Mac 헤드풀 CDP
+      페처가 수집 → **우리 레코드 계약**으로 push → 파서(clients/coupang/rocket_promo.py) 정규화 → 적재.
+    grain: (vendor_id, option_id, date). 같은 키 재수신 시 확정치 교체(snapshot upsert, 멱등).
+
+    ★★revenue는 회계 매출이 아니다(D-CPP-2). 1P 회계 매출은 발주(납품)금액 축이 정본이다
+      (rocket-1p D-3). 여기 revenue = **소비자 실현가**(쿠팡이 자체 마진으로 내린 판매가가 반영된
+      금액)이며, 용도는 **광고 BEP ROAS의 분자 · 수요/전환 신호**로 한정한다. 종합조망 net_profit
+      계산에 절대 결합하지 않는다 — 결합하면 1P 매출이 이중으로 잡힌다.
+
+    sku_id = 발주 데이터의 product_number와 같은 키(실측 62178970) → RocketProductCostMap 브리지로
+      원가에 닿는다. option_id는 쿠팡 옵션ID(판매분석 화면 표기).
+    D-CPP-5: 판매분석은 BETA + "Basic 무료체험중" → 접근 차단이 조용히 오면 이 테이블이 멈춘다.
+      수집기는 403/구독오류를 성공으로 접지 말 것(원칙22).
+    """
+
+    __tablename__ = "coupang_rocket_sales_daily"
+    __table_args__ = (
+        UniqueConstraint("vendor_id", "option_id", "date", name="uq_coupang_rocket_sales_daily"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    vendor_id: Mapped[str] = mapped_column(String(20), nullable=False, index=True)  # A01029796(계정축)
+    option_id: Mapped[str] = mapped_column(String(30), nullable=False, index=True)  # 쿠팡 옵션ID
+    sku_id: Mapped[Optional[str]] = mapped_column(
+        String(30), nullable=True, index=True
+    )  # = 발주상세 product_number(원가 브리지 키)
+    date: Mapped[Optional[datetime]] = mapped_column(Date, nullable=False, index=True)  # 판매일(KST)
+    qty: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )  # 판매수량
+    revenue: Mapped[Decimal] = mapped_column(
+        Numeric(14, 2), nullable=False, default=0, server_default="0"
+    )  # ★소비자 실현가 기준 매출(회계축 아님 — 위 주석)
+    visitors: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 유입수(있으면)
+    conversion_rate: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(7, 4), nullable=True
+    )  # 전환율 — **0~1 소수**(3.52% → 0.0352). % 표기는 페처가 100으로 나눠 보낸다(PLAN §4)
+    product_name: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+    source: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="sales_analysis",
+        server_default="sales_analysis",
+    )  # sales_analysis | excel (원천 라벨 — 폴백 경로 추적)
+    synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class CoupangRocketPromotion(Base):
+    """쿠팡 로켓배송(1P) 프로모션 신청 — 공급자허브 '프로모션' 메뉴 (트랙 coupang-promo-pnl, Phase 1).
+
+    소스: 공급자허브 프로모션 목록/상세(D-CPP-1: 자동 수집이 기본, 수기 입력은 폴백).
+    grain: request_id(Request ID). 재수신 시 확정치 교체(snapshot upsert, 멱등).
+
+    ★행사기간은 **초 단위**다(실례 Request 687878: 2026-07-24 00:01:00 ~ 07-26 23:59:59) —
+      날짜로 뭉개면 프로모션 창 조인(Phase 2)이 하루씩 틀어진다. DateTime으로 보존한다.
+    ★D-CPP-4: 분담금이 어떤 형태로 청구되는지 **미확정**이다(07월분 정산일이 9월). 매입정산
+      (coupang_rocket_settlement)에 흔적 없음. 따라서 이 테이블은 **사실 기록일 뿐 비용 라인이
+      아니다** — 어떤 손익 계산에도 자동 반영하지 않는다. 9월 정산서 도착 후 대사해서 확정.
+    raw: 원본 응답 보존(스키마 드리프트·미매핑 필드 사후 복구용).
+    """
+
+    __tablename__ = "coupang_rocket_promotion"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    request_id: Mapped[str] = mapped_column(String(30), unique=True, nullable=False, index=True)
+    vendor_id: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    contract_id: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)  # 계약ID
+    promotion_name: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)  # 쿠폰명
+    promotion_type: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)  # 종류(즉시할인 등)
+    status: Mapped[Optional[str]] = mapped_column(String(30), nullable=True, index=True)
+    start_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)  # 초 단위
+    end_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)  # 초 단위
+    share_ratio: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(7, 2), nullable=True
+    )  # 고객할인 비용 분담비율(%) — 100 = 전액 셀러 부담
+    discount_method: Mapped[Optional[str]] = mapped_column(
+        String(40), nullable=True
+    )  # 할인방식(정액수량 / 할인액 등)
+    discount_value: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+    budget_amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)  # 예산
+    settlement_date: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True)  # 정산일
+    applied_product_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 적용상품 수
+    requested_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)  # 요청일
+    raw: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)  # 원본 보존
+    synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 class RocketProductCostMap(Base):
     """쿠팡 로켓배송(1P) 원가 브리지 — 발주상세 상품번호 → product_master.internal_sku (트랙 rocket-1p, S4.5b/D-13).
 
@@ -1475,6 +1575,12 @@ class NaverAdDaily(Base):
     avg_rank = rank_sum / imp (0 노출이면 미정의). cost/conv_amt = 원 단위(VAT 별도).
     같은 날짜 재수집 시 확정치로 교체(snapshot upsert). D-NAO-9: 키워드 단위 일 판단은
     통계적 불가(0.88클릭/일) → 이 테이블은 누적 저장용, 판단은 7~30일 창 풀링.
+
+    ★adgroup_id='__backfill__'(BACKFILL_SENTINEL_ADGROUP) 행은 회계 의미가 다르다 — 소스가
+    /stats(캠페인 grain 장기 백필)라 conv_indirect_cnt/amt에 구매+장바구니 등 전환 액션
+    **전량 합계**가 들어있고(액션 유형 분리 불가) cart_*=0이다. 상세 행은 구매만 conv_*,
+    장바구니는 cart_*로 분리되므로, 둘을 함께 합산하면 분자가 이중가산된다.
+    → 집계하는 SA는 sentinel 행을 명시적으로 제외할 것(제외 안 한 채 배포된 사례: D-NAO-58 CD1).
     """
 
     __tablename__ = "naver_ad_daily"
