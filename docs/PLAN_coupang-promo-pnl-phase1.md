@@ -31,7 +31,19 @@
 
 ---
 
-## §2 정찰 결과 (2026-07-28) — **미완: supplier 세션 만료**
+## §2 정찰 결과
+
+> ✅ **2026-07-28 오후 정찰 완료 — 아래 "미완" 기록은 그날 오전의 이력이다.**
+> 확정된 경로·필드·페이지네이션·에러 규약은 **트랙 파일의 "확정된 API 스펙" 표**가 정본이며,
+> 실제 매핑 코드는 `tools/rocket_supplier_fetcher.py`의 판매분석·프로모션 섹션에 있다.
+> 요약: ①판매분석 = `POST /retail-insight/api/business-insight/vi-detail-search`(**구간 합산 →
+> 하루 단위 호출 필수**, `paginationDetails`로 페이지 종료 판정, 범위 밖은 400에 유효구간 동봉)
+> ②프로모션 = `GET /promotion/promotion-request`(Spring Page) + `/{id}`(목록과 필드 동일)
+> ③구독 게이트 = `GET /rpd/v2/supplier/subscription/detail`(무료체험 종료 2026-08-20).
+> ⇒ **엑셀 폴백(§2 5번·§7 2번)은 불필요해졌다** — JSON API가 전부 열려 있다.
+> ⇒ **§0.6의 "기존 rocket 페처 수정 금지"는 후속 스프린트 지시로 해제**(같은 파일에 스트림 추가).
+
+### (이력) 오전 정찰 — **미완: supplier 세션 만료**
 
 수행: 살아있는 CDP(포트 9223, 실제 Chrome, 프로필 `~/.ohisell_supplier_chrome`)에 Playwright로 접속 →
 판매분석 URL로 네비게이션하며 `supplier.coupang.com` 대상 XHR/fetch/document 응답 전수 캡처.
