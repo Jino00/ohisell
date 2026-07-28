@@ -1,4 +1,4 @@
-## 🟡 로켓 1P M1 — 마이그레이션 prod 적용 완료 / 코드 배포만 CAS 대기 (2026-07-28 12:10)
+## 🟡 로켓 1P M1 — 마이그레이션 prod 적용 완료 / 코드 배포만 CAS 대기 (2026-07-28 12:10) — ★N1 세션이 12:1x main 병합으로 해소(아래 N1 배포 완료 블록 참조, e1f659e가 main 조상 편입)
 - **alembic 그래프 복구 완료(PR #135 병합)**: revision ID 충돌 `a1c3e5f7b9d1` 해소 — promo-pnl을 **`c2998cfe1f7c`**(uuid4 생성)로 개명, prod 선배포 3개(`a7b9c1d3e5f7`·`f6a8c0e2b4d6`·`a1c3e5f7b9d1`-merge, 브랜치 `worktree-agent-aca8c40c8d32c1725` 5커밋)를 main 흡수. **직렬 단일 체인** `e5f7a9c1b3d5 → {a7b9,f6a8c0e2} → a1c3(merge) → c2998cfe1f7c → f6a8c0b2d4e6(head)`. 테스트 **3607 passed**.
 - **prod 마이그레이션 적용 완료(실측)**: `alembic current = f6a8c0b2d4e6` / `coupang_rocket_settlement.tax_invoice_transmitted` 있음 / `coupang_rocket_purchase_order_item.vendor_confirmed_qty` 있음 / `coupang_coupon.used_amount` 있음 / promo 테이블 2종(`coupang_rocket_sales_daily`·`coupang_rocket_promotion`) 생성. 백엔드 online, 배포 락 없음.
 - 🟡 **남은 것 = 코드 4파일 배포(models.py·rocket_supplier.py·rocket_supplier_sync.py + 마이그는 이미 감)**. `safe_deploy` **CAS가 차단** — prod의 `models.py`가 **미푸시 N1 브랜치 `worktree-agent-a2fe33dc69941c21e`**(10커밋, D-NAO-99/100 **진행 중**) 버전이라 우리 역사에 없음.
@@ -45,6 +45,13 @@
 - **prod 라이브 실측(원칙22)**: 30일 창 분자 4881→2045(분모 1221 불변). 글로벌은 1.675도 clamp 1.0이라 표면상 무변화 — **실제 변화는 캠페인 grain 6/28개가 clamp 1.0 고정에서 하강**(10769985 →0.4, 8336372 →0.3, 9577882·10852962 →0.0, 8790976 →0.8, 6006664 →0.833). `probe_signal`/`probe_revert` 확장 낙관 편향 해소.
 - **✅종결**: PR #128 병합(main == prod). **codex 게이트는 Jino가 이 건 한정 면제** — 원문 11:10 KST "이건은 codex review 건너띌꺼야. 병합해줘". 근거=한도 소진으로 08-02까지 실행 불가 + 필터 추가(행 제외) 방향 + 양방향 회귀 테스트 증명 + 3501 passed + prod 라이브 실측. **08-03 재실행 불요.** ⚠️병렬 codex 세션이 커밋 `6ea18e3`에 "PR은 codex 후"를 Jino 인용으로 기록한 것을 정정함 → LESSONS #50. **↳ 재정정(11:2x)**: 그건 *없던 발화*가 아니라 **`AskUserQuestion` 선택지를 Jino가 실제 선택한 결정**(11:10 면제로 뒤집히기 전까지 유효)이었고, 잘못은 내가 쓴 선택지 라벨에 인용부호를 씌운 **표기**에 있었다 → 규칙: 선택 결과는 "Jino 선택(라벨 — 원문 아님)", 인용부호는 채팅 원문에만.
 - 기록: 트랙 파일 "현재 진행 단계" 최신 블록 · LESSONS #49 · failures.jsonl.
+
+## 최신 상태 (2026-07-28 12:1x, 워크트리 agent-a2fe33dc69941c21e) — N1 BEP 배송방식 인지형 정합 prod 배포 완료(PR #138 병합)
+- **N1 배포 완료**: `product_commission.py`(신규)·`bep_calculator.py`·`models.py`(주석)·`verify_bep_delivery_parity.py` — `safe_deploy.sh --restart`, CAS 통과, pm2 online, 예외 없음.
+- **라이브 검증(원칙22)**: `calculate_bep()` 710행/with_bep 525행. 앵커 5종 대비 09:35 시뮬 — EZ툴16프로 1.9180(±0.00%)·폴드7매트필름 2.2616(±0.00%)·EZ툴17프로 1.7819(−0.31%)·EZ툴15프로 1.8532(+1.23%)·EZ툴17 1.8921(+2.12%, 신규 주문 유입 드리프트로 설명됨). `verify_bep_delivery_parity.py` PASS(판별 실대조 10,094건 불일치0·물류비 재계산 584상품 차이0).
+- **★교차 세션 alembic 충돌 발견·해소**: 병합 전 origin/main이 27커밋 앞서 있었고 revision ID `a1c3e5f7b9d1` 충돌(2dfc758 기록)을 발견했으나 이미 main에서 `6c9f16b`(promo-pnl→`c2998cfe1f7c` 개명)로 해소된 상태였음 — 병합 후 68개 리비전 unique·`alembic heads` 단일(`f6a8c0b2d4e6`) 재확인.
+- **★이 병합이 로켓 1P M1 세션의 CAS 블록도 함께 해소**(위 🟡 블록 참조) — 그 세션이 겪은 차단은 prod의 `models.py`가 이 N1 미푸시 브랜치(e1f659e) 버전이라 그쪽 역사에 없어 발생한 것. N1 브랜치→main 병합(PR #138, `c9d6aae`)으로 e1f659e가 main 조상에 편입되어, 그 세션이 현재 main 기준으로 재배포하면 CAS 통과할 것으로 판단됨. **로켓 M1의 나머지 파일(`rocket_supplier.py`·`rocket_supplier_sync.py`) 실배포는 그 세션/트랙 소관 — 이 세션에서 대신 배포하지 않음.**
+- PR #138: 커밋 `4f5e39c`(N1 본체 D-NAO-99)·`3dc85b3`(E5 중앙값 D-NAO-100)·`b636e1b`(리뷰 R1)·`e1f659e`(리뷰 R2)·`60dfc19`(main 병합)+N0 흡수(`6033c0f`, 186b357). 로컬 전체 스위트 **3,645 passed**(병합 후 재검증).
 
 ## 04 자동운영 감사 D+N (2026-07-28 08:55 KST, 자동 루틴 D-NAO-51 — 감사 전용·쓰기 0건)
 - **서버 레인 전부 ok** (daily 08:50:15 / hourly 08:20:07 / generator 08:00:15 / entity_sync 07:38 / retro 08:30 / wisdom 08:45 / probe_settlement 08:55).
