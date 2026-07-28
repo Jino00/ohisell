@@ -180,6 +180,9 @@ def _date(v: Any) -> date | None:
     try:
         return date.fromisoformat(s[:10])
     except ValueError:
+        # 폴백까지 실패하면 진짜 실패다 — 여기서는 침묵하지 않는다. 거짓 경보를 없앤다고
+        #   진짜 실패까지 조용해지면(예: settlement_date가 NULL로 조용히 저장) 안 된다.
+        log.warning("날짜 파싱 실패 → None: %r", v)
         return None
 
 
@@ -238,6 +241,8 @@ def parse_sales_rows(
     skipped = 0
     accepted = 0
     blank_obs = 0
+    blank_qty = 0
+    blank_rev = 0
     for r in rows or []:
         if not isinstance(r, dict):
             skipped += 1
@@ -260,8 +265,18 @@ def parse_sales_rows(
             skipped += 1
             continue
         accepted += 1
+        # 필드별로 따로 센다: 컬럼명이 **한쪽만** 바뀌면 다른 쪽이 행을 살려 둘 다 빈 경우에만
+        #   세는 카운터를 빠져나간다(그러면 '18개 팔렸는데 매출 0원'이 무신호로 쌓인다 —
+        #   Inf를 사고로 분류한 것과 같은 이유). 한쪽만 전멸해도 잡히게 한다.
+        # ★키가 있는데 값이 빈 경우만 센다. 키 자체를 안 보내는 건 그 페처의 선언된 모양이지
+        #   사고가 아니다 — 그것까지 세면 qty만 보내는 배치마다 경보가 울려 경보가 죽는다.
+        #   잡으려는 건 {"revenue": row.get("매출액")}가 컬럼명 변경으로 None을 뱉는 경우다.
+        if "qty" in r and not _present(r.get("qty")):
+            blank_qty += 1
+        if "revenue" in r and not _present(r.get("revenue")):
+            blank_rev += 1
         if not _present(r.get("qty")) and not _present(r.get("revenue")):
-            blank_obs += 1   # 키는 있는데 둘 다 빈 셀 — 배치 전체가 이러면 매핑 사고 신호
+            blank_obs += 1
         out[(option_id, d)] = {
             "option_id": option_id,
             "date": d,
@@ -282,15 +297,21 @@ def parse_sales_rows(
     #   {"qty": row.get("판매수량")} 처럼 **키는 항상 있고 값만 None**이 된다. 쿠팡이 컬럼명을
     #   바꾸면 행 단위로는 전부 합법(키 존재·빈 셀=0)이라 skipped=0으로 조용히 0원 테이블이
     #   쌓인다. 전 행이 빈 관측이면 그건 0판매일이 아니라 매핑 사고다 — 배치로 봐야 보인다.
-    if accepted and blank_obs == accepted:
+    if accepted and (blank_qty == accepted or blank_rev == accepted):
+        dead = "qty·revenue 전부" if blank_obs == accepted else (
+            "qty 전부" if blank_qty == accepted else "revenue 전부")
         log.warning(
-            "1P 판매: 배치 %d행 **전부** qty·revenue가 빈 값 — 0판매일이 아니라 페처 매핑 사고를"
-            " 의심할 것(쿠팡 컬럼명 변경 등)", accepted,
+            "1P 판매: 배치 %d행에서 %s가 빈 값 — 0판매일이 아니라 페처 매핑 사고를 의심할 것"
+            "(쿠팡 컬럼명 변경 등). 한쪽 필드만 전멸해도 나머지가 행을 살리므로 배치로만 보인다.",
+            accepted, dead,
         )
     if stats is not None:
         stats["skipped"] = skipped
         stats["deduped"] = deduped
+        stats["accepted"] = accepted
         stats["blank_observations"] = blank_obs
+        stats["blank_qty"] = blank_qty
+        stats["blank_revenue"] = blank_rev
     return list(out.values())
 
 

@@ -84,7 +84,8 @@ def test_parse_sales_last_row_wins_on_duplicate_grain():
     ], stats=stats)
     assert len(recs) == 1 and recs[0]["qty"] == 9
     # 중복 흡수는 '계약 위반'이 아니다 — 따로 센다(수집 건강 신호를 중복 뒤에 숨기지 않는다)
-    assert stats["skipped"] == 0 and stats["deduped"] == 1
+    assert stats == {"skipped": 0, "deduped": 1, "accepted": 2,
+                     "blank_observations": 0, "blank_qty": 0, "blank_revenue": 0}
 
 
 def test_parse_sales_source_label_propagates():
@@ -166,6 +167,22 @@ def test_parse_sales_all_blank_batch_raises_alarm(caplog):
     assert len(recs) == 2                      # 행은 살린다(0판매일일 수도 있으므로)
     assert stats["blank_observations"] == 2    # 그러나 전부 빈 관측이면
     assert "매핑 사고" in caplog.text          # 경보를 울린다
+
+
+def test_parse_sales_half_broken_mapping_is_caught(caplog):
+    """컬럼명이 **한쪽만** 바뀌어도 잡는다 — 다른 쪽이 행을 살려 blank_observations를 빠져나간다.
+
+    revenue만 전멸하면 '18개 팔렸는데 매출 0원'이 되고, qty만 전멸하면 Phase 2 단위경제가
+    뒤집힌다. 그래서 필드별로 따로 세고 **어느 한쪽이라도** 전멸이면 경보를 울린다.
+    """
+    stats: dict = {}
+    recs = rp.parse_sales_rows([
+        {"option_id": "OP5", "date": "2026-07-24", "qty": 18, "revenue": None},
+        {"option_id": "OP6", "date": "2026-07-24", "qty": 7, "revenue": None},
+    ], stats=stats)
+    assert len(recs) == 2 and stats["blank_observations"] == 0   # 둘 다 빈 행은 없지만
+    assert stats["blank_revenue"] == 2                            # revenue는 전멸
+    assert "매핑 사고" in caplog.text and "revenue 전부" in caplog.text
 
 
 def test_parse_sales_partial_blank_batch_is_quiet():
@@ -495,6 +512,21 @@ def test_route_sales_ingest_happy_path_and_source_label(client):
     assert r.status_code == 200 and r.json()["ingested"] == 1
     row = s.query(CoupangRocketSalesDaily).one()
     assert row.vendor_id == "A01029796" and row.source == "excel"   # 폴백 경로 라벨 보존
+
+
+def test_route_sales_ingest_surfaces_blank_observation_counters(client):
+    """운영자가 보는 건 응답 필드다 — 파서에만 있고 응답에 없으면 아무도 못 본다."""
+    c, _ = client
+    r = c.post(_BASE + "/rocket/sales/ingest", headers={"X-Ingest-Token": _TOKEN}, json={
+        "vendor_id": "A01029796",
+        "rows": [{"option_id": "O1", "date": "2026-07-24", "qty": None, "revenue": None},
+                 {"option_id": "O2", "date": "2026-07-24", "qty": None, "revenue": None}],
+    })
+    body = r.json()
+    assert body["ingested"] == 2 and body["accepted"] == 2
+    # 판정 기준은 ingested가 아니라 accepted(중복 섞인 배치에서 어긋난다)
+    assert body["blank_observations"] == body["accepted"]
+    assert body["blank_qty"] == 2 and body["blank_revenue"] == 2
 
 
 def test_route_promotion_ingest_happy_path(client):

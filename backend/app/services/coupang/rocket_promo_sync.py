@@ -37,10 +37,13 @@ def ingest_rocket_sales(
 
     멱등: 같은 (vendor_id, option_id, date) 재수신 시 확정치로 교체.
     vendor_id는 계정축(판매분석 행에 없어 페처가 주입 — 정산 ingest와 동일 패턴).
-    반환: {ingested, skipped, deduped, vendor_id}.
+    반환: {ingested, skipped, deduped, accepted, blank_observations, blank_qty, blank_revenue,
+           vendor_id}.
       skipped = 계약 위반 행 수(option_id/date/관측값 누락) — **수집 건강 신호**
       deduped = 같은 그레인에 흡수된 행 수 — 정상(재조회). 둘을 한 숫자로 뭉치면 계약 위반이
                 중복 뒤에 숨어 보이지 않는다.
+      accepted = 계약을 통과한 행 수(= ingested + deduped). 아래 빈 관측 카운터의 **분모**다 —
+                ingested와 비교하면 중복이 있는 배치에서 판정이 어긋난다.
     """
     stats: dict = {}
     recs = parser.parse_sales_rows(rows, source=source, stats=stats)
@@ -78,9 +81,14 @@ def ingest_rocket_sales(
         "ingested": len(recs),
         "skipped": skipped,
         "deduped": stats.get("deduped", 0),
-        # 빈 관측(키는 있는데 qty·revenue 둘 다 빈 값) 행 수. ingested와 같아지면 0판매일이
-        #   아니라 페처 매핑 사고를 의심해야 한다 — 응답에 실어 페처·운영자가 보게 한다.
+        # 빈 관측 카운터. **accepted와 같아지면** 0판매일이 아니라 페처 매핑 사고를 의심해야
+        #   한다(분모는 ingested가 아니라 accepted — 중복이 섞인 배치에서 어긋난다).
+        #   blank_qty/blank_revenue를 따로 두는 이유: 컬럼명이 한쪽만 바뀌면 다른 쪽이 행을
+        #   살려서 blank_observations를 빠져나간다.
+        "accepted": stats.get("accepted", 0),
         "blank_observations": stats.get("blank_observations", 0),
+        "blank_qty": stats.get("blank_qty", 0),
+        "blank_revenue": stats.get("blank_revenue", 0),
         "vendor_id": vendor_id,
     }
 
@@ -93,6 +101,8 @@ def ingest_rocket_promotions(db: Session, vendor_id: str, rows: list[dict]) -> d
 
     멱등: 같은 request_id 재수신 시 확정치로 교체(상태 변화·기간 수정 반영).
     반환: {ingested, skipped, deduped, vendor_id} — skipped(계약 위반)와 deduped(중복 흡수) 분리.
+    (판매 ingest와 달리 빈 관측 카운터는 없다 — 프로모션은 필수키가 request_id 하나뿐이라
+     '전 행이 빈 값'이라는 상태가 성립하지 않는다.)
     """
     stats: dict = {}
     recs = parser.parse_promotion_rows(rows, stats=stats)
