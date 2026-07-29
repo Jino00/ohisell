@@ -482,9 +482,12 @@ def _overheat_curve():
 
 
 def test_hourly_lane_canary_routes_disconnected_to_ad_pending_only(db):
-    """[GATE P2-2 Confirm-only] 카나리 + 미연결 그룹 밴드 DOWN → ad-레벨 제안을
-    **pending으로 생성만**(자동발사 0, D-NAO-5 — 실행은 Jino 콘솔 Confirm 경로만).
-    target_type='ad'·target_id=max_ad_id·adgroup_id=그룹·target_bid=소재 스텝(800→680)."""
+    """[GATE P2-2 → D-NAO-125 supersede] 카나리 + 미연결 그룹 밴드 DOWN → ad-레벨 bid_down
+    제안은 이제 **레인이 인라인 자동 실행**한다(D-NAO-125, 2026-07-29 — 종전 전면 Confirm-only
+    규칙의 유일한 해제 방향, _AD_AUTO_EXEC_PROPOSAL_TYPES={"bid_down"}). 종전 pending-only
+    회귀는 이 시나리오에서 더 이상 참이 아니다(하향은 어차피 카나리 상수와 무관하게 열림 —
+    test_canary_default_empty_set·(c) 회귀 참조). target_type='ad'·target_id=max_ad_id·
+    adgroup_id=그룹·target_bid=소재 스텝(800→680)."""
     _seed_hourly_shopping(db)
     _ad(db, "grp-hot", "p1", ad_id="nad-1", ad_bid_amt=800, use_group=False)
     db.commit()
@@ -493,12 +496,12 @@ def test_hourly_lane_canary_routes_disconnected_to_ad_pending_only(db):
          patch.object(auto_operator.naver_sa_writer, "get_ad_bid", return_value=800), \
          patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
         result = auto_operator.run_hourly_lane(db, now=NOW, fetch_intraday=lambda t, d: _overheat_curve())
-    mock_exec.assert_not_called()  # 인라인 실행 금지(Confirm-only)
-    assert result["approved"] == 0
-    assert result["ad_confirm_pending"] == 1
+    mock_exec.assert_called_once()  # D-NAO-125: 하향은 인라인 실행(Confirm-only 아님)
+    assert result["approved"] == 1
+    assert result["ad_confirm_pending"] == 0
     saved = db.query(NaverProposal).filter(NaverProposal.target_type == "ad").one()
-    assert saved.status == "pending"          # 자동 승인 금지
-    assert saved.approval_source is None      # 승인 이력 없음(콘솔 Confirm 대기)
+    assert saved.status == "approved"                                  # 자동 승인(D-NAO-125)
+    assert saved.approval_source == auto_operator.APPROVAL_SOURCE_HOURLY  # 시간당 레인 소속
     assert saved.target_id == "nad-1"
     assert saved.adgroup_id == "grp-hot"
     assert saved.proposal_type == "bid_down"
@@ -566,16 +569,22 @@ def test_daily_lane_excludes_ad_proposals_from_auto_approval(db):
 
 
 def test_hourly_lane_non_canary_holds_disconnected(db):
-    """비카나리(빈 집합 기본값) → 미연결 그룹은 기존 [레버 미연결] hold(현행 동작 보존)."""
+    """비카나리(빈 집합 기본값) → 미연결 그룹은 기존 [레버 미연결] hold(현행 동작 보존).
+
+    D-NAO-125(2026-07-29): 스코프 판정이 AD_BID_CANARY_CAMPAIGNS 상수에서 킬스위치
+    (AD_BID_ROUTING_ENABLED)로 옮겨졌다 — 기본 상태(킬스위치 on)에서는 이 캠페인도 이제
+    ad-레벨로 열린다((c) 회귀가 그 경로를 커버). 이 테스트는 킬스위치 off로 좁혀
+    "카나리 상수 미포함 → hold" 종전 회귀를 보존한다."""
     _seed_hourly_shopping(db)
     _ad(db, "grp-hot", "p1", ad_id="nad-1", ad_bid_amt=800, use_group=False)
     db.commit()
-    with patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 200}), \
+    with patch.object(auto_operator, "AD_BID_ROUTING_ENABLED", False), \
+         patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 200}), \
          patch.object(auto_operator.naver_sa_writer, "get_ad_bid") as mget_ad, \
          patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
         result = auto_operator.run_hourly_lane(db, now=NOW, fetch_intraday=lambda t, d: _overheat_curve())
     mock_exec.assert_not_called()
-    mget_ad.assert_not_called()  # 비카나리는 소재 재조회조차 안 함
+    mget_ad.assert_not_called()  # 비카나리(킬스위치 off)는 소재 재조회조차 안 함
     assert result["approved"] == 0
     assert any("[레버 미연결]" in h["reason"] for h in result["held"])
 
@@ -689,15 +698,19 @@ def test_build_band_bep_canary_routes_disconnected_to_ad(db):
 
 
 def test_build_band_bep_non_canary_skips_disconnected(db):
-    """비카나리(기본) → 미연결 그룹 skip(B2 억제, 현행 동작 보존)."""
+    """비카나리(기본) → 미연결 그룹 skip(B2 억제, 현행 동작 보존).
+
+    D-NAO-125(2026-07-29): 기본 상태(킬스위치 on)에서는 이 캠페인도 이제 ad-레벨로 열린다
+    (의도된 변경). 이 테스트는 킬스위치 off로 좁혀 종전 skip 회귀를 보존한다."""
     db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
     _ad(db, "grp-d", "p1", ad_id="nad-1", ad_bid_amt=800, use_group=False, campaign_id="cmp-ours")
     db.commit()
     diagnosis = _diagnosis(shopping_group_bep=[_bep_board_row()])
-    out = proposal_writer.build(
-        db, diagnosis, bid_sims={("adgroup", "grp-d"): _sim(direction="down", current_bid=200)},
-        as_of=TODAY,
-    )
+    with patch.object(auto_operator, "AD_BID_ROUTING_ENABLED", False):
+        out = proposal_writer.build(
+            db, diagnosis, bid_sims={("adgroup", "grp-d"): _sim(direction="down", current_bid=200)},
+            as_of=TODAY,
+        )
     assert out == []
 
 
@@ -724,9 +737,17 @@ def test_build_band_growth_canary_up_not_routed_stage2(db):
 # (5) 카나리 빈 집합 기본값 = 전면 hold(배포 즉시 행위 변화 0) + DOWN 한정 상수
 # ══════════════════════════════════════════════════════════════════
 def test_canary_default_empty_set():
-    # 카나리 1호 개방(Jino 2026-07-20): 맥세이프만. 다른 캠페인이 소리 없이 추가되면 이 테스트가 잡는다.
+    # 카나리 1호 개방(Jino 2026-07-20): 맥세이프만 — 상수 자체는 D-NAO-125에서도 불변
+    # (delegation_gate·expert_briefing_builder가 이 상수로 Confirm-only 제외 판별을 그대로
+    # 한다 — 건드리면 계정 전체 위임이 죽는다). 다른 캠페인이 상수에 소리 없이 추가되면
+    # 이 테스트가 잡는다.
     assert auto_operator.AD_BID_CANARY_CAMPAIGNS == frozenset({"cmp-a001-02-000000010769985"})
-    assert auto_operator._ad_bid_canary("any-campaign") is False
+    # D-NAO-125(2026-07-29): _ad_bid_canary는 이제 스코프(=위 상수)가 아니라 킬스위치
+    # (AD_BID_ROUTING_ENABLED)만 본다 — 기본(킬스위치 on) 상태에서는 상수 무관 True다.
+    assert auto_operator._ad_bid_canary("any-campaign") is True
+    with patch.object(auto_operator, "AD_BID_ROUTING_ENABLED", False):
+        # 킬스위치 off → 종전처럼 상수 멤버십으로 폴백(회귀 보존).
+        assert auto_operator._ad_bid_canary("any-campaign") is False
 
 
 def test_canary_directions_down_only():
@@ -793,7 +814,13 @@ def test_expert_briefing_excludes_ad_pending(db):
 # ══════════════════════════════════════════════════════════════════
 def test_hourly_lane_ad_pending_dedup_across_runs(db):
     """[GATE 2R P2-B] 같은 유닛 2회 연속 hourly run → ad pending 1건 유지 + 2회차는
-    dup skip 카운터(매시간 동일 pending 누적 → Confirm 큐 매몰 방지)."""
+    dup skip 카운터(매시간 동일 pending 누적 → Confirm 큐 매몰 방지).
+
+    D-NAO-125(2026-07-29): 이 dedup 분기는 이제 `_AD_AUTO_EXEC_PROPOSAL_TYPES`에 든 타입
+    (기본 bid_down)에는 적용되지 않는다 — 그 타입은 pending으로 남지 않고 인라인 실행되므로
+    dedup 자체가 무의미해진다(신규 회귀 (e) 참조: stale pending이 하향을 막지 않음, 이 테스트와
+    정확히 대칭). 이 테스트는 `_AD_AUTO_EXEC_PROPOSAL_TYPES`를 빈 집합으로 되돌려 "아직
+    자동실행으로 승격 안 된 ad-레벨 타입"의 Confirm-only dedup 회귀를 그대로 보존한다."""
     _seed_hourly_shopping(db)
     _ad(db, "grp-hot", "p1", ad_id="nad-1", ad_bid_amt=800, use_group=False)
     db.commit()
@@ -802,6 +829,7 @@ def test_hourly_lane_ad_pending_dedup_across_runs(db):
         get_ad_bid=800,
     )
     with patch.object(auto_operator, "AD_BID_CANARY_CAMPAIGNS", frozenset({CAMP})), \
+         patch.object(auto_operator, "_AD_AUTO_EXEC_PROPOSAL_TYPES", frozenset()), \
          patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value=patches["_get_adgroup"]), \
          patch.object(auto_operator.naver_sa_writer, "get_ad_bid", return_value=patches["get_ad_bid"]), \
          patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
@@ -816,6 +844,181 @@ def test_hourly_lane_ad_pending_dedup_across_runs(db):
     ad_rows = db.query(NaverProposal).filter(NaverProposal.target_type == "ad").all()
     assert len(ad_rows) == 1  # 동일 유닛 pending 누적 없음
     assert ad_rows[0].status == "pending"
+
+
+# ══════════════════════════════════════════════════════════════════
+# D-NAO-125(2026-07-29) — 소재 하향 인라인 자동실행 + 킬스위치(AD_BID_ROUTING_ENABLED) 회귀
+#
+# 배경: AD_BID_CANARY_CAMPAIGNS는 delegation_gate·expert_briefing_builder가 "Confirm-only
+# 제외" 판별에도 재사용하는 상수라, 그 상수를 채워 스코프를 넓히면 계정 전체 위임이 죽는다
+# (07-21 적대 리뷰 P2가 지적한 채로 8일 미이행 → 07-29 07:37 인수 캠페인이 상수 누락으로
+# [레버 미연결] hold에 묶여 손실이 시간당 쌓인 실사고). D-NAO-125는 스코프를 이 상수에서
+# 떼어 상위 auto_operate 게이트(두 겹)에 위임하고, _ad_bid_canary는 새 킬스위치
+# AD_BID_ROUTING_ENABLED만 본다. 실행 여부(인라인 자동실행 vs Confirm-only pending)는
+# 별도 상수 _AD_AUTO_EXEC_PROPOSAL_TYPES={"bid_down"}가 결정 — 하향만 연다(상향은 새 승인원
+# 설계가 필요한 별도 스프린트).
+# ══════════════════════════════════════════════════════════════════
+def test_hourly_lane_ad_bid_down_executes_inline(db):
+    """(a) 소재 하향이 인라인 자동 실행된다(D-NAO-125) — 레버 미연결(source='ad') 그룹에서
+    손실 판정(밴드 DOWN)이 나면 레인이 ad-레벨 bid_down 제안을 Confirm 큐에 세워두지 않고
+    그 자리에서 승인·실행한다. executed 카운터 증가·제안 status=approved·
+    ad_confirm_pending은 늘지 않는다(Confirm 큐로 안 감 — 이게 D-NAO-125의 핵심 변화)."""
+    _seed_hourly_shopping(db)
+    _ad(db, "grp-hot", "p1", ad_id="nad-1", ad_bid_amt=800, use_group=False)  # 미연결
+    db.commit()
+    with patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 200}), \
+         patch.object(auto_operator.naver_sa_writer, "get_ad_bid", return_value=800), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(db, now=NOW, fetch_intraday=lambda t, d: _overheat_curve())
+    mock_exec.assert_called_once()
+    assert result["executed"] == 1
+    assert result["approved"] == 1
+    assert result["ad_confirm_pending"] == 0
+    saved = db.query(NaverProposal).filter(NaverProposal.target_type == "ad").one()
+    assert saved.status == "approved"
+    assert saved.proposal_type == "bid_down"
+    assert saved.approval_source == auto_operator.APPROVAL_SOURCE_HOURLY
+
+
+def test_hourly_lane_ad_bid_up_still_pending_confirm(db):
+    """(b) 소재 상향은 여전히 열리지 않는다 — 같은 미연결 조건에서 방향만 up이면 생성
+    단계에서 그대로 hold("[레버 미연결] ad UP은 카나리 2단계"), 제안 0·실행 0.
+    D-NAO-125가 연 것은 하향뿐 — _AD_BID_CANARY_PROPOSAL_TYPES={"bid_down"}는 불변이라
+    _ad_bid_proposal이 up 방향에는 여전히 None을 반환한다."""
+    _seed_hourly_shopping(db)
+    _ad(db, "grp-hot", "p1", ad_id="nad-1", ad_bid_amt=800, use_group=False)  # 미연결
+    db.commit()
+    with patch.object(auto_operator, "_judge_hourly",
+                      return_value={"direction": "up", "reason": "저순위"}), \
+         patch.object(auto_operator, "_learned_optimal_skip", return_value=(False, "학습밴드 미도달")), \
+         patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 200}), \
+         patch.object(auto_operator.naver_sa_writer, "get_ad_bid") as mget_ad, \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(db, now=NOW, fetch_intraday=lambda t, d: _overheat_curve())
+    mock_exec.assert_not_called()
+    mget_ad.assert_not_called()  # hold가 생성 이전 단계라 소재 재조회조차 없음
+    assert db.query(NaverProposal).count() == 0
+    assert result["approved"] == 0
+    assert result["executed"] == 0
+    assert any("[레버 미연결] ad UP은 카나리 2단계" in h["reason"] for h in result["held"])
+
+
+def test_hourly_lane_ad_bid_down_opens_for_non_canary_campaign(db):
+    """(c) 비카나리 캠페인도 이제 열린다 — 이게 D-NAO-125의 본체다. 07-29 07:37 인수 캠페인이
+    AD_BID_CANARY_CAMPAIGNS 상수 누락으로 죽어 있던 사고의 회귀 방지: CAMP("cmp-shop")는
+    AD_BID_CANARY_CAMPAIGNS(맥세이프 전용)에 한 번도 없었던 캠페인인데도, 상수를 전혀
+    건드리지 않고(패치 없이) (a)와 동일하게 인라인 자동 실행된다."""
+    assert CAMP not in auto_operator.AD_BID_CANARY_CAMPAIGNS  # 전제 확인 — 진짜 비카나리
+    _seed_hourly_shopping(db)
+    _ad(db, "grp-hot", "p1", ad_id="nad-1", ad_bid_amt=800, use_group=False)  # 미연결
+    db.commit()
+    with patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 200}), \
+         patch.object(auto_operator.naver_sa_writer, "get_ad_bid", return_value=800), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(db, now=NOW, fetch_intraday=lambda t, d: _overheat_curve())
+    mock_exec.assert_called_once()
+    assert result["executed"] == 1
+    assert result["ad_confirm_pending"] == 0
+    saved = db.query(NaverProposal).filter(NaverProposal.target_type == "ad").one()
+    assert saved.status == "approved"
+
+
+def test_hourly_lane_kill_switch_off_restores_full_hold(db):
+    """(d) 킬스위치 — AD_BID_ROUTING_ENABLED=False면 종전 "[레버 미연결] … B3 대기" hold로
+    복귀하고 실행 0(상수 폴백 — 이 캠페인은 AD_BID_CANARY_CAMPAIGNS에도 없어 전면 hold)."""
+    _seed_hourly_shopping(db)
+    _ad(db, "grp-hot", "p1", ad_id="nad-1", ad_bid_amt=800, use_group=False)  # 미연결
+    db.commit()
+    with patch.object(auto_operator, "AD_BID_ROUTING_ENABLED", False), \
+         patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 200}), \
+         patch.object(auto_operator.naver_sa_writer, "get_ad_bid") as mget_ad, \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(db, now=NOW, fetch_intraday=lambda t, d: _overheat_curve())
+    mock_exec.assert_not_called()
+    mget_ad.assert_not_called()  # 킬스위치 off → 소재 재조회조차 안 함(hold가 그 전에 걸림)
+    assert result["executed"] == 0
+    assert result["approved"] == 0
+    reasons = [h["reason"] for h in result["held"]]
+    assert any("[레버 미연결]" in r and "B3 대기" in r for r in reasons)
+
+
+def test_kill_switch_off_also_stops_auto_exec_on_canary_campaign(db):
+    """(g) ★킬스위치는 두 게이트를 모두 지배해야 한다 — 롤백 보장.
+
+    생성 게이트(AD_BID_ROUTING_ENABLED)와 실행 게이트(_AD_AUTO_EXEC_PROPOSAL_TYPES)가 독립
+    축이면, 킬스위치를 내려도 **AD_BID_CANARY_CAMPAIGNS에 남아 있는 캠페인**은 상수 폴백으로
+    ad 라우팅을 통과한 뒤 하향이 계속 자동 실행된다 = "되돌리는 스위치가 완전히 되돌리지
+    않는다". 현재 맥세이프엔 ad-레버 유닛이 없어 도달 불가능하지만, 롤백 보장은 도달
+    가능성과 무관하게 성립해야 한다(사고 시 한 줄 원복이 이 스위치의 존재 이유).
+    → _ad_auto_exec()가 킬스위치를 함께 보므로 Confirm 대기로 남아야 한다.
+    """
+    _seed_hourly_shopping(db)
+    _ad(db, "grp-hot", "p1", ad_id="nad-1", ad_bid_amt=800, use_group=False)  # 미연결
+    db.commit()
+    with patch.object(auto_operator, "AD_BID_ROUTING_ENABLED", False), \
+         patch.object(auto_operator, "AD_BID_CANARY_CAMPAIGNS", frozenset({CAMP})), \
+         patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 200}), \
+         patch.object(auto_operator.naver_sa_writer, "get_ad_bid", return_value=800), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(db, now=NOW, fetch_intraday=lambda t, d: _overheat_curve())
+
+    mock_exec.assert_not_called()  # ★핵심: 킬스위치가 실행 게이트까지 덮는다
+    assert result["executed"] == 0
+    assert result["ad_confirm_pending"] == 1  # 라우팅은 되지만 Confirm 대기로만 남음
+    pending = db.query(NaverProposal).filter(NaverProposal.target_type == "ad").all()
+    assert [p.status for p in pending] == ["pending"]
+
+
+def test_hourly_lane_stale_ad_pending_does_not_block_bid_down(db):
+    """(e) stale pending이 하향을 막지 않는다 — 배포 전에 쌓여 있던 같은 (bid_down, ad,
+    target_id) pending 제안이 이미 DB에 있어도, 새 하향 판정은 dedup skip되지 않고
+    그대로 인라인 실행된다(_AD_AUTO_EXEC_PROPOSAL_TYPES는 dedup 분기에서 제외되므로).
+    회귀 대상: 이 dedup을 그대로 뒀다면 stale 카드 한 장이 이후 모든 하향을 영구 skip시켰다."""
+    _seed_hourly_shopping(db)
+    _ad(db, "grp-hot", "p1", ad_id="nad-1", ad_bid_amt=800, use_group=False)  # 미연결
+    db.commit()
+    stale = NaverProposal(
+        proposal_type="bid_down", target_type="ad", target_id="nad-1", campaign_id=CAMP,
+        adgroup_id="grp-hot", rationale="[소재입찰] 배포 전 stale pending", expected_effect="x",
+        status="pending", target_bid=680,
+    )
+    db.add(stale)
+    db.commit()
+    with patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 200}), \
+         patch.object(auto_operator.naver_sa_writer, "get_ad_bid", return_value=800), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(db, now=NOW, fetch_intraday=lambda t, d: _overheat_curve())
+    mock_exec.assert_called_once()  # stale pending에 안 막힘
+    assert result["executed"] == 1
+    assert result.get("ad_confirm_pending_dup_skipped", 0) == 0
+    ad_rows = db.query(NaverProposal).filter(NaverProposal.target_type == "ad").all()
+    assert len(ad_rows) == 2  # stale 1건 + 새로 실행된 1건(dedup skip 안 됨 — 이게 핵심)
+    statuses = sorted(r.status for r in ad_rows)
+    # ★codex 2R[P2] 이후 변경: stale pending은 남겨두지 않고 **만료 교체**한다. 남겨두면
+    #   레인 캡 강등분이 매시간 새 pending을 낳아 Confirm 큐가 같은 소재로 매몰된다.
+    #   큐에는 항상 지금 값 기준 1장만 존재한다.
+    assert statuses == ["approved", "expired"]
+
+
+def test_hourly_lane_probe_still_holds_no_ad_routing(db):
+    """(f) 탐침은 여전히 ad 라우팅 금지 — D-NAO-125는 탐침 경로를 건드리지 않았다. 미연결
+    그룹 + 탐침 트리거면 킬스위치 on(기본)이어도 "[레버 미연결] 탐침은 ad 미지원" hold."""
+    _seed_hourly_shopping(db)
+    _ad(db, "grp-hot", "p1", ad_id="nad-1", ad_bid_amt=800, use_group=False)  # 미연결
+    db.commit()
+    with patch.object(auto_operator, "_judge_hourly",
+                      return_value={"direction": "hold", "reason": "판단보류"}), \
+         patch.object(auto_operator, "_probe_trigger", return_value=(True, "imp 있음·클릭0")), \
+         patch.object(auto_operator, "_learned_optimal_skip", return_value=(False, "학습밴드 미도달")), \
+         patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 200}), \
+         patch.object(auto_operator.naver_sa_writer, "get_ad_bid") as mget_ad, \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(db, now=NOW, fetch_intraday=lambda t, d: _overheat_curve())
+    mock_exec.assert_not_called()
+    mget_ad.assert_not_called()
+    assert db.query(NaverProposal).count() == 0
+    assert result["approved"] == 0
+    assert any("탐침" in h["reason"] and "[레버 미연결]" in h["reason"] for h in result["held"])
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -896,3 +1099,285 @@ def test_shopping_pause_disconnected_no_ad_change_uses_chronic_window(db):
     assert len(out) == 1
     assert out[0]["cost"] == 21000
     assert out[0]["effective_ad_id"] == "nad-1"  # B3: 소재-레벨 제어 대상 노출
+
+
+# ══════════════════════════════════════════════════════════════════
+# D-NAO-125 codex[P1] 4건 회귀 (2026-07-29 리뷰 → 수정)
+#   1) 자동 하향에만 일일 상한(DL3 면제는 사람 눈 전제였다)
+#   2) 같은 소재가 실행 중이면 중복 발사 금지
+#   3) 킬스위치가 잔존 approved 행까지 되돌린다(writer 직전 최종 확인)
+#   4) 레인당 blast radius 상한 — 초과분은 드롭이 아니라 Confirm 대기로 강등
+# ══════════════════════════════════════════════════════════════════
+def test_auto_bid_down_has_daily_cap_but_human_down_does_not(db):
+    """(1) 같은 하향이라도 **무인 실행**이면 일일 상한이 걸린다."""
+    from app.services.naver_ad import guardrail_gate
+
+    # ★codex 2R[P1]: 상한의 원료는 "그 소재의 오늘 모든 변경"이 아니라 **자동 하향 성공 수**다.
+    #   사람이 오늘 손으로 5번 만졌어도 자동 하향이 0회면 손실 하향은 나가야 한다.
+    ctx = {"current_bid": 800, "changes_today_count": 5, "auto_bid_down_today": 3,
+           "campaign_type": "SHOPPING"}
+    auto = guardrail_gate.check({"proposal_type": "bid_down", "target_bid": 680},
+                                {**ctx, "auto_exec": True}, now=NOW)
+    human = guardrail_gate.check({"proposal_type": "bid_down", "target_bid": 680},
+                                 {**ctx, "auto_exec": False}, now=NOW)
+    assert auto is not None and "자동 하향 일일 상한" in auto
+    assert human is None  # DL3 면제 유지 — 사람이 승인한 "쭉 낮추다가"는 그대로
+
+
+def test_auto_bid_down_under_cap_passes(db):
+    from app.services.naver_ad import guardrail_gate
+
+    assert guardrail_gate.check(
+        {"proposal_type": "bid_down", "target_bid": 680},
+        {"current_bid": 800, "changes_today_count": 9, "auto_bid_down_today": 2,
+         "auto_exec": True, "campaign_type": "SHOPPING"},
+        now=NOW,
+    ) is None
+
+
+def test_kill_switch_blocks_residual_approved_ad_proposal(db):
+    """(3) approved 커밋 후 크래시로 남은 행도 킬스위치가 막는다(쓰기·change_log 0)."""
+    db.add(NaverCampaignSettings(campaign_id=CAMP, optimizer="ours", auto_operate=True))
+    p = NaverProposal(
+        proposal_type="bid_down", target_type="ad", target_id="nad-1", campaign_id=CAMP,
+        adgroup_id="grp-hot", status="approved", target_bid=680,
+        approval_source=auto_operator.APPROVAL_SOURCE_HOURLY,
+    )
+    db.add(p)
+    db.commit()
+    with patch.object(auto_operator, "AD_BID_ROUTING_ENABLED", False), \
+         patch.object(writer, "get_ad_bid") as mock_get, \
+         patch.object(writer, "update_ad_bid") as mock_write:
+        with pytest.raises(harness.KillSwitchEngagedError):
+            harness.execute(db, p.id, dry_run=False, now=NOW)
+    mock_write.assert_not_called()
+    mock_get.assert_not_called()  # 진입 지점에서 막혀 라이브 재조회조차 안 나간다
+    db.refresh(p)
+    assert p.status == "approved"  # 미실행 정직 상태(executing 잔존 금지)
+    assert db.query(NaverChangeLog).count() == 0
+
+
+def test_inflight_ad_proposal_blocks_duplicate_fire(db):
+    """(2) 같은 소재에 executing 제안이 있으면 새 하향을 만들지 않는다(동시 실행 중복 쓰기)."""
+    _seed_hourly_shopping(db)
+    _ad(db, "grp-hot", "p1", ad_id="nad-1", ad_bid_amt=800, use_group=False)
+    db.add(NaverProposal(
+        proposal_type="bid_down", target_type="ad", target_id="nad-1", campaign_id=CAMP,
+        adgroup_id="grp-hot", status="executing", target_bid=680,
+    ))
+    db.commit()
+    with patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 200}), \
+         patch.object(auto_operator.naver_sa_writer, "get_ad_bid", return_value=800), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(db, now=NOW, fetch_intraday=lambda t, d: _overheat_curve())
+    mock_exec.assert_not_called()
+    assert result["ad_auto_exec_inflight_skipped"] == 1
+    assert result["approved"] == 0
+
+
+def test_lane_cap_degrades_excess_to_confirm_pending(db):
+    """(4) 레인당 상한 초과분은 **드롭이 아니라** Confirm 대기로 남는다."""
+    n_groups = auto_operator._MAX_AD_AUTO_EXEC_PER_LANE + 2
+    db.add(NaverCampaignSettings(campaign_id=CAMP, optimizer="ours", auto_operate=True))
+    db.add(NaverEntity(entity_type="campaign", entity_id=CAMP, campaign_id=CAMP, status="on"))
+    db.add(NaverHourlySnapshot(snapshot_at=NOW, ad_date=TODAY, snapshot_hour=23,
+                               campaign_id=CAMP, campaign_type="", cost=0, clk=0, imp=0))
+    window_from, _ = auto_operator._settlement_window(TODAY)
+    for i in range(n_groups):
+        gid = f"grp-{i}"
+        db.add(NaverEntity(entity_type="adgroup", entity_id=gid, parent_id=CAMP,
+                           campaign_id=CAMP, campaign_type="SHOPPING", status="on"))
+        db.add(NaverAdDaily(ad_date=window_from, campaign_id=CAMP, campaign_type="SHOPPING",
+                            adgroup_id=gid, keyword_id="", imp=200, clk=20, cost=2000))
+        _ad(db, gid, f"p{i}", ad_id=f"nad-{i}", ad_bid_amt=800, use_group=False)
+    db.commit()
+    with patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 200}), \
+         patch.object(auto_operator.naver_sa_writer, "get_ad_bid", return_value=800), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(db, now=NOW, fetch_intraday=lambda t, d: _overheat_curve())
+    assert result["approved"] == auto_operator._MAX_AD_AUTO_EXEC_PER_LANE
+    assert mock_exec.call_count == auto_operator._MAX_AD_AUTO_EXEC_PER_LANE
+    assert result["ad_auto_exec_capped"] == n_groups - auto_operator._MAX_AD_AUTO_EXEC_PER_LANE
+    assert result["ad_confirm_pending"] == n_groups - auto_operator._MAX_AD_AUTO_EXEC_PER_LANE
+    # 강등분은 사라지지 않고 큐에 보인다
+    assert db.query(NaverProposal).filter(NaverProposal.status == "pending").count() == \
+        n_groups - auto_operator._MAX_AD_AUTO_EXEC_PER_LANE
+
+
+# ── codex 2R 회귀(2026-07-29) — 1R 수정이 만든 결함 3건 + 누적 방지 ──────────────
+def test_kill_switch_does_not_block_human_console_approval(db):
+    """★codex 2R[P1] 회귀: 킬스위치는 **자동 발사**를 끄는 것이지 사람 손을 묶는 게 아니다.
+
+    사고 대응 중 자동화를 내린 상태에서 Jino가 콘솔로 직접 하향을 승인하면 실행돼야 한다.
+    1R은 조건이 `approval_source is not None`이라 'console'까지 막았다.
+    """
+    db.add(NaverCampaignSettings(campaign_id=CAMP, optimizer="ours", auto_operate=True))
+    _ad(db, "grp-hot", "p1", ad_id="nad-1", ad_bid_amt=800, use_group=False)
+    p = NaverProposal(
+        proposal_type="bid_down", target_type="ad", target_id="nad-1", campaign_id=CAMP,
+        adgroup_id="grp-hot", status="approved", target_bid=760, approval_source="console",
+    )
+    db.add(p)
+    db.commit()
+    after = {"nccAdId": "nad-1", "adAttr": {"bidAmt": 760, "useGroupBidAmt": False}}
+    with patch.object(auto_operator, "AD_BID_ROUTING_ENABLED", False), \
+         patch.object(writer, "get_ad_bid", return_value=800), \
+         patch.object(writer, "update_ad_bid",
+                      return_value=WriteResult(action="update_ad_bid", before={"bidAmt": 800},
+                                               response=None, after=after, created_ids=[])) as mock_write:
+        harness.execute(db, p.id, dry_run=False, now=NOW)
+    mock_write.assert_called_once()  # 사람 승인은 스위치와 무관하게 나간다
+
+
+def test_target_level_claim_blocks_second_proposal_on_same_ad(db):
+    """★codex 2R[P1] 회귀: 같은 소재에 executing 제안이 있으면 **다른 proposal도** 클레임 실패.
+
+    레인의 사전 조회는 조회-생성 사이가 열려 있어 경쟁을 못 막는다. 진짜 방어는 클레임
+    UPDATE 한 문장 안에서 대상 단위로 판정하는 것이다.
+    """
+    db.add(NaverCampaignSettings(campaign_id=CAMP, optimizer="ours", auto_operate=True))
+    _ad(db, "grp-hot", "p1", ad_id="nad-1", ad_bid_amt=800, use_group=False)
+    first = NaverProposal(  # 다른 실행자가 이미 클레임한 상태
+        proposal_type="bid_down", target_type="ad", target_id="nad-1", campaign_id=CAMP,
+        adgroup_id="grp-hot", status="executing", target_bid=680,
+        approval_source=auto_operator.APPROVAL_SOURCE_HOURLY,
+    )
+    second = NaverProposal(
+        proposal_type="bid_down", target_type="ad", target_id="nad-1", campaign_id=CAMP,
+        adgroup_id="grp-hot", status="approved", target_bid=680,
+        approval_source=auto_operator.APPROVAL_SOURCE_HOURLY,
+    )
+    db.add_all([first, second])
+    db.commit()
+    with patch.object(writer, "get_ad_bid", return_value=800), \
+         patch.object(writer, "update_ad_bid") as mock_write:
+        with pytest.raises(harness.AlreadyExecutedError):
+            harness.execute(db, second.id, dry_run=False, now=NOW)
+    mock_write.assert_not_called()
+    db.refresh(second)
+    assert second.status == "approved"  # 미실행 정직 상태
+
+
+def test_auto_down_cap_counts_only_auto_downs(db):
+    """★codex 2R[P1] 회귀: 상한 원료는 '오늘 모든 변경'이 아니라 '자동 하향 성공'이다.
+
+    같은 소재에 오늘 사람 하향 1 + 자동 상향 2가 있어도 자동 하향은 0회 → 상한 미도달.
+    """
+    def _log(pt, src, action="update_bid"):
+        pr = NaverProposal(proposal_type=pt, target_type="ad", target_id="nad-1",
+                           campaign_id=CAMP, status="approved", approval_source=src)
+        db.add(pr)
+        db.flush()
+        db.add(NaverChangeLog(
+            entity_type="ad", entity_id="nad-1", campaign_id=CAMP, action=action,
+            dry_run=False, changed_at=NOW, executed_at=NOW, proposal_id=pr.id,
+            after_value=json.dumps({"bidAmt": 700}),
+        ))
+
+    _log("bid_down", "console")                              # 사람 하향
+    _log("bid_up_servo", auto_operator.APPROVAL_SOURCE_HOURLY)  # 자동 상향
+    _log("bid_up_servo", auto_operator.APPROVAL_SOURCE_HOURLY)
+    db.commit()
+    assert harness.count_auto_bid_down_today(db, "ad", "nad-1", NOW) == 0
+    _log("bid_down", auto_operator.APPROVAL_SOURCE_HOURLY)   # 자동 하향 1회
+    db.commit()
+    assert harness.count_auto_bid_down_today(db, "ad", "nad-1", NOW) == 1
+
+
+def test_capped_pending_is_replaced_not_accumulated(db):
+    """★codex 2R[P2] 회귀: 캡 강등 카드가 매시간 쌓이지 않는다(같은 소재는 항상 1장)."""
+    n_groups = auto_operator._MAX_AD_AUTO_EXEC_PER_LANE + 1
+    db.add(NaverCampaignSettings(campaign_id=CAMP, optimizer="ours", auto_operate=True))
+    db.add(NaverEntity(entity_type="campaign", entity_id=CAMP, campaign_id=CAMP, status="on"))
+    db.add(NaverHourlySnapshot(snapshot_at=NOW, ad_date=TODAY, snapshot_hour=23,
+                               campaign_id=CAMP, campaign_type="", cost=0, clk=0, imp=0))
+    window_from, _ = auto_operator._settlement_window(TODAY)
+    for i in range(n_groups):
+        gid = f"grp-{i}"
+        db.add(NaverEntity(entity_type="adgroup", entity_id=gid, parent_id=CAMP,
+                           campaign_id=CAMP, campaign_type="SHOPPING", status="on"))
+        db.add(NaverAdDaily(ad_date=window_from, campaign_id=CAMP, campaign_type="SHOPPING",
+                            adgroup_id=gid, keyword_id="", imp=200, clk=20, cost=2000))
+        _ad(db, gid, f"p{i}", ad_id=f"nad-{i}", ad_bid_amt=800, use_group=False)
+    db.commit()
+    for _ in range(2):  # 두 회차 연속
+        with patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 200}), \
+             patch.object(auto_operator.naver_sa_writer, "get_ad_bid", return_value=800), \
+             patch.object(auto_operator.naver_execution_harness, "execute"):
+            auto_operator.run_hourly_lane(db, now=NOW, fetch_intraday=lambda t, d: _overheat_curve())
+    pendings = db.query(NaverProposal).filter(
+        NaverProposal.target_type == "ad", NaverProposal.status == "pending"
+    ).all()
+    assert len({p.target_id for p in pendings}) == len(pendings)  # 소재당 1장
+
+
+def test_claim_race_across_separate_connections(tmp_path):
+    """★codex 3R[P2]: **서로 다른 커넥션** 두 개가 같은 소재를 클레임하면 하나만 성공한다.
+
+    앞선 회귀는 이미 executing인 정적 상태만 봤다. 이 테스트는 파일 DB + 독립 세션 2개로,
+    NOT EXISTS 판정이 UPDATE 실행 시점에 **상대 커넥션이 커밋한 최신 상태**를 보는지 확인한다
+    (ORM 아이덴티티 맵의 낡은 스냅샷이 아니라). 그게 이 방어의 유일한 근거다.
+    """
+    url = f"sqlite:///{tmp_path}/race.db"
+    engine = create_engine(url)
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    setup = Session()
+    setup.add(NaverCampaignSettings(campaign_id=CAMP, optimizer="ours", auto_operate=True))
+    setup.add(NaverAdgroupProduct(adgroup_id="grp-hot", campaign_id=CAMP, mall_product_id="p1",
+                                  product_name="p1", ad_id="nad-1", ad_bid_amt=800,
+                                  use_group_bid_amt=False))
+    ids = []
+    for _ in range(2):
+        pr = NaverProposal(
+            proposal_type="bid_down", target_type="ad", target_id="nad-1", campaign_id=CAMP,
+            adgroup_id="grp-hot", status="approved", target_bid=680,
+            approval_source=auto_operator.APPROVAL_SOURCE_HOURLY,
+        )
+        setup.add(pr)
+        setup.flush()
+        ids.append(pr.id)
+    setup.commit()
+    setup.close()
+
+    s_a, s_b = Session(), Session()
+    try:
+        # A가 클레임만 하고 아직 쓰기 중(= executing 상태로 커밋). 이게 동시 실행 구간이다.
+        p_a = s_a.query(NaverProposal).filter(NaverProposal.id == ids[0]).one()
+        harness._claim_executing(s_a, p_a)
+        assert p_a.status == "executing"
+        # B는 **다른 커넥션**에서 자기 proposal(id가 다르다)을 실행하려 한다.
+        with patch.object(writer, "get_ad_bid", return_value=800), \
+             patch.object(writer, "update_ad_bid") as mock_write:
+            with pytest.raises(harness.AlreadyExecutedError):
+                harness.execute(s_b, ids[1], dry_run=False, now=NOW)
+        mock_write.assert_not_called()  # 같은 소재에 두 번째 PUT이 나가지 않는다
+        assert s_b.query(NaverProposal).filter(
+            NaverProposal.id == ids[1]).one().status == "approved"
+    finally:
+        s_a.close()
+        s_b.close()
+
+
+def test_pending_replacement_policy_covers_all_producers(db):
+    """★codex 3R[P2] 정책 명문화: 자동 하향 카드를 만들 때 같은 (타입, 소재)의 pending은
+    **생산자와 무관하게** 만료된다.
+
+    의도된 동작이다 — 레인이 지금 값으로 판정해 새 카드를 만드는 시점에서, 같은 소재·같은
+    방향의 옛 카드는 어느 경로가 만들었든 이미 낡았다(입찰가·근거가 그때 값이다). 다만
+    '조용히 사라지는' 것이 아니라 status='expired'로 남아 이력에서 보인다.
+    """
+    _seed_hourly_shopping(db)
+    _ad(db, "grp-hot", "p1", ad_id="nad-1", ad_bid_amt=800, use_group=False)
+    other = NaverProposal(  # 다른 생산자(일 레인 proposal_writer 등)가 만든 카드
+        proposal_type="bid_down", target_type="ad", target_id="nad-1", campaign_id=CAMP,
+        adgroup_id="grp-hot", status="pending", target_bid=700, rationale="[일레인] 옛 판정",
+    )
+    db.add(other)
+    db.commit()
+    with patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 200}), \
+         patch.object(auto_operator.naver_sa_writer, "get_ad_bid", return_value=800), \
+         patch.object(auto_operator.naver_execution_harness, "execute"):
+        auto_operator.run_hourly_lane(db, now=NOW, fetch_intraday=lambda t, d: _overheat_curve())
+    db.refresh(other)
+    assert other.status == "expired"  # 사라지지 않고 만료로 남는다(이력 보존)

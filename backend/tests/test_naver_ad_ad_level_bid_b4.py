@@ -325,14 +325,18 @@ def test_build_lever_resume_ml_or_unknown_group_skipped(db, manual_bid):
 
 def test_build_lever_resume_non_canary_skips(db):
     """[B4 스코프] 비카나리(기본) → 재개 준비/재개 모두 미생성(B3 카나리 스코프 계승).
-    비카나리는 ML 재조회조차 안 함(API 콜 최소 — 카나리 소수 그룹만)."""
+    비카나리는 ML 재조회조차 안 함(API 콜 최소 — 카나리 소수 그룹만).
+
+    D-NAO-125(2026-07-29): 기본 상태(킬스위치 on)에서는 이 캠페인도 이제 열린다(의도된
+    변경). 이 테스트는 킬스위치 off로 좁혀 종전 비카나리 skip 회귀를 보존한다."""
     _ours(db)
     diagnosis = _diagnosis(shopping_lever_resume_candidates=[
         _resume_board_row("bid_down_first"),
         _resume_board_row("resume", adgroup_id="grp-2", effective_ad_id="nad-2"),
     ])
-    with patch.object(proposal_writer, "_adgroup_is_manual_bid") as m_manual:
-        out = proposal_writer.build(db, diagnosis, as_of=TODAY)  # 카나리 패치 없음
+    with patch.object(auto_operator, "AD_BID_ROUTING_ENABLED", False), \
+         patch.object(proposal_writer, "_adgroup_is_manual_bid") as m_manual:
+        out = proposal_writer.build(db, diagnosis, as_of=TODAY)  # 카나리 패치 없음 + 킬스위치 off
     assert out == []
     m_manual.assert_not_called()
 
