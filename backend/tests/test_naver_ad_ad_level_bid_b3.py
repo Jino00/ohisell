@@ -1309,3 +1309,75 @@ def test_capped_pending_is_replaced_not_accumulated(db):
         NaverProposal.target_type == "ad", NaverProposal.status == "pending"
     ).all()
     assert len({p.target_id for p in pendings}) == len(pendings)  # 소재당 1장
+
+
+def test_claim_race_across_separate_connections(tmp_path):
+    """★codex 3R[P2]: **서로 다른 커넥션** 두 개가 같은 소재를 클레임하면 하나만 성공한다.
+
+    앞선 회귀는 이미 executing인 정적 상태만 봤다. 이 테스트는 파일 DB + 독립 세션 2개로,
+    NOT EXISTS 판정이 UPDATE 실행 시점에 **상대 커넥션이 커밋한 최신 상태**를 보는지 확인한다
+    (ORM 아이덴티티 맵의 낡은 스냅샷이 아니라). 그게 이 방어의 유일한 근거다.
+    """
+    url = f"sqlite:///{tmp_path}/race.db"
+    engine = create_engine(url)
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    setup = Session()
+    setup.add(NaverCampaignSettings(campaign_id=CAMP, optimizer="ours", auto_operate=True))
+    setup.add(NaverAdgroupProduct(adgroup_id="grp-hot", campaign_id=CAMP, mall_product_id="p1",
+                                  product_name="p1", ad_id="nad-1", ad_bid_amt=800,
+                                  use_group_bid_amt=False))
+    ids = []
+    for _ in range(2):
+        pr = NaverProposal(
+            proposal_type="bid_down", target_type="ad", target_id="nad-1", campaign_id=CAMP,
+            adgroup_id="grp-hot", status="approved", target_bid=680,
+            approval_source=auto_operator.APPROVAL_SOURCE_HOURLY,
+        )
+        setup.add(pr)
+        setup.flush()
+        ids.append(pr.id)
+    setup.commit()
+    setup.close()
+
+    s_a, s_b = Session(), Session()
+    try:
+        # A가 클레임만 하고 아직 쓰기 중(= executing 상태로 커밋). 이게 동시 실행 구간이다.
+        p_a = s_a.query(NaverProposal).filter(NaverProposal.id == ids[0]).one()
+        harness._claim_executing(s_a, p_a)
+        assert p_a.status == "executing"
+        # B는 **다른 커넥션**에서 자기 proposal(id가 다르다)을 실행하려 한다.
+        with patch.object(writer, "get_ad_bid", return_value=800), \
+             patch.object(writer, "update_ad_bid") as mock_write:
+            with pytest.raises(harness.AlreadyExecutedError):
+                harness.execute(s_b, ids[1], dry_run=False, now=NOW)
+        mock_write.assert_not_called()  # 같은 소재에 두 번째 PUT이 나가지 않는다
+        assert s_b.query(NaverProposal).filter(
+            NaverProposal.id == ids[1]).one().status == "approved"
+    finally:
+        s_a.close()
+        s_b.close()
+
+
+def test_pending_replacement_policy_covers_all_producers(db):
+    """★codex 3R[P2] 정책 명문화: 자동 하향 카드를 만들 때 같은 (타입, 소재)의 pending은
+    **생산자와 무관하게** 만료된다.
+
+    의도된 동작이다 — 레인이 지금 값으로 판정해 새 카드를 만드는 시점에서, 같은 소재·같은
+    방향의 옛 카드는 어느 경로가 만들었든 이미 낡았다(입찰가·근거가 그때 값이다). 다만
+    '조용히 사라지는' 것이 아니라 status='expired'로 남아 이력에서 보인다.
+    """
+    _seed_hourly_shopping(db)
+    _ad(db, "grp-hot", "p1", ad_id="nad-1", ad_bid_amt=800, use_group=False)
+    other = NaverProposal(  # 다른 생산자(일 레인 proposal_writer 등)가 만든 카드
+        proposal_type="bid_down", target_type="ad", target_id="nad-1", campaign_id=CAMP,
+        adgroup_id="grp-hot", status="pending", target_bid=700, rationale="[일레인] 옛 판정",
+    )
+    db.add(other)
+    db.commit()
+    with patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 200}), \
+         patch.object(auto_operator.naver_sa_writer, "get_ad_bid", return_value=800), \
+         patch.object(auto_operator.naver_execution_harness, "execute"):
+        auto_operator.run_hourly_lane(db, now=NOW, fetch_intraday=lambda t, d: _overheat_curve())
+    db.refresh(other)
+    assert other.status == "expired"  # 사라지지 않고 만료로 남는다(이력 보존)
