@@ -89,6 +89,10 @@ _MAX_DAILY_AUTO_BID_DOWNS = 3
 # 2.0배에서 멈추고 사람에게 넘긴다(사람 승인 상향은 auto_exec=False라 이 상한 대상이 아니다 —
 # 더 올릴 근거가 있으면 사람이 콘솔에서 올리고, 그 값이 새 기준점이 된다).
 _MAX_AUTO_UP_MULTIPLE = Decimal("2.0")
+# 이 상한이 걸리는 타입 = D-NAO-129가 개방한 성과 상향뿐. harness._AD_UP_OPEN_TYPES와
+# 같은 값이어야 한다(그 모듈은 이 모듈을 import 하므로 역방향 import를 피해 값으로 고정 —
+# 정합은 테스트로 지킨다: test_cumulative_cap_types_match_ad_up_open_types).
+_CUMULATIVE_CAP_TYPES: frozenset[str] = frozenset({"bid_up"})
 
 # P2(D-NAO-42-f): 예산 통제 — PLAN_naver-ad-budget-control.md §5-C. bid_up/down과 병렬 구조.
 _BUDGET_UP_TYPES = frozenset({"budget_up"})
@@ -261,8 +265,15 @@ def _check_bid(proposal: dict, context: dict, proposal_type: str) -> str | None:
 
         # ★D-NAO-129: 누적 상승 배수 상한 — BEP가 소재 천장이 못 되는 구멍의 마개(위 상수 주석).
         # 기준점이 없으면(최근 창에 자동 상향 이력 없음) 미적용 = 종전 동작.
+        # ★적용 범위는 이번에 개방한 타입뿐(codex 적대 2R[P2]): 탐색(bid_up_explore)·콜드
+        #   (bid_up_cold)·서보(bid_up_servo/rank)는 각자의 경제성 상한을 가진 별도 레인이라,
+        #   전역 2배 천장으로 묶으면 그 레인들의 의미가 조용히 바뀐다(기존 동작 회귀).
         auto_up_base = context.get("auto_up_base_bid")
-        if context.get("auto_exec") and auto_up_base:
+        if (
+            context.get("auto_exec")
+            and auto_up_base
+            and proposal_type in _CUMULATIVE_CAP_TYPES
+        ):
             ceiling = int(Decimal(auto_up_base) * _MAX_AUTO_UP_MULTIPLE)
             if target_bid > ceiling:
                 return (

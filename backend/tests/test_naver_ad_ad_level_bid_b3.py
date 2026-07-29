@@ -1489,14 +1489,20 @@ def test_cas_blocks_write_when_bid_changed_after_judgement(db):
     """
     from app.services.naver_ad import naver_sa_writer as w
 
-    before_live = {"nccAdId": "nad-1", "nccAdgroupId": "grp-hot", "userLock": False,
-                   "adAttr": {"bidAmt": 400, "useGroupBidAmt": False}}  # 외부가 400으로 내림
-    with patch.object(w, "get_ad", return_value=before_live), \
+    live_800 = {"nccAdId": "nad-1", "nccAdgroupId": "grp-hot", "userLock": False,
+                "adAttr": {"bidAmt": 800, "useGroupBidAmt": False}}
+    live_400 = {**live_800, "adAttr": {"bidAmt": 400, "useGroupBidAmt": False}}  # 외부가 내림
+    # ★잔여 창을 재현한다(codex 적대 2R[P1]): 첫 GET에서는 800이라 통과하고, **PUT 직전**
+    #   마지막 확인에서 400으로 바뀐 것을 잡아야 한다. 초판은 첫 GET에서만 비교해 이 창을
+    #   놓쳤다(부모그룹 조회·body 조립 구간이 통째로 열려 있었다).
+    with patch.object(w, "get_ad", side_effect=[live_800, live_400]), \
+         patch.object(w, "_get_adgroup", return_value={"systemBiddingType": "NONE",
+                                                      "autobidStrategy": {"isAutobidActive": False}}), \
          patch("requests.put") as mput:
         with pytest.raises(w.WriteValidationError) as ei:
             w.update_ad_bid("nad-1", 920, expected_before_bid=800)  # 800 기준으로 판정했었다
     mput.assert_not_called()  # ★PUT이 아예 나가지 않는다
-    assert "CAS 실패" in str(ei.value)
+    assert "기준가 불일치" in str(ei.value)
 
 
 def test_cas_allows_write_when_bid_unchanged(db):
@@ -1507,7 +1513,8 @@ def test_cas_allows_write_when_bid_unchanged(db):
                    "adAttr": {"bidAmt": 800, "useGroupBidAmt": False}}
     after_live = {**before_live, "adAttr": {"bidAmt": 920, "useGroupBidAmt": False}}
     resp = type("R", (), {"status_code": 200, "json": lambda self: {}, "text": ""})()
-    with patch.object(w, "get_ad", side_effect=[before_live, after_live]), \
+    # GET 3회: ①before ②PUT 직전 기준가 재확인 ③after 검증
+    with patch.object(w, "get_ad", side_effect=[before_live, before_live, after_live]), \
          patch.object(w, "_get_adgroup", return_value={"systemBiddingType": "NONE",
                                                       "autobidStrategy": {"isAutobidActive": False}}), \
          patch("requests.put", return_value=resp):
@@ -1544,10 +1551,15 @@ def test_auto_up_cumulative_multiple_cap(db):
     ) is None
 
 
-def test_auto_up_base_bid_uses_first_auto_up_before(db):
-    """기준점 = 최근 7일 우리 **자동** 상향의 최초 before(사람 상향은 기준점을 새로 잡는다)."""
-    def _up(bid_before, src, at):
-        pr = NaverProposal(proposal_type="bid_up", target_type="ad", target_id="nad-1",
+def test_auto_up_base_bid_is_anchored_to_human_not_a_time_window(db):
+    """★codex 적대 2R[P1] 회귀: 기준점은 **사람이 마지막으로 정한 값**이고 시간이 지나도 안 풀린다.
+
+    초판은 "최근 7일"이라 창이 만료되면 기준점이 사라지고 그때의 높은 값이 새 기준이 됐다 —
+    800→1,600에서 막혀도 일주일 뒤 1,600→3,200 → … 계단식으로 100,000에 닿는다. 상한이
+    상승을 늦출 뿐 멈추지 못했고, 그 우회를 테스트가 계약으로 고정하고 있었다.
+    """
+    def _log(bid_before, bid_after, src, at, ptype="bid_up"):
+        pr = NaverProposal(proposal_type=ptype, target_type="ad", target_id="nad-1",
                            campaign_id=CAMP, status="approved", approval_source=src)
         db.add(pr)
         db.flush()
@@ -1555,12 +1567,69 @@ def test_auto_up_base_bid_uses_first_auto_up_before(db):
             entity_type="ad", entity_id="nad-1", campaign_id=CAMP, action="update_bid",
             dry_run=False, changed_at=at, executed_at=at, proposal_id=pr.id,
             before_value=json.dumps({"adAttr": {"bidAmt": bid_before, "useGroupBidAmt": False}}),
-            after_value=json.dumps({"adAttr": {"bidAmt": int(bid_before * 1.15)}}),
+            after_value=json.dumps({"adAttr": {"bidAmt": bid_after, "useGroupBidAmt": False}}),
         ))
 
-    _up(800, auto_operator.APPROVAL_SOURCE_HOURLY, NOW - timedelta(days=2))
-    _up(920, auto_operator.APPROVAL_SOURCE_HOURLY, NOW - timedelta(days=1))
+    _log(800, 920, auto_operator.APPROVAL_SOURCE_HOURLY, NOW - timedelta(days=40))
+    _log(920, 1060, auto_operator.APPROVAL_SOURCE_HOURLY, NOW - timedelta(days=39))
     db.commit()
+    # 40일이 지나도 기준점은 그대로 800이다(자동 만료 없음 = 계단식 상승 봉쇄).
     assert harness.auto_up_base_bid(db, "ad", "nad-1", NOW) == 800
-    # 창(7일) 밖 이력은 기준점이 되지 않는다 — 다시 처음부터.
-    assert harness.auto_up_base_bid(db, "ad", "nad-1", NOW + timedelta(days=10)) is None
+
+    # 사람이 콘솔에서 2,000으로 올리면 **그 값이 새 기준점**이 된다(상한 4,000).
+    _log(1060, 2000, "console", NOW - timedelta(days=1))
+    db.commit()
+    assert harness.auto_up_base_bid(db, "ad", "nad-1", NOW) == 2000
+
+    # 사람이 내린 경우도 같다 — 기준점은 사람이 정한 값을 따라간다(위로만 유리하게 남지 않는다).
+    _log(2000, 400, "console", NOW)
+    db.commit()
+    assert harness.auto_up_base_bid(db, "ad", "nad-1", NOW) == 400
+
+
+def test_auto_up_anchor_ignores_other_lane_types(db):
+    """탐색·콜드 이력은 이 기준점에 섞이지 않는다(각자 경제성 상한을 가진 별도 레인)."""
+    pr = NaverProposal(proposal_type="bid_up_cold", target_type="ad", target_id="nad-1",
+                       campaign_id=CAMP, status="approved", approval_source="cold_op")
+    db.add(pr)
+    db.flush()
+    db.add(NaverChangeLog(
+        entity_type="ad", entity_id="nad-1", campaign_id=CAMP, action="update_bid",
+        dry_run=False, changed_at=NOW, executed_at=NOW, proposal_id=pr.id,
+        before_value=json.dumps({"adAttr": {"bidAmt": 300, "useGroupBidAmt": False}}),
+        after_value=json.dumps({"adAttr": {"bidAmt": 3000, "useGroupBidAmt": False}}),
+    ))
+    db.commit()
+    assert harness.auto_up_base_bid(db, "ad", "nad-1", NOW) is None
+
+
+def test_cumulative_cap_types_match_ad_up_open_types():
+    """두 모듈의 상수는 같은 값이어야 한다(역방향 import를 피해 값으로 고정한 자리)."""
+    from app.services.naver_ad import guardrail_gate
+
+    assert guardrail_gate._CUMULATIVE_CAP_TYPES == harness._AD_UP_OPEN_TYPES
+
+
+def test_console_ad_up_passes_blocker_and_reaches_writer(db):
+    """★codex 적대 2R[P2]: 콘솔 계약과 executor 계약을 **한 테스트에서** 함께 고정한다.
+
+    blocker가 None을 준다는 것만으로는 "콘솔에서 승인하면 실제로 나간다"가 보장되지 않는다.
+    """
+    db.add(NaverCampaignSettings(campaign_id=CAMP, optimizer="ours", auto_operate=True))
+    p = NaverProposal(
+        proposal_type="bid_up", target_type="ad", target_id="nad-1", campaign_id=CAMP,
+        adgroup_id="grp-hot", status="approved", target_bid=920, approval_source="console",
+    )
+    db.add(p)
+    db.commit()
+    assert harness.real_write_blocker(p) is None
+    # 상향은 사람 승인이어도 BEP·일예산 근거가 있어야 나간다(완전성 게이트는 승인원 무관).
+    full_ctx = {"current_bid": 800, "auto_exec": False, "roas_corrected": 5.0,
+                "target_roas": 1.9611, "unconverted_spend": 0, "cost_today": 0,
+                "daily_budget": 300000}
+    with patch.object(harness, "_build_guardrail_context", return_value=full_ctx), \
+         patch.object(harness.guardrail_gate, "check", return_value=None), \
+         patch.object(harness.naver_sa_writer, "update_ad_bid",
+                      return_value=_ad_write_result()) as mad:
+        harness.execute(db, p.id, dry_run=False, now=NOW)
+    mad.assert_called_once_with("nad-1", 920, expected_before_bid=800)

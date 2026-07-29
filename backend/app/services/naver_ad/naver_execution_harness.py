@@ -29,7 +29,7 @@ import json
 import logging
 from datetime import datetime, timedelta
 
-from sqlalchemy import func as sqlfunc, select
+from sqlalchemy import func as sqlfunc, or_, select
 from sqlalchemy.orm import Session, aliased
 
 from app.models import (
@@ -470,23 +470,74 @@ def is_auto_exec(proposal: NaverProposal) -> bool:
     return proposal.approval_source not in (None, "console")
 
 
-def auto_up_base_bid(
-    db: Session, entity_type: str, entity_id: str, now: datetime, *, days: int = 7,
-) -> int | None:
-    """최근 days일 우리 **자동 상향**의 최초 before 입찰가 = 누적 상승 배수의 기준점.
+def _ad_bid_from_payload(raw: str | None) -> int | None:
+    """change_log의 before/after_value(JSON) → 소재 입찰가. ad grain은 get_ad 원본(adAttr 중첩)."""
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    bid, _ = naver_sa_fetcher._parse_ad_attr(payload.get("adAttr"))
+    if bid is not None:
+        return bid
+    v = payload.get("bidAmt")
+    try:
+        return int(v) if v is not None and not isinstance(v, bool) else None
+    except (TypeError, ValueError):
+        return None
 
-    ★왜 필요한가(D-NAO-129 codex 적대[P1]): 소재 상향의 경제적 브레이크는 "BEP 미달 증액
-    금지" 하나인데, 그 BEP는 **소재가 아니라 부모 광고그룹의 30일 집계**다. 같은 그룹에
-    매출을 만드는 소재가 하나라도 있으면 전환 0인 소재도 그 실적을 빌려 계속 통과한다.
-    그러면 남는 절대 상한은 네이버 API 최대값(100,000원)뿐이고, ±15%×하루 3회는 복리라
-    800원이 12일이면 100,000원에 닿는다(실측 계산: 1.15³/일 → 약 1.52배/일).
-    "언제 멈추나"에 답하는 값이 코드 어디에도 없었다 — 이 함수가 그 기준선이다.
 
-    자동 상향만 센다(사람이 콘솔에서 올린 값은 기준점을 새로 잡는 것으로 본다 — 사람은
-    이 상한의 대상이 아니다). 창을 벗어나면 None(=상한 미적용, 다시 처음부터).
+def auto_up_base_bid(db: Session, entity_type: str, entity_id: str, now: datetime) -> int | None:
+    """자동 상향 누적 상한의 **기준점**(anchor) — 사람이 마지막으로 정한 입찰가.
+
+    ★왜 필요한가(D-NAO-129 codex 적대[P1]): 상향의 경제적 브레이크인 "BEP 미달 증액 금지"는
+    소재가 아니라 **부모 광고그룹의 30일 집계**로 판정한다. 같은 그룹에 매출을 만드는 소재가
+    하나라도 있으면 전환 0인 소재도 그 실적을 빌려 계속 통과하고, 그러면 남는 절대 상한은
+    네이버 API 최대값(100,000원)뿐이다.
+
+    ★기준점을 **시간창으로 잡으면 안 된다**(codex 적대 2R[P1] — 초판의 결함): "최근 7일" 같은
+    이동창은 오래된 기준점을 자동으로 버려서, 1주차에 800→1,600으로 막힌 뒤 창이 만료되면
+    1,600이 새 기준이 되어 3,200 → 6,400 → … 계단식으로 결국 100,000에 닿는다. 상한이 상승을
+    **느리게 만들 뿐 멈추지 못한다**. "7일 동안 자동 상향이 없었다"는 "사람이 승인했다"와
+    동치가 아니다.
+
+    그래서 기준점은 **사람이 마지막으로 만든 값**이다:
+      ① 사람 쓰기(approval_source NULL·console)의 after 입찰가 — 가장 최근 것.
+      ② 그런 이력이 없으면, 사람 개입 이후 **최초 자동 상향의 before**(= 자동화가 출발한 값).
+      ③ 둘 다 없으면 None → 상한 미적용(이번이 첫 스텝이고, 그 스텝의 before가 다음 기준점이 된다).
+    사람이 올리든 내리든 그 값이 새 기준점이 되므로, 상한은 언제나 "사람이 정한 값의 N배"다.
+
+    ★자동 상향 이력은 이번에 개방한 타입(_AD_UP_OPEN_TYPES)만 센다 — 탐색(explore)·콜드(cold)는
+    각자의 경제성 상한을 가진 별도 레인이라 이 상한에 묶지 않는다(그 레인들의 의미를 바꾸지
+    않는다는 스코프 원칙, codex 적대 2R[P2]).
     """
-    since = datetime.combine(now.date(), datetime.min.time()) - timedelta(days=days - 1)
-    row = (
+    human = (
+        db.query(NaverChangeLog)
+        .outerjoin(NaverProposal, NaverProposal.id == NaverChangeLog.proposal_id)
+        .filter(
+            NaverChangeLog.entity_type == entity_type,
+            NaverChangeLog.entity_id == entity_id,
+            NaverChangeLog.dry_run.is_(False),
+            NaverChangeLog.after_value.isnot(None),
+            NaverChangeLog.action == "update_bid",
+            or_(
+                NaverChangeLog.proposal_id.is_(None),
+                NaverProposal.approval_source.is_(None),
+                NaverProposal.approval_source == "console",
+            ),
+        )
+        .order_by(NaverChangeLog.changed_at.desc())
+        .first()
+    )
+    if human is not None:
+        anchor = _ad_bid_from_payload(human.after_value)
+        if anchor is not None:
+            return anchor
+
+    q = (
         db.query(NaverChangeLog)
         .join(NaverProposal, NaverProposal.id == NaverChangeLog.proposal_id)
         .filter(
@@ -494,31 +545,15 @@ def auto_up_base_bid(
             NaverChangeLog.entity_id == entity_id,
             NaverChangeLog.dry_run.is_(False),
             NaverChangeLog.after_value.isnot(None),
-            NaverChangeLog.changed_at >= since,
-            NaverProposal.proposal_type.in_(BID_UP_TYPES),
+            NaverProposal.proposal_type.in_(_AD_UP_OPEN_TYPES),
             NaverProposal.approval_source.isnot(None),
             NaverProposal.approval_source != "console",
         )
-        .order_by(NaverChangeLog.changed_at.asc())
-        .first()
     )
-    if row is None or not row.before_value:
-        return None
-    try:
-        before = json.loads(row.before_value)
-    except (ValueError, TypeError):
-        return None
-    if not isinstance(before, dict):
-        return None
-    # ad grain의 before_value는 get_ad 응답 원본(adAttr 중첩) — 파싱은 fetcher와 단일 소스.
-    bid, _ = naver_sa_fetcher._parse_ad_attr(before.get("adAttr"))
-    if bid is None:
-        raw = before.get("bidAmt")
-        try:
-            bid = int(raw) if raw is not None and not isinstance(raw, bool) else None
-        except (TypeError, ValueError):
-            bid = None
-    return bid
+    if human is not None:
+        q = q.filter(NaverChangeLog.changed_at > human.changed_at)
+    first_auto = q.order_by(NaverChangeLog.changed_at.asc()).first()
+    return _ad_bid_from_payload(first_auto.before_value) if first_auto is not None else None
 
 
 def count_auto_bid_down_today(

@@ -708,21 +708,6 @@ def update_ad_bid(
     before = get_ad(ncc_ad_id)
     _before_bid, before_ugba = fetcher._parse_ad_attr(before.get("adAttr"))
 
-    # ★D-NAO-129 codex 적대[P1] — 입찰 CAS(compare-and-swap). 가드레일(±15% 클램프·방향)은
-    #   executor가 **그 시점에 읽은 값**을 기준으로 판정하는데, 여기서 다시 읽는 before가 그
-    #   사이 바뀌었으면 **검증한 기준과 실제 착지 기준이 다르다**. 재현: executor가 800원을
-    #   읽고 920원(+15%)을 승인 → 그 사이 대행사가 400원으로 내림 → 검증 없이 920 PUT =
-    #   실제 +130%. 이건 가정이 아니라 오늘(2026-07-29 15:39) 실제로 일어난 종류의 사건이다
-    #   (대행사가 폴드8와이드 소재를 1,600→1,000으로 되돌림, D-NAO-126).
-    #   기준가가 어긋나면 **쓰지 않는다** — 다음 회차가 새 현재값으로 다시 판정한다.
-    #   expected_before_bid=None이면 종전 동작(하위호환 — 호출부가 기준가를 모르는 경로).
-    if expected_before_bid is not None and _before_bid != expected_before_bid:
-        raise WriteValidationError(
-            f"update_ad_bid: 소재 {ncc_ad_id}의 입찰이 판정 이후 바뀜(CAS 실패) — "
-            f"가드레일 판정 기준={expected_before_bid}원, 쓰기 직전 실측={_before_bid}원. "
-            "그 사이 외부(대행사/사람)가 바꿨을 수 있어 검증된 변경폭이 성립하지 않는다"
-            "(fail-closed, D-NAO-129)"
-        )
     # useGroupBidAmt=false 소재만 개별 bidAmt가 실효 — true/불명이면 그룹입찰이 실효라
     # 개별 수정 무의미(fail-closed on ambiguity, update_adgroup_bid ML 가드와 동형 규율).
     if before_ugba is not False:
@@ -780,6 +765,26 @@ def update_ad_bid(
     ad_attr["useGroupBidAmt"] = False
     body = dict(before)
     body["adAttr"] = ad_attr
+    # ★D-NAO-129 codex 적대 2R[P1] — 기준가 재확인은 **PUT 직전 마지막 순간에** 한다.
+    #   가드레일(±15% 클램프·방향)은 executor가 그 시점에 읽은 값을 기준으로 판정하는데, 그
+    #   기준이 쓰기 시점에 달라져 있으면 검증한 변경폭이 성립하지 않는다. 재현: 800을 읽고
+    #   920(+15%)을 승인 → 그 사이 외부가 400으로 내림 → 그대로 PUT하면 실제 +130%.
+    #   가정이 아니다 — 오늘(2026-07-29 15:39) 대행사가 폴드8와이드 소재를 1,600→1,000으로
+    #   되돌렸다(D-NAO-126).
+    #   ★한계를 정직하게: 네이버 SA API에는 조건부 업데이트(If-Match류)가 없다. 그래서 이건
+    #     **원자적 CAS가 아니다** — 이 GET과 아래 PUT 사이의 왕복 한 번이 잔여 경쟁 창으로
+    #     남는다(초판은 부모그룹 조회·body 조립까지 창에 포함돼 훨씬 넓었다). 그 창에서 값이
+    #     바뀌면 사후 `_detect_external_change` 경고와 D-NAO-127 소재 외부변경 탐지가 잡는다.
+    #     완전한 제거는 API가 조건부 쓰기를 제공해야 가능하다.
+    if expected_before_bid is not None:
+        latest_bid, _ = fetcher._parse_ad_attr(get_ad(ncc_ad_id).get("adAttr"))
+        if latest_bid != expected_before_bid:
+            raise WriteValidationError(
+                f"update_ad_bid: 소재 {ncc_ad_id}의 입찰이 판정 이후 바뀜(기준가 불일치) — "
+                f"가드레일 판정 기준={expected_before_bid}원, PUT 직전 실측={latest_bid}원. "
+                "검증된 변경폭이 성립하지 않아 쓰지 않는다(fail-closed, D-NAO-129). "
+                "다음 회차가 새 현재값으로 다시 판정한다"
+            )
     log.info("Naver SA 쓰기 시도: update_ad_bid ad=%s bidAmt=%s", ncc_ad_id, bid_amt)
     resp = requests.put(
         fetcher.BASE_URL + path,
