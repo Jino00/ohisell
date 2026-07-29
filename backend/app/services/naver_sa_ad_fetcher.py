@@ -683,13 +683,18 @@ def get_ads(adgroup_id: str) -> list[dict]:
     naver_product_bep.channel_product_id와 정확히 일치한다(라이브 실증, 트랙 D-NAO-57 A).
 
     반환: [{"ad_id","adgroup_id","ad_type","mall_product_id","product_name",
-            "ad_bid_amt","use_group_bid_amt","ad_user_lock"}, ...]
+            "ad_bid_amt","use_group_bid_amt","ad_user_lock","edit_tm"}, ...]
     (mall_product_id가 있는 소재만 — 쇼핑 상품 소재가 아니거나 referenceData에 상품번호가
     없으면 제외). product_name은 referenceData에서 best-effort로 추출(표시용, 매핑 정확성엔
     무관 — 확정 필드가 아니라 여러 후보 키를 시도하고 없으면 빈 문자열).
 
     ★B1(D-NAO-65): adAttr(bidAmt·useGroupBidAmt)·userLock 추가 파싱(추가 API 콜 0 — 기존 응답
     재사용). adAttr 부재/파싱 실패 시 입찰 필드 None(read-only 인식층, 행위변경 없음).
+
+    ★D-NAO-127: editTm(소재 마지막 수정 시각) 원문 전달 — 소재 grain 외부 변경 탐지의 앵커.
+    라이브 실측(2026-07-29, 원칙22): 이 목록 응답에 `editTm`이 UTC ISO8601
+    "2026-07-29T06:39:05.000Z"로 실려 온다(추가 GET 0). 필드가 없으면 None → 탐지는 판정 유보
+    (없는 값을 지어내지 않는다).
     """
     resp = _get("/ncc/ads", {"nccAdgroupId": adgroup_id})
     resp.raise_for_status()
@@ -712,6 +717,7 @@ def get_ads(adgroup_id: str) -> list[dict]:
             "ad_bid_amt": ad_bid_amt,
             "use_group_bid_amt": use_group_bid_amt,
             "ad_user_lock": bool(a.get("userLock", False)),
+            "edit_tm": a.get("editTm"),  # D-NAO-127 외부 변경 탐지 앵커(원문 문자열 그대로)
         })
     return out
 

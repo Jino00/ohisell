@@ -68,7 +68,8 @@ def test_sync_adgroup_products_snapshot_replace_and_dedup(db):
         {"mall_product_id": "999", "product_name": "other"},
     ]}
     res = shopping_ad_product_sync.sync_adgroup_products(db, ads_by_adgroup=ads)
-    assert res == {"adgroups": 1, "mappings": 2, "products": 2, "removed": 0, "failed_adgroups": 0}
+    assert res == {"adgroups": 1, "mappings": 2, "products": 2, "removed": 0,
+                   "failed_adgroups": 0, "external_ad_changes": 0}  # D-NAO-127 additive
     rows = db.query(NaverAdgroupProduct).filter(NaverAdgroupProduct.adgroup_id == "grp-1").all()
     assert {r.mall_product_id for r in rows} == {"13365319468", "999"}
     assert all(r.campaign_id == "cmp-shop" for r in rows)

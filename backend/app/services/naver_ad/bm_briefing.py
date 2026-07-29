@@ -30,9 +30,11 @@ ACTION_WEEKLY_SUMMARY = "bm_weekly_benchmark"
 
 _MAX_SUMMARY_LINES = 20  # 요약 최대 건수(초과분은 "외 N건" 1줄로 압축, 콘솔 범람 방지 관례 계승)
 
-# op_type → 한글 라벨(브리핑 가독성). bm_diff.py의 op_type 어휘와 1:1 대응.
+# op_type → 한글 라벨(브리핑 가독성). bm_diff.py + ad_external_change.py(D-NAO-127)의 op_type
+# 어휘와 1:1 대응. 없는 op_type은 원문 코드를 그대로 쓴다(지어내지 않는다).
 _OP_TYPE_KR = {
     "bid_change": "입찰변경", "status_flip": "상태전환",
+    "bid_mode_flip": "소재입찰모드전환", "ad_edit": "소재편집",
     "keyword_add": "키워드추가", "keyword_remove": "키워드삭제",
     "negative_add": "제외추가", "negative_remove": "제외삭제",
     "creative_change": "소재변경", "budget_change": "예산변경",
@@ -60,11 +62,19 @@ def _fmt(v: str | None) -> str:
 
 
 def _op_line(op: NaverAgencyOp, names: dict[str, str]) -> str:
-    """캠페인명·op_type·before→after·magnitude 압축 1줄(요청 스펙 §브리핑 형식)."""
+    """캠페인명·op_type·before→after·magnitude 압축 1줄(요청 스펙 §브리핑 형식).
+
+    ★D-NAO-127: 소재 grain은 (a) 어느 소재인지와 (b) **언제 손댔는지**를 함께 낸다.
+    occurred_at은 editTm으로 확정된 실제 편집 시각이라 "오늘 아침에 감지"보다 훨씬 쓸모가 있다
+    (2026-07-29 실사고: 15:39:05에 되돌려진 것을 다음날 알았다). 값이 없는 grain(스냅샷 diff)은
+    종전대로 시각 없이 출력한다 — 모르는 시각을 지어내지 않는다.
+    """
     camp = names.get(op.campaign_id, op.campaign_id or "(계정 전체)")
     label = _OP_TYPE_KR.get(op.op_type, op.op_type)
     mag = f" ({op.magnitude:+.1f}%)" if op.magnitude is not None else ""
-    return f"- {camp} · {label}: {_fmt(op.before_value)}→{_fmt(op.after_value)}{mag}"
+    who = f" · 소재 …{op.entity_id[-9:]}" if op.entity_type == "ad" and op.entity_id else ""
+    when = f" · {op.occurred_at:%m-%d %H:%M}" if op.occurred_at is not None else ""
+    return f"- {camp}{who} · {label}: {_fmt(op.before_value)}→{_fmt(op.after_value)}{mag}{when}"
 
 
 def _build_ops_summary(ops: list[NaverAgencyOp], names: dict[str, str]) -> str:
