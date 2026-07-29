@@ -29,6 +29,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from app.models import NaverAgencyOp, NaverCampaignSettings, NaverChangeLog
+from app.services.naver_ad.naver_execution_harness import WRITE_FAILURE_MARKER
 from app.services.naver_sa_ad_fetcher import _parse_ad_attr
 from app.utils.kst import KST, kst_now
 
@@ -90,6 +91,38 @@ def _our_last_ad_writes(db: Session, ad_ids: list[str]) -> dict[str, dict]:
             continue
         if isinstance(after, dict):
             out[r.entity_id] = after
+    return out
+
+
+def _ambiguous_write_at(db: Session, ad_ids: list[str]) -> dict[str, datetime]:
+    """소재별 **결과 불확실한** 우리 쓰기의 마지막 시도 시각(codex[P2] 2026-07-29).
+
+    `[실행 실패]`(WRITE_FAILURE_MARKER) = writer 예외. PUT을 이미 보낸 뒤일 수 있어 광고가
+    바뀌었는지 **모른다**(harness의 마커 주석: bidAmt는 반영됐는데 검증 GET이 타임아웃한
+    경우도 같은 행을 만든다). 이런 행은 after_value가 없어 '우리 쓰기 증거'로 못 쓰는데,
+    그 사이 editTm은 우리 PUT으로 전진해 있으므로 **우리 손을 대행사 조작으로 기록**하게 된다.
+    `[실행 불가]`(가드 거부)는 제외한다 — writer를 부르지도 않았으므로 광고는 확실히 그대로다.
+    """
+    if not ad_ids:
+        return {}
+    rows = (
+        db.query(NaverChangeLog)
+        .filter(
+            NaverChangeLog.entity_type == "ad",
+            NaverChangeLog.entity_id.in_(ad_ids),
+            NaverChangeLog.dry_run.is_(False),
+            NaverChangeLog.after_value.is_(None),
+            NaverChangeLog.outcome == "failed",
+            NaverChangeLog.rationale.contains(WRITE_FAILURE_MARKER),
+        )
+        .order_by(NaverChangeLog.changed_at.asc())
+        .all()
+    )
+    out: dict[str, datetime] = {}
+    for r in rows:
+        at = r.executed_at or r.changed_at
+        if at is not None:
+            out[r.entity_id] = at
     return out
 
 
@@ -170,6 +203,7 @@ def detect_ad_external_changes(
     """
     ad_ids = [o["ad_id"] for o in observed if o.get("ad_id")]
     our_writes = _our_last_ad_writes(db, ad_ids)
+    ambiguous = _ambiguous_write_at(db, ad_ids)
     ops: list[dict] = []
 
     for obs in observed:
@@ -190,9 +224,19 @@ def detect_ad_external_changes(
         if ours_edit and ours_edit == live_edit:
             continue  # ④ 마지막 편집이 우리 쓰기
 
-        # 우리 쓰기가 직전 관측보다 뒤라면(그 editTm이 직전 관측에 안 잡혔다) 외부의 출발값은
-        # 우리 값이다. 우리 쓰기가 직전 관측 이전이면 prev_edit == ours_edit이라 여기 안 걸린다.
-        overwrote_ours = bool(ours_edit and ours_edit != prev_edit)
+        # 우리 쓰기가 **직전 관측과 이번 관측 사이**에 있을 때만 외부의 출발값이 우리 값이다.
+        # ★codex[P1] 2026-07-29: 초판은 `ours_edit != prev_edit`만 봤는데 그건 "우리 쓰기가
+        #   직전 관측 이후"라는 증거가 아니다 — 그 사이에 외부 편집이 한 번이라도 끼면
+        #   (D-2 우리 1,600 → D-1 외부 1,200 → D 외부 문구편집) 옛 우리 값이 before로 되살아나
+        #   변하지도 않은 입찰이 `bid_change 1600→1200`으로 기록된다(실행으로 재현됨).
+        #   시각 파싱이 안 되면 귀속을 주장하지 않고 직전 관측값으로 폴백한다(추정 금지).
+        prev_dt, live_dt = parse_edit_tm(prev_edit), parse_edit_tm(live_edit)
+        ours_dt = parse_edit_tm(ours_edit)
+        overwrote_ours = bool(
+            ours_edit and ours_edit != prev_edit
+            and prev_dt and ours_dt and live_dt
+            and prev_dt < ours_dt <= live_dt
+        )
         before = {**prev, **{k: v for k, v in ours.items() if v is not None}} if overwrote_ours else prev
 
         field_ops = _diff_ops(before, obs)
@@ -206,14 +250,27 @@ def detect_ad_external_changes(
                 "magnitude": None,
             }]
 
+        # ★귀속 불확실(codex[P2]): 직전 관측 이후 우리의 **결과 불명** 쓰기 시도가 있었다면
+        #   이 편집이 그 시도의 결과일 수 있다. 기록은 남기되(미탐 금지) 예외 브리핑으로
+        #   승격하지 않는다 — 우리 손일 수 있는 것을 "대행사 조작"이라고 단정하지 않는다.
+        amb_at = ambiguous.get(ad_id)
+        uncertain = bool(amb_at and prev_dt and live_dt and prev_dt < amb_at <= live_dt)
+        if uncertain:
+            log.warning(
+                "소재 %s 외부 변경 귀속 불확실 — 직전 관측 이후 우리의 결과 불명 쓰기(%s)가 있다"
+                "(예외 승격 보류, 사람이 네이버 콘솔로 확인 필요)", ad_id, amb_at,
+            )
+
         for op in field_ops:
             ops.append({
                 **op,
                 "entity_id": ad_id,
                 "campaign_id": obs.get("campaign_id") or "",
                 "adgroup_id": obs.get("adgroup_id") or "",
-                "occurred_at": parse_edit_tm(live_edit),
+                "occurred_at": live_dt,
+                "edit_tm_raw": live_edit,
                 "overwrote_ours": overwrote_ours,
+                "uncertain": uncertain,
             })
 
     return ops
@@ -237,12 +294,22 @@ def _optimizer_map(db: Session, campaign_ids: set[str]) -> dict[str, str]:
     }
 
 
+def _dedup_key(entity_id: str, op_type: str, occurred_at, after_value):
+    """멱등 키. occurred_at이 있으면 그것이 편집의 고유 식별자, 없으면 after_value로 대체."""
+    return (entity_id, op_type, occurred_at) if occurred_at is not None else (entity_id, op_type, after_value)
+
+
 def record_ad_external_changes(db: Session, ops: list[dict], now: datetime) -> int:
     """op 리스트 → naver_agency_op 적재(중복 방지). 반환: 실제 삽입 행 수.
 
     멱등 키는 (entity_id, op_type, occurred_at)이다 — bm_diff처럼 날짜 통째 삭제-재생성을 쓰지
     않는다(같은 테이블을 두 프로듀서가 쓰므로 남의 행을 지우면 안 된다). occurred_at이 곧 그
     편집의 고유 식별자라, 같은 편집을 두 번 관측해도 두 번 기록되지 않는다.
+
+    ★occurred_at이 NULL(editTm 파싱 불가)인 행은 이 키로 서로 구분되지 않는다(codex[P2]):
+    그대로 두면 첫 사건 이후 같은 유형이 **영구히 누락**된다. 그래서 NULL일 때만 키를
+    (entity_id, op_type, after_value)로 바꿔 '값이 다르면 다른 사건'으로 본다 — 같은 값으로
+    두 번 왕복한 경우를 한 건으로 접는 손실은 감수한다(미탐 영구화보다 낫다).
 
     ★op_date = **감지일**(컬럼 정의 그대로). occurred_at이 어제여도 op_date는 오늘이다 —
     그래야 오늘 도는 예외 브리핑(bm_briefing은 op_date == 오늘로 조회)이 이 사건을 놓치지 않는다.
@@ -252,14 +319,17 @@ def record_ad_external_changes(db: Session, ops: list[dict], now: datetime) -> i
         return 0
     opt = _optimizer_map(db, {op["campaign_id"] for op in ops if op["campaign_id"]})
     existing = {
-        (r.entity_id, r.op_type, r.occurred_at)
-        for r in db.query(NaverAgencyOp.entity_id, NaverAgencyOp.op_type, NaverAgencyOp.occurred_at)
+        _dedup_key(r.entity_id, r.op_type, r.occurred_at, r.after_value)
+        for r in db.query(
+            NaverAgencyOp.entity_id, NaverAgencyOp.op_type,
+            NaverAgencyOp.occurred_at, NaverAgencyOp.after_value,
+        )
         .filter(NaverAgencyOp.entity_type == "ad")
         .all()
     }
     inserted = 0
     for op in ops:
-        key = (op["entity_id"], op["op_type"], op["occurred_at"])
+        key = _dedup_key(op["entity_id"], op["op_type"], op["occurred_at"], op["after_value"])
         if key in existing:
             continue
         existing.add(key)
@@ -274,7 +344,8 @@ def record_ad_external_changes(db: Session, ops: list[dict], now: datetime) -> i
             before_value=op["before_value"],
             after_value=op["after_value"],
             magnitude=op["magnitude"],
-            is_exception=op["op_type"] in _EXCEPTION_OP_TYPES,
+            # 귀속 불확실(우리의 결과 불명 쓰기가 낀 구간)이면 예외 승격 보류 — 기록은 남는다.
+            is_exception=op["op_type"] in _EXCEPTION_OP_TYPES and not op.get("uncertain"),
             occurred_at=op["occurred_at"],
         ))
         inserted += 1

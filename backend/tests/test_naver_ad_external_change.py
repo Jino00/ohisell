@@ -131,6 +131,73 @@ def test_external_overwrite_with_third_value(db):
     assert (op.before_value, op.after_value) == ("1600", "900")
 
 
+def test_stale_our_write_is_not_treated_as_the_starting_point(db):
+    """★codex[P1] 회귀: 우리 쓰기가 **직전 관측보다 이전**이면 before 귀속에 쓰지 않는다.
+
+    D-2 우리 1,600 → D-1 외부 1,200(직전 관측) → D 외부가 문구만 편집(입찰 1,200 유지).
+    초판은 `ours_edit != prev_edit`만 봐서 옛 우리 값이 되살아나 `bid_change 1600→1200`을
+    지어냈다(codex가 실행으로 재현). 실제로는 입찰이 안 바뀌었으므로 ad_edit이어야 한다.
+    """
+    db.add(NaverChangeLog(
+        entity_type="ad", entity_id=AD, campaign_id=CAMP, action="update_bid", dry_run=False,
+        changed_at=datetime(2026, 7, 27, 10), executed_at=datetime(2026, 7, 27, 10),
+        after_value=json.dumps({"editTm": "2026-07-27T01:00:00.000Z", "userLock": False,
+                                "adAttr": {"bidAmt": 1600, "useGroupBidAmt": False}}),
+    ))
+    db.commit()
+    run(db,
+        prev_by_ad={AD: {"edit_tm": "2026-07-28T01:00:00.000Z", "ad_bid_amt": 1200,
+                         "use_group_bid_amt": False, "ad_user_lock": False}},
+        observed=[{"ad_id": AD, "adgroup_id": GRP, "campaign_id": CAMP,
+                   "edit_tm": "2026-07-29T01:00:00.000Z", "ad_bid_amt": 1200,
+                   "use_group_bid_amt": False, "ad_user_lock": False}],
+        now=NOW)
+    (op,) = _ops(db)
+    assert op.op_type == "ad_edit"  # 입찰 무변동 — 유령 bid_change 금지
+
+
+def test_uncertain_write_is_recorded_but_not_escalated(db):
+    """codex[P2]: 결과 불명(`[실행 실패]`) 쓰기가 낀 구간이면 기록은 남기되 예외 승격은 보류."""
+    from app.services.naver_ad.naver_execution_harness import WRITE_FAILURE_MARKER
+
+    db.add(NaverChangeLog(
+        entity_type="ad", entity_id=AD, campaign_id=CAMP, action="update_bid", dry_run=False,
+        outcome="failed", rationale=f"{WRITE_FAILURE_MARKER} WriteVerificationError: timeout",
+        changed_at=datetime(2026, 7, 29, 15, 0), executed_at=datetime(2026, 7, 29, 15, 0),
+    ))
+    db.commit()
+    run(db, prev_by_ad=_prev(bid=1000), observed=_obs(bid=1600), now=NOW)
+    (op,) = _ops(db)
+    assert op.op_type == "bid_change" and op.is_exception is False
+
+
+def test_guard_blocked_write_does_not_suppress_escalation(db):
+    """`[실행 불가]`(가드 거부)는 PUT을 보내지도 않았다 → 불확실이 아니다(예외 승격 유지)."""
+    from app.services.naver_ad.naver_execution_harness import GUARD_BLOCK_MARKER
+
+    db.add(NaverChangeLog(
+        entity_type="ad", entity_id=AD, campaign_id=CAMP, action="update_bid", dry_run=False,
+        outcome="failed", rationale=f"{GUARD_BLOCK_MARKER} 쿨다운",
+        changed_at=datetime(2026, 7, 29, 15, 0), executed_at=datetime(2026, 7, 29, 15, 0),
+    ))
+    db.commit()
+    run(db, prev_by_ad=_prev(bid=1000), observed=_obs(bid=1600), now=NOW)
+    (op,) = _ops(db)
+    assert op.is_exception is True
+
+
+def test_unparseable_edit_tm_still_records_distinct_events(db):
+    """codex[P2]: occurred_at이 NULL이어도 값이 다르면 다른 사건으로 남는다(영구 미탐 금지)."""
+    run(db, prev_by_ad=_prev(edit_tm="A", bid=1000), observed=_obs(edit_tm="B", bid=1600), now=NOW)
+    run(db, prev_by_ad=_prev(edit_tm="B", bid=1600), observed=_obs(edit_tm="C", bid=1200), now=NOW)
+    ops = _ops(db)
+    assert [o.after_value for o in ops] == ["1600", "1200"]
+    assert all(o.occurred_at is None for o in ops)
+    # 같은 사건 재관측은 여전히 1건(after_value 폴백 키)
+    run(db, prev_by_ad=_prev(edit_tm="B", bid=1600), observed=_obs(edit_tm="C", bid=1200), now=NOW)
+    assert len(_ops(db)) == 2
+
+
 def test_dry_run_and_failed_writes_are_not_our_evidence(db):
     """dry-run·실패(after 없음) 행은 '우리 쓰기'로 인정하지 않는다(기존 규약과 동일)."""
     _our_write(db, edit_tm=EDIT_EXT, bid=1600, dry_run=True)

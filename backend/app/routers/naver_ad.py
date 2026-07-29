@@ -1473,6 +1473,9 @@ def get_bm_agency_ops(
                 "id": r.id,
                 "op_date": r.op_date.isoformat() if hasattr(r.op_date, "isoformat") else str(r.op_date),
                 "detected_at": r.detected_at.isoformat() if r.detected_at else None,
+                # D-NAO-127: 실제로 손댄 시각(ad grain은 editTm으로 확정). 스냅샷 diff 유래
+                # 행은 None — detected_at(감지 시각)과 섞으면 "언제"에 거짓으로 답하게 된다.
+                "occurred_at": r.occurred_at.isoformat() if r.occurred_at else None,
                 "entity_type": r.entity_type, "entity_id": r.entity_id,
                 "campaign_id": r.campaign_id, "campaign_name": camp_names.get(r.campaign_id),
                 "optimizer": r.optimizer, "op_type": r.op_type,
