@@ -2964,7 +2964,10 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
         "probed": 0,  # D-NAO-58 CD2: 탐침으로 승격된 up 제안 수(라이브 관측용)
         "ad_confirm_pending": 0,  # B3 GATE P2-2: Confirm 대기로 생성된 ad-레벨 제안 수
         "ad_confirm_pending_dup_skipped": 0,  # B3 GATE 2R P2-B: 동일 pending 존재로 skip된 수
-        "ad_auto_exec": 0,  # D-NAO-125: 이번 레인에서 자동 실행한 소재 제안 수(캡 원료)
+        # D-NAO-125 레인 캡 원료. ★"예약"이다 — execute() **전에** 증가한다(codex 2R[P2]).
+        # 실제 성공 수는 result["executed"]. 승인 직후 실패해도 그 자리는 이미 쓴 것으로
+        # 세는데, 그 방향이 안전(첫 회차에 몰아 쏘지 않음)이라 그대로 두고 이름을 바꿨다.
+        "ad_auto_exec_reserved": 0,
         "ad_auto_exec_capped": 0,  # D-NAO-125 codex[P1]: 레인 캡 초과로 Confirm 대기로 강등된 수
         "ad_auto_exec_inflight_skipped": 0,  # D-NAO-125 codex[P1]: 같은 소재가 실행 중이라 skip
         "servo": 0,  # IU-R R1: 서보 스텝으로 승인된 쇼검 UP 제안 수(라이브 관측용)
@@ -3370,6 +3373,17 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                     if inflight is not None:
                         result["ad_auto_exec_inflight_skipped"] += 1
                         continue
+                    # ★codex 2R[P2] 강등분 누적 방지: 레인 캡으로 Confirm 대기에 남은 이전
+                    #   회차 카드가 있으면 **만료 처리하고 새 카드로 교체**한다(skip이 아니다).
+                    #   skip하면 stale 한 장이 이후 하향을 계속 막고(그게 dedup을 걷어낸 이유),
+                    #   그냥 두면 매시간 같은 소재의 pending이 쌓여 Confirm 큐가 매몰된다.
+                    #   교체하면 큐에는 항상 **지금 값 기준 1장**만 남는다.
+                    db.query(NaverProposal).filter(
+                        NaverProposal.proposal_type == proposal_type,
+                        NaverProposal.target_type == "ad",
+                        NaverProposal.target_id == exec_target_id,
+                        NaverProposal.status == "pending",
+                    ).update({"status": "expired"}, synchronize_session=False)
                 else:
                     dup_exists = db.query(NaverProposal.id).filter(
                         NaverProposal.proposal_type == proposal_type,
@@ -3417,7 +3431,7 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
             #   무엇이 밀렸는지가 큐에 보인다(조용한 드롭 금지).
             lane_capped = (
                 _ad_auto_exec(proposal_type)
-                and result["ad_auto_exec"] >= _MAX_AD_AUTO_EXEC_PER_LANE
+                and result["ad_auto_exec_reserved"] >= _MAX_AD_AUTO_EXEC_PER_LANE
             )
             if lane_capped:
                 result["ad_auto_exec_capped"] += 1
@@ -3441,7 +3455,7 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
             db.commit()
             result["approved"] += 1
             if exec_target_type == "ad":
-                result["ad_auto_exec"] += 1  # D-NAO-125 레인 캡 카운터(승인=발사 확정 시점)
+                result["ad_auto_exec_reserved"] += 1  # D-NAO-125 레인 캡(승인=자리 예약 시점)
             if is_probe:
                 result["probed"] += 1
             if rank_step_used and rank_kind == "servo":

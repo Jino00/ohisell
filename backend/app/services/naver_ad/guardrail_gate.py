@@ -167,12 +167,18 @@ def _check_cooldown_and_cap(context: dict, now: datetime, proposal_type: str | N
     if proposal_type not in _DAILY_CAP_EXEMPT_TYPES:
         if changes_today >= _MAX_DAILY_CHANGES:
             return f"일일 변경 건수 상한 도달({changes_today}/{_MAX_DAILY_CHANGES}건, 폭주 방지)"
-    elif context.get("auto_exec"):
+    elif context.get("auto_exec") and context.get("auto_bid_down_today") is not None:
         # D-NAO-125 codex[P1]: 사람 없이 쏘는 하향에만 별도 상한(위 _MAX_DAILY_AUTO_BID_DOWNS
         # 주석). 사람이 승인한 하향은 종전 DL3 면제 유지.
-        if changes_today >= _MAX_DAILY_AUTO_BID_DOWNS:
+        # ★세는 것은 changes_today_count(그 대상의 오늘 **모든** 변경)가 아니라 **자동 하향
+        #   성공 건수**다(codex 2R[P1]): 전자를 쓰면 사람이 오늘 손으로 3번 만진 소재에서
+        #   정작 손실 하향이 하루 종일 막힌다 — 열려던 행동을 정확히 막는 셈이다.
+        # ★키가 None이면 상한 미적용: harness가 소재 grain에서만 채운다(그룹·키워드의 기존
+        #   자동 하향 경로는 종전 DL3 면제 그대로 — 이번 변경의 스코프 밖).
+        auto_downs = context["auto_bid_down_today"]
+        if auto_downs >= _MAX_DAILY_AUTO_BID_DOWNS:
             return (
-                f"자동 하향 일일 상한 도달({changes_today}/{_MAX_DAILY_AUTO_BID_DOWNS}건, "
+                f"자동 하향 일일 상한 도달({auto_downs}/{_MAX_DAILY_AUTO_BID_DOWNS}건, "
                 "D-NAO-125 — 더 내리려면 콘솔에서 사람이 승인)"
             )
 
