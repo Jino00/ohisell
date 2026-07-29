@@ -54,6 +54,7 @@ from app.services.naver_ad.bid_step_types import (
     APPROVAL_SOURCE_COLD,
     BID_DOWN_TYPES,
     BID_UP_TYPES,
+    CHANGE_PCT_EXEMPT_TYPES,
     COLD_START_STEP_TYPES,
     EXPLORATION_STEP_TYPES,
     RANK_STEP_TYPES,
@@ -61,6 +62,13 @@ from app.services.naver_ad.bid_step_types import (
     decode_cold_ceiling,
     decode_exploration_ceiling,
 )
+
+# D-NAO-129: 소재(ad) 실쓰기 경계에서 **승인원 무관으로 개방**되는 UP 타입(= DOWN 대칭).
+# ★불변식: 이 집합은 변경폭 상한을 면제받는 타입을 절대 포함하지 않는다. 쌍방향 (승인원⟺타입)
+#   잠금의 존재 이유가 "면제 타입이 아무 승인원으로 발사되는 것"을 막는 것이기 때문이다
+#   (적대 리뷰 재현: 300원→90,000원). 이 불변식은 테스트로 고정한다 —
+#   test_ad_up_open_types_are_never_clamp_exempt.
+_AD_UP_OPEN_TYPES: frozenset[str] = frozenset({"bid_up"})
 from app.services.naver_ad.diagnosis import correction_factor as compute_correction_factor
 from app.utils.kst import kst_now
 
@@ -1214,21 +1222,32 @@ def _execute_update_bid(db: Session, proposal: NaverProposal, now: datetime) -> 
                 APPROVAL_SOURCE_EXPLORE: EXPLORATION_STEP_TYPES,   # BX2 D-NAO-70③
                 APPROVAL_SOURCE_COLD: COLD_START_STEP_TYPES,       # CS D-NAO-96
             }
-            allowed = _AD_UP_ROUTES.get(proposal.approval_source)
-            if allowed is None:
-                ad_guard.append(
-                    f"소재 UP은 자동 경로(explore_op/cold_op)만 개방(승인원={proposal.approval_source!r}) "
-                    "— 그 밖의 소재 UP은 Confirm 스코프 밖(D-NAO-70③·96)"
-                )
-            elif proposal.proposal_type not in allowed:
-                ad_guard.append(
-                    f"승인원 {proposal.approval_source!r} 소재 UP은 {sorted(allowed)} 타입만"
-                    f"(요청={proposal.proposal_type!r}) — 타입⟺승인원 쌍방향 잠금"
-                )
+            # ★D-NAO-129(2026-07-29): 성과 상향 `bid_up`은 **승인원 무관 개방**(DOWN 대칭).
+            #   왜 쌍방향 잠금을 안 거는가 — 그 잠금의 존재 이유는 "±15% 변경폭이 **면제된**
+            #   타입이 아무 승인원으로 발사되는 것"을 막는 데 있다(재현: 300원→90,000원).
+            #   bid_up은 CHANGE_PCT_EXEMPT_TYPES에도 EXPLORATION_STEP_TYPES에도 없어 ±15%
+            #   클램프가 그대로 걸리므로 그 구멍이 원리적으로 재현되지 않는다. 나머지 UP 타입
+            #   (bid_up_servo·bid_up_rank·bid_up_cold·bid_up_explore)의 잠금은 **불변**이다.
+            #   ★이 집합에 새 타입을 넣기 전에 반드시 확인할 것: 그 타입이 변경폭 상한을
+            #     면제받는가? 면제 타입을 여기 넣는 순간 위 구멍이 그대로 열린다.
+            if proposal.proposal_type in _AD_UP_OPEN_TYPES:
+                pass  # 클램프 적용 타입 — BEP·스톱로스·일예산·쿨다운·일일상한은 전량 존치
+            else:
+                allowed = _AD_UP_ROUTES.get(proposal.approval_source)
+                if allowed is None:
+                    ad_guard.append(
+                        f"소재 UP은 자동 경로(explore_op/cold_op)만 개방(승인원={proposal.approval_source!r}) "
+                        "— 그 밖의 소재 UP은 Confirm 스코프 밖(D-NAO-70③·96)"
+                    )
+                elif proposal.proposal_type not in allowed:
+                    ad_guard.append(
+                        f"승인원 {proposal.approval_source!r} 소재 UP은 {sorted(allowed)} 타입만"
+                        f"(요청={proposal.proposal_type!r}) — 타입⟺승인원 쌍방향 잠금"
+                    )
         elif proposal.proposal_type not in BID_DOWN_TYPES:
             ad_guard.append(
                 f"proposal_type={proposal.proposal_type!r}는 소재-레벨 미지원 방향"
-                "(UP=탐색explore_op·콜드cold_op / DOWN=bid_down Confirm)"
+                "(UP=bid_up·탐색explore_op·콜드cold_op / DOWN=bid_down)"
             )
         if ad_guard:
             reason = "소재(ad) 실쓰기 경계 차단(fail-closed) — " + " · ".join(ad_guard)

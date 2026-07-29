@@ -108,15 +108,28 @@ AD_BID_CANARY_CAMPAIGNS: frozenset[str] = frozenset({
 # 파싱 — ad는 adAttr JSON 문자열 중첩·_conv_direct_today grain 필터 부재) 별도 페이즈로 이월.
 # ★이름 정정(IU-R R0, codex R3 P2-1): 값은 direction이 아니라 proposal_type("bid_down")이다 —
 # 이름을 _AD_BID_CANARY_PROPOSAL_TYPES로 정정(값·판별 로직 불변 = 행위 불변, rename만).
-_AD_BID_CANARY_PROPOSAL_TYPES: frozenset[str] = frozenset({"bid_down"})
+#
+# ★D-NAO-129(Jino 지시 2026-07-29 저녁 *"올리는것도 해줘"*): **성과 상향(bid_up) 개방** —
+#   카나리 2단계. D-NAO-125가 하향을 연 그날, 시스템이 "브레이크만 자동이고 액셀은 반쪽"인
+#   상태가 됐다. 손실은 자동으로 깎이는데 이익 구간에서 볼륨을 늘리는 손이 없으면 D-NAO-59
+#   (총이익 최대화)가 아니라 ROAS 방어로 표류한다 — EX 스프린트가 잡았던 "RoAS +7%인데
+#   매출 −52%"와 같은 방향의 실패다.
+#   ★열리는 타입이 `bid_up`인 것이 안전의 핵심이다: 소재 UP 라우팅은 rank-step 분기
+#   (bid_up_servo/bid_up_rank)에 걸리지 않아 레거시 ±15% _clamp_step 폴백을 탄다. 즉 이번에
+#   열리는 것은 **±15% 클램프가 걸리는 타입 하나**이고, 클램프 면제 타입들(bid_up_servo·
+#   bid_up_rank·bid_up_cold·bid_up_explore)의 (승인원⟺타입) 쌍방향 잠금은 그대로다.
+#   그 잠금은 적대 리뷰가 300원→90,000원 구멍을 잡은 자리라 건드리지 않는다.
+_AD_BID_CANARY_PROPOSAL_TYPES: frozenset[str] = frozenset({"bid_down", "bid_up"})
 
-# D-NAO-125: 소재-레벨 제안 중 **레인이 인라인 자동 실행**하는 타입. 그 밖(=상향)은 종전대로
+# D-NAO-125: 소재-레벨 제안 중 **레인이 인라인 자동 실행**하는 타입. 여기 없는 타입은
 # pending으로 남아 콘솔 Confirm을 기다린다. 비우면 종전 "ad 전면 Confirm-only"로 즉시 복귀.
 # ★생성 게이트(_AD_BID_CANARY_PROPOSAL_TYPES)와 별개인 이유: 생성은 "카드를 만드는가",
-#   이것은 "사람 없이 쏘는가"다. 상향을 생성만 열고 실행을 막으면 실쓰기 경계에서 죽는
-#   카드가 Confirm 큐에 쌓이므로(harness가 성과 UP 소재 쓰기를 fail-closed로 막음) 지금은
-#   둘 다 하향만 연다 — 죽은 카드를 만들지 않는다.
-_AD_AUTO_EXEC_PROPOSAL_TYPES: frozenset[str] = frozenset({"bid_down"})
+#   이것은 "사람 없이 쏘는가"다. 한쪽만 열면 실쓰기 경계에서 죽는 카드가 Confirm 큐에 쌓이므로
+#   두 상수는 항상 같이 움직여야 한다(죽은 카드를 만들지 않는다).
+# ★D-NAO-129: bid_up 추가 — 생성 게이트와 함께 연다. 상향에 걸리는 가드는 하향보다 **많다**:
+#   ±15% 클램프 · BEP 미달 증액 금지(D-NAO-1 안전선) · 스톱로스 · 일예산 상한 · 쿨다운 2h ·
+#   일일 상한 3회(하향과 달리 bid_up은 DL3 면제 대상이 아니다) · 레인당 5건 캡 · 킬스위치.
+_AD_AUTO_EXEC_PROPOSAL_TYPES: frozenset[str] = frozenset({"bid_down", "bid_up"})
 
 # D-NAO-125 codex[P1]: 레인 1회차당 소재 자동 실행 상한(계정 전체 합). 초과분은 Confirm 대기로
 # 강등된다(드롭 아님). 5인 이유: 2h 쿨다운·시간당 레인이므로 활동시간 16h면 하루 최대 ~40건이
@@ -3146,8 +3159,9 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                         # _conv_direct_today grain 필터 부재. 탐침 ad 확장은 별도 페이즈.
                         hold_reason = "[레버 미연결] 탐침은 ad 미지원 — CD3 'ad' 확장 후"
                     elif intended_action not in _AD_BID_CANARY_PROPOSAL_TYPES:
-                        # GATE P2-2: 카나리 1단계는 bid_down만 — ad UP은 카나리 2단계.
-                        hold_reason = "[레버 미연결] ad UP은 카나리 2단계"
+                        # D-NAO-129 이후 이 분기에 남는 것은 bid_down/bid_up 외의 타입뿐이다
+                        # (예: 향후 신설되는 소재 타입). 열려면 위 상수에 등록한다.
+                        hold_reason = f"[레버 미연결] ad {intended_action}는 미개방 타입"
                     else:
                         hold_reason = None
                     if hold_reason is not None:
@@ -3188,9 +3202,15 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
             # 그 외(BRAND_SEARCH adgroup·DOWN·probe UP·ad DOWN·campaign_type None)는 기존 ±15%
             # _clamp_step 폴백(codex P1-3·P2-1 — rank-step 미적용이지 UP 회귀 아님, 더 보수적 레거시
             # 경로. BEP·스톱로스·일예산·쿨다운 가드 전량 존치·스텝도 더 작음). probe는 별도 실험
-            # 기계라 rank-step 미적용. ★ad-라우팅 UP은 위에서 이미 hold(카나리 2단계)라
-            # exec_target_type=="ad"는 DOWN뿐 → rank-step 조건(direction=="up")에 자연히 안 걸림
-            # (ad 카나리 UP 누출 0). rank_step_meta['step_reason']엔 태그를 넣지 않고(중복 방지),
+            # 기계라 rank-step 미적용.
+            # ★D-NAO-129 이후 정정: ad-라우팅 UP이 더 이상 hold되지 않는다. 그래도 rank-step은
+            #   **여전히 안 걸린다** — 아래 분기가 exec_target_type=="adgroup"(서보)·"keyword"
+            #   (estimate)만 매칭하기 때문이고, 소재는 둘 다 아니라 레거시 ±15% _clamp_step
+            #   폴백을 탄다. 이건 우연이 아니라 이번 개방의 **안전 근거**다: 소재 UP이 클램프
+            #   면제 타입(bid_up_servo/bid_up_rank)을 절대 달지 못하고 ±15% 상한이 걸린 bid_up
+            #   으로만 나간다. ★소재 grain에 rank-step을 확장하려면 그때는 면제 타입이 소재로
+            #   흘러가므로 쓰기 경계의 (승인원⟺타입) 잠금부터 다시 설계해야 한다.
+            # rank_step_meta['step_reason']엔 태그를 넣지 않고(중복 방지),
             # hold_reason·rationale 구성 시 [순위서보]/[순위직행] 접두를 이 레인에서 붙인다.
             rank_step_used = False
             rank_step_meta: dict = {}

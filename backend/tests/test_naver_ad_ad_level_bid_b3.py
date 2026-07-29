@@ -528,21 +528,30 @@ def test_hourly_lane_canary_probe_up_holds_no_ad_routing(db):
     assert any("탐침" in h["reason"] and "[레버 미연결]" in h["reason"] for h in result["held"])
 
 
-def test_hourly_lane_canary_up_holds_stage2(db):
-    """[GATE P2-2 DOWN 한정] 카나리 + 미연결 그룹 + 비탐침 UP verdict → ad UP은 카나리
-    2단계(_AD_BID_CANARY_PROPOSAL_TYPES 밖) → hold, 제안 0."""
+def test_hourly_lane_ad_up_executes_inline(db):
+    """★D-NAO-129: 미연결 그룹의 UP도 소재 레버로 인라인 자동 실행된다(하향과 대칭).
+
+    종전 계약("ad UP은 카나리 2단계" hold, 제안 0)의 대체. 손실은 자동으로 깎이는데 이익
+    구간에서 볼륨을 늘리는 손이 없으면 D-NAO-59(총이익 최대화)가 ROAS 방어로 표류한다.
+    ★타입은 반드시 `bid_up`이어야 한다 — 소재는 rank-step 분기(bid_up_servo/bid_up_rank)에
+    안 걸려 ±15% 클램프가 적용되는 레거시 폴백을 탄다. 그게 이 개방의 안전 근거다.
+    """
     _seed_hourly_shopping(db)
     _ad(db, "grp-hot", "p1", ad_id="nad-1", ad_bid_amt=800, use_group=False)
     db.commit()
-    with patch.object(auto_operator, "AD_BID_CANARY_CAMPAIGNS", frozenset({CAMP})), \
-         patch.object(auto_operator, "_judge_hourly", return_value={"direction": "up", "reason": "저순위"}), \
+    with patch.object(auto_operator, "_judge_hourly", return_value={"direction": "up", "reason": "저순위"}), \
          patch.object(auto_operator, "_learned_optimal_skip", return_value=(False, "학습밴드 미도달")), \
          patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 200}), \
+         patch.object(auto_operator.naver_sa_writer, "get_ad_bid", return_value=800), \
          patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
         result = auto_operator.run_hourly_lane(db, now=NOW, fetch_intraday=lambda t, d: _overheat_curve())
-    mock_exec.assert_not_called()
-    assert db.query(NaverProposal).count() == 0
-    assert any("2단계" in h["reason"] for h in result["held"])
+    mock_exec.assert_called_once()
+    assert result["executed"] == 1
+    assert result["ad_confirm_pending"] == 0
+    saved = db.query(NaverProposal).filter(NaverProposal.target_type == "ad").one()
+    assert saved.proposal_type == "bid_up"  # ★면제 타입(servo/rank)이 아니어야 한다
+    assert saved.target_bid == 920  # 소재 800 기준 +15%
+    assert saved.status == "approved"
 
 
 def test_daily_lane_excludes_ad_proposals_from_auto_approval(db):
@@ -714,9 +723,8 @@ def test_build_band_bep_non_canary_skips_disconnected(db):
     assert out == []
 
 
-def test_build_band_growth_canary_up_not_routed_stage2(db):
-    """[GATE P2-2 DOWN 한정] 성장(up)은 카나리 1단계에서 ad 라우팅 금지
-    (_AD_BID_CANARY_PROPOSAL_TYPES={"bid_down"}) — 카나리여도 미연결 up은 기존 skip(제안 0)."""
+def test_build_band_growth_routes_up_to_ad(db):
+    """★D-NAO-129: 일 레인 성장(up)도 미연결 그룹이면 소재 레버로 라우팅된다(종전 skip 대체)."""
     db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
     _ad(db, "grp-g", "p1", ad_id="nad-1", ad_bid_amt=800, use_group=False, campaign_id="cmp-ours")
     db.commit()
@@ -730,7 +738,9 @@ def test_build_band_growth_canary_up_not_routed_stage2(db):
                                                  current_bid=200)},
             as_of=TODAY,
         )
-    assert out == []
+    assert len(out) == 1
+    assert (out[0]["target_type"], out[0]["proposal_type"]) == ("ad", "bid_up")
+    assert out[0]["target_bid"] == 920  # 소재 800 +15%(그룹입찰 200 기준이 아니다)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -750,9 +760,10 @@ def test_canary_default_empty_set():
         assert auto_operator._ad_bid_canary("any-campaign") is False
 
 
-def test_canary_directions_down_only():
-    """[GATE P2-2] 카나리 1단계 방향 = bid_down만(2단계 개방 시 상수 확장)."""
-    assert auto_operator._AD_BID_CANARY_PROPOSAL_TYPES == frozenset({"bid_down"})
+def test_canary_directions_open_both_ways():
+    """D-NAO-129: 소재 개방 방향 = 하향 + 성과 상향. 생성·실행 두 상수가 같이 움직인다."""
+    assert auto_operator._AD_BID_CANARY_PROPOSAL_TYPES == frozenset({"bid_down", "bid_up"})
+    assert auto_operator._AD_AUTO_EXEC_PROPOSAL_TYPES == frozenset({"bid_down", "bid_up"})
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -880,27 +891,40 @@ def test_hourly_lane_ad_bid_down_executes_inline(db):
     assert saved.approval_source == auto_operator.APPROVAL_SOURCE_HOURLY
 
 
-def test_hourly_lane_ad_bid_up_still_pending_confirm(db):
-    """(b) 소재 상향은 여전히 열리지 않는다 — 같은 미연결 조건에서 방향만 up이면 생성
-    단계에서 그대로 hold("[레버 미연결] ad UP은 카나리 2단계"), 제안 0·실행 0.
-    D-NAO-125가 연 것은 하향뿐 — _AD_BID_CANARY_PROPOSAL_TYPES={"bid_down"}는 불변이라
-    _ad_bid_proposal이 up 방향에는 여전히 None을 반환한다."""
-    _seed_hourly_shopping(db)
-    _ad(db, "grp-hot", "p1", ad_id="nad-1", ad_bid_amt=800, use_group=False)  # 미연결
+def test_ad_up_open_types_are_never_clamp_exempt():
+    """★D-NAO-129 불변식: 소재 UP 개방 집합에 **변경폭 면제 타입**이 절대 들어가지 않는다.
+
+    쌍방향 (승인원⟺타입) 잠금의 존재 이유가 "±15%가 면제된 타입이 아무 승인원으로 발사되는
+    것"을 막는 데 있다(적대 리뷰 재현: 300원→90,000원). bid_up을 승인원 무관으로 연 근거가
+    바로 "그 타입은 클램프가 걸린다"이므로, 이 불변식이 깨지면 개방 근거 자체가 사라진다.
+    """
+    from app.services.naver_ad.bid_step_types import (
+        CHANGE_PCT_EXEMPT_TYPES,
+        EXPLORATION_STEP_TYPES,
+    )
+    assert harness._AD_UP_OPEN_TYPES & (CHANGE_PCT_EXEMPT_TYPES | EXPLORATION_STEP_TYPES) == frozenset()
+    assert harness._AD_UP_OPEN_TYPES <= harness.BID_UP_TYPES
+
+
+def test_ad_up_exempt_types_still_locked_to_their_source(db):
+    """회귀 0 — 면제 타입(bid_up_cold)은 여전히 자기 승인원에서만 나간다.
+
+    D-NAO-129가 연 것은 bid_up 하나뿐이다. 콘솔·시간당 레인 승인원이 bid_up_cold를 태우면
+    ±15% 완전 면제를 무제한 상향으로 쓰는 구멍이 되므로 종전대로 fail-closed여야 한다.
+    """
+    db.add(NaverCampaignSettings(campaign_id=CAMP, optimizer="ours", auto_operate=True))
+    p = NaverProposal(
+        proposal_type="bid_up_cold", target_type="ad", target_id="nad-1", campaign_id=CAMP,
+        adgroup_id="grp-hot", status="approved", target_bid=5000,
+        approval_source=auto_operator.APPROVAL_SOURCE_HOURLY,  # cold_op가 아니다
+    )
+    db.add(p)
     db.commit()
-    with patch.object(auto_operator, "_judge_hourly",
-                      return_value={"direction": "up", "reason": "저순위"}), \
-         patch.object(auto_operator, "_learned_optimal_skip", return_value=(False, "학습밴드 미도달")), \
-         patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 200}), \
-         patch.object(auto_operator.naver_sa_writer, "get_ad_bid") as mget_ad, \
-         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
-        result = auto_operator.run_hourly_lane(db, now=NOW, fetch_intraday=lambda t, d: _overheat_curve())
-    mock_exec.assert_not_called()
-    mget_ad.assert_not_called()  # hold가 생성 이전 단계라 소재 재조회조차 없음
-    assert db.query(NaverProposal).count() == 0
-    assert result["approved"] == 0
-    assert result["executed"] == 0
-    assert any("[레버 미연결] ad UP은 카나리 2단계" in h["reason"] for h in result["held"])
+    with patch.object(writer, "get_ad_bid", return_value=800), \
+         patch.object(writer, "update_ad_bid") as mock_write:
+        with pytest.raises(harness.MissingExecutionTargetError):
+            harness.execute(db, p.id, dry_run=False, now=NOW)
+    mock_write.assert_not_called()
 
 
 def test_hourly_lane_ad_bid_down_opens_for_non_canary_campaign(db):
@@ -1381,3 +1405,70 @@ def test_pending_replacement_policy_covers_all_producers(db):
         auto_operator.run_hourly_lane(db, now=NOW, fetch_intraday=lambda t, d: _overheat_curve())
     db.refresh(other)
     assert other.status == "expired"  # 사라지지 않고 만료로 남는다(이력 보존)
+
+
+# ── D-NAO-129 상향 안전장치 회귀 ────────────────────────────────────────────
+def test_ad_up_fails_closed_without_bep_context(db):
+    """★소재 상향은 근거(BEP·일예산) 없이는 못 나간다 — 컨텍스트 불완전이면 fail-closed.
+
+    guardrail_gate의 up 전용 검사(BEP·스톱로스·일예산)는 원료가 None이면 **검사를 건너뛴다**
+    (fail-open 성질). 그래서 executor가 실행 직전 완전성을 종합 확인한다. 상향은 현금이
+    나가는 방향이라 이 게이트가 하향보다 중요하다.
+    """
+    db.add(NaverCampaignSettings(campaign_id=CAMP, optimizer="ours", auto_operate=True))
+    p = NaverProposal(
+        proposal_type="bid_up", target_type="ad", target_id="nad-1", campaign_id=CAMP,
+        adgroup_id="grp-hot", status="approved", target_bid=920,
+        approval_source=auto_operator.APPROVAL_SOURCE_HOURLY,
+    )
+    db.add(p)
+    db.commit()
+    with patch.object(writer, "get_ad_bid", return_value=800), \
+         patch.object(writer, "update_ad_bid") as mock_write:
+        with pytest.raises(harness.MissingExecutionTargetError):
+            harness.execute(db, p.id, dry_run=False, now=NOW)
+    mock_write.assert_not_called()
+    log = db.query(NaverChangeLog).one()
+    assert "증액 가드 컨텍스트 불완전" in (log.rationale or "")
+
+
+def test_ad_up_blocked_below_bep_and_capped_daily(db):
+    """BEP 미달 증액 금지(D-NAO-1)와 일일 상한 3회가 소재 상향에도 그대로 걸린다.
+
+    ★하향과 달리 bid_up은 DL3(일일상한 면제) 대상이 아니다 — 올리는 쪽은 횟수 제한이 있다.
+    """
+    from app.services.naver_ad import guardrail_gate
+
+    base = {"current_bid": 800, "campaign_type": "SHOPPING", "changes_today_count": 0,
+            "unconverted_spend": 0, "cost_today": 0, "daily_budget": 300000}
+    below_bep = guardrail_gate.check(
+        {"proposal_type": "bid_up", "target_bid": 920},
+        {**base, "roas_corrected": 1.2, "target_roas": 1.9611}, now=NOW,
+    )
+    assert below_bep is not None and "BEP 미달 증액 금지" in below_bep
+
+    capped = guardrail_gate.check(
+        {"proposal_type": "bid_up", "target_bid": 920},
+        {**base, "changes_today_count": 3, "roas_corrected": 3.0, "target_roas": 1.9611,
+         "auto_exec": True}, now=NOW,
+    )
+    assert capped is not None and "일일 변경 건수 상한" in capped
+
+    ok = guardrail_gate.check(
+        {"proposal_type": "bid_up", "target_bid": 920},
+        {**base, "roas_corrected": 3.0, "target_roas": 1.9611, "auto_exec": True}, now=NOW,
+    )
+    assert ok is None  # 이익 구간·상한 미도달이면 통과
+
+
+def test_ad_up_step_is_clamped_to_15pct(db):
+    """소재 상향 스텝은 ±15% 클램프를 넘지 않는다(면제 타입이 아니라는 것의 실효 확인)."""
+    from app.services.naver_ad import guardrail_gate
+
+    blocked = guardrail_gate.check(
+        {"proposal_type": "bid_up", "target_bid": 1600},  # 800 → +100%
+        {"current_bid": 800, "campaign_type": "SHOPPING", "changes_today_count": 0,
+         "roas_corrected": 5.0, "target_roas": 1.9611, "unconverted_spend": 0,
+         "cost_today": 0, "daily_budget": 300000}, now=NOW,
+    )
+    assert blocked is not None and "변경폭" in blocked
