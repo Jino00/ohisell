@@ -12,6 +12,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.models import NaverAdgroupProduct, NaverCampaignSettings, NaverEntity
+from app.services.naver_ad import ad_external_change
 from app.services.naver_sa_ad_fetcher import get_ads
 from app.utils.kst import kst_now
 
@@ -85,6 +86,9 @@ def collect_adgroup_products(
                 "ad_bid_amt": ad.get("ad_bid_amt"),
                 "use_group_bid_amt": ad.get("use_group_bid_amt"),
                 "ad_user_lock": ad.get("ad_user_lock"),
+                # D-NAO-127: 소재 외부 변경 탐지 앵커(editTm). 미주입 경로는 None → 판정 유보.
+                "edit_tm": ad.get("edit_tm"),
+                "adgroup_id": aid,
             })
         result[aid] = rows
     return result, failed
@@ -112,6 +116,15 @@ def sync_adgroup_products(
             )
         ).all()
     ]
+    # ★D-NAO-127: 직전 관측 상태를 **삭제 전에** 메모리로 뜬다(이 함수는 스냅샷 교체라
+    #   아래 delete가 지나가면 어제 값이 사라진다 = 비교 대상 소멸).
+    prev_by_ad = {
+        r.ad_id: {
+            "edit_tm": r.ad_edit_tm, "ad_bid_amt": r.ad_bid_amt,
+            "use_group_bid_amt": r.use_group_bid_amt, "ad_user_lock": r.ad_user_lock,
+        }
+        for r in db.query(NaverAdgroupProduct).filter(NaverAdgroupProduct.ad_id.isnot(None)).all()
+    }
     per_group, failed = collect_adgroup_products(db, ads_by_adgroup=ads_by_adgroup)
     now = kst_now()
     removed = 0
@@ -141,6 +154,7 @@ def sync_adgroup_products(
                 ad_bid_amt=r.get("ad_bid_amt"),
                 use_group_bid_amt=r.get("use_group_bid_amt"),
                 ad_user_lock=r.get("ad_user_lock"),
+                ad_edit_tm=r.get("edit_tm"),  # D-NAO-127 앵커
                 synced_at=now,
             ))
             n_map += 1
@@ -164,7 +178,22 @@ def sync_adgroup_products(
         removed += res.rowcount or 0
 
     db.commit()
-    log.info("naver_adgroup_product sync: 그룹 %d개, 매핑 %d행, 상품 %d종, 정리 %d행, 실패그룹 %d",
-             len(per_group), n_map, len(distinct), removed, len(failed))
+
+    # ★D-NAO-127 소재 외부 변경 탐지 — 매핑 커밋 **이후**에 독립 실행한다.
+    #   ①prev_by_ad는 이미 메모리에 떠 있어 DB가 새 값으로 덮여도 비교가 가능하고,
+    #   ②탐지 실패가 매핑 sync를 되돌리지 않는다(관측 부가기능이 본 기능을 죽이면 안 됨 —
+    #     이 파일의 그룹 단위 fail-open과 같은 규율).
+    detected = {"observed": 0, "ops": 0, "recorded": 0}
+    try:
+        observed = [r for rows in per_group.values() for r in rows if r.get("ad_id")]
+        detected = ad_external_change.run(db, prev_by_ad=prev_by_ad, observed=observed, now=now)
+    except Exception as e:  # noqa: BLE001 — 관측 전용 부가기능, fail-open
+        log.exception("shopping_ad_product_sync: 소재 외부 변경 탐지 실패(무시하고 진행): %s", e)
+        db.rollback()
+
+    log.info("naver_adgroup_product sync: 그룹 %d개, 매핑 %d행, 상품 %d종, 정리 %d행, 실패그룹 %d, "
+             "외부변경 %d건",
+             len(per_group), n_map, len(distinct), removed, len(failed), detected["recorded"])
     return {"adgroups": len(per_group), "mappings": n_map, "products": len(distinct),
-            "removed": removed, "failed_adgroups": len(failed)}
+            "removed": removed, "failed_adgroups": len(failed),
+            "external_ad_changes": detected["recorded"]}

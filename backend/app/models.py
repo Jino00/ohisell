@@ -1731,6 +1731,12 @@ class NaverAdgroupProduct(Base):
     ad_bid_amt: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # adAttr.bidAmt(소재 개별 입찰)
     use_group_bid_amt: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)  # false면 소재 bidAmt가 실효
     ad_user_lock: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)  # 소재 userLock
+    # D-NAO-127: 소재 외부 변경 탐지 앵커 — 네이버 소재 객체의 editTm 원문(마지막 수정 시각).
+    # 라이브 실측(2026-07-29): UTC ISO8601 "2026-07-29T06:39:05.000Z" 형식으로 /ncc/ads 목록
+    # 응답에 실려 온다(추가 GET 0). ★값 비교만으로는 "우리가 800으로 바꾼 걸 외부가 1,000으로
+    # 되돌림"이 무변동으로 보이지만 editTm은 단조 전진하므로 편집 사실 자체가 남는다.
+    # 문자열 원문 그대로 보관한다 — 판정은 동등비교뿐이라 파싱이 필요 없다(파싱은 표시용).
+    ad_edit_tm: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
@@ -2267,6 +2273,10 @@ class NaverAgencyOp(Base):
     ★naver_change_log와 분리: change_log는 OUR 제안·집행의 피드백 루프(proposal_id·outcome·
     verify)에 묶여 있어, 45캠페인 대행사 노이즈를 섞으면 학습 쿼리가 오염된다(§2 결정).
     op_date+entity_id+op_type을 리플레이 키로 삼아 같은 날 재실행은 삭제-재생성(멱등).
+
+    ★프로듀서가 둘이다(D-NAO-127): bm_diff(스냅샷 유래 campaign/adgroup grain) + ad_external_change
+    (소재 grain, editTm 앵커). bm_diff의 멱등 재생성은 **자기 산출물만** 지운다(entity_type != 'ad')
+    — 날짜 단위로 통째로 지우면 다른 프로듀서의 관측이 조용히 사라진다.
     """
 
     __tablename__ = "naver_agency_op"
@@ -2281,11 +2291,15 @@ class NaverAgencyOp(Base):
     entity_id: Mapped[str] = mapped_column(String(50), nullable=False)
     campaign_id: Mapped[str] = mapped_column(String(50), nullable=False, default="", index=True)
     optimizer: Mapped[str] = mapped_column(String(8), nullable=False, default="none")  # 조작 주체 구분(대행사=none/mop, ours 자기변경 필터 대상)
-    op_type: Mapped[str] = mapped_column(String(24), nullable=False)  # bid_change/status_flip/keyword_add/keyword_remove/campaign_add/adgroup_add/campaign_remove/adgroup_remove/negative_add/negative_remove/creative_change/budget_change/extended_toggle
+    op_type: Mapped[str] = mapped_column(String(24), nullable=False)  # bid_change/status_flip/keyword_add/keyword_remove/campaign_add/adgroup_add/campaign_remove/adgroup_remove/negative_add/negative_remove/creative_change/budget_change/extended_toggle + (ad grain, D-NAO-127) bid_mode_flip/ad_edit
     before_value: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     after_value: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     magnitude: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # 변화 크기(입찰 Δ%·예산 Δ%·키워드 증감 등 — 예외 랭킹용)
     is_exception: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)  # 예외 브리핑에 올릴 이상치 여부(SA-2 필터 판정)
+    # D-NAO-127: 그 조작이 **실제로 일어난** 시각(KST). 소스가 시각을 줄 때만 채운다 —
+    # ad grain은 네이버 editTm으로 초 단위 확정. NULL = 일별 스냅샷 diff(campaign/adgroup grain)라
+    # 시각 불명. op_date·detected_at은 '우리가 감지한' 시각이라 "언제 손댔나"에 답하지 못한다.
+    occurred_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
 class NaverBmBenchmark(Base):

@@ -162,7 +162,9 @@ def test_sync_ad_bid_columns_null_when_absent(db):
     ads = {"grp-1": [{"mall_product_id": "13365319468", "product_name": "17E"}]}
     res = shopping_ad_product_sync.sync_adgroup_products(db, ads_by_adgroup=ads)
     # 기존 반환 통계 불변
-    assert res == {"adgroups": 1, "mappings": 1, "products": 1, "removed": 0, "failed_adgroups": 0}
+    # external_ad_changes(D-NAO-127)는 additive — 소재 외부 변경 탐지 결과(여기선 앵커 부재로 0).
+    assert res == {"adgroups": 1, "mappings": 1, "products": 1, "removed": 0,
+                   "failed_adgroups": 0, "external_ad_changes": 0}
     row = db.query(NaverAdgroupProduct).filter(NaverAdgroupProduct.adgroup_id == "grp-1").one()
     assert row.mall_product_id == "13365319468"  # 매핑 회귀 0
     assert row.product_name == "17E"
