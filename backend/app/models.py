@@ -1862,6 +1862,49 @@ class NaverKeywordHourly(Base):
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())  # ⚠️UTC(sqlite-server-default-now-is-utc) — 시간계산엔 미사용
 
 
+class NaverAdgroupHourlyToday(Base):
+    """당일(진행 중) 애드그룹 시간별 성과 — 매시 재수집·교체 (D-NAO-122).
+
+    grain: (ad_date, adgroup_id, hour). 소스는 naver_keyword_hourly와 같은
+    /stats?breakdown=hh24이지만 **테이블을 분리한다.**
+
+    ★왜 naver_keyword_hourly에 넣지 않는가(codex 리뷰 P1, 2026-07-29): 그 테이블은
+      "행이 있다 = 그 날 하루가 통째로 스윕됐다"는 완결 불변식 위에 서 있고,
+      auto_operator._exploration_yesterday_flow가 그 불변식으로 어제 clk 창 합을
+      신뢰한다(그 함수 docstring ①). 당일 진행분을 같은 테이블에 쓰면 자정을 넘긴
+      순간 그 행들이 "어제 행"이 되어 판정을 통과하는데, 마지막 시간(23시)은 아직
+      완결되지 않아 구조적으로 빠져 있다 → 롤링 24h 흐름 과소계상 → 잠겨 있어야 할
+      확장·입찰상향이 열린다. 변경 전에는 어제 행이 아예 없어 fail-toward-hold로
+      안전하게 빠졌으므로, 섞는 것은 순수한 퇴행이다.
+      완결 여부를 hour=23 존재로 판정할 수도 없다 — hh24는 실적 있는 시간대만
+      반환하므로 23시 노출 0인 그룹은 완전 스윕 후에도 23시 행이 없다.
+    ★같은 이유로 이 테이블을 읽는 코드는 "부분 데이터"임을 알고 읽어야 한다.
+      과거 완결 데이터가 필요하면 naver_keyword_hourly를 읽는다(두 테이블을 암묵적으로
+      섞지 않는다 — naver_bid_estimate_daily가 세운 "신규 grain=신규 테이블" 규약 계승).
+
+    ★회계 불변(D-NAO-60 RL1 계승): conv_cnt는 건수만(ccnt) — 금액(convAmt)은 hh24에
+      없다. 매출/BEP/ROAS 집계는 이 컬럼을 읽지 않는다.
+    """
+
+    __tablename__ = "naver_adgroup_hourly_today"
+    __table_args__ = (
+        UniqueConstraint("ad_date", "adgroup_id", "hour", name="uq_naver_adgroup_hourly_today"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ad_date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)
+    hour: Mapped[int] = mapped_column(Integer, nullable=False)  # 0~23, 완결된 시간만
+    adgroup_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    campaign_id: Mapped[str] = mapped_column(String(50), nullable=False, default="", index=True)
+    campaign_type: Mapped[str] = mapped_column(String(20), nullable=False, default="")
+    imp: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    clk: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cost: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    conv_cnt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    avg_rank: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
+    synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())  # ⚠️UTC
+
+
 class NaverChangeLog(Base):
     """변경 1건 전건 기록 — 쓰기 유일 초크포인트 + 피드백 루프 (D-NAO-12/14, 계획서 §2).
 
