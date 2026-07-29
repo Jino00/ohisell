@@ -29,10 +29,12 @@ import json
 import logging
 from datetime import datetime, timedelta
 
-from sqlalchemy import func as sqlfunc, select
+from sqlalchemy import func as sqlfunc, or_, select
 from sqlalchemy.orm import Session, aliased
 
 from app.models import (
+    NaverAdgroupProduct,
+    NaverAgencyOp,
     NaverCampaignSettings,
     NaverChangeLog,
     NaverEntity,
@@ -54,6 +56,7 @@ from app.services.naver_ad.bid_step_types import (
     APPROVAL_SOURCE_COLD,
     BID_DOWN_TYPES,
     BID_UP_TYPES,
+    CHANGE_PCT_EXEMPT_TYPES,
     COLD_START_STEP_TYPES,
     EXPLORATION_STEP_TYPES,
     RANK_STEP_TYPES,
@@ -61,7 +64,15 @@ from app.services.naver_ad.bid_step_types import (
     decode_cold_ceiling,
     decode_exploration_ceiling,
 )
+
+# D-NAO-129: 소재(ad) 실쓰기 경계에서 **승인원 무관으로 개방**되는 UP 타입(= DOWN 대칭).
+# ★불변식: 이 집합은 변경폭 상한을 면제받는 타입을 절대 포함하지 않는다. 쌍방향 (승인원⟺타입)
+#   잠금의 존재 이유가 "면제 타입이 아무 승인원으로 발사되는 것"을 막는 것이기 때문이다
+#   (적대 리뷰 재현: 300원→90,000원). 이 불변식은 테스트로 고정한다 —
+#   test_ad_up_open_types_are_never_clamp_exempt.
+_AD_UP_OPEN_TYPES: frozenset[str] = frozenset({"bid_up"})
 from app.services.naver_ad.diagnosis import correction_factor as compute_correction_factor
+from app.services import naver_sa_ad_fetcher as naver_sa_fetcher
 from app.utils.kst import kst_now
 
 log = logging.getLogger(__name__)
@@ -461,6 +472,283 @@ def is_auto_exec(proposal: NaverProposal) -> bool:
     return proposal.approval_source not in (None, "console")
 
 
+def _ad_bid_from_payload(raw: str | None) -> int | None:
+    """change_log의 before/after_value(JSON) → 소재 입찰가. ad grain은 get_ad 원본(adAttr 중첩)."""
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    bid, _ = naver_sa_fetcher._parse_ad_attr(payload.get("adAttr"))
+    if bid is not None:
+        return bid
+    v = payload.get("bidAmt")
+    try:
+        return int(v) if v is not None and not isinstance(v, bool) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _our_last_known_ad_states(db: Session, ad_id: str) -> set[tuple[str, int | None]]:
+    """우리가 아는 그 소재의 (editTm, bidAmt) 쌍 집합 — ①마지막 관측 ②우리 성공 쓰기들.
+
+    live 상태가 여기 없으면 **그 사이 외부가 만진 것**이다(D-NAO-130).
+    ★editTm만 비교하면 같은 초에 우리 쓰기와 외부 변경이 겹칠 때 외부를 우리 것으로 오인한다
+    (codex 5R[P2]). 값까지 함께 봐야 그 충돌이 갈린다.
+    """
+    known: set[tuple[str, int | None]] = set()
+    row = (
+        db.query(NaverAdgroupProduct.ad_edit_tm, NaverAdgroupProduct.ad_bid_amt)
+        .filter(NaverAdgroupProduct.ad_id == ad_id,
+                NaverAdgroupProduct.ad_edit_tm.isnot(None))
+        .first()
+    )
+    if row and row[0]:
+        known.add((str(row[0]), row[1]))
+    for (raw,) in (
+        db.query(NaverChangeLog.after_value)
+        .filter(
+            NaverChangeLog.entity_type == "ad",
+            NaverChangeLog.entity_id == ad_id,
+            NaverChangeLog.dry_run.is_(False),
+            NaverChangeLog.after_value.isnot(None),
+        )
+        .order_by(NaverChangeLog.changed_at.desc())
+        .limit(_EDIT_TM_SCAN)
+        .all()
+    ):
+        try:
+            payload = json.loads(raw or "")
+        except (ValueError, TypeError):
+            continue
+        if isinstance(payload, dict) and payload.get("editTm"):
+            bid, _ = naver_sa_fetcher._parse_ad_attr(payload.get("adAttr"))
+            known.add((str(payload["editTm"]), bid))
+    return known
+
+
+# 외부변경 확인 판정 — 자동 상향은 CONFIRMED_OURS일 때만 나간다(fail-closed).
+_EXT_OURS = "ours"          # 우리가 아는 상태 그대로 = 외부 손 없음
+_EXT_TOUCHED = "external"   # 외부가 만졌다 → 기준점 재설정 후 진행
+_EXT_UNKNOWN = "unknown"    # 판정 불가(관측 부재·조회 실패) → 자동 상향 보류
+
+
+def _classify_external_touch(
+    db: Session, ad_id: str, live_edit_tm: str | None, live_bid: int | None,
+) -> str:
+    """live 상태가 우리가 아는 것인가 / 외부가 만졌나 / 알 수 없나(D-NAO-130, codex 5R[P1]).
+
+    ★"모르면 진행"이 아니라 **"모르면 보류"**다. 초판은 known이 비면 False("외부 아님")를
+    반환해 자동 상향을 계속했는데, 그건 관측이 없는 신규 소재에서 정확히 반대로 작동한다 —
+    대행사가 400으로 내려놔도 판정이 '외부 아님'이라 그대로 460으로 올린다. 확인이 성립하지
+    않으면 올리지 않는 것이 이 장치의 존재 이유다.
+    """
+    if not live_edit_tm:
+        return _EXT_UNKNOWN
+    known = _our_last_known_ad_states(db, ad_id)
+    if not known:
+        return _EXT_UNKNOWN  # 기준선이 없다 — 이번 회차는 보류하고 관측만 세운다
+    return _EXT_OURS if (str(live_edit_tm), live_bid) in known else _EXT_TOUCHED
+
+
+def _seed_edit_tm_baseline(db: Session, ad_id: str, live_edit_tm: str, live_bid: int | None) -> None:
+    """관측 기준선이 없는 소재에 현재 상태를 세워둔다 — 다음 회차부터 판정이 성립한다.
+
+    (일 1회 sync가 채우기 전이라도 이 자리에서 세워 자동 상향이 하루 종일 묶이지 않게 한다.)
+    """
+    row = (
+        db.query(NaverAdgroupProduct)
+        .filter(NaverAdgroupProduct.ad_id == ad_id,
+                NaverAdgroupProduct.ad_edit_tm.is_(None))
+        .first()
+    )
+    if row is None:
+        return
+    row.ad_edit_tm = str(live_edit_tm)
+    if live_bid is not None:
+        row.ad_bid_amt = live_bid
+    db.commit()
+
+
+def _record_inline_external_touch(
+    db: Session, proposal: NaverProposal, live_edit_tm: str, live_bid: int, now: datetime,
+) -> None:
+    """쓰기 직전에 발견한 외부 변경을 관측 테이블에 즉시 남긴다(소실 방지, D-NAO-130).
+
+    D-NAO-127의 일 1회 탐지는 우리가 먼저 쓰면 editTm이 덮여 이 사건을 영영 못 본다.
+    여기서 남겨야 다음 판정의 기준점이 산다. 멱등 키는 그쪽과 동일(entity_id, op_type, occurred_at).
+    """
+    from app.services.naver_ad import ad_external_change
+
+    occurred_at = ad_external_change.parse_edit_tm(live_edit_tm)
+    # ★codex 5R[P1-3]: occurred_at이 NULL(editTm 형식 변화)일 때 모든 NULL 사건을 하나로
+    #   접으면 최신 외부 하향이 기록되지 않아 기준점이 옛 고가로 복귀한다.
+    #   ad_external_change._dedup_key와 같은 규율로 값까지 키에 넣는다.
+    dup_q = db.query(NaverAgencyOp.id).filter(
+        NaverAgencyOp.entity_type == "ad",
+        NaverAgencyOp.entity_id == proposal.target_id,
+        NaverAgencyOp.op_type == "bid_change",
+    )
+    if occurred_at is not None:
+        dup_q = dup_q.filter(NaverAgencyOp.occurred_at == occurred_at)
+    else:
+        dup_q = dup_q.filter(NaverAgencyOp.occurred_at.is_(None),
+                             NaverAgencyOp.after_value == str(live_bid))
+    dup = dup_q.first()
+    if dup is not None:
+        return
+    db.add(NaverAgencyOp(
+        op_date=now.date(), detected_at=now, entity_type="ad",
+        entity_id=proposal.target_id, campaign_id=proposal.campaign_id or "",
+        optimizer="ours", op_type="bid_change",
+        before_value=None, after_value=str(live_bid), magnitude=None,
+        is_exception=True, occurred_at=occurred_at,
+    ))
+    db.commit()
+    log.warning(
+        "소재 외부 변경을 쓰기 직전에 감지(D-NAO-130): ad=%s 현재 %s원(editTm=%s) — "
+        "자동 상향 기준점을 이 값으로 재설정한다",
+        proposal.target_id, live_bid, live_edit_tm,
+    )
+
+
+def last_change_was_auto_up(db: Session, entity_type: str, entity_id: str) -> bool:
+    """이 대상의 **가장 최근 성공 쓰기**가 우리 자동 상향이었는가(D-NAO-130).
+
+    되먹임 루프의 교정 단계(올렸는데 손실 → 되돌린다)가 쿨다운에 막히지 않게 하는 판정.
+    사람이 올린 것은 포함하지 않는다 — 사람 판단을 자동이 2시간 안에 뒤집게 만들 이유가 없다.
+    """
+    row = (
+        db.query(NaverProposal.proposal_type, NaverProposal.approval_source)
+        .join(NaverChangeLog, NaverChangeLog.proposal_id == NaverProposal.id)
+        .filter(
+            NaverChangeLog.entity_type == entity_type,
+            NaverChangeLog.entity_id == entity_id,
+            NaverChangeLog.dry_run.is_(False),
+            NaverChangeLog.after_value.isnot(None),
+        )
+        .order_by(NaverChangeLog.changed_at.desc())
+        .first()
+    )
+    if row is None:
+        return False
+    ptype, src = row
+    return ptype in BID_UP_TYPES and src is not None and src != "console"
+
+
+_EDIT_TM_SCAN = 20  # 우리 쓰기 editTm 스캔 폭
+
+
+_HUMAN_ANCHOR_SCAN = 20  # 사람 기준점 후보 스캔 폭(최신 파싱 가능한 행을 찾는다)
+
+
+def auto_up_base_bid(db: Session, entity_type: str, entity_id: str, now: datetime) -> int | None:
+    """자동 상향 누적 상한의 **기준점**(anchor) — 사람이 마지막으로 정한 입찰가.
+
+    ★왜 필요한가(D-NAO-129 codex 적대[P1]): 상향의 경제적 브레이크인 "BEP 미달 증액 금지"는
+    소재가 아니라 **부모 광고그룹의 30일 집계**로 판정한다. 같은 그룹에 매출을 만드는 소재가
+    하나라도 있으면 전환 0인 소재도 그 실적을 빌려 계속 통과하고, 그러면 남는 절대 상한은
+    네이버 API 최대값(100,000원)뿐이다.
+
+    ★기준점을 **시간창으로 잡으면 안 된다**(codex 적대 2R[P1] — 초판의 결함): "최근 7일" 같은
+    이동창은 오래된 기준점을 자동으로 버려서, 1주차에 800→1,600으로 막힌 뒤 창이 만료되면
+    1,600이 새 기준이 되어 3,200 → 6,400 → … 계단식으로 결국 100,000에 닿는다. 상한이 상승을
+    **느리게 만들 뿐 멈추지 못한다**. "7일 동안 자동 상향이 없었다"는 "사람이 승인했다"와
+    동치가 아니다.
+
+    그래서 기준점은 **사람이 마지막으로 만든 값**이다:
+      ① 사람 쓰기(approval_source NULL·console)의 after 입찰가 — 가장 최근 것.
+      ② 그런 이력이 없으면, 사람 개입 이후 **최초 자동 상향의 before**(= 자동화가 출발한 값).
+      ③ 둘 다 없으면 None → 상한 미적용(이번이 첫 스텝이고, 그 스텝의 before가 다음 기준점이 된다).
+    사람이 올리든 내리든 그 값이 새 기준점이 되므로, 상한은 언제나 "사람이 정한 값의 N배"다.
+
+    ★자동 상향 이력은 이번에 개방한 타입(_AD_UP_OPEN_TYPES)만 센다 — 탐색(explore)·콜드(cold)는
+    각자의 경제성 상한을 가진 별도 레인이라 이 상한에 묶지 않는다(그 레인들의 의미를 바꾸지
+    않는다는 스코프 원칙, codex 적대 2R[P2]).
+    """
+    human_rows = (
+        db.query(NaverChangeLog)
+        .outerjoin(NaverProposal, NaverProposal.id == NaverChangeLog.proposal_id)
+        .filter(
+            NaverChangeLog.entity_type == entity_type,
+            NaverChangeLog.entity_id == entity_id,
+            NaverChangeLog.dry_run.is_(False),
+            NaverChangeLog.after_value.isnot(None),
+            NaverChangeLog.action == "update_bid",
+            or_(
+                NaverChangeLog.proposal_id.is_(None),
+                NaverProposal.approval_source.is_(None),
+                NaverProposal.approval_source == "console",
+            ),
+        )
+        .order_by(NaverChangeLog.changed_at.desc())
+        .limit(_HUMAN_ANCHOR_SCAN)
+        .all()
+    )
+    # ★codex 적대 3R[P2]: "최신 1건"만 보면 그 행의 payload가 깨졌을 때 유효한 이전 사람
+    #   기준점까지 버리고 상한이 통째로 풀린다 — **최신 파싱 가능한** 행을 찾는다.
+    human = human_rows[0] if human_rows else None
+
+    # ★codex 적대 3R[P1] — **외부(대행사) 변경도 기준점을 재설정한다.**
+    #   초판 정의는 "우리 앱에서 사람이 정한 값"이었다. 대행사가 네이버 콘솔에서 2,000→400으로
+    #   내려도 우리 change_log엔 안 남으므로 기준점은 2,000에 머물고, 자동화가 400→4,000까지
+    #   **10배로 되돌린다**. 오늘 15:39에 대행사가 한 일이 정확히 그 하향이다(D-NAO-126).
+    #   D-NAO-127이 그 사건을 naver_agency_op(ad grain, bid_change)에 남기므로 그것을 사람
+    #   개입과 **같은 급의 기준점 재설정 사건**으로 쓴다.
+    #   ★알려진 지연: 소재 외부변경 탐지는 하루 1회(07:45) 돈다. 그 사이의 외부 하향은 다음
+    #     아침까지 기준점에 반영되지 않는다 — 그 구간은 ±15% 클램프·BEP·일일 3회가 막는다.
+    external = (
+        db.query(NaverAgencyOp)
+        .filter(
+            NaverAgencyOp.entity_type == entity_type,
+            NaverAgencyOp.entity_id == entity_id,
+            NaverAgencyOp.op_type == "bid_change",
+            NaverAgencyOp.after_value.isnot(None),
+        )
+        # ★codex 5R[P1-3]: occurred_at NULLS LAST로 정렬하면 **최신** NULL 사건이 과거의
+        #   non-NULL 사건에 밀려 기준점이 옛 고가로 복귀한다. 항상 존재하는 detected_at으로
+        #   최신을 고르고, 시각 비교에는 occurred_at이 없으면 detected_at을 쓴다.
+        .order_by(NaverAgencyOp.detected_at.desc(), NaverAgencyOp.id.desc())
+        .first()
+    )
+    ext_at = None
+    if external is not None:
+        ext_at = external.occurred_at or external.detected_at
+    if external is not None and (
+        human is None or ext_at is None or human.changed_at is None or ext_at > human.changed_at
+    ):
+        try:
+            return int(external.after_value)  # 대행사가 세운 값이 새 기준점이다
+        except (TypeError, ValueError):
+            pass
+
+    for row in human_rows:
+        anchor = _ad_bid_from_payload(row.after_value)
+        if anchor is not None:
+            return anchor
+
+    q = (
+        db.query(NaverChangeLog)
+        .join(NaverProposal, NaverProposal.id == NaverChangeLog.proposal_id)
+        .filter(
+            NaverChangeLog.entity_type == entity_type,
+            NaverChangeLog.entity_id == entity_id,
+            NaverChangeLog.dry_run.is_(False),
+            NaverChangeLog.after_value.isnot(None),
+            NaverProposal.proposal_type.in_(_AD_UP_OPEN_TYPES),
+            NaverProposal.approval_source.isnot(None),
+            NaverProposal.approval_source != "console",
+        )
+    )
+    if human is not None:
+        q = q.filter(NaverChangeLog.changed_at > human.changed_at)
+    first_auto = q.order_by(NaverChangeLog.changed_at.asc()).first()
+    return _ad_bid_from_payload(first_auto.before_value) if first_auto is not None else None
+
+
 def count_auto_bid_down_today(
     db: Session, entity_type: str, entity_id: str, now: datetime,
 ) -> int:
@@ -658,6 +946,14 @@ def _build_guardrail_context(db: Session, proposal: NaverProposal, now: datetime
                 "naver_execution_harness: guardrail context get_ad_bid 실패(fail-closed) "
                 "target_id=%s: %s", proposal.target_id, e,
             )
+        # D-NAO-130: 외부 변경 확인용 editTm은 **best-effort**로 따로 읽는다(실패해도 본 판정
+        # 무해 — 그 경우 기준점 재설정이 이번 회차에만 생략된다). current_bid 계약은 불변.
+        live_edit_tm = None
+        try:
+            live_edit_tm = naver_sa_writer.get_ad(proposal.target_id).get("editTm")
+        except Exception as e:  # noqa: BLE001 — 관측 부가정보
+            log.debug("naver_execution_harness: editTm 재조회 실패(무시) target_id=%s: %s",
+                      proposal.target_id, e)
 
         # D-NAO-121: 출시창 순위 하한 — target_type='ad'(소재 단위) 제안에서만 계산한다.
         # adgroup_id가 없으면(구 제안·격상 경로) 판정 불가라 floor_for를 호출하지 않고 None
@@ -704,6 +1000,44 @@ def _build_guardrail_context(db: Session, proposal: NaverProposal, now: datetime
         context["auto_bid_down_today"] = count_auto_bid_down_today(
             db, proposal.target_type, proposal.target_id, now,
         )
+        # D-NAO-130: 직전 변경이 우리 자동 상향이면 하향 쿨다운 면제(되먹임 루프의 교정 단계).
+        context["last_change_was_auto_up"] = last_change_was_auto_up(
+            db, proposal.target_type, proposal.target_id,
+        )
+        # D-NAO-129: 자동 상향 누적 배수 상한의 기준점(auto_up_base_bid 참조).
+        context["auto_up_base_bid"] = auto_up_base_bid(
+            db, proposal.target_type, proposal.target_id, now,
+        )
+        # ★D-NAO-130(codex 적대 4R·5R[P1]) — **쓰기 직전 외부 변경 확인(fail-closed)**.
+        #   D-NAO-127 소재 외부변경 탐지는 하루 1회(07:45)인데 이 레인은 매시간 쓴다. 우리가
+        #   먼저 쓰면 editTm이 우리 것으로 바뀌어 **외부 사건이 영구 소실**된다 — 그러면 기준점이
+        #   옛 값에 머문 채 자동화가 대행사의 하향을 되돌려 올린다(재현: 07:45 기준 2,000 →
+        #   10:00 대행사 400 → 11:00 우리 460 → 다음날 탐지는 "우리 쓰기"로 분류 → 기준점 2,000).
+        #   그래서 **지금 이 자리에서** 확인한다.
+        #   ★핵심(codex 5R[P1]): 확인이 **성립하지 않으면 자동 상향을 하지 않는다**. 초판은
+        #     best-effort라 조회 실패·관측 부재에서 조용히 통과했는데, 그러면 이 장치는 선행조건이
+        #     아니라 장식이다. 실패·불명은 전부 보류(_EXT_UNKNOWN)로 모은다.
+        context["external_check"] = _EXT_UNKNOWN
+        try:
+            verdict = _classify_external_touch(
+                db, proposal.target_id, live_edit_tm, context["current_bid"],
+            )
+            if verdict == _EXT_TOUCHED:
+                # 외부가 만졌다 — 기준점을 현재 실측값으로 재설정하고 사건을 남긴다(소실 방지).
+                _record_inline_external_touch(
+                    db, proposal, live_edit_tm, context["current_bid"], now,
+                )
+                context["auto_up_base_bid"] = context["current_bid"]
+            elif verdict == _EXT_UNKNOWN and live_edit_tm and context["current_bid"] is not None:
+                # 기준선이 없다 — 이번 회차는 보류하고 다음 판정을 위해 관측만 세운다.
+                _seed_edit_tm_baseline(db, proposal.target_id, live_edit_tm, context["current_bid"])
+            context["external_check"] = verdict
+        except Exception as e:  # noqa: BLE001 — 실패는 곧 '확인 불가' = 자동 상향 보류
+            log.warning(
+                "naver_execution_harness: 쓰기 직전 외부변경 확인 실패 — 자동 상향 보류"
+                "(target_id=%s): %s", proposal.target_id, e,
+            )
+            context["external_check"] = _EXT_UNKNOWN
         return context
 
     if proposal.target_type not in ("keyword", "campaign"):
@@ -1214,21 +1548,32 @@ def _execute_update_bid(db: Session, proposal: NaverProposal, now: datetime) -> 
                 APPROVAL_SOURCE_EXPLORE: EXPLORATION_STEP_TYPES,   # BX2 D-NAO-70③
                 APPROVAL_SOURCE_COLD: COLD_START_STEP_TYPES,       # CS D-NAO-96
             }
-            allowed = _AD_UP_ROUTES.get(proposal.approval_source)
-            if allowed is None:
-                ad_guard.append(
-                    f"소재 UP은 자동 경로(explore_op/cold_op)만 개방(승인원={proposal.approval_source!r}) "
-                    "— 그 밖의 소재 UP은 Confirm 스코프 밖(D-NAO-70③·96)"
-                )
-            elif proposal.proposal_type not in allowed:
-                ad_guard.append(
-                    f"승인원 {proposal.approval_source!r} 소재 UP은 {sorted(allowed)} 타입만"
-                    f"(요청={proposal.proposal_type!r}) — 타입⟺승인원 쌍방향 잠금"
-                )
+            # ★D-NAO-129(2026-07-29): 성과 상향 `bid_up`은 **승인원 무관 개방**(DOWN 대칭).
+            #   왜 쌍방향 잠금을 안 거는가 — 그 잠금의 존재 이유는 "±15% 변경폭이 **면제된**
+            #   타입이 아무 승인원으로 발사되는 것"을 막는 데 있다(재현: 300원→90,000원).
+            #   bid_up은 CHANGE_PCT_EXEMPT_TYPES에도 EXPLORATION_STEP_TYPES에도 없어 ±15%
+            #   클램프가 그대로 걸리므로 그 구멍이 원리적으로 재현되지 않는다. 나머지 UP 타입
+            #   (bid_up_servo·bid_up_rank·bid_up_cold·bid_up_explore)의 잠금은 **불변**이다.
+            #   ★이 집합에 새 타입을 넣기 전에 반드시 확인할 것: 그 타입이 변경폭 상한을
+            #     면제받는가? 면제 타입을 여기 넣는 순간 위 구멍이 그대로 열린다.
+            if proposal.proposal_type in _AD_UP_OPEN_TYPES:
+                pass  # 클램프 적용 타입 — BEP·스톱로스·일예산·쿨다운·일일상한은 전량 존치
+            else:
+                allowed = _AD_UP_ROUTES.get(proposal.approval_source)
+                if allowed is None:
+                    ad_guard.append(
+                        f"소재 UP은 자동 경로(explore_op/cold_op)만 개방(승인원={proposal.approval_source!r}) "
+                        "— 그 밖의 소재 UP은 Confirm 스코프 밖(D-NAO-70③·96)"
+                    )
+                elif proposal.proposal_type not in allowed:
+                    ad_guard.append(
+                        f"승인원 {proposal.approval_source!r} 소재 UP은 {sorted(allowed)} 타입만"
+                        f"(요청={proposal.proposal_type!r}) — 타입⟺승인원 쌍방향 잠금"
+                    )
         elif proposal.proposal_type not in BID_DOWN_TYPES:
             ad_guard.append(
                 f"proposal_type={proposal.proposal_type!r}는 소재-레벨 미지원 방향"
-                "(UP=탐색explore_op·콜드cold_op / DOWN=bid_down Confirm)"
+                "(UP=bid_up·탐색explore_op·콜드cold_op / DOWN=bid_down)"
             )
         if ad_guard:
             reason = "소재(ad) 실쓰기 경계 차단(fail-closed) — " + " · ".join(ad_guard)
@@ -1455,14 +1800,20 @@ def _execute_update_bid(db: Session, proposal: NaverProposal, now: datetime) -> 
 
     _claim_executing(db, proposal)
 
+    writer_kwargs: dict = {}
     if proposal.target_type == "keyword":
         writer_fn = naver_sa_writer.update_keyword_bid
     elif proposal.target_type == "adgroup":
         writer_fn = naver_sa_writer.update_adgroup_bid
     else:  # ad (B3, D-NAO-65) — 소재 bidAmt 직접 수정(useGroupBidAmt=false 실효 소재)
         writer_fn = naver_sa_writer.update_ad_bid
+        # ★D-NAO-129 codex 적대[P1] TOCTOU: 가드레일이 **판정에 쓴 그 값**을 writer에 넘겨
+        #   쓰기 직전 실측과 일치할 때만 PUT한다(CAS). 어긋나면 그 사이 외부가 바꾼 것이므로
+        #   검증된 ±15%가 성립하지 않는다 — 쓰지 않고 다음 회차가 새 값으로 다시 판정한다.
+        #   context["current_bid"]는 바로 위 guardrail_gate.check가 클램프·방향 검증에 쓴 값이다.
+        writer_kwargs["expected_before_bid"] = context.get("current_bid")
     try:
-        result = writer_fn(proposal.target_id, proposal.target_bid)
+        result = writer_fn(proposal.target_id, proposal.target_bid, **writer_kwargs)
     except Exception as exc:  # WriteValidationError/WriteError/WriteVerificationError + requests 계열
         proposal.status = "failed"  # 자동 재시도 차단(approved 게이트) — 재승인만 재시도 경로
         fail_entry = NaverChangeLog(
@@ -1858,26 +2209,31 @@ def real_write_blocker(proposal: NaverProposal) -> str | None:
             if not proposal.adgroup_id:
                 return "adgroup_id 없음 — 소재 제안 필수 컨텍스트 부족(재생성 필요)"
             if proposal.proposal_type in BID_UP_TYPES:
-                # 타입⟺승인원 쌍방향 잠금(_execute_update_bid과 동일 판정 — 이중 방벽).
-                _routes = {
-                    APPROVAL_SOURCE_EXPLORE: EXPLORATION_STEP_TYPES,  # BX2 D-NAO-70③
-                    APPROVAL_SOURCE_COLD: COLD_START_STEP_TYPES,      # CS D-NAO-96
-                }
-                allowed = _routes.get(proposal.approval_source)
-                if allowed is None:
-                    return (
-                        "소재(ad) UP은 자동 경로(explore_op/cold_op)만 개방 — 그 밖의 소재 UP은 "
-                        "Confirm 스코프 밖(D-NAO-70③·96, 콘솔 실행 버튼 비활성)"
-                    )
-                if proposal.proposal_type not in allowed:
-                    return (
-                        f"승인원 {proposal.approval_source} 소재 UP은 {sorted(allowed)} 타입만"
-                        f"(요청={proposal.proposal_type}) — 타입⟺승인원 쌍방향 잠금"
-                    )
+                # ★D-NAO-129 codex 적대[P2]: executor와 **같은 판정**을 써야 한다. 종전엔 이
+                #   함수만 explore/cold 화이트리스트에 머물러, 콘솔은 "실행 불가"인데 내부
+                #   harness.execute()는 통과하는 **쓰기 경계 이중 계약**이 생겼다(사람이 승인한
+                #   소재 UP이 콘솔에서 409로 막힘). 같은 상수를 공유해 계약을 하나로 되돌린다.
+                if proposal.proposal_type not in _AD_UP_OPEN_TYPES:
+                    # 타입⟺승인원 쌍방향 잠금(_execute_update_bid과 동일 판정 — 이중 방벽).
+                    _routes = {
+                        APPROVAL_SOURCE_EXPLORE: EXPLORATION_STEP_TYPES,  # BX2 D-NAO-70③
+                        APPROVAL_SOURCE_COLD: COLD_START_STEP_TYPES,      # CS D-NAO-96
+                    }
+                    allowed = _routes.get(proposal.approval_source)
+                    if allowed is None:
+                        return (
+                            "소재(ad) UP은 bid_up·자동 경로(explore_op/cold_op)만 개방 — 그 밖의 "
+                            "소재 UP은 Confirm 스코프 밖(D-NAO-70③·96, 콘솔 실행 버튼 비활성)"
+                        )
+                    if proposal.proposal_type not in allowed:
+                        return (
+                            f"승인원 {proposal.approval_source} 소재 UP은 {sorted(allowed)} 타입만"
+                            f"(요청={proposal.proposal_type}) — 타입⟺승인원 쌍방향 잠금"
+                        )
             elif proposal.proposal_type not in BID_DOWN_TYPES:
                 return (
                     f"소재(ad) {proposal.proposal_type}은 미지원 방향"
-                    "(UP=탐색explore_op·콜드cold_op / DOWN=bid_down Confirm)"
+                    "(UP=bid_up·탐색explore_op·콜드cold_op / DOWN=bid_down)"
                 )
         # CS(리뷰 P1-3): 콜드 스텝 구조 게이트 — target_type 강제 + 상한 마커 존재(정적 판정).
         if proposal.proposal_type in COLD_START_STEP_TYPES:

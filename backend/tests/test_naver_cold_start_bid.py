@@ -557,7 +557,7 @@ def writer_stub(monkeypatch):
 
     calls = []
 
-    def fake_update_ad_bid(ncc_ad_id, bid_amt):
+    def fake_update_ad_bid(ncc_ad_id, bid_amt, **kwargs):  # kwargs=CAS 기준가(D-NAO-129)
         calls.append((ncc_ad_id, bid_amt))
         return h.naver_sa_writer.WriteResult(
             action="update_ad_bid",

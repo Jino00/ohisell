@@ -109,7 +109,7 @@ def test_explore_op_ad_up_writes(db):
          patch.object(harness.naver_sa_writer, "update_ad_bid",
                       return_value=_ad_write_result(800, 1040)) as mad:
         log_entry = harness.execute(db, p.id, dry_run=False)
-    mad.assert_called_once_with(AD_ID, 1040)
+    mad.assert_called_once_with(AD_ID, 1040, expected_before_bid=800)  # CAS(D-NAO-129)
     assert log_entry.entity_type == "ad"
 
 
@@ -172,7 +172,7 @@ def test_console_bid_down_still_allowed(db):
          patch.object(harness.naver_sa_writer, "update_ad_bid",
                       return_value=_ad_write_result(800, 680)) as mad:
         harness.execute(db, p.id, dry_run=False)
-    mad.assert_called_once_with(AD_ID, 680)
+    mad.assert_called_once_with(AD_ID, 680, expected_before_bid=800)  # CAS(D-NAO-129)
 
 
 def test_real_write_blocker_explore_op_bid_down_rejected(db):

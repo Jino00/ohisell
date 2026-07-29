@@ -241,8 +241,17 @@ def test_diary_action_to_direction_matches_golden():
 # ══════════════════════════════════════════════════════════════════
 # (B4) 차등 — _AD_BID_CANARY_PROPOSAL_TYPES 값 불변(rename만)
 # ══════════════════════════════════════════════════════════════════
-def test_ad_canary_proposal_types_value_unchanged():
-    assert auto_operator._AD_BID_CANARY_PROPOSAL_TYPES == frozenset({"bid_down"})
+def test_ad_canary_proposal_types_value():
+    """소재 개방 타입(D-NAO-129: 하향 + 성과 상향). 소리 없이 늘어나면 이 테스트가 잡는다.
+
+    ★새 타입을 넣을 때 반드시 확인: 변경폭 상한이 면제되는 타입인가? 면제 타입을 여기 넣으면
+    쓰기 경계의 (승인원⟺타입) 잠금이 우회된다(harness._AD_UP_OPEN_TYPES 불변식 참조).
+    """
+    assert auto_operator._AD_BID_CANARY_PROPOSAL_TYPES == frozenset({"bid_down", "bid_up"})
+    # D-NAO-130: 자동 발사도 양방향(되먹임 루프 — 올리고 손실이면 자동 하향이 깎는다).
+    assert auto_operator._AD_AUTO_EXEC_PROPOSAL_TYPES == frozenset({"bid_down", "bid_up"})
+    from app.services.naver_ad.bid_step_types import CHANGE_PCT_EXEMPT_TYPES
+    assert auto_operator._AD_BID_CANARY_PROPOSAL_TYPES & CHANGE_PCT_EXEMPT_TYPES == frozenset()
 
 
 # ══════════════════════════════════════════════════════════════════

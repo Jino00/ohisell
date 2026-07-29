@@ -475,8 +475,13 @@ def test_build_shopping_bep_no_ad_data_falls_back_to_propose(db):
     assert len(out) == 1
 
 
-def test_build_shopping_growth_skips_disconnected_group(db):
-    """성장(bid_up)도 대칭 — 미연결 그룹의 그룹입찰 bid_up은 지출·노출에 무효, 제안 미생성."""
+def test_build_shopping_growth_routes_disconnected_group_to_ad(db):
+    """성장(bid_up)도 대칭 — 미연결 그룹에는 **그룹입찰 제안을 만들지 않는다**(무효 레버).
+
+    ★D-NAO-129 이후 변경: 종전엔 여기서 아무것도 안 만들고 끝났다(제안 0). 이제는 실효 레버인
+    **소재 입찰**로 라우팅해 ad-레벨 bid_up을 만든다 — 무효 레버로 쏘지 않는다는 원래 계약은
+    그대로이고, 헛돌던 판정이 실효 레버를 찾아가는 것이 이번 개방의 내용이다.
+    """
     db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
     _ad(db, "grp-g", "p1", ad_id="nad-1", ad_bid_amt=800, use_group=False)  # 미연결
     db.commit()
@@ -490,7 +495,12 @@ def test_build_shopping_growth_skips_disconnected_group(db):
                                              current_bid=200)},
         as_of=D_TO,
     )
-    assert out == []
+    assert len(out) == 1
+    p = out[0]
+    assert (p["target_type"], p["target_id"], p["adgroup_id"]) == ("ad", "nad-1", "grp-g")
+    assert p["proposal_type"] == "bid_up"
+    # 스텝 기준은 그룹입찰(200)이 아니라 **소재 실효입찰(800)**이고 ±15% 클램프가 걸린다.
+    assert p["target_bid"] == 920
 
 
 # ══════════════════════════════════════════════════════════════════

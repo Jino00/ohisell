@@ -80,6 +80,23 @@ _DAILY_CAP_EXEMPT_TYPES = _BID_DOWN_TYPES
 # 3스텝 = 0.85³ ≈ 하루 최대 -39%. 그 이상 필요하면 사람이 콘솔에서 이어서 내린다.
 _MAX_DAILY_AUTO_BID_DOWNS = 3
 
+# ★D-NAO-129 codex 적대[P1] — 자동 상향의 **누적** 상한(기준가 대비 배수).
+# 상향의 유일한 경제적 브레이크인 "BEP 미달 증액 금지"는 소재가 아니라 **부모 광고그룹의
+# 30일 집계**로 판정한다. 같은 그룹에 매출을 만드는 소재가 하나라도 있으면 전환 0인 소재도
+# 그 실적을 빌려 계속 통과하고, 그러면 남는 절대 상한은 네이버 API 최대값(100,000원)뿐이다
+# — ±15%×하루 3회는 복리라 800원이 약 12일이면 거기 닿는다. "언제 멈추나"에 답하는 값이
+# 코드에 없었다는 것이 이 상수의 존재 이유다.
+# 2.0배에서 멈추고 사람에게 넘긴다(사람 승인 상향은 auto_exec=False라 이 상한 대상이 아니다 —
+# 더 올릴 근거가 있으면 사람이 콘솔에서 올리고, 그 값이 새 기준점이 된다).
+_MAX_AUTO_UP_MULTIPLE = Decimal("2.0")
+# 이 상한이 걸리는 타입 = D-NAO-129가 개방한 성과 상향뿐. harness._AD_UP_OPEN_TYPES와
+# 같은 값이어야 한다(그 모듈은 이 모듈을 import 하므로 역방향 import를 피해 값으로 고정 —
+# 정합은 테스트로 지킨다: test_cumulative_cap_types_match_ad_up_open_types).
+_CUMULATIVE_CAP_TYPES: frozenset[str] = frozenset({"bid_up"})
+# 외부변경 확인 판정값(harness._EXT_* 와 같은 값 — 역방향 import 회피, 정합은 테스트로 고정).
+_EXT_CHECK_OURS = "ours"
+_EXT_CHECK_EXTERNAL = "external"
+
 # P2(D-NAO-42-f): 예산 통제 — PLAN_naver-ad-budget-control.md §5-C. bid_up/down과 병렬 구조.
 _BUDGET_UP_TYPES = frozenset({"budget_up"})
 _BUDGET_DOWN_TYPES = frozenset({"budget_down"})
@@ -151,7 +168,20 @@ def precheck_cooldown_and_cap(
 
 def _check_cooldown_and_cap(context: dict, now: datetime, proposal_type: str | None) -> str | None:
     # 쿨다운 2h는 전 유형 공통(DL3 면제 대상 아님) — 방향 무관하게 항상 검사.
-    last_change_at = context.get("last_change_at")
+    # ★D-NAO-130(Jino 2026-07-29 "평가하고 판단하면서 수정하면 되지 않을까?"): 자동 상향을 켜는
+    #   근거가 바로 그 되먹임 루프다 — 올리고, 실측하고, 손실이면 자동 하향이 깎는다. 그런데
+    #   UP과 DOWN이 같은 쿨다운 시계를 쓰면 **되돌리는 손이 최대 2시간 묶인다**(codex 적대 2R).
+    #   루프의 교정 단계를 막는 브레이크는 브레이크가 아니라 고장이다. 그래서 "직전 변경이 우리
+    #   자동 상향이었다면 하향은 쿨다운 면제".
+    #   ★진동 방어는 남는다: 되돌림은 한 번이면 충분하고(그 뒤엔 직전 변경이 DOWN이라 면제 안 됨),
+    #     자동 하향 일일 상한(_MAX_DAILY_AUTO_BID_DOWNS)과 ±15% 클램프가 그대로 걸린다.
+    if (
+        proposal_type in _BID_DOWN_TYPES
+        and context.get("last_change_was_auto_up")
+    ):
+        last_change_at = None
+    else:
+        last_change_at = context.get("last_change_at")
     if last_change_at is not None:
         elapsed_hours = (now - last_change_at).total_seconds() / 3600
         if elapsed_hours < _COOLDOWN_HOURS:
@@ -248,6 +278,45 @@ def _check_bid(proposal: dict, context: dict, proposal_type: str) -> str | None:
                 f"스톱로스 도달 — 무전환 지출 {unconverted_spend}원 ≥ 상한 {stop_loss_amount}원"
                 f"(D-NAO-20, {base_label}×{growth_sweeper.STOP_LOSS_CLICK_MULTIPLE})"
             )
+
+        # ★D-NAO-129: 누적 상승 배수 상한 — BEP가 소재 천장이 못 되는 구멍의 마개(위 상수 주석).
+        # 기준점이 없으면(최근 창에 자동 상향 이력 없음) 미적용 = 종전 동작.
+        # ★D-NAO-130 codex 5R[P1]: **외부변경 확인이 성립하지 않으면 자동 상향을 하지 않는다.**
+        #   이 확인이 자동 상향을 켠 선행조건이므로, 확인 실패(조회 오류·관측 부재·형식 변화)를
+        #   통과시키면 조건 없이 켠 것과 같다. 사람 승인 상향은 이 검사 대상이 아니다.
+        #   context에 키가 없으면(비-ad grain 등) 종전 동작 — 이 게이트는 소재 자동 상향 전용이다.
+        if (
+            context.get("auto_exec")
+            and proposal_type in _CUMULATIVE_CAP_TYPES
+            and context.get("external_check", _EXT_CHECK_OURS) != _EXT_CHECK_OURS
+            and context.get("external_check") != _EXT_CHECK_EXTERNAL
+        ):
+            return (
+                "외부 변경 확인 불가 — 이 소재의 현재 값이 우리가 아는 상태인지 확인되지 않아 "
+                "자동 상향을 보류한다(D-NAO-130 fail-closed). 다음 회차에 관측이 서면 재개된다"
+            )
+
+        # ★적용 범위는 이번에 개방한 타입뿐(codex 적대 2R[P2]): 탐색(bid_up_explore)·콜드
+        #   (bid_up_cold)·서보(bid_up_servo/rank)는 각자의 경제성 상한을 가진 별도 레인이라,
+        #   전역 2배 천장으로 묶으면 그 레인들의 의미가 조용히 바뀐다(기존 동작 회귀).
+        # ★기준점은 **과거의 고정점**이어야 한다. 초판 수정에서 current_bid를 min으로 물었더니
+        #   기준점이 현재값을 따라 올라가(400→460→529…) 천장이 언제나 현재값의 2배가 되어
+        #   **상한이 영영 안 걸렸다** — 방어를 넣으면서 방어를 껐다. 외부 하향 반영은 시각이
+        #   아니라 **사건**으로 한다(auto_up_base_bid: 사람 쓰기 또는 D-NAO-127 소재 외부변경
+        #   감지 중 최신 것이 기준점을 재설정한다).
+        auto_up_base = context.get("auto_up_base_bid")
+        if (
+            context.get("auto_exec")
+            and auto_up_base
+            and proposal_type in _CUMULATIVE_CAP_TYPES
+        ):
+            ceiling = int(Decimal(auto_up_base) * _MAX_AUTO_UP_MULTIPLE)
+            if target_bid > ceiling:
+                return (
+                    f"자동 상향 누적 상한 — 기준가 {auto_up_base}원의 "
+                    f"{float(_MAX_AUTO_UP_MULTIPLE):.1f}배({ceiling}원)를 넘는 {target_bid}원은 "
+                    "자동으로 올리지 않는다(D-NAO-129 — 더 올리려면 콘솔에서 사람이 승인)"
+                )
 
         roas_corrected = context.get("roas_corrected")
         target_roas = context.get("target_roas")
