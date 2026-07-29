@@ -110,9 +110,59 @@ AD_BID_CANARY_CAMPAIGNS: frozenset[str] = frozenset({
 # 이름을 _AD_BID_CANARY_PROPOSAL_TYPES로 정정(값·판별 로직 불변 = 행위 불변, rename만).
 _AD_BID_CANARY_PROPOSAL_TYPES: frozenset[str] = frozenset({"bid_down"})
 
+# D-NAO-125: 소재-레벨 제안 중 **레인이 인라인 자동 실행**하는 타입. 그 밖(=상향)은 종전대로
+# pending으로 남아 콘솔 Confirm을 기다린다. 비우면 종전 "ad 전면 Confirm-only"로 즉시 복귀.
+# ★생성 게이트(_AD_BID_CANARY_PROPOSAL_TYPES)와 별개인 이유: 생성은 "카드를 만드는가",
+#   이것은 "사람 없이 쏘는가"다. 상향을 생성만 열고 실행을 막으면 실쓰기 경계에서 죽는
+#   카드가 Confirm 큐에 쌓이므로(harness가 성과 UP 소재 쓰기를 fail-closed로 막음) 지금은
+#   둘 다 하향만 연다 — 죽은 카드를 만들지 않는다.
+_AD_AUTO_EXEC_PROPOSAL_TYPES: frozenset[str] = frozenset({"bid_down"})
+
+
+def _ad_auto_exec(proposal_type: str) -> bool:
+    """이 소재 제안을 레인이 인라인 자동 실행하는가.
+
+    ★킬스위치를 여기서도 본다(테스트 정리 중 발견): 두 게이트가 독립 축이면
+    AD_BID_ROUTING_ENABLED=False로 내려도 카나리 상수에 남은 캠페인의 소재 하향은 계속
+    자동 실행돼 **"되돌리는 스위치가 완전히 되돌리지 않는" 상태**가 된다(현재는 맥세이프에
+    ad-레버 유닛이 없어 도달 불가능하지만, 롤백 보장은 도달 가능성과 무관하게 성립해야
+    한다 — 사고 났을 때 한 줄로 원복된다는 믿음이 이 스위치의 존재 이유다).
+    """
+    return AD_BID_ROUTING_ENABLED and proposal_type in _AD_AUTO_EXEC_PROPOSAL_TYPES
+
+
+# D-NAO-125(Jino 확정 2026-07-29) — 소재-레벨 **제안 생성** 스코프를 카나리 상수에서
+# 떼어내 auto_operate에 위임한다. Jino 원문: *"적용되는 건 우리가 MOP에서 관리하는
+# 캠페인만 적용하면 되잖아?"*
+#
+# ★왜 상수를 채우지 않고 분리했는가(이게 이 변경의 핵심): AD_BID_CANARY_CAMPAIGNS는 한
+#   이름으로 **정반대 두 의미**를 겸하고 있었다 —
+#     · auto_operator/proposal_writer: 집합에 들면 소재 제안 생성 **허용**(개방)
+#     · delegation_gate·expert_briefing_builder: 집합에 들면 위임·브리핑에서 **제외**(제한)
+#   그래서 D-NAO-70②("쓰기 카나리를 모든 캠페인으로 확대해", 2026-07-21)를 상수 채우기로
+#   이행하면 **모든 캠페인이 위임 자동승인에서 빠져 계정 전체 자동 실행이 죽는다.** 07-21
+#   적대 리뷰가 P2로 "생성 게이트를 D-NAO-70②에 맞춰 정리하라"고 한 것이 바로 이 뜻인데,
+#   8일간 미이행돼 4캠페인·92그룹·256소재의 상·하향이 전부 [레버 미연결] hold로 죽어 있었다
+#   (2026-07-29 실측: 7일 홀드 78건 = UP 59 + DOWN 19).
+#
+# ★스코프가 이중으로 이미 걸린다: 이 판정에 도달하는 캠페인은 run_hourly_lane의
+#   _auto_operate_campaign_ids(레인 시작 스냅샷) + 실행 직전 _auto_operate_now(독립 커넥션
+#   재확인) 둘을 통과한 것뿐이다. 캠페인 목록을 코드에 또 적는 것은 중복이자, 새 캠페인을
+#   인수할 때마다 상수를 고쳐야 하는 구멍이다(오늘 사고의 직접 원인 — 07:37 인수 시
+#   상수 갱신 누락).
+# ★AD_BID_CANARY_CAMPAIGNS는 **건드리지 않는다** — 그 상수의 Confirm-only 의미
+#   (delegation_gate·expert_briefing_builder)는 그대로 유지된다.
+AD_BID_ROUTING_ENABLED: bool = True  # 킬스위치 — False면 종전 카나리 전면 hold로 즉시 복귀
+
 
 def _ad_bid_canary(campaign_id: str) -> bool:
-    """캠페인이 B3 소재-레벨 제어 카나리 개방 대상인지(기본 빈 집합=전면 미개방)."""
+    """이 캠페인에서 소재-레벨 제안 생성을 개방하는지.
+
+    스코프 판정(우리가 관리하는 캠페인인가)은 상위 auto_operate 게이트가 이미 두 번 했으므로
+    여기서는 킬스위치만 본다. 킬스위치를 내리면 종전 카나리 집합으로 되돌아간다.
+    """
+    if AD_BID_ROUTING_ENABLED:
+        return True
     return campaign_id in AD_BID_CANARY_CAMPAIGNS
 _MIN_CLICK_FOR_APPROVAL = 10  # D-NAO-48 조건②(rationale 창 클릭) / §4-1 핫셋 클릭 게이트 공유
 _MIN_HOURLY_SAMPLE_IMP = 30  # §4-2 "imp 합 < 30이면 그 시간대 묶음은 판단 보류"
@@ -3288,7 +3338,11 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
             # 동일 (proposal_type, target_type='ad', target_id) pending이 이미 있으면 생성
             # skip(proposal_writer.persist의 pending dedup 규약 재사용) — 없으면 매시간 동일
             # pending이 누적(~16건/일 × 만료 14일)돼 Confirm 큐가 매몰된다.
-            if exec_target_type == "ad":
+            # ★D-NAO-125: 인라인 자동 실행 타입(하향)은 이 dedup에서 제외한다. 그 타입은
+            #   pending으로 남지 않으므로 누적 매몰이 애초에 없고, 반대로 **배포 전에 쌓여
+            #   있던 stale pending 하향 카드 한 장이 이후 모든 하향 판정을 영구히 skip시키는**
+            #   역방향 사고가 난다(생성 자체가 막히니 일기에도 안 남아 조용히 죽는다).
+            if exec_target_type == "ad" and not _ad_auto_exec(proposal_type):
                 dup_exists = db.query(NaverProposal.id).filter(
                     NaverProposal.proposal_type == proposal_type,
                     NaverProposal.target_type == "ad",
@@ -3311,7 +3365,22 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
             # B3 GATE P2-2 Confirm-only(계획서 카나리 스펙 "Jino Confirm 승인분만·자동발사 0",
             # D-NAO-5): target_type='ad' 제안은 어떤 레인에서도 자동 승인·인라인 실행 금지 —
             # pending으로 생성만 하고 실행은 기존 콘솔 Confirm 경로(라우터 승인→harness)만.
-            if exec_target_type == "ad":
+            #
+            # ★D-NAO-125(Jino 확정 2026-07-29): **하향(bid_down)만 이 금지에서 해제**한다.
+            #   근거 — 오늘 폴드8와이드(추정ROAS 0.945 < BEP 1.9611)가 RL3 손실 판정을
+            #   13:20·14:20·15:20 세 번 받고도 세 번 다 집행되지 못했다. 판정은 정확한데 손이
+            #   없어 손실이 시간당 3만원씩 쌓였다. Jino: *"손해를 보면 순위를 당장 낮춰야지."*
+            #   방향을 하향으로 한정하는 이유:
+            #     · 지출·노출이 **줄어드는** 방향이라 최악의 실수가 "너무 많이 내림"(기회 손실)
+            #       이지 현금 유출이 아니다.
+            #     · 실쓰기 경계(naver_execution_harness)가 이미 소재 bid_down을 승인원 무관·전
+            #       캠페인으로 통과시킨다(D-NAO-70② ①). 즉 여기만 열면 경로가 완성된다.
+            #     · 상향은 그 경계에서 (승인원 ⟺ 타입) 쌍방향 잠금에 막혀 있고, 그 잠금은 적대
+            #       리뷰가 ±15% 클램프 면제 구멍(재현: 300원→90,000원)을 잡은 자리다. 성과 UP
+            #       자동화는 새 승인원 경로 설계 + codex 적대 리뷰가 필요한 **별도 스프린트**다.
+            #   가드레일은 전부 그대로 걸린다 — 2시간 쿨다운·한 등씩·±15% 클램프·스톱로스·
+            #   출시창 하한(D-NAO-121). 되돌리려면 _AD_AUTO_EXEC_PROPOSAL_TYPES를 비우면 된다.
+            if exec_target_type == "ad" and not _ad_auto_exec(proposal_type):
                 db.commit()
                 result["ad_confirm_pending"] += 1
                 log.info(

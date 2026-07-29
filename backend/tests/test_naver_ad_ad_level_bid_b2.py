@@ -426,16 +426,23 @@ def _diagnosis(**boards):
 
 def test_build_shopping_bep_skips_disconnected_group(db):
     """미연결 그룹(source='ad')에 그룹입찰 bid_down 제안 금지 — 지출 무효 + DL1 행동 창
-    리셋으로 P2-1 그물 지연 + changes_today 슬롯 낭비. 제안 미생성."""
+    리셋으로 P2-1 그물 지연 + changes_today 슬롯 낭비. 제안 미생성.
+
+    D-NAO-125(2026-07-29): 이 테스트가 서있던 전제(스코프=AD_BID_CANARY_CAMPAIGNS 상수)가
+    킬스위치(AD_BID_ROUTING_ENABLED)로 대체됐다 — 기본 상태(킬스위치 on)에서는 미연결 그룹도
+    이제 ad-레벨 bid_down으로 라우팅된다(의도된 변경, test_naver_auto_operator.py의 신규
+    회귀가 그 경로를 커버). 이 테스트는 "킬스위치 off일 때의 구제 경로"로 의미를 좁혀 보존한다.
+    """
     db.add(NaverCampaignSettings(campaign_id="cmp-ours", optimizer="ours"))
     _ad(db, "grp-d", "p1", ad_id="nad-1", ad_bid_amt=800, use_group=False)  # 미연결
     db.commit()
     diagnosis = _diagnosis(shopping_group_bep=[_bep_board_row()])
-    out = proposal_writer.build(
-        db, diagnosis,
-        bid_sims={("adgroup", "grp-d"): _sim(direction="down", current_bid=200)},
-        as_of=D_TO,
-    )
+    with patch.object(auto_operator, "AD_BID_ROUTING_ENABLED", False):
+        out = proposal_writer.build(
+            db, diagnosis,
+            bid_sims={("adgroup", "grp-d"): _sim(direction="down", current_bid=200)},
+            as_of=D_TO,
+        )
     assert out == []
 
 
@@ -522,11 +529,16 @@ def _overheat_curve():
 
 def test_hourly_lane_holds_band_down_for_disconnected_group(db):
     """미연결 그룹(실효=소재 800·그룹 200) 밴드 DOWN → 집행 skip + held 사유 '[레버 미연결]'.
-    그룹입찰 하향은 지출 무효이면서 DL1 행동 창만 리셋(P2-1 그물 지연)·슬롯 낭비."""
+    그룹입찰 하향은 지출 무효이면서 DL1 행동 창만 리셋(P2-1 그물 지연)·슬롯 낭비.
+
+    D-NAO-125(2026-07-29): 기본 상태(킬스위치 on)에서는 이 시나리오가 오히려 ad-레벨
+    bid_down 인라인 자동 실행으로 열린다(의도된 변경 — test_naver_auto_operator.py 신규
+    회귀가 그 경로를 커버). 이 테스트는 킬스위치 off로 좁혀 종전 hold 회귀를 보존한다."""
     _seed_hourly_shopping(db)
     _ad(db, "grp-hot", "p1", ad_id="nad-1", ad_bid_amt=800, use_group=False)  # 미연결
     db.commit()
-    with patch.object(auto_operator.naver_sa_writer, "_get_adgroup",
+    with patch.object(auto_operator, "AD_BID_ROUTING_ENABLED", False), \
+         patch.object(auto_operator.naver_sa_writer, "_get_adgroup",
                       return_value={"bidAmt": 200}), \
          patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
         result = auto_operator.run_hourly_lane(
