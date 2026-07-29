@@ -1209,6 +1209,8 @@ def test_build_guardrail_context_non_keyword_target_all_none(db):
         "current_bid": None, "current_budget": None, "roas_corrected": None, "target_roas": None,
         "cost_today": None, "daily_budget": None, "unconverted_spend": None,
         "last_change_at": None, "changes_today_count": 0, "campaign_type": None,
+        # D-NAO-121: target_type='ad'가 아니므로 출시창 순위 하한은 항상 None(하한 없음).
+        "launch_floor_bid": None, "launch_target_rank": None,
     }
 
 
@@ -1224,6 +1226,9 @@ def test_build_guardrail_context_adgroup_target_bid_budget_fields_none_no_prior_
         "current_bid": None, "current_budget": None, "roas_corrected": None, "target_roas": None,
         "cost_today": None, "daily_budget": None, "unconverted_spend": None,
         "last_change_at": None, "changes_today_count": 0, "campaign_type": None,
+        # D-NAO-121: target_type='adgroup'(그룹 단위)이므로 출시창 순위 하한은 소재 전용 —
+        # 항상 None(하한 없음).
+        "launch_floor_bid": None, "launch_target_rank": None,
     }
 
 

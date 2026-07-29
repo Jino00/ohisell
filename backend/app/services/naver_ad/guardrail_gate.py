@@ -188,6 +188,21 @@ def _check_bid(proposal: dict, context: dict, proposal_type: str) -> str | None:
                 f"— 현재={current_bid}원 목표={target_bid}원"
             )
 
+    # ── 출시창 순위 하한(D-NAO-121) ───────────────────────────────────────────
+    # 인하 제안이 "목표 순위 유지에 필요한 금액" 밑으로 내려가면 차단한다. 출시 초기에는
+    # 그 자리가 매출 자체를 결정하기 때문이다(2026-07-29 실사고: 머리 키워드 1.7~2.2위 →
+    # 7위 추락, 원인은 입찰 하락인데 이 파이프라인엔 상한만 있고 하한이 없었다).
+    # context에 키가 없거나 None이면 하한 없음 = 종전 동작(하위호환).
+    # ★상한(BEP)과 충돌하면 출시창 안에서는 하한이 이긴다 — 계산된 손해를 감수하고
+    #   가시성을 사는 것이 이 창의 목적이다. 창이 끝나면 하한 자체가 사라진다.
+    if proposal_type in _BID_DOWN_TYPES:
+        launch_floor = context.get("launch_floor_bid")
+        if launch_floor is not None and target_bid < launch_floor:
+            return (
+                f"출시창 순위 하한 — 목표 {context.get('launch_target_rank')}위 유지에 "
+                f"{launch_floor}원이 필요해 {target_bid}원으로 내릴 수 없다(D-NAO-121)"
+            )
+
     if proposal_type in _BID_UP_TYPES:
         # IU-R R1 스톱로스 완화 방지(codex 엣지): rank-step 타입(bid_up_servo 등)은 스텝이
         # ±15%를 넘을 수 있어 target_bid 기준 스톱로스가 실질 완화된다(target_bid↑ → 상한↑).
