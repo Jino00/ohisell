@@ -889,6 +889,16 @@ def run_naver_auto_operator_hourly_job():
             result["explored_not_rank"], result["explored_ghost_hold"],
             len(result["ghost_hold_groups"]),
         )
+        # ★D-NAO-130 관측 구멍 수정(2026-07-29 실측): 소재 자동 실행 카운터 4종이 어느 로그
+        # 라인에도 없어서, 레인 캡이 걸렸는지·중복으로 skip됐는지를 **로그로 알 수 없었다**
+        # (approved=5가 캡 도달인지 우연인지 구분 불가 → DB를 봐야만 했다). 별도 라인으로 낸다.
+        log.info(
+            "[스케줄러] naver 소재(ad) 자동실행: reserved=%s capped=%s confirm_pending=%s "
+            "dup_skipped=%s inflight_skipped=%s",
+            result["ad_auto_exec_reserved"], result["ad_auto_exec_capped"],
+            result["ad_confirm_pending"], result["ad_confirm_pending_dup_skipped"],
+            result["ad_auto_exec_inflight_skipped"],
+        )
         # BP(D-NAO-102) 예산 페이싱 카운터 — 별도 라인(위 라인이 이미 길어 소실 위험).
         log.info(
             "[스케줄러] naver BP 예산페이싱: reviewed=%s raised=%s failed=%s dry_run=%s "
