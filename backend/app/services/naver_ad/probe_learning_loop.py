@@ -25,6 +25,7 @@ from app.services.naver_ad.probe_cell_aggregate import (
     _WINDOW_DAYS,
     aggregate_cells,
 )
+from app.services.naver_ad import probe_cell_aggregate
 from app.services.naver_ad.probe_cell_segmenter import judge_cell_segmentation
 from app.utils.kst import kst_now
 
@@ -54,6 +55,39 @@ def learned_probe_rank(
     if cell is None or not _is_promotable(cell):
         return None
     return cell["optimal_band"]
+
+
+def gate_bands(db: Session, *, as_of: date, campaign_ids: list[str]) -> dict[str, str | None]:
+    """★게이트가 **실제로 읽는** 값 — 캠페인별 승격 밴드(없으면 None).
+
+    이 잡(`run_probe_learning`)은 스케줄러가 `campaign_id` 없이 부르므로 **계정 전체** 집계를
+    승격시켜 일기에 남긴다. 그런데 실제 소비자(`auto_operator._learned_band_of` →
+    `_probe_rank_floor`·`_learned_optimal_skip`)는 **캠페인별**로 재계산한 값을 쓴다.
+    두 값은 다를 수 있고, 실제로 달랐다 — 2026-07-29 실측에서 계정 전체는 `1.0-2.0`이
+    승격돼 있었으나 `optimizer='ours'` 6개 캠페인 중 그 밴드를 소비하는 곳은 **0개**였다.
+    일기에는 학습이 된 것처럼 보이는데 아무도 그 값을 안 읽는 상태 — 이 프로젝트가 추적
+    중인 표방↔실구현 괴리 그대로다.
+
+    그래서 일기에 **둘을 나란히** 남긴다. 계정 승격은 '참고', 이 함수 결과가 '실제 적용값'이다.
+    """
+    out: dict[str, str | None] = {}
+    for cid in campaign_ids:
+        try:
+            env_cell = probe_cell_aggregate.env_cell_of_date(as_of)
+            out[cid] = learned_probe_rank(db, env_cell=env_cell, as_of=as_of, campaign_id=cid)
+        except Exception:  # noqa: BLE001 — 한 캠페인 실패가 나머지를 막지 않음(관측 목적)
+            log.exception("probe_learning_loop: gate_band 산출 실패 campaign=%s", cid)
+            out[cid] = None
+    return out
+
+
+def _ours_campaign_ids(db: Session) -> list[str]:
+    from app.models import NaverCampaignSettings
+
+    return [
+        r[0] for r in db.query(NaverCampaignSettings.campaign_id)
+        .filter(NaverCampaignSettings.optimizer == "ours").all()
+    ]
 
 
 def _run_stage(result: dict, key: str, fn, default):
@@ -129,7 +163,21 @@ def _summary_rationale(result: dict) -> str:
             label = "전환 최다(이익 방향) 일부·나머지 클릭 최다(전환 신호 부족·CTR 폴백)"
         else:
             label = "클릭 최다(전환 신호 부족·CTR 폴백)"
-        lines.append(f"- 승격({label}·CD5): {top}")
+        scope_label = "계정 전체" if result.get("scope") in (None, "account") else f"캠페인 {result['scope']}"
+        lines.append(f"- 승격({label}·CD5, **{scope_label} 기준 — 참고값**): {top}")
+    gate = result.get("gate_bands") or {}
+    if gate:
+        applied = {c: b for c, b in gate.items() if b}
+        if applied:
+            lines.append(
+                "- ★실제 적용값(캠페인별, 게이트가 읽는 값): "
+                + "; ".join(f"{c[-12:]}→{b}" for c, b in list(applied.items())[:6])
+            )
+        if len(applied) < len(gate):
+            lines.append(
+                f"- ★학습밴드 없는 캠페인 {len(gate) - len(applied)}/{len(gate)}개 — "
+                "그 캠페인은 하드코딩 프라이어(2.5)로 동작(계정 승격값을 쓰지 않는다)"
+            )
     for j in splits[:5]:
         lines.append(
             f"- 세분 권고 [{j.get('cell')}] 축={j.get('axis')}: "
@@ -148,6 +196,8 @@ def _write_summary_diary(db: Session, now: datetime, result: dict) -> None:
         {
             "promoted": result.get("promoted") or [],
             "promoted_basis": result.get("promoted_basis") or {},  # D-NAO-60 RL5 Part B
+            "scope": result.get("scope"),                # 위 promoted가 어느 스코프의 값인지
+            "gate_bands": result.get("gate_bands") or {},  # 게이트가 실제로 읽는 캠페인별 값
             "segment": (result.get("segment") or {}).get("judged") or [],
         },
         ensure_ascii=False, default=str,
@@ -178,6 +228,12 @@ def run_probe_learning(
 
     _run_stage(result, "promoted", lambda: _promote_cells(aggregate), [])
     _run_stage(result, "promoted_basis", lambda: _promoted_basis_map(aggregate), {})
+
+    # ★위 promoted는 이 호출의 스코프(스케줄러는 campaign_id 없이 부르므로 = 계정 전체)다.
+    # 게이트가 실제로 읽는 캠페인별 값을 따로 산출해 일기·로그에 나란히 남긴다(gate_bands docstring).
+    result["scope"] = campaign_id or "account"
+    _run_stage(result, "gate_bands",
+               lambda: gate_bands(db, as_of=as_of, campaign_ids=_ours_campaign_ids(db)), {})
 
     try:
         _write_summary_diary(db, now, result)

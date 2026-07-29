@@ -124,3 +124,12 @@ def test_active_days_adgroup_aggregates_before_counting(db):
     n = forecast_source.active_days(db, grain="adgroup", scope_key=ADGROUP, date_from=YESTERDAY, date_to=YESTERDAY)
 
     assert n == 1
+
+
+def test_conv_amt_basis_label_covers_every_supported_grain(db):
+    """★라벨 정정(2026-07-28) 드리프트 가드 — SUPPORTED_GRAINS에 grain을 추가하면서
+    CONV_AMT_BASIS_LABEL을 빼먹으면 소비처(proposal_writer)가 기준 없는 '매출'로 표기하게 된다.
+    campaign만 sentinel(/stats) 소스라 구매+장바구니 합, 나머지는 상세 행이라 구매만."""
+    assert set(forecast_source.CONV_AMT_BASIS_LABEL) == set(forecast_source.SUPPORTED_GRAINS)
+    assert forecast_source.CONV_AMT_BASIS_LABEL["campaign"] != forecast_source.CONV_AMT_BASIS_LABEL["keyword"]
+    assert forecast_source.CONV_AMT_BASIS_LABEL["adgroup"] == forecast_source.CONV_AMT_BASIS_LABEL["keyword"]

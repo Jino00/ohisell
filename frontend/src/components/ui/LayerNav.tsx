@@ -2,6 +2,8 @@
 import { NavLink } from "react-router-dom";
 
 const LINKS = [
+  // ★"성과"가 맨 앞이다(D-NAO-104 계획서 §5) — 사장님 뷰가 첫 탭. 나머지는 운영자 화면이다.
+  { to: "/naver-ad/performance", label: "성과" },
   { to: "/naver-ad", label: "커맨드 센터", end: true },
   { to: "/naver-ad/report", label: "리포트" },
   { to: "/naver-ad/diagnosis", label: "진단 보드" },

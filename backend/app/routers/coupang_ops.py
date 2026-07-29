@@ -24,10 +24,10 @@ from sqlalchemy.orm import Session
 from app.clients.coupang.inbound import WingReadError
 from app.config import get_coupang_config
 from app.database import get_db
-from app.models import Channel, CoupangAdCostDaily, CoupangAdOptionDaily, CoupangProductItem, CoupangRevenueFee, CoupangRgInbound, CoupangRgOrderItem, CoupangRgSettlementFee, Order, ProductChannelMapping, ProductMaster
+from app.models import Channel, CoupangAdCostDaily, CoupangAdOptionDaily, CoupangProductItem, CoupangRevenueFee, CoupangRgInbound, CoupangRgOrderItem, CoupangRgSettlementFee, CoupangRocketPromotion, Order, ProductChannelMapping, ProductMaster
 from app.routers._coupang_write_http import handle_write as _handle_write
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
-from app.services.coupang import ad_cost_sync, coupon_write, refresh_contract, coupang_seller_cost as _seller_cost_harness, demand_classifier, in_transit_estimator, lead_time_estimator, ohitech_ad_sync, product_write, rg_fee_audit, rg_inbound_sync, rg_product_size_sync, rg_replenishment, rg_settlement_sync, replenishment_backtest, rocket_cost_map, rocket_supplier_sync, rg_cost_reader as _rg_reader, sales_velocity_estimator, vendor_summary_sync
+from app.services.coupang import ad_cost_sync, coupon_write, refresh_contract, coupang_seller_cost as _seller_cost_harness, demand_classifier, in_transit_estimator, lead_time_estimator, ohitech_ad_sync, product_write, rg_fee_audit, rg_inbound_sync, rg_product_size_sync, rg_replenishment, rg_settlement_sync, replenishment_backtest, rocket_cost_map, rocket_promo_sync, rocket_supplier_sync, rg_cost_reader as _rg_reader, sales_velocity_estimator, vendor_summary_sync
 from app.utils.crypto import CookieCryptoError
 
 log = logging.getLogger(__name__)
@@ -1386,6 +1386,235 @@ def ingest_rocket_po_detail(
 
 
 # ════════════════════════════════════════════════
+# 프로모션 손익 레이어 ingest (트랙 coupang-promo-pnl Phase 1, D-CPP-1~6)
+# ────────────────────────────────────────────────
+# body의 rows는 **우리 레코드 계약**(PLAN_coupang-promo-pnl-phase1.md §4)이지 쿠팡 원시 응답이
+#   아니다. 2026-07-28 정찰에서 supplier 세션이 만료돼 원시 스키마를 특정하지 못했고, 모르는
+#   스키마의 파서를 지어내지 않기로 했다(추측 금지). 페처가 raw→계약 매핑을 담당한다.
+# ★회계축 불변: 여기로 들어온 값은 net_profit·종합조망에 결합되지 않는다(D-CPP-2/D-CPP-4).
+# ════════════════════════════════════════════════
+@router.post("/rocket/sales/ingest")
+def ingest_rocket_sales(
+    body: dict[str, Any] = Body(...),
+    x_ingest_token: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """로켓배송(1P) 옵션×일 소비자 판매(판매분석) push → snapshot upsert(멱등).
+
+    body: {"vendor_id":"A01029796", "source":"sales_analysis|excel",
+           "rows":[{"option_id","date","sku_id","qty","revenue","visitors","conversion_rate","product_name"}, ...]}
+    vendor_id는 계정축(판매분석 행에 없어 주입). ★revenue는 소비자 실현가 — 회계 매출 아님(D-CPP-2).
+    """
+    _check_ingest_token(x_ingest_token)
+    vendor_id = str(body.get("vendor_id") or "").strip()
+    # 길이도 본다: vendor_id는 String(20) 그레인 키다. SQLite는 초과를 통과시켜 **평행 계정축**을
+    #   만들고, PostgreSQL에선 배치 전체가 죽는다(파서가 식별자에 적용하는 규칙과 같은 이유).
+    if not vendor_id or len(vendor_id) > 20:
+        raise HTTPException(status_code=400, detail="vendor_id 필요(<=20자)")
+    rows = body.get("rows")
+    if not isinstance(rows, list) or not rows:
+        raise HTTPException(status_code=400, detail="rows[] 필요")
+    source = str(body.get("source") or "sales_analysis").strip() or "sales_analysis"
+    out = rocket_promo_sync.ingest_rocket_sales(db, vendor_id, rows, source=source)
+    # ★수집 통계를 prod 로그에 남긴다(적대적 리뷰 4R): 실패·미조회 날짜가 Mac 로컬 로그에만
+    #   있으면 아무도 안 본다 — RG 26일 침묵이 정확히 그 형태였다(감지는 되는데 표면이 없음).
+    #   페처가 안 보내는 구버전이면 빈 dict라 그냥 조용하다(하위호환).
+    cs = body.get("collection_stats")
+    if isinstance(cs, dict) and cs:
+        out["collection_stats"] = cs
+        if cs.get("days_failed") or cs.get("days_abandoned"):
+            log.warning(
+                "1P 판매 수집 부분 성공: vendor=%s 요청 %s일 → 수집 %s·범위밖 %s·실패 %s·미조회 %s "
+                "(실패 날짜 %s) — 롤링 창이 다음 회차에 메우는지 확인할 것",
+                vendor_id, cs.get("days_requested"), cs.get("days_collected"),
+                cs.get("days_out_of_range"), cs.get("days_failed"), cs.get("days_abandoned"),
+                ",".join(map(str, cs.get("failed_dates") or []))[:200],
+            )
+    return out
+
+
+@router.post("/rocket/promotion/ingest")
+def ingest_rocket_promotion(
+    body: dict[str, Any] = Body(...),
+    x_ingest_token: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """로켓배송(1P) 프로모션 신청(공급자허브) push → snapshot upsert(멱등, grain=request_id).
+
+    body: {"vendor_id":"A01029796",
+           "rows":[{"request_id","contract_id","promotion_name","promotion_type","status",
+                    "start_at","end_at","share_ratio","discount_method","discount_value",
+                    "budget_amount","settlement_date","applied_product_count","requested_at","raw"}, ...]}
+    행사기간(start_at/end_at)은 **초 단위**를 보존한다. ★분담금 청구 방식은 미확정(D-CPP-4) —
+    이 데이터는 사실 기록이며 어떤 비용 라인에도 자동 반영되지 않는다.
+    """
+    _check_ingest_token(x_ingest_token)
+    vendor_id = str(body.get("vendor_id") or "").strip()
+    if not vendor_id or len(vendor_id) > 20:   # String(20) 그레인 키 — 위 sales와 같은 이유
+        raise HTTPException(status_code=400, detail="vendor_id 필요(<=20자)")
+    rows = body.get("rows")
+    if not isinstance(rows, list) or not rows:
+        raise HTTPException(status_code=400, detail="rows[] 필요")
+    return rocket_promo_sync.ingest_rocket_promotions(db, vendor_id, rows)
+
+
+@router.post("/coupon/used-amount/ingest")
+def ingest_coupon_used_amount(
+    body: dict[str, Any] = Body(...),
+    x_ingest_token: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """쿠폰별 실사용 할인액(= 셀러 실부담, D-CPP-3 권위값) push → 기존 coupang_coupon 행 갱신.
+
+    body: {"account_key":"COUPANG_WING1", "source":"wing_ui|wing_api|manual",
+           "rows":[{"coupon_id":"94177420","used_amount":156000}, ...]}
+    ★쿠팡 Open API(fms)에는 이 값이 없다(ref 06 §E 전수 대조) → coupon_sync가 아니라 이 경로로만
+      들어온다. 없는 쿠폰은 행을 만들지 않고 not_found로 돌려준다(유령 행 방지).
+    """
+    _check_ingest_token(x_ingest_token)
+    account_key = str(body.get("account_key") or "").strip()
+    if not account_key or len(account_key) > 20:   # coupang_coupon.account_key = String(20)
+        raise HTTPException(status_code=400, detail="account_key 필요(<=20자)")
+    rows = body.get("rows")
+    if not isinstance(rows, list) or not rows:
+        raise HTTPException(status_code=400, detail="rows[] 필요")
+    source = str(body.get("source") or "wing_ui").strip() or "wing_ui"
+    return rocket_promo_sync.ingest_coupon_used_amount(db, account_key, rows, source=source)
+
+
+# 목적지 컬럼 Numeric(12,2)의 정수부 상한 — 파서의 _MAX_DISCOUNT와 같은 이유(유한하다고 담기는
+#   것은 아니다: SQLite는 통과시켜 합계를 오염시키고 PostgreSQL은 commit을 죽인다).
+_MAX_UNIT_DISCOUNT = Decimal(10) ** 10
+
+# 대상 SKU 지정(Phase 2) 방어값. product_number는 String(30)이고, 한 프로모션의 적용상품은
+#   실측 1~3개다(prod 7건 전수). 상한은 넉넉히 두되 무한 리스트는 막는다.
+_MAX_TARGET_SKUS = 200
+_MAX_SKU_LEN = 30
+
+
+def _normalize_target_sku_ids(raw: Any) -> list[str] | None:
+    """대상 SKU 리스트 정규화 — 공백 제거·중복 제거(순서 보존)·빈 값 제거.
+
+    ★길이 초과 ID는 **자르지 않고 거부한다**(400): 잘린 ID는 '다른 ID'가 되어 영원히 엉뚱한
+      판매 행에 붙는다(파서 `_sid`와 같은 이유). 손익이 통째로 틀리면서 대사되지 않는다.
+    ★빈 리스트([])는 삭제(=미지정)로 취급해 None으로 저장한다 — '지정했는데 0개'라는 상태는
+      의미가 없고, target_sku_missing 판정을 한 갈래로 유지한다.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        raise HTTPException(status_code=400, detail="target_sku_ids는 배열이어야 합니다(삭제는 null 또는 [])")
+    if len(raw) > _MAX_TARGET_SKUS:
+        raise HTTPException(status_code=400, detail=f"target_sku_ids 최대 {_MAX_TARGET_SKUS}개")
+    out: list[str] = []
+    for v in raw:
+        if isinstance(v, bool) or not isinstance(v, (str, int)):
+            raise HTTPException(status_code=400, detail=f"target_sku_ids 원소는 문자열이어야 합니다: {v!r}")
+        s = str(v).strip()
+        if not s:
+            continue
+        if len(s) > _MAX_SKU_LEN:
+            raise HTTPException(
+                status_code=400,
+                detail=f"target_sku_ids 항목 길이 초과(<={_MAX_SKU_LEN}자): {s[:40]}",
+            )
+        if s not in out:
+            out.append(s)
+    return out or None
+
+
+@router.patch("/rocket/promotion/{request_id}/unit-discount")
+def patch_promotion_unit_discount(
+    request_id: str = Path(...),
+    body: dict[str, Any] = Body(...),
+    db: Session = Depends(get_db),
+):
+    """프로모션 **수기 입력** 갱신 — 개당 할인액(D-CPP-7) + 대상 SKU(Phase 2). 기존 행만 갱신.
+
+    ★X-Ingest-Token을 걸지 않는다(Phase 2에서 해제 — 아래 이유): 이 경로는 페처가 쓰는 ingest가
+      아니라 **사람이 sellC 화면에서 확정하는 입력**이고, 브라우저에는 ingest 토큰을 줄 수 없다
+      (프론트에 심으면 그 순간 비밀이 아니다). 같은 성격의 `/rocket/cost-map`(원가 매핑 확정)이
+      이미 토큰 없이 사용자 CRUD로 열려 있고, 프로젝트 전체가 IP 허용목록 뒤에 있다 —
+      한 화면의 두 수기 입력이 서로 다른 인증을 갖는 쪽이 오히려 사고를 부른다.
+      Phase 1에 토큰이 걸려 있었지만 이 라우트는 **prod 미배포**라 기존 호출자가 없다.
+
+    body: {"unit_discount_amount": 3000, "target_sku_ids": ["62178970", "69411570"]}
+      - 두 키는 **각각 선택**이다(둘 다 없으면 400). 보낸 키만 갱신한다 — 할인액만 고칠 때
+        SKU가 지워지지 않는다(반대도 마찬가지).
+      - `null`(또는 SKU는 `[]`)이면 그 값 삭제 = '모름'으로 되돌림(0원 할인·0개 지정과 구분).
+
+    ★target_sku_ids가 왜 수기인가(2026-07-28 prod raw 실측): 프로모션 API 응답에 **적용 상품
+      목록이 없다** — `detailCount`(적용상품 수)만 있다. 손익은 "이 창에서 어느 SKU가 팔렸나"를
+      알아야 계산되는데, 이름 유사도·기간 겹침 같은 추정 매핑은 틀려도 대사되지 않는다(원칙22).
+
+    ★왜 수기인가(2026-07-28 라이브 실측): 공급자허브 프로모션 목록/상세 API에 상품별·단위
+      할인액 필드가 **없다**(discountBudget=총예산, supplierFundRate=분담%뿐). Jino 확정:
+      "한 프로모션에 제품은 여러개가 들어갈 수 있지만 할인 가격은 모두 같은게 맞아" → 1칸이면 족하다.
+    ★행을 만들지 않는다: 없는 request_id는 404. 수기 입력이 유령 프로모션을 만들면 그 값은
+      어떤 수집으로도 대사되지 않는다(원칙22).
+    ★페처는 이 칸을 쓰지 않는다 → 재수집(snapshot upsert)이 수기 값을 지우지 않는다.
+    """
+    rid = str(request_id or "").strip()
+    if not rid or len(rid) > 30:   # String(30) 그레인 키
+        raise HTTPException(status_code=400, detail="request_id 필요(<=30자)")
+    has_amount = "unit_discount_amount" in body
+    has_skus = "target_sku_ids" in body
+    if not has_amount and not has_skus:
+        raise HTTPException(
+            status_code=400,
+            detail="unit_discount_amount 또는 target_sku_ids 필요(각각 삭제는 null)",
+        )
+
+    amount: Decimal | None = None
+    if has_amount:
+        raw = body.get("unit_discount_amount")
+        if raw is None or (isinstance(raw, str) and raw.strip() == ""):
+            amount = None   # 명시적 삭제 = '모른다'로 되돌림(0원 할인과 구분)
+        else:
+            try:
+                amount = Decimal(str(raw).replace(",", "").strip())
+            except (ArithmeticError, ValueError):
+                raise HTTPException(status_code=400, detail="unit_discount_amount 숫자 아님")
+            if not amount.is_finite() or amount < 0 or amount >= _MAX_UNIT_DISCOUNT:
+                # 음수 할인액은 존재하지 않는다 — 입력 사고를 조용히 저장하지 않는다.
+                raise HTTPException(status_code=400, detail="unit_discount_amount 범위 오류(0 이상, 10^10 미만)")
+            # ★목적지 컬럼 그레인(Numeric(12,2))으로 먼저 맞춘다: SQLite는 준 대로 담고
+            #   PostgreSQL은 반올림해서 담아, 같은 입력이 DB에 따라 다르게 저장된다. 여기서
+            #   접어 두면 응답으로 돌려주는 값이 실제 저장값과 항상 같다. (`-0`도 `0.00`으로 정규화)
+            amount = amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) + Decimal(0)
+
+    skus: list[str] | None = None
+    if has_skus:
+        skus = _normalize_target_sku_ids(body.get("target_sku_ids"))
+
+    row = (
+        db.query(CoupangRocketPromotion)
+        .filter(CoupangRocketPromotion.request_id == rid)
+        .first()
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"프로모션 {rid} 없음(먼저 수집되어야 합니다)")
+    if has_amount:
+        row.unit_discount_amount = amount
+    if has_skus:
+        row.target_sku_ids = skus
+    db.commit()
+    log.info(
+        "프로모션 수기 갱신: request_id=%s amount=%s(set=%s) target_skus=%s(set=%s)",
+        rid, amount, has_amount, skus, has_skus,
+    )
+    return {
+        "request_id": rid,
+        "unit_discount_amount": (
+            str(row.unit_discount_amount) if row.unit_discount_amount is not None else None
+        ),
+        "target_sku_ids": row.target_sku_ids,
+        "promotion_name": row.promotion_name,
+        "applied_product_count": row.applied_product_count,
+    }
+
+
+# ════════════════════════════════════════════════
 # 로켓배송(1P) 원가 브리지 매핑 (트랙 rocket-1p S4.5b, D-13)
 # ────────────────────────────────────────────────
 # 사용자 확정 입력(프론트 S5) — 발주상세 상품번호 → product_master.internal_sku.
@@ -1949,6 +2178,27 @@ def wing_rg_settlement_refresh_complete(
         db, rg_settlement_sync._rg_state_key(_require_rg_account(account_key)),
         clear_error=True, lease=lease)
     return {"ok": ok}
+
+
+@router.get("/wing/rg-settlement/layer2-gaps")
+def wing_rg_settlement_layer2_gaps(
+    account_key: str = Query(default="COUPANG_WING1", description="COUPANG_WING1/2"),
+    days: int = Query(default=rg_settlement_sync.LAYER2_GAP_DEFAULT_DAYS, ge=1, le=400,
+                      description="조회 창(일) — 페처의 rg_status_days와 짝"),
+    report_types: list[str] | None = Query(default=None, description="sellerReportType 반복 파라미터"),
+    x_ingest_token: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """층2(옵션 엑셀) 결손 주기 조회 — **읽기 전용**(PLAN_rg-layer2-gap-driven-selfheal D1).
+
+    Mac 페처가 층1 push 직후 호출해 "무엇이 비었는지"를 받아 결손 주기만 다운로드한다.
+    이게 없으면 페처는 매 회차 최신 1주기만 받아 캐던스가 느려질 때마다 영구 공백이 생긴다.
+    인증은 형제 페처용 엔드포인트(refresh-claim·ingest)와 동일한 X-Ingest-Token — 이 응답은
+    페처 전용이고 UI는 쓰지 않는다.
+    """
+    _require_ingest_token(x_ingest_token)
+    return rg_settlement_sync.layer2_gaps(
+        db, _require_rg_account(account_key), days=days, report_types=report_types)
 
 
 # ════════════════════════════════════════════════════════════════════

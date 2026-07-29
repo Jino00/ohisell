@@ -403,6 +403,14 @@ function describeChange(row: NaverChangeLogRow): string {
       return `입찰가 ${n(b?.bidAmt)} → ${n(a?.bidAmt)}`;
     case "update_budget":
       return `일예산 ${n(b?.dailyBudget)} → ${n(a?.dailyBudget)}`;
+    // BP(예산 페이싱, D-NAO-102 ⑥) — 실행 경로도 payload(dailyBudget)도 update_budget과
+    // 같고 change_log에 남는 **라벨만** 갈라진다. 케이스를 안 달면 default로 떨어져
+    // "budget_up_pacing"이라는 영문이 그대로 표에 노출된다 — 바로 아래 외부감지 2종이
+    // 겪었던 누락과 같은 모양이다(그때는 prod 15행 전부가 action 원문으로 렌더됐다).
+    case "budget_up_pacing":
+      return `일예산 ${n(b?.dailyBudget)} → ${n(a?.dailyBudget)} (조기 소진 대응 증액)`;
+    case "budget_down_pacing":
+      return `일예산 ${n(b?.dailyBudget)} → ${n(a?.dailyBudget)} (증액분 원복)`;
     case "set_user_lock":
       return `${lock(b?.userLock)} → ${lock(a?.userLock)}`;
     case "add_negative_keyword": {

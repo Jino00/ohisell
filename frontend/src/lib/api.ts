@@ -926,6 +926,334 @@ export function fetchRocketOverview(from: string, to: string): Promise<RocketOve
   return fetchApi<RocketOverview>(`/api/overview/rocket-overview?from=${from}&to=${to}`);
 }
 
+// ──────────────────────────────────────────────
+// 로켓배송(1P) 통합 대사 — 발주·납품·거래명세서 단계·계산서를 상품 한 표로 (조회 전용)
+// ★null = **모름**이지 0이 아니다(원칙22). 화면에서 0으로 렌더하지 말 것 — 미상은 "—"로.
+//   특히 received_qty/drift_qty의 null은 "멀티SKU 발주라 상품별 입고를 쪼갤 근거가 없다"는 뜻이다.
+// ──────────────────────────────────────────────
+export interface ReconStatusRow {
+  status: string | null;                 // CI/PA/RP …
+  status_description: string | null;     // 거래명세서확인 / 발주확정 / 거래처확인요청
+  is_settled_stage: boolean;             // true=입고 끝난 단계(드리프트가 진짜 신호)
+  po_count: number;
+  order_qty: number;
+  received_qty: number;
+  order_amount: string;                  // Decimal → string
+  receiving_amount: string;
+  drift_po_count: number;
+}
+
+export interface ReconInvoiceSummary {
+  po_without_invoice_count: number;      // 아직 계산서에 안 묶인 발주
+  mapped_invoice_count: number;
+  invoice_missing_row_count: number;     // 번호는 있는데 정산행 미수집(≠미발행)
+  invoice_unconfirmed_count: number;     // 세금계산서 확정일 없음
+  invoice_not_marked_transmitted_count: number; // 전송 '미표기'(실패 아님)
+  settled_amount: string;
+  note: string;
+}
+
+export interface ReconDetailCoverage {
+  pos_with_detail_count: number;
+  pos_without_detail_count: number;      // 발주상세(SKU) 미수집 PO
+  // 0~1 분수. null=윈도우 PO 0건(0%가 아님). ★Decimal이라 JSON에선 문자열("0.0036")로 온다.
+  po_coverage_pct: string | null;
+  line_count: number;
+  sku_count: number;
+  lines_missing_confirmed_qty: number;
+  note: string;
+}
+
+export interface ReconSummary {
+  po_count: number;
+  order_qty: number;
+  received_qty: number;
+  unreceived_qty: number;
+  order_amount: string;
+  receiving_amount: string;
+  unreceived_amount: string;
+  drift_po_count: number;                // 전체(입고 전 단계의 당연한 불일치 포함)
+  drift_po_count_settled_stage: number;  // ★핵심: 거래명세서확인인데 발주≠입고
+  settled_stage_po_count: number;
+  no_date_po_count: number;
+  by_status: ReconStatusRow[];
+  invoice: ReconInvoiceSummary;
+  detail_coverage: ReconDetailCoverage;
+}
+
+export interface ReconSkuRow {
+  product_number: string;
+  product_name: string | null;
+  barcode: string | null;
+  po_count: number;
+  line_count: number;
+  order_qty: number;
+  order_amount: string;
+  confirmed_qty: number;                 // 납품가능(업체확인) — 미수집 라인은 빠져 있다
+  confirmed_missing_lines: number;
+  received_qty: number | null;           // ★단일SKU 발주 귀속분만. null=귀속 불가(모름)
+  received_attributable_po_count: number;
+  received_unattributable_po_count: number;
+  attributable_order_qty: number | null;
+  drift_qty: number | null;              // 귀속 가능분 발주−입고(입고 전 단계 포함=참고값). null=산출 불가
+  // ★진짜 신호 — 입고 완료 단계(CI·RI) 귀속분만. null=판정 근거 없음(0 아님). 빨강은 이 값에만.
+  drift_qty_settled_stage: number | null;
+  // 수량이 상쇄돼 0이어도 건수가 >0이면 불일치는 실재한다(요약 타일과 같은 단위).
+  drift_po_count_settled_stage: number;
+  settled_stage_attributable_po_count: number;
+  invoice_count: number;
+  // ↓ 계산서 카운터는 **이 SKU가 속한 발주** 기준 — 요약 타일(기간 전체 중복 제거)과 분모가 다르다.
+  //   계산서 1건이 멀티SKU 발주에 걸리면 SKU마다 잡히므로 행 합계 > 요약. 같은 이름이지만 다른 수다.
+  po_without_invoice_count: number;
+  invoice_missing_row_count: number;
+  invoice_unconfirmed_count: number;
+  invoice_not_marked_transmitted_count: number;
+}
+
+export interface RocketRecon {
+  period: { from: string; to: string; vendor_id?: string };
+  channel: string;
+  summary: ReconSummary;
+  filters: {
+    drift_only: boolean;
+    unconfirmed_only: boolean;
+    sku_count_total: number;
+    sku_count_shown: number;
+    // 발주≠입고를 판정할 근거가 없는 SKU 수 — drift_only가 '정상이라서'가 아니라 '몰라서' 제외한다.
+    sku_count_unknown_drift: number;
+  };
+  skus: ReconSkuRow[];
+  note: string;
+}
+
+export interface ReconInvoice {
+  invoice_seq: number;
+  found: boolean;                        // false=번호만 있고 정산행 미수집
+  issue_date: string | null;
+  payment_date: string | null;
+  tax_invoice_confirmed_date: string | null;
+  tax_invoice_transmitted: boolean | null; // null/false=미표기(실패 아님)
+  payment_amount: string | null;
+  supply_amount: string | null;
+  vat: string | null;
+  bill_issue_type: string | null;
+  settlement_type: string | null;
+}
+
+export interface ReconSkuPoRow {
+  product_name: string | null;
+  purchase_order_seq: number;
+  po_created_date: string | null;        // 발주일(KST)
+  expected_delivery_date: string | null;
+  status: string | null;
+  status_description: string | null;
+  is_settled_stage: boolean;
+  center_name: string | null;
+  purchase_type: string | null;
+  sku_count: number;
+  po_order_qty: number;                  // PO 전체(이 SKU만의 값이 아니다)
+  po_received_qty: number;
+  po_order_amount: string;
+  po_receiving_amount: string;
+  po_drift_qty: number;
+  line_order_qty: number;                // 이 SKU 라인
+  line_confirmed_qty: number | null;     // null=미수집(0 아님)
+  line_order_amount: string;
+  unit_purchase_price: string;
+  invoices: ReconInvoice[];
+}
+
+export interface RocketReconSku {
+  period: { from: string; to: string; vendor_id?: string };
+  product_number: string;
+  product_name: string | null;
+  po_count: number;
+  rows: ReconSkuPoRow[];
+  note: string;
+}
+
+export function fetchRocketRecon(params: {
+  from: string; to: string; driftOnly?: boolean; unconfirmedOnly?: boolean;
+}): Promise<RocketRecon> {
+  const q = new URLSearchParams({ from: params.from, to: params.to });
+  if (params.driftOnly) q.set("drift_only", "true");
+  if (params.unconfirmedOnly) q.set("unconfirmed_only", "true");
+  return fetchApi<RocketRecon>(`/api/overview/rocket-recon?${q.toString()}`);
+}
+
+export function fetchRocketReconSku(
+  productNumber: string, from: string, to: string,
+): Promise<RocketReconSku> {
+  const q = new URLSearchParams({ from, to });
+  return fetchApi<RocketReconSku>(
+    `/api/overview/rocket-recon/sku/${encodeURIComponent(productNumber)}?${q.toString()}`,
+  );
+}
+
+// ── 쿠팡 프로모션 손익 레이어 (트랙 coupang-promo-pnl Phase 2) ──
+// ★읽기 전용 신규 API. 종합조망 net_profit 회계는 이 블록과 무관하게 그대로다.
+// ★null = **모름**이지 0이 아니다(원칙22). 화면에서 0으로 렌더하지 말 것 — 미상은 "—"로.
+export interface PromoSkuRow {
+  sku_id: string;
+  product_name: string | null;
+  option_ids: string[];
+  sales_days: number;
+  qty: number;
+  realized_revenue: string;             // 소비자 실현가(회계 매출 아님, D-CPP-2)
+  realized_unit_price: string | null;
+  supply_unit_price: string | null;     // 납품 단가(최신 발주)
+  supply_price_po_seq: number | null;   // 그 단가가 온 발주번호(창 이후 발주일 수 있다 — 대사용)
+  supply_revenue: string | null;
+  cost_price: string | null;
+  cost: string | null;
+  funding: string | null;               // 분담금 = 판매량 × 개당 할인액
+  unit_contribution: string | null;     // 납품단가 − 원가 − 개당 분담금
+  bep_ad_spend: string | null;
+  bep_roas: string | null;
+  resolved: boolean;
+  unresolved_reasons: string[];
+}
+
+export interface PromoTotals {
+  qty: number;                          // 손익에 들어간 분(해결된 SKU)
+  qty_all: number;                      // 대상 SKU 전체 판매량
+  realized_revenue: string;
+  realized_revenue_all: string;
+  supply_revenue: string | null;
+  cost: string | null;
+  funding: string | null;
+  ad_cost: string | null;               // null = 옵션 귀속 불가(0 아님)
+  net_profit: string | null;
+  bep_ad_spend: string | null;          // 이 값을 넘는 광고비 = 적자
+  bep_roas: string | null;              // ★진짜 BEP ROAS
+  // ★"최악값"이 아니다 — **해결된 SKU만의** 하한이다. 미해결 SKU가 적자였다면 참값은 이 밑이고,
+  //   경계일 과대 포함도 이 값을 낙관 방향으로 민다. 반드시 "≥ …(미해결 N건 제외)"로 렌더할 것.
+  net_profit_lower_bound_resolved_only: string | null;
+  lower_bound_excludes_unresolved: boolean;
+  resolved_sku_count: number;
+  unresolved_sku_ids: string[];
+  unresolved_qty: number;
+  qty_is_lower_bound: boolean;          // ★창 부분 커버 — 수량·손익은 확정값이 아니라 하한
+  not_started: boolean;                 // 창 전체 미도래(시작 전/집계 전) — 결손이 아니다
+  basis: string;
+}
+
+export interface PromoPnlCard {
+  request_id: string;
+  vendor_id: string;
+  promotion_name: string | null;
+  promotion_type: string | null;
+  status: string | null;
+  start_at: string | null;
+  end_at: string | null;
+  share_ratio: string | null;
+  budget_amount: string | null;
+  applied_product_count: number | null;
+  unit_discount_amount: string | null;
+  unit_discount_missing: boolean;
+  target_sku_ids: string[];
+  target_sku_missing: boolean;
+  window: {
+    from: string; to: string; days: number;
+    window_days: number; covered_days: number;
+    missing_days: string[];             // 수집 결손(메울 수 있는 구멍)
+    pending_days: string[];             // 아직 확정 전 — 결손이 아니다
+    data_through: string;
+    sales_through: string | null;       // 판매 데이터가 실제로 닿은 마지막 날
+    in_flight: boolean;
+    complete: boolean;
+    null_sku_rows: number;
+  } | null;
+  window_basis: string;
+  skus: PromoSkuRow[];
+  totals: PromoTotals | null;
+  ad: {
+    available: boolean;
+    attributed: string | null;
+    attributed_partial: string | null;  // 부분 귀속분(참고용 — 확정 순이익에 쓰지 않는다)
+    by_option: Record<string, string>;
+    ad_days_covered: number;
+    ad_days_judged: number;             // pending 제외한 판정 대상 일수
+    ad_days_total: number;
+    option_vs_account_ratio: Record<string, string>;
+    options_with_spend: number;
+    options_total: number;
+    account_window_spend: string;       // 계정 전체 Retail — **상한 프록시**
+    basis: string;
+  } | null;
+  blockers: string[];
+}
+
+export interface PromoFreshness {
+  today: string;
+  window: { from: string; to: string; days: number };
+  window_days_basis: string;
+  latest_date: string | null;
+  stale_days: number | null;
+  missing_count: number;
+  missing_dates: { date: string; days_until_expiry: number }[];
+  urgent_count: number;
+  subscription: {
+    free_trial_end: string | null;
+    days_left: number | null;
+    warn: boolean;
+    expired: boolean;
+    basis: string;
+  };
+}
+
+export interface RgCouponRow {
+  coupon_id: string;
+  account_key: string;
+  promotion_name: string | null;
+  status: string | null;
+  discount_type: string | null;
+  discount: string | null;
+  start_at: string | null;
+  end_at: string | null;
+  option_count: number;
+  used_amount: string | null;
+  used_amount_source: string | null;
+  used_amount_pending: boolean;         // ★true = 미수집(0이 아님)
+}
+
+export interface PromoPnlResponse {
+  vendor_id: string | null;
+  promotions: PromoPnlCard[];
+  promotion_count: number;
+  freshness: PromoFreshness;
+  rg_coupons: {
+    coupons: RgCouponRow[]; count: number; pending_count: number;
+    window: { from: string | null; to: string | null } | null;
+    window_note: string | null;
+    account_key: string | null;
+    limit: number;
+    note: string;
+  };
+  accounting_note: string;
+}
+
+export function fetchRocketPromoPnl(limit = 20): Promise<PromoPnlResponse> {
+  return fetchApi<PromoPnlResponse>(`/api/overview/rocket-promo-pnl?limit=${limit}`);
+}
+
+/** 프로모션 수기 입력(개당 할인액·대상 SKU). 보낸 키만 갱신된다 — 한쪽이 다른 쪽을 지우지 않는다. */
+export function patchPromotionManual(
+  requestId: string,
+  body: { unit_discount_amount?: string | number | null; target_sku_ids?: string[] | null },
+): Promise<{
+  request_id: string;
+  unit_discount_amount: string | null;
+  target_sku_ids: string[] | null;
+  promotion_name: string | null;
+  applied_product_count: number | null;
+}> {
+  return fetchApi(
+    `/api/coupang/ops/rocket/promotion/${encodeURIComponent(requestId)}/unit-discount`,
+    { method: "PATCH", body: JSON.stringify(body) },
+  );
+}
+
 // ── 로켓배송(1P) 원가 매핑 (S4.5b) ──
 export interface RocketUnmappedItem {
   product_number: string;
@@ -2199,6 +2527,12 @@ export interface NaverCampaignRosterRow {
   optimizer: NaverAdOptimizer;
   /** D-NAO-65 UI2 — loss 대응 정책. null=미설정 → 콘솔이 '기본(고삐)'로 해석. */
   loss_policy: NaverLossPolicy | null;
+  /** D-NAO-104 P1-1(additive) — 자동 운영 레인 대상인가. optimizer와 **다른 축**이다
+   *  (우리 소유인데 자동 레인만 꺼둔 상태가 실재한다). */
+  auto_operate: boolean;
+  /** D-NAO-97 statusReason 원문(ELIGIBLE/CAMPAIGN_PAUSED/CAMPAIGN_LIMITED_BY_BUDGET…).
+   *  한글화는 성과 뷰(백엔드)가 하고, 여기선 원문 그대로 온다. null=미수집. */
+  status_reason: string | null;
   window_days: number;
 }
 
@@ -2255,4 +2589,423 @@ export interface CollectionStatus {
 }
 export function getCollectionStatus(): Promise<CollectionStatus> {
   return fetchApi<CollectionStatus>("/api/coupang/ops/collection-status");
+}
+
+// ── 광고 성과(사장님 뷰) — D-NAO-104 Phase 1 (docs/PLAN_naver-ad-performance-view.md §4-ⓐ) ──
+// ★이 응답의 한국어 문자열은 **백엔드가 이미 D-NAO-103 규칙으로 조립한 것**이다(ID·내부 용어
+//   없음, 문장). 프론트는 그대로 렌더한다 — 여기서 문장을 다시 만들면 표기 규칙이 두 벌이 된다.
+// ★null은 전부 "알 수 없음"이다. 0으로 대체하거나 `?? 0`으로 삼키지 말 것(원칙22).
+export interface NaverPerformanceCampaignCard {
+  /** 화면 미표시(딥링크·title 속성 전용). D-NAO-103①: 사람에겐 이름만 보여준다. */
+  campaign_id: string;
+  name: string;
+  type_label: string;          // 쇼핑검색 / 파워링크 …
+  status_label: string;        // 정상 노출 중 / 정지됨 / 오늘 예산을 다 써서 멈춤 …
+  review_label: string | null; // "검수 중"(정상 노출과 배타가 아닌 별도 축)
+  managed_by_label: string;    // 우리가 자동으로 운영 / 대행사가 운영 / 직접 관리…
+  auto_operate: boolean;
+  spend_today: number;
+  daily_budget: number | null; // null = 일예산 미설정(무제한)
+  spend_ratio: number | null;  // 분수(0~1). 일예산 없으면 null
+  imp_today: number;
+  clk_today: number;
+  /** 상한 프록시 매출(그 상품의 전체 판매액). 상품 매핑이 없으면 null. */
+  revenue_today_proxy: number | null;
+  /** 상한 프록시 ROAS. null = 알 수 없음 — **0.00배로 렌더 금지**(파워링크가 항상 이 경우). */
+  roas_today_proxy: number | null;
+  roas_unknown_reason: string | null;
+  target_roas: number | null;
+  bep_roas: number | null;
+  shared_product_count: number; // 여러 캠페인이 공유해 매출을 나눠 계상한 상품 수
+  active_today: boolean;
+  verdict_sentence: string;
+  // ★출처 라벨(D-NAO-105): 같은 칸에 오늘=실주문 프록시와 과거=네이버 확정치가 번갈아 들어온다.
+  //   무엇을 보고 있는지는 **백엔드가 정한 라벨**이 말한다 — 프론트가 다시 판단하지 않는다.
+  source: "today_proxy" | "settling" | "confirmed";
+  source_label: string;   // 오늘 추정 / 확정 중 / 확정
+  roas_label: string;     // 오늘 ROAS(추정) / ROAS(확정 중) / ROAS(확정)
+  revenue_label: string;  // 오늘 매출(추정) / 전환매출(확정 중) / 전환매출(확정)
+}
+
+export type NaverPerformanceActionState = "executed" | "blocked" | "unknown";
+
+export interface NaverPerformanceActionItem {
+  at: string | null;
+  time_label: string;
+  state: NaverPerformanceActionState;
+  campaign_id: string | null;
+  campaign_name: string | null;
+  sentence: string;
+}
+
+export interface NaverPerformanceToday {
+  as_of: string;
+  date: string;
+  data_note: string;
+  campaigns: NaverPerformanceCampaignCard[];
+  totals: { spend_today: number; campaigns_active_today: number; campaigns_total: number };
+  today_actions: {
+    executed_count: number;
+    blocked_count: number;
+    unknown_count: number;
+    items: NaverPerformanceActionItem[];
+    /** 0건일 때만 채워진다 — 0을 숨기지 않고 왜 0인지 말한다(D-47-h). */
+    quiet_reason: string | null;
+  };
+}
+
+export function fetchNaverPerformanceToday(): Promise<NaverPerformanceToday> {
+  return fetchApi<NaverPerformanceToday>("/api/naver/ad/performance/today");
+}
+
+// ── 광고 성과 Phase 2 — 날짜 선택·비교·캠페인 상세·예산 (D-NAO-105, 계획서 §4-ⓑⓒ) ──
+// ★날짜에 따라 숫자의 **출처가 다르다**: 오늘=실주문 상한 프록시 / 과거=네이버 확정 전환매출.
+//   `source_label`·`roas_label`·`revenue_label`은 백엔드가 정한 라벨이다 — 프론트가 다시
+//   판단하지 않는다(표기 규칙이 두 벌이 되면 갈라진다).
+
+/** today_proxy=오늘 추정 · settling=확정 중(간접전환 유입 중) · confirmed=확정 */
+export type NaverPerformanceSource = "today_proxy" | "settling" | "confirmed";
+
+export interface NaverPerformanceCampaignOption {
+  campaign_id: string;  // select의 value 전용 — 사람이 읽는 자리엔 절대 안 나간다
+  name: string;
+  type_label: string;
+  managed_by_label: string;
+  cost_30d: number;
+}
+
+export interface NaverPerformanceCampaignOptions {
+  campaigns: NaverPerformanceCampaignOption[];
+  window_days: number;
+}
+
+export function fetchNaverPerformanceCampaignOptions(): Promise<NaverPerformanceCampaignOptions> {
+  return fetchApi<NaverPerformanceCampaignOptions>("/api/naver/ad/performance/campaigns");
+}
+
+/** 날짜 일반화 응답. Phase 1의 `/today`와 같은 모양 + 출처 라벨이 더 붙는다. */
+export interface NaverPerformanceDay extends NaverPerformanceToday {
+  is_today: boolean;
+  source: NaverPerformanceSource;
+  source_label: string;
+  campaign_filter: string | null;
+  /** 과거 날짜인데 확정 기록이 한 줄도 없을 때만 채워진다 — "0원 집행"과 "수집 안 됨"은 다르다. */
+  data_gap_note: string | null;
+}
+
+export function fetchNaverPerformanceDay(
+  params: { date?: string; campaignId?: string } = {},
+): Promise<NaverPerformanceDay> {
+  const q = new URLSearchParams();
+  if (params.date) q.set("date", params.date);
+  if (params.campaignId) q.set("campaign_id", params.campaignId);
+  const qs = q.toString();
+  return fetchApi<NaverPerformanceDay>(`/api/naver/ad/performance/day${qs ? `?${qs}` : ""}`);
+}
+
+/** 증감. `pct`는 **분수**(0.12=+12%) — `pctFromFraction` 계약. 한쪽이라도 모르면 둘 다 null. */
+export interface NaverPerformanceDelta {
+  abs: number | null;
+  pct: number | null;
+}
+
+export interface NaverPerformanceDayMetrics {
+  spend: number;
+  imp: number;
+  clk: number;
+  revenue: number | null;
+  roas: number | null;
+}
+
+export interface NaverPerformanceCompareSide {
+  date: string;
+  source: NaverPerformanceSource;
+  source_label: string;
+  data_note: string;
+  totals: NaverPerformanceDayMetrics & { revenue_unknown_campaigns: number };
+}
+
+export type NaverPerformanceCompareMetric = "spend" | "imp" | "clk" | "revenue" | "roas";
+
+export interface NaverPerformanceCompareRow {
+  campaign_id: string;
+  name: string;
+  type_label: string;
+  base: NaverPerformanceDayMetrics;
+  against: NaverPerformanceDayMetrics;
+  deltas: Record<NaverPerformanceCompareMetric, NaverPerformanceDelta>;
+}
+
+export interface NaverPerformanceCompare {
+  base: NaverPerformanceCompareSide;
+  against: NaverPerformanceCompareSide;
+  deltas: Record<NaverPerformanceCompareMetric, NaverPerformanceDelta>;
+  campaign_filter: string | null;
+  rows: NaverPerformanceCompareRow[];
+  /** 오늘(프록시) vs 과거(확정)처럼 **정의가 다른** 값끼리의 비교일 때만 채워진다. */
+  mixed_source_note: string | null;
+  /** 한쪽이 아직 전환 정착 중일 때. 정의 불일치는 아니다(둘 다 확정치). */
+  settling_note: string | null;
+  empty_reason: string | null;
+}
+
+export function fetchNaverPerformanceCompare(
+  base: string, against: string, campaignId?: string,
+): Promise<NaverPerformanceCompare> {
+  const q = new URLSearchParams({ base, against });
+  if (campaignId) q.set("campaign_id", campaignId);
+  return fetchApi<NaverPerformanceCompare>(`/api/naver/ad/performance/compare?${q}`);
+}
+
+/** 상태 내부 코드. 화면에는 `state_label`만 쓴다(D-NAO-103②).
+ *  `observed` = 우리가 운영하지 않는 광고 → 성과 사실만 진술(능동 관리 문장 금지). */
+export type NaverPerformanceGroupState =
+  | "expanding" | "watching" | "hold" | "blocked" | "observed";
+
+export interface NaverPerformanceGroup {
+  adgroup_id: string;   // title 속성 전용
+  name: string;
+  state: NaverPerformanceGroupState;
+  state_label: string;  // 확장 중 / 관망 / 증액 보류 / 차단됨
+  reason_sentence: string;
+  cost: number;
+  imp: number;
+  clk: number;
+  conv_amt: number;
+  roas: number | null;
+}
+
+export interface NaverPerformanceSeriesPoint {
+  date: string;
+  cost: number;
+  imp: number;
+  clk: number;
+  conv_amt: number;
+  /** 네이버 확정 기준(직+간접). 광고비 0이면 null — 0으로 그리지 않는다. */
+  roas: number | null;
+  avg_rank: number | null;
+}
+
+export interface NaverPerformanceCampaignDetail {
+  campaign_id: string;
+  name: string;
+  type_label: string;
+  managed_by_label: string;
+  managed_by_us: boolean;
+  /** 우리가 운영하지 않는 광고일 때만 채워진다 — 성과를 우리 조치로 읽지 않도록. */
+  managed_note: string | null;
+  window: { from: string; to: string; days: number };
+  change_window_days: number;
+  lines: { target_roas: number | null; bep_roas: number | null };
+  series: NaverPerformanceSeriesPoint[];
+  series_note: string;
+  groups: NaverPerformanceGroup[];
+  totals: { cost: number; conv_amt: number; roas: number | null; imp: number; clk: number };
+}
+
+export function fetchNaverPerformanceCampaign(
+  campaignId: string, days = 30,
+): Promise<NaverPerformanceCampaignDetail> {
+  return fetchApi<NaverPerformanceCampaignDetail>(
+    `/api/naver/ad/performance/campaign/${encodeURIComponent(campaignId)}?days=${days}`,
+  );
+}
+
+export interface NaverPerformanceBudgetPoint {
+  hour: number;
+  cost: number;      // 그 시각까지의 **누적**
+  hour_cost: number; // 그 한 시간 지출(차분)
+  spend_ratio: number | null;
+  imp: number;
+  clk: number;
+}
+
+export interface NaverPerformanceBudgetCurve {
+  campaign_id: string;
+  campaign_name: string;
+  daily_budget: number | null;
+  spend_total: number;
+  spend_ratio: number | null;
+  points: NaverPerformanceBudgetPoint[];
+  /** 예산을 다 써서 광고가 멈춘 시각들(음영 구간). 빈 배열 = 멈춘 적 없음.
+   *  트리거는 "증분 0이 2시간 연속", 예산 귀속은 멈추기 **직전** 소진율 ≥90%가 근거다. */
+  blackout_hours: number[];
+  blackout_sentence: string | null;
+  /** 멈추긴 했는데 예산 탓이라 단언할 근거가 없는 구간(소진율 60~90%). 원인을 말하지 않는다. */
+  stall_sentence: string | null;
+}
+
+export interface NaverPerformanceBudget {
+  date: string;
+  is_today: boolean;
+  curves: NaverPerformanceBudgetCurve[];
+  budget_changes: (NaverPerformanceActionItem & { hour: number | null })[];
+  /** 빈 배열은 정상이다 — 왜 비었는지 말한다(D-47-h). */
+  budget_changes_empty_reason: string | null;
+  data_note: string;
+}
+
+export function fetchNaverPerformanceBudget(
+  params: { date?: string; campaignId?: string } = {},
+): Promise<NaverPerformanceBudget> {
+  const q = new URLSearchParams();
+  if (params.date) q.set("date", params.date);
+  if (params.campaignId) q.set("campaign_id", params.campaignId);
+  const qs = q.toString();
+  return fetchApi<NaverPerformanceBudget>(`/api/naver/ad/performance/budget${qs ? `?${qs}` : ""}`);
+}
+
+// ── ⑤ BEP 구성 — 성과뷰 Phase 3 (D-NAO-104, 계획서 §4-ⓓ) ──────────────
+// ★새 산식 없음 — bep_breakdown.py는 매일 저장된 naver_product_bep 값을 되짚어 보여줄 뿐이다.
+//   화면 산술은 저장값끼리의 자명한 조합(수수료액=판매가×요율, 세전잔액=판매가−수수료−원가−
+//   물류비)이고, 공헌이익은 그걸 ÷vat_divisor 한 값이다(뺄셈이 안 맞아 보이는 이유를 화면에서
+//   설명해야 한다 — 컴포넌트 쪽 요구사항 참조).
+export interface NaverPerformanceBepRow {
+  product_name: string;
+  /** ★화면에 절대 렌더 금지(내부값) — ad_count로만 개수를 보여준다. */
+  campaign_ids: string[];
+  ad_count: number;
+  selling_price: number;
+  /** 분수(0~1). pctFromFraction 계약. */
+  commission_rate: number | null;
+  commission_won: number;
+  /** null = 원가 미입력 — 0으로 렌더하지 않는다. */
+  cost_price: number | null;
+  logistics_cost: number;
+  /** 분수(0~1). */
+  nbaesong_share: number | null;
+  nbaesong_sample: number | null;
+  /** 판매가−수수료−원가−물류비. null = 원가 미입력이라 산출 불가. */
+  pre_vat_margin: number | null;
+  /** pre_vat_margin ÷ vat_divisor. */
+  contribution_margin: number | null;
+  bep_roas: number | null;
+  target_roas: number | null;
+  /** null = 상한 산출 불가(blocked_reason 또는 ceiling_basis에 사유). */
+  ceiling_bid: number | null;
+  /** true = 이 행의 ceiling_bid가 이 상품 자체 표본이 아니라 **계정 평균을 빌려** 계산된
+   *  값이라 실제보다 후하게(낙관적으로) 나왔을 수 있다. marketBidTone에서 이 값이 true면
+   *  good/bad 색 판정을 건너뛰고 중립(idle)으로 렌더한다(근거 없는 확신을 색으로 주지 않는다). */
+  ceiling_is_borrowed: boolean;
+  /** 마크다운 `**` 포함 가능 — stripBoldMarkers로 정제 후 렌더할 것. */
+  ceiling_basis: string;
+  /** 최근 관측일의 **최댓값**(구속 조건) — 최솟값이 아니다. 그 순위를 사려면 기기·소재 중
+   *  가장 비싼 쪽을 지불해야 실제로 닿는다(bep_breakdown.py `_market_bid` 참고). */
+  market_bid: number | null;
+  /** market_bid를 낸 기기. "MOBILE" | "PC" | null. */
+  market_bid_device: string | null;
+  /** market_bid를 관측한 날짜(YYYY-MM-DD). 최대 7일 전일 수 있다 — 화면에 반드시 함께
+   *  표기해 "지금" 값처럼 보이지 않게 한다(원칙22). */
+  market_bid_observed_on: string | null;
+  market_bid_position: number | null;
+  /** "" = 문제 없음. 비어있지 않으면 상한을 계산할 수 없었던 이유. */
+  blocked_reason: string;
+  sentence: string;
+}
+
+export interface NaverPerformanceBepBreakdown {
+  rows: NaverPerformanceBepRow[];
+  missing_cost_count: number;
+  vat_divisor: number;
+  data_note: string;
+  campaign_id: string | null;
+  as_of: string;
+}
+
+export function fetchNaverPerformanceBepBreakdown(
+  params: { campaignId?: string; onlyActionable?: boolean } = {},
+): Promise<NaverPerformanceBepBreakdown> {
+  const q = new URLSearchParams();
+  if (params.campaignId) q.set("campaign_id", params.campaignId);
+  if (params.onlyActionable !== undefined) {
+    q.set("only_actionable", params.onlyActionable ? "true" : "false");
+  }
+  const qs = q.toString();
+  return fetchApi<NaverPerformanceBepBreakdown>(
+    `/api/naver/ad/performance/bep-breakdown${qs ? `?${qs}` : ""}`,
+  );
+}
+
+// ── ⑥ 개선 타임라인 — 성과뷰 Phase 3 (D-NAO-104, 계획서 §4-ⓔ) ──────────
+// ★인과 주장 없음 — perf_timeline_harness.build_timeline은 "이 변경 전후 기간이 이랬다"는
+//   관찰만 낸다. sentence/data_note는 백엔드가 쓴 문장을 그대로 렌더한다(정직 규약은
+//   백엔드에 있다 — 프론트가 다시 쓰지 않는다).
+export interface NaverPerformanceTimelineEvent {
+  /** ★화면에 렌더 금지 — React key 용도로만 쓴다. */
+  ref_key: string;
+  label_ko: string;
+  /** 빈 문자열일 수 있다. */
+  detail_ko: string;
+  effective_confidence: "commit" | "assumed" | "log" | "unknown";
+  scope: "account" | "campaign";
+  source: "track" | "change_log";
+  curated: boolean;
+  /** campaign_id가 있을 때만 존재. */
+  campaign_name?: string;
+}
+
+export interface NaverPerformanceTimelineWindow {
+  days: number;
+  /** 달력상 일수(days) 중 실제로 적재된 행이 있었던 날짜 수. days_with_data === 0이면
+   *  cost/conv_amt/roas는 전부 null(측정된 0이 아니라 데이터 없음 — 원칙22). */
+  days_with_data: number;
+  /** null = 측정 안 됨(0이 아니다 — 원칙22). */
+  cost: number | null;
+  conv_amt: number | null;
+  roas: number | null;
+}
+
+export interface NaverPerformanceTimelineImpact {
+  pre: NaverPerformanceTimelineWindow;
+  post: NaverPerformanceTimelineWindow & { complete: boolean };
+  /** 최대 5개까지만 — 전체 개수는 confounded_count로 따로 나간다. */
+  confounded_with: string[];
+  /** ★다른 날의 변경만 센다(같은 날 함께 확정된 변경은 same_day_count로 따로 낸다). */
+  confounded_count: number;
+  /** 그날 함께 확정된 변경 수(자기 자신 포함). > 1이면 그 결정들을 서로 떼어 볼 수 없다는 뜻. */
+  same_day_count: number;
+  sentence: string;
+}
+
+export interface NaverPerformanceTimelineDay {
+  date: string;
+  events: NaverPerformanceTimelineEvent[];
+  /** null = 날짜 파싱 실패로 전후 비교를 못 낸 것. */
+  impact: NaverPerformanceTimelineImpact | null;
+}
+
+export interface NaverPerformanceTimeline {
+  as_of: string;
+  days: number;
+  campaign_id: string | null;
+  /** false여도 에러가 아니다 — 트랙 결정 목록 없이 라이브 변경만 나온다는 뜻. */
+  catalog_available: boolean;
+  undated_catalog_count: number;
+  event_count: number;
+  /** 날짜 오름차순. */
+  timeline: NaverPerformanceTimelineDay[];
+  retro: {
+    window_days: number;
+    n: number;
+    correct: number;
+    gray: number;
+    wrong: number;
+    no_spend: number;
+    precision_spenders: number | null;
+    bleed_sum: number | null;
+    sentence: string;
+  };
+  data_note: string;
+}
+
+export function fetchNaverPerformanceTimeline(
+  params: { days?: number; campaignId?: string } = {},
+): Promise<NaverPerformanceTimeline> {
+  const q = new URLSearchParams();
+  if (params.days !== undefined) q.set("days", String(params.days));
+  if (params.campaignId) q.set("campaign_id", params.campaignId);
+  const qs = q.toString();
+  return fetchApi<NaverPerformanceTimeline>(
+    `/api/naver/ad/performance/timeline${qs ? `?${qs}` : ""}`,
+  );
 }

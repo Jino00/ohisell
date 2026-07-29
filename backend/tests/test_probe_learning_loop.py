@@ -207,3 +207,37 @@ def test_run_probe_learning_stage_isolation_segment_failure_does_not_block_promo
     assert result["cells"] > 0
     assert {"cell": "weekday", "band": "2.0-2.5"} in result["promoted"]
     assert result["stage_status"]["diary"] == "ok"
+
+
+# ═══ 스코프 라벨링 (2026-07-29) — 계정 승격값과 게이트 실제 적용값을 나란히 남긴다 ═══
+
+def test_summary_rationale_labels_scope_and_gate_bands():
+    """일기가 '계정 전체 기준=참고값'과 '캠페인별=실제 적용값'을 구분해 적는다.
+    구분이 없으면 학습이 된 것처럼 보이는데 아무도 그 값을 안 읽는 상태가 숨는다."""
+    from app.services.naver_ad.probe_learning_loop import _summary_rationale
+
+    txt = _summary_rationale({
+        "cells": 3,
+        "promoted": [{"cell": "weekday", "band": "1.0-2.0"}],
+        "promoted_basis": {"weekday": "conv"},
+        "segment": {"judged": []},
+        "scope": "account",
+        "gate_bands": {"cmp-a": "2.5-3.0", "cmp-b": None, "cmp-c": None},
+    })
+    assert "계정 전체 기준" in txt and "참고값" in txt
+    assert "실제 적용값" in txt and "2.5-3.0" in txt
+    assert "학습밴드 없는 캠페인 2/3개" in txt
+
+
+def test_summary_rationale_all_campaigns_without_band():
+    """전 캠페인이 학습밴드 없으면 그 사실이 그대로 드러나야 한다(오늘 실제 상태)."""
+    from app.services.naver_ad.probe_learning_loop import _summary_rationale
+
+    txt = _summary_rationale({
+        "cells": 3, "promoted": [{"cell": "weekday", "band": "1.0-2.0"}],
+        "promoted_basis": {"weekday": "conv"}, "segment": {"judged": []},
+        "scope": "account", "gate_bands": {"cmp-a": None, "cmp-b": None},
+    })
+    assert "실제 적용값" not in txt          # 적용되는 값이 없으므로 그 줄은 안 나온다
+    assert "학습밴드 없는 캠페인 2/2개" in txt
+    assert "하드코딩 프라이어(2.5)" in txt

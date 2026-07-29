@@ -1,6 +1,307 @@
+## 📌 세션 인계: `.claude/memory/HANDOFF_learning-loop-repair-2nd+live-verified_20260729.md` (2026-07-29 새벽~아침, 07:40 갱신 — prod 배포 4회 완료·PR 3건 병합·PR #121 alembic 분기로 보류. 다음 세션 최우선 = 아침 관측 3건 회수)
+
+## ✅ 2026-07-29 아침(07:40) — 학습 배관 수리 2차 후반부: PR 정리 3건 병합 + prod 배포 4회 완료 (D-NAO-117·118, 워크트리 `learning-loop-repair`)
+
+**prod 배포 총 4회**(전부 `safe_deploy.sh` CAS 통과): 23:48 `flight_loop.py`+`auto_operator.py`(276) · 05:28 `bid_rank_curve.py`+`bid_step_types.py`(277) · 06:38 `auto_operator.py`+`probe_learning_loop.py`(278) · 07:28 `conversion_maturity.py`(279).
+
+**PR 정리 — 열린 4건 중 3건 병합**: ①**#159**(시간별 주문 동기화, 타 세션) 병합 — 이것이 그동안 `scheduler_service.py` CAS 거부의 정체였다(blob 해시 일치 확인, main==prod 회복). ②**#162**(학습밴드 스코프, D-NAO-117) 병합·배포 완료 — 영향 실측: 하한 2.5→2.0 대상 캠페인 5개 중 3개, 그 on 그룹 32개 중 BEP 확인 13개만 실제 적용. ③**#163**(flight_loop 관측기 확정 + 정착 스냅샷 필터 버그, D-NAO-118) 병합·배포 완료 — conv_delay 곡선이 4/7=0.5714로 고정되던 근본 원인(스냅샷 존재판정은 sentinel 포함·금액집계는 sentinel 제외) 규명·수정. **④#121(BM 관측시각, 타 세션)은 병합 보류** — alembic head 2개 분기(`4b66ae3706e6` vs `d5f7b9c1e3a6`), 코드 충돌 0·4,026 passed(alembic만 실패), 브랜치 소유 세션 몫이라 PR 코멘트만 남기고 재부모는 하지 않음.
+
+`dd73a59`(conv_delay 보정 배수 자체)는 여전히 미배포 — 근본 버그는 고쳤으나 과거 오염 행을 지우지 않기로 확정했으므로 깨끗한 코호트가 21일 쌓인 뒤(대략 8월 중순) 재측정 후 배포 판단. flight_loop 실행 경로 신설 여부는 **AST 계약 테스트**(`test_flight_loop_has_no_write_path`)로 "만들지 않는다"가 구조로 확정.
+
+**다음 세션 최우선**: ①아침 관측 3건 결과 확인(07:45 매핑 적재 / 08:10 `bid_rank_slope` 첫 적립 / 08:50 갤럭시 68그룹 손실 브레이크 — 아직 미확인) ②PR #161 상태 확인(`gh pr view 161`) ③PR #121 alembic 재부모 조율.
+
+트랙 파일·상세는 HANDOFF §9(세션 후반부 작업 상세)·§10(새 세션 시작 프롬프트) 참조.
+
+---
+
+## ✅ 2026-07-29 새벽 — 학습 배관 수리 2차 배포·라이브 검증 완료 (D-NAO-111, 워크트리 `learning-loop-repair`, PR #161 미병합)
+
+**PR #161**(브랜치 `claude/learning-loop-repair`, HEAD `9b6df55`) 생성됨(미병합). 커밋 5건(전 세션 `466bbc5`·`dd73a59` 위에 쌓임): `c58f430` flight_loop 무성 실패 관측성+대상 정의 불일치 해소 / `223f138` 탐침 하한 학습밴드 우선 / `e2ecd29` 정착 보정 주석 표적성 단정 철회 / `72b0628` forecast_pending≠forecast_missing / `09f7943` 적대적 리뷰 지적 6건 반영 / `9b6df55` main 병합(문서 충돌 2건은 main 채택).
+
+**prod 배포 2회 완료**(`safe_deploy.sh`, CAS 통과): 23:48 `flight_loop.py`+`auto_operator.py`(pm2 재시작 276) · 05:28 `bid_rank_curve.py`+`bid_step_types.py`(pm2 재시작 277). **미배포 2건**: ①`scheduler_service.py` — CAS 거부(prod 내용이 우리 브랜치·main·로컬 어느 브랜치에도 없음 = 다른 세션이 배포·PR 미생성 추정, 원인 파악 다음 세션 과제) ②`dd73a59`(conversion_maturity·bid_ceiling_calculator) — conv_delay 곡선 퇴화(day 8~18이 정확히 4/7=0.5714로 고정, `compute_curve` 단순평균 기전 확정) 미해소로 계속 보류.
+
+**적대적 리뷰는 Jino 지시로 2회 캡**("적대적리뷰는 2번만 해"). 1건 중단(대상 466bbc5, 메인 루프가 코드 직접 재확인으로 대체), 1건 완료 후 NEEDS-CHANGES → 지적 6건 전량 반영.
+
+**라이브 검증(원칙22) 3건 전부 성공**: ①인수 후 첫 시간당 레인(23:20) 갤럭시 `update_bid` 9건 전부 `[실행 불가]` 가드레일 차단(writer 미호출) ②**00:05 BP 원복 사상 첫 실전** — 03 캠페인 52,700→50,000원 실집행 ③**flight_loop 신버전**(00:15/02:15/04:15) 로그 `결정 0, 스킵 6 {forecast_pending: 5, campaign_off: 1}`이 정정된 예측과 정확히 일치, 진단행 0건. auto_operator 신버전 05:20까지 무예외. **아직 미확인**(별도 에이전트 관측 중): 07:45 매핑 적재·08:10 slope 첫 적립·08:50 갤럭시 손실 브레이크.
+
+**기록 사고 복원**(main `056afcf`): D-NAO-108 번호 충돌로 소실됐던 codex 면제 결정(19:49 Jino 지시)을 D-NAO-110으로 복원. **LESSONS #61**(D-NAO 채번은 git log까지 확인) · **#62**(스위치 존재≠기능 존재) 추가(main `837be34`). 테스트 3,994 passed.
+
+**다음 액션(우선순위)**: ①아침 관측 3건 결과 확인(07:45/08:10/08:50) ②PR #161 병합 판단(Jino) ③`scheduler_service.py` CAS 거부 원인 파악 ④Jino 판단 대기 3건(학습밴드 스코프 통일·dd73a59 배포·flight_loop 실행 경로 신설 여부) ⑤D-NAO-109(수명주기 국면 판정 구조)는 여전히 미승인, 착수 전 승인 필요.
+
+트랙 파일 `docs/tracks/active/track_naver-ad-optimization.md` D-NAO-111 항목 갱신 완료.
+
+---
+
+## ⚠️ 2026-07-28 밤 — 학습 배관 수리 조사 + 갤럭시Z 8시리즈 대행사 캠페인 인수 (D-NAO-106~109, 워크트리 `learning-loop-repair`, 코딩 중단·인계)
+
+Jino 지시(22:38)로 이 세션은 코딩을 중단하고 인계. **커밋 2건(`466bbc5`·`dd73a59`)은 워크트리에만 있고 prod 미배포** — 라이브 시스템은 인수 1건을 제외하면 이 세션 이전과 동일.
+
+- **D-NAO-106 학습 배관 수리**: ①반응곡선 학습 원료 필터가 `RANK_STEP_TYPES`(가드레일 의미)를 오용해 실집행 219건짜리 `bid_up_explore`+주력 `bid_up`/`growth_bid_up`이 원료에서 빠지고 실집행 0건짜리만 인정 → `bid_rank_slope` 0행 → rank_servo 영구 콜드스타트. `CURVE_SAMPLE_TYPES` 신설로 분리(**배포 권고**, 회귀 5건 확인·3,967 passed). ②전환 정착 지연 보정(`conversion_maturity`, `_rpc_for` 날짜별 보정) 신설했으나 **prod 사본 406그룹 실측이 코드 주석의 "신규 상품에 표적 작동" 주장을 반증**(1.5배+ 상승의 80%가 기존 상품, 정작 갤럭시Z 8시리즈 3그룹은 배율 1.0=무효과) → **배포 보류**, 곡선 이상(day 8~18 동일값 0.5714) 원인 규명 후 주석 수정 필요.
+- **D-NAO-107 신제품 광고 운영 4원칙 확정**: ①손해 안 나는 선에서는 정지 아닌 BEP 상한 인하로 계속 운영 ②국면 전환은 날짜 예측이 아니라 실측(노출·클릭·CTR→장바구니→전환지연→CVR·ROAS) 종합 판단 ③달력은 증거의 눈금(문턱·밀도·창 경계·사후 라벨)일 뿐 전환 트리거 아님 ④전 캠페인 공통 적용, 공격성은 결과이지 손잡이 아님.
+- **D-NAO-108 갤럭시 대행사 캠페인 인수**: Jino 승인("그래, 우리가 인수할꺼야") 후 실행 — `naver_change_log` id 900·901로 `optimizer=ours, auto_operate=1` 전환. **범위가 타겟 3그룹이 아니라 캠페인 전체 68그룹**(`NaverCampaignSettings` campaign_id 단일키라 그룹 단위 인수 구조적 불가) — Jino가 3그룹만 의도했는지 미확인, 다음 세션 확인 필요. 유지 조건 3개(폴드8울트라 BEP 등록·첫 밤 전수 확인·킬스위치는 optimizer+auto_operate 둘 다) 이행 의무. 사고 1건(prod DB 의도치 않은 커밋, 즉시 원복, 실집행 없음) → LESSONS #59 기록 필요.
+- **D-NAO-109 수명주기 국면 판정 구조는 ★미승인** — SA1(달력=관측 앵커)·SA2(실측 국면 판정)·SA3(학습 예산) 설계는 합의됐으나 Claude가 두 번 승인 요청 후에도 Jino가 승인 대신 설계를 교정 중 — 착수 전 명시 승인 필요.
+- **다음 세션 최우선(Jino 승인 "다 수정하자, dry run도 해제" 중 미완 3개)**: ②학습밴드(1.0~2.0) vs 하드코딩 2.5 충돌 해소 ③flight_loop 무성 스킵 관측성 수정(원인=예측 원료 부재, 6개 캠페인 중 5개 강등/정지로 스킵) ⑤dry_run 해제는 관측성 선행 없이 **지금 하면 위험** — (a)관측성→(b)α보수화→(c)해제 순서.
+- 이 세션에서 Claude가 8번 틀렸다가 정정(HANDOFF §7, 코드 주석에 미검증 근거를 단정형으로 쓴 것 포함) — 다음 세션 필독.
+- codex 소급 부채 6건째(08-02 쿼터 리셋 후 일괄).
+- 트랙 파일 `docs/tracks/active/track_naver-ad-optimization.md` D-NAO-106~109 기록 완료, "현재 진행 단계"·"다음 액션" 최신 블록 갱신 완료.
+
+---
+
+## ✅ 2026-07-28 저녁 — 광고 성과(사장님 뷰) Phase 3(⑤⑥) 구현·배포·라이브 검증 완료 (PR #158, D-NAO-106) — ★PR 미병합, Jino 승인 대기
+
+⑤BEP 구성 + ⑥개선 타임라인 구현 완료. `scripts/gen_naver_improvement_events.py` 생성 스크립트 + `docs/naver_ad_improvement_events.json` 카탈로그(99건) 신규 커밋. 계획 대비 교정 3건(파서 정규식→6형식 흡수 파서, 이벤트 단위→날짜 단위 응답, 상한 문장 단정 제거) — 상세는 `docs/PLAN_naver-ad-performance-view.md` §6·§8 참조. 라이브 검증 6항 전부 확인(파서 parsed=99 skipped=0, 멱등+curated 보존, D-NAO-101 타임라인 카드 confounded 표기, 원가 미입력 20건 추정치 없이 null 표기, 카탈로그 파일 제거해도 500 아닌 catalog_available:false 폴백, pytest 3,956/vitest 123 통과). `EventMarker` 차트 마커는 이번 슬라이스 미구현(카드 목록만) — 트랙 D-NAO-106에 부채로 기록.
+
+**다음 액션**:
+1. PR #158 병합 여부 — Jino 판단 대기.
+2. 내일 아침 3종 확인: ①08:50 새 형식 Slack 경보 실발화 ②03 ROAS가 08:20 매핑 sync 후 성과 페이지에 표시 시작 ③밤사이 BP 증액 발동 여부(오늘 17:20 평가 시점 03 소진율 74.5%로 미발동).
+3. ~~codex 소급 리뷰 부채~~ → **2026-07-28 19:49 Jino 지시 "codex는 건너뛰어줘"로 전량 면제**(D-NAO-108). 부채 아님·재실행 불요. 원칙 19 게이트 자체는 유효 — 쿼터 회복 후 **신규** 작업엔 정상 적용.
+
+---
+
+## ✅ 2026-07-28 밤 — 광고 성과(사장님 뷰) Phase 2 배포 완료 (main `948188f`, PR #157, D-NAO-105)
+
+캠페인 선택기 + 날짜 선택(기준일) + 기준일vs비교일 증감 비교 + 섹션③(캠페인 상세 ROAS 추이 vs BEP선) + 섹션④(시간별 예산 소진 곡선) 구현·prod 배포·라이브 검증 완료. 적대적 리뷰 1R PASS + P2 지적 3건 반영(암전 검출 재설계·배지 정확성 2건). 워크트리 `agent-aba1a0c1fde5d288a`(HEAD `75286a0`)를 main(`4b65044`)에 병합 시 `perf_today_harness.py` 1건 충돌 — `TODAY_ACTIONS` 파생은 main 쪽(PR #152가 이미 고친 `EXECUTION_ACTIONS` 파생 규칙만 참조)을 채택, HEAD의 구식 `budget_pacing.PACING_ACTIONS` 합집합 우회는 폐기(LESSONS #55와 동일 계열 — 우회 사본을 다시 들이지 않음). 재검증 **3,920 passed**(백엔드) + **88 passed**(vitest).
+
+**★암전(블랙아웃) 검출 재설계 — 오늘 오후 "암전 없음" 판단은 오류였음을 정정.** 기존 방식(소진율 98% 임계)은 실제로 멈춘 시간대를 여럿 놓치고 있었다. **증분(시간당 광고비) 0 연속을 1차 신호**로 재설계한 결과, 라이브 데이터에서 실제 암전 2건을 신규 검출:
+- **07-27 03 캠페인** — 20~23시(4시간) 암전. 프록시 검증(`/api/naver/ad/performance/budget?date=2026-07-27&campaign_id=cmp-a001-02-000000008492582`): `blackout_hours: [20,21,22,23]`, `blackout_sentence: "오후 8시쯤 하루 예산을 다 써서 그 뒤로 4시간 동안 광고가 나가지 않았습니다."` — 브라우저 렌더까지 확인(아래 QA 참조).
+- **07-19 맥세이프 캠페인** — 20~23시(4시간) 암전.
+옛 98% 임계 방식은 이 두 사례를 "정상"으로 읽었을 것 — **"암전 없음"이라는 이전 판단은 데이터가 아니라 탐지기의 한계였다.**
+
+**배지 정확성 수정 2건**: ①집행 0원 캠페인 → "중단"류가 아니라 "관망"으로 표시(비활동을 정지로 오독하지 않도록) ②비운영(auto_operate=false) 캠페인 → "관찰만"으로 표시(우리가 조작하는 것처럼 보이던 오표시 수정).
+
+**라이브 검증(원칙22)**: `/performance/today` 200 · `/performance/day?date=2026-07-27` 200(실데이터) · `/performance/compare?base=2026-07-27&against=2026-07-22` 200(캠페인별 증감 산출 확인) · `/performance/campaign/{03}` 200(일별 ROAS 추이·그룹 배지) · `/performance/budget?date=2026-07-27&campaign_id={03}` 200(암전 [20,21,22,23]·4시간 문장 실측). pm2 `ohisell-backend` online(재시작 후 uptime 확인)·에러 로그 0건. 브라우저 QA(prod `/naver-ad/performance`): 캠페인 선택기로 03 선택 시 카드가 03 데이터로 전환 확인, 날짜를 07-27로 바꾸자 "확정 중" 소스 라벨과 API 수치 일치 확인, 비교일 07-22 지정 시 하단에 캠페인별 증감(광고비 ▲23,438원 등)·예산 소진 곡선·"오후 8시쯤…4시간" 문장이 실제 렌더됨을 `get_page_text`로 전문 확인(스크롤 타임아웃으로 하단부 스크린샷은 미확보 — 텍스트 추출로 대체 확인, 스크린샷 3장은 상단 상태만 캡처).
+
+병합 시 main에 존재하던 D-NAO-105 승인 기록(문서 기록 세션이 앞서 커밋 없이 남긴 초안)은 실제 구현 완료 상태를 반영해 계획서 체크리스트를 갱신하며 정리.
+
+codex 소급 부채 **5건째 누적**(N1·프로모션 손익·BP+VT3·성과뷰 Phase 1·Phase 2, 08-02 쿼터 리셋 후 일괄 재실행).
+
+다음 액션: 내일 이후 암전 재발 시 신규 검출기가 실제로 알림/화면에 반영되는지 재확인. 당일 프록시 커버리지 확장은 여전히 스코프 밖.
+
+---
+
+## ✅ 2026-07-28 오후 — EXECUTION_ACTIONS가 BP 라벨을 못 세던 결함 수정·배포 (main `ae0d049`, PR #152·#155)
+
+BP(예산 페이싱, D-NAO-102 ⑥)는 실행 경로가 `update_budget` 하나인데 change_log에는 `budget_up_pacing`/`budget_down_pacing`이라는 별도 라벨을 남긴다. `EXECUTION_ACTIONS`가 `_ACTION_BY_PROPOSAL_TYPE` 값에서만 파생되어 그 라벨을 몰랐고, `/change-log?actor=ours`·커맨드센터 1층 "우리 조작 N회"·`_execution_state` 배지가 BP 실집행을 통째로 못 셌다(0을 정직하게 말하려던 필터가 반대 방향으로 거짓말 — D-47-h 위반).
+
+- **수정 위치 = 라우터가 아니라 파생 규칙 자체.** `EXECUTION_ACTIONS = frozenset(_ACTION_BY_PROPOSAL_TYPE.values()) | frozenset(PACING_ACTIONS)`. 라우터에 합집합을 하나 더 만들면 다음 소비자가 같은 구멍에 빠진다 — 실제로 `perf_today_harness.TODAY_ACTIONS`가 이미 자기 자리에서 우회하고 있었고, 그 **우회 사본이 원본 결함을 "처리된 것처럼" 은폐**했다. 사본은 제거(이제 EXECUTION_ACTIONS만 참조).
+- **소비처 전수조사**: EXECUTION_ACTIONS 소비자는 라우터 2곳뿐(`actor=ours` 필터 · `_execution_state`). 쿨다운(`compute_change_cadence`)은 action을 아예 안 보므로 **가드레일에는 구멍 없음**(코드로 확인).
+- 프론트 `describeChange()`에 BP 라벨 2케이스 추가 — 없으면 `default`로 떨어져 영문 원문(`budget_up_pacing`)이 표에 노출된다.
+- 회귀 4건(신규 3·수정 1). 구조 가드는 목록을 다시 적지 않고 `_budget_log_action`을 직접 호출해 검사. **수정 전 4건 전부 실패함을 확인**. 전체 3,847 passed.
+- **라이브 검증(원칙22)**: prod 파이썬에서 `budget_up_pacing in EXECUTION_ACTIONS: True`·`TODAY_ACTIONS == EXECUTION_ACTIONS: True` 직접 확인. `/change-log?actor=ours`·`&include_blocked=true`·`/performance/today` 전부 200, pm2 online·재시작 후 예외 0.
+- ★**당장 눈에 보이는 변화 0 — 선행 수정이다.** prod 이력 전체에 BP 행 0건·`approval_source='pace_op'` 제안 0건(레인은 매시 20분 정상 가동하나 소진율 90% 미도달). BP 첫 발사 시점부터 제대로 세어진다.
+- PR #154는 squash 병합으로 merge-base가 갈려 diff가 오염 → 닫고 main 기준 새 브랜치로 #155 재발행(LESSONS #55).
+- codex 소급 부채 **4건째**(08-02 쿼터 리셋 후 일괄 재실행).
+- 다음 액션: BP 실제 증액 발동(소진율≥90%) 시 커맨드센터 1층·성과 뷰에 BP 행이 한글 라벨로 뜨는지 확인.
+
+---
+
+## ✅ 2026-07-28 밤 — 로켓 1P 통합 대사 화면 배포 완료 (main `4c4a883`, PR #153)
+
+발주↔납품↔거래명세서↔계산서 SKU 대사 화면(`/rocket-recon`) + 조회전용 API(`GET /api/overview/rocket-recon`) 신설. 경량 2R 리뷰 합의(MAJOR 4건 수용, 미합의 0) 후 병합. alembic head 확인(prod `4b66ae3706e6`) 후 backend 2파일 + frontend `safe_deploy.sh` 배포, pm2 재시작 정상. 라이브 실측(ssh localhost:8001): PO 491건·수량드리프트 181건 중 정산단계(CI) 드리프트 105건, SKU 249종(발주상세 커버리지 49.5%), SKU 상세 응답 정상. 프론트 신규 번들(`index-C7VY_nkE.js`) 서빙 확인. 후속 이관 4건(RI 장기체류 알림·TS↔TI 부가세 검증·기간필터 UI·RG 교차대사)은 트랙 스코프 밖.
+
+---
+
+## ✅ 2026-07-28 밤 — 광고 성과(사장님 뷰) Phase 1 배포 완료 (main `11bf3d4`, PR #151, D-NAO-104)
+
+오늘 한눈에(캠페인 카드 46개) + 오늘 시스템이 한 일(당일 자동 실행/차단 이벤트) 구현·prod 배포·라이브 검증 완료. 적대적 리뷰 1R PASS(공유 상품 매출 분할 분모 단일화 반영). PR #149·#150을 먼저 merge 후 병합(api.ts 1곳만 겹침, 자동 해소) — 재검증 3,844 passed. `safe_deploy.sh`로 백엔드 8파일+frontend 배포, pm2 online·예외 0. API 200(campaigns 46·today_actions 실행16/차단4) + 브라우저 QA로 카드 렌더·"오늘 시스템이 한 일"·파워링크 ROAS `—` 표기 확인(스크린샷 세션 스크래치패드). 다음: Phase 2(개선 전/후 추적). codex 소급 부채 4건째 누적(08-02 리셋 후).
+
+---
+
+## ✅ 2026-07-28 밤 — 쿠팡 프로모션 손익 Phase 2 배포 완료 + 687878 실데이터 완결 (main `27dc00e`, PR #150)
+
+Phase 2 배포 완료(PR #150 27dc00e): 손익 엔진·커맨드센터 뷰 라이브, 687878 실데이터 완결(BEP ROAS 실측치 기입), alembic 형제 head 2건 모두 게이트에서 재결합(prod 무사고). 남은 결정: 06-01 백필(D-0)·리뷰 등급제. 다음: 통합 대사 화면(진행 중).
+
+---
+
+## ✅ 2026-07-28 오늘 전체 요약 — N1 배포 → 03 재가동 → BP·VT3 통합 배포·라이브 검증 (main `74cf050`, PR #149)
+
+- **N1(BEP 배송방식 인지형 정합, D-NAO-99·100)** prod 배포·라이브 검증 완료(PR #138) — 앵커 5종 대조·`verify_bep_delivery_parity.py` PASS.
+- **03 캠페인 자동운영 재가동(D-NAO-101)** — D-NAO-92 정지(07-23) 번복, N1 상한 재산출 전제조건 충족 확인 후 재가동.
+- **BP(Budget Pacing) 레인(D-NAO-102) + VT3 소재 CTR 경보 개편(D-NAO-103)** — 각각 별도 워크트리에서 구현·codex 대체 리뷰 2라운드 후, 통합 브랜치(`integrate/bp-vt3-D-NAO-102-103`)에서 병합(auto_operator.py import 충돌 1건만, union으로 해소) → alembic 3-way head(BP·VT3·기존 promo-pnl 헤드가 동일 부모 공유) → 병합 리비전 `96e8319324f5` 생성·왕복검증 → `safe_deploy.sh`로 마이그레이션 선배포·코드 배포·재시작(CAS 전부 통과) → PR #149 병합.
+  - **라이브 검증(원칙22)**: prod DB에 `base_daily_budget` 컬럼·`naver_ctr_alert_log` 테이블 실존, pm2 온라인·재시작 후 예외 0. 14:20 KST 시간당 레인 완주 — `naver BP 예산페이싱: reviewed=5 raised=0 failed=0` (5개 auto_operate 캠페인 전부 평가, base_daily_budget 최초 자가시드 확인, 소진율<90%라 미발동은 정상). VT3 실발화는 내일 08:50 확인 예정(오늘은 임포트·마이그·크론 등록까지 확인).
+- **전체 테스트 3785 passed.** ruff는 프로젝트 설정 파일 부재로 기본값 노이즈뿐(베이스라인 비교로 확인) — 신규 코드의 실결함(병합 리비전 미사용 import·불필요 pass)만 수정.
+- **codex 소급 부채 3건째 누적**(N1 → 프로모션 손익 페처 → BP+VT3, 전부 08-02 쿼터 리셋 후 일괄 재실행 대상).
+- 다음 액션: VT3 08:50 실발화 확인, BP 실제 증액 발동(소진율≥90% 도달 시) 확인, D-NAO-104(광고 성과 뷰) Phase 1 착수 가능(차단 해소).
+
+---
+
+RG 옛 공백(04-20~05-03) Jino 종결 승인(13:34) — 공백 아님(배송비 실제 0원+PRODUCT_SIZE 설계 제외) 확정, HANDOFF 미결 항목 닫힘.
+
+## ✅ 네이버 광고 — forecast `pred_conv_amt` 라벨 정정 완료 (2026-07-28 12:5x, main `fcec2c5`, prod 배포 완료)
+- **원 요청**: 07-28 센티널 조사(PR #128)의 우선순위 3 — 제안 근거의 예상매출이 부풀어 보이는 문제. → **완료·prod 라이브 확인.**
+- **핵심 발견(브리프 보정)**: conv_amt의 회계 기준이 **grain마다 다르다** — campaign만 sentinel(`/stats`)이라 구매+장바구니 합(03 기준 +64%), adgroup/keyword는 상세 행이라 구매만. 브리프대로 일괄 라벨을 붙였으면 **키워드·그룹 표기가 새로 틀렸다.**
+- **채택안 = (a) 라벨만, 계산 변경 0.** 소비처 전수 확인으로 "표시 문제"임을 증명: `_budget_proposal` 사이징=`pred_cost`만 · `response_curve_builder`는 `pred_conv_amt` **미사용**(수익은 rpc) · `flight_loop` rpc는 이미 센티널 제외 · 프론트 0건 → **입찰 산식(D-NAO-19) 무관.** 값을 바꾸면 forecast_scorer의 예측·실측이 같은 소스라 성립하던 내부 일관성이 깨진다.
+- **구현**: `forecast_source.CONV_AMT_BASIS_LABEL`(라벨 단일 진실 소스) + `proposal_writer._forecast_evidence_suffix(forecast, grain)`. 회귀 2건(campaign 라벨 / SUPPORTED_GRAINS↔라벨 드리프트 가드). **3653 passed** — forecast_scorer·model_builder 전량 무변경 통과 = 값 불변 증명.
+- **prod 라이브 증거(원칙22)**: safe_deploy CAS 통과·pm2 재기동 후, prod 실 인터프리터로 **오늘 실 forecast 32행** 렌더 → campaign `conv_amt(전 전환액션=구매+장바구니)=45394원` / adgroup `conv_amt(구매)=1176원` / keyword `conv_amt(구매)=0원`. `/health` 200 · 최근 로그 예외 0건.
+- 병합: PR #144(코드) · #145(트랙·LESSONS). DB 변경 없음(`--migrate` 불요).
+- **codex 게이트 = Jino 결정으로 스킵**(계산 변경 0인 라벨 건 + 쿼터 08-02 차단). **부채 아님 · 소급 재실행 불요.**
+- 교훈 **LESSONS #53**(grain마다 의미가 다른 값에 일괄 라벨은 새 오류 — 브리프가 정확해도 갈래는 안 적혀 있다).
+- **다음 액션**: 내일 08:00 제안 라운드에서 실제 생성된 rationale에 기준 표기가 들어갔는지 콘솔에서 확인(선택 — 라이브 렌더는 이미 검증됨).
+- 별건 후보(미조치): `response_curve_builder.build_response_curve`의 `pred_conv_amt` 지역변수가 할당만 되고 미사용인데 docstring은 입력으로 명시 → 읽는 사람 오도.
+
+## 최신 상태 (2026-07-28 13:30, repo 루트 main) — 프로모션 손익 페처 확장 배포·라이브 합격 + prod crash loop 수리
+- 페처 확장 배포(PR #147 `4a1717a`): 판매분석 일별(271행 07-22~27)·프로모션 7건 첫 수집 라이브 완주, 687878 개당 할인액 4,000 입력(D-CPP-7 첫 실데이터), 구독 게이트(BASIC 체험 08-20 종료) 감지 배선. 적대적 리뷰 5R(BLOCKER 2→0·회귀 1 자체적발·alembic ID 개명 충돌 재배선으로 전 배포 사망 예방·테스트 3697/0). codex 대체(한도 08-02).
+- ⚠️ prod crash loop 발견·수리: Phase 1(PR #131)의 `rocket_promo_sync.py`·`rocket_promo.py`가 prod 미배포인 채 이를 import하는 `coupang_ops.py`만 타 세션이 배포 → 재시작마다 즉사(누적 265회). 누락 2파일 배포로 복구·안정 확인.
+- RG 잔여 종결: WING2 결손 자가치유 라이브 합격(lease 3회 재시도 계약이 플레이키 흡수 실증). "옛 공백 04-20~05-03"은 공백 아님 판명(배송비 실제 0원 + PRODUCT_SIZE 설계상 제외) — Jino 종결 승인 대기.
+- 결정 대기: ①원가 시드 실행 시점(소급 변동) ②RG 옛 공백 종결. 다음 작업: 발주→납품→명세서→계산서 통합 대사 화면(선행조건 충족 — 칩 PR #130 배포 완료), Phase 2(손익 엔진·뷰).
+
+## ✅ 로켓 1P M1 완료 — prod 배포·라이브 검증 종료 (2026-07-28 12:17, main)
+- **원 요청**: 로켓배송(1P) 공급자허브 파서가 원본 DOM에 있는데 매핑 누락으로 버리던 컬럼 2개 복원. → **완료·prod 라이브 동작 확인.**
+- **라이브 증거(원칙22)**: 배포 후 페처 실수집 완주(발주 490·정산 90·발주상세 80·실패 0) → prod DB 실측:
+  - `coupang_rocket_settlement.tax_invoice_transmitted` = **True 90행** / None 50행(수집창 90일 밖). **교차검증 "전송성공 ⟺ 세금계산서 확정일 존재" 90/90 성립.**
+  - `coupang_rocket_purchase_order_item.vendor_confirmed_qty` = **451/1207행** 적재. **납품가능 < 발주 SKU 32건 검출** = SKU 단위 입고/납품 비교 개통(원 목적).
+- prod: alembic `f6a8c0b2d4e6`(head) · API 200 · 스케줄러 정상 · 에러 0 · 락 없음. Mac 페처 런타임 `install_local_runtime.sh` 갱신(사본 해시=repo 일치, M2 `childNodes` 마커 확인).
+- **부수 성과 — alembic 그래프 정상화**: revision ID 충돌 `a1c3e5f7b9d1`(서로 다른 두 마이그가 같은 ID, 그대로 배포했으면 prod 전 마이그가 `Duplicate revision`으로 정지) 발견·해소. promo-pnl을 **uuid4 `c2998cfe1f7c`**로 개명 + prod 선배포 3개 main 흡수 → **직렬 단일 체인**. safe_deploy 가드가 파일 전송 전 차단한 것이 발견 계기(구조 가드의 첫 실사고 방어).
+- 병합: #130·#132·#134·#135·#136·#137·#138 (#127은 #135가 흡수해 자동 종료). 최종 테스트 **3647 passed**(기존 cwd 의존 4 errors만 동반).
+- **codex 게이트 = Jino 결정으로 스킵(2026-07-28 확정)**. 부채 아님 — 8/2 쿼터 해제 후 소급 리뷰 **불필요**. 이 스프린트의 교차검증은 **Opus 독립 적대적 리뷰**(로켓 2R·safe_deploy 2R, 미합의 0)로 갈음한다. 원칙19의 교차모델 사각지대는 남지만 **감수하기로 한 리스크**다.
+- 교훈: **LESSONS #49**(형제 마이그·미푸시 워크트리 확인 절차) · **#50**(alembic revision ID를 손으로 짓지 말 것 — `alembic revision` 또는 `uuid4().hex[:12]`).
+
+## 🟡 로켓 1P M1 — 마이그레이션 prod 적용 완료 / 코드 배포만 CAS 대기 (2026-07-28 12:10) — ★N1 세션이 12:1x main 병합으로 해소(아래 N1 배포 완료 블록 참조, e1f659e가 main 조상 편입)
+- **alembic 그래프 복구 완료(PR #135 병합)**: revision ID 충돌 `a1c3e5f7b9d1` 해소 — promo-pnl을 **`c2998cfe1f7c`**(uuid4 생성)로 개명, prod 선배포 3개(`a7b9c1d3e5f7`·`f6a8c0e2b4d6`·`a1c3e5f7b9d1`-merge, 브랜치 `worktree-agent-aca8c40c8d32c1725` 5커밋)를 main 흡수. **직렬 단일 체인** `e5f7a9c1b3d5 → {a7b9,f6a8c0e2} → a1c3(merge) → c2998cfe1f7c → f6a8c0b2d4e6(head)`. 테스트 **3607 passed**.
+- **prod 마이그레이션 적용 완료(실측)**: `alembic current = f6a8c0b2d4e6` / `coupang_rocket_settlement.tax_invoice_transmitted` 있음 / `coupang_rocket_purchase_order_item.vendor_confirmed_qty` 있음 / `coupang_coupon.used_amount` 있음 / promo 테이블 2종(`coupang_rocket_sales_daily`·`coupang_rocket_promotion`) 생성. 백엔드 online, 배포 락 없음.
+- 🟡 **남은 것 = 코드 4파일 배포(models.py·rocket_supplier.py·rocket_supplier_sync.py + 마이그는 이미 감)**. `safe_deploy` **CAS가 차단** — prod의 `models.py`가 **미푸시 N1 브랜치 `worktree-agent-a2fe33dc69941c21e`**(10커밋, D-NAO-99/100 **진행 중**) 버전이라 우리 역사에 없음.
+  - 실측 대조: prod-only 내용은 **주석 7줄뿐, 기능 코드 차이 0**(prod models.py ⊂ main models.py). 즉 지금 덮어도 죽는 기능은 없지만 **CAS를 우회하지 않았다**(07-17 clobber 사고의 판단 방식이 바로 그것).
+  - ⚠**역방향 위험이 더 크다**: N1 브랜치는 main보다 뒤처져 있어, 그쪽이 먼저 models.py를 재배포하면 **우리 컬럼 매핑 + promo 매핑이 통째로 지워진다.**
+  - **해결 = N1 세션이 main을 자기 브랜치에 병합**(또는 그 브랜치를 main에 병합). 그 뒤 아래 한 줄이면 끝:
+    `scripts/safe_deploy.sh backend/app/models.py backend/app/clients/coupang/rocket_supplier.py backend/app/services/coupang/rocket_supplier_sync.py --restart`
+  - 급하지 않다: prod DB는 컬럼만 먼저 생긴 **안전한 방향**이고, 로켓 페처(매일 08:00)는 구 파서로 돌아 신규 컬럼만 NULL로 남는다. 깨지는 것 없음.
+- **PR 이력**: #130(로켓 M1)·#132(safe_deploy 하니스)·#134(충돌 기록)·#135(그래프 복구) 전부 병합. #127은 #135가 내용을 흡수 → 정리 대상.
+
+## 🔴 prod 배포 차단 — alembic revision ID 충돌 (2026-07-28 11:45, main 기준)
+- **PR #130(로켓 1P 파서 컬럼 2건)·PR #132(safe_deploy 회귀 하니스) 둘 다 main 병합 완료.** 그러나 **prod 배포는 차단됨 — prod 무변경.**
+- **차단 사유**: 서로 다른 두 마이그레이션이 **같은 revision ID `a1c3e5f7b9d1`** 을 쓴다.
+  - prod: `a1c3e5f7b9d1_merge_status_reason_and_delivery_cols.py`(merge revision, 부모 `a7b9c1d3e5f7`+`f6a8c0e2b4d6`) — **적용됨**(`alembic_version=a1c3e5f7b9d1`)
+  - main: `a1c3e5f7b9d1_add_coupang_promo_pnl_phase1.py`(promo-pnl Phase1) — **미적용**(prod에 promo 테이블 0개)
+  - 배포했다면 prod `versions/`에 같은 revision 정의 2개 → **alembic 전체 `Duplicate revision` 사망**(모든 마이그·배포 차단). `safe_deploy.sh --migrate` 가드가 **파일 전송 전 차단** — D-NAO-49 계열 구조 가드가 실사고를 막은 첫 사례.
+- **prod 무변경 실측**: `tax_invoice_transmitted`·`vendor_confirmed_qty` 둘 다 없음(불변) / `alembic_version=a1c3e5f7b9d1` 불변 / `.deploy-lock` 잔여 없음.
+- **그래프 분열**: prod에만 3개(`a7b9c1d3e5f7`·`f6a8c0e2b4d6`·`a1c3e5f7b9d1`-merge, 전부 prod 선배포·미병합 — 생성 커밋 `f7e2108`은 **미푸시 워크트리** `worktree-agent-a2fe33dc69941c21e`/`aca8c40c8d32c1725`에만) / main에만 2개(promo-pnl·로켓 M1). ⚠**PR #127(열림)은 `a7b9c1d3e5f7` 하나만 담아 그대로 병합하면 또 형제 head 발생.**
+- **권고 순서(Jino 판단 — 다른 트랙 소유 마이그 개명 포함)**: ①main promo-pnl revision을 난수 신규 ID로 개명(미적용이라 안전) ②로켓 `f6a8c0b2d4e6` down_revision 재연결 ③prod 선배포 3개 main 편입(#127 병합 + `f7e2108` 푸시) ④promo-NEW 부모를 `a1c3e5f7b9d1`(prod merge point)로 → 직렬 단일 체인 ⑤배포.
+- **근본 원인**: revision ID를 손으로 지어 표본공간이 좁다(`e5f7a9c1b3d5`/`a1c3e5f7b9d1`/`f6a8c0b2d4e6`/`a7b9c1d3e5f7`/`f6a8c0e2b4d6` — 같은 hex 재배열). 같은 날 near-miss 2건째: 우리 `f6a8c0b2d4e6` vs prod `f6a8c0e2b4d6`. → **LESSONS #50**.
+
+## 로켓배송(1P) M2 — DOM 셀 공백 의존 제거 (2026-07-28 11:40 KST, 워크트리 focused-torvalds-27d4ae, 브랜치 claude/focused-torvalds-27d4ae, 미푸시)
+- **기전**: `DOMParser` 문서는 렌더링되지 않아 `td.innerText`가 `textContent`로 떨어지고, textContent는 **요소 경계에 공백을 넣지 않는다**. 셀 안 공백은 쿠팡 SSR 마크업 들여쓰기 덕이라 미니파이 한 번이면 사라지고, 그 순간 `parse_po_item_rows`의 `partition(" ")`이 **인덱스 걸린 `barcode` 컬럼에 상품명을 넣고** `product_name=None`으로 만든다(조용한 오염).
+- **수정**(커밋 `412042e`): ①페처 두 추출기를 공용 `_CELL_HELPERS_JS`로 통일 — 자손 텍스트노드 명시적 `' '` 조인(ul>li·div·a·button 전부), ★`<br>`은 비분리자(헤더 `상품<br>번호` 토큰 계약 보존, 아니면 rows=[] 무성 전손), 표 선택은 `noWs()`로 공백 무시. ②파서 `_split_barcode_name` — 판정 기준은 "공백 유무"가 아니라 **"선두 토큰이 바코드꼴인가"**(상품명 자체에 공백 있음). ③정산 헤더 매핑 공백 무시 + `_to_int/_to_dec/_to_date` 공백 복구(조용한 0 방지). ④신규 `tools/verify_rocket_dom_extract.py`(브라우저 실증 하니스 — 백엔드 스위트는 브라우저를 띄우지 않는 방침).
+- **라이브 증거(원칙22)**: ①라이브 정산 마크업(CDP **9225** supplier 세션, 기록 샘플과 동일 URL 재fetch·읽기전용) 수정 전(ddb2c02)·후 **11행 셀 단위 완전 일치** = 회귀 0. 기록 `20_..json`과의 차이는 전부 데이터 변동(신규 계산서 2건 06-17 유입으로 page1 뒤 2건이 page2로 밀림 + 30025494 확정일 `-`→`2026-06-18`). ②ref20b 발주상세: 원본 == `_PO_DETAIL_ROWS` 13행, **태그 사이 공백 전부 제거한 HTML도 동일 rows**(공백 독립성). ③테스트 **3515 passed**.
+- **배포**: `tools/install_local_runtime.sh` — `~/.ohisell/tools/rocket_supplier_fetcher.py` byte-identical, `com.ohisell.rocket` pid 20786→44099. 실행 전 나머지 4종이 워크트리와 동일함을 확인(미푸시 형제 브랜치 다운그레이드 0). **백엔드 파서는 prod 미배포** — 이 트랙 백엔드 자체가 미배포·alembic `f6a8c0b2d4e6` 미적용이라 순서가 깨진다(컬럼 없는 DB에 코드만 올리면 ingest 전체 침묵). 페처 신버전은 현행 마크업에서 구 파서와 동일 rows라 이 비대칭은 안전.
+- **codex 게이트 면제** — Jino 판단(07-28, 원문 "이번건은 codex review를 건너뛰어줘"). ★**M1도 동일하게 스킵 확정**(07-28 12:22 Jino 재확인) — 로켓 1P M1/M2 모두 codex 부채 없음, 08-02 소급 리뷰 불필요.
+- **종결(2026-07-28 12:20 실측)**: ①**PR #137 병합 완료**(main `a99bdbf`) ②**revision ID 충돌 해소됨** — 병행 세션 `claude/alembic-graph-reconcile`이 promo-pnl을 `a1c3e5f7b9d1`→`c2998cfe1f7c`로 개명·재부모 → 단일 head `f6a8c0b2d4e6`(prod 적용 완료·promo 테이블 5종 실존) ③**prod 배포 완료** — 병행 세션 `claude/final-deploy`가 `c9d6aae`(M2 포함)로 3파일 배포+재시작(12:13:52), prod 파서에 `_split_barcode_name` 라이브·백엔드 12:13:53 재기동. ★내가 실행하려던 '권고 복구 순서'는 그 사이 **stale**해졌고(prod가 이미 f6a8c0b2d4e6 적용), models.py 배포는 **safe_deploy CAS가 차단**해 병행 세션의 N1 컬럼 clobber를 막았다(가드 2번째 실사고 방어).
+## 최신 상태 (2026-07-28 11:10, 워크트리 cool-driscoll-31712d) — 로켓 1P 파서 누락 컬럼 2건 복원, PR #130 오픈(미병합·미배포)
+- **PR #130** https://github.com/Jino00/ohisell/pull/130 — 트랙 `track_coupang-rocket-1p.md` M1(유지보수). 커밋 `85967cf`→`e3da1f6`→`39c1c39`(코드)+`a386614`·`ddb2c02`(문서).
+- 복원 ①: 정산 마지막 링크 컬럼(헤더명=빈 문자열, ref20 §4 #16) → `coupang_rocket_settlement.tax_invoice_transmitted`(Boolean nullable). 버튼 토큰 정확일치 제거 후 잔여로 판정(`전송성공`=True / 없음=False / 셀부재·미관측=None+warning). 공백소실 폴백은 `전송성공` 정확일치일 때만 True — **어느 경로로도 틀린 False를 만들지 않음**. ★**False = "전송실패"가 아니라 "전송성공 미표기"**(샘플 10행에서 미표기 행은 확정일도 `-`, "확정됐는데 미전송" 표본 0건).
+- 복원 ②: 발주상세 인덱스 5 → `coupang_rocket_purchase_order_item.vendor_confirmed_qty`(Integer nullable) = SKU 단위 입고/납품수량 비교 개통. PO그레인 `sumOfVendorConfirmedQty`의 per-SKU 판.
+- alembic **`f6a8c0b2d4e6`**(ADD COLUMN 2건, upgrade/downgrade 실증). 테스트 파서 48 / 루트 전체 **3505 passed**(동반 4 errors=`test_migration_one_running_index.py` cwd 의존 **기존** 결함, `cd backend`에선 4 passed). 라이브 증거(원칙22): DOM 샘플 10행 전수 — 빈 헤더 1개·셀 변형 2종·"전송성공 ⟺ 확정일 존재" 10/10.
+- **★배포 순서 강제**: `alembic upgrade head` → 코드 → 재시작. ingest가 엔티티를 통째 SELECT하므로 컬럼 없는 DB에 `models.py`만 올라가면 **정산·발주상세 ingest 전체가 OperationalError로 침묵**. → **구조로 해소됨(main `a516951`, 11:09)**: `safe_deploy.sh --migrate`가 순서를 강제(대기 상태 코드배포 거부·upgrade 실패 시 코드 미전송). 이 M1의 실측이 그 가드의 근거. ⚠단 그 가드는 **무테스트 병합** — 고아 브랜치 `claude/quizzical-jones-1b538a`의 하니스만 살려 main 구현에 맞추는 작업 별도 진행 중.
+- **★alembic 형제 head 충돌 → 해소됨(11:40)**: promo-pnl `a1c3e5f7b9d1`이 **같은 부모**를 물고 PR #131로 먼저 병합 → 우리가 "나중"이므로 `f6a8c0b2d4e6`의 `down_revision`을 `a1c3e5f7b9d1`로 **재연결**. 체인 `e5f7a9c1b3d5 → a1c3e5f7b9d1 → f6a8c0b2d4e6(head)`. main 22커밋 병합 완료, 루트 전체 **3557 passed**. PR #130 재푸시됨.
+- **safe_deploy 하니스 PR #132**(별도 브랜치 `claude/safe-deploy-harness`, MERGEABLE): main의 alembic 가드가 무테스트 병합돼 고아 브랜치 `claude/quizzical-jones-1b538a`의 하니스를 main 구현에 맞춰 이식. 11시나리오·42단언, 부정 대조군(게이트 무력화 사본)에서 7건 정확히 실패 = 회귀 감지 실증. main `safe_deploy.sh` 본문 무수정·결함 없음 보고.
+- **codex 게이트: Jino 판단으로 건너뜀**(쿼터 08-02 해제). 대체=Opus 독립 적대적 리뷰 2R → PASS·미합의 0. 원칙19 부채로 기록(LESSONS #49).
+- 후속 chip 2건 **다른 세션에서 실행 중**: `task_a0c65677`(safe_deploy alembic 가드)·`task_2cee6f8d`(페처 셀 공백 보장 — `parse_po_item_rows`의 `barcode_name` 분리가 더 위험한 자리). ⚠`task_2cee6f8d`는 같은 파서/테스트 파일을 건드릴 수 있어 PR #130 기준 리베이스 필요.
+- **남은 것(Jino 판단)**: PR #130 병합 시점(promo-pnl과의 순서) · 병합 후 prod 배포(마이그레이션 선행 필수). **prod DB에 마이그레이션 미적용 상태.**
+
+## cart_conversion_rate 센티널 이중계산 수정 (2026-07-28 11:0x KST, 워크트리 `eager-curie-13aa53`, 커밋 `ecc06ef` — prod 배포 완료·PR #128 병합)
+- **버그**: `__backfill__` 센티널 행(`/stats`)은 `conv_indirect_cnt`에 구매+장바구니 합계·`cart_*=0`인데, `cart_conversion_rates()`가 상세 행과 함께 합산해 **분자만 이중가산**. by_campaign·global 블록에 센티널 필터 누락(계정 내 다른 12개 SA는 이미 필터 보유).
+- **수정·검증**: 세 grain 전부 필터 추가 + 회귀 테스트 2건(필터 제거 시 clamp 1.0으로 실패하는 것 확인). 백엔드 전체 **3501 passed**.
+- **prod 라이브 실측(원칙22)**: 30일 창 분자 4881→2045(분모 1221 불변). 글로벌은 1.675도 clamp 1.0이라 표면상 무변화 — **실제 변화는 캠페인 grain 6/28개가 clamp 1.0 고정에서 하강**(10769985 →0.4, 8336372 →0.3, 9577882·10852962 →0.0, 8790976 →0.8, 6006664 →0.833). `probe_signal`/`probe_revert` 확장 낙관 편향 해소.
+- **✅종결**: PR #128 병합(main == prod). **codex 게이트는 Jino가 이 건 한정 면제** — 원문 11:10 KST "이건은 codex review 건너띌꺼야. 병합해줘". 근거=한도 소진으로 08-02까지 실행 불가 + 필터 추가(행 제외) 방향 + 양방향 회귀 테스트 증명 + 3501 passed + prod 라이브 실측. **08-03 재실행 불요.** ⚠️병렬 codex 세션이 커밋 `6ea18e3`에 "PR은 codex 후"를 Jino 인용으로 기록한 것을 정정함 → LESSONS #50. **↳ 재정정(11:2x)**: 그건 *없던 발화*가 아니라 **`AskUserQuestion` 선택지를 Jino가 실제 선택한 결정**(11:10 면제로 뒤집히기 전까지 유효)이었고, 잘못은 내가 쓴 선택지 라벨에 인용부호를 씌운 **표기**에 있었다 → 규칙: 선택 결과는 "Jino 선택(라벨 — 원문 아님)", 인용부호는 채팅 원문에만.
+- 기록: 트랙 파일 "현재 진행 단계" 최신 블록 · LESSONS #49 · failures.jsonl.
+
+## 최신 상태 (2026-07-28 12:1x, 워크트리 agent-a2fe33dc69941c21e) — N1 BEP 배송방식 인지형 정합 prod 배포 완료(PR #138 병합)
+- **N1 배포 완료**: `product_commission.py`(신규)·`bep_calculator.py`·`models.py`(주석)·`verify_bep_delivery_parity.py` — `safe_deploy.sh --restart`, CAS 통과, pm2 online, 예외 없음.
+- **라이브 검증(원칙22)**: `calculate_bep()` 710행/with_bep 525행. 앵커 5종 대비 09:35 시뮬 — EZ툴16프로 1.9180(±0.00%)·폴드7매트필름 2.2616(±0.00%)·EZ툴17프로 1.7819(−0.31%)·EZ툴15프로 1.8532(+1.23%)·EZ툴17 1.8921(+2.12%, 신규 주문 유입 드리프트로 설명됨). `verify_bep_delivery_parity.py` PASS(판별 실대조 10,094건 불일치0·물류비 재계산 584상품 차이0).
+- **★교차 세션 alembic 충돌 발견·해소**: 병합 전 origin/main이 27커밋 앞서 있었고 revision ID `a1c3e5f7b9d1` 충돌(2dfc758 기록)을 발견했으나 이미 main에서 `6c9f16b`(promo-pnl→`c2998cfe1f7c` 개명)로 해소된 상태였음 — 병합 후 68개 리비전 unique·`alembic heads` 단일(`f6a8c0b2d4e6`) 재확인.
+- **★이 병합이 로켓 1P M1 세션의 CAS 블록도 함께 해소**(위 🟡 블록 참조) — 그 세션이 겪은 차단은 prod의 `models.py`가 이 N1 미푸시 브랜치(e1f659e) 버전이라 그쪽 역사에 없어 발생한 것. N1 브랜치→main 병합(PR #138, `c9d6aae`)으로 e1f659e가 main 조상에 편입되어, 그 세션이 현재 main 기준으로 재배포하면 CAS 통과할 것으로 판단됨. **로켓 M1의 나머지 파일(`rocket_supplier.py`·`rocket_supplier_sync.py`) 실배포는 그 세션/트랙 소관 — 이 세션에서 대신 배포하지 않음.**
+- PR #138: 커밋 `4f5e39c`(N1 본체 D-NAO-99)·`3dc85b3`(E5 중앙값 D-NAO-100)·`b636e1b`(리뷰 R1)·`e1f659e`(리뷰 R2)·`60dfc19`(main 병합)+N0 흡수(`6033c0f`, 186b357). 로컬 전체 스위트 **3,645 passed**(병합 후 재검증).
+
+## 04 자동운영 감사 D+N (2026-07-28 08:55 KST, 자동 루틴 D-NAO-51 — 감사 전용·쓰기 0건)
+- **서버 레인 전부 ok** (daily 08:50:15 / hourly 08:20:07 / generator 08:00:15 / entity_sync 07:38 / retro 08:30 / wisdom 08:45 / probe_settlement 08:55).
+- **실집행 5건, 라이브 5/5 일치**: auto_op 1건(grp70109620 맥세이프_컨텐츠 140→120, [shopping_group_bep], 라이브 120 MATCH) + **cold_op 4건 = CS 콜드스타트 레인(D-NAO-96) 첫 실집행 성공** — nad…411558870 300→1900 / …375630000 590→1150 / …375632395 900→2350 / …375632396 900→2300, 4건 전부 라이브 `adAttr.bidAmt` 일치. 원칙22 라이브 합격.
+- **차단 1건(정상 가드레일)**: budget_up cmp…010769985 30,000→50,000 [예산봉투 D-NAO-87] → BEP 미달 증액 금지(보정ROAS 0.353 < 1.9587, D-NAO-1). 라이브 dailyBudget=30,000 불변. **4일 연속 동일 충돌**.
+- **CS 레인 통계**: 후보 50 · 제안 4 · 집행 4 · 실패 0 · **경제성없음 24(상품 BEP 없음=원가 미입력)** · 보류 22. → 신규 폴드8/플립8(D-NAO-95) 확정원가 입력 전까지 24건은 구조적 보류.
+- **시간당 레인**: 00:20~08:20 KST 9회 전부 exec=0 · held=13 · explored=0 (전일과 동일한 새벽 fail-closed 패턴).
+- **A/B (03 MOP vs 04 ours, 최근7 07-21~27 / ROAS D-8~D-2 07-20~26)**: 03 cost 273,573·clk 116·CPC 2,358·ROAS 3.65 / 04 cost 51,212·clk 36·CPC 1,423·ROAS 4.18. pre 대비 lift — cost 03 +22.5% vs 04 −15.3%(**DiD −37.8pp**), clk +3.6 vs −18.2(−21.8pp), CPC +18.2 vs +3.6(−14.6pp), ROAS −10.8 vs **+37.0**(+47.8pp). → **03 볼륨 완전 회복, 04는 ROAS만 좋고 볼륨 위축 4일째** (D-NAO-59 총이익 목적함수 관점의 미해결 지점).
+- **17E 카나리(grp65140028)**: 07-27 cost 2,891·clk 2·전환 0. 5일 누적 12,696원/8clk/매출 15,900 → 누적 ROAS 1.25 < BEP 1.96. 라이브 bid 1,400·ELIGIBLE.
+- **관찰 필요**: ①03에 `external_status_change`(userLock false→true, 07-28 07:46 KST) 기록됐으나 **라이브 재조회는 userLock=False·ELIGIBLE** — PR#119 entity_sync 체이닝 전환 첫날의 일회성 오탐 가능성, 내일 재발 여부 확인. ②차단 제안이 change_log에 `dry_run=0` 유령행으로 남는 현상 재현(id 853) — 07-27 감사 지적과 동일.
+- **중단 조건 없음**: 04 당일소진 0 ≪ 7일평균 7,316×3 / 04 ROAS 4.18 ≫ 1.0 / 우리 캠페인 외부변경 0 / 레인 error 0.
+- 기록: `docs/references/data/ab_03_vs_04_daily.jsonl` 8번째 항목.
+
+## 최신 상태 (2026-07-28 08:25, repo 루트 main) — CS 실집행 전환 + 신규캠페인 검수대기 + N1 승인
+- **HANDOFF: `.claude/memory/HANDOFF_cs-live+newcampaign+nbaesong-N1_20260728.md`** ← 새 세션은 이 파일 먼저.
+- CS 콜드스타트 레인(D-NAO-96) prod 배포·실집행 전환(NAVER_CS_DRY_RUN=0, 07-28 07:08). 08:50 첫 실집행 결과 미확인.
+- 신규 캠페인 "● 15. 갤럭시Z_폴드8플립8_사생활보호"(D-NAO-95): 소재 3종 검수 대기(노출 0), 자동운영 편입, 잠정원가(폴드4,300/플립3,800) — 확정 원가 07-28 Jino 제공 예정.
+- N배송 규명 완료: 도착보장 수수료 5.89% 실측, BEP 120일창 3중 왜곡 발견 → N-INT 설계, **N1(BEP 정합) 시뮬레이션 Jino 승인(미착수·트랙 D-N 미기록)**.
+- 진행 중이던 백그라운드 2건(DV 기기차원 스프린트·주문 배송구분 영속화) 완료 여부 확인 필요.
+- codex 게이트 부채(한도 08-02 리셋 후 소급). 상세는 HANDOFF §5·§6.
+
 # claude-progress.txt
 # 매 sprint 완료 시 Claude가 이 파일을 갱신합니다.
 # 새 세션 시작 시 이 파일을 가장 먼저 읽으세요.
+
+## 최신 상태 (2026-07-28 07:40, repo 루트 main) — RG 층2 결손 주도 자가치유 배포 완료
+- **RG 층2 결손 주도 자가치유 배포**(PR #124 병합 `cdfc91d`, safe_deploy CAS 통과, Mac 런타임 bootout+bootstrap 갱신): 층2 병목 `rg_max_periods=1` 폐기 → prod 결손 조회 엔드포인트(`GET /api/coupang/ops/wing/rg-settlement/layer2-gaps`) 기반 gap-driven 선택(회차 상한 `rg_max_targets=3`)+최신 주기 rider(PRODUCT_SIZE 영구 미수집 P1 수정)+claim 기준 시간예산(TTL 20분 부등식)+층2 루프 세션 재확인. 계획서=`docs/PLAN_rg-layer2-gap-driven-selfheal.md`(알려진 한계 2건 명문화).
+- 교차 리뷰: **codex CLI 한도 소진(리셋 08-02)** → Jino 07-18 승인 방식(적대적 Claude 리뷰어 Opus 단일)으로 대체, 5라운드 — 지적 14건(수용 11·절충 3·미합의 0), 배포 차단급 P1 2건(결손 매칭 KST 날짜 불일치 상시 실패·PRODUCT_SIZE 영구 미수집) 리뷰가 잡음. 테스트 3440 passed.
+- 라이브 실증: WING1 07-27 23:08 완주 — gap-driven 대상 선택 정상 + PRODUCT_SIZE 129행 첫 적재(P1 수정 라이브 작동). 35일 창 내 결손 0(기백필 상태 확인).
+- **차단/잔여**: WING1·WING2 Wing 데스크톱 세션 밤사이 만료(login_required·재시도 3회 소진) → ①WING2 결손 트리거 재확인 ②WING1 04-20~05-03 옛 공백 백필(`rg_status_days:100` 1회 오버라이드 — 시도했다 세션 만료로 미완, config 원복 확인됨) — 둘 다 **Jino의 Wing 재로그인 선행 필요**. chip task_2a26d430은 이 스프린트의 층2 루프 세션 재확인으로 코드 확인分 해소.
+
+## (이전) 최신 상태 (2026-07-27 23:xx, 워크트리 agent-a0d4b0f9f34968c6a) — CS 스프린트(콜드 첫 입찰 레인) PR #123
+
+## (이전) 최신 상태 (2026-07-28 08:xx, 워크트리 musing-germain-a6e240) — D-NAO-97 외부변경 감지기 오탐 수정(배포 완료)
+- **증상**: `naver_change_log` id 847 — 03 캠페인이 07-27 22:46에 `external_status_change`
+  (userLock false→true, "외부(MOP/사람) 상태 변경")로 기록. 라이브는 `userLock=false` ·
+  `statusReason=CAMPAIGN_LIMITED_BY_BUDGET`(일예산 5만 소진) — **네이버가 멈춘 것을 사람 탓으로 기록**했다.
+- **원인 한 줄**: `get_campaigns_full()`이 `userLock`을 안 넘겨 `collect_entities`가 `status=="PAUSED"`로
+  **역추론**. 그룹·키워드는 처음부터 실 `userLock`을 써서 **캠페인 행에만** 있던 비대칭 결함.
+- **수정**: 캠페인 status = `userLock`만(역추론 금지) / fetcher가 3계층 전부 `statusReason` 전달 /
+  시스템 사유는 별도 액션 `system_status_change`(dry_run, **캠페인 행만** — 쓰기 폭증 방어) /
+  `_log_external_status_change` 2중 안전장치 / `naver_entity.status_reason` 컬럼(alembic `a7b9c1d3e5f7`).
+- **분류표는 화이트리스트**: 공식 스키마(ncc-heroes-ncc.json) enum + 라이브 실측. ★공식 문서에 **없는**
+  값 2종을 실측(ELIGIBLE · BUSINESS_CHANNEL_ABNORMAL_INTERLOCK) → 표는 완전할 수 없다 →
+  **미지의 사유는 '사람 조작 아님'으로 실패**하게 설계.
+- **소급 집계**: 캠페인 external_status_change 5건 중 **오탐 1건**(id 847). 나머지 4건은 라이브 userLock=true
+  + 해당일 광고비 0~3,130원(일예산 미달)로 진짜 조작 확정. 그룹·키워드 26건은 구조적으로 오탐 불가.
+  ★1건뿐인 이유 = entity_sync 크론이 **07:35 KST 단독**이라 예산 소진(저녁)과 안 겹쳤을 뿐 —
+  저녁에 sync를 돌릴 때마다 재발할 구조적 노출이었다(07-27 22:46 = 크론 밖 수동 실행).
+- **배포·라이브 검증 완료**: safe_deploy 4파일 + alembic `a7b9c1d3e5f7` + pm2 재시작.
+  07-28 07:37:43 크론 완주 → 92,152행 status_reason 적재(라이브 API 분포와 100% 일치)·신규 change_log **0건**·
+  캠페인 status(on 30/off 16)가 라이브 userLock과 정확히 일치. 배포된 prod 코드로 id 847 재생 →
+  `external_status_change` 0건, `system_status_change` 1건("캠페인 일예산 소진")으로 **재분류 확인**.
+  오탐이 남긴 잘못된 행 1건(03 status='off')은 라이브 대조 후 교정(유령 '외부 재개' 방지).
+- **미결**: ①`/codex review` 미이행(한도 소진, 리셋 08-02 — 원칙19 부채) ②**실제 예산 소진 순간의 라이브 발화 확인은
+  오늘 저녁 이후**(다음 세션 확인 쿼리 ↓) ③change_log id 847 행의 사후 처리(삭제/라벨 정정)는 **Jino 판단 대기**.
+  ```sql
+  -- 저녁 sync 이후 실행: 유령 0건 + 시스템 이벤트가 대신 잡혔는지
+  SELECT action, dry_run, entity_id, changed_at, after_value, rationale
+  FROM naver_change_log WHERE changed_at >= '2026-07-28' ORDER BY changed_at;
+  ```
+
+## (이전) 최신 상태 (2026-07-27 23:xx, 워크트리 agent-a0d4b0f9f34968c6a) — CS 스프린트(콜드 첫 입찰 레인) PR #123
+- **D-NAO-96 / ref 41**: D-NAO-95(ref 40)가 표준화한 "신규 소재 첫 입찰가 산출 절차"를 **자동운영 레인으로 배선**.
+  구조(원칙18): Harness `cold_start_bid_lane` ← SA1 `bid_ceiling_calculator`(상한=RPC÷BEP) + SA2 `market_bid_probe`
+  (쇼핑 전용 `/npla-estimate/*` 래퍼·일별 축적 `naver_bid_estimate_daily`) + SA3 `cold_start_bid_decider`
+  (min(상한, 목표순위 시장가), 목표=모바일 3위). 실집행은 기존 `naver_execution_harness.execute()` 관문 경유(쓰기 경로 신설 0).
+- **쇼핑 시세를 프로그램이 처음 본다**: 기존 estimate 배선은 전부 파워링크 키워드 grain이라 콜드 소재는
+  눈먼 래더(현재가×1.1·BM 프라이어)로만 올랐다(`npla` 문자열 코드베이스 0건이었음).
+- **★라이브 실측이 ref 40 전제 2건 정정**(원칙22): ①배치 상한은 **200**이다 — ref 40의 "1~2개씩 나눠 호출"은 틀렸고,
+  그 400은 실제로 **position 5 오류**였다(두 에러 문구가 `invalid collections size`로 동일해 오독됨).
+  ②**최소노출입찰가는 사다리의 하한이 아니다**(pos3=2,810인데 expmin=3,270) — 게이트로 쓰면 현재 정상 노출 중인
+  소재까지 전량 차단. 경제성 판정을 **사다리 최저가** 기준으로 바꿨다. ③`naver_ad_daily`에 ad grain이 없어
+  "소재 자기이력 CVR"은 원리적으로 불가 → 그룹→캠페인→계정 사다리.
+- **★라이브 경제성 결론**: 08514959 상한 **1,110~1,230원** vs 4위 시장가 **2,280~3,010원** → **이익 내며 쇼핑 1~4위
+  노출 불가**(2~2.7배 부족, 간접전환 포함해 낙관해도 동일). CS의 주 산출물은 입찰 변경이 아니라 `not_viable` **경보**다.
+  D-NAO-91을 전 소재로 일반화한 결과.
+- **안전**: `bid_up_cold`는 ±15% 완전 면제(시장가 직행이 목적) → **위임 경로 영구 제외**(`COLD_START_STEP_TYPES`) +
+  `cold_op` 킬스위치 화이트리스트 2곳 등록(테스트로 못박음). 기본 `dry_run=True`, 전환은 prod `.env` `NAVER_CS_DRY_RUN=0`만.
+  소재당 첫 1회(dry-run은 소진 안 함)·라운드 캡 5·예산 미변경(금지선).
+- **미결**: ①`/codex review` 미이행(한도 소진, 리셋 08-02) — 독립 적대적 리뷰로 대체, **원칙19 부채로 남음**.
+  ②신규 갤럭시Z 캠페인(10907625) 소재가 `naver_adgroup_product`에 아직 0행(검수 중·mallProductId null) → 콜드 편입은 검수 후 확인 필요.
+  ③현재 소재 중 1,450~2,270원 입찰분은 이미 상한 초과 상태(CS 스코프 밖 — 콜드 아님, 별도 검토 필요).
+- **배포 완료**(PR #123 병합 + 핫픽스 PR #125): safe_deploy 11파일·alembic e5f7a9c1b3d5·pm2 재시작.
+  라이브 dry-run 합격 — 사다리 510행(저장↔라이브 100% 일치)·콜드 47/51·propose 4/not_viable 24/
+  hold_no_ceiling 18/hold_no_change 1·쓰기 0건·기존 레인 무영향(스케줄러 전 잡 정상 등록).
+- **★prod 사고 1건(즉시 수정)**: 로컬 3.14에서 3,497건 통과한 코드가 **prod(Python 3.10)에서
+  SyntaxError** — PEP 701(f-string 중첩)은 3.12+ 문법. 2건 수정 + 재발 방지 가드 신설
+  (`tests/test_prod_python_syntax_compat.py`, prod 세대 인터프리터로 app/ 전체 컴파일).
+  **그 가드가 즉시 두 번째 위반을 잡았다.**
+- 적대적 리뷰 3라운드: 1R NEEDS-CHANGES(P1 4건 — CS가 한 건도 집행 안 됨 + 300배 상향 우회 재현),
+  2R NEEDS-CHANGES(P2-B 마커 동어반복), **3R PASS**. 전체 3,499 passed. PR #123·#125.
 
 ## 최신 상태 (2026-07-27 19:50, repo 루트 main) — 13:30 블록의 "남은 것" 4건 전부 완결 + 후속 5건
 - **claim lease 재시도 계약 구현·배포**(PR #106, D=버튼 1회=재시도 3회·login_required 제외, TTL 20분, `refresh_contract.py` 공용 SA, 계획서=docs/PLAN_coupang-claim-retry-lease.md, codex 5R 22건 중 21수용/1기각-후속보류). 페처 4종 실패보고 첫 배선.
@@ -17,6 +318,24 @@
 - **쿠팡 브라우저 수집 4종 버튼-only 전환 완결**: PR #68의 chrome supervisor(KeepAlive 상주, "창 닫아도 30초 뒤 부활"의 범인) 폐기 → per-fetch 수명(_chrome_argv/_launch_chrome/_owned_chrome/_ChromeOwner). 소유권 판정 최종형 = PID 동일성+시간순서(프로세스 시작<lock 생성). codex 6R(수용12/기각3/보류1). 테스트 29→92. PR #103 병합·prod 배포(safe_deploy CAS 통과). supervisor plist 3개 완전 삭제(재부팅 부활 차단), poll 데몬 4개 재가동.
 - **라이브 검증 합격**(Jino 실버튼): ofix판매분석/RG정산(35행)/ofix광고비(SSO 자동재발급·29일 백필)/ohitech광고(1,457만원 백필)/로켓(발주486+정산90+상세80) — 13:31 collection-status 4스트림 전부 fresh.
 - **남은 것**: WING2 RG 정산 06-20부터 누락(chip 발행) / wing 판매분석 3P GMV=0 모순(chip 발행) / claim 재시도 계약(백엔드 변경 필요, codex와 보류 합의) / chrome-supervise 스텁 제거.
+
+## 최신 상태 (2026-07-24 11:2x KST, 워크트리 ex-sprint-post-deployment-2e9656) — 03 캠페인 우리 자동운영 정지(D-NAO-92, 문서 기록만·코드 변경 0)
+- **Jino 지시**: "운영중이던 03 캠페인 정지해줘" → 범위 확인 결과 **"우리 자동운영만 정지"** 선택(캠페인 OFF 아님, 광고는 계속 노출·집행).
+- **실행(03 = `cmp-a001-02-000000008492582`)**: `optimizer` ours→**none**(정식 라우터, change_log **639**) + `auto_operate` 1→**0**(라우터 없어 prod DB 직접 UPDATE, 감사용 change_log **640** 수동 기록).
+- **검증(라이브)**: 03만 변경·04/P_Test/맥세이프는 `ours/1` 무변경 / 캠페인+애드그룹 24개 전부 `status=on` 유지(광고 살아있음, 체크섬 동일) / 03 소속 입찰 전건 무변경(17프로 소재 3,060원 그대로, 체크섬 동일).
+- **★게이트 커버리지 발견(중요)**: `auto_operate` 킬스위치만으로는 **전문가 위임(delegation) 자동실행 경로를 못 막는다** — `delegation_gate._eligible()`이 optimizer만 검사·harness 킬스위치 화이트리스트에서 `delegation`이 명시적 제외. 현재 `expert_delegated_types=[]`라 실피해 0건이었으나 구조는 뚫려 있었음 → **optimizer도 함께 none으로 내려 봉쇄**. 별건 chip `task_2fb0dc9b`. **교훈: "캠페인 자동운영 완전 정지 = optimizer=none + auto_operate=0 두 스위치 모두 내려야 한다."**
+- **정지 근거(성과 실측)**: 07-23 03 확정 성과 = 노출 3,450·클릭 21·광고비 50,045(전일 25,261의 +98%)·광고귀속 전환 4건·매출 66,600 → **ROAS 3.31→1.33 (BEP 1.55 미만 = 적자 하루)**. 스마트스토어 실주문도 178,000→171,000으로 매출 정체인데 광고비만 2배. 구간 분해: **17프로 그룹(수동 입찰 상향 대상)은 ROAS 2.50으로 BEP 위·머리 키워드 순위 5.61→4.00 개선**했으나, **03 나머지 그룹이 ROAS 0.98로 적자**(오전 [탐색UP] 레인이 매시 입찰 상향한 구간). 정지 직전 11:20에도 자동 실집행 1건(그룹 15 입찰 230→270, change_log 638) 있었음.
+- **잔존**: approved 미실행 제안 13건(id 1923~1937, `bid_up_explore`·`explore_op`)이 남아 있고, 이제 실행 시도 시 거부되어 approved 상태로 유지(정지≠폐기, 설계된 동작). 재가동 시 재실행 가능.
+- **재가동 조건 미정** — Jino 지시 있을 때까지 정지 유지. 04·P_Test·맥세이프는 계속 자동운영.
+- 상세=`docs/tracks/active/track_naver-ad-optimization.md` D-NAO-92 + "현재 진행 단계"/"다음 액션" 최신 블록.
+
+## (이전) 최신 상태 (2026-07-23 16:36, 워크트리 ex-sprint-post-deployment-2e9656) — 17프로 입찰 3,060 유지 결정(D-NAO-91, 문서 기록만·코드 변경 0)
+- **수동 운영 세션(17프로=아이폰17프로 강화유리, 03 소속 애드그룹 `grp-a001-02-000000059879629`)**: 소재 `nad-a001-02-000000455468669` 입찰 14:54 KST 2,290→3,000(change_log 587)→16:35경 3,000→3,060(change_log 590, 상한 게이트가 3,700 요청을 3,060으로 캡) 실집행.
+- **머리 키워드 "아이폰17프로강화유리" 실순위 ≈6위**(Jino 실SERP 확인) — 그룹 avg_rank(3.7~4.8)가 롱테일 키워드에 눌려 이 6위를 가려온 구조적 사각(쇼핑=키워드 단위 입찰 없음).
+- **경제성 상한 = 3,060원**(90일 RPC 4,750÷BEP 1.5484). 앞선 3,740(RPC 5,795 기준)은 stale — 90일 롤링창에서 RPC 하락, 라이브 실측이 대체(원칙22).
+- **★Jino 결정(16:36 KST) = "3060원으로 기다려보자"**: top-5는 firm 요구("어쨌든 우리는 오등 안에 순위가 들어가 있어야 돼")이나 현재 경제성으론 top-5가 BEP 안전선(3,060)을 넘어야 가능 → BEP 안전선 우선, 한계 적자 안 냄, ~6위 수용하고 관망. top-5 재검토 조건 = 90일 RPC 회복 또는 BEP 개선 시.
+- **미결/관찰 대기**: N배송 물류비 회계가 BEP를 좌우하나 우리 정산 데이터로 확인 불가 → chip(task_10c8e239) 발행. 머리 키워드 실순위는 익일 배치 또는 Jino SERP 확인으로만 갱신 가능(자동 브라우징=네이버 418 봇차단).
+- 상세=`docs/tracks/active/track_naver-ad-optimization.md` D-NAO-91 + "현재 진행 단계" 최신 블록.
 
 ## 최신 상태 (2026-07-23 13:40, 워크트리 ex-sprint-post-deployment-2e9656) — Jino 결정 대기 3건 응답 완료(문서 기록만, 코드 변경 0)
 - EX 스프린트(D-NAO-85·87·89)는 아래 블록에서 이미 구현·배포·병합·첫 자동발사 라이브 실증까지 완료된 상태 — 이 세션은 남아있던 결정 대기 3건을 트랙 파일(D-NAO-90 신설 + "현재 진행 단계"/"다음 액션" 갱신)에 반영.

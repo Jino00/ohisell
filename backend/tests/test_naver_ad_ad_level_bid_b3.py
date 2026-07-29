@@ -426,7 +426,9 @@ def test_real_write_blocker_ad_bid_up_non_explore_not_executable(db):
     """BX2: 비탐색 승인원(콘솔 NULL)의 소재 UP은 미개방 — 실행 버튼 비활성(탐색 explore_op만)."""
     p = _ad_proposal(db, proposal_type="bid_up", target_bid=920)  # approval_source=None
     blocked = harness.real_write_blocker(p)
-    assert blocked is not None and "탐색" in blocked
+    # CS(D-NAO-96)로 소재 UP 자동 경로가 explore_op + cold_op 둘로 늘었다 — 문구가 바뀌었을 뿐
+    # 판정은 불변(콘솔 NULL 승인원의 소재 UP은 여전히 미개방).
+    assert blocked is not None and "explore_op" in blocked
 
 
 def test_build_guardrail_context_ad_current_bid_from_live_ad(db):

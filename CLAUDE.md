@@ -43,6 +43,18 @@
 - 백엔드: `scripts/safe_deploy.sh backend/app/... [--restart]` / 프론트: `--frontend`
 - CAS 거부가 뜨면 = 다른 세션이 배포한 것. **덮지 말고** fetch·병합 후 재시도.
 
+### ★DB 변경이 있으면 `--migrate` (마이그레이션 순서 가드, 2026-07-28)
+- 이유(rocket-1p 리뷰 실증): 이 앱은 **부팅 시 인프로세스 마이그레이션을 하지 않는다**.
+  `models.py`를 마이그레이션보다 먼저 배포하면 nullable 컬럼 추가라도 ORM이 엔티티를 통째로
+  SELECT 하다 `OperationalError: no such column` → **그 테이블 ingest 경로가 통째로 침묵**한다
+  (신규 필드만 죽는 게 아니다). 순서를 docstring/HANDOFF에 적는 방식은 이미 실패했으므로
+  safe_deploy.sh가 구조로 강제한다.
+- 강제 순서: **①마이그 파일 배포 → ②원격 `alembic upgrade head` → ③코드 배포 → ④재시작**
+- `scripts/safe_deploy.sh backend/alembic/versions/xxx.py backend/app/models.py --migrate --restart`
+- `--migrate` 없이 마이그레이션 대기 상태면 **코드 배포·재시작 거부**(수동 명령 안내 출력).
+  커밋된 로컬 마이그 파일이 prod에 없는데 배포 목록에도 없으면 그것도 거부.
+- 컬럼 삭제처럼 **구코드를 깨는** 마이그레이션은 순서가 반대 → `--migrate` 쓰지 말고 수동 조율.
+
 ## Skill routing
 
 When the user's request matches an available skill, ALWAYS invoke it using the Skill

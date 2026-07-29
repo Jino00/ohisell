@@ -299,7 +299,21 @@ def get_campaign_types() -> dict[str, str]:
 
 
 def get_campaigns_full() -> list[dict]:
-    """캠페인 전체 정보 반환: [{campaign_id, name, campaign_type, daily_budget, status}]."""
+    """캠페인 전체 정보 반환:
+    [{campaign_id, name, campaign_type, daily_budget, status, user_lock, status_reason}].
+
+    ★user_lock·status_reason은 D-NAO-97 추가(2026-07-28). 그 전까지 이 함수는 status만 넘겼고
+    entity_sync가 `status == "PAUSED"` → off로 **userLock을 역추론**했다. 그래서 일예산 소진
+    자동정지(status=PAUSED · statusReason=CAMPAIGN_LIMITED_BY_BUDGET · **userLock=false**)가
+    "외부(MOP/사람)가 캠페인을 잠갔다"는 유령 신호로 기록됐다(prod 실측: change_log id 847,
+    03 캠페인 2026-07-27 22:46). 그룹·키워드는 처음부터 userLock을 그대로 썼으므로 이 오탐이
+    캠페인 행에만 있었다 — 이 함수가 userLock을 안 넘긴 것이 유일한 원인이다.
+
+    필드명 근거(추정 아님): 공식 스키마 docs/references/data/ncc-heroes-ncc.json의
+    Campaign.userLock("캠페인의 On/Off 설정 … 노출을 중지할 경우 true")·Campaign.statusReason,
+    그리고 라이브 실측(2026-07-28 07:10 KST, 46캠페인 — ELIGIBLE 30 / PAUSED+CAMPAIGN_PAUSED
+    +userLock=true 16, 역추론과 실값이 어긋난 캠페인 1건 확인).
+    """
     resp = _get("/ncc/campaigns")
     resp.raise_for_status()
     return [{
@@ -308,6 +322,8 @@ def get_campaigns_full() -> list[dict]:
         "campaign_type": c.get("campaignTp", ""),
         "daily_budget": c.get("dailyBudget"),
         "status": c.get("status", ""),
+        "user_lock": bool(c.get("userLock", False)),
+        "status_reason": c.get("statusReason", ""),
     } for c in resp.json()]
 
 
@@ -584,8 +600,12 @@ def get_adgroups(campaign_id: str) -> list[dict]:
     §3.2, useExpSearch=true·expSearchBudgetRatio=100 관측 확인)으로 확정 — 추정 아님. 기존
     호출부(entity_sync)는 두 신규 키를 안 써도 무해(dict 추가 키, 기존 키 제거 없음).
 
-    Returns: [{"adgroup_id","campaign_id","name","status","user_lock","bid_amt",
+    Returns: [{"adgroup_id","campaign_id","name","status","status_reason","user_lock","bid_amt",
                "daily_budget","extended_search"}, ...]
+    status_reason(statusReason)는 D-NAO-97 추가 — "왜 꺼져 있나"(사람 OFF vs 예산소진 vs 검수)를
+    구분하는 유일한 필드. 그룹 status는 이미 userLock 기준이라 오탐은 없었지만, 사유를 저장하지
+    않으면 PAUSED의 원인을 사후에 알 방법이 없다(라이브 실측 2026-07-28: 그룹 PAUSED 548건 중
+    331건이 부모 캠페인 정지 상속 CAMPAIGN_PAUSED · userLock=false).
     """
     resp = _get("/ncc/adgroups", {"nccCampaignId": campaign_id})
     resp.raise_for_status()
@@ -594,6 +614,7 @@ def get_adgroups(campaign_id: str) -> list[dict]:
         "campaign_id": a["nccCampaignId"],
         "name": a.get("name", ""),
         "status": a.get("status", ""),
+        "status_reason": a.get("statusReason", ""),
         "user_lock": bool(a.get("userLock", False)),
         "bid_amt": a.get("bidAmt"),
         "daily_budget": a.get("dailyBudget"),
@@ -605,7 +626,11 @@ def get_keywords(adgroup_id: str) -> list[dict]:
     """광고그룹의 키워드 목록 (P2-S1 entity_sync, WEB_SITE만 호출 — SHOPPING은 개별 키워드 무의미,
     실측: 계정 전체 등록 키워드 90,379건 중 90,150건이 WEB_SITE 소속, docs/references/22).
 
-    Returns: [{"keyword_id","adgroup_id","keyword","status","user_lock","bid_amt","qi_grade"}, ...]
+    Returns: [{"keyword_id","adgroup_id","keyword","status","status_reason","user_lock","bid_amt","qi_grade"}, ...]
+    status_reason(statusReason, D-NAO-97): 공식 스키마 AdKeyword.statusReason enum =
+    KEYWORD_DELETED/KEYWORD_PAUSED/KEYWORD_DISAPPROVED/KEYWORD_UNDER_REVIEW.
+    검수 반려(DISAPPROVED)·검수 중(UNDER_REVIEW)은 사람이 끈 것이 아니다 — 저장해두지 않으면
+    "왜 이 키워드가 안 도나"를 사후에 알 수 없다.
     qi_grade(1~7, 품질지수)는 /ncc/keywords 응답 nccQi.qiGrade — entity_sync 기존 일일
     열거에 무상 편승(추가 콜 0, D-NAO-46②, ref 32 §5).
     """
@@ -616,6 +641,7 @@ def get_keywords(adgroup_id: str) -> list[dict]:
         "adgroup_id": k["nccAdgroupId"],
         "keyword": k.get("keyword", ""),
         "status": k.get("status", ""),
+        "status_reason": k.get("statusReason", ""),
         "user_lock": bool(k.get("userLock", False)),
         "bid_amt": k.get("bidAmt"),
         "qi_grade": (k.get("nccQi") or {}).get("qiGrade"),

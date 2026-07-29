@@ -923,8 +923,13 @@ def test_harness_kill_switch_flip_after_entry_check_blocks_writer(db):
 
 def _ctr_alert_rows(db, *, adgroup_id="grp-1", campaign_id=CAMPAIGN, imp=300, clk=0, rank=3.0):
     """ctr_alert의 W3 창(D0-2..D0, D0=NOW.date()-1)에 들어가는 naver_ad_daily 3일 시드 —
-    누적 imp≥200·clk=0·avg_rank≤4.0(밴드 내) → 경보 발화."""
+    누적 imp≥200·clk=0·avg_rank≤4.0(밴드 내) → 경보 발화. D-NAO-103 이후에는 기대클릭
+    게이트(≥2)가 있어 트레일링 창(~D0-3]의 기준 CTR 시드가 함께 있어야 발화한다."""
     d0 = NOW.date() - timedelta(days=1)
+    db.add(NaverAdDaily(  # 트레일링 기준 CTR 2%(imp 1000·clk 20) → 기대클릭 = 0.02 × 창 노출
+        ad_date=d0 - timedelta(days=10), campaign_id=campaign_id, campaign_type="SHOPPING",
+        adgroup_id=adgroup_id, keyword_id="", imp=1000, clk=20, cost=0, rank_sum=3000,
+    ))
     for k in range(3):
         db.add(NaverAdDaily(
             ad_date=d0 - timedelta(days=k), campaign_id=campaign_id, campaign_type="SHOPPING",
@@ -943,6 +948,7 @@ def test_daily_lane_ctr_alert_briefing_emitted_when_alert_present(db):
         result = auto_operator.run_daily_lane(db, now=NOW)
 
     assert result["ctr_alerts"] >= 1
+    assert result["ctr_alerts_fired"] >= 1  # 첫 판정 = 신규 진입 → 즉시 발화
     briefs = db.query(OpsDiaryEntry).filter(
         OpsDiaryEntry.action == auto_operator.ACTION_CTR_ALERT_BRIEFING
     ).all()
@@ -952,21 +958,53 @@ def test_daily_lane_ctr_alert_briefing_emitted_when_alert_present(db):
 
 
 def test_daily_lane_ctr_alert_briefing_dedupes_w1_w3(db):
-    """codex 1R P2-2: 한 그룹이 W1·W3 동시 발화(clk=0 3일)해도 브리핑은 그룹당 1행(window
-    'W1+W3' 병기)·헤더 건수도 그룹 수(1) 기준(2건 중복 집계 금지)."""
+    """한 그룹이 W1·W3 동시 발화(clk=0 3일)해도 브리핑은 그룹당 1건 — 건수도 그룹 수(1) 기준
+    (2건 중복 집계 금지). D-NAO-103: 창 표기는 사람 말('최근 1일·3일')로 나간다."""
     _settings(db)
     _ctr_alert_rows(db)  # clk=0 3일 → 같은 그룹 W1(D0 단일일)·W3(누적) 동시 발화
     with patch.object(auto_operator.slack_notifier, "notify_text", return_value={"sent": True}):
-        auto_operator.run_daily_lane(db, now=NOW)
+        result = auto_operator.run_daily_lane(db, now=NOW)
 
+    assert result["ctr_alerts"] == 1  # 그룹 수 기준(2건 아님)
     briefs = db.query(OpsDiaryEntry).filter(
         OpsDiaryEntry.action == auto_operator.ACTION_CTR_ALERT_BRIEFING
     ).all()
     assert len(briefs) == 1
     rationale = briefs[0].rationale
-    assert "경보 1건" in rationale            # 그룹 수 기준(2건 아님)
-    assert rationale.count("/grp-1(") == 1    # 그룹당 1행(중복 행 없음)
-    assert "W1+W3" in rationale               # window 병기
+    assert "새로 생긴 문제 1건" in rationale
+    assert rationale.count("grp-1") == 1      # 그룹당 1행(중복 행 없음)
+    assert "최근 1일·3일" in rationale         # 내부 창 코드(W1/W3) 노출 금지
+    assert "W1" not in rationale and "W3" not in rationale
+    assert "D-NAO" not in rationale           # 내부 결정 코드 노출 금지
+
+
+def test_daily_lane_ctr_alert_repeat_is_suppressed_next_day(db):
+    """D-NAO-103 핵심: 같은 그룹이 이튿날에도 판정되면 개별 발화하지 않는다(만성 = 주간 요약행).
+    이튿날(화요일)엔 브리핑 자체가 없다 — 판정은 그대로 1건, 발화만 0."""
+    _settings(db)
+    _ctr_alert_rows(db)
+    with patch.object(auto_operator.slack_notifier, "notify_text", return_value={"sent": True}):
+        auto_operator.run_daily_lane(db, now=NOW)
+
+    # 이튿날 같은 조건(창이 하루 밀리도록 D0+1 행 추가) — 화요일이라 주간 요약도 아님.
+    next_now = NOW + timedelta(days=1)
+    db.add(NaverAdDaily(
+        ad_date=next_now.date() - timedelta(days=1), campaign_id=CAMPAIGN,
+        campaign_type="SHOPPING", adgroup_id="grp-1", keyword_id="",
+        imp=300, clk=0, cost=0, rank_sum=900,
+    ))
+    db.commit()
+    with patch.object(auto_operator.slack_notifier, "notify_text",
+                       return_value={"sent": True}) as mock_slack2:
+        result2 = auto_operator.run_daily_lane(db, now=next_now)
+
+    assert result2["ctr_alerts"] == 1              # 판정은 그대로(래더 skip 게이트는 계속 작동)
+    assert result2["ctr_alerts_fired"] == 0        # 사람에게는 안 알림
+    assert result2["ctr_alerts_suppressed"] == 1
+    mock_slack2.assert_not_called()
+    assert db.query(OpsDiaryEntry).filter(
+        OpsDiaryEntry.action == auto_operator.ACTION_CTR_ALERT_BRIEFING
+    ).count() == 1  # 첫날 1건 그대로(이튿날 추가 없음)
 
 
 def test_daily_lane_ctr_alert_briefing_silent_when_no_alert(db):
@@ -3378,3 +3416,140 @@ def test_bid_up_rank_not_in_daily_lane_types():
 def test_bid_up_rank_excluded_from_delegation():
     from app.services.naver_ad import delegation_gate
     assert "bid_up_rank" not in delegation_gate.delegable_types()  # rank-step 위임 영구 제외(inline)
+
+
+# ═════════════ 학습밴드 vs 하드코딩 2.5 충돌 해소 (2026-07-28) ═════════════
+# 상수 2.5가 학습된 최적밴드(1.0-2.0)를 이겨서 탐침이 자기 최적점에 도달하지 못하고,
+# 그것을 막으려던 CD5 게이트도 2.5>2.0이라 영원히 발동하지 않던 구조를 해소한다.
+
+def test_probe_rank_floor_lowers_only_for_learned_band_below_prior():
+    """학습밴드 상한이 2.5보다 좋을 때만 하한을 낮춘다 — 그 외는 전부 종전 그대로."""
+    from decimal import Decimal as D
+    assert auto_operator._probe_rank_floor("1.0-2.0") == D("2")   # ★유일하게 값이 바뀌는 경우
+    assert auto_operator._probe_rank_floor("2.0-2.5") is None     # band_high==2.5 = 프라이어와 동일
+    assert auto_operator._probe_rank_floor("2.5-3.0") is None     # 느슨한 쪽으로 완화하지 않는다
+    assert auto_operator._probe_rank_floor("3.0-4.0") is None
+    assert auto_operator._probe_rank_floor("4.0+") is None        # 개방 밴드 = CD5가 담당(종전 경로)
+    assert auto_operator._probe_rank_floor(None) is None          # 학습값 없음 = 프라이어 유지
+
+
+def test_probe_rank_floor_unknown_label_falls_back_to_prior():
+    """알 수 없는 라벨은 예외를 밖으로 던지지 않고 프라이어로 폴백(조용한 오판정 방지)."""
+    assert auto_operator._probe_rank_floor("존재하지-않는-밴드") is None
+
+
+def test_probe_trigger_reaches_learned_optimum_when_floor_lowered():
+    """★핵심 회귀: 학습밴드 1.0-2.0이면 rank 2.0~2.5 구간에서도 탐침이 발동한다.
+    이 구간이 막혀 있어서 탐침이 학습 최적점(2.0)에 구조적으로 도달할 수 없었다."""
+    from decimal import Decimal as D
+    now = datetime(2026, 7, 20, 8, 20, 0)
+    curve = [_hour(6, imp=20, clk=0, cost=200, avg_rank=2.2),
+             _hour(7, imp=20, clk=0, cost=200, avg_rank=2.2)]
+    # 종전(하한 2.5): 미발동
+    assert auto_operator._probe_trigger(curve, now)[0] is False
+    # 학습밴드 1.0-2.0 반영(하한 2.0): 발동
+    fired, reason = auto_operator._probe_trigger(
+        curve, now, rank_floor=auto_operator._probe_rank_floor("1.0-2.0"),
+    )
+    assert fired is True
+    assert "학습밴드" in reason  # 근거가 하드코딩이 아니라 학습값임이 사유에 남는다
+    # 학습 최적점 안쪽(2.0 미만)까지 오면 다시 멈춘다 — 무한 상승 아님
+    inner = [_hour(6, imp=20, clk=0, cost=200, avg_rank=1.5),
+             _hour(7, imp=20, clk=0, cost=200, avg_rank=1.5)]
+    assert auto_operator._probe_trigger(inner, now, rank_floor=D("2"))[0] is False
+
+
+def test_probe_trigger_default_floor_unchanged_without_learned_band():
+    """학습밴드가 없으면 종전과 완전히 동일(rank 2.2는 미발동, 3.0은 발동)."""
+    now = datetime(2026, 7, 20, 8, 20, 0)
+    below = [_hour(6, imp=20, clk=0, cost=200, avg_rank=2.2),
+             _hour(7, imp=20, clk=0, cost=200, avg_rank=2.2)]
+    above = [_hour(6, imp=20, clk=0, cost=200, avg_rank=3.0),
+             _hour(7, imp=20, clk=0, cost=200, avg_rank=3.0)]
+    assert auto_operator._probe_trigger(below, now, rank_floor=None)[0] is False
+    assert auto_operator._probe_trigger(above, now, rank_floor=None)[0] is True
+
+
+def test_learned_band_of_swallows_lookup_failure(monkeypatch):
+    """학습밴드 조회 실패가 시간당 레인 전체를 막지 않는다(None 폴백)."""
+    from app.services.naver_ad import probe_learning_loop
+
+    def _boom(*a, **kw):
+        raise RuntimeError("aggregate 실패")
+
+    monkeypatch.setattr(probe_learning_loop, "learned_probe_rank", _boom)
+    assert auto_operator._learned_band_of(
+        None, datetime(2026, 7, 20, 8, 20, 0), "cmp-x",
+    ) is None
+
+
+# ═══════ 학습밴드 스코프 불일치 해소 (2026-07-29, Jino 확정) ═══════
+# 09:03 학습 잡은 계정 전체 밴드를 승격시키는데 게이트는 캠페인별만 읽어서,
+# 학습해놓고 아무도 안 읽는 상태였다. 자기 밴드가 없을 때만 계정 밴드를 빌리되
+# **사후 고삐(RL3)가 발동 가능한 유닛(BEP 확인)에만** 연다.
+
+def test_account_band_fallback_requires_bep(monkeypatch):
+    """BEP 미확인 유닛은 폴백을 안 쓴다 — 사후 고삐가 fail-closed로 침묵하기 때문."""
+    from app.services.naver_ad import intraday_roas
+
+    monkeypatch.setattr(auto_operator, "_resolve_adgroup_id", lambda *a, **kw: "grp-1")
+    monkeypatch.setattr(intraday_roas, "adgroup_unit_price",
+                        lambda db, aid: {"price": None, "bep_roas": None})
+    ok, why = auto_operator._account_band_fallback_ok(None, "keyword", "kw-1")
+    assert ok is False
+    assert "BEP 미확인" in why
+
+    monkeypatch.setattr(intraday_roas, "adgroup_unit_price",
+                        lambda db, aid: {"price": 16800, "bep_roas": Decimal("2.03")})
+    ok, why = auto_operator._account_band_fallback_ok(None, "keyword", "kw-1")
+    assert ok is True
+
+
+def test_account_band_fallback_blocked_when_adgroup_unresolved(monkeypatch):
+    """adgroup 해석 실패도 fail-closed — 근거 없이 빌린 값으로 올리지 않는다."""
+    monkeypatch.setattr(auto_operator, "_resolve_adgroup_id", lambda *a, **kw: None)
+    ok, _ = auto_operator._account_band_fallback_ok(None, "keyword", "kw-1")
+    assert ok is False
+
+
+def test_account_band_fallback_swallows_lookup_error(monkeypatch):
+    """BEP 조회가 터져도 레인을 막지 않고 폴백만 보류한다."""
+    from app.services.naver_ad import intraday_roas
+
+    def _boom(*a, **kw):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(auto_operator, "_resolve_adgroup_id", lambda *a, **kw: "grp-1")
+    monkeypatch.setattr(intraday_roas, "adgroup_unit_price", _boom)
+    ok, why = auto_operator._account_band_fallback_ok(None, "keyword", "kw-1")
+    assert ok is False and "조회 실패" in why
+
+
+def test_learned_bands_of_returns_own_and_account(monkeypatch):
+    """(자기 밴드, 계정 밴드) 둘 다 반환 — 호출부가 조건부로 고를 수 있게."""
+    calls = []
+
+    def _fake(db, now, campaign_id):
+        calls.append(campaign_id)
+        return "1.0-2.0" if campaign_id is None else None
+
+    monkeypatch.setattr(auto_operator, "_learned_band_of", _fake)
+    own, acct = auto_operator._learned_bands_of(None, datetime(2026, 7, 29, 10, 0), "cmp-x")
+    assert own is None and acct == "1.0-2.0"
+    assert calls == ["cmp-x", None]  # 자기 → 계정 순서
+
+
+def test_probe_floor_uses_account_band_only_via_fallback():
+    """★핵심: 계정 밴드가 1.0-2.0이어도 그것을 '쓰기로 결정'해야만 하한이 내려간다.
+    폴백이 막히면(BEP 미확인) 하한은 종전 프라이어 2.5 그대로다."""
+    from decimal import Decimal as D
+    now = datetime(2026, 7, 20, 8, 20, 0)
+    curve = [_hour(6, imp=20, clk=0, cost=200, avg_rank=2.2),
+             _hour(7, imp=20, clk=0, cost=200, avg_rank=2.2)]
+    # 폴백 차단 → band=None → 하한 2.5 → 미발동(종전과 동일)
+    assert auto_operator._probe_trigger(
+        curve, now, rank_floor=auto_operator._probe_rank_floor(None))[0] is False
+    # 폴백 허용 → band='1.0-2.0' → 하한 2.0 → 발동
+    fired, reason = auto_operator._probe_trigger(
+        curve, now, rank_floor=auto_operator._probe_rank_floor("1.0-2.0"))
+    assert fired is True and "학습밴드" in reason

@@ -52,9 +52,20 @@ def take_daily_snapshot(db: Session, *, today: date | None = None) -> dict:
         # naver_ad_daily에 이 ad_date 행 자체가 없으면(미수집/07:30 크론 아직 안 돎) 스킵 —
         # "진짜 전환 0원 확정"과 "아직 안 채워짐"을 구분 못 하면 곡선이 왜곡된다. days_since=0
         # (오늘)도 예외 없이 동일 규칙 적용(오늘 데이터가 아직 안 들어왔으면 관측 자체가 불가).
+        # ★2026-07-29 수정: 이 존재 판정과 아래 금액 집계가 **서로 다른 필터**를 쓰고 있었다.
+        # 존재 판정은 백필 sentinel(`__backfill__`) 행까지 셌고 금액은 sentinel을 제외했다.
+        # 그래서 **sentinel 행만 있는 ad_date**가 "행이 있다 → 스킵 안 함 → 금액 0"으로 흘러
+        # 위 docstring이 막으려던 바로 그 일("아직 안 채워짐"을 "진짜 0원"으로 기록)이 일어났다.
+        # 실측 피해: 07-01·07-02·07-03 코호트가 days_since 8~20에 0으로 박힌 뒤 실단위 데이터가
+        # 도착한 날(07-21) 한 번에 점프하는 인위적 계단이 됐고, `compute_curve`가 그것을
+        # "전환이 원래 느리게 붙는다"로 읽어 곡선이 days 8~18에서 정확히 4/7로 고정됐다.
+        # 두 쿼리가 같은 모집단을 봐야 한다 — 금액 쪽과 동일한 sentinel 제외를 여기에도 건다.
         existing_any = (
             db.query(sqlfunc.count(NaverAdDaily.id))
-            .filter(NaverAdDaily.ad_date == ad_date).scalar() or 0
+            .filter(
+                NaverAdDaily.ad_date == ad_date,
+                NaverAdDaily.adgroup_id != BACKFILL_SENTINEL_ADGROUP,
+            ).scalar() or 0
         )
         if existing_any == 0:
             continue
@@ -110,6 +121,73 @@ def compute_curve(db: Session) -> dict:
         for d, vals in ratios_by_day.items() if vals
     }
     return {"curve": curve, "cohort_n": len(mature_ad_dates), "skipped_reason": None}
+
+
+# 성숙 환산 배수 상한 — 곡선이 망가져(m(d)가 0에 가깝게) 상한을 폭주시키는 것을 막는 fail-safe.
+# 3배 = 관측 시점에 최종 매출의 1/3만 보이는 경우까지 허용. 그보다 심한 지연은 곡선을 의심한다.
+_MAX_MATURITY_MULTIPLIER = Decimal("3")
+
+
+def load_curve(db: Session) -> dict[int, Decimal]:
+    """m(d) 곡선 로드 — {days_since: 성숙(D+21) 대비 그날 시점 관측 비율}. 미산출이면 빈 dict.
+
+    run_daily가 NaverLearningState(scope="global", scope_key="day_<d>", metric="conv_delay")에
+    적립한 것을 그대로 읽는다. 코호트 부족으로 곡선이 없으면 빈 dict → 소비자는 보정 없이(배수 1.0)
+    기존 동작을 유지한다(fail-safe — 없는 곡선을 추정으로 만들지 않는다)."""
+    rows = (
+        db.query(NaverLearningState.scope_key, NaverLearningState.current_value)
+        .filter(
+            NaverLearningState.scope == "global",
+            NaverLearningState.metric == METRIC,
+            NaverLearningState.current_value.isnot(None),
+        )
+        .all()
+    )
+    out: dict[int, Decimal] = {}
+    for scope_key, value in rows:
+        if not scope_key or not scope_key.startswith("day_"):
+            continue
+        try:
+            out[int(scope_key[4:])] = Decimal(value)
+        except (ValueError, TypeError):
+            continue
+    return out
+
+
+def maturity_multiplier(curve: dict[int, Decimal], days_since: int) -> Decimal:
+    """관측 매출 → **성숙 시점 추정 매출**로 환산하는 배수(= 1/m(d)).
+
+    ★왜 필요한가: 전환은 ad_date로부터 며칠에 걸쳐 정착하므로, 최근 며칠의 conv_amt는 항상
+    과소계상 상태다. 그 값을 그대로 쓰면 최근 성과가 실제보다 나쁘게 보인다. 원리는 여기까지다.
+
+    ★★검증된 것과 아닌 것을 구분한다(2026-07-28 실측으로 초판 주석을 정정).
+    초판은 "이 보정은 신규/런칭 상품에 가장 크게 작동한다(의도된 표적성)"라고 **단정**했다.
+    prod 사본 406개 그룹 전/후 비교로 그 주장은 **반증됐다**:
+      · 배수 중앙값 1.071 / p90 1.231 / 최댓값 1.750 · 37%는 무변화(1.0)
+      · 1.5배 이상 상승 그룹의 **80%가 90일 내내 존재한 기존 상품**이었다
+      · 이 변경을 하게 만든 갤럭시Z 8시리즈 3그룹은 **전부 배수 1.0000 = 무효과**
+    실제 판별 변수는 신규성이 아니라 **표본 희소성**(저클릭 그룹의 전환이 고배수 구간에
+    우연히 몰릴 때 최대 배율을 맞는다). 표적성 주장은 **철회한다** — 근거 없이 코드에
+    남기면 다음 사람이 그것을 믿는다.
+
+    ★★★현재 상태: **미배포·보류.** 곡선(`compute_curve`)이 days_since 8~18에서 11칸 연속
+    정확히 0.5714(=4/7)를 낸다. 이는 감쇠 곡선의 자연 관측이 아니라 산술의 퇴화다 —
+    `compute_curve`는 코호트별 비율의 **단순 평균**(line 109)이라, 성숙 코호트 7개 중
+    4개가 비율 1.0(그 구간에 이미 최종값)이고 3개가 0.0이면 평균이 정확히 4/7로 고정된다.
+    그리고 이 보정의 **최댓값 1.75배가 바로 이 구간에서 나온다.** 즉 지금 배포하면
+    "이익 상한 최대 +75%"의 근거가 실측 감쇠가 아니라 코호트 7개의 이산 조합이 된다.
+    선결: 곡선 퇴화 규명·해소 → 배수 분포 재측정 → 그 뒤 배포 판단(Jino).
+
+    fail-safe 규칙(하나라도 걸리면 배수 1.0 = 보정 없음, 기존 동작):
+      · 곡선 없음(코호트 부족)  · days_since ≥ MATURITY_DAYS(이미 성숙)
+      · m(d)가 0 이하(정의 불가)  · m(d) ≥ 1(이미 다 찼거나 이상값)
+    상한은 _MAX_MATURITY_MULTIPLIER — 망가진 곡선이 이익 상한을 폭주시키지 못하게 한다."""
+    if days_since < 0 or days_since >= MATURITY_DAYS or not curve:
+        return Decimal(1)
+    m = curve.get(days_since)
+    if m is None or m <= 0 or m >= 1:
+        return Decimal(1)
+    return min(Decimal(1) / m, _MAX_MATURITY_MULTIPLIER)
 
 
 def _upsert_learning_state(db: Session, *, scope_key: str, value: Decimal, sample_n: int, confidence: Decimal) -> None:

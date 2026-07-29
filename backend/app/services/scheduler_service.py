@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from app.utils.kst import kst_now, kst_today
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 
 from apscheduler.events import (
     EVENT_JOB_ERROR,
@@ -38,6 +39,11 @@ scheduler = BackgroundScheduler(
 # 나간다(이 레인의 문서화된 정책 = catch-up 제외, 놓친 회차는 폐기·다음 정시가 재기회).
 # 5분(:20 잡이 :25 내에 못 돌면 폐기)만 허용. 일 레인(08:50)은 전역 기본+catch-up 정책 유지.
 _AUTO_OPERATOR_HOURLY_MISFIRE_GRACE = 300
+
+# 네이버 시간별 주문 동기화 전용 misfire 유예 — 전역 3600s를 상속하면 재시작 직후 최대
+# 1시간 늦게 발화한다. 근시간 보정 레인이라 그 시점엔 이미 다음 정시가 임박했으므로
+# _AUTO_OPERATOR_HOURLY_MISFIRE_GRACE와 같은 패턴으로 300초만 허용(catch-up 정책과 정합).
+_NAVER_ORDERS_HOURLY_MISFIRE_GRACE = 300
 
 
 def _get_own_db_session():
@@ -149,6 +155,60 @@ def sync_all_channels_job():
 
     except Exception as e:
         log.exception("[스케줄러] sync_all_channels_job 에러: %s", e)
+        raise  # 삼킴 정렬(S5b): EVENT_JOB_ERROR/HTTP500로 실패 표면화(16일 침묵 사고 방지)
+    finally:
+        db.close()
+
+
+def sync_naver_orders_hourly_job():
+    """네이버 스마트스토어 주문 시간별 동기화 (스케줄러 작업) — 근시간 공백 메움 전용.
+
+    ★왜 스마트스토어 전용인가: 2026-07-28 실사고 — 근시간 동기화의 유일한 트리거가
+    프런트엔드 마운트 시 호출되는 POST /api/sync/realtime였고, 서버 자동 실행은
+    auto_sync_orders 일 1회(06:00)뿐이라, 아무도 대시보드를 열지 않으면 7시간 넘게
+    동기화 시도 자체가 0건이었다(sync_log 6채널 전부 공백 실증). 네이버 광고 성과를
+    당일 스마트스토어 실주문으로 대조하는 작업이 이 공백에 막혀 스마트스토어부터
+    좁혀서 잡는다(Jino 확정 2026-07-28). 쿠팡(Wing/RG)·cafe24는 같은 공백에 걸리지만
+    이번 스코프 밖 — "이왕 하는 김에" 확대하지 않는다.
+    ★왜 7일 창(date_from=None)인가: sync_channel_orders 기본창(kst_today()-7일)을 그대로
+    쓴다. 06:00 일 배치(sync_all_channels_job)는 취소 반영을 위해 30일 넓은 창을 쓰지만,
+    그건 하루 1회면 충분한 몫이다. 이 잡은 시간마다 도는 좁은 보정 레인이라 좁은 창으로
+    충분하고, 30일 창을 매시간 돌리면 불필요한 API 부하만 늘어난다.
+    ★왜 RG 미포함인가: RG 주문 동기화(sync_all_rg_orders)는 이번 스코프 밖(Jino 확정) —
+    sync_all_channels_job을 참고 삼되 그 호출은 절대 가져오지 않는다.
+    ★왜 catch-up 제외인가: 시간성이 소멸하는 근시간 보정 레인이다. 놓친 회차를 뒤늦게
+    따라잡아 봐야 그 시각의 "근시간" 가치가 없다 — 다음 정시가 재기회(_AUTO_OPERATOR_HOURLY_MISFIRE_GRACE와
+    같은 사상, run_naver_auto_operator_hourly_job 참고).
+    역할 분담: 06:00 일 배치 = 넓은 30일 창 + 전 채널 + RG(취소 정합 포함) / 이 잡 = 좁은
+    7일 창 + 스마트스토어 단독(근시간 공백 메움).
+    """
+    db = _get_own_db_session()
+    try:
+        from app.services.sync_service import sync_channel_orders
+
+        # ★channel_id 하드코딩 금지(DB 시퀀스라 취약) — platform으로 대상 선정.
+        # api_type != "excel"은 방어적 계약 명시(현재 네이버 채널은 excel 아님이 라이브 실측이나,
+        # 엑셀 전용 채널이 실수로 naver platform으로 등록돼도 sync_channel_orders 호출을 막는다).
+        channels = db.query(Channel).filter(
+            Channel.platform == "naver", Channel.api_type != "excel"
+        ).all()
+        if not channels:
+            log.info("[스케줄러] sync_naver_orders_hourly_job: 대상 네이버 채널 없음 — 건너뜀")
+            return
+
+        for ch in channels:
+            try:
+                result = sync_channel_orders(db, ch.id, None, None)
+                log.info(
+                    "[스케줄러] 네이버 시간별 주문 동기화 완료: 채널 %s → %s (신규: %s, 취소반영: %s)",
+                    ch.name, result.get("status"), result.get("new_orders"),
+                    result.get("reconciled_cancelled"),
+                )
+            except Exception as e:
+                log.error("[스케줄러] 네이버 시간별 주문 동기화 채널 %s 에러: %s", ch.name, e)
+
+    except Exception as e:
+        log.exception("[스케줄러] sync_naver_orders_hourly_job 에러: %s", e)
         raise  # 삼킴 정렬(S5b): EVENT_JOB_ERROR/HTTP500로 실패 표면화(16일 침묵 사고 방지)
     finally:
         db.close()
@@ -285,7 +345,21 @@ def trigger_watch_job():
 
 
 def sync_naver_entity_job():
-    """네이버 SA 엔티티(캠페인/그룹/키워드) 인벤토리 동기화 (07:35 KST, P2-S1)."""
+    """네이버 SA 엔티티(캠페인/그룹/키워드) 인벤토리 동기화 (07:35 KST, P2-S1).
+
+    ★완료 직후 BM 레이어를 체이닝 호출한다(구 07:37 독립 크론 폐지). 이유 = 구조적 경합:
+    entity_sync는 45캠페인+1,004그룹+~91,099키워드를 순차 fetch한 뒤 **맨 끝에서 한 번**
+    commit해서(entity_sync.py 단일 commit) 실제 commit 시각이 07:37을 넘긴다 → 구 07:37 크론의
+    naver_entity_snapshot(D)이 항상 entity_sync(D-1) 값을 담았다(2026-07-23~27 5/5일 라이브
+    실측, 스냅샷 commit이 entity_sync commit보다 +2.9s~+50.9s 먼저). 크론 시각을 뒤로 미루는
+    것은 fetch 소요가 가변이라 근본 해결이 아니므로, '완료'를 신호로 삼는 체이닝으로 바꾼다.
+
+    sync가 실패해도 BM은 실행한다 — 구 07:37 크론이 sync 성공 여부와 무관하게 발화하던 것과
+    동일(스냅샷 연속성 유지). 단 체이닝은 이 잡의 성공/실패 판정을 절대 바꾸면 안 되므로
+    non-throwing 경계로 감싼다(codex R1 [P1]): run_naver_bm_layer_job은 세션 생성이 try 밖이고
+    finally의 db.close()도 안 삼켜서, 그 둘 중 하나가 던지면 finally에서 성공한 sync를 실패로
+    뒤집거나 진행 중인 sync 예외를 BM 예외로 교체한다(예외 마스킹).
+    """
     db = _get_own_db_session()
     try:
         from app.services.naver_ad.entity_sync import sync_entities
@@ -297,15 +371,32 @@ def sync_naver_entity_job():
         raise
     finally:
         db.close()
+        # 세션을 닫은 뒤(=단일 commit 확정 후) 체이닝 — 이 순서라야 스냅샷이 당일 sync 결과를 본다.
+        _chain_bm_layer_after_entity_sync()
+
+
+def _chain_bm_layer_after_entity_sync():
+    """entity_sync 완료 후 BM 레이어 체이닝 — 어떤 예외도 상류로 새지 않는 경계.
+
+    finally에서 호출되므로 여기서 예외가 나가면 sync 잡의 결과를 덮어쓴다(성공→실패 오판,
+    또는 sync 예외 교체 → EVENT_JOB_ERROR가 엉뚱한 원인을 보고). BM은 관찰 전용이라
+    sync의 last_run_at·에러 표면화에 영향을 줄 자격이 없다(§0 금지선 5와 동일 정신).
+    """
+    try:
+        run_naver_bm_layer_job()
+    except Exception as e:  # noqa: BLE001 — 관찰 잡이 상류 sync 판정을 바꾸면 안 됨(codex R1 [P1])
+        log.exception("[스케줄러] BM 체이닝 실패(무시, sync 판정 보존): %s", e)
 
 
 def run_naver_bm_layer_job():
-    """BM(벤치마크) 학습 레이어 (07:37 KST, D-NAO-78, PLAN_naver-ad-bm-layer.md §7).
+    """BM(벤치마크) 학습 레이어 (D-NAO-78, PLAN_naver-ad-bm-layer.md §7).
 
-    07:35 entity_sync 직후 발화 — naver_entity(DB)를 읽어 계정 전체 45캠페인(대행사 포함)의
-    캠페인·그룹 grain 구조를 날짜별 스냅샷(SA-1, Phase 3 예산·확장검색 GET 포함·관찰 전용).
-    run_bm_layer 내부가 전면 fail-open이라 catch-up 체인에는 넣지 않는다(관찰 잡, 놓치면
-    다음날 스냅샷이 이어짐)."""
+    ★별도 크론이 아니다 — sync_naver_entity_job(07:35) 완료 직후 체이닝으로 실행된다(구 07:37
+    크론은 폐지, 사유는 sync_naver_entity_job docstring 참조). naver_entity(DB)를 읽어 계정 전체
+    45캠페인(대행사 포함)의 캠페인·그룹 grain 구조를 날짜별 스냅샷(SA-1, Phase 3 예산·확장검색
+    GET 포함·관찰 전용). run_bm_layer 내부가 전면 fail-open이라 catch-up 체인에 독립 항목으로는
+    넣지 않는다(관찰 잡, 놓치면 다음날 스냅샷이 이어짐 — 상류 sync_naver_entity가 catch-up되면
+    체이닝으로 함께 따라잡힌다)."""
     db = _get_own_db_session()
     try:
         from app.services.naver_ad.bm_harness import run_bm_layer
@@ -321,8 +412,9 @@ def run_naver_bm_layer_job():
 def run_naver_bm_deep_job():
     """BM 벤치마크 레이어 주간 deep 차원 (일요일 09:20 KST, D-NAO-78, PLAN_naver-ad-bm-layer.md §7).
 
-    무거운 그룹별 GET(제외키워드·소재수, ~1,100 GET/주)을 일별 07:37 레인과 분리해 아침 집행
-    레인이 다 끝난 한산한 시간대(일요일)에 실행 — 07:40 검색어 잡 지연 방지(§7). run_bm_deep
+    무거운 그룹별 GET(제외키워드·소재수, ~1,100 GET/주)을 일별 체이닝 레인(entity_sync 직후,
+    구 07:37 크론)과 분리해 아침 집행 레인이 다 끝난 한산한 시간대(일요일)에 실행 — 07:40
+    검색어 잡 지연 방지(§7). run_bm_deep
     내부가 전면 fail-open이라 catch-up 체인에는 넣지 않는다(관찰 잡, 놓쳐도 다음 주에 이어짐)."""
     db = _get_own_db_session()
     try:
@@ -442,8 +534,14 @@ def run_naver_flight_loop_job():
         from app.services.naver_ad.flight_loop import run_flight_loop
 
         result = run_flight_loop(db)
-        log.info("[스케줄러] naver flight_loop: %d캠페인, dry_run=%s",
-                 result["campaigns_processed"], result.get("dry_run", True))
+        # ★breakdown 없이 캠페인 수만 찍으면 전원 스킵도 정상 완주로 읽힌다(flight_loop
+        # 실사고 2026-07-25~28). 결정/스킵/오류를 분해해서 남긴다 — 잡 로그만 보고도
+        # "돌긴 돌았는데 아무 결정도 안 났다"가 보여야 한다.
+        log.info(
+            "[스케줄러] naver flight_loop: %d캠페인 (결정 %s, 스킵 %s %s, 오류 %s), dry_run=%s",
+            result["campaigns_processed"], result.get("decided"), result.get("skipped"),
+            result.get("skip_breakdown"), result.get("errors"), result.get("dry_run", True),
+        )
     except Exception as e:
         log.exception("[스케줄러] run_naver_flight_loop_job 에러: %s", e)
         raise
@@ -629,6 +727,26 @@ def sweep_naver_keyword_hourly_job():
         db.close()
 
 
+def sweep_naver_today_hourly_job():
+    """당일 그룹 grain 시간별(hh24) 축적 — 매시 :10 KST (D-NAO-122).
+
+    :05 캠페인 스냅샷 뒤, :20 auto_operator 시간당 레인 앞에 둔다 — 레인이 같은 시각의
+    당일 그룹 데이터를 읽을 수 있게. 진행 중인 시간 버킷은 저장하지 않고, 네이버 반영
+    지연으로 빠진 시간은 다음 실행의 교체 upsert가 보완한다(관찰 전용, 쓰기 API 0).
+    """
+    db = _get_own_db_session()
+    try:
+        from app.services.naver_ad.today_hourly_sweep import sweep_adgroup_hourly_today
+
+        result = sweep_adgroup_hourly_today(db)
+        log.info("[스케줄러] naver today_hourly sweep: %s", result)
+    except Exception as e:
+        log.exception("[스케줄러] sweep_naver_today_hourly_job 에러: %s", e)
+        raise
+    finally:
+        db.close()
+
+
 def run_naver_auto_operator_daily_job():
     """auto_operator 일 레인 — D-NAO-48 4조건 심사·집행 서버 코드화 (08:50 KST,
     run_naver_retro_scoring 08:30 이후 — 조건④ bleeding 판정이 그 결과를 쓴다, D-NAO-49).
@@ -701,6 +819,53 @@ def run_naver_auto_operator_daily_job():
     finally:
         db3.close()
 
+    # CS(콜드 스타트 첫 입찰) — ① 시장가 사다리 수집(npla-estimate) → ② 콜드 소재 첫 입찰 레인.
+    # 별도 세션·독립 try(fail-open, 위 블록들과 동일 관례) — 이 레인이 실패해도 이미 커밋된
+    # 일 레인/SS/PX 결과를 되돌리지 않는다. 수집(①)이 실패해도 레인(②)은 돌린다 —
+    # load_today_ladder가 행 없음을 "시세 없음"으로 읽어 전건 보류하므로 안전하게 no-op이 된다.
+    #
+    # ★dry_run 기본값 = True(관측만·쓰기 없음). 실집행 전환은 prod .env에
+    #   `NAVER_CS_DRY_RUN=0`을 넣고 재시작하는 것으로만 열린다(코드 배포 없이 되돌릴 수 있게).
+    #   첫 배포 후에는 반드시 dry-run 회차의 제안값을 눈으로 확인한 뒤 전환한다.
+    db4 = _get_own_db_session()
+    try:
+        from app.services.naver_ad.cold_start_bid_lane import (
+            collect_market_bids_daily, run_cold_start_lane,
+        )
+
+        # ★리뷰 P3-13: today를 now(ss_now)에서 파생시킨다. 종전엔 now=ss_now(과거 시각)와
+        #   today=kst_today()(호출 시점)를 섞어 자정 경계에서 어긋났다 — 바로 위 693줄이 정확히
+        #   이 문제(C6) 때문에 ss_now를 도입했는데 CS가 그 계약을 깼다.
+        cs_today = ss_now.date()
+        collected = collect_market_bids_daily(db4, today=cs_today)
+        log.info(
+            "[스케줄러] naver CS 시장가 수집: 소재=%s 행=%s floor=%s",
+            collected.get("ads"), collected.get("rows"), collected.get("floor_ads"),
+        )
+        cs_dry_run = os.getenv("NAVER_CS_DRY_RUN", "1") != "0"
+        cs = run_cold_start_lane(db4, dry_run=cs_dry_run, now=ss_now, today=cs_today)
+        log.info(
+            "[스케줄러] naver CS 콜드 첫 입찰(dry_run=%s): 후보=%s 제안=%s 집행=%s 실패=%s "
+            "경제성없음=%s 보류=%s",
+            cs_dry_run, cs["candidates"], cs["proposed"], cs["executed"], cs["failed"],
+            cs["not_viable"], cs["held"],
+        )
+        # 상세는 제안/경보 건만 남긴다(리뷰 P3-15: 소재 수백 개면 전건 로깅은 폭주).
+        # 단순 보류(시세 없음·상한 없음·상향 아님)는 위 집계 카운터로 충분하다.
+        _CS_LOUD = {"propose", "not_viable"}
+        for r in (x for x in cs["rows"] if x["decision"] in _CS_LOUD):
+            log.info(
+                "[스케줄러] naver CS 상세: ad=%s grp=%s 현재=%s 판정=%s 목표=%s "
+                "상한=%s 시장가=%s 사다리최저=%s RPC출처=%s(clk=%s) — %s",
+                r["ad_id"], r["adgroup_id"], r["current_bid"], r["decision"], r["target_bid"],
+                r["ceiling_cpc"], r["market_bid"], r["ladder_min"], r["rpc_source"],
+                r["sample_clk"], r["reason"],
+            )
+    except Exception as e:  # noqa: BLE001 — CS 실패는 다른 레인과 분리(fail-open)
+        log.exception("[스케줄러] naver CS 레인 에러(fail-open): %s", e)
+    finally:
+        db4.close()
+
 
 def run_naver_auto_operator_hourly_job():
     """auto_operator 시간당 레인 — 핫셋 intraday 밴드 관제 실입찰 (매시 :20 KST, D-NAO-49).
@@ -724,8 +889,41 @@ def run_naver_auto_operator_hourly_job():
             result["explored_not_rank"], result["explored_ghost_hold"],
             len(result["ghost_hold_groups"]),
         )
+        # BP(D-NAO-102) 예산 페이싱 카운터 — 별도 라인(위 라인이 이미 길어 소실 위험).
+        log.info(
+            "[스케줄러] naver BP 예산페이싱: reviewed=%s raised=%s failed=%s dry_run=%s "
+            "held=%s | restore reviewed=%s restored=%s failed=%s",
+            result["budget_pacing_reviewed"], result["budget_pacing_raised"],
+            result["budget_pacing_failed"], result["budget_pacing_dry_run"],
+            len(result["budget_pacing_held"]), result["budget_pacing_restore_reviewed"],
+            result["budget_pacing_restored"], result["budget_pacing_restore_failed"],
+        )
     except Exception as e:
         log.exception("[스케줄러] run_naver_auto_operator_hourly_job 에러: %s", e)
+        raise
+    finally:
+        db.close()
+
+
+def run_naver_budget_pacing_reset_job():
+    """BP 익일 예산 원복 — auto_operator._run_budget_pacing_restore (매일 00:05 KST, D-NAO-102 ⑤).
+
+    전날 장중 페이싱 증액분을 naver_campaign_settings.base_daily_budget으로 되돌린다.
+    ★멱등·자가치유: 판정이 change_log 이력 기반이라 이 잡이 죽어도 시간당 레인(:20)이 같은
+    함수를 호출해 따라잡는다 — catch-up 목록(아침배치 전용)에 넣지 않는 이유."""
+    db = _get_own_db_session()
+    try:
+        from app.services.naver_ad.auto_operator import run_budget_pacing_reset_lane
+
+        result = run_budget_pacing_reset_lane(db)
+        log.info(
+            "[스케줄러] naver BP 예산 원복: reviewed=%s restored=%s failed=%s dry_run=%s held=%s",
+            result["budget_pacing_restore_reviewed"], result["budget_pacing_restored"],
+            result["budget_pacing_restore_failed"], result["budget_pacing_dry_run"],
+            len(result["budget_pacing_held"]),
+        )
+    except Exception as e:
+        log.exception("[스케줄러] run_naver_budget_pacing_reset_job 에러: %s", e)
         raise
     finally:
         db.close()
@@ -1028,7 +1226,7 @@ def auto_download_rg_settlement_job():
     (auth_error/all_failed/partial/failed 등)는 실패로 raise한다."""
     db = _get_own_db_session()
     try:
-        from app.services.coupang.rg_settlement_sync import auto_download_all, RG_ACCOUNTS
+        from app.services.coupang.rg_settlement_sync import auto_download_all
 
         vendor_id_map = {}
         import os
@@ -1235,14 +1433,17 @@ def _ensure_default_states(db):
     """기본 스케줄러 상태 DB 레코드 생성"""
     defaults = [
         ("auto_sync_orders", "0 6 * * *"),
+        # 네이버 스마트스토어 시간별 주문 동기화(근시간 공백 메움, 2026-07-28 실사고 대응).
+        # :45인 이유: 기존 시간별 잡이 :5(snapshot)·:7(trigger_watch)·:15(flight_loop 2h)·
+        # :20(auto_operator_hourly)에 몰려 있어 SQLite 라이터 충돌을 피하려는 것.
+        ("sync_naver_orders_hourly", "45 * * * *"),
         ("auto_profit_calc", "30 6 * * *"),
         ("cafe24_token_refresh", "*/30 * * * *"),
         ("sync_naver_sa_ad_costs", "0 7 * * *"),
         ("sync_naver_ad_daily", "30 7 * * *"),      # 네이버 SA 일별 성과+BEP (트랙 P0)
         ("snapshot_naver_ad_hourly", "5 * * * *"),  # 네이버 SA 시간별 스냅샷 (빠른 루프)
         ("trigger_watch", "7 * * * *"),             # 조건발동 즉시알림(페이싱·CPC급등, 트랙 P4)
-        ("sync_naver_entity", "35 7 * * *"),        # 엔티티 인벤토리 동기화 (트랙 P2-S1)
-        ("run_naver_bm_layer", "37 7 * * *"),       # BM 벤치마크 레이어 SA-1 구조 스냅샷 (D-NAO-78, 관찰 전용·catch-up 제외)
+        ("sync_naver_entity", "35 7 * * *"),        # 엔티티 인벤토리 동기화 (트랙 P2-S1) — 완료 직후 BM 레이어 체이닝(구 07:37 크론 폐지)
         ("run_naver_bm_deep", "20 9 * * 0"),        # BM 벤치마크 레이어 주간 deep(제외키워드·소재수, D-NAO-78, 관찰 전용·catch-up 제외)
         ("sync_naver_search_term", "40 7 * * *"),   # 검색어 단위 성과 수집 (트랙 P2-S1)
         ("sync_naver_keyword_volume", "0 9 * * 0"), # 저클릭 키워드 월검색량 (주1회, 일요일)
@@ -1260,7 +1461,9 @@ def _ensure_default_states(db):
         ("run_naver_probe_settlement", "55 8 * * *"),  # 탐침 성과 정산 판정(유지/되돌림/보류, D-NAO-58 CD3 Stage 2 — 일 레인 08:50·retro 08:30 뒤)
         ("run_naver_probe_learning", "3 9 * * *"),  # CD4 환경별 학습·세분화층(정산 08:55 뒤·vault 09:05 앞 재계산 → observe 요약이 당일 볼트에 포함, D-NAO-58 CD4)
         ("sweep_naver_keyword_hourly", "10 9 * * *"),  # 키워드/쇼핑그룹 시간별(hh24) 축적, D-1 스윕(D-NAO-46②)
+        ("sweep_naver_today_hourly", "57 * * * *"),  # 당일 그룹 grain 시간별(hh24) 축적(D-NAO-122 — 매시 멱등 교체라 catch-up 제외). ★분 슬롯을 이렇게 고른 이유(codex 리뷰 2R): 매시 최대 800콜 + SQLite 쓰기라 ①09:10 D-1 스윕(3,500콜 ~12분 = 09:10~09:22, 지연 여유 포함) ②07:35 sync_naver_entity(계정 전체 인벤토리 동기화) 둘 다와 겹치면 안 된다. 등록된 분 슬롯은 3·5·7·10·15·20·25·30·35·40·45·50·55와 */30 — :57이 유일하게 비어 있고 두 창에서 가장 멀다. 당일 레인은 hh24를 직접 호출하므로 이 잡이 :20보다 뒤여도 무방하다
         ("run_naver_auto_operator_hourly", "20 * * * *"),  # 시간당 밴드 관제 실입찰(catch-up 제외, D-NAO-49)
+        ("run_naver_budget_pacing_reset", "5 0 * * *"),  # BP 익일 예산 원복(D-NAO-102 ⑤ — 멱등, 시간당 레인이 자가치유하므로 catch-up 제외)
         ("run_naver_flight_loop", "15 */2 * * *"),  # 당일 플라이트 루프 2시간 주기(X2, dry_run=True)
         ("sync_naver_settlement", "25 5 * * *"),
         ("sync_naver_case_settlement", "30 5 * * *"),
@@ -1281,12 +1484,21 @@ def _ensure_default_states(db):
         # 창을 스스로 띄우던 자동 트리거를 없애고, 갱신은 UI '광고비 갱신' 버튼으로만 한다.
         # 낡음/실패는 GET /collection-status → 전역 신선도 배너로 가시화(잊어버림 방지).
     ]
+    # 폐지된 잡(retired) — defaults에서 빼는 것만으로는 prod에서 안 죽는다: 스케줄링의 단일
+    # 주도자가 SchedulerState 행이라(start_scheduler가 DB rows를 순회하며 add_job) 이미 만들어진
+    # 행은 계속 옛 크론으로 발화한다. 그래서 행 자체를 지운다(같은 commit에 포함).
+    #   run_naver_bm_layer: 07:37 독립 크론 폐지 → sync_naver_entity_job 완료 직후 체이닝으로 전환
+    #   (구조적 경합으로 스냅샷이 항상 entity_sync D-1 값을 담던 문제, 2026-07-23~27 5/5일 실측).
+    retired = ("run_naver_bm_layer",)
+
     for name, cron in defaults:
         existing = db.query(SchedulerState).filter(
             SchedulerState.job_name == name
         ).first()
         if not existing:
             db.add(SchedulerState(job_name=name, cron_expression=cron, is_enabled=True))
+    for name in retired:
+        db.query(SchedulerState).filter(SchedulerState.job_name == name).delete()
     db.commit()
 
 
@@ -1314,6 +1526,7 @@ _CATCHUP_ORDER: tuple[str, ...] = (
     "sweep_naver_keyword_hourly",  # 09:10 (D-NAO-46②, 독립 잡이나 표준 cron catch-up 포함)
     "run_naver_wisdom",  # 08:45 크론이지만 catch-up은 돈 잡(08:50)·reflection 뒤(D-NAO-54 P3): reflection이 outcome을 소급 기입해야 후보 수확 결과가 최신 + LLM 판사(최대 회당 5×재시도)가 집행 복구를 지연시키면 안 됨. 관찰·보고 전용이라 맨 뒤 배치(diary_outcome 60일 하한 내면 하루 늦어도 무관). fail-open은 영구 블록만 막고 지연은 못 막는다
     "run_naver_vault_export",  # 09:05 크론이지만 catch-up은 맨 뒤(D-NAO-54 P5): 일기·지혜를 마크다운으로 재생성하는 열람 전용 잡이라 wisdom(승격)까지 끝난 뒤에 도는 게 볼트 최신성에 맞고, 파일 IO가 집행 복구를 지연시키면 안 된다. 매 실행 전체 재생성(멱등)이라 하루 늦어도 무해. fail-open은 영구 블록만 막고 지연은 못 막는다
+    "sync_naver_entity",  # 07:35 크론이지만 catch-up은 맨 뒤: 전량 fetch(45캠페인+1,004그룹+~91k 키워드, 수 분)가 돈 잡(집행) 복구를 지연시키면 안 된다(위 관찰 잡들과 같은 원칙). 맨 뒤라 실패해도 끊길 하류가 없다(체인 중단=무해, last_run_at 미전진 → 다음 재시작 재시도). 성공하면 체이닝된 BM 스냅샷도 함께 따라잡힌다
 )
 _CATCHUP_LOOKBACK = timedelta(hours=12)  # 오늘 예정 발화가 이보다 오래됐으면 스킵(다음 정상 발화에 위임)
 
@@ -1433,8 +1646,11 @@ def _catch_up_morning_batch():
         "run_naver_probe_settlement": run_naver_probe_settlement_job,
         "run_naver_probe_learning": run_naver_probe_learning_job,
         "sweep_naver_keyword_hourly": sweep_naver_keyword_hourly_job,
+        "sweep_naver_today_hourly": sweep_naver_today_hourly_job,
         "run_naver_wisdom": run_naver_wisdom_job,
         "run_naver_vault_export": run_naver_vault_export_job,
+        # 엔티티 sync는 BM 스냅샷을 체이닝하므로 이 항목 하나로 두 잡이 함께 따라잡힌다.
+        "sync_naver_entity": sync_naver_entity_job,
     }
     log.warning("[스케줄러] 아침배치 catch-up 대상(cron순 순차): %s", missed)
 
@@ -1465,14 +1681,16 @@ def job_func_for(job_name: str):
     """
     return {
         "auto_sync_orders": sync_all_channels_job,
+        "sync_naver_orders_hourly": sync_naver_orders_hourly_job,
         "auto_profit_calc": recalculate_profit_job,
         "cafe24_token_refresh": cafe24_proactive_refresh_job,
         "sync_naver_sa_ad_costs": sync_naver_sa_ad_costs_job,
         "sync_naver_ad_daily": sync_naver_ad_daily_job,
         "snapshot_naver_ad_hourly": snapshot_naver_ad_hourly_job,
         "trigger_watch": trigger_watch_job,
+        # run_naver_bm_layer는 크론 등록 대상이 아니다 — sync_naver_entity_job이 완료 직후 함수를
+        # 직접 호출(체이닝)한다. 매핑에 남기면 toggle/재등록으로 07:37 독립 발화가 되살아난다.
         "sync_naver_entity": sync_naver_entity_job,
-        "run_naver_bm_layer": run_naver_bm_layer_job,
         "run_naver_bm_deep": run_naver_bm_deep_job,
         "shopping_ad_product_sync": shopping_ad_product_sync_job,
         "sync_naver_search_term": sync_naver_search_term_job,
@@ -1486,8 +1704,10 @@ def job_func_for(job_name: str):
         "run_naver_wisdom": run_naver_wisdom_job,
         "run_naver_vault_export": run_naver_vault_export_job,
         "sweep_naver_keyword_hourly": sweep_naver_keyword_hourly_job,
+        "sweep_naver_today_hourly": sweep_naver_today_hourly_job,
         "run_naver_auto_operator_daily": run_naver_auto_operator_daily_job,
         "run_naver_auto_operator_hourly": run_naver_auto_operator_hourly_job,
+        "run_naver_budget_pacing_reset": run_naver_budget_pacing_reset_job,
         "run_naver_probe_settlement": run_naver_probe_settlement_job,
         "run_naver_probe_learning": run_naver_probe_learning_job,
         "generate_expert_desk": generate_expert_desk_job,
@@ -1518,6 +1738,8 @@ def job_kwargs_for(job_name: str) -> dict:
     """
     if job_name == "run_naver_auto_operator_hourly":
         return {"misfire_grace_time": _AUTO_OPERATOR_HOURLY_MISFIRE_GRACE}
+    if job_name == "sync_naver_orders_hourly":
+        return {"misfire_grace_time": _NAVER_ORDERS_HOURLY_MISFIRE_GRACE}
     return {}
 
 

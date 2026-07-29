@@ -20,6 +20,18 @@
 #   경보). W1은 "클릭0"만 보고(단일일은 기대클릭 비교가 표본 통계적으로 불안정), W3만 트레일링
 #   CTR 대비 −80%↓ 분기를 추가로 본다(누적 표본이 있어야 "기대치 대비 부족"을 말할 수 있음).
 #
+#   ★D-NAO-103 통계 필터(2026-07-28 개편): "클릭0"은 그 자체로 이상이 아니다 — 애초에 클릭이
+#   기대됐을 때만 이상이다. 만성 저CTR 그룹(파워링크 0.14~0.47%·154일)은 하루 노출 수백에도
+#   기대클릭이 1 미만이라 클릭0이 통계적으로 평범한 날이 태반인데, 구 로직은 그걸 매일
+#   경보로 올렸다(07-23~28 5~8그룹/일 반복 발화 → Jino 읽기 포기). 이제 W1·W3 둘 다
+#   기대클릭(=트레일링 CTR × 창 노출) ≥2 를 요구하고, 트레일링 표본이 아예 없으면 비발화한다.
+#   트레일링 CTR 창도 구 30일에서 **가용 전 기간**으로 넓혔다(_trailing_agg_by_group 주석).
+#   ★단 하나의 예외 — 누적 노출 ≥1,000인데 클릭이 역사상 0인 "완전 무반응" 그룹은 기대클릭이
+#   0이라 이 필터에 걸려 영원히 침묵하게 된다. 그건 안전이 아니라 최악의 사각이므로 별도
+#   종류(KIND_NO_RESPONSE)로 계속 발화시킨다(_is_no_response 주석 — 적대적 리뷰 P2-1).
+#   발화 억제(신규 진입만 개별 발화·만성은 주간 요약)는 이 SA가 아니라 브리핑 harness 몫이다 —
+#   이 SA의 산출물은 탐색 래더 skip 게이트도 함께 쓰므로 만성 건도 계속 판정돼야 한다.
+#
 #   ★grain 주의: naver_ad_daily는 파워링크(WEB_SITE)는 keyword_id 단위, 쇼핑/브랜드검색은
 #   adgroup 단위(keyword_id='' sentinel)로 쌓인다. 이 SA는 adgroup_id로 group_by하므로
 #   파워링크 그룹도 소속 키워드 행이 자동으로 그 그룹에 롤업된다(별도 분기 불필요).
@@ -38,13 +50,21 @@ from app.utils.kst import kst_now
 
 log = logging.getLogger(__name__)
 
+# ── 경보 종류(alert["kind"]) ──
+# 두 종류는 사람에게 **다른 처방**을 요구하므로 문구도 게이트 해석도 분리한다.
+KIND_EXPECTED_SHORTFALL = "expected_shortfall"  # 평소 CTR 대비 클릭이 크게 모자람
+KIND_NO_RESPONSE = "no_response"                # 충분한 누적 노출에도 클릭이 역사상 0(소재 교체 대상)
+
 # ── 경보 상수(PLAN §4.1 명문) ──
 _MIN_IMP = 200                                  # W1·W3 공통 노출 하한
 _RANK_BAND_TOP = Decimal("4.0")                 # "입찰로 못 푸는" 판정 근거 — 순위 ≤4.0(밴드 내)만 경보
 _W3_WINDOW_DAYS = 3                             # rolling 3일(D0-2..D0)
 _EXPECTED_CLK_RATIO = Decimal("0.2")            # 기대클릭의 20%(=−80%↓) 미만이면 발화
 _MIN_EXPECTED_CLK_FOR_RATIO = Decimal("5")      # 기대클릭 <5면 −80% 분기 발화 금지(소표본 오탐 방지)
-_TRAILING_CTR_DAYS = 30                         # 트레일링 CTR 창 길이
+# D-NAO-103 통계 필터: "클릭0"이 이례적이려면 애초에 클릭이 기대됐어야 한다. 만성 저CTR
+# 그룹(파워링크 0.14~0.47%)은 하루 노출 수백이어도 기대클릭이 1 미만이라 클릭0이 통계적으로
+# 평범하다 — 그걸 매일 경보로 올린 것이 07-23~28 반복 발화의 실체. 기대클릭 <2 = 정보 없음 → 억제.
+_MIN_EXPECTED_CLK_FOR_ZERO = Decimal("2")
 _TRAILING_CTR_GAP_DAYS = 2                      # W3(D0-2..D0)와 겹치지 않게 D0-3까지에서 끝냄
 _GROUP_TRAILING_MIN_IMP = 1000                  # 그룹 트레일링 표본 하한(미달=캠페인 CTR 폴백)
 
@@ -149,10 +169,13 @@ def _window_daily_by_group(
     return out
 
 
-def _window_agg_by_group(
-    db: Session, campaign_id: str, start: date, end: date,
-) -> dict[str, dict]:
-    """[start,end] 그룹별 (imp,clk) 합(날짜 구분 없음) — 트레일링 CTR 원료(rank_sum 불필요)."""
+def _trailing_agg_by_group(db: Session, campaign_id: str, end: date) -> dict[str, dict]:
+    """(…, end] 그룹별 (imp,clk) 합 — 트레일링 CTR 원료(rank_sum 불필요).
+
+    D-NAO-103: 하한 없는 **가용 전 기간**이다(구 30일 창 폐기). 이유 — 기대클릭 필터가
+    새로 판정의 중심이 되면서 트레일링 CTR의 표본 안정성이 곧 오탐률이 됐다. 만성 저CTR
+    그룹은 30일로 자르면 그룹 표본 하한(1,000노출)에 못 미쳐 캠페인 CTR로 폴백되는데,
+    캠페인 평균은 그 그룹보다 높아 기대클릭이 부풀고 → "이례적"이 아닌 날도 발화한다."""
     rows = (
         db.query(
             NaverAdDaily.adgroup_id,
@@ -161,7 +184,6 @@ def _window_agg_by_group(
         )
         .filter(
             NaverAdDaily.campaign_id == campaign_id,
-            NaverAdDaily.ad_date >= start,
             NaverAdDaily.ad_date <= end,
             NaverAdDaily.adgroup_id != BACKFILL_SENTINEL_ADGROUP,
         )
@@ -169,6 +191,21 @@ def _window_agg_by_group(
         .all()
     )
     return {gid: {"imp": int(imp), "clk": int(clk)} for gid, imp, clk in rows}
+
+
+def _campaign_type(db: Session, campaign_id: str) -> str:
+    """캠페인 유형(SHOPPING/WEB_SITE/BRAND_SEARCH) — 브리핑 문구 분기용(D-NAO-103).
+    naver_ad_daily 자기 소스에서 읽는다(이 SA는 naver_entity를 안 본다 — 원료 단일화).
+    미상이면 ''(호출부가 "유형 미상 = 쇼핑 전용 문구 금지"로 안전측 해석)."""
+    row = (
+        db.query(NaverAdDaily.campaign_type)
+        .filter(
+            NaverAdDaily.campaign_id == campaign_id,
+            NaverAdDaily.campaign_type != "",
+        )
+        .first()
+    )
+    return str(row[0]) if row else ""
 
 
 def _avg_rank(rank_sum: int, imp: int) -> Decimal | None:
@@ -184,36 +221,74 @@ def _group_trailing_ctr(
     trailing: dict[str, dict], gid: str, campaign_ctr: Decimal | None,
 ) -> Decimal | None:
     """그룹 표본(임프)≥1,000이면 그룹 자체 CTR, 미달이면 캠페인 CTR 폴백, 그것도 없으면 None
-    (호출부가 None을 "기대클릭 게이트 생략(clk=0 분기만)"으로 처리)."""
+    (호출부가 None을 "이례성 판정 불가 → 비발화"로 처리)."""
     tr = trailing.get(gid, {"imp": 0, "clk": 0})
     if tr["imp"] >= _GROUP_TRAILING_MIN_IMP:
         return Decimal(tr["clk"]) / Decimal(tr["imp"])
     return campaign_ctr
 
 
-def _w1_alert(gid: str, campaign_id: str, day_row: dict | None) -> dict | None:
-    """W1(최근 1일): imp≥200 ∧ clk=0 ∧ avg_rank≤4.0. 기대클릭 비교 없음(단일일 표본 불안정)."""
+def _is_no_response(trailing: dict[str, dict], gid: str) -> bool:
+    """완전 무반응 소재 판정(적대적 리뷰 P2-1) — 충분한 표본(≥1,000노출)에서 **누적 클릭이
+    단 한 번도 없는** 그룹.
+
+    ★이게 왜 별도 분기여야 하나: 이런 그룹은 트레일링 CTR이 정확히 0이라 기대클릭도 0이 되고,
+    "기대클릭 <2 → 억제" 규칙에 걸려 **영원히 침묵**한다. 그런데 이건 경보가 필요 없는 상태가
+    아니라 가장 심한 상태다(노출은 계속 사는데 반응이 0 = 소재가 죽었다). 기대클릭 필터가
+    거르려던 것은 "클릭0이 통계적으로 평범한 저CTR 그룹"이지 "역사상 클릭이 0인 그룹"이 아니다.
+    판정 SA 레벨에서 분기하므로 소비자 3곳(탐색 래더 skip·확장 후보 제외·브리핑) 전부에 적용된다."""
+    tr = trailing.get(gid, {"imp": 0, "clk": 0})
+    return tr["imp"] >= _GROUP_TRAILING_MIN_IMP and tr["clk"] == 0
+
+
+def _w1_alert(
+    gid: str, campaign_id: str, day_row: dict | None, trailing_ctr: Decimal | None,
+    *, no_response: bool, trailing_imp: int,
+) -> dict | None:
+    """W1(최근 1일): imp≥200 ∧ clk=0 ∧ avg_rank≤4.0 ∧ (기대클릭≥2 ∨ 완전 무반응).
+
+    기대클릭 = trailing_ctr × 당일 imp. 트레일링 CTR을 못 구하면(그룹·캠페인 둘 다 표본 0)
+    "이례적인지" 자체를 말할 수 없으므로 비발화(추정 금지 — 구 동작은 클릭0만으로 발화했다).
+    단 완전 무반응(누적 ≥1,000노출·클릭 0)은 기대클릭이 0이라 필터에 걸리므로 별도 통과시킨다."""
     if day_row is None or day_row["imp"] < _MIN_IMP or day_row["clk"] != 0:
         return None
     rank = _avg_rank(day_row["rank_sum"], day_row["imp"])
     if rank is None or rank > _RANK_BAND_TOP:
         return None
+    expected_clk = (trailing_ctr * Decimal(day_row["imp"])) if trailing_ctr is not None else None
+    if not no_response and (expected_clk is None or expected_clk < _MIN_EXPECTED_CLK_FOR_ZERO):
+        return None
     rank_f = float(round(rank, 2))
-    return {
+    expected_f = float(round(expected_clk, 1)) if expected_clk is not None else 0.0
+    alert = {
         "campaign_id": campaign_id, "adgroup_id": gid, "window": "W1",
-        "imp": day_row["imp"], "clk": 0, "avg_rank": rank_f,
-        "reason": (
-            f"W1 최근1일 노출{day_row['imp']}·클릭0·순위{rank_f}(밴드 내≤4.0) — "
-            "입찰로 못 푸는 소재 CTR 문제 — 사람 처방 대상(썸네일·가격·리뷰)"
-        ),
+        "imp": day_row["imp"], "clk": 0, "avg_rank": rank_f, "expected_clk": expected_f,
+        "kind": KIND_NO_RESPONSE if no_response else KIND_EXPECTED_SHORTFALL,
+        "trailing_imp": trailing_imp,
     }
+    if no_response:
+        alert["reason"] = (
+            f"W1 최근1일 노출{day_row['imp']}·클릭0 / 누적 노출{trailing_imp}에 클릭 0 — "
+            f"완전 무반응 소재(순위{rank_f}) — 소재 교체 대상"
+        )
+    else:
+        alert["reason"] = (
+            f"W1 최근1일 노출{day_row['imp']}·클릭0(기대클릭{expected_f})·순위{rank_f}"
+            "(밴드 내≤4.0) — 입찰로 못 푸는 소재 CTR 문제 — 사람 처방 대상"
+        )
+    return alert
 
 
 def _w3_alert(
     gid: str, campaign_id: str, by_date: dict[date, dict], trailing_ctr: Decimal | None,
+    *, no_response: bool, trailing_imp: int,
 ) -> dict | None:
-    """W3(rolling 3일): 누적 imp≥200 ∧ (clk=0 또는 clk≤기대클릭×0.2) ∧ avg_rank≤4.0.
-    기대클릭 = trailing_ctr × 창 imp. expected_clk<5면 −80% 분기 비활성(clk=0 분기만 유효)."""
+    """W3(rolling 3일): 누적 imp≥200 ∧ avg_rank≤4.0 ∧
+    (clk=0 ∧ (기대클릭≥2 ∨ 완전 무반응) | clk≤기대클릭×0.2).
+
+    기대클릭 = trailing_ctr × 창 imp. expected_clk<5면 −80% 분기 비활성(소표본 오탐 방지),
+    expected_clk<2면 clk=0 분기도 비활성(D-NAO-103 통계 필터 — 클릭0이 평범한 구간).
+    완전 무반응 그룹은 그 필터의 대상이 아니다(_is_no_response 주석)."""
     imp = sum(v["imp"] for v in by_date.values())
     if imp < _MIN_IMP:
         return None
@@ -224,29 +299,40 @@ def _w3_alert(
         return None
 
     expected_clk = (trailing_ctr * Decimal(imp)) if trailing_ctr is not None else None
+    if expected_clk is None and not no_response:
+        return None  # 트레일링 표본 전무 = 이례성 판정 불가(추정 금지)
     ratio_fired = (
         expected_clk is not None
         and expected_clk >= _MIN_EXPECTED_CLK_FOR_RATIO
         and Decimal(clk) <= expected_clk * _EXPECTED_CLK_RATIO
     )
-    if clk != 0 and not ratio_fired:
+    zero_fired = clk == 0 and (
+        no_response or (expected_clk is not None and expected_clk >= _MIN_EXPECTED_CLK_FOR_ZERO)
+    )
+    if not zero_fired and not ratio_fired:
         return None
 
     rank_f = float(round(rank, 2))
+    expected_f = float(round(expected_clk, 1)) if expected_clk is not None else 0.0
+    # 창에 클릭이 있으면 "완전 무반응"이 아니다 — 그 경우는 기대치 미달(−80%↓)로 말한다.
+    kind = KIND_NO_RESPONSE if (no_response and clk == 0) else KIND_EXPECTED_SHORTFALL
     alert = {
         "campaign_id": campaign_id, "adgroup_id": gid, "window": "W3",
-        "imp": imp, "clk": clk, "avg_rank": rank_f,
+        "imp": imp, "clk": clk, "avg_rank": rank_f, "expected_clk": expected_f,
+        "kind": kind, "trailing_imp": trailing_imp,
     }
-    detail = f"클릭{clk}"
-    if expected_clk is not None:
-        expected_f = float(round(expected_clk, 1))
-        alert["expected_clk"] = expected_f
-        if ratio_fired and clk > 0:
-            detail += f"(기대클릭{expected_f} 대비 −80%↓)"
-    alert["reason"] = (
-        f"W3 최근3일 누적 노출{imp}·{detail}·순위{rank_f}(밴드 내≤4.0) — "
-        "입찰로 못 푸는 소재 CTR 문제 — 사람 처방 대상(썸네일·가격·리뷰)"
-    )
+    if kind == KIND_NO_RESPONSE:
+        alert["reason"] = (
+            f"W3 최근3일 누적 노출{imp}·클릭0 / 누적 노출{trailing_imp}에 클릭 0 — "
+            f"완전 무반응 소재(순위{rank_f}) — 소재 교체 대상"
+        )
+    else:
+        detail = f"클릭{clk}(기대클릭{expected_f}"
+        detail += " 대비 −80%↓)" if (ratio_fired and clk > 0) else ")"
+        alert["reason"] = (
+            f"W3 최근3일 누적 노출{imp}·{detail}·순위{rank_f}(밴드 내≤4.0) — "
+            "입찰로 못 푸는 소재 CTR 문제 — 사람 처방 대상"
+        )
     return alert
 
 
@@ -254,8 +340,10 @@ def detect_ctr_alerts(db: Session, campaign_id: str, *, now: datetime | None = N
     """소재 CTR 경보 산출(PLAN §4.1). 순수 SA·read-only. 캠페인 1개 스코프(위 헤더 근거 주석).
 
     as_of=D0=today−1(최근 완료일, 코드베이스 as_of=D-1 관례 — naver_ad_daily는 당일 진행중
-    부분치를 포함하지 않는다). 반환: {"alerts": [{campaign_id, adgroup_id, window(W1|W3),
-    imp, clk, avg_rank, expected_clk?, reason}, ...]}. 경보 없으면 {"alerts": []}."""
+    부분치를 포함하지 않는다). 반환: {"alerts": [{campaign_id, campaign_type, adgroup_id,
+    window(W1|W3), imp, clk, avg_rank, expected_clk, kind, trailing_imp, reason}, ...]}.
+    경보 없으면 {"alerts": []}. D-NAO-103: expected_clk는 이제 **항상** 있다(없으면 애초에
+    발화하지 않는다). kind는 KIND_EXPECTED_SHORTFALL | KIND_NO_RESPONSE."""
     if not _is_auto_operate_campaign(db, campaign_id):
         return {"alerts": []}
 
@@ -272,25 +360,31 @@ def detect_ctr_alerts(db: Session, campaign_id: str, *, now: datetime | None = N
     w3_start = d0 - timedelta(days=_W3_WINDOW_DAYS - 1)  # D0-2
     daily = _window_daily_by_group(db, campaign_id, w3_start, d0)
 
-    tr_end = d0 - timedelta(days=_TRAILING_CTR_GAP_DAYS + 1)  # D0-3
-    tr_start = tr_end - timedelta(days=_TRAILING_CTR_DAYS - 1)  # D0-32
-    trailing = _window_agg_by_group(db, campaign_id, tr_start, tr_end)
+    tr_end = d0 - timedelta(days=_TRAILING_CTR_GAP_DAYS + 1)  # D0-3(가용 전 기간 ~ D0-3]
+    trailing = _trailing_agg_by_group(db, campaign_id, tr_end)
     campaign_trailing_imp = sum(v["imp"] for v in trailing.values())
     campaign_trailing_clk = sum(v["clk"] for v in trailing.values())
     campaign_ctr = (
         Decimal(campaign_trailing_clk) / Decimal(campaign_trailing_imp)
         if campaign_trailing_imp > 0 else None
     )
+    campaign_type = _campaign_type(db, campaign_id)
 
     alerts: list[dict] = []
     for gid, by_date in daily.items():
-        w1 = _w1_alert(gid, campaign_id, by_date.get(d0))
+        trailing_ctr = _group_trailing_ctr(trailing, gid, campaign_ctr)
+        no_response = _is_no_response(trailing, gid)
+        tr_imp = int(trailing.get(gid, {}).get("imp", 0))
+        w1 = _w1_alert(gid, campaign_id, by_date.get(d0), trailing_ctr,
+                       no_response=no_response, trailing_imp=tr_imp)
         if w1 is not None:
             alerts.append(w1)
-        trailing_ctr = _group_trailing_ctr(trailing, gid, campaign_ctr)
-        w3 = _w3_alert(gid, campaign_id, by_date, trailing_ctr)
+        w3 = _w3_alert(gid, campaign_id, by_date, trailing_ctr,
+                       no_response=no_response, trailing_imp=tr_imp)
         if w3 is not None:
             alerts.append(w3)
+    for a in alerts:
+        a["campaign_type"] = campaign_type  # 브리핑 문구 분기(쇼핑 전용 "탐색 래더" 문구 차단)
 
     log.info(
         "ctr_alert: detect_ctr_alerts campaign=%s as_of=%s 경보=%s",

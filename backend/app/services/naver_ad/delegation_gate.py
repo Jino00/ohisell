@@ -23,7 +23,9 @@ from app.models import (
     NaverProposal,
 )
 from app.services.naver_ad import naver_execution_harness, search_term_judge
-from app.services.naver_ad.bid_step_types import EXPLORATION_STEP_TYPES, RANK_STEP_TYPES
+from app.services.naver_ad.bid_step_types import (
+    COLD_START_STEP_TYPES, EXPLORATION_STEP_TYPES, RANK_STEP_TYPES,
+)
 from app.utils.kst import kst_now
 
 log = logging.getLogger(__name__)
@@ -57,7 +59,7 @@ def delegable_types() -> set[str]:
     return {
         ptype for ptype, action in naver_execution_harness._ACTION_BY_PROPOSAL_TYPE.items()
         if action in openable
-    } - RANK_STEP_TYPES - EXPLORATION_STEP_TYPES - {
+    } - RANK_STEP_TYPES - EXPLORATION_STEP_TYPES - COLD_START_STEP_TYPES - {
         # SS3(검색어 제외): 자동 발사 절대 금지(PLAN §0 4·§3 SS3-A "자동 승인원 절대 배선 금지").
         # exclude_search_term은 OPEN_ACTIONS·_WRITE_EXECUTORS에 있어(콘솔 Confirm 실쓰기용) 위 집합에
         # 들어오지만, 위임(Ava agree 자동승인) 경로로 새면 사람 Confirm 없이 자동 제외된다 —
@@ -68,6 +70,9 @@ def delegable_types() -> set[str]:
     # BX2(D-NAO-70): 탐색 스텝(bid_up_explore)도 동일 — 탐색 레인 inline(explore_op) 전용이라 위임
     # 경로로 새면 경제성 상한(exploration_ceiling) 없이 30% 면제만 적용되고 killswitch 화이트리스트
     # (explore_op 전용)도 우회한다(approval_source='delegation'은 미등록). 둘 다 영구 제외(봉쇄 유지).
+    # CS: 콜드 첫 입찰(bid_up_cold)도 동일 — ±15% **완전 면제** 타입이라 유일한 상한이 레인이
+    # 산정한 min(이익상한, 시장가)인데, 위임 경로는 그 산정을 거치지 않아 무제한 상향이 된다.
+    # 킬스위치 화이트리스트(cold_op)도 우회 — 영구 제외.
 
 
 def _resolve_optimizer(db: Session, campaign_id: str) -> str:

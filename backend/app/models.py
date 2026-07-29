@@ -266,12 +266,36 @@ class Order(Base):
         Numeric(12, 2), nullable=True
     )
     raw_data: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # ── 배송 구분(Jino 지시 2026-07-28) — raw_data JSON 안에만 있던 값을 조회 가능하게 영속화.
+    #    판별·파싱은 services/order_delivery.py 한 곳에서만 한다(SA). 배송방식과 배송비 부담은
+    #    독립 축이라 각각 저장한다. NULL = 판별 불가(네이버 주문 아님·raw_data 부재·JSON 잘림).
+    # 원본 그대로: ARRIVAL_GUARANTEE(N배송) / TODAY / NORMAL …
+    delivery_attribute_type: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    delivery_policy_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)   # 유료/무료/조건부무료
+    shipping_fee_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)      # 선결제/무료 …
+    logistics_company_id: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)   # N배송 물류사(PG 등)
+    # ★우리가 지불한 배송비(건별 스냅샷). 단가는 코드 상수라 개정되면 과거 원가가 소급 왜곡된다
+    #   → 주문 시점 판정 단가를 행에 박아 둔다. 고객 수취액은 기존 shipping_cost(의미 불변).
+    #   실부담 = shipping_cost_paid − COALESCE(shipping_cost,0) → 조회 시 계산(중복 저장 금지).
+    shipping_cost_paid: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now()
     )
 
     channel: Mapped[Channel] = relationship(back_populates="orders")
     product: Mapped[Optional[ProductMaster]] = relationship()
+
+    @property
+    def shipping_cost_net(self) -> Optional[Decimal]:
+        """실부담 배송비(우리 지불 − 고객 수취). 지불 미판별이면 None(파생값, 저장 안 함)."""
+        if self.shipping_cost_paid is None:
+            return None
+        return Decimal(str(self.shipping_cost_paid)) - Decimal(str(self.shipping_cost or 0))
+
+    @property
+    def is_nbaesong(self) -> bool:
+        """N배송(도착보장) 주문인가 — 단일 판별자(deliveryAttributeType)."""
+        return self.delivery_attribute_type == "ARRIVAL_GUARANTEE"
 
 
 class SyncLog(Base):
@@ -1029,6 +1053,17 @@ class CoupangCoupon(Base):
     wow_exclusive: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)  # 즉시: 와우회원 전용
     applied_option_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 다운로드: 적용 옵션수
     usage_amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)  # 다운로드: 사용량
+    # ── 프로모션 손익 레이어(트랙 coupang-promo-pnl, D-CPP-3) ──
+    # ★셀러 부담 실사용 할인액의 **권위값**. Wing 화면의 쿠폰별 "사용 금액"(예: 94177420 = 156,000원).
+    #   위 usage_amount(다운로드쿠폰 '사용량')와는 다른 축이라 컬럼을 분리한다 — 의미를 겹치면
+    #   나중에 어느 쪽이 우리 실부담인지 구분할 수 없다.
+    #   ⚠️ 쿠팡 Open API(fms)에는 이 값이 없다(ref 06 §E 전수 대조) → coupon_sync가 채우지 않는다.
+    #   ingest 경로(/coupon/used-amount/ingest)로만 들어오며, 출처는 used_amount_source로 항상 라벨링.
+    used_amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)
+    used_amount_source: Mapped[Optional[str]] = mapped_column(
+        String(20), nullable=True
+    )  # wing_ui | wing_api | manual (추정값 금지 — 출처 없는 값은 넣지 않는다)
+    used_amount_synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     synced_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
     )
@@ -1357,6 +1392,10 @@ class CoupangRocketPurchaseOrderItem(Base):
     product_name: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
     purchase_type: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)  # 일반매입/직매입
     order_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 발주수량(원가 산정용)
+    # 업체납품가능수량(발주상세 인덱스 5, ref 20b §2) — 우리가 확인한 납품 가능분.
+    #   PO그레인 CoupangRocketPurchaseOrder.vendor_confirmed_qty(sumOfVendorConfirmedQty)의 per-SKU 판.
+    #   nullable: 이 컬럼 신설 이전에 적재된 기존 행은 값 없음(백필 전까지 NULL).
+    vendor_confirmed_qty: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     # 금액(gross/net, 원 단위) — 쿠팡→우리 매입(매출), 우리 원가 아님(원가는 product_master)
     unit_purchase_price: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)  # 매입 단가
     line_order_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)  # 라인 발주금액(gross)
@@ -1393,6 +1432,120 @@ class CoupangRocketSettlement(Base):
     tax_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)  # 과세유형
     first_payment_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)  # 1차지급액
     second_payment_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)  # 2차지급액
+    # 전자세금계산서 전송성공 여부 — 정산 테이블 마지막(헤더명 빈) 링크 컬럼에서 파싱(ref 20 §4 #16).
+    #   True='전송성공' 표기 / False='전송성공' **미표기** / None=셀 부재·미관측 토큰(판별 불가).
+    #   ★False를 '전송실패'로 읽지 말 것. 실측 10행에서 False인 유일한 행은 세금계산서 확정일도
+    #     '-'(미확정)이라, 관측된 사실은 "확정 전에는 상태 텍스트가 없다"까지다. '확정됐는데 미전송'
+    #     표본은 0건 — 진짜 실패와 미발행을 구분하려면 별도 근거가 필요하다.
+    tax_invoice_transmitted: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class CoupangRocketSalesDaily(Base):
+    """쿠팡 로켓배송(1P) 옵션×일 소비자 판매 — supplier 애널리틱스>판매 분석 (트랙 coupang-promo-pnl, Phase 1).
+
+    소스: `https://supplier.coupang.com/rpd/web-v2/basic/web-view?type=SALES_ANALYSIS` (BETA).
+    런타임 경계(rocket-1p D-1과 동일): Akamai 봇방어 → 백엔드 직접 fetch 금지. Mac 헤드풀 CDP
+      페처가 수집 → **우리 레코드 계약**으로 push → 파서(clients/coupang/rocket_promo.py) 정규화 → 적재.
+    grain: (vendor_id, option_id, date). 같은 키 재수신 시 확정치 교체(snapshot upsert, 멱등).
+
+    ★★revenue는 회계 매출이 아니다(D-CPP-2). 1P 회계 매출은 발주(납품)금액 축이 정본이다
+      (rocket-1p D-3). 여기 revenue = **소비자 실현가**(쿠팡이 자체 마진으로 내린 판매가가 반영된
+      금액)이며, 용도는 **광고 BEP ROAS의 분자 · 수요/전환 신호**로 한정한다. 종합조망 net_profit
+      계산에 절대 결합하지 않는다 — 결합하면 1P 매출이 이중으로 잡힌다.
+
+    sku_id = 발주 데이터의 product_number와 같은 키(실측 62178970) → RocketProductCostMap 브리지로
+      원가에 닿는다. option_id는 쿠팡 옵션ID(판매분석 화면 표기).
+    D-CPP-5: 판매분석은 BETA + "Basic 무료체험중" → 접근 차단이 조용히 오면 이 테이블이 멈춘다.
+      수집기는 403/구독오류를 성공으로 접지 말 것(원칙22).
+    """
+
+    __tablename__ = "coupang_rocket_sales_daily"
+    __table_args__ = (
+        UniqueConstraint("vendor_id", "option_id", "date", name="uq_coupang_rocket_sales_daily"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    vendor_id: Mapped[str] = mapped_column(String(20), nullable=False, index=True)  # A01029796(계정축)
+    option_id: Mapped[str] = mapped_column(String(30), nullable=False, index=True)  # 쿠팡 옵션ID
+    sku_id: Mapped[Optional[str]] = mapped_column(
+        String(30), nullable=True, index=True
+    )  # = 발주상세 product_number(원가 브리지 키)
+    date: Mapped[Optional[datetime]] = mapped_column(Date, nullable=False, index=True)  # 판매일(KST)
+    qty: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )  # 판매수량
+    revenue: Mapped[Decimal] = mapped_column(
+        Numeric(14, 2), nullable=False, default=0, server_default="0"
+    )  # ★소비자 실현가 기준 매출(회계축 아님 — 위 주석)
+    visitors: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 유입수(있으면)
+    conversion_rate: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(7, 4), nullable=True
+    )  # 전환율 — **0~1 소수**(3.52% → 0.0352). % 표기는 페처가 100으로 나눠 보낸다(PLAN §4)
+    product_name: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+    source: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="sales_analysis",
+        server_default="sales_analysis",
+    )  # sales_analysis | excel (원천 라벨 — 폴백 경로 추적)
+    synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class CoupangRocketPromotion(Base):
+    """쿠팡 로켓배송(1P) 프로모션 신청 — 공급자허브 '프로모션' 메뉴 (트랙 coupang-promo-pnl, Phase 1).
+
+    소스: 공급자허브 프로모션 목록/상세(D-CPP-1: 자동 수집이 기본, 수기 입력은 폴백).
+    grain: request_id(Request ID). 재수신 시 확정치 교체(snapshot upsert, 멱등).
+
+    ★행사기간은 **초 단위**다(실례 Request 687878: 2026-07-24 00:01:00 ~ 07-26 23:59:59) —
+      날짜로 뭉개면 프로모션 창 조인(Phase 2)이 하루씩 틀어진다. DateTime으로 보존한다.
+    ★D-CPP-4: 분담금이 어떤 형태로 청구되는지 **미확정**이다(07월분 정산일이 9월). 매입정산
+      (coupang_rocket_settlement)에 흔적 없음. 따라서 이 테이블은 **사실 기록일 뿐 비용 라인이
+      아니다** — 어떤 손익 계산에도 자동 반영하지 않는다. 9월 정산서 도착 후 대사해서 확정.
+    raw: 원본 응답 보존(스키마 드리프트·미매핑 필드 사후 복구용).
+
+    ★unit_discount_amount(D-CPP-7, 2026-07-28 확정) — **프로모션당 단위 할인액(원), 수기 입력.**
+      Jino 원문: "한 프로모션당 할인하는 가격이 하나로 정해지게 되어 있어. 그래서, 한 프로모션에
+      제품은 여러개가 들어갈 수 있지만 할인 가격은 모두 같은게 맞아."
+      왜 수기인가(라이브 실측 2026-07-28): 공급자허브 프로모션 목록/상세 API 응답에 **상품별·단위
+      할인액 필드가 없다**(discountBudget=총예산, supplierFundRate=분담%, discountType=할인방식뿐).
+      없는 필드를 추측해서 읽으면 조용히 틀린 값이 권위값 자리에 앉는다 → 페처는 이 칸을 절대
+      건드리지 않고, `PATCH /rocket/promotion/{request_id}/unit-discount`로만 채운다.
+      ⇒ **페처의 snapshot upsert가 이 칸을 덮어쓰지 않는다**(수기 입력이 재수집에 지워지면 안 됨).
+    """
+
+    __tablename__ = "coupang_rocket_promotion"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    request_id: Mapped[str] = mapped_column(String(30), unique=True, nullable=False, index=True)
+    vendor_id: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    contract_id: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)  # 계약ID
+    promotion_name: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)  # 쿠폰명
+    promotion_type: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)  # 종류(즉시할인 등)
+    status: Mapped[Optional[str]] = mapped_column(String(30), nullable=True, index=True)
+    start_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)  # 초 단위
+    end_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)  # 초 단위
+    share_ratio: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(7, 2), nullable=True
+    )  # 고객할인 비용 분담비율(%) — 100 = 전액 셀러 부담
+    discount_method: Mapped[Optional[str]] = mapped_column(
+        String(40), nullable=True
+    )  # 할인방식(정액수량 / 할인액 등)
+    discount_value: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+    unit_discount_amount: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(12, 2), nullable=True
+    )  # ★수기 입력(D-CPP-7) — 프로모션당 단위 할인액. 아래 주석 참조
+    # ★대상 SKU(=발주 product_number) 목록, **수기 입력**(Phase 2 손익 엔진).
+    #   왜 수기인가: 프로모션 API 응답에 **적용 상품 목록이 없다**(2026-07-28 prod raw 실측 —
+    #   detailCount=적용상품 '수'만 있고 배열 없음). 손익은 "이 창에서 어느 SKU가 팔렸나"를
+    #   알아야 계산되는데, 이름 유사도·기간 겹침 같은 **추정 매핑은 금지**한다: 틀린 SKU를
+    #   물면 손익·BEP ROAS가 통째로 틀리면서 어디서도 대사되지 않는다(원칙22).
+    #   unit_discount_amount와 같이 페처가 손대지 않는 칸이라 재수집에 지워지지 않는다.
+    target_sku_ids: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    budget_amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)  # 예산
+    settlement_date: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True)  # 정산일
+    applied_product_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 적용상품 수
+    requested_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)  # 요청일
+    raw: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)  # 원본 보존
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
@@ -1465,6 +1618,12 @@ class NaverAdDaily(Base):
     avg_rank = rank_sum / imp (0 노출이면 미정의). cost/conv_amt = 원 단위(VAT 별도).
     같은 날짜 재수집 시 확정치로 교체(snapshot upsert). D-NAO-9: 키워드 단위 일 판단은
     통계적 불가(0.88클릭/일) → 이 테이블은 누적 저장용, 판단은 7~30일 창 풀링.
+
+    ★adgroup_id='__backfill__'(BACKFILL_SENTINEL_ADGROUP) 행은 회계 의미가 다르다 — 소스가
+    /stats(캠페인 grain 장기 백필)라 conv_indirect_cnt/amt에 구매+장바구니 등 전환 액션
+    **전량 합계**가 들어있고(액션 유형 분리 불가) cart_*=0이다. 상세 행은 구매만 conv_*,
+    장바구니는 cart_*로 분리되므로, 둘을 함께 합산하면 분자가 이중가산된다.
+    → 집계하는 SA는 sentinel 행을 명시적으로 제외할 것(제외 안 한 채 배포된 사례: D-NAO-58 CD1).
     """
 
     __tablename__ = "naver_ad_daily"
@@ -1530,8 +1689,13 @@ class NaverProductBep(Base):
     aggressiveness: Mapped[str] = mapped_column(String(12), nullable=False, default="standard")  # safe/standard/aggressive
     target_roas: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4), nullable=True)  # bep_roas × 공격성 배수
     has_cost: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    # D-NAO-57(B): 광고 의사결정 BEP에 쓴 수수료율 기준 — ad_case(정산 유형별 실측 분해=주문관리+
-    # 매출연동 언디루션) / blended(기존 전체 회계 실효율 폴백). None=산출 전/폴백 미판정.
+    # 광고 의사결정 BEP에 쓴 수수료율 기준(행 단위). None=산출 전/폴백 미판정.
+    #   delivery_case — N1(D-NAO-99) 기본. **그 상품의** 건별 정산 실측(주문관리+기저 매출연동)
+    #                   + 1.5%p × N배송 혼합비. 상품 표본 ≥5건일 때.
+    #   delivery_acct  — 위와 같은 실측이되 상품 표본이 얇아(<5건) 계정 실측을 쓴 행.
+    #   ad_case        — D-NAO-57(B) 유형별 분해(매출연동 언디루션). 정산 표본이 상품에 귀속되지
+    #                   않을 때의 계정 단일 요율 폴백. ★언디루션은 라이브에서 항등(ref 42 §6, N3).
+    #   blended        — 전체 회계 실효율(|Σcomm|/(Σsettle+|Σcomm|)) 최종 폴백.
     commission_basis: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     calculated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
@@ -1570,6 +1734,38 @@ class NaverAdgroupProduct(Base):
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class NaverBidEstimateDaily(Base):
+    """네이버 쇼핑 소재별 시장가 사다리 일별 축적 (CS 스프린트 SA2, market_bid_probe).
+
+    grain: (date, ad_id, device, position). 소스: /npla-estimate/average-position-bid/id
+    (순위 1~4 필요 입찰가) + /npla-estimate/exposure-minimum-bid/id(최소노출입찰가).
+
+    position: 1~4 = 평균 노출순위별 필요 입찰가. **0 = 최소노출입찰가**(별도 엔드포인트 값을
+      같은 테이블 grain에 담기 위한 가상 position — 실제 API position이 아니다).
+      ★position 5 이상은 API가 400으로 거부한다(라이브 실측) — 사다리는 1~4가 전부.
+    is_floor: 시세 무의미 표식(50원 이하 관측 또는 순위별 차등 없음). True인 행의 bid를
+      실제 시장가로 오인해 입찰에 쓰면 안 된다(market_bid_probe.detect_floor 참조).
+
+    ★신규 테이블 = 신규 grain. naver_ad_daily(그룹/키워드 grain)는 건드리지 않는다.
+    """
+
+    __tablename__ = "naver_bid_estimate_daily"
+    __table_args__ = (
+        UniqueConstraint("date", "ad_id", "device", "position", name="uq_naver_bid_estimate_daily"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)  # 관례: Date 컬럼도 Mapped[datetime](기존 테이블 동일)
+    ad_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)  # nccAdId(소재)
+    adgroup_id: Mapped[str] = mapped_column(String(50), nullable=False, default="", index=True)
+    campaign_id: Mapped[str] = mapped_column(String(50), nullable=False, default="", index=True)
+    device: Mapped[str] = mapped_column(String(8), nullable=False)  # MOBILE/PC
+    position: Mapped[int] = mapped_column(Integer, nullable=False)  # 1~4 순위 / 0=최소노출입찰가
+    bid: Mapped[int] = mapped_column(Integer, nullable=False)
+    is_floor: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    collected_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 class NaverCampaignSettings(Base):
     """캠페인별 관리 주체·모드 (D-NAO-13). 진단·리포트는 전 캠페인, 제안·실행은 optimizer='ours'만.
 
@@ -1594,6 +1790,11 @@ class NaverCampaignSettings(Base):
     # 고삐라 additive nullable(기존 행 무영향·회귀 0). ★쓰기는 Router PUT /campaign-settings/
     # loss-policy 하나뿐 — 위임·자동 레인 어디서도 이 값을 바꾸지 않는다(§0 금지선).
     loss_policy: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    # BP(D-NAO-102): 예산 페이싱 레인의 그날 기준 일예산(장중 증액 직전 값). ①증액 캡 =
+    # base×2(같은 날 여러 번 증액해도 복리 금지) ②익일 00:05 원복 목표값. NULL=미시드
+    # (BP 레인이 그날 첫 평가에서 현재 예산으로 시드 — 사람이 콘솔에서 바꾼 값도 이때 흡수).
+    # ★쓰기 주체는 BP 레인(auto_operator._run_budget_pacing_lane) 하나뿐.
+    base_daily_budget: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
@@ -1659,6 +1860,49 @@ class NaverKeywordHourly(Base):
     conv_cnt: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")  # 시간당 전환건수(ccnt, D-NAO-60 RL1) — 건수만·회계 미접촉
     avg_rank: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())  # ⚠️UTC(sqlite-server-default-now-is-utc) — 시간계산엔 미사용
+
+
+class NaverAdgroupHourlyToday(Base):
+    """당일(진행 중) 애드그룹 시간별 성과 — 매시 재수집·교체 (D-NAO-122).
+
+    grain: (ad_date, adgroup_id, hour). 소스는 naver_keyword_hourly와 같은
+    /stats?breakdown=hh24이지만 **테이블을 분리한다.**
+
+    ★왜 naver_keyword_hourly에 넣지 않는가(codex 리뷰 P1, 2026-07-29): 그 테이블은
+      "행이 있다 = 그 날 하루가 통째로 스윕됐다"는 완결 불변식 위에 서 있고,
+      auto_operator._exploration_yesterday_flow가 그 불변식으로 어제 clk 창 합을
+      신뢰한다(그 함수 docstring ①). 당일 진행분을 같은 테이블에 쓰면 자정을 넘긴
+      순간 그 행들이 "어제 행"이 되어 판정을 통과하는데, 마지막 시간(23시)은 아직
+      완결되지 않아 구조적으로 빠져 있다 → 롤링 24h 흐름 과소계상 → 잠겨 있어야 할
+      확장·입찰상향이 열린다. 변경 전에는 어제 행이 아예 없어 fail-toward-hold로
+      안전하게 빠졌으므로, 섞는 것은 순수한 퇴행이다.
+      완결 여부를 hour=23 존재로 판정할 수도 없다 — hh24는 실적 있는 시간대만
+      반환하므로 23시 노출 0인 그룹은 완전 스윕 후에도 23시 행이 없다.
+    ★같은 이유로 이 테이블을 읽는 코드는 "부분 데이터"임을 알고 읽어야 한다.
+      과거 완결 데이터가 필요하면 naver_keyword_hourly를 읽는다(두 테이블을 암묵적으로
+      섞지 않는다 — naver_bid_estimate_daily가 세운 "신규 grain=신규 테이블" 규약 계승).
+
+    ★회계 불변(D-NAO-60 RL1 계승): conv_cnt는 건수만(ccnt) — 금액(convAmt)은 hh24에
+      없다. 매출/BEP/ROAS 집계는 이 컬럼을 읽지 않는다.
+    """
+
+    __tablename__ = "naver_adgroup_hourly_today"
+    __table_args__ = (
+        UniqueConstraint("ad_date", "adgroup_id", "hour", name="uq_naver_adgroup_hourly_today"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ad_date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)
+    hour: Mapped[int] = mapped_column(Integer, nullable=False)  # 0~23, 완결된 시간만
+    adgroup_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    campaign_id: Mapped[str] = mapped_column(String(50), nullable=False, default="", index=True)
+    campaign_type: Mapped[str] = mapped_column(String(20), nullable=False, default="")
+    imp: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    clk: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cost: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    conv_cnt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    avg_rank: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
+    synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())  # ⚠️UTC
 
 
 class NaverChangeLog(Base):
@@ -1954,6 +2198,10 @@ class NaverEntity(Base):
     campaign_type: Mapped[str] = mapped_column(String(20), nullable=False, default="")  # WEB_SITE/SHOPPING/BRAND_SEARCH
     name: Mapped[str] = mapped_column(String(300), nullable=False, default="")  # 캠페인/그룹명 또는 키워드 텍스트
     status: Mapped[str] = mapped_column(String(10), nullable=False, default="on")  # on/off/deleted
+    # 네이버 statusReason 원문(D-NAO-97) — status가 'on'인데 실제로 안 도는 이유를 담는 유일한 필드
+    # (CAMPAIGN_LIMITED_BY_BUDGET=일예산 소진 / CAMPAIGN_PAUSED=상위 캠페인 OFF / *_UNDER_REVIEW 등).
+    # ★status(on/off)는 사람의 On/Off 스위치(userLock)만 반영한다 — 이 둘을 섞지 않는다.
+    status_reason: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     bid_amt: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 그룹 기본가·키워드 개별입찰
     monthly_volume: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # keywordstool PC+Mobile 합
     competition: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)  # low/mid/high
@@ -1965,8 +2213,8 @@ class NaverEntity(Base):
 class NaverEntitySnapshot(Base):
     """대행사 포함 45캠페인 구조의 날짜별 history (SA-1, D-NAO-78 · BM 벤치마크 레이어).
 
-    naver_entity는 upsert라 '현재 상태'만 남아 역사가 없다 → 이 테이블이 매일 07:37 캠페인·
-    그룹 grain 구조를 스냅샷(0 GET, naver_entity DB만 읽음). 관찰 전용 — 네이버 API 쓰기 0.
+    naver_entity는 upsert라 '현재 상태'만 남아 역사가 없다 → 이 테이블이 매일 아침(entity_sync
+    완료 직후 체이닝) 캠페인·그룹 grain 구조를 스냅샷(0 GET, naver_entity DB만 읽음). 관찰 전용 — 네이버 API 쓰기 0.
     키워드 grain은 저장 안 함(90,150행/일 × 365 = 3,300만행/년 회피): 그룹 행에 키워드 집계
     (keyword_count·keyword_avg_bid)만 남기고 개별 키워드 변화는 이벤트(naver_agency_op, P2)로
     잡는다. optimizer는 naver_campaign_settings 조인(none=대행사 관찰 대상/ours/mop).
@@ -2044,8 +2292,8 @@ class NaverBmBenchmark(Base):
     """대행사 구조↔성과 상관을 벤치마크化한 프라이어 1행 (SA-3, D-NAO-78 · BM 벤치마크 레이어).
 
     B-X(탐색 초기입찰)·SS4(승격 교차)·(향후)IU-R·L2가 optional 입력으로 소비한다 —
-    전부 fail-open(부재 시 기존 동일, §0 금지선 4). 매일 07:37 재산출(bench_kind 단위 교체
-    upsert) — 최신 벤치마크만 유지한다(naver_product_bep snapshot 교체 관례 계승). 관찰 전용 —
+    전부 fail-open(부재 시 기존 동일, §0 금지선 4). 매일 아침(entity_sync 완료 직후 체이닝)
+    재산출(bench_kind 단위 교체 upsert) — 최신 벤치마크만 유지한다(naver_product_bep snapshot 교체 관례 계승). 관찰 전용 —
     네이버 API 쓰기 0(DB만: naver_entity_snapshot + naver_ad_daily + naver_entity 조인 산출).
 
     ★저장소 택일(§9-2, P4 Opus 결정 = 혼용): keyword_verified/bid_band/group_structure는 값이
@@ -2293,6 +2541,47 @@ class NaverAccountSettings(Base):
     key: Mapped[str] = mapped_column(String(40), unique=True, nullable=False)
     value_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+# ══════════════════════════════════════════════════════════════════
+# D-NAO-103 — 소재 CTR 경보 이력(발화 억제 상태) (VT3 개편)
+# ══════════════════════════════════════════════════════════════════
+class NaverCtrAlertLog(Base):
+    """소재 CTR 경보의 **판정 이력** 1행 — "어제도 경보였나"를 알기 위한 유일한 상태(D-NAO-103).
+
+    왜 필요한가: 개편 전 VT3는 만성 저CTR 그룹을 매일 재발화해(07-23~28 파워링크 5~8그룹/일)
+    Jino가 읽기를 포기했다. "신규 진입만 개별 발화 · 만성은 주 1회 요약"으로 바꾸려면 전일
+    **판정 집합**이 필요한데, ops_diary_entries의 브리핑 본문은 (a)억제된 건이 애초에 안 적히고
+    (b)사람이 읽는 이름 표기로 바뀌어 ID 역파싱이 불가능하다 → 별도 이력 테이블.
+
+    ★기록 대상은 **발화한 것이 아니라 판정된 것 전부**다. 억제된 만성 건을 안 남기면 다음날
+    "전일 집합에 없음 = 신규"로 되살아나 억제가 매일 무효화된다(설계상 가장 쉬운 함정).
+
+    grain: (as_of_date, campaign_id, adgroup_id). as_of_date = detect_ctr_alerts의 D0(=today−1),
+    브리핑 실행일이 아니다(레인이 하루 걸러 돌아도 창 의미가 유지된다).
+    streak_days = 연속 판정 일수(전일 행이 있으면 +1, 없으면 1) — 브리핑의 "N일째" 근거.
+    notified = 그날 개별/주간 메시지에 실제로 실렸는지(관측용, 억제율 사후 확인).
+    """
+
+    __tablename__ = "naver_ctr_alert_log"
+    __table_args__ = (
+        UniqueConstraint("as_of_date", "campaign_id", "adgroup_id", name="uq_naver_ctr_alert_log"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    as_of_date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)  # D0(=today−1, KST)
+    campaign_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    adgroup_id: Mapped[str] = mapped_column(String(50), nullable=False, default="")
+    window: Mapped[str] = mapped_column(String(8), nullable=False, default="")  # W1/W3/W1+W3
+    imp: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    clk: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    avg_rank: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
+    expected_clk: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
+    streak_days: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    notified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # ⚠️UTC — server_default=func.now()는 UTC([[sqlite-server-default-now-is-utc]]). 날짜 판단은
+    # 전부 as_of_date(KST 파생)로 한다 — created_at은 감사용 타임스탬프일 뿐 계산에 쓰지 않는다.
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
 # ══════════════════════════════════════════════════════════════════

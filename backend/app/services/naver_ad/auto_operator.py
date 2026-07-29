@@ -34,7 +34,7 @@ from app.models import (
     NaverProposal,
     NaverRetroSignal,
 )
-from app.services.naver_ad import bid_rank_curve, bid_simulator, budget_envelope, campaign_target_resolver, ctr_alert, diagnosis, diary, effective_bid, exploration, expansion_allocator, expansion_pressure, gave_score, guardrail_gate, intraday_roas, naver_execution_harness, naver_sa_writer, rank_servo, slack_notifier, visibility, vitality_signal
+from app.services.naver_ad import bid_rank_curve, bid_simulator, budget_envelope, budget_pacing, campaign_target_resolver, ctr_alert, ctr_alert_briefing, diagnosis, diary, effective_bid, exploration, expansion_allocator, expansion_pressure, gave_score, guardrail_gate, intraday_roas, naver_execution_harness, naver_sa_writer, rank_servo, slack_notifier, visibility, vitality_signal
 from app.services.naver_ad.bid_step_types import BID_UP_TYPES, EXPLORATION_STEP_TYPES, encode_base_bid, encode_exploration_ceiling
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.services.naver_ad.guardrail_gate import _MAX_CHANGE_PCT
@@ -61,6 +61,9 @@ APPROVAL_SOURCE_DAILY = "auto_op"  # 7자
 APPROVAL_SOURCE_HOURLY = "auto_op_hr"  # 10자
 APPROVAL_SOURCE_PROBE = "probe_op"  # 8자 — D-NAO-58 CD2 클릭 탐침(String(12) 적합, diary probe actor)
 APPROVAL_SOURCE_REVERT = "revert_op"  # 9자 — D-NAO-58 CD3 탐침 되돌림(String(12) 적합, diary ACTOR_PROBE 재사용)
+# BP(D-NAO-102) 예산 페이싱 승인원 — 값의 집은 budget_pacing SA(harness가 auto_operator를
+# module-level import하면 순환이라 SA 쪽이 소유). 여기선 다른 레인 상수와 같은 자리에 재노출만.
+APPROVAL_SOURCE_PACING = budget_pacing.APPROVAL_SOURCE_PACING  # 'pace_op'(7자, diary ACTOR_PACING)
 
 # ── VT2(D-NAO-81 B축 스파이럴 복원) ──
 # 스파이럴 복원 발사는 새 approval_source·새 쓰기 경로를 만들지 않는다(§0 3 "새 권한 없음"):
@@ -78,7 +81,8 @@ ACTION_VITALITY_BRIEFING = "vitality_spiral_briefing"  # diary observe action(�
 # ── VT3(D-NAO-82② 소재 CTR 경보) ──
 # 새 권한 없음(§0 "브리핑+래더 중지뿐") — 실행 레버는 그대로, 브리핑 1개 + 탐색 래더 skip 1개.
 ACTION_CTR_ALERT_BRIEFING = "ctr_alert_briefing"  # diary observe action(브리핑 렌더용)
-_CTR_ALERT_BRIEFING_TOP_N = 20  # PX 브리핑 관례(_TOP_N=10)보다 넉넉히(창별 2건/그룹 가능)
+# D-NAO-103: 브리핑 문안·압축·발화 억제는 ctr_alert_briefing(harness)으로 이관했다
+# (구 _dedupe_ctr_alert_rows/_fmt_ctr_alert_rows/_CTR_ALERT_BRIEFING_TOP_N 폐기).
 _CTR_ALERT_LADDER_SKIP_REASON = "CTR경보 — 소재 처방 대상, 추가 UP 무의미"
 
 # ── VF(D-NAO-83 가시성 우선) 유령∧창 비활성 관측(VT3b 최소형) ──
@@ -561,61 +565,14 @@ def _check_bid_up_conditions(
     return None
 
 
-def _dedupe_ctr_alert_rows(alerts: list[dict]) -> list[dict]:
-    """VT3 codex 1R P2-2: 같은 (campaign_id, adgroup_id)가 W1·W3 동시 발화하면 브리핑에서
-    한 그룹 한 행으로 합친다(window는 'W1+W3'처럼 병기, 건수도 그룹 수 기준 — 중복 집계 금지).
-    래더 skip 게이트(auto_operator가 쓰는 set)는 이미 dedupe라 이 함수는 브리핑 표시 전용.
-    입력 순서(첫 등장 순)를 보존하고, 첫 발화 행의 reason을 대표로 유지한다(detect_ctr_alerts는
-    그룹당 W1을 먼저 append하므로 대표=W1, window는 뒤 발화(W3)를 병기)."""
-    merged: dict[tuple[str, str], dict] = {}
-    order: list[tuple[str, str]] = []
-    for a in alerts:
-        key = (a["campaign_id"], a["adgroup_id"])
-        existing = merged.get(key)
-        if existing is None:
-            merged[key] = dict(a)
-            order.append(key)
-        else:
-            windows = existing["window"].split("+")
-            if a["window"] not in windows:
-                existing["window"] = "+".join(windows + [a["window"]])
-    return [merged[k] for k in order]
-
-
-def _fmt_ctr_alert_rows(alerts: list[dict]) -> str:
-    """CTR 경보 상위 나열 — PX _fmt_rows 관례 미러(상위 N + "외 M건" 압축). 입력은
-    _dedupe_ctr_alert_rows로 그룹당 1행 정규화된 목록을 받는다(P2-2)."""
-    top = alerts[:_CTR_ALERT_BRIEFING_TOP_N]
-    lines = [
-        f"- {a['campaign_id']}/{a['adgroup_id']}({a['window']}): {a['reason']}"
-        for a in top
-    ]
-    remainder = len(alerts) - len(top)
-    if remainder > 0:
-        lines.append(f"- 외 {remainder}건")
-    return "\n".join(lines)
-
-
-def _emit_ctr_alert_briefing(db: Session, alerts: list[dict], now: datetime) -> None:
-    """경보 있던 날만 diary(observe)+Slack — PX·VT 브리핑 관례 미러(호출부가 독립 try로
-    감싼다 — 이 함수 자체는 fail-open을 스스로 보장하지 않는다, _run_ctr_alert_briefing 참조).
-    P2-2: 헤더 건수·행 모두 그룹 단위 dedupe(한 그룹이 W1·W3 동시 발화해도 1건·1행)."""
-    deduped = _dedupe_ctr_alert_rows(alerts)
-    header = (
-        f"{now.date().isoformat()} 소재 CTR 경보 {len(deduped)}건(D-NAO-82②) — "
-        "입찰로 못 푸는 소재 CTR 문제 — 사람 처방 대상(썸네일·가격·리뷰) — 해당 그룹 탐색 래더 추가 UP 중지"
-    )
-    text = "\n".join([header, _fmt_ctr_alert_rows(deduped)])
-    diary.write_diary_entry(
-        db, "observe", "", actor=diary.ACTOR_DAILY, action=ACTION_CTR_ALERT_BRIEFING,
-        rationale=text, now=now,
-    )
-    slack_notifier.notify_text(text, log_label="소재 CTR 경보 브리핑")
-
-
 def _run_ctr_alert_briefing(db: Session, now: datetime, result: dict) -> None:
-    """VT3(D-NAO-82②) 소재 CTR 경보 브리핑 — 일 레인(08:50)에서 전 auto_operate 캠페인의
-    ctr_alert(SA)를 캠페인당 1회 호출해 수집, 경보가 있는 날만 브리핑(없는 날 완전 침묵).
+    """VT3(D-NAO-82② → D-NAO-103 개편) 소재 CTR 경보 브리핑 — 일 레인(08:50)에서 전
+    auto_operate 캠페인의 ctr_alert(SA)를 캠페인당 1회 호출해 수집하고, 조립·발화 억제는
+    ctr_alert_briefing(harness)에 위임한다. 이 함수는 수집·발송·집계만 한다(원칙18 — 레인은
+    SA/harness를 엮을 뿐 문안을 만들지 않는다).
+
+    D-NAO-103: 매일 같은 만성 건을 반복 발화하던 것을 "신규 진입만 즉시, 만성은 월요일 요약"
+    으로 바꿨다. 발화할 게 없는 날은 여전히 완전 침묵(diary·Slack 둘 다 없음).
     fail-open: 이 스텝의 실패가 일 레인 본작업(승인/실행/stale 정리)을 막지 않는다(bleed
     밸브·vitality 스텝과 동형 — 호출부는 독립 try로 감싸지 않고 이 함수가 직접 감싼다,
     run_daily_lane 말미에서 반환값 없이 호출)."""
@@ -624,10 +581,18 @@ def _run_ctr_alert_briefing(db: Session, now: datetime, result: dict) -> None:
         for campaign_id in _auto_operate_campaign_ids(db):
             signals = ctr_alert.detect_ctr_alerts(db, campaign_id, now=now)
             alerts.extend(signals.get("alerts", []))
-        result["ctr_alerts"] = len(alerts)
-        if not alerts:
-            return  # 무경보 = 무브리핑(§4.1 "없는 날 침묵")
-        _emit_ctr_alert_briefing(db, alerts, now)
+        brief = ctr_alert_briefing.build_briefing(db, alerts, now=now)
+        result["ctr_alerts"] = brief["total"]              # 판정된 그룹 수(창 중복 합산 아님)
+        result["ctr_alerts_fired"] = brief["fired"]        # 실제 메시지에 실린 그룹 수
+        result["ctr_alerts_suppressed"] = brief["suppressed"]  # 만성 반복이라 억제된 수
+        text = brief["text"]
+        if not text:
+            return  # 신규 진입 0(+주간 요약일 아님) = 완전 침묵
+        diary.write_diary_entry(
+            db, "observe", "", actor=diary.ACTOR_DAILY, action=ACTION_CTR_ALERT_BRIEFING,
+            rationale=text, now=now,
+        )
+        slack_notifier.notify_text(text, log_label="소재 CTR 경보 브리핑")
     except Exception as e:  # noqa: BLE001 — VT3 브리핑 실패는 일 레인 본작업과 분리(fail-open)
         log.warning("auto_operator: CTR 경보 브리핑 실패(fail-open): %s", e)
 
@@ -1806,7 +1771,9 @@ def _probe_window_stats(curve: list[dict], now: datetime) -> tuple[int, int, Dec
     return imp_sum, clk_sum, weighted_rank, win_label
 
 
-def _probe_trigger(curve: list[dict], now: datetime) -> tuple[bool, str]:
+def _probe_trigger(
+    curve: list[dict], now: datetime, rank_floor: Decimal | None = None,
+) -> tuple[bool, str]:
     """D-NAO-58 CD2 클릭 탐침 트리거(순수 SA·단일 창 자기완결) — 밴드의 사각지대(밴드 안/하단
     인데 클릭0)를 감지한다(D-58-7 확정, 기존 검증 상수 재사용). (발동여부, 사유) 반환.
 
@@ -1819,8 +1786,12 @@ def _probe_trigger(curve: list[dict], now: datetime) -> tuple[bool, str]:
     - clk 합 == 0.
     - imp 합 ≥ 30(_MIN_HOURLY_SAMPLE_IMP 재사용) — "노출 부족 무클릭"↔"낮은 순위 무클릭"
       분리: imp≥30인데 clk=0이면 순위 병리 = 탐침 대상.
-    - 창 내 imp-가중 avg_rank ≥ 2.5(_HOURLY_RANK_DOWN_THRESHOLD 재사용) — rank<2.5는 밴드
-      상단/과열 = 위치가 아니라 수요 문제라 올려도 소용없음. 밴드 안/하단이어야 올라갈 여지.
+    - 창 내 imp-가중 avg_rank ≥ 하한 — rank가 하한보다 좋으면 밴드 상단/과열 = 위치가 아니라
+      수요 문제라 올려도 소용없음. 밴드 안/하단이어야 올라갈 여지.
+      하한 = `rank_floor`(호출부가 넘긴 **학습된** 밴드 하한) 또는 없으면
+      `_HOURLY_RANK_DOWN_THRESHOLD`(2.5, 하드코딩 프라이어). 학습값 우선 규약은
+      `_probe_rank_floor` docstring 참조 — 상수가 학습값을 이기던 충돌을 그쪽에서 해소한다.
+      SA는 db를 모른다(원칙18-6) — 학습밴드 조회는 harness(run_hourly_lane)가 해서 넘긴다.
       가중 로직은 _weighted_recent와 동일(rank None 버킷 제외·imp 가중·Decimal). 창 안 rank가
       전부 None이면(rank_imp_sum==0) weighted_rank=None → fail-closed 보류(근거 없음).
 
@@ -1838,19 +1809,142 @@ def _probe_trigger(curve: list[dict], now: datetime) -> tuple[bool, str]:
         return False, f"노출 부족(창{win_label} imp={imp_sum}<{_MIN_HOURLY_SAMPLE_IMP}) — 순위 병리 아님(탐침 보류)"
     if weighted_rank is None:
         return False, f"가중 avg_rank 근거 없음(창{win_label} rank 전부 None) — 탐침 보류(fail-closed)"
-    if weighted_rank < _HOURLY_RANK_DOWN_THRESHOLD:
+    floor = rank_floor if rank_floor is not None else _HOURLY_RANK_DOWN_THRESHOLD
+    floor_label = (
+        f"{floor}(학습밴드)" if rank_floor is not None else f"{_HOURLY_RANK_DOWN_THRESHOLD}"
+    )
+    if weighted_rank < floor:
         return False, (
-            f"창{win_label} 가중 avg_rank={float(weighted_rank):.2f}<{_HOURLY_RANK_DOWN_THRESHOLD}"
+            f"창{win_label} 가중 avg_rank={float(weighted_rank):.2f}<{floor_label}"
             "(밴드 상단/과열=수요 문제) — 탐침 대상 아님"
         )
     return True, (
         f"창{win_label} imp={imp_sum}≥{_MIN_HOURLY_SAMPLE_IMP}·clk=0·가중avg_rank="
-        f"{float(weighted_rank):.2f}≥{_HOURLY_RANK_DOWN_THRESHOLD}(밴드 사각지대 — 한 등 상향 탐침)"
+        f"{float(weighted_rank):.2f}≥{floor_label}(밴드 사각지대 — 한 등 상향 탐침)"
     )
+
+
+def _probe_rank_floor(learned_band: str | None) -> Decimal | None:
+    """학습된 최적 밴드 → 탐침 트리거 하한(없으면 None = 하드코딩 프라이어 유지).
+
+    ★해소하는 충돌(2026-07-28): `_probe_trigger`의 하한은 `_HOURLY_RANK_DOWN_THRESHOLD`
+    (2.5) 상수였다. 그 근거는 "rank<2.5면 위치가 아니라 수요 문제"라는 **프라이어**인데,
+    학습이 그 캠페인의 최적 밴드를 `1.0-2.0`으로 승격시키면 프라이어와 학습값이 정면으로
+    충돌한다. 그때 상수가 이기면 탐침은 rank 2.5에서 멈추고 **자기가 학습한 최적점(2.0)에
+    구조적으로 도달할 수 없다.** 동시에 그 도달을 막으려고 만든 CD5 게이트
+    (`_learned_optimal_skip`, 하한 band_high 미만이면 생략)도 2.5 > 2.0이라 영원히 발동하지
+    않는다 — 학습 소비자 하나가 통째로 사문화된다.
+
+    이 코드베이스의 일관된 규약대로 **학습값이 있으면 학습값이, 없으면 하드코딩 프라이어가**
+    이긴다. 단 방향은 `min`으로만 — 학습밴드가 2.5보다 느슨해도(2.5-3.0/3.0-4.0/4.0+)
+    하한 **값**을 키우지 않는다(그 경우 종전과 완전히 동일하게 동작하고, 과climb 억제는
+    기존 CD5가 그대로 담당한다). 즉 이 함수가 실제로 값을 바꾸는 경우는 `1.0-2.0` 하나다.
+
+    ★★위험 방향을 정확히 적는다(리뷰 L-1 정정). 하한 **값**은 안 커지지만 하한이 내려가면
+    **탐침 발동 집합은 엄격히 커진다** — 학습밴드가 `1.0-2.0`인 캠페인에서 rank 2.0~2.5
+    구간이 새로 열리고, 그건 입찰 **상향** 제안이 늘어난다는 뜻이다(라이브 광고비 방향).
+    "느슨해지지 않는다"는 값 이야기지 노출 이야기가 아니다. 새로 열리는 2.0~2.5는 실측
+    이익극대 스팟밴드(2.5~4)보다 **위쪽**이라 이익 관점에선 검증되지 않은 구간이다 —
+    그래서 학습이 그 캠페인에 대해 직접 승격시킨 밴드가 있을 때만 열린다.
+    제안이 실제 집행되려면 ±15% 클램프·킬스위치 재확인·쿨다운 2h·일일상한·BEP 하한·
+    스톱로스를 전부 통과해야 한다(우회 없음).
+
+    ★CD5와의 관계도 정확히 적는다(리뷰 H-2 정정). floor를 band_high로 맞췄으므로 탐침
+    발동(rank ≥ band_high)과 CD5 생략(rank < band_high)은 **정확한 여집합**이 된다 —
+    즉 `1.0-2.0`에서 CD5는 여전히 한 번도 발동하지 않는다. 달성된 것은 "탐침이 학습
+    최적점에서 멈춘다"이지 "CD5가 되살아난다"가 아니다. CD5의 역할은 이제 트리거 자신이
+    수행하고, CD5는 중복 방어로 남는다. (floor를 band_high보다 낮추면 탐침이 최적점을
+    **넘어서** 계속 오르므로 그 방향은 취하지 않는다.)
+
+    상한 개방 밴드("4.0+", hi=None)는 종전 경로 유지 — 탐침이 발동한 뒤 CD5가 생략시키며,
+    그 편이 "학습 최적밴드 도달" 사유가 일기에 남아 관측성이 낫다.
+    """
+    if not learned_band:
+        return None
+    from app.services.naver_ad import probe_cell_aggregate
+
+    try:
+        band_high = probe_cell_aggregate.rank_band_upper(learned_band)
+    except ValueError:  # 알 수 없는 라벨 — 프라이어 유지(조용한 오판정 방지)
+        return None
+    if band_high is None or band_high >= _HOURLY_RANK_DOWN_THRESHOLD:
+        return None
+    return band_high
+
+
+def _account_band_fallback_ok(
+    db: Session, target_type: str, target_id: str,
+) -> tuple[bool, str]:
+    """이 유닛에 **계정 밴드 폴백**을 적용해도 되는가 = 사후 고삐가 실제로 발동 가능한가.
+
+    ★조건은 하나: 상품 단가·BEP가 확인될 것(Jino 확정 2026-07-29).
+    근거 — 브레이크는 두 겹인데 그중 하나가 이 조건에 걸려 있다.
+      · 사전 상한(`bid_simulator.affordable_ceiling` = 보정RPC ÷ target ROAS)은 자기 이력이
+        없어도 `pooled_rpc`의 계층 수축으로 항상 계산된다. 즉 BEP를 넘는 입찰가로는 애초에
+        못 올라간다. **다만 그 RPC는 빌린 값**이라 자기 CVR이 계정 평균보다 나쁘면 상한이
+        자기 기준으론 관대하다(트랙 실측: 신규 그룹에서 계정 풀링 상한이 약 22% 관대).
+      · 그 관대함을 회수하는 것이 사후 고삐(`_intraday_loss_leash`, 장중 ROAS<BEP → 한 등
+        하향)인데, 그 함수는 `price`·`bep_roas`가 **둘 다** 있어야 판정하고 없으면
+        fail-closed로 **침묵**한다. 즉 BEP 미확인 유닛은 사전 상한만 남고 회수 장치가 없다.
+    그래서 BEP가 확인되는 유닛에만 폴백을 연다 — 브레이크가 두 겹 다 살아 있는 곳에서만
+    빌린 학습값으로 올라간다.
+
+    자기 캠페인이 직접 승격시킨 밴드가 있으면 이 검사를 타지 않는다(그건 빌린 값이 아니다).
+    """
+    adgroup_id = _resolve_adgroup_id(db, target_type, target_id)
+    if adgroup_id is None:
+        return False, "adgroup 해석 불가 — 계정밴드 폴백 보류"
+    try:
+        info = intraday_roas.adgroup_unit_price(db, adgroup_id)
+    except Exception:  # noqa: BLE001 — 판정 불가는 fail-closed(폴백 안 함)
+        log.exception("auto_operator: 폴백 BEP 확인 실패 adgroup=%s", adgroup_id)
+        return False, "BEP 조회 실패 — 계정밴드 폴백 보류"
+    if info.get("price") is None or info.get("bep_roas") is None:
+        return False, "상품 단가/BEP 미확인 — 사후 고삐 불가라 계정밴드 폴백 보류"
+    return True, "BEP 확인 — 계정밴드 폴백 허용"
+
+
+def _learned_bands_of(
+    db: Session, now: datetime, campaign_id: str,
+) -> tuple[str | None, str | None]:
+    """(그 캠페인 자신의 승격 밴드, 계정 전체 승격 밴드). 각각 없으면 None.
+
+    ★스코프 불일치 해소(Jino 확정 2026-07-29): 09:03 학습 잡은 `campaign_id` 없이 돌아
+    **계정 전체** 밴드를 승격·기록하는데 게이트는 **캠페인별** 값만 읽었다. 그래서 계정에
+    학습값이 있어도 캠페인이 자기 승격에 못 미치면 그 캠페인은 하드코딩 프라이어(2.5)로
+    동작했다 — 학습해놓고 아무도 안 읽는 상태(2026-07-29 실측: ours 6개 중 계정 승격
+    밴드 `1.0-2.0`을 쓰는 캠페인 0개).
+    이제 둘 다 돌려주고, **자기 값이 없을 때만** 호출부가 조건부로 계정 값을 쓴다
+    (조건 = `_account_band_fallback_ok`).
+    """
+    return (
+        _learned_band_of(db, now, campaign_id),
+        _learned_band_of(db, now, None),
+    )
+
+
+def _learned_band_of(db: Session, now: datetime, campaign_id: str | None) -> str | None:
+    """그 캠페인(또는 campaign_id=None이면 계정 전체)·오늘 환경셀의 승격된 최적 밴드 라벨.
+
+    `_learned_optimal_skip`이 하던 조회를 밖으로 뽑은 것 — 탐침 하한(`_probe_rank_floor`)과
+    CD5 게이트가 **같은 값**을 봐야 서로 어긋나지 않는다. 조회 실패는 삼키고 None(=학습값
+    없음 → 하드코딩 프라이어 유지)으로 폴백한다: 학습 조회가 시간당 레인 전체를 막으면 안 된다.
+    """
+    from app.services.naver_ad import probe_cell_aggregate, probe_learning_loop
+
+    try:
+        env_cell = probe_cell_aggregate.env_cell_of_date(now.date())
+        return probe_learning_loop.learned_probe_rank(
+            db, env_cell=env_cell, as_of=now.date(), campaign_id=campaign_id,
+        )
+    except Exception:  # noqa: BLE001 — 학습값 부재와 동일 취급(프라이어 폴백)
+        log.exception("auto_operator: 학습밴드 조회 실패 campaign=%s", campaign_id)
+        return None
 
 
 def _learned_optimal_skip(
     db: Session, curve: list[dict], now: datetime, campaign_id: str,
+    learned_band: str | None = None, band_resolved: bool = False,
 ) -> tuple[bool, str]:
     """D-NAO-59/60 RL5(CD5) — 탐침(`_probe_trigger`)이 발동한 직후 게이트. **탐침 전용**.
     ★밴드=탐침 프라이어, ROAS-UP 캡 아님(D-NAO-66). IU2 이후 ROAS-driven 일반 UP은 이 게이트를
@@ -1874,7 +1968,11 @@ def _learned_optimal_skip(
         return False, "순위 근거 없음 — 게이트 미적용"
 
     env_cell = probe_cell_aggregate.env_cell_of_date(now.date())
-    learned = probe_learning_loop.learned_probe_rank(
+    # ★호출부가 이미 해결한 값이 있으면 그것을 쓴다(리뷰 M-1). 재조회하면 ①유닛마다
+    # 30일 aggregate를 도는 N+1이 그대로 남고 ②탐침 하한과 이 게이트가 **서로 다른 값**을
+    # 볼 수 있다(하한은 run 시작값 고정, 여기는 매번 재계산) — 두 게이트가 같은 밴드를
+    # 봐야 어긋나지 않는다는 게 이 배선의 전제다.
+    learned = learned_band if band_resolved else probe_learning_loop.learned_probe_rank(
         db, env_cell=env_cell, as_of=now.date(), campaign_id=campaign_id,
     )
     if learned is None:
@@ -2582,6 +2680,191 @@ def _run_vitality_step(db: Session, now: datetime, result: dict) -> None:
     _emit_vitality_briefing(db, alerts, now, revive_hold_reason=revive_hold_reason)
 
 
+def _bp_fire(
+    db: Session, *, campaign_id: str, proposal_type: str, target_budget: int,
+    rationale: str, expected_effect: str, now: datetime, result: dict,
+    ok_key: str, fail_key: str,
+) -> bool:
+    """BP(D-NAO-102) 예산 쓰기 1건 — 제안 생성→승인→naver_execution_harness.execute 경유.
+
+    새 쓰기 경로를 만들지 않는다(원칙18-6 초크포인트): guardrail_gate._check_budget이
+    +100%캡·스톱로스·BEP 이익하한·쿨다운2h·일일상한을 실행 직전에 다시 검증하고, harness가
+    킬스위치 최종 가드(approval_source=pace_op)를 건다. 여기서 하는 추가 방어는 승인 직전
+    킬스위치 재확인 하나(다른 레인과 동일 계약)뿐이다.
+
+    NAVER_BP_DRY_RUN=1이면 execute(dry_run=True) — 실쓰기 없이 change_log에 제안만 남긴다.
+    """
+    if not _auto_operate_now(db, campaign_id):
+        hold_reason = "킬스위치 OFF — auto_operate=False(BP 실행 직전 재확인)"
+        result["budget_pacing_held"].append({"campaign_id": campaign_id, "reason": hold_reason})
+        _record_blocked(
+            db, campaign_id=campaign_id, actor=diary.ACTOR_PACING, reason=hold_reason,
+            now=now, target_type="campaign", target_id=campaign_id,
+            action=proposal_type, event_type="kill_switch",
+        )
+        return False
+
+    proposal = NaverProposal(
+        proposal_type=proposal_type, target_type="campaign", target_id=campaign_id,
+        campaign_id=campaign_id, rationale=rationale, expected_effect=expected_effect,
+        status="pending", target_budget=target_budget,
+        # 라운드 봉투 분류는 BP 레인이 이미 apply_round_cap으로 소비했다(초과분은 제안 자체를
+        # 만들지 않는다) — 여기까지 온 건 전부 자율분.
+        budget_auto_eligible=True,
+    )
+    db.add(proposal)
+    db.flush()
+    proposal.status = "approved"
+    proposal.approval_source = APPROVAL_SOURCE_PACING
+    db.commit()
+
+    dry_run = budget_pacing.dry_run_enabled()
+    try:
+        naver_execution_harness.execute(db, proposal.id, dry_run=dry_run, now=now)
+        if dry_run:
+            result["budget_pacing_dry_run"] += 1
+        else:
+            result[ok_key] += 1
+        return True
+    except Exception as e:  # noqa: BLE001 — harness가 change_log/상태를 이미 확정(failed 등)
+        result[fail_key] += 1
+        log.warning(
+            "auto_operator: BP %s 실행 실패 campaign=%s proposal_id=%s: %s",
+            proposal_type, campaign_id, proposal.id, e,
+        )
+        return False
+
+
+def _run_budget_pacing_restore(db: Session, now: datetime, result: dict) -> None:
+    """BP 익일 원복 — 어제 이전 BP 증액분을 base_daily_budget으로 되돌린다(D-NAO-102 ⑤).
+
+    00:05 전용 잡이 아니라 **멱등 판정**이라 시간당 레인도 같은 함수를 호출한다(00:05 잡이
+    죽어도 다음 정시가 따라잡는 자가치유). 감액이라 guardrail은 방향·클램프만 본다."""
+    for cand in budget_pacing.restore_candidates(db, now=now):
+        result["budget_pacing_restore_reviewed"] += 1
+        rationale = f"{budget_pacing.BUDGET_PACING_RESTORE_PREFIX} {cand['reason']}"
+        _bp_fire(
+            db, campaign_id=cand["campaign_id"], proposal_type="budget_down",
+            target_budget=cand["base_budget"], rationale=rationale,
+            expected_effect=(
+                "BP 익일 원복 — 장중 페이싱 증액분을 그날 기준(base) 예산으로 복귀"
+                "(감액은 가드레일 면제 대상이라 방향·클램프만 검증)."
+            ),
+            now=now, result=result,
+            ok_key="budget_pacing_restored", fail_key="budget_pacing_restore_failed",
+        )
+
+
+def _run_budget_pacing_lane(db: Session, now: datetime, result: dict) -> None:
+    """BP 장중 증액 레인(D-NAO-102) — auto_operate 전 캠페인 전역 레인(캠페인 하드코딩 없음).
+
+    ①익일 원복 자가치유 ②budget_pacing.evaluate 판정(소진율≥90% ∧ 프록시ROAS≥target)
+    ③회당 라운드 봉투(≤10만) 그리디 배정 ④소진 서킷브레이커 통과분만 ⑤제안·승인·execute.
+
+    ★소진 서킷브레이커(§4-6, 당일 소진 > 직전7일 일평균×3)를 증액에도 적용한다 — 이미
+    폭주 중인 캠페인의 천장을 더 여는 것은 브레이커의 취지와 정면 충돌한다.
+    ★base 시드는 판정 결과(base_seeded)를 하니스가 반영한다(SA는 DB 쓰기 금지).
+    """
+    _run_budget_pacing_restore(db, now, result)
+
+    decisions = budget_pacing.evaluate(db, now=now)
+    if not decisions:
+        return
+
+    # base 시드/재시드 반영(오늘 BP 증액이 없던 캠페인은 현재 예산이 그날 기준값).
+    seeded = [d for d in decisions if d.get("base_seeded") and d.get("base_budget")]
+    if seeded:
+        for d in seeded:
+            db.query(NaverCampaignSettings).filter(
+                NaverCampaignSettings.campaign_id == d["campaign_id"]
+            ).update({"base_daily_budget": int(d["base_budget"])}, synchronize_session=False)
+        db.commit()
+
+    # 트리거 미달·uncapped 같은 일상 관찰은 일기에 남기지 않는다(_record_blocked 선별 규약 —
+    # 매시×캠페인 hold를 전부 적으면 일기가 소음으로 매몰된다). 결과 dict에만 집계.
+    result["budget_pacing_reviewed"] += len(decisions)
+    candidates = [d for d in decisions if d["needs_raise"]]
+    if not candidates:
+        return
+
+    # 이번 런의 총 증액 한도 = min(회당 라운드 봉투 10만, 계정 일일 잔여 10만 − 오늘 집행분).
+    # 회당 캡만으로는 매시 발동이 누적돼 하루 총액이 무한정 커진다(리뷰 P2-4).
+    raised_amount = budget_pacing.raised_amount_today(db, today=now.date())
+    daily_left = budget_pacing.DAILY_ACCOUNT_RAISE_CAP - raised_amount
+    run_cap = min(budget_pacing.ROUND_BUDGET_CAP, daily_left)
+    result["budget_pacing_daily_left"] = daily_left
+    if run_cap <= 0:
+        hold_reason = (
+            f"계정 BP 일일 총량 캡 소진 — 오늘 이미 {raised_amount}원 증액"
+            f"(한도 {budget_pacing.DAILY_ACCOUNT_RAISE_CAP}원)"
+        )
+        for d in candidates:
+            result["budget_pacing_held"].append(
+                {"campaign_id": d["campaign_id"], "reason": hold_reason}
+            )
+            _record_blocked(
+                db, campaign_id=d["campaign_id"], actor=diary.ACTOR_PACING, reason=hold_reason,
+                now=now, target_type="campaign", target_id=d["campaign_id"], action="budget_up",
+            )
+        return
+
+    budget_pacing.apply_round_cap(candidates, cap=run_cap)
+
+    for d in candidates:
+        campaign_id = d["campaign_id"]
+        if not d.get("round_eligible", True):
+            hold_reason = (
+                f"이번 회차 증액 한도 초과(한도 {run_cap}원 = min(회당 봉투 "
+                f"{budget_pacing.ROUND_BUDGET_CAP}, 계정 일일 잔여 {daily_left})) — 배정 불가"
+                f"(다음 정시 재평가). 목표 {d['target_budget']}원/현재 {d['current_budget']}원"
+            )
+            result["budget_pacing_held"].append({"campaign_id": campaign_id, "reason": hold_reason})
+            _record_blocked(
+                db, campaign_id=campaign_id, actor=diary.ACTOR_PACING, reason=hold_reason,
+                now=now, target_type="campaign", target_id=campaign_id, action="budget_up",
+            )
+            continue
+
+        breaker_reason = _check_spend_circuit_breaker(db, campaign_id, now)
+        if breaker_reason:
+            hold_reason = f"소진 서킷브레이커 — 증액 금지: {breaker_reason}"
+            result["budget_pacing_held"].append({"campaign_id": campaign_id, "reason": hold_reason})
+            _record_blocked(
+                db, campaign_id=campaign_id, actor=diary.ACTOR_PACING, reason=hold_reason,
+                now=now, target_type="campaign", target_id=campaign_id, action="budget_up",
+            )
+            continue
+
+        _bp_fire(
+            db, campaign_id=campaign_id, proposal_type="budget_up",
+            target_budget=int(d["target_budget"]),
+            rationale=f"{budget_pacing.BUDGET_PACING_PREFIX} {d['reason']}",
+            expected_effect=(
+                "예산 페이싱 자동 증액(D-NAO-102) — 당일 소진 속도로 자정까지 필요분을 추정해 "
+                "예산 소진에 의한 조기 정지를 막는다. 성과 판정은 스마트스토어 실주문 기반 "
+                "상한 프록시(광고 귀속 아님)이며, 실집행 방어선은 guardrail_gate(BEP·스톱로스·"
+                "+100%캡·쿨다운)."
+            ),
+            now=now, result=result,
+            ok_key="budget_pacing_raised", fail_key="budget_pacing_failed",
+        )
+
+
+def run_budget_pacing_reset_lane(db: Session, *, now: datetime | None = None) -> dict:
+    """BP 익일 원복 전용 공개 엔트리 — 00:05 크론(run_naver_budget_pacing_reset_job)이 호출.
+
+    시간당 레인도 같은 판정 함수를 태우므로(자가치유) 이 잡이 죽어도 다음 정시가 따라잡는다
+    — catch-up 목록(아침배치 전용 체인)에 넣지 않는 이유."""
+    now = now or kst_now()
+    result = {
+        "budget_pacing_restore_reviewed": 0, "budget_pacing_restored": 0,
+        "budget_pacing_restore_failed": 0, "budget_pacing_dry_run": 0,
+        "budget_pacing_held": [],
+    }
+    _run_budget_pacing_restore(db, now, result)
+    return result
+
+
 def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=None) -> dict:
     """시간당 밴드 관제 실입찰(PLAN §4). 매시 :20 크론(catch-up 제외 — 시간성 소멸).
 
@@ -2616,6 +2899,10 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
     fetch_intraday = fetch_intraday or fetch_entity_hh24
     today = now.date()
     window_from, window_to = _settlement_window(today)
+    # 캠페인별 **학습밴드 라벨** 캐시(run 1회 한정). 조회가 30일 aggregate라 유닛마다
+    # 부르면 N+1 — 캠페인당 1회로 묶는다. None도 캐시한다("학습값 없음"도 확정된 답).
+    # 하한(`_probe_rank_floor`)과 CD5(`_learned_optimal_skip`)가 **이 하나의 값을 공유**한다.
+    _probe_band_cache: dict[str, str | None] = {}
 
     result: dict = {
         "reviewed": 0, "approved": 0, "executed": 0, "held": [], "skipped": 0, "failed": 0,
@@ -2636,6 +2923,16 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
         "vitality_alerts": 0,   # S1∧S2 스파이럴 경보 캠페인 수
         "vitality_fired": 0,    # 복원 UP 실쓰기(execute 성공) 수
         "vitality_held": [],    # 캡·쿨다운·킬스위치·재조회실패로 미발사된 그룹
+        # BP(D-NAO-102 예산 페이싱) 카운터(라이브 관측용):
+        "budget_pacing_reviewed": 0,  # 판정한 auto_operate 캠페인 수
+        "budget_pacing_raised": 0,    # 증액 실쓰기 성공 수
+        "budget_pacing_failed": 0,    # 증액 실행 실패(가드레일 차단 포함)
+        "budget_pacing_dry_run": 0,   # NAVER_BP_DRY_RUN=1로 제안만 기록한 수
+        "budget_pacing_held": [],     # 회차/일일 캡 초과·서킷브레이커·킬스위치로 미발사
+        "budget_pacing_daily_left": None,  # 계정 BP 일일 총량 캡 잔여(원, 관측용)
+        "budget_pacing_restore_reviewed": 0,  # 익일 원복 후보 수
+        "budget_pacing_restored": 0,          # 원복 실쓰기 성공 수
+        "budget_pacing_restore_failed": 0,    # 원복 실행 실패
     }
     # IU-R R2: estimate 회당 캡·런 캐시(§난제4) — 실제 스텝 유닛에만 호출하고 (kw_id,position)
     # 중복은 캐시로 흡수. counter는 mutable dict로 helper와 공유(호출 수 봉인 테스트가 이 값 관측).
@@ -2697,11 +2994,34 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                 # D-NAO-58 CD2 클릭 탐침: 밴드 판정이 hold(액션 없음)일 때만 사각지대 평가
                 # (up/down이면 이미 액션 — 이중 발동 금지). 트리거 참이면 up-의도 탐침으로 치환.
                 # _probe_trigger는 clk/imp/rank를 모두 자기 2시간 창에서 산출(R1 P3-1 자기완결).
-                probe_fired, probe_reason = _probe_trigger(curve, now)
+                # ★학습밴드가 있으면 탐침 하한을 학습값으로(상수 2.5가 학습 최적점 도달을
+                # 막던 충돌 해소 — `_probe_rank_floor` docstring). 조회는 harness 몫이고
+                # (SA는 db를 모른다, 원칙18-6) 캠페인당 1회만 — `learned_probe_rank`는
+                # 내부에서 30일 aggregate를 도는 무거운 호출이라 유닛마다 부르면 N+1이 된다.
+                if campaign_id not in _probe_band_cache:
+                    _probe_band_cache[campaign_id] = _learned_bands_of(db, now, campaign_id)
+                own_band, account_band = _probe_band_cache[campaign_id]
+                # 자기 캠페인이 승격시킨 밴드가 우선. 없을 때만 계정 밴드를 빌리되,
+                # **사후 고삐가 발동 가능한 유닛(BEP 확인)에만** 연다(Jino 확정 2026-07-29,
+                # `_account_band_fallback_ok` docstring에 근거).
+                band, band_note = own_band, ""
+                if band is None and account_band is not None:
+                    ok, why = _account_band_fallback_ok(db, target_type, target_id)
+                    band_note = f" · {why}"
+                    if ok:
+                        band = account_band
+                probe_fired, probe_reason = _probe_trigger(
+                    curve, now, rank_floor=_probe_rank_floor(band),
+                )
+                if band_note:
+                    probe_reason = f"{probe_reason}{band_note}"
                 if probe_fired:
                     # D-NAO-60 RL5(CD5): 학습된 최적 밴드에 이미 도달했으면 상향 생략(과climb
                     # 방지). guardrail 우회 없음 — 통과한 제안도 execute() 전량을 그대로 탄다.
-                    skip, skip_reason = _learned_optimal_skip(db, curve, now, campaign_id)
+                    skip, skip_reason = _learned_optimal_skip(
+                        db, curve, now, campaign_id,
+                        learned_band=band, band_resolved=True,
+                    )
                     if skip:
                         result["held"].append({"target_id": target_id, "reason": skip_reason})
                         continue
@@ -3047,5 +3367,12 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
         _run_vitality_step(db, now, result)
     except Exception as e:  # noqa: BLE001 — vitality 스텝 실패는 fail-soft(레인 결과 불변)
         log.warning("auto_operator: 스파이럴 복원 스텝 실패(fail-soft): %s", e)
+
+    # BP(D-NAO-102): 예산 페이싱 증액 + 익일 원복 자가치유. 핫셋/탐색 레인과 독립·맨 뒤
+    # (그 시각까지의 소진을 다 보고 판정) · fail-soft(BP 실패가 입찰 집행 결과를 오염시키지 않음).
+    try:
+        _run_budget_pacing_lane(db, now, result)
+    except Exception as e:  # noqa: BLE001 — BP 레인 실패는 fail-soft(레인 결과 불변)
+        log.warning("auto_operator: 예산 페이싱 레인 실패(fail-soft): %s", e)
 
     return result

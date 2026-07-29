@@ -31,6 +31,21 @@
 # GET /api/naver/ad/raw/search-terms  — 검색어 원자료(prod 114,285행), limit 상한 200 강제.
 # GET /api/naver/ad/raw/hourly        — 시간당 스냅샷 + daily_budget·spend_ratio(스펙 §1-4의
 #   "소진율 미노출" 해소). spend_ratio는 budget 없음/0이면 None(0 나눗셈 금지).
+# GET /api/naver/ad/performance/today — 광고 성과(사장님 뷰) ①오늘 한눈에 + ②오늘 시스템이
+#   한 일(D-NAO-104 Phase 1). perf_today_harness 경유·읽기 전용. 응답 문자열은 D-NAO-103
+#   표기 규칙(ID·내부 용어 금지, 문장)을 통과한 상태로 나간다 — 프론트는 조립하지 않는다.
+# GET /api/naver/ad/performance/day       — 위의 날짜 일반화(D-NAO-105). date·campaign_id 선택.
+# GET /api/naver/ad/performance/compare   — 기준일 vs 비교일 증감(D-NAO-105, 하루 대 하루).
+# GET /api/naver/ad/performance/campaigns — 캠페인 선택기 목록(이름만, ID는 값으로만).
+# GET /api/naver/ad/performance/campaign/{id} — ③캠페인 상세(일별 ROAS·기준선·그룹 배지).
+# GET /api/naver/ad/performance/budget    — ④예산 소진 곡선·암전 구간·예산 변경 이력.
+#   위 5개 전부 perf_today_harness / perf_campaign_harness 경유·**읽기 전용**(계획서 §0-1).
+# GET /api/naver/ad/performance/bep-breakdown — ⑤BEP 구성(Phase 3). 상품별 판매가·수수료·원가·
+#   물류비 → 공헌이익 → 이익 CPC 상한의 **근거 표**. perf_timeline_harness 경유·읽기 전용.
+#   원가 미입력 상품은 추정치로 채우지 않고 "산출 불가"로 나간다(원칙22).
+# GET /api/naver/ad/performance/timeline — ⑥개선 타임라인(Phase 3). 트랙 결정 카탈로그 ∪
+#   라이브 구조 변경 + 이벤트별 전후 7일. **인과 주장 금지** — 겹친 변경을 전부 표기하고
+#   사후 창이 안 찼으면 "관찰 중"으로 말한다(계획서 §3-3).
 # GET /api/naver/ad/bm/agency-ops     — BM SA-2 조작 이벤트 온디맨드 드릴다운(D-NAO-79 ③).
 # GET /api/naver/ad/bm/snapshot       — BM SA-1 구조 스냅샷 온디맨드 드릴다운(D-NAO-79 ③).
 # GET /api/naver/ad/bm/benchmark      — BM SA-3 벤치마크 프라이어 현황 온디맨드 드릴다운
@@ -76,6 +91,10 @@ from app.services.naver_ad import delegation_gate
 from app.services.naver_ad import metrics_aggregator
 from app.services.naver_ad import naver_execution_harness
 from app.services.naver_ad import naver_sa_writer
+from app.services.naver_ad import perf_campaign_harness
+from app.services.naver_ad import perf_timeline_harness
+from app.services.naver_ad import retro_rollup
+from app.services.naver_ad import perf_today_harness
 from app.services.naver_ad import proposal_writer
 from app.services.naver_ad.ad_report import build_report
 from app.services.naver_ad.diagnosis import build_diagnosis
@@ -873,33 +892,6 @@ def expert_delegation_put(body: ExpertDelegationIn, db: Session = Depends(get_db
     return _delegation_response(db)
 
 
-_RETRO_VERDICTS = ("correct", "gray", "wrong", "no_spend")
-
-
-def _retro_board_rollup(rows: list[NaverRetroSignal], horizon: int) -> dict:
-    """단일 보드·단일 지평(d3/d7)의 rollup — PLAN §5: n, correct/gray/wrong/no_spend,
-    precision_spenders(=correct/(correct+gray+wrong), no_spend 제외 — 지출 지속 타깃 기준),
-    bleed_sum(down/pause & verdict=correct 행의 양수 bleed 합, ref 31 §1-c와 동일 산식)."""
-    verdict_attr, bleed_attr = f"verdict_d{horizon}", f"bleed_post{horizon}"
-    counts = dict.fromkeys(_RETRO_VERDICTS, 0)
-    bleed_sum = 0
-    for row in rows:
-        verdict = getattr(row, verdict_attr)
-        if verdict is None:  # 아직 채점 전(사후창 미도달) — rollup 대상 아님
-            continue
-        counts[verdict] = counts.get(verdict, 0) + 1
-        if row.direction in ("down", "pause") and verdict == "correct":
-            bleed_sum += max(0, getattr(row, bleed_attr) or 0)
-    spenders = counts["correct"] + counts["gray"] + counts["wrong"]
-    precision = round(counts["correct"] / spenders, 4) if spenders else None
-    return {
-        "n": spenders + counts["no_spend"],
-        "correct": counts["correct"], "gray": counts["gray"],
-        "wrong": counts["wrong"], "no_spend": counts["no_spend"],
-        "precision_spenders": precision, "bleed_sum": bleed_sum,
-    }
-
-
 @router.get("/retro-scorecard")
 def retro_scorecard(
     days: int = Query(28, ge=1, le=180, description="조회 창(일, asof_date/alert_date 기준)"),
@@ -919,7 +911,8 @@ def retro_scorecard(
     for row in signal_rows:
         by_board.setdefault(row.board, []).append(row)
     boards = {
-        board: {"d3": _retro_board_rollup(rows, 3), "d7": _retro_board_rollup(rows, 7)}
+        board: {"d3": retro_rollup.board_rollup(rows, 3),
+                "d7": retro_rollup.board_rollup(rows, 7)}
         for board, rows in by_board.items()
     }
 
@@ -1639,3 +1632,158 @@ def get_search_term_exclusions(
             for r in rows
         ],
     }
+
+
+# ══════════════════════════════════════════════════════════════════
+# 광고 성과(사장님 뷰) — D-NAO-104 Phase 1 (docs/PLAN_naver-ad-performance-view.md §4-ⓐ)
+# ★읽기 전용 페이지 전용 API다. 조작(관리주체 스위치·승인·예산 변경)은 커맨드 센터와
+#   최적화 콘솔이 계속 담당한다 — 여기에 쓰기 엔드포인트를 추가하지 말 것(계획서 §0-1).
+# ★응답 문자열은 전부 D-NAO-103 규칙을 통과한 것이다(ID·내부 용어 없음, 문장). 프론트는
+#   문장을 조립하지 않고 그대로 렌더한다 — 표기 규칙이 두 벌이 되면 갈라진다.
+# ══════════════════════════════════════════════════════════════════
+
+
+@router.get("/performance/today")
+def performance_today(db: Session = Depends(get_db)) -> dict:
+    """오늘 한눈에(캠페인 카드) + 오늘 시스템이 한 일(한글 문장). 파라미터 없음(오늘 고정).
+
+    당일 숫자의 원천은 시간별 스냅샷(비용·노출·클릭)과 스마트스토어 실주문(매출 프록시)이다
+    — naver_ad_daily는 그날 확정 적재 전이라 쓰지 않는다(계획서 §4 창 관례).
+
+    ★`roas_today_proxy`는 **상한 프록시**다(그 상품의 전체 판매액 / 광고비). 상품 매핑이 없는
+    지면(파워링크·브랜드검색)은 배분이 원리적으로 불가능해 **null**로 나간다 — 0으로 채우면
+    "성과가 바닥"이라는 거짓 단언이 된다(원칙22). 프론트는 null을 '—'로 렌더한다.
+    """
+    return perf_today_harness.build(db)
+
+
+# 과거 조회 상한. 시간별 스냅샷 보관이 365일이고 naver_ad_daily도 그 언저리라, 더 뒤로 가면
+# "데이터가 없다"를 "성과가 0이다"로 읽게 만드는 빈 화면만 나온다.
+_MAX_PERFORMANCE_LOOKBACK_DAYS = 365
+
+
+def _validate_performance_date(day: date, *, field: str) -> date:
+    """미래·너무 먼 과거를 막는다. 미래 날짜를 허용하면 '오늘 고정' 분기가 조용히 미래를
+    오늘로 취급해 프록시 숫자를 미래 날짜에 붙인다."""
+    today = kst_today()
+    if day > today:
+        raise HTTPException(400, f"{field}는 오늘 이후일 수 없습니다")
+    if (today - day).days > _MAX_PERFORMANCE_LOOKBACK_DAYS:
+        raise HTTPException(400, f"{field}는 최근 {_MAX_PERFORMANCE_LOOKBACK_DAYS}일 이내여야 합니다")
+    return day
+
+
+@router.get("/performance/day")
+def performance_day(
+    date_: date | None = Query(None, alias="date", description="조회 날짜(YYYY-MM-DD, 기본 오늘)"),
+    campaign_id: str | None = Query(None, description="특정 광고만(선택기용)"),
+    db: Session = Depends(get_db),
+) -> dict:
+    """선택한 날짜의 ①한눈에 + ②그날 시스템이 한 일(D-NAO-105).
+
+    ★날짜에 따라 숫자의 **출처가 다르다**: 오늘은 실주문 상한 프록시, 과거는 네이버 확정
+    전환매출이다. 응답의 `source`/`source_label`/`roas_label`이 그것을 말한다 — 프론트는 그
+    라벨을 그대로 쓴다(표기 규칙이 두 벌이 되면 갈라진다).
+    """
+    day = _validate_performance_date(date_, field="date") if date_ else None
+    return perf_today_harness.build(db, day=day, campaign_id=campaign_id)
+
+
+@router.get("/performance/compare")
+def performance_compare(
+    base: date = Query(..., description="기준일(YYYY-MM-DD)"),
+    against: date = Query(..., description="비교일(YYYY-MM-DD)"),
+    campaign_id: str | None = Query(None, description="특정 광고만"),
+    db: Session = Depends(get_db),
+) -> dict:
+    """기준일 vs 비교일 — 캠페인별·합계 지출/노출/클릭/매출/ROAS 증감(절대+%) (D-NAO-105).
+
+    하루 대 하루만 비교한다(기간 범위 비교는 후속 슬라이스 — 계획서 승계 큐).
+    """
+    _validate_performance_date(base, field="base")
+    _validate_performance_date(against, field="against")
+    if base == against:
+        raise HTTPException(400, "기준일과 비교일이 같습니다")
+    return perf_today_harness.compare(db, base=base, against=against, campaign_id=campaign_id)
+
+
+@router.get("/performance/campaigns")
+def performance_campaigns(db: Session = Depends(get_db)) -> dict:
+    """캠페인 선택기 목록 — 이름·광고종류·관리주체만(D-NAO-105).
+
+    ★화면에는 이름만 뜬다(D-NAO-103①). `campaign_id`는 select의 value로만 쓰이고 사람이
+    읽는 자리에는 절대 나가지 않는다.
+    """
+    return perf_today_harness.campaign_options(db)
+
+
+@router.get("/performance/campaign/{campaign_id}")
+def performance_campaign(
+    campaign_id: str,
+    days: int = Query(30, ge=1, le=perf_campaign_harness.MAX_SERIES_DAYS,
+                      description="일별 추이 창(기본 30일, D-0 제외)"),
+    db: Session = Depends(get_db),
+) -> dict:
+    """③캠페인 상세 — 일별 ROAS 추이(BEP선·목표선 포함) + 그룹별 상태 배지(D-NAO-105).
+
+    series의 ROAS는 **네이버 확정 기준**(직+간접 전환매출 ÷ 광고비)이고 D-0은 제외한다 —
+    카드의 당일 프록시와 정의가 달라 같은 선에 그리면 안 된다(계획서 §4 창 관례).
+    """
+    try:
+        return perf_campaign_harness.build_campaign(db, campaign_id, days=days)
+    except perf_campaign_harness.CampaignNotFound:
+        raise HTTPException(404, "그런 광고를 찾을 수 없습니다")
+
+
+@router.get("/performance/budget")
+def performance_budget(
+    date_: date | None = Query(None, alias="date", description="조회 날짜(기본 오늘)"),
+    campaign_id: str | None = Query(None, description="특정 광고만"),
+    db: Session = Depends(get_db),
+) -> dict:
+    """④예산 — 시간별 누적 소진 곡선 + 예산 도달로 멈춘 구간(암전) + 그날 예산 변경 이력.
+
+    ★`budget_changes`가 빈 배열인 것은 **정상**이다(BP 레인 미배포 또는 그날 변경 없음) —
+    에러가 아니라 "이날은 예산을 자동으로 바꾼 기록이 없습니다"로 말한다(계획서 §4-ⓒ).
+    """
+    day = _validate_performance_date(date_, field="date") if date_ else None
+    return perf_campaign_harness.build_budget(db, day=day, campaign_id=campaign_id)
+
+
+@router.get("/performance/bep-breakdown")
+def performance_bep_breakdown(
+    campaign_id: str | None = Query(None, description="특정 광고의 상품만(선택기용)"),
+    only_actionable: bool = Query(True, description="광고에 연결된 상품만(false=네이버 전 상품)"),
+    db: Session = Depends(get_db),
+) -> dict:
+    """⑤BEP 구성 — "이 상품은 클릭당 얼마까지 써야 남나"의 **근거 표**(Phase 3, 계획서 §4-ⓓ).
+
+    판매가 − 수수료 − 원가 − 물류비 = 세전 잔액, 거기서 부가세(÷1.1)를 걷어낸 것이 공헌이익이고,
+    손익분기 ROAS = 판매가 ÷ 공헌이익이다. 화면에서 뺄셈이 맞도록 VAT 단계를 응답에 명시한다.
+
+    ★새 산식을 만들지 않는다 — 전부 매일 저장되는 `naver_product_bep` 스냅샷 값을 되짚어
+    보여줄 뿐이다. 원가가 없는 상품은 **추정치로 채우지 않고** 산출 불가 사유를 문장으로 낸다.
+    """
+    return perf_timeline_harness.build_bep_breakdown(
+        db, campaign_id=campaign_id, only_actionable=only_actionable
+    )
+
+
+@router.get("/performance/timeline")
+def performance_timeline(
+    days: int = Query(perf_timeline_harness.DEFAULT_TIMELINE_DAYS, ge=1,
+                      le=perf_timeline_harness.MAX_TIMELINE_DAYS,
+                      description="조회 창(일, 기본 90)"),
+    campaign_id: str | None = Query(None, description="특정 광고만(계정 전체 변경은 항상 포함)"),
+    db: Session = Depends(get_db),
+) -> dict:
+    """⑥개선 타임라인 — "우리가 뭘 바꿨고, 그 전후 7일은 어땠나"(Phase 3, 계획서 §4-ⓔ).
+
+    ★인과를 주장하지 않는다(계획서 §3-3 · 원칙22). 이 시스템은 변경이 거의 매일 나와 전후
+    7일 창이 서로 겹친다 — 겹친 다른 변경을 `confounded_with`로 **전부** 표기하고, 사후
+    7일이 아직 안 지난 이벤트는 "관찰 중 (N/7일)"로 말한다. "개선됐습니다"라고 쓰지 않는다.
+
+    ★카탈로그(`docs/naver_ad_improvement_events.json`)가 prod에 없어도 500이 아니다 —
+    `catalog_available:false`로 말하고 라이브 설정 변경만 낸다(계획서 §6 Phase3 완료기준 5).
+    """
+    return perf_timeline_harness.build_timeline(db, days=days, campaign_id=campaign_id)

@@ -58,7 +58,9 @@ _ID_CHUNK = 400             # change_log IN 절 분할(SQLite 바인딩 상한 �
 _OURS_ACTION_MATCH = {
     "bid_change": {"update_bid"},
     "status_flip": {"set_user_lock", "external_status_change"},
-    "budget_change": {"update_budget"},
+    # BP(D-NAO-102 ⑥): 예산 페이싱 레인의 쓰기는 change_log.action이 세분화돼 있다 —
+    # 여기 넣지 않으면 우리 손의 예산 변경이 "외부 개입"으로 오분류된다(§3-1 후단).
+    "budget_change": {"update_budget", "budget_up_pacing", "budget_down_pacing"},
     "negative_add": {"add_negative_keyword"},
 }
 

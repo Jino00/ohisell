@@ -38,8 +38,10 @@ _GOLDEN_EXEMPT = frozenset({"growth_bid_up"})
 # UP·±15%면제·rank-step 3셋에 등록됨.
 # ★BX2(D-NAO-70·71): 탐색 UP 타입 bid_up_explore가 **UP에는 추가**되나 ±15%면제·rank-step에는
 #   추가되지 않는다(30% 상한 = EXPLORATION_STEP_TYPES 별도 셋, 완전 면제도 rank-step도 아님).
-_BX2_BID_UP = _GOLDEN_BID_UP | {"bid_up_servo", "bid_up_rank", "bid_up_explore"}
-_R2_EXEMPT = _GOLDEN_EXEMPT | {"bid_up_servo", "bid_up_rank"}
+# ★CS(콜드 스타트): `bid_up_cold`가 UP + ±15%완전면제 두 셋에 추가된다(rank-step·탐색 셋에는
+#   미추가 — 시장가 직행이라 rank 서보도 30% 래더도 아니다).
+_BX2_BID_UP = _GOLDEN_BID_UP | {"bid_up_servo", "bid_up_rank", "bid_up_explore", "bid_up_cold"}
+_R2_EXEMPT = _GOLDEN_EXEMPT | {"bid_up_servo", "bid_up_rank", "bid_up_cold"}
 _R2_RANK_STEP = frozenset({"bid_up_servo", "bid_up_rank"})
 _BX2_EXPLORATION = frozenset({"bid_up_explore"})
 
@@ -208,6 +210,7 @@ def test_action_by_proposal_type_mapping_derived_with_servo():
         "bid_up_servo": "update_bid",  # IU-R R1: 레지스트리 파생으로 자동 매핑
         "bid_up_rank": "update_bid",   # IU-R R2: 레지스트리 파생으로 자동 매핑
         "bid_up_explore": "update_bid",  # BX2(D-NAO-70): 탐색 UP도 레지스트리 파생 자동 매핑
+        "bid_up_cold": "update_bid",  # CS: 콜드 첫 입찰도 레지스트리 파생 자동 매핑
         "pause": "set_user_lock",
         "resume": "set_user_lock",
         "budget_up": "update_budget",
@@ -290,3 +293,17 @@ def test_executed_bid_ups_today_excludes_dryrun_and_yesterday(db):
     _seed_executed(db, "bid_up", changed_at=today, after_value=None)  # 제외(미실쓰기)
     _seed_executed(db, "growth_bid_up", changed_at=yesterday)         # 제외(어제)
     assert auto_operator._executed_bid_ups_today(db, "adgroup", "grp-1", now) == 1
+
+
+# ── 곡선 원료 셋 불변식(2026-07-28 사고 회귀) ──────────────────────────────
+def test_curve_sample_types_cover_every_upward_step():
+    """곡선 원료는 "모든 상향 스텝" — RANK_STEP_TYPES(가드레일/TOCTOU 의미)와 혼동 금지.
+    이 둘을 한 셋으로 겸용해서 bid_rank_slope가 prod 0행이 된 사고의 회귀 가드."""
+    from app.services.naver_ad.bid_step_types import CURVE_SAMPLE_TYPES
+
+    assert CURVE_SAMPLE_TYPES == BID_UP_TYPES
+    # 실집행 0건이던 rank-step 둘만이 아니라, 실제로 실행되는 타입들이 반드시 포함돼야 한다.
+    for t in ("bid_up", "growth_bid_up", "bid_up_explore", "bid_up_cold"):
+        assert t in CURVE_SAMPLE_TYPES, f"{t}가 곡선 원료에서 빠지면 slope가 다시 굶는다"
+    assert RANK_STEP_TYPES < CURVE_SAMPLE_TYPES  # 진부분집합 — 겸용 금지
+    assert "bid_down" not in CURVE_SAMPLE_TYPES  # 하향은 아직 미편입(반대 사분면)

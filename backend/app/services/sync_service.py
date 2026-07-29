@@ -16,6 +16,7 @@ from app.clients.coupang import CoupangClient
 from app.clients.naver import NaverClient
 from app.config import get_cafe24_config, get_coupang_config, get_naver_config
 from app.models import Channel, OAuthToken, Order, ProductChannelMapping, SyncLog
+from app.services import order_delivery
 
 log = logging.getLogger(__name__)
 
@@ -339,6 +340,8 @@ def sync_channel_orders(
                 existing.payment_type = raw.payment_type
                 existing.commission_amount = raw.commission_amount
                 existing.raw_data = _truncate_raw_data(raw.raw_data)
+                # 배송 구분 컬럼(Jino 지시 2026-07-28). 판별 불가면 기존 값 보존(덮지 않음).
+                order_delivery.apply_delivery_fields(existing, raw.raw_data)
                 _auto_link_product(db, existing)
                 updated_count += 1
             else:
@@ -357,6 +360,9 @@ def sync_channel_orders(
                     commission_amount=raw.commission_amount,
                     raw_data=_truncate_raw_data(raw.raw_data),
                 )
+                # 배송 구분 컬럼(Jino 지시 2026-07-28). 네이버 외 채널은 productOrder가 없어
+                # 판별 불가 → 컬럼 NULL(추정으로 채우지 않는다).
+                order_delivery.apply_delivery_fields(order, raw.raw_data)
                 _auto_link_product(db, order)
                 db.add(order)
                 db.flush()  # 즉시 flush해서 다음 루프의 SELECT에 반영

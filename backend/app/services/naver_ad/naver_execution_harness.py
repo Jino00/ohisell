@@ -42,18 +42,23 @@ from app.models import (
 )
 from app.services.naver_ad import (
     account_diagnosis,
+    budget_pacing,
     campaign_target_resolver,
     diary,
     guardrail_gate,
+    launch_rank_floor,
     naver_sa_writer,
     search_term_judge,
 )
 from app.services.naver_ad.bid_step_types import (
+    APPROVAL_SOURCE_COLD,
     BID_DOWN_TYPES,
     BID_UP_TYPES,
+    COLD_START_STEP_TYPES,
     EXPLORATION_STEP_TYPES,
     RANK_STEP_TYPES,
     decode_base_bid,
+    decode_cold_ceiling,
     decode_exploration_ceiling,
 )
 from app.services.naver_ad.diagnosis import correction_factor as compute_correction_factor
@@ -71,6 +76,13 @@ VERIFY_DAYS = 14
 # 면제만 적용되므로 fail-closed로 죽인다(면제의 폐루프 밖 누출 봉쇄). 위임 경로는 이미
 # delegation_gate가 RANK_STEP_TYPES를 제외하므로, 이 게이트는 콘솔 재실행/재시도 잔존분 방어.
 _RANK_STEP_MAX_AGE_MINUTES = 10
+
+# CS(적대적 리뷰 P2-7): 콜드 첫 입찰 제안 신선도 상한(분). 정상 경로는 일 레인에서 생성 직후
+# 인라인 실행이라 초 단위다. 이 상한을 넘겨 살아난 제안 = 킬스위치 OFF로 approved 잔존했다가
+# 콘솔 재실행/재시도로 나중에 깨어난 stale 제안 — **시장가는 매일 변하므로** 어제 시세로 오늘
+# 입찰하면 안 된다. rank-step보다 넉넉한 이유: 일 레인은 시장가 수집 → 레인 순으로 도는데 그
+# 수집이 소재 수만큼 HTTP를 도느라 수 분이 걸린다(같은 회차 안에서 죽지 않게).
+_COLD_STEP_MAX_AGE_MINUTES = 60
 
 # guardrail_gate 컨텍스트의 실적 창(account_diagnosis.LOW_CLICK_LOOKBACK_DAYS 재사용 —
 # 신규 상수 아님, pause_candidates/resume_candidates와 동일 창으로 정합성 유지).
@@ -162,10 +174,12 @@ _ACTION_BY_PROPOSAL_TYPE = {
 }
 
 # D-NAO-47(codex[P2] 2026-07-17): **우리가 실제로 광고 API에 쓴 것**의 action 집합.
-# 위 매핑의 값에서 파생한다 — 하드코딩하면 새 제안 유형이 배선될 때 조용히 어긋난다.
+# 위 매핑의 값 **+ 라벨 세분화분**에서 파생한다 — 하드코딩하면 새 제안 유형이 배선될 때
+# 조용히 어긋난다.
 #
 # ★왜 필요한가: naver_change_log에는 세 부류가 섞여 있다.
 #   ① 우리 실집행        — update_bid / add_negative_keyword / set_user_lock / update_budget
+#                          (+ 같은 경로의 세분화 라벨 budget_up_pacing / budget_down_pacing)
 #   ② 외부 변경 **감지**  — external_bid_change / external_status_change (entity_sync가 기록.
 #                          MOP·사람이 바꾼 걸 우리가 관측한 것이지 우리가 한 게 아니다)
 #   ③ 우리 시스템 내부 설정 — optimizer_change / update_expert_delegation / flight_pacing
@@ -174,7 +188,20 @@ _ACTION_BY_PROPOSAL_TYPE = {
 # prod 실측(2026-07-17) change_log의 dry_run=False 행 15건은 **전부 ②**이고 우리 실집행은
 # 0건이라, 필터 없이 세면 "우리 조작 15회"라고 표시된다. 0을 0이라고 말하는 게 그 화면의
 # 존재 이유다(D-47-h).
-EXECUTION_ACTIONS: frozenset[str] = frozenset(_ACTION_BY_PROPOSAL_TYPE.values())
+#
+# ★PACING_ACTIONS를 합치는 이유(D-NAO-102 ⑥): BP(예산 페이싱) 레인의 쓰기는 **제안유형도
+#   실행 경로도 budget_up/budget_down → _execute_update_budget 그대로**이고, 달라지는 건
+#   change_log에 남기는 라벨뿐이다(`_budget_log_action`). 그래서 이 집합을 매핑 값에서만
+#   파생시키면 BP의 실집행이 ①인데도 ①로 안 세어진다 — actor=ours 조회와 커맨드 센터 1층
+#   "우리 조작 N회"가 **실제로 광고를 바꿔놓고 0이라고 말한다**. 0을 0이라 말하려고 만든
+#   필터가 정반대 방향의 같은 거짓말을 하는 것이라 D-47-h 위반은 동일하다.
+#   (성공행만이 아니다 — 가드 거부·쓰기 실패 행도 같은 라벨을 달므로 `_execution_state`의
+#    blocked/unknown 배지까지 통째로 사라진다.)
+# ★새 라벨을 또 세분화한다면 여기 합집합에 추가하는 것이 계약이다. 라우터·프론트에서
+#   각자 합집합을 만들면(퍼진 사본) 다음 소비자가 같은 구멍에 빠진다.
+EXECUTION_ACTIONS: frozenset[str] = frozenset(_ACTION_BY_PROPOSAL_TYPE.values()) | frozenset(
+    budget_pacing.PACING_ACTIONS
+)
 
 # ══════════════════════════════════════════════════════════════════
 # 실패 rationale 접두사(D-NAO-54) — **두 사건은 다르다. 섞으면 화면이 거짓말한다.**
@@ -284,6 +311,7 @@ def _claim_executing(db: Session, proposal: NaverProposal) -> None:
             _auto_operator.APPROVAL_SOURCE_PROBE,  # D-NAO-58 CD2: 탐침도 동일 킬스위치 가드(우회 금지)
             _auto_operator.APPROVAL_SOURCE_REVERT,  # D-NAO-58 CD3: 되돌림도 킬스위치 통과(우회 금지)
             APPROVAL_SOURCE_EXPLORE,  # BX2 D-NAO-70: 탐색 자동 실쓰기도 동일 킬스위치 가드(우회 금지, probe_op 관례)
+            APPROVAL_SOURCE_COLD,  # CS: 콜드 첫 입찰도 동일 킬스위치 가드(우회 금지 — 자동 실쓰기 레인)
             search_term_judge.APPROVAL_SOURCE_SS_EXCLUDE,  # SS3-A: 미래 자동 활성화 대비 사전 등록(현재 미배선)
         ) and not _auto_operator._auto_operate_now(db, proposal.campaign_id):
             proposal.status = "approved"  # 클레임 원복 — executing 잔존 방지(미실행 정직 상태)
@@ -447,6 +475,9 @@ def _build_guardrail_context(db: Session, proposal: NaverProposal, now: datetime
         "current_bid": None, "current_budget": None, "roas_corrected": None, "target_roas": None,
         "cost_today": None, "daily_budget": None, "unconverted_spend": None,
         "last_change_at": None, "changes_today_count": 0, "campaign_type": None,
+        # D-NAO-121: 출시창 순위 하한 — 소재(target_type='ad')와 그룹(target_type='adgroup',
+        # 그룹 입찰을 쓰는 출시창 소재가 있을 때) 제안에서 채운다. 캠페인 단위는 항상 None.
+        "launch_floor_bid": None, "launch_target_rank": None,
     }
     # VT4 codex 1R P1-1: guardrail_gate가 campaign_type 인지형 입찰 하한(SHOPPING 50·그 외 70)을
     # 적용하려면 context에 campaign_type이 실려야 한다 — proposal.campaign_id의 campaign 엔티티
@@ -500,6 +531,21 @@ def _build_guardrail_context(db: Session, proposal: NaverProposal, now: datetime
                 db, proposal.campaign_id, now.date(),
             )
 
+        # D-NAO-121 그룹 경로(codex 리뷰 P1, 2026-07-29): useGroupBidAmt=true 소재의 실효
+        # 레버는 그룹 입찰이고 실행기도 adgroup bid_down을 낸다 — 소재 분기에만 하한이
+        # 있으면 그 경로로 출시창 소재가 하한 밑으로 밀린다. 그룹 하한을 집계해 싣는다.
+        try:
+            gfloor = launch_rank_floor.group_floor_for(
+                db, adgroup_id=proposal.target_id, today=now.date(),
+            )
+            context["launch_floor_bid"] = gfloor["floor_bid"]
+            context["launch_target_rank"] = gfloor["target_rank"]
+        except Exception as e:  # noqa: BLE001 — 조회 실패는 하한 없음 유지(종전 동작)
+            log.warning(
+                "naver_execution_harness: guardrail context group_floor_for 조회 실패 "
+                "(하한 없음 유지) adgroup_id=%s: %s", proposal.target_id, e,
+            )
+
         context["last_change_at"], context["changes_today_count"] = compute_change_cadence(
             db, proposal.target_type, proposal.target_id, now,
         )
@@ -517,6 +563,25 @@ def _build_guardrail_context(db: Session, proposal: NaverProposal, now: datetime
                 "naver_execution_harness: guardrail context get_ad_bid 실패(fail-closed) "
                 "target_id=%s: %s", proposal.target_id, e,
             )
+
+        # D-NAO-121: 출시창 순위 하한 — target_type='ad'(소재 단위) 제안에서만 계산한다.
+        # adgroup_id가 없으면(구 제안·격상 경로) 판정 불가라 floor_for를 호출하지 않고 None
+        # 유지(fail-closed는 아님 — 이 하한은 "있으면 추가 보호", 없어도 종전 동작).
+        # guardrail_gate는 bid_down 제안에서만 launch_floor_bid를 소비하므로, up 제안에서
+        # 채워져 있어도 무해하다(계산 자체는 방향 무관하게 항상 시도해 반환값을 그대로 싣는다).
+        if proposal.adgroup_id:
+            try:
+                floor = launch_rank_floor.floor_for(
+                    db, ad_id=proposal.target_id, adgroup_id=proposal.adgroup_id, today=now.date(),
+                )
+                context["launch_floor_bid"] = floor["floor_bid"]
+                context["launch_target_rank"] = floor["target_rank"]
+            except Exception as e:  # noqa: BLE001 — 조회 실패는 fail-closed(하한 없음 유지)
+                log.warning(
+                    "naver_execution_harness: guardrail context launch_rank_floor 조회 실패 "
+                    "(하한 없음 유지) target_id=%s adgroup_id=%s: %s",
+                    proposal.target_id, proposal.adgroup_id, e,
+                )
 
         # 증액(bid_up/growth_bid_up)만 up-only 가드 원료를 채운다 — 소재 단위 실적은
         # naver_ad_daily에 없어(그레인=adgroup/keyword) 부모 광고그룹(proposal.adgroup_id) 창
@@ -1040,23 +1105,86 @@ def _execute_update_bid(db: Session, proposal: NaverProposal, now: datetime) -> 
         if not proposal.adgroup_id:
             ad_guard.append("adgroup_id 없음(소재 제안 필수 컨텍스트)")
         if proposal.proposal_type in BID_UP_TYPES:
-            if proposal.approval_source != APPROVAL_SOURCE_EXPLORE:
+            # 소재 UP 자동 경로 화이트리스트 — (승인원, 허용 타입 집합) 쌍방향 잠금.
+            # ★CS(적대적 리뷰 P1-1): bid_up_cold를 BID_UP_TYPES에 넣은 순간 이 경계가 전건
+            #   fail-closed로 막아 CS가 한 건도 집행되지 않았다. explore와 동일 규약으로 개방하되,
+            #   반드시 **쌍방향**이어야 한다(P1-3): cold_op는 bid_up_cold만, bid_up_cold는 cold_op만.
+            #   한쪽만 열면 다른 승인원(콘솔 NULL·delegation)이 bid_up_cold를 태워 ±15% 완전 면제를
+            #   무제한 상향으로 쓰는 구멍이 된다(리뷰 재현: 300원→90,000원).
+            _AD_UP_ROUTES = {
+                APPROVAL_SOURCE_EXPLORE: EXPLORATION_STEP_TYPES,   # BX2 D-NAO-70③
+                APPROVAL_SOURCE_COLD: COLD_START_STEP_TYPES,       # CS D-NAO-96
+            }
+            allowed = _AD_UP_ROUTES.get(proposal.approval_source)
+            if allowed is None:
                 ad_guard.append(
-                    f"소재 UP은 탐색(explore_op) 자동 경로만 개방(승인원={proposal.approval_source!r}) "
-                    "— 비탐색 소재 UP은 Confirm 스코프 밖(D-NAO-70③)"
+                    f"소재 UP은 자동 경로(explore_op/cold_op)만 개방(승인원={proposal.approval_source!r}) "
+                    "— 그 밖의 소재 UP은 Confirm 스코프 밖(D-NAO-70③·96)"
                 )
-            elif proposal.proposal_type not in EXPLORATION_STEP_TYPES:
+            elif proposal.proposal_type not in allowed:
                 ad_guard.append(
-                    f"explore_op 소재 UP은 탐색 스텝 타입만(개방={sorted(EXPLORATION_STEP_TYPES)}, "
-                    f"요청={proposal.proposal_type!r})"
+                    f"승인원 {proposal.approval_source!r} 소재 UP은 {sorted(allowed)} 타입만"
+                    f"(요청={proposal.proposal_type!r}) — 타입⟺승인원 쌍방향 잠금"
                 )
         elif proposal.proposal_type not in BID_DOWN_TYPES:
             ad_guard.append(
                 f"proposal_type={proposal.proposal_type!r}는 소재-레벨 미지원 방향"
-                "(UP=탐색explore_op / DOWN=bid_down Confirm)"
+                "(UP=탐색explore_op·콜드cold_op / DOWN=bid_down Confirm)"
             )
         if ad_guard:
             reason = "소재(ad) 실쓰기 경계 차단(fail-closed) — " + " · ".join(ad_guard)
+            _guard_failure(db, proposal, now, "update_bid", reason)
+            raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
+
+    # ★CS(적대적 리뷰 P1-3) — 콜드 스텝은 **target_type='ad' 강제**. 이 검사가 없으면
+    # target_type을 'adgroup'/'keyword'로 바꾼 bid_up_cold 제안이 위 소재 가드를 통째로 우회하고,
+    # ±15% 완전 면제라 변경 폭을 막는 가드가 하나도 남지 않는다(리뷰 재현: 그룹 300원→90,000원).
+    if proposal.proposal_type in COLD_START_STEP_TYPES and proposal.target_type != "ad":
+        reason = (
+            f"콜드 첫 입찰은 소재(ad) 전용(fail-closed) — target_type={proposal.target_type!r}. "
+            "그룹/키워드 grain으로는 소재 UP 경계·상한 게이트를 우회하게 된다"
+        )
+        _guard_failure(db, proposal, now, "update_bid", reason)
+        raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
+
+    # ★CS(적대적 리뷰 P1-3) — 콜드 상한 **쓰기-경계 하드 게이트**(탐색 게이트와 동형).
+    # bid_up_cold는 ±15% 완전 면제라 레인이 산정한 min(이익상한, 목표순위 시장가)이 유일한 가격
+    # 브레이크다. 레인 계산을 불신하고 여기서 재검증한다 — 경로 밖 생성·변조·낡은 제안 재생이
+    # 최종 경계를 통과하는 fail-open 차단. 마커 부재/중복(오염) = fail-closed.
+    if proposal.proposal_type in COLD_START_STEP_TYPES:
+        cold_ceiling = decode_cold_ceiling(proposal.expected_effect)
+        if cold_ceiling is None:
+            reason = (
+                "콜드 상한 마커 부재/오염(fail-closed) — bid_up_cold는 ±15% 완전 면제라 상한이 "
+                "유일 가격 브레이크. cold_start_bid_lane 밖 생성/변조 제안 차단(D-NAO-96)"
+            )
+            _guard_failure(db, proposal, now, "update_bid", reason)
+            raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
+        if proposal.target_bid > cold_ceiling:
+            reason = (
+                f"콜드 상한 초과(fail-closed) — target_bid={proposal.target_bid}원 > 상한 "
+                f"{cold_ceiling}원. '클릭당 확정 손해' 가격 진입 금지(쓰기-경계 재검증, D-NAO-96)"
+            )
+            _guard_failure(db, proposal, now, "update_bid", reason)
+            raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
+        # 신선도(리뷰 P2-7): 킬스위치 OFF 등으로 approved 상태로 남은 낡은 제안이 며칠 뒤 콘솔
+        # 클릭 한 번으로 낡은 target_bid를 집행하는 재생을 막는다(rank-step 신선도 게이트 동형).
+        # 시장가는 매일 변한다 — 어제 시세로 오늘 입찰하지 않는다.
+        # ★created_at은 **UTC 저장**([[sqlite-server-default-now-is-utc]]) — now(kst_now, KST naive)와
+        #   비교하려면 +9h 해서 KST로 맞춘다. 이걸 빼먹으면 모든 제안이 9시간(540분) 늙은 것으로
+        #   보여 게이트가 전건을 죽인다(실제로 이 구현의 첫 판에서 그렇게 났다).
+        # ★created_at=None도 stale 취급(fail-closed) — 컬럼에 NOT NULL 제약이 없어 NULL 행이
+        #   가능하고, None을 통과시키면 신선도 게이트가 우회된다(rank-step과 동일 판단).
+        if proposal.created_at is None:
+            age_min = None
+        else:
+            age_min = (now - (proposal.created_at + timedelta(hours=9))).total_seconds() / 60
+        if age_min is None or age_min > _COLD_STEP_MAX_AGE_MINUTES:
+            age_str = "미상(created_at 없음)" if age_min is None else f"{age_min:.0f}분 경과"
+            reason = (
+                f"콜드 제안 신선도 초과(fail-closed) — 생성 후 {age_str} "
+                f"(> {_COLD_STEP_MAX_AGE_MINUTES}분). 시장가는 매일 변하므로 낡은 시세로 집행 금지"
+            )
             _guard_failure(db, proposal, now, "update_bid", reason)
             raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
 
@@ -1166,10 +1294,26 @@ def _execute_update_bid(db: Session, proposal: NaverProposal, now: datetime) -> 
         proposal.proposal_type in EXPLORATION_STEP_TYPES
         and proposal.approval_source == _EXPLORE_SRC
     )
+    # ★CS: 콜드 첫 입찰도 같은 이유로 표본-기반 완전성 게이트 면제 — **콜드 소재는 정의상 정착
+    #   표본이 없어 BEP(roas_corrected)를 잴 수 없다**. 표본이 없는 대상에 표본 판단을 요구하면
+    #   레인이 전건 fail-closed로 죽는다(탐색이 같은 이유로 이미 면제받는다, PLAN §1 가드6).
+    #   대체 가격 브레이크 = 위에서 **이미 통과한** 콜드 상한 하드 게이트(min(이익상한, 시장가)를
+    #   expected_effect 마커로 재검증) — 면제가 무방비를 뜻하지 않는다.
+    #   면제는 탐색과 동일하게 **타입 ∧ 승인원**을 함께 잠근다(면제가 승인원과 분리돼 다른
+    #   target_type에서 새는 결함 클래스 원천 차단).
+    #   ★면제되는 것은 "컨텍스트 **완전성 요구**" 하나뿐이다 — 검사 자체는 그대로 돈다.
+    #     라이브 확인(리뷰 2R): 표본 없는 콜드는 통과하되, 무전환 지출 큰 그룹은 **스톱로스가**,
+    #     적자 그룹(보정ROAS<target)은 **BEP 하한이** 그대로 차단한다. 단 target_roas가 미해석
+    #     (None)이면 BEP 검사는 fail-open이다(guardrail_gate 성질 — 탐색도 동일).
+    _cold_exempt = (
+        proposal.proposal_type in COLD_START_STEP_TYPES
+        and proposal.approval_source == APPROVAL_SOURCE_COLD
+    )
     if (
         proposal.target_type in ("adgroup", "ad", "keyword")
         and proposal.proposal_type in BID_UP_TYPES
         and not _exploration_exempt
+        and not _cold_exempt
     ):
         # guardrail_gate._check_bid의 up 전용 검사(BEP·스톱로스·일예산)는 그 원료가 None이면
         # 전부 fail-open(검사 건너뜀)이다 — 컨텍스트가 불완전한 채 넘기면 D-NAO-1 이익하한·
@@ -1353,6 +1497,22 @@ def _execute_set_user_lock(db: Session, proposal: NaverProposal, now: datetime) 
     return log_entry
 
 
+def _budget_log_action(proposal: NaverProposal) -> str:
+    """change_log.action 라벨 — BP(예산 페이싱, D-NAO-102 ⑥) 쓰기만 세분화한다.
+
+    'update_budget'(기본, 봉투·콘솔 Confirm 경로) vs 'budget_up_pacing'/'budget_down_pacing'
+    (BP 레인). ★실행 경로·가드레일·디스패치 키(_WRITE_EXECUTORS/'update_budget')는 전부
+    그대로다 — 이 함수가 바꾸는 건 사후 식별용 라벨뿐이라 초크포인트는 여전히 하나다.
+    판별은 approval_source(구조화 컬럼)로 한다 — rationale 텍스트 파싱 금지 원칙 준수."""
+    if proposal.approval_source != budget_pacing.APPROVAL_SOURCE_PACING:
+        return "update_budget"
+    return (
+        budget_pacing.ACTION_BUDGET_DOWN_PACING
+        if proposal.proposal_type == "budget_down"
+        else budget_pacing.ACTION_BUDGET_UP_PACING
+    )
+
+
 def _execute_update_budget(db: Session, proposal: NaverProposal, now: datetime) -> NaverChangeLog:
     """캠페인 일예산 실쓰기 1건 (P3, D-NAO-16 4단계, D-NAO-42-f). budget_up/budget_down 공용 —
     target_budget 컬럼(P1, proposal_writer가 구조화 저장)을 그대로 쓴다(rationale 텍스트
@@ -1367,16 +1527,19 @@ def _execute_update_budget(db: Session, proposal: NaverProposal, now: datetime) 
     라운드 봉투(budget_auto_eligible, §5-E)는 여기서 소비하지 않는다 — 오늘은 반자동이라
     Jino 콘솔 승인(status='approved')이 실행 전 유일한 게이트이고, 라운드 봉투는 자율(위임)
     승급 후 자동발사 경로에서만 실효(PLAN §5-E 주석)."""
+    # BP(D-NAO-102 ⑥) 라벨 분기 — 실행 경로 불변, change_log.action만 세분화.
+    log_action = _budget_log_action(proposal)
+
     if proposal.target_type != "campaign":
         reason = (
             f"target_type={proposal.target_type!r} — 캠페인 단위 예산만 구현됨(정직 경계)"
         )
-        _guard_failure(db, proposal, now, "update_budget", reason)
+        _guard_failure(db, proposal, now, log_action, reason)
         raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
 
     if proposal.target_budget is None:
         reason = "target_budget 없음 — 구조 결함(구 제안이거나 재생성 필요)"
-        _guard_failure(db, proposal, now, "update_budget", reason)
+        _guard_failure(db, proposal, now, log_action, reason)
         raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
 
     # codex[P1, Fix 2]: 캠페인 단위 예산 쓰기는 target_id==campaign_id가 불변이어야 한다
@@ -1389,7 +1552,7 @@ def _execute_update_budget(db: Session, proposal: NaverProposal, now: datetime) 
             "둘 중 하나가 비어있음) — 캠페인 예산 쓰기는 target_id==campaign_id가 불변, "
             "stale/malformed 제안(fail-closed)"
         )
-        _guard_failure(db, proposal, now, "update_budget", reason)
+        _guard_failure(db, proposal, now, log_action, reason)
         raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
 
     context = _build_guardrail_context(db, proposal, now)
@@ -1400,7 +1563,7 @@ def _execute_update_budget(db: Session, proposal: NaverProposal, now: datetime) 
     block_reason = guardrail_gate.check(gate_proposal, context, now=now)
     if block_reason is not None:
         reason = f"가드레일 차단 — {block_reason}"
-        _guard_failure(db, proposal, now, "update_budget", reason)
+        _guard_failure(db, proposal, now, log_action, reason)
         raise MissingExecutionTargetError(f"proposal_id={proposal.id} {reason}")
 
     _claim_executing(db, proposal)
@@ -1411,7 +1574,7 @@ def _execute_update_budget(db: Session, proposal: NaverProposal, now: datetime) 
         proposal.status = "failed"  # 자동 재시도 차단(approved 게이트) — 재승인만 재시도 경로
         fail_entry = NaverChangeLog(
             entity_type=proposal.target_type, entity_id=proposal.target_id,
-            campaign_id=proposal.campaign_id, action="update_budget",
+            campaign_id=proposal.campaign_id, action=log_action,
             rationale=(
                 f"{proposal.rationale or ''} {WRITE_FAILURE_MARKER} {type(exc).__name__}: {str(exc)[:300]}"
             ),
@@ -1433,7 +1596,7 @@ def _execute_update_budget(db: Session, proposal: NaverProposal, now: datetime) 
     # _execute_add_negative_keyword 주석 참조).
     log_entry = NaverChangeLog(
         entity_type=proposal.target_type, entity_id=proposal.target_id,
-        campaign_id=proposal.campaign_id, action="update_budget",
+        campaign_id=proposal.campaign_id, action=log_action,
         rationale=rationale, predicted_json=proposal.expected_effect,
         proposal_id=proposal.id, dry_run=False,
         before_value=json.dumps(result.before, ensure_ascii=False),
@@ -1596,20 +1759,46 @@ def real_write_blocker(proposal: NaverProposal) -> str | None:
             if not proposal.adgroup_id:
                 return "adgroup_id 없음 — 소재 제안 필수 컨텍스트 부족(재생성 필요)"
             if proposal.proposal_type in BID_UP_TYPES:
-                if proposal.approval_source != APPROVAL_SOURCE_EXPLORE:
+                # 타입⟺승인원 쌍방향 잠금(_execute_update_bid과 동일 판정 — 이중 방벽).
+                _routes = {
+                    APPROVAL_SOURCE_EXPLORE: EXPLORATION_STEP_TYPES,  # BX2 D-NAO-70③
+                    APPROVAL_SOURCE_COLD: COLD_START_STEP_TYPES,      # CS D-NAO-96
+                }
+                allowed = _routes.get(proposal.approval_source)
+                if allowed is None:
                     return (
-                        "소재(ad) UP은 탐색(explore_op) 자동 경로만 개방 — 비탐색 소재 UP은 "
-                        "Confirm 스코프 밖(D-NAO-70③, 콘솔 실행 버튼 비활성)"
+                        "소재(ad) UP은 자동 경로(explore_op/cold_op)만 개방 — 그 밖의 소재 UP은 "
+                        "Confirm 스코프 밖(D-NAO-70③·96, 콘솔 실행 버튼 비활성)"
                     )
-                if proposal.proposal_type not in EXPLORATION_STEP_TYPES:
+                if proposal.proposal_type not in allowed:
                     return (
-                        f"explore_op 소재 UP은 탐색 스텝 타입만(개방={sorted(EXPLORATION_STEP_TYPES)}, "
-                        f"요청={proposal.proposal_type})"
+                        f"승인원 {proposal.approval_source} 소재 UP은 {sorted(allowed)} 타입만"
+                        f"(요청={proposal.proposal_type}) — 타입⟺승인원 쌍방향 잠금"
                     )
             elif proposal.proposal_type not in BID_DOWN_TYPES:
                 return (
                     f"소재(ad) {proposal.proposal_type}은 미지원 방향"
-                    "(UP=탐색explore_op / DOWN=bid_down Confirm)"
+                    "(UP=탐색explore_op·콜드cold_op / DOWN=bid_down Confirm)"
+                )
+        # CS(리뷰 P1-3): 콜드 스텝 구조 게이트 — target_type 강제 + 상한 마커 존재(정적 판정).
+        if proposal.proposal_type in COLD_START_STEP_TYPES:
+            if proposal.target_type != "ad":
+                return (
+                    f"콜드 첫 입찰은 소재(ad) 전용 — target_type={proposal.target_type} "
+                    "(그룹/키워드 grain은 소재 UP 경계·상한 게이트 우회 경로)"
+                )
+            _cold_ceiling = decode_cold_ceiling(proposal.expected_effect)
+            if _cold_ceiling is None:
+                return (
+                    "콜드 상한 마커 부재/오염 — ±15% 완전 면제 타입이라 상한 없이 실행 금지"
+                    "(실행 버튼 비활성, D-NAO-96)"
+                )
+            # 리뷰 P3: 상한 초과 정적 검사도 여기 둔다(탐색엔 있는데 CS엔 없었다) — 없으면
+            # 콘솔엔 "실행 가능"으로 보이다가 클릭하면 executor가 죽인다(UI 거짓말).
+            if proposal.target_bid is not None and proposal.target_bid > _cold_ceiling:
+                return (
+                    f"콜드 상한 초과 — target_bid={proposal.target_bid}원 > 상한 {_cold_ceiling}원"
+                    "(실행 버튼 비활성, D-NAO-96)"
                 )
     elif action == "set_user_lock":
         if proposal.target_type not in ("keyword", "adgroup"):
@@ -1669,6 +1858,9 @@ def execute(db: Session, proposal_id: int, *, dry_run: bool = True, now: datetim
         raise ActionNotExecutableError(
             f"proposal_type={proposal.proposal_type!r}는 정보성 제안이라 실행 대상이 아님"
         )
+    # BP(D-NAO-102 ⑥): 기록 라벨만 세분화 — 디스패치/OPEN_ACTIONS 키는 계속 `action`
+    # (초크포인트 불변). dry-run change_log·일기도 같은 라벨을 써야 BP 레인이 사후 식별된다.
+    log_action = _budget_log_action(proposal) if action == "update_budget" else action
 
     if proposal.status != "approved":
         raise ProposalNotApprovedError(
@@ -1701,7 +1893,9 @@ def execute(db: Session, proposal_id: int, *, dry_run: bool = True, now: datetim
             _auto_operator.APPROVAL_SOURCE_DAILY, _auto_operator.APPROVAL_SOURCE_HOURLY,
             _auto_operator.APPROVAL_SOURCE_PROBE,  # D-NAO-58 CD2: 탐침도 동일 킬스위치 가드(우회 금지)
             _auto_operator.APPROVAL_SOURCE_REVERT,  # D-NAO-58 CD3: 되돌림도 진입 가드(probe_op와 동일 2중 harness 방어)
+            budget_pacing.APPROVAL_SOURCE_PACING,  # BP D-NAO-102: 예산 페이싱 증액·원복도 킬스위치 가드(우회 금지)
             APPROVAL_SOURCE_EXPLORE,  # BX2 D-NAO-70: 탐색 자동 실쓰기도 진입 킬스위치 가드(우회 금지, probe_op 관례)
+            APPROVAL_SOURCE_COLD,  # CS: 콜드 첫 입찰도 진입 킬스위치 가드(우회 금지 — 자동 실쓰기 레인)
             search_term_judge.APPROVAL_SOURCE_SS_EXCLUDE,  # SS3-A: 미래 자동 활성화 대비 사전 등록(현재 미배선)
         ) and not _auto_operator._auto_operate_now(db, proposal.campaign_id):
             log.warning(
@@ -1716,7 +1910,7 @@ def execute(db: Session, proposal_id: int, *, dry_run: bool = True, now: datetim
                     db, "kill_switch", proposal.campaign_id,
                     actor=diary.actor_from_approval_source(proposal.approval_source),
                     target_type=proposal.target_type, target_id=proposal.target_id,
-                    adgroup_id=proposal.adgroup_id, action=action,
+                    adgroup_id=proposal.adgroup_id, action=log_action,
                     rationale="킬스위치 OFF(쓰기 직전 재확인)", now=now,
                 )
             except Exception as diary_err:  # noqa: BLE001 — fail-open(인자 평가 포함)
@@ -1744,7 +1938,7 @@ def execute(db: Session, proposal_id: int, *, dry_run: bool = True, now: datetim
                 db, "execute", proposal.campaign_id,
                 actor=diary.actor_from_approval_source(proposal.approval_source),
                 target_type=proposal.target_type, target_id=proposal.target_id,
-                adgroup_id=proposal.adgroup_id, action=action,
+                adgroup_id=proposal.adgroup_id, action=log_action,
                 before_value=log_entry.before_value, after_value=log_entry.after_value,
                 rationale=proposal.rationale, source_ref=log_entry.id, now=now,
             )
@@ -1754,7 +1948,7 @@ def execute(db: Session, proposal_id: int, *, dry_run: bool = True, now: datetim
 
     log_entry = NaverChangeLog(
         entity_type=proposal.target_type, entity_id=proposal.target_id,
-        campaign_id=proposal.campaign_id, action=action,
+        campaign_id=proposal.campaign_id, action=log_action,
         rationale=proposal.rationale, predicted_json=proposal.expected_effect,
         proposal_id=proposal.id, dry_run=effective_dry_run, changed_at=now, executed_at=now,
         verify_date=(now + timedelta(days=VERIFY_DAYS)).date(),
