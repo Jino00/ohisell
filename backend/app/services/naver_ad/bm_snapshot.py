@@ -5,12 +5,19 @@
 #   전면 fail-open(NULL 유지, SA-1 나머지 필드는 그대로 진행). 주간 deep(제외키워드·소재수)은
 #   update_deep_dimensions가 별도 레인(bm_deep, 일요일)에서 채운다. 관찰 전용(§0 금지선 1) —
 #   실행 손(naver_sa_writer/naver_execution_harness)은 import조차 하지 않는다.
+#
+# ★필드 출처별 관측 시각 저장(D-NAO-93): synced_at은 이 함수가 도는 **복사** 시각이라 필드별
+#   실관측과 어긋난다 — Phase 1/2 필드는 앞선 entity_sync가 관측한 값(NaverEntity.synced_at,
+#   실측상 D-1 07:35)이고, Phase 3 필드는 이 함수가 도는 중 GET한 값이다. 그래서
+#   entity_observed_at(=e.synced_at 복사)·p3_observed_at(=그 행의 P3 GET 직후 kst_now)을 따로
+#   남긴다. P3는 캠페인별 순차 GET이라 p3_observed_at은 **행별로 다르다**(전역 1개 금지 —
+#   codex[P1]). bm_diff가 이걸 op별 change_log 대조창 상한으로 쓴다.
 from __future__ import annotations
 
 import logging
 import time
 from collections import defaultdict
-from datetime import date
+from datetime import date, datetime
 
 from sqlalchemy.orm import Session
 
@@ -72,40 +79,57 @@ def _keyword_aggregates(entities: list[NaverEntity]) -> dict[str, tuple[int, int
     }
 
 
-def _fetch_campaign_budgets(campaigns_full: list[dict] | None) -> tuple[dict[str, int | None], int]:
+def _fetch_campaign_budgets(
+    campaigns_full: list[dict] | None,
+    observed_at: datetime | None = None,
+) -> tuple[dict[str, int | None], datetime | None, int]:
     """캠페인 dailyBudget(get_campaigns_full, +1 GET, Phase 3 일별) → campaign_id→daily_budget.
 
     campaigns_full 주입 시 GET 생략(테스트/재사용, 원칙18-8 — entity_sync.collect_entities와
     동일 관례). 실패는 로그+빈 dict(fail-open, daily_budget=NULL 유지 — SA-1 나머지 필드는
-    그대로 진행, §0 금지선 5). Returns: (campaign_id→daily_budget, 실제 GET 호출 수)."""
+    그대로 진행, §0 금지선 5).
+    ★관측 시각(D-NAO-93)은 이 GET 반환 **직후** 1회 채취한다 — 뒤이어 도는 그룹별 GET 시각을
+    캠페인 행에 찍으면 그 사이 우리 쓰기가 '반영 안 됐는데 창 안'이 된다(codex[P1]).
+    주입 경로는 observed_at으로 **그 데이터가 실제 관측된 시각**을 함께 넘길 수 있다. 미제공 시
+    호출 시점 kst_now()로 폴백 — 즉 "주입 시각 = 관측 시각"으로 간주한다(테스트는 무해하지만,
+    캐시·재사용 배선을 붙일 때 이걸 안 넘기면 밴드가 되살아난다).
+    Returns: (campaign_id→daily_budget, 관측 시각|None, 실제 GET 호출 수)."""
     if campaigns_full is not None:
-        return {c["campaign_id"]: c.get("daily_budget") for c in campaigns_full}, 0
+        return ({c["campaign_id"]: c.get("daily_budget") for c in campaigns_full},
+                observed_at or kst_now(), 0)
     try:
         rows = get_campaigns_full()
     except Exception as e:  # noqa: BLE001 — Phase3 GET 실패가 SA-1 전체를 막지 않음
         log.warning("[BM] SA-1 P3 캠페인 예산 GET 실패(fail-open, daily_budget=NULL 유지): %s", e)
-        return {}, 0
-    return {c["campaign_id"]: c.get("daily_budget") for c in rows}, 1
+        return {}, None, 0
+    return {c["campaign_id"]: c.get("daily_budget") for c in rows}, kst_now(), 1
 
 
 def _fetch_adgroup_dims(
     campaign_ids: list[str],
     adgroups_by_campaign: dict[str, list[dict]] | None,
+    observed_at: datetime | None = None,
 ) -> tuple[dict[str, dict], int]:
     """그룹별 daily_budget·extended_search(get_adgroups 확장, 캠페인당 +1 GET, Phase 3 일별).
 
     캠페인 단위 fail-open — 한 캠페인의 GET이 실패해도 나머지 캠페인은 계속 진행(그 캠페인
     소속 그룹은 이번 회차 NULL 유지). adgroups_by_campaign 주입 시 GET 생략(테스트/재사용).
-    Returns: ({adgroup_id: {"daily_budget","extended_search"}}, 실제 GET 호출 수)."""
+    ★관측 시각(D-NAO-93)은 **캠페인별 GET 반환 직후** 채취해 그 캠페인 소속 그룹에만 찍는다 —
+    순차 GET이라 먼저 관측된 캠페인에 마지막 시각을 찍으면 그 사이 우리 쓰기가 '반영 안 됐는데
+    창 안'이 된다(codex[P1]). 주입 경로는 observed_at으로 그 데이터의 실제 관측 시각을 넘길 수
+    있고, 미제공 시 호출 시점 kst_now() 폴백(= "주입 시각 = 관측 시각" 간주, 위와 같은 규약).
+    Returns: ({adgroup_id: {"daily_budget","extended_search","observed_at"}}, 실제 GET 호출 수)."""
     out: dict[str, dict] = {}
     get_count = 0
     for cid in campaign_ids:
         try:
             if adgroups_by_campaign is not None:
                 ags = adgroups_by_campaign.get(cid) or []
+                cid_observed_at = observed_at or kst_now()  # 주입: 넘어온 관측 시각(없으면 주입 시각)
             else:
                 ags = get_adgroups(cid)
                 get_count += 1
+                cid_observed_at = kst_now()  # 라이브: **이 캠페인** GET 직후
         except Exception as e:  # noqa: BLE001 — 캠페인 1건 GET 실패는 skip(§0 금지선 5)
             log.warning("[BM] SA-1 P3 그룹 확장차원 GET 실패(campaign=%s, skip): %s", cid, e)
             continue
@@ -113,23 +137,32 @@ def _fetch_adgroup_dims(
             out[a["adgroup_id"]] = {
                 "daily_budget": a.get("daily_budget"),
                 "extended_search": a.get("extended_search"),
+                "observed_at": cid_observed_at,
             }
     return out, get_count
 
 
-def _snapshot_fields(e: NaverEntity, opt_map, kw_agg, now, budget_map, adgroup_dims) -> dict:
+def _snapshot_fields(e: NaverEntity, opt_map, kw_agg, now, budget_map, budget_at, adgroup_dims) -> dict:
     """엔티티 1건 → 스냅샷 컬럼 dict. Phase 1: name/status/optimizer/bid_amt/키워드집계.
     Phase 3(D-NAO-78): 캠페인 daily_budget(budget_map)·그룹 daily_budget+extended_search
     (adgroup_dims) 추가 채움 — 미수집/실패 시 NULL(하위호환, §2 nullable 규약).
 
-    그룹 키워드 집계는 WEB_SITE만 유효(다른 유형은 키워드 미동기화 → NULL, 0으로 오도 금지)."""
+    그룹 키워드 집계는 WEB_SITE만 유효(다른 유형은 키워드 미동기화 → NULL, 0으로 오도 금지).
+
+    ★관측 시각(D-NAO-93): entity_observed_at은 항상 e.synced_at(entity_sync가 이 값을 실제로
+    본 시각). p3_observed_at은 **그 행이 실제로 P3 데이터를 받은 시각** — 캠페인은 예산 GET
+    시각(budget_at), 그룹은 그 캠페인의 dims GET 시각(dims["observed_at"])이다. GET fail-open으로
+    필드가 NULL이면 관측 시각도 NULL이어야 bm_diff의 synced_at 폴백이 성립한다."""
     kw_count: int | None = None
     kw_avg: int | None = None
     bid_amt: int | None = None
     daily_budget: int | None = None
     extended_search: bool | None = None
+    p3_observed_at = None
     if e.entity_type == "campaign":
-        daily_budget = budget_map.get(e.entity_id)
+        if e.entity_id in budget_map:  # 키 존재 = P3 응답에 포함됨(값 None은 '무제한'이라 유효 관측)
+            daily_budget = budget_map[e.entity_id]
+            p3_observed_at = budget_at
     if e.entity_type == "adgroup":
         bid_amt = _norm_bid(e.bid_amt)
         if e.campaign_type == "WEB_SITE":
@@ -138,6 +171,7 @@ def _snapshot_fields(e: NaverEntity, opt_map, kw_agg, now, budget_map, adgroup_d
         if dims:
             daily_budget = dims.get("daily_budget")
             extended_search = dims.get("extended_search")
+            p3_observed_at = dims.get("observed_at")
     return {
         "parent_id": e.parent_id or "",
         "campaign_id": e.campaign_id or "",
@@ -151,6 +185,8 @@ def _snapshot_fields(e: NaverEntity, opt_map, kw_agg, now, budget_map, adgroup_d
         "keyword_count": kw_count,
         "keyword_avg_bid": kw_avg,
         "synced_at": now,  # ★kst_now 명시(server_default는 UTC — stale 판정 오독 회피)
+        "entity_observed_at": e.synced_at,  # entity_sync 관측 시각(없으면 None → bm_diff가 폴백)
+        "p3_observed_at": p3_observed_at,
     }
 
 
@@ -160,6 +196,7 @@ def snapshot_entities(
     snapshot_date: date | None = None,
     campaigns_full: list[dict] | None = None,
     adgroups_by_campaign: dict[str, list[dict]] | None = None,
+    p3_observed_at: datetime | None = None,
 ) -> dict:
     """naver_entity를 읽어 캠페인·그룹 grain 스냅샷을 upsert(멱등, 일 1회).
 
@@ -168,6 +205,14 @@ def snapshot_entities(
     0 GET(DB만). Phase 3(예산·확장검색, D-NAO-78)은 campaigns_full/adgroups_by_campaign 미주입
     시 get_campaigns_full/get_adgroups를 호출(≈46 GET/일, §7) — 주입 시 GET 생략(테스트/재사용,
     원칙18-8). 두 차원 모두 fail-open(실패해도 나머지 필드는 그대로 커밋).
+
+    ★관측 시각 2종을 함께 저장한다(D-NAO-93): entity_observed_at=NaverEntity.synced_at 복사,
+    p3_observed_at=**그 행의** P3 GET 직후 시각(캠페인=예산 GET / 그룹=그 캠페인의 dims GET).
+    P3는 캠페인별 순차 GET이라 행마다 시각이 다르다 — 전역 1개로 뭉치면 먼저 관측된 행에
+    "아직 반영 안 됐는데 창 안"인 밴드가 그대로 재생산된다(codex[P1]).
+    ★주입(campaigns_full/adgroups_by_campaign) 시 p3_observed_at으로 **그 데이터가 실제 관측된
+    시각**을 함께 넘길 수 있다. 미제공이면 호출 시점 kst_now()로 폴백 = "주입 시각 = 관측 시각"
+    간주 — 캐시·재사용 배선을 붙이면서 이걸 안 넘기면 그 시차만큼 밴드가 되살아난다(codex[P2]).
     """
     sdate = snapshot_date or kst_today()
     now = kst_now()
@@ -175,11 +220,12 @@ def snapshot_entities(
     opt_map = _optimizer_map(db)
     kw_agg = _keyword_aggregates(entities)
 
-    budget_map, n_budget_get = _fetch_campaign_budgets(campaigns_full)
+    budget_map, budget_at, n_budget_get = _fetch_campaign_budgets(campaigns_full, p3_observed_at)
     campaign_ids = [
         e.entity_id for e in entities if e.entity_type == "campaign" and e.status != "deleted"
     ]
-    adgroup_dims, n_adgroup_get = _fetch_adgroup_dims(campaign_ids, adgroups_by_campaign)
+    adgroup_dims, n_adgroup_get = _fetch_adgroup_dims(
+        campaign_ids, adgroups_by_campaign, p3_observed_at)
 
     existing = {
         (s.entity_type, s.entity_id): s
@@ -191,7 +237,7 @@ def snapshot_entities(
     for e in entities:
         if e.entity_type not in ("campaign", "adgroup"):
             continue
-        fields = _snapshot_fields(e, opt_map, kw_agg, now, budget_map, adgroup_dims)
+        fields = _snapshot_fields(e, opt_map, kw_agg, now, budget_map, budget_at, adgroup_dims)
         row = existing.get((e.entity_type, e.entity_id))
         if row is None:
             db.add(NaverEntitySnapshot(
