@@ -10,7 +10,12 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.database import Base
-from app.models import NaverAdDaily, NaverBidEstimateDaily, NaverLearningState
+from app.models import (
+    NaverAdDaily,
+    NaverAdgroupProduct,
+    NaverBidEstimateDaily,
+    NaverLearningState,
+)
 from app.services.naver_ad import guardrail_gate as gate
 from app.services.naver_ad import launch_rank_floor as lrf
 
@@ -40,11 +45,14 @@ def _exposure_row(ad_date, adgroup_id=ADGROUP_ID, imp=10):
     )
 
 
-def _ladder_row(rank, bid, ladder_date=TODAY, ad_id=AD_ID, device="MOBILE"):
-    # position은 0-베이스: 1위=0, 4위=3.
+def _ladder_row(rank, bid, ladder_date=TODAY, ad_id=AD_ID, device="MOBILE", is_floor=False):
+    """★2026-07-29 정정: position은 **1-베이스**(1위=1, 4위=4)이고 0은 최소노출입찰가다
+    (models.NaverBidEstimateDaily docstring). 종전 이 헬퍼가 `position=rank - 1`로 저장해
+    코드의 오프바이원과 정확히 같은 오류를 복제했고, 그래서 테스트가 통과하면서 버그를
+    가렸다(codex 리뷰 P1). 헬퍼는 실제 규약을 따르고, 규약 자체는 아래 회귀 테스트가 못박는다."""
     return NaverBidEstimateDaily(
         date=ladder_date, ad_id=ad_id, adgroup_id=ADGROUP_ID, campaign_id=CAMPAIGN_ID,
-        device=device, position=rank - 1, bid=bid, is_floor=False,
+        device=device, position=rank, bid=bid, is_floor=is_floor,
     )
 
 
@@ -228,3 +236,126 @@ def test_guardrail_passes_bid_down_when_context_missing_launch_keys_entirely():
     ctx.pop("launch_target_rank", None)
     reason = gate.check(_bid_proposal("bid_down", 1400), ctx, now=NOW)
     assert reason is None
+
+
+# ── codex 리뷰 P1 회귀 (2026-07-29) ─────────────────────────────────────────
+
+
+def test_ladder_position_is_one_based_not_zero_based(db):
+    """★목표 4위는 position 4를 읽어야 한다 — 종전엔 rank-1로 조회해 3위 가격을 강제했다.
+
+    라이브 3개 상품이 전부 목표 4위였으므로 실제로 한 칸 비싼 값이 하한이 되어 있었다.
+    """
+    db.add(_exposure_row(TODAY - timedelta(days=1)))
+    for rank, bid in ((1, 5000), (2, 4000), (3, 3000), (4, 2000)):
+        db.add(_ladder_row(rank, bid))
+    lrf.set_target_rank(db, AD_ID, 4, note="test")
+    db.commit()
+
+    out = lrf.floor_for(db, ad_id=AD_ID, adgroup_id=ADGROUP_ID, today=TODAY)
+    assert out["floor_bid"] == 2000, "4위 목표는 4위 가격(2000)이어야 한다"
+
+
+def test_rank_one_does_not_read_exposure_minimum(db):
+    """★position 0은 순위가 아니라 최소노출입찰가다 — 1위 목표가 이걸 읽으면 순위를 잃는다."""
+    db.add(_exposure_row(TODAY - timedelta(days=1)))
+    db.add(_ladder_row(1, 5000))
+    db.add(NaverBidEstimateDaily(  # position 0 = 최소노출입찰가(가상 position)
+        date=TODAY, ad_id=AD_ID, adgroup_id=ADGROUP_ID, campaign_id=CAMPAIGN_ID,
+        device="MOBILE", position=0, bid=50, is_floor=False,
+    ))
+    lrf.set_target_rank(db, AD_ID, 1, note="test")
+    db.commit()
+
+    out = lrf.floor_for(db, ad_id=AD_ID, adgroup_id=ADGROUP_ID, today=TODAY)
+    assert out["floor_bid"] == 5000, "1위 목표가 최소노출입찰가 50원을 읽으면 안 된다"
+
+
+def test_is_floor_rows_are_not_treated_as_market_price(db):
+    """★is_floor=시세 무의미 표식. bep_breakdown이 같은 이유로 이미 제외한다 —
+    신제품 사다리가 이 상태가 되기 쉬워 하한이 50원으로 무너질 수 있었다."""
+    db.add(_exposure_row(TODAY - timedelta(days=1)))
+    db.add(_ladder_row(4, 50, is_floor=True))
+    lrf.set_target_rank(db, AD_ID, 4, note="test")
+    db.commit()
+
+    out = lrf.floor_for(db, ad_id=AD_ID, adgroup_id=ADGROUP_ID, today=TODAY)
+    assert out["floor_bid"] is None, "시세 무의미 행을 하한으로 쓰면 안 된다"
+
+
+def test_is_floor_row_does_not_shadow_a_valid_older_row(db):
+    """당일이 is_floor여도 유효한 과거 행이 있으면 그쪽으로 폴백해야 한다."""
+    db.add(_exposure_row(TODAY - timedelta(days=2)))
+    db.add(_ladder_row(4, 2000, ladder_date=TODAY - timedelta(days=1)))
+    db.add(_ladder_row(4, 50, ladder_date=TODAY, is_floor=True))
+    lrf.set_target_rank(db, AD_ID, 4, note="test")
+    db.commit()
+
+    out = lrf.floor_for(db, ad_id=AD_ID, adgroup_id=ADGROUP_ID, today=TODAY)
+    assert out["floor_bid"] == 2000
+    assert out["ladder_date"] == TODAY - timedelta(days=1)
+
+
+# ── group_floor_for — 그룹 입찰 경로 하한 (codex P1) ────────────────────────
+
+
+def _mapping(db, *, ad_id, adgroup_id=ADGROUP_ID, use_group=None, mall="p1"):
+    db.add(NaverAdgroupProduct(
+        adgroup_id=adgroup_id, campaign_id=CAMPAIGN_ID, mall_product_id=mall,
+        ad_id=ad_id, use_group_bid_amt=use_group,
+    ))
+
+
+def test_group_floor_none_without_launch_targets(db):
+    _mapping(db, ad_id=AD_ID, use_group=True)
+    db.commit()
+    assert lrf.group_floor_for(db, adgroup_id=ADGROUP_ID, today=TODAY)["floor_bid"] is None
+
+
+def test_group_floor_uses_group_bid_ads(db):
+    """★useGroupBidAmt=true 소재의 실효 레버는 그룹 입찰 — 그 하한이 그룹 인하를 막아야 한다."""
+    db.add(_exposure_row(TODAY - timedelta(days=1)))
+    db.add(_ladder_row(4, 2000))
+    _mapping(db, ad_id=AD_ID, use_group=True)
+    lrf.set_target_rank(db, AD_ID, 4, note="test")
+    db.commit()
+
+    out = lrf.group_floor_for(db, adgroup_id=ADGROUP_ID, today=TODAY)
+    assert out["floor_bid"] == 2000 and out["binding_ad_id"] == AD_ID
+
+
+def test_group_floor_ignores_ads_with_own_bid(db):
+    """use_group_bid_amt=False면 그룹 입찰이 그 소재를 안 움직인다 — 하한 대상 아님."""
+    db.add(_exposure_row(TODAY - timedelta(days=1)))
+    db.add(_ladder_row(4, 2000))
+    _mapping(db, ad_id=AD_ID, use_group=False)
+    lrf.set_target_rank(db, AD_ID, 4, note="test")
+    db.commit()
+
+    assert lrf.group_floor_for(db, adgroup_id=ADGROUP_ID, today=TODAY)["floor_bid"] is None
+
+
+def test_group_floor_includes_unknown_use_group_bid(db):
+    """NULL(미수집)은 포함한다 — 오탐 대가는 '인하 한 번 못함', 누락 대가는 '1페이지 이탈'."""
+    db.add(_exposure_row(TODAY - timedelta(days=1)))
+    db.add(_ladder_row(4, 2000))
+    _mapping(db, ad_id=AD_ID, use_group=None)
+    lrf.set_target_rank(db, AD_ID, 4, note="test")
+    db.commit()
+
+    assert lrf.group_floor_for(db, adgroup_id=ADGROUP_ID, today=TODAY)["floor_bid"] == 2000
+
+
+def test_group_floor_takes_max_across_ads(db):
+    """소재가 여럿이면 가장 높은 하한이 그룹을 구속한다(하나라도 밀리면 안 되므로)."""
+    db.add(_exposure_row(TODAY - timedelta(days=1)))
+    db.add(_ladder_row(4, 2000, ad_id="nad-a"))
+    db.add(_ladder_row(4, 3500, ad_id="nad-b"))
+    _mapping(db, ad_id="nad-a", use_group=True, mall="p1")
+    _mapping(db, ad_id="nad-b", use_group=True, mall="p2")
+    lrf.set_target_rank(db, "nad-a", 4, note="test")
+    lrf.set_target_rank(db, "nad-b", 4, note="test")
+    db.commit()
+
+    out = lrf.group_floor_for(db, adgroup_id=ADGROUP_ID, today=TODAY)
+    assert out["floor_bid"] == 3500 and out["binding_ad_id"] == "nad-b"

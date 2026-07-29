@@ -23,7 +23,12 @@ from decimal import Decimal
 from sqlalchemy import func as sqlfunc
 from sqlalchemy.orm import Session
 
-from app.models import NaverAdDaily, NaverBidEstimateDaily, NaverLearningState
+from app.models import (
+    NaverAdDaily,
+    NaverAdgroupProduct,
+    NaverBidEstimateDaily,
+    NaverLearningState,
+)
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 
 log = logging.getLogger(__name__)
@@ -103,7 +108,19 @@ def days_since_launch(db: Session, adgroup_id: str, today: date) -> int | None:
 
 
 def _ladder_bid(db: Session, ad_id: str, rank: int, today: date, device: str) -> tuple[int | None, date | None]:
-    """사다리에서 '목표 순위 유지에 필요한 입찰'. position은 0-베이스(1위=0)라 rank-1로 조회.
+    """사다리에서 '목표 순위 유지에 필요한 입찰'. position은 **1-베이스**(1위=1)라 rank로 조회.
+
+    ★2026-07-29 정정(codex 리뷰 P1): 종전 구현은 `position == rank - 1`이었고 docstring도
+      "0-베이스"라고 적혀 있었으나 **규약이 정반대다** — NaverBidEstimateDaily는
+      `position 1~4 = 순위별 필요 입찰가`, `position 0 = 최소노출입찰가`(같은 테이블에
+      담기 위한 가상 position, 실제 API position 아님)라고 모델 docstring에 명시돼 있다.
+      그래서 4위 목표가 3위 가격을 강제하고(초과 지불), 1위 목표는 최소노출입찰가를 읽어
+      순위를 통째로 잃는 상태였다. 라이브 3개 상품(목표 4위)이 전부 이 값에 걸려 있었다.
+
+    ★is_floor 행 제외: 시세가 무의미하다는 표식(50원 바닥·순위별 무차등)이라 그걸 "이 순위
+      유지에 필요한 금액"이라고 부르면 거짓이다. bep_breakdown.py:91이 같은 이유로 이미
+      제외하고 있고(그 주석 참조), 신제품 사다리가 바로 이 상태가 되기 쉬워 하한이 50원으로
+      무너질 수 있었다(codex 리뷰 P1).
 
     당일 행이 없으면 가장 최근 행으로 폴백한다(사다리는 전날 23:50 수집이라 보통 당일 것이
     있지만, 수집 실패한 날 하한이 통째로 사라지면 그날 순위가 무너진다 — 마지막으로 알려진
@@ -114,7 +131,8 @@ def _ladder_bid(db: Session, ad_id: str, rank: int, today: date, device: str) ->
         .filter(
             NaverBidEstimateDaily.ad_id == ad_id,
             NaverBidEstimateDaily.device == device,
-            NaverBidEstimateDaily.position == rank - 1,
+            NaverBidEstimateDaily.position == rank,
+            NaverBidEstimateDaily.is_floor.is_(False),
             NaverBidEstimateDaily.date <= today,
         )
         .order_by(NaverBidEstimateDaily.date.desc())
@@ -164,6 +182,52 @@ def floor_for(
     out["reason"] = (
         f"출시창 순위 하한 — 목표 {rank}위 유지에 {bid}원 필요"
         f"(첫 노출 후 {days}/{LAUNCH_WINDOW_DAYS}일{stale})"
+    )
+    return out
+
+
+def group_floor_for(
+    db: Session, *, adgroup_id: str, today: date, device: str = DEFAULT_DEVICE,
+) -> dict:
+    """이 **그룹**의 입찰을 내릴 때 지켜야 할 하한 — 그룹 입찰을 쓰는 출시창 소재들의 최대 하한.
+
+    ★왜 필요한가(codex 리뷰 P1, 2026-07-29): 소재가 `useGroupBidAmt=true`면 실효 레버는
+      **그룹 입찰**이고 실행기도 adgroup 단위 bid_down을 낸다. 그런데 하한 계산이
+      target_type='ad' 분기에만 있어 그 경로에서는 launch_floor_bid=None → 출시창 소재의
+      실효 입찰이 하한 밑으로 내려갈 수 있었다. 소재 하한을 그룹으로 올려 집계한다.
+
+    ★use_group_bid_amt가 NULL(미수집)인 소재는 **포함한다.** 오탐의 대가는 "그룹 입찰을
+      한 번 못 내렸다"이고, 누락의 대가는 "출시 상품이 1페이지에서 떨어졌다"이다.
+      출시창에서는 가시성이 우선이라는 D-NAO-120에 따라 안전한 쪽으로 판단한다.
+
+    반환: {"floor_bid": int|None, "target_rank": int|None, "binding_ad_id": str|None,
+           "reason": str}. floor_bid=None이면 하한 없음(종전 동작).
+    """
+    out: dict = {"floor_bid": None, "target_rank": None, "binding_ad_id": None, "reason": ""}
+    rows = (
+        db.query(NaverAdgroupProduct.ad_id, NaverAdgroupProduct.use_group_bid_amt)
+        .filter(
+            NaverAdgroupProduct.adgroup_id == adgroup_id,
+            NaverAdgroupProduct.ad_id.isnot(None),
+        )
+        .all()
+    )
+    best: tuple[int, int, str] | None = None  # (floor_bid, target_rank, ad_id)
+    for ad_id, use_group in rows:
+        if use_group is False:  # 소재 개별 입찰이 실효 — 그룹 입찰은 이 소재를 안 움직인다
+            continue
+        f = floor_for(db, ad_id=ad_id, adgroup_id=adgroup_id, today=today, device=device)
+        bid = f["floor_bid"]
+        if bid is None:
+            continue
+        if best is None or bid > best[0]:
+            best = (int(bid), int(f["target_rank"]), ad_id)
+    if best is None:
+        out["reason"] = "그룹 입찰을 쓰는 출시창 소재 없음 — 하한 없음"
+        return out
+    out["floor_bid"], out["target_rank"], out["binding_ad_id"] = best
+    out["reason"] = (
+        f"그룹 출시창 하한 — 소재 {best[2]}의 목표 {best[1]}위 유지에 {best[0]}원 필요"
     )
     return out
 

@@ -475,8 +475,8 @@ def _build_guardrail_context(db: Session, proposal: NaverProposal, now: datetime
         "current_bid": None, "current_budget": None, "roas_corrected": None, "target_roas": None,
         "cost_today": None, "daily_budget": None, "unconverted_spend": None,
         "last_change_at": None, "changes_today_count": 0, "campaign_type": None,
-        # D-NAO-121: 출시창 순위 하한 — 소재(target_type='ad') 대상 제안에서만 채운다(아래
-        # 'ad' 분기). 그룹/캠페인 단위 제안에는 소재 하한 개념이 없으므로 항상 None 유지.
+        # D-NAO-121: 출시창 순위 하한 — 소재(target_type='ad')와 그룹(target_type='adgroup',
+        # 그룹 입찰을 쓰는 출시창 소재가 있을 때) 제안에서 채운다. 캠페인 단위는 항상 None.
         "launch_floor_bid": None, "launch_target_rank": None,
     }
     # VT4 codex 1R P1-1: guardrail_gate가 campaign_type 인지형 입찰 하한(SHOPPING 50·그 외 70)을
@@ -529,6 +529,21 @@ def _build_guardrail_context(db: Session, proposal: NaverProposal, now: datetime
             context["target_roas"] = _resolve_target_roas_float(db, proposal.campaign_id)
             context["cost_today"], context["daily_budget"] = _latest_hourly_snapshot_fields(
                 db, proposal.campaign_id, now.date(),
+            )
+
+        # D-NAO-121 그룹 경로(codex 리뷰 P1, 2026-07-29): useGroupBidAmt=true 소재의 실효
+        # 레버는 그룹 입찰이고 실행기도 adgroup bid_down을 낸다 — 소재 분기에만 하한이
+        # 있으면 그 경로로 출시창 소재가 하한 밑으로 밀린다. 그룹 하한을 집계해 싣는다.
+        try:
+            gfloor = launch_rank_floor.group_floor_for(
+                db, adgroup_id=proposal.target_id, today=now.date(),
+            )
+            context["launch_floor_bid"] = gfloor["floor_bid"]
+            context["launch_target_rank"] = gfloor["target_rank"]
+        except Exception as e:  # noqa: BLE001 — 조회 실패는 하한 없음 유지(종전 동작)
+            log.warning(
+                "naver_execution_harness: guardrail context group_floor_for 조회 실패 "
+                "(하한 없음 유지) adgroup_id=%s: %s", proposal.target_id, e,
             )
 
         context["last_change_at"], context["changes_today_count"] = compute_change_cadence(

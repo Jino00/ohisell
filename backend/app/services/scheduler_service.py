@@ -727,6 +727,26 @@ def sweep_naver_keyword_hourly_job():
         db.close()
 
 
+def sweep_naver_today_hourly_job():
+    """당일 그룹 grain 시간별(hh24) 축적 — 매시 :10 KST (D-NAO-122).
+
+    :05 캠페인 스냅샷 뒤, :20 auto_operator 시간당 레인 앞에 둔다 — 레인이 같은 시각의
+    당일 그룹 데이터를 읽을 수 있게. 진행 중인 시간 버킷은 저장하지 않고, 네이버 반영
+    지연으로 빠진 시간은 다음 실행의 교체 upsert가 보완한다(관찰 전용, 쓰기 API 0).
+    """
+    db = _get_own_db_session()
+    try:
+        from app.services.naver_ad.today_hourly_sweep import sweep_adgroup_hourly_today
+
+        result = sweep_adgroup_hourly_today(db)
+        log.info("[스케줄러] naver today_hourly sweep: %s", result)
+    except Exception as e:
+        log.exception("[스케줄러] sweep_naver_today_hourly_job 에러: %s", e)
+        raise
+    finally:
+        db.close()
+
+
 def run_naver_auto_operator_daily_job():
     """auto_operator 일 레인 — D-NAO-48 4조건 심사·집행 서버 코드화 (08:50 KST,
     run_naver_retro_scoring 08:30 이후 — 조건④ bleeding 판정이 그 결과를 쓴다, D-NAO-49).
@@ -1441,6 +1461,7 @@ def _ensure_default_states(db):
         ("run_naver_probe_settlement", "55 8 * * *"),  # 탐침 성과 정산 판정(유지/되돌림/보류, D-NAO-58 CD3 Stage 2 — 일 레인 08:50·retro 08:30 뒤)
         ("run_naver_probe_learning", "3 9 * * *"),  # CD4 환경별 학습·세분화층(정산 08:55 뒤·vault 09:05 앞 재계산 → observe 요약이 당일 볼트에 포함, D-NAO-58 CD4)
         ("sweep_naver_keyword_hourly", "10 9 * * *"),  # 키워드/쇼핑그룹 시간별(hh24) 축적, D-1 스윕(D-NAO-46②)
+        ("sweep_naver_today_hourly", "57 * * * *"),  # 당일 그룹 grain 시간별(hh24) 축적(D-NAO-122 — 매시 멱등 교체라 catch-up 제외). ★분 슬롯을 이렇게 고른 이유(codex 리뷰 2R): 매시 최대 800콜 + SQLite 쓰기라 ①09:10 D-1 스윕(3,500콜 ~12분 = 09:10~09:22, 지연 여유 포함) ②07:35 sync_naver_entity(계정 전체 인벤토리 동기화) 둘 다와 겹치면 안 된다. 등록된 분 슬롯은 3·5·7·10·15·20·25·30·35·40·45·50·55와 */30 — :57이 유일하게 비어 있고 두 창에서 가장 멀다. 당일 레인은 hh24를 직접 호출하므로 이 잡이 :20보다 뒤여도 무방하다
         ("run_naver_auto_operator_hourly", "20 * * * *"),  # 시간당 밴드 관제 실입찰(catch-up 제외, D-NAO-49)
         ("run_naver_budget_pacing_reset", "5 0 * * *"),  # BP 익일 예산 원복(D-NAO-102 ⑤ — 멱등, 시간당 레인이 자가치유하므로 catch-up 제외)
         ("run_naver_flight_loop", "15 */2 * * *"),  # 당일 플라이트 루프 2시간 주기(X2, dry_run=True)
@@ -1625,6 +1646,7 @@ def _catch_up_morning_batch():
         "run_naver_probe_settlement": run_naver_probe_settlement_job,
         "run_naver_probe_learning": run_naver_probe_learning_job,
         "sweep_naver_keyword_hourly": sweep_naver_keyword_hourly_job,
+        "sweep_naver_today_hourly": sweep_naver_today_hourly_job,
         "run_naver_wisdom": run_naver_wisdom_job,
         "run_naver_vault_export": run_naver_vault_export_job,
         # 엔티티 sync는 BM 스냅샷을 체이닝하므로 이 항목 하나로 두 잡이 함께 따라잡힌다.
@@ -1682,6 +1704,7 @@ def job_func_for(job_name: str):
         "run_naver_wisdom": run_naver_wisdom_job,
         "run_naver_vault_export": run_naver_vault_export_job,
         "sweep_naver_keyword_hourly": sweep_naver_keyword_hourly_job,
+        "sweep_naver_today_hourly": sweep_naver_today_hourly_job,
         "run_naver_auto_operator_daily": run_naver_auto_operator_daily_job,
         "run_naver_auto_operator_hourly": run_naver_auto_operator_hourly_job,
         "run_naver_budget_pacing_reset": run_naver_budget_pacing_reset_job,
