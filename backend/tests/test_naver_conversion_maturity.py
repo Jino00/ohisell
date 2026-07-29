@@ -214,22 +214,41 @@ def test_rpc_unchanged_when_no_curve(db):
 
 
 def test_rpc_projects_unsettled_recent_days_upward(db):
-    """정착 중인 최근 날짜는 성숙 추정치로 환산돼 RPC가 올라간다."""
+    """정착 중인 최근 날짜는 성숙 추정치로 환산돼 RPC가 올라간다.
+
+    ★D-NAO-119 의도된 변경: MATURITY_CORRECTION_ENABLED가 기본 False로 게이트됐다(보류
+    결정 — 모듈 docstring 참조). 이 테스트는 그 스위치가 켜졌을 때의 배선을 검증하는
+    것이므로 명시적으로 켠다(기능이 지워진 게 아니라 게이트됐을 뿐 — 대응 회귀는
+    test_naver_coldstart_rpc_shrinkage.py::test_maturity_correction_still_works_when_enabled).
+    """
     _seed_curve(db, {1: 0.5})  # D+1 시점엔 최종 매출의 절반만 보인다
     _seed_ad_day(db, ad_date=TODAY - timedelta(days=1), clk=10, direct=10_000)
     db.commit()
-    clk, rpc = bcc._rpc_for(db, TODAY, adgroup_id="grp1")
+    orig = bcc.MATURITY_CORRECTION_ENABLED
+    bcc.MATURITY_CORRECTION_ENABLED = True
+    try:
+        clk, rpc = bcc._rpc_for(db, TODAY, adgroup_id="grp1")
+    finally:
+        bcc.MATURITY_CORRECTION_ENABLED = orig
     assert clk == 10
     assert rpc == Decimal(2000)  # 10,000 × 2 ÷ 10클릭 — 보정 없으면 1,000
 
 
 def test_rpc_corrects_each_day_separately(db):
-    """창 안의 날짜별로 서로 다른 배수가 적용된다(단일 SUM이면 불가능한 동작)."""
+    """창 안의 날짜별로 서로 다른 배수가 적용된다(단일 SUM이면 불가능한 동작).
+
+    ★D-NAO-119 의도된 변경: 위 테스트와 같은 이유로 MATURITY_CORRECTION_ENABLED를 명시적으로 켠다.
+    """
     _seed_curve(db, {1: 0.5, 2: 1.0})   # D+1만 미정착, D+2는 이미 성숙
     _seed_ad_day(db, ad_date=TODAY - timedelta(days=1), clk=10, direct=10_000)  # ×2
     _seed_ad_day(db, ad_date=TODAY - timedelta(days=2), clk=10, direct=10_000)  # ×1
     db.commit()
-    clk, rpc = bcc._rpc_for(db, TODAY, adgroup_id="grp1")
+    orig = bcc.MATURITY_CORRECTION_ENABLED
+    bcc.MATURITY_CORRECTION_ENABLED = True
+    try:
+        clk, rpc = bcc._rpc_for(db, TODAY, adgroup_id="grp1")
+    finally:
+        bcc.MATURITY_CORRECTION_ENABLED = orig
     assert clk == 20
     assert rpc == Decimal(1500)  # (20,000 + 10,000) / 20 — 일괄 보정이면 2,000, 무보정이면 1,000
 

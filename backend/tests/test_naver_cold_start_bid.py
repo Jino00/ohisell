@@ -69,7 +69,10 @@ def test_sa1_ceiling_equals_cvr_times_contribution(db):
     out = sa1.compute_ceiling(db, AD, GID, CID, TODAY)
     # RPC 2224 / BEP 1.5921 = 1396.9 → 10원 내림 = 1390
     assert out["ceiling_cpc"] == 1390
-    assert out["rpc_source"] == "adgroup"
+    # ★D-NAO-119(수축) 의도된 변경: 이 시드는 conv_direct_cnt를 안 넣어(0) prior CVR이 0이
+    # 되고, _prior_clicks가 _DEFAULT_PRIOR_CLICKS(150)로 폴백한다. 자기 클릭(100) < 150이라
+    # own_dominant가 아니라 prior(campaign 층)가 지배로 표기된다 — 값(1390)은 그대로다.
+    assert out["rpc_source"] == "campaign"
     # 동치 확인: CVR × 공헌이익. CVR = RPC / 판매가 = 2224/15900.
     cvr = Decimal("2224") / Decimal("15900")
     assert abs(cvr * Decimal("9986.76") - Decimal("1396.9")) < Decimal("1.0")
