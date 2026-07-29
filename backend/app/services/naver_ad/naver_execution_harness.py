@@ -46,6 +46,7 @@ from app.services.naver_ad import (
     campaign_target_resolver,
     diary,
     guardrail_gate,
+    launch_rank_floor,
     naver_sa_writer,
     search_term_judge,
 )
@@ -474,6 +475,9 @@ def _build_guardrail_context(db: Session, proposal: NaverProposal, now: datetime
         "current_bid": None, "current_budget": None, "roas_corrected": None, "target_roas": None,
         "cost_today": None, "daily_budget": None, "unconverted_spend": None,
         "last_change_at": None, "changes_today_count": 0, "campaign_type": None,
+        # D-NAO-121: 출시창 순위 하한 — 소재(target_type='ad') 대상 제안에서만 채운다(아래
+        # 'ad' 분기). 그룹/캠페인 단위 제안에는 소재 하한 개념이 없으므로 항상 None 유지.
+        "launch_floor_bid": None, "launch_target_rank": None,
     }
     # VT4 codex 1R P1-1: guardrail_gate가 campaign_type 인지형 입찰 하한(SHOPPING 50·그 외 70)을
     # 적용하려면 context에 campaign_type이 실려야 한다 — proposal.campaign_id의 campaign 엔티티
@@ -544,6 +548,25 @@ def _build_guardrail_context(db: Session, proposal: NaverProposal, now: datetime
                 "naver_execution_harness: guardrail context get_ad_bid 실패(fail-closed) "
                 "target_id=%s: %s", proposal.target_id, e,
             )
+
+        # D-NAO-121: 출시창 순위 하한 — target_type='ad'(소재 단위) 제안에서만 계산한다.
+        # adgroup_id가 없으면(구 제안·격상 경로) 판정 불가라 floor_for를 호출하지 않고 None
+        # 유지(fail-closed는 아님 — 이 하한은 "있으면 추가 보호", 없어도 종전 동작).
+        # guardrail_gate는 bid_down 제안에서만 launch_floor_bid를 소비하므로, up 제안에서
+        # 채워져 있어도 무해하다(계산 자체는 방향 무관하게 항상 시도해 반환값을 그대로 싣는다).
+        if proposal.adgroup_id:
+            try:
+                floor = launch_rank_floor.floor_for(
+                    db, ad_id=proposal.target_id, adgroup_id=proposal.adgroup_id, today=now.date(),
+                )
+                context["launch_floor_bid"] = floor["floor_bid"]
+                context["launch_target_rank"] = floor["target_rank"]
+            except Exception as e:  # noqa: BLE001 — 조회 실패는 fail-closed(하한 없음 유지)
+                log.warning(
+                    "naver_execution_harness: guardrail context launch_rank_floor 조회 실패 "
+                    "(하한 없음 유지) target_id=%s adgroup_id=%s: %s",
+                    proposal.target_id, proposal.adgroup_id, e,
+                )
 
         # 증액(bid_up/growth_bid_up)만 up-only 가드 원료를 채운다 — 소재 단위 실적은
         # naver_ad_daily에 없어(그레인=adgroup/keyword) 부모 광고그룹(proposal.adgroup_id) 창
