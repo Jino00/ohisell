@@ -70,6 +70,7 @@ from app.services.naver_ad.bid_step_types import (
 #   test_ad_up_open_types_are_never_clamp_exempt.
 _AD_UP_OPEN_TYPES: frozenset[str] = frozenset({"bid_up"})
 from app.services.naver_ad.diagnosis import correction_factor as compute_correction_factor
+from app.services import naver_sa_ad_fetcher as naver_sa_fetcher
 from app.utils.kst import kst_now
 
 log = logging.getLogger(__name__)
@@ -469,6 +470,57 @@ def is_auto_exec(proposal: NaverProposal) -> bool:
     return proposal.approval_source not in (None, "console")
 
 
+def auto_up_base_bid(
+    db: Session, entity_type: str, entity_id: str, now: datetime, *, days: int = 7,
+) -> int | None:
+    """최근 days일 우리 **자동 상향**의 최초 before 입찰가 = 누적 상승 배수의 기준점.
+
+    ★왜 필요한가(D-NAO-129 codex 적대[P1]): 소재 상향의 경제적 브레이크는 "BEP 미달 증액
+    금지" 하나인데, 그 BEP는 **소재가 아니라 부모 광고그룹의 30일 집계**다. 같은 그룹에
+    매출을 만드는 소재가 하나라도 있으면 전환 0인 소재도 그 실적을 빌려 계속 통과한다.
+    그러면 남는 절대 상한은 네이버 API 최대값(100,000원)뿐이고, ±15%×하루 3회는 복리라
+    800원이 12일이면 100,000원에 닿는다(실측 계산: 1.15³/일 → 약 1.52배/일).
+    "언제 멈추나"에 답하는 값이 코드 어디에도 없었다 — 이 함수가 그 기준선이다.
+
+    자동 상향만 센다(사람이 콘솔에서 올린 값은 기준점을 새로 잡는 것으로 본다 — 사람은
+    이 상한의 대상이 아니다). 창을 벗어나면 None(=상한 미적용, 다시 처음부터).
+    """
+    since = datetime.combine(now.date(), datetime.min.time()) - timedelta(days=days - 1)
+    row = (
+        db.query(NaverChangeLog)
+        .join(NaverProposal, NaverProposal.id == NaverChangeLog.proposal_id)
+        .filter(
+            NaverChangeLog.entity_type == entity_type,
+            NaverChangeLog.entity_id == entity_id,
+            NaverChangeLog.dry_run.is_(False),
+            NaverChangeLog.after_value.isnot(None),
+            NaverChangeLog.changed_at >= since,
+            NaverProposal.proposal_type.in_(BID_UP_TYPES),
+            NaverProposal.approval_source.isnot(None),
+            NaverProposal.approval_source != "console",
+        )
+        .order_by(NaverChangeLog.changed_at.asc())
+        .first()
+    )
+    if row is None or not row.before_value:
+        return None
+    try:
+        before = json.loads(row.before_value)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(before, dict):
+        return None
+    # ad grain의 before_value는 get_ad 응답 원본(adAttr 중첩) — 파싱은 fetcher와 단일 소스.
+    bid, _ = naver_sa_fetcher._parse_ad_attr(before.get("adAttr"))
+    if bid is None:
+        raw = before.get("bidAmt")
+        try:
+            bid = int(raw) if raw is not None and not isinstance(raw, bool) else None
+        except (TypeError, ValueError):
+            bid = None
+    return bid
+
+
 def count_auto_bid_down_today(
     db: Session, entity_type: str, entity_id: str, now: datetime,
 ) -> int:
@@ -710,6 +762,11 @@ def _build_guardrail_context(db: Session, proposal: NaverProposal, now: datetime
         )
         # D-NAO-125 codex 2R[P1]: 자동 하향 상한은 **자동 하향만** 세야 한다(위 주석 참조).
         context["auto_bid_down_today"] = count_auto_bid_down_today(
+            db, proposal.target_type, proposal.target_id, now,
+        )
+        # D-NAO-129 codex 적대[P1]: 자동 상향 누적 배수 상한의 기준점(auto_up_base_bid 참조).
+        # None = 최근 창에 자동 상향 이력 없음 → 상한 미적용(이번이 첫 스텝).
+        context["auto_up_base_bid"] = auto_up_base_bid(
             db, proposal.target_type, proposal.target_id, now,
         )
         return context
@@ -1474,14 +1531,20 @@ def _execute_update_bid(db: Session, proposal: NaverProposal, now: datetime) -> 
 
     _claim_executing(db, proposal)
 
+    writer_kwargs: dict = {}
     if proposal.target_type == "keyword":
         writer_fn = naver_sa_writer.update_keyword_bid
     elif proposal.target_type == "adgroup":
         writer_fn = naver_sa_writer.update_adgroup_bid
     else:  # ad (B3, D-NAO-65) — 소재 bidAmt 직접 수정(useGroupBidAmt=false 실효 소재)
         writer_fn = naver_sa_writer.update_ad_bid
+        # ★D-NAO-129 codex 적대[P1] TOCTOU: 가드레일이 **판정에 쓴 그 값**을 writer에 넘겨
+        #   쓰기 직전 실측과 일치할 때만 PUT한다(CAS). 어긋나면 그 사이 외부가 바꾼 것이므로
+        #   검증된 ±15%가 성립하지 않는다 — 쓰지 않고 다음 회차가 새 값으로 다시 판정한다.
+        #   context["current_bid"]는 바로 위 guardrail_gate.check가 클램프·방향 검증에 쓴 값이다.
+        writer_kwargs["expected_before_bid"] = context.get("current_bid")
     try:
-        result = writer_fn(proposal.target_id, proposal.target_bid)
+        result = writer_fn(proposal.target_id, proposal.target_bid, **writer_kwargs)
     except Exception as exc:  # WriteValidationError/WriteError/WriteVerificationError + requests 계열
         proposal.status = "failed"  # 자동 재시도 차단(approved 게이트) — 재승인만 재시도 경로
         fail_entry = NaverChangeLog(
@@ -1877,26 +1940,31 @@ def real_write_blocker(proposal: NaverProposal) -> str | None:
             if not proposal.adgroup_id:
                 return "adgroup_id 없음 — 소재 제안 필수 컨텍스트 부족(재생성 필요)"
             if proposal.proposal_type in BID_UP_TYPES:
-                # 타입⟺승인원 쌍방향 잠금(_execute_update_bid과 동일 판정 — 이중 방벽).
-                _routes = {
-                    APPROVAL_SOURCE_EXPLORE: EXPLORATION_STEP_TYPES,  # BX2 D-NAO-70③
-                    APPROVAL_SOURCE_COLD: COLD_START_STEP_TYPES,      # CS D-NAO-96
-                }
-                allowed = _routes.get(proposal.approval_source)
-                if allowed is None:
-                    return (
-                        "소재(ad) UP은 자동 경로(explore_op/cold_op)만 개방 — 그 밖의 소재 UP은 "
-                        "Confirm 스코프 밖(D-NAO-70③·96, 콘솔 실행 버튼 비활성)"
-                    )
-                if proposal.proposal_type not in allowed:
-                    return (
-                        f"승인원 {proposal.approval_source} 소재 UP은 {sorted(allowed)} 타입만"
-                        f"(요청={proposal.proposal_type}) — 타입⟺승인원 쌍방향 잠금"
-                    )
+                # ★D-NAO-129 codex 적대[P2]: executor와 **같은 판정**을 써야 한다. 종전엔 이
+                #   함수만 explore/cold 화이트리스트에 머물러, 콘솔은 "실행 불가"인데 내부
+                #   harness.execute()는 통과하는 **쓰기 경계 이중 계약**이 생겼다(사람이 승인한
+                #   소재 UP이 콘솔에서 409로 막힘). 같은 상수를 공유해 계약을 하나로 되돌린다.
+                if proposal.proposal_type not in _AD_UP_OPEN_TYPES:
+                    # 타입⟺승인원 쌍방향 잠금(_execute_update_bid과 동일 판정 — 이중 방벽).
+                    _routes = {
+                        APPROVAL_SOURCE_EXPLORE: EXPLORATION_STEP_TYPES,  # BX2 D-NAO-70③
+                        APPROVAL_SOURCE_COLD: COLD_START_STEP_TYPES,      # CS D-NAO-96
+                    }
+                    allowed = _routes.get(proposal.approval_source)
+                    if allowed is None:
+                        return (
+                            "소재(ad) UP은 bid_up·자동 경로(explore_op/cold_op)만 개방 — 그 밖의 "
+                            "소재 UP은 Confirm 스코프 밖(D-NAO-70③·96, 콘솔 실행 버튼 비활성)"
+                        )
+                    if proposal.proposal_type not in allowed:
+                        return (
+                            f"승인원 {proposal.approval_source} 소재 UP은 {sorted(allowed)} 타입만"
+                            f"(요청={proposal.proposal_type}) — 타입⟺승인원 쌍방향 잠금"
+                        )
             elif proposal.proposal_type not in BID_DOWN_TYPES:
                 return (
                     f"소재(ad) {proposal.proposal_type}은 미지원 방향"
-                    "(UP=탐색explore_op·콜드cold_op / DOWN=bid_down Confirm)"
+                    "(UP=bid_up·탐색explore_op·콜드cold_op / DOWN=bid_down)"
                 )
         # CS(리뷰 P1-3): 콜드 스텝 구조 게이트 — target_type 강제 + 상한 마커 존재(정적 판정).
         if proposal.proposal_type in COLD_START_STEP_TYPES:

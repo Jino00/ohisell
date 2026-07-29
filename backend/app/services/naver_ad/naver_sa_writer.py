@@ -678,7 +678,9 @@ def get_ad_bid(ncc_ad_id: str) -> int | None:
     return bid
 
 
-def update_ad_bid(ncc_ad_id: str, bid_amt: int) -> WriteResult:
+def update_ad_bid(
+    ncc_ad_id: str, bid_amt: int, *, expected_before_bid: int | None = None,
+) -> WriteResult:
     """PUT /ncc/ads/{nccAdId}?fields=adAttr — 쇼핑 소재 개별 입찰가 변경(B3, D-NAO-65).
 
     adAttr의 bidAmt만 변경, useGroupBidAmt는 불변(§0 강제 전환 금지 — before가 false인
@@ -705,6 +707,22 @@ def update_ad_bid(ncc_ad_id: str, bid_amt: int) -> WriteResult:
 
     before = get_ad(ncc_ad_id)
     _before_bid, before_ugba = fetcher._parse_ad_attr(before.get("adAttr"))
+
+    # ★D-NAO-129 codex 적대[P1] — 입찰 CAS(compare-and-swap). 가드레일(±15% 클램프·방향)은
+    #   executor가 **그 시점에 읽은 값**을 기준으로 판정하는데, 여기서 다시 읽는 before가 그
+    #   사이 바뀌었으면 **검증한 기준과 실제 착지 기준이 다르다**. 재현: executor가 800원을
+    #   읽고 920원(+15%)을 승인 → 그 사이 대행사가 400원으로 내림 → 검증 없이 920 PUT =
+    #   실제 +130%. 이건 가정이 아니라 오늘(2026-07-29 15:39) 실제로 일어난 종류의 사건이다
+    #   (대행사가 폴드8와이드 소재를 1,600→1,000으로 되돌림, D-NAO-126).
+    #   기준가가 어긋나면 **쓰지 않는다** — 다음 회차가 새 현재값으로 다시 판정한다.
+    #   expected_before_bid=None이면 종전 동작(하위호환 — 호출부가 기준가를 모르는 경로).
+    if expected_before_bid is not None and _before_bid != expected_before_bid:
+        raise WriteValidationError(
+            f"update_ad_bid: 소재 {ncc_ad_id}의 입찰이 판정 이후 바뀜(CAS 실패) — "
+            f"가드레일 판정 기준={expected_before_bid}원, 쓰기 직전 실측={_before_bid}원. "
+            "그 사이 외부(대행사/사람)가 바꿨을 수 있어 검증된 변경폭이 성립하지 않는다"
+            "(fail-closed, D-NAO-129)"
+        )
     # useGroupBidAmt=false 소재만 개별 bidAmt가 실효 — true/불명이면 그룹입찰이 실효라
     # 개별 수정 무의미(fail-closed on ambiguity, update_adgroup_bid ML 가드와 동형 규율).
     if before_ugba is not False:

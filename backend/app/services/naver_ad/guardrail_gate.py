@@ -80,6 +80,16 @@ _DAILY_CAP_EXEMPT_TYPES = _BID_DOWN_TYPES
 # 3스텝 = 0.85³ ≈ 하루 최대 -39%. 그 이상 필요하면 사람이 콘솔에서 이어서 내린다.
 _MAX_DAILY_AUTO_BID_DOWNS = 3
 
+# ★D-NAO-129 codex 적대[P1] — 자동 상향의 **누적** 상한(기준가 대비 배수).
+# 상향의 유일한 경제적 브레이크인 "BEP 미달 증액 금지"는 소재가 아니라 **부모 광고그룹의
+# 30일 집계**로 판정한다. 같은 그룹에 매출을 만드는 소재가 하나라도 있으면 전환 0인 소재도
+# 그 실적을 빌려 계속 통과하고, 그러면 남는 절대 상한은 네이버 API 최대값(100,000원)뿐이다
+# — ±15%×하루 3회는 복리라 800원이 약 12일이면 거기 닿는다. "언제 멈추나"에 답하는 값이
+# 코드에 없었다는 것이 이 상수의 존재 이유다.
+# 2.0배에서 멈추고 사람에게 넘긴다(사람 승인 상향은 auto_exec=False라 이 상한 대상이 아니다 —
+# 더 올릴 근거가 있으면 사람이 콘솔에서 올리고, 그 값이 새 기준점이 된다).
+_MAX_AUTO_UP_MULTIPLE = Decimal("2.0")
+
 # P2(D-NAO-42-f): 예산 통제 — PLAN_naver-ad-budget-control.md §5-C. bid_up/down과 병렬 구조.
 _BUDGET_UP_TYPES = frozenset({"budget_up"})
 _BUDGET_DOWN_TYPES = frozenset({"budget_down"})
@@ -248,6 +258,18 @@ def _check_bid(proposal: dict, context: dict, proposal_type: str) -> str | None:
                 f"스톱로스 도달 — 무전환 지출 {unconverted_spend}원 ≥ 상한 {stop_loss_amount}원"
                 f"(D-NAO-20, {base_label}×{growth_sweeper.STOP_LOSS_CLICK_MULTIPLE})"
             )
+
+        # ★D-NAO-129: 누적 상승 배수 상한 — BEP가 소재 천장이 못 되는 구멍의 마개(위 상수 주석).
+        # 기준점이 없으면(최근 창에 자동 상향 이력 없음) 미적용 = 종전 동작.
+        auto_up_base = context.get("auto_up_base_bid")
+        if context.get("auto_exec") and auto_up_base:
+            ceiling = int(Decimal(auto_up_base) * _MAX_AUTO_UP_MULTIPLE)
+            if target_bid > ceiling:
+                return (
+                    f"자동 상향 누적 상한 — 기준가 {auto_up_base}원의 "
+                    f"{float(_MAX_AUTO_UP_MULTIPLE):.1f}배({ceiling}원)를 넘는 {target_bid}원은 "
+                    "자동으로 올리지 않는다(D-NAO-129 — 더 올리려면 콘솔에서 사람이 승인)"
+                )
 
         roas_corrected = context.get("roas_corrected")
         target_roas = context.get("target_roas")
