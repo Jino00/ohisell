@@ -118,6 +118,11 @@ _AD_BID_CANARY_PROPOSAL_TYPES: frozenset[str] = frozenset({"bid_down"})
 #   둘 다 하향만 연다 — 죽은 카드를 만들지 않는다.
 _AD_AUTO_EXEC_PROPOSAL_TYPES: frozenset[str] = frozenset({"bid_down"})
 
+# D-NAO-125 codex[P1]: 레인 1회차당 소재 자동 실행 상한(계정 전체 합). 초과분은 Confirm 대기로
+# 강등된다(드롭 아님). 5인 이유: 2h 쿨다운·시간당 레인이므로 활동시간 16h면 하루 최대 ~40건이
+# 흘러가는데, 그건 256소재 규모에서 "며칠에 걸쳐 수렴"이라 규칙이 틀렸을 때 되돌릴 시간이 남는다.
+_MAX_AD_AUTO_EXEC_PER_LANE = 5
+
 
 def _ad_auto_exec(proposal_type: str) -> bool:
     """이 소재 제안을 레인이 인라인 자동 실행하는가.
@@ -2959,6 +2964,9 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
         "probed": 0,  # D-NAO-58 CD2: 탐침으로 승격된 up 제안 수(라이브 관측용)
         "ad_confirm_pending": 0,  # B3 GATE P2-2: Confirm 대기로 생성된 ad-레벨 제안 수
         "ad_confirm_pending_dup_skipped": 0,  # B3 GATE 2R P2-B: 동일 pending 존재로 skip된 수
+        "ad_auto_exec": 0,  # D-NAO-125: 이번 레인에서 자동 실행한 소재 제안 수(캡 원료)
+        "ad_auto_exec_capped": 0,  # D-NAO-125 codex[P1]: 레인 캡 초과로 Confirm 대기로 강등된 수
+        "ad_auto_exec_inflight_skipped": 0,  # D-NAO-125 codex[P1]: 같은 소재가 실행 중이라 skip
         "servo": 0,  # IU-R R1: 서보 스텝으로 승인된 쇼검 UP 제안 수(라이브 관측용)
         "rank_direct": 0,  # IU-R R2: estimate 직행 스텝으로 승인된 파워링크 UP 제안 수(라이브 관측용)
         # B-X BX3(D-NAO-70·71) 탐색-UP 레인 카운터(라이브 관측용):
@@ -3342,16 +3350,36 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
             #   pending으로 남지 않으므로 누적 매몰이 애초에 없고, 반대로 **배포 전에 쌓여
             #   있던 stale pending 하향 카드 한 장이 이후 모든 하향 판정을 영구히 skip시키는**
             #   역방향 사고가 난다(생성 자체가 막히니 일기에도 안 남아 조용히 죽는다).
-            if exec_target_type == "ad" and not _ad_auto_exec(proposal_type):
-                dup_exists = db.query(NaverProposal.id).filter(
-                    NaverProposal.proposal_type == proposal_type,
-                    NaverProposal.target_type == "ad",
-                    NaverProposal.target_id == exec_target_id,
-                    NaverProposal.status == "pending",
-                ).first()
-                if dup_exists is not None:
-                    result["ad_confirm_pending_dup_skipped"] += 1
-                    continue
+            if exec_target_type == "ad":
+                if _ad_auto_exec(proposal_type):
+                    # ★D-NAO-125 codex[P1] 동시 실행 중복 쓰기 방지. 쿨다운은 change_log가
+                    #   커밋된 **뒤에야** 보이므로, 레인이 겹쳐 돌면(수동 트리거 + 크론,
+                    #   또는 다중 프로세스) 두 인스턴스가 각자 제안을 만들어 둘 다 쿨다운을
+                    #   통과한 뒤 연달아 쓴다. 같은 소재에 'executing' 제안이 있으면 skip한다
+                    #   — executing = 다른 실행자가 클레임했거나(동시), 크래시로 잔존해
+                    #   **쓰기 결과가 불확실**한 상태다(harness 규약). 둘 다 지금 또 쏘면 안 되는
+                    #   상황이라 fail-closed가 맞다.
+                    #   ★pending은 보지 않는다: 자동 실행 타입은 pending으로 남지 않으므로,
+                    #   배포 전에 쌓여 있던 stale pending 한 장이 이후 모든 하향을 영구히
+                    #   막는 역방향 사고만 만든다(그게 이 dedup을 걷어낸 원래 이유다).
+                    inflight = db.query(NaverProposal.id).filter(
+                        NaverProposal.target_type == "ad",
+                        NaverProposal.target_id == exec_target_id,
+                        NaverProposal.status == "executing",
+                    ).first()
+                    if inflight is not None:
+                        result["ad_auto_exec_inflight_skipped"] += 1
+                        continue
+                else:
+                    dup_exists = db.query(NaverProposal.id).filter(
+                        NaverProposal.proposal_type == proposal_type,
+                        NaverProposal.target_type == "ad",
+                        NaverProposal.target_id == exec_target_id,
+                        NaverProposal.status == "pending",
+                    ).first()
+                    if dup_exists is not None:
+                        result["ad_confirm_pending_dup_skipped"] += 1
+                        continue
 
             proposal = NaverProposal(
                 proposal_type=proposal_type, target_type=exec_target_type, target_id=exec_target_id,
@@ -3380,7 +3408,25 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
             #       자동화는 새 승인원 경로 설계 + codex 적대 리뷰가 필요한 **별도 스프린트**다.
             #   가드레일은 전부 그대로 걸린다 — 2시간 쿨다운·한 등씩·±15% 클램프·스톱로스·
             #   출시창 하한(D-NAO-121). 되돌리려면 _AD_AUTO_EXEC_PROPOSAL_TYPES를 비우면 된다.
-            if exec_target_type == "ad" and not _ad_auto_exec(proposal_type):
+            # ★D-NAO-125 codex[P1] 첫 실행 blast radius: 이 게이트가 열리는 순간 그동안
+            #   [레버 미연결]로 눌려 있던 92그룹·256소재의 하향 판정이 **한 회차에 통째로**
+            #   쏟아질 수 있다. 판정이 옳다면 결국 다 내려가야 하지만, 그걸 첫 회차에 한꺼번에
+            #   하면 규칙이 틀렸을 때 되돌릴 시간이 없다. 레인당 상한을 두어 회차에 걸쳐
+            #   흘려보낸다(2h 쿨다운이라 유닛당 손해는 최대 1회차 = 1시간 지연).
+            #   초과분은 버리지 않고 Confirm 대기로 남긴다 — 사람이 급하면 바로 승인할 수 있고,
+            #   무엇이 밀렸는지가 큐에 보인다(조용한 드롭 금지).
+            lane_capped = (
+                _ad_auto_exec(proposal_type)
+                and result["ad_auto_exec"] >= _MAX_AD_AUTO_EXEC_PER_LANE
+            )
+            if lane_capped:
+                result["ad_auto_exec_capped"] += 1
+                log.warning(
+                    "auto_operator: 소재 자동 실행 레인 캡 도달(%d건) — proposal_id=%s ad=%s는 "
+                    "Confirm 대기로 강등(D-NAO-125)",
+                    _MAX_AD_AUTO_EXEC_PER_LANE, proposal.id, exec_target_id,
+                )
+            if exec_target_type == "ad" and (not _ad_auto_exec(proposal_type) or lane_capped):
                 db.commit()
                 result["ad_confirm_pending"] += 1
                 log.info(
@@ -3394,6 +3440,8 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
             proposal.approval_source = proposal_approval_source
             db.commit()
             result["approved"] += 1
+            if exec_target_type == "ad":
+                result["ad_auto_exec"] += 1  # D-NAO-125 레인 캡 카운터(승인=발사 확정 시점)
             if is_probe:
                 result["probed"] += 1
             if rank_step_used and rank_kind == "servo":

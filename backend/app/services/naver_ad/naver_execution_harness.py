@@ -306,6 +306,30 @@ def _claim_executing(db: Session, proposal: NaverProposal) -> None:
         from app.services.naver_ad import auto_operator as _auto_operator  # 지연 import(순환 회피, 7R과 동일)
         from app.services.naver_ad.exploration import APPROVAL_SOURCE_EXPLORE  # BX2 탐색 승인원
 
+        # ★D-NAO-125 codex[P1] — 소재 자동 실행 킬스위치도 **여기서** 재확인한다.
+        #   레인의 `_ad_auto_exec` 판정은 제안을 approved로 커밋한 **뒤에** 실행으로 넘어가므로,
+        #   그 사이에 크래시하거나(잔존 approved 행) 킬스위치를 내려도 잔존 행이 다음 실행자·
+        #   재시도 경로를 타고 그대로 통과한다 = "되돌리는 스위치가 되돌리지 않는" 상태.
+        #   캠페인 킬스위치(_auto_operate_now)와 같은 자리에서 같은 방식으로 막는다.
+        #   ★사람 승인(approval_source NULL·console)은 영향 없음 — 이 블록 자체가 자동 승인원
+        #     전용이고, 스위치는 '자동 발사'를 끄는 것이지 사람 손을 묶는 것이 아니다.
+        if (
+            proposal.target_type == "ad"
+            and proposal.proposal_type in _auto_operator._AD_AUTO_EXEC_PROPOSAL_TYPES
+            and not _auto_operator.AD_BID_ROUTING_ENABLED
+        ):
+            proposal.status = "approved"  # 클레임 원복(미실행 정직 상태)
+            db.commit()
+            log.warning(
+                "naver_execution_harness: 소재 자동 실행 킬스위치 OFF(writer 직전 최종 확인) — "
+                "proposal_id=%s ad=%s 실행 거부(쓰기·change_log 없음, D-NAO-125)",
+                proposal.id, proposal.target_id,
+            )
+            raise KillSwitchEngagedError(
+                f"proposal_id={proposal.id} target={proposal.target_id} — "
+                "AD_BID_ROUTING_ENABLED=False(소재 자동 실행 킬스위치 OFF)"
+            )
+
         if proposal.approval_source in (
             _auto_operator.APPROVAL_SOURCE_DAILY, _auto_operator.APPROVAL_SOURCE_HOURLY,
             _auto_operator.APPROVAL_SOURCE_PROBE,  # D-NAO-58 CD2: 탐침도 동일 킬스위치 가드(우회 금지)
@@ -475,6 +499,12 @@ def _build_guardrail_context(db: Session, proposal: NaverProposal, now: datetime
         "current_bid": None, "current_budget": None, "roas_corrected": None, "target_roas": None,
         "cost_today": None, "daily_budget": None, "unconverted_spend": None,
         "last_change_at": None, "changes_today_count": 0, "campaign_type": None,
+        # D-NAO-125 codex[P1]: 사람 승인 없이 쏘는 제안인가. 콘솔 Confirm(approval_source가
+        # NULL 또는 'console')만 '사람'이고, 그 밖(auto_op/auto_op_hr/probe/explore/cold/
+        # delegation…)은 전부 무인 실행이다. guardrail_gate가 자동 하향에만 별도 일일 상한을
+        # 걸 때 쓴다 — DL3 면제(하향 무제한)는 사람 눈을 전제로 설계된 규칙이라 무인 경로에
+        # 그대로 적용하면 아무도 안 보는 사이 바닥까지 파고든다.
+        "auto_exec": proposal.approval_source not in (None, "console"),
         # D-NAO-121: 출시창 순위 하한 — 소재(target_type='ad')와 그룹(target_type='adgroup',
         # 그룹 입찰을 쓰는 출시창 소재가 있을 때) 제안에서 채운다. 캠페인 단위는 항상 None.
         "launch_floor_bid": None, "launch_target_rank": None,
@@ -1888,6 +1918,25 @@ def execute(db: Session, proposal_id: int, *, dry_run: bool = True, now: datetim
     if proposal.approval_source is not None:
         from app.services.naver_ad import auto_operator as _auto_operator
         from app.services.naver_ad.exploration import APPROVAL_SOURCE_EXPLORE  # BX2 탐색 승인원
+
+        # D-NAO-125 codex[P1]: 소재 자동 실행 킬스위치 — 진입 지점(여기)과 writer 직전
+        # (_claim_executing) 2중. 진입에서 먼저 막으면 라이브 재조회(get_ad_bid) API 콜조차
+        # 나가지 않는다. 스위치를 내린 뒤 잔존 approved 행이 다음 실행자를 타고 나가는 것을
+        # 막는 것이 목적 — 사람 승인(approval_source NULL/console)은 이 블록 밖이라 무영향.
+        if (
+            proposal.target_type == "ad"
+            and proposal.proposal_type in _auto_operator._AD_AUTO_EXEC_PROPOSAL_TYPES
+            and not _auto_operator.AD_BID_ROUTING_ENABLED
+        ):
+            log.warning(
+                "naver_execution_harness: 소재 자동 실행 킬스위치 OFF(진입) — proposal_id=%s "
+                "ad=%s 실행 거부(쓰기·change_log 없음, D-NAO-125)",
+                proposal.id, proposal.target_id,
+            )
+            raise KillSwitchEngagedError(
+                f"proposal_id={proposal.id} target={proposal.target_id} — "
+                "AD_BID_ROUTING_ENABLED=False(소재 자동 실행 킬스위치 OFF)"
+            )
 
         if proposal.approval_source in (
             _auto_operator.APPROVAL_SOURCE_DAILY, _auto_operator.APPROVAL_SOURCE_HOURLY,

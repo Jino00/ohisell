@@ -69,6 +69,17 @@ _LOCK_TYPES = frozenset({"pause", "resume"})
 # growth_bid_up·budget 계열·pause/resume은 상한 3을 그대로 유지한다.
 _DAILY_CAP_EXEMPT_TYPES = _BID_DOWN_TYPES
 
+# ★D-NAO-125 codex[P1] 2026-07-29 — DL3 면제의 전제가 바뀌었다.
+# DL3은 하향이 **사람 Confirm을 거치는 동안** 설계됐다: 8스텝을 쭉 낮추더라도 매 스텝을
+# 사람이 봤다. 소재 하향 자동 실행이 열리면 그 눈이 사라져, 판정이 틀린 채 반복되면
+# 아무도 안 보는 사이 하루 8스텝(0.85⁸ ≈ 27%)까지 파고든다 — 800원짜리가 220원이 되면
+# 그 소재는 사실상 노출에서 사라진다("지출이 주는 방향"이 안전하다는 논리가 성립하지 않는
+# 지점: 매출도 같이 0이 된다).
+# 그래서 **자동 실행 경로에만** 별도 일일 상한을 건다. 사람이 승인한 하향은 종전 DL3 면제
+# 그대로다(Jino 원문 "쭉 낮추다가"의 원래 맥락이 유지된다).
+# 3스텝 = 0.85³ ≈ 하루 최대 -39%. 그 이상 필요하면 사람이 콘솔에서 이어서 내린다.
+_MAX_DAILY_AUTO_BID_DOWNS = 3
+
 # P2(D-NAO-42-f): 예산 통제 — PLAN_naver-ad-budget-control.md §5-C. bid_up/down과 병렬 구조.
 _BUDGET_UP_TYPES = frozenset({"budget_up"})
 _BUDGET_DOWN_TYPES = frozenset({"budget_down"})
@@ -120,14 +131,20 @@ def check(proposal: dict, context: dict, *, now: datetime) -> str | None:
 
 def precheck_cooldown_and_cap(
     last_change_at: datetime | None, changes_today_count: int, now: datetime,
-    proposal_type: str | None,
+    proposal_type: str | None, *, auto_exec: bool = False,
 ) -> str | None:
     """쿨다운·일일상한 사전점검(IU-R R2 공용 — auto_operator.run_hourly_lane의 rank-step
     prefilter가 estimate 호출 전 재사용). 임계·면제 규칙은 _check_cooldown_and_cap 단일 소스를
     그대로 태운다(중복 금지) — prefilter와 실행 시점 guardrail이 **같은 판정**을 공유한다.
-    (차단사유, or None=통과). last_change_at/changes_today_count는 compute_change_cadence 산출."""
+    (차단사유, or None=통과). last_change_at/changes_today_count는 compute_change_cadence 산출.
+
+    auto_exec: 이 제안을 사람 승인 없이 레인이 바로 쏘는가(D-NAO-125). True면 하향에도
+    _MAX_DAILY_AUTO_BID_DOWNS 상한이 걸린다 — prefilter가 이걸 안 넘기면 레인은 통과라고
+    보고 estimate까지 간 뒤 실행 시점 guardrail에서 막혀 **판정이 갈린다**(중복 금지 원칙 위반).
+    """
     return _check_cooldown_and_cap(
-        {"last_change_at": last_change_at, "changes_today_count": changes_today_count},
+        {"last_change_at": last_change_at, "changes_today_count": changes_today_count,
+         "auto_exec": auto_exec},
         now, proposal_type,
     )
 
@@ -146,10 +163,18 @@ def _check_cooldown_and_cap(context: dict, now: datetime, proposal_type: str | N
     # DL3(D-NAO-65): 안전방향(bid_down)은 일일 횟수 상한에서만 면제 — "쭉 낮추다가"를
     # 위해서다. 진동 방어는 위 쿨다운 2h가 유지하고, 방향 불일치 stale 행(bid_down인데
     # target≥current)은 뒤이은 _check_bid의 방향검증이 여전히 fail-closed 차단한다.
+    changes_today = context.get("changes_today_count", 0)
     if proposal_type not in _DAILY_CAP_EXEMPT_TYPES:
-        changes_today = context.get("changes_today_count", 0)
         if changes_today >= _MAX_DAILY_CHANGES:
             return f"일일 변경 건수 상한 도달({changes_today}/{_MAX_DAILY_CHANGES}건, 폭주 방지)"
+    elif context.get("auto_exec"):
+        # D-NAO-125 codex[P1]: 사람 없이 쏘는 하향에만 별도 상한(위 _MAX_DAILY_AUTO_BID_DOWNS
+        # 주석). 사람이 승인한 하향은 종전 DL3 면제 유지.
+        if changes_today >= _MAX_DAILY_AUTO_BID_DOWNS:
+            return (
+                f"자동 하향 일일 상한 도달({changes_today}/{_MAX_DAILY_AUTO_BID_DOWNS}건, "
+                "D-NAO-125 — 더 내리려면 콘솔에서 사람이 승인)"
+            )
 
     return None
 

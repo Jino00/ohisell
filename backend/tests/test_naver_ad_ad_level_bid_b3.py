@@ -1096,3 +1096,103 @@ def test_shopping_pause_disconnected_no_ad_change_uses_chronic_window(db):
     assert len(out) == 1
     assert out[0]["cost"] == 21000
     assert out[0]["effective_ad_id"] == "nad-1"  # B3: 소재-레벨 제어 대상 노출
+
+
+# ══════════════════════════════════════════════════════════════════
+# D-NAO-125 codex[P1] 4건 회귀 (2026-07-29 리뷰 → 수정)
+#   1) 자동 하향에만 일일 상한(DL3 면제는 사람 눈 전제였다)
+#   2) 같은 소재가 실행 중이면 중복 발사 금지
+#   3) 킬스위치가 잔존 approved 행까지 되돌린다(writer 직전 최종 확인)
+#   4) 레인당 blast radius 상한 — 초과분은 드롭이 아니라 Confirm 대기로 강등
+# ══════════════════════════════════════════════════════════════════
+def test_auto_bid_down_has_daily_cap_but_human_down_does_not(db):
+    """(1) 같은 하향이라도 **무인 실행**이면 일일 상한이 걸린다."""
+    from app.services.naver_ad import guardrail_gate
+
+    ctx = {"current_bid": 800, "changes_today_count": 3, "campaign_type": "SHOPPING"}
+    auto = guardrail_gate.check({"proposal_type": "bid_down", "target_bid": 680},
+                                {**ctx, "auto_exec": True}, now=NOW)
+    human = guardrail_gate.check({"proposal_type": "bid_down", "target_bid": 680},
+                                 {**ctx, "auto_exec": False}, now=NOW)
+    assert auto is not None and "자동 하향 일일 상한" in auto
+    assert human is None  # DL3 면제 유지 — 사람이 승인한 "쭉 낮추다가"는 그대로
+
+
+def test_auto_bid_down_under_cap_passes(db):
+    from app.services.naver_ad import guardrail_gate
+
+    assert guardrail_gate.check(
+        {"proposal_type": "bid_down", "target_bid": 680},
+        {"current_bid": 800, "changes_today_count": 2, "auto_exec": True,
+         "campaign_type": "SHOPPING"},
+        now=NOW,
+    ) is None
+
+
+def test_kill_switch_blocks_residual_approved_ad_proposal(db):
+    """(3) approved 커밋 후 크래시로 남은 행도 킬스위치가 막는다(쓰기·change_log 0)."""
+    db.add(NaverCampaignSettings(campaign_id=CAMP, optimizer="ours", auto_operate=True))
+    p = NaverProposal(
+        proposal_type="bid_down", target_type="ad", target_id="nad-1", campaign_id=CAMP,
+        adgroup_id="grp-hot", status="approved", target_bid=680,
+        approval_source=auto_operator.APPROVAL_SOURCE_HOURLY,
+    )
+    db.add(p)
+    db.commit()
+    with patch.object(auto_operator, "AD_BID_ROUTING_ENABLED", False), \
+         patch.object(writer, "get_ad_bid") as mock_get, \
+         patch.object(writer, "update_ad_bid") as mock_write:
+        with pytest.raises(harness.KillSwitchEngagedError):
+            harness.execute(db, p.id, dry_run=False, now=NOW)
+    mock_write.assert_not_called()
+    mock_get.assert_not_called()  # 진입 지점에서 막혀 라이브 재조회조차 안 나간다
+    db.refresh(p)
+    assert p.status == "approved"  # 미실행 정직 상태(executing 잔존 금지)
+    assert db.query(NaverChangeLog).count() == 0
+
+
+def test_inflight_ad_proposal_blocks_duplicate_fire(db):
+    """(2) 같은 소재에 executing 제안이 있으면 새 하향을 만들지 않는다(동시 실행 중복 쓰기)."""
+    _seed_hourly_shopping(db)
+    _ad(db, "grp-hot", "p1", ad_id="nad-1", ad_bid_amt=800, use_group=False)
+    db.add(NaverProposal(
+        proposal_type="bid_down", target_type="ad", target_id="nad-1", campaign_id=CAMP,
+        adgroup_id="grp-hot", status="executing", target_bid=680,
+    ))
+    db.commit()
+    with patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 200}), \
+         patch.object(auto_operator.naver_sa_writer, "get_ad_bid", return_value=800), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(db, now=NOW, fetch_intraday=lambda t, d: _overheat_curve())
+    mock_exec.assert_not_called()
+    assert result["ad_auto_exec_inflight_skipped"] == 1
+    assert result["approved"] == 0
+
+
+def test_lane_cap_degrades_excess_to_confirm_pending(db):
+    """(4) 레인당 상한 초과분은 **드롭이 아니라** Confirm 대기로 남는다."""
+    n_groups = auto_operator._MAX_AD_AUTO_EXEC_PER_LANE + 2
+    db.add(NaverCampaignSettings(campaign_id=CAMP, optimizer="ours", auto_operate=True))
+    db.add(NaverEntity(entity_type="campaign", entity_id=CAMP, campaign_id=CAMP, status="on"))
+    db.add(NaverHourlySnapshot(snapshot_at=NOW, ad_date=TODAY, snapshot_hour=23,
+                               campaign_id=CAMP, campaign_type="", cost=0, clk=0, imp=0))
+    window_from, _ = auto_operator._settlement_window(TODAY)
+    for i in range(n_groups):
+        gid = f"grp-{i}"
+        db.add(NaverEntity(entity_type="adgroup", entity_id=gid, parent_id=CAMP,
+                           campaign_id=CAMP, campaign_type="SHOPPING", status="on"))
+        db.add(NaverAdDaily(ad_date=window_from, campaign_id=CAMP, campaign_type="SHOPPING",
+                            adgroup_id=gid, keyword_id="", imp=200, clk=20, cost=2000))
+        _ad(db, gid, f"p{i}", ad_id=f"nad-{i}", ad_bid_amt=800, use_group=False)
+    db.commit()
+    with patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 200}), \
+         patch.object(auto_operator.naver_sa_writer, "get_ad_bid", return_value=800), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(db, now=NOW, fetch_intraday=lambda t, d: _overheat_curve())
+    assert result["approved"] == auto_operator._MAX_AD_AUTO_EXEC_PER_LANE
+    assert mock_exec.call_count == auto_operator._MAX_AD_AUTO_EXEC_PER_LANE
+    assert result["ad_auto_exec_capped"] == n_groups - auto_operator._MAX_AD_AUTO_EXEC_PER_LANE
+    assert result["ad_confirm_pending"] == n_groups - auto_operator._MAX_AD_AUTO_EXEC_PER_LANE
+    # 강등분은 사라지지 않고 큐에 보인다
+    assert db.query(NaverProposal).filter(NaverProposal.status == "pending").count() == \
+        n_groups - auto_operator._MAX_AD_AUTO_EXEC_PER_LANE

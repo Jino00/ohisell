@@ -1211,6 +1211,9 @@ def test_build_guardrail_context_non_keyword_target_all_none(db):
         "last_change_at": None, "changes_today_count": 0, "campaign_type": None,
         # D-NAO-121: target_type='ad'가 아니므로 출시창 순위 하한은 항상 None(하한 없음).
         "launch_floor_bid": None, "launch_target_rank": None,
+        # D-NAO-125: 사람 승인(approval_source NULL/console)이면 False — 자동 하향
+        # 일일 상한(_MAX_DAILY_AUTO_BID_DOWNS)은 무인 경로에만 걸린다.
+        "auto_exec": False,
     }
 
 
@@ -1229,6 +1232,9 @@ def test_build_guardrail_context_adgroup_target_bid_budget_fields_none_no_prior_
         # D-NAO-121: target_type='adgroup'(그룹 단위)이므로 출시창 순위 하한은 소재 전용 —
         # 항상 None(하한 없음).
         "launch_floor_bid": None, "launch_target_rank": None,
+        # D-NAO-125: 사람 승인(approval_source NULL/console)이면 False — 자동 하향
+        # 일일 상한(_MAX_DAILY_AUTO_BID_DOWNS)은 무인 경로에만 걸린다.
+        "auto_exec": False,
     }
 
 
