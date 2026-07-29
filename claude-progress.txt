@@ -1,4 +1,18 @@
-## 📌 세션 인계: `.claude/memory/HANDOFF_ad-bid-down-open+agency-revert_20260729.md` (2026-07-29 오후~저녁 — D-NAO-125 소재 하향 자동 개방 브랜치 대기(codex P1 4건, 배포 보류)·D-NAO-126 대행사 외부 변경 재확인. 다음 세션 최우선 = 소재 grain 외부변경 탐지 추가)
+## 📌 세션 인계: `.claude/memory/HANDOFF_ad-external-change+bid-down-shipped_20260729.md` (2026-07-29 저녁 — D-NAO-127 소재 grain 외부변경 탐지(editTm 앵커) + D-NAO-125 소재 하향 자동 개방(codex P1 7건 대응 후 배포) 둘 다 구현·배포·병합 완료. 다음 세션 최우선 = 19:20/20:20 레인 라이브 증거 확인)
+
+## ✅ 2026-07-29 저녁 — 소재 grain 외부변경 탐지 + 소재 하향 자동 개방 배포 완료 (D-NAO-127·125, PR #166·#167 병합, prod 배포 완료)
+
+**§0 가장 먼저 알아야 할 것**: ①대행사가 여전히 계정을 만지고 있다(07-29 15:39:05 소재 입찰 되돌림 재확인, D-NAO-126) — Jino 확정: "손대지 말라고 했으니 이제 우리가 컨트롤한다." ②폴드8와이드 입찰은 1,000원 유지 확정(실측상 목표 4위 값). ③크론 시각 실제값 주의 — `sweep_naver_today_hourly`=`57 * * * *`(코드 기본값 :35 아님), `shopping_ad_product_sync`=`45 7 * * *`(문서상 08:20 아님), 시간당 레인=매시 :20.
+
+**D-NAO-127 (신규 확정·구현·배포·병합 완료)**: 소재(ad) grain 외부 변경을 `editTm`(네이버 소재 마지막 수정 시각) 앵커로 탐지해 `naver_agency_op`에 관측 기록. 네이버 API 쓰기 0. 라이브 실측 근거(원칙22): `/ncc/ads` 응답의 `editTm`이 폴드8와이드 되돌림 시각(15:39:05 KST)과 초 단위 일치. **why editTm**: 값 비교만으로는 왕복(우리 1,600→외부가 1,000으로 되돌림)이 무변동으로 보인다 — editTm은 단조 전진해 편집 사실이 남는다. **why not change_log**: change_log는 쿨다운·일일상한의 원료라 외부 관측을 섞으면 대행사가 만질 때마다 우리 소재 쿨다운이 연장돼 되찾을 때 손이 묶인다. 신규 SA `ad_external_change.py`(5단계 판정+before 귀속), 컬럼 2개 additive, 실제 크론 `shopping_ad_product_sync`(07:45 KST)에 편승. codex 2R(P1 1건 수정) 통과, PR #166 병합(`8f9e3f3`)·`--migrate --restart` prod 배포 완료(alembic `c3e5a7b9d1f4`). 테스트 4,114 passed. **신규 로직 첫 발동은 07-30 07:45**(오늘분은 배포 전 구코드), 실제 탐지는 07-31부터.
+
+**D-NAO-125 (배포 완료로 전환)**: 어제 배포 보류 사유(codex P1 4건)를 3라운드에 걸쳐 총 7건 대응 → "P1 0건·배포 차단 없음". 신규 안전장치 4종: ①자동 하향 일일 상한 3회(사람 승인 하향은 종전 면제 유지, 세는 원료는 자동 하향 성공 건수) ②대상 단위 원자 클레임(UPDATE 문 `NOT EXISTS`) ③킬스위치 2중 재검사(harness 진입+writer 직전, 사람 console 승인은 스위치와 무관) ④레인당 blast radius 5건(초과분은 드롭이 아니라 Confirm 대기로 강등). 롤백은 `AD_BID_ROUTING_ENABLED=False` 한 줄. PR #167 병합(`85b69c2`)·prod 배포·재시작 완료. 테스트 4,132 passed. **첫 자동 하향 발사는 19:20 KST 시간당 레인**(배포 18:47 KST 기준 미발동, 이번 세션에서 라이브 증거 미확인).
+
+**다음 세션 최우선(우선순위 순)**: ①19:20/20:20 레인 라이브 증거 확인(change_log entity_type='ad'·action='update_bid'·dry_run=0, 레인 캡·일일 상한 정상 작동 여부) ②07-30 07:45 소재 외부 변경 탐지 첫 발동 확인(`naver_agency_op` entity_type='ad', 첫 회차는 0건이 정상 — 실탐지는 07-31부터) ③머리 키워드 보정계수(07-30 아침 D+1 실측으로 두 점 더) ④성과 상향 자동화(3단계, codex 적대 리뷰 필수) ⑤X1a 죽은 경로 정리·`naver_execution_harness` docstring 정정 ⑥이월: 이익 서보(D-NAO-124)·시간별 이탈 경보·`not_viable` 소비 경로·일예산 초과 자동 지출중단·출시배수 3.0.
+
+트랙 파일 `docs/tracks/active/track_naver-ad-optimization.md` D-NAO-127 신규 기록 + D-NAO-125 배포 완료로 갱신, "현재 진행 단계"·"다음 액션" 최신 블록 추가 완료.
+
+---
 
 ## ⚠️ 2026-07-29 오후~저녁 — 소재 하향 자동 개방 구현(배포 보류) + 대행사 외부변경 재발 확인 (D-NAO-125·126, 브랜치 `claude/d-nao-125-ad-bid-down-open` `cc778de` push 완료·main은 문서만)
 
