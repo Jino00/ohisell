@@ -248,7 +248,8 @@ def test_ad_canary_proposal_types_value():
     쓰기 경계의 (승인원⟺타입) 잠금이 우회된다(harness._AD_UP_OPEN_TYPES 불변식 참조).
     """
     assert auto_operator._AD_BID_CANARY_PROPOSAL_TYPES == frozenset({"bid_down", "bid_up"})
-    assert auto_operator._AD_AUTO_EXEC_PROPOSAL_TYPES == frozenset({"bid_down", "bid_up"})
+    # 자동 발사는 하향만(D-NAO-129 최종) — 상향은 Confirm 큐.
+    assert auto_operator._AD_AUTO_EXEC_PROPOSAL_TYPES == frozenset({"bid_down"})
     from app.services.naver_ad.bid_step_types import CHANGE_PCT_EXEMPT_TYPES
     assert auto_operator._AD_BID_CANARY_PROPOSAL_TYPES & CHANGE_PCT_EXEMPT_TYPES == frozenset()
 

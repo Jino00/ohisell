@@ -534,13 +534,13 @@ def test_hourly_lane_canary_probe_up_holds_no_ad_routing(db):
     assert any("탐침" in h["reason"] and "[레버 미연결]" in h["reason"] for h in result["held"])
 
 
-def test_hourly_lane_ad_up_executes_inline(db):
-    """★D-NAO-129: 미연결 그룹의 UP도 소재 레버로 인라인 자동 실행된다(하향과 대칭).
+def test_hourly_lane_ad_up_creates_confirm_card_not_inline_fire(db):
+    """★D-NAO-129 최종 계약: 미연결 그룹의 UP은 **카드는 만들되 자동 발사하지 않는다**.
 
-    종전 계약("ad UP은 카나리 2단계" hold, 제안 0)의 대체. 손실은 자동으로 깎이는데 이익
-    구간에서 볼륨을 늘리는 손이 없으면 D-NAO-59(총이익 최대화)가 ROAS 방어로 표류한다.
-    ★타입은 반드시 `bid_up`이어야 한다 — 소재는 rank-step 분기(bid_up_servo/bid_up_rank)에
-    안 걸려 ±15% 클램프가 적용되는 레거시 폴백을 탄다. 그게 이 개방의 안전 근거다.
+    상향의 경제적 브레이크가 대리 지표(가격 규칙)이고, 그 기준점을 지키는 장치가 구조적으로
+    성립하지 않는다(외부 하향 → 우리가 먼저 쓰면 editTm이 우리 것이 되어 외부 사건 영구 소실).
+    그래서 발사는 사람이 한다 — 하향(자동)과 비대칭인 것이 의도다.
+    ★타입은 `bid_up`이어야 한다(±15% 클램프 적용). 면제 타입(servo/rank)이 소재로 새면 안 된다.
     """
     _seed_hourly_shopping(db)
     _ad(db, "grp-hot", "p1", ad_id="nad-1", ad_bid_amt=800, use_group=False)
@@ -551,13 +551,10 @@ def test_hourly_lane_ad_up_executes_inline(db):
          patch.object(auto_operator.naver_sa_writer, "get_ad_bid", return_value=800), \
          patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
         result = auto_operator.run_hourly_lane(db, now=NOW, fetch_intraday=lambda t, d: _overheat_curve())
-    mock_exec.assert_called_once()
-    assert result["executed"] == 1
-    assert result["ad_confirm_pending"] == 0
+    mock_exec.assert_not_called()  # ★자동 발사 없음
+    assert result["ad_confirm_pending"] == 1
     saved = db.query(NaverProposal).filter(NaverProposal.target_type == "ad").one()
-    assert saved.proposal_type == "bid_up"  # ★면제 타입(servo/rank)이 아니어야 한다
-    assert saved.target_bid == 920  # 소재 800 기준 +15%
-    assert saved.status == "approved"
+    assert (saved.proposal_type, saved.status, saved.target_bid) == ("bid_up", "pending", 920)
 
 
 def test_daily_lane_excludes_ad_proposals_from_auto_approval(db):
@@ -766,10 +763,14 @@ def test_canary_default_empty_set():
         assert auto_operator._ad_bid_canary("any-campaign") is False
 
 
-def test_canary_directions_open_both_ways():
-    """D-NAO-129: 소재 개방 방향 = 하향 + 성과 상향. 생성·실행 두 상수가 같이 움직인다."""
+def test_canary_generation_open_both_ways_but_autofire_down_only():
+    """D-NAO-129 최종: 생성은 양방향, **자동 발사는 하향만**(상향은 Confirm).
+
+    두 상수가 갈라져 있는 것이 이 스프린트의 결론이다 — 소리 없이 같아지면 이 테스트가 잡는다.
+    상향 자동 발사를 켜려면 소재별 경제 신호 또는 쓰기 직전 외부변경 확인이 선행돼야 한다.
+    """
     assert auto_operator._AD_BID_CANARY_PROPOSAL_TYPES == frozenset({"bid_down", "bid_up"})
-    assert auto_operator._AD_AUTO_EXEC_PROPOSAL_TYPES == frozenset({"bid_down", "bid_up"})
+    assert auto_operator._AD_AUTO_EXEC_PROPOSAL_TYPES == frozenset({"bid_down"})
 
 
 # ══════════════════════════════════════════════════════════════════
