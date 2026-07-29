@@ -492,20 +492,22 @@ def _ad_bid_from_payload(raw: str | None) -> int | None:
         return None
 
 
-def _our_last_known_edit_tms(db: Session, ad_id: str) -> set[str]:
-    """우리가 아는 그 소재의 editTm 집합 — ①마지막 관측(daily sync) ②우리 성공 쓰기들.
+def _our_last_known_ad_states(db: Session, ad_id: str) -> set[tuple[str, int | None]]:
+    """우리가 아는 그 소재의 (editTm, bidAmt) 쌍 집합 — ①마지막 관측 ②우리 성공 쓰기들.
 
-    live editTm이 여기 없으면 **그 사이 외부가 만진 것**이다(D-NAO-130).
+    live 상태가 여기 없으면 **그 사이 외부가 만진 것**이다(D-NAO-130).
+    ★editTm만 비교하면 같은 초에 우리 쓰기와 외부 변경이 겹칠 때 외부를 우리 것으로 오인한다
+    (codex 5R[P2]). 값까지 함께 봐야 그 충돌이 갈린다.
     """
-    known: set[str] = set()
+    known: set[tuple[str, int | None]] = set()
     row = (
-        db.query(NaverAdgroupProduct.ad_edit_tm)
+        db.query(NaverAdgroupProduct.ad_edit_tm, NaverAdgroupProduct.ad_bid_amt)
         .filter(NaverAdgroupProduct.ad_id == ad_id,
                 NaverAdgroupProduct.ad_edit_tm.isnot(None))
         .first()
     )
     if row and row[0]:
-        known.add(str(row[0]))
+        known.add((str(row[0]), row[1]))
     for (raw,) in (
         db.query(NaverChangeLog.after_value)
         .filter(
@@ -523,18 +525,52 @@ def _our_last_known_edit_tms(db: Session, ad_id: str) -> set[str]:
         except (ValueError, TypeError):
             continue
         if isinstance(payload, dict) and payload.get("editTm"):
-            known.add(str(payload["editTm"]))
+            bid, _ = naver_sa_fetcher._parse_ad_attr(payload.get("adAttr"))
+            known.add((str(payload["editTm"]), bid))
     return known
 
 
-def _external_touch_since_last_known(db: Session, ad_id: str, live_edit_tm: str) -> bool:
-    """live editTm이 우리가 아는 어떤 editTm과도 다르면 True(그 사이 외부가 만졌다).
+# 외부변경 확인 판정 — 자동 상향은 CONFIRMED_OURS일 때만 나간다(fail-closed).
+_EXT_OURS = "ours"          # 우리가 아는 상태 그대로 = 외부 손 없음
+_EXT_TOUCHED = "external"   # 외부가 만졌다 → 기준점 재설정 후 진행
+_EXT_UNKNOWN = "unknown"    # 판정 불가(관측 부재·조회 실패) → 자동 상향 보류
 
-    ★우리가 아는 editTm이 하나도 없으면 False를 준다 — 최초 관측을 '외부 변경'으로 읽으면
-    모든 소재가 첫 회차에 유령 사건을 만든다(D-NAO-127의 ② 판정 유보와 같은 규율).
+
+def _classify_external_touch(
+    db: Session, ad_id: str, live_edit_tm: str | None, live_bid: int | None,
+) -> str:
+    """live 상태가 우리가 아는 것인가 / 외부가 만졌나 / 알 수 없나(D-NAO-130, codex 5R[P1]).
+
+    ★"모르면 진행"이 아니라 **"모르면 보류"**다. 초판은 known이 비면 False("외부 아님")를
+    반환해 자동 상향을 계속했는데, 그건 관측이 없는 신규 소재에서 정확히 반대로 작동한다 —
+    대행사가 400으로 내려놔도 판정이 '외부 아님'이라 그대로 460으로 올린다. 확인이 성립하지
+    않으면 올리지 않는 것이 이 장치의 존재 이유다.
     """
-    known = _our_last_known_edit_tms(db, ad_id)
-    return bool(known) and str(live_edit_tm) not in known
+    if not live_edit_tm:
+        return _EXT_UNKNOWN
+    known = _our_last_known_ad_states(db, ad_id)
+    if not known:
+        return _EXT_UNKNOWN  # 기준선이 없다 — 이번 회차는 보류하고 관측만 세운다
+    return _EXT_OURS if (str(live_edit_tm), live_bid) in known else _EXT_TOUCHED
+
+
+def _seed_edit_tm_baseline(db: Session, ad_id: str, live_edit_tm: str, live_bid: int | None) -> None:
+    """관측 기준선이 없는 소재에 현재 상태를 세워둔다 — 다음 회차부터 판정이 성립한다.
+
+    (일 1회 sync가 채우기 전이라도 이 자리에서 세워 자동 상향이 하루 종일 묶이지 않게 한다.)
+    """
+    row = (
+        db.query(NaverAdgroupProduct)
+        .filter(NaverAdgroupProduct.ad_id == ad_id,
+                NaverAdgroupProduct.ad_edit_tm.is_(None))
+        .first()
+    )
+    if row is None:
+        return
+    row.ad_edit_tm = str(live_edit_tm)
+    if live_bid is not None:
+        row.ad_bid_amt = live_bid
+    db.commit()
 
 
 def _record_inline_external_touch(
@@ -548,16 +584,20 @@ def _record_inline_external_touch(
     from app.services.naver_ad import ad_external_change
 
     occurred_at = ad_external_change.parse_edit_tm(live_edit_tm)
-    dup = (
-        db.query(NaverAgencyOp.id)
-        .filter(
-            NaverAgencyOp.entity_type == "ad",
-            NaverAgencyOp.entity_id == proposal.target_id,
-            NaverAgencyOp.op_type == "bid_change",
-            NaverAgencyOp.occurred_at == occurred_at,
-        )
-        .first()
+    # ★codex 5R[P1-3]: occurred_at이 NULL(editTm 형식 변화)일 때 모든 NULL 사건을 하나로
+    #   접으면 최신 외부 하향이 기록되지 않아 기준점이 옛 고가로 복귀한다.
+    #   ad_external_change._dedup_key와 같은 규율로 값까지 키에 넣는다.
+    dup_q = db.query(NaverAgencyOp.id).filter(
+        NaverAgencyOp.entity_type == "ad",
+        NaverAgencyOp.entity_id == proposal.target_id,
+        NaverAgencyOp.op_type == "bid_change",
     )
+    if occurred_at is not None:
+        dup_q = dup_q.filter(NaverAgencyOp.occurred_at == occurred_at)
+    else:
+        dup_q = dup_q.filter(NaverAgencyOp.occurred_at.is_(None),
+                             NaverAgencyOp.after_value == str(live_bid))
+    dup = dup_q.first()
     if dup is not None:
         return
     db.add(NaverAgencyOp(
@@ -668,10 +708,15 @@ def auto_up_base_bid(db: Session, entity_type: str, entity_id: str, now: datetim
             NaverAgencyOp.op_type == "bid_change",
             NaverAgencyOp.after_value.isnot(None),
         )
-        .order_by(NaverAgencyOp.occurred_at.desc().nullslast(), NaverAgencyOp.id.desc())
+        # ★codex 5R[P1-3]: occurred_at NULLS LAST로 정렬하면 **최신** NULL 사건이 과거의
+        #   non-NULL 사건에 밀려 기준점이 옛 고가로 복귀한다. 항상 존재하는 detected_at으로
+        #   최신을 고르고, 시각 비교에는 occurred_at이 없으면 detected_at을 쓴다.
+        .order_by(NaverAgencyOp.detected_at.desc(), NaverAgencyOp.id.desc())
         .first()
     )
-    ext_at = external.occurred_at if external is not None else None
+    ext_at = None
+    if external is not None:
+        ext_at = external.occurred_at or external.detected_at
     if external is not None and (
         human is None or ext_at is None or human.changed_at is None or ext_at > human.changed_at
     ):
@@ -963,23 +1008,36 @@ def _build_guardrail_context(db: Session, proposal: NaverProposal, now: datetime
         context["auto_up_base_bid"] = auto_up_base_bid(
             db, proposal.target_type, proposal.target_id, now,
         )
-        # ★D-NAO-130(codex 적대 4R[P1] 선행조건②) — **쓰기 직전 외부 변경 확인**.
+        # ★D-NAO-130(codex 적대 4R·5R[P1]) — **쓰기 직전 외부 변경 확인(fail-closed)**.
         #   D-NAO-127 소재 외부변경 탐지는 하루 1회(07:45)인데 이 레인은 매시간 쓴다. 우리가
         #   먼저 쓰면 editTm이 우리 것으로 바뀌어 **외부 사건이 영구 소실**된다 — 그러면 기준점이
         #   옛 값에 머문 채 자동화가 대행사의 하향을 되돌려 올린다(재현: 07:45 기준 2,000 →
         #   10:00 대행사 400 → 11:00 우리 460 → 다음날 탐지는 "우리 쓰기"로 분류 → 기준점 2,000).
-        #   그래서 **지금 이 자리에서** 확인한다: 방금 재조회한 live editTm이 우리가 아는 마지막
-        #   editTm(마지막 관측 또는 우리 마지막 쓰기)과 다르면 그 사이 외부가 만진 것이다.
-        #   ①기준점을 현재 실측값으로 즉시 재설정하고 ②그 사건을 관측 테이블에 남긴다(소실 방지).
-        if live_edit_tm and context["current_bid"] is not None:
-            try:
-                if _external_touch_since_last_known(db, proposal.target_id, live_edit_tm):
-                    context["auto_up_base_bid"] = context["current_bid"]
-                    _record_inline_external_touch(
-                        db, proposal, live_edit_tm, context["current_bid"], now,
-                    )
-            except Exception as e:  # noqa: BLE001 — 관측 부가기능, 본 실행을 막지 않는다
-                log.warning("naver_execution_harness: 쓰기 직전 외부변경 확인 실패(무시): %s", e)
+        #   그래서 **지금 이 자리에서** 확인한다.
+        #   ★핵심(codex 5R[P1]): 확인이 **성립하지 않으면 자동 상향을 하지 않는다**. 초판은
+        #     best-effort라 조회 실패·관측 부재에서 조용히 통과했는데, 그러면 이 장치는 선행조건이
+        #     아니라 장식이다. 실패·불명은 전부 보류(_EXT_UNKNOWN)로 모은다.
+        context["external_check"] = _EXT_UNKNOWN
+        try:
+            verdict = _classify_external_touch(
+                db, proposal.target_id, live_edit_tm, context["current_bid"],
+            )
+            if verdict == _EXT_TOUCHED:
+                # 외부가 만졌다 — 기준점을 현재 실측값으로 재설정하고 사건을 남긴다(소실 방지).
+                _record_inline_external_touch(
+                    db, proposal, live_edit_tm, context["current_bid"], now,
+                )
+                context["auto_up_base_bid"] = context["current_bid"]
+            elif verdict == _EXT_UNKNOWN and live_edit_tm and context["current_bid"] is not None:
+                # 기준선이 없다 — 이번 회차는 보류하고 다음 판정을 위해 관측만 세운다.
+                _seed_edit_tm_baseline(db, proposal.target_id, live_edit_tm, context["current_bid"])
+            context["external_check"] = verdict
+        except Exception as e:  # noqa: BLE001 — 실패는 곧 '확인 불가' = 자동 상향 보류
+            log.warning(
+                "naver_execution_harness: 쓰기 직전 외부변경 확인 실패 — 자동 상향 보류"
+                "(target_id=%s): %s", proposal.target_id, e,
+            )
+            context["external_check"] = _EXT_UNKNOWN
         return context
 
     if proposal.target_type not in ("keyword", "campaign"):

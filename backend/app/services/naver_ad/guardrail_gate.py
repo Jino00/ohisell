@@ -93,6 +93,9 @@ _MAX_AUTO_UP_MULTIPLE = Decimal("2.0")
 # 같은 값이어야 한다(그 모듈은 이 모듈을 import 하므로 역방향 import를 피해 값으로 고정 —
 # 정합은 테스트로 지킨다: test_cumulative_cap_types_match_ad_up_open_types).
 _CUMULATIVE_CAP_TYPES: frozenset[str] = frozenset({"bid_up"})
+# 외부변경 확인 판정값(harness._EXT_* 와 같은 값 — 역방향 import 회피, 정합은 테스트로 고정).
+_EXT_CHECK_OURS = "ours"
+_EXT_CHECK_EXTERNAL = "external"
 
 # P2(D-NAO-42-f): 예산 통제 — PLAN_naver-ad-budget-control.md §5-C. bid_up/down과 병렬 구조.
 _BUDGET_UP_TYPES = frozenset({"budget_up"})
@@ -278,6 +281,21 @@ def _check_bid(proposal: dict, context: dict, proposal_type: str) -> str | None:
 
         # ★D-NAO-129: 누적 상승 배수 상한 — BEP가 소재 천장이 못 되는 구멍의 마개(위 상수 주석).
         # 기준점이 없으면(최근 창에 자동 상향 이력 없음) 미적용 = 종전 동작.
+        # ★D-NAO-130 codex 5R[P1]: **외부변경 확인이 성립하지 않으면 자동 상향을 하지 않는다.**
+        #   이 확인이 자동 상향을 켠 선행조건이므로, 확인 실패(조회 오류·관측 부재·형식 변화)를
+        #   통과시키면 조건 없이 켠 것과 같다. 사람 승인 상향은 이 검사 대상이 아니다.
+        #   context에 키가 없으면(비-ad grain 등) 종전 동작 — 이 게이트는 소재 자동 상향 전용이다.
+        if (
+            context.get("auto_exec")
+            and proposal_type in _CUMULATIVE_CAP_TYPES
+            and context.get("external_check", _EXT_CHECK_OURS) != _EXT_CHECK_OURS
+            and context.get("external_check") != _EXT_CHECK_EXTERNAL
+        ):
+            return (
+                "외부 변경 확인 불가 — 이 소재의 현재 값이 우리가 아는 상태인지 확인되지 않아 "
+                "자동 상향을 보류한다(D-NAO-130 fail-closed). 다음 회차에 관측이 서면 재개된다"
+            )
+
         # ★적용 범위는 이번에 개방한 타입뿐(codex 적대 2R[P2]): 탐색(bid_up_explore)·콜드
         #   (bid_up_cold)·서보(bid_up_servo/rank)는 각자의 경제성 상한을 가진 별도 레인이라,
         #   전역 2배 천장으로 묶으면 그 레인들의 의미가 조용히 바뀐다(기존 동작 회귀).

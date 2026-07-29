@@ -1855,3 +1855,126 @@ def test_last_change_was_auto_up_ignores_human(db):
         ))
         db.commit()
         assert harness.last_change_was_auto_up(db, "ad", "nad-x") is expect
+
+
+# ── codex 적대 5R P1 3건 회귀: 외부변경 확인은 fail-CLOSED ────────────────────
+def test_external_check_unknown_blocks_auto_up(db):
+    """★codex 5R[P1]: 확인이 성립하지 않으면 자동 상향을 **하지 않는다**.
+
+    이 확인이 자동 상향을 켠 선행조건이므로, 실패를 통과시키면 조건 없이 켠 것과 같다.
+    재현: 대행사가 2,000→400으로 내린 뒤 우리 editTm 조회만 실패 → 종전 코드는 CAS도
+    통과(현재 400 == 판정 400)하고 460을 그대로 PUT했다.
+    """
+    from app.services.naver_ad import guardrail_gate
+
+    base = {"current_bid": 400, "campaign_type": "SHOPPING", "changes_today_count": 0,
+            "roas_corrected": 5.0, "target_roas": 1.9611, "unconverted_spend": 0,
+            "cost_today": 0, "daily_budget": 300000, "auto_exec": True,
+            "auto_up_base_bid": 400}
+    blocked = guardrail_gate.check(
+        {"proposal_type": "bid_up", "target_bid": 460},
+        {**base, "external_check": harness._EXT_UNKNOWN}, now=NOW,
+    )
+    assert blocked is not None and "외부 변경 확인 불가" in blocked
+    # 확인이 성립하면(우리 상태 그대로 / 외부 감지 후 기준점 재설정) 통과한다.
+    for verdict in (harness._EXT_OURS, harness._EXT_TOUCHED):
+        assert guardrail_gate.check(
+            {"proposal_type": "bid_up", "target_bid": 460},
+            {**base, "external_check": verdict}, now=NOW,
+        ) is None
+    # 사람 승인 상향은 이 게이트 대상이 아니다.
+    assert guardrail_gate.check(
+        {"proposal_type": "bid_up", "target_bid": 460},
+        {**base, "auto_exec": False, "external_check": harness._EXT_UNKNOWN}, now=NOW,
+    ) is None
+    # 하향은 언제나 나간다 — 출혈을 멈추는 손을 이 게이트가 막으면 안 된다.
+    assert guardrail_gate.check(
+        {"proposal_type": "bid_down", "target_bid": 350},
+        {**base, "external_check": harness._EXT_UNKNOWN, "auto_bid_down_today": 0}, now=NOW,
+    ) is None
+
+
+def test_no_baseline_holds_and_seeds_observation(db):
+    """★codex 5R[P1-2]: 관측 기준선이 없으면 '외부 아님'이 아니라 **보류**하고 기준선을 세운다.
+
+    종전 코드는 known이 비면 False("외부 아님")를 반환해, 관측이 없는 신규 소재에서 정확히
+    반대로 작동했다 — 대행사가 400으로 내려놔도 그대로 460으로 올린다.
+    """
+    _settings(db, optimizer="ours")
+    db.add(NaverAdgroupProduct(
+        adgroup_id="grp-hot", campaign_id=CAMP, mall_product_id="p1", product_name="p1",
+        ad_id=AD_ID, ad_bid_amt=400, use_group_bid_amt=False, ad_edit_tm=None,  # 관측 없음
+    ))
+    p = _ad_proposal(db, proposal_type="bid_up", target_bid=460)
+    p.approval_source = auto_operator.APPROVAL_SOURCE_HOURLY
+    db.commit()
+    live = {"nccAdId": AD_ID, "editTm": "2026-07-29T06:39:05.000Z",
+            "adAttr": {"bidAmt": 400, "useGroupBidAmt": False}}
+    with patch.object(harness.naver_sa_writer, "get_ad_bid", return_value=400), \
+         patch.object(harness.naver_sa_writer, "get_ad", return_value=live):
+        ctx = harness._build_guardrail_context(db, p, NOW)
+    assert ctx["external_check"] == harness._EXT_UNKNOWN  # 이번 회차 보류
+    row = db.query(NaverAdgroupProduct).filter(NaverAdgroupProduct.ad_id == AD_ID).one()
+    assert row.ad_edit_tm == "2026-07-29T06:39:05.000Z"  # 다음 회차를 위한 기준선은 세운다
+
+
+def test_edit_tm_lookup_failure_is_unknown_not_pass(db):
+    """editTm 조회가 실패하면 '외부 아님'이 아니라 보류다(fail-open 금지)."""
+    _settings(db, optimizer="ours")
+    db.add(NaverAdgroupProduct(
+        adgroup_id="grp-hot", campaign_id=CAMP, mall_product_id="p1", product_name="p1",
+        ad_id=AD_ID, ad_bid_amt=400, use_group_bid_amt=False,
+        ad_edit_tm="2026-07-28T01:00:00.000Z",
+    ))
+    p = _ad_proposal(db, proposal_type="bid_up", target_bid=460)
+    p.approval_source = auto_operator.APPROVAL_SOURCE_HOURLY
+    db.commit()
+    with patch.object(harness.naver_sa_writer, "get_ad_bid", return_value=400), \
+         patch.object(harness.naver_sa_writer, "get_ad", side_effect=RuntimeError("timeout")):
+        ctx = harness._build_guardrail_context(db, p, NOW)
+    assert ctx["external_check"] == harness._EXT_UNKNOWN
+
+
+def test_same_second_collision_is_distinguished_by_value(db):
+    """★codex 5R[P2]: 같은 editTm이어도 **값이 다르면** 외부 변경이다.
+
+    editTm만 비교하면 우리 800 쓰기와 대행사 400 하향이 같은 초에 들어올 때 '우리 것'으로
+    오인한다.
+    """
+    db.add(NaverAdgroupProduct(
+        adgroup_id="grp-hot", campaign_id=CAMP, mall_product_id="p1", product_name="p1",
+        ad_id=AD_ID, ad_bid_amt=800, use_group_bid_amt=False,
+        ad_edit_tm="2026-07-29T06:39:05.000Z",
+    ))
+    db.commit()
+    same_tm = "2026-07-29T06:39:05.000Z"
+    assert harness._classify_external_touch(db, AD_ID, same_tm, 800) == harness._EXT_OURS
+    assert harness._classify_external_touch(db, AD_ID, same_tm, 400) == harness._EXT_TOUCHED
+
+
+def test_unparseable_edit_tm_event_still_becomes_the_anchor(db):
+    """★codex 5R[P1-3]: 파싱 불가 editTm 사건(occurred_at NULL)도 최신 기준점이 된다.
+
+    occurred_at DESC NULLS LAST로 고르면 최신 NULL 사건이 과거 non-NULL에 밀려 천장이 옛
+    고가로 복원된다.
+    """
+    db.add(NaverAgencyOp(  # 과거 외부 사건(정상 시각) — 2,000
+        op_date=NOW.date(), detected_at=NOW - timedelta(hours=3), entity_type="ad",
+        entity_id=AD_ID, campaign_id=CAMP, optimizer="ours", op_type="bid_change",
+        after_value="2000", is_exception=True, occurred_at=NOW - timedelta(hours=3),
+    ))
+    db.add(NaverAgencyOp(  # 최신 외부 사건인데 editTm 형식 변화로 occurred_at NULL — 400
+        op_date=NOW.date(), detected_at=NOW - timedelta(minutes=10), entity_type="ad",
+        entity_id=AD_ID, campaign_id=CAMP, optimizer="ours", op_type="bid_change",
+        after_value="400", is_exception=True, occurred_at=None,
+    ))
+    db.commit()
+    assert harness.auto_up_base_bid(db, "ad", AD_ID, NOW) == 400
+
+
+def test_external_check_constants_match_guardrail():
+    """두 모듈의 판정값 상수는 같아야 한다(역방향 import 회피로 값 고정한 자리)."""
+    from app.services.naver_ad import guardrail_gate
+
+    assert (guardrail_gate._EXT_CHECK_OURS, guardrail_gate._EXT_CHECK_EXTERNAL) == \
+        (harness._EXT_OURS, harness._EXT_TOUCHED)
