@@ -306,3 +306,19 @@ def test_module_writes_nothing_to_change_log(db):
 def _source() -> str:
     import inspect
     return inspect.getsource(ad_external_change)
+
+
+def test_later_failure_does_not_mask_in_window_uncertainty(db):
+    """codex 2R[P2]: 구간 뒤에 실패가 하나 더 생겨도 구간 **안**의 불확실이 가려지면 안 된다."""
+    from app.services.naver_ad.naver_execution_harness import WRITE_FAILURE_MARKER
+
+    for at in (datetime(2026, 7, 29, 15, 0), datetime(2026, 7, 29, 23, 0)):  # 두 번째는 live_dt 이후
+        db.add(NaverChangeLog(
+            entity_type="ad", entity_id=AD, campaign_id=CAMP, action="update_bid", dry_run=False,
+            outcome="failed", rationale=f"{WRITE_FAILURE_MARKER} timeout",
+            changed_at=at, executed_at=at,
+        ))
+    db.commit()
+    run(db, prev_by_ad=_prev(bid=1000), observed=_obs(bid=1600), now=NOW)
+    (op,) = _ops(db)
+    assert op.is_exception is False  # 15:00 실패(구간 안)가 여전히 보인다

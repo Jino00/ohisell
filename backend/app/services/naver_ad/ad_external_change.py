@@ -94,7 +94,7 @@ def _our_last_ad_writes(db: Session, ad_ids: list[str]) -> dict[str, dict]:
     return out
 
 
-def _ambiguous_write_at(db: Session, ad_ids: list[str]) -> dict[str, datetime]:
+def _ambiguous_write_times(db: Session, ad_ids: list[str]) -> dict[str, list[datetime]]:
     """소재별 **결과 불확실한** 우리 쓰기의 마지막 시도 시각(codex[P2] 2026-07-29).
 
     `[실행 실패]`(WRITE_FAILURE_MARKER) = writer 예외. PUT을 이미 보낸 뒤일 수 있어 광고가
@@ -102,6 +102,9 @@ def _ambiguous_write_at(db: Session, ad_ids: list[str]) -> dict[str, datetime]:
     경우도 같은 행을 만든다). 이런 행은 after_value가 없어 '우리 쓰기 증거'로 못 쓰는데,
     그 사이 editTm은 우리 PUT으로 전진해 있으므로 **우리 손을 대행사 조작으로 기록**하게 된다.
     `[실행 불가]`(가드 거부)는 제외한다 — writer를 부르지도 않았으므로 광고는 확실히 그대로다.
+
+    ★**전건 목록**을 돌려준다(codex 2R[P2]): 소재별 마지막 1건만 남기면, 관측 구간 뒤에
+    실패가 하나 더 생긴 순간 구간 **안**의 실패가 가려져 불확실 판정이 조용히 풀린다.
     """
     if not ad_ids:
         return {}
@@ -118,11 +121,11 @@ def _ambiguous_write_at(db: Session, ad_ids: list[str]) -> dict[str, datetime]:
         .order_by(NaverChangeLog.changed_at.asc())
         .all()
     )
-    out: dict[str, datetime] = {}
+    out: dict[str, list[datetime]] = {}
     for r in rows:
         at = r.executed_at or r.changed_at
         if at is not None:
-            out[r.entity_id] = at
+            out.setdefault(r.entity_id, []).append(at)
     return out
 
 
@@ -203,7 +206,7 @@ def detect_ad_external_changes(
     """
     ad_ids = [o["ad_id"] for o in observed if o.get("ad_id")]
     our_writes = _our_last_ad_writes(db, ad_ids)
-    ambiguous = _ambiguous_write_at(db, ad_ids)
+    ambiguous = _ambiguous_write_times(db, ad_ids)
     ops: list[dict] = []
 
     for obs in observed:
@@ -253,8 +256,12 @@ def detect_ad_external_changes(
         # ★귀속 불확실(codex[P2]): 직전 관측 이후 우리의 **결과 불명** 쓰기 시도가 있었다면
         #   이 편집이 그 시도의 결과일 수 있다. 기록은 남기되(미탐 금지) 예외 브리핑으로
         #   승격하지 않는다 — 우리 손일 수 있는 것을 "대행사 조작"이라고 단정하지 않는다.
-        amb_at = ambiguous.get(ad_id)
-        uncertain = bool(amb_at and prev_dt and live_dt and prev_dt < amb_at <= live_dt)
+        amb_at = next(
+            (t for t in ambiguous.get(ad_id, [])
+             if prev_dt and live_dt and prev_dt < t <= live_dt),
+            None,
+        )
+        uncertain = amb_at is not None
         if uncertain:
             log.warning(
                 "소재 %s 외부 변경 귀속 불확실 — 직전 관측 이후 우리의 결과 불명 쓰기(%s)가 있다"
