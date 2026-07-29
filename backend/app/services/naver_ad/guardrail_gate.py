@@ -268,6 +268,11 @@ def _check_bid(proposal: dict, context: dict, proposal_type: str) -> str | None:
         # ★적용 범위는 이번에 개방한 타입뿐(codex 적대 2R[P2]): 탐색(bid_up_explore)·콜드
         #   (bid_up_cold)·서보(bid_up_servo/rank)는 각자의 경제성 상한을 가진 별도 레인이라,
         #   전역 2배 천장으로 묶으면 그 레인들의 의미가 조용히 바뀐다(기존 동작 회귀).
+        # ★기준점은 **과거의 고정점**이어야 한다. 초판 수정에서 current_bid를 min으로 물었더니
+        #   기준점이 현재값을 따라 올라가(400→460→529…) 천장이 언제나 현재값의 2배가 되어
+        #   **상한이 영영 안 걸렸다** — 방어를 넣으면서 방어를 껐다. 외부 하향 반영은 시각이
+        #   아니라 **사건**으로 한다(auto_up_base_bid: 사람 쓰기 또는 D-NAO-127 소재 외부변경
+        #   감지 중 최신 것이 기준점을 재설정한다).
         auto_up_base = context.get("auto_up_base_bid")
         if (
             context.get("auto_exec")

@@ -33,6 +33,7 @@ from sqlalchemy import func as sqlfunc, or_, select
 from sqlalchemy.orm import Session, aliased
 
 from app.models import (
+    NaverAgencyOp,
     NaverCampaignSettings,
     NaverChangeLog,
     NaverEntity,
@@ -490,6 +491,9 @@ def _ad_bid_from_payload(raw: str | None) -> int | None:
         return None
 
 
+_HUMAN_ANCHOR_SCAN = 20  # 사람 기준점 후보 스캔 폭(최신 파싱 가능한 행을 찾는다)
+
+
 def auto_up_base_bid(db: Session, entity_type: str, entity_id: str, now: datetime) -> int | None:
     """자동 상향 누적 상한의 **기준점**(anchor) — 사람이 마지막으로 정한 입찰가.
 
@@ -514,7 +518,7 @@ def auto_up_base_bid(db: Session, entity_type: str, entity_id: str, now: datetim
     각자의 경제성 상한을 가진 별도 레인이라 이 상한에 묶지 않는다(그 레인들의 의미를 바꾸지
     않는다는 스코프 원칙, codex 적대 2R[P2]).
     """
-    human = (
+    human_rows = (
         db.query(NaverChangeLog)
         .outerjoin(NaverProposal, NaverProposal.id == NaverChangeLog.proposal_id)
         .filter(
@@ -530,10 +534,43 @@ def auto_up_base_bid(db: Session, entity_type: str, entity_id: str, now: datetim
             ),
         )
         .order_by(NaverChangeLog.changed_at.desc())
+        .limit(_HUMAN_ANCHOR_SCAN)
+        .all()
+    )
+    # ★codex 적대 3R[P2]: "최신 1건"만 보면 그 행의 payload가 깨졌을 때 유효한 이전 사람
+    #   기준점까지 버리고 상한이 통째로 풀린다 — **최신 파싱 가능한** 행을 찾는다.
+    human = human_rows[0] if human_rows else None
+
+    # ★codex 적대 3R[P1] — **외부(대행사) 변경도 기준점을 재설정한다.**
+    #   초판 정의는 "우리 앱에서 사람이 정한 값"이었다. 대행사가 네이버 콘솔에서 2,000→400으로
+    #   내려도 우리 change_log엔 안 남으므로 기준점은 2,000에 머물고, 자동화가 400→4,000까지
+    #   **10배로 되돌린다**. 오늘 15:39에 대행사가 한 일이 정확히 그 하향이다(D-NAO-126).
+    #   D-NAO-127이 그 사건을 naver_agency_op(ad grain, bid_change)에 남기므로 그것을 사람
+    #   개입과 **같은 급의 기준점 재설정 사건**으로 쓴다.
+    #   ★알려진 지연: 소재 외부변경 탐지는 하루 1회(07:45) 돈다. 그 사이의 외부 하향은 다음
+    #     아침까지 기준점에 반영되지 않는다 — 그 구간은 ±15% 클램프·BEP·일일 3회가 막는다.
+    external = (
+        db.query(NaverAgencyOp)
+        .filter(
+            NaverAgencyOp.entity_type == entity_type,
+            NaverAgencyOp.entity_id == entity_id,
+            NaverAgencyOp.op_type == "bid_change",
+            NaverAgencyOp.after_value.isnot(None),
+        )
+        .order_by(NaverAgencyOp.occurred_at.desc().nullslast(), NaverAgencyOp.id.desc())
         .first()
     )
-    if human is not None:
-        anchor = _ad_bid_from_payload(human.after_value)
+    ext_at = external.occurred_at if external is not None else None
+    if external is not None and (
+        human is None or ext_at is None or human.changed_at is None or ext_at > human.changed_at
+    ):
+        try:
+            return int(external.after_value)  # 대행사가 세운 값이 새 기준점이다
+        except (TypeError, ValueError):
+            pass
+
+    for row in human_rows:
+        anchor = _ad_bid_from_payload(row.after_value)
         if anchor is not None:
             return anchor
 

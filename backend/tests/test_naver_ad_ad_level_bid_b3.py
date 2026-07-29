@@ -22,6 +22,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.database import Base
 from app.models import (
+    NaverAgencyOp,
     NaverAdDaily,
     NaverAdgroupProduct,
     NaverCampaignSettings,
@@ -1633,3 +1634,115 @@ def test_console_ad_up_passes_blocker_and_reaches_writer(db):
                       return_value=_ad_write_result()) as mad:
         harness.execute(db, p.id, dry_run=False, now=NOW)
     mad.assert_called_once_with("nad-1", 920, expected_before_bid=800)
+
+
+# ── codex 적대 3R P1 2건 회귀 ────────────────────────────────────────────────
+def test_agency_lowering_bid_resets_the_anchor(db):
+    """★codex 적대 3R[P1]: 대행사가 콘솔에서 내린 값이 자동화의 새 기준점이 된다.
+
+    재현(오늘 15:39 대행사가 한 일): 우리 사람이 2,000으로 정함 → 대행사가 400으로 내림.
+    우리 change_log엔 그 하향이 없으므로 종전 정의("우리 앱에서 사람이 정한 값")로는 기준점이
+    2,000에 머물고, 자동화가 400 → 4,000까지 **10배로 되돌린다**. D-NAO-127이 남긴 소재
+    외부변경 기록을 사람 개입과 같은 급의 재설정 사건으로 쓴다.
+    ★min(기준점, 현재값)으로 푸는 것은 틀렸다 — 기준점이 현재값을 따라 올라가(400→460→529…)
+      천장이 언제나 현재값의 2배가 되어 상한이 영영 안 걸린다(방어를 넣으면서 방어를 끄는 셈).
+    """
+    db.add(NaverChangeLog(  # 우리 사람이 2,000으로 설정
+        entity_type="ad", entity_id="nad-1", campaign_id=CAMP, action="update_bid",
+        dry_run=False, changed_at=NOW - timedelta(hours=5), executed_at=NOW - timedelta(hours=5),
+        proposal_id=None, after_value=json.dumps({"adAttr": {"bidAmt": 2000}}),
+    ))
+    db.commit()
+    assert harness.auto_up_base_bid(db, "ad", "nad-1", NOW) == 2000
+
+    db.add(NaverAgencyOp(  # 대행사가 400으로 내린 것을 D-NAO-127이 관측
+        op_date=NOW.date(), detected_at=NOW, entity_type="ad", entity_id="nad-1",
+        campaign_id=CAMP, optimizer="ours", op_type="bid_change",
+        before_value="2000", after_value="400", is_exception=True,
+        occurred_at=NOW - timedelta(hours=1),
+    ))
+    db.commit()
+    assert harness.auto_up_base_bid(db, "ad", "nad-1", NOW) == 400  # 새 기준점 = 대행사가 세운 값
+
+
+def test_cumulative_cap_binds_across_steps(db):
+    """상한이 실제로 **누적**을 막는다 — 한 스텝이 아니라 기준점 대비 총 상승폭이 기준이다."""
+    from app.services.naver_ad import guardrail_gate
+
+    ctx = {"current_bid": 1500, "campaign_type": "SHOPPING", "changes_today_count": 0,
+           "roas_corrected": 5.0, "target_roas": 1.9611, "unconverted_spend": 0,
+           "cost_today": 0, "daily_budget": 300000, "auto_exec": True,
+           "auto_up_base_bid": 800}  # 사람이 정한 출발점 800 → 천장 1,600
+    assert guardrail_gate.check({"proposal_type": "bid_up", "target_bid": 1600}, ctx, now=NOW) is None
+    blocked = guardrail_gate.check({"proposal_type": "bid_up", "target_bid": 1720}, ctx, now=NOW)
+    assert blocked is not None and "자동 상향 누적 상한" in blocked
+
+
+def test_writer_refuses_to_revert_concurrent_group_bid_flip(db):
+    """★codex 적대 3R[P1]: 그 사이 외부가 useGroupBidAmt를 켰으면 되돌리지 않는다.
+
+    body를 첫 GET으로 조립해두면 우리가 false를 다시 써서 **남의 변경을 조용히 되돌린 뒤
+    성공으로 기록**한다(after 검증은 false를 성공 조건으로 보고, 최종 editTm이 우리 것이라
+    D-NAO-127 사후 탐지도 "우리 쓰기"로 분류한다 = 아무도 못 잡는다).
+    """
+    from app.services.naver_ad import naver_sa_writer as w
+
+    first = {"nccAdId": "nad-1", "nccAdgroupId": "grp-hot", "userLock": False,
+             "adAttr": {"bidAmt": 800, "useGroupBidAmt": False}}
+    flipped = {**first, "adAttr": {"bidAmt": 800, "useGroupBidAmt": True}}  # 외부가 그룹입찰로 전환
+    with patch.object(w, "get_ad", side_effect=[first, flipped]), \
+         patch.object(w, "_get_adgroup", return_value={"systemBiddingType": "NONE",
+                                                      "autobidStrategy": {"isAutobidActive": False}}), \
+         patch("requests.put") as mput:
+        with pytest.raises(w.WriteValidationError) as ei:
+            w.update_ad_bid("nad-1", 920, expected_before_bid=800)
+    mput.assert_not_called()
+    assert "useGroupBidAmt" in str(ei.value)
+
+
+def test_writer_rebuilds_body_from_latest_response(db):
+    """PUT body는 **최신 응답**으로 만든다 — 그 사이 바뀐 다른 필드를 덮지 않기 위해서다."""
+    from app.services.naver_ad import naver_sa_writer as w
+
+    first = {"nccAdId": "nad-1", "nccAdgroupId": "grp-hot", "userLock": False, "inspectStatus": "OLD",
+             "adAttr": {"bidAmt": 800, "useGroupBidAmt": False}}
+    latest = {**first, "inspectStatus": "NEW"}  # 외부/네이버가 다른 필드를 갱신
+    after = {**latest, "adAttr": {"bidAmt": 920, "useGroupBidAmt": False}}
+    resp = type("R", (), {"status_code": 200, "json": lambda self: {}, "text": ""})()
+    with patch.object(w, "get_ad", side_effect=[first, latest, after]), \
+         patch.object(w, "_get_adgroup", return_value={"systemBiddingType": "NONE",
+                                                      "autobidStrategy": {"isAutobidActive": False}}), \
+         patch("requests.put", return_value=resp) as mput:
+        w.update_ad_bid("nad-1", 920, expected_before_bid=800)
+    sent = mput.call_args.kwargs["json"]
+    assert sent["inspectStatus"] == "NEW"  # 낡은 스냅샷으로 덮어쓰지 않는다
+    assert sent["adAttr"]["bidAmt"] == 920
+
+
+def test_writer_refuses_when_ad_moved_to_another_group(db):
+    """판정 이후 소재가 다른 그룹으로 옮겨졌으면 쓰지 않는다(부모 ML 가드를 통과한 그룹이 아님)."""
+    from app.services.naver_ad import naver_sa_writer as w
+
+    first = {"nccAdId": "nad-1", "nccAdgroupId": "grp-hot", "userLock": False,
+             "adAttr": {"bidAmt": 800, "useGroupBidAmt": False}}
+    moved = {**first, "nccAdgroupId": "grp-other"}
+    with patch.object(w, "get_ad", side_effect=[first, moved]), \
+         patch.object(w, "_get_adgroup", return_value={"systemBiddingType": "NONE",
+                                                      "autobidStrategy": {"isAutobidActive": False}}), \
+         patch("requests.put") as mput:
+        with pytest.raises(w.WriteValidationError):
+            w.update_ad_bid("nad-1", 920, expected_before_bid=800)
+    mput.assert_not_called()
+
+
+def test_human_anchor_falls_back_when_latest_row_unparseable(db):
+    """codex 적대 3R[P2]: 최신 사람 이력이 깨져 있으면 그 이전 유효 행을 쓴다(상한 유지)."""
+    for after_val, at in ((json.dumps({"adAttr": {"bidAmt": 400}}), NOW - timedelta(hours=2)),
+                          ("깨진 payload", NOW - timedelta(hours=1))):
+        db.add(NaverChangeLog(
+            entity_type="ad", entity_id="nad-1", campaign_id=CAMP, action="update_bid",
+            dry_run=False, changed_at=at, executed_at=at, proposal_id=None,
+            after_value=after_val,
+        ))
+    db.commit()
+    assert harness.auto_up_base_bid(db, "ad", "nad-1", NOW) == 400

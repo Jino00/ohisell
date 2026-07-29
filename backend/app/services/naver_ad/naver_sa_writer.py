@@ -765,19 +765,23 @@ def update_ad_bid(
     ad_attr["useGroupBidAmt"] = False
     body = dict(before)
     body["adAttr"] = ad_attr
-    # ★D-NAO-129 codex 적대 2R[P1] — 기준가 재확인은 **PUT 직전 마지막 순간에** 한다.
-    #   가드레일(±15% 클램프·방향)은 executor가 그 시점에 읽은 값을 기준으로 판정하는데, 그
-    #   기준이 쓰기 시점에 달라져 있으면 검증한 변경폭이 성립하지 않는다. 재현: 800을 읽고
-    #   920(+15%)을 승인 → 그 사이 외부가 400으로 내림 → 그대로 PUT하면 실제 +130%.
-    #   가정이 아니다 — 오늘(2026-07-29 15:39) 대행사가 폴드8와이드 소재를 1,600→1,000으로
-    #   되돌렸다(D-NAO-126).
-    #   ★한계를 정직하게: 네이버 SA API에는 조건부 업데이트(If-Match류)가 없다. 그래서 이건
-    #     **원자적 CAS가 아니다** — 이 GET과 아래 PUT 사이의 왕복 한 번이 잔여 경쟁 창으로
-    #     남는다(초판은 부모그룹 조회·body 조립까지 창에 포함돼 훨씬 넓었다). 그 창에서 값이
-    #     바뀌면 사후 `_detect_external_change` 경고와 D-NAO-127 소재 외부변경 탐지가 잡는다.
-    #     완전한 제거는 API가 조건부 쓰기를 제공해야 가능하다.
+    # ★D-NAO-129 codex 적대 2R·3R[P1] — 쓰기 직전 **최신 상태 재확인 + body 재조립**.
+    #   ①왜 PUT 직전인가(2R): 가드레일은 executor가 그 시점에 읽은 값을 기준으로 ±15%·방향을
+    #     판정한다. 그 기준이 쓰기 시점에 달라져 있으면 검증한 변경폭이 성립하지 않는다
+    #     (800 판정 → 외부가 400으로 내림 → 그대로 PUT하면 실제 +130%). 오늘 15:39 대행사가
+    #     폴드8와이드 소재를 1,600→1,000으로 되돌린 것이 바로 이 부류다(D-NAO-126).
+    #   ②왜 bidAmt만 보면 안 되는가(3R): body를 **첫 GET**으로 조립해 두면, 그 사이 외부가
+    #     useGroupBidAmt를 true로 바꿔도 우리가 false를 다시 써서 **남의 변경을 조용히 되돌린
+    #     뒤 성공으로 기록**한다(after 검증은 false를 성공 조건으로 보므로 통과하고, 최종
+    #     editTm이 우리 것이라 D-NAO-127 사후 탐지도 "우리 쓰기"로 분류한다 = 아무도 못 잡는다).
+    #     그래서 최신 응답으로 **body를 다시 만들고** bidAmt·useGroupBidAmt·부모그룹을 전부
+    #     재검증한다 — 우리는 우리가 바꾸려는 필드만 바꾼다.
+    #   ★한계를 정직하게: 네이버 SA API에는 조건부 쓰기(If-Match류)가 없다. 이건 **원자적 CAS가
+    #     아니고**, 이 GET과 아래 PUT 사이 왕복 한 번이 잔여 창으로 남는다(초판은 부모그룹 조회·
+    #     body 조립까지 창에 포함돼 훨씬 넓었다). 완전한 제거는 API가 조건부 쓰기를 줘야 가능하다.
     if expected_before_bid is not None:
-        latest_bid, _ = fetcher._parse_ad_attr(get_ad(ncc_ad_id).get("adAttr"))
+        latest = get_ad(ncc_ad_id)
+        latest_bid, latest_ugba = fetcher._parse_ad_attr(latest.get("adAttr"))
         if latest_bid != expected_before_bid:
             raise WriteValidationError(
                 f"update_ad_bid: 소재 {ncc_ad_id}의 입찰이 판정 이후 바뀜(기준가 불일치) — "
@@ -785,6 +789,36 @@ def update_ad_bid(
                 "검증된 변경폭이 성립하지 않아 쓰지 않는다(fail-closed, D-NAO-129). "
                 "다음 회차가 새 현재값으로 다시 판정한다"
             )
+        if latest_ugba is not False:
+            raise WriteValidationError(
+                f"update_ad_bid: 소재 {ncc_ad_id}의 useGroupBidAmt가 판정 이후 {latest_ugba!r}로 "
+                "바뀜 — 우리가 false를 다시 써서 그 변경을 되돌리지 않는다(fail-closed, "
+                "D-NAO-129 codex 3R). 그룹입찰 전환은 사람이 판단할 일이다"
+            )
+        if latest.get("nccAdgroupId") != parent_adgroup_id:
+            raise WriteValidationError(
+                f"update_ad_bid: 소재 {ncc_ad_id}가 판정 이후 다른 그룹으로 이동 "
+                f"({parent_adgroup_id} → {latest.get('nccAdgroupId')!r}) — 부모 ML 가드를 통과한 "
+                "그룹이 아니므로 쓰지 않는다(fail-closed)"
+            )
+        # ★body를 최신 응답으로 다시 만든다(위 ②) — 그 사이 바뀐 다른 필드를 덮지 않기 위해서다.
+        latest_attr = latest.get("adAttr")
+        if isinstance(latest_attr, str):
+            try:
+                latest_attr = json.loads(latest_attr)
+            except (ValueError, TypeError):
+                latest_attr = None
+        if not isinstance(latest_attr, dict):
+            raise WriteVerificationError(
+                f"update_ad_bid: 소재 {ncc_ad_id}의 최신 adAttr을 dict로 정규화 불가"
+                f"(type={type(latest.get('adAttr')).__name__}) — 병합 기반 소실, fail-closed"
+            )
+        ad_attr = dict(latest_attr)
+        ad_attr["bidAmt"] = bid_amt
+        ad_attr["useGroupBidAmt"] = False
+        body = dict(latest)
+        body["adAttr"] = ad_attr
+
     log.info("Naver SA 쓰기 시도: update_ad_bid ad=%s bidAmt=%s", ncc_ad_id, bid_amt)
     resp = requests.put(
         fetcher.BASE_URL + path,
