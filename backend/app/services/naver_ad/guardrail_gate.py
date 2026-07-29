@@ -165,7 +165,20 @@ def precheck_cooldown_and_cap(
 
 def _check_cooldown_and_cap(context: dict, now: datetime, proposal_type: str | None) -> str | None:
     # 쿨다운 2h는 전 유형 공통(DL3 면제 대상 아님) — 방향 무관하게 항상 검사.
-    last_change_at = context.get("last_change_at")
+    # ★D-NAO-130(Jino 2026-07-29 "평가하고 판단하면서 수정하면 되지 않을까?"): 자동 상향을 켜는
+    #   근거가 바로 그 되먹임 루프다 — 올리고, 실측하고, 손실이면 자동 하향이 깎는다. 그런데
+    #   UP과 DOWN이 같은 쿨다운 시계를 쓰면 **되돌리는 손이 최대 2시간 묶인다**(codex 적대 2R).
+    #   루프의 교정 단계를 막는 브레이크는 브레이크가 아니라 고장이다. 그래서 "직전 변경이 우리
+    #   자동 상향이었다면 하향은 쿨다운 면제".
+    #   ★진동 방어는 남는다: 되돌림은 한 번이면 충분하고(그 뒤엔 직전 변경이 DOWN이라 면제 안 됨),
+    #     자동 하향 일일 상한(_MAX_DAILY_AUTO_BID_DOWNS)과 ±15% 클램프가 그대로 걸린다.
+    if (
+        proposal_type in _BID_DOWN_TYPES
+        and context.get("last_change_was_auto_up")
+    ):
+        last_change_at = None
+    else:
+        last_change_at = context.get("last_change_at")
     if last_change_at is not None:
         elapsed_hours = (now - last_change_at).total_seconds() / 3600
         if elapsed_hours < _COOLDOWN_HOURS:

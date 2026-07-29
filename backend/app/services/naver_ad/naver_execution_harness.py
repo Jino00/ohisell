@@ -33,6 +33,7 @@ from sqlalchemy import func as sqlfunc, or_, select
 from sqlalchemy.orm import Session, aliased
 
 from app.models import (
+    NaverAdgroupProduct,
     NaverAgencyOp,
     NaverCampaignSettings,
     NaverChangeLog,
@@ -491,6 +492,116 @@ def _ad_bid_from_payload(raw: str | None) -> int | None:
         return None
 
 
+def _our_last_known_edit_tms(db: Session, ad_id: str) -> set[str]:
+    """우리가 아는 그 소재의 editTm 집합 — ①마지막 관측(daily sync) ②우리 성공 쓰기들.
+
+    live editTm이 여기 없으면 **그 사이 외부가 만진 것**이다(D-NAO-130).
+    """
+    known: set[str] = set()
+    row = (
+        db.query(NaverAdgroupProduct.ad_edit_tm)
+        .filter(NaverAdgroupProduct.ad_id == ad_id,
+                NaverAdgroupProduct.ad_edit_tm.isnot(None))
+        .first()
+    )
+    if row and row[0]:
+        known.add(str(row[0]))
+    for (raw,) in (
+        db.query(NaverChangeLog.after_value)
+        .filter(
+            NaverChangeLog.entity_type == "ad",
+            NaverChangeLog.entity_id == ad_id,
+            NaverChangeLog.dry_run.is_(False),
+            NaverChangeLog.after_value.isnot(None),
+        )
+        .order_by(NaverChangeLog.changed_at.desc())
+        .limit(_EDIT_TM_SCAN)
+        .all()
+    ):
+        try:
+            payload = json.loads(raw or "")
+        except (ValueError, TypeError):
+            continue
+        if isinstance(payload, dict) and payload.get("editTm"):
+            known.add(str(payload["editTm"]))
+    return known
+
+
+def _external_touch_since_last_known(db: Session, ad_id: str, live_edit_tm: str) -> bool:
+    """live editTm이 우리가 아는 어떤 editTm과도 다르면 True(그 사이 외부가 만졌다).
+
+    ★우리가 아는 editTm이 하나도 없으면 False를 준다 — 최초 관측을 '외부 변경'으로 읽으면
+    모든 소재가 첫 회차에 유령 사건을 만든다(D-NAO-127의 ② 판정 유보와 같은 규율).
+    """
+    known = _our_last_known_edit_tms(db, ad_id)
+    return bool(known) and str(live_edit_tm) not in known
+
+
+def _record_inline_external_touch(
+    db: Session, proposal: NaverProposal, live_edit_tm: str, live_bid: int, now: datetime,
+) -> None:
+    """쓰기 직전에 발견한 외부 변경을 관측 테이블에 즉시 남긴다(소실 방지, D-NAO-130).
+
+    D-NAO-127의 일 1회 탐지는 우리가 먼저 쓰면 editTm이 덮여 이 사건을 영영 못 본다.
+    여기서 남겨야 다음 판정의 기준점이 산다. 멱등 키는 그쪽과 동일(entity_id, op_type, occurred_at).
+    """
+    from app.services.naver_ad import ad_external_change
+
+    occurred_at = ad_external_change.parse_edit_tm(live_edit_tm)
+    dup = (
+        db.query(NaverAgencyOp.id)
+        .filter(
+            NaverAgencyOp.entity_type == "ad",
+            NaverAgencyOp.entity_id == proposal.target_id,
+            NaverAgencyOp.op_type == "bid_change",
+            NaverAgencyOp.occurred_at == occurred_at,
+        )
+        .first()
+    )
+    if dup is not None:
+        return
+    db.add(NaverAgencyOp(
+        op_date=now.date(), detected_at=now, entity_type="ad",
+        entity_id=proposal.target_id, campaign_id=proposal.campaign_id or "",
+        optimizer="ours", op_type="bid_change",
+        before_value=None, after_value=str(live_bid), magnitude=None,
+        is_exception=True, occurred_at=occurred_at,
+    ))
+    db.commit()
+    log.warning(
+        "소재 외부 변경을 쓰기 직전에 감지(D-NAO-130): ad=%s 현재 %s원(editTm=%s) — "
+        "자동 상향 기준점을 이 값으로 재설정한다",
+        proposal.target_id, live_bid, live_edit_tm,
+    )
+
+
+def last_change_was_auto_up(db: Session, entity_type: str, entity_id: str) -> bool:
+    """이 대상의 **가장 최근 성공 쓰기**가 우리 자동 상향이었는가(D-NAO-130).
+
+    되먹임 루프의 교정 단계(올렸는데 손실 → 되돌린다)가 쿨다운에 막히지 않게 하는 판정.
+    사람이 올린 것은 포함하지 않는다 — 사람 판단을 자동이 2시간 안에 뒤집게 만들 이유가 없다.
+    """
+    row = (
+        db.query(NaverProposal.proposal_type, NaverProposal.approval_source)
+        .join(NaverChangeLog, NaverChangeLog.proposal_id == NaverProposal.id)
+        .filter(
+            NaverChangeLog.entity_type == entity_type,
+            NaverChangeLog.entity_id == entity_id,
+            NaverChangeLog.dry_run.is_(False),
+            NaverChangeLog.after_value.isnot(None),
+        )
+        .order_by(NaverChangeLog.changed_at.desc())
+        .first()
+    )
+    if row is None:
+        return False
+    ptype, src = row
+    return ptype in BID_UP_TYPES and src is not None and src != "console"
+
+
+_EDIT_TM_SCAN = 20  # 우리 쓰기 editTm 스캔 폭
+
+
 _HUMAN_ANCHOR_SCAN = 20  # 사람 기준점 후보 스캔 폭(최신 파싱 가능한 행을 찾는다)
 
 
@@ -790,6 +901,14 @@ def _build_guardrail_context(db: Session, proposal: NaverProposal, now: datetime
                 "naver_execution_harness: guardrail context get_ad_bid 실패(fail-closed) "
                 "target_id=%s: %s", proposal.target_id, e,
             )
+        # D-NAO-130: 외부 변경 확인용 editTm은 **best-effort**로 따로 읽는다(실패해도 본 판정
+        # 무해 — 그 경우 기준점 재설정이 이번 회차에만 생략된다). current_bid 계약은 불변.
+        live_edit_tm = None
+        try:
+            live_edit_tm = naver_sa_writer.get_ad(proposal.target_id).get("editTm")
+        except Exception as e:  # noqa: BLE001 — 관측 부가정보
+            log.debug("naver_execution_harness: editTm 재조회 실패(무시) target_id=%s: %s",
+                      proposal.target_id, e)
 
         # D-NAO-121: 출시창 순위 하한 — target_type='ad'(소재 단위) 제안에서만 계산한다.
         # adgroup_id가 없으면(구 제안·격상 경로) 판정 불가라 floor_for를 호출하지 않고 None
@@ -836,11 +955,31 @@ def _build_guardrail_context(db: Session, proposal: NaverProposal, now: datetime
         context["auto_bid_down_today"] = count_auto_bid_down_today(
             db, proposal.target_type, proposal.target_id, now,
         )
-        # D-NAO-129 codex 적대[P1]: 자동 상향 누적 배수 상한의 기준점(auto_up_base_bid 참조).
-        # None = 최근 창에 자동 상향 이력 없음 → 상한 미적용(이번이 첫 스텝).
+        # D-NAO-130: 직전 변경이 우리 자동 상향이면 하향 쿨다운 면제(되먹임 루프의 교정 단계).
+        context["last_change_was_auto_up"] = last_change_was_auto_up(
+            db, proposal.target_type, proposal.target_id,
+        )
+        # D-NAO-129: 자동 상향 누적 배수 상한의 기준점(auto_up_base_bid 참조).
         context["auto_up_base_bid"] = auto_up_base_bid(
             db, proposal.target_type, proposal.target_id, now,
         )
+        # ★D-NAO-130(codex 적대 4R[P1] 선행조건②) — **쓰기 직전 외부 변경 확인**.
+        #   D-NAO-127 소재 외부변경 탐지는 하루 1회(07:45)인데 이 레인은 매시간 쓴다. 우리가
+        #   먼저 쓰면 editTm이 우리 것으로 바뀌어 **외부 사건이 영구 소실**된다 — 그러면 기준점이
+        #   옛 값에 머문 채 자동화가 대행사의 하향을 되돌려 올린다(재현: 07:45 기준 2,000 →
+        #   10:00 대행사 400 → 11:00 우리 460 → 다음날 탐지는 "우리 쓰기"로 분류 → 기준점 2,000).
+        #   그래서 **지금 이 자리에서** 확인한다: 방금 재조회한 live editTm이 우리가 아는 마지막
+        #   editTm(마지막 관측 또는 우리 마지막 쓰기)과 다르면 그 사이 외부가 만진 것이다.
+        #   ①기준점을 현재 실측값으로 즉시 재설정하고 ②그 사건을 관측 테이블에 남긴다(소실 방지).
+        if live_edit_tm and context["current_bid"] is not None:
+            try:
+                if _external_touch_since_last_known(db, proposal.target_id, live_edit_tm):
+                    context["auto_up_base_bid"] = context["current_bid"]
+                    _record_inline_external_touch(
+                        db, proposal, live_edit_tm, context["current_bid"], now,
+                    )
+            except Exception as e:  # noqa: BLE001 — 관측 부가기능, 본 실행을 막지 않는다
+                log.warning("naver_execution_harness: 쓰기 직전 외부변경 확인 실패(무시): %s", e)
         return context
 
     if proposal.target_type not in ("keyword", "campaign"):

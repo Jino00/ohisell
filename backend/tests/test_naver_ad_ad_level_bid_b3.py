@@ -534,13 +534,12 @@ def test_hourly_lane_canary_probe_up_holds_no_ad_routing(db):
     assert any("탐침" in h["reason"] and "[레버 미연결]" in h["reason"] for h in result["held"])
 
 
-def test_hourly_lane_ad_up_creates_confirm_card_not_inline_fire(db):
-    """★D-NAO-129 최종 계약: 미연결 그룹의 UP은 **카드는 만들되 자동 발사하지 않는다**.
+def test_hourly_lane_ad_up_executes_inline(db):
+    """★D-NAO-130: 미연결 그룹의 UP도 소재 레버로 **인라인 자동 실행**된다(하향과 대칭).
 
-    상향의 경제적 브레이크가 대리 지표(가격 규칙)이고, 그 기준점을 지키는 장치가 구조적으로
-    성립하지 않는다(외부 하향 → 우리가 먼저 쓰면 editTm이 우리 것이 되어 외부 사건 영구 소실).
-    그래서 발사는 사람이 한다 — 하향(자동)과 비대칭인 것이 의도다.
-    ★타입은 `bid_up`이어야 한다(±15% 클램프 적용). 면제 타입(servo/rank)이 소재로 새면 안 된다.
+    Jino 확정 근거: 올리고 → 실측하고 → 손실이면 자동 하향이 깎는 되먹임 루프가 이미 돈다.
+    ★타입은 반드시 `bid_up`이어야 한다 — 소재는 rank-step 분기(bid_up_servo/bid_up_rank)에
+    안 걸려 ±15% 클램프가 적용되는 레거시 폴백을 탄다. 면제 타입이 소재로 새면 안 된다.
     """
     _seed_hourly_shopping(db)
     _ad(db, "grp-hot", "p1", ad_id="nad-1", ad_bid_amt=800, use_group=False)
@@ -551,10 +550,11 @@ def test_hourly_lane_ad_up_creates_confirm_card_not_inline_fire(db):
          patch.object(auto_operator.naver_sa_writer, "get_ad_bid", return_value=800), \
          patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
         result = auto_operator.run_hourly_lane(db, now=NOW, fetch_intraday=lambda t, d: _overheat_curve())
-    mock_exec.assert_not_called()  # ★자동 발사 없음
-    assert result["ad_confirm_pending"] == 1
+    mock_exec.assert_called_once()
+    assert result["executed"] == 1
+    assert result["ad_confirm_pending"] == 0
     saved = db.query(NaverProposal).filter(NaverProposal.target_type == "ad").one()
-    assert (saved.proposal_type, saved.status, saved.target_bid) == ("bid_up", "pending", 920)
+    assert (saved.proposal_type, saved.status, saved.target_bid) == ("bid_up", "approved", 920)
 
 
 def test_daily_lane_excludes_ad_proposals_from_auto_approval(db):
@@ -763,14 +763,14 @@ def test_canary_default_empty_set():
         assert auto_operator._ad_bid_canary("any-campaign") is False
 
 
-def test_canary_generation_open_both_ways_but_autofire_down_only():
-    """D-NAO-129 최종: 생성은 양방향, **자동 발사는 하향만**(상향은 Confirm).
+def test_canary_generation_and_autofire_both_directions():
+    """D-NAO-130: 생성·자동발사 모두 양방향. 두 상수는 항상 같이 움직인다.
 
-    두 상수가 갈라져 있는 것이 이 스프린트의 결론이다 — 소리 없이 같아지면 이 테스트가 잡는다.
-    상향 자동 발사를 켜려면 소재별 경제 신호 또는 쓰기 직전 외부변경 확인이 선행돼야 한다.
+    한쪽만 열면 실쓰기 경계에서 죽는 카드가 Confirm 큐에 쌓인다(죽은 카드 금지).
+    되돌리려면 _AD_AUTO_EXEC_PROPOSAL_TYPES에서 bid_up을 빼면 Confirm 큐로 복귀한다.
     """
     assert auto_operator._AD_BID_CANARY_PROPOSAL_TYPES == frozenset({"bid_down", "bid_up"})
-    assert auto_operator._AD_AUTO_EXEC_PROPOSAL_TYPES == frozenset({"bid_down"})
+    assert auto_operator._AD_AUTO_EXEC_PROPOSAL_TYPES == frozenset({"bid_down", "bid_up"})
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1747,3 +1747,111 @@ def test_human_anchor_falls_back_when_latest_row_unparseable(db):
         ))
     db.commit()
     assert harness.auto_up_base_bid(db, "ad", "nad-1", NOW) == 400
+
+
+# ── D-NAO-130 자동 상향 개방의 두 축 회귀 ────────────────────────────────────
+def test_write_time_external_touch_resets_anchor(db):
+    """★codex 적대 4R[P1] 회귀: 외부 변경을 **쓰기 직전에** 잡아 기준점을 즉시 재설정한다.
+
+    하루 1회 탐지에만 기대면, 우리가 먼저 쓰는 순간 editTm이 우리 것으로 바뀌어 외부 사건이
+    영구 소실된다(07:45 기준 2,000 → 10:00 대행사 400 → 11:00 우리 460 → 다음날 "우리 쓰기"로
+    분류 → 기준점 영영 2,000 → 자동화가 4,000까지 되돌림). 매 판정마다 대조해서 그 창을 없앤다.
+    """
+    _settings(db, optimizer="ours")
+    db.add(NaverAdgroupProduct(
+        adgroup_id="grp-hot", campaign_id=CAMP, mall_product_id="p1", product_name="p1",
+        ad_id=AD_ID, ad_bid_amt=2000, use_group_bid_amt=False,
+        ad_edit_tm="2026-07-29T01:00:00.000Z",  # 우리가 아는 마지막 editTm
+    ))
+    db.add(NaverChangeLog(  # 사람이 2,000으로 정했던 이력(종전 기준점)
+        entity_type="ad", entity_id=AD_ID, campaign_id=CAMP, action="update_bid",
+        dry_run=False, changed_at=NOW - timedelta(hours=5), executed_at=NOW - timedelta(hours=5),
+        proposal_id=None, after_value=json.dumps({"adAttr": {"bidAmt": 2000}}),
+    ))
+    p = _ad_proposal(db, proposal_type="bid_up", target_bid=460)
+    p.approval_source = auto_operator.APPROVAL_SOURCE_HOURLY
+    db.commit()
+
+    live = {"nccAdId": AD_ID, "editTm": "2026-07-29T06:39:05.000Z",  # 우리가 모르는 editTm
+            "adAttr": {"bidAmt": 400, "useGroupBidAmt": False}}
+    with patch.object(harness.naver_sa_writer, "get_ad_bid", return_value=400), \
+         patch.object(harness.naver_sa_writer, "get_ad", return_value=live):
+        ctx = harness._build_guardrail_context(db, p, NOW)
+    assert ctx["auto_up_base_bid"] == 400  # 종전 기준점 2,000이 아니라 현재 실측값
+    op = db.query(NaverAgencyOp).filter(NaverAgencyOp.entity_type == "ad").one()
+    assert (op.op_type, op.after_value) == ("bid_change", "400")  # 사건이 소실되지 않는다
+
+
+def test_write_time_check_silent_when_edit_tm_is_ours(db):
+    """우리가 쓴 editTm이면 외부 변경이 아니다 — 유령 사건을 만들지 않는다."""
+    _settings(db, optimizer="ours")
+    db.add(NaverAdgroupProduct(
+        adgroup_id="grp-hot", campaign_id=CAMP, mall_product_id="p1", product_name="p1",
+        ad_id=AD_ID, ad_bid_amt=800, use_group_bid_amt=False,
+        ad_edit_tm="2026-07-28T01:00:00.000Z",
+    ))
+    db.add(NaverChangeLog(  # 우리 쓰기가 남긴 editTm
+        entity_type="ad", entity_id=AD_ID, campaign_id=CAMP, action="update_bid",
+        dry_run=False, changed_at=NOW - timedelta(hours=1), executed_at=NOW - timedelta(hours=1),
+        proposal_id=None, after_value=json.dumps({"editTm": "2026-07-29T02:00:00.000Z",
+                                                  "adAttr": {"bidAmt": 800}}),
+    ))
+    p = _ad_proposal(db, proposal_type="bid_up", target_bid=920)
+    p.approval_source = auto_operator.APPROVAL_SOURCE_HOURLY
+    db.commit()
+    live = {"nccAdId": AD_ID, "editTm": "2026-07-29T02:00:00.000Z",
+            "adAttr": {"bidAmt": 800, "useGroupBidAmt": False}}
+    with patch.object(harness.naver_sa_writer, "get_ad_bid", return_value=800), \
+         patch.object(harness.naver_sa_writer, "get_ad", return_value=live):
+        harness._build_guardrail_context(db, p, NOW)
+    assert db.query(NaverAgencyOp).count() == 0
+
+
+def test_down_after_auto_up_is_exempt_from_cooldown(db):
+    """★D-NAO-130: 되먹임 루프의 **교정 단계**는 쿨다운에 막히지 않는다.
+
+    올렸는데 손실로 뒤집히면 즉시 되돌려야 한다 — 그게 자동 상향을 켠 근거다.
+    교정을 막는 브레이크는 브레이크가 아니라 고장이다.
+    """
+    from app.services.naver_ad import guardrail_gate
+
+    just_now = {"last_change_at": NOW - timedelta(minutes=10), "changes_today_count": 1,
+                "current_bid": 920, "campaign_type": "SHOPPING"}
+    # 직전 변경이 우리 자동 상향 → 하향은 쿨다운 면제
+    assert guardrail_gate.check(
+        {"proposal_type": "bid_down", "target_bid": 790},
+        {**just_now, "last_change_was_auto_up": True, "auto_exec": True,
+         "auto_bid_down_today": 0}, now=NOW,
+    ) is None
+    # 그 플래그가 없으면 종전대로 쿨다운에 막힌다(면제는 이 경우 한정)
+    blocked = guardrail_gate.check(
+        {"proposal_type": "bid_down", "target_bid": 790},
+        {**just_now, "auto_exec": True, "auto_bid_down_today": 0}, now=NOW,
+    )
+    assert blocked is not None and "쿨다운" in blocked
+    # 상향에는 면제가 없다 — 진동 방지(올린 뒤 곧바로 또 올리지 않는다)
+    up_blocked = guardrail_gate.check(
+        {"proposal_type": "bid_up", "target_bid": 1050},
+        {**just_now, "last_change_was_auto_up": True, "auto_exec": True,
+         "roas_corrected": 5.0, "target_roas": 1.9, "unconverted_spend": 0,
+         "cost_today": 0, "daily_budget": 300000}, now=NOW,
+    )
+    assert up_blocked is not None and "쿨다운" in up_blocked
+
+
+def test_last_change_was_auto_up_ignores_human(db):
+    """사람이 올린 것은 면제 대상이 아니다 — 자동이 2시간 안에 사람 판단을 뒤집지 않는다."""
+    for src, expect in (("console", False), (auto_operator.APPROVAL_SOURCE_HOURLY, True)):
+        db.query(NaverChangeLog).delete()
+        db.query(NaverProposal).delete()
+        pr = NaverProposal(proposal_type="bid_up", target_type="ad", target_id="nad-x",
+                           campaign_id=CAMP, status="approved", approval_source=src)
+        db.add(pr)
+        db.flush()
+        db.add(NaverChangeLog(
+            entity_type="ad", entity_id="nad-x", campaign_id=CAMP, action="update_bid",
+            dry_run=False, changed_at=NOW, executed_at=NOW, proposal_id=pr.id,
+            after_value=json.dumps({"adAttr": {"bidAmt": 920}}),
+        ))
+        db.commit()
+        assert harness.last_change_was_auto_up(db, "ad", "nad-x") is expect
