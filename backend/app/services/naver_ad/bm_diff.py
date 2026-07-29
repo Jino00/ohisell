@@ -52,6 +52,9 @@ OURS_MATCH_WINDOW_H = 48    # ours 자기변경 매칭 창(op_date 종료 기준
 #   외부 귀속 기록(external_*)이 없어 veto 브레이크가 안 걸리고 인과 규칙(4)만 남는다.
 ECHO_LOOKBACK_D = 3
 _ID_CHUNK = 400             # change_log IN 절 분할(SQLite 바인딩 상한 방어)
+# naver_agency_op의 **다른 프로듀서**가 쓰는 grain(D-NAO-127, ad_external_change 소유).
+# 이 모듈은 스냅샷에서 나온 grain만 만들고 지운다.
+AD_GRAIN = "ad"
 
 # op_type → 우리(ours)가 API로 쓰는 change_log.action 집합(매칭 대상). 여기 없는 op_type은
 # 우리가 API로 안 쓰는 종류 → ours여도 매칭 불가 = 외부 개입으로 간주(§3-1 후단).
@@ -610,7 +613,12 @@ def detect_agency_ops(db: Session, *, op_date: date | None = None) -> dict:
     raw = _detect_added(curr, prev) + _detect_removed(curr, prev) + _detect_changed(curr, prev)
     logs = _load_change_logs(db, raw, win)
 
-    db.query(NaverAgencyOp).filter(NaverAgencyOp.op_date == d).delete()  # 멱등 재생성
+    # 멱등 재생성 — ★**자기 산출물만** 지운다(D-NAO-127). 이 테이블은 이제 프로듀서가 둘이다:
+    # 여기(스냅샷 유래 campaign/adgroup grain)와 ad_external_change(소재 grain, editTm 앵커).
+    # op_date만 걸고 지우면 같은 날 소재 관측이 diff 리플레이 한 번에 조용히 증발한다.
+    db.query(NaverAgencyOp).filter(
+        NaverAgencyOp.op_date == d, NaverAgencyOp.entity_type != AD_GRAIN
+    ).delete()
     n_event = n_exc = 0
     for op in raw:
         keep, is_exc = _classify(op, logs, win)
