@@ -1162,3 +1162,16 @@ RG 옛 공백(04-20~05-03) Jino 종결 승인(13:34) — 공백 아님(배송비
 
 ## 새 세션 시작 프롬프트
 .claude/memory/HANDOFF_ohisell-replenishment-phase2-plan-reviewed_20260617.md 읽고 이어서 작업해줘
+
+---
+## 04 자동운영 D+N (2026-07-30, 08:55 정기 감사 — Fable 세션, 검증·보고 전용, 쓰기 0건)
+- 워크트리 `spot-backtest-cadence-pacing-dedfad`는 이번 세션에서 확인되지 않음 → 프로젝트 루트 claude-progress.txt에 기록.
+- 서버 레인: daily(2026-07-30 08:50:29 KST) ok / hourly(08:20:45 KST) ok. 둘 다 정상.
+- ★핵심 발견: D-NAO-129/130(소재 ad grain 상향 자동실행) 레인 자동 상향 첫 실집행 확인 — 07-30 02:20 KST(approved=5 executed=4 failed=1). failed 1건은 D-NAO-130 fail-closed 가드가 실제 발동한 것(캠페인03 소재 nad-...373441859의 stale editTm 2610원 감지 → 자동 상향 보류 + 기준점 재설정, 다음 회차부터 정상 재개) — 안전장치가 라이브에서 설계대로 작동함을 실증. 이후 03:20~08:20 매시 4~5건 반복. 최신(08:20) 라이브 3건 재조회 100% 일치.
+- 일 레인(08:50) 실집행 4건 전부 라이브 일치(14/15/16프로 그룹 bid_up + 갤럭시 플립2 그룹 bid_down). campaign 04(cmp-...008514959) 자체는 오늘 일 레인 실쓰기 0건.
+- 시간당 카운터(최신 08:20): reserved=5 capped=2 confirm_pending=2 dup_skipped=0 inflight_skipped=0 — 라운드 캡(5건/시간) 반복 도달, 초과 수요는 Confirm 대기로 정상 강등(D-NAO-125).
+- 카나리(04, 07-29): cost 10,796 · clk 8 · conv 2 · conv_amt 36,900 · CPC 1,349.5 · ROAS 3.4179.
+- A/B(recent7 07-22~07-28 vs pre 07-05~11): 04 ROAS lift +36.1% vs 03 -4.7%(DiD +40.8pp, 04 우위 지속) / cost는 03 +42.3% vs 04 +11.4%(DiD -30.9pp, 03가 훨씬 더 볼륨 확장).
+- ⚠️문서 정정 필요: 이 감사 루틴 프롬프트가 "캠페인03=MOP 대행사 관리, 쓰기 절대금지"로 서술하고 있으나, 실제로는 D-NAO-61(07-19 MOP→ours)·D-NAO-92(07-24 정지)·D-NAO-101(07-28 재가동)을 거쳐 현재 optimizer=ours·auto_operate=1로 우리 자동운영 중(track 파일 확인). 감사 자체는 read-only만 수행해 문제 없었으나, 다음 세션은 이 프롬프트 문구를 D-NAO-101 반영해 갱신할 것.
+- 중단조건 전부 정상: 04 당일소진(hour7까지) 1,484 << 임계 28,856 / 04 ROAS(07-29) 3.42 >> 1.0 / campaign04 외부변경 0건.
+- 기록: `docs/references/data/ab_03_vs_04_daily.jsonl`에 07-30 항목 추가(07-29 항목 누락 확인·gap_note로 표기). D-NAO-51 섹션에도 확인 라인 추가(집행 있었으므로).
