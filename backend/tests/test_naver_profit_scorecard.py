@@ -4,7 +4,7 @@
 #   대비 증감% ⑤Slack/diary 호출 여부(mock) ⑥무보정(source≠actual_revenue_ratio) 정직 표기.
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -298,10 +298,44 @@ def test_ours_optimizer_campaign_included_even_without_auto_operate(db, monkeypa
     assert "17프로.케이스" in entry.rationale
 
 
-def test_non_ours_non_auto_operate_campaign_excluded(db, monkeypatch):
+def test_spending_agency_campaign_is_now_included(db, monkeypatch):
+    """★계약 변경(2026-07-30 사고 수정): 구 계약은 `auto_operate ∪ optimizer='ours'`가
+    아니면 제외였다. 이제 **돈을 쓰는 캠페인은 스위치와 무관하게 관측한다** — 이 스코어카드는
+    목적함수(D-NAO-59 총이익 절대액)를 표면화하는 관찰 전용 장치이고, 대행사가 태우는 광고비도
+    우리 총이익에 그대로 들어가기 때문이다(D-NAO-13: 진단·리포트는 상태 무관 전 캠페인)."""
     _settings(db, "cmp-agency", auto_operate=False, optimizer="mop")
     _campaign_name(db, "cmp-agency", "대행사 캠페인")
     _ad_row(db, YDAY, "cmp-agency", "grpX", cost=1000, direct=3000)
+    db.commit()
+
+    monkeypatch.setattr(profit_scorecard, "correction_factor", _fixed_factor("1.0"))
+    _fake_slack(monkeypatch)
+
+    result = profit_scorecard.run_profit_scorecard(db, now=NOW)
+    assert result["campaigns"] == 1
+    assert "대행사 캠페인" in _observes(db)[0].rationale
+
+
+def test_all_optimizer_none_still_produces_scorecard(db, monkeypatch):
+    """★2026-07-30 사고 직접 회귀: 전 캠페인 optimizer='none' · auto_operate=0(긴급정지)
+    상태에서도 스코어카드가 침묵하지 않는다. 구 코드로는 campaigns==0이었다."""
+    _settings(db, "cmp-stopped", auto_operate=False, optimizer="none")
+    _campaign_name(db, "cmp-stopped", "정지된 캠페인")
+    _ad_row(db, YDAY, "cmp-stopped", "grpS", cost=1000, direct=3000)
+    db.commit()
+
+    monkeypatch.setattr(profit_scorecard, "correction_factor", _fixed_factor("1.0"))
+    _fake_slack(monkeypatch)
+
+    result = profit_scorecard.run_profit_scorecard(db, now=NOW)
+    assert result["campaigns"] == 1
+    assert "정지된 캠페인" in _observes(db)[0].rationale
+
+
+def test_stale_campaign_outside_scope_excluded(db, monkeypatch):
+    """스코프는 계정 전체가 아니다 — settings 행도 없고 최근 7일 광고비도 없으면 제외."""
+    _campaign_name(db, "cmp-stale", "옛날 캠페인")
+    _ad_row(db, YDAY - timedelta(days=60), "cmp-stale", "grpZ", cost=1000, direct=3000)
     db.commit()
 
     monkeypatch.setattr(profit_scorecard, "correction_factor", _fixed_factor("1.0"))

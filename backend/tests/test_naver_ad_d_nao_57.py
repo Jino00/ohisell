@@ -15,8 +15,9 @@ from sqlalchemy.pool import StaticPool
 
 from app.database import Base
 from app.models import (
-    Channel, NaverAdgroupProduct, NaverCampaignSettings, NaverEntity, NaverProductBep,
-    NaverSettlementCase, NaverSettlementDaily, Order, ProductChannelMapping, ProductMaster,
+    Channel, NaverAdDaily, NaverAdgroupProduct, NaverCampaignSettings, NaverEntity,
+    NaverProductBep, NaverSettlementCase, NaverSettlementDaily, Order, ProductChannelMapping,
+    ProductMaster,
 )
 from app.services.naver_ad import bep_calculator, campaign_target_resolver, shopping_ad_product_sync
 from app.utils.kst import kst_today
@@ -44,20 +45,39 @@ def _ours_shopping_adgroup(db, campaign_id="cmp-shop", adgroup_id="grp-1"):
     db.commit()
 
 
-def test_collect_only_ours_shopping_active_adgroups(db):
-    # ours 쇼핑(대상) + mop 쇼핑(제외) + ours 파워링크(제외) + ours 쇼핑 off(제외)
-    db.add(NaverCampaignSettings(campaign_id="c-ours", optimizer="ours"))
-    db.add(NaverCampaignSettings(campaign_id="c-mop", optimizer="mop"))
-    db.add(NaverCampaignSettings(campaign_id="c-web", optimizer="ours"))
+def test_collect_scopes_shopping_active_adgroups_regardless_of_optimizer(db):
+    """★2026-07-30 사고 회귀: 스코프는 optimizer가 아니라 **관측 스코프**다.
+
+    구 계약은 `optimizer='ours'`만 대상으로 삼았고, 긴급정지(D-NAO-132)로 전 캠페인이
+    optimizer='none'이 되자 수집이 통째로 죽었다. 이제 settings 행이 있으면(값 무관)
+    대상이고, 모듈 고유 필터(SHOPPING · status='on')만 남는다.
+    """
+    db.add(NaverCampaignSettings(campaign_id="c-none", optimizer="none"))   # 정지 중 — 그래도 대상
+    db.add(NaverCampaignSettings(campaign_id="c-mop", optimizer="mop"))     # 대행사 — 그래도 대상
+    db.add(NaverCampaignSettings(campaign_id="c-web", optimizer="ours"))    # 파워링크 → 그룹이 제외
     db.add_all([
-        NaverEntity(entity_type="adgroup", entity_id="g-ours", campaign_id="c-ours", campaign_type="SHOPPING", status="on"),
+        NaverEntity(entity_type="adgroup", entity_id="g-none", campaign_id="c-none", campaign_type="SHOPPING", status="on"),
         NaverEntity(entity_type="adgroup", entity_id="g-mop", campaign_id="c-mop", campaign_type="SHOPPING", status="on"),
         NaverEntity(entity_type="adgroup", entity_id="g-web", campaign_id="c-web", campaign_type="WEB_SITE", status="on"),
-        NaverEntity(entity_type="adgroup", entity_id="g-off", campaign_id="c-ours", campaign_type="SHOPPING", status="off"),
+        NaverEntity(entity_type="adgroup", entity_id="g-off", campaign_id="c-none", campaign_type="SHOPPING", status="off"),
+        # 스코프 밖(설정 행 없음·최근 광고비 없음) → 제외
+        NaverEntity(entity_type="adgroup", entity_id="g-out", campaign_id="c-out", campaign_type="SHOPPING", status="on"),
     ])
     db.commit()
-    ags = shopping_ad_product_sync._ours_shopping_adgroups(db)
-    assert {a.entity_id for a in ags} == {"g-ours"}
+    ags = shopping_ad_product_sync._observed_shopping_adgroups(db)
+    assert {a.entity_id for a in ags} == {"g-none", "g-mop"}
+
+
+def test_collect_scope_includes_recent_spender_without_settings(db):
+    """설정 행이 없어도 **최근 7일 광고비>0**이면 관측한다(사고 증상 '01·03이 돈을 쓰는데
+    우리가 못 본다'의 직접 회귀)."""
+    db.add(NaverEntity(entity_type="adgroup", entity_id="g-spend", campaign_id="c-spend",
+                       campaign_type="SHOPPING", status="on"))
+    db.add(NaverAdDaily(ad_date=kst_today(), campaign_id="c-spend", adgroup_id="g-spend",
+                        keyword_id="", campaign_type="SHOPPING", cost=1234, clk=1, imp=10))
+    db.commit()
+    ags = shopping_ad_product_sync._observed_shopping_adgroups(db)
+    assert {a.entity_id for a in ags} == {"g-spend"}
 
 
 def test_sync_adgroup_products_snapshot_replace_and_dedup(db):
@@ -69,7 +89,8 @@ def test_sync_adgroup_products_snapshot_replace_and_dedup(db):
     ]}
     res = shopping_ad_product_sync.sync_adgroup_products(db, ads_by_adgroup=ads)
     assert res == {"adgroups": 1, "mappings": 2, "products": 2, "removed": 0,
-                   "failed_adgroups": 0, "external_ad_changes": 0}  # D-NAO-127 additive
+                   "failed_adgroups": 0, "external_ad_changes": 0,  # D-NAO-127 additive
+                   "observation_blind": False}  # 2026-07-30 사고 수정 additive
     rows = db.query(NaverAdgroupProduct).filter(NaverAdgroupProduct.adgroup_id == "grp-1").all()
     assert {r.mall_product_id for r in rows} == {"13365319468", "999"}
     assert all(r.campaign_id == "cmp-shop" for r in rows)

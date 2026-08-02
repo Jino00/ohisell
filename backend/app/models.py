@@ -1706,7 +1706,10 @@ class NaverAdgroupProduct(Base):
     grain: (adgroup_id, mall_product_id). 소스: 쇼핑 소재 /ncc/ads의
     referenceData.mallProductId(type=SHOPPING_PRODUCT_AD) — naver_product_bep.channel_product_id와
     정확히 일치(라이브 실증). 한 그룹에 소재(상품)가 여럿일 수 있어 unique는 (adgroup, mall_product).
-    optimizer='ours' 쇼핑 캠페인의 활성 그룹만 매일 08:20 sync가 스냅샷 교체(그룹 단위).
+    **관측 스코프**(campaign_roster.observation_campaign_ids — 최근 7일 광고비>0 ∪ settings 행,
+    optimizer 무관) 쇼핑 캠페인의 활성 그룹을 매일 07:45 sync가 스냅샷 교체(그룹 단위).
+    ★구 스코프는 optimizer='ours'였고, 2026-07-30 긴급정지로 그 집합이 비자 이 테이블 276행이
+    전량 삭제됐다(2026-07-31 07:45 KST). 관측 스코프는 실행 스위치와 분리한다(D-NAO-13).
     campaign_target_resolver 우선순위 ②(상품 파생 target_roas)가 이 매핑을 소비한다.
 
     ★B1(스프린트 B, D-NAO-65): 소재-레벨 실효입찰 인식·저장. 각 SHOPPING_PRODUCT_AD 소재의

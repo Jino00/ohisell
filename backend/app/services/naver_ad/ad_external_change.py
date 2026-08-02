@@ -372,12 +372,25 @@ def run(
     """탐지 + 적재 1회(harness). 자체 commit — 호출부(매핑 sync)의 트랜잭션과 분리한다.
 
     반환: {"observed", "ops", "recorded"}.
+
+    ★이 모듈은 **자체 스코프가 없다** — 관측 소재 목록(`observed`)을 호출부
+    (`shopping_ad_product_sync`)의 수집 결과에 100% 의존한다. 그래서 호출부의 스코프가
+    죽으면 이 탐지기도 같이 죽는데, 구 코드는 그 상태를 INFO `관측 0소재`로만 남겨
+    **맹목이 안전 확인처럼 보였다**(2026-07-30 사고, 사흘간 침묵). observed가 비면
+    WARNING으로 승격한다 — 소재를 하나도 못 보는 것은 정상 운영 상태가 아니다.
     """
     n = now or kst_now()
     ops = detect_ad_external_changes(db, prev_by_ad=prev_by_ad, observed=observed)
     recorded = record_ad_external_changes(db, ops, n)
     if recorded:
         db.commit()
-    log.info("ad_external_change: 관측 %d소재, 외부변경 op %d건(적재 %d)",
-             len(observed), len(ops), recorded)
+    if not observed:
+        log.warning(
+            "ad_external_change: 관측 대상 소재가 0 — 소재 grain 전면 맹목"
+            "(호출부 수집 결과에 ad_id를 가진 소재가 하나도 없다: 수집 스코프 결함"
+            "(campaign_roster.observation_campaign_ids) 또는 소재 미수집 의심)",
+        )
+    else:
+        log.info("ad_external_change: 관측 %d소재, 외부변경 op %d건(적재 %d)",
+                 len(observed), len(ops), recorded)
     return {"observed": len(observed), "ops": len(ops), "recorded": recorded}

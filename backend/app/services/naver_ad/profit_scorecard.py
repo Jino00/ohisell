@@ -2,7 +2,9 @@
 #   docs/PLAN_naver-ad-ex-expansion.md §4-1) — 관찰 전용, 실쓰기 0(네이버 API 호출도 0).
 # 역할: 목적함수(D-NAO-59 총이익 절대액)를 매일 캠페인별로 표면화한다 — ROAS·매출·클릭만
 #   보이고 총이익 절대액이 안 보여 매출 −52% 사태를 3일 뒤에야 사람이 발견한 사고(ref39)를
-#   막는다. 대상 = auto_operate=True ∪ optimizer='ours' 캠페인(현재 03/04/17프로/P_Test).
+#   막는다. 대상 = **관측 스코프**(campaign_roster.observation_campaign_ids — 최근 7일
+#   광고비>0 ∪ settings 행 존재, optimizer/auto_operate 무관. 구 정의 `auto_operate=True ∪
+#   optimizer='ours'`는 2026-07-30 긴급정지로 공집합이 돼 이 장치가 통째로 침묵했다).
 #   ①어제(D-1) 캠페인별 이익+합계 ②최근 7일(D-7~D-1) 일평균 ③2026년 6월(06-01~06-30)
 #   baseline 대비 증감%. 총이익 = 보정conv_amt(직+간접) ÷ bep_roas − cost.
 #   bep_roas는 campaign_target_resolver의 캠페인-grain 우선순위(② 캠페인 매핑 상품 BEP →
@@ -24,8 +26,10 @@ from decimal import ROUND_HALF_UP, Decimal
 
 from sqlalchemy.orm import Session
 
-from app.models import NaverCampaignSettings, NaverEntity, NaverProductBep
-from app.services.naver_ad import campaign_target_resolver, metrics_aggregator, slack_notifier
+from app.models import NaverEntity, NaverProductBep
+from app.services.naver_ad import (
+    campaign_roster, campaign_target_resolver, metrics_aggregator, slack_notifier,
+)
 from app.services.naver_ad.diagnosis import correction_factor
 from app.services.naver_ad.diary import ACTOR_SYSTEM, write_diary_entry
 from app.utils.kst import kst_now
@@ -49,21 +53,24 @@ def _round_won(value: Decimal) -> int:
     return int(value.quantize(_Q0, rounding=ROUND_HALF_UP))
 
 
-def _target_campaign_ids(db: Session) -> set[str]:
-    """대상 캠페인 = auto_operate=True ∪ optimizer='ours'(D-NAO-13, 현재 03/04/17프로/P_Test).
-    auto_operator._auto_operate_campaign_ids·proposal_writer._ours_campaign_ids와 동형 쿼리를
-    이 모듈에 로컬 복제한다(원칙18 SA간 직접 호출 금지 — 값만 같은 쿼리로 재현하는 두 모듈의
-    기존 관례를 그대로 잇는다. 셋째 지점에서 다시 만들면 셋 다 갈라질 위험이 있으나, 두 상수
-    모두 원본이 NaverCampaignSettings 컬럼 자체라 정의가 바뀌면 모델 마이그레이션이 드러낸다)."""
-    auto_ids = {
-        r[0] for r in db.query(NaverCampaignSettings.campaign_id)
-        .filter(NaverCampaignSettings.auto_operate.is_(True)).all()
-    }
-    ours_ids = {
-        r[0] for r in db.query(NaverCampaignSettings.campaign_id)
-        .filter(NaverCampaignSettings.optimizer == "ours").all()
-    }
-    return auto_ids | ours_ids
+def _target_campaign_ids(db: Session, *, today: date | None = None) -> set[str]:
+    """대상 캠페인 = **관측 스코프**(campaign_roster.observation_campaign_ids).
+
+    `today`는 스코어카드가 보고하는 날 기준(호출부가 `now.date()`를 넘긴다) — 과거 날짜
+    리플레이가 그날의 스코프를 재현해야 하므로 실시간 `kst_today()`에 기대지 않는다.
+
+    ★스코프 교체(2026-07-30 사고): 구 정의는 `auto_operate=True ∪ optimizer='ours'`였다.
+    D-NAO-132 긴급정지로 두 조건이 동시에 비자 **목적함수(D-NAO-59 총이익 절대액)를 매일
+    표면화하는 장치가 통째로 침묵했다.** 이 스코어카드가 존재하는 이유 자체가 "ROAS·매출만
+    보이고 총이익이 안 보여 −52% 사태를 3일 뒤에야 발견한 사고"(ref39)인데, 정지 기간은
+    바로 그 이익 추이를 가장 봐야 할 구간이다. 관찰 전용(실쓰기 0·API 0)이므로 스코프를
+    실행 스위치에 묶을 근거도 없다 — D-NAO-13 원문 "진단·리포트·이상 알림은 상태 무관 전
+    캠페인(읽기는 무해)". 근거·선례는 campaign_roster.observation_campaign_ids docstring.
+
+    ★구 정의는 새 스코프의 **부분집합**이다(settings 행이 있어야 optimizer/auto_operate가
+    참일 수 있으므로) — 즉 이 교체로 빠지는 캠페인은 없고, 돈을 쓰는 캠페인이 추가될 뿐이다.
+    """
+    return campaign_roster.observation_campaign_ids(db, today=today)
 
 
 def _campaign_names(db: Session, campaign_ids: set[str]) -> dict[str, str]:
@@ -201,7 +208,14 @@ def run_profit_scorecard(db: Session, now: datetime | None = None) -> dict:
     factor_info = correction_factor(db, yesterday)
     factor = factor_info["factor"]
 
-    campaign_ids = _target_campaign_ids(db)
+    campaign_ids = _target_campaign_ids(db, today=n.date())
+    if not campaign_ids:
+        # ★"대상 0" ≠ "대상은 있는데 이익이 0". 구 코드는 조용히 빈 스코어카드를 냈다
+        #   (2026-07-30 사고: 목적함수 표면화 장치가 침묵하는데 화면은 정상으로 보였다).
+        log.warning(
+            "[P7] 관측 대상 캠페인이 0 — 관측 스코프 결함 의심"
+            "(스코프 정의는 campaign_roster.observation_campaign_ids)",
+        )
     names = _campaign_names(db, campaign_ids)
     rows = [
         _campaign_row(db, cid, names.get(cid, cid), yesterday, factor=factor)
