@@ -440,7 +440,9 @@ def shopping_ad_product_sync_job():
     try:
         from app.services.naver_ad.shopping_ad_product_sync import sync_adgroup_products
 
-        result = sync_adgroup_products(db)
+        # as_of 명시(codex 1R P1-2): 조용한 kst_today() 폴백을 없앤다 — 관측 스코프의
+        # 기준일이 호출부에서 보여야 catch-up 실행이 어느 날짜로 도는지 알 수 있다.
+        result = sync_adgroup_products(db, as_of=kst_today())
         log.info("[스케줄러] naver shopping_ad_product sync: %s", result)
     except Exception as e:
         log.exception("[스케줄러] shopping_ad_product_sync_job 에러(fail-open): %s", e)

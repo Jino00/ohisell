@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 
 import pytest
@@ -32,6 +33,29 @@ from app.services.naver_ad import (
     profit_scorecard, shopping_ad_product_sync,
 )
 from app.utils.kst import kst_today
+
+
+@contextmanager
+def caplog_at_warning(module):
+    """그 모듈 로거의 WARNING 이상만 모아 주는 컨텍스트(pytest caplog와 달리 다른 모듈의
+    로그가 섞이지 않는다 — 이 파일은 '어느 모듈이 무엇을 말했나'가 계약이라 분리가 필요)."""
+    records: list[str] = []
+
+    class _Sink(logging.Handler):
+        def emit(self, record):
+            if record.levelno >= logging.WARNING:
+                records.append(record.getMessage())
+
+    logger = logging.getLogger(module.__name__)
+    handler = _Sink()
+    logger.addHandler(handler)
+    prev = logger.level
+    logger.setLevel(logging.WARNING)
+    try:
+        yield lambda: list(records)
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(prev)
 
 
 @pytest.fixture
@@ -62,7 +86,7 @@ def _adgroup(db, adgroup_id: str, campaign_id: str, *, campaign_type="SHOPPING",
 
 
 def _spend(db, campaign_id: str, *, days_ago: int = 1, cost: int = 1000,
-           adgroup_id: str = "grp-x") -> None:
+           adgroup_id: str = "grp-x") -> None:  # noqa: D401
     db.add(NaverAdDaily(
         ad_date=kst_today() - timedelta(days=days_ago), campaign_id=campaign_id,
         adgroup_id=adgroup_id, keyword_id="", campaign_type="SHOPPING",
@@ -146,29 +170,89 @@ def test_sync_preserves_mappings_when_observation_scope_is_empty(db):
     assert db.query(NaverAdgroupProduct).count() == 2, "관측 대상 0인데 매핑을 지웠다"
 
 
-def test_sync_preserves_mappings_when_scope_has_no_active_shopping_group(db):
-    """스코프 캠페인은 있는데 활성 SHOPPING 그룹이 0인 경우도 맹목 — 정리 유보."""
+def test_sync_cleans_when_last_group_intentionally_deactivated(db):
+    """★codex 1R P1-1 — 열거 성공 + 활성 그룹 0 → **정리한다**(반대 방향의 정당한 정리).
+
+    초판은 "스코프 전체에 활성 SHOPPING 그룹 0"이라는 **전역** 조건으로 정리를 통째로 껐다.
+    그러면 관리 캠페인의 마지막 그룹을 **의도적으로** 내린 경우에도 stale 매핑이 영구히
+    남는다(codex 지적, 초판 테스트가 그 역회귀를 계약으로 고정하고 있었다).
+
+    '열거 성공'의 증거 = `naver_entity`에 이 캠페인의 adgroup 행이 존재(status 무관).
+    여기선 off 행과 WEB_SITE 행이 남아 있으므로 "봤는데 활성 쇼핑 그룹이 없다"가 확정된다.
+    """
     _stopped_settings(db, "cmp-a")
-    _adgroup(db, "grp-off", "cmp-a", status="off")          # 전부 off
+    _adgroup(db, "grp-off", "cmp-a", status="off")              # 의도적 비활성화
     _adgroup(db, "grp-web", "cmp-a", campaign_type="WEB_SITE")  # 쇼핑 아님
+    db.add(NaverAdgroupProduct(adgroup_id="grp-old", campaign_id="cmp-a", mall_product_id="p1"))
+    db.commit()
+
+    with caplog_at_warning(shopping_ad_product_sync) as records:
+        res = shopping_ad_product_sync.sync_adgroup_products(db, ads_by_adgroup={})
+
+    assert res["observation_blind"] is True, "전역 '대상 0' 신호 자체는 그대로 관측된다"
+    assert res["reconciled_campaigns"] == 1
+    assert res["withheld_campaigns"] == 0
+    assert res["removed"] == 1
+    assert db.query(NaverAdgroupProduct).count() == 0
+    # ★로그가 거짓말하지 않는다: 실제로 지웠는데 "보존한다"고 쓰면 안 된다.
+    assert not any("삭제하지 않고 보존" in m for m in records()), records()
+
+
+def test_sync_withholds_cleanup_for_campaign_entity_never_enumerated(db):
+    """★반대 방향 — 엔티티 인벤토리를 못 본 캠페인은 활성 그룹 0이어도 **보존**한다.
+
+    adgroup 행이 하나도 없다 = `sync_naver_entity`가 이 캠페인을 못 채웠다(또는 죽었다).
+    "그룹이 없어졌다"가 아니라 "안 보인다"이므로 지울 근거가 없다 — 이것이 위 테스트와
+    갈리는 지점이고, 두 상황을 가르는 신호가 `_entity_enumerated_campaigns`다.
+    """
+    _stopped_settings(db, "cmp-a")  # settings만 있고 adgroup 엔티티 행은 전무
     db.add(NaverAdgroupProduct(adgroup_id="grp-old", campaign_id="cmp-a", mall_product_id="p1"))
     db.commit()
 
     res = shopping_ad_product_sync.sync_adgroup_products(db, ads_by_adgroup={})
 
-    assert res["observation_blind"] is True
+    assert res["reconciled_campaigns"] == 0
+    assert res["withheld_campaigns"] == 1
     assert res["removed"] == 0
     assert db.query(NaverAdgroupProduct).count() == 1
+
+
+def test_sync_withholds_cleanup_for_campaign_whose_fetch_failed(db, monkeypatch):
+    """★기존 계약 유지 — get_ads가 실패한 캠페인은 그 캠페인만 정리 보류(전면 중단 아님)."""
+    _stopped_settings(db, "cmp-a")
+    _stopped_settings(db, "cmp-b")
+    _adgroup(db, "grp-a", "cmp-a")
+    _adgroup(db, "grp-b", "cmp-b")
+    db.add_all([
+        NaverAdgroupProduct(adgroup_id="grp-a-old", campaign_id="cmp-a", mall_product_id="pa"),
+        NaverAdgroupProduct(adgroup_id="grp-b-old", campaign_id="cmp-b", mall_product_id="pb"),
+    ])
+    db.commit()
+
+    def fake_get_ads(aid):
+        if aid == "grp-a":
+            raise RuntimeError("일시 API 장애")
+        return [{"mall_product_id": "p1", "product_name": "x", "adgroup_id": aid}]
+
+    monkeypatch.setattr(shopping_ad_product_sync, "get_ads", fake_get_ads)
+    monkeypatch.setattr(shopping_ad_product_sync, "_MIN_CALL_INTERVAL_S", 0)
+    res = shopping_ad_product_sync.sync_adgroup_products(db)  # 실 경로(주입 없음)
+
+    assert res["failed_adgroups"] == 1
+    assert res["withheld_campaigns"] == 1  # cmp-a만 보류
+    assert res["reconciled_campaigns"] == 1  # cmp-b는 정상 정리
+    assert {r.adgroup_id for r in db.query(NaverAdgroupProduct).all()} == {"grp-a-old", "grp-b"}
 
 
 def test_sync_still_cleans_stale_rows_when_observation_succeeds(db):
     """★반대 방향 — 맹목 가드가 정상 정리까지 막으면 안 된다.
 
-    관측이 성공한(대상 그룹이 있는) 경우, 실제로 사라진 소재/스코프 밖 캠페인의 행은
-    종전대로 정리된다. 가드는 '대상 0'에만 걸린다.
+    관측이 성공한 경우, 실제로 사라진 소재(2)/스코프 밖 캠페인(1)의 행은 종전대로 정리된다.
+    (1)은 광고비 축이 살아 있어야 도는 계층이라 광고비 행을 함께 심는다.
     """
     _stopped_settings(db, "cmp-a")
     _adgroup(db, "grp-1", "cmp-a")
+    _spend(db, "cmp-a", days_ago=1, adgroup_id="grp-1")
     db.add_all([
         # 스코프 밖 캠페인 → (1)에서 정리
         NaverAdgroupProduct(adgroup_id="grp-z", campaign_id="cmp-out", mall_product_id="pz"),
@@ -184,6 +268,29 @@ def test_sync_still_cleans_stale_rows_when_observation_succeeds(db):
     assert res["observation_blind"] is False
     assert res["removed"] == 2
     assert {r.adgroup_id for r in db.query(NaverAdgroupProduct).all()} == {"grp-1"}
+
+
+def test_sync_withholds_out_of_scope_cleanup_when_spend_axis_silent(db):
+    """★스코프 이탈 판정은 `naver_ad_daily`가 근거다 — 그 적재가 죽으면 보류한다.
+
+    광고비 축이 침묵하면 멀쩡히 돈 쓰는 캠페인이 전부 '이탈'로 보인다. (2)는 근거가
+    `naver_entity`라 이 축과 무관하므로 계속 돈다(증거 출처가 다른 두 판단을 한 신호로
+    끄지 않는다).
+    """
+    _stopped_settings(db, "cmp-a")
+    _adgroup(db, "grp-1", "cmp-a")
+    db.add_all([
+        NaverAdgroupProduct(adgroup_id="grp-z", campaign_id="cmp-out", mall_product_id="pz"),
+        NaverAdgroupProduct(adgroup_id="grp-gone", campaign_id="cmp-a", mall_product_id="pg"),
+    ])
+    db.commit()  # 광고비 행 없음 = spend_axis_alive False
+
+    res = shopping_ad_product_sync.sync_adgroup_products(
+        db, ads_by_adgroup={"grp-1": [{"mall_product_id": "p1", "product_name": "x"}]},
+    )
+
+    assert res["removed"] == 1, "(2)만 돌아야 한다"
+    assert {r.adgroup_id for r in db.query(NaverAdgroupProduct).all()} == {"grp-z", "grp-1"}
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -232,6 +339,101 @@ def test_ad_external_change_warns_when_nothing_observed(db, caplog):
 
     assert res == {"observed": 0, "ops": 0, "recorded": 0}
     assert any("소재 grain 전면 맹목" in r.getMessage() for r in caplog.records)
+
+
+# ══════════════════════════════════════════════════════════════════
+# ③-b 호출 예산 — 스로틀 · 시간 예산 이월 · 소요시간 (codex 1R P2)
+# ══════════════════════════════════════════════════════════════════
+def test_live_path_throttles_between_calls(db, monkeypatch):
+    """실 API 경로는 호출 사이에 최소 간격을 둔다(rate limit 사전 회피)."""
+    _stopped_settings(db, "cmp-a")
+    for i in range(3):
+        _adgroup(db, f"grp-{i}", "cmp-a")
+    db.commit()
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(shopping_ad_product_sync, "get_ads", lambda aid: [])
+    monkeypatch.setattr(shopping_ad_product_sync.time, "sleep", lambda s: sleeps.append(s))
+
+    shopping_ad_product_sync.collect_adgroup_products(db)
+
+    # 3그룹 → 첫 콜 앞에는 안 쉰다(간격은 콜 '사이')
+    assert sleeps == [shopping_ad_product_sync._MIN_CALL_INTERVAL_S] * 2
+
+
+def test_injected_path_does_not_throttle(db, monkeypatch):
+    """주입 경로(테스트·재사용)는 네트워크가 없으므로 sleep 하지 않는다."""
+    _stopped_settings(db, "cmp-a")
+    for i in range(3):
+        _adgroup(db, f"grp-{i}", "cmp-a")
+    db.commit()
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(shopping_ad_product_sync.time, "sleep", lambda s: sleeps.append(s))
+
+    shopping_ad_product_sync.collect_adgroup_products(db, ads_by_adgroup={})
+    assert sleeps == []
+
+
+def test_budget_exceeded_defers_rest_and_withholds_all_cleanup(db):
+    """★시간 예산 초과 = **부분 수집**. 남은 그룹은 다음 회차로 이월하고 정리는 전면 보류한다.
+
+    부분 수집 결과로 stale 판정을 하면 P1-1과 같은 함정(안 본 것을 없어진 것으로 오인)에
+    빠진다 — 그래서 (1)·(2) 둘 다 끈다.
+    """
+    _stopped_settings(db, "cmp-a")
+    _adgroup(db, "grp-1", "cmp-a")
+    _spend(db, "cmp-a", days_ago=1, adgroup_id="grp-1")
+    db.add_all([
+        NaverAdgroupProduct(adgroup_id="grp-z", campaign_id="cmp-out", mall_product_id="pz"),
+        NaverAdgroupProduct(adgroup_id="grp-gone", campaign_id="cmp-a", mall_product_id="pg"),
+    ])
+    db.commit()
+
+    # budget_s=0 → 첫 그룹 앞에서 이미 예산 초과 = 아무 그룹도 시도하지 않고 이월
+    res = shopping_ad_product_sync.sync_adgroup_products(
+        db, ads_by_adgroup={"grp-1": [{"mall_product_id": "p1", "product_name": "x"}]},
+        budget_s=0,
+    )
+
+    assert res["truncated"] is True
+    assert res["removed"] == 0
+    assert res["reconciled_campaigns"] == 0
+    assert {r.adgroup_id for r in db.query(NaverAdgroupProduct).all()} == {"grp-z", "grp-gone"}
+
+
+def test_collect_reports_attempted_and_elapsed(db):
+    """수집 결과는 '무엇을 시도했는가'와 '얼마나 걸렸는가'를 함께 실어 나른다."""
+    _stopped_settings(db, "cmp-a")
+    _adgroup(db, "grp-1", "cmp-a")
+    _adgroup(db, "grp-2", "cmp-a")
+    db.commit()
+
+    out = shopping_ad_product_sync.collect_adgroup_products(db, ads_by_adgroup={"grp-1": []})
+    assert out.attempted == {"grp-1", "grp-2"}
+    assert out.truncated is False
+    assert out.elapsed_s >= 0
+
+
+def test_slow_run_is_warned(db, caplog):
+    """소요시간이 임계를 넘으면 WARNING — 07:45 잡이 하류 잡을 침범하는지 로그로 판정된다."""
+    _stopped_settings(db, "cmp-a")
+    _adgroup(db, "grp-1", "cmp-a")
+    db.commit()
+
+    with caplog.at_level(logging.WARNING, logger=shopping_ad_product_sync.__name__):
+        # 임계를 0으로 낮춰 느린 실행을 재현(실시간 sleep 없이)
+        original = shopping_ad_product_sync._SLOW_RUN_WARN_S
+        shopping_ad_product_sync._SLOW_RUN_WARN_S = 0.0
+        try:
+            shopping_ad_product_sync.sync_adgroup_products(db, ads_by_adgroup={"grp-1": []})
+        finally:
+            shopping_ad_product_sync._SLOW_RUN_WARN_S = original
+
+    assert any(
+        "하류 잡(07:50/08:00) 침범 위험" in r.getMessage()
+        for r in caplog.records if r.name == shopping_ad_product_sync.__name__
+    ), [r.getMessage() for r in caplog.records]
 
 
 # ══════════════════════════════════════════════════════════════════

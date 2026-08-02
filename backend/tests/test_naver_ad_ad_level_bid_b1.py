@@ -165,7 +165,10 @@ def test_sync_ad_bid_columns_null_when_absent(db):
     # external_ad_changes(D-NAO-127)는 additive — 소재 외부 변경 탐지 결과(여기선 앵커 부재로 0).
     assert res == {"adgroups": 1, "mappings": 1, "products": 1, "removed": 0,
                    "failed_adgroups": 0, "external_ad_changes": 0,
-                   "observation_blind": False}  # 2026-07-30 사고 수정 additive
+                   # 2026-07-30 사고 수정 + codex 1R 대응 additive(수집 신뢰도 표면화)
+                   "observation_blind": False, "truncated": False,
+                   "reconciled_campaigns": 1, "withheld_campaigns": 0,
+                   "elapsed_s": res["elapsed_s"]}
     row = db.query(NaverAdgroupProduct).filter(NaverAdgroupProduct.adgroup_id == "grp-1").one()
     assert row.mall_product_id == "13365319468"  # 매핑 회귀 0
     assert row.product_name == "17E"

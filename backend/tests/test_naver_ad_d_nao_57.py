@@ -90,7 +90,10 @@ def test_sync_adgroup_products_snapshot_replace_and_dedup(db):
     res = shopping_ad_product_sync.sync_adgroup_products(db, ads_by_adgroup=ads)
     assert res == {"adgroups": 1, "mappings": 2, "products": 2, "removed": 0,
                    "failed_adgroups": 0, "external_ad_changes": 0,  # D-NAO-127 additive
-                   "observation_blind": False}  # 2026-07-30 사고 수정 additive
+                   # 2026-07-30 사고 수정 + codex 1R 대응 additive(수집 신뢰도 표면화)
+                   "observation_blind": False, "truncated": False,
+                   "reconciled_campaigns": 1, "withheld_campaigns": 0,
+                   "elapsed_s": res["elapsed_s"]}
     rows = db.query(NaverAdgroupProduct).filter(NaverAdgroupProduct.adgroup_id == "grp-1").all()
     assert {r.mall_product_id for r in rows} == {"13365319468", "999"}
     assert all(r.campaign_id == "cmp-shop" for r in rows)
@@ -102,10 +105,18 @@ def test_sync_adgroup_products_snapshot_replace_and_dedup(db):
     assert {r.mall_product_id for r in rows2} == {"13365319468"}
 
 
-def test_sync_reconciles_non_ours_campaign_rows(db):
-    """리뷰 P2-3 ①: optimizer가 ours가 아니게 된 캠페인의 매핑 행 삭제."""
-    _ours_shopping_adgroup(db)  # cmp-shop=ours
-    db.add(NaverCampaignSettings(campaign_id="cmp-left", optimizer="mop"))  # ours 이탈
+def test_sync_reconciles_out_of_scope_campaign_rows(db):
+    """리뷰 P2-3 ①(계약 갱신): **관측 스코프를 벗어난** 캠페인의 매핑 행 삭제.
+
+    구 기준은 'optimizer가 ours가 아니게 된 캠페인'이었으나 스코프가 optimizer와 무관해졌다
+    (2026-07-30 사고). 이제 '이탈' = settings 행도 없고 최근 7일 광고비도 없음.
+    ★이 계층은 광고비 축이 살아 있을 때만 돈다 — 판정 근거가 naver_ad_daily이기 때문
+    (codex 1R P1-1 후속). 그래서 cmp-shop에 광고비를 심는다.
+    """
+    _ours_shopping_adgroup(db)  # cmp-shop: settings 행 + 활성 쇼핑 그룹
+    db.add(NaverAdDaily(ad_date=kst_today(), campaign_id="cmp-shop", adgroup_id="grp-1",
+                        keyword_id="", campaign_type="SHOPPING", cost=500, clk=1, imp=10))
+    # cmp-left: settings 없음 · 최근 광고비 없음 → 스코프 이탈
     db.add(NaverAdgroupProduct(adgroup_id="grp-old", campaign_id="cmp-left", mall_product_id="111"))
     db.commit()
     res = shopping_ad_product_sync.sync_adgroup_products(db, ads_by_adgroup={"grp-1": []})
