@@ -1,6 +1,5 @@
-# CLAUDE.md — 프로젝트 설정
-# 프로젝트명: ohisell
-# 이 파일은 전역 CLAUDE.md와 합쳐져 적용됩니다.
+# CLAUDE.md — ohisell
+# 전역 ~/.claude/CLAUDE.md v2(계약 기반)와 합쳐져 적용된다. 구판: ~/.claude/archive/harness_v1_20260802/projects/
 
 ## 프로젝트 개요
 - 이름: ohisell
@@ -32,11 +31,11 @@
 - docs/CHECKLIST.md: 작업 체크리스트
 - scripts/init.sh: 개발 서버 시작
 
-## 이 프로젝트만의 규칙
+## 이 프로젝트만의 규칙 (금지선)
 
 ### ★prod 배포는 반드시 `scripts/safe_deploy.sh` — 직접 scp/rsync 금지 (D-NAO-49)
 - 이유(2026-07-17 사고): 병행 세션 둘 다 "배포 → 나중에 PR" 순서라, 직접 scp는 **상대 세션이
-  방금 배포한 코드를 구버전으로 덮는다**(qi 수집이 4분 만에 죽음). 원칙20 문서는 세 번 다
+  방금 배포한 코드를 구버전으로 덮는다**(qi 수집이 4분 만에 죽음). 문서 규칙은 세 번 다
   못 막았다 — 이 스크립트가 구조로 막는다.
 - 동작: prod 파일의 현재 내용이 **내 브랜치 역사에 없는 버전이면 배포 거부**(CAS) +
   prod 측 배포 락 + 커밋 안 된 파일 거부 + 배포 매니페스트 기록.
@@ -55,22 +54,18 @@
   커밋된 로컬 마이그 파일이 prod에 없는데 배포 목록에도 없으면 그것도 거부.
 - 컬럼 삭제처럼 **구코드를 깨는** 마이그레이션은 순서가 반대 → `--migrate` 쓰지 말고 수동 조율.
 
-## Skill routing
+## 스킬 라우팅 힌트 (선택 도구 — 자동 실행 의무 없음)
 
-When the user's request matches an available skill, ALWAYS invoke it using the Skill
-tool as your FIRST action. Do NOT answer directly, do NOT use other tools first.
-The skill has specialized workflows that produce better results than ad-hoc answers.
-
-Key routing rules:
-- Product ideas, "is this worth building", brainstorming → invoke office-hours
-- Bugs, errors, "why is this broken", 500 errors → invoke investigate
-- Ship, deploy, push, create PR → invoke ship
-- QA, test the site, find bugs → invoke qa
-- Code review, check my diff → invoke review
-- Update docs after shipping → invoke document-release
-- Weekly retro → invoke retro
-- Design system, brand → invoke design-consultation
-- Visual audit, design polish → invoke design-review
-- Architecture review → invoke plan-eng-review
-- Save progress, checkpoint, resume → invoke checkpoint
-- Code quality, health check → invoke health
+| 요청 유형 | 유용한 스킬 |
+|---|---|
+| 제품 아이디어·"만들 가치가 있나"·브레인스토밍 | `/office-hours` |
+| 버그·에러·500·"왜 깨졌나" | `/investigate` |
+| 배포·push·PR 생성 | `/ship` · `/land-and-deploy` |
+| 사이트 QA·버그 찾기 | `/qa` |
+| 코드 리뷰·diff 점검 | `/review` |
+| 배포 후 문서 갱신 | `/document-release` |
+| 주간 회고 | `/retro` |
+| 디자인 시스템·브랜드 | `/design-consultation` |
+| 비주얼 감사·디자인 폴리시 | `/design-review` |
+| 아키텍처 리뷰 | `/plan-eng-review` |
+| 코드 품질·헬스 체크 | `/health` |
