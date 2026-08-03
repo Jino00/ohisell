@@ -2166,17 +2166,34 @@ def wing_rg_settlement_refresh_complete(
     가서 lease 불일치로 버려졌다(mark_success가 stale로 접음). 즉 이 엔드포인트가 막으려고
     만들어진 바로 그 거짓 실패가 WING2에서 그대로 재현된다. 기본값 WING1로 하위호환 유지 —
     account_key를 안 보내는 구버전 페처는 지금과 똑같이 동작한다.
+
+    ★lease는 **필수**다(2026-08-03 codex 3R[P1]). 예전엔 옵션이라 lease가 없으면 지금 유효한
+    임대를 확인하지 않고 무조건 요청을 지웠다 — 완료 POST가 지연된 run A가 끝나고 사용자가
+    다시 눌러 요청 B가 생긴 뒤 늦은 A의 POST가 도착하면 **B의 요청이 지워지고**, 프론트
+    (streamRefresh.ts의 "새 실패 없이 요청만 사라졌다 = 정상 종료" 분기)가 시작도 안 한 B를
+    'done'으로 오보했다. 형제 신호(fetch-error, lease 있는 완료)엔 이미 stale 가드가 있었고
+    이 무-lease 경로만 뚫려 있었다.
+    ★400으로 거부해도 정상 경로는 안 깨진다(라이브 실측 2026-08-03): 배포된 페처
+    `~/.ohisell/tools/wing_browser_fetcher.py`는 repo와 바이트 동일하고 유일한 호출부가
+    claim 응답의 lease를 항상 실어 보낸다. claim은 claimed=true면 lease를 반드시 준다
+    (refresh_contract.claim_refresh) — 그 성질이 이 필수화의 안전성을 떠받친다.
     """
     _require_ingest_token(x_ingest_token)
+    lease = str(body.get("lease") or "").strip() or None
+    if lease is None:
+        raise HTTPException(
+            status_code=400,
+            detail="lease가 필요합니다 — refresh-claim 응답의 lease를 그대로 보내세요. "
+                   "임대 대조 없이 요청을 지우면 남의 회차를 완료로 오보합니다.",
+        )
     # clear_error=True(codex 2R[P2]): 1회차가 실패하고 2회차가 "받을 게 없어" 정상 종료하면
     # last_error_at만 바뀐 채 요청이 사라진다 → UI가 성공한 회차를 실패로 읽는다. 실패 흔적을
     # 함께 지우되 last_success_at(데이터 신선도 시계)은 그대로 둔다.
-    # lease(옵션): 내 임대에 대해서만 완료 처리(codex 3R[P2]). 20분 넘게 끌던 옛 run이
-    # 임대를 넘긴 뒤 뒤늦게 완료를 외쳐 새 요청을 지우는 것을 막는다. 없으면 기존 동작.
-    lease = str(body.get("lease") or "").strip() or None
-    ok = refresh_contract.mark_success(
+    # ok=False = "내 임대가 아니었다"(stale 또는 이미 업로드가 소멸시킨 뒤) — 무해한 no-op이라
+    # 200으로 답한다. 페처는 200이면 재시도하지 않는다.
+    ok = refresh_contract.mark_run_complete(
         db, rg_settlement_sync._rg_state_key(_require_rg_account(account_key)),
-        clear_error=True, lease=lease)
+        lease, clear_error=True)
     return {"ok": ok}
 
 
