@@ -1092,6 +1092,51 @@ function RocketView({
             <div className="text-indigo-600 mt-1">{data.drift.note}</div>
           </div>
 
+          {/* 상품별(옵션) 광고비 표 — 백엔드 ad_options 블록(배포 순서상 없을 수 있음) */}
+          {data.ad_options && data.ad_options.options.length > 0 && (
+            <details className="bg-white border border-gray-200 rounded-lg mb-4">
+              <summary className="px-4 py-2 cursor-pointer select-none hover:bg-gray-50 text-sm font-semibold text-gray-700">
+                📦 상품별 광고비 (상위 {num(data.ad_options.shown)}/{num(data.ad_options.option_count)}개)
+              </summary>
+              <div className="border-t border-gray-100 p-4">
+                <div className="text-xs text-gray-500 mb-2" title={data.ad_options.reconciliation.basis}>
+                  옵션 합계 {won(data.ad_options.reconciliation.option_sum)} · 계정 총액 {won(data.ad_options.reconciliation.account_total)} · 차이{" "}
+                  {Number(data.ad_options.reconciliation.diff) > 0 ? "+" : ""}
+                  {won(data.ad_options.reconciliation.diff)} ({(Number(data.ad_options.reconciliation.diff_pct) * 100).toFixed(2)}%)
+                  <span className="block text-[11px] text-gray-400 mt-0.5">※ 순이익에는 계정 총액을 씁니다.</span>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="min-w-full text-xs">
+                    <thead>
+                      <tr className="text-left text-gray-400 border-b border-gray-100">
+                        <th className="py-1 pr-2">옵션ID</th>
+                        <th className="py-1 pr-2 text-right">광고비</th>
+                        <th className="py-1 pr-2 text-right">클릭</th>
+                        <th className="py-1 pr-2 text-right">전환매출</th>
+                        <th className="py-1 pr-2 text-right">ROAS</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {data.ad_options.options.map((opt) => {
+                        const adSpend = Number(opt.ad_spend);
+                        const roas = adSpend > 0 ? ratioX((Number(opt.conversion_revenue) / adSpend).toString()) : "—";
+                        return (
+                          <tr key={opt.option_id} className="border-b border-gray-50 hover:bg-gray-50">
+                            <td className="py-1.5 pr-2 text-gray-700 font-mono">{opt.option_id}</td>
+                            <td className="py-1.5 pr-2 text-right text-gray-600">{won(opt.ad_spend)}</td>
+                            <td className="py-1.5 pr-2 text-right text-gray-500">{num(opt.clicks)}</td>
+                            <td className="py-1.5 pr-2 text-right text-gray-600">{won(opt.conversion_revenue)}</td>
+                            <td className="py-1.5 pr-2 text-right font-semibold text-purple-700">{roas}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </details>
+          )}
+
           {/* 원가 매핑 관리 패널 */}
           <div className="bg-white border border-gray-200 rounded-lg">
             <div
