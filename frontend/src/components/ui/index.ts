@@ -11,3 +11,4 @@ export { LayerNav } from "./LayerNav";
 export { OptimizerSwitch } from "./OptimizerSwitch";
 export { LossPolicySwitch } from "./LossPolicySwitch";
 export { EventMarker } from "./EventMarker";
+export { PeriodTabs } from "./PeriodTabs";
