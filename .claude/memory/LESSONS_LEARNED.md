@@ -1389,6 +1389,11 @@ push 응답 JSON 83회(WING1 55·WING2 28)를 전수 세어 empty 0건·부분 s
 지워지고 2행으로 교체됐을 자리다). `last_success_at`도 `2026-07-27T14:02:52` 그대로 —
 heartbeat가 안 찍혔다. prod 액세스 로그에 `422 Unprocessable Entity` 3건.
 
-⚠️성공 경로(검산으로 확인된 빈 시트 → 200)는 **일부러 라이브로 쏘지 않았다**:
-`rg_mark_heartbeat`가 `last_success_at`을 지금 시각으로 갱신해 실제로는 6일 낡은 RG 신선도
-시계를 테스트가 초록으로 만든다 — 고치려는 그 거짓 완료를 스스로 만드는 셈이다. 테스트로만 덮었다.
+성공 경로는 합성 파일로 쏘지 **않았다**: `rg_mark_heartbeat`가 `last_success_at`을 지금 시각으로
+갱신해 실제로는 6일 낡은 RG 신선도 시계를 테스트가 초록으로 만든다 — 고치려는 그 거짓 완료를
+스스로 만드는 셈이다. 대신 **진짜 수집으로 증명했다**(12:44, Jino 로그인 후 실회차):
+`A01564720-WAREHOUSING_SHIPPING-*.xlsx` → **200 · upserted=10** · 입출고비 options=5 ·
+reconcile match=True · vs_status_api 19,746 == 19,746. `last_success_at`이 07-27 14:02 →
+**08-03 12:44:24**(166.7시간 만에 첫 이동), `last_error_at` → None, `2026-08-02` 주기에
+warehousing 5 + delivery 5행 적재, 층2 결손 0.
+→ **가드가 진짜 정산 파일을 오탐하지 않는다**는 마지막 미검증 지점이 이걸로 닫혔다.
