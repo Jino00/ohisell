@@ -167,8 +167,8 @@ def test_by_period_no_matched_period_downgrades_to_unit_unknown():
     assert (r["periods_judged"], r["periods_unmatched"]) == (0, 2)
 
 
-def test_by_period_localizes_real_anomaly_without_diluting_it():
-    """강등이 신호를 죽이지 않는다: 한 주기만 과청구여도 플래그는 살아남는다."""
+def test_by_period_gross_anomaly_survives_aggregation():
+    """강등이 진짜 신호를 죽이지 않는다: 집계해도 큰 과청구는 플래그로 남는다."""
     periods = [
         _period("2026-05-11", "2026-05-17", 1900, 1100, 1, 1),    # 정상
         _period("2026-05-18", "2026-05-24", 19750, 1100, 1, 1),   # 특대형 정합 = 이상
@@ -176,13 +176,38 @@ def test_by_period_localizes_real_anomaly_without_diluting_it():
     ]
     r = detect_fee_anomalies_by_period(*_IPAD_DIMS, periods=periods,
                                        coupang_size_type="극소형")
-    assert "measured_vs_billed_mismatch" in r["flags"]
-    # implied는 최악 주기 기준 → 평균(10,825)으로 뭉개지 않는다.
+    # 판정은 집계(21,650 ÷ 2주문 = 10,825) 1회로 한다.
+    assert r["per_unit_delivery"] == 10825
     assert r["implied_size_delivery"] == "특대형"
-    # 주기별 상세에 어느 주기가 이상인지 남는다(Jino가 대조할 원자료).
+    assert "measured_vs_billed_mismatch" in r["flags"]
+    # 주기별 상세에 어느 주기가 이상해 보이는지 남는다(집계가 희석해도 사람이 볼 수 있게).
     bad = [p for p in r["period_detail"] if p["flags"]]
     assert len(bad) == 1 and bad[0]["date_from"] == "2026-05-18"
+    assert r["periods_flagged"] == 1
     assert [p["judged"] for p in r["period_detail"]] == [True, True, False]
+
+
+def test_by_period_intra_period_order_undercount_does_not_flag():
+    """★라이브 회귀(95570603482): 주기 **안에서** 주문이 부분 수집돼도 플래그를 만들지 않는다.
+
+    같은 옵션이 1,975원/1주문(정상)과 3,950원/1주문(=2주문분 청구·1건만 수집)을 함께 갖는다.
+    주기별로 판정하면 후자가 measured_vs_billed_mismatch가 되지만(오탐 3→20건의 원인),
+    집계하면 13,825 ÷ 6주문 = 2,304원 = 극소형 최소의 1.7배 → 정상 구간이다.
+    """
+    periods = [
+        _period("2026-06-22", "2026-06-28", 1975, 1125, 1, 1),
+        _period("2026-07-01", "2026-07-05", 3950, 2250, 1, 1),   # 분모 결손
+        _period("2026-07-06", "2026-07-12", 1975, 1125, 1, 1),
+        _period("2026-07-13", "2026-07-19", 3950, 2250, 2, 2),
+        _period("2026-07-20", "2026-07-26", 1975, 1125, 1, 1),
+    ]
+    r = detect_fee_anomalies_by_period(*_IPAD_DIMS, periods=periods,
+                                       coupang_size_type="극소형")
+    assert r["judged_delivery"] == 13825
+    assert r["per_unit_delivery"] == 2304.17
+    assert r["flags"] == []
+    # 주기 단위로는 이상해 보이는 주기가 있었다는 사실은 남긴다.
+    assert r["periods_flagged"] == 1
 
 
 def test_by_period_missing_dims_short_circuits():

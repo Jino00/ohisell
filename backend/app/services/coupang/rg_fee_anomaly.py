@@ -150,21 +150,31 @@ def detect_fee_anomalies_by_period(
     periods: list[dict],
     coupang_size_type: str | None = None,
 ) -> dict:
-    """옵션 1개를 **정산주기별로** 판정하고 합산 결과를 낸다(2026-08-03, ⓒ+ⓑ).
+    """옵션 1개를 정산주기 단위로 **집계해** 판정하고, 주기별 근거를 함께 낸다(2026-08-03).
 
     periods 각 항목: {"date_from", "date_to", "delivery", "warehousing",
                       "order_count", "quantity"}  ← 그 주기 안에서만 집계된 값
-    주기 안에 대응 주문이 없으면(order_count/quantity 0) 그 주기는 **판정하지 않는다** — 주기
-    밖 주문으로 나누면 단가가 정수배로 부풀기 때문이다(모듈 상단 실사고).
+
+    ★두 층을 분리한다 — **판정은 판정주기 전체 합산, 표시는 주기별.**
+      · 주문이 대응되지 않은 주기(order_count/quantity 0)는 판정에서 **제외**한다. 주기 밖
+        주문으로 나누면 단가가 정수배로 부풀기 때문이다(모듈 상단 실사고 4건).
+      · 그러나 판정 자체를 주기 단위로 쪼개지는 **않는다.** 라이브가 그 설계를 반증했다:
+        주기 **안에서도** 주문이 부분만 수집된다(같은 옵션 95570603482가 `1,975원/1주문`과
+        `3,950원/1주문`을 함께 갖고, 95598292078은 `12,600원/7주문`과 `12,600원/3주문`을 함께
+        갖는다 — 금액은 안정된 단가의 정수배인데 분모가 불안정하다). 주기별 판정은 표본을
+        주기 1개로 줄여 **그 불안정을 증폭**했다: WING1 measured_vs_billed_mismatch 3→20건.
+        표본을 키울수록 결손·과다가 서로 상쇄되므로 **집계 판정이 통계적으로 옳다.**
+      · 주기별 신호는 버리지 않고 period_detail·periods_flagged로 **표면화**한다. 집계가
+        희석할 수 있는 국소 이상치를 사람이 볼 수 있어야 하기 때문이다.
 
     반환(기존 키 유지 + 커버리지 필드 추가):
       per_unit_delivery/warehousing  판정 주기들만의 단가(Σ판정청구 ÷ Σ판정주문). 청구총액을
                                      주문수로 나눈 값이 **아니다** — 그 나눗셈이 오탐의 원인이었다.
       judged_delivery/warehousing    위 단가의 분자(판정 주기 청구액 합). charged_*와 다를 수 있다.
-      implied_size_delivery          판정 주기 중 **단가가 가장 큰** 주기 기준(최악 주기).
-      flags                          판정 주기 플래그의 합집합. 판정 주기 0개면 ['unit_unknown'].
-      periods_total/judged/unmatched 커버리지 표면화(ⓑ). unmatched>0이면 단가는 부분 표본이다.
-      period_detail                  주기별 근거 행(judged 여부 포함) — Jino가 직접 대조할 원자료.
+      flags                          집계 판정 결과. 판정 주기 0개면 ['unit_unknown'].
+      periods_total/judged/unmatched 커버리지 표면화. unmatched>0이면 단가는 부분 표본이다.
+      periods_flagged                주기 단위로 보면 이상한 주기 수(집계 판정과 별개의 참고값).
+      period_detail                  주기별 근거 행(judged·주기 단가·주기 플래그) — 대조 원자료.
     """
     size_type = coupang_size_type or classify_size_type(width_mm, length_mm, height_mm, weight_g)
     base: dict = {
@@ -180,6 +190,7 @@ def detect_fee_anomalies_by_period(
         "periods_total": len(periods),
         "periods_judged": 0,
         "periods_unmatched": len(periods),
+        "periods_flagged": 0,
         "period_detail": [],
     }
 
@@ -191,13 +202,11 @@ def detect_fee_anomalies_by_period(
         base["flags"] = ["oversize"]
         return base
 
-    flags: list[str] = []
     judged = 0
+    periods_flagged = 0
     sum_dlv = sum_wh = 0.0
     sum_orders = sum_qty = 0
     has_dlv = has_wh = False
-    worst_per_order = -1.0
-    worst_implied: str | None = None
     detail: list[dict] = []
 
     for p in periods:
@@ -221,6 +230,8 @@ def detect_fee_anomalies_by_period(
             detail.append(row)
             continue
 
+        # 주기 단위 판정은 **참고 표시용**이다(판정은 아래 집계로 한다). 주기 안에서도 주문이
+        # 부분 수집되기 때문에 이 값 하나로 이상 여부를 단정하면 오탐이 3→20건으로 늘었다.
         one = detect_fee_anomalies(
             width_mm, length_mm, height_mm, weight_g,
             delivery_amount=p.get("delivery"), warehousing_amount=p.get("warehousing"),
@@ -235,13 +246,9 @@ def detect_fee_anomalies_by_period(
             "flags": list(one["flags"]),
         })
         detail.append(row)
+        if one["flags"]:
+            periods_flagged += 1
 
-        for f in one["flags"]:
-            if f not in flags:
-                flags.append(f)
-        if one["per_unit_delivery"] is not None and one["per_unit_delivery"] > worst_per_order:
-            worst_per_order = one["per_unit_delivery"]
-            worst_implied = one["implied_size_delivery"]
         if p.get("delivery") is not None:
             sum_dlv += float(p["delivery"])
             has_dlv = True
@@ -254,18 +261,27 @@ def detect_fee_anomalies_by_period(
     base["period_detail"] = detail
     base["periods_judged"] = judged
     base["periods_unmatched"] = len(periods) - judged
+    base["periods_flagged"] = periods_flagged
 
     if judged == 0:
-        # 대응 주기가 하나도 없다 → 단가를 만들 근거가 없다. 판정 보류(ⓑ 강등).
+        # 대응 주기가 하나도 없다 → 단가를 만들 근거가 없다. 판정 보류(강등).
         base["flags"] = ["unit_unknown"]
         return base
 
-    if has_dlv and sum_orders > 0:
+    # ★판정 = 판정주기 전체 합산 1회. 단일 주기가 아니라 모아서 봐야 분모 결손·과다가 상쇄된다.
+    agg = detect_fee_anomalies(
+        width_mm, length_mm, height_mm, weight_g,
+        delivery_amount=round(sum_dlv, 2) if has_dlv else None,
+        warehousing_amount=round(sum_wh, 2) if has_wh else None,
+        quantity=sum_qty, order_count=sum_orders,
+        coupang_size_type=coupang_size_type,
+    )
+    if has_dlv:
         base["judged_delivery"] = round(sum_dlv, 2)
-        base["per_unit_delivery"] = round(sum_dlv / sum_orders, 2)
-    if has_wh and sum_qty > 0:
+    if has_wh:
         base["judged_warehousing"] = round(sum_wh, 2)
-        base["per_unit_warehousing"] = round(sum_wh / sum_qty, 2)
-    base["implied_size_delivery"] = worst_implied
-    base["flags"] = flags
+    base["per_unit_delivery"] = agg["per_unit_delivery"]
+    base["per_unit_warehousing"] = agg["per_unit_warehousing"]
+    base["implied_size_delivery"] = agg["implied_size_delivery"]
+    base["flags"] = list(agg["flags"])
     return base

@@ -202,8 +202,8 @@ def test_coverage_partial_counted_but_not_flagged_as_anomaly(db):
     assert out["items"][0]["periods_unmatched"] == 1
 
 
-def test_real_anomaly_still_flagged_per_period(db):
-    """강등이 진짜 신호를 죽이지 않는다 — 판정된 주기의 이상치는 그대로 올라온다."""
+def test_real_anomaly_still_flagged_after_aggregation(db):
+    """강등이 진짜 신호를 죽이지 않는다 — 집계 판정에서도 큰 과청구는 올라온다."""
     _add_item(db, "900", 227, 126, 20, 137)
     _add_size(db, "900", "극소형")
     _add_fee(db, "900", "delivery", 1900, dfrom=date(2026, 5, 4), dto=date(2026, 5, 10))
@@ -216,8 +216,10 @@ def test_real_anomaly_still_flagged_per_period(db):
     it = out["items"][0]
     assert "measured_vs_billed_mismatch" in it["flags"]
     assert out["summary"]["measured_vs_billed_mismatch"] == 1
+    assert it["per_unit_delivery"] == 10825  # (1900+19750) ÷ 2주문
     bad = [p for p in it["period_detail"] if p["flags"]]
     assert len(bad) == 1 and bad[0]["date_from"] == "2026-05-11"
+    assert it["periods_flagged"] == 1
 
 
 def test_boundary_period_orders_not_re_cut_by_query_window(db):

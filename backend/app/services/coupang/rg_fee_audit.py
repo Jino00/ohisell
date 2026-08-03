@@ -3,10 +3,12 @@
 # 흐름(정보 유통):
 #   _load_dims(1회) ─────────┐
 #   _load_fees(1회, 주기별)  ├─→ 옵션별 detect_fee_anomalies_by_period(SA3)
-#   _load_qty_by_period(1회) ─┘      ←(주기당 SA3 단일판정 → SA1 분류·SA2 floor 호출)
+#   _load_qty_by_period(1회) ─┘      ←(판정주기 집계 1회 판정 → SA1 분류·SA2 floor 호출)
 #                                     → 플래그 + 근거수치 행 + 주기별 상세, summary 집계
-# ★판정 단위 = 정산주기 1개(2026-08-03). 주기를 합쳐 나누면 주문 미수집 주기의 청구액이 다른
-#   주기의 주문으로 나뉘어 단가가 정수배로 부푼다 — 오탐 4건의 원인(SA3 상단 실사고·LESSONS #92).
+# ★단가의 분모는 **주문이 대응된 정산주기**만 쓴다(2026-08-03). 미대응 주기까지 합쳐 나누면
+#   그 주기 청구액이 다른 주기의 주문으로 나뉘어 단가가 정수배로 부푼다 — 오탐 4건의 원인
+#   (SA3 상단 실사고·LESSONS #92). 단 판정을 주기 1개로 쪼개지는 않는다 — 주기 안에서도 주문이
+#   부분 수집돼 그 설계는 오탐을 3→20건으로 늘렸다. 판정=판정주기 집계, 표시=주기별.
 # ★읽기 전용·net_profit 불변(D-17). 정확 청구액 판정 아님 — 사람 검토 신호(D-5).
 # ★배치 효율(원칙 18-8): 치수·수량을 옵션ID로 1회씩 dict 적재 후 주입 → N×쿼리 방지.
 # SA 직접 호출이 아니라 이 Harness를 라우터가 호출한다(원칙 18-7).
@@ -60,9 +62,10 @@ def _load_fees(
 ) -> dict[str, dict[tuple[date, date], dict[str, float]]]:
     """옵션ID → {(정산주기 시작, 끝): {fee_type: 금액}}. 옵션 단위만. 기간은 매출인식일 기준.
 
-    ★주기를 합치지 않고 그대로 내려보낸다(2026-08-03) — 판정 단위가 정산주기 1개이기 때문이다.
-      주기를 미리 합치면 주문이 없는 주기의 청구액이 다른 주기의 주문으로 나뉘어 단가가
-      정수배로 부풀고, 그게 '실측 vs 청구 불일치' 오탐 4건의 원인이었다(SA3 상단 실사고).
+    ★주기를 합치지 않고 그대로 내려보낸다(2026-08-03) — 어느 주기에 주문이 대응됐는지를 SA가
+      알아야 미대응 주기를 분모에서 뺄 수 있기 때문이다. 여기서 미리 합치면 주문이 없는 주기의
+      청구액이 다른 주기의 주문으로 나뉘어 단가가 정수배로 부풀고, 그게 '실측 vs 청구 불일치'
+      오탐 4건의 원인이었다(SA3 상단 실사고).
     """
     q = db.query(
         CoupangRgSettlementFee.vendor_item_id,
@@ -181,7 +184,7 @@ def build_fee_audit(
     """
     dims = _load_dims(db, account_key)
     fees = _load_fees(db, account_key, date_from, date_to)
-    # 주기별 판정(ⓒ) — 정산주기 목록을 먼저 뽑아 그 주기 안의 주문만 버킷팅한다.
+    # 정산주기 목록을 먼저 뽑아 그 주기 안의 주문만 버킷팅한다(주기 밖 주문을 분모에 섞지 않음).
     periods_by_option = {vii: sorted(by_period.keys()) for vii, by_period in fees.items()}
     qty = _load_qty_by_period(db, account_key, periods_by_option)
     # 쿠팡 실측 사이즈 배치 로드 — 과금 기준이므로 anomaly 판단 최우선(원칙 18-8)
@@ -264,6 +267,10 @@ def build_fee_audit(
         "coverage_none": sum(
             1 for it in items
             if it.get("periods_total") and not it.get("periods_judged")),
+        # 집계 판정은 깨끗한데 특정 주기만 이상해 보이는 옵션 수 — 집계가 희석했을 수 있는
+        # 국소 신호를 숨기지 않기 위한 참고값(주기 분모 결손 탓인 경우가 많다).
+        "clean_but_period_outlier": sum(
+            1 for it in items if not it["flags"] and it.get("periods_flagged")),
     }
     log.info(
         "RG 청구 감사 (%s): %d옵션 중 %d플래그(실측불일치%d·추정불일치%d·하한미달%d)"
@@ -282,8 +289,9 @@ def build_fee_audit(
         "disclaimer": (
             "최소금액 기준 스크리닝(레퍼런스 17 §7). 정확 청구액은 카테고리·판매가·합포장에 따라 "
             "달라지므로 플래그는 검토 신호이며 과오청구 확정이 아님(D-5). 청구 사이즈=물류센터 측정값. "
-            "★단가는 **정산주기별**로 산출하며 주문이 대응되지 않은 주기는 판정에서 제외한다"
-            "(periods_unmatched). charged_delivery(전 주기 청구총액)를 order_count로 나누지 말 것 — "
+            "★단가는 **주문이 대응된 정산주기**만으로 산출한다(미대응 주기는 판정 제외, "
+            "periods_unmatched). 판정은 그 주기들을 집계해 1회 내린다 — 주기 안에서도 주문이 "
+            "부분 수집되므로 주기 단위 판정은 오탐을 늘린다(periods_flagged는 참고값). charged_delivery(전 주기 청구총액)를 order_count로 나누지 말 것 — "
             "그 나눗셈이 2026-08-03에 규명된 오탐 4건의 원인이었다. 단가의 분자는 judged_delivery다. "
             "주기 안에서 일부 주문만 수집된 경우는 여전히 단가가 부풀 수 있다(한계, 단정 금지)."
         ),
