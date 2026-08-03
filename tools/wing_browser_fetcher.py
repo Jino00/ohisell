@@ -1748,10 +1748,14 @@ def _rg_session_probe(page) -> tuple[str, str]:
     status = res.get("status")
     body = res.get("body") or ""
     low = body.lower()
-    looks_login = ("kccontext" in low or "signin" in low
-                   or (status == 200 and "<html" in low))
-    if status in (401, 403) or looks_login:
-        return _PROBE_AUTH, f"로그인 필요(status={status}, body={body[:80]!r})"
+    marker = next((m for m in ("kccontext", "signin") if m in low), None)
+    if marker is None and status == 200 and "<html" in low:
+        marker = "html"
+    if status in (401, 403) or marker:
+        # ★AUTH에선 body를 남기지 않는다: 로그인 페이지 본문엔 CSRF/세션 토큰이 실릴 수 있는데
+        #   "로그인 페이지였다"는 사실 외에 진단 가치가 없다(어느 신호가 맞았는지만 남긴다).
+        #   UNKNOWN 쪽은 반대다 — 서버 오류 본문이 원인 규명의 거의 유일한 단서라 앞부분을 남긴다.
+        return _PROBE_AUTH, f"로그인 필요(status={status}, 신호={marker or 'status'})"
     if status != 200:
         return _PROBE_UNKNOWN, f"비200(status={status}, body={body[:120]!r})"
     try:
