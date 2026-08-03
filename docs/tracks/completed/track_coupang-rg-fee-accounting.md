@@ -1,8 +1,14 @@
 # 트랙: 쿠팡 로켓그로스(RG) 수수료 회계 자동화
 
-> 시작일: 2026-06-08 · 상태: 🟢 Active
+> 시작일: 2026-06-08 · 종료일: 2026-08-03 · 상태: ✅ Completed
 > 단일 진실 원천. 이 트랙을 무시·변형해서 진행하지 말 것. 변경은 Jino 승인 후 D-N으로 기록.
 > 상세 정책·라이브 실증: docs/references/17_coupang_rg_fulfillment_fee_policy.md
+
+> **상태: Completed (2026-08-03)** — Jino 승인.
+> 미결이던 size_mismatch_high 1건은 "자동 판가름 대기"가 종료됐다. 실측값 확보(극소형) + 판정 기구
+> 정상화(PR #183) 후 결과는 **불일치 확인**: 실측 극소형 vs 청구 함의 대형1, 주문당 4,050원
+> (극소형 최소 1,350원의 3.0배). 감사 목록 1위로 상시 노출되며 `measured_vs_billed_mismatch`
+> 플래그로 뜬다. 후속(정산서 대조)은 운영 판단이라 chip `task_7b887d9f`로 분리.
 
 ## 목표 (한 줄)
 오픽스·오하이테크 로켓그로스(RG) 판매에 쿠팡이 실제 청구한 **모든 수수료(판매수수료·입출고비·배송비·보관비·반품/반출비 등)를 옵션 단위로 자동 수집**해 종합조망 순이익에 반영하고, 향후 모든 RG 상품·판매에 자동 적용한다.
@@ -102,6 +108,7 @@
 - 2026-06-09: **★S6-auto 완료(자동 엑셀 다운로드)**. 커밋 e9554bc. Wing 3단계(request-download→폴링→S3 GET)·고유 requestTime·24h poll window·_mark_red mid-flow·0행 error. codex 3R pass(P1 1건+P2 4건 모두 수용·수정). POST /api/coupang/ops/rg/settlement/auto-download. prod self-verify 미완(쿠키 존재 시).
 - 2026-06-09: **★S6-auto prod self-verify + scheduler 등록 완료**. 라이브 `auto-download`: WING1 28/28→9적재·WING2 28/28→10적재, 인증 정상, 옵션단위 vendor_item_id 적재 확인. `auto_download_rg_settlement_job` 06:15 KST scheduler 등록(커밋 db48d04, scheduler_state DB 확인). CATEGORY_TR만 0행(시트명 미매핑, sale_fee는 status/api로 수집중이라 무영향).
 - 2026-06-09: **★S8 완료(과오청구 감사, D-17)**. 커밋 7de358a+00a8525. **사이즈표 라이브 확보**(Wing fee-details 로그인, 쿠키 피커 import → 레퍼런스 17 §7): 세변합(cm)+무게(kg) 6등급, 둘 다 충족·하나라도 초과시 상위. 구조: SA1 classify_size_type(순수함수)+SA2 expected_fee_floor(최소금액)+SA3 detect_fee_anomalies(배송 주문당·입출고 수량당 정규화) → Harness rg_fee_audit → GET /rg/fee-audit. **읽기전용·net_profit 불변**. **정확금액 복제 안 함**(D-17 — fragile 머니코드 회피, D-4 모델보조·D-5 사실만 준수). codex 1R(P1 0·P2 2 수용: 배송 order_count 정규화·날짜 overlap)+회귀테스트. fixture 32. **prod self-verify: 22옵션 15플래그(size_mismatch_high 4·below_floor 2·unit_unknown 9), order_count 정규화 라이브 확인**.
+- **2026-08-03 — 감사 판정 기구 결함 수정 (PR #183)**: `rg_fee_anomaly.detect_fee_anomalies`가 쿠팡 실측값(`coupang_size_type`)이 있으면 `size_mismatch_high` 판정을 **통째로 스킵**했다("실측값이 과금 기준이므로 추정 불필요"). 그 논리는 "실측 사이즈 = 청구 사이즈"를 전제하는데 라이브가 반증했다 — 실측 극소형인데 청구는 대형1. 실측값의 도착이 불일치를 해소한 게 아니라 **확인해 준 것인데** 코드는 "볼 필요 없음"으로 읽고 신호를 껐고, 그 결과 2026-06-15에 올라온 플래그가 숫자 하나 안 바뀐 채 조용히 사라졌다. 수정: 스킵 제거 + 신호 세기별 이름 분리 — 실측 미확보는 `size_mismatch_high`(약한 신호, 기존 계약 불변), 실측 확보는 `measured_vs_billed_mismatch`(강한 신호, 신설·정렬 최상단). 읽기 전용이라 net_profit 불변(D-17). prod 배포·라이브 확인 완료(`measured_vs_billed_mismatch: 1`, 해당 옵션 flags 재부상, 정렬 1/13).
 
 ## 다음 액션
 - **트랙 코드 전부 완료(S1~S8 + S6-auto self-verify + scheduler).** 운영 단계 진입.
