@@ -107,14 +107,24 @@ _POST_JSON_JS = """async (args) => {
   const headers = {'content-type': 'application/json', 'accept': 'application/json, text/plain, */*'};
   if (m) { try { headers['x-xsrf-token'] = decodeURIComponent(m[1]); } catch (e) { headers['x-xsrf-token'] = m[1]; } }
   try {
+    // ★redirect:'manual'인 이유(2026-08-03 라이브 실측): 로그아웃되면 이 JSON API가 302로
+    //   /login → /logout → helpseller.coupang.com(크로스 오리진)까지 튕긴다. 기본값
+    //   redirect:'follow'면 그 체인 끝에서 fetch가 'TypeError: Failed to fetch'로 **터져서**,
+    //   명백한 로그아웃이 '판정 불가(예외)'로 뭉개진다. manual이면 opaqueredirect로 조용히
+    //   돌아와 "리다이렉트당했다 = 로그인 필요"를 확증할 수 있다.
+    //   기존 성공 경로는 무영향 — 이 API들의 성공은 항상 200이고, 호출자는 이미 200만 성공으로
+    //   친다(3xx는 원래도 실패였다). 달라지는 건 '왜 실패했는지 알게 된다'는 것뿐이다.
     const r = await fetch(location.origin + path, {
       method: 'POST',
       headers,
       body: JSON.stringify(payload),
       credentials: 'include',
+      redirect: 'manual',
       signal: ctrl.signal,
     });
-    return { status: r.status, body: await r.text() };
+    const redirected = (r.type === 'opaqueredirect') || (r.status >= 300 && r.status < 400);
+    return { status: r.status, body: redirected ? '' : await r.text(),
+             redirected, respType: r.type };
   } finally { clearTimeout(t); }
 }"""
 
@@ -1353,6 +1363,17 @@ _RG_ONE_REPORT_TAIL_S = 150   # S3 GET(90s) + prod push(60s) — 폴링 뒤에 �
 _RG_BUDGET_SLACK_S = 90
 _RG_POLL_INTERVAL_S = 8       # download-list 폴링 간격
 _RG_POLL_TIMEOUT_S = 300      # 생성 완료 최대 대기(5분)
+# ── status/api 5xx 재시도 (2026-08-03 라이브 계측) ──────────────────────────
+# status/api는 업스트림이 상시 불안정하다. 같은 페이지·같은 쿠키로 32회 호출한 실측에서
+#   status/api 1/32 성공(창 폭 35/21/7/1일 전부 동일), download-list/api 8/8 성공.
+#   실패는 0.55초 fast-fail HTTP 500이고 본문은 **로그인된** Wing 셸 HTML
+#   (`<title>Coupang Wing - …</title>`, `__GLOBAL_DATA__ activeProfile:'production'`, istio-envoy).
+# 120초 근거: 라이브 회복 실측 22s·46s·34s(08-03 12:43·12:55·13:06)에 여유 2배 이상.
+#   회차 예산(660s) 안이라 다운로드 몫을 크게 갉지 않는다.
+_RG_STATUS_RETRY_S = 120
+_RG_STATUS_RETRY_INTERVAL_S = 5
+# 로그아웃은 정산 URL이 xauth 로그인 페이지로 리다이렉트되는 형태로도 드러난다(_rg_off_origin).
+_RG_ORIGIN_HOST = "wing.coupang.com"
 _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
@@ -1387,15 +1408,42 @@ def _rg_status_payload(cfg: dict, days: int | None = None) -> dict:
     }
 
 
-def _rg_fetch_status_raw(page, cfg: dict) -> dict | None:
-    """status/api를 **1회** POST해 raw JSON dict 반환(층1: prod push + group key 열거 공용 소스).
+def _rg_fetch_status_raw(page, cfg: dict, *, budget_s: float = _RG_STATUS_RETRY_S
+                         ) -> tuple[str, dict | None]:
+    """status/api → (판정, raw dict). **5xx는 예산 안에서 재시도**(층1 push + 열거 공용 소스).
 
     윈도우=rg_status_days(기본 35 — 월경계 분할 주기+여유, 백필 시 cfg로 90 오버라이드).
-    200이 아니거나 로그인 HTML이면 None(_rg_json 규칙). 호출자가 None을 세션 이상으로 처리.
     ★이 함수가 유일한 status/api 소스여야 push와 열거가 같은 raw를 공유(이중 호출 금지, §1.6).
+    ★재시도가 필수인 이유(_RG_STATUS_RETRY_S 주석의 실측): status/api는 1/32만 성공한다.
+      재시도 없이 1회로 판정하면 회차 대부분이 '열거 실패 rc=1'로 죽는다 — 실제로 프로브만
+      고친 상태의 라이브 런(2026-08-03 13:35:37)이 정확히 그렇게 rc=1로 끝났다.
+      종전엔 _rg_login_wait(5초×180초)가 **우연히** 이 재시도를 대행하고 있었을 뿐이라,
+      프로브가 즉시 통과하게 되는 순간 그 우연한 보호막이 사라진다.
+    AUTH(로그아웃 확증)면 즉시 반환한다 — 재시도해도 로그인 전엔 통과할 수 없다.
     """
-    res = _rg_post(page, RG_STATUS_PATH, _rg_status_payload(cfg, days=_rg_status_days(cfg)))
-    return _rg_json(res)
+    deadline = time.monotonic() + max(0.0, budget_s)
+    attempt = 0
+    while True:
+        attempt += 1
+        off = _rg_off_origin(page)
+        if off:
+            log.error("RG status/api 오리진 이탈(로그인 필요) — url=%s", off[:120])
+            return _PROBE_AUTH, None
+        verdict, why, data = _rg_probe_endpoint(
+            page, RG_STATUS_PATH, _rg_status_payload(cfg, days=_rg_status_days(cfg)),
+            expect_key="settlementStatusReports")
+        if verdict == _PROBE_OK:
+            if attempt > 1:
+                log.info("RG status/api %d회 재시도 끝에 성공 — 일시적 업스트림 500이었다.", attempt)
+            return verdict, data
+        log.info("RG status/api %s(%d회차) — %s", verdict, attempt, why)
+        if verdict == _PROBE_AUTH:
+            return verdict, None
+        if time.monotonic() >= deadline:
+            log.error("RG status/api %d회 재시도(%.0fs) 모두 실패 — 업스트림 장애로 본다"
+                      "(로그아웃 아님, 재시도 대상).", attempt, budget_s)
+            return verdict, None
+        time.sleep(_RG_STATUS_RETRY_INTERVAL_S)
 
 
 def _rg_push_status(cfg: dict, raw: dict) -> int:
@@ -1720,21 +1768,161 @@ def _rg_push_xlsx(cfg: dict, url: str, report_type: str, group_key: str) -> int:
     return 0
 
 
+# ── 세션 프로브 판정 3값 ───────────────────────────────────────────────────────
+# ★왜 bool이 아닌가(2026-08-03 라이브 실측): 한 비트로는 "로그아웃"과 "판정 불가"를 구분할 수
+#   없다. _rg_json이 비200·깨진 JSON·예외를 전부 None으로 접고 호출자가 그걸 곧장 '세션 만료'로
+#   읽어, 멀쩡한 세션에서 남은 주기가 통째로 버려졌다(3/3 재현: 다운로드 성공 6~7초 뒤 실패).
+#   대조군까지 성립했다 — 같은 세션·2분 간격에 대상 2개면 중단, 1개면 성공.
+_PROBE_OK = "ok"
+_PROBE_AUTH = "auth"        # 로그인 필요가 **확실**(로그인 HTML·401·403)
+_PROBE_UNKNOWN = "unknown"  # 판정 불가(비200·본문 이상·예외) — 세션 만료로 승격하지 않는다
+
+
+def _rg_off_origin(page) -> str:
+    """페이지가 정산 오리진(wing.coupang.com)을 벗어나 있으면 그 URL, 아니면 ''.
+
+    ★로그아웃의 **관측된** 형태다(cmd_login 주석의 2026-07-27 실측): 정산 URL이 xauth 로그인
+      페이지로 리다이렉트되고 그 오리진의 status/api는 404를 준다. same-origin POST는
+      location.origin 기반이라 애초에 엉뚱한 호스트로 나간다. 본문 마커보다 확실하고 싸다
+      — 404 자체는 UNKNOWN이지만(정상 세션에서도 경로 변경으로 날 수 있다) 오리진 이탈은 확증이다.
+    """
+    try:
+        url = str(page.url or "")
+    except Exception:  # noqa: BLE001 — 창 닫힘 등은 판정 불가로 접는다
+        return ""
+    if url and not url.startswith("about:") and _RG_ORIGIN_HOST not in url:
+        return url
+    return ""
+
+
+def _rg_probe_endpoint(page, path: str, payload: dict, *, expect_key: str | None = None,
+                       expect_list: bool = False) -> tuple[str, str, object]:
+    """same-origin POST 1회 → (판정, 사유, 파싱값). 사유는 그대로 로그에 남긴다.
+
+    ★사유를 남기는 게 이 함수의 존재 이유다: 종전엔 실패가 False 한 비트라 로그아웃인지
+      429인지 500인지 evaluate 예외인지 사후에 구분할 방법이 없었다(그래서 6일 침묵의 원인을
+      로그만으로 못 짚었다).
+    ★HTML 마커로 로그인을 단정할 때 status를 함께 본다: 502 오류 페이지도 HTML이라
+      '<html'만으로 로그인 필요라고 부르면 인프라 장애가 로그아웃으로 둔갑한다.
+      (실측 2026-08-03: status/api 500의 본문은 **로그인된** Wing 셸 HTML이다.)
+    """
+    try:
+        res = _rg_post(page, path, payload)
+    except Exception as e:  # noqa: BLE001 — 네비게이션 중 evaluate 실패 등
+        return _PROBE_UNKNOWN, f"evaluate 예외: {str(e)[:120]}", None
+    if not isinstance(res, dict):
+        return _PROBE_UNKNOWN, f"응답 형식 이상: {str(res)[:80]}", None
+    status = res.get("status")
+    body = res.get("body") or ""
+    low = body.lower()
+    if res.get("redirected"):
+        # ★JSON API가 리다이렉트당했다 = 로그인 필요. 라이브 실측 체인(2026-08-03 14:05):
+        #   download-list/api → 302 → wing/login → 302 → wing/logout → helpseller(크로스 오리진).
+        #   redirect:'follow'였을 땐 이게 TypeError로 터져 '판정 불가'로 뭉개졌다.
+        return _PROBE_AUTH, f"로그인 필요(리다이렉트 — status={status}, type={res.get('respType')})", None
+    marker = next((m for m in ("kccontext", "signin", "xauth") if m in low), None)
+    if marker is None and status == 200 and "<html" in low:
+        marker = "html"
+    if status in (401, 403) or marker:
+        # ★AUTH에선 body를 남기지 않는다: 로그인 페이지 본문엔 CSRF/세션 토큰이 실릴 수 있는데
+        #   "로그인 페이지였다"는 사실 외에 진단 가치가 없다(어느 신호가 맞았는지만 남긴다).
+        #   UNKNOWN 쪽은 반대다 — 서버 오류 본문이 원인 규명의 거의 유일한 단서라 앞부분을 남긴다.
+        return _PROBE_AUTH, f"로그인 필요(status={status}, 신호={marker or 'status'})", None
+    if status != 200:
+        return _PROBE_UNKNOWN, f"비200(status={status}, body={body[:120]!r})", None
+    try:
+        data = json.loads(body)
+    except (ValueError, TypeError):
+        return _PROBE_UNKNOWN, f"JSON 파싱 실패(body={body[:120]!r})", None
+    if expect_list:
+        # download-list는 항목 배열을 준다(라이브 실측 'JSON list n=5'). 딕트가 오면 응답 형태가
+        #   바뀐 것이므로 '살아 있다'고 단정하지 않는다 — 형태 드리프트를 조용히 통과시키면
+        #   프로브가 아무것도 증명하지 못하는 장식이 된다.
+        if isinstance(data, list):
+            return _PROBE_OK, "ok", data
+        keys = list(data)[:6] if isinstance(data, dict) else type(data).__name__
+        return _PROBE_UNKNOWN, f"예상 형태(list) 아님: {keys}", None
+    if expect_key is None:
+        return _PROBE_OK, "ok", data
+    if isinstance(data, dict) and expect_key in data:
+        return _PROBE_OK, "ok", data
+    keys = list(data)[:6] if isinstance(data, dict) else type(data).__name__
+    return _PROBE_UNKNOWN, f"예상 키({expect_key}) 없음: {keys}", None
+
+
+def _rg_session_probe(page) -> tuple[str, str]:
+    """정산 세션 (판정, 사유) — 프로브 엔드포인트는 **download-list/api**다.
+
+    ★왜 status/api가 아닌가(2026-08-03 라이브 계측, 같은 페이지·같은 쿠키·32회 호출):
+        status/api      1/32 성공 (창 폭 35/21/7/1일 전부 동일 — 질의 무게와 무관)
+        download-list   8/8  성공 (0.49s)
+      "로그인했는가"의 정의를 계정에서 **가장 불안정한 엔드포인트**에 걸어 둔 것이 이 사고의
+      뿌리였다. 판정을 3상태로 나눠도 프로브가 97% UNKNOWN이면 세션 감시는 사실상 죽어 있다
+      — download-list는 같은 오리진·같은 쿠키·같은 XSRF로 계정의 다운로드 목록을 돌려주므로
+      세션 신선도를 같은 강도로 증명하면서 20배 이상 싸고 안정적이다.
+    ★단서: download-list의 **로그아웃 시 응답 형태는 라이브로 검증하지 못했다**(실제 세션을
+      끊어볼 수 없어서). 그래서 오리진 이탈을 1차 확증으로 먼저 보고, 본문 마커가 없으면
+      AUTH라 부르지 않는다. 진짜 로그아웃이면 이어지는 request-download가 재시도 가능한
+      실패로 떨어져 회수된다(_rg_loop_should_abort의 판단기준과 같은 비대칭).
+    """
+    off = _rg_off_origin(page)
+    if off:
+        return _PROBE_AUTH, f"로그인 필요(오리진 이탈 — url={off[:100]})"
+    now_ms = int(time.time() * 1000)
+    verdict, why, _ = _rg_probe_endpoint(
+        page, RG_DOWNLOAD_LIST_PATH,
+        {"requestTimeFrom": str(now_ms - 24 * 3600 * 1000), "requestTimeTo": str(now_ms + 60_000)},
+        expect_list=True)
+    return verdict, why
+
+
 def _rg_session_ok(page) -> bool:
     """정산 status/api가 정상 JSON(settlementStatusReports 키)을 주면 로그인 상태.
 
     ★호스트 무관(location.origin same-origin). vendor-summary(m-wing) 감지로 정산 세션을 판단하면
     틀리므로(셀프리뷰 A), 정산 자체의 status/api로 직접 판정한다. 빈 cfg 기본값으로 호출 가능.
+    ★진입·로그인 대기 경로 전용(보수적: 판정 불가도 False). 층2 루프는 판정 불가를 만료로
+      승격하면 안 되므로 _rg_session_verdict_confirmed를 쓴다.
     """
-    try:
-        data = _rg_json(_rg_post(page, RG_STATUS_PATH, _rg_status_payload({})))
-    except Exception:  # noqa: BLE001 — 네비게이션 중 evaluate 실패 등은 '아직 아님'으로 처리
-        return False
-    return isinstance(data, dict) and "settlementStatusReports" in data
+    verdict, why = _rg_session_probe(page)
+    if verdict != _PROBE_OK:
+        log.info("RG 세션 프로브 %s — %s", verdict, why)
+    return verdict == _PROBE_OK
+
+
+def _rg_loop_should_abort(verdict: str) -> bool:
+    """층2 루프를 중단할지 — **AUTH일 때만** True.
+
+    한 줄짜리를 굳이 함수로 뽑은 이유: 이게 이번 결함의 전부다(판정 불가를 중단 사유로 쓴 것).
+    루프 안에 인라인으로 두면 브라우저 없이 검증할 수 없어 변이 테스트가 불가능하다.
+    """
+    return verdict == _PROBE_AUTH
+
+
+def _rg_session_verdict_confirmed(page, *, delay_s: float = 5.0) -> str:
+    """층2 루프용 — 실패 시 짧은 지연 후 1회 재확인하고 **판정값**을 그대로 돌려준다.
+
+    반환은 _PROBE_OK / _PROBE_AUTH / _PROBE_UNKNOWN. 호출자는 AUTH일 때만 중단한다.
+    ★UNKNOWN을 중단 사유로 쓰지 않는 이유(계약 판단기준): 프로브 오판의 비용이 오검출 비용보다
+      크다. 오판이면 남은 주기가 통째로 버려지고 "로그인 필요"라는 거짓 사유가 기록되지만,
+      정말로 세션이 죽었다면 이어지는 다운로드가 어차피 실패해 rc=1(재시도 가능)로 잡힌다.
+      즉 UNKNOWN에서 계속 진행하는 쪽이 어느 경우에도 더 나쁘지 않다.
+    """
+    verdict, why = _rg_session_probe(page)
+    if verdict == _PROBE_OK:
+        return verdict
+    log.info("RG 세션 프로브 1차 %s — %s (%.0f초 후 재확인)", verdict, why, delay_s)
+    time.sleep(delay_s)
+    verdict2, why2 = _rg_session_probe(page)
+    if verdict2 == _PROBE_OK:
+        log.info("RG 세션 프로브 재확인 ok — 1차는 일시 실패였다(중단하지 않는다).")
+    else:
+        log.warning("RG 세션 프로브 재확인도 %s — %s", verdict2, why2)
+    return verdict2
 
 
 def _rg_session_ok_confirmed(page, *, delay_s: float = 5.0) -> bool:
-    """_rg_session_ok를 (실패 시) 짧은 지연 후 1회 재확인 — 둘 다 False일 때만 '세션 만료'.
+    """(구 API — 하위호환) 판정 불가까지 False로 접는다. 신규 호출부는 verdict 쪽을 쓸 것.
 
     ★왜(적대적 리뷰 R1 [P2-2]): _rg_session_ok는 로그아웃뿐 아니라 비200·깨진 JSON·evaluate 예외
       까지 전부 False로 접는다(진입 경로 주석이 스스로 인정한 사실, codex 5R[P1]). 루프 도중의
@@ -1811,32 +1999,41 @@ def _do_rg_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
             with _chrome(p, cfg, state, owner=owner) as (page, ctx, save):
                 page.goto(RG_DASH_URL, wait_until="domcontentloaded", timeout=40000)
                 page.wait_for_timeout(3500)   # Cloudflare/Akamai JS 챌린지 안정화
-                if not _rg_session_ok(page):
-                    # ★재시도 대상으로 둔다(codex 5R[P1], rocket _session_ok와 같은 원칙):
-                    #   _rg_session_ok는 로그아웃뿐 아니라 status/api의 일시적 비200·깨진 JSON·
-                    #   Playwright evaluate 실패까지 전부 False로 접는다. 로그아웃이 확증된 게
-                    #   아니므로 login_required로 1회 만에 소멸시키면 안 된다. 창은 열어 두므로
-                    #   사람이 늦게 로그인해도 다음 재시도가 자동으로 이어받는다.
+                entry_verdict, entry_why = _rg_session_probe(page)
+                if entry_verdict != _PROBE_OK:
+                    log.info("RG 진입 프로브 %s — %s", entry_verdict, entry_why)
+                if entry_verdict == _PROBE_AUTH:
+                    # ★AUTH(로그아웃 확증)일 때만 로그인 창을 띄운다. 종전엔 업스트림 500도
+                    #   여기로 떨어져 멀쩡한 세션에 매 회차 '세션 만료 의심'을 오보했다
+                    #   (08-03 12:12~13:07 전 회차). 창은 열어 두므로 사람이 늦게 로그인해도
+                    #   다음 재시도가 자동으로 이어받는다.
                     owner.keep_open = True    # 로그인할 창이 필요 → 닫지 않음
                     if login_wait_secs <= 0:
-                        log.error("RG: 세션 만료 의심(정산 status/api 미응답). 'login' 또는 데몬 로그인 필요.")
+                        log.error("RG: 로그인 필요(정산 세션 로그아웃 확증). 'login' 또는 데몬 로그인 필요.")
                         return 1
-                    log.info("RG: 세션 만료 의심 — 창에서 로그인하세요(자동 감지, 최대 %d초).", login_wait_secs)
+                    log.info("RG: 로그아웃 확증 — 창에서 로그인하세요(자동 감지, 최대 %d초).", login_wait_secs)
                     if not _rg_login_wait(page, ctx, state, login_wait_secs, cdp=cdp):
                         log.error("RG: 로그인 감지 실패(창은 열어 둠 — 다음 재시도가 이어받는다).")
                         return 1
                     owner.keep_open = False   # 로그인 성공 → 평소대로 작업 후 창 닫음
-                else:
+                elif entry_verdict == _PROBE_OK:
                     save()  # 세션 유효 → 회전 쿠키 보존 (CDP: no-op)
+                # UNKNOWN은 여기서 멈추지 않는다 — 바로 아래 status/api가 예산 안에서 재시도하며
+                #   진짜 로그아웃이면 거기서 AUTH가 나온다(설계된 2차 관문).
 
-                # 층1: status/api raw를 1회 fetch → prod push(계정 수수료 적재) → 같은 raw로 열거.
+                # 층1: status/api raw를 fetch(5xx는 재시도) → prod push → 같은 raw로 열거.
                 try:
-                    raw = _rg_fetch_status_raw(page, cfg)
+                    raw_verdict, raw = _rg_fetch_status_raw(page, cfg)
                 except Exception as e:  # noqa: BLE001 — 응답 비정상/챌린지 → 실패 보고
                     log.error("RG status/api fetch 실패(정산 페이지 same-origin 200 미확인?): %s", e)
                     return 1
+                if raw_verdict == _PROBE_AUTH:
+                    owner.keep_open = True    # 사람이 로그인할 창을 남긴다
+                    log.error("RG: status/api에서 로그아웃 확증 — 로그인 필요.")
+                    return RC_LOGIN_REQUIRED
                 if not isinstance(raw, dict):
-                    log.error("RG status/api 응답 비정상(200/JSON 아님) — 세션·챌린지 확인.")
+                    # 업스트림 500 지속 — 로그아웃이 아니므로 **재시도 대상**이다(요청 소멸 금지).
+                    log.error("RG status/api 지속 실패(업스트림 장애로 판단) — 재시도 대상.")
                     return 1
                 # 계정 단위 수수료 push는 엑셀 흐름과 독립(fail-soft): 실패해도 다운로드는 계속.
                 # ★단 결손 판정은 층1 DB를 소스로 삼는다 — push가 실패한 회차엔 최신 주기가 층1에
@@ -1892,15 +2089,28 @@ def _do_rg_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
                     # ★주기 사이 세션 재확인(D3): 층2는 주기×리포트당 최대 300초 폴링이라, 진입 시
                     #   1회 확인만으로는 루프 도중 만료를 못 잡는다 — 남은 주기가 통째로 헛돈다.
                     #   이미 받아 push한 주기는 그대로 두고(멱등 적재), 남은 주기만 중단한다.
-                    #   ★blip 1회로 승격하지 않는다(리뷰 [P2-2]) — _rg_session_ok_confirmed 참조.
-                    if n > 0 and not _rg_session_ok_confirmed(page):
-                        log.error("RG: 층2 루프 중 세션 만료 — 남은 주기 %d개 중단(로그인 필요).",
-                                  len(targets) - n)
-                        # keep_open은 CDP 모드에서만 실효(레거시 _chrome 경로는 finally에서 무조건
-                        #   닫는다) — 라이브는 CDP라 의도대로 동작한다(리뷰 [P2-9]).
-                        owner.keep_open = True   # 사람이 로그인할 창을 남긴다
-                        session_lost = True
-                        break
+                    #   ★blip 1회로 승격하지 않는다(리뷰 [P2-2]) — _rg_session_verdict_confirmed 참조.
+                    #   ★2026-08-03: **판정 불가(UNKNOWN)로는 중단하지 않는다.** 종전엔 비200·깨진
+                    #     JSON·예외까지 전부 '세션 만료'로 승격해, 멀쩡한 세션에서 남은 주기가 통째로
+                    #     버려지고 "로그인 필요"라는 거짓 사유가 기록됐다(라이브 3/3 재현 — 매번
+                    #     다운로드 성공 6~7초 뒤). 대조군도 성립: 같은 세션·2분 간격에 대상 2개면
+                    #     중단, 1개면 성공. 즉 끊은 건 세션이 아니라 이 프로브였다.
+                    #     rider(PRODUCT_SIZE_COMPARISON)가 항상 슬롯 #1을 차지하므로 진짜 정산
+                    #     결손은 구조적으로 항상 #2 이하 → 이 오판 하나가 결손 충전을 영구히 막았다.
+                    if n > 0:
+                        _verdict = _rg_session_verdict_confirmed(page)
+                        if _rg_loop_should_abort(_verdict):
+                            log.error("RG: 층2 루프 중 세션 만료 — 남은 주기 %d개 중단(로그인 필요).",
+                                      len(targets) - n)
+                            # keep_open은 CDP 모드에서만 실효(레거시 _chrome 경로는 finally에서
+                            #   무조건 닫는다) — 라이브는 CDP라 의도대로 동작한다(리뷰 [P2-9]).
+                            owner.keep_open = True   # 사람이 로그인할 창을 남긴다
+                            session_lost = True
+                            break
+                        if _verdict != _PROBE_OK:
+                            log.warning(
+                                "RG: 주기 사이 세션 프로브 판정 불가 — 중단하지 않고 계속한다"
+                                "(정말 죽었다면 이어지는 다운로드가 rc=1로 잡혀 재시도된다).")
                     for rt in t["report_types"]:
                         # ★예산 검사는 '리포트 하나를 시작하기 전마다'다(리뷰 R3 [P2-1]).
                         #   주기 단위로만 재면, 예산을 아슬하게 통과한 마지막 주기가 리포트 여러 건을
