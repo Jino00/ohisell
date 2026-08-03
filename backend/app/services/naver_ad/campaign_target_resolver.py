@@ -20,6 +20,47 @@ from app.services.naver_ad import adgroup_product_freshness
 
 NAVER_CHANNEL_ID = 6
 
+# ★"매핑은 있는데 전부 신선도 창 밖" = BEP/target 확정 불가(Jino 확정 2026-08-03, fail-closed).
+#   이 source를 받은 호출부는 **계정 평균으로 다시 폴백하면 안 된다** — 그 폴백이 정확히
+#   막으려는 위험이다(아래 `_stale_only_*` docstring).
+SOURCE_STALE_MAPPING = "stale_mapping"
+
+
+def _has_any_mapping(db: Session, *, adgroup_id: str | None = None,
+                     campaign_id: str | None = None) -> bool:
+    """신선도 **무관**하게 매핑 행이 하나라도 있는가(= 우리가 이 유닛을 매핑한 적이 있는가)."""
+    q = db.query(NaverAdgroupProduct.id)
+    if adgroup_id is not None:
+        q = q.filter(NaverAdgroupProduct.adgroup_id == adgroup_id)
+    if campaign_id is not None:
+        q = q.filter(NaverAdgroupProduct.campaign_id == campaign_id)
+    return db.query(q.exists()).scalar() or False
+
+
+def stale_only_for_adgroup(db: Session, adgroup_id: str) -> bool:
+    """★이 그룹의 매핑이 **존재하지만 전부 신선도 창 밖**인가 = BEP/target 확정 불가.
+
+    두 상태를 반드시 구분해야 한다(이 함수의 존재 이유):
+      · **한 번도 매핑된 적 없음**(파워링크·브랜드검색처럼 상품 소재가 아예 없는 유닛) —
+        예전부터 계정 기본값(③)으로 폴백하던 정상 경로다. **동작 불변.**
+      · **매핑은 있었는데 전부 낡음**(sync가 7일 이상 이 유닛을 못 봤다) — 우리는 지금 이
+        유닛의 상품 구성을 **모른다.** 여기서 계정 평균으로 추정하면 안 된다.
+
+    ★왜 계정 평균이 위험한가(Jino 확정 2026-08-03, fail-closed): 경제 상한은
+      `affordable_ceiling = rpc / bep_roas`로 BEP가 **분모**다. 고BEP(저마진) 상품 그룹이
+      계정 평균(대개 더 낮음)으로 떨어지면 **상한이 올라간다** = 돈을 더 쓰는 방향.
+      "모르는데 대리 지표로 추정해 판단한다"는 이 트랙이 반복해 실패한 패턴이고
+      (상향 브레이크 대리 지표·순위를 광고영역 값으로 판단), 같은 데이터 결손에
+      `budget_pacing.campaign_product_ids`와 `bid_ceiling_calculator.resolve_bep`는 이미
+      fail-closed다. 처분을 일치시킨다.
+    """
+    return not _cpids_for_adgroup(db, adgroup_id) and _has_any_mapping(db, adgroup_id=adgroup_id)
+
+
+def stale_only_for_campaign(db: Session, campaign_id: str) -> bool:
+    """캠페인 grain 대칭 — 근거는 `stale_only_for_adgroup` 참조."""
+    return not _cpids_for_campaign(db, campaign_id) and _has_any_mapping(db, campaign_id=campaign_id)
+
 
 def _revenue_weighted_avg(db: Session, column) -> Decimal | None:
     """상품별 column(target_roas/bep_roas)을 최근 주문매출로 가중평균(매출가중).
@@ -150,7 +191,7 @@ def resolve_adgroup_target_roas(db: Session, adgroup_id: str) -> dict:
     D-NAO-57 A: 그 그룹의 매핑 상품(들)의 상품 BEP target_roas 가중평균. 매핑/BEP가 없으면
     계정 기본값(③)으로 폴백. 우선순위 ①(캠페인 override)은 grain이 캠페인이라 여기서는 다루지
     않는다 — override는 캠페인 수준 resolve_target_roas에서만 적용된다.
-    source: product_bep(②) / account_default(③) / unavailable.
+    source: product_bep(②) / account_default(③) / stale_mapping(확정 불가) / unavailable.
 
     ⚠️ 현재 프로덕션 호출부 0(의도적 선구축, 리뷰 P3-2 승인 유지): 기존 소비처(제안·레인·진단)는
     전부 캠페인 grain으로만 호출한다. 1차 활용 후보 = auto_operator **시간당 밴드 레인** —
@@ -160,6 +201,10 @@ def resolve_adgroup_target_roas(db: Session, adgroup_id: str) -> dict:
     val = _weighted_target_for_cpids(db, _cpids_for_adgroup(db, adgroup_id), NaverProductBep.target_roas)
     if val is not None:
         return {"target_roas": val, "source": "product_bep"}
+    # ★fail-closed(Jino 확정 2026-08-03): 매핑이 있었는데 전부 낡았으면 **계정 평균으로
+    #   추정하지 않는다** — 근거는 stale_only_for_adgroup docstring.
+    if stale_only_for_adgroup(db, adgroup_id):
+        return {"target_roas": None, "source": SOURCE_STALE_MAPPING}
     default = account_default_target_roas(db)
     return {"target_roas": default, "source": "account_default" if default is not None else "unavailable"}
 
@@ -185,8 +230,9 @@ def resolve_target_roas(db: Session, campaign_id: str) -> dict:
     우선순위(D-NAO-57 A로 ② 활성화):
       ① naver_campaign_settings.target_roas_override — **절대 불변, 항상 최우선**
       ② 상품 파생 — 이 캠페인의 그룹들에 매핑된 상품 BEP target_roas 가중평균(그룹들 가중)
-      ③ 계정 기본값(BEP 매출가중)
-    source: override(①) / product_bep(②) / account_default(③) / unavailable.
+      ③ 계정 기본값(BEP 매출가중) — **단 매핑이 전부 낡았으면 여기로 내려가지 않는다**
+    source: override(①) / product_bep(②) / account_default(③) / stale_mapping(확정 불가) /
+            unavailable. ★stale_mapping을 받은 호출부는 계정 평균으로 재폴백하면 안 된다.
     """
     settings = db.query(NaverCampaignSettings).filter(
         NaverCampaignSettings.campaign_id == campaign_id
@@ -200,6 +246,10 @@ def resolve_target_roas(db: Session, campaign_id: str) -> dict:
     )
     if product_val is not None:
         return {"target_roas": product_val, "source": "product_bep"}
+
+    # ★fail-closed — stale_only_for_campaign docstring 참조.
+    if stale_only_for_campaign(db, campaign_id):
+        return {"target_roas": None, "source": SOURCE_STALE_MAPPING}
 
     default = account_default_target_roas(db)
     return {"target_roas": default, "source": "account_default" if default is not None else "unavailable"}

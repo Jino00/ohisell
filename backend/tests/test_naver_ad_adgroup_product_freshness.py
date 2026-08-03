@@ -169,25 +169,114 @@ def test_cold_start_lane_does_not_use_stale_context(db):
     assert ("c-old", "g-old") not in contexts, "옛 문맥으로 라이브 소재에 입찰하려 한다"
 
 
-def test_target_resolver_falls_back_conservatively_when_all_stale(db):
-    """★필터 후 0행이면 폴백 — 숫자를 지어내지 않고 계정 기본값으로 내려간다(기존 동작).
+def _account_default_bep_and_target(db):
+    """계정 평균이 **존재하는** 상태 — fail-closed가 '평균이 없어서'가 아님을 보장한다."""
+    db.add_all([
+        NaverProductBep(channel_id=6, channel_product_id="acc", has_cost=True,
+                        target_roas=Decimal("222"), bep_roas=Decimal("1.2")),
+        Order(channel_id=6, platform_product_id="acc", selling_price=Decimal("1000"),
+              quantity=1, order_date=date(2026, 8, 1), order_number="o-acc"),
+    ])
 
-    이 폴백은 매핑이 애초에 0행일 때 이미 일어나던 경로다(새 위험이 아님).
+
+def test_target_resolver_is_fail_closed_when_mapping_all_stale(db):
+    """★★fail-closed(Jino 확정 2026-08-03): 매핑이 있었는데 전부 낡으면 **계정 평균으로
+    추정하지 않고 판정 불가**를 반환한다.
+
+    구 동작은 계정 평균 폴백이었는데, 경제 상한이 `rpc / bep`라 BEP가 **분모**다 —
+    고BEP(저마진) 그룹이 계정 평균(대개 더 낮음)으로 떨어지면 상한이 올라간다(돈 쓰는 방향).
     """
     _mapping(db, adgroup_id="g1", campaign_id="c1", product_id="p-gone", age_days=STALE)
-    db.add_all([
-        NaverProductBep(channel_id=6, channel_product_id="p-gone", has_cost=True,
-                        target_roas=Decimal("500")),
-        NaverProductBep(channel_id=6, channel_product_id="acc", has_cost=True,
-                        target_roas=Decimal("222")),
-        Order(channel_id=6, platform_product_id="acc", selling_price=Decimal("1000"),
-              quantity=1, order_date=date(2026, 8, 1), order_number="o1"),
-    ])
+    db.add(NaverProductBep(channel_id=6, channel_product_id="p-gone", has_cost=True,
+                           target_roas=Decimal("500")))
+    _account_default_bep_and_target(db)
     db.commit()
 
     r = campaign_target_resolver.resolve_target_roas(db, "c1")
+    assert r["source"] == campaign_target_resolver.SOURCE_STALE_MAPPING
+    assert r["target_roas"] is None, "계정 평균 222로 추정하면 안 된다"
+
+    r_ag = campaign_target_resolver.resolve_adgroup_target_roas(db, "g1")
+    assert r_ag["source"] == campaign_target_resolver.SOURCE_STALE_MAPPING
+    assert r_ag["target_roas"] is None
+
+
+def test_never_mapped_unit_still_uses_account_default(db):
+    """★회귀: **한 번도 매핑된 적 없는** 유닛(파워링크 등)은 종전대로 계정 기본값을 쓴다.
+
+    바꾼 것은 "확정할 수 없을 때"의 처분뿐이다 — "애초에 상품 소재가 없는 유닛"은 다른 상태다.
+    """
+    _account_default_bep_and_target(db)
+    db.commit()
+
+    r = campaign_target_resolver.resolve_target_roas(db, "cmp-powerlink")
     assert r["source"] == "account_default"
     assert r["target_roas"] == Decimal("222")
+
+
+def test_partial_freshness_keeps_product_derived_value(db):
+    """★회귀: 부분 필터링(일부만 낡음)에서는 기존 동작 불변 — 신선한 상품으로 계속 해석한다."""
+    _mapping(db, adgroup_id="g1", campaign_id="c1", product_id="p-now", age_days=FRESH)
+    _mapping(db, adgroup_id="g1", campaign_id="c1", product_id="p-gone", age_days=STALE)
+    db.add_all([
+        NaverProductBep(channel_id=6, channel_product_id="p-now", has_cost=True,
+                        target_roas=Decimal("150")),
+        NaverProductBep(channel_id=6, channel_product_id="p-gone", has_cost=True,
+                        target_roas=Decimal("500")),
+    ])
+    _account_default_bep_and_target(db)
+    db.commit()
+
+    r = campaign_target_resolver.resolve_target_roas(db, "c1")
+    assert r["source"] == "product_bep"
+    assert r["target_roas"] == Decimal("150")
+    assert campaign_target_resolver.stale_only_for_campaign(db, "c1") is False
+
+
+def test_stale_verdict_is_not_re_derived_by_money_path_consumers(db):
+    """★★"판정 불가"를 **계정 평균으로 되살리는 소비처가 없다**.
+
+    `auto_operator._resolve_target_roas`·`budget_pacing.resolve_target_roas`는 종전에
+    `if target is None: target = account_default_target_roas(db)`로 **스스로 다시 폴백**했다.
+    그대로 두면 resolver의 fail-closed가 여기서 조용히 풀린다 — 이 테스트가 그 재발을 막는다.
+    """
+    from app.services.naver_ad import auto_operator, budget_pacing
+
+    _mapping(db, adgroup_id="g1", campaign_id="c1", product_id="p-gone", age_days=STALE)
+    db.add(NaverProductBep(channel_id=6, channel_product_id="p-gone", has_cost=True,
+                           target_roas=Decimal("500")))
+    _account_default_bep_and_target(db)
+    db.commit()
+
+    assert campaign_target_resolver.account_default_target_roas(db) is not None, \
+        "전제: 계정 평균은 존재한다(없어서 None이 나오는 게 아님을 확인)"
+    assert auto_operator._resolve_target_roas(db, "c1") is None
+    assert budget_pacing.resolve_target_roas(db, "c1") is None
+
+
+def test_stale_verdict_blocks_exploration_economic_ceiling(db):
+    """★★BEP 사다리도 계정 평균으로 내려가지 않는다 → 경제 상한이 느슨해지지 않는다.
+
+    `_resolve_exploration_bep_roas`가 None이면 `compute_exploration_ceiling`이 current_bid를
+    돌려주고 ladder가 'capped'로 판정해 **상향 불가**(fail-closed) — "제한 없음"이 아니다.
+    """
+    from app.services.naver_ad import exploration, expansion_pressure
+
+    _mapping(db, adgroup_id="g1", campaign_id="c1", product_id="p-gone", age_days=STALE)
+    db.add(NaverProductBep(channel_id=6, channel_product_id="p-gone", has_cost=True,
+                           bep_roas=Decimal("3.0")))
+    _account_default_bep_and_target(db)
+    db.commit()
+
+    assert campaign_target_resolver.account_default_bep_roas(db) is not None, "전제: 계정 평균 존재"
+    assert exploration.resolve_exploration_bep_roas(db, "c1", "g1") is None
+    assert expansion_pressure._resolve_campaign_bep_roas(db, "c1") is None
+
+    # ★"판정 불가"가 "제한 없음"이 아님을 상한 값으로 확인 — current_bid가 그대로 상한이 된다.
+    ceiling = exploration.exploration_ceiling(
+        db, "c1", "g1", 1000, date(2026, 7, 1), date(2026, 8, 3),
+    )
+    assert ceiling == 1000, "상한이 current_bid로 묶여야 한다(capped)"
 
 
 def test_today_proxy_revenue_reports_unknown_not_zero_when_all_stale(db):

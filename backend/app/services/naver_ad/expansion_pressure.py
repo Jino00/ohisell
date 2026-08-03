@@ -92,6 +92,10 @@ def _resolve_campaign_bep_roas(db: Session, campaign_id: str) -> Decimal | None:
     )
     if bep is not None and bep > 0:
         return bep
+    # ★계정 평균 폴백 차단 — exploration._resolve_exploration_bep_roas와 동일 근거(2026-08-03).
+    #   매핑이 전부 낡았으면 확장 압력의 분모를 추정하지 않는다(한 번도 매핑 없던 유닛은 불변).
+    if campaign_target_resolver.stale_only_for_campaign(db, campaign_id):
+        return None
     bep = campaign_target_resolver.account_default_bep_roas(db)
     if bep is not None and bep > 0:
         return bep

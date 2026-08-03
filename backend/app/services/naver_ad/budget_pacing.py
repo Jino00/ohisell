@@ -262,7 +262,8 @@ def resolve_target_roas(db: Session, campaign_id: str) -> Decimal | None:
     """캠페인 목표 ROAS(override > 상품BEP파생 > 계정기본값). 전부 미해결이면 None(fail-closed)."""
     resolved = campaign_target_resolver.resolve_target_roas(db, campaign_id)
     target = resolved.get("target_roas")
-    if target is None:
+    # ★fail-closed — auto_operator._resolve_target_roas와 동일 근거(2026-08-03).
+    if target is None and resolved.get("source") != campaign_target_resolver.SOURCE_STALE_MAPPING:
         target = campaign_target_resolver.account_default_target_roas(db)
     return Decimal(str(target)) if target is not None else None
 

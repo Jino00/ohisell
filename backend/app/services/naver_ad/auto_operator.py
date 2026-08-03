@@ -363,7 +363,11 @@ def _resolve_target_roas(db: Session, campaign_id: str) -> float | None:
     변경에 결합되지 않게 한다)."""
     resolved = campaign_target_resolver.resolve_target_roas(db, campaign_id)
     target_roas = resolved["target_roas"]
-    if target_roas is None:
+    # ★fail-closed(Jino 확정 2026-08-03): 매핑이 전부 낡아 확정 불가면 **계정 평균으로 다시
+    #   폴백하지 않는다.** 이 재폴백이 있으면 resolver의 fail-closed가 여기서 조용히 풀린다
+    #   (계정 평균 BEP는 대개 더 낮아 경제 상한을 올린다 = 돈 쓰는 방향).
+    #   None은 호출부가 이미 "판정 불가 → fail-closed"로 읽는다(_settlement_roas_verdict 등).
+    if target_roas is None and resolved.get("source") != campaign_target_resolver.SOURCE_STALE_MAPPING:
         target_roas = campaign_target_resolver.account_default_target_roas(db)
     return float(target_roas) if target_roas is not None else None
 
