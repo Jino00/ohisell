@@ -75,19 +75,35 @@ def _headers(path: str, method: str = "GET") -> dict:
     }
 
 
+HTTP_TIMEOUT_S = 30
+MAX_ATTEMPTS = 3
+# 한 호출의 최악 소요(초) = 시도 3회 × 타임아웃 + 시도 **사이**의 백오프(1s + 2s).
+# 호출부가 시간 예산을 짤 때 이 값을 헤드룸으로 쓴다(shopping_ad_product_sync).
+MAX_CALL_DURATION_S = MAX_ATTEMPTS * HTTP_TIMEOUT_S + 1 + 2  # = 93s
+
+
 def _get(path: str, params: dict | None = None) -> requests.Response:
     """SA API GET. rate limit(429)·일시 5xx는 지수 백오프 재시도(최대 3회).
 
     GET는 멱등이라 재시도 안전. 4xx(인증·잘못된 요청)는 즉시 반환(재시도 무의미).
+
+    ★마지막 시도 뒤에는 기다리지 않는다(codex 2R P2): 구 코드는 3번째 시도가 실패해도
+      `time.sleep(4)`를 하고 나서 반환했다 — 더 시도할 게 없는데 4초를 버리는 순수 낭비이고,
+      호출부의 시간 예산 계산도 그만큼 빗나갔다.
     """
     last: requests.Response | None = None
-    for attempt in range(3):
-        resp = requests.get(BASE_URL + path, headers=_headers(path), params=params, timeout=30)
+    for attempt in range(MAX_ATTEMPTS):
+        resp = requests.get(
+            BASE_URL + path, headers=_headers(path), params=params, timeout=HTTP_TIMEOUT_S,
+        )
         if resp.status_code not in _RETRY_STATUS:
             return resp
         last = resp
-        wait = 2 ** attempt  # 1s, 2s, 4s
-        log.warning("Naver SA %s %d — %ds 후 재시도(%d/3)", path, resp.status_code, wait, attempt + 1)
+        if attempt == MAX_ATTEMPTS - 1:
+            break  # 마지막 시도 — 더 잘 것이 없다
+        wait = 2 ** attempt  # 1s, 2s
+        log.warning("Naver SA %s %d — %ds 후 재시도(%d/%d)",
+                    path, resp.status_code, wait, attempt + 1, MAX_ATTEMPTS)
         time.sleep(wait)
     return last  # type: ignore[return-value]
 
@@ -1209,7 +1225,7 @@ def _estimate_post(path: str, body: dict) -> requests.Response:
         raise RuntimeError("Naver SA 자격증명 없음 — NAVER_SA_ACCESS_LICENSE/NAVER_SA_SECRET_KEY 확인")
 
     last: requests.Response | None = None
-    for attempt in range(3):
+    for attempt in range(MAX_ATTEMPTS):
         ts = str(int(time.time() * 1000))
         sig = base64.b64encode(
             hmac.new(secret_key.encode("utf-8"), f"{ts}.POST.{path}".encode(), hashlib.sha256).digest()
@@ -1218,12 +1234,15 @@ def _estimate_post(path: str, body: dict) -> requests.Response:
             "X-Timestamp": ts, "X-API-KEY": access_license,
             "X-Signature": sig, "X-Customer": str(customer_id),
         }
-        resp = requests.post(BASE_URL + path, headers=headers, json=body, timeout=30)
+        resp = requests.post(BASE_URL + path, headers=headers, json=body, timeout=HTTP_TIMEOUT_S)
         if resp.status_code not in _RETRY_STATUS:
             return resp
         last = resp
+        if attempt == MAX_ATTEMPTS - 1:
+            break  # 마지막 시도 뒤 sleep 제거(codex 2R P2 — _get과 동일 규율)
         wait = 2 ** attempt
-        log.warning("Naver SA estimate %s %d — %ds 후 재시도(%d/3)", path, resp.status_code, wait, attempt + 1)
+        log.warning("Naver SA estimate %s %d — %ds 후 재시도(%d/%d)",
+                    path, resp.status_code, wait, attempt + 1, MAX_ATTEMPTS)
         time.sleep(wait)
     return last  # type: ignore[return-value]
 

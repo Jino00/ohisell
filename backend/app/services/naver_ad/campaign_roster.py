@@ -22,6 +22,97 @@ from app.utils.kst import kst_today
 
 DEFAULT_WINDOW_DAYS = 30
 
+# 관측 스코프의 광고비 창 — "지금 돈을 쓰고 있는가"를 판정하는 기간(D-0 포함).
+OBSERVATION_COST_WINDOW_DAYS = 7
+
+
+def observation_campaign_ids(
+    db: Session, *, days: int = OBSERVATION_COST_WINDOW_DAYS, today: date | None = None,
+) -> set[str]:
+    """★관측(수집·진단·리포트) 대상 캠페인 — **관측 스코프의 단일 진실 원천**.
+
+    ══ 왜 optimizer로 스코프하면 안 되는가 (읽기 전에 이 문단부터) ══
+    **D-NAO-13 원문**: "진단·리포트·이상 알림은 **상태 무관 전 캠페인**(읽기는 무해)".
+    optimizer/auto_operate는 **실행 게이트**의 입력이지 관측 게이트의 입력이 아니다.
+    관측에까지 그 조건을 걸면 "정지 스위치를 내리는 순간 눈까지 감는" 구조가 되는데,
+    정지는 바로 **뭔가 잘못돼서 더 잘 봐야 할 때** 내리는 스위치다.
+
+    ══ 같은 클래스의 사고가 두 번 났다 ══
+    ① 2026-07-24 (D-NAO-92): 03 캠페인을 optimizer='none'으로 내리자, `bm_diff`가
+       optimizer='ours' 행만 change_log와 대조하던 탓에 **우리 자신의 변경 7건이 전부
+       "대행사 조작"으로 오기록**됐다. 그래서 bm_diff는 "optimizer와 무관하게" 검사하도록
+       고쳐졌다 — `bm_diff.py:10-13`(★echo 필터 주석)에 그 경위가 남아 있다.
+       그러나 **그 교훈이 나머지 모듈로 퍼지지 않았다.**
+    ② 2026-07-30 10:50 KST (D-NAO-132 긴급정지): 계정의 모든 캠페인이 optimizer='none' ·
+       auto_operate=0이 되자, 관측 스코프를 optimizer='ours'로 잡고 있던 **관측·수집 5곳이
+       함께 죽었다**(shopping_ad_product_sync / ad_external_change / flight_loop /
+       profit_scorecard / probe_learning_loop). 라이브 증거: prod 로그
+       `naver_adgroup_product sync: 그룹 0개 ... 정리 276행`(2026-07-31 07:45 KST) —
+       수집을 안 한 게 아니라 기존 매핑 276행을 **능동적으로 지웠다**.
+
+    그래서 관측 스코프를 이 한 곳으로 모은다. 다음 사람에게: 여기를 `optimizer == 'ours'`로
+    되돌리면 위 두 사고가 세 번째로 재현된다. 실행을 막고 싶다면
+    `naver_execution_harness`의 optimizer 하드체크(D-NAO-13)와 auto_operate 킬스위치
+    (D-NAO-49)를 쓰면 되고, 그 둘은 이 함수와 무관하게 이미 작동한다.
+
+    ══ 스코프 기준(합집합) ══
+      · **최근 `days`일(D-0 포함) 광고비 > 0인 캠페인** — 지금 돈을 쓰고 있는 것은 우리
+        스위치와 무관하게 다 본다. 2026-07-30 사고의 증상("01·03이 돈을 쓰는데 우리가 못
+        본다")을 직접 겨냥한다.
+      · **`naver_campaign_settings`에 행이 존재하는 캠페인**(optimizer 값 **무관**) —
+        우리가 관리했던(또는 관리 중인) 캠페인은 **정지 중에도 계속 본다.** 정지 기간의
+        관측치가 없으면 재개 판단의 근거가 없다.
+
+    계정 전체(naver_entity의 모든 캠페인)로 넓히지 않는 이유는 순전히 비용이다 —
+    소재 수집은 그룹당 1 API 콜이고 계정 전체 활성 SHOPPING 그룹은 325개다(2026-08-03 실측).
+    관측 목적상 계정 전체가 더 정확하지만, 돈도 안 쓰고 우리 설정도 없는 캠페인은 관측
+    가치가 가장 낮은 구간이라 여기서 잘라낸다.
+
+    ★sentinel(`__backfill__`) 행을 **제외하지 않는다**(다른 SA와 의도적으로 다름): 이
+    함수는 광고비를 **합산하지 않고 존재만 판정**하므로 2배 함정이 성립하지 않는다.
+    반대로 제외하면 캠페인 롤업 백필만 있고 실단위 행이 아직 없는 캠페인이 스코프에서
+    빠져 **관측 사각**이 생긴다 — 관측 스코프는 넓은 쪽이 안전 방향이다.
+
+    ══ ★★한계: `today`는 **반쪽 리플레이**다(codex 1R P1-2, 2026-08-03) ══
+    `today`를 과거 날짜로 주면 **광고비 축만** 되감긴다. settings 축(`managed`)은
+    `naver_campaign_settings`의 **현재 상태**를 읽으며, 이 테이블에는 **멤버십 히스토리가
+    없다.** 따라서 과거 날짜 리플레이에서
+      · 그 날짜 이후에 추가된 settings 캠페인은 **잘못 포함**되고,
+      · 그 사이 제거된 settings 캠페인은 **누락**된다.
+    → **리플레이 결과를 "그날의 관측 스코프"라고 믿으면 안 된다.** `today`가 보장하는 것은
+      "실행 시각에 의존하지 않는 결정적 계산"(멱등·테스트 가능성)까지이지, 시점 정확한
+      과거 재현이 아니다. 정확한 과거 재현이 필요하면 settings 멤버십 스냅샷 테이블이
+      선행돼야 하고 그것은 DB 마이그레이션 사안이다(별도 항목으로 남김).
+    이 한계는 이번 변경이 만든 것이 아니라 원래부터 그랬다 — `today` 파라미터가 "완전한
+    리플레이가 된다"는 인상을 주므로 여기 명시한다.
+
+    ★이 집합을 **삭제 판단의 근거로 쓰지 말 것.** 2026-08-03(codex 2R) 이후
+    `shopping_ad_product_sync`는 매핑을 지우지 않는다 — 스코프가 좁아진 이유가 "정말
+    이탈했다"인지 "수집 축이 침묵한다"인지 이 집합만으로는 영영 구분되지 않기 때문이다.
+    그 판정을 시도했던 가드 계층은 전부 제거됐고, 되살리려면 그 구분을 가능하게 하는
+    증거부터 확보해야 한다.
+
+    반환: campaign_id 집합. 각 소비자는 자기 고유 필터(SHOPPING만·활성 그룹만 등)를
+    이 집합 **위에** 얹는다.
+    """
+    today = today or kst_today()
+    date_from = today - timedelta(days=days - 1)
+
+    spending = {
+        r[0]
+        for r in db.query(NaverAdDaily.campaign_id)
+        .filter(
+            NaverAdDaily.ad_date >= date_from,
+            NaverAdDaily.ad_date <= today,
+            NaverAdDaily.cost > 0,
+        )
+        .distinct()
+        .all()
+        if r[0]
+    }
+    managed = {r[0] for r in db.query(NaverCampaignSettings.campaign_id).all() if r[0]}
+    return spending | managed
+
 
 def build(db: Session, *, days: int = DEFAULT_WINDOW_DAYS, today: date | None = None) -> list[dict]:
     """캠페인 명부 — entity(이름·종류·상태) ⨝ ad_daily(최근 N일 성과) ⨝ settings(관리주체).

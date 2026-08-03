@@ -15,8 +15,9 @@ from sqlalchemy.pool import StaticPool
 
 from app.database import Base
 from app.models import (
-    Channel, NaverAdgroupProduct, NaverCampaignSettings, NaverEntity, NaverProductBep,
-    NaverSettlementCase, NaverSettlementDaily, Order, ProductChannelMapping, ProductMaster,
+    Channel, NaverAdDaily, NaverAdgroupProduct, NaverCampaignSettings, NaverEntity,
+    NaverProductBep, NaverSettlementCase, NaverSettlementDaily, Order, ProductChannelMapping,
+    ProductMaster,
 )
 from app.services.naver_ad import bep_calculator, campaign_target_resolver, shopping_ad_product_sync
 from app.utils.kst import kst_today
@@ -44,74 +45,112 @@ def _ours_shopping_adgroup(db, campaign_id="cmp-shop", adgroup_id="grp-1"):
     db.commit()
 
 
-def test_collect_only_ours_shopping_active_adgroups(db):
-    # ours 쇼핑(대상) + mop 쇼핑(제외) + ours 파워링크(제외) + ours 쇼핑 off(제외)
-    db.add(NaverCampaignSettings(campaign_id="c-ours", optimizer="ours"))
-    db.add(NaverCampaignSettings(campaign_id="c-mop", optimizer="mop"))
-    db.add(NaverCampaignSettings(campaign_id="c-web", optimizer="ours"))
+def test_collect_scopes_shopping_active_adgroups_regardless_of_optimizer(db):
+    """★2026-07-30 사고 회귀: 스코프는 optimizer가 아니라 **관측 스코프**다.
+
+    구 계약은 `optimizer='ours'`만 대상으로 삼았고, 긴급정지(D-NAO-132)로 전 캠페인이
+    optimizer='none'이 되자 수집이 통째로 죽었다. 이제 settings 행이 있으면(값 무관)
+    대상이고, 모듈 고유 필터(SHOPPING · status='on')만 남는다.
+    """
+    db.add(NaverCampaignSettings(campaign_id="c-none", optimizer="none"))   # 정지 중 — 그래도 대상
+    db.add(NaverCampaignSettings(campaign_id="c-mop", optimizer="mop"))     # 대행사 — 그래도 대상
+    db.add(NaverCampaignSettings(campaign_id="c-web", optimizer="ours"))    # 파워링크 → 그룹이 제외
     db.add_all([
-        NaverEntity(entity_type="adgroup", entity_id="g-ours", campaign_id="c-ours", campaign_type="SHOPPING", status="on"),
+        NaverEntity(entity_type="adgroup", entity_id="g-none", campaign_id="c-none", campaign_type="SHOPPING", status="on"),
         NaverEntity(entity_type="adgroup", entity_id="g-mop", campaign_id="c-mop", campaign_type="SHOPPING", status="on"),
         NaverEntity(entity_type="adgroup", entity_id="g-web", campaign_id="c-web", campaign_type="WEB_SITE", status="on"),
-        NaverEntity(entity_type="adgroup", entity_id="g-off", campaign_id="c-ours", campaign_type="SHOPPING", status="off"),
+        NaverEntity(entity_type="adgroup", entity_id="g-off", campaign_id="c-none", campaign_type="SHOPPING", status="off"),
+        # 스코프 밖(설정 행 없음·최근 광고비 없음) → 제외
+        NaverEntity(entity_type="adgroup", entity_id="g-out", campaign_id="c-out", campaign_type="SHOPPING", status="on"),
     ])
     db.commit()
-    ags = shopping_ad_product_sync._ours_shopping_adgroups(db)
-    assert {a.entity_id for a in ags} == {"g-ours"}
+    ags = shopping_ad_product_sync._observed_shopping_adgroups(db, as_of=kst_today())
+    assert {a.entity_id for a in ags} == {"g-none", "g-mop"}
 
 
-def test_sync_adgroup_products_snapshot_replace_and_dedup(db):
+def test_collect_scope_includes_recent_spender_without_settings(db):
+    """설정 행이 없어도 **최근 7일 광고비>0**이면 관측한다(사고 증상 '01·03이 돈을 쓰는데
+    우리가 못 본다'의 직접 회귀)."""
+    db.add(NaverEntity(entity_type="adgroup", entity_id="g-spend", campaign_id="c-spend",
+                       campaign_type="SHOPPING", status="on"))
+    db.add(NaverAdDaily(ad_date=kst_today(), campaign_id="c-spend", adgroup_id="g-spend",
+                        keyword_id="", campaign_type="SHOPPING", cost=1234, clk=1, imp=10))
+    db.commit()
+    ags = shopping_ad_product_sync._observed_shopping_adgroups(db, as_of=kst_today())
+    assert {a.entity_id for a in ags} == {"g-spend"}
+
+
+def test_sync_adgroup_products_upsert_and_dedup(db):
     _ours_shopping_adgroup(db)
     ads = {"grp-1": [
         {"mall_product_id": "13365319468", "product_name": "17E"},
         {"mall_product_id": "13365319468", "product_name": "dup"},  # 같은 상품 중복 소재 → dedup
         {"mall_product_id": "999", "product_name": "other"},
     ]}
-    res = shopping_ad_product_sync.sync_adgroup_products(db, ads_by_adgroup=ads)
-    assert res == {"adgroups": 1, "mappings": 2, "products": 2, "removed": 0,
-                   "failed_adgroups": 0, "external_ad_changes": 0}  # D-NAO-127 additive
+    res = shopping_ad_product_sync.sync_adgroup_products(db, as_of=kst_today(), ads_by_adgroup=ads)
+    assert res == {"adgroups": 1, "mappings": 2, "products": 2,
+                   "inserted": 2, "updated": 0,
+                   "failed_adgroups": 0, "external_ad_changes": 0,  # D-NAO-127 additive
+                   # 2026-07-30 사고 수정 + codex 1R·2R 대응 additive(수집 신뢰도 표면화)
+                   "observation_blind": False, "truncated": False, "cursor": None,
+                   "elapsed_s": res["elapsed_s"]}
     rows = db.query(NaverAdgroupProduct).filter(NaverAdgroupProduct.adgroup_id == "grp-1").all()
     assert {r.mall_product_id for r in rows} == {"13365319468", "999"}
     assert all(r.campaign_id == "cmp-shop" for r in rows)
 
-    # 재실행 — 상품 하나 이탈 → 스냅샷 교체(멱등, 잔여 없음)
-    res2 = shopping_ad_product_sync.sync_adgroup_products(db, ads_by_adgroup={"grp-1": [{"mall_product_id": "13365319468", "product_name": "17E"}]})
-    assert res2["mappings"] == 1
+    # 재실행 — 관측된 상품은 **갱신**된다(멱등: 행이 늘지 않는다).
+    # ★계약 변경(codex 2R): 이 잡은 삭제하지 않으므로 이번에 안 보인 "999"는 남는다.
+    #   stale 판별은 synced_at 신선도가 담당한다(모듈 docstring의 의도된 트레이드오프).
+    res2 = shopping_ad_product_sync.sync_adgroup_products(
+        db, as_of=kst_today(),
+        ads_by_adgroup={"grp-1": [{"mall_product_id": "13365319468", "product_name": "17E"}]},
+    )
+    assert res2 == {**res2, "inserted": 0, "updated": 1}
     rows2 = db.query(NaverAdgroupProduct).filter(NaverAdgroupProduct.adgroup_id == "grp-1").all()
-    assert {r.mall_product_id for r in rows2} == {"13365319468"}
+    assert {r.mall_product_id for r in rows2} == {"13365319468", "999"}
+    fresh = {r.mall_product_id: r.synced_at for r in rows2}
+    assert fresh["13365319468"] > fresh["999"], "관측된 행만 신선도가 올라간다"
 
 
-def test_sync_reconciles_non_ours_campaign_rows(db):
-    """리뷰 P2-3 ①: optimizer가 ours가 아니게 된 캠페인의 매핑 행 삭제."""
-    _ours_shopping_adgroup(db)  # cmp-shop=ours
-    db.add(NaverCampaignSettings(campaign_id="cmp-left", optimizer="mop"))  # ours 이탈
+def test_sync_never_deletes_rows_of_campaign_outside_scope(db):
+    """★계약(codex 2R): 스코프를 벗어난 캠페인의 매핑도 **지우지 않는다**.
+
+    구 계약(1R까지)은 '관측 스코프 이탈 = 삭제'였다. 그 판정은 "정말 이탈했다"와 "수집 축이
+    침묵한다"를 구분할 수 없어 삭제 계층을 통째로 들어냈다(모듈 docstring 참조).
+    """
+    _ours_shopping_adgroup(db)  # cmp-shop
+    db.add(NaverAdDaily(ad_date=kst_today(), campaign_id="cmp-shop", adgroup_id="grp-1",
+                        keyword_id="", campaign_type="SHOPPING", cost=500, clk=1, imp=10))
+    # cmp-left: settings 없음 · 최근 광고비 없음 → 스코프 밖. 그래도 보존된다.
     db.add(NaverAdgroupProduct(adgroup_id="grp-old", campaign_id="cmp-left", mall_product_id="111"))
     db.commit()
-    res = shopping_ad_product_sync.sync_adgroup_products(db, ads_by_adgroup={"grp-1": []})
-    assert res["removed"] == 1
-    assert db.query(NaverAdgroupProduct).filter(NaverAdgroupProduct.campaign_id == "cmp-left").count() == 0
+    shopping_ad_product_sync.sync_adgroup_products(
+        db, as_of=kst_today(), ads_by_adgroup={"grp-1": []},
+    )
+    assert db.query(NaverAdgroupProduct).filter(
+        NaverAdgroupProduct.campaign_id == "cmp-left").count() == 1
 
 
-def test_sync_reconciles_stale_adgroup_when_fully_enumerated(db):
-    """리뷰 P2-3 ②: 전체 그룹 열거 성공 캠페인의, 수집에 없는 그룹(삭제/off) 행 삭제."""
+def test_sync_never_deletes_stale_adgroup_rows(db):
+    """★계약(codex 2R): 활성 엔티티에 없는 그룹(삭제/off)의 행도 지우지 않는다."""
     _ours_shopping_adgroup(db)  # 활성 그룹 = grp-1만
-    # grp-gone: 과거 매핑 행은 있으나 활성 엔티티에 없음(그룹 삭제/off) → stale
     db.add(NaverAdgroupProduct(adgroup_id="grp-gone", campaign_id="cmp-shop", mall_product_id="222"))
     db.commit()
-    res = shopping_ad_product_sync.sync_adgroup_products(
-        db, ads_by_adgroup={"grp-1": [{"mall_product_id": "333", "product_name": "x"}]}
+    shopping_ad_product_sync.sync_adgroup_products(
+        db, as_of=kst_today(),
+        ads_by_adgroup={"grp-1": [{"mall_product_id": "333", "product_name": "x"}]},
     )
-    assert res["removed"] == 1
-    assert db.query(NaverAdgroupProduct).filter(NaverAdgroupProduct.adgroup_id == "grp-gone").count() == 0
-    assert db.query(NaverAdgroupProduct).filter(NaverAdgroupProduct.adgroup_id == "grp-1").count() == 1
+    assert db.query(NaverAdgroupProduct).filter(
+        NaverAdgroupProduct.adgroup_id == "grp-gone").count() == 1
+    assert db.query(NaverAdgroupProduct).filter(
+        NaverAdgroupProduct.adgroup_id == "grp-1").count() == 1
 
 
 def test_sync_preserves_mappings_when_fetch_fails(db, monkeypatch):
-    """리뷰 P2-3 ② 안전변: get_ads 실패 그룹이 있는 캠페인은 stale 정리 유보(매핑 소실 금지)."""
+    """get_ads 실패 그룹은 그 그룹만 skip하고 기존 매핑은 그대로 남는다(fail-open)."""
     _ours_shopping_adgroup(db)  # grp-1 활성
     db.add(NaverEntity(entity_type="adgroup", entity_id="grp-2", parent_id="cmp-shop",
                        campaign_id="cmp-shop", campaign_type="SHOPPING", status="on"))
-    # 기존 매핑: grp-2(이번에 실패할 그룹) + grp-gone(진짜 stale이지만 실패 캠페인이라 유보)
     db.add(NaverAdgroupProduct(adgroup_id="grp-2", campaign_id="cmp-shop", mall_product_id="444"))
     db.add(NaverAdgroupProduct(adgroup_id="grp-gone", campaign_id="cmp-shop", mall_product_id="555"))
     db.commit()
@@ -122,10 +161,9 @@ def test_sync_preserves_mappings_when_fetch_fails(db, monkeypatch):
         return [{"mall_product_id": "333", "product_name": "x", "adgroup_id": aid}]
 
     monkeypatch.setattr(shopping_ad_product_sync, "get_ads", fake_get_ads)
-    res = shopping_ad_product_sync.sync_adgroup_products(db)  # 실 경로(주입 없음)
+    monkeypatch.setattr(shopping_ad_product_sync, "_MIN_CALL_INTERVAL_S", 0)
+    res = shopping_ad_product_sync.sync_adgroup_products(db, as_of=kst_today())  # 실 경로
     assert res["failed_adgroups"] == 1
-    # 실패 그룹 매핑 보존 + 같은 캠페인의 stale 후보도 유보(removed 0)
-    assert res["removed"] == 0
     assert db.query(NaverAdgroupProduct).filter(NaverAdgroupProduct.adgroup_id == "grp-2").count() == 1
     assert db.query(NaverAdgroupProduct).filter(NaverAdgroupProduct.adgroup_id == "grp-gone").count() == 1
 

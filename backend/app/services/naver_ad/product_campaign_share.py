@@ -30,8 +30,13 @@ from app.models import NaverAdgroupProduct
 def campaigns_per_product(db: Session, product_ids: list[str] | set[str]) -> dict[str, int]:
     """{상품ID: 그 상품을 매핑한 캠페인 수} — 1쿼리. 매핑이 없는 상품은 키가 없다(호출부가 1로 취급).
 
-    ★필터를 추가하지 말 것(auto_operate·optimizer·요청 범위 무엇도). 분모가 관점에 따라
-    달라지면 같은 상품 매출이 화면마다 다른 값이 된다 — 이 모듈의 존재 이유가 그것이다."""
+    ★**관점 필터**를 추가하지 말 것(auto_operate·optimizer·요청 범위 무엇도). 분모가 관점에 따라
+    달라지면 같은 상품 매출이 화면마다 다른 값이 된다 — 이 모듈의 존재 이유가 그것이다.
+
+    ★이 분모에 **어떤 종류의 행 배제도 넣지 말 것**(2026-08-03 재확인): 호출부가
+    `shares.get(pid, 1)`로 읽으므로 행이 빠지면 분모가 1이 되고, 같은 매출이 여러 캠페인에
+    100%씩 계상돼 예산 증액 게이트가 부당 통과한다 — 이 모듈 헤더의 2026-07-28 사고가
+    정확히 그 방향이었다."""
     uniq = [p for p in dict.fromkeys(product_ids) if p]
     if not uniq:
         return {}
