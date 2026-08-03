@@ -1277,6 +1277,32 @@ def sync_coupang_ad_cost_job():
         db.close()
 
 
+def coupang_collection_watchdog_job():
+    """쿠팡 브라우저 수집 신선도 워치독 (09:20 KST, 하루 1회) — 알림 + 위급 시 자동 갱신.
+
+    07-27 재설계로 수집의 유일한 트리거가 사람의 클릭이 됐는데(순수 버튼-only), 그 클릭을
+    유도하는 장치가 없어 2026-08-03에 6일 침묵·51일 결손 직전까지 갔다. 이 잡이 그 구멍이다.
+
+    ★하루 1회인 것이 곧 알림 쿨다운이다 — 별도 상태 저장 없이 "같은 건으로 하루 여러 번"이
+      구조적으로 불가능하다. 시간당으로 돌리면 알림이 배너처럼 상시화돼 다시 무시된다.
+    ★여기서 하는 일은 prod DB에 요청 플래그를 세우는 것뿐이라, Mac이 자고 있어도 깨어난 뒤
+      집어간다(Mac은 수시로 sleep한다 — 08-03 실측).
+    ★fail-soft: Slack 미연결·발송 실패는 no-op으로 삼킨다(잡 자체는 성공). 자동 갱신 요청
+      실패만 로그에 남기고 계속한다 — 알림이 죽었다고 구조까지 막으면 안 된다.
+    """
+    db = _get_own_db_session()
+    try:
+        from app.services.coupang import collection_watchdog
+
+        result = collection_watchdog.run(db)
+        log.info("[스케줄러] 쿠팡 수집 워치독 결과: %s", result)
+    except Exception as e:
+        log.exception("[스케줄러] coupang_collection_watchdog_job 에러: %s", e)
+        raise
+    finally:
+        db.close()
+
+
 def sync_coupang_coupons_job():
     """쿠팡 쿠폰 운영 현황 자동 동기화 (06:00 KST) — 즉시할인쿠폰+예산/계약(P5). 트랙 D-8: 서버 IP에서만."""
     db = _get_own_db_session()
@@ -1490,6 +1516,9 @@ def _ensure_default_states(db):
         ("sync_coupang_coupons", "0 6 * * *"),
         ("sync_coupang_cs", "5 6 * * *"),
         ("sync_coupang_ad_cost", "10 0 * * *"),
+        # 쿠팡 브라우저 수집 신선도 워치독 — 하루 1회(09:20). 알림 + 위급 시 자동 갱신.
+        # 하루 1회인 것이 곧 알림 쿨다운이다(별도 상태 저장 없음).
+        ("coupang_collection_watchdog", "20 9 * * *"),
         # ofix 광고비 장중 자동 갱신 크론은 제거됨 — 순수 on-demand 전환.
         # 창을 스스로 띄우던 자동 트리거를 없애고, 갱신은 UI '광고비 갱신' 버튼으로만 한다.
         # 낡음/실패는 GET /collection-status → 전역 신선도 배너로 가시화(잊어버림 방지).
@@ -1737,6 +1766,7 @@ def job_func_for(job_name: str):
         "sync_coupang_coupons": sync_coupang_coupons_job,
         "sync_coupang_cs": sync_coupang_cs_job,
         "sync_coupang_ad_cost": sync_coupang_ad_cost_job,
+        "coupang_collection_watchdog": coupang_collection_watchdog_job,
     }.get(job_name)
 
 
