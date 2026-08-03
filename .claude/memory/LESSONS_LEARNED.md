@@ -1896,3 +1896,48 @@ D-10)를 그 경로 그대로 밀면 계정 총액 행(전체 기준)을 PA 기�
 정하고, 반대편은 받은 그대로 표시만 한다. 특히 오차·차이 같은 "작아야 정상인 숫자"는
 자릿수가 한 자리 어긋나도 "그래도 작네"로 넘어가기 쉬우므로, 화면에 낸 숫자와 원시
 분자/분모를 직접 나눠 대조하는 습관이 필요하다.
+
+## 106. alembic 검증이 엉뚱한 DB를 올린다 — 성공 로그는 대상이 맞다는 증거가 아니다 (2026-08-03, 마이그레이션 검증)
+
+### 🐛 이슈
+마이그레이션을 임시 DB 위에서 검증하려고 `DATABASE_URL=sqlite:///<tmp> alembic upgrade head`를
+돌렸는데, 정작 올라간 곳은 로컬 dev DB(`backend/ohisell.db`)였다. 이 레포의
+`alembic/env.py`는 `config.get_main_option('sqlalchemy.url')`만 읽고, `alembic.ini`의
+`sqlalchemy.url = sqlite:///./ohisell.db`가 고정값이라 `DATABASE_URL` 환경변수는 통째로
+무시된다. 명령은 정상 종료했고 로그도 "성공"으로 보였다 — 임시 DB엔 테이블이 0개였는데도
+자각할 방법이 없었다.
+
+### ✅ 해결
+임시 DB로 검증하려면 `-x` 옵션이나 `alembic.ini` 수정이 아니라 `alembic -c`로 별도 ini를
+주거나, `alembic upgrade head -x db_url=...`를 `env.py`가 실제로 읽도록 배선해야 한다.
+현재 구조에서 가장 안전한 검증은 dev DB 사본을 떠서 그 위에서 돌리는 것.
+
+### 📌 교훈
+**성공 로그가 대상이 맞다는 증거가 아니다.** `alembic upgrade`가 정상 종료해도 그게 내가
+지정한 DB에 적용됐다는 뜻은 아니다 — env.py가 환경변수를 무시하고 ini 고정값을 쓸 수
+있기 때문이다. upgrade 직후 반드시 대상 DB의 `sqlite_master` 테이블 개수나 mtime을 세어
+"내가 의도한 DB가 맞는지"를 별도로 확인한다. 로그만 보고 판단하면 구분이 원리적으로
+불가능하다.
+
+## 107. 새 마이그레이션의 부모는 main의 head가 아니라 prod의 alembic_version이다 — "배포 먼저, PR 나중" 관례가 만드는 함정 (2026-08-03, 마이그레이션 재부모)
+
+### 🐛 이슈
+2026-08-03 시점 prod의 `alembic_version`은 `rg9billed7c4e`인데, 그 리비전 파일은 로컬
+main에 없다 — 열린 PR #190(`claude/serene-agnesi-feee36`, RG 감사 S9)이 갖고 있고 prod엔
+이미 배포돼 있다. 이 프로젝트는 "배포 먼저, PR 나중" 관례라 이런 상태가 정상적으로
+발생한다. 새 마이그레이션(`c4a7e2b91d63`)의 `down_revision`을 main 기준(`b6e1c93f4275`)으로
+잡았는데, `rg9billed7c4e`의 부모도 같은 `b6e1c93f4275`라 이대로 prod에
+`alembic upgrade head`를 돌리면 헤드가 둘로 갈라져 실패한다. 같은 사고를 이미 한 번
+겪었다(커밋 `3130ee5` "마이그 재부모").
+
+### ✅ 해결
+배포 전에 `ssh sellc.ohitech.co.kr "sqlite3 'file:/home/ubuntu/ohisell/backend/ohisell.db?mode=ro' 'SELECT version_num FROM alembic_version;'"`로
+prod의 실제 리비전을 확인한다. 로컬에 없는 리비전이면 그 PR이 main에 병합되기를 기다렸다가
+재부모(re-parent)한다.
+
+### 📌 교훈
+**새 마이그레이션의 부모는 main의 head가 아니라 prod의 alembic_version을 보고 정해야
+한다.** "main 병합했나"를 git ref로 확인하는 방식은 이 프로젝트의 배포 관례(배포 먼저,
+PR 나중) 아래서는 원리적으로 통하지 않는다 — prod가 참조하는 리비전이 로컬 main에 아직
+없을 수 있기 때문이다. 마이그레이션을 새로 만들 때는 항상 prod에 직접 물어보고
+`down_revision`을 정한다.
