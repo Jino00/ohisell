@@ -239,3 +239,116 @@ def test_boundary_period_orders_not_re_cut_by_query_window(db):
     assert it["order_count"] == 2
     assert it["per_unit_delivery"] == 1900
     assert it["flags"] == []
+
+
+# ── S9: 청구 근거를 정산서에서 직접 읽는다 (2026-08-03) ────────────────────────
+# 종전 감사는 두 값을 추론했고 둘 다 오탐의 원인이었다: 분모(주문수)는 결제일 basis 주문테이블을
+# 매출인식일 정산주기에 맞춰 세다 창 불일치로 부풀었고, 사이즈는 금액 임계로 역추정했다.
+# 정산 엑셀 상세에는 주문ID·판매수량·개별포장사이즈가 원래부터 있다(ref 17 §8-1).
+
+def _add_fee_billed(db, vii, ftype, amount, dfrom, dto, *,
+                    size=None, orders=None, qty=None):
+    db.add(CoupangRgSettlementFee(
+        account_key="COUPANG_WING1", vendor_item_id=vii, fee_type=ftype,
+        amount=Decimal(amount), recognition_date_from=dfrom, recognition_date_to=dto,
+        billed_size_type=size, billed_order_count=orders, billed_quantity=qty,
+    ))
+
+
+def test_s9_settlement_divisor_beats_order_table_coverage(db):
+    """★핵심: 정산서가 주문수를 알려주면 주문테이블 커버리지와 무관하게 단가가 맞는다.
+
+    라이브 재현(91313543029): 주기 4개 × 2,025원인데 주문테이블엔 2건뿐. 정산서 기재
+    주문수(주기당 1건)를 쓰면 4주기 전부 판정되고 단가는 2,025원 — 주문 결손이 무해해진다.
+    """
+    _add_item(db, "91313543029", 355, 245, 5, 169)
+    _add_size(db, "91313543029", "극소형")
+    for df, dt in [((2026, 4, 13), (2026, 4, 19)), ((2026, 4, 20), (2026, 4, 26)),
+                   ((2026, 5, 11), (2026, 5, 17)), ((2026, 5, 18), (2026, 5, 24))]:
+        _add_fee_billed(db, "91313543029", "delivery", 2025, date(*df), date(*dt),
+                        size="극소형", orders=1, qty=1)
+        _add_fee_billed(db, "91313543029", "warehousing", 1175, date(*df), date(*dt),
+                        size="극소형", orders=1, qty=1)
+    # 주문테이블엔 5월 2건만(4월분 미수집 — prod 실제 상태)
+    _add_order(db, "91313543029", 1, oid="O-0514", paid=datetime(2026, 5, 14))
+    _add_order(db, "91313543029", 1, oid="O-0518", paid=datetime(2026, 5, 18))
+    db.commit()
+
+    out = build_fee_audit(db, "COUPANG_WING1")
+    it = out["items"][0]
+    assert it["size_source"] == "settlement_billed"
+    assert it["billed_size_type"] == "극소형"
+    assert it["divisor_source"] == "settlement"        # 주문테이블 폴백이 아예 안 쓰였다
+    assert it["periods_judged"] == 4 and it["periods_unmatched"] == 0  # 4월도 판정됨
+    assert it["per_unit_delivery"] == 2025
+    assert it["per_unit_warehousing"] == 1175
+    assert it["flags"] == []
+    assert out["summary"]["divisor_from_settlement"] == 1
+
+
+def test_s9_billed_size_vs_amount_mismatch_is_strongest_flag(db):
+    """정산서가 '극소형으로 청구'라 적었는데 금액이 큰 등급이면 그건 정산서 내부 모순이다."""
+    _add_item(db, "700", 227, 126, 20, 137)
+    _add_size(db, "700", "극소형")
+    _add_fee_billed(db, "700", "delivery", 19750, date(2026, 6, 1), date(2026, 6, 7),
+                    size="극소형", orders=1, qty=1)
+    db.commit()
+
+    out = build_fee_audit(db, "COUPANG_WING1")
+    it = out["items"][0]
+    assert "billed_size_vs_amount_mismatch" in it["flags"]
+    # 추론 기반 이름은 붙지 않는다 — 어느 값이 근거인지 이름이 말해야 한다.
+    assert "measured_vs_billed_mismatch" not in it["flags"]
+    assert "size_mismatch_high" not in it["flags"]
+    assert out["summary"]["billed_size_vs_amount_mismatch"] == 1
+    assert out["items"][0] is it  # 최상단 정렬
+
+
+def test_s9_billed_size_differs_from_measured_is_surfaced(db):
+    """정산서 기재 사이즈 ≠ 물류센터 실측이면 기재값 간 불일치로 표면화(둘 다 쿠팡 값)."""
+    _add_item(db, "800", 227, 126, 20, 137)
+    _add_size(db, "800", "극소형")                     # 물류센터 실측
+    _add_fee_billed(db, "800", "delivery", 2200, date(2026, 6, 1), date(2026, 6, 7),
+                    size="대형1", orders=1, qty=1)     # 정산서가 청구에 쓴 등급
+    db.commit()
+
+    out = build_fee_audit(db, "COUPANG_WING1")
+    it = out["items"][0]
+    assert it["billed_size_type"] == "대형1" and it["measured_size_type"] == "극소형"
+    assert it["billed_vs_measured_size_diff"] is True
+    assert out["summary"]["billed_vs_measured_size_diff"] == 1
+    # 청구액 2,200은 기재 등급(대형1) 최소금액과 정합 → 금액 자체는 이상 아님.
+    assert it["size_type"] == "대형1"
+    assert it["flags"] == []
+
+
+def test_s9_null_billed_falls_back_to_previous_path(db):
+    """구 행(정산서 컬럼 NULL)은 종전 경로 그대로 — 무중단 폴백."""
+    _add_item(db, "900", 227, 126, 20, 137)
+    _add_size(db, "900", "극소형")
+    _add_fee(db, "900", "delivery", 1900, dfrom=date(2026, 6, 1), dto=date(2026, 6, 7))
+    _add_order(db, "900", 1, oid="O-x", paid=datetime(2026, 6, 3))
+    db.commit()
+
+    it = build_fee_audit(db, "COUPANG_WING1")["items"][0]
+    assert it["billed_size_type"] is None
+    assert it["size_source"] == "coupang_measured"      # 실측으로 폴백
+    assert it["divisor_source"] == "order_table"
+    assert it["per_unit_delivery"] == 1900
+    assert it["flags"] == []
+
+
+def test_s9_mixed_billed_size_within_option_holds_judgment(db):
+    """한 옵션에서 청구 등급이 갈리면 '어느 등급으로 청구됐나'에 답이 없다 → 폴백(단정 금지)."""
+    _add_item(db, "950", 227, 126, 20, 137)
+    _add_size(db, "950", "극소형")
+    _add_fee_billed(db, "950", "delivery", 1900, date(2026, 6, 1), date(2026, 6, 7),
+                    size="극소형", orders=1, qty=1)
+    _add_fee_billed(db, "950", "delivery", 1900, date(2026, 6, 8), date(2026, 6, 14),
+                    size="소형", orders=1, qty=1)
+    db.commit()
+
+    it = build_fee_audit(db, "COUPANG_WING1")["items"][0]
+    assert it["billed_size_type"] is None               # 갈렸으므로 기재값을 쓰지 않는다
+    assert it["size_source"] == "coupang_measured"
+    assert it["divisor_source"] == "settlement"         # 분모는 여전히 정산서 값

@@ -59,8 +59,10 @@ def _load_dims(db: Session, account_key: str | None) -> dict[str, dict]:
 
 def _load_fees(
     db: Session, account_key: str | None, date_from: date | None, date_to: date | None
-) -> dict[str, dict[tuple[date, date], dict[str, float]]]:
-    """옵션ID → {(정산주기 시작, 끝): {fee_type: 금액}}. 옵션 단위만. 기간은 매출인식일 기준.
+) -> dict[str, dict[tuple[date, date], dict]]:
+    """옵션ID → {(정산주기): {"fees": {fee_type: 금액}, "billed": {fee_type: 청구근거}}}.
+
+    옵션 단위만. 기간은 매출인식일 기준. billed = 정산서 기재값(S9: 사이즈·주문수·수량).
 
     ★주기를 합치지 않고 그대로 내려보낸다(2026-08-03) — 어느 주기에 주문이 대응됐는지를 SA가
       알아야 미대응 주기를 분모에서 뺄 수 있기 때문이다. 여기서 미리 합치면 주문이 없는 주기의
@@ -73,6 +75,11 @@ def _load_fees(
         CoupangRgSettlementFee.recognition_date_to,
         CoupangRgSettlementFee.fee_type,
         func.sum(CoupangRgSettlementFee.amount),
+        # ★S9: 정산서가 기재한 청구 근거. 같은 grain에 1행이라 max()는 그 값 자체다
+        #   (group_by에 넣으면 NULL 행이 갈려 집계가 쪼개진다).
+        func.max(CoupangRgSettlementFee.billed_size_type),
+        func.max(CoupangRgSettlementFee.billed_order_count),
+        func.max(CoupangRgSettlementFee.billed_quantity),
     ).filter(
         CoupangRgSettlementFee.vendor_item_id != "",
         CoupangRgSettlementFee.fee_type.in_(_AUDITED_FEE_TYPES),
@@ -90,9 +97,19 @@ def _load_fees(
         CoupangRgSettlementFee.recognition_date_to,
         CoupangRgSettlementFee.fee_type,
     )
-    out: dict[str, dict[tuple[date, date], dict[str, float]]] = {}
-    for vii, rfrom, rto, ftype, total in q.all():
-        out.setdefault(str(vii), {}).setdefault((rfrom, rto), {})[ftype] = float(total or 0)
+    out: dict[str, dict[tuple[date, date], dict]] = {}
+    for vii, rfrom, rto, ftype, total, b_size, b_orders, b_qty in q.all():
+        per = out.setdefault(str(vii), {}).setdefault(
+            (rfrom, rto), {"fees": {}, "billed": {}}
+        )
+        per["fees"][ftype] = float(total or 0)
+        # ★분모는 부과 단위별로 따로 온다: 배송비=주문당(billed_order_count),
+        #   입출고비=수량당(billed_quantity). 그래서 fee_type별로 보관한다.
+        per["billed"][ftype] = {
+            "size_type": b_size,
+            "order_count": int(b_orders) if b_orders else None,
+            "quantity": int(b_qty) if b_qty else None,
+        }
     return out
 
 
@@ -196,25 +213,51 @@ def build_fee_audit(
         per_option_qty = qty.get(vii, {})
         periods_in: list[dict] = []
         charged_delivery = charged_warehousing = None
+        billed_sizes: set[str] = set()
+        divisor_sources: set[str] = set()
         for p in periods_by_option[vii]:
-            ft = by_period[p]
+            ft = by_period[p]["fees"]
+            billed = by_period[p]["billed"]
             dlv = ft.get("delivery")
             wh = ft.get("warehousing")
             if dlv is not None:
                 charged_delivery = (charged_delivery or 0) + dlv
             if wh is not None:
                 charged_warehousing = (charged_warehousing or 0) + wh
+            # ★S9: 분모는 정산서 기재값이 1순위. 같은 파일·같은 basis라 조인도 추론도 없다.
+            #   NULL(구 행·계정 row·컬럼 없는 파일)이면 종전 주문테이블 버킷으로 폴백한다.
+            b_dlv = billed.get("delivery") or {}
+            b_wh = billed.get("warehousing") or {}
             oq = per_option_qty.get(p, {})
+            orders = b_dlv.get("order_count")
+            quantity = b_wh.get("quantity") or b_dlv.get("quantity")
+            if orders is not None or quantity is not None:
+                divisor_sources.add("settlement")
+            if orders is None:
+                orders = oq.get("orders", 0)
+                divisor_sources.add("order_table")
+            if quantity is None:
+                quantity = oq.get("qty", 0)
+                divisor_sources.add("order_table")
+            for b in (b_dlv, b_wh):
+                if b.get("size_type"):
+                    billed_sizes.add(b["size_type"])
             periods_in.append({
                 "date_from": p[0].isoformat(), "date_to": p[1].isoformat(),
                 "delivery": dlv, "warehousing": wh,
-                "order_count": oq.get("orders", 0), "quantity": oq.get("qty", 0),
+                "order_count": orders, "quantity": quantity,
             })
+        # ★사이즈도 정산서 기재값이 1순위(청구에 실제로 쓰인 등급). 없으면 물류센터 실측, 없으면 등록치수.
+        #   한 옵션에서 등급이 갈리면 "어느 등급으로 청구됐나"에 답이 없으므로 폴백한다.
+        billed_size = next(iter(billed_sizes)) if len(billed_sizes) == 1 else None
+        measured_size = coupang_sizes.get(vii)
         # SA에는 date 원본이 아니라 표시용 문자열이 들어가도 무해(판정에 날짜를 쓰지 않는다).
         anomaly = detect_fee_anomalies_by_period(
             d.get("width_mm"), d.get("length_mm"), d.get("height_mm"), d.get("weight_g"),
             periods=periods_in,
-            coupang_size_type=coupang_sizes.get(vii),
+            coupang_size_type=billed_size or measured_size,
+            size_source=("settlement_billed" if billed_size
+                         else ("coupang_measured" if measured_size else "registered_dims")),
         )
         items.append({
             "vendor_item_id": vii,
@@ -226,6 +269,14 @@ def build_fee_audit(
             #   charged ÷ order_count를 다시 하면 오탐 4건이 그대로 되살아난다.
             "charged_delivery": charged_delivery,
             "charged_warehousing": charged_warehousing,
+            # ★S9 근거 노출: 정산서가 기재한 청구 사이즈 / 물류센터 실측 / 분모 출처.
+            #   셋을 나란히 보여야 "무엇과 무엇이 어긋났는가"를 사람이 직접 읽을 수 있다.
+            "billed_size_type": billed_size,
+            "measured_size_type": measured_size,
+            "divisor_source": "+".join(sorted(divisor_sources)) or None,
+            # 정산서 사이즈와 물류센터 실측이 갈리면 그건 추론이 아니라 **기재값 간 불일치**다.
+            "billed_vs_measured_size_diff": bool(
+                billed_size and measured_size and billed_size != measured_size),
             # 판정에 쓰인 주문/수량(판정 주기 합) — charged 전 주기의 주문수가 아니다.
             # period_detail이 빈 조기종료(missing_dims·oversize)에선 전 주기 합으로 폴백해
             # 검토자가 원자료를 볼 수 있게 한다(판정에는 쓰이지 않는다).
@@ -238,6 +289,8 @@ def build_fee_audit(
     def _sort_key(it: dict) -> tuple:
         f = it["flags"]
         return (
+            # 최상단 = 정산서 기재 사이즈와 청구액의 모순(추론이 하나도 안 들어간 신호, S9).
+            0 if "billed_size_vs_amount_mismatch" in f else 1,
             0 if "measured_vs_billed_mismatch" in f else 1,
             0 if "size_mismatch_high" in f else 1,
             0 if f else 1,
@@ -251,6 +304,15 @@ def build_fee_audit(
         "total_options": len(items),
         "flagged": len(flagged),
         "size_mismatch_high": sum(1 for it in items if "size_mismatch_high" in it["flags"]),
+        # ★S9 최강 신호: 정산서가 적은 청구 사이즈와 청구액이 서로 안 맞는다(추론 0).
+        "billed_size_vs_amount_mismatch": sum(
+            1 for it in items if "billed_size_vs_amount_mismatch" in it["flags"]),
+        # 정산서 기재 사이즈 ≠ 물류센터 실측 사이즈 — 기재값 간 불일치(둘 다 쿠팡 값).
+        "billed_vs_measured_size_diff": sum(
+            1 for it in items if it.get("billed_vs_measured_size_diff")),
+        # 분모를 **전부** 정산서에서 얻은 옵션 수(=추론 0으로 판정된 옵션). 커버리지 진전 지표.
+        "divisor_from_settlement": sum(
+            1 for it in items if it.get("divisor_source") == "settlement"),
         # 실측값 자체와 청구가 어긋난 건수 — 등록치수 기준 추정보다 강한 신호(2026-08-03 신설).
         "measured_vs_billed_mismatch": sum(
             1 for it in items if "measured_vs_billed_mismatch" in it["flags"]),
@@ -287,6 +349,10 @@ def build_fee_audit(
         "summary": summary,
         "items": items,
         "disclaimer": (
+            "★S9(2026-08-03): 청구 사이즈·주문수·수량은 정산서 기재값을 1순위로 쓴다"
+            "(divisor_source·size_source 확인). 정산서 값이 있으면 추론이 개입하지 않으므로 "
+            "billed_size_vs_amount_mismatch는 정산서 내부 모순을 뜻한다. "
+            "정산서 값이 없는 구 행은 종전 경로(주문테이블 버킷·치수 분류)로 폴백한다. "
             "최소금액 기준 스크리닝(레퍼런스 17 §7). 정확 청구액은 카테고리·판매가·합포장에 따라 "
             "달라지므로 플래그는 검토 신호이며 과오청구 확정이 아님(D-5). 청구 사이즈=물류센터 측정값. "
             "★단가는 **주문이 대응된 정산주기**만으로 산출한다(미대응 주기는 판정 제외, "

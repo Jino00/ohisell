@@ -332,6 +332,12 @@ _SHEET_FEE_TYPE_MAP: dict[str, str] = {
     "배송비": "delivery",
     "보관비": "storage",
     "판매수수료": "sale_fee",
+    # ★CATEGORY_TR 리포트의 유일 시트명(2026-08-03 추가). 종전엔 미매핑이라 그 리포트가 매 주기
+    #   0행을 냈다(prod 로그 28건). 판매수수료는 status/api로 **계정 단위**론 이미 수집 중이므로
+    #   회계 영향은 없고, 이 매핑은 옵션 단위 드릴다운을 켜는 것이다.
+    #   ⚠️컬럼 구조가 다르면 _find_header_row/_build_col_map이 fail-soft skip한다(D-13).
+    "주문내역, 판매수수료": "sale_fee",
+    "주문내역,판매수수료": "sale_fee",
     "반품 회수비": "return_shipping",
     "반품회수비": "return_shipping",
     "반품 재입고비": "return_shipping",
@@ -344,6 +350,11 @@ _COL_OPTION_ID = "옵션ID"
 _COL_RECOGNITION = "매출인식일"
 _COL_PERIOD_END = "정산주기(종료일)"
 _COL_DISCOUNTED = "할인적용가(A-B)"  # ★옵션 cost (VAT前). 엑셀 ASCII 하이픈 '-'.
+# ★S9(2026-08-03): 청구 근거를 추론하지 않고 정산서에서 직접 읽는다(ref 17 §8-1 컬럼 실증).
+#   배송비=주문당·입출고비=수량당 부과라 분모가 서로 다르다 → 둘 다 센다.
+_COL_ORDER_ID = "주문ID"
+_COL_SALES_QTY = "판매수량"
+_COL_BILLED_SIZE = "개별포장사이즈"
 
 
 def _norm_option_id(value) -> str:
@@ -503,7 +514,19 @@ def parse_settlement_xlsx(content: bytes) -> dict:
                 skipped.append(sn)
                 continue
 
-            options: dict[tuple[str, date | None], Decimal] = {}
+            # ★S9 청구 근거 컬럼(있으면 사용, 없으면 None → 감사가 종전 경로로 폴백).
+            oid_order_col = col_map.get(_COL_ORDER_ID)
+            qty_col = col_map.get(_COL_SALES_QTY)
+            size_col = col_map.get(_COL_BILLED_SIZE)
+            if not oid_order_col or not qty_col or not size_col:
+                # 컬럼명 드리프트를 조용히 넘기지 않는다 — 발견된 헤더를 남겨 다음 세션이 대조한다.
+                log.warning(
+                    "RG 엑셀 '%s' S9 청구근거 컬럼 일부 없음(주문ID=%s·판매수량=%s·개별포장사이즈=%s)."
+                    " 감사는 폴백 경로를 쓴다. 발견된 헤더: %s",
+                    sn, oid_order_col, qty_col, size_col, sorted(col_map)[:40],
+                )
+
+            options: dict[tuple[str, date | None], dict] = {}
             sum_detail = Decimal(0)
             # 헤더+1부터 순회. 서브헤더 행은 옵션ID가 비어 자동 skip(서브헤더 유무 무관).
             for r in range(hr + 1, len(grid) + 1):
@@ -513,8 +536,28 @@ def parse_settlement_xlsx(content: bytes) -> dict:
                 cost = _dec(_at(grid, r, cost_col))
                 pend = _parse_excel_date(_at(grid, r, pend_col)) if pend_col else None
                 key = (oid, pend)
-                options[key] = options.get(key, Decimal(0)) + cost
+                agg = options.get(key)
+                if agg is None:
+                    agg = {"cost": Decimal(0), "order_ids": set(), "quantity": 0,
+                           "size_types": set()}
+                    options[key] = agg
+                agg["cost"] += cost
                 sum_detail += cost
+                # 배송비는 주문당 1회 부과(합포장) → distinct 주문ID가 정확한 분모다.
+                if oid_order_col:
+                    ordid = _at(grid, r, oid_order_col)
+                    if ordid is not None and str(ordid).strip() not in ("", "-"):
+                        agg["order_ids"].add(_norm_option_id(ordid) or str(ordid).strip())
+                # 입출고비는 수량당 부과 → Σ판매수량이 분모다.
+                if qty_col:
+                    q = _dec(_at(grid, r, qty_col))
+                    if q is not None:
+                        agg["quantity"] += int(q)
+                # 쿠팡이 청구에 쓴 사이즈 등급 — 추론 대상이 아니라 기재값이다.
+                if size_col:
+                    st = _at(grid, r, size_col)
+                    if st is not None and str(st).strip() not in ("", "-"):
+                        agg["size_types"].add(str(st).strip())
 
             summary = _parse_summary(grid)
             reconcile = None
@@ -631,6 +674,23 @@ def _assert_no_sheet_drift(parsed: dict) -> None:
         )
 
 
+def _single_size_type(size_types: set[str], fee_type: str, oid: str) -> str | None:
+    """정산서에 기재된 청구 사이즈 등급 1개. 없으면 None, 여러 개면 None+경고.
+
+    한 (옵션·주기) 안에서 등급이 갈리면 그건 "어느 등급으로 청구됐나"에 답이 없다는 뜻이다.
+    임의로 하나를 고르면 감사가 그 선택을 사실로 오해하므로 **모르는 상태로 남긴다**(폴백).
+    """
+    if not size_types:
+        return None
+    if len(size_types) > 1:
+        log.warning(
+            "RG 정산서 청구 사이즈가 한 주기에 여러 값(%s/%s): %s → 판정 보류(None)",
+            fee_type, oid, sorted(size_types),
+        )
+        return None
+    return next(iter(size_types))
+
+
 def ingest_settlement_xlsx(db: Session, account_key: str, content: bytes,
                            *, strict_sheets: bool = False) -> dict:
     """종류별 엑셀 bytes → 파싱·검산·옵션 단위 upsert(S6).
@@ -669,7 +729,7 @@ def ingest_settlement_xlsx(db: Session, account_key: str, content: bytes,
     #   삭제 대상에 넣으면 상세 종료일 불명 시 delete만 하고 insert는 skip돼 데이터 손실이 난다.
     #   → 상세 row의 종료일이 없으면 요약 종료일로 채워 insert까지 되게 하고, 요약 period는
     #   "상세 0건 정상 시트"일 때만 삭제 대상에 추가한다.
-    merged: dict[str, dict[tuple[str, date | None], Decimal]] = {}
+    merged: dict[str, dict[tuple[str, date | None], dict]] = {}
     merged_periods: dict[str, set[date]] = {}   # fee_type -> snapshot 삭제 대상 period_end 집합
     for sheet in sheets:
         ft = sheet["fee_type"]
@@ -678,10 +738,20 @@ def ingest_settlement_xlsx(db: Session, account_key: str, content: bytes,
         bucket = merged.setdefault(ft, {})
         pset = merged_periods.setdefault(ft, set())
         has_options = False
-        for (oid, pe), cost in sheet["options"].items():
+        for (oid, pe), agg in sheet["options"].items():
             has_options = True
             eff_pe = pe if pe is not None else fallback_pe  # 상세 종료일 없으면 요약으로 fallback
-            bucket[(oid, eff_pe)] = bucket.get((oid, eff_pe), Decimal(0)) + cost
+            tgt = bucket.get((oid, eff_pe))
+            if tgt is None:
+                tgt = {"cost": Decimal(0), "order_ids": set(), "quantity": 0,
+                       "size_types": set()}
+                bucket[(oid, eff_pe)] = tgt
+            tgt["cost"] += agg["cost"]
+            # ★주문ID는 **합집합**으로 센다 — 같은 fee_type의 여러 시트가 같은 주문을 담을 수 있어
+            #   개수를 더하면 분모가 부풀고, 그건 우리가 방금 없앤 오탐과 같은 종류의 오류다.
+            tgt["order_ids"] |= agg["order_ids"]
+            tgt["quantity"] += agg["quantity"]
+            tgt["size_types"] |= agg["size_types"]
             if eff_pe is not None:
                 pset.add(eff_pe)  # insert될 period만 삭제 대상(삭제만 하고 못 넣는 손실 방지)
         # 상세 0건 정상 시트(요약만 존재)도 snapshot replace 대상 — 옵션 전삭제로 stale 제거.
@@ -701,7 +771,7 @@ def ingest_settlement_xlsx(db: Session, account_key: str, content: bytes,
     # ── 3. 병합된 옵션 적재 (delete 후라 전부 신규 insert) ─────────────────
     upserted_total = 0
     for ft, options in merged.items():
-        for (oid, period_end), cost in options.items():
+        for (oid, period_end), agg in options.items():
             if period_end is None:
                 log.warning("RG 옵션 적재 skip(정산주기 종료일 불명·요약 fallback도 없음): %s/%s", ft, oid)
                 continue
@@ -713,7 +783,12 @@ def ingest_settlement_xlsx(db: Session, account_key: str, content: bytes,
                 fee_type=ft,
                 vendor_item_id=oid,
                 raw_type=f"xlsx:{ft}",
-                amount=cost,
+                amount=agg["cost"],
+                # ★S9: 컬럼이 없던 파일이면 0/빈집합이 오므로 None으로 저장한다 —
+                #   0을 넣으면 감사가 "분모 0"으로 읽어 종전 폴백이 아니라 오판으로 간다.
+                billed_size_type=_single_size_type(agg["size_types"], ft, oid),
+                billed_order_count=len(agg["order_ids"]) or None,
+                billed_quantity=agg["quantity"] or None,
             ))
             upserted_total += 1
 

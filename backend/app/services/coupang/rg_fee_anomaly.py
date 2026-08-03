@@ -32,9 +32,20 @@ _DELIVERY_OVERCHARGE_MULTIPLE = 2.0
 # 이상치 플래그(=검토 신호)만 모은 집합. 커버리지 사실 표기는 여기 들어가지 않는다 —
 # 커버리지는 periods_total/judged/unmatched 필드로 표면화하고, flags는 "이상하다"만 뜻하게 둔다.
 ANOMALY_FLAGS = frozenset({
-    "missing_dims", "oversize", "unit_unknown",
-    "below_floor", "size_mismatch_high", "measured_vs_billed_mismatch",
+    "missing_dims", "oversize", "unit_unknown", "below_floor",
+    "size_mismatch_high", "measured_vs_billed_mismatch", "billed_size_vs_amount_mismatch",
 })
+
+# 사이즈 출처 → 불일치 플래그 이름. 신호의 **세기**가 출처마다 다르기 때문에 이름을 나눈다.
+#   registered_dims   우리 등록 치수 기준 — 등록이 틀렸을 가능성이 남아 가장 약하다.
+#   coupang_measured  물류센터 실측 기준 — 등록 오류 설명이 제거돼 더 강하다.
+#   settlement_billed 정산서가 **청구에 썼다고 적은** 등급 기준 — 가장 강하다. 이건 추론이
+#     아니라 정산서 내부의 모순이다("극소형으로 청구했다"면서 큰 등급 금액을 받았다).
+_MISMATCH_FLAG_BY_SOURCE = {
+    "registered_dims": "size_mismatch_high",
+    "coupang_measured": "measured_vs_billed_mismatch",
+    "settlement_billed": "billed_size_vs_amount_mismatch",
+}
 
 
 def detect_fee_anomalies(
@@ -48,6 +59,7 @@ def detect_fee_anomalies(
     quantity: int | None,
     order_count: int | None = None,
     coupang_size_type: str | None = None,
+    size_source: str | None = None,
 ) -> dict:
     """이상치 플래그 + 근거 수치 반환.
 
@@ -74,7 +86,10 @@ def detect_fee_anomalies(
     flags: list[str] = []
     result: dict = {
         "size_type": size_type,
-        "size_source": "coupang_measured" if coupang_size_type else "registered_dims",
+        # ★size_source는 호출자가 알려준다(S9). 종전엔 coupang_size_type 유무로만 갈랐는데
+        #   이제 출처가 셋(정산서 기재·물류센터 실측·등록 치수)이라 유무로는 구분되지 않는다.
+        "size_source": size_source or (
+            "coupang_measured" if coupang_size_type else "registered_dims"),
         "per_unit_delivery": None,
         "per_unit_warehousing": None,
         "floor": expected_fee_floor(size_type),
@@ -126,10 +141,14 @@ def detect_fee_anomalies(
             #   청구 함의 사이즈는 '대형1'. 실측이 들어온 것이 불일치를 해소한 게 아니라
             #   **확인해 줬는데** 코드는 그걸 "볼 필요 없음"으로 읽고 신호를 껐다.
             #   그 결과 2026-06-15에 올라온 플래그가 숫자 하나 안 바뀐 채 조용히 사라졌다.
-            flags.append(
+            #   · 정산서 기재(settlement_billed 기준) → billed_size_vs_amount_mismatch.
+            #     **가장 강한 신호다(2026-08-03 S9).** 사이즈도 추론이 아니고 분모도 추론이
+            #     아니므로 "우리 데이터가 틀렸다"는 설명이 전부 제거된다.
+            flags.append(_MISMATCH_FLAG_BY_SOURCE.get(
+                result["size_source"],
                 "measured_vs_billed_mismatch" if coupang_size_type is not None
-                else "size_mismatch_high"
-            )
+                else "size_mismatch_high",
+            ))
 
     if warehousing_amount is not None:
         per_unit_wh = warehousing_amount / quantity
@@ -149,6 +168,7 @@ def detect_fee_anomalies_by_period(
     *,
     periods: list[dict],
     coupang_size_type: str | None = None,
+    size_source: str | None = None,
 ) -> dict:
     """옵션 1개를 정산주기 단위로 **집계해** 판정하고, 주기별 근거를 함께 낸다(2026-08-03).
 
@@ -179,7 +199,8 @@ def detect_fee_anomalies_by_period(
     size_type = coupang_size_type or classify_size_type(width_mm, length_mm, height_mm, weight_g)
     base: dict = {
         "size_type": size_type,
-        "size_source": "coupang_measured" if coupang_size_type else "registered_dims",
+        "size_source": size_source or (
+            "coupang_measured" if coupang_size_type else "registered_dims"),
         "per_unit_delivery": None,
         "per_unit_warehousing": None,
         "judged_delivery": None,
@@ -236,6 +257,7 @@ def detect_fee_anomalies_by_period(
             width_mm, length_mm, height_mm, weight_g,
             delivery_amount=p.get("delivery"), warehousing_amount=p.get("warehousing"),
             quantity=qy, order_count=oc, coupang_size_type=coupang_size_type,
+            size_source=size_source,
         )
         judged += 1
         row.update({
@@ -274,7 +296,7 @@ def detect_fee_anomalies_by_period(
         delivery_amount=round(sum_dlv, 2) if has_dlv else None,
         warehousing_amount=round(sum_wh, 2) if has_wh else None,
         quantity=sum_qty, order_count=sum_orders,
-        coupang_size_type=coupang_size_type,
+        coupang_size_type=coupang_size_type, size_source=size_source,
     )
     if has_dlv:
         base["judged_delivery"] = round(sum_dlv, 2)

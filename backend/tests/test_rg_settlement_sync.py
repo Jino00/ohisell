@@ -580,8 +580,8 @@ def test_parse_xlsx_same_option_summed():
     """같은 옵션 2행 → 합산(3375). 집계 grain=(옵션ID, 정산주기끝)."""
     content = _build_xlsx([("입출고비", "입출고비", _WH_ROWS)])
     s = parse_settlement_xlsx(content)["sheets"][0]
-    assert s["options"][("95521944483", date(2026, 6, 7))] == Decimal("3375")
-    assert s["options"][("95521944484", date(2026, 6, 7))] == Decimal("1125")
+    assert s["options"][("95521944483", date(2026, 6, 7))]["cost"] == Decimal("3375")
+    assert s["options"][("95521944484", date(2026, 6, 7))]["cost"] == Decimal("1125")
     assert len(s["options"]) == 2  # 고유 옵션 2개
 
 def test_parse_xlsx_reconcile_match():
@@ -603,7 +603,7 @@ def test_parse_xlsx_column_position_independence():
     content = _build_xlsx([("배송비", "배송비", _DEL_ROWS, 24)])
     s = parse_settlement_xlsx(content)["sheets"][0]
     assert s["fee_type"] == "delivery"
-    assert s["options"][("95521944483", date(2026, 6, 7))] == Decimal("2200")
+    assert s["options"][("95521944483", date(2026, 6, 7))]["cost"] == Decimal("2200")
     assert s["sum_detail"] == Decimal("4175")  # 2200+1975
 
 def test_parse_xlsx_unknown_sheet_skipped():
@@ -1309,3 +1309,108 @@ def test_rg_fetch_error_is_per_account():
     rg_mark_fetch_error(db, "chrome crash", _W2)
     assert rg_refresh_status(db, _W2)["last_error"] == "chrome crash"
     assert rg_refresh_status(db, _W1)["last_error"] is None
+
+
+# ── S9: 정산서 청구 근거 컬럼 파싱 (주문ID·판매수량·개별포장사이즈, 2026-08-03) ──
+# 감사가 추론하던 두 값이 정산서 상세에 원래 있었다(ref 17 §8-1). 추론 제거의 전제라 파싱을 잠근다.
+
+_S9_ORDER_COL, _S9_SIZE_COL, _S9_QTY_COL = 7, 17, 19
+
+
+def _write_sheet_s9(ws, fee_label, rows, *, cost_col=25):
+    """_write_sheet + S9 컬럼 3개. rows: (oid, pe, AB, order_id, size_type, qty)."""
+    base = [(oid, "2026-06-04", pe, ab, 0, ab) for oid, pe, ab, _, _, _ in rows]
+    _write_sheet(ws, f"{fee_label} 정산 내역", fee_label, base, cost_col=cost_col)
+    ws.cell(7, _S9_ORDER_COL, "주문ID")
+    ws.cell(7, _S9_SIZE_COL, "개별포장사이즈")
+    ws.cell(7, _S9_QTY_COL, "판매수량")
+    for i, (_, _, _, order_id, size_type, qty) in enumerate(rows):
+        rr = 9 + i
+        ws.cell(rr, _S9_ORDER_COL, order_id)
+        ws.cell(rr, _S9_SIZE_COL, size_type)
+        ws.cell(rr, _S9_QTY_COL, qty)
+
+
+def _build_xlsx_s9(sheet_name, fee_label, rows, *, cost_col=25):
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    _write_sheet_s9(wb.create_sheet(sheet_name), fee_label, rows, cost_col=cost_col)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_s9_parse_collects_order_ids_quantity_and_size():
+    content = _build_xlsx_s9("배송비", "배송비", [
+        ("95521944483", "2026-06-07", 1975, "O-1", "극소형", 1),
+        ("95521944483", "2026-06-07", 1975, "O-2", "극소형", 2),
+    ], cost_col=24)
+    agg = parse_settlement_xlsx(content)["sheets"][0]["options"][("95521944483", date(2026, 6, 7))]
+    assert agg["cost"] == Decimal("3950")
+    assert agg["order_ids"] == {"O-1", "O-2"}
+    assert agg["quantity"] == 3
+    assert agg["size_types"] == {"극소형"}
+
+
+def test_s9_duplicate_order_id_counted_once():
+    """★같은 주문이 여러 라인이면 주문수는 1이다 — 개수를 더하면 분모가 부풀어 오탐이 된다.
+
+    배송비는 주문당 1회 부과라 distinct가 정의상 맞다. 이 테스트가 없으면 '라인 수 = 주문 수'로
+    퇴행해도 아무것도 깨지지 않는다.
+    """
+    content = _build_xlsx_s9("배송비", "배송비", [
+        ("95521944483", "2026-06-07", 1000, "O-1", "극소형", 1),
+        ("95521944483", "2026-06-07", 975, "O-1", "극소형", 1),   # 같은 주문 분할 라인
+    ], cost_col=24)
+    agg = parse_settlement_xlsx(content)["sheets"][0]["options"][("95521944483", date(2026, 6, 7))]
+    assert agg["order_ids"] == {"O-1"}
+    assert agg["cost"] == Decimal("1975")   # 금액은 합산, 주문수는 1
+
+
+def test_s9_ingest_writes_billed_columns():
+    db = _db()
+    content = _build_xlsx_s9("배송비", "배송비", [
+        ("95521944483", "2026-06-07", 1975, "O-1", "극소형", 1),
+        ("95521944483", "2026-06-07", 1975, "O-2", "극소형", 1),
+    ], cost_col=24)
+    ingest_settlement_xlsx(db, "COUPANG_WING1", content)
+    row = db.query(CoupangRgSettlementFee).filter_by(
+        vendor_item_id="95521944483", fee_type="delivery").one()
+    assert row.billed_size_type == "극소형"
+    assert row.billed_order_count == 2
+    assert row.billed_quantity == 2
+    assert row.amount == Decimal("3950")
+
+
+def test_s9_mixed_size_types_stored_as_null():
+    """한 주기에 청구 등급이 갈리면 답이 없다 → None(감사는 폴백). 임의 선택 금지."""
+    db = _db()
+    content = _build_xlsx_s9("배송비", "배송비", [
+        ("95521944483", "2026-06-07", 1975, "O-1", "극소형", 1),
+        ("95521944483", "2026-06-07", 1975, "O-2", "소형", 1),
+    ], cost_col=24)
+    ingest_settlement_xlsx(db, "COUPANG_WING1", content)
+    row = db.query(CoupangRgSettlementFee).filter_by(
+        vendor_item_id="95521944483", fee_type="delivery").one()
+    assert row.billed_size_type is None
+    assert row.billed_order_count == 2      # 분모는 여전히 유효하다
+
+
+def test_s9_absent_columns_leave_nulls_not_zeros():
+    """★컬럼 없는 파일(구 리포트)은 NULL이어야 한다. 0을 넣으면 감사가 '분모 0'으로 오판한다."""
+    db = _db()
+    content = _build_xlsx([("배송비", "배송비", _DEL_ROWS, 24)])
+    ingest_settlement_xlsx(db, "COUPANG_WING1", content)
+    rows = db.query(CoupangRgSettlementFee).filter_by(fee_type="delivery").all()
+    assert rows
+    assert all(r.billed_order_count is None and r.billed_quantity is None
+               and r.billed_size_type is None for r in rows)
+
+
+def test_s9_category_tr_sheet_name_now_mapped():
+    """CATEGORY_TR 유일 시트명이 sale_fee로 매핑된다(종전 미매핑 → 매 주기 0행)."""
+    content = _build_xlsx([("주문내역, 판매수수료", "판매수수료", _DEL_ROWS, 24)])
+    parsed = parse_settlement_xlsx(content)
+    assert parsed["sheets_skipped"] == []
+    assert parsed["sheets"][0]["fee_type"] == "sale_fee"
+    assert len(parsed["sheets"][0]["options"]) == 2
