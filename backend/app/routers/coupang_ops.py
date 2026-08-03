@@ -2269,6 +2269,39 @@ async def upload_rg_settlement_xlsx(
         )
     except WingReadError as e:
         raise HTTPException(status_code=422, detail=f"엑셀 파싱 실패: {e}")
+
+    # ── ★시트 드리프트 = 거짓 완료 차단(2026-08-03) ────────────────────────────────
+    # 결함: ingest는 인식 가능한 시트가 하나도 없어도 예외 대신 status="empty"를 **정상 반환**
+    #   한다(rg_settlement_sync.ingest_settlement_xlsx). 그런데 여기서 결과와 무관하게
+    #   heartbeat를 찍고 있었다 → 쿠팡이 시트명을 바꾸거나 파서가 드리프트하면 파일이 통째로
+    #   무시되는데 화면은 "✅ 완료". 정산=돈 데이터라 거짓 완료가 가장 나쁜 오보다.
+    # ★서비스가 아니라 라우터에서 막는 이유(라이브 실측 2026-08-03): 같은 ingest 함수를 쓰는
+    #   서버측 S6-auto(auto_download_and_ingest)에서는 CATEGORY_TR 엑셀이 **매 주기 정상적으로**
+    #   empty를 낸다(유일 시트명 '주문내역, 판매수수료'가 _SHEET_FEE_TYPE_MAP에 없음, prod 로그
+    #   28건). 서비스에 예외를 넣으면 그 경로가 통째로 터진다. 반면 이 push 경로는 라이브 83회
+    #   (WING1 55·WING2 28) 전수에서 empty 0건·sheets_skipped 비어있지 않은 응답 0건이었다
+    #   → 이 경로에서 시트 미인식은 **항상** 결함 신호다.
+    # ★422를 고른 이유: 페처(tools/wing_browser_fetcher.py `_rg_push_xlsx`)는 이미 비200을
+    #   log.error + rc=1로 세고, run 끝에 refresh-complete 대신 fetch-error를 보낸다 →
+    #   last_error_at이 생겨 화면(streamRefresh.ts RG 판정)까지 이어진다. **페처 배포 불필요**
+    #   (~/.ohisell/tools/ 로컬 사본과 계약이 어긋날 위험 0).
+    # ★upserted==0은 실패로 승격하지 않는다: 시트는 정상 인식됐는데 그 주기 옵션 행이 0건인
+    #   케이스가 라이브에 10건 있다(전부 WING2 오하이테크 '입출고비'). 여기 넣으면 오탐이 된다.
+    # ★부분 인식(일부 시트만 skip)도 같은 취급(Jino 결정 2026-08-03): 적재는 이미 커밋됐지만
+    #   절반이 조용히 빠진 채 화면은 완전 정상이라 empty보다 나쁘다. 재시도는 멱등(fee_type×
+    #   period 단위 snapshot replace)이라 실패 보고로 인한 재업로드는 무해하다.
+    #   대가: 쿠팡이 무해한 시트를 추가하면 _SHEET_FEE_TYPE_MAP에 한 줄 넣고 배포할 때까지
+    #   RG가 실패로 뜬다 — 조용한 절반 손실보다 낫다는 판단.
+    _skipped = result.get("sheets_skipped") or []
+    if result.get("status") == "empty" or _skipped:
+        _why = ("인식된 정산 시트 없음(전량 미인식)" if result.get("status") == "empty"
+                else f"정산 시트 일부 미인식(적재 {result.get('upserted', 0)}행은 반영됨)")
+        raise HTTPException(
+            status_code=422,
+            detail=f"{_why} — 시트명 드리프트 의심: {_skipped[:5]}. "
+                   f"heartbeat 미갱신(거짓 완료 방지).",
+        )
+
     # S4-P2: 자동 다운로드(Mac 페처 push)·수동 업로드 모두 freshness 갱신(스케줄 중복방지·상태표시).
     # ★계정별 상태행에 기록(2026-07-27): WING2 push가 WING1 행을 갱신하면 오픽스가 실제론 안
     #   왔는데 "갱신 완료"로 보이고(UI 폴링이 남의 성공에 종료됨) 신선도 배너도 거짓말한다.

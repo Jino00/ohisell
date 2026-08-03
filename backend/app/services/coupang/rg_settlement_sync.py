@@ -592,6 +592,11 @@ def ingest_settlement_xlsx(db: Session, account_key: str, content: bytes) -> dic
     반환: {"account_key", "upserted", "sheets": [{fee_type, sheet_name, options(개수),
            reconcile, vs_status_api}], "sheets_skipped", "status": "ok"|"empty"}.
     검산2(vs_status_api): 요약최종(VAT후) == status/api 계정 row amount(같은 fee_type·기간).
+
+    ★status="empty"/sheets_skipped는 **호출자가 판정해야 하는 신호**다(여기서 raise하지 않는 이유):
+      같은 함수를 쓰는 S6-auto는 CATEGORY_TR 엑셀이 매 주기 정상적으로 empty를 내지만(시트명
+      '주문내역, 판매수수료' 미매핑), Mac 페처 push 경로에서는 empty=시트 드리프트=결함이다.
+      후자는 라우터 /rg/settlement/upload-xlsx가 422로 막는다(2026-08-03 — 거짓 완료 차단).
     """
     parsed = parse_settlement_xlsx(content)
     sheets = parsed["sheets"]
