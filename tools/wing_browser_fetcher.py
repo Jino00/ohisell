@@ -107,14 +107,24 @@ _POST_JSON_JS = """async (args) => {
   const headers = {'content-type': 'application/json', 'accept': 'application/json, text/plain, */*'};
   if (m) { try { headers['x-xsrf-token'] = decodeURIComponent(m[1]); } catch (e) { headers['x-xsrf-token'] = m[1]; } }
   try {
+    // ★redirect:'manual'인 이유(2026-08-03 라이브 실측): 로그아웃되면 이 JSON API가 302로
+    //   /login → /logout → helpseller.coupang.com(크로스 오리진)까지 튕긴다. 기본값
+    //   redirect:'follow'면 그 체인 끝에서 fetch가 'TypeError: Failed to fetch'로 **터져서**,
+    //   명백한 로그아웃이 '판정 불가(예외)'로 뭉개진다. manual이면 opaqueredirect로 조용히
+    //   돌아와 "리다이렉트당했다 = 로그인 필요"를 확증할 수 있다.
+    //   기존 성공 경로는 무영향 — 이 API들의 성공은 항상 200이고, 호출자는 이미 200만 성공으로
+    //   친다(3xx는 원래도 실패였다). 달라지는 건 '왜 실패했는지 알게 된다'는 것뿐이다.
     const r = await fetch(location.origin + path, {
       method: 'POST',
       headers,
       body: JSON.stringify(payload),
       credentials: 'include',
+      redirect: 'manual',
       signal: ctrl.signal,
     });
-    return { status: r.status, body: await r.text() };
+    const redirected = (r.type === 'opaqueredirect') || (r.status >= 300 && r.status < 400);
+    return { status: r.status, body: redirected ? '' : await r.text(),
+             redirected, respType: r.type };
   } finally { clearTimeout(t); }
 }"""
 
@@ -1805,6 +1815,11 @@ def _rg_probe_endpoint(page, path: str, payload: dict, *, expect_key: str | None
     status = res.get("status")
     body = res.get("body") or ""
     low = body.lower()
+    if res.get("redirected"):
+        # ★JSON API가 리다이렉트당했다 = 로그인 필요. 라이브 실측 체인(2026-08-03 14:05):
+        #   download-list/api → 302 → wing/login → 302 → wing/logout → helpseller(크로스 오리진).
+        #   redirect:'follow'였을 땐 이게 TypeError로 터져 '판정 불가'로 뭉개졌다.
+        return _PROBE_AUTH, f"로그인 필요(리다이렉트 — status={status}, type={res.get('respType')})", None
     marker = next((m for m in ("kccontext", "signin", "xauth") if m in low), None)
     if marker is None and status == 200 and "<html" in low:
         marker = "html"

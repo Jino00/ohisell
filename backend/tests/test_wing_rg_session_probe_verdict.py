@@ -261,3 +261,34 @@ def test_status_fetch_stops_immediately_on_auth(fetcher, monkeypatch):
     verdict, _ = fetcher._rg_fetch_status_raw(page, {"rg_status_days": 35}, budget_s=60)
     assert verdict == fetcher._PROBE_AUTH
     assert page.calls == 1
+
+
+# ── ⑧ 리다이렉트 = 로그인 필요 (2026-08-03 14:05 라이브 실측) ────────────────
+# 라이브 체인: download-list/api → 302 → wing/login → 302 → wing/logout → helpseller(크로스 오리진).
+# redirect:'follow'였을 땐 그 끝에서 fetch가 'TypeError: Failed to fetch'로 터져, **명백한
+# 로그아웃**이 '판정 불가(예외)'로 뭉개졌다 — 사람이 로그인해야 하는데 아무도 안 알려준다.
+def test_redirect_is_auth_not_unknown(fetcher):
+    page = _PageStub([{"status": 0, "body": "", "redirected": True, "respType": "opaqueredirect"}])
+    v, why = fetcher._rg_session_probe(page)
+    assert v == fetcher._PROBE_AUTH, why
+    assert "리다이렉트" in why
+    assert fetcher._rg_loop_should_abort(v) is True
+
+
+def test_302_status_is_auth(fetcher):
+    v, _ = fetcher._rg_session_probe(
+        _PageStub([{"status": 302, "body": "", "redirected": True, "respType": "opaqueredirect"}]))
+    assert v == fetcher._PROBE_AUTH
+
+
+def test_post_helper_uses_manual_redirect(fetcher):
+    """계약: redirect:'manual'을 되돌리면 로그아웃이 다시 '판정 불가'로 뭉개진다."""
+    assert "redirect: 'manual'" in fetcher._POST_JSON_JS
+    assert "opaqueredirect" in fetcher._POST_JSON_JS
+
+
+def test_non_redirect_500_still_unknown(fetcher):
+    """리다이렉트 판정이 500까지 AUTH로 끌고 가면 원래 사고로 되돌아간다."""
+    v, _ = fetcher._rg_session_probe(
+        _PageStub([{"status": 500, "body": _LIVE_500_SHELL, "redirected": False}]))
+    assert v == fetcher._PROBE_UNKNOWN
