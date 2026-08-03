@@ -103,6 +103,13 @@ prod `alembic_version` = **`rg9billed7c4e`**인데 **그 리비전 파일이 로
 **→ 배포 전에 PR #190 병합을 기다렸다가 재부모(re-parent)하고 `alembic heads`가 1개인지
 확인할 것.** 전례: 커밋 `3130ee5` "마이그 재부모". (LESSONS #107)
 
+⚠️**재부모 시 딸린 리비전이 하나 더 있다**: 같은 폴더에서 **병행 세션(쿠팡 로켓 1P 상품명
+트랙)이 `d7c1a9e35f42_add_ad_option_product_names.py`를 만들면서 부모를 내 `c4a7e2b91d63`으로
+잡았다**(08-03 밤 작업트리에서 확인, 아직 미커밋). 즉 로컬 체인은
+`b6e1c93f4275 → c4a7e2b91d63(내 것) → d7c1a9e35f42(병행 세션)`이다.
+**내 것을 재부모하면 그쪽도 함께 옮겨야 한다** — 혼자 옮기면 그 세션의 리비전이 고아가 된다.
+재부모 전에 그 세션과 순서를 맞출 것.
+
 배포 명령(재부모 후):
 ```
 scripts/safe_deploy.sh backend/alembic/versions/c4a7e2b91d63_*.py backend/app/models.py \
@@ -148,6 +155,14 @@ scripts/safe_deploy.sh backend/alembic/versions/c4a7e2b91d63_*.py backend/app/mo
 - ⚠️**의도치 않은 부작용 1건**: 마이그레이션 검증을 임시 DB로 하려 했으나 이 레포의
   `alembic/env.py`는 `alembic.ini`의 고정 URL만 읽어 `DATABASE_URL`을 무시한다 → **로컬 dev
   DB(`backend/ohisell.db`)가 대신 올라갔다**(prod 아님, 무해). LESSONS #106 · failures.jsonl 기록.
+- ⚠️★**사고 1건 — `git add -A`가 병행 세션의 미완 작업을 커밋했다(즉시 되돌림).** 문서 커밋을
+  `git add -A`로 하는 순간, **같은 폴더에서 동시에 일하던 쿠팡 로켓 1P 상품명 세션의 미완
+  파일 6개**(`ad_costs.py`·`rocket_intelligence.py`·`api.ts`·`CommandCenter.tsx`·models.py 추가분·
+  신규 마이그레이션)가 딸려 들어갔다. `git reset HEAD~1`로 되돌리고 **내 파일 5개만 명시
+  add**해 재커밋(`9ddd075`). 다행히 push 전이었다. **교훈: 공유 메인 폴더에서는 `git add -A`를
+  쓰지 않는다 — 파일을 명시한다.** LESSONS #108.
+  (이번에 알게 된 사실: 이 폴더에서 **다른 세션이 동시에 작업 중**이다. 그 세션이 내 커밋
+  `b1268ad` 위에 `c485f5c`·`f60813a`를 얹어 이미 push했다.)
 
 ## §8 다음 세션 시작 프롬프트
 
