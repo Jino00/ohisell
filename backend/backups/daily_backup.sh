@@ -29,15 +29,33 @@ set -uo pipefail
 D=/home/ubuntu/ohisell/backend
 B="$D/backups"
 DB="$D/ohisell.db"
-RETENTION_DAYS=7
+KEEP=7                     # 보관할 백업 **개수**(시각이 아니라 개수 — 아래 이유 참조)
 TS=$(date +%Y%m%d_%H%M%S)
 log() { echo "$(date -Is) $*"; }
 
 # ── ① 보존정리 먼저 ────────────────────────────────────────────────
 # 순서가 이 스크립트의 핵심이다(위 사고 참조). 정리 실패는 백업을 막지 않는다.
-# 구 비압축(.db) 잔재도 같은 규칙으로 정리한다 — 전환기 혼재를 남기지 않기 위함.
-find "$B" -maxdepth 1 -name 'ohisell_daily_*.db.gz' -mtime +${RETENTION_DAYS} -delete 2>/dev/null || true
-find "$B" -maxdepth 1 -name 'ohisell_daily_*.db'    -mtime +${RETENTION_DAYS} -delete 2>/dev/null || true
+#
+# ★왜 `-mtime +7`이 아니라 개수 기반인가(2026-08-04 실측으로 교체):
+#   이 크론은 **매일 같은 시각(18:30:0x UTC)** 에 돈다. 그래서 7일 전 파일의 나이가 실행
+#   시점에 **정확히 8.000일 경계**에 얹히고, `-mtime`은 소수부를 버리므로 삭제가 되기도
+#   안 되기도 한다(실측: 08-03 18:31 크론에서 8일 1분 된 07-26 파일이 안 지워졌다).
+#   결과는 '보존 7일'이라 적어놓고 실제로는 8개가 남는 조용한 어긋남이다.
+#   개수 기반은 경계가 없고, 하루에 여러 번 돌아도 **상한이 보장**된다. 이 스크립트의 목적이
+#   '디스크를 묶는 것'이므로 시각보다 개수가 목적에 직접 대응한다.
+#
+# ★KEEP-1로 줄이는 이유: 정리를 백업 **전에** 하므로, 지금 KEEP-1개로 만들어야 이 실행이
+#   하나를 더한 뒤 정확히 KEEP개가 된다. 백업이 실패하면 한 개 덜 남지만(그래도 6개),
+#   그 대가로 '백업이 디스크를 넘치게 하는 일은 없다'가 보장된다 — 사고의 교훈이 그것이다.
+_trim() {  # $1=글롭 패턴, $2=남길 개수
+  local keep="$2" old
+  ls -1t $1 2>/dev/null | tail -n +$((keep + 1)) | while IFS= read -r old; do
+    rm -f -- "$old" && log "정리: $(basename "$old")"
+  done
+}
+_trim "$B/ohisell_daily_*.db.gz" $((KEEP - 1))
+# 구 비압축(.db) 잔재는 전환기 산물이라 남기지 않는다(같은 날짜의 .gz가 이미 정본).
+_trim "$B/ohisell_daily_*.db" 0
 
 # ── ② 여유 공간 사전 확인 ──────────────────────────────────────────
 # .backup은 원본 크기만큼 쓰고, 이어지는 gzip은 잠깐 원본+압축본이 공존한다 → 원본의 1.3배를
@@ -80,4 +98,5 @@ if ! gzip -f "$TMP"; then
 fi
 
 GZ_BYTES=$(stat -c %s "$TMP.gz" 2>/dev/null || echo 0)
-log "ok: $(basename "$TMP.gz") ${TABLES}테이블 $((DB_BYTES/1048576))MB→$((GZ_BYTES/1048576))MB 보존 ${RETENTION_DAYS}일"
+KEPT=$(ls -1 "$B"/ohisell_daily_*.db.gz 2>/dev/null | wc -l)
+log "ok: $(basename "$TMP.gz") ${TABLES}테이블 $((DB_BYTES/1048576))MB→$((GZ_BYTES/1048576))MB 보관 ${KEPT}/${KEEP}개"
