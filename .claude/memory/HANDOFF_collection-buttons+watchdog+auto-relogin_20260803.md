@@ -108,10 +108,20 @@ Jino 보고 **"버튼을 눌러도 아무 일이 일어나지 않는다"**의 �
 - **★PR #175는 수정본의 성공 경로가 라이브 미증명**이다. 12:20·12:32 두 회차 모두 keycloak이
   진짜 만료라 재현 조건이 안 나왔고, `verify` 로직은 개입 기회조차 없었다. **"고쳤으니 된다"고
   말하면 안 된다.** 유일한 성공 증거(11:55, 13초 복구+수집 완주)는 **수정 전 코드**의 것이다.
-- **★2층(Keychain)이 아직 비활성** — `~/.ohisell_ohitech_ad.json`에 `ohitech_ad_login_id`,
-  `~/.ohisell_rocket_fetcher.json`에 `supplier_login_id`가 **없다**. Jino가
-  `tools/setup_fetcher_autologin.sh`를 1회 실행해야 켜진다. **지금 keycloak이 죽어 있는 상태가
-  오히려 ②의 이상적 시험 조건** — 등록 직후 갱신을 쏘면 바로 라이브 증거를 얻는다.
+- **★2층(Keychain) 설정은 완비, 라이브 검증만 남았다** (12:57 갱신):
+  ```
+  ~/.ohisell_ohitech_ad.json     → ohitech_ad_login_id = "ohitech"   (모델이 기록)
+  ~/.ohisell_rocket_fetcher.json → supplier_login_id  = "ohitech"   (모델이 기록)
+  Keychain(ohisell-coupang-ad)   → ofixohi, ohitech 둘 다 등록됨    (Jino가 등록)
+  coupang_auth.keychain_get('ohitech') → 조회 성공(15자)
+  ```
+  **그런데 발동 조건(세션 만료)을 못 만들었다 — 3번 시도, 3번 다 세션이 살아남았다**:
+  ①데몬 재기동 후 발사 → 복구 로그 0건 ②CDP로 쿠팡 쿠키 34개(xauth 포함) 삭제 후 발사 → 통과
+  ③Chrome 종료 + 프로필 쿠키 DB 파일 삭제 후 발사 → **여전히 통과**.
+  세션이 쿠키 밖(localStorage 등)에도 남아 SPA가 조용히 재인증하는 것으로 보인다.
+  → **억지로 만들지 말고 자연 만료를 기다린다.** 오하이테크 세션은 ≈2h면 풀리므로,
+  다음 자연 만료 회차 로그에 **`자동 로그인 성공`**이 뜨면 그때 PR #175를 병합한다.
+  ⚠️ 2FA가 걸려 있으면 `2FA 단계 — 사람 호출` 알림이 뜬다. 그 경우 ①까지가 한계다.
 - **오하이테크 세션 수명이 짧다(≈2시간)** — 오늘 세 번 끊겼다. "keycloak 12h"는 오픽스 WING
   맥락의 수치이고 supplier-hub에도 적용되는지는 **확인 안 됨**.
 - **Slack 도착 여부 미확인** — 워치독이 11:19·11:32에 `sent: True`로 발송했으나 Jino 확인 전.
