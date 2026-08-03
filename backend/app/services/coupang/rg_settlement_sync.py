@@ -1082,11 +1082,21 @@ def rg_mark_heartbeat(db: Session, account_key: str = "COUPANG_WING1") -> None:
     여러 엑셀을 올린다. 첫 업로드에서 요청을 지우면 뒤이은 다운로드·push가 실패해도 재시도할
     요청이 남아있지 않아 정산 데이터가 반쪽으로 남는다. 요청 소멸은 run 전체가 끝난 뒤
     refresh-complete(=/wing/rg-settlement/refresh-complete)가 한다.
+
+    ★실패 흔적은 **살아있는 요청**의 성공일 때만 지운다(2026-08-03 codex P1). 무조건 지우면
+    이미 종료된 run의 실패가 늦게 도착한 업로드에 지워진다: 페처의 업로드 클라이언트 타임아웃
+    (60s)은 서버 처리를 취소하지 않아, 페처가 실패를 보고해 run이 끝난 **뒤에** 서버 ingest가
+    완주하며 여기로 들어온다(2026-07-17 실측 — success/error가 138ms 차로 같은 행을 갱신).
+    그 순간 프론트(streamRefresh.runStreamRefresh)는 '요청 소멸 + 실패 흔적 없음 + 성공 시각
+    변화'만 보고 **반쪽 정산 run을 "완료"로 읽는다** — 실패 판정의 유일한 근거가 last_error_at
+    이기 때문이다. 신선도(last_success_at)는 조건 없이 올린다: 데이터는 실제로 들어왔다.
     """
     row = _rg_ensure_state_row(db, account_key)
     row.status = "green"
-    row.last_error = None
-    row.last_error_at = None  # 성공 = 실패 흔적 클리어(안 지우면 오래된 실패가 화면에 남는다)
+    if row.refresh_requested_at is not None:
+        # 이번 run 안의 성공 → 지난 시도의 실패 흔적 클리어(안 지우면 오래된 실패가 화면에 남는다)
+        row.last_error = None
+        row.last_error_at = None
     row.last_success_at = kst_now()
     db.commit()
 

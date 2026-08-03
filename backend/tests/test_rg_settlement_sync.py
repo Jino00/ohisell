@@ -1145,6 +1145,49 @@ def test_rg_mark_heartbeat_green_and_success_at():
     assert st["age_hours"] is not None and st["age_hours"] >= 0
 
 
+def test_rg_heartbeat_clears_error_during_live_run():
+    """살아있는 run의 업로드 성공은 지난 시도의 실패 흔적을 지운다(기존 계약 보존).
+
+    안 지우면 1회차 실패 뒤 2회차가 성공해도 화면에 옛 실패가 남는다.
+    """
+    from app.services.coupang.rg_settlement_sync import rg_mark_fetch_error
+    db = _db()
+    rg_request_refresh(db)
+    rg_claim_refresh(db)
+    rg_mark_fetch_error(db, "1회차 실패")              # 평범한 실패 = 재시도 대상
+    assert rg_refresh_status(db)["requested"] is True  # 요청은 살아있다
+    rg_mark_heartbeat(db)                              # 2회차 업로드 성공
+    assert rg_refresh_status(db)["last_error_at"] is None
+
+
+def test_rg_heartbeat_does_not_erase_terminated_failure():
+    """★늦게 도착한 업로드가 **끝난 run의 실패 흔적을 지우지 못한다**(2026-08-03 codex P1).
+
+    페처의 업로드 클라이언트 타임아웃(60s)은 서버 처리를 취소하지 않는다 — 페처가 실패를
+    보고해 run이 종료된 **뒤에** 서버 ingest가 완주해 heartbeat를 찍는다(2026-07-17 실측:
+    success/error가 138ms 차로 같은 행을 갱신). 이때 실패 흔적을 지우면 프론트
+    (streamRefresh.runStreamRefresh)는 '요청 소멸 + 실패 흔적 없음 + 성공 시각 변화'만 보고
+    반쪽 정산 run을 "✅ 완료"로 읽는다 — 실패 판정의 유일한 근거가 last_error_at이기 때문이다.
+    신선도(last_success_at)는 올린다: 데이터는 실제로 들어왔다.
+    """
+    from app.services.coupang.rg_settlement_sync import rg_mark_fetch_error
+    db = _db()
+    rg_request_refresh(db)
+    rg_claim_refresh(db)
+    # 로그인 필요 = 재시도 없이 즉시 요청 소멸(run 종료)
+    rg_mark_fetch_error(db, "마지막 리포트 실패", kind="login_required")
+    st = rg_refresh_status(db)
+    assert st["requested"] is False and st["last_error_at"] is not None
+    err_at, err = st["last_error_at"], st["last_error"]
+
+    rg_mark_heartbeat(db)                              # 뒤늦게 도착한 업로드
+
+    st2 = rg_refresh_status(db)
+    assert st2["last_success_at"] is not None          # 신선도는 올라간다
+    assert st2["last_error_at"] == err_at              # ★실패 흔적은 그대로
+    assert st2["last_error"] == err
+
+
 def test_rg_state_isolated_from_vendor_summary():
     """RG 상태행은 vendor-summary(COUPANG_WING_VS)와 다른 account_key로 분리(D-5)."""
     from app.services.coupang import vendor_summary_sync as vss
