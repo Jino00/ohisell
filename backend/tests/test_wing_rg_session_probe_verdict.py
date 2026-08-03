@@ -216,6 +216,97 @@ def test_on_origin_probes_normally(fetcher):
     assert fetcher._rg_session_probe(page)[0] == fetcher._PROBE_OK
 
 
+# ── ⑨ 오리진 판정은 **호스트 파싱**으로 (2026-08-03 WING2 라이브 실측) ──────────
+# 진짜 Keycloak 로그인 URL은 돌아갈 주소를 쿼리에 싣는다. 부분문자열 검사
+# (`"wing.coupang.com" not in url`)는 그 redirect_uri에 걸려 **로그인 페이지 위에서
+# '오리진 유지'** 라고 답했다 → 로그아웃이 UNKNOWN(404)으로 오분류 → 로그인 창이 뜨지 않음
+# → 아무도 로그인하지 못한 채 회차마다 120초 재시도만 태우는 영구 침묵.
+# 위 test_off_origin_is_auth_evidence는 쿼리 없는 URL을 써서 이 형태를 통과시켰다.
+_LIVE_XAUTH_URL = (
+    "https://xauth.coupang.com/auth/realms/seller/protocol/openid-connect/auth"
+    "?response_type=code&client_id=wing"
+    "&redirect_uri=https%3A%2F%2Fwing.coupang.com%2Ftenants%2Frfm%2Fsettlements%2Fstatus-new"
+    "&state=8f2c1d&scope=openid"
+)
+
+
+def test_off_origin_detects_login_url_carrying_our_host_in_query(fetcher):
+    """★수정 전 실패하는 회귀 — 라이브 실측 URL 그대로."""
+    page = _UrlPageStub([{"status": 404, "body": "<html><body>404 - Not Found</body></html>"}],
+                        _LIVE_XAUTH_URL)
+    v, why = fetcher._rg_session_probe(page)
+    assert v == fetcher._PROBE_AUTH, (
+        f"로그인 페이지를 '오리진 유지'로 보면 로그인 창이 뜨지 않아 침묵한다 — {v} ({why})")
+    assert page.calls == 0, "오리진 이탈이면 POST를 낭비하지 않는다"
+
+
+def test_off_origin_returns_url_for_query_carrying_login_page(fetcher):
+    """판정 함수 자체를 고정 — 프로브를 갈아끼워도 이 계약은 남는다."""
+    page = _UrlPageStub([], _LIVE_XAUTH_URL)
+    assert fetcher._rg_off_origin(page) == _LIVE_XAUTH_URL
+
+
+@pytest.mark.parametrize("url", [
+    "https://wing.coupang.com/tenants/rfm/settlements/status-new",
+    "https://wing.coupang.com/tenants/rfm/settlements/status-new?next=https%3A%2F%2Fxauth.coupang.com%2F",
+    "https://wing.coupang.com:443/tenants/rfm/settlements/status-new",
+    "https://WING.COUPANG.COM/tenants/rfm/settlements/status-new",
+])
+def test_on_origin_urls_are_not_off_origin(fetcher, url):
+    """반대 방향 오판도 막는다 — 정상 페이지를 이탈로 부르면 멀쩡한 세션에 재로그인을 시킨다."""
+    assert fetcher._rg_off_origin(_UrlPageStub([], url)) == ""
+
+
+@pytest.mark.parametrize("url", [
+    "https://xauth.coupang.com/auth/realms/seller",
+    "https://wing.coupang.com.evil.example/tenants/rfm",   # 접미사 위장
+    "https://notwing.coupang.com/tenants/rfm",
+])
+def test_foreign_hosts_are_off_origin(fetcher, url):
+    assert fetcher._rg_off_origin(_UrlPageStub([], url)) == url
+
+
+def test_about_blank_is_not_a_verdict(fetcher):
+    """아직 아무데도 안 간 창을 로그아웃으로 부르지 않는다(기존 계약 보존)."""
+    assert fetcher._rg_off_origin(_UrlPageStub([], "about:blank")) == ""
+    assert fetcher._rg_off_origin(_UrlPageStub([], "")) == ""
+
+
+# ── ⑩ 상주 모드 — 내가 띄운 창을 작업 후 닫지 않는다 (2026-08-03) ────────────────
+# 왜: Wing 로그인은 JSESSIONID 세션 쿠키라 Chrome과 함께 죽는다(실측). per-fetch 수명에서는
+#   회차마다 로그아웃 → 사람이 매번 로그인(08-03 WING1 4회차 전부 그랬다).
+def test_resident_owner_is_not_closed(fetcher):
+    owner = fetcher._ChromeOwner()
+    owner.proc = object()
+    owner.resident = True
+    assert owner.owned is True
+    assert owner.should_close is False, "상주 창을 닫으면 다음 회차가 로그아웃으로 뜬다"
+
+
+def test_non_resident_owner_still_closes(fetcher):
+    """상주를 안 켠 인스턴스의 버튼-only 계약(07-27)은 그대로다."""
+    owner = fetcher._ChromeOwner()
+    owner.proc = object()
+    assert owner.should_close is True
+
+
+def test_resident_survives_caller_clearing_keep_open(fetcher):
+    """★_do_rg_run은 로그인 성공 후 keep_open=False로 되돌린다 — 상주를 keep_open에 얹었다면
+    그 한 줄이 상주를 조용히 해제했을 것이다(별도 플래그로 둔 이유)."""
+    owner = fetcher._ChromeOwner()
+    owner.proc = object()
+    owner.resident = True
+    owner.keep_open = True
+    owner.keep_open = False          # 로그인 성공 경로가 하는 일
+    assert owner.should_close is False
+
+
+def test_adopted_chrome_is_never_closed_even_when_resident_off(fetcher):
+    """남의 창은 예나 지금이나 안 닫는다."""
+    owner = fetcher._ChromeOwner()
+    assert owner.owned is False and owner.should_close is False
+
+
 # ── status/api 재시도 ────────────────────────────────────────────────────
 class _StatusPage:
     """status/api용 페이지 스텁 — 응답 시퀀스를 소진하고 마지막 응답을 반복한다."""
