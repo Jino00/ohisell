@@ -41,7 +41,9 @@ _NAVER_CHANNEL_ID = 6
 _Q2 = Decimal("0.01")
 _Z  = Decimal("0")
 _VAT_DIVISOR = Decimal("1.1")       # VAT 포함 → 공급가(부가세 제외) 환산
-_HANJIN_PER_SHIPMENT = Decimal("1900")  # 한진택배 물리배송 1건당(packageNumber 기준), VAT 포함
+# 택배 물리배송 1건당 단가(VAT 포함). 일반배송 기본가이자 shipping_cost_paid 결측 폴백 —
+# N배송(도착보장 3,020)은 주문 행의 shipping_cost_paid 스냅샷에서 읽는다(order_delivery 단가표).
+_HANJIN_PER_SHIPMENT = Decimal("1900")
 
 
 def _date_range(days: int) -> tuple[date, date]:
@@ -122,21 +124,22 @@ def sales_summary(
     )
     # 광고비는 네이버 광고 = 공급가(VAT 제외, 세금계산서 별도) → 공급가 통일 시 그대로.
 
-    # ── 2b. 한진 물류비 — 물리배송 1건당 1,900 (packageNumber 기준, VAT 포함) ──
+    # ── 2b. 택배 물류비 — 물리배송(packageNumber) 1건당 배송방식별 실단가, VAT 포함 ──
     # 메인 엔진(profit_calculator)과 동일 기준. 매출 제외 주문은 빼고, 배송 단위(패키지)당 1회.
-    shipment_count = int(
+    # ★2026-08-03: 정액 1,900 × 배송건수 → 패키지별 max(shipping_cost_paid)의 합으로 교체.
+    #   N배송(도착보장)은 3,020이라 정액을 곱하면 과소계상된다(D-NAO-84 단가표).
+    #   패키지 내 단가가 갈리면 max(보수) — profit_calculator._add_shipment_cost와 같은 규칙.
+    #   shipping_cost_paid가 NULL인 행(백필 이전·판별 불가)은 1,900 폴백 = 종전 동작.
+    _pkg_key = func.coalesce(
+        func.nullif(func.json_extract(Order.raw_data, "$.productOrder.packageNumber"), ""),
+        Order.order_number,
+    )
+    _pkg = (
         db.query(
-            func.count(
-                func.distinct(
-                    func.coalesce(
-                        func.nullif(
-                            func.json_extract(Order.raw_data, "$.productOrder.packageNumber"),
-                            "",
-                        ),
-                        Order.order_number,
-                    )
-                )
-            )
+            _pkg_key.label("pkg"),
+            func.max(
+                func.coalesce(Order.shipping_cost_paid, _HANJIN_PER_SHIPMENT)
+            ).label("paid"),
         )
         .filter(
             Order.channel_id == _NAVER_CHANNEL_ID,
@@ -144,10 +147,11 @@ def sales_summary(
             Order.order_date >= start,
             Order.order_date <= end,
         )
-        .scalar()
-        or 0
+        .group_by(_pkg_key)
+        .subquery()
     )
-    total_logistics = _HANJIN_PER_SHIPMENT * shipment_count  # VAT 포함
+    shipment_count = int(db.query(func.count()).select_from(_pkg).scalar() or 0)
+    total_logistics = Decimal(str(db.query(func.sum(_pkg.c.paid)).scalar() or 0))  # VAT 포함
 
     # 검색광고(SA) RoAS — 디스플레이 제외(전환추적 없음).
     # 네이버 전환 보고서는 최근 ~15일만 보관 → 전환데이터가 있는 날짜로만 분모를 맞춰

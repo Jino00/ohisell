@@ -12,6 +12,7 @@ from sqlalchemy import and_, func, text
 from sqlalchemy.orm import Session
 
 from app.models import Channel, CoupangRgSettlementFee, Order, ProductChannelMapping, ProductMaster
+from app.services import order_delivery
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
 from app.services.coupang.revenue_fee_source import (
     COUPANG_3P_CODES,
@@ -198,8 +199,46 @@ def _coupang_3p_actual_fee(
     return actual_fee_by_order_option(db, oids)
 
 
-# 한진택배 주문(배송) 1건당 판매자 지급액 — 전 채널 동일, 고객 결제 여부 무관
+# 한진택배 주문(배송) 1건당 판매자 지급액 — 고객 결제 여부 무관.
+# ★네이버 N배송(도착보장)은 단가가 다르다(3,020) → 정액 상수를 직접 쓰지 말고
+#   _shipment_cost()를 통해 건별 단가를 받는다. 이 상수는 비-네이버 채널의 값이자
+#   판별 불가 시 폴백이며, order_delivery.SHIPPING_COST_NORMAL과 같은 값이다.
 HANJIN_PER_SHIPMENT = Decimal("1900")
+
+
+def _shipment_cost(o: Order) -> Decimal:
+    """물리 배송 1건에 우리가 지불하는 택배비(VAT 포함).
+
+    ★2026-08-03 배선: 종전에는 전 채널·전 건 1,900 정액이었다. 07-2x부터 네이버 주문의
+      절반 이상이 N배송(도착보장, 건당 3,020)으로 전환되면서 정액 가정이 배송비를
+      과소계상하게 됐다(라이브 실측 2026-07-27~08-02: 653패키지 400,960원 과소).
+      BEP 엔진(bep_calculator)은 이미 배송방식별 단가를 쓰고 있었으므로, 같은 계정에서
+      두 엔진이 서로 다른 배송비를 쓰던 상태를 여기서 해소한다.
+
+    단가 판별은 order_delivery(단일 진실 원천, D-NAO-84)에 위임한다 —
+    orders.shipping_cost_paid(주문 시점 스냅샷) 우선, 없으면 raw_data 파싱 폴백.
+    ★비-네이버 채널은 productOrder 키가 없어 항상 SHIPPING_COST_NORMAL(=1,900)이 나온다.
+      즉 쿠팡·cafe24의 동작은 바뀌지 않는다(라이브 실측: 채널 1·2·7 전 행 shipping_cost_paid NULL).
+    """
+    return order_delivery.order_shipping_cost(o)
+
+
+def _add_shipment_cost(bucket: dict, seen: dict, skey: tuple, o: Order) -> None:
+    """배송 1건(packageNumber·박스)당 택배비를 bucket["shipping"]에 **1회만** 더한다.
+
+    ★패키지 내 단가가 갈리면 **최댓값**을 쓴다(first-wins 아님). 라이브 실측으로는 한
+      패키지 안에서 배송방식이 섞인 경우가 0/2,505건이지만, N배송 전환이 진행 중이라
+      앞으로 생길 수 있다. 그때 낮은 쪽을 집으면 배송비가 과소계상돼 이익이 부풀려진다 —
+      최댓값이면 그 방향으로는 틀리지 않는다.
+    """
+    cost = _shipment_cost(o)
+    prev = seen.get(skey)
+    if prev is None:
+        seen[skey] = cost
+        bucket["shipping"] += cost
+    elif cost > prev:
+        seen[skey] = cost
+        bucket["shipping"] += cost - prev  # 이미 더한 만큼만 차액 보정
 
 
 def _raw(o: Order) -> dict:
@@ -418,7 +457,7 @@ def calculate_daily_trend(
     # 날짜별 집계
     daily: dict[str, dict] = {}
     manual_revenue_by_date: dict[str, Decimal] = {}  # 순이익 제외용 추적
-    seen_shipments: set[tuple] = set()  # 배송(packageNumber/박스)당 1,900 1회
+    seen_shipments: dict[tuple, Decimal] = {}  # 배송(packageNumber/박스)당 택배비 1회
     seen_deliv: set[tuple] = set()      # 쿠팡 배송수입 박스당 1회 (라인 복사 dedup)
     for o in orders:
         ch = channel_map.get(o.channel_id)
@@ -464,10 +503,8 @@ def calculate_daily_trend(
         # 수수료 — 상품매출 기준만 (배송비엔 수수료 미부과)
         bucket["commission"] += _line_commission(ch, o, product_rev, actual_fee)
 
-        # 판매자 배송비 — 한진 1,900/물리배송(packageNumber·박스). 배송당 1회만.
-        if skey not in seen_shipments:
-            seen_shipments.add(skey)
-            bucket["shipping"] += HANJIN_PER_SHIPMENT
+        # 판매자 배송비 — 물리배송(packageNumber·박스)당 1회, 배송방식별 실단가.
+        _add_shipment_cost(bucket, seen_shipments, skey, o)
 
         # VAT — 표시 매출(상품+배송) 기준
         bucket["vat"] += revenue * Decimal("10") / Decimal("110")
@@ -561,7 +598,7 @@ def calculate_channel_summary(
 
     # 채널별 집계
     by_channel: dict[int, dict] = {}
-    seen_shipments: set[tuple] = set()  # 배송(packageNumber/박스)당 1,900 1회
+    seen_shipments: dict[tuple, Decimal] = {}  # 배송(packageNumber/박스)당 택배비 1회
     seen_deliv: set[tuple] = set()      # 쿠팡 배송수입 박스당 1회 (라인 복사 dedup)
     for o in orders:
         ch = channel_map.get(o.channel_id)
@@ -599,10 +636,8 @@ def calculate_channel_summary(
 
         # 수수료 — 상품매출 기준만 (배송비엔 수수료 미부과)
         b["commission"] += _line_commission(ch, o, product_rev, actual_fee)
-        # 판매자 배송비 — 한진 1,900/물리배송(packageNumber·박스). 배송당 1회만.
-        if skey not in seen_shipments:
-            seen_shipments.add(skey)
-            b["shipping"] += HANJIN_PER_SHIPMENT
+        # 판매자 배송비 — 물리배송(packageNumber·박스)당 1회, 배송방식별 실단가.
+        _add_shipment_cost(b, seen_shipments, skey, o)
         # VAT — 표시 매출(상품+배송) 기준
         b["vat"] += revenue * Decimal("10") / Decimal("110")
 
@@ -782,8 +817,12 @@ def calculate_product_profit(
 
         # 배송 그룹 — 한진 1,900 & 고객배송수입을 라인 비례 배분
         skey = _shipment_key(ch, o)
-        g = ship_groups.setdefault(skey, {"lines": [], "deliv": ZERO})
+        g = ship_groups.setdefault(skey, {"lines": [], "deliv": ZERO, "cost": ZERO})
         g["lines"].append((pid, product_rev))
+        # 택배비는 배송당 1회 — 단가가 갈리면 최댓값(_add_shipment_cost와 같은 이유).
+        _c = _shipment_cost(o)
+        if _c > g["cost"]:
+            g["cost"] = _c
         dval = _delivery_income(ch, o)
         if dval:
             if _is_coupang(ch):
@@ -794,7 +833,7 @@ def calculate_product_profit(
 
         # 광고비는 아래에서 option_id → product_id 매핑으로 일괄 할당
 
-    # 배송 1건당 한진 1,900 + 고객배송수입을 그룹 내 라인 매출 비례 배분 (합 보존)
+    # 배송 1건당 택배비(배송방식별 실단가) + 고객배송수입을 그룹 내 라인 매출 비례 배분 (합 보존)
     def _alloc_to_lines(_lines: list, _amount: Decimal, _field: str) -> None:
         _total = sum((rev for _, rev in _lines), ZERO)
         _n = len(_lines)
@@ -812,7 +851,7 @@ def calculate_product_profit(
                 by_product[_pid][_field] += _share
 
     for _g in ship_groups.values():
-        _alloc_to_lines(_g["lines"], HANJIN_PER_SHIPMENT, "shipping")
+        _alloc_to_lines(_g["lines"], _g["cost"], "shipping")
         if _g["deliv"]:
             # 고객배송수입을 revenue와 shipping_revenue 양쪽에 동시 누적 (불변식: revenue = product + shipping)
             _alloc_to_lines(_g["lines"], _g["deliv"], "revenue")
