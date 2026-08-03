@@ -508,6 +508,11 @@ class CoupangAdOptionDaily(Base):
     sell_type: Mapped[str] = mapped_column(String(10), nullable=False)  # 3P / 2P / Retail
     ad_option_id: Mapped[str] = mapped_column(String(20), nullable=False, index=True)  # [8] 비용·노출 귀속
     conv_option_id: Mapped[str] = mapped_column(String(20), nullable=False, index=True)  # [10] 매출·주문 귀속
+    # 상품명([7]·[9]) — XLSX가 같은 행에 실어 오는 라벨. 1P Retail 옵션은 coupang_product_item
+    # (3P product_sync 산물)에 없어 조인으로 못 붙인다 → 적재 시점에 보존한다.
+    # nullable: 이 컬럼 추가(2026-08-03) 이전 행과, 이름이 빈 행이 있다. 표시는 옵션ID로 폴백.
+    ad_product_name: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+    conv_product_name: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
     impressions: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     clicks: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     ad_spend: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)

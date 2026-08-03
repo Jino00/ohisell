@@ -1112,6 +1112,7 @@ function RocketView({
                   <table className="min-w-full text-xs">
                     <thead>
                       <tr className="text-left text-gray-400 border-b border-gray-100">
+                        <th className="py-1 pr-2">상품명</th>
                         <th className="py-1 pr-2">옵션ID</th>
                         <th className="py-1 pr-2 text-right">광고비</th>
                         <th className="py-1 pr-2 text-right">클릭</th>
@@ -1125,7 +1126,14 @@ function RocketView({
                         const roas = adSpend > 0 ? ratioX((Number(opt.conversion_revenue) / adSpend).toString()) : "—";
                         return (
                           <tr key={opt.option_id} className="border-b border-gray-50 hover:bg-gray-50">
-                            <td className="py-1.5 pr-2 text-gray-700 font-mono">{opt.option_id}</td>
+                            {/* 상품명은 없을 수 있다(컬럼 추가 이전 적재분) → 표가 비지 않게 —로 폴백 */}
+                            <td
+                              className="py-1.5 pr-2 text-gray-700 max-w-[22rem] truncate"
+                              title={opt.product_name ?? undefined}
+                            >
+                              {opt.product_name || <span className="text-gray-300">—</span>}
+                            </td>
+                            <td className="py-1.5 pr-2 text-gray-500 font-mono">{opt.option_id}</td>
                             <td className="py-1.5 pr-2 text-right text-gray-600">{won(opt.ad_spend)}</td>
                             <td className="py-1.5 pr-2 text-right text-gray-500">{num(opt.clicks)}</td>
                             <td className="py-1.5 pr-2 text-right text-gray-600">{won(opt.conversion_revenue)}</td>

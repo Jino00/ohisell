@@ -925,6 +925,7 @@ export interface RocketOverview {
 
 export interface RocketAdOptionItem {
   option_id: string;
+  product_name?: string | null;  // 컬럼 추가(2026-08-03) 이전 적재분은 null → 표에선 옵션ID로 폴백
   ad_spend: string;              // Decimal → string
   impressions: number;
   clicks: number;

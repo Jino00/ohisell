@@ -442,6 +442,10 @@ def _detect_xlsx_format(headers: list) -> dict:
         # 옵션ID 컬럼(keyword 포맷에만 존재 — adGroup 포맷은 -1) → 트랙 D-9 3자 조인 광고축
         "ad_opt":   _find("광고집행 옵션"),       # 비용·노출·클릭 귀속 옵션ID
         "conv_opt": _find("전환매출발생 옵션"),    # 매출·주문 귀속 옵션ID
+        # 상품명 — 옵션ID의 사람이 읽는 라벨. 옵션ID 컬럼과 짝(있으면 같이 있다).
+        #   "광고집행 상품명"은 "광고집행 옵션ID"와 접두가 같으므로 **전체 어구로** 찾는다.
+        "ad_name":   _find("광고집행 상품명"),
+        "conv_name": _find("전환매출발생 상품명"),
     }
 
 
@@ -523,6 +527,18 @@ def ingest_coupang_ad_xlsx_content(
         except Exception:
             return Decimal("0")
 
+    def _cell_name(r: tuple, idx: int) -> str | None:
+        """상품명 셀 → 정리된 문자열(빈값·'-'는 None). 컬럼 길이(300) 초과분은 자른다."""
+        if idx == -1 or idx >= len(r):
+            return None
+        v = r[idx]
+        if v is None:
+            return None
+        s = str(v).strip()
+        if s in ("", "-"):
+            return None
+        return s[:300]
+
     def _norm_opt(v):
         """옵션ID 정규화: 94277472815.0 → '94277472815', 빈값('-'/None)은 None."""
         if v is None:
@@ -599,8 +615,15 @@ def ingest_coupang_ad_xlsx_content(
                 okey = (ad_date, vendor_id, sell_type, ad_opt, conv_opt)
                 if okey not in opt_agg:
                     opt_agg[okey] = {"impr": 0, "clicks": 0, "spend": Decimal("0"),
-                                     "orders": 0, "qty": 0, "rev": Decimal("0")}
+                                     "orders": 0, "qty": 0, "rev": Decimal("0"),
+                                     "ad_name": None, "conv_name": None}
                 o = opt_agg[okey]
+                # 상품명: 같은 키의 여러 행(키워드별)이 같은 이름을 반복한다. 빈 행이 섞일 수
+                #   있으므로 **처음 만난 non-null을 유지**한다(빈값으로 덮지 않는다).
+                if o["ad_name"] is None:
+                    o["ad_name"] = _cell_name(row, col["ad_name"])
+                if o["conv_name"] is None:
+                    o["conv_name"] = _cell_name(row, col["conv_name"])
                 o["impr"]   += _cell_int(row, col["impr"])
                 o["clicks"] += _cell_int(row, col["clicks"])
                 o["spend"]  += spend
@@ -664,6 +687,7 @@ def ingest_coupang_ad_xlsx_content(
             db.add(CoupangAdOptionDaily(
                 report_date=od, vendor_id=vid, sell_type=st,
                 ad_option_id=ad_opt, conv_option_id=conv_opt,
+                ad_product_name=o["ad_name"], conv_product_name=o["conv_name"],
                 impressions=o["impr"], clicks=o["clicks"], ad_spend=o["spend"],
                 orders=o["orders"], sales_qty=o["qty"], conversion_revenue=o["rev"],
             ))
@@ -692,6 +716,8 @@ def ingest_coupang_ad_xlsx_content(
         # ★옵션 합계를 따로 돌려준다: 계정 총액과의 대조가 이 경로의 유일한 자기검증이다
         #   (D-12 실측 기준 0.02% 차이 — 원인 미규명이라 계속 보고 있어야 한다).
         "option_spend": int(sum(o["spend"] for o in opt_agg.values())),
+        # 상품명이 실제로 붙은 행 수 — 0이면 헤더가 바뀌었거나 컬럼을 못 찾은 것이다(조용한 실패 방지).
+        "option_named_rows": sum(1 for o in opt_agg.values() if o["ad_name"]),
         "options_only": options_only,
         "date_from": date_from.isoformat(),
         "date_to": date_to.isoformat(),

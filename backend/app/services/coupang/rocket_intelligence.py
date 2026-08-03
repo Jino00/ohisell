@@ -138,6 +138,39 @@ def _agg_rocket_ad(db: Session, dfrom: date, dto: date,
     return _f(q.scalar())
 
 
+def _rocket_option_names(db: Session, dfrom: date, dto: date,
+                         vendor_id: str | None, option_ids: list[str]) -> dict[str, str]:
+    """옵션ID → 상품명(가장 최근 report_date의 non-null).
+
+    상품명은 개명될 수 있어 **최신 이름**을 쓴다(사람이 아는 이름). 화면에 실제로 나가는
+    상위 N개만 조회한다 — 전 옵션을 끌어오면 표시 한 줄 때문에 창 전체를 읽게 된다.
+    """
+    if not option_ids:
+        return {}
+    q = (
+        db.query(
+            CoupangAdOptionDaily.ad_option_id,
+            CoupangAdOptionDaily.report_date,
+            CoupangAdOptionDaily.ad_product_name,
+        )
+        .filter(
+            CoupangAdOptionDaily.report_date >= dfrom,
+            CoupangAdOptionDaily.report_date <= dto,
+            CoupangAdOptionDaily.sell_type == ROCKET_AD_SELL_TYPE,
+            CoupangAdOptionDaily.ad_option_id.in_(option_ids),
+            CoupangAdOptionDaily.ad_product_name.isnot(None),
+        )
+    )
+    if vendor_id is not None:
+        q = q.filter(CoupangAdOptionDaily.vendor_id == vendor_id)
+
+    # 오래된 것부터 훑어 덮어쓰면 마지막에 최신 이름이 남는다.
+    out: dict[str, str] = {}
+    for opt_id, _rdate, name in q.order_by(CoupangAdOptionDaily.report_date.asc()).all():
+        out[str(opt_id)] = name
+    return out
+
+
 def _rocket_ad_options(db: Session, dfrom: date, dto: date,
                        vendor_id: str | None, account_total: Decimal,
                        limit: int = 30) -> dict:
@@ -169,10 +202,13 @@ def _rocket_ad_options(db: Session, dfrom: date, dto: date,
     option_total = sum((_f(r[1]) for r in rows), Decimal("0"))
     diff = option_total - account_total
     top = sorted(rows, key=lambda r: _f(r[1]), reverse=True)[:limit]
+    names = _rocket_option_names(db, dfrom, dto, vendor_id, [str(r[0]) for r in top])
     return {
         "options": [
             {
                 "option_id": str(r[0]),
+                # 상품명은 없을 수 있다(컬럼 추가 이전 적재분·빈 셀) → 프론트가 옵션ID로 폴백한다.
+                "product_name": names.get(str(r[0])),
                 "ad_spend": _f(r[1]),
                 "impressions": int(r[2] or 0),
                 "clicks": int(r[3] or 0),

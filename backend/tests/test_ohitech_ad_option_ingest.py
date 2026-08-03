@@ -40,9 +40,11 @@ _HEADER = [
 ]
 
 
-def _row(day: str, opt: str, spend: float, impr: int = 10, clicks: int = 1):
+def _row(day: str, opt: str, spend: float, impr: int = 10, clicks: int = 1,
+         name: str | None = None):
     r = [None] * len(_HEADER)
     r[0], r[2] = float(day), "Retail"
+    r[7] = r[9] = name
     r[8] = r[10] = float(opt)
     r[13], r[14], r[15] = impr, clicks, spend
     r[17], r[20], r[23] = 0, 0, 0
@@ -125,6 +127,45 @@ class TestOptionsOnlyDoesNotTouchMoney:
         with pytest.raises(HTTPException) as e:
             ingest_coupang_ad_xlsx_content(buf.getvalue(), _FILE, db, options_only=True)
         assert e.value.status_code == 422
+
+
+class TestProductName:
+    """옵션ID만 있는 표는 사람이 못 읽는다 — XLSX가 실어 온 이름을 적재 시점에 보존한다."""
+
+    def test_상품명이_적재된다(self, db, rocket_env):
+        ingest_coupang_ad_xlsx_content(
+            _xlsx([_row("20260727", "70252569329", 8000, name="오하이 강화유리 2매")]),
+            _FILE, db, options_only=True)
+        row = db.query(CoupangAdOptionDaily).one()
+        assert row.ad_product_name == "오하이 강화유리 2매"
+        assert row.conv_product_name == "오하이 강화유리 2매"
+
+    def test_이름_없는_행도_적재된다(self, db, rocket_env):
+        """★이름은 부수 정보다 — 없다고 금액 행을 잃으면 안 된다."""
+        result, _f, _t = ingest_coupang_ad_xlsx_content(
+            _xlsx([_row("20260727", "70252569329", 8000)]), _FILE, db, options_only=True)
+        row = db.query(CoupangAdOptionDaily).one()
+        assert row.ad_product_name is None
+        assert row.ad_spend == Decimal("8000")
+        assert result["option_named_rows"] == 0, "이름 적재 실패를 세어서 드러내야 한다"
+
+    def test_빈_이름이_있는_이름을_덮지_않는다(self, db, rocket_env):
+        """같은 옵션의 키워드 행 중 일부만 이름이 비는 경우 — non-null이 이긴다."""
+        rows = [_row("20260727", "70252569329", 3000),                      # 이름 없음
+                _row("20260727", "70252569329", 5000, name="오하이 필름")]   # 이름 있음
+        result, _f, _t = ingest_coupang_ad_xlsx_content(
+            _xlsx(rows), _FILE, db, options_only=True)
+        row = db.query(CoupangAdOptionDaily).one()
+        assert row.ad_product_name == "오하이 필름"
+        assert row.ad_spend == Decimal("8000"), "금액 합산은 그대로여야 한다"
+        assert result["option_named_rows"] == 1
+
+    def test_대시는_이름이_아니다(self, db, rocket_env):
+        """쿠팡 XLSX는 결측을 '-'로 준다(옵션ID와 같은 관례) — 그걸 상품명으로 저장하지 않는다."""
+        ingest_coupang_ad_xlsx_content(
+            _xlsx([_row("20260727", "70252569329", 8000, name="-")]),
+            _FILE, db, options_only=True)
+        assert db.query(CoupangAdOptionDaily).one().ad_product_name is None
 
 
 class TestMoneyPathGuard:

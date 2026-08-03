@@ -96,3 +96,49 @@ class TestRocketAdOptionsIsDisplayOnly:
         from app.services.coupang.rocket_intelligence import _rocket_ad_options
         blk = _rocket_ad_options(db, D, D, VENDOR, Decimal("0"))
         assert blk["reconciliation"]["diff_pct"] is None
+
+
+class TestRocketAdOptionProductName:
+    """옵션ID 숫자만으로는 사람이 상품을 못 알아본다 — 표에 이름을 함께 낸다."""
+
+    def test_이름이_있으면_붙는다(self, db):
+        from app.services.coupang.rocket_intelligence import _rocket_ad_options
+        db.query(CoupangAdOptionDaily).filter_by(ad_option_id="1001").update(
+            {"ad_product_name": "오하이 강화유리 2매"})
+        db.commit()
+        blk = _rocket_ad_options(db, D, D, VENDOR, Decimal("5449504"))
+        assert blk["options"][0]["product_name"] == "오하이 강화유리 2매"
+
+    def test_이름이_없으면_None이고_행은_남는다(self, db):
+        """★컬럼 추가 이전 적재분은 이름이 없다 — 그 행이 표에서 사라지면 안 된다."""
+        from app.services.coupang.rocket_intelligence import _rocket_ad_options
+        blk = _rocket_ad_options(db, D, D, VENDOR, Decimal("5449504"))
+        assert len(blk["options"]) == 1
+        assert blk["options"][0]["product_name"] is None
+
+    def test_개명되면_최신_이름을_쓴다(self, db):
+        """상품명은 바뀔 수 있다 — 사람이 지금 아는 이름을 보여준다."""
+        from app.services.coupang.rocket_intelligence import _rocket_ad_options
+        older = date(2026, 7, 20)
+        db.query(CoupangAdOptionDaily).filter_by(ad_option_id="1001").update(
+            {"ad_product_name": "새 이름"})
+        db.add(CoupangAdOptionDaily(
+            report_date=older, vendor_id=VENDOR, sell_type="Retail",
+            ad_option_id="1001", conv_option_id="1001", ad_product_name="옛 이름",
+            impressions=1, clicks=1, ad_spend=Decimal("100"),
+            orders=0, sales_qty=0, conversion_revenue=Decimal("0")))
+        db.commit()
+        blk = _rocket_ad_options(db, older, D, VENDOR, Decimal("5449504"))
+        assert blk["options"][0]["product_name"] == "새 이름"
+
+    def test_이름_조회가_3P를_끌어오지_않는다(self, db):
+        """이름 조회는 별도 쿼리다 — 본 쿼리와 같은 스코프(1P·vendor)를 지켜야 한다."""
+        from app.services.coupang.rocket_intelligence import _rocket_ad_options
+        db.add(CoupangAdOptionDaily(
+            report_date=D, vendor_id=VENDOR, sell_type="3P",
+            ad_option_id="1001", conv_option_id="1001", ad_product_name="3P 이름 오염",
+            impressions=1, clicks=1, ad_spend=Decimal("1"),
+            orders=0, sales_qty=0, conversion_revenue=Decimal("0")))
+        db.commit()
+        blk = _rocket_ad_options(db, D, D, VENDOR, Decimal("5449504"))
+        assert blk["options"][0]["product_name"] is None, "3P 행의 이름이 1P 표에 샜다"
