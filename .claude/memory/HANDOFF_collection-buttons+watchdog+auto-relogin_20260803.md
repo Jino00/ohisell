@@ -1,6 +1,7 @@
 # 세션 인수인계: 수집 배너 버튼 수정 + 신선도 워치독 + 페처 세션 자가 복구
 
-> 저장일시: 2026-08-03 12:45 KST · main `f39203b` 기준(+PR #175 미병합)
+> 저장일시: 2026-08-03 12:45 KST · main `f39203b` 기준(+PR #175, 이후 8/3 오후 라이브 검증
+> 거쳐 병합 완료 = main `e55e7e2`, 갱신 시각 아래 §2 참조)
 > 앞 HANDOFF: `HANDOFF_ohisell-promo-pnl-layer+rg-selfheal-complete_20260728.md`
 > 시작점: Jino "SellC에 나오는 3가지 경고가 항상 나온다. 어떻게 해결할 수 있어?"
 
@@ -10,7 +11,7 @@
 - **★codex 쿼터 소진 — 리셋 `2026-08-09 16:16`.** 오늘 PR #169·#171 리뷰로 남은 분을 다 썼다.
   그때까지 **Jino 승인 대체 경로**(신선 컨텍스트 적대적 Claude/Opus 리뷰어 1기, 07-18 승인)를 쓴다.
   실제로 PR #175에서 그 경로가 **codex가 못 잡았을 P1 2건을 잡았다** — 대체재가 아니라 유효한 수단이다.
-- 활성 워크트리: `.claude/worktrees/collection-watchdog`(#171, 병합됨) · `.claude/worktrees/fetcher-auto-relogin`(#175, 미병합)
+- 활성 워크트리: `.claude/worktrees/collection-watchdog`(#171, 병합됨) · `.claude/worktrees/fetcher-auto-relogin`(#175, **병합됨, main `e55e7e2`**)
 
 ## 2. 이번 세션 완료 목록
 
@@ -42,14 +43,68 @@ Jino 보고 **"버튼을 눌러도 아무 일이 일어나지 않는다"**의 �
 - codex 1R: **P1 3 + P2 2, 전건 수용**(아래 §3 참조).
 - 라이브: 11:19 실행 시 `notify: ['supplier_hub']` + **Slack 실제 발송**(진짜 고장 탐지).
 
-### ⏳ PR #175 — 페처 세션 자가 복구 (배포됨, **미병합** — 라이브 증거 대기)
+### ✅ PR #175 — 페처 세션 자가 복구 (병합 완료, main `e55e7e2`)
 페처 4종 중 **오픽스 광고 하나만** 자동 재로그인을 갖고 있었다. 나머지는 세션이 풀리면 rc=3으로
-멈춰 사람을 불렀다 — **그날 하루에만 Jino가 3번 로그인**(09:31·10:07·11:11, 오하이테크 세션 수명 ≈2h).
+멈춰 사람을 불렀다 — **그날 하루에만 Jino가 3번 로그인**(09:31·10:07·11:11).
 - `tools/coupang_auth.py` 신설 = 오픽스 구현의 일반화. 3층: ①SSO 재발급(비번 없음) →
   ②Keychain 자동입력 → ③macOS 알림.
 - `tools/install_local_runtime.sh`에 공용 모듈 복사를 **페처 루프보다 앞**에 추가(없으면 import
   실패 크래시 루프 — LESSONS #54 기전).
 - 적대적 리뷰 1R: **P1 2 + P2 3 수용**, 추가로 구조 위험 1건 자발 수정(§3).
+- **★8/3 오후 라이브 검증에서 2층(Keychain)이 처음으로 실제 발동했고 그 자리에서 죽었다.**
+  원인 3개를 실측으로 규명해 고쳤다(아래) + 적대적 리뷰가 추가로 P1 2건을 잡았다(LESSONS #85~88).
+  최종 라이브 합격 후 병합.
+
+#### 라이브가 드러낸 결함 3건 (8/3 오후, `.env` 아닌 라이브 실측)
+1. **진입 클라이언트 오류** — 오하이테크(A01029796)는 쿠팡 **로켓배송(1P) 공급자** 계정인데,
+   오픽스에서 그대로 가져온 `_cap_client=WING` 진입을 썼다. WING으로 들어가면 광고센터
+   '역할 선택' 화면(마켓플레이스·로켓배송·대행사 카드 3장)에 멈추고 입력칸이 0개다 —
+   supplier-hub realm 세션이 살아 있는데도 WING 진입은 튕겼다(13:52 실측). 올바른 체인(document
+   요청 추적으로 실측): `/user/login?_cap_client=SUPPLIERHUB&_cap_market=KR` →
+   `/login_sxauth?client=SUPPLIERHUB&market=KR` →
+   `xauth.coupang.com/auth/realms/seller?client_id=supplier-hub&redirect_uri=advertising.coupang.com/keycloak_callback`
+   → `/keycloak_callback` → 대시보드(비번 없이 관통). ★`SUPPLIER`(오타 아닌 실제 다른 값)도
+   `_cap_market` 누락도 역할 선택 화면으로 되돌아간다.
+2. **폼 셀렉터가 id 의존** — supplier-hub 테마 keycloak 폼에는 id가 하나도 없다:
+   `input[name=username]` / `input[name=password]`, 제출은 id 없는 `button[type=submit]`.
+   오픽스에서 가져온 `#username`/`#kc-login`은 전부 빗나가 13:34:00에 `wait_for_selector`
+   15초 타임아웃으로 죽었다.
+3. **권위값 검사가 다음 층을 망가뜨렸다** — `ensure_session`이 ①실패 후 부르는 `verify`(앱 세션
+   검사)는 '대시보드에 실제로 들어가지는지'라 본질적으로 goto한다. 그 이동이 ①이 띄워둔
+   keycloak 폼을 화면에서 치웠고, ②는 입력칸 없는 화면에서 15초 기다리다 죽었다(13:58:00).
+   → ②는 로그인 진입으로 **재진입한 뒤** 채우도록 수정.
+
+#### 적대적 리뷰(codex 쿼터 소진 대체 경로, 신선 컨텍스트 Opus 1기)가 잡은 P1 2건 — 전건 수용
+- **거짓 OK(수정이 만든 신규 회귀)**: `_goto_reset`이 goto 실패를 삼켜 `page.url`이 stale로 남으면,
+  직전 verify가 남긴 대시보드 URL 때문에 **아무 데도 안 가고 비번도 안 넣고 OK**가 됐다.
+  `ensure_session`은 `res==OK`면 단락평가로 verify를 호출조차 안 해 ③알림까지 건너뛴다 →
+  사람은 아무 신호도 못 받는다.
+- **비밀번호가 회원가입 폼에 들어갈 수 있었다**: keycloak 가입 폼에도 `name=password`가 있고,
+  playwright의 `page.fill`/`page.click`은 strict가 아니라 **첫 매치**를 쓴다. 제출만
+  `form:has(...)`로 가둔 것은 장식이었고 fill은 스코프가 아예 없었다. → 로그인 폼을 action
+  (`login-actions/authenticate`, keycloak 계약)으로 **하나로 특정**해 입력·제출을 전부 그 안에서
+  수행. 후보가 2개 이상이면 채택하지 않고 시끄럽게 실패.
+
+#### 부수 실측 (중요)
+- **`KEYCLOAK_IDENTITY`는 세션 쿠키**다 — Chrome 프로필의 Cookies DB에 없다(영속: `KEYCLOAK_SESSION`
+  12h, `aid` 1h / 비영속: `AUTH_SESSION_ID`, `CAP_AUTH_SESSION`). 페처는 run마다 Chrome을 닫으므로
+  **①은 사실상 항상 실패하고 ②(비번 로그인)가 상시 경로**가 된다. "오하이테크 세션 수명
+  ≈2시간"의 정체는 시간이 아니라 **Chrome 재기동**이었다.
+- **CDP 웹소켓 물림**: 장시간 떠 있던 Chrome(9224, 4시간)에서 HTTP `/json/version`은 64ms로
+  응답하는데 `connect_over_cdp`의 **WS 핸드셰이크만 무한 대기**했다. 페처가 여기서 180초를 태워
+  rc=1로 끝나 자가 복구 로직은 손도 못 댔다. 해결=그 Chrome 재기동(SIGTERM).
+- prod 일시 502(13:12) — 병행 세션 배포 중 재시작으로 추정. 판매분석·프로모션 push 실패했으나
+  13:07 회차가 이미 성공해 데이터 유실 없음.
+
+#### 라이브 합격 증거 (수정본, 2회 연속)
+```
+14:22:12 세션 만료 감지 — 자가 복구 시도(SSO → Keychain 순)
+14:23:02 SSO로 복구 안 됨 — Keychain 자동 로그인 시도
+14:23:18 자동 로그인 성공 — 목적지 착지 / 세션 자가 복구 성공 — 수집 계속
+14:23:19 성공: A01029796 Retail 29일 push → rc=0
+prod refresh-status: last_success_at 14:23:19, status green
+```
+사람 개입 0. 같은 경로로 14:04:59에도 성공. 테스트 28 passed, 변이 5건 전부 잡힘 확인.
 
 ## 3. 확정된 결정사항 / 리뷰가 잡은 것
 
@@ -100,20 +155,21 @@ Jino 보고 **"버튼을 눌러도 아무 일이 일어나지 않는다"**의 �
 | `backend/app/services/coupang/collection_watchdog.py` | 신선도 워치독(알림 + 위급 시 자동 갱신) |
 | `backend/app/services/coupang/collection_status.py` | 4스트림 신선도 집계(+`requested_at` 노출) |
 | `tools/coupang_auth.py` | 세션 자가 복구 공용(①SSO ②Keychain ③알림) — **미병합** |
-| `tools/setup_fetcher_autologin.sh` | ②층 활성화(계정별 1회 실행) — **미병합·미실행** |
+| `tools/setup_fetcher_autologin.sh` | ②층 활성화(계정별 1회 실행) — **불필요해짐**(ohitech Keychain 등록이 이미 완료돼 있었음, §6 참조) |
 | `tools/install_local_runtime.sh` | Mac 데몬 로컬 사본 설치(공용 모듈 복사 포함) |
 
 ## 5. 알려진 이슈 / 주의사항
 
-- **★PR #175는 수정본의 성공 경로가 라이브 미증명**이다. 12:20·12:32 두 회차 모두 keycloak이
-  진짜 만료라 재현 조건이 안 나왔고, `verify` 로직은 개입 기회조차 없었다. **"고쳤으니 된다"고
-  말하면 안 된다.** 유일한 성공 증거(11:55, 13초 복구+수집 완주)는 **수정 전 코드**의 것이다.
-- **★2층(Keychain)이 아직 비활성** — `~/.ohisell_ohitech_ad.json`에 `ohitech_ad_login_id`,
-  `~/.ohisell_rocket_fetcher.json`에 `supplier_login_id`가 **없다**. Jino가
-  `tools/setup_fetcher_autologin.sh`를 1회 실행해야 켜진다. **지금 keycloak이 죽어 있는 상태가
-  오히려 ②의 이상적 시험 조건** — 등록 직후 갱신을 쏘면 바로 라이브 증거를 얻는다.
-- **오하이테크 세션 수명이 짧다(≈2시간)** — 오늘 세 번 끊겼다. "keycloak 12h"는 오픽스 WING
-  맥락의 수치이고 supplier-hub에도 적용되는지는 **확인 안 됨**.
+- **[정정] PR #175는 병합 완료·라이브 합격 증거 확보됨(8/3 오후, main `e55e7e2`)**. 14:22~14:23
+  세션 만료 → SSO 실패 → Keychain 자동 로그인 성공 → 수집 계속, 2회 연속(14:04:59도 동일 경로
+  성공). §2의 "라이브가 드러낸 결함 3건"을 실측·수정한 뒤의 결과다.
+- **[정정] "2층(Keychain) 설정은 완비, 라이브 검증만 남았다"는 오전 기록이었고, 오후 자연
+  발동에서 §2의 결함 3개가 드러났다** — 발동 자체는 됐으나 진입 클라이언트 오류·id 셀렉터
+  부재·verify의 navigation 부작용으로 죽었다. 수정 후 재발동해 합격.
+- **[정정] "오하이테크 세션 수명이 짧다(≈2시간)"는 오독이었다.** `KEYCLOAK_IDENTITY`는
+  세션 쿠키(브라우저 프로세스에 묶임)라 페처가 run마다 Chrome을 닫으면 항상 사라진다.
+  Jino가 겪은 "≈2시간마다 끊김"의 정체는 시간 경과가 아니라 **Chrome 재기동 빈도**였다.
+  "keycloak 12h"는 여전히 오픽스 WING 맥락 수치이고 supplier-hub 적용 여부는 확인 안 됨(별건).
 - **Slack 도착 여부 미확인** — 워치독이 11:19·11:32에 `sent: True`로 발송했으나 Jino 확인 전.
   안 왔다면 웹훅 채널(`NAVER_SLACK_WEBHOOK_URL` 폴백 중, `COUPANG_SLACK_WEBHOOK_URL` 미설정) 점검.
 - **비활성 스케줄러 잡 3종**(`sync_coupang_ad_cost`·`sync_coupang_rg_settlement`·
@@ -126,18 +182,27 @@ Jino 보고 **"버튼을 눌러도 아무 일이 일어나지 않는다"**의 �
 
 ## 6. 다음에 할 작업
 
-1. **[최우선] `tools/setup_fetcher_autologin.sh` 실행 → ②층 라이브 증거 확보 → PR #175 병합**
-   비번은 스크립트가 프롬프트로 받는다(모델이 입력하지 않는다).
-2. **Phase B — 오하이테크 광고비 옵션 귀속**. `coupang_ad_option_daily`에 A01029796 **0행**
+**PR #175 병합 완료(main `e55e7e2`)에 따른 남은 미결:**
+1. `KEYCLOAK_IDENTITY` 세션 쿠키 문제 → 매 갱신마다 비번 로그인 경로를 탄다. Chrome 상주
+   유지 또는 오픽스식 `storage_state` 파일 보존이 대안(별건).
+2. ohitech `DASH_URL`이 아직 `_cap_client=WING` — 데이터 fetch는 정상이나 verify가 이 URL로
+   재진입하므로 false negative 여지(방향은 안전=사람 호출 쪽으로 치우침).
+3. 로켓 공급자허브의 ②(Keychain) 재진입 수정은 라이브 미검증(구조상 ①의 이동을 그대로
+   반복하므로 동치로 판단했으나 별도 확인은 안 함).
+4. codex 쿼터 리셋 `2026-08-09 16:16` — 리셋 후 소급 교차 리뷰 정상화.
+5. `tools/setup_fetcher_autologin.sh` 실행 항목은 **불필요해짐** — Keychain 등록(ohitech)은
+   이미 돼 있었고 그게 8/3 오후 ②층 성공의 전제였다.
+
+**이전부터 이어지는 미결:**
+6. **Phase B — 오하이테크 광고비 옵션 귀속**. `coupang_ad_option_daily`에 A01029796 **0행**
    (오픽스 3P만 6,177행). ★"배선하면 됨"이 아니라 **가부 미확정**이다 —
    `tools/ohitech_billboard_recon.py`(07-11 작성, 결론 없이 방치)가 "1P가 옵션 granularity
-   Billboard를 주는가"를 검증하려던 S0 정찰이다. 세션 만료로 오늘 실행이 막혔다
+   Billboard를 주는가"를 검증하려던 S0 정찰이다. 세션 만료로 실행이 막혔던 적 있음
    (`[S0][세션만료]`). 자동 복구가 붙었으니 재시도 가능. 붙으면 프로모션 순이익이 N/A→숫자.
-3. **Phase C — 08-20 판매분석 무료체험 종료 대응**. 유료 전환은 **Jino 판단**, 모델은 판단
+7. **Phase C — 08-20 판매분석 무료체험 종료 대응**. 유료 전환은 **Jino 판단**, 모델은 판단
    재료(끊기면 뭐가 죽는지·대체 경로·D-CPP-5 배선 실효)를 만든다.
-4. RG 부분실패 오탐(별건 세션 진행 중, chip `task_41881732`)
-5. **codex 08-09 리셋 후** 소급 교차 리뷰 정상화
-6. 수집 자동성 잔여 — 비활성 크론 3종 처리 방침, 간헐 403 규명
+8. RG 부분실패 오탐(별건 세션 진행 중, chip `task_41881732`)
+9. 수집 자동성 잔여 — 비활성 크론 3종 처리 방침, 간헐 403 규명
 
 ## 7. 새 세션 시작 프롬프트
 

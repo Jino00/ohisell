@@ -1,0 +1,423 @@
+# test_naver_ad_modifications_router.py — 「수정 사항」 화면 HTTP 왕복.
+# 원칙22: SA 단위테스트는 라우터를 안 거치므로 라우터 레이어 500을 못 잡는다(P2-S2 사고 전례).
+#
+# 커버(계약 그대로):
+#   · 두 원천 union이 날짜 구간으로 정확히 잘리는가
+#   · 주체 판정 4규칙 각각(external_* → 대행사 / 우리 실집행 → 우리 자동화 /
+#     agency_op 전량 → 대행사 / 정정이 최우선)
+#   · 정정이 **원천을 안 건드리는가**(정정 후 원천 행 불변을 SELECT로 단언)
+#   · occurred_at 없는 행의 날짜 귀속(감지일) vs 있는 행의 날짜 귀속(실제 발생일)
+#   · 이전값 불명을 0/빈칸으로 채우지 않는가 · 소급 백필 표시
+from __future__ import annotations
+
+import json
+from datetime import date, datetime
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from app.database import Base, get_db
+from app.main import app
+from app.models import NaverAgencyOp, NaverChangeActorOverride, NaverChangeLog, NaverEntity
+from app.services.naver_ad import change_actor
+
+# 라이브 실측 배경(2026-07-30): 우리 10:12 17프로 소재 입찰 인하 + 대행사 소재 조작 3건.
+DAY = date(2026, 7, 30)
+DETECTED_DAY = date(2026, 8, 3)  # 백필이 남긴 감지일 — 여기로 잡으면 07-30에 안 보인다
+
+
+@pytest.fixture
+def client_and_session():
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    TestingSession = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+    def _override_get_db():
+        db = TestingSession()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    app.dependency_overrides[get_db] = _override_get_db
+    session_for_seed = TestingSession()
+    yield TestClient(app), session_for_seed
+    session_for_seed.close()
+    app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def client(client_and_session):
+    return client_and_session[0]
+
+
+@pytest.fixture
+def db(client_and_session):
+    return client_and_session[1]
+
+
+def _bid(amount: int) -> str:
+    """소재(ad) grain 입찰 JSON — 실측 스키마는 최상위가 아니라 `adAttr.bidAmt`다."""
+    return json.dumps({"nccAdId": "nad-1", "adAttr": {"bidAmt": amount}})
+
+
+def _seed_change_log(db, *, action="update_bid", at=datetime(2026, 7, 30, 10, 12, 9),
+                     before=_bid(2730), after=_bid(2330), campaign_id="cmp-1",
+                     entity_type="ad", entity_id="nad-1", dry_run=False, rationale=None):
+    row = NaverChangeLog(
+        entity_type=entity_type, entity_id=entity_id, campaign_id=campaign_id,
+        action=action, before_value=before, after_value=after,
+        rationale=rationale, dry_run=dry_run, changed_at=at,
+    )
+    db.add(row)
+    db.commit()
+    return row
+
+
+def _seed_agency_op(db, *, op_date=DETECTED_DAY, occurred_at=datetime(2026, 7, 30, 11, 28, 36),
+                    op_type="bid_change", before="2330",
+                    after="1890 [BACKFILL 2026-08-03: 소급 백필, 정규 탐지 아님]",
+                    entity_type="ad", entity_id="nad-2", campaign_id="cmp-1",
+                    optimizer="none"):
+    row = NaverAgencyOp(
+        op_date=op_date, detected_at=datetime(2026, 8, 3, 12, 53, 57),
+        occurred_at=occurred_at, entity_type=entity_type, entity_id=entity_id,
+        campaign_id=campaign_id, optimizer=optimizer, op_type=op_type,
+        before_value=before, after_value=after, is_exception=True,
+    )
+    db.add(row)
+    db.commit()
+    return row
+
+
+def _get(client, **params):
+    params.setdefault("date_from", DAY.isoformat())
+    params.setdefault("date_to", DAY.isoformat())
+    r = client.get("/api/naver/ad/modifications", params=params)
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+# ── union + 날짜 구간 ────────────────────────────────────────────────
+
+
+def test_union_of_two_sources_in_one_list(client, db):
+    _seed_change_log(db)
+    _seed_agency_op(db)
+    data = _get(client)
+    assert data["total"] == 2
+    assert {r["source"] for r in data["rows"]} == {"change_log", "agency_op"}
+
+
+def test_window_clips_both_sources(client, db):
+    _seed_change_log(db, at=datetime(2026, 7, 29, 23, 59, 59))  # 구간 밖(전날)
+    _seed_change_log(db, at=datetime(2026, 7, 30, 0, 0, 0))     # 구간 안(첫 순간)
+    _seed_change_log(db, at=datetime(2026, 7, 31, 0, 0, 0))     # 구간 밖(다음 날 자정)
+    _seed_agency_op(db, occurred_at=datetime(2026, 7, 29, 20, 0, 0))  # 구간 밖
+    _seed_agency_op(db, occurred_at=datetime(2026, 7, 30, 23, 59, 59))  # 구간 안(마지막 순간)
+    data = _get(client)
+    assert data["total"] == 2, [r["occurred_at"] for r in data["rows"]]
+
+
+def test_rows_sorted_by_occurrence_desc(client, db):
+    _seed_change_log(db, at=datetime(2026, 7, 30, 10, 12, 9))
+    _seed_agency_op(db, occurred_at=datetime(2026, 7, 30, 15, 39, 5))
+    rows = _get(client)["rows"]
+    assert [r["source"] for r in rows] == ["agency_op", "change_log"]
+
+
+# ── 주체 판정 4규칙 ──────────────────────────────────────────────────
+
+
+def test_rule1_external_detection_defaults_to_agency(client, db):
+    """① change_log의 external_* 4종 = 외부가 바꾼 걸 우리가 관측 → 대행사."""
+    _seed_change_log(db, action="external_bid_change")
+    row = _get(client)["rows"][0]
+    assert row["actor"] == change_actor.ACTOR_AGENCY
+    assert row["actor_label"] == "대행사"
+
+
+def test_rule2_our_execution_is_ours(client, db):
+    """② change_log의 나머지(우리 실집행) = 우리 자동화."""
+    _seed_change_log(db, action="update_bid")
+    row = _get(client)["rows"][0]
+    assert row["actor"] == change_actor.ACTOR_OURS
+    assert row["actor_label"] == "우리 자동화"
+
+
+def test_rule3_agency_op_is_always_agency_regardless_of_optimizer(client, db):
+    """③ agency_op은 전량 외부다. ★optimizer 컬럼을 보면 안 된다 — 그건 '누가 만들었나'가
+    아니라 '그 캠페인의 관리주체 설정'이라, ours로 설정된 캠페인을 대행사가 만진 사건이
+    **우리 것**으로 뒤집힌다."""
+    _seed_agency_op(db, optimizer="ours")
+    row = _get(client)["rows"][0]
+    assert row["actor"] == change_actor.ACTOR_AGENCY
+    assert row["actor_auto"] == change_actor.ACTOR_AGENCY
+
+
+def test_rule4_override_wins_over_auto(client, db):
+    """④ 정정이 있으면 그것이 최우선. 자동 판정은 지워지지 않고 actor_auto로 남는다."""
+    src = _seed_change_log(db, action="update_bid")
+    r = client.put(
+        f"/api/naver/ad/modifications/change_log/{src.id}/actor",
+        json={"actor": "jino", "note": "내가 콘솔에서 직접"},
+    )
+    assert r.status_code == 200, r.text
+    row = _get(client)["rows"][0]
+    assert row["actor"] == "jino"
+    assert row["actor_label"] == "Jino"
+    assert row["actor_auto"] == change_actor.ACTOR_OURS  # 자동 판정은 보존
+    assert row["corrected"] is True
+    assert row["correction_note"] == "내가 콘솔에서 직접"
+
+
+def test_override_survives_refetch_and_applies_to_agency_op_too(client, db):
+    op = _seed_agency_op(db)
+    client.put(f"/api/naver/ad/modifications/agency_op/{op.id}/actor", json={"actor": "jino"})
+    assert _get(client)["rows"][0]["actor"] == "jino"
+    assert _get(client)["rows"][0]["actor"] == "jino"  # 새로고침(재조회) 후에도 유지
+
+
+def test_actor_filter_uses_final_actor_not_auto(client, db):
+    """정정했는데 원래 버킷에 계속 남아 있으면 정정이 무의미하다."""
+    src = _seed_change_log(db, action="update_bid")
+    client.put(f"/api/naver/ad/modifications/change_log/{src.id}/actor", json={"actor": "agency"})
+    assert _get(client, actor="ours")["total"] == 0
+    assert _get(client, actor="agency")["total"] == 1
+
+
+def test_by_actor_distribution_counts_final_actor(client, db):
+    _seed_change_log(db, action="update_bid")
+    _seed_change_log(db, action="external_bid_change", at=datetime(2026, 7, 30, 7, 35, 0))
+    _seed_agency_op(db)
+    dist = _get(client)["by_actor"]
+    assert dist["ours"] == 1
+    assert dist["agency"] == 2
+    assert dist["jino"] == 0
+
+
+# ── 정정이 원천을 오염시키지 않는다 ─────────────────────────────────
+
+
+def test_override_does_not_mutate_change_log_source_row(client, db):
+    """★계약: 정정은 원천을 덮어쓰지 않는다. 덮어쓰면 탐지 산출물과 사람 주석이 구분 불가."""
+    src = _seed_change_log(db, action="external_bid_change")
+    snapshot = (src.action, src.before_value, src.after_value, src.dry_run, src.changed_at)
+
+    client.put(f"/api/naver/ad/modifications/change_log/{src.id}/actor", json={"actor": "jino"})
+
+    db.expire_all()
+    after = db.query(NaverChangeLog).filter(NaverChangeLog.id == src.id).one()
+    assert (after.action, after.before_value, after.after_value, after.dry_run,
+            after.changed_at) == snapshot
+    # 정정은 전용 테이블에만 쌓인다.
+    ov = db.query(NaverChangeActorOverride).one()
+    assert (ov.source, ov.source_id, ov.actor) == ("change_log", src.id, "jino")
+
+
+def test_override_does_not_mutate_agency_op_source_row(client, db):
+    op = _seed_agency_op(db)
+    snapshot = (op.op_date, op.occurred_at, op.optimizer, op.op_type,
+                op.before_value, op.after_value)
+
+    client.put(f"/api/naver/ad/modifications/agency_op/{op.id}/actor", json={"actor": "ours"})
+
+    db.expire_all()
+    after = db.query(NaverAgencyOp).filter(NaverAgencyOp.id == op.id).one()
+    assert (after.op_date, after.occurred_at, after.optimizer, after.op_type,
+            after.before_value, after.after_value) == snapshot
+
+
+def test_override_upsert_then_clear_returns_to_auto(client, db):
+    """되돌리기가 없으면 오타 정정이 영구화된다(일방통행 문 금지)."""
+    src = _seed_change_log(db, action="update_bid")
+    client.put(f"/api/naver/ad/modifications/change_log/{src.id}/actor", json={"actor": "agency"})
+    assert _get(client)["rows"][0]["actor"] == "agency"
+
+    r = client.put(f"/api/naver/ad/modifications/change_log/{src.id}/actor", json={"actor": None})
+    assert r.status_code == 200, r.text
+    row = _get(client)["rows"][0]
+    assert row["actor"] == change_actor.ACTOR_OURS
+    assert row["corrected"] is False
+    assert db.query(NaverChangeActorOverride).count() == 0
+
+
+def test_override_rejects_unknown_actor_and_source(client, db):
+    src = _seed_change_log(db)
+    assert client.put(
+        f"/api/naver/ad/modifications/change_log/{src.id}/actor", json={"actor": "mop"}
+    ).status_code == 422
+    assert client.put(
+        f"/api/naver/ad/modifications/entity_sync/{src.id}/actor", json={"actor": "ours"}
+    ).status_code == 422
+
+
+def test_override_on_missing_source_row_is_404(client):
+    """존재하지 않는 행에 정정을 달면 화면에 영영 안 보이는 유령 레코드가 된다."""
+    r = client.put("/api/naver/ad/modifications/change_log/9999/actor", json={"actor": "jino"})
+    assert r.status_code == 404
+
+
+# ── 날짜 귀속: 실제 발생 시각 우선 ───────────────────────────────────
+
+
+def test_occurred_at_wins_over_detection_date(client, db):
+    """★이 화면이 존재하는 이유: 백필 36건은 op_date=08-03이지만 실제로는 07-30 일이다.
+    감지일로 잡으면 07-30을 골랐을 때 한 건도 안 보인다."""
+    _seed_agency_op(db, op_date=DETECTED_DAY, occurred_at=datetime(2026, 7, 30, 11, 28, 36))
+    on_day = _get(client)
+    assert on_day["total"] == 1
+    row = on_day["rows"][0]
+    assert row["occurred_date"] == "2026-07-30"
+    assert row["time_basis"] == "occurred"
+
+    # 감지일(08-03)로 조회하면 **안 나온다** — 발생일 기준이 계약이기 때문.
+    assert _get(client, date_from="2026-08-03", date_to="2026-08-03")["total"] == 0
+
+
+def test_row_without_occurred_at_falls_back_to_detection_date_and_says_so(client, db):
+    """시각 불명 행을 지어내지 않는다 — 감지일에 귀속시키고 그 사실을 표시한다."""
+    _seed_agency_op(db, op_date=DAY, occurred_at=None, entity_type="adgroup", entity_id="grp-1")
+    row = _get(client)["rows"][0]
+    assert row["occurred_date"] == "2026-07-30"
+    assert row["time_basis"] == "detected"
+    assert "감지 시각" in row["time_note"]
+
+
+def test_external_detection_row_time_is_marked_detected(client, db):
+    """change_log의 external_* 도 '감지' 시각이다(entity_sync가 알아챈 순간)."""
+    _seed_change_log(db, action="external_bid_change")
+    assert _get(client)["rows"][0]["time_basis"] == "detected"
+
+
+def test_our_execution_row_time_is_actual(client, db):
+    _seed_change_log(db, action="update_bid")
+    assert _get(client)["rows"][0]["time_basis"] == "occurred"
+
+
+# ── 값 표시: 모르는 건 모른다고 ──────────────────────────────────────
+
+
+def test_missing_before_is_null_with_reason_not_zero(client, db):
+    """★백필 36건 중 31건은 이전값이 없다. 0이나 빈칸으로 채우면 '0원이었다'는 거짓이 된다."""
+    _seed_agency_op(db, op_type="ad_edit", before="",
+                    after="07-30 13:32:03 [BACKFILL 2026-08-03: 소급 백필, 정규 탐지 아님]")
+    row = _get(client)["rows"][0]
+    assert row["before"] is None
+    assert row["before_unknown"] == "이전값 불명(관측 공백)"
+    assert row["after"] is not None
+
+
+def test_backfill_marker_is_flagged_and_stripped_from_value(client, db):
+    """마커를 값에 붙인 채 두면 '1890 [BACKFILL…]'이 그대로 표에 찍힌다(내부 표기 노출)."""
+    _seed_agency_op(db, op_type="bid_change", before="2330",
+                    after="1890 [BACKFILL 2026-08-03: 소급 백필, 정규 탐지 아님]")
+    row = _get(client)["rows"][0]
+    assert row["backfilled"] is True
+    assert "BACKFILL" not in (row["after"] or "")
+    assert row["after"] == "1,890원"
+    assert row["before"] == "2,330원"
+
+
+def test_regular_detection_is_not_marked_backfilled(client, db):
+    _seed_agency_op(db, before="2330", after="1890")
+    assert _get(client)["rows"][0]["backfilled"] is False
+
+
+def test_ad_level_bid_is_read_from_adattr(client, db):
+    """소재 입찰은 최상위 bidAmt가 아니라 adAttr.bidAmt다(쇼핑의 실제 레버, 실측 96%)."""
+    _seed_change_log(db, before=_bid(2730), after=_bid(2330))
+    row = _get(client)["rows"][0]
+    assert (row["before"], row["after"]) == ("2,730원", "2,330원")
+
+
+def test_stop_row_shows_lock_not_unchanged_budget(client, db):
+    """★라이브 실측 회귀 고정(2026-07-30 긴급 정지 5건): 캠페인 정지 payload에는 dailyBudget도
+    들어 있어서 '입찰→예산→정지' 순 탐색이면 **"50,000원 → 50,000원"**이 뜬다 —
+    광고를 멈춘 사건인데 화면이 "아무것도 안 바뀜"이라고 말한다."""
+    payload = lambda lock: json.dumps({  # noqa: E731
+        "nccCampaignId": "cmp-1", "dailyBudget": 50000, "userLock": lock,
+    })
+    _seed_change_log(db, action="manual_emergency_stop", entity_type="campaign",
+                     entity_id="cmp-1", before=payload(False), after=payload(True))
+    row = _get(client)["rows"][0]
+    assert (row["before"], row["after"]) == ("가동", "정지")
+
+
+def test_unknown_action_picks_the_field_that_actually_changed(client, db):
+    """모르는 액션은 순서상 첫 필드가 아니라 **달라진** 필드를 고른다."""
+    payload = lambda budget: json.dumps({"bidAmt": 1000, "dailyBudget": budget})  # noqa: E731
+    _seed_change_log(db, action="some_new_action", entity_type="campaign", entity_id="cmp-1",
+                     before=payload(30000), after=payload(50000))
+    row = _get(client)["rows"][0]
+    assert (row["before"], row["after"]) == ("30,000원", "50,000원")
+
+
+def test_entity_name_is_resolved_for_campaign(client, db):
+    db.add(NaverEntity(entity_type="campaign", entity_id="cmp-1", campaign_id="cmp-1",
+                       campaign_type="SHOPPING", name="03. 아이폰_강화유리", status="on"))
+    db.commit()
+    _seed_change_log(db, entity_type="campaign", entity_id="cmp-1")
+    row = _get(client)["rows"][0]
+    assert row["campaign_name"] == "03. 아이폰_강화유리"
+
+
+# ── 필터·기본값 ──────────────────────────────────────────────────────
+
+
+def test_dry_run_excluded_by_default(client, db):
+    _seed_change_log(db, dry_run=True)
+    assert _get(client)["total"] == 0
+    assert _get(client, include_dry_run=True)["total"] == 1
+
+
+def test_blocked_attempt_excluded_by_default(client, db):
+    """가드레일이 막힌 시도는 광고를 **안 바꿨다** — '수정 사항'에 세면 거짓이다."""
+    _seed_change_log(db, before=None, after=None, rationale="[실행 불가] 가드레일 차단 — BEP 미달")
+    assert _get(client)["total"] == 0
+    opened = _get(client, include_blocked=True)
+    assert opened["total"] == 1
+    assert opened["rows"][0]["execution_state"] == "blocked"
+
+
+def test_source_filter(client, db):
+    _seed_change_log(db)
+    _seed_agency_op(db)
+    assert _get(client, source="change_log")["total"] == 1
+    assert _get(client, source="agency_op")["total"] == 1
+
+
+def test_campaign_filter_applies_to_both_sources(client, db):
+    _seed_change_log(db, campaign_id="cmp-1")
+    _seed_agency_op(db, campaign_id="cmp-2")
+    assert _get(client, campaign_id="cmp-1")["total"] == 1
+    assert _get(client, campaign_id="cmp-2")["total"] == 1
+
+
+def test_pagination_slices_merged_list(client, db):
+    for h in range(5):
+        _seed_change_log(db, at=datetime(2026, 7, 30, 10 + h, 0, 0))
+    first = _get(client, limit=2, offset=0)
+    second = _get(client, limit=2, offset=2)
+    assert first["total"] == second["total"] == 5
+    assert len(first["rows"]) == len(second["rows"]) == 2
+    assert {r["key"] for r in first["rows"]}.isdisjoint({r["key"] for r in second["rows"]})
+
+
+# ── 날짜 검증은 /change-log와 **동일 규칙** ──────────────────────────
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"date_from": "2026-07-30"},                       # 한쪽만
+        {"date_from": "2026-07-31", "date_to": "2026-07-30"},  # 뒤집힘
+        {"date_from": "2025-07-17", "date_to": "2026-07-17"},  # 366일
+        {"date_from": "9999-12-31", "date_to": "9999-12-31"},  # OverflowError 경로
+    ],
+)
+def test_date_validation_matches_change_log_rules(client, params):
+    assert client.get("/api/naver/ad/modifications", params=params).status_code == 422

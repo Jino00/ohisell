@@ -1422,7 +1422,13 @@ def cafe24_proactive_refresh_job():
 
 
 def sync_naver_settlement_job():
-    """네이버 일별 정산 내역 자동 적재 (트랙 N1, 05:25 KST). 최근 35일."""
+    """네이버 일별 정산 내역 자동 적재 (트랙 N1, 05:25 KST). 최근 31일.
+
+    ★창이 31일인 이유: 네이버 daily API의 조회 구간 상한이 **32일**이다(라이브 실측
+      2026-08-03, 공식 문서엔 미명시). 종전 `days=34`(35일 구간)는 **매 호출 400**을 받았고,
+      클라이언트가 그걸 빈 결과로 삼켜 "0건 적재 완료"를 남겼다 — 스케줄러는 ok로 기록하고
+      daily 테이블은 07-27에서 멈춰 있었다. 상한 32일에 여유 1일을 둬 31일 구간으로 고정한다.
+      (클라이언트가 이제 구간 초과·요청 실패를 예외로 올리므로 다시 조용히 비지 않는다.)"""
     db = _get_own_db_session()
     try:
         from app.config import get_naver_config
@@ -1434,7 +1440,7 @@ def sync_naver_settlement_job():
             log.error("[스케줄러] 네이버 설정 없음 — 정산 동기화 건너뜀")
             return
         dto = kst_today()
-        dfrom = dto - timedelta(days=34)
+        dfrom = dto - timedelta(days=30)   # 31일 구간 (API 상한 32일)
         rows = NaverClient(cfg).fetch_daily_settlement(dfrom, dto)
         n = _upsert_settlement(db, rows)
         log.info("[스케줄러] 네이버 일별 정산 %d건 적재 완료 (%s~%s)", n, dfrom, dto)
@@ -1464,6 +1470,39 @@ def sync_naver_case_settlement_job():
         log.info("[스케줄러] 네이버 건별 정산 %d건 적재 완료 (결제일 %s~%s)", n, dfrom, dto)
     except Exception as e:
         log.exception("[스케줄러] sync_naver_case_settlement_job 에러: %s", e)
+        raise  # 삼킴 정렬(S5b): EVENT_JOB_ERROR/HTTP500로 실패 표면화
+    finally:
+        db.close()
+
+
+def run_naver_nbaesong_return_probe_job():
+    """N배송 반품 회수비 프로브 (관측 전용, 06:02 KST).
+
+    최근 44일 네이버 클레임(반품/교환) 주문을 주문번호로 1회씩 훑어(단건 조회는 그 주문의
+    정산 행이 유형 구분 없이 전량 온다) 정산 구조를 적재하고, **처음 보는 조합**
+    (배송방식 × 멤버십 × productOrderType × settleType)만 Slack으로 올린다.
+    N배송 반품 표본이 라이브 468건 중 2건뿐이고 둘 다 지금은 NORMAL_SETTLE_BEFORE_CANCEL
+    (정산 전 취소)이라, 정산 성숙(D+12)에서 상태가 옮겨가는 순간을 사람이 지키는 대신
+    이 잡이 잡는다. 상세 배경은 services/naver_claim_settlement_probe.py 상단.
+    """
+    db = _get_own_db_session()
+    try:
+        from app.clients.naver import NaverClient
+        from app.config import get_naver_config
+        from app.services.naver_claim_settlement_probe import run_probe
+
+        cfg = get_naver_config("NAVER")
+        if not cfg:
+            log.error("[스케줄러] 네이버 설정 없음 — 클레임 정산 프로브 건너뜀")
+            return
+        result = run_probe(db, NaverClient(cfg))
+        log.info(
+            "[스케줄러] 클레임 정산 프로브 완료 — 주문 %d건·관측 %d행·적재 %d행·신규조합 %d건",
+            result["orders"], result["observations"], result["inserted"],
+            len(result["new_combos"]),
+        )
+    except Exception as e:
+        log.exception("[스케줄러] run_naver_nbaesong_return_probe_job 에러: %s", e)
         raise  # 삼킴 정렬(S5b): EVENT_JOB_ERROR/HTTP500로 실패 표면화
     finally:
         db.close()
@@ -1507,6 +1546,13 @@ def _ensure_default_states(db):
         ("run_naver_flight_loop", "15 */2 * * *"),  # 당일 플라이트 루프 2시간 주기(X2, dry_run=True)
         ("sync_naver_settlement", "25 5 * * *"),
         ("sync_naver_case_settlement", "30 5 * * *"),
+        # N배송 반품 회수비 프로브(관측 전용). 06:02인 이유: 06:00엔 auto_sync_orders와
+        # sync_coupang_coupons가 이미 있어 SQLite 라이터가 겹친다. :02는 이 시간대에서 비어
+        # 있고, 이 잡은 orders를 읽기만 하므로 주문 동기화보다 몇 분 늦어도 무해하다
+        # (판정 대상이 D+12 정산 성숙이라 분 단위 신선도가 의미 없다).
+        # ★_CATCHUP_ORDER 제외 — 관측 전용이라 하루 늦어도 무해하고, 스캔 창 44일이
+        #   성숙(D+12)보다 32일 넉넉해 하루 유실로 놓치는 표본이 없다.
+        ("run_naver_nbaesong_return_probe", "2 6 * * *"),
         ("sync_meta_ad_costs", "0 7 * * *"),
         ("sync_coupang_rg_inbound", "20 5 * * *"),
         ("sync_coupang_rg_settlement", "30 5 * * *"),
@@ -1555,6 +1601,14 @@ def _ensure_default_states(db):
 # 성공해야 하류를 잇는다. keyword_hourly sweep은 다른 잡에 의존하지 않지만(자체 완결) 09:10
 # 표준 cron이라 같은 catch-up 목록에 포함(D-NAO-46②) — 순서상 맨 뒤(가장 늦은 cron).
 _CATCHUP_ORDER: tuple[str, ...] = (
+    # ★정산 2개가 맨 앞(2026-08-03 추가): cron이 05:25/05:30으로 이 목록에서 가장 이르고,
+    #   BEP(07:30)·이익 회계가 정산 실측을 입력으로 쓰므로 하류보다 먼저 복구돼야 한다.
+    #   라이브 사고: 08-03 03:45 KST 백엔드 재시작 → 05:25/05:30 발화 유실 → 두 잡이 이 목록에
+    #   없어 다음날 05:25까지 영영 안 돌았다(SETTLED 129건 미수집). misfire_grace_time은
+    #   프로세스 재시작을 못 잡는다(위 주석) — 목록 편입이 유일한 복구 경로다.
+    #   둘 다 상류 의존이 없고 upsert라 재실행이 안전하며, 실패해도 하류 체인을 끊지 않는다.
+    "sync_naver_settlement",       # 05:25
+    "sync_naver_case_settlement",  # 05:30
     "shopping_ad_product_sync",    # 07:45 (D-NAO-57 A, 리뷰 P2-2 — BEP(07:30, catch-up 밖) 뒤·proposals 앞: 그날 제안이 최신 매핑 target을 쓰게. fail-open이라 실패해도 체인 안 끊김)
     "run_naver_forecast_engine",   # 07:50
     "generate_naver_proposals",    # 08:00
@@ -1572,6 +1626,18 @@ _CATCHUP_ORDER: tuple[str, ...] = (
     "sync_naver_entity",  # 07:35 크론이지만 catch-up은 맨 뒤: 전량 fetch(45캠페인+1,004그룹+~91k 키워드, 수 분)가 돈 잡(집행) 복구를 지연시키면 안 된다(위 관찰 잡들과 같은 원칙). 맨 뒤라 실패해도 끊길 하류가 없다(체인 중단=무해, last_run_at 미전진 → 다음 재시작 재시도). 성공하면 체이닝된 BM 스냅샷도 함께 따라잡힌다
 )
 _CATCHUP_LOOKBACK = timedelta(hours=12)  # 오늘 예정 발화가 이보다 오래됐으면 스킵(다음 정상 발화에 위임)
+
+# 체인을 끊지 않는 catch-up 잡. _run_chain은 예외 시 break한다(상류 실패 → 하류 중단 =
+# 의존 보존)인데, **정산은 이 체인의 상류가 아니다** — 회계 입력이지 집행
+# (proposals→expert→auto_operator)의 선행 조건이 아니고, 실제로 아무 잡도 정산 잡의
+# 성공을 기다리지 않는다(BEP 07:30은 catch-up 목록 밖이라 별도 발화).
+# 정산 API가 잠깐 죽었다고 광고 자동운영 복구가 통째로 막히면 결합이 잘못된 것이다.
+# ★잡 자체의 raise는 유지한다 — 정상 크론에서는 실패가 last_status로 드러나야 한다.
+#   여기서 하는 것은 "실패를 실패로 기록하되 뒤를 막지 않는다"뿐이다(성공으로 위장 금지).
+_CATCHUP_NON_BLOCKING: frozenset[str] = frozenset({
+    "sync_naver_settlement",
+    "sync_naver_case_settlement",
+})
 
 
 def _missed_morning_jobs(db, now):
@@ -1675,6 +1741,10 @@ def _catch_up_morning_batch():
         return
 
     funcs = {
+        # 정산 2개(05:25/05:30) — _CATCHUP_ORDER 맨 앞과 짝. 여기 빠지면 아래 funcs.get()이
+        # None을 돌려주고 조용히 스킵된다(목록에만 넣고 끝내면 복구가 안 된다).
+        "sync_naver_settlement": sync_naver_settlement_job,
+        "sync_naver_case_settlement": sync_naver_case_settlement_job,
         "run_naver_forecast_engine": run_naver_forecast_engine_job,
         # proposals는 완주 검증판 사용(codex R3 P1-a): stage_status로 실제 생성 확인,
         # 미완주면 예외 → 체인 중단(expert가 pending 0으로 오실행되는 것 원천 차단).
@@ -1701,15 +1771,23 @@ def _catch_up_morning_batch():
         for job_name in missed:  # 이미 cron(의존) 순서
             func = funcs.get(job_name)
             if func is None:
+                # ★조용한 스킵 금지: _CATCHUP_ORDER에 이름만 추가하고 funcs 등록을 빠뜨리면
+                #   복구가 안 되는데 아무 흔적도 안 남는다(2026-08-03 정산 잡 편입 시 경계).
+                log.error("[스케줄러] catch-up 함수 미등록: %s — funcs에 추가 필요", job_name)
                 continue
             try:
                 log.warning("[스케줄러] catch-up 순차 실행: %s", job_name)
                 func()  # 동기 실행(각 잡이 자체 db 세션·예외 처리, 성공 시 정상 반환)
             except Exception as e:  # noqa: BLE001 — 상류 실패 시 하류 중단(의존 보존)
+                _record_catchup_status(job_name, ok=False, exception=e)
+                if job_name in _CATCHUP_NON_BLOCKING:
+                    log.exception(
+                        "[스케줄러] catch-up %s 실패 — 하류와 의존 없어 체인 계속: %s", job_name, e
+                    )
+                    continue
                 log.exception(
                     "[스케줄러] catch-up %s 실패 → 체인 중단(다음 재시작 재시도): %s", job_name, e
                 )
-                _record_catchup_status(job_name, ok=False, exception=e)
                 break
             _record_catchup_status(job_name, ok=True)
 
@@ -1757,6 +1835,7 @@ def job_func_for(job_name: str):
         "run_naver_flight_loop": run_naver_flight_loop_job,
         "sync_naver_settlement": sync_naver_settlement_job,
         "sync_naver_case_settlement": sync_naver_case_settlement_job,
+        "run_naver_nbaesong_return_probe": run_naver_nbaesong_return_probe_job,
         "sync_meta_ad_costs": sync_meta_ad_costs_job,
         "sync_coupang_products": sync_coupang_products_job,
         "sync_coupang_returns": sync_coupang_returns_job,

@@ -5,7 +5,9 @@
 //   ("불러오지 못했습니다: Input should be a valid date…") — 사용자에게 아무 의미 없는 문자열이다.
 //   ISO 날짜의 문자열 비교가 곧 날짜 비교인 건 **양쪽이 채워졌을 때만** 참이다.
 import { describe, it, expect } from "vitest";
-import { customRangeError, kstDate } from "./NaverAdCommandCenter";
+// ★2026-08-03: 「수정 사항」 화면이 같은 규칙을 쓰게 되면서 `lib/periodRange`로 공용화했다.
+//   테스트는 그대로 따라간다 — 규칙이 두 벌이 되는 순간 이 파일이 지키던 게 반쪽이 된다.
+import { customRangeError, kstDate } from "../lib/periodRange";
 
 describe("customRangeError — 캘린더 커스텀 구간 검증", () => {
   it("정상 구간은 null (조회 가능)", () => {
