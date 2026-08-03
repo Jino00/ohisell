@@ -25,6 +25,10 @@ RETRY_BASE_DELAY = 2
 class NaverClient(BaseChannelClient):
     """네이버 커머스 API 클라이언트 (OAuth2 + bcrypt 전자서명)"""
 
+    # 일별 정산 조회 구간 상한(일, 시작·종료일 포함). 라이브 실측 2026-08-03:
+    # 32일 구간 OK / 33일 구간부터 400. 공식 문서에 제한 명시가 없어 실측이 유일 근거다.
+    SETTLE_DAILY_MAX_SPAN_DAYS = 32
+
     def __init__(self, config: NaverAccountConfig, access_token: str | None = None):
         self.client_id = config.client_id
         self.client_secret = config.client_secret
@@ -278,7 +282,21 @@ class NaverClient(BaseChannelClient):
 
         Returns 정규화 dict 목록 (정산예정일·정산금액·수수료(음수)·혜택·지급보류 등).
         네이버 응답 amount는 부호 그대로 보존(수수료/혜택은 음수).
+
+        ★조회 구간 상한 = **32일**(라이브 실측 2026-08-03: `days=31`(32일 구간) OK /
+          `days=32`(33일 구간)부터 400. 공식 문서엔 제한이 명시돼 있지 않아 실측이 유일 근거).
+          호출부가 넘기면 여기서 즉시 죽인다 — 400을 받아 조용히 0건을 돌려주면 "성공 0건"으로
+          기록돼 **아무도 모르는 채 정산 데이터가 계속 비는** 사고가 된다(라이브 실사고:
+          `days=34`가 배선돼 있어 이 잡이 계속 400 → daily 테이블이 07-27에서 멈춰 있었다).
+        ★요청 실패(_request가 None)도 예외로 표면화한다. 종전엔 `break`로 삼켜 빈 리스트를
+          돌려줬고, 잡은 그걸 정상으로 보고 last_status='ok'를 남겼다(green-while-stale).
         """
+        span = (date_to - date_from).days + 1
+        if span > self.SETTLE_DAILY_MAX_SPAN_DAYS:
+            raise ValueError(
+                f"일별 정산 조회 구간 {span}일 > 상한 {self.SETTLE_DAILY_MAX_SPAN_DAYS}일 "
+                f"({date_from}~{date_to}) — 네이버가 400을 낸다. 호출부 창을 줄일 것."
+            )
         path = "/v1/pay-settle/settle/daily"
         results: list[dict] = []
         page = 1
@@ -290,6 +308,11 @@ class NaverClient(BaseChannelClient):
                 "pageSize": 1000,
             }
             data = self._request("GET", path, params)
+            if data is None:
+                raise RuntimeError(
+                    f"일별 정산 조회 실패({date_from}~{date_to}, page={page}) — "
+                    "빈 결과로 삼키지 않고 실패로 표면화한다."
+                )
             if not data:
                 break
             elements = data.get("elements", []) if isinstance(data, dict) else []
@@ -336,6 +359,13 @@ class NaverClient(BaseChannelClient):
                     "pageSize": 1000,
                 }
                 data = self._request("GET", path, params)
+                if data is None:
+                    # ★조용한 유실 금지: 하루가 통째로 빠져도 종전엔 break로 삼켜
+                    #   "성공"으로 기록됐다. 실패로 올려 다음 실행이 재시도하게 한다(upsert라 안전).
+                    raise RuntimeError(
+                        f"건별 정산 조회 실패(결제일 {current}, page={page}) — "
+                        "빈 결과로 삼키지 않고 실패로 표면화한다."
+                    )
                 if not data:
                     break
                 elements = data.get("elements", []) if isinstance(data, dict) else []
@@ -871,13 +901,43 @@ class NaverClient(BaseChannelClient):
 
     @staticmethod
     def _map_status(naver_status: str) -> str:
+        """네이버 productOrderStatus → 내부 상태.
+
+        ★내부 상태는 매출 인식을 가른다 — cafe24_status_mapper.REVENUE_EXCLUDED
+          ({cancelled, returned, pending})에 걸리면 매출·수수료·원가가 통째로 빠진다.
+          그래서 이 표는 "이 주문의 돈이 우리 것인가"를 결정하는 회계 계약이다.
+
+        ★2026-08-03 정정 2건(14일 전수 대사에서 발견):
+          ① EXCHANGED → 종전 "returned"였다. **교환은 환불이 아니다** — 상품만 바꿔 보내고
+             돈은 그대로 우리 것이다. 정산이 이를 확정한다: 교환 라인 33건이
+             settle_type=NORMAL_SETTLE_ORIGINAL로 **정산 완료**됐고(settle_complete_date 존재)
+             차감 행(NORMAL_SETTLE_AFTER_CANCEL)은 3개월이 지나도 오지 않았다.
+             그런데 우리는 매출에서 뺐다 — 라이브 49건 826,500원 과소계상.
+             → 별도 상태 "exchanged"로 분리(REVENUE_EXCLUDED에 넣지 않아 매출 유지).
+          ② CANCELED_BY_NOPAYMENT → 매핑이 없어 폴백 .lower()로 통과했고, 그 값은
+             REVENUE_EXCLUDED에 없어 **결제조차 안 된 주문이 매출로 잡혔다**
+             (라이브 10건 163,000원 과대계상). → "cancelled"로 명시 매핑.
+
+        ★폴백(.lower())은 유지하되 경고를 남긴다 — 모르는 상태가 조용히 매출로 새는 것이
+          ②의 실체였다. 새 상태가 로그에 뜨면 이 표에 명시적으로 추가할 것.
+        """
         mapping = {
-            "PAYED": "confirmed",
-            "DELIVERING": "shipped",
-            "DELIVERED": "delivered",
-            "PURCHASE_DECIDED": "delivered",
-            "EXCHANGED": "returned",
+            # 매출 인식
+            "PAYED": "confirmed",            # 결제완료
+            "DELIVERING": "shipped",         # 배송중
+            "DELIVERED": "delivered",        # 배송완료
+            "PURCHASE_DECIDED": "delivered",  # 구매확정
+            "EXCHANGED": "exchanged",        # 교환완료 — 돈은 우리 것(매출 유지)
+            # 매출 제외 (REVENUE_EXCLUDED)
             "CANCELED": "cancelled",
+            "CANCELED_BY_NOPAYMENT": "cancelled",  # 미입금 취소 = 결제 자체가 없었다
             "RETURNED": "returned",
         }
-        return mapping.get(naver_status, naver_status.lower())
+        mapped = mapping.get(naver_status)
+        if mapped is None:
+            log.warning(
+                "네이버 미지의 주문상태 '%s' — 매핑표에 없어 소문자 폴백. 매출 인식이 "
+                "의도와 다를 수 있으니 _map_status에 명시 추가할 것", naver_status,
+            )
+            return naver_status.lower()
+        return mapped

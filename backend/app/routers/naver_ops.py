@@ -14,7 +14,7 @@ import re
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import func
+from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
 from app.config import get_naver_config
@@ -28,6 +28,7 @@ from app.models import (
     ProductChannelMapping,
     ProductMaster,
 )
+from app.services import order_delivery
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
 from app.utils.kst import kst_today
 
@@ -41,7 +42,64 @@ _NAVER_CHANNEL_ID = 6
 _Q2 = Decimal("0.01")
 _Z  = Decimal("0")
 _VAT_DIVISOR = Decimal("1.1")       # VAT 포함 → 공급가(부가세 제외) 환산
-_HANJIN_PER_SHIPMENT = Decimal("1900")  # 한진택배 물리배송 1건당(packageNumber 기준), VAT 포함
+# 택배 물리배송 1건당 단가(VAT 포함). 일반배송 기본가이자 shipping_cost_paid 결측 폴백 —
+# N배송(도착보장 3,020)은 주문 행의 shipping_cost_paid 스냅샷에서 읽는다(order_delivery 단가표).
+_HANJIN_PER_SHIPMENT = Decimal("1900")
+
+
+def logistics_totals(db: Session, start, end) -> tuple[int, Decimal]:
+    """기간 내 네이버 주문의 (물리배송 건수, 택배비 합계 VAT포함).
+
+    메인 엔진(profit_calculator)과 동일 기준 — 매출 제외 주문은 빼고, 배송(패키지)당 1회.
+    ★2026-08-03: 정액 1,900 × 배송건수 → 패키지별 max(단가)의 합으로 교체.
+      N배송(도착보장)은 3,020이라 정액을 곱하면 과소계상된다(D-NAO-84 단가표).
+      패키지 내 단가가 갈리면 max(보수) — profit_calculator._shipment_cost_map과 같은 규칙.
+
+    ★단가 폴백 3단(codex 리뷰 P1): shipping_cost_paid → delivery_attribute_type → 1,900.
+      2단이 필요한 이유: 메인 엔진은 order_delivery를 통해 스냅샷이 없으면 배송속성으로
+      3,020을 복구하는데, SQL이 곧장 1,900으로 떨어지면 **같은 주문에 두 엔진이 다른
+      배송비**를 쓴다. 두 엔진 정합이 이 변경의 목적이므로 폴백 경로까지 맞춘다.
+      (현재 라이브 NULL 행은 1건뿐이고 그마저 반품이라 금액 영향 0 — 구조로 막는 것이다.)
+
+    ★json_valid 가드: SQLite json_extract는 **깨진 JSON에서 예외를 던진다**. raw_data는
+      MAX_RAW_DATA_SIZE 초과 시 잘려 저장되므로(라이브 실측: 채널6 1건·채널7 1,386건)
+      잘린 행이 매출 인식 상태로 하나만 들어와도 이 엔드포인트가 통째로 500이 된다.
+      잘린 행은 패키지 식별을 포기하고 order_number로 떨어뜨린다(배송 1건 취급 = 보수).
+    """
+    pkg_key = case(
+        (
+            func.json_valid(Order.raw_data) == 1,
+            func.coalesce(
+                func.nullif(
+                    func.json_extract(Order.raw_data, "$.productOrder.packageNumber"), ""
+                ),
+                Order.order_number,
+            ),
+        ),
+        else_=Order.order_number,
+    )
+    unit_price = func.coalesce(
+        Order.shipping_cost_paid,
+        case(
+            (Order.delivery_attribute_type == order_delivery.NBAESONG_ATTR,
+             order_delivery.SHIPPING_COST_NBAESONG),
+            else_=_HANJIN_PER_SHIPMENT,
+        ),
+    )
+    pkg = (
+        db.query(pkg_key.label("pkg"), func.max(unit_price).label("paid"))
+        .filter(
+            Order.channel_id == _NAVER_CHANNEL_ID,
+            Order.status.notin_(tuple(REVENUE_EXCLUDED)),
+            Order.order_date >= start,
+            Order.order_date <= end,
+        )
+        .group_by(pkg_key)
+        .subquery()
+    )
+    count = int(db.query(func.count()).select_from(pkg).scalar() or 0)
+    total = Decimal(str(db.query(func.sum(pkg.c.paid)).scalar() or 0))
+    return count, total
 
 
 def _date_range(days: int) -> tuple[date, date]:
@@ -122,32 +180,8 @@ def sales_summary(
     )
     # 광고비는 네이버 광고 = 공급가(VAT 제외, 세금계산서 별도) → 공급가 통일 시 그대로.
 
-    # ── 2b. 한진 물류비 — 물리배송 1건당 1,900 (packageNumber 기준, VAT 포함) ──
-    # 메인 엔진(profit_calculator)과 동일 기준. 매출 제외 주문은 빼고, 배송 단위(패키지)당 1회.
-    shipment_count = int(
-        db.query(
-            func.count(
-                func.distinct(
-                    func.coalesce(
-                        func.nullif(
-                            func.json_extract(Order.raw_data, "$.productOrder.packageNumber"),
-                            "",
-                        ),
-                        Order.order_number,
-                    )
-                )
-            )
-        )
-        .filter(
-            Order.channel_id == _NAVER_CHANNEL_ID,
-            Order.status.notin_(tuple(REVENUE_EXCLUDED)),
-            Order.order_date >= start,
-            Order.order_date <= end,
-        )
-        .scalar()
-        or 0
-    )
-    total_logistics = _HANJIN_PER_SHIPMENT * shipment_count  # VAT 포함
+    # ── 2b. 택배 물류비 — 물리배송(packageNumber) 1건당 배송방식별 실단가, VAT 포함 ──
+    shipment_count, total_logistics = logistics_totals(db, start, end)
 
     # 검색광고(SA) RoAS — 디스플레이 제외(전환추적 없음).
     # 네이버 전환 보고서는 최근 ~15일만 보관 → 전환데이터가 있는 날짜로만 분모를 맞춰
