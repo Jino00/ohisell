@@ -3,8 +3,9 @@
 #   생성 속도보다 느려지는 순간 그 사이 주기는 영구 공백이 된다. prod에 "무엇이 비었나"를 묻고
 #   결손만 받는다. 여기서 고정하는 것:
 #     ① 결손만·최신 우선 ② 회차 상한(rg_max_targets) ③ 조회 실패=기존 동작 폴백(수집 불중단)
-#     ④ 결손 0건이면 다운로드 0건(정상 완주) ⑤ 주기 사이 세션 재확인→남은 주기 중단·로그인 필요
-#     ⑥ 죽은 config 키(rg_max_periods)를 다시 읽지 않음
+#     ④ 결손 0건이면 다운로드 0건(정상 완주) ⑤ 주기 사이 세션 재확인 — **로그아웃 확증일 때만**
+#        중단·로그인 필요이고, 판정 불가(업스트림 500)면 계속 진행 ⑥ 죽은 config 키 미사용
+#     ⑦ 세션 3상태 분류(2026-08-03 사고 회귀) — 500+로그인된 셸 HTML ≠ 로그아웃
 from __future__ import annotations
 
 import contextlib
@@ -224,7 +225,10 @@ def _raw(*ends: str) -> dict:
 def rg_run(wing, monkeypatch, tmp_path):
     """_do_rg_run을 브라우저 없이 돌린다 — 다운로드 호출 기록을 돌려준다."""
     calls: list[tuple] = []
-    state = {"session_ok": [], "gaps": None, "raw": _raw("2026-07-19")}
+    # session_ok: 프로브가 돌려줄 **3상태** 시퀀스(ok/logged_out/unknown). 비면 ok.
+    #   raw_state: _rg_fetch_status_raw가 돌려줄 상태(기본 ok).
+    state = {"session_ok": [], "gaps": None, "raw": _raw("2026-07-19"),
+             "raw_state": wing.RG_PROBE_OK}
 
     @contextlib.contextmanager
     def _fake_chrome(_p, _cfg, _state, owner=None, **_k):
@@ -234,16 +238,20 @@ def rg_run(wing, monkeypatch, tmp_path):
     def _fake_playwright():
         yield object()
 
-    def _session_ok(_page):
+    def _probe(_page, **_k):
         seq = state["session_ok"]
-        return seq.pop(0) if seq else True
+        return seq.pop(0) if seq else wing.RG_PROBE_OK
+
+    def _fetch_raw(_p, _c, **_k):
+        st = state["raw_state"]
+        return st, (state["raw"] if st == wing.RG_PROBE_OK else None)
 
     monkeypatch.setattr(wing.time, "sleep", lambda *_a, **_k: None)  # 세션 재확인 지연 제거
     monkeypatch.setattr(wing, "sync_playwright", _fake_playwright)
     monkeypatch.setattr(wing, "_chrome", _fake_chrome)
     monkeypatch.setattr(wing, "_cdp_mode", lambda _c: False)
-    monkeypatch.setattr(wing, "_rg_session_ok", _session_ok)
-    monkeypatch.setattr(wing, "_rg_fetch_status_raw", lambda _p, _c: state["raw"])
+    monkeypatch.setattr(wing, "_rg_probe_session", _probe)
+    monkeypatch.setattr(wing, "_rg_fetch_status_raw", _fetch_raw)
     monkeypatch.setattr(wing, "_rg_push_status", lambda _c, _r: 0)
     monkeypatch.setattr(wing, "_prod_rg_layer2_gaps", lambda _c, _rt, _d: state["gaps"])
     monkeypatch.setattr(wing, "_rg_push_xlsx", lambda _c, _u, _rt, _gk: 0)
@@ -291,30 +299,79 @@ def test_run_respects_max_targets(rg_run):
 
 
 def test_run_stops_remaining_periods_on_session_loss(rg_run):
-    """루프 도중 세션이 죽으면 남은 주기는 헛돈다 — 즉시 중단하고 로그인 필요로 보고."""
+    """루프 도중 **로그아웃이 확증되면** 남은 주기는 헛돈다 — 즉시 중단하고 로그인 필요로 보고."""
+    wing = rg_run.wing
     ends = ["2026-07-19", "2026-07-12", "2026-07-05"]
     rg_run.state["raw"] = _raw(*ends)
     rg_run.state["gaps"] = _gaps(*[(e, [_WS]) for e in ends])
-    # 진입 확인 True → 2번째 주기 직전 False가 **두 번**(재확인까지 실패)이어야 만료로 본다.
-    rg_run.state["session_ok"] = [True, False, False]
-    rc = rg_run.wing._do_rg_run(rg_run.cfg, rg_run.cfg["state_file"])
-    assert rc == rg_run.wing.RC_LOGIN_REQUIRED
+    # 진입 ok → 2번째 주기 직전 logged_out이 **두 번**(재확인까지)이어야 만료로 확정한다.
+    rg_run.state["session_ok"] = [wing.RG_PROBE_OK, wing.RG_PROBE_LOGGED_OUT,
+                                  wing.RG_PROBE_LOGGED_OUT]
+    rc = wing._do_rg_run(rg_run.cfg, rg_run.cfg["state_file"])
+    assert rc == wing.RC_LOGIN_REQUIRED
     assert [gk for gk, _ in rg_run.calls] == ["A01564720-2026-07-19"]  # 1번째까지는 유지
 
 
-def test_run_survives_single_session_blip(rg_run):
-    """★프로브 blip 1회는 세션 만료가 아니다(리뷰 [P2-2]).
-
-    _rg_session_ok는 로그아웃뿐 아니라 비200·깨진 JSON·evaluate 예외도 전부 False로 접는다.
-    300초 폴링 직후의 흔들림 한 번으로 남은 결손 충전을 취소하고 '로그인 필요'를 오보하면,
-    다운로드 실패(재시도 가능)보다 blip이 더 치명이 되는 역전이 생긴다.
-    """
+def test_run_survives_single_logout_blip(rg_run):
+    """로그아웃 확증이 1회뿐이면(재확인 통과) 만료가 아니다 — 리다이렉트 과도기일 수 있다."""
+    wing = rg_run.wing
     ends = ["2026-07-19", "2026-07-12"]
     rg_run.state["raw"] = _raw(*ends)
     rg_run.state["gaps"] = _gaps(*[(e, [_WS]) for e in ends])
-    rg_run.state["session_ok"] = [True, False, True]   # 2번째 주기 직전 blip → 재확인 성공
-    assert rg_run.wing._do_rg_run(rg_run.cfg, rg_run.cfg["state_file"]) == 0
+    rg_run.state["session_ok"] = [wing.RG_PROBE_OK, wing.RG_PROBE_LOGGED_OUT, wing.RG_PROBE_OK]
+    assert wing._do_rg_run(rg_run.cfg, rg_run.cfg["state_file"]) == 0
     assert len(rg_run.calls) == 2   # 중단되지 않고 끝까지 간다
+
+
+# ── 2026-08-03 사고 회귀: 업스트림 500을 로그아웃으로 오분류 ────────────────────
+# 라이브 실측(같은 페이지·같은 쿠키·32회): status/api 1/32 성공, 실패는 0.55초 fast-fail
+#   HTTP 500 + **로그인된** Wing 셸 HTML. 주기 전환 프로브가 그걸 만료로 접고
+#   RC_LOGIN_REQUIRED(재시도 없이 요청 소멸)를 돌려줘 "버튼 1회 = 주기 1개"가 됐고,
+#   층2 결손이 영영 안 메워졌다(RG 166시간 침묵).
+
+def test_run_continues_when_turn_probe_is_unknown(rg_run):
+    """★핵심 회귀: 주기 전환 프로브가 '판정 불가'여도 남은 주기를 계속 받는다.
+
+    이 단언이 깨지면 버튼 1회가 다시 주기 1개로 묶이고 결손이 안 메워진다(Jino 승인 2026-08-03).
+    """
+    wing = rg_run.wing
+    ends = ["2026-07-19", "2026-07-12", "2026-07-05"]
+    rg_run.state["raw"] = _raw(*ends)
+    rg_run.state["gaps"] = _gaps(*[(e, [_WS]) for e in ends])
+    # 매 전환마다 판정 불가(업스트림 500) — 라이브에서 관측된 그대로.
+    rg_run.state["session_ok"] = [wing.RG_PROBE_OK] + [wing.RG_PROBE_UNKNOWN] * 6
+    rc = wing._do_rg_run(rg_run.cfg, rg_run.cfg["state_file"])
+    assert rc == 0
+    assert [gk for gk, _ in rg_run.calls] == [f"A01564720-{e}" for e in ends]
+
+
+def test_unknown_entry_probe_does_not_demand_login(rg_run, monkeypatch):
+    """진입 프로브가 판정 불가면 로그인 창을 띄우지 않고 진행한다(status/api가 2차 관문)."""
+    wing = rg_run.wing
+    rg_run.state["raw"] = _raw("2026-07-19", "2026-07-12")
+    rg_run.state["gaps"] = _gaps(("2026-07-12", [_WS]))
+    rg_run.state["session_ok"] = [wing.RG_PROBE_UNKNOWN]
+    monkeypatch.setattr(wing, "_rg_login_wait",
+                        lambda *_a, **_k: pytest.fail("판정 불가로 로그인 대기에 새면 안 된다"))
+    assert wing._do_rg_run(rg_run.cfg, rg_run.cfg["state_file"]) == 0
+    assert [gk for gk, _ in rg_run.calls] == ["A01564720-2026-07-12"]
+
+
+def test_persistent_status_500_is_retryable_not_login_required(rg_run):
+    """status/api가 예산 내내 500이면 rc=1(재시도)이다 — login_required면 요청이 소멸한다."""
+    wing = rg_run.wing
+    rg_run.state["raw_state"] = wing.RG_PROBE_UNKNOWN
+    rc = wing._do_rg_run(rg_run.cfg, rg_run.cfg["state_file"])
+    assert rc == 1
+    assert rc != wing.RC_LOGIN_REQUIRED
+    assert rg_run.calls == []
+
+
+def test_status_logged_out_is_login_required(rg_run):
+    """반대로 status/api에서 로그아웃이 **확증**되면 login_required가 맞다."""
+    wing = rg_run.wing
+    rg_run.state["raw_state"] = wing.RG_PROBE_LOGGED_OUT
+    assert wing._do_rg_run(rg_run.cfg, rg_run.cfg["state_file"]) == wing.RC_LOGIN_REQUIRED
 
 
 def test_run_falls_back_when_layer1_push_failed(rg_run, monkeypatch):
@@ -524,3 +581,110 @@ def test_gap_query_uses_same_window_as_layer1(wing):
     src = inspect.getsource(wing._do_rg_run)
     assert "_prod_rg_layer2_gaps(cfg, report_types, _rg_status_days(cfg))" in src
     assert "_rg_status_days(cfg)" in inspect.getsource(wing._rg_fetch_status_raw)
+
+
+# ── ⑦ 세션 3상태 분류 — 2026-08-03 라이브 응답으로 고정 ────────────────────
+# 아래 _LIVE_500_SHELL은 실제 캡처 앞부분이다(13:05:59 등). 핵심은 이 본문이 **로그인된**
+# 화면이라는 것 — 판매자명이 title에 박혀 있고 로그인 페이지가 아니다. 그런데 종전 규칙은
+# `<html` 한 조각만 보고 이걸 로그아웃으로 번역했다.
+_LIVE_500_SHELL = (
+    '\n\n\n\n\n\n\n\n\n<!doctype html> <html class="font-v2" lang="ko"><head>'
+    '<title>Coupang Wing - 김진오, 오픽스</title><meta charset="UTF-8">'
+    "<script>window.__GLOBAL_DATA__ = {\n        activeProfile: 'production',\n"
+    "        activeMarket: 'KR',\n"
+)
+
+
+def test_live_500_shell_is_not_logged_out(wing):
+    """★이 사고의 한 줄 요약: HTTP 500 + 로그인된 셸 HTML ≠ 로그아웃."""
+    state, _ = wing._rg_classify({"status": 500, "body": _LIVE_500_SHELL}, what="회귀")
+    assert state == wing.RG_PROBE_UNKNOWN
+    assert state != wing.RG_PROBE_LOGGED_OUT
+
+
+def test_html_alone_is_never_logout_evidence(wing):
+    """`<html`은 로그아웃 마커가 아니다 — 그렇게 쓰면 500 셸이 곧 로그아웃이 된다."""
+    assert "<html" not in wing._RG_SIGNIN_MARKERS
+
+
+@pytest.mark.parametrize("body", ["kccontext=abc", "<html>signin</html>",
+                                  "redirect to xauth.coupang.com"])
+def test_signin_markers_are_logged_out(wing, body):
+    state, _ = wing._rg_classify({"status": 200, "body": body}, what="회귀")
+    assert state == wing.RG_PROBE_LOGGED_OUT
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_auth_statuses_are_logged_out(wing, status):
+    state, _ = wing._rg_classify({"status": status, "body": "{}"}, what="회귀")
+    assert state == wing.RG_PROBE_LOGGED_OUT
+
+
+def test_expected_key_present_is_ok(wing):
+    state, parsed = wing._rg_classify(
+        {"status": 200, "body": '{"settlementStatusReports": []}'},
+        expect_key="settlementStatusReports", what="회귀")
+    assert state == wing.RG_PROBE_OK
+    assert parsed == {"settlementStatusReports": []}
+
+
+def test_200_json_list_is_ok_without_expected_key(wing):
+    """download-list는 리스트를 준다 — 프로브는 키를 요구하지 않는다."""
+    state, _ = wing._rg_classify({"status": 200, "body": "[]"}, what="회귀")
+    assert state == wing.RG_PROBE_OK
+
+
+@pytest.mark.parametrize("res", [None, {"status": -1, "body": "JS_EXC: TypeError"},
+                                 {"status": 200, "body": "not json"},
+                                 {"status": 502, "body": ""}])
+def test_ambiguous_answers_are_unknown_not_logout(wing, res):
+    state, _ = wing._rg_classify(res, what="회귀")
+    assert state == wing.RG_PROBE_UNKNOWN
+
+
+def test_probe_uses_download_list_not_status_api(wing):
+    """★프로브 엔드포인트 계약: status/api는 1/32, download-list는 8/8(라이브 실측).
+
+    되돌리면 이 사고가 그대로 재발한다.
+    """
+    src = inspect.getsource(wing._rg_probe_session)
+    assert "RG_DOWNLOAD_LIST_PATH" in src
+    assert "RG_STATUS_PATH" not in src
+
+
+def test_status_fetch_retries_on_500(wing):
+    """status/api 5xx는 예산 안에서 재시도한다 — 1회 판정이면 회차 대부분이 열거 0으로 죽는다."""
+    calls = {"n": 0}
+
+    class _P:
+        url = "https://wing.coupang.com/tenants/rfm/settlements/status-new"
+
+        def evaluate(self, *_a, **_k):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                return {"status": 500, "body": _LIVE_500_SHELL}
+            return {"status": 200, "body": '{"settlementStatusReports": [1]}'}
+
+    state, raw = wing._rg_fetch_status_raw(_P(), {"rg_status_days": 35}, budget_s=0.0001)
+    # budget이 0이어도 첫 시도는 하고, 실패면 즉시 UNKNOWN(로그아웃 아님)이어야 한다.
+    assert state == wing.RG_PROBE_UNKNOWN and raw is None
+    calls["n"] = 0
+    state, raw = wing._rg_fetch_status_raw(_P(), {"rg_status_days": 35}, budget_s=60)
+    assert state == wing.RG_PROBE_OK and raw == {"settlementStatusReports": [1]}
+    assert calls["n"] == 3
+
+
+def test_off_origin_is_logout_evidence(wing):
+    """진짜 로그아웃은 xauth 로그인 페이지로 리다이렉트된다(파일 주석의 실관측)."""
+    class _P:
+        url = "https://xauth.coupang.com/auth/realms/seller/protocol/openid-connect/auth"
+
+    assert wing._rg_off_origin(_P())
+    assert wing._rg_probe_session(_P()) == wing.RG_PROBE_LOGGED_OUT
+
+
+def test_on_origin_is_not_off_origin(wing):
+    class _P:
+        url = "https://wing.coupang.com/tenants/rfm/settlements/status-new"
+
+    assert wing._rg_off_origin(_P()) == ""
