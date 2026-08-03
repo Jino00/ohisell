@@ -24,6 +24,12 @@
   - **트리거(Jino 선택 '버튼-poll')**: D-8ⓒ의 스케줄 1회성을 폐기하고 **상주 poll 데몬**(adcost/rocket 패턴) — 30초 폴 `refresh-status`→요청 시 claim→run + last_success 23h 초과 시 자동 run. `com.ohisell.ohitech-ad.plist`(poll). → 백엔드 refresh-status/claim/request 엔드포인트 + 프론트 '광고비 갱신' 버튼(rocket-overview) 신규 배선 필요.
   - **세션만료 신호**: 기존 cmd_run의 `_notify_mac`(로그인HTML/비201/일별맵아님 시 알림) 유지. 별도 쿠키 freshness 워치독은 Phase1.5로 보류.
 
+- **D-12 Phase 2 게이트 통과 — 1P도 옵션 granularity를 준다(2026-08-03 라이브 실측, S0 정찰 완료)**: 7/11에 `[S0][세션만료]`로 멈춰 있던 `tools/ohitech_billboard_recon.py`를 **세션 자가 복구(PR #175)로 관통**시켜 실행(16:58:57 ①SSO 실패 → 16:59:13 ②Keychain 성공 → 정찰 계속). 결과: 캠페인 **1,089개** · `requestReport(granularity=keyword)` **completed** · XLSX **7,002행 × 44열** · 고유 옵션ID **429개** · `판매방식` 전량 **Retail**. 컬럼 구조가 **오픽스 keyword 포맷과 동일**(`광고집행 옵션ID`[8]·`광고전환매출발생 옵션ID`[10]·`광고비`[15]) → **기존 파서 재사용 가능, 신규 파서 불필요**.
+  - **금액 대조(2026-07-27~08-02)**: 옵션 합계 **5,450,601** vs prod 계정 총액(`coupang_ad_report` Retail/A01029796) **5,449,504** = **+1,097원(0.02%)**. ⚠️미규명: prod 총액은 전체(ALL_DELIVERED, D-10) 기준이고 Billboard는 PA 기준인데 0.02%만 차이 난다 = 이 계정은 비-PA가 거의 없다는 뜻으로 보이나 **별도 확인 안 함**.
+- **D-13 옵션 적재는 계정 총액과 분리한다(2026-08-03, Jino 승인 "그래, 진행해")**: 기존 `POST /ad-cost/option-ingest`의 공용 파서(`ingest_coupang_ad_xlsx_content`)는 **`ad_costs` + `coupang_ad_report` + `coupang_ad_option_daily` 셋 다** 쓴다. A01029796 XLSX를 그 경로로 밀면 **`report/SALES` 페처가 쓰는 계정 총액 행(D-10, 전체 기준)을 PA 기준 값으로 덮고** `ad_costs`에도 이중 적재된다 — S1c 배포 체크리스트의 "A01029796 PA-XLSX 수동업로드 금지(리뷰 P1①)"가 가리키던 바로 그 경로이며, 지금은 **문서 규칙으로만** 막혀 있었다.
+  - **결정**: ⓐ 파서에 `options_only` 모드 추가 — `coupang_ad_option_daily`만 적재, `ad_costs`·`coupang_ad_report`는 건드리지 않는다(이익 재계산도 없음). ⓑ **신규 전용 엔드포인트** `POST /rocket/ad-cost/option-ingest`(토큰 인증)가 `options_only=True`로 호출 — 기존 오픽스 경로는 무수정(라이브 머니경로 보호, D-8ⓐ와 같은 원칙). ⓒ **구조 가드**: vendor_id == `COUPANG_ROCKET_VENDOR_ID`인 XLSX가 `options_only=False`로 들어오면 **422로 거부**한다 — 문서 규칙(체크리스트 ②)을 코드로 승격. 왜냐하면 같은 머니 행에 정의가 다른 두 writer(PA vs 전체)가 붙으면 나중에 쓴 쪽이 조용히 이기고, 그 사고는 순이익에서만 드러난다.
+  - **순이익 반영은 이번 스코프 밖**: 옵션 광고비는 먼저 **표시 전용**으로 얹는다. 0.02% 차이의 원인을 모르는 채 차감 축을 계정 총액→옵션 합계로 갈아타면 어긋나도 못 알아챈다(D-12 ⚠️).
+
 ## 사용자 원문 인용
 - "2P 로켓그로스, 3P 판매자배송은 오픽스에서만 운영, 광고도 진행중이야. 그리고 오하이테크는 1P로켓배송만을 운영중이어서 광고도 로켓배송만 운영되고 있어"
 - 범위: "너의 권장대로 진행"(Phase 1) · 로그인: "A"
@@ -42,7 +48,11 @@
 - [x] **S3: 상주 자동화 완료·라이브 검증(2026-06-22, 원칙22)** — 전용 포트 9224(D-11) + chrome-supervise(launchd `com.ohisell.ohitech-chrome`, KeepAlive self-heal) + 버튼-poll(`com.ohisell.ohitech-ad`, poll: 버튼 claim + 23h 자동) + 백엔드 4엔드포인트(`/rocket/ad-cost/{request-refresh,refresh-status,refresh-claim,fetch-success}`) + 프론트 '광고비 갱신' 버튼(rocket-overview). 커밋 `2f92620`(feat, 미push). **라이브 증거**: ①백엔드 7/7 라운드트립(원자claim·토큰401·소비) ②수동9223 Chrome 은퇴→9224 상주 3초 기동 ③run end-to-end 29일 push(5/24~6/21, 22,431,687) ④heartbeat last_success green ⑤**버튼 라운드트립**(request→poll 60s 감지→claim→run→push→소비) ⑥머니패스 rocket-overview ad_spend 3,393,330·net_profit 5,107,684 ⑦**self-heal**(SIGKILL→3초 복구). Claude 적대적리뷰 P1(config 9223→9224 갱신)·P2(TZ KST·adopt정지알림·실패가시성) 반영. codex 사후리뷰 6/26.
   - ⚠️**잔존**: ① Chrome 기동 직후 첫 run은 리다이렉트 전환으로 1회 false '세션만료' 알림 가능(다음 poll 자동복구) ② 세션 완전만료 시 Jino가 9224 창에서 1회 로그인(D-7, 불가피) ③ feat `feat/ohitech-ad-cost` 미push·미머지(Jino 결정).
 - [x] 라이브 검증: 수집값=화면 1:1(4,039,603)·순이익 반영(0→3,393,330 차감) 확인
-- [ ] (Phase 2) 상품별 옵션 단위 광고비 표시(Billboard 리포트)
+- [x] **(Phase 2) S0 정찰: 1P 옵션 granularity 제공 여부 게이트 — 통과(D-12, 2026-08-03 라이브)**. 7,002행·429옵션·전량 Retail·오픽스 포맷 동일·금액 대조 0.02%. 정찰을 막고 있던 세션 만료는 PR #175 자가 복구가 해소.
+- [ ] (Phase 2) S1: 파서 `options_only` 모드 + 전용 엔드포인트 `/rocket/ad-cost/option-ingest` + 구조 가드(D-13ⓒ)
+- [ ] (Phase 2) S2: 페처에 Billboard 옵션 보고서 흐름 추가(오픽스 GraphQL 재사용) → 신규 엔드포인트로 push
+- [ ] (Phase 2) S3: 화면에 상품별 광고비 표시 + 옵션합계↔계정총액 대조 노출(D-13 ⓐ 표시 전용)
+- [ ] (Phase 2, 별건) 옵션 합계 vs 계정 총액 0.02% 차이 원인 규명 → 그 다음에 순이익 축 전환 여부 판단
 - [ ] (선택) 세션만료 워치독 — 현재 run의 `_notify_mac`(만료·rc2·401 알림)로 표면화. 별도 쿠키 freshness 워치독은 Phase1.5 보류.
 
 ## 현재 진행 단계
