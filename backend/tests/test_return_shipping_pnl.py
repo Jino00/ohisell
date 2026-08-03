@@ -34,7 +34,8 @@ from app.services.profit_calculator import (
 D = Decimal
 NAVER_CH = 6
 CH_MAP = {NAVER_CH: Channel(id=NAVER_CH, code="NAVER", channel_type="own")}
-PICKUP = order_delivery.RETURN_PICKUP_COST_HANJIN   # 회수비(미확정 추정치, 상수 한 곳)
+PICKUP = order_delivery.RETURN_PICKUP_COST_NORMAL       # 일반배송 회수비(⚠️한진 추정치)
+PICKUP_NB = order_delivery.RETURN_PICKUP_COST_NBAESONG  # N배송 회수비(품고 요율표 실단가)
 
 
 @pytest.fixture
@@ -94,16 +95,18 @@ def test_uncharged_return_is_pure_loss(db):
     assert row["cost"] == D("1900") + PICKUP
 
 
-def test_nbaesong_return_uses_pumgo_outbound_and_hanjin_pickup(db):
-    """★N배송 반품 — 출고는 품고 3,020인데 **회수는 한진**이다(라이브 2건 실측).
+def test_nbaesong_return_uses_pumgo_rate_not_hanjin(db):
+    """★회수비 축은 회수 택배사가 아니라 **배송방식**이다(2026-08-03 정정).
 
-    배송방식으로 회수비를 갈랐다면 회수에도 3,020을 붙여 과대계상했을 것이다.
-    지원액 0으로 두면 회수비가 그대로 우리 부담이다(지원 상계는 아래 테스트)."""
+    처음엔 라이브 86건의 collectDeliveryCompany가 전부 HANJIN이라 회수사 축으로 잡았는데,
+    **일반배송도 N배송도 실제 택배사가 한진**이라 그 축으론 구분이 안 된다. 갈리는 것은
+    계약 주체다 — 일반배송은 우리 한진 직계약, N배송은 품고 요율표(센터반품 2,050 +
+    반품작업비 900 = 3,245 VAT포함). 회수사 축이면 N배송에 한진 추정치가 잘못 붙는다."""
     _returned(db, pkg="pk3", attr="ARRIVAL_GUARANTEE", demand=0,
               completed=datetime(2026, 8, 2, 9, 0))
     row = _return_shipping_pnl(db, CH_MAP, date(2026, 8, 1), date(2026, 8, 3))[NAVER_CH]["2026-08-02"]
     assert row["income"] == D("0")                              # 원천이 `미청구(N배송)`
-    assert row["cost"] == order_delivery.SHIPPING_COST_NBAESONG + PICKUP
+    assert row["cost"] == order_delivery.SHIPPING_COST_NBAESONG + PICKUP_NB
 
 
 def test_naver_support_offsets_pickup_cost(db):

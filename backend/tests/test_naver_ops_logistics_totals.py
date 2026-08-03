@@ -56,29 +56,29 @@ def _add(db, *, pkg, attr=None, paid=None, status="delivered", line="1",
 
 def test_normal_and_nbaesong_priced_separately(db):
     _add(db, pkg="A", attr="TODAY", paid=D("1900"))
-    _add(db, pkg="B", attr="ARRIVAL_GUARANTEE", paid=D("3020"))
-    assert logistics_totals(db, START, END) == (2, D("4920"))
+    _add(db, pkg="B", attr="ARRIVAL_GUARANTEE", paid=D("3245"))
+    assert logistics_totals(db, START, END) == (2, D("5145"))
 
 
 def test_flat_rate_regression_guard(db):
     # N배송 3건이면 정액 1,900 시절엔 5,700이었다. 9,060이어야 한다.
     for i, p in enumerate("XYZ"):
-        _add(db, pkg=p, attr="ARRIVAL_GUARANTEE", paid=D("3020"), line=str(i))
+        _add(db, pkg=p, attr="ARRIVAL_GUARANTEE", paid=D("3245"), line=str(i))
     count, total = logistics_totals(db, START, END)
-    assert (count, total) == (3, D("9060"))
+    assert (count, total) == (3, D("9735"))
     assert total != D("5700")
 
 
 def test_one_charge_per_package(db):
     for i in range(4):  # 한 패키지에 라인 4개
-        _add(db, pkg="A", attr="ARRIVAL_GUARANTEE", paid=D("3020"), line=str(i))
-    assert logistics_totals(db, START, END) == (1, D("3020"))
+        _add(db, pkg="A", attr="ARRIVAL_GUARANTEE", paid=D("3245"), line=str(i))
+    assert logistics_totals(db, START, END) == (1, D("3245"))
 
 
 def test_mixed_package_takes_max(db):
     _add(db, pkg="A", attr="TODAY", paid=D("1900"), line="1")
-    _add(db, pkg="A", attr="ARRIVAL_GUARANTEE", paid=D("3020"), line="2")
-    assert logistics_totals(db, START, END) == (1, D("3020"))
+    _add(db, pkg="A", attr="ARRIVAL_GUARANTEE", paid=D("3245"), line="2")
+    assert logistics_totals(db, START, END) == (1, D("3245"))
 
 
 # ── codex P1: 스냅샷 결측 시 배송속성 폴백 ─────────────────────────────────
@@ -86,7 +86,7 @@ def test_null_snapshot_falls_back_to_delivery_attribute(db):
     # shipping_cost_paid가 비어도 배송속성이 N배송이면 3,020 — 메인 엔진과 같은 답.
     _add(db, pkg="A", attr="ARRIVAL_GUARANTEE", paid=None)
     count, total = logistics_totals(db, START, END)
-    assert (count, total) == (1, D("3020"))
+    assert (count, total) == (1, D("3245"))
     assert total != D("1900")  # 이 값이 나오면 두 엔진이 갈린 것
 
 
@@ -100,17 +100,17 @@ def test_truncated_raw_data_does_not_raise(db):
     # raw_data는 MAX_RAW_DATA_SIZE 초과 시 잘려 저장된다(라이브 실재). json_valid 가드가
     # 없으면 SQLite json_extract가 예외를 던져 엔드포인트가 통째로 500이 난다.
     _add(db, pkg="A", attr="TODAY", paid=D("1900"))
-    _add(db, pkg="BROKEN", attr="ARRIVAL_GUARANTEE", paid=D("3020"),
+    _add(db, pkg="BROKEN", attr="ARRIVAL_GUARANTEE", paid=D("3245"),
          raw='{"productOrder": {"packageNum')  # 잘린 JSON
     count, total = logistics_totals(db, START, END)
-    assert (count, total) == (2, D("4920"))  # 잘린 행은 order_number를 배송키로 쓴다
+    assert (count, total) == (2, D("5145"))  # 잘린 행은 order_number를 배송키로 쓴다
 
 
 # ── 경계 ───────────────────────────────────────────────────────────────────
 def test_cancelled_and_returned_excluded(db):
     _add(db, pkg="A", attr="TODAY", paid=D("1900"))
-    _add(db, pkg="B", attr="ARRIVAL_GUARANTEE", paid=D("3020"), status="cancelled")
-    _add(db, pkg="C", attr="ARRIVAL_GUARANTEE", paid=D("3020"), status="returned")
+    _add(db, pkg="B", attr="ARRIVAL_GUARANTEE", paid=D("3245"), status="cancelled")
+    _add(db, pkg="C", attr="ARRIVAL_GUARANTEE", paid=D("3245"), status="returned")
     assert logistics_totals(db, START, END) == (1, D("1900"))
 
 
@@ -122,7 +122,7 @@ def test_other_channels_excluded(db):
 
 def test_outside_window_excluded(db):
     _add(db, pkg="A", attr="TODAY", paid=D("1900"))
-    _add(db, pkg="B", attr="ARRIVAL_GUARANTEE", paid=D("3020"),
+    _add(db, pkg="B", attr="ARRIVAL_GUARANTEE", paid=D("3245"),
          when=datetime(2026, 6, 1, 10, 0, 0))
     assert logistics_totals(db, START, END) == (1, D("1900"))
 

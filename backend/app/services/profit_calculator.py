@@ -379,7 +379,7 @@ def _return_shipping_pnl(
         #   ★상한 = 회수비. 초과분(N배송 5,500 − 2,500 = 3,000)은 **수입으로 잡지 않는다** —
         #     그 돈이 실제로 우리에게 지급되는지는 정산에서 아직 확인되지 않았다(D+12 미성숙).
         #     프로브(naver_claim_settlement_probe)가 08-06·08-09에 잡으면 그때 재심한다.
-        pickup = order_delivery.return_pickup_cost(o.return_collect_company)
+        pickup = order_delivery.return_pickup_cost(o.delivery_attribute_type)
         support = min(Decimal(str(o.return_fee_support_amount or 0)), pickup)
         cost = _shipment_cost(o) + pickup - support
         bucket = out.setdefault(o.channel_id, {}).setdefault(
@@ -425,7 +425,7 @@ def _return_shipping_pnl_by_product(
         head = lines[0]
         ch = channel_map.get(head.channel_id)
         income = Decimal(str(head.return_fee_demand_amount or 0))
-        pickup = order_delivery.return_pickup_cost(head.return_collect_company)
+        pickup = order_delivery.return_pickup_cost(head.delivery_attribute_type)
         support = min(Decimal(str(head.return_fee_support_amount or 0)), pickup)
         cost = _shipment_cost(head) + pickup - support
         commission = _delivery_commission(ch, income)

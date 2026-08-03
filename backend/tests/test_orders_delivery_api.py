@@ -94,9 +94,9 @@ def test_order_list_adds_delivery_fields_without_breaking_shape(client):
     assert nb[0]["delivery_policy_type"] == "유료"
     assert nb[0]["shipping_fee_type"] == "선결제"
     assert nb[0]["logistics_company_id"] == "PG"
-    assert Decimal(nb[0]["shipping_cost_paid"]) == Decimal("3020")
+    assert Decimal(nb[0]["shipping_cost_paid"]) == Decimal("3245")
     assert Decimal(nb[0]["shipping_cost"]) == Decimal("3000")
-    assert Decimal(nb[0]["shipping_cost_net"]) == Decimal("20")   # 실부담
+    assert Decimal(nb[0]["shipping_cost_net"]) == Decimal("245")  # 실부담 = 3,245 − 3,000
 
 
 def test_delivery_breakdown_reproduces_four_combinations(client):
@@ -115,14 +115,14 @@ def test_delivery_breakdown_reproduces_four_combinations(client):
     assert got[("NORMAL", False)]["orders"] == 2
     assert got[("NORMAL", True)]["orders"] == 1
 
-    # 실부담: N배송 3건 × (3020−3000)=60, 일반 TODAY 6건 × 1900=11,400
-    assert Decimal(got[("ARRIVAL_GUARANTEE", True)]["net_total"]) == Decimal("60")
+    # 실부담: N배송 3건 × (3245−3000)=735, 일반 TODAY 6건 × 1900=11,400
+    assert Decimal(got[("ARRIVAL_GUARANTEE", True)]["net_total"]) == Decimal("735")
     assert Decimal(got[("TODAY", False)]["net_total"]) == Decimal("11400")
     # 수취가 지불을 넘는 칸은 음수 그대로(리포트는 사실 그대로, BEP의 보수 클램프와 별개)
     assert Decimal(got[("NORMAL", True)]["net_total"]) == Decimal("-600")
 
     assert d["total_orders"] == 12
-    assert Decimal(d["total_paid"]) == Decimal("3") * Decimal("3020") + Decimal("9") * Decimal("1900")
+    assert Decimal(d["total_paid"]) == Decimal("3") * Decimal("3245") + Decimal("9") * Decimal("1900")
     assert Decimal(d["total_collected"]) == Decimal("3") * Decimal("3000") + Decimal("2500")
     assert Decimal(d["total_net"]) == Decimal(d["total_paid"]) - Decimal(d["total_collected"])
     assert d["unresolved_orders"] == 0
