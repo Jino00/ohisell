@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import date
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from collections import defaultdict
 
@@ -255,6 +255,35 @@ def _shipment_cost_map(orders: list, channel_map: dict) -> dict[tuple, Decimal]:
     return costs
 
 
+# 배송비 수취분에 붙는 네이버페이 주문관리 수수료율.
+# ★라이브 실측(naver_settlement_case product_order_type='DELIVERY', 전 기간 1,652행 −119,270원):
+#   2,500원→68원 / 3,000원→81원 / 5,000원→136원 / 5,500원→150원 = 2.700~2.727%.
+#   상품 주문관리 수수료율(2.724%)과 같은 요율이다. 네이버의 원 단위 절사·반올림 규칙이
+#   금액대마다 미세하게 갈려 건당 ±1원 오차가 남는다(N배송 438건 기준 총 ±438원).
+#   그 1원을 재현하려 반올림 규칙을 역설계하는 것은 과적합이라 표준 반올림을 쓴다.
+NAVER_DELIVERY_COMMISSION_RATE = Decimal("0.02724")
+
+
+def _delivery_commission(ch: Channel | None, deliv: Decimal) -> Decimal:
+    """고객이 낸(=우리가 정산받는) 배송비에 붙는 주문관리 수수료.
+
+    ★종전 코드는 "배송비엔 수수료 미부과"를 가정했는데 **실측은 반대**다 — 정산이 배송비를
+      product_order_type='DELIVERY' 원장 행으로 따로 끊고 거기에도 주문관리 수수료를 매긴다.
+    ★N배송(도착보장) 배송비 3,000원 정책이 2026-07-22부터 돌면서 이 누락이 급격히 커진다.
+      구조(라이브 실측 438건): deliveryFeeAmount는 항상 3,000이고
+        - 멤버십 회원(deliveryDiscountAmount=3,000, 61.6%) → 네이버가 고객에게 면제해주고
+          그 3,000원을 우리에게 지급
+        - 비멤버십(deliveryDiscountAmount=0, 37.7%) → 고객이 우리에게 3,000원 지급
+      **어느 쪽이든 우리가 3,000원을 정산받고 거기에 수수료가 붙는다**(DELIVERY 행 3,000원
+      109건으로 실증). 그래서 할인 여부를 볼 필요 없이 수취 배송비에 요율을 곱하면 된다.
+
+    쿠팡·cafe24는 배송비 수수료 구조가 확인되지 않아 적용하지 않는다(추정 금지 — 확인되면 확장).
+    """
+    if deliv <= 0 or not ch or ch.code != "NAVER":
+        return ZERO
+    return (deliv * NAVER_DELIVERY_COMMISSION_RATE).quantize(Decimal("1"), ROUND_HALF_UP)
+
+
 def _raw(o: Order) -> dict:
     """Order.raw_data(Text JSON) → dict (실패 시 빈 dict)."""
     rd = o.raw_data
@@ -292,11 +321,22 @@ def _shipment_key(ch: Channel | None, o: Order) -> tuple:
 
 
 def _delivery_income(ch: Channel | None, o: Order) -> Decimal:
-    """고객이 결제한 배송비 = 매출 가산분 (수수료 미부과). 라인 단위 원본값.
+    """우리가 정산받는 배송비 = 매출 가산분. 라인 단위 원본값 — **배송당 1회만** 쓸 것.
 
-    NAVER deliveryFeeAmount: productOrder(패키지)별로 저장 → 라인 합 = 주문 총액 (정확).
-    COUPANG shippingPrice: shipment 단위 값이 박스 내 모든 라인에 복사돼 있음
-      → 호출부에서 _shipment_key로 배송 1회만 가산 (라인 합산 시 중복).
+    ★2026-08-03 정정: 종전 주석은 "NAVER deliveryFeeAmount는 패키지별로 저장 → 라인 합 =
+      주문 총액(정확)"이라고 적었는데 **틀렸다**. 실측하면 네이버도 쿠팡과 똑같이
+      **배송 단위 값이 패키지 내 모든 라인에 복사**돼 있다:
+        2라인 패키지 13개 → 라인 합 78,000 vs 실제 39,000
+        3라인 패키지  1개 → 라인 합  9,000 vs 실제  3,000
+        채널6 전 기간 과대계상 62,500원(21패키지)
+      정산이 이를 확정한다 — DELIVERY 원장 행은 **배송 1건당 1행**이다(N배송 423패키지 ↔
+      DELIVERY 행 110건, 미성숙분 제외). 분할배송이면 packageNumber가 갈리며 행도 2개가 된다.
+      → 그래서 호출부는 채널을 가리지 않고 _shipment_key로 배송 1회만 가산한다.
+
+    NAVER deliveryFeeAmount: N배송은 3,000 고정. 멤버십이면 네이버가 고객에게 면제하고 그
+      금액을 우리에게 지급, 아니면 고객이 지급 — **어느 쪽이든 우리 수입**이라 할인 여부를
+      보지 않는다(_delivery_commission 주석의 실측 참조).
+    COUPANG shippingPrice: shipment 단위 값이 박스 내 모든 라인에 복사.
     CAFE24/기타: 고객 무료배송이라 수입 0.
     """
     if not ch:
@@ -308,6 +348,8 @@ def _delivery_income(ch: Channel | None, o: Order) -> Decimal:
 
 
 def _is_coupang(ch: Channel | None) -> bool:
+    """쿠팡 계열 채널 판별. 배송수입 dedup이 전 채널로 통일되면서(2026-08-03) 호출부가
+    없어졌지만, _line_revenue/_delivery_income의 채널 판별과 짝이 되는 공개 헬퍼라 남긴다."""
     return bool(ch and (ch.code or "").startswith("COUPANG"))
 
 
@@ -473,7 +515,7 @@ def calculate_daily_trend(
     manual_revenue_by_date: dict[str, Decimal] = {}  # 순이익 제외용 추적
     shipment_costs = _shipment_cost_map(orders, channel_map)  # 배송별 택배비 선행 확정
     seen_shipments: set[tuple] = set()  # 배송(packageNumber/박스)당 1회 부과
-    seen_deliv: set[tuple] = set()      # 쿠팡 배송수입 박스당 1회 (라인 복사 dedup)
+    seen_deliv: set[tuple] = set()      # 배송수입 배송당 1회 (전 채널 라인 복사 dedup)
     for o in orders:
         ch = channel_map.get(o.channel_id)
         if ch and ch.channel_type == "consignment":
@@ -500,7 +542,9 @@ def calculate_daily_trend(
         product_rev = _line_revenue(ch, o)
         # 고객이 낸 배송비 → 매출 가산. 쿠팡은 박스값이 라인마다 복사돼 배송당 1회만.
         deliv = _delivery_income(ch, o)
-        if deliv and _is_coupang(ch):
+        # ★배송수입은 배송(패키지·박스)당 1회 — 네이버도 쿠팡과 같이 라인마다 복사돼 있다
+        #   (_delivery_income 주석의 실측). 종전엔 쿠팡만 dedup해 네이버가 이중계상됐다.
+        if deliv:
             if skey in seen_deliv:
                 deliv = ZERO
             else:
@@ -515,8 +559,9 @@ def calculate_daily_trend(
         if o.product_id and o.product_id in product_map:
             bucket["cost"] += product_map[o.product_id].cost_price * o.quantity
 
-        # 수수료 — 상품매출 기준만 (배송비엔 수수료 미부과)
+        # 수수료 — 상품매출 + 배송비 수취분(정산 DELIVERY 원장 행에 실제로 부과됨)
         bucket["commission"] += _line_commission(ch, o, product_rev, actual_fee)
+        bucket["commission"] += _delivery_commission(ch, deliv)
 
         # 판매자 배송비 — 물리배송(packageNumber·박스)당 1회, 배송방식별 실단가(선행 확정).
         if skey not in seen_shipments:
@@ -617,7 +662,7 @@ def calculate_channel_summary(
     by_channel: dict[int, dict] = {}
     shipment_costs = _shipment_cost_map(orders, channel_map)  # 배송별 택배비 선행 확정
     seen_shipments: set[tuple] = set()  # 배송(packageNumber/박스)당 1회 부과
-    seen_deliv: set[tuple] = set()      # 쿠팡 배송수입 박스당 1회 (라인 복사 dedup)
+    seen_deliv: set[tuple] = set()      # 배송수입 배송당 1회 (전 채널 라인 복사 dedup)
     for o in orders:
         ch = channel_map.get(o.channel_id)
         if ch and ch.channel_type == "consignment":
@@ -638,7 +683,9 @@ def calculate_channel_summary(
         product_rev = _line_revenue(ch, o)
         # 고객이 낸 배송비 → 매출 가산. 쿠팡은 박스값이 라인마다 복사돼 배송당 1회만.
         deliv = _delivery_income(ch, o)
-        if deliv and _is_coupang(ch):
+        # ★배송수입은 배송(패키지·박스)당 1회 — 네이버도 쿠팡과 같이 라인마다 복사돼 있다
+        #   (_delivery_income 주석의 실측). 종전엔 쿠팡만 dedup해 네이버가 이중계상됐다.
+        if deliv:
             if skey in seen_deliv:
                 deliv = ZERO
             else:
@@ -652,8 +699,9 @@ def calculate_channel_summary(
         if o.product_id and o.product_id in product_map:
             b["cost"] += product_map[o.product_id].cost_price * o.quantity
 
-        # 수수료 — 상품매출 기준만 (배송비엔 수수료 미부과)
+        # 수수료 — 상품매출 + 배송비 수취분(정산 DELIVERY 원장 행에 실제로 부과됨)
         b["commission"] += _line_commission(ch, o, product_rev, actual_fee)
+        b["commission"] += _delivery_commission(ch, deliv)
         # 판매자 배송비 — 물리배송(packageNumber·박스)당 1회, 배송방식별 실단가(선행 확정).
         if skey not in seen_shipments:
             seen_shipments.add(skey)
@@ -832,24 +880,22 @@ def calculate_product_profit(
         if pid in product_map:
             b["cost"] += product_map[pid].cost_price * o.quantity
 
-        # 수수료 — 상품매출 기준만 (배송비엔 수수료 미부과)
+        # 수수료 — 상품매출분. 배송비 수취분 수수료는 배송 그룹에서 라인 비례 배분한다.
         b["commission"] += _line_commission(ch, o, product_rev, actual_fee)
 
-        # 배송 그룹 — 한진 1,900 & 고객배송수입을 라인 비례 배분
+        # 배송 그룹 — 택배비 & 고객배송수입을 라인 비례 배분
         skey = _shipment_key(ch, o)
-        g = ship_groups.setdefault(skey, {"lines": [], "deliv": ZERO, "cost": ZERO})
+        g = ship_groups.setdefault(skey, {"lines": [], "deliv": ZERO, "cost": ZERO, "ch": ch})
         g["lines"].append((pid, product_rev))
-        # 택배비는 배송당 1회 — 단가가 갈리면 최댓값(_add_shipment_cost와 같은 이유).
+        # 택배비는 배송당 1회 — 단가가 갈리면 최댓값(_shipment_cost_map과 같은 이유).
         _c = _shipment_cost(o)
         if _c > g["cost"]:
             g["cost"] = _c
         dval = _delivery_income(ch, o)
-        if dval:
-            if _is_coupang(ch):
-                if g["deliv"] == ZERO:  # 박스값 라인 복사 → 최초 1회만 (first-wins)
-                    g["deliv"] = dval
-            else:
-                g["deliv"] += dval  # NAVER: 패키지별 라인 합 = 배송 총액
+        # ★배송수입도 배송당 1회 — 네이버도 쿠팡과 같이 라인마다 복사돼 있다(전 채널 first-wins).
+        #   종전엔 네이버만 라인 합산해 다라인 패키지에서 이중계상됐다(라이브 62,500원).
+        if dval and g["deliv"] == ZERO:
+            g["deliv"] = dval
 
         # 광고비는 아래에서 option_id → product_id 매핑으로 일괄 할당
 
@@ -878,6 +924,10 @@ def calculate_product_profit(
             _alloc_to_lines(_g["lines"], _g["deliv"], "shipping_revenue")
             # 배송수입에 대한 VAT도 라인 비례 배분
             _alloc_to_lines(_g["lines"], _g["deliv"] * Decimal("10") / Decimal("110"), "vat")
+            # 배송비 수취분에 붙는 주문관리 수수료(정산 DELIVERY 원장 행)도 같은 비례로.
+            _dc = _delivery_commission(_g["ch"], _g["deliv"])
+            if _dc:
+                _alloc_to_lines(_g["lines"], _dc, "commission")
 
     # option_id → product_id 매핑으로 광고비 직접 할당 (ad_data.db 기반 — 현재 비활성)
     option_to_product: dict[str, int] = {}
