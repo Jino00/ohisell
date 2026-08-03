@@ -184,7 +184,7 @@ def test_logistics_uses_recent_nbaesong_share(db):
     db.commit()
     out = bep_calculator._avg_qty_and_logistics(db)["p1"]
     assert out["nb_share"] == Decimal("1")
-    assert out["shipping"] == Decimal("3020")     # 1,900 + 1,120 × 1
+    assert out["shipping"] == Decimal("3245")     # 1,900 + 1,345 × 1
     assert out["nb_sample"] == 10
     # ★평균 수량·수취 배송비는 넓은 창(52건 전부) — 혼합비만 최근 표본이다
     assert out["orders"] == 52
@@ -209,8 +209,8 @@ def test_logistics_paid_is_linear_in_nbaesong_share(db):
     db.commit()
     out = bep_calculator._avg_qty_and_logistics(db)["p1"]
     assert out["nb_share"] == Decimal("0.5")
-    assert out["shipping"] == Decimal("2460")
-    assert out["logistics"] == Decimal("2460.00")
+    assert out["shipping"] == Decimal("2572.5")
+    assert out["logistics"] == Decimal("2572.50")
 
 
 def test_logistics_wide_window_still_drives_qty_and_collected(db):
@@ -447,7 +447,7 @@ def test_logistics_uses_raw_data_fallback_for_unbackfilled_rows(db):
     db.commit()
     out = bep_calculator._avg_qty_and_logistics(db)["p1"]
     assert out["nb_share"] == Decimal("1")
-    assert out["shipping"] == Decimal("3020")
+    assert out["shipping"] == Decimal("3245")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -459,10 +459,10 @@ def test_calculate_bep_delivery_aware_hand_computed(db):
     입력: 최근 10건 전부 N배송·판매가 20,000·수량 1·수취 0 / 원가 5,000
           정산 실측 10건: 주문관리 2.724% · 매출연동 4.5%(N배송) → 기저 3.0%
     손계산: 혼합비 1.0 → 수수료율 = 0.02724 + 0.03 + 0.015 = 0.07224
-            물류비 = 1,900 + 1,120×1 = 3,020
-            20,000×0.07224 = 1,444.8 → 20,000−1,444.8−5,000−3,020 = 10,535.2
-            공헌이익 = 10,535.2 / 1.1 = 9,577.4545… → 9,577.45(2자리)
-            bep = 20,000 / 9,577.45 = 2.08823… → 2.0882(4자리)
+            물류비 = 1,900 + 1,345×1 = 3,245 (품고 요율표 2, 2026-08-03 정정)
+            20,000×0.07224 = 1,444.8 → 20,000−1,444.8−5,000−3,245 = 10,310.2
+            공헌이익 = 10,310.2 / 1.1 = 9,372.9090… → 9,372.91(2자리)
+            bep = 20,000 / 9,372.91 = 2.13383… → 2.1338(4자리)
     """
     pm = ProductMaster(internal_sku="SKU-N1", product_name="N1", cost_price=Decimal("5000"))
     db.add(pm)
@@ -481,12 +481,12 @@ def test_calculate_bep_delivery_aware_hand_computed(db):
     row = db.query(NaverProductBep).filter(NaverProductBep.channel_product_id == "p1").one()
     assert row.commission_basis == "delivery_case"
     assert row.commission_rate == Decimal("0.0722")     # 0.07224 → 4자리 반올림
-    assert row.logistics_cost == Decimal("3020.00")
+    assert row.logistics_cost == Decimal("3245.00")
     assert row.selling_price == Decimal("20000")
     expected_cm = ((Decimal("20000") - Decimal("20000") * Decimal("0.07224")
-                    - Decimal("5000") - Decimal("3020")) / Decimal("1.1")).quantize(Decimal("0.01"))
+                    - Decimal("5000") - Decimal("3245")) / Decimal("1.1")).quantize(Decimal("0.01"))
     assert row.contribution_margin == expected_cm
-    assert row.bep_roas == Decimal("2.0882")
+    assert row.bep_roas == Decimal("2.1338")
 
 
 def test_calculate_bep_falls_back_to_account_rate_without_settlement(db):
