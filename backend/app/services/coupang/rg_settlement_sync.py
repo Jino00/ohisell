@@ -585,7 +585,53 @@ def _resolve_period_start(db: Session, account_key: str, period_end: date) -> da
     return fallback
 
 
-def ingest_settlement_xlsx(db: Session, account_key: str, content: bytes) -> dict:
+class RgSheetDriftError(Exception):
+    """엑셀은 정상적으로 열렸는데 **우리가 아는 시트 구조가 아니다**(시트명·상세 구조 드리프트).
+
+    WingReadError(파일 자체 손상/열기 실패)와 구분한다 — 이건 파일은 멀쩡하고 쿠팡 쪽 스키마가
+    바뀐 것이라 사람이 _SHEET_FEE_TYPE_MAP을 고쳐야 풀린다.
+    """
+
+
+def _assert_no_sheet_drift(parsed: dict) -> None:
+    """strict 경로 전용 사전 판정 — **DML을 시작하기 전에** 드리프트면 끊는다.
+
+    ★왜 사후가 아니라 사전인가(codex 1R[P1], 2026-08-03): 적재는 (fee_type, period_end) 단위로
+      delete-once 후 insert다. 여러 시트가 같은 fee_type으로 병합되는 경우('반품 회수비'+
+      '반품 재입고비' → return_shipping) 한 시트만 개명되면, 인식된 반쪽이 그 fee_type×period의
+      **기존 snapshot 전체를 지우고 반쪽만 넣는다**. 커밋 뒤에 422를 던져봐야 데이터는 이미 반쪽이고
+      재시도는 복구가 아니라 반복이다. "멱등이라 무해"는 틀린 가정이었다.
+
+    판정 3가지 — 전부 파싱 결과만으로 결정되므로 DB를 건드리기 전에 알 수 있다:
+      ① 인식 시트 0개          → 전량 미인식(시트명 드리프트)
+      ② sheets_skipped 비어있지 않음 → 부분 미인식(절반이 조용히 빠지는 쪽이 더 나쁘다)
+      ③ 상세 0건인데 검산이 '진짜 비었음'을 확인해 주지 않는 시트가 있음
+         ★③의 근거(라이브 실측 2026-08-03): 상세 0건 성공 10건은 **전부** sum_summary=0.0 ·
+           reconcile.match=True · vs_status_api.match=True였다(WING2 오하이테크, 그 주 발생비용
+           없음). 즉 정상 케이스는 검산으로 확인된다. 반대로 "상세 행이 사라지고 요약금액만 남은"
+           드리프트는 match=False로 드러난다 — 이걸 성공으로 두면 기존 snapshot을 0건으로
+           갈아엎고 heartbeat까지 찍는다(codex 1R[P1]).
+         상세가 있는 시트의 검산 불일치는 여기서 다루지 않는다(기존대로 warning) — 그건 금액
+           정합성 주제라 별건이다.
+    """
+    sheets = parsed["sheets"]
+    skipped = parsed["sheets_skipped"]
+    if not sheets:
+        raise RgSheetDriftError(f"인식된 정산 시트 없음(전량 미인식) — 시트명 드리프트 의심: {skipped[:5]}")
+    if skipped:
+        raise RgSheetDriftError(f"정산 시트 일부 미인식 — 시트명 드리프트 의심: {skipped[:5]}")
+    unverified = [
+        s["sheet_name"] for s in sheets
+        if not s["options"] and not (s["reconcile"] and s["reconcile"]["match"])
+    ]
+    if unverified:
+        raise RgSheetDriftError(
+            f"상세 0건인데 검산이 '비어 있음'을 확인해 주지 않음 — 상세 구조 드리프트 의심: {unverified[:5]}"
+        )
+
+
+def ingest_settlement_xlsx(db: Session, account_key: str, content: bytes,
+                           *, strict_sheets: bool = False) -> dict:
     """종류별 엑셀 bytes → 파싱·검산·옵션 단위 upsert(S6).
 
     upsert grain=(account_key, from, to, fee_type, vendor_item_id=옵션ID). VAT前(A-B) 저장.
@@ -593,12 +639,20 @@ def ingest_settlement_xlsx(db: Session, account_key: str, content: bytes) -> dic
            reconcile, vs_status_api}], "sheets_skipped", "status": "ok"|"empty"}.
     검산2(vs_status_api): 요약최종(VAT후) == status/api 계정 row amount(같은 fee_type·기간).
 
-    ★status="empty"/sheets_skipped는 **호출자가 판정해야 하는 신호**다(여기서 raise하지 않는 이유):
-      같은 함수를 쓰는 S6-auto는 CATEGORY_TR 엑셀이 매 주기 정상적으로 empty를 내지만(시트명
-      '주문내역, 판매수수료' 미매핑), Mac 페처 push 경로에서는 empty=시트 드리프트=결함이다.
-      후자는 라우터 /rg/settlement/upload-xlsx가 422로 막는다(2026-08-03 — 거짓 완료 차단).
+    ★strict_sheets(2026-08-03 — 거짓 완료 차단): True면 적재 **전에** _assert_no_sheet_drift로
+      시트 드리프트를 판정해 RgSheetDriftError를 던진다(DB 무변경). 라우터
+      /rg/settlement/upload-xlsx(Mac 페처 push)만 True다.
+      기본값 False인 이유: 같은 함수를 쓰는 S6-auto는 CATEGORY_TR 엑셀이 매 주기 **정상적으로**
+      empty를 낸다(유일 시트명 '주문내역, 판매수수료'가 _SHEET_FEE_TYPE_MAP에 없음, prod 로그
+      28건). 거기에 예외를 던지면 그 경로가 통째로 터진다.
+      ⚠️전제: 페처 config의 rg_report_types에 **파서가 시트를 아는 리포트만** 넣어야 한다.
+      CATEGORY_TR 등을 켜려면 _SHEET_FEE_TYPE_MAP을 먼저 확장할 것 — 안 그러면 정상 파일이
+      매 회차 422 → 재시도 3회 소진으로 끝난다(codex 1R[P2]). 라우터는 report_type을 받지 않아
+      리포트별로 정책을 가를 수 없다.
     """
     parsed = parse_settlement_xlsx(content)
+    if strict_sheets:
+        _assert_no_sheet_drift(parsed)   # ★DML 전 — 던지면 DB는 손대지 않은 상태 그대로다
     sheets = parsed["sheets"]
     if not sheets:
         return {

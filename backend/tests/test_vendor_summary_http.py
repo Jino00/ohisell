@@ -241,13 +241,13 @@ def test_rg_settlement_upload_runs_ingest_off_the_event_loop(client, monkeypatch
     seen: dict[str, bool] = {}
     _real = _rs.ingest_settlement_xlsx
 
-    def _spy(db, account_key, content):
+    def _spy(db, account_key, content, **kw):
         try:
             asyncio.get_running_loop()
             seen["on_event_loop"] = True      # 루프 스레드 = 오프로드 안 됨 = 퇴행
         except RuntimeError:
             seen["on_event_loop"] = False     # 워커 스레드 = 정상
-        return _real(db, account_key, content)
+        return _real(db, account_key, content, **kw)
 
     monkeypatch.setattr(_rs, "ingest_settlement_xlsx", _spy)
 
@@ -309,12 +309,15 @@ def test_rg_settlement_upload_all_sheets_unknown_returns_422_without_heartbeat(c
     assert _rg_last_success(client) == before
 
 
-def test_rg_settlement_upload_partial_skip_returns_422_but_keeps_ingested_rows(client):
-    """부분 인식(2시트 중 1개만 미인식)도 실패로 보고한다 — 절반이 조용히 빠지는데 화면은
-    완전 정상이라 전량 미인식보다 나쁘다(Jino 결정 2026-08-03).
+def test_rg_settlement_upload_partial_skip_rejects_before_touching_db(client):
+    """★부분 인식(2시트 중 1개만 미인식)은 **DB를 건드리기 전에** 끊는다(codex 1R[P1]).
 
-    단 **적재된 행은 남긴다**: ingest는 이미 커밋한 뒤라 롤백하지 않는다. 재시도는 멱등
-    (fee_type×period snapshot replace)이라 실패 보고로 인한 재업로드가 데이터를 망치지 않는다.
+    처음엔 커밋 뒤에 422를 던졌는데, 그건 데이터 손상을 막지 못한다: 적재는 (fee_type,
+    period_end) 단위 delete-once + insert라, 같은 fee_type으로 병합되는 2시트('반품 회수비'+
+    '반품 재입고비' → return_shipping) 중 하나만 개명되면 인식된 반쪽이 기존 snapshot 전체를
+    지우고 반쪽만 넣는다. 재시도는 복구가 아니라 반복이다 — "멱등이라 무해"는 틀린 가정이었다.
+
+    그래서 판정은 파싱 직후(=DML 전)에 한다. 이 테스트는 **행이 하나도 안 들어갔는지**를 본다.
     """
     from tests.test_rg_settlement_sync import _build_xlsx, _WH_ROWS, _DEL_ROWS
 
@@ -331,16 +334,37 @@ def test_rg_settlement_upload_partial_skip_returns_422_but_keeps_ingested_rows(c
     assert r.status_code == 422, r.text
     assert "배송비(개편)" in r.json()["detail"]
     assert _rg_last_success(client) == before
-    assert "적재 2행은 반영됨" in r.json()["detail"]
-    # 인식된 입출고비 2행은 커밋돼 있다(422가 롤백을 뜻하지 않음)
+    # ★핵심: 인식된 시트의 행도 들어가면 안 된다(들어가면 snapshot replace가 이미 일어난 것)
     from app.models import CoupangRgSettlementFee
     with client.testing_session() as s:
         n = s.query(CoupangRgSettlementFee).filter(
             CoupangRgSettlementFee.account_key == "COUPANG_WING1",
-            CoupangRgSettlementFee.fee_type == "warehousing",
-            CoupangRgSettlementFee.vendor_item_id != "",
         ).count()
-    assert n == 2
+    assert n == 0, "부분 미인식인데 DML이 실행됐다 — snapshot이 반쪽으로 갈아치워질 수 있다"
+
+
+def test_rg_settlement_upload_summary_without_detail_rows_returns_422(client):
+    """★상세 행이 사라지고 요약금액만 남은 드리프트를 잡는다(codex 1R[P1]).
+
+    'upserted==0이면 무조건 정상'으로 두면, 상세 구조가 바뀌어 옵션 행을 하나도 못 읽은
+    파일이 기존 snapshot을 0건으로 갈아엎고 heartbeat까지 찍는다. 라이브의 진짜 빈 시트는
+    검산이 확인해 준다(sum_summary=0·match=True, 실측 10건) — 그렇지 않은 0건만 끊는다.
+    """
+    from tests.test_rg_settlement_sync import _build_xlsx
+
+    before = _rg_last_success(client)
+    # 요약합계 50,000인데 상세 0행 → reconcile.match=False
+    content = _build_xlsx([("입출고비", "입출고비", [], 25, 50000, "2026-06-07")])
+    r = client.post(
+        "/api/coupang/ops/rg/settlement/upload-xlsx",
+        params={"account_key": "COUPANG_WING1"},
+        files={"file": ("WAREHOUSING_SHIPPING-ko-x.xlsx", content,
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        headers={"X-Ingest-Token": _TOKEN},
+    )
+    assert r.status_code == 422, r.text
+    assert "입출고비" in r.json()["detail"]
+    assert _rg_last_success(client) == before
 
 
 def test_rg_settlement_upload_zero_option_rows_is_success(client):
