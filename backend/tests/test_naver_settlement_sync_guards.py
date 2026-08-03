@@ -124,3 +124,32 @@ def test_settlement_jobs_are_registered_in_scheduler():
     src = inspect.getsource(sched)
     assert '("sync_naver_settlement", "25 5 * * *")' in src
     assert '("sync_naver_case_settlement", "30 5 * * *")' in src
+
+
+# ── ★정산 실패가 아침배치 전체를 막지 않아야 한다 (자체 델타 점검에서 발견) ──────────
+# _run_chain은 예외 시 break한다(상류 실패 → 하류 중단 = 의존 보존). 그런데 정산을
+# _CATCHUP_ORDER 맨 앞에 넣으면서, 정산 API가 한 번 죽으면 그 뒤 전체
+# (proposals→expert→auto_operator 등 집행 잡 포함)가 통째로 안 도는 결합이 생겼다.
+# 정산은 이 체인의 상류가 아니므로(아무 잡도 정산 성공을 기다리지 않는다) 끊으면 안 된다.
+def test_settlement_catchup_does_not_block_the_chain():
+    assert "sync_naver_settlement" in sched._CATCHUP_NON_BLOCKING
+    assert "sync_naver_case_settlement" in sched._CATCHUP_NON_BLOCKING
+
+
+def test_execution_jobs_still_block_the_chain():
+    """집행 체인(제안→전문가→자동운영)은 의존이 실재하므로 상류 실패 시 끊겨야 한다."""
+    for j in ("generate_naver_proposals", "generate_expert_desk",
+              "run_naver_auto_operator_daily"):
+        assert j not in sched._CATCHUP_NON_BLOCKING, f"{j}는 의존 체인이라 끊겨야 한다"
+
+
+def test_non_blocking_failure_is_still_recorded_as_failure():
+    """★실패를 삼켜 성공으로 위장하면 안 된다 — 체인만 잇고 기록은 실패여야 한다."""
+    import inspect
+    src = inspect.getsource(sched._catch_up_morning_batch)
+    # _record_catchup_status(ok=False)가 non-blocking 분기보다 먼저 호출돼야 한다.
+    rec = src.find("_record_catchup_status(job_name, ok=False")
+    branch = src.find("_CATCHUP_NON_BLOCKING")
+    assert rec != -1 and branch != -1 and rec < branch, (
+        "non-blocking 잡도 실패는 실패로 기록돼야 한다(green-while-stale 방지)"
+    )
