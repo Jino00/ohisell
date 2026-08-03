@@ -1253,8 +1253,11 @@ class NaverClaimSettlementProbe(Base):
     않는 이유: 무엇이 신호인지 아직 모르는 단계라 원본 행을 남겨야 나중에 어떤 축으로든 다시
     볼 수 있다(뭉쳐 저장하면 되돌릴 수 없다).
 
-    UNIQUE = (product_order_id, product_order_type, settle_type, settle_decision_type,
-              observed_date) — 하루 여러 번 재실행해도 같은 행이 중복 적재되지 않는다.
+    UNIQUE = (product_order_id, product_order_type, settle_type, observed_date)
+    — 하루 여러 번 재실행해도 같은 행이 중복 적재되지 않는다.
+    ★settle_decision_type 컬럼은 2026-08-03에 **삭제**했다(마이그 e7b2c9d4a610): orderId 단건
+      조회는 periodType과 상호 배타라 settleDecisionType을 줄 수 없고, 응답 스키마에도 그 필드가
+      없다(공식 스펙 확인). 유형 축은 응답의 settle_type이 대신한다.
     observed_date를 키에 **포함**하는 이유: 같은 상품주문의 정산 상태는 날짜에 따라 옮겨간다
     (UNSETTLED → SETTLED). 날짜를 빼면 그 전이가 덮여 사라지고, 넣으면 "언제 무엇으로 보였나"의
     시계열이 남는다 — 이 프로브의 목적이 바로 그 전이 관측이다.
@@ -1267,8 +1270,7 @@ class NaverClaimSettlementProbe(Base):
     __tablename__ = "naver_claim_settlement_probe"
     __table_args__ = (
         UniqueConstraint(
-            "product_order_id", "product_order_type", "settle_type",
-            "settle_decision_type", "observed_date",
+            "product_order_id", "product_order_type", "settle_type", "observed_date",
             name="uq_naver_claim_settlement_probe",
         ),
     )
@@ -1281,9 +1283,10 @@ class NaverClaimSettlementProbe(Base):
     delivery_attribute_type: Mapped[Optional[str]] = mapped_column(String(40), nullable=True, index=True)
     is_membership: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)  # deliveryDiscountAmount > 0
     order_status: Mapped[str] = mapped_column(String(20), nullable=False)               # returned / exchanged
-    settle_decision_type: Mapped[str] = mapped_column(String(20), nullable=False)       # SETTLED/UNSETTLED/BEFORE_CANCEL
     product_order_type: Mapped[str] = mapped_column(String(40), nullable=False)         # PROD_ORDER/DELIVERY/CONCESSION/…
-    settle_type: Mapped[str] = mapped_column(String(40), nullable=False, default="")    # NORMAL_SETTLE_ORIGINAL/… ('' = 없음)
+    # 정산 상태 축 — NORMAL_SETTLE_ORIGINAL(일반) / NORMAL_SETTLE_BEFORE_CANCEL(정산 전 취소) /
+    # NORMAL_SETTLE_AFTER_CANCEL / QUICK_SETTLE_* / QUANTITY_CANCEL_* ('' = 응답에 없음).
+    settle_type: Mapped[str] = mapped_column(String(40), nullable=False, default="")
     pay_settle_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
     settle_expect_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
     pay_date: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)

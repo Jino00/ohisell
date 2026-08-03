@@ -1,15 +1,18 @@
 # test_nbaesong_return_settlement_probe.py — N배송 반품 회수비 프로브 가드.
 #
 # 왜 이 가드들이 있나:
-#   이 프로브는 **아직 존재하지 않는 표본**(N배송 반품 정산 행)이 익는 순간을 잡으려고 만든
-#   장치다. 라이브 실측상 N배송 반품은 468건 중 2건뿐이고(2026072553216341 결제 07-25 /
-#   2026072852172181 결제 07-28) 둘 다 settleDecisionType 3유형 전부에서 정산 행 0건이다
-#   (정산 성숙 D+12 → 08-06·08-09경 예상). 즉 **오늘은 아무 것도 안 나오는 것이 정상**이고,
-#   그래서 조용히 고장 나 있어도 아무도 모른다. 이 테스트가 유일한 파수꾼이다.
+#   이 프로브는 N배송 반품 정산 행의 **상태 전이**를 잡으려고 만든 장치다. 라이브 실측상
+#   N배송 반품은 468건 중 2건뿐이고(2026072553216341 결제 07-25 / 2026072852172181 결제 07-28),
+#   지금은 둘 다 NORMAL_SETTLE_BEFORE_CANCEL(정산 전 취소)로만 잡힌다. 정산 성숙 D+12라
+#   08-06·08-09경 상태가 바뀔 수 있고, 그 순간을 사람이 지키고 있을 수는 없다.
+#   평소엔 **아무 알림도 안 오는 것이 정상**이라 조용히 고장 나 있어도 아무도 모른다.
+#   이 테스트가 유일한 파수꾼이다.
 #
 #   ① API 실패를 빈 결과로 삼키면 → 표본이 익어도 "0건"으로 기록하고 알림 없이 지나간다.
 #   ② 신규 조합 판정이 틀리면 → 매일 알리거나(무시하게 됨) 첫 출현을 놓친다.
 #   ③ 멤버십·N배송 판별이 틀리면 → 가설 검증의 두 축이 통째로 무의미해진다.
+#   ④ ★조회 파라미터가 틀리면 → 400으로 전손한다. 실제로 첫 배포본이 그랬다(2026-08-03):
+#     orderId에 periodType·settleDecisionType을 함께 실어 보내 매 호출 400을 받았다.
 from __future__ import annotations
 
 import json
@@ -64,15 +67,15 @@ def _order(db, order_number, *, attr, status="returned", discount=0, days_ago=5,
 
 
 class _FakeClient:
-    """정산 API 대역 — (order_id, decision) → 응답 행 목록."""
+    """정산 API 대역 — order_id → 응답 행 목록(유형 필터 없이 그 주문의 정산 행 전량)."""
 
-    def __init__(self, table: dict[tuple[str, str], list[dict]]):
+    def __init__(self, table: dict[str, list[dict]]):
         self.table = table
-        self.calls: list[tuple[str, str]] = []
+        self.calls: list[str] = []
 
-    def fetch_case_settlement_by_order(self, order_id, settle_decision_type):
-        self.calls.append((order_id, settle_decision_type))
-        return list(self.table.get((order_id, settle_decision_type), []))
+    def fetch_case_settlement_by_order(self, order_id):
+        self.calls.append(order_id)
+        return list(self.table.get(order_id, []))
 
 
 def _elem(**kw) -> dict:
@@ -94,19 +97,25 @@ def test_by_order_request_failure_raises():
     c = NaverClient(NaverAccountConfig(client_id="x", client_secret="y"), access_token="t")
     c._request = lambda *a, **k: None
     with pytest.raises(RuntimeError, match="건별 정산 단건 조회 실패"):
-        c.fetch_case_settlement_by_order(NBAESONG_ORDER, "SETTLED")
+        c.fetch_case_settlement_by_order(NBAESONG_ORDER)
 
 
 def test_by_order_empty_result_is_not_an_error():
-    # 진짜로 정산이 아직 없는 주문(=지금의 N배송 2건)은 빈 리스트가 정상.
+    # 진짜로 정산이 아직 없는 주문은 빈 리스트가 정상.
     c = NaverClient(NaverAccountConfig(client_id="x", client_secret="y"), access_token="t")
     c._request = lambda *a, **k: {"elements": []}
-    assert c.fetch_case_settlement_by_order(NBAESONG_ORDER, "SETTLED") == []
+    assert c.fetch_case_settlement_by_order(NBAESONG_ORDER) == []
 
 
-def test_by_order_sends_orderid_and_decision_type():
-    """orderId·settleDecisionType이 실제로 실려야 한다 — 빠지면 계정 전체가 돌아와
-    엉뚱한 주문의 정산이 이 주문의 관측으로 기록된다."""
+def test_by_order_sends_only_orderid_and_paging():
+    """★첫 배포본 전손의 재발 가드(2026-08-03 라이브).
+
+    네이버는 orderId와 periodType·searchDate를 **상호 배타**로 본다:
+      orderId + periodType → 400 "periodType 값은 orderId, productOrderId 값과 같이
+                             입력될 수 없습니다"
+    settleDecisionType은 periodType=PAY_DATE일 때만 의미가 있으므로 함께 못 보낸다.
+    orderId가 빠지면 반대로 계정 전체가 돌아와 엉뚱한 주문의 정산이 이 주문의 관측이 된다.
+    """
     seen: dict = {}
     c = NaverClient(NaverAccountConfig(client_id="x", client_secret="y"), access_token="t")
 
@@ -115,11 +124,10 @@ def test_by_order_sends_orderid_and_decision_type():
         return {"elements": []}
 
     c._request = _capture
-    c.fetch_case_settlement_by_order(NBAESONG_ORDER, "BEFORE_CANCEL")
+    c.fetch_case_settlement_by_order(NBAESONG_ORDER)
     assert seen["orderId"] == NBAESONG_ORDER
-    assert seen["settleDecisionType"] == "BEFORE_CANCEL"
-    assert seen["periodType"] == "SETTLE_CASEBYCASE_PAY_DATE"
-    assert "searchDate" not in seen  # 결제일로 좁히면 D+12 성숙 시점을 놓친다
+    assert seen["pageNumber"] == 1 and seen["pageSize"] == 1000   # 스펙상 필수
+    assert set(seen) == {"orderId", "pageNumber", "pageSize"}     # 나머지는 전부 400 유발
 
 
 def test_probe_propagates_api_failure(db, monkeypatch):
@@ -160,8 +168,9 @@ def test_nbaesong_detected_by_single_discriminator(db):
     _order(db, NORMAL_ORDER, attr="TODAY")
     got = {e["order_number"]: e["delivery_attribute_type"] for e in probe.collect_claim_orders(db, today=TODAY)}
     assert got == {NBAESONG_ORDER: "ARRIVAL_GUARANTEE", NORMAL_ORDER: "TODAY"}
-    assert probe._highlight(("ARRIVAL_GUARANTEE", False, "DELIVERY", "SETTLED")).startswith("★★★")
-    assert probe._highlight(("TODAY", False, "DELIVERY", "SETTLED")) is None
+    nb = ("ARRIVAL_GUARANTEE", False, "DELIVERY", "NORMAL_SETTLE_BEFORE_CANCEL")
+    assert probe._highlight(nb).startswith("★★★")
+    assert probe._highlight(("TODAY", False, "DELIVERY", "NORMAL_SETTLE_ORIGINAL")) is None
 
 
 # ── 스캔 대상 선별 ──────────────────────────────────────────────────────────
@@ -190,15 +199,15 @@ def test_new_combo_notifies_and_persists(db, monkeypatch):
     monkeypatch.setattr(probe, "notify_text", lambda text, **k: sent.append(text) or {"sent": True})
     _order(db, NBAESONG_ORDER, attr="ARRIVAL_GUARANTEE")
     client = _FakeClient({
-        (NBAESONG_ORDER, "SETTLED"): [_elem(order_id=NBAESONG_ORDER, pay_settle_amount=Decimal("3000"))],
+        NBAESONG_ORDER: [_elem(order_id=NBAESONG_ORDER, pay_settle_amount=Decimal("3000"))],
     })
 
     result = probe.run_probe(db, client, today=TODAY)
 
-    assert len(client.calls) == 3          # 3 decision type 전부 조회
+    assert client.calls == [NBAESONG_ORDER]   # 주문당 1회 — 유형별 반복 조회는 400을 부른다
     assert result["inserted"] == 1
     assert result["notified"] is True
-    assert ("ARRIVAL_GUARANTEE", False, "DELIVERY", "SETTLED") in result["new_combos"]
+    assert ("ARRIVAL_GUARANTEE", False, "DELIVERY", "NORMAL_SETTLE_ORIGINAL") in result["new_combos"]
     assert "★★★" in sent[0] and "N배송" in sent[0]
 
     # DB round-trip — 관측이 실제로 남아야 다음 실행이 "이미 본 조합"을 안다.
@@ -207,11 +216,41 @@ def test_new_combo_notifies_and_persists(db, monkeypatch):
     assert row.delivery_attribute_type == "ARRIVAL_GUARANTEE"
     assert row.is_membership is False
     assert row.order_status == "returned"
-    assert row.settle_decision_type == "SETTLED"
     assert row.product_order_type == "DELIVERY"
     assert row.settle_type == "NORMAL_SETTLE_ORIGINAL"
     assert Decimal(str(row.pay_settle_amount)) == Decimal("3000")
     assert row.observed_date == TODAY
+
+
+def test_settle_type_transition_is_a_new_combo(db, monkeypatch):
+    """★이 프로브의 존재 이유 — 같은 주문의 정산 상태가 옮겨가면(BEFORE_CANCEL → ORIGINAL)
+    그것이 신규 조합으로 잡혀야 한다. 지금 N배송 반품 2건은 전부 BEFORE_CANCEL이고,
+    08-06·08-09 성숙에서 바뀌는지가 회수비 구조 규명의 관문이다."""
+    sent: list[str] = []
+    monkeypatch.setattr(probe, "notify_text", lambda text, **k: sent.append(text) or {"sent": True})
+    _order(db, NBAESONG_ORDER, attr="ARRIVAL_GUARANTEE")
+
+    before = _FakeClient({NBAESONG_ORDER: [
+        _elem(order_id=NBAESONG_ORDER, settle_type="NORMAL_SETTLE_BEFORE_CANCEL",
+              pay_settle_amount=Decimal("3000")),
+    ]})
+    probe.run_probe(db, before, today=TODAY)
+    assert len(sent) == 1
+
+    after = _FakeClient({NBAESONG_ORDER: [
+        _elem(order_id=NBAESONG_ORDER, settle_type="NORMAL_SETTLE_ORIGINAL",
+              pay_settle_amount=Decimal("3000")),
+    ]})
+    result = probe.run_probe(db, after, today=TODAY + timedelta(days=3))
+
+    assert result["new_combos"] == [
+        ("ARRIVAL_GUARANTEE", False, "DELIVERY", "NORMAL_SETTLE_ORIGINAL")
+    ]
+    assert len(sent) == 2
+    # 전이 전후가 둘 다 남는다(덮어쓰지 않는다) — 시계열이 이 프로브의 산출물이다.
+    assert {r.settle_type for r in db.query(NaverClaimSettlementProbe).all()} == {
+        "NORMAL_SETTLE_BEFORE_CANCEL", "NORMAL_SETTLE_ORIGINAL",
+    }
 
 
 def test_known_combo_does_not_notify(db, monkeypatch):
@@ -221,14 +260,14 @@ def test_known_combo_does_not_notify(db, monkeypatch):
     db.add(NaverClaimSettlementProbe(
         order_number="prev-1", product_order_id="po-prev",
         delivery_attribute_type="ARRIVAL_GUARANTEE", is_membership=False,
-        order_status="returned", settle_decision_type="SETTLED",
+        order_status="returned",
         product_order_type="DELIVERY", settle_type="NORMAL_SETTLE_ORIGINAL",
         pay_settle_amount=Decimal("3000"), settle_expect_amount=Decimal("3000"),
         observed_date=TODAY - timedelta(days=1),
     ))
     db.commit()
     _order(db, NBAESONG_ORDER, attr="ARRIVAL_GUARANTEE")
-    client = _FakeClient({(NBAESONG_ORDER, "SETTLED"): [_elem(order_id=NBAESONG_ORDER)]})
+    client = _FakeClient({NBAESONG_ORDER: [_elem(order_id=NBAESONG_ORDER)]})
 
     result = probe.run_probe(db, client, today=TODAY)
 
@@ -244,7 +283,7 @@ def test_same_day_rerun_does_not_double_notify(db, monkeypatch):
     sent: list[str] = []
     monkeypatch.setattr(probe, "notify_text", lambda text, **k: sent.append(text) or {"sent": True})
     _order(db, NBAESONG_ORDER, attr="ARRIVAL_GUARANTEE")
-    client = _FakeClient({(NBAESONG_ORDER, "SETTLED"): [_elem(order_id=NBAESONG_ORDER)]})
+    client = _FakeClient({NBAESONG_ORDER: [_elem(order_id=NBAESONG_ORDER)]})
 
     first = probe.run_probe(db, client, today=TODAY)
     second = probe.run_probe(db, client, today=TODAY)
@@ -261,7 +300,7 @@ def test_membership_nbaesong_is_highlighted(db, monkeypatch):
     monkeypatch.setattr(probe, "notify_text", lambda text, **k: sent.append(text) or {"sent": True})
     _order(db, NBAESONG_ORDER, attr="ARRIVAL_GUARANTEE", discount=3000)
     client = _FakeClient({
-        (NBAESONG_ORDER, "SETTLED"): [_elem(order_id=NBAESONG_ORDER, product_order_type="PROD_ORDER")],
+        NBAESONG_ORDER: [_elem(order_id=NBAESONG_ORDER, product_order_type="PROD_ORDER")],
     })
 
     probe.run_probe(db, client, today=TODAY)
@@ -276,7 +315,7 @@ def test_compensation_type_is_highlighted(db, monkeypatch):
     monkeypatch.setattr(probe, "notify_text", lambda text, **k: sent.append(text) or {"sent": True})
     _order(db, NBAESONG_ORDER, attr="ARRIVAL_GUARANTEE")
     client = _FakeClient({
-        (NBAESONG_ORDER, "UNSETTLED"): [
+        NBAESONG_ORDER: [
             _elem(order_id=NBAESONG_ORDER, product_order_type="CONCESSION", settle_type=None),
         ],
     })
@@ -288,7 +327,7 @@ def test_compensation_type_is_highlighted(db, monkeypatch):
 
 
 def test_no_observations_means_no_notification(db, monkeypatch):
-    """지금(08-03)의 실제 상태 — N배송 2건이 3유형 모두 0건이면 조용해야 한다."""
+    """정산 행이 아직 없는 주문만 있으면 조용해야 한다(평상시의 정상 상태)."""
     sent: list[str] = []
     monkeypatch.setattr(probe, "notify_text", lambda text, **k: sent.append(text) or {"sent": True})
     _order(db, NBAESONG_ORDER, attr="ARRIVAL_GUARANTEE")
@@ -315,4 +354,3 @@ def test_probe_job_is_excluded_from_catchup():
 def test_probe_job_scan_window_matches_case_settlement_convention():
     # 기존 건별정산 수집과 같은 44일 — 성숙(D+12)에 32일 여유.
     assert probe.SCAN_LOOKBACK_DAYS == 44
-    assert probe.SETTLE_DECISION_TYPES == ("SETTLED", "UNSETTLED", "BEFORE_CANCEL")

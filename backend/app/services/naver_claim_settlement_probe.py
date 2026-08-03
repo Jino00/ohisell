@@ -12,7 +12,7 @@
 #   검증 불가다. 그래서 검증을 억지로 시도하는 대신 **표본이 익는 순간 자동으로 잡히게** 한다.
 #   사람이 08-06·08-09을 기억하고 지키고 있을 수는 없기 때문이다.
 #
-# 책임(SA): (1) 클레임 주문을 뽑아 (2) 정산 API를 3-decision-type으로 훑고 (3) 관측을 적재하고
+# 책임(SA): (1) 클레임 주문을 뽑아 (2) 주문번호로 정산 행을 전량 조회하고 (3) 관측을 적재하고
 #   (4) **처음 보는 조합**만 Slack으로 올린다. 회계·이익 계산은 건드리지 않는다(관측 전용 —
 #   가설이 검증되기 전에 숫자를 바꾸면 근거 없는 수치가 회계에 박힌다).
 #
@@ -38,9 +38,12 @@ log = logging.getLogger(__name__)
 #   44일이면 성숙(D+12)에 32일 여유 — 성숙 직후 전이를 놓칠 창이 아니다.
 SCAN_LOOKBACK_DAYS = 44
 
-# periodType=SETTLE_CASEBYCASE_PAY_DATE에서만 의미를 갖는 3유형(공식 스펙). 전부 훑는 이유:
-# N배송 2건이 지금 **세 유형 모두에서 0건**이라, 어디에 처음 나타나는지가 곧 정보다.
-SETTLE_DECISION_TYPES: tuple[str, ...] = ("SETTLED", "UNSETTLED", "BEFORE_CANCEL")
+# ★유형 축은 settleDecisionType이 아니라 **응답의 settleType**이다(2026-08-03 정정).
+#   orderId 단건 조회는 periodType과 상호 배타라 settleDecisionType을 아예 못 준다
+#   (clients/naver.py fetch_case_settlement_by_order 주석의 raw HTTP 증거). 대신 그 주문의
+#   정산 행이 유형 구분 없이 전부 돌아오고, 각 행의 settleType이
+#   NORMAL_SETTLE_ORIGINAL / NORMAL_SETTLE_BEFORE_CANCEL / … 로 상태를 말해 준다.
+#   주문당 조회는 1회면 충분하다(구버전은 3회 돌며 매번 400을 받았다).
 
 # 클레임 = 반품/교환. 취소(cancelled)는 배송 회수가 없어 회수비 관측 대상이 아니다.
 CLAIM_STATUSES: tuple[str, ...] = ("returned", "exchanged")
@@ -118,8 +121,10 @@ def collect_claim_orders(db, *, today: date, lookback_days: int = SCAN_LOOKBACK_
 
 
 def _combo(row: NaverClaimSettlementProbe | dict) -> tuple:
-    """신규 판정 그레인 = (배송방식, 멤버십, productOrderType, settleDecisionType).
+    """신규 판정 그레인 = (배송방식, 멤버십, productOrderType, settleType).
 
+    네 번째 축이 settleDecisionType이 아니라 settleType인 이유는 위 SETTLE_* 주석 참조
+    (단건 조회에서는 decisionType을 줄 수도 받을 수도 없다).
     금액·상품주문번호는 넣지 않는다 — 금액이 다를 때마다 알리면 매일 시끄러워 첫 출현이 묻힌다.
     """
     if isinstance(row, dict):
@@ -127,13 +132,13 @@ def _combo(row: NaverClaimSettlementProbe | dict) -> tuple:
             row["delivery_attribute_type"],
             bool(row["is_membership"]),
             row["product_order_type"],
-            row["settle_decision_type"],
+            row["settle_type"],
         )
     return (
         row.delivery_attribute_type,
         bool(row.is_membership),
         row.product_order_type,
-        row.settle_decision_type,
+        row.settle_type,
     )
 
 
@@ -145,19 +150,19 @@ def _known_combos(db) -> set[tuple]:
       observed_date < today로 자르면 재실행마다 같은 알림이 반복된다.
     """
     return {
-        (attr, bool(memb), pot, sdt)
-        for attr, memb, pot, sdt in db.query(
+        (attr, bool(memb), pot, st)
+        for attr, memb, pot, st in db.query(
             NaverClaimSettlementProbe.delivery_attribute_type,
             NaverClaimSettlementProbe.is_membership,
             NaverClaimSettlementProbe.product_order_type,
-            NaverClaimSettlementProbe.settle_decision_type,
+            NaverClaimSettlementProbe.settle_type,
         ).distinct()
     }
 
 
 def _highlight(combo: tuple) -> str | None:
     """강조 라벨 — 이 프로브를 만든 이유에 해당하는 사건만 별을 단다."""
-    attr, membership, product_order_type, _decision = combo
+    attr, membership, product_order_type, _settle_type = combo
     if attr == NBAESONG_ATTR and product_order_type == _DELIVERY_TYPE:
         return "★★★ N배송 반품/교환 배송비(DELIVERY) 최초 관측 — 회수비 실측 확보"
     if product_order_type in COMPENSATION_TYPES:
@@ -179,21 +184,21 @@ def _format_slack(new_rows: list[dict], *, today: date) -> str:
 
     lines = [f"[N배송 반품 프로브 {today}] 처음 보는 정산 조합 {len(new_rows)}건"]
     for _rank, combo, row in ranked:
-        attr, membership, product_order_type, decision = combo
+        attr, membership, product_order_type, settle_type = combo
         label = _highlight(combo)
         if label:
             lines.append(label)
         lines.append(
             f"- 배송={attr or 'UNKNOWN'} / 멤버십={'Y' if membership else 'N'} / "
-            f"{product_order_type} / {decision} / settleType={row['settle_type'] or '-'} / "
-            f"정산기준금액={row['pay_settle_amount']} "
+            f"{product_order_type} / settleType={settle_type or '-'} / "
+            f"정산기준금액={row['pay_settle_amount']} / 정산예정액={row['settle_expect_amount']} "
             f"(주문 {row['order_number']}, 상품주문 {row['product_order_id'] or '-'})"
         )
     return "\n".join(lines)
 
 
 def run_probe(db, client, *, today: date | None = None, webhook_url: str | None = None) -> dict:
-    """클레임 주문 × 3 decision type 정산 조회 → 적재 → 신규 조합만 Slack.
+    """클레임 주문 × 주문번호 단건 정산 조회(주문당 1회) → 적재 → 신규 조합만 Slack.
 
     반환: {"orders": n, "observations": n, "inserted": n, "new_combos": [...], "notified": bool}
     """
@@ -203,31 +208,28 @@ def run_probe(db, client, *, today: date | None = None, webhook_url: str | None 
 
     observations: list[dict] = []
     for entry in orders:
-        for decision in SETTLE_DECISION_TYPES:
-            # 실패는 예외로 올라간다(client 계약) — 여기서 잡지 않는다.
-            for e in client.fetch_case_settlement_by_order(entry["order_number"], decision):
-                observations.append({
-                    "order_number": entry["order_number"],
-                    "product_order_id": e.get("product_order_id") or "",
-                    "delivery_attribute_type": entry["delivery_attribute_type"],
-                    "is_membership": entry["is_membership"],
-                    "order_status": entry["order_status"],
-                    "settle_decision_type": decision,
-                    "product_order_type": e.get("product_order_type") or "",
-                    "settle_type": e.get("settle_type") or "",
-                    "pay_settle_amount": e.get("pay_settle_amount") or Decimal(0),
-                    "settle_expect_amount": e.get("settle_expect_amount") or Decimal(0),
-                    "pay_date": e.get("pay_date"),
-                    "settle_expect_date": e.get("settle_expect_date"),
-                })
+        # 실패는 예외로 올라간다(client 계약) — 여기서 잡지 않는다.
+        for e in client.fetch_case_settlement_by_order(entry["order_number"]):
+            observations.append({
+                "order_number": entry["order_number"],
+                "product_order_id": e.get("product_order_id") or "",
+                "delivery_attribute_type": entry["delivery_attribute_type"],
+                "is_membership": entry["is_membership"],
+                "order_status": entry["order_status"],
+                "product_order_type": e.get("product_order_type") or "",
+                "settle_type": e.get("settle_type") or "",
+                "pay_settle_amount": e.get("pay_settle_amount") or Decimal(0),
+                "settle_expect_amount": e.get("settle_expect_amount") or Decimal(0),
+                "pay_date": e.get("pay_date"),
+                "settle_expect_date": e.get("settle_expect_date"),
+            })
 
     inserted = 0
     seen_keys: set[tuple] = set()
     new_by_combo: dict[tuple, dict] = {}
     for obs in observations:
         key = (
-            obs["product_order_id"], obs["product_order_type"], obs["settle_type"],
-            obs["settle_decision_type"], today,
+            obs["product_order_id"], obs["product_order_type"], obs["settle_type"], today,
         )
         combo = _combo(obs)
         if combo not in known and combo not in new_by_combo:
@@ -241,7 +243,6 @@ def run_probe(db, client, *, today: date | None = None, webhook_url: str | None 
                 NaverClaimSettlementProbe.product_order_id == obs["product_order_id"],
                 NaverClaimSettlementProbe.product_order_type == obs["product_order_type"],
                 NaverClaimSettlementProbe.settle_type == obs["settle_type"],
-                NaverClaimSettlementProbe.settle_decision_type == obs["settle_decision_type"],
                 NaverClaimSettlementProbe.observed_date == today,
             )
             .first()
