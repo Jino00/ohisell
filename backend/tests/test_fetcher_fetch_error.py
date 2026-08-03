@@ -2,10 +2,12 @@
 #   ad_cost(오픽스 광고)는 PR #30에서 먼저 고쳤고(test_ad_cost_fetch_error.py), 같은 구멍을
 #   공유하던 나머지가 여기다: Wing 판매분석·RG 정산·오하이테크 광고·로켓 발주/정산.
 #
-#   ★구멍(PR #30과 동일): 페처가 갱신 요청을 claim한 뒤(=플래그 이미 clear) 죽으면 prod에
-#   아무 흔적도 안 남는다. 성공에만 시각(last_success_at)이 있고 실패엔 짝이 없어서, UI는
+#   ★구멍(PR #30과 동일): 당시 claim은 요청 플래그를 즉시 소비했고, 페처가 claim 직후 죽으면
+#   prod에 아무 흔적도 안 남았다. 성공에만 시각(last_success_at)이 있고 실패엔 짝이 없어서, UI는
 #   "실패"와 "아직 진행 중"을 구분할 수단이 아예 없다 — 215초를 헛기다린 뒤 "Mac 응답 없음"
 #   이라는 뭉뚱그린 문구만 낸다(진짜 원인은 화면 어디에도 안 나옴).
+#   (지금은 lease 계약이라 claim이 플래그를 보존한다 — 2026-07-27. 실패 흔적이 필요한 이유는
+#    그대로다: 재시도 소진·로그인 필요로 요청이 소멸할 때 사유가 남는 유일한 자리다.)
 #
 #   4종 전부 상태행이 coupang_wing_cookie 한 테이블에 산다(account_key로만 구분) → PR #30이
 #   추가한 last_error_at 컬럼을 그대로 쓴다(신규 마이그 없음).
@@ -130,7 +132,15 @@ def test_mark_fetch_error_truncates_to_column_limit(db, account, mark_error, _ma
     assert len(_row(db, account).last_error) == 300
 
 
-@pytest.mark.parametrize("account,_mark_error,mark_ok,_status", _FETCHERS)
+# heartbeat가 곧 run 완료 신호인 3종(claim의 settle_on_success_heartbeat=True). RG만 뺀다 —
+# RG는 한 회차가 (정산주기×리포트종류) 여러 엑셀이라 heartbeat가 **중간** 신호이고, 그래서
+# 실패 흔적 클리어 계약이 다르다(2026-08-03 codex 2R[P2]: 4종으로 퉁치면 나머지 3종의 계약이
+# 느슨해진다 — 3종은 요청 유무와 무관하게 지우는 게 맞다).
+# RG 쪽 계약은 test_rg_settlement_sync.py의 rg_heartbeat 3종이 따로 지킨다.
+_FETCHERS_HEARTBEAT_SETTLES = [p for p in _FETCHERS if p.id != "rg_settlement"]
+
+
+@pytest.mark.parametrize("account,_mark_error,mark_ok,_status", _FETCHERS_HEARTBEAT_SETTLES)
 def test_success_clears_error_trace(db, account, _mark_error, mark_ok, _status):
     """성공 push는 과거 실패 흔적을 지운다 — 안 지우면 오래된 실패가 화면에 계속 남는다."""
     _seed(db, account)
