@@ -1720,21 +1720,97 @@ def _rg_push_xlsx(cfg: dict, url: str, report_type: str, group_key: str) -> int:
     return 0
 
 
+# ── 세션 프로브 판정 3값 ───────────────────────────────────────────────────────
+# ★왜 bool이 아닌가(2026-08-03 라이브 실측): 한 비트로는 "로그아웃"과 "판정 불가"를 구분할 수
+#   없다. _rg_json이 비200·깨진 JSON·예외를 전부 None으로 접고 호출자가 그걸 곧장 '세션 만료'로
+#   읽어, 멀쩡한 세션에서 남은 주기가 통째로 버려졌다(3/3 재현: 다운로드 성공 6~7초 뒤 실패).
+#   대조군까지 성립했다 — 같은 세션·2분 간격에 대상 2개면 중단, 1개면 성공.
+_PROBE_OK = "ok"
+_PROBE_AUTH = "auth"        # 로그인 필요가 **확실**(로그인 HTML·401·403)
+_PROBE_UNKNOWN = "unknown"  # 판정 불가(비200·본문 이상·예외) — 세션 만료로 승격하지 않는다
+
+
+def _rg_session_probe(page) -> tuple[str, str]:
+    """정산 status/api를 1회 POST해 (판정, 사유)를 돌려준다. 사유는 그대로 로그에 남긴다.
+
+    ★사유를 남기는 게 이 함수의 존재 이유다: 종전엔 실패가 False 한 비트라 로그아웃인지
+      429인지 500인지 evaluate 예외인지 사후에 구분할 방법이 없었다(그래서 6일 침묵의 원인을
+      로그만으로 못 짚었다).
+    ★HTML 마커로 로그인을 단정할 때 status를 함께 본다: 502 오류 페이지도 HTML이라
+      '<html'만으로 로그인 필요라고 부르면 인프라 장애가 로그아웃으로 둔갑한다.
+    """
+    try:
+        res = _rg_post(page, RG_STATUS_PATH, _rg_status_payload({}))
+    except Exception as e:  # noqa: BLE001 — 네비게이션 중 evaluate 실패 등
+        return _PROBE_UNKNOWN, f"evaluate 예외: {str(e)[:120]}"
+    if not isinstance(res, dict):
+        return _PROBE_UNKNOWN, f"응답 형식 이상: {str(res)[:80]}"
+    status = res.get("status")
+    body = res.get("body") or ""
+    low = body.lower()
+    looks_login = ("kccontext" in low or "signin" in low
+                   or (status == 200 and "<html" in low))
+    if status in (401, 403) or looks_login:
+        return _PROBE_AUTH, f"로그인 필요(status={status}, body={body[:80]!r})"
+    if status != 200:
+        return _PROBE_UNKNOWN, f"비200(status={status}, body={body[:120]!r})"
+    try:
+        data = json.loads(body)
+    except (ValueError, TypeError):
+        return _PROBE_UNKNOWN, f"JSON 파싱 실패(body={body[:120]!r})"
+    if isinstance(data, dict) and "settlementStatusReports" in data:
+        return _PROBE_OK, "ok"
+    keys = list(data)[:6] if isinstance(data, dict) else type(data).__name__
+    return _PROBE_UNKNOWN, f"예상 키(settlementStatusReports) 없음: {keys}"
+
+
 def _rg_session_ok(page) -> bool:
     """정산 status/api가 정상 JSON(settlementStatusReports 키)을 주면 로그인 상태.
 
     ★호스트 무관(location.origin same-origin). vendor-summary(m-wing) 감지로 정산 세션을 판단하면
     틀리므로(셀프리뷰 A), 정산 자체의 status/api로 직접 판정한다. 빈 cfg 기본값으로 호출 가능.
+    ★진입·로그인 대기 경로 전용(보수적: 판정 불가도 False). 층2 루프는 판정 불가를 만료로
+      승격하면 안 되므로 _rg_session_verdict_confirmed를 쓴다.
     """
-    try:
-        data = _rg_json(_rg_post(page, RG_STATUS_PATH, _rg_status_payload({})))
-    except Exception:  # noqa: BLE001 — 네비게이션 중 evaluate 실패 등은 '아직 아님'으로 처리
-        return False
-    return isinstance(data, dict) and "settlementStatusReports" in data
+    verdict, why = _rg_session_probe(page)
+    if verdict != _PROBE_OK:
+        log.info("RG 세션 프로브 %s — %s", verdict, why)
+    return verdict == _PROBE_OK
+
+
+def _rg_loop_should_abort(verdict: str) -> bool:
+    """층2 루프를 중단할지 — **AUTH일 때만** True.
+
+    한 줄짜리를 굳이 함수로 뽑은 이유: 이게 이번 결함의 전부다(판정 불가를 중단 사유로 쓴 것).
+    루프 안에 인라인으로 두면 브라우저 없이 검증할 수 없어 변이 테스트가 불가능하다.
+    """
+    return verdict == _PROBE_AUTH
+
+
+def _rg_session_verdict_confirmed(page, *, delay_s: float = 5.0) -> str:
+    """층2 루프용 — 실패 시 짧은 지연 후 1회 재확인하고 **판정값**을 그대로 돌려준다.
+
+    반환은 _PROBE_OK / _PROBE_AUTH / _PROBE_UNKNOWN. 호출자는 AUTH일 때만 중단한다.
+    ★UNKNOWN을 중단 사유로 쓰지 않는 이유(계약 판단기준): 프로브 오판의 비용이 오검출 비용보다
+      크다. 오판이면 남은 주기가 통째로 버려지고 "로그인 필요"라는 거짓 사유가 기록되지만,
+      정말로 세션이 죽었다면 이어지는 다운로드가 어차피 실패해 rc=1(재시도 가능)로 잡힌다.
+      즉 UNKNOWN에서 계속 진행하는 쪽이 어느 경우에도 더 나쁘지 않다.
+    """
+    verdict, why = _rg_session_probe(page)
+    if verdict == _PROBE_OK:
+        return verdict
+    log.info("RG 세션 프로브 1차 %s — %s (%.0f초 후 재확인)", verdict, why, delay_s)
+    time.sleep(delay_s)
+    verdict2, why2 = _rg_session_probe(page)
+    if verdict2 == _PROBE_OK:
+        log.info("RG 세션 프로브 재확인 ok — 1차는 일시 실패였다(중단하지 않는다).")
+    else:
+        log.warning("RG 세션 프로브 재확인도 %s — %s", verdict2, why2)
+    return verdict2
 
 
 def _rg_session_ok_confirmed(page, *, delay_s: float = 5.0) -> bool:
-    """_rg_session_ok를 (실패 시) 짧은 지연 후 1회 재확인 — 둘 다 False일 때만 '세션 만료'.
+    """(구 API — 하위호환) 판정 불가까지 False로 접는다. 신규 호출부는 verdict 쪽을 쓸 것.
 
     ★왜(적대적 리뷰 R1 [P2-2]): _rg_session_ok는 로그아웃뿐 아니라 비200·깨진 JSON·evaluate 예외
       까지 전부 False로 접는다(진입 경로 주석이 스스로 인정한 사실, codex 5R[P1]). 루프 도중의
@@ -1892,15 +1968,28 @@ def _do_rg_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
                     # ★주기 사이 세션 재확인(D3): 층2는 주기×리포트당 최대 300초 폴링이라, 진입 시
                     #   1회 확인만으로는 루프 도중 만료를 못 잡는다 — 남은 주기가 통째로 헛돈다.
                     #   이미 받아 push한 주기는 그대로 두고(멱등 적재), 남은 주기만 중단한다.
-                    #   ★blip 1회로 승격하지 않는다(리뷰 [P2-2]) — _rg_session_ok_confirmed 참조.
-                    if n > 0 and not _rg_session_ok_confirmed(page):
-                        log.error("RG: 층2 루프 중 세션 만료 — 남은 주기 %d개 중단(로그인 필요).",
-                                  len(targets) - n)
-                        # keep_open은 CDP 모드에서만 실효(레거시 _chrome 경로는 finally에서 무조건
-                        #   닫는다) — 라이브는 CDP라 의도대로 동작한다(리뷰 [P2-9]).
-                        owner.keep_open = True   # 사람이 로그인할 창을 남긴다
-                        session_lost = True
-                        break
+                    #   ★blip 1회로 승격하지 않는다(리뷰 [P2-2]) — _rg_session_verdict_confirmed 참조.
+                    #   ★2026-08-03: **판정 불가(UNKNOWN)로는 중단하지 않는다.** 종전엔 비200·깨진
+                    #     JSON·예외까지 전부 '세션 만료'로 승격해, 멀쩡한 세션에서 남은 주기가 통째로
+                    #     버려지고 "로그인 필요"라는 거짓 사유가 기록됐다(라이브 3/3 재현 — 매번
+                    #     다운로드 성공 6~7초 뒤). 대조군도 성립: 같은 세션·2분 간격에 대상 2개면
+                    #     중단, 1개면 성공. 즉 끊은 건 세션이 아니라 이 프로브였다.
+                    #     rider(PRODUCT_SIZE_COMPARISON)가 항상 슬롯 #1을 차지하므로 진짜 정산
+                    #     결손은 구조적으로 항상 #2 이하 → 이 오판 하나가 결손 충전을 영구히 막았다.
+                    if n > 0:
+                        _verdict = _rg_session_verdict_confirmed(page)
+                        if _rg_loop_should_abort(_verdict):
+                            log.error("RG: 층2 루프 중 세션 만료 — 남은 주기 %d개 중단(로그인 필요).",
+                                      len(targets) - n)
+                            # keep_open은 CDP 모드에서만 실효(레거시 _chrome 경로는 finally에서
+                            #   무조건 닫는다) — 라이브는 CDP라 의도대로 동작한다(리뷰 [P2-9]).
+                            owner.keep_open = True   # 사람이 로그인할 창을 남긴다
+                            session_lost = True
+                            break
+                        if _verdict != _PROBE_OK:
+                            log.warning(
+                                "RG: 주기 사이 세션 프로브 판정 불가 — 중단하지 않고 계속한다"
+                                "(정말 죽었다면 이어지는 다운로드가 rc=1로 잡혀 재시도된다).")
                     for rt in t["report_types"]:
                         # ★예산 검사는 '리포트 하나를 시작하기 전마다'다(리뷰 R3 [P2-1]).
                         #   주기 단위로만 재면, 예산을 아슬하게 통과한 마지막 주기가 리포트 여러 건을

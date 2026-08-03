@@ -238,11 +238,27 @@ def rg_run(wing, monkeypatch, tmp_path):
         seq = state["session_ok"]
         return seq.pop(0) if seq else True
 
+    def _session_probe(_page):
+        """진입·루프가 공유하는 판정 소스 스텁.
+
+        ★2026-08-03: 루프는 bool이 아니라 판정값(_PROBE_OK/AUTH/UNKNOWN)을 본다 — 판정 불가를
+          '세션 만료'로 승격하던 것이 이번에 고친 결함이기 때문이다. 기존 시나리오의 True/False는
+          "정말 로그인됐다/로그아웃됐다"는 뜻이었으므로 OK/AUTH로 옮긴다. 판정 불가 시나리오는
+          state["session_probe"]에 판정값을 직접 넣어 쓴다.
+        """
+        seq = state.get("session_probe")
+        if seq:
+            v = seq.pop(0)
+            return v, f"stub:{v}"
+        return ((wing._PROBE_OK, "stub:ok") if _session_ok(_page)
+                else (wing._PROBE_AUTH, "stub:auth"))
+
     monkeypatch.setattr(wing.time, "sleep", lambda *_a, **_k: None)  # 세션 재확인 지연 제거
     monkeypatch.setattr(wing, "sync_playwright", _fake_playwright)
     monkeypatch.setattr(wing, "_chrome", _fake_chrome)
     monkeypatch.setattr(wing, "_cdp_mode", lambda _c: False)
     monkeypatch.setattr(wing, "_rg_session_ok", _session_ok)
+    monkeypatch.setattr(wing, "_rg_session_probe", _session_probe)
     monkeypatch.setattr(wing, "_rg_fetch_status_raw", lambda _p, _c: state["raw"])
     monkeypatch.setattr(wing, "_rg_push_status", lambda _c, _r: 0)
     monkeypatch.setattr(wing, "_prod_rg_layer2_gaps", lambda _c, _rt, _d: state["gaps"])
@@ -291,7 +307,11 @@ def test_run_respects_max_targets(rg_run):
 
 
 def test_run_stops_remaining_periods_on_session_loss(rg_run):
-    """루프 도중 세션이 죽으면 남은 주기는 헛돈다 — 즉시 중단하고 로그인 필요로 보고."""
+    """루프 도중 **정말** 로그아웃되면 남은 주기는 헛돈다 — 즉시 중단하고 로그인 필요로 보고.
+
+    (2026-08-03: 판정 소스가 bool→판정값으로 바뀌었다. 여기서 False는 원래 "정말 로그아웃"을
+     뜻했으므로 스텁이 AUTH로 옮긴다. 방어를 없앤 게 아니라 좁혔다는 것을 이 테스트가 지킨다.)
+    """
     ends = ["2026-07-19", "2026-07-12", "2026-07-05"]
     rg_run.state["raw"] = _raw(*ends)
     rg_run.state["gaps"] = _gaps(*[(e, [_WS]) for e in ends])
@@ -300,6 +320,31 @@ def test_run_stops_remaining_periods_on_session_loss(rg_run):
     rc = rg_run.wing._do_rg_run(rg_run.cfg, rg_run.cfg["state_file"])
     assert rc == rg_run.wing.RC_LOGIN_REQUIRED
     assert [gk for gk, _ in rg_run.calls] == ["A01564720-2026-07-19"]  # 1번째까지는 유지
+
+
+def test_run_continues_when_probe_verdict_is_unknown(rg_run):
+    """★계약 합격기준(2026-08-03): 판정 불가(비200·깨진 JSON·예외)로는 남은 주기를 버리지 않는다.
+
+    라이브 실측 3/3 — 매번 다운로드 성공 6~7초 뒤 프로브가 실패해 남은 주기가 통째로 취소되고
+    "로그인 필요"라는 거짓 사유가 기록됐다. 대조군까지 성립했다: 같은 세션·2분 간격에 대상
+    2개면 중단, 1개면 성공. rider(PRODUCT_SIZE_COMPARISON)가 항상 슬롯 #1을 차지하므로 진짜
+    정산 결손은 구조적으로 항상 #2 이하 → 이 오판 하나가 결손 충전을 영구히 막았다.
+    """
+    ends = ["2026-07-19", "2026-07-12", "2026-07-05"]
+    rg_run.state["raw"] = _raw(*ends)
+    rg_run.state["gaps"] = _gaps(*[(e, [_WS]) for e in ends])
+    w = rg_run.wing
+    # 진입 OK → 2번째 주기 직전 판정 불가 2회(재확인까지) → 3번째 직전도 판정 불가 2회
+    rg_run.state["session_probe"] = [
+        w._PROBE_OK,
+        w._PROBE_UNKNOWN, w._PROBE_UNKNOWN,
+        w._PROBE_UNKNOWN, w._PROBE_UNKNOWN,
+    ]
+    rc = rg_run.wing._do_rg_run(rg_run.cfg, rg_run.cfg["state_file"])
+    assert rc == 0, "판정 불가는 로그인 필요가 아니다"
+    assert [gk for gk, _ in rg_run.calls] == [
+        "A01564720-2026-07-19", "A01564720-2026-07-12", "A01564720-2026-07-05",
+    ], "판정 불가로 남은 주기를 버리면 결손이 영영 안 채워진다"
 
 
 def test_run_survives_single_session_blip(rg_run):
