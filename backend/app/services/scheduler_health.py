@@ -31,6 +31,11 @@ log = logging.getLogger(__name__)
 # 제외(fail-soft/Mac·쿠키 의존): sync_coupang_rg_inbound, sync_coupang_rg_settlement,
 #   auto_download_rg_settlement, sync_coupang_ad_cost, cafe24_token_refresh.
 WATCHDOG_JOBS: tuple[str, ...] = (
+    # ★워치독 자신도 감시 대상이다(2026-08-03 codex 1R[P2]): 이 잡이 죽으면 "수집이
+    #   멈춘 걸 알려주는 장치"가 조용히 사라진다 — 감시자가 없는 감시자는 없느니만 못하다.
+    #   Mac/쿠키에 의존하지 않고(플래그 쓰기 + Slack뿐) 서버 안에서 완결되므로
+    #   fail-soft 제외 사유에 해당하지 않는다.
+    "coupang_collection_watchdog",
     "auto_sync_orders",
     "auto_profit_calc",
     "sync_naver_settlement",

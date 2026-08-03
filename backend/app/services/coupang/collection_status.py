@@ -89,5 +89,10 @@ def collection_status(db: Session) -> dict:
             "last_success_at": st.get("last_success_at"),
             "last_error_at": st.get("last_error_at"),
             "last_error": st.get("last_error"),
+            # ★requested_at 노출(2026-08-03 codex 1R[P1]): in_flight는 "지금 수집 중"과
+            #   "Mac이 꺼져 요청만 몇 주째 대기 중"을 구분하지 못한다. 워치독이 후자를
+            #   in_flight로 보고 건너뛰면 **영원히 침묵**한다(요청 플래그는 아무도 claim
+            #   하지 않으면 스스로 사라지지 않는다). 소비자가 대기 시간을 재도록 시각을 준다.
+            "requested_at": st.get("requested_at"),
         })
     return {"streams": streams, "as_of": now.isoformat()}

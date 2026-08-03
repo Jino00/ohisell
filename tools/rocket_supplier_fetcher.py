@@ -253,7 +253,16 @@ def load_config() -> dict:
     #   수치가 뒤늦게 정정되는 것을 따라잡는다). sales_backfill_days>0이면 그 일수로 창을 넓힌다
     #   (서버가 알려주는 유효 구간으로 자동 클램프 — 롤링 창이라 하드코딩하면 반드시 틀어진다).
     cfg.setdefault("collect_sales", True)
-    cfg.setdefault("sales_days", 7)
+    # ★★30이지 7이 아니다 — 이 숫자를 줄이면 데이터가 영구 소실된다(2026-08-03 codex 1R[P1]).
+    #   판매분석 원천은 **롤링 57일 창**이라, 재수집 창(sales_days)보다 오래된 구멍은 다음
+    #   실행이 절대 못 메우고 그대로 창 밖으로 밀려 사라진다. 다른 스트림은 소급 창이
+    #   30~90일(po_days/settle_days=90, ofix 광고비 30일)인데 이것만 7일이라, 그 비대칭이
+    #   2026-07-28 **51일 결손**의 기전이었다(소멸 8시간 전 발견).
+    #   ★backend/app/services/coupang/collection_watchdog.py의 RESCUE_STALE_DAYS(21)가 이 값이
+    #     30이라는 전제 위에 서 있다. 둘 중 하나만 바꾸면 워치독이 구조해도 앞 구간이 남는다
+    #     (그리고 그 성공이 신선도를 리셋해 워치독은 조용해진다). test_collection_watchdog.py의
+    #     결합 가드가 이 커플링을 지킨다 — 바꾸려면 양쪽을 같이 바꿔라.
+    cfg.setdefault("sales_days", 30)
     cfg.setdefault("sales_backfill_days", 0)
     cfg.setdefault("sales_page_size", 20)
     cfg.setdefault("sales_max_pages", 40)
