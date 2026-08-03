@@ -3,6 +3,7 @@
 import { describe, it, expect } from "vitest";
 import { buildCollectionFreshnessBanner } from "./collectionFreshnessBanner";
 import type { CollectionStatus, CollectionStreamStatus } from "../lib/api";
+import { specsForKeys } from "../lib/streamRefresh";
 
 function s(over: Partial<CollectionStreamStatus>): CollectionStreamStatus {
   return {
@@ -47,5 +48,31 @@ describe("buildCollectionFreshnessBanner", () => {
   it("age_hours null(수집 기록 없음)이면 '수집 기록 없음' 표기", () => {
     const b = buildCollectionFreshnessBanner(wrap([s({ state: "critical", age_hours: null })]));
     expect(b?.items[0].text).toContain("수집 기록 없음");
+  });
+});
+
+// ── 배너 항목 ↔ 갱신 대상 결합 가드 (2026-08-03) ──────────────────────
+// ★존재 이유: 배너의 '지금 갱신'은 items[].key로 갱신 대상을 고른다. 백엔드가 key를 바꾸거나
+//   빌더가 key를 안 실으면 버튼이 **조용히 아무것도 갱신하지 않는다** — 링크였던 시절과
+//   똑같이 "눌러도 아무 일이 없는" 상태로 되돌아간다. 그 회귀를 여기서 잡는다.
+describe("배너 항목은 갱신 가능한 스트림 key를 실어야 한다", () => {
+  it("낡은 항목의 key가 STREAM_SPECS로 해석된다", () => {
+    const b = buildCollectionFreshnessBanner(
+      wrap([
+        s({ state: "critical", key: "ohitech_ad", label: "ohitech 로켓광고", age_hours: 160 }),
+        s({ state: "failed", key: "supplier_hub", label: "로켓 발주/정산" }),
+      ]),
+    );
+    const specs = specsForKeys((b?.items ?? []).map((i) => i.key));
+    expect(specs.map((x) => x.key)).toEqual(["ohitech_ad", "supplier_hub"]);
+  });
+
+  it("4개 스트림이 전부 낡으면 4건 모두 갱신 대상이 된다(누락 없음)", () => {
+    // as const — key는 리터럴 유니온이라 string[]로 넓어지면 타입이 안 맞는다.
+    const keys = ["ofix_sales", "ofix_ad", "ohitech_ad", "supplier_hub"] as const;
+    const b = buildCollectionFreshnessBanner(
+      wrap(keys.map((k) => s({ state: "critical", key: k, age_hours: 100 }))),
+    );
+    expect(specsForKeys((b?.items ?? []).map((i) => i.key))).toHaveLength(4);
   });
 });

@@ -4,15 +4,7 @@ import { useState, useEffect, useRef } from "react";
 import {
   fetchCommandCenter,
   fetchRevenueReconcile,
-  requestWingVendorSummaryRefresh,
-  getWingVendorSummaryRefreshStatus,
-  requestWingRgSettlementRefresh,
-  getWingRgSettlementRefreshStatus,
   fetchRocketOverview,
-  requestRocketRefresh,
-  getRocketRefreshStatus,
-  requestOhitechAdRefresh,
-  getOhitechAdRefreshStatus,
   fetchRocketCostMapUnmapped,
   fetchRocketCostMap,
   upsertRocketCostMap,
@@ -29,6 +21,21 @@ import {
   type PromoPnlResponse,
   type PromoPnlCard,
 } from "../lib/api";
+// 갱신 폴링 판정은 여기 한 곳에만 산다(사본 금지 — LESSONS #55). 배너도 같은 것을 쓴다.
+import {
+  runStreamRefresh,
+  runStreamsRefresh,
+  describeOutcome,
+  STREAM_SPECS,
+  RG_STREAM_SPECS,
+  type StreamRefreshSpec,
+} from "../lib/streamRefresh";
+
+function specByKey(key: string): StreamRefreshSpec {
+  const s = STREAM_SPECS.find((x) => x.key === key);
+  if (!s) throw new Error(`알 수 없는 스트림: ${key}`);
+  return s;
+}
 
 function isoKST(d: Date): string {
   const kst = new Date(d.toLocaleString("en-US", { timeZone: "Asia/Seoul" }));
@@ -70,46 +77,7 @@ const ACCOUNTS = [
 
 // 'RG 정산 갱신' 버튼이 깨우는 계정(2026-07-27 WING2 편입). 버튼은 하나지만 큐는 계정별로
 // 갈려 있어(백엔드 상태행 분리) 각 계정 데몬이 자기 요청만 claim한다 → 요청·폴링도 계정별.
-const RG_REFRESH_ACCOUNTS = [
-  { key: "COUPANG_WING1", label: "오픽스" },
-  { key: "COUPANG_WING2", label: "오하이테크" },
-];
-
-// 한 계정의 RG 갱신 1건: 요청 → last_success_at/last_error_at 변화 폴링 → 결과 판정.
-// 판정 규칙은 판매분석 갱신과 동일(성공 우선·실패 보고 즉시 이탈·215초 한도).
-async function runRgRefreshForAccount(
-  accountKey: string,
-): Promise<{ done: boolean; failed: string | null }> {
-  const before = await getWingRgSettlementRefreshStatus(accountKey);
-  const baseline = before.last_success_at;
-  const errBaseline = before.last_error_at; // 실패도 감지해야 "진행 중"과 구분된다
-  await requestWingRgSettlementRefresh(accountKey);
-  const deadline = Date.now() + 215000;
-  while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 3000));
-    const st = await getWingRgSettlementRefreshStatus(accountKey);
-    // ★성공 우선(순서 바꾸지 말 것): 둘 다 변했으면 성공이 이긴다. 라이브 실측
-    // (2026-07-17 RG): 업로드가 클라 타임아웃(60s)을 넘겨 페처는 실패로 보고했지만
-    // 서버는 완주해 success/error가 138ms 차로 함께 갱신됐다 — 데이터는 실제로 들어왔다.
-    // ★RG만 !requested를 함께 요구한다(codex 3R[P1]): RG 한 회차는 (정산주기×리포트종류)
-    // 여러 엑셀을 올린다. 첫 엑셀에서 last_success_at이 오르므로 그것만 보고 이탈하면
-    // 뒤 엑셀이 실패한 반쪽 run을 "완료"로 표시한다. 요청 소멸(=run 종료)까지 기다린다.
-    if (st.last_success_at && st.last_success_at !== baseline && !st.requested) {
-      return { done: true, failed: null };
-    }
-    // 페처가 **종료된** 실패를 보고하면 즉시 이탈 — 이게 없으면 이미 끝난 실패를 215초 헛기다린다.
-    // ★requested가 아직 true면 재시도가 남아 있다는 뜻(lease 계약, 2026-07-27) — 여기서
-    // 이탈하면 1회차 실패를 최종 실패로 오보한다. 요청이 소멸(=재시도 소진/로그인 필요)한
-    // 뒤에야 실패로 판정한다. last_error에는 소멸 사유가 들어 있다.
-    if (st.last_error_at && st.last_error_at !== errBaseline && !st.requested) {
-      return { done: false, failed: st.last_error || "원인 미상" };
-    }
-    // 새 실패 없이 요청만 사라졌다 = 수집이 정상 종료됐다(예: RG "받을 정산주기 없음").
-    // 이 분기가 없으면 성공한 무작업 회차를 타임아웃까지 기다린 뒤 "응답 없음"으로 오보한다.
-    if (!st.requested) return { done: true, failed: null };
-  }
-  return { done: false, failed: null }; // 타임아웃 = 그 계정 Mac 데몬 무응답(미설치·꺼짐·로그인 전)
-}
+// 폴링 판정 규칙(성공 우선·lease·무작업 종료·RG 다중업로드 정착)은 lib/streamRefresh로 이관됐다.
 
 export default function CommandCenter() {
   const today = isoKST(new Date());
@@ -179,42 +147,16 @@ export default function CommandCenter() {
     setSalesRefreshing(true);
     setSalesRefreshMsg("Mac에서 판매분석 가져오는 중… (~20초, 첫 갱신이면 Mac 로그인 창 확인)");
     try {
-      const before = await getWingVendorSummaryRefreshStatus();
-      const baseline = before.last_success_at;
-      const errBaseline = before.last_error_at; // 실패도 감지해야 "진행 중"과 구분된다
-      await requestWingVendorSummaryRefresh();
-      const deadline = Date.now() + 215000; // 215초 — 데몬 로그인 대기(180s)+fetch 여유까지 커버
-      let done = false;
-      let failed: string | null = null;
-      while (Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 3000));
-        const st = await getWingVendorSummaryRefreshStatus();
-        // ★성공 우선(순서 바꾸지 말 것): 둘 다 변했으면 성공이 이긴다. 라이브 실측
-        // (2026-07-17 RG): 업로드가 클라 타임아웃(60s)을 넘겨 페처는 실패로 보고했지만
-        // 서버는 완주해 success/error가 138ms 차로 함께 갱신됐다 — 데이터는 실제로 들어왔다.
-        if (st.last_success_at && st.last_success_at !== baseline) { done = true; break; }
-        // 페처가 **종료된** 실패를 보고하면 즉시 이탈 — 이게 없으면 이미 끝난 실패를 215초 헛기다린다.
-        // ★requested가 아직 true면 재시도가 남아 있다는 뜻(lease 계약, 2026-07-27) — 여기서
-        // 이탈하면 1회차 실패를 최종 실패로 오보한다. 요청이 소멸(=재시도 소진/로그인 필요)한
-        // 뒤에야 실패로 판정한다. last_error에는 소멸 사유가 들어 있다.
-        if (st.last_error_at && st.last_error_at !== errBaseline && !st.requested) {
-          failed = st.last_error || "원인 미상";
-          break;
-        }
-        // 새 실패 없이 요청만 사라졌다 = 수집이 정상 종료됐다(예: RG "받을 정산주기 없음").
-        // 이 분기가 없으면 성공한 무작업 회차를 타임아웃까지 기다린 뒤 "응답 없음"으로 오보한다.
-        if (!st.requested) { done = true; break; }
-      }
-      if (done) {
+      const spec = specByKey("ofix_sales");
+      const outcome = await runStreamRefresh(spec);
+      if (outcome.state === "done") {
         // 대기 중 사용자가 계정/기간을 바꿨을 수 있음 → 현재 선택(selRef)으로 재조회(codex S3 P1).
         const sel = selRef.current;
         doFetch(sel.from, sel.to, sel.account);
         setSalesRefreshMsg("✅ 판매분석 갱신 완료");
         setTimeout(() => setSalesRefreshMsg(null), 4000);
-      } else if (failed) {
-        setSalesRefreshMsg("❌ Mac 페처 실패: " + failed);
       } else {
-        setSalesRefreshMsg("⚠️ Mac 응답 없음 — Mac이 켜져 있는지, 첫 갱신이면 로그인 창을 확인하세요.");
+        setSalesRefreshMsg(describeOutcome(spec, outcome));
       }
     } catch (e: any) {
       setSalesRefreshMsg("❌ 갱신 요청 실패: " + (e?.message || ""));
@@ -229,34 +171,24 @@ export default function CommandCenter() {
     setRgRefreshing(true);
     setRgRefreshMsg("Mac에서 RG 정산 가져오는 중… (~30초, 계정 2곳)");
     try {
-      // ★계정별로 '정착하는 즉시' 반영한다(codex R1 [P2]): Promise.all 결과를 한꺼번에 쓰면
-      //   한쪽 데몬이 꺼져 있을 때 이미 끝난 쪽의 데이터·문구가 상대의 215초 타임아웃까지
-      //   인질로 잡힌다(오픽스 30초 완료 → 3분 넘게 화면에 아무것도 안 뜸).
-      const results: ({ done: boolean; failed: string | null } | null)[] =
-        RG_REFRESH_ACCOUNTS.map(() => null);
-      const render = () => setRgRefreshMsg(RG_REFRESH_ACCOUNTS.map((a, i) => {
-        const r = results[i];
-        if (!r) return `⏳ ${a.label} 진행 중`;      // 아직 정착 안 된 계정
-        if (r.done) return `✅ ${a.label} 완료`;
-        if (r.failed) return `❌ ${a.label} 실패(${r.failed})`;
-        return `⚠️ ${a.label} 응답 없음`;            // Mac 꺼짐·데몬 미설치·첫 로그인 전
-      }).join(" · "));
-      await Promise.all(
-        // 한 계정의 요청 실패가 다른 계정 결과를 삼키면 안 된다 → 계정별로 catch.
-        RG_REFRESH_ACCOUNTS.map(async (a, i) => {
-          results[i] = await runRgRefreshForAccount(a.key).catch((e: any) => ({
-            done: false, failed: e?.message || "요청 실패",
-          }));
-          // 성공한 계정의 데이터는 곧바로 반영 — 현재 선택(selRef)으로 재조회(codex S3 P1).
-          if (results[i]!.done) {
-            const sel = selRef.current;
-            doFetch(sel.from, sel.to, sel.account);
-          }
-          render();
-        }),
-      );
+      // ★계정별로 '정착하는 즉시' 반영한다(codex R1 [P2]) — runStreamsRefresh가 그 규칙을 담당.
+      //   Promise.all 결과를 한꺼번에 쓰면 한쪽 데몬이 꺼져 있을 때 이미 끝난 쪽의 데이터·문구가
+      //   상대의 215초 타임아웃까지 인질로 잡힌다(오픽스 30초 완료 → 3분 넘게 화면에 아무것도 안 뜸).
+      const results = await runStreamsRefresh(RG_STREAM_SPECS, (spec, outcome, all) => {
+        // 성공한 계정의 데이터는 곧바로 반영 — 현재 선택(selRef)으로 재조회(codex S3 P1).
+        if (outcome.state === "done") {
+          const sel = selRef.current;
+          doFetch(sel.from, sel.to, sel.account);
+        }
+        setRgRefreshMsg(
+          RG_STREAM_SPECS.map((s) => describeOutcome(s, all.get(s.key) ?? null)).join(" · "),
+        );
+        void spec;
+      });
       // 전건 성공일 때만 자동 소거 — 실패/무응답 문구는 남겨서 Jino가 보게 한다.
-      if (results.every((r) => r?.done)) setTimeout(() => setRgRefreshMsg(null), 4000);
+      if (RG_STREAM_SPECS.every((s) => results.get(s.key)?.state === "done")) {
+        setTimeout(() => setRgRefreshMsg(null), 4000);
+      }
     } catch (e: any) {
       setRgRefreshMsg("❌ 갱신 요청 실패: " + (e?.message || ""));
     } finally {
@@ -270,41 +202,16 @@ export default function CommandCenter() {
     setRocketRefreshing(true);
     setRocketRefreshMsg("Mac에서 로켓배송 발주/정산 가져오는 중… (~30초)");
     try {
-      const before = await getRocketRefreshStatus();
-      const baseline = before.last_success_at;
-      const errBaseline = before.last_error_at; // 실패도 감지해야 "진행 중"과 구분된다
-      await requestRocketRefresh();
-      const deadline = Date.now() + 180000; // 180초
-      let done = false;
-      let failed: string | null = null;
-      while (Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 5000));
-        const st = await getRocketRefreshStatus();
-        // ★성공 우선(순서 바꾸지 말 것): 둘 다 변했으면 성공이 이긴다. 라이브 실측
-        // (2026-07-17 RG): 업로드가 클라 타임아웃(60s)을 넘겨 페처는 실패로 보고했지만
-        // 서버는 완주해 success/error가 138ms 차로 함께 갱신됐다 — 데이터는 실제로 들어왔다.
-        if (st.last_success_at && st.last_success_at !== baseline) { done = true; break; }
-        // 페처가 **종료된** 실패를 보고하면 즉시 이탈 — 이게 없으면 이미 끝난 실패를 180초 헛기다린다.
-        // ★requested가 아직 true면 재시도가 남아 있다는 뜻(lease 계약, 2026-07-27) — 여기서
-        // 이탈하면 1회차 실패를 최종 실패로 오보한다. 요청이 소멸(=재시도 소진/로그인 필요)한
-        // 뒤에야 실패로 판정한다. last_error에는 소멸 사유가 들어 있다.
-        if (st.last_error_at && st.last_error_at !== errBaseline && !st.requested) {
-          failed = st.last_error || "원인 미상";
-          break;
-        }
-        // 새 실패 없이 요청만 사라졌다 = 수집이 정상 종료됐다(예: RG "받을 정산주기 없음").
-        // 이 분기가 없으면 성공한 무작업 회차를 타임아웃까지 기다린 뒤 "응답 없음"으로 오보한다.
-        if (!st.requested) { done = true; break; }
-      }
-      if (done) {
+      const spec = specByKey("supplier_hub");
+      // 타임아웃·폴링 간격은 기존 값 보존(180초·5초) — 이 버튼의 동작을 바꾸지 않는다.
+      const outcome = await runStreamRefresh(spec, { timeoutMs: 180000, pollMs: 5000 });
+      if (outcome.state === "done") {
         const sel = selRef.current;
         doFetch(sel.from, sel.to, sel.account);
         setRocketRefreshMsg("✅ 로켓배송 갱신 완료");
         setTimeout(() => setRocketRefreshMsg(null), 4000);
-      } else if (failed) {
-        setRocketRefreshMsg("❌ Mac 페처 실패: " + failed);
       } else {
-        setRocketRefreshMsg("⚠️ Mac 응답 없음 — Mac이 켜져 있는지, Chrome(CDP 9223)이 실행 중인지 확인하세요.");
+        setRocketRefreshMsg(describeOutcome(spec, outcome));
       }
     } catch (e: any) {
       setRocketRefreshMsg("❌ 갱신 요청 실패: " + (e?.message || ""));
@@ -320,41 +227,16 @@ export default function CommandCenter() {
     setOhitechAdRefreshing(true);
     setOhitechAdRefreshMsg("Mac에서 오하이테크 광고비 가져오는 중… (~수초, 첫 갱신이면 Chrome 로그인 확인)");
     try {
-      const before = await getOhitechAdRefreshStatus();
-      const baseline = before.last_success_at;
-      const errBaseline = before.last_error_at; // 실패도 감지해야 "진행 중"과 구분된다
-      await requestOhitechAdRefresh();
-      const deadline = Date.now() + 180000; // 180초
-      let done = false;
-      let failed: string | null = null;
-      while (Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 5000));
-        const st = await getOhitechAdRefreshStatus();
-        // ★성공 우선(순서 바꾸지 말 것): 둘 다 변했으면 성공이 이긴다. 라이브 실측
-        // (2026-07-17 RG): 업로드가 클라 타임아웃(60s)을 넘겨 페처는 실패로 보고했지만
-        // 서버는 완주해 success/error가 138ms 차로 함께 갱신됐다 — 데이터는 실제로 들어왔다.
-        if (st.last_success_at && st.last_success_at !== baseline) { done = true; break; }
-        // 페처가 **종료된** 실패를 보고하면 즉시 이탈 — 이게 없으면 이미 끝난 실패를 180초 헛기다린다.
-        // ★requested가 아직 true면 재시도가 남아 있다는 뜻(lease 계약, 2026-07-27) — 여기서
-        // 이탈하면 1회차 실패를 최종 실패로 오보한다. 요청이 소멸(=재시도 소진/로그인 필요)한
-        // 뒤에야 실패로 판정한다. last_error에는 소멸 사유가 들어 있다.
-        if (st.last_error_at && st.last_error_at !== errBaseline && !st.requested) {
-          failed = st.last_error || "원인 미상";
-          break;
-        }
-        // 새 실패 없이 요청만 사라졌다 = 수집이 정상 종료됐다(예: RG "받을 정산주기 없음").
-        // 이 분기가 없으면 성공한 무작업 회차를 타임아웃까지 기다린 뒤 "응답 없음"으로 오보한다.
-        if (!st.requested) { done = true; break; }
-      }
-      if (done) {
+      const spec = specByKey("ohitech_ad");
+      // 타임아웃·폴링 간격은 기존 값 보존(180초·5초) — 이 버튼의 동작을 바꾸지 않는다.
+      const outcome = await runStreamRefresh(spec, { timeoutMs: 180000, pollMs: 5000 });
+      if (outcome.state === "done") {
         const sel = selRef.current;
         doFetch(sel.from, sel.to, sel.account);
         setOhitechAdRefreshMsg("✅ 광고비 갱신 완료");
         setTimeout(() => setOhitechAdRefreshMsg(null), 4000);
-      } else if (failed) {
-        setOhitechAdRefreshMsg("❌ Mac 페처 실패: " + failed);
       } else {
-        setOhitechAdRefreshMsg("⚠️ Mac 응답 없음 — Mac이 켜져 있는지, Chrome(CDP 9224)이 실행 중인지 확인하세요.");
+        setOhitechAdRefreshMsg(describeOutcome(spec, outcome));
       }
     } catch (e: any) {
       setOhitechAdRefreshMsg("❌ 갱신 요청 실패: " + (e?.message || ""));

@@ -14,6 +14,7 @@ import {
   type CollectionStatus,
 } from "../lib/api";
 import { buildCollectionFreshnessBanner } from "./collectionFreshnessBanner";
+import { runStreamsRefresh, describeOutcome, specsForKeys } from "../lib/streamRefresh";
 
 // 전역 헬스 배너 요약 빌더 (순수 함수 — 테스트 대상).
 // healthy:false여도 실제로 표시할 문제가 없으면 null 반환(배너 숨김). 규칙:
@@ -104,6 +105,10 @@ export default function Layout() {
   const [adRefreshMsg, setAdRefreshMsg] = useState<string | null>(null);
   const [health, setHealth] = useState<SchedulerHealth | null>(null);
   const [collection, setCollection] = useState<CollectionStatus | null>(null);
+  // 수집 신선도 배너 '지금 갱신' 상태 — 2026-08-03까지 이 자리는 링크였고, 눌러도 페이지만
+  // 바뀌어 "아무 일도 안 일어난다"로 보였다(Jino 보고). 이제 실제 갱신을 돌린다.
+  const [collRefreshing, setCollRefreshing] = useState(false);
+  const [collRefreshMsg, setCollRefreshMsg] = useState<string | null>(null);
 
   // 배너 '지금 갱신' — stale(쿠키 정상, Mac 페처 지연)일 때 실제 갱신 요청.
   // request_refresh 플래그 set → Mac 데몬이 다음 폴링(~20초)에서 fetch·push. 12초 뒤 상태 재확인.
@@ -169,6 +174,34 @@ export default function Layout() {
     const t = setInterval(tick, 60 * 1000);
     return () => { cancelled = true; clearInterval(t); };
   }, []);
+
+  // 배너 '지금 갱신' — 낡은/실패한 스트림 전부를 한 번에 갱신한다.
+  //  ★계정별 개별 선택은 커맨드센터가 담당한다(같은 UI를 배너에 복제하지 않는다 — 한쪽만
+  //    고쳐지는 사고를 만들지 않기 위해). 배너의 일은 "배너를 없애는 것"이므로 전건 갱신이다.
+  //  ★로그인이 필요한 스트림은 계정명과 함께 남긴다 — 로그인은 버튼이 대신할 수 없고,
+  //    어느 계정인지 모르면 창을 찾지 못한다(2026-08-03 실측: 4개 중 2개가 rc=3 로그인 필요).
+  async function handleCollectionRefresh(keys: string[]) {
+    const specs = specsForKeys(keys);
+    if (specs.length === 0) return;
+    setCollRefreshing(true);
+    setCollRefreshMsg(specs.map((s) => describeOutcome(s, null)).join(" · "));
+    try {
+      const results = await runStreamsRefresh(specs, (_spec, _outcome, all) => {
+        // 한 건이 정착할 때마다 문구를 갱신 — 느린 스트림이 빠른 스트림을 인질로 잡지 않는다.
+        setCollRefreshMsg(specs.map((s) => describeOutcome(s, all.get(s.key) ?? null)).join(" · "));
+      });
+      // 완료분을 배너에서 즉시 걷어내기 위해 신선도를 다시 읽는다(60초 폴링을 기다리지 않음).
+      getCollectionStatus().then(setCollection).catch(() => { /* fail-soft */ });
+      // 전건 성공일 때만 문구 자동 소거 — 실패/로그인 필요는 남겨서 Jino가 보게 한다.
+      if (specs.every((s) => results.get(s.key)?.state === "done")) {
+        setTimeout(() => setCollRefreshMsg(null), 4000);
+      }
+    } catch (e: any) {
+      setCollRefreshMsg("❌ 갱신 요청 실패: " + (e?.message || ""));
+    } finally {
+      setCollRefreshing(false);
+    }
+  }
 
   // 경로 이동 시 모바일 드로어 닫기
   useEffect(() => {
@@ -331,11 +364,15 @@ export default function Layout() {
           >
             <span className="font-semibold shrink-0">⚠️ 파이프라인 경고</span>
             <span className="text-amber-100 min-w-0 truncate">{healthBanner.summary}</span>
+            {/* ★이 자리는 '액션'이 아니라 '이동'이다 — 여기 모이는 문제(쿠키 재등록·잡 실패)는
+                버튼 한 번으로 해결되지 않고 각자 다른 처방이 필요하다. 그래서 갱신 버튼을 달지
+                않고 라벨을 이동으로 정직하게 적는다(2026-08-03: 구 라벨 '확인 →'이 눌리는
+                버튼처럼 보여 "눌러도 아무 일이 없다"는 오해를 만들었다). */}
             <Link
               to="/coupang-ops"
               className="ml-auto shrink-0 bg-white text-amber-700 font-medium px-3 py-1 rounded hover:bg-amber-50"
             >
-              확인 →
+              쿠팡 운영 열기 →
             </Link>
           </div>
         )}
@@ -349,21 +386,28 @@ export default function Layout() {
             }`}
           >
             <span className="font-semibold shrink-0">🕒 수집 신선도</span>
-            <span className="min-w-0 truncate">
-              {collectionBanner.items.map((it, i) => (
+            <span className="min-w-0 truncate" title={collRefreshMsg ?? undefined}>
+              {collRefreshMsg ?? collectionBanner.items.map((it, i) => (
                 <span key={it.key}>
                   {i > 0 && " · "}
                   {it.text}
                 </span>
               ))}
             </span>
-            <Link
-              to="/command-center"
-              className={`ml-auto shrink-0 bg-white font-medium px-3 py-1 rounded hover:bg-gray-50 ${
+            <button
+              onClick={() => handleCollectionRefresh(collectionBanner.items.map((it) => it.key))}
+              disabled={collRefreshing}
+              className={`ml-auto shrink-0 bg-white font-medium px-3 py-1 rounded hover:bg-gray-50 disabled:opacity-60 ${
                 collectionBanner.severity === "red" ? "text-rose-700" : "text-amber-700"
               }`}
             >
-              지금 갱신 →
+              {collRefreshing ? "갱신 중…" : "지금 갱신 →"}
+            </button>
+            <Link
+              to="/command-center"
+              className="shrink-0 underline decoration-white/50 hover:decoration-white text-xs opacity-90"
+            >
+              개별 갱신
             </Link>
           </div>
         )}
