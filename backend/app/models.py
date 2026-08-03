@@ -2325,6 +2325,39 @@ class NaverAgencyOp(Base):
     occurred_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
+class NaverChangeActorOverride(Base):
+    """수정 주체 정정 1건 — 「수정 사항」 화면에서 사람이 단 주석.
+
+    ★원천을 덮어쓰지 않는다. 주체는 두 원천(naver_change_log·naver_agency_op)에서
+    **데이터로 자동 판정**하고(change_actor.py), 사람의 정정은 여기에 쌓아 읽을 때 겹친다.
+    원천 컬럼에 써버리면 탐지 산출물과 사람 주석이 구분 불가가 되어 탐지 로직을 검증할 수
+    없게 된다 — 그러면 "우리가 안 바꿨다"는 판정 자체를 못 믿는다.
+
+    (source, source_id) = 원천 테이블 이름 + 그 테이블의 PK. FK를 걸지 않은 이유는
+    ①원천이 둘이라 단일 FK로 표현 불가 ②bm_diff가 같은 날 재실행 시 자기 산출물을
+    삭제-재생성하므로(멱등 리플레이) CASCADE면 정정이 조용히 사라진다. 고아 정정은
+    조회 시 매칭 실패로 무시된다(무해).
+
+    actor: ours(우리 자동화) / agency(대행사) / jino(Jino 본인). 화면 라벨과 1:1
+    (change_actor.ACTOR_LABEL). ★코드베이스의 optimizer='mop'과 무관하다 — 그건 "제3자
+    소유"라는 뜻이고 이 컬럼은 "누가 이 이벤트를 만들었나"다.
+    """
+
+    __tablename__ = "naver_change_actor_override"
+    __table_args__ = (
+        UniqueConstraint("source", "source_id", name="uq_naver_change_actor_override"),
+        Index("ix_naver_change_actor_override_source", "source", "source_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source: Mapped[str] = mapped_column(String(12), nullable=False)  # change_log/agency_op
+    source_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    actor: Mapped[str] = mapped_column(String(12), nullable=False)  # ours/agency/jino
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)  # ★kst_now() 명시(server_default=UTC 회피)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)  # ★kst_now() 명시
+
+
 class NaverBmBenchmark(Base):
     """대행사 구조↔성과 상관을 벤치마크化한 프라이어 1행 (SA-3, D-NAO-78 · BM 벤치마크 레이어).
 
