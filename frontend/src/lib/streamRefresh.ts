@@ -224,7 +224,15 @@ export const RG_STREAM_SPECS: StreamRefreshSpec[] = [
   },
 ];
 
-/** 배너 항목(collection-status key)들을 갱신 대상 spec으로. 모르는 key는 조용히 버린다. */
-export function specsForKeys(keys: string[]): StreamRefreshSpec[] {
-  return STREAM_SPECS.filter((s) => keys.includes(s.key));
+/**
+ * 배너 항목(collection-status key)들을 갱신 대상 spec으로.
+ *
+ * ★모르는 key를 **조용히 버리지 않는다**(codex R1[P2]): 백엔드가 스트림 key를 추가·개명하면
+ * 매칭이 0건이 되고, 버튼은 아무것도 갱신하지 않으면서 성공한 척한다 — 이 PR이 고치고 있는
+ * "눌러도 아무 일이 없다"가 그대로 재현된다. 못 알아본 key를 돌려주고 호출자가 문구로 드러낸다.
+ */
+export function specsForKeys(keys: string[]): { specs: StreamRefreshSpec[]; unknown: string[] } {
+  const specs = STREAM_SPECS.filter((s) => keys.includes(s.key));
+  const known = new Set(STREAM_SPECS.map((s) => s.key));
+  return { specs, unknown: keys.filter((k) => !known.has(k)) };
 }

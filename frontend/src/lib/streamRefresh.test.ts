@@ -192,9 +192,18 @@ describe("isLoginRequired / specsForKeys", () => {
     expect(isLoginRequired(null)).toBe(false);
   });
 
-  it("배너 key → spec 매칭, 모르는 key는 버린다", () => {
-    const specs = specsForKeys(["ohitech_ad", "supplier_hub", "존재하지않음"]);
+  it("배너 key → spec 매칭, 모르는 key는 **버리지 않고 돌려준다**", () => {
+    // codex R1[P2]: 조용히 버리면 백엔드 key 개명 시 버튼이 아무것도 갱신하지 않으면서
+    // 성공한 척한다 — 이 PR이 고치는 "눌러도 아무 일 없음"의 재발 경로.
+    const { specs, unknown } = specsForKeys(["ohitech_ad", "supplier_hub", "존재하지않음"]);
     expect(specs.map((s) => s.key)).toEqual(["ohitech_ad", "supplier_hub"]);
+    expect(unknown).toEqual(["존재하지않음"]);
+  });
+
+  it("전부 모르는 key면 specs는 비고 unknown이 전건을 담는다", () => {
+    const { specs, unknown } = specsForKeys(["new_stream_v2"]);
+    expect(specs).toEqual([]);
+    expect(unknown).toEqual(["new_stream_v2"]);
   });
 
   it("레지스트리 key가 collection-status 스트림 4종과 일치한다", () => {

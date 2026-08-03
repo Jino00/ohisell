@@ -63,8 +63,9 @@ describe("배너 항목은 갱신 가능한 스트림 key를 실어야 한다", 
         s({ state: "failed", key: "supplier_hub", label: "로켓 발주/정산" }),
       ]),
     );
-    const specs = specsForKeys((b?.items ?? []).map((i) => i.key));
+    const { specs } = specsForKeys((b?.items ?? []).map((i) => i.key));
     expect(specs.map((x) => x.key)).toEqual(["ohitech_ad", "supplier_hub"]);
+    expect(specsForKeys((b?.items ?? []).map((i) => i.key)).unknown).toEqual([]);
   });
 
   it("4개 스트림이 전부 낡으면 4건 모두 갱신 대상이 된다(누락 없음)", () => {
@@ -73,6 +74,6 @@ describe("배너 항목은 갱신 가능한 스트림 key를 실어야 한다", 
     const b = buildCollectionFreshnessBanner(
       wrap(keys.map((k) => s({ state: "critical", key: k, age_hours: 100 }))),
     );
-    expect(specsForKeys((b?.items ?? []).map((i) => i.key))).toHaveLength(4);
+    expect(specsForKeys((b?.items ?? []).map((i) => i.key)).specs).toHaveLength(4);
   });
 });

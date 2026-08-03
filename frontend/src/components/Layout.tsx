@@ -1,7 +1,7 @@
 // Layout.tsx — 사이드바 + 메인 영역 레이아웃
 // 데스크탑: 고정 사이드바. 모바일(<md): 햄버거 → 슬라이드 드로어.
 // 대시보드(전체)를 부모 메뉴로 두고, 채널별 운영(쿠팡·스마트스토어)을 접이식 자식으로 묶음.
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, NavLink, Outlet, useLocation } from "react-router-dom";
 import SchedulerStatus from "./SchedulerStatus";
 import {
@@ -109,6 +109,18 @@ export default function Layout() {
   // 바뀌어 "아무 일도 안 일어난다"로 보였다(Jino 보고). 이제 실제 갱신을 돌린다.
   const [collRefreshing, setCollRefreshing] = useState(false);
   const [collRefreshMsg, setCollRefreshMsg] = useState<string | null>(null);
+  // 갱신은 최대 215초 걸린다 — 그 사이 언마운트되거나 사용자가 다시 누를 수 있다. 마운트
+  // 플래그 + 실행 세대로 늦은 콜백의 setState를 막고, 소거 타이머도 정리한다(codex R1[P2]).
+  const collMounted = useRef(true);
+  const collRunSeq = useRef(0);
+  const collClearTimer = useRef<number | null>(null);
+  useEffect(() => {
+    collMounted.current = true;
+    return () => {
+      collMounted.current = false;
+      if (collClearTimer.current !== null) window.clearTimeout(collClearTimer.current);
+    };
+  }, []);
 
   // 배너 '지금 갱신' — stale(쿠키 정상, Mac 페처 지연)일 때 실제 갱신 요청.
   // request_refresh 플래그 set → Mac 데몬이 다음 폴링(~20초)에서 fetch·push. 12초 뒤 상태 재확인.
@@ -181,25 +193,53 @@ export default function Layout() {
   //  ★로그인이 필요한 스트림은 계정명과 함께 남긴다 — 로그인은 버튼이 대신할 수 없고,
   //    어느 계정인지 모르면 창을 찾지 못한다(2026-08-03 실측: 4개 중 2개가 rc=3 로그인 필요).
   async function handleCollectionRefresh(keys: string[]) {
-    const specs = specsForKeys(keys);
-    if (specs.length === 0) return;
+    const { specs, unknown } = specsForKeys(keys);
+    // ★못 알아본 key를 침묵시키지 않는다(codex R1[P2]): 백엔드가 스트림을 추가·개명하면
+    //   매칭이 0건이 되는데, 조용히 return하면 버튼이 다시 "눌러도 아무 일 없는" 물건이 된다.
+    const unknownNote = unknown.length ? `⚠️ 미지원 항목 ${unknown.join(", ")}(갱신 불가)` : "";
+    if (specs.length === 0) {
+      setCollRefreshMsg(unknownNote || "⚠️ 갱신할 수 있는 항목이 없습니다");
+      return;
+    }
+    // 실행 세대 — 이전 실행의 늦은 콜백이 새 실행의 문구를 덮어쓰는 것을 막는다(codex R1[P2]).
+    const gen = ++collRunSeq.current;
+    const alive = () => collMounted.current && gen === collRunSeq.current;
+    const withNote = (body: string) => [body, unknownNote].filter(Boolean).join(" · ");
+
     setCollRefreshing(true);
-    setCollRefreshMsg(specs.map((s) => describeOutcome(s, null)).join(" · "));
+    setCollRefreshMsg(withNote(specs.map((s) => describeOutcome(s, null)).join(" · ")));
     try {
       const results = await runStreamsRefresh(specs, (_spec, _outcome, all) => {
         // 한 건이 정착할 때마다 문구를 갱신 — 느린 스트림이 빠른 스트림을 인질로 잡지 않는다.
-        setCollRefreshMsg(specs.map((s) => describeOutcome(s, all.get(s.key) ?? null)).join(" · "));
+        if (!alive()) return;
+        setCollRefreshMsg(
+          withNote(specs.map((s) => describeOutcome(s, all.get(s.key) ?? null)).join(" · ")),
+        );
       });
+      if (!alive()) return;
+      const allDone = specs.every((s) => results.get(s.key)?.state === "done") && !unknown.length;
       // 완료분을 배너에서 즉시 걷어내기 위해 신선도를 다시 읽는다(60초 폴링을 기다리지 않음).
-      getCollectionStatus().then(setCollection).catch(() => { /* fail-soft */ });
-      // 전건 성공일 때만 문구 자동 소거 — 실패/로그인 필요는 남겨서 Jino가 보게 한다.
-      if (specs.every((s) => results.get(s.key)?.state === "done")) {
-        setTimeout(() => setCollRefreshMsg(null), 4000);
-      }
+      // ★재조회 실패를 삼키지 않는다(codex R1[P2]): 삼키면 문구만 사라지고 낡은 배너가 이유
+      //   없이 되돌아온다 — 갱신이 실패한 것처럼 보인다. 실패하면 문구를 남기고 이유를 적는다.
+      getCollectionStatus()
+        .then((c) => {
+          if (!alive()) return;
+          setCollection(c);
+          // 전건 성공일 때만 문구 자동 소거 — 실패/로그인 필요는 남겨서 Jino가 보게 한다.
+          if (allDone) {
+            collClearTimer.current = window.setTimeout(() => {
+              if (alive()) setCollRefreshMsg(null);
+            }, 4000);
+          }
+        })
+        .catch(() => {
+          if (!alive()) return;
+          setCollRefreshMsg((prev) => `${prev ?? ""} · ⚠️ 상태 재조회 실패(잠시 후 자동 갱신)`);
+        });
     } catch (e: any) {
-      setCollRefreshMsg("❌ 갱신 요청 실패: " + (e?.message || ""));
+      if (alive()) setCollRefreshMsg("❌ 갱신 요청 실패: " + (e?.message || ""));
     } finally {
-      setCollRefreshing(false);
+      if (alive()) setCollRefreshing(false);
     }
   }
 
