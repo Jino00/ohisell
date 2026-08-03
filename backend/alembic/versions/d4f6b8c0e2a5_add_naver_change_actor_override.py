@@ -12,8 +12,16 @@ FK를 걸지 않는 이유는 원천이 둘이라 단일 FK로 표현할 수 없
 삭제-재생성되는 경로(bm_diff 멱등 재생성)가 있어 CASCADE가 정정을 조용히 지우기 때문이다.
 고아 정정은 조회 시 자연스럽게 매칭 실패로 무시된다(무해).
 
+★재부모 이력(2026-08-03): 원래 부모는 `c3e5a7b9d1f4`였는데, 병행 세션
+(worktree-nbaesong-shipping-cost)이 **같은 부모**에서 `d4f6a8c0b2e5`(N배송 반품 회수비
+프로브)를 만들어 13:51에 prod에 먼저 적용했다. 그대로 두면 헤드가 둘로 갈려
+`alembic upgrade head`가 "Multiple head revisions are present"로 죽는다.
+**내 쪽만** 재부모해 선형으로 합류시킨다 — 그쪽 리비전은 이미 prod `alembic_version`에
+박혀 있어 ID를 바꾸면 prod가 고아가 되고, 내 것은 아직 어디에도 적용되지 않았다.
+(누가 먼저 병합했나가 아니라 **누가 이미 적용됐나**가 기준이다.)
+
 Revision ID: d4f6b8c0e2a5
-Revises: c3e5a7b9d1f4
+Revises: d4f6a8c0b2e5
 """
 from typing import Sequence, Union
 
@@ -21,7 +29,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "d4f6b8c0e2a5"
-down_revision: Union[str, Sequence[str], None] = "c3e5a7b9d1f4"
+down_revision: Union[str, Sequence[str], None] = "d4f6a8c0b2e5"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
