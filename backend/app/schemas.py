@@ -432,6 +432,19 @@ class SchedulerDataVerdictOut(BaseModel):
     reason: str
 
 
+class SchedulerDiskVerdictOut(BaseModel):
+    # 디스크 여유 감시(2026-08-03 ENOSPC 사고). 잡·쿠키·데이터 나이가 전부 '이미 죽은 뒤'를
+    # 보는 사후 지표인 반면, 이건 포화 전에 뜨는 유일한 사전 신호다.
+    path: str
+    state: str  # low
+    used_percent: float
+    warn_percent: float
+    free_bytes: int
+    total_bytes: int
+    impact: str  # 돈/운영 영향 한글 라벨
+    reason: str
+
+
 class SchedulerHealthOut(BaseModel):
     healthy: bool
     scheduler_running: bool
@@ -444,4 +457,6 @@ class SchedulerHealthOut(BaseModel):
     cookies_stale: list[SchedulerCookieVerdictOut] = []
     # 데이터 나이 감시 — 최신 row가 max_age_days를 넘겼거나 아예 없는(no_data) 파이프라인.
     data_stale: list[SchedulerDataVerdictOut] = []
+    # 디스크 여유 감시 — 사용률이 warn_percent를 넘긴 마운트(포화 전 사전 경보).
+    disk_low: list[SchedulerDiskVerdictOut] = []
     as_of: str

@@ -195,6 +195,74 @@ def evaluate_data_freshness(
     return out
 
 
+# ── 디스크 여유 (SA, 순수) ────────────────────────────────────────────────
+# 왜 잡·쿠키·데이터 나이 위에 또 디스크인가: 2026-08-03 03:32 KST에 디스크가 꽉 차(ENOSPC)
+# **서버에서 쓰기가 필요한 모든 프로세스가 3시간 40분 마비**됐고, 05:20~07:00 예정 자동수집
+# 12개가 통째로 유실됐다. 그때 세 감시선 중 어느 것도 사전에 울리지 않았다 —
+#   · 잡 감시: 잡이 '실패'한 게 아니라 프로세스가 없어서 '발화 자체를 안 했다'
+#   · 데이터 나이: 사후 지표라, 이미 유실된 뒤에야 뜬다(실제로 다음 날에야 stale로 떴다)
+# 디스크는 **유일하게 사전에 보이는 신호**다. 꽉 차기 전에 울려야 의미가 있으므로 임계를
+# 넉넉히 앞당긴다(85%). 잡·쿠키·데이터가 전부 '이미 죽은 뒤'를 보는 것과 대비된다.
+#
+# 임계 85% 근거: 이 서버의 일일 DB 백업이 원본 크기(~1.5GB)를 한 번에 쓴다. 97GB 디스크에서
+# 15% = 14.5GB → 백업 1회분의 약 9배 여유. 하루 1GB 안팎으로 증가하던 실측 추세에서
+# 대응까지 열흘 이상 확보된다(사고 당시엔 92%에서 시작해 하루 만에 터졌다 — 92%는 늦다).
+DISK_WARN_PERCENT = 85.0
+
+
+class DiskSnapshot(TypedDict, total=False):
+    path: str
+    total_bytes: int
+    used_bytes: int
+    free_bytes: int
+    warn_percent: float
+    impact: str
+
+
+class DiskVerdict(TypedDict):
+    path: str
+    state: str  # 'low'
+    used_percent: float
+    warn_percent: float
+    free_bytes: int
+    total_bytes: int
+    impact: str
+    reason: str
+
+
+def evaluate_disk_space(snapshots: Sequence[DiskSnapshot]) -> list[DiskVerdict]:
+    """사용률이 warn_percent를 넘긴 마운트만 반환(=비정상). 정상이면 결과에서 제외.
+
+    total_bytes가 0/누락이면 판정 불가 → **조용히 건너뛴다**(헛알림 방지). 다른 SA들과 달리
+    'no_data'를 만들지 않는 이유: 디스크 조회 실패는 파이프라인 침묵의 증거가 아니라 단순
+    조회 실패이고, 이 감시선 자체가 보조선이라 시끄럽게 만들 이득이 없다.
+    """
+    out: list[DiskVerdict] = []
+    for s in snapshots:
+        total = int(s.get("total_bytes") or 0)
+        if total <= 0:
+            continue
+        used = int(s.get("used_bytes") or 0)
+        free = int(s.get("free_bytes") or 0)
+        warn = float(s.get("warn_percent") or DISK_WARN_PERCENT)
+        used_pct = used / total * 100.0
+        if used_pct > warn:
+            out.append({
+                "path": s.get("path", "/"),
+                "state": "low",
+                "used_percent": used_pct,
+                "warn_percent": warn,
+                "free_bytes": free,
+                "total_bytes": total,
+                "impact": s.get("impact", ""),
+                "reason": (
+                    f"디스크 사용률 {used_pct:.1f}% (> {warn:.0f}%), "
+                    f"여유 {free / 1073741824:.1f}GB"
+                ),
+            })
+    return out
+
+
 def _verdict(name: str, state: str, age: Optional[float], reason: str) -> JobVerdict:
     return {"job_name": name, "state": state, "age_sec": age, "reason": reason}
 

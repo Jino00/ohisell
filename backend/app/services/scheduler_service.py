@@ -1619,8 +1619,12 @@ def _ensure_default_states(db):
 # 네이버 아침배치 catch-up. misfire_grace_time은 프로세스 재시작을 못 잡는다(in-memory
 # jobstore라 재시작 시 과거 발화 기록 소실 → misfire 미인식, codex 2026-07-13 [P1]).
 # 그래서 SchedulerState.last_run_at(마지막 '성공' 시각)로 오늘 예정 발화를 놓쳤는지 명시적
-# 판정해 따라잡는다. 범위는 네이버 아침배치 한정(Jino 결정 2026-07-13) — 쿠팡 등 blast
-# radius 제외. ★순서 중요(codex [P1] R2): 이 잡들은 의존 스태거(forecast→proposals→expert
+# 판정해 따라잡는다. 범위는 네이버 아침배치(Jino 결정 2026-07-13) + **자가치유 불가 잡**
+# (2026-08-03 확장, Jino 승인) — 쿠팡 등 blast radius는 여전히 제외.
+#   ★확장 판단기준: '하루 놓치면 다음 발화가 스스로 메우는가'로 가른다. 쿠팡 수집 잡들은
+#   최근 30~35일 창을 다시 긁으므로 다음 날 자동 복구된다 → 목록에 넣을 이유가 없다(제외 유지).
+#   반면 광고비 3잡은 '어제 하루치만' 쓰므로 구멍이 영구화된다 → 넣는다. 즉 목록의 기준은
+#   '중요도'가 아니라 **복구 가능성**이다 — 중요도로 고르면 목록이 무한히 자란다. ★순서 중요(codex [P1] R2): 이 잡들은 의존 스태거(forecast→proposals→expert
 # →learning). expert_desk는 pending 제안 0이면 '성공 스킵'하므로 proposals보다 먼저 돌면
 # 오늘 전문가검토가 영구 스킵된다. 따라서 동시 발화 금지 — cron 순서로 순차 실행하고 상류가
 # 성공해야 하류를 잇는다. keyword_hourly sweep은 다른 잡에 의존하지 않지만(자체 완결) 09:10
@@ -1634,6 +1638,17 @@ _CATCHUP_ORDER: tuple[str, ...] = (
     #   둘 다 상류 의존이 없고 upsert라 재실행이 안전하며, 실패해도 하류 체인을 끊지 않는다.
     "sync_naver_settlement",       # 05:25
     "sync_naver_case_settlement",  # 05:30
+    # ★광고비 3잡(2026-08-03 추가, 정산 바로 뒤·나머지 앞): 이 셋은 **'어제 하루치만' 적재**한다
+    #   (다른 수집 잡들이 최근 30~35일 창을 다시 긁는 것과 근본적으로 다르다). 그래서 하루를
+    #   놓치면 다음 정상 발화가 그 구멍을 **영영 메우지 않는다** — 그날 광고비가 손익에서
+    #   영구 누락되고, 아무 에러도 남지 않는다.
+    #   라이브 사고(08-03 03:32 ENOSPC → 서버 3시간 40분 마비): 07:00 두 잡이 유실됐고 catch-up
+    #   목록 밖이라 자동 복구가 없었다. 사람이 그날 밤 눈치채고 손으로 되살려 겨우 막았다 —
+    #   같은 세션에서 발견한 ADVoost·GFA 488만원 누락(59일 침묵)과 **소멸 방식이 정확히 같다**.
+    #   순서: 정산 뒤(회계 입력 우선), 하류 관찰·집행 잡 앞. 셋 다 upsert라 재실행이 안전하다.
+    "sync_naver_sa_ad_costs",      # 07:00 (검색광고 NCC)
+    "sync_meta_ad_costs",          # 07:00 (Meta)
+    "sync_naver_display_ad_costs", # 07:10 (ADVoost 쇼핑·GFA — 비즈머니 실차감)
     "shopping_ad_product_sync",    # 07:45 (D-NAO-57 A, 리뷰 P2-2 — BEP(07:30, catch-up 밖) 뒤·proposals 앞: 그날 제안이 최신 매핑 target을 쓰게. fail-open이라 실패해도 체인 안 끊김)
     "run_naver_forecast_engine",   # 07:50
     "generate_naver_proposals",    # 08:00
@@ -1662,6 +1677,13 @@ _CATCHUP_LOOKBACK = timedelta(hours=12)  # 오늘 예정 발화가 이보다 오
 _CATCHUP_NON_BLOCKING: frozenset[str] = frozenset({
     "sync_naver_settlement",
     "sync_naver_case_settlement",
+    # 광고비 3잡도 같은 이유(2026-08-03): 회계 입력이지 집행(proposals→expert→auto_operator)의
+    # 선행 조건이 아니다. 외부 API(네이버 SA·비즈머니·Meta)에 의존하는 잡이라 남의 장애 확률이
+    # 상대적으로 높은데, 그 하나가 광고 자동운영 복구 전체를 막으면 결합이 잘못된 것이다.
+    # ★잡 자체의 raise는 유지 — 정상 크론에서는 실패가 last_status로 드러나야 한다.
+    "sync_naver_sa_ad_costs",
+    "sync_meta_ad_costs",
+    "sync_naver_display_ad_costs",
 })
 
 
@@ -1770,6 +1792,11 @@ def _catch_up_morning_batch():
         # None을 돌려주고 조용히 스킵된다(목록에만 넣고 끝내면 복구가 안 된다).
         "sync_naver_settlement": sync_naver_settlement_job,
         "sync_naver_case_settlement": sync_naver_case_settlement_job,
+        # 광고비 3잡(07:00/07:00/07:10) — '어제 하루치만' 적재라 놓치면 손익에서 영구 누락된다
+        # (2026-08-03 ENOSPC 사고). 셋 다 upsert 멱등이라 다중 재시작에도 안전.
+        "sync_naver_sa_ad_costs": sync_naver_sa_ad_costs_job,
+        "sync_meta_ad_costs": sync_meta_ad_costs_job,
+        "sync_naver_display_ad_costs": sync_naver_display_ad_costs_job,
         "run_naver_forecast_engine": run_naver_forecast_engine_job,
         # proposals는 완주 검증판 사용(codex R3 P1-a): stage_status로 실제 생성 확인,
         # 미완주면 예외 → 체인 중단(expert가 pending 0으로 오실행되는 것 원천 차단).
