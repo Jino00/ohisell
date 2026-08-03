@@ -1763,6 +1763,56 @@ def ohitech_ad_refresh_status(db: Session = Depends(get_db)):
     return ohitech_ad_sync.refresh_status(db)
 
 
+@router.post("/rocket/ad-cost/option-ingest")
+async def ingest_ohitech_ad_option(
+    request: Request,
+    x_ingest_token: str | None = Header(default=None),
+    x_report_filename: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """오하이테크(1P 로켓배송) Billboard 옵션 보고서 XLSX → **옵션 테이블만** 적재(D-13).
+
+    왜 오픽스와 다른 엔드포인트인가: 공용 파서는 `ad_costs`·`coupang_ad_report`에도 쓴다.
+    A01029796의 계정 단위 광고비는 `report/SALES` 페처가 **전체(ALL_DELIVERED) 기준**으로
+    적재하는데(D-10), 이 XLSX는 **PA 기준**이라 같은 행을 덮으면 나중에 쓴 쪽이 조용히 이기고
+    순이익이 흔들린다. 그래서 이 경로는 `options_only=True`로 **머니 테이블을 못 건드린다**.
+    이익 재계산도 하지 않는다(머니 값이 안 변하므로).
+
+    인증: X-Ingest-Token == AD_INGEST_TOKEN. 파일명은 X-Report-Filename({vendor_id}_pa_daily_*.xlsx).
+    """
+    import secrets as _secrets
+
+    from app.routers.ad_costs import ingest_coupang_ad_xlsx_content
+
+    expected = os.getenv("AD_INGEST_TOKEN", "").strip()
+    if not expected or not x_ingest_token or not _secrets.compare_digest(x_ingest_token.strip(), expected):
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+    filename = (x_report_filename or "").strip()
+    if not filename:
+        raise HTTPException(status_code=400, detail="X-Report-Filename 헤더 필요({vendor_id}_pa_daily_*.xlsx)")
+
+    # 크기 상한 — 옵션 보고서는 7일치 ~1MB(D-12 실측). 오픽스 경로와 같은 방어(스트림 누적 한도).
+    _MAX = 30 * 1024 * 1024
+    clen = request.headers.get("content-length")
+    if clen and clen.isdigit() and int(clen) > _MAX:
+        raise HTTPException(status_code=413, detail="본문 과대(최대 30MB)")
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > _MAX:
+            raise HTTPException(status_code=413, detail="본문 과대(최대 30MB)")
+        chunks.append(chunk)
+    content = b"".join(chunks)
+    if not content:
+        raise HTTPException(status_code=400, detail="빈 본문 — xlsx 바이트 필요")
+
+    result, _recalc_from, _recalc_to = ingest_coupang_ad_xlsx_content(
+        content, filename, db, options_only=True)
+    return result
+
+
 @router.post("/rocket/ad-cost/refresh-claim")
 def ohitech_ad_refresh_claim(
     x_ingest_token: str | None = Header(default=None),

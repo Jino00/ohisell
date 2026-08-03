@@ -14,7 +14,7 @@ from app.services.profit_calculator import (
 )
 
 D = Decimal
-NBAESONG = D("3245")
+NBAESONG = D("3377")
 NAVER_CH = 6
 
 

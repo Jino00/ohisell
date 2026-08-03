@@ -29,7 +29,10 @@ def main() -> int:
     start_i, end_i = _window()
     print(f"[S0] window {start_i}~{end_i} (cdp_port={cfg.get('cdp_port')})")
 
-    with ohi._cdp_page(cfg) as (page, _browser):
+    # ★Chrome 수명은 페처와 같은 계약으로(2026-07-27 버튼-only 전환): _cdp_page는 이미 떠 있는
+    #   Chrome만 attach하므로, 여기서 _owned_chrome으로 기동을 보장한다.
+    with ohi._owned_chrome(cfg):
+      with ohi._cdp_page(cfg) as (page, _browser):
         # 0) same-origin 확보 — advertising.coupang.com으로 navigate(동작하는 페처와 동일).
         try:
             page.goto(ohi.DASH_URL, wait_until="domcontentloaded", timeout=40000)
@@ -37,8 +40,14 @@ def main() -> int:
             print(f"[S0] 대시보드 goto 경고(계속): {str(e)[:120]}")
         page.wait_for_timeout(2000)  # Akamai/세션 안정화
         if ohi._is_logged_out(page.url):
-            print(f"[S0][세션만료] 로그인 페이지로 리다이렉트됨(url={page.url[:80]}) — Chrome 창 재로그인 필요. (게이트 판정 아님)")
-            return 4
+            # ★2026-08-03: 세션 만료가 더 이상 정찰의 중단 사유가 아니다(PR #175 병합).
+            #   ①SSO → ②Keychain → ③알림 순으로 스스로 복구한다. 이 정찰이 7/11에 멈춰 있던
+            #   이유가 바로 이 자리였다(`[S0][세션만료]`).
+            print(f"[S0] 세션 만료 감지(url={page.url[:70]}) — 자가 복구 시도")
+            if ohi._recover_session(page, cfg) != ohi.coupang_auth.OK:
+                print("[S0][세션만료] 자가 복구 실패 — Chrome 창에서 재로그인 필요. (게이트 판정 아님)")
+                return 4
+            print("[S0] 세션 자가 복구 성공 — 정찰 계속")
 
         # 1) 캠페인 목록 (세션 스코프 — 9224=오하이테크 계정)
         data = ofix._gql(page, [{

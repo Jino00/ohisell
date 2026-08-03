@@ -691,6 +691,41 @@ def _parse_ad_attr(raw: object) -> tuple[int | None, bool | None]:
     return bid, ugba
 
 
+# D-NAO-137 S1: referenceData.APPLY_TM 하한/상한 — "에폭 밀리초로 읽었는데 값이 말이 되는가"의
+# 유일한 방어선이다. 초 단위(10자리)나 쓰레기 값을 밀리초로 읽으면 1970년대가 나오고, 그런 값이
+# 조용히 적재되면 S2에서 판별자 분포를 오염시킨다. 창은 넓게 잡는다(2020-01-01 ~ 2100-01-01) —
+# 목적은 정밀 검증이 아니라 **자릿수 오독 차단**이다.
+_APPLY_TM_MIN_MS = 1_577_836_800_000  # 2020-01-01T00:00:00Z
+_APPLY_TM_MAX_MS = 4_102_444_800_000  # 2100-01-01T00:00:00Z
+
+
+def _parse_apply_tm(ref: dict) -> int | None:
+    """referenceData.APPLY_TM → 에폭 밀리초 int (D-NAO-137 S1, 관측 적재 전용).
+
+    라이브 실측(2026-08-03, prod `naver_change_log.after_value`의 소재 원본 스냅샷):
+      - 키 이름은 정확히 `APPLY_TM`이다 — referenceData의 다른 키가 전부 camelCase인데 이것만
+        대문자+언더스코어다(오타로 보이지만 이게 실제 응답이다).
+      - 값은 **int** `1785734497797`이다 — 이웃 필드(`lowPrice`, `purchaseCnt` 등)가 전부
+        문자열인데 이것만 숫자형이다. 그래서 int/문자열 양쪽을 받는다.
+      - 에폭 밀리초로 읽으면 2026-08-03 14:21:37 KST가 나오고, 이는 같은 소재의 editTm
+        (14:22~14:23)보다 수십 초 앞선다 — 피드 적용 → 소재 재적용 순서와 일치한다.
+
+    ★그러나 "APPLY_TM = 피드 적용 시각"은 **실측 추론이지 문서 기재가 아니다**. 공식 스웨거
+    `NccShoppingCollectionProduct`에 필드는 실재하나 설명문이 없다. 그래서 이 슬라이스는
+    **원문 값을 그대로 보관만** 하고 의미에 기대는 판정을 하지 않는다.
+
+    부재/형식 불명/범위 밖은 전부 None(없는 값을 지어내지 않는다 — editTm과 같은 규율).
+    """
+    raw = ref.get("APPLY_TM")
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        val = int(raw)
+    except (ValueError, TypeError):
+        return None
+    return val if _APPLY_TM_MIN_MS <= val <= _APPLY_TM_MAX_MS else None
+
+
 def get_ads(adgroup_id: str) -> list[dict]:
     """광고그룹의 소재(ad) 목록 → 쇼핑 상품 매핑 원료 (D-NAO-57 A) + 소재-레벨 입찰(B1).
 
@@ -711,6 +746,13 @@ def get_ads(adgroup_id: str) -> list[dict]:
     라이브 실측(2026-07-29, 원칙22): 이 목록 응답에 `editTm`이 UTC ISO8601
     "2026-07-29T06:39:05.000Z"로 실려 온다(추가 GET 0). 필드가 없으면 None → 탐지는 판정 유보
     (없는 값을 지어내지 않는다).
+
+    ★D-NAO-137 S1: apply_tm(referenceData.APPLY_TM) 원문 전달 — **관측 적재 전용**.
+    editTm은 "네이버가 상품 피드를 재적용해도" 전진하기 때문에(2026-08-03 실측: 233건 중
+    229건이 피드 재적용, 실제 조작은 4건) editTm 하나로는 신호와 잡음이 안 갈린다. 후보
+    판별자가 `editTm − APPLY_TM`인데, **APPLY_TM은 현재값만 주므로 소급 수집이 불가능**하다
+    → 지금부터 쌓지 않으면 표본이 영영 n=1이다. 이 슬라이스는 **적재만** 하고 판정에는 쓰지
+    않는다(임계값은 며칠 관측한 뒤 D-NAO-137 S2에서 정한다).
     """
     resp = _get("/ncc/ads", {"nccAdgroupId": adgroup_id})
     resp.raise_for_status()
@@ -734,6 +776,7 @@ def get_ads(adgroup_id: str) -> list[dict]:
             "use_group_bid_amt": use_group_bid_amt,
             "ad_user_lock": bool(a.get("userLock", False)),
             "edit_tm": a.get("editTm"),  # D-NAO-127 외부 변경 탐지 앵커(원문 문자열 그대로)
+            "apply_tm": _parse_apply_tm(ref),  # D-NAO-137 S1 관측 적재(판정 미사용)
         })
     return out
 

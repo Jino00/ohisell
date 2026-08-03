@@ -56,6 +56,7 @@ import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 import requests
@@ -287,6 +288,21 @@ def _cdp_mode(cfg: dict) -> bool:
 #   poll 데몬이 요청을 claim한 뒤 스스로 Chrome을 띄우고 작업이 끝나면 닫는다.
 # ★소유권 규칙: 내가 띄운 Chrome만 내가 닫는다. 이미 떠 있던 Chrome(사람이 로그인하려고
 #   띄운 창 등)은 adopt만 하고 절대 닫지 않는다.
+#
+# ── 상주 모드(설정 `chrome_resident: true`, 2026-08-03) ──────────────────────────
+# 왜 필요한가(실측): Wing 로그인은 `JSESSIONID`(wing.coupang.com) **세션 쿠키**에 얹혀 있고
+#   xauth엔 무언 재발급용 SSO 쿠키(KEYCLOAK_IDENTITY 등)가 **없다**. 즉 Chrome을 닫으면
+#   로그인은 반드시 사라진다 — 두 계정 모두. per-fetch 수명에서는 회차마다 로그아웃으로 뜨고,
+#   실제로 2026-08-03 WING1은 fresh launch 4회차 전부 사람이 창에서 로그인해 통과했다
+#   (12:43:27→12:44:13, 12:55:43→12:56:05, 13:06:29→13:07:03). 로그인 횟수를 정하는 건
+#   세션 수명이 아니라 **Chrome 수명**이다.
+# 어떻게: 내가 띄운 창을 작업 후 닫지 않는다. 다음 회차는 그 창을 adopt하고 세션이 이어진다.
+# ★사람이 닫은 창은 즉시 되살리지 않는다 — 07-27에 상주 supervisor(launchd KeepAlive)를
+#   폐기한 사유가 바로 "닫으면 10~30초 뒤 되살아난다"였다. 창이 새로 뜨는 순간은 예나 지금이나
+#   '갱신 버튼을 누른 직후' 하나뿐이고, 달라진 것은 그 창을 닫지 않는다는 것뿐이다.
+#   그래서 상주는 별도 KeepAlive 잡이 아니라 이 소유권 규칙 안에 산다(프로필 기동을 두 주체가
+#   다투지 않는다). 되살아난 Chrome은 항상 로그아웃 상태이므로 로그인 안내가 반드시 뜬다
+#   — 그 안내를 침묵시키던 결함이 `_rg_off_origin`이었다(같은 날 수정).
 # (_cdp_alive·_profile_chrome_alive는 파일 하단 정의 — 호출 시점에 해석된다.)
 def _port_owner_foreign(port: int, profile: str, allow_unverified: bool = False) -> bool:
     """CDP 포트를 LISTEN 중인 프로세스가 '우리 프로필의 Chrome'임을 **확인하지 못하면** True(=adopt 거부).
@@ -441,6 +457,9 @@ def _cleanup_owned_chromes(_signum=None, _frame=None) -> None:
     `launchctl bootout`하므로, fetch 중 재설치하면 데몬만 죽고 Chrome이 남는다 → 다음 데몬은
     그 Chrome을 adopt(=닫을 책임 없음)해 버튼-only인데도 창이 영구 잔류한다.
     keep_open 창은 사람이 로그인 중일 수 있으므로 평소 규칙대로 남긴다.
+    ★상주(resident) 창도 남긴다 — 배포마다 데몬을 bootout 하는데 여기서 닫으면 **재배포가
+      곧 로그아웃**이 된다(Wing 로그인은 JSESSIONID 세션 쿠키라 Chrome과 함께 죽는다,
+      2026-08-03 실측). 남겨 두면 새 데몬이 그대로 adopt해 세션이 이어진다.
     """
     if _signum is not None:
         # 재진입 차단(codex R2): 정리 도중 두 번째 시그널이 들어오면 handler가 겹쳐 돈다.
@@ -448,7 +467,7 @@ def _cleanup_owned_chromes(_signum=None, _frame=None) -> None:
             with contextlib.suppress(Exception):
                 signal.signal(_s, signal.SIG_IGN)
     for owner in list(_LIVE_OWNERS):
-        if owner.owned and not owner.keep_open:
+        if owner.should_close:
             with contextlib.suppress(Exception):
                 _close_chrome(owner.proc, grace_s=5)   # 시그널 경로는 짧게
             owner.proc = None
@@ -471,15 +490,23 @@ class _ChromeOwner:
     """이번 작업 동안의 Chrome 소유권. proc=None이면 adopt(남의 창) → 절대 닫지 않는다.
 
     keep_open=True면 내가 띄운 창이라도 남긴다(세션 만료 → 사람이 그 창에서 로그인해야 하는 경우).
+    resident=True면 상주 모드라 **작업이 끝나도 닫지 않는다**(설정 chrome_resident, 아래 주석).
+      keep_open과 따로 두는 이유: 호출자는 로그인 성공 후 keep_open을 False로 되돌리는데
+      (_do_rg_run), 상주를 keep_open에 얹으면 그 한 줄이 상주를 조용히 해제한다.
     """
 
     def __init__(self) -> None:
         self.proc = None
         self.keep_open = False
+        self.resident = False
 
     @property
     def owned(self) -> bool:
         return self.proc is not None
+
+    @property
+    def should_close(self) -> bool:
+        return self.owned and not self.keep_open and not self.resident
 
 
 @contextlib.contextmanager
@@ -508,8 +535,10 @@ def _owned_chrome(cfg: dict, owner: "_ChromeOwner | None" = None):
             if proc is None:
                 raise RuntimeError("chrome_launch_failed")
             owner.proc = proc
+            owner.resident = bool(cfg.get("chrome_resident", False))
             _LIVE_OWNERS.append(owner)   # 시그널 종료 시 회수 대상
-            log.info("Chrome 기동(PID %d, CDP %d) — 작업 후 닫음.", proc.pid, port)
+            log.info("Chrome 기동(PID %d, CDP %d) — %s.", proc.pid, port,
+                     "상주(작업 후 닫지 않음)" if owner.resident else "작업 후 닫음")
             if not _wait_cdp(port):
                 log.error("Chrome CDP(%d) 기동 대기 초과 — 종료.", port)
                 _close_chrome(proc)
@@ -522,7 +551,10 @@ def _owned_chrome(cfg: dict, owner: "_ChromeOwner | None" = None):
     finally:
         try:
             if owner.owned:
-                if owner.keep_open:
+                if owner.resident:
+                    log.info("상주 모드 — Chrome(PID %s) 유지(다음 회차가 adopt).",
+                             getattr(owner.proc, "pid", "?"))
+                elif owner.keep_open:
                     log.info("로그인 대기 위해 Chrome 창 유지 — 로그인 후 '갱신' 버튼을 다시 누르세요.")
                 else:
                     _close_chrome(owner.proc)
@@ -1806,14 +1838,28 @@ def _rg_off_origin(page) -> str:
       페이지로 리다이렉트되고 그 오리진의 status/api는 404를 준다. same-origin POST는
       location.origin 기반이라 애초에 엉뚱한 호스트로 나간다. 본문 마커보다 확실하고 싸다
       — 404 자체는 UNKNOWN이지만(정상 세션에서도 경로 변경으로 날 수 있다) 오리진 이탈은 확증이다.
+
+    ★판정은 **호스트 파싱**으로 한다 — 부분문자열 검사는 원리적으로 이 형태를 못 본다
+      (2026-08-03 WING2 라이브 실측). Keycloak 로그인 URL은 돌아갈 주소를 쿼리에 싣는다:
+          https://xauth.coupang.com/auth/realms/seller/protocol/openid-connect/auth
+              ?response_type=code&client_id=wing&redirect_uri=https%3A%2F%2Fwing.coupang.com%2F...
+      `_RG_ORIGIN_HOST not in url`은 저 redirect_uri 안의 'wing.coupang.com'에 걸려 **로그인
+      페이지 위에 서서 '오리진 유지'라고 답했다.** 그 결과 로그아웃이 AUTH로 확증되지 못하고
+      404 → UNKNOWN → "업스트림 장애(로그아웃 아님)"로 오분류되어 **로그인 창이 뜨지 않았고**,
+      아무도 로그인할 기회를 얻지 못한 채 회차마다 120초 재시도만 태웠다(15:22·15:25·15:27 전손).
+      침묵의 형태가 정확히 이것이다 — 고장은 시끄러워야 고쳐진다.
     """
     try:
         url = str(page.url or "")
     except Exception:  # noqa: BLE001 — 창 닫힘 등은 판정 불가로 접는다
         return ""
-    if url and not url.startswith("about:") and _RG_ORIGIN_HOST not in url:
-        return url
-    return ""
+    if not url or url.startswith("about:"):
+        return ""
+    try:
+        host = (urlsplit(url).hostname or "").lower()
+    except ValueError:          # 파싱 불가 URL = 우리 오리진이 아님(확인된 이탈로 취급)
+        host = ""
+    return "" if host == _RG_ORIGIN_HOST else url
 
 
 def _rg_probe_endpoint(page, path: str, payload: dict, *, expect_key: str | None = None,

@@ -1019,6 +1019,28 @@ export interface RocketOverview {
     settlement_invoice_count: number;
     note: string;
   };
+  ad_options?: RocketAdOptions;
+}
+
+export interface RocketAdOptionItem {
+  option_id: string;
+  ad_spend: string;              // Decimal → string
+  impressions: number;
+  clicks: number;
+  conversion_revenue: string;    // Decimal → string
+}
+
+export interface RocketAdOptions {
+  options: RocketAdOptionItem[];
+  option_count: number;
+  shown: number;
+  reconciliation: {
+    option_sum: string;
+    account_total: string;
+    diff: string;
+    diff_pct: string;
+    basis: string;
+  };
 }
 
 export function fetchRocketOverview(from: string, to: string): Promise<RocketOverview> {
