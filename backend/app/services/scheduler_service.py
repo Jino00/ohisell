@@ -1478,9 +1478,11 @@ def sync_naver_case_settlement_job():
 def run_naver_nbaesong_return_probe_job():
     """N배송 반품 회수비 프로브 (관측 전용, 06:02 KST).
 
-    최근 44일 네이버 클레임(반품/교환) 주문을 settleDecisionType 3유형으로 훑어 정산 구조를
-    적재하고, **처음 보는 조합**만 Slack으로 올린다. N배송 반품 표본이 라이브 468건 중 2건뿐
-    (둘 다 정산 성숙 D+12 전이라 3유형 모두 0건)이라, 표본이 익는 순간을 사람이 지키는 대신
+    최근 44일 네이버 클레임(반품/교환) 주문을 주문번호로 1회씩 훑어(단건 조회는 그 주문의
+    정산 행이 유형 구분 없이 전량 온다) 정산 구조를 적재하고, **처음 보는 조합**
+    (배송방식 × 멤버십 × productOrderType × settleType)만 Slack으로 올린다.
+    N배송 반품 표본이 라이브 468건 중 2건뿐이고 둘 다 지금은 NORMAL_SETTLE_BEFORE_CANCEL
+    (정산 전 취소)이라, 정산 성숙(D+12)에서 상태가 옮겨가는 순간을 사람이 지키는 대신
     이 잡이 잡는다. 상세 배경은 services/naver_claim_settlement_probe.py 상단.
     """
     db = _get_own_db_session()
