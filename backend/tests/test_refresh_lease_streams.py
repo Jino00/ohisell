@@ -183,9 +183,9 @@ def test_router_passes_login_required_kind(client, _, acc, request_fn, claim_fn,
                                            error_fn, success_fn, url):
     c, seed = client
     request_fn(seed)
-    claim_fn(seed)
+    lease = claim_fn(seed)["lease"]
 
-    r = c.post(url, json={"error": "세션 만료", "kind": "login_required"},
+    r = c.post(url, json={"error": "세션 만료", "kind": "login_required", "lease": lease},
                headers={"X-Ingest-Token": _TOKEN})
     assert r.status_code == 200
 
@@ -303,15 +303,78 @@ def test_claim_always_returns_lease(db, _, acc, request_fn, claim_fn, status_fn,
                          STREAMS, ids=IDS)
 def test_router_without_kind_keeps_request_for_retry(client, _, acc, request_fn, claim_fn,
                                                      status_fn, error_fn, success_fn, url):
-    """하위호환 — kind 없는 구버전 페처 보고는 평범한 실패(=재시도 대상)로 다룬다."""
+    """하위호환 — kind 없는 보고는 평범한 실패(=재시도 대상)로 다룬다.
+
+    ★kind는 여전히 옵션이다(구버전 페처 하위호환). lease만 필수로 바뀌었다 —
+    kind는 "어떤 실패인가"를 말할 뿐이지만 lease는 "누구의 회차인가"를 말하기 때문이다.
+    """
     c, seed = client
     request_fn(seed)
-    claim_fn(seed)
+    lease = claim_fn(seed)["lease"]
 
-    r = c.post(url, json={"error": "browser closed"}, headers={"X-Ingest-Token": _TOKEN})
+    r = c.post(url, json={"error": "browser closed", "lease": lease},
+               headers={"X-Ingest-Token": _TOKEN})
     assert r.status_code == 200
 
     seed.expire_all()
     row = _row(seed, acc)
     assert row.refresh_requested_at is not None   # 요청 보존
     assert row.claimed_at is None                 # lease 반납 → 다음 폴에서 재claim
+
+
+@pytest.mark.parametrize("_, acc, request_fn, claim_fn, status_fn, error_fn, success_fn, url",
+                         STREAMS, ids=IDS)
+def test_fetch_error_requires_lease(client, _, acc, request_fn, claim_fn, status_fn,
+                                    error_fn, success_fn, url):
+    """★2026-08-03 slice 2: lease 없는 실패 보고는 남의 요청을 죽인다 — 5스트림 전부 거부.
+
+    완료 신호(refresh-complete)와 **같은 구멍**이다. report_failure는 lease가 있으면 stale
+    가드를 돌지만 없으면 통째로 건너뛴다. 그리고 reason이 잡히는 실패
+    (login_required/access_denied/mapping_broken/attempt>=MAX)는 **요청을 소멸시킨다** —
+    즉 늦게 도착한 run A의 lease 없는 login_required 보고 하나가 사용자의 새 요청 B를 죽이고,
+    프론트는 "새 실패 없이 요청만 사라졌다 = 정상 종료"로 읽어 시작도 안 한 B를 done으로 오보한다.
+
+    ★거부해도 실패가 조용해지지 않는다: 보고가 거부된 회차는 "데몬이 보고 없이 죽었다"로
+    퇴화하고, 그건 lease 계약이 이미 처리한다(TTL 만료 → reaper → last_error에
+    "재시도 3회 소진 — 마지막 시도가 보고 없이 종료"). 가시성이 사라지는 게 아니라 늦어질 뿐이다.
+    """
+    c, seed = client
+
+    # ── run A: 임대까지 받았고, 그 뒤 A의 요청은 이미 소멸한 상태 ──
+    request_fn(seed)
+    lease_a = claim_fn(seed)["lease"]
+    assert lease_a is not None
+    row = _row(seed, acc)
+    row.refresh_requested_at = None
+    row.claimed_at = None
+    row.attempt_count = 0
+    seed.commit()
+
+    # ── 사용자가 다시 누름 → 요청 B → 데몬이 B를 임대 ──
+    request_fn(seed)
+    lease_b = claim_fn(seed)["lease"]
+    assert lease_b is not None and lease_b != lease_a
+    requested_b = _row(seed, acc).refresh_requested_at
+
+    # ── 늦은 A의 lease 없는 실패 보고(가장 파괴적인 kind) ──
+    r = c.post(url, json={"error": "세션 만료", "kind": "login_required"},
+               headers={"X-Ingest-Token": _TOKEN})
+    assert r.status_code == 400
+    seed.expire_all()
+    row = _row(seed, acc)
+    assert row.refresh_requested_at == requested_b   # ★B의 요청 생존
+    assert row.claimed_at is not None                # ★B의 임대도 반납되지 않음
+
+    # ── 옛 임대를 실은 보고(stale)도 B를 건드리지 못한다(기존 가드) ──
+    r = c.post(url, json={"error": "세션 만료", "kind": "login_required", "lease": lease_a},
+               headers={"X-Ingest-Token": _TOKEN})
+    assert r.status_code == 200
+    seed.expire_all()
+    assert _row(seed, acc).refresh_requested_at == requested_b
+
+    # ── B 자신의 보고만이 B를 닫는다 ──
+    r = c.post(url, json={"error": "세션 만료", "kind": "login_required", "lease": lease_b},
+               headers={"X-Ingest-Token": _TOKEN})
+    assert r.status_code == 200
+    seed.expire_all()
+    assert _row(seed, acc).refresh_requested_at is None
