@@ -44,7 +44,7 @@ def test_unit_prices_unchanged():
     ★일반배송 1,900은 불변 — 품고가 아니라 **한진 직계약**이다(Jino 확정 2026-08-03).
     """
     assert od.SHIPPING_COST_NORMAL == Decimal("1900")
-    assert od.SHIPPING_COST_NBAESONG == Decimal("3245")
+    assert od.SHIPPING_COST_NBAESONG == Decimal("3377")
     # bep_calculator 재수출이 같은 객체를 가리키는가(단가 진실 원천 1개)
     assert bep_calculator.SHIPPING_COST_NORMAL == od.SHIPPING_COST_NORMAL
     assert bep_calculator.SHIPPING_COST_NBAESONG == od.SHIPPING_COST_NBAESONG
@@ -63,7 +63,7 @@ def test_delivery_fields_nbaesong_live_shape():
         "delivery_policy_type": "유료",
         "shipping_fee_type": "선결제",
         "logistics_company_id": "PG",
-        "shipping_cost_paid": Decimal("3245"),
+        "shipping_cost_paid": Decimal("3377"),
     }
 
 
@@ -95,7 +95,7 @@ def test_delivery_fields_missing_attr_still_costs_normal():
 
 # ── 3. 영속 컬럼 vs 파싱 폴백 동치 ────────────────────────────
 def test_column_and_parse_paths_agree():
-    for attr, expect in (("ARRIVAL_GUARANTEE", "3245"), ("TODAY", "1900"), ("NORMAL", "1900")):
+    for attr, expect in (("ARRIVAL_GUARANTEE", "3377"), ("TODAY", "1900"), ("NORMAL", "1900")):
         raw = _entry(attr)
         parsed = od.order_shipping_cost({"raw_data": raw})           # 폴백 경로
         backfilled = od.delivery_fields(raw)["shipping_cost_paid"]   # 백필이 쓰는 값
@@ -117,13 +117,13 @@ def test_order_shipping_cost_legacy_contract_preserved():
     assert bep_calculator._order_shipping_cost({"raw_data": "not json{"}) == Decimal("1900")
     assert bep_calculator._order_shipping_cost({"raw_data": "[]"}) == Decimal("1900")
     assert bep_calculator._order_shipping_cost(
-        {"raw_data": _entry("ARRIVAL_GUARANTEE")}) == Decimal("3245")
+        {"raw_data": _entry("ARRIVAL_GUARANTEE")}) == Decimal("3377")
 
 
 # ── 4. 실부담(clamp 없음) ─────────────────────────────────────
 def test_net_burden_can_be_negative():
     """수취가 지불을 넘으면 음수 — 리포트는 사실 그대로(BEP의 보수 클램프와 별개)."""
-    assert od.net_shipping_burden(Decimal("3245"), Decimal("3000")) == Decimal("245")
+    assert od.net_shipping_burden(Decimal("3377"), Decimal("3000")) == Decimal("377")
     assert od.net_shipping_burden(Decimal("1900"), Decimal("2500")) == Decimal("-600")
     assert od.net_shipping_burden(Decimal("1900"), None) == Decimal("1900")
 
@@ -141,7 +141,7 @@ def test_apply_delivery_fields_sets_and_preserves():
     r = _Row()
     assert od.apply_delivery_fields(r, _entry("ARRIVAL_GUARANTEE", deliveryPolicyType="유료")) is True
     assert r.delivery_attribute_type == "ARRIVAL_GUARANTEE"
-    assert r.shipping_cost_paid == Decimal("3245")
+    assert r.shipping_cost_paid == Decimal("3377")
     # 판별 불가 재동기화가 이미 확보한 실측을 지우지 않는다
     assert od.apply_delivery_fields(r, None) is False
     assert r.delivery_attribute_type == "ARRIVAL_GUARANTEE"
@@ -220,8 +220,8 @@ def test_sync_fills_delivery_columns_on_insert_and_update(monkeypatch):
     o = rows[0]
     assert o.delivery_attribute_type == "ARRIVAL_GUARANTEE"
     assert o.logistics_company_id == "PG"
-    assert o.shipping_cost_paid == Decimal("3245")
-    assert o.shipping_cost_net == Decimal("245")  # 실부담 = 3,245 지불 − 3,000 수취
+    assert o.shipping_cost_paid == Decimal("3377")
+    assert o.shipping_cost_net == Decimal("377")  # 실부담 = 3,377 지불 − 3,000 수취
     db.close()
 
 
@@ -269,7 +269,7 @@ def test_backfill_is_idempotent_and_reports_unresolved(monkeypatch):
 
     db.expire_all()
     rows = {o.order_number: o for o in db.query(Order).all()}
-    assert rows["o1"].shipping_cost_paid == Decimal("3245")
+    assert rows["o1"].shipping_cost_paid == Decimal("3377")
     assert rows["o2"].shipping_cost_paid == Decimal("1900")
     assert rows["o3"].delivery_attribute_type is None   # 추정으로 채우지 않음
     assert rows["o4"].shipping_cost_paid is None
