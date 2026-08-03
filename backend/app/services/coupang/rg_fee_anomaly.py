@@ -42,6 +42,11 @@ def detect_fee_anomalies(
       size_mismatch_high  배송 주문당 단가가 우리 사이즈 최소금액의 2배+ AND 큰 등급에 정합
                           → 과대측정/과오청구 의심(정확 금액표로 확인 필요). floor는 최소치라
                           1~1.x배는 정상 가능 → 배수 임계로 오탐 억제.
+                          **실측 미확보(등록 치수 기준)일 때의 이름이다.**
+      measured_vs_billed_mismatch
+                          같은 조건이되 기준이 **쿠팡 실측 사이즈**일 때. 과금 기준인 물류센터
+                          실측값 자체와 청구가 어긋났고 '등록 치수가 틀렸다'는 설명이 이미
+                          제거됐으므로 size_mismatch_high보다 **강한 신호**다(2026-08-03 신설).
     """
     # 쿠팡 실측 사이즈가 있으면 우선 사용(과금 기준). 없으면 등록 치수로 분류(폴백).
     size_type = coupang_size_type or classify_size_type(width_mm, length_mm, height_mm, weight_g)
@@ -81,15 +86,29 @@ def detect_fee_anomalies(
         if floor_delivery is not None and per_order_delivery < floor_delivery:
             flags.append("below_floor")
         elif (
-            coupang_size_type is None  # 쿠팡 실측값 있으면 스킵 — 실측값이 과금 기준
-            and implied is not None
+            implied is not None
             and SIZE_TYPES.index(implied) > our_idx
             and floor_delivery is not None
             and per_order_delivery >= floor_delivery * _DELIVERY_OVERCHARGE_MULTIPLE
         ):
-            # 쿠팡 실측 사이즈 미수집 + 배송비가 우리 등급보다 큰 사이즈에 정합 + 2배+
-            # → 과대측정 의심. 쿠팡 실측값이 있으면 그 값이 과금 기준이므로 이 추정 불필요.
-            flags.append("size_mismatch_high")
+            # 배송비가 우리 등급보다 큰 사이즈에 정합 + 2배+ → 검토 신호.
+            # ★어느 사이즈를 기준으로 어긋났느냐에 따라 신호의 **세기**가 다르다(2026-08-03):
+            #   · 실측 미확보(registered_dims 기준) → size_mismatch_high.
+            #     우리 등록 치수가 틀렸을 가능성이 남아 있어 상대적으로 약한 신호다.
+            #   · 실측 확보(coupang_measured 기준) → measured_vs_billed_mismatch.
+            #     **더 강한 신호다.** 과금 기준인 물류센터 실측값 자체와 청구가 어긋났고,
+            #     등록 치수 오탐이라는 설명이 이미 제거됐기 때문이다.
+            # ★종전엔 `coupang_size_type is None` 조건으로 후자를 **통째로 스킵**했다
+            #   ("실측값이 과금 기준이므로 추정 불필요"). 그 논리는 "실측 사이즈 = 청구 사이즈"를
+            #   전제하는데, 라이브가 그 전제를 반증했다 — 옵션 91313543029(아이패드미니 필름,
+            #   WING2): 실측 '극소형'인데 주문당 배송비 4,050원(극소형 최소 1,350원의 3.0배)이고
+            #   청구 함의 사이즈는 '대형1'. 실측이 들어온 것이 불일치를 해소한 게 아니라
+            #   **확인해 줬는데** 코드는 그걸 "볼 필요 없음"으로 읽고 신호를 껐다.
+            #   그 결과 2026-06-15에 올라온 플래그가 숫자 하나 안 바뀐 채 조용히 사라졌다.
+            flags.append(
+                "measured_vs_billed_mismatch" if coupang_size_type is not None
+                else "size_mismatch_high"
+            )
 
     if warehousing_amount is not None:
         per_unit_wh = warehousing_amount / quantity
