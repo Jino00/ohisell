@@ -2465,6 +2465,17 @@ class NaverAgencyOp(Base):
     # ad grain은 네이버 editTm으로 초 단위 확정. NULL = 일별 스냅샷 diff(campaign/adgroup grain)라
     # 시각 불명. op_date·detected_at은 '우리가 감지한' 시각이라 "언제 손댔나"에 답하지 못한다.
     occurred_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # ── D-NAO-139: 피드 재적용 판별(소재 grain 전용, 그 외 grain은 전부 NULL) ──
+    # `ad_edit_tm`은 대행사가 만져도 전진하지만 **네이버가 상품 피드를 재적용해도 전진**한다.
+    # 판별: 같은 상품의 소재가 **전량** 같은 초로 움직였으면 피드(사람은 하나씩 만진다).
+    # 규칙·검증·실패 모드는 `services/naver_ad/feed_reapply.py` docstring.
+    # ★**조회 시 계산이 아니라 탐지 시점에 계산해 저장**한다: `naver_adgroup_product`는 누적
+    #   테이블이라 stale 행이 쌓이며 total이 계속 커지고, 그러면 과거 이벤트의 판정이 조회할
+    #   때마다 흔들린다. 그래서 판정 근거 숫자(moved/total)까지 그 시점 값으로 굳혀 둔다.
+    feed_verdict: Mapped[Optional[str]] = mapped_column(String(8), nullable=True)  # feed/real/unknown
+    feed_product_id: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)  # 판별에 쓴 mall_product_id
+    feed_moved: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 그 초에 움직인 소재 수
+    feed_total: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 그 상품의 소재 수(판정 시점)
 
 
 class NaverChangeActorOverride(Base):

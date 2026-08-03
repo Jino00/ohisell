@@ -20,7 +20,7 @@ import {
 } from "../lib/modificationActor";
 import {
   fetchNaverModifications, putNaverModificationActor,
-  type NaverModificationActor, type NaverModificationRow,
+  type NaverModificationActor, type NaverModificationFeedReapply, type NaverModificationRow,
 } from "../lib/api";
 
 const PAGE = 50;
@@ -37,7 +37,11 @@ export default function NaverAdModifications() {
   //   바꿨을 때 offset=100이 그대로 나가 **결과가 있는데도 빈 화면**이 뜬다("수정 없음"으로 읽힌다).
   //   effect로 setState 하지 않고 **파생**한다 — 그러면 리셋 전 한 프레임이 잘못된 offset으로
   //   조회를 날리는 창(cascading render)이 애초에 없다.
-  const queryKey = `${p.range.from}|${p.range.to}|${actor}`;
+  // D-NAO-139 — 네이버가 상품 피드를 재적용하면 그 상품의 소재가 **전부** 같은 초로 움직여
+  // 한 사건이 N줄로 늘어선다. 기본은 접어서 1줄로 보여주고, 이 스위치를 켜면 아예 뺀다
+  // (대행사가 실제로 만진 것만 보고 싶을 때). 무엇을 얼마나 뺐는지는 항상 표시한다.
+  const [hideFeed, setHideFeed] = useState(false);
+  const queryKey = `${p.range.from}|${p.range.to}|${actor}|${hideFeed}`;
   const [page, setPage] = useState({ key: queryKey, offset: 0 });
   const offset = page.key === queryKey ? page.offset : 0;
   const setOffset = (n: number) => setPage({ key: queryKey, offset: n });
@@ -58,6 +62,12 @@ export default function NaverAdModifications() {
                 onClick={() => setActor(a)}
               />
             ))}
+            <span className="mx-1 h-3 w-px bg-gray-200" />
+            <FilterChip
+              label="피드 재적용 숨기기"
+              active={hideFeed}
+              onClick={() => setHideFeed((v) => !v)}
+            />
           </div>
         }
       >
@@ -70,6 +80,7 @@ export default function NaverAdModifications() {
             to={p.range.to}
             label={p.label}
             actor={actor}
+            hideFeed={hideFeed}
             offset={offset}
             onOffset={setOffset}
             version={version}
@@ -96,16 +107,17 @@ function FilterChip({ label, active, onClick }: { label: string; active: boolean
 }
 
 function ModificationTable({
-  from, to, label, actor, offset, onOffset, version, onCorrected,
+  from, to, label, actor, hideFeed, offset, onOffset, version, onCorrected,
 }: {
-  from: string; to: string; label: string; actor: NaverModificationActor | "";
+  from: string; to: string; label: string; actor: NaverModificationActor | ""; hideFeed: boolean;
   offset: number; onOffset: (n: number) => void; version: number; onCorrected: () => void;
 }) {
   const { data, error } = useAsyncData(
     () => fetchNaverModifications({
       date_from: from, date_to: to, actor: actor || undefined, limit: PAGE, offset,
+      include_feed_reapply: !hideFeed,
     }),
-    [from, to, actor, offset, version],
+    [from, to, actor, hideFeed, offset, version],
   );
 
   if (error) {
@@ -129,6 +141,7 @@ function ModificationTable({
   return (
     <>
       <ActorSummary byActor={data.by_actor} label={label} />
+      <FeedReapplyNote info={data.feed_reapply} />
       <Table
         head={
           <>
@@ -141,7 +154,10 @@ function ModificationTable({
             <Td><TimeCell row={r} /></Td>
             <Td><ActorCell row={r} onCorrected={onCorrected} /></Td>
             <Td><TargetCell row={r} /></Td>
-            <Td><span className="text-xs">{r.op_label}</span></Td>
+            <Td>
+              <span className="text-xs">{r.op_label}</span>
+              <FeedVerdictBadge row={r} />
+            </Td>
             <Td><ValueCell row={r} /></Td>
             <Td><SourceCell row={r} /></Td>
           </tr>
@@ -164,6 +180,43 @@ function ActorSummary({ byActor, label }: { byActor: Record<string, number>; lab
         </span>
       ))}
     </p>
+  );
+}
+
+/** D-NAO-139 — 피드 재적용을 얼마나 접고 숨겼는지. **판정 행이 있으면 항상 말한다.**
+ *
+ *  ★조용히 접거나 숨기면 안 되는 이유: 이 화면은 "그날 대행사가 뭘 만졌나"에 답하는 화면이고,
+ *  줄이 사라진 걸 모르면 줄어든 목록이 곧 "조용한 하루"로 읽힌다 — 이 화면이 없애려던
+ *  거짓 안심이 형태만 바꿔 돌아온다. */
+function FeedReapplyNote({ info }: { info: NaverModificationFeedReapply }) {
+  if (!info || info.feed_rows === 0) return null;
+  return (
+    <p className="px-4 py-2 text-xs text-gray-500 border-b border-gray-100">
+      네이버 상품 피드 재적용{" "}
+      <span className="text-gray-700">{num(info.feed_rows)}건</span>
+      {info.hidden > 0
+        ? ` — 목록에서 숨김(${num(info.hidden)}건). 대행사가 실제로 만진 것만 보고 있습니다.`
+        : info.collapsed_into > 0
+          ? ` — 같은 상품이 같은 초에 움직인 ${num(info.collapsed_into)}줄을 접었습니다(한 사건 = 한 줄).`
+          : " — 접힌 줄 없음."}
+    </p>
+  );
+}
+
+/** 판정 배지 — **주체는 안 바꾼다**(자동 판정 '대행사'는 그대로 둔다, D-NAO-138 ①).
+ *  여기서 말하는 건 "그 편집이 사람 손인가"이지 "누구 소유인가"가 아니다. */
+function FeedVerdictBadge({ row }: { row: NaverModificationRow }) {
+  if (!row.feed_verdict) return null;
+  // 실조작만 눈에 띄게 한다 — 이 화면의 목적이 "사람이 만진 것"을 찾는 것이라,
+  // 피드 재적용(절대다수)이 강조되면 신호가 다시 잡음에 묻힌다.
+  const tone = row.feed_verdict === "real" ? "alert" : "neutral";
+  return (
+    <div className="mt-0.5 space-y-0.5" title={row.feed_evidence ?? undefined}>
+      <Badge tone={tone}>{row.feed_verdict_label}</Badge>
+      {row.feed_group_size > 1 && (
+        <div className="text-[11px] text-gray-500">소재 {num(row.feed_group_size)}개 동시</div>
+      )}
+    </div>
   );
 }
 
