@@ -1367,11 +1367,9 @@ class CoupangRgSettlementFee(Base):
     #   계정 row(status/api)·구 행은 NULL이다(그래서 nullable, 감사는 NULL이면 종전 경로로 폴백).
     #   왜 필요한가: 감사가 "청구 사이즈"와 "청구 주문수"를 **추론**했고 둘 다 오탐의 원인이었다.
     #   주문수는 `coupang_rg_order_item`(결제일 basis)을 매출인식일 정산주기에 맞춰 세다가
-    #   창 불일치로 단가를 정수배 부풀렸고(오탐 4건, LESSONS #99), 사이즈는 금액 임계로 역추정했다.
+    #   창 불일치로 단가를 정수배 부풀렸고(오탐 4건, LESSONS #106), 사이즈는 금액 임계로 역추정했다.
     #   정산 엑셀 상세에는 **주문ID·판매수량·개별포장사이즈**가 그대로 있다(ref 17 §8-1) →
     #   같은 파일·같은 basis에서 읽으면 조인도 추론도 없다.
-    # ※이 3필드는 prod에 이미 배포·적용돼 있었으나(마이그레이션 rg9billed7c4e) main에는 없었다
-    #   — 미병합 브랜치에서 배포된 탓이다. models.py를 배포하려면 합집합이어야 어느 쪽도 안 죽는다.
     billed_size_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     billed_order_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     billed_quantity: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)

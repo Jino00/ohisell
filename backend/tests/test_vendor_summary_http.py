@@ -294,8 +294,11 @@ def test_rg_settlement_upload_all_sheets_unknown_returns_422_without_heartbeat(c
     from tests.test_rg_settlement_sync import _build_xlsx, _WH_ROWS
 
     before = _rg_last_success(client)
-    # 쿠팡이 시트명을 바꾼 상황 재현(맵에 없는 이름)
-    content = _build_xlsx([("주문내역, 판매수수료", "판매수수료", _WH_ROWS)])
+    # 쿠팡이 시트명을 바꾼 상황 재현(맵에 없는 이름).
+    # ★2026-08-03: 종전엔 "주문내역, 판매수수료"를 미지 시트 예시로 썼는데 그 이름이
+    #   _SHEET_FEE_TYPE_MAP에 편입(CATEGORY_TR 개방)돼 더는 미지가 아니다 → 실제로 맵에 없는
+    #   이름으로 교체한다. 이 테스트가 잠그는 것은 특정 이름이 아니라 **미인식 시 422+무-heartbeat**다.
+    content = _build_xlsx([("정산상세내역_v2", "판매수수료", _WH_ROWS)])
     r = client.post(
         "/api/coupang/ops/rg/settlement/upload-xlsx",
         params={"account_key": "COUPANG_WING1"},
@@ -304,7 +307,7 @@ def test_rg_settlement_upload_all_sheets_unknown_returns_422_without_heartbeat(c
         headers={"X-Ingest-Token": _TOKEN},
     )
     assert r.status_code == 422, r.text
-    assert "주문내역, 판매수수료" in r.json()["detail"]   # 무엇이 안 읽혔는지 사유에 실린다
+    assert "정산상세내역_v2" in r.json()["detail"]   # 무엇이 안 읽혔는지 사유에 실린다
     # ★핵심: 성공 시계가 움직이지 않아야 한다(움직이면 배너·폴링이 "완료"로 거짓말한다)
     assert _rg_last_success(client) == before
 
