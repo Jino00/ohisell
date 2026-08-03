@@ -72,3 +72,27 @@ def test_오픽스는_동작이_안_바뀐다(db):
                                 orders=0, sales_qty=0, conversion_revenue=Decimal("0")))
     db.commit()
     assert _agg_ads(db, D, D, "A01564720")["3003"]["spend"] == Decimal("777")
+
+
+class TestRocketAdOptionsIsDisplayOnly:
+    """1P 상품별 광고비는 **표시 전용** — 순이익 차감 축은 계정 총액 그대로다(D-13)."""
+
+    def test_순이익은_계정_총액만_쓴다(self, db):
+        from app.services.coupang.rocket_intelligence import _rocket_ad_options
+        # 옵션 합계(5,450,601)와 계정 총액(5,449,504)이 다른 실측 상황을 그대로 재현
+        blk = _rocket_ad_options(db, D, D, VENDOR, Decimal("5449504"))
+        assert blk["reconciliation"]["account_total"] == Decimal("5449504"), (
+            "순이익에 쓰이는 값은 계정 총액이어야 한다")
+        assert blk["reconciliation"]["option_sum"] == Decimal("5450601")
+        assert blk["reconciliation"]["diff"] == Decimal("1097"), "차이를 숨기면 안 된다"
+
+    def test_1P만_담는다(self, db):
+        from app.services.coupang.rocket_intelligence import _rocket_ad_options
+        blk = _rocket_ad_options(db, D, D, VENDOR, Decimal("5449504"))
+        ids = {o["option_id"] for o in blk["options"]}
+        assert ids == {"1001"}, f"3P 옵션이 1P 화면에 섞였다: {ids}"
+
+    def test_계정_총액이_0이어도_안_터진다(self, db):
+        from app.services.coupang.rocket_intelligence import _rocket_ad_options
+        blk = _rocket_ad_options(db, D, D, VENDOR, Decimal("0"))
+        assert blk["reconciliation"]["diff_pct"] is None
