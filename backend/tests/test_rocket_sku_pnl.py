@@ -159,6 +159,82 @@ class TestCoverageIsVisible:
         assert cov["ad_bridged_pct"] is None
 
 
+class TestCostSourcePriority:
+    """원가는 sellc 등록값이 정본, 이름 유사도 자동매핑은 폴백이다(D-19).
+
+    ★두 값의 신뢰 등급이 다르다: sellc는 쿠팡 externalVendorSku ↔ internal_sku **코드 정확일치**,
+      자동매핑은 이름 유사도 score 0.56~0.78의 추정(실제로 아이폰13을 아이폰17 Pro에 붙였다).
+      같은 이름으로 저장해 구분을 잃은 것이 2026-08-03 사고의 구조적 원인이라 출처를 남긴다.
+    """
+
+    def _sellc(self, db, option_id: str, internal_sku: str, cost: str):
+        from app.models import Channel, ProductChannelMapping
+        db.add(Channel(id=1, code="COUPANG_WING1", name="윙", platform="coupang",
+                       channel_type="marketplace"))
+        pm = ProductMaster(internal_sku=internal_sku, product_name=f"master {internal_sku}",
+                           cost_price=Decimal(cost))
+        db.add(pm); db.flush()
+        db.add(ProductChannelMapping(product_id=pm.id, channel_id=1,
+                                     channel_product_id=option_id, is_active=True))
+
+    def test_sellc가_자동매핑을_이긴다(self, db):
+        _ad(db, "O1", "1000"); _bridge(db, "O1", "SKU_A")
+        _po(db, 1, "SKU_A", qty=10, amount="50000")
+        _cost(db, "SKU_A", "INT-AUTO", "9999")          # 자동매핑(비싼 오답)
+        self._sellc(db, "O1", "INT-SELLC", "3300")      # sellc 등록원가
+        db.commit()
+        row = _rocket_sku_pnl(db, D, D, VENDOR)["skus"][0]
+        assert row["cost"] == Decimal("33000"), "sellc 3,300×10이어야 한다"
+        assert row["cost_source"] == "sellc"
+        assert "sellc" in row["profit_basis"]
+
+    def test_sellc가_없으면_자동매핑으로_폴백하되_추정임을_말한다(self, db):
+        _ad(db, "O1", "1000"); _bridge(db, "O1", "SKU_A")
+        _po(db, 1, "SKU_A", qty=10, amount="50000")
+        _cost(db, "SKU_A", "INT-AUTO", "2500")
+        db.commit()
+        row = _rocket_sku_pnl(db, D, D, VENDOR)["skus"][0]
+        assert row["cost"] == Decimal("25000")
+        assert row["cost_source"] == "auto_map"
+        assert "자동매핑" in row["profit_basis"], "추정임을 행이 스스로 말해야 한다"
+
+    def test_ignored보다_sellc가_우선이다(self, db):
+        """ignored 22건도 자동매핑과 같은 6분 배치 산물이라 사람의 제외 결정이라는 보장이 없다."""
+        _ad(db, "O1", "1000"); _bridge(db, "O1", "SKU_A")
+        _po(db, 1, "SKU_A", qty=10, amount="50000")
+        _cost(db, "SKU_A", "INT-IGN", None, status="ignored")
+        self._sellc(db, "O1", "INT-SELLC", "3300")
+        db.commit()
+        row = _rocket_sku_pnl(db, D, D, VENDOR)["skus"][0]
+        assert row["cost"] == Decimal("33000")
+        assert row["cost_source"] == "sellc"
+
+    def test_커버리지가_sellc와_추정을_갈라_낸다(self, db):
+        _ad(db, "O1", "1000"); _bridge(db, "O1", "SKU_A")
+        _po(db, 1, "SKU_A", qty=1, amount="5000"); self._sellc(db, "O1", "INT-SELLC", "100")
+        _ad(db, "O2", "3000"); _bridge(db, "O2", "SKU_B")
+        _po(db, 2, "SKU_B", qty=1, amount="5000"); _cost(db, "SKU_B", "INT-AUTO", "100")
+        db.commit()
+        cov = _rocket_sku_pnl(db, D, D, VENDOR)["coverage"]
+        assert cov["ad_cost_sellc"] == Decimal("1000")
+        assert cov["ad_cost_auto"] == Decimal("3000")
+        assert cov["ad_cost_sellc_pct"] == Decimal("25")
+
+    def test_비활성_채널매핑은_안_쓴다(self, db):
+        from app.models import Channel, ProductChannelMapping
+        _ad(db, "O1", "1000"); _bridge(db, "O1", "SKU_A")
+        _po(db, 1, "SKU_A", qty=1, amount="5000")
+        db.add(Channel(id=1, code="COUPANG_WING1", name="윙", platform="coupang",
+                       channel_type="marketplace"))
+        pm = ProductMaster(internal_sku="INT-OFF", product_name="비활성", cost_price=Decimal("999"))
+        db.add(pm); db.flush()
+        db.add(ProductChannelMapping(product_id=pm.id, channel_id=1,
+                                     channel_product_id="O1", is_active=False))
+        db.commit()
+        row = _rocket_sku_pnl(db, D, D, VENDOR)["skus"][0]
+        assert row["cost"] is None, "is_active=False 매핑을 원가로 쓰면 안 된다"
+
+
 class TestScope:
     def test_3P_광고는_1P_표에_안_섞인다(self, db):
         db.add(CoupangAdOptionDaily(

@@ -31,6 +31,7 @@ from app.models import (
     CoupangRocketPurchaseOrder,
     CoupangRocketPurchaseOrderItem,
     CoupangRocketSettlement,
+    ProductChannelMapping,
     ProductMaster,
     RocketProductCostMap,
 )
@@ -285,7 +286,8 @@ def _rocket_sku_pnl(db: Session, dfrom: date, dto: date,
             continue
         g = by_sku.setdefault(sku, {"ad_spend": _Z, "clicks": 0, "conv_revenue": _Z,
                                     "option_count": 0, "revenue": _Z, "cost": _Z,
-                                    "qty": 0, "has_cost": False, "name": None})
+                                    "qty": 0, "has_cost": False, "name": None,
+                                    "cost_source": None})
         g["ad_spend"] += spend
         g["clicks"] += int(clicks or 0)
         g["conv_revenue"] += _f(conv)
@@ -313,6 +315,7 @@ def _rocket_sku_pnl(db: Session, dfrom: date, dto: date,
         .filter(Item.purchase_order_seq.in_(seq_subq))
         .all()
     )
+    sellc = _sellc_cost_by_product_number(db)   # D-19: 계정 원가축과 **같은 해석기**를 쓴다
     for pnum, pname, qty, line_amt, status, cost_price in po_rows:
         sku = str(pnum)
         if sku not in by_sku:
@@ -322,12 +325,11 @@ def _rocket_sku_pnl(db: Session, dfrom: date, dto: date,
         g["qty"] += int(qty or 0)
         if g["name"] is None and pname:
             g["name"] = pname
-        # 원가는 confirmed 매핑 + master 존재일 때만. ignored는 "원가 0으로 결정됨"이라 확정 취급.
-        if status == "confirmed" and cost_price is not None:
-            g["cost"] += _f(cost_price) * int(qty or 0)
+        unit, src = _resolve_unit_cost(sku, sellc, {sku: (status, cost_price)})
+        if src is not None:
+            g["cost"] += unit * int(qty or 0)
             g["has_cost"] = True
-        elif status == "ignored":
-            g["has_cost"] = True
+            g["cost_source"] = src
 
     # ── ③ 라벨: 발주상세 이름이 없으면 광고 XLSX 상품명으로 폴백 ──
     need_name = [s for s, g in by_sku.items() if not g["name"]]
@@ -350,6 +352,7 @@ def _rocket_sku_pnl(db: Session, dfrom: date, dto: date,
     # ── ④ 행 구성 + 커버리지(광고비 가중) ──
     ad_with_revenue = _Z
     ad_with_cost = _Z
+    ad_by_cost_source: dict[str, Decimal] = {COST_SRC_SELLC: _Z, COST_SRC_AUTO: _Z}
     items = []
     for sku, g in by_sku.items():
         has_rev = g["revenue"] > 0
@@ -357,9 +360,13 @@ def _rocket_sku_pnl(db: Session, dfrom: date, dto: date,
             ad_with_revenue += g["ad_spend"]
         if g["has_cost"]:
             ad_with_cost += g["ad_spend"]
+            if g["cost_source"] in ad_by_cost_source:
+                ad_by_cost_source[g["cost_source"]] += g["ad_spend"]
         if g["has_cost"] and has_rev:
             net = g["revenue"] - g["ad_spend"] - g["cost"]
-            basis = "매출(발주 gross)−광고비(PA)−원가(확정 매핑)"
+            basis = ("매출(발주 gross)−광고비(PA)−원가(sellc 등록원가)"
+                     if g["cost_source"] == COST_SRC_SELLC
+                     else "매출(발주 gross)−광고비(PA)−원가(★이름 유사도 자동매핑 — 검증 안 됨)")
         else:
             net = None
             basis = ("이 기간 발주 없음 — 1P 매출은 발주일 귀속이라 매출 0이다"
@@ -374,6 +381,7 @@ def _rocket_sku_pnl(db: Session, dfrom: date, dto: date,
             "revenue": g["revenue"],
             "order_qty": g["qty"],
             "cost": g["cost"] if g["has_cost"] else None,
+            "cost_source": g["cost_source"],     # sellc | auto_map | ignored | None (D-19)
             "net_profit": net,
             "profit_basis": basis,
         })
@@ -396,11 +404,17 @@ def _rocket_sku_pnl(db: Session, dfrom: date, dto: date,
             "ad_with_revenue_pct": _pct(ad_with_revenue),
             "ad_with_cost": ad_with_cost,
             "ad_with_cost_pct": _pct(ad_with_cost),
+            # D-19: 원가가 sellc 등록값인 몫과 자동매핑 추정인 몫을 갈라 낸다.
+            "ad_cost_sellc": ad_by_cost_source[COST_SRC_SELLC],
+            "ad_cost_sellc_pct": _pct(ad_by_cost_source[COST_SRC_SELLC]),
+            "ad_cost_auto": ad_by_cost_source[COST_SRC_AUTO],
+            "ad_cost_auto_pct": _pct(ad_by_cost_source[COST_SRC_AUTO]),
             "ad_unbridged": ad_unbridged,
             "unbridged_option_count": unbridged_options,
             "note": (
                 "브리지=옵션ID↔상품번호(판매분석 관측을 누적 보존, D-16). 매출=발주 라인 gross(발주일 KST), "
-                "원가=발주수량×cost_price(확정 매핑). 광고비는 Billboard PA 기준이라 계정 총액(비-PA 포함)과 "
+                "원가=발주수량×단가(①sellc 등록원가 ②없으면 이름 유사도 자동매핑 — 행마다 cost_source 표시, D-19). "
+                "광고비는 Billboard PA 기준이라 계정 총액(비-PA 포함)과 "
                 "정의가 달라 **SKU 순이익 합 ≠ 계정 순이익**이다 — 이 표는 표시 전용이다. "
                 "원가 미도달분은 순이익을 내지 않는다(0으로 계산하면 과대 순이익이 섞인다)."
             ),
@@ -467,6 +481,78 @@ def _agg_rocket_drift(db: Session, dfrom: date, dto: date,
 
 
 # ──────────────────────────────────────────────
+# ④-a 원가 출처 해석 — sellc 우선, 자동매핑은 폴백 (D-19)
+# ──────────────────────────────────────────────
+#   왜 sellc가 1순위인가(2026-08-03 Jino 지시 "원가는 sellc에 있는 원가를 사용하자"):
+#     `product_channel_mapping`은 쿠팡이 주는 `externalVendorSku`가 `product_master.internal_sku`와
+#     **정확히 일치할 때만** 붙는다(product_sync._link) — 코드 대 코드 일치라 사실이다.
+#     반면 `rocket_product_cost_map`의 183/189건은 2026-06-17 23:25~23:31 6분 배치에서
+#     **이름 유사도(auto score 0.56~0.78)**로 확정된 추정이고, 실제로 아이폰13을 아이폰17 Pro에,
+#     무광택을 사생활보호에 붙인 사례가 확인됐다. 두 값은 신뢰 등급이 다르므로 **출처를 행마다
+#     남긴다** — 같은 이름으로 저장해 구분을 잃은 것이 이번 사고의 구조적 원인이었다.
+COST_SRC_SELLC = "sellc"        # product_channel_mapping(옵션ID↔SKU코드 정확일치) — 정본
+COST_SRC_AUTO = "auto_map"      # rocket_product_cost_map confirmed — 이름 유사도 추정(폴백)
+COST_SRC_IGNORED = "ignored"    # 원가 0으로 결정된 제외(샘플/증정)
+
+
+def _sellc_cost_by_product_number(db: Session) -> dict[str, Decimal]:
+    """상품번호 → sellc 등록 원가. 경로: 상품번호 =brige= 옵션ID → 채널매핑 → product_master.
+
+    브리지(`coupang_rocket_option_sku`)가 필요한 이유: 발주는 상품번호 그레인인데 sellc 채널매핑은
+    옵션ID 그레인이라 직접 조인이 안 된다(실측: 브리지 sku가 채널매핑에 0건).
+    ★한 상품번호에 옵션이 여럿이어도 원가는 갈리지 않는다(2026-08-03 실측 208/208 단일).
+      그래도 갈리면 **비싼 쪽**을 쓰고 경고한다 — 싼 쪽을 고르면 순이익이 과대해진다.
+    """
+    rows = (
+        db.query(
+            CoupangRocketOptionSku.sku_id,
+            ProductMaster.cost_price,
+        )
+        .join(
+            ProductChannelMapping,
+            ProductChannelMapping.channel_product_id == CoupangRocketOptionSku.option_id,
+        )
+        .join(ProductMaster, ProductMaster.id == ProductChannelMapping.product_id)
+        .filter(
+            ProductChannelMapping.is_active.is_(True),
+            ProductMaster.cost_price > 0,
+        )
+        .all()
+    )
+    out: dict[str, Decimal] = {}
+    for sku, cost in rows:
+        sku = str(sku)
+        cost = _f(cost)
+        prev = out.get(sku)
+        if prev is None:
+            out[sku] = cost
+        elif prev != cost:
+            log.warning(
+                "sellc 원가 갈림: 상품번호 %s 에 %s / %s — 비싼 쪽 채택(순이익 과대 방지)", sku, prev, cost
+            )
+            out[sku] = max(prev, cost)
+    return out
+
+
+def _resolve_unit_cost(product_number: str, sellc: dict, auto: dict) -> tuple[Decimal | None, str | None]:
+    """단가 해석: sellc → 자동매핑 → ignored(0) → 미상(None).
+
+    auto: {product_number: (status, cost_price|None)}. 반환 (단가, 출처). 미상이면 (None, None).
+    ★ignored를 sellc보다 뒤에 두는 이유: ignored 22건도 위 6분 배치 산물이라(created_at 동일)
+      사람의 제외 결정이라는 보장이 없다. 사실(sellc)이 있으면 그것이 이긴다.
+    """
+    c = sellc.get(product_number)
+    if c is not None:
+        return c, COST_SRC_SELLC
+    st, cp = auto.get(product_number, (None, None))
+    if st == "confirmed" and cp is not None:
+        return _f(cp), COST_SRC_AUTO
+    if st == "ignored":
+        return _Z, COST_SRC_IGNORED
+    return None, None
+
+
+# ──────────────────────────────────────────────
 # ④ 원가 (발주상세 per-SKU × 매핑 cost_price) — D-4/D-13, S4.5c
 # ──────────────────────────────────────────────
 def _rocket_cost(db: Session, dfrom: date, dto: date,
@@ -516,6 +602,7 @@ def _rocket_cost(db: Session, dfrom: date, dto: date,
     rows = (
         db.query(
             Item.purchase_order_seq,
+            Item.product_number,
             Item.order_qty,
             Item.line_order_amount,
             RocketProductCostMap.status,
@@ -526,21 +613,28 @@ def _rocket_cost(db: Session, dfrom: date, dto: date,
         .filter(Item.purchase_order_seq.in_(seq_subq))
         .all()
     )
+    sellc = _sellc_cost_by_product_number(db)   # D-19: 정본. 없을 때만 자동매핑으로 폴백
 
     cost = _Z
     confirmed_amt = _Z
     ignored_amt = _Z
     unmapped_amt = _Z
     confirmed_sku = ignored_sku = unmapped_sku = 0
+    # 출처별 분해 — 신뢰 등급이 다른 값을 한 숫자로 뭉치면 이번 사고가 반복된다(D-19).
+    cost_by_source: dict[str, Decimal] = {COST_SRC_SELLC: _Z, COST_SRC_AUTO: _Z}
+    amount_by_source: dict[str, Decimal] = {COST_SRC_SELLC: _Z, COST_SRC_AUTO: _Z}
     pos_with_detail: set[int] = set()
-    for po_seq, qty, line_amt, status, cost_price in rows:
+    for po_seq, pnum, qty, line_amt, status, cost_price in rows:
         pos_with_detail.add(po_seq)
         line_amt = _f(line_amt)
-        if status == "confirmed" and cost_price is not None:
-            cost += _f(cost_price) * int(qty or 0)
+        unit, src = _resolve_unit_cost(str(pnum), sellc, {str(pnum): (status, cost_price)})
+        if src in (COST_SRC_SELLC, COST_SRC_AUTO):
+            cost += unit * int(qty or 0)
             confirmed_amt += line_amt
             confirmed_sku += 1
-        elif status == "ignored":
+            cost_by_source[src] += unit * int(qty or 0)
+            amount_by_source[src] += line_amt
+        elif src == COST_SRC_IGNORED:
             ignored_amt += line_amt  # 원가 0(결정된 제외) — 해결됨
             ignored_sku += 1
         else:
@@ -568,10 +662,15 @@ def _rocket_cost(db: Session, dfrom: date, dto: date,
         "unmapped_sku_count": unmapped_sku,
         "pos_with_detail_count": len(pos_with_detail),
         "pos_without_detail_count": max(0, window_po_count - len(pos_with_detail)),  # 발주상세 미수집 PO
+        # D-19 출처 분해: sellc(정확 SKU코드 일치)와 auto_map(이름 유사도 추정)을 갈라 둔다.
+        "cost_by_source": cost_by_source,
+        "order_amount_by_source": amount_by_source,
         "note": (
-            "원가 = Σ(발주상세 order_qty × product_master.cost_price[상품번호→internal_sku 매핑, D-13]). "
-            "confirmed만 가산·ignored=원가0·미매핑/미수집은 원가 누락 → coverage_pct로 투명화(원칙22). "
-            "커버리지<100%면 net_profit는 원가 과소반영(순이익 과대)일 수 있음."
+            "원가 = Σ(발주상세 order_qty × 단가). 단가 출처 우선순위(D-19): "
+            "①sellc(product_channel_mapping — 쿠팡 externalVendorSku와 internal_sku 정확일치) "
+            "②rocket_product_cost_map confirmed(**이름 유사도 자동 추정** — 폴백) ③ignored=원가0. "
+            "미매핑/미수집은 원가 누락 → coverage_pct로 투명화(원칙22). 커버리지<100%면 순이익 과대 가능. "
+            "cost_by_source로 추정분이 얼마인지 항상 드러낸다."
         ),
     }
 

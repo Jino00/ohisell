@@ -1057,6 +1057,8 @@ export interface RocketSkuPnlItem {
   revenue: string;
   order_qty: number;
   cost: string | null;
+  // 원가 출처(D-19). sellc=등록원가(쿠팡 SKU코드 정확일치, 정본) / auto_map=이름 유사도 자동매핑(추정)
+  cost_source?: "sellc" | "auto_map" | "ignored" | null;
   net_profit: string | null;
   profit_basis: string;
 }
@@ -1073,6 +1075,10 @@ export interface RocketSkuPnl {
     ad_with_revenue_pct: string | null;
     ad_with_cost: string;
     ad_with_cost_pct: string | null;
+    ad_cost_sellc: string;
+    ad_cost_sellc_pct: string | null;
+    ad_cost_auto: string;
+    ad_cost_auto_pct: string | null;
     ad_unbridged: string;
     unbridged_option_count: number;
     note: string;
@@ -2635,12 +2641,41 @@ export interface NaverModificationRow {
   /** 소급 백필로 들어온 행(정규 탐지가 아니라 신뢰도가 다르다). */
   backfilled: boolean;
   dry_run: boolean;
+  /** D-NAO-139 — 소재 편집이 「네이버의 상품 피드 재적용」인지 「사람의 실조작」인지.
+   *  판정 대상이 아닌 행(다른 grain·매핑 결손)은 전부 null이다.
+   *   "feed"    상품의 소재가 **전량** 같은 초로 움직임 = 피드 재적용(사람 손 아님)
+   *   "real"    일부만 움직임 = 사람이 그 소재를 골라 만졌다
+   *   "unknown" 소재가 1개뿐이라 구조로 못 가름 */
+  feed_verdict: "feed" | "real" | "unknown" | null;
+  feed_verdict_label: string | null;
+  /** 그 판정의 근거 한 문장(서버가 만든다 — 규칙이 화면마다 다른 말이 되지 않게). */
+  feed_evidence: string | null;
+  /** 접기로 이 줄에 합쳐진 형제 수. 1이면 접힌 게 없다. */
+  feed_group_size: number;
+  /** 접힌 형제들의 source_id(감사·펼치기용 — 접었다고 버리지 않는다). */
+  feed_group_ids: number[];
+}
+
+/** D-NAO-139 — 피드 재적용을 얼마나 접었고 숨겼는지. **항상 온다**(조용한 truncation 금지). */
+export interface NaverModificationFeedReapply {
+  /** 판정이 붙은 행 수(소재 grain). */
+  verdict_rows: number;
+  /** 그중 피드 재적용으로 판별된 행 수. */
+  feed_rows: number;
+  /** 숨기기로 목록에서 뺀 행 수. */
+  hidden: number;
+  /** 접기로 사라진 줄 수(5줄→1줄이면 4). */
+  collapsed_into: number;
+  included: boolean;
+  collapsed: boolean;
 }
 
 export interface NaverModificationResponse {
   total: number;
   /** 구간 전체 주체 분포 — actor 필터를 걸어도 전체가 보인다. */
   by_actor: Record<NaverModificationActor, number>;
+  /** D-NAO-139 — 피드 재적용을 얼마나 접고 숨겼는지(항상 온다). */
+  feed_reapply: NaverModificationFeedReapply;
   rows: NaverModificationRow[];
 }
 
@@ -2655,6 +2690,10 @@ export async function fetchNaverModifications(params: {
   include_dry_run?: boolean;
   /** 가드레일이 막아 **실제로는 안 바뀐** 시도도 포함(기본 false — 안 바뀐 걸 수정으로 세면 거짓). */
   include_blocked?: boolean;
+  /** D-NAO-139 — 피드 재적용 행 포함(기본 true). false면 사람이 만진 것만 남는다. */
+  include_feed_reapply?: boolean;
+  /** D-NAO-139 — 같은 상품이 같은 초에 움직인 N줄을 1줄로 접는다(기본 true). */
+  collapse_feed_reapply?: boolean;
   limit?: number;
   offset?: number;
 } = {}): Promise<NaverModificationResponse> {

@@ -1115,6 +1115,13 @@ function RocketView({
                   <b className={Number(data.sku_pnl.coverage.ad_with_cost_pct ?? 0) < 90 ? "text-amber-600" : ""}>
                     {pct1(data.sku_pnl.coverage.ad_with_cost_pct)}
                   </b>
+                  {/* ★원가 출처를 갈라 보인다(D-19) — sellc 등록원가와 이름 유사도 자동매핑은
+                      신뢰 등급이 다르다. 같은 숫자로 뭉쳐 보이던 것이 2026-08-03 사고의 원인. */}
+                  {" ("}
+                  <span className="text-emerald-700">sellc {pct1(data.sku_pnl.coverage.ad_cost_sellc_pct)}</span>
+                  {" · "}
+                  <span className="text-amber-600">자동추정 {pct1(data.sku_pnl.coverage.ad_cost_auto_pct)}</span>
+                  {")"}
                   {Number(data.sku_pnl.coverage.ad_unbridged) > 0 && (
                     <> · 상품 미연결 {won(data.sku_pnl.coverage.ad_unbridged)}
                       ({num(data.sku_pnl.coverage.unbridged_option_count)}개 옵션)</>
@@ -1153,7 +1160,17 @@ function RocketView({
                             <td className="py-1.5 pr-2 text-right text-gray-600">{won(r.revenue)}</td>
                             <td className="py-1.5 pr-2 text-right text-gray-600">{won(r.ad_spend)}</td>
                             <td className="py-1.5 pr-2 text-right text-gray-500">
-                              {r.cost == null ? <span className="text-gray-300">—</span> : won(r.cost)}
+                              {r.cost == null ? (
+                                <span className="text-gray-300">—</span>
+                              ) : (
+                                <>
+                                  {won(r.cost)}
+                                  {/* 자동추정 원가는 눈에 띄게 — 검증된 sellc 값과 섞이면 안 된다 */}
+                                  {r.cost_source === "auto_map" && (
+                                    <span className="ml-1 text-[10px] text-amber-600" title="이름 유사도 자동매핑 — 검증되지 않은 추정값입니다">추정</span>
+                                  )}
+                                </>
+                              )}
                             </td>
                             {/* ★순이익 null = 계산 안 함(0이 아니다). 사유는 툴팁으로 말한다 —
                                 모르는 것을 0으로 채우면 과대 순이익이 정상값과 섞인다. */}
