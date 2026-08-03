@@ -10,7 +10,7 @@
 #
 # 여기서 고정하는 것:
 #   ① 로그인 신호(401·403·kccontext·signin·200+HTML)만 AUTH
-#   ② 그 외 실패(429·500·깨진 JSON·예외·예상 키 없음)는 UNKNOWN — 만료로 승격하지 않는다
+#   ② 그 외 실패(429·500·깨진 JSON·예외·예상 형태 아님)는 UNKNOWN — 만료로 승격하지 않는다
 #   ③ 502 오류 페이지처럼 status가 200이 아닌 HTML을 로그아웃으로 오인하지 않는다
 #   ④ 층2 루프 중단 판정(_rg_loop_should_abort)은 AUTH일 때만 True
 #   ⑤ 1차 실패·2차 성공은 OK(일시 실패를 만료로 굳히지 않는다)
@@ -61,7 +61,11 @@ def fetcher(tmp_path_factory):
             os.environ["HOME"] = old_home
 
 
-_OK_BODY = '{"settlementStatusReports": [{"groupKey": "A01564720-2026-07-27-2026-07-31"}]}'
+# ★프로브 엔드포인트는 2026-08-03에 status/api → download-list/api로 옮겼다(라이브 실측:
+#   status/api 1/32 성공 vs download-list 8/8). 그래서 OK 응답의 형태는 **항목 배열**이다
+#   (라이브 캡처 'JSON list n=5'). status/api의 dict를 그대로 두면 이 테스트가 옛 계약을
+#   고정해 버린다.
+_OK_BODY = '[{"requestTime": "1754190000000", "downloadStatus": "COMPLETED"}]'
 
 
 class _PageStub:
@@ -102,7 +106,7 @@ def test_probe_auth_signals(fetcher, res):
     ({"status": 429, "body": "rate limited"}, "429 스로틀"),
     ({"status": 500, "body": "oops"}, "500"),
     ({"status": 200, "body": "not-json"}, "깨진 JSON"),
-    ({"status": 200, "body": '{"other": 1}'}, "예상 키 없음"),
+    ({"status": 200, "body": '{"other": 1}'}, "예상 형태 아님(list 아닌 dict)"),
     (RuntimeError("Execution context was destroyed"), "evaluate 예외"),
     (None, "응답 형식 이상"),
 ])
@@ -163,3 +167,97 @@ def test_probe_reason_identifies_the_cause(fetcher):
     assert "429" in why429
     assert "ctx destroyed" in whyexc
     assert why429 != whyexc, "서로 다른 실패가 같은 사유로 뭉개지면 안 된다"
+
+
+# ── ⑦ 델타(2026-08-03): 프로브 엔드포인트 이전 · status/api 5xx 재시도 · 오리진 이탈 ───────
+# 라이브 계측(같은 페이지·같은 쿠키·32회): status/api 1/32, download-list 8/8.
+# 판정을 3상태로 나눠도 프로브가 97% UNKNOWN이면 세션 감시는 사실상 죽어 있고, 열거용
+# status/api를 1회로 판정하면 회차 대부분이 rc=1로 죽는다(라이브 13:35:37 런이 그랬다).
+_LIVE_500_SHELL = (
+    '\n\n\n\n\n\n\n\n\n<!doctype html> <html class="font-v2" lang="ko"><head>'
+    '<title>Coupang Wing - 김진오, 오픽스</title><meta charset="UTF-8">'
+    "<script>window.__GLOBAL_DATA__ = {\n        activeProfile: 'production',\n"
+)
+
+
+def test_live_500_shell_is_unknown_not_auth(fetcher):
+    """★사고의 한 줄 요약: HTTP 500 + **로그인된** 셸 HTML ≠ 로그아웃."""
+    v, why = fetcher._rg_session_probe(_PageStub([{"status": 500, "body": _LIVE_500_SHELL}]))
+    assert v == fetcher._PROBE_UNKNOWN, why
+    assert fetcher._rg_loop_should_abort(v) is False
+
+
+def test_probe_targets_download_list_not_status_api(fetcher):
+    """프로브 엔드포인트 계약 — 되돌리면 프로브가 97% UNKNOWN인 장식으로 돌아간다."""
+    import inspect
+    src = inspect.getsource(fetcher._rg_session_probe)
+    assert "RG_DOWNLOAD_LIST_PATH" in src
+    assert "RG_STATUS_PATH" not in src
+
+
+class _UrlPageStub(_PageStub):
+    def __init__(self, responses, url):
+        super().__init__(responses)
+        self.url = url
+
+
+def test_off_origin_is_auth_evidence(fetcher):
+    """진짜 로그아웃은 xauth 로그인 페이지로 리다이렉트된다(2026-07-27 실측, cmd_login 주석)."""
+    page = _UrlPageStub([{"status": 200, "body": _OK_BODY}],
+                        "https://xauth.coupang.com/auth/realms/seller/protocol/openid-connect/auth")
+    v, why = fetcher._rg_session_probe(page)
+    assert v == fetcher._PROBE_AUTH, why
+    assert page.calls == 0, "오리진 이탈이면 POST를 낭비하지 않는다"
+
+
+def test_on_origin_probes_normally(fetcher):
+    page = _UrlPageStub([{"status": 200, "body": _OK_BODY}],
+                        "https://wing.coupang.com/tenants/rfm/settlements/status-new")
+    assert fetcher._rg_session_probe(page)[0] == fetcher._PROBE_OK
+
+
+# ── status/api 재시도 ────────────────────────────────────────────────────
+class _StatusPage:
+    """status/api용 페이지 스텁 — 응답 시퀀스를 소진하고 마지막 응답을 반복한다."""
+
+    url = "https://wing.coupang.com/tenants/rfm/settlements/status-new"
+
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.calls = 0
+
+    def evaluate(self, *_a, **_k):
+        self.calls += 1
+        return self._responses[min(self.calls - 1, len(self._responses) - 1)]
+
+
+_STATUS_OK = '{"settlementStatusReports": [{"groupKey": "A01564720-2026-07-27-2026-07-31"}]}'
+
+
+def test_status_fetch_retries_through_500s(fetcher, monkeypatch):
+    """★없으면 프로브만 고친 상태에서 회차 대부분이 rc=1로 죽는다(라이브 13:35:37 재현)."""
+    monkeypatch.setattr(fetcher.time, "sleep", lambda _s: None)
+    page = _StatusPage([{"status": 500, "body": _LIVE_500_SHELL},
+                        {"status": 500, "body": _LIVE_500_SHELL},
+                        {"status": 200, "body": _STATUS_OK}])
+    verdict, raw = fetcher._rg_fetch_status_raw(page, {"rg_status_days": 35}, budget_s=60)
+    assert verdict == fetcher._PROBE_OK
+    assert raw == {"settlementStatusReports": [{"groupKey": "A01564720-2026-07-27-2026-07-31"}]}
+    assert page.calls == 3
+
+
+def test_status_fetch_persistent_500_is_unknown_not_auth(fetcher, monkeypatch):
+    """예산을 다 써도 500이면 UNKNOWN — AUTH로 접으면 요청이 재시도 없이 소멸한다."""
+    monkeypatch.setattr(fetcher.time, "sleep", lambda _s: None)
+    page = _StatusPage([{"status": 500, "body": _LIVE_500_SHELL}])
+    verdict, raw = fetcher._rg_fetch_status_raw(page, {"rg_status_days": 35}, budget_s=0)
+    assert verdict == fetcher._PROBE_UNKNOWN and raw is None
+
+
+def test_status_fetch_stops_immediately_on_auth(fetcher, monkeypatch):
+    """로그아웃이면 재시도해도 통과할 수 없다 — 예산을 낭비하지 않고 즉시 AUTH."""
+    monkeypatch.setattr(fetcher.time, "sleep", lambda _s: None)
+    page = _StatusPage([{"status": 200, "body": "<html>signin</html>"}])
+    verdict, _ = fetcher._rg_fetch_status_raw(page, {"rg_status_days": 35}, budget_s=60)
+    assert verdict == fetcher._PROBE_AUTH
+    assert page.calls == 1

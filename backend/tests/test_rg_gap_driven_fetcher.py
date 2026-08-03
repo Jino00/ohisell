@@ -259,7 +259,13 @@ def rg_run(wing, monkeypatch, tmp_path):
     monkeypatch.setattr(wing, "_cdp_mode", lambda _c: False)
     monkeypatch.setattr(wing, "_rg_session_ok", _session_ok)
     monkeypatch.setattr(wing, "_rg_session_probe", _session_probe)
-    monkeypatch.setattr(wing, "_rg_fetch_status_raw", lambda _p, _c: state["raw"])
+    # ★2026-08-03: _rg_fetch_status_raw는 (판정, raw) 튜플을 돌려준다(5xx 재시도 추가).
+    #   raw_verdict로 AUTH/UNKNOWN도 주입할 수 있어야 "500 지속=rc1, 로그아웃=rc3"을 가른다.
+    def _fetch_raw(_p, _c, **_k):
+        v = state.get("raw_verdict", wing._PROBE_OK)
+        return v, (state["raw"] if v == wing._PROBE_OK else None)
+
+    monkeypatch.setattr(wing, "_rg_fetch_status_raw", _fetch_raw)
     monkeypatch.setattr(wing, "_rg_push_status", lambda _c, _r: 0)
     monkeypatch.setattr(wing, "_prod_rg_layer2_gaps", lambda _c, _rt, _d: state["gaps"])
     monkeypatch.setattr(wing, "_rg_push_xlsx", lambda _c, _u, _rt, _gk: 0)
@@ -569,3 +575,37 @@ def test_gap_query_uses_same_window_as_layer1(wing):
     src = inspect.getsource(wing._do_rg_run)
     assert "_prod_rg_layer2_gaps(cfg, report_types, _rg_status_days(cfg))" in src
     assert "_rg_status_days(cfg)" in inspect.getsource(wing._rg_fetch_status_raw)
+
+
+# ── ⑦ 열거(status/api) 판정이 회차 rc를 가른다 (2026-08-03 델타) ──────────
+def test_persistent_status_500_is_retryable_not_login_required(rg_run):
+    """★status/api가 예산 내내 500이면 rc=1(재시도)이다.
+
+    login_required(3)로 접으면 lease 계약상 요청이 재시도 없이 소멸한다 — 결손이 안 메워진
+    바로 그 경로다. 업스트림 장애는 재시도로 넘길 수 있다(라이브: 22~46초 뒤 통과).
+    """
+    wing = rg_run.wing
+    rg_run.state["raw_verdict"] = wing._PROBE_UNKNOWN
+    rc = wing._do_rg_run(rg_run.cfg, rg_run.cfg["state_file"])
+    assert rc == 1
+    assert rc != wing.RC_LOGIN_REQUIRED
+    assert rg_run.calls == []
+
+
+def test_status_auth_is_login_required(rg_run):
+    """반대로 status/api에서 로그아웃이 **확증**되면 login_required가 맞다(방어를 좁힌 것뿐)."""
+    wing = rg_run.wing
+    rg_run.state["raw_verdict"] = wing._PROBE_AUTH
+    assert wing._do_rg_run(rg_run.cfg, rg_run.cfg["state_file"]) == wing.RC_LOGIN_REQUIRED
+
+
+def test_unknown_entry_probe_does_not_demand_login(rg_run, monkeypatch):
+    """진입 프로브가 판정 불가면 로그인 창을 띄우지 않고 진행한다(status/api가 2차 관문)."""
+    wing = rg_run.wing
+    rg_run.state["raw"] = _raw("2026-07-19", "2026-07-12")
+    rg_run.state["gaps"] = _gaps(("2026-07-12", [_WS]))
+    rg_run.state["session_probe"] = [wing._PROBE_UNKNOWN]
+    monkeypatch.setattr(wing, "_rg_login_wait",
+                        lambda *_a, **_k: pytest.fail("판정 불가로 로그인 대기에 새면 안 된다"))
+    assert wing._do_rg_run(rg_run.cfg, rg_run.cfg["state_file"]) == 0
+    assert [gk for gk, _ in rg_run.calls] == ["A01564720-2026-07-12"]
