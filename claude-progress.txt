@@ -25,6 +25,11 @@ delivery 2,025 / warehousing 1,175**가 청구됐고, 4,050은 **주기 4개 합
   API의 화면 소비자가 0건이었다. 잔존 오탐 1건이 주기 드릴다운에서 자기설명된다.
 - 회귀 22건 신설. 4,448 passed(백엔드) + 182 passed(프론트).
 
+**⚠️ prod ↔ main 의도된 드리프트(2026-08-03 20:35, PR #190 병합 직후 확인)**
+- `rg_fee_audit.py`·`rg_fee_anomaly.py`: prod가 main보다 **주석만** 낡음(LESSONS 번호 #99→#106 재번호). 동작 동일 → 배포 불요.
+- `models.py`: prod가 main보다 낡은 것은 **다른 세션의 `ad_apply_tm` 컬럼 + BigInteger 임포트**다. 그 마이그레이션 `c4a7e2b91d63`이 **prod 미적용**이라 지금 `models.py`를 배포하면 ORM이 없는 컬럼을 SELECT해 그 테이블 ingest 경로가 침묵한다. **그쪽 세션이 `--migrate`로 함께 배포할 몫** — 이 세션은 손대지 않았다.
+- alembic은 병합 리비전 `mrg9b1c4a7e2`로 단일 head 복구. prod는 `rg9billed7c4e`에 있고, 다음 배포자의 `--migrate`가 `c4a7e2b91d63` → 합류점 순으로 적용한다(safe_deploy가 순서를 구조로 강제).
+
 **★미결 3개**
 1. **PR #190 병합** — codex 교차 리뷰 미실행(한도 리셋 **2026-08-09 16:16**). DB 마이그레이션+프론트
    포함이라 리셋 후 실행 추천. Jino 선택: 리셋 후 실행 / 이 건 면제(PR #128 선례).
