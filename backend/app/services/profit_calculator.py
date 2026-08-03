@@ -139,12 +139,18 @@ def _get_naver_sa_ad_spend_by_keyword_day(
 def _get_gfa_ad_spend_daily(
     db: Session, naver_channel_id: int, date_from: date, date_to: date
 ) -> dict[str, Decimal]:
-    """ad_costs → GFA(ADVoost) 일별 총 광고비 {date_str: spend}"""
+    """ad_costs → GFA(ADVoost) 일별 총 광고비 {date_str: spend}
+
+    ★`gfa:%` 계열 전체를 읽는다: 수동 CSV 시절의 `gfa:쇼핑`(~2026-06-04)과 비즈머니 실차감
+    자동 적재분(`gfa:advoost`·`gfa:da`, 2026-06-05~)이 한 계열로 이어지기 때문이다.
+    두 경로가 같은 날짜를 채우면 이중계상이 되므로, 쓰는 쪽(naver_display_ad_costs)이
+    `gfa:쇼핑`이 있는 날짜를 건너뛰어 겹침을 막는다.
+    """
     rows = db.execute(
         text("""
             SELECT ad_date, SUM(CAST(ad_spend AS REAL))
             FROM ad_costs
-            WHERE channel_id = :cid AND source = 'gfa:쇼핑'
+            WHERE channel_id = :cid AND source LIKE 'gfa:%'
               AND ad_date >= :since AND ad_date <= :until
             GROUP BY ad_date
         """),

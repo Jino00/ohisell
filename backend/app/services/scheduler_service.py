@@ -286,6 +286,28 @@ def sync_naver_sa_ad_costs_job():
         db.close()
 
 
+def sync_naver_display_ad_costs_job():
+    """ADVoost 쇼핑·성과형 디스플레이(GFA) 광고비 어제치 적재 (07:10 KST).
+
+    검색광고(07:00)와 분리된 잡인 이유: 출처가 다르다(리포트 vs 비즈머니 실차감). 한 잡에
+    묶으면 성과형 조회가 실패했을 때 검색광고 적재까지 같이 죽는다.
+    """
+    db = _get_own_db_session()
+    try:
+        from app.services.naver_display_ad_costs import sync_display_ad_costs
+
+        yesterday = kst_today() - timedelta(days=1)
+        result = sync_display_ad_costs(db, yesterday, yesterday)
+        db.commit()
+        log.info("[스케줄러] 성과형 광고비 %d건 적재 완료 (%s, 합계 %s)",
+                 result["written"], yesterday, result["total"])
+    except Exception as e:
+        log.exception("[스케줄러] sync_naver_display_ad_costs_job 에러: %s", e)
+        raise  # 삼킴 정렬(S5b): EVENT_JOB_ERROR/HTTP500로 실패 표면화
+    finally:
+        db.close()
+
+
 def sync_naver_ad_daily_job():
     """네이버 SA 일별 광고성과(naver_ad_daily) 수집 + BEP 산출 (07:30 KST).
 
@@ -1519,6 +1541,9 @@ def _ensure_default_states(db):
         ("auto_profit_calc", "30 6 * * *"),
         ("cafe24_token_refresh", "*/30 * * * *"),
         ("sync_naver_sa_ad_costs", "0 7 * * *"),
+        # ADVoost 쇼핑·GFA 광고비(비즈머니 실차감) — 검색광고 리포트가 못 덮는 축.
+        # 07:30 BEP 산출보다 앞서야 그날 BEP가 온전한 광고비를 본다.
+        ("sync_naver_display_ad_costs", "10 7 * * *"),
         ("sync_naver_ad_daily", "30 7 * * *"),      # 네이버 SA 일별 성과+BEP (트랙 P0)
         ("snapshot_naver_ad_hourly", "5 * * * *"),  # 네이버 SA 시간별 스냅샷 (빠른 루프)
         ("trigger_watch", "7 * * * *"),             # 조건발동 즉시알림(페이싱·CPC급등, 트랙 P4)
@@ -1806,6 +1831,7 @@ def job_func_for(job_name: str):
         "auto_profit_calc": recalculate_profit_job,
         "cafe24_token_refresh": cafe24_proactive_refresh_job,
         "sync_naver_sa_ad_costs": sync_naver_sa_ad_costs_job,
+        "sync_naver_display_ad_costs": sync_naver_display_ad_costs_job,
         "sync_naver_ad_daily": sync_naver_ad_daily_job,
         "snapshot_naver_ad_hourly": snapshot_naver_ad_hourly_job,
         "trigger_watch": trigger_watch_job,

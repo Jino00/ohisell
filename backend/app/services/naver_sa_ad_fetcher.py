@@ -10,14 +10,14 @@ import logging
 import os
 import re
 import time
-from datetime import date, timedelta
-from decimal import Decimal
+from datetime import date, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 
 from urllib.parse import urlparse, parse_qs
 
 import requests
 
-from app.utils.kst import kst_today
+from app.utils.kst import KST as _KST, kst_today
 
 log = logging.getLogger(__name__)
 
@@ -233,6 +233,70 @@ def fetch_campaign_daily_spend(date_from: date, date_to: date) -> list[dict]:
     except Exception as e:
         log.error("Naver SA API 조회 실패: %s", e)
         raise
+
+
+# ── 비즈머니 실차감(성과형 광고비) ────────────────────────────────────────────
+# 검색광고 리포트(/stat-reports)는 **NCC(검색광고)만** 덮는다. 같은 비즈머니에서 함께 빠져나가는
+# ADVoost 쇼핑(prodInfoCd=PMAX)과 성과형 디스플레이(GFA)는 리포트 축에 아예 존재하지 않아
+# (캠페인 타입 enum = WEB_SITE/SHOPPING/BRAND_SEARCH/PLACE/POWER_CONTENTS), 실차감 내역이
+# 유일한 수집 경로다. 2026-08-03 실측: 06-05 이후 59일간 4,881,848원이 손익에서 누락돼 있었다.
+BIZMONEY_PROD_SEARCH_AD = "NCC"       # 검색광고 — 이미 /stat-reports로 적재 중(중복 금지)
+BIZMONEY_PROD_ADVOOST = "PMAX"        # ADVoost 쇼핑
+BIZMONEY_PROD_DISPLAY = "GFA"         # 성과형 디스플레이
+
+
+def fetch_bizmoney_exhaust_daily(
+    date_from: date, date_to: date
+) -> dict[str, dict[str, Decimal]]:
+    """비즈머니 실차감액을 {날짜: {prodInfoCd: 금액}}으로 반환 (KST 일자, **VAT 포함**).
+
+    출처: `GET /billing/bizmoney/histories/exhaust` (공식 스펙 `ncc-heroes-billing.json`).
+    응답 `BillingStatActivityApi[]` — 차감이라 금액이 **음수**로 오므로 부호를 뒤집어 담는다.
+
+    ★이 값이 "네이버가 실제로 가져간 돈"인 근거(2026-08-03 실측):
+      ① 일별 `잔액 = 전일잔액 + 카드충전 − 차감`이 8일 연속 오차 0원으로 닫힌다
+         (`/histories/period` + `/histories/charge` 대조). 충전은 실제 카드 결제액이다.
+      ② NCC 부분이 우리 `/stat-reports` 집계와 29일간 ±13원 이내 일치한다.
+      즉 리포트끼리의 정합이 아니라 **현금과의 정합**이 확인된 축이다.
+
+    ★VAT: 카드 결제액과 같은 축이라 VAT 포함이다. 우리 장부도 VAT 포함 기준이므로
+      (물류비 상수가 ×1.1, 스마트스토어 매출도 VAT 포함가) 그대로 넣는 것이 일관된다.
+
+    ⚠️신선도: 이 엔드포인트는 **D-1까지만** 준다(당일 총액은 `/histories/period`에 있으나
+      상품별 분해가 없다). 호출부는 어제치를 적재하는 전제로 쓸 것.
+    """
+    if not ACCESS_LICENSE or not SECRET_KEY_B64:
+        log.warning("Naver SA 자격증명 없음 — 비즈머니 차감 조회 생략")
+        return {}
+
+    path = "/billing/bizmoney/histories/exhaust"
+    resp = _get(path, params={
+        "searchStartDt": date_from.strftime("%Y%m%d"),
+        "searchEndDt": date_to.strftime("%Y%m%d"),
+    })
+    resp.raise_for_status()
+
+    out: dict[str, dict[str, Decimal]] = {}
+    for row in _json_list(resp):
+        settle_dt = row.get("settleDt")
+        prod = row.get("prodInfoCd")
+        if settle_dt is None or not prod:
+            continue
+        try:
+            # unixtimestamp(ms). KST 일자로 환산 — 서버 로컬 타임존에 기대지 않는다.
+            day = datetime.fromtimestamp(int(settle_dt) / 1000, _KST).strftime("%Y-%m-%d")
+        except (TypeError, ValueError, OSError, OverflowError):
+            log.warning("비즈머니 차감: settleDt 파싱 실패(%r) — 건너뜀", settle_dt)
+            continue
+        amount = Decimal("0")
+        for key in ("useRefundableAmt", "useNonrefundableAmt"):
+            try:
+                amount += Decimal(str(row.get(key) or 0))
+            except (InvalidOperation, TypeError):
+                log.warning("비즈머니 차감: %s 파싱 실패(%r) — 0으로 처리", key, row.get(key))
+        out.setdefault(day, {}).setdefault(prod, Decimal("0"))
+        out[day][prod] += -amount  # 차감은 음수로 오므로 부호 반전
+    return out
 
 
 def _list_reports_by_type(report_tp: str, date_from: date, date_to: date) -> list[dict]:

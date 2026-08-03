@@ -41,6 +41,10 @@ WATCHDOG_JOBS: tuple[str, ...] = (
     "sync_naver_settlement",
     "sync_naver_case_settlement",
     "sync_naver_sa_ad_costs",
+    # ★ADVoost·GFA 광고비(2026-08-03 추가). 이 축의 종전 경로는 사람이 CSV를 올리는 것이었고
+    #   06-04에 멈춘 뒤 **59일간 488만원이 조용히 누락**됐다 — 감시가 없으면 자동화해도
+    #   같은 방식으로 다시 침묵한다. 서버 안에서 완결(SA API)되므로 fail-soft 제외 사유 없음.
+    "sync_naver_display_ad_costs",
     "sync_naver_ad_daily",
     "sync_meta_ad_costs",
     "sync_coupang_products",
