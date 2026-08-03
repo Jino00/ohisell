@@ -24,6 +24,7 @@ from sqlalchemy import func as sqlfunc
 from sqlalchemy.orm import Session
 
 from app.models import NaverAdDaily, NaverAdgroupProduct, NaverChangeLog, NaverProposal, OpsDiaryEntry
+from app.services.naver_ad import adgroup_product_freshness
 from app.services.naver_ad import (
     auto_operator,
     cart_conversion_rate,
@@ -49,7 +50,8 @@ def _one_to_one_product(db: Session, adgroup_id: str) -> str | None:
     None). cart_conversion_rate._one_to_one_adgroup_product와 동일 판정(1:1만) — 그 함수는
     전체 스캔이라 단건 조회로 국소화(같은 규약, 결합 회피)."""
     rows = db.query(NaverAdgroupProduct.mall_product_id).filter(
-        NaverAdgroupProduct.adgroup_id == adgroup_id
+        NaverAdgroupProduct.adgroup_id == adgroup_id,
+        adgroup_product_freshness.fresh_condition()
     ).all()
     pids = {r[0] for r in rows}
     return next(iter(pids)) if len(pids) == 1 else None

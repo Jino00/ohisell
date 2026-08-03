@@ -476,6 +476,10 @@ def _last_ad_bid_change_by_group(db: Session, adgroup_ids: set[str]) -> dict[str
         .filter(
             NaverAdgroupProduct.adgroup_id.in_(adgroup_ids),
             NaverAdgroupProduct.ad_id.isnot(None),
+            # ★★신선도 필터를 걸지 말 것(2026-08-03 폴백 방향 조사): 0행이 되면 스톱로스
+            #   창이 만성 7일에서 DL1 3일로 좁아져, 일 출혈이 임계/3 미만인 유닛이 영구
+            #   침묵한다(이 파일 _stop_loss_window_start 주석의 경고 그대로). 여기서는
+            #   오래된 소재 이력이라도 있는 편이 감지에 유리하다.
         )
         .all()
     )

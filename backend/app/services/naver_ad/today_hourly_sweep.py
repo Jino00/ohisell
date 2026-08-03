@@ -28,6 +28,7 @@ from sqlalchemy import delete
 from sqlalchemy.orm import Session
 
 from app.models import NaverAdgroupHourlyToday, NaverAdgroupProduct, NaverLearningState
+from app.services.naver_ad import adgroup_product_freshness
 from app.services.naver_ad.keyword_hourly_sweep import build_sweep_targets
 from app.services.naver_ad.launch_rank_floor import (
     LAUNCH_WINDOW_DAYS,
@@ -80,7 +81,7 @@ def _launch_window_targets(db: Session, today: date) -> dict[str, dict]:
         return {}
     rows = (
         db.query(NaverAdgroupProduct.adgroup_id, NaverAdgroupProduct.campaign_id)
-        .filter(NaverAdgroupProduct.ad_id.in_(tuple(ad_ids)))
+        .filter(NaverAdgroupProduct.ad_id.in_(tuple(ad_ids)), adgroup_product_freshness.fresh_condition())
         .all()
     )
     out: dict[str, dict] = {}

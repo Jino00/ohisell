@@ -16,6 +16,7 @@ from sqlalchemy import func as sqlfunc
 from sqlalchemy.orm import Session
 
 from app.models import NaverAdgroupProduct, NaverCampaignSettings, NaverProductBep, Order
+from app.services.naver_ad import adgroup_product_freshness
 
 NAVER_CHANNEL_ID = 6
 
@@ -96,18 +97,30 @@ def _weighted_target_for_cpids(
 
 
 def _cpids_for_adgroup(db: Session, adgroup_id: str) -> list[str]:
-    """광고그룹에 매핑된 상품(mall_product_id=channel_product_id) 목록(naver_adgroup_product)."""
+    """광고그룹에 매핑된 **현재 유효한** 상품(mall_product_id=channel_product_id) 목록.
+
+    ★신선도 필터 필수(codex 3R P1): `naver_adgroup_product`는 2026-08-03부터 삭제 없는
+    누적 upsert라 **역대 관측의 합집합**이다. 필터 없이 읽으면 이미 빠진 옛 상품이 target
+    ROAS 가중평균에 섞이고, 그 값이 auto_operator → 실행 직전 harness까지 간다.
+    근거·한계는 adgroup_product_freshness 모듈 docstring.
+    """
     return [
         r[0] for r in db.query(NaverAdgroupProduct.mall_product_id)
-        .filter(NaverAdgroupProduct.adgroup_id == adgroup_id).all()
+        .filter(NaverAdgroupProduct.adgroup_id == adgroup_id,
+                adgroup_product_freshness.fresh_condition()).all()
     ]
 
 
 def _cpids_for_campaign(db: Session, campaign_id: str) -> list[str]:
-    """캠페인의 그룹들에 매핑된 상품 전체 목록(campaign grain 해석용, 그룹들 가중)."""
+    """캠페인의 그룹들에 매핑된 **현재 유효한** 상품 전체 목록(campaign grain 해석용).
+
+    ★신선도 필터 필수 — 이유는 `_cpids_for_adgroup` 참조. campaign grain은 그룹들을 합치므로
+    옛 그룹의 상품까지 누적돼 오염이 더 크다.
+    """
     return [
         r[0] for r in db.query(NaverAdgroupProduct.mall_product_id)
-        .filter(NaverAdgroupProduct.campaign_id == campaign_id).all()
+        .filter(NaverAdgroupProduct.campaign_id == campaign_id,
+                adgroup_product_freshness.fresh_condition()).all()
     ]
 
 

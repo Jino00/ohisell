@@ -24,7 +24,8 @@ from app.models import (
     NaverProposal,
 )
 from app.services.naver_ad import (
-    bid_ceiling_calculator, cold_start_bid_decider, market_bid_probe, naver_execution_harness,
+    adgroup_product_freshness, bid_ceiling_calculator, cold_start_bid_decider, market_bid_probe,
+    naver_execution_harness,
 )
 from app.services.naver_ad.bid_step_types import (
     APPROVAL_SOURCE_COLD,  # 재수출 — 단일 소스는 bid_step_types(리뷰 P3-12: harness가 무의존 경로로 읽게)
@@ -131,6 +132,10 @@ def select_cold_ads(db: Session, today: date) -> list[dict]:
     if not campaign_ids:
         return []
 
+    # ★신선도 필터(codex 3R P1) — **데이터 읽기**에만 적용한다(실행 게이트 불변).
+    #   매핑 테이블은 누적 upsert(삭제 없음)라 소재가 그룹 A→B로 옮겨가면 옛 행이 남는다.
+    #   unique 키가 (adgroup_id, mall_product_id)뿐이라 같은 ad_id가 양쪽에 존재할 수 있고,
+    #   필터 없이 읽으면 **옛 campaign/adgroup 문맥으로 라이브 ad_id에 입찰**하게 된다.
     rows = db.query(
         NaverAdgroupProduct.ad_id, NaverAdgroupProduct.adgroup_id,
         NaverAdgroupProduct.campaign_id, NaverAdgroupProduct.ad_bid_amt,
@@ -138,6 +143,7 @@ def select_cold_ads(db: Session, today: date) -> list[dict]:
     ).filter(
         NaverAdgroupProduct.campaign_id.in_(campaign_ids),
         NaverAdgroupProduct.ad_id.isnot(None),
+        adgroup_product_freshness.fresh_condition(),
     ).all()
     if not rows:
         return []
@@ -310,6 +316,7 @@ def collect_market_bids_daily(db: Session, today: date | None = None) -> dict:
         ).filter(
             NaverAdgroupProduct.campaign_id.in_(campaign_ids),
             NaverAdgroupProduct.ad_id.isnot(None),
+            adgroup_product_freshness.fresh_condition(),  # codex 3R P1(옛 문맥 배제)
         ).all()
         return market_bid_probe.collect_daily(db, [tuple(r) for r in rows], today)
     except Exception as e:  # noqa: BLE001 — 격리(기존 수집 무영향)

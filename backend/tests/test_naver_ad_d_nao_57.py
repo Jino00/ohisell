@@ -80,7 +80,7 @@ def test_collect_scope_includes_recent_spender_without_settings(db):
     assert {a.entity_id for a in ags} == {"g-spend"}
 
 
-def test_sync_adgroup_products_snapshot_replace_and_dedup(db):
+def test_sync_adgroup_products_upsert_and_dedup(db):
     _ours_shopping_adgroup(db)
     ads = {"grp-1": [
         {"mall_product_id": "13365319468", "product_name": "17E"},

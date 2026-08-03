@@ -372,6 +372,61 @@ def test_cursor_is_written_and_read_back(db):
     assert shopping_ad_product_sync.read_cursor(db) is None
 
 
+def test_cursor_cas_refuses_to_overwrite_concurrent_progress(db):
+    """★codex 3R P2: 동시 실행(07:45 정시 vs catch-up 스레드)이 진행도를 되감지 못한다.
+
+    내가 회차 시작에 읽은 값이 그 사이 바뀌었으면 상대가 더 최신이므로 내 커서를 쓰지 않는다.
+    (단순 대소 비교가 아니라 CAS인 이유: 커서는 **링**이라 한 바퀴 돌면 작은 id로 돌아오는
+    것이 정상 전진이다 — grp-98 → grp-01.)
+    """
+    now = datetime(2026, 8, 3, 7, 45)
+    shopping_ad_product_sync.write_cursor(db, "grp-05", now=now)   # 상대 회차가 먼저 커밋
+    db.commit()
+
+    # 나는 회차 시작에 grp-02를 읽었다고 믿고 grp-03을 쓰려 한다 → CAS 불일치
+    wrote = shopping_ad_product_sync.write_cursor(db, "grp-03", now=now, expected="grp-02")
+    assert wrote is False
+    db.commit()
+    assert shopping_ad_product_sync.read_cursor(db) == "grp-05", "상대 진행도가 보존돼야 한다"
+
+    # 기대값이 맞으면 정상 전진
+    assert shopping_ad_product_sync.write_cursor(db, "grp-07", now=now, expected="grp-05") is True
+    db.commit()
+    assert shopping_ad_product_sync.read_cursor(db) == "grp-07"
+
+
+def test_cursor_cas_allows_ring_wraparound(db):
+    """링 되감김은 정상 전진이다 — CAS는 대소가 아니라 '기대값 일치'만 본다."""
+    now = datetime(2026, 8, 3, 7, 45)
+    shopping_ad_product_sync.write_cursor(db, "grp-98", now=now)
+    db.commit()
+
+    assert shopping_ad_product_sync.write_cursor(db, "grp-01", now=now, expected="grp-98") is True
+    db.commit()
+    assert shopping_ad_product_sync.read_cursor(db) == "grp-01"
+
+
+def test_cursor_write_failure_does_not_lose_mappings(db, monkeypatch):
+    """★커서 저장이 실패해도 이번 회차 매핑 수집 결과는 커밋돼 있어야 한다(fail-open).
+
+    커서는 최적화이고 매핑이 본 기능이다 — 순서를 거꾸로 두면 동시 INSERT 충돌 한 번이
+    수집 결과를 통째로 되돌린다.
+    """
+    _stopped_settings(db, "cmp-a")
+    _adgroup(db, "grp-1", "cmp-a")
+    db.commit()
+
+    def boom(*a, **k):
+        raise RuntimeError("커서 저장 실패(동시 INSERT 충돌 가정)")
+
+    monkeypatch.setattr(shopping_ad_product_sync, "write_cursor", boom)
+    shopping_ad_product_sync.sync_adgroup_products(
+        db, as_of=kst_today(),
+        ads_by_adgroup={"grp-1": [{"mall_product_id": "p1", "product_name": "x"}]},
+    )
+    assert db.query(NaverAdgroupProduct).count() == 1, "커서 실패가 매핑을 되돌렸다"
+
+
 def test_corrupt_cursor_falls_back_to_start(db):
     """커서 값이 깨져도 죽지 않고 처음부터 순회한다(커서는 최적화지 정확성 요건이 아니다)."""
     db.add(NaverAccountSettings(

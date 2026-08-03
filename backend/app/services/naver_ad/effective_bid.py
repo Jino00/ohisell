@@ -79,6 +79,11 @@ def adgroup_effective_bids(db: Session, group_bids: dict[str, int]) -> dict[str,
             NaverAdgroupProduct.use_group_bid_amt,
             NaverAdgroupProduct.ad_user_lock,
         )
+        # ★★신선도 필터를 걸지 말 것(2026-08-03 폴백 방향 조사): 행이 사라지면 _derive가
+        #   source='ad'를 만들 수 없어 항상 'group'이 된다. 그러면 auto_operator의
+        #   "[레버 미연결] 그룹입찰 무효" hold 게이트와 account_diagnosis의 만성 7일
+        #   스톱로스 창이 **동시에 꺼져**, 종전에 held되던 입찰이 집행되고 느린 출혈의
+        #   감지가 늦어진다. 여기서는 오래된 소재 입찰 관측이라도 있는 편이 안전하다.
         .filter(NaverAdgroupProduct.adgroup_id.in_(group_bids))
         .all()
     )

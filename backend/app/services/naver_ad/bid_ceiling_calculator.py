@@ -43,6 +43,7 @@ from sqlalchemy import func as sqlfunc
 from sqlalchemy.orm import Session
 
 from app.models import NaverAdDaily, NaverAdgroupProduct, NaverProductBep
+from app.services.naver_ad import adgroup_product_freshness
 from app.services.naver_ad import bid_simulator, conversion_maturity
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 
@@ -263,7 +264,10 @@ def resolve_bep(db: Session, ad_id: str) -> dict:
             (NaverProductBep.channel_product_id == NaverAdgroupProduct.mall_product_id)
             & (NaverProductBep.channel_id == NAVER_CHANNEL_ID),
         )
-        .filter(NaverAdgroupProduct.ad_id == ad_id)
+        .filter(NaverAdgroupProduct.ad_id == ad_id, adgroup_product_freshness.fresh_condition())
+        # 같은 ad_id가 옛 그룹·새 그룹 두 행에 존재할 수 있다(unique 키가
+        # (adgroup_id, mall_product_id)뿐) — .first()가 임의로 고르지 않게 최신 관측 우선.
+        .order_by(NaverAdgroupProduct.synced_at.desc(), NaverAdgroupProduct.id.desc())
         .first()
     )
     if row is None:

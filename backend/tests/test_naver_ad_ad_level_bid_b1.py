@@ -1,6 +1,6 @@
 # test_naver_ad_ad_level_bid_b1.py — 스프린트 B Phase 1(B1: 소재-레벨 입찰 인식·저장, D-NAO-65)
 # 커버: (1) get_ads의 adAttr(JSON 문자열/dict/깨짐/부재) 방어적 파싱 + userLock
-#   (2) shopping_ad_product_sync가 소재 입찰 4컬럼을 적재·스냅샷 교체 시 갱신
+#   (2) shopping_ad_product_sync가 소재 입찰 4컬럼을 적재·재관측 시 upsert 갱신
 #   (3) 기존 매핑·상품명 동작 회귀 0(입찰 필드 미주입 시 NULL)
 from __future__ import annotations
 
@@ -124,7 +124,7 @@ def test_get_ads_partial_adattr_fields(monkeypatch):
 
 
 # ══════════════════════════════════════════════════════════════════
-# (2) sync가 소재 입찰 4컬럼 적재 + 스냅샷 교체 시 갱신
+# (2) sync가 소재 입찰 4컬럼 적재 + 재관측 시 upsert 갱신
 # ══════════════════════════════════════════════════════════════════
 def test_sync_stores_ad_bid_columns(db):
     _ours_shopping_adgroup(db)
@@ -140,8 +140,11 @@ def test_sync_stores_ad_bid_columns(db):
     assert row.ad_user_lock is False
 
 
-def test_sync_snapshot_replace_updates_ad_bid(db):
-    """스냅샷 교체 시 소재 입찰도 갱신(그룹입찰 무시하는 소재 bidAmt 변경 추적)."""
+def test_sync_upsert_updates_ad_bid_on_reobservation(db):
+    """재관측 시 소재 입찰도 upsert 갱신(그룹입찰 무시하는 소재 bidAmt 변경 추적).
+
+    ★이름 정정(codex 3R P2): 이 테이블은 2026-08-03부터 스냅샷 교체가 아니라 **누적 upsert**다
+    — 옛 이름(snapshot_replace)은 다음 사람이 현재값 테이블로 오해하게 만든다."""
     _ours_shopping_adgroup(db)
     shopping_ad_product_sync.sync_adgroup_products(db, as_of=kst_today(), ads_by_adgroup={"grp-1": [
         {"mall_product_id": "13365319468", "product_name": "17E", "ad_id": "nad-1",

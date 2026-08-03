@@ -1706,10 +1706,25 @@ class NaverAdgroupProduct(Base):
     grain: (adgroup_id, mall_product_id). 소스: 쇼핑 소재 /ncc/ads의
     referenceData.mallProductId(type=SHOPPING_PRODUCT_AD) — naver_product_bep.channel_product_id와
     정확히 일치(라이브 실증). 한 그룹에 소재(상품)가 여럿일 수 있어 unique는 (adgroup, mall_product).
-    **관측 스코프**(campaign_roster.observation_campaign_ids — 최근 7일 광고비>0 ∪ settings 행,
-    optimizer 무관) 쇼핑 캠페인의 활성 그룹을 매일 07:45 sync가 스냅샷 교체(그룹 단위).
-    ★구 스코프는 optimizer='ours'였고, 2026-07-30 긴급정지로 그 집합이 비자 이 테이블 276행이
-    전량 삭제됐다(2026-07-31 07:45 KST). 관측 스코프는 실행 스위치와 분리한다(D-NAO-13).
+    ══ ★★계약: 이 테이블은 "현재 매핑"이 아니라 **역대 관측의 누적**이다 (2026-08-03) ══
+    매일 07:45 `shopping_ad_product_sync`가 **관측 스코프**(campaign_roster.
+    observation_campaign_ids — 최근 7일 광고비>0 ∪ settings 행, optimizer 무관) 쇼핑 캠페인의
+    활성 그룹을 **upsert**한다. **삭제는 하지 않는다** — 2026-07-31 07:45 KST에 구 "스냅샷
+    교체" 구현이 276행을 전량 날린 뒤, 정리 계층을 통째로 들어냈다(사고 경위와 그 판단 근거는
+    `shopping_ad_product_sync` 모듈 docstring).
+
+    ★그래서 **읽을 때 반드시 신선도 필터를 거쳐야 한다.**
+      `app.services.naver_ad.adgroup_product_freshness.fresh_condition()`을 쿼리에 붙여라.
+      필터 없이 읽으면 이미 빠진 옛 상품·옛 그룹 문맥이 섞여 들어와 target ROAS·프록시 매출·
+      예산 증액·콜드 입찰 문맥을 오염시킨다(codex 3R P1이 추적한 실제 경로).
+      ★`ad_id`로 문맥을 되찾을 때는 `fresh_rows_by_ad_id()`를 써라 — unique 키가
+      (adgroup_id, mall_product_id)뿐이라 **같은 ad_id가 여러 행에 존재할 수 있다**.
+      예외(필터를 쓰지 않는 곳)는 "그 시점의 매핑"을 원하는 이력 표기 경로뿐이다
+      (change_log_narrator·perf_campaign_harness — 각 호출부 주석 참조).
+
+    ★`synced_at`이 곧 신선도다: 이번 회차에 관측된 행만 갱신되므로, 오래된 값 = 이번에 못 본 행.
+    (단 "실제로 사라진 것"과 "부분 응답·실패·이월로 못 본 것"은 구분되지 않는다 — 보수적
+    배제라는 성격은 adgroup_product_freshness docstring에 적혀 있다.)
     campaign_target_resolver 우선순위 ②(상품 파생 target_roas)가 이 매핑을 소비한다.
 
     ★B1(스프린트 B, D-NAO-65): 소재-레벨 실효입찰 인식·저장. 각 SHOPPING_PRODUCT_AD 소재의

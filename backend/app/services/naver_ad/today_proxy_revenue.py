@@ -33,7 +33,7 @@ from sqlalchemy.orm import Session
 
 from app.models import NaverAdgroupProduct, Order
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
-from app.services.naver_ad import product_campaign_share
+from app.services.naver_ad import adgroup_product_freshness, product_campaign_share
 
 NAVER_CHANNEL_ID = 6
 
@@ -51,7 +51,11 @@ def product_ids_by_campaign(db: Session, campaign_ids: list[str]) -> dict[str, l
         return {}
     rows = (
         db.query(NaverAdgroupProduct.campaign_id, NaverAdgroupProduct.mall_product_id)
-        .filter(NaverAdgroupProduct.campaign_id.in_(campaign_ids))
+        .filter(NaverAdgroupProduct.campaign_id.in_(campaign_ids),
+                # codex 3R P1: 누적 upsert 테이블이라 옛 상품이 남는다. 필터 없이 읽으면
+                # 이미 빠진 상품의 당일 판매액이 이 캠페인 매출로 잡혀 ROAS가 부풀고,
+                # budget_pacing이 그 값으로 증액을 통과시킨다.
+                adgroup_product_freshness.fresh_condition())
         .all()
     )
     by_campaign: dict[str, list[str]] = {}
