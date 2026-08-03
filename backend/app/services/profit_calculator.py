@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import date
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_DOWN, Decimal
 
 from collections import defaultdict
 
@@ -255,12 +255,55 @@ def _shipment_cost_map(orders: list, channel_map: dict) -> dict[tuple, Decimal]:
     return costs
 
 
-# 배송비 수취분에 붙는 네이버페이 주문관리 수수료율.
-# ★라이브 실측(naver_settlement_case product_order_type='DELIVERY', 전 기간 1,652행 −119,270원):
-#   2,500원→68원 / 3,000원→81원 / 5,000원→136원 / 5,500원→150원 = 2.700~2.727%.
-#   상품 주문관리 수수료율(2.724%)과 같은 요율이다. 네이버의 원 단위 절사·반올림 규칙이
-#   금액대마다 미세하게 갈려 건당 ±1원 오차가 남는다(N배송 438건 기준 총 ±438원).
-#   그 1원을 재현하려 반올림 규칙을 역설계하는 것은 과적합이라 표준 반올림을 쓴다.
+def _delivery_income_map(orders: list, channel_map: dict) -> dict[tuple, Decimal]:
+    """배송(skey)별 **배송비 수입**을 선행 1회 훑어 확정한다.
+
+    ★선행 패스인 이유(codex 2R P2): 종전엔 본 루프에서 first-wins로 잡았는데, 쿼리에 결정적
+      정렬이 없고 동기화가 라인을 각각 갱신하므로 한 패키지 안에서 값이 갈리면 **매출·VAT·
+      수수료가 임의로 정해진다**. _shipment_cost_map과 같은 형태로 맞춰 순서 의존을 없앤다.
+
+    ★갈릴 때 규칙 = **최솟값**(비용 쪽 _shipment_cost_map의 최댓값과 반대). 수입은 적게, 비용은
+      많게가 보수 방향이라 이익이 부풀려지지 않는다. 갈린 사실 자체는 조용히 넘기지 않고
+      로그로 표면화한다 — 라이브 실측은 9,614패키지 전부 단일 값(혼재 0건)이라, 로그가 찍히면
+      그건 원천 데이터 성질이 바뀐 신호다.
+    """
+    income: dict[tuple, Decimal] = {}
+    conflicts = 0
+    for o in orders:
+        ch = channel_map.get(o.channel_id)
+        if ch and ch.channel_type == "consignment":
+            continue
+        if o.status in REVENUE_EXCLUDED:
+            continue
+        deliv = _delivery_income(ch, o)
+        if deliv <= 0:
+            continue
+        skey = _shipment_key(ch, o)
+        prev = income.get(skey)
+        if prev is None:
+            income[skey] = deliv
+        elif prev != deliv:
+            conflicts += 1
+            income[skey] = min(prev, deliv)
+    if conflicts:
+        log.warning("배송비 수입이 한 배송 안에서 갈림 %d건 — 최솟값 채택(원천 데이터 확인 필요)",
+                    conflicts)
+    return income
+
+
+# 배송비 수취분에 붙는 네이버페이 주문관리 수수료율 = 상품 주문관리 수수료율(2.724%).
+# ★원 단위 규칙은 **절사(ROUND_DOWN)** — 라이브 전수 대조(DELIVERY 행 1,652건):
+#     금액   건수   실측    절사   반올림
+#     2,500  1,441   68      68 ✓   68 ✓
+#     3,000    127   81      81 ✓   82 ✗
+#     5,000     74  136     136 ✓  136 ✓
+#     7,500      2  204     204 ✓  204 ✓
+#     5,500      5  150     149 ✗  150 ✓
+#       500      3   13      13 ✓   14 ✗
+#   절사 1,644/1,652(99.5%) vs 반올림 1,522(92.1%). 특히 **N배송의 유일한 금액인 3,000원에서
+#   절사만 맞는다** — N배송이 주력이 되는 지금 반올림을 쓰면 매 건 +1원 체계적 과대다.
+#   5,500·500의 예외 8건은 결제수단별 요율 차이로 보이나(commission-details의 payMeansType별
+#   분해에서 요율이 갈린다) orders에 결제수단을 저장하지 않아 재현 불가 — 과적합하지 않는다.
 NAVER_DELIVERY_COMMISSION_RATE = Decimal("0.02724")
 
 
@@ -281,7 +324,7 @@ def _delivery_commission(ch: Channel | None, deliv: Decimal) -> Decimal:
     """
     if deliv <= 0 or not ch or ch.code != "NAVER":
         return ZERO
-    return (deliv * NAVER_DELIVERY_COMMISSION_RATE).quantize(Decimal("1"), ROUND_HALF_UP)
+    return (deliv * NAVER_DELIVERY_COMMISSION_RATE).quantize(Decimal("1"), ROUND_DOWN)
 
 
 def _raw(o: Order) -> dict:
@@ -516,6 +559,7 @@ def calculate_daily_trend(
     shipment_costs = _shipment_cost_map(orders, channel_map)  # 배송별 택배비 선행 확정
     seen_shipments: set[tuple] = set()  # 배송(packageNumber/박스)당 1회 부과
     seen_deliv: set[tuple] = set()      # 배송수입 배송당 1회 (전 채널 라인 복사 dedup)
+    delivery_income = _delivery_income_map(orders, channel_map)  # 배송별 수입 선행 확정
     for o in orders:
         ch = channel_map.get(o.channel_id)
         if ch and ch.channel_type == "consignment":
@@ -541,14 +585,13 @@ def calculate_daily_trend(
         skey = _shipment_key(ch, o)
         product_rev = _line_revenue(ch, o)
         # 고객이 낸 배송비 → 매출 가산. 쿠팡은 박스값이 라인마다 복사돼 배송당 1회만.
-        deliv = _delivery_income(ch, o)
         # ★배송수입은 배송(패키지·박스)당 1회 — 네이버도 쿠팡과 같이 라인마다 복사돼 있다
         #   (_delivery_income 주석의 실측). 종전엔 쿠팡만 dedup해 네이버가 이중계상됐다.
-        if deliv:
-            if skey in seen_deliv:
-                deliv = ZERO
-            else:
-                seen_deliv.add(skey)
+        #   금액은 선행 확정(_delivery_income_map)이라 라인 순서와 무관하다.
+        deliv = ZERO
+        if skey not in seen_deliv:
+            seen_deliv.add(skey)
+            deliv = delivery_income.get(skey, ZERO)
         revenue = product_rev + deliv
         bucket["product_revenue"] += product_rev
         bucket["shipping_revenue"] += deliv
@@ -663,6 +706,7 @@ def calculate_channel_summary(
     shipment_costs = _shipment_cost_map(orders, channel_map)  # 배송별 택배비 선행 확정
     seen_shipments: set[tuple] = set()  # 배송(packageNumber/박스)당 1회 부과
     seen_deliv: set[tuple] = set()      # 배송수입 배송당 1회 (전 채널 라인 복사 dedup)
+    delivery_income = _delivery_income_map(orders, channel_map)  # 배송별 수입 선행 확정
     for o in orders:
         ch = channel_map.get(o.channel_id)
         if ch and ch.channel_type == "consignment":
@@ -682,14 +726,13 @@ def calculate_channel_summary(
         skey = _shipment_key(ch, o)
         product_rev = _line_revenue(ch, o)
         # 고객이 낸 배송비 → 매출 가산. 쿠팡은 박스값이 라인마다 복사돼 배송당 1회만.
-        deliv = _delivery_income(ch, o)
         # ★배송수입은 배송(패키지·박스)당 1회 — 네이버도 쿠팡과 같이 라인마다 복사돼 있다
         #   (_delivery_income 주석의 실측). 종전엔 쿠팡만 dedup해 네이버가 이중계상됐다.
-        if deliv:
-            if skey in seen_deliv:
-                deliv = ZERO
-            else:
-                seen_deliv.add(skey)
+        #   금액은 선행 확정(_delivery_income_map)이라 라인 순서와 무관하다.
+        deliv = ZERO
+        if skey not in seen_deliv:
+            seen_deliv.add(skey)
+            deliv = delivery_income.get(skey, ZERO)
         revenue = product_rev + deliv
         b["product_revenue"] += product_rev
         b["shipping_revenue"] += deliv
@@ -854,6 +897,7 @@ def calculate_product_profit(
     # 상품별 집계 (배송비·고객배송수입은 배송 단위라 아래에서 라인 비례 배분)
     by_product: dict[int, dict] = {}
     ship_groups: dict[tuple, dict] = {}
+    delivery_income = _delivery_income_map(orders, channel_map)  # 배송별 수입 선행 확정
     for o in orders:
         ch = channel_map.get(o.channel_id)
         if ch and ch.channel_type == "consignment":
@@ -891,11 +935,10 @@ def calculate_product_profit(
         _c = _shipment_cost(o)
         if _c > g["cost"]:
             g["cost"] = _c
-        dval = _delivery_income(ch, o)
-        # ★배송수입도 배송당 1회 — 네이버도 쿠팡과 같이 라인마다 복사돼 있다(전 채널 first-wins).
+        # ★배송수입도 배송당 1회 — 네이버도 쿠팡과 같이 라인마다 복사돼 있다.
         #   종전엔 네이버만 라인 합산해 다라인 패키지에서 이중계상됐다(라이브 62,500원).
-        if dval and g["deliv"] == ZERO:
-            g["deliv"] = dval
+        #   금액은 선행 확정 맵에서 가져와 라인 순서와 무관하게 만든다(codex 2R P2).
+        g["deliv"] = delivery_income.get(skey, ZERO)
 
         # 광고비는 아래에서 option_id → product_id 매핑으로 일괄 할당
 

@@ -19,6 +19,7 @@ from app.services.profit_calculator import (
     NAVER_DELIVERY_COMMISSION_RATE,
     _delivery_commission,
     _delivery_income,
+    _delivery_income_map,
     _shipment_key,
 )
 
@@ -72,14 +73,48 @@ def test_cafe24_has_no_delivery_income():
     assert _delivery_income(CAFE24, o) == D("0")
 
 
+# ── _delivery_income_map: 배송별 수입 선행 확정 (codex 2R P2) ─────────────
+_CH_MAP = {6: NAVER}
+
+
+def test_income_map_charges_package_once():
+    lines = [_naver_line("pkg-1", D("3000")) for _ in range(3)]  # 한 패키지 3라인
+    assert sum(_delivery_income_map(lines, _CH_MAP).values()) == D("3000")
+
+
+def test_income_map_is_order_independent_and_conservative():
+    # ★codex 2R P2 회귀 가드: 값이 갈리면 first-wins는 입력 순서에 따라 답이 달라졌다.
+    #   선행 확정 + 최솟값(수입은 적게 = 보수)이라 순서와 무관하다.
+    a, b = _naver_line("pkg-x", D("3000")), _naver_line("pkg-x", D("2500"))
+    assert _delivery_income_map([a, b], _CH_MAP) == _delivery_income_map([b, a], _CH_MAP)
+    assert sum(_delivery_income_map([a, b], _CH_MAP).values()) == D("2500")
+
+
+def test_income_map_excludes_cancelled_and_consignment():
+    live = _naver_line("live", D("3000"))
+    dead = _naver_line("dead", D("3000")); dead.status = "cancelled"
+    assert sum(_delivery_income_map([live, dead], _CH_MAP).values()) == D("3000")
+    consign = {6: Channel(code="NAVER", channel_type="consignment")}
+    assert _delivery_income_map([live], consign) == {}
+
+
 # ── ② 배송비 수취분에 붙는 주문관리 수수료 ─────────────────────────────────
-@pytest.mark.parametrize("fee,expected", [
-    (D("3000"), D("82")),   # 3000×2.724% = 81.72 → 82 (라이브 실측 81, ±1원 반올림 차)
-    (D("2500"), D("68")),   # 2500×2.724% = 68.1  → 68 (라이브 실측 68, 일치)
-    (D("5000"), D("136")),  # 5000×2.724% = 136.2 → 136 (라이브 실측 136, 일치)
+# ★라이브 DELIVERY 원장 행 전수 대조(1,652건). 절사 1,644건 일치(99.5%) vs 반올림 1,522(92.1%).
+#   특히 N배송의 유일한 금액인 3,000원은 절사(81)만 맞는다 — 반올림(82)이면 매 건 +1원 과대.
+@pytest.mark.parametrize("fee,expected,n_live", [
+    (D("3000"), D("81"), 127),    # 실측 81
+    (D("2500"), D("68"), 1441),   # 실측 68
+    (D("5000"), D("136"), 74),    # 실측 136
+    (D("7500"), D("204"), 2),     # 실측 204
 ])
-def test_delivery_commission_matches_live_scale(fee, expected):
+def test_delivery_commission_matches_live_settlement(fee, expected, n_live):
     assert _delivery_commission(NAVER, fee) == expected
+
+
+def test_rounding_is_truncation_not_half_up():
+    # ★codex 2R P2 회귀 가드: 반올림으로 되돌리면 3,000원이 82가 되어 N배송 매 건 +1원 과대.
+    assert _delivery_commission(NAVER, D("3000")) == D("81")
+    assert _delivery_commission(NAVER, D("3000")) != D("82")
 
 
 def test_no_commission_without_delivery_income():
@@ -104,9 +139,9 @@ def test_rate_is_order_management_rate():
 
 
 def test_nbaesong_shipping_is_net_negative_but_better_than_free_shipping():
-    """N배송 배송 손익 = 수취 3,000 − 수수료 82 − 품고 지불 3,020 = −102원/건.
-    일반 무료배송(−1,900원/건)보다 1,798원 유리하다 — 이 부등호가 뒤집히면 회귀다."""
+    """N배송 배송 손익 = 수취 3,000 − 수수료 81 − 품고 지불 3,020(Jino 확인) = −101원/건.
+    일반 무료배송(−1,900원/건)보다 1,799원 유리하다 — 이 부등호가 뒤집히면 회귀다."""
     nb_net = D("3000") - _delivery_commission(NAVER, D("3000")) - D("3020")
     normal_net = D("0") - D("0") - D("1900")
-    assert nb_net == D("-102")
+    assert nb_net == D("-101")
     assert nb_net > normal_net
