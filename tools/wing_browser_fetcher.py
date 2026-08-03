@@ -802,10 +802,16 @@ def cmd_login(cfg: dict, wait_secs: int = 600, rg_probe: bool = True) -> int:
       데스크톱 xauth SSO)은 **세션이 따로 논다**. 같은 Chrome에서 vendor-summary=200인데
       정산 goto는 xauth 로그인 페이지로 리다이렉트되고 status/api는 404인 상태가 실제로
       관측됐다. VS 프로브만으로 "로그인 완료"를 선언하면 그 침묵이 데스크톱 세션 만료를
-      가리고, 직후 `rg`(login_wait_secs=0)가 _rg_session_ok 실패로 fail-fast한다.
+      가리고, 직후 `rg`(login_wait_secs=0)가 세션 판정 실패로 fail-fast한다.
       → 창이 아직 열려 있는 동안 정산 세션까지 확인하고, 없으면 사람에게 마저 로그인시킨다
       (워밍 네비게이션으로는 해결 불가 — 사람 재로그인만 가능).
       rg_probe=False는 데몬 VS 레인용(cmd_poll 주석 참조).
+    ★판정은 **3값**이다(2026-08-03, 층2·진입 경로와 동일 계약). 종전엔 보수적 bool이라
+      판정 불가(업스트림 500·깨진 JSON·goto 예외)까지 "데스크톱 세션 만료"로 불러 **로그인해
+      있는 사람에게 로그인을 시켰고**, 끝내 못 잡으면 멀쩡한 세션에 rc=5를 돌려줬다.
+      로그아웃은 AUTH(오리진 이탈·리다이렉트·로그인 HTML)로 확증되지 UNKNOWN으로 오지
+      않는다 — 그래서 UNKNOWN은 로그인을 요구하지 않고, 대신 "확인됨"이라고 주장하지도
+      않는다. 진짜로 죽었다면 이어지는 `rg`가 자기 진입 프로브에서 AUTH로 잡는다.
     """
     state = os.path.expanduser(cfg["state_file"])
     cdp = _cdp_mode(cfg)
@@ -820,7 +826,7 @@ def cmd_login(cfg: dict, wait_secs: int = 600, rg_probe: bool = True) -> int:
     #   함께 fresh해진다. "기존 세션이 VS 프로브를 즉시 통과해 사람이 로그인을 건너뛴다"는
     #   마스킹 시나리오 자체가 원리적으로 생기지 않는다(=프로브가 잡을 것이 없다).
     probe_rg = bool(rg_probe and cdp and _rg_applicable(cfg))
-    rg_ok = True             # 프로브 미수행이면 기존 동작 그대로(성공 취급)
+    rg_verdict = _PROBE_OK   # 프로브 미수행이면 기존 동작 그대로(성공 취급)
     started = time.monotonic()
     windows = _vs_windows(cfg)   # 프로브·과거창이 같은 기준일을 쓰도록 1회만 계산(자정 경계)
     with sync_playwright() as p:
@@ -838,22 +844,36 @@ def cmd_login(cfg: dict, wait_secs: int = 600, rg_probe: bool = True) -> int:
                     try:
                         page.goto(RG_DASH_URL, wait_until="domcontentloaded", timeout=40000)
                         page.wait_for_timeout(3500)   # Cloudflare/Akamai JS 챌린지 안정화
-                        rg_ok = _rg_session_ok(page)
-                        if not rg_ok:
+                        # 1차 실패 시 짧은 지연 후 1회 재확인 — 업스트림 500 blip을 로그아웃으로
+                        #   승격하지 않기 위해서다(층2 루프와 같은 헬퍼·같은 판단기준).
+                        rg_verdict = _rg_session_verdict_confirmed(page)
+                        if rg_verdict == _PROBE_AUTH:
                             remaining = max(0, wait_secs - int(time.monotonic() - started))
                             log.info(
-                                "판매분석(VS) 세션은 정상 — RG(정산) 데스크톱 세션 만료. "
+                                "판매분석(VS) 세션은 정상 — RG(정산) 데스크톱 세션 만료(로그아웃 확증). "
                                 "같은 창에서 wing.coupang.com에 로그인하세요(자동 감지, 최대 %d초).",
                                 remaining)
-                            rg_ok = _rg_login_wait(page, ctx, state, remaining, cdp=cdp)
+                            if _rg_login_wait(page, ctx, state, remaining, cdp=cdp):
+                                rg_verdict = _PROBE_OK
                     except Exception as e:  # noqa: BLE001 — 프로브 실패는 VS 결과를 무효화하지 않는다
-                        log.error("RG(정산) 세션 프로브 실패: %s", str(e)[:160])
-                        rg_ok = False
+                        # 창 닫힘·네비게이션 실패는 '로그아웃 확증'이 아니라 판정 불가다.
+                        log.error("RG(정산) 세션 프로브 실패(판정 불가로 접는다): %s", str(e)[:160])
+                        # ★단 이미 AUTH를 확증한 뒤 로그인 대기 중에 터진 것이라면 판정을 지우지
+                        #   않는다 — 로그아웃은 여전히 사실이고 로그인은 완료되지 않았다.
+                        if rg_verdict != _PROBE_AUTH:
+                            rg_verdict = _PROBE_UNKNOWN
     if res is None:
         log.error("제한 시간 내 로그인 감지 실패 — 다시 시도하세요.")
         return RC_LOGIN_REQUIRED   # ★로그인 자체가 안 된 경우만 '로그인 필요'(codex 1R[P2])
     log.info("로그인 감지·세션 저장 완료: %s%s", state,
-             " (RG 정산 데스크톱 세션도 확인됨)" if (probe_rg and rg_ok) else "")
+             " (RG 정산 데스크톱 세션도 확인됨)" if (probe_rg and rg_verdict == _PROBE_OK) else "")
+    if probe_rg and rg_verdict == _PROBE_UNKNOWN:
+        # ★"확인됨"도 "만료"도 아니다 — 둘 다 주장하지 않는 게 이 분기의 전부다.
+        #   0을 돌려주는 근거: 로그인을 요구할 근거(AUTH)가 없고, 정말 죽었다면 `rg` 진입
+        #   프로브가 AUTH로 잡아 창을 띄운다. 여기서 rc=5를 내면 멀쩡한 세션에 대고
+        #   사람에게 헛로그인을 시킨다(2026-08-03 실측된 오보 계열).
+        log.warning("RG(정산) 세션 판정 불가 — 로그아웃 확증이 아니므로 로그인을 요구하지 "
+                    "않는다('rg' 실행 시 진입 프로브가 다시 판정한다).")
     # 로그인은 됐는데 push가 실패한 경우는 재시도 대상 — login_required로 보고하면
     # 멀쩡한 세션을 두고 요청이 소멸한다(거짓 로그인 문제).
     summ = _summarize(res.get("body") or "")
@@ -878,12 +898,13 @@ def cmd_login(cfg: dict, wait_secs: int = 600, rg_probe: bool = True) -> int:
         if rc != 0:
             # push 실패가 우선이다 — VS 레인이 실제로 실패했고 재시도 대상이다.
             # RG 미확보는 그 위에 얹힌 부가 상태이므로 로그로만 남긴다.
-            if not rg_ok:
+            if rg_verdict == _PROBE_AUTH:
                 log.error("(추가) RG(정산) 데스크톱 로그인도 미완 — push 재시도 성공 후 'rg' 전에 로그인 필요.")
             return rc
-    if not rg_ok:
+    if rg_verdict == _PROBE_AUTH:
         # VS는 전부 성공(로그인·파싱·push)했지만 정산 데스크톱 세션만 못 잡았다. 0을 돌려주면
         # 그 침묵이 그대로 'rg' fail-fast로 이어진다(이 프로브가 존재하는 이유).
+        # ★rc=5는 **AUTH(로그아웃 확증)일 때만**이다 — 판정 불가는 위에서 0으로 빠진다.
         log.error("판매분석(VS) 로그인·push 완료 — RG(정산) 데스크톱 로그인 미완(창은 열어 둠, "
                   "'login' 재실행 또는 창에서 로그인 후 'rg' 실행).")
         return RC_RG_LOGIN_REQUIRED
@@ -1877,12 +1898,15 @@ def _rg_session_probe(page) -> tuple[str, str]:
 
 
 def _rg_session_ok(page) -> bool:
-    """정산 status/api가 정상 JSON(settlementStatusReports 키)을 주면 로그인 상태.
+    """프로브가 OK를 확증했는가 — **로그인 대기 루프 전용**.
 
     ★호스트 무관(location.origin same-origin). vendor-summary(m-wing) 감지로 정산 세션을 판단하면
-    틀리므로(셀프리뷰 A), 정산 자체의 status/api로 직접 판정한다. 빈 cfg 기본값으로 호출 가능.
-    ★진입·로그인 대기 경로 전용(보수적: 판정 불가도 False). 층2 루프는 판정 불가를 만료로
-      승격하면 안 되므로 _rg_session_verdict_confirmed를 쓴다.
+    틀리므로(셀프리뷰 A), 정산 오리진에서 직접 판정한다. 빈 cfg 기본값으로 호출 가능.
+    ★여기서만 보수적(판정 불가도 False)인 게 맞는 이유: 유일한 호출부 _rg_login_wait은 "로그인이
+      **됐는가**"를 폴링하는 루프다. UNKNOWN에서 True를 주면 로그인 안 된 세션에 마커를 저장하고
+      빠져나온다 — 즉 여기서 False는 '만료 선언'이 아니라 '아직 확증 못 했으니 더 기다린다'다.
+      반면 만료를 **선언**하는 경로(진입·층2 루프·cmd_login 프로브)는 판정 불가를 로그아웃으로
+      승격하면 안 되므로 전부 _rg_session_probe / _rg_session_verdict_confirmed를 쓴다.
     """
     verdict, why = _rg_session_probe(page)
     if verdict != _PROBE_OK:
@@ -1919,24 +1943,6 @@ def _rg_session_verdict_confirmed(page, *, delay_s: float = 5.0) -> str:
     else:
         log.warning("RG 세션 프로브 재확인도 %s — %s", verdict2, why2)
     return verdict2
-
-
-def _rg_session_ok_confirmed(page, *, delay_s: float = 5.0) -> bool:
-    """(구 API — 하위호환) 판정 불가까지 False로 접는다. 신규 호출부는 verdict 쪽을 쓸 것.
-
-    ★왜(적대적 리뷰 R1 [P2-2]): _rg_session_ok는 로그아웃뿐 아니라 비200·깨진 JSON·evaluate 예외
-      까지 전부 False로 접는다(진입 경로 주석이 스스로 인정한 사실, codex 5R[P1]). 루프 도중의
-      False를 곧장 RC_LOGIN_REQUIRED(요청 소멸·재시도 제외)로 승격하면, 300초 폴링 직후의 blip
-      한 번이 남은 결손 충전을 통째로 취소하고 사용자에게 "로그인 필요"를 오보한다 — 다운로드
-      실패(rc=1·재시도 가능)보다 세션 프로브 blip이 더 치명이 되는 역전이다.
-    ★lease 계약과 충돌하지 않는다: 계약은 (버튼1회=재시도 3회 / login_required는 재시도 제외 /
-      TTL 20분)만 규정하고 '무엇을 login_required로 분류할지'는 규정하지 않는다. 비용은 회차당
-      최대 ~5초로, 진입 경로가 같은 TTL 안에서 쓰는 로그인 대기(_LOGIN_WAIT_S)보다 훨씬 작다.
-    """
-    if _rg_session_ok(page):
-        return True
-    time.sleep(delay_s)
-    return _rg_session_ok(page)
 
 
 def _rg_login_wait(page, ctx, state: str, secs: int, *, cdp: bool = False) -> bool:
