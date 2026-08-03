@@ -829,6 +829,105 @@ export function fetchReplenishmentPlan(company = "ALL", targetDays = 7): Promise
   );
 }
 
+// ── 쿠팡 RG 청구액 감사 (S8, D-17) — 읽기 전용 스크리닝 화면용 ───────
+// ★프론트는 charged_*(전 주기 청구총액)를 order_count로 다시 나누지 않는다.
+//   단가는 백엔드가 낸 per_unit_delivery/per_unit_warehousing을 그대로 쓴다
+//   (그 나눗셈이 2026-08-03에 규명된 오탐 4건의 원인이었다 — rg_fee_audit.py 상단 주석).
+
+export interface RgFeeAuditPeriodDetail {
+  date_from: string;
+  date_to: string;
+  delivery: number | null;
+  warehousing: number | null;
+  order_count: number;
+  quantity: number;
+  judged: boolean;
+  per_unit_delivery: number | null;
+  per_unit_warehousing: number | null;
+  implied_size_delivery: string | null;
+  flags: string[];
+}
+
+export interface RgFeeAuditFloor {
+  delivery?: number | null;
+  warehousing?: number | null;
+}
+
+export interface RgFeeAuditItem {
+  vendor_item_id: string;
+  product_name: string | null;
+  item_name: string;
+  width_mm: number | null;
+  length_mm: number | null;
+  height_mm: number | null;
+  weight_g: number | null;
+  // 전 주기 청구총액(분자 아님 — judged_*가 단가의 분자).
+  charged_delivery: number | null;
+  charged_warehousing: number | null;
+  // 판정에 실제로 쓰인 금액 합(단가의 분자).
+  judged_delivery: number | null;
+  judged_warehousing: number | null;
+  size_type: string | null;
+  size_source: "settlement_billed" | "coupang_measured" | "registered_dims" | null;
+  billed_size_type: string | null;
+  measured_size_type: string | null;
+  divisor_source: string | null; // "settlement" | "order_table" | "order_table+settlement"
+  billed_vs_measured_size_diff: boolean;
+  per_unit_delivery: number | null;
+  per_unit_warehousing: number | null;
+  floor: RgFeeAuditFloor | null;
+  implied_size_delivery: string | null;
+  quantity: number | null;
+  order_count: number | null;
+  periods_total: number;
+  periods_judged: number;
+  periods_unmatched: number;
+  periods_flagged: number;
+  period_detail: RgFeeAuditPeriodDetail[];
+  flags: string[];
+}
+
+export interface RgFeeAuditSummary {
+  total_options: number;
+  flagged: number;
+  size_mismatch_high: number;
+  billed_size_vs_amount_mismatch: number;
+  measured_vs_billed_mismatch: number;
+  billed_vs_measured_size_diff: number;
+  divisor_from_settlement: number;
+  below_floor: number;
+  missing_dims: number;
+  unit_unknown: number;
+  oversize: number;
+  coverage_partial: number;
+  coverage_none: number;
+  clean_but_period_outlier: number;
+}
+
+export interface RgFeeAudit {
+  generated_at: string;
+  account_key: string | null;
+  date_from: string | null;
+  date_to: string | null;
+  summary: RgFeeAuditSummary;
+  items: RgFeeAuditItem[];
+  disclaimer: string;
+}
+
+export function fetchRgFeeAudit(
+  company = "ALL",
+  dateFrom?: string | null,
+  dateTo?: string | null,
+): Promise<RgFeeAudit> {
+  // company가 ALL/전체면 account_key 미지정(전체 계정) — replenishment-plan과 동일 관례.
+  const params = new URLSearchParams();
+  if (company && company !== "ALL" && company !== "전체") params.set("company", company);
+  if (dateFrom) params.set("date_from", dateFrom);
+  if (dateTo) params.set("date_to", dateTo);
+  const qs = params.toString();
+  return fetchApi<RgFeeAudit>(`/api/coupang/ops/rg/fee-audit${qs ? `?${qs}` : ""}`);
+}
+
 // ── 쿠팡 운영 패널 — 상품 목록·쓰기 ─────────────────────────────
 
 export interface ProductItem {

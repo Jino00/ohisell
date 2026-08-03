@@ -1358,6 +1358,16 @@ class CoupangRgSettlementFee(Base):
     vendor_item_id: Mapped[str] = mapped_column(String(30), nullable=False, server_default="", default="", index=True)
     raw_type: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    # ★S9(2026-08-03) 정산서가 직접 알려주는 청구 근거 — 추론 대체용. 옵션 row(엑셀)만 채워지고
+    #   계정 row(status/api)·구 행은 NULL이다(그래서 nullable, 감사는 NULL이면 종전 경로로 폴백).
+    #   왜 필요한가: 감사가 "청구 사이즈"와 "청구 주문수"를 **추론**했고 둘 다 오탐의 원인이었다.
+    #   주문수는 `coupang_rg_order_item`(결제일 basis)을 매출인식일 정산주기에 맞춰 세다가
+    #   창 불일치로 단가를 정수배 부풀렸고(오탐 4건, LESSONS #106), 사이즈는 금액 임계로 역추정했다.
+    #   정산 엑셀 상세에는 **주문ID·판매수량·개별포장사이즈**가 그대로 있다(ref 17 §8-1) →
+    #   같은 파일·같은 basis에서 읽으면 조인도 추론도 없다.
+    billed_size_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    billed_order_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    billed_quantity: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     synced_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
     )
