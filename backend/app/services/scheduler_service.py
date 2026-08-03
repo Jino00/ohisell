@@ -1392,7 +1392,13 @@ def cafe24_proactive_refresh_job():
 
 
 def sync_naver_settlement_job():
-    """네이버 일별 정산 내역 자동 적재 (트랙 N1, 05:25 KST). 최근 35일."""
+    """네이버 일별 정산 내역 자동 적재 (트랙 N1, 05:25 KST). 최근 31일.
+
+    ★창이 31일인 이유: 네이버 daily API의 조회 구간 상한이 **32일**이다(라이브 실측
+      2026-08-03, 공식 문서엔 미명시). 종전 `days=34`(35일 구간)는 **매 호출 400**을 받았고,
+      클라이언트가 그걸 빈 결과로 삼켜 "0건 적재 완료"를 남겼다 — 스케줄러는 ok로 기록하고
+      daily 테이블은 07-27에서 멈춰 있었다. 상한 32일에 여유 1일을 둬 31일 구간으로 고정한다.
+      (클라이언트가 이제 구간 초과·요청 실패를 예외로 올리므로 다시 조용히 비지 않는다.)"""
     db = _get_own_db_session()
     try:
         from app.config import get_naver_config
@@ -1404,7 +1410,7 @@ def sync_naver_settlement_job():
             log.error("[스케줄러] 네이버 설정 없음 — 정산 동기화 건너뜀")
             return
         dto = kst_today()
-        dfrom = dto - timedelta(days=34)
+        dfrom = dto - timedelta(days=30)   # 31일 구간 (API 상한 32일)
         rows = NaverClient(cfg).fetch_daily_settlement(dfrom, dto)
         n = _upsert_settlement(db, rows)
         log.info("[스케줄러] 네이버 일별 정산 %d건 적재 완료 (%s~%s)", n, dfrom, dto)
@@ -1522,6 +1528,14 @@ def _ensure_default_states(db):
 # 성공해야 하류를 잇는다. keyword_hourly sweep은 다른 잡에 의존하지 않지만(자체 완결) 09:10
 # 표준 cron이라 같은 catch-up 목록에 포함(D-NAO-46②) — 순서상 맨 뒤(가장 늦은 cron).
 _CATCHUP_ORDER: tuple[str, ...] = (
+    # ★정산 2개가 맨 앞(2026-08-03 추가): cron이 05:25/05:30으로 이 목록에서 가장 이르고,
+    #   BEP(07:30)·이익 회계가 정산 실측을 입력으로 쓰므로 하류보다 먼저 복구돼야 한다.
+    #   라이브 사고: 08-03 03:45 KST 백엔드 재시작 → 05:25/05:30 발화 유실 → 두 잡이 이 목록에
+    #   없어 다음날 05:25까지 영영 안 돌았다(SETTLED 129건 미수집). misfire_grace_time은
+    #   프로세스 재시작을 못 잡는다(위 주석) — 목록 편입이 유일한 복구 경로다.
+    #   둘 다 상류 의존이 없고 upsert라 재실행이 안전하며, 실패해도 하류 체인을 끊지 않는다.
+    "sync_naver_settlement",       # 05:25
+    "sync_naver_case_settlement",  # 05:30
     "shopping_ad_product_sync",    # 07:45 (D-NAO-57 A, 리뷰 P2-2 — BEP(07:30, catch-up 밖) 뒤·proposals 앞: 그날 제안이 최신 매핑 target을 쓰게. fail-open이라 실패해도 체인 안 끊김)
     "run_naver_forecast_engine",   # 07:50
     "generate_naver_proposals",    # 08:00
@@ -1642,6 +1656,10 @@ def _catch_up_morning_batch():
         return
 
     funcs = {
+        # 정산 2개(05:25/05:30) — _CATCHUP_ORDER 맨 앞과 짝. 여기 빠지면 아래 funcs.get()이
+        # None을 돌려주고 조용히 스킵된다(목록에만 넣고 끝내면 복구가 안 된다).
+        "sync_naver_settlement": sync_naver_settlement_job,
+        "sync_naver_case_settlement": sync_naver_case_settlement_job,
         "run_naver_forecast_engine": run_naver_forecast_engine_job,
         # proposals는 완주 검증판 사용(codex R3 P1-a): stage_status로 실제 생성 확인,
         # 미완주면 예외 → 체인 중단(expert가 pending 0으로 오실행되는 것 원천 차단).
@@ -1668,6 +1686,9 @@ def _catch_up_morning_batch():
         for job_name in missed:  # 이미 cron(의존) 순서
             func = funcs.get(job_name)
             if func is None:
+                # ★조용한 스킵 금지: _CATCHUP_ORDER에 이름만 추가하고 funcs 등록을 빠뜨리면
+                #   복구가 안 되는데 아무 흔적도 안 남는다(2026-08-03 정산 잡 편입 시 경계).
+                log.error("[스케줄러] catch-up 함수 미등록: %s — funcs에 추가 필요", job_name)
                 continue
             try:
                 log.warning("[스케줄러] catch-up 순차 실행: %s", job_name)

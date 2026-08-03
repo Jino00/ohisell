@@ -25,6 +25,10 @@ RETRY_BASE_DELAY = 2
 class NaverClient(BaseChannelClient):
     """네이버 커머스 API 클라이언트 (OAuth2 + bcrypt 전자서명)"""
 
+    # 일별 정산 조회 구간 상한(일, 시작·종료일 포함). 라이브 실측 2026-08-03:
+    # 32일 구간 OK / 33일 구간부터 400. 공식 문서에 제한 명시가 없어 실측이 유일 근거다.
+    SETTLE_DAILY_MAX_SPAN_DAYS = 32
+
     def __init__(self, config: NaverAccountConfig, access_token: str | None = None):
         self.client_id = config.client_id
         self.client_secret = config.client_secret
@@ -278,7 +282,21 @@ class NaverClient(BaseChannelClient):
 
         Returns 정규화 dict 목록 (정산예정일·정산금액·수수료(음수)·혜택·지급보류 등).
         네이버 응답 amount는 부호 그대로 보존(수수료/혜택은 음수).
+
+        ★조회 구간 상한 = **32일**(라이브 실측 2026-08-03: `days=31`(32일 구간) OK /
+          `days=32`(33일 구간)부터 400. 공식 문서엔 제한이 명시돼 있지 않아 실측이 유일 근거).
+          호출부가 넘기면 여기서 즉시 죽인다 — 400을 받아 조용히 0건을 돌려주면 "성공 0건"으로
+          기록돼 **아무도 모르는 채 정산 데이터가 계속 비는** 사고가 된다(라이브 실사고:
+          `days=34`가 배선돼 있어 이 잡이 계속 400 → daily 테이블이 07-27에서 멈춰 있었다).
+        ★요청 실패(_request가 None)도 예외로 표면화한다. 종전엔 `break`로 삼켜 빈 리스트를
+          돌려줬고, 잡은 그걸 정상으로 보고 last_status='ok'를 남겼다(green-while-stale).
         """
+        span = (date_to - date_from).days + 1
+        if span > self.SETTLE_DAILY_MAX_SPAN_DAYS:
+            raise ValueError(
+                f"일별 정산 조회 구간 {span}일 > 상한 {self.SETTLE_DAILY_MAX_SPAN_DAYS}일 "
+                f"({date_from}~{date_to}) — 네이버가 400을 낸다. 호출부 창을 줄일 것."
+            )
         path = "/v1/pay-settle/settle/daily"
         results: list[dict] = []
         page = 1
@@ -290,6 +308,11 @@ class NaverClient(BaseChannelClient):
                 "pageSize": 1000,
             }
             data = self._request("GET", path, params)
+            if data is None:
+                raise RuntimeError(
+                    f"일별 정산 조회 실패({date_from}~{date_to}, page={page}) — "
+                    "빈 결과로 삼키지 않고 실패로 표면화한다."
+                )
             if not data:
                 break
             elements = data.get("elements", []) if isinstance(data, dict) else []
@@ -336,6 +359,13 @@ class NaverClient(BaseChannelClient):
                     "pageSize": 1000,
                 }
                 data = self._request("GET", path, params)
+                if data is None:
+                    # ★조용한 유실 금지: 하루가 통째로 빠져도 종전엔 break로 삼켜
+                    #   "성공"으로 기록됐다. 실패로 올려 다음 실행이 재시도하게 한다(upsert라 안전).
+                    raise RuntimeError(
+                        f"건별 정산 조회 실패(결제일 {current}, page={page}) — "
+                        "빈 결과로 삼키지 않고 실패로 표면화한다."
+                    )
                 if not data:
                     break
                 elements = data.get("elements", []) if isinstance(data, dict) else []
