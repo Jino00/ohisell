@@ -211,25 +211,92 @@ def test_rg_upload_heartbeat_alone_keeps_request(client):
     assert rg_settlement_sync.rg_claim_refresh(seed)["claimed"] is True
 
 
+_RG_COMPLETE = "/api/coupang/ops/wing/rg-settlement/refresh-complete"
+
+
 def test_rg_refresh_complete_extinguishes_request(client):
     """RG run이 '받을 게 없어' 업로드 0건으로 정상 완주한 회차 — 요청은 여기서 소멸해야 한다.
 
     ★없으면: 성공 heartbeat(upload-xlsx)가 안 찍혀 요청이 남고, 창을 3번 더 띄운 뒤
     "재시도 3회 소진"이라는 거짓 실패로 끝난다.
     ★last_success_at(데이터 신선도 시계)은 건드리지 않는다 — 받은 게 없으니 데이터는 그대로.
+    ★lease는 필수다(2026-08-03) — 아래 test_rg_refresh_complete_requires_lease 참조.
     """
     c, seed = client
-    url = "/api/coupang/ops/wing/rg-settlement/refresh-complete"
     rg_settlement_sync.rg_request_refresh(seed)
-    rg_settlement_sync.rg_claim_refresh(seed)
+    lease = rg_settlement_sync.rg_claim_refresh(seed)["lease"]
 
-    assert c.post(url).status_code == 401                      # 토큰 필요(형제와 동일 규칙)
-    assert c.post(url, headers={"X-Ingest-Token": _TOKEN}).status_code == 200
+    assert c.post(_RG_COMPLETE).status_code == 401              # 토큰 필요(형제와 동일 규칙)
+    assert c.post(_RG_COMPLETE, json={"lease": lease},
+                  headers={"X-Ingest-Token": _TOKEN}).status_code == 200
 
     seed.expire_all()
     row = _row(seed, rg_settlement_sync._RG_STATE_ACCOUNT)
     assert row.refresh_requested_at is None
     assert row.last_success_at is None                          # 신선도 시계는 불변
+
+
+def test_rg_refresh_complete_requires_lease(client):
+    """★2026-08-03 codex 3R[P1]: lease 없는 완료 신호는 남의 요청을 지운다 — 거부해야 한다.
+
+    재현(인터리빙): run A가 완료 POST를 지연시킨 채 끝나고 → 사용자가 다시 눌러 요청 B가
+    생기고 → 늦은 A의 POST가 도착한다. lease가 없으면 '지금 유효한 임대'를 대조할 수단이
+    없어 무조건 B의 요청을 지운다. 그러면 프론트(streamRefresh.ts의 `!requested → done`)가
+    **시작도 안 한 B를 '완료'로 오보**한다.
+    ★lease를 붙였는데 옛 임대인 경우(=stale)는 기존 가드가 이미 접는다 — 여기선 200 no-op.
+    """
+    c, seed = client
+    acc = rg_settlement_sync._RG_STATE_ACCOUNT
+
+    # ── run A: 임대까지 받은 뒤 요청이 소멸한 상태(reaper 또는 자기 완료로 이미 닫힘) ──
+    rg_settlement_sync.rg_request_refresh(seed)
+    lease_a = rg_settlement_sync.rg_claim_refresh(seed)["lease"]
+    assert lease_a is not None
+    row = _row(seed, acc)
+    row.refresh_requested_at = None      # A의 요청은 이미 사라졌다
+    row.claimed_at = None
+    row.attempt_count = 0
+    seed.commit()
+
+    # ── 사용자가 다시 누름 → 요청 B 생성 + 데몬이 B를 임대 ──
+    rg_settlement_sync.rg_request_refresh(seed)
+    lease_b = rg_settlement_sync.rg_claim_refresh(seed)["lease"]
+    assert lease_b is not None and lease_b != lease_a
+    requested_b = _row(seed, acc).refresh_requested_at
+
+    # ── 늦은 A의 완료 POST ──
+    r = c.post(_RG_COMPLETE, headers={"X-Ingest-Token": _TOKEN})       # lease 없음
+    assert r.status_code == 400                                        # 계약 위반 = 거부
+    seed.expire_all()
+    assert _row(seed, acc).refresh_requested_at == requested_b         # ★B의 요청 생존
+
+    r = c.post(_RG_COMPLETE, json={"lease": lease_a},
+               headers={"X-Ingest-Token": _TOKEN})                     # 옛 임대 = stale
+    assert r.status_code == 200 and r.json()["ok"] is False
+    seed.expire_all()
+    assert _row(seed, acc).refresh_requested_at == requested_b         # ★여전히 생존
+
+    # ── B 자신의 완료만이 B를 닫는다 ──
+    assert c.post(_RG_COMPLETE, json={"lease": lease_b},
+                  headers={"X-Ingest-Token": _TOKEN}).json()["ok"] is True
+    seed.expire_all()
+    assert _row(seed, acc).refresh_requested_at is None
+
+
+@pytest.mark.parametrize("_, acc, request_fn, claim_fn, status_fn, error_fn, success_fn, url",
+                         STREAMS, ids=IDS)
+def test_claim_always_returns_lease(db, _, acc, request_fn, claim_fn, status_fn,
+                                    error_fn, success_fn, url):
+    """claimed=true면 lease도 반드시 온다 — 페처가 완료·실패 보고에 붙일 유일한 식별자다.
+
+    ★없으면 무슨 일이 나나: 페처는 lease 없이 완료를 부르고 → 라우터가 400으로 거부하고 →
+    요청이 임대된 채 TTL 20분을 묵히다 재시도되어 끝내 '재시도 3회 소진'이라는 거짓 실패로
+    끝난다. 즉 lease 필수화의 안전성은 이 성질에 걸려 있다.
+    """
+    request_fn(db)
+    claimed = claim_fn(db)
+    assert claimed["claimed"] is True
+    assert claimed["lease"] == _row(db, acc).claimed_at.isoformat()
 
 
 @pytest.mark.parametrize("_, acc, request_fn, claim_fn, status_fn, error_fn, success_fn, url",

@@ -1102,13 +1102,20 @@ def _prod_report_failure(cfg: dict, path: str, error: str, kind: str | None = No
     if lease:
         body["lease"] = lease   # 내 임대에 대해서만 보고(stale 보고 차단, codex 1R[P1])
     try:
-        requests.post(
+        r = requests.post(
             cfg["prod_base_url"].rstrip("/") + path,
             params={"account_key": cfg["account_key"]},
             json=body,
             headers={"X-Ingest-Token": cfg["ingest_token"]},
             timeout=10,
         )
+        # ★비200을 침묵시키지 않는다(codex 1R[P2], 2026-08-03): 이 POST가 실패의 **유일한**
+        #   흔적(last_error_at)을 만든다. 401(토큰 만료)·422·500이어도 조용히 끝나면 화면은
+        #   "아직 진행 중"으로 보이다가 폴링 창을 헛기다린 뒤 뭉뚱그린 문구를 낸다 — 이
+        #   엔드포인트가 막으려고 만들어진 바로 그 상태로 되돌아간다.
+        if r.status_code != 200:
+            log.warning("fetch-error 보고 비200(%s) — 실패 흔적이 prod에 안 남는다: %s",
+                        r.status_code, r.text[:120])
     except Exception as e:  # noqa: BLE001
         log.warning("fetch-error 보고 실패(무시): %s", str(e)[:120])
 
