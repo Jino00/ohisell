@@ -139,9 +139,12 @@ def test_rate_is_order_management_rate():
 
 
 def test_nbaesong_shipping_is_net_negative_but_better_than_free_shipping():
-    """N배송 배송 손익 = 수취 3,000 − 수수료 81 − 품고 지불 3,020(Jino 확인) = −101원/건.
-    일반 무료배송(−1,900원/건)보다 1,799원 유리하다 — 이 부등호가 뒤집히면 회귀다."""
-    nb_net = D("3000") - _delivery_commission(NAVER, D("3000")) - D("3020")
+    """N배송 배송 손익 = 수취 3,000 − 수수료 81 − 품고 지불 3,245 = **−326원/건**.
+
+    ★3,020 → 3,245 정정(2026-08-03, 품고 요율표 2: 배송비 극소형 2,050 + 출고 작업비 900,
+      VAT 포함). 그래도 일반 무료배송(−1,900원/건)보다 1,574원 유리하다 —
+      **이 부등호가 뒤집히면 회귀다**(N배송 전환의 근거 자체가 사라진다)."""
+    nb_net = D("3000") - _delivery_commission(NAVER, D("3000")) - D("3245")
     normal_net = D("0") - D("0") - D("1900")
-    assert nb_net == D("-101")
+    assert nb_net == D("-326")
     assert nb_net > normal_net

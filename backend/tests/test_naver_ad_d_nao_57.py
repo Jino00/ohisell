@@ -308,7 +308,7 @@ def test_ad_commission_rate_none_when_implausible(db):
 # ══════════════════════════════════════════════════════════════════
 def test_shipping_config_constants():
     assert bep_calculator.SHIPPING_COST_NORMAL == Decimal("1900")
-    assert bep_calculator.SHIPPING_COST_NBAESONG == Decimal("3020")
+    assert bep_calculator.SHIPPING_COST_NBAESONG == Decimal("3245")
     # order_row 없음 → 일반배송 폴백(fail-safe)
     assert bep_calculator._order_shipping_cost(None) == Decimal("1900")
 
@@ -330,7 +330,7 @@ def test_order_shipping_cost_nbaesong_when_arrival_guarantee():
     # D-NAO-84 실측: productOrder.deliveryAttributeType == "ARRIVAL_GUARANTEE" → N배송 3,020
     row = {"raw_data": _entry_raw("ARRIVAL_GUARANTEE", extra_po={
         "logisticsCompanyId": "PG", "deliveryTagType": "TOMORROW"})}
-    assert bep_calculator._order_shipping_cost(row) == Decimal("3020")
+    assert bep_calculator._order_shipping_cost(row) == Decimal("3245")
 
 
 def test_order_shipping_cost_normal_when_today():
@@ -349,7 +349,7 @@ def test_order_shipping_cost_fallbacks_to_normal():
     # dict 형태 raw_data(직접 dict 저장 경로)도 지원
     assert bep_calculator._order_shipping_cost(
         {"raw_data": {"productOrder": {"deliveryAttributeType": "ARRIVAL_GUARANTEE"}}}
-    ) == Decimal("3020")
+    ) == Decimal("3245")
 
 
 def test_avg_logistics_nbaesong_used_in_computation(db):
@@ -358,13 +358,13 @@ def test_avg_logistics_nbaesong_used_in_computation(db):
                  raw_data=_entry_raw("ARRIVAL_GUARANTEE"), order_date=date(2026, 7, 1), order_number="o1"))
     db.commit()
     out = bep_calculator._avg_qty_and_logistics(db)
-    assert out["p1"]["shipping"] == Decimal("3020")
-    assert out["p1"]["net_ship"] == Decimal("3020")
-    assert out["p1"]["logistics"] == Decimal("3020.00")
+    assert out["p1"]["shipping"] == Decimal("3245")
+    assert out["p1"]["net_ship"] == Decimal("3245")
+    assert out["p1"]["logistics"] == Decimal("3245.00")
 
 
 def test_avg_logistics_mixed_shipping_weighted_average(db):
-    # 혼재: N배송 1건(3,020) + 일반 1건(TODAY, 1,900) → 지불 평균 (3020+1900)/2 = 2,460
+    # 혼재: N배송 1건(3,020) + 일반 1건(TODAY, 1,900) → 지불 평균 (3245+1900)/2 = 2,572.5
     db.add(Order(channel_id=6, platform_product_id="p1", selling_price=Decimal("3000"), quantity=1,
                  raw_data=_entry_raw("ARRIVAL_GUARANTEE"), order_date=date(2026, 7, 1), order_number="o1"))
     db.add(Order(channel_id=6, platform_product_id="p1", selling_price=Decimal("3000"), quantity=1,
@@ -372,10 +372,10 @@ def test_avg_logistics_mixed_shipping_weighted_average(db):
     db.commit()
     out = bep_calculator._avg_qty_and_logistics(db)
     assert out["p1"]["avg_qty"] == Decimal("1")
-    assert out["p1"]["shipping"] == Decimal("2460")   # (3020+1900)/2
+    assert out["p1"]["shipping"] == Decimal("2572.5")   # (3245+1900)/2
     assert out["p1"]["collected"] == Decimal("0")
-    assert out["p1"]["net_ship"] == Decimal("2460")
-    assert out["p1"]["logistics"] == Decimal("2460.00")
+    assert out["p1"]["net_ship"] == Decimal("2572.5")
+    assert out["p1"]["logistics"] == Decimal("2572.50")
 
 
 def test_avg_qty_and_logistics_per_unit(db):

@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import date
+from datetime import date, datetime
+from datetime import time as dtime
 from decimal import ROUND_DOWN, Decimal
 
 from collections import defaultdict
@@ -307,6 +308,157 @@ def _delivery_income_map(orders: list, channel_map: dict) -> dict[tuple, Decimal
 NAVER_DELIVERY_COMMISSION_RATE = Decimal("0.02724")
 
 
+def _new_bucket(*, with_order_count: bool = True) -> dict:
+    """집계 버킷 템플릿. 주문 루프와 반품 손익 반영이 **같은 모양**을 쓰도록 한 곳에 모은다
+    (한쪽에만 키가 있으면 반품만 있는 날짜에서 KeyError로 죽는다)."""
+    b = {
+        "revenue": ZERO,
+        "product_revenue": ZERO,
+        "shipping_revenue": ZERO,
+        "cost": ZERO,
+        "commission": ZERO,
+        "shipping": ZERO,
+        "ad_spend": ZERO,
+        "vat": ZERO,
+    }
+    if with_order_count:
+        b["order_count"] = 0
+    return b
+
+
+def _return_shipping_pnl(
+    db: Session, channel_map: dict, date_from: date, date_to: date, channel_id: int | None = None
+) -> dict[int, dict[str, dict]]:
+    """반품 **완료일**별·채널별 배송 손익 → {channel_id: {date_str: {income, commission, cost}}}.
+
+    ★왜 필요한가: 반품 건은 REVENUE_EXCLUDED라 매출·원가·배송비가 **전부 0으로 빠진다**.
+      그런데 실제로는 출고비와 회수비가 나가고 반품비가 들어온다. 그래서 종전 대시보드는
+      **반품이 늘어도 이익이 반응하지 않았다** — 반품이 공짜인 것처럼 보였다.
+
+    ★귀속일 = return_completed_at(반품 완료일). 결제일이 아니다(Jino 지시 2026-08-03:
+      "과거 이익이 흔들리면 안 돼"). 결제일에 실으면 이미 마감해서 본 지난달 이익이 반품이
+      생길 때마다 뒤로 바뀐다. 그래서 이 함수만 order_date가 아닌 별도 축으로 조회한다.
+
+    ★수입은 정액이 아니라 건별 실측(return_fee_demand_amount). 라이브 86건 중 **22건이 미청구**
+      (일반 20 + N배송 2, 원천이 `미청구(N배송)`이라고 명시)라, 정액 5,000을 쓰면 그 22건이
+      통째로 틀린 수입이 되어 반품이 이익 나는 일처럼 보인다.
+
+    ★수입을 배송수입과 **똑같이** 다루는 이유(수수료·VAT 포함): 정산 원장이 둘을 구분하지
+      않는다 — 원 배송비도 반품비도 같은 productOrderType='DELIVERY' 행으로 같은 주문관리
+      수수료를 맞는다(라이브: 5,000→136 · 3,000→81, 2.724% 절사). 여기서만 다르게 처리하면
+      원천에 없는 세무 판단을 코드가 새로 만드는 셈이다.
+
+    비용 = 출고비(배송방식별 실단가) + 회수비(회수 택배사 단가). 배송(패키지)당 1회.
+    """
+    start = datetime.combine(date_from, dtime.min)
+    end = datetime.combine(date_to, dtime.max)
+    q = db.query(Order).filter(
+        Order.status == "returned",
+        Order.return_completed_at >= start,
+        Order.return_completed_at <= end,
+    )
+    if channel_id:
+        q = q.filter(Order.channel_id == channel_id)
+
+    out: dict[int, dict[str, dict]] = {}
+    seen: set[tuple] = set()   # 배송(패키지)당 1회 — 라인마다 복사된 값을 중복 계상하지 않는다
+    for o in q.all():
+        ch = channel_map.get(o.channel_id)
+        if ch and ch.channel_type == "consignment":
+            continue
+        skey = _shipment_key(ch, o)
+        if skey in seen:
+            continue
+        seen.add(skey)
+
+        d = str(o.return_completed_at)[:10]
+        income = Decimal(str(o.return_fee_demand_amount or 0))
+        # ★네이버 지원액만큼 회수비가 상쇄된다(2026-08-03 정정). N배송 반품은 고객 청구가 0인데
+        #   그건 우리 손실이 아니라 네이버가 5,500원을 부담하기 때문이다 — 지원 필드를 안 보면
+        #   정확히 반대로 읽힌다(처음에 그렇게 읽었다).
+        #   ★상한 = 회수비. 초과분(N배송 5,500 − 2,500 = 3,000)은 **수입으로 잡지 않는다** —
+        #     그 돈이 실제로 우리에게 지급되는지는 정산에서 아직 확인되지 않았다(D+12 미성숙).
+        #     프로브(naver_claim_settlement_probe)가 08-06·08-09에 잡으면 그때 재심한다.
+        pickup = order_delivery.return_pickup_cost(o.delivery_attribute_type)
+        support = min(Decimal(str(o.return_fee_support_amount or 0)), pickup)
+        cost = _shipment_cost(o) + pickup - support
+        bucket = out.setdefault(o.channel_id, {}).setdefault(
+            d, {"income": ZERO, "commission": ZERO, "cost": ZERO}
+        )
+        bucket["income"] += income
+        bucket["commission"] += _delivery_commission(ch, income)
+        bucket["cost"] += cost
+    return out
+
+
+def _return_shipping_pnl_by_product(
+    db: Session, channel_map: dict, date_from: date, date_to: date, channel_id: int | None = None
+) -> dict[int, dict]:
+    """반품 배송 손익을 **상품별**로 → {product_id: {income, commission, cost}}.
+
+    ★배분 규칙이 필요 없다(Jino 지적 2026-08-03): 라이브 반품 86패키지가 **전부 상품 1종**이다
+      (라인 87개). 반품 회수비는 그 반품이 발생한 건에 그대로 붙이면 된다.
+      2종 이상인 패키지가 생기면 상품매출 비례로 나눈다 — 광고비 배분과 같은 규칙이라
+      새 규칙을 만드는 게 아니고, 실측 0건이라 지금은 발동하지 않는다.
+    product_id가 없는 라인(미연결 상품)은 버린다 — 이 집계 자체가 상품 그레인이다.
+    """
+    start = datetime.combine(date_from, dtime.min)
+    end = datetime.combine(date_to, dtime.max)
+    q = db.query(Order).filter(
+        Order.status == "returned",
+        Order.return_completed_at >= start,
+        Order.return_completed_at <= end,
+        Order.product_id.isnot(None),
+    )
+    if channel_id:
+        q = q.filter(Order.channel_id == channel_id)
+
+    by_pkg: dict[tuple, list] = {}
+    for o in q.all():
+        ch = channel_map.get(o.channel_id)
+        if ch and ch.channel_type == "consignment":
+            continue
+        by_pkg.setdefault(_shipment_key(ch, o), []).append(o)
+
+    out: dict[int, dict] = {}
+    for lines in by_pkg.values():
+        head = lines[0]
+        ch = channel_map.get(head.channel_id)
+        income = Decimal(str(head.return_fee_demand_amount or 0))
+        pickup = order_delivery.return_pickup_cost(head.delivery_attribute_type)
+        support = min(Decimal(str(head.return_fee_support_amount or 0)), pickup)
+        cost = _shipment_cost(head) + pickup - support
+        commission = _delivery_commission(ch, income)
+
+        weights = {}
+        for o in lines:
+            weights[o.product_id] = weights.get(o.product_id, ZERO) + _line_revenue(ch, o)
+        total = sum(weights.values())
+        if total <= 0:   # 반품이라 매출이 0인 라인만 있으면 균등 배분
+            weights = {pid: Decimal(1) for pid in weights}
+            total = Decimal(len(weights))
+
+        for pid, w in weights.items():
+            share = w / total
+            b = out.setdefault(pid, {"income": ZERO, "commission": ZERO, "cost": ZERO})
+            b["income"] += income * share
+            b["commission"] += commission * share
+            b["cost"] += cost * share
+    return out
+
+
+def _apply_return_pnl(bucket: dict, pnl: dict) -> None:
+    """반품 배송 손익 1건분을 집계 버킷에 반영.
+
+    order_count는 **올리지 않는다** — 반품은 주문이 아니다(주문수가 부풀면 객단가가 틀어진다).
+    """
+    bucket["shipping_revenue"] += pnl["income"]
+    bucket["revenue"] += pnl["income"]
+    bucket["commission"] += pnl["commission"]
+    bucket["shipping"] += pnl["cost"]
+    bucket["vat"] += pnl["income"] * Decimal("10") / Decimal("110")
+
+
 def _delivery_commission(ch: Channel | None, deliv: Decimal) -> Decimal:
     """고객이 낸(=우리가 정산받는) 배송비에 붙는 주문관리 수수료.
 
@@ -544,7 +696,9 @@ def calculate_daily_trend(
 
     # 수동 매출이 있으면 주문이 없어도 계속 진행
     manual_lookup = get_daily_manual_revenue(db, date_from, date_to, channel_id)
-    if not orders and not manual_lookup:
+    # 반품 배송 손익 — 반품 완료일 귀속이라 order_date 창과 다른 축이다(별도 조회).
+    return_pnl = _return_shipping_pnl(db, channel_map, date_from, date_to, channel_id)
+    if not orders and not manual_lookup and not return_pnl:
         return []
 
     option_map = _get_option_id_map(db)
@@ -569,17 +723,7 @@ def calculate_daily_trend(
 
         d = str(o.order_date.date()) if hasattr(o.order_date, "date") else str(o.order_date)[:10]
         if d not in daily:
-            daily[d] = {
-                "revenue": ZERO,
-                "product_revenue": ZERO,
-                "shipping_revenue": ZERO,
-                "cost": ZERO,
-                "commission": ZERO,
-                "shipping": ZERO,
-                "ad_spend": ZERO,
-                "vat": ZERO,
-                "order_count": 0,
-            }
+            daily[d] = _new_bucket()
 
         bucket = daily[d]
         skey = _shipment_key(ch, o)
@@ -613,6 +757,14 @@ def calculate_daily_trend(
 
         # VAT — 표시 매출(상품+배송) 기준
         bucket["vat"] += revenue * Decimal("10") / Decimal("110")
+
+    # 반품 배송 손익 — 반품 완료일 버킷에 싣는다. 그날 주문이 하나도 없어도 버킷을 만든다
+    # (반품만 있는 날에 손실이 사라지면 안 된다).
+    for _cid, by_date in return_pnl.items():
+        for d, pnl in by_date.items():
+            if d not in daily:
+                daily[d] = _new_bucket()
+            _apply_return_pnl(daily[d], pnl)
 
     # 광고비 합산 (option_id 기반 — ad_data.db 연결 시 사용, 현재 비활성)
     for (oid, d_str), spend in ad_lookup.items():
@@ -694,7 +846,8 @@ def calculate_channel_summary(
     channel_map, product_map = _build_channel_maps(db)
     actual_fee = _coupang_3p_actual_fee(db, orders, channel_map)  # 쿠팡3P 실측수수료(D-A)
     manual_lookup_ch = get_daily_manual_revenue(db, date_from, date_to)
-    if not orders and not manual_lookup_ch:
+    return_pnl = _return_shipping_pnl(db, channel_map, date_from, date_to)
+    if not orders and not manual_lookup_ch and not return_pnl:
         return []
 
     option_map = _get_option_id_map(db)
@@ -716,11 +869,7 @@ def calculate_channel_summary(
 
         cid = o.channel_id
         if cid not in by_channel:
-            by_channel[cid] = {
-                "revenue": ZERO, "product_revenue": ZERO, "shipping_revenue": ZERO,
-                "cost": ZERO, "commission": ZERO,
-                "ad_spend": ZERO, "shipping": ZERO, "vat": ZERO, "order_count": 0,
-            }
+            by_channel[cid] = _new_bucket()
 
         b = by_channel[cid]
         skey = _shipment_key(ch, o)
@@ -751,6 +900,14 @@ def calculate_channel_summary(
             b["shipping"] += shipment_costs[skey]
         # VAT — 표시 매출(상품+배송) 기준
         b["vat"] += revenue * Decimal("10") / Decimal("110")
+
+    # 반품 배송 손익 — 반품 완료일이 이 기간에 든 건을 해당 채널에 싣는다.
+    # 그 채널에 이 기간 주문이 하나도 없어도 버킷을 만든다(반품 손실이 사라지면 안 된다).
+    for cid, by_date in return_pnl.items():
+        for pnl in by_date.values():
+            if cid not in by_channel:
+                by_channel[cid] = _new_bucket()
+            _apply_return_pnl(by_channel[cid], pnl)
 
     # 광고비를 option_id → 주문의 채널로 직접 매핑 (bleeding 방지)
     # 1) option_id별 광고비 합산
@@ -869,7 +1026,12 @@ def calculate_product_profit(
     sort_by: str = "revenue",
     limit: int = 20,
 ) -> list[dict]:
-    """상품별 이익률 Top N"""
+    """상품별 이익률 Top N.
+
+    ★반품 배송 손익도 포함한다(2026-08-03). 처음엔 "패키지 안 여러 상품에 어떻게 배분하나"를
+      이유로 뺐는데, 실측하니 **반품 86패키지가 전부 상품 1종**이라 배분할 것 자체가 없었다
+      (Jino 지적). 일별·채널별 집계와 합계가 어긋나지 않는다.
+    """
     query = db.query(Order).filter(
         and_(
             Order.order_date >= date_from.isoformat(),
@@ -881,10 +1043,12 @@ def calculate_product_profit(
         query = query.filter(Order.channel_id == channel_id)
 
     orders = query.all()
-    if not orders:
+    channel_map, product_map = _build_channel_maps(db)
+    # 반품 배송 손익(반품 완료일 귀속) — order_date 창과 다른 축이라 별도 조회.
+    return_pnl_prod = _return_shipping_pnl_by_product(db, channel_map, date_from, date_to, channel_id)
+    if not orders and not return_pnl_prod:
         return []
 
-    channel_map, product_map = _build_channel_maps(db)
     actual_fee = _coupang_3p_actual_fee(db, orders, channel_map)  # 쿠팡3P 실측수수료(D-A)
     all_option_ids = list(set(o.platform_product_id for o in orders if o.platform_product_id))
     ad_lookup = _get_ad_spend_lookup(ad_db, date_from, date_to, all_option_ids)
@@ -1051,6 +1215,15 @@ def calculate_product_profit(
                 for pid, prod_rev in naver_kw_day_products.get((kw, d), {}).items():
                     if pid in by_product:
                         by_product[pid]["ad_spend"] += spend * prod_rev / total
+
+    # 반품 배송 손익 — 그 상품에 그대로 붙인다(반품 패키지는 실측상 전부 상품 1종).
+    # 기간 내 판매가 0인 상품도 반품은 있을 수 있으므로 버킷을 새로 만든다.
+    for pid, pnl in return_pnl_prod.items():
+        if pid not in by_product:
+            b = _new_bucket(with_order_count=False)
+            b["quantity"] = 0
+            by_product[pid] = b
+        _apply_return_pnl(by_product[pid], pnl)
 
     result = []
     for pid, b in by_product.items():

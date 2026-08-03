@@ -278,6 +278,26 @@ class Order(Base):
     #   → 주문 시점 판정 단가를 행에 박아 둔다. 고객 수취액은 기존 shipping_cost(의미 불변).
     #   실부담 = shipping_cost_paid − COALESCE(shipping_cost,0) → 조회 시 계산(중복 저장 금지).
     shipping_cost_paid: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+    # ── 반품 배송 손익 (2026-08-03) ────────────────────────────────────────────
+    # 반품 건은 매출에서 제외되지만(REVENUE_EXCLUDED) **배송 손익은 실제로 발생한다** —
+    # 우리는 출고비와 회수비를 쓰고 고객에게 반품비를 받는다. 종전엔 셋 다 0으로 빠져
+    # 있어 반품이 늘어도 이익이 반응하지 않았다.
+    # ★귀속일을 결제일이 아니라 **반품 완료일**로 잡는 이유(Jino 지시 2026-08-03):
+    #   결제일에 실으면 이미 마감해서 본 지난달 이익이 반품이 생길 때마다 바뀐다.
+    # ★금액은 정액이 아니라 **건별 실측**(raw_data.return.claimDeliveryFeeDemandAmount).
+    #   라이브 86건 실측: 5,000원 58건 / 미청구 20건 / 2,500원 4건 / 7,500원 2건 /
+    #   N배송 2건은 원천이 명시적으로 `미청구(N배송)`. 정액을 쓰면 미청구 22건이 통째로 틀린다.
+    # NULL = 반품 정보 없음(반품 아님·raw_data 부재). 0 = 미청구(실측된 0).
+    return_completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+    return_fee_demand_amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+    # 회수 택배사 — 라이브 86건 전부 HANJIN(N배송 반품도 품고가 아니라 한진이다).
+    # 회수 단가가 택배사별로 갈리면 이 컬럼이 판별자가 된다.
+    return_collect_company: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    # ★네이버가 대신 부담하는 반품 배송비(claimDeliveryFeeSupportAmount). 라이브 실측:
+    #   N배송 반품 2건이 `MEMBERSHIP_ARRIVAL_GUARANTEE` 유형으로 **5,500원 지원**, 일반배송은 0.
+    #   N배송 반품에서 고객 청구가 0이었던 이유가 이것이다 — 안 받은 게 아니라 네이버가 낸다.
+    #   (2026-08-03 정정: 지원 필드를 안 보고 "고객 미청구=우리 손실"로 읽었다.)
+    return_fee_support_amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now()
     )
@@ -1342,7 +1362,7 @@ class CoupangRgSettlementFee(Base):
     #   계정 row(status/api)·구 행은 NULL이다(그래서 nullable, 감사는 NULL이면 종전 경로로 폴백).
     #   왜 필요한가: 감사가 "청구 사이즈"와 "청구 주문수"를 **추론**했고 둘 다 오탐의 원인이었다.
     #   주문수는 `coupang_rg_order_item`(결제일 basis)을 매출인식일 정산주기에 맞춰 세다가
-    #   창 불일치로 단가를 정수배 부풀렸고(오탐 4건, LESSONS #92), 사이즈는 금액 임계로 역추정했다.
+    #   창 불일치로 단가를 정수배 부풀렸고(오탐 4건, LESSONS #99), 사이즈는 금액 임계로 역추정했다.
     #   정산 엑셀 상세에는 **주문ID·판매수량·개별포장사이즈**가 그대로 있다(ref 17 §8-1) →
     #   같은 파일·같은 basis에서 읽으면 조인도 추론도 없다.
     billed_size_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)

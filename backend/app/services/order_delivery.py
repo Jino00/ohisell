@@ -18,23 +18,60 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
+
+_KST = timezone(timedelta(hours=9))
 
 # ── 배송방식 판별자 ──
 NBAESONG_ATTR = "ARRIVAL_GUARANTEE"  # 품고 내일도착/도착보장
 METHOD_NORMAL = "normal"
 METHOD_NBAESONG = "nbaesong"
 
-# ── D-NAO-57 (C) 우리가 지불하는 배송비: 건당 단가(부가세포함, Jino 확정 2026-07-18) ──
+# ── 우리가 지불하는 출고 배송비: 건당 단가(부가세포함) ──
 # ★단가는 상수(단가 개정 대비), 적용은 주문 건별 배송방식 판별 기반.
 #   개정 시 과거 주문 원가가 소급 왜곡되지 않도록 **주문 행에 스냅샷으로 박아** 둔다
 #   (orders.shipping_cost_paid) — 이 상수는 "지금 들어오는 주문"에만 적용된다.
-SHIPPING_COST_NORMAL = Decimal("1900")     # 일반배송 건당
-SHIPPING_COST_NBAESONG = Decimal("3020")   # N배송 건당 — D-NAO-84 실배선
+#
+# ★출처가 두 갈래다(2026-08-03 정리) — 배송 경로가 아예 다르기 때문이다:
+#   일반배송(TODAY/NORMAL) = **한진 직계약**(우리가 직접 계약, Jino 확정 2026-08-03)
+#   N배송(ARRIVAL_GUARANTEE) = **품고(두핸즈) 물류대행** → 품고 요율표가 정본
+#
+# ★N배송 3,020 → 3,245 정정(2026-08-03): 품고 표준물류대행계약서(2026-07-15 발효) 유첨 3
+#   「요율표 2 국내 배송 서비스」 실단가로 대조한 결과, 3,020은 어느 항목과도 맞지 않았다.
+#     B2C 배송비 극소형(삼변합 80cm·3kg 이하)  2,050
+#     B2C 출고 기본 작업비                       900
+#     소계 2,950 (VAT 별도) → **3,245 (VAT 포함)**
+#   부자재(품고 박스 A1 260 / A2 350)는 **실사용 기준 청구**라 여기 넣지 않는다 — 넣으면
+#   봉투 출고분까지 박스값을 물린다. 그만큼 이 상수는 여전히 하한이다.
+#   ⚠️보관로케이션 830원/일·출고로케이션 170원/일은 **건당이 아니라 일 단위 고정비**라
+#     이 축으로 계상할 수 없다. 지금 손익에서 통째로 빠져 있다(월 청구서 확보 시 별도 배선).
+SHIPPING_COST_NORMAL = Decimal("1900")     # 일반배송 건당 — 한진 직계약(Jino 확정)
+SHIPPING_COST_NBAESONG = Decimal("3245")   # N배송 건당 — 품고 요율표 2 (2,050+900)×1.1
 SHIPPING_COST_BY_METHOD = {
     METHOD_NORMAL: SHIPPING_COST_NORMAL,
     METHOD_NBAESONG: SHIPPING_COST_NBAESONG,
+}
+
+# ── 반품 회수비: 회수 1건당 우리 지불(부가세포함) ──
+# ★축을 회수 택배사 → **배송방식**으로 정정(2026-08-03). 라이브 반품 86건의
+#   collectDeliveryCompany가 전부 HANJIN이라 처음엔 회수사 축으로 잡았는데, **일반배송도
+#   N배송도 실제 회수 택배사가 한진**이라 그 축으로는 구분이 안 된다. 갈리는 것은 택배사가
+#   아니라 **계약 주체**다 — 일반배송은 우리 한진 직계약, N배송은 품고 요율표.
+#   ⚠️그래서 return_collect_company 컬럼은 계속 적재하되 **단가 판별에는 쓰지 않는다**(관측용).
+#
+# N배송: 품고 요율표 2 — 센터반품 배송비 = 국내 택배 배송비와 동일(극소형 2,050)
+#        + 반품 작업비 = B2C 출고 작업비와 동일(900) → 2,950 (VAT 별도) = 3,245 (VAT 포함).
+#        (요율표의 "지정반품 배송비 극소형 2,500"은 **우리가 지정한 주소로 보내는** 경우라
+#         우리 케이스가 아니다 — 숫자가 공교롭게 2,500이라 헷갈리기 쉽다.)
+# 일반배송: ⚠️여전히 **미확정 추정치**(Jino 2026-08-03: "아마 우리도 2500원을 지급할꺼야").
+#        한진 청구서를 받으면 이 한 줄만 고치면 된다.
+RETURN_PICKUP_COST_NORMAL = Decimal("2500")     # ⚠️추정 — 한진 청구서 미확보
+RETURN_PICKUP_COST_NBAESONG = Decimal("3245")   # 품고 요율표 2 (2,050+900)×1.1
+RETURN_PICKUP_COST_BY_METHOD = {
+    METHOD_NORMAL: RETURN_PICKUP_COST_NORMAL,
+    METHOD_NBAESONG: RETURN_PICKUP_COST_NBAESONG,
 }
 
 # 영속 컬럼명(모델·백필·동기화가 공유 — 오타로 갈라지는 것을 막는다)
@@ -44,6 +81,14 @@ DELIVERY_COLUMNS = (
     "shipping_fee_type",
     "logistics_company_id",
     "shipping_cost_paid",
+)
+
+# 반품 배송 손익용 영속 컬럼(같은 이유로 한 곳에 모음)
+RETURN_COLUMNS = (
+    "return_completed_at",
+    "return_fee_demand_amount",
+    "return_collect_company",
+    "return_fee_support_amount",
 )
 
 
@@ -115,6 +160,108 @@ def apply_delivery_fields(order, raw: Any) -> bool:
     for k, v in fields.items():
         setattr(order, k, v)
     return True
+
+
+def return_of(raw: Any) -> dict | None:
+    """raw_data → return dict(반품 클레임 정보). 반품 아님·네이버 아님·파싱 실패는 None.
+
+    ★`return` 키는 반품이 실제로 발생한 주문에만 붙는다(교환은 `exchange`). 여기서 None이면
+      반품 배송 손익 컬럼을 **NULL로 남긴다** — 0으로 채우면 "미청구(실측 0)"와 구분이 사라진다.
+    """
+    parsed = parse_raw_data(raw)
+    if not isinstance(parsed, dict):
+        return None
+    ret = parsed.get("return")
+    return ret if isinstance(ret, dict) else None
+
+
+def _kst_naive(value: Any) -> datetime | None:
+    """ISO8601(오프셋 포함) → **KST 벽시계 naive** datetime. 파싱 불가는 None.
+
+    ★naive KST로 떨어뜨리는 이유: orders.order_date가 이미 그 표현이다(라이브 실측
+      `2026-08-03 14:36:12.456000` — 오프셋 없이 KST 벽시계). 여기서만 aware로 저장하면
+      같은 테이블 안에서 두 시간 표현이 섞여 날짜 버킷이 9시간 어긋난다.
+    """
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str) and value:
+        try:
+            dt = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    else:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(_KST).replace(tzinfo=None)
+    return dt
+
+
+def _decimal_or_zero(v: Any) -> Decimal:
+    """금액 필드 → Decimal. 부재·이상값은 0(실측된 0과 같은 취급)."""
+    try:
+        return Decimal(str(v or 0))
+    except (ValueError, TypeError, ArithmeticError):
+        return Decimal(0)
+
+
+def return_fields(raw: Any) -> dict | None:
+    """raw_data → 반품 배송 손익용 영속 필드 dict. 반품 정보가 없으면 None(=컬럼 NULL 유지).
+
+    반환 키 = RETURN_COLUMNS.
+      return_completed_at       반품 완료일(귀속일) — 없으면 회수 완료일, 그것도 없으면 요청일.
+      return_fee_demand_amount  고객에게 실제 청구한 반품비(**건별 실측**). 필드 부재 = 0(미청구).
+      return_collect_company    회수 택배사(회수비 단가 판별자).
+      return_fee_support_amount 네이버가 대신 부담하는 반품 배송비(claimDeliveryFeeSupportAmount).
+
+    ★★지원액을 빼먹으면 안 되는 이유(2026-08-03 실제로 빼먹었다): N배송 반품 2건은 고객 청구가
+      0인데, 그건 우리가 손실을 떠안았다는 뜻이 **아니라** 네이버가 `MEMBERSHIP_ARRIVAL_GUARANTEE`
+      유형으로 5,500원을 지원하기 때문이다. 청구액만 보면 정확히 반대로 읽힌다.
+
+    ★귀속일 폴백 순서의 근거: 라이브 86건은 returnCompletedDate가 100% 있다. 폴백은 미래에
+      응답이 얇아졌을 때 **행을 통째로 잃지 않기 위한** 안전망이지, 평상시 경로가 아니다.
+    ★청구액이 없으면 0인 이유: 라이브 20건이 `claimDeliveryFeePayMethod` 자체가 비어 있는
+      **미청구** 건이다(우리가 회수비를 다 떠안은 반품). 여기서 정액을 넣으면 그 20건이
+      통째로 틀린 수입이 된다 — 반품이 이익 나는 일처럼 보이게 만드는 정확히 그 실패다.
+    """
+    ret = return_of(raw)
+    if ret is None:
+        return None
+    completed = (
+        _kst_naive(ret.get("returnCompletedDate"))
+        or _kst_naive(ret.get("collectCompletedDate"))
+        or _kst_naive(ret.get("claimRequestDate"))
+    )
+    if completed is None:
+        return None   # 귀속일이 없으면 어느 날에 실을지 정할 수 없다 → 추정하지 않는다
+    return {
+        "return_completed_at": completed,
+        "return_fee_demand_amount": _decimal_or_zero(ret.get("claimDeliveryFeeDemandAmount")),
+        "return_collect_company": _str_or_none(ret.get("collectDeliveryCompany")),
+        "return_fee_support_amount": _decimal_or_zero(ret.get("claimDeliveryFeeSupportAmount")),
+    }
+
+
+def apply_return_fields(order, raw: Any) -> bool:
+    """Order ORM 행에 반품 배송 손익 컬럼을 반영. 판별 가능했으면 True.
+
+    ★apply_delivery_fields와 같은 규칙 — 판별 불가면 **기존 값을 지우지 않는다**.
+      재동기화 응답이 일시적으로 얇아도 이미 확보한 실측을 잃지 않는다."""
+    fields = return_fields(raw)
+    if fields is None:
+        return False
+    for k, v in fields.items():
+        setattr(order, k, v)
+    return True
+
+
+def return_pickup_cost(delivery_attribute_type: Any = None) -> Decimal:
+    """반품 회수 1건에 우리가 지불하는 비용(부가세포함) — **배송방식** 축.
+
+    판별 불가는 일반배송으로 폴백한다(order_shipping_cost와 같은 fail-safe 방향).
+    0으로 두지 않는 이유: 회수비가 통째로 사라지면 수입만 계상돼 반품이 이익 나는 일처럼 보인다.
+    ⚠️일반배송 단가는 여전히 추정치다(RETURN_PICKUP_COST_NORMAL 주석 참조)."""
+    method = shipping_method_of(delivery_attribute_type)
+    return RETURN_PICKUP_COST_BY_METHOD.get(method, RETURN_PICKUP_COST_NORMAL)
 
 
 def order_shipping_cost(order_row: Any = None) -> Decimal:

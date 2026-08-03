@@ -1,7 +1,7 @@
 """add rg settlement billed columns (S9 — 청구 근거를 추론에서 정산서 실측으로)
 
 Revision ID: rg9billed7c4e
-Revises: f3c1d7e9a482
+Revises: b6e1c93f4275
 Create Date: 2026-08-03 00:00:00.000000
 
 coupang_rg_settlement_fee에 정산 엑셀이 **직접 알려주는** 청구 근거 3컬럼을 추가한다(additive,
@@ -30,7 +30,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = 'rg9billed7c4e'
-down_revision: Union[str, None] = 'f3c1d7e9a482'
+down_revision: Union[str, None] = 'b6e1c93f4275'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
