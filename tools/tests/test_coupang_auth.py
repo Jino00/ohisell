@@ -138,37 +138,89 @@ class TestRealLoginFormDom:
     초판은 `#username`/`#kc-login`을 요구해 폼을 코앞에 두고 15초 타임아웃으로 죽었다.
     """
 
+    # ── 가짜 DOM ──────────────────────────────────────────────────────
+    # ★셀렉터 문자열 집합으로 모델링하면 안 된다(적대적 리뷰 P2): DOM 순서·중복을 재현하지 못해
+    #   취약한 셀렉터를 계약으로 고정해버린다. 폼 2개를 실제 구조로 두되 **가입 폼을 앞에** 놓아
+    #   '첫 매치를 집는' playwright 기본 동작이 위험한 순서를 그대로 재현한다.
+    _REGISTER = {
+        "action": "https://xauth.coupang.com/auth/realms/seller/login-actions/registration",
+        "inputs": {"username": "", "password": "", "password-confirm": ""},
+        "submits": ["가입하기"],
+    }
+    _LOGIN = {
+        "action": "https://xauth.coupang.com/auth/realms/seller/login-actions/authenticate?session_code=x",
+        "inputs": {"username": "", "password": ""},   # ★id는 하나도 없다(실측)
+        "submits": ["로그인"],
+    }
+
+    class _Loc:
+        """필요한 만큼만 흉내 낸 playwright Locator(비-strict: first 매치를 쓴다)."""
+
+        def __init__(self, page, forms, sel=None):
+            self.page, self.forms, self.sel = page, forms, sel
+
+        def count(self):
+            return len(self.forms)
+
+        @property
+        def first(self):
+            return self
+
+        def locator(self, sel):
+            return type(self)(self.page, self.forms, sel)
+
+        def _target(self):
+            if not self.forms:
+                raise RuntimeError(f"Timeout: no element for {self.sel}")
+            return self.forms[0]
+
+        def fill(self, val):
+            f = self._target()
+            name = self.sel.split("name=")[1].rstrip("]")
+            if name not in f["inputs"]:
+                raise RuntimeError(f"Timeout: no {self.sel}")
+            f["inputs"][name] = val
+            self.page.filled.append((f["action"], name, val))
+
+        def click(self, timeout=None):
+            f = self._target()
+            if self.sel not in ("button[type=submit]", "input[type=submit]"):
+                raise RuntimeError(f"Timeout: no {self.sel}")   # #kc-login 등은 없다
+            if self.sel == "input[type=submit]":
+                raise RuntimeError("Timeout: no input[type=submit]")
+            self.page.clicked.append((f["action"], f["submits"][0]))
+            self.page.url = "https://supplier.coupang.com/dashboard/KR"
+
     class _FormPage:
-        """id 없는 keycloak 폼 + 별도 form의 '가입하기'까지 재현하는 가짜 페이지."""
+        """실측 DOM(가입 폼 + 로그인 폼)을 가진 가짜 페이지."""
 
-        def __init__(self):
+        def __init__(self, forms=None):
+            import copy
             self.url = "https://xauth.coupang.com/auth/realms/seller/protocol/openid-connect/auth"
-            self.filled: dict[str, str] = {}
-            self.clicked: list[str] = []
-            self.goto_urls: list[str] = []
+            self.forms = copy.deepcopy(forms) if forms is not None else copy.deepcopy(
+                [TestRealLoginFormDom._REGISTER, TestRealLoginFormDom._LOGIN])
+            self.filled: list = []
+            self.clicked: list = []
+            self.goto_urls: list = []
 
-        # 실측 DOM에 존재하는 셀렉터만 매칭한다(없는 건 예외 = playwright 동작).
-        _PRESENT = {
-            "input[name=username]",
-            "input[name=password]",
-            "form:has(input[name=password]) button[type=submit]",
-        }
-
-        def _require(self, sel):
-            if sel not in self._PRESENT:
-                raise RuntimeError(f"Timeout: selector not found: {sel}")
+        def _has_form(self):
+            return any(f["inputs"] for f in self.forms)
 
         def wait_for_selector(self, sel, timeout=None):
-            self._require(sel)
+            if not self._has_form():
+                raise RuntimeError(f"Timeout: selector not found: {sel}")
 
-        def fill(self, sel, val):
-            self._require(sel)
-            self.filled[sel] = val
-
-        def click(self, sel, timeout=None):
-            self._require(sel)
-            self.clicked.append(sel)
-            self.url = "https://supplier.coupang.com/dashboard/KR"
+        def locator(self, sel):
+            if sel.startswith("form[action*="):
+                needle = sel.split("'")[1]
+                m = [f for f in self.forms if needle in f["action"]]
+            elif sel.startswith("form:has("):
+                inner = sel[len("form:has("):-1]
+                name = inner.split("name=")[1].rstrip("]")
+                m = [f for f in self.forms if name in f["inputs"]]
+            else:
+                m = list(self.forms)
+            return TestRealLoginFormDom._Loc(self, m, sel)
 
         def goto(self, url, **kw):
             self.goto_urls.append(url)
@@ -189,14 +241,38 @@ class TestRealLoginFormDom:
             timeout_s=10,
         )
         assert res == auth.OK, "id 없는 실제 폼에서 죽으면 안 된다(13:34:00 라이브 결함)"
-        assert pg.filled["input[name=username]"] == "ohitech"
-        assert "input[name=password]" in pg.filled
+        assert [n for _, n, _ in pg.filled] == ["username", "password"]
 
-    def test_제출은_로그인_폼_안으로_스코프된다(self):
-        """전역 button[type=submit]은 '가입하기'를 누를 수 있다 — form:has로 가둔다."""
-        for sel in auth._SUBMIT_SELS:
-            assert sel == "#kc-login" or "form:has(input[name=password])" in sel, (
-                f"폼 스코프 없는 제출 셀렉터({sel}) — 회원가입 버튼을 누를 수 있다")
+    def test_비밀번호가_가입_폼에_들어가지_않는다(self, monkeypatch):
+        """★적대적 리뷰 P1: keycloak 가입 폼에도 name=password가 있고, page.fill은 strict가
+        아니라 **첫 매치**를 채운다. 가입 폼이 앞서면 평문 비번이 회원가입으로 제출된다."""
+        monkeypatch.setattr(auth, "keychain_get", lambda a, s=None: "SECRET")
+        pg = self._FormPage()   # 가입 폼이 **앞**에 있다
+        auth.try_auto_login(pg, "ohitech", lambda u: "/dashboard" in u, timeout_s=10)
+        assert pg.filled, "아무것도 안 채웠다면 이 검사는 무의미하다"
+        for action, name, val in pg.filled:
+            assert "registration" not in action, (
+                f"비밀번호가 가입 폼({action})에 들어갔다 — 회원가입으로 평문 전송된다")
+        assert all("authenticate" in a for a, _, _ in pg.filled)
+
+    def test_제출은_로그인_폼_안에서만_눌린다(self, monkeypatch):
+        """'가입하기'도 button[type=submit]이다 — 전역 셀렉터는 그걸 누른다."""
+        monkeypatch.setattr(auth, "keychain_get", lambda a, s=None: "pw")
+        pg = self._FormPage()
+        auth.try_auto_login(pg, "ohitech", lambda u: "/dashboard" in u, timeout_s=10)
+        assert pg.clicked, "제출을 아예 안 눌렀다"
+        for action, label in pg.clicked:
+            assert label == "로그인" and "authenticate" in action, (
+                f"엉뚱한 버튼을 눌렀다: {label} @ {action}")
+
+    def test_로그인_폼이_모호하면_시끄럽게_실패한다(self, monkeypatch):
+        """아무거나 고르는 것보다 사람을 부르는 게 낫다 — 엉뚱한 폼에 비번을 넣는 게 최악이다."""
+        monkeypatch.setattr(auth, "keychain_get", lambda a, s=None: "pw")
+        dup = dict(self._LOGIN, action="https://x/login-actions/authenticate?session_code=1")
+        dup2 = dict(self._LOGIN, action="https://x/login-actions/authenticate?session_code=2")
+        pg = self._FormPage(forms=[dup, dup2])
+        assert auth.try_auto_login(pg, "ohitech", lambda u: True, timeout_s=5) == auth.LOGIN_REQUIRED
+        assert pg.filled == [], "모호한데도 채웠다"
 
     def test_verify가_폼을_치워도_키체인층은_되돌아간다(self, monkeypatch):
         """★13:58:00 라이브 결함: ①과 ② 사이의 verify(권위값 검사)가 대시보드로 **이동**해
@@ -207,21 +283,19 @@ class TestRealLoginFormDom:
         DASH = "https://advertising.coupang.com/marketing/dashboard/sales"
         ROLE = "https://advertising.coupang.com/user/login?callback_url=x"  # 입력칸 0개
 
+        forms = [dict(self._LOGIN)]
+
         class _FormOnlyAtSso(self._FormPage):
             """폼은 **로그인 진입으로 goto했을 때만** 존재한다(실제와 같다)."""
             def __init__(self):
-                super().__init__()
-                self.on_form = False
+                super().__init__(forms=forms)
                 self.url = ROLE
-
-            def _require(self, sel):
-                if not self.on_form:
-                    raise RuntimeError(f"Timeout: selector not found: {sel}")
-                super()._require(sel)
+                self.forms = []          # 시작 = 역할 선택 화면(입력칸 0개)
 
             def goto(self, url, **kw):
                 super().goto(url, **kw)
-                self.on_form = "_cap_client" in url
+                import copy
+                self.forms = copy.deepcopy(forms) if "_cap_client" in url else []
 
         pg = _FormOnlyAtSso()
         sso = "https://advertising.coupang.com/user/login?_cap_client=SUPPLIERHUB&_cap_market=KR"
@@ -258,16 +332,41 @@ class TestRealLoginFormDom:
             form_url="https://x/login", timeout_s=10,
         )
         assert res == auth.OK
-        assert pg.filled == {}, "이미 착지했는데 비밀번호를 입력하면 안 된다"
+        assert pg.filled == [], "이미 착지했는데 비밀번호를 입력하면 안 된다"
+
+    def test_goto가_실패하면_stale_URL을_착지로_인정하지_않는다(self, monkeypatch):
+        """★적대적 리뷰 P1(내 수정이 만든 신규 회귀): _goto_reset은 실패를 삼키므로 창이 죽으면
+        page.url이 **직전 URL 그대로** 남는다. 바로 앞 verify가 대시보드로 이동해뒀다면 그 stale
+        URL이 is_landed를 만족해 **아무 데도 안 가고, 비번도 안 넣고, OK**가 된다 — ③알림까지
+        건너뛰어 사람은 아무 신호도 못 받는다. 조용한 무력화가 최악이다."""
+        monkeypatch.setattr(auth, "keychain_get", lambda a, s=None: "pw")
+
+        class _DeadNav(self._FormPage):
+            """goto가 전부 실패한다(창 소실). url은 verify가 남긴 대시보드 그대로."""
+            def __init__(self):
+                super().__init__()
+                self.url = "https://advertising.coupang.com/marketing/dashboard/sales"
+                self.forms = []          # 폼도 없다
+
+            def goto(self, url, **kw):
+                self.goto_urls.append(url)
+                raise RuntimeError("Target page, context or browser has been closed")
+
+        pg = _DeadNav()
+        res = auth.try_auto_login(
+            pg, "ohitech", lambda u: "/marketing/dashboard" in u,
+            form_url="https://advertising.coupang.com/user/login?_cap_client=SUPPLIERHUB",
+            timeout_s=10,
+        )
+        assert res == auth.LOGIN_REQUIRED, "이동에 실패했는데 stale URL로 복구 성공이 되면 안 된다"
+        assert pg.filled == []
 
     def test_제출_버튼을_못_찾으면_수동_폴백(self, monkeypatch):
         """조용히 성공으로 넘어가면 사람은 아무 신호도 못 받는다."""
         monkeypatch.setattr(auth, "keychain_get", lambda a, s=None: "pw")
-
-        class NoSubmit(self._FormPage):
-            _PRESENT = {"input[name=username]", "input[name=password]"}
-
-        assert auth.try_auto_login(NoSubmit(), "ohitech", lambda u: True) == auth.LOGIN_REQUIRED
+        no_submit = dict(self._LOGIN, submits=[])
+        pg = self._FormPage(forms=[no_submit])
+        assert auth.try_auto_login(pg, "ohitech", lambda u: True) == auth.LOGIN_REQUIRED
 
 
 class TestOhitechLoginClient:

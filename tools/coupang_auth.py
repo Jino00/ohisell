@@ -160,11 +160,14 @@ def _assert_predicate_sound(sso_url: str, is_landed: Callable[[str], bool]) -> N
         )
 
 
-def _goto_reset(page, url: str) -> None:
-    """about:blank로 리셋한 뒤 url로 이동한다(실패해도 예외를 삼키고 폴링에 맡긴다).
+def _goto_reset(page, url: str) -> bool:
+    """about:blank로 리셋한 뒤 url로 이동한다. **이동이 성공했는지**를 돌려준다.
 
     ★리셋하는 이유: 로그인 페이지에서 곧장 goto하면 클라이언트 리다이렉트가 진행 중이라
       net::ERR_ABORTED가 난다(오픽스 프로브에서 검증된 사항).
+    ★반환값이 필요한 이유(적대적 리뷰 P1): 실패를 삼키면 page.url이 **직전 URL 그대로** 남고,
+      호출부가 그걸 착지로 오인해 "아무 데도 안 갔는데 복구 성공"이 된다. 실패는 폴링으로
+      만회할 수 있으니 예외는 계속 삼키되, 삼켰다는 사실은 호출부에 알린다.
     """
     try:
         page.goto("about:blank", timeout=10000)
@@ -172,9 +175,11 @@ def _goto_reset(page, url: str) -> None:
         pass
     try:
         page.goto(url, wait_until="domcontentloaded", timeout=40000)
+        return True
     except Exception as e:  # noqa: BLE001
         # ERR_ABORTED는 리다이렉트로 인한 중단일 수 있다 — 바로 실패로 보지 말고 폴링으로 확인.
         log.warning("goto 경고(폴링으로 확인): %s", str(e)[:120])
+        return False
 
 
 def sso_refresh(
@@ -206,22 +211,47 @@ def sso_refresh(
 _USERNAME_SEL = "input[name=username]"
 _PASSWORD_SEL = "input[name=password]"
 
-# ★제출 버튼을 **폼으로 스코프**하는 이유(라이브 실측): 같은 페이지에 '가입하기'도
-#   button[type=submit]이고 그건 다른 form(registration)에 있다. 전역 button[type=submit]은
-#   DOM 순서가 바뀌는 날 조용히 회원가입을 누른다 — 구조(:has)로 로그인 폼 안으로 가둔다.
-_SUBMIT_SELS = (
-    "#kc-login",
-    f"form:has({_PASSWORD_SEL}) button[type=submit]",
-    f"form:has({_PASSWORD_SEL}) input[type=submit]",
+# ★로그인 폼을 **하나로 특정**해 그 안에서만 입력·제출한다(적대적 리뷰 P1).
+#   전역 셀렉터로는 안 된다: playwright의 page.fill/click은 strict가 아니라 **첫 매치**를 쓰고,
+#   keycloak의 회원가입 폼에도 name=password가 있다. 그러면 `form:has(input[name=password])`가
+#   두 폼을 다 물고, 무엇보다 fill은 스코프가 아예 없어 **평문 비번이 가입 폼에 들어가 그대로
+#   제출될 수 있다**. 제출만 폼으로 가두는 건 장식이었다.
+#   판정 근거는 keycloak의 계약인 form action이다(실측: 로그인 폼 action은
+#   `.../login-actions/authenticate?session_code=...`, 가입 폼은 `/registration/...`).
+_LOGIN_FORM_SELS = (
+    "form[action*='login-actions/authenticate']",
+    f"form:has({_PASSWORD_SEL})",
 )
 
 
-def _click_login_submit(page) -> None:
-    """로그인 폼의 제출 버튼을 누른다. 셋 다 못 찾으면 예외(→ 수동 폴백)."""
+def _login_form(page):
+    """로그인 폼 로케이터를 **유일하게** 특정한다. 못 하면 예외(→ 수동 폴백).
+
+    ★후보가 2개 이상이면 그 셀렉터는 버리고 다음으로 넘어간다 — 아무거나 고르는 것보다
+      시끄럽게 실패하는 게 낫다(엉뚱한 폼에 비번을 넣는 것이 최악이다).
+    """
+    for sel in _LOGIN_FORM_SELS:
+        loc = page.locator(sel)
+        n = loc.count()
+        if n == 1:
+            return loc
+        if n > 1:
+            log.warning("로그인 폼 후보 %d개(%s) — 모호해서 채택하지 않는다.", n, sel)
+    raise RuntimeError("로그인 폼을 유일하게 특정하지 못했다")
+
+
+# 제출 버튼 후보 — **이미 로그인 폼 안으로 스코프된 상태**에서 쓴다(위 _login_form).
+#   ★`#kc-login`을 앞에 두지 않는다(적대적 리뷰 P2): 이 모듈을 쓰는 두 페처는 둘 다 id가 없는
+#     supplier-hub 테마라, 앞에 두면 **성공 경로마다 5초를 버린다**. 호환용으로 뒤에만 남긴다.
+_SUBMIT_SELS = ("button[type=submit]", "input[type=submit]", "#kc-login")
+
+
+def _click_login_submit(form) -> None:
+    """로그인 폼 **안에서** 제출을 누른다. 못 찾으면 예외(→ 수동 폴백)."""
     last = None
     for sel in _SUBMIT_SELS:
         try:
-            page.click(sel, timeout=5000)
+            form.locator(sel).first.click(timeout=5000)
             return
         except Exception as e:  # noqa: BLE001 — 다음 후보로 넘어간다
             last = e
@@ -258,18 +288,25 @@ def try_auto_login(
         return LOGIN_REQUIRED
     try:
         if form_url:
-            _goto_reset(page, form_url)
-            # 재진입 도중 세션이 살아나 착지했으면 폼을 기다릴 이유가 없다(비번도 안 쓴다).
-            try:
-                if is_landed(page.url):
-                    log.info("로그인 폼 재진입 중 착지 — 비번 없이 복구.")
-                    return OK
-            except Exception:  # noqa: BLE001 — 네비게이션 중이면 그냥 폼을 기다린다
-                pass
+            # ★판정자 건전성은 여기서도 요구한다(적대적 리뷰 P2-3): form_url은 공개 인자라
+            #   헐거운 판정자로 직접 호출되면 goto 직후 즉시 거짓 OK가 난다.
+            _assert_predicate_sound(form_url, is_landed)
+            navigated = _goto_reset(page, form_url)
+            # ★재진입 도중 세션이 살아나 착지했으면 폼을 기다릴 이유가 없다(비번도 안 쓴다).
+            #   단 **goto가 실제로 성공했을 때만** 묻는다(적대적 리뷰 P1): _goto_reset은 실패를
+            #   삼키므로, 창이 죽으면 page.url이 **직전 URL 그대로** 남는다. 바로 앞에서 verify가
+            #   대시보드로 이동해뒀다면 그 stale URL이 is_landed를 만족해 **아무 데도 안 가고,
+            #   비번도 안 넣고, 권위값 검사가 '복구 안 됨'이라 말하는데도 OK**가 된다
+            #   (③알림도 건너뛰어 사람은 아무 신호를 못 받는다).
+            #   판정은 _poll_landed에 맡긴다 — 안정화(3s)와 창 닫힘 감지가 거기 들어 있다.
+            if navigated and _poll_landed(page, is_landed, 6):
+                log.info("로그인 폼 재진입 중 착지 — 비번 없이 복구.")
+                return OK
         page.wait_for_selector(_USERNAME_SEL, timeout=15000)
-        page.fill(_USERNAME_SEL, login_id)
-        page.fill(_PASSWORD_SEL, pw)
-        _click_login_submit(page)
+        form = _login_form(page)
+        form.locator(_USERNAME_SEL).fill(login_id)
+        form.locator(_PASSWORD_SEL).fill(pw)
+        _click_login_submit(form)
         if _poll_landed(page, is_landed, timeout_s):
             log.info("자동 로그인 성공 — 목적지 착지.")
             return OK
