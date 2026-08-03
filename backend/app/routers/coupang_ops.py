@@ -2175,17 +2175,34 @@ def wing_rg_settlement_refresh_complete(
     가서 lease 불일치로 버려졌다(mark_success가 stale로 접음). 즉 이 엔드포인트가 막으려고
     만들어진 바로 그 거짓 실패가 WING2에서 그대로 재현된다. 기본값 WING1로 하위호환 유지 —
     account_key를 안 보내는 구버전 페처는 지금과 똑같이 동작한다.
+
+    ★lease는 **필수**다(2026-08-03 codex 3R[P1]). 예전엔 옵션이라 lease가 없으면 지금 유효한
+    임대를 확인하지 않고 무조건 요청을 지웠다 — 완료 POST가 지연된 run A가 끝나고 사용자가
+    다시 눌러 요청 B가 생긴 뒤 늦은 A의 POST가 도착하면 **B의 요청이 지워지고**, 프론트
+    (streamRefresh.ts의 "새 실패 없이 요청만 사라졌다 = 정상 종료" 분기)가 시작도 안 한 B를
+    'done'으로 오보했다. 형제 신호(fetch-error, lease 있는 완료)엔 이미 stale 가드가 있었고
+    이 무-lease 경로만 뚫려 있었다.
+    ★400으로 거부해도 정상 경로는 안 깨진다(라이브 실측 2026-08-03): 배포된 페처
+    `~/.ohisell/tools/wing_browser_fetcher.py`는 repo와 바이트 동일하고 유일한 호출부가
+    claim 응답의 lease를 항상 실어 보낸다. claim은 claimed=true면 lease를 반드시 준다
+    (refresh_contract.claim_refresh) — 그 성질이 이 필수화의 안전성을 떠받친다.
     """
     _require_ingest_token(x_ingest_token)
+    lease = str(body.get("lease") or "").strip() or None
+    if lease is None:
+        raise HTTPException(
+            status_code=400,
+            detail="lease가 필요합니다 — refresh-claim 응답의 lease를 그대로 보내세요. "
+                   "임대 대조 없이 요청을 지우면 남의 회차를 완료로 오보합니다.",
+        )
     # clear_error=True(codex 2R[P2]): 1회차가 실패하고 2회차가 "받을 게 없어" 정상 종료하면
     # last_error_at만 바뀐 채 요청이 사라진다 → UI가 성공한 회차를 실패로 읽는다. 실패 흔적을
     # 함께 지우되 last_success_at(데이터 신선도 시계)은 그대로 둔다.
-    # lease(옵션): 내 임대에 대해서만 완료 처리(codex 3R[P2]). 20분 넘게 끌던 옛 run이
-    # 임대를 넘긴 뒤 뒤늦게 완료를 외쳐 새 요청을 지우는 것을 막는다. 없으면 기존 동작.
-    lease = str(body.get("lease") or "").strip() or None
-    ok = refresh_contract.mark_success(
+    # ok=False = "내 임대가 아니었다"(stale 또는 이미 업로드가 소멸시킨 뒤) — 무해한 no-op이라
+    # 200으로 답한다. 페처는 200이면 재시도하지 않는다.
+    ok = refresh_contract.mark_run_complete(
         db, rg_settlement_sync._rg_state_key(_require_rg_account(account_key)),
-        clear_error=True, lease=lease)
+        lease, clear_error=True)
     return {"ok": ok}
 
 
@@ -2273,11 +2290,31 @@ async def upload_rg_settlement_xlsx(
         # 동기 ingest가 **이벤트 루프 위에서** 돌았다. prod는 uvicorn --workers 1 단일 워커라
         # 그 시간 동안 모든 API가 멈춘다(같은 시각 fetch-error POST도 15초 타임아웃). 파싱이
         # 빨라진 지금도(0.06초) 파일이 커지면 재발하므로 구조로 막는다.
+        # ── ★strict_sheets=True — 시트 드리프트 = 거짓 완료 차단(2026-08-03) ──────────
+        # 결함: ingest는 인식 가능한 시트가 하나도 없어도 예외 대신 status="empty"를 **정상
+        #   반환**하는데, 여기서 결과와 무관하게 heartbeat를 찍고 있었다 → 쿠팡이 시트명을
+        #   바꾸거나 파서가 드리프트하면 정산 파일이 통째로 무시되는데 화면은 "✅ 완료".
+        #   정산=돈 데이터라 거짓 완료가 가장 나쁜 오보다.
+        # ★판정을 ingest 안(=DML 전)으로 넣은 이유(codex 1R[P1]): 적재는 (fee_type, period_end)
+        #   단위 delete-once 후 insert다. 커밋된 뒤 라우터에서 422를 던지면 부분 미인식 파일이
+        #   기존 snapshot을 반쪽으로 갈아치운 상태가 남는다(같은 fee_type에 매핑되는 2시트 중
+        #   하나만 개명된 경우). 사전 판정이면 DB를 아예 손대지 않는다.
+        # ★strict를 이 경로에만 켜는 이유(라이브 실측): 같은 ingest를 쓰는 서버측 S6-auto는
+        #   CATEGORY_TR 엑셀이 매 주기 정상적으로 empty를 낸다(prod 로그 28건). 반면 이 push
+        #   경로는 라이브 83회(WING1 55·WING2 28) 전수에서 empty 0건·부분 skip 0건이었다
+        #   → 이 경로의 시트 미인식은 **항상** 결함 신호다.
+        # ★422를 고른 이유: 페처 `_rg_push_xlsx`는 이미 비200을 rc=1로 세고 run 끝에
+        #   refresh-complete 대신 fetch-error를 보낸다 → last_error_at이 생겨 화면
+        #   (streamRefresh.ts RG 판정)까지 이어진다. 백엔드만 바꿔도 계약이 어긋나지 않는다.
         result = await run_in_threadpool(
-            rg_settlement_sync.ingest_settlement_xlsx, db, account_key, content
+            rg_settlement_sync.ingest_settlement_xlsx, db, account_key, content,
+            strict_sheets=True,
         )
     except WingReadError as e:
         raise HTTPException(status_code=422, detail=f"엑셀 파싱 실패: {e}")
+    except rg_settlement_sync.RgSheetDriftError as e:
+        raise HTTPException(status_code=422, detail=f"{e} — heartbeat 미갱신(거짓 완료 방지).")
+
     # S4-P2: 자동 다운로드(Mac 페처 push)·수동 업로드 모두 freshness 갱신(스케줄 중복방지·상태표시).
     # ★계정별 상태행에 기록(2026-07-27): WING2 push가 WING1 행을 갱신하면 오픽스가 실제론 안
     #   왔는데 "갱신 완료"로 보이고(UI 폴링이 남의 성공에 종료됨) 신선도 배너도 거짓말한다.
