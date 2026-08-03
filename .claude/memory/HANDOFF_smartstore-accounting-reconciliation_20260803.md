@@ -4,6 +4,27 @@
 > 결과: 회계 오류 6건을 찾아 고쳤고, 최근 1주일 순이익이 **21% 부풀려져** 있었다.
 > **PR #170 병합 = main `d05d358`, prod 배포 완료.**
 
+## ▶ 다음 세션 첫 작업 (Jino 지시 2026-08-03 13:58: "새 대화에서 프로브 파라미터 수정부터 하자")
+
+**감시 프로브의 orderId 조회 파라미터를 고치고 라이브 검증 후 재활성화한다.** 상세는 §3.6.
+지금 prod 상태: 코드·테이블(마이그 `d4f6a8c0b2e5`) 배포됨 / 잡은 `is_enabled=0`으로 **꺼져 있음**.
+
+1. `backend/app/clients/naver.py`의 `fetch_case_settlement_by_order` —
+   `periodType`·`settleDecisionType`을 **빼고** `{orderId, pageNumber, pageSize}`만 보낸다.
+   근거는 §3.5(네이버가 "orderId와 같이 입력될 수 없습니다"를 명시적으로 응답).
+2. `backend/app/services/naver_claim_settlement_probe.py` — 3유형 루프 제거(주문당 1회 조회로
+   충분). 테이블의 `settle_decision_type` 컬럼은 API가 안 주므로 `settleType`으로 대체하거나 삭제.
+3. 테스트 19건 갱신 → **prod에서 잡 1회 수동 실행으로 라이브 검증** →
+   `UPDATE scheduler_state SET is_enabled=1 WHERE job_name='run_naver_nbaesong_return_probe';`
+
+★검증 성공의 정의: N배송 반품 2건(`2026072553216341`·`2026072852172181`)이 각각 2행
+(`PROD_ORDER`/`DELIVERY` 모두 `NORMAL_SETTLE_BEFORE_CANCEL`)으로 적재되면 합격.
+그 2건이 08-06·08-09에 성숙하면 상태가 바뀔 수 있으니, 그 전이가 잡히는지가 이 프로브의 존재 이유다.
+
+★★서브에이전트를 쓴다면 **별도 워크트리**로. 같은 워크트리에서 돌렸다가 커밋이 섞였다(LESSONS #81).
+
+---
+
 ## §0 가장 먼저 알아야 할 것
 
 1. **대시보드 산술 자체는 틀린 적이 없다.** 매출−원가−수수료−배송비−광고비 계산은 매번
