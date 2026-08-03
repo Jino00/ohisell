@@ -753,11 +753,19 @@ def _is_logged_out(url: str) -> bool:
 # 재발급 → 수동 로그인 주기가 12배 늘어난다.
 SSO_LOGIN_URL = SUPPLIER_ORIGIN + "/"
 
+# 인증 후에만 나오는 경로. ★오리진만으로 판정하면 **출발 URL이 곧 착지**가 되어, 아무 데도
+#   가지 않고도 "복구 성공"이 된다(적대적 리뷰 P1). 그러면 ②Keychain·③알림이 통째로
+#   건너뛰어지고 사람은 아무 신호도 못 받는다. 라이브 실측 착지 URL: /dashboard/KR.
+#   coupang_auth._assert_predicate_sound가 이 조건을 런타임에 강제한다(어기면 즉시 예외).
+_AUTHED_PATH_HINTS = ("/dashboard",)
+
 
 def _is_landed(url: str) -> bool:
-    """복구 성공 판정 — supplier 오리진에 있고 로그인/keycloak 페이지가 아니다."""
+    """복구 성공 판정 — 인증 후 경로에 있고 로그인/keycloak 페이지가 아니다."""
     u = url or ""
-    return u.startswith(SUPPLIER_ORIGIN) and not _is_logged_out(u)
+    if not u.startswith(SUPPLIER_ORIGIN) or _is_logged_out(u):
+        return False
+    return any(h in u for h in _AUTHED_PATH_HINTS)
 
 
 def _recover_session(page, cfg: dict) -> str:

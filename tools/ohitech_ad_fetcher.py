@@ -122,7 +122,11 @@ def _recover_session(page, cfg: dict) -> str:
         page,
         sso_url=SSO_LOGIN_URL,
         is_landed=_is_landed,
-        login_id=cfg.get("ad_login_id"),
+        # ★키 이름을 오픽스와 분리한다(적대적 리뷰 P2): 오픽스도 `ad_login_id`를 쓴다.
+        #   같은 이름이면 config를 복사할 때 오픽스 계정이 오하이테크 프로필에 로그인하고,
+        #   _push_days가 vendor_id를 리터럴('A01029796')로 박아 push하므로 **오픽스 광고비가
+        #   오하이테크로 조용히 적재된다**. 이름을 분리해 그 실수를 구조로 막는다.
+        login_id=cfg.get("ohitech_ad_login_id"),
         label="오하이테크 광고",
     )
 

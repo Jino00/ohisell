@@ -99,20 +99,65 @@ def otp_input_visible(page) -> bool:
         return False
 
 
+# 첫 판정 전 안정화 시간(ms). ★리다이렉트 체인이 시작되기도 전에 판정하면 **출발 URL을
+# 착지로 오인**한다(적대적 리뷰 P1). 페처들이 goto 후 3000ms를 넣는 것과 같은 이유다 —
+# goto 반환 시점의 page.url은 확정이 아니다.
+_SETTLE_MS = 3000
+
+
 def _poll_landed(page, is_landed: Callable[[str], bool], timeout_s: int) -> bool:
-    """리다이렉트 체인이 끝나 목적지에 착지했는지 URL 폴링으로 대기."""
-    waited = 0
+    """리다이렉트 체인이 끝나 목적지에 착지했는지 URL 폴링으로 대기.
+
+    ★_SETTLE_MS 뒤에 첫 판정을 한다. 그전에 판정하면 아직 이동하지 않은 출발 URL이
+      is_landed를 만족해 "복구 성공"으로 오판하고, 그 결과 ②Keychain·③알림이 통째로
+      건너뛰어진다 — 사람은 아무 신호도 못 받고 수집만 조용히 실패한다.
+    ★wait_for_timeout은 드라이버 왕복이라 페이지/브라우저가 닫히면 raise한다(적대적 리뷰 P2).
+      사람이 "이 창에서 로그인하세요" 안내를 보고 창을 닫는 흔한 경로에서 예외가 새어 나가면
+      호출부가 rc=3(로그인 필요)이어야 할 상황을 rc=1(재시도)로 오분류한다 → 여기서 잡는다.
+    """
+    try:
+        page.wait_for_timeout(_SETTLE_MS)
+    except Exception as e:  # noqa: BLE001 — 창이 닫혔다 = 복구 불가(사람이 개입해야 함)
+        log.warning("복구 대기 중 페이지 소실(창 닫힘 추정): %s", type(e).__name__)
+        return False
+    waited = _SETTLE_MS / 1000.0
     while waited < timeout_s:
-        page.wait_for_timeout(2000)
+        try:
+            page.wait_for_timeout(2000)
+        except Exception as e:  # noqa: BLE001
+            log.warning("복구 대기 중 페이지 소실(창 닫힘 추정): %s", type(e).__name__)
+            return False
         waited += 2
         try:
             u = page.url
         except Exception:
             continue  # 네비게이션 중
         if is_landed(u):
-            page.wait_for_timeout(1500)  # 쿠키 안정화
+            try:
+                page.wait_for_timeout(1500)  # 쿠키 안정화
+            except Exception:  # noqa: BLE001 — 착지는 이미 확인됨
+                pass
             return True
     return False
+
+
+class LandingPredicateError(RuntimeError):
+    """착지 판정자가 **출발 URL을 착지로 인정**한다 = 복구를 안 하고도 성공이 된다.
+
+    이걸 런타임에 터뜨리는 이유(적대적 리뷰 P1): 이 실수는 조용히 지나가면
+    ②Keychain·③알림을 통째로 건너뛰게 만들고, 사람은 아무 신호도 못 받는다.
+    설정 실수는 **시끄럽게 죽는 게** 조용히 무력화되는 것보다 낫다.
+    """
+
+
+def _assert_predicate_sound(sso_url: str, is_landed: Callable[[str], bool]) -> None:
+    """출발 URL이 착지 판정을 만족하면 그 판정자는 쓸 수 없다."""
+    if is_landed(sso_url):
+        raise LandingPredicateError(
+            f"is_landed가 출발 URL을 착지로 인정한다(sso_url={sso_url!r}). "
+            "복구 여부와 무관하게 성공이 되므로 판정자를 좁혀라 "
+            "(예: 인증 후에만 나오는 경로를 요구)."
+        )
 
 
 def sso_refresh(
@@ -130,6 +175,7 @@ def sso_refresh(
     ★about:blank로 먼저 리셋한다: 로그인 페이지에서 곧장 sso_url로 goto하면 클라이언트
       리다이렉트가 진행 중이라 net::ERR_ABORTED가 난다(오픽스 프로브에서 검증된 사항).
     """
+    _assert_predicate_sound(sso_url, is_landed)
     try:
         page.goto("about:blank", timeout=10000)
     except Exception:
@@ -176,7 +222,13 @@ def try_auto_login(
         log.warning("자동 로그인 실패(목적지 미착지) — 수동 폴백.")
         return LOGIN_REQUIRED
     except Exception as e:  # noqa: BLE001
-        log.warning("자동 로그인 실패(수동 폴백): %s", str(e)[:100])
+        # ★★예외 메시지를 그대로 찍지 마라(적대적 리뷰 P2): playwright의 page.fill은 내부
+        #   로그에 `fill("<값>")`을 남기고, 실패 시 그 call log가 예외 메시지에 통째로 붙는다
+        #   → str(e)를 로그에 찍으면 **평문 비밀번호가 로그 파일에 남는다**(~/.ohisell_*.log는
+        #   0644라 다른 사용자도 읽는다). 길이 절단([:100])으로 우연히 막히던 것을 구조로 바꾼다.
+        #   예외 타입 + call log 앞부분만 남긴다.
+        safe = str(e).split("Call log:")[0].strip()[:120]
+        log.warning("자동 로그인 실패(수동 폴백): %s: %s", type(e).__name__, safe)
         return LOGIN_REQUIRED
 
 
