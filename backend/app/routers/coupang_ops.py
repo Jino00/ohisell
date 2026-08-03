@@ -2127,8 +2127,9 @@ def wing_rg_settlement_fetch_error(
 ):
     """Wing RG 정산 페처 run 실패 보고 → last_error/last_error_at 기록. 토큰 인증(claim과 동일).
 
-    ★claim의 짝: 페처가 요청을 claim한 뒤 브라우저 에러로 죽으면 플래그는 이미 clear라 아무
-    흔적도 안 남았다 — UI는 실패인지 진행 중인지 알 수 없었다(215초 헛기다림).
+    ★claim의 짝: 이 엔드포인트가 생기기 전엔 claim이 요청 플래그를 즉시 소비했고, 페처가 claim
+    직후 브라우저 에러로 죽으면 prod에 아무 흔적도 안 남았다 — UI는 실패인지 진행 중인지 알 수
+    없었다(215초 헛기다림). (지금은 lease 계약이라 claim이 플래그를 보존한다.)
     성공은 upload-xlsx(rg_mark_heartbeat)가 알리고, 실패는 이 엔드포인트가 알린다.
     """
     _require_ingest_token(x_ingest_token)
@@ -2158,7 +2159,9 @@ def wing_rg_settlement_refresh_complete(
     있다. lease 계약에선 요청이 성공 신호로만 소멸하므로, 이 신호가 없으면 그런 회차가
     재시도 3회(=창 3번)를 유발한 뒤 "재시도 3회 소진"이라는 거짓 실패로 끝난다.
     ★last_success_at(데이터 신선도 시계)은 건드리지 않는다 — 받은 게 없으면 데이터는 그대로다.
-    이미 업로드가 요청을 소멸시킨 뒤라면 이 호출은 무해한 no-op.
+    이미 다른 경로가 요청을 소멸시킨 뒤(성공 완료 신호 중복·reaper·실패 소멸)라면 무해한 no-op.
+    ★업로드(rg_mark_heartbeat)는 요청을 소멸시키지 않는다 — RG는 한 회차가 여러 엑셀이라
+      중간 신호이기 때문이다. 요청을 소멸시키는 성공 경로는 이 엔드포인트 하나뿐이다.
 
     ★account_key(R3, 2026-07-27 버그 수정): 형제 엔드포인트(request/status/claim/fetch-error)는
     모두 계정별 상태행을 쓰는데 이 완료 신호만 WING1 행을 하드코딩하고 있었다 — WING2 run이

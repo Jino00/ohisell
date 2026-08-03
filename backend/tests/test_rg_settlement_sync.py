@@ -1188,6 +1188,52 @@ def test_rg_heartbeat_does_not_erase_terminated_failure():
     assert st2["last_error"] == err
 
 
+def test_rg_heartbeat_guard_is_atomic_against_concurrent_terminal_failure():
+    """★가드는 조회-후-쓰기가 아니라 **한 UPDATE 안**에서 판정해야 한다(2026-08-03 codex 2R[P1]).
+
+    실경합: 업로드 세션 H가 행을 읽어 '요청 살아있음'을 확인한 직후, fetch-error 세션 F가
+    3회 소진(또는 reaper)으로 requested=NULL + last_error_at=E3을 커밋한다. H가 그 뒤에
+    ORM 변경을 커밋하면 **이미 통과한 조건**을 근거로 방금 기록된 terminal error를 지운다 —
+    순차 케이스만 막히고 진짜 경합은 그대로 열린다.
+
+    여기서는 H의 세션이 낡은 값을 identity map에 물고 있는 상태를 만들어 그 창을 재현한다.
+    """
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+    from app.database import Base
+    from app.services.coupang.rg_settlement_sync import rg_mark_fetch_error
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False},
+                           poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    h, f = Session(), Session()          # H=업로드(heartbeat), F=실패 보고
+
+    rg_request_refresh(f, "COUPANG_WING1")
+    rg_claim_refresh(f, "COUPANG_WING1")
+    rg_mark_fetch_error(f, "1회차 실패")   # 재시도 대상 — 요청은 살아있다
+
+    # H가 '요청 살아있음' 상태의 행을 읽는다(=경합의 조회 시점).
+    # ★강참조로 붙잡아야 한다 — SQLAlchemy identity map은 약참조라 놓으면 GC가 가져가고,
+    #   그러면 다음 조회가 최신값을 다시 읽어 창이 우연히 닫힌다(테스트가 결함을 놓친다).
+    h_view = h.query(CoupangWingCookie).filter_by(account_key=_RG_STATE_ACCOUNT).first()
+    assert h_view.refresh_requested_at is not None
+
+    # 그 사이 F가 run을 종료시킨다(3회 소진과 동치인 login_required 경로)
+    rg_mark_fetch_error(f, "마지막 리포트 실패", kind="login_required")
+    f.expire_all()
+    terminal_err_at = rg_refresh_status(f)["last_error_at"]
+    assert rg_refresh_status(f)["requested"] is False and terminal_err_at is not None
+
+    rg_mark_heartbeat(h, "COUPANG_WING1")  # 늦게 도착한 업로드가 이제야 커밋
+
+    f.expire_all()
+    st = rg_refresh_status(f)
+    assert st["last_success_at"] is not None       # 신선도는 올라간다
+    assert st["last_error_at"] == terminal_err_at  # ★terminal error는 살아남는다
+
+
 def test_rg_state_isolated_from_vendor_summary():
     """RG 상태행은 vendor-summary(COUPANG_WING_VS)와 다른 account_key로 분리(D-5)."""
     from app.services.coupang import vendor_summary_sync as vss

@@ -109,11 +109,14 @@ export async function runStreamRefresh(
     // 표시했다 — settleBeforeSuccess가 막으려던 바로 그 오보를 스스로 통과시키고 있었다.
     //
     // 이 판정이 안전한 근거는 백엔드 계약이다(refresh_contract.py · rg_settlement_sync.py):
-    //   성공 upload  → rg_mark_heartbeat: last_success_at=now, **last_error_at=NULL**
-    //   run 정상종료 → refresh-complete → mark_success(clear_error=True): 요청 소멸 + error=NULL
-    //   run 실패종료 → report_failure(소멸 사유): last_error_at=now + 요청 소멸
-    // 즉 RG는 성공 경로가 실패 흔적을 **반드시 지운다** → 요청이 소멸한 시점에 이번 run이
-    // 남긴 실패 흔적이 살아 있다 ⟺ 그 run은 실패로 끝났다. 시각 대소 비교로 추측하지 않는다.
+    //   run 중 upload  → rg_mark_heartbeat: last_success_at=now + **요청이 살아있을 때만** error=NULL
+    //   run 정상종료   → refresh-complete → mark_success(clear_error=True): 요청 소멸 + error=NULL
+    //   run 실패종료   → report_failure(소멸 사유)·_reap_exhausted: last_error_at=now + 요청 소멸
+    // 즉 요청이 소멸한 시점에 이번 run이 남긴 실패 흔적이 살아 있다 ⟺ 그 run은 실패로 끝났다.
+    // 시각 대소 비교로 추측하지 않는다.
+    // ★heartbeat의 "요청이 살아있을 때만"이 이 동치의 전제다(codex 1R·2R[P1]). 무조건 지우면
+    // 클라 타임아웃(60s) 뒤 서버가 완주해 **늦게 도착한 업로드**가 방금 기록된 terminal error를
+    // 지워, 여기서 다시 반쪽 run이 done으로 샌다. 백엔드 가드를 되돌리면 이 판정도 무너진다.
     //
     // 2026-07-17 '성공 우선' 사고와 상충하지 않는 이유: 그 사고(업로드는 서버에서 완주,
     // 페처는 클라 타임아웃으로 실패 보고 — 실측 순서는 last_error_at > last_success_at,
