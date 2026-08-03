@@ -129,6 +129,110 @@ class TestConfigKeySeparation:
         assert "ohitech_ad_login_id" in s and "supplier_login_id" in s
 
 
+class TestRealLoginFormDom:
+    """★2026-08-03 라이브에서 ②층이 죽은 자리의 회귀.
+
+    실측 DOM(xauth.coupang.com, client_id=supplier-hub, title='Supplier Hub'):
+      inputs : name=username / name=password  — **id가 하나도 없다**
+      buttons: button[type=submit]'로그인'(로그인 폼) + button[type=submit]'가입하기'(가입 폼)
+    초판은 `#username`/`#kc-login`을 요구해 폼을 코앞에 두고 15초 타임아웃으로 죽었다.
+    """
+
+    class _FormPage:
+        """id 없는 keycloak 폼 + 별도 form의 '가입하기'까지 재현하는 가짜 페이지."""
+
+        def __init__(self):
+            self.url = "https://xauth.coupang.com/auth/realms/seller/protocol/openid-connect/auth"
+            self.filled: dict[str, str] = {}
+            self.clicked: list[str] = []
+            self.goto_urls: list[str] = []
+
+        # 실측 DOM에 존재하는 셀렉터만 매칭한다(없는 건 예외 = playwright 동작).
+        _PRESENT = {
+            "input[name=username]",
+            "input[name=password]",
+            "form:has(input[name=password]) button[type=submit]",
+        }
+
+        def _require(self, sel):
+            if sel not in self._PRESENT:
+                raise RuntimeError(f"Timeout: selector not found: {sel}")
+
+        def wait_for_selector(self, sel, timeout=None):
+            self._require(sel)
+
+        def fill(self, sel, val):
+            self._require(sel)
+            self.filled[sel] = val
+
+        def click(self, sel, timeout=None):
+            self._require(sel)
+            self.clicked.append(sel)
+            self.url = "https://supplier.coupang.com/dashboard/KR"
+
+        def goto(self, url, **kw):
+            self.goto_urls.append(url)
+            self.url = url
+
+        def wait_for_timeout(self, ms):
+            pass
+
+        def evaluate(self, js):
+            return False
+
+    def test_id_없는_폼에서도_자동로그인이_완주한다(self, monkeypatch):
+        monkeypatch.setattr(auth, "keychain_get", lambda a, s=None: "pw")
+        pg = self._FormPage()
+        res = auth.try_auto_login(
+            pg, "ohitech",
+            lambda u: u.startswith("https://supplier.coupang.com") and "/dashboard" in u,
+            timeout_s=10,
+        )
+        assert res == auth.OK, "id 없는 실제 폼에서 죽으면 안 된다(13:34:00 라이브 결함)"
+        assert pg.filled["input[name=username]"] == "ohitech"
+        assert "input[name=password]" in pg.filled
+
+    def test_제출은_로그인_폼_안으로_스코프된다(self):
+        """전역 button[type=submit]은 '가입하기'를 누를 수 있다 — form:has로 가둔다."""
+        for sel in auth._SUBMIT_SELS:
+            assert sel == "#kc-login" or "form:has(input[name=password])" in sel, (
+                f"폼 스코프 없는 제출 셀렉터({sel}) — 회원가입 버튼을 누를 수 있다")
+
+    def test_제출_버튼을_못_찾으면_수동_폴백(self, monkeypatch):
+        """조용히 성공으로 넘어가면 사람은 아무 신호도 못 받는다."""
+        monkeypatch.setattr(auth, "keychain_get", lambda a, s=None: "pw")
+
+        class NoSubmit(self._FormPage):
+            _PRESENT = {"input[name=username]", "input[name=password]"}
+
+        assert auth.try_auto_login(NoSubmit(), "ohitech", lambda u: True) == auth.LOGIN_REQUIRED
+
+    def test_login_url이_주어지면_폼이_있는_곳으로_먼저_간다(self, monkeypatch):
+        """★①이 끝난 자리(광고센터 역할 선택 화면)에는 입력칸이 0개다 — 거기서 기다리면 죽는다."""
+        monkeypatch.setattr(auth, "keychain_get", lambda a, s=None: "pw")
+        pg = self._FormPage()
+        pg.url = "https://advertising.coupang.com/user/login?callback_url=..."
+        auth.try_auto_login(
+            pg, "ohitech",
+            lambda u: "/dashboard" in u,
+            timeout_s=10,
+            login_url="https://supplier.coupang.com/",
+        )
+        assert "https://supplier.coupang.com/" in pg.goto_urls
+
+    def test_오하이테크가_supplier_폼으로_라우팅된다(self):
+        import inspect
+        import ohitech_ad_fetcher as oh
+        src = inspect.getsource(oh._recover_session)
+        assert "login_url=" in src and "SUPPLIER_LOGIN_URL" in src, (
+            "광고센터에는 폼이 없다 — ②는 supplier-hub 폼으로 가야 한다")
+        # ②의 착지 판정도 '존재의 증명'이어야 한다(출발 URL·빈 페이지는 거부).
+        assert oh._supplier_landed(oh.SUPPLIER_LOGIN_URL) is False
+        assert oh._supplier_landed("about:blank") is False
+        assert oh._supplier_landed("https://supplier.coupang.com/dashboard/KR") is True
+        auth._assert_predicate_sound(oh.SUPPLIER_LOGIN_URL, oh._supplier_landed)
+
+
 class TestVerifyIsAuthoritative:
     """★URL 판정은 휴리스틱, 앱 세션 검사가 권위값.
 

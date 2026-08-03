@@ -160,6 +160,23 @@ def _assert_predicate_sound(sso_url: str, is_landed: Callable[[str], bool]) -> N
         )
 
 
+def _goto_reset(page, url: str) -> None:
+    """about:blank로 리셋한 뒤 url로 이동한다(실패해도 예외를 삼키고 폴링에 맡긴다).
+
+    ★리셋하는 이유: 로그인 페이지에서 곧장 goto하면 클라이언트 리다이렉트가 진행 중이라
+      net::ERR_ABORTED가 난다(오픽스 프로브에서 검증된 사항).
+    """
+    try:
+        page.goto("about:blank", timeout=10000)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=40000)
+    except Exception as e:  # noqa: BLE001
+        # ERR_ABORTED는 리다이렉트로 인한 중단일 수 있다 — 바로 실패로 보지 말고 폴링으로 확인.
+        log.warning("goto 경고(폴링으로 확인): %s", str(e)[:120])
+
+
 def sso_refresh(
     page,
     sso_url: str,
@@ -176,16 +193,42 @@ def sso_refresh(
       리다이렉트가 진행 중이라 net::ERR_ABORTED가 난다(오픽스 프로브에서 검증된 사항).
     """
     _assert_predicate_sound(sso_url, is_landed)
-    try:
-        page.goto("about:blank", timeout=10000)
-    except Exception:
-        pass
-    try:
-        page.goto(sso_url, wait_until="domcontentloaded", timeout=40000)
-    except Exception as e:  # noqa: BLE001
-        # ERR_ABORTED는 리다이렉트로 인한 중단일 수 있다 — 바로 실패로 보지 말고 폴링으로 확인.
-        log.warning("SSO goto 경고(폴링으로 확인): %s", str(e)[:120])
+    _goto_reset(page, sso_url)
     return _poll_landed(page, is_landed, timeout_s)
+
+
+# 로그인 폼 셀렉터 — ★id에 기대지 마라(2026-08-03 라이브 실측으로 뒤집힌 가정).
+#   초판은 오픽스 구현에서 `#username`/`#kc-login`을 그대로 가져왔는데, **supplier-hub 테마의
+#   keycloak 폼에는 id가 하나도 없다**: input[name=username]/[name=password], 제출은 id 없는
+#   button[type=submit]. 그래서 오하이테크 광고 13:34:00 실측에서 ②층이 폼을 코앞에 두고
+#   `wait_for_selector` 15초 타임아웃으로 죽었다. name 속성은 keycloak이 POST에 쓰는 계약이라
+#   테마가 바뀌어도 남는다 — id보다 이쪽이 안정적이다.
+_USERNAME_SEL = "input[name=username]"
+_PASSWORD_SEL = "input[name=password]"
+
+# ★제출 버튼을 **폼으로 스코프**하는 이유(라이브 실측): 같은 페이지에 '가입하기'도
+#   button[type=submit]이고 그건 다른 form(registration)에 있다. 전역 button[type=submit]은
+#   DOM 순서가 바뀌는 날 조용히 회원가입을 누른다 — 구조(:has)로 로그인 폼 안으로 가둔다.
+_SUBMIT_SELS = (
+    "#kc-login",
+    f"form:has({_PASSWORD_SEL}) button[type=submit]",
+    f"form:has({_PASSWORD_SEL}) input[type=submit]",
+)
+
+
+def _click_login_submit(page) -> None:
+    """로그인 폼의 제출 버튼을 누른다. 셋 다 못 찾으면 예외(→ 수동 폴백)."""
+    last = None
+    for sel in _SUBMIT_SELS:
+        try:
+            page.click(sel, timeout=5000)
+            return
+        except Exception as e:  # noqa: BLE001 — 다음 후보로 넘어간다
+            last = e
+    raise RuntimeError(
+        "로그인 제출 버튼을 찾지 못했다"
+        + (f"({type(last).__name__})" if last is not None else "")
+    )
 
 
 def try_auto_login(
@@ -195,11 +238,16 @@ def try_auto_login(
     *,
     service: str = KEYCHAIN_SERVICE,
     timeout_s: int = 25,
+    login_url: str | None = None,
 ) -> str:
     """② keycloak 로그인 폼에 Keychain 자격증명을 자동입력·제출한다.
 
     반환: OK(착지) / TWO_FACTOR(OTP 단계) / LOGIN_REQUIRED(자격증명 없음·폼 못 찾음·실패).
     ★비밀번호는 메모리에서만 쓰고 로그에 안 남긴다.
+
+    ★login_url(선택): **①이 끝난 자리에 로그인 폼이 없을 수 있다.** 오하이테크 광고가 그렇다 —
+      ①이 실패하면 광고센터의 '역할 선택' 화면(마켓플레이스/로켓배송/대행사)에 멈추는데 거기엔
+      입력칸이 아예 없다(2026-08-03 실측). 폼이 실제로 있는 곳으로 먼저 이동한 뒤 채운다.
     """
     if not login_id:
         return LOGIN_REQUIRED
@@ -208,10 +256,13 @@ def try_auto_login(
         log.info("Keychain 자격증명 없음(%s) — 수동 로그인 폴백.", login_id)
         return LOGIN_REQUIRED
     try:
-        page.wait_for_selector("#username, input[name=username]", timeout=15000)
-        page.fill("#username", login_id)
-        page.fill("#password", pw)
-        page.click("#kc-login")
+        if login_url:
+            log.info("로그인 폼으로 이동: %s", login_url)
+            _goto_reset(page, login_url)
+        page.wait_for_selector(_USERNAME_SEL, timeout=15000)
+        page.fill(_USERNAME_SEL, login_id)
+        page.fill(_PASSWORD_SEL, pw)
+        _click_login_submit(page)
         if _poll_landed(page, is_landed, timeout_s):
             log.info("자동 로그인 성공 — 목적지 착지.")
             return OK
@@ -243,6 +294,8 @@ def ensure_session(
     sso_timeout_s: int = 45,
     login_timeout_s: int = 25,
     verify: Callable[[], bool] | None = None,
+    login_url: str | None = None,
+    login_is_landed: Callable[[str], bool] | None = None,
 ) -> str:
     """세션이 풀린 상태에서 ①→②→③ 순으로 복구를 시도한다.
 
@@ -258,6 +311,12 @@ def ensure_session(
       사람에게 불필요한 로그인 알림이 간다(2026-08-03: supplier의 SSO returnUrl이 오리진
       루트라 /dashboard를 요구하는 판정이 정상 복구를 거부할 여지가 있었다).
       verify가 주어지면 각 층 뒤에 호출해 그 결과를 우선한다.
+
+    ★login_url/login_is_landed(선택): ①이 끝난 자리에 **로그인 폼이 없는** 앱을 위한 것이다.
+      오하이테크 광고가 그렇다 — ①이 실패하면 광고센터 역할 선택 화면에 멈추고 거기엔 입력칸이
+      없다(2026-08-03 실측). 폼이 있는 곳(supplier-hub 로그인)으로 이동해 채우고, 그 로그인의
+      착지는 광고 대시보드가 아니라 그쪽 대시보드이므로 판정자도 따로 받는다. 최종 확인은
+      verify(앱 자신의 세션 검사)가 한다 — 같은 realm이면 광고 쪽은 조용히 재발급된다.
     """
     def _confirmed(stage: str) -> bool:
         if verify is None:
@@ -280,7 +339,15 @@ def ensure_session(
         return OK
 
     log.info("[%s] SSO로 복구 안 됨 — Keychain 자동 로그인 시도.", label)
-    res = try_auto_login(page, login_id, is_landed, service=service, timeout_s=login_timeout_s)
+    landing = login_is_landed or is_landed
+    if login_url:
+        # ★로그인 착지 판정에도 같은 건전성을 요구한다 — 출발 URL이 착지면 아무 데도 안 가고
+        #   "자동 로그인 성공"이 되고, ③알림이 건너뛰어져 사람은 신호를 못 받는다.
+        _assert_predicate_sound(login_url, landing)
+    res = try_auto_login(
+        page, login_id, landing,
+        service=service, timeout_s=login_timeout_s, login_url=login_url,
+    )
     if res == OK or (res != TWO_FACTOR and _confirmed("자동 로그인 후")):
         log.info("[%s] 자동 로그인으로 세션 복구.", label)
         return OK
