@@ -223,22 +223,36 @@ def _shipment_cost(o: Order) -> Decimal:
     return order_delivery.order_shipping_cost(o)
 
 
-def _add_shipment_cost(bucket: dict, seen: dict, skey: tuple, o: Order) -> None:
-    """배송 1건(packageNumber·박스)당 택배비를 bucket["shipping"]에 **1회만** 더한다.
+def _shipment_cost_map(orders: list, channel_map: dict) -> dict[tuple, Decimal]:
+    """집계 대상 주문 전체를 **선행 1회 훑어** 배송(skey)별 택배비를 확정한다.
 
-    ★패키지 내 단가가 갈리면 **최댓값**을 쓴다(first-wins 아님). 라이브 실측으로는 한
-      패키지 안에서 배송방식이 섞인 경우가 0/2,505건이지만, N배송 전환이 진행 중이라
-      앞으로 생길 수 있다. 그때 낮은 쪽을 집으면 배송비가 과소계상돼 이익이 부풀려진다 —
-      최댓값이면 그 방향으로는 틀리지 않는다.
+    ★패키지 내 단가가 갈리면 **최댓값**. 라이브 실측으로는 한 패키지 안에서 배송방식이
+      섞인 경우가 0/10,159건이지만, N배송 전환이 진행 중이라 앞으로 생길 수 있다.
+      그때 낮은 쪽을 집으면 배송비가 과소계상돼 이익이 부풀려진다 — 최댓값이면 그
+      방향으로는 틀리지 않는다.
+
+    ★선행 패스인 이유(codex 리뷰 P2): 처음엔 본 루프에서 만나는 대로 더하고 더 비싼
+      단가를 만나면 차액을 보정했는데, 일별 트렌드는 **날짜별 버킷**이라 같은 배송이
+      두 날짜에 걸치면 앞 날짜에 1,900 · 뒤 날짜에 1,120이 쪼개져 들어갔다. 기간 합계는
+      맞지만 일별 손익이 DB 반환 순서에 따라 달라진다 — "배송 1건은 한 번에 한 곳"이라는
+      계약이 버킷 수준에서 깨진다. 금액을 먼저 확정하면 순서와 무관해진다.
+      (라이브 실측 0/10,159건이지만, 순서 의존은 조용히 틀리는 종류라 구조로 없앤다.)
+
+    집계에서 빠지는 주문(위탁 채널·취소/반품/입금전)은 본 루프와 **같은 규칙**으로
+    제외한다 — 여기서 포함해 버리면 매출 0인 배송에 택배비만 잡힌다.
     """
-    cost = _shipment_cost(o)
-    prev = seen.get(skey)
-    if prev is None:
-        seen[skey] = cost
-        bucket["shipping"] += cost
-    elif cost > prev:
-        seen[skey] = cost
-        bucket["shipping"] += cost - prev  # 이미 더한 만큼만 차액 보정
+    costs: dict[tuple, Decimal] = {}
+    for o in orders:
+        ch = channel_map.get(o.channel_id)
+        if ch and ch.channel_type == "consignment":
+            continue
+        if o.status in REVENUE_EXCLUDED:
+            continue
+        skey = _shipment_key(ch, o)
+        cost = _shipment_cost(o)
+        if cost > costs.get(skey, ZERO):
+            costs[skey] = cost
+    return costs
 
 
 def _raw(o: Order) -> dict:
@@ -457,7 +471,8 @@ def calculate_daily_trend(
     # 날짜별 집계
     daily: dict[str, dict] = {}
     manual_revenue_by_date: dict[str, Decimal] = {}  # 순이익 제외용 추적
-    seen_shipments: dict[tuple, Decimal] = {}  # 배송(packageNumber/박스)당 택배비 1회
+    shipment_costs = _shipment_cost_map(orders, channel_map)  # 배송별 택배비 선행 확정
+    seen_shipments: set[tuple] = set()  # 배송(packageNumber/박스)당 1회 부과
     seen_deliv: set[tuple] = set()      # 쿠팡 배송수입 박스당 1회 (라인 복사 dedup)
     for o in orders:
         ch = channel_map.get(o.channel_id)
@@ -503,8 +518,10 @@ def calculate_daily_trend(
         # 수수료 — 상품매출 기준만 (배송비엔 수수료 미부과)
         bucket["commission"] += _line_commission(ch, o, product_rev, actual_fee)
 
-        # 판매자 배송비 — 물리배송(packageNumber·박스)당 1회, 배송방식별 실단가.
-        _add_shipment_cost(bucket, seen_shipments, skey, o)
+        # 판매자 배송비 — 물리배송(packageNumber·박스)당 1회, 배송방식별 실단가(선행 확정).
+        if skey not in seen_shipments:
+            seen_shipments.add(skey)
+            bucket["shipping"] += shipment_costs[skey]
 
         # VAT — 표시 매출(상품+배송) 기준
         bucket["vat"] += revenue * Decimal("10") / Decimal("110")
@@ -598,7 +615,8 @@ def calculate_channel_summary(
 
     # 채널별 집계
     by_channel: dict[int, dict] = {}
-    seen_shipments: dict[tuple, Decimal] = {}  # 배송(packageNumber/박스)당 택배비 1회
+    shipment_costs = _shipment_cost_map(orders, channel_map)  # 배송별 택배비 선행 확정
+    seen_shipments: set[tuple] = set()  # 배송(packageNumber/박스)당 1회 부과
     seen_deliv: set[tuple] = set()      # 쿠팡 배송수입 박스당 1회 (라인 복사 dedup)
     for o in orders:
         ch = channel_map.get(o.channel_id)
@@ -636,8 +654,10 @@ def calculate_channel_summary(
 
         # 수수료 — 상품매출 기준만 (배송비엔 수수료 미부과)
         b["commission"] += _line_commission(ch, o, product_rev, actual_fee)
-        # 판매자 배송비 — 물리배송(packageNumber·박스)당 1회, 배송방식별 실단가.
-        _add_shipment_cost(b, seen_shipments, skey, o)
+        # 판매자 배송비 — 물리배송(packageNumber·박스)당 1회, 배송방식별 실단가(선행 확정).
+        if skey not in seen_shipments:
+            seen_shipments.add(skey)
+            b["shipping"] += shipment_costs[skey]
         # VAT — 표시 매출(상품+배송) 기준
         b["vat"] += revenue * Decimal("10") / Decimal("110")
 

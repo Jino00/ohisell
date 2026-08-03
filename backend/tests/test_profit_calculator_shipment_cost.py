@@ -6,26 +6,38 @@
 import json
 from decimal import Decimal
 
-from app.models import Order
+from app.models import Channel, Order
 from app.services.profit_calculator import (
     HANJIN_PER_SHIPMENT,
-    _add_shipment_cost,
     _shipment_cost,
+    _shipment_cost_map,
 )
 
 D = Decimal
 NBAESONG = D("3020")
+NAVER_CH = 6
 
 
-def _naver_order(attr: str | None, *, paid=None) -> Order:
+def _naver_order(attr: str | None, *, paid=None, pkg="pkg-1", status="delivered") -> Order:
     """네이버 주문 1라인. paid=None이면 shipping_cost_paid 결측(백필 이전 행) 재현."""
-    raw = {"productOrder": {"deliveryAttributeType": attr} if attr else {}}
-    return Order(raw_data=json.dumps(raw), shipping_cost_paid=paid)
+    po = {"packageNumber": pkg}
+    if attr:
+        po["deliveryAttributeType"] = attr
+    return Order(
+        channel_id=NAVER_CH,
+        order_number=pkg,
+        status=status,
+        raw_data=json.dumps({"productOrder": po}),
+        shipping_cost_paid=paid,
+    )
 
 
 def _foreign_order() -> Order:
     """쿠팡/cafe24 주문 — raw_data에 productOrder 키가 없다."""
     return Order(raw_data=json.dumps({"shipmentBoxId": "box-1"}), shipping_cost_paid=None)
+
+
+_CH_MAP = {NAVER_CH: Channel(code="NAVER", channel_type="own")}
 
 
 # ── _shipment_cost: 배송방식별 단가 ─────────────────────────────────────────
@@ -48,34 +60,63 @@ def test_non_naver_channel_unchanged():
     assert _shipment_cost(_foreign_order()) == HANJIN_PER_SHIPMENT
 
 
-# ── _add_shipment_cost: 배송당 1회 + 최댓값 ────────────────────────────────
-def test_same_shipment_charged_once():
-    bucket, seen = {"shipping": D("0")}, {}
-    skey = (6, "pkg-1")
-    for _ in range(3):  # 한 패키지에 라인 3개
-        _add_shipment_cost(bucket, seen, skey, _naver_order("TODAY", paid=D("1900")))
-    assert bucket["shipping"] == D("1900")
+# ── _shipment_cost_map: 배송별 단가 선행 확정 ──────────────────────────────
+def test_same_shipment_resolves_to_one_entry():
+    orders = [_naver_order("TODAY", paid=D("1900")) for _ in range(3)]  # 한 패키지 3라인
+    costs = _shipment_cost_map(orders, _CH_MAP)
+    assert list(costs.values()) == [D("1900")]
 
 
-def test_distinct_shipments_charged_separately():
-    bucket, seen = {"shipping": D("0")}, {}
-    _add_shipment_cost(bucket, seen, (6, "pkg-1"), _naver_order("TODAY", paid=D("1900")))
-    _add_shipment_cost(bucket, seen, (6, "pkg-2"),
-                       _naver_order("ARRIVAL_GUARANTEE", paid=NBAESONG))
-    assert bucket["shipping"] == D("1900") + NBAESONG
+def test_distinct_shipments_priced_separately():
+    costs = _shipment_cost_map(
+        [
+            _naver_order("TODAY", paid=D("1900"), pkg="pkg-1"),
+            _naver_order("ARRIVAL_GUARANTEE", paid=NBAESONG, pkg="pkg-2"),
+        ],
+        _CH_MAP,
+    )
+    assert sum(costs.values()) == D("1900") + NBAESONG
 
 
 def test_mixed_shipment_takes_max_regardless_of_order():
-    # 한 패키지에 단가가 갈리면 최댓값. 낮은 쪽을 먼저 봐도(=차액 보정) 결과가 같아야 한다.
-    for first, second in (
-        (D("1900"), NBAESONG),
-        (NBAESONG, D("1900")),
-    ):
-        bucket, seen = {"shipping": D("0")}, {}
-        skey = (6, "pkg-mixed")
-        _add_shipment_cost(bucket, seen, skey, _naver_order("TODAY", paid=first))
-        _add_shipment_cost(bucket, seen, skey, _naver_order("TODAY", paid=second))
-        assert bucket["shipping"] == NBAESONG
+    # 한 패키지에 단가가 갈리면 최댓값. 입력 순서가 반대여도 같은 답이어야 한다.
+    for first, second in ((D("1900"), NBAESONG), (NBAESONG, D("1900"))):
+        costs = _shipment_cost_map(
+            [
+                _naver_order("TODAY", paid=first, pkg="pkg-mixed"),
+                _naver_order("TODAY", paid=second, pkg="pkg-mixed"),
+            ],
+            _CH_MAP,
+        )
+        assert sum(costs.values()) == NBAESONG
+
+
+def test_excluded_orders_do_not_create_shipments():
+    # ★취소/반품은 매출에서 빠지므로 택배비도 잡히면 안 된다 — 본 루프와 같은 규칙.
+    costs = _shipment_cost_map(
+        [
+            _naver_order("TODAY", paid=D("1900"), pkg="live"),
+            _naver_order("ARRIVAL_GUARANTEE", paid=NBAESONG, pkg="dead", status="cancelled"),
+            _naver_order("ARRIVAL_GUARANTEE", paid=NBAESONG, pkg="dead2", status="returned"),
+        ],
+        _CH_MAP,
+    )
+    assert sum(costs.values()) == D("1900")
+
+
+def test_consignment_channel_excluded():
+    ch_map = {NAVER_CH: Channel(code="X", channel_type="consignment")}
+    assert _shipment_cost_map([_naver_order("TODAY", paid=D("1900"))], ch_map) == {}
+
+
+def test_price_is_order_independent_across_buckets():
+    # ★codex P2 회귀 가드: 같은 배송이 여러 날짜 버킷에 걸쳐도 금액은 선행 확정이라
+    #   입력 순서와 무관하다. 종전 차액 보정 방식은 앞 버킷 1,900 / 뒤 버킷 1,120으로
+    #   쪼개져 일별 손익이 DB 반환 순서에 따라 달라졌다.
+    a = _naver_order("TODAY", paid=D("1900"), pkg="span")
+    b = _naver_order("ARRIVAL_GUARANTEE", paid=NBAESONG, pkg="span")
+    assert _shipment_cost_map([a, b], _CH_MAP) == _shipment_cost_map([b, a], _CH_MAP)
+    assert sum(_shipment_cost_map([a, b], _CH_MAP).values()) == NBAESONG
 
 
 def test_nbaesong_costs_more_than_flat_rate():
