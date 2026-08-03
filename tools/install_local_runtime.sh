@@ -86,6 +86,20 @@ fi
 # ★wing2(2026-07-27, codex R1 [P1]): WING2=오하이테크 인스턴스. 같은 스크립트를 env로 분리 기동한다.
 #   이 loop에 없으면 plist의 __PYTHON__/__SCRIPT__가 치환되지 않은 채로만 존재해 데몬이 영영 안 뜬다
 #   (= WING2 RG 갱신 요청이 아무도 claim하지 않는다 = 이번 스프린트가 라이브에서 무효).
+# ★공용 모듈 먼저 복사한다(2026-08-03): 페처들이 `import coupang_auth` 한다. 이게 없으면
+#   데몬이 import 실패로 즉사하고 launchd가 무한 재기동한다 — LESSONS #54와 똑같은 기전
+#   (의존 모듈을 빼고 그걸 import하는 파일만 배포해 크래시 루프 265회).
+#   ★페처 복사 루프보다 **앞**이어야 한다: 순서가 뒤면 새 페처가 잠시 구 모듈 없이 존재한다.
+echo "==> 공용 모듈 설치"
+for mod in coupang_auth.py; do
+  if [ ! -f "$REPO_TOOLS/$mod" ]; then
+    echo "    ❌ 공용 모듈 없음: $REPO_TOOLS/$mod — 중단(페처가 import 실패로 죽는다)"
+    exit 1
+  fi
+  cp -f "$REPO_TOOLS/$mod" "$LOCAL_TOOLS/$mod"
+  echo "    $mod 복사"
+done
+
 for pair in "adcost:ad_cost_browser_fetcher.py" "wing:wing_browser_fetcher.py" "wing2:wing_browser_fetcher.py" "rocket:rocket_supplier_fetcher.py" "ohitech-ad:ohitech_ad_fetcher.py"; do
   name="${pair%%:*}"
   script="${pair##*:}"

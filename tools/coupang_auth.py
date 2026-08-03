@@ -1,0 +1,216 @@
+# coupang_auth.py — 쿠팡 페처 4종의 **세션 자가 복구** 공용 구현.
+#
+# 왜 만드는가(2026-08-03 실측):
+#   페처 4종 중 오픽스 광고(ad_cost_browser_fetcher)만 자동 재로그인을 갖고 있었고, 나머지
+#   3종(오하이테크 광고·로켓 공급자허브·Wing)은 세션이 풀리면 그냥 rc=3으로 멈춰 사람을 불렀다.
+#   그날 하루에만 Jino가 3번 로그인했다(09:31·10:07·11:11 — 오하이테크 세션 수명 ≈2시간).
+#   그 결과 같은 날 배포한 워치독의 "위급 시 자동 갱신"도 반쪽이 된다 — 자동으로 당겨도
+#   세션이 죽어 있으면 결국 사람을 부르기 때문이다.
+#
+# 3층 복구(오픽스 구현을 그대로 일반화한 것 — 새로 발명한 게 아니다):
+#   ① aid 만료(발급+1h 절대) → SSO 재진입으로 재발급. **비밀번호 안 씀.**
+#      keycloak 세션(12h)이 살아 있으면 통과 → 수동 로그인 주기가 1h → 12h로 늘어난다.
+#   ② keycloak 세션도 만료 → Keychain 자격증명으로 폼 자동입력.
+#      ★계정별 Keychain 등록은 **Jino가 1회** 해야 한다(아래 KEYCHAIN_SETUP 참조).
+#        등록이 없으면 조용히 ①까지만 하고 폴백한다 — 없다고 깨지지 않는다.
+#   ③ 2FA·실패 → macOS 알림으로 사람 호출. 어차피 로그인은 이 Mac에서 해야 한다.
+#
+# ★headful 전용: xauth의 Akamai가 headless를 Access Denied로 막는다(오픽스 구현 주석 실측).
+# ★프로필별 쿠키: 페처마다 전용 Chrome 프로필이라 keycloak 세션은 **공유되지 않는다**.
+#   한 계정에 로그인해도 다른 프로필은 여전히 자기 세션이 필요하다.
+# ★비밀번호는 메모리에서만 쓰고 로그·파일·git 어디에도 남기지 않는다.
+#
+# KEYCHAIN_SETUP (Jino가 계정마다 1회, 터미널에서):
+#   security add-generic-password -U -s ohisell-coupang-ad -a <로그인ID> -w
+#   (-w 뒤에 비번을 안 적으면 프롬프트로 안전하게 입력받는다)
+from __future__ import annotations
+
+import logging
+import subprocess
+from typing import Callable
+
+log = logging.getLogger(__name__)
+
+# 오픽스 광고 페처가 이미 쓰던 서비스명. 계정(-a)만 다르게 등록하면 4종이 같은 서비스를 공유한다.
+KEYCHAIN_SERVICE = "ohisell-coupang-ad"
+
+# ensure_session 반환값 — 호출부가 rc를 정하는 근거.
+OK = "ok"                      # 세션 살아있음(또는 복구 성공)
+LOGIN_REQUIRED = "login_required"   # 사람이 로그인해야 함(창을 남길 것)
+TWO_FACTOR = "2fa"             # 자격증명은 맞는데 OTP 단계 — 자동화 불가, 사람 호출
+
+
+def keychain_get(account: str, service: str = KEYCHAIN_SERVICE) -> str | None:
+    """macOS Keychain에서 비밀번호를 읽는다(평문 저장·로그·git 없음).
+
+    미등록/잠김/실패는 전부 None → 호출부는 수동 로그인으로 폴백한다.
+    ★반환값을 절대 로그에 찍지 마라.
+    """
+    if not account:
+        return None
+    try:
+        r = subprocess.run(
+            ["security", "find-generic-password", "-s", service, "-a", account, "-w"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode == 0:
+            return r.stdout.strip() or None
+        return None
+    except Exception as e:  # noqa: BLE001
+        log.warning("Keychain 조회 실패(무시): %s", str(e)[:80])
+        return None
+
+
+def notify_mac(title: str, message: str, sound: str = "Glass") -> None:
+    """macOS 네이티브 알림 — 자동 복구가 실패해 사람 개입이 필요할 때.
+
+    로그인은 어차피 이 Mac에서 해야 하므로 알림도 같은 화면에 띄우는 게 가장 빠르다.
+    best-effort: 실패해도 데몬 흐름에 영향 주지 않는다.
+    """
+    try:
+        safe_t = title.replace('"', "'")
+        safe_m = message.replace('"', "'")
+        subprocess.run(
+            ["osascript", "-e",
+             f'display notification "{safe_m}" with title "{safe_t}" sound name "{sound}"'],
+            timeout=10, check=False,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("macOS 알림 실패(무시): %s", str(e)[:80])
+
+
+def otp_input_visible(page) -> bool:
+    """제출 후 '보이는' OTP/인증번호 입력칸이 있는지 — 진짜 2FA 단계 판별.
+
+    ★대시보드 본문에도 '인증번호' 글자가 있어 전체 HTML 키워드 스캔은 오탐한다(오픽스 검증서).
+      실제 2FA는 인증 페이지에 **보이는** 입력 필드가 생긴다 → 그것만 신뢰한다.
+    """
+    try:
+        return bool(page.evaluate("""() => {
+            const els = Array.from(document.querySelectorAll('input'));
+            return els.some(e => {
+                const hint = ((e.placeholder||'') + ' ' + (e.name||'') + ' ' + (e.id||'')).toLowerCase();
+                const vis = e.offsetParent !== null;  // 화면에 보임
+                return vis && (hint.includes('인증') || hint.includes('otp')
+                       || hint.includes('verification') || hint.includes('code'));
+            });
+        }"""))
+    except Exception:
+        return False
+
+
+def _poll_landed(page, is_landed: Callable[[str], bool], timeout_s: int) -> bool:
+    """리다이렉트 체인이 끝나 목적지에 착지했는지 URL 폴링으로 대기."""
+    waited = 0
+    while waited < timeout_s:
+        page.wait_for_timeout(2000)
+        waited += 2
+        try:
+            u = page.url
+        except Exception:
+            continue  # 네비게이션 중
+        if is_landed(u):
+            page.wait_for_timeout(1500)  # 쿠키 안정화
+            return True
+    return False
+
+
+def sso_refresh(
+    page,
+    sso_url: str,
+    is_landed: Callable[[str], bool],
+    *,
+    timeout_s: int = 45,
+) -> bool:
+    """① aid 만료 시 keycloak 세션으로 재발급한다. **비밀번호 안 씀.**
+
+    로그인 시작 URL → keycloak authorize(Akamai JS 챌린지 ~16초) → callback → 목적지 착지.
+    keycloak 세션(12h)도 만료됐으면 로그인 폼에 머물러 False.
+
+    ★about:blank로 먼저 리셋한다: 로그인 페이지에서 곧장 sso_url로 goto하면 클라이언트
+      리다이렉트가 진행 중이라 net::ERR_ABORTED가 난다(오픽스 프로브에서 검증된 사항).
+    """
+    try:
+        page.goto("about:blank", timeout=10000)
+    except Exception:
+        pass
+    try:
+        page.goto(sso_url, wait_until="domcontentloaded", timeout=40000)
+    except Exception as e:  # noqa: BLE001
+        # ERR_ABORTED는 리다이렉트로 인한 중단일 수 있다 — 바로 실패로 보지 말고 폴링으로 확인.
+        log.warning("SSO goto 경고(폴링으로 확인): %s", str(e)[:120])
+    return _poll_landed(page, is_landed, timeout_s)
+
+
+def try_auto_login(
+    page,
+    login_id: str | None,
+    is_landed: Callable[[str], bool],
+    *,
+    service: str = KEYCHAIN_SERVICE,
+    timeout_s: int = 25,
+) -> str:
+    """② keycloak 로그인 폼에 Keychain 자격증명을 자동입력·제출한다.
+
+    반환: OK(착지) / TWO_FACTOR(OTP 단계) / LOGIN_REQUIRED(자격증명 없음·폼 못 찾음·실패).
+    ★비밀번호는 메모리에서만 쓰고 로그에 안 남긴다.
+    """
+    if not login_id:
+        return LOGIN_REQUIRED
+    pw = keychain_get(login_id, service)
+    if not pw:
+        log.info("Keychain 자격증명 없음(%s) — 수동 로그인 폴백.", login_id)
+        return LOGIN_REQUIRED
+    try:
+        page.wait_for_selector("#username, input[name=username]", timeout=15000)
+        page.fill("#username", login_id)
+        page.fill("#password", pw)
+        page.click("#kc-login")
+        if _poll_landed(page, is_landed, timeout_s):
+            log.info("자동 로그인 성공 — 목적지 착지.")
+            return OK
+        # 미착지 → 2FA인지 단순 실패인지 구분(알림 문구가 달라진다)
+        if otp_input_visible(page):
+            log.warning("자동 로그인 후 2FA(인증번호) 단계 — 자동화 불가, 사람 호출.")
+            return TWO_FACTOR
+        log.warning("자동 로그인 실패(목적지 미착지) — 수동 폴백.")
+        return LOGIN_REQUIRED
+    except Exception as e:  # noqa: BLE001
+        log.warning("자동 로그인 실패(수동 폴백): %s", str(e)[:100])
+        return LOGIN_REQUIRED
+
+
+def ensure_session(
+    page,
+    *,
+    sso_url: str,
+    is_landed: Callable[[str], bool],
+    login_id: str | None = None,
+    label: str = "쿠팡",
+    service: str = KEYCHAIN_SERVICE,
+    sso_timeout_s: int = 45,
+    login_timeout_s: int = 25,
+) -> str:
+    """세션이 풀린 상태에서 ①→②→③ 순으로 복구를 시도한다.
+
+    반환 OK면 호출부는 그대로 수집을 이어가면 된다. LOGIN_REQUIRED/TWO_FACTOR면 창을 남기고
+    rc=3(로그인 필요)으로 끝내야 한다 — 재시도해도 같은 자리에서 죽고 창만 반복해서 뜬다.
+
+    ★①을 먼저 하는 이유: 비밀번호를 안 쓰는 경로가 항상 우선이다. 실제로 대부분의 만료는
+      aid(1h)이고 keycloak(12h)은 살아 있어 여기서 끝난다 — 수동 로그인 주기가 12배 늘어난다.
+    """
+    if sso_refresh(page, sso_url, is_landed, timeout_s=sso_timeout_s):
+        log.info("[%s] SSO 재발급 성공(비번 없이) — 세션 복구.", label)
+        return OK
+
+    log.info("[%s] keycloak 세션도 만료 — Keychain 자동 로그인 시도.", label)
+    res = try_auto_login(page, login_id, is_landed, service=service, timeout_s=login_timeout_s)
+    if res == OK:
+        log.info("[%s] 자동 로그인으로 세션 복구.", label)
+        return OK
+
+    if res == TWO_FACTOR:
+        notify_mac(f"{label} 로그인 필요(2FA)", "인증번호 단계 — 열린 Chrome 창에서 직접 로그인하세요.")
+    else:
+        notify_mac(f"{label} 로그인 필요", "자동 복구 실패 — 열린 Chrome 창에서 직접 로그인하세요.")
+    return res

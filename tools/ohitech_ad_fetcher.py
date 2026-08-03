@@ -38,6 +38,10 @@ import subprocess
 import sys
 import time
 import urllib.request
+
+# 세션 자가 복구 공용 구현(같은 디렉터리 — 데몬은 ~/.ohisell/tools/에서 실행되므로
+# install_local_runtime.sh가 이 파일도 함께 복사해야 한다. 빠지면 import 실패로 크래시 루프).
+import coupang_auth
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -91,6 +95,36 @@ def load_config() -> dict:
 def _is_logged_out(url: str) -> bool:
     u = (url or "").lower()
     return any(x in u for x in ("login", "/auth", "sso", "signin", "xauth"))
+
+
+# ── 세션 자가 복구(2026-08-03) ─────────────────────────────────────────
+# 이 페처는 오픽스 광고와 **완전히 같은 대시보드·같은 keycloak**을 쓰는데(DASH_URL 동일),
+# 자동 재로그인만 없어서 세션이 풀릴 때마다 사람을 불렀다(그날 하루 3회). 오픽스가 이미
+# 검증한 경로를 coupang_auth로 일반화해 그대로 쓴다 — 새로 만드는 게 아니다.
+SSO_LOGIN_URL = (
+    "https://advertising.coupang.com/user/login?_cap_client=WING"
+    "&returnUrl=%2Fmarketing%2Fdashboard%2Fsales%3F_cap_client%3DWING"
+)
+
+
+def _is_landed(url: str) -> bool:
+    """SSO/자동로그인 성공 판정 — 대시보드에 착지했고 로그인 페이지가 아니다."""
+    return "/marketing/dashboard" in (url or "") and not _is_logged_out(url)
+
+
+def _recover_session(page, cfg: dict) -> str:
+    """세션이 풀렸을 때 ①SSO 재발급 → ②Keychain 자동로그인 → ③알림 순으로 복구 시도.
+
+    ★login_id(cfg["ad_login_id"])가 없으면 ②는 조용히 건너뛴다 — 미설정이 오류가 아니다.
+      ①만으로도 수동 로그인 주기가 aid(1h) → keycloak(12h)으로 늘어난다.
+    """
+    return coupang_auth.ensure_session(
+        page,
+        sso_url=SSO_LOGIN_URL,
+        is_landed=_is_landed,
+        login_id=cfg.get("ad_login_id"),
+        label="오하이테크 광고",
+    )
 
 
 def _cdp_alive(port: int) -> bool:
@@ -803,10 +837,14 @@ def cmd_run(cfg: dict) -> int:
                 log.warning("대시보드 goto 경고(계속): %s", str(e)[:120])
             page.wait_for_timeout(2000)  # Akamai/세션 안정화
             if _is_logged_out(page.url):
-                log.error("세션 만료(로그인 페이지) — Chrome 창에서 오하이테크 재로그인 필요.")
-                _notify_mac("오하이테크 광고 로그인 필요", "광고비 수집 세션 만료 — Chrome 창에서 재로그인하세요.")
-                owner.keep_open = True   # 로그인할 창이 필요 → 닫지 않음
-                return RC_LOGIN_REQUIRED
+                # ★사람을 부르기 전에 스스로 복구를 시도한다(2026-08-03): 대부분의 만료는
+                #   aid(1h)이고 keycloak(12h)은 살아 있어 비번 없이 여기서 끝난다.
+                log.info("세션 만료 감지 — 자가 복구 시도(SSO → Keychain 순).")
+                if coupang_auth.OK != _recover_session(page, cfg):
+                    log.error("세션 자가 복구 실패 — Chrome 창에서 오하이테크 재로그인 필요.")
+                    owner.keep_open = True   # 로그인할 창이 필요 → 닫지 않음
+                    return RC_LOGIN_REQUIRED
+                log.info("세션 자가 복구 성공 — 수집 계속.")
             res = page.evaluate(_SALES_FETCH_JS, _sales_payload(cfg))
             status = res.get("status") if res else None
             body = (res or {}).get("body") or ""
@@ -814,10 +852,22 @@ def cmd_run(cfg: dict) -> int:
             # 페이지를 200으로 주기도 한다 — 아래 status 분기 안에만 두면 200 로그인 HTML이
             # 파싱 단계로 새어 '재시도 대상'이 되고 창이 세 번 뜬다.
             if any(x in body.lower() for x in ("login", "signin", "kccontext")):
-                log.error("세션 만료(로그인 HTML, status=%s) — 재로그인 필요.", status)
-                _notify_mac("오하이테크 광고 로그인 필요", "광고비 수집 세션 만료 — Chrome 창에서 재로그인하세요.")
-                owner.keep_open = True
-                return RC_LOGIN_REQUIRED
+                # 페이지는 대시보드인데 fetch만 로그인 HTML = aid만 만료된 전형적 상태.
+                # ★복구 후 **한 번만** 재시도한다(무한 루프 금지 — 실패하면 사람을 부른다).
+                log.info("fetch가 로그인 HTML(status=%s) — 자가 복구 후 1회 재시도.", status)
+                if coupang_auth.OK != _recover_session(page, cfg):
+                    log.error("세션 자가 복구 실패 — Chrome 창에서 오하이테크 재로그인 필요.")
+                    owner.keep_open = True
+                    return RC_LOGIN_REQUIRED
+                res = page.evaluate(_SALES_FETCH_JS, _sales_payload(cfg))
+                status = res.get("status") if res else None
+                body = (res or {}).get("body") or ""
+                if any(x in body.lower() for x in ("login", "signin", "kccontext")):
+                    log.error("복구 후에도 로그인 HTML(status=%s) — 재로그인 필요.", status)
+                    coupang_auth.notify_mac("오하이테크 광고 로그인 필요",
+                                            "자동 복구 실패 — Chrome 창에서 재로그인하세요.")
+                    owner.keep_open = True
+                    return RC_LOGIN_REQUIRED
             if status not in (200, 201):
                 log.error("report/SALES 비정상 status=%s — %s", status, body[:160].replace("\n", " "))
                 return 1
