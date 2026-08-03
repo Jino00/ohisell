@@ -1706,7 +1706,30 @@ class NaverAdgroupProduct(Base):
     grain: (adgroup_id, mall_product_id). 소스: 쇼핑 소재 /ncc/ads의
     referenceData.mallProductId(type=SHOPPING_PRODUCT_AD) — naver_product_bep.channel_product_id와
     정확히 일치(라이브 실증). 한 그룹에 소재(상품)가 여럿일 수 있어 unique는 (adgroup, mall_product).
-    optimizer='ours' 쇼핑 캠페인의 활성 그룹만 매일 08:20 sync가 스냅샷 교체(그룹 단위).
+    ══ ★★계약: 이 테이블은 "현재 매핑"이 아니라 **역대 관측의 누적**이다 (2026-08-03) ══
+    매일 07:45 `shopping_ad_product_sync`가 **관측 스코프**(campaign_roster.
+    observation_campaign_ids — 최근 7일 광고비>0 ∪ settings 행, optimizer 무관) 쇼핑 캠페인의
+    활성 그룹을 **upsert**한다. **삭제는 하지 않는다** — 2026-07-31 07:45 KST에 구 "스냅샷
+    교체" 구현이 276행을 전량 날린 뒤, 정리 계층을 통째로 들어냈다(사고 경위와 그 판단 근거는
+    `shopping_ad_product_sync` 모듈 docstring).
+
+    ★★**stale 행이 누적된다 — 소비자는 그 사실을 알고 읽어야 한다.**
+      그룹에서 빠진 상품, 삭제된 그룹, 옮겨간 소재의 행이 **영구히 남는다**. 이 테이블을
+      "지금의 매핑"으로 그대로 믿으면 target ROAS·프록시 매출·예산 증액 판단이 옛 상품에
+      끌려간다. 각 소비자는 자기 판단이 stale에 얼마나 민감한지 스스로 알고 써야 한다.
+
+    ★**신선도 정책은 아직 없다**(2026-08-03 현재). `synced_at`(이번 회차에 관측된 행만 갱신)이
+      유일한 단서지만, 그것만으로 창을 정할 수 없다 — 오래된 `synced_at`은 ⓐ실제로 사라진 행
+      ⓑ네이버 부분 200으로 이번에 안 보인 행 ⓒget_ads 실패·시간 예산 이월로 **아직 안 본** 행을
+      구분하지 못한다. 특히 커서 순회가 한 바퀴 도는 데 며칠이 걸릴 수 있어(정상 주기 실측
+      미확보), 근거 없는 상수로 창을 잡으면 **살아 있는 매핑이 창 밖으로 밀려난다.**
+      → 창을 정하려면 `shopping_ad_product_sync`가 로깅하는 `elapsed_s`로 **커서 한 바퀴 실측**이
+        선행돼야 한다. **자동운영 재개 전 선행조건**(스코프 밖으로 분리된 항목).
+
+    ★단 하나 지금 닫혀 있는 것: **같은 `ad_id`가 여러 행에 존재**할 수 있다는 문제
+      (unique 키가 (adgroup_id, mall_product_id)뿐이라, 소재가 그룹 A→B로 옮기면 두 행이 남는다).
+      `ad_id`를 **실행 레버**로 쓰는 경로는 `synced_at`이 가장 최근인 행 하나만 채택한다
+      (`effective_bid` 참조) — 신선도 창과 무관한 판정이라 age-out 위험이 없다.
     campaign_target_resolver 우선순위 ②(상품 파생 target_roas)가 이 매핑을 소비한다.
 
     ★B1(스프린트 B, D-NAO-65): 소재-레벨 실효입찰 인식·저장. 각 SHOPPING_PRODUCT_AD 소재의

@@ -96,7 +96,13 @@ def _weighted_target_for_cpids(
 
 
 def _cpids_for_adgroup(db: Session, adgroup_id: str) -> list[str]:
-    """광고그룹에 매핑된 상품(mall_product_id=channel_product_id) 목록(naver_adgroup_product)."""
+    """광고그룹에 매핑된 상품(mall_product_id=channel_product_id) 목록.
+
+    ⚠️ `naver_adgroup_product`는 삭제 없는 **누적 upsert**라 그룹에서 빠진 옛 상품 행이 남는다
+    (models.py NaverAdgroupProduct docstring). 즉 이 목록에 stale이 섞일 수 있고, 그만큼
+    target ROAS 가중평균이 흔들린다. 신선도 정책은 **아직 없다** — 정하려면 커서 한 바퀴
+    주기 실측(`shopping_ad_product_sync`의 `elapsed_s`)이 선행돼야 한다(자동운영 재개 전 선행조건).
+    """
     return [
         r[0] for r in db.query(NaverAdgroupProduct.mall_product_id)
         .filter(NaverAdgroupProduct.adgroup_id == adgroup_id).all()
@@ -104,7 +110,11 @@ def _cpids_for_adgroup(db: Session, adgroup_id: str) -> list[str]:
 
 
 def _cpids_for_campaign(db: Session, campaign_id: str) -> list[str]:
-    """캠페인의 그룹들에 매핑된 상품 전체 목록(campaign grain 해석용, 그룹들 가중)."""
+    """캠페인의 그룹들에 매핑된 상품 전체 목록(campaign grain 해석용, 그룹들 가중).
+
+    ⚠️ 누적 upsert라 stale이 섞일 수 있다 — `_cpids_for_adgroup` 경고 참조. campaign grain은
+    그룹들을 합치므로 옛 그룹의 상품까지 누적돼 편차가 더 크다.
+    """
     return [
         r[0] for r in db.query(NaverAdgroupProduct.mall_product_id)
         .filter(NaverAdgroupProduct.campaign_id == campaign_id).all()

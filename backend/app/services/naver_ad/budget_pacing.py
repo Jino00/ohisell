@@ -164,12 +164,15 @@ def remaining_hours(now: datetime) -> Decimal:
 def campaign_product_ids(db: Session, campaign_id: str) -> list[str]:
     """캠페인에 매핑된 판매 상품(mall_product_id = orders.platform_product_id) 목록.
 
-    소스 = naver_adgroup_product(shopping_ad_product_sync 스냅샷 — optimizer='ours' 캠페인만
-    적재한다). 매핑이 없으면 빈 목록 → 프록시 ROAS 판정 불가(fail-closed).
+    소스 = naver_adgroup_product(shopping_ad_product_sync가 **관측 스코프** 쇼핑 캠페인을
+    누적 upsert). 매핑이 없으면 빈 목록 → 프록시 ROAS 판정 불가(fail-closed).
     ★07-27 03 리플레이 실측: 03은 D-NAO-92로 auto_operate=0이라 **애초에 이 레인의 1단계
-    (auto_operate 필터)에서 제외**됐고, 강제 편입해도 optimizer='none'이라 매핑이 0행이라
-    19:20 여기서 다시 막힌다(이중 방어). 갓 'ours'로 전환돼 다음 sync 전인 캠페인도 같은
-    케이스 — 매핑이 도착할 때까지 증액하지 않는다."""
+    (auto_operate 필터)에서 제외**됐다. 갓 편입돼 다음 sync 전인 캠페인도 같은 케이스 —
+    매핑이 도착할 때까지 증액하지 않는다.
+
+    ★신선도 필터(codex 3R P1): 매핑 테이블이 누적 upsert(삭제 없음)라 옛 상품이 계속 남는다.
+    필터 없이 읽으면 이미 빠진 상품의 매출까지 프록시 ROAS에 들어가 **증액이 부당 통과**한다.
+    필터 후 0행이면 위 fail-closed 경로 그대로 — 증액하지 않는다(보수 방향)."""
     return sorted(
         {
             r[0]
