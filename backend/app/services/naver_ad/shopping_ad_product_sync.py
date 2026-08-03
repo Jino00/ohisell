@@ -392,6 +392,9 @@ def collect_adgroup_products(
                 "ad_user_lock": ad.get("ad_user_lock"),
                 # D-NAO-127: 소재 외부 변경 탐지 앵커(editTm). 미주입 경로는 None → 판정 유보.
                 "edit_tm": ad.get("edit_tm"),
+                # D-NAO-137 S1: 피드 적용 시각(APPLY_TM) **관측 적재 전용** — 아래 탐지
+                # (ad_external_change.run)에는 넘기지 않는다. 판정을 안 바꾸는 게 이 슬라이스의 계약.
+                "apply_tm": ad.get("apply_tm"),
                 "adgroup_id": aid,
             })
         result[aid] = rows
@@ -483,6 +486,7 @@ def sync_adgroup_products(
             row.use_group_bid_amt = r.get("use_group_bid_amt")
             row.ad_user_lock = r.get("ad_user_lock")
             row.ad_edit_tm = r.get("edit_tm")  # D-NAO-127 앵커
+            row.ad_apply_tm = r.get("apply_tm")  # D-NAO-137 S1 관측 적재(판정 미사용)
             row.synced_at = now                # 신선도 — stale 판별의 유일 근거
             distinct.add(r["mall_product_id"])
 

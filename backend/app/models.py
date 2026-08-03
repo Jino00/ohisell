@@ -6,7 +6,7 @@ from decimal import Decimal
 from typing import Optional
 
 from sqlalchemy import (
-    JSON, Boolean, DateTime, Date, Float, ForeignKey, Index, Integer, Numeric,
+    JSON, BigInteger, Boolean, DateTime, Date, Float, ForeignKey, Index, Integer, Numeric,
     String, Text, UniqueConstraint, func, text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -1840,6 +1840,18 @@ class NaverAdgroupProduct(Base):
     # 되돌림"이 무변동으로 보이지만 editTm은 단조 전진하므로 편집 사실 자체가 남는다.
     # 문자열 원문 그대로 보관한다 — 판정은 동등비교뿐이라 파싱이 필요 없다(파싱은 표시용).
     ad_edit_tm: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    # D-NAO-137 S1: referenceData.APPLY_TM 원문(에폭 밀리초). ★**관측 적재 전용 — 판정 미사용.**
+    # 왜 필요한가: `ad_edit_tm`은 대행사가 만져도 전진하지만 **네이버가 상품 피드를 재적용해도
+    # 전진한다**(2026-08-03 실측: 전진 233건 중 229건이 피드 재적용이고 광고 설정은 무변동,
+    # 실제 조작은 4건). 즉 editTm 단독으로는 신호 4 : 잡음 229를 못 가른다. 후보 판별자가
+    # `editTm − APPLY_TM`(그날 표본에서 ≤120초 229건 : >1시간 4건으로 완전 분리)인데,
+    # **APPLY_TM은 API가 현재값만 주므로 과거분 소급 수집이 원리적으로 불가능하다** — 지금부터
+    # 적재하지 않으면 표본이 영영 n=1이다. 그래서 판정 배선보다 적재를 먼저 한다.
+    # ★임계 120초를 여기에 굳히지 않는다: 표본 1일치에서 나온 경험값이고, `APPLY_TM`의 의미
+    # 자체가 실측 추론이다(공식 스웨거에 필드는 있으나 설명문 없음). 판별자 배선은 관측을
+    # 며칠 쌓은 뒤 별도 슬라이스(S2)에서 한다.
+    # 기존 행은 NULL(하위호환·backfill 불가) — 다음 07:45 sync가 관측한 행부터 채운다.
+    ad_apply_tm: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
