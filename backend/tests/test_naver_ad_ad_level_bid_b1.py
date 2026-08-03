@@ -13,6 +13,7 @@ from app.database import Base
 from app.models import NaverAdgroupProduct, NaverCampaignSettings, NaverEntity
 from app.services import naver_sa_ad_fetcher as fetcher
 from app.services.naver_ad import shopping_ad_product_sync
+from app.utils.kst import kst_today
 
 
 @pytest.fixture
@@ -131,7 +132,7 @@ def test_sync_stores_ad_bid_columns(db):
         {"mall_product_id": "13365319468", "product_name": "17E", "ad_id": "nad-1",
          "ad_bid_amt": 810, "use_group_bid_amt": False, "ad_user_lock": False},
     ]}
-    shopping_ad_product_sync.sync_adgroup_products(db, ads_by_adgroup=ads)
+    shopping_ad_product_sync.sync_adgroup_products(db, as_of=kst_today(), ads_by_adgroup=ads)
     row = db.query(NaverAdgroupProduct).filter(NaverAdgroupProduct.adgroup_id == "grp-1").one()
     assert row.ad_id == "nad-1"
     assert row.ad_bid_amt == 810
@@ -142,12 +143,12 @@ def test_sync_stores_ad_bid_columns(db):
 def test_sync_snapshot_replace_updates_ad_bid(db):
     """스냅샷 교체 시 소재 입찰도 갱신(그룹입찰 무시하는 소재 bidAmt 변경 추적)."""
     _ours_shopping_adgroup(db)
-    shopping_ad_product_sync.sync_adgroup_products(db, ads_by_adgroup={"grp-1": [
+    shopping_ad_product_sync.sync_adgroup_products(db, as_of=kst_today(), ads_by_adgroup={"grp-1": [
         {"mall_product_id": "13365319468", "product_name": "17E", "ad_id": "nad-1",
          "ad_bid_amt": 810, "use_group_bid_amt": False, "ad_user_lock": False},
     ]})
     # 다음 sync: 소재 입찰 상향
-    shopping_ad_product_sync.sync_adgroup_products(db, ads_by_adgroup={"grp-1": [
+    shopping_ad_product_sync.sync_adgroup_products(db, as_of=kst_today(), ads_by_adgroup={"grp-1": [
         {"mall_product_id": "13365319468", "product_name": "17E", "ad_id": "nad-1",
          "ad_bid_amt": 1200, "use_group_bid_amt": False, "ad_user_lock": True},
     ]})
@@ -160,14 +161,14 @@ def test_sync_ad_bid_columns_null_when_absent(db):
     """입찰 필드 미주입(기존 소비자 형식) → NULL 유지(하위호환·회귀 0)."""
     _ours_shopping_adgroup(db)
     ads = {"grp-1": [{"mall_product_id": "13365319468", "product_name": "17E"}]}
-    res = shopping_ad_product_sync.sync_adgroup_products(db, ads_by_adgroup=ads)
+    res = shopping_ad_product_sync.sync_adgroup_products(db, as_of=kst_today(), ads_by_adgroup=ads)
     # 기존 반환 통계 불변
     # external_ad_changes(D-NAO-127)는 additive — 소재 외부 변경 탐지 결과(여기선 앵커 부재로 0).
-    assert res == {"adgroups": 1, "mappings": 1, "products": 1, "removed": 0,
+    assert res == {"adgroups": 1, "mappings": 1, "products": 1,
+                   "inserted": 1, "updated": 0,
                    "failed_adgroups": 0, "external_ad_changes": 0,
-                   # 2026-07-30 사고 수정 + codex 1R 대응 additive(수집 신뢰도 표면화)
-                   "observation_blind": False, "truncated": False,
-                   "reconciled_campaigns": 1, "withheld_campaigns": 0,
+                   # 2026-07-30 사고 수정 + codex 1R·2R 대응 additive(수집 신뢰도 표면화)
+                   "observation_blind": False, "truncated": False, "cursor": None,
                    "elapsed_s": res["elapsed_s"]}
     row = db.query(NaverAdgroupProduct).filter(NaverAdgroupProduct.adgroup_id == "grp-1").one()
     assert row.mall_product_id == "13365319468"  # 매핑 회귀 0
@@ -187,7 +188,7 @@ def test_sync_dedup_keeps_first_ad_bid(db):
         {"mall_product_id": "13365319468", "product_name": "dup", "ad_id": "nad-dup",
          "ad_bid_amt": 999, "use_group_bid_amt": True, "ad_user_lock": True},
     ]}
-    shopping_ad_product_sync.sync_adgroup_products(db, ads_by_adgroup=ads)
+    shopping_ad_product_sync.sync_adgroup_products(db, as_of=kst_today(), ads_by_adgroup=ads)
     row = db.query(NaverAdgroupProduct).filter(NaverAdgroupProduct.adgroup_id == "grp-1").one()
     assert row.ad_id == "nad-1"
     assert row.ad_bid_amt == 810

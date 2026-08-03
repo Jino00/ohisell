@@ -56,8 +56,15 @@ def _round_won(value: Decimal) -> int:
 def _target_campaign_ids(db: Session, *, today: date | None = None) -> set[str]:
     """대상 캠페인 = **관측 스코프**(campaign_roster.observation_campaign_ids).
 
-    `today`는 스코어카드가 보고하는 날 기준(호출부가 `now.date()`를 넘긴다) — 과거 날짜
-    리플레이가 그날의 스코프를 재현해야 하므로 실시간 `kst_today()`에 기대지 않는다.
+    `today`는 스코어카드가 보고하는 날 기준(호출부가 `now.date()`를 넘긴다) — 실행 시각에
+    의존하지 않는 결정적 계산을 위해 실시간 `kst_today()`에 기대지 않는다.
+
+    ★과거 날짜로 부를 때 **무엇이 재현되고 무엇이 안 되는가**(codex 2R P1-4 정정): 재현되는
+    것은 **광고비 축뿐**이다. settings 축(`naver_campaign_settings` 행 존재 여부)은 히스토리가
+    없어 항상 **현재 상태**이므로, 그 사이 추가된 캠페인은 과거 스코프에 잘못 포함되고
+    제거된 캠페인은 누락된다. 초판 주석은 "과거 스코프가 재현된다"고 주장했으나 그건 틀렸다.
+    이 함수는 관찰 전용(실쓰기 0·API 0)이라 그 오차가 리포트 구성에만 영향을 주므로 과거
+    날짜를 계속 허용한다 — 파괴적 경로(`shopping_ad_product_sync`)는 아예 거부한다.
 
     ★스코프 교체(2026-07-30 사고): 구 정의는 `auto_operate=True ∪ optimizer='ours'`였다.
     D-NAO-132 긴급정지로 두 조건이 동시에 비자 **목적함수(D-NAO-59 총이익 절대액)를 매일

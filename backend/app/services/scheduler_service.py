@@ -431,7 +431,8 @@ def run_naver_bm_deep_job():
 def shopping_ad_product_sync_job():
     """쇼핑 광고그룹↔상품 매핑 동기화 (07:45 KST, D-NAO-57 A, 관찰성 sync).
 
-    optimizer='ours' 쇼핑 캠페인의 활성 그룹 /ncc/ads → naver_adgroup_product 스냅샷 교체+리컨실.
+    관측 스코프 쇼핑 캠페인의 활성 그룹 /ncc/ads → naver_adgroup_product **upsert**(삭제 없음 —
+    2026-08-03 codex 2R 이후 정리 계층 제거, 근거는 shopping_ad_product_sync 모듈 docstring).
     campaign_target_resolver 우선순위 ②(상품 파생 target)의 데이터 소스라 **08:00 제안 생성보다
     먼저** 돌아야 그날 제안이 최신 매핑 기반 target을 쓴다(리뷰 P2-2 — 07:30 BEP 산출 뒤·
     08:00 proposals 앞). fail-open — 매핑 sync 실패가 catch-up 체인 하류 집행 잡을 막으면 안
@@ -440,8 +441,9 @@ def shopping_ad_product_sync_job():
     try:
         from app.services.naver_ad.shopping_ad_product_sync import sync_adgroup_products
 
-        # as_of 명시(codex 1R P1-2): 조용한 kst_today() 폴백을 없앤다 — 관측 스코프의
-        # 기준일이 호출부에서 보여야 catch-up 실행이 어느 날짜로 도는지 알 수 있다.
+        # as_of는 필수 인자다(codex 2R P1-4 — 기본값 자체를 제거했다). 이 잡은 라이브 소재를
+        # 수집하므로 sync_adgroup_products가 오늘이 아닌 날짜를 거부한다: catch-up이 날짜를
+        # 넘겨 도는 일이 있으면 조용히 섞이지 않고 예외로 드러난다(fail-open 로그에 남는다).
         result = sync_adgroup_products(db, as_of=kst_today())
         log.info("[스케줄러] naver shopping_ad_product sync: %s", result)
     except Exception as e:

@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
-from typing import NamedTuple
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -25,62 +24,6 @@ DEFAULT_WINDOW_DAYS = 30
 
 # 관측 스코프의 광고비 창 — "지금 돈을 쓰고 있는가"를 판정하는 기간(D-0 포함).
 OBSERVATION_COST_WINDOW_DAYS = 7
-
-
-class ObservationScope(NamedTuple):
-    """관측 스코프 + **그 스코프를 얼마나 믿을 수 있는가**를 함께 실어 나른다.
-
-    소비자가 스코프를 근거로 **데이터를 지우려 할 때**는 집합만으로 부족하다 —
-    "정말 아무 캠페인도 돈을 안 썼다"와 "`naver_ad_daily` 적재가 죽어서 안 보인다"가
-    똑같이 빈 집합으로 보이기 때문이다. 그래서 두 축을 분해해 같이 준다.
-
-    · `campaign_ids` — `spending | managed`(관측 대상)
-    · `spending`     — 최근 창에서 광고비>0으로 **실제로 관측된** 캠페인
-    · `managed`      — settings 행이 존재하는 캠페인(현재 상태)
-    · `spend_axis_alive` — `spending`이 비어 있지 않은가. 이것이 False면 스코프의 한 축이
-      통째로 침묵한 것이므로 **삭제 판단의 근거로 쓰면 안 된다**(2026-07-30 사고의 교훈:
-      "관측 대상이 안 보인다"는 삭제 근거가 아니라 이상 신호다).
-    """
-
-    campaign_ids: frozenset[str]
-    spending: frozenset[str]
-    managed: frozenset[str]
-
-    @property
-    def spend_axis_alive(self) -> bool:
-        return bool(self.spending)
-
-
-def observation_scope(
-    db: Session, *, days: int = OBSERVATION_COST_WINDOW_DAYS, today: date | None = None,
-) -> ObservationScope:
-    """`observation_campaign_ids`와 같은 스코프를 **두 축으로 분해해** 반환한다.
-
-    스코프의 정의·근거·한계는 전부 `observation_campaign_ids` docstring에 있다(중복 금지).
-    삭제·리컨실처럼 되돌릴 수 없는 판단을 하는 소비자는 집합이 아니라 이쪽을 쓴다 —
-    `spend_axis_alive`로 "스코프를 믿어도 되는가"를 먼저 물을 수 있기 때문이다.
-    """
-    today = today or kst_today()
-    date_from = today - timedelta(days=days - 1)
-
-    spending = {
-        r[0]
-        for r in db.query(NaverAdDaily.campaign_id)
-        .filter(
-            NaverAdDaily.ad_date >= date_from,
-            NaverAdDaily.ad_date <= today,
-            NaverAdDaily.cost > 0,
-        )
-        .distinct()
-        .all()
-        if r[0]
-    }
-    managed = {r[0] for r in db.query(NaverCampaignSettings.campaign_id).all() if r[0]}
-    return ObservationScope(
-        campaign_ids=frozenset(spending | managed),
-        spending=frozenset(spending),
-        managed=frozenset(managed),
-    )
 
 
 def observation_campaign_ids(
@@ -143,11 +86,32 @@ def observation_campaign_ids(
     이 한계는 이번 변경이 만든 것이 아니라 원래부터 그랬다 — `today` 파라미터가 "완전한
     리플레이가 된다"는 인상을 주므로 여기 명시한다.
 
+    ★이 집합을 **삭제 판단의 근거로 쓰지 말 것.** 2026-08-03(codex 2R) 이후
+    `shopping_ad_product_sync`는 매핑을 지우지 않는다 — 스코프가 좁아진 이유가 "정말
+    이탈했다"인지 "수집 축이 침묵한다"인지 이 집합만으로는 영영 구분되지 않기 때문이다.
+    그 판정을 시도했던 가드 계층은 전부 제거됐고, 되살리려면 그 구분을 가능하게 하는
+    증거부터 확보해야 한다.
+
     반환: campaign_id 집합. 각 소비자는 자기 고유 필터(SHOPPING만·활성 그룹만 등)를
-    이 집합 **위에** 얹는다. 삭제·리컨실 판단을 하는 소비자는 이 함수 대신
-    `observation_scope()`를 써서 `spend_axis_alive`를 먼저 확인한다.
+    이 집합 **위에** 얹는다.
     """
-    return set(observation_scope(db, days=days, today=today).campaign_ids)
+    today = today or kst_today()
+    date_from = today - timedelta(days=days - 1)
+
+    spending = {
+        r[0]
+        for r in db.query(NaverAdDaily.campaign_id)
+        .filter(
+            NaverAdDaily.ad_date >= date_from,
+            NaverAdDaily.ad_date <= today,
+            NaverAdDaily.cost > 0,
+        )
+        .distinct()
+        .all()
+        if r[0]
+    }
+    managed = {r[0] for r in db.query(NaverCampaignSettings.campaign_id).all() if r[0]}
+    return spending | managed
 
 
 def build(db: Session, *, days: int = DEFAULT_WINDOW_DAYS, today: date | None = None) -> list[dict]:

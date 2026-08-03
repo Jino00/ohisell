@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine
@@ -26,7 +27,8 @@ from sqlalchemy.pool import StaticPool
 
 from app.database import Base
 from app.models import (
-    NaverAdDaily, NaverAdgroupProduct, NaverCampaignSettings, NaverEntity, NaverProposal,
+    NaverAccountSettings, NaverAdDaily, NaverAdgroupProduct, NaverCampaignSettings, NaverEntity,
+    NaverProposal,
 )
 from app.services.naver_ad import (
     campaign_roster, flight_loop, naver_execution_harness as harness, probe_learning_loop,
@@ -148,201 +150,331 @@ def test_scope_is_not_account_wide(db):
 
 
 # ══════════════════════════════════════════════════════════════════
-# ② 파괴적 분기 — 관측 대상 0이면 아무것도 지우지 않는다
+# ② ★삭제 없음 — 이 잡은 어떤 조건에서도 매핑 행을 줄이지 않는다
+#
+# codex 2R 이후 방향 전환: 가드를 네 겹 쌓아도 매 라운드 틈이 나왔다(전역 신호로 캠페인별
+# 삭제를 판단 / 네이버의 부분 HTTP-200을 '없어졌다'와 구분 불가). 그래서 정리 계층을 통째로
+# 들어냈다. 아래 테스트들은 **삭제 계층이 되살아나면 깨진다** — 그게 이 절의 목적이다.
 # ══════════════════════════════════════════════════════════════════
-def test_sync_preserves_mappings_when_observation_scope_is_empty(db):
-    """★★이 파일의 핵심 회귀. 관측 대상이 0일 때 기존 매핑이 **한 행도** 삭제되지 않는다.
+def _row_ids(db) -> set[int]:
+    return {r.id for r in db.query(NaverAdgroupProduct).all()}
 
-    수정 전 코드는 `else: db.execute(delete(NaverAdgroupProduct))`로 테이블을 통째로
-    비웠다(라이브 실증: 276행 → 0행). 대상 0은 이상 신호이지 삭제 근거가 아니다.
+
+@pytest.mark.parametrize("scenario", ["scope_empty", "campaign_gone", "group_off",
+                                      "entity_never_synced", "fetch_failed", "budget_truncated"])
+def test_sync_never_removes_existing_mappings(db, monkeypatch, scenario):
+    """★★이 파일의 핵심 계약: 어떤 시나리오에서도 기존 매핑 행이 **하나도** 줄지 않는다.
+
+    2026-07-31 07:45 KST에 276행이 0행이 된 사고(전량 삭제)를 포함해, 1·2라운드에서
+    codex가 지적한 삭제 경로를 전부 한 계약으로 흡수한다:
+      · scope_empty         — 관측 스코프 공집합(07-31 사고 재현)
+      · campaign_gone       — 스코프를 벗어난 캠페인의 행(구 layer 1)
+      · group_off           — 활성 엔티티에 없는 그룹의 행(구 layer 2)
+      · entity_never_synced — entity_sync가 못 본 캠페인(2R P1-1)
+      · fetch_failed        — get_ads 실패(부분 응답과 구분 불가)
+      · budget_truncated    — 시간 예산 소진으로 부분 수집(2R P1-3)
     """
     db.add_all([
-        NaverAdgroupProduct(adgroup_id="grp-1", campaign_id="cmp-gone", mall_product_id="p1"),
-        NaverAdgroupProduct(adgroup_id="grp-2", campaign_id="cmp-gone", mall_product_id="p2"),
+        NaverAdgroupProduct(adgroup_id="grp-keep", campaign_id="cmp-a", mall_product_id="p1"),
+        NaverAdgroupProduct(adgroup_id="grp-orphan", campaign_id="cmp-vanished", mall_product_id="p2"),
     ])
+    ads: dict | None = {}
+    budget = shopping_ad_product_sync._RUN_BUDGET_S
+
+    if scenario == "scope_empty":
+        pass  # settings·spend 둘 다 없음 → 스코프 공집합
+    elif scenario == "campaign_gone":
+        _stopped_settings(db, "cmp-a")
+        _adgroup(db, "grp-keep", "cmp-a")
+        _spend(db, "cmp-a", days_ago=1)
+        ads = {"grp-keep": [{"mall_product_id": "p1", "product_name": "x"}]}
+    elif scenario == "group_off":
+        _stopped_settings(db, "cmp-a")
+        _adgroup(db, "grp-keep", "cmp-a", status="off")  # 활성 그룹 0
+    elif scenario == "entity_never_synced":
+        _stopped_settings(db, "cmp-a")  # adgroup 엔티티 행 전무
+    elif scenario == "fetch_failed":
+        _stopped_settings(db, "cmp-a")
+        _adgroup(db, "grp-keep", "cmp-a")
+        monkeypatch.setattr(shopping_ad_product_sync, "_MIN_CALL_INTERVAL_S", 0)
+        monkeypatch.setattr(shopping_ad_product_sync, "get_ads",
+                            lambda aid: (_ for _ in ()).throw(RuntimeError("일시 장애")))
+        ads = None  # 실 경로
+    elif scenario == "budget_truncated":
+        _stopped_settings(db, "cmp-a")
+        _adgroup(db, "grp-keep", "cmp-a")
+        ads = {"grp-keep": [{"mall_product_id": "p1", "product_name": "x"}]}
+        budget = 0  # 첫 그룹 앞에서 예산 소진
     db.commit()
-    assert campaign_roster.observation_campaign_ids(db) == set(), "전제: 관측 대상 0"
 
-    res = shopping_ad_product_sync.sync_adgroup_products(db, ads_by_adgroup={})
+    before = _row_ids(db)
+    shopping_ad_product_sync.sync_adgroup_products(
+        db, as_of=kst_today(), ads_by_adgroup=ads, budget_s=budget,
+    )
+    after = _row_ids(db)
+    assert before <= after, f"[{scenario}] 기존 매핑 행이 삭제됐다: {sorted(before - after)}"
 
-    assert res["observation_blind"] is True
-    assert res["removed"] == 0
-    assert db.query(NaverAdgroupProduct).count() == 2, "관측 대상 0인데 매핑을 지웠다"
 
+def test_module_contains_no_delete_statement():
+    """★계약: 이 모듈의 소스에 삭제 구문이 **문법적으로도** 없다.
 
-def test_sync_cleans_when_last_group_intentionally_deactivated(db):
-    """★codex 1R P1-1 — 열거 성공 + 활성 그룹 0 → **정리한다**(반대 방향의 정당한 정리).
-
-    초판은 "스코프 전체에 활성 SHOPPING 그룹 0"이라는 **전역** 조건으로 정리를 통째로 껐다.
-    그러면 관리 캠페인의 마지막 그룹을 **의도적으로** 내린 경우에도 stale 매핑이 영구히
-    남는다(codex 지적, 초판 테스트가 그 역회귀를 계약으로 고정하고 있었다).
-
-    '열거 성공'의 증거 = `naver_entity`에 이 캠페인의 adgroup 행이 존재(status 무관).
-    여기선 off 행과 WEB_SITE 행이 남아 있으므로 "봤는데 활성 쇼핑 그룹이 없다"가 확정된다.
+    주석·docstring이 아니라 AST를 본다. 다음 사람이 "이 경우엔 지워도 안전하지 않나"로
+    정리 계층을 되살리면 여기서 깨진다 — 되살리려면 부분 HTTP-200과 실제 소멸을 구분할
+    증거를 먼저 확보해야 하고, 그건 이 잡의 스코프가 아니다(모듈 docstring).
     """
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(shopping_ad_product_sync))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            fn = node.func
+            name = getattr(fn, "id", None) or getattr(fn, "attr", None)
+            assert name not in ("delete", "bulk_delete_mappings"), (
+                "shopping_ad_product_sync에 삭제 구문이 생겼다 — 이 잡은 수집(upsert) 전용이다."
+            )
+        # ORM 세션 삭제도 금지(db.delete(row))
+        if isinstance(node, ast.Attribute) and node.attr == "delete":
+            raise AssertionError("shopping_ad_product_sync에 .delete 접근이 생겼다")
+
+
+def test_sync_upserts_instead_of_replacing(db):
+    """수집된 행은 갱신(신선도 전진), 이번에 안 보인 행은 남되 신선도가 멈춘다."""
     _stopped_settings(db, "cmp-a")
-    _adgroup(db, "grp-off", "cmp-a", status="off")              # 의도적 비활성화
-    _adgroup(db, "grp-web", "cmp-a", campaign_type="WEB_SITE")  # 쇼핑 아님
-    db.add(NaverAdgroupProduct(adgroup_id="grp-old", campaign_id="cmp-a", mall_product_id="p1"))
+    _adgroup(db, "grp-1", "cmp-a")
     db.commit()
 
-    with caplog_at_warning(shopping_ad_product_sync) as records:
-        res = shopping_ad_product_sync.sync_adgroup_products(db, ads_by_adgroup={})
+    shopping_ad_product_sync.sync_adgroup_products(
+        db, as_of=kst_today(),
+        ads_by_adgroup={"grp-1": [
+            {"mall_product_id": "p1", "product_name": "A"},
+            {"mall_product_id": "p2", "product_name": "B"},
+        ]},
+    )
+    res2 = shopping_ad_product_sync.sync_adgroup_products(
+        db, as_of=kst_today(),
+        ads_by_adgroup={"grp-1": [{"mall_product_id": "p1", "product_name": "A2"}]},
+    )
 
-    assert res["observation_blind"] is True, "전역 '대상 0' 신호 자체는 그대로 관측된다"
-    assert res["reconciled_campaigns"] == 1
-    assert res["withheld_campaigns"] == 0
-    assert res["removed"] == 1
-    assert db.query(NaverAdgroupProduct).count() == 0
-    # ★로그가 거짓말하지 않는다: 실제로 지웠는데 "보존한다"고 쓰면 안 된다.
-    assert not any("삭제하지 않고 보존" in m for m in records()), records()
+    assert res2["inserted"] == 0 and res2["updated"] == 1
+    rows = {r.mall_product_id: r for r in db.query(NaverAdgroupProduct).all()}
+    assert set(rows) == {"p1", "p2"}, "안 보인 p2도 남는다(삭제하지 않음)"
+    assert rows["p1"].product_name == "A2", "관측된 행은 갱신된다"
+    assert rows["p1"].synced_at > rows["p2"].synced_at, "신선도로 stale이 구분된다"
 
 
-def test_sync_withholds_cleanup_for_campaign_entity_never_enumerated(db):
-    """★반대 방향 — 엔티티 인벤토리를 못 본 캠페인은 활성 그룹 0이어도 **보존**한다.
+# ══════════════════════════════════════════════════════════════════
+# ②-b 커서 — 예산에 걸려도 꼬리가 굶지 않는다 (codex 2R P1-3)
+# ══════════════════════════════════════════════════════════════════
+def _seed_groups(db, n: int, campaign_id="cmp-a"):
+    _stopped_settings(db, campaign_id)
+    for i in range(n):
+        _adgroup(db, f"grp-{i:02d}", campaign_id)
+    db.commit()
 
-    adgroup 행이 하나도 없다 = `sync_naver_entity`가 이 캠페인을 못 채웠다(또는 죽었다).
-    "그룹이 없어졌다"가 아니라 "안 보인다"이므로 지울 근거가 없다 — 이것이 위 테스트와
-    갈리는 지점이고, 두 상황을 가르는 신호가 `_entity_enumerated_campaigns`다.
+
+def test_adgroup_order_is_deterministic(db):
+    """커서 순회의 전제 — 목록 순서가 회차마다 같다(adgroup_id 오름차순)."""
+    _seed_groups(db, 5)
+    ids = [a.entity_id for a in
+           shopping_ad_product_sync._observed_shopping_adgroups(db, as_of=kst_today())]
+    assert ids == sorted(ids)
+
+
+def test_cursor_advances_and_next_run_resumes_after_it(db):
+    """★starvation 정면 회귀: 예산에 걸리면 커서가 남고, 다음 회차는 **그 다음**부터 시작한다.
+
+    구 구현은 커서가 없어 매 회차 index 0에서 시작했다 — 지속적으로 느리면 같은 prefix만
+    매일 갱신되고 꼬리는 영원히 미시도로 굶는다. 이 테스트가 그 재현을 불가능하게 만든다.
     """
-    _stopped_settings(db, "cmp-a")  # settings만 있고 adgroup 엔티티 행은 전무
-    db.add(NaverAdgroupProduct(adgroup_id="grp-old", campaign_id="cmp-a", mall_product_id="p1"))
-    db.commit()
+    _seed_groups(db, 4)
+    ads = {f"grp-{i:02d}": [{"mall_product_id": f"p{i}", "product_name": "x"}] for i in range(4)}
+    adgroups = shopping_ad_product_sync._observed_shopping_adgroups(db, as_of=kst_today())
 
-    res = shopping_ad_product_sync.sync_adgroup_products(db, ads_by_adgroup={})
+    # 1회차: 2개만 처리하도록 예산을 흉내낸다(직접 collect 호출 + 목록 슬라이스)
+    out1 = shopping_ad_product_sync.collect_adgroup_products(
+        db, as_of=kst_today(), ads_by_adgroup=ads, adgroups=adgroups[:2], cursor=None,
+    )
+    assert out1.attempted == ["grp-00", "grp-01"]
 
-    assert res["reconciled_campaigns"] == 0
-    assert res["withheld_campaigns"] == 1
-    assert res["removed"] == 0
-    assert db.query(NaverAdgroupProduct).count() == 1
+    # 커서를 grp-01로 두면 2회차는 grp-02부터 — 앞의 두 개를 다시 갈지 않는다.
+    out2 = shopping_ad_product_sync.collect_adgroup_products(
+        db, as_of=kst_today(), ads_by_adgroup=ads, adgroups=adgroups, cursor="grp-01",
+    )
+    assert out2.attempted == ["grp-02", "grp-03", "grp-00", "grp-01"], "커서 다음부터 링 순회"
 
 
-def test_sync_withholds_cleanup_for_campaign_whose_fetch_failed(db, monkeypatch):
-    """★기존 계약 유지 — get_ads가 실패한 캠페인은 그 캠페인만 정리 보류(전면 중단 아님)."""
-    _stopped_settings(db, "cmp-a")
-    _stopped_settings(db, "cmp-b")
-    _adgroup(db, "grp-a", "cmp-a")
-    _adgroup(db, "grp-b", "cmp-b")
-    db.add_all([
-        NaverAdgroupProduct(adgroup_id="grp-a-old", campaign_id="cmp-a", mall_product_id="pa"),
-        NaverAdgroupProduct(adgroup_id="grp-b-old", campaign_id="cmp-b", mall_product_id="pb"),
-    ])
-    db.commit()
+def test_persistently_slow_runs_still_visit_every_group(db, monkeypatch):
+    """★★P1-3 정면 회귀: **지속적으로 느려도** 모든 그룹이 몇 회차 안에 방문된다.
+
+    codex 지적의 핵심 시나리오를 그대로 재현한다 — 매 회차 예산이 전체를 못 돌 만큼 작다.
+    커서가 없던 구현이라면 매 회차 index 0에서 시작해 앞의 3개만 영원히 갱신되고 꼬리
+    4개는 **단 한 번도** 방문되지 않는다. 가짜 시계로 한 호출당 40초를 소비시켜 그 상황을
+    만들고, 3회차 안에 7개 전부가 방문되는지 본다.
+    """
+    _seed_groups(db, 7)
+    clock = {"t": 0.0}
+    visited: list[str] = []
 
     def fake_get_ads(aid):
-        if aid == "grp-a":
-            raise RuntimeError("일시 API 장애")
-        return [{"mall_product_id": "p1", "product_name": "x", "adgroup_id": aid}]
+        clock["t"] += 40.0  # 한 호출 40초
+        visited.append(aid)
+        return []
 
     monkeypatch.setattr(shopping_ad_product_sync, "get_ads", fake_get_ads)
-    monkeypatch.setattr(shopping_ad_product_sync, "_MIN_CALL_INTERVAL_S", 0)
-    res = shopping_ad_product_sync.sync_adgroup_products(db)  # 실 경로(주입 없음)
+    monkeypatch.setattr(
+        shopping_ad_product_sync, "time",
+        SimpleNamespace(monotonic=lambda: clock["t"], sleep=lambda s: None),
+    )
 
-    assert res["failed_adgroups"] == 1
-    assert res["withheld_campaigns"] == 1  # cmp-a만 보류
-    assert res["reconciled_campaigns"] == 1  # cmp-b는 정상 정리
-    assert {r.adgroup_id for r in db.query(NaverAdgroupProduct).all()} == {"grp-a-old", "grp-b"}
+    per_run = []
+    for _ in range(3):
+        visited.clear()
+        clock["t"] = 0.0
+        shopping_ad_product_sync.sync_adgroup_products(db, as_of=kst_today(), budget_s=200)
+        per_run.append(list(visited))
+
+    assert all(r for r in per_run), f"어느 회차도 굶으면 안 된다: {per_run}"
+    seen = {g for run in per_run for g in run}
+    assert seen == {f"grp-{i:02d}" for i in range(7)}, (
+        f"3회차 안에 전 그룹이 방문돼야 한다 — 미방문={sorted({f'grp-{i:02d}' for i in range(7)} - seen)}, "
+        f"회차별={per_run}"
+    )
+    assert per_run[0] != per_run[1], "회차마다 같은 prefix만 갈면 꼬리가 굶는다(구 구현의 병)"
 
 
-def test_sync_still_cleans_stale_rows_when_observation_succeeds(db):
-    """★반대 방향 — 맹목 가드가 정상 정리까지 막으면 안 된다.
+def test_cursor_persists_across_runs_and_rewinds_after_full_pass(db):
+    """커서가 DB에 남고, 한 바퀴를 완주하면 비워진다(다음 회차는 처음부터)."""
+    _seed_groups(db, 3)
+    ads = {f"grp-{i:02d}": [] for i in range(3)}
 
-    관측이 성공한 경우, 실제로 사라진 소재(2)/스코프 밖 캠페인(1)의 행은 종전대로 정리된다.
-    (1)은 광고비 축이 살아 있어야 도는 계층이라 광고비 행을 함께 심는다.
-    """
-    _stopped_settings(db, "cmp-a")
-    _adgroup(db, "grp-1", "cmp-a")
-    _spend(db, "cmp-a", days_ago=1, adgroup_id="grp-1")
-    db.add_all([
-        # 스코프 밖 캠페인 → (1)에서 정리
-        NaverAdgroupProduct(adgroup_id="grp-z", campaign_id="cmp-out", mall_product_id="pz"),
-        # 같은 캠페인이지만 활성 그룹 목록에 없음 → (2)에서 정리
-        NaverAdgroupProduct(adgroup_id="grp-gone", campaign_id="cmp-a", mall_product_id="pg"),
-    ])
+    # budget_s=0 → 아무것도 시도 못 하고 truncated. 시도 0이면 커서는 남길 게 없다.
+    res0 = shopping_ad_product_sync.sync_adgroup_products(
+        db, as_of=kst_today(), ads_by_adgroup=ads, budget_s=0,
+    )
+    assert res0["truncated"] is True and res0["cursor"] is None
+
+    # 정상 회차 — 전부 완주하면 커서는 None(되감김)
+    res1 = shopping_ad_product_sync.sync_adgroup_products(db, as_of=kst_today(), ads_by_adgroup=ads)
+    assert res1["truncated"] is False
+    assert res1["cursor"] is None
+    assert shopping_ad_product_sync.read_cursor(db) is None
+
+
+def test_cursor_is_written_and_read_back(db):
+    """커서 저장·복원 왕복(마이그레이션 없이 기존 KV 사용)."""
+    now = datetime(2026, 8, 3, 7, 45)
+    shopping_ad_product_sync.write_cursor(db, "grp-42", now=now)
     db.commit()
-
-    res = shopping_ad_product_sync.sync_adgroup_products(
-        db, ads_by_adgroup={"grp-1": [{"mall_product_id": "p1", "product_name": "x"}]},
-    )
-
-    assert res["observation_blind"] is False
-    assert res["removed"] == 2
-    assert {r.adgroup_id for r in db.query(NaverAdgroupProduct).all()} == {"grp-1"}
+    assert shopping_ad_product_sync.read_cursor(db) == "grp-42"
+    shopping_ad_product_sync.write_cursor(db, None, now=now)
+    db.commit()
+    assert shopping_ad_product_sync.read_cursor(db) is None
 
 
-def test_sync_withholds_out_of_scope_cleanup_when_spend_axis_silent(db):
-    """★스코프 이탈 판정은 `naver_ad_daily`가 근거다 — 그 적재가 죽으면 보류한다.
+def test_corrupt_cursor_falls_back_to_start(db):
+    """커서 값이 깨져도 죽지 않고 처음부터 순회한다(커서는 최적화지 정확성 요건이 아니다)."""
+    db.add(NaverAccountSettings(
+        key=shopping_ad_product_sync.CURSOR_SETTINGS_KEY, value_json="{깨진 JSON",
+    ))
+    db.commit()
+    assert shopping_ad_product_sync.read_cursor(db) is None
 
-    광고비 축이 침묵하면 멀쩡히 돈 쓰는 캠페인이 전부 '이탈'로 보인다. (2)는 근거가
-    `naver_entity`라 이 축과 무관하므로 계속 돈다(증거 출처가 다른 두 판단을 한 신호로
-    끄지 않는다).
+
+def test_rotate_from_missing_cursor_resumes_at_next_greater_id(db):
+    """커서가 가리키던 그룹이 사라져도(삭제·스코프 변경) 그 다음 id부터 이어간다."""
+    _seed_groups(db, 4)
+    adgroups = shopping_ad_product_sync._observed_shopping_adgroups(db, as_of=kst_today())
+    rotated = shopping_ad_product_sync._rotate_from_cursor(adgroups, "grp-01x")  # 존재하지 않는 값
+    assert [a.entity_id for a in rotated] == ["grp-02", "grp-03", "grp-00", "grp-01"]
+
+
+# ══════════════════════════════════════════════════════════════════
+# ②-c 과거 날짜 거부 (codex 2R P1-4)
+# ══════════════════════════════════════════════════════════════════
+def test_sync_rejects_past_as_of(db):
+    """★라이브 수집 경로는 과거 날짜를 **거부**한다(문서 경고가 아니라 예외).
+
+    과거 as_of는 '과거 광고비 + 현재 settings + 현재 엔티티 + 라이브 소재'를 뒤섞는다.
+    되감기는 축은 광고비뿐이라 결과가 무엇의 스냅샷인지 말할 수 없다.
     """
+    with pytest.raises(ValueError, match="오늘"):
+        shopping_ad_product_sync.sync_adgroup_products(
+            db, as_of=kst_today() - timedelta(days=1), ads_by_adgroup={},
+        )
+
+
+def test_sync_rejects_future_as_of(db):
+    with pytest.raises(ValueError, match="오늘"):
+        shopping_ad_product_sync.sync_adgroup_products(
+            db, as_of=kst_today() + timedelta(days=1), ads_by_adgroup={},
+        )
+
+
+def test_sync_requires_as_of_explicitly(db):
+    """기본값 제거 — 호출부가 반드시 명시해야 한다(조용한 kst_today() 폴백 금지)."""
+    with pytest.raises(TypeError, match="as_of"):
+        shopping_ad_product_sync.sync_adgroup_products(db, ads_by_adgroup={})  # type: ignore[call-arg]
+
+
+def test_nondestructive_consumers_still_accept_past_dates(db):
+    """비파괴 관측(scorecard·probe)은 과거 날짜를 계속 허용한다 — 거부는 쓰기 경로만."""
     _stopped_settings(db, "cmp-a")
-    _adgroup(db, "grp-1", "cmp-a")
-    db.add_all([
-        NaverAdgroupProduct(adgroup_id="grp-z", campaign_id="cmp-out", mall_product_id="pz"),
-        NaverAdgroupProduct(adgroup_id="grp-gone", campaign_id="cmp-a", mall_product_id="pg"),
-    ])
-    db.commit()  # 광고비 행 없음 = spend_axis_alive False
-
-    res = shopping_ad_product_sync.sync_adgroup_products(
-        db, ads_by_adgroup={"grp-1": [{"mall_product_id": "p1", "product_name": "x"}]},
-    )
-
-    assert res["removed"] == 1, "(2)만 돌아야 한다"
-    assert {r.adgroup_id for r in db.query(NaverAdgroupProduct).all()} == {"grp-z", "grp-1"}
+    db.commit()
+    past = kst_today() - timedelta(days=30)
+    assert profit_scorecard._target_campaign_ids(db, today=past) == {"cmp-a"}
+    assert probe_learning_loop._observed_campaign_ids(db, as_of=past) == ["cmp-a"]
 
 
 # ══════════════════════════════════════════════════════════════════
 # ③ 로그 — "대상 0" ≠ "관측했는데 0건"
 # ══════════════════════════════════════════════════════════════════
-def test_blind_scope_logs_warning_and_diary(db, caplog):
+def test_blind_scope_logs_warning_and_diary(db):
     """맹목은 WARNING으로 승격하고 문장에 '스코프 결함 의심'이 드러난다.
 
-    구 코드는 INFO `그룹 0개`만 찍어, 사흘간의 맹목이 안전 확인처럼 보였다
-    (flight_loop._log_flight_silence의 유성 실패 관례를 이 모듈에도 적용).
+    구 코드는 INFO `그룹 0개`만 찍어, 사흘간의 맹목이 안전 확인처럼 보였다.
     """
     db.add(NaverAdgroupProduct(adgroup_id="grp-1", campaign_id="cmp-gone", mall_product_id="p1"))
     db.commit()
 
-    with caplog.at_level(logging.WARNING, logger="app.services.naver_ad.shopping_ad_product_sync"):
-        shopping_ad_product_sync.sync_adgroup_products(db, ads_by_adgroup={})
+    with caplog_at_warning(shopping_ad_product_sync) as records:
+        shopping_ad_product_sync.sync_adgroup_products(db, as_of=kst_today(), ads_by_adgroup={})
 
-    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
-    assert any("관측 대상 자체가 0" in m and "스코프 결함 의심" in m for m in warnings), warnings
-    assert any("삭제하지 않고 보존" in m for m in warnings), warnings
+    msgs = records()
+    assert any("관측 대상 자체가 0" in m and "스코프 결함 의심" in m for m in msgs), msgs
+    # ★"삭제하지 않고 보존한다"류 서술은 없어야 한다 — 이 잡은 애초에 안 지우므로
+    #   그 문장은 독자에게 "지울 수도 있는 잡"이라는 오해를 준다.
+    assert not any("보존" in m for m in msgs), msgs
 
 
-def test_normal_sync_does_not_warn_about_scope(db, caplog):
+def test_normal_sync_does_not_warn_about_scope(db):
     """정상 수집은 WARNING을 내지 않는다(경보가 배경소음이 되면 안 된다)."""
     _stopped_settings(db, "cmp-a")
     _adgroup(db, "grp-1", "cmp-a")
     db.commit()
 
-    with caplog.at_level(logging.WARNING, logger="app.services.naver_ad.shopping_ad_product_sync"):
+    with caplog_at_warning(shopping_ad_product_sync) as records:
         shopping_ad_product_sync.sync_adgroup_products(
-            db, ads_by_adgroup={"grp-1": [{"mall_product_id": "p1", "product_name": "x"}]},
+            db, as_of=kst_today(),
+            ads_by_adgroup={"grp-1": [{"mall_product_id": "p1", "product_name": "x"}]},
         )
-
-    assert [
-        r.getMessage() for r in caplog.records
-        if r.levelno >= logging.WARNING and r.name == shopping_ad_product_sync.__name__
-    ] == []
+    assert records() == []
 
 
-def test_ad_external_change_warns_when_nothing_observed(db, caplog):
+def test_ad_external_change_warns_when_nothing_observed(db):
     """소재 grain 맹목도 WARNING — 이 탐지기는 자체 스코프가 없어 호출부와 함께 죽는다."""
     from app.services.naver_ad import ad_external_change
 
-    with caplog.at_level(logging.WARNING, logger="app.services.naver_ad.ad_external_change"):
+    with caplog_at_warning(ad_external_change) as records:
         res = ad_external_change.run(db, prev_by_ad={}, observed=[], now=datetime(2026, 8, 3, 7, 45))
 
     assert res == {"observed": 0, "ops": 0, "recorded": 0}
-    assert any("소재 grain 전면 맹목" in r.getMessage() for r in caplog.records)
+    assert any("소재 grain 전면 맹목" in m for m in records())
+
 
 
 # ══════════════════════════════════════════════════════════════════
-# ③-b 호출 예산 — 스로틀 · 시간 예산 이월 · 소요시간 (codex 1R P2)
+# ③-b 호출 예산 — 스로틀 · 시간 예산 이월 · 소요시간 (codex 1R P2 / 2R P2)
 # ══════════════════════════════════════════════════════════════════
 def test_live_path_throttles_between_calls(db, monkeypatch):
     """실 API 경로는 호출 사이에 최소 간격을 둔다(rate limit 사전 회피)."""
@@ -355,7 +487,7 @@ def test_live_path_throttles_between_calls(db, monkeypatch):
     monkeypatch.setattr(shopping_ad_product_sync, "get_ads", lambda aid: [])
     monkeypatch.setattr(shopping_ad_product_sync.time, "sleep", lambda s: sleeps.append(s))
 
-    shopping_ad_product_sync.collect_adgroup_products(db)
+    shopping_ad_product_sync.collect_adgroup_products(db, as_of=kst_today())
 
     # 3그룹 → 첫 콜 앞에는 안 쉰다(간격은 콜 '사이')
     assert sleeps == [shopping_ad_product_sync._MIN_CALL_INTERVAL_S] * 2
@@ -371,69 +503,104 @@ def test_injected_path_does_not_throttle(db, monkeypatch):
     sleeps: list[float] = []
     monkeypatch.setattr(shopping_ad_product_sync.time, "sleep", lambda s: sleeps.append(s))
 
-    shopping_ad_product_sync.collect_adgroup_products(db, ads_by_adgroup={})
+    shopping_ad_product_sync.collect_adgroup_products(db, as_of=kst_today(), ads_by_adgroup={})
     assert sleeps == []
 
 
-def test_budget_exceeded_defers_rest_and_withholds_all_cleanup(db):
-    """★시간 예산 초과 = **부분 수집**. 남은 그룹은 다음 회차로 이월하고 정리는 전면 보류한다.
+def test_live_path_reserves_headroom_for_worst_case_call(db, monkeypatch):
+    """★codex 2R P2: 새 호출은 '남은 예산 ≥ 한 호출의 최악 소요'일 때만 시작한다.
 
-    부분 수집 결과로 stale 판정을 하면 P1-1과 같은 함정(안 본 것을 없어진 것으로 오인)에
-    빠진다 — 그래서 (1)·(2) 둘 다 끈다.
+    호출 **전 경과**만 보면 재시도(1+2s 백오프 + 3×30s 타임아웃 = 93s)까지 물린 한 호출이
+    예산을 통째로 넘긴다. 예산이 최악 소요보다 작으면 아예 시작하지 않아야 한다.
     """
+    from app.services import naver_sa_ad_fetcher
+
     _stopped_settings(db, "cmp-a")
     _adgroup(db, "grp-1", "cmp-a")
-    _spend(db, "cmp-a", days_ago=1, adgroup_id="grp-1")
-    db.add_all([
-        NaverAdgroupProduct(adgroup_id="grp-z", campaign_id="cmp-out", mall_product_id="pz"),
-        NaverAdgroupProduct(adgroup_id="grp-gone", campaign_id="cmp-a", mall_product_id="pg"),
-    ])
     db.commit()
 
-    # budget_s=0 → 첫 그룹 앞에서 이미 예산 초과 = 아무 그룹도 시도하지 않고 이월
-    res = shopping_ad_product_sync.sync_adgroup_products(
-        db, ads_by_adgroup={"grp-1": [{"mall_product_id": "p1", "product_name": "x"}]},
-        budget_s=0,
+    called: list[str] = []
+    monkeypatch.setattr(shopping_ad_product_sync, "get_ads",
+                        lambda aid: called.append(aid) or [])
+    monkeypatch.setattr(shopping_ad_product_sync.time, "sleep", lambda s: None)
+
+    # 예산이 최악 소요보다 작다 → 실 경로는 한 건도 시작하지 않는다
+    out = shopping_ad_product_sync.collect_adgroup_products(
+        db, as_of=kst_today(), budget_s=naver_sa_ad_fetcher.MAX_CALL_DURATION_S - 1,
     )
+    assert called == [] and out.truncated is True
 
-    assert res["truncated"] is True
-    assert res["removed"] == 0
-    assert res["reconciled_campaigns"] == 0
-    assert {r.adgroup_id for r in db.query(NaverAdgroupProduct).all()} == {"grp-z", "grp-gone"}
+    # 여유가 있으면 정상 진행
+    out2 = shopping_ad_product_sync.collect_adgroup_products(
+        db, as_of=kst_today(), budget_s=naver_sa_ad_fetcher.MAX_CALL_DURATION_S + 60,
+    )
+    assert called == ["grp-1"] and out2.truncated is False
 
 
-def test_collect_reports_attempted_and_elapsed(db):
-    """수집 결과는 '무엇을 시도했는가'와 '얼마나 걸렸는가'를 함께 실어 나른다."""
+def test_retry_does_not_sleep_after_final_attempt(monkeypatch):
+    """★codex 2R P2: 마지막 시도 뒤에는 자지 않는다(더 시도할 게 없는데 4초를 버렸다)."""
+    from app.services import naver_sa_ad_fetcher
+
+    class _Resp:
+        status_code = 429
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(naver_sa_ad_fetcher.requests, "get", lambda *a, **k: _Resp())
+    monkeypatch.setattr(naver_sa_ad_fetcher.time, "sleep", lambda s: sleeps.append(s))
+    monkeypatch.setattr(naver_sa_ad_fetcher, "_headers", lambda p, method="GET": {})
+
+    naver_sa_ad_fetcher._get("/ncc/ads")
+    # 시도 3회 → 사이 간격은 2번뿐(1s, 2s). 구 코드는 뒤에 4s를 더 잤다.
+    assert sleeps == [1, 2]
+
+
+def test_budget_exceeded_defers_rest_and_advances_cursor(db):
+    """시간 예산 소진 = 부분 수집 → 남은 그룹을 다음 회차로 이월(삭제는 애초에 없다)."""
     _stopped_settings(db, "cmp-a")
     _adgroup(db, "grp-1", "cmp-a")
     _adgroup(db, "grp-2", "cmp-a")
     db.commit()
 
-    out = shopping_ad_product_sync.collect_adgroup_products(db, ads_by_adgroup={"grp-1": []})
-    assert out.attempted == {"grp-1", "grp-2"}
+    ads = {"grp-1": [{"mall_product_id": "p1", "product_name": "x"}],
+           "grp-2": [{"mall_product_id": "p2", "product_name": "y"}]}
+    adgroups = shopping_ad_product_sync._observed_shopping_adgroups(db, as_of=kst_today())
+
+    # 첫 그룹만 처리되도록 목록을 잘라 1회차를 흉내내고, 그 결과 커서가 남는지 본다.
+    out = shopping_ad_product_sync.collect_adgroup_products(
+        db, as_of=kst_today(), ads_by_adgroup=ads, adgroups=adgroups, budget_s=0,
+    )
+    assert out.truncated is True and out.attempted == [] and out.cursor is None
+
+
+def test_collect_reports_attempted_and_elapsed(db):
+    """수집 결과는 '무엇을 시도했는가'(순서대로)와 '얼마나 걸렸는가'를 함께 실어 나른다."""
+    _stopped_settings(db, "cmp-a")
+    _adgroup(db, "grp-1", "cmp-a")
+    _adgroup(db, "grp-2", "cmp-a")
+    db.commit()
+
+    out = shopping_ad_product_sync.collect_adgroup_products(
+        db, as_of=kst_today(), ads_by_adgroup={"grp-1": []},
+    )
+    assert out.attempted == ["grp-1", "grp-2"]
     assert out.truncated is False
     assert out.elapsed_s >= 0
 
 
-def test_slow_run_is_warned(db, caplog):
+def test_slow_run_is_warned(db, monkeypatch):
     """소요시간이 임계를 넘으면 WARNING — 07:45 잡이 하류 잡을 침범하는지 로그로 판정된다."""
     _stopped_settings(db, "cmp-a")
     _adgroup(db, "grp-1", "cmp-a")
     db.commit()
 
-    with caplog.at_level(logging.WARNING, logger=shopping_ad_product_sync.__name__):
-        # 임계를 0으로 낮춰 느린 실행을 재현(실시간 sleep 없이)
-        original = shopping_ad_product_sync._SLOW_RUN_WARN_S
-        shopping_ad_product_sync._SLOW_RUN_WARN_S = 0.0
-        try:
-            shopping_ad_product_sync.sync_adgroup_products(db, ads_by_adgroup={"grp-1": []})
-        finally:
-            shopping_ad_product_sync._SLOW_RUN_WARN_S = original
+    # 임계를 0으로 낮춰 느린 실행을 재현(실시간 sleep 없이)
+    monkeypatch.setattr(shopping_ad_product_sync, "_SLOW_RUN_WARN_S", 0.0)
+    with caplog_at_warning(shopping_ad_product_sync) as records:
+        shopping_ad_product_sync.sync_adgroup_products(
+            db, as_of=kst_today(), ads_by_adgroup={"grp-1": []},
+        )
 
-    assert any(
-        "하류 잡(07:50/08:00) 침범 위험" in r.getMessage()
-        for r in caplog.records if r.name == shopping_ad_product_sync.__name__
-    ), [r.getMessage() for r in caplog.records]
+    assert any("하류 잡(07:50/08:00) 침범 위험" in m for m in records()), records()
 
 
 # ══════════════════════════════════════════════════════════════════

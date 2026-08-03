@@ -96,6 +96,10 @@ def _observed_campaign_ids(db: Session, *, as_of: date | None = None) -> list[st
     (일기에는 계정 승격값만 남아, 이 함수가 애초에 드러내려던 표방↔실구현 괴리가 다시
     가려졌다). 이 산출은 DB 읽기뿐이라 네이버 API 콜이 0이고 실행에도 전혀 관여하지 않는다
     — 근거·선례는 campaign_roster.observation_campaign_ids docstring(D-NAO-13 원문).
+
+    ★과거 `as_of`로 부를 때: 재현되는 것은 **광고비 축뿐**이고 settings 축은 히스토리가 없어
+    현재 상태다(codex 2R P1-4). 비파괴 관측이라 계속 허용하되, 과거 일기를 재생성할 때 그
+    시점의 캠페인 목록과 정확히 일치하지 않을 수 있다는 점을 알고 읽어야 한다.
     """
     from app.services.naver_ad import campaign_roster
 
