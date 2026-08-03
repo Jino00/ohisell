@@ -98,41 +98,30 @@ def _is_logged_out(url: str) -> bool:
 
 
 # ── 세션 자가 복구(2026-08-03) ─────────────────────────────────────────
-# 이 페처는 오픽스 광고와 **완전히 같은 대시보드·같은 keycloak**을 쓰는데(DASH_URL 동일),
-# 자동 재로그인만 없어서 세션이 풀릴 때마다 사람을 불렀다(그날 하루 3회). 오픽스가 이미
-# 검증한 경로를 coupang_auth로 일반화해 그대로 쓴다 — 새로 만드는 게 아니다.
+# 이 페처는 오픽스 광고와 같은 대시보드를 쓰지만 **로그인 클라이언트가 다르다**. 자동 재로그인이
+# 없어서 세션이 풀릴 때마다 사람을 불렀다(그날 하루 3회).
+#
+# ★★진입 클라이언트(2026-08-03 라이브 실측으로 바로잡음): 오하이테크는 **로켓배송(1P) 공급자**
+#   계정이라 오픽스의 `_cap_client=WING`을 그대로 쓰면 안 된다. WING으로 들어가면 세션이 풀렸을 때
+#   광고센터 '역할 선택' 화면(마켓플레이스·로켓배송·대행사 카드 3장)에 멈춘다 — 입력칸이 0개라
+#   ②Keychain은 폼을 기다리다 죽고(13:34:00), keycloak 세션이 살아 있어도 ①이 관통하지 못한다
+#   (13:52 실측: supplier-hub 세션이 살아 있는데도 WING 진입은 역할 선택으로 튕겼다).
+#   역할 선택에서 '쿠팡 로켓배송 판매자'를 고를 때 실제로 타는 체인을 그대로 쓴다:
+#     /user/login?_cap_client=SUPPLIERHUB&_cap_market=KR
+#       → /login_sxauth?client=SUPPLIERHUB&market=KR
+#       → xauth realms/seller?client_id=supplier-hub&redirect_uri=.../keycloak_callback
+#       → /keycloak_callback → /marketing/dashboard/sales   (세션 살아있으면 **비번 없이**)
+#   ★`SUPPLIER`가 아니라 `SUPPLIERHUB`이고 `_cap_market=KR`이 필요하다 — 둘 중 하나만 틀려도
+#     역할 선택 화면으로 되돌아간다(실측). 추측하지 말 것.
 SSO_LOGIN_URL = (
-    "https://advertising.coupang.com/user/login?_cap_client=WING"
-    "&returnUrl=%2Fmarketing%2Fdashboard%2Fsales%3F_cap_client%3DWING"
+    "https://advertising.coupang.com/user/login?_cap_client=SUPPLIERHUB&_cap_market=KR"
+    "&returnUrl=%2Fmarketing%2Fdashboard%2Fsales%3F_cap_client%3DSUPPLIERHUB"
 )
-
-
-# ★②Keychain은 여기로 가서 채운다 — 광고센터에는 로그인 폼이 없기 때문이다(2026-08-03 실측).
-#   ①이 실패하면 페이지는 광고센터 '역할 선택' 화면(마켓플레이스·로켓배송·대행사 카드 3장)에
-#   멈추는데 입력칸이 0개다. 그래서 초판 ②는 폼을 기다리다 15초 타임아웃으로 죽었다(13:34:00).
-#   ★오하이테크는 **로켓배송(1P) 공급자** 계정이라 광고센터 로그인도 supplier-hub realm을 탄다:
-#     역할 선택에서 '쿠팡 로켓배송 판매자'를 고르면
-#     xauth.coupang.com/auth/realms/seller/...?client_id=supplier-hub
-#     &redirect_uri=https://advertising.coupang.com/keycloak_callback 로 간다(실측).
-#   같은 realm이므로 supplier-hub에 로그인해 realm 세션만 세우면, 광고 대시보드는 verify에서
-#   비밀번호 없이 조용히 재발급된다 — DOM 클릭 시퀀스(카드→시장선택→이동)를 흉내 내지 않는다.
-SUPPLIER_LOGIN_URL = "https://supplier.coupang.com/"
-_SUPPLIER_ORIGIN = "https://supplier.coupang.com"
 
 
 def _is_landed(url: str) -> bool:
     """SSO/자동로그인 성공 판정 — 대시보드에 착지했고 로그인 페이지가 아니다."""
     return "/marketing/dashboard" in (url or "") and not _is_logged_out(url)
-
-
-def _supplier_landed(url: str) -> bool:
-    """②의 착지 판정 — supplier-hub 로그인은 광고가 아니라 그쪽 대시보드로 착지한다.
-
-    ★착지는 **존재의 증명**이어야 한다: 오리진 루트(=출발 URL)나 about:blank는 아직 아무 데도
-      안 간 상태다. 인증 후에만 나오는 경로(/dashboard)를 요구한다.
-    """
-    u = url or ""
-    return u.startswith(_SUPPLIER_ORIGIN) and "/dashboard" in u and not _is_logged_out(u)
 
 
 def _recover_session(page, cfg: dict) -> str:
@@ -151,11 +140,7 @@ def _recover_session(page, cfg: dict) -> str:
         #   오하이테크로 조용히 적재된다**. 이름을 분리해 그 실수를 구조로 막는다.
         login_id=cfg.get("ohitech_ad_login_id"),
         label="오하이테크 광고",
-        # ★②는 광고센터가 아니라 폼이 실제로 있는 supplier-hub에서 채운다(위 주석 참조).
-        login_url=SUPPLIER_LOGIN_URL,
-        login_is_landed=_supplier_landed,
         # ★권위값 = 대시보드 실제 진입. URL 휴리스틱이 틀려도 여기서 통과하면 복구된 것이다.
-        #   ②가 supplier 쪽에 착지해도 최종 판정은 여기서 난다(같은 realm → 조용한 재발급).
         verify=lambda: _dashboard_reachable(page),
     )
 

@@ -207,30 +207,40 @@ class TestRealLoginFormDom:
 
         assert auth.try_auto_login(NoSubmit(), "ohitech", lambda u: True) == auth.LOGIN_REQUIRED
 
-    def test_login_url이_주어지면_폼이_있는_곳으로_먼저_간다(self, monkeypatch):
-        """★①이 끝난 자리(광고센터 역할 선택 화면)에는 입력칸이 0개다 — 거기서 기다리면 죽는다."""
-        monkeypatch.setattr(auth, "keychain_get", lambda a, s=None: "pw")
-        pg = self._FormPage()
-        pg.url = "https://advertising.coupang.com/user/login?callback_url=..."
-        auth.try_auto_login(
-            pg, "ohitech",
-            lambda u: "/dashboard" in u,
-            timeout_s=10,
-            login_url="https://supplier.coupang.com/",
-        )
-        assert "https://supplier.coupang.com/" in pg.goto_urls
 
-    def test_오하이테크가_supplier_폼으로_라우팅된다(self):
-        import inspect
+class TestOhitechLoginClient:
+    """★오하이테크는 **로켓배송(1P) 공급자** 계정이다 — 오픽스의 WING 진입을 그대로 쓰면
+    세션이 풀렸을 때 입력칸이 0개인 '역할 선택' 화면에 멈춰 3층이 통째로 무력해진다.
+
+    라이브 실측(2026-08-03) 체인:
+      /user/login?_cap_client=SUPPLIERHUB&_cap_market=KR
+        → /login_sxauth?client=SUPPLIERHUB&market=KR
+        → xauth realms/seller?client_id=supplier-hub&redirect_uri=.../keycloak_callback
+        → /keycloak_callback → /marketing/dashboard/sales   (세션 살아있으면 비번 없이)
+    ★`SUPPLIER`도, `_cap_market` 누락도 역할 선택 화면으로 되돌아간다(둘 다 실측).
+    """
+
+    def _oh(self):
         import ohitech_ad_fetcher as oh
-        src = inspect.getsource(oh._recover_session)
-        assert "login_url=" in src and "SUPPLIER_LOGIN_URL" in src, (
-            "광고센터에는 폼이 없다 — ②는 supplier-hub 폼으로 가야 한다")
-        # ②의 착지 판정도 '존재의 증명'이어야 한다(출발 URL·빈 페이지는 거부).
-        assert oh._supplier_landed(oh.SUPPLIER_LOGIN_URL) is False
-        assert oh._supplier_landed("about:blank") is False
-        assert oh._supplier_landed("https://supplier.coupang.com/dashboard/KR") is True
-        auth._assert_predicate_sound(oh.SUPPLIER_LOGIN_URL, oh._supplier_landed)
+        return oh
+
+    def test_진입_클라이언트가_SUPPLIERHUB다(self):
+        url = self._oh().SSO_LOGIN_URL
+        assert "_cap_client=SUPPLIERHUB" in url, (
+            "WING 진입은 로켓배송 계정에서 역할 선택 화면으로 튕긴다(13:52 실측)")
+        assert "_cap_client=SUPPLIER&" not in url, "SUPPLIER는 통하지 않는다 — SUPPLIERHUB다"
+        assert "_cap_market=KR" in url, "시장 파라미터가 없으면 역할 선택 화면으로 되돌아간다"
+
+    def test_오픽스와_다른_진입을_쓴다(self):
+        import ad_cost_browser_fetcher as ofix  # 오픽스는 WING 그대로여야 한다
+        assert "_cap_client=WING" in ofix.SSO_LOGIN_URL
+        assert self._oh().SSO_LOGIN_URL != ofix.SSO_LOGIN_URL, (
+            "계정 유형이 다르면 진입 클라이언트도 달라야 한다")
+
+    def test_판정자는_여전히_건전하다(self):
+        oh = self._oh()
+        assert oh._is_landed(oh.SSO_LOGIN_URL) is False
+        auth._assert_predicate_sound(oh.SSO_LOGIN_URL, oh._is_landed)
 
 
 class TestVerifyIsAuthoritative:

@@ -238,16 +238,15 @@ def try_auto_login(
     *,
     service: str = KEYCHAIN_SERVICE,
     timeout_s: int = 25,
-    login_url: str | None = None,
 ) -> str:
     """② keycloak 로그인 폼에 Keychain 자격증명을 자동입력·제출한다.
 
     반환: OK(착지) / TWO_FACTOR(OTP 단계) / LOGIN_REQUIRED(자격증명 없음·폼 못 찾음·실패).
     ★비밀번호는 메모리에서만 쓰고 로그에 안 남긴다.
 
-    ★login_url(선택): **①이 끝난 자리에 로그인 폼이 없을 수 있다.** 오하이테크 광고가 그렇다 —
-      ①이 실패하면 광고센터의 '역할 선택' 화면(마켓플레이스/로켓배송/대행사)에 멈추는데 거기엔
-      입력칸이 아예 없다(2026-08-03 실측). 폼이 실제로 있는 곳으로 먼저 이동한 뒤 채운다.
+    ★전제: ①이 끝난 자리가 **로그인 폼**이어야 한다. 그렇지 않으면 여기서 고칠 게 아니라
+      호출부의 sso_url이 틀린 것이다 — 오하이테크 광고가 그 사례였다(WING으로 들어가면 폼이
+      없는 '역할 선택' 화면에 멈춘다. 진입 클라이언트를 SUPPLIERHUB로 바로잡아 해결).
     """
     if not login_id:
         return LOGIN_REQUIRED
@@ -256,9 +255,6 @@ def try_auto_login(
         log.info("Keychain 자격증명 없음(%s) — 수동 로그인 폴백.", login_id)
         return LOGIN_REQUIRED
     try:
-        if login_url:
-            log.info("로그인 폼으로 이동: %s", login_url)
-            _goto_reset(page, login_url)
         page.wait_for_selector(_USERNAME_SEL, timeout=15000)
         page.fill(_USERNAME_SEL, login_id)
         page.fill(_PASSWORD_SEL, pw)
@@ -294,8 +290,6 @@ def ensure_session(
     sso_timeout_s: int = 45,
     login_timeout_s: int = 25,
     verify: Callable[[], bool] | None = None,
-    login_url: str | None = None,
-    login_is_landed: Callable[[str], bool] | None = None,
 ) -> str:
     """세션이 풀린 상태에서 ①→②→③ 순으로 복구를 시도한다.
 
@@ -312,11 +306,9 @@ def ensure_session(
       루트라 /dashboard를 요구하는 판정이 정상 복구를 거부할 여지가 있었다).
       verify가 주어지면 각 층 뒤에 호출해 그 결과를 우선한다.
 
-    ★login_url/login_is_landed(선택): ①이 끝난 자리에 **로그인 폼이 없는** 앱을 위한 것이다.
-      오하이테크 광고가 그렇다 — ①이 실패하면 광고센터 역할 선택 화면에 멈추고 거기엔 입력칸이
-      없다(2026-08-03 실측). 폼이 있는 곳(supplier-hub 로그인)으로 이동해 채우고, 그 로그인의
-      착지는 광고 대시보드가 아니라 그쪽 대시보드이므로 판정자도 따로 받는다. 최종 확인은
-      verify(앱 자신의 세션 검사)가 한다 — 같은 realm이면 광고 쪽은 조용히 재발급된다.
+    ★sso_url은 **그 계정이 실제로 타는 로그인 클라이언트**여야 한다. 틀리면 ①이 관통하지 못할
+      뿐 아니라 ②가 도달하는 자리에 폼이 없어 3층이 통째로 무력해진다(2026-08-03 오하이테크
+      광고: 로켓배송 계정에 WING 진입을 써서 '역할 선택' 화면에 멈췄다).
     """
     def _confirmed(stage: str) -> bool:
         if verify is None:
@@ -339,15 +331,7 @@ def ensure_session(
         return OK
 
     log.info("[%s] SSO로 복구 안 됨 — Keychain 자동 로그인 시도.", label)
-    landing = login_is_landed or is_landed
-    if login_url:
-        # ★로그인 착지 판정에도 같은 건전성을 요구한다 — 출발 URL이 착지면 아무 데도 안 가고
-        #   "자동 로그인 성공"이 되고, ③알림이 건너뛰어져 사람은 신호를 못 받는다.
-        _assert_predicate_sound(login_url, landing)
-    res = try_auto_login(
-        page, login_id, landing,
-        service=service, timeout_s=login_timeout_s, login_url=login_url,
-    )
+    res = try_auto_login(page, login_id, is_landed, service=service, timeout_s=login_timeout_s)
     if res == OK or (res != TWO_FACTOR and _confirmed("자동 로그인 후")):
         log.info("[%s] 자동 로그인으로 세션 복구.", label)
         return OK
