@@ -45,9 +45,12 @@ export interface StreamRefreshSpec {
   getStatus: () => Promise<RefreshStatusLike>;
   request: () => Promise<unknown>;
   /**
-   * true면 last_success_at 변화만으로 성공 판정하지 않고 요청 소멸(!requested)까지 기다린다.
+   * true면 (a)last_success_at 변화만으로 성공 판정하지 않고 요청 소멸(!requested)까지 기다리고,
+   * (b)정착 시점에 이번 run이 남긴 실패 흔적이 있으면 **실패가 성공보다 우선**한다.
    * RG 전용: 한 회차가 (정산주기×리포트종류) 여러 엑셀을 올려서 첫 엑셀에 last_success_at이
    * 오른다 — 그것만 보고 이탈하면 뒤 엑셀이 실패한 반쪽 run을 "완료"로 표시한다(codex 3R[P1]).
+   * ★(b)가 없으면 (a)는 오보를 **늦출 뿐 막지 못한다**(2026-08-03 codex P1) — 상세는
+   * runStreamRefresh 안의 판정 주석.
    */
   settleBeforeSuccess?: boolean;
   /**
@@ -70,7 +73,8 @@ export interface RunnerDeps {
 /**
  * 갱신 1건: 요청 → last_success_at/last_error_at 변화 폴링 → 결과 판정.
  *
- * 판정 순서를 바꾸지 말 것. 아래 세 분기는 전부 라이브 오보 사고의 처방이다.
+ * 판정 순서를 바꾸지 말 것. 아래 분기는 전부 라이브 오보 사고의 처방이다.
+ * 순서는 스트림 종류에 따라 갈린다: RG(settleBeforeSuccess)는 실패 우선, 나머지는 성공 우선.
  */
 export async function runStreamRefresh(
   spec: StreamRefreshSpec,
@@ -91,7 +95,37 @@ export async function runStreamRefresh(
     await sleep(pollMs);
     const st = await spec.getStatus();
 
-    // ★성공 우선(순서 바꾸지 말 것): 둘 다 변했으면 성공이 이긴다. 라이브 실측
+    // 페처가 **종료된** 실패를 보고하면 즉시 이탈 — 이게 없으면 이미 끝난 실패를 215초 헛기다린다.
+    // ★requested가 아직 true면 재시도가 남아 있다는 뜻(lease 계약, 2026-07-27) — 여기서
+    // 이탈하면 1회차 실패를 최종 실패로 오보한다. 요청이 소멸(=재시도 소진/로그인 필요)한
+    // 뒤에야 실패로 판정한다. last_error에는 소멸 사유가 들어 있다.
+    const settledFailure =
+      !!st.last_error_at && st.last_error_at !== errBaseline && !st.requested;
+
+    // ★RG(settleBeforeSuccess)만 실패 우선. 아래 '성공 우선'보다 먼저 평가한다.
+    // 왜 예외인가(2026-08-03 codex P1): RG 한 회차는 여러 엑셀을 올리므로 첫 엑셀에서 이미
+    // last_success_at이 baseline을 벗어난다. 그 뒤 뒷단이 실패해 요청이 소멸하면 성공 조건
+    // (변한 success + !requested)이 **먼저** 참이 되어, 정산이 반쪽만 들어온 run을 "✅ 완료"로
+    // 표시했다 — settleBeforeSuccess가 막으려던 바로 그 오보를 스스로 통과시키고 있었다.
+    //
+    // 이 판정이 안전한 근거는 백엔드 계약이다(refresh_contract.py · rg_settlement_sync.py):
+    //   성공 upload  → rg_mark_heartbeat: last_success_at=now, **last_error_at=NULL**
+    //   run 정상종료 → refresh-complete → mark_success(clear_error=True): 요청 소멸 + error=NULL
+    //   run 실패종료 → report_failure(소멸 사유): last_error_at=now + 요청 소멸
+    // 즉 RG는 성공 경로가 실패 흔적을 **반드시 지운다** → 요청이 소멸한 시점에 이번 run이
+    // 남긴 실패 흔적이 살아 있다 ⟺ 그 run은 실패로 끝났다. 시각 대소 비교로 추측하지 않는다.
+    //
+    // 2026-07-17 '성공 우선' 사고와 상충하지 않는 이유: 그 사고(업로드는 서버에서 완주,
+    // 페처는 클라 타임아웃으로 실패 보고 — 실측 순서는 last_error_at > last_success_at,
+    // 커밋 7118ef5)는 lease 계약 도입 이전이었다. 지금 그 경로는 kind 없는 평범한 실패라
+    // 요청이 살아남아(재시도) !requested가 거짓 → 여기서 이탈하지 않고, 재시도가 완주하면
+    // 실패 흔적이 지워져 done이 된다. 3회 모두 그렇게 끝날 때만 실패로 보고되는데, 정산(돈)
+    // 데이터에서는 **거짓 완료가 거짓 실패보다 훨씬 나쁘다**(재클릭은 무해).
+    if (spec.settleBeforeSuccess && settledFailure) {
+      return { state: "failed", reason: st.last_error || "원인 미상" };
+    }
+
+    // ★성공 우선(순서 바꾸지 말 것 — 비RG): 둘 다 변했으면 성공이 이긴다. 라이브 실측
     // (2026-07-17 RG): 업로드가 클라 타임아웃(60s)을 넘겨 페처는 실패로 보고했지만
     // 서버는 완주해 success/error가 138ms 차로 함께 갱신됐다 — 데이터는 실제로 들어왔다.
     if (
@@ -102,11 +136,7 @@ export async function runStreamRefresh(
       return { state: "done" };
     }
 
-    // 페처가 **종료된** 실패를 보고하면 즉시 이탈 — 이게 없으면 이미 끝난 실패를 215초 헛기다린다.
-    // ★requested가 아직 true면 재시도가 남아 있다는 뜻(lease 계약, 2026-07-27) — 여기서
-    // 이탈하면 1회차 실패를 최종 실패로 오보한다. 요청이 소멸(=재시도 소진/로그인 필요)한
-    // 뒤에야 실패로 판정한다. last_error에는 소멸 사유가 들어 있다.
-    if (st.last_error_at && st.last_error_at !== errBaseline && !st.requested) {
+    if (settledFailure) {
       return { state: "failed", reason: st.last_error || "원인 미상" };
     }
 
