@@ -1121,10 +1121,11 @@ def rg_mark_fetch_error(db: Session, error: str, account_key: str = "COUPANG_WIN
                         kind: str | None = None, lease: str | None = None) -> None:
     """Wing 페처 RG run 실패 보고 → last_error/last_error_at 기록(UI가 실패를 감지하는 유일 경로).
 
-    ★존재 이유(PR #30이 광고비에서 먼저 고친 것과 같은 구멍): 페처가 갱신 요청을 claim한
-    뒤(=플래그 이미 clear) 브라우저 에러로 죽으면 prod에 아무 흔적도 안 남았다. 성공에만
+    ★존재 이유(PR #30이 광고비에서 먼저 고친 것과 같은 구멍): 당시 claim은 요청 플래그를 즉시
+    소비했고, 페처가 claim 직후 브라우저 에러로 죽으면 prod에 아무 흔적도 안 남았다. 성공에만
     시각(last_success_at)이 있고 실패엔 짝이 없어서 UI는 "실패"와 "아직 진행 중"을 구분할
     수단이 없었다 — 215초를 헛기다린 뒤 "Mac 응답 없음"이라는 뭉뚱그린 문구만 냈다.
+    (지금은 lease 계약이라 claim이 플래그를 보존한다 — 2026-07-27.)
 
     ★status는 일부러 건드리지 않는다(PR #30 codex 1R[P2]): status=red는 Layout 배너에서
     곧바로 "쿠키 만료(재설정 필요)" + 쿠키 재설정 CTA로 렌더된다(Layout.tsx:201/206).
