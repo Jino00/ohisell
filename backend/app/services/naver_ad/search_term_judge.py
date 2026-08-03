@@ -321,10 +321,6 @@ def _pl_protect_tokens(
         )
         .filter(
             NaverAdgroupProduct.adgroup_id == adgroup_id,
-            # ★★신선도 필터를 걸지 말 것(2026-08-03 폴백 방향 조사): 여기서 얻는 것은
-            #   "자동 제외하면 안 되는 상품명 토큰"(보호 목록)이다. 행이 빠지면 보호가
-            #   줄어 정상 제품형 검색어가 **실제로 제외**된다(되돌리기 어려운 실쓰기).
-            #   오래된 상품명이 남아 과보호되는 쪽이 안전 방향이다.
             NaverProductBep.has_cost.is_(True),
         )
         .all()

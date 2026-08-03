@@ -29,6 +29,8 @@ from datetime import date
 from typing import NamedTuple
 
 from sqlalchemy import func
+from sqlalchemy import update as sa_update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models import NaverAccountSettings, NaverAdgroupProduct, NaverEntity
@@ -51,6 +53,8 @@ CURSOR_SETTINGS_KEY = "shopping_ad_sync_cursor"
 
 # write_cursor의 `expected` 미지정(=CAS 안 함)을 None(=커서 없음)과 구분하는 센티널.
 _UNSET: str = "\x00__unset__"
+# "커서 없음"의 저장 표현 — NULL이 아니라 빈 문자열(_encode_cursor docstring 참조).
+_CURSOR_NONE = ""
 
 # ── 호출 예산(codex 1R P2 / 2R P2) ────────────────────────────────────────────
 # ★네이버 SA API의 **공식 rate limit 수치는 문서에서 확인 안 됨**(추정 금지). 그래서 값을
@@ -83,6 +87,7 @@ class CollectResult(NamedTuple):
     attempted: list[str]     # 실제로 조회를 **시도**한 그룹(성공 + 실패), 처리 순서대로
     elapsed_s: float
     cursor: str | None       # 다음 회차 시작점(None = 한 바퀴 완주 → 처음부터)
+    advance_cursor: bool     # False면 커서를 **건드리지 않는다**(시도 0 = 진행도 없음)
 
 
 def _require_today(as_of: date, *, caller: str) -> None:
@@ -136,79 +141,121 @@ def _observed_shopping_adgroups(
     )
 
 
+def _encode_cursor(cursor: str | None) -> str:
+    """커서 → 저장값. None(=한 바퀴 완주)은 **빈 문자열**로 적는다.
+
+    ★NULL을 쓰지 않는 이유: CAS의 WHERE 절이 `value_json = :expected`인데 SQL에서
+    `= NULL`은 항상 거짓이라 "커서 없음"을 기대값으로 삼는 순간 CAS가 절대 성립하지 않는다.
+    빈 문자열이면 최초 실행(기대값 None)도 같은 한 문장으로 판정된다.
+    """
+    return cursor or _CURSOR_NONE
+
+
 def read_cursor(db: Session) -> str | None:
     """직전 회차가 마지막으로 **시도한** adgroup_id(없으면 None = 처음부터)."""
-    row = (
-        db.query(NaverAccountSettings)
+    raw = (
+        db.query(NaverAccountSettings.value_json)
         .filter(NaverAccountSettings.key == CURSOR_SETTINGS_KEY)
-        .one_or_none()
+        .scalar()
     )
-    if row is None or not row.value_json:
+    if not raw:
         return None
-    try:
-        return (json.loads(row.value_json) or {}).get("last_adgroup_id") or None
-    except (ValueError, TypeError):
-        # 값이 깨졌으면 처음부터 — 커서는 최적화지 정확성 요건이 아니다(fail-open).
-        log.warning("shopping_ad_product_sync: 커서 파싱 실패 — 처음부터 순회한다")
-        return None
+    if raw.startswith("{"):
+        # 구 JSON 형식 관용(이 브랜치의 초기 구현) — 읽기만 지원하고 다음 쓰기에 평문으로 바뀐다.
+        try:
+            return (json.loads(raw) or {}).get("last_adgroup_id") or None
+        except (ValueError, TypeError):
+            log.warning("shopping_ad_product_sync: 커서 파싱 실패 — 처음부터 순회한다")
+            return None
+    return raw
 
 
 def write_cursor(
     db: Session, last_adgroup_id: str | None, *, now, expected: str | None = _UNSET,
 ) -> bool:
-    """다음 회차 시작점 저장(CAS). None이면 '한 바퀴 완주' = 다음 회차는 처음부터.
+    """다음 회차 시작점 저장(**원자적 CAS**). None이면 '한 바퀴 완주' = 다음 회차는 처음부터.
 
-    반환: 실제로 썼으면 True, CAS 불일치로 건너뛰었으면 False.
+    반환: 실제로 썼으면 True, CAS 불일치(= 상대가 먼저 진행)로 건너뛰었으면 False.
 
     ★CAS가 필요한 이유(codex 3R P2): 이 잡은 **동시 실행될 수 있다.** APScheduler는 같은
       잡의 중복 실행을 막지만(`max_instances` 기본 1), `_catch_up_morning_batch`가 **별도
       데몬 스레드에서 스케줄러를 우회해** `shopping_ad_product_sync_job()`을 직접 부른다
       (scheduler_service `_run_chain`). 그래서 07:45 정시 발화와 catch-up 체인이 겹칠 수 있다.
-      잠금 없이 두면 ①둘 다 "행 없음"을 읽고 같은 unique key를 INSERT해 한쪽이 깨지거나
-      ②나중 커밋이 **더 앞선 커서로 진행도를 되감는다.**
 
     ★왜 "뒤로 안 간다"가 아니라 CAS인가: 커서는 **링**이라 한 바퀴 돌면 작은 id로 돌아오는
       것이 정상 전진이다(grp-98 → grp-01). 단순 대소 비교로는 정상 전진과 되감기를 구분할 수
-      없다. 대신 "내가 회차 시작에 읽은 값이 아직 그대로인가"만 본다 — 그 사이 누가 바꿨으면
-      그쪽이 더 최신 진행도이므로 **내 값을 쓰지 않는다.**
+      없다. 대신 "내가 회차 시작에 읽은 값이 아직 그대로인가"만 본다.
+
+    ★★판정을 **DB에 맡긴다**(codex 4R P2-6): 종전 구현은 ORM으로 읽고 파이썬에서 비교한 뒤
+      따로 UPDATE라, 두 트랜잭션이 **모두 같은 값을 읽으면 둘 다 통과**했다(check-then-act
+      경합). 이제 `UPDATE ... WHERE key=:key AND value_json=:expected` 한 문장으로 조건과
+      갱신을 묶고 `rowcount == 1`로 승패를 가른다 — 진 쪽은 아무것도 쓰지 않는다.
     """
-    row = (
-        db.query(NaverAccountSettings)
-        .filter(NaverAccountSettings.key == CURSOR_SETTINGS_KEY)
-        .one_or_none()
+    new_value = _encode_cursor(last_adgroup_id)
+
+    if expected is _UNSET:
+        # CAS 없음(초기 세팅·테스트) — 있으면 갱신, 없으면 삽입.
+        updated = db.execute(
+            sa_update(NaverAccountSettings)
+            .where(NaverAccountSettings.key == CURSOR_SETTINGS_KEY)
+            .values(value_json=new_value)
+        ).rowcount
+        if not updated:
+            db.add(NaverAccountSettings(key=CURSOR_SETTINGS_KEY, value_json=new_value))
+        return True
+
+    # ① 조건부 UPDATE — 조건 판정과 갱신이 한 문장(원자적).
+    res = db.execute(
+        sa_update(NaverAccountSettings)
+        .where(
+            NaverAccountSettings.key == CURSOR_SETTINGS_KEY,
+            NaverAccountSettings.value_json == _encode_cursor(expected),
+        )
+        .values(value_json=new_value)
     )
-    if expected is not _UNSET:
-        current = None
-        if row is not None and row.value_json:
-            try:
-                current = (json.loads(row.value_json) or {}).get("last_adgroup_id") or None
-            except (ValueError, TypeError):
-                current = None
-        if current != expected:
+    if res.rowcount == 1:
+        return True
+
+    # ② 행 자체가 없는 최초 실행(기대값도 '커서 없음')만 INSERT를 시도한다.
+    #    동시 INSERT는 unique 제약이 잡아준다 — 진 쪽은 IntegrityError를 받고 물러난다.
+    if expected is None:
+        try:
+            with db.begin_nested():
+                db.add(NaverAccountSettings(key=CURSOR_SETTINGS_KEY, value_json=new_value))
+            return True
+        except IntegrityError:
             log.warning(
-                "shopping_ad_product_sync: 커서 CAS 불일치 — 회차 시작 시 %s였는데 지금 %s다"
-                "(동시 실행 의심: 07:45 정시 발화 vs catch-up 스레드). 내 커서(%s)는 쓰지 않고 "
-                "상대 진행도를 존중한다.", expected, current, last_adgroup_id,
+                "shopping_ad_product_sync: 커서 최초 생성 경합 — 상대가 먼저 만들었다"
+                "(동시 실행: 07:45 정시 발화 vs catch-up 스레드). 내 커서(%s)는 쓰지 않는다.",
+                last_adgroup_id,
             )
             return False
-    payload = json.dumps(
-        {"last_adgroup_id": last_adgroup_id, "updated_at": now.isoformat()},
-        ensure_ascii=False,
+
+    log.warning(
+        "shopping_ad_product_sync: 커서 CAS 불일치 — 회차 시작 시 %s였는데 그 사이 바뀌었다"
+        "(동시 실행 의심). 내 커서(%s)는 쓰지 않고 상대 진행도를 존중한다.",
+        expected, last_adgroup_id,
     )
-    if row is None:
-        db.add(NaverAccountSettings(key=CURSOR_SETTINGS_KEY, value_json=payload))
-    else:
-        row.value_json = payload
-    return True
+    return False
 
 
-def _persist_cursor(db: Session, new_cursor: str | None, *, expected: str | None, now) -> None:
+def _persist_cursor(
+    db: Session, new_cursor: str | None, *, expected: str | None, now, advance: bool = True,
+) -> None:
     """커서를 **매핑 커밋과 분리된 짧은 트랜잭션**으로 저장(fail-open).
 
     분리하는 이유: 동시 INSERT가 unique 충돌을 내면 그 예외가 **같은 트랜잭션의 매핑 upsert를
     통째로 되돌린다.** 커서는 최적화이고 매핑은 본 기능이므로, 커서 저장 실패가 수집 결과를
     날리는 일은 없어야 한다(이 파일의 fail-open 규율과 동일).
     """
+    if not advance:
+        # 시도한 그룹이 0개 = 진행도가 없다. 기존 커서를 **그대로 둔다**(구 코드는 None을 저장해
+        # 진행도를 지웠고, 그러면 느린 계정에서 꼬리가 영영 굶는다 — codex 4R P2-6).
+        log.warning(
+            "shopping_ad_product_sync: 시도한 그룹이 0개 — 커서를 갱신하지 않고 기존 진행도를 "
+            "유지한다(예산이 한 호출 최악 소요보다 작을 때 발생)",
+        )
+        return
     try:
         if write_cursor(db, new_cursor, now=now, expected=expected):
             db.commit()
@@ -348,12 +395,18 @@ def collect_adgroup_products(
                 "adgroup_id": aid,
             })
         result[aid] = rows
-    # 한 바퀴를 다 돌았으면 커서를 비운다(다음 회차는 처음부터). 중간에 끊겼으면 마지막
-    # 시도 지점을 남긴다 — 다음 회차가 그 **다음**부터 이어받는다.
+    # 커서 결정(codex 4R P2-6):
+    #   · 중간에 끊겼고 시도한 게 있다 → 마지막 시도 지점(다음 회차가 그 **다음**부터).
+    #   · 한 바퀴 완주 → None(다음 회차는 처음부터 = 링 되감기).
+    #   · ★첫 호출 **전에** 예산이 소진돼 시도가 0이다 → `advance=False`로 **기존 커서를
+    #     그대로 둔다.** 구 코드는 이 경우에도 None을 저장해 그동안의 진행도를 지웠고,
+    #     그러면 느린 계정에서 매 회차 앞부분만 다시 갈고 꼬리가 영영 굶는다(P1-3 재발).
+    advance_cursor = bool(attempted)
     next_cursor = attempted[-1] if (truncated and attempted) else None
     return CollectResult(
         per_group=result, failed=failed, truncated=truncated, attempted=attempted,
         elapsed_s=time.monotonic() - started, cursor=next_cursor,
+        advance_cursor=advance_cursor,
     )
 
 
@@ -436,7 +489,8 @@ def sync_adgroup_products(
     db.commit()
     # 커서는 매핑 커밋 **이후** 별도 트랜잭션에 쓴다(_persist_cursor docstring — 동시 INSERT
     # 충돌이 매핑 upsert를 되돌리면 안 된다). CAS 기준은 이 회차 시작에 읽은 값.
-    _persist_cursor(db, collected.cursor, expected=cursor, now=now)
+    _persist_cursor(db, collected.cursor, expected=cursor, now=now,
+                    advance=collected.advance_cursor)
 
     # ★D-NAO-127 소재 외부 변경 탐지 — 매핑 커밋 **이후**에 독립 실행한다.
     #   ①prev_by_ad는 이미 메모리에 떠 있어 DB가 새 값으로 덮여도 비교가 가능하고,

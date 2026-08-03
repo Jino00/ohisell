@@ -25,7 +25,6 @@ from decimal import Decimal
 from sqlalchemy.orm import Session
 
 from app.models import NaverAdgroupProduct, NaverBidEstimateDaily, NaverProductBep
-from app.services.naver_ad import adgroup_product_freshness
 from app.services.naver_ad.alert_humanizer import clean_name, money
 
 NAVER_CHANNEL_ID = 6
@@ -46,7 +45,7 @@ def product_ad_links(db: Session, *, campaign_id: str | None = None) -> dict[str
     반환: {mall_product_id: [{"ad_id", "adgroup_id", "campaign_id", "product_name"}, ...]}
     ad_id가 없는 매핑 행(소재 미확정)은 상한을 계산할 대상이 아니라 제외한다.
     """
-    q = db.query(NaverAdgroupProduct).filter(adgroup_product_freshness.fresh_condition())
+    q = db.query(NaverAdgroupProduct)
     if campaign_id:
         q = q.filter(NaverAdgroupProduct.campaign_id == campaign_id)
     out: dict[str, list[dict]] = {}

@@ -29,7 +29,6 @@ from app.models import (
     NaverBidEstimateDaily,
     NaverLearningState,
 )
-from app.services.naver_ad import adgroup_product_freshness
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 
 log = logging.getLogger(__name__)
@@ -210,7 +209,6 @@ def group_floor_for(
         .filter(
             NaverAdgroupProduct.adgroup_id == adgroup_id,
             NaverAdgroupProduct.ad_id.isnot(None),
-            adgroup_product_freshness.fresh_condition(),
         )
         .all()
     )

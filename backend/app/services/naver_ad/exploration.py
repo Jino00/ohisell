@@ -281,14 +281,6 @@ def _resolve_exploration_bep_roas(db: Session, campaign_id: str, adgroup_id: str
     )
     if bep is not None and bep > 0:
         return bep
-    # ★③(계정 평균) 차단 — fail-closed(Jino 확정 2026-08-03): 이 캠페인의 매핑이 **있었는데
-    #   전부 낡았으면** 상품 구성을 모르는 것이다. 계정 평균 BEP는 대개 더 낮아 분모가 작아지고
-    #   `affordable_ceiling = rpc / bep`가 **올라간다**(돈 쓰는 방향). 근거는
-    #   campaign_target_resolver.stale_only_for_campaign docstring.
-    #   ★한 번도 매핑된 적 없는 유닛(파워링크 등)은 종전대로 ③ 폴백 — 동작 불변.
-    #   None 반환 시 compute_exploration_ceiling이 current_bid를 돌려줘 'capped'가 된다(상향 불가).
-    if campaign_target_resolver.stale_only_for_campaign(db, campaign_id):
-        return None
     bep = campaign_target_resolver.account_default_bep_roas(db)
     if bep is not None and bep > 0:
         return bep

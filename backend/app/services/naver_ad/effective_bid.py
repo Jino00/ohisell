@@ -10,6 +10,50 @@ from sqlalchemy.orm import Session
 
 from app.models import NaverAdgroupProduct
 
+_ID_CHUNK = 400  # IN 절 분할(SQLite 바인딩 상한 방어 — bm_diff._ID_CHUNK 관례)
+
+
+def _superseded_ad_ids(db: Session, ad_ids: list[str]) -> set[tuple[str, str]]:
+    """(ad_id, adgroup_id) 중 **더 최근 관측이 다른 곳에 있는** 조합 = 버려야 할 옛 문맥.
+
+    ★왜 필요한가(codex 4R P1-1): `naver_adgroup_product`는 삭제 없는 누적 upsert이고 unique
+    키가 (adgroup_id, mall_product_id)뿐이라, **소재가 그룹 A→B로 옮겨가면 두 행이 남는다.**
+    그대로 두면 A를 조회할 때 그 소재가 A의 소재로 보이고, `_derive`가 그 옛 행을
+    `max_ad_id`(=실효 레버)로 내보낸다. 그 값은 auto_operator·proposal_writer를 거쳐
+    **실제 입찰 대상**이 되므로, 지금은 B에 있는 소재를 A의 문맥으로 조작하게 된다.
+    삭제를 없앤 결과 생긴 유일한 실질 위험이라 여기서 닫는다.
+
+    ★판정은 `synced_at` **상대 비교**뿐 — 신선도 '창'을 쓰지 않는다. 창을 쓰면 커서 한 바퀴가
+    며칠 걸릴 때 살아 있는 매핑까지 밀려나는데(그 주기 실측이 아직 없다), 상대 비교는 그
+    위험이 없다: 중복이 없으면 아무것도 버리지 않고, 있으면 더 최근 쪽만 남긴다.
+    동률이면 `id`가 큰 쪽(나중에 삽입된 행)을 채택해 판정을 결정적으로 만든다.
+    """
+    uniq = [a for a in dict.fromkeys(ad_ids) if a]
+    if not uniq:
+        return set()
+    rows: list[tuple] = []
+    for i in range(0, len(uniq), _ID_CHUNK):
+        rows.extend(
+            db.query(
+                NaverAdgroupProduct.ad_id,
+                NaverAdgroupProduct.adgroup_id,
+                NaverAdgroupProduct.synced_at,
+                NaverAdgroupProduct.id,
+            )
+            .filter(NaverAdgroupProduct.ad_id.in_(uniq[i:i + _ID_CHUNK]))
+            .all()
+        )
+    best: dict[str, tuple] = {}
+    for ad_id, adgroup_id, synced_at, row_id in rows:
+        key = (synced_at, row_id)
+        if ad_id not in best or key > best[ad_id][0]:
+            best[ad_id] = (key, adgroup_id)
+    return {
+        (ad_id, adgroup_id)
+        for ad_id, adgroup_id, _synced, _rid in rows
+        if best[ad_id][1] != adgroup_id
+    }
+
 
 def _derive(rows: list[tuple], group_bid: int) -> dict:
     """소재 행 목록 → 실효입찰 파생(순수 계산부 — 단건/배치가 공유, GATE P3-2).
@@ -78,17 +122,16 @@ def adgroup_effective_bids(db: Session, group_bids: dict[str, int]) -> dict[str,
             NaverAdgroupProduct.ad_bid_amt,
             NaverAdgroupProduct.use_group_bid_amt,
             NaverAdgroupProduct.ad_user_lock,
+            NaverAdgroupProduct.synced_at,
         )
-        # ★★신선도 필터를 걸지 말 것(2026-08-03 폴백 방향 조사): 행이 사라지면 _derive가
-        #   source='ad'를 만들 수 없어 항상 'group'이 된다. 그러면 auto_operator의
-        #   "[레버 미연결] 그룹입찰 무효" hold 게이트와 account_diagnosis의 만성 7일
-        #   스톱로스 창이 **동시에 꺼져**, 종전에 held되던 입찰이 집행되고 느린 출혈의
-        #   감지가 늦어진다. 여기서는 오래된 소재 입찰 관측이라도 있는 편이 안전하다.
         .filter(NaverAdgroupProduct.adgroup_id.in_(group_bids))
         .all()
     )
+    stale_ad_ids = _superseded_ad_ids(db, [r[1] for r in rows if r[1]])
     by_adgroup: dict[str, list[tuple]] = {}
-    for adgroup_id, ad_id, ad_bid_amt, use_group, user_lock in rows:
+    for adgroup_id, ad_id, ad_bid_amt, use_group, user_lock, synced_at in rows:
+        if ad_id and (ad_id, adgroup_id) in stale_ad_ids:
+            continue  # 이 소재는 다른 그룹에서 더 최근에 관측됐다 — 옛 문맥 행은 버린다
         by_adgroup.setdefault(adgroup_id, []).append((ad_id, ad_bid_amt, use_group, user_lock))
     return {
         adgroup_id: _derive(by_adgroup.get(adgroup_id, []), group_bid)

@@ -42,9 +42,7 @@ from app.models import (
     Order,
 )
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
-from app.services.naver_ad import (
-    adgroup_product_freshness, campaign_target_resolver, product_campaign_share,
-)
+from app.services.naver_ad import campaign_target_resolver, product_campaign_share
 
 log = logging.getLogger(__name__)
 
@@ -179,8 +177,7 @@ def campaign_product_ids(db: Session, campaign_id: str) -> list[str]:
         {
             r[0]
             for r in db.query(NaverAdgroupProduct.mall_product_id)
-            .filter(NaverAdgroupProduct.campaign_id == campaign_id,
-                    adgroup_product_freshness.fresh_condition())
+            .filter(NaverAdgroupProduct.campaign_id == campaign_id)
             .all()
             if r[0]
         }
@@ -205,9 +202,6 @@ def product_campaign_counts(db: Session, campaign_ids: list[str]) -> dict[str, i
     pids = [
         r[0]
         for r in db.query(NaverAdgroupProduct.mall_product_id)
-        # ★여기엔 신선도 필터를 걸지 않는다 — 이 pid 목록은 **분모**(campaigns_per_product)로
-        # 들어간다. 걸면 분모가 줄어 프록시 ROAS가 부풀고 증액이 부당 통과한다
-        # (product_campaign_share docstring의 '의도된 비대칭' 참조).
         .filter(NaverAdgroupProduct.campaign_id.in_(campaign_ids))
         .distinct()
         .all()
@@ -262,8 +256,7 @@ def resolve_target_roas(db: Session, campaign_id: str) -> Decimal | None:
     """캠페인 목표 ROAS(override > 상품BEP파생 > 계정기본값). 전부 미해결이면 None(fail-closed)."""
     resolved = campaign_target_resolver.resolve_target_roas(db, campaign_id)
     target = resolved.get("target_roas")
-    # ★fail-closed — auto_operator._resolve_target_roas와 동일 근거(2026-08-03).
-    if target is None and resolved.get("source") != campaign_target_resolver.SOURCE_STALE_MAPPING:
+    if target is None:
         target = campaign_target_resolver.account_default_target_roas(db)
     return Decimal(str(target)) if target is not None else None
 

@@ -31,7 +31,6 @@ from sqlalchemy import func as sqlfunc
 from sqlalchemy.orm import Session
 
 from app.models import NaverAdDaily, NaverAdgroupProduct
-from app.services.naver_ad import adgroup_product_freshness
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.utils.kst import kst_today
 
@@ -47,7 +46,6 @@ def _one_to_one_adgroup_product(db: Session) -> dict[str, str]:
     """adgroup_id → mall_product_id (정확히 1:1 매핑인 것만). 다상품 adgroup은 제외."""
     rows = (
         db.query(NaverAdgroupProduct.adgroup_id, NaverAdgroupProduct.mall_product_id)
-        .filter(adgroup_product_freshness.fresh_condition())
         .all()
     )
     products_by_adgroup: dict[str, set[str]] = {}

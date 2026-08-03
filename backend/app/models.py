@@ -1713,18 +1713,23 @@ class NaverAdgroupProduct(Base):
     교체" 구현이 276행을 전량 날린 뒤, 정리 계층을 통째로 들어냈다(사고 경위와 그 판단 근거는
     `shopping_ad_product_sync` 모듈 docstring).
 
-    ★그래서 **읽을 때 반드시 신선도 필터를 거쳐야 한다.**
-      `app.services.naver_ad.adgroup_product_freshness.fresh_condition()`을 쿼리에 붙여라.
-      필터 없이 읽으면 이미 빠진 옛 상품·옛 그룹 문맥이 섞여 들어와 target ROAS·프록시 매출·
-      예산 증액·콜드 입찰 문맥을 오염시킨다(codex 3R P1이 추적한 실제 경로).
-      ★`ad_id`로 문맥을 되찾을 때는 `fresh_rows_by_ad_id()`를 써라 — unique 키가
-      (adgroup_id, mall_product_id)뿐이라 **같은 ad_id가 여러 행에 존재할 수 있다**.
-      예외(필터를 쓰지 않는 곳)는 "그 시점의 매핑"을 원하는 이력 표기 경로뿐이다
-      (change_log_narrator·perf_campaign_harness — 각 호출부 주석 참조).
+    ★★**stale 행이 누적된다 — 소비자는 그 사실을 알고 읽어야 한다.**
+      그룹에서 빠진 상품, 삭제된 그룹, 옮겨간 소재의 행이 **영구히 남는다**. 이 테이블을
+      "지금의 매핑"으로 그대로 믿으면 target ROAS·프록시 매출·예산 증액 판단이 옛 상품에
+      끌려간다. 각 소비자는 자기 판단이 stale에 얼마나 민감한지 스스로 알고 써야 한다.
 
-    ★`synced_at`이 곧 신선도다: 이번 회차에 관측된 행만 갱신되므로, 오래된 값 = 이번에 못 본 행.
-    (단 "실제로 사라진 것"과 "부분 응답·실패·이월로 못 본 것"은 구분되지 않는다 — 보수적
-    배제라는 성격은 adgroup_product_freshness docstring에 적혀 있다.)
+    ★**신선도 정책은 아직 없다**(2026-08-03 현재). `synced_at`(이번 회차에 관측된 행만 갱신)이
+      유일한 단서지만, 그것만으로 창을 정할 수 없다 — 오래된 `synced_at`은 ⓐ실제로 사라진 행
+      ⓑ네이버 부분 200으로 이번에 안 보인 행 ⓒget_ads 실패·시간 예산 이월로 **아직 안 본** 행을
+      구분하지 못한다. 특히 커서 순회가 한 바퀴 도는 데 며칠이 걸릴 수 있어(정상 주기 실측
+      미확보), 근거 없는 상수로 창을 잡으면 **살아 있는 매핑이 창 밖으로 밀려난다.**
+      → 창을 정하려면 `shopping_ad_product_sync`가 로깅하는 `elapsed_s`로 **커서 한 바퀴 실측**이
+        선행돼야 한다. **자동운영 재개 전 선행조건**(스코프 밖으로 분리된 항목).
+
+    ★단 하나 지금 닫혀 있는 것: **같은 `ad_id`가 여러 행에 존재**할 수 있다는 문제
+      (unique 키가 (adgroup_id, mall_product_id)뿐이라, 소재가 그룹 A→B로 옮기면 두 행이 남는다).
+      `ad_id`를 **실행 레버**로 쓰는 경로는 `synced_at`이 가장 최근인 행 하나만 채택한다
+      (`effective_bid` 참조) — 신선도 창과 무관한 판정이라 age-out 위험이 없다.
     campaign_target_resolver 우선순위 ②(상품 파생 target_roas)가 이 매핑을 소비한다.
 
     ★B1(스프린트 B, D-NAO-65): 소재-레벨 실효입찰 인식·저장. 각 SHOPPING_PRODUCT_AD 소재의

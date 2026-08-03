@@ -395,6 +395,58 @@ def test_cursor_cas_refuses_to_overwrite_concurrent_progress(db):
     assert shopping_ad_product_sync.read_cursor(db) == "grp-07"
 
 
+def test_cursor_cas_is_atomic_at_db_level(db):
+    """★codex 4R P2-6: CAS 판정과 갱신이 **한 문장**이라 둘 다 통과하지 못한다.
+
+    구 구현은 ORM으로 읽고 파이썬에서 비교한 뒤 따로 UPDATE라(check-then-act), 두 실행이
+    같은 값을 읽으면 **둘 다** 통과했다. 이제 조건은 `UPDATE ... WHERE value_json=:expected`가
+    DB에서 판정하고 `rowcount`로 승패가 갈린다.
+    """
+    now = datetime(2026, 8, 3, 7, 45)
+    shopping_ad_product_sync.write_cursor(db, "grp-05", now=now)
+    db.commit()
+
+    # 두 실행이 모두 "회차 시작에 grp-05를 읽었다"고 믿는 상황
+    first = shopping_ad_product_sync.write_cursor(db, "grp-07", now=now, expected="grp-05")
+    db.commit()
+    second = shopping_ad_product_sync.write_cursor(db, "grp-09", now=now, expected="grp-05")
+    db.commit()
+
+    assert first is True and second is False, "같은 기대값으로 둘 다 통과하면 CAS가 아니다"
+    assert shopping_ad_product_sync.read_cursor(db) == "grp-07"
+
+
+def test_cursor_cas_handles_first_ever_write(db):
+    """행 자체가 없는 최초 실행 — 기대값 None으로 삽입되고, 두 번째는 CAS에 걸린다."""
+    now = datetime(2026, 8, 3, 7, 45)
+    assert shopping_ad_product_sync.write_cursor(db, "grp-01", now=now, expected=None) is True
+    db.commit()
+    assert shopping_ad_product_sync.read_cursor(db) == "grp-01"
+
+    # 상대도 "커서 없음"을 읽었다고 믿고 쓰려 하면 실패해야 한다
+    assert shopping_ad_product_sync.write_cursor(db, "grp-02", now=now, expected=None) is False
+    db.commit()
+    assert shopping_ad_product_sync.read_cursor(db) == "grp-01"
+
+
+def test_zero_attempts_preserves_existing_cursor(db):
+    """★codex 4R P2-6: 첫 호출 전 예산 소진(시도 0)이면 **기존 진행도를 지우지 않는다**.
+
+    구 코드는 이 경우에도 cursor=None을 저장해 그동안의 진행도를 날렸다. 그러면 느린 계정에서
+    매 회차 앞부분만 다시 갈고 꼬리가 영영 굶는다(P1-3 재발).
+    """
+    _seed_groups(db, 3)
+    shopping_ad_product_sync.write_cursor(db, "grp-01", now=datetime(2026, 8, 3, 7, 45))
+    db.commit()
+
+    res = shopping_ad_product_sync.sync_adgroup_products(
+        db, as_of=kst_today(), ads_by_adgroup={}, budget_s=0,
+    )
+
+    assert res["truncated"] is True
+    assert shopping_ad_product_sync.read_cursor(db) == "grp-01", "진행도가 지워졌다"
+
+
 def test_cursor_cas_allows_ring_wraparound(db):
     """링 되감김은 정상 전진이다 — CAS는 대소가 아니라 '기대값 일치'만 본다."""
     now = datetime(2026, 8, 3, 7, 45)
