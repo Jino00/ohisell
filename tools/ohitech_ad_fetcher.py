@@ -115,8 +115,8 @@ def _is_landed(url: str) -> bool:
 def _recover_session(page, cfg: dict) -> str:
     """세션이 풀렸을 때 ①SSO 재발급 → ②Keychain 자동로그인 → ③알림 순으로 복구 시도.
 
-    ★login_id(cfg["ad_login_id"])가 없으면 ②는 조용히 건너뛴다 — 미설정이 오류가 아니다.
-      ①만으로도 수동 로그인 주기가 aid(1h) → keycloak(12h)으로 늘어난다.
+    ★login_id(cfg["ohitech_ad_login_id"])가 없으면 ②는 조용히 건너뛴다 — 미설정이 오류가
+      아니다. 그 경우 ①까지만 동작한다(tools/setup_fetcher_autologin.sh로 1회 등록하면 켜진다).
     """
     return coupang_auth.ensure_session(
         page,
@@ -128,7 +128,26 @@ def _recover_session(page, cfg: dict) -> str:
         #   오하이테크로 조용히 적재된다**. 이름을 분리해 그 실수를 구조로 막는다.
         login_id=cfg.get("ohitech_ad_login_id"),
         label="오하이테크 광고",
+        # ★권위값 = 대시보드 실제 진입. URL 휴리스틱이 틀려도 여기서 통과하면 복구된 것이다.
+        verify=lambda: _dashboard_reachable(page),
     )
+
+
+def _dashboard_reachable(page) -> bool:
+    """대시보드에 실제로 들어가지는지 = 앱 기준 세션 생존 판정.
+
+    URL 판정(_is_landed)은 폴링을 언제 멈출지 정하는 휴리스틱일 뿐이고, 복구됐는지의
+    최종 판정은 이쪽이다 — 내 URL 추측이 틀려도 진짜 복구를 실패로 오판하지 않는다.
+    """
+    try:
+        page.goto(DASH_URL, wait_until="domcontentloaded", timeout=40000)
+    except Exception:  # noqa: BLE001
+        return False
+    try:
+        page.wait_for_timeout(2000)  # Akamai/세션 안정화
+        return not _is_logged_out(page.url)
+    except Exception:  # noqa: BLE001 — 창 소실 등
+        return False
 
 
 def _cdp_alive(port: int) -> bool:

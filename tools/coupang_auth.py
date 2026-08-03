@@ -242,22 +242,46 @@ def ensure_session(
     service: str = KEYCHAIN_SERVICE,
     sso_timeout_s: int = 45,
     login_timeout_s: int = 25,
+    verify: Callable[[], bool] | None = None,
 ) -> str:
     """세션이 풀린 상태에서 ①→②→③ 순으로 복구를 시도한다.
 
     반환 OK면 호출부는 그대로 수집을 이어가면 된다. LOGIN_REQUIRED/TWO_FACTOR면 창을 남기고
     rc=3(로그인 필요)으로 끝내야 한다 — 재시도해도 같은 자리에서 죽고 창만 반복해서 뜬다.
 
-    ★①을 먼저 하는 이유: 비밀번호를 안 쓰는 경로가 항상 우선이다. 실제로 대부분의 만료는
-      aid(1h)이고 keycloak(12h)은 살아 있어 여기서 끝난다 — 수동 로그인 주기가 12배 늘어난다.
+    ★①을 먼저 하는 이유: 비밀번호를 안 쓰는 경로가 항상 우선이다. aid(1h) 만료가 대부분이고
+      keycloak 세션이 살아 있으면 여기서 끝난다 — 수동 로그인 주기가 크게 늘어난다.
+
+    ★verify(선택): **앱 자신의 세션 검사**를 권위값으로 쓴다. URL 판정(is_landed)은 폴링을
+      언제 멈출지 정하는 휴리스틱일 뿐, 복구 성공의 최종 판정자가 아니다. 둘을 하나로 쓰면
+      내 URL 추측이 틀렸을 때 **진짜 복구를 실패로 오판**해 ②③으로 잘못 escalate하고,
+      사람에게 불필요한 로그인 알림이 간다(2026-08-03: supplier의 SSO returnUrl이 오리진
+      루트라 /dashboard를 요구하는 판정이 정상 복구를 거부할 여지가 있었다).
+      verify가 주어지면 각 층 뒤에 호출해 그 결과를 우선한다.
     """
-    if sso_refresh(page, sso_url, is_landed, timeout_s=sso_timeout_s):
+    def _confirmed(stage: str) -> bool:
+        if verify is None:
+            return False
+        try:
+            ok = bool(verify())
+        except Exception as e:  # noqa: BLE001 — 검사 실패는 '복구 안 됨'으로 본다(안전한 방향)
+            log.warning("[%s] 세션 검사 오류(%s): %s", label, stage, type(e).__name__)
+            return False
+        if ok:
+            log.info("[%s] 앱 세션 검사 통과(%s) — 복구 확정.", label, stage)
+        return ok
+
+    landed = sso_refresh(page, sso_url, is_landed, timeout_s=sso_timeout_s)
+    if landed:
         log.info("[%s] SSO 재발급 성공(비번 없이) — 세션 복구.", label)
         return OK
+    # ★URL 판정이 실패해도 앱이 살아 있다고 하면 복구된 것이다(판정자 과잉 협소 방어).
+    if _confirmed("SSO 후"):
+        return OK
 
-    log.info("[%s] keycloak 세션도 만료 — Keychain 자동 로그인 시도.", label)
+    log.info("[%s] SSO로 복구 안 됨 — Keychain 자동 로그인 시도.", label)
     res = try_auto_login(page, login_id, is_landed, service=service, timeout_s=login_timeout_s)
-    if res == OK:
+    if res == OK or (res != TWO_FACTOR and _confirmed("자동 로그인 후")):
         log.info("[%s] 자동 로그인으로 세션 복구.", label)
         return OK
 

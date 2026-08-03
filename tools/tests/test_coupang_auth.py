@@ -127,3 +127,63 @@ class TestConfigKeySeparation:
         p = pathlib.Path(__file__).resolve().parents[1] / "setup_fetcher_autologin.sh"
         s = p.read_text(encoding="utf-8")
         assert "ohitech_ad_login_id" in s and "supplier_login_id" in s
+
+
+class TestVerifyIsAuthoritative:
+    """★URL 판정은 휴리스틱, 앱 세션 검사가 권위값.
+
+    둘을 하나로 쓰면 내 URL 추측이 틀렸을 때 **진짜 복구를 실패로 오판**해 사람에게
+    불필요한 로그인 알림이 간다(2026-08-03: supplier SSO returnUrl이 오리진 루트라
+    /dashboard를 요구하는 판정이 정상 복구를 거부할 여지가 있었다).
+    """
+
+    class _Page:
+        def __init__(self, url="https://x/login"):
+            self.url = url
+        def goto(self, u, **kw):
+            self.url = u
+        def wait_for_timeout(self, ms):
+            pass
+
+    def test_URL판정_실패해도_앱검사가_통과하면_OK(self, monkeypatch):
+        monkeypatch.setattr(auth, "notify_mac", lambda *a, **k: None)
+        r = auth.ensure_session(
+            self._Page(),
+            sso_url="https://x/login",
+            is_landed=lambda u: False,      # 절대 착지 안 했다고 우기는 판정자
+            login_id=None,                   # ②는 비활성
+            verify=lambda: True,             # 앱은 세션 살아있다고 답한다
+            sso_timeout_s=0, login_timeout_s=0,
+        )
+        assert r == auth.OK, "앱이 살아있다는데 URL 추측으로 실패 처리하면 안 된다"
+
+    def test_앱검사도_실패하면_LOGIN_REQUIRED(self, monkeypatch):
+        called = {}
+        monkeypatch.setattr(auth, "notify_mac", lambda t, m, **k: called.setdefault("n", (t, m)))
+        r = auth.ensure_session(
+            self._Page(),
+            sso_url="https://x/login",
+            is_landed=lambda u: False,
+            login_id=None,
+            verify=lambda: False,
+            sso_timeout_s=0, login_timeout_s=0,
+        )
+        assert r == auth.LOGIN_REQUIRED
+        assert "n" in called, "복구 실패면 사람을 불러야 한다"
+
+    def test_verify가_예외를_던져도_복구됨으로_오판하지_않는다(self, monkeypatch):
+        monkeypatch.setattr(auth, "notify_mac", lambda *a, **k: None)
+        def boom():
+            raise RuntimeError("창 닫힘")
+        r = auth.ensure_session(
+            self._Page(), sso_url="https://x/login", is_landed=lambda u: False,
+            login_id=None, verify=boom, sso_timeout_s=0, login_timeout_s=0,
+        )
+        assert r == auth.LOGIN_REQUIRED
+
+    def test_두_페처가_verify를_넘긴다(self):
+        import inspect
+        import rocket_supplier_fetcher as rk
+        import ohitech_ad_fetcher as oh
+        assert "verify=" in inspect.getsource(rk._recover_session)
+        assert "verify=" in inspect.getsource(oh._recover_session)

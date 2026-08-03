@@ -776,6 +776,10 @@ def _recover_session(page, cfg: dict) -> str:
         is_landed=_is_landed,
         login_id=cfg.get("supplier_login_id"),
         label="오하이테크 공급자허브",
+        # ★권위값 = 앱 자신의 오리진 진입 검사. URL 판정(_is_landed)이 과잉 협소해도
+        #   여기서 통과하면 복구된 것이다(supplier의 SSO returnUrl이 오리진 루트라
+        #   /dashboard를 요구하는 판정이 정상 복구를 거부할 여지가 있다).
+        verify=lambda: _goto_origin(page),
     )
 
 
