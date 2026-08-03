@@ -9,8 +9,15 @@ nullable — 이 마이그레이션 이전 적재분은 NULL로 남고, 페처�
 (option_days=30, delete-then-insert)로 최근 30일이 자연 채워진다. 표시는 옵션ID로 폴백.
 
 Revision ID: d7c1a9e35f42
-Revises: c4a7e2b91d63
+Revises: mrg9b1c4a7e2
 Create Date: 2026-08-03 20:30:00.000000
+
+★부모가 머지 리비전인 이유(2026-08-03): prod의 alembic head가 `rg9billed7c4e`(RG 정산 S9,
+  당시 미병합 브랜치에서 배포됨)였고 main의 head는 `c4a7e2b91d63`(네이버 APPLY_TM)이라 같은
+  부모 `b6e1c93f4275`에서 두 갈래가 나 있었다. 그 위에 그대로 얹으면 prod에 head가 둘이 되어
+  `alembic upgrade head`가 실패하고 **모든 세션의 배포 경로가 함께 막힌다**(safe_deploy가 이
+  명령을 쓴다). → RG 세션이 만들어 둔 머지 리비전 `mrg9b1c4a7e2`를 main으로 가져와 갈래를
+  합치고 그 위에 얹었다(Jino 승인).
 
 """
 from typing import Sequence, Union
@@ -21,7 +28,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = 'd7c1a9e35f42'
-down_revision: Union[str, None] = 'c4a7e2b91d63'
+down_revision: Union[str, None] = 'mrg9b1c4a7e2'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
