@@ -61,6 +61,58 @@ N배송   +3,000(수취) −81(수수료 2.724% 절사) −3,020(품고) = −10
 ⚠️ **부채**: 마지막 3커밋(`2f9097d`·`b407855`·`7ccf6f1`)은 codex 미검토. 08-09 후 재실행하거나
 Jino 판단으로 면제.
 
+## §3.5 ★★세션 막판 정정 — orderId 조회는 periodType·searchDate와 상호 배타
+
+**커머스 API 실측(2026-08-03, raw HTTP로 확인):**
+```
+orderId + periodType        → 400 "periodType 값은 orderId, productOrderId 값과 같이 입력될 수 없습니다"
+orderId + searchDate        → 400 "searchDate 값은 orderId, productOrderId 값과 같이 입력될 수 없습니다"
+orderId 단독(+page/size)    → 200 ✅
+```
+→ **orderId 단건 조회에서는 `settleDecisionType`을 쓸 수 없다**(그건 `periodType=PAY_DATE`일 때만
+의미가 있는데 periodType 자체를 못 준다). 대신 그 주문의 정산 행이 유형 구분 없이 전부 나온다.
+
+### 이 때문에 세션 중반 결론 하나가 틀렸다 — 정정
+"N배송 반품 2건은 정산 3유형 전부에서 0행" → **틀렸다.** `(r or {}).get('elements', [])`로 읽어
+**400 실패를 '없음'으로 오독**했다. 올바른 조회 결과:
+
+```
+주문 2026072553216341(결제 07-25) / 2026072852172181(결제 07-28) — 각 2행, 둘 다 비멤버십
+  PROD_ORDER  NORMAL_SETTLE_BEFORE_CANCEL  gross=16,800  mgmt=−458  expect=15,586
+  DELIVERY    NORMAL_SETTLE_BEFORE_CANCEL  gross= 3,000  mgmt= −81  expect= 2,919
+```
+
+### ★Jino 가설이 데이터로 지지된다 — N배송과 비N배송의 반품 처리가 다르다
+
+| | 반품 시 DELIVERY 행 | 의미 |
+|---|---|---|
+| **비N배송** | 5,000원 `NORMAL_SETTLE_ORIGINAL` | 반품비를 **정산받는다**(수입) |
+| **N배송** | 3,000원 `NORMAL_SETTLE_BEFORE_CANCEL` | 원 배송비가 **취소된다**(수입 없음) |
+
+즉 N배송 반품은 "반품비를 받는" 구조가 아니라 "받았던 배송비를 되돌리는" 구조로 보인다.
+표본 2건(둘 다 비멤버십)이라 확정은 이르다. **멤버십 N배송 반품은 여전히 0건**이라
+"멤버십이면 네이버가 보상"은 미검증.
+
+## §3.6 미결 — 감시 프로브(B)가 잘못된 파라미터로 배포됨, **잡은 꺼둠**
+
+서브에이전트가 만든 `naver_claim_settlement_probe`(커밋 `15a7dba`, 테스트 19건 통과)가
+**prod에 배포돼 있으나 라이브에서 실패**한다 — `fetch_case_settlement_by_order`가
+`periodType`+`settleDecisionType`+`orderId`를 함께 보내 400을 받는다(§3.5).
+서브에이전트가 커밋 메시지에 "라이브 미검증(크레덴셜 없음)"이라고 정확히 경고했고, 그게 터졌다.
+
+**조치**: prod `scheduler_state`에서 `run_naver_nbaesong_return_probe`를 **`is_enabled=0`으로 꺼뒀다.**
+코드·테이블(마이그 `d4f6a8c0b2e5`)은 배포된 채 남아 있다.
+
+**다음 세션이 할 일**:
+1. `fetch_case_settlement_by_order`에서 `periodType`·`settleDecisionType` 제거 → `{orderId, pageNumber, pageSize}`만
+2. 프로브의 3유형 루프 제거(주문당 1회 조회로 충분) + 테이블 `settle_decision_type` 컬럼 의미 재검토
+   (API가 안 주므로 `settleType`으로 대체하거나 컬럼 삭제)
+3. 테스트 19건 갱신 → 라이브 1회 실행으로 검증 → `is_enabled=1`
+
+★내 커밋 `7ccf6f1`에 서브에이전트의 스케줄러 배선이 섞여 들어가 prod에 반쪽 배포된 상태였다
+(지연 import라 즉사는 면했고, 뒤늦게 마이그+서비스까지 배포해 봉합). **같은 워크트리에서
+서브에이전트를 돌리면 `git add <파일>`이 남의 작업을 집어간다** — 다음엔 별도 워크트리로.
+
 ## §4 미결 — 반품 배송비 (4번 항목)
 
 수입은 실측 확정: 반품 주문의 DELIVERY 정산행 **50건 247,500원**(5,000원 45건이 지배적).
