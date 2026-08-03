@@ -64,12 +64,19 @@ def gate_bands(db: Session, *, as_of: date, campaign_ids: list[str]) -> dict[str
     승격시켜 일기에 남긴다. 그런데 실제 소비자(`auto_operator._learned_band_of` →
     `_probe_rank_floor`·`_learned_optimal_skip`)는 **캠페인별**로 재계산한 값을 쓴다.
     두 값은 다를 수 있고, 실제로 달랐다 — 2026-07-29 실측에서 계정 전체는 `1.0-2.0`이
-    승격돼 있었으나 `optimizer='ours'` 6개 캠페인 중 그 밴드를 소비하는 곳은 **0개**였다.
+    승격돼 있었으나 당시 `optimizer='ours'` 6개 캠페인 중 그 밴드를 소비하는 곳은 **0개**였다
+    (campaign_ids 스코프는 2026-07-30 사고 이후 `_observed_campaign_ids`로 교체됐다).
     일기에는 학습이 된 것처럼 보이는데 아무도 그 값을 안 읽는 상태 — 이 프로젝트가 추적
     중인 표방↔실구현 괴리 그대로다.
 
     그래서 일기에 **둘을 나란히** 남긴다. 계정 승격은 '참고', 이 함수 결과가 '실제 적용값'이다.
     """
+    if not campaign_ids:
+        # ★"대상 0" ≠ "대상은 있는데 학습밴드가 없다"(후자는 아래 루프가 None으로 표기).
+        log.warning(
+            "probe_learning_loop: gate_band 산출 대상 캠페인이 0 — 관측 스코프 결함 의심"
+            "(스코프 정의는 campaign_roster.observation_campaign_ids)",
+        )
     out: dict[str, str | None] = {}
     for cid in campaign_ids:
         try:
@@ -81,13 +88,22 @@ def gate_bands(db: Session, *, as_of: date, campaign_ids: list[str]) -> dict[str
     return out
 
 
-def _ours_campaign_ids(db: Session) -> list[str]:
-    from app.models import NaverCampaignSettings
+def _observed_campaign_ids(db: Session, *, as_of: date | None = None) -> list[str]:
+    """`gate_bands`를 산출할 캠페인 목록 = **관측 스코프**.
 
-    return [
-        r[0] for r in db.query(NaverCampaignSettings.campaign_id)
-        .filter(NaverCampaignSettings.optimizer == "ours").all()
-    ]
+    ★스코프 교체(2026-07-30 사고): 구 코드는 `optimizer='ours'`만 봤고, D-NAO-132
+    긴급정지로 그 집합이 비자 "게이트가 실제로 읽는 값"의 캠페인별 재계산이 통째로 멈췄다
+    (일기에는 계정 승격값만 남아, 이 함수가 애초에 드러내려던 표방↔실구현 괴리가 다시
+    가려졌다). 이 산출은 DB 읽기뿐이라 네이버 API 콜이 0이고 실행에도 전혀 관여하지 않는다
+    — 근거·선례는 campaign_roster.observation_campaign_ids docstring(D-NAO-13 원문).
+
+    ★과거 `as_of`로 부를 때: 재현되는 것은 **광고비 축뿐**이고 settings 축은 히스토리가 없어
+    현재 상태다(codex 2R P1-4). 비파괴 관측이라 계속 허용하되, 과거 일기를 재생성할 때 그
+    시점의 캠페인 목록과 정확히 일치하지 않을 수 있다는 점을 알고 읽어야 한다.
+    """
+    from app.services.naver_ad import campaign_roster
+
+    return sorted(campaign_roster.observation_campaign_ids(db, today=as_of))
 
 
 def _run_stage(result: dict, key: str, fn, default):
@@ -233,7 +249,8 @@ def run_probe_learning(
     # 게이트가 실제로 읽는 캠페인별 값을 따로 산출해 일기·로그에 나란히 남긴다(gate_bands docstring).
     result["scope"] = campaign_id or "account"
     _run_stage(result, "gate_bands",
-               lambda: gate_bands(db, as_of=as_of, campaign_ids=_ours_campaign_ids(db)), {})
+               lambda: gate_bands(db, as_of=as_of,
+                                  campaign_ids=_observed_campaign_ids(db, as_of=as_of)), {})
 
     try:
         _write_summary_diary(db, now, result)
