@@ -1102,7 +1102,10 @@ function RocketView({
                 <div className="text-xs text-gray-500 mb-2" title={data.ad_options.reconciliation.basis}>
                   옵션 합계 {won(data.ad_options.reconciliation.option_sum)} · 계정 총액 {won(data.ad_options.reconciliation.account_total)} · 차이{" "}
                   {Number(data.ad_options.reconciliation.diff) > 0 ? "+" : ""}
-                  {won(data.ad_options.reconciliation.diff)} ({(Number(data.ad_options.reconciliation.diff_pct) * 100).toFixed(2)}%)
+                  {/* ★diff_pct는 백엔드가 **이미 퍼센트 단위**로 준다(diff/account_total*100).
+                      여기서 또 100을 곱하면 0.02%가 2.05%로 보인다 — 수집이 크게 어긋난 것처럼
+                      읽히는 숫자라 조용한 오해를 만든다(2026-08-03 라이브에서 발견). */}
+                  {won(data.ad_options.reconciliation.diff)} ({Number(data.ad_options.reconciliation.diff_pct).toFixed(2)}%)
                   <span className="block text-[11px] text-gray-400 mt-0.5">※ 순이익에는 계정 총액을 씁니다.</span>
                 </div>
                 <div className="overflow-x-auto">
