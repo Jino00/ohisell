@@ -551,11 +551,13 @@ def _rg_row(db, account_key: str) -> CoupangWingCookie | None:
 def test_refresh_complete_respects_account_key(client):
     """WING2 완주 신호는 WING2 요청만 지운다 — 예전엔 WING1 행을 하드코딩해 둘 다 틀렸다."""
     c, seed = client
+    leases = {}
     for ak in ("COUPANG_WING1", "COUPANG_WING2"):
         rg_settlement_sync.rg_request_refresh(seed, ak)
-        rg_settlement_sync.rg_claim_refresh(seed, ak)
+        leases[ak] = rg_settlement_sync.rg_claim_refresh(seed, ak)["lease"]
 
     r = c.post(_RG_COMPLETE_URL, params={"account_key": "COUPANG_WING2"},
+               json={"lease": leases["COUPANG_WING2"]},
                headers={"X-Ingest-Token": _TOKEN})
     assert r.status_code == 200 and r.json()["ok"] is True
 
@@ -565,13 +567,17 @@ def test_refresh_complete_respects_account_key(client):
 
 
 def test_refresh_complete_defaults_to_wing1(client):
-    """하위호환 — account_key를 안 보내는 구버전 페처는 지금과 똑같이 WING1을 닫는다."""
+    """하위호환 — account_key를 안 보내는 페처 호출은 WING1을 닫는다.
+
+    ★lease는 2026-08-03부터 필수(codex 3R[P1]) — account_key 기본값만 하위호환이다.
+    """
     c, seed = client
     rg_settlement_sync.rg_request_refresh(seed, "COUPANG_WING1")
-    rg_settlement_sync.rg_claim_refresh(seed, "COUPANG_WING1")
+    lease = rg_settlement_sync.rg_claim_refresh(seed, "COUPANG_WING1")["lease"]
 
     assert c.post(_RG_COMPLETE_URL).status_code == 401           # 토큰 필요(형제와 동일 규칙)
-    assert c.post(_RG_COMPLETE_URL, headers={"X-Ingest-Token": _TOKEN}).status_code == 200
+    assert c.post(_RG_COMPLETE_URL, json={"lease": lease},
+                  headers={"X-Ingest-Token": _TOKEN}).status_code == 200
 
     seed.expire_all()
     row = _rg_row(seed, "COUPANG_WING1")

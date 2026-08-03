@@ -177,11 +177,20 @@ def claim_refresh(db: Session, account_key: str, *,
         log.info("refresh claim: %s attempt=%d/%d", account_key, attempt, MAX_ATTEMPTS)
     elif row is not None:
         _reap_exhausted(db, row, now, cutoff)
+    # ★claimed=true면 lease도 반드시 준다(2026-08-03): 완료·실패 보고가 lease 없이는 거부되므로
+    #   여기서 None이 새면 그 회차는 요청이 임대된 채 TTL 20분을 묵히다 끝내 '재시도 3회 소진'
+    #   이라는 거짓 실패로 끝난다. 위 UPDATE는 claimed_at=now를 썼는데 그 뒤 재-SELECT 사이에
+    #   다른 폴이 임대를 반납하면 _lease_of가 None이 될 수 있다 → 우리가 쓴 값으로 되돌린다.
+    #   (그 사이 임대가 바뀌었다면 이 lease는 뒤에서 stale로 접힌다 — None보다 언제나 낫다.)
+    lease = _lease_of(row) if claimed else None
+    if claimed and lease is None:
+        log.warning("claim 직후 임대 소실 — 쓴 값으로 대체: %s", account_key)
+        lease = now.isoformat()
     return {
         "claimed": claimed,
         "attempt": attempt,
         "max_attempts": MAX_ATTEMPTS,
-        "lease": _lease_of(row) if claimed else None,
+        "lease": lease,
     }
 
 
@@ -263,12 +272,17 @@ def _reap_exhausted(
 # ════════════════════════════════════════════════
 # ③ success — 여기서만 요청이 소멸한다
 # ════════════════════════════════════════════════
-def mark_success(db: Session, account_key: str, *, clear_error: bool = False,
-                 lease: str | None = None) -> bool:
-    """수집 성공 → 요청 소멸 + lease 해제 + 시도 카운터 리셋.
+def mark_success(db: Session, account_key: str, *, clear_error: bool = False) -> bool:
+    """**데이터 ingest**가 알리는 성공 → 요청 소멸 + lease 해제 + 시도 카운터 리셋.
 
-    ★요청이 사라지는 정상 경로는 여기 하나뿐이다(claim은 이제 소비하지 않는다).
+    ★요청이 사라지는 정상 경로는 여기와 mark_run_complete 둘뿐이다(claim은 소비하지 않는다).
     commit은 호출자 쪽 heartbeat와 함께 일어나도 무해하도록 여기서도 한다.
+
+    ★lease를 받지 않는다(2026-08-03): 이 함수는 "데이터가 실제로 들어왔다"는 자리에서만
+    불린다(vendor_summary·ohitech_ad·rocket·ad_cost의 ingest). run이 스스로 "끝났다"고
+    **주장**하는 신호는 임대 대조가 필요하므로 mark_run_complete를 쓴다 — 예전엔 한 함수가
+    lease=None이면 무조건 닫는 레거시 분기를 갖고 있었고, HTTP 엔드포인트가 그 분기에 닿아
+    남의 요청을 지울 수 있었다(codex 3R[P1]). 이제 그 분기는 HTTP에서 도달 불가다.
 
     clear_error(codex 2R[P2]): 지난 시도의 실패 흔적까지 지운다. 데이터 heartbeat를 동반하지
     않는 성공(=받을 게 없어 정상 종료한 회차)에서 필요하다 — 안 지우면 last_error_at만
@@ -278,22 +292,27 @@ def mark_success(db: Session, account_key: str, *, clear_error: bool = False,
     row = _row(db, account_key)
     if row is None:
         return False
-    values: dict = {"refresh_requested_at": None, "claimed_at": None, "attempt_count": 0}
-    if clear_error:
-        values["last_error"] = None
-        values["last_error_at"] = None
+    for k, v in _settle_values(clear_error).items():
+        setattr(row, k, v)
+    db.commit()
+    return True
 
-    if lease is None:
-        # 레거시 경로(데이터 ingest가 알리는 성공) — 조건 없이 닫는다.
-        for k, v in values.items():
-            setattr(row, k, v)
-        db.commit()
-        return True
 
-    # ★stale 완료 신호 무시(codex 3R[P2]) + 검사·쓰기 원자화(codex 5R[P2]):
-    # 임대를 넘긴 옛 run이 뒤늦게 "끝났다"고 말하면 지금 일하는 run의 임대나 사용자의 새
-    # 요청을 지운다. SELECT로 확인하고 따로 쓰면 그 사이에 임대가 바뀔 수 있으므로,
-    # 관측한 claimed_at과 일치할 때만 쓰는 조건부 UPDATE로 처리하고 rowcount로 판정한다.
+def mark_run_complete(db: Session, account_key: str, lease: str, *,
+                      clear_error: bool = True) -> bool:
+    """페처 run이 **자기 임대에 대해** "정상 완주했다"고 알리는 신호 → 요청 소멸.
+
+    데이터 heartbeat를 동반하지 않는 완주(=받을 게 없어 업로드 0건인 회차)를 닫는 유일한
+    수단이다. lease는 **필수** — 없으면 A와 B를 구분할 정보가 아예 없다.
+
+    ★stale 완료 신호 무시(codex 3R[P2]) + 검사·쓰기 원자화(codex 5R[P2]):
+    임대를 넘긴 옛 run이 뒤늦게 "끝났다"고 말하면 지금 일하는 run의 임대나 사용자의 새
+    요청을 지운다. SELECT로 확인하고 따로 쓰면 그 사이에 임대가 바뀔 수 있으므로,
+    관측한 claimed_at과 일치할 때만 쓰는 조건부 UPDATE로 처리하고 rowcount로 판정한다.
+
+    반환 False = "내 임대가 아니었다"(무해한 no-op). 호출자는 이걸 실패로 취급하지 않는다 —
+    이미 업로드가 요청을 소멸시킨 뒤여도 여기로 온다.
+    """
     try:
         lease_dt = datetime.fromisoformat(lease)
     except (TypeError, ValueError):
@@ -303,7 +322,7 @@ def mark_success(db: Session, account_key: str, *, clear_error: bool = False,
         update(CoupangWingCookie)
         .where(CoupangWingCookie.account_key == account_key)
         .where(CoupangWingCookie.claimed_at == lease_dt)
-        .values(**values)
+        .values(**_settle_values(clear_error))
     )
     db.commit()
     if (res.rowcount or 0) == 0:
@@ -311,6 +330,15 @@ def mark_success(db: Session, account_key: str, *, clear_error: bool = False,
                  account_key, lease, _lease_of(_row(db, account_key)))
         return False
     return True
+
+
+def _settle_values(clear_error: bool) -> dict:
+    """요청 소멸 시 쓰는 컬럼 묶음 — mark_success와 mark_run_complete가 공유한다."""
+    values: dict = {"refresh_requested_at": None, "claimed_at": None, "attempt_count": 0}
+    if clear_error:
+        values["last_error"] = None
+        values["last_error_at"] = None
+    return values
 
 
 # ════════════════════════════════════════════════

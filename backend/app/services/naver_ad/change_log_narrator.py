@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import re
+from typing import Protocol, Sequence
 
 from sqlalchemy.orm import Session
 
@@ -186,6 +187,71 @@ def change_direction(row: NaverChangeLog) -> int:
     return 1 if a > b else -1
 
 
+def _lock_text(v: bool) -> str:
+    return "정지" if v else "가동"
+
+
+#: 액션별로 **의미 있는 필드**가 무엇인지. 순서 탐색만으로는 안 된다(라이브 실측):
+#: 캠페인 정지 행(`manual_emergency_stop`)의 payload에는 dailyBudget도 들어 있어서
+#: "입찰→예산→정지" 순으로 찾으면 **"50,000원 → 50,000원"**이 표시된다 —
+#: 광고를 멈춘 사건인데 화면은 "아무것도 안 바뀜"이라고 말한다.
+_VALUE_FIELD_BY_ACTION: dict[str, str] = {
+    "update_bid": "bid",
+    "external_bid_change": "bid",
+    "external_keyword_added": "bid",
+    "external_keyword_removed": "bid",
+    "update_budget": "budget",
+    "budget_up_pacing": "budget",
+    "budget_down_pacing": "budget",
+    "set_user_lock": "lock",
+    "manual_emergency_stop": "lock",
+    "external_status_change": "lock",
+}
+
+_EXTRACTORS: dict[str, tuple] = {
+    "bid": (_bid_of, _won),
+    "budget": (_budget_of, _won),
+    "lock": (_lock_of, _lock_text),
+}
+
+
+def changed_values(row: NaverChangeLog) -> tuple[str | None, str | None]:
+    """(이전값, 이후값) 표시 문자열. 못 구하면 **None** — 0이나 빈칸으로 채우지 않는다.
+
+    ★공개 함수인 이유는 change_direction과 같다: before/after 파싱 규약(소재는
+    `adAttr.bidAmt`, 예산은 `dailyBudget`, 정지는 `userLock`)이 이 모듈에만 있고, 밖에서
+    다시 파싱하면 소재-레벨 입찰(쇼핑의 실제 레버, 실측 96%)을 통째로 놓친다.
+
+    ★한쪽만 있는 경우가 실제로 있다(entity_sync의 키워드 삭제 감지는 before만 채운다) —
+    그때 없는 쪽은 None이다. 호출자가 '관측 공백'이라고 **말하게** 하려는 것이지,
+    같은 값으로 메우거나 0으로 채우려는 게 아니다.
+
+    ★모르는 액션은 **실제로 달라진 필드**를 고른다(순서상 첫 번째가 아니라). 안 그러면
+    payload에 우연히 들어 있는 무변동 필드가 뽑혀 "안 바뀌었다"고 말하게 된다.
+    """
+    before, after = _loads(row.before_value), _loads(row.after_value)
+
+    def rendered(kind: str) -> tuple[str | None, str | None]:
+        extract, fmt = _EXTRACTORS[kind]
+        b, a = extract(before), extract(after)
+        return (fmt(b) if b is not None else None, fmt(a) if a is not None else None)
+
+    field = _VALUE_FIELD_BY_ACTION.get(row.action)
+    if field:
+        return rendered(field)
+
+    fallback: tuple[str | None, str | None] | None = None
+    for kind in ("bid", "budget", "lock"):
+        b, a = rendered(kind)
+        if b is None and a is None:
+            continue
+        if b != a:
+            return b, a  # 실제로 달라진 필드 — 이게 그 행이 말하려는 변화다
+        if fallback is None:
+            fallback = (b, a)
+    return fallback or (None, None)
+
+
 def block_reason(rationale: str | None) -> str:
     """가드 거부 사유를 사람 말로. 내부 원문(D-NAO 코드·변수명)은 절대 그대로 안 내보낸다.
 
@@ -199,7 +265,16 @@ def block_reason(rationale: str | None) -> str:
     return _BLOCK_REASON_FALLBACK
 
 
-def resolve_labels(db: Session, rows: list[NaverChangeLog]) -> dict[tuple[str, str], str]:
+class HasEntity(Protocol):
+    """이름 해석에 필요한 최소 표면. NaverChangeLog·NaverAgencyOp 둘 다 만족한다 —
+    「수정 사항」 화면이 두 원천을 한 표에 그리므로 이름 해석도 한 곳이어야 한다
+    (두 벌로 해석하면 같은 소재가 화면마다 다른 이름으로 나온다)."""
+
+    entity_type: str
+    entity_id: str
+
+
+def resolve_labels(db: Session, rows: Sequence[HasEntity]) -> dict[tuple[str, str], str]:
     """{(entity_type, entity_id): 표시 이름} 배치 해석(쿼리 수는 엔티티 종류 수로 유한).
 
     ★소재(ad)는 naver_entity에 없다 — naver_adgroup_product(소재 sync)의 상품명, 없으면
@@ -351,6 +426,10 @@ def narrate(
         time_label = row.changed_at.strftime("%H:%M") if row.changed_at else "시각 미상"
         head = f"{time_label} · {cname} — " if cname else f"{time_label} · "
         out.append({
+            # ★행 id를 함께 준다(「수정 사항」 화면): 문장만 돌려주면 호출자가 어느 행의
+            #   문장인지 되짚을 방법이 정렬 순서 재현밖에 없다 — 내부 정렬 키가 바뀌는 순간
+            #   문장이 **다른 행에 붙는다**(조용한 오표시). 추가 키라 기존 소비자엔 무해하다.
+            "id": row.id,
             "at": row.changed_at.isoformat() if row.changed_at else None,
             "time_label": time_label,
             "state": state,

@@ -386,9 +386,18 @@ def test_stale_completion_signal_is_ignored(db):
     db.commit()
     rc.claim_refresh(db, ACC)   # 2회차가 재claim
 
-    assert rc.mark_success(db, ACC, lease=stale_lease) is False
+    assert rc.mark_run_complete(db, ACC, stale_lease) is False
     assert _row(db).refresh_requested_at is not None   # 새 임대의 요청은 살아있다
-    assert rc.mark_success(db, ACC, lease=_row(db).claimed_at.isoformat()) is True
+    assert rc.mark_run_complete(db, ACC, _row(db).claimed_at.isoformat()) is True
+
+
+def test_run_complete_rejects_garbage_lease(db):
+    """lease가 임대 식별자 꼴이 아니면 접는다 — 파싱 실패를 '조건 없이 닫기'로 떨어뜨리지 않는다."""
+    rc.request_refresh(db, ACC)
+    rc.claim_refresh(db, ACC)
+
+    assert rc.mark_run_complete(db, ACC, "not-a-timestamp") is False
+    assert _row(db).refresh_requested_at is not None   # 요청 생존
 
 
 def test_mark_success_can_clear_error_trace(db):

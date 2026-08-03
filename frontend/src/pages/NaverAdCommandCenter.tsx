@@ -13,7 +13,9 @@
 // 없어(백엔드 _serialize_settings가 안 줌) campaign_id만 표시한다 — 추측으로 필드를 만들지 않는다.
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { Card, Stat, EmptyState, Loading, CoverageBar, Table, Th, Td, Badge, LayerNav, OptimizerSwitch, LossPolicySwitch } from "../components/ui";
+import { Card, Stat, EmptyState, Loading, CoverageBar, Table, Th, Td, Badge, LayerNav, OptimizerSwitch, LossPolicySwitch, PeriodTabs } from "../components/ui";
+import type { DateRange } from "../lib/periodRange";
+import { usePeriod } from "../lib/usePeriod";
 import { num, won, roasX, pctFromFraction, NO_DATA } from "../lib/format";
 import { useAsyncData } from "../lib/useAsyncData";
 import {
@@ -584,136 +586,10 @@ function TargetCell({ row }: { row: NaverChangeLogRow }) {
 }
 
 // ══════════════════════════════════════════════════════════════════
-// D-NAO-54 기간 선택 — 변경 이력 두 패널이 **각각** 쓰는 재사용 컴포넌트.
-// ★상태는 공유하지 않는다(패널마다 독립 usePeriod). 의도된 것이다: 외부 감지는 하루 1회
-//   (07:35 entity_sync)라 우리 시간당 집행과 자연스러운 창이 다르다. 대신 각 카드의 탭이
-//   보이고 라벨에 실제 날짜가 병기되므로 숨은 상태가 아니다(Jino 결정 2026-07-17).
-// Jino 확정(2026-07-17): 기본=당일 · 7일/30일은 **어제 기준**(당일은 진행 중이라 별도 탭이고,
-// 섞으면 "완결된 과거"라는 탭의 의미가 깨진다) · 임의 구간은 캘린더.
+// D-NAO-54 기간 선택 — 두 패널이 **각각** 쓰는 재사용 컴포넌트는 `components/ui/PeriodTabs`로
+// 옮겼다(「수정 사항」 화면이 같은 규칙을 필요로 한다 — 복사하면 두 화면이 서로 다른 규칙으로
+// 같은 백엔드를 호출하게 되고 한쪽만 422 원문을 흘린다). 순수 로직은 `lib/periodRange`.
 // ══════════════════════════════════════════════════════════════════
-
-type DateRange = { from: string; to: string };
-
-/** KST 기준 N일 전 날짜(YYYY-MM-DD).
- *  ★브라우저 로컬시각(`new Date().toISOString().slice(0,10)` 등)으로 계산하면 안 된다:
- *  그건 UTC/로컬 날짜이고 서버의 changed_at은 **KST**다. 자정~09:00 사이에 하루가 어긋난다
- *  — 이 저장소가 이미 두 번 당한 함정(memory: sqlite-server-default-now-is-utc).
- *  그래서 타임존을 명시해 KST로 못박는다.
- *  ★en-CA 로케일이 YYYY-MM-DD를 준다. 한국은 DST가 없어 ±N일이 정확히 86,400초다.
- *  ★export하는 이유: 이 diff에서 **유일하게 타임존이 걸린 프론트 코드**다. 테스트 못 하는
- *  타임존 코드를 두는 게 정확히 위 두 사고의 모양이었다. */
-export function kstDate(offsetDays: number, now: number = Date.now()): string {
-  return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Seoul" })
-    .format(new Date(now + offsetDays * 86_400_000));
-}
-
-const PERIOD_PRESETS = [
-  { key: "today", label: "당일", range: (): DateRange => ({ from: kstDate(0), to: kstDate(0) }) },
-  { key: "yesterday", label: "어제", range: (): DateRange => ({ from: kstDate(-1), to: kstDate(-1) }) },
-  // 어제를 끝점으로 7일/30일 — 당일 미포함(끝점 포함이므로 -7..-1이 정확히 7일이다).
-  { key: "7d", label: "7일", range: (): DateRange => ({ from: kstDate(-7), to: kstDate(-1) }) },
-  { key: "30d", label: "30일", range: (): DateRange => ({ from: kstDate(-30), to: kstDate(-1) }) },
-] as const;
-
-type PeriodKey = (typeof PERIOD_PRESETS)[number]["key"] | "custom";
-type Period = ReturnType<typeof usePeriod>;
-
-/** 백엔드 `_MAX_CHANGE_LOG_SPAN_DAYS`와 같은 값. 양끝 포함이라 365일째까지 합법. */
-const MAX_SPAN_DAYS = 365;
-
-/** 커스텀 구간이 조회 불가한 이유. null이면 조회 가능.
- *  ★`<input type="date">`는 사용자가 지우면 **빈 문자열**을 준다(실측). 그걸 안 잡으면
- *  `date_from=`이 그대로 나가고 백엔드가 422 + 날 것의 pydantic 메시지를 뱉어
- *  화면에 "불러오지 못했습니다: Input should be a valid date…"가 뜬다(실측).
- *  ★`from > to` 하나만 보면 빈 문자열을 못 잡는다: `"" > "2026-07-17"`는 **false**다(실측).
- *  ISO 날짜라서 문자열 비교가 곧 날짜 비교인 건 **양쪽이 채워졌을 때만** 참이다.
- *  ★백엔드 3개 규칙(빈값·뒤집힘·365일)을 **전부** 따라해야 한다. span 규칙을 빼먹었더니
- *  `2024-01-01 ~ 2026-07-17`을 정상적으로 고르는 것만으로 422 원문이 떴다. 게다가 날짜
- *  입력은 타이핑 중간값도 onChange로 흘린다 — 연도 칸에 2026을 치면 0002·0020·0202를
- *  거치는데 그 중간값들이 파라미터 검증을 **통과**한 뒤 span 초과로 422가 된다.
- *  여기서 막으면 요청 자체가 안 나가므로 디바운스 없이도 원문 노출이 사라진다. */
-export function customRangeError(range: DateRange, today: string = kstDate(0)): string | null {
-  if (!range.from || !range.to) return "시작일과 종료일을 모두 선택하세요.";
-  if (range.from > range.to) return "시작일이 종료일보다 늦습니다.";
-  // ★미래 차단(D-NAO-54 R2): 변경 이력은 지나간 사건의 기록이라 미래 구간은 의미가 없다.
-  //   동시에 이게 `9999-12-31` 계열을 통째로 막는다 — 백엔드는 그 날짜에서
-  //   `date_to + 1일`이 OverflowError라 422를 주는데(자체 프로브로 발견), 프론트가 안 막으면
-  //   그 422가 "불러오지 못했습니다: API error 422: {…}"로 사용자에게 그대로 간다.
-  //   불변식: **백엔드가 막는 입력은 프론트가 먼저 막는다**(프론트가 더 엄격한 건 허용).
-  if (range.to > today) return "미래 날짜는 조회할 수 없습니다.";
-  const spanDays = (Date.parse(`${range.to}T00:00:00Z`) - Date.parse(`${range.from}T00:00:00Z`))
-    / 86_400_000 + 1;
-  if (!Number.isFinite(spanDays)) return "날짜 형식이 올바르지 않습니다.";
-  if (spanDays > MAX_SPAN_DAYS) return `조회 구간은 최대 ${MAX_SPAN_DAYS}일입니다.`;
-  return null;
-}
-
-/** 해석된 구간을 사람이 읽는 문자열로. 프리셋도 **실제 날짜를 병기**한다.
- *  ★"당일"만 쓰면 라벨이 거짓말할 수 있다: range는 렌더 시점의 Date.now()로 계산되는데
- *  useAsyncData에는 타이머가 없다. 23:50에 열어둔 화면이 00:10이 되어도 재렌더가 없으면
- *  어제 데이터를 "당일"이라고 표시한 채 굳는다. 날짜를 병기하면 최소한 거짓말은 아니고,
- *  두 패널이 서로 다른 날을 질의하는 것도 눈에 보인다. */
-function rangeLabel(presetLabel: string | null, range: DateRange): string {
-  const span = range.from === range.to ? range.from : `${range.from} ~ ${range.to}`;
-  return presetLabel ? `${presetLabel} (${span})` : span;
-}
-
-/** 기간 상태. range는 원시 문자열 2개라 useAsyncData deps에 그대로 넣어도 안정적이다. */
-function usePeriod() {
-  const [key, setKey] = useState<PeriodKey>("today");
-  // ★초기화 함수 형태 — 객체 리터럴로 쓰면 Intl.DateTimeFormat 2개가 매 렌더 생성되고 버려진다.
-  const [custom, setCustom] = useState<DateRange>(() => ({ from: kstDate(-7), to: kstDate(0) }));
-  const preset = PERIOD_PRESETS.find((p) => p.key === key);
-  const range = preset ? preset.range() : custom;
-  // 잘못된 구간은 백엔드도 422로 막지만(조용한 빈 결과 = "변경 없음"으로 읽히므로),
-  // 화면에서 먼저 잡아 요청 자체를 안 보낸다 — 422 원문은 사용자에게 무의미하다.
-  const error = preset ? null : customRangeError(custom);
-  const label = rangeLabel(preset ? preset.label : null, range);
-  return { key, setKey, custom, setCustom, range, error, label };
-}
-
-function PeriodTabs({ p }: { p: Period }) {
-  return (
-    <div className="px-4 py-2 border-b border-gray-100 flex items-center gap-1 flex-wrap">
-      {PERIOD_PRESETS.map((preset) => (
-        <button
-          key={preset.key}
-          type="button"
-          onClick={() => p.setKey(preset.key)}
-          className={`px-2 py-0.5 text-xs rounded-full ${
-            p.key === preset.key ? "bg-blue-50 text-blue-700 font-semibold" : "text-gray-600 hover:bg-gray-100"
-          }`}
-        >
-          {preset.label}
-        </button>
-      ))}
-      <button
-        type="button"
-        onClick={() => p.setKey("custom")}
-        className={`px-2 py-0.5 text-xs rounded-full ${
-          p.key === "custom" ? "bg-blue-50 text-blue-700 font-semibold" : "text-gray-600 hover:bg-gray-100"
-        }`}
-      >
-        기간 지정
-      </button>
-      {p.key === "custom" && (
-        <span className="flex items-center gap-1 ml-1">
-          <input
-            type="date" value={p.custom.from} max={kstDate(0)}
-            onChange={(e) => p.setCustom({ ...p.custom, from: e.target.value })}
-            className="text-xs border border-gray-200 rounded px-1 py-0.5"
-          />
-          <span className="text-xs text-gray-400">~</span>
-          <input
-            type="date" value={p.custom.to} max={kstDate(0)}
-            onChange={(e) => p.setCustom({ ...p.custom, to: e.target.value })}
-            className="text-xs border border-gray-200 rounded px-1 py-0.5"
-          />
-        </span>
-      )}
-    </div>
-  );
-}
 
 /** 변경 칸. ★실패 행은 before/after가 **둘 다 없다**(writer를 부르지도 않았거나 예외로 끊겼다)
  *  — describeChange에 그대로 넘기면 "입찰가 — → —"가 되어 데이터 결손처럼 보인다.
