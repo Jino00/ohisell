@@ -160,10 +160,12 @@ def build_fee_audit(
             **anomaly,
         })
 
-    # 플래그 있는 항목 먼저(검토 우선순위), 그 안에서 size_mismatch_high를 최상단.
+    # 플래그 있는 항목 먼저(검토 우선순위). 최상단은 measured_vs_billed_mismatch —
+    #   실측값 자체와 청구가 어긋난 것이라 등록치수 기준 추정(size_mismatch_high)보다 강한 신호다.
     def _sort_key(it: dict) -> tuple:
         f = it["flags"]
         return (
+            0 if "measured_vs_billed_mismatch" in f else 1,
             0 if "size_mismatch_high" in f else 1,
             0 if f else 1,
             -(it.get("per_unit_delivery") or 0),
@@ -176,15 +178,19 @@ def build_fee_audit(
         "total_options": len(items),
         "flagged": len(flagged),
         "size_mismatch_high": sum(1 for it in items if "size_mismatch_high" in it["flags"]),
+        # 실측값 자체와 청구가 어긋난 건수 — 등록치수 기준 추정보다 강한 신호(2026-08-03 신설).
+        "measured_vs_billed_mismatch": sum(
+            1 for it in items if "measured_vs_billed_mismatch" in it["flags"]),
         "below_floor": sum(1 for it in items if "below_floor" in it["flags"]),
         "missing_dims": sum(1 for it in items if "missing_dims" in it["flags"]),
         "unit_unknown": sum(1 for it in items if "unit_unknown" in it["flags"]),
         "oversize": sum(1 for it in items if "oversize" in it["flags"]),
     }
     log.info(
-        "RG 청구 감사 (%s): %d옵션 중 %d플래그(불일치%d·하한미달%d)",
+        "RG 청구 감사 (%s): %d옵션 중 %d플래그(실측불일치%d·추정불일치%d·하한미달%d)",
         account_key or "ALL", summary["total_options"], summary["flagged"],
-        summary["size_mismatch_high"], summary["below_floor"],
+        summary["measured_vs_billed_mismatch"], summary["size_mismatch_high"],
+        summary["below_floor"],
     )
     return {
         "generated_at": kst_today().isoformat(),

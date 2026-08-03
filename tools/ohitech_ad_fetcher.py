@@ -38,6 +38,10 @@ import subprocess
 import sys
 import time
 import urllib.request
+
+# 세션 자가 복구 공용 구현(같은 디렉터리 — 데몬은 ~/.ohisell/tools/에서 실행되므로
+# install_local_runtime.sh가 이 파일도 함께 복사해야 한다. 빠지면 import 실패로 크래시 루프).
+import coupang_auth
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -91,6 +95,71 @@ def load_config() -> dict:
 def _is_logged_out(url: str) -> bool:
     u = (url or "").lower()
     return any(x in u for x in ("login", "/auth", "sso", "signin", "xauth"))
+
+
+# ── 세션 자가 복구(2026-08-03) ─────────────────────────────────────────
+# 이 페처는 오픽스 광고와 같은 대시보드를 쓰지만 **로그인 클라이언트가 다르다**. 자동 재로그인이
+# 없어서 세션이 풀릴 때마다 사람을 불렀다(그날 하루 3회).
+#
+# ★★진입 클라이언트(2026-08-03 라이브 실측으로 바로잡음): 오하이테크는 **로켓배송(1P) 공급자**
+#   계정이라 오픽스의 `_cap_client=WING`을 그대로 쓰면 안 된다. WING으로 들어가면 세션이 풀렸을 때
+#   광고센터 '역할 선택' 화면(마켓플레이스·로켓배송·대행사 카드 3장)에 멈춘다 — 입력칸이 0개라
+#   ②Keychain은 폼을 기다리다 죽고(13:34:00), keycloak 세션이 살아 있어도 ①이 관통하지 못한다
+#   (13:52 실측: supplier-hub 세션이 살아 있는데도 WING 진입은 역할 선택으로 튕겼다).
+#   역할 선택에서 '쿠팡 로켓배송 판매자'를 고를 때 실제로 타는 체인을 그대로 쓴다:
+#     /user/login?_cap_client=SUPPLIERHUB&_cap_market=KR
+#       → /login_sxauth?client=SUPPLIERHUB&market=KR
+#       → xauth realms/seller?client_id=supplier-hub&redirect_uri=.../keycloak_callback
+#       → /keycloak_callback → /marketing/dashboard/sales   (세션 살아있으면 **비번 없이**)
+#   ★`SUPPLIER`가 아니라 `SUPPLIERHUB`이고 `_cap_market=KR`이 필요하다 — 둘 중 하나만 틀려도
+#     역할 선택 화면으로 되돌아간다(실측). 추측하지 말 것.
+SSO_LOGIN_URL = (
+    "https://advertising.coupang.com/user/login?_cap_client=SUPPLIERHUB&_cap_market=KR"
+    "&returnUrl=%2Fmarketing%2Fdashboard%2Fsales%3F_cap_client%3DSUPPLIERHUB"
+)
+
+
+def _is_landed(url: str) -> bool:
+    """SSO/자동로그인 성공 판정 — 대시보드에 착지했고 로그인 페이지가 아니다."""
+    return "/marketing/dashboard" in (url or "") and not _is_logged_out(url)
+
+
+def _recover_session(page, cfg: dict) -> str:
+    """세션이 풀렸을 때 ①SSO 재발급 → ②Keychain 자동로그인 → ③알림 순으로 복구 시도.
+
+    ★login_id(cfg["ohitech_ad_login_id"])가 없으면 ②는 조용히 건너뛴다 — 미설정이 오류가
+      아니다. 그 경우 ①까지만 동작한다(tools/setup_fetcher_autologin.sh로 1회 등록하면 켜진다).
+    """
+    return coupang_auth.ensure_session(
+        page,
+        sso_url=SSO_LOGIN_URL,
+        is_landed=_is_landed,
+        # ★키 이름을 오픽스와 분리한다(적대적 리뷰 P2): 오픽스도 `ad_login_id`를 쓴다.
+        #   같은 이름이면 config를 복사할 때 오픽스 계정이 오하이테크 프로필에 로그인하고,
+        #   _push_days가 vendor_id를 리터럴('A01029796')로 박아 push하므로 **오픽스 광고비가
+        #   오하이테크로 조용히 적재된다**. 이름을 분리해 그 실수를 구조로 막는다.
+        login_id=cfg.get("ohitech_ad_login_id"),
+        label="오하이테크 광고",
+        # ★권위값 = 대시보드 실제 진입. URL 휴리스틱이 틀려도 여기서 통과하면 복구된 것이다.
+        verify=lambda: _dashboard_reachable(page),
+    )
+
+
+def _dashboard_reachable(page) -> bool:
+    """대시보드에 실제로 들어가지는지 = 앱 기준 세션 생존 판정.
+
+    URL 판정(_is_landed)은 폴링을 언제 멈출지 정하는 휴리스틱일 뿐이고, 복구됐는지의
+    최종 판정은 이쪽이다 — 내 URL 추측이 틀려도 진짜 복구를 실패로 오판하지 않는다.
+    """
+    try:
+        page.goto(DASH_URL, wait_until="domcontentloaded", timeout=40000)
+    except Exception:  # noqa: BLE001
+        return False
+    try:
+        page.wait_for_timeout(2000)  # Akamai/세션 안정화
+        return not _is_logged_out(page.url)
+    except Exception:  # noqa: BLE001 — 창 소실 등
+        return False
 
 
 def _cdp_alive(port: int) -> bool:
@@ -803,10 +872,14 @@ def cmd_run(cfg: dict) -> int:
                 log.warning("대시보드 goto 경고(계속): %s", str(e)[:120])
             page.wait_for_timeout(2000)  # Akamai/세션 안정화
             if _is_logged_out(page.url):
-                log.error("세션 만료(로그인 페이지) — Chrome 창에서 오하이테크 재로그인 필요.")
-                _notify_mac("오하이테크 광고 로그인 필요", "광고비 수집 세션 만료 — Chrome 창에서 재로그인하세요.")
-                owner.keep_open = True   # 로그인할 창이 필요 → 닫지 않음
-                return RC_LOGIN_REQUIRED
+                # ★사람을 부르기 전에 스스로 복구를 시도한다(2026-08-03): 대부분의 만료는
+                #   aid(1h)이고 keycloak(12h)은 살아 있어 비번 없이 여기서 끝난다.
+                log.info("세션 만료 감지 — 자가 복구 시도(SSO → Keychain 순).")
+                if coupang_auth.OK != _recover_session(page, cfg):
+                    log.error("세션 자가 복구 실패 — Chrome 창에서 오하이테크 재로그인 필요.")
+                    owner.keep_open = True   # 로그인할 창이 필요 → 닫지 않음
+                    return RC_LOGIN_REQUIRED
+                log.info("세션 자가 복구 성공 — 수집 계속.")
             res = page.evaluate(_SALES_FETCH_JS, _sales_payload(cfg))
             status = res.get("status") if res else None
             body = (res or {}).get("body") or ""
@@ -814,10 +887,22 @@ def cmd_run(cfg: dict) -> int:
             # 페이지를 200으로 주기도 한다 — 아래 status 분기 안에만 두면 200 로그인 HTML이
             # 파싱 단계로 새어 '재시도 대상'이 되고 창이 세 번 뜬다.
             if any(x in body.lower() for x in ("login", "signin", "kccontext")):
-                log.error("세션 만료(로그인 HTML, status=%s) — 재로그인 필요.", status)
-                _notify_mac("오하이테크 광고 로그인 필요", "광고비 수집 세션 만료 — Chrome 창에서 재로그인하세요.")
-                owner.keep_open = True
-                return RC_LOGIN_REQUIRED
+                # 페이지는 대시보드인데 fetch만 로그인 HTML = aid만 만료된 전형적 상태.
+                # ★복구 후 **한 번만** 재시도한다(무한 루프 금지 — 실패하면 사람을 부른다).
+                log.info("fetch가 로그인 HTML(status=%s) — 자가 복구 후 1회 재시도.", status)
+                if coupang_auth.OK != _recover_session(page, cfg):
+                    log.error("세션 자가 복구 실패 — Chrome 창에서 오하이테크 재로그인 필요.")
+                    owner.keep_open = True
+                    return RC_LOGIN_REQUIRED
+                res = page.evaluate(_SALES_FETCH_JS, _sales_payload(cfg))
+                status = res.get("status") if res else None
+                body = (res or {}).get("body") or ""
+                if any(x in body.lower() for x in ("login", "signin", "kccontext")):
+                    log.error("복구 후에도 로그인 HTML(status=%s) — 재로그인 필요.", status)
+                    coupang_auth.notify_mac("오하이테크 광고 로그인 필요",
+                                            "자동 복구 실패 — Chrome 창에서 재로그인하세요.")
+                    owner.keep_open = True
+                    return RC_LOGIN_REQUIRED
             if status not in (200, 201):
                 log.error("report/SALES 비정상 status=%s — %s", status, body[:160].replace("\n", " "))
                 return 1
