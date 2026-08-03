@@ -901,13 +901,43 @@ class NaverClient(BaseChannelClient):
 
     @staticmethod
     def _map_status(naver_status: str) -> str:
+        """네이버 productOrderStatus → 내부 상태.
+
+        ★내부 상태는 매출 인식을 가른다 — cafe24_status_mapper.REVENUE_EXCLUDED
+          ({cancelled, returned, pending})에 걸리면 매출·수수료·원가가 통째로 빠진다.
+          그래서 이 표는 "이 주문의 돈이 우리 것인가"를 결정하는 회계 계약이다.
+
+        ★2026-08-03 정정 2건(14일 전수 대사에서 발견):
+          ① EXCHANGED → 종전 "returned"였다. **교환은 환불이 아니다** — 상품만 바꿔 보내고
+             돈은 그대로 우리 것이다. 정산이 이를 확정한다: 교환 라인 33건이
+             settle_type=NORMAL_SETTLE_ORIGINAL로 **정산 완료**됐고(settle_complete_date 존재)
+             차감 행(NORMAL_SETTLE_AFTER_CANCEL)은 3개월이 지나도 오지 않았다.
+             그런데 우리는 매출에서 뺐다 — 라이브 49건 826,500원 과소계상.
+             → 별도 상태 "exchanged"로 분리(REVENUE_EXCLUDED에 넣지 않아 매출 유지).
+          ② CANCELED_BY_NOPAYMENT → 매핑이 없어 폴백 .lower()로 통과했고, 그 값은
+             REVENUE_EXCLUDED에 없어 **결제조차 안 된 주문이 매출로 잡혔다**
+             (라이브 10건 163,000원 과대계상). → "cancelled"로 명시 매핑.
+
+        ★폴백(.lower())은 유지하되 경고를 남긴다 — 모르는 상태가 조용히 매출로 새는 것이
+          ②의 실체였다. 새 상태가 로그에 뜨면 이 표에 명시적으로 추가할 것.
+        """
         mapping = {
-            "PAYED": "confirmed",
-            "DELIVERING": "shipped",
-            "DELIVERED": "delivered",
-            "PURCHASE_DECIDED": "delivered",
-            "EXCHANGED": "returned",
+            # 매출 인식
+            "PAYED": "confirmed",            # 결제완료
+            "DELIVERING": "shipped",         # 배송중
+            "DELIVERED": "delivered",        # 배송완료
+            "PURCHASE_DECIDED": "delivered",  # 구매확정
+            "EXCHANGED": "exchanged",        # 교환완료 — 돈은 우리 것(매출 유지)
+            # 매출 제외 (REVENUE_EXCLUDED)
             "CANCELED": "cancelled",
+            "CANCELED_BY_NOPAYMENT": "cancelled",  # 미입금 취소 = 결제 자체가 없었다
             "RETURNED": "returned",
         }
-        return mapping.get(naver_status, naver_status.lower())
+        mapped = mapping.get(naver_status)
+        if mapped is None:
+            log.warning(
+                "네이버 미지의 주문상태 '%s' — 매핑표에 없어 소문자 폴백. 매출 인식이 "
+                "의도와 다를 수 있으니 _map_status에 명시 추가할 것", naver_status,
+            )
+            return naver_status.lower()
+        return mapped
