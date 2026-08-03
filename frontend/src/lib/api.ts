@@ -2427,6 +2427,99 @@ export async function fetchNaverChangeLog(params: {
   return fetchApi(`/api/naver/ad/change-log?${q.toString()}`);
 }
 
+// ══════════════════════════════════════════════════════════════════
+// 「수정 사항」 화면 — naver_change_log ∪ naver_agency_op 합본 + 주체 정정
+// ★`fetchNaverChangeLog`(단일 원천)와 다른 엔드포인트다. 대행사 조작은 grain에 따라
+//   **다른 테이블**에 들어가므로(입찰·상태 diff는 change_log의 external_*, 소재 editTm은
+//   agency_op) 한쪽만 보면 "그날 아무도 안 만졌다"는 거짓 안심을 준다.
+// ══════════════════════════════════════════════════════════════════
+
+/** 우리 자동화 / 대행사 / Jino. ★'MOP'라는 말은 화면 어디에도 쓰지 않는다 — 코드베이스의
+ *  `optimizer='mop'`은 "제3자 소유"라는 뜻이라 Jino가 말하는 "MOP=우리 시스템"과 정반대다. */
+export type NaverModificationActor = "ours" | "agency" | "jino";
+
+export interface NaverModificationRow {
+  /** `"change_log:1122"` — 두 원천의 id가 겹치므로 원천을 접두한 합성 키다(React key·정정 대상). */
+  key: string;
+  source: "change_log" | "agency_op";
+  source_label: string;
+  source_id: number;
+  /** 귀속 시각(KST). agency_op은 occurred_at 우선 — 백필 36건은 감지일이 08-03이지만
+   *  실제로는 07-30 일이라, 감지일로 잡으면 07-30을 골랐을 때 안 보인다. */
+  occurred_at: string | null;
+  occurred_date: string | null;
+  /** "occurred"=실제 발생 시각 / "detected"=우리가 알아챈 시각(실제로 언제 손댔는지 모름). */
+  time_basis: "occurred" | "detected";
+  time_note: string;
+  /** 정정을 반영한 **최종** 주체. */
+  actor: NaverModificationActor;
+  actor_label: string;
+  /** 데이터로 자동 판정한 주체(정정이 있어도 지워지지 않는다 — 판정이 옳았는지 봐야 한다). */
+  actor_auto: NaverModificationActor;
+  corrected: boolean;
+  correction_note: string | null;
+  entity_type: string;
+  entity_type_label: string;
+  entity_id: string;
+  entity_name: string | null;
+  campaign_id: string | null;
+  campaign_name: string | null;
+  op_type: string;
+  op_label: string;
+  /** 표시용 이전/이후 값. **null이면 모른다는 뜻**이고 사유가 *_unknown에 온다 —
+   *  빈칸이나 0으로 채우지 않는다(백필 36건 중 31건은 이전값이 아예 없다). */
+  before: string | null;
+  after: string | null;
+  before_unknown: string | null;
+  after_unknown: string | null;
+  /** 우리 쓰기의 3상태. agency_op 행은 우리 쓰기가 아니라 관측이라 항상 null. */
+  execution_state: "executed" | "blocked" | "unknown" | null;
+  summary: string | null;
+  /** 소급 백필로 들어온 행(정규 탐지가 아니라 신뢰도가 다르다). */
+  backfilled: boolean;
+  dry_run: boolean;
+}
+
+export interface NaverModificationResponse {
+  total: number;
+  /** 구간 전체 주체 분포 — actor 필터를 걸어도 전체가 보인다. */
+  by_actor: Record<NaverModificationActor, number>;
+  rows: NaverModificationRow[];
+}
+
+export async function fetchNaverModifications(params: {
+  /** KST 날짜 YYYY-MM-DD, 양끝 **포함**. 반드시 둘을 함께(한쪽만 주면 422). */
+  date_from?: string;
+  date_to?: string;
+  days?: number;
+  campaign_id?: string;
+  actor?: NaverModificationActor;
+  source?: "change_log" | "agency_op";
+  include_dry_run?: boolean;
+  /** 가드레일이 막아 **실제로는 안 바뀐** 시도도 포함(기본 false — 안 바뀐 걸 수정으로 세면 거짓). */
+  include_blocked?: boolean;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<NaverModificationResponse> {
+  const q = new URLSearchParams();
+  Object.entries(params).forEach(([k, v]) => { if (v != null) q.set(k, String(v)); });
+  return fetchApi(`/api/naver/ad/modifications?${q.toString()}`);
+}
+
+/** 수정 1건의 주체를 정정한다. ★원천 테이블은 건드리지 않는다 — 정정 전용 테이블에만 쌓인다.
+ *  `actor: null`은 정정을 지우고 자동 판정으로 되돌린다(오타 정정이 영구화되지 않게). */
+export function putNaverModificationActor(
+  source: "change_log" | "agency_op",
+  sourceId: number,
+  actor: NaverModificationActor | null,
+  note?: string | null,
+): Promise<{ source: string; source_id: number; actor: string | null; corrected: boolean }> {
+  return fetchApi(`/api/naver/ad/modifications/${source}/${sourceId}/actor`, {
+    method: "PUT",
+    body: JSON.stringify({ actor, note: note ?? null }),
+  });
+}
+
 export interface NaverRawKeywordRow {
   entity_id: string; name: string; parent_id: string; campaign_id: string;
   campaign_type: string; status: string; bid_amt: number | null;

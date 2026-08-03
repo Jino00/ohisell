@@ -396,6 +396,70 @@ class NaverClient(BaseChannelClient):
         log.info("네이버 건별 정산 %d건 수집 (결제일 %s ~ %s)", len(results), date_from, date_to)
         return results
 
+    def fetch_case_settlement_by_order(self, order_id: str) -> list[dict]:
+        """주문번호 단건의 건별 정산 행 **전량** 조회(유형 필터 없음).
+
+        fetch_case_settlement()와 같은 엔드포인트지만 **조회 축이 다르다**:
+          - fetch_case_settlement: searchDate(결제일) 순회 + settleDecisionType='SETTLED' 고정
+            → 회계 적재용(확정분만).
+          - 이 메서드: orderId 하나만 지정
+            → "이 주문이 어떤 productOrderType·settleType으로 잡히는가"를 관측하기 위한
+              것(N배송 반품 회수비 프로브).
+
+        ★★orderId는 periodType·searchDate와 **상호 배타**다(2026-08-03 라이브 실측, raw HTTP):
+            orderId + periodType  → 400 "periodType 값은 orderId, productOrderId 값과 같이
+                                    입력될 수 없습니다"
+            orderId + searchDate  → 400 (같은 문구)
+            orderId 단독(+page/size) → 200
+          settleDecisionType은 periodType=SETTLE_CASEBYCASE_PAY_DATE일 때만 의미를 갖는데
+          그 periodType 자체를 못 주므로 **단건 조회에서는 쓸 수 없다**. 대신 그 주문의 정산
+          행이 유형 구분 없이 전부 돌아온다 — 유형 축은 응답의 settleType으로 관측한다
+          (settleDecisionType은 응답 스키마에 아예 없다, 공식 스펙 확인).
+          07-31 첫 배포본이 이 세 개를 함께 보내 라이브에서 400으로 전손했다.
+
+        ★조용한 실패 금지: _request가 None(인증·네트워크·400)이면 빈 결과로 삼키지 않고
+          RuntimeError로 올린다(fetch_case_settlement와 같은 관례) — 프로브가 "아직 정산 안
+          뜸"과 "조회가 실패함"을 절대 혼동하면 안 되기 때문이다. 혼동하면 08-06·08-09에
+          표본이 익어도 실패를 '0건'으로 기록하고 알림 없이 지나간다.
+        """
+        path = "/v1/pay-settle/settle/case"
+        results: list[dict] = []
+        page = 1
+        while True:
+            params = {
+                "orderId": str(order_id),
+                "pageNumber": page,
+                "pageSize": 1000,
+            }
+            data = self._request("GET", path, params)
+            if data is None:
+                raise RuntimeError(
+                    f"건별 정산 단건 조회 실패(orderId={order_id}, page={page}) — "
+                    "빈 결과로 삼키지 않고 실패로 표면화한다."
+                )
+            if not data:
+                break
+            elements = data.get("elements", []) if isinstance(data, dict) else []
+            for e in elements:
+                results.append({
+                    "product_order_id": str(e.get("productOrderId") or ""),
+                    "order_id": str(e.get("orderId") or ""),
+                    "product_id": str(e.get("productId")) if e.get("productId") else None,
+                    "product_order_type": e.get("productOrderType") or "",
+                    "settle_type": e.get("settleType"),
+                    "product_name": e.get("productName"),
+                    "pay_settle_amount": Decimal(str(e.get("paySettleAmount") or 0)),
+                    "settle_expect_amount": Decimal(str(e.get("settleExpectAmount") or 0)),
+                    "pay_date": e.get("payDate"),
+                    "settle_expect_date": e.get("settleExpectDate"),
+                    "settle_complete_date": e.get("settleCompleteDate"),
+                })
+            if len(elements) < 1000:
+                break
+            page += 1
+            time.sleep(0.2)
+        return results
+
     def fetch_inquiries(
         self,
         date_from: date,

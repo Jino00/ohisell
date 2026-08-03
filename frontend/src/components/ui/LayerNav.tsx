@@ -8,6 +8,9 @@ const LINKS = [
   { to: "/naver-ad/report", label: "리포트" },
   { to: "/naver-ad/diagnosis", label: "진단 보드" },
   { to: "/naver-ad/console", label: "최적화 콘솔" },
+  // 「수정 사항」 — 그날 광고에 일어난 수정 전건 + 누가 했나(두 원천 합본). 라이브 editTm을
+  // 손으로 대조하던 일을 대체한다.
+  { to: "/naver-ad/modifications", label: "수정 사항" },
   { to: "/naver-ad/raw", label: "원자료" },
 ];
 
