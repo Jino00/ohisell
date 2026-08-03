@@ -42,9 +42,21 @@ KST = timezone(timedelta(hours=9))
 # 알림을 보내면 알림이 배너처럼 상시화돼 다시 무시된다(오늘 배너가 당한 실패).
 NOTIFY_STALE_DAYS = int(os.getenv("COUPANG_WATCHDOG_NOTIFY_DAYS", "3"))
 
-# 자동 구조 임계. 페처 sales_days=30 창보다 **작게** 잡아 여유를 남긴다(Mac이 며칠 꺼져 있어도
-# 30일 창 안에서 따라잡을 수 있도록). 21일 = 창 30일 - 9일 여유.
+# 자동 구조 임계. 페처 sales_days 창보다 **작게** 잡아 여유를 남긴다(Mac이 며칠 꺼져 있어도
+# 창 안에서 따라잡을 수 있도록). 21일 = 창 30일 - 9일 여유.
+#
+# ★★이 값은 tools/rocket_supplier_fetcher.py의 `sales_days` 기본값(30)과 **짝**이다
+#   (2026-08-03 codex 1R[P1]). 페처 창이 21일보다 좁으면(예: 옛 기본값 7일) 구조해도 최근
+#   7일만 복구되고 앞 14일은 영구 소실되며, 그 성공이 신선도를 리셋해 워치독은 더 이상
+#   구조하지 않는다 — 방어가 있는데 못 막는 최악의 형태다. 한쪽만 바꾸지 마라.
+#   test_collection_watchdog.py의 결합 가드가 페처 소스를 직접 읽어 이 커플링을 지킨다.
 RESCUE_STALE_DAYS = int(os.getenv("COUPANG_WATCHDOG_RESCUE_DAYS", "21"))
+
+# 갱신 요청이 이 시간을 넘겨 대기하면 "수집 중"이 아니라 **막힌 것**으로 본다.
+# ★없으면 영원히 침묵한다(codex 1R[P1]): 요청 플래그는 아무도 claim하지 않으면 스스로
+#   사라지지 않는다. Mac이 꺼져 있으면 state가 계속 in_flight라, in_flight를 무조건 건너뛰는
+#   설계는 "자동 구조를 건 다음날부터 영구 무음"이 된다 — 첫 Slack을 놓치면 끝이다.
+STUCK_REQUEST_HOURS = int(os.getenv("COUPANG_WATCHDOG_STUCK_HOURS", "24"))
 
 # ★영구 소실 위험이 있는 스트림만. 나머지는 늦게 눌러도 스스로 복구하므로 자동 발동시키면
 #   창만 뜨고 얻는 게 없다(07-27 "창 마구 안 뜨기" 결정을 값 없이 깎아먹는다).
@@ -66,12 +78,27 @@ def _now_kst() -> datetime:
     return datetime.now(KST).replace(tzinfo=None)
 
 
+def _pending_hours(requested_at: str | None, now: datetime) -> float | None:
+    """갱신 요청이 몇 시간째 대기 중인지. 파싱 실패·미요청이면 None."""
+    if not requested_at:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(requested_at))
+    except ValueError:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(KST).replace(tzinfo=None)
+    return (now - dt).total_seconds() / 3600.0
+
+
 def decide(
     streams: list[dict],
     *,
+    now: datetime | None = None,
     notify_days: int = NOTIFY_STALE_DAYS,
     rescue_days: int = RESCUE_STALE_DAYS,
     rescue_streams: frozenset[str] = RESCUE_STREAMS,
+    stuck_hours: int = STUCK_REQUEST_HOURS,
 ) -> dict:
     """순수 판정 — 어떤 스트림을 알리고 어떤 스트림을 자동 구조할지.
 
@@ -85,6 +112,7 @@ def decide(
         풀리는 상태다(대개 로그인 필요) — 방치하면 나이가 차오를 때까지 조용하다.
       - 자동 구조는 rescue_streams ∩ (나이 >= rescue_days)에만. 그 외에는 알림만.
     """
+    now = now or _now_kst()
     notify: list[dict] = []
     rescue: list[str] = []
     skipped: list[str] = []
@@ -94,9 +122,27 @@ def decide(
         state = st.get("state")
         age_h = st.get("age_hours")
         age_days = None if age_h is None else age_h / 24.0
+        pending_h = _pending_hours(st.get("requested_at"), now)
 
+        # ★in_flight를 무조건 건너뛰지 않는다(codex 1R[P1]): 요청 플래그는 아무도 claim하지
+        #   않으면 스스로 사라지지 않으므로, Mac이 꺼져 있으면 state가 영원히 in_flight다.
+        #   그 상태로 skip하면 "자동 구조를 건 다음날부터 영구 무음"이 된다.
         if state == "in_flight":
-            skipped.append(key)
+            stuck = pending_h is not None and pending_h >= stuck_hours
+            if not stuck:
+                skipped.append(key)
+                continue
+            notify.append({
+                "key": key,
+                "label": st.get("label") or key,
+                "account": _ACCOUNT_BY_KEY.get(key, "계정 미상"),
+                "state": "stuck",
+                "age_days": None if age_days is None else round(age_days, 1),
+                "reason": f"갱신 요청이 {pending_h / 24:.0f}일째 대기 중 — Mac이 꺼져 있나요?",
+                "last_error": st.get("last_error"),
+            })
+            # 막힌 요청은 이미 pending이라 재요청해도 already_pending으로 흡수된다 →
+            # 자동 구조 목록에는 넣지 않는다(헛일 + Slack이 "걸었습니다"라고 거짓말하게 된다).
             continue
 
         # ★실패는 나이 무관 즉시 알림 — 사람 개입 없이는 안 풀린다.
@@ -123,20 +169,36 @@ def decide(
     return {"notify": notify, "rescue": rescue, "skipped_in_flight": skipped}
 
 
-def _format_slack(notify: list[dict], rescue: list[str]) -> str:
-    """사람이 읽고 **바로 행동할 수 있는** 문구. 무슨 일이 있었는지가 아니라 뭘 해야 하는지."""
+def _format_slack(
+    notify: list[dict],
+    rescued_ok: list[str],
+    rescue_failed: list[dict] | None = None,
+) -> str:
+    """사람이 읽고 **바로 행동할 수 있는** 문구. 무슨 일이 있었는지가 아니라 뭘 해야 하는지.
+
+    ★계획이 아니라 **실제 결과**를 받는다(codex 1R[P1]): 예전엔 plan["rescue"]로 문구를
+      만들어, 요청이 예외로 실패해도 "자동 갱신을 걸었습니다"라고 거짓 보고했다. 안전장치가
+      거짓말하면 없느니만 못하다 — 사람이 안심하고 방치하게 된다.
+    """
+    rescue_failed = rescue_failed or []
     lines = ["🕒 *쿠팡 수집이 낡았습니다*"]
     for n in notify:
-        mark = "❌" if n["state"] == "failed" else "⚠️"
+        mark = {"failed": "❌", "stuck": "🚧"}.get(n["state"], "⚠️")
         line = f"{mark} *{n['label']}* — {n['reason']} · {n['account']}"
         if n["state"] == "failed" and n.get("last_error"):
             line += f"\n    └ {str(n['last_error'])[:120]}"
         lines.append(line)
-    if rescue:
+    if rescued_ok:
         lines.append(
-            "\n🤖 *자동 갱신을 걸었습니다* — " + ", ".join(rescue)
+            "\n🤖 *자동 갱신을 걸었습니다* — " + ", ".join(rescued_ok)
             + "\n    (판매분석은 롤링 창 밖으로 밀리면 영구 소멸이라 자동으로 당겼습니다."
               " Mac이 꺼져 있으면 켜질 때 실행됩니다.)"
+        )
+    if rescue_failed:
+        lines.append(
+            "\n🔥 *자동 갱신 요청 자체가 실패했습니다* — "
+            + ", ".join(f"{f['key']}({str(f.get('error'))[:60]})" for f in rescue_failed)
+            + "\n    ★수동 갱신이 필요합니다. 이건 안전장치가 못 돈 것이라 방치하면 소실됩니다."
         )
     lines.append("\n👉 sellC 상단 배너의 *지금 갱신* 또는 종합조망에서 갱신하세요.")
     return "\n".join(lines)
@@ -192,31 +254,39 @@ def run(db: Session) -> dict:
     status = _cs.collection_status(db)
     plan = decide(status.get("streams") or [])
 
-    rescued: list[dict] = []
+    rescued_ok: list[str] = []
+    rescue_failed: list[dict] = []
     for key in plan["rescue"]:
         try:
             res = _request_refresh(db, key)
-            rescued.append({"key": key, **{k: res.get(k) for k in ("requested", "already_pending")}})
+            rescued_ok.append(key)
             log.info("[watchdog] 자동 갱신 요청: %s → %s", key, res)
         except Exception as e:  # noqa: BLE001 — 한 스트림 실패가 나머지를 막지 않는다
             log.exception("[watchdog] 자동 갱신 요청 실패 %s: %s", key, e)
-            rescued.append({"key": key, "error": str(e)[:200]})
+            rescue_failed.append({"key": key, "error": str(e)[:200]})
 
     slack = {"sent": False, "reason": "nothing_to_report"}
-    if plan["notify"] or plan["rescue"]:
+    if plan["notify"] or rescued_ok or rescue_failed:
         try:
-            slack = _send_slack(_format_slack(plan["notify"], plan["rescue"]))
-        except Exception as e:  # noqa: BLE001 — 알림 실패가 잡을 죽이지 않는다
+            slack = _send_slack(_format_slack(plan["notify"], rescued_ok, rescue_failed))
+        except Exception as e:  # noqa: BLE001 — 알림 실패가 잡을 죽이지 않는다(구조는 이미 끝났다)
             log.exception("[watchdog] Slack 발송 실패: %s", e)
             slack = {"sent": False, "reason": str(e)[:200]}
 
     result = {
         "checked": len(status.get("streams") or []),
         "notify": [n["key"] for n in plan["notify"]],
-        "rescue": rescued,
+        "rescued": rescued_ok,
+        "rescue_failed": rescue_failed,
         "skipped_in_flight": plan["skipped_in_flight"],
         "slack": slack,
         "as_of": _now_kst().isoformat(),
     }
     log.info("[watchdog] %s", result)
+
+    # ★구조 실패는 잡을 실패로 남긴다(codex 1R[P1]): 알림을 먼저 보내 사람에게 도달시킨 뒤
+    #   raise한다. 정상 반환하면 APScheduler가 성공으로 기록하고 scheduler_health도 초록이라,
+    #   **안전장치가 죽은 걸 아무도 모른다**. 알림 실패와 달리 이건 삼키면 안 된다.
+    if rescue_failed:
+        raise RuntimeError(f"자동 갱신 요청 실패: {rescue_failed}")
     return result

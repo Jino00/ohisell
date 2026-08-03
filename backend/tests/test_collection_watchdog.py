@@ -129,3 +129,91 @@ class TestScheduler:
         parts = m.group(1).split()
         assert parts[2:] == ["*", "*", "*"] and parts[1].isdigit(), f"하루 1회가 아니다: {m.group(1)}"
         assert ss.job_func_for("coupang_collection_watchdog") is ss.coupang_collection_watchdog_job
+
+
+# ── codex 1R 지적 대응 회귀 (2026-08-03) ──────────────────────────────
+class TestCodexRound1:
+    def test_P1_페처_재수집_창과_구조_임계의_결합을_지킨다(self):
+        """★구조 임계(21일)는 페처 sales_days 창(30일) 전제 위에 서 있다.
+
+        페처 창이 21일보다 좁으면(옛 기본값 7일) 구조해도 최근 7일만 복구되고 앞 14일은
+        영구 소실되며, 그 성공이 신선도를 리셋해 워치독은 더 이상 구조하지 않는다.
+        방어가 있는데 못 막는 최악의 형태 — 그래서 소스를 직접 읽어 커플링을 고정한다.
+        """
+        import pathlib
+        import re
+
+        root = pathlib.Path(__file__).resolve().parents[2]
+        src = (root / "tools" / "rocket_supplier_fetcher.py").read_text(encoding="utf-8")
+        m = re.search(r'cfg\.setdefault\("sales_days",\s*(\d+)\)', src)
+        assert m, "페처에서 sales_days 기본값을 못 찾았다(이름이 바뀌었나?)"
+        sales_days = int(m.group(1))
+        assert sales_days > RESCUE_STALE_DAYS, (
+            f"페처 재수집 창({sales_days}일)이 자동 구조 임계({RESCUE_STALE_DAYS}일)보다 좁다 — "
+            "구조해도 앞 구간이 영구 소실된다. 양쪽을 함께 조정하라."
+        )
+
+    def test_P1_오래_대기중인_요청은_in_flight로_묻히지_않는다(self):
+        """Mac이 꺼져 요청만 몇 주째 대기하면 state는 영원히 in_flight다.
+
+        무조건 skip하면 '자동 구조를 건 다음날부터 영구 무음'이 된다 — 첫 Slack을 놓치면 끝.
+        """
+        from datetime import datetime, timedelta
+
+        now = datetime(2026, 8, 3, 12, 0, 0)
+        old_req = (now - timedelta(days=5)).isoformat()
+        r = decide(
+            [dict(s("supplier_hub", "in_flight", 30), requested_at=old_req)],
+            now=now,
+        )
+        assert [n["key"] for n in r["notify"]] == ["supplier_hub"]
+        assert r["notify"][0]["state"] == "stuck"
+        assert "대기 중" in r["notify"][0]["reason"]
+        # 이미 pending이라 재요청은 헛일 → 구조 목록엔 안 넣는다(Slack 거짓말 방지)
+        assert r["rescue"] == []
+
+    def test_P1_방금_시작된_수집은_여전히_건너뛴다(self):
+        """정상 수집 중(방금 요청)까지 시끄럽게 알리면 알림이 상시화된다."""
+        from datetime import datetime, timedelta
+
+        now = datetime(2026, 8, 3, 12, 0, 0)
+        fresh_req = (now - timedelta(hours=1)).isoformat()
+        r = decide(
+            [dict(s("supplier_hub", "in_flight", 30), requested_at=fresh_req)],
+            now=now,
+        )
+        assert r["notify"] == [] and r["skipped_in_flight"] == ["supplier_hub"]
+
+    def test_P1_구조_실패면_Slack이_성공했다고_거짓말하지_않는다(self):
+        """안전장치가 거짓말하면 없느니만 못하다 — 사람이 안심하고 방치한다."""
+        text = _format_slack(
+            notify=[],
+            rescued_ok=[],
+            rescue_failed=[{"key": "supplier_hub", "error": "DB 잠김"}],
+        )
+        assert "자동 갱신을 걸었습니다" not in text
+        assert "자동 갱신 요청 자체가 실패" in text
+        assert "수동 갱신이 필요" in text
+
+    def test_P1_구조_성공과_실패가_섞이면_둘_다_보인다(self):
+        text = _format_slack(
+            notify=[],
+            rescued_ok=["supplier_hub"],
+            rescue_failed=[{"key": "ofix_ad", "error": "타임아웃"}],
+        )
+        assert "자동 갱신을 걸었습니다" in text and "supplier_hub" in text
+        assert "자동 갱신 요청 자체가 실패" in text and "ofix_ad" in text
+
+    def test_P2_워치독_자신이_헬스_감시_대상이다(self):
+        """감시자가 없는 감시자는 없느니만 못하다 — 이 잡이 죽으면 아무도 모른다."""
+        from app.services.scheduler_health import WATCHDOG_JOBS
+
+        assert "coupang_collection_watchdog" in WATCHDOG_JOBS
+
+    def test_P1_collection_status가_requested_at을_노출한다(self):
+        """워치독의 stuck 판정은 이 필드에 의존한다 — 빠지면 조용히 옛 동작으로 퇴행한다."""
+        import inspect
+
+        from app.services.coupang import collection_status as cs
+
+        assert '"requested_at"' in inspect.getsource(cs.collection_status)
