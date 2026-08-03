@@ -238,15 +238,17 @@ def try_auto_login(
     *,
     service: str = KEYCHAIN_SERVICE,
     timeout_s: int = 25,
+    form_url: str | None = None,
 ) -> str:
     """② keycloak 로그인 폼에 Keychain 자격증명을 자동입력·제출한다.
 
     반환: OK(착지) / TWO_FACTOR(OTP 단계) / LOGIN_REQUIRED(자격증명 없음·폼 못 찾음·실패).
     ★비밀번호는 메모리에서만 쓰고 로그에 안 남긴다.
 
-    ★전제: ①이 끝난 자리가 **로그인 폼**이어야 한다. 그렇지 않으면 여기서 고칠 게 아니라
-      호출부의 sso_url이 틀린 것이다 — 오하이테크 광고가 그 사례였다(WING으로 들어가면 폼이
-      없는 '역할 선택' 화면에 멈춘다. 진입 클라이언트를 SUPPLIERHUB로 바로잡아 해결).
+    ★form_url: **폼으로 다시 진입하고 나서** 채운다. ①이 폼을 띄워놨더라도 그 사이에
+      verify(앱 세션 검사)가 대시보드로 **이동**해버리기 때문이다 — 그러면 ②는 입력칸이 없는
+      화면에서 기다리다 죽는다(2026-08-03 13:58:00 라이브: `wait_for_selector` 15초 타임아웃.
+      권위값 검사가 자기 뒤의 층을 망가뜨리고 있었다). 재진입은 멱등이라 손해가 없다.
     """
     if not login_id:
         return LOGIN_REQUIRED
@@ -255,6 +257,15 @@ def try_auto_login(
         log.info("Keychain 자격증명 없음(%s) — 수동 로그인 폴백.", login_id)
         return LOGIN_REQUIRED
     try:
+        if form_url:
+            _goto_reset(page, form_url)
+            # 재진입 도중 세션이 살아나 착지했으면 폼을 기다릴 이유가 없다(비번도 안 쓴다).
+            try:
+                if is_landed(page.url):
+                    log.info("로그인 폼 재진입 중 착지 — 비번 없이 복구.")
+                    return OK
+            except Exception:  # noqa: BLE001 — 네비게이션 중이면 그냥 폼을 기다린다
+                pass
         page.wait_for_selector(_USERNAME_SEL, timeout=15000)
         page.fill(_USERNAME_SEL, login_id)
         page.fill(_PASSWORD_SEL, pw)
@@ -331,7 +342,12 @@ def ensure_session(
         return OK
 
     log.info("[%s] SSO로 복구 안 됨 — Keychain 자동 로그인 시도.", label)
-    res = try_auto_login(page, login_id, is_landed, service=service, timeout_s=login_timeout_s)
+    # ★form_url=sso_url: 바로 위 _confirmed가 대시보드로 **이동**했을 수 있다. 그 자리엔 폼이
+    #   없으므로 ②는 반드시 로그인 진입으로 되돌아가서 시작해야 한다(위 docstring 참조).
+    res = try_auto_login(
+        page, login_id, is_landed,
+        service=service, timeout_s=login_timeout_s, form_url=sso_url,
+    )
     if res == OK or (res != TWO_FACTOR and _confirmed("자동 로그인 후")):
         log.info("[%s] 자동 로그인으로 세션 복구.", label)
         return OK

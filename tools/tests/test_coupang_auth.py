@@ -198,6 +198,68 @@ class TestRealLoginFormDom:
             assert sel == "#kc-login" or "form:has(input[name=password])" in sel, (
                 f"폼 스코프 없는 제출 셀렉터({sel}) — 회원가입 버튼을 누를 수 있다")
 
+    def test_verify가_폼을_치워도_키체인층은_되돌아간다(self, monkeypatch):
+        """★13:58:00 라이브 결함: ①과 ② 사이의 verify(권위값 검사)가 대시보드로 **이동**해
+        ②가 쓸 폼을 페이지에서 치웠다. ②는 입력칸 없는 화면에서 15초 기다리다 죽었다 —
+        권위값 검사가 자기 뒤의 층을 망가뜨린 것이다."""
+        monkeypatch.setattr(auth, "keychain_get", lambda a, s=None: "pw")
+
+        DASH = "https://advertising.coupang.com/marketing/dashboard/sales"
+        ROLE = "https://advertising.coupang.com/user/login?callback_url=x"  # 입력칸 0개
+
+        class _FormOnlyAtSso(self._FormPage):
+            """폼은 **로그인 진입으로 goto했을 때만** 존재한다(실제와 같다)."""
+            def __init__(self):
+                super().__init__()
+                self.on_form = False
+                self.url = ROLE
+
+            def _require(self, sel):
+                if not self.on_form:
+                    raise RuntimeError(f"Timeout: selector not found: {sel}")
+                super()._require(sel)
+
+            def goto(self, url, **kw):
+                super().goto(url, **kw)
+                self.on_form = "_cap_client" in url
+
+        pg = _FormOnlyAtSso()
+        sso = "https://advertising.coupang.com/user/login?_cap_client=SUPPLIERHUB&_cap_market=KR"
+
+        def verify_navigates():
+            """★권위값 검사는 '실제로 들어가지는지'라 본질적으로 **이동한다** — 그게 폼을 치운다."""
+            pg.goto(DASH)   # → on_form=False, url=역할 선택 화면과 같은 상태
+            pg.url = ROLE
+            return False
+
+        res = auth.ensure_session(
+            pg, sso_url=sso,
+            is_landed=lambda u: "/dashboard/KR" in u,
+            login_id="ohitech",
+            verify=verify_navigates,
+            sso_timeout_s=0, login_timeout_s=10,
+        )
+        assert res == auth.OK, "②는 폼으로 되돌아가서 시작해야 한다(재진입은 멱등)"
+        # ①의 진입과 ②의 재진입, 최소 2번은 로그인 진입으로 갔어야 한다
+        assert pg.goto_urls.count(sso) >= 2, "verify가 치운 뒤 재진입하지 않았다"
+
+    def test_재진입_중_착지하면_비번을_안_쓴다(self, monkeypatch):
+        """재진입이 곧 SSO 재시도다 — 그 사이 세션이 살아나면 폼을 기다릴 이유가 없다."""
+        monkeypatch.setattr(auth, "keychain_get", lambda a, s=None: "pw")
+
+        class _Recovered(self._FormPage):
+            def goto(self, url, **kw):
+                self.goto_urls.append(url)
+                self.url = "https://supplier.coupang.com/dashboard/KR" if url != "about:blank" else url
+
+        pg = _Recovered()
+        res = auth.try_auto_login(
+            pg, "ohitech", lambda u: "/dashboard/KR" in u,
+            form_url="https://x/login", timeout_s=10,
+        )
+        assert res == auth.OK
+        assert pg.filled == {}, "이미 착지했는데 비밀번호를 입력하면 안 된다"
+
     def test_제출_버튼을_못_찾으면_수동_폴백(self, monkeypatch):
         """조용히 성공으로 넘어가면 사람은 아무 신호도 못 받는다."""
         monkeypatch.setattr(auth, "keychain_get", lambda a, s=None: "pw")
