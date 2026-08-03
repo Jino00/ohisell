@@ -1763,6 +1763,56 @@ def ohitech_ad_refresh_status(db: Session = Depends(get_db)):
     return ohitech_ad_sync.refresh_status(db)
 
 
+@router.post("/rocket/ad-cost/option-ingest")
+async def ingest_ohitech_ad_option(
+    request: Request,
+    x_ingest_token: str | None = Header(default=None),
+    x_report_filename: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """오하이테크(1P 로켓배송) Billboard 옵션 보고서 XLSX → **옵션 테이블만** 적재(D-13).
+
+    왜 오픽스와 다른 엔드포인트인가: 공용 파서는 `ad_costs`·`coupang_ad_report`에도 쓴다.
+    A01029796의 계정 단위 광고비는 `report/SALES` 페처가 **전체(ALL_DELIVERED) 기준**으로
+    적재하는데(D-10), 이 XLSX는 **PA 기준**이라 같은 행을 덮으면 나중에 쓴 쪽이 조용히 이기고
+    순이익이 흔들린다. 그래서 이 경로는 `options_only=True`로 **머니 테이블을 못 건드린다**.
+    이익 재계산도 하지 않는다(머니 값이 안 변하므로).
+
+    인증: X-Ingest-Token == AD_INGEST_TOKEN. 파일명은 X-Report-Filename({vendor_id}_pa_daily_*.xlsx).
+    """
+    import secrets as _secrets
+
+    from app.routers.ad_costs import ingest_coupang_ad_xlsx_content
+
+    expected = os.getenv("AD_INGEST_TOKEN", "").strip()
+    if not expected or not x_ingest_token or not _secrets.compare_digest(x_ingest_token.strip(), expected):
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+    filename = (x_report_filename or "").strip()
+    if not filename:
+        raise HTTPException(status_code=400, detail="X-Report-Filename 헤더 필요({vendor_id}_pa_daily_*.xlsx)")
+
+    # 크기 상한 — 옵션 보고서는 7일치 ~1MB(D-12 실측). 오픽스 경로와 같은 방어(스트림 누적 한도).
+    _MAX = 30 * 1024 * 1024
+    clen = request.headers.get("content-length")
+    if clen and clen.isdigit() and int(clen) > _MAX:
+        raise HTTPException(status_code=413, detail="본문 과대(최대 30MB)")
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > _MAX:
+            raise HTTPException(status_code=413, detail="본문 과대(최대 30MB)")
+        chunks.append(chunk)
+    content = b"".join(chunks)
+    if not content:
+        raise HTTPException(status_code=400, detail="빈 본문 — xlsx 바이트 필요")
+
+    result, _recalc_from, _recalc_to = ingest_coupang_ad_xlsx_content(
+        content, filename, db, options_only=True)
+    return result
+
+
 @router.post("/rocket/ad-cost/refresh-claim")
 def ohitech_ad_refresh_claim(
     x_ingest_token: str | None = Header(default=None),
@@ -2089,7 +2139,11 @@ def request_wing_rg_settlement_refresh(
     account_key: str = Query(default="COUPANG_WING1", description="COUPANG_WING1/2"),
     db: Session = Depends(get_db),
 ):
-    """UI 'RG 정산 갱신' 버튼/스케줄 → 갱신 요청 플래그 set. 해당 계정 데몬이 다음 폴링에서 소비."""
+    """UI 'RG 정산 갱신' 버튼/스케줄 → 갱신 요청 플래그 set.
+
+    해당 계정 데몬이 다음 폴링에서 **임대**한다(소비하지 않는다 — lease 계약, 2026-07-27).
+    요청은 refresh-complete(성공) 또는 재시도 소진/로그인 필요(실패)로만 소멸한다.
+    """
     return rg_settlement_sync.rg_request_refresh(db, _require_rg_account(account_key))
 
 
@@ -2127,9 +2181,12 @@ def wing_rg_settlement_fetch_error(
 ):
     """Wing RG 정산 페처 run 실패 보고 → last_error/last_error_at 기록. 토큰 인증(claim과 동일).
 
-    ★claim의 짝: 페처가 요청을 claim한 뒤 브라우저 에러로 죽으면 플래그는 이미 clear라 아무
-    흔적도 안 남았다 — UI는 실패인지 진행 중인지 알 수 없었다(215초 헛기다림).
-    성공은 upload-xlsx(rg_mark_heartbeat)가 알리고, 실패는 이 엔드포인트가 알린다.
+    ★claim의 짝: 이 엔드포인트가 생기기 전엔 claim이 요청 플래그를 즉시 소비했고, 페처가 claim
+    직후 브라우저 에러로 죽으면 prod에 아무 흔적도 안 남았다 — UI는 실패인지 진행 중인지 알 수
+    없었다(215초 헛기다림). (지금은 lease 계약이라 claim이 플래그를 보존한다.)
+    데이터 도착은 upload-xlsx(rg_mark_heartbeat)가 알리고, 실패는 이 엔드포인트가 알린다.
+    ★RG의 **run 완주** 신호는 heartbeat가 아니라 refresh-complete다 — 한 회차가 여러 엑셀이라
+      heartbeat는 중간 신호다(claim의 settle_on_success_heartbeat=False).
     """
     _require_ingest_token(x_ingest_token)
     error = str(body.get("error") or "").strip() or "unknown"
@@ -2158,7 +2215,9 @@ def wing_rg_settlement_refresh_complete(
     있다. lease 계약에선 요청이 성공 신호로만 소멸하므로, 이 신호가 없으면 그런 회차가
     재시도 3회(=창 3번)를 유발한 뒤 "재시도 3회 소진"이라는 거짓 실패로 끝난다.
     ★last_success_at(데이터 신선도 시계)은 건드리지 않는다 — 받은 게 없으면 데이터는 그대로다.
-    이미 업로드가 요청을 소멸시킨 뒤라면 이 호출은 무해한 no-op.
+    이미 다른 경로가 요청을 소멸시킨 뒤(성공 완료 신호 중복·reaper·실패 소멸)라면 무해한 no-op.
+    ★업로드(rg_mark_heartbeat)는 요청을 소멸시키지 않는다 — RG는 한 회차가 여러 엑셀이라
+      중간 신호이기 때문이다. 요청을 소멸시키는 성공 경로는 이 엔드포인트 하나뿐이다.
 
     ★account_key(R3, 2026-07-27 버그 수정): 형제 엔드포인트(request/status/claim/fetch-error)는
     모두 계정별 상태행을 쓰는데 이 완료 신호만 WING1 행을 하드코딩하고 있었다 — WING2 run이
@@ -2281,11 +2340,31 @@ async def upload_rg_settlement_xlsx(
         # 동기 ingest가 **이벤트 루프 위에서** 돌았다. prod는 uvicorn --workers 1 단일 워커라
         # 그 시간 동안 모든 API가 멈춘다(같은 시각 fetch-error POST도 15초 타임아웃). 파싱이
         # 빨라진 지금도(0.06초) 파일이 커지면 재발하므로 구조로 막는다.
+        # ── ★strict_sheets=True — 시트 드리프트 = 거짓 완료 차단(2026-08-03) ──────────
+        # 결함: ingest는 인식 가능한 시트가 하나도 없어도 예외 대신 status="empty"를 **정상
+        #   반환**하는데, 여기서 결과와 무관하게 heartbeat를 찍고 있었다 → 쿠팡이 시트명을
+        #   바꾸거나 파서가 드리프트하면 정산 파일이 통째로 무시되는데 화면은 "✅ 완료".
+        #   정산=돈 데이터라 거짓 완료가 가장 나쁜 오보다.
+        # ★판정을 ingest 안(=DML 전)으로 넣은 이유(codex 1R[P1]): 적재는 (fee_type, period_end)
+        #   단위 delete-once 후 insert다. 커밋된 뒤 라우터에서 422를 던지면 부분 미인식 파일이
+        #   기존 snapshot을 반쪽으로 갈아치운 상태가 남는다(같은 fee_type에 매핑되는 2시트 중
+        #   하나만 개명된 경우). 사전 판정이면 DB를 아예 손대지 않는다.
+        # ★strict를 이 경로에만 켜는 이유(라이브 실측): 같은 ingest를 쓰는 서버측 S6-auto는
+        #   CATEGORY_TR 엑셀이 매 주기 정상적으로 empty를 낸다(prod 로그 28건). 반면 이 push
+        #   경로는 라이브 83회(WING1 55·WING2 28) 전수에서 empty 0건·부분 skip 0건이었다
+        #   → 이 경로의 시트 미인식은 **항상** 결함 신호다.
+        # ★422를 고른 이유: 페처 `_rg_push_xlsx`는 이미 비200을 rc=1로 세고 run 끝에
+        #   refresh-complete 대신 fetch-error를 보낸다 → last_error_at이 생겨 화면
+        #   (streamRefresh.ts RG 판정)까지 이어진다. 백엔드만 바꿔도 계약이 어긋나지 않는다.
         result = await run_in_threadpool(
-            rg_settlement_sync.ingest_settlement_xlsx, db, account_key, content
+            rg_settlement_sync.ingest_settlement_xlsx, db, account_key, content,
+            strict_sheets=True,
         )
     except WingReadError as e:
         raise HTTPException(status_code=422, detail=f"엑셀 파싱 실패: {e}")
+    except rg_settlement_sync.RgSheetDriftError as e:
+        raise HTTPException(status_code=422, detail=f"{e} — heartbeat 미갱신(거짓 완료 방지).")
+
     # S4-P2: 자동 다운로드(Mac 페처 push)·수동 업로드 모두 freshness 갱신(스케줄 중복방지·상태표시).
     # ★계정별 상태행에 기록(2026-07-27): WING2 push가 WING1 행을 갱신하면 오픽스가 실제론 안
     #   왔는데 "갱신 완료"로 보이고(UI 폴링이 남의 성공에 종료됨) 신선도 배너도 거짓말한다.

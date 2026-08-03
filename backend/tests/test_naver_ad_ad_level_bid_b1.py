@@ -1,6 +1,6 @@
 # test_naver_ad_ad_level_bid_b1.py — 스프린트 B Phase 1(B1: 소재-레벨 입찰 인식·저장, D-NAO-65)
 # 커버: (1) get_ads의 adAttr(JSON 문자열/dict/깨짐/부재) 방어적 파싱 + userLock
-#   (2) shopping_ad_product_sync가 소재 입찰 4컬럼을 적재·스냅샷 교체 시 갱신
+#   (2) shopping_ad_product_sync가 소재 입찰 4컬럼을 적재·재관측 시 upsert 갱신
 #   (3) 기존 매핑·상품명 동작 회귀 0(입찰 필드 미주입 시 NULL)
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from app.database import Base
 from app.models import NaverAdgroupProduct, NaverCampaignSettings, NaverEntity
 from app.services import naver_sa_ad_fetcher as fetcher
 from app.services.naver_ad import shopping_ad_product_sync
+from app.utils.kst import kst_today
 
 
 @pytest.fixture
@@ -123,7 +124,7 @@ def test_get_ads_partial_adattr_fields(monkeypatch):
 
 
 # ══════════════════════════════════════════════════════════════════
-# (2) sync가 소재 입찰 4컬럼 적재 + 스냅샷 교체 시 갱신
+# (2) sync가 소재 입찰 4컬럼 적재 + 재관측 시 upsert 갱신
 # ══════════════════════════════════════════════════════════════════
 def test_sync_stores_ad_bid_columns(db):
     _ours_shopping_adgroup(db)
@@ -131,7 +132,7 @@ def test_sync_stores_ad_bid_columns(db):
         {"mall_product_id": "13365319468", "product_name": "17E", "ad_id": "nad-1",
          "ad_bid_amt": 810, "use_group_bid_amt": False, "ad_user_lock": False},
     ]}
-    shopping_ad_product_sync.sync_adgroup_products(db, ads_by_adgroup=ads)
+    shopping_ad_product_sync.sync_adgroup_products(db, as_of=kst_today(), ads_by_adgroup=ads)
     row = db.query(NaverAdgroupProduct).filter(NaverAdgroupProduct.adgroup_id == "grp-1").one()
     assert row.ad_id == "nad-1"
     assert row.ad_bid_amt == 810
@@ -139,15 +140,18 @@ def test_sync_stores_ad_bid_columns(db):
     assert row.ad_user_lock is False
 
 
-def test_sync_snapshot_replace_updates_ad_bid(db):
-    """스냅샷 교체 시 소재 입찰도 갱신(그룹입찰 무시하는 소재 bidAmt 변경 추적)."""
+def test_sync_upsert_updates_ad_bid_on_reobservation(db):
+    """재관측 시 소재 입찰도 upsert 갱신(그룹입찰 무시하는 소재 bidAmt 변경 추적).
+
+    ★이름 정정(codex 3R P2): 이 테이블은 2026-08-03부터 스냅샷 교체가 아니라 **누적 upsert**다
+    — 옛 이름(snapshot_replace)은 다음 사람이 현재값 테이블로 오해하게 만든다."""
     _ours_shopping_adgroup(db)
-    shopping_ad_product_sync.sync_adgroup_products(db, ads_by_adgroup={"grp-1": [
+    shopping_ad_product_sync.sync_adgroup_products(db, as_of=kst_today(), ads_by_adgroup={"grp-1": [
         {"mall_product_id": "13365319468", "product_name": "17E", "ad_id": "nad-1",
          "ad_bid_amt": 810, "use_group_bid_amt": False, "ad_user_lock": False},
     ]})
     # 다음 sync: 소재 입찰 상향
-    shopping_ad_product_sync.sync_adgroup_products(db, ads_by_adgroup={"grp-1": [
+    shopping_ad_product_sync.sync_adgroup_products(db, as_of=kst_today(), ads_by_adgroup={"grp-1": [
         {"mall_product_id": "13365319468", "product_name": "17E", "ad_id": "nad-1",
          "ad_bid_amt": 1200, "use_group_bid_amt": False, "ad_user_lock": True},
     ]})
@@ -160,11 +164,15 @@ def test_sync_ad_bid_columns_null_when_absent(db):
     """입찰 필드 미주입(기존 소비자 형식) → NULL 유지(하위호환·회귀 0)."""
     _ours_shopping_adgroup(db)
     ads = {"grp-1": [{"mall_product_id": "13365319468", "product_name": "17E"}]}
-    res = shopping_ad_product_sync.sync_adgroup_products(db, ads_by_adgroup=ads)
+    res = shopping_ad_product_sync.sync_adgroup_products(db, as_of=kst_today(), ads_by_adgroup=ads)
     # 기존 반환 통계 불변
     # external_ad_changes(D-NAO-127)는 additive — 소재 외부 변경 탐지 결과(여기선 앵커 부재로 0).
-    assert res == {"adgroups": 1, "mappings": 1, "products": 1, "removed": 0,
-                   "failed_adgroups": 0, "external_ad_changes": 0}
+    assert res == {"adgroups": 1, "mappings": 1, "products": 1,
+                   "inserted": 1, "updated": 0,
+                   "failed_adgroups": 0, "external_ad_changes": 0,
+                   # 2026-07-30 사고 수정 + codex 1R·2R 대응 additive(수집 신뢰도 표면화)
+                   "observation_blind": False, "truncated": False, "cursor": None,
+                   "elapsed_s": res["elapsed_s"]}
     row = db.query(NaverAdgroupProduct).filter(NaverAdgroupProduct.adgroup_id == "grp-1").one()
     assert row.mall_product_id == "13365319468"  # 매핑 회귀 0
     assert row.product_name == "17E"
@@ -183,7 +191,7 @@ def test_sync_dedup_keeps_first_ad_bid(db):
         {"mall_product_id": "13365319468", "product_name": "dup", "ad_id": "nad-dup",
          "ad_bid_amt": 999, "use_group_bid_amt": True, "ad_user_lock": True},
     ]}
-    shopping_ad_product_sync.sync_adgroup_products(db, ads_by_adgroup=ads)
+    shopping_ad_product_sync.sync_adgroup_products(db, as_of=kst_today(), ads_by_adgroup=ads)
     row = db.query(NaverAdgroupProduct).filter(NaverAdgroupProduct.adgroup_id == "grp-1").one()
     assert row.ad_id == "nad-1"
     assert row.ad_bid_amt == 810

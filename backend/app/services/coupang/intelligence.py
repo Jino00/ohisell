@@ -249,12 +249,24 @@ def _agg_seller_shipping_3p(db: Session, dfrom: date, dto: date,
     return HANJIN_PER_SHIPMENT * len(seen)
 
 
+# ★커맨드센터(옵션 그레인 조망)는 **Wing 축(3P/2P)**이다 — 1P 로켓배송은 별도 화면
+#   (rocket-overview)이 PO 그레인으로 다룬다. 그런데 오하이테크는 **같은 vendor_id로 1P와
+#   3P를 함께** 가지므로, vendor_id만으로 거르면 1P 광고비가 3P 매출 옆에 붙는다.
+#   2026-08-03 실측: 옵션 광고비 적재 직후 COUPANG_WING2 뷰가 매출 160,500(3P)에 광고비
+#   5,450,601(1P)을 얹어 net_profit −5,382,780으로 뒤집혔다. 사과와 오렌지를 더한 값이다.
+#   → 판매방식으로도 잘라야 계정 분리가 완결된다.
+_WING_SELL_TYPES = ("3P", "2P")
+
+
 def _agg_ads(db: Session, dfrom: date, dto: date,
-             vendor_id: str | None = None) -> dict[str, dict]:
+             vendor_id: str | None = None,
+             sell_types: tuple[str, ...] | None = _WING_SELL_TYPES) -> dict[str, dict]:
     """광고 옵션 일별을 옵션ID별 집계. D-9: 비용·노출·클릭은 ad_option_id 귀속,
     매출·주문은 conv_option_id 귀속(간접전환 대비 분리). 같은 옵션이면 한 행에 합쳐짐.
 
-    S1: vendor_id 주면 해당 계정 광고만(계정 분리). None이면 전체(기존 동작 불변)."""
+    S1: vendor_id 주면 해당 계정 광고만(계정 분리). None이면 전체(기존 동작 불변).
+    ★sell_types: 기본 (3P,2P) = Wing 축. None이면 전 판매방식(호출자가 의도적으로 열 때만).
+      Retail(1P)을 기본에서 빼는 이유는 위 주석 참조 — 같은 vendor에 축이 두 개다."""
     out: dict[str, dict] = {}
 
     def _row(vid: str) -> dict:
@@ -276,6 +288,8 @@ def _agg_ads(db: Session, dfrom: date, dto: date,
     )
     if vendor_id is not None:
         cost_q = cost_q.filter(CoupangAdOptionDaily.vendor_id == vendor_id)
+    if sell_types is not None:
+        cost_q = cost_q.filter(CoupangAdOptionDaily.sell_type.in_(sell_types))
     cost_rows = cost_q.group_by(CoupangAdOptionDaily.ad_option_id).all()
     for vid, spend, imp, clk in cost_rows:
         b = _row(vid)
@@ -295,6 +309,8 @@ def _agg_ads(db: Session, dfrom: date, dto: date,
     )
     if vendor_id is not None:
         conv_q = conv_q.filter(CoupangAdOptionDaily.vendor_id == vendor_id)
+    if sell_types is not None:
+        conv_q = conv_q.filter(CoupangAdOptionDaily.sell_type.in_(sell_types))
     conv_rows = conv_q.group_by(CoupangAdOptionDaily.conv_option_id).all()
     for vid, conv_rev, ords, qty in conv_rows:
         b = _row(vid)

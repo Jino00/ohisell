@@ -35,7 +35,11 @@ def client(monkeypatch):
 
     app.dependency_overrides[get_db] = _override_get_db
     monkeypatch.setenv("AD_INGEST_TOKEN", _TOKEN)
-    yield TestClient(app)
+    tc = TestClient(app)
+    # 격리 세션 팩토리를 테스트에 노출 — HTTP로 확인할 수 없는 "커밋됐는가"를 직접 볼 때만 쓴다
+    # (app.database.SessionLocal은 이 인메모리 엔진이 아니라 실 DB를 가리키므로 쓰면 안 된다).
+    tc.testing_session = TestingSession
+    yield tc
     app.dependency_overrides.clear()
 
 
@@ -237,13 +241,13 @@ def test_rg_settlement_upload_runs_ingest_off_the_event_loop(client, monkeypatch
     seen: dict[str, bool] = {}
     _real = _rs.ingest_settlement_xlsx
 
-    def _spy(db, account_key, content):
+    def _spy(db, account_key, content, **kw):
         try:
             asyncio.get_running_loop()
             seen["on_event_loop"] = True      # 루프 스레드 = 오프로드 안 됨 = 퇴행
         except RuntimeError:
             seen["on_event_loop"] = False     # 워커 스레드 = 정상
-        return _real(db, account_key, content)
+        return _real(db, account_key, content, **kw)
 
     monkeypatch.setattr(_rs, "ingest_settlement_xlsx", _spy)
 
@@ -272,6 +276,121 @@ def test_rg_settlement_upload_corrupt_file_returns_422(client):
         headers={"X-Ingest-Token": _TOKEN},
     )
     assert r.status_code == 422, r.text
+
+
+def _rg_last_success(client, account_key="COUPANG_WING1"):
+    base = "/api/coupang/ops/wing/rg-settlement/refresh-status"
+    return client.get(f"{base}?account_key={account_key}").json()["last_success_at"]
+
+
+def test_rg_settlement_upload_all_sheets_unknown_returns_422_without_heartbeat(client):
+    """★거짓 완료 차단(2026-08-03): 인식 시트 0개인데 heartbeat를 찍으면 화면은 "✅ 완료"인 채
+    정산(=돈) 데이터가 통째로 사라진다. 시트명 드리프트가 정확히 이 모양이다.
+
+    라이브 실측 근거: 이 push 경로 83회(WING1 55·WING2 28) 전수에서 status="empty" 0건
+    → 이 경로의 미인식은 항상 결함 신호. (반면 서버측 S6-auto의 CATEGORY_TR은 상시 empty라
+    서비스가 아니라 **라우터**에서만 막는다 — 그쪽을 깨지 않기 위함.)
+    """
+    from tests.test_rg_settlement_sync import _build_xlsx, _WH_ROWS
+
+    before = _rg_last_success(client)
+    # 쿠팡이 시트명을 바꾼 상황 재현(맵에 없는 이름).
+    # ★2026-08-03: 종전엔 "주문내역, 판매수수료"를 미지 시트 예시로 썼는데 그 이름이
+    #   _SHEET_FEE_TYPE_MAP에 편입(CATEGORY_TR 개방)돼 더는 미지가 아니다 → 실제로 맵에 없는
+    #   이름으로 교체한다. 이 테스트가 잠그는 것은 특정 이름이 아니라 **미인식 시 422+무-heartbeat**다.
+    content = _build_xlsx([("정산상세내역_v2", "판매수수료", _WH_ROWS)])
+    r = client.post(
+        "/api/coupang/ops/rg/settlement/upload-xlsx",
+        params={"account_key": "COUPANG_WING1"},
+        files={"file": ("WAREHOUSING_SHIPPING-ko-x.xlsx", content,
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        headers={"X-Ingest-Token": _TOKEN},
+    )
+    assert r.status_code == 422, r.text
+    assert "정산상세내역_v2" in r.json()["detail"]   # 무엇이 안 읽혔는지 사유에 실린다
+    # ★핵심: 성공 시계가 움직이지 않아야 한다(움직이면 배너·폴링이 "완료"로 거짓말한다)
+    assert _rg_last_success(client) == before
+
+
+def test_rg_settlement_upload_partial_skip_rejects_before_touching_db(client):
+    """★부분 인식(2시트 중 1개만 미인식)은 **DB를 건드리기 전에** 끊는다(codex 1R[P1]).
+
+    처음엔 커밋 뒤에 422를 던졌는데, 그건 데이터 손상을 막지 못한다: 적재는 (fee_type,
+    period_end) 단위 delete-once + insert라, 같은 fee_type으로 병합되는 2시트('반품 회수비'+
+    '반품 재입고비' → return_shipping) 중 하나만 개명되면 인식된 반쪽이 기존 snapshot 전체를
+    지우고 반쪽만 넣는다. 재시도는 복구가 아니라 반복이다 — "멱등이라 무해"는 틀린 가정이었다.
+
+    그래서 판정은 파싱 직후(=DML 전)에 한다. 이 테스트는 **행이 하나도 안 들어갔는지**를 본다.
+    """
+    from tests.test_rg_settlement_sync import _build_xlsx, _WH_ROWS, _DEL_ROWS
+
+    before = _rg_last_success(client)
+    content = _build_xlsx([("입출고비", "입출고비", _WH_ROWS),
+                           ("배송비(개편)", "배송비", _DEL_ROWS, 24)])   # 뒤 시트만 맵에 없음
+    r = client.post(
+        "/api/coupang/ops/rg/settlement/upload-xlsx",
+        params={"account_key": "COUPANG_WING1"},
+        files={"file": ("WAREHOUSING_SHIPPING-ko-x.xlsx", content,
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        headers={"X-Ingest-Token": _TOKEN},
+    )
+    assert r.status_code == 422, r.text
+    assert "배송비(개편)" in r.json()["detail"]
+    assert _rg_last_success(client) == before
+    # ★핵심: 인식된 시트의 행도 들어가면 안 된다(들어가면 snapshot replace가 이미 일어난 것)
+    from app.models import CoupangRgSettlementFee
+    with client.testing_session() as s:
+        n = s.query(CoupangRgSettlementFee).filter(
+            CoupangRgSettlementFee.account_key == "COUPANG_WING1",
+        ).count()
+    assert n == 0, "부분 미인식인데 DML이 실행됐다 — snapshot이 반쪽으로 갈아치워질 수 있다"
+
+
+def test_rg_settlement_upload_summary_without_detail_rows_returns_422(client):
+    """★상세 행이 사라지고 요약금액만 남은 드리프트를 잡는다(codex 1R[P1]).
+
+    'upserted==0이면 무조건 정상'으로 두면, 상세 구조가 바뀌어 옵션 행을 하나도 못 읽은
+    파일이 기존 snapshot을 0건으로 갈아엎고 heartbeat까지 찍는다. 라이브의 진짜 빈 시트는
+    검산이 확인해 준다(sum_summary=0·match=True, 실측 10건) — 그렇지 않은 0건만 끊는다.
+    """
+    from tests.test_rg_settlement_sync import _build_xlsx
+
+    before = _rg_last_success(client)
+    # 요약합계 50,000인데 상세 0행 → reconcile.match=False
+    content = _build_xlsx([("입출고비", "입출고비", [], 25, 50000, "2026-06-07")])
+    r = client.post(
+        "/api/coupang/ops/rg/settlement/upload-xlsx",
+        params={"account_key": "COUPANG_WING1"},
+        files={"file": ("WAREHOUSING_SHIPPING-ko-x.xlsx", content,
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        headers={"X-Ingest-Token": _TOKEN},
+    )
+    assert r.status_code == 422, r.text
+    assert "입출고비" in r.json()["detail"]
+    assert _rg_last_success(client) == before
+
+
+def test_rg_settlement_upload_zero_option_rows_is_success(client):
+    """★오탐 방지 가드: 시트는 정상 인식됐는데 그 주기 옵션 행이 0건인 것은 **정상**이다.
+
+    라이브 실측 10건(전부 WING2 오하이테크 '입출고비' — RG 물량이 작아 그 주에 발생 비용이
+    없었다). upserted==0을 실패로 승격하면 이 회차들이 전부 거짓 실패가 된다.
+    """
+    from tests.test_rg_settlement_sync import _build_xlsx
+
+    before = _rg_last_success(client)
+    content = _build_xlsx([("입출고비", "입출고비", [])])   # 헤더만 있고 상세 0행
+    r = client.post(
+        "/api/coupang/ops/rg/settlement/upload-xlsx",
+        params={"account_key": "COUPANG_WING1"},
+        files={"file": ("WAREHOUSING_SHIPPING-ko-x.xlsx", content,
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        headers={"X-Ingest-Token": _TOKEN},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "ok" and body["upserted"] == 0 and body["sheets_skipped"] == []
+    assert _rg_last_success(client) != before   # 성공이므로 heartbeat는 갱신된다
 
 
 def test_rg_settlement_refresh_trigger_claim_flow(client):

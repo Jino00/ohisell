@@ -38,6 +38,10 @@ import subprocess
 import sys
 import time
 import urllib.request
+
+# 세션 자가 복구 공용 구현(같은 디렉터리 — 데몬은 ~/.ohisell/tools/에서 실행되므로
+# install_local_runtime.sh가 이 파일도 함께 복사해야 한다. 빠지면 import 실패로 크래시 루프).
+import coupang_auth
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -91,6 +95,71 @@ def load_config() -> dict:
 def _is_logged_out(url: str) -> bool:
     u = (url or "").lower()
     return any(x in u for x in ("login", "/auth", "sso", "signin", "xauth"))
+
+
+# ── 세션 자가 복구(2026-08-03) ─────────────────────────────────────────
+# 이 페처는 오픽스 광고와 같은 대시보드를 쓰지만 **로그인 클라이언트가 다르다**. 자동 재로그인이
+# 없어서 세션이 풀릴 때마다 사람을 불렀다(그날 하루 3회).
+#
+# ★★진입 클라이언트(2026-08-03 라이브 실측으로 바로잡음): 오하이테크는 **로켓배송(1P) 공급자**
+#   계정이라 오픽스의 `_cap_client=WING`을 그대로 쓰면 안 된다. WING으로 들어가면 세션이 풀렸을 때
+#   광고센터 '역할 선택' 화면(마켓플레이스·로켓배송·대행사 카드 3장)에 멈춘다 — 입력칸이 0개라
+#   ②Keychain은 폼을 기다리다 죽고(13:34:00), keycloak 세션이 살아 있어도 ①이 관통하지 못한다
+#   (13:52 실측: supplier-hub 세션이 살아 있는데도 WING 진입은 역할 선택으로 튕겼다).
+#   역할 선택에서 '쿠팡 로켓배송 판매자'를 고를 때 실제로 타는 체인을 그대로 쓴다:
+#     /user/login?_cap_client=SUPPLIERHUB&_cap_market=KR
+#       → /login_sxauth?client=SUPPLIERHUB&market=KR
+#       → xauth realms/seller?client_id=supplier-hub&redirect_uri=.../keycloak_callback
+#       → /keycloak_callback → /marketing/dashboard/sales   (세션 살아있으면 **비번 없이**)
+#   ★`SUPPLIER`가 아니라 `SUPPLIERHUB`이고 `_cap_market=KR`이 필요하다 — 둘 중 하나만 틀려도
+#     역할 선택 화면으로 되돌아간다(실측). 추측하지 말 것.
+SSO_LOGIN_URL = (
+    "https://advertising.coupang.com/user/login?_cap_client=SUPPLIERHUB&_cap_market=KR"
+    "&returnUrl=%2Fmarketing%2Fdashboard%2Fsales%3F_cap_client%3DSUPPLIERHUB"
+)
+
+
+def _is_landed(url: str) -> bool:
+    """SSO/자동로그인 성공 판정 — 대시보드에 착지했고 로그인 페이지가 아니다."""
+    return "/marketing/dashboard" in (url or "") and not _is_logged_out(url)
+
+
+def _recover_session(page, cfg: dict) -> str:
+    """세션이 풀렸을 때 ①SSO 재발급 → ②Keychain 자동로그인 → ③알림 순으로 복구 시도.
+
+    ★login_id(cfg["ohitech_ad_login_id"])가 없으면 ②는 조용히 건너뛴다 — 미설정이 오류가
+      아니다. 그 경우 ①까지만 동작한다(tools/setup_fetcher_autologin.sh로 1회 등록하면 켜진다).
+    """
+    return coupang_auth.ensure_session(
+        page,
+        sso_url=SSO_LOGIN_URL,
+        is_landed=_is_landed,
+        # ★키 이름을 오픽스와 분리한다(적대적 리뷰 P2): 오픽스도 `ad_login_id`를 쓴다.
+        #   같은 이름이면 config를 복사할 때 오픽스 계정이 오하이테크 프로필에 로그인하고,
+        #   _push_days가 vendor_id를 리터럴('A01029796')로 박아 push하므로 **오픽스 광고비가
+        #   오하이테크로 조용히 적재된다**. 이름을 분리해 그 실수를 구조로 막는다.
+        login_id=cfg.get("ohitech_ad_login_id"),
+        label="오하이테크 광고",
+        # ★권위값 = 대시보드 실제 진입. URL 휴리스틱이 틀려도 여기서 통과하면 복구된 것이다.
+        verify=lambda: _dashboard_reachable(page),
+    )
+
+
+def _dashboard_reachable(page) -> bool:
+    """대시보드에 실제로 들어가지는지 = 앱 기준 세션 생존 판정.
+
+    URL 판정(_is_landed)은 폴링을 언제 멈출지 정하는 휴리스틱일 뿐이고, 복구됐는지의
+    최종 판정은 이쪽이다 — 내 URL 추측이 틀려도 진짜 복구를 실패로 오판하지 않는다.
+    """
+    try:
+        page.goto(DASH_URL, wait_until="domcontentloaded", timeout=40000)
+    except Exception:  # noqa: BLE001
+        return False
+    try:
+        page.wait_for_timeout(2000)  # Akamai/세션 안정화
+        return not _is_logged_out(page.url)
+    except Exception:  # noqa: BLE001 — 창 소실 등
+        return False
 
 
 def _cdp_alive(port: int) -> bool:
@@ -795,6 +864,7 @@ def cmd_run(cfg: dict) -> int:
     # 응답 판정은 창을 닫기 전에 끝낸다(with 블록 안) — 세션 만료로 판정되면 그 창을 남겨야
     # 사람이 바로 로그인할 수 있다. 창을 먼저 닫으면 "재로그인하세요" 알림에 로그인할 창이 없다.
     days: list[dict] | None = None
+    option_payload = None   # (filename, bytes) — Billboard 옵션×일별 보고서(일 1회, D-13)
     try:
         with _owned_chrome(cfg, owner), _cdp_page(cfg) as (page, _browser):
             try:
@@ -803,10 +873,14 @@ def cmd_run(cfg: dict) -> int:
                 log.warning("대시보드 goto 경고(계속): %s", str(e)[:120])
             page.wait_for_timeout(2000)  # Akamai/세션 안정화
             if _is_logged_out(page.url):
-                log.error("세션 만료(로그인 페이지) — Chrome 창에서 오하이테크 재로그인 필요.")
-                _notify_mac("오하이테크 광고 로그인 필요", "광고비 수집 세션 만료 — Chrome 창에서 재로그인하세요.")
-                owner.keep_open = True   # 로그인할 창이 필요 → 닫지 않음
-                return RC_LOGIN_REQUIRED
+                # ★사람을 부르기 전에 스스로 복구를 시도한다(2026-08-03): 대부분의 만료는
+                #   aid(1h)이고 keycloak(12h)은 살아 있어 비번 없이 여기서 끝난다.
+                log.info("세션 만료 감지 — 자가 복구 시도(SSO → Keychain 순).")
+                if coupang_auth.OK != _recover_session(page, cfg):
+                    log.error("세션 자가 복구 실패 — Chrome 창에서 오하이테크 재로그인 필요.")
+                    owner.keep_open = True   # 로그인할 창이 필요 → 닫지 않음
+                    return RC_LOGIN_REQUIRED
+                log.info("세션 자가 복구 성공 — 수집 계속.")
             res = page.evaluate(_SALES_FETCH_JS, _sales_payload(cfg))
             status = res.get("status") if res else None
             body = (res or {}).get("body") or ""
@@ -814,10 +888,22 @@ def cmd_run(cfg: dict) -> int:
             # 페이지를 200으로 주기도 한다 — 아래 status 분기 안에만 두면 200 로그인 HTML이
             # 파싱 단계로 새어 '재시도 대상'이 되고 창이 세 번 뜬다.
             if any(x in body.lower() for x in ("login", "signin", "kccontext")):
-                log.error("세션 만료(로그인 HTML, status=%s) — 재로그인 필요.", status)
-                _notify_mac("오하이테크 광고 로그인 필요", "광고비 수집 세션 만료 — Chrome 창에서 재로그인하세요.")
-                owner.keep_open = True
-                return RC_LOGIN_REQUIRED
+                # 페이지는 대시보드인데 fetch만 로그인 HTML = aid만 만료된 전형적 상태.
+                # ★복구 후 **한 번만** 재시도한다(무한 루프 금지 — 실패하면 사람을 부른다).
+                log.info("fetch가 로그인 HTML(status=%s) — 자가 복구 후 1회 재시도.", status)
+                if coupang_auth.OK != _recover_session(page, cfg):
+                    log.error("세션 자가 복구 실패 — Chrome 창에서 오하이테크 재로그인 필요.")
+                    owner.keep_open = True
+                    return RC_LOGIN_REQUIRED
+                res = page.evaluate(_SALES_FETCH_JS, _sales_payload(cfg))
+                status = res.get("status") if res else None
+                body = (res or {}).get("body") or ""
+                if any(x in body.lower() for x in ("login", "signin", "kccontext")):
+                    log.error("복구 후에도 로그인 HTML(status=%s) — 재로그인 필요.", status)
+                    coupang_auth.notify_mac("오하이테크 광고 로그인 필요",
+                                            "자동 복구 실패 — Chrome 창에서 재로그인하세요.")
+                    owner.keep_open = True
+                    return RC_LOGIN_REQUIRED
             if status not in (200, 201):
                 log.error("report/SALES 비정상 status=%s — %s", status, body[:160].replace("\n", " "))
                 return 1
@@ -832,21 +918,119 @@ def cmd_run(cfg: dict) -> int:
                 # 아니므로 login_required로 1회 만에 소멸시키면 안 된다(위 로그인HTML/URL
                 # 분기가 진짜 로그아웃을 잡는다).
                 return 1
+            # ★세션이 살아있음이 확인된 자리에서만 옵션 보고서를 받는다(창 닫기 전).
+            #   메인 응답 판정 뒤에 둔 이유: 옵션 보고서는 30~60초가 걸리는데, 세션이 죽었다면
+            #   그 시간을 버리지 않고 곧장 사람을 부르는 게 맞다.
+            option_payload = _collect_option_report(page, cfg)
     except RuntimeError:
         return 2
     except Exception as e:  # noqa: BLE001
         log.error("report/SALES fetch 오류: %s", str(e)[:160])
         return 1
 
+    # ★옵션 push는 메인(계정 총액)보다 **뒤에**, 그리고 메인 성패와 무관하게 한 번 시도한다.
+    #   앞에 두면 옵션 실패가 머니 경로를 지연시키고, 메인 성공에 종속시키면 "메인은 됐는데
+    #   옵션만 안 되는 날" 영원히 재시도되지 않는다(마커는 push 성공 시에만 세운다).
+    def _flush_option() -> None:
+        if option_payload and _push_option_xlsx(cfg, *option_payload):
+            _mark_option_done(cfg)
+
     if not days:
         # 세션은 정상이나 확정 과거일 없음 → 성공으로 처리(heartbeat 갱신: UI 완료 감지).
         log.info("report/SALES: 갱신할 과거 확정일 없음")
+        _flush_option()
         _mark_fetch_success(cfg)
         return 0
     rc = _push_days(cfg, days)
+    _flush_option()
     if rc == 0:
         _mark_fetch_success(cfg)  # push 성공 → UI 폴링이 last_success_at 변화로 완료 감지
     return rc
+
+
+# ════════════════════════════════════════════════════════════════════
+# 옵션(상품) 단위 광고비 — Billboard 보고서 (트랙 ohitech-ad Phase 2, D-12/D-13)
+# ════════════════════════════════════════════════════════════════════
+# 왜 필요한가: 계정 총액만으로는 "이 상품이 광고비까지 빼고 남는가"에 답할 수 없다.
+#   429개 옵션이 광고를 돌고 있는데 어느 것이 밑지는지 지금은 안 보인다(D-12).
+#
+# ★생성·다운로드는 **오픽스 구현을 그대로 호출한다**(사본 금지): _fetch_option_report는
+#   전부 cfg 기반(option_days·ad_vendor_code)이라 오하이테크 cfg로 그대로 동작한다.
+#   1P가 이 보고서를 주는지는 D-12에서 라이브로 확인됨(7,002행·429옵션·전량 Retail).
+#
+# ★분리하는 것 둘:
+#   ① **push 경로** — 오픽스의 `/ad-cost/option-ingest`는 공용 파서로 `ad_costs`·
+#     `coupang_ad_report`에도 쓴다. 이 계정의 계정 총액은 report/SALES가 **전체 기준**으로
+#     쓰는데(D-10) 이 XLSX는 **PA 기준**이라 같은 행을 덮으면 순이익이 조용히 흔들린다.
+#     → 옵션 전용 엔드포인트(D-13ⓑ). prod 쪽에도 구조 가드가 있다(D-13ⓒ).
+#   ② **일1회 마커 파일** — 오픽스와 공유하면 한쪽이 받은 날 다른 쪽이 건너뛴다.
+OPTION_LAST_PATH = Path(os.path.expanduser("~/.ohisell_ohitech_ad_option_last"))
+
+
+def _option_marker(cfg: dict) -> str:
+    """마커 = 오늘(KST)|vendor_code|prod_base — 대상이 바뀌면 오늘이라도 다시 받는다."""
+    today = datetime.now(KST).date().isoformat()
+    return f"{today}|{cfg.get('ad_vendor_code')}|{cfg.get('prod_base_url', '').rstrip('/')}"
+
+
+def _option_due_today(cfg: dict) -> bool:
+    try:
+        return OPTION_LAST_PATH.read_text(encoding="utf-8").strip() != _option_marker(cfg)
+    except OSError:
+        return True
+
+
+def _mark_option_done(cfg: dict) -> None:
+    try:
+        OPTION_LAST_PATH.write_text(_option_marker(cfg), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _push_option_xlsx(cfg: dict, filename: str, content: bytes) -> bool:
+    """옵션 XLSX → prod **옵션 전용** 엔드포인트 push. 성공 시에만 True.
+
+    실패 시 오늘 마커를 세우지 않아 다음 run이 재시도한다(오픽스와 같은 계약).
+    """
+    try:
+        pr = requests.post(
+            cfg["prod_base_url"].rstrip("/") + "/api/coupang/ops/rocket/ad-cost/option-ingest",
+            data=content,
+            headers={
+                "X-Ingest-Token": cfg["ingest_token"],
+                "X-Report-Filename": filename,
+                "Content-Type": "application/octet-stream",
+            },
+            timeout=120,
+        )
+        pr.raise_for_status()
+    except requests.RequestException as e:  # noqa: BLE001
+        log.warning("옵션보고서 push 실패(다음 run 재시도): %s", str(e)[:140])
+        return False
+    try:
+        info = pr.json()
+    except ValueError:
+        info = pr.text[:120]
+    log.info("옵션보고서 push 성공: %s", info)
+    return True
+
+
+def _collect_option_report(page, cfg: dict):
+    """일1회 게이트 안에서 옵션 보고서를 받아온다 → (filename, bytes) | None.
+
+    ★메인 push를 절대 막지 않는다: 예외도 None으로 접는다. 계정 총액(머니 경로)이 옵션 보고서
+      때문에 실패하면 안 된다 — 이건 부가 정보다.
+    """
+    if not bool(cfg.get("option_report_enabled", True)):
+        return None
+    if not _option_due_today(cfg):
+        return None
+    try:
+        import ad_cost_browser_fetcher as ofix   # 생성·폴링·다운로드 구현 재사용(사본 금지)
+        return ofix._fetch_option_report(page, cfg)
+    except Exception as e:  # noqa: BLE001
+        log.warning("옵션보고서 수집 건너뜀(메인 무영향): %s: %s", type(e).__name__, str(e)[:120])
+        return None
 
 
 def cmd_poll(cfg: dict) -> int:

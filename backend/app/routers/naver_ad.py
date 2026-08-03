@@ -27,6 +27,12 @@
 # GET /api/naver/ad/change-log        — 변경 이력 조회(D-NAO-47). naver_change_log 단순 read.
 #   include_dry_run 기본 False — 1층 "우리 조작 N회"는 실제 집행만 센다(D-47-h 정직성).
 #   이 API는 읽기만 하고, 이력을 *채우는* 것은 entity_sync의 diff 밸브와 execution_harness다.
+# GET /api/naver/ad/modifications     — 「수정 사항」 화면. naver_change_log ∪ naver_agency_op을
+#   날짜 구간으로 합쳐 시간순으로 준다(modification_feed 경유·읽기 전용). 주체는 데이터로
+#   자동 판정(change_actor 4규칙)하고 기본값은 대행사. 날짜 귀속은 **실제 발생 시각 우선**
+#   (agency_op.occurred_at) — 감지일로 잡으면 07-30 백필 36건이 07-30에 안 보인다.
+# PUT /api/naver/ad/modifications/{source}/{source_id}/actor — 주체 정정. 원천 테이블은
+#   건드리지 않고 naver_change_actor_override에만 쌓는다(탐지 산출물 ≠ 사람 주석).
 # GET /api/naver/ad/raw/keywords      — 등록 키워드 원자료(prod 91,005행), limit 상한 200 강제.
 # GET /api/naver/ad/raw/search-terms  — 검색어 원자료(prod 114,285행), limit 상한 200 강제.
 # GET /api/naver/ad/raw/hourly        — 시간당 스냅샷 + daily_budget·spend_ratio(스펙 §1-4의
@@ -70,6 +76,7 @@ from app.models import (
     NaverAgencyOp,
     NaverBmBenchmark,
     NaverCampaignSettings,
+    NaverChangeActorOverride,
     NaverChangeLog,
     NaverEntity,
     NaverEntitySnapshot,
@@ -86,9 +93,11 @@ from app.models import (
 )
 from app.services.naver_ad import bid_step_types
 from app.services.naver_ad import campaign_roster
+from app.services.naver_ad import change_actor
 from app.services.naver_ad import dashboard_overview
 from app.services.naver_ad import delegation_gate
 from app.services.naver_ad import metrics_aggregator
+from app.services.naver_ad import modification_feed
 from app.services.naver_ad import naver_execution_harness
 from app.services.naver_ad import naver_sa_writer
 from app.services.naver_ad import perf_campaign_harness
@@ -1240,6 +1249,144 @@ def get_change_log(
             }
             for r in rows
         ],
+    }
+
+
+# ══════════════════════════════════════════════════════════════════
+# 「수정 사항」 화면 — 두 원천 합본 조회 + 주체 정정(읽기 화면. 네이버 API 쓰기 0)
+#
+# ★왜 새 엔드포인트인가(기존 확장이 아니라): `/change-log`는 **한 테이블 단순 read**라는
+#   계약 위에 서 있고 그 계약을 6개 소비자가 쓴다(커맨드 센터 두 패널·성과 화면 등).
+#   거기에 두 번째 테이블을 union으로 끼우면 `total`·`executed_total`·`execution_state`의
+#   의미가 조용히 바뀐다 — agency_op 행에는 dry_run도 실행 3상태도 없다. 기존 계약을 깨는
+#   대신 새 창구를 낸다(`/bm/agency-ops`도 그대로 둔다 — 그쪽은 단일 원천 원자료 열람이다).
+# ★날짜 검증 규칙은 `_change_log_window`를 **그대로 재사용**한다. 프론트 `customRangeError()`가
+#   그 세 규칙(빈값·뒤집힘·365일)+미래 차단과 1:1로 맞춰져 있어, 여기서 규칙이 갈라지면
+#   화면이 막지 못한 입력에 백엔드 422 원문이 그대로 노출된다.
+# ══════════════════════════════════════════════════════════════════
+_MAX_MODIFICATION_LIMIT = 500
+
+
+@router.get("/modifications")
+def get_modifications(
+    campaign_id: str | None = Query(None, description="캠페인 필터"),
+    actor: str | None = Query(
+        None,
+        pattern="^(ours|agency|jino)$",
+        description="주체 필터(정정 반영 후 기준). 미지정=전체",
+    ),
+    source: str | None = Query(
+        None, pattern="^(change_log|agency_op)$", description="원천 필터. 미지정=두 원천 합본"
+    ),
+    days: int = Query(30, ge=1, le=365, description="date_from/date_to의 폴백 창(KST)"),
+    date_from: date | None = Query(None, description="조회 시작일(KST, 포함). date_to와 함께"),
+    date_to: date | None = Query(None, description="조회 종료일(KST, 포함). date_from과 함께"),
+    include_dry_run: bool = Query(False, description="dry-run 기록 포함(기본 제외)"),
+    include_blocked: bool = Query(
+        False, description="가드레일이 막아 **실제로는 안 바뀐** 시도도 포함(기본 제외)"
+    ),
+    limit: int = Query(100, ge=1, le=_MAX_MODIFICATION_LIMIT),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+) -> dict:
+    """그날 광고에 일어난 수정 사항 전건(두 원천 합본, 읽기 전용).
+
+    행마다: 발생 시각 + 그것이 실제 발생인지 감지 시각인지(`time_basis`) · 주체(자동 판정
+    또는 정정) · 대상(이름 해석) · 무엇을 · 이전값→이후값(불명이면 명시적 null + 사유) ·
+    원천 · 소급 백필 여부 · 정정 여부.
+
+    ★기본 정렬은 **발생 시각 내림차순**이고, 그 시각은 agency_op의 경우 `occurred_at`을
+    먼저 본다 — 백필 36건은 감지일이 08-03이지만 실제로는 07-30 일이라, 감지일로 잡으면
+    07-30을 골랐을 때 한 건도 안 보인다(이 화면이 존재하는 이유가 바로 그 대조 작업이다).
+    """
+    since, until = _change_log_window(date_from, date_to, days)
+    return modification_feed.build(
+        db,
+        since=since,
+        until=until,
+        campaign_id=campaign_id,
+        actor=actor,
+        source=source,
+        include_dry_run=include_dry_run,
+        include_blocked=include_blocked,
+        limit=limit,
+        offset=offset,
+    )
+
+
+class ModificationActorIn(BaseModel):
+    """주체 정정 1건. actor=None이면 정정을 **지우고** 자동 판정으로 되돌린다.
+
+    ★되돌리기를 넣는 이유: 잘못 누른 정정을 못 지우면 원천은 깨끗한데 화면이 영영 틀리게
+    말한다 — 그건 원천을 안 건드린 보람이 없는 상태다(일방통행 문 금지)."""
+
+    model_config = {"extra": "forbid"}
+
+    actor: str | None = None
+    note: str | None = None
+
+
+@router.put("/modifications/{source}/{source_id}/actor")
+def put_modification_actor(
+    source: str,
+    source_id: int,
+    body: ModificationActorIn,
+    db: Session = Depends(get_db),
+) -> dict:
+    """수정 1건의 주체를 사람이 정정한다 — **원천 테이블은 건드리지 않는다**.
+
+    naver_change_actor_override에 (source, source_id) 유일키로 upsert 한다. 자동 판정은
+    그대로 남아 있고(`actor_auto`), 화면은 정정된 값을 우선 보여준다. 이 경로에서
+    naver_change_log·naver_agency_op에 대한 UPDATE는 한 줄도 없다(계약).
+
+    ⚠️ 이 프로젝트는 앱 레벨 인증이 없고 IP 허용목록으로 보호된다 — 다른 쓰기 엔드포인트
+    (campaign-settings 계열)와 같은 패턴을 따르며 여기서 새 인증 층을 만들지 않는다.
+    """
+    if source not in change_actor.SOURCES:
+        raise HTTPException(422, f"source는 {list(change_actor.SOURCES)} 중 하나여야 합니다.")
+    if body.actor is not None and body.actor not in change_actor.ACTORS:
+        raise HTTPException(422, f"actor는 {list(change_actor.ACTORS)} 중 하나여야 합니다.")
+
+    # 존재하지 않는 행에 정정을 달면 화면에 영영 안 보이는 유령 레코드가 된다 — 404로 막는다.
+    model = NaverChangeLog if source == change_actor.SOURCE_CHANGE_LOG else NaverAgencyOp
+    if db.query(model.id).filter(model.id == source_id).first() is None:
+        raise HTTPException(404, f"{source} #{source_id} 행이 없습니다.")
+
+    now = kst_now()  # ★server_default=func.now()는 UTC다(9시간 어긋남) — 명시 주입.
+    row = (
+        db.query(NaverChangeActorOverride)
+        .filter(
+            NaverChangeActorOverride.source == source,
+            NaverChangeActorOverride.source_id == source_id,
+        )
+        .first()
+    )
+
+    if body.actor is None:
+        if row is not None:
+            db.delete(row)
+            db.commit()
+        return {"source": source, "source_id": source_id, "actor": None, "corrected": False}
+
+    if row is None:
+        row = NaverChangeActorOverride(
+            source=source, source_id=source_id, actor=body.actor,
+            note=body.note, created_at=now, updated_at=now,
+        )
+        db.add(row)
+    else:
+        row.actor = body.actor
+        row.note = body.note
+        row.updated_at = now
+    db.commit()
+    return {
+        "source": source,
+        "source_id": source_id,
+        "actor": row.actor,
+        "actor_label": change_actor.ACTOR_LABEL.get(row.actor, row.actor),
+        "note": row.note,
+        "corrected": True,
+        "updated_at": row.updated_at.isoformat(),
     }
 
 

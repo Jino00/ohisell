@@ -14,6 +14,7 @@ from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 import openpyxl
+from sqlalchemy import case, update
 from sqlalchemy.orm import Session
 
 from app.clients.coupang.inbound import WingAuthError, WingReadError
@@ -331,6 +332,12 @@ _SHEET_FEE_TYPE_MAP: dict[str, str] = {
     "배송비": "delivery",
     "보관비": "storage",
     "판매수수료": "sale_fee",
+    # ★CATEGORY_TR 리포트의 유일 시트명(2026-08-03 추가). 종전엔 미매핑이라 그 리포트가 매 주기
+    #   0행을 냈다(prod 로그 28건). 판매수수료는 status/api로 **계정 단위**론 이미 수집 중이므로
+    #   회계 영향은 없고, 이 매핑은 옵션 단위 드릴다운을 켜는 것이다.
+    #   ⚠️컬럼 구조가 다르면 _find_header_row/_build_col_map이 fail-soft skip한다(D-13).
+    "주문내역, 판매수수료": "sale_fee",
+    "주문내역,판매수수료": "sale_fee",
     "반품 회수비": "return_shipping",
     "반품회수비": "return_shipping",
     "반품 재입고비": "return_shipping",
@@ -343,6 +350,11 @@ _COL_OPTION_ID = "옵션ID"
 _COL_RECOGNITION = "매출인식일"
 _COL_PERIOD_END = "정산주기(종료일)"
 _COL_DISCOUNTED = "할인적용가(A-B)"  # ★옵션 cost (VAT前). 엑셀 ASCII 하이픈 '-'.
+# ★S9(2026-08-03): 청구 근거를 추론하지 않고 정산서에서 직접 읽는다(ref 17 §8-1 컬럼 실증).
+#   배송비=주문당·입출고비=수량당 부과라 분모가 서로 다르다 → 둘 다 센다.
+_COL_ORDER_ID = "주문ID"
+_COL_SALES_QTY = "판매수량"
+_COL_BILLED_SIZE = "개별포장사이즈"
 
 
 def _norm_option_id(value) -> str:
@@ -502,7 +514,19 @@ def parse_settlement_xlsx(content: bytes) -> dict:
                 skipped.append(sn)
                 continue
 
-            options: dict[tuple[str, date | None], Decimal] = {}
+            # ★S9 청구 근거 컬럼(있으면 사용, 없으면 None → 감사가 종전 경로로 폴백).
+            oid_order_col = col_map.get(_COL_ORDER_ID)
+            qty_col = col_map.get(_COL_SALES_QTY)
+            size_col = col_map.get(_COL_BILLED_SIZE)
+            if not oid_order_col or not qty_col or not size_col:
+                # 컬럼명 드리프트를 조용히 넘기지 않는다 — 발견된 헤더를 남겨 다음 세션이 대조한다.
+                log.warning(
+                    "RG 엑셀 '%s' S9 청구근거 컬럼 일부 없음(주문ID=%s·판매수량=%s·개별포장사이즈=%s)."
+                    " 감사는 폴백 경로를 쓴다. 발견된 헤더: %s",
+                    sn, oid_order_col, qty_col, size_col, sorted(col_map)[:40],
+                )
+
+            options: dict[tuple[str, date | None], dict] = {}
             sum_detail = Decimal(0)
             # 헤더+1부터 순회. 서브헤더 행은 옵션ID가 비어 자동 skip(서브헤더 유무 무관).
             for r in range(hr + 1, len(grid) + 1):
@@ -512,8 +536,28 @@ def parse_settlement_xlsx(content: bytes) -> dict:
                 cost = _dec(_at(grid, r, cost_col))
                 pend = _parse_excel_date(_at(grid, r, pend_col)) if pend_col else None
                 key = (oid, pend)
-                options[key] = options.get(key, Decimal(0)) + cost
+                agg = options.get(key)
+                if agg is None:
+                    agg = {"cost": Decimal(0), "order_ids": set(), "quantity": 0,
+                           "size_types": set()}
+                    options[key] = agg
+                agg["cost"] += cost
                 sum_detail += cost
+                # 배송비는 주문당 1회 부과(합포장) → distinct 주문ID가 정확한 분모다.
+                if oid_order_col:
+                    ordid = _at(grid, r, oid_order_col)
+                    if ordid is not None and str(ordid).strip() not in ("", "-"):
+                        agg["order_ids"].add(_norm_option_id(ordid) or str(ordid).strip())
+                # 입출고비는 수량당 부과 → Σ판매수량이 분모다.
+                if qty_col:
+                    q = _dec(_at(grid, r, qty_col))
+                    if q is not None:
+                        agg["quantity"] += int(q)
+                # 쿠팡이 청구에 쓴 사이즈 등급 — 추론 대상이 아니라 기재값이다.
+                if size_col:
+                    st = _at(grid, r, size_col)
+                    if st is not None and str(st).strip() not in ("", "-"):
+                        agg["size_types"].add(str(st).strip())
 
             summary = _parse_summary(grid)
             reconcile = None
@@ -585,15 +629,91 @@ def _resolve_period_start(db: Session, account_key: str, period_end: date) -> da
     return fallback
 
 
-def ingest_settlement_xlsx(db: Session, account_key: str, content: bytes) -> dict:
+class RgSheetDriftError(Exception):
+    """엑셀은 정상적으로 열렸는데 **우리가 아는 시트 구조가 아니다**(시트명·상세 구조 드리프트).
+
+    WingReadError(파일 자체 손상/열기 실패)와 구분한다 — 이건 파일은 멀쩡하고 쿠팡 쪽 스키마가
+    바뀐 것이라 사람이 _SHEET_FEE_TYPE_MAP을 고쳐야 풀린다.
+    """
+
+
+def _assert_no_sheet_drift(parsed: dict) -> None:
+    """strict 경로 전용 사전 판정 — **DML을 시작하기 전에** 드리프트면 끊는다.
+
+    ★왜 사후가 아니라 사전인가(codex 1R[P1], 2026-08-03): 적재는 (fee_type, period_end) 단위로
+      delete-once 후 insert다. 여러 시트가 같은 fee_type으로 병합되는 경우('반품 회수비'+
+      '반품 재입고비' → return_shipping) 한 시트만 개명되면, 인식된 반쪽이 그 fee_type×period의
+      **기존 snapshot 전체를 지우고 반쪽만 넣는다**. 커밋 뒤에 422를 던져봐야 데이터는 이미 반쪽이고
+      재시도는 복구가 아니라 반복이다. "멱등이라 무해"는 틀린 가정이었다.
+
+    판정 3가지 — 전부 파싱 결과만으로 결정되므로 DB를 건드리기 전에 알 수 있다:
+      ① 인식 시트 0개          → 전량 미인식(시트명 드리프트)
+      ② sheets_skipped 비어있지 않음 → 부분 미인식(절반이 조용히 빠지는 쪽이 더 나쁘다)
+      ③ 상세 0건인데 검산이 '진짜 비었음'을 확인해 주지 않는 시트가 있음
+         ★③의 근거(라이브 실측 2026-08-03): 상세 0건 성공 10건은 **전부** sum_summary=0.0 ·
+           reconcile.match=True · vs_status_api.match=True였다(WING2 오하이테크, 그 주 발생비용
+           없음). 즉 정상 케이스는 검산으로 확인된다. 반대로 "상세 행이 사라지고 요약금액만 남은"
+           드리프트는 match=False로 드러난다 — 이걸 성공으로 두면 기존 snapshot을 0건으로
+           갈아엎고 heartbeat까지 찍는다(codex 1R[P1]).
+         상세가 있는 시트의 검산 불일치는 여기서 다루지 않는다(기존대로 warning) — 그건 금액
+           정합성 주제라 별건이다.
+    """
+    sheets = parsed["sheets"]
+    skipped = parsed["sheets_skipped"]
+    if not sheets:
+        raise RgSheetDriftError(f"인식된 정산 시트 없음(전량 미인식) — 시트명 드리프트 의심: {skipped[:5]}")
+    if skipped:
+        raise RgSheetDriftError(f"정산 시트 일부 미인식 — 시트명 드리프트 의심: {skipped[:5]}")
+    unverified = [
+        s["sheet_name"] for s in sheets
+        if not s["options"] and not (s["reconcile"] and s["reconcile"]["match"])
+    ]
+    if unverified:
+        raise RgSheetDriftError(
+            f"상세 0건인데 검산이 '비어 있음'을 확인해 주지 않음 — 상세 구조 드리프트 의심: {unverified[:5]}"
+        )
+
+
+def _single_size_type(size_types: set[str], fee_type: str, oid: str) -> str | None:
+    """정산서에 기재된 청구 사이즈 등급 1개. 없으면 None, 여러 개면 None+경고.
+
+    한 (옵션·주기) 안에서 등급이 갈리면 그건 "어느 등급으로 청구됐나"에 답이 없다는 뜻이다.
+    임의로 하나를 고르면 감사가 그 선택을 사실로 오해하므로 **모르는 상태로 남긴다**(폴백).
+    """
+    if not size_types:
+        return None
+    if len(size_types) > 1:
+        log.warning(
+            "RG 정산서 청구 사이즈가 한 주기에 여러 값(%s/%s): %s → 판정 보류(None)",
+            fee_type, oid, sorted(size_types),
+        )
+        return None
+    return next(iter(size_types))
+
+
+def ingest_settlement_xlsx(db: Session, account_key: str, content: bytes,
+                           *, strict_sheets: bool = False) -> dict:
     """종류별 엑셀 bytes → 파싱·검산·옵션 단위 upsert(S6).
 
     upsert grain=(account_key, from, to, fee_type, vendor_item_id=옵션ID). VAT前(A-B) 저장.
     반환: {"account_key", "upserted", "sheets": [{fee_type, sheet_name, options(개수),
            reconcile, vs_status_api}], "sheets_skipped", "status": "ok"|"empty"}.
     검산2(vs_status_api): 요약최종(VAT후) == status/api 계정 row amount(같은 fee_type·기간).
+
+    ★strict_sheets(2026-08-03 — 거짓 완료 차단): True면 적재 **전에** _assert_no_sheet_drift로
+      시트 드리프트를 판정해 RgSheetDriftError를 던진다(DB 무변경). 라우터
+      /rg/settlement/upload-xlsx(Mac 페처 push)만 True다.
+      기본값 False인 이유: 같은 함수를 쓰는 S6-auto는 CATEGORY_TR 엑셀이 매 주기 **정상적으로**
+      empty를 낸다(유일 시트명 '주문내역, 판매수수료'가 _SHEET_FEE_TYPE_MAP에 없음, prod 로그
+      28건). 거기에 예외를 던지면 그 경로가 통째로 터진다.
+      ⚠️전제: 페처 config의 rg_report_types에 **파서가 시트를 아는 리포트만** 넣어야 한다.
+      CATEGORY_TR 등을 켜려면 _SHEET_FEE_TYPE_MAP을 먼저 확장할 것 — 안 그러면 정상 파일이
+      매 회차 422 → 재시도 3회 소진으로 끝난다(codex 1R[P2]). 라우터는 report_type을 받지 않아
+      리포트별로 정책을 가를 수 없다.
     """
     parsed = parse_settlement_xlsx(content)
+    if strict_sheets:
+        _assert_no_sheet_drift(parsed)   # ★DML 전 — 던지면 DB는 손대지 않은 상태 그대로다
     sheets = parsed["sheets"]
     if not sheets:
         return {
@@ -609,7 +729,7 @@ def ingest_settlement_xlsx(db: Session, account_key: str, content: bytes) -> dic
     #   삭제 대상에 넣으면 상세 종료일 불명 시 delete만 하고 insert는 skip돼 데이터 손실이 난다.
     #   → 상세 row의 종료일이 없으면 요약 종료일로 채워 insert까지 되게 하고, 요약 period는
     #   "상세 0건 정상 시트"일 때만 삭제 대상에 추가한다.
-    merged: dict[str, dict[tuple[str, date | None], Decimal]] = {}
+    merged: dict[str, dict[tuple[str, date | None], dict]] = {}
     merged_periods: dict[str, set[date]] = {}   # fee_type -> snapshot 삭제 대상 period_end 집합
     for sheet in sheets:
         ft = sheet["fee_type"]
@@ -618,10 +738,20 @@ def ingest_settlement_xlsx(db: Session, account_key: str, content: bytes) -> dic
         bucket = merged.setdefault(ft, {})
         pset = merged_periods.setdefault(ft, set())
         has_options = False
-        for (oid, pe), cost in sheet["options"].items():
+        for (oid, pe), agg in sheet["options"].items():
             has_options = True
             eff_pe = pe if pe is not None else fallback_pe  # 상세 종료일 없으면 요약으로 fallback
-            bucket[(oid, eff_pe)] = bucket.get((oid, eff_pe), Decimal(0)) + cost
+            tgt = bucket.get((oid, eff_pe))
+            if tgt is None:
+                tgt = {"cost": Decimal(0), "order_ids": set(), "quantity": 0,
+                       "size_types": set()}
+                bucket[(oid, eff_pe)] = tgt
+            tgt["cost"] += agg["cost"]
+            # ★주문ID는 **합집합**으로 센다 — 같은 fee_type의 여러 시트가 같은 주문을 담을 수 있어
+            #   개수를 더하면 분모가 부풀고, 그건 우리가 방금 없앤 오탐과 같은 종류의 오류다.
+            tgt["order_ids"] |= agg["order_ids"]
+            tgt["quantity"] += agg["quantity"]
+            tgt["size_types"] |= agg["size_types"]
             if eff_pe is not None:
                 pset.add(eff_pe)  # insert될 period만 삭제 대상(삭제만 하고 못 넣는 손실 방지)
         # 상세 0건 정상 시트(요약만 존재)도 snapshot replace 대상 — 옵션 전삭제로 stale 제거.
@@ -641,7 +771,7 @@ def ingest_settlement_xlsx(db: Session, account_key: str, content: bytes) -> dic
     # ── 3. 병합된 옵션 적재 (delete 후라 전부 신규 insert) ─────────────────
     upserted_total = 0
     for ft, options in merged.items():
-        for (oid, period_end), cost in options.items():
+        for (oid, period_end), agg in options.items():
             if period_end is None:
                 log.warning("RG 옵션 적재 skip(정산주기 종료일 불명·요약 fallback도 없음): %s/%s", ft, oid)
                 continue
@@ -653,7 +783,12 @@ def ingest_settlement_xlsx(db: Session, account_key: str, content: bytes) -> dic
                 fee_type=ft,
                 vendor_item_id=oid,
                 raw_type=f"xlsx:{ft}",
-                amount=cost,
+                amount=agg["cost"],
+                # ★S9: 컬럼이 없던 파일이면 0/빈집합이 오므로 None으로 저장한다 —
+                #   0을 넣으면 감사가 "분모 0"으로 읽어 종전 폴백이 아니라 오판으로 간다.
+                billed_size_type=_single_size_type(agg["size_types"], ft, oid),
+                billed_order_count=len(agg["order_ids"]) or None,
+                billed_quantity=agg["quantity"] or None,
             ))
             upserted_total += 1
 
@@ -1034,7 +1169,7 @@ def auto_download_all(db: Session, vendor_id_map: dict[str, str]) -> list[dict]:
 # 분리해 판매분석(COUPANG_WING_VS)·광고와 섞지 않는다(D-5 세션/상태 분리 원칙).
 #   - request_refresh: UI 버튼/스케줄 → 요청 플래그 set
 #   - refresh_status:  UI 폴링·페처 데몬 공용(요청 여부 + 마지막 push 시각)
-#   - claim_refresh:   페처가 요청 소비(원자적 조건부 UPDATE)
+#   - claim_refresh:   페처가 요청을 **임대**(lease, 원자적 조건부 UPDATE) — 소비하지 않는다
 #   - mark_heartbeat:  업로드(push) 성공 시 last_success_at 갱신(라우터 경계에서 호출 — 머니코드 불변)
 # 위 5개는 모두 account_key(COUPANG_WING1/2) 차원 — 계정별 데몬이 자기 큐만 본다(아래 매핑 참조).
 _RG_STATE_ACCOUNT = "COUPANG_WING_RG"
@@ -1082,12 +1217,37 @@ def rg_mark_heartbeat(db: Session, account_key: str = "COUPANG_WING1") -> None:
     여러 엑셀을 올린다. 첫 업로드에서 요청을 지우면 뒤이은 다운로드·push가 실패해도 재시도할
     요청이 남아있지 않아 정산 데이터가 반쪽으로 남는다. 요청 소멸은 run 전체가 끝난 뒤
     refresh-complete(=/wing/rg-settlement/refresh-complete)가 한다.
+
+    ★실패 흔적은 **살아있는 요청**의 성공일 때만 지운다(2026-08-03 codex 1R[P1]). 무조건 지우면
+    이미 종료된 run의 실패가 늦게 도착한 업로드에 지워진다: 페처의 업로드 클라이언트 타임아웃
+    (60s)은 서버 처리를 취소하지 않아, 페처가 실패를 보고해 run이 끝난 **뒤에** 서버 ingest가
+    완주하며 여기로 들어온다(2026-07-17 실측 — success/error가 138ms 차로 같은 행을 갱신).
+    그 순간 프론트(streamRefresh.runStreamRefresh)는 '요청 소멸 + 실패 흔적 없음 + 성공 시각
+    변화'만 보고 **반쪽 정산 run을 "완료"로 읽는다** — 실패 판정의 유일한 근거가 last_error_at
+    이기 때문이다. 신선도(last_success_at)는 조건 없이 올린다: 데이터는 실제로 들어왔다.
+
+    ★이 가드는 반드시 **한 UPDATE 안**에서 판정해야 한다(codex 2R[P1]). ORM으로 읽고-고치고-
+    커밋하면 조회와 쓰기 사이에 fetch-error(3회 소진)나 _reap_exhausted가 끼어들어, 이미 통과한
+    조건을 근거로 방금 기록된 terminal error를 지운다 — 순차 케이스만 막고 진짜 경합은 그대로
+    열린다. refresh_contract가 모든 전이를 조건부 UPDATE + rowcount로 쓰는 것과 같은 이유다.
     """
-    row = _rg_ensure_state_row(db, account_key)
-    row.status = "green"
-    row.last_error = None
-    row.last_error_at = None  # 성공 = 실패 흔적 클리어(안 지우면 오래된 실패가 화면에 남는다)
-    row.last_success_at = kst_now()
+    _rg_ensure_state_row(db, account_key)
+    db.flush()
+    key = _rg_state_key(account_key)
+    col = CoupangWingCookie
+    keep = col.refresh_requested_at.is_(None)   # 요청이 없으면(=끝난 run) 실패 흔적 보존
+    db.execute(
+        update(col)
+        .where(col.account_key == key)
+        .values(
+            status="green",
+            last_success_at=kst_now(),
+            # 살아있는 run 안의 성공 → 지난 시도의 실패 흔적 클리어
+            # (안 지우면 1회차 실패 뒤 2회차가 성공해도 옛 실패가 화면에 남는다)
+            last_error=case((keep, col.last_error), else_=None),
+            last_error_at=case((keep, col.last_error_at), else_=None),
+        )
+    )
     db.commit()
 
 
@@ -1095,10 +1255,11 @@ def rg_mark_fetch_error(db: Session, error: str, account_key: str = "COUPANG_WIN
                         kind: str | None = None, lease: str | None = None) -> None:
     """Wing 페처 RG run 실패 보고 → last_error/last_error_at 기록(UI가 실패를 감지하는 유일 경로).
 
-    ★존재 이유(PR #30이 광고비에서 먼저 고친 것과 같은 구멍): 페처가 갱신 요청을 claim한
-    뒤(=플래그 이미 clear) 브라우저 에러로 죽으면 prod에 아무 흔적도 안 남았다. 성공에만
+    ★존재 이유(PR #30이 광고비에서 먼저 고친 것과 같은 구멍): 당시 claim은 요청 플래그를 즉시
+    소비했고, 페처가 claim 직후 브라우저 에러로 죽으면 prod에 아무 흔적도 안 남았다. 성공에만
     시각(last_success_at)이 있고 실패엔 짝이 없어서 UI는 "실패"와 "아직 진행 중"을 구분할
     수단이 없었다 — 215초를 헛기다린 뒤 "Mac 응답 없음"이라는 뭉뚱그린 문구만 냈다.
+    (지금은 lease 계약이라 claim이 플래그를 보존한다 — 2026-07-27.)
 
     ★status는 일부러 건드리지 않는다(PR #30 codex 1R[P2]): status=red는 Layout 배너에서
     곧바로 "쿠키 만료(재설정 필요)" + 쿠키 재설정 CTA로 렌더된다(Layout.tsx:201/206).

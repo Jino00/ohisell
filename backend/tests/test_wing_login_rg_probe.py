@@ -4,16 +4,24 @@
 #   (wing.coupang.com, 데스크톱 xauth SSO OIDC client_id=wing)은 **같은 Chrome 안에서도 세션이
 #   따로 논다**. vendor-summary=200인데 정산 goto는 xauth 로그인 페이지로 리다이렉트되고
 #   status/api는 404인 상태가 실측됐다. 그런데 cmd_login은 VS 프로브만 보고 "로그인 완료"
-#   마커를 쓰고 rc=0을 돌려줬다 → 직후 `rg`(cmd_rg, login_wait_secs=0)는 _rg_session_ok 실패로
+#   마커를 쓰고 rc=0을 돌려줬다 → 직후 `rg`(cmd_rg, login_wait_secs=0)는 세션 판정 실패로
 #   fail-fast. 즉 **침묵 성공이 데스크톱 세션 만료를 마스킹**했다(워밍 네비게이션으로는 해결
 #   불가 — 사람 재로그인만 가능).
 #
+# ★2026-08-03 계약 변경(3값 판정): 이 프로브는 보수적 bool(_rg_session_ok)이라 **판정 불가**
+#   (업스트림 500·깨진 JSON·goto 예외)까지 "데스크톱 세션 만료"로 불렀다. 그 결과 로그인해
+#   있는 사람에게 로그인을 시키고, 끝내 확증을 못 얻으면 멀쩡한 세션에 rc=5를 돌려줬다.
+#   같은 날 라이브에서 status/api 500의 본문이 **로그인된** Wing 셸 HTML임이 확인됐고,
+#   진짜 로그아웃은 AUTH(오리진 이탈·리다이렉트·로그인 HTML)로 확증된다 — UNKNOWN으로 오지
+#   않는다. 그래서 UNKNOWN은 로그인을 요구하지 않는다(층2 루프·`rg` 진입과 같은 비대칭).
+#
 # 여기서 고정하는 것:
-#   ① 창이 아직 열려 있는 동안 RG_DASH_URL을 열어 _rg_session_ok로 판정한다.
-#   ② 만료면 같은 창에서 _rg_login_wait으로 사람 로그인을 기다린다(남은 시간만큼).
+#   ① 창이 아직 열려 있는 동안 RG_DASH_URL을 열어 _rg_session_verdict_confirmed로 판정한다.
+#   ② **AUTH(로그아웃 확증)**면 같은 창에서 _rg_login_wait으로 사람 로그인을 기다린다(남은 시간만큼).
 #   ③ 끝내 못 잡으면 rc=RC_RG_LOGIN_REQUIRED(5) — 단, VS push는 그대로 나간다(데이터 손실 금지).
-#   ④ 반환 우선순위 불변: 로그인 실패 3 > 파싱 실패 1 > push 실패 rc > RG 미확보 5.
-#   ⑤ 데몬 VS 레인(rg_probe=False)·RG 미사용 인스턴스(vendor_id 없음)·레거시(비CDP)는 프로브 제외.
+#   ④ **UNKNOWN이면 로그인을 요구하지 않고 rc=0** — 대신 "확인됨"이라고 주장하지도 않는다.
+#   ⑤ 반환 우선순위 불변: 로그인 실패 3 > 파싱 실패 1 > push 실패 rc > RG 미확보 5.
+#   ⑥ 데몬 VS 레인(rg_probe=False)·RG 미사용 인스턴스(vendor_id 없음)·레거시(비CDP)는 프로브 제외.
 #   (브라우저 실동작은 여기서 검증 불가 — 라이브 검증은 운영 절차의 몫.)
 import contextlib
 import importlib.util
@@ -143,27 +151,34 @@ def _pushed(calls: list[str]) -> bool:
     return any(c.endswith("/vendor-summary/ingest") for c in calls)
 
 
+def _verdict(fetcher, monkeypatch, value: str) -> None:
+    """cmd_login이 보는 세션 판정을 고정한다(3값). 프로브 자체는 verdict 테스트가 따로 본다."""
+    monkeypatch.setattr(fetcher, "_rg_session_verdict_confirmed", lambda *_a, **_k: value)
+
+
+def _no_login_wait(fetcher, monkeypatch, why: str) -> None:
+    monkeypatch.setattr(fetcher, "_rg_login_wait", lambda *_a, **_k: pytest.fail(why))
+
+
 # ── ① 프로브 성공 = 기존과 동일한 rc=0 ────────────────────────────────
 def test_rg_probe_success_returns_zero(fetcher, tmp_path, monkeypatch):
     page = _patch_browser(fetcher, monkeypatch)
     calls = _record_push(fetcher, monkeypatch)
-    monkeypatch.setattr(fetcher, "_rg_session_ok", lambda _p: True)
-    monkeypatch.setattr(
-        fetcher, "_rg_login_wait",
-        lambda *_a, **_k: pytest.fail("세션이 살아있는데 로그인 대기에 들어가면 안 된다"))
+    _verdict(fetcher, monkeypatch, fetcher._PROBE_OK)
+    _no_login_wait(fetcher, monkeypatch, "세션이 살아있는데 로그인 대기에 들어가면 안 된다")
 
     assert fetcher.cmd_login(_cfg(tmp_path), wait_secs=5) == 0
     assert fetcher.RG_DASH_URL in page.gotos   # 정산 페이지를 실제로 열었다
     assert _pushed(calls)
 
 
-# ── ② 프로브 실패 → 같은 창에서 사람 로그인 성공 → rc=0 ──────────────────
-def test_rg_probe_failure_recovered_by_login_wait(fetcher, tmp_path, monkeypatch):
+# ── ② AUTH(로그아웃 확증) → 같은 창에서 사람 로그인 성공 → rc=0 ──────────
+def test_rg_probe_auth_recovered_by_login_wait(fetcher, tmp_path, monkeypatch):
     """세션 만료를 잡아내고 같은 창에서 회복하는 것이 이 프로브의 본래 목적이다."""
     _patch_browser(fetcher, monkeypatch)
     calls = _record_push(fetcher, monkeypatch)
     waits: list[int] = []
-    monkeypatch.setattr(fetcher, "_rg_session_ok", lambda _p: False)
+    _verdict(fetcher, monkeypatch, fetcher._PROBE_AUTH)
 
     def _wait(_page, _ctx, _state, secs, *, cdp=False):
         waits.append(secs)
@@ -181,7 +196,7 @@ def test_rg_login_never_completes_returns_rc5_but_pushes(fetcher, tmp_path, monk
     """★핵심: 침묵(rc=0) 금지. 동시에 이미 받은 판매분석 데이터를 버리지도 않는다."""
     _patch_browser(fetcher, monkeypatch)
     calls = _record_push(fetcher, monkeypatch)
-    monkeypatch.setattr(fetcher, "_rg_session_ok", lambda _p: False)
+    _verdict(fetcher, monkeypatch, fetcher._PROBE_AUTH)
     monkeypatch.setattr(fetcher, "_rg_login_wait", lambda *_a, **_k: False)
 
     assert fetcher.cmd_login(_cfg(tmp_path), wait_secs=5) == fetcher.RC_RG_LOGIN_REQUIRED
@@ -189,8 +204,43 @@ def test_rg_login_never_completes_returns_rc5_but_pushes(fetcher, tmp_path, monk
     assert _pushed(calls)
 
 
-def test_probe_exception_is_not_fatal_to_vs_result(fetcher, tmp_path, monkeypatch):
-    """프로브 goto가 터져도(창 닫힘 등) VS 파싱·push는 계속하고 rc만 5로 접는다."""
+# ── ④ 판정 불가(UNKNOWN)는 만료가 아니다 — 2026-08-03 계약 ────────────────
+def test_unknown_does_not_demand_login(fetcher, tmp_path, monkeypatch):
+    """★이번 수정의 전부: 판정 불가로 사람에게 로그인을 시키지 않는다.
+
+    라이브 근거 — status/api 500의 본문은 로그인된 Wing 셸 HTML(<title>Coupang Wing - …</title>)
+    이었다. 그걸 만료로 부르면 멀쩡한 세션에 rc=5를 돌려주고 헛로그인을 지시한다. 진짜
+    로그아웃은 AUTH로 확증되며, 놓치더라도 이어지는 `rg`가 자기 진입 프로브에서 잡는다.
+    """
+    _patch_browser(fetcher, monkeypatch)
+    calls = _record_push(fetcher, monkeypatch)
+    _verdict(fetcher, monkeypatch, fetcher._PROBE_UNKNOWN)
+    _no_login_wait(fetcher, monkeypatch, "판정 불가로 로그인 대기에 들어가면 안 된다")
+
+    assert fetcher.cmd_login(_cfg(tmp_path), wait_secs=5) == 0
+    assert _pushed(calls)
+
+
+def test_unknown_does_not_claim_session_confirmed(fetcher, tmp_path, monkeypatch, caplog):
+    """rc=0이라고 "확인됨"까지 주장하면 반대편 거짓말이 된다 — 둘 다 주장하지 않는다."""
+    _patch_browser(fetcher, monkeypatch)
+    _record_push(fetcher, monkeypatch)
+    _verdict(fetcher, monkeypatch, fetcher._PROBE_UNKNOWN)
+    _no_login_wait(fetcher, monkeypatch, "판정 불가로 로그인 대기에 들어가면 안 된다")
+
+    with caplog.at_level("INFO", logger=fetcher.log.name):
+        assert fetcher.cmd_login(_cfg(tmp_path), wait_secs=5) == 0
+    text = caplog.text
+    assert "RG 정산 데스크톱 세션도 확인됨" not in text
+    assert "판정 불가" in text
+
+
+def test_probe_exception_is_unknown_not_logout(fetcher, tmp_path, monkeypatch):
+    """프로브 goto가 터져도(창 닫힘 등) VS 파싱·push는 계속하고, **로그아웃으로 단정하지 않는다**.
+
+    ★계약 변경(종전 rc=5): 네비게이션 실패는 세션에 대해 아무것도 증명하지 않는다. 그걸
+      만료로 부른 게 이 파일이 고정하던 낡은 계약이었다(같은 뿌리의 결함 계열).
+    """
     page = _patch_browser(fetcher, monkeypatch)
     calls = _record_push(fetcher, monkeypatch)
 
@@ -200,18 +250,44 @@ def test_probe_exception_is_not_fatal_to_vs_result(fetcher, tmp_path, monkeypatc
             raise RuntimeError("Target page, context or browser has been closed")
 
     monkeypatch.setattr(page, "goto", _boom)
-    monkeypatch.setattr(fetcher, "_rg_session_ok", lambda _p: True)
+    _verdict(fetcher, monkeypatch, fetcher._PROBE_OK)   # 도달조차 못 한다
+    _no_login_wait(fetcher, monkeypatch, "프로브가 터진 것으로 로그인 대기에 들어가면 안 된다")
+
+    assert fetcher.cmd_login(_cfg(tmp_path), wait_secs=5) == 0
+    assert _pushed(calls)
+
+
+def test_auth_survives_exception_during_login_wait(fetcher, tmp_path, monkeypatch):
+    """AUTH를 확증한 뒤 로그인 대기 중에 창이 닫혀도 rc=5를 유지한다.
+
+    예외 처리는 '판정 불가'를 UNKNOWN으로 접기 위한 것이지, **이미 관측된 로그아웃을 지우는**
+    장치가 아니다. 여기서 UNKNOWN으로 덮으면 진짜 만료가 rc=0으로 침묵한다(원래 이 프로브가
+    존재하는 이유를 정확히 되돌리는 실수).
+    """
+    _patch_browser(fetcher, monkeypatch)
+    calls = _record_push(fetcher, monkeypatch)
+    _verdict(fetcher, monkeypatch, fetcher._PROBE_AUTH)
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("Target page, context or browser has been closed")
+
+    monkeypatch.setattr(fetcher, "_rg_login_wait", _boom)
 
     assert fetcher.cmd_login(_cfg(tmp_path), wait_secs=5) == fetcher.RC_RG_LOGIN_REQUIRED
     assert _pushed(calls)
 
 
-# ── ④ 게이트: 프로브를 걸지 않아야 하는 경우들 ─────────────────────────
+def test_dead_confirmed_bool_helper_is_gone(fetcher):
+    """사문 제거 회귀 가드 — 호출부 0인 구 bool API가 되살아나면 판정이 다시 두 갈래가 된다."""
+    assert not hasattr(fetcher, "_rg_session_ok_confirmed")
+
+
+# ── ⑤ 게이트: 프로브를 걸지 않아야 하는 경우들 ─────────────────────────
 def _fail_if_probed(fetcher, monkeypatch) -> None:
     monkeypatch.setattr(
-        fetcher, "_rg_session_ok", lambda _p: pytest.fail("프로브를 수행하면 안 되는 경로다"))
-    monkeypatch.setattr(
-        fetcher, "_rg_login_wait", lambda *_a, **_k: pytest.fail("로그인 대기에 들어가면 안 된다"))
+        fetcher, "_rg_session_verdict_confirmed",
+        lambda *_a, **_k: pytest.fail("프로브를 수행하면 안 되는 경로다"))
+    _no_login_wait(fetcher, monkeypatch, "로그인 대기에 들어가면 안 된다")
 
 
 def test_daemon_path_rg_probe_false_skips_probe(fetcher, tmp_path, monkeypatch):
@@ -254,11 +330,11 @@ def test_poll_daemon_calls_login_with_rg_probe_false(fetcher):
     assert "rg_probe=False" in src
 
 
-# ── ⑤ 반환 우선순위: 기존 코드가 이긴다 ────────────────────────────────
+# ── ⑥ 반환 우선순위: 기존 코드가 이긴다 ────────────────────────────────
 def test_push_failure_wins_over_rg_login_required(fetcher, tmp_path, monkeypatch):
     """push 실패는 VS 레인의 실제 실패(재시도 대상) — RG 미확보로 덮으면 재시도 판정이 바뀐다."""
     _patch_browser(fetcher, monkeypatch)
-    monkeypatch.setattr(fetcher, "_rg_session_ok", lambda _p: False)
+    _verdict(fetcher, monkeypatch, fetcher._PROBE_AUTH)
     monkeypatch.setattr(fetcher, "_rg_login_wait", lambda *_a, **_k: False)
 
     def _post(*_a, **_k):
@@ -274,7 +350,7 @@ def test_parse_failure_wins_over_rg_login_required(fetcher, tmp_path, monkeypatc
     """파싱 실패(rc=1)도 우선 — RG 프로브가 기존 실패 사유를 가리면 안 된다."""
     _patch_browser(fetcher, monkeypatch, body='{"saleSummaryByDate": null}')
     _record_push(fetcher, monkeypatch)
-    monkeypatch.setattr(fetcher, "_rg_session_ok", lambda _p: False)
+    _verdict(fetcher, monkeypatch, fetcher._PROBE_AUTH)
     monkeypatch.setattr(fetcher, "_rg_login_wait", lambda *_a, **_k: False)
 
     assert fetcher.cmd_login(_cfg(tmp_path), wait_secs=5) == 1

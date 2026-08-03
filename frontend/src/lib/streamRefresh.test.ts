@@ -127,6 +127,57 @@ describe("runStreamRefresh — 판정 규칙", () => {
     ]);
     expect(await runStreamRefresh(spec, fakeClock())).toEqual({ state: "done" });
   });
+
+  // ── RG 반쪽 run 오보(2026-08-03 codex P1) ────────────────────────────
+  // 백엔드 계약이 이 세 케이스를 가른다(refresh_contract.py · rg_settlement_sync.py):
+  //   성공 upload  → rg_mark_heartbeat: last_success_at=now, **last_error_at=NULL**
+  //   run 정상종료 → refresh-complete → mark_success(clear_error=True): 요청 소멸 + **error=NULL**
+  //   run 실패종료 → report_failure(소멸 사유 있음): last_error_at=now + 요청 소멸
+  // 즉 **요청이 소멸한 시점에 실패 흔적이 남아 있다 ⟺ 그 run은 실패로 끝났다**.
+  it("★RG 반쪽 run: 첫 엑셀 성공 → 마지막 엑셀 실패로 요청 소멸이면 failed", async () => {
+    const { spec } = mkSpec(
+      [
+        S({ last_success_at: "T0", last_error_at: "E0" }),
+        // 첫 엑셀 성공(heartbeat가 옛 실패 흔적을 지운다) — run은 계속 중
+        S({ last_success_at: "T1", last_error_at: null, requested: true }),
+        // 마지막 엑셀 실패 → 재시도 예산 소진 → 요청 소멸 + 새 실패 흔적
+        S({ last_success_at: "T1", last_error_at: "E1",
+            last_error: "RG 정산 수집 실패 [재시도 3회 소진]", requested: false }),
+      ],
+      { settleBeforeSuccess: true },
+    );
+    // 여기서 done이 나오면 정산 데이터가 반쪽인데 화면은 "✅ 완료"다(거짓 완료).
+    expect(await runStreamRefresh(spec, fakeClock())).toEqual({
+      state: "failed",
+      reason: "RG 정산 수집 실패 [재시도 3회 소진]",
+    });
+  });
+
+  it("★RG: 중간 실패 후 재시도가 완주하면 done — 실패 흔적은 백엔드가 지운다", async () => {
+    const { spec } = mkSpec(
+      [
+        S({ last_success_at: "T0", last_error_at: "E0" }),
+        // 1회차 중간 실패(lease만 반납 → 요청은 살아있음)
+        S({ last_success_at: "T1", last_error_at: "E1", last_error: "타임아웃", requested: true }),
+        // 2회차 완주 → refresh-complete(clear_error=True)가 요청과 실패 흔적을 함께 지운다
+        S({ last_success_at: "T2", last_error_at: null, requested: false }),
+      ],
+      { settleBeforeSuccess: true },
+    );
+    expect(await runStreamRefresh(spec, fakeClock())).toEqual({ state: "done" });
+  });
+
+  it("RG: 버튼 이전의 낡은 실패 흔적은 실패로 읽지 않는다", async () => {
+    const { spec } = mkSpec(
+      [
+        S({ last_success_at: "T0", last_error_at: "E0" }),
+        // last_error_at이 baseline 그대로 = 이번 run이 남긴 게 아니다
+        S({ last_success_at: "T1", last_error_at: "E0", requested: false }),
+      ],
+      { settleBeforeSuccess: true },
+    );
+    expect(await runStreamRefresh(spec, fakeClock())).toEqual({ state: "done" });
+  });
 });
 
 describe("runStreamsRefresh — 다건", () => {

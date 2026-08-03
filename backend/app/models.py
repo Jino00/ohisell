@@ -6,7 +6,7 @@ from decimal import Decimal
 from typing import Optional
 
 from sqlalchemy import (
-    JSON, Boolean, DateTime, Date, Float, ForeignKey, Index, Integer, Numeric,
+    JSON, BigInteger, Boolean, DateTime, Date, Float, ForeignKey, Index, Integer, Numeric,
     String, Text, UniqueConstraint, func, text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -278,6 +278,26 @@ class Order(Base):
     #   → 주문 시점 판정 단가를 행에 박아 둔다. 고객 수취액은 기존 shipping_cost(의미 불변).
     #   실부담 = shipping_cost_paid − COALESCE(shipping_cost,0) → 조회 시 계산(중복 저장 금지).
     shipping_cost_paid: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+    # ── 반품 배송 손익 (2026-08-03) ────────────────────────────────────────────
+    # 반품 건은 매출에서 제외되지만(REVENUE_EXCLUDED) **배송 손익은 실제로 발생한다** —
+    # 우리는 출고비와 회수비를 쓰고 고객에게 반품비를 받는다. 종전엔 셋 다 0으로 빠져
+    # 있어 반품이 늘어도 이익이 반응하지 않았다.
+    # ★귀속일을 결제일이 아니라 **반품 완료일**로 잡는 이유(Jino 지시 2026-08-03):
+    #   결제일에 실으면 이미 마감해서 본 지난달 이익이 반품이 생길 때마다 바뀐다.
+    # ★금액은 정액이 아니라 **건별 실측**(raw_data.return.claimDeliveryFeeDemandAmount).
+    #   라이브 86건 실측: 5,000원 58건 / 미청구 20건 / 2,500원 4건 / 7,500원 2건 /
+    #   N배송 2건은 원천이 명시적으로 `미청구(N배송)`. 정액을 쓰면 미청구 22건이 통째로 틀린다.
+    # NULL = 반품 정보 없음(반품 아님·raw_data 부재). 0 = 미청구(실측된 0).
+    return_completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+    return_fee_demand_amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+    # 회수 택배사 — 라이브 86건 전부 HANJIN(N배송 반품도 품고가 아니라 한진이다).
+    # 회수 단가가 택배사별로 갈리면 이 컬럼이 판별자가 된다.
+    return_collect_company: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    # ★네이버가 대신 부담하는 반품 배송비(claimDeliveryFeeSupportAmount). 라이브 실측:
+    #   N배송 반품 2건이 `MEMBERSHIP_ARRIVAL_GUARANTEE` 유형으로 **5,500원 지원**, 일반배송은 0.
+    #   N배송 반품에서 고객 청구가 0이었던 이유가 이것이다 — 안 받은 게 아니라 네이버가 낸다.
+    #   (2026-08-03 정정: 지원 필드를 안 보고 "고객 미청구=우리 손실"로 읽었다.)
+    return_fee_support_amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now()
     )
@@ -488,6 +508,11 @@ class CoupangAdOptionDaily(Base):
     sell_type: Mapped[str] = mapped_column(String(10), nullable=False)  # 3P / 2P / Retail
     ad_option_id: Mapped[str] = mapped_column(String(20), nullable=False, index=True)  # [8] 비용·노출 귀속
     conv_option_id: Mapped[str] = mapped_column(String(20), nullable=False, index=True)  # [10] 매출·주문 귀속
+    # 상품명([7]·[9]) — XLSX가 같은 행에 실어 오는 라벨. 1P Retail 옵션은 coupang_product_item
+    # (3P product_sync 산물)에 없어 조인으로 못 붙인다 → 적재 시점에 보존한다.
+    # nullable: 이 컬럼 추가(2026-08-03) 이전 행과, 이름이 빈 행이 있다. 표시는 옵션ID로 폴백.
+    ad_product_name: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+    conv_product_name: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
     impressions: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     clicks: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     ad_spend: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
@@ -1235,6 +1260,66 @@ class NaverSettlementCase(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class NaverClaimSettlementProbe(Base):
+    """네이버 클레임(반품/교환) 주문의 정산 구조 관측 로그 — N배송 반품 회수비 프로브.
+
+    ★존재 이유(2026-08-03): 반품 배송비 수입을 이익에 반영하려는데 **N배송(도착보장) 반품의
+      정산 구조를 아무도 모른다**. 라이브 실측:
+        - 비N배송(TODAY/NORMAL) 반품·교환 → productOrderType='DELIVERY' 행이 뜬다.
+          금액은 5,000원 지배적(45/50건)·2,500원 3건·7,500원 2건 = 고객이 낸 반품비=우리 수입.
+        - N배송 반품은 468건 중 2건뿐(2026072553216341 결제 07-25 / 2026072852172181 결제 07-28)
+          이고, 둘 다 settleDecisionType 3유형 전부에서 정산 행 0건. 정산 성숙이 D+12라
+          08-06·08-09경 떠야 정상.
+        - 그 2건은 둘 다 비멤버십(deliveryDiscountAmount == 0) → 멤버십 N배송 반품 표본은 0건.
+      가설("N배송 회수비는 다르고, 멤버십 반품은 네이버가 보상")은 표본이 없어 검증 불가다.
+      그래서 검증하려 애쓰는 대신 **표본이 익는 순간 자동으로 포착되게** 한다.
+
+    그레인 = 정산 API가 돌려준 행 그대로(관측 로그, append-only). 집계 그레인으로 미리 뭉치지
+    않는 이유: 무엇이 신호인지 아직 모르는 단계라 원본 행을 남겨야 나중에 어떤 축으로든 다시
+    볼 수 있다(뭉쳐 저장하면 되돌릴 수 없다).
+
+    UNIQUE = (product_order_id, product_order_type, settle_type, observed_date)
+    — 하루 여러 번 재실행해도 같은 행이 중복 적재되지 않는다.
+    ★settle_decision_type 컬럼은 2026-08-03에 **삭제**했다(마이그 e7b2c9d4a610): orderId 단건
+      조회는 periodType과 상호 배타라 settleDecisionType을 줄 수 없고, 응답 스키마에도 그 필드가
+      없다(공식 스펙 확인). 유형 축은 응답의 settle_type이 대신한다.
+    observed_date를 키에 **포함**하는 이유: 같은 상품주문의 정산 상태는 날짜에 따라 옮겨간다
+    (UNSETTLED → SETTLED). 날짜를 빼면 그 전이가 덮여 사라지고, 넣으면 "언제 무엇으로 보였나"의
+    시계열이 남는다 — 이 프로브의 목적이 바로 그 전이 관측이다.
+
+    ★settle_type의 '' sentinel: SQLite/Postgres 모두 UNIQUE에서 NULL을 서로 distinct로 취급해
+      중복을 못 막는다(CoupangRgSettlementFee.vendor_item_id와 같은 이유). 응답에 settleType이
+      없으면 ''로 채운다. product_order_id도 같은 이유로 non-null ''.
+    """
+
+    __tablename__ = "naver_claim_settlement_probe"
+    __table_args__ = (
+        UniqueConstraint(
+            "product_order_id", "product_order_type", "settle_type", "observed_date",
+            name="uq_naver_claim_settlement_probe",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    order_number: Mapped[str] = mapped_column(String(40), nullable=False, index=True)   # 네이버 orderId
+    product_order_id: Mapped[str] = mapped_column(String(40), nullable=False, default="")  # '' = 응답에 없음
+    # 배송방식 — orders.delivery_attribute_type 원본 그대로(ARRIVAL_GUARANTEE=N배송).
+    # NULL = 판별 불가(raw_data 부재·JSON 잘림) — 추정으로 채우지 않는다(order_delivery SA 계약).
+    delivery_attribute_type: Mapped[Optional[str]] = mapped_column(String(40), nullable=True, index=True)
+    is_membership: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)  # deliveryDiscountAmount > 0
+    order_status: Mapped[str] = mapped_column(String(20), nullable=False)               # returned / exchanged
+    product_order_type: Mapped[str] = mapped_column(String(40), nullable=False)         # PROD_ORDER/DELIVERY/CONCESSION/…
+    # 정산 상태 축 — NORMAL_SETTLE_ORIGINAL(일반) / NORMAL_SETTLE_BEFORE_CANCEL(정산 전 취소) /
+    # NORMAL_SETTLE_AFTER_CANCEL / QUICK_SETTLE_* / QUANTITY_CANCEL_* ('' = 응답에 없음).
+    settle_type: Mapped[str] = mapped_column(String(40), nullable=False, default="")
+    pay_settle_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    settle_expect_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    pay_date: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    settle_expect_date: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    observed_date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)   # 프로브 실행일(KST)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 # ──────────────────────────────────────────────
 # RG 정산 수수료 (트랙 RG-Fee-Accounting S2)
 # ──────────────────────────────────────────────
@@ -1278,6 +1363,16 @@ class CoupangRgSettlementFee(Base):
     vendor_item_id: Mapped[str] = mapped_column(String(30), nullable=False, server_default="", default="", index=True)
     raw_type: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    # ★S9(2026-08-03) 정산서가 직접 알려주는 청구 근거 — 추론 대체용. 옵션 row(엑셀)만 채워지고
+    #   계정 row(status/api)·구 행은 NULL이다(그래서 nullable, 감사는 NULL이면 종전 경로로 폴백).
+    #   왜 필요한가: 감사가 "청구 사이즈"와 "청구 주문수"를 **추론**했고 둘 다 오탐의 원인이었다.
+    #   주문수는 `coupang_rg_order_item`(결제일 basis)을 매출인식일 정산주기에 맞춰 세다가
+    #   창 불일치로 단가를 정수배 부풀렸고(오탐 4건, LESSONS #106), 사이즈는 금액 임계로 역추정했다.
+    #   정산 엑셀 상세에는 **주문ID·판매수량·개별포장사이즈**가 그대로 있다(ref 17 §8-1) →
+    #   같은 파일·같은 basis에서 읽으면 조인도 추론도 없다.
+    billed_size_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    billed_order_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    billed_quantity: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     synced_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
     )
@@ -1706,7 +1801,30 @@ class NaverAdgroupProduct(Base):
     grain: (adgroup_id, mall_product_id). 소스: 쇼핑 소재 /ncc/ads의
     referenceData.mallProductId(type=SHOPPING_PRODUCT_AD) — naver_product_bep.channel_product_id와
     정확히 일치(라이브 실증). 한 그룹에 소재(상품)가 여럿일 수 있어 unique는 (adgroup, mall_product).
-    optimizer='ours' 쇼핑 캠페인의 활성 그룹만 매일 08:20 sync가 스냅샷 교체(그룹 단위).
+    ══ ★★계약: 이 테이블은 "현재 매핑"이 아니라 **역대 관측의 누적**이다 (2026-08-03) ══
+    매일 07:45 `shopping_ad_product_sync`가 **관측 스코프**(campaign_roster.
+    observation_campaign_ids — 최근 7일 광고비>0 ∪ settings 행, optimizer 무관) 쇼핑 캠페인의
+    활성 그룹을 **upsert**한다. **삭제는 하지 않는다** — 2026-07-31 07:45 KST에 구 "스냅샷
+    교체" 구현이 276행을 전량 날린 뒤, 정리 계층을 통째로 들어냈다(사고 경위와 그 판단 근거는
+    `shopping_ad_product_sync` 모듈 docstring).
+
+    ★★**stale 행이 누적된다 — 소비자는 그 사실을 알고 읽어야 한다.**
+      그룹에서 빠진 상품, 삭제된 그룹, 옮겨간 소재의 행이 **영구히 남는다**. 이 테이블을
+      "지금의 매핑"으로 그대로 믿으면 target ROAS·프록시 매출·예산 증액 판단이 옛 상품에
+      끌려간다. 각 소비자는 자기 판단이 stale에 얼마나 민감한지 스스로 알고 써야 한다.
+
+    ★**신선도 정책은 아직 없다**(2026-08-03 현재). `synced_at`(이번 회차에 관측된 행만 갱신)이
+      유일한 단서지만, 그것만으로 창을 정할 수 없다 — 오래된 `synced_at`은 ⓐ실제로 사라진 행
+      ⓑ네이버 부분 200으로 이번에 안 보인 행 ⓒget_ads 실패·시간 예산 이월로 **아직 안 본** 행을
+      구분하지 못한다. 특히 커서 순회가 한 바퀴 도는 데 며칠이 걸릴 수 있어(정상 주기 실측
+      미확보), 근거 없는 상수로 창을 잡으면 **살아 있는 매핑이 창 밖으로 밀려난다.**
+      → 창을 정하려면 `shopping_ad_product_sync`가 로깅하는 `elapsed_s`로 **커서 한 바퀴 실측**이
+        선행돼야 한다. **자동운영 재개 전 선행조건**(스코프 밖으로 분리된 항목).
+
+    ★단 하나 지금 닫혀 있는 것: **같은 `ad_id`가 여러 행에 존재**할 수 있다는 문제
+      (unique 키가 (adgroup_id, mall_product_id)뿐이라, 소재가 그룹 A→B로 옮기면 두 행이 남는다).
+      `ad_id`를 **실행 레버**로 쓰는 경로는 `synced_at`이 가장 최근인 행 하나만 채택한다
+      (`effective_bid` 참조) — 신선도 창과 무관한 판정이라 age-out 위험이 없다.
     campaign_target_resolver 우선순위 ②(상품 파생 target_roas)가 이 매핑을 소비한다.
 
     ★B1(스프린트 B, D-NAO-65): 소재-레벨 실효입찰 인식·저장. 각 SHOPPING_PRODUCT_AD 소재의
@@ -1737,6 +1855,18 @@ class NaverAdgroupProduct(Base):
     # 되돌림"이 무변동으로 보이지만 editTm은 단조 전진하므로 편집 사실 자체가 남는다.
     # 문자열 원문 그대로 보관한다 — 판정은 동등비교뿐이라 파싱이 필요 없다(파싱은 표시용).
     ad_edit_tm: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    # D-NAO-137 S1: referenceData.APPLY_TM 원문(에폭 밀리초). ★**관측 적재 전용 — 판정 미사용.**
+    # 왜 필요한가: `ad_edit_tm`은 대행사가 만져도 전진하지만 **네이버가 상품 피드를 재적용해도
+    # 전진한다**(2026-08-03 실측: 전진 233건 중 229건이 피드 재적용이고 광고 설정은 무변동,
+    # 실제 조작은 4건). 즉 editTm 단독으로는 신호 4 : 잡음 229를 못 가른다. 후보 판별자가
+    # `editTm − APPLY_TM`(그날 표본에서 ≤120초 229건 : >1시간 4건으로 완전 분리)인데,
+    # **APPLY_TM은 API가 현재값만 주므로 과거분 소급 수집이 원리적으로 불가능하다** — 지금부터
+    # 적재하지 않으면 표본이 영영 n=1이다. 그래서 판정 배선보다 적재를 먼저 한다.
+    # ★임계 120초를 여기에 굳히지 않는다: 표본 1일치에서 나온 경험값이고, `APPLY_TM`의 의미
+    # 자체가 실측 추론이다(공식 스웨거에 필드는 있으나 설명문 없음). 판별자 배선은 관측을
+    # 며칠 쌓은 뒤 별도 슬라이스(S2)에서 한다.
+    # 기존 행은 NULL(하위호환·backfill 불가) — 다음 07:45 sync가 관측한 행부터 채운다.
+    ad_apply_tm: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
@@ -2300,6 +2430,39 @@ class NaverAgencyOp(Base):
     # ad grain은 네이버 editTm으로 초 단위 확정. NULL = 일별 스냅샷 diff(campaign/adgroup grain)라
     # 시각 불명. op_date·detected_at은 '우리가 감지한' 시각이라 "언제 손댔나"에 답하지 못한다.
     occurred_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class NaverChangeActorOverride(Base):
+    """수정 주체 정정 1건 — 「수정 사항」 화면에서 사람이 단 주석.
+
+    ★원천을 덮어쓰지 않는다. 주체는 두 원천(naver_change_log·naver_agency_op)에서
+    **데이터로 자동 판정**하고(change_actor.py), 사람의 정정은 여기에 쌓아 읽을 때 겹친다.
+    원천 컬럼에 써버리면 탐지 산출물과 사람 주석이 구분 불가가 되어 탐지 로직을 검증할 수
+    없게 된다 — 그러면 "우리가 안 바꿨다"는 판정 자체를 못 믿는다.
+
+    (source, source_id) = 원천 테이블 이름 + 그 테이블의 PK. FK를 걸지 않은 이유는
+    ①원천이 둘이라 단일 FK로 표현 불가 ②bm_diff가 같은 날 재실행 시 자기 산출물을
+    삭제-재생성하므로(멱등 리플레이) CASCADE면 정정이 조용히 사라진다. 고아 정정은
+    조회 시 매칭 실패로 무시된다(무해).
+
+    actor: ours(우리 자동화) / agency(대행사) / jino(Jino 본인). 화면 라벨과 1:1
+    (change_actor.ACTOR_LABEL). ★코드베이스의 optimizer='mop'과 무관하다 — 그건 "제3자
+    소유"라는 뜻이고 이 컬럼은 "누가 이 이벤트를 만들었나"다.
+    """
+
+    __tablename__ = "naver_change_actor_override"
+    __table_args__ = (
+        UniqueConstraint("source", "source_id", name="uq_naver_change_actor_override"),
+        Index("ix_naver_change_actor_override_source", "source", "source_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source: Mapped[str] = mapped_column(String(12), nullable=False)  # change_log/agency_op
+    source_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    actor: Mapped[str] = mapped_column(String(12), nullable=False)  # ours/agency/jino
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)  # ★kst_now() 명시(server_default=UTC 회피)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)  # ★kst_now() 명시
 
 
 class NaverBmBenchmark(Base):

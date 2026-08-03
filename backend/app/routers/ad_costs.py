@@ -442,11 +442,15 @@ def _detect_xlsx_format(headers: list) -> dict:
         # 옵션ID 컬럼(keyword 포맷에만 존재 — adGroup 포맷은 -1) → 트랙 D-9 3자 조인 광고축
         "ad_opt":   _find("광고집행 옵션"),       # 비용·노출·클릭 귀속 옵션ID
         "conv_opt": _find("전환매출발생 옵션"),    # 매출·주문 귀속 옵션ID
+        # 상품명 — 옵션ID의 사람이 읽는 라벨. 옵션ID 컬럼과 짝(있으면 같이 있다).
+        #   "광고집행 상품명"은 "광고집행 옵션ID"와 접두가 같으므로 **전체 어구로** 찾는다.
+        "ad_name":   _find("광고집행 상품명"),
+        "conv_name": _find("전환매출발생 상품명"),
     }
 
 
 def ingest_coupang_ad_xlsx_content(
-    content: bytes, filename: str, db: Session
+    content: bytes, filename: str, db: Session, *, options_only: bool = False
 ) -> tuple[dict, date | None, date | None]:
     """쿠팡 광고 XLSX 바이트 → ad_costs + coupang_ad_report + coupang_ad_option_daily 적재.
 
@@ -454,6 +458,12 @@ def ingest_coupang_ad_xlsx_content(
     반환: (public_result, recalc_from, recalc_to). 이익 재계산 범위는 호출자가 스케줄(여기선 DB 커밋만).
     재계산 불필요(광고비 행 없음) 시 recalc_from/to=None (codex P2 — private 키 누출 방지).
     파일명 형식: {vendor_id}_pa_daily_*.xlsx. 포맷(adGroup/keyword)은 헤더 행에서 자동 감지.
+
+    ★options_only(D-13, 2026-08-03): `coupang_ad_option_daily`만 적재하고 **머니 테이블
+      (`ad_costs`·`coupang_ad_report`)은 건드리지 않는다**. 오하이테크(1P 로켓배송)가 이 모드를
+      쓴다 — 그 계정의 계정 단위 광고비는 `report/SALES` 페처가 **전체(ALL_DELIVERED) 기준**으로
+      쓰는데(D-10), 같은 행을 이 XLSX가 **PA 기준**으로 덮으면 나중에 쓴 쪽이 조용히 이기고
+      그 사고는 순이익에서만 드러난다. 정의가 다른 두 writer를 한 행에 붙이지 않는다.
     """
     if not filename or not filename.endswith(".xlsx"):
         raise HTTPException(status_code=400, detail="xlsx 파일만 업로드 가능합니다.")
@@ -462,6 +472,21 @@ def ingest_coupang_ad_xlsx_content(
     if not m:
         raise HTTPException(status_code=400, detail="파일명에서 vendor_id를 찾을 수 없습니다. 형식: {vendor_id}_pa_daily_...")
     vendor_id = m.group(1)
+
+    # ★구조 가드(D-13ⓒ): 로켓 벤더의 XLSX가 머니 경로로 들어오는 것을 **코드로** 막는다.
+    #   트랙 S1c 배포 체크리스트 ②("A01029796 PA-XLSX 수동업로드 금지")는 문서 규칙이라
+    #   수동 업로드 화면에서도, 잘못된 엔드포인트 호출에서도 지켜지지 않을 수 있다.
+    #   여기서 막으면 경로가 무엇이든 같은 결론이 난다.
+    _rocket_vendor = os.getenv("COUPANG_ROCKET_VENDOR_ID", "").strip()
+    if not options_only and _rocket_vendor and vendor_id == _rocket_vendor:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{vendor_id}(1P 로켓배송)의 XLSX는 계정 단위 광고비를 덮어쓸 수 없습니다 — "
+                "그 값은 report/SALES 페처가 전체(비-PA 포함) 기준으로 적재합니다(D-10). "
+                "옵션 단위만 적재하려면 /api/coupang/ops/rocket/ad-cost/option-ingest 를 쓰세요(D-13)."
+            ),
+        )
 
     vendor_channel_map = _build_vendor_channel_map(db)
 
@@ -501,6 +526,18 @@ def ingest_coupang_ad_xlsx_content(
             return Decimal(str(r[idx] or 0)) if idx != -1 and idx < len(r) else Decimal("0")
         except Exception:
             return Decimal("0")
+
+    def _cell_name(r: tuple, idx: int) -> str | None:
+        """상품명 셀 → 정리된 문자열(빈값·'-'는 None). 컬럼 길이(300) 초과분은 자른다."""
+        if idx == -1 or idx >= len(r):
+            return None
+        v = r[idx]
+        if v is None:
+            return None
+        s = str(v).strip()
+        if s in ("", "-"):
+            return None
+        return s[:300]
 
     def _norm_opt(v):
         """옵션ID 정규화: 94277472815.0 → '94277472815', 빈값('-'/None)은 None."""
@@ -578,8 +615,15 @@ def ingest_coupang_ad_xlsx_content(
                 okey = (ad_date, vendor_id, sell_type, ad_opt, conv_opt)
                 if okey not in opt_agg:
                     opt_agg[okey] = {"impr": 0, "clicks": 0, "spend": Decimal("0"),
-                                     "orders": 0, "qty": 0, "rev": Decimal("0")}
+                                     "orders": 0, "qty": 0, "rev": Decimal("0"),
+                                     "ad_name": None, "conv_name": None}
                 o = opt_agg[okey]
+                # 상품명: 같은 키의 여러 행(키워드별)이 같은 이름을 반복한다. 빈 행이 섞일 수
+                #   있으므로 **처음 만난 non-null을 유지**한다(빈값으로 덮지 않는다).
+                if o["ad_name"] is None:
+                    o["ad_name"] = _cell_name(row, col["ad_name"])
+                if o["conv_name"] is None:
+                    o["conv_name"] = _cell_name(row, col["conv_name"])
                 o["impr"]   += _cell_int(row, col["impr"])
                 o["clicks"] += _cell_int(row, col["clicks"])
                 o["spend"]  += spend
@@ -587,7 +631,17 @@ def ingest_coupang_ad_xlsx_content(
                 o["qty"]    += _cell_int(row, col["qty"])
                 o["rev"]    += _cell_dec(row, col["rev"])
 
-    if not agg and not report_agg:
+    if options_only:
+        # 머니 테이블은 쓰지 않는다 → 집계도 버려서 아래 저장·재계산이 구조적으로 못 돌게 한다.
+        #   (플래그를 저장 시점마다 다시 확인하는 방식은 한 군데만 빠뜨려도 새는 반면,
+        #    원료를 비우면 새는 경로가 남지 않는다.)
+        agg = {}
+        report_agg = {}
+        if not opt_agg:
+            raise HTTPException(
+                status_code=422,
+                detail="옵션 단위 행이 없습니다 — keyword 포맷(옵션ID 컬럼 포함) XLSX가 필요합니다.")
+    elif not agg and not report_agg:
         raise HTTPException(status_code=422, detail="저장할 광고 데이터가 없습니다. 파일 형식을 확인하세요.")
 
     # ad_costs 저장
@@ -633,14 +687,17 @@ def ingest_coupang_ad_xlsx_content(
             db.add(CoupangAdOptionDaily(
                 report_date=od, vendor_id=vid, sell_type=st,
                 ad_option_id=ad_opt, conv_option_id=conv_opt,
+                ad_product_name=o["ad_name"], conv_product_name=o["conv_name"],
                 impressions=o["impr"], clicks=o["clicks"], ad_spend=o["spend"],
                 orders=o["orders"], sales_qty=o["qty"], conversion_revenue=o["rev"],
             ))
 
     db.commit()
 
-    date_from = min((k[0] for k in agg), default=min(k[0] for k in report_agg)) if agg else min(k[0] for k in report_agg)
-    date_to   = max((k[0] for k in agg), default=max(k[0] for k in report_agg)) if agg else max(k[0] for k in report_agg)
+    # 날짜 범위 — 머니 집계가 비면(options_only) 옵션 집계에서 뽑는다.
+    _date_keys = [k[0] for k in agg] or [k[0] for k in report_agg] or [k[0] for k in opt_agg]
+    date_from = min(_date_keys)
+    date_to   = max(_date_keys)
     dates = sorted({k[0].isoformat() for k in agg})
     total = int(sum(agg.values()))
     channel_summary: dict[str, int] = {}
@@ -656,6 +713,12 @@ def ingest_coupang_ad_xlsx_content(
         "total_spend": total,
         "report_rows": len(report_agg),
         "option_rows": len(opt_agg),
+        # ★옵션 합계를 따로 돌려준다: 계정 총액과의 대조가 이 경로의 유일한 자기검증이다
+        #   (D-12 실측 기준 0.02% 차이 — 원인 미규명이라 계속 보고 있어야 한다).
+        "option_spend": int(sum(o["spend"] for o in opt_agg.values())),
+        # 상품명이 실제로 붙은 행 수 — 0이면 헤더가 바뀌었거나 컬럼을 못 찾은 것이다(조용한 실패 방지).
+        "option_named_rows": sum(1 for o in opt_agg.values() if o["ad_name"]),
+        "options_only": options_only,
         "date_from": date_from.isoformat(),
         "date_to": date_to.isoformat(),
         "dates": dates,

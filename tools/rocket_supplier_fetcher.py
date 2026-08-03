@@ -45,6 +45,10 @@ import subprocess
 import sys
 import time
 import urllib.request
+
+# 세션 자가 복구 공용 구현 — install_local_runtime.sh가 coupang_auth.py도 함께 복사한다.
+# (빠지면 import 실패로 크래시 루프: LESSONS #54)
+import coupang_auth
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -740,6 +744,43 @@ def _goto_origin(page) -> bool:
 def _is_logged_out(url: str) -> bool:
     u = (url or "").lower()
     return any(x in u for x in ("login", "/auth", "sso", "signin", "passport"))
+
+
+# ── 세션 자가 복구(2026-08-03) ─────────────────────────────────────────
+# 이 페처는 오늘 하루에만 세 번 세션이 끊겨 사람을 불렀다(09:31·10:07·11:11). 공급자허브는
+# supplier.coupang.com이지만 인증은 오픽스 광고와 같은 keycloak(xauth realms/seller)이라,
+# 검증된 SSO 재진입 경로를 그대로 쓸 수 있다. 비번 없이 aid(1h)를 keycloak 세션(12h)으로
+# 재발급 → 수동 로그인 주기가 12배 늘어난다.
+SSO_LOGIN_URL = SUPPLIER_ORIGIN + "/"
+
+# 인증 후에만 나오는 경로. ★오리진만으로 판정하면 **출발 URL이 곧 착지**가 되어, 아무 데도
+#   가지 않고도 "복구 성공"이 된다(적대적 리뷰 P1). 그러면 ②Keychain·③알림이 통째로
+#   건너뛰어지고 사람은 아무 신호도 못 받는다. 라이브 실측 착지 URL: /dashboard/KR.
+#   coupang_auth._assert_predicate_sound가 이 조건을 런타임에 강제한다(어기면 즉시 예외).
+_AUTHED_PATH_HINTS = ("/dashboard",)
+
+
+def _is_landed(url: str) -> bool:
+    """복구 성공 판정 — 인증 후 경로에 있고 로그인/keycloak 페이지가 아니다."""
+    u = url or ""
+    if not u.startswith(SUPPLIER_ORIGIN) or _is_logged_out(u):
+        return False
+    return any(h in u for h in _AUTHED_PATH_HINTS)
+
+
+def _recover_session(page, cfg: dict) -> str:
+    """①SSO 재진입 → ②Keychain 자동로그인 → ③알림. login_id 없으면 ②는 조용히 건너뛴다."""
+    return coupang_auth.ensure_session(
+        page,
+        sso_url=SSO_LOGIN_URL,
+        is_landed=_is_landed,
+        login_id=cfg.get("supplier_login_id"),
+        label="오하이테크 공급자허브",
+        # ★권위값 = 앱 자신의 오리진 진입 검사. URL 판정(_is_landed)이 과잉 협소해도
+        #   여기서 통과하면 복구된 것이다(supplier의 SSO returnUrl이 오리진 루트라
+        #   /dashboard를 요구하는 판정이 정상 복구를 거부할 여지가 있다).
+        verify=lambda: _goto_origin(page),
+    )
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -1832,9 +1873,14 @@ def _do_run(cfg: dict) -> int:
             with sync_playwright() as p:
                 with _chrome(p, cfg) as page:
                     if not _goto_origin(page):
-                        log.error("supplier 로그아웃 상태(url=%s) — 이 창에서 로그인 후 다시 '갱신'을 누르세요.", page.url)
-                        owner.keep_open = True   # 로그인할 창이 필요 → 닫지 않음
-                        return RC_LOGIN_REQUIRED
+                        # ★사람을 부르기 전에 스스로 복구한다(2026-08-03): 대부분의 만료는
+                        #   aid(1h)이고 keycloak(12h)은 살아 있어 비번 없이 여기서 끝난다.
+                        log.info("supplier 로그아웃 감지 — 자가 복구 시도(SSO → Keychain 순).")
+                        if coupang_auth.OK != _recover_session(page, cfg) or not _goto_origin(page):
+                            log.error("세션 자가 복구 실패(url=%s) — 이 창에서 로그인 후 다시 '갱신'을 누르세요.", page.url)
+                            owner.keep_open = True   # 로그인할 창이 필요 → 닫지 않음
+                            return RC_LOGIN_REQUIRED
+                        log.info("세션 자가 복구 성공 — 수집 계속.")
                     if not _session_ok(page, cfg):
                         # ★재시도 대상으로 둔다(codex 1R[P2]): _session_ok는 Playwright 예외·
                         # Akamai 챌린지·일시적 비200까지 전부 False로 접는다. 로그아웃이 확증된

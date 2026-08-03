@@ -38,10 +38,12 @@ from sqlalchemy import func as sqlfunc
 from sqlalchemy.orm import Session
 
 from app.models import (
-    NaverCampaignSettings, NaverChangeLog, NaverEntity, NaverForecastDaily,
+    NaverChangeLog, NaverEntity, NaverForecastDaily,
     NaverHourlyPatternHistory, NaverHourlySnapshot, NaverLearningState,
 )
-from app.services.naver_ad import completeness_curve, response_curve_builder, pacing_controller
+from app.services.naver_ad import (
+    campaign_roster, completeness_curve, response_curve_builder, pacing_controller,
+)
 from app.services.naver_ad.bid_simulator import pooled_rpc
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.services.naver_ad.diagnosis import correction_factor as compute_correction_factor
@@ -64,12 +66,19 @@ SKIP_FORECAST_MISSING = "forecast_missing"
 SKIP_FORECAST_PENDING = "forecast_pending"
 
 
-def _ours_campaigns(db: Session) -> list[tuple[NaverCampaignSettings, str | None]]:
-    """optimizer='ours' 설정 행을 그 캠페인의 `NaverEntity.status`와 함께 반환.
+def _observed_campaigns(db: Session, *, today: date | None = None) -> list[tuple[str, str | None]]:
+    """**관측 스코프** 캠페인을 그 캠페인의 `NaverEntity.status`와 함께 반환 [(campaign_id, status)].
 
-    ★대상 정의 불일치(2026-07-28 규명): `forecast_engine._active_scopes`는 status='on'인
+    ★스코프 교체(2026-07-30 사고): 구 코드는 `optimizer='ours'` 설정 행만 대상으로 삼았고,
+    D-NAO-132 긴급정지로 전 캠페인이 optimizer='none'이 되자 **예측 정확도 관측이 통째로
+    멈췄다**(매 run 조기반환). 이 레인은 입찰을 바꾸지 않는 **관측기**이므로(모듈 docstring,
+    Jino 확정 2026-07-29) 실행 스위치로 스코프를 잡을 이유가 없다 — 오히려 정지 기간의
+    예측 정확도야말로 재개 판단의 근거다. 스코프 정의·근거는
+    `campaign_roster.observation_campaign_ids` docstring 참조(D-NAO-13 원문·bm_diff 선례).
+
+    ★대상 정의 불일치(2026-07-28 규명, 유지): `forecast_engine._active_scopes`는 status='on'인
     엔티티만 예측 대상으로 삼는데(forecast_engine.py:40-46) 여기서는 status를 보지 않았다.
-    그래서 정지된 캠페인이 optimizer='ours'로 남아 있으면 예측이 영원히 생기지 않고,
+    그래서 정지된 캠페인이 스코프에 남아 있으면 예측이 영원히 생기지 않고,
     이 루프는 2시간마다 그것을 "forecast 없음"으로 조용히 넘겼다.
     prod 실측(2026-07-28 23:0x): optimizer='ours' 6개 중 `cmp-a001-02-000000010769985`가
     entity status='off' 상태로 이 경로에 걸려 있었다.
@@ -78,17 +87,23 @@ def _ours_campaigns(db: Session) -> list[tuple[NaverCampaignSettings, str | None
     통째로 사라져 관측성이 오히려 나빠진다. 루프 안에서 `campaign_off`로 **이름 붙여**
     스킵한다 — 무성 실패를 유성 실패로 바꾸는 것이 이 수정의 목적이다.
     """
+    scope_ids = campaign_roster.observation_campaign_ids(db, today=today)
+    if not scope_ids:
+        return []
     rows = (
-        db.query(NaverCampaignSettings, NaverEntity.status)
-        .outerjoin(
-            NaverEntity,
-            (NaverEntity.entity_id == NaverCampaignSettings.campaign_id)
-            & (NaverEntity.entity_type == "campaign"),
+        db.query(NaverEntity.entity_id, NaverEntity.status)
+        .filter(
+            NaverEntity.entity_type == "campaign",
+            NaverEntity.entity_id.in_(scope_ids),
         )
-        .filter(NaverCampaignSettings.optimizer == "ours")
         .all()
     )
-    return [(cs, status) for cs, status in rows]
+    # 엔티티가 아직 동기화되지 않은 스코프 캠페인은 status=None으로 남긴다(제외하지 않는다 —
+    # 사라지면 관측성이 나빠진다는 위 논리 그대로. status=None은 루프가 'on'처럼 취급한다).
+    known = {eid for eid, _ in rows}
+    out: list[tuple[str, str | None]] = [(eid, status) for eid, status in rows]
+    out.extend((cid, None) for cid in sorted(scope_ids - known))
+    return out
 
 
 FORECAST_JOB_NAME = "run_naver_forecast_engine"
@@ -328,7 +343,7 @@ def run_flight_loop(
     if current_hour is None:
         current_hour = now.hour
 
-    campaigns = _ours_campaigns(db)
+    campaigns = _observed_campaigns(db, today=today)
     if not campaigns:
         # ★조기반환도 침묵하지 않는다(리뷰 지적): 관리 대상이 통째로 사라진 것은
         # 개별 캠페인 스킵보다 치명적인 무성 실패인데, 초판은 이 경로만 종전대로
@@ -338,7 +353,8 @@ def run_flight_loop(
             "skip_breakdown": {}, "errors": 0, "forecast_ready": None,
             "dry_run": dry_run,
         }
-        log.warning("flight_loop: optimizer='ours' 캠페인이 하나도 없다 — 관리 대상 소실 의심")
+        log.warning("flight_loop: 관측 대상 캠페인이 하나도 없다 — 관측 스코프 결함 의심"
+                    "(스코프 정의는 campaign_roster.observation_campaign_ids)")
         _log_flight_silence(db, summary=summary, now=now)
         db.commit()
         return {**summary, "decisions": []}
@@ -356,10 +372,9 @@ def run_flight_loop(
     # 쓰면 예산제약(αB)이 남은예산을 과대평가해 α가 과속 편향된다(PLAN §0).
     curve_by_hour = completeness_curve.build_curve(db, today=today)
 
-    for cs, entity_status in campaigns:
-        cid = cs.campaign_id
+    for cid, entity_status in campaigns:
         try:
-            # 정지된 캠페인은 예측 자체가 생성되지 않는다(_ours_campaigns docstring 참조).
+            # 정지된 캠페인은 예측 자체가 생성되지 않는다(_observed_campaigns docstring 참조).
             # "forecast 없음"으로 뭉뚱그리면 대응이 갈리지 않으므로 사유를 분리한다.
             if entity_status is not None and entity_status != "on":
                 skip_breakdown[SKIP_CAMPAIGN_OFF] = skip_breakdown.get(SKIP_CAMPAIGN_OFF, 0) + 1

@@ -25,6 +25,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models import (
+    CoupangAdOptionDaily,
     CoupangAdReport,
     CoupangRocketPurchaseOrder,
     CoupangRocketPurchaseOrderItem,
@@ -135,6 +136,97 @@ def _agg_rocket_ad(db: Session, dfrom: date, dto: date,
     if vendor_id is not None:
         q = q.filter(CoupangAdReport.vendor_id == vendor_id)
     return _f(q.scalar())
+
+
+def _rocket_option_names(db: Session, dfrom: date, dto: date,
+                         vendor_id: str | None, option_ids: list[str]) -> dict[str, str]:
+    """옵션ID → 상품명(가장 최근 report_date의 non-null).
+
+    상품명은 개명될 수 있어 **최신 이름**을 쓴다(사람이 아는 이름). 화면에 실제로 나가는
+    상위 N개만 조회한다 — 전 옵션을 끌어오면 표시 한 줄 때문에 창 전체를 읽게 된다.
+    """
+    if not option_ids:
+        return {}
+    q = (
+        db.query(
+            CoupangAdOptionDaily.ad_option_id,
+            CoupangAdOptionDaily.report_date,
+            CoupangAdOptionDaily.ad_product_name,
+        )
+        .filter(
+            CoupangAdOptionDaily.report_date >= dfrom,
+            CoupangAdOptionDaily.report_date <= dto,
+            CoupangAdOptionDaily.sell_type == ROCKET_AD_SELL_TYPE,
+            CoupangAdOptionDaily.ad_option_id.in_(option_ids),
+            CoupangAdOptionDaily.ad_product_name.isnot(None),
+        )
+    )
+    if vendor_id is not None:
+        q = q.filter(CoupangAdOptionDaily.vendor_id == vendor_id)
+
+    # 오래된 것부터 훑어 덮어쓰면 마지막에 최신 이름이 남는다.
+    out: dict[str, str] = {}
+    for opt_id, _rdate, name in q.order_by(CoupangAdOptionDaily.report_date.asc()).all():
+        out[str(opt_id)] = name
+    return out
+
+
+def _rocket_ad_options(db: Session, dfrom: date, dto: date,
+                       vendor_id: str | None, account_total: Decimal,
+                       limit: int = 30) -> dict:
+    """1P 광고비를 **상품(옵션) 단위**로 — 표시 전용(트랙 ohitech-ad D-12/D-13).
+
+    ★순이익에는 쓰지 않는다. 차감 축은 계정 총액(`coupang_ad_report`, 전체 기준 D-10) 그대로다.
+      이 값은 PA 기준 Billboard라 정의가 다르고, 2026-08-03 실측 기준 계정 총액과 0.02%
+      어긋나는데 **원인이 미규명**이다. 원인을 모르는 채 차감 축을 갈아타면 어긋나도 못 본다.
+      → 대신 `reconciliation`으로 그 차이를 **항상 드러낸다**. 차이가 벌어지면 화면에서 보인다.
+    """
+    q = (
+        db.query(
+            CoupangAdOptionDaily.ad_option_id,
+            func.sum(CoupangAdOptionDaily.ad_spend).label("spend"),
+            func.sum(CoupangAdOptionDaily.impressions),
+            func.sum(CoupangAdOptionDaily.clicks),
+            func.sum(CoupangAdOptionDaily.conversion_revenue),
+        )
+        .filter(
+            CoupangAdOptionDaily.report_date >= dfrom,
+            CoupangAdOptionDaily.report_date <= dto,
+            CoupangAdOptionDaily.sell_type == ROCKET_AD_SELL_TYPE,
+        )
+    )
+    if vendor_id is not None:
+        q = q.filter(CoupangAdOptionDaily.vendor_id == vendor_id)
+    rows = q.group_by(CoupangAdOptionDaily.ad_option_id).all()
+
+    option_total = sum((_f(r[1]) for r in rows), Decimal("0"))
+    diff = option_total - account_total
+    top = sorted(rows, key=lambda r: _f(r[1]), reverse=True)[:limit]
+    names = _rocket_option_names(db, dfrom, dto, vendor_id, [str(r[0]) for r in top])
+    return {
+        "options": [
+            {
+                "option_id": str(r[0]),
+                # 상품명은 없을 수 있다(컬럼 추가 이전 적재분·빈 셀) → 프론트가 옵션ID로 폴백한다.
+                "product_name": names.get(str(r[0])),
+                "ad_spend": _f(r[1]),
+                "impressions": int(r[2] or 0),
+                "clicks": int(r[3] or 0),
+                "conversion_revenue": _f(r[4]),
+            }
+            for r in top
+        ],
+        "option_count": len(rows),
+        "shown": len(top),
+        "reconciliation": {
+            "option_sum": option_total,
+            "account_total": account_total,     # 순이익에 실제로 쓰이는 값
+            "diff": diff,
+            "diff_pct": (diff / account_total * 100) if account_total else None,
+            "basis": ("옵션 합계는 Billboard(PA 기준), 계정 총액은 report/SALES(전체 기준, D-10). "
+                      "정의가 달라 완전히 같지 않다 — 차이가 커지면 수집이 어긋난 신호다."),
+        },
+    }
 
 
 # ──────────────────────────────────────────────
@@ -344,6 +436,8 @@ def compute_rocket_overview(db: Session, dfrom: date, dto: date,
         "po_count": rev["po_count"],
         "no_date_po_count": rev["no_date_po_count"],
         "ad_spend": ad_spend,
+        # 상품(옵션)별 광고비 — 표시 전용. 순이익은 위 ad_spend(계정 총액)만 쓴다(D-13).
+        "ad_options": _rocket_ad_options(db, dfrom, dto, vendor_id, ad_spend),
         "cost": cost,                     # ★원가(confirmed 매핑, S4.5c/D-13)
         "has_cost": has_cost,             # 매핑 1건이라도 결정되면 True(D-12 해소)
         "net_profit": net_profit,         # = 매출 − 광고 − 원가

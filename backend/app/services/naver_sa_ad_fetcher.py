@@ -75,19 +75,35 @@ def _headers(path: str, method: str = "GET") -> dict:
     }
 
 
+HTTP_TIMEOUT_S = 30
+MAX_ATTEMPTS = 3
+# 한 호출의 최악 소요(초) = 시도 3회 × 타임아웃 + 시도 **사이**의 백오프(1s + 2s).
+# 호출부가 시간 예산을 짤 때 이 값을 헤드룸으로 쓴다(shopping_ad_product_sync).
+MAX_CALL_DURATION_S = MAX_ATTEMPTS * HTTP_TIMEOUT_S + 1 + 2  # = 93s
+
+
 def _get(path: str, params: dict | None = None) -> requests.Response:
     """SA API GET. rate limit(429)·일시 5xx는 지수 백오프 재시도(최대 3회).
 
     GET는 멱등이라 재시도 안전. 4xx(인증·잘못된 요청)는 즉시 반환(재시도 무의미).
+
+    ★마지막 시도 뒤에는 기다리지 않는다(codex 2R P2): 구 코드는 3번째 시도가 실패해도
+      `time.sleep(4)`를 하고 나서 반환했다 — 더 시도할 게 없는데 4초를 버리는 순수 낭비이고,
+      호출부의 시간 예산 계산도 그만큼 빗나갔다.
     """
     last: requests.Response | None = None
-    for attempt in range(3):
-        resp = requests.get(BASE_URL + path, headers=_headers(path), params=params, timeout=30)
+    for attempt in range(MAX_ATTEMPTS):
+        resp = requests.get(
+            BASE_URL + path, headers=_headers(path), params=params, timeout=HTTP_TIMEOUT_S,
+        )
         if resp.status_code not in _RETRY_STATUS:
             return resp
         last = resp
-        wait = 2 ** attempt  # 1s, 2s, 4s
-        log.warning("Naver SA %s %d — %ds 후 재시도(%d/3)", path, resp.status_code, wait, attempt + 1)
+        if attempt == MAX_ATTEMPTS - 1:
+            break  # 마지막 시도 — 더 잘 것이 없다
+        wait = 2 ** attempt  # 1s, 2s
+        log.warning("Naver SA %s %d — %ds 후 재시도(%d/%d)",
+                    path, resp.status_code, wait, attempt + 1, MAX_ATTEMPTS)
         time.sleep(wait)
     return last  # type: ignore[return-value]
 
@@ -675,6 +691,41 @@ def _parse_ad_attr(raw: object) -> tuple[int | None, bool | None]:
     return bid, ugba
 
 
+# D-NAO-137 S1: referenceData.APPLY_TM 하한/상한 — "에폭 밀리초로 읽었는데 값이 말이 되는가"의
+# 유일한 방어선이다. 초 단위(10자리)나 쓰레기 값을 밀리초로 읽으면 1970년대가 나오고, 그런 값이
+# 조용히 적재되면 S2에서 판별자 분포를 오염시킨다. 창은 넓게 잡는다(2020-01-01 ~ 2100-01-01) —
+# 목적은 정밀 검증이 아니라 **자릿수 오독 차단**이다.
+_APPLY_TM_MIN_MS = 1_577_836_800_000  # 2020-01-01T00:00:00Z
+_APPLY_TM_MAX_MS = 4_102_444_800_000  # 2100-01-01T00:00:00Z
+
+
+def _parse_apply_tm(ref: dict) -> int | None:
+    """referenceData.APPLY_TM → 에폭 밀리초 int (D-NAO-137 S1, 관측 적재 전용).
+
+    라이브 실측(2026-08-03, prod `naver_change_log.after_value`의 소재 원본 스냅샷):
+      - 키 이름은 정확히 `APPLY_TM`이다 — referenceData의 다른 키가 전부 camelCase인데 이것만
+        대문자+언더스코어다(오타로 보이지만 이게 실제 응답이다).
+      - 값은 **int** `1785734497797`이다 — 이웃 필드(`lowPrice`, `purchaseCnt` 등)가 전부
+        문자열인데 이것만 숫자형이다. 그래서 int/문자열 양쪽을 받는다.
+      - 에폭 밀리초로 읽으면 2026-08-03 14:21:37 KST가 나오고, 이는 같은 소재의 editTm
+        (14:22~14:23)보다 수십 초 앞선다 — 피드 적용 → 소재 재적용 순서와 일치한다.
+
+    ★그러나 "APPLY_TM = 피드 적용 시각"은 **실측 추론이지 문서 기재가 아니다**. 공식 스웨거
+    `NccShoppingCollectionProduct`에 필드는 실재하나 설명문이 없다. 그래서 이 슬라이스는
+    **원문 값을 그대로 보관만** 하고 의미에 기대는 판정을 하지 않는다.
+
+    부재/형식 불명/범위 밖은 전부 None(없는 값을 지어내지 않는다 — editTm과 같은 규율).
+    """
+    raw = ref.get("APPLY_TM")
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        val = int(raw)
+    except (ValueError, TypeError):
+        return None
+    return val if _APPLY_TM_MIN_MS <= val <= _APPLY_TM_MAX_MS else None
+
+
 def get_ads(adgroup_id: str) -> list[dict]:
     """광고그룹의 소재(ad) 목록 → 쇼핑 상품 매핑 원료 (D-NAO-57 A) + 소재-레벨 입찰(B1).
 
@@ -695,6 +746,13 @@ def get_ads(adgroup_id: str) -> list[dict]:
     라이브 실측(2026-07-29, 원칙22): 이 목록 응답에 `editTm`이 UTC ISO8601
     "2026-07-29T06:39:05.000Z"로 실려 온다(추가 GET 0). 필드가 없으면 None → 탐지는 판정 유보
     (없는 값을 지어내지 않는다).
+
+    ★D-NAO-137 S1: apply_tm(referenceData.APPLY_TM) 원문 전달 — **관측 적재 전용**.
+    editTm은 "네이버가 상품 피드를 재적용해도" 전진하기 때문에(2026-08-03 실측: 233건 중
+    229건이 피드 재적용, 실제 조작은 4건) editTm 하나로는 신호와 잡음이 안 갈린다. 후보
+    판별자가 `editTm − APPLY_TM`인데, **APPLY_TM은 현재값만 주므로 소급 수집이 불가능**하다
+    → 지금부터 쌓지 않으면 표본이 영영 n=1이다. 이 슬라이스는 **적재만** 하고 판정에는 쓰지
+    않는다(임계값은 며칠 관측한 뒤 D-NAO-137 S2에서 정한다).
     """
     resp = _get("/ncc/ads", {"nccAdgroupId": adgroup_id})
     resp.raise_for_status()
@@ -718,6 +776,7 @@ def get_ads(adgroup_id: str) -> list[dict]:
             "use_group_bid_amt": use_group_bid_amt,
             "ad_user_lock": bool(a.get("userLock", False)),
             "edit_tm": a.get("editTm"),  # D-NAO-127 외부 변경 탐지 앵커(원문 문자열 그대로)
+            "apply_tm": _parse_apply_tm(ref),  # D-NAO-137 S1 관측 적재(판정 미사용)
         })
     return out
 
@@ -1209,7 +1268,7 @@ def _estimate_post(path: str, body: dict) -> requests.Response:
         raise RuntimeError("Naver SA 자격증명 없음 — NAVER_SA_ACCESS_LICENSE/NAVER_SA_SECRET_KEY 확인")
 
     last: requests.Response | None = None
-    for attempt in range(3):
+    for attempt in range(MAX_ATTEMPTS):
         ts = str(int(time.time() * 1000))
         sig = base64.b64encode(
             hmac.new(secret_key.encode("utf-8"), f"{ts}.POST.{path}".encode(), hashlib.sha256).digest()
@@ -1218,12 +1277,15 @@ def _estimate_post(path: str, body: dict) -> requests.Response:
             "X-Timestamp": ts, "X-API-KEY": access_license,
             "X-Signature": sig, "X-Customer": str(customer_id),
         }
-        resp = requests.post(BASE_URL + path, headers=headers, json=body, timeout=30)
+        resp = requests.post(BASE_URL + path, headers=headers, json=body, timeout=HTTP_TIMEOUT_S)
         if resp.status_code not in _RETRY_STATUS:
             return resp
         last = resp
+        if attempt == MAX_ATTEMPTS - 1:
+            break  # 마지막 시도 뒤 sleep 제거(codex 2R P2 — _get과 동일 규율)
         wait = 2 ** attempt
-        log.warning("Naver SA estimate %s %d — %ds 후 재시도(%d/3)", path, resp.status_code, wait, attempt + 1)
+        log.warning("Naver SA estimate %s %d — %ds 후 재시도(%d/%d)",
+                    path, resp.status_code, wait, attempt + 1, MAX_ATTEMPTS)
         time.sleep(wait)
     return last  # type: ignore[return-value]
 
