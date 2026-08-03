@@ -63,6 +63,7 @@ RETURN_COLUMNS = (
     "return_completed_at",
     "return_fee_demand_amount",
     "return_collect_company",
+    "return_fee_support_amount",
 )
 
 
@@ -170,13 +171,26 @@ def _kst_naive(value: Any) -> datetime | None:
     return dt
 
 
+def _decimal_or_zero(v: Any) -> Decimal:
+    """금액 필드 → Decimal. 부재·이상값은 0(실측된 0과 같은 취급)."""
+    try:
+        return Decimal(str(v or 0))
+    except (ValueError, TypeError, ArithmeticError):
+        return Decimal(0)
+
+
 def return_fields(raw: Any) -> dict | None:
     """raw_data → 반품 배송 손익용 영속 필드 dict. 반품 정보가 없으면 None(=컬럼 NULL 유지).
 
     반환 키 = RETURN_COLUMNS.
-      return_completed_at      반품 완료일(귀속일) — 없으면 회수 완료일, 그것도 없으면 요청일.
-      return_fee_demand_amount 고객에게 실제 청구한 반품비(**건별 실측**). 필드 부재 = 0(미청구).
-      return_collect_company   회수 택배사(회수비 단가 판별자).
+      return_completed_at       반품 완료일(귀속일) — 없으면 회수 완료일, 그것도 없으면 요청일.
+      return_fee_demand_amount  고객에게 실제 청구한 반품비(**건별 실측**). 필드 부재 = 0(미청구).
+      return_collect_company    회수 택배사(회수비 단가 판별자).
+      return_fee_support_amount 네이버가 대신 부담하는 반품 배송비(claimDeliveryFeeSupportAmount).
+
+    ★★지원액을 빼먹으면 안 되는 이유(2026-08-03 실제로 빼먹었다): N배송 반품 2건은 고객 청구가
+      0인데, 그건 우리가 손실을 떠안았다는 뜻이 **아니라** 네이버가 `MEMBERSHIP_ARRIVAL_GUARANTEE`
+      유형으로 5,500원을 지원하기 때문이다. 청구액만 보면 정확히 반대로 읽힌다.
 
     ★귀속일 폴백 순서의 근거: 라이브 86건은 returnCompletedDate가 100% 있다. 폴백은 미래에
       응답이 얇아졌을 때 **행을 통째로 잃지 않기 위한** 안전망이지, 평상시 경로가 아니다.
@@ -194,14 +208,11 @@ def return_fields(raw: Any) -> dict | None:
     )
     if completed is None:
         return None   # 귀속일이 없으면 어느 날에 실을지 정할 수 없다 → 추정하지 않는다
-    try:
-        demand = Decimal(str(ret.get("claimDeliveryFeeDemandAmount") or 0))
-    except (ValueError, TypeError, ArithmeticError):
-        demand = Decimal(0)
     return {
         "return_completed_at": completed,
-        "return_fee_demand_amount": demand,
+        "return_fee_demand_amount": _decimal_or_zero(ret.get("claimDeliveryFeeDemandAmount")),
         "return_collect_company": _str_or_none(ret.get("collectDeliveryCompany")),
+        "return_fee_support_amount": _decimal_or_zero(ret.get("claimDeliveryFeeSupportAmount")),
     }
 
 

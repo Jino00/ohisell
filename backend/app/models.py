@@ -293,6 +293,11 @@ class Order(Base):
     # 회수 택배사 — 라이브 86건 전부 HANJIN(N배송 반품도 품고가 아니라 한진이다).
     # 회수 단가가 택배사별로 갈리면 이 컬럼이 판별자가 된다.
     return_collect_company: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    # ★네이버가 대신 부담하는 반품 배송비(claimDeliveryFeeSupportAmount). 라이브 실측:
+    #   N배송 반품 2건이 `MEMBERSHIP_ARRIVAL_GUARANTEE` 유형으로 **5,500원 지원**, 일반배송은 0.
+    #   N배송 반품에서 고객 청구가 0이었던 이유가 이것이다 — 안 받은 게 아니라 네이버가 낸다.
+    #   (2026-08-03 정정: 지원 필드를 안 보고 "고객 미청구=우리 손실"로 읽었다.)
+    return_fee_support_amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now()
     )

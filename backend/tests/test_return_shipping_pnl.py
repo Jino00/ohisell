@@ -24,7 +24,12 @@ from sqlalchemy.pool import StaticPool
 
 from app.models import Base, Channel, Order
 from app.services import order_delivery
-from app.services.profit_calculator import _apply_return_pnl, _new_bucket, _return_shipping_pnl
+from app.services.profit_calculator import (
+    _apply_return_pnl,
+    _new_bucket,
+    _return_shipping_pnl,
+    _return_shipping_pnl_by_product,
+)
 
 D = Decimal
 NAVER_CH = 6
@@ -46,12 +51,13 @@ def db():
         s.close()
 
 
-def _returned(db, *, pkg, attr="TODAY", demand, completed, company="HANJIN", line="", status="returned"):
+def _returned(db, *, pkg, attr="TODAY", demand, completed, company="HANJIN", line="",
+              status="returned", support=0, product_id=None):
     o = Order(
         channel_id=NAVER_CH, order_number=pkg, platform_product_id="p1",
         platform_order_line_id=line, quantity=1, selling_price=D("15900"),
         order_date=datetime(2026, 7, 1, 10, 0), status=status,
-        delivery_attribute_type=attr,
+        delivery_attribute_type=attr, product_id=product_id,
         shipping_cost_paid=order_delivery.shipping_cost_paid_of(
             order_delivery.shipping_method_of(attr)
         ),
@@ -59,6 +65,7 @@ def _returned(db, *, pkg, attr="TODAY", demand, completed, company="HANJIN", lin
         return_completed_at=completed,
         return_fee_demand_amount=None if demand is None else D(str(demand)),
         return_collect_company=company,
+        return_fee_support_amount=D(str(support)),
     )
     db.add(o)
     db.commit()
@@ -90,12 +97,38 @@ def test_uncharged_return_is_pure_loss(db):
 def test_nbaesong_return_uses_pumgo_outbound_and_hanjin_pickup(db):
     """★N배송 반품 — 출고는 품고 3,020인데 **회수는 한진**이다(라이브 2건 실측).
 
-    배송방식으로 회수비를 갈랐다면 회수에도 3,020을 붙여 과대계상했을 것이다."""
+    배송방식으로 회수비를 갈랐다면 회수에도 3,020을 붙여 과대계상했을 것이다.
+    지원액 0으로 두면 회수비가 그대로 우리 부담이다(지원 상계는 아래 테스트)."""
     _returned(db, pkg="pk3", attr="ARRIVAL_GUARANTEE", demand=0,
               completed=datetime(2026, 8, 2, 9, 0))
     row = _return_shipping_pnl(db, CH_MAP, date(2026, 8, 1), date(2026, 8, 3))[NAVER_CH]["2026-08-02"]
     assert row["income"] == D("0")                              # 원천이 `미청구(N배송)`
     assert row["cost"] == order_delivery.SHIPPING_COST_NBAESONG + PICKUP
+
+
+def test_naver_support_offsets_pickup_cost(db):
+    """★★고객 청구 0을 '우리 손실'로 읽으면 정확히 반대다 — 네이버가 5,500원을 부담한다.
+
+    라이브 N배송 반품 2건: claimDeliveryFeeSupportType=MEMBERSHIP_ARRIVAL_GUARANTEE,
+    claimDeliveryFeeSupportAmount=5,500. 처음 배선에서 이 필드를 안 봐서 회수비를 통째로
+    우리 부담으로 계상했다(2026-08-03 정정)."""
+    _returned(db, pkg="pk3s", attr="ARRIVAL_GUARANTEE", demand=0, support=5500,
+              completed=datetime(2026, 8, 2, 9, 0))
+    row = _return_shipping_pnl(db, CH_MAP, date(2026, 8, 1), date(2026, 8, 3))[NAVER_CH]["2026-08-02"]
+    # 회수비는 전액 상쇄, 출고비(품고)만 남는다.
+    assert row["cost"] == order_delivery.SHIPPING_COST_NBAESONG
+
+
+def test_support_above_pickup_is_not_booked_as_income(db):
+    """지원액 초과분(5,500 − 2,500 = 3,000)은 수입으로 잡지 않는다.
+
+    그 돈이 실제로 우리에게 지급되는지는 정산에서 아직 확인되지 않았다(D+12 미성숙).
+    상계 상한을 안 두면 회수비가 **음수**가 되어 반품이 돈을 버는 일이 된다."""
+    _returned(db, pkg="pk3x", attr="TODAY", demand=0, support=99999,
+              completed=datetime(2026, 8, 2, 9, 0))
+    row = _return_shipping_pnl(db, CH_MAP, date(2026, 8, 1), date(2026, 8, 3))[NAVER_CH]["2026-08-02"]
+    assert row["cost"] == D("1900")        # 출고비만 — 회수비 0이 하한
+    assert row["income"] == D("0")
 
 
 # ── ② 귀속일 = 반품 완료일 ─────────────────────────────────────────────────
@@ -159,3 +192,36 @@ def test_uncharged_return_reduces_profit():
     _apply_return_pnl(b, {"income": D("0"), "commission": D("0"), "cost": D("4400")})
     net = b["revenue"] - b["cost"] - b["commission"] - b["shipping"] - b["ad_spend"] - b["vat"]
     assert net == D("-4400")
+
+
+# ── ④ 상품별 귀속 (배분 규칙 불필요) ────────────────────────────────────────
+def test_product_grain_attaches_whole_cost_to_the_single_product(db):
+    """★라이브 반품 86패키지가 전부 상품 1종 — 배분할 게 없다(Jino 지적 2026-08-03).
+
+    처음엔 "배분 규칙이 없다"는 이유로 상품별 이익에서 반품을 통째로 뺐는데, 그래서
+    일별·채널별 합계와 상품별 합계가 반품분만큼 어긋나 있었다."""
+    _returned(db, pkg="pp1", demand=5000, completed=datetime(2026, 8, 2, 14, 0), product_id=7)
+    got = _return_shipping_pnl_by_product(db, CH_MAP, date(2026, 8, 1), date(2026, 8, 3))
+    assert set(got) == {7}
+    assert got[7]["income"] == D("5000")
+    assert got[7]["commission"] == D("136")
+    assert got[7]["cost"] == D("1900") + PICKUP
+
+
+def test_product_grain_splits_multi_product_package_by_revenue(db):
+    """2종 이상 패키지는 상품매출 비례(광고비 배분과 같은 규칙). 실측 0건이라 지금은 미발동."""
+    _returned(db, pkg="pp2", demand=5000, completed=datetime(2026, 8, 2, 14, 0),
+              product_id=1, line="l1")
+    _returned(db, pkg="pp2", demand=5000, completed=datetime(2026, 8, 2, 14, 0),
+              product_id=2, line="l2")
+    got = _return_shipping_pnl_by_product(db, CH_MAP, date(2026, 8, 1), date(2026, 8, 3))
+    assert set(got) == {1, 2}
+    # 두 라인 매출이 같으므로 정확히 반씩 — 합치면 패키지 1건분과 같아야 한다(이중계상 금지).
+    assert got[1]["cost"] + got[2]["cost"] == D("1900") + PICKUP
+    assert got[1]["income"] + got[2]["income"] == D("5000")
+
+
+def test_product_grain_skips_unlinked_lines(db):
+    """상품 미연결(product_id NULL) 라인은 상품 그레인 집계 대상이 아니다."""
+    _returned(db, pkg="pp3", demand=5000, completed=datetime(2026, 8, 2, 14, 0), product_id=None)
+    assert _return_shipping_pnl_by_product(db, CH_MAP, date(2026, 8, 1), date(2026, 8, 3)) == {}
