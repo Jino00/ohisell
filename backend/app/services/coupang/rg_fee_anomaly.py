@@ -3,6 +3,20 @@
 # ★스크리닝 도구지 확정 계산기 아님(D-5). 합포장으로 주별집계÷수량이 깔끔한 단가가 아닐 수 있어
 #   플래그는 "사람 검토 신호"이지 과오청구 단정이 아니다. 근거 수치를 함께 반환해 Jino가 판단.
 # 순수함수 — DB·외부호출 없음. SA1(분류)·SA2(floor)만 호출. fixture 테스트로 잠금(D-12).
+#
+# ★단가 판정의 전제(2026-08-03, 오탐 4건 규명 후 도입 — LESSONS #92):
+#   단가 = 청구액 ÷ 주문수다. **분자와 분모가 같은 창에서 오지 않으면 단가는 거짓이 된다.**
+#   실사고: 아이패드미니 필름(91313543029)은 정산주기 4개에 각 2,025원이 청구됐는데 RG 주문
+#   수집이 2026-06-03에 시작해 4월 주문이 DB에 없었다 → 감사가 합계 8,100원을 주문 2건으로
+#   나눠 4,050원(=대형1 정합, 극소형 최소금액의 3.0배)을 만들고 "실측과 청구가 어긋났다"는
+#   가장 강한 플래그로 올렸다. 같은 원인으로 WING1 3건까지 총 4건이 전부 오탐이었다.
+#   → 그래서 이 모듈의 판정 단위는 **정산주기 1개**이고(주기 밖 청구액을 절대 섞지 않는다),
+#     주문이 대응되지 않은 주기는 **판정에서 제외**하되 그 사실(periods_unmatched)을 표면화한다.
+#     대응 주기가 하나도 없으면 판정하지 않고 unit_unknown으로 강등한다 — 조용한 오탐은
+#     조용한 침묵과 같은 값으로 신뢰를 깎기 때문이다.
+#   ★남는 한계(해결 못 함, 단정 금지): 주기 안에서 **일부** 주문만 수집된 경우는 여전히 단가가
+#     부풀 수 있다. 청구된 주문수를 알 방법이 없고, 금액÷알려진단가로 역산하는 것은 쿠팡 계산기
+#     복제(D-17 금지)다. 그래서 주기별 판정은 이 오차를 **국소화**할 뿐 제거하지 못한다.
 from __future__ import annotations
 
 from app.services.coupang.rg_fee_reference import (
@@ -14,6 +28,13 @@ from app.services.coupang.rg_size_classifier import SIZE_TYPES, classify_size_ty
 # 배송 단가가 우리 사이즈 최소금액의 이 배수 이상이면 "검토" 플래그.
 # floor는 최소치라 1~1.x배는 카테고리·판매가 변동으로 정상일 수 있음(오탐). 2배+는 gross outlier.
 _DELIVERY_OVERCHARGE_MULTIPLE = 2.0
+
+# 이상치 플래그(=검토 신호)만 모은 집합. 커버리지 사실 표기는 여기 들어가지 않는다 —
+# 커버리지는 periods_total/judged/unmatched 필드로 표면화하고, flags는 "이상하다"만 뜻하게 둔다.
+ANOMALY_FLAGS = frozenset({
+    "missing_dims", "oversize", "unit_unknown",
+    "below_floor", "size_mismatch_high", "measured_vs_billed_mismatch",
+})
 
 
 def detect_fee_anomalies(
@@ -118,3 +139,133 @@ def detect_fee_anomalies(
             flags.append("below_floor")
 
     return result
+
+
+def detect_fee_anomalies_by_period(
+    width_mm: int | None,
+    length_mm: int | None,
+    height_mm: int | None,
+    weight_g: int | None,
+    *,
+    periods: list[dict],
+    coupang_size_type: str | None = None,
+) -> dict:
+    """옵션 1개를 **정산주기별로** 판정하고 합산 결과를 낸다(2026-08-03, ⓒ+ⓑ).
+
+    periods 각 항목: {"date_from", "date_to", "delivery", "warehousing",
+                      "order_count", "quantity"}  ← 그 주기 안에서만 집계된 값
+    주기 안에 대응 주문이 없으면(order_count/quantity 0) 그 주기는 **판정하지 않는다** — 주기
+    밖 주문으로 나누면 단가가 정수배로 부풀기 때문이다(모듈 상단 실사고).
+
+    반환(기존 키 유지 + 커버리지 필드 추가):
+      per_unit_delivery/warehousing  판정 주기들만의 단가(Σ판정청구 ÷ Σ판정주문). 청구총액을
+                                     주문수로 나눈 값이 **아니다** — 그 나눗셈이 오탐의 원인이었다.
+      judged_delivery/warehousing    위 단가의 분자(판정 주기 청구액 합). charged_*와 다를 수 있다.
+      implied_size_delivery          판정 주기 중 **단가가 가장 큰** 주기 기준(최악 주기).
+      flags                          판정 주기 플래그의 합집합. 판정 주기 0개면 ['unit_unknown'].
+      periods_total/judged/unmatched 커버리지 표면화(ⓑ). unmatched>0이면 단가는 부분 표본이다.
+      period_detail                  주기별 근거 행(judged 여부 포함) — Jino가 직접 대조할 원자료.
+    """
+    size_type = coupang_size_type or classify_size_type(width_mm, length_mm, height_mm, weight_g)
+    base: dict = {
+        "size_type": size_type,
+        "size_source": "coupang_measured" if coupang_size_type else "registered_dims",
+        "per_unit_delivery": None,
+        "per_unit_warehousing": None,
+        "judged_delivery": None,
+        "judged_warehousing": None,
+        "floor": expected_fee_floor(size_type),
+        "implied_size_delivery": None,
+        "flags": [],
+        "periods_total": len(periods),
+        "periods_judged": 0,
+        "periods_unmatched": len(periods),
+        "period_detail": [],
+    }
+
+    # 치수 미측정·입고불가는 주기와 무관한 판정 → 조기 종료(단일 주기 판정기와 동일 의미).
+    if size_type is None:
+        base["flags"] = ["missing_dims"]
+        return base
+    if size_type == "초과":
+        base["flags"] = ["oversize"]
+        return base
+
+    flags: list[str] = []
+    judged = 0
+    sum_dlv = sum_wh = 0.0
+    sum_orders = sum_qty = 0
+    has_dlv = has_wh = False
+    worst_per_order = -1.0
+    worst_implied: str | None = None
+    detail: list[dict] = []
+
+    for p in periods:
+        oc = p.get("order_count") or 0
+        qy = p.get("quantity") or 0
+        row = {
+            "date_from": p.get("date_from"),
+            "date_to": p.get("date_to"),
+            "delivery": p.get("delivery"),
+            "warehousing": p.get("warehousing"),
+            "order_count": oc,
+            "quantity": qy,
+            "judged": False,
+            "per_unit_delivery": None,
+            "per_unit_warehousing": None,
+            "implied_size_delivery": None,
+            "flags": [],
+        }
+        if oc <= 0 or qy <= 0:
+            # 주문 미대응 주기 — 판정 제외(ⓑ). 청구액은 charged_*에 남아 금액은 안 사라진다.
+            detail.append(row)
+            continue
+
+        one = detect_fee_anomalies(
+            width_mm, length_mm, height_mm, weight_g,
+            delivery_amount=p.get("delivery"), warehousing_amount=p.get("warehousing"),
+            quantity=qy, order_count=oc, coupang_size_type=coupang_size_type,
+        )
+        judged += 1
+        row.update({
+            "judged": True,
+            "per_unit_delivery": one["per_unit_delivery"],
+            "per_unit_warehousing": one["per_unit_warehousing"],
+            "implied_size_delivery": one["implied_size_delivery"],
+            "flags": list(one["flags"]),
+        })
+        detail.append(row)
+
+        for f in one["flags"]:
+            if f not in flags:
+                flags.append(f)
+        if one["per_unit_delivery"] is not None and one["per_unit_delivery"] > worst_per_order:
+            worst_per_order = one["per_unit_delivery"]
+            worst_implied = one["implied_size_delivery"]
+        if p.get("delivery") is not None:
+            sum_dlv += float(p["delivery"])
+            has_dlv = True
+        if p.get("warehousing") is not None:
+            sum_wh += float(p["warehousing"])
+            has_wh = True
+        sum_orders += oc
+        sum_qty += qy
+
+    base["period_detail"] = detail
+    base["periods_judged"] = judged
+    base["periods_unmatched"] = len(periods) - judged
+
+    if judged == 0:
+        # 대응 주기가 하나도 없다 → 단가를 만들 근거가 없다. 판정 보류(ⓑ 강등).
+        base["flags"] = ["unit_unknown"]
+        return base
+
+    if has_dlv and sum_orders > 0:
+        base["judged_delivery"] = round(sum_dlv, 2)
+        base["per_unit_delivery"] = round(sum_dlv / sum_orders, 2)
+    if has_wh and sum_qty > 0:
+        base["judged_warehousing"] = round(sum_wh, 2)
+        base["per_unit_warehousing"] = round(sum_wh / sum_qty, 2)
+    base["implied_size_delivery"] = worst_implied
+    base["flags"] = flags
+    return base
