@@ -204,3 +204,17 @@ S3(`ids=` 배치 전환 + 주기 상향).
 문서: 트랙 `docs/tracks/active/track_naver-ad-optimization.md`(D-NAO-137·138),
 HANDOFF `.claude/memory/HANDOFF_apply-tm-observation-slice_20260803.md`.
 ```
+
+## §9 (23:1x 추가) D-NAO-139 S2 구현 완료 — 미배포, 커밋은 섞임
+
+Jino "그래"로 착수해 세 가지를 만들었다:
+1. **자동 판별** — 탐지 시점에 `feed_verdict`/`feed_product_id`/`feed_moved`/`feed_total`을 계산해 저장(마이그레이션 `f2b8c40d9e17`). 과거 행은 `feed_reapply.backfill()` 1회(멱등).
+2. **N줄 → 1줄 접기** — 같은 상품·같은 초를 한 줄로. 형제 id는 `feed_group_ids`로 보존.
+3. **숨기기 스위치** — 「피드 재적용 숨기기」. 무엇을 얼마나 접고 숨겼는지 항상 표시(`feed_reapply` 블록).
+
+테스트: 신규 13건 · 백엔드 **4,531 passed** · 프론트 **182 passed** · tsc 클린 · vite 빌드 성공.
+
+⚠️**커밋 혼입**: 이 9개 파일이 병행 세션 커밋 **`6b97a1c`**에 섞여 들어갔다(내용 온전·push됨).
+히스토리 재작성은 하지 않는다(공유 브랜치 push 완료 + 그 세션 활동 중).
+
+⚠️**미배포**: prod에는 아직 없다. 배포 순서 — ①`scripts/safe_deploy.sh backend/alembic/versions/f2b8c40d9e17_*.py backend/app/models.py backend/app/services/naver_ad/feed_reapply.py backend/app/services/naver_ad/ad_external_change.py backend/app/services/naver_ad/modification_feed.py backend/app/routers/naver_ad.py --migrate --restart` ②`--frontend`로 dist ③`feed_reapply.backfill()` 1회 실행(과거 37행 판정). 배포 시점은 Jino 결정("크론 뒤")에 따라 08-04 07:45 이후.
