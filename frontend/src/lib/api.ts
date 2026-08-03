@@ -1020,6 +1020,7 @@ export interface RocketOverview {
     note: string;
   };
   ad_options?: RocketAdOptions;
+  sku_pnl?: RocketSkuPnl;
 }
 
 export interface RocketAdOptionItem {
@@ -1041,6 +1042,40 @@ export interface RocketAdOptions {
     diff: string;
     diff_pct: string;
     basis: string;
+  };
+}
+
+// 상품(SKU)별 손익 — 표시 전용(D-16). net_profit/cost는 **모를 때 null**이다(0이 아니다):
+//   원가 매핑이 없거나 그 기간 발주가 없으면 계산하지 않는다. 이유는 profit_basis가 말한다.
+export interface RocketSkuPnlItem {
+  sku_id: string;
+  product_name?: string | null;
+  option_count: number;
+  ad_spend: string;
+  clicks: number;
+  conversion_revenue: string;
+  revenue: string;
+  order_qty: number;
+  cost: string | null;
+  net_profit: string | null;
+  profit_basis: string;
+}
+
+export interface RocketSkuPnl {
+  skus: RocketSkuPnlItem[];
+  sku_count: number;
+  shown: number;
+  coverage: {
+    ad_total: string;
+    ad_bridged: string;
+    ad_bridged_pct: string | null;
+    ad_with_revenue: string;
+    ad_with_revenue_pct: string | null;
+    ad_with_cost: string;
+    ad_with_cost_pct: string | null;
+    ad_unbridged: string;
+    unbridged_option_count: number;
+    note: string;
   };
 }
 

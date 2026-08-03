@@ -320,6 +320,52 @@ def test_ingest_sales_and_idempotent(db):
     assert db.query(CoupangRocketSalesDaily).count() == 2
 
 
+class TestOptionSkuBridgeIsAccumulated:
+    """브리지(옵션↔상품번호)는 판매분석의 부산물이 아니라 **누적 자산**이다(D-16).
+
+    판매분석은 BETA + 무료체험(2026-08-20 종료 예정)이라 언젠가 끊긴다. 대응 자체는 시간
+    불변인데(실측: 바뀐 옵션 0건) 일별 테이블에만 있으면 수집이 멈추는 순간 손익이 조용히
+    멈춘다 — 그래서 관측될 때마다 따로 남긴다.
+    """
+
+    def test_적재하면_브리지가_함께_남는다(self, db):
+        from app.models import CoupangRocketOptionSku
+        sync.ingest_rocket_sales(db, "A01029796", _SALES_ROWS)
+        rows = {r.option_id: r for r in db.query(CoupangRocketOptionSku).all()}
+        assert rows["95536607339"].sku_id == "62178970"
+        assert rows["95536607339"].vendor_id == "A01029796"
+        assert rows["95570603512"].sku_id == "69411570"
+
+    def test_sku가_빈_재수신이_기존_브리지를_지우지_않는다(self, db):
+        """★핵심: 판매분석이 sku를 안 주는 날(또는 끊긴 뒤)에도 이미 아는 대응은 살아남는다."""
+        from app.models import CoupangRocketOptionSku
+        sync.ingest_rocket_sales(db, "A01029796", _SALES_ROWS)
+        sync.ingest_rocket_sales(db, "A01029796", [
+            {"option_id": "95536607339", "date": "2026-07-25", "qty": 3, "revenue": "50000"},
+        ])
+        assert db.query(CoupangRocketOptionSku).filter_by(
+            option_id="95536607339").one().sku_id == "62178970"
+
+    def test_재적재해도_행이_늘지_않는다(self, db):
+        from app.models import CoupangRocketOptionSku
+        for _ in range(3):
+            sync.ingest_rocket_sales(db, "A01029796", _SALES_ROWS)
+        assert db.query(CoupangRocketOptionSku).count() == 2
+
+    def test_sku가_실제로_바뀌면_갱신하고_경고한다(self, db, caplog):
+        """불변이라던 전제가 깨진 것이므로 조용히 넘기면 안 된다(손익 귀속이 바뀐다)."""
+        from app.models import CoupangRocketOptionSku
+        sync.ingest_rocket_sales(db, "A01029796", _SALES_ROWS)
+        with caplog.at_level("WARNING"):
+            sync.ingest_rocket_sales(db, "A01029796", [
+                {"option_id": "95536607339", "sku_id": "99999999", "date": "2026-07-26",
+                 "qty": 1, "revenue": "1000"},
+            ])
+        assert db.query(CoupangRocketOptionSku).filter_by(
+            option_id="95536607339").one().sku_id == "99999999"
+        assert "브리지 변경" in caplog.text
+
+
 def test_ingest_sales_updates_on_resync(db):
     sync.ingest_rocket_sales(db, "A01029796", _SALES_ROWS)
     sync.ingest_rocket_sales(db, "A01029796", [

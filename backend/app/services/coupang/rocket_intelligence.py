@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 from app.models import (
     CoupangAdOptionDaily,
     CoupangAdReport,
+    CoupangRocketOptionSku,
     CoupangRocketPurchaseOrder,
     CoupangRocketPurchaseOrderItem,
     CoupangRocketSettlement,
@@ -225,6 +226,184 @@ def _rocket_ad_options(db: Session, dfrom: date, dto: date,
             "diff_pct": (diff / account_total * 100) if account_total else None,
             "basis": ("옵션 합계는 Billboard(PA 기준), 계정 총액은 report/SALES(전체 기준, D-10). "
                       "정의가 달라 완전히 같지 않다 — 차이가 커지면 수집이 어긋난 신호다."),
+        },
+    }
+
+
+# ──────────────────────────────────────────────
+# ②-b 상품(SKU)별 손익 — 표시 전용 (트랙 ohitech-ad D-16)
+# ──────────────────────────────────────────────
+def _rocket_sku_pnl(db: Session, dfrom: date, dto: date,
+                    vendor_id: str | None, limit: int = 30) -> dict:
+    """1P 손익을 **상품(SKU=상품번호) 단위**로. 매출·광고비·원가·순이익.
+
+    ★왜 옵션이 아니라 SKU인가: 매출(발주 라인)도 원가(cost_price 매핑)도 원래 **상품번호 그레인**
+      이고, 광고비만 옵션 그레인이다. 그런데 sku→option은 1:N이다(실측 최대 3, 활동 기간이 실제로
+      겹쳐 기간 필터로 안 갈린다). 옵션 축으로 내리면 매출·원가를 **안분(추정)** 해야 하지만,
+      SKU 축으로 올리면 광고비를 **더하기만** 하면 된다 — 추정이 들어가는 자리가 없다.
+
+    ★순이익에는 쓰지 않는다(D-13 유지). 계정 net_profit의 광고 차감축은 `coupang_ad_report`
+      계정 총액(비-PA 포함, D-10)인데 여기 광고비는 Billboard PA 기준이라 정의가 다르다.
+      따라서 **SKU 순이익 합 ≠ 계정 순이익**이다 — 그 차이를 coverage로 항상 드러낸다.
+
+    ★원가 미매핑 SKU는 net_profit을 **내지 않는다**(None). 원가 0으로 계산하면 과대 순이익이
+      정상값과 섞여 구분이 안 된다(원칙22). 사유는 profit_basis로 행마다 말한다.
+    """
+    # ── ① 광고비: 옵션 그레인 → 브리지로 SKU에 합산(더하기, 추정 없음) ──
+    ad_rows = (
+        db.query(
+            CoupangAdOptionDaily.ad_option_id,
+            func.sum(CoupangAdOptionDaily.ad_spend),
+            func.sum(CoupangAdOptionDaily.clicks),
+            func.sum(CoupangAdOptionDaily.conversion_revenue),
+        )
+        .filter(
+            CoupangAdOptionDaily.report_date >= dfrom,
+            CoupangAdOptionDaily.report_date <= dto,
+            CoupangAdOptionDaily.sell_type == ROCKET_AD_SELL_TYPE,
+            *([CoupangAdOptionDaily.vendor_id == vendor_id] if vendor_id is not None else []),
+        )
+        .group_by(CoupangAdOptionDaily.ad_option_id)
+        .all()
+    )
+    bridge = {
+        str(o): str(s)
+        for o, s in db.query(CoupangRocketOptionSku.option_id, CoupangRocketOptionSku.sku_id).all()
+    }
+
+    by_sku: dict[str, dict] = {}
+    ad_total = _Z
+    ad_unbridged = _Z          # 브리지 없는 옵션의 광고비 — 어느 SKU에도 안 붙는다(투명화)
+    unbridged_options = 0
+    for opt, spend, clicks, conv in ad_rows:
+        spend = _f(spend)
+        ad_total += spend
+        sku = bridge.get(str(opt))
+        if sku is None:
+            ad_unbridged += spend
+            unbridged_options += 1
+            continue
+        g = by_sku.setdefault(sku, {"ad_spend": _Z, "clicks": 0, "conv_revenue": _Z,
+                                    "option_count": 0, "revenue": _Z, "cost": _Z,
+                                    "qty": 0, "has_cost": False, "name": None})
+        g["ad_spend"] += spend
+        g["clicks"] += int(clicks or 0)
+        g["conv_revenue"] += _f(conv)
+        g["option_count"] += 1
+
+    # ── ② 매출·원가: 발주상세 라인(상품번호 그레인, 발주일 KST 윈도우) ──
+    start, end = _kst_window_utc(dfrom, dto)
+    seq_subq = select(CoupangRocketPurchaseOrder.purchase_order_seq).where(
+        CoupangRocketPurchaseOrder.po_created_at >= start,
+        CoupangRocketPurchaseOrder.po_created_at <= end,
+        *([CoupangRocketPurchaseOrder.vendor_id == vendor_id] if vendor_id is not None else []),
+    )
+    Item = CoupangRocketPurchaseOrderItem
+    po_rows = (
+        db.query(
+            Item.product_number,
+            Item.product_name,
+            Item.order_qty,
+            Item.line_order_amount,
+            RocketProductCostMap.status,
+            ProductMaster.cost_price,
+        )
+        .outerjoin(RocketProductCostMap, RocketProductCostMap.product_number == Item.product_number)
+        .outerjoin(ProductMaster, ProductMaster.internal_sku == RocketProductCostMap.internal_sku)
+        .filter(Item.purchase_order_seq.in_(seq_subq))
+        .all()
+    )
+    for pnum, pname, qty, line_amt, status, cost_price in po_rows:
+        sku = str(pnum)
+        if sku not in by_sku:
+            continue     # 광고를 안 돌린 상품 — 이 표는 광고 축 조망이다(광고비 0행을 만들지 않는다)
+        g = by_sku[sku]
+        g["revenue"] += _f(line_amt)
+        g["qty"] += int(qty or 0)
+        if g["name"] is None and pname:
+            g["name"] = pname
+        # 원가는 confirmed 매핑 + master 존재일 때만. ignored는 "원가 0으로 결정됨"이라 확정 취급.
+        if status == "confirmed" and cost_price is not None:
+            g["cost"] += _f(cost_price) * int(qty or 0)
+            g["has_cost"] = True
+        elif status == "ignored":
+            g["has_cost"] = True
+
+    # ── ③ 라벨: 발주상세 이름이 없으면 광고 XLSX 상품명으로 폴백 ──
+    need_name = [s for s, g in by_sku.items() if not g["name"]]
+    if need_name:
+        opt_of_sku = {v: k for k, v in bridge.items() if v in set(need_name)}
+        if opt_of_sku:
+            for opt_id, nm in (
+                db.query(CoupangAdOptionDaily.ad_option_id, CoupangAdOptionDaily.ad_product_name)
+                .filter(
+                    CoupangAdOptionDaily.ad_option_id.in_(list(opt_of_sku.values())),
+                    CoupangAdOptionDaily.ad_product_name.isnot(None),
+                )
+                .order_by(CoupangAdOptionDaily.report_date.asc())
+                .all()
+            ):
+                for sku, o in opt_of_sku.items():
+                    if o == str(opt_id):
+                        by_sku[sku]["name"] = nm
+
+    # ── ④ 행 구성 + 커버리지(광고비 가중) ──
+    ad_with_revenue = _Z
+    ad_with_cost = _Z
+    items = []
+    for sku, g in by_sku.items():
+        has_rev = g["revenue"] > 0
+        if has_rev:
+            ad_with_revenue += g["ad_spend"]
+        if g["has_cost"]:
+            ad_with_cost += g["ad_spend"]
+        if g["has_cost"] and has_rev:
+            net = g["revenue"] - g["ad_spend"] - g["cost"]
+            basis = "매출(발주 gross)−광고비(PA)−원가(확정 매핑)"
+        else:
+            net = None
+            basis = ("이 기간 발주 없음 — 1P 매출은 발주일 귀속이라 매출 0이다"
+                     if not has_rev else "원가 매핑 미확정 — 0으로 계산하면 순이익이 과대해진다")
+        items.append({
+            "sku_id": sku,
+            "product_name": g["name"],
+            "option_count": g["option_count"],
+            "ad_spend": g["ad_spend"],
+            "clicks": g["clicks"],
+            "conversion_revenue": g["conv_revenue"],
+            "revenue": g["revenue"],
+            "order_qty": g["qty"],
+            "cost": g["cost"] if g["has_cost"] else None,
+            "net_profit": net,
+            "profit_basis": basis,
+        })
+    items.sort(key=lambda r: r["ad_spend"], reverse=True)
+    top = items[:limit]
+
+    def _pct(part: Decimal) -> "Decimal | None":
+        return (part / ad_total * 100) if ad_total else None
+
+    return {
+        "skus": top,
+        "sku_count": len(items),
+        "shown": len(top),
+        "coverage": {
+            # 분모는 항상 이 기간 1P 광고비 전체 — 도달하지 못한 돈이 얼마인지가 요점이다.
+            "ad_total": ad_total,
+            "ad_bridged": ad_total - ad_unbridged,
+            "ad_bridged_pct": _pct(ad_total - ad_unbridged),
+            "ad_with_revenue": ad_with_revenue,
+            "ad_with_revenue_pct": _pct(ad_with_revenue),
+            "ad_with_cost": ad_with_cost,
+            "ad_with_cost_pct": _pct(ad_with_cost),
+            "ad_unbridged": ad_unbridged,
+            "unbridged_option_count": unbridged_options,
+            "note": (
+                "브리지=옵션ID↔상품번호(판매분석 관측을 누적 보존, D-16). 매출=발주 라인 gross(발주일 KST), "
+                "원가=발주수량×cost_price(확정 매핑). 광고비는 Billboard PA 기준이라 계정 총액(비-PA 포함)과 "
+                "정의가 달라 **SKU 순이익 합 ≠ 계정 순이익**이다 — 이 표는 표시 전용이다. "
+                "원가 미도달분은 순이익을 내지 않는다(0으로 계산하면 과대 순이익이 섞인다)."
+            ),
         },
     }
 
@@ -438,6 +617,7 @@ def compute_rocket_overview(db: Session, dfrom: date, dto: date,
         "ad_spend": ad_spend,
         # 상품(옵션)별 광고비 — 표시 전용. 순이익은 위 ad_spend(계정 총액)만 쓴다(D-13).
         "ad_options": _rocket_ad_options(db, dfrom, dto, vendor_id, ad_spend),
+        "sku_pnl": _rocket_sku_pnl(db, dfrom, dto, vendor_id),   # 상품(SKU)별 손익 — 표시 전용(D-16)
         "cost": cost,                     # ★원가(confirmed 매핑, S4.5c/D-13)
         "has_cost": has_cost,             # 매핑 1건이라도 결정되면 True(D-12 해소)
         "net_profit": net_profit,         # = 매출 − 광고 − 원가

@@ -1585,6 +1585,41 @@ class CoupangRocketSalesDaily(Base):
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class CoupangRocketOptionSku(Base):
+    """쿠팡 1P 옵션ID ↔ 상품번호(SKU) 대응 — **손익 결합의 브리지**(트랙 ohitech-ad D-16).
+
+    왜 별도 테이블인가: 이 대응은 **시간 불변**이다(2026-08-03 실측 — 244옵션 중 sku_id가 바뀐
+      옵션 0건). 즉 매일 재수집할 이유가 없는 정적 사실인데, 지금까지는 `coupang_rocket_sales_daily`
+      **일별 수집의 부산물로만** 존재했다. 판매분석은 BETA + "Basic 무료체험"(D-CPP-5, 2026-08-20
+      종료 예정)이라 그 수집이 끊기면 **브리지가 통째로 사라지고 옵션별 손익이 조용히 멈춘다**.
+      → 관측될 때마다 여기에 누적 보존하고, 손익 계산은 **이 테이블만** 읽는다. 수집이 끊겨도
+      이미 아는 상품은 계속 산출되고, 새 상품만 "브리지 없음"으로 화면에 드러난다.
+      (같은 실패 형태: D-NAO-41 "외부생성 리소스 의존은 조용히 끊긴다 → 자족 구조로".)
+
+    grain: option_id(쿠팡 옵션ID·유니크). sku_id = 발주상세 product_number와 같은 키(실측 62178970)
+      → RocketProductCostMap(상품번호→internal_sku) → ProductMaster.cost_price로 원가에 닿는다.
+    ★sku_id는 NOT NULL이다 — 비어 있으면 브리지가 아니다(빈 행을 남겨 "매핑 있음"으로 오인시키지
+      않는다). 원천이 externalSkuIds를 하나로 특정 못 하면 애초에 적재하지 않는다.
+    ★option_id → sku_id는 1:1이지만 **sku_id → option_id는 1:N**이다(실측 최대 3, 활동 기간이
+      실제로 겹친다). 그래서 손익 그레인은 옵션이 아니라 **SKU**다 — 매출·원가는 원래 상품번호
+      그레인이고 광고비만 옵션 그레인이라, SKU로 올리면 **더하기(사실)**로 끝나고 안분(추정)이
+      필요 없다. 옵션 축으로 내리면 매출·원가를 반드시 나눠야 하고 그건 추정이다.
+    """
+
+    __tablename__ = "coupang_rocket_option_sku"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    option_id: Mapped[str] = mapped_column(String(30), unique=True, nullable=False, index=True)
+    sku_id: Mapped[str] = mapped_column(String(30), nullable=False, index=True)  # = 발주 product_number
+    vendor_id: Mapped[Optional[str]] = mapped_column(String(20), nullable=True, index=True)
+    product_name: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)  # 관측 시점 라벨(감사용)
+    source: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="sales_analysis", server_default="sales_analysis",
+    )  # sales_analysis | backfill | manual — 끊긴 뒤에도 무엇이 어디서 왔는지 남긴다
+    first_observed_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    last_observed_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 class CoupangRocketPromotion(Base):
     """쿠팡 로켓배송(1P) 프로모션 신청 — 공급자허브 '프로모션' 메뉴 (트랙 coupang-promo-pnl, Phase 1).
 
