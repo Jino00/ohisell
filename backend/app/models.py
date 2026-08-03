@@ -1235,6 +1235,63 @@ class NaverSettlementCase(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class NaverClaimSettlementProbe(Base):
+    """네이버 클레임(반품/교환) 주문의 정산 구조 관측 로그 — N배송 반품 회수비 프로브.
+
+    ★존재 이유(2026-08-03): 반품 배송비 수입을 이익에 반영하려는데 **N배송(도착보장) 반품의
+      정산 구조를 아무도 모른다**. 라이브 실측:
+        - 비N배송(TODAY/NORMAL) 반품·교환 → productOrderType='DELIVERY' 행이 뜬다.
+          금액은 5,000원 지배적(45/50건)·2,500원 3건·7,500원 2건 = 고객이 낸 반품비=우리 수입.
+        - N배송 반품은 468건 중 2건뿐(2026072553216341 결제 07-25 / 2026072852172181 결제 07-28)
+          이고, 둘 다 settleDecisionType 3유형 전부에서 정산 행 0건. 정산 성숙이 D+12라
+          08-06·08-09경 떠야 정상.
+        - 그 2건은 둘 다 비멤버십(deliveryDiscountAmount == 0) → 멤버십 N배송 반품 표본은 0건.
+      가설("N배송 회수비는 다르고, 멤버십 반품은 네이버가 보상")은 표본이 없어 검증 불가다.
+      그래서 검증하려 애쓰는 대신 **표본이 익는 순간 자동으로 포착되게** 한다.
+
+    그레인 = 정산 API가 돌려준 행 그대로(관측 로그, append-only). 집계 그레인으로 미리 뭉치지
+    않는 이유: 무엇이 신호인지 아직 모르는 단계라 원본 행을 남겨야 나중에 어떤 축으로든 다시
+    볼 수 있다(뭉쳐 저장하면 되돌릴 수 없다).
+
+    UNIQUE = (product_order_id, product_order_type, settle_type, settle_decision_type,
+              observed_date) — 하루 여러 번 재실행해도 같은 행이 중복 적재되지 않는다.
+    observed_date를 키에 **포함**하는 이유: 같은 상품주문의 정산 상태는 날짜에 따라 옮겨간다
+    (UNSETTLED → SETTLED). 날짜를 빼면 그 전이가 덮여 사라지고, 넣으면 "언제 무엇으로 보였나"의
+    시계열이 남는다 — 이 프로브의 목적이 바로 그 전이 관측이다.
+
+    ★settle_type의 '' sentinel: SQLite/Postgres 모두 UNIQUE에서 NULL을 서로 distinct로 취급해
+      중복을 못 막는다(CoupangRgSettlementFee.vendor_item_id와 같은 이유). 응답에 settleType이
+      없으면 ''로 채운다. product_order_id도 같은 이유로 non-null ''.
+    """
+
+    __tablename__ = "naver_claim_settlement_probe"
+    __table_args__ = (
+        UniqueConstraint(
+            "product_order_id", "product_order_type", "settle_type",
+            "settle_decision_type", "observed_date",
+            name="uq_naver_claim_settlement_probe",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    order_number: Mapped[str] = mapped_column(String(40), nullable=False, index=True)   # 네이버 orderId
+    product_order_id: Mapped[str] = mapped_column(String(40), nullable=False, default="")  # '' = 응답에 없음
+    # 배송방식 — orders.delivery_attribute_type 원본 그대로(ARRIVAL_GUARANTEE=N배송).
+    # NULL = 판별 불가(raw_data 부재·JSON 잘림) — 추정으로 채우지 않는다(order_delivery SA 계약).
+    delivery_attribute_type: Mapped[Optional[str]] = mapped_column(String(40), nullable=True, index=True)
+    is_membership: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)  # deliveryDiscountAmount > 0
+    order_status: Mapped[str] = mapped_column(String(20), nullable=False)               # returned / exchanged
+    settle_decision_type: Mapped[str] = mapped_column(String(20), nullable=False)       # SETTLED/UNSETTLED/BEFORE_CANCEL
+    product_order_type: Mapped[str] = mapped_column(String(40), nullable=False)         # PROD_ORDER/DELIVERY/CONCESSION/…
+    settle_type: Mapped[str] = mapped_column(String(40), nullable=False, default="")    # NORMAL_SETTLE_ORIGINAL/… ('' = 없음)
+    pay_settle_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    settle_expect_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    pay_date: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    settle_expect_date: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    observed_date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)   # 프로브 실행일(KST)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 # ──────────────────────────────────────────────
 # RG 정산 수수료 (트랙 RG-Fee-Accounting S2)
 # ──────────────────────────────────────────────
