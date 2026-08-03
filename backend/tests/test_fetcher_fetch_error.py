@@ -19,7 +19,6 @@ from sqlalchemy.pool import StaticPool
 from app.database import Base
 from app.models import CoupangWingCookie
 from app.services.coupang import (
-    refresh_contract,
     ohitech_ad_sync,
     rg_settlement_sync,
     rocket_supplier_sync,
@@ -131,19 +130,18 @@ def test_mark_fetch_error_truncates_to_column_limit(db, account, mark_error, _ma
     assert len(_row(db, account).last_error) == 300
 
 
-@pytest.mark.parametrize("account,_mark_error,mark_ok,_status", _FETCHERS)
-def test_success_clears_error_trace(db, account, _mark_error, mark_ok, _status):
-    """성공 push는 과거 실패 흔적을 지운다 — 안 지우면 오래된 실패가 화면에 계속 남는다.
+# heartbeat가 곧 run 완료 신호인 3종(claim의 settle_on_success_heartbeat=True). RG만 뺀다 —
+# RG는 한 회차가 (정산주기×리포트종류) 여러 엑셀이라 heartbeat가 **중간** 신호이고, 그래서
+# 실패 흔적 클리어 계약이 다르다(2026-08-03 codex 2R[P2]: 4종으로 퉁치면 나머지 3종의 계약이
+# 느슨해진다 — 3종은 요청 유무와 무관하게 지우는 게 맞다).
+# RG 쪽 계약은 test_rg_settlement_sync.py의 rg_heartbeat 3종이 따로 지킨다.
+_FETCHERS_HEARTBEAT_SETTLES = [p for p in _FETCHERS if p.id != "rg_settlement"]
 
-    ★살아있는 요청(=버튼이 눌린 run) 안에서 검증한다(2026-08-03 codex P1). RG만 heartbeat의
-    의미가 다르기 때문이다: 나머지 3종은 heartbeat가 곧 run 완료 신호지만, RG는 한 회차가 여러
-    엑셀을 올려서 heartbeat가 **중간** 신호다. 그래서 RG는 요청이 없을 때 도착한 업로드로는
-    실패 흔적을 지우지 않는다 — 안 그러면 클라 타임아웃된 업로드가 run 종료 뒤 뒤늦게 완주하며
-    실패를 지우고, 프론트가 반쪽 정산 run을 "완료"로 읽는다(rg_mark_heartbeat 주석 참조).
-    요청이 살아있는 이 시나리오에서는 4종의 동작이 동일해야 한다.
-    """
+
+@pytest.mark.parametrize("account,_mark_error,mark_ok,_status", _FETCHERS_HEARTBEAT_SETTLES)
+def test_success_clears_error_trace(db, account, _mark_error, mark_ok, _status):
+    """성공 push는 과거 실패 흔적을 지운다 — 안 지우면 오래된 실패가 화면에 계속 남는다."""
     _seed(db, account)
-    refresh_contract.request_refresh(db, account)
     _mark_error(db, "browser closed")
     assert _row(db, account).last_error_at is not None
 

@@ -14,6 +14,7 @@ from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 import openpyxl
+from sqlalchemy import case, update
 from sqlalchemy.orm import Session
 
 from app.clients.coupang.inbound import WingAuthError, WingReadError
@@ -1034,7 +1035,7 @@ def auto_download_all(db: Session, vendor_id_map: dict[str, str]) -> list[dict]:
 # 분리해 판매분석(COUPANG_WING_VS)·광고와 섞지 않는다(D-5 세션/상태 분리 원칙).
 #   - request_refresh: UI 버튼/스케줄 → 요청 플래그 set
 #   - refresh_status:  UI 폴링·페처 데몬 공용(요청 여부 + 마지막 push 시각)
-#   - claim_refresh:   페처가 요청 소비(원자적 조건부 UPDATE)
+#   - claim_refresh:   페처가 요청을 **임대**(lease, 원자적 조건부 UPDATE) — 소비하지 않는다
 #   - mark_heartbeat:  업로드(push) 성공 시 last_success_at 갱신(라우터 경계에서 호출 — 머니코드 불변)
 # 위 5개는 모두 account_key(COUPANG_WING1/2) 차원 — 계정별 데몬이 자기 큐만 본다(아래 매핑 참조).
 _RG_STATE_ACCOUNT = "COUPANG_WING_RG"
@@ -1083,21 +1084,36 @@ def rg_mark_heartbeat(db: Session, account_key: str = "COUPANG_WING1") -> None:
     요청이 남아있지 않아 정산 데이터가 반쪽으로 남는다. 요청 소멸은 run 전체가 끝난 뒤
     refresh-complete(=/wing/rg-settlement/refresh-complete)가 한다.
 
-    ★실패 흔적은 **살아있는 요청**의 성공일 때만 지운다(2026-08-03 codex P1). 무조건 지우면
+    ★실패 흔적은 **살아있는 요청**의 성공일 때만 지운다(2026-08-03 codex 1R[P1]). 무조건 지우면
     이미 종료된 run의 실패가 늦게 도착한 업로드에 지워진다: 페처의 업로드 클라이언트 타임아웃
     (60s)은 서버 처리를 취소하지 않아, 페처가 실패를 보고해 run이 끝난 **뒤에** 서버 ingest가
     완주하며 여기로 들어온다(2026-07-17 실측 — success/error가 138ms 차로 같은 행을 갱신).
     그 순간 프론트(streamRefresh.runStreamRefresh)는 '요청 소멸 + 실패 흔적 없음 + 성공 시각
     변화'만 보고 **반쪽 정산 run을 "완료"로 읽는다** — 실패 판정의 유일한 근거가 last_error_at
     이기 때문이다. 신선도(last_success_at)는 조건 없이 올린다: 데이터는 실제로 들어왔다.
+
+    ★이 가드는 반드시 **한 UPDATE 안**에서 판정해야 한다(codex 2R[P1]). ORM으로 읽고-고치고-
+    커밋하면 조회와 쓰기 사이에 fetch-error(3회 소진)나 _reap_exhausted가 끼어들어, 이미 통과한
+    조건을 근거로 방금 기록된 terminal error를 지운다 — 순차 케이스만 막고 진짜 경합은 그대로
+    열린다. refresh_contract가 모든 전이를 조건부 UPDATE + rowcount로 쓰는 것과 같은 이유다.
     """
-    row = _rg_ensure_state_row(db, account_key)
-    row.status = "green"
-    if row.refresh_requested_at is not None:
-        # 이번 run 안의 성공 → 지난 시도의 실패 흔적 클리어(안 지우면 오래된 실패가 화면에 남는다)
-        row.last_error = None
-        row.last_error_at = None
-    row.last_success_at = kst_now()
+    _rg_ensure_state_row(db, account_key)
+    db.flush()
+    key = _rg_state_key(account_key)
+    col = CoupangWingCookie
+    keep = col.refresh_requested_at.is_(None)   # 요청이 없으면(=끝난 run) 실패 흔적 보존
+    db.execute(
+        update(col)
+        .where(col.account_key == key)
+        .values(
+            status="green",
+            last_success_at=kst_now(),
+            # 살아있는 run 안의 성공 → 지난 시도의 실패 흔적 클리어
+            # (안 지우면 1회차 실패 뒤 2회차가 성공해도 옛 실패가 화면에 남는다)
+            last_error=case((keep, col.last_error), else_=None),
+            last_error_at=case((keep, col.last_error_at), else_=None),
+        )
+    )
     db.commit()
 
 
