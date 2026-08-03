@@ -2089,7 +2089,11 @@ def request_wing_rg_settlement_refresh(
     account_key: str = Query(default="COUPANG_WING1", description="COUPANG_WING1/2"),
     db: Session = Depends(get_db),
 ):
-    """UI 'RG 정산 갱신' 버튼/스케줄 → 갱신 요청 플래그 set. 해당 계정 데몬이 다음 폴링에서 소비."""
+    """UI 'RG 정산 갱신' 버튼/스케줄 → 갱신 요청 플래그 set.
+
+    해당 계정 데몬이 다음 폴링에서 **임대**한다(소비하지 않는다 — lease 계약, 2026-07-27).
+    요청은 refresh-complete(성공) 또는 재시도 소진/로그인 필요(실패)로만 소멸한다.
+    """
     return rg_settlement_sync.rg_request_refresh(db, _require_rg_account(account_key))
 
 
@@ -2130,7 +2134,9 @@ def wing_rg_settlement_fetch_error(
     ★claim의 짝: 이 엔드포인트가 생기기 전엔 claim이 요청 플래그를 즉시 소비했고, 페처가 claim
     직후 브라우저 에러로 죽으면 prod에 아무 흔적도 안 남았다 — UI는 실패인지 진행 중인지 알 수
     없었다(215초 헛기다림). (지금은 lease 계약이라 claim이 플래그를 보존한다.)
-    성공은 upload-xlsx(rg_mark_heartbeat)가 알리고, 실패는 이 엔드포인트가 알린다.
+    데이터 도착은 upload-xlsx(rg_mark_heartbeat)가 알리고, 실패는 이 엔드포인트가 알린다.
+    ★RG의 **run 완주** 신호는 heartbeat가 아니라 refresh-complete다 — 한 회차가 여러 엑셀이라
+      heartbeat는 중간 신호다(claim의 settle_on_success_heartbeat=False).
     """
     _require_ingest_token(x_ingest_token)
     error = str(body.get("error") or "").strip() or "unknown"
