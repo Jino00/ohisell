@@ -455,6 +455,20 @@ def test_refresh_queue_bad_account_key_400(client, base, path, method):
     assert r.status_code == 400, r.text
 
 
+def _claimed_lease(client, base: str, account_key: str) -> str:
+    """요청 → 임대까지 HTTP로 진행하고 임대 식별자를 돌려준다.
+
+    ★실패 보고는 claim한 run만 할 수 있다(2026-08-03 slice 2: lease 필수). claim 없이 도착한
+    보고는 누구의 회차인지 알 수 없어 사용자의 새 요청을 죽일 수 있었다.
+    """
+    client.post(f"{base}/request-refresh?account_key={account_key}")
+    r = client.post(f"{base}/refresh-claim?account_key={account_key}",
+                    headers={"X-Ingest-Token": _TOKEN})
+    lease = r.json()["lease"]
+    assert lease is not None
+    return lease
+
+
 def test_vs_ingest_heartbeat_is_per_account(client):
     """판매분석 ingest 성공 heartbeat도 계정별(codex R1 [P2]).
 
@@ -464,7 +478,8 @@ def test_vs_ingest_heartbeat_is_per_account(client):
     hdr = {"X-Ingest-Token": _TOKEN}
     y = _yesterday()
     # WING1에 먼저 실패를 남긴다 — WING2 성공이 이걸 지우면 안 된다.
-    client.post(f"{_VS}/fetch-error?account_key=COUPANG_WING1", headers=hdr, json={"error": "boom"})
+    client.post(f"{_VS}/fetch-error?account_key=COUPANG_WING1", headers=hdr,
+                json={"error": "boom", "lease": _claimed_lease(client, _VS, "COUPANG_WING1")})
     r = client.post(f"{_VS}/ingest", headers=hdr, json={
         "account_key": "COUPANG_WING2",
         "days": [{"date": y, "registration_type": "NORMAL", "gmv": 1000, "units_sold": 1}],
@@ -480,7 +495,9 @@ def test_vs_ingest_heartbeat_is_per_account(client):
 def test_fetch_error_is_per_account(client, base):
     """실패 보고도 계정별 — WING2 실패가 WING1 화면에 뜨면 원인 오진단."""
     r = client.post(f"{base}/fetch-error?account_key=COUPANG_WING2",
-                    headers={"X-Ingest-Token": _TOKEN}, json={"error": "chrome crash"})
+                    headers={"X-Ingest-Token": _TOKEN},
+                    json={"error": "chrome crash",
+                          "lease": _claimed_lease(client, base, "COUPANG_WING2")})
     assert r.status_code == 200
     assert client.get(f"{base}/refresh-status?account_key=COUPANG_WING2").json()["last_error"] == "chrome crash"
     assert client.get(f"{base}/refresh-status?account_key=COUPANG_WING1").json()["last_error"] is None

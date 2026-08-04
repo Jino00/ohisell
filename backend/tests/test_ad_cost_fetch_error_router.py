@@ -12,7 +12,7 @@ from sqlalchemy.pool import StaticPool
 from app.database import Base, get_db
 from app.main import app
 from app.models import CoupangWingCookie
-from app.services.coupang import ad_cost_sync
+from app.services.coupang import ad_cost_sync, refresh_contract as rc
 
 _URL = "/api/coupang/ops/ad-cost/fetch-error"
 _TOKEN = "test-token-123"
@@ -41,9 +41,22 @@ def env(monkeypatch):
     app.dependency_overrides.clear()
 
 
+def _claimed_lease(seed) -> str:
+    """요청 → 임대까지 진행하고 임대 식별자를 돌려준다.
+
+    ★실패 보고는 claim한 run만 할 수 있다(2026-08-03 slice 2: lease 필수). 페처의 실제 순서와
+    같다 — claim 없이 도착한 보고는 누구의 회차인지 알 수 없어 남의 요청을 죽일 수 있었다.
+    """
+    rc.request_refresh(seed, ad_cost_sync._ADS_ACCOUNT)
+    lease = rc.claim_refresh(seed, ad_cost_sync._ADS_ACCOUNT)["lease"]
+    assert lease is not None
+    return lease
+
+
 def test_reports_error_with_valid_token(env):
     client, seed = env
-    r = client.post(_URL, json={"error": "browser: Target page ... has been closed"},
+    r = client.post(_URL, json={"error": "browser: Target page ... has been closed",
+                                "lease": _claimed_lease(seed)},
                     headers={"X-Ingest-Token": _TOKEN})
     assert r.status_code == 200
 
@@ -72,7 +85,8 @@ def test_rejects_wrong_token(env):
 def test_missing_error_field_records_unknown(env):
     """페처가 메시지 없이 보고해도 '실패했다'는 사실 자체는 남는다(빈 문자열로 지워지지 않음)."""
     client, seed = env
-    r = client.post(_URL, json={}, headers={"X-Ingest-Token": _TOKEN})
+    r = client.post(_URL, json={"lease": _claimed_lease(seed)},
+                    headers={"X-Ingest-Token": _TOKEN})
     assert r.status_code == 200
 
     seed.expire_all()

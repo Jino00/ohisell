@@ -21,14 +21,16 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 
 from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
 from app.models import NaverAgencyOp, NaverChangeLog
-from app.services.naver_ad import alert_humanizer, change_actor, change_log_narrator
+from app.services.naver_ad import alert_humanizer, change_actor, change_log_narrator, feed_reapply
+
+FEED_VERDICT_FEED = feed_reapply.VERDICT_FEED
 
 # ── 백필 마커 ────────────────────────────────────────────────────────
 # 소급 백필 스크립트가 값 꼬리에 남기는 표식: `1890 [BACKFILL 2026-08-03: 소급 백필, …]`.
@@ -120,6 +122,13 @@ class _Candidate:
     at: datetime
     time_basis: str
     auto_actor: str
+    # D-NAO-139 — 소재 grain agency_op에만 채워진다. 그 외(change_log·다른 grain)는 None.
+    feed_verdict: str | None = None
+    feed_product_id: str | None = None
+    feed_cluster_at: datetime | None = None
+    # 접기로 이 행에 합쳐진 형제 행들(대표행에만 채워진다). 1이면 접힌 게 없다.
+    feed_group_size: int = 1
+    feed_group_ids: tuple[int, ...] = ()
 
 
 def _effective_dt(occurred_at: datetime | None, op_date: date | None) -> tuple[datetime, str]:
@@ -232,13 +241,14 @@ def _agency_op_candidates(
         date_cond.append(NaverAgencyOp.op_date <= date_to)
 
     q = db.query(
-        NaverAgencyOp.id, NaverAgencyOp.occurred_at, NaverAgencyOp.op_date
+        NaverAgencyOp.id, NaverAgencyOp.occurred_at, NaverAgencyOp.op_date,
+        NaverAgencyOp.feed_verdict, NaverAgencyOp.feed_product_id, NaverAgencyOp.feed_cluster_at,
     ).filter(or_(and_(*occurred_cond), and_(*date_cond)))
     if campaign_id:
         q = q.filter(NaverAgencyOp.campaign_id == campaign_id)
 
     out: list[_Candidate] = []
-    for aid, occurred_at, op_date in q.all():
+    for aid, occurred_at, op_date, verdict, product_id, cluster_at in q.all():
         at, basis = _effective_dt(occurred_at, op_date)
         out.append(
             _Candidate(
@@ -248,9 +258,57 @@ def _agency_op_candidates(
                 time_basis=basis,
                 # 규칙 ③ — optimizer 컬럼을 보지 않는다(change_actor docstring의 용어 함정).
                 auto_actor=change_actor.classify_agency_op(),
+                feed_verdict=verdict,
+                feed_product_id=product_id,
+                feed_cluster_at=cluster_at,
             )
         )
     return out
+
+
+def _collapse_feed_reapply(candidates: list[_Candidate]) -> list[_Candidate]:
+    """피드 재적용 형제들을 **한 줄로 접는다** (D-NAO-139).
+
+    상품 하나의 피드가 재적용되면 그 상품의 소재가 전부 같은 초로 움직인다 — 화면엔 같은
+    상품명이 N줄로 늘어서고, 사람은 "대행사가 N번 수정했다"로 읽는다(Jino가 08-01 12:27 건에서
+    실제로 그렇게 읽었고 그게 이 기능의 출발점이다).
+
+    접는 기준은 **(군집 시작 시각, 상품)**이다 — `feed_cluster_at`은 판정 시점에 굳혀 둔 값이다.
+    ★행의 `at`(각 소재의 editTm)으로 묶으면 안 된다: 08-04 실측에서 피드가 **최대 501초에
+      걸쳐 전파**되는 경우가 나왔고(간격 0·66·437·501초), 그러면 한 사건의 소재들이 서로 다른
+      `at`을 갖게 되어 접기가 통째로 실패한다.
+    op_type은 키에 넣지 않는다: 접기 대상은 `verdict == feed`인 행뿐이고, 추적 필드가 바뀐 op은
+    판별기 가드①이 **무조건 real**로 내리므로 이 그룹에 들어올 수 없다.
+
+    ★대표행은 **가장 작은 source_id**로 고정한다(정렬·페이지가 흔들리지 않게). 접힌 형제
+    id는 `feed_group_ids`로 남긴다 — 화면이 펼치거나 감사할 수 있어야 하고, "몇 건이 접혔나"를
+    숫자로 말할 수 있어야 한다(조용한 truncation 금지).
+    """
+    groups: dict[tuple, list[_Candidate]] = {}
+    passthrough: list[_Candidate] = []
+    for c in candidates:
+        if (
+            c.source == change_actor.SOURCE_AGENCY_OP
+            and c.feed_verdict == FEED_VERDICT_FEED
+            and c.feed_product_id
+        ):
+            # 군집 시각이 없는 옛 행(판정 이전 백필분)은 자기 시각으로 떨어뜨린다 — 억지로
+            # 묶지 않는다(모르는 것을 아는 척하면 남의 사건과 합쳐진다).
+            groups.setdefault((c.feed_cluster_at or c.at, c.feed_product_id), []).append(c)
+        else:
+            passthrough.append(c)
+
+    for members in groups.values():
+        members.sort(key=lambda c: c.source_id)
+        head = members[0]
+        passthrough.append(
+            replace(
+                head,
+                feed_group_size=len(members),
+                feed_group_ids=tuple(m.source_id for m in members),
+            )
+        )
+    return passthrough
 
 
 # ── 본체 조립(2패스) ──────────────────────────────────────────────────
@@ -338,14 +396,24 @@ def build(
     source: str | None = None,
     include_dry_run: bool = False,
     include_blocked: bool = False,
+    include_feed_reapply: bool = True,
+    collapse_feed_reapply: bool = True,
     limit: int = 100,
     offset: int = 0,
 ) -> dict:
-    """두 원천 합본 목록. 반환: {total, by_actor, rows}.
+    """두 원천 합본 목록. 반환: {total, by_actor, feed_reapply, rows}.
 
     `actor` 필터는 **정정을 반영한 최종 주체** 기준이다(자동 판정 기준이 아니다) — 사람이
     "이건 내가 한 것"이라고 고쳤는데 '대행사' 필터에 계속 남아 있으면 정정이 무의미하다.
     `by_actor`는 actor 필터와 무관하게 **구간 전체 분포**를 준다(필터를 걸어도 전체가 보인다).
+
+    ★D-NAO-139 피드 재적용 두 스위치(둘은 다른 일을 한다):
+      - `collapse_feed_reapply`(기본 켬) — 같은 상품이 같은 초에 움직인 N줄을 **1줄로 접는다**.
+        정보는 안 버린다(`feed_group_size`·`feed_group_ids`로 남는다).
+      - `include_feed_reapply`(기본 켬) — 끄면 피드 재적용 행을 **목록에서 뺀다**. 대행사가
+        실제로 만진 것만 보고 싶을 때 쓴다.
+    ★두 스위치가 무엇을 얼마나 감췄는지는 반환의 `feed_reapply` 블록이 항상 말한다 —
+      조용한 truncation 금지(숨긴 줄 수를 화면이 모르면 "그날 조용했다"는 거짓 안심이 된다).
     """
     candidates: list[_Candidate] = []
     if source in (None, change_actor.SOURCE_CHANGE_LOG):
@@ -361,6 +429,25 @@ def build(
         candidates += _agency_op_candidates(
             db, since=since, until=until, campaign_id=campaign_id
         )
+
+    # ── D-NAO-139: 피드 재적용 처리는 **집계·페이지 계산 전에** 한다 ──
+    #   나중에 걸면 total과 화면 줄 수가 어긋나고, 페이지마다 접힌 개수가 달라진다.
+    feed_rows = [c for c in candidates if c.feed_verdict == FEED_VERDICT_FEED]
+    feed_stats = {
+        "verdict_rows": sum(1 for c in candidates if c.feed_verdict),
+        "feed_rows": len(feed_rows),
+        "hidden": 0,
+        "collapsed_into": 0,
+        "included": include_feed_reapply,
+        "collapsed": collapse_feed_reapply,
+    }
+    if not include_feed_reapply:
+        candidates = [c for c in candidates if c.feed_verdict != FEED_VERDICT_FEED]
+        feed_stats["hidden"] = len(feed_rows)
+    elif collapse_feed_reapply:
+        before = len(candidates)
+        candidates = _collapse_feed_reapply(candidates)
+        feed_stats["collapsed_into"] = before - len(candidates)
 
     overrides = _chunked_overrides(db, [(c.source, c.source_id) for c in candidates])
 
@@ -437,7 +524,32 @@ def build(
                 "before_unknown": None if body["before"] is not None else UNKNOWN_BEFORE,
                 "after_unknown": None if body["after"] is not None else UNKNOWN_AFTER,
                 **body,
+                # D-NAO-139 — 판정이 없는 행(다른 grain·매핑 결손)은 전부 None이다.
+                # 라벨·근거 문장은 서버가 만든다: 판정 규칙이 화면마다 다른 말이 되지 않게.
+                **_feed_fields(c, ao_by_id.get(c.source_id) if c.source == change_actor.SOURCE_AGENCY_OP else None),
             }
         )
 
-    return {"total": total, "by_actor": by_actor, "rows": rows}
+    return {"total": total, "by_actor": by_actor, "feed_reapply": feed_stats, "rows": rows}
+
+
+def _feed_fields(c: _Candidate, ao_row: NaverAgencyOp | None) -> dict:
+    """행에 실을 피드 재적용 판정 필드. 판정이 없으면 전부 None(빈칸을 지어내지 않는다)."""
+    if ao_row is None or not ao_row.feed_verdict:
+        return {
+            "feed_verdict": None, "feed_verdict_label": None, "feed_evidence": None,
+            "feed_group_size": 1, "feed_group_ids": [],
+        }
+    # ★`reason`을 반드시 함께 넘긴다 — 근거 문장은 reason으로 분기하므로, 빼먹으면 모든 행이
+    #   "상품 매핑을 찾지 못해 판별하지 않았다"로 잘못 말한다(판정은 맞는데 설명이 거짓).
+    verdict = feed_reapply.Verdict(
+        ao_row.feed_verdict, ao_row.feed_product_id, ao_row.feed_moved, ao_row.feed_total,
+        reason=ao_row.feed_reason or "", cluster_at=ao_row.feed_cluster_at,
+    )
+    return {
+        "feed_verdict": ao_row.feed_verdict,
+        "feed_verdict_label": feed_reapply.VERDICT_LABEL.get(ao_row.feed_verdict, ao_row.feed_verdict),
+        "feed_evidence": verdict.evidence(),
+        "feed_group_size": c.feed_group_size,
+        "feed_group_ids": list(c.feed_group_ids),
+    }

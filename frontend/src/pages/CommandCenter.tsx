@@ -57,6 +57,12 @@ function ratioPct(s: string | null): string {
   if (s == null) return "—";
   return `${(Number(s) * 100).toFixed(2)}%`;
 }
+// ★ratioPct와 다르다: 이건 백엔드가 **이미 퍼센트 단위로 준 값**을 그대로 찍는다(100을 곱하지
+//   않는다). 두 관례를 한 함수로 뭉치면 0.02%가 2.05%로 보이는 사고가 또 난다(2026-08-03).
+function pct1(s: string | null): string {
+  if (s == null) return "—";
+  return `${Number(s).toFixed(1)}%`;
+}
 
 type Axis = "account" | "ad" | "product" | "rocket";
 
@@ -1091,6 +1097,100 @@ function RocketView({
             </div>
             <div className="text-indigo-600 mt-1">{data.drift.note}</div>
           </div>
+
+          {/* 상품(SKU)별 손익 — 백엔드 sku_pnl 블록(배포 순서상 없을 수 있음).
+              ★그레인이 옵션이 아니라 SKU인 이유: 매출·원가는 원래 상품번호 그레인이고 광고비만
+                옵션 그레인인데 sku→option이 1:N이라, 옵션으로 내리면 매출·원가를 안분(추정)해야
+                한다. SKU로 올리면 광고비를 더하기만 하면 되고 추정이 사라진다(D-16). */}
+          {data.sku_pnl && data.sku_pnl.skus.length > 0 && (
+            <details className="bg-white border border-gray-200 rounded-lg mb-4" open>
+              <summary className="px-4 py-2 cursor-pointer select-none hover:bg-gray-50 text-sm font-semibold text-gray-700">
+                💵 상품별 손익 (상위 {num(data.sku_pnl.shown)}/{num(data.sku_pnl.sku_count)}개)
+              </summary>
+              <div className="border-t border-gray-100 p-4">
+                <div className="text-xs text-gray-500 mb-2" title={data.sku_pnl.coverage.note}>
+                  광고비 {won(data.sku_pnl.coverage.ad_total)} 중 · 상품 연결{" "}
+                  <b>{pct1(data.sku_pnl.coverage.ad_bridged_pct)}</b> · 매출 도달{" "}
+                  <b>{pct1(data.sku_pnl.coverage.ad_with_revenue_pct)}</b> · 순이익 도달{" "}
+                  <b className={Number(data.sku_pnl.coverage.ad_with_cost_pct ?? 0) < 90 ? "text-amber-600" : ""}>
+                    {pct1(data.sku_pnl.coverage.ad_with_cost_pct)}
+                  </b>
+                  {/* ★원가 출처를 갈라 보인다(D-19) — sellc 등록원가와 이름 유사도 자동매핑은
+                      신뢰 등급이 다르다. 같은 숫자로 뭉쳐 보이던 것이 2026-08-03 사고의 원인. */}
+                  {" ("}
+                  <span className="text-emerald-700">sellc {pct1(data.sku_pnl.coverage.ad_cost_sellc_pct)}</span>
+                  {" · "}
+                  <span className="text-amber-600">자동추정 {pct1(data.sku_pnl.coverage.ad_cost_auto_pct)}</span>
+                  {")"}
+                  {Number(data.sku_pnl.coverage.ad_unbridged) > 0 && (
+                    <> · 상품 미연결 {won(data.sku_pnl.coverage.ad_unbridged)}
+                      ({num(data.sku_pnl.coverage.unbridged_option_count)}개 옵션)</>
+                  )}
+                  <span className="block text-[11px] text-gray-400 mt-0.5">
+                    ※ 표시 전용 — 광고비가 PA 기준이라 SKU 순이익 합은 계정 순이익과 다릅니다. 원가 미확정 상품은 순이익을 내지 않습니다.
+                  </span>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="min-w-full text-xs">
+                    <thead>
+                      <tr className="text-left text-gray-400 border-b border-gray-100">
+                        <th className="py-1 pr-2">상품명</th>
+                        <th className="py-1 pr-2">상품번호</th>
+                        <th className="py-1 pr-2 text-right">매출(발주)</th>
+                        <th className="py-1 pr-2 text-right">광고비</th>
+                        <th className="py-1 pr-2 text-right">원가</th>
+                        <th className="py-1 pr-2 text-right">순이익</th>
+                        <th className="py-1 pr-2 text-right">ROAS</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {data.sku_pnl.skus.map((r) => {
+                        const adSpend = Number(r.ad_spend);
+                        const roas = adSpend > 0 ? ratioX((Number(r.conversion_revenue) / adSpend).toString()) : "—";
+                        const np = r.net_profit == null ? null : Number(r.net_profit);
+                        return (
+                          <tr key={r.sku_id} className="border-b border-gray-50 hover:bg-gray-50">
+                            <td className="py-1.5 pr-2 text-gray-700 max-w-[20rem] truncate" title={r.product_name ?? undefined}>
+                              {r.product_name || <span className="text-gray-300">—</span>}
+                              {r.option_count > 1 && (
+                                <span className="ml-1 text-[10px] text-gray-400">옵션 {num(r.option_count)}</span>
+                              )}
+                            </td>
+                            <td className="py-1.5 pr-2 text-gray-500 font-mono">{r.sku_id}</td>
+                            <td className="py-1.5 pr-2 text-right text-gray-600">{won(r.revenue)}</td>
+                            <td className="py-1.5 pr-2 text-right text-gray-600">{won(r.ad_spend)}</td>
+                            <td className="py-1.5 pr-2 text-right text-gray-500">
+                              {r.cost == null ? (
+                                <span className="text-gray-300">—</span>
+                              ) : (
+                                <>
+                                  {won(r.cost)}
+                                  {/* 자동추정 원가는 눈에 띄게 — 검증된 sellc 값과 섞이면 안 된다 */}
+                                  {r.cost_source === "auto_map" && (
+                                    <span className="ml-1 text-[10px] text-amber-600" title="이름 유사도 자동매핑 — 검증되지 않은 추정값입니다">추정</span>
+                                  )}
+                                </>
+                              )}
+                            </td>
+                            {/* ★순이익 null = 계산 안 함(0이 아니다). 사유는 툴팁으로 말한다 —
+                                모르는 것을 0으로 채우면 과대 순이익이 정상값과 섞인다. */}
+                            <td className="py-1.5 pr-2 text-right font-semibold" title={r.profit_basis}>
+                              {np == null ? (
+                                <span className="text-gray-300 cursor-help">—</span>
+                              ) : (
+                                <span className={np >= 0 ? "text-emerald-700" : "text-rose-600"}>{won(r.net_profit)}</span>
+                              )}
+                            </td>
+                            <td className="py-1.5 pr-2 text-right text-purple-700">{roas}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </details>
+          )}
 
           {/* 상품별(옵션) 광고비 표 — 백엔드 ad_options 블록(배포 순서상 없을 수 있음) */}
           {data.ad_options && data.ad_options.options.length > 0 && (

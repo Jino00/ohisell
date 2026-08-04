@@ -29,6 +29,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from app.models import NaverAgencyOp, NaverCampaignSettings, NaverChangeLog
+from app.services.naver_ad import feed_reapply
 from app.services.naver_ad.naver_execution_harness import WRITE_FAILURE_MARKER
 from app.services.naver_sa_ad_fetcher import _parse_ad_attr
 from app.utils.kst import KST, kst_now
@@ -325,6 +326,15 @@ def record_ad_external_changes(db: Session, ops: list[dict], now: datetime) -> i
     if not ops:
         return 0
     opt = _optimizer_map(db, {op["campaign_id"] for op in ops if op["campaign_id"]})
+    # D-NAO-139: 피드 재적용 판별을 **삽입 시점에** 굳힌다(조회 시 계산 금지 — 모듈 docstring).
+    # 판별 실패가 기록 자체를 막으면 안 된다: 실패하면 판정 없이(NULL) 행을 남긴다.
+    try:
+        verdicts = feed_reapply.classify(
+            db, [(op["entity_id"], op.get("edit_tm_raw"), op["op_type"]) for op in ops]
+        )
+    except Exception as e:  # noqa: BLE001 — 부가 판별, fail-open
+        log.warning("feed_reapply 판별 실패(판정 없이 기록 계속): %s", e)
+        verdicts = {}
     existing = {
         _dedup_key(r.entity_id, r.op_type, r.occurred_at, r.after_value)
         for r in db.query(
@@ -340,6 +350,7 @@ def record_ad_external_changes(db: Session, ops: list[dict], now: datetime) -> i
         if key in existing:
             continue
         existing.add(key)
+        v = verdicts.get((op["entity_id"], op["op_type"]), feed_reapply.NO_VERDICT)
         db.add(NaverAgencyOp(
             op_date=now.date(),
             detected_at=now,
@@ -354,6 +365,14 @@ def record_ad_external_changes(db: Session, ops: list[dict], now: datetime) -> i
             # 귀속 불확실(우리의 결과 불명 쓰기가 낀 구간)이면 예외 승격 보류 — 기록은 남는다.
             is_exception=op["op_type"] in _EXCEPTION_OP_TYPES and not op.get("uncertain"),
             occurred_at=op["occurred_at"],
+            # D-NAO-139 — 매핑을 못 찾으면 product_id가 None이고, 그때는 판정도 남기지 않는다
+            # (unknown을 적으면 "판별했는데 못 갈랐다"로 읽혀 매핑 결손을 숨긴다).
+            feed_verdict=v.verdict if v.product_id else None,
+            feed_product_id=v.product_id,
+            feed_moved=v.moved,
+            feed_total=v.total,
+            feed_cluster_at=v.cluster_at,
+            feed_reason=v.reason if v.product_id else None,
         ))
         inserted += 1
         log.warning(

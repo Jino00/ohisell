@@ -1,5 +1,22 @@
 # HANDOFF — APPLY_TM 관측 슬라이스(S1) 구현 + Jino 결정 3건 (2026-08-03 밤 KST)
 
+> ★**22:44 추가 — 이 문서의 전제가 하나 바뀌었다(D-NAO-139). 아래 본문보다 이 블록이 우선한다.**
+>
+> Jino가 화면에서 "한 사건이 두 줄로 보인다"를 짚었고, 파고드니 **훨씬 나은 판별자**가 나왔다:
+> **「같은 상품의 소재가 전량 같은 초로 움직였는가」**. 상품 하나의 피드가 갱신되면 그 상품을
+> 광고하는 소재 전부가 같은 초로 재적용된다(08-01 12:27:38 = 상품 380397804의 소재 5개/5그룹,
+> `ad_edit_tm` 초 단위 동일).
+>
+> - **판정**: `total≥2 & moved==total` → 피드 / `total≥2 & moved<total` → 실조작 / `total==1` → 판별 불가
+> - **검증**: 정답지인 `bid_change` 4건이 **전부 "부분"**. 소재 grain 37행 = 피드 26 / 실조작 7 / 판별 불가 4.
+>   피드 26건은 §6 ①에서 "같은 분에 2건 이상"으로 주석 단 26건과 **정확히 일치**.
+> - **★§6 ①·§5의 "소급 확증 불가"는 `APPLY_TM` 기준에서만 참이다.** `mall_product_id`·`ad_edit_tm`은
+>   이미 저장돼 있어 이 규칙은 **소급 적용된다** — 실제로 **37행 전부에 판정 주석을 재적재**했다
+>   (미주석 0. 26건만 고치면 "주석 없음"이 *안 본 것*인지 *실조작 판정*인지 구분 안 되기 때문).
+> - **S1(APPLY_TM)은 폐기가 아니라 역할 축소**: `total==1`인 상품(현재 4건)은 구조로 못 가르고
+>   거기가 `APPLY_TM`의 자리다. **S1은 그대로 배포한다.** 단 "임계 120초"는 구조 규칙엔 없다.
+> - **S2는 관측 대기가 사라져 지금 구현 가능하다**(설계·실패모드는 트랙 D-NAO-139). 착수 전 승인 1회.
+
 > 트랙: 네이버 SA 광고 최적화(우리판 MOP) · 기록: **D-NAO-137 · D-NAO-138**
 > 직전 세션: `HANDOFF_ad-change-detection-cadence-probe_20260803.md`(D-NAO-136)
 > 커밋: `7dfde2c`(문서) · `b1268ad`(S1 구현) — **둘 다 main, prod 배포 없음**
@@ -187,3 +204,17 @@ S3(`ids=` 배치 전환 + 주기 상향).
 문서: 트랙 `docs/tracks/active/track_naver-ad-optimization.md`(D-NAO-137·138),
 HANDOFF `.claude/memory/HANDOFF_apply-tm-observation-slice_20260803.md`.
 ```
+
+## §9 (23:1x 추가) D-NAO-139 S2 구현 완료 — 미배포, 커밋은 섞임
+
+Jino "그래"로 착수해 세 가지를 만들었다:
+1. **자동 판별** — 탐지 시점에 `feed_verdict`/`feed_product_id`/`feed_moved`/`feed_total`을 계산해 저장(마이그레이션 `f2b8c40d9e17`). 과거 행은 `feed_reapply.backfill()` 1회(멱등).
+2. **N줄 → 1줄 접기** — 같은 상품·같은 초를 한 줄로. 형제 id는 `feed_group_ids`로 보존.
+3. **숨기기 스위치** — 「피드 재적용 숨기기」. 무엇을 얼마나 접고 숨겼는지 항상 표시(`feed_reapply` 블록).
+
+테스트: 신규 13건 · 백엔드 **4,531 passed** · 프론트 **182 passed** · tsc 클린 · vite 빌드 성공.
+
+⚠️**커밋 혼입**: 이 9개 파일이 병행 세션 커밋 **`6b97a1c`**에 섞여 들어갔다(내용 온전·push됨).
+히스토리 재작성은 하지 않는다(공유 브랜치 push 완료 + 그 세션 활동 중).
+
+⚠️**미배포**: prod에는 아직 없다. 배포 순서 — ①`scripts/safe_deploy.sh backend/alembic/versions/f2b8c40d9e17_*.py backend/app/models.py backend/app/services/naver_ad/feed_reapply.py backend/app/services/naver_ad/ad_external_change.py backend/app/services/naver_ad/modification_feed.py backend/app/routers/naver_ad.py --migrate --restart` ②`--frontend`로 dist ③`feed_reapply.backfill()` 1회 실행(과거 37행 판정). 배포 시점은 Jino 결정("크론 뒤")에 따라 08-04 07:45 이후.

@@ -1739,9 +1739,10 @@ def rocket_fetch_error(
     # kind(옵션, 하위호환): 구버전 페처는 안 보낸다 → None = 평범한 실패 = 재시도 대상.
     # "login_required"만 특별 취급(재시도 제외, PLAN §0 금지선).
     kind = str(body.get("kind") or "").strip() or None
-    # lease(옵션, codex 1R[P1]): claim 응답의 임대 식별자. 지금 유효한 임대와 다르면 stale
-    # 보고로 무시한다(20분 넘게 멈췄던 옛 시도가 남의 임대를 반납하는 것 차단). 없으면 기존 동작.
-    lease = str(body.get("lease") or "").strip() or None
+    # lease(**필수**, 2026-08-03 slice 2): claim 응답의 임대 식별자. 지금 유효한 임대와 다르면
+    # stale 보고로 무시한다. 예전엔 옵션이라 없으면 대조 없이 남의 요청을 지울 수 있었다 —
+    # 근거·거부해도 안전한 이유는 _require_lease 참조.
+    lease = _require_lease(body)
     rocket_supplier_sync.mark_rocket_fetch_error(db, error, kind=kind, lease=lease)
     return {"ok": True}
 
@@ -1854,9 +1855,10 @@ def ohitech_ad_fetch_error(
     # kind(옵션, 하위호환): 구버전 페처는 안 보낸다 → None = 평범한 실패 = 재시도 대상.
     # "login_required"만 특별 취급(재시도 제외, PLAN §0 금지선).
     kind = str(body.get("kind") or "").strip() or None
-    # lease(옵션, codex 1R[P1]): claim 응답의 임대 식별자. 지금 유효한 임대와 다르면 stale
-    # 보고로 무시한다(20분 넘게 멈췄던 옛 시도가 남의 임대를 반납하는 것 차단). 없으면 기존 동작.
-    lease = str(body.get("lease") or "").strip() or None
+    # lease(**필수**, 2026-08-03 slice 2): claim 응답의 임대 식별자. 지금 유효한 임대와 다르면
+    # stale 보고로 무시한다. 예전엔 옵션이라 없으면 대조 없이 남의 요청을 지울 수 있었다 —
+    # 근거·거부해도 안전한 이유는 _require_lease 참조.
+    lease = _require_lease(body)
     ohitech_ad_sync.mark_fetch_error(db, error, kind=kind, lease=lease)
     return {"ok": True}
 
@@ -1963,9 +1965,10 @@ def report_ad_cost_fetch_error(
     # kind(옵션, 하위호환): 구버전 페처는 안 보낸다 → None = 평범한 실패 = 재시도 대상.
     # "login_required"만 특별 취급(재시도 제외, PLAN §0 금지선).
     kind = str(body.get("kind") or "").strip() or None
-    # lease(옵션, codex 1R[P1]): claim 응답의 임대 식별자. 지금 유효한 임대와 다르면 stale
-    # 보고로 무시한다(20분 넘게 멈췄던 옛 시도가 남의 임대를 반납하는 것 차단). 없으면 기존 동작.
-    lease = str(body.get("lease") or "").strip() or None
+    # lease(**필수**, 2026-08-03 slice 2): claim 응답의 임대 식별자. 지금 유효한 임대와 다르면
+    # stale 보고로 무시한다. 예전엔 옵션이라 없으면 대조 없이 남의 요청을 지울 수 있었다 —
+    # 근거·거부해도 안전한 이유는 _require_lease 참조.
+    lease = _require_lease(body)
     ad_cost_sync.mark_fetch_error(db, error, kind=kind, lease=lease)
     return {"ok": True}
 
@@ -1990,6 +1993,36 @@ def _require_ingest_token(x_ingest_token: str | None) -> None:
     expected = os.getenv("AD_INGEST_TOKEN", "").strip()
     if not expected or not x_ingest_token or not _secrets.compare_digest(x_ingest_token.strip(), expected):
         raise HTTPException(status_code=401, detail="unauthorized")
+
+
+def _require_lease(body: dict[str, Any]) -> str:
+    """페처가 보내는 **회차 종료 신호**(완료·실패)에서 임대 식별자를 꺼낸다. 없으면 400.
+
+    ★왜 필수인가(2026-08-03, codex 3R[P1]와 그 형제 구멍): 이 신호들은 갱신 요청을 **소멸**
+    시킬 수 있다. lease가 없으면 "지금 유효한 임대"와 대조할 수단이 없어 **누구의 회차인지
+    모른 채** 요청을 지운다 — 보고가 지연된 run A가 끝나고 사용자가 다시 눌러 요청 B가 생긴
+    뒤 늦은 A의 신호가 도착하면 **B의 요청이 지워지고**, 프론트(streamRefresh.ts의 "새 실패
+    없이 요청만 사라졌다 = 정상 종료" 분기)가 시작도 안 한 B를 'done'으로 오보한다.
+    실패 보고에선 reason이 잡히는 kind(login_required·access_denied·mapping_broken·시도 소진)가
+    요청을 지우므로, 늦은 login_required 하나가 갓 시작한 남의 회차를 죽일 수 있었다.
+
+    ★거부해도 실패 가시성은 잃지 않는다: 보고가 거부된 회차는 "데몬이 보고 없이 죽었다"로
+    퇴화하고 그건 lease 계약이 이미 처리한다(TTL 만료 → claim 경로의 reaper → last_error에
+    "재시도 3회 소진 — 마지막 시도가 보고 없이 종료"). 가시성이 사라지는 게 아니라 늦어진다.
+    페처도 비200을 로그로 남긴다("fetch-error 보고 비200 — 실패 흔적이 prod에 안 남는다").
+
+    ★정상 경로는 안 깨진다(라이브 실측 2026-08-03): 페처 4종의 회차 종료 보고 호출부는 전부
+    claim 응답의 lease를 싣고, claim은 claimed=true면 lease를 반드시 준다
+    (refresh_contract.claim_refresh) — 그 성질이 이 필수화의 안전성을 떠받친다.
+    """
+    lease = str(body.get("lease") or "").strip() or None
+    if lease is None:
+        raise HTTPException(
+            status_code=400,
+            detail="lease가 필요합니다 — refresh-claim 응답의 lease를 그대로 보내세요. "
+                   "임대 대조 없이 요청을 지우면 남의 회차를 완료로 오보합니다.",
+        )
+    return lease
 
 
 _VS_TYPES = {"NORMAL", "RFM"}  # ref 18: NORMAL=3P / RFM=RG
@@ -2123,9 +2156,10 @@ def wing_vendor_summary_fetch_error(
     # kind(옵션, 하위호환): 구버전 페처는 안 보낸다 → None = 평범한 실패 = 재시도 대상.
     # "login_required"만 특별 취급(재시도 제외, PLAN §0 금지선).
     kind = str(body.get("kind") or "").strip() or None
-    # lease(옵션, codex 1R[P1]): claim 응답의 임대 식별자. 지금 유효한 임대와 다르면 stale
-    # 보고로 무시한다(20분 넘게 멈췄던 옛 시도가 남의 임대를 반납하는 것 차단). 없으면 기존 동작.
-    lease = str(body.get("lease") or "").strip() or None
+    # lease(**필수**, 2026-08-03 slice 2): claim 응답의 임대 식별자. 지금 유효한 임대와 다르면
+    # stale 보고로 무시한다. 예전엔 옵션이라 없으면 대조 없이 남의 요청을 지울 수 있었다 —
+    # 근거·거부해도 안전한 이유는 _require_lease 참조.
+    lease = _require_lease(body)
     vendor_summary_sync.mark_fetch_error(
         db, error, account_key=_require_rg_account(account_key), kind=kind, lease=lease)
     return {"ok": True}
@@ -2193,9 +2227,10 @@ def wing_rg_settlement_fetch_error(
     # kind(옵션, 하위호환): 구버전 페처는 안 보낸다 → None = 평범한 실패 = 재시도 대상.
     # "login_required"만 특별 취급(재시도 제외, PLAN §0 금지선).
     kind = str(body.get("kind") or "").strip() or None
-    # lease(옵션, codex 1R[P1]): claim 응답의 임대 식별자. 지금 유효한 임대와 다르면 stale
-    # 보고로 무시한다(20분 넘게 멈췄던 옛 시도가 남의 임대를 반납하는 것 차단). 없으면 기존 동작.
-    lease = str(body.get("lease") or "").strip() or None
+    # lease(**필수**, 2026-08-03 slice 2): claim 응답의 임대 식별자. 지금 유효한 임대와 다르면
+    # stale 보고로 무시한다. 예전엔 옵션이라 없으면 대조 없이 남의 요청을 지울 수 있었다 —
+    # 근거·거부해도 안전한 이유는 _require_lease 참조.
+    lease = _require_lease(body)
     rg_settlement_sync.rg_mark_fetch_error(
         db, error, account_key=_require_rg_account(account_key), kind=kind, lease=lease)
     return {"ok": True}
@@ -2238,13 +2273,7 @@ def wing_rg_settlement_refresh_complete(
     (refresh_contract.claim_refresh) — 그 성질이 이 필수화의 안전성을 떠받친다.
     """
     _require_ingest_token(x_ingest_token)
-    lease = str(body.get("lease") or "").strip() or None
-    if lease is None:
-        raise HTTPException(
-            status_code=400,
-            detail="lease가 필요합니다 — refresh-claim 응답의 lease를 그대로 보내세요. "
-                   "임대 대조 없이 요청을 지우면 남의 회차를 완료로 오보합니다.",
-        )
+    lease = _require_lease(body)
     # clear_error=True(codex 2R[P2]): 1회차가 실패하고 2회차가 "받을 게 없어" 정상 종료하면
     # last_error_at만 바뀐 채 요청이 사라진다 → UI가 성공한 회차를 실패로 읽는다. 실패 흔적을
     # 함께 지우되 last_success_at(데이터 신선도 시계)은 그대로 둔다.

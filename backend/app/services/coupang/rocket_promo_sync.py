@@ -15,7 +15,12 @@ from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
 from app.clients.coupang import rocket_promo as parser
-from app.models import CoupangCoupon, CoupangRocketPromotion, CoupangRocketSalesDaily
+from app.models import (
+    CoupangCoupon,
+    CoupangRocketOptionSku,
+    CoupangRocketPromotion,
+    CoupangRocketSalesDaily,
+)
 from app.utils.kst import kst_now
 
 log = logging.getLogger(__name__)
@@ -25,6 +30,46 @@ log = logging.getLogger(__name__)
 #   marketplace). D-CPP-3의 "사용 금액"은 **셀러 부담 즉시할인**이므로 INSTANT에만 붙인다 —
 #   kind를 안 걸면 DOWNLOAD 행(이미 usage_amount를 가진 다른 축)에 권위값이 잘못 앉는다.
 _COUPON_KIND = "INSTANT"
+
+
+def _observe_option_sku(db: Session, vendor_id: str, rec: dict, now) -> None:
+    """옵션ID↔상품번호 대응을 **누적 보존**한다(트랙 ohitech-ad D-16).
+
+    판매분석은 BETA + 무료체험(D-CPP-5, 2026-08-20 종료 예정)이라 언젠가 끊긴다. 대응 자체는
+    시간 불변인데(실측: sku_id가 바뀐 옵션 0건) 지금까지 이 일별 테이블의 부산물로만 존재했다
+    — 수집이 멈추면 브리지가 통째로 사라져 옵션·상품별 손익이 조용히 멈춘다. 여기 남기면
+    끊긴 뒤에도 이미 아는 상품은 계속 산출된다.
+
+    ★sku_id가 비면 **아무것도 쓰지 않는다**(빈 행이 "매핑 있음"으로 오인되면 손익이 0원가로
+      계산돼 순이익이 과대해진다). ★기존 행의 sku_id는 값이 실제로 바뀔 때만 갱신하고 그때
+      로그를 남긴다 — 불변이라던 전제가 깨진 것이므로 조용히 넘기면 안 된다.
+    """
+    sku = (rec.get("sku_id") or "").strip()
+    option_id = rec.get("option_id")
+    if not sku or not option_id:
+        return
+    row = (
+        db.query(CoupangRocketOptionSku)
+        .filter(CoupangRocketOptionSku.option_id == option_id)
+        .first()
+    )
+    if row is None:
+        db.add(CoupangRocketOptionSku(
+            option_id=option_id, sku_id=sku, vendor_id=vendor_id,
+            product_name=rec.get("product_name"), source="sales_analysis",
+            first_observed_at=now, last_observed_at=now,
+        ))
+        return
+    if row.sku_id != sku:
+        log.warning(
+            "1P 브리지 변경 관측: option_id=%s sku %s → %s (불변 전제가 깨졌다 — 손익 귀속이 바뀐다)",
+            option_id, row.sku_id, sku,
+        )
+        row.sku_id = sku
+    row.vendor_id = vendor_id
+    if rec.get("product_name"):
+        row.product_name = rec["product_name"]
+    row.last_observed_at = now
 
 
 # ════════════════════════════════════════════════
@@ -72,6 +117,7 @@ def ingest_rocket_sales(
         row.product_name = rec["product_name"]
         row.source = rec["source"]
         row.synced_at = now
+        _observe_option_sku(db, vendor_id, rec, now)
     db.commit()
     log.info(
         "1P 판매 ingest: vendor=%s records=%d skipped=%d deduped=%d",

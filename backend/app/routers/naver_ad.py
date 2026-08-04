@@ -1285,6 +1285,14 @@ def get_modifications(
     include_blocked: bool = Query(
         False, description="가드레일이 막아 **실제로는 안 바뀐** 시도도 포함(기본 제외)"
     ),
+    include_feed_reapply: bool = Query(
+        True,
+        description="네이버 상품 피드 재적용으로 판별된 행 포함(D-NAO-139). 끄면 사람이 만진 것만 남는다",
+    ),
+    collapse_feed_reapply: bool = Query(
+        True,
+        description="같은 상품이 같은 초에 움직인 N줄을 1줄로 접는다(D-NAO-139). 정보는 feed_group_ids에 남는다",
+    ),
     limit: int = Query(100, ge=1, le=_MAX_MODIFICATION_LIMIT),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -1309,6 +1317,8 @@ def get_modifications(
         source=source,
         include_dry_run=include_dry_run,
         include_blocked=include_blocked,
+        include_feed_reapply=include_feed_reapply,
+        collapse_feed_reapply=collapse_feed_reapply,
         limit=limit,
         offset=offset,
     )
