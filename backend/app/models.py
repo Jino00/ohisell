@@ -294,6 +294,20 @@ class Order(Base):
     # 회수 택배사 — 라이브 86건 전부 HANJIN(N배송 반품도 품고가 아니라 한진이다).
     # 회수 단가가 택배사별로 갈리면 이 컬럼이 판별자가 된다.
     return_collect_company: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    # ── 교환 배송 손익 (2026-08-04) ────────────────────────────────────────────
+    # ★반품과 성격이 다르다: 교환 주문은 `exchanged` 상태이고 REVENUE_EXCLUDED에 **없다** —
+    #   매출·원가·수수료·출고비가 이미 정상 계상돼 있다. 빠진 것은 셋뿐이다:
+    #   ①고객에게 받은 교환 배송비 ②회수비 ③**재발송 출고비**(한 주문에 출고가 두 번
+    #   일어났는데 엔진은 한 번만 센다). 그래서 교환은 여태 손익에 0회 등장했다.
+    # ★귀속일 = 재배송 처리일(raw_data.exchange.reDeliveryOperationDate). 요청일이 아니다.
+    # ★EXCHANGE_DONE만 값이 찬다 — REJECT 건은 회수도 재발송도 없다(order_delivery 참조).
+    # NULL = 교환 손익 없음(교환 아님·거부됨·정보 없음). 0 = 미청구(실측된 0).
+    exchange_completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+    exchange_fee_demand_amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+    exchange_collect_company: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    # 지원액 필드명이 반품과 다르다(membershipsArrivalGuaranteeClaimSupportingAmount).
+    # 라이브 전건 0 — N배송 교환이 0건이기 때문이다. 생기면 이 컬럼이 값을 받는다.
+    exchange_fee_support_amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
     # ★네이버가 대신 부담하는 반품 배송비(claimDeliveryFeeSupportAmount). 라이브 실측:
     #   N배송 반품 2건이 `MEMBERSHIP_ARRIVAL_GUARANTEE` 유형으로 **5,500원 지원**, 일반배송은 0.
     #   N배송 반품에서 고객 청구가 0이었던 이유가 이것이다 — 안 받은 게 아니라 네이버가 낸다.
