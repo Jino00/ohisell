@@ -25,6 +25,17 @@ PAGE_SIZE = 100
 # 정책이 아니다 — 걸리면 로그로 드러난다(조용한 절단 금지).
 MAX_PAGES = 20
 
+# ★캠페인 목록은 **goalType별로 따로 물어야 한다**(2026-08-04 실측).
+#   같은 엔드포인트인데 goalType=SALES면 오픽스 16건, NCA면 4건이 온다 — 합집합이 아니다.
+#   처음엔 `goalType: null`로 바꿔보고 "필터가 아무것도 안 숨긴다"고 결론냈는데, null은
+#   **필터 해제가 아니라 기본값(SALES)**이었다. 그래서 신규 구매 고객 확보(NCA) 캠페인
+#   4건(오픽스)·48건(오하이테크)이 통째로 빠져 있었다 — 오픽스 광고비의 10.7%.
+#   ★비워보고 넘어가지 말고 **값을 실제로 훑어서** 확인할 것.
+#   실측: SALES·NCA만 유효. BRAND/AWARENESS/REACH 등 14종은 전부 0건이었다.
+#   ⚠️단 "0건"은 '그런 캠페인이 없다'와 '그런 이름의 goalType이 아니다'를 구분하지 못한다.
+#     쿠팡이 새 목적을 추가하면 이 목록에 넣기 전까지 안 보인다(알려진 한계).
+GOAL_TYPES = ("SALES", "NCA")
+
 # 대시보드가 실제로 보내는 payload 그대로(추측 금지 — 2026-08-04 캡처본에서 옮김).
 _BASE_PAYLOAD: dict[str, Any] = {
     "isDeleted": False,
@@ -62,20 +73,22 @@ _FETCH_JS = """async ([url, payload]) => {
 }"""
 
 
-def _payload(page_no: int, *, is_active: bool | None) -> dict:
+def _payload(page_no: int, *, is_active: bool | None, goal_type: str) -> dict:
     p = dict(_BASE_PAYLOAD)
     p["isActive"] = is_active
+    p["goalType"] = goal_type
     p["pagination"] = {"page": page_no, "size": PAGE_SIZE}
     return p
 
 
-def _fetch_page(page, page_no: int, *, is_active: bool | None, log) -> dict | None:
-    res = page.evaluate(_FETCH_JS, [CAMPAIGNS_URL, _payload(page_no, is_active=is_active)])
+def _fetch_page(page, page_no: int, *, is_active: bool | None, goal_type: str, log) -> dict | None:
+    res = page.evaluate(_FETCH_JS,
+                        [CAMPAIGNS_URL, _payload(page_no, is_active=is_active, goal_type=goal_type)])
     status = (res or {}).get("status")
     body = (res or {}).get("body") or ""
     if status != 200:
-        log.warning("광고 설정 조회 status=%s (page=%s active=%s) — %s",
-                    status, page_no, is_active, body[:120].replace("\n", " "))
+        log.warning("광고 설정 조회 status=%s (page=%s active=%s goal=%s) — %s",
+                    status, page_no, is_active, goal_type, body[:120].replace("\n", " "))
         return None
     # ★로그인 HTML은 200으로도 온다(쿠팡 실측) — JSON 파싱 실패로 걸러진다.
     try:
@@ -89,7 +102,7 @@ def _fetch_page(page, page_no: int, *, is_active: bool | None, log) -> dict | No
     return j
 
 
-def _fetch_all_pages(page, *, is_active: bool | None, log) -> list[dict] | None:
+def _fetch_all_pages(page, *, is_active: bool | None, goal_type: str, log) -> list[dict] | None:
     """★`hasNextPage`를 믿지 않는다 — **`totalCount`가 권위값이다.**
 
     2026-08-04 실측(광고그룹 204811906의 `/ads`): `size=100`으로 받으면 100건이 오는데
@@ -103,7 +116,7 @@ def _fetch_all_pages(page, *, is_active: bool | None, log) -> list[dict] | None:
     out: list[dict] = []
     total: int | None = None
     for n in range(MAX_PAGES):
-        j = _fetch_page(page, n, is_active=is_active, log=log)
+        j = _fetch_page(page, n, is_active=is_active, goal_type=goal_type, log=log)
         if j is None:
             return None if n == 0 else out   # 1페이지도 못 받으면 실패, 중간이면 받은 만큼
         batch = j.get("campaigns") or []
@@ -126,6 +139,27 @@ def _fetch_all_pages(page, *, is_active: bool | None, log) -> list[dict] | None:
     return out
 
 
+def _fetch_by_goals(page, *, is_active: bool | None, log) -> tuple[list[dict], dict[str, int]]:
+    """GOAL_TYPES를 각각 조회해 합친다. id 기준 중복 제거(같은 캠페인이 두 목적에 뜨진 않지만 방어).
+
+    ★한 goalType이 실패해도 나머지는 살린다 — 다만 몇 건을 못 받았는지 로그로 드러난다.
+    """
+    merged: dict[str, dict] = {}
+    per_goal: dict[str, int] = {}
+    for g in GOAL_TYPES:
+        rows = _fetch_all_pages(page, is_active=is_active, goal_type=g, log=log)
+        if rows is None:
+            log.warning("goalType=%s 조회 실패(active=%s) — 이 목적은 이번 회차에서 빠진다.", g, is_active)
+            per_goal[g] = -1
+            continue
+        per_goal[g] = len(rows)
+        for c in rows:
+            cid = c.get("id")
+            if cid is not None:
+                merged[str(cid)] = c
+    return list(merged.values()), per_goal
+
+
 def collect(page, *, log) -> dict | None:
     """전량(A축: 신규·On/Off·삭제) + 활성(B축: 내용 diff) 두 벌.
 
@@ -133,15 +167,17 @@ def collect(page, *, log) -> dict | None:
     캠페인의 내용 변경에 대해서는 On되어 있는 캠페인만 보면 되는거야."
     활성만 따로 받는 이유: 오하이테크가 525건인데 활성은 16건이라 서버 필터로 1콜에 끝난다.
     """
-    all_rows = _fetch_all_pages(page, is_active=None, log=log)
+    # ★goalType별로 따로 물어서 합친다(GOAL_TYPES 주석 참조). 한 번에 다 주지 않는다.
+    all_rows, per_goal = _fetch_by_goals(page, is_active=None, log=log)
     if not all_rows:
         log.warning("광고 설정 전량 조회 실패 — 이번 회차는 설정 수집을 건너뛴다.")
         return None      # ★빈 목록을 올리면 서버가 '전부 삭제'로 오독할 수 있다(서버도 막지만 여기서도 막는다)
-    active_rows = _fetch_all_pages(page, is_active=True, log=log)
+    active_rows, _ = _fetch_by_goals(page, is_active=True, log=log)
     if active_rows is None:
         log.warning("광고 설정 활성 조회 실패 — 내용 diff 없이 존재·On/Off만 올린다.")
         active_rows = []
-    log.info("광고 설정 수집: 전량 %d건 · 활성 %d건", len(all_rows), len(active_rows))
+    log.info("광고 설정 수집: 전량 %d건(%s) · 활성 %d건", len(all_rows),
+             " ".join(f"{g}={n}" for g, n in per_goal.items()), len(active_rows))
     # 쿠팡이 직접 주는 변경 이력(전/후 값 + 실행 시각 + 90일 소급). 실패해도 나머지는 올린다.
     events = _fetch_history(page, [str(c.get("id")) for c in all_rows if c.get("id") is not None],
                             days=HISTORY_DAYS, log=log) or []
