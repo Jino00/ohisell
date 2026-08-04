@@ -147,7 +147,14 @@ def collect(page, *, log) -> dict | None:
                             days=HISTORY_DAYS, log=log) or []
     # ★전량은 **얇게** 보낸다. 서버(A축)가 쓰는 건 이 다섯 필드뿐인데 full payload로 보내면
     #   525건 ≈ 1MB다. 내용 diff는 어차피 활성분(B축)으로만 한다(D-CAC-3).
-    return {"all": [_thin(c) for c in all_rows], "active": active_rows, "events": events}
+    # 소재(옵션ID) — 활성 캠페인만. 실패해도 나머지는 올린다.
+    try:
+        ads = _collect_ads(page, active_rows, log=log)
+    except Exception as e:  # noqa: BLE001
+        log.warning("소재 수집 실패(회차는 계속): %s", str(e)[:140])
+        ads = []
+    return {"all": [_thin(c) for c in all_rows], "active": active_rows,
+            "events": events, "ads": ads}
 
 
 _THIN_KEYS = ("id", "name", "isActive", "updatedAt", "createdAt")
@@ -155,6 +162,66 @@ _THIN_KEYS = ("id", "name", "isActive", "updatedAt", "createdAt")
 
 def _thin(c: dict) -> dict:
     return {k: c.get(k) for k in _THIN_KEYS}
+
+
+# ── 소재(광고 상품) 목록 ──────────────────────────────────────────────
+# `VIID` 이벤트는 개수만 준다. 이 목록이 **어떤 옵션ID인지**를 채운다.
+ADS_URL = "https://advertising.coupang.com/marketing/tetris-api/%s/ads"
+ADS_SIZE = 500          # ★size를 크게 줘야 한 번에 온다(size=100이면 447건 중 100건만 온다)
+ADS_MAX_PAGES = 10
+
+
+def _fetch_ads(page, adgroup_id: str, *, log) -> list[dict] | None:
+    """한 광고그룹의 소재 전량. ★`totalCount`가 권위값이다(`hasNextPage`는 거짓말한다)."""
+    got: list[dict] = []
+    total = None
+    for n in range(ADS_MAX_PAGES):
+        res = page.evaluate(_FETCH_JS, [ADS_URL % adgroup_id, {
+            "isDeleted": False, "pagination": {"page": n, "size": ADS_SIZE},
+            "sortedBy": "ID", "isSortDesc": True,
+        }])
+        if (res or {}).get("status") != 200:
+            log.warning("소재 조회 status=%s (그룹 %s p%s)", (res or {}).get("status"), adgroup_id, n)
+            return got or None
+        try:
+            j = json.loads((res or {}).get("body") or "")
+        except ValueError:
+            log.warning("소재 응답이 JSON이 아니다(그룹 %s).", adgroup_id)
+            return got or None
+        batch = j.get("ads") or []
+        got.extend(batch)
+        total = (j.get("pageInfo") or {}).get("totalCount")
+        if total is None or len(got) >= total or not batch:
+            break
+    if total is not None and len(got) < total:
+        log.warning("소재 %s: %d/%d만 받았다 — 조용한 절단 방지 경고.", adgroup_id, len(got), total)
+    return got
+
+
+def _collect_ads(page, active_rows: list[dict], *, log) -> list[dict]:
+    """활성 캠페인의 모든 광고그룹 소재. 서버가 쓰는 형태로 얇게 만들어 보낸다."""
+    out: list[dict] = []
+    for c in active_rows:
+        cid = str(c.get("id"))
+        for g in (c.get("groupList") or []):
+            gid = str(g.get("id"))
+            if not gid or gid == "None":
+                continue
+            ads = _fetch_ads(page, gid, log=log)
+            if ads is None:
+                continue
+            for a in ads:
+                out.append({
+                    "campaign_id": cid, "adgroup_id": gid,
+                    "ad_node_id": str(a.get("adNodeId") or ""),
+                    "vendor_item_id": a.get("vendoritemid"),
+                    "item_name": (a.get("itemName") or "")[:200],
+                    "is_active": bool(a.get("isActive")),
+                    "is_suspended": bool(a.get("isSuspended")),
+                    "pricing_override": a.get("pricingOverride"),
+                })
+    log.info("소재 수집: %d건", len(out))
+    return out
 
 
 # ── 쿠팡이 직접 주는 변경 이력 ────────────────────────────────────────
@@ -207,7 +274,7 @@ def push(prod_base_url: str, ingest_token: str, account: str, payload: dict, *, 
     """prod /ad-settings/ingest push. 실패해도 회차를 실패시키지 않는다(곁다리)."""
     url = prod_base_url.rstrip("/") + "/api/coupang/ops/ad-settings/ingest"
     body = {"account": account, "all": payload["all"], "active": payload["active"],
-            "events": payload.get("events") or []}
+            "events": payload.get("events") or [], "ads": payload.get("ads") or []}
     try:
         r = requests.post(url, json=body, headers={"X-Ingest-Token": ingest_token}, timeout=60)
     except requests.RequestException as e:

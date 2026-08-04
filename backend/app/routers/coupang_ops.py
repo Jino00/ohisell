@@ -27,7 +27,7 @@ from app.database import get_db
 from app.models import Channel, CoupangAdChangeLog, CoupangAdCostDaily, CoupangAdEntitySnapshot, CoupangAdOptionDaily, CoupangProductItem, CoupangRevenueFee, CoupangRgInbound, CoupangRgOrderItem, CoupangRgSettlementFee, CoupangRocketPromotion, Order, ProductChannelMapping, ProductMaster
 from app.routers._coupang_write_http import handle_write as _handle_write
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
-from app.services.coupang import ad_change_history, ad_cost_sync, ad_settings_diff, coupon_write, refresh_contract, coupang_seller_cost as _seller_cost_harness, demand_classifier, in_transit_estimator, lead_time_estimator, ohitech_ad_sync, product_write, rg_fee_audit, rg_inbound_sync, rg_product_size_sync, rg_replenishment, rg_settlement_sync, replenishment_backtest, rocket_cost_map, rocket_promo_sync, rocket_supplier_sync, rg_cost_reader as _rg_reader, sales_velocity_estimator, vendor_summary_sync
+from app.services.coupang import ad_change_history, ad_cost_sync, ad_creative_diff, ad_settings_diff, coupon_write, refresh_contract, coupang_seller_cost as _seller_cost_harness, demand_classifier, in_transit_estimator, lead_time_estimator, ohitech_ad_sync, product_write, rg_fee_audit, rg_inbound_sync, rg_product_size_sync, rg_replenishment, rg_settlement_sync, replenishment_backtest, rocket_cost_map, rocket_promo_sync, rocket_supplier_sync, rg_cost_reader as _rg_reader, sales_velocity_estimator, vendor_summary_sync
 from app.utils.crypto import CookieCryptoError
 
 log = logging.getLogger(__name__)
@@ -2573,6 +2573,9 @@ def ingest_ad_settings(
     events = body.get("events")
     if events is not None and not isinstance(events, list):
         raise HTTPException(status_code=400, detail="events는 리스트여야 합니다")
+    ads = body.get("ads")
+    if ads is not None and not isinstance(ads, list):
+        raise HTTPException(status_code=400, detail="ads는 리스트여야 합니다")
 
     out: dict[str, Any] = {}
     if events:
@@ -2581,8 +2584,23 @@ def ingest_ad_settings(
                    for c in all_rows if c.get("id") is not None}
         out["history"] = ad_change_history.ingest_events(db, account, events, name_of=name_of)
     out.update(ad_settings_diff.ingest(db, account, all_rows, active_rows))
+    if ads:
+        # ★설정 diff **뒤에** 둔다: 소재 증감은 쿠팡 ads_changed 행에 목록을 얹는데,
+        #   그 행이 먼저 들어와 있어야 붙일 대상이 있다.
+        out["creatives"] = ad_creative_diff.ingest_ads(db, account, ads)
     db.commit()
     return out
+
+
+def _safe_json(raw: str | None):
+    if not raw:
+        return None
+    try:
+        import json as _json
+        return _json.loads(raw)
+    except (ValueError, TypeError):
+        log.warning("change_log.detail_json 파손 — null로 내린다: %s", (raw or "")[:80])
+        return None
 
 
 def _parse_kst_date(v: str | None, default: date) -> date:
@@ -2645,6 +2663,10 @@ def list_ad_changes(
             #   화면은 이 둘을 반드시 구분해 보여야 한다(모르는 걸 아는 척하지 않는다).
             "time_basis": r.time_basis,
             "detected_at": _kst(r.detected_at),
+            # 원천 — 화면이 "쿠팡이 알려준 것"과 "우리가 비교해 알아낸 것"을 구분할 수 있게.
+            "source": r.source,
+            # 소재 변경의 옵션ID 목록 등. 파손된 JSON은 조용히 삼키지 않고 null로 내린다.
+            "detail": _safe_json(r.detail_json),
         }
         for r in rows
     ]
