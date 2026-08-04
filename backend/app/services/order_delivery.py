@@ -104,6 +104,14 @@ RETURN_COLUMNS = (
     "return_fee_support_amount",
 )
 
+# 교환 배송 손익용 영속 컬럼(반품과 대칭)
+EXCHANGE_COLUMNS = (
+    "exchange_completed_at",
+    "exchange_fee_demand_amount",
+    "exchange_collect_company",
+    "exchange_fee_support_amount",
+)
+
 
 def parse_raw_data(raw: Any) -> dict | None:
     """raw_data(dict | JSON str | None) → dict. 잘림/비JSON/None은 전부 None."""
@@ -276,6 +284,72 @@ def return_fields(raw: Any) -> dict | None:
         "return_collect_company": _str_or_none(ret.get("collectDeliveryCompany")),
         "return_fee_support_amount": _decimal_or_zero(ret.get("claimDeliveryFeeSupportAmount")),
     }
+
+
+def exchange_of(raw: Any) -> dict | None:
+    """raw_data → exchange dict(교환 클레임 정보). 교환 아님·파싱 실패는 None."""
+    parsed = parse_raw_data(raw)
+    if not isinstance(parsed, dict):
+        return None
+    ex = parsed.get("exchange")
+    return ex if isinstance(ex, dict) else None
+
+
+def exchange_fields(raw: Any) -> dict | None:
+    """raw_data → 교환 배송 손익용 영속 필드 dict. 손익이 없으면 None(=컬럼 NULL 유지).
+
+    반환 키 = EXCHANGE_COLUMNS.
+
+    ★**`claimStatus == "EXCHANGE_DONE"`인 건만** 값을 낸다. 라이브 55건 중 6건이
+      `EXCHANGE_REJECT`인데, 거부된 교환은 회수도 재발송도 일어나지 않아 손익이 없다.
+      이 규칙을 손익 쿼리가 아니라 **추출 경계**에 두는 이유: 컬럼에 값이 있으면
+      "교환이 실제로 완료됐다"가 되어, 나중에 쿼리를 새로 짜는 사람이 상태 필터를
+      잊어도 틀리지 않는다.
+
+    ★귀속일 = **재배송 처리일**(reDeliveryOperationDate). 교환이 끝나는 시점은 재발송이다.
+      요청일에 실으면 이미 마감해서 본 지난달 이익이 뒤로 바뀐다(반품과 같은 금지선).
+      라이브 실측: EXCHANGE_DONE 49건 **전건에** reDeliveryOperationDate·collectCompletedDate가
+      있다(폴백은 응답이 얇아졌을 때의 안전망이지 평상시 경로가 아니다).
+
+    ★청구액은 정액이 아니라 건별 실측. DONE 49건 중 **9건이 미청구**(우리 귀책이면 필드가
+      아예 없다) — 정액 5,000을 넣으면 그 9건이 통째로 틀린 수입이 된다.
+
+    ⚠️지원액 필드명이 반품과 **다르다**: 반품은 `claimDeliveryFeeSupportAmount`,
+      교환은 `membershipsArrivalGuaranteeClaimSupportingAmount`. 라이브에선 전건 0이지만
+      (N배송 교환이 0건이라 그렇다) 필드를 읽어 두면 N배송 교환이 생겨도 안 틀린다.
+    """
+    ex = exchange_of(raw)
+    if ex is None:
+        return None
+    if ex.get("claimStatus") != "EXCHANGE_DONE":
+        return None
+    completed = (
+        _kst_naive(ex.get("reDeliveryOperationDate"))
+        or _kst_naive(ex.get("collectCompletedDate"))
+        or _kst_naive(ex.get("claimRequestDate"))
+    )
+    if completed is None:
+        return None   # 귀속일이 없으면 어느 날에 실을지 정할 수 없다 → 추정하지 않는다
+    return {
+        "exchange_completed_at": completed,
+        "exchange_fee_demand_amount": _decimal_or_zero(ex.get("claimDeliveryFeeDemandAmount")),
+        "exchange_collect_company": _str_or_none(ex.get("collectDeliveryCompany")),
+        "exchange_fee_support_amount": _decimal_or_zero(
+            ex.get("membershipsArrivalGuaranteeClaimSupportingAmount")
+        ),
+    }
+
+
+def apply_exchange_fields(order, raw: Any) -> bool:
+    """Order ORM 행에 교환 배송 손익 컬럼을 반영. 판별 가능했으면 True.
+
+    ★apply_return_fields와 같은 규칙 — 판별 불가면 **기존 값을 지우지 않는다**."""
+    fields = exchange_fields(raw)
+    if fields is None:
+        return False
+    for k, v in fields.items():
+        setattr(order, k, v)
+    return True
 
 
 def apply_return_fields(order, raw: Any) -> bool:

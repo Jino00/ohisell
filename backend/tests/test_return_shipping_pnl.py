@@ -25,7 +25,7 @@ from sqlalchemy.pool import StaticPool
 from app.models import Base, Channel, Order
 from app.services import order_delivery
 from app.services.profit_calculator import (
-    _apply_return_pnl,
+    _apply_claim_shipping_pnl,
     _new_bucket,
     _return_shipping_pnl,
     _return_shipping_pnl_by_product,
@@ -182,7 +182,7 @@ def test_channel_filter_applies(db):
 def test_apply_does_not_inflate_order_count():
     """★반품은 주문이 아니다 — order_count가 오르면 객단가가 틀어진다."""
     b = _new_bucket()
-    _apply_return_pnl(b, {"income": D("5000"), "commission": D("136"), "cost": D("4400")})
+    _apply_claim_shipping_pnl(b, {"income": D("5000"), "commission": D("136"), "cost": D("4400")})
     assert b["order_count"] == 0
     assert b["shipping_revenue"] == D("5000") and b["revenue"] == D("5000")
     assert b["commission"] == D("136") and b["shipping"] == D("4400")
@@ -192,7 +192,7 @@ def test_apply_does_not_inflate_order_count():
 def test_uncharged_return_reduces_profit():
     """미청구 반품은 순수 손실 — 순이익 공식(revenue−cost−commission−shipping−ad−vat) 기준."""
     b = _new_bucket()
-    _apply_return_pnl(b, {"income": D("0"), "commission": D("0"), "cost": D("4400")})
+    _apply_claim_shipping_pnl(b, {"income": D("0"), "commission": D("0"), "cost": D("4400")})
     net = b["revenue"] - b["cost"] - b["commission"] - b["shipping"] - b["ad_spend"] - b["vat"]
     assert net == D("-4400")
 

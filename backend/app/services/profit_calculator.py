@@ -425,6 +425,104 @@ def _return_shipping_pnl(
     return out
 
 
+def _exchange_rows(
+    db: Session, date_from: date, date_to: date, channel_id: int | None = None
+):
+    """교환 손익 대상 주문 — 재배송 처리일이 창 안에 있는 건. 배송(패키지)당 1회로 dedup 전."""
+    start = datetime.combine(date_from, dtime.min)
+    end = datetime.combine(date_to, dtime.max)
+    q = db.query(Order).filter(
+        Order.exchange_completed_at >= start,
+        Order.exchange_completed_at <= end,
+    )
+    if channel_id:
+        q = q.filter(Order.channel_id == channel_id)
+    return q.all()
+
+
+def _exchange_pnl_one(o) -> dict:
+    """교환 1건의 손익 3항목 → {income, cost}.
+
+    ★반품과 결정적으로 다른 점: 교환 주문은 `exchanged` 상태이고 **REVENUE_EXCLUDED에 없다** —
+      매출·원가·수수료·최초 출고비가 이미 정상 계상돼 있다. 그래서 여기서 다시 더하면 안 되고,
+      **추가로 발생한 것만** 잡는다:
+        수입 = 고객에게 받은 교환 배송비(건별 실측)
+        비용 = 회수비 + **재발송 출고비**
+      ★재발송 출고비가 이 함수의 존재 이유다 — 한 주문에 출고가 두 번 일어났는데 엔진은
+        `_shipment_cost`로 한 번만 센다. 회수비만 더하면 교환이 실제보다 싸 보인다.
+
+    ★지원액은 회수비를 상한으로 상쇄(반품과 동일 규칙). 라이브는 전건 0이지만 N배송 교환이
+      생기면 값이 붙는다 — 그때 이 줄이 없으면 "고객 미청구=우리 손실"로 정확히 반대로 읽는다.
+    """
+    income = Decimal(str(o.exchange_fee_demand_amount or 0))
+    pickup = order_delivery.return_pickup_cost(o.delivery_attribute_type)
+    support = min(Decimal(str(o.exchange_fee_support_amount or 0)), pickup)
+    redelivery = _shipment_cost(o)          # 재발송 = 출고 1회 추가
+    return {"income": income, "cost": redelivery + pickup - support}
+
+
+def _exchange_shipping_pnl(
+    db: Session, channel_map: dict, date_from: date, date_to: date, channel_id: int | None = None
+) -> dict[int, dict[str, dict]]:
+    """교환 **재배송 처리일**별·채널별 배송 손익 → {channel_id: {date_str: {income, commission, cost}}}.
+
+    ★왜 필요한가: 교환은 여태 손익 엔진에 **0회 등장**했다. 매출은 잡히니 티가 안 났지만
+      회수비·재발송비가 통째로 빠져 있어 교환이 늘어도 이익이 반응하지 않았다.
+    ★귀속일 = 재배송 처리일. 요청일에 실으면 마감해서 본 지난달 이익이 뒤로 바뀐다(반품과 동일).
+    ★수입에 수수료를 매기는 것도 반품과 동일 — 정산 원장이 원 배송비와 클레임 배송비를
+      같은 `DELIVERY` 행으로 끊고 같은 주문관리 수수료를 매긴다.
+    """
+    out: dict[int, dict[str, dict]] = {}
+    seen: set[tuple] = set()
+    for o in _exchange_rows(db, date_from, date_to, channel_id):
+        ch = channel_map.get(o.channel_id)
+        if ch and ch.channel_type == "consignment":
+            continue
+        skey = _shipment_key(ch, o)
+        if skey in seen:
+            continue
+        seen.add(skey)
+
+        d = str(o.exchange_completed_at)[:10]
+        pnl = _exchange_pnl_one(o)
+        bucket = out.setdefault(o.channel_id, {}).setdefault(
+            d, {"income": ZERO, "commission": ZERO, "cost": ZERO}
+        )
+        bucket["income"] += pnl["income"]
+        bucket["commission"] += _delivery_commission(ch, pnl["income"])
+        bucket["cost"] += pnl["cost"]
+    return out
+
+
+def _exchange_shipping_pnl_by_product(
+    db: Session, channel_map: dict, date_from: date, date_to: date, channel_id: int | None = None
+) -> dict[int, dict]:
+    """교환 배송 손익을 **상품별**로 → {product_id: {income, commission, cost}}.
+
+    반품과 달리 고정비(②)처럼 배분 추정이 필요 없다 — 교환은 특정 주문의 특정 상품이다."""
+    out: dict[int, dict] = {}
+    seen: set[tuple] = set()
+    for o in _exchange_rows(db, date_from, date_to, channel_id):
+        ch = channel_map.get(o.channel_id)
+        if ch and ch.channel_type == "consignment":
+            continue
+        if o.product_id is None:
+            continue
+        skey = _shipment_key(ch, o)
+        if skey in seen:
+            continue
+        seen.add(skey)
+
+        pnl = _exchange_pnl_one(o)
+        bucket = out.setdefault(
+            o.product_id, {"income": ZERO, "commission": ZERO, "cost": ZERO}
+        )
+        bucket["income"] += pnl["income"]
+        bucket["commission"] += _delivery_commission(ch, pnl["income"])
+        bucket["cost"] += pnl["cost"]
+    return out
+
+
 def _return_shipping_pnl_by_product(
     db: Session, channel_map: dict, date_from: date, date_to: date, channel_id: int | None = None
 ) -> dict[int, dict]:
@@ -481,10 +579,13 @@ def _return_shipping_pnl_by_product(
     return out
 
 
-def _apply_return_pnl(bucket: dict, pnl: dict) -> None:
-    """반품 배송 손익 1건분을 집계 버킷에 반영.
+def _apply_claim_shipping_pnl(bucket: dict, pnl: dict) -> None:
+    """클레임(반품·교환) 배송 손익 1건분을 집계 버킷에 반영.
 
-    order_count는 **올리지 않는다** — 반품은 주문이 아니다(주문수가 부풀면 객단가가 틀어진다).
+    order_count는 **올리지 않는다** — 클레임은 주문이 아니다(주문수가 부풀면 객단가가 틀어진다).
+    교환도 같은 함수를 쓴다: 반품이든 교환이든 "수입은 배송수입으로 매출에 들어가고 수수료를
+    맞으며, 비용은 배송비로 나간다"는 모양이 같기 때문이다(2026-08-04 교환 배선 시 개명 —
+    종전 이름 `_apply_return_pnl`은 공용인데 반품 전용처럼 보였다).
     """
     bucket["shipping_revenue"] += pnl["income"]
     bucket["revenue"] += pnl["income"]
@@ -732,9 +833,11 @@ def calculate_daily_trend(
     manual_lookup = get_daily_manual_revenue(db, date_from, date_to, channel_id)
     # 반품 배송 손익 — 반품 완료일 귀속이라 order_date 창과 다른 축이다(별도 조회).
     return_pnl = _return_shipping_pnl(db, channel_map, date_from, date_to, channel_id)
+    # 교환 배송 손익 — 재배송 처리일 귀속이라 order_date 창과 다른 축이다(반품과 같은 이유).
+    exchange_pnl = _exchange_shipping_pnl(db, channel_map, date_from, date_to, channel_id)
     # 월 고정비(3PL 입고·보관·항공도선·합포장) — 주문 축에 없는 비용이라 별도 조회·일할 배분.
     fixed_lookup = get_daily_fixed_cost(db, date_from, date_to, channel_id)
-    if not orders and not manual_lookup and not return_pnl and not fixed_lookup:
+    if not orders and not manual_lookup and not return_pnl and not exchange_pnl and not fixed_lookup:
         return []
 
     option_map = _get_option_id_map(db)
@@ -800,7 +903,14 @@ def calculate_daily_trend(
         for d, pnl in by_date.items():
             if d not in daily:
                 daily[d] = _new_bucket()
-            _apply_return_pnl(daily[d], pnl)
+            _apply_claim_shipping_pnl(daily[d], pnl)
+
+    # 교환 배송 손익 — 재배송 처리일 버킷에. 반품과 같은 규칙(그날 주문이 없어도 버킷을 만든다).
+    for _cid, by_date in exchange_pnl.items():
+        for d, pnl in by_date.items():
+            if d not in daily:
+                daily[d] = _new_bucket()
+            _apply_claim_shipping_pnl(daily[d], pnl)
 
     # 광고비 합산 (option_id 기반 — ad_data.db 연결 시 사용, 현재 비활성)
     for (oid, d_str), spend in ad_lookup.items():
@@ -893,6 +1003,7 @@ def calculate_channel_summary(
     actual_fee = _coupang_3p_actual_fee(db, orders, channel_map)  # 쿠팡3P 실측수수료(D-A)
     manual_lookup_ch = get_daily_manual_revenue(db, date_from, date_to)
     return_pnl = _return_shipping_pnl(db, channel_map, date_from, date_to)
+    exchange_pnl = _exchange_shipping_pnl(db, channel_map, date_from, date_to)
     if not orders and not manual_lookup_ch and not return_pnl:
         return []
 
@@ -953,7 +1064,14 @@ def calculate_channel_summary(
         for pnl in by_date.values():
             if cid not in by_channel:
                 by_channel[cid] = _new_bucket()
-            _apply_return_pnl(by_channel[cid], pnl)
+            _apply_claim_shipping_pnl(by_channel[cid], pnl)
+
+    # 교환 배송 손익 — 반품과 같은 규칙으로 채널에 싣는다.
+    for cid, by_date in exchange_pnl.items():
+        for pnl in by_date.values():
+            if cid not in by_channel:
+                by_channel[cid] = _new_bucket()
+            _apply_claim_shipping_pnl(by_channel[cid], pnl)
 
     # 광고비를 option_id → 주문의 채널로 직접 매핑 (bleeding 방지)
     # 1) option_id별 광고비 합산
@@ -1105,6 +1223,7 @@ def calculate_product_profit(
     channel_map, product_map = _build_channel_maps(db)
     # 반품 배송 손익(반품 완료일 귀속) — order_date 창과 다른 축이라 별도 조회.
     return_pnl_prod = _return_shipping_pnl_by_product(db, channel_map, date_from, date_to, channel_id)
+    exchange_pnl_prod = _exchange_shipping_pnl_by_product(db, channel_map, date_from, date_to, channel_id)
     if not orders and not return_pnl_prod:
         return []
 
@@ -1281,7 +1400,15 @@ def calculate_product_profit(
             b = _new_bucket(with_order_count=False)
             b["quantity"] = 0
             by_product[pid] = b
-        _apply_return_pnl(by_product[pid], pnl)
+        _apply_claim_shipping_pnl(by_product[pid], pnl)
+
+    # 교환 배송 손익 — 특정 주문의 특정 상품이라 배분 추정이 필요 없다.
+    for pid, pnl in exchange_pnl_prod.items():
+        if pid not in by_product:
+            b = _new_bucket(with_order_count=False)
+            b["quantity"] = 0
+            by_product[pid] = b
+        _apply_claim_shipping_pnl(by_product[pid], pnl)
 
     result = []
     for pid, b in by_product.items():

@@ -345,6 +345,7 @@ def sync_channel_orders(
                 # 반품 배송 손익 컬럼(2026-08-03). 반품은 **재동기화로 뒤늦게 붙는다** —
                 # 신규 생성 경로보다 이쪽이 실제 주경로다(주문은 이미 있고 상태만 바뀐다).
                 order_delivery.apply_return_fields(existing, raw.raw_data)
+                order_delivery.apply_exchange_fields(existing, raw.raw_data)
                 _auto_link_product(db, existing)
                 updated_count += 1
             else:
@@ -367,6 +368,7 @@ def sync_channel_orders(
                 # 판별 불가 → 컬럼 NULL(추정으로 채우지 않는다).
                 order_delivery.apply_delivery_fields(order, raw.raw_data)
                 order_delivery.apply_return_fields(order, raw.raw_data)
+                order_delivery.apply_exchange_fields(order, raw.raw_data)
                 _auto_link_product(db, order)
                 db.add(order)
                 db.flush()  # 즉시 flush해서 다음 루프의 SELECT에 반영
