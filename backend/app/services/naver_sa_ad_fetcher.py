@@ -43,6 +43,12 @@ CONV_ADDTOCART_ACTION = "add_to_cart"  # 장바구니(D-NAO-58 CD1): cart_*로 �
 # AD 보고서(14컬럼): 위 COL_* 재사용 + 아래. avg_rank = rank_sum / imp.
 COL_ADGROUP_ID = 3
 COL_KEYWORD_ID = 4  # nkw-... / "-"(쇼핑=그룹 단위)
+# D-NAO-140: 소재(광고) ID. **AD·AD_CONVERSION 두 보고서 모두 같은 자리에 있다** — 라이브 실측
+# (2026-08-04, 08-03분 6,874행·152행 다운로드): `nad-a001-02-000000311706061` 형식.
+# ★즉 소재별 비용·클릭·전환·매출은 **이미 매일 받고 있었고** 집계에서 버려지고 있었다
+#   (그래서 이 grain 개방에 추가 네이버 API 콜이 0이다).
+# 컬럼 6(`bsn-…` 비즈채널)·7(숫자)은 정체 미확인 → 손대지 않는다(이름을 지어 붙이면 추측이 굳는다).
+COL_AD_ID = 5
 COL_DEVICE = 8      # M/P
 COL_IMP = 9
 COL_CLK = 10
@@ -554,15 +560,50 @@ def _row_date_iso(raw: str) -> str | None:
     return f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}"
 
 
-def fetch_ad_performance_daily(date_from: date, date_to: date) -> list[dict]:
-    """AD 보고서에서 (일자×캠페인×광고그룹×키워드) grain 성과를 집계 반환.
+GRAIN_ADGROUP = "adgroup"  # (일자×캠페인×광고그룹×키워드) — 기존 naver_ad_daily 형태
+GRAIN_AD = "ad"            # (일자×캠페인×광고그룹×소재) — D-NAO-140, 키워드는 롤업
+
+
+def _grain_key(cols: list[str], grain: str) -> tuple:
+    """행 → 집계 키. **grain 하나만 여기서 갈린다** — 두 grain이 같은 파서·같은 컬럼 상수를
+    쓰게 하려는 것이 요점이다(계약 판단기준 ②: 같은 TSV를 두 벌로 파싱하면 정의가 갈라지고,
+    갈라진 뒤엔 어느 쪽이 맞는지 아무도 모른다).
+    """
+    d = _row_date_iso(cols[COL_DATE])
+    if d is None:
+        return ()
+    if grain == GRAIN_AD:
+        # 소재 grain에서는 키워드를 롤업한다: 파워링크는 한 소재가 여러 키워드로 노출되는데,
+        # 우리가 조작하는 레버는 소재 하나다(제어 grain에 측정을 맞춘다는 게 이 작업의 목적).
+        return (d, cols[COL_CAMPAIGN_ID], cols[COL_ADGROUP_ID], cols[COL_AD_ID])
+    kw = cols[COL_KEYWORD_ID]
+    return (d, cols[COL_CAMPAIGN_ID], cols[COL_ADGROUP_ID], "" if kw == KEYWORD_NONE else kw)
+
+
+def _grain_fields(key: tuple, grain: str) -> dict:
+    """집계 키 → 결과 행의 식별 필드."""
+    d, campaign_id, adgroup_id, last = key
+    tail = {"ad_id": last} if grain == GRAIN_AD else {"keyword_id": last}
+    return {"date": d, "campaign_id": campaign_id, "adgroup_id": adgroup_id, **tail}
+
+
+def fetch_ad_performance_daily(
+    date_from: date, date_to: date, *, grain: str = GRAIN_ADGROUP
+) -> list[dict]:
+    """AD 보고서에서 일별 성과를 집계 반환. 기본 grain은 (일자×캠페인×광고그룹×키워드).
 
     소재(ad)·기기(M/P)는 롤업 합산. keyword_id="-"(쇼핑/브랜드)는 "" sentinel로 정규화
     → 쇼핑은 그룹 단위로 집계됨. avg_rank는 rank_sum/imp로 소비측에서 계산.
     컬럼 실측 근거: docs/references/21. 순수 함수(HTTP만, DB 없음).
 
+    ★`grain=GRAIN_AD`(D-NAO-140)이면 키워드 대신 **소재(ad_id)**로 묶는다 — 우리가 입찰을
+    조작하는 단위가 소재인데 성과가 그룹까지만 있어서, 자동화가 자기 손이 뭘 했는지 모른 채
+    움직이던 문제를 없애기 위한 축이다. **기본값은 기존 동작과 완전히 같다**(추가 콜도 없다 —
+    같은 보고서의 이미 받고 있던 컬럼을 버리지 않을 뿐).
+
     Returns:
-        [{"date","campaign_id","adgroup_id","keyword_id","imp","clk","cost","rank_sum"}, ...]
+        [{"date","campaign_id","adgroup_id", ("keyword_id"|"ad_id"),
+          "imp","clk","cost","rank_sum"}, ...]
     """
     if not ACCESS_LICENSE or not SECRET_KEY_B64:
         log.warning("Naver SA 자격증명 없음 — AD 성과 수집 건너뜀")
@@ -583,16 +624,12 @@ def fetch_ad_performance_daily(date_from: date, date_to: date) -> list[dict]:
         for cols in _download_tsv(rep["downloadUrl"]):
             if len(cols) <= COL_RANK_SUM:
                 continue
-            d = _row_date_iso(cols[COL_DATE])
-            if d is None:
+            key = _grain_key(cols, grain)
+            if not key:
                 continue
-            kw = cols[COL_KEYWORD_ID]
-            keyword_id = "" if kw == KEYWORD_NONE else kw
-            key = (d, cols[COL_CAMPAIGN_ID], cols[COL_ADGROUP_ID], keyword_id)
             row = agg.get(key)
             if row is None:
-                row = {"date": d, "campaign_id": cols[COL_CAMPAIGN_ID],
-                       "adgroup_id": cols[COL_ADGROUP_ID], "keyword_id": keyword_id,
+                row = {**_grain_fields(key, grain),
                        "imp": 0, "clk": 0, "cost": 0, "rank_sum": 0}
                 agg[key] = row
             row["imp"] += _safe_int(cols[COL_IMP])
@@ -604,8 +641,13 @@ def fetch_ad_performance_daily(date_from: date, date_to: date) -> list[dict]:
     return list(agg.values())
 
 
-def fetch_conversion_daily(date_from: date, date_to: date) -> list[dict]:
-    """AD_CONVERSION 보고서에서 (일자×캠페인×광고그룹×키워드) grain 전환을 집계 반환.
+def fetch_conversion_daily(
+    date_from: date, date_to: date, *, grain: str = GRAIN_ADGROUP
+) -> list[dict]:
+    """AD_CONVERSION 보고서에서 일별 전환을 집계 반환. 기본 grain은 (일자×캠페인×그룹×키워드).
+
+    ★`grain=GRAIN_AD`(D-NAO-140)이면 소재(ad_id) 단위로 묶는다 — 성과와 **같은 키 함수**를 쓰므로
+    두 보고서가 같은 축에서 조인된다(정의가 갈라질 여지를 없앤다).
 
     구매(purchase)→conv_* 와 장바구니(add_to_cart)→cart_* 를 **분리** 집계한다(D-NAO-58 CD1).
     그 외 전환 액션은 무시. 직접(col9="1")/간접(col9="2")은 양쪽 모두 분리 유지.
@@ -644,16 +686,14 @@ def fetch_conversion_daily(date_from: date, date_to: date) -> list[dict]:
                 prefix = "cart"
             else:  # 그 외 전환 액션(회원가입 등)은 수집 대상 아님
                 continue
-            d = _row_date_iso(cols[CONV_COL_DATE])
-            if d is None:
+            # ★두 보고서의 식별자 컬럼 배치가 같다(0=일자·2=캠페인·3=그룹·4=키워드·5=소재) —
+            #   2026-08-04 라이브 실측으로 확인. 그래서 grain 키 함수를 공유한다.
+            key = _grain_key(cols, grain)
+            if not key:
                 continue
-            kw = cols[CONV_COL_KEYWORD]
-            keyword_id = "" if kw == KEYWORD_NONE else kw
-            key = (d, cols[CONV_COL_CAMPAIGN], cols[CONV_COL_ADGROUP], keyword_id)
             row = agg.get(key)
             if row is None:
-                row = {"date": d, "campaign_id": cols[CONV_COL_CAMPAIGN],
-                       "adgroup_id": cols[CONV_COL_ADGROUP], "keyword_id": keyword_id,
+                row = {**_grain_fields(key, grain),
                        "conv_direct_cnt": 0, "conv_indirect_cnt": 0,
                        "conv_direct_amt": 0, "conv_indirect_amt": 0,
                        "cart_direct_cnt": 0, "cart_indirect_cnt": 0,
