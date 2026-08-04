@@ -31,6 +31,8 @@ from zoneinfo import ZoneInfo
 import requests
 from playwright.sync_api import sync_playwright
 
+import ad_settings_collect
+
 CONFIG_PATH = Path(os.path.expanduser("~/.ohisell_ad_fetcher.json"))
 LOG_PATH = Path(os.path.expanduser("~/.ohisell_ad_fetcher.log"))
 LOCK_PATH = Path(os.path.expanduser("~/.ohisell_ad_fetcher.lock"))
@@ -809,6 +811,11 @@ def _do_run(cfg: dict, state: str, login_wait_secs: int = 0) -> int:
                                 option_payload = _fetch_option_report(page, cfg)
                             except Exception as e:
                                 log.warning("옵션보고서 수집 실패(무시): %s", str(e)[:100])
+                        # ★광고 설정(캠페인·광고그룹) 수집을 이 회차에 **얹는다**
+                        #   (트랙 coupang-ad-change-log). 자기 크론을 두지 않는 이유:
+                        #   xauth Akamai가 headless를 막아 창이 반드시 뜬다 → 여기 얹으면
+                        #   창이 뜨는 횟수가 0회 늘어난다. 실패해도 회차는 계속된다(곁다리).
+                        ad_settings_collect.collect_and_push(page, cfg, "ofix", log=log)
             finally:
                 ctx.close()
                 browser.close()

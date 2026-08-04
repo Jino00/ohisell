@@ -719,6 +719,84 @@ class CoupangAdCostDaily(Base):
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class CoupangAdEntitySnapshot(Base):
+    """쿠팡 광고 설정 스냅샷 — diff의 "전" 값. (account, entity_type, entity_id)당 최신 1행.
+
+    트랙 coupang-ad-change-log D-CAC-4. 원천 = `POST /marketing/tetris-api/campaigns`
+    (오픽스·오하이테크 동일 엔드포인트, `groupList`에 광고그룹 중첩).
+
+    ★settings_json에는 **설정 필드만** 담는다. 성과 필드(spentBudget·averageTimeBudgetUtilRate 등)를
+      섞으면 매일 아침 "전 캠페인 수정됨"이 뜬다 — 실측: spentBudget이 20분에 6,501→6,592로 움직였다
+      (네이버에서 소재 editTm이 상품 피드 재적용으로 전진해 ad_edit이 229:4로 오염된 것과 같은 함정).
+
+    ★present: 마지막 전량 조회에 이 엔티티가 있었나. 삭제 판정용 — is_active=False(Off)와 구분해야 한다
+      (Off는 목록에 남고, 삭제는 사라진다).
+
+    ★settings_json은 **활성 조회(전체 필드)에서만** 갱신한다. 전량 조회는 id·name·isActive만 쓰므로
+      그걸로 덮으면 설정이 통째로 날아간다(D-CAC-3: 내용 diff는 활성만).
+    """
+
+    __tablename__ = "coupang_ad_entity_snapshot"
+    __table_args__ = (
+        UniqueConstraint("account", "entity_type", "entity_id",
+                         name="uq_coupang_ad_entity_snapshot"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    account: Mapped[str] = mapped_column(String(12), nullable=False, index=True)  # ofix / ohitech
+    entity_type: Mapped[str] = mapped_column(String(12), nullable=False)          # campaign / adgroup
+    entity_id: Mapped[str] = mapped_column(String(24), nullable=False)
+    campaign_id: Mapped[str] = mapped_column(String(24), nullable=False, default="", index=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    settings_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # 쿠팡이 준 updatedAt(UTC naive). 발생 시각 앵커 — 네이버 소재 editTm과 같은 역할.
+    src_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    present: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+
+class CoupangAdChangeLog(Base):
+    """쿠팡 광고 설정 변경 1건 — 「수정 사항」 쿠팡판의 표시 원천.
+
+    ★쿠팡은 **모든 변경이 외부다**. 우리가 쿠팡 광고를 쓰는 경로가 없어서 네이버의
+      naver_change_log(우리 실집행) 같은 원천이 원리적으로 안 생긴다. 전량이 스냅샷 diff 유래다.
+
+    op: created / turned_on / turned_off / deleted / field_change
+    occurred_at: 귀속 시각. time_basis가 'src'면 쿠팡 updatedAt(진짜 발생 시각),
+      'detected'면 우리가 알아챈 시각이다 — ★모르는 걸 아는 척하지 않는다.
+      (네이버에서 감지일로 귀속했다가 07-30 변경을 08-03으로 잡은 실사고가 있었다.)
+
+    ★변경 주체는 기록하지 않는다 — isAgencyManaged는 '현재 관리 주체'지 '이번 변경을 누가 했나'가
+      아니다. 네이버처럼 우리/대행사/Jino를 가르는 건 쿠팡에선 근거가 없다.
+
+    유니크 키가 (account, entity_type, entity_id, op, field, occurred_at)인 이유: 같은 스냅샷을
+      두 번 넣어도 행이 안 늘어야 한다(회차 재실행·백필 idempotent).
+    """
+
+    __tablename__ = "coupang_ad_change_log"
+    __table_args__ = (
+        UniqueConstraint("account", "entity_type", "entity_id", "op", "field", "occurred_at",
+                         name="uq_coupang_ad_change_log"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    account: Mapped[str] = mapped_column(String(12), nullable=False, index=True)
+    entity_type: Mapped[str] = mapped_column(String(12), nullable=False)
+    entity_id: Mapped[str] = mapped_column(String(24), nullable=False)
+    campaign_id: Mapped[str] = mapped_column(String(24), nullable=False, default="", index=True)
+    entity_name: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    op: Mapped[str] = mapped_column(String(16), nullable=False)
+    # field: field_change일 때만 채운다. 유니크 키에 들어가므로 NULL 대신 ''를 쓴다
+    # (SQLite에서 NULL은 서로 달라 중복이 막히지 않는다).
+    field: Mapped[str] = mapped_column(String(40), nullable=False, default="")
+    before_value: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    after_value: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    time_basis: Mapped[str] = mapped_column(String(10), nullable=False, default="detected")  # src/detected
+    detected_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 class CoupangWingCookie(Base):
     """Wing 내부 API 세션쿠키 시크릿 — 계정별 (트랙 D-5, S1-b).
 

@@ -24,10 +24,10 @@ from sqlalchemy.orm import Session
 from app.clients.coupang.inbound import WingReadError
 from app.config import get_coupang_config
 from app.database import get_db
-from app.models import Channel, CoupangAdCostDaily, CoupangAdOptionDaily, CoupangProductItem, CoupangRevenueFee, CoupangRgInbound, CoupangRgOrderItem, CoupangRgSettlementFee, CoupangRocketPromotion, Order, ProductChannelMapping, ProductMaster
+from app.models import Channel, CoupangAdChangeLog, CoupangAdCostDaily, CoupangAdEntitySnapshot, CoupangAdOptionDaily, CoupangProductItem, CoupangRevenueFee, CoupangRgInbound, CoupangRgOrderItem, CoupangRgSettlementFee, CoupangRocketPromotion, Order, ProductChannelMapping, ProductMaster
 from app.routers._coupang_write_http import handle_write as _handle_write
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
-from app.services.coupang import ad_cost_sync, coupon_write, refresh_contract, coupang_seller_cost as _seller_cost_harness, demand_classifier, in_transit_estimator, lead_time_estimator, ohitech_ad_sync, product_write, rg_fee_audit, rg_inbound_sync, rg_product_size_sync, rg_replenishment, rg_settlement_sync, replenishment_backtest, rocket_cost_map, rocket_promo_sync, rocket_supplier_sync, rg_cost_reader as _rg_reader, sales_velocity_estimator, vendor_summary_sync
+from app.services.coupang import ad_cost_sync, ad_settings_diff, coupon_write, refresh_contract, coupang_seller_cost as _seller_cost_harness, demand_classifier, in_transit_estimator, lead_time_estimator, ohitech_ad_sync, product_write, rg_fee_audit, rg_inbound_sync, rg_product_size_sync, rg_replenishment, rg_settlement_sync, replenishment_backtest, rocket_cost_map, rocket_promo_sync, rocket_supplier_sync, rg_cost_reader as _rg_reader, sales_velocity_estimator, vendor_summary_sync
 from app.utils.crypto import CookieCryptoError
 
 log = logging.getLogger(__name__)
@@ -2533,3 +2533,115 @@ def get_product_size(
         for r in rows
     ]
 
+
+
+# ════════════════════════════════════════════════
+# 쿠팡 광고 설정 변경 이력 (트랙 coupang-ad-change-log, D-CAC-3/4)
+# ────────────────────────────────────────────────
+# 런타임 경계: advertising.coupang.com은 xauth Akamai가 headless를 막는다(coupang_auth.py 실측)
+#   → 백엔드 직접 fetch 불가. Mac 헤드풀 페처가 「광고비 갱신」 회차에 **얹어서** 수집·push한다.
+#   ★자동 크론을 두지 않는 이유: 창이 뜬다. 2026-07-27에 같은 이유로 자동 실행을 걷어냈다.
+#     주기가 느려도 발생 시각은 안 잃는다 — 쿠팡 updatedAt이 캠페인·광고그룹 양쪽에 있다.
+# ════════════════════════════════════════════════
+@router.post("/ad-settings/ingest")
+def ingest_ad_settings(
+    body: dict[str, Any] = Body(...),
+    x_ingest_token: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """캠페인 조회 2벌(전량·활성) push → 스냅샷 갱신 + 변경 행 기록(멱등).
+
+    body: {"account": "ofix"|"ohitech",
+           "all":    [<전량 조회 campaigns[]>],     # id·name·isActive만 쓴다
+           "active": [<활성 조회 campaigns[]>]}      # 전체 필드 + groupList
+
+    ★all이 비면 서비스가 회차를 통째로 건너뛴다 — 조회 실패를 "전부 삭제됨"으로 오독하면
+      change_log가 되돌리기 어렵게 오염된다.
+    """
+    _check_ingest_token(x_ingest_token)
+    account = str(body.get("account") or "").strip()
+    if account not in ad_settings_diff.ACCOUNTS:
+        raise HTTPException(status_code=400, detail="account는 ofix|ohitech")
+    all_rows = body.get("all")
+    active_rows = body.get("active")
+    if not isinstance(all_rows, list) or not isinstance(active_rows, list):
+        raise HTTPException(status_code=400, detail="all[]·active[] 필요")
+    result = ad_settings_diff.ingest(db, account, all_rows, active_rows)
+    db.commit()
+    return result
+
+
+def _parse_kst_date(v: str | None, default: date) -> date:
+    """YYYY-MM-DD(KST) 파싱. 빈 값은 default, 형식 오류는 422(조용히 default로 흘리지 않는다)."""
+    if not v:
+        return default
+    try:
+        return date.fromisoformat(v.strip())
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"날짜 형식은 YYYY-MM-DD여야 합니다: {v}")
+
+
+@router.get("/ad-changes")
+def list_ad_changes(
+    from_: str | None = Query(None, alias="from"),
+    to: str | None = Query(None),
+    account: str | None = Query(None),
+    db: Session = Depends(get_db),
+):
+    """「수정 사항」 쿠팡판 — 날짜 구간의 설정 변경을 **발생 시각 역순**으로.
+
+    날짜 경계는 KST다(occurred_at은 UTC naive 저장 → -9h 창으로 조회).
+    기본 기간 = 최근 14일(KST). 성과 필드는 애초에 안 들어온다(ad_settings_diff 허용목록).
+    """
+    today = kst_today()
+    dto = _parse_kst_date(to, today)
+    dfrom = _parse_kst_date(from_, dto - timedelta(days=13))
+    if dfrom > dto:
+        raise HTTPException(status_code=422, detail="from이 to보다 늦습니다")
+    if account is not None and account not in ad_settings_diff.ACCOUNTS:
+        raise HTTPException(status_code=400, detail="account는 ofix|ohitech")
+
+    start = datetime.combine(dfrom, time.min) - timedelta(hours=9)
+    end = datetime.combine(dto, time.max) - timedelta(hours=9)
+    q = db.query(CoupangAdChangeLog).filter(
+        CoupangAdChangeLog.occurred_at >= start,
+        CoupangAdChangeLog.occurred_at <= end,
+    )
+    if account:
+        q = q.filter(CoupangAdChangeLog.account == account)
+    rows = q.order_by(CoupangAdChangeLog.occurred_at.desc(), CoupangAdChangeLog.id.desc()).all()
+
+    def _kst(dt: datetime | None) -> str | None:
+        return (dt + timedelta(hours=9)).isoformat() if dt else None
+
+    items = [
+        {
+            "id": r.id,
+            "account": r.account,
+            "entity_type": r.entity_type,
+            "entity_id": r.entity_id,
+            "campaign_id": r.campaign_id,
+            "entity_name": r.entity_name,
+            "op": r.op,
+            "field": r.field or None,
+            "before_value": r.before_value,
+            "after_value": r.after_value,
+            "occurred_at": _kst(r.occurred_at),       # KST 표기(전역 원칙 0)
+            # ★src면 쿠팡이 준 진짜 발생 시각, detected면 우리가 알아챈 시각이다.
+            #   화면은 이 둘을 반드시 구분해 보여야 한다(모르는 걸 아는 척하지 않는다).
+            "time_basis": r.time_basis,
+            "detected_at": _kst(r.detected_at),
+        }
+        for r in rows
+    ]
+    # 마지막 관측 시각 — "언제 기준의 목록인가"를 화면이 말할 수 있게(신선도 표면화).
+    last_obs = db.query(func.max(CoupangAdEntitySnapshot.observed_at))
+    if account:
+        last_obs = last_obs.filter(CoupangAdEntitySnapshot.account == account)
+    return {
+        "period": {"from": dfrom.isoformat(), "to": dto.isoformat(), "tz": "KST"},
+        "account": account,
+        "count": len(items),
+        "last_observed_at": _kst(last_obs.scalar()),
+        "items": items,
+    }
