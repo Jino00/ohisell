@@ -417,11 +417,25 @@ def sync_channel_orders(
     }
 
 
-def relink_unlinked_orders(db: Session, channel_id: int | None = None) -> int:
-    """미링크 주문 재매핑 (매핑 추가 시 호출)"""
+def relink_unlinked_orders(
+    db: Session,
+    channel_id: int | None = None,
+    platform_product_id: str | None = None,
+) -> int:
+    """미링크 주문 재매핑 (매핑 추가 시 호출).
+
+    ★왜 옵션ID 스코프가 필요한가(2026-08-04): `_auto_link_product`는 **수집 시점에 한 번만**
+      돈다. 그래서 나중에 매핑을 이어도 **그 전에 들어온 주문은 영원히 product_id=NULL**로
+      남고, 손익 화면에서 "원가 미상"으로 계속 잡힌다. 라이브 실증: 「맥세이프 이지 거울
+      카드지갑」(네이버 13563480014)을 07-19에 화면에서 이었는데 05-26~06-15 주문 27건
+      488,100원이 그대로 미연결이었다 — 종전엔 이 함수를 **엑셀 업로드 경로에서만** 불렀다.
+      옵션ID로 좁히면 방금 이은 그 코드만 건드리므로 화면 응답 시간도 예측 가능하다.
+    """
     query = db.query(Order).filter(Order.product_id.is_(None))
     if channel_id:
         query = query.filter(Order.channel_id == channel_id)
+    if platform_product_id:
+        query = query.filter(Order.platform_product_id == platform_product_id)
 
     count = 0
     for order in query.all():

@@ -57,6 +57,10 @@ class MappingOut(BaseModel):
     selling_price: Decimal
     is_active: bool
     mapping_source: str = "auto_sync"
+    # 매핑을 새로 만들거나 고친 응답에만 채워진다 — 그 옵션ID의 **과거 미연결 주문 중 방금
+    # 연결된 건수**(2026-08-04). 목록 조회 응답에는 없다(None). 화면이 "이었더니 과거 N건도
+    # 원가가 붙었다"를 말할 수 있게 하는 값이라, 소급 연결의 사후 가시성 그 자체다.
+    orders_linked: Optional[int] = None
 
     model_config = {"from_attributes": True}
 

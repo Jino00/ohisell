@@ -208,6 +208,9 @@ export interface Mapping {
   channel_sku: string | null;
   selling_price: number;
   is_active: boolean;
+  // 매핑을 새로 잇거나 고친 응답에만 온다 — 그 옵션ID의 **과거 미연결 주문 중 방금 연결된
+  // 건수**(2026-08-04). 목록 조회에는 없다(undefined). 이었는데 과거가 안 붙던 결함의 증거.
+  orders_linked?: number | null;
 }
 
 export interface Product {

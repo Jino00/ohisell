@@ -13,12 +13,17 @@ import {
   type ConnectionMap,
   type ConnCell,
   type ChannelCoverage,
+  type Mapping,
   type MappingIngestResult,
   type PnlReconciliation,
   type PnlSkuRow,
 } from "../lib/api";
 
 const fmt = (n: number) => new Intl.NumberFormat("ko-KR").format(n);
+
+// 매핑을 이으면 **과거 주문도** 소급 연결된다(2026-08-04). 종전엔 앞으로 팔릴 것만 맞고
+// 이미 판 것은 영영 원가 미상으로 남았다 — 그래서 몇 건이 되살아났는지 화면이 말해야 한다.
+const _linkedMsg = (n: number) => `과거 주문 ${fmt(n)}건이 이 상품에 소급 연결됐습니다(원가·손익 반영).`;
 const won = (s: string) => `${fmt(Math.round(Number(s)))}원`;
 
 function isoKST(d: Date): string {
@@ -152,8 +157,9 @@ function ConnectionMapTab() {
     if (!editing) return;
     setErr("");
     try {
-      await updateMapping(editing.productId, editing.mapping.mapping_id, patch);
+      const saved = await updateMapping(editing.productId, editing.mapping.mapping_id, patch);
       setEditing(null);
+      if (saved.orders_linked) setUploadMsg(_linkedMsg(saved.orders_linked));
       load(q);
     } catch (e) {
       setErr(`${e}`.replace(/^Error:\s*/, ""));
@@ -180,12 +186,13 @@ function ConnectionMapTab() {
     if (!adding) return;
     setErr("");
     try {
-      await fetchApi(`/api/products/${adding.productId}/mappings`, {
+      const created = await fetchApi<Mapping>(`/api/products/${adding.productId}/mappings`, {
         method: "POST",
         body: JSON.stringify(add),
       });
       setAdding(null);
       setPendingAttach(null);
+      if (created.orders_linked) setUploadMsg(_linkedMsg(created.orders_linked));
       load(q);
     } catch (e) {
       setErr(`${e}`);

@@ -70,8 +70,10 @@ SHIPPING_COST_BY_METHOD = {
 #        + 반품 작업비 = B2C 출고 작업비와 동일(900) → 2,950 (VAT 별도) = 3,245 (VAT 포함).
 #        (요율표의 "지정반품 배송비 극소형 2,500"은 **우리가 지정한 주소로 보내는** 경우라
 #         우리 케이스가 아니다 — 숫자가 공교롭게 2,500이라 헷갈리기 쉽다.)
-# 일반배송: ⚠️여전히 **미확정 추정치**(Jino 2026-08-03: "아마 우리도 2500원을 지급할꺼야").
-#        한진 청구서를 받으면 이 한 줄만 고치면 된다.
+# 일반배송: **확정 2,500원**(Jino 2026-08-04: "반품 회수비 2500원 확정"). 08-03의 "아마 …
+#        지급할꺼야"라는 추정 표시를 해제한다. 값은 그대로이므로 손익 숫자 변화는 없다.
+#        ※정산 실측이 반품 건당 5,000원인 것과 모순이 아니다 — 그쪽은 **고객에게 청구하는**
+#          왕복 반품비(수입)이고, 이 상수는 **우리가 택배사에 내는** 회수 단가(비용)다.
 # ── 제주·도서산간 할증: 우리가 택배사에 더 내는 금액(건당) ──
 # Jino 확정(2026-08-04): "한진택배에는 기본값에 3000원 추가".
 # ★적용 범위 근거: 라이브 51건(sectionDeliveryFee>0) 전부 deliveryAttributeType이 TODAY/NORMAL
@@ -80,7 +82,7 @@ SHIPPING_COST_BY_METHOD = {
 #   수입만 잡히므로 그 건은 이익이 과대해진다. 표본이 생기면 이 주석을 근거로 재검토).
 SECTION_SURCHARGE_PAID = Decimal("3000")
 
-RETURN_PICKUP_COST_NORMAL = Decimal("2500")     # ⚠️추정 — 한진 청구서 미확보
+RETURN_PICKUP_COST_NORMAL = Decimal("2500")     # 확정(Jino 2026-08-04)
 RETURN_PICKUP_COST_NBAESONG = Decimal("3245")   # 품고 요율표 2 (2,050+900)×1.1
 RETURN_PICKUP_COST_BY_METHOD = {
     METHOD_NORMAL: RETURN_PICKUP_COST_NORMAL,
@@ -370,7 +372,7 @@ def return_pickup_cost(delivery_attribute_type: Any = None) -> Decimal:
 
     판별 불가는 일반배송으로 폴백한다(order_shipping_cost와 같은 fail-safe 방향).
     0으로 두지 않는 이유: 회수비가 통째로 사라지면 수입만 계상돼 반품이 이익 나는 일처럼 보인다.
-    ⚠️일반배송 단가는 여전히 추정치다(RETURN_PICKUP_COST_NORMAL 주석 참조)."""
+    일반배송 2,500원은 Jino 확정값이다(2026-08-04, RETURN_PICKUP_COST_NORMAL 주석 참조)."""
     method = shipping_method_of(delivery_attribute_type)
     return RETURN_PICKUP_COST_BY_METHOD.get(method, RETURN_PICKUP_COST_NORMAL)
 

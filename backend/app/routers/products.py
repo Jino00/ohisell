@@ -147,6 +147,27 @@ def _active_option_clash(
     )
 
 
+def _relink_after_mapping(db: Session, m: ProductChannelMapping) -> int:
+    """방금 만들어졌거나 편집된 매핑의 옵션ID로 **과거 미연결 주문**을 소급 연결한다.
+
+    ★왜 이 호출이 필요한가(2026-08-04 라이브 실증): 주문↔상품 연결은 수집 시점에만 일어나서,
+      화면에서 매핑을 이어도 **이미 들어와 있던 주문은 계속 원가 미상**으로 남았다. 종전에
+      `relink_unlinked_orders`를 부르는 곳은 엑셀 마스터 업로드 경로뿐이었다 —
+      즉 "손으로 이으면 앞으로 팔릴 것만 맞고, 이미 판 것은 영영 안 맞는" 상태였다.
+      네이버 13563480014(거울 카드지갑): 07-19 수동 매핑 후에도 그 이전 27건 488,100원이 미연결.
+    ★옵션ID로 좁히는 이유: 다른 코드의 주문까지 훑을 이유가 없고(그쪽은 그쪽 매핑이 생길 때
+      돈다), 화면 응답 시간이 미연결 주문 총량에 좌우되지 않는다.
+    비활성 매핑은 건너뛴다 — `_auto_link_product`가 is_active=True만 보므로 어차피 0건이다.
+    """
+    if not m.is_active:
+        return 0
+    from app.services.sync_service import relink_unlinked_orders
+
+    return relink_unlinked_orders(
+        db, channel_id=m.channel_id, platform_product_id=m.channel_product_id
+    )
+
+
 @router.post("/{product_id}/mappings", response_model=MappingOut, status_code=201)
 def add_mapping(
     product_id: int, data: MappingCreate, db: Session = Depends(get_db)
@@ -171,6 +192,7 @@ def add_mapping(
     db.add(m)
     db.commit()
     db.refresh(m)
+    linked = _relink_after_mapping(db, m)
     return MappingOut(
         id=m.id,
         channel_id=m.channel_id,
@@ -181,6 +203,7 @@ def add_mapping(
         selling_price=m.selling_price,
         is_active=m.is_active,
         mapping_source=m.mapping_source,
+        orders_linked=linked,
     )
 
 
@@ -230,6 +253,9 @@ def update_mapping(
     m.mapping_source = "manual"  # 수동 편집 → 자동동기화 clobber 방지(D-12)
     db.commit()
     db.refresh(m)
+    # 옵션ID를 고쳤거나 다시 켠 편집도 소급 연결 대상이다 — 오타를 고친 경우가 정확히
+    # "그동안 안 붙던 주문이 이제 붙어야 하는" 상황이다(생성 경로와 같은 규칙).
+    linked = _relink_after_mapping(db, m)
     ch = db.query(Channel).get(m.channel_id)
     return MappingOut(
         id=m.id,
@@ -241,6 +267,7 @@ def update_mapping(
         selling_price=m.selling_price,
         is_active=m.is_active,
         mapping_source=m.mapping_source,
+        orders_linked=linked,
     )
 
 
