@@ -1243,10 +1243,18 @@ def cmd_poll(cfg: dict) -> int:
     state = os.path.expanduser(cfg["state_file"])
     interval = int(cfg.get("poll_interval_s", _POLL_INTERVAL_S))
     cooldown = int(cfg.get("min_fetch_interval_s", _MIN_FETCH_INTERVAL_S))
-    last_fetch = 0.0
+    # ★기준점은 `0.0`이 아니라 `None`(= 이번 프로세스에서 한 번도 안 돌림)이다.
+    #   `time.monotonic()`은 macOS에서 **부팅 이후 경과초**라(실측 2026-08-04: 부팅
+    #   11:26:03 · monotonic 21,214 ≈ uptime 5:53), `0.0`을 기준으로 삼으면
+    #   `monotonic - 0.0 >= 쿨다운`이 곧 **"부팅 후 쿨다운만큼 지났나"**가 된다.
+    #   RG는 쿨다운이 3600초라 **재부팅 후 1시간 동안 버튼이 통째로 침묵했다** — claim도
+    #   로그도 실패 보고도 없이. 요청 플래그는 살아남고 UI는 215초 뒤 "Mac 응답 없음"으로
+    #   오진한다(이 파일 R1~R3 가드가 막으려던 실패 모드인데, 가드에 **도달조차 못 했다**).
+    #   2026-06-14 S4 도입부터 7주간 잠복했고, 테스트가 부팅 1시간 안에 돌 때만 드러났다.
+    last_fetch: float | None = None
     # RG 정산(S4-P2): 온디맨드 버튼만. RG는 주 단위·느림(생성 대기) → 별도 쿨다운 유지.
     rg_cooldown = int(cfg.get("rg_min_interval_s", 3600))   # RG 실행 최소 간격(실패 재시도 폭주 방지)
-    last_rg = 0.0
+    last_rg: float | None = None
     # ★재시도용 짧은 백오프(codex 2R[P1]): RG 쿨다운은 1시간이라, 재시도 가능한 실패 뒤
     # 다음 시도가 1시간 뒤가 된다 — UI는 215초에 포기하고 3회 소진에 2시간이 걸린다.
     # 실패로 임대를 반납한 경우에 한해 쿨다운을 이 시각까지 면제한다(요청이 살아있는 동안만).
@@ -1263,7 +1271,7 @@ def cmd_poll(cfg: dict) -> int:
             net_fails = 0
             if st.get("requested"):
                 # 쿨다운/락은 claim '전에' 검사 — claim 후 스킵하면 요청 유실(광고 패턴 codex P2).
-                if time.monotonic() - last_fetch < cooldown:
+                if last_fetch is not None and time.monotonic() - last_fetch < cooldown:
                     log.info("fetch 쿨다운 중 — 요청 보류(다음 폴에서 처리)")
                 else:
                     with _try_fetch_lock() as acquired:
@@ -1307,7 +1315,7 @@ def cmd_poll(cfg: dict) -> int:
         # ── RG 정산 다운로드: 버튼 요청만 소비(2026-07-27 — 새벽 일일예약 제거, 순수 버튼-only) ──
         try:
             rg_st = _prod_rg_refresh_status(cfg)
-            _rg_ready = (time.monotonic() - last_rg >= rg_cooldown) or (
+            _rg_ready = (last_rg is None or time.monotonic() - last_rg >= rg_cooldown) or (
                 rg_retry_at is not None and time.monotonic() >= rg_retry_at)
             if bool(rg_st.get("requested")) and _rg_ready:
                 with _try_fetch_lock() as acquired:

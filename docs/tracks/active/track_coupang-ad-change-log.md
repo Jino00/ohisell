@@ -113,6 +113,106 @@ Jino: "이거 매 시간 화면에 크롬이 뜨는거 아니야? 성가신데..
 `ad_cost_browser_fetcher.py login`으로 Jino가 직접 로그인해야 했다(15:30). 같은 날 10:25엔
 keycloak이 살아 있어 통과했으므로 만료 주기 문제다.
 
+## ★★ 정찰 2차 (2026-08-04 17:2x) — 쿠팡이 **변경 이력 API를 직접 준다**
+
+Jino "키워드, 소재 그레인까지 현실적으로 가능해? 안정적으로 구현할 수 있는지 실증먼저 해봐"
+
+광고센터 메뉴에 **「변경 이력」**(`/marketing/change-history`)이 있었다. 그 화면이 부르는 API:
+
+**`POST /marketing/tetris-api/change-history/events-simple`**
+요청 `{"campaignIds":[...], "filter":{"executionTimeFrom":"20260506","executionTimeTo":"20260804"}}`
+응답 `[{campaignId, executionTime(UTC), executionId(UUID), changes:[{changeType, before, after, added, removed, ruleType, campaignRule, budgetRollbackType}]}]`
+
+**두 계정 모두 동작**(오픽스 WING / 오하이테크 SUPPLIERHUB, 같은 엔드포인트).
+90일 실측: 오픽스 86건(05-26~08-03) · 오하이테크 108건(05-11~08-04).
+
+| changeType | 90일 합계 | 내용 |
+|---|---|---|
+| `VIID` | 120 | **소재(광고 상품) 추가·제거** — `before/after/added/removed` **개수만** |
+| `TROAS` | 35 | 목표 ROAS (270→230 식) |
+| `BUDGET` | 28 | 일예산 (50,000→100,000 식) |
+| `CAMPAIGN_ONOFF` | 21 | On/Off (true→false) |
+
+- ★**소급 조회가 된다** — 90일 과거를 지금 당장 받는다. 우리 스냅샷 diff는 원리적으로 배포 이후만 가능하다.
+- ★**`executionId`가 UUID** — 멱등 키가 공짜로 있다.
+- 기간 상한: 90일 OK, 1년은 500(`Cannot read properties of null`). 정확한 상한 미측정.
+- `events`·`event`·`events-detail`은 **404** — `events-simple` 하나뿐이다.
+- 한 이벤트의 `changes`는 1~2개(103:5).
+
+**★합격 증거의 원료가 여기 있었다**: Jino의 08-04 변경이 `BUDGET 1,500,000 → 70,000`
+(`2026-08-04T01:51:21Z` = KST 10:51:21, `[매.최] 메츨 싱`)로 그대로 들어 있다. 우리 스냅샷은
+`updatedAt`으로 **시각만** 알았는데 쿠팡은 **전→후 값**을 준다.
+
+### 키워드 — 추적할 대상이 존재하지 않는다
+prod 스냅샷 실측: **활성 광고그룹 21개(오픽스 5 + 오하이테크 16) 전부 `keywordTargeting=AUTOMATIC`
++ `bidType=AUTO_BID`.** 사람이 키워드를 추가·삭제·입찰하지 않는다 → 변경 이력에 키워드 changeType이
+0건인 게 당연하다. **"구현이 어렵다"가 아니라 "관리 대상이 없다".**
+(단 비활성 캠페인의 광고그룹은 안 봤고, 수동 키워드 캠페인을 새로 만들면 전제가 바뀐다.)
+
+### 두 원천은 상호보완적이다 — 내 스냅샷 diff가 이걸 대체하지 않는다
+| | change-history API | 스냅샷 diff(현 구현) |
+|---|---|---|
+| 예산·목표ROAS·On/Off | ✅ 전/후 + 정확한 시각 + **90일 소급** | ✅ 배포 이후만 |
+| **소재(상품) 추가·제거** | ✅ **개수만**(어떤 상품인지는 없음) | ❌ |
+| 신규 캠페인·삭제 | 미확인 | ✅ |
+| 이름·기타 캠페인 설정 13종 | ❌ | ✅ |
+| 광고그룹 15개 필드 | ❌ | ✅ |
+| 키워드 | 대상 없음 | 대상 없음 |
+
+★정직하게: **이 API를 모른 채 스냅샷 diff를 먼저 만들었다.** 겹치는 축(예산·ROAS·On/Off)은
+쿠팡 쪽이 더 정확하다(전/후 값 + 소급). 네이버 「수정 사항」이 두 원천을 합치듯
+(`naver_change_log ∪ naver_agency_op`) 여기도 합치는 게 맞다 — 어느 한쪽만으로는 반쪽이다.
+
+## ★★ 정찰 3차 (2026-08-04 17:4x) — 옵션ID 단위 소재 추적이 **된다**
+
+Jino "광고 캠페인에 어떤 옵션ID가 추가됐는지 볼 수 있는 방법은 전혀없는거야?"
+
+**`POST /marketing/tetris-api/{adGroupId}/ads`**
+요청 `{"isDeleted":false,"pagination":{"page":0,"size":500},"sortedBy":"ID","isSortDesc":true}`
+응답 `{ads:[{adNodeId, vendoritemid, itemName, isActive, isSuspended, isDeleted,
+           pricingOverride, servingStatus, type}], pageInfo:{totalCount, hasNextPage}}`
+
+- ★**`vendoritemid` = 옵션ID**가 그대로 온다 → 스냅샷 diff하면 **어떤 옵션이 붙고 빠졌는지** 정확히 안다.
+  `events-simple`의 `VIID`는 개수만 주지만, 이 목록과 합치면 "옵션 95838755133 외 19개 추가"로 쓸 수 있다.
+- ★`pricingOverride` — **소재별 입찰가 오버라이드**도 온다(현재 오픽스 0건이지만 축은 존재).
+- ★`isDeleted=true`로 **삭제된 소재도 따로 조회**된다(AI스마트광고 42건).
+**비용 실측(두 계정, `totalCount` 기준 수정 후)**
+
+| 계정 | 활성 캠페인 | 광고그룹 | 소재 | 콜 | 시간 |
+|---|---|---|---|---|---|
+| 오픽스 | 5 | 5 | **543** | 6 | 1.4초 |
+| 오하이테크 | 16 | 16 | **499** | 17 | 14.6초 |
+| 합계 | 21 | 21 | 1,042(고유 옵션 955) | **23** | **약 16초** |
+
+가장 큰 광고그룹은 오픽스 `AI스마트광고` 447개 · 오하이테크 `AI_로켓` 446개. 나머지는 1~27개.
+활성 소재는 오픽스 154/543 · 오하이테크 392/499.
+
+**★기존 데이터와 이어진다** — 소재 옵션ID 955개 중:
+- **772건(81%)이 `coupang_ad_option_daily`**(옵션별 광고비)에 이미 있다
+- **527건(55%)이 `product_channel_mapping`**(sellc 상품 연결)에 있다 → 상품명·내부SKU·원가로 이어진다
+- 244건이 `coupang_rocket_option_sku`(1P 브리지)에 있다
+→ "어떤 상품이 광고에 붙고 빠졌나"를 **손익 축과 바로 조인**할 수 있다.
+
+⚠️첫 측정은 오픽스를 196개로 **과소 보고**했다(실제 543). 아래 `hasNextPage` 함정에 내가 직접 물렸다 —
+정찰 스크립트를 고친 뒤에야 347개가 드러났다. 함정을 문서로만 알고 코드를 안 고치면 이렇게 된다.
+
+### ★★★ 함정: `hasNextPage`가 거짓말한다 (조용한 절단)
+같은 광고그룹(204811906)에 대해:
+
+| 요청 | 받은 ads | pageInfo |
+|---|---|---|
+| `size=100, page=0` | **100** | `totalCount: 447, hasNextPage: **False**` |
+| `size=100, page=1` | 100 | `totalCount: 447, hasNextPage: False` |
+| `size=500, page=0` | **447** | `totalCount: 447, hasNextPage: False` |
+
+`hasNextPage`만 믿고 루프를 끊으면 **347개가 조용히 사라진다**. 로그에도 안 남는다.
+**`totalCount`가 권위값이다** — 받은 수가 totalCount에 못 미치면 계속 받아야 한다.
+
+⚠️**이 함정이 현 구현에도 잠재해 있다**: `tools/ad_settings_collect.py::_fetch_all_pages`가
+`hasNextPage`만 본다. campaigns 엔드포인트에선 우연히 정상 동작했지만(오하이테크 525건 수신 =
+totalCount 525 일치, 라이브 확인) 같은 코드를 `/ads`에 쓰면 즉시 절단된다.
+→ 다음 슬라이스에서 **totalCount 기준으로 교체**하고, 못 채우면 경고를 남긴다(조용한 절단 금지).
+
 ## 미결
 
 - [ ] **최종 합격 증거**: Jino가 광고센터에서 실제로 한 번 바꾸면 전/후 값이 뜨는지.

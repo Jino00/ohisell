@@ -90,16 +90,39 @@ def _fetch_page(page, page_no: int, *, is_active: bool | None, log) -> dict | No
 
 
 def _fetch_all_pages(page, *, is_active: bool | None, log) -> list[dict] | None:
+    """★`hasNextPage`를 믿지 않는다 — **`totalCount`가 권위값이다.**
+
+    2026-08-04 실측(광고그룹 204811906의 `/ads`): `size=100`으로 받으면 100건이 오는데
+    `pageInfo`는 `{totalCount: 447, hasNextPage: False}`다. hasNextPage만 보고 끊으면
+    **347건이 조용히 사라지고 로그에도 안 남는다**. 실제로 이 트랙의 첫 비용 측정이
+    오픽스 소재를 543개가 아니라 196개로 과소 보고했다(같은 함정에 내가 물렸다).
+
+    campaigns 엔드포인트는 지금까지 hasNextPage가 정직했지만(525건 수신=totalCount 525),
+    같은 서버의 형제 엔드포인트가 거짓말하는 이상 그 정직함에 기대지 않는다.
+    """
     out: list[dict] = []
+    total: int | None = None
     for n in range(MAX_PAGES):
         j = _fetch_page(page, n, is_active=is_active, log=log)
         if j is None:
             return None if n == 0 else out   # 1페이지도 못 받으면 실패, 중간이면 받은 만큼
-        out.extend(j.get("campaigns") or [])
-        if not (j.get("pageInfo") or {}).get("hasNextPage"):
+        batch = j.get("campaigns") or []
+        out.extend(batch)
+        total = (j.get("pageInfo") or {}).get("totalCount")
+        if total is None:
+            # totalCount가 없으면 판단 근거가 없다 — hasNextPage로 폴백하되 그 사실을 남긴다.
+            log.warning("pageInfo.totalCount 부재(active=%s) — hasNextPage로 폴백한다.", is_active)
+            if not (j.get("pageInfo") or {}).get("hasNextPage"):
+                return out
+        elif len(out) >= total:
             return out
-    log.warning("광고 설정 전량 순회가 상한 %d페이지에 걸렸다 — 일부만 수집됐다(active=%s).",
-                MAX_PAGES, is_active)
+        elif not batch:
+            # 더 줄 게 있다는데(total 미달) 빈 페이지가 왔다 = 서버가 멈춘 것. 조용히 덮지 않는다.
+            log.warning("광고 설정 조회가 %d/%s에서 빈 페이지를 냈다(active=%s) — 일부만 수집됐다.",
+                        len(out), total, is_active)
+            return out
+    log.warning("광고 설정 순회가 상한 %d페이지에 걸렸다 — %d/%s만 수집됐다(active=%s).",
+                MAX_PAGES, len(out), total, is_active)
     return out
 
 
@@ -119,9 +142,12 @@ def collect(page, *, log) -> dict | None:
         log.warning("광고 설정 활성 조회 실패 — 내용 diff 없이 존재·On/Off만 올린다.")
         active_rows = []
     log.info("광고 설정 수집: 전량 %d건 · 활성 %d건", len(all_rows), len(active_rows))
+    # 쿠팡이 직접 주는 변경 이력(전/후 값 + 실행 시각 + 90일 소급). 실패해도 나머지는 올린다.
+    events = _fetch_history(page, [str(c.get("id")) for c in all_rows if c.get("id") is not None],
+                            days=HISTORY_DAYS, log=log) or []
     # ★전량은 **얇게** 보낸다. 서버(A축)가 쓰는 건 이 다섯 필드뿐인데 full payload로 보내면
     #   525건 ≈ 1MB다. 내용 diff는 어차피 활성분(B축)으로만 한다(D-CAC-3).
-    return {"all": [_thin(c) for c in all_rows], "active": active_rows}
+    return {"all": [_thin(c) for c in all_rows], "active": active_rows, "events": events}
 
 
 _THIN_KEYS = ("id", "name", "isActive", "updatedAt", "createdAt")
@@ -131,10 +157,57 @@ def _thin(c: dict) -> dict:
     return {k: c.get(k) for k in _THIN_KEYS}
 
 
+# ── 쿠팡이 직접 주는 변경 이력 ────────────────────────────────────────
+# `/marketing/change-history` 화면이 쓰는 API. 스냅샷 diff와 달리 **전→후 값**과 **실행 시각**을
+# 주고 **소급 조회**가 된다(90일 실측 OK, 1년은 500).
+HISTORY_URL = "https://advertising.coupang.com/marketing/tetris-api/change-history/events-simple"
+HISTORY_DAYS = 90        # 실측 상한 안쪽. 넘기면 500(`Cannot read properties of null`).
+HISTORY_CHUNK = 200      # campaignIds를 한 번에 몇 개씩 물을지(오하이테크 525개 대비).
+
+
+def _fetch_history(page, campaign_ids: list[str], *, days: int, log) -> list[dict] | None:
+    """최근 `days`일 변경 이벤트. 실패하면 None(회차는 계속된다 — 곁다리다)."""
+    if not campaign_ids:
+        return []
+    # 날짜는 KST 기준 YYYYMMDD를 그대로 쓴다(화면이 보내는 형식과 동일).
+    import datetime as _dt
+    today = _dt.datetime.now(_dt.timezone(_dt.timedelta(hours=9))).date()
+    frm = (today - _dt.timedelta(days=days)).strftime("%Y%m%d")
+    to = today.strftime("%Y%m%d")
+
+    out: list[dict] = []
+    for i in range(0, len(campaign_ids), HISTORY_CHUNK):
+        chunk = [int(c) for c in campaign_ids[i:i + HISTORY_CHUNK] if str(c).isdigit()]
+        if not chunk:
+            continue
+        res = page.evaluate(_FETCH_JS, [HISTORY_URL, {
+            "campaignIds": chunk,
+            "filter": {"executionTimeFrom": frm, "executionTimeTo": to},
+        }])
+        status = (res or {}).get("status")
+        body = (res or {}).get("body") or ""
+        if status != 200:
+            log.warning("변경 이력 조회 status=%s (%d개) — %s",
+                        status, len(chunk), body[:120].replace("\n", " "))
+            return out or None
+        try:
+            j = json.loads(body)
+        except ValueError:
+            log.warning("변경 이력 응답이 JSON이 아니다(세션 만료 가능).")
+            return out or None
+        if not isinstance(j, list):
+            log.warning("변경 이력 응답이 리스트가 아니다: %s", str(j)[:120])
+            return out or None
+        out.extend(j)
+    log.info("변경 이력 %d일: 이벤트 %d건", days, len(out))
+    return out
+
+
 def push(prod_base_url: str, ingest_token: str, account: str, payload: dict, *, log) -> bool:
     """prod /ad-settings/ingest push. 실패해도 회차를 실패시키지 않는다(곁다리)."""
     url = prod_base_url.rstrip("/") + "/api/coupang/ops/ad-settings/ingest"
-    body = {"account": account, "all": payload["all"], "active": payload["active"]}
+    body = {"account": account, "all": payload["all"], "active": payload["active"],
+            "events": payload.get("events") or []}
     try:
         r = requests.post(url, json=body, headers={"X-Ingest-Token": ingest_token}, timeout=60)
     except requests.RequestException as e:

@@ -27,7 +27,7 @@ from app.database import get_db
 from app.models import Channel, CoupangAdChangeLog, CoupangAdCostDaily, CoupangAdEntitySnapshot, CoupangAdOptionDaily, CoupangProductItem, CoupangRevenueFee, CoupangRgInbound, CoupangRgOrderItem, CoupangRgSettlementFee, CoupangRocketPromotion, Order, ProductChannelMapping, ProductMaster
 from app.routers._coupang_write_http import handle_write as _handle_write
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
-from app.services.coupang import ad_cost_sync, ad_settings_diff, coupon_write, refresh_contract, coupang_seller_cost as _seller_cost_harness, demand_classifier, in_transit_estimator, lead_time_estimator, ohitech_ad_sync, product_write, rg_fee_audit, rg_inbound_sync, rg_product_size_sync, rg_replenishment, rg_settlement_sync, replenishment_backtest, rocket_cost_map, rocket_promo_sync, rocket_supplier_sync, rg_cost_reader as _rg_reader, sales_velocity_estimator, vendor_summary_sync
+from app.services.coupang import ad_change_history, ad_cost_sync, ad_settings_diff, coupon_write, refresh_contract, coupang_seller_cost as _seller_cost_harness, demand_classifier, in_transit_estimator, lead_time_estimator, ohitech_ad_sync, product_write, rg_fee_audit, rg_inbound_sync, rg_product_size_sync, rg_replenishment, rg_settlement_sync, replenishment_backtest, rocket_cost_map, rocket_promo_sync, rocket_supplier_sync, rg_cost_reader as _rg_reader, sales_velocity_estimator, vendor_summary_sync
 from app.utils.crypto import CookieCryptoError
 
 log = logging.getLogger(__name__)
@@ -2553,10 +2553,14 @@ def ingest_ad_settings(
 
     body: {"account": "ofix"|"ohitech",
            "all":    [<전량 조회 campaigns[]>],     # id·name·isActive만 쓴다
-           "active": [<활성 조회 campaigns[]>]}      # 전체 필드 + groupList
+           "active": [<활성 조회 campaigns[]>],     # 전체 필드 + groupList
+           "events": [<change-history/events-simple 응답>]}   # 선택 — 쿠팡이 준 변경 이력
 
     ★all이 비면 서비스가 회차를 통째로 건너뛴다 — 조회 실패를 "전부 삭제됨"으로 오독하면
       change_log가 되돌리기 어렵게 오염된다.
+
+    ★events를 **먼저** 넣는다: 겹치는 축(예산·목표ROAS·On/Off)에서 쿠팡이 이겨야 하는데,
+      쿠팡 행이 먼저 있으면 스냅샷 쪽이 같은 키를 건너뛰어 자연히 한 줄만 남는다.
     """
     _check_ingest_token(x_ingest_token)
     account = str(body.get("account") or "").strip()
@@ -2566,9 +2570,19 @@ def ingest_ad_settings(
     active_rows = body.get("active")
     if not isinstance(all_rows, list) or not isinstance(active_rows, list):
         raise HTTPException(status_code=400, detail="all[]·active[] 필요")
-    result = ad_settings_diff.ingest(db, account, all_rows, active_rows)
+    events = body.get("events")
+    if events is not None and not isinstance(events, list):
+        raise HTTPException(status_code=400, detail="events는 리스트여야 합니다")
+
+    out: dict[str, Any] = {}
+    if events:
+        # 이벤트엔 캠페인명이 없다 — 전량 조회에서 붙인다(없으면 빈 문자열로 둔다).
+        name_of = {str(c.get("id")): str(c.get("name") or "")
+                   for c in all_rows if c.get("id") is not None}
+        out["history"] = ad_change_history.ingest_events(db, account, events, name_of=name_of)
+    out.update(ad_settings_diff.ingest(db, account, all_rows, active_rows))
     db.commit()
-    return result
+    return out
 
 
 def _parse_kst_date(v: str | None, default: date) -> date:

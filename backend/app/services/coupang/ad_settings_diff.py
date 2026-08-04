@@ -47,6 +47,18 @@ OP_TURNED_OFF = "turned_off"
 OP_DELETED = "deleted"
 OP_FIELD = "field_change"
 
+SOURCE_SNAPSHOT = "snapshot"
+SOURCE_COUPANG = "coupang"
+
+
+def trunc_second(dt: datetime) -> datetime:
+    """★두 원천의 시각을 **초 단위로 맞춘다**.
+
+    쿠팡 `executionTime`은 초까지("2026-08-04T01:51:21Z")인데 우리가 쓰는 `updatedAt`은
+    밀리초까지다("...:21.372Z"). 절삭하지 않으면 **같은 사건이 영영 안 겹쳐** 두 줄로 뜬다.
+    """
+    return dt.replace(microsecond=0)
+
 # ── 설정 필드 허용목록 ────────────────────────────────────────────────
 # isActive는 여기 없다 — On/Off는 별도 축(op)이라 넣으면 같은 사건이 두 줄로 뜬다.
 CAMPAIGN_FIELDS = (
@@ -122,7 +134,7 @@ class _Recorder:
     def add(self, *, entity_type: str, entity_id: str, campaign_id: str, name: str,
             op: str, field: str = "", before: str | None = None, after: str | None = None,
             src_updated_at: datetime | None = None) -> None:
-        occurred_at = src_updated_at or self.detected_at
+        occurred_at = trunc_second(src_updated_at or self.detected_at)
         basis = "src" if src_updated_at else "detected"
         key = (entity_type, entity_id, op, field, occurred_at)
         if key in self._seen:
@@ -133,11 +145,16 @@ class _Recorder:
             campaign_id=campaign_id, entity_name=name, op=op, field=field,
             before_value=before, after_value=after,
             occurred_at=occurred_at, time_basis=basis, detected_at=self.detected_at,
+            source=SOURCE_SNAPSHOT,
         ))
 
 
 def _persist(db: Session, rows: list[CoupangAdChangeLog]) -> int:
-    """UNIQUE 위반은 '이미 기록된 변경'이므로 조용히 건너뛴다(회차 재실행 idempotent)."""
+    """UNIQUE 위반은 '이미 기록된 변경'이므로 조용히 건너뛴다(회차 재실행 idempotent).
+
+    ★같은 키에 **쿠팡 유래** 행이 있으면 덮지 않는다 — 쿠팡은 전/후 값을 갖고 있고 우리는
+      시각만 안다. 우선순위가 한 방향(coupang > snapshot)이라 어느 쪽이 먼저 들어와도 결과가 같다.
+    """
     written = 0
     for r in rows:
         exists = (
