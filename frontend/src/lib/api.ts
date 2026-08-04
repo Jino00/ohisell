@@ -3298,3 +3298,55 @@ export function fetchNaverPerformanceTimeline(
     `/api/naver/ad/performance/timeline${qs ? `?${qs}` : ""}`,
   );
 }
+
+// ── D-NAO-140 S2: 소재(광고)별 성과 ──
+// ★이 축이 없으면 캠페인 평균이 적자 소재를 가린다(2026-08-03 실측: 캠페인 03 ROAS 2.07~3.26
+//   인데 그 안의 소재 하나는 0.61 — 3일 10.4만원 써서 6.4만원).
+export interface NaverCreativeRow {
+  ad_id: string;
+  campaign_id: string;
+  /** 이름이 없으면 null — 화면이 ID 폴백을 스스로 정한다(ID를 이름 자리에 넣지 않는다). */
+  campaign_name: string | null;
+  adgroup_id: string;
+  adgroup_name: string | null;
+  mall_product_id: string | null;
+  product_name: string | null;
+  /** 소재 개별 입찰. use_group_bid_amt=true면 그룹 입찰이 실효라 이 값은 참고용. */
+  bid_amt: number | null;
+  use_group_bid_amt: boolean | null;
+  /** 이 구간에서 성과가 관측된 날 수(구간 길이와 다를 수 있다). */
+  days: number;
+  imp: number;
+  clk: number;
+  cost: number;
+  conv: number;
+  rev: number;
+  /** 비용 0이면 null — 0으로 적으면 '수익이 0'으로 읽힌다. */
+  roas: number | null;
+  bep_roas: number | null;
+  bep_gap: number | null;
+  /** ★3상태: 넘음/미달/**판정불가(null)**. BEP를 모르면 판정하지 않는다. */
+  verdict: "above" | "below" | null;
+}
+
+export interface NaverCreativeResponse {
+  window: { since: string; until: string };
+  total: number;
+  /** 페이지·필터와 무관한 구간 전체 합계 — 한 페이지만 보고 '이게 전부'로 읽지 않게. */
+  totals: { ads: number; cost: number; rev: number; clk: number };
+  rows: NaverCreativeRow[];
+}
+
+export function fetchNaverCreatives(params: {
+  date_from?: string;
+  date_to?: string;
+  days?: number;
+  campaign_id?: string;
+  sort?: "cost" | "imp" | "clk";
+  limit?: number;
+  offset?: number;
+} = {}): Promise<NaverCreativeResponse> {
+  const q = new URLSearchParams();
+  Object.entries(params).forEach(([k, v]) => { if (v != null) q.set(k, String(v)); });
+  return fetchApi(`/api/naver/ad/creatives?${q.toString()}`);
+}

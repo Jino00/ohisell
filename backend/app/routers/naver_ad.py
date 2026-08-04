@@ -94,6 +94,7 @@ from app.models import (
 from app.services.naver_ad import bid_step_types
 from app.services.naver_ad import campaign_roster
 from app.services.naver_ad import change_actor
+from app.services.naver_ad import creative_scorecard
 from app.services.naver_ad import dashboard_overview
 from app.services.naver_ad import delegation_gate
 from app.services.naver_ad import metrics_aggregator
@@ -1265,6 +1266,40 @@ def get_change_log(
 #   화면이 막지 못한 입력에 백엔드 422 원문이 그대로 노출된다.
 # ══════════════════════════════════════════════════════════════════
 _MAX_MODIFICATION_LIMIT = 500
+
+
+@router.get("/creatives")
+def get_creatives(
+    campaign_id: str | None = Query(None, description="캠페인 필터"),
+    days: int = Query(7, ge=1, le=90, description="date_from/date_to의 폴백 창(KST)"),
+    date_from: date | None = Query(None, description="조회 시작일(KST, 포함). date_to와 함께"),
+    date_to: date | None = Query(None, description="조회 종료일(KST, 포함). date_from과 함께"),
+    sort: str = Query("cost", pattern="^(cost|imp|clk)$", description="정렬 축(내림차순)"),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+) -> dict:
+    """소재(광고)별 성과 — ROAS를 **BEP와 나란히** 준다 (D-NAO-140 S2, 읽기 전용).
+
+    ★이 화면이 없으면 안 보이는 것: 캠페인 평균이 적자 소재를 가린다. 2026-08-03 실측으로
+    캠페인 03의 ROAS는 2.07~3.26인데 그 안의 소재 하나는 0.61이었다(3일 10.4만원 써서 6.4만원).
+
+    ★`verdict`는 3상태다(above/below/**null**). BEP를 모르면 판정하지 않는다 — 모르는 걸
+    '미달'로 적으면 매핑 결손이 적자로 둔갑한다.
+    ★기본 창이 7일인 이유: 소재당 전환이 하루 0~3건이라 하루치 ROAS는 노이즈가 신호보다 크다.
+    """
+    since, until = _change_log_window(date_from, date_to, days)
+    # creative 테이블의 축은 DATE라 창을 날짜로 되돌린다(until은 배타적 → 하루 물린다).
+    until_date = (until - modification_feed._ONE_MICRO).date() if until is not None else kst_today()
+    return creative_scorecard.build(
+        db,
+        since=since.date(),
+        until=until_date,
+        campaign_id=campaign_id,
+        sort=sort,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.get("/modifications")
