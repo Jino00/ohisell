@@ -113,6 +113,56 @@ Jino: "이거 매 시간 화면에 크롬이 뜨는거 아니야? 성가신데..
 `ad_cost_browser_fetcher.py login`으로 Jino가 직접 로그인해야 했다(15:30). 같은 날 10:25엔
 keycloak이 살아 있어 통과했으므로 만료 주기 문제다.
 
+## ★★ 정찰 2차 (2026-08-04 17:2x) — 쿠팡이 **변경 이력 API를 직접 준다**
+
+Jino "키워드, 소재 그레인까지 현실적으로 가능해? 안정적으로 구현할 수 있는지 실증먼저 해봐"
+
+광고센터 메뉴에 **「변경 이력」**(`/marketing/change-history`)이 있었다. 그 화면이 부르는 API:
+
+**`POST /marketing/tetris-api/change-history/events-simple`**
+요청 `{"campaignIds":[...], "filter":{"executionTimeFrom":"20260506","executionTimeTo":"20260804"}}`
+응답 `[{campaignId, executionTime(UTC), executionId(UUID), changes:[{changeType, before, after, added, removed, ruleType, campaignRule, budgetRollbackType}]}]`
+
+**두 계정 모두 동작**(오픽스 WING / 오하이테크 SUPPLIERHUB, 같은 엔드포인트).
+90일 실측: 오픽스 86건(05-26~08-03) · 오하이테크 108건(05-11~08-04).
+
+| changeType | 90일 합계 | 내용 |
+|---|---|---|
+| `VIID` | 120 | **소재(광고 상품) 추가·제거** — `before/after/added/removed` **개수만** |
+| `TROAS` | 35 | 목표 ROAS (270→230 식) |
+| `BUDGET` | 28 | 일예산 (50,000→100,000 식) |
+| `CAMPAIGN_ONOFF` | 21 | On/Off (true→false) |
+
+- ★**소급 조회가 된다** — 90일 과거를 지금 당장 받는다. 우리 스냅샷 diff는 원리적으로 배포 이후만 가능하다.
+- ★**`executionId`가 UUID** — 멱등 키가 공짜로 있다.
+- 기간 상한: 90일 OK, 1년은 500(`Cannot read properties of null`). 정확한 상한 미측정.
+- `events`·`event`·`events-detail`은 **404** — `events-simple` 하나뿐이다.
+- 한 이벤트의 `changes`는 1~2개(103:5).
+
+**★합격 증거의 원료가 여기 있었다**: Jino의 08-04 변경이 `BUDGET 1,500,000 → 70,000`
+(`2026-08-04T01:51:21Z` = KST 10:51:21, `[매.최] 메츨 싱`)로 그대로 들어 있다. 우리 스냅샷은
+`updatedAt`으로 **시각만** 알았는데 쿠팡은 **전→후 값**을 준다.
+
+### 키워드 — 추적할 대상이 존재하지 않는다
+prod 스냅샷 실측: **활성 광고그룹 21개(오픽스 5 + 오하이테크 16) 전부 `keywordTargeting=AUTOMATIC`
++ `bidType=AUTO_BID`.** 사람이 키워드를 추가·삭제·입찰하지 않는다 → 변경 이력에 키워드 changeType이
+0건인 게 당연하다. **"구현이 어렵다"가 아니라 "관리 대상이 없다".**
+(단 비활성 캠페인의 광고그룹은 안 봤고, 수동 키워드 캠페인을 새로 만들면 전제가 바뀐다.)
+
+### 두 원천은 상호보완적이다 — 내 스냅샷 diff가 이걸 대체하지 않는다
+| | change-history API | 스냅샷 diff(현 구현) |
+|---|---|---|
+| 예산·목표ROAS·On/Off | ✅ 전/후 + 정확한 시각 + **90일 소급** | ✅ 배포 이후만 |
+| **소재(상품) 추가·제거** | ✅ **개수만**(어떤 상품인지는 없음) | ❌ |
+| 신규 캠페인·삭제 | 미확인 | ✅ |
+| 이름·기타 캠페인 설정 13종 | ❌ | ✅ |
+| 광고그룹 15개 필드 | ❌ | ✅ |
+| 키워드 | 대상 없음 | 대상 없음 |
+
+★정직하게: **이 API를 모른 채 스냅샷 diff를 먼저 만들었다.** 겹치는 축(예산·ROAS·On/Off)은
+쿠팡 쪽이 더 정확하다(전/후 값 + 소급). 네이버 「수정 사항」이 두 원천을 합치듯
+(`naver_change_log ∪ naver_agency_op`) 여기도 합치는 게 맞다 — 어느 한쪽만으로는 반쪽이다.
+
 ## 미결
 
 - [ ] **최종 합격 증거**: Jino가 광고센터에서 실제로 한 번 바꾸면 전/후 값이 뜨는지.
