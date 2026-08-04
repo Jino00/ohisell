@@ -187,6 +187,9 @@ def _snapshot_fields(e: NaverEntity, opt_map, kw_agg, now, budget_map, budget_at
         "synced_at": now,  # ★kst_now 명시(server_default는 UTC — stale 판정 오독 회피)
         "entity_observed_at": e.synced_at,  # entity_sync 관측 시각(없으면 None → bm_diff가 폴백)
         "p3_observed_at": p3_observed_at,
+        # D-NAO-146: 네이버 editTm 원문 복사(발생 시각 앵커). 짝이 되는 관측 시각은
+        # entity_observed_at이다 — 둘 다 entity_sync의 같은 GET에서 왔기 때문.
+        "edit_tm": e.edit_tm,
     }
 
 

@@ -159,6 +159,7 @@ def collect_entities(
             "status": _campaign_status(c),
             "status_reason": c.get("status_reason"),
             "bid_amt": None,
+            "edit_tm": c.get("edit_tm"),  # D-NAO-146 발생 시각 앵커(네이버 editTm 원문)
         })
 
         ags = (adgroups_by_campaign or {}).get(cid) if adgroups_by_campaign is not None else get_adgroups(cid)
@@ -170,6 +171,7 @@ def collect_entities(
                 "status": _status(ag.get("status", ""), ag.get("user_lock", False)),
                 "status_reason": ag.get("status_reason"),
                 "bid_amt": ag.get("bid_amt"),
+                "edit_tm": ag.get("edit_tm"),  # D-NAO-146
             })
 
             if ctype != "WEB_SITE":
@@ -623,7 +625,8 @@ def sync_entities(db: Session, *, rows: list[dict] | None = None) -> dict:
                 entity_type=r["entity_type"], entity_id=r["entity_id"], parent_id=r["parent_id"],
                 campaign_id=r["campaign_id"], campaign_type=r["campaign_type"], name=r["name"],
                 status=r["status"], status_reason=r.get("status_reason"),
-                bid_amt=r.get("bid_amt"), qi_grade=r.get("qi_grade"), synced_at=now,
+                bid_amt=r.get("bid_amt"), qi_grade=r.get("qi_grade"),
+                edit_tm=r.get("edit_tm"), synced_at=now,
             ))
         else:
             if r["entity_type"] == "keyword":
@@ -657,6 +660,10 @@ def sync_entities(db: Session, *, rows: list[dict] | None = None) -> dict:
                 # 키가 없는 레거시 주입 rows는 마지막 관측 사유를 지우지 않는다(qi와 같은 규약).
                 e.status_reason = r["status_reason"]
             e.bid_amt = r.get("bid_amt")
+            if "edit_tm" in r:
+                # D-NAO-146: 키가 없는 레거시 주입 rows는 마지막 관측 editTm을 지우지 않는다
+                # (status_reason과 같은 규약). 값이 None으로 **온** 경우는 관측 결과이므로 반영한다.
+                e.edit_tm = r["edit_tm"]
             if r.get("qi_grade") is not None:
                 # codex[P2] D-NAO-46②: qi는 느리게 변하는 관측치 — API가 일시적으로 nccQi를
                 # 누락(또는 레거시 rows 주입)해도 last-known 등급을 None으로 지우지 않는다.

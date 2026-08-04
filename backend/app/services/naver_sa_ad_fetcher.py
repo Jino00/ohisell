@@ -386,7 +386,17 @@ def get_campaign_types() -> dict[str, str]:
 
 def get_campaigns_full() -> list[dict]:
     """캠페인 전체 정보 반환:
-    [{campaign_id, name, campaign_type, daily_budget, status, user_lock, status_reason}].
+    [{campaign_id, name, campaign_type, daily_budget, status, user_lock, status_reason, edit_tm}].
+
+    ★edit_tm(D-NAO-146, 2026-08-04): 이 응답에 `editTm`이 **이미 실려 온다**(라이브 실측 46/46건).
+    소재 grain의 `editTm`(D-NAO-127)·`APPLY_TM`(D-NAO-137)에 이어 세 번째로 "받아서 버리던"
+    필드다 — 추가 GET 0. 캠페인·그룹 조작은 일별 스냅샷 diff라 지금껏 시각이 100% NULL이었는데
+    (naver_agency_op 30일 90/90), 이 값이 그 "언제"를 초 단위로 채운다.
+    ★소재와 달리 **피드 재적용 잡음이 없다**(실측 2026-08-04: 캠페인 46건 중 최근 3일 전진 1건,
+    그룹 1,010건 중 2건 — 소재는 같은 날 229건이 피드로 전진했다). 그래서 판별자가 필요 없다.
+    교차 검증: 03 캠페인 editTm 2026-08-03T05:32:37Z = 대행사 일예산 50,000→200,000 변경 시각과
+    초 단위 일치(트랙 D-NAO-138③ 기록).
+    ★원문 문자열 그대로 넘긴다 — 파싱은 소비 지점(ad_external_change.parse_edit_tm)에서 한다.
 
     ★user_lock·status_reason은 D-NAO-97 추가(2026-07-28). 그 전까지 이 함수는 status만 넘겼고
     entity_sync가 `status == "PAUSED"` → off로 **userLock을 역추론**했다. 그래서 일예산 소진
@@ -410,6 +420,7 @@ def get_campaigns_full() -> list[dict]:
         "status": c.get("status", ""),
         "user_lock": bool(c.get("userLock", False)),
         "status_reason": c.get("statusReason", ""),
+        "edit_tm": c.get("editTm"),  # D-NAO-146 발생 시각 앵커(원문 그대로)
     } for c in resp.json()]
 
 
@@ -739,6 +750,7 @@ def get_adgroups(campaign_id: str) -> list[dict]:
         "bid_amt": a.get("bidAmt"),
         "daily_budget": a.get("dailyBudget"),
         "extended_search": a.get("useExpSearch"),
+        "edit_tm": a.get("editTm"),  # D-NAO-146 발생 시각 앵커(원문 그대로, 라이브 실측 1,010/1,010건)
     } for a in resp.json()]
 
 

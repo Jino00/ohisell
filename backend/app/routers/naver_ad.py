@@ -1665,8 +1665,11 @@ def get_bm_agency_ops(
                 "id": r.id,
                 "op_date": r.op_date.isoformat() if hasattr(r.op_date, "isoformat") else str(r.op_date),
                 "detected_at": r.detected_at.isoformat() if r.detected_at else None,
-                # D-NAO-127: 실제로 손댄 시각(ad grain은 editTm으로 확정). 스냅샷 diff 유래
-                # 행은 None — detected_at(감지 시각)과 섞으면 "언제"에 거짓으로 답하게 된다.
+                # D-NAO-127: 실제로 손댄 시각(ad grain은 editTm으로 확정).
+                # ★D-NAO-146: campaign/adgroup grain도 이제 네이버 editTm으로 채워진다 — 단
+                # 창((직전 관측, 이번 관측]) 밖이거나 자식 롤업 op(키워드·제외키워드 수 증감)면
+                # 여전히 None이다. None은 "시각 불명"이지 "변경이 없었다"가 아니다.
+                # detected_at(감지 시각)과 섞으면 "언제"에 거짓으로 답하게 된다.
                 "occurred_at": r.occurred_at.isoformat() if r.occurred_at else None,
                 "entity_type": r.entity_type, "entity_id": r.entity_id,
                 "campaign_id": r.campaign_id, "campaign_name": camp_names.get(r.campaign_id),

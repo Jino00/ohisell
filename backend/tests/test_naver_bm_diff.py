@@ -55,7 +55,7 @@ def db():
 def _snap(db, sdate, entity_type, entity_id, *, campaign_id="", campaign_type="", optimizer="none",
           status="on", bid_amt=None, keyword_count=None, daily_budget=None, extended_search=None,
           negative_kw_count=None, ad_count=None, name="", synced_at=None,
-          entity_observed_at=None, p3_observed_at=None):
+          entity_observed_at=None, p3_observed_at=None, edit_tm=None):
     # synced_at 기본값 = 그 날 07:37(실제 스냅샷 크론 시각). change_log 조회창의 상한이므로
     # kst_now()가 아니라 스냅샷 날짜에 묶어야 리플레이가 결정적이다.
     # entity_observed_at·p3_observed_at 기본값 = NULL(구 행) → bm_diff가 synced_at으로 폴백.
@@ -68,6 +68,7 @@ def _snap(db, sdate, entity_type, entity_id, *, campaign_id="", campaign_type=""
         daily_budget=daily_budget, extended_search=extended_search,
         negative_kw_count=negative_kw_count, ad_count=ad_count, synced_at=synced_at,
         entity_observed_at=entity_observed_at, p3_observed_at=p3_observed_at,
+        edit_tm=edit_tm,
     ))
 
 
@@ -746,3 +747,153 @@ def test_band_until_is_clamped_into_load_window(db):
     too_early = {"op_type": "bid_change", "entity_observed_at": win.load_from - timedelta(days=9)}
     assert win.band(too_late).until == win.load_until
     assert win.band(too_early).until == win.load_from
+
+
+# ── 12. ★D-NAO-146: 캠페인·광고그룹 변경의 발생 시각(occurred_at) ────────────────
+# 배경: 이 grain은 일별 스냅샷 diff라 occurred_at이 100% NULL이었다(prod 30일 90/90).
+#   네이버 /ncc/campaigns·/ncc/adgroups 응답의 `editTm`이 그 "언제"를 초 단위로 준다.
+#   ★소재 grain과 달리 피드 재적용 잡음이 없다(라이브 실측 2026-08-04: 캠페인 46건 중 최근
+#   3일 전진 1건 / 그룹 1,010건 중 2건) — 그래서 피드 판별자 없이 그대로 승격한다.
+# 가드: **직전 관측 < editTm ≤ 이번 관측**일 때만 채운다. editTm은 마지막 수정만 남으므로
+#   창 밖 값은 이 변경의 시각이 아니다(창 밖을 채우면 D-NAO-139의 "소급 판정이 하룻밤 새
+#   뒤집힘"이 재발한다).
+PREV_OBS = datetime(2026, 7, 20, 7, 35)          # D-1 entity_sync 관측
+CURR_OBS = datetime(2026, 7, 21, 7, 35)          # D entity_sync 관측
+EDIT_IN_WINDOW = "2026-07-20T10:22:11.000Z"      # = 2026-07-20 19:22:11 KST (창 안)
+EDIT_IN_WINDOW_KST = datetime(2026, 7, 20, 19, 22, 11)
+EDIT_BEFORE_WINDOW = "2026-03-30T06:42:23.000Z"  # 창보다 훨씬 과거(실측: 캠페인 31건이 이 상태)
+EDIT_AFTER_OBS = "2026-07-21T09:00:00.000Z"      # = 07-21 18:00 KST, 우리가 본 뒤
+
+
+def _pair_for_bid_change(db, *, edit_tm, prev_obs=PREV_OBS, curr_obs=CURR_OBS):
+    """그룹 기본입찰 300→600(대행사 조작) 한 쌍. D 행에만 edit_tm을 심는다."""
+    _snap(db, D_PREV, "campaign", "cmp-a", campaign_type="WEB_SITE", entity_observed_at=prev_obs)
+    _snap(db, D_CURR, "campaign", "cmp-a", campaign_type="WEB_SITE", entity_observed_at=curr_obs)
+    _snap(db, D_PREV, "adgroup", "grp-a", campaign_id="cmp-a", bid_amt=300,
+          entity_observed_at=prev_obs)
+    _snap(db, D_CURR, "adgroup", "grp-a", campaign_id="cmp-a", bid_amt=600,
+          entity_observed_at=curr_obs, edit_tm=edit_tm)
+    db.commit()
+
+
+def test_occurred_at_filled_from_edit_tm_in_window(db):
+    """editTm이 [직전 관측, 이번 관측] 창 안 → 그 시각이 occurred_at으로 올라간다(KST 변환)."""
+    _pair_for_bid_change(db, edit_tm=EDIT_IN_WINDOW)
+    detect_agency_ops(db, op_date=D_CURR)
+
+    op = _ops(db)[("bid_change", "grp-a")]
+    assert op.occurred_at == EDIT_IN_WINDOW_KST
+
+
+def test_occurred_at_null_when_edit_tm_predates_window(db):
+    """editTm이 직전 관측보다 과거 → NULL. 값은 변했는데 editTm이 안 움직였다는 뜻이므로
+    (자식 변경의 롤업·우리 관측 경합 등) 그 시각을 이 변경의 시각으로 쓰면 거짓이다."""
+    _pair_for_bid_change(db, edit_tm=EDIT_BEFORE_WINDOW)
+    detect_agency_ops(db, op_date=D_CURR)
+
+    assert _ops(db)[("bid_change", "grp-a")].occurred_at is None
+
+
+def test_occurred_at_null_when_edit_tm_after_our_observation(db):
+    """editTm이 우리 관측 이후 → NULL. 우리가 본 뒤에 난 편집은 이 diff의 원인일 수 없다
+    (다음 회차가 잡는다). 창 상한이 없으면 미래 시각을 사실처럼 기록하게 된다."""
+    _pair_for_bid_change(db, edit_tm=EDIT_AFTER_OBS)
+    detect_agency_ops(db, op_date=D_CURR)
+
+    assert _ops(db)[("bid_change", "grp-a")].occurred_at is None
+
+
+def test_occurred_at_null_when_edit_tm_missing(db):
+    """editTm 미수집(구 행·API 누락) → NULL. 종전 동작 그대로(하위호환)."""
+    _pair_for_bid_change(db, edit_tm=None)
+    detect_agency_ops(db, op_date=D_CURR)
+
+    assert _ops(db)[("bid_change", "grp-a")].occurred_at is None
+
+
+def test_occurred_at_filled_for_budget_and_status_and_extended(db):
+    """엔티티 자신의 필드 변경 4종(bid·budget·status·extended)이 전부 채워진다.
+    ★예산·확장검색은 값 자체는 몇 분 뒤 P3 GET에서 오지만, editTm의 짝은 entity 관측
+    시각이다 — 상한을 P3로 늘리면 그 사이 편집을 이 diff의 시각으로 오기록한다."""
+    _snap(db, D_PREV, "campaign", "cmp-a", campaign_type="WEB_SITE", status="on",
+          daily_budget=50_000, entity_observed_at=PREV_OBS, p3_observed_at=P3_OBS)
+    _snap(db, D_CURR, "campaign", "cmp-a", campaign_type="WEB_SITE", status="off",
+          daily_budget=200_000, entity_observed_at=CURR_OBS, p3_observed_at=P3_OBS,
+          edit_tm=EDIT_IN_WINDOW)
+    _snap(db, D_PREV, "adgroup", "grp-a", campaign_id="cmp-a", bid_amt=300,
+          extended_search=False, entity_observed_at=PREV_OBS, p3_observed_at=P3_OBS)
+    _snap(db, D_CURR, "adgroup", "grp-a", campaign_id="cmp-a", bid_amt=600,
+          extended_search=True, entity_observed_at=CURR_OBS, p3_observed_at=P3_OBS,
+          edit_tm=EDIT_IN_WINDOW)
+    db.commit()
+
+    detect_agency_ops(db, op_date=D_CURR)
+    ops = _ops(db)
+    for key in (("bid_change", "grp-a"), ("budget_change", "cmp-a"),
+                ("status_flip", "cmp-a"), ("extended_toggle", "grp-a")):
+        assert ops[key].occurred_at == EDIT_IN_WINDOW_KST, key
+
+
+def test_occurred_at_null_for_child_rollup_ops(db):
+    """★자식 변경(키워드·제외키워드 수)은 창 안이어도 NULL로 남긴다 — 그룹 객체의 editTm이
+    자식 추가로 전진하는지 확인된 바 없다. 확인 전엔 채우지 않는다(추정 금지)."""
+    _snap(db, D_PREV, "campaign", "cmp-a", campaign_type="WEB_SITE", entity_observed_at=PREV_OBS)
+    _snap(db, D_CURR, "campaign", "cmp-a", campaign_type="WEB_SITE", entity_observed_at=CURR_OBS)
+    _snap(db, D_PREV, "adgroup", "grp-a", campaign_id="cmp-a", campaign_type="WEB_SITE",
+          keyword_count=10, negative_kw_count=2, entity_observed_at=PREV_OBS)
+    _snap(db, D_CURR, "adgroup", "grp-a", campaign_id="cmp-a", campaign_type="WEB_SITE",
+          keyword_count=14, negative_kw_count=5, entity_observed_at=CURR_OBS,
+          edit_tm=EDIT_IN_WINDOW)
+    db.commit()
+
+    detect_agency_ops(db, op_date=D_CURR)
+    ops = _ops(db)
+    assert ops[("keyword_add", "grp-a")].occurred_at is None
+    assert ops[("negative_add", "grp-a")].occurred_at is None
+
+
+def test_occurred_at_null_for_structural_add_and_remove(db):
+    """신설·소멸은 이번 범위 밖(생성 시각은 regTm이 답하고, 아직 안 받는다) → NULL 유지."""
+    _snap(db, D_PREV, "campaign", "cmp-a", campaign_type="WEB_SITE", entity_observed_at=PREV_OBS)
+    _snap(db, D_CURR, "campaign", "cmp-a", campaign_type="WEB_SITE", entity_observed_at=CURR_OBS)
+    _snap(db, D_PREV, "adgroup", "grp-old", campaign_id="cmp-a", entity_observed_at=PREV_OBS)
+    _snap(db, D_CURR, "adgroup", "grp-new", campaign_id="cmp-a", entity_observed_at=CURR_OBS,
+          edit_tm=EDIT_IN_WINDOW)
+    db.commit()
+
+    detect_agency_ops(db, op_date=D_CURR)
+    ops = _ops(db)
+    assert ops[("adgroup_add", "grp-new")].occurred_at is None
+    assert ops[("adgroup_remove", "grp-old")].occurred_at is None
+
+
+def test_occurred_at_falls_back_to_synced_at_when_observation_null(db):
+    """구 행은 entity_observed_at이 NULL — 그때는 synced_at(스냅샷 복사 시각)을 창 경계로
+    쓴다(_window의 폴백과 같은 규약). 창이 없다고 시각을 버리지 않는다."""
+    _snap(db, D_PREV, "campaign", "cmp-a", campaign_type="WEB_SITE")
+    _snap(db, D_CURR, "campaign", "cmp-a", campaign_type="WEB_SITE")
+    _snap(db, D_PREV, "adgroup", "grp-a", campaign_id="cmp-a", bid_amt=300)
+    _snap(db, D_CURR, "adgroup", "grp-a", campaign_id="cmp-a", bid_amt=600,
+          edit_tm=EDIT_IN_WINDOW)
+    db.commit()
+
+    detect_agency_ops(db, op_date=D_CURR)
+    assert _ops(db)[("bid_change", "grp-a")].occurred_at == EDIT_IN_WINDOW_KST
+
+
+def test_our_echo_still_filtered_when_edit_tm_present(db):
+    """★회귀: occurred_at을 붙여도 '우리 변경의 지연 반영(echo)' 필터는 그대로 산다.
+    우리가 실집행한 값이 editTm과 함께 뒤늦게 스냅샷에 반영돼도 대행사 조작으로 승격되지
+    않는다 — 시각 부여가 분류를 건드리면 안 된다."""
+    _snap(db, D_PREV, "campaign", "cmp-a", campaign_type="WEB_SITE", entity_observed_at=PREV_OBS)
+    _snap(db, D_CURR, "campaign", "cmp-a", campaign_type="WEB_SITE", entity_observed_at=CURR_OBS)
+    _snap(db, D_PREV, "adgroup", "grp-a", campaign_id="cmp-a", bid_amt=300,
+          entity_observed_at=PREV_OBS)
+    _snap(db, D_CURR, "adgroup", "grp-a", campaign_id="cmp-a", bid_amt=600,
+          entity_observed_at=CURR_OBS, edit_tm=EDIT_IN_WINDOW)
+    _log(db, "grp-a", "update_bid", {"bidAmt": 600}, before={"bidAmt": 300},
+         at=EDIT_IN_WINDOW_KST, campaign_id="cmp-a")
+    db.commit()
+
+    detect_agency_ops(db, op_date=D_CURR)
+    assert ("bid_change", "grp-a") not in _ops(db)
