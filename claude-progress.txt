@@ -1476,3 +1476,11 @@ RG 옛 공백(04-20~05-03) Jino 종결 승인(13:34) — 공백 아님(배송비
   ②건너뛴 파일이 공용 모듈 `coupang_auth.py`일 때 fatal로 승격할지 — 현재는 경고만.
 - failure-memory DB(`AI Program/.claude/skills/failure-memory/failures.jsonl`)에 사고 원인 +
   `git -C` pathspec 버그 2건 이미 기록 완료.
+
+## 2026-08-04 저녁~밤 — 손익 미배선 4건 처리 (D-NAO-144·145·148)
+- ② 월 고정비 배선(마이그 e7a2c5b90d84) · ③ 교환 배송손익 배선(b2f9d61ae403·백필 49건)
+- N배송 1.5% = 불필요 확정(정산 대조 오차 0원, 배선 시 이중계상) — 코드 0줄
+- 원가 미상 매출 표면화(대시보드 경고, 순이익 불변) — 라이브 1,271,300원 일치
+- 테스트 4,737 passed · 전부 prod 배포 · PR #195 push 완료
+- 다음 1순위: 자사몰 미매핑 34% 원인 규명
+- 상세: .claude/memory/HANDOFF_monthly-fixed-cost+exchange-pnl_20260804.md
