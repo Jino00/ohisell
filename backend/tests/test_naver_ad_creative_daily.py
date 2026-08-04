@@ -185,3 +185,45 @@ def test_reconcile_reports_mismatch_without_raising(db):
     r = res["reconcile"][0]
     assert r["ok"] is False and r["diff"]["cost"] == (400, 999)
     assert db.query(NaverAdCreativeDaily).count() == 2  # 적재는 살아 있다
+
+
+def test_reconcile_covers_a_day_with_zero_creative_rows(db):
+    """★소재 행이 0인 날도 대조한다 — 이걸 건너뛰면 '수집이 통째로 샌 날'이 초록으로 보인다.
+
+    도달 경로: 어느 날 AD 보고서 생성이 실패하면 그날 수집 결과가 빈다. 그런데
+    `ingest_ad_daily`는 **행이 있는 날짜만** 스냅샷 교체하므로 `naver_ad_daily`에는
+    **이전 회차의 그날 행이 그대로 남는다.** 즉 그룹합 > 0 · 소재합 0이라는 최악의 어긋남이
+    생기는데, 대조 대상 날짜를 '소재 행이 있는 날'에서 뽑으면 그날은 아예 검사되지 않아
+    로그가 "대조 0일 중 불일치 0일"이라고 말한다 — 대조가 막으라고 만든 바로 그 상황이다.
+    """
+    _daily(db, imp=30, clk=3, cost=400, rev=14000)
+    res = ad_creative_daily_sync.sync(db, date_from=DAY, date_to=DAY, rows=[])
+
+    assert len(res["reconcile"]) == 1, "소재 행이 없어도 그날은 대조 대상이다"
+    r = res["reconcile"][0]
+    assert r["day"] == DAY.isoformat()
+    assert r["ok"] is False and r["diff"]["cost"] == (0, 400)
+
+
+def test_reconcile_is_silent_when_both_sides_are_empty(db):
+    """양쪽 다 비어 있으면 불일치가 아니다 — 없는 날을 매번 경보로 만들지 않는다."""
+    res = ad_creative_daily_sync.sync(db, date_from=DAY, date_to=DAY, rows=[])
+    assert [r["ok"] for r in res["reconcile"]] == [True]
+
+
+def test_two_reports_share_the_identifier_columns():
+    """★`_grain_key`는 **AD 보고서 상수**(COL_*)로 AD_CONVERSION 행도 읽는다 — 두 보고서의
+    식별자 컬럼 배치가 같다는 라이브 실측(2026-08-04)에 기댄 설계다.
+
+    그 결과 `CONV_COL_CAMPAIGN/ADGROUP/KEYWORD`는 **아무도 안 쓰는 상수**가 됐다. 전환 보고서
+    배치가 언젠가 바뀌어 누가 그 상수만 고치면 파서는 하나도 안 바뀌고, 전환이 엉뚱한 키로
+    합산돼 **매출이 조용히 어긋난다**(BEP·ROAS가 전부 이 축 위에 있다). 그래서 '같다'는 전제를
+    주석이 아니라 테스트로 잡아 둔다 — 어긋나는 순간 여기서 깨진다.
+    """
+    assert (fetcher.CONV_COL_DATE, fetcher.CONV_COL_CAMPAIGN,
+            fetcher.CONV_COL_ADGROUP, fetcher.CONV_COL_KEYWORD) == (
+        fetcher.COL_DATE, fetcher.COL_CAMPAIGN_ID,
+        fetcher.COL_ADGROUP_ID, fetcher.COL_KEYWORD_ID)
+    # 소재 컬럼은 길이 가드 안쪽이어야 한다(두 보고서 모두 인덱스 접근 전에 걸러진다).
+    assert fetcher.COL_AD_ID < fetcher.COL_RANK_SUM
+    assert fetcher.COL_AD_ID < fetcher.CONV_COL_VALUE

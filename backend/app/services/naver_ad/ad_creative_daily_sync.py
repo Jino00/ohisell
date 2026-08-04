@@ -22,7 +22,7 @@ upsert 하고, 같은 날 `naver_ad_daily` 합계와 **대조**한다.
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, timedelta
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -151,7 +151,13 @@ def sync(db: Session, *, date_from: date, date_to: date, rows: list[dict] | None
         row.synced_at = now
     db.commit()
 
-    days = sorted({r.ad_date for r in existing.values() if date_from <= r.ad_date <= date_to})
+    # ★대조 대상은 **요청 구간의 모든 날**이다 — '소재 행이 있는 날'에서 뽑으면 안 된다.
+    #   그날 보고서 생성이 실패해 수집이 비면 소재 행이 0인데, `ingest_ad_daily`는 행이 있는
+    #   날짜만 스냅샷 교체하므로 `naver_ad_daily`에는 이전 회차 행이 그대로 남는다. 즉
+    #   "그룹합 > 0 · 소재합 0"이라는 최악의 어긋남이 나는데, 그날이 대조 목록에서 빠져
+    #   로그는 "대조 0일 중 불일치 0일"이라고 말한다 — 대조가 막으라고 만든 상황이 바로 이거다.
+    #   양쪽 다 비어 있는 날은 0==0으로 자동 통과하므로 경보가 늘어나지도 않는다.
+    days = [date_from + timedelta(days=i) for i in range((date_to - date_from).days + 1)]
     recon = [reconcile(db, d) for d in days]
     log.info(
         "ad_creative_daily sync %s~%s: %d행(신규 %d·갱신 %d), 대조 %d일 중 불일치 %d일",
