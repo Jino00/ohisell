@@ -2474,8 +2474,12 @@ class NaverAgencyOp(Base):
     #   때마다 흔들린다. 그래서 판정 근거 숫자(moved/total)까지 그 시점 값으로 굳혀 둔다.
     feed_verdict: Mapped[Optional[str]] = mapped_column(String(8), nullable=True)  # feed/real/unknown
     feed_product_id: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)  # 판별에 쓴 mall_product_id
-    feed_moved: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 그 초에 움직인 소재 수
+    feed_moved: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 그 창에서 함께 움직인 소재 수
     feed_total: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 그 상품의 소재 수(판정 시점)
+    # 군집 시작 시각 — 화면이 형제 줄을 한 줄로 접는 키. 08-04 실측으로 판별 창이 "같은 초"에서
+    # 최대 수백 초로 넓어지면서 소재마다 시각이 달라졌고, 그래서 시각 자체로는 같은 사건을
+    # 더 이상 묶을 수 없다(간격 실측 0·66·437·501초).
+    feed_cluster_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
 class NaverChangeActorOverride(Base):

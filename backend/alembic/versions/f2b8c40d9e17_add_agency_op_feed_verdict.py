@@ -32,6 +32,9 @@ _COLS = (
     ("feed_product_id", sa.String(50)),
     ("feed_moved", sa.Integer()),
     ("feed_total", sa.Integer()),
+    # 군집 시작 시각 — 화면 접기 키. 08-04 실측(간격 0·66·437·501초)으로 판별 창이
+    # "같은 초"에서 넓어지면서, 시각 자체로는 같은 사건을 묶을 수 없게 됐다.
+    ("feed_cluster_at", sa.DateTime()),
 )
 
 

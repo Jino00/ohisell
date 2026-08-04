@@ -26,6 +26,11 @@ T_OTHER = "2026-07-29T01:27:20.000Z"
 KST_FEED = datetime(2026, 8, 1, 12, 27, 38)
 
 
+def _iso_kst(dt: datetime) -> str:
+    """KST datetime → 네이버가 주는 UTC ISO8601 'Z' 형식(테스트 입력을 실제 형식으로 맞춘다)."""
+    return (dt - timedelta(hours=9)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
 @pytest.fixture
 def db():
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
@@ -75,6 +80,45 @@ def test_single_ad_product_is_undecidable(db):
     v = feed_reapply.verdict_for(db, "nad-0", T_FEED)
     assert v.verdict == feed_reapply.VERDICT_UNKNOWN
     assert "1개뿐" in v.evidence()
+
+
+# ── 2026-08-04 라이브 첫 정규 판정이 강제한 수정 2건 ──
+def test_tracked_field_change_is_never_feed(db):
+    """★가드① — 입찰이 실제로 바뀐 op은 **전량이 함께 움직였어도** 피드가 아니다.
+
+    피드 재적용은 `bidAmt`·`useGroupBidAmt`·`userLock`을 건드리지 않는다(233건 전수 확인).
+    이 가드가 없으면 대행사가 한 상품의 소재 입찰을 몰아서 내렸을 때 통째로 '피드'로 접혀
+    **화면에서 사라진다** — 이 화면이 막으려는 바로 그 일이다."""
+    for i in range(3):
+        _map(db, ad_id=f"nad-{i}", product="P1", edit_tm=T_FEED)
+    assert feed_reapply.verdict_for(db, "nad-0", T_FEED, "ad_edit").verdict == feed_reapply.VERDICT_FEED
+    for op in ("bid_change", "bid_mode_flip", "status_flip"):
+        v = feed_reapply.verdict_for(db, "nad-0", T_FEED, op)
+        assert v.verdict == feed_reapply.VERDICT_REAL, op
+        assert "건드리지 않으므로" in v.evidence()
+
+
+def test_feed_spread_over_minutes_still_counts(db):
+    """★수정② — 피드 전파가 항상 원자적이지 않다.
+
+    08-04 실측: 대부분 간격 0초인데 상품 3개는 소재 전량이 움직였는데도 66·437·**501초**로
+    벌어졌다(새벽 3~4시, 입찰 무변동). '같은 초' 규칙은 이걸 거짓 실조작 9건으로 만들었다."""
+    base = datetime(2026, 8, 4, 3, 24, 54)
+    for i, gap in enumerate((0, 66, 501)):
+        _map(db, ad_id=f"nad-{i}", product="P1", edit_tm=_iso_kst(base + timedelta(seconds=gap)))
+    v = feed_reapply.verdict_for(db, "nad-0", _iso_kst(base))
+    assert (v.verdict, v.moved, v.total) == (feed_reapply.VERDICT_FEED, 3, 3)
+    # 군집 시작 시각 = 창 안에서 가장 이른 editTm(화면 접기 키)
+    assert v.cluster_at == base
+
+
+def test_move_outside_window_is_not_the_same_event(db):
+    """창을 벗어나면 같은 사건이 아니다 — 창이 무한이면 판별자가 아무것도 안 가른다."""
+    base = datetime(2026, 8, 4, 3, 0, 0)
+    _map(db, ad_id="nad-0", product="P1", edit_tm=_iso_kst(base))
+    _map(db, ad_id="nad-1", product="P1", edit_tm=_iso_kst(base + timedelta(seconds=901)))
+    v = feed_reapply.verdict_for(db, "nad-0", _iso_kst(base))
+    assert (v.verdict, v.moved, v.total) == (feed_reapply.VERDICT_REAL, 1, 2)
 
 
 def test_no_mapping_yields_no_product(db):
@@ -210,6 +254,30 @@ def test_feed_cluster_collapses_to_one_row(db):
     assert head["feed_group_size"] == 5
     assert len(head["feed_group_ids"]) == 5  # 접힌 형제를 버리지 않는다
     assert "전량" in head["feed_evidence"]
+
+
+def test_spread_feed_still_collapses_to_one_row(db):
+    """★접기는 각 행의 시각이 아니라 **군집 시작 시각**으로 묶는다.
+
+    전파가 벌어지면 소재마다 `occurred_at`이 달라진다 — 시각으로 묶으면 접기가 통째로
+    실패해서, 판별은 맞는데 화면은 여전히 N줄로 보인다."""
+    base = datetime(2026, 8, 4, 3, 24, 54)
+    for i, gap in enumerate((0, 66, 501)):
+        at = base + timedelta(seconds=gap)
+        _map(db, ad_id=f"nad-{i}", product="P1", edit_tm=_iso_kst(at))
+        db.add(NaverAgencyOp(
+            op_date=kst_today(), detected_at=datetime(2026, 8, 4, 7, 46), entity_type="ad",
+            entity_id=f"nad-{i}", campaign_id="cmp-1", op_type="ad_edit", occurred_at=at,
+        ))
+    db.commit()
+    feed_reapply.backfill(db)
+    assert {o.feed_verdict for o in db.query(NaverAgencyOp).all()} == {feed_reapply.VERDICT_FEED}
+
+    res = modification_feed.build(
+        db, since=base - timedelta(days=1), until=base + timedelta(days=1)
+    )
+    assert res["total"] == 1
+    assert res["rows"][0]["feed_group_size"] == 3
 
 
 def test_hiding_feed_reapply_leaves_only_real_ops(db):

@@ -125,6 +125,7 @@ class _Candidate:
     # D-NAO-139 — 소재 grain agency_op에만 채워진다. 그 외(change_log·다른 grain)는 None.
     feed_verdict: str | None = None
     feed_product_id: str | None = None
+    feed_cluster_at: datetime | None = None
     # 접기로 이 행에 합쳐진 형제 행들(대표행에만 채워진다). 1이면 접힌 게 없다.
     feed_group_size: int = 1
     feed_group_ids: tuple[int, ...] = ()
@@ -241,13 +242,13 @@ def _agency_op_candidates(
 
     q = db.query(
         NaverAgencyOp.id, NaverAgencyOp.occurred_at, NaverAgencyOp.op_date,
-        NaverAgencyOp.feed_verdict, NaverAgencyOp.feed_product_id,
+        NaverAgencyOp.feed_verdict, NaverAgencyOp.feed_product_id, NaverAgencyOp.feed_cluster_at,
     ).filter(or_(and_(*occurred_cond), and_(*date_cond)))
     if campaign_id:
         q = q.filter(NaverAgencyOp.campaign_id == campaign_id)
 
     out: list[_Candidate] = []
-    for aid, occurred_at, op_date, verdict, product_id in q.all():
+    for aid, occurred_at, op_date, verdict, product_id, cluster_at in q.all():
         at, basis = _effective_dt(occurred_at, op_date)
         out.append(
             _Candidate(
@@ -259,6 +260,7 @@ def _agency_op_candidates(
                 auto_actor=change_actor.classify_agency_op(),
                 feed_verdict=verdict,
                 feed_product_id=product_id,
+                feed_cluster_at=cluster_at,
             )
         )
     return out
@@ -271,10 +273,12 @@ def _collapse_feed_reapply(candidates: list[_Candidate]) -> list[_Candidate]:
     상품명이 N줄로 늘어서고, 사람은 "대행사가 N번 수정했다"로 읽는다(Jino가 08-01 12:27 건에서
     실제로 그렇게 읽었고 그게 이 기능의 출발점이다).
 
-    접는 기준은 **(귀속 시각, 상품)**이다 — 같은 상품이 같은 초에 움직인 건 한 사건이다.
-    op_type은 키에 넣지 않는다: 접기 대상은 `verdict == feed`인 행뿐이고, 입찰이 실제로
-    바뀐 행은 정의상 `moved < total`이라 애초에 feed로 판정되지 않는다(그 상품의 다른 소재는
-    그 초에 안 움직였으니까). 즉 이 그룹 안에 성격이 다른 사건이 섞일 길이 없다.
+    접는 기준은 **(군집 시작 시각, 상품)**이다 — `feed_cluster_at`은 판정 시점에 굳혀 둔 값이다.
+    ★행의 `at`(각 소재의 editTm)으로 묶으면 안 된다: 08-04 실측에서 피드가 **최대 501초에
+      걸쳐 전파**되는 경우가 나왔고(간격 0·66·437·501초), 그러면 한 사건의 소재들이 서로 다른
+      `at`을 갖게 되어 접기가 통째로 실패한다.
+    op_type은 키에 넣지 않는다: 접기 대상은 `verdict == feed`인 행뿐이고, 추적 필드가 바뀐 op은
+    판별기 가드①이 **무조건 real**로 내리므로 이 그룹에 들어올 수 없다.
 
     ★대표행은 **가장 작은 source_id**로 고정한다(정렬·페이지가 흔들리지 않게). 접힌 형제
     id는 `feed_group_ids`로 남긴다 — 화면이 펼치거나 감사할 수 있어야 하고, "몇 건이 접혔나"를
@@ -283,8 +287,14 @@ def _collapse_feed_reapply(candidates: list[_Candidate]) -> list[_Candidate]:
     groups: dict[tuple, list[_Candidate]] = {}
     passthrough: list[_Candidate] = []
     for c in candidates:
-        if c.source == change_actor.SOURCE_AGENCY_OP and c.feed_verdict == FEED_VERDICT_FEED and c.feed_product_id:
-            groups.setdefault((c.at, c.feed_product_id), []).append(c)
+        if (
+            c.source == change_actor.SOURCE_AGENCY_OP
+            and c.feed_verdict == FEED_VERDICT_FEED
+            and c.feed_product_id
+        ):
+            # 군집 시각이 없는 옛 행(판정 이전 백필분)은 자기 시각으로 떨어뜨린다 — 억지로
+            # 묶지 않는다(모르는 것을 아는 척하면 남의 사건과 합쳐진다).
+            groups.setdefault((c.feed_cluster_at or c.at, c.feed_product_id), []).append(c)
         else:
             passthrough.append(c)
 

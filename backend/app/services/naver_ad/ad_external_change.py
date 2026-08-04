@@ -330,7 +330,7 @@ def record_ad_external_changes(db: Session, ops: list[dict], now: datetime) -> i
     # 판별 실패가 기록 자체를 막으면 안 된다: 실패하면 판정 없이(NULL) 행을 남긴다.
     try:
         verdicts = feed_reapply.classify(
-            db, [(op["entity_id"], op.get("edit_tm_raw")) for op in ops]
+            db, [(op["entity_id"], op.get("edit_tm_raw"), op["op_type"]) for op in ops]
         )
     except Exception as e:  # noqa: BLE001 — 부가 판별, fail-open
         log.warning("feed_reapply 판별 실패(판정 없이 기록 계속): %s", e)
@@ -350,9 +350,7 @@ def record_ad_external_changes(db: Session, ops: list[dict], now: datetime) -> i
         if key in existing:
             continue
         existing.add(key)
-        v = verdicts.get(
-            (op["entity_id"], feed_reapply._norm(op.get("edit_tm_raw"))), feed_reapply.NO_VERDICT
-        )
+        v = verdicts.get((op["entity_id"], op["op_type"]), feed_reapply.NO_VERDICT)
         db.add(NaverAgencyOp(
             op_date=now.date(),
             detected_at=now,
@@ -373,6 +371,7 @@ def record_ad_external_changes(db: Session, ops: list[dict], now: datetime) -> i
             feed_product_id=v.product_id,
             feed_moved=v.moved,
             feed_total=v.total,
+            feed_cluster_at=v.cluster_at,
         ))
         inserted += 1
         log.warning(
