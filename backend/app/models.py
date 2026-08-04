@@ -1789,6 +1789,59 @@ class NaverAdDaily(Base):
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class NaverAdCreativeDaily(Base):
+    """네이버 SA 일별 **소재(광고)** 성과 (D-NAO-140).
+
+    grain: (ad_date, ad_id). 키워드는 롤업한다 — 파워링크는 한 소재가 여러 키워드로 노출되지만
+    **우리가 조작하는 레버는 소재 하나**이고, 이 테이블의 존재 이유가 바로 제어 grain에 측정을
+    맞추는 것이다(자동화가 소재 입찰을 바꾸면서 소재 성과를 못 보던 상태 = D-NAO-132 정지의
+    구조적 원인 중 하나).
+
+    ══ ★왜 `naver_ad_daily`에 컬럼을 더하지 않고 별도 테이블인가 ══
+    그 테이블에 grain을 하나 더 얹으면 **기존 소비자가 전부 이중계상한다.** 2026-08-04에 실제로
+    그 함정에 걸렸다 — 03 캠페인 08-03 소진을 69,912원이 아니라 139,824원(정확히 2배)으로 읽었다.
+    센티넬 행이 `keyword_id`가 아니라 `adgroup_id` 칼럼에 사는 걸 몰라 필터가 안 먹었던 것이다.
+    같은 테이블에 grain이 섞이면 이런 오독은 **합계가 안 맞을 때까지 안 보인다.** 그래서 분리한다.
+
+    ══ 수집 비용 0 ══
+    소스는 이미 매일 받고 있는 `AD`·`AD_CONVERSION` 보고서다 — **두 보고서 모두 컬럼 5가
+    소재 ID**(2026-08-04 라이브 실측). 지금까지 집계하며 버리고 있었을 뿐이라 **추가 네이버
+    API 콜이 0**이다. 같은 파서·같은 grain 키 함수를 쓴다(`naver_sa_ad_fetcher._grain_key`).
+
+    ★**측정 전용이다** — 이 테이블을 읽고 광고를 조작하는 경로는 없다(계약 금지선). 실행층
+    배선은 별도 결정 사안이고, 자동운영 재개와도 무관하다.
+    ★대조 계약: 같은 날 이 테이블의 합계는 `naver_ad_daily`의 같은 날 합계와 **일치해야 한다**
+    (`ad_creative_daily_sync.reconcile`). 안 맞으면 둘 중 하나가 틀린 것이고, 그건 즉시 알아야 한다.
+    """
+
+    __tablename__ = "naver_ad_creative_daily"
+    __table_args__ = (
+        UniqueConstraint("ad_date", "ad_id", name="uq_naver_ad_creative_daily"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ad_date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)
+    ad_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)  # nad-...
+    # 소재가 그룹을 옮기면 하루 안에서도 달라질 수 있다 — 그날 관측된 값을 담는다(참고용).
+    campaign_id: Mapped[str] = mapped_column(String(50), nullable=False, default="", index=True)
+    campaign_type: Mapped[str] = mapped_column(String(20), nullable=False, default="")
+    adgroup_id: Mapped[str] = mapped_column(String(50), nullable=False, default="", index=True)
+    imp: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    clk: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cost: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 원, VAT 별도
+    rank_sum: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # avg_rank = rank_sum/imp
+    conv_direct_cnt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    conv_indirect_cnt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    conv_direct_amt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    conv_indirect_amt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # 장바구니는 `naver_ad_daily`와 같은 규율 — 매출 합계에 절대 안 섞인다(선행지표 재료).
+    cart_direct_cnt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cart_indirect_cnt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cart_direct_amt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cart_indirect_amt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 class NaverProductBep(Base):
     """네이버 상품별 손익분기 ROAS — 자동 산출 (D-NAO-8, 계획서 §2).
 
