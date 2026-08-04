@@ -280,6 +280,7 @@ class TrendPoint(BaseModel):
     cost: str
     commission: str
     ad_spend: str
+    fixed_cost: str = "0"  # 월 고정비 일할 배분분(3PL 입고·보관·항공도선·합포장)
     shipping: str
     vat: str
     net_profit: str
