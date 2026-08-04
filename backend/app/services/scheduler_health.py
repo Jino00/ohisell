@@ -10,18 +10,21 @@
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timedelta
 from typing import Any, Iterable, Optional, Sequence
 
 from apscheduler.triggers.cron import CronTrigger
 
 from app.services.scheduler_watchdog import (
+    DISK_WARN_PERCENT,
     STATE_DISABLED,
     STATE_FAILED,
     STATE_NEVER_SUCCEEDED,
     STATE_STALE,
     evaluate_cookie_freshness,
     evaluate_data_freshness,
+    evaluate_disk_space,
     evaluate_staleness,
 )
 
@@ -41,6 +44,10 @@ WATCHDOG_JOBS: tuple[str, ...] = (
     "sync_naver_settlement",
     "sync_naver_case_settlement",
     "sync_naver_sa_ad_costs",
+    # ★ADVoost·GFA 광고비(2026-08-03 추가). 이 축의 종전 경로는 사람이 CSV를 올리는 것이었고
+    #   06-04에 멈춘 뒤 **59일간 488만원이 조용히 누락**됐다 — 감시가 없으면 자동화해도
+    #   같은 방식으로 다시 침묵한다. 서버 안에서 완결(SA API)되므로 fail-soft 제외 사유 없음.
+    "sync_naver_display_ad_costs",
     "sync_naver_ad_daily",
     "sync_meta_ad_costs",
     "sync_coupang_products",
@@ -138,6 +145,22 @@ def _sanitize_error(last_error: Optional[str]) -> Optional[str]:
     return lines[-1].strip()[:_ERR_SUMMARY_MAX]
 
 
+def disk_target_path(database_url: str) -> str:
+    """감시할 파일시스템 경로를 DATABASE_URL에서 유도한다(순수 — I/O 없음).
+
+    sqlite면 DB 파일이 놓인 디렉터리를 본다. 백업·WAL·로그가 전부 그 파일시스템에서 경쟁하므로
+    거기가 포화의 현장이다. sqlite가 아니면(Postgres 등) DB는 원격이므로 로컬 루트를 본다.
+    경로가 비면 "/"로 떨어진다 — 판정 불가보다 루트라도 보는 게 낫다.
+    """
+    prefix = "sqlite:///"
+    if not database_url.startswith(prefix):
+        return "/"
+    raw = database_url[len(prefix):]
+    if raw.startswith("file:"):  # sqlite:///file:...?mode=ro 형태(읽기전용 첨부 DB)
+        raw = raw[len("file:"):].split("?", 1)[0]
+    return os.path.dirname(os.path.abspath(raw)) or "/"
+
+
 def build_health(
     watched_jobs: Sequence[str],
     states: Iterable[Any],
@@ -146,6 +169,7 @@ def build_health(
     now: datetime,
     cookies: Iterable[Any] = (),
     data_snapshots: Iterable[dict] = (),
+    disk_snapshots: Iterable[dict] = (),
 ) -> dict:
     """워치독 판정 코어(순수: DB/스케줄러 미접촉 — 인자로 받은 스냅샷만 사용).
 
@@ -223,6 +247,10 @@ def build_health(
     # 데이터 나이 — 잡·쿠키 보고가 거짓말해도(2026-07-17 사고) 최신 데이터 나이는 거짓말 못 한다.
     data_stale = evaluate_data_freshness(list(data_snapshots), now)
 
+    # 디스크 여유 — 위 셋이 전부 '이미 죽은 뒤'를 보는 사후 지표인 반면 이건 유일한 사전 신호다
+    # (2026-08-03 ENOSPC 사고: 디스크 포화가 서버를 3시간 40분 마비시켜 자동수집 12개 유실).
+    disk_low = evaluate_disk_space(list(disk_snapshots))
+
     # disabled는 정상(노이즈 제외) — healthy 판정에서 무시. 그 외 어떤 비정상이라도 healthy=False.
     healthy = (
         scheduler_running
@@ -232,6 +260,7 @@ def build_health(
         and not never_succeeded
         and not cookies_stale
         and not data_stale
+        and not disk_low
     )
 
     return {
@@ -244,6 +273,7 @@ def build_health(
         "disabled": disabled,
         "cookies_stale": cookies_stale,
         "data_stale": data_stale,
+        "disk_low": disk_low,
         "as_of": now.isoformat(),
     }
 
@@ -304,7 +334,30 @@ def compute_scheduler_health(db, scheduler, now: datetime) -> dict:
         log.exception("[워치독] 데이터 나이 쿼리 실패 — data_stale 감시만 생략(헬스 API는 유지)")
         data_snapshots = []
 
+    # 디스크 여유 — DB가 사는 파일시스템을 본다(백업·WAL·로그가 전부 여기서 경쟁한다).
+    # ★try/except: 데이터 나이 쿼리와 같은 이유 — 이 조회가 실패해도 헬스 API 전체를 죽이면 안 된다
+    #   (워치독 침묵 = 이 계열 사고가 막으려는 바로 그 실패). 실패 시 디스크 감시만 생략한다.
+    disk_snapshots: list[dict] = []
+    try:
+        import shutil
+
+        from app.database import DATABASE_URL  # noqa: PLC0415 — 지연 임포트(순수 코어 테스트용)
+
+        target = disk_target_path(DATABASE_URL)
+        usage = shutil.disk_usage(target)
+        disk_snapshots.append({
+            "path": target,
+            "total_bytes": usage.total,
+            "used_bytes": usage.used,
+            "free_bytes": usage.free,
+            "warn_percent": DISK_WARN_PERCENT,
+            "impact": "디스크 포화 시 전 수집 잡이 조용히 멈춘다(2026-08-03 ENOSPC 사고)",
+        })
+    except Exception:
+        log.exception("[워치독] 디스크 조회 실패 — disk_low 감시만 생략(헬스 API는 유지)")
+        disk_snapshots = []
+
     return build_health(
         WATCHDOG_JOBS, states, registered, running, now,
-        cookies=cookies, data_snapshots=data_snapshots,
+        cookies=cookies, data_snapshots=data_snapshots, disk_snapshots=disk_snapshots,
     )

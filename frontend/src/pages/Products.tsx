@@ -60,11 +60,16 @@ export default function Products() {
 
   async function handleAddMapping(data: Record<string, unknown>) {
     if (mappingTarget === null) return;
-    await fetchApi(`/api/products/${mappingTarget}/mappings`, {
-      method: "POST",
-      body: JSON.stringify(data),
-    });
+    // 응답의 orders_linked = 이 옵션ID의 **과거 미연결 주문 중 방금 소급 연결된 건수**
+    // (2026-08-04). 조용히 지나가면 "이었는데 손익이 안 바뀐다"로 오해된다.
+    const created = await fetchApi<{ orders_linked?: number | null }>(
+      `/api/products/${mappingTarget}/mappings`,
+      { method: "POST", body: JSON.stringify(data) },
+    );
     setMappingTarget(null);
+    if (created.orders_linked) {
+      alert(`과거 주문 ${created.orders_linked}건이 이 상품에 소급 연결됐습니다(원가·손익 반영).`);
+    }
     load();
   }
 

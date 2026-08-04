@@ -125,6 +125,22 @@ interface ManualRevenueRecord {
   updated_at: string;
 }
 
+interface MonthlyFixedCostRecord {
+  id: number;
+  channel_id: number;
+  channel_name: string;
+  year_month: string;
+  item: string;
+  amount: string;
+  memo: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+// 백엔드 FIXED_COST_ITEMS와 같은 순서·같은 문자열. 자유 입력이 아닌 이유는
+// 오타 하나로 같은 항목이 둘로 갈라져 월별 추이가 끊기기 때문이다.
+const FIXED_COST_ITEMS = ["입고비", "보관료", "항공도선료", "합포장비"] as const;
+
 export default function Settings() {
   const [channels, setChannels] = useState<ChannelStatus[]>([]);
   const [loading, setLoading] = useState(true);
@@ -149,6 +165,16 @@ export default function Settings() {
   });
   const [rocketSaving, setRocketSaving] = useState(false);
   const [rocketError, setRocketError] = useState<string | null>(null);
+
+  // 월 고정비 입력 상태 (3PL 정산서 — 네이버 채널 전용)
+  const [fixedCostRecords, setFixedCostRecords] = useState<MonthlyFixedCostRecord[]>([]);
+  const [fixedCostMonth, setFixedCostMonth] = useState(() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  });
+  const [fixedCostAmounts, setFixedCostAmounts] = useState<Record<string, string>>({});
+  const [fixedCostSaving, setFixedCostSaving] = useState(false);
+  const [fixedCostError, setFixedCostError] = useState<string | null>(null);
 
   // 쿠팡 광고비 업로드 상태
   const [coupangAdUploading, setCoupangAdUploading] = useState(false);
@@ -200,9 +226,78 @@ export default function Settings() {
     fetchCoupangAdStatus();
   }, [fetchStatus, fetchGfaStatus, fetchCoupangAdStatus]);
 
+  const naverChannel = channels.find((c) => c.code === "NAVER");
+
+  const fetchFixedCostRecords = useCallback(async () => {
+    if (!naverChannel) return;
+    try {
+      const data = await fetchApi<MonthlyFixedCostRecord[]>(
+        `/api/monthly-fixed-cost?channel_id=${naverChannel.channel_id}`
+      );
+      setFixedCostRecords(data);
+    } catch { /* silent */ }
+  }, [naverChannel]);
+
   useEffect(() => {
     if (channels.length > 0) fetchRocketRecords();
   }, [channels, fetchRocketRecords]);
+
+  useEffect(() => {
+    if (channels.length > 0) fetchFixedCostRecords();
+  }, [channels, fetchFixedCostRecords]);
+
+  // 입력한 달의 기존 값을 폼에 채운다 — 덮어쓰기 전에 지금 값이 뭔지 보여야 한다
+  useEffect(() => {
+    const existing: Record<string, string> = {};
+    for (const r of fixedCostRecords) {
+      if (r.year_month === fixedCostMonth) existing[r.item] = String(Number(r.amount));
+    }
+    setFixedCostAmounts(existing);
+  }, [fixedCostMonth, fixedCostRecords]);
+
+  const handleFixedCostSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!naverChannel) return;
+    const entries = FIXED_COST_ITEMS.map((item) => [item, fixedCostAmounts[item]] as const)
+      .filter(([, v]) => v !== undefined && v !== "");
+    if (entries.length === 0) {
+      setFixedCostError("최소 한 항목은 입력해 주세요.");
+      return;
+    }
+    if (entries.some(([, v]) => isNaN(Number(v)) || Number(v) < 0)) {
+      setFixedCostError("금액은 0 이상의 숫자여야 합니다.");
+      return;
+    }
+    setFixedCostSaving(true);
+    setFixedCostError(null);
+    try {
+      for (const [item, value] of entries) {
+        await fetchApi("/api/monthly-fixed-cost", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            channel_id: naverChannel.channel_id,
+            year_month: fixedCostMonth,
+            item,
+            amount: Number(value),
+          }),
+        });
+      }
+      fetchFixedCostRecords();
+    } catch {
+      setFixedCostError("저장 실패. 다시 시도해 주세요.");
+    } finally {
+      setFixedCostSaving(false);
+    }
+  };
+
+  const handleFixedCostDelete = async (id: number) => {
+    if (!confirm("삭제하시겠습니까?")) return;
+    try {
+      await fetchApi(`/api/monthly-fixed-cost/${id}`, { method: "DELETE" });
+      fetchFixedCostRecords();
+    } catch { /* silent */ }
+  };
 
   const handleRocketSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -813,6 +908,104 @@ export default function Settings() {
 
         {rocketRecords.length === 0 && (
           <p className="text-xs text-gray-300">입력된 매출 내역이 없습니다.</p>
+        )}
+      </div>
+
+      {/* 월 고정비 입력 (3PL 정산서 — 네이버 전용) */}
+      <div className="bg-white rounded-xl border border-gray-200 p-6">
+        <h2 className="text-base font-semibold text-gray-800 mb-1">월 고정비 입력 (네이버)</h2>
+        <p className="text-xs text-gray-400 mb-4">
+          두핸즈(3PL) 월 정산서의 입고비·보관료·항공도선료·합포장비를 입력합니다.
+          재고·입고 기반이라 주문에 붙일 수 없는 비용이라, 입력한 월 총액을{" "}
+          <strong className="text-gray-500">일할 배분</strong>해 네이버 채널 일별 손익에 반영합니다.
+          같은 달·같은 항목을 다시 저장하면 덮어씁니다.
+        </p>
+
+        {!naverChannel && (
+          <p className="text-xs text-gray-300">네이버 채널을 찾을 수 없습니다.</p>
+        )}
+
+        {naverChannel && (
+          <>
+            <form onSubmit={handleFixedCostSubmit} className="flex flex-wrap items-end gap-2 mb-4">
+              <label className="flex flex-col gap-1">
+                <span className="text-[11px] text-gray-400">대상 월</span>
+                <input
+                  type="month"
+                  value={fixedCostMonth}
+                  onChange={(e) => setFixedCostMonth(e.target.value)}
+                  className="border border-gray-200 rounded px-2 py-1.5 text-sm"
+                  required
+                />
+              </label>
+              {FIXED_COST_ITEMS.map((item) => (
+                <label key={item} className="flex flex-col gap-1">
+                  <span className="text-[11px] text-gray-400">{item}</span>
+                  <input
+                    type="number"
+                    value={fixedCostAmounts[item] ?? ""}
+                    onChange={(e) =>
+                      setFixedCostAmounts((f) => ({ ...f, [item]: e.target.value }))
+                    }
+                    placeholder="0"
+                    min="0"
+                    className="border border-gray-200 rounded px-2 py-1.5 text-sm w-28"
+                  />
+                </label>
+              ))}
+              <button
+                type="submit"
+                disabled={fixedCostSaving}
+                className="px-3 py-1.5 rounded text-sm font-medium bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50"
+              >
+                {fixedCostSaving ? "저장 중..." : "저장"}
+              </button>
+            </form>
+
+            {fixedCostError && (
+              <div className="text-xs px-3 py-2 mb-3 rounded bg-red-50 border border-red-100 text-red-700">
+                {fixedCostError}
+              </div>
+            )}
+
+            {fixedCostRecords.length > 0 && (
+              <table className="w-full text-xs border-collapse">
+                <thead>
+                  <tr className="border-b border-gray-100 text-gray-400">
+                    <th className="text-left pb-1.5 pr-4 font-medium">월</th>
+                    <th className="text-left pb-1.5 pr-4 font-medium">항목</th>
+                    <th className="text-right pb-1.5 pr-4 font-medium">금액</th>
+                    <th className="text-left pb-1.5 font-medium">수정일</th>
+                    <th />
+                  </tr>
+                </thead>
+                <tbody>
+                  {fixedCostRecords.map((r) => (
+                    <tr key={r.id} className="border-b border-gray-50 hover:bg-gray-50">
+                      <td className="py-1.5 pr-4">{r.year_month}</td>
+                      <td className="py-1.5 pr-4 text-gray-500">{r.item}</td>
+                      <td className="py-1.5 pr-4 text-right font-medium">
+                        {Number(r.amount).toLocaleString("ko-KR")}원
+                      </td>
+                      <td className="py-1.5 text-gray-300">{r.updated_at.slice(0, 10)}</td>
+                      <td className="py-1.5 pl-3">
+                        <button
+                          onClick={() => handleFixedCostDelete(r.id)}
+                          className="text-red-400 hover:text-red-600 text-xs"
+                        >
+                          삭제
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+
+            {fixedCostRecords.length === 0 && (
+              <p className="text-xs text-gray-300">입력된 고정비가 없습니다.</p>
+            )}
+          </>
         )}
       </div>
     </div>

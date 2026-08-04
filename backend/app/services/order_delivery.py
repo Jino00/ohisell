@@ -70,9 +70,19 @@ SHIPPING_COST_BY_METHOD = {
 #        + 반품 작업비 = B2C 출고 작업비와 동일(900) → 2,950 (VAT 별도) = 3,245 (VAT 포함).
 #        (요율표의 "지정반품 배송비 극소형 2,500"은 **우리가 지정한 주소로 보내는** 경우라
 #         우리 케이스가 아니다 — 숫자가 공교롭게 2,500이라 헷갈리기 쉽다.)
-# 일반배송: ⚠️여전히 **미확정 추정치**(Jino 2026-08-03: "아마 우리도 2500원을 지급할꺼야").
-#        한진 청구서를 받으면 이 한 줄만 고치면 된다.
-RETURN_PICKUP_COST_NORMAL = Decimal("2500")     # ⚠️추정 — 한진 청구서 미확보
+# 일반배송: **확정 2,500원**(Jino 2026-08-04: "반품 회수비 2500원 확정"). 08-03의 "아마 …
+#        지급할꺼야"라는 추정 표시를 해제한다. 값은 그대로이므로 손익 숫자 변화는 없다.
+#        ※정산 실측이 반품 건당 5,000원인 것과 모순이 아니다 — 그쪽은 **고객에게 청구하는**
+#          왕복 반품비(수입)이고, 이 상수는 **우리가 택배사에 내는** 회수 단가(비용)다.
+# ── 제주·도서산간 할증: 우리가 택배사에 더 내는 금액(건당) ──
+# Jino 확정(2026-08-04): "한진택배에는 기본값에 3000원 추가".
+# ★적용 범위 근거: 라이브 51건(sectionDeliveryFee>0) 전부 deliveryAttributeType이 TODAY/NORMAL
+#   = 일반배송(한진 계열)이고 **N배송 제주는 0건**이다. 그래서 N배송 할증은 근거가 없어
+#   더하지 않는다 — 만약 N배송 제주가 생기면 품고 요율표로 별도 확인할 것(그 전까지는
+#   수입만 잡히므로 그 건은 이익이 과대해진다. 표본이 생기면 이 주석을 근거로 재검토).
+SECTION_SURCHARGE_PAID = Decimal("3000")
+
+RETURN_PICKUP_COST_NORMAL = Decimal("2500")     # 확정(Jino 2026-08-04)
 RETURN_PICKUP_COST_NBAESONG = Decimal("3245")   # 품고 요율표 2 (2,050+900)×1.1
 RETURN_PICKUP_COST_BY_METHOD = {
     METHOD_NORMAL: RETURN_PICKUP_COST_NORMAL,
@@ -94,6 +104,14 @@ RETURN_COLUMNS = (
     "return_fee_demand_amount",
     "return_collect_company",
     "return_fee_support_amount",
+)
+
+# 교환 배송 손익용 영속 컬럼(반품과 대칭)
+EXCHANGE_COLUMNS = (
+    "exchange_completed_at",
+    "exchange_fee_demand_amount",
+    "exchange_collect_company",
+    "exchange_fee_support_amount",
 )
 
 
@@ -127,9 +145,31 @@ def shipping_method_of(delivery_attribute_type: Any) -> str:
     return METHOD_NBAESONG if delivery_attribute_type == NBAESONG_ATTR else METHOD_NORMAL
 
 
-def shipping_cost_paid_of(method: str) -> Decimal:
-    """배송방식 → 우리가 지불하는 건당 배송비(현재 단가표)."""
-    return SHIPPING_COST_BY_METHOD.get(method, SHIPPING_COST_NORMAL)
+def shipping_cost_paid_of(method: str, *, section: bool = False) -> Decimal:
+    """배송방식 → 우리가 지불하는 건당 배송비(현재 단가표). section=제주·도서산간 할증 여부.
+
+    ★할증을 **비용에도** 반영하는 이유(2026-08-04): 같은 커밋에서 제주 추가배송비를 매출로
+      인식하기 시작했다. 수입만 넣고 비용을 빼면 제주 배송이 이익 나는 일로 보인다 —
+      반품 배송비에서 이미 겪은 함정과 같은 구조다(수입·비용은 짝으로 넣는다).
+    """
+    base = SHIPPING_COST_BY_METHOD.get(method, SHIPPING_COST_NORMAL)
+    return base + SECTION_SURCHARGE_PAID if section else base
+
+
+def section_delivery_fee_of(po: dict | None) -> Decimal:
+    """상품주문의 제주·도서산간 추가배송비(고객 수취분). 없으면 0.
+
+    ★상수로 박지 않고 스마트스토어가 준 값을 그대로 읽는다(Jino 지시 2026-08-04).
+      실측은 05월 이후 51건 전부 3,000원이지만, 스토어 설정이 바뀌면 코드 수정 없이 따라가야
+      한다. 이 값이 곧 정산 DELIVERY 원장의 구성요소다(`deliveryFeeAmount + sectionDeliveryFee`
+      = 정산 DELIVERY, 성숙 2개 창 전수 대조로 확인).
+    """
+    if not po:
+        return Decimal("0")
+    try:
+        return Decimal(str(po.get("sectionDeliveryFee") or 0))
+    except (ValueError, TypeError, ArithmeticError):
+        return Decimal("0")
 
 
 def delivery_fields(raw: Any) -> dict | None:
@@ -150,7 +190,9 @@ def delivery_fields(raw: Any) -> dict | None:
         "delivery_policy_type": _str_or_none(po.get("deliveryPolicyType")),
         "shipping_fee_type": _str_or_none(po.get("shippingFeeType")),
         "logistics_company_id": _str_or_none(logi),
-        "shipping_cost_paid": shipping_cost_paid_of(method),
+        "shipping_cost_paid": shipping_cost_paid_of(
+            method, section=section_delivery_fee_of(po) > 0
+        ),
     }
 
 
@@ -246,6 +288,72 @@ def return_fields(raw: Any) -> dict | None:
     }
 
 
+def exchange_of(raw: Any) -> dict | None:
+    """raw_data → exchange dict(교환 클레임 정보). 교환 아님·파싱 실패는 None."""
+    parsed = parse_raw_data(raw)
+    if not isinstance(parsed, dict):
+        return None
+    ex = parsed.get("exchange")
+    return ex if isinstance(ex, dict) else None
+
+
+def exchange_fields(raw: Any) -> dict | None:
+    """raw_data → 교환 배송 손익용 영속 필드 dict. 손익이 없으면 None(=컬럼 NULL 유지).
+
+    반환 키 = EXCHANGE_COLUMNS.
+
+    ★**`claimStatus == "EXCHANGE_DONE"`인 건만** 값을 낸다. 라이브 55건 중 6건이
+      `EXCHANGE_REJECT`인데, 거부된 교환은 회수도 재발송도 일어나지 않아 손익이 없다.
+      이 규칙을 손익 쿼리가 아니라 **추출 경계**에 두는 이유: 컬럼에 값이 있으면
+      "교환이 실제로 완료됐다"가 되어, 나중에 쿼리를 새로 짜는 사람이 상태 필터를
+      잊어도 틀리지 않는다.
+
+    ★귀속일 = **재배송 처리일**(reDeliveryOperationDate). 교환이 끝나는 시점은 재발송이다.
+      요청일에 실으면 이미 마감해서 본 지난달 이익이 뒤로 바뀐다(반품과 같은 금지선).
+      라이브 실측: EXCHANGE_DONE 49건 **전건에** reDeliveryOperationDate·collectCompletedDate가
+      있다(폴백은 응답이 얇아졌을 때의 안전망이지 평상시 경로가 아니다).
+
+    ★청구액은 정액이 아니라 건별 실측. DONE 49건 중 **9건이 미청구**(우리 귀책이면 필드가
+      아예 없다) — 정액 5,000을 넣으면 그 9건이 통째로 틀린 수입이 된다.
+
+    ⚠️지원액 필드명이 반품과 **다르다**: 반품은 `claimDeliveryFeeSupportAmount`,
+      교환은 `membershipsArrivalGuaranteeClaimSupportingAmount`. 라이브에선 전건 0이지만
+      (N배송 교환이 0건이라 그렇다) 필드를 읽어 두면 N배송 교환이 생겨도 안 틀린다.
+    """
+    ex = exchange_of(raw)
+    if ex is None:
+        return None
+    if ex.get("claimStatus") != "EXCHANGE_DONE":
+        return None
+    completed = (
+        _kst_naive(ex.get("reDeliveryOperationDate"))
+        or _kst_naive(ex.get("collectCompletedDate"))
+        or _kst_naive(ex.get("claimRequestDate"))
+    )
+    if completed is None:
+        return None   # 귀속일이 없으면 어느 날에 실을지 정할 수 없다 → 추정하지 않는다
+    return {
+        "exchange_completed_at": completed,
+        "exchange_fee_demand_amount": _decimal_or_zero(ex.get("claimDeliveryFeeDemandAmount")),
+        "exchange_collect_company": _str_or_none(ex.get("collectDeliveryCompany")),
+        "exchange_fee_support_amount": _decimal_or_zero(
+            ex.get("membershipsArrivalGuaranteeClaimSupportingAmount")
+        ),
+    }
+
+
+def apply_exchange_fields(order, raw: Any) -> bool:
+    """Order ORM 행에 교환 배송 손익 컬럼을 반영. 판별 가능했으면 True.
+
+    ★apply_return_fields와 같은 규칙 — 판별 불가면 **기존 값을 지우지 않는다**."""
+    fields = exchange_fields(raw)
+    if fields is None:
+        return False
+    for k, v in fields.items():
+        setattr(order, k, v)
+    return True
+
+
 def apply_return_fields(order, raw: Any) -> bool:
     """Order ORM 행에 반품 배송 손익 컬럼을 반영. 판별 가능했으면 True.
 
@@ -264,7 +372,7 @@ def return_pickup_cost(delivery_attribute_type: Any = None) -> Decimal:
 
     판별 불가는 일반배송으로 폴백한다(order_shipping_cost와 같은 fail-safe 방향).
     0으로 두지 않는 이유: 회수비가 통째로 사라지면 수입만 계상돼 반품이 이익 나는 일처럼 보인다.
-    ⚠️일반배송 단가는 여전히 추정치다(RETURN_PICKUP_COST_NORMAL 주석 참조)."""
+    일반배송 2,500원은 Jino 확정값이다(2026-08-04, RETURN_PICKUP_COST_NORMAL 주석 참조)."""
     method = shipping_method_of(delivery_attribute_type)
     return RETURN_PICKUP_COST_BY_METHOD.get(method, RETURN_PICKUP_COST_NORMAL)
 
@@ -294,7 +402,10 @@ def order_shipping_cost(order_row: Any = None) -> Decimal:
     po = product_order_of(raw)
     if po is None:
         return SHIPPING_COST_NORMAL
-    return shipping_cost_paid_of(shipping_method_of(po.get("deliveryAttributeType")))
+    return shipping_cost_paid_of(
+        shipping_method_of(po.get("deliveryAttributeType")),
+        section=section_delivery_fee_of(po) > 0,
+    )
 
 
 def net_shipping_burden(paid: Any, collected: Any) -> Decimal:

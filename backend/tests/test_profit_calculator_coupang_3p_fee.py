@@ -174,16 +174,31 @@ def test_end_to_end_daily_trend_actual_vs_fallback(db):
     assert D(by_date["2026-06-06"]["commission"]) == D("858.00")
 
 
-def test_daily_trend_net_excludes_vat(db):
-    # Jino 2026-06-15: 구 대시보드 순이익에서 판매자 VAT(rev×10/110) 미차감으로 통일.
+def test_daily_trend_net_deducts_payable_vat(db):
+    """순이익에서 **납부세액**(매출VAT − 매입세액공제)을 뺀다 (Jino 2026-08-04).
+
+    ★종전 계약을 뒤집은 것이다. 2026-06-15에는 "판매자 VAT는 매입세액공제로 상당부분
+      상쇄되는 통과분"이라며 아예 안 뺐다. 맞는 말이지만 '상당부분'이 전부는 아니라서
+      실제 납부액만큼 이익이 부풀었다(7월 네이버 실측 604,465원).
+      반대로 매출VAT 전액을 빼면 매입세액공제를 무시해 과다차감이라, 두 안 중 납부세액을 골랐다.
+    """
     wing = _seed_channel(db, "COUPANG_WING1", "7.8")
     _seed_order(db, wing, "ORDV", "V1", "10000", day=5)  # 실측 없음 → 폴백 858, 배송 1건(1,900)
     db.commit()
     trend = calculate_daily_trend(db, None, wing, date(2026, 6, 1), date(2026, 6, 30))
     r = {x["date"]: x for x in trend}["2026-06-05"]
-    # net = 매출10000 − 원가0 − 수수료858 − 배송1900 − 광고0  (VAT 미차감)
-    assert D(r["net_profit"]) == D("10000") - D("858") - D("1900")
-    assert D(r["net_profit"]) == D("7242")  # VAT 차감 시였다면 6332.91 — VAT 빠졌음 확인
+
+    # 매출 10,000 · 원가 0 · 수수료 858 · 배송 1,900 · 광고 0
+    #   매출VAT = 10,000 ×10/110 = 909.0909…
+    #   매입VAT = (858+1,900)×10/110 = 250.7272…
+    #   납부세액 = 658.3636…  → net = 7,242 − 658.3636… = 6,583.6363…
+    gross = D("10000") - D("858") - D("1900")
+    assert gross == D("7242")  # VAT 차감 전(=종전 계약 값)
+    net = D(r["net_profit"])
+    assert net < gross, "납부세액이 차감돼야 한다"
+    # 모든 축이 VAT 포함이면 결과는 공급가 기준 이익과 같다 — 그 항등식으로 검산한다
+    assert abs(net - gross / D("1.1")) < D("0.01")
+    assert abs(net - D("6583.6363")) < D("0.01")
 
 
 def test_end_to_end_naver_uses_commission_amount(db):

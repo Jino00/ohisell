@@ -295,3 +295,75 @@ def test_scheduler_health_out_data_stale_defaults_empty():
     h = build_health(["a"], states, {"a"}, True, NOW)
     out = SchedulerHealthOut(**h).model_dump()
     assert out["data_stale"] == []
+
+
+# ── 디스크 여유 감시 (2026-08-03 ENOSPC 사고) ──────────────────────────────
+# 왜 이 감시가 필요했나: 08-03 03:32 KST 디스크 포화로 서버 쓰기가 3시간 40분 마비돼
+# 05:20~07:00 자동수집 12개가 통째로 유실됐다. 잡 감시는 '발화 자체를 안 한' 잡을 못 잡고
+# (실패가 아니라 부재), 데이터 나이는 이미 유실된 뒤에야 뜬다. 디스크만이 사전 신호다.
+def test_disk_low_breaks_health():
+    from app.schemas import SchedulerHealthOut
+
+    states = [_FakeState(job_name="a")]
+    snaps = [{
+        "path": "/",
+        "total_bytes": 100 * 1024**3,
+        "used_bytes": 92 * 1024**3,   # 92% — 실제 사고 당일 수치
+        "free_bytes": 8 * 1024**3,
+        "warn_percent": 85.0,
+        "impact": "디스크 포화 시 전 수집 잡이 조용히 멈춘다",
+    }]
+    h = build_health(["a"], states, {"a"}, True, NOW, disk_snapshots=snaps)
+    assert h["healthy"] is False
+    out = SchedulerHealthOut(**h).model_dump()
+    assert len(out["disk_low"]) == 1
+    v = out["disk_low"][0]
+    assert v["state"] == "low"
+    assert 91.9 < v["used_percent"] < 92.1
+    assert v["path"] == "/"
+    assert "85" in v["reason"]
+
+
+def test_disk_ok_keeps_health():
+    states = [_FakeState(job_name="a")]
+    snaps = [{
+        "path": "/",
+        "total_bytes": 100 * 1024**3,
+        "used_bytes": 76 * 1024**3,   # 76% — 이번 정리 후 실측 수치
+        "free_bytes": 24 * 1024**3,
+        "warn_percent": 85.0,
+        "impact": "",
+    }]
+    h = build_health(["a"], states, {"a"}, True, NOW, disk_snapshots=snaps)
+    assert h["healthy"] is True
+    assert h["disk_low"] == []
+
+
+def test_disk_unknown_total_is_skipped_not_alarmed():
+    """total=0(조회 실패)은 헛알림 대신 침묵 — 보조 감시선이라 시끄럽게 할 이득이 없다."""
+    states = [_FakeState(job_name="a")]
+    snaps = [{"path": "/", "total_bytes": 0, "used_bytes": 0, "free_bytes": 0}]
+    h = build_health(["a"], states, {"a"}, True, NOW, disk_snapshots=snaps)
+    assert h["healthy"] is True
+    assert h["disk_low"] == []
+
+
+def test_scheduler_health_out_disk_low_defaults_empty():
+    """구버전 응답(디스크 키 없음) 하위호환 — 스키마가 기본 []로 받는다."""
+    from app.schemas import SchedulerHealthOut
+
+    states = [_FakeState(job_name="a")]
+    h = build_health(["a"], states, {"a"}, True, NOW)
+    out = SchedulerHealthOut(**h).model_dump()
+    assert out["disk_low"] == []
+
+
+def test_disk_target_path_from_sqlite_url(tmp_path):
+    from app.services.scheduler_health import disk_target_path
+
+    p = tmp_path / "ohisell.db"
+    assert disk_target_path(f"sqlite:///{p}") == str(tmp_path)
+    # 비-sqlite(원격 DB)는 로컬 루트를 본다
+    assert disk_target_path("postgresql://u:p@host/db") == "/"
+    # 읽기전용 첨부 형태(sqlite:///file:...?mode=ro)도 경로를 뽑아낸다
+    assert disk_target_path(f"sqlite:///file:{p}?mode=ro&uri=true") == str(tmp_path)

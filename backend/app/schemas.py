@@ -57,6 +57,10 @@ class MappingOut(BaseModel):
     selling_price: Decimal
     is_active: bool
     mapping_source: str = "auto_sync"
+    # 매핑을 새로 만들거나 고친 응답에만 채워진다 — 그 옵션ID의 **과거 미연결 주문 중 방금
+    # 연결된 건수**(2026-08-04). 목록 조회 응답에는 없다(None). 화면이 "이었더니 과거 N건도
+    # 원가가 붙었다"를 말할 수 있게 하는 값이라, 소급 연결의 사후 가시성 그 자체다.
+    orders_linked: Optional[int] = None
 
     model_config = {"from_attributes": True}
 
@@ -280,6 +284,8 @@ class TrendPoint(BaseModel):
     cost: str
     commission: str
     ad_spend: str
+    fixed_cost: str = "0"  # 월 고정비 일할 배분분(3PL 입고·보관·항공도선·합포장)
+    unmapped_revenue: str = "0"  # 원가를 못 붙인 제품매출(표시 전용 — 순이익에는 영향 없음)
     shipping: str
     vat: str
     net_profit: str
@@ -432,6 +438,19 @@ class SchedulerDataVerdictOut(BaseModel):
     reason: str
 
 
+class SchedulerDiskVerdictOut(BaseModel):
+    # 디스크 여유 감시(2026-08-03 ENOSPC 사고). 잡·쿠키·데이터 나이가 전부 '이미 죽은 뒤'를
+    # 보는 사후 지표인 반면, 이건 포화 전에 뜨는 유일한 사전 신호다.
+    path: str
+    state: str  # low
+    used_percent: float
+    warn_percent: float
+    free_bytes: int
+    total_bytes: int
+    impact: str  # 돈/운영 영향 한글 라벨
+    reason: str
+
+
 class SchedulerHealthOut(BaseModel):
     healthy: bool
     scheduler_running: bool
@@ -444,4 +463,6 @@ class SchedulerHealthOut(BaseModel):
     cookies_stale: list[SchedulerCookieVerdictOut] = []
     # 데이터 나이 감시 — 최신 row가 max_age_days를 넘겼거나 아예 없는(no_data) 파이프라인.
     data_stale: list[SchedulerDataVerdictOut] = []
+    # 디스크 여유 감시 — 사용률이 warn_percent를 넘긴 마운트(포화 전 사전 경보).
+    disk_low: list[SchedulerDiskVerdictOut] = []
     as_of: str

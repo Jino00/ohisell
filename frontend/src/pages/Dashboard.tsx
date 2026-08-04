@@ -320,6 +320,25 @@ export default function Dashboard() {
     return () => clearTimeout(timer);
   }, [fetchAll]);
 
+  // 원가 미상 매출 — 사실(unmapped_revenue)은 서버가 주고, 부풀림 금액은 여기서 **추정**한다.
+  // ★추정을 서버 손익 숫자에 섞지 않는 이유: 원가를 추정해 채우는 순간 "실측 원가"와
+  //   구분이 사라진다(LESSONS #117). 화면에서만, 추정이라고 밝히고 보여준다.
+  const unmappedNotice = (() => {
+    const unmapped = trend.reduce((s, t) => s + Number(t.unmapped_revenue ?? 0), 0);
+    if (unmapped <= 0) return null;
+    const revenue = trend.reduce((s, t) => s + Number(t.revenue ?? 0), 0);
+    const cost = trend.reduce((s, t) => s + Number(t.cost ?? 0), 0);
+    const mappedRevenue = revenue - unmapped;
+    if (mappedRevenue <= 0 || cost <= 0) return null;   // 비교군이 없으면 추정하지 않는다
+    const ratio = cost / mappedRevenue;
+    // 모든 축이 VAT 포함이므로 순이익 영향은 빠진 원가 ÷ 1.1
+    return {
+      revenue: unmapped,
+      overstated: Math.round((unmapped * ratio) / 1.1),
+      costPct: ratio * 100,
+    };
+  })();
+
   // 서버가 total/company/leaf 계층 행을 내려줌
   const leafRows = channels.filter((c) => c.kind === "leaf");
   const leafTotalRevenue = leafRows.reduce((s, c) => s + c.revenue, 0);
@@ -356,6 +375,27 @@ export default function Dashboard() {
           {syncing ? "동기화 중…" : "새로고침"}
         </button>
       </div>
+
+      {/* 원가 미상 경고 — 연결맵에 들어가야만 보이던 구멍을 손익 화면에 상설로 올린다.
+          ★순이익 숫자는 바꾸지 않는다. 부풀림 금액은 '추정'임을 문구로 명시한다. */}
+      {unmappedNotice && (
+        <div className="mb-6 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
+          <div className="text-sm text-amber-900">
+            <b>원가를 모르는 매출이 {formatKRW(unmappedNotice.revenue)}원</b> 있습니다
+            {" "}— 이 매출은 원가가 <b>0원으로 계산</b>돼 있어, 순이익이 실제보다{" "}
+            <b>약 {formatKRW(unmappedNotice.overstated)}원 높게</b> 보입니다(추정).
+          </div>
+          <div className="mt-1 text-xs text-amber-700">
+            상품 연결이 안 됐거나 원가가 입력되지 않은 주문입니다. 부풀림 금액은 같은 기간
+            연결된 상품의 원가율 {unmappedNotice.costPct.toFixed(1)}%를 적용한 <b>추정치</b>이며,
+            대시보드의 순이익 숫자에는 반영돼 있지 않습니다.
+            {" "}
+            <a href="/product-connection-map" className="underline font-medium">
+              상품 연결맵에서 연결하기 →
+            </a>
+          </div>
+        </div>
+      )}
 
       {/* KPI Cards */}
       {loading && !kpi ? (
@@ -725,6 +765,11 @@ export default function Dashboard() {
               })}
             </tbody>
           </table>
+          <p className="px-4 py-3 text-xs text-gray-400 border-t">
+            * 상품별 순이익에는 <b>월 고정비(3PL 입고·보관·항공도선·합포장)가 빠져 있습니다</b> —
+            재고·입고 기반이라 상품에 배분할 근거가 없어 채널 단위로만 반영합니다.
+            따라서 상품별 순이익 합계는 채널 순이익보다 그만큼 큽니다.
+          </p>
           </div>
         )}
       </div>

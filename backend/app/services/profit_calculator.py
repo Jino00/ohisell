@@ -20,6 +20,7 @@ from app.services.coupang.revenue_fee_source import (
     actual_fee_by_order_option,
 )
 from app.services.manual_revenue_service import get_daily_manual_revenue
+from app.services.monthly_fixed_cost_service import get_daily_fixed_cost
 
 log = logging.getLogger(__name__)
 
@@ -139,12 +140,18 @@ def _get_naver_sa_ad_spend_by_keyword_day(
 def _get_gfa_ad_spend_daily(
     db: Session, naver_channel_id: int, date_from: date, date_to: date
 ) -> dict[str, Decimal]:
-    """ad_costs → GFA(ADVoost) 일별 총 광고비 {date_str: spend}"""
+    """ad_costs → GFA(ADVoost) 일별 총 광고비 {date_str: spend}
+
+    ★`gfa:%` 계열 전체를 읽는다: 수동 CSV 시절의 `gfa:쇼핑`(~2026-06-04)과 비즈머니 실차감
+    자동 적재분(`gfa:advoost`·`gfa:da`, 2026-06-05~)이 한 계열로 이어지기 때문이다.
+    두 경로가 같은 날짜를 채우면 이중계상이 되므로, 쓰는 쪽(naver_display_ad_costs)이
+    `gfa:쇼핑`이 있는 날짜를 건너뛰어 겹침을 막는다.
+    """
     rows = db.execute(
         text("""
             SELECT ad_date, SUM(CAST(ad_spend AS REAL))
             FROM ad_costs
-            WHERE channel_id = :cid AND source = 'gfa:쇼핑'
+            WHERE channel_id = :cid AND source LIKE 'gfa:%'
               AND ad_date >= :since AND ad_date <= :until
             GROUP BY ad_date
         """),
@@ -308,6 +315,25 @@ def _delivery_income_map(orders: list, channel_map: dict) -> dict[tuple, Decimal
 NAVER_DELIVERY_COMMISSION_RATE = Decimal("0.02724")
 
 
+def _cost_of_line(product_map: dict, product_id, quantity) -> Decimal | None:
+    """이 라인의 원가. **원가를 알 수 없으면 None**(0이 아니다).
+
+    ★0을 돌려주면 안 되는 이유: 엔진은 여태 원가를 못 찾으면 조용히 더하지 않았고, 그러면
+      "원가 0원짜리 상품"과 "원가를 모르는 상품"이 손익에서 **완전히 같은 모양**이 된다.
+      후자는 판 돈이 전부 이익으로 잡혀 이익을 부풀리는데 아무 경보도 안 울린다.
+    ⚠️`product_master.cost_price`는 NOT NULL default 0이라 **미입력과 실제 0을 구분할 수 없다**
+      (prod 실측: 원가 0인 상품 90개). 그래서 여기서는 0도 '미상'으로 본다 — 최근 30일
+      매출 기여가 8,900원뿐이라 실익이 거의 없고, 과대계상을 놓치는 쪽이 더 위험하다.
+      원가 축이 확정되면(원가 트랙) 이 판정 한 줄만 고치면 된다.
+    """
+    if product_id is None or product_id not in product_map:
+        return None
+    cost_price = product_map[product_id].cost_price
+    if not cost_price:
+        return None
+    return cost_price * quantity
+
+
 def _new_bucket(*, with_order_count: bool = True) -> dict:
     """집계 버킷 템플릿. 주문 루프와 반품 손익 반영이 **같은 모양**을 쓰도록 한 곳에 모은다
     (한쪽에만 키가 있으면 반품만 있는 날짜에서 KeyError로 죽는다)."""
@@ -319,11 +345,40 @@ def _new_bucket(*, with_order_count: bool = True) -> dict:
         "commission": ZERO,
         "shipping": ZERO,
         "ad_spend": ZERO,
+        "fixed_cost": ZERO,
+        "unmapped_revenue": ZERO,
         "vat": ZERO,
     }
     if with_order_count:
         b["order_count"] = 0
     return b
+
+
+def payable_vat(revenue: Decimal, *deductible_costs: Decimal) -> Decimal:
+    """납부세액 = 매출VAT − 매입세액공제. 순이익에서 뺄 부가세는 이 값이다.
+
+    ★2026-08-04 Jino 결정으로 종전 방침을 뒤집는다. 종전 주석은 이랬다 —
+      "VAT 미차감 — 판매자 VAT는 매입세액공제로 상당부분 상쇄되는 통과분"(2026-06-15).
+      맞는 말이지만 **'상당부분'이 전부는 아니다**. 실측(7월 네이버): 매출VAT 4,196,650 −
+      매입세액 3,592,185 = **납부세액 604,465원**이 실제로 국세청에 나간다. 이걸 빼지 않으면
+      순이익이 그만큼 부풀고, 특히 이익률이 낮을수록 왜곡 비중이 커진다.
+      반대로 **매출VAT 전액**을 빼면(4,196,650) 매입세액공제를 통째로 무시해 과다차감된다 —
+      Jino가 두 안 중 '납부세액'을 골랐다.
+
+    ★매입세액에 넣는 것: 원가·수수료·배송비·광고비. 넷 다 **VAT 포함 축**임이 확인됐다
+      (배송비 상수는 ×1.1, 네이버 수수료·광고비는 실차감이 카드 결제액과 같은 축).
+    ★원가 축 확정(Jino 2026-08-04): "sellc에 들어있는 원가는 **부가세 포함**된 가격이야."
+      → 종전 ⚠️미확인 표시 해제. 이 함수는 원가를 매입세액에 넣어 ÷1.1 하고 있었으므로
+      **가정이 확정과 일치**했다(코드 변경 0줄, 이익 숫자 정정 없음). 원가 축이 언젠가
+      공급가 기준으로 바뀌면 여기 `deductible_costs`에서 원가만 빼면 된다.
+
+    수식이 결국 `(매출−비용)/1.1`과 같아지는 것은 우연이 아니다 — 모든 축이 VAT 포함이면
+    공급가 기준 이익과 같아진다. 그래도 두 항을 명시적으로 쓴다: 원가의 VAT 축이 바뀌면
+    한 줄만 빠지면 되고, 축약형은 그 변경 지점을 숨긴다.
+    """
+    sales_vat = revenue * Decimal("10") / Decimal("110")
+    input_vat = sum(deductible_costs, ZERO) * Decimal("10") / Decimal("110")
+    return sales_vat - input_vat
 
 
 def _return_shipping_pnl(
@@ -391,6 +446,104 @@ def _return_shipping_pnl(
     return out
 
 
+def _exchange_rows(
+    db: Session, date_from: date, date_to: date, channel_id: int | None = None
+):
+    """교환 손익 대상 주문 — 재배송 처리일이 창 안에 있는 건. 배송(패키지)당 1회로 dedup 전."""
+    start = datetime.combine(date_from, dtime.min)
+    end = datetime.combine(date_to, dtime.max)
+    q = db.query(Order).filter(
+        Order.exchange_completed_at >= start,
+        Order.exchange_completed_at <= end,
+    )
+    if channel_id:
+        q = q.filter(Order.channel_id == channel_id)
+    return q.all()
+
+
+def _exchange_pnl_one(o) -> dict:
+    """교환 1건의 손익 3항목 → {income, cost}.
+
+    ★반품과 결정적으로 다른 점: 교환 주문은 `exchanged` 상태이고 **REVENUE_EXCLUDED에 없다** —
+      매출·원가·수수료·최초 출고비가 이미 정상 계상돼 있다. 그래서 여기서 다시 더하면 안 되고,
+      **추가로 발생한 것만** 잡는다:
+        수입 = 고객에게 받은 교환 배송비(건별 실측)
+        비용 = 회수비 + **재발송 출고비**
+      ★재발송 출고비가 이 함수의 존재 이유다 — 한 주문에 출고가 두 번 일어났는데 엔진은
+        `_shipment_cost`로 한 번만 센다. 회수비만 더하면 교환이 실제보다 싸 보인다.
+
+    ★지원액은 회수비를 상한으로 상쇄(반품과 동일 규칙). 라이브는 전건 0이지만 N배송 교환이
+      생기면 값이 붙는다 — 그때 이 줄이 없으면 "고객 미청구=우리 손실"로 정확히 반대로 읽는다.
+    """
+    income = Decimal(str(o.exchange_fee_demand_amount or 0))
+    pickup = order_delivery.return_pickup_cost(o.delivery_attribute_type)
+    support = min(Decimal(str(o.exchange_fee_support_amount or 0)), pickup)
+    redelivery = _shipment_cost(o)          # 재발송 = 출고 1회 추가
+    return {"income": income, "cost": redelivery + pickup - support}
+
+
+def _exchange_shipping_pnl(
+    db: Session, channel_map: dict, date_from: date, date_to: date, channel_id: int | None = None
+) -> dict[int, dict[str, dict]]:
+    """교환 **재배송 처리일**별·채널별 배송 손익 → {channel_id: {date_str: {income, commission, cost}}}.
+
+    ★왜 필요한가: 교환은 여태 손익 엔진에 **0회 등장**했다. 매출은 잡히니 티가 안 났지만
+      회수비·재발송비가 통째로 빠져 있어 교환이 늘어도 이익이 반응하지 않았다.
+    ★귀속일 = 재배송 처리일. 요청일에 실으면 마감해서 본 지난달 이익이 뒤로 바뀐다(반품과 동일).
+    ★수입에 수수료를 매기는 것도 반품과 동일 — 정산 원장이 원 배송비와 클레임 배송비를
+      같은 `DELIVERY` 행으로 끊고 같은 주문관리 수수료를 매긴다.
+    """
+    out: dict[int, dict[str, dict]] = {}
+    seen: set[tuple] = set()
+    for o in _exchange_rows(db, date_from, date_to, channel_id):
+        ch = channel_map.get(o.channel_id)
+        if ch and ch.channel_type == "consignment":
+            continue
+        skey = _shipment_key(ch, o)
+        if skey in seen:
+            continue
+        seen.add(skey)
+
+        d = str(o.exchange_completed_at)[:10]
+        pnl = _exchange_pnl_one(o)
+        bucket = out.setdefault(o.channel_id, {}).setdefault(
+            d, {"income": ZERO, "commission": ZERO, "cost": ZERO}
+        )
+        bucket["income"] += pnl["income"]
+        bucket["commission"] += _delivery_commission(ch, pnl["income"])
+        bucket["cost"] += pnl["cost"]
+    return out
+
+
+def _exchange_shipping_pnl_by_product(
+    db: Session, channel_map: dict, date_from: date, date_to: date, channel_id: int | None = None
+) -> dict[int, dict]:
+    """교환 배송 손익을 **상품별**로 → {product_id: {income, commission, cost}}.
+
+    반품과 달리 고정비(②)처럼 배분 추정이 필요 없다 — 교환은 특정 주문의 특정 상품이다."""
+    out: dict[int, dict] = {}
+    seen: set[tuple] = set()
+    for o in _exchange_rows(db, date_from, date_to, channel_id):
+        ch = channel_map.get(o.channel_id)
+        if ch and ch.channel_type == "consignment":
+            continue
+        if o.product_id is None:
+            continue
+        skey = _shipment_key(ch, o)
+        if skey in seen:
+            continue
+        seen.add(skey)
+
+        pnl = _exchange_pnl_one(o)
+        bucket = out.setdefault(
+            o.product_id, {"income": ZERO, "commission": ZERO, "cost": ZERO}
+        )
+        bucket["income"] += pnl["income"]
+        bucket["commission"] += _delivery_commission(ch, pnl["income"])
+        bucket["cost"] += pnl["cost"]
+    return out
+
+
 def _return_shipping_pnl_by_product(
     db: Session, channel_map: dict, date_from: date, date_to: date, channel_id: int | None = None
 ) -> dict[int, dict]:
@@ -447,10 +600,13 @@ def _return_shipping_pnl_by_product(
     return out
 
 
-def _apply_return_pnl(bucket: dict, pnl: dict) -> None:
-    """반품 배송 손익 1건분을 집계 버킷에 반영.
+def _apply_claim_shipping_pnl(bucket: dict, pnl: dict) -> None:
+    """클레임(반품·교환) 배송 손익 1건분을 집계 버킷에 반영.
 
-    order_count는 **올리지 않는다** — 반품은 주문이 아니다(주문수가 부풀면 객단가가 틀어진다).
+    order_count는 **올리지 않는다** — 클레임은 주문이 아니다(주문수가 부풀면 객단가가 틀어진다).
+    교환도 같은 함수를 쓴다: 반품이든 교환이든 "수입은 배송수입으로 매출에 들어가고 수수료를
+    맞으며, 비용은 배송비로 나간다"는 모양이 같기 때문이다(2026-08-04 교환 배선 시 개명 —
+    종전 이름 `_apply_return_pnl`은 공용인데 반품 전용처럼 보였다).
     """
     bucket["shipping_revenue"] += pnl["income"]
     bucket["revenue"] += pnl["income"]
@@ -698,7 +854,11 @@ def calculate_daily_trend(
     manual_lookup = get_daily_manual_revenue(db, date_from, date_to, channel_id)
     # 반품 배송 손익 — 반품 완료일 귀속이라 order_date 창과 다른 축이다(별도 조회).
     return_pnl = _return_shipping_pnl(db, channel_map, date_from, date_to, channel_id)
-    if not orders and not manual_lookup and not return_pnl:
+    # 교환 배송 손익 — 재배송 처리일 귀속이라 order_date 창과 다른 축이다(반품과 같은 이유).
+    exchange_pnl = _exchange_shipping_pnl(db, channel_map, date_from, date_to, channel_id)
+    # 월 고정비(3PL 입고·보관·항공도선·합포장) — 주문 축에 없는 비용이라 별도 조회·일할 배분.
+    fixed_lookup = get_daily_fixed_cost(db, date_from, date_to, channel_id)
+    if not orders and not manual_lookup and not return_pnl and not exchange_pnl and not fixed_lookup:
         return []
 
     option_map = _get_option_id_map(db)
@@ -742,9 +902,12 @@ def calculate_daily_trend(
         bucket["revenue"] += revenue
         bucket["order_count"] += 1
 
-        # 원가
-        if o.product_id and o.product_id in product_map:
-            bucket["cost"] += product_map[o.product_id].cost_price * o.quantity
+        # 원가 — 알 수 없으면 그 라인의 제품매출을 '원가 미상'으로 따로 센다(표시 전용).
+        _line_cost = _cost_of_line(product_map, o.product_id, o.quantity)
+        if _line_cost is None:
+            bucket["unmapped_revenue"] += product_rev
+        else:
+            bucket["cost"] += _line_cost
 
         # 수수료 — 상품매출 + 배송비 수취분(정산 DELIVERY 원장 행에 실제로 부과됨)
         bucket["commission"] += _line_commission(ch, o, product_rev, actual_fee)
@@ -764,7 +927,14 @@ def calculate_daily_trend(
         for d, pnl in by_date.items():
             if d not in daily:
                 daily[d] = _new_bucket()
-            _apply_return_pnl(daily[d], pnl)
+            _apply_claim_shipping_pnl(daily[d], pnl)
+
+    # 교환 배송 손익 — 재배송 처리일 버킷에. 반품과 같은 규칙(그날 주문이 없어도 버킷을 만든다).
+    for _cid, by_date in exchange_pnl.items():
+        for d, pnl in by_date.items():
+            if d not in daily:
+                daily[d] = _new_bucket()
+            _apply_claim_shipping_pnl(daily[d], pnl)
 
     # 광고비 합산 (option_id 기반 — ad_data.db 연결 시 사용, 현재 비활성)
     for (oid, d_str), spend in ad_lookup.items():
@@ -797,14 +967,18 @@ def calculate_daily_trend(
         if channel_id is not None and mr_ch_id != channel_id:
             continue
         if d not in daily:
-            daily[d] = {
-                "revenue": ZERO, "product_revenue": ZERO, "shipping_revenue": ZERO,
-                "cost": ZERO, "commission": ZERO,
-                "shipping": ZERO, "ad_spend": ZERO, "vat": ZERO, "order_count": 0,
-            }
+            daily[d] = _new_bucket()  # ★손으로 쓴 dict였다 — 키가 하나 늘 때마다 여기서 KeyError가 난다
         daily[d]["revenue"] += revenue
         daily[d]["product_revenue"] += revenue
         manual_revenue_by_date[d] = manual_revenue_by_date.get(d, ZERO) + revenue
+
+    # 월 고정비 일할 배분분 병합.
+    # ★주문이 없는 날에도 행을 만든다 — 보관료는 주문이 없어도 나가는 돈이라, 그날을 건너뛰면
+    #   합계가 월 총액에 못 미친다(비용이 조용히 사라진다).
+    for (_fc_ch_id, d), amount in fixed_lookup.items():
+        if d not in daily:
+            daily[d] = _new_bucket()
+        daily[d]["fixed_cost"] += amount
 
     # 정렬 후 반환
     result = []
@@ -812,9 +986,14 @@ def calculate_daily_trend(
         b = daily[d]
         # 수동 매출은 순이익 계산에서 제외 (매출만 표시)
         mr = manual_revenue_by_date.get(d, ZERO)
-        # VAT 미차감 — 두 엔진(구 대시보드·종합조망) 순이익 정의 통일(Jino 2026-06-15).
-        # 판매자 VAT는 매입세액공제로 상당부분 상쇄되는 통과분 → 순이익에서 제외(과다차감 회피).
-        net = (b["revenue"] - mr) - b["cost"] - b["commission"] - b["shipping"] - b["ad_spend"]
+        # 부가세 차감(Jino 2026-08-04, 종전 '미차감' 방침 뒤집음) — 상세는 payable_vat 참조.
+        _rev = b["revenue"] - mr
+        net = (
+            _rev - b["cost"] - b["commission"] - b["shipping"] - b["ad_spend"] - b["fixed_cost"]
+            - payable_vat(
+                _rev, b["cost"], b["commission"], b["shipping"], b["ad_spend"], b["fixed_cost"]
+            )
+        )
         result.append({
             "date": d,
             "revenue": str(b["revenue"]),
@@ -823,6 +1002,8 @@ def calculate_daily_trend(
             "cost": str(b["cost"]),
             "commission": str(b["commission"]),
             "ad_spend": str(b["ad_spend"]),
+            "fixed_cost": str(b["fixed_cost"]),
+            "unmapped_revenue": str(b["unmapped_revenue"]),
             "shipping": str(b["shipping"]),
             "vat": str(b["vat"]),
             "net_profit": str(net),
@@ -847,6 +1028,7 @@ def calculate_channel_summary(
     actual_fee = _coupang_3p_actual_fee(db, orders, channel_map)  # 쿠팡3P 실측수수료(D-A)
     manual_lookup_ch = get_daily_manual_revenue(db, date_from, date_to)
     return_pnl = _return_shipping_pnl(db, channel_map, date_from, date_to)
+    exchange_pnl = _exchange_shipping_pnl(db, channel_map, date_from, date_to)
     if not orders and not manual_lookup_ch and not return_pnl:
         return []
 
@@ -888,8 +1070,11 @@ def calculate_channel_summary(
         b["revenue"] += revenue
         b["order_count"] += 1
 
-        if o.product_id and o.product_id in product_map:
-            b["cost"] += product_map[o.product_id].cost_price * o.quantity
+        _line_cost = _cost_of_line(product_map, o.product_id, o.quantity)
+        if _line_cost is None:
+            b["unmapped_revenue"] += product_rev
+        else:
+            b["cost"] += _line_cost
 
         # 수수료 — 상품매출 + 배송비 수취분(정산 DELIVERY 원장 행에 실제로 부과됨)
         b["commission"] += _line_commission(ch, o, product_rev, actual_fee)
@@ -907,7 +1092,14 @@ def calculate_channel_summary(
         for pnl in by_date.values():
             if cid not in by_channel:
                 by_channel[cid] = _new_bucket()
-            _apply_return_pnl(by_channel[cid], pnl)
+            _apply_claim_shipping_pnl(by_channel[cid], pnl)
+
+    # 교환 배송 손익 — 반품과 같은 규칙으로 채널에 싣는다.
+    for cid, by_date in exchange_pnl.items():
+        for pnl in by_date.values():
+            if cid not in by_channel:
+                by_channel[cid] = _new_bucket()
+            _apply_claim_shipping_pnl(by_channel[cid], pnl)
 
     # 광고비를 option_id → 주문의 채널로 직접 매핑 (bleeding 방지)
     # 1) option_id별 광고비 합산
@@ -944,6 +1136,11 @@ def calculate_channel_summary(
         for spend in gfa_daily.values():
             by_channel[naver_id]["ad_spend"] += spend
 
+    # 월 고정비 채널 합산 (3PL 입고·보관·항공도선·합포장 — 일할 배분분의 창 내 합계)
+    for (fc_ch_id, _), amount in get_daily_fixed_cost(db, date_from, date_to).items():
+        if fc_ch_id in by_channel:
+            by_channel[fc_ch_id]["fixed_cost"] += amount
+
     # 수동 매출 채널 행 병합 (매출-only, 순이익 None)
     manual_by_channel: dict[int, Decimal] = {}
     for (mr_ch_id, _), revenue in manual_lookup_ch.items():
@@ -952,8 +1149,15 @@ def calculate_channel_summary(
     result = []
     for cid, b in by_channel.items():
         ch = channel_map.get(cid)
-        # VAT 미차감 — 두 엔진 순이익 정의 통일(Jino 2026-06-15, 통과분 제외).
-        net = b["revenue"] - b["cost"] - b["commission"] - b["ad_spend"] - b["shipping"]
+        # 부가세 차감(Jino 2026-08-04, 종전 '미차감' 방침 뒤집음) — 상세는 payable_vat 참조.
+        net = (
+            b["revenue"] - b["cost"] - b["commission"] - b["ad_spend"] - b["shipping"]
+            - b["fixed_cost"]
+            - payable_vat(
+                b["revenue"], b["cost"], b["commission"], b["shipping"], b["ad_spend"],
+                b["fixed_cost"],
+            )
+        )
         rate_pct = (net / b["revenue"] * 100) if b["revenue"] > 0 else ZERO
 
         result.append({
@@ -965,6 +1169,8 @@ def calculate_channel_summary(
             "cost": str(b["cost"]),
             "commission": str(b["commission"]),
             "ad_spend": str(b["ad_spend"]),
+            "fixed_cost": str(b["fixed_cost"]),
+            "unmapped_revenue": str(b["unmapped_revenue"]),
             "shipping": str(b["shipping"]),
             "net_profit": str(net),
             "profit_rate": str(rate_pct.quantize(Decimal("0.01")) if isinstance(rate_pct, Decimal) else "0.00"),
@@ -1046,6 +1252,7 @@ def calculate_product_profit(
     channel_map, product_map = _build_channel_maps(db)
     # 반품 배송 손익(반품 완료일 귀속) — order_date 창과 다른 축이라 별도 조회.
     return_pnl_prod = _return_shipping_pnl_by_product(db, channel_map, date_from, date_to, channel_id)
+    exchange_pnl_prod = _exchange_shipping_pnl_by_product(db, channel_map, date_from, date_to, channel_id)
     if not orders and not return_pnl_prod:
         return []
 
@@ -1071,11 +1278,10 @@ def calculate_product_profit(
 
         pid = o.product_id
         if pid not in by_product:
-            by_product[pid] = {
-                "revenue": ZERO, "product_revenue": ZERO, "shipping_revenue": ZERO,
-                "cost": ZERO, "commission": ZERO,
-                "ad_spend": ZERO, "shipping": ZERO, "vat": ZERO, "quantity": 0,
-            }
+            # 같은 함수의 반품 경로(아래)와 **같은 생성자**를 쓴다 — 손으로 쓴 dict를 두면
+            # 버킷 키가 늘 때 두 경로가 갈라진다(_new_bucket docstring 참조).
+            by_product[pid] = _new_bucket(with_order_count=False)
+            by_product[pid]["quantity"] = 0
 
         b = by_product[pid]
         product_rev = _line_revenue(ch, o)
@@ -1085,8 +1291,11 @@ def calculate_product_profit(
         # VAT — 상품매출 기준 누적 (배송수입 VAT는 아래 alloc 단계에서 추가)
         b["vat"] += product_rev * Decimal("10") / Decimal("110")
 
-        if pid in product_map:
-            b["cost"] += product_map[pid].cost_price * o.quantity
+        _line_cost = _cost_of_line(product_map, pid, o.quantity)
+        if _line_cost is None:
+            b["unmapped_revenue"] += product_rev
+        else:
+            b["cost"] += _line_cost
 
         # 수수료 — 상품매출분. 배송비 수취분 수수료는 배송 그룹에서 라인 비례 배분한다.
         b["commission"] += _line_commission(ch, o, product_rev, actual_fee)
@@ -1223,15 +1432,26 @@ def calculate_product_profit(
             b = _new_bucket(with_order_count=False)
             b["quantity"] = 0
             by_product[pid] = b
-        _apply_return_pnl(by_product[pid], pnl)
+        _apply_claim_shipping_pnl(by_product[pid], pnl)
+
+    # 교환 배송 손익 — 특정 주문의 특정 상품이라 배분 추정이 필요 없다.
+    for pid, pnl in exchange_pnl_prod.items():
+        if pid not in by_product:
+            b = _new_bucket(with_order_count=False)
+            b["quantity"] = 0
+            by_product[pid] = b
+        _apply_claim_shipping_pnl(by_product[pid], pnl)
 
     result = []
     for pid, b in by_product.items():
         p = product_map.get(pid)
         if not p:
             continue
-        # VAT 미차감 — 두 엔진 순이익 정의 통일(Jino 2026-06-15, 통과분 제외).
-        net = b["revenue"] - b["cost"] - b["commission"] - b["ad_spend"] - b["shipping"]
+        # 부가세 차감(Jino 2026-08-04, 종전 '미차감' 방침 뒤집음) — 상세는 payable_vat 참조.
+        net = (
+            b["revenue"] - b["cost"] - b["commission"] - b["ad_spend"] - b["shipping"]
+            - payable_vat(b["revenue"], b["cost"], b["commission"], b["shipping"], b["ad_spend"])
+        )
         rate_pct = (net / b["revenue"] * 100) if b["revenue"] > 0 else ZERO
 
         result.append({
