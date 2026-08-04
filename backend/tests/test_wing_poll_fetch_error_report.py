@@ -591,3 +591,78 @@ def test_refresh_complete_rejects_unknown_account(client):
     r = c.post(_RG_COMPLETE_URL, params={"account_key": "COUPANG_WING9"},
                headers={"X-Ingest-Token": _TOKEN})
     assert r.status_code == 400
+
+
+# ════════════════════════════════════════════════════════════════════
+# R4: 쿨다운 기준점 — 부팅 직후를 "방금 돌린 직후"로 착각하지 않는다
+#   (2026-08-04 발견. 이 파일의 6건이 어떤 날은 실패하고 어떤 날은 통과해서 추적했더니
+#    테스트가 아니라 데몬이 틀렸다 — 부팅 후 1시간 동안 RG 버튼이 완전히 침묵했다.)
+# ════════════════════════════════════════════════════════════════════
+def test_rg_consumes_the_button_right_after_boot(fetcher, tmp_path, monkeypatch):
+    """★재부팅 직후에도 RG 버튼 요청은 즉시 소비돼야 한다.
+
+    macOS에서 `time.monotonic()`은 **부팅 이후 경과초**다(실측 2026-08-04: 부팅
+    11:26:03 · monotonic 21,214 ≈ uptime 5:53). 그런데 쿨다운 기준점을 `0.0`으로
+    잡으면 `monotonic - 0.0 >= 3600`이 곧 "부팅 후 1시간 지났나"가 되어, 그 전에는
+    **한 번도 안 돌렸는데 방금 돌린 것으로 취급**된다.
+
+    그 결과가 이 파일이 막으려는 실패 모드 그 자체였다 — claim도 로그도 실패 보고도
+    없이 침묵하고, 요청 플래그는 살아남고, UI는 215초 뒤 "Mac 응답 없음"으로 오진한다.
+    가드가 있어도 **가드에 도달하지 못하면** 소용이 없다.
+    """
+    cfg = _cfg(tmp_path)
+    _patch_common(fetcher, monkeypatch, vs_requested=False, rg_requested=True)
+    calls = _install_recorder(fetcher, monkeypatch)
+    monkeypatch.setattr(fetcher, "_do_rg_run", lambda _c, _s, login_wait_secs=0: 0)
+    monkeypatch.setattr(fetcher.time, "monotonic", lambda: 100.0)  # 부팅 100초 뒤
+
+    with pytest.raises(_StopPoll):
+        fetcher.cmd_poll(cfg)
+
+    assert _only(calls, "/rg-settlement/refresh-complete")["json"]["lease"] == _LEASE
+
+
+def test_vs_fetches_right_after_boot(fetcher, tmp_path, monkeypatch):
+    """판매분석 레인도 같은 기준점을 쓴다 — 쿨다운 45초라 피해는 작지만 결함은 같다."""
+    cfg = _cfg(tmp_path)
+    _patch_common(fetcher, monkeypatch, vs_requested=True, rg_requested=False)
+    calls = _install_recorder(fetcher, monkeypatch)
+    ran: list[bool] = []
+    monkeypatch.setattr(fetcher, "_do_run",
+                        lambda _c, _s, login_wait_secs=0: (ran.append(True), 0)[1])
+    monkeypatch.setattr(fetcher.time, "monotonic", lambda: 10.0)  # 부팅 10초 뒤
+
+    with pytest.raises(_StopPoll):
+        fetcher.cmd_poll(cfg)
+
+    assert ran == [True], "부팅 직후라는 이유로 fetch가 보류되면 안 된다"
+    _none(calls, "/vendor-summary/fetch-error")
+
+
+def test_rg_cooldown_still_holds_after_a_real_run(fetcher, tmp_path, monkeypatch):
+    """★쿨다운 자체는 살아 있어야 한다 — 위 수정이 해머링 방지를 없애면 안 된다.
+
+    한 번 돌린 뒤 같은 폴 루프의 다음 회차는 보류돼야 한다. 루프를 두 바퀴 돌리기 위해
+    `time.sleep`은 첫 회차에서 통과시키고 둘째 회차에서 탈출시킨다.
+    """
+    cfg = _cfg(tmp_path)
+    _patch_common(fetcher, monkeypatch, vs_requested=False, rg_requested=True)
+    calls = _install_recorder(fetcher, monkeypatch)
+    runs: list[int] = []
+    monkeypatch.setattr(fetcher, "_do_rg_run",
+                        lambda _c, _s, login_wait_secs=0: (runs.append(1), 0)[1])
+    monkeypatch.setattr(fetcher.time, "monotonic", lambda: 100.0)  # 시간은 흐르지 않는다
+    laps = {"n": 0}
+
+    def _sleep(_s):
+        laps["n"] += 1
+        if laps["n"] >= 2:
+            raise _StopPoll()
+
+    monkeypatch.setattr(fetcher.time, "sleep", _sleep)
+
+    with pytest.raises(_StopPoll):
+        fetcher.cmd_poll(cfg)
+
+    assert runs == [1], f"쿨다운이 죽었다 — 두 바퀴에서 {len(runs)}회 실행됨"
+    assert len([c for c in calls if c["url"].endswith("/rg-settlement/refresh-complete")]) == 1
