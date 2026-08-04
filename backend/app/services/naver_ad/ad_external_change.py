@@ -372,6 +372,7 @@ def record_ad_external_changes(db: Session, ops: list[dict], now: datetime) -> i
             feed_moved=v.moved,
             feed_total=v.total,
             feed_cluster_at=v.cluster_at,
+            feed_reason=v.reason if v.product_id else None,
         ))
         inserted += 1
         log.warning(

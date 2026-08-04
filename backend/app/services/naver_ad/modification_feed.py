@@ -540,8 +540,11 @@ def _feed_fields(c: _Candidate, ao_row: NaverAgencyOp | None) -> dict:
             "feed_verdict": None, "feed_verdict_label": None, "feed_evidence": None,
             "feed_group_size": 1, "feed_group_ids": [],
         }
+    # ★`reason`을 반드시 함께 넘긴다 — 근거 문장은 reason으로 분기하므로, 빼먹으면 모든 행이
+    #   "상품 매핑을 찾지 못해 판별하지 않았다"로 잘못 말한다(판정은 맞는데 설명이 거짓).
     verdict = feed_reapply.Verdict(
-        ao_row.feed_verdict, ao_row.feed_product_id, ao_row.feed_moved, ao_row.feed_total
+        ao_row.feed_verdict, ao_row.feed_product_id, ao_row.feed_moved, ao_row.feed_total,
+        reason=ao_row.feed_reason or "", cluster_at=ao_row.feed_cluster_at,
     )
     return {
         "feed_verdict": ao_row.feed_verdict,

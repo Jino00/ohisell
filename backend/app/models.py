@@ -2480,6 +2480,10 @@ class NaverAgencyOp(Base):
     # 최대 수백 초로 넓어지면서 소재마다 시각이 달라졌고, 그래서 시각 자체로는 같은 사건을
     # 더 이상 묶을 수 없다(간격 실측 0·66·437·501초).
     feed_cluster_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # 왜 그 판정이 나왔는지(feed_reapply.REASON_*). ★verdict만으로는 근거를 복원할 수 없다 —
+    # 같은 `unknown`이라도 "소재가 1개뿐"과 "그 뒤 소재가 다시 수정돼 근거가 덮였다"는 전혀
+    # 다른 상태이고, 같은 `real`이라도 "일부만 움직임"과 "추적 필드가 바뀜(가드)"은 다르다.
+    feed_reason: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
 
 
 class NaverChangeActorOverride(Base):

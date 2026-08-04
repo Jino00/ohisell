@@ -121,6 +121,52 @@ def test_move_outside_window_is_not_the_same_event(db):
     assert (v.verdict, v.moved, v.total) == (feed_reapply.VERDICT_REAL, 1, 2)
 
 
+def test_stale_snapshot_is_not_judged(db):
+    """★가드② — 그 사건 뒤에 소재가 다시 수정됐으면 판정하지 않는다.
+
+    2026-08-04 배포 직후 실증: 08-03 사건 26건이 하룻밤 새 FEED→REAL로 뒤집혔다. 그 소재들이
+    08-04 새벽 피드로 다시 움직여 `ad_edit_tm`(마지막 수정만 남긴다)이 덮인 탓이다.
+    썩은 근거로 '실조작'을 주장하면 거짓 경보가 매일 쌓인다 — 모른다고 말해야 한다."""
+    old = datetime(2026, 8, 3, 14, 22, 25)
+    now_ = old + timedelta(days=1)
+    for i in range(3):
+        _map(db, ad_id=f"nad-{i}", product="P1", edit_tm=_iso_kst(now_))  # 오늘 다시 움직였다
+    v = feed_reapply.verdict_for(db, "nad-0", _iso_kst(old))
+    assert v.verdict == feed_reapply.VERDICT_UNKNOWN
+    assert v.reason == feed_reapply.REASON_STALE
+    assert "다시 수정돼" in v.evidence()
+
+
+def test_stale_guard_does_not_swallow_bid_changes(db):
+    """단 가드①이 먼저다 — op 행 자체가 '입찰이 1500→1100이 됐다'를 담고 있고, 그 사실은
+    매핑 스냅샷이 낡았는지와 무관하게 참이다. 낡았다고 입찰 변경을 '모름'으로 덮으면
+    대행사 조작이 시간이 지나며 조용히 사라진다."""
+    old = datetime(2026, 8, 3, 14, 30, 34)
+    for i in range(3):
+        _map(db, ad_id=f"nad-{i}", product="P1", edit_tm=_iso_kst(old + timedelta(days=1)))
+    v = feed_reapply.verdict_for(db, "nad-0", _iso_kst(old), "bid_change")
+    assert v.verdict == feed_reapply.VERDICT_REAL
+    assert v.reason == feed_reapply.REASON_TRACKED_CHANGE
+
+
+def test_screen_evidence_matches_stored_reason(db):
+    """저장된 `reason`이 화면 근거 문장으로 이어진다 — 안 넘기면 판정은 맞는데 설명이 거짓이 된다."""
+    for i in range(3):
+        _map(db, ad_id=f"nad-{i}", product="P1", edit_tm=T_FEED)
+    db.add(NaverAgencyOp(
+        op_date=kst_today(), detected_at=datetime(2026, 8, 1, 13, 0), entity_type="ad",
+        entity_id="nad-0", campaign_id="cmp-1", op_type="ad_edit", occurred_at=KST_FEED,
+    ))
+    db.commit()
+    feed_reapply.backfill(db)
+    row = db.query(NaverAgencyOp).one()
+    assert row.feed_reason == feed_reapply.REASON_ALL_MOVED
+    res = modification_feed.build(
+        db, since=KST_FEED - timedelta(days=1), until=KST_FEED + timedelta(days=1)
+    )
+    assert "전량" in res["rows"][0]["feed_evidence"]
+
+
 def test_no_mapping_yields_no_product(db):
     """매핑이 없으면 상품을 모른다 — 판정을 지어내지 않는다(호출부가 NULL로 남긴다)."""
     v = feed_reapply.verdict_for(db, "nad-없음", T_FEED)

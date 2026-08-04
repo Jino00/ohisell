@@ -82,6 +82,14 @@ OP_AD_EDIT = "ad_edit"
 _FEED_SPAN_S = 900
 
 
+REASON_TRACKED_CHANGE = "tracked_change"  # 가드① — 입찰·정지가 실제로 바뀌었다
+REASON_STALE = "stale_snapshot"           # 가드② — 그 사건의 근거가 이미 덮였다
+REASON_SINGLE_AD = "single_ad"            # 상품에 소재가 1개뿐
+REASON_ALL_MOVED = "all_moved"            # 전량이 한 사건으로 함께 전진
+REASON_PARTIAL = "partial_moved"          # 일부만 움직임
+REASON_NO_MAPPING = "no_mapping"          # 상품 매핑을 못 찾음
+
+
 @dataclass(frozen=True)
 class Verdict:
     """판정 1건. `product_id`가 None이면 매핑을 못 찾은 것(호출부가 판정을 남기지 않는다)."""
@@ -90,58 +98,83 @@ class Verdict:
     product_id: str | None
     moved: int | None
     total: int | None
+    # 왜 그 판정이 나왔는지. **verdict만으로는 근거를 복원할 수 없다** — 같은 UNKNOWN이라도
+    # "소재가 1개뿐"과 "근거가 이미 썩었다"는 완전히 다른 상태이고, 같은 REAL이라도
+    # "일부만 움직임"과 "추적 필드가 바뀜(가드)"은 다른 이야기다. 화면이 둘을 같게 말하면
+    # 거짓말이 된다.
+    reason: str = ""
     # 이 이벤트가 속한 군집의 **시작 시각**(그 창 안에서 움직인 소재들의 최소 editTm).
     # 화면이 형제 줄을 한 줄로 접을 때 쓰는 키다 — 창이 도입되면서 각 소재의 시각이 서로
     # 달라졌기 때문에, 시각 자체로는 더 이상 같은 사건을 묶을 수 없다.
     cluster_at: datetime | None = None
 
     def evidence(self) -> str:
-        """화면에 그대로 쓸 수 있는 한 문장. 숫자가 없으면 지어내지 않는다."""
-        if self.product_id is None or self.total is None:
-            return "상품 매핑을 찾지 못해 판별하지 않았다."
-        if self.verdict == VERDICT_UNKNOWN:
-            return (
-                f"상품 {self.product_id}에 소재가 1개뿐이라 '전량 전진'이 자동으로 참이 된다 "
-                f"— 피드 재적용과 실조작을 구조로 가를 수 없다."
-            )
-        if self.verdict == VERDICT_FEED:
-            return (
-                f"상품 {self.product_id}의 소재 {self.total}개 **전량**이 한 사건으로 함께 전진했다 "
-                f"— 상품 피드가 재적용되면 그 상품의 소재가 전부 따라 움직인다."
-            )
-        # ★여기 도달한 REAL 중 `moved >= total`인 것은 **가드①로 내려온 판정**이다(창·전량
-        #   조건만 봤다면 FEED였을 것). 그 경우 "N개 중 N개만 움직였다"는 모순된 말이 되므로
-        #   근거를 가드 쪽으로 바꿔 말한다 — 판정과 설명이 어긋나면 화면이 거짓말을 한다.
-        if self.moved is None or self.total < 2 or self.moved >= self.total:
+        """화면에 그대로 쓸 수 있는 한 문장. **`reason`으로 분기한다** — 숫자만 보고 근거를
+        되짚으면 같은 값이 다른 사연을 갖는 경우(UNKNOWN 두 종류·REAL 두 종류)를 놓친다."""
+        if self.reason == REASON_TRACKED_CHANGE:
             return (
                 "추적 필드(입찰·그룹입찰 사용·정지)가 실제로 바뀌었다 — 피드 재적용은 이 값들을 "
                 "건드리지 않으므로 사람의 조작이다."
             )
-        return (
-            f"상품 {self.product_id}의 소재 {self.total}개 중 {self.moved}개만 움직였다 "
-            f"— 피드였다면 전량이 한 사건으로 따라 움직인다."
-        )
+        if self.reason == REASON_STALE:
+            return (
+                "판정할 수 없다 — 이 사건 뒤에 그 소재가 다시 수정돼, 지금 남은 관측이 그 시점을 "
+                "더 이상 담고 있지 않다(editTm은 마지막 수정만 남긴다)."
+            )
+        if self.reason == REASON_SINGLE_AD:
+            return (
+                f"상품 {self.product_id}에 소재가 1개뿐이라 '전량 전진'이 자동으로 참이 된다 "
+                f"— 피드 재적용과 실조작을 구조로 가를 수 없다."
+            )
+        if self.reason == REASON_ALL_MOVED:
+            return (
+                f"상품 {self.product_id}의 소재 {self.total}개 **전량**이 한 사건으로 함께 전진했다 "
+                f"— 상품 피드가 재적용되면 그 상품의 소재가 전부 따라 움직인다."
+            )
+        if self.reason == REASON_PARTIAL:
+            return (
+                f"상품 {self.product_id}의 소재 {self.total}개 중 {self.moved}개만 움직였다 "
+                f"— 피드였다면 전량이 한 사건으로 따라 움직인다."
+            )
+        return "상품 매핑을 찾지 못해 판별하지 않았다."
 
 
 # 판정 불가(매핑 없음). None을 여기저기 흩뿌리지 않는다.
-NO_VERDICT = Verdict(verdict=VERDICT_UNKNOWN, product_id=None, moved=None, total=None)
+NO_VERDICT = Verdict(
+    verdict=VERDICT_UNKNOWN, product_id=None, moved=None, total=None, reason=REASON_NO_MAPPING
+)
 
 
 def _decide(op_type: str, moved: int, total: int, cluster_at: datetime | None,
-            product_id: str) -> Verdict:
+            product_id: str, *, own_is_fresh: bool) -> Verdict:
     """판정 규칙 **단일 지점**. 정규 탐지와 소급 백필이 같은 함수를 쓴다.
 
     ★가드① — 추적 필드가 바뀐 op(`ad_edit`이 아닌 전부)은 창·전량 여부와 **무관하게** REAL이다.
       피드는 입찰·정지를 안 바꾼다. 이 가드가 없으면 대행사가 한 상품의 소재 입찰을 몰아서
       내렸을 때 그게 통째로 '피드'로 접혀 **사라진다** — 이 화면이 막으려는 바로 그 일이다.
+      이 가드가 **가장 먼저**인 이유: op 행 자체가 "입찰이 1500→1100이 됐다"는 사실을 담고
+      있고, 그 사실은 매핑 스냅샷이 낡았는지와 무관하게 참이다.
+
+    ★가드② — 그 소재 **자신의** 현재 editTm이 사건 시각의 창 밖이면 판정하지 않는다(UNKNOWN).
+      2026-08-04 배포 직후 실증: 08-03 사건 26건이 하룻밤 새 FEED→REAL로 뒤집혔다. 그 소재들이
+      08-04 새벽 피드로 **다시** 움직여 `ad_edit_tm`(마지막 수정만 남긴다)이 덮인 탓이다.
+      → **소급 판정은 소재가 다시 움직이는 순간 썩는다.** 썩은 근거로 '실조작'을 주장하면
+      거짓 경보가 매일 쌓이므로, 모른다고 말한다(모르는 걸 아는 척하지 않는다).
     """
     if op_type != OP_AD_EDIT:
-        return Verdict(VERDICT_REAL, product_id, moved, total, cluster_at)
+        return Verdict(VERDICT_REAL, product_id, moved, total,
+                       reason=REASON_TRACKED_CHANGE, cluster_at=cluster_at)
+    if not own_is_fresh:
+        return Verdict(VERDICT_UNKNOWN, product_id, moved, total,
+                       reason=REASON_STALE, cluster_at=cluster_at)
     if total < 2:
-        return Verdict(VERDICT_UNKNOWN, product_id, moved, total, cluster_at)
+        return Verdict(VERDICT_UNKNOWN, product_id, moved, total,
+                       reason=REASON_SINGLE_AD, cluster_at=cluster_at)
     if moved >= total:
-        return Verdict(VERDICT_FEED, product_id, moved, total, cluster_at)
-    return Verdict(VERDICT_REAL, product_id, moved, total, cluster_at)
+        return Verdict(VERDICT_FEED, product_id, moved, total,
+                       reason=REASON_ALL_MOVED, cluster_at=cluster_at)
+    return Verdict(VERDICT_REAL, product_id, moved, total,
+                       reason=REASON_PARTIAL, cluster_at=cluster_at)
 
 
 def _to_dt(raw) -> datetime | None:
@@ -182,11 +215,17 @@ def _product_context(db: Session, ad_ids: set[str]) -> tuple[dict, dict]:
     return product_of, siblings
 
 
-def _window(event_dt: datetime, sibling_dts: dict) -> tuple[int, datetime | None]:
-    """창 안에서 함께 움직인 소재 수와 그 군집의 시작 시각."""
+def _window(event_dt: datetime, sibling_dts: dict, ad_id: str) -> tuple[int, datetime | None, bool]:
+    """(창 안에서 함께 움직인 소재 수, 군집 시작 시각, **그 소재 자신의 관측이 신선한가**).
+
+    세 번째 값이 가드②의 입력이다 — 소재 자신의 현재 editTm이 사건 시각의 창 밖이면 그
+    사건의 근거는 이미 덮인 것이고, 그 위에서 세는 `moved`는 아무 의미가 없다.
+    """
     span = timedelta(seconds=_FEED_SPAN_S)
     inside = [d for d in sibling_dts.values() if d is not None and abs(d - event_dt) <= span]
-    return len(inside), (min(inside) if inside else None)
+    own = sibling_dts.get(ad_id)
+    own_is_fresh = own is not None and abs(own - event_dt) <= span
+    return len(inside), (min(inside) if inside else None), own_is_fresh
 
 
 def classify(db: Session, events: list[tuple[str, object, str]]) -> dict[tuple[str, str], Verdict]:
@@ -208,8 +247,10 @@ def classify(db: Session, events: list[tuple[str, object, str]]) -> dict[tuple[s
         if not pid or not sib or event_dt is None:
             out[(ad_id, op_type)] = NO_VERDICT
             continue
-        moved, cluster_at = _window(event_dt, sib)
-        out[(ad_id, op_type)] = _decide(op_type, moved, len(sib), cluster_at, pid)
+        moved, cluster_at, fresh = _window(event_dt, sib, ad_id)
+        out[(ad_id, op_type)] = _decide(
+            op_type, moved, len(sib), cluster_at, pid, own_is_fresh=fresh
+        )
     return out
 
 
@@ -257,10 +298,11 @@ def backfill(db: Session, *, commit: bool = True) -> dict:
         if not pid or not sib:
             stats["no_mapping"] += 1
             continue  # 판정을 남기지 않는다 — unknown으로 적으면 매핑 결손이 숨는다
-        moved, cluster_at = _window(r.occurred_at, sib)
-        v = _decide(r.op_type, moved, len(sib), cluster_at, pid)
+        moved, cluster_at, fresh = _window(r.occurred_at, sib, r.entity_id)
+        v = _decide(r.op_type, moved, len(sib), cluster_at, pid, own_is_fresh=fresh)
         r.feed_verdict, r.feed_product_id = v.verdict, v.product_id
-        r.feed_moved, r.feed_total, r.feed_cluster_at = v.moved, v.total, v.cluster_at
+        r.feed_moved, r.feed_total = v.moved, v.total
+        r.feed_cluster_at, r.feed_reason = v.cluster_at, v.reason
         stats[v.verdict] += 1
 
     if commit:
