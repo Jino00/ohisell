@@ -10,6 +10,7 @@ import Settings from "./pages/Settings";
 import AdReport from "./pages/AdReport";
 import CommandCenter from "./pages/CommandCenter";
 import CoupangOps from "./pages/CoupangOps";
+import CoupangAdChanges from "./pages/CoupangAdChanges";
 import RocketRecon from "./pages/RocketRecon";
 import NaverOps from "./pages/NaverOps";
 import ProductConnectionMap from "./pages/ProductConnectionMap";
@@ -30,6 +31,7 @@ export default function App() {
           <Route index element={<Dashboard />} />
           <Route path="command-center" element={<CommandCenter />} />
           <Route path="coupang-ops" element={<CoupangOps />} />
+          <Route path="coupang-ad-changes" element={<CoupangAdChanges />} />
           <Route path="rocket-recon" element={<RocketRecon />} />
           <Route path="naver-ops" element={<NaverOps />} />
           <Route path="orders" element={<Orders />} />
