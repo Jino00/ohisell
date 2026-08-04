@@ -725,6 +725,11 @@ export default function Dashboard() {
               })}
             </tbody>
           </table>
+          <p className="px-4 py-3 text-xs text-gray-400 border-t">
+            * 상품별 순이익에는 <b>월 고정비(3PL 입고·보관·항공도선·합포장)가 빠져 있습니다</b> —
+            재고·입고 기반이라 상품에 배분할 근거가 없어 채널 단위로만 반영합니다.
+            따라서 상품별 순이익 합계는 채널 순이익보다 그만큼 큽니다.
+          </p>
           </div>
         )}
       </div>

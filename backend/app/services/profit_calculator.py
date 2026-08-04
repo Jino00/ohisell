@@ -20,6 +20,7 @@ from app.services.coupang.revenue_fee_source import (
     actual_fee_by_order_option,
 )
 from app.services.manual_revenue_service import get_daily_manual_revenue
+from app.services.monthly_fixed_cost_service import get_daily_fixed_cost
 
 log = logging.getLogger(__name__)
 
@@ -325,6 +326,7 @@ def _new_bucket(*, with_order_count: bool = True) -> dict:
         "commission": ZERO,
         "shipping": ZERO,
         "ad_spend": ZERO,
+        "fixed_cost": ZERO,
         "vat": ZERO,
     }
     if with_order_count:
@@ -730,7 +732,9 @@ def calculate_daily_trend(
     manual_lookup = get_daily_manual_revenue(db, date_from, date_to, channel_id)
     # 반품 배송 손익 — 반품 완료일 귀속이라 order_date 창과 다른 축이다(별도 조회).
     return_pnl = _return_shipping_pnl(db, channel_map, date_from, date_to, channel_id)
-    if not orders and not manual_lookup and not return_pnl:
+    # 월 고정비(3PL 입고·보관·항공도선·합포장) — 주문 축에 없는 비용이라 별도 조회·일할 배분.
+    fixed_lookup = get_daily_fixed_cost(db, date_from, date_to, channel_id)
+    if not orders and not manual_lookup and not return_pnl and not fixed_lookup:
         return []
 
     option_map = _get_option_id_map(db)
@@ -829,14 +833,18 @@ def calculate_daily_trend(
         if channel_id is not None and mr_ch_id != channel_id:
             continue
         if d not in daily:
-            daily[d] = {
-                "revenue": ZERO, "product_revenue": ZERO, "shipping_revenue": ZERO,
-                "cost": ZERO, "commission": ZERO,
-                "shipping": ZERO, "ad_spend": ZERO, "vat": ZERO, "order_count": 0,
-            }
+            daily[d] = _new_bucket()  # ★손으로 쓴 dict였다 — 키가 하나 늘 때마다 여기서 KeyError가 난다
         daily[d]["revenue"] += revenue
         daily[d]["product_revenue"] += revenue
         manual_revenue_by_date[d] = manual_revenue_by_date.get(d, ZERO) + revenue
+
+    # 월 고정비 일할 배분분 병합.
+    # ★주문이 없는 날에도 행을 만든다 — 보관료는 주문이 없어도 나가는 돈이라, 그날을 건너뛰면
+    #   합계가 월 총액에 못 미친다(비용이 조용히 사라진다).
+    for (_fc_ch_id, d), amount in fixed_lookup.items():
+        if d not in daily:
+            daily[d] = _new_bucket()
+        daily[d]["fixed_cost"] += amount
 
     # 정렬 후 반환
     result = []
@@ -847,8 +855,10 @@ def calculate_daily_trend(
         # 부가세 차감(Jino 2026-08-04, 종전 '미차감' 방침 뒤집음) — 상세는 payable_vat 참조.
         _rev = b["revenue"] - mr
         net = (
-            _rev - b["cost"] - b["commission"] - b["shipping"] - b["ad_spend"]
-            - payable_vat(_rev, b["cost"], b["commission"], b["shipping"], b["ad_spend"])
+            _rev - b["cost"] - b["commission"] - b["shipping"] - b["ad_spend"] - b["fixed_cost"]
+            - payable_vat(
+                _rev, b["cost"], b["commission"], b["shipping"], b["ad_spend"], b["fixed_cost"]
+            )
         )
         result.append({
             "date": d,
@@ -858,6 +868,7 @@ def calculate_daily_trend(
             "cost": str(b["cost"]),
             "commission": str(b["commission"]),
             "ad_spend": str(b["ad_spend"]),
+            "fixed_cost": str(b["fixed_cost"]),
             "shipping": str(b["shipping"]),
             "vat": str(b["vat"]),
             "net_profit": str(net),
@@ -979,6 +990,11 @@ def calculate_channel_summary(
         for spend in gfa_daily.values():
             by_channel[naver_id]["ad_spend"] += spend
 
+    # 월 고정비 채널 합산 (3PL 입고·보관·항공도선·합포장 — 일할 배분분의 창 내 합계)
+    for (fc_ch_id, _), amount in get_daily_fixed_cost(db, date_from, date_to).items():
+        if fc_ch_id in by_channel:
+            by_channel[fc_ch_id]["fixed_cost"] += amount
+
     # 수동 매출 채널 행 병합 (매출-only, 순이익 None)
     manual_by_channel: dict[int, Decimal] = {}
     for (mr_ch_id, _), revenue in manual_lookup_ch.items():
@@ -990,7 +1006,11 @@ def calculate_channel_summary(
         # 부가세 차감(Jino 2026-08-04, 종전 '미차감' 방침 뒤집음) — 상세는 payable_vat 참조.
         net = (
             b["revenue"] - b["cost"] - b["commission"] - b["ad_spend"] - b["shipping"]
-            - payable_vat(b["revenue"], b["cost"], b["commission"], b["shipping"], b["ad_spend"])
+            - b["fixed_cost"]
+            - payable_vat(
+                b["revenue"], b["cost"], b["commission"], b["shipping"], b["ad_spend"],
+                b["fixed_cost"],
+            )
         )
         rate_pct = (net / b["revenue"] * 100) if b["revenue"] > 0 else ZERO
 
@@ -1003,6 +1023,7 @@ def calculate_channel_summary(
             "cost": str(b["cost"]),
             "commission": str(b["commission"]),
             "ad_spend": str(b["ad_spend"]),
+            "fixed_cost": str(b["fixed_cost"]),
             "shipping": str(b["shipping"]),
             "net_profit": str(net),
             "profit_rate": str(rate_pct.quantize(Decimal("0.01")) if isinstance(rate_pct, Decimal) else "0.00"),
@@ -1109,11 +1130,10 @@ def calculate_product_profit(
 
         pid = o.product_id
         if pid not in by_product:
-            by_product[pid] = {
-                "revenue": ZERO, "product_revenue": ZERO, "shipping_revenue": ZERO,
-                "cost": ZERO, "commission": ZERO,
-                "ad_spend": ZERO, "shipping": ZERO, "vat": ZERO, "quantity": 0,
-            }
+            # 같은 함수의 반품 경로(아래)와 **같은 생성자**를 쓴다 — 손으로 쓴 dict를 두면
+            # 버킷 키가 늘 때 두 경로가 갈라진다(_new_bucket docstring 참조).
+            by_product[pid] = _new_bucket(with_order_count=False)
+            by_product[pid]["quantity"] = 0
 
         b = by_product[pid]
         product_rev = _line_revenue(ch, o)
