@@ -163,6 +163,38 @@ prod 스냅샷 실측: **활성 광고그룹 21개(오픽스 5 + 오하이테크
 쿠팡 쪽이 더 정확하다(전/후 값 + 소급). 네이버 「수정 사항」이 두 원천을 합치듯
 (`naver_change_log ∪ naver_agency_op`) 여기도 합치는 게 맞다 — 어느 한쪽만으로는 반쪽이다.
 
+## ★★ 정찰 3차 (2026-08-04 17:4x) — 옵션ID 단위 소재 추적이 **된다**
+
+Jino "광고 캠페인에 어떤 옵션ID가 추가됐는지 볼 수 있는 방법은 전혀없는거야?"
+
+**`POST /marketing/tetris-api/{adGroupId}/ads`**
+요청 `{"isDeleted":false,"pagination":{"page":0,"size":500},"sortedBy":"ID","isSortDesc":true}`
+응답 `{ads:[{adNodeId, vendoritemid, itemName, isActive, isSuspended, isDeleted,
+           pricingOverride, servingStatus, type}], pageInfo:{totalCount, hasNextPage}}`
+
+- ★**`vendoritemid` = 옵션ID**가 그대로 온다 → 스냅샷 diff하면 **어떤 옵션이 붙고 빠졌는지** 정확히 안다.
+  `events-simple`의 `VIID`는 개수만 주지만, 이 목록과 합치면 "옵션 95838755133 외 19개 추가"로 쓸 수 있다.
+- ★`pricingOverride` — **소재별 입찰가 오버라이드**도 온다(현재 오픽스 0건이지만 축은 존재).
+- ★`isDeleted=true`로 **삭제된 소재도 따로 조회**된다(AI스마트광고 42건).
+- **비용 실측(오픽스)**: 활성 캠페인 5 · 광고그룹 5 · 소재 196개 → **콜 6회 · 1.0초**.
+
+### ★★★ 함정: `hasNextPage`가 거짓말한다 (조용한 절단)
+같은 광고그룹(204811906)에 대해:
+
+| 요청 | 받은 ads | pageInfo |
+|---|---|---|
+| `size=100, page=0` | **100** | `totalCount: 447, hasNextPage: **False**` |
+| `size=100, page=1` | 100 | `totalCount: 447, hasNextPage: False` |
+| `size=500, page=0` | **447** | `totalCount: 447, hasNextPage: False` |
+
+`hasNextPage`만 믿고 루프를 끊으면 **347개가 조용히 사라진다**. 로그에도 안 남는다.
+**`totalCount`가 권위값이다** — 받은 수가 totalCount에 못 미치면 계속 받아야 한다.
+
+⚠️**이 함정이 현 구현에도 잠재해 있다**: `tools/ad_settings_collect.py::_fetch_all_pages`가
+`hasNextPage`만 본다. campaigns 엔드포인트에선 우연히 정상 동작했지만(오하이테크 525건 수신 =
+totalCount 525 일치, 라이브 확인) 같은 코드를 `/ads`에 쓰면 즉시 절단된다.
+→ 다음 슬라이스에서 **totalCount 기준으로 교체**하고, 못 채우면 경고를 남긴다(조용한 절단 금지).
+
 ## 미결
 
 - [ ] **최종 합격 증거**: Jino가 광고센터에서 실제로 한 번 바꾸면 전/후 값이 뜨는지.
