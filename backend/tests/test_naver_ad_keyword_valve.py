@@ -31,23 +31,26 @@ def db():
 
 
 # ── helpers ──
-def _seed_keyword(db, *, entity_id, name="필름", bid_amt=700, status="on"):
+def _seed_keyword(db, *, entity_id, name="필름", bid_amt=700, status="on", synced_at=None):
     e = NaverEntity(
         entity_type="keyword", entity_id=entity_id, parent_id="grp-1",
         campaign_id="cmp-1", campaign_type="WEB_SITE", name=name,
-        status=status, bid_amt=bid_amt, synced_at=kst_now(),
+        status=status, bid_amt=bid_amt, synced_at=synced_at or kst_now(),
     )
     db.add(e)
     db.commit()
     return e
 
 
-def _kw_row(*, entity_id, name="필름", bid_amt=700, status="on"):
-    return {
+def _kw_row(*, entity_id, name="필름", bid_amt=700, status="on", reg_tm=None):
+    row = {
         "entity_type": "keyword", "entity_id": entity_id, "parent_id": "grp-1",
         "campaign_id": "cmp-1", "campaign_type": "WEB_SITE", "name": name,
         "status": status, "bid_amt": bid_amt,
     }
+    if reg_tm is not None:
+        row["reg_tm"] = reg_tm
+    return row
 
 
 def _added(db):
@@ -223,3 +226,128 @@ def test_actions_registered_in_external_detection_set():
 
     assert "external_keyword_added" in EXTERNAL_DETECTION_ACTIONS
     assert "external_keyword_removed" in EXTERNAL_DETECTION_ACTIONS
+
+
+# ── ★D-NAO-148: 키워드 등록 시각(regTm) ──────────────────────────────────────
+# 배경: `external_keyword_added`는 prod 30일 95건 전부 occurred_at NULL이었다 —
+#   화면이 "07-23 07:37에 추가됨"이라고 말했지만 그건 **우리가 알아챈** 시각이고,
+#   실제 등록은 전날 오후였다(라이브 대조: nkw…756866 regTm 07-22 13:41:30).
+# 창 = (직전 sync, 이번 sync]. 하한을 엔티티 행에서 못 얻는다 — 신규 키워드엔
+#   직전 관측이 없으므로 **직전 sync 실행 시각**(기존 행들의 max synced_at)을 쓴다.
+from datetime import datetime, timedelta  # noqa: E402
+
+
+def _reg(dt_utc: str) -> str:
+    return dt_utc
+
+
+def test_added_keyword_carries_registration_time(db):
+    """★신규 등록: regTm이 (직전 sync, 이번 sync] 안 → occurred_at에 그 시각(KST)이 찍힌다."""
+    prev_sync = kst_now() - timedelta(hours=24)
+    _seed_keyword(db, entity_id="nkw-old", synced_at=prev_sync)
+    # 직전 sync(24시간 전) 이후, 지금 이전에 등록된 키워드
+    reg_kst = prev_sync + timedelta(hours=6)
+    reg_utc = (reg_kst - timedelta(hours=9)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    entity_sync.sync_entities(db, rows=[
+        _kw_row(entity_id="nkw-old"),
+        _kw_row(entity_id="nkw-new", name="신규키워드", bid_amt=850, reg_tm=reg_utc),
+    ])
+
+    rows = _added(db)
+    assert len(rows) == 1
+    assert rows[0].entity_id == "nkw-new"
+    # 초 단위 일치(마이크로초는 strftime에서 버려짐)
+    assert rows[0].occurred_at == reg_kst.replace(microsecond=0)
+
+
+def test_added_keyword_without_reg_tm_leaves_time_null(db):
+    """regTm 미수집(구 경로·API 누락) → NULL. 화면은 '감지 시각'이라고 정직하게 말한다."""
+    _seed_keyword(db, entity_id="nkw-old", synced_at=kst_now() - timedelta(hours=24))
+    entity_sync.sync_entities(db, rows=[
+        _kw_row(entity_id="nkw-old"), _kw_row(entity_id="nkw-new", name="신규"),
+    ])
+
+    rows = _added(db)
+    assert len(rows) == 1 and rows[0].occurred_at is None
+
+
+def test_reappeared_keyword_gets_null_not_old_creation_time(db):
+    """★재등장(deleted→on)은 등록이 아니다 — 원래 생성 시각(창 밖)이 실려 와도 NULL.
+    이걸 채우면 '2024년에 추가됨'이 어제 사건으로 화면에 뜬다."""
+    _seed_keyword(db, entity_id="nkw-1", status="deleted",
+                  synced_at=kst_now() - timedelta(hours=24))
+    entity_sync.sync_entities(db, rows=[
+        _kw_row(entity_id="nkw-1", name="부활키워드", status="on",
+                reg_tm="2024-08-19T01:19:26.000Z"),
+    ])
+
+    rows = _added(db)
+    assert len(rows) == 1 and rows[0].occurred_at is None
+
+
+def test_added_keyword_reg_tm_after_now_is_rejected(db):
+    """이번 sync 이후 시각은 창 밖 → NULL. 시계가 어긋난 값을 사실로 적지 않는다."""
+    _seed_keyword(db, entity_id="nkw-old", synced_at=kst_now() - timedelta(hours=24))
+    future_utc = (kst_now() + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    entity_sync.sync_entities(db, rows=[
+        _kw_row(entity_id="nkw-old"),
+        _kw_row(entity_id="nkw-new", name="신규", reg_tm=future_utc),
+    ])
+
+    assert _added(db)[0].occurred_at is None
+
+
+def test_removed_keyword_never_carries_time(db):
+    """★소멸은 영구 NULL — regTm은 '언제 지웠나'에 답하지 못한다(삭제 시각은 응답에 없다)."""
+    _seed_keyword(db, entity_id="nkw-1", synced_at=kst_now() - timedelta(hours=24))
+    entity_sync.sync_entities(db, rows=[
+        _kw_row(entity_id="nkw-1", status="deleted", reg_tm="2026-07-22T04:41:30.000Z"),
+    ])
+
+    rows = _removed(db)
+    assert len(rows) == 1 and rows[0].occurred_at is None
+
+
+def test_reg_tm_persisted_on_entity(db):
+    """naver_entity.reg_tm에 원문이 보관된다 — 백필·재판정의 원천이다(불변값)."""
+    entity_sync.sync_entities(db, rows=[
+        _kw_row(entity_id="nkw-1", reg_tm="2026-07-22T04:41:30.000Z"),
+    ])
+    e = db.query(NaverEntity).filter(NaverEntity.entity_id == "nkw-1").one()
+    assert e.reg_tm == "2026-07-22T04:41:30.000Z"
+
+
+def test_reg_tm_not_erased_by_legacy_rows(db):
+    """레거시 주입 rows(reg_tm 키 없음)가 기존 생성 시각을 지우지 않는다(qi와 같은 규약)."""
+    entity_sync.sync_entities(db, rows=[
+        _kw_row(entity_id="nkw-1", reg_tm="2026-07-22T04:41:30.000Z"),
+    ])
+    entity_sync.sync_entities(db, rows=[_kw_row(entity_id="nkw-1", bid_amt=900)])
+
+    e = db.query(NaverEntity).filter(NaverEntity.entity_id == "nkw-1").one()
+    assert e.reg_tm == "2026-07-22T04:41:30.000Z"
+    assert e.bid_amt == 900
+
+
+def test_bulk_added_summary_row_has_null_time(db):
+    """대량 등록 요약행(__bulk__)은 개별 키워드가 아니므로 시각을 갖지 않는다."""
+    _seed_keyword(db, entity_id="nkw-anchor", synced_at=kst_now() - timedelta(hours=24))
+    reg_utc = (kst_now() - timedelta(hours=12)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    rows = [_kw_row(entity_id="nkw-anchor")] + [
+        _kw_row(entity_id=f"nkw-new-{i}", name=f"new{i}", reg_tm=reg_utc) for i in range(250)
+    ]
+    entity_sync.sync_entities(db, rows=rows)
+
+    added = _added(db)
+    assert len(added) == 1 and added[0].entity_id == "__bulk__"
+    assert added[0].occurred_at is None
+
+
+def test_bootstrap_still_logs_nothing_with_reg_tm(db):
+    """★회귀: 부트스트랩 가드는 regTm이 있어도 그대로 산다(91,005행 폭주 방지)."""
+    reg_utc = (kst_now() - timedelta(hours=12)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    entity_sync.sync_entities(db, rows=[
+        _kw_row(entity_id=f"nkw-{i}", reg_tm=reg_utc) for i in range(3)
+    ])
+    assert _added(db) == []

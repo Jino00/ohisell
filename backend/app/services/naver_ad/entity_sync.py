@@ -153,6 +153,28 @@ def external_occurred_at(entity: NaverEntity, edit_tm_raw, now) -> "datetime | N
     return at if prev < at <= now else None
 
 
+def reg_occurred_at(reg_tm_raw, prev_sync, now) -> "datetime | None":
+    """키워드가 **실제로 등록된** 시각(KST). 창 밖·부재는 None (D-NAO-148).
+
+    창 = (직전 sync, 이번 sync] = `(prev_sync, now]`. `external_occurred_at`과 같은 규약이고
+    다른 건 두 가지뿐이다:
+      ① 앵커가 `regTm`(생성)이지 `editTm`(수정)이 아니다.
+      ② 하한을 **엔티티 행에서 못 얻는다** — 신규 등록 키워드는 직전 관측이 존재하지 않기
+         때문이다. 대신 직전 sync 실행 시각(기존 행들의 max synced_at)을 쓴다. "그때 수집엔
+         없었다"가 곧 "그 이후에 만들어졌다"이므로 이 하한은 정당하다.
+
+    ★재등장(deleted→on)이 자동으로 NULL이 되는 것이 이 창의 핵심 효용이다: 그 키워드의
+    regTm은 원래 만들어진 옛 시각이라 창 밖으로 떨어진다. 등록이 아닌 것을 등록 시각으로
+    적지 않는다 — 부활·추적 개시(regTm이 2022년)도 같은 이유로 걸러진다.
+    ★regTm은 **불변**이라 editTm과 달리 소급 판정이 썩지 않는다(LESSONS #119의 전제인
+    "마지막 수정만 남는다"가 생성 시각엔 없다). 과거 행 백필이 성립하는 근거가 이것이다.
+    """
+    at = parse_edit_tm(reg_tm_raw)  # regTm도 같은 UTC ISO8601 'Z' 형식(라이브 실측)
+    if at is None or prev_sync is None:
+        return None
+    return at if prev_sync < at <= now else None
+
+
 def collect_entities(
     *,
     campaigns: list[dict] | None = None,
@@ -186,6 +208,7 @@ def collect_entities(
             "status_reason": c.get("status_reason"),
             "bid_amt": None,
             "edit_tm": c.get("edit_tm"),  # D-NAO-146 발생 시각 앵커(네이버 editTm 원문)
+            "reg_tm": c.get("reg_tm"),    # D-NAO-148 생성 시각 앵커(네이버 regTm 원문)
         })
 
         ags = (adgroups_by_campaign or {}).get(cid) if adgroups_by_campaign is not None else get_adgroups(cid)
@@ -198,6 +221,7 @@ def collect_entities(
                 "status_reason": ag.get("status_reason"),
                 "bid_amt": ag.get("bid_amt"),
                 "edit_tm": ag.get("edit_tm"),  # D-NAO-146
+                "reg_tm": ag.get("reg_tm"),    # D-NAO-148
             })
 
             if ctype != "WEB_SITE":
@@ -212,6 +236,7 @@ def collect_entities(
                     "bid_amt": kw.get("bid_amt"),
                     "qi_grade": kw.get("qi_grade"),  # D-NAO-46②: 품질지수 1~7(get_keywords 무상 편승)
                     "edit_tm": kw.get("edit_tm"),  # D-NAO-147
+                    "reg_tm": kw.get("reg_tm"),    # D-NAO-148
                 })
 
     log.info("naver_entity collect: campaign=%d adgroup=%d keyword=%d",
@@ -529,6 +554,7 @@ def _log_keyword_inventory_changes(
     now,
     *,
     bootstrap: bool,
+    prev_sync=None,
 ) -> None:
     """D-NAO-50: 키워드가 새로 나타나거나(등록·재등장) 사라지는(삭제·수집 소실) 인벤토리 변화를
     change_log에 기록한다 — 상태·입찰·품질 밸브에 이은 네 번째 diff 밸브.
@@ -563,14 +589,18 @@ def _log_keyword_inventory_changes(
       같은 귀속 로직이 필요해진다 — 없으면 우리 자신의 등록이 '외부'로 오분류된다.
 
     호출 계약: stale 루프 이후, `db.commit()` 이전에 1회 호출한다.
+
+    prev_sync(D-NAO-148): 직전 sync 실행 시각 — added 방향의 occurred_at 창 하한. removed는
+    쓰지 않는다(`regTm`은 "언제 지웠나"에 답하지 못한다 — 삭제 시각은 응답에 없다).
     """
     if added and not bootstrap:
-        _emit_inventory_side(db, added, now, direction="added")
+        _emit_inventory_side(db, added, now, direction="added", prev_sync=prev_sync)
     if removed:
         _emit_inventory_side(db, removed, now, direction="removed")
 
 
-def _emit_inventory_side(db: Session, items: list[dict], now, *, direction: str) -> None:
+def _emit_inventory_side(db: Session, items: list[dict], now, *, direction: str,
+                         prev_sync=None) -> None:
     """added/removed 한 방향을 기록. 200 초과면 __bulk__ 요약 1행, 아니면 개별행.
 
     payload 배치가 방향에 따라 다르다: added는 after_value(before=None, 등장), removed는
@@ -579,6 +609,7 @@ def _emit_inventory_side(db: Session, items: list[dict], now, *, direction: str)
     is_added = direction == "added"
     action = "external_keyword_added" if is_added else "external_keyword_removed"
     n = len(items)
+    n_occurred = 0  # D-NAO-148: 등록 시각까지 확정된 건수(로그로 매일 표면화)
 
     if n > _MASS_EVENT_THRESHOLD:
         verb = "등록" if is_added else "소실"
@@ -606,14 +637,18 @@ def _emit_inventory_side(db: Session, items: list[dict], now, *, direction: str)
     )
     for it in items:
         payload = json.dumps({"keyword": it["name"], "bidAmt": it["bid"]}, ensure_ascii=False)
+        # D-NAO-148: 등록 방향만 시각을 붙인다(창 밖·부재·재등장이면 None = 시각 불명).
+        occurred = reg_occurred_at(it.get("reg_tm"), prev_sync, now) if is_added else None
+        n_occurred += int(occurred is not None)
         db.add(NaverChangeLog(
             entity_type="keyword", entity_id=it["entity_id"], campaign_id=it["campaign_id"],
             action=action, proposal_id=None, dry_run=False, changed_at=now,
             before_value=None if is_added else payload,
             after_value=payload if is_added else None,
             rationale=rationale,
+            occurred_at=occurred,
         ))
-    log.info("keyword_inventory %s: %d건 개별 기록", direction, n)
+    log.info("keyword_inventory %s: %d건 개별 기록(occurred=%d)", direction, n, n_occurred)
 
 
 def sync_entities(db: Session, *, rows: list[dict] | None = None) -> dict:
@@ -630,6 +665,12 @@ def sync_entities(db: Session, *, rows: list[dict] | None = None) -> dict:
     existing = {(e.entity_type, e.entity_id): e for e in db.query(NaverEntity).all()}
     seen: set[tuple[str, str]] = set()
     now = kst_now()
+    # D-NAO-148: 직전 sync 실행 시각 = 기존 행들의 max(synced_at). **루프 전에** 구한다 —
+    # 루프가 본 행마다 synced_at을 now로 갱신하므로 뒤에서 구하면 항상 now가 나온다.
+    # 신규 등록 키워드의 occurred_at 창 하한이 이 값이다(그 키워드엔 직전 관측 행이 없다).
+    # stale 행은 synced_at이 옛날에 멈춰 있지만 max라 영향 없다. 부트스트랩이면 None → NULL.
+    prev_sync = max((e.synced_at for e in existing.values() if e.synced_at is not None),
+                    default=None)
     # ★루프 전 1회 적재(D-NAO-47, codex[P2]) — 루프 안에서 행마다 조회하면 91,005번 쿼리한다.
     our_bid_writes = _load_our_bid_writes(db)
 
@@ -649,21 +690,25 @@ def sync_entities(db: Session, *, rows: list[dict] | None = None) -> dict:
                 added_keywords.append({
                     "name": r["name"], "entity_id": r["entity_id"],
                     "campaign_id": r["campaign_id"], "bid": _norm_bid(r.get("bid_amt")),
+                    "reg_tm": r.get("reg_tm"),  # D-NAO-148: 등록 시각 앵커
                 })
             db.add(NaverEntity(
                 entity_type=r["entity_type"], entity_id=r["entity_id"], parent_id=r["parent_id"],
                 campaign_id=r["campaign_id"], campaign_type=r["campaign_type"], name=r["name"],
                 status=r["status"], status_reason=r.get("status_reason"),
                 bid_amt=r.get("bid_amt"), qi_grade=r.get("qi_grade"),
-                edit_tm=r.get("edit_tm"), synced_at=now,
+                edit_tm=r.get("edit_tm"), reg_tm=r.get("reg_tm"), synced_at=now,
             ))
         else:
             if r["entity_type"] == "keyword":
                 if e.status == "deleted" and r["status"] != "deleted":
                     # (b) 재등장: 기존 deleted 키워드가 다시 켜짐. (status 밸브는 e.status=deleted라 미발화)
+                    # ★reg_tm을 실어도 창 밖(원래 만들어진 옛 시각)이라 occurred_at은 NULL이 된다
+                    #   — 재등장은 등록이 아니므로 그게 맞다(D-NAO-148).
                     added_keywords.append({
                         "name": r["name"], "entity_id": r["entity_id"],
                         "campaign_id": r["campaign_id"], "bid": _norm_bid(r.get("bid_amt")),
+                        "reg_tm": r.get("reg_tm"),
                     })
                 elif e.status != "deleted" and r["status"] == "deleted":
                     # (a) 삭제: API가 DELETED 반환. (on→deleted는 lock 변화가 아니라 status 밸브 미발화)
@@ -691,6 +736,10 @@ def sync_entities(db: Session, *, rows: list[dict] | None = None) -> dict:
                 # 키가 없는 레거시 주입 rows는 마지막 관측 사유를 지우지 않는다(qi와 같은 규약).
                 e.status_reason = r["status_reason"]
             e.bid_amt = r.get("bid_amt")
+            if r.get("reg_tm") is not None:
+                # D-NAO-148: regTm은 불변이므로 last-known을 None으로 지우지 않는다(qi와 같은
+                # 규약). 레거시 주입 rows·API 누락에 기존 생성 시각을 잃지 않기 위함.
+                e.reg_tm = r["reg_tm"]
             if "edit_tm" in r:
                 # D-NAO-146: 키가 없는 레거시 주입 rows는 마지막 관측 editTm을 지우지 않는다
                 # (status_reason과 같은 규약). 값이 None으로 **온** 경우는 관측 결과이므로 반영한다.
@@ -714,7 +763,8 @@ def sync_entities(db: Session, *, rows: list[dict] | None = None) -> dict:
             stale += 1
 
     # D-NAO-50: commit 전에 인벤토리 변화 일괄 로깅(부트스트랩·대량 가드는 함수 내부에서 적용).
-    _log_keyword_inventory_changes(db, added_keywords, removed_keywords, now, bootstrap=bootstrap)
+    _log_keyword_inventory_changes(db, added_keywords, removed_keywords, now,
+                                   bootstrap=bootstrap, prev_sync=prev_sync)
 
     db.commit()
 

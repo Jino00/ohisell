@@ -2584,6 +2584,13 @@ class NaverEntity(Base):
     # ★synced_at은 '우리가 본 시각'이고 이건 '네이버에서 실제로 바뀐 시각'이다 — 섞지 않는다.
     # 소재 grain(naver_adgroup_product.ad_edit_tm)과 같은 규약: 문자열 원문 보관, 파싱은 소비 지점.
     edit_tm: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    # D-NAO-148: 네이버가 준 **생성** 시각(regTm) 원문. campaign/adgroup/keyword 전부 응답에
+    # 실려 온다(라이브 실측 46/46 · 96/96 · 41/41 = 100%, 추가 GET 0).
+    # ★edit_tm과 성질이 다르다 — regTm은 **불변**이다(실측: 어제 정지된 그룹이 reg=2026-01-20 ·
+    # edit=2026-08-04 10:49:25). 그래서 edit_tm에 금지된 소급 백필이 이 필드엔 성립한다
+    # (LESSONS #119는 "마지막 수정만 남는다"가 전제였고, 생성 시각엔 그 전제가 없다).
+    # 소비처는 신설 op의 occurred_at 하나뿐이다(bm_diff._REG_OPS · entity_sync 키워드 등록).
+    reg_tm: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
@@ -2640,6 +2647,13 @@ class NaverEntitySnapshot(Base):
     # 몇 분 뒤 P3 GET 값이라 그 사이의 변경은 창 밖으로 떨어져 NULL이 된다 — fail-closed가 맞다.
     # 구 행은 NULL(backfill 불가: editTm은 마지막 수정만 남아 소급하면 판정이 썩는다, LESSONS #119).
     edit_tm: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    # D-NAO-148: NaverEntity.reg_tm 복사(네이버 regTm 원문 = 생성 시각). bm_diff가 **신설 op**
+    # (campaign_add·adgroup_add)의 occurred_at으로 승격한다 — 창 안일 때만.
+    # ★창의 하한이 다르다: 신설 엔티티는 직전 스냅샷에 행이 **없으므로** 행별 하한을 못 얻는다.
+    # 대신 직전 스냅샷 **배치**의 관측 시각(그 날 관측된 행들의 max)을 하한으로 쓴다 —
+    # "그때는 없었다"가 곧 "그 이후에 생겼다"이기 때문. 상한은 다른 op와 같이 이 행의 관측 시각.
+    # 창 밖(예: 부활·추적 개시로 2022년 regTm)은 NULL — 옛 생성 시각을 어제 사건으로 적지 않는다.
+    reg_tm: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
 
 
 class NaverAgencyOp(Base):
