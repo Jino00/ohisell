@@ -90,6 +90,33 @@ def reconcile(db: Session, day: date) -> dict:
     return {"ok": not diff, "day": day.isoformat(), "diff": diff}
 
 
+# 소재 귀속이 없는 보고서 행의 sentinel. 노출만 있고 비용은 0인 행이 하루 몇 건 나온다
+# (2026-08-04 실측: 08-03분 2행·13노출·0원). **버리지 않는다** — 버리면 그만큼 대조가 어긋나고,
+# 그 어긋남은 "수집이 새고 있다"와 구분되지 않는다. 있는 그대로 이 키로 담아 합계를 맞춘다.
+AD_ID_UNATTRIBUTED = "-"
+
+
+def _fold_by_ad(rows: list[dict]) -> dict[tuple, dict]:
+    """수집 행을 **(날짜, 소재)로 접는다**. 같은 키가 여러 번 나오면 **합산**한다.
+
+    ★왜 필요한가(2026-08-04 라이브 대조가 잡은 결함): 수집 grain은 (날짜·캠페인·그룹·소재)라
+    같은 소재가 **여러 광고그룹**에 걸쳐 있거나 `ad_id='-'`(귀속 없음) 행이 여러 개면 한 키로
+    여러 행이 떨어진다. 초판은 그걸 덮어써서 **뒤 행만 남았고**, 노출이 08-02에 13·08-03에 4씩
+    사라졌다. 비용·클릭·전환은 마침 그 행들이 0이라 안 틀렸다 — 즉 **대조가 없었으면 못 봤다.**
+    """
+    folded: dict[tuple, dict] = {}
+    for r in rows:
+        day = date.fromisoformat(r["ad_date"]) if isinstance(r["ad_date"], str) else r["ad_date"]
+        key = (day, r.get("ad_id") or AD_ID_UNATTRIBUTED)
+        cur = folded.get(key)
+        if cur is None:
+            folded[key] = {**r, **{f: int(r.get(f) or 0) for f in _COUNTER_FIELDS}}
+            continue
+        for f in _COUNTER_FIELDS:
+            cur[f] += int(r.get(f) or 0)
+    return folded
+
+
 def sync(db: Session, *, date_from: date, date_to: date, rows: list[dict] | None = None) -> dict:
     """구간 적재(멱등 upsert) + 날짜별 대조. 반환: {rows, inserted, updated, reconcile: [...]}.
 
@@ -106,12 +133,8 @@ def sync(db: Session, *, date_from: date, date_to: date, rows: list[dict] | None
     }
     now = kst_now()  # ★server_default=func.now()는 UTC다 — 명시 주입.
     inserted = updated = 0
-    for r in rows:
-        day = date.fromisoformat(r["ad_date"]) if isinstance(r["ad_date"], str) else r["ad_date"]
-        ad_id = r.get("ad_id") or ""
-        if not ad_id:
-            continue  # 소재 ID가 없는 행은 이 테이블의 grain이 아니다(지어내지 않는다)
-        key = (day, ad_id)
+    for key, r in _fold_by_ad(rows).items():
+        day, ad_id = key
         row = existing.get(key)
         if row is None:
             row = NaverAdCreativeDaily(ad_date=day, ad_id=ad_id)

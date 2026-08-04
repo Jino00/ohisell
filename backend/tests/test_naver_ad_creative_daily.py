@@ -118,12 +118,31 @@ def test_sync_is_idempotent(db):
     assert (row.cost, row.imp, row.conv_direct_amt) == (300, 20, 9000)
 
 
-def test_rows_without_ad_id_are_skipped(db):
-    """소재 ID가 없으면 이 테이블의 grain이 아니다 — 빈 키로 행을 만들지 않는다."""
-    rows = _rows(("nad-A", 10, 1, 100, 0))
-    rows.append({**rows[0], "ad_id": ""})
+def test_same_ad_across_adgroups_is_summed_not_overwritten(db):
+    """★2026-08-04 라이브 대조가 잡은 결함: 같은 (날짜·소재)로 여러 행이 떨어지면 초판은
+    **덮어써서 뒤 행만 남겼다**. 수집 grain은 그룹까지 포함하므로 소재가 그룹을 걸치면 흔하다.
+    비용·클릭이 0인 행에서만 티가 나서 **대조가 없었으면 못 봤다**(노출만 13·4씩 사라짐)."""
+    rows = _rows(("nad-A", 10, 1, 100, 5000))
+    rows.append({**rows[0], "adgroup_id": "grp-2", "imp": 7, "clk": 0, "cost": 0,
+                 "conv_direct_amt": 0})
     ad_creative_daily_sync.sync(db, date_from=DAY, date_to=DAY, rows=rows)
-    assert db.query(NaverAdCreativeDaily).count() == 1
+    row = db.query(NaverAdCreativeDaily).one()
+    assert (row.imp, row.cost) == (17, 100)
+
+
+def test_unattributed_rows_are_kept_not_dropped(db):
+    """소재 귀속이 없는 행(`ad_id='-'`, 노출만 있고 비용 0)도 담는다 — 버리면 그만큼 대조가
+    어긋나고, 그 어긋남은 '수집이 새고 있다'와 구분되지 않는다."""
+    rows = _rows(("nad-A", 10, 1, 100, 0))
+    rows.append({**rows[0], "ad_id": "-", "imp": 13, "clk": 0, "cost": 0})
+    rows.append({**rows[0], "ad_id": "", "imp": 5, "clk": 0, "cost": 0})  # 빈 값도 같은 키로
+    _daily(db, imp=28, clk=1, cost=100, rev=0)
+    res = ad_creative_daily_sync.sync(db, date_from=DAY, date_to=DAY, rows=rows)
+    unattr = db.query(NaverAdCreativeDaily).filter(
+        NaverAdCreativeDaily.ad_id == ad_creative_daily_sync.AD_ID_UNATTRIBUTED
+    ).one()
+    assert unattr.imp == 18
+    assert res["reconcile"][0]["ok"] is True  # 버리지 않아야 합계가 맞는다
 
 
 # ══════════════════════════════════════════════════════════════════
