@@ -353,3 +353,38 @@ def test_rows_without_verdict_are_untouched(db):
     row = _build(db)["rows"][0]
     assert row["feed_verdict"] is None and row["feed_evidence"] is None
     assert row["feed_group_size"] == 1
+
+
+# ══════════════════════════════════════════════════════════════════
+# (5) 같은 소재가 여러 행일 때 — **최신 관측 채택**(실행 경로와 같은 규칙)
+# ══════════════════════════════════════════════════════════════════
+def test_duplicate_ad_rows_adopt_the_latest_observation(db):
+    """★소재가 그룹 A→B로 옮기면 두 행이 남는다(unique 키가 (adgroup, mall_product)뿐).
+    그때 어느 행의 `ad_edit_tm`을 쓰느냐로 판정이 뒤집힌다 — 옛 행을 집으면 '자기 관측이
+    창 밖'이라 UNKNOWN(stale)이 나온다.
+
+    `NaverAdgroupProduct` docstring이 못 박은 규칙("`ad_id`를 실행 레버로 쓰는 경로는
+    `synced_at`이 가장 최근인 행 하나만 채택")과 `creative_scorecard._product_map`이 같은
+    규칙을 쓴다. 판별기만 DB 반환 순서에 맡기면 **측정과 제어가 서로 다른 행을 본다.**
+    """
+    old = datetime(2026, 7, 1, 0, 0, 0)
+    new = datetime(2026, 8, 1, 0, 0, 0)
+    # 소재 A의 **옛 상품** P1(먼저 삽입 = 낮은 id). 여기엔 형제가 하나뿐이라 total==1이 된다.
+    db.add(NaverAdgroupProduct(adgroup_id="grp-X", campaign_id="cmp-1", mall_product_id="P1",
+                               product_name="옛 상품", ad_id="nad-A", ad_edit_tm=T_FEED,
+                               synced_at=old))
+    # 소재 A의 **현재 상품** P2 — 형제 B와 함께 같은 초로 움직였다(피드 서명).
+    db.add(NaverAdgroupProduct(adgroup_id="grp-Y", campaign_id="cmp-1", mall_product_id="P2",
+                               product_name="현재 상품", ad_id="nad-A", ad_edit_tm=T_FEED,
+                               synced_at=new))
+    db.add(NaverAdgroupProduct(adgroup_id="grp-Z", campaign_id="cmp-1", mall_product_id="P2",
+                               product_name="현재 상품", ad_id="nad-B", ad_edit_tm=T_FEED,
+                               synced_at=new))
+    db.commit()
+
+    v = feed_reapply.verdict_for(db, "nad-A", T_FEED)
+    # 최신 관측(P2)을 채택하면 형제 2개 전량이 함께 움직였으므로 FEED다.
+    # 옛 행(P1)을 채택하면 소재가 1개뿐이라 UNKNOWN(single_ad)이 나온다 — 판정이 통째로 뒤집힌다.
+    assert v.product_id == "P2", f"최신 관측을 채택해야 한다 (실제: {v.product_id}/{v.reason})"
+    assert v.verdict == feed_reapply.VERDICT_FEED, v.reason
+    assert (v.moved, v.total) == (2, 2)

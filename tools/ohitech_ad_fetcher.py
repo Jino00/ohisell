@@ -41,6 +41,7 @@ import urllib.request
 
 # 세션 자가 복구 공용 구현(같은 디렉터리 — 데몬은 ~/.ohisell/tools/에서 실행되므로
 # install_local_runtime.sh가 이 파일도 함께 복사해야 한다. 빠지면 import 실패로 크래시 루프).
+import ad_settings_collect
 import coupang_auth
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -922,6 +923,11 @@ def cmd_run(cfg: dict) -> int:
             #   메인 응답 판정 뒤에 둔 이유: 옵션 보고서는 30~60초가 걸리는데, 세션이 죽었다면
             #   그 시간을 버리지 않고 곧장 사람을 부르는 게 맞다.
             option_payload = _collect_option_report(page, cfg)
+            # ★광고 설정(캠페인·광고그룹) 수집을 이 회차에 **얹는다**(트랙 coupang-ad-change-log).
+            #   자기 크론을 두지 않는 이유: xauth Akamai가 headless를 막아 창이 반드시 뜬다.
+            #   여기 얹으면 창이 뜨는 횟수가 0회 늘어난다(2026-07-27 "버튼 누를 때만" 구조 유지).
+            #   실패해도 회차는 계속된다 — 광고비가 머니 경로고 이건 곁다리다.
+            ad_settings_collect.collect_and_push(page, cfg, "ohitech", log=log)
     except RuntimeError:
         return 2
     except Exception as e:  # noqa: BLE001

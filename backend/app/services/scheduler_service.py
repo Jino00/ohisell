@@ -325,6 +325,18 @@ def sync_naver_ad_daily_job():
         ing = ingest_ad_daily(db, start, end)
         bep = calculate_bep(db)
         log.info("[스케줄러] naver_ad_daily 적재 %s + BEP %s", ing, bep)
+
+        # D-NAO-140: 소재(광고) grain 적재 + 같은 날 대조. **같은 창·같은 보고서**를 쓴다.
+        # ★fail-open으로 감싼다 — 이건 측정 부가 축이고, 여기서 터져도 위의 머니 경로
+        #   (naver_ad_daily·BEP)는 이미 커밋됐다. 부가기능이 본 기능을 죽이면 안 된다.
+        try:
+            from app.services.naver_ad.ad_creative_daily_sync import sync as sync_creative
+
+            log.info("[스케줄러] naver_ad_creative_daily: %s",
+                     sync_creative(db, date_from=start, date_to=end))
+        except Exception as e:  # noqa: BLE001
+            log.exception("[스케줄러] naver_ad_creative_daily 적재 실패(무시하고 진행): %s", e)
+            db.rollback()
     except Exception as e:
         log.exception("[스케줄러] sync_naver_ad_daily_job 에러: %s", e)
         raise  # 삼킴 정렬(S5b): cron 경로 EVENT_JOB_ERROR로 표면화

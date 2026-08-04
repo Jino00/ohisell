@@ -327,13 +327,13 @@ fi
 #   (의존 모듈을 빼고 그걸 import하는 파일만 배포해 크래시 루프 265회).
 #   순서가 뒤면 새 페처가 잠시 구 모듈 없이 존재한다.
 echo "==> 파일 배포 (CAS 가드)"
-for f in coupang_auth.py \
+for f in coupang_auth.py ad_settings_collect.py \
          ad_cost_browser_fetcher.py wing_browser_fetcher.py \
          rocket_supplier_fetcher.py ohitech_ad_fetcher.py \
          scheduler_watchdog_poll.py; do
   if [ ! -f "$REPO_TOOLS/$f" ]; then
     case "$f" in
-      coupang_auth.py)
+      coupang_auth.py|ad_settings_collect.py)
         echo "    ❌ 공용 모듈 없음: $REPO_TOOLS/$f — 중단(페처가 import 실패로 죽는다)"; exit 1 ;;
       *) echo "    (소스 없음, 건너뜀: $f)"; continue ;;
     esac

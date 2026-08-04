@@ -3298,3 +3298,113 @@ export function fetchNaverPerformanceTimeline(
     `/api/naver/ad/performance/timeline${qs ? `?${qs}` : ""}`,
   );
 }
+
+// ── D-NAO-140 S2: 소재(광고)별 성과 ──
+// ★이 축이 없으면 캠페인 평균이 적자 소재를 가린다(2026-08-03 실측: 캠페인 03 ROAS 2.07~3.26
+//   인데 그 안의 소재 하나는 0.61 — 3일 10.4만원 써서 6.4만원).
+export interface NaverCreativeRow {
+  ad_id: string;
+  campaign_id: string;
+  /** 이름이 없으면 null — 화면이 ID 폴백을 스스로 정한다(ID를 이름 자리에 넣지 않는다). */
+  campaign_name: string | null;
+  adgroup_id: string;
+  adgroup_name: string | null;
+  mall_product_id: string | null;
+  product_name: string | null;
+  /** 소재 개별 입찰. use_group_bid_amt=true면 그룹 입찰이 실효라 이 값은 참고용. */
+  bid_amt: number | null;
+  use_group_bid_amt: boolean | null;
+  /** 이 구간에서 성과가 관측된 날 수(구간 길이와 다를 수 있다). */
+  days: number;
+  imp: number;
+  clk: number;
+  cost: number;
+  conv: number;
+  rev: number;
+  /** 비용 0이면 null — 0으로 적으면 '수익이 0'으로 읽힌다. */
+  roas: number | null;
+  bep_roas: number | null;
+  bep_gap: number | null;
+  /** ★3상태: 넘음/미달/**판정불가(null)**. BEP를 모르면 판정하지 않는다. */
+  verdict: "above" | "below" | null;
+}
+
+export interface NaverCreativeResponse {
+  window: { since: string; until: string };
+  total: number;
+  /** 페이지·필터와 무관한 구간 전체 합계 — 한 페이지만 보고 '이게 전부'로 읽지 않게. */
+  totals: { ads: number; cost: number; rev: number; clk: number };
+  rows: NaverCreativeRow[];
+}
+
+export function fetchNaverCreatives(params: {
+  date_from?: string;
+  date_to?: string;
+  days?: number;
+  campaign_id?: string;
+  sort?: "cost" | "imp" | "clk";
+  limit?: number;
+  offset?: number;
+} = {}): Promise<NaverCreativeResponse> {
+  const q = new URLSearchParams();
+  Object.entries(params).forEach(([k, v]) => { if (v != null) q.set(k, String(v)); });
+  return fetchApi(`/api/naver/ad/creatives?${q.toString()}`);
+}
+
+// ──────────────────────────────────────────────
+// 쿠팡 광고 설정 변경 이력 (트랙 coupang-ad-change-log, D-CAC-3/4)
+// ★네이버와 결정적으로 다른 점: 쿠팡은 **모든 변경이 외부다**(우리가 쿠팡 광고를 쓰는 경로가
+//   없다). 그래서 '주체' 축이 아예 없다 — isAgencyManaged는 현재 관리 주체지 변경 주체가 아니다.
+// ──────────────────────────────────────────────
+export type CoupangAdAccount = "ofix" | "ohitech";
+export type CoupangAdChangeOp =
+  | "created" | "turned_on" | "turned_off" | "deleted" | "field_change";
+
+export interface CoupangAdChangeRow {
+  id: number;
+  account: CoupangAdAccount;
+  entity_type: "campaign" | "adgroup";
+  entity_id: string;
+  campaign_id: string;
+  entity_name: string;
+  op: CoupangAdChangeOp;
+  /** field_change일 때만. 그 외에는 null. */
+  field: string | null;
+  before_value: string | null;
+  after_value: string | null;
+  /** KST ISO. time_basis에 따라 의미가 다르다 — 아래 참조. */
+  occurred_at: string;
+  /**
+   * "src" = 쿠팡이 준 updatedAt = **진짜 발생 시각**.
+   * "detected" = 우리가 알아챈 시각(쿠팡이 시각을 안 준 경우).
+   * ★화면은 이 둘을 반드시 구분해 보여야 한다. 네이버에서 감지일로 귀속했다가
+   *   07-30 변경을 08-03으로 잡은 실사고가 있었다.
+   */
+  time_basis: "src" | "detected";
+  detected_at: string | null;
+}
+
+export interface CoupangAdChangesResponse {
+  period: { from: string; to: string; tz: "KST" };
+  account: CoupangAdAccount | null;
+  count: number;
+  /** 마지막으로 설정을 관측한 시각(KST). null이면 아직 한 번도 안 봤다 — 신선도 표면화. */
+  last_observed_at: string | null;
+  items: CoupangAdChangeRow[];
+}
+
+export function fetchCoupangAdChanges(params: {
+  /** KST 날짜 YYYY-MM-DD, 양끝 포함. */
+  from?: string;
+  to?: string;
+  account?: CoupangAdAccount;
+} = {}): Promise<CoupangAdChangesResponse> {
+  const q = new URLSearchParams();
+  if (params.from) q.set("from", params.from);
+  if (params.to) q.set("to", params.to);
+  if (params.account) q.set("account", params.account);
+  const qs = q.toString();
+  return fetchApi<CoupangAdChangesResponse>(
+    `/api/coupang/ops/ad-changes${qs ? `?${qs}` : ""}`,
+  );
+}

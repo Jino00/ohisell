@@ -719,6 +719,84 @@ class CoupangAdCostDaily(Base):
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class CoupangAdEntitySnapshot(Base):
+    """쿠팡 광고 설정 스냅샷 — diff의 "전" 값. (account, entity_type, entity_id)당 최신 1행.
+
+    트랙 coupang-ad-change-log D-CAC-4. 원천 = `POST /marketing/tetris-api/campaigns`
+    (오픽스·오하이테크 동일 엔드포인트, `groupList`에 광고그룹 중첩).
+
+    ★settings_json에는 **설정 필드만** 담는다. 성과 필드(spentBudget·averageTimeBudgetUtilRate 등)를
+      섞으면 매일 아침 "전 캠페인 수정됨"이 뜬다 — 실측: spentBudget이 20분에 6,501→6,592로 움직였다
+      (네이버에서 소재 editTm이 상품 피드 재적용으로 전진해 ad_edit이 229:4로 오염된 것과 같은 함정).
+
+    ★present: 마지막 전량 조회에 이 엔티티가 있었나. 삭제 판정용 — is_active=False(Off)와 구분해야 한다
+      (Off는 목록에 남고, 삭제는 사라진다).
+
+    ★settings_json은 **활성 조회(전체 필드)에서만** 갱신한다. 전량 조회는 id·name·isActive만 쓰므로
+      그걸로 덮으면 설정이 통째로 날아간다(D-CAC-3: 내용 diff는 활성만).
+    """
+
+    __tablename__ = "coupang_ad_entity_snapshot"
+    __table_args__ = (
+        UniqueConstraint("account", "entity_type", "entity_id",
+                         name="uq_coupang_ad_entity_snapshot"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    account: Mapped[str] = mapped_column(String(12), nullable=False, index=True)  # ofix / ohitech
+    entity_type: Mapped[str] = mapped_column(String(12), nullable=False)          # campaign / adgroup
+    entity_id: Mapped[str] = mapped_column(String(24), nullable=False)
+    campaign_id: Mapped[str] = mapped_column(String(24), nullable=False, default="", index=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    settings_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # 쿠팡이 준 updatedAt(UTC naive). 발생 시각 앵커 — 네이버 소재 editTm과 같은 역할.
+    src_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    present: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+
+class CoupangAdChangeLog(Base):
+    """쿠팡 광고 설정 변경 1건 — 「수정 사항」 쿠팡판의 표시 원천.
+
+    ★쿠팡은 **모든 변경이 외부다**. 우리가 쿠팡 광고를 쓰는 경로가 없어서 네이버의
+      naver_change_log(우리 실집행) 같은 원천이 원리적으로 안 생긴다. 전량이 스냅샷 diff 유래다.
+
+    op: created / turned_on / turned_off / deleted / field_change
+    occurred_at: 귀속 시각. time_basis가 'src'면 쿠팡 updatedAt(진짜 발생 시각),
+      'detected'면 우리가 알아챈 시각이다 — ★모르는 걸 아는 척하지 않는다.
+      (네이버에서 감지일로 귀속했다가 07-30 변경을 08-03으로 잡은 실사고가 있었다.)
+
+    ★변경 주체는 기록하지 않는다 — isAgencyManaged는 '현재 관리 주체'지 '이번 변경을 누가 했나'가
+      아니다. 네이버처럼 우리/대행사/Jino를 가르는 건 쿠팡에선 근거가 없다.
+
+    유니크 키가 (account, entity_type, entity_id, op, field, occurred_at)인 이유: 같은 스냅샷을
+      두 번 넣어도 행이 안 늘어야 한다(회차 재실행·백필 idempotent).
+    """
+
+    __tablename__ = "coupang_ad_change_log"
+    __table_args__ = (
+        UniqueConstraint("account", "entity_type", "entity_id", "op", "field", "occurred_at",
+                         name="uq_coupang_ad_change_log"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    account: Mapped[str] = mapped_column(String(12), nullable=False, index=True)
+    entity_type: Mapped[str] = mapped_column(String(12), nullable=False)
+    entity_id: Mapped[str] = mapped_column(String(24), nullable=False)
+    campaign_id: Mapped[str] = mapped_column(String(24), nullable=False, default="", index=True)
+    entity_name: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    op: Mapped[str] = mapped_column(String(16), nullable=False)
+    # field: field_change일 때만 채운다. 유니크 키에 들어가므로 NULL 대신 ''를 쓴다
+    # (SQLite에서 NULL은 서로 달라 중복이 막히지 않는다).
+    field: Mapped[str] = mapped_column(String(40), nullable=False, default="")
+    before_value: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    after_value: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    time_basis: Mapped[str] = mapped_column(String(10), nullable=False, default="detected")  # src/detected
+    detected_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 class CoupangWingCookie(Base):
     """Wing 내부 API 세션쿠키 시크릿 — 계정별 (트랙 D-5, S1-b).
 
@@ -1786,6 +1864,59 @@ class NaverAdDaily(Base):
     cart_indirect_cnt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 간접 장바구니 수
     cart_direct_amt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 직접 장바구니 전환가치(원, 매출 아님)
     cart_indirect_amt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 간접 장바구니 전환가치(원, 매출 아님)
+    synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class NaverAdCreativeDaily(Base):
+    """네이버 SA 일별 **소재(광고)** 성과 (D-NAO-140).
+
+    grain: (ad_date, ad_id). 키워드는 롤업한다 — 파워링크는 한 소재가 여러 키워드로 노출되지만
+    **우리가 조작하는 레버는 소재 하나**이고, 이 테이블의 존재 이유가 바로 제어 grain에 측정을
+    맞추는 것이다(자동화가 소재 입찰을 바꾸면서 소재 성과를 못 보던 상태 = D-NAO-132 정지의
+    구조적 원인 중 하나).
+
+    ══ ★왜 `naver_ad_daily`에 컬럼을 더하지 않고 별도 테이블인가 ══
+    그 테이블에 grain을 하나 더 얹으면 **기존 소비자가 전부 이중계상한다.** 2026-08-04에 실제로
+    그 함정에 걸렸다 — 03 캠페인 08-03 소진을 69,912원이 아니라 139,824원(정확히 2배)으로 읽었다.
+    센티넬 행이 `keyword_id`가 아니라 `adgroup_id` 칼럼에 사는 걸 몰라 필터가 안 먹었던 것이다.
+    같은 테이블에 grain이 섞이면 이런 오독은 **합계가 안 맞을 때까지 안 보인다.** 그래서 분리한다.
+
+    ══ 수집 비용 0 ══
+    소스는 이미 매일 받고 있는 `AD`·`AD_CONVERSION` 보고서다 — **두 보고서 모두 컬럼 5가
+    소재 ID**(2026-08-04 라이브 실측). 지금까지 집계하며 버리고 있었을 뿐이라 **추가 네이버
+    API 콜이 0**이다. 같은 파서·같은 grain 키 함수를 쓴다(`naver_sa_ad_fetcher._grain_key`).
+
+    ★**측정 전용이다** — 이 테이블을 읽고 광고를 조작하는 경로는 없다(계약 금지선). 실행층
+    배선은 별도 결정 사안이고, 자동운영 재개와도 무관하다.
+    ★대조 계약: 같은 날 이 테이블의 합계는 `naver_ad_daily`의 같은 날 합계와 **일치해야 한다**
+    (`ad_creative_daily_sync.reconcile`). 안 맞으면 둘 중 하나가 틀린 것이고, 그건 즉시 알아야 한다.
+    """
+
+    __tablename__ = "naver_ad_creative_daily"
+    __table_args__ = (
+        UniqueConstraint("ad_date", "ad_id", name="uq_naver_ad_creative_daily"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ad_date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)
+    ad_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)  # nad-...
+    # 소재가 그룹을 옮기면 하루 안에서도 달라질 수 있다 — 그날 관측된 값을 담는다(참고용).
+    campaign_id: Mapped[str] = mapped_column(String(50), nullable=False, default="", index=True)
+    campaign_type: Mapped[str] = mapped_column(String(20), nullable=False, default="")
+    adgroup_id: Mapped[str] = mapped_column(String(50), nullable=False, default="", index=True)
+    imp: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    clk: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cost: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 원, VAT 별도
+    rank_sum: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # avg_rank = rank_sum/imp
+    conv_direct_cnt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    conv_indirect_cnt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    conv_direct_amt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    conv_indirect_amt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # 장바구니는 `naver_ad_daily`와 같은 규율 — 매출 합계에 절대 안 섞인다(선행지표 재료).
+    cart_direct_cnt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cart_indirect_cnt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cart_direct_amt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cart_indirect_amt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 

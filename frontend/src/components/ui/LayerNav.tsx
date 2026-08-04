@@ -10,6 +10,9 @@ const LINKS = [
   { to: "/naver-ad/console", label: "최적화 콘솔" },
   // 「수정 사항」 — 그날 광고에 일어난 수정 전건 + 누가 했나(두 원천 합본). 라이브 editTm을
   // 손으로 대조하던 일을 대체한다.
+  // 「소재 성과」 — 소재별 ROAS를 BEP와 나란히. 캠페인 평균이 적자 소재를 가리던
+  // 문제를 없앤다(D-NAO-140).
+  { to: "/naver-ad/creatives", label: "소재 성과" },
   { to: "/naver-ad/modifications", label: "수정 사항" },
   { to: "/naver-ad/raw", label: "원자료" },
 ];

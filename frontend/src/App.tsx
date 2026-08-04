@@ -10,6 +10,7 @@ import Settings from "./pages/Settings";
 import AdReport from "./pages/AdReport";
 import CommandCenter from "./pages/CommandCenter";
 import CoupangOps from "./pages/CoupangOps";
+import CoupangAdChanges from "./pages/CoupangAdChanges";
 import RocketRecon from "./pages/RocketRecon";
 import NaverOps from "./pages/NaverOps";
 import ProductConnectionMap from "./pages/ProductConnectionMap";
@@ -19,6 +20,7 @@ import NaverAdDiagnosisBoard from "./pages/NaverAdDiagnosisBoard";
 import NaverAdOptimizationConsole from "./pages/NaverAdOptimizationConsole";
 import NaverAdRawExplorer from "./pages/NaverAdRawExplorer";
 import NaverAdPerformance from "./pages/NaverAdPerformance";
+import NaverAdCreatives from "./pages/NaverAdCreatives";
 import NaverAdModifications from "./pages/NaverAdModifications";
 
 export default function App() {
@@ -29,6 +31,7 @@ export default function App() {
           <Route index element={<Dashboard />} />
           <Route path="command-center" element={<CommandCenter />} />
           <Route path="coupang-ops" element={<CoupangOps />} />
+          <Route path="coupang-ad-changes" element={<CoupangAdChanges />} />
           <Route path="rocket-recon" element={<RocketRecon />} />
           <Route path="naver-ops" element={<NaverOps />} />
           <Route path="orders" element={<Orders />} />
@@ -43,6 +46,7 @@ export default function App() {
           <Route path="naver-ad/report" element={<NaverAdReport />} />
           <Route path="naver-ad/diagnosis" element={<NaverAdDiagnosisBoard />} />
           <Route path="naver-ad/console" element={<NaverAdOptimizationConsole />} />
+          <Route path="naver-ad/creatives" element={<NaverAdCreatives />} />
           <Route path="naver-ad/modifications" element={<NaverAdModifications />} />
           <Route path="naver-ad/raw" element={<NaverAdRawExplorer />} />
         </Route>

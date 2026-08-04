@@ -185,16 +185,27 @@ def _to_dt(raw) -> datetime | None:
 
 
 def _product_context(db: Session, ad_ids: set[str]) -> tuple[dict, dict]:
-    """(ad_id→상품, 상품→{ad_id: editTm datetime}). 두 번의 쿼리로 끝낸다(N+1 방지)."""
+    """(ad_id→상품, 상품→{ad_id: editTm datetime}). 두 번의 쿼리로 끝낸다(N+1 방지).
+
+    ★같은 `ad_id`가 여러 행에 존재할 수 있다(unique 키가 (adgroup_id, mall_product_id)뿐이라
+      소재가 그룹·상품을 옮기면 옛 행이 남는다). **`synced_at`이 가장 최근인 행 하나만
+      채택한다** — `NaverAdgroupProduct` docstring이 못 박은 규칙이자 실행 경로
+      (`bid_ceiling_calculator`)·조회 화면(`creative_scorecard._product_map`)이 쓰는 규칙이다.
+      DB 반환 순서에 맡기면 판별기만 다른 행을 보게 되고, 그러면 **측정과 제어가 서로 다른
+      상품을 가리킨다** — 옛 상품 쪽에 형제가 하나뿐이면 같은 사건이 FEED에서 UNKNOWN으로
+      통째로 뒤집힌다(회귀 테스트로 고정).
+    """
+    order = (NaverAdgroupProduct.synced_at.desc(), NaverAdgroupProduct.id.desc())
     product_of: dict[str, str] = {}
     if ad_ids:
         for ad_id, pid in (
             db.query(NaverAdgroupProduct.ad_id, NaverAdgroupProduct.mall_product_id)
             .filter(NaverAdgroupProduct.ad_id.in_(ad_ids))
+            .order_by(*order)
             .all()
         ):
             if ad_id and pid:
-                product_of.setdefault(ad_id, pid)
+                product_of.setdefault(ad_id, pid)  # 최신 관측이 먼저 온다
 
     siblings: dict[str, dict[str, datetime | None]] = {}
     products = set(product_of.values())
@@ -206,12 +217,15 @@ def _product_context(db: Session, ad_ids: set[str]) -> tuple[dict, dict]:
                 NaverAdgroupProduct.ad_edit_tm,
             )
             .filter(NaverAdgroupProduct.mall_product_id.in_(products))
+            .order_by(*order)
             .all()
         ):
             # ★같은 소재가 여러 행이면 ad_id로 접는다(그룹 이동 잔여 행). 안 접으면 total이
             #   부풀어 moved<total이 되고 **피드가 실조작으로 오분류**된다.
+            #   접을 때도 최신 관측을 남긴다 — 옛 행의 editTm을 집으면 자기 관측이 창 밖으로
+            #   보여 멀쩡한 사건이 stale(UNKNOWN)로 떨어진다.
             if ad_id:
-                siblings.setdefault(pid, {})[ad_id] = _to_dt(edit_tm)
+                siblings.setdefault(pid, {}).setdefault(ad_id, _to_dt(edit_tm))
     return product_of, siblings
 
 

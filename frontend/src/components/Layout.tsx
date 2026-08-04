@@ -72,6 +72,8 @@ export function buildPipelineHealthBanner(
 // 대시보드 하위 채널별 운영 패널 (접이식)
 const DASHBOARD_CHILDREN = [
   { to: "/coupang-ops", label: "쿠팡 운영", icon: "🔧" },
+  // 쿠팡 광고 설정 변경 이력(트랙 coupang-ad-change-log). 조회 전용 — 여기서 광고를 만지지 않는다.
+  { to: "/coupang-ad-changes", label: "쿠팡 광고 수정", icon: "📝" },
   { to: "/naver-ops", label: "스마트스토어", icon: "🛒" },
 ];
 
