@@ -7,7 +7,7 @@ import hashlib
 import logging
 import time
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 
 import bcrypt
 import requests
@@ -16,6 +16,32 @@ from app.clients.base import BaseChannelClient, RawOrder
 from app.config import NaverAccountConfig
 
 log = logging.getLogger(__name__)
+
+
+def naver_line_revenue(po: dict) -> Decimal:
+    """네이버 상품주문 1건의 **우리가 받는 상품 매출**. 수집·백필이 같은 함수를 쓴다.
+
+    ★공식(2026-08-04, 정산 원장 전수 대조로 확정):
+        remainProductAmount − remainSellerBurdenDiscountAmount
+      성숙 2개 창에서 **2,505건 100.00%** 정산 일치. 종전 `totalPaymentAmount`는 99.24%.
+
+    왜 이 두 필드인가 — 종전 공식이 틀리는 방식이 두 가지였다:
+      ① **부분취소**: 2개 중 1개가 취소돼도 `totalPaymentAmount`는 원 주문 금액 그대로다.
+         `remain*`만 갱신된다 → 취소된 수량만큼 매출이 과대계상된다.
+      ② **플랫폼 부담 할인**: `totalPaymentAmount`는 **고객이 낸 돈**이다. 네이버가 부담하는
+         쿠폰·할인은 고객이 덜 내지만 그 차액을 네이버가 우리에게 지급하므로, 그만큼
+         매출이 과소계상된다(실측 4,900원짜리 다수). 우리가 실제로 못 받는 것은
+         **판매자 부담 할인**뿐이라, 그것만 뺀다.
+
+    즉 "고객이 낸 돈"이 아니라 "우리가 받는 돈"을 매출로 삼는다 — 정산이 그 축이다.
+    """
+    remain = Decimal(str(po.get("remainProductAmount") or 0))
+    seller_burden = Decimal(str(po.get("remainSellerBurdenDiscountAmount") or 0))
+    if remain > 0:
+        return remain - seller_burden
+    # remain 계열이 없는 응답(구 스키마·부분 응답)은 종전 값으로 폴백한다 — 0으로 떨구면
+    # 매출이 통째로 사라져 훨씬 위험하다.
+    return Decimal(str(po.get("totalPaymentAmount") or 0))
 
 NAVER_API_BASE = "https://api.commerce.naver.com/external"
 MAX_RETRIES = 3
@@ -236,7 +262,15 @@ class NaverClient(BaseChannelClient):
                 product_order_id = str(po.get("productOrderId") or "")
                 order_id = str(order_info.get("orderId") or product_order_id or "")
                 product_id = str(po.get("productId") or "")
-                shipping_fee = Decimal(str(po.get("deliveryFeeAmount", 0)))
+                # ★제주·도서산간 추가배송비 포함(2026-08-04): 정산 DELIVERY 원장 행은
+                #   `deliveryFeeAmount + sectionDeliveryFee`와 일치한다(성숙 2개 창 전수 대조).
+                #   종전엔 deliveryFeeAmount만 읽어, 무료배송(deliveryFeeAmount=0)인데 제주라
+                #   sectionDeliveryFee만 붙는 건의 배송수입이 통째로 빠졌다(05월 이후 29건).
+                #   금액은 상수로 박지 않고 스마트스토어가 주는 값을 그대로 쓴다(Jino 지시) —
+                #   스토어 설정이 바뀌면 코드 수정 없이 따라간다.
+                shipping_fee = Decimal(str(po.get("deliveryFeeAmount", 0))) + Decimal(
+                    str(po.get("sectionDeliveryFee", 0) or 0)
+                )
 
                 # productOrderId 단위로 1행씩 내보낸다. 같은 (주문, 상품)이 여러 productOrderId로
                 # 분할돼도(부분취소/부분배송) 각각 보존 → 수량·매출 누락 방지(트랙 N1·D-6).
@@ -257,6 +291,19 @@ class NaverClient(BaseChannelClient):
                     if any(k in po for k in _COMM_KEYS)
                     else None
                 )
+                # ★부분취소 보정(2026-08-04, 정산 전수 대조로 확정): 주문 API의 수수료 필드는
+                #   부분취소가 나도 **원 주문 기준으로 남는다**(remain 대응 필드가 없다).
+                #   그대로 두면 매출만 remain으로 줄고 수수료는 안 줄어 수수료율이 2배로 보인다.
+                #   → 남은 금액 비율로 축소한다. 절사(ROUND_DOWN)인 것은 네이버 실측 관례와
+                #   같다(배송비 수수료 1,652건 전수에서 절사 99.5% vs 반올림 92.1%).
+                #   라이브 검증: 부분취소 2건 모두 정산과 원 단위 일치(1,477→738 / 1,185→592).
+                if commission is not None:
+                    _total_prod = Decimal(str(po.get("totalProductAmount") or 0))
+                    _remain_prod = Decimal(str(po.get("remainProductAmount") or 0))
+                    if _total_prod > 0 and _remain_prod != _total_prod:
+                        commission = (commission * _remain_prod / _total_prod).quantize(
+                            Decimal("1"), rounding=ROUND_DOWN
+                        )
 
                 raw = RawOrder(
                     order_number=order_id,
@@ -264,7 +311,7 @@ class NaverClient(BaseChannelClient):
                     platform_order_line_id=product_order_id,
                     platform_product_name=po.get("productName", ""),
                     quantity=int(po.get("quantity", 1)),
-                    selling_price=Decimal(str(po.get("totalPaymentAmount", 0))),
+                    selling_price=naver_line_revenue(po),
                     shipping_cost=shipping_fee if shipping_fee else None,
                     order_date=order_info.get("paymentDate", date_from.isoformat()),
                     status=self._map_status(po.get("productOrderStatus", "")),

@@ -72,6 +72,14 @@ SHIPPING_COST_BY_METHOD = {
 #         우리 케이스가 아니다 — 숫자가 공교롭게 2,500이라 헷갈리기 쉽다.)
 # 일반배송: ⚠️여전히 **미확정 추정치**(Jino 2026-08-03: "아마 우리도 2500원을 지급할꺼야").
 #        한진 청구서를 받으면 이 한 줄만 고치면 된다.
+# ── 제주·도서산간 할증: 우리가 택배사에 더 내는 금액(건당) ──
+# Jino 확정(2026-08-04): "한진택배에는 기본값에 3000원 추가".
+# ★적용 범위 근거: 라이브 51건(sectionDeliveryFee>0) 전부 deliveryAttributeType이 TODAY/NORMAL
+#   = 일반배송(한진 계열)이고 **N배송 제주는 0건**이다. 그래서 N배송 할증은 근거가 없어
+#   더하지 않는다 — 만약 N배송 제주가 생기면 품고 요율표로 별도 확인할 것(그 전까지는
+#   수입만 잡히므로 그 건은 이익이 과대해진다. 표본이 생기면 이 주석을 근거로 재검토).
+SECTION_SURCHARGE_PAID = Decimal("3000")
+
 RETURN_PICKUP_COST_NORMAL = Decimal("2500")     # ⚠️추정 — 한진 청구서 미확보
 RETURN_PICKUP_COST_NBAESONG = Decimal("3245")   # 품고 요율표 2 (2,050+900)×1.1
 RETURN_PICKUP_COST_BY_METHOD = {
@@ -127,9 +135,31 @@ def shipping_method_of(delivery_attribute_type: Any) -> str:
     return METHOD_NBAESONG if delivery_attribute_type == NBAESONG_ATTR else METHOD_NORMAL
 
 
-def shipping_cost_paid_of(method: str) -> Decimal:
-    """배송방식 → 우리가 지불하는 건당 배송비(현재 단가표)."""
-    return SHIPPING_COST_BY_METHOD.get(method, SHIPPING_COST_NORMAL)
+def shipping_cost_paid_of(method: str, *, section: bool = False) -> Decimal:
+    """배송방식 → 우리가 지불하는 건당 배송비(현재 단가표). section=제주·도서산간 할증 여부.
+
+    ★할증을 **비용에도** 반영하는 이유(2026-08-04): 같은 커밋에서 제주 추가배송비를 매출로
+      인식하기 시작했다. 수입만 넣고 비용을 빼면 제주 배송이 이익 나는 일로 보인다 —
+      반품 배송비에서 이미 겪은 함정과 같은 구조다(수입·비용은 짝으로 넣는다).
+    """
+    base = SHIPPING_COST_BY_METHOD.get(method, SHIPPING_COST_NORMAL)
+    return base + SECTION_SURCHARGE_PAID if section else base
+
+
+def section_delivery_fee_of(po: dict | None) -> Decimal:
+    """상품주문의 제주·도서산간 추가배송비(고객 수취분). 없으면 0.
+
+    ★상수로 박지 않고 스마트스토어가 준 값을 그대로 읽는다(Jino 지시 2026-08-04).
+      실측은 05월 이후 51건 전부 3,000원이지만, 스토어 설정이 바뀌면 코드 수정 없이 따라가야
+      한다. 이 값이 곧 정산 DELIVERY 원장의 구성요소다(`deliveryFeeAmount + sectionDeliveryFee`
+      = 정산 DELIVERY, 성숙 2개 창 전수 대조로 확인).
+    """
+    if not po:
+        return Decimal("0")
+    try:
+        return Decimal(str(po.get("sectionDeliveryFee") or 0))
+    except (ValueError, TypeError, ArithmeticError):
+        return Decimal("0")
 
 
 def delivery_fields(raw: Any) -> dict | None:
@@ -150,7 +180,9 @@ def delivery_fields(raw: Any) -> dict | None:
         "delivery_policy_type": _str_or_none(po.get("deliveryPolicyType")),
         "shipping_fee_type": _str_or_none(po.get("shippingFeeType")),
         "logistics_company_id": _str_or_none(logi),
-        "shipping_cost_paid": shipping_cost_paid_of(method),
+        "shipping_cost_paid": shipping_cost_paid_of(
+            method, section=section_delivery_fee_of(po) > 0
+        ),
     }
 
 
@@ -294,7 +326,10 @@ def order_shipping_cost(order_row: Any = None) -> Decimal:
     po = product_order_of(raw)
     if po is None:
         return SHIPPING_COST_NORMAL
-    return shipping_cost_paid_of(shipping_method_of(po.get("deliveryAttributeType")))
+    return shipping_cost_paid_of(
+        shipping_method_of(po.get("deliveryAttributeType")),
+        section=section_delivery_fee_of(po) > 0,
+    )
 
 
 def net_shipping_burden(paid: Any, collected: Any) -> Decimal:
