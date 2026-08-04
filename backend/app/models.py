@@ -795,6 +795,16 @@ class CoupangAdChangeLog(Base):
     occurred_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
     time_basis: Mapped[str] = mapped_column(String(10), nullable=False, default="detected")  # src/detected
     detected_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    # ── 슬라이스2: 두 번째 원천(쿠팡 변경 이력 API) ──────────────────────────
+    # 'snapshot' = 우리 스냅샷 diff / 'coupang' = POST tetris-api/change-history/events-simple.
+    # ★겹치는 축(예산·목표ROAS·On/Off)에선 **coupang이 이긴다** — 쿠팡은 전/후 값과 정확한
+    #   실행 시각을 주지만 우리 스냅샷은 updatedAt으로 시각만 안다.
+    source: Mapped[str] = mapped_column(String(10), nullable=False, default="snapshot")
+    # 쿠팡 executionId(UUID). 같은 회차를 두 번 돌려도 행이 안 늘게 하는 자연 키.
+    external_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    # 구조화된 부가정보 — 소재 변경의 옵션ID 목록(added/removed), VIID 개수 등.
+    # ★before/after 두 칸으로는 "어떤 옵션이 붙었나"를 담을 수 없어서 따로 둔다.
+    detail_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 
 class CoupangWingCookie(Base):

@@ -188,12 +188,17 @@ class TestContentDiff:
 class TestTimeBasis:
     """③ 발생 시각을 아는 척하지 않는다."""
 
-    def test_updatedAt이_있으면_src(self, db):
+    def test_updatedAt이_있으면_src이고_초로_절삭된다(self, db):
+        """★밀리초를 버리는 건 의도다(슬라이스2). 쿠팡 change-history의 executionTime은
+        초까지라(01:51:21 vs 01:51:21.372) 절삭하지 않으면 같은 사건이 영영 안 겹쳐
+        화면에 두 줄로 뜬다."""
         _seed(db, [_campaign(budget=70000)])
         after = _campaign(budget=80000, updated=UPD)
         mod.ingest(db, ACC, [_thin(after)], [after], detected_at=T2)
         row = _logs(db, op=mod.OP_FIELD)[0]
-        assert row.time_basis == "src" and row.occurred_at == UPD_DT
+        assert row.time_basis == "src"
+        assert row.occurred_at == UPD_DT.replace(microsecond=0)
+        assert row.source == mod.SOURCE_SNAPSHOT
 
     def test_updatedAt이_없으면_detected(self, db):
         _seed(db, [_campaign(budget=70000, updated=None)])
