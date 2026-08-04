@@ -59,6 +59,7 @@ class Channel(Base):
     )
     ad_costs: Mapped[list[AdCost]] = relationship(back_populates="channel")
     manual_revenues: Mapped[list[ManualRevenue]] = relationship(back_populates="channel")
+    monthly_fixed_costs: Mapped[list[MonthlyFixedCost]] = relationship(back_populates="channel")
 
 
 # ──────────────────────────────────────────────
@@ -459,6 +460,38 @@ class ManualRevenue(Base):
 
 
 # ──────────────────────────────────────────────
+# 월 고정비 (주문 축에 못 붙는 3PL 비용)
+# ──────────────────────────────────────────────
+class MonthlyFixedCost(Base):
+    """채널별·월별·항목별 고정비 — 3PL 정산서의 입고비·보관료·항공도선료·합포장비.
+
+    ★왜 별도 테이블인가: 이 비용들은 **재고·입고 기반이라 주문 축에 붙지 않는다**.
+      손익 엔진은 "주문 1건 → 매출·수수료·배송비·원가"로 도는데 보관료·입고비는 그 축에
+      자리가 없어서 여태 **아무 데도 안 잡히고 통째로 누락**돼 있었다(월 ~38만원).
+    ★그레인이 월×항목인 이유(Jino 2026-08-04): 원천이 월 단위 정산서이고, 항목을 합쳐
+      한 줄로 넣으면 "보관료만 급증" 같은 관찰을 영원히 못 한다. 소비할 땐 일할 배분한다.
+    """
+
+    __tablename__ = "monthly_fixed_cost"
+    __table_args__ = (
+        UniqueConstraint("channel_id", "year_month", "item", name="uq_monthly_fixed_cost"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id"), nullable=False)
+    year_month: Mapped[str] = mapped_column(String(7), nullable=False)  # "2026-07"
+    item: Mapped[str] = mapped_column(String(30), nullable=False)       # FIXED_COST_ITEMS 중 하나
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    memo: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+    channel: Mapped[Channel] = relationship(back_populates="monthly_fixed_costs")
+
+
+# ──────────────────────────────────────────────
 # 쿠팡 광고 리포트 (XLSX 업로드 상세 지표)
 # ──────────────────────────────────────────────
 class CoupangAdReport(Base):
@@ -795,16 +828,6 @@ class CoupangAdChangeLog(Base):
     occurred_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
     time_basis: Mapped[str] = mapped_column(String(10), nullable=False, default="detected")  # src/detected
     detected_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
-    # ── 슬라이스2: 두 번째 원천(쿠팡 변경 이력 API) ──────────────────────────
-    # 'snapshot' = 우리 스냅샷 diff / 'coupang' = POST tetris-api/change-history/events-simple.
-    # ★겹치는 축(예산·목표ROAS·On/Off)에선 **coupang이 이긴다** — 쿠팡은 전/후 값과 정확한
-    #   실행 시각을 주지만 우리 스냅샷은 updatedAt으로 시각만 안다.
-    source: Mapped[str] = mapped_column(String(10), nullable=False, default="snapshot")
-    # 쿠팡 executionId(UUID). 같은 회차를 두 번 돌려도 행이 안 늘게 하는 자연 키.
-    external_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
-    # 구조화된 부가정보 — 소재 변경의 옵션ID 목록(added/removed), VIID 개수 등.
-    # ★before/after 두 칸으로는 "어떤 옵션이 붙었나"를 담을 수 없어서 따로 둔다.
-    detail_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 
 class CoupangWingCookie(Base):
