@@ -149,6 +149,9 @@ Jino: "Sellc에 우리가 광고 수정한 내역에 대해서 네이버 광고 
 
 ## 11. 새 세션 시작 프롬프트
 
+> ⚠️**이 파일이 최신이 아니다.** Jino 지시(2026-08-04 19:23)로 **다음 세션 1순위는 로켓 1P
+> 원가 매핑 4건**이다. 이 파일은 오늘 완료한 쿠팡 광고 이력 작업의 상세 기록으로만 참조할 것.
+
 ```
-.claude/memory/HANDOFF_coupang-ad-change-log_20260804.md 읽고 §9 남은 작업 이어서
+.claude/memory/HANDOFF_next-rocket-1p-cost-mapping_20260804.md 읽고 §1 로켓 1P 원가 매핑 4건부터 진행
 ```
