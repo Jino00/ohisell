@@ -1,6 +1,6 @@
 # 트랙: 쿠팡 광고 설정 변경 내역 (「수정 사항」 쿠팡판)
 
-> 생성 2026-08-04 · 상태: **정찰 완료 · 계약 승인 대기**
+> 생성 2026-08-04 · 상태: **구현·배포 완료 · 최종 합격 증거(실변경 1건) 대기**
 > 대상: 오픽스(3P/RG, WING) + 오하이테크(1P 로켓, SUPPLIERHUB)
 > 모델: 네이버 「수정 사항」 화면(D-NAO-135) — 날짜별 변경 이력 조회
 
@@ -76,12 +76,44 @@ Jino가 캠페인 하나를 On/Off. 스냅샷을 뜨니 `[매.최] 메츨 싱`(i
   선행: `python3 tools/ohitech_ad_fetcher.py chrome` 후 Jino 로그인.
 - SSO 자동 재발급 내장(keycloak, 비번 없음). **headless는 keycloak이 막는다 — headful 필수.**
 
+### D-CAC-5 자기 크론을 두지 않는다 — 「광고비 갱신」 회차에 얹는다 (2026-08-04)
+Jino: "이거 매 시간 화면에 크롬이 뜨는거 아니야? 성가신데..."
+
+`coupang_auth.py` 실측: **xauth Akamai가 headless를 Access Denied로 막는다** → 창이 반드시 뜬다.
+그래서 2026-07-27에 이미 "창을 스스로 띄우지 않고 버튼 누를 때만 뜬다"로 정리된 구조다
+(`ohitech_ad_fetcher.cmd_poll` docstring). 여기에 콜 몇 개를 얹으면 **창이 뜨는 횟수가 0회 늘어난다**.
+
+주기가 느려도 손실이 거의 없다 — `updatedAt`이 캠페인·광고그룹 **양쪽에** 있어서 사흘 만에 떠도
+발생 시각은 초 단위로 복원된다. 잃는 건 하나: 같은 필드를 두 스냅샷 사이에 두 번 바꾸면
+중간값이 뭉친다(100,000→50,000→80,000이 "100,000→80,000"으로 보인다).
+
+## 구현 (2026-08-04, main `fcbc683`·프론트 커밋, prod 배포 완료)
+
+| 층 | 파일 |
+|---|---|
+| 마이그 | `c8d1a4f97b26` — `coupang_ad_entity_snapshot` · `coupang_ad_change_log` |
+| 서비스 | `backend/app/services/coupang/ad_settings_diff.py` (A축/B축 분리·허용목록·idempotent) |
+| 라우터 | `coupang_ops.py` — `POST /ad-settings/ingest`(토큰) · `GET /ad-changes`(KST 창) |
+| 수집 | `tools/ad_settings_collect.py`(공용) → 페처 2종에 얹음 · 설치 목록에 공용 모듈 등록 |
+| 화면 | `frontend/src/pages/CoupangAdChanges.tsx` — `/coupang-ad-changes` |
+| 테스트 | 37건(`test_coupang_ad_settings_diff.py` 22 + `test_coupang_ad_changes_router.py` 15) |
+
+**라이브 검증(2026-08-04 11:4x, prod)**
+- 1회차: 전량 525건·활성 16건 수집 → `changes: 541`(캠페인 525 + 광고그룹 16의 created).
+- ★그 541건이 **오늘 화면을 어지럽히지 않았다** — 쿠팡 `createdAt`에 귀속돼 진짜 생성일로 흩어졌다
+  (오늘 0건, 최근 14일 12건). 감지일에 귀속했다면 525줄이 오늘 하루에 쏟아졌다.
+- 2회차(2분 뒤): **`changes: 0`** — 실데이터 525건에서 오탐 없음.
+- 화면: `/coupang-ad-changes` 30일 탭에 캠페인·광고그룹 짝이 KST 시각으로 정상 렌더.
+- 허용목록 밖 22종은 전부 식별자·UI·파생(`adNodeId`·`id`·`depth`·`descriptor`·`groupId`…) — 놓친 설정 없음.
+
 ## 미결
 
-- [ ] 계약 승인 (아래)
-- [ ] 키워드 그레인 정찰 (캠페인 → 키워드 탭)
+- [ ] **최종 합격 증거**: Jino가 광고센터에서 실제로 한 번 바꾸면 전/후 값이 뜨는지.
+      (10:51 변경은 11:47 기준선보다 **앞서** 흡수됐다 — 새 변경이 필요하다.)
+- [ ] 키워드 그레인 정찰 (캠페인 → 키워드 탭) — 1차 스코프 밖
 - [ ] 오하이테크 SSO 상시 실패 — keycloak 세션까지 만료돼 Jino 수동 로그인이 필요했다.
-      (기존 인계의 "①SSO 상시 실패 해소" 미결과 같은 건)
+      (기존 인계의 "①SSO 상시 실패 해소" 미결과 같은 건. 단 페처 자체는 Keychain 자동 로그인으로 복구됨)
+- [ ] codex PR 경계 리뷰 (쿼터 리셋 08-09)
 
 ## 계약 초안 (승인 대기)
 
