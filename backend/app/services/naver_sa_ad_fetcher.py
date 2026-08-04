@@ -777,6 +777,10 @@ def get_keywords(adgroup_id: str) -> list[dict]:
         "user_lock": bool(k.get("userLock", False)),
         "bid_amt": k.get("bidAmt"),
         "qi_grade": (k.get("nccQi") or {}).get("qiGrade"),
+        # D-NAO-147: 키워드도 editTm을 준다(라이브 실측 41/41 = 100%, 표본 전부 2025-12-29 =
+        # 캠페인·그룹과 마찬가지로 피드 재적용 잡음 없음). 외부 입찰 변경 30일 342건·신규
+        # 95건의 **발생 시각**이 여기서 온다 — 추가 GET 0.
+        "edit_tm": k.get("editTm"),
     } for k in resp.json()]
 
 

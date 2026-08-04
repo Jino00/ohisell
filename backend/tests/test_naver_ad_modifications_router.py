@@ -66,11 +66,12 @@ def _bid(amount: int) -> str:
 
 def _seed_change_log(db, *, action="update_bid", at=datetime(2026, 7, 30, 10, 12, 9),
                      before=_bid(2730), after=_bid(2330), campaign_id="cmp-1",
-                     entity_type="ad", entity_id="nad-1", dry_run=False, rationale=None):
+                     entity_type="ad", entity_id="nad-1", dry_run=False, rationale=None,
+                     occurred_at=None):
     row = NaverChangeLog(
         entity_type=entity_type, entity_id=entity_id, campaign_id=campaign_id,
         action=action, before_value=before, after_value=after,
-        rationale=rationale, dry_run=dry_run, changed_at=at,
+        rationale=rationale, dry_run=dry_run, changed_at=at, occurred_at=occurred_at,
     )
     db.add(row)
     db.commit()
@@ -421,3 +422,110 @@ def test_pagination_slices_merged_list(client, db):
 )
 def test_date_validation_matches_change_log_rules(client, params):
     assert client.get("/api/naver/ad/modifications", params=params).status_code == 422
+
+
+# ── D-NAO-147: 변경 이력에도 발생 시각 + 원천 간 중복 접기 ──────────────
+# 배경(라이브 실측 2026-08-04): 10:49:25에 꺼진 광고그룹이 change_log에 18:33:51로 남아
+#   화면이 "감지 시각 — 실제로 언제 손댔는지는 기록이 없습니다"라고 말했다. 같은 순간
+#   naver_entity.edit_tm은 10:49를 갖고 있었다.
+OCCURRED = datetime(2026, 7, 30, 10, 49, 25)   # 네이버 editTm이 말하는 실제 발생 시각
+DETECTED_NEXT_MORNING = datetime(2026, 7, 31, 7, 35, 2)  # 우리가 알아챈 시각(다음날 아침)
+
+
+def test_external_change_log_uses_occurred_at_as_time(client, db):
+    """occurred_at이 있으면 그것이 귀속 시각이고 time_basis='occurred'다."""
+    _seed_change_log(db, action="external_status_change", entity_type="adgroup",
+                     entity_id="grp-1", before=json.dumps({"userLock": False}),
+                     after=json.dumps({"userLock": True}),
+                     at=DETECTED_NEXT_MORNING, occurred_at=OCCURRED)
+
+    rows = _get(client)["rows"]
+    assert len(rows) == 1
+    assert rows[0]["occurred_at"].startswith("2026-07-30T10:49:25")
+    assert rows[0]["time_basis"] == "occurred"
+
+
+def test_external_change_log_detected_next_day_still_shows_on_occurrence_date(client, db):
+    """★핵심: 발생일을 고른 사용자에게 **다음날 감지된** 행이 보여야 한다.
+
+    changed_at으로만 거르면 07-30을 골랐을 때 이 행이 통째로 사라진다 — 정확히 이 화면이
+    없애려는 문제(agency_op 쪽에서 이미 한 번 겪은 함정)."""
+    _seed_change_log(db, action="external_bid_change", entity_type="adgroup",
+                     entity_id="grp-1", before=json.dumps({"bidAmt": 300}),
+                     after=json.dumps({"bidAmt": 600}),
+                     at=DETECTED_NEXT_MORNING, occurred_at=OCCURRED)
+
+    assert _get(client)["total"] == 1  # 조회창은 07-30 하루
+
+
+def test_change_log_without_occurred_at_keeps_detected_basis(client, db):
+    """occurred_at이 없으면 종전 그대로 — 감지 시각 + '모른다'는 표시(하위호환)."""
+    _seed_change_log(db, action="external_bid_change", entity_type="adgroup",
+                     entity_id="grp-1", before=json.dumps({"bidAmt": 300}),
+                     after=json.dumps({"bidAmt": 600}),
+                     at=datetime(2026, 7, 30, 7, 35, 2))
+
+    rows = _get(client)["rows"]
+    assert rows[0]["time_basis"] == "detected"
+
+
+def test_same_event_in_both_sources_collapses_to_one_row(client, db):
+    """★같은 사건이 두 원천에 들어와도 한 줄이다.
+
+    양쪽이 같은 editTm을 시각으로 쓰게 되면서 '같은 초·같은 대상·같은 축'의 두 줄이
+    나란히 뜨게 됐다 — 읽는 사람에겐 "10:49에 두 번 바뀜"이다. 접은 개수는 dedup이 말한다."""
+    _seed_change_log(db, action="external_bid_change", entity_type="adgroup",
+                     entity_id="grp-1", before=json.dumps({"bidAmt": 300}),
+                     after=json.dumps({"bidAmt": 600}),
+                     at=DETECTED_NEXT_MORNING, occurred_at=OCCURRED)
+    _seed_agency_op(db, op_date=date(2026, 7, 31), occurred_at=OCCURRED,
+                    op_type="bid_change", entity_type="adgroup", entity_id="grp-1",
+                    before="300", after="600")
+
+    body = _get(client)
+    assert body["total"] == 1
+    assert body["dedup"]["merged_agency_op"] == 1
+    assert body["rows"][0]["source"] == "change_log"  # 남는 쪽은 관측값이 더 정확한 change_log
+
+
+def test_different_second_is_not_collapsed(client, db):
+    """1초라도 다르면 접지 않는다 — 다른 사건일 가능성을 지우지 않는다(오접 > 미탐)."""
+    _seed_change_log(db, action="external_bid_change", entity_type="adgroup",
+                     entity_id="grp-1", before=json.dumps({"bidAmt": 300}),
+                     after=json.dumps({"bidAmt": 600}),
+                     at=DETECTED_NEXT_MORNING, occurred_at=OCCURRED)
+    _seed_agency_op(db, op_date=date(2026, 7, 31),
+                    occurred_at=OCCURRED.replace(second=26),
+                    op_type="bid_change", entity_type="adgroup", entity_id="grp-1",
+                    before="300", after="600")
+
+    body = _get(client)
+    assert body["total"] == 2
+    assert body["dedup"]["merged_agency_op"] == 0
+
+
+def test_different_axis_is_not_collapsed(client, db):
+    """같은 대상·같은 초라도 축이 다르면 별개 사건이다(입찰과 On/Off를 뭉치지 않는다)."""
+    _seed_change_log(db, action="external_bid_change", entity_type="adgroup",
+                     entity_id="grp-1", before=json.dumps({"bidAmt": 300}),
+                     after=json.dumps({"bidAmt": 600}),
+                     at=DETECTED_NEXT_MORNING, occurred_at=OCCURRED)
+    _seed_agency_op(db, op_date=date(2026, 7, 31), occurred_at=OCCURRED,
+                    op_type="status_flip", entity_type="adgroup", entity_id="grp-1",
+                    before="on", after="off")
+
+    assert _get(client)["total"] == 2
+
+
+def test_agency_op_without_occurred_at_is_never_collapsed(client, db):
+    """시각을 모르는 agency_op 행은 접기 대상이 아니다 — 같은 사건인지 알 수 없기 때문."""
+    _seed_change_log(db, action="external_bid_change", entity_type="adgroup",
+                     entity_id="grp-1", before=json.dumps({"bidAmt": 300}),
+                     after=json.dumps({"bidAmt": 600}),
+                     at=DETECTED_NEXT_MORNING, occurred_at=OCCURRED)
+    _seed_agency_op(db, op_date=DAY, occurred_at=None, op_type="bid_change",
+                    entity_type="adgroup", entity_id="grp-1", before="300", after="600")
+
+    body = _get(client)
+    assert body["total"] == 2
+    assert body["dedup"]["merged_agency_op"] == 0

@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime  # noqa: F401 — external_occurred_at 반환 타입
 
 from sqlalchemy.orm import Session
 
 from app.models import NaverChangeLog, NaverEntity
+from app.services.naver_ad.ad_external_change import parse_edit_tm  # D-NAO-147 editTm 파서(전 grain 공유)
 from app.services.naver_sa_ad_fetcher import get_adgroups, get_campaigns_full, get_keywords
 from app.utils.kst import kst_now
 
@@ -127,6 +129,30 @@ def _norm_bid(v) -> int | None:
         return None
 
 
+def external_occurred_at(entity: NaverEntity, edit_tm_raw, now) -> "datetime | None":
+    """이 외부 변경이 **실제로 일어난** 시각(KST). 창 밖·부재는 None (D-NAO-147).
+
+    창 = (직전 관측, 이번 관측] = `(entity.synced_at, now]`. bm_diff의 `_occurred_at`과 **같은
+    규약**이다 — 다른 건 앵커를 어디서 얻느냐뿐이다(저기는 스냅샷 두 장, 여기는 엔티티 행 하나).
+
+    ★왜 창이 필요한가: `editTm`은 마지막 수정만 남긴다. 값이 변했는데 editTm이 직전 관측보다
+    과거라면 그 editTm은 **이 변경의 시각이 아니다**(우리 쓰기가 editTm을 전진시킨 뒤 값만
+    뒤늦게 보이는 경우 등). 지어내느니 비워 둔다 — 화면은 NULL이면 "감지 시각"이라고 정직하게
+    말한다.
+    ★상한이 `now`인 이유: 이 관측을 방금 했으므로 그 이후의 editTm은 있을 수 없다. 있다면
+    시계가 어긋난 것이므로 역시 신뢰하지 않는다.
+    ★`entity.synced_at`은 호출 시점에 **아직 갱신 전**이어야 한다(직전 관측 시각) — 기존
+    밸브들(`_log_external_status_change` 등)이 이미 그 계약 위에서 돌고 있어 같은 자리에 붙인다.
+    """
+    at = parse_edit_tm(edit_tm_raw)
+    if at is None:
+        return None
+    prev = getattr(entity, "synced_at", None)
+    if prev is None:
+        return None  # 직전 관측을 모르면 창을 못 만든다 — 판정 유보
+    return at if prev < at <= now else None
+
+
 def collect_entities(
     *,
     campaigns: list[dict] | None = None,
@@ -185,6 +211,7 @@ def collect_entities(
                     "status_reason": kw.get("status_reason"),
                     "bid_amt": kw.get("bid_amt"),
                     "qi_grade": kw.get("qi_grade"),  # D-NAO-46②: 품질지수 1~7(get_keywords 무상 편승)
+                    "edit_tm": kw.get("edit_tm"),  # D-NAO-147
                 })
 
     log.info("naver_entity collect: campaign=%d adgroup=%d keyword=%d",
@@ -195,7 +222,7 @@ def collect_entities(
 
 
 def _log_external_status_change(
-    db: Session, entity: NaverEntity, new_status: str, now, status_reason=None,
+    db: Session, entity: NaverEntity, new_status: str, now, status_reason=None, edit_tm=None,
 ) -> None:
     """D-NAO-40: 우리 change_log에 없는 외부 상태 변경을 감지하면 기록한다.
     우리 실행으로 인한 변경(최근 set_user_lock 성공 기록과 방향이 일치 **그리고** 그 쓰기가
@@ -267,6 +294,7 @@ def _log_external_status_change(
         proposal_id=None,
         dry_run=False,
         changed_at=now,
+        occurred_at=external_occurred_at(entity, edit_tm, now),  # D-NAO-147(창 밖·부재면 None)
         before_value=json.dumps({"userLock": old_lock}),
         after_value=json.dumps({"userLock": new_lock}),
         rationale="entity_sync 감지: 외부(MOP/사람) 상태 변경",
@@ -369,7 +397,7 @@ def _our_bid_target(entity: NaverEntity, our_writes: dict[tuple[str, str], Naver
 
 def _log_external_bid_change(
     db: Session, entity: NaverEntity, new_bid_raw, now,
-    our_writes: dict[tuple[str, str], NaverChangeLog],
+    our_writes: dict[tuple[str, str], NaverChangeLog], edit_tm=None,
 ) -> None:
     """D-NAO-47: 입찰가 변경을 change_log에 기록한다 — `_log_external_status_change`의 대칭.
 
@@ -452,6 +480,7 @@ def _log_external_bid_change(
         proposal_id=None,
         dry_run=False,
         changed_at=now,
+        occurred_at=external_occurred_at(entity, edit_tm, now),  # D-NAO-147(창 밖·부재면 None)
         before_value=json.dumps({"bidAmt": before_bid}),
         after_value=json.dumps({"bidAmt": new_bid}),
         rationale=rationale,
@@ -643,13 +672,15 @@ def sync_entities(db: Session, *, rows: list[dict] | None = None) -> dict:
                         "campaign_id": e.campaign_id, "bid": _norm_bid(e.bid_amt),
                     })
             if e.status != r["status"] and e.status != "deleted":
-                _log_external_status_change(db, e, r["status"], now, r.get("status_reason"))
+                _log_external_status_change(db, e, r["status"], now, r.get("status_reason"),
+                                            edit_tm=r.get("edit_tm"))
             # D-NAO-97: 시스템 사유 정지(예산 소진 등) 관찰 — 캠페인 행만, dry_run=True.
             _log_system_status_change(db, e, r.get("status_reason"), now)
             # ★두 밸브 모두 **대입 전**에 호출한다 — entity의 옛값을 읽어야 diff가 나온다.
             #   (D-NAO-47 입찰가 / D-NAO-46② 품질지수. 병합 2026-07-17: 두 세션이 서로 모르는
             #   채 같은 자리에 같은 패턴을 만들었고, 관심사가 달라 둘 다 유지한다.)
-            _log_external_bid_change(db, e, r.get("bid_amt"), now, our_bid_writes)
+            _log_external_bid_change(db, e, r.get("bid_amt"), now, our_bid_writes,
+                                     edit_tm=r.get("edit_tm"))
             _log_external_qi_change(db, e, r.get("qi_grade"), now)
             e.parent_id = r["parent_id"]
             e.campaign_id = r["campaign_id"]
