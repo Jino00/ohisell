@@ -529,3 +529,18 @@ def test_agency_op_without_occurred_at_is_never_collapsed(client, db):
     body = _get(client)
     assert body["total"] == 2
     assert body["dedup"]["merged_agency_op"] == 0
+
+
+def test_summary_sentence_uses_occurred_time_not_detected(client, db):
+    """★행의 시각과 문장의 시각이 어긋나면 안 된다.
+
+    라이브에서 실제로 그랬다(2026-08-04): 행 머리는 10:49인데 문장은 "18:33 · …"이었다.
+    occurred_at이 있으면 문장도 그 시각을 말한다."""
+    _seed_change_log(db, action="external_status_change", entity_type="adgroup",
+                     entity_id="grp-1", before=json.dumps({"userLock": False}),
+                     after=json.dumps({"userLock": True}),
+                     at=DETECTED_NEXT_MORNING, occurred_at=OCCURRED)
+
+    row = _get(client)["rows"][0]
+    assert row["summary"].startswith("10:49"), row["summary"]
+    assert "07:35" not in row["summary"]
