@@ -332,6 +332,32 @@ def _new_bucket(*, with_order_count: bool = True) -> dict:
     return b
 
 
+def payable_vat(revenue: Decimal, *deductible_costs: Decimal) -> Decimal:
+    """납부세액 = 매출VAT − 매입세액공제. 순이익에서 뺄 부가세는 이 값이다.
+
+    ★2026-08-04 Jino 결정으로 종전 방침을 뒤집는다. 종전 주석은 이랬다 —
+      "VAT 미차감 — 판매자 VAT는 매입세액공제로 상당부분 상쇄되는 통과분"(2026-06-15).
+      맞는 말이지만 **'상당부분'이 전부는 아니다**. 실측(7월 네이버): 매출VAT 4,196,650 −
+      매입세액 3,592,185 = **납부세액 604,465원**이 실제로 국세청에 나간다. 이걸 빼지 않으면
+      순이익이 그만큼 부풀고, 특히 이익률이 낮을수록 왜곡 비중이 커진다.
+      반대로 **매출VAT 전액**을 빼면(4,196,650) 매입세액공제를 통째로 무시해 과다차감된다 —
+      Jino가 두 안 중 '납부세액'을 골랐다.
+
+    ★매입세액에 넣는 것: 원가·수수료·배송비·광고비. 넷 다 **VAT 포함 축**임이 확인됐다
+      (배송비 상수는 ×1.1, 네이버 수수료·광고비는 실차감이 카드 결제액과 같은 축).
+    ⚠️**원가만 미확인**이다 — `product_master.cost_price`가 VAT 포함인지 별도인지 확정되지
+      않았다(원가 트랙에서 확인 예정). 별도라면 여기 매입세액이 과대계상되어 납부세액이
+      과소 → 이익이 여전히 조금 부푼다. 확정되면 이 함수 한 곳만 고치면 된다.
+
+    수식이 결국 `(매출−비용)/1.1`과 같아지는 것은 우연이 아니다 — 모든 축이 VAT 포함이면
+    공급가 기준 이익과 같아진다. 그래도 두 항을 명시적으로 쓴다: 원가의 VAT 축이 바뀌면
+    한 줄만 빠지면 되고, 축약형은 그 변경 지점을 숨긴다.
+    """
+    sales_vat = revenue * Decimal("10") / Decimal("110")
+    input_vat = sum(deductible_costs, ZERO) * Decimal("10") / Decimal("110")
+    return sales_vat - input_vat
+
+
 def _return_shipping_pnl(
     db: Session, channel_map: dict, date_from: date, date_to: date, channel_id: int | None = None
 ) -> dict[int, dict[str, dict]]:
@@ -818,9 +844,12 @@ def calculate_daily_trend(
         b = daily[d]
         # 수동 매출은 순이익 계산에서 제외 (매출만 표시)
         mr = manual_revenue_by_date.get(d, ZERO)
-        # VAT 미차감 — 두 엔진(구 대시보드·종합조망) 순이익 정의 통일(Jino 2026-06-15).
-        # 판매자 VAT는 매입세액공제로 상당부분 상쇄되는 통과분 → 순이익에서 제외(과다차감 회피).
-        net = (b["revenue"] - mr) - b["cost"] - b["commission"] - b["shipping"] - b["ad_spend"]
+        # 부가세 차감(Jino 2026-08-04, 종전 '미차감' 방침 뒤집음) — 상세는 payable_vat 참조.
+        _rev = b["revenue"] - mr
+        net = (
+            _rev - b["cost"] - b["commission"] - b["shipping"] - b["ad_spend"]
+            - payable_vat(_rev, b["cost"], b["commission"], b["shipping"], b["ad_spend"])
+        )
         result.append({
             "date": d,
             "revenue": str(b["revenue"]),
@@ -958,8 +987,11 @@ def calculate_channel_summary(
     result = []
     for cid, b in by_channel.items():
         ch = channel_map.get(cid)
-        # VAT 미차감 — 두 엔진 순이익 정의 통일(Jino 2026-06-15, 통과분 제외).
-        net = b["revenue"] - b["cost"] - b["commission"] - b["ad_spend"] - b["shipping"]
+        # 부가세 차감(Jino 2026-08-04, 종전 '미차감' 방침 뒤집음) — 상세는 payable_vat 참조.
+        net = (
+            b["revenue"] - b["cost"] - b["commission"] - b["ad_spend"] - b["shipping"]
+            - payable_vat(b["revenue"], b["cost"], b["commission"], b["shipping"], b["ad_spend"])
+        )
         rate_pct = (net / b["revenue"] * 100) if b["revenue"] > 0 else ZERO
 
         result.append({
@@ -1236,8 +1268,11 @@ def calculate_product_profit(
         p = product_map.get(pid)
         if not p:
             continue
-        # VAT 미차감 — 두 엔진 순이익 정의 통일(Jino 2026-06-15, 통과분 제외).
-        net = b["revenue"] - b["cost"] - b["commission"] - b["ad_spend"] - b["shipping"]
+        # 부가세 차감(Jino 2026-08-04, 종전 '미차감' 방침 뒤집음) — 상세는 payable_vat 참조.
+        net = (
+            b["revenue"] - b["cost"] - b["commission"] - b["ad_spend"] - b["shipping"]
+            - payable_vat(b["revenue"], b["cost"], b["commission"], b["shipping"], b["ad_spend"])
+        )
         rate_pct = (net / b["revenue"] * 100) if b["revenue"] > 0 else ZERO
 
         result.append({
