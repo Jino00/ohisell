@@ -32,6 +32,9 @@ const OP_LABEL: Record<CoupangAdChangeOp, string> = {
   turned_off: "꺼짐",
   deleted: "삭제됨",
   field_change: "내용 변경",
+  ads_changed: "소재 변경",
+  ads_added: "소재 추가",
+  ads_removed: "소재 제거",
 };
 
 // Badge의 tone 어휘는 이 코드베이스에 이미 정해져 있다(dir/judge/owner/neutral/alert).
@@ -43,6 +46,9 @@ const OP_TONE: Record<CoupangAdChangeOp, "owner" | "alert" | "neutral"> = {
   turned_off: "alert",
   deleted: "alert",
   field_change: "neutral",
+  ads_changed: "neutral",
+  ads_added: "neutral",
+  ads_removed: "alert",
 };
 
 // 쿠팡 원필드명을 사람 말로. ★모르는 필드는 **원문 그대로 보여준다** — 지어내지 않는다.
@@ -203,7 +209,8 @@ function ChangeTable({ rows }: { rows: CoupangAdChangeRow[] }) {
                   {r.entity_name || "(이름 없음)"}
                 </div>
                 <span className="text-[11px] text-gray-400">
-                  {r.entity_type === "adgroup" ? "광고그룹" : "캠페인"} · {r.entity_id}
+                  {r.entity_type === "adgroup" ? "광고그룹"
+                    : r.entity_type === "ad" ? "소재" : "캠페인"} · {r.entity_id}
                 </span>
               </Td>
               <Td>
@@ -220,13 +227,69 @@ function ChangeTable({ rows }: { rows: CoupangAdChangeRow[] }) {
                 )}
               </Td>
               <Td>
-                {r.op === "field_change" && (
+                {r.op === "field_change" ? (
                   <span className="font-medium">{valueText(r.after_value)}</span>
+                ) : (
+                  <AdsSummary r={r} />
                 )}
               </Td>
             </tr>
         ))}
       </Table>
+    </div>
+  );
+}
+
+/**
+ * 소재 변경 요약 + 옵션ID 펼치기.
+ * ★목록이 없을 수 있다 — 쿠팡 변경 이력은 **개수만** 주고, 우리 소재 스냅샷은 2026-08-04부터
+ *   쌓이기 시작했다. 그래서 그 이전 사건은 영원히 개수만 남는다. 그 사실을 숨기지 않는다
+ *   (목록 없음을 빈칸으로 두면 "소재가 안 바뀐 것"으로 읽힌다).
+ */
+function AdsSummary({ r }: { r: CoupangAdChangeRow }) {
+  const [open, setOpen] = useState(false);
+  const d = r.detail;
+  const isAds = r.op === "ads_changed" || r.op === "ads_added" || r.op === "ads_removed";
+  if (!isAds) return null;
+
+  const counts = d
+    ? [d.added ? `${d.added}개 추가` : null, d.removed ? `${d.removed}개 제거` : null]
+        .filter(Boolean).join(" · ")
+    : "";
+  const opts = d?.options ?? [];
+
+  return (
+    <div className="text-sm">
+      <div className="flex items-center gap-2">
+        {r.before_value !== null && r.after_value !== null && (
+          <span className="text-gray-600">{r.before_value}개 → <b>{r.after_value}개</b></span>
+        )}
+        {counts && <span className="text-gray-500">{counts}</span>}
+        {opts.length > 0 ? (
+          <button
+            type="button"
+            onClick={() => setOpen((v) => !v)}
+            className="text-xs text-blue-600 hover:underline"
+          >
+            {open ? "접기" : `옵션 ${opts.length}개 보기`}
+          </button>
+        ) : (
+          <span className="text-[11px] text-gray-400">옵션 목록 없음(개수만 기록됨)</span>
+        )}
+      </div>
+      {open && (
+        <ul className="mt-1 max-h-56 overflow-y-auto rounded bg-gray-50 p-2 text-xs">
+          {opts.map((o, i) => (
+            <li key={`${o.vendor_item_id}-${i}`} className="py-0.5">
+              <span className="font-mono text-gray-700">{o.vendor_item_id ?? "(ID 없음)"}</span>
+              <span className="ml-2 text-gray-500">{o.item_name}</span>
+            </li>
+          ))}
+          {d?.truncated && (
+            <li className="pt-1 text-amber-600">…목록이 잘렸습니다(200개 상한)</li>
+          )}
+        </ul>
+      )}
     </div>
   );
 }

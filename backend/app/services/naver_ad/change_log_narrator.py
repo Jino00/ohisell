@@ -423,14 +423,18 @@ def narrate(
                 "확인되지 않았습니다 — 네이버 광고 화면에서 확인이 필요합니다."
             )
 
-        time_label = row.changed_at.strftime("%H:%M") if row.changed_at else "시각 미상"
+        # D-NAO-147: 외부 변경은 `occurred_at`(네이버 editTm)이 실제 발생 시각이고
+        # `changed_at`은 우리가 알아챈 시각이다. 문장이 감지 시각을 말하면 같은 행의 머리(10:49)와
+        # 본문(18:33)이 어긋난다 — 실제로 그렇게 떴다(라이브 2026-08-04). 있으면 발생 시각을 쓴다.
+        at = getattr(row, "occurred_at", None) or row.changed_at
+        time_label = at.strftime("%H:%M") if at else "시각 미상"
         head = f"{time_label} · {cname} — " if cname else f"{time_label} · "
         out.append({
             # ★행 id를 함께 준다(「수정 사항」 화면): 문장만 돌려주면 호출자가 어느 행의
             #   문장인지 되짚을 방법이 정렬 순서 재현밖에 없다 — 내부 정렬 키가 바뀌는 순간
             #   문장이 **다른 행에 붙는다**(조용한 오표시). 추가 키라 기존 소비자엔 무해하다.
             "id": row.id,
-            "at": row.changed_at.isoformat() if row.changed_at else None,
+            "at": at.isoformat() if at else None,
             "time_label": time_label,
             "state": state,
             "campaign_id": cid or None,

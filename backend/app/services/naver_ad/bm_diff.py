@@ -33,6 +33,7 @@ from typing import Callable, NamedTuple
 from sqlalchemy.orm import Session
 
 from app.models import NaverAgencyOp, NaverChangeLog, NaverEntitySnapshot
+from app.services.naver_ad.ad_external_change import parse_edit_tm  # D-NAO-146 editTm 파서(소재 grain과 공유)
 from app.utils.kst import kst_now, kst_today
 
 log = logging.getLogger(__name__)
@@ -95,8 +96,52 @@ def _snapshot_map(db: Session, sdate: date) -> dict[tuple[str, str], NaverEntity
     }
 
 
-def _op(row, op_type: str, *, before, after, magnitude, force_exc: bool = False) -> dict:
-    """diff 1건 → 내부 op dict(분류/영속화 전 중간표현). before/after는 텍스트로 정규화."""
+# D-NAO-146: editTm을 occurred_at으로 승격하는 op_type — **엔티티 자신의 필드**가 바뀐 것만.
+# 제외되는 것과 그 이유:
+#   · keyword_add/remove·negative_add/remove = 자식(키워드)의 변화를 그룹 행에 롤업한 집계다.
+#     그룹 객체의 editTm이 자식 추가로 전진하는지 확인된 바 없다 — 확인 전엔 채우지 않는다.
+#   · creative_change = 소재 수 집계(같은 이유) + 소재 grain은 자기 editTm을 이미 갖는다.
+#   · *_add/*_remove(구조 신설·소멸) = 생성 시각은 `regTm`이 답한다. 이번 범위 밖(Jino 승인
+#     범위 = editTm만) — 채우려면 regTm을 함께 받아야 하고, 그건 별도 슬라이스다.
+_OCCURRED_OPS = frozenset({"bid_change", "status_flip", "budget_change", "extended_toggle"})
+
+
+def _observed_bound(row) -> datetime | None:
+    """그 스냅샷 행이 엔티티 필드를 관측한 시각. NULL(구 행)이면 스냅샷 복사 시각으로 폴백
+    — _window의 폴백과 같은 규약(창을 모른다고 시각을 버리지는 않는다)."""
+    if row is None:
+        return None
+    return getattr(row, "entity_observed_at", None) or getattr(row, "synced_at", None)
+
+
+def _occurred_at(op_type: str, curr, prev) -> datetime | None:
+    """네이버 editTm → 이 변경이 **실제로 일어난** 시각(KST). 창 밖·부재는 None(D-NAO-146).
+
+    창 = (직전 관측, 이번 관측]. ★왜 창이 필요한가: editTm은 **마지막 수정만** 남긴다
+    (LESSONS #119). 값이 변했는데 editTm이 직전 관측보다 과거라면 그 editTm은 이 변경의
+    시각이 아니다(자식 변화의 롤업·관측 경합 등) — 그걸 그대로 적으면 화면이 틀린 시각을
+    사실처럼 보여준다. 반대로 우리 관측 **이후**의 editTm은 이 diff의 원인일 수 없다(다음
+    회차가 잡는다). 양쪽 다 D-NAO-139에서 겪은 "소급 판정이 하룻밤 새 뒤집힘"의 같은 뿌리다.
+
+    ★상한은 항상 entity 관측 시각이다 — edit_tm은 entity_sync의 GET에서 오기 때문. 예산·
+    확장검색은 값 자체가 몇 분 뒤 P3 GET에서 오지만, 상한을 P3로 늘리면 그 사이(07:35~07:42)에
+    일어난 편집을 이 diff의 시각으로 오기록한다. 그 구간은 fail-closed(NULL)로 둔다.
+    """
+    if op_type not in _OCCURRED_OPS:
+        return None
+    at = parse_edit_tm(getattr(curr, "edit_tm", None))
+    if at is None:
+        return None  # 미수집(구 행)·형식 불명 → 없는 값을 지어내지 않는다
+    lower, upper = _observed_bound(prev), _observed_bound(curr)
+    if lower is None or upper is None:
+        return None
+    return at if lower < at <= upper else None
+
+
+def _op(row, op_type: str, *, before, after, magnitude, force_exc: bool = False, prev=None) -> dict:
+    """diff 1건 → 내부 op dict(분류/영속화 전 중간표현). before/after는 텍스트로 정규화.
+
+    prev = 이 변경의 직전 스냅샷 행(값 변화 op만 전달). occurred_at 창의 하한을 여기서 얻는다."""
     return {
         "entity_type": row.entity_type,
         "entity_id": row.entity_id,
@@ -111,6 +156,8 @@ def _op(row, op_type: str, *, before, after, magnitude, force_exc: bool = False)
         # P3는 캠페인별 순차 GET이라 먼저 관측된 행에 늦은 시각을 쓰면 밴드가 되살아난다).
         "entity_observed_at": getattr(row, "entity_observed_at", None),
         "p3_observed_at": getattr(row, "p3_observed_at", None),
+        # D-NAO-146: 네이버 editTm이 준 실제 발생 시각(창 밖·부재면 None = 시각 불명).
+        "occurred_at": _occurred_at(op_type, row, prev),
     }
 
 
@@ -153,7 +200,7 @@ def _changed_bid(p, c) -> list[dict]:
     pct = _pct(p.bid_amt, c.bid_amt)
     if abs(pct) < BID_JITTER_PCT:
         return []
-    return [_op(c, "bid_change", before=p.bid_amt, after=c.bid_amt, magnitude=round(pct, 2))]
+    return [_op(c, "bid_change", before=p.bid_amt, after=c.bid_amt, magnitude=round(pct, 2), prev=p)]
 
 
 def _changed_status(p, c) -> list[dict]:
@@ -168,7 +215,7 @@ def _changed_status(p, c) -> list[dict]:
     if ps == cs or "deleted" in (ps, cs):
         return []
     is_campaign = c.entity_type == "campaign"
-    return [_op(c, "status_flip", before=ps, after=cs, magnitude=None, force_exc=is_campaign)]
+    return [_op(c, "status_flip", before=ps, after=cs, magnitude=None, force_exc=is_campaign, prev=p)]
 
 
 def _changed_keyword_count(p, c) -> list[dict]:
@@ -192,14 +239,14 @@ def _changed_budget(p, c) -> list[dict]:
     pct = _pct(p.daily_budget, c.daily_budget)
     if abs(pct) < BUDGET_JITTER_PCT:
         return []
-    return [_op(c, "budget_change", before=p.daily_budget, after=c.daily_budget, magnitude=round(pct, 2))]
+    return [_op(c, "budget_change", before=p.daily_budget, after=c.daily_budget, magnitude=round(pct, 2), prev=p)]
 
 
 def _changed_extended(p, c) -> list[dict]:
     """확장검색 on↔off 토글. 어느 쪽이든 NULL(미수집)이면 스킵(_changed_budget과 같은 근거)."""
     if p.extended_search is None or c.extended_search is None or p.extended_search == c.extended_search:
         return []
-    return [_op(c, "extended_toggle", before=p.extended_search, after=c.extended_search, magnitude=None)]
+    return [_op(c, "extended_toggle", before=p.extended_search, after=c.extended_search, magnitude=None, prev=p)]
 
 
 def _changed_negative(p, c) -> list[dict]:
@@ -619,7 +666,7 @@ def detect_agency_ops(db: Session, *, op_date: date | None = None) -> dict:
     db.query(NaverAgencyOp).filter(
         NaverAgencyOp.op_date == d, NaverAgencyOp.entity_type != AD_GRAIN
     ).delete()
-    n_event = n_exc = 0
+    n_event = n_exc = n_occurred = 0
     for op in raw:
         keep, is_exc = _classify(op, logs, win)
         if not keep:
@@ -630,11 +677,16 @@ def detect_agency_ops(db: Session, *, op_date: date | None = None) -> dict:
             campaign_id=op["campaign_id"], optimizer=op["optimizer"],
             op_type=op["op_type"], before_value=op["before_value"],
             after_value=op["after_value"], magnitude=op["magnitude"], is_exception=is_exc,
+            occurred_at=op["occurred_at"],  # D-NAO-146: 네이버 editTm 유래(창 밖·부재면 NULL)
         ))
         n_event += 1
+        n_occurred += int(op["occurred_at"] is not None)
         n_exc += int(is_exc)
     db.commit()
 
-    result = {"op_date": str(d), "bootstrap": False, "events": n_event, "exceptions": n_exc}
+    # occurred = 발생 시각까지 확정된 건수(D-NAO-146). events 대비 이 비율이 갑자기 0으로
+    # 떨어지면 editTm 수집이 끊긴 것이므로, 로그 한 줄로 매일 표면화한다.
+    result = {"op_date": str(d), "bootstrap": False, "events": n_event,
+              "exceptions": n_exc, "occurred": n_occurred}
     log.info("[BM] SA-2 조작 감지: %s", result)
     return result

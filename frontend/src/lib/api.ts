@@ -3360,12 +3360,26 @@ export function fetchNaverCreatives(params: {
 // ──────────────────────────────────────────────
 export type CoupangAdAccount = "ofix" | "ohitech";
 export type CoupangAdChangeOp =
-  | "created" | "turned_on" | "turned_off" | "deleted" | "field_change";
+  | "created" | "turned_on" | "turned_off" | "deleted" | "field_change"
+  // 소재(광고 상품) 축. ads_changed = 쿠팡이 준 개수 변화(VIID),
+  // ads_added/removed = 우리 스냅샷이 잡은 증감(쿠팡 이벤트에 못 붙었을 때).
+  | "ads_changed" | "ads_added" | "ads_removed";
+
+/** 소재 변경에 붙는 옵션ID 목록. ★없을 수 있다 — 과거 이벤트는 쿠팡이 개수만 줬다. */
+export interface CoupangAdChangeDetail {
+  count?: number;
+  added?: number;
+  removed?: number;
+  /** 목록이 붙었으면 그게 added인지 removed인지. */
+  options_of?: "added" | "removed";
+  options?: { vendor_item_id: string | null; item_name: string }[];
+  truncated?: boolean;
+}
 
 export interface CoupangAdChangeRow {
   id: number;
   account: CoupangAdAccount;
-  entity_type: "campaign" | "adgroup";
+  entity_type: "campaign" | "adgroup" | "ad";
   entity_id: string;
   campaign_id: string;
   entity_name: string;
@@ -3384,6 +3398,10 @@ export interface CoupangAdChangeRow {
    */
   time_basis: "src" | "detected";
   detected_at: string | null;
+  /** "coupang" = 쿠팡 변경 이력 API(전/후 값·실행 시각) / "snapshot" = 우리 스냅샷 diff. */
+  source: "coupang" | "snapshot";
+  /** 소재 변경의 옵션ID 목록 등. 없으면 null. */
+  detail: CoupangAdChangeDetail | null;
 }
 
 export interface CoupangAdChangesResponse {

@@ -2290,6 +2290,18 @@ class NaverChangeLog(Base):
     proposal_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     dry_run: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)  # P5: 실제 API쓰기 없이 기록만
     executed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)  # P5: 실행 시도 시각(dry-run 포함)
+    # D-NAO-147: **외부** 변경이 실제로 일어난 시각(KST). `external_*` 감지 행에만 채워진다.
+    # ★왜 필요한가: `changed_at`은 두 가지가 섞인 컬럼이다 — 우리 실집행 행에서는 곧 발생
+    #   시각이지만, entity_sync가 남기는 `external_*` 행에서는 **우리가 알아챈 시각**이다.
+    #   실측(2026-08-04): 10:49:25에 꺼진 광고그룹이 change_log에 18:33:51로 남아, 화면이
+    #   "감지 시각 — 실제로 언제 손댔는지는 기록이 없습니다"라고 말했다. 같은 순간
+    #   `naver_entity.edit_tm`은 10:49를 갖고 있었는데도.
+    # ★`changed_at`을 고치지 않고 컬럼을 따로 두는 이유: changed_at은 쿨다운·echo 대조창·
+    #   학습 루프가 "우리가 언제 썼나"로 소비하는 축이다. 거기에 외부 발생 시각을 섞으면
+    #   그 소비자들이 조용히 틀린다. 두 시각은 의미가 다르므로 칸도 다르다.
+    # NULL = 시각 불명(우리 실집행 행·창 밖·editTm 미제공). 화면은 NULL이면 종전대로
+    # changed_at을 쓰고 `time_basis='detected'`로 표시한다.
+    occurred_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
 class NaverProposal(Base):
@@ -2566,6 +2578,12 @@ class NaverEntity(Base):
     competition: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)  # low/mid/high
     volume_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     qi_grade: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 품질지수 1~7(D-NAO-46②, keyword 행만 — /ncc/keywords nccQi.qiGrade)
+    # D-NAO-146: 네이버가 준 마지막 수정 시각(editTm) 원문. campaign/adgroup/**keyword** 전부
+    # 채운다 — `/ncc/campaigns`·`/ncc/adgroups`·`/ncc/keywords` 응답에 모두 실려 온다(추가 GET 0.
+    # 키워드는 D-NAO-147에서 확인: 표본 41/41 = 100%).
+    # ★synced_at은 '우리가 본 시각'이고 이건 '네이버에서 실제로 바뀐 시각'이다 — 섞지 않는다.
+    # 소재 grain(naver_adgroup_product.ad_edit_tm)과 같은 규약: 문자열 원문 보관, 파싱은 소비 지점.
+    edit_tm: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
@@ -2616,6 +2634,12 @@ class NaverEntitySnapshot(Base):
     # 그대로, backfill 불필요).
     entity_observed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)  # bid_amt/status/name/keyword_* 관측 시각(=NaverEntity.synced_at 복사, ★KST naive)
     p3_observed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)  # daily_budget/extended_search 관측 시각(P3 GET 직후 kst_now, ★KST naive)
+    # D-NAO-146: NaverEntity.edit_tm 복사(네이버 editTm 원문). bm_diff가 이 값을 op의
+    # occurred_at으로 승격한다 — 단 **직전 스냅샷 관측 ~ 이번 관측 창 안일 때만**.
+    # ★관측 시각 짝은 entity_observed_at이다(edit_tm은 entity_sync의 GET에서 온다). 예산·확장검색은
+    # 몇 분 뒤 P3 GET 값이라 그 사이의 변경은 창 밖으로 떨어져 NULL이 된다 — fail-closed가 맞다.
+    # 구 행은 NULL(backfill 불가: editTm은 마지막 수정만 남아 소급하면 판정이 썩는다, LESSONS #119).
+    edit_tm: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
 
 
 class NaverAgencyOp(Base):

@@ -348,3 +348,89 @@ def test_plain_external_change_still_uses_old_bid_as_before(db):
     assert json.loads(logs[0].before_value) == {"bidAmt": 700}
     assert "덮어씀" not in logs[0].rationale
     assert "되돌림" not in logs[0].rationale
+
+
+# ── D-NAO-147: external_* 감지 행에 발생 시각(editTm) 붙이기 ─────────────
+# 배경(라이브 실측 2026-08-04): 10:49:25에 꺼진 광고그룹이 change_log에 18:33:51(감지 시각)로
+#   남았다 — 같은 순간 naver_entity.edit_tm은 10:49를 갖고 있었는데도.
+# 창 = (직전 관측, 이번 관측]. bm_diff._occurred_at과 같은 규약.
+from datetime import datetime  # noqa: E402
+
+PREV_SYNC = datetime(2026, 8, 3, 7, 35, 0)   # 직전 관측
+NOW_SYNC = datetime(2026, 8, 4, 7, 35, 0)    # 이번 관측
+EDIT_IN = "2026-08-03T05:32:37.000Z"         # = 08-03 14:32:37 KST (창 안)
+EDIT_IN_KST = datetime(2026, 8, 3, 14, 32, 37)
+EDIT_OLD = "2026-03-30T06:42:23.000Z"        # 창보다 훨씬 과거(실측: 캠페인 31건이 이 상태)
+EDIT_FUTURE = "2026-08-04T09:00:00.000Z"     # = 08-04 18:00 KST, 이번 관측 이후
+
+
+def _kw_rows(bid, edit_tm):
+    return [{
+        "entity_type": "keyword", "entity_id": "nkw-1", "parent_id": "grp-1",
+        "campaign_id": "cmp-1", "campaign_type": "WEB_SITE", "name": "필름",
+        "status": "on", "bid_amt": bid, "edit_tm": edit_tm,
+    }]
+
+
+def _one_log(db, action):
+    rows = db.query(NaverChangeLog).filter(NaverChangeLog.action == action).all()
+    assert len(rows) == 1, f"{action}: {len(rows)}건"
+    return rows[0]
+
+
+def test_external_bid_change_carries_occurred_at_from_edit_tm(db):
+    """editTm이 창 안이면 발생 시각이 change_log에 실린다."""
+    _seed_entity(db, bid_amt=700, synced_at=PREV_SYNC)
+    entity_sync.sync_entities(db, rows=_kw_rows(900, EDIT_IN))
+
+    assert _one_log(db, "external_bid_change").occurred_at == EDIT_IN_KST
+
+
+def test_external_bid_change_leaves_occurred_at_null_when_edit_tm_stale(db):
+    """editTm이 직전 관측보다 과거면 이 변경의 시각이 아니다 → NULL(지어내지 않는다)."""
+    _seed_entity(db, bid_amt=700, synced_at=PREV_SYNC)
+    entity_sync.sync_entities(db, rows=_kw_rows(900, EDIT_OLD))
+
+    assert _one_log(db, "external_bid_change").occurred_at is None
+
+
+def test_occurred_at_null_when_edit_tm_after_this_observation(db):
+    """이번 관측 이후의 editTm은 방금 본 값일 수 없다 → NULL(시계 어긋남 방어).
+
+    ★sync_entities 경로가 아니라 순수 함수로 검증한다: sync_entities는 내부에서 `kst_now()`를
+    잡으므로 "이번 관측 시각"을 테스트가 고정할 수 없고, 벽시계에 따라 결과가 갈린다."""
+    e = _seed_entity(db, bid_amt=700, synced_at=PREV_SYNC)
+    assert entity_sync.external_occurred_at(e, EDIT_FUTURE, NOW_SYNC) is None
+
+
+def test_external_bid_change_without_edit_tm_still_logs(db):
+    """editTm이 아예 없어도(레거시 rows) 탐지 자체는 종전대로 — 시각만 비어 있다."""
+    _seed_entity(db, bid_amt=700, synced_at=PREV_SYNC)
+    entity_sync.sync_entities(db, rows=_rows(db, keyword_bid=900))
+
+    assert _one_log(db, "external_bid_change").occurred_at is None
+
+
+def test_external_status_change_carries_occurred_at(db):
+    """상태(On/Off) 축도 같다 — 08-04 10:49 그룹 정지 사건의 형태."""
+    _seed_entity(db, bid_amt=700, status="on", synced_at=PREV_SYNC)
+    rows = _kw_rows(700, EDIT_IN)
+    rows[0]["status"] = "off"
+    entity_sync.sync_entities(db, rows=rows)
+
+    assert _one_log(db, "external_status_change").occurred_at == EDIT_IN_KST
+
+
+def test_edit_tm_is_persisted_on_entity(db):
+    """editTm 원문이 naver_entity에 남아야 다음 회차·스냅샷이 쓸 수 있다."""
+    _seed_entity(db, bid_amt=700, synced_at=PREV_SYNC)
+    entity_sync.sync_entities(db, rows=_kw_rows(900, EDIT_IN))
+
+    assert db.query(NaverEntity).one().edit_tm == EDIT_IN
+
+
+def test_external_occurred_at_window_is_half_open(db):
+    """경계: 직전 관측과 **같은 시각**은 창 밖(그때 이미 봤다), 이번 관측과 같으면 창 안."""
+    e = _seed_entity(db, bid_amt=700, synced_at=PREV_SYNC)
+    assert entity_sync.external_occurred_at(e, "2026-08-02T22:35:00.000Z", NOW_SYNC) is None  # == PREV
+    assert entity_sync.external_occurred_at(e, "2026-08-03T22:35:00.000Z", NOW_SYNC) == NOW_SYNC  # == NOW

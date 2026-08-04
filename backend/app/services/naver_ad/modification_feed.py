@@ -39,6 +39,12 @@ FEED_VERDICT_FEED = feed_reapply.VERDICT_FEED
 #   그대로 표에 찍힌다(내부 표기 노출).
 _BACKFILL_RE = re.compile(r"\s*\[BACKFILL\b[^\]]*\]\s*")
 
+# ── 원천 간 공통 축(D-NAO-147) ────────────────────────────────────────
+# 같은 사건을 두 테이블이 서로 다른 이름으로 부른다. 접기 비교는 이 정규화된 축으로 한다.
+# 여기 없는 종류는 축이 None → 절대 접히지 않는다(모르는 것은 안 건드린다).
+_CHANGE_LOG_AXIS = {"external_status_change": "status", "external_bid_change": "bid"}
+_AGENCY_OP_AXIS = {"status_flip": "status", "bid_change": "bid"}
+
 # ── 라벨 사전 ────────────────────────────────────────────────────────
 # 모르는 코드는 **그대로 노출**한다 — 지어내지 않는다(원칙22).
 _ENTITY_LABEL = {
@@ -129,6 +135,10 @@ class _Candidate:
     # 접기로 이 행에 합쳐진 형제 행들(대표행에만 채워진다). 1이면 접힌 게 없다.
     feed_group_size: int = 1
     feed_group_ids: tuple[int, ...] = ()
+    # D-NAO-147 원천 간 중복 접기용 신원. axis = 무엇이 바뀌었나(status/bid) — 두 원천이
+    # 서로 다른 이름(action / op_type)을 쓰므로 공통 축으로 정규화해 비교한다.
+    entity_id: str = ""
+    axis: str | None = None
 
 
 def _effective_dt(occurred_at: datetime | None, op_date: date | None) -> tuple[datetime, str]:
@@ -186,9 +196,19 @@ def _change_log_candidates(
         NaverChangeLog.id,
         NaverChangeLog.changed_at,
         NaverChangeLog.action,
-    ).filter(NaverChangeLog.changed_at >= since)
+        NaverChangeLog.occurred_at,
+        NaverChangeLog.entity_id,
+    )
+    # ★D-NAO-147: 날짜 조건을 occurred_at 있음/없음으로 **갈라서** 건다 — agency_op 쪽과 같은
+    #   이유이자 같은 함정이다. 외부 변경은 10:49에 일어나고 우리는 다음날 07:35에 알아채므로,
+    #   `changed_at`으로만 거르면 **발생일을 고른 사용자에게 그 행이 안 보인다**(정확히 이
+    #   화면이 없애려는 문제). coalesce로 뭉치면 안 되는 이유도 같다(SQLite 문자열 비교).
+    occurred_cond = [NaverChangeLog.occurred_at.isnot(None), NaverChangeLog.occurred_at >= since]
+    fallback_cond = [NaverChangeLog.occurred_at.is_(None), NaverChangeLog.changed_at >= since]
     if until is not None:
-        q = q.filter(NaverChangeLog.changed_at < until)
+        occurred_cond.append(NaverChangeLog.occurred_at < until)
+        fallback_cond.append(NaverChangeLog.changed_at < until)
+    q = q.filter(or_(and_(*occurred_cond), and_(*fallback_cond)))
     if campaign_id:
         q = q.filter(NaverChangeLog.campaign_id == campaign_id)
     if not include_dry_run:
@@ -197,20 +217,27 @@ def _change_log_candidates(
         q = q.filter(NaverChangeLog.after_value.isnot(None))
 
     out: list[_Candidate] = []
-    for cid, changed_at, action in q.all():
+    for cid, changed_at, action, occurred_at, entity_id in q.all():
         actor = change_actor.classify_change_log(action)
         # 우리 실집행은 changed_at이 곧 "우리가 바꾼 순간"이다. external_* 감지 행은
         # entity_sync가 **알아챈** 시각이라 실제 발생 시각이 아니다 — 섞으면 "언제"에 거짓말한다.
-        basis = (
-            TIME_BASIS_DETECTED if actor == change_actor.ACTOR_AGENCY else TIME_BASIS_OCCURRED
-        )
+        # ★D-NAO-147: 단 `occurred_at`(네이버 editTm 유래)이 있으면 그건 진짜 발생 시각이다.
+        if occurred_at is not None:
+            at, basis = occurred_at, TIME_BASIS_OCCURRED
+        else:
+            at = changed_at or datetime.min
+            basis = (
+                TIME_BASIS_DETECTED if actor == change_actor.ACTOR_AGENCY else TIME_BASIS_OCCURRED
+            )
         out.append(
             _Candidate(
                 source=change_actor.SOURCE_CHANGE_LOG,
                 source_id=cid,
-                at=changed_at or datetime.min,
+                at=at,
                 time_basis=basis,
                 auto_actor=actor,
+                entity_id=entity_id or "",
+                axis=_CHANGE_LOG_AXIS.get(action),
             )
         )
     return out
@@ -243,12 +270,13 @@ def _agency_op_candidates(
     q = db.query(
         NaverAgencyOp.id, NaverAgencyOp.occurred_at, NaverAgencyOp.op_date,
         NaverAgencyOp.feed_verdict, NaverAgencyOp.feed_product_id, NaverAgencyOp.feed_cluster_at,
+        NaverAgencyOp.entity_id, NaverAgencyOp.op_type,
     ).filter(or_(and_(*occurred_cond), and_(*date_cond)))
     if campaign_id:
         q = q.filter(NaverAgencyOp.campaign_id == campaign_id)
 
     out: list[_Candidate] = []
-    for aid, occurred_at, op_date, verdict, product_id, cluster_at in q.all():
+    for aid, occurred_at, op_date, verdict, product_id, cluster_at, entity_id, op_type in q.all():
         at, basis = _effective_dt(occurred_at, op_date)
         out.append(
             _Candidate(
@@ -261,9 +289,51 @@ def _agency_op_candidates(
                 feed_verdict=verdict,
                 feed_product_id=product_id,
                 feed_cluster_at=cluster_at,
+                entity_id=entity_id or "",
+                axis=_AGENCY_OP_AXIS.get(op_type),
             )
         )
     return out
+
+
+def _dedupe_cross_source(candidates: list[_Candidate]) -> tuple[list[_Candidate], int]:
+    """같은 사건이 두 원천에 **각각** 들어간 경우를 한 줄로 접는다 (D-NAO-147).
+
+    ★왜 지금 필요한가: 외부 입찰·상태 변경은 두 경로가 **둘 다** 잡는다 — entity_sync가
+      07:35 관측에서 `external_*`(change_log)로, bm_diff가 07:37 스냅샷 diff에서
+      `bid_change`/`status_flip`(agency_op)으로. 라이브 실측(2026-08-04)에서 07-25~07-30
+      구간에 같은 그룹의 같은 변경이 양쪽에 다 있는 것을 확인했다.
+      지금까지는 두 줄의 **시각이 달라**(감지 시각 vs 감지일 자정) 딴 사건처럼 흩어져 있었다.
+      그런데 D-NAO-146·147로 양쪽 다 같은 `editTm`을 시각으로 쓰게 되면서, 이제 **같은 초·같은
+      대상·같은 축**의 두 줄이 나란히 뜬다 — 읽는 사람에게는 "10:49에 두 번 바뀜"이다.
+      즉 이 접기는 시각 부여의 부작용을 막는 짝이지, 별개의 미화가 아니다.
+
+    ★접는 조건을 좁게 잡는다(오접이 미탐보다 나쁘다): **entity_id·축·시각이 전부 일치**할 때만.
+      두 시각은 같은 `editTm`에서 왔으므로 진짜 같은 사건이면 초 단위로 같다. 조금이라도
+      다르면 접지 않고 두 줄로 남긴다 — 다른 사건일 가능성을 지우지 않는다.
+    ★남기는 쪽은 change_log다: before/after가 그 시점 관측값이라 더 정확하고, 이미 화면에
+      있던 행이라 사용자가 보던 것이 사라지지 않는다. 접은 개수는 반환의 `dedup`이 말한다
+      (조용한 truncation 금지).
+    """
+    keep_keys = {
+        (c.entity_id, c.axis, c.at)
+        for c in candidates
+        if c.source == change_actor.SOURCE_CHANGE_LOG and c.axis and c.entity_id
+    }
+    if not keep_keys:
+        return candidates, 0
+    out, merged = [], 0
+    for c in candidates:
+        if (
+            c.source == change_actor.SOURCE_AGENCY_OP
+            and c.axis
+            and c.time_basis == TIME_BASIS_OCCURRED
+            and (c.entity_id, c.axis, c.at) in keep_keys
+        ):
+            merged += 1
+            continue
+        out.append(c)
+    return out, merged
 
 
 def _collapse_feed_reapply(candidates: list[_Candidate]) -> list[_Candidate]:
@@ -430,6 +500,11 @@ def build(
             db, since=since, until=until, campaign_id=campaign_id
         )
 
+    # ── D-NAO-147: 원천 간 중복 접기는 **가장 먼저** 한다 ──
+    #   피드 접기·집계·페이지 계산이 전부 이 뒤에 오도록 해야 total과 화면 줄 수가 맞는다.
+    #   `source` 필터가 걸려 한쪽만 있으면 접을 게 없다(keep_keys가 비거나 상대가 없음).
+    candidates, merged_dup = _dedupe_cross_source(candidates)
+
     # ── D-NAO-139: 피드 재적용 처리는 **집계·페이지 계산 전에** 한다 ──
     #   나중에 걸면 total과 화면 줄 수가 어긋나고, 페이지마다 접힌 개수가 달라진다.
     feed_rows = [c for c in candidates if c.feed_verdict == FEED_VERDICT_FEED]
@@ -530,7 +605,12 @@ def build(
             }
         )
 
-    return {"total": total, "by_actor": by_actor, "feed_reapply": feed_stats, "rows": rows}
+    return {
+        "total": total, "by_actor": by_actor, "feed_reapply": feed_stats,
+        # D-NAO-147: 두 원천에 중복으로 들어와 한 줄로 접힌 건수(조용한 truncation 금지).
+        "dedup": {"merged_agency_op": merged_dup},
+        "rows": rows,
+    }
 
 
 def _feed_fields(c: _Candidate, ao_row: NaverAgencyOp | None) -> dict:
