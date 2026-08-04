@@ -315,6 +315,25 @@ def _delivery_income_map(orders: list, channel_map: dict) -> dict[tuple, Decimal
 NAVER_DELIVERY_COMMISSION_RATE = Decimal("0.02724")
 
 
+def _cost_of_line(product_map: dict, product_id, quantity) -> Decimal | None:
+    """이 라인의 원가. **원가를 알 수 없으면 None**(0이 아니다).
+
+    ★0을 돌려주면 안 되는 이유: 엔진은 여태 원가를 못 찾으면 조용히 더하지 않았고, 그러면
+      "원가 0원짜리 상품"과 "원가를 모르는 상품"이 손익에서 **완전히 같은 모양**이 된다.
+      후자는 판 돈이 전부 이익으로 잡혀 이익을 부풀리는데 아무 경보도 안 울린다.
+    ⚠️`product_master.cost_price`는 NOT NULL default 0이라 **미입력과 실제 0을 구분할 수 없다**
+      (prod 실측: 원가 0인 상품 90개). 그래서 여기서는 0도 '미상'으로 본다 — 최근 30일
+      매출 기여가 8,900원뿐이라 실익이 거의 없고, 과대계상을 놓치는 쪽이 더 위험하다.
+      원가 축이 확정되면(원가 트랙) 이 판정 한 줄만 고치면 된다.
+    """
+    if product_id is None or product_id not in product_map:
+        return None
+    cost_price = product_map[product_id].cost_price
+    if not cost_price:
+        return None
+    return cost_price * quantity
+
+
 def _new_bucket(*, with_order_count: bool = True) -> dict:
     """집계 버킷 템플릿. 주문 루프와 반품 손익 반영이 **같은 모양**을 쓰도록 한 곳에 모은다
     (한쪽에만 키가 있으면 반품만 있는 날짜에서 KeyError로 죽는다)."""
@@ -327,6 +346,7 @@ def _new_bucket(*, with_order_count: bool = True) -> dict:
         "shipping": ZERO,
         "ad_spend": ZERO,
         "fixed_cost": ZERO,
+        "unmapped_revenue": ZERO,
         "vat": ZERO,
     }
     if with_order_count:
@@ -881,9 +901,12 @@ def calculate_daily_trend(
         bucket["revenue"] += revenue
         bucket["order_count"] += 1
 
-        # 원가
-        if o.product_id and o.product_id in product_map:
-            bucket["cost"] += product_map[o.product_id].cost_price * o.quantity
+        # 원가 — 알 수 없으면 그 라인의 제품매출을 '원가 미상'으로 따로 센다(표시 전용).
+        _line_cost = _cost_of_line(product_map, o.product_id, o.quantity)
+        if _line_cost is None:
+            bucket["unmapped_revenue"] += product_rev
+        else:
+            bucket["cost"] += _line_cost
 
         # 수수료 — 상품매출 + 배송비 수취분(정산 DELIVERY 원장 행에 실제로 부과됨)
         bucket["commission"] += _line_commission(ch, o, product_rev, actual_fee)
@@ -979,6 +1002,7 @@ def calculate_daily_trend(
             "commission": str(b["commission"]),
             "ad_spend": str(b["ad_spend"]),
             "fixed_cost": str(b["fixed_cost"]),
+            "unmapped_revenue": str(b["unmapped_revenue"]),
             "shipping": str(b["shipping"]),
             "vat": str(b["vat"]),
             "net_profit": str(net),
@@ -1045,8 +1069,11 @@ def calculate_channel_summary(
         b["revenue"] += revenue
         b["order_count"] += 1
 
-        if o.product_id and o.product_id in product_map:
-            b["cost"] += product_map[o.product_id].cost_price * o.quantity
+        _line_cost = _cost_of_line(product_map, o.product_id, o.quantity)
+        if _line_cost is None:
+            b["unmapped_revenue"] += product_rev
+        else:
+            b["cost"] += _line_cost
 
         # 수수료 — 상품매출 + 배송비 수취분(정산 DELIVERY 원장 행에 실제로 부과됨)
         b["commission"] += _line_commission(ch, o, product_rev, actual_fee)
@@ -1142,6 +1169,7 @@ def calculate_channel_summary(
             "commission": str(b["commission"]),
             "ad_spend": str(b["ad_spend"]),
             "fixed_cost": str(b["fixed_cost"]),
+            "unmapped_revenue": str(b["unmapped_revenue"]),
             "shipping": str(b["shipping"]),
             "net_profit": str(net),
             "profit_rate": str(rate_pct.quantize(Decimal("0.01")) if isinstance(rate_pct, Decimal) else "0.00"),
@@ -1262,8 +1290,11 @@ def calculate_product_profit(
         # VAT — 상품매출 기준 누적 (배송수입 VAT는 아래 alloc 단계에서 추가)
         b["vat"] += product_rev * Decimal("10") / Decimal("110")
 
-        if pid in product_map:
-            b["cost"] += product_map[pid].cost_price * o.quantity
+        _line_cost = _cost_of_line(product_map, pid, o.quantity)
+        if _line_cost is None:
+            b["unmapped_revenue"] += product_rev
+        else:
+            b["cost"] += _line_cost
 
         # 수수료 — 상품매출분. 배송비 수취분 수수료는 배송 그룹에서 라인 비례 배분한다.
         b["commission"] += _line_commission(ch, o, product_rev, actual_fee)

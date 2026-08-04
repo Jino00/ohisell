@@ -281,6 +281,7 @@ class TrendPoint(BaseModel):
     commission: str
     ad_spend: str
     fixed_cost: str = "0"  # 월 고정비 일할 배분분(3PL 입고·보관·항공도선·합포장)
+    unmapped_revenue: str = "0"  # 원가를 못 붙인 제품매출(표시 전용 — 순이익에는 영향 없음)
     shipping: str
     vat: str
     net_profit: str

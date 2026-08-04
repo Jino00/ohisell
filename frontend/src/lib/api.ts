@@ -426,6 +426,8 @@ export interface TrendItem extends Record<string, unknown> {
   cost: number;
   commission: number;
   ad_spend: number;
+  fixed_cost?: number;        // 월 고정비 일할 배분분
+  unmapped_revenue?: number;  // 원가를 못 붙인 제품매출(표시 전용 — 순이익엔 영향 없음)
   shipping: number;
   vat: number;
   net_profit: number;

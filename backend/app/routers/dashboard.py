@@ -170,6 +170,7 @@ def dashboard_trend(
                     "cost": Decimal("0"),
                     "commission": Decimal("0"), "ad_spend": Decimal("0"),
                     "fixed_cost": Decimal("0"),
+                    "unmapped_revenue": Decimal("0"),
                     "shipping": Decimal("0"), "vat": Decimal("0"),
                     "net_profit": Decimal("0"), "order_count": 0,
                 }
@@ -182,6 +183,7 @@ def dashboard_trend(
             g["commission"] += Decimal(point["commission"])
             g["ad_spend"] += Decimal(point["ad_spend"])
             g["fixed_cost"] += Decimal(point.get("fixed_cost", "0"))
+            g["unmapped_revenue"] += Decimal(point.get("unmapped_revenue", "0"))
             g["shipping"] += Decimal(point["shipping"])
             g["vat"] += Decimal(point["vat"])
             g["net_profit"] += Decimal(point["net_profit"])
@@ -199,6 +201,7 @@ def dashboard_trend(
                 "commission": str(g["commission"]),
                 "ad_spend": str(g["ad_spend"]),
                 "fixed_cost": str(g["fixed_cost"]),
+                "unmapped_revenue": str(g["unmapped_revenue"]),
                 "shipping": str(g["shipping"]),
                 "vat": str(g["vat"]),
                 "net_profit": str(g["net_profit"]),
