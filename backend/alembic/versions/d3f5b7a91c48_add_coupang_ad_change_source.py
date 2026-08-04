@@ -13,8 +13,14 @@ before/after 두 칸에 안 들어간다.
 
 가산적이다: 기존 행은 `source='snapshot'`으로 남고 로직도 그대로 동작한다.
 
+★부모 재지정(2026-08-04 17:56, Jino 승인): 원래 부모는 `c8d1a4f97b26`였는데, 병행 세션의
+  `e7a2c5b90d84`(월 고정비)가 **같은 부모에서 갈라져 prod에 먼저 적용**되는 바람에 헤드가 2개가
+  됐다(`alembic upgrade head`가 "Multiple head revisions" 로 거부). 이 리비전은 그 시점에
+  **어디에도 적용되지 않은 상태**였으므로, 적용된 이력을 건드리지 않고 이쪽만 뒤로 물러선다.
+  두 리비전은 서로 다른 테이블을 만지므로 순서 의존이 없다.
+
 Revision ID: d3f5b7a91c48
-Revises: c8d1a4f97b26
+Revises: e7a2c5b90d84
 """
 from typing import Sequence, Union
 
@@ -22,7 +28,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "d3f5b7a91c48"
-down_revision: Union[str, Sequence[str], None] = "c8d1a4f97b26"
+down_revision: Union[str, Sequence[str], None] = "e7a2c5b90d84"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
