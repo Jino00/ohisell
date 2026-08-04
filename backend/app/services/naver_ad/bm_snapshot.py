@@ -190,6 +190,10 @@ def _snapshot_fields(e: NaverEntity, opt_map, kw_agg, now, budget_map, budget_at
         # D-NAO-146: 네이버 editTm 원문 복사(발생 시각 앵커). 짝이 되는 관측 시각은
         # entity_observed_at이다 — 둘 다 entity_sync의 같은 GET에서 왔기 때문.
         "edit_tm": e.edit_tm,
+        # D-NAO-148: 네이버 regTm 원문 복사(생성 시각 앵커). bm_diff가 신설 op(campaign_add·
+        # adgroup_add)의 occurred_at으로 승격한다. 관측 시각 짝은 edit_tm과 같이
+        # entity_observed_at이다(같은 GET 유래).
+        "reg_tm": e.reg_tm,
     }
 
 

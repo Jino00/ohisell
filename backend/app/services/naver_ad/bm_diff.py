@@ -101,9 +101,13 @@ def _snapshot_map(db: Session, sdate: date) -> dict[tuple[str, str], NaverEntity
 #   · keyword_add/remove·negative_add/remove = 자식(키워드)의 변화를 그룹 행에 롤업한 집계다.
 #     그룹 객체의 editTm이 자식 추가로 전진하는지 확인된 바 없다 — 확인 전엔 채우지 않는다.
 #   · creative_change = 소재 수 집계(같은 이유) + 소재 grain은 자기 editTm을 이미 갖는다.
-#   · *_add/*_remove(구조 신설·소멸) = 생성 시각은 `regTm`이 답한다. 이번 범위 밖(Jino 승인
-#     범위 = editTm만) — 채우려면 regTm을 함께 받아야 하고, 그건 별도 슬라이스다.
+#   · *_remove(구조 소멸) = `regTm`은 "언제 지웠나"에 답하지 못한다(삭제 시각은 응답에 없다).
+#     NULL로 남긴다 — D-NAO-148에서 명시적으로 범위 밖에 뒀다.
 _OCCURRED_OPS = frozenset({"bid_change", "status_flip", "budget_change", "extended_toggle"})
+
+# D-NAO-148: **regTm**(생성 시각)을 occurred_at으로 승격하는 op_type — 구조 신설만.
+# editTm과 앵커도 창의 하한도 다르므로 집합을 따로 둔다(_occurred_at 참조).
+_REG_OPS = frozenset({"campaign_add", "adgroup_add"})
 
 
 def _observed_bound(row) -> datetime | None:
@@ -114,7 +118,23 @@ def _observed_bound(row) -> datetime | None:
     return getattr(row, "entity_observed_at", None) or getattr(row, "synced_at", None)
 
 
-def _occurred_at(op_type: str, curr, prev) -> datetime | None:
+def _batch_bound(prev_map: dict) -> datetime | None:
+    """직전 스냅샷 **배치**의 관측 시각 = 그 날 행들의 max(관측 시각). None이면 창 없음.
+
+    D-NAO-148: 신설 op의 창 하한 전용이다. 신규 엔티티는 직전 스냅샷에 행이 없어
+    `_observed_bound(prev_row)`를 쓸 수 없다 — 대신 "그 배치가 계정을 훑은 시각"을 쓴다.
+    그때 수집에 없었다는 사실이 곧 "그 이후에 생겼다"의 근거이기 때문.
+
+    ★max인 이유(min·평균이 아니라): entity_observed_at은 entity_sync 한 회차의 단일
+    `now` 복사라 살아있는 행끼리는 같은 값이다. 다만 stale(deleted) 행은 옛 시각에 멈춰
+    있으므로 min을 쓰면 창이 며칠씩 벌어져 무관한 옛 regTm까지 통과시킨다. max가 가장
+    좁은(fail-closed) 하한이다.
+    """
+    bounds = [b for b in (_observed_bound(r) for r in prev_map.values()) if b is not None]
+    return max(bounds) if bounds else None
+
+
+def _occurred_at(op_type: str, curr, prev, *, lower: datetime | None = None) -> datetime | None:
     """네이버 editTm → 이 변경이 **실제로 일어난** 시각(KST). 창 밖·부재는 None(D-NAO-146).
 
     창 = (직전 관측, 이번 관측]. ★왜 창이 필요한가: editTm은 **마지막 수정만** 남긴다
@@ -126,22 +146,36 @@ def _occurred_at(op_type: str, curr, prev) -> datetime | None:
     ★상한은 항상 entity 관측 시각이다 — edit_tm은 entity_sync의 GET에서 오기 때문. 예산·
     확장검색은 값 자체가 몇 분 뒤 P3 GET에서 오지만, 상한을 P3로 늘리면 그 사이(07:35~07:42)에
     일어난 편집을 이 diff의 시각으로 오기록한다. 그 구간은 fail-closed(NULL)로 둔다.
+
+    ★D-NAO-148 — 신설 op(`_REG_OPS`)는 앵커가 `regTm`(생성)이고 창의 하한을 호출부가
+    `lower`로 준다(직전 스냅샷 **배치** 관측 시각, `_batch_bound`). 신규 엔티티엔 직전 행이
+    없어 행별 하한이 원리적으로 존재하지 않기 때문이다. 상한은 다른 op와 똑같이 이 행의 관측
+    시각이고, 창 밖이면 NULL이다 — 부활·추적 개시로 옛 regTm(예: 2022년)이 실려 와도 그것을
+    "어제의 신설"로 적지 않는다. regTm은 불변이라 editTm과 달리 소급 판정이 썩지 않는다.
     """
-    if op_type not in _OCCURRED_OPS:
+    if op_type in _REG_OPS:
+        at = parse_edit_tm(getattr(curr, "reg_tm", None))  # regTm도 같은 UTC ISO8601 'Z'
+        low = lower
+    elif op_type in _OCCURRED_OPS:
+        at = parse_edit_tm(getattr(curr, "edit_tm", None))
+        low = _observed_bound(prev)
+    else:
         return None
-    at = parse_edit_tm(getattr(curr, "edit_tm", None))
     if at is None:
         return None  # 미수집(구 행)·형식 불명 → 없는 값을 지어내지 않는다
-    lower, upper = _observed_bound(prev), _observed_bound(curr)
-    if lower is None or upper is None:
+    upper = _observed_bound(curr)
+    if low is None or upper is None:
         return None
-    return at if lower < at <= upper else None
+    return at if low < at <= upper else None
 
 
-def _op(row, op_type: str, *, before, after, magnitude, force_exc: bool = False, prev=None) -> dict:
+def _op(row, op_type: str, *, before, after, magnitude, force_exc: bool = False, prev=None,
+        lower=None) -> dict:
     """diff 1건 → 내부 op dict(분류/영속화 전 중간표현). before/after는 텍스트로 정규화.
 
-    prev = 이 변경의 직전 스냅샷 행(값 변화 op만 전달). occurred_at 창의 하한을 여기서 얻는다."""
+    prev = 이 변경의 직전 스냅샷 행(값 변화 op만 전달). occurred_at 창의 하한을 여기서 얻는다.
+    lower = 신설 op 전용 창 하한(D-NAO-148, 직전 스냅샷 배치 관측 시각) — 신규 엔티티는
+    prev 행이 아예 없어 하한을 행에서 못 얻는다."""
     return {
         "entity_type": row.entity_type,
         "entity_id": row.entity_id,
@@ -157,20 +191,26 @@ def _op(row, op_type: str, *, before, after, magnitude, force_exc: bool = False,
         "entity_observed_at": getattr(row, "entity_observed_at", None),
         "p3_observed_at": getattr(row, "p3_observed_at", None),
         # D-NAO-146: 네이버 editTm이 준 실제 발생 시각(창 밖·부재면 None = 시각 불명).
-        "occurred_at": _occurred_at(op_type, row, prev),
+        "occurred_at": _occurred_at(op_type, row, prev, lower=lower),
     }
 
 
 def _detect_added(curr: dict, prev: dict) -> list[dict]:
     """새 entity_id 등장 = 대행사 구조 신설(campaign_add/adgroup_add). 항상 is_exception=True(§3).
 
-    신규 등장인데 이미 deleted면 무시(구조로 등장하지 않은 잔여 상태)."""
+    신규 등장인데 이미 deleted면 무시(구조로 등장하지 않은 잔여 상태).
+
+    D-NAO-148: 이 op들의 occurred_at은 `regTm`(생성 시각)에서 오고, 창의 하한은 **직전 스냅샷
+    배치**의 관측 시각이다(`_batch_bound(prev)`) — 신규 엔티티는 prev에 행이 없어 행별 하한을
+    못 얻는다. 배치 하한은 루프 밖에서 1회 계산한다(행마다 prev 전체를 훑으면 O(n²))."""
+    lower = _batch_bound(prev)
     ops = []
     for key, c in curr.items():
         if key in prev or (c.status or "") == "deleted":
             continue
         op_type = "campaign_add" if c.entity_type == "campaign" else "adgroup_add"
-        ops.append(_op(c, op_type, before=None, after=(c.status or "on"), magnitude=None, force_exc=True))
+        ops.append(_op(c, op_type, before=None, after=(c.status or "on"), magnitude=None,
+                       force_exc=True, lower=lower))
     return ops
 
 

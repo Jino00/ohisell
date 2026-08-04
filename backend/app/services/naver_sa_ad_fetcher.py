@@ -421,6 +421,11 @@ def get_campaigns_full() -> list[dict]:
         "user_lock": bool(c.get("userLock", False)),
         "status_reason": c.get("statusReason", ""),
         "edit_tm": c.get("editTm"),  # D-NAO-146 발생 시각 앵커(원문 그대로)
+        # D-NAO-148: 생성 시각(regTm). 라이브 실측 46/46 = 100%, 추가 GET 0.
+        # editTm과 달리 **불변**이라 신설 op의 "언제 만들어졌나"에 답한다(교차 검증:
+        # 15. 갤럭시Z 캠페인 regTm 2026-07-27T12:56:58Z = 우리가 07-28 아침 스냅샷에서
+        # campaign_add로 발견한 그 캠페인).
+        "reg_tm": c.get("regTm"),
     } for c in resp.json()]
 
 
@@ -751,6 +756,7 @@ def get_adgroups(campaign_id: str) -> list[dict]:
         "daily_budget": a.get("dailyBudget"),
         "extended_search": a.get("useExpSearch"),
         "edit_tm": a.get("editTm"),  # D-NAO-146 발생 시각 앵커(원문 그대로, 라이브 실측 1,010/1,010건)
+        "reg_tm": a.get("regTm"),    # D-NAO-148 생성 시각(불변) — 라이브 실측 96/96 = 100%
     } for a in resp.json()]
 
 
@@ -781,6 +787,10 @@ def get_keywords(adgroup_id: str) -> list[dict]:
         # 캠페인·그룹과 마찬가지로 피드 재적용 잡음 없음). 외부 입찰 변경 30일 342건·신규
         # 95건의 **발생 시각**이 여기서 온다 — 추가 GET 0.
         "edit_tm": k.get("editTm"),
+        # D-NAO-148: 키워드 생성 시각(regTm, 불변). 라이브 실측 41/41 = 100%.
+        # external_keyword_added 30일 95건의 "언제 등록됐나"가 여기서 온다 — 교차 검증:
+        # nkw…756866 regTm 2026-07-22T04:41:30Z(=13:41 KST)를 07-23 07:37 sync가 발견.
+        "reg_tm": k.get("regTm"),
     } for k in resp.json()]
 
 

@@ -55,7 +55,7 @@ def db():
 def _snap(db, sdate, entity_type, entity_id, *, campaign_id="", campaign_type="", optimizer="none",
           status="on", bid_amt=None, keyword_count=None, daily_budget=None, extended_search=None,
           negative_kw_count=None, ad_count=None, name="", synced_at=None,
-          entity_observed_at=None, p3_observed_at=None, edit_tm=None):
+          entity_observed_at=None, p3_observed_at=None, edit_tm=None, reg_tm=None):
     # synced_at 기본값 = 그 날 07:37(실제 스냅샷 크론 시각). change_log 조회창의 상한이므로
     # kst_now()가 아니라 스냅샷 날짜에 묶어야 리플레이가 결정적이다.
     # entity_observed_at·p3_observed_at 기본값 = NULL(구 행) → bm_diff가 synced_at으로 폴백.
@@ -68,7 +68,7 @@ def _snap(db, sdate, entity_type, entity_id, *, campaign_id="", campaign_type=""
         daily_budget=daily_budget, extended_search=extended_search,
         negative_kw_count=negative_kw_count, ad_count=ad_count, synced_at=synced_at,
         entity_observed_at=entity_observed_at, p3_observed_at=p3_observed_at,
-        edit_tm=edit_tm,
+        edit_tm=edit_tm, reg_tm=reg_tm,
     ))
 
 
@@ -853,7 +853,8 @@ def test_occurred_at_null_for_child_rollup_ops(db):
 
 
 def test_occurred_at_null_for_structural_add_and_remove(db):
-    """신설·소멸은 이번 범위 밖(생성 시각은 regTm이 답하고, 아직 안 받는다) → NULL 유지."""
+    """★신설 op는 **editTm으로는** 절대 채워지지 않는다(앵커가 regTm이다, D-NAO-148).
+    소멸은 영구히 NULL — regTm은 "언제 지웠나"에 답하지 못하고 삭제 시각은 응답에 없다."""
     _snap(db, D_PREV, "campaign", "cmp-a", campaign_type="WEB_SITE", entity_observed_at=PREV_OBS)
     _snap(db, D_CURR, "campaign", "cmp-a", campaign_type="WEB_SITE", entity_observed_at=CURR_OBS)
     _snap(db, D_PREV, "adgroup", "grp-old", campaign_id="cmp-a", entity_observed_at=PREV_OBS)
@@ -897,3 +898,103 @@ def test_our_echo_still_filtered_when_edit_tm_present(db):
 
     detect_agency_ops(db, op_date=D_CURR)
     assert ("bid_change", "grp-a") not in _ops(db)
+
+
+# ── 13. ★D-NAO-148: 구조 신설의 발생 시각(regTm) ─────────────────────────────
+# 배경: D-NAO-146이 **수정** 시각을 붙였지만 신설은 여전히 NULL이었다(prod 30일:
+#   campaign_add 1 · adgroup_add 6). 네이버 `regTm`이 "언제 만들어졌나"에 답한다.
+# ★창의 하한이 다르다: 신규 엔티티는 직전 스냅샷에 **행이 없어** 행별 하한을 못 얻는다.
+#   대신 직전 스냅샷 배치의 관측 시각(_batch_bound = prev 행들의 max)을 쓴다.
+# ★regTm은 불변이라 editTm과 달리 소급 판정이 썩지 않는다(백필이 성립하는 근거).
+REG_IN_WINDOW = "2026-07-20T10:22:11.000Z"       # = 2026-07-20 19:22:11 KST(창 안)
+REG_IN_WINDOW_KST = datetime(2026, 7, 20, 19, 22, 11)
+REG_LONG_AGO = "2022-04-20T00:00:19.000Z"        # 부활·추적 개시(실측: 캠페인 regTm 2022년)
+REG_AFTER_OBS = "2026-07-21T09:00:00.000Z"       # = 07-21 18:00 KST, 우리가 본 뒤
+
+
+def _pair_for_adgroup_add(db, *, reg_tm, prev_obs=PREV_OBS, curr_obs=CURR_OBS):
+    """D-1엔 없던 그룹이 D에 등장(대행사 신설) 한 쌍. 캠페인은 양쪽에 있다."""
+    _snap(db, D_PREV, "campaign", "cmp-a", campaign_type="WEB_SITE", entity_observed_at=prev_obs)
+    _snap(db, D_CURR, "campaign", "cmp-a", campaign_type="WEB_SITE", entity_observed_at=curr_obs)
+    _snap(db, D_CURR, "adgroup", "grp-new", campaign_id="cmp-a", entity_observed_at=curr_obs,
+          reg_tm=reg_tm)
+    db.commit()
+
+
+def test_add_occurred_at_filled_from_reg_tm_in_window(db):
+    """regTm이 (직전 배치 관측, 이번 관측] 안 → 그 시각이 occurred_at으로 올라간다(KST).
+    라이브 대조: grp-a001-02-000000070992116 regTm 07-30 14:04:04 → 07-31 스냅샷이 발견."""
+    _pair_for_adgroup_add(db, reg_tm=REG_IN_WINDOW)
+    detect_agency_ops(db, op_date=D_CURR)
+
+    assert _ops(db)[("adgroup_add", "grp-new")].occurred_at == REG_IN_WINDOW_KST
+
+
+def test_add_occurred_at_null_when_reg_tm_predates_window(db):
+    """★부활·추적 개시 방어: regTm이 직전 배치 관측보다 과거 → NULL.
+    옛날에 만들어진 엔티티가 이제야 우리 수집에 들어온 것이지 어제 신설된 게 아니다.
+    이걸 채우면 화면이 2022년을 어제 사건의 시각으로 보여준다."""
+    _pair_for_adgroup_add(db, reg_tm=REG_LONG_AGO)
+    detect_agency_ops(db, op_date=D_CURR)
+
+    assert _ops(db)[("adgroup_add", "grp-new")].occurred_at is None
+
+
+def test_add_occurred_at_null_when_reg_tm_after_our_observation(db):
+    """regTm이 우리 관측 이후 → NULL. 우리가 본 뒤에 생긴 것은 이 diff의 원인일 수 없다."""
+    _pair_for_adgroup_add(db, reg_tm=REG_AFTER_OBS)
+    detect_agency_ops(db, op_date=D_CURR)
+
+    assert _ops(db)[("adgroup_add", "grp-new")].occurred_at is None
+
+
+def test_add_occurred_at_null_when_reg_tm_missing(db):
+    """regTm 미수집(구 행·API 누락) → NULL. 종전 동작 그대로(하위호환)."""
+    _pair_for_adgroup_add(db, reg_tm=None)
+    detect_agency_ops(db, op_date=D_CURR)
+
+    assert _ops(db)[("adgroup_add", "grp-new")].occurred_at is None
+
+
+def test_campaign_add_occurred_at_filled_from_reg_tm(db):
+    """캠페인 신설도 같은 규약. 라이브 대조: cmp-a001-02-000000010907625 regTm 07-27 21:56:58."""
+    _snap(db, D_PREV, "campaign", "cmp-old", campaign_type="WEB_SITE", entity_observed_at=PREV_OBS)
+    _snap(db, D_CURR, "campaign", "cmp-old", campaign_type="WEB_SITE", entity_observed_at=CURR_OBS)
+    _snap(db, D_CURR, "campaign", "cmp-new", campaign_type="WEB_SITE",
+          entity_observed_at=CURR_OBS, reg_tm=REG_IN_WINDOW)
+    db.commit()
+
+    detect_agency_ops(db, op_date=D_CURR)
+    assert _ops(db)[("campaign_add", "cmp-new")].occurred_at == REG_IN_WINDOW_KST
+
+
+def test_add_occurred_at_ignores_edit_tm(db):
+    """★앵커가 갈린다: 신설 op는 editTm을 보지 않는다. 창 안 editTm이 실려 있어도
+    regTm이 없으면 NULL이다 — 신설의 '언제'는 수정 시각이 아니라 생성 시각이다."""
+    _snap(db, D_PREV, "campaign", "cmp-a", campaign_type="WEB_SITE", entity_observed_at=PREV_OBS)
+    _snap(db, D_CURR, "campaign", "cmp-a", campaign_type="WEB_SITE", entity_observed_at=CURR_OBS)
+    _snap(db, D_CURR, "adgroup", "grp-new", campaign_id="cmp-a", entity_observed_at=CURR_OBS,
+          edit_tm=EDIT_IN_WINDOW, reg_tm=None)
+    db.commit()
+
+    detect_agency_ops(db, op_date=D_CURR)
+    assert _ops(db)[("adgroup_add", "grp-new")].occurred_at is None
+
+
+def test_add_window_lower_bound_uses_batch_max_not_min(db):
+    """★하한은 직전 배치 행들의 **max**다. deleted 좀비가 옛 관측 시각을 물고 있어도 창이
+    벌어지지 않는다 — min이면 그 사이의 무관한 옛 regTm이 통과해 거짓 시각이 찍힌다."""
+    stale_obs = PREV_OBS - timedelta(days=30)     # 오래전에 멈춘 좀비 행
+    _snap(db, D_PREV, "campaign", "cmp-a", campaign_type="WEB_SITE", entity_observed_at=PREV_OBS)
+    _snap(db, D_CURR, "campaign", "cmp-a", campaign_type="WEB_SITE", entity_observed_at=CURR_OBS)
+    _snap(db, D_PREV, "adgroup", "grp-zombie", campaign_id="cmp-a", status="deleted",
+          entity_observed_at=stale_obs)
+    _snap(db, D_CURR, "adgroup", "grp-zombie", campaign_id="cmp-a", status="deleted",
+          entity_observed_at=CURR_OBS)
+    # 좀비 관측(30일 전)과 직전 배치 관측 사이에 만들어진 값 → max 하한이면 창 밖 = NULL
+    _snap(db, D_CURR, "adgroup", "grp-new", campaign_id="cmp-a", entity_observed_at=CURR_OBS,
+          reg_tm="2026-07-10T00:00:00.000Z")
+    db.commit()
+
+    detect_agency_ops(db, op_date=D_CURR)
+    assert _ops(db)[("adgroup_add", "grp-new")].occurred_at is None
