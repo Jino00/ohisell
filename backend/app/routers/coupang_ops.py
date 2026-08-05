@@ -27,7 +27,7 @@ from app.database import get_db
 from app.models import Channel, CoupangAdChangeLog, CoupangAdCostDaily, CoupangAdEntitySnapshot, CoupangAdOptionDaily, CoupangProductItem, CoupangRevenueFee, CoupangRgInbound, CoupangRgOrderItem, CoupangRgSettlementFee, CoupangRocketPromotion, Order, ProductChannelMapping, ProductMaster
 from app.routers._coupang_write_http import handle_write as _handle_write
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
-from app.services.coupang import ad_change_history, ad_cost_sync, ad_creative_diff, ad_settings_diff, coupon_write, refresh_contract, coupang_seller_cost as _seller_cost_harness, demand_classifier, in_transit_estimator, lead_time_estimator, ohitech_ad_sync, product_write, rg_fee_audit, rg_inbound_sync, rg_product_size_sync, rg_replenishment, rg_settlement_sync, replenishment_backtest, rocket_cost_map, rocket_promo_sync, rocket_supplier_sync, rg_cost_reader as _rg_reader, sales_velocity_estimator, vendor_summary_sync
+from app.services.coupang import ad_change_history, ad_cost_sync, ad_creative_diff, ad_settings_diff, coupon_write, refresh_contract, coupang_seller_cost as _seller_cost_harness, demand_classifier, in_transit_estimator, lead_time_estimator, ohitech_ad_sync, product_write, rg_fee_audit, rg_inbound_sync, rg_product_size_sync, rg_replenishment, rg_settlement_sync, replenishment_backtest, rocket_cost_map, rocket_promo_file_sync, rocket_promo_sync, rocket_supplier_sync, rg_cost_reader as _rg_reader, sales_velocity_estimator, vendor_summary_sync
 from app.utils.crypto import CookieCryptoError
 
 log = logging.getLogger(__name__)
@@ -1456,6 +1456,41 @@ def ingest_rocket_promotion(
     if not isinstance(rows, list) or not rows:
         raise HTTPException(status_code=400, detail="rows[] 필요")
     return rocket_promo_sync.ingest_rocket_promotions(db, vendor_id, rows)
+
+
+@router.post("/rocket/promotion/discount-files/ingest")
+def ingest_promo_discount_files(
+    body: dict[str, Any] = Body(...),
+    x_ingest_token: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """MD 제출 제안서 엑셀(구글드라이브) push → 프로모션 매칭 + 상품별 개당 할인액 적재 (D-CPP-10).
+
+    body: {"vendor_id":"A01029796",
+           "files":[{"file_name":"instant_upload_template_260723_260815_플립폴드8시리즈",
+                     "file_mtime":"2026-07-23T11:26:00",
+                     "rows":[{"product_number":"76350897","discount_type":"정액수량","discount_value":3000}, ...]}]}
+
+    ★이 파일이 개당 할인액의 유일한 출처다(2026-08-05 라이브 확정): 프로모션 API·상세 화면·
+      계약서 본문 셋 다 개당 할인액을 주지 않는다. 파일명의 기간으로 프로모션을 찾는다.
+    ★미매칭 파일은 응답 `unmatched[]`와 prod 로그에 반드시 남는다 — 조용히 빠지면 분담금이
+      0으로 남아 순이익이 과대해진다.
+    """
+    _check_ingest_token(x_ingest_token)
+    vendor_id = str(body.get("vendor_id") or "").strip()
+    if not vendor_id or len(vendor_id) > 20:   # String(20) 그레인 키 — 위 sales와 같은 이유
+        raise HTTPException(status_code=400, detail="vendor_id 필요(<=20자)")
+    files = body.get("files")
+    if not isinstance(files, list) or not files:
+        raise HTTPException(status_code=400, detail="files[] 필요")
+    out = rocket_promo_file_sync.ingest_promo_discount_files(db, vendor_id, files)
+    if out.get("unmatched"):
+        log.warning(
+            "제안서 미매칭 %d건 — 그 기간 분담금은 0으로 남는다(순이익 과대): %s",
+            len(out["unmatched"]),
+            "; ".join(f"{u.get('file_name')}({u.get('reason')})" for u in out["unmatched"])[:400],
+        )
+    return out
 
 
 @router.post("/coupon/used-amount/ingest")
