@@ -14,7 +14,7 @@
 //      0이 아니라 "—" + 미수집 건수로 표시한다.
 //   3) **드리프트는 단계로 갈린다.** 입고 전 단계(발주확정·거래처확인요청)에서 발주≠입고는
 //      당연하다. 요약 타일이 강조하는 값은 "거래명세서확인 단계인데 발주≠입고"뿐이다.
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Card, Stat, Table, Th, Td, Loading, EmptyState, Button, Badge } from "../components/ui";
 import { useAsyncData } from "../lib/useAsyncData";
 import {
@@ -308,14 +308,92 @@ function StatusBreakdown({ data }: { data: RocketRecon }) {
 }
 
 // ── 상품(SKU) 표 + 행 확장 ──────────────────────────────────────
+/** 검색·정렬 키. 서버는 발주 금액 desc로 주므로 그 순서를 '기본'으로 보존한다
+ *  (정렬을 끄면 원래 보던 화면으로 정확히 돌아가야 하기 때문). */
+type SkuSortKey = "default" | "sku" | "name";
+
+/** 한글 검색은 정규화가 갈리면 **에러 없이 0건**이 된다(교훈 #140: macOS NFD vs API NFC).
+ *  화면 입력(NFC일 수도 NFD일 수도)과 API 문자열 양쪽을 NFC로 모아 비교한다. */
+const norm = (s: string) => s.normalize("NFC").toLowerCase();
+
+/** SKU 번호는 숫자 문자열이라 문자열 정렬하면 9 > 76350896이 된다 — 숫자면 숫자로 비교. */
+function compareSku(a: string, b: string): number {
+  const na = Number(a), nb = Number(b);
+  if (Number.isFinite(na) && Number.isFinite(nb) && na !== nb) return na - nb;
+  return a.localeCompare(b, "ko");
+}
+
 function SkuTable({ data, from, to }: { data: RocketRecon; from: string; to: string }) {
   const [openSku, setOpenSku] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [sortKey, setSortKey] = useState<SkuSortKey>("default");
+  const [asc, setAsc] = useState(true);
   const f = data.filters;
 
-  const title =
+  // 검색: 공백으로 나눈 토큰 **전부**가 SKU 번호 또는 상품명에 있으면 통과(부분·순서무관).
+  const shown = useMemo(() => {
+    const tokens = norm(query).split(/\s+/).filter(Boolean);
+    const filtered = tokens.length === 0
+      ? data.skus
+      : data.skus.filter((r) => {
+          const hay = `${norm(r.product_number)} ${norm(r.product_name ?? "")}`;
+          return tokens.every((t) => hay.includes(t));
+        });
+    if (sortKey === "default") return asc ? filtered : [...filtered].reverse();
+    const sorted = [...filtered].sort((a, b) =>
+      sortKey === "sku"
+        ? compareSku(a.product_number, b.product_number)
+        // 상품명 없는 행은 정렬 방향과 무관하게 항상 뒤로 — '이름 없음'은 값이 아니다.
+        : (a.product_name == null || b.product_name == null)
+          ? (a.product_name == null ? 1 : 0) - (b.product_name == null ? 1 : 0)
+          : a.product_name.localeCompare(b.product_name, "ko"),
+    );
+    return asc ? sorted : sorted.reverse();
+  }, [data.skus, query, sortKey, asc]);
+
+  const searching = query.trim().length > 0;
+  const baseTitle =
     f.drift_only || f.unconfirmed_only
       ? `상품별 대사 — ${n(f.sku_count_shown)}/${n(f.sku_count_total)} SKU (필터 적용)`
       : `상품별 대사 — ${n(f.sku_count_total)} SKU`;
+  const title = searching ? `${baseTitle} · 검색 ${n(shown.length)}건` : baseTitle;
+
+  const controls = (
+    <div className="flex flex-wrap items-center gap-2 border-b border-gray-100 px-4 py-3">
+      <div className="relative">
+        <input
+          type="search"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="상품명 또는 SKU 번호로 검색"
+          aria-label="상품명 또는 SKU 번호로 검색"
+          className="w-72 rounded border border-gray-300 px-2 py-1 text-sm"
+        />
+      </div>
+      {searching && (
+        <Button variant="ghost" onClick={() => setQuery("")}>지우기</Button>
+      )}
+      <div className="ml-auto flex items-center gap-2">
+        <label className="text-xs text-gray-500" htmlFor="sku-sort">정렬</label>
+        <select
+          id="sku-sort"
+          value={sortKey}
+          onChange={(e) => setSortKey(e.target.value as SkuSortKey)}
+          className="rounded border border-gray-300 px-2 py-1 text-sm"
+        >
+          <option value="default">기본(발주 금액 큰 순)</option>
+          <option value="sku">SKU 번호</option>
+          <option value="name">상품명</option>
+        </select>
+        {/* 버튼 글자는 '지금 적용된 순서' — 누르면 반대로 뒤집힌다. */}
+        <Button onClick={() => setAsc(!asc)} title="정렬 방향 뒤집기">
+          {sortKey === "default"
+            ? (asc ? "금액 큰 순 ↓" : "금액 작은 순 ↑")
+            : (asc ? "오름차순 ↑" : "내림차순 ↓")}
+        </Button>
+      </div>
+    </div>
+  );
 
   if (data.skus.length === 0) {
     return (
@@ -338,6 +416,13 @@ function SkuTable({ data, from, to }: { data: RocketRecon; from: string; to: str
 
   return (
     <Card title={title}>
+      {controls}
+      {shown.length === 0 ? (
+        <EmptyState
+          reason={`"${query.trim()}"과(와) 일치하는 상품이 없습니다 (이 기간 ${n(data.skus.length)} SKU 중 0건).`}
+          hint="SKU 번호 일부나 상품명 일부로 검색해 보세요. 검색은 이 기간에 조회된 상품 안에서만 이뤄집니다 — 기간 밖 상품은 기간을 넓혀야 나옵니다."
+        />
+      ) : (
       <Table
         head={
           <>
@@ -352,7 +437,7 @@ function SkuTable({ data, from, to }: { data: RocketRecon; from: string; to: str
           </>
         }
       >
-        {data.skus.map((r) => (
+        {shown.map((r) => (
           <SkuRows
             key={r.product_number}
             row={r}
@@ -363,6 +448,7 @@ function SkuTable({ data, from, to }: { data: RocketRecon; from: string; to: str
           />
         ))}
       </Table>
+      )}
       <div className="px-4 py-3 text-xs text-gray-400 space-y-1">
         <p>
           <b>입고</b> 열은 <b>단일 상품 발주에서만</b> 채워집니다 — 여러 상품이 섞인 발주는 입고수량이
@@ -376,6 +462,10 @@ function SkuTable({ data, from, to }: { data: RocketRecon; from: string; to: str
             <> 판정 근거가 아예 없는 상품이 {n(f.sku_count_unknown_drift)}건 있으며, &lsquo;발주≠입고만&rsquo;
             필터를 켜면 <b>정상이라서가 아니라 모르기 때문에</b> 빠집니다.</>
           )}
+        </p>
+        <p>
+          <b>검색·정렬</b>은 위 조회 조건으로 <b>이미 불러온 상품 안에서만</b> 적용됩니다(요약 타일·수집률은
+          검색과 무관하게 기간 전체 기준). 찾는 상품이 안 보이면 기간을 넓히거나 상단 필터를 해제하세요.
         </p>
         <p>
           <b>계산서</b> 배지는 <b>그 상품이 속한 발주</b> 기준입니다 — 계산서 1건이 여러 상품에 걸치므로
@@ -397,10 +487,12 @@ function SkuRows({ row, open, onToggle, from, to }: {
     <>
       <tr className={open ? "bg-blue-50/40" : undefined}>
         <Td>
-          <button type="button" onClick={onToggle} className="text-left">
+          {/* ★상품명은 자르지 않는다 — 'Z플립8'과 'Z폴드8'처럼 **끝에서 갈리는** 이름이 많아
+              말줄임(…)이 되면 서로 다른 상품이 같은 줄로 보인다. 폭만 제한하고 줄바꿈시킨다. */}
+          <button type="button" onClick={onToggle} className="block w-full text-left">
             <span className="font-medium text-gray-900">{row.product_number}</span>
             <span className="ml-2 text-xs text-gray-500">발주 {n(row.po_count)}건</span>
-            <div className="text-xs text-gray-500 max-w-md truncate">
+            <div className="max-w-[34rem] text-xs text-gray-500 whitespace-normal break-words">
               {row.product_name ?? NO_DATA}
             </div>
           </button>
