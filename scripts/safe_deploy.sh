@@ -40,6 +40,11 @@
 #   · 커밋 안 된 변경이 있는 파일은 배포 거부(배포물 = 커밋된 내용, 재현 가능)
 #   · 배포 후 sha 대조 + prod 매니페스트(deploy-manifest.jsonl)에 who/when/commit 기록
 #
+# ★재시작은 무중단이 기본(2026-08-05): `--restart` 는 블루-그린으로 동작한다
+#   (scripts/zero_downtime_restart.sh). 구 `pm2 restart` 는 콜드부팅 ~50초 동안 전 요청을
+#   502로 만들었고, 그 창에서 갱신 버튼 POST·Mac 페처 push가 유실됐다(3일 61회).
+#   무중단 경로가 고장난 비상시에만 `--restart-legacy`(다운타임 감수).
+#
 # 사용:
 #   scripts/safe_deploy.sh backend/app/routers/naver_ad.py [파일...] [--restart]
 #   scripts/safe_deploy.sh backend/alembic/versions/xxx.py backend/app/models.py --migrate --restart
@@ -55,10 +60,11 @@ MANIFEST="$REMOTE_REPO/deploy-manifest.jsonl"
 MIG_DIR="backend/alembic/versions"                          # repo-relative
 REMOTE_ALEMBIC="${SAFE_DEPLOY_ALEMBIC:-.venv/bin/alembic}"  # $REMOTE_REPO/backend 기준
 
-RESTART=0; FRONTEND=0; STEAL=0; MIGRATE=0; FILES=()
+RESTART=0; RESTART_LEGACY=0; FRONTEND=0; STEAL=0; MIGRATE=0; FILES=()
 for a in "$@"; do
   case "$a" in
     --restart) RESTART=1 ;;
+    --restart-legacy) RESTART_LEGACY=1 ;;
     --frontend) FRONTEND=1 ;;
     --steal-lock) STEAL=1 ;;
     --migrate) MIGRATE=1 ;;
@@ -261,7 +267,22 @@ if [ ${#CODE_FILES[@]} -gt 0 ]; then
 fi
 
 # ── 4. 재시작(선택) ─────────────────────────────────────────────────
+# ★2026-08-05부터 재시작은 **무중단(블루-그린)**이 기본이다. 구 방식(pm2 restart)은
+# 콜드부팅 ~50초 동안 전 요청이 502였고, 그 창에서 갱신 버튼의 POST와 Mac 페처의 push가
+# 유실됐다(3일간 재시작 61회 = 502 구멍 61개). 상세는 scripts/zero_downtime_restart.sh 헤더.
+# --restart-legacy 는 무중단 경로가 고장났을 때의 탈출구다(다운타임 발생을 감수).
 if [ "$RESTART" = 1 ]; then
+  echo "▶ 무중단 재시작(블루-그린)…"
+  if ! "$(dirname "$0")/zero_downtime_restart.sh"; then
+    echo "" >&2
+    echo "  ★무중단 재시작이 실패했습니다. **코드 파일은 이미 prod에 배포됐고**," >&2
+    echo "    구 프로세스가 구버전 코드로 계속 서빙 중일 수 있습니다(사용자 영향은 없음)." >&2
+    echo "    위 로그에서 실패 단계를 확인한 뒤 재실행하거나, 부득이하면:" >&2
+    echo "      scripts/safe_deploy.sh --restart-legacy   # 다운타임 ~50초 감수" >&2
+    fail "무중단 재시작 실패 — 배포는 완료, 재시작만 미완"
+  fi
+elif [ "$RESTART_LEGACY" = 1 ]; then
+  echo "⚠️  레거시 재시작(다운타임 ~50초 — 그 사이 요청은 502가 됩니다)"
   ssh -o BatchMode=yes "$HOST" "pm2 restart ohisell-backend >/dev/null 2>&1; sleep 6; pm2 list | grep ohisell-backend"
 fi
 echo "✅ 배포 완료 (commit $COMMIT)"

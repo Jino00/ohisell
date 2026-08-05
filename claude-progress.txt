@@ -1,3 +1,37 @@
+[2026-08-05 밤] 쿠팡 손익 정합(인프라) — 무중단 배포·광고push·전체갱신 3PR 적대 리뷰 마감 + 세션 인계
+  · 출발점: Jino가 대시보드 빨간 배너("쿠팡 광고비 수집 중단") 보고 "이건 왜 뜨는거야?" 질문
+    — 배너는 정직했다(광고비 2큐 26시간 미갱신), 상류를 파고들어 병소 3개 확정
+  · 아래 D-19 항목(전 세션 문서화분)의 코드 실체 = 3개 PR: #203(무중단 배포)·#204(광고 push 500
+    SAVEPOINT 멱등)·#205(대시보드 전체 갱신 버튼). #204 push 완료(fd21cc7)
+  · codex CLI 쿼터 소진 → Opus 1기 적대 리뷰로 대체(스킬 폴백). P1 총 7건 발견 — 6건 채택·수정,
+    1건(PR #204 P1-5)은 SQLAlchemy 소스+재현 스크립트로 전제 불성립 확인해 근거 실측 부분 기각
+    (하드닝은 채택). ★가장 무거운 것 = PR #203 P1-1: 리더 락 보유와 스케줄러 가동을 한 플래그로
+    합친 탓에 기동 실패해도 /health가 "리더"를 자칭 — 배포 스크립트가 크론 전멸을 "완료"로
+    오판할 수 있었다(green-while-stale 재발 형태, 교훈 #142와 같은 계열)
+  · 처분 표를 PR #204·#205 코멘트로 게시 완료(테스트 수치·재현 절차 포함). PR #203은 자체 리뷰
+    결과를 커밋(2a9fd69)에 반영, 별도 코멘트는 미게시(다음 세션 필요시)
+  · 라이브 증거: 전환 5회 각 7~10초·프로브 61/61·62/62=200, 광고 push 성공(21:34:06, duplicate
+    116 집계·유실되던 변경 11건 최초 적재), 백엔드 4,813 passed·프론트 212 passed
+  · 미결 이월: codex 소급 리뷰(08-09 이후) / PR 3건 병합 대기 / 전체 갱신 버튼 라이브 1클릭
+    검증 미실시(Jino Mac 확인 후 진행) / next_ids.sh 정규식 사각지대(`## #140 —` 형식 미인식)
+  · 상세: .claude/memory/HANDOFF_zero-downtime-deploy+unified-refresh_20260805.md
+
+[2026-08-05] 쿠팡 손익 정합(인프라) — prod 무중단 배포(블루-그린) + 광고 설정 push 500 수정 (D-19)
+  · sellc prod 간헐 502(08-03~05) 원인 규명: 크래시·OOM 0건, 정체는 pm2 restart 콜드부팅 공백
+    — 재시작 08-03 34회/08-04 19회/08-05 8회, 종료→기동 47초가 nginx connect() failed와 초 단위 일치
+  · 블루-그린 무중단 배포 도입(scripts/zero_downtime_restart.sh) + nginx upstream + 스케줄러
+    파일락 리더 선출(backend/app/services/scheduler_leader.py). safe_deploy.sh --restart 기본 경로화
+  · 라이브 실증: 전환 3회 각 7~10초, 0.2초 간격 프로브 62요청 전부 200
+  · 쿠팡 광고 설정 push HTTP 500(UNIQUE constraint failed: coupang_ad_change_log) 원인·수정
+    — SessionLocal(autoflush=False)에서 같은 트랜잭션 내 두 ingest 경로 교차 중복 삽입.
+    SAVEPOINT(db.begin_nested())+즉시 flush로 흡수, 라이브 2026-08-05 21:34:06 push 성공
+    (duplicate 116/changes_duplicate 2, 신규 변경 3건·소재 변경 7건 최초 적재)
+  · 교훈 #142(재시작=다운타임, 배포 빈도로 502 추적) · #143(autoflush 교차 중복)
+  · failure-memory 2건 기록. 코드 수정은 별도 워크트리(fix-ad-change-log-idempotent) 기존 커밋에
+    이미 반영돼 있었음 — 이 세션은 문서화만(코드 변경 없음)
+  · 이 기록은 워크트리 .claude/worktrees/zero-downtime(브랜치 claude/zero-downtime-deploy)에서 작성.
+    루트는 main 고정, PR·배포 미실행
+
 [2026-08-05] 쿠팡 손익 정합 — 로켓배송 1P 축 확정 + 프로모션 제안서 자동수집(D-CPP-10)
   · 대시보드가 회사 매출의 34.5%만 보여줌(RG1 매출 0·비용만 / 로켓1P 행 자체 없음)
   · 1P 매출 정본 = 세금계산서. 현행 발주액 정의는 +24.7% 과대(5개월 실측)
