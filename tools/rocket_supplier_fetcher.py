@@ -69,6 +69,10 @@ PO_DETAIL_PATH = "/scm/purchase/order/get"                     # 발주상세 pe
 # ── 프로모션 손익 레이어(트랙 coupang-promo-pnl) 경로 — 2026-07-28 라이브 정찰 실측 ──
 #   ★추측 아님: 아래 셋 다 살아있는 세션에서 200 응답과 필드를 직접 확인하고 적었다.
 SALES_SEARCH_PATH = "/retail-insight/api/business-insight/vi-detail-search"   # 판매분석 POST JSON
+# 판매분석 페이지 크기(ref 44 §3): 라이브 최대 하루 60옵션 → 100이면 1페이지로 끝난다.
+#   승급 재시도 상한은 그보다 넉넉히 — 여기를 넘는 날은 재시도해도 경계가 남으므로 실패로 올린다.
+_SALES_PAGE_SIZE = 100
+_SALES_PAGE_SIZE_MAX = 500
 SUBSCRIPTION_PATH = "/rpd/v2/supplier/subscription/detail"                    # 구독 게이트(D-CPP-5)
 PROMOTION_LIST_PATH = "/promotion/promotion-request"                          # 프로모션 목록(Spring Page)
 PROMOTION_DETAIL_PATH = "/promotion/promotion-request"                        # + /{requestId}
@@ -268,7 +272,12 @@ def load_config() -> dict:
     #     결합 가드가 이 커플링을 지킨다 — 바꾸려면 양쪽을 같이 바꿔라.
     cfg.setdefault("sales_days", 30)
     cfg.setdefault("sales_backfill_days", 0)
-    cfg.setdefault("sales_page_size", 20)
+    # ★★100이지 20이 아니다 — 이 숫자를 줄이면 **행이 조용히 사라진다**(2026-08-05 라이브, ref 44 §3).
+    #   `sortBy=GMV DESC`가 불안정 정렬이라 페이지를 넘길 때마다 경계 행이 중복/누락된다.
+    #   실측 최대 하루 60옵션이므로 100이면 **1페이지로 끝나 경계 자체가 없다**.
+    #   (경계가 생기는 날은 _collect_sales_day가 고유 개수로 잡아 pageSize를 승급해 재시도한다.)
+    cfg.setdefault("sales_page_size", _SALES_PAGE_SIZE)
+    cfg.setdefault("sales_page_size_max", _SALES_PAGE_SIZE_MAX)
     cfg.setdefault("sales_max_pages", 40)
     # 판매분석 시간 예산(분). lease TTL이 20분이라 그 안에서 끝나야 prod가 요청을 재무장하고
     #   Chrome을 한 번 더 띄우는 일이 없다. 초과하면 모은 것만 push하고 남은 날은 다음 회차로.
@@ -1190,6 +1199,41 @@ def _sales_page_meta(payload: dict) -> dict:
     }
 
 
+def _sales_raw_ids(payload: dict) -> list[str]:
+    """응답의 원시 vendorItemId 목록(매핑 전). 절단 판정은 **이걸로** 한다.
+
+    ★매핑 후 레코드로 세면 안 된다: 쿠팡이 필드명을 바꾸면(vendorItemId 개명) 레코드가 0이 되어
+      "페이지가 잘렸다"로 오진되고, 그러면 그 날이 실패로 접혀 _SalesMappingError가 영영 안 뜬다.
+      두 사고는 처방이 다르다(전자=코드 한 줄, 후자=재수집) — 판정자를 갈라 둔다.
+    """
+    out: list[str] = []
+    for it in (payload or {}).get("vendorItems") or []:
+        if not isinstance(it, dict):
+            continue
+        det = it.get("vendorItemDetails")
+        vi = det.get("vendorItemId") if isinstance(det, dict) else None
+        if vi is None or str(vi).strip() == "":
+            continue
+        out.append(str(vi))
+    return out
+
+
+def _dedupe_sales_rows(rows: list[dict]) -> list[dict]:
+    """option_id 기준 중복 제거(뒤엣것 우선), 첫 등장 순서 유지.
+
+    ★쿠팡 판매분석은 같은 옵션을 여러 페이지에 걸쳐 다시 준다(GMV 정렬 불안정, ref 44 §3-1).
+      ingest가 uq(vendor, option, date)로 어차피 접지만, 여기서 접어야 **고유 개수로 절단을
+      판정**할 수 있다 — 접기 전 개수를 세면 중복이 결손을 가린다(거짓 초록).
+    """
+    out: dict[str, dict] = {}
+    for r in rows:
+        key = str((r or {}).get("option_id") or "")
+        if not key:
+            continue
+        out[key] = r          # 뒤엣것 우선(같은 날 같은 옵션이면 값은 같다)
+    return list(out.values())
+
+
 def _sales_records(payload: dict, day: date) -> list[dict]:
     """쿠팡 원시 vendorItems → **우리 레코드 계약**(PLAN §4 sales). 순수 함수(HTTP 없음).
 
@@ -1307,17 +1351,18 @@ def _sales_access_ok(page, today: date | None = None) -> tuple[bool, str]:
     return True, ""
 
 
-def _fetch_sales_page(page, cfg: dict, day: date, page_no: int):
+def _fetch_sales_page(page, cfg: dict, day: date, page_no: int, page_size: int | None = None):
     """판매분석 한 날짜·한 페이지 fetch. 반환 (payload|None, status, body).
 
     body는 400일 때 유효 구간을 읽기 위해 그대로 돌려준다.
+    page_size를 주면 설정값 대신 그것을 쓴다(페이지 승급 재시도 — _collect_sales_day 참조).
     """
     body = {
         "startDate": day.isoformat(),
         "endDate": day.isoformat(),          # ★하루 단위 — 위 섹션 주석(구간 합산 함정) 참조
         "registrationTypes": ["RETAIL"],
         "pageNumber": page_no,
-        "pageSize": int(cfg.get("sales_page_size", 20)),
+        "pageSize": int(page_size if page_size else cfg.get("sales_page_size", _SALES_PAGE_SIZE)),
         "sortBy": "GMV",
         "sortOrder": "DESC",
         "isKanCategoryCode": True,
@@ -1347,45 +1392,97 @@ def _collect_sales_day(page, cfg: dict, day: date, today: date | None = None):
       들어와 있는 **확인 수단**인데 이전 판은 파싱만 하고 버렸다(원칙14).
       - pageNumber 에코가 요청과 다르면 서버가 페이징을 무시하고 같은 페이지를 다시 주는 것 →
         무한 루프는 max_pages가 막지만 같은 행을 N번 세게 되므로 즉시 끊는다.
-      - 마지막에 len(rows) != totalResults 면 **조용한 절단**이다 → 그 날을 실패로 올린다.
       - max_pages 소진도 절단이다 → 이전 판은 정상 종료와 구분이 안 됐다.
+
+    ★★2026-08-05 라이브 실증(ref 44 §3) — **판정자를 누적 행 수에서 고유 옵션 수로 바꿨다.**
+      `sortBy=GMV DESC` 정렬이 불안정해서 페이지 경계의 행이 다음 페이지에 **다시 나오고**
+      그만큼 다른 행이 영영 건너뛰어진다. 실측: 2026-08-01 totalResults=60인데 pageSize=20으로
+      3페이지를 돌면 누적 60행 · **고유 58개**(07-15는 43 → 42).
+      이전 판의 검사식 `raw_items != total_results`는 **중복을 포함해 세므로 60==60으로 통과**했고,
+      ingest의 uq(vendor, option, date) upsert가 중복을 조용히 접어 58행만 남았다 —
+      "검사식이 결함과 같은 값을 본다"는 거짓 초록이다. 고유 개수로 세면 즉시 드러난다.
+      회복은 두 겹으로 한다:
+        ① 기본 pageSize를 100으로 올려 대개 **1페이지**로 끝낸다(경계가 없으면 유실도 없다).
+        ② 그래도 고유 < totalResults면 **pageSize를 totalResults로 승급해 하루를 통째로 1회 재시도**.
+      재시도 후에도 모자라면 그날을 실패로 올린다(조용히 접지 않는다).
+    ★반환 rows는 **option_id 기준 중복 제거**(뒤엣것 우선)된다. ingest가 어차피 upsert로 접지만,
+      raw_items/len(rows)를 보고 판단하는 상류가 중복에 속지 않게 여기서 접는다.
     """
     max_pages = int(cfg.get("sales_max_pages", 40))
-    rows: list[dict] = []
-    raw_items = 0
-    total_results = 0
-    page_no = 0
-    truncated = True     # 루프를 정상 종료(break)로 빠져나가면 False로 내린다
-    while page_no < max_pages:
-        payload, status, text = _fetch_sales_page(page, cfg, day, page_no)
-        if status == 403:
-            raise _SalesAccessDenied(f"판매분석 403(구독/권한) {day}: {text[:160]}")
-        if payload is None:
-            period = _parse_viewable_period(text) if status == 400 else None
-            if period is not None:
-                return rows, period, raw_items
-            raise RuntimeError(f"판매분석 {day} page={page_no} 비정상(status={status}): {text[:160]}")
-        items = (payload or {}).get("vendorItems") or []
-        raw_items += len(items) if isinstance(items, list) else 0
-        rows.extend(_sales_records(payload, day))
-        meta = _sales_page_meta(payload)
-        if meta["page_number"] != page_no:
+    cap = int(cfg.get("sales_page_size_max", _SALES_PAGE_SIZE_MAX))
+
+    def _sweep(page_size: int | None):
+        """한 날짜를 끝까지 훑는다. 반환 (rows, period_hint|None, raw_items, unique_n, total_results).
+
+        unique_n = **원시 vendorItemId 고유 개수**(매핑 전). 매핑 후 레코드로 세지 않는 이유는
+        _sales_raw_ids 주석 참조 — 매핑 파손과 페이지 유실을 뭉치지 않기 위해서다.
+        """
+        rows: list[dict] = []
+        raw_items = 0
+        raw_ids: set[str] = set()
+        total_results = 0
+        page_no = 0
+        truncated = True   # 루프를 정상 종료(break)로 빠져나가면 False로 내린다
+        while page_no < max_pages:
+            payload, status, text = _fetch_sales_page(page, cfg, day, page_no, page_size)
+            if status == 403:
+                raise _SalesAccessDenied(f"판매분석 403(구독/권한) {day}: {text[:160]}")
+            if payload is None:
+                period = _parse_viewable_period(text) if status == 400 else None
+                if period is not None:
+                    return _dedupe_sales_rows(rows), period, raw_items, len(raw_ids), 0
+                raise RuntimeError(f"판매분석 {day} page={page_no} 비정상(status={status}): {text[:160]}")
+            items = (payload or {}).get("vendorItems") or []
+            raw_items += len(items) if isinstance(items, list) else 0
+            raw_ids.update(_sales_raw_ids(payload))
+            rows.extend(_sales_records(payload, day))
+            meta = _sales_page_meta(payload)
+            if meta["page_number"] != page_no:
+                raise RuntimeError(
+                    f"판매분석 {day}: 요청 page={page_no}인데 응답 pageNumber={meta['page_number']} — "
+                    "서버가 페이징을 무시했다(같은 행을 중복 계수할 수 있어 중단한다)"
+                )
+            total_results = meta["total_results"] or total_results
+            total_pages = meta["total_pages"]
+            if total_pages <= 0 or page_no + 1 >= total_pages:
+                truncated = False
+                break
+            page_no += 1
+            page.wait_for_timeout(300)   # 폴라이트 간격
+        if truncated:
             raise RuntimeError(
-                f"판매분석 {day}: 요청 page={page_no}인데 응답 pageNumber={meta['page_number']} — "
-                "서버가 페이징을 무시했다(같은 행을 중복 계수할 수 있어 중단한다)"
+                f"판매분석 {day}: 페이지 상한(sales_max_pages={max_pages}) 소진 — 절단된 하루를 "
+                "정상 수집으로 세지 않는다(upsert라 빠진 옵션은 옛 값으로 남는다)"
             )
-        total_results = meta["total_results"] or total_results
-        total_pages = meta["total_pages"]
-        if total_pages <= 0 or page_no + 1 >= total_pages:
-            truncated = False
-            break
-        page_no += 1
-        page.wait_for_timeout(300)   # 폴라이트 간격
-    if truncated:
-        raise RuntimeError(
-            f"판매분석 {day}: 페이지 상한(sales_max_pages={max_pages}) 소진 — 절단된 하루를 "
-            "정상 수집으로 세지 않는다(upsert라 빠진 옵션은 옛 값으로 남는다)"
+        return _dedupe_sales_rows(rows), None, raw_items, len(raw_ids), total_results
+
+    rows, period, raw_items, unique_n, total_results = _sweep(None)
+    if period is not None:
+        return rows, period, raw_items
+
+    # ★★중복 수신 = 정렬 불안정으로 다른 행이 건너뛰어졌다는 **직접 증거**(ref 44 §3-1).
+    #   판정자를 "고유 < totalResults"로 두면 안 된다 — 쿠팡이 vendorItemId를 개명했을 때도
+    #   고유가 0이 되어 매핑 파손이 페이지 유실로 오진되고, 그 날이 실패로 접혀 _SalesMappingError가
+    #   영영 안 뜬다(기존 테스트가 이 설계를 잡아냈다). **중복이 있었는가**만 본다.
+    def _dup(u, raw):
+        return u > 0 and u < raw
+
+    if _dup(unique_n, raw_items) and total_results and total_results <= cap:
+        log.warning(
+            "판매분석 %s: 누적 %d행인데 고유 vendorItemId %d개(totalResults=%d) — 정렬 불안정으로 "
+            "경계 행이 중복/누락됐다. pageSize=%d로 하루를 재수집한다",
+            day, raw_items, unique_n, total_results, total_results,
         )
+        rows, period, raw_items, unique_n, total_results = _sweep(total_results)
+        if period is not None:
+            return rows, period, raw_items
+        if _dup(unique_n, raw_items):
+            raise RuntimeError(
+                f"판매분석 {day}: 페이지 승급 재수집 후에도 중복 수신(누적 {raw_items}행 · "
+                f"고유 {unique_n}개) — 유실된 옵션이 남는다(조용한 절단 방지)"
+            )
+        raw_items = unique_n   # 승급 후엔 고유 개수가 곧 수신량 — 아래 totalResults 검산의 분자
+
     if total_results and raw_items != total_results:
         # ★오늘치는 **정상적으로도** 어긋난다(적대적 리뷰 4R): 페이지를 넘기는 사이에 새 주문이
         #   들어오면 totalResults가 커진다. 당일을 hard-raise하면 장사가 잘 되는 날마다 그날을
