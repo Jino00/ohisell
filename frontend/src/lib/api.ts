@@ -1166,6 +1166,12 @@ export interface ReconSkuRow {
   order_amount: string;
   confirmed_qty: number;                 // 납품가능(업체확인) — 미수집 라인은 빠져 있다
   confirmed_missing_lines: number;
+  // ★보낸 수량(발송/ASN) — PO×SKU 그레인이 원천에 그대로 있어 귀속 추정이 필요 없다.
+  //   null = 발송 기록 없음(="모름"). 0으로 접으면 미수집 기간이 미수금처럼 보인다.
+  shipped_qty: number | null;
+  shipment_received_qty: number | null;  // 같은 원천의 SKU별 입고(멀티SKU도 쪼개진다)
+  unreceived_shipped_qty: number | null; // 보냈는데 안 잡힌 수량 = 미수금 후보
+  shipment_covered_po_count: number;     // 이 SKU의 발주 중 발송 기록이 있는 건수
   received_qty: number | null;           // ★단일SKU 발주 귀속분만. null=귀속 불가(모름)
   received_attributable_po_count: number;
   received_unattributable_po_count: number;

@@ -66,6 +66,12 @@ PO_LIST_PATH = "/po-web/app/purchase-order/list"               # 발주+납품 J
 SETTLEMENT_PATH = "/scm/settlement/general/purchase/account"   # 정산 SSR HTML (ref20 §4)
 PO_DETAIL_PATH = "/scm/purchase/order/get"                     # 발주상세 per-SKU SSR HTML (ref20b, S4.5a)
 
+# ── 발송(ASN) 쉽먼트 경로 — 2026-08-05 라이브 실측 (ref 45 §1-1) ──
+#   ★목록을 브라우저 주소창으로 열면 대시보드로 리다이렉트된다. 여기선 **같은 탭에서 fetch**만
+#     하므로(네비게이션 없음) 그 리다이렉트에 안 걸린다 — 정산·발주상세와 같은 방식이다.
+SHIPMENT_LIST_PATH = "/ibs/shipment/parcel/list"                # 쉽먼트 목록 SSR HTML (10행/페이지)
+SHIPMENT_DETAIL_PATH = "/ibs/shipment/parcel"                   # 쉽먼트 상세 SSR HTML (/{shipmentSeq})
+
 # ── 프로모션 손익 레이어(트랙 coupang-promo-pnl) 경로 — 2026-07-28 라이브 정찰 실측 ──
 #   ★추측 아님: 아래 셋 다 살아있는 세션에서 200 응답과 필드를 직접 확인하고 적었다.
 SALES_SEARCH_PATH = "/retail-insight/api/business-insight/vi-detail-search"   # 판매분석 POST JSON
@@ -86,6 +92,7 @@ KST = ZoneInfo("Asia/Seoul")
 PO_INGEST_PATH = "/api/coupang/ops/rocket/po/ingest"
 SETTLEMENT_INGEST_PATH = "/api/coupang/ops/rocket/settlement/ingest"
 PO_DETAIL_INGEST_PATH = "/api/coupang/ops/rocket/po-detail/ingest"
+SHIPMENT_INGEST_PATH = "/api/coupang/ops/rocket/shipment/ingest"
 SALES_INGEST_PATH = "/api/coupang/ops/rocket/sales/ingest"            # 트랙 coupang-promo-pnl Phase 1
 PROMOTION_INGEST_PATH = "/api/coupang/ops/rocket/promotion/ingest"    # 〃
 
@@ -232,6 +239,95 @@ _FETCH_PO_DETAIL_JS = r"""async (args) => {
     return { status: r.status, rows, looksLogin };
   } finally { clearTimeout(t); }
 }""".replace("__CELL_HELPERS__", _CELL_HELPERS_JS)
+
+
+# ── 발송(ASN) 쉽먼트 — 표를 통째로(헤더+행) 보낸다 (ref 45) ─────────────
+# ★표를 고르지 않고 **전부** 보내는 이유: 쉽먼트 상세는 `id="shipmentTotalTable"`을 두 표에
+#   중복해서 쓴다(정보표 + 요약표). id로 고르면 요약표를 영영 못 보고, 인덱스로 고르면 표가
+#   하나 늘 때 전부 밀린다. 어느 표가 무엇인지는 **백엔드 파서가 헤더 이름으로** 판정한다
+#   (런타임 경계 D-1 — 도구는 수집만, 해석은 백엔드).
+# ★thead에 <tr>이 없다(`<thead><th>…</th></thead>`). `querySelectorAll('tr')`만 쓰면 헤더가
+#   통째로 사라진다 — 라이브 실측. thead th를 따로 뽑고, 없으면 첫 tr의 th를 헤더로 본다.
+_TABLE_INFO_JS = r"""
+      const tableInfo = (tb) => {
+        let headers = [...tb.querySelectorAll('thead th')].map(cellText);
+        const bodyTrs = [...tb.querySelectorAll('tbody tr')];
+        let trs = bodyTrs.length ? bodyTrs : [...tb.querySelectorAll('tr')];
+        if (!headers.length && trs.length) {
+          const firstThs = [...trs[0].querySelectorAll('th')];
+          if (firstThs.length) { headers = firstThs.map(cellText); trs = trs.slice(1); }
+        }
+        return {
+          id: tb.id || '', cls: tb.className || '', headers,
+          rows: trs.map(tr => [...tr.querySelectorAll('td,th')].map(cellText)),
+        };
+      };
+"""
+
+# 쉽먼트 목록 — 행마다 data-id/status/type 속성과 발주서 popover(data-content)를 같이 싣는다.
+#   화면 라벨("발송 완료")이 아니라 속성(CONFIRMED)이 정본이고, 발주서 셀은 "138140027 외 7건"으로
+#   잘려 있어 전체 목록은 data-content에만 있다(라이브 확인).
+_FETCH_SHIPMENT_LIST_JS = r"""async (args) => {
+  const [path] = args;
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 25000);
+  try {
+    const r = await fetch(path, { credentials: 'include', signal: ctrl.signal });
+    const html = await r.text();
+    const lower = html.toLowerCase();
+    const looksLogin = (lower.includes('login') || lower.includes('signin')) &&
+                       (lower.includes('password') || lower.includes('passport'));
+    let headers = [], entries = [];
+    try {
+      __CELL_HELPERS__
+      __TABLE_INFO__
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+      for (const tb of [...doc.querySelectorAll('table')]) {
+        const info = tableInfo(tb);
+        const flat = info.headers.map(noWs).join('|');
+        if (flat.indexOf('쉽먼트번호') < 0) continue;
+        headers = info.headers;
+        const bodyTrs = [...tb.querySelectorAll('tbody tr')];
+        const trs = bodyTrs.length ? bodyTrs : [...tb.querySelectorAll('tr')].slice(1);
+        for (const tr of trs) {
+          if (!tr.getAttribute('data-id')) continue;    // 안내문·빈결과 행 배제
+          const pop = tr.querySelector('[data-content]');
+          entries.push({
+            cells: [...tr.querySelectorAll('td,th')].map(cellText),
+            data: { id: tr.getAttribute('data-id'),
+                    status: tr.getAttribute('data-status'),
+                    type: tr.getAttribute('data-type') },
+            po_content: pop ? pop.getAttribute('data-content') : '',
+          });
+        }
+        break;
+      }
+    } catch (e) { /* 파싱 실패 시 entries=[] */ }
+    return { status: r.status, headers, entries, looksLogin };
+  } finally { clearTimeout(t); }
+}""".replace("__CELL_HELPERS__", _CELL_HELPERS_JS).replace("__TABLE_INFO__", _TABLE_INFO_JS)
+
+# 쉽먼트 상세 — 페이지의 모든 표를 헤더와 함께 그대로 싣는다(해석은 백엔드).
+_FETCH_SHIPMENT_DETAIL_JS = r"""async (args) => {
+  const [path] = args;
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 25000);
+  try {
+    const r = await fetch(path, { credentials: 'include', signal: ctrl.signal });
+    const html = await r.text();
+    const lower = html.toLowerCase();
+    const looksLogin = (lower.includes('login') || lower.includes('signin')) &&
+                       (lower.includes('password') || lower.includes('passport'));
+    let tables = [];
+    try {
+      __CELL_HELPERS__
+      __TABLE_INFO__
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+      tables = [...doc.querySelectorAll('table')].map(tableInfo);
+    } catch (e) { /* 파싱 실패 시 tables=[] */ }
+    return { status: r.status, tables, looksLogin };
+  } finally { clearTimeout(t); }
+}""".replace("__CELL_HELPERS__", _CELL_HELPERS_JS).replace("__TABLE_INFO__", _TABLE_INFO_JS)
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -1054,6 +1150,139 @@ def _push_po_items(cfg: dict, po_seq: int, rows: list[list]) -> int:
     if pr.status_code != 200:
         log.error("발주상세 push PO=%d 실패 HTTP %s — %s", po_seq, pr.status_code, pr.text[:200])
         return 1
+    return 0
+
+
+# ════════════════════════════════════════════════════════════════════
+# 발송(ASN) 쉽먼트 — "우리가 보낸 양" (ref 45)
+# ════════════════════════════════════════════════════════════════════
+# ★왜 이 스트림이 cmd_run 안에 있나: 자동 트리거를 되살리지 않고도 상시화하는 유일한 경로다.
+#   버튼 한 번에 발주·정산·프로모션과 **함께** 갱신된다(D-17 — 버튼-only 유지).
+def _fetch_shipment_list(page, page_number: int):
+    """쉽먼트 목록 한 페이지. 반환 (headers, entries, status). 실패면 (None, None, status)."""
+    path = (f"{SHIPMENT_LIST_PATH}?pageNumber={page_number}&purchaseOrderSeq=&shipmentStatus="
+            "&centerCode=&carrierCode=&estimatedDeliveryDate=&shipmentSeq=")
+    res = _eval_retry(page, _FETCH_SHIPMENT_LIST_JS, [path]) or {}
+    if res.get("status") != 200 or res.get("looksLogin"):
+        return None, None, res.get("status")
+    return res.get("headers") or [], res.get("entries") or [], 200
+
+
+def _fetch_shipment_detail(page, shipment_seq: int):
+    """쉽먼트 상세의 표 전체. 반환 (tables|None, status)."""
+    res = _eval_retry(page, _FETCH_SHIPMENT_DETAIL_JS,
+                      [f"{SHIPMENT_DETAIL_PATH}/{shipment_seq}"]) or {}
+    if res.get("status") != 200 or res.get("looksLogin"):
+        return None, res.get("status")
+    tables = res.get("tables") or []
+    return (tables if tables else None), 200
+
+
+def _collect_and_push_shipments(page, cfg: dict) -> tuple[int, list[str]]:
+    """쉽먼트 목록 N페이지 + 각 건 상세 → prod push 1회. 반환 (rc, 실패사유들).
+
+    ★목록만 받고 상세를 못 받은 건은 **상세 없이** 보낸다 — 백엔드가 총 입고 수량을 건드리지
+      않으므로 "모름"이 유지된다. 0으로 접으면 미수금을 지어낸다(ref 45 §12 계열의 사고).
+    ★페이지는 최신순 10행이라 기본 3페이지(=최근 30건)면 하루치 발송을 넉넉히 덮는다.
+      과거 소급은 이 루프가 아니라 별도 백필로 한다(운영 수집을 무겁게 만들지 않는다).
+    """
+    if not cfg.get("collect_shipment", True):
+        return 0, []
+    max_pages = max(1, int(cfg.get("shipment_pages") or 3))
+    detail_cap = max(0, int(cfg.get("shipment_detail_cap") or 40))
+
+    entries: list[dict] = []
+    headers: list[str] = []
+    for pn in range(1, max_pages + 1):
+        hdrs, ents, status = None, None, None
+        for attempt in (1, 2):
+            try:
+                hdrs, ents, status = _fetch_shipment_list(page, pn)
+            except Exception as e:  # noqa: BLE001 — Akamai stale 등 일시 실패
+                hdrs, ents, status = None, None, str(e)[:60]
+            if ents is not None:
+                break
+            if attempt == 1:
+                with contextlib.suppress(Exception):
+                    _goto_origin(page)            # Akamai 센서 재무장
+        if ents is None:
+            log.warning("쉽먼트 목록 p%d 실패(status=%s)", pn, status)
+            if pn == 1:
+                return 1, [f"쉽먼트 목록 실패(status={status})"]
+            break                                  # 뒷페이지 실패는 앞페이지를 버리지 않는다
+        if hdrs:
+            headers = hdrs
+        if not ents:
+            break                                  # 빈 페이지 = 끝
+        entries.extend(ents)
+        page.wait_for_timeout(300)
+
+    if not entries:
+        log.info("쉽먼트: 목록 0건 — 건너뜀")
+        return 0, []
+
+    for e in entries:
+        e["headers"] = headers
+
+    detail_failed = 0
+    consec_fail = 0
+    for e in entries[:detail_cap]:
+        seq = int((e.get("data") or {}).get("id") or 0)
+        if seq <= 0:
+            continue
+        tables = None
+        for attempt in (1, 2):
+            try:
+                tables, status = _fetch_shipment_detail(page, seq)
+            except Exception as e2:  # noqa: BLE001
+                tables, status = None, str(e2)[:60]
+            if tables is not None:
+                break
+            if attempt == 1:
+                with contextlib.suppress(Exception):
+                    _goto_origin(page)
+        if tables is None:
+            detail_failed += 1
+            consec_fail += 1
+            log.warning("쉽먼트 상세 seq=%d 실패(status=%s)", seq, status)
+            if consec_fail >= 5:
+                log.error("쉽먼트 상세 연속 실패 5건 — 세션 의심, 상세 수집 조기 종료")
+                break
+            continue
+        consec_fail = 0
+        e["detail"] = {"tables": tables}
+        page.wait_for_timeout(300)
+
+    rc = _push_shipments(cfg, entries)
+    reasons: list[str] = []
+    if rc:
+        reasons.append("쉽먼트 push 실패")
+    if detail_failed:
+        reasons.append(f"쉽먼트 상세 실패 {detail_failed}건")
+    log.info("쉽먼트 완료 — 목록 %d건 / 상세 실패 %d건 / push rc=%d",
+             len(entries), detail_failed, rc)
+    # 상세 일부 실패는 목록 적재를 무효화하지 않는다(부분 성공을 성공으로 보고하지도 않는다).
+    return (1 if (rc or detail_failed) else 0), reasons
+
+
+def _push_shipments(cfg: dict, entries: list[dict]) -> int:
+    """쉽먼트 목록+상세 → prod ingest(쉽먼트별 snapshot replace). 0=성공/1=실패."""
+    if not entries:
+        return 0
+    try:
+        pr = requests.post(
+            cfg["prod_base_url"].rstrip("/") + SHIPMENT_INGEST_PATH,
+            json={"vendor_id": cfg["vendor_id"], "shipments": entries},
+            headers={"X-Ingest-Token": cfg["ingest_token"]},
+            timeout=120,
+        )
+    except requests.RequestException as e:
+        log.error("쉽먼트 push 네트워크 오류: %s", e)
+        return 1
+    if pr.status_code != 200:
+        log.error("쉽먼트 push 실패 HTTP %s — %s", pr.status_code, pr.text[:200])
+        return 1
+    log.info("쉽먼트 push 성공 — %s", pr.text[:200])
     return 0
 
 
@@ -1965,6 +2194,8 @@ def _do_run(cfg: dict) -> int:
     rc_promo_pnl = 0
     promo_failures: list[str] = []
     promo_permanent_kind: str | None = None
+    rc_shipment = 0
+    shipment_failures: list[str] = []
     try:
         with _owned_chrome(cfg) as owner:
             with sync_playwright() as p:
@@ -2007,6 +2238,12 @@ def _do_run(cfg: dict) -> int:
                     rc_promo_pnl, promo_failures, promo_permanent_kind = (
                         _collect_and_push_promo_pnl(page, cfg)
                     )
+                    # 발송(ASN) 쉽먼트 — 위 스트림들과 독립. 실패해도 발주/정산은 이미 push됐다.
+                    try:
+                        rc_shipment, shipment_failures = _collect_and_push_shipments(page, cfg)
+                    except Exception as e:  # noqa: BLE001
+                        log.error("쉽먼트 수집 실패(다른 스트림은 push됨): %s", e)
+                        rc_shipment, shipment_failures = 1, [f"쉽먼트 수집 예외: {str(e)[:80]}"]
     except Exception as e:  # noqa: BLE001 — Chrome 기동/브라우저/수집 오류
         log.error("브라우저 수집 오류: %s", e)
         return 1
@@ -2022,19 +2259,21 @@ def _do_run(cfg: dict) -> int:
     if detail_failed > 0:
         reasons.append(f"발주상세 실패 {detail_failed}건")
     reasons.extend(promo_failures)
+    reasons.extend(shipment_failures)
     _LAST_RUN_ERROR = " / ".join(reasons) if reasons else ""
 
-    if not core_failed and rc_promo_pnl == 0:
+    if not core_failed and rc_promo_pnl == 0 and rc_shipment == 0:
         rc = 0
-    elif not core_failed and promo_permanent_kind:
+    elif not core_failed and promo_permanent_kind and rc_shipment == 0:
         _LAST_RUN_KIND = promo_permanent_kind
         # 발주/정산은 성공했고 프로모션손익만 **영구** 실패(구독 만료·매핑 파손). 재시도해도
         # 같은 자리에서 죽으므로 재시도 대상에서 뺀다(요청 소멸 + 사유 안내). 실패로는 남는다.
         rc = RC_ACCESS_DENIED
     else:
         rc = 1
-    log.info("run 완료 — 발주 push rc=%d / 정산 push rc=%d / 발주상세 실패=%d / 프로모션손익 rc=%d%s",
-             rc_po, rc_st, detail_failed, rc_promo_pnl,
+    log.info("run 완료 — 발주 push rc=%d / 정산 push rc=%d / 발주상세 실패=%d / 프로모션손익 rc=%d"
+             " / 쉽먼트 rc=%d%s",
+             rc_po, rc_st, detail_failed, rc_promo_pnl, rc_shipment,
              f" / 사유: {_LAST_RUN_ERROR}" if _LAST_RUN_ERROR else "")
     # 성공 시 last_success_at 갱신 (UI 폴링 완료 감지용)
     if rc == 0 and _push_configured(cfg):

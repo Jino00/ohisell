@@ -39,6 +39,7 @@ from app.models import (
     CoupangRocketPurchaseOrder,
     CoupangRocketPurchaseOrderItem,
     CoupangRocketSettlement,
+    CoupangRocketShipmentItem,
 )
 from app.services.coupang.rocket_intelligence import _kst_window_utc
 
@@ -263,6 +264,41 @@ def _agg_invoices(mapping: dict[int, list[int]], po_without_invoice: int,
 # ──────────────────────────────────────────────
 # ③ SKU 집계 (발주상세 라인 → 상품 기준)
 # ──────────────────────────────────────────────
+def _shipped_by_sku(db: Session, po_seqs: list[int]) -> tuple[dict[str, dict], set[int]]:
+    """윈도우 PO들에 대해 **우리가 보낸 수량**과 쿠팡이 잡은 입고를 SKU별로 접는다 (ref 45).
+
+    반환 ({product_number: {shipped_qty, received_qty, po_seqs}}, 발송 기록이 있는 PO 집합).
+
+    ★왜 이 축이 따로 필요한가: 지금까지 화면에 있던 건 발주(쿠팡이 시킨 양)와 입고(쿠팡이 인정한
+      양)뿐이었다. 그 사이 "보냈는데 안 잡힌 것"이 미수금인데 볼 방법이 없었다 — 2026-08-05
+      일회성 정찰로만 8,033,970원을 찾았다.
+    ★수량은 우리 신고값이다(박스 내용물을 쿠팡이 검수해 주는 게 아니다, ref 45 §8-1).
+      제3자 근거는 박스 추적(집하·도착·하차)에 따로 있다.
+    ★발송 기록이 없는 PO는 "0개 보냈다"가 아니라 **모름**이다(수집 이전 기간·트럭 쉽먼트 등).
+      호출부가 covered 여부로 갈라 화면에 "—"를 띄운다.
+    """
+    if not po_seqs:
+        return {}, set()
+    rows: list[CoupangRocketShipmentItem] = []
+    for i in range(0, len(po_seqs), 500):        # SQLite 변수 한계(999) 회피 — 위 라인 조회와 동형
+        rows.extend(
+            db.query(CoupangRocketShipmentItem)
+            .filter(CoupangRocketShipmentItem.purchase_order_seq.in_(po_seqs[i:i + 500]))
+            .all()
+        )
+    agg: dict[str, dict] = {}
+    covered: set[int] = set()
+    for r in rows:
+        covered.add(r.purchase_order_seq)
+        e = agg.get(r.product_number)
+        if e is None:
+            e = agg[r.product_number] = {"shipped_qty": 0, "received_qty": 0, "po_seqs": set()}
+        e["shipped_qty"] += int(r.shipped_qty or 0)
+        e["received_qty"] += int(r.received_qty or 0)
+        e["po_seqs"].add(r.purchase_order_seq)
+    return agg, covered
+
+
 def _sku_aggregate(db: Session, po_by_seq: dict[int, CoupangRocketPurchaseOrder],
                    invoice_map: dict[int, list[int]],
                    settlements: dict[int, CoupangRocketSettlement]) -> tuple[list[dict], dict]:
@@ -293,6 +329,11 @@ def _sku_aggregate(db: Session, po_by_seq: dict[int, CoupangRocketPurchaseOrder]
     lines_per_po: dict[int, int] = {}
     for ln in lines:
         lines_per_po[ln.purchase_order_seq] = lines_per_po.get(ln.purchase_order_seq, 0) + 1
+
+    # ★발송(ASN) 축 — 「보낸 수량」. 이 축은 **PO×SKU 그레인이 원천에 그대로 있다**(ref 45)
+    #   → 아래 received_qty가 겪는 멀티SKU 귀속 불가(64%) 문제가 없다. 그래서 발주·납품가능과
+    #   같은 정밀도로 나란히 놓을 수 있다.
+    shipped_by_sku, shipment_covered_pos = _shipped_by_sku(db, seqs)
 
     def _attributable(po_seq: int) -> bool:
         """이 PO의 입고수량을 SKU 하나에 통째로 귀속해도 되는가.
@@ -394,6 +435,22 @@ def _sku_aggregate(db: Session, po_by_seq: dict[int, CoupangRocketPurchaseOrder]
             # 납품가능(업체확인) — 미수집 라인은 합에서 빠졌고 그 수를 함께 낸다.
             "confirmed_qty": r["confirmed_qty"],
             "confirmed_missing_lines": r["confirmed_missing_lines"],
+            # ★보낸 수량(발송/ASN) — PO×SKU 그레인이 원천에 그대로 있어 귀속 추정이 필요 없다.
+            #   발송 기록이 아예 없으면 None(="모름") — 0으로 접으면 "안 보냈다"가 되어
+            #   미수집 기간이 미수금처럼 보인다.
+            "shipped_qty": (shipped_by_sku.get(r["product_number"], {}).get("shipped_qty")
+                            if r["product_number"] in shipped_by_sku else None),
+            # 같은 원천의 SKU별 입고 — 위 received_qty(단일SKU PO 귀속분)와 **다른 축**이다.
+            #   이쪽은 멀티SKU PO도 쪼갤 수 있어 미귀속 구멍이 없다.
+            "shipment_received_qty": (shipped_by_sku.get(r["product_number"], {}).get("received_qty")
+                                      if r["product_number"] in shipped_by_sku else None),
+            # 보냈는데 안 잡힌 수량 = 미수금 후보. 발송 기록이 없으면 None.
+            "unreceived_shipped_qty": (
+                shipped_by_sku[r["product_number"]]["shipped_qty"]
+                - shipped_by_sku[r["product_number"]]["received_qty"]
+                if r["product_number"] in shipped_by_sku else None),
+            # 이 SKU가 속한 PO 중 발송 기록이 있는 비율을 화면이 판단할 수 있게 분모·분자를 낸다.
+            "shipment_covered_po_count": len(r["po_seqs"] & shipment_covered_pos),
             # 입고 — 단일SKU PO 귀속분만. 귀속 PO 0건이면 None(화면에서 "—").
             "received_qty": received if attr_seqs else None,
             "received_attributable_po_count": len(attr_seqs),
