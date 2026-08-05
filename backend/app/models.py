@@ -1928,7 +1928,12 @@ class CoupangRocketShipmentItem(Base):
     product_name: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
     barcode: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
     shipped_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0)   # 납품수량(우리 신고)
-    received_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 입고수량(쿠팡 인정)
+    # ★입고수량 = **ASN 화면이 말하는 입고**다. 미수금 확정에 그대로 쓰면 안 된다:
+    #   이 화면은 **재발송분 입고를 못 본다**(2026-08-05 실측 52라인) → 미입고가 과대하게 나온다.
+    #   그날 그 값만 믿고 계산한 미수금 14.0M이 입고 원장 재판정에서 8.03M으로 내려갔다
+    #   (5,763,290원 과대, 교훈 #141). 확정 판정의 정본은 `/scm/receive/detail/download` 입고 원장이다.
+    #   여기 값은 **상한(후보)**으로만 쓴다.
+    received_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 입고수량(ASN 화면 기준)
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 

@@ -444,7 +444,10 @@ def _sku_aggregate(db: Session, po_by_seq: dict[int, CoupangRocketPurchaseOrder]
             #   이쪽은 멀티SKU PO도 쪼갤 수 있어 미귀속 구멍이 없다.
             "shipment_received_qty": (shipped_by_sku.get(r["product_number"], {}).get("received_qty")
                                       if r["product_number"] in shipped_by_sku else None),
-            # 보냈는데 안 잡힌 수량 = 미수금 후보. 발송 기록이 없으면 None.
+            # 보냈는데 안 잡힌 수량 = 미수금 **후보**(확정 아님). 발송 기록이 없으면 None.
+            # ★상한이다: ①아직 입고 처리 중인 건이 섞이고 ②ASN 화면 입고수량은 재발송분을
+            #   못 본다(교훈 #141 — 그래서 2026-08-05에 5,763,290원을 과대계상했다).
+            #   확정은 입고 원장(/scm/receive/detail/download) 대조로만 한다.
             "unreceived_shipped_qty": (
                 shipped_by_sku[r["product_number"]]["shipped_qty"]
                 - shipped_by_sku[r["product_number"]]["received_qty"]
