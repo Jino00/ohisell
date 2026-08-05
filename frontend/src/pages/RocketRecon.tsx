@@ -426,12 +426,13 @@ function SkuTable({ data, from, to }: { data: RocketRecon; from: string; to: str
       <Table
         head={
           <>
+            {/* 머리글은 줄바꿈 금지 — '발주−입고'가 '발주−입 / 고'로 갈리면 열 이름을 못 읽는다. */}
             <Th>상품(SKU)</Th>
-            <Th right>발주</Th>
-            <Th right>납품가능</Th>
-            <Th right>입고</Th>
-            <Th right>발주−입고</Th>
-            <Th right>발주 금액</Th>
+            <Th right><span className="whitespace-nowrap">발주</span></Th>
+            <Th right><span className="whitespace-nowrap">납품가능</span></Th>
+            <Th right><span className="whitespace-nowrap">입고</span></Th>
+            <Th right><span className="whitespace-nowrap">발주−입고</span></Th>
+            <Th right><span className="whitespace-nowrap">발주 금액</span></Th>
             <Th>계산서</Th>
             <Th> </Th>
           </>
@@ -492,7 +493,7 @@ function SkuRows({ row, open, onToggle, from, to }: {
           <button type="button" onClick={onToggle} className="block w-full text-left">
             <span className="font-medium text-gray-900">{row.product_number}</span>
             <span className="ml-2 text-xs text-gray-500">발주 {n(row.po_count)}건</span>
-            <div className="max-w-[34rem] text-xs text-gray-500 whitespace-normal break-words">
+            <div className="max-w-md text-xs text-gray-500 whitespace-normal break-words">
               {row.product_name ?? NO_DATA}
             </div>
           </button>
@@ -547,7 +548,8 @@ function SkuRows({ row, open, onToggle, from, to }: {
             </div>
           )}
         </Td>
-        <Td right>{won(row.order_amount)}</Td>
+        {/* 금액은 '36,430,080 / 원'으로 갈리면 자릿수를 잘못 읽는다 — 한 덩어리로 묶는다. */}
+        <Td right><span className="whitespace-nowrap">{won(row.order_amount)}</span></Td>
         <Td>
           {invoiceIssues === 0 ? (
             <span className="text-xs text-gray-400">정상 {n(row.invoice_count)}건</span>
@@ -569,7 +571,9 @@ function SkuRows({ row, open, onToggle, from, to }: {
           )}
         </Td>
         <Td>
-          <Button variant="ghost" onClick={onToggle}>{open ? "닫기 ▲" : "발주내역 ▼"}</Button>
+          <span className="whitespace-nowrap">
+            <Button variant="ghost" onClick={onToggle}>{open ? "닫기 ▲" : "발주내역 ▼"}</Button>
+          </span>
         </Td>
       </tr>
       {open && (
