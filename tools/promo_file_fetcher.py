@@ -34,7 +34,7 @@ import requests
 
 CONFIG_PATH = Path(os.path.expanduser("~/.ohisell_rocket_fetcher.json"))
 LOG_PATH = Path(os.path.expanduser("~/.ohisell_promo_file_fetcher.log"))
-INGEST_PATH = "/api/coupang/rocket/promotion/discount-files/ingest"
+INGEST_PATH = "/api/coupang/ops/rocket/promotion/discount-files/ingest"
 
 # 기본 폴더(Jino 확인, 2026-08-05). 설정으로 덮을 수 있다.
 DEFAULT_DIR = (
