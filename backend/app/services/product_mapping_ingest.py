@@ -4,6 +4,7 @@
 #       마스터 시트 grain = 옵션 단위(D-1), 채널명 마커 컬럼 뒤 옵션ID 컬럼들이 채널블록.
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Literal
@@ -27,6 +28,8 @@ _LABEL_TO_ACCOUNT_KEY = {
 }
 
 _CHANNEL_MARKER_HEADER = "채널명"
+# 자동 채번 SKU의 형태. 이 형태가 아닌 SKU(수동 명명)는 채번 계산에서 제외한다.
+_SKU_NUM_RE = re.compile(r"^OHI-(\d+)$")
 MAPPING_SOURCE_EXCEL = "excel_master"
 
 
@@ -163,9 +166,9 @@ def upsert_product_by_name(
             product.cost_price = cost_price
         return product, "updated"
 
-    new_sku = f"OHI-{next_sku_num[0]:04d}"
-    next_sku_num[0] += 1
-    product = ProductMaster(internal_sku=new_sku, product_name=name, cost_price=cost_price)
+    product = ProductMaster(
+        internal_sku=_allocate_sku(db, next_sku_num), product_name=name, cost_price=cost_price
+    )
     db.add(product)
     db.flush()
     return product, "created"
@@ -212,18 +215,34 @@ class IngestResult:
 
 
 def _next_sku_counter(db: Session) -> list[int]:
-    max_sku = (
-        db.query(ProductMaster.internal_sku)
+    """다음 채번 시작값 = **숫자형 `OHI-####` 중 최댓값 + 1**.
+
+    ★문자열 정렬 최댓값을 쓰면 안 된다(2026-08-05 라이브 500의 원인):
+      손으로 만든 비숫자 SKU(`OHI-Z-PRIVACY-FOLD8-WIDE`)가 정렬상 `OHI-0895`보다 위에 오고,
+      `int("Z")`가 터지면 옛 코드는 **조용히 1부터** 다시 셌다 → 이미 있는 `OHI-0001`과
+      UNIQUE 충돌 → 신규 상품이 하나라도 든 업로드는 전부 500. 정렬이 아니라 형태로 거른다.
+    """
+    nums = [
+        int(m.group(1))
+        for (sku,) in db.query(ProductMaster.internal_sku)
         .filter(ProductMaster.internal_sku.like("OHI-%"))
-        .order_by(ProductMaster.internal_sku.desc())
-        .first()
-    )
-    if max_sku and max_sku[0]:
-        try:
-            return [int(max_sku[0].split("-")[1]) + 1]
-        except (IndexError, ValueError):
-            pass
-    return [1]
+        .all()
+        if sku and (m := _SKU_NUM_RE.match(sku))
+    ]
+    return [max(nums) + 1 if nums else 1]
+
+
+def _allocate_sku(db: Session, counter: list[int]) -> str:
+    """비어 있는 `OHI-####`를 찾아 반환한다(이미 쓰인 번호는 건너뛴다).
+
+    카운터만 믿지 않는 이유: 수동 SKU가 또 생기거나 과거 채번이 어긋나 있으면 UNIQUE 충돌로
+    **업로드 전체가 500**이 된다 — 한 건의 번호 충돌이 900행짜리 적재를 통째로 죽이게 두지 않는다.
+    """
+    while True:
+        sku = f"OHI-{counter[0]:04d}"
+        counter[0] += 1
+        if db.query(ProductMaster.id).filter_by(internal_sku=sku).first() is None:
+            return sku
 
 
 # ── Harness ──

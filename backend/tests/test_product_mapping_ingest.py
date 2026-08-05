@@ -18,6 +18,7 @@ from app.main import app
 from app.models import Channel, ProductChannelMapping, ProductMaster
 from app.services.coupang.product_sync import _maybe_upsert_mapping
 from app.services.product_mapping_ingest import (
+    _next_sku_counter,
     check_integrity,
     ingest_master_sheet,
     parse_master_sheet,
@@ -159,6 +160,44 @@ def test_upsert_product_by_name_creates_then_updates(db):
     assert action2 == "updated"
     assert p2.id == p1.id
     assert p2.cost_price == Decimal("1200")
+
+
+def test_sku_counter_ignores_non_numeric_skus(db):
+    """수동 명명 SKU가 섞여 있어도 채번은 숫자형 최댓값+1이어야 한다.
+
+    2026-08-05 라이브 500 재현: 옛 코드는 문자열 정렬 최댓값('OHI-Z-PRIVACY-FOLD8-WIDE')의
+    가운데 토막을 int()로 바꾸다 실패하면 조용히 1부터 다시 세어, 이미 있는 'OHI-0001'과
+    UNIQUE 충돌을 냈다 → 신규 상품이 든 업로드가 전부 500.
+    """
+    db.add_all([
+        ProductMaster(internal_sku="OHI-0001", product_name="기존 A", cost_price=Decimal("100")),
+        ProductMaster(internal_sku="OHI-0895", product_name="기존 B", cost_price=Decimal("100")),
+        ProductMaster(internal_sku="OHI-Z-PRIVACY-FOLD8-WIDE", product_name="수동 C", cost_price=Decimal("100")),
+    ])
+    db.commit()
+
+    counter = _next_sku_counter(db)
+    assert counter == [896]  # 'Z-PRIVACY…'가 아니라 0895 기준
+
+    product, action = upsert_product_by_name(db, "신규 D", Decimal("500"), counter)
+    db.commit()
+    assert action == "created"
+    assert product.internal_sku == "OHI-0896"
+
+
+def test_allocate_sku_skips_taken_numbers(db):
+    """카운터가 이미 쓰인 번호를 가리켜도 건너뛴다 — 한 건의 충돌이 적재 전체를 죽이지 않게."""
+    db.add_all([
+        ProductMaster(internal_sku="OHI-0002", product_name="기존 A", cost_price=Decimal("100")),
+        ProductMaster(internal_sku="OHI-0003", product_name="기존 B", cost_price=Decimal("100")),
+    ])
+    db.commit()
+
+    counter = [2]  # 이미 쓰인 번호를 가리키는 상태
+    product, action = upsert_product_by_name(db, "신규 C", Decimal("500"), counter)
+    db.commit()
+    assert action == "created"
+    assert product.internal_sku == "OHI-0004"
 
 
 def test_upsert_mapping_created_updated_conflict(db):
