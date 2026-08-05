@@ -186,3 +186,43 @@ class TestSafety:
     def test_모르는_계정은_거부(self, db):
         with pytest.raises(ValueError):
             cre.ingest_ads(db, "naver", [_ad("1", 111)])
+
+
+class TestAbsorbedDuplicatesAreSurfaced:
+    """★계약: "흡수한 중복은 카운트로 노출한다 — 침묵 금지."
+
+    예전엔 `_add_field_row`가 "새로 썼다"와 "중복이라 안 썼다"를 똑같이 `0`으로 돌려줘 응답에
+    한 칸도 안 떴고, `_emit`의 중복도 마찬가지였다. 페처가 같은 초에 두 번 push하는 건 실제로
+    일어나는 일이라(회차 간격이 짧거나 재시도) 이 칸이 없으면 "왜 행이 안 늘지?"를 로그로만
+    추적해야 한다.
+    """
+
+    def test_같은_초의_두_번째_필드변경은_중복으로_카운트된다(self, db):
+        cre.ingest_ads(db, ACC, [_ad("1", 111, override=None)], detected_at=T1)
+        r1 = cre.ingest_ads(db, ACC, [_ad("1", 111, override=250)], detected_at=T2)
+        assert (r1["field_changes"], r1["field_changes_duplicate"]) == (1, 0)
+
+        # 같은 감지 시각(T2)에 같은 소재·같은 필드가 또 바뀐다 → UNIQUE 키가 완전히 같다.
+        r2 = cre.ingest_ads(db, ACC, [_ad("1", 111, override=None)], detected_at=T2)
+        assert r2["field_changes"] == 0
+        assert r2["field_changes_duplicate"] == 1     # ★예전엔 그냥 0으로 사라졌다
+        assert r2["race_absorbed"] == 0               # 사전 SELECT가 잡은 것이지 경합이 아니다
+        assert len(_rows(db, entity_type=cre.ENTITY_AD, field="pricingOverride")) == 1
+
+    def test_같은_초의_두_번째_소재추가는_duplicate_rows로_카운트된다(self, db):
+        cre.ingest_ads(db, ACC, [_ad("1", 111)], detected_at=T1)
+        r1 = cre.ingest_ads(db, ACC, [_ad("1", 111), _ad("2", 222)], detected_at=T2)
+        assert (r1["own_rows"], r1["duplicate_rows"]) == (1, 0)
+
+        r2 = cre.ingest_ads(db, ACC, [_ad("1", 111), _ad("2", 222), _ad("3", 333)],
+                            detected_at=T2)
+        assert r2["added"] == 1 and r2["own_rows"] == 0
+        assert r2["duplicate_rows"] == 1              # ★예전엔 "dup"이 어디에도 안 실렸다
+
+    def test_기준선_응답도_같은_칸을_갖는다(self, db):
+        """화면·로그가 키 유무로 분기하지 않게 모양을 맞춘다."""
+        r = cre.ingest_ads(db, ACC, [_ad("1", 111)], detected_at=T1)
+        assert r["baseline"] is True
+        for k in ("own_rows", "duplicate_rows", "field_changes",
+                  "field_changes_duplicate", "race_absorbed"):
+            assert r[k] == 0
