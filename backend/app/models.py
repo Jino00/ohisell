@@ -1712,6 +1712,15 @@ class CoupangRocketSalesDaily(Base):
     conversion_rate: Mapped[Optional[Decimal]] = mapped_column(
         Numeric(7, 4), nullable=True
     )  # 전환율 — **0~1 소수**(3.52% → 0.0352). % 표기는 페처가 100으로 나눠 보낸다(PLAN §4)
+    # ── 퍼널 지표(D-CPP-11, 2026-08-06) — 이미 받고 있던 응답에서 버리던 값이다. 추가 요청 0.
+    #   ★날짜별 값임을 실측으로 확인했다: 같은 옵션의 08-04와 06-05가 서로 다르다(대조군).
+    #   visitors(방문자) ⊂ page_views(조회) ⊃ orders(주문)이고 conversion_rate == orders/page_views
+    #   (실측: 162/1540 = 0.10519… == pvToOrder). 즉 전환율은 이 둘의 몫이라 **검산이 가능하다.**
+    #   ⚠️장바구니·검색량·SRP클릭/점유율은 담지 않았다 — 3개 날짜 전 옵션에서 값이 0이었다
+    #     (프리미엄 데이터 2.0 등급 지표로 보인다). 0을 담으면 "관측 없음"과 "정말 0"이 영영
+    #     구분되지 않는다. 등급이 올라가면 그때 재확인하고 추가할 것.
+    page_views: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 조회(PV)
+    orders: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)      # 주문수
     product_name: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
     source: Mapped[str] = mapped_column(
         String(20), nullable=False, default="sales_analysis",
@@ -1751,6 +1760,21 @@ class CoupangRocketOptionSku(Base):
     source: Mapped[str] = mapped_column(
         String(20), nullable=False, default="sales_analysis", server_default="sales_analysis",
     )  # sales_analysis | backfill | manual — 끊긴 뒤에도 무엇이 어디서 왔는지 남긴다
+    # ── 옵션 속성(D-CPP-11, 2026-08-06). **일별 테이블이 아니라 여기다** — 실측 근거:
+    #   08-04와 06-05를 같은 옵션 22개로 대조했더니 아래 값이 **전부 동일**했다. 즉 판매분석이
+    #   주는 이 필드들은 그 날짜의 상태가 아니라 **조회 시점의 현재값**이다. 일별 테이블에 넣으면
+    #   6월 행에 오늘의 품절 상태가 찍혀 **가짜 시계열**이 된다(같은 응답의 metrics는 날짜별로
+    #   다르므로 대조군이 성립한다). 그래서 최신값 1행 + 관측 시각으로 보존한다.
+    #   ★현재값이라 롤링 조회창(약 2개월)과 무관하게 언제든 재취득할 수 있다 — 유실 위험 없음.
+    brand_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    category_path: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)  # ' > ' 조인
+    is_item_winner: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)  # 바이박스 승자
+    is_oos: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)          # 품절
+    rating_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)     # 리뷰 수
+    rating_score: Mapped[Optional[Decimal]] = mapped_column(Numeric(3, 2), nullable=True)  # 평점 4.6
+    # ★위 속성들을 **언제 본 값인지**. 없으면 최신값인지 반년 전 값인지 구분할 수 없다
+    #   (last_observed_at은 브리지 관측 시각이라 의미가 다르다 — 속성이 안 와도 갱신된다).
+    attrs_observed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     first_observed_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     last_observed_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
