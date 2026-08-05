@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import logging
+import os
+import threading
+import time
 from app.utils.kst import kst_now, kst_today
 from datetime import date, timedelta
 from decimal import Decimal
@@ -60,11 +63,60 @@ def _default_dates(
     return date_from, date_to
 
 
+# ──────────────────────────────────────────────
+# 조회 시 동기화 쿨다운 (2026-08-05, Jino 승인 "A로 해줘")
+# ──────────────────────────────────────────────
+# 문제: `/channel-breakdown`·`/trend-by-channel`은 조회할 때마다 외부 API로 주문 7일 +
+#   광고비 7일을 재동기화한다. 라이브 실측 — 이 두 엔드포인트만 **63.7초**, 같은 창의
+#   `kpi` 0.11초 · `product-ranking` 0.12초. 화면을 열 때마다, 기간을 바꿀 때마다,
+#   매출 축 토글을 누를 때마다 1분씩 멈춘다.
+# 이미 `auto_sync_orders` 크론이 매일 06:00에 돌고 있으므로 조회 시 동기화는 그 위에 얹힌
+#   **중복**이다. 다만 크론만 믿으면 06:00 이후 주문이 다음날까지 안 보이므로 없애지 않고,
+#   같은 창을 짧은 시간 안에 다시 볼 때만 건너뛴다.
+# ★키를 (용도, 창)으로 잡는다: 기간을 바꾸면 그 창은 새로 동기화된다(다른 데이터를 보는데
+#   앞 창의 쿨다운에 막히면 "왜 안 바뀌지"가 된다).
+# ★check-and-set을 락으로 묶는다: 이 엔드포인트는 스레드풀에서 돌아 브라우저 탭 두 개가
+#   동시에 열리면 **둘 다** 63초 동기화를 시작한다. 락이 그걸 하나로 접는다.
+# ★"한 번도 안 함"을 0.0 같은 기본값으로 두지 않는다(키 부재로 표현한다) — 단조시계와
+#   0.0을 비교했다가 재부팅 후 1시간 동안 조용히 죽은 사고가 있었다(Wing 폴 데몬, 2026-08-04).
+_SYNC_COOLDOWN_SEC = int(os.getenv("DASHBOARD_SYNC_COOLDOWN_SEC") or "300")
+_sync_lock = threading.Lock()
+_last_sync: dict[str, float] = {}
+
+
+def _sync_due(key: str) -> bool:
+    """쿨다운이 지났으면 True(그리고 즉시 '지금 했음'으로 표시). 아니면 False.
+
+    ★실패해도 표시한다: 이 경로의 동기화는 best-effort(내부에서 예외를 삼키고 로그만 남긴다)라
+      성공 여부를 알 수 없다. 실패가 쿨다운을 잡아도 크론이 별도로 돌고 다음 창에서 다시 시도되므로
+      데이터가 영구히 멈추지 않는다 — 대신 조회가 매번 1분 멈추는 것을 막는 쪽을 택했다.
+    """
+    now = time.monotonic()
+    with _sync_lock:
+        prev = _last_sync.get(key)
+        if prev is not None and (now - prev) < _SYNC_COOLDOWN_SEC:
+            return False
+        _last_sync[key] = now
+        return True
+
+
+def _reset_sync_cooldown() -> None:
+    """테스트용 — 프로세스 전역 상태를 비운다."""
+    with _sync_lock:
+        _last_sync.clear()
+
+
 def _sync_orders_recent(db: Session) -> None:
-    """대시보드 조회 시 API 채널 주문 최근 7일치 최신화 (실패해도 조회는 계속)"""
+    """대시보드 조회 시 API 채널 주문 최근 7일치 최신화 (실패해도 조회는 계속).
+
+    쿨다운(_sync_due) 안이면 건너뛴다 — 위 섹션 주석 참조.
+    """
     from app.services.sync_service import sync_channel_orders
     sync_to = kst_today()
     sync_from = sync_to - timedelta(days=6)
+    if not _sync_due(f"orders:{sync_from}:{sync_to}"):
+        log.debug("주문 최신화 건너뜀(쿨다운 %ds)", _SYNC_COOLDOWN_SEC)
+        return
     channels = db.query(Channel).filter(
         Channel.api_type != "excel",
         Channel.code != "COUPANG_ROCKET",
@@ -84,6 +136,9 @@ def _sync_ad_costs_for_period(db: Session, date_from: date, date_to: date) -> No
     """
     sync_from = max(date_from, date_to - timedelta(days=6))
     date_from, date_to = sync_from, date_to
+    if not _sync_due(f"adcost:{date_from}:{date_to}"):
+        log.debug("광고비 최신화 건너뜀(쿨다운 %ds)", _SYNC_COOLDOWN_SEC)
+        return
     # 네이버 SA
     try:
         from app.services.naver_sa_ad_fetcher import fetch_campaign_daily_spend as _fetch_sa
