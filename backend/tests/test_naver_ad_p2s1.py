@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -23,6 +23,7 @@ from app.services.naver_ad import (
     campaign_backfill, campaign_target_resolver, entity_sync, keyword_volume_sync, search_term_ingest,
 )
 from app.services import naver_sa_ad_fetcher as fetcher
+from app.utils.kst import kst_today
 
 
 @pytest.fixture
@@ -546,7 +547,15 @@ def test_sync_keyword_volumes_targets_low_click_only(db, monkeypatch):
                         campaign_type="WEB_SITE", name="저클릭키워드", status="on"))
     db.add(NaverEntity(entity_type="keyword", entity_id="nkw-high", campaign_id="cmp-1",
                         campaign_type="WEB_SITE", name="고클릭키워드", status="on"))
-    db.add(NaverAdDaily(ad_date=date(2026, 7, 5), campaign_id="cmp-1", keyword_id="nkw-high", clk=50))
+    # ★날짜는 **오늘 기준 상대**여야 한다: sync_keyword_volumes의 저클릭 판정 창이
+    #   `kst_today() - _LOOKBACK_DAYS(30)`이라 실제 시계를 탄다. 고정 날짜를 쓰면 그 날짜가
+    #   창을 벗어나는 날 클릭 이력이 사라져 고클릭 키워드가 저클릭으로 뒤집힌다 —
+    #   실제로 `date(2026, 7, 5)`가 2026-08-05 자정에 창 밖으로 나가 이 테스트가 깨졌다
+    #   (08-04엔 cutoff가 정확히 07-05라 경계에 걸쳐 통과하고 있었다).
+    #   창 전체를 고정하려면 시계를 얼려야 하는데(같은 트랙 test_naver_ad_exploration_bx3의
+    #   `NOW` 패턴), 여기선 창 경계 자체가 검증 대상이 아니므로 데이터를 창 안에 붙여 둔다.
+    db.add(NaverAdDaily(ad_date=kst_today() - timedelta(days=1), campaign_id="cmp-1",
+                        keyword_id="nkw-high", clk=50))
     db.commit()
 
     monkeypatch.setattr(keyword_volume_sync, "fetch_keyword_volumes",
