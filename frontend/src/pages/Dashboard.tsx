@@ -1,5 +1,5 @@
 // Dashboard.tsx — 대시보드 페이지 (Sprint 3)
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ComposedChart,
   Bar,
@@ -286,7 +286,17 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
 
+  // ★응답 순서 역전 방어 (2026-08-05 라이브 재현).
+  //   조회 조건(기간·매출 축)을 바꾸면 새 요청이 나가는데, **앞 요청이 더 늦게 도착할 수 있다.**
+  //   실제로 그랬다: 첫 로드가 콜드 동기화로 63초 걸리는 사이 매출 축을 토글하니 판매 축 응답
+  //   (0.1초)이 먼저 와서 화면에 그려졌고, 뒤늦게 도착한 계산서 축 응답이 그것을 **덮어썼다**.
+  //   증상은 "눌렀는데 안 바뀐다"지만 진짜 위험은 그게 아니다 — 라벨은 「판매」인데 값은 계산서라
+  //   **틀린 축의 숫자를 맞다고 믿게 된다.**
+  //   세대 카운터로 막는다: 응답이 도착했을 때 내가 최신 요청이 아니면 결과를 **버린다**.
+  const fetchGen = useRef(0);
+
   const fetchAll = useCallback(async () => {
+    const gen = ++fetchGen.current;
     setLoading(true);
     try {
       const params = `date_from=${dateFrom}&date_to=${dateTo}`;
@@ -298,6 +308,7 @@ export default function Dashboard() {
         fetchApi<GroupedTrendPoint[]>(`/api/dashboard/trend-by-channel?${params}&${rb}`),
         fetchApi<ProductRanking[]>(`/api/dashboard/product-ranking?${params}&sort_by=${sortBy}&limit=20`),
       ]);
+      if (gen !== fetchGen.current) return;   // 뒤처진 응답 — 최신 화면을 덮지 않는다
       setKpi(parseNumbers(kpiData));
       setTrend(parseList(trendData));
       setChannels(parseList(channelData));
@@ -306,7 +317,8 @@ export default function Dashboard() {
     } catch {
       // keep previous data on error
     } finally {
-      setLoading(false);
+      // 뒤처진 응답이 최신 요청의 로딩 표시를 끄면 "다 됐다"로 잘못 보인다
+      if (gen === fetchGen.current) setLoading(false);
     }
   }, [dateFrom, dateTo, period, sortBy, rocketBasis]);
 
