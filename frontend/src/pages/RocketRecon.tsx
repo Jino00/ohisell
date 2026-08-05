@@ -493,6 +493,10 @@ function SkuTable({ data, from, to }: { data: RocketRecon; from: string; to: str
             <Th>상품(SKU)</Th>
             <Th right><span className="whitespace-nowrap">발주</span></Th>
             <Th right><span className="whitespace-nowrap">납품가능</span></Th>
+            {/* ★「보낸 수량」의 제자리는 납품가능과 입고 사이다 — 발주 → 납품가능 → 보냄 → 입고로
+                줄어드는 깔때기를 그대로 읽게 한다. 「보냄 > 입고」가 미수금 후보이고, 그 구간이
+                지금까지 화면에 아예 없었다(ref 45: 2026-08-05 실측 8,033,970원). */}
+            <Th right><span className="whitespace-nowrap">보낸 수량</span></Th>
             <Th right><span className="whitespace-nowrap">입고</span></Th>
             <Th right><span className="whitespace-nowrap">발주−입고</span></Th>
             <Th right><span className="whitespace-nowrap">발주 금액</span></Th>
@@ -573,6 +577,34 @@ function SkuRows({ row, open, onToggle, from, to }: {
           )}
           {row.confirmed_missing_lines > 0 && (
             <div className="text-xs text-gray-400">미수집 {n(row.confirmed_missing_lines)}줄</div>
+          )}
+        </Td>
+        <Td right>
+          {/* 발송 기록이 없으면 '0개 보냈다'가 아니라 **모름**이다(수집 이전 기간·트럭 쉽먼트).
+              0으로 칠하면 미수집 구간이 통째로 미수금처럼 보인다. */}
+          {row.shipped_qty == null ? (
+            <span className="text-gray-400" title="이 상품의 발주에 발송(ASN) 기록이 아직 없습니다 (0이 아니라 '모름')">
+              {NO_DATA}
+            </span>
+          ) : (
+            <>
+              {n(row.shipped_qty)}
+              {row.unreceived_shipped_qty != null && row.unreceived_shipped_qty > 0 && (
+                <div
+                  className="text-xs text-red-600"
+                  title={
+                    "보냈는데 발송(ASN) 화면의 입고수량에 안 잡힌 수량 — 미수금 '후보'이지 확정이 아닙니다.\n" +
+                    "① 아직 배송·입고 처리 중일 수 있습니다(발송 직후 건은 정상적으로 0입니다).\n" +
+                    "② ★ASN 화면의 입고수량은 재발송분 입고를 못 봅니다 — 이 값만 믿고 청구하면 과대계상됩니다" +
+                    "(2026-08-05 실측: 그렇게 해서 5,763,290원을 과대계상했습니다).\n" +
+                    "확정 판정은 쿠팡 입고 원장(/scm/receive/detail/download)과 대조해야 합니다."
+                  }
+                >
+                  미입고 {n(row.unreceived_shipped_qty)}
+                  <span className="text-gray-400"> (후보)</span>
+                </div>
+              )}
+            </>
           )}
         </Td>
         <Td right>

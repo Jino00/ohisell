@@ -189,19 +189,12 @@ def _po_line(s, po_seq, sku, unit_price, qty=1):
          "sup": unit_price * qty / 1.1, "vat": unit_price * qty / 11})
 
 
-def _create_promo_discount_table(s):
-    """★`coupang_promo_discount_item`은 main의 models.py에 **없다**.
-
-    D-CPP-10(제안서 엑셀 → 개당 할인액)은 브랜치 `claude/d-cpp-10-promo-file-ingest`에만 있고
-    prod엔 마이그레이션 `c8e1a4b7d201`로 배포돼 있다 — **prod에는 있고 main에는 없는** 상태다.
-    그래서 서비스는 테이블 존재를 확인하고 없으면 분담금을 **모름(None)**으로 둔다.
-    이 헬퍼는 "있는 경우"를 재현한다(그 브랜치가 병합되면 이 헬퍼를 지우면 된다).
-    """
-    s.execute(text(
-        "CREATE TABLE IF NOT EXISTS coupang_promo_discount_item ("
-        " id INTEGER PRIMARY KEY, request_id VARCHAR(30) NOT NULL,"
-        " product_number VARCHAR(30) NOT NULL, discount_type VARCHAR(10) NOT NULL,"
-        " discount_value NUMERIC(12,4) NOT NULL)"))
+def _promotion(s, request_id, start, end):
+    """창에 걸치는 프로모션 1건. **할인액 없이** 넣으면 분담금은 '모름'이 된다."""
+    s.execute(text("INSERT INTO coupang_rocket_promotion "
+                   "(request_id, vendor_id, start_at, end_at) "
+                   "VALUES (:r, :v, :s, :e)"),
+              {"r": request_id, "v": svc.ROCKET_1P_VENDOR_ID, "s": start, "e": end})
 
 
 def _master_cost(s, internal_sku, cost, product_number):
@@ -254,14 +247,21 @@ def test_net_profit_suppressed_when_cost_coverage_is_low(db):
     assert Decimal(row["cost_coverage"]) == Decimal("0.1000")
 
 
-def test_net_profit_suppressed_when_promo_source_is_absent(db):
-    """★분담금 원천이 없으면 0으로 접지 않고 **모름**으로 두고 순이익을 내지 않는다.
+def test_net_profit_suppressed_when_window_promotion_has_no_discount_source(db):
+    """★프로모션은 있었는데 할인액 원천이 없으면 0으로 접지 않고 **모름**으로 둔다.
 
-    0으로 접으면 "분담금이 없었다"가 되어 이익이 부풀어 보인다 — 원가 커버리지와 같은 원칙.
+    0으로 접으면 "분담금이 없었다"가 되어 그 프로모션의 할인액만큼 이익이 부풀어 보인다 —
+    원가 커버리지와 같은 원칙.
+    ★이 계약의 판정자가 2026-08-05에 바뀌었다: 원래는 `coupang_promo_discount_item` **테이블
+      존재**로 갈랐는데, 그 테이블이 main에 병합되면서(PR #200) 어디에나 존재하게 됐다.
+      빈 테이블이 곧 "분담금 0"으로 읽히면 제안서를 아직 못 받은 기간의 순이익이 조용히
+      부풀어 오른다 — 같은 실패가 형태만 바꿔 돌아온 것이라 판정자를 **창에 걸친 프로모션의
+      할인액 유무**로 옮겼다.
     """
     _po_line(db, 900, 111, 10000)
     _master_cost(db, "OHI-A", 3000, 111)
     _sales(db, "2026-08-04", 111, 10, 1)
+    _promotion(db, "686180", "2026-08-01 00:00:00", "2026-08-15 23:59:59")  # 할인액 없음
     db.commit()
     row = svc.compute_rocket_1p_summary_row(db, date(2026, 8, 4), date(2026, 8, 4), "sales")
     assert Decimal(row["cost_coverage"]) == Decimal("1.0000")   # 원가는 다 붙었는데도
@@ -269,9 +269,19 @@ def test_net_profit_suppressed_when_promo_source_is_absent(db):
     assert row["net_profit"] is None
 
 
+def test_burden_is_zero_when_window_had_no_promotion_at_all(db):
+    """프로모션이 아예 없던 기간의 분담금 0은 **추정이 아니라 사실**이다 — 순이익을 낸다."""
+    _po_line(db, 900, 111, 10000)
+    _master_cost(db, "OHI-A", 3000, 111)
+    _sales(db, "2026-08-04", 111, 10, 1)
+    db.commit()
+    row = svc.compute_rocket_1p_summary_row(db, date(2026, 8, 4), date(2026, 8, 4), "sales")
+    assert Decimal(row["promo_burden"]) == Decimal("0")
+    assert row["net_profit"] is not None
+
+
 def test_net_profit_emitted_when_cost_coverage_is_full(db):
     """커버리지가 임계 이상이면 스마트스토어와 같은 공식으로 순이익을 낸다."""
-    _create_promo_discount_table(db)
     _po_line(db, 900, 111, 10000)
     _master_cost(db, "OHI-A", 3000, 111)
     _sales(db, "2026-08-04", 111, 10, 1)
@@ -291,7 +301,6 @@ def test_promo_burden_is_subtracted_on_sales_basis(db):
     _po_line(db, 900, 111, 10000)
     _master_cost(db, "OHI-A", 3000, 111)
     _sales(db, "2026-08-04", 111, 10, 1)
-    _create_promo_discount_table(db)
     db.execute(text("INSERT INTO coupang_rocket_promotion "
                     "(request_id, vendor_id, start_at, end_at) "
                     "VALUES ('686180', :v, '2026-08-01 00:00:00', '2026-08-15 23:59:59')"),
@@ -307,7 +316,6 @@ def test_promo_burden_is_subtracted_on_sales_basis(db):
 def test_promo_burden_ignores_out_of_window_promotions(db):
     _po_line(db, 900, 111, 10000)
     _sales(db, "2026-08-04", 111, 10, 1)
-    _create_promo_discount_table(db)
     db.execute(text("INSERT INTO coupang_rocket_promotion "
                     "(request_id, vendor_id, start_at, end_at) "
                     "VALUES ('685840', :v, '2026-07-22 00:00:00', '2026-07-23 23:59:59')"),

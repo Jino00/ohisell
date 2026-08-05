@@ -27,7 +27,7 @@ from app.database import get_db
 from app.models import Channel, CoupangAdChangeLog, CoupangAdCostDaily, CoupangAdEntitySnapshot, CoupangAdOptionDaily, CoupangProductItem, CoupangRevenueFee, CoupangRgInbound, CoupangRgOrderItem, CoupangRgSettlementFee, CoupangRocketPromotion, Order, ProductChannelMapping, ProductMaster
 from app.routers._coupang_write_http import handle_write as _handle_write
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
-from app.services.coupang import ad_change_history, ad_cost_sync, ad_creative_diff, ad_settings_diff, coupon_write, refresh_contract, coupang_seller_cost as _seller_cost_harness, demand_classifier, in_transit_estimator, lead_time_estimator, ohitech_ad_sync, product_write, rg_fee_audit, rg_inbound_sync, rg_product_size_sync, rg_replenishment, rg_settlement_sync, replenishment_backtest, rocket_cost_map, rocket_promo_file_sync, rocket_promo_sync, rocket_supplier_sync, rg_cost_reader as _rg_reader, sales_velocity_estimator, vendor_summary_sync
+from app.services.coupang import ad_change_history, ad_cost_sync, ad_creative_diff, ad_settings_diff, coupon_write, refresh_contract, coupang_seller_cost as _seller_cost_harness, demand_classifier, in_transit_estimator, lead_time_estimator, ohitech_ad_sync, product_write, rg_fee_audit, rg_inbound_sync, rg_product_size_sync, rg_replenishment, rg_settlement_sync, replenishment_backtest, rocket_cost_map, rocket_promo_file_sync, rocket_promo_sync, rocket_shipment_sync, rocket_supplier_sync, rg_cost_reader as _rg_reader, sales_velocity_estimator, vendor_summary_sync
 from app.utils.crypto import CookieCryptoError
 
 log = logging.getLogger(__name__)
@@ -1383,6 +1383,32 @@ def ingest_rocket_po_detail(
     if not isinstance(rows, list) or not rows:
         raise HTTPException(status_code=400, detail="rows[] 필요")
     return rocket_supplier_sync.ingest_po_items(db, po_seq, vendor_id, rows)
+
+
+@router.post("/rocket/shipment/ingest")
+def ingest_rocket_shipment(
+    body: dict[str, Any] = Body(...),
+    x_ingest_token: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """로켓배송(1P) 발송(ASN) 쉽먼트 목록+상세 DOM push → 파싱 → 쉽먼트 단위 snapshot replace(ref 45).
+
+    body: {"vendor_id": "A01029796", "shipments": [
+             {"headers": [...], "cells": [...], "data": {"id","status","type"},
+              "po_content": "…<br>…",
+              "detail": {"tables": [{"id","class","headers","rows"}, …]}}   # detail은 선택
+           ]}
+    ★상세(detail)가 없으면 목록 필드만 갱신하고 총 입고 수량 등은 **건드리지 않는다**(모름 유지) —
+      0으로 접으면 "쿠팡이 하나도 안 받았다"가 되어 미수금을 지어낸다(ref 45 §12 계열의 사고).
+    """
+    _check_ingest_token(x_ingest_token)
+    vendor_id = str(body.get("vendor_id") or "").strip()
+    if not vendor_id:
+        raise HTTPException(status_code=400, detail="vendor_id 필요")
+    shipments = body.get("shipments")
+    if not isinstance(shipments, list) or not shipments:
+        raise HTTPException(status_code=400, detail="shipments[] 필요")
+    return rocket_shipment_sync.ingest_shipments(db, vendor_id, shipments)
 
 
 # ════════════════════════════════════════════════

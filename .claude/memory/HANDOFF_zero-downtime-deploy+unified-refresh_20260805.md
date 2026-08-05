@@ -1,5 +1,5 @@
 # 세션 인수인계: prod 무중단 배포 + 광고 push 500 수정 + 대시보드 전체 갱신 (2026-08-05 밤)
-> 저장 2026-08-05 23:0x KST · 트랙: **쿠팡 손익 정합**(인프라 갈래) — 트랙 파일 `docs/tracks/active/track_coupang-rocket-1p.md` D-18
+> 저장 2026-08-05 23:0x KST · 트랙: **쿠팡 손익 정합**(인프라 갈래) — 트랙 파일 `docs/tracks/active/track_coupang-rocket-1p.md` D-19
 > 이 워크트리 `claude/zero-downtime-deploy` HEAD `2a9fd69`(PR #203) · 관련 PR **#204**(`fd21cc7`)·**#205**(`e8cf08b`) 별도 워크트리
 > 세 PR 전부 codex 소급 리뷰 대기 상태로 **OPEN**(병합 미실행)
 
@@ -18,10 +18,10 @@
 - ✅ **③대시보드 전체 갱신 버튼**(PR #205, `7a716d5`+`e8cf08b`) — 6큐(쿠팡·네이버·광고비 등) 한 번에 트리거 + POST 재시도 + 폴링 실패 방어 + sessionStorage 영속화.
 - ✅ **④cao.service 크래시 루프 정지** — 3일간 약 4.8만 회 재시작 루프를 발견해 정지 처리(별도 원인, 이 인프라 정리와 병행 처치).
 - ✅ **적대 리뷰 3PR 전건 실행** — codex CLI 쿼터 소진으로 Opus 1기 적대 리뷰로 대체(스킬 폴백 규칙). PR #203 자체 리뷰 → P1 4건 전건 채택·수정(`2a9fd69`). PR #204 → P1 1건(SAVEPOINT 이전 흡수 가정) 근거 실측으로 **부분 기각** + 하드닝 채택, P2 4건 채택. PR #205 → P1 2건 전건 채택. 처분 표는 PR #204·#205 코멘트로 게시 완료(§7).
-- ✅ 트랙 파일 D-18 / LESSONS_LEARNED #142·#143 / claude-progress.txt 기록(`fbc1c9b`, 병렬 세션 시점 — 이 HANDOFF가 review-round 결과까지 마저 덮음)
+- ✅ 트랙 파일 D-19 / LESSONS_LEARNED #142·#143 / claude-progress.txt 기록(`fbc1c9b`, 병렬 세션 시점 — 이 HANDOFF가 review-round 결과까지 마저 덮음)
 
 ## 3. 확정된 결정사항 (번복 금지)
-- **D-18(트랙 §확정 결정사항) — prod 백엔드 재시작 = 무중단(블루-그린) 기본, 구 `pm2 restart`는 legacy 플래그로만.** 재시작이 곧 다운타임이던 구조를 닫는다. `safe_deploy.sh --restart`가 기본 경로.
+- **D-19(트랙 §확정 결정사항) — prod 백엔드 재시작 = 무중단(블루-그린) 기본, 구 `pm2 restart`는 legacy 플래그로만.** 재시작이 곧 다운타임이던 구조를 닫는다. `safe_deploy.sh --restart`가 기본 경로.
 - **`/api/health`가 `scheduler_leader`·`holds_scheduler_lock`을 노출한다**(`backend/app/main.py:99` 이하) — 배포 스크립트가 "구 프로세스 종료 후 신 프로세스가 스케줄러를 실제로 물려받았는지"를 판정하는 유일한 신호. 로컬 `127.0.0.1:포트`가 아니라 **공개 URL로 프로브해 pid까지 대조**해야 한다(서버 로컬에서 Host 헤더로 찌르지 않음 — 07-17 무인증 공개 사고의 처방을 훼손하므로).
 - **리더 락 보유(`holds_lock()`)와 스케줄러 실제 가동(`is_leader()`)은 별개 신호로 분리 유지** — 합치면 "락은 쥔 채·크론은 죽은 채·헬스는 리더"인 거짓 초록이 난다(P1-1, 아래 §5).
 - **`.restart-lock`으로 무중단 스크립트 동시 실행을 막는다** — 단독 실행이 정식 사용법이라도, 세션 A가 드레인 중일 때 B가 겹치면 방금 라이브된 프로세스를 B가 죽인다(P1-4).
@@ -35,7 +35,7 @@
 | `scripts/safe_deploy.sh` | `--restart`가 무중단 경로 기본 호출 |
 | `backend/app/routers/coupang_ops.py`(또는 광고 설정 ingest 라우터) · `backend/app/services/ad_change_history.py` · `ad_settings_diff.py` | PR #204 — SAVEPOINT 멱등 흡수 |
 | `frontend/src/lib/streamRefresh.ts` · `frontend/src/lib/bulkRefreshPersistence.ts` · `frontend/src/pages/Dashboard.tsx` | PR #205 — 전체 갱신 버튼·폴링 방어·세션 영속화 |
-| `docs/tracks/active/track_coupang-rocket-1p.md` (D-18) | 이 세션의 확정 결정 |
+| `docs/tracks/active/track_coupang-rocket-1p.md` (D-19) | 이 세션의 확정 결정 |
 | `.claude/memory/LESSONS_LEARNED.md` #142·#143 | 원인 규명 서사 |
 
 ## 5. 알려진 이슈 / 주의사항 — 적대 리뷰에서 나온 것 (전부 처리됨, 재발 방지용 기록)
