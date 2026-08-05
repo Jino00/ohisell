@@ -34,16 +34,25 @@ log = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """앱 시작/종료 시 스케줄러 관리"""
+    """앱 시작/종료 시 스케줄러 관리.
+
+    ★스케줄러는 **리더 프로세스에서만** 돈다(scheduler_leader). 무중단 배포(블루-그린)는
+    신·구 프로세스가 수십 초 겹치는데, 둘 다 스케줄러를 켜면 그 창의 크론이 두 번 발화한다.
+    standby로 뜬 프로세스는 HTTP만 서빙하다가 구 프로세스가 종료되면 자동 승격한다.
+    """
+    from app.services import scheduler_leader
     from app.services.scheduler_service import start_scheduler, stop_scheduler
 
     try:
-        start_scheduler()
-        log.info("스케줄러 시작 완료")
+        if scheduler_leader.start_when_leader(start_scheduler):
+            log.info("스케줄러 시작 완료(리더)")
+        else:
+            log.info("스케줄러 미기동 — standby(리더 승격 대기 중)")
     except Exception as e:
         log.error("스케줄러 시작 실패: %s", e)
     yield
     try:
+        scheduler_leader.release()  # 먼저 락을 놓아 후임이 즉시 승격하게 한다
         stop_scheduler()
         log.info("스케줄러 종료 완료")
     except Exception as e:
@@ -83,4 +92,17 @@ app.include_router(monthly_fixed_cost.router)
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok"}
+    """라이브니스 + 스케줄러 리더 여부.
+
+    ★DB를 건드리지 않는다 — 블루-그린 배포에서 신 프로세스의 '트래픽 받을 준비' 판정에
+    쓰이므로, DB 지연이 헬스체크 실패로 둔갑하면 배포가 멈춘다.
+    scheduler_leader는 배포 스크립트가 "구 프로세스 종료 후 신 프로세스가 스케줄러를
+    이어받았다"를 라이브로 확인하는 유일한 표면이다(로그 대신 API로 판정).
+    """
+    from app.services import scheduler_leader
+
+    return {
+        "status": "ok",
+        "pid": os.getpid(),
+        "scheduler_leader": scheduler_leader.is_leader(),
+    }
