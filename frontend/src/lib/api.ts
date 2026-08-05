@@ -1271,6 +1271,57 @@ export function fetchRocketReconSku(
   );
 }
 
+// ── 로켓1P 매출 두 축 대조 (S2, 2026-08-06) ──
+// ★★두 매출을 **더하지 말 것**. consumer_revenue는 쿠팡이 고객에게 판 금액(=쿠팡의 매출)이고
+//   our_revenue는 판매수량×납품단가(=우리 매출)다. 같은 물건이라 더하면 이중계상이다.
+// ★null = **모름**이지 0이 아니다. our_revenue가 null인 옵션은 납품단가를 못 붙인 것이지
+//   공짜로 준 게 아니다 — 화면은 반드시 "—"로 그린다.
+export interface Rocket1PRevenueOption {
+  option_id: string;
+  sku_id: string | null;
+  product_name: string | null;
+  qty: number;
+  consumer_revenue: string;        // 쿠팡가 기준(쿠팡의 매출)
+  our_revenue: string | null;      // 납품가 기준(우리 매출) — null=단가 미상
+  unit_price: string | null;
+  visitors: number | null;
+  our_share: string | null;        // our ÷ consumer (0~1)
+  ad_spend: string | null;
+  roas: string | null;             // ★우리 매출 기준
+}
+
+export interface Rocket1PRevenue {
+  period: { from: string; to: string; vendor_id?: string };
+  totals: {
+    qty: number;
+    consumer_revenue: string;
+    our_revenue: string | null;
+    settlement_revenue: string | null;
+    ad_spend: string;
+    our_share: string | null;
+    roas: string | null;
+  };
+  coverage: {
+    qty_axis: number; qty_all: number; qty_priced: number;
+    priced_pct: string | null; options_unpriced: number;
+  };
+  ad_reconciliation: {
+    option_sum: string; account_total: string; diff: string; basis: string;
+  };
+  option_count: number;
+  shown: number;
+  options: Rocket1PRevenueOption[];
+  axes_note: string;
+}
+
+export function fetchRocket1PRevenue(params: {
+  from: string; to: string; limit?: number;
+}): Promise<Rocket1PRevenue> {
+  const q = new URLSearchParams({ from: params.from, to: params.to });
+  if (params.limit) q.set("limit", String(params.limit));
+  return fetchApi<Rocket1PRevenue>(`/api/overview/rocket-1p-revenue?${q.toString()}`);
+}
+
 // ── 쿠팡 프로모션 손익 레이어 (트랙 coupang-promo-pnl Phase 2) ──
 // ★읽기 전용 신규 API. 종합조망 net_profit 회계는 이 블록과 무관하게 그대로다.
 // ★null = **모름**이지 0이 아니다(원칙22). 화면에서 0으로 렌더하지 말 것 — 미상은 "—"로.
