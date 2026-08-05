@@ -48,6 +48,10 @@ const PERIODS = [
   { label: "30일", days: 30 },
 ];
 
+// 갱신 표시의 최소 노출 시간(ms). sales-summary 응답이 ~0.2초라 이 바닥이 없으면
+// 스피너가 한 프레임 스치고 사라져 "아무 일도 안 일어났다"로 보인다.
+const MIN_BUSY_MS = 350;
+
 function Spinner({ className = "w-4 h-4" }: { className?: string }) {
   return (
     <svg className={`animate-spin ${className}`} viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -170,9 +174,14 @@ export default function NaverOps() {
   const reqSeq = useRef(0);
   const load = useCallback(async () => {
     const seq = ++reqSeq.current;
+    const t0 = performance.now();
     setLoading(true); setError(null);
     try {
       const r = await fetchNaverSalesSummary(days);
+      // 응답이 ~0.2초라 그냥 두면 진행 표시가 깜빡이고 만다(사실상 안 보인다).
+      // 최소 노출 시간을 채운 뒤에 값을 갈아끼운다 — 그동안 옛 값은 흐린 채로 남는다.
+      const rest = MIN_BUSY_MS - (performance.now() - t0);
+      if (rest > 0) await new Promise((res) => setTimeout(res, rest));
       if (seq !== reqSeq.current) return;   // 더 최신 요청이 진행 중 — 이 응답은 버린다
       setData(r);
     } catch (e) {
