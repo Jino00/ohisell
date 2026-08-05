@@ -15,3 +15,6 @@ tools/*.log
 .ohisell_ad_*
 
 .venv-test/
+
+# 스케줄러 리더 락(무중단 배포 겹침 구간의 이중 발화 방지) — 런타임 산출물
+backend/.scheduler.lock

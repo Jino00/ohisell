@@ -14,6 +14,7 @@ from datetime import datetime
 
 import pytest
 from sqlalchemy import create_engine
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -294,3 +295,150 @@ class TestSnapshotState:
         db.refresh(snap)
         assert '"budget": "70000"' in snap.settings_json
         assert snap.is_active is False and snap.present is True
+
+
+class TestSavepointAbsorbsRealRace:
+    """★`safe_add_change_log`의 SAVEPOINT 흡수 경로를 **실제로 밟는** 유일한 자리.
+
+    왜 따로 필요한가(2026-08-05 적대 리뷰 P2-1): 기존 회귀 테스트는 이벤트 경로가 넣은 행이
+    곧바로 flush돼 뒤이은 스냅샷 diff의 **사전 SELECT에 보였다**. 즉 중복을 거른 것은 사전
+    SELECT였고, `except IntegrityError` 블록을 통째로 지워도 그 테스트들은 전부 통과했다
+    (실측: 17 passed). 무검증 코드를 "검증됐다"고 부르지 않으려면 사전 SELECT가 원리적으로
+    못 잡는 상황 — **다른 트랜잭션이 조회~삽입 사이에 커밋** — 을 만들어야 한다.
+
+    그래서 여기만 **파일 DB + 세션 2개**를 쓴다. 인메모리 StaticPool은 커넥션이 하나뿐이라
+    '다른 트랜잭션'이 원리적으로 만들어지지 않는다.
+    """
+
+    OCC = datetime(2026, 8, 5, 7, 2, 10)
+
+    @pytest.fixture
+    def race(self, tmp_path):
+        """A=우리 요청 세션, B=경합 상대. ★autoflush=False는 prod SessionLocal과 같은 설정이다."""
+        eng = create_engine(f"sqlite:///{tmp_path}/race.db")
+        Base.metadata.create_all(eng)
+        make = sessionmaker(bind=eng, autoflush=False)
+        a, b = make(), make()
+        try:
+            yield a, b
+        finally:
+            a.close()
+            b.close()
+            eng.dispose()
+
+    def _log(self, **over):
+        kw = dict(account=ACC, entity_type=mod.ENTITY_CAMPAIGN, entity_id="104882010",
+                  campaign_id="104882010", entity_name="[매.최] 메츨 싱", op=mod.OP_FIELD,
+                  field="budget", before_value="165000", after_value="130000",
+                  occurred_at=self.OCC, time_basis="src", detected_at=self.OCC,
+                  source=mod.SOURCE_SNAPSHOT)
+        kw.update(over)
+        return CoupangAdChangeLog(**kw)
+
+    def _pre_select(self, db):
+        return (db.query(CoupangAdChangeLog.id)
+                .filter(CoupangAdChangeLog.account == ACC,
+                        CoupangAdChangeLog.entity_id == "104882010",
+                        CoupangAdChangeLog.op == mod.OP_FIELD,
+                        CoupangAdChangeLog.field == "budget",
+                        CoupangAdChangeLog.occurred_at == self.OCC)
+                .first())
+
+    def test_사전_SELECT_이후_다른_트랜잭션이_커밋해도_배치가_안_죽는다(self, race):
+        a, b = race
+        assert self._pre_select(a) is None            # ① A가 보기엔 없다
+
+        b.add(self._log(source=mod.SOURCE_COUPANG))   # ② 그 사이 B가 같은 키를 커밋
+        b.commit()
+
+        assert mod.safe_add_change_log(a, self._log()) is False   # ③ SAVEPOINT가 흡수
+        a.commit()
+        assert a.query(CoupangAdChangeLog).count() == 1
+
+    def test_흡수가_이웃_미flush_쓰기를_되돌리지_않는다(self, race):
+        """★계약: "배치 한 건 실패가 배치 전체를 죽이지 않는다."
+
+        이 세션은 autoflush=False라 흡수 시점에 **아직 flush 안 된 이웃 쓰기**가 쌓여 있을 수
+        있다(ingest_ads가 방금 add한 신규 소재 스냅샷, ingest가 갱신한 present/settings_json 등).
+        그게 `ROLLBACK TO SAVEPOINT`에 휩쓸리면 flush 끝난 객체는 다시 dirty로 안 잡혀
+        **영영 재시도되지 않는다** — 죽는 게 아니라 조용히 사라진다. 그러면 다음 회차에 같은
+        소재가 또 "신규 추가"로 잡혀 유령 행이 매 회차 생긴다.
+
+        ★정직하게 적어둔다: 이 테스트는 **오늘 코드에서도, 사전 flush를 빼도 통과한다**.
+          SQLAlchemy 2.0.48의 `SessionTransaction._take_snapshot()`이 SAVEPOINT를 걸기 전에
+          이미 `session.flush()`를 부르기 때문이다(실측). 즉 이건 "고친 버그의 증거"가 아니라
+          **라이브러리 내부 구현에 걸려 있는 불변식을 못 박는 핀**이다 — 그 flush가 사라지거나
+          흡수 로직이 지워지면 여기서 깨진다(흡수 제거 시 실패 실측).
+        """
+        a, b = race
+        a.add(CoupangAdEntitySnapshot(account=ACC, entity_type=mod.ENTITY_CAMPAIGN,
+                                      entity_id="OLD", campaign_id="OLD", name="원래이름",
+                                      is_active=True, settings_json="{}", observed_at=T1,
+                                      present=True))
+        a.commit()
+        old = a.query(CoupangAdEntitySnapshot).filter_by(entity_id="OLD").one()
+
+        # 미flush INSERT + 미flush UPDATE를 쌓아둔다
+        a.add(CoupangAdEntitySnapshot(account=ACC, entity_type="ad", entity_id="AD-NEW",
+                                      campaign_id="104882010", name="새 소재", is_active=True,
+                                      settings_json="{}", observed_at=T2, present=True))
+        old.name = "갱신된이름"
+        old.present = False
+
+        b.add(self._log(source=mod.SOURCE_COUPANG))
+        b.commit()
+
+        assert mod.safe_add_change_log(a, self._log()) is False
+        a.commit()
+
+        fresh = sessionmaker(bind=a.get_bind(), autoflush=False)()
+        try:
+            assert fresh.query(CoupangAdEntitySnapshot).filter_by(entity_id="AD-NEW").count() == 1
+            kept = fresh.query(CoupangAdEntitySnapshot).filter_by(entity_id="OLD").one()
+            assert (kept.name, kept.present) == ("갱신된이름", False)
+            assert fresh.query(CoupangAdChangeLog).count() == 1
+        finally:
+            fresh.close()
+
+    def test_UNIQUE가_아닌_무결성_오류는_삼키지_않는다(self, db):
+        """중복 흡수가 데이터 오류까지 덮으면 침묵이 된다 — op는 NOT NULL이다."""
+        bad = self._log()
+        bad.op = None
+        with pytest.raises(IntegrityError):
+            mod.safe_add_change_log(db, bad)
+
+
+class TestUniqueViolationIsDialectIndependent:
+    """★P2-2: SQLite 문구(`UNIQUE constraint failed`)에 매달면 **PostgreSQL 이관 순간 500이
+    그대로 부활한다**(이 앱의 DB 축은 SQLite→PostgreSQL). PG는 같은 사건을
+    `duplicate key value violates unique constraint "uq_coupang_ad_change_log"` +
+    SQLSTATE 23505로 말한다. 여기선 PG 드라이버가 없으므로 orig를 모사해 판별기만 직접 친다.
+    """
+
+    def _exc(self, msg, **attrs):
+        orig = type("_Orig", (Exception,), attrs)(msg)
+        return IntegrityError("INSERT INTO coupang_ad_change_log ...", {}, orig)
+
+    def test_SQLite_문구(self):
+        assert mod._is_unique_violation(self._exc(
+            "UNIQUE constraint failed: coupang_ad_change_log.account, "
+            "coupang_ad_change_log.entity_type")) is True
+
+    def test_PostgreSQL_문구(self):
+        assert mod._is_unique_violation(self._exc(
+            'duplicate key value violates unique constraint "uq_coupang_ad_change_log"',
+            pgcode="23505")) is True
+
+    def test_PostgreSQL_SQLSTATE만_있어도_알아본다(self):
+        """psycopg3는 pgcode 대신 sqlstate를 쓴다. 문구가 지역화돼도 코드는 안 변한다."""
+        assert mod._is_unique_violation(self._exc(
+            "다른 언어로 번역된 메시지 coupang_ad_change_log", sqlstate="23505")) is True
+
+    def test_같은_테이블의_다른_무결성_오류는_안_삼킨다(self):
+        assert mod._is_unique_violation(self._exc(
+            'null value in column "op" of relation "coupang_ad_change_log" '
+            'violates not-null constraint', pgcode="23502")) is False
+
+    def test_다른_테이블의_UNIQUE_위반은_안_삼킨다(self):
+        assert mod._is_unique_violation(self._exc(
+            "UNIQUE constraint failed: coupang_ad_entity_snapshot.account")) is False

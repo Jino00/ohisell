@@ -23,12 +23,20 @@ import {
 } from "./api";
 
 // 페처 갱신 상태 5종이 공통으로 갖는 필드만 추린 구조적 타입.
-// (각 API의 고유 필드 — age_hours·attempt_count 등 — 는 판정에 쓰지 않는다.)
+// (각 API의 고유 필드 — age_hours 등 — 는 판정에 쓰지 않는다.)
 export interface RefreshStatusLike {
   requested: boolean;
   last_success_at: string | null;
   last_error_at: string | null;
   last_error: string | null;
+  /**
+   * lease 계약의 시도 횟수(0~3). ★성공/실패 **판정에는 쓰지 않는다** — 오직 "Mac이 요청을
+   * 집어갔는가"를 화면에 보이기 위한 진행 표시용이다.
+   * 근거(backend/app/services/coupang/refresh_contract.py): request_refresh가 0으로 리셋하고,
+   * 데몬이 claim_refresh로 집어갈 때만 +1 된다 → requested && attempt_count>0 ⟺ Mac 수령.
+   * 없는 응답(구버전·다른 표면)도 받아들이도록 optional — 없으면 이 표시만 생략된다.
+   */
+  attempt_count?: number;
 }
 
 export type RefreshOutcome =
@@ -68,6 +76,98 @@ export interface RunnerDeps {
   /** 215초 — 데몬 로그인 대기(180s) + fetch 여유까지 커버. */
   timeoutMs?: number;
   pollMs?: number;
+  /**
+   * 정착 **전**의 진행 상태 통지(선택). 결과 판정과 무관 — 화면이 "지금 어디쯤인지"를
+   * 말할 수 있게 하는 통로다. 스펙별로 오므로 여러 큐를 한 패널에 세울 수 있다.
+   */
+  onPhase?: (spec: StreamRefreshSpec, phase: RefreshPhase) => void;
+}
+
+/**
+ * 큐 하나의 진행 단계. 정착(RefreshOutcome) 전까지만 흐른다.
+ *  requesting → requested → fetching → (RefreshOutcome)
+ * ★fetching은 attempt_count로만 알 수 있고, 그 필드가 없는 표면에서는 requested에 머문다
+ *   — 없는 정보를 있는 척 만들지 않는다.
+ */
+export type RefreshPhase =
+  /** POST 시도 중. retry=0이면 첫 시도, 1 이상이면 재시도 n회차(백오프 대기 포함). */
+  | { kind: "requesting"; retry: number; maxRetries: number }
+  /** POST 성공 = prod에 요청 플래그가 섰다. 이제 Mac 데몬의 폴링(15~60초)을 기다린다. */
+  | { kind: "requested" }
+  /** Mac 데몬이 요청을 집어갔다(lease claim) = 실제 수집 중. */
+  | { kind: "fetching" };
+
+/**
+ * request-refresh POST 재시도 지연(ms) — 첫 시도 실패 후 이 순서로 최대 3회 더 시도한다.
+ *
+ * ★왜 필요한가(2026-08-05 라이브 사고): prod가 간헐 502를 내는 동안 갱신 버튼을 누르면
+ * **POST 자체가 유실**된다. 폴링은 멀쩡히 돌지만 요청 플래그가 안 섰으니 Mac은 영원히
+ * 아무것도 하지 않고, 화면엔 "요청 실패"가 잠깐 스쳤다 사라져 Jino는 "버튼이 안 눌린다"로
+ * 인지했다. 502는 대개 수초짜리라 **한 번 더 던지면 붙는다**.
+ * ★여기 한 곳에만 둔다 — 호출자가 각자 재시도를 짜면 한쪽만 고쳐진다(LESSONS #55).
+ */
+export const REQUEST_RETRY_DELAYS_MS = [2000, 5000, 10000];
+
+/**
+ * 폴링 루프 안 getStatus가 연속으로 실패해도 되는 횟수 상한(P1-6, 2026-08-05 적대 리뷰).
+ *
+ * ★왜 필요한가: 215초 폴링 창(pollMs마다 반복)은 POST 재시도 창(길어야 수십 초)보다 훨씬
+ * 길어서, prod의 찰나 502·네트워크 끊김을 만날 확률은 폴링 쪽이 압도적으로 높다. 예전 주석은
+ * "루프 자체가 pollMs마다 재시도라 감쌀 필요 없다"고 했지만 실제로는 루프에 try/catch가 없어
+ * **getStatus 1회 reject가 runStreamRefresh 전체를 즉시 reject**시켰다 — Mac은 실제로 수집을
+ * 완료하는데 화면은 "❌ 실패"로 영구 확정되고, 패널도 접히지 않고, 사용자는 이미 끝난 수집을
+ * 재클릭으로 또 돌리게 된다. 그렇다고 실패를 무한히 삼키면 진짜 장애(Mac이 꺼짐 등)가 215초
+ * 내내 "진행 중"으로 보이므로, 연속 N회 실패하면 이탈해 실패로 확정한다. 성공 시 리셋된다.
+ */
+export const POLL_FAILURE_LIMIT = 5;
+
+/**
+ * POST 재시도 대상인지 판정(P2-3, 적대 리뷰 2026-08-05).
+ *
+ * ★왜 필요한가: withRequestRetry는 원래 오류 종류를 가리지 않고 2+5+10초를 태웠다. 400/401·
+ * "로그인 필요"는 몇 번을 더 던져도 붙지 않는데, 그 사용자는 재시도 지연만큼 헛되이 기다렸다.
+ * 판단이 애매하면 보수적으로 — **네트워크 오류(상태 코드 없음)와 5xx만** 재시도 대상으로 본다.
+ */
+export function isRetryableRequestError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : typeof err === "string" ? err : "";
+  if (isLoginRequired(msg)) return false;
+  const m = msg.match(/API error (\d{3}):/);
+  if (m) {
+    const status = Number(m[1]);
+    return status >= 500; // 4xx(400/401 등)는 재시도해도 안 붙는다 — 즉시 포기.
+  }
+  return true; // 상태 코드가 없는 오류(fetch 자체 실패 등)는 일시적 문제로 보고 재시도한다.
+}
+
+/**
+ * 일시적 실패에 강한 호출 래퍼. 총 시도 = 1(첫 시도) + REQUEST_RETRY_DELAYS_MS.length.
+ * onRetry는 **대기 시작 시점**에 불린다 — 화면이 "요청 재시도 2/3…"을 백오프 동안 띄우기 위해.
+ * ★재시도 불가 오류(isRetryableRequestError가 false)는 즉시 포기한다(P2-3).
+ */
+export async function withRequestRetry<T>(
+  fn: () => Promise<T>,
+  opts: {
+    sleep: (ms: number) => Promise<void>;
+    delays?: number[];
+    onRetry?: (retry: number, maxRetries: number, err: unknown) => void;
+  },
+): Promise<T> {
+  const delays = opts.delays ?? REQUEST_RETRY_DELAYS_MS;
+  let lastErr: unknown = new Error("요청 실패");
+  for (let i = 0; i <= delays.length; i++) {
+    if (i > 0) {
+      // 대기 전에 알린다 — 대기 중 화면이 조용하면 "멈춘 것"으로 보인다(이 PR이 고치는 인지 실패).
+      opts.onRetry?.(i, delays.length, lastErr);
+      await opts.sleep(delays[i - 1]);
+    }
+    try {
+      return await fn();
+    } catch (e) {
+      lastErr = e;
+      if (!isRetryableRequestError(e)) throw e; // 4xx·로그인 필요 — 재시도해도 안 붙는다.
+    }
+  }
+  throw lastErr;
 }
 
 /**
@@ -85,15 +185,49 @@ export async function runStreamRefresh(
   const timeoutMs = deps.timeoutMs ?? 215000;
   const pollMs = deps.pollMs ?? 3000;
 
-  const before = await spec.getStatus();
+  const maxRetries = REQUEST_RETRY_DELAYS_MS.length;
+  const emit = (phase: RefreshPhase) => deps.onPhase?.(spec, phase);
+  const onRetry = (retry: number) => emit({ kind: "requesting", retry, maxRetries });
+
+  emit({ kind: "requesting", retry: 0, maxRetries });
+  // ★baseline 조회도 같은 래퍼로 감싼다: 502 창은 GET/POST를 가리지 않으므로, 여기서 한 번
+  //   튕기면 POST를 던져보지도 못하고 "요청 실패"로 끝난다 — 재시도를 넣은 이유가 그대로 샌다.
+  //   폴링 중의 getStatus는 아래 루프에서 **따로** try/catch로 감싼다(POLL_FAILURE_LIMIT 참조) —
+  //   215초 폴링 창은 POST 재시도 창보다 훨씬 길어 502를 만날 확률이 압도적으로 높다.
+  const before = await withRequestRetry(() => spec.getStatus(), { sleep, onRetry });
   const baseline = before.last_success_at;
   const errBaseline = before.last_error_at; // 실패도 감지해야 "진행 중"과 구분된다
-  await spec.request();
+  await withRequestRetry(() => spec.request(), { sleep, onRetry });
+  emit({ kind: "requested" });
 
   const deadline = now() + timeoutMs;
+  let sawFetching = false;
+  let pollFailures = 0;
   while (now() < deadline) {
     await sleep(pollMs);
-    const st = await spec.getStatus();
+
+    let st: RefreshStatusLike;
+    try {
+      st = await spec.getStatus();
+      pollFailures = 0; // 성공하면 연속 실패 카운터를 리셋한다.
+    } catch (e) {
+      pollFailures += 1;
+      if (pollFailures >= POLL_FAILURE_LIMIT) {
+        // 연속 N회 실패 — 일시적 문제가 아니라고 보고 실패로 확정한다(무한히 삼키지 않는다).
+        return {
+          state: "failed",
+          reason: e instanceof Error ? e.message : "폴링 실패(연속 오류)",
+        };
+      }
+      continue; // 일시적 실패(찰나 502 등) — 다음 폴에서 다시 시도한다. 215초 창이 이를 흡수한다.
+    }
+
+    // Mac 데몬이 요청을 집어갔다 → "요청 전달됨"과 "실제 수집 중"을 구분해 보여준다.
+    // 판정에는 관여하지 않는다(아래 분기들은 attempt_count를 보지 않는다).
+    if (!sawFetching && st.requested && (st.attempt_count ?? 0) > 0) {
+      sawFetching = true;
+      emit({ kind: "fetching" });
+    }
 
     // 페처가 **종료된** 실패를 보고하면 즉시 이탈 — 이게 없으면 이미 끝난 실패를 215초 헛기다린다.
     // ★requested가 아직 true면 재시도가 남아 있다는 뜻(lease 계약, 2026-07-27) — 여기서
@@ -256,6 +390,17 @@ export const RG_STREAM_SPECS: StreamRefreshSpec[] = [
     settleBeforeSuccess: true,
   },
 ];
+
+/**
+ * 수동 수집 **전 큐**(대시보드 '전체 갱신' 전용).
+ *
+ * ★두 레지스트리를 합친 것이지 세 번째 목록이 아니다 — 스트림이 추가되면 위 두 배열만
+ * 고치면 여기도 따라온다. 사본을 만들면 "버튼이 커버하지 않는 큐"가 조용히 생기고, 그건
+ * 화면상 '전체 갱신'이라는 이름이 거짓말이 되는 실패다(이 기능이 고치려는 것과 같은 종류).
+ *
+ * 화면 버튼은 5개인데 큐가 6개인 이유: RG 정산 버튼 하나가 계정 큐 2개를 깨운다.
+ */
+export const ALL_REFRESH_SPECS: StreamRefreshSpec[] = [...STREAM_SPECS, ...RG_STREAM_SPECS];
 
 /**
  * 배너 항목(collection-status key)들을 갱신 대상 spec으로.
