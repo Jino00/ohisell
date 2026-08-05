@@ -104,7 +104,12 @@ function PeriodBar({
   driftOnly: boolean; onDriftOnly: (v: boolean) => void;
   unconfirmedOnly: boolean; onUnconfirmedOnly: (v: boolean) => void;
 }) {
+  /** 오늘까지의 최근 N일. N=1이면 오늘 하루. */
   const preset = (days: number) => { onFrom(daysAgo(days - 1)); onTo(isoKST(new Date())); };
+  /** 하루짜리 창(어제처럼 시작=끝). 최근 N일과 달리 오늘을 포함하지 않는다. */
+  const day = (agoDays: number) => { const d = daysAgo(agoDays); onFrom(d); onTo(d); };
+  const today = isoKST(new Date());
+  const active = (f: string, t: string) => from === f && to === t;
   return (
     <Card title="조회 조건">
       <div className="flex flex-wrap items-center gap-3 px-4 py-3">
@@ -118,10 +123,15 @@ function PeriodBar({
           type="date" value={to} onChange={(e) => onTo(e.target.value)}
           className="rounded border border-gray-300 px-2 py-1 text-sm"
         />
-        <div className="flex gap-1">
-          <Button onClick={() => preset(30)}>30일</Button>
-          <Button onClick={() => preset(90)}>90일</Button>
-          <Button onClick={() => preset(365)}>1년</Button>
+        {/* 지금 걸린 기간과 같은 프리셋은 눌린 상태로 보인다 — 어느 창을 보고 있는지가
+            날짜 두 개를 읽어야만 알 수 있으면 오독한다. */}
+        <div className="flex flex-wrap gap-1">
+          <Button variant={active(today, today) ? "primary" : "secondary"} onClick={() => preset(1)}>오늘</Button>
+          <Button variant={active(daysAgo(1), daysAgo(1)) ? "primary" : "secondary"} onClick={() => day(1)}>어제</Button>
+          <Button variant={active(daysAgo(6), today) ? "primary" : "secondary"} onClick={() => preset(7)}>7일</Button>
+          <Button variant={active(daysAgo(29), today) ? "primary" : "secondary"} onClick={() => preset(30)}>30일</Button>
+          <Button variant={active(daysAgo(89), today) ? "primary" : "secondary"} onClick={() => preset(90)}>90일</Button>
+          <Button variant={active(daysAgo(364), today) ? "primary" : "secondary"} onClick={() => preset(365)}>1년</Button>
         </div>
         <div className="ml-auto flex flex-wrap items-center gap-3">
           <label className="flex items-center gap-1.5 text-xs text-gray-600">
@@ -139,6 +149,8 @@ function PeriodBar({
       </div>
       <p className="px-4 pb-3 text-xs text-gray-400">
         기간은 <b>발주일(KST)</b> 기준입니다. 발주→입고→명세서→계산서 확정까지 수 주가 걸려 기본 창을 90일로 둡니다.
+        &lsquo;오늘·어제·7일&rsquo;은 <b>그 날짜에 난 발주</b>만 보는 창이라 입고·계산서가 아직 비어 있는 것이 정상이며,
+        발주 자체가 없던 날이면 표가 비어 보입니다(수집 실패와 다릅니다).
         필터는 아래 상품 표에만 적용되며 요약 타일은 항상 기간 전체 기준입니다.
       </p>
     </Card>
