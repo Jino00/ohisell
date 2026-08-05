@@ -14,6 +14,21 @@
 - 1P는 판매 모델이 3P/RG와 완전히 다름(판매자 주문 없음·쿠팡 풀필먼트·한진배송 없음).
 
 ## 확정 결정사항 (D-N)
+- **D-18 (prod 백엔드 재시작 = 무중단(블루-그린) 기본, 구 pm2 restart는 legacy 플래그로만
+  — 2026-08-05, 인프라 수리)**: 재시작이 곧 다운타임이던 구조를 닫는다.
+  - **배경**: 08-03~08-05 sellc prod에서 간헐 502/연결거부로 갱신 버튼 POST·Mac 페처 push가
+    유실됐다. 서버 크래시·OOM은 0건 — 정체는 배포 재시작(pm2 restart)의 콜드부팅 공백이었다.
+    pm2 종료 기록 전수가 exit code 0 + SIGINT/SIGKILL(=명령에 의한 종료)이었고 재시작 횟수는
+    08-03 34회·08-04 19회·08-05 8회. 19:06:16 종료 → 19:07:05 기동(약 47초)이 nginx error.log의
+    `connect() failed` 시각과 초 단위 일치 — **재시작 61회 = 502 구멍 61개**였고 그 창에서
+    갱신 요청·페처 push가 유실됐다.
+  - **조치**: 블루-그린 무중단 배포(`scripts/zero_downtime_restart.sh`) + nginx upstream 구조 +
+    스케줄러 파일락 리더 선출(`backend/app/services/scheduler_leader.py`). `safe_deploy.sh --restart`가
+    무중단 경로를 **기본**으로 쓴다. 라이브 실증: 전환 3회 각 7~10초, 0.2초 간격 프로브 62요청
+    전부 200.
+  - 부수적으로 같은 날 발견·수정: 쿠팡 광고 설정 push HTTP 500(UNIQUE constraint failed,
+    `SessionLocal(autoflush=False)` 조합에서 교차 서비스 중복 삽입) — SAVEPOINT+즉시 flush로
+    흡수, 라이브 2026-08-05 21:34:06 push 성공(교훈 #143). 함께 교훈 #142(재시작=다운타임)로 기록.
 - **D-17 (수집 위치 = Jino Mac 버튼-only 유지 · VM 이전 기각 — 2026-08-05 20:34, Jino 판단)**:
   ④"계산서·ASN 자동 트리거"를 되살릴지 재심한 결과 **현행 유지**로 닫는다.
   - ★버튼-only는 결함이 아니라 **2026-07-27 확정 결정**이다(`com.ohisell.rocket.plist` 주석: "자동
