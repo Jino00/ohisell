@@ -1136,6 +1136,25 @@ def main() -> None:
             sys.exit(0)
         if arg == "capture":
             sys.exit(cmd_capture(cfg))
+        if arg == "backfill":
+            # 소급 수집 — report/SALES는 과거 범위를 그대로 돌려준다(2026-08-05 라이브 확인:
+            #   2024-08-03까지 응답). 상시 창(sales_days 기본 30)을 키우면 버튼 갱신이 매번
+            #   무거워지므로 **일회성 인자**로 분리한다(로켓 발송 백필과 같은 이유).
+            #   ★어디까지가 1P인지는 데이터로 못 가른다: 이 광고 계정은 2025-07 전에 로켓그로스
+            #     광고를 태웠다(Jino 확인 2026-08-05). 그 이전을 넣으면 RG 비용이 1P에 얹힌다.
+            #     그래서 일수를 사람이 정해 넣는다 — 기본값을 크게 잡지 않는다.
+            try:
+                days = int(sys.argv[2]) if len(sys.argv) >= 3 else 0
+            except ValueError:
+                days = 0
+            if days <= 0:
+                print("usage: ohitech_ad_fetcher.py backfill <일수>  (예: 400)", file=sys.stderr)
+                print("  ★2025-07 이전은 로켓그로스 광고라 1P에 넣으면 안 된다.", file=sys.stderr)
+                sys.exit(2)
+            cfg = dict(cfg)
+            cfg["sales_days"] = days
+            log.info("[backfill] report/SALES 소급 %d일 — 오늘부터 역산", days)
+            sys.exit(cmd_run(cfg))
         sys.exit(cmd_run(cfg))
 
 
