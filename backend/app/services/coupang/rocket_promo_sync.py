@@ -54,11 +54,13 @@ def _observe_option_sku(db: Session, vendor_id: str, rec: dict, now) -> None:
         .first()
     )
     if row is None:
-        db.add(CoupangRocketOptionSku(
+        row = CoupangRocketOptionSku(
             option_id=option_id, sku_id=sku, vendor_id=vendor_id,
             product_name=rec.get("product_name"), source="sales_analysis",
             first_observed_at=now, last_observed_at=now,
-        ))
+        )
+        db.add(row)
+        _apply_option_attrs(row, rec, now)
         return
     if row.sku_id != sku:
         log.warning(
@@ -69,7 +71,34 @@ def _observe_option_sku(db: Session, vendor_id: str, rec: dict, now) -> None:
     row.vendor_id = vendor_id
     if rec.get("product_name"):
         row.product_name = rec["product_name"]
+    _apply_option_attrs(row, rec, now)
     row.last_observed_at = now
+
+
+# 판매분석이 주는 옵션 속성 — **조회 시점의 현재값**이지 그 날짜의 상태가 아니다(D-CPP-11 실측:
+#   08-04와 06-05를 공통 옵션 22개로 대조했더니 전부 동일). 그래서 일별 행이 아니라 여기 최신값
+#   1개로 남기고, 언제 본 값인지를 attrs_observed_at에 적는다.
+_OPTION_ATTRS = (
+    "brand_name", "category_path", "is_item_winner", "is_oos", "rating_count", "rating_score",
+)
+
+
+def _apply_option_attrs(row, rec: dict, now) -> None:
+    """옵션 속성 갱신. **하나라도 관측됐을 때만** attrs_observed_at을 전진시킨다.
+
+    ★None은 덮지 않는다: 속성을 안 보내는 경로(excel 폴백·구버전 페처)가 같은 옵션을 재적재할 때
+      이미 아는 값을 지워버린다. 그리고 아무것도 안 왔는데 관측 시각만 갱신하면 **반년 전 값이
+      오늘 본 값처럼 보인다** — 그게 이 필드를 둔 이유를 무너뜨린다.
+    """
+    seen = False
+    for attr in _OPTION_ATTRS:
+        val = rec.get(attr)
+        if val is None:
+            continue
+        setattr(row, attr, val)
+        seen = True
+    if seen:
+        row.attrs_observed_at = now
 
 
 # ════════════════════════════════════════════════
@@ -114,6 +143,13 @@ def ingest_rocket_sales(
         row.revenue = rec["revenue"]
         row.visitors = rec["visitors"]
         row.conversion_rate = rec["conversion_rate"]
+        # ★None이면 **덮지 않는다**(D-CPP-11): 이 컬럼들은 나중에 붙었으므로, 이 값을 안 보내는
+        #   구버전 페처나 excel 폴백 경로가 같은 그레인을 재적재할 때 이미 채운 값을 지운다.
+        #   qty/revenue와 달리 "관측 없음"이 정상적으로 존재하는 필드라 upsert 규칙이 다르다.
+        if rec.get("page_views") is not None:
+            row.page_views = rec["page_views"]
+        if rec.get("orders") is not None:
+            row.orders = rec["orders"]
         row.product_name = rec["product_name"]
         row.source = rec["source"]
         row.synced_at = now

@@ -596,3 +596,85 @@ def test_route_coupon_used_amount_reports_not_found(client):
     assert r.status_code == 200
     assert r.json()["updated"] == 0 and r.json()["not_found"] == 1
     assert s.query(CoupangCoupon).count() == 0
+
+
+# ══════════════════════════════════════════════════════════════════
+# 판매분석 퍼널 지표 + 옵션 속성 (D-CPP-11, 2026-08-06)
+#   값은 라이브 실측: 2026-08-04 옵션 95752961189(갤럭시 Z 폴드8) —
+#   조회 1,540 · 주문 162 · 방문자 765 · 판매 152 · 매출 3,024,800 · 평점 4.6 · 리뷰 10,575.
+#   전환율 162/1540 = 0.10519… 가 쿠팡의 pvToOrder와 자릿수까지 일치한다.
+# ══════════════════════════════════════════════════════════════════
+_FUNNEL_ROW = {
+    "option_id": "95752961189", "sku_id": "76350897", "date": "2026-08-04",
+    "qty": 152, "revenue": "3024800", "visitors": 765,
+    "conversion_rate": "0.1051948052", "page_views": 1540, "orders": 162,
+    "brand_name": "오하이",
+    "category_path": "가전/디지털 > 휴대폰/태블릿PC/액세서리 > 보호필름",
+    "is_item_winner": False, "is_oos": True,
+    "rating_count": 10575, "rating_score": "4.6",
+    "product_name": "오하이 폴드 플립 지문방지 무광택 액정보호 필름, 갤럭시 Z 폴드8",
+}
+
+
+def test_parse_sales_maps_funnel_metrics():
+    """조회·주문이 계약대로 실린다 — 그리고 전환율 == 주문/조회로 검산된다."""
+    rec = rp.parse_sales_rows([_FUNNEL_ROW])[0]
+    assert rec["page_views"] == 1540
+    assert rec["orders"] == 162
+    # 쿠팡이 준 전환율과 우리가 담은 두 값의 몫이 같아야 매핑이 맞다.
+    assert abs(Decimal(rec["orders"]) / Decimal(rec["page_views"]) - rec["conversion_rate"]) < Decimal("0.000001")
+
+
+def test_parse_sales_funnel_absent_stays_none_not_zero():
+    """조회·주문이 없는 행은 None으로 남는다 — 0이면 '조회 0회인 날'로 둔갑한다."""
+    rec = rp.parse_sales_rows([{"option_id": "1", "date": "2026-08-04", "qty": 3}])[0]
+    assert rec["page_views"] is None and rec["orders"] is None
+
+
+def test_parse_sales_bool_does_not_coerce_unknown_to_false():
+    """모르는 값을 False로 접지 않는다 — is_oos=False는 '품절 아님'이라는 관측이다."""
+    rec = rp.parse_sales_rows([{**_FUNNEL_ROW, "is_oos": None, "is_item_winner": "쓰레기"}])[0]
+    assert rec["is_oos"] is None
+    assert rec["is_item_winner"] is None
+    # 명시적 False는 살아남는다(관측이므로).
+    assert rp.parse_sales_rows([{**_FUNNEL_ROW, "is_oos": False}])[0]["is_oos"] is False
+
+
+def test_ingest_funnel_metrics_land_on_daily_row(db):
+    sync.ingest_rocket_sales(db, "A01029796", [_FUNNEL_ROW])
+    row = db.query(CoupangRocketSalesDaily).filter_by(option_id="95752961189").one()
+    assert row.page_views == 1540 and row.orders == 162
+    assert row.qty == 152 and row.revenue == Decimal("3024800.00")   # 기존 축 불변
+
+
+def test_ingest_option_attrs_go_to_option_table_not_daily(db):
+    """속성은 **현재값**이라 일별이 아니라 option_sku로 간다(가짜 시계열 방지)."""
+    from app.models import CoupangRocketOptionSku
+
+    sync.ingest_rocket_sales(db, "A01029796", [_FUNNEL_ROW])
+    opt = db.query(CoupangRocketOptionSku).filter_by(option_id="95752961189").one()
+    assert opt.brand_name == "오하이"
+    assert opt.is_oos is True and opt.is_item_winner is False
+    assert opt.rating_count == 10575 and opt.rating_score == Decimal("4.60")
+    assert opt.attrs_observed_at is not None
+    # 일별 테이블엔 그런 컬럼이 아예 없다(모델 계약).
+    assert not hasattr(db.query(CoupangRocketSalesDaily).first(), "is_oos")
+
+
+def test_ingest_none_does_not_erase_known_funnel_or_attrs(db):
+    """속성을 안 보내는 경로(excel 폴백·구버전 페처)가 이미 아는 값을 지우면 안 된다."""
+    from app.models import CoupangRocketOptionSku
+
+    sync.ingest_rocket_sales(db, "A01029796", [_FUNNEL_ROW])
+    first_seen = db.query(CoupangRocketOptionSku).filter_by(option_id="95752961189").one().attrs_observed_at
+    # 같은 그레인을 속성/퍼널 없이 재적재(구 계약 모양).
+    sync.ingest_rocket_sales(db, "A01029796", [{
+        "option_id": "95752961189", "sku_id": "76350897", "date": "2026-08-04",
+        "qty": 152, "revenue": "3024800",
+    }], source="excel")
+    row = db.query(CoupangRocketSalesDaily).filter_by(option_id="95752961189").one()
+    assert row.page_views == 1540 and row.orders == 162     # 안 지워졌다
+    opt = db.query(CoupangRocketOptionSku).filter_by(option_id="95752961189").one()
+    assert opt.is_oos is True and opt.rating_count == 10575
+    # ★아무 속성도 안 왔으면 관측 시각을 전진시키지 않는다 — 반년 전 값이 오늘 값처럼 보이면 안 된다.
+    assert opt.attrs_observed_at == first_seen

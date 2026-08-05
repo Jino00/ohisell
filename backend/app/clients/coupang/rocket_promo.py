@@ -151,6 +151,25 @@ _MAX_AMOUNT = Decimal(10) ** 12    # NUMERIC(14,2): revenue · budget_amount · 
 _MAX_DISCOUNT = Decimal(10) ** 10  # NUMERIC(12,2): discount_value
 _MAX_RATIO = Decimal(10) ** 5      # NUMERIC(7,2) : share_ratio
 _MAX_RATE = Decimal(10) ** 3       # NUMERIC(7,4) : conversion_rate
+_MAX_RATING = Decimal(10)          # NUMERIC(3,2) : rating_score(평점 0~5, 실측 4.6)
+
+
+def _bool(v: Any) -> bool | None:
+    """참/거짓 → bool, 그 외(None·빈 문자열·모르는 값) → None.
+
+    ★모르는 값을 False로 접지 않는다: `is_oos`가 False면 "품절 아님"이라는 **관측**인데,
+      값이 안 온 것까지 False로 만들면 "재고 있었다"를 지어내는 셈이 된다.
+    """
+    if isinstance(v, bool):
+        return v
+    if v is None:
+        return None
+    s = str(v).strip().lower()
+    if s in ("true", "1", "y", "yes"):
+        return True
+    if s in ("false", "0", "n", "no"):
+        return False
+    return None
 
 
 def _date(v: Any) -> date | None:
@@ -228,7 +247,10 @@ def parse_sales_rows(
 ) -> list[dict]:
     """레코드 계약(sales) → 정규화 레코드. 필수 = option_id, date, **관측값(qty|revenue) 중 하나**.
 
-    계약: {option_id*, date*, sku_id, qty, revenue, visitors, conversion_rate, product_name}
+    계약: {option_id*, date*, sku_id, qty, revenue, visitors, conversion_rate, product_name,
+           page_views, orders,                                          ← 날짜별(D-CPP-11)
+           brand_name, category_path, is_item_winner, is_oos, rating_count, rating_score}
+                                                                        ← 현재값(option_sku로 감)
     반환 레코드: 위 키 + source.
     같은 (option_id, date)가 배치 안에서 중복되면 **뒤에 온 행이 이긴다**(수집기 재조회 = 최신).
 
@@ -285,7 +307,18 @@ def parse_sales_rows(
             "revenue": revenue if revenue is not None else Decimal(0),
             "visitors": _int(r.get("visitors"), None),
             "conversion_rate": _dec(r.get("conversion_rate"), None, max_abs=_MAX_RATE),
+            # 퍼널 지표(D-CPP-11). 없으면 None — **0으로 접지 않는다**: 이 값들은 나중에 붙었으므로
+            #   과거 행에는 영영 없을 수 있고, 0으로 채우면 "안 담던 시절"이 "조회 0회인 날"로 둔갑한다.
+            "page_views": _int(r.get("page_views"), None),
+            "orders": _int(r.get("orders"), None),
             "product_name": _s(r.get("product_name"), 300),
+            # 옵션 속성(현재값 스냅샷 — 일별이 아니라 option_sku 행으로 간다).
+            "brand_name": _s(r.get("brand_name"), 100),
+            "category_path": _s(r.get("category_path"), 300),
+            "is_item_winner": _bool(r.get("is_item_winner")),
+            "is_oos": _bool(r.get("is_oos")),
+            "rating_count": _int(r.get("rating_count"), None),
+            "rating_score": _dec(r.get("rating_score"), None, max_abs=_MAX_RATING),
             "source": _s(source, 20) or "sales_analysis",
         }
     deduped = accepted - len(out)
