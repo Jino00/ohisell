@@ -25,7 +25,8 @@ from sqlalchemy.orm import Session
 from app.models import CoupangAdChangeLog, CoupangAdEntitySnapshot
 from app.services.coupang.ad_change_history import OP_ADS_CHANGED
 from app.services.coupang.ad_settings_diff import (
-    ACCOUNTS, ENTITY_CAMPAIGN, OP_FIELD, SOURCE_COUPANG, SOURCE_SNAPSHOT, trunc_second,
+    ACCOUNTS, ENTITY_CAMPAIGN, OP_FIELD, SOURCE_COUPANG, SOURCE_SNAPSHOT,
+    safe_add_change_log, trunc_second,
 )
 
 log = logging.getLogger("coupang.ad_creative_diff")
@@ -190,11 +191,11 @@ def _add_field_row(db: Session, *, account: str, ad_key: str, campaign_id: str, 
     )
     if exists:
         return 0
-    db.add(CoupangAdChangeLog(
+    obj = CoupangAdChangeLog(
         account=account, entity_type=ENTITY_AD, entity_id=ad_key, campaign_id=campaign_id,
         entity_name=name, op=OP_FIELD, field=field, before_value=before, after_value=after,
-        occurred_at=occurred_at, time_basis="detected", source=SOURCE_SNAPSHOT))
-    return 1
+        occurred_at=occurred_at, time_basis="detected", source=SOURCE_SNAPSHOT)
+    return 1 if safe_add_change_log(db, obj) else 0
 
 
 def _detail(items: list[dict]) -> str:
@@ -254,10 +255,10 @@ def _emit(db: Session, account: str, campaign_id: str, items: list[dict],
     )
     if exists:
         return "dup"
-    db.add(CoupangAdChangeLog(
+    obj = CoupangAdChangeLog(
         account=account, entity_type=ENTITY_CAMPAIGN, entity_id=campaign_id,
         campaign_id=campaign_id, entity_name="", op=op, field="",
         before_value=None, after_value=str(len(items)),
         occurred_at=detected_at, time_basis="detected", source=SOURCE_SNAPSHOT,
-        detail_json=detail))
-    return "own"
+        detail_json=detail)
+    return "own" if safe_add_change_log(db, obj) else "dup"

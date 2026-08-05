@@ -30,7 +30,7 @@ from sqlalchemy.orm import Session
 from app.models import CoupangAdChangeLog
 from app.services.coupang.ad_settings_diff import (
     ACCOUNTS, ENTITY_CAMPAIGN, OP_FIELD, OP_TURNED_OFF, OP_TURNED_ON, SOURCE_COUPANG,
-    trunc_second,
+    safe_add_change_log, trunc_second,
 )
 
 log = logging.getLogger("coupang.ad_change_history")
@@ -77,7 +77,7 @@ def ingest_events(db: Session, account: str, events: list[dict],
     if account not in ACCOUNTS:
         raise ValueError(f"알 수 없는 계정: {account}")
     name_of = name_of or {}
-    written = upgraded = skipped = 0
+    written = upgraded = skipped = duplicate = 0
     unknown_types: set[str] = set()
 
     for ev in events or []:
@@ -114,20 +114,20 @@ def ingest_events(db: Session, account: str, events: list[dict],
                 written += 1
             elif row == "upgraded":
                 upgraded += 1
+            elif row == "same":
+                duplicate += 1
 
     if unknown_types:
         # 조용히 지나가지 않는다 — 매핑 추가 신호다.
         log.warning("[%s] 모르는 changeType %s — field에 원문으로 남겼다.", account, sorted(unknown_types))
     return {"account": account, "events": len(events or []), "written": written,
-            "upgraded_from_snapshot": upgraded, "skipped": skipped,
+            "upgraded_from_snapshot": upgraded, "skipped": skipped, "duplicate": duplicate,
             "unknown_change_types": sorted(unknown_types)}
 
 
-def _upsert(db: Session, *, account: str, entity_id: str, name: str, op: str, field: str,
-            before: str | None, after: str | None, occurred_at: datetime,
-            external_id: str | None, detail_json: str | None) -> str:
-    """같은 키가 있으면: 스냅샷 유래면 **덮고**, 이미 쿠팡 유래면 그대로 둔다."""
-    existing = (
+def _find_existing(db: Session, *, account: str, entity_id: str, op: str, field: str,
+                   occurred_at: datetime) -> CoupangAdChangeLog | None:
+    return (
         db.query(CoupangAdChangeLog)
         .filter(
             CoupangAdChangeLog.account == account,
@@ -139,25 +139,56 @@ def _upsert(db: Session, *, account: str, entity_id: str, name: str, op: str, fi
         )
         .first()
     )
+
+
+def _upgrade(existing: CoupangAdChangeLog, *, before: str | None, after: str | None,
+            external_id: str | None, detail_json: str | None, name: str) -> None:
+    """스냅샷이 먼저 적어둔 같은 사건을 쿠팡 값으로 덮는다 — 쿠팡은 전/후 값이 정확하다."""
+    existing.source = SOURCE_COUPANG
+    existing.before_value = before
+    existing.after_value = after
+    existing.time_basis = "src"
+    existing.external_id = external_id
+    if detail_json:
+        existing.detail_json = detail_json
+    if name and not existing.entity_name:
+        existing.entity_name = name
+
+
+def _upsert(db: Session, *, account: str, entity_id: str, name: str, op: str, field: str,
+            before: str | None, after: str | None, occurred_at: datetime,
+            external_id: str | None, detail_json: str | None) -> str:
+    """같은 키가 있으면: 스냅샷 유래면 **덮고**, 이미 쿠팡 유래면 그대로 둔다."""
+    existing = _find_existing(db, account=account, entity_id=entity_id, op=op, field=field,
+                              occurred_at=occurred_at)
     if existing is not None:
         if existing.source == SOURCE_COUPANG:
             return "same"
-        # ★스냅샷이 먼저 적어둔 같은 사건 — 쿠팡 값이 더 정확하다(전/후 값을 갖고 있다).
-        existing.source = SOURCE_COUPANG
-        existing.before_value = before
-        existing.after_value = after
-        existing.time_basis = "src"
-        existing.external_id = external_id
-        if detail_json:
-            existing.detail_json = detail_json
-        if name and not existing.entity_name:
-            existing.entity_name = name
+        _upgrade(existing, before=before, after=after, external_id=external_id,
+                detail_json=detail_json, name=name)
         return "upgraded"
 
-    db.add(CoupangAdChangeLog(
+    obj = CoupangAdChangeLog(
         account=account, entity_type=ENTITY_CAMPAIGN, entity_id=entity_id, campaign_id=entity_id,
         entity_name=name, op=op, field=field, before_value=before, after_value=after,
         occurred_at=occurred_at, time_basis="src", source=SOURCE_COUPANG,
         external_id=external_id, detail_json=detail_json,
-    ))
-    return "new"
+    )
+    if safe_add_change_log(db, obj):
+        return "new"
+
+    # ★경합: 조회~삽입 사이 다른 경로(같은 요청 안의 스냅샷 diff 등)가 먼저 같은 키를 넣었다.
+    #   재조회해 upgrade 규칙을 그대로 적용한다 — 방금 경합에서 진 이 행이 쿠팡 유래이므로
+    #   결과는 여전히 "쿠팡이 이긴다"와 같다.
+    existing = _find_existing(db, account=account, entity_id=entity_id, op=op, field=field,
+                              occurred_at=occurred_at)
+    if existing is None:
+        # 삽입은 막혔는데 재조회로도 안 보이면 진짜 이상한 상황 — 삼키지 않는다.
+        raise RuntimeError(
+            f"coupang_ad_change_log UNIQUE 충돌 후 재조회 실패: {account}/{entity_id}/{op}/{field}"
+        )
+    if existing.source == SOURCE_COUPANG:
+        return "same"
+    _upgrade(existing, before=before, after=after, external_id=external_id,
+            detail_json=detail_json, name=name)
+    return "upgraded"

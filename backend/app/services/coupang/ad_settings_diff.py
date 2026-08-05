@@ -28,6 +28,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models import CoupangAdChangeLog, CoupangAdEntitySnapshot
@@ -49,6 +50,31 @@ OP_FIELD = "field_change"
 
 SOURCE_SNAPSHOT = "snapshot"
 SOURCE_COUPANG = "coupang"
+
+
+def safe_add_change_log(db: Session, obj: CoupangAdChangeLog) -> bool:
+    """CoupangAdChangeLog 1행 삽입 — UNIQUE 충돌은 SAVEPOINT로 격리해 조용히 흡수한다.
+
+    ★왜 필요한가(2026-08-05 500 사고): 이 세션은 `autoflush=False`(database.py)라, "먼저 SELECT로
+      존재를 확인하고 없으면 add" 패턴만으로는 **같은 요청 안에서** 다른 서비스가 방금 add(아직
+      flush 안 됨)한 행이 안 보인다 — events(쿠팡 이력)를 먼저 넣고 settings-diff(스냅샷)를 뒤에
+      돌리는 순서 자체가 "겹치면 쿠팡이 이긴다"를 이 가시성에 의존하고 있었다. 여기서 즉시 flush해
+      다음 삽입 시도가 항상 최신 상태를 보게 만든다. 동시 요청 경합(진짜 UNIQUE 충돌)도 같은
+      경로로 흡수된다 — 배치 하나 때문에 전체 트랜잭션이 죽지 않는다.
+
+    반환: True=삽입됨, False=이미 같은 키가 있어 스킵(호출자가 "중복" 카운트). UNIQUE 제약 위반이
+      아닌 무결성 오류는 **삼키지 않고** 그대로 올린다(데이터 오류를 중복으로 오분류하지 않는다).
+    """
+    try:
+        with db.begin_nested():
+            db.add(obj)
+            db.flush()
+    except IntegrityError as exc:
+        msg = str(getattr(exc, "orig", exc))
+        if "coupang_ad_change_log" not in msg or "UNIQUE constraint failed" not in msg:
+            raise
+        return False
+    return True
 
 
 def trunc_second(dt: datetime) -> datetime:
@@ -149,13 +175,19 @@ class _Recorder:
         ))
 
 
-def _persist(db: Session, rows: list[CoupangAdChangeLog]) -> int:
+def _persist(db: Session, rows: list[CoupangAdChangeLog]) -> tuple[int, int]:
     """UNIQUE 위반은 '이미 기록된 변경'이므로 조용히 건너뛴다(회차 재실행 idempotent).
 
     ★같은 키에 **쿠팡 유래** 행이 있으면 덮지 않는다 — 쿠팡은 전/후 값을 갖고 있고 우리는
       시각만 안다. 우선순위가 한 방향(coupang > snapshot)이라 어느 쪽이 먼저 들어와도 결과가 같다.
+
+    사전 SELECT는 흔한 경우(진짜 신규/진짜 기존)를 빠르게 가르는 최적화일 뿐이고, 실제 idempotency
+    보장은 `safe_add_change_log`(SAVEPOINT)가 진다 — 사전 SELECT가 "없다"고 오판해도(같은 요청 안의
+    다른 서비스가 방금 넣은 미flush 행 등) 삽입 시점에 다시 걸러진다.
+
+    반환: (written, duplicate).
     """
-    written = 0
+    written = duplicate = 0
     for r in rows:
         exists = (
             db.query(CoupangAdChangeLog.id)
@@ -170,10 +202,13 @@ def _persist(db: Session, rows: list[CoupangAdChangeLog]) -> int:
             .first()
         )
         if exists:
+            duplicate += 1
             continue
-        db.add(r)
-        written += 1
-    return written
+        if safe_add_change_log(db, r):
+            written += 1
+        else:
+            duplicate += 1
+    return written, duplicate
 
 
 def ingest(db: Session, account: str, all_rows: list[dict], active_rows: list[dict],
@@ -294,7 +329,7 @@ def ingest(db: Session, account: str, all_rows: list[dict], active_rows: list[di
             if g_src:
                 gsnap.src_updated_at = g_src
 
-    written = _persist(db, rec.rows)
+    written, duplicate = _persist(db, rec.rows)
     db.flush()
     if unknown_keys:
         # 허용목록 밖 = 이번엔 안 봤다는 뜻. 가려지지 않게 남긴다(설계 재검토 신호).
@@ -305,6 +340,7 @@ def ingest(db: Session, account: str, all_rows: list[dict], active_rows: list[di
         "campaigns_total": len(seen_ids),
         "campaigns_active": len(active_by_id),
         "changes": written,
+        "changes_duplicate": duplicate,
         "unknown_field_count": len(unknown_keys),
     }
 

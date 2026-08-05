@@ -149,6 +149,82 @@ class TestIngestAndList:
         assert got["last_observed_at"] is not None
 
 
+class TestCrossSourceDuplicateDoesNotCrash:
+    """2026-08-05 20:55 라이브 사고 재현: 페처가 change-history events와 캠페인 스냅샷을
+    한 회차에 같이 push하면, 이벤트 경로(ad_change_history)와 스냅샷 diff 경로
+    (ad_settings_diff)가 **같은 예산 변경을 서로 다른 경로로 잡아** coupang_ad_change_log의
+    UNIQUE(account, entity_type, entity_id, op, field, occurred_at)에 같은 키로 부딪혔다.
+
+    이 라우터의 세션은 `autoflush=False`(prod `SessionLocal`과 동일 설정, env 픽스처 참고) —
+    이벤트가 먼저 add한 행이 뒤이은 스냅샷 diff의 사전 SELECT엔 안 보여(미flush) "없다"고
+    오판, 같은 키로 다시 add했고 flush 시점에 sqlite3.IntegrityError → 500이 났다. 페처는
+    90일 이력을 매번 통째로 재push하므로 재실행마다 필연적으로 재현됐다(정상 동작에서 발생하는
+    중복이지 데이터 오류가 아니다). 이 테스트는 500이 아니라 200 + skip 카운트로 수렴하는지,
+    그리고 같은 사건이 화면에 두 줄로 새지 않는지(쿠팡 값이 이겨야 한다)를 확인한다."""
+
+    def test_이벤트와_스냅샷_diff가_같은_예산_변경을_동시에_보내도_500이_아니다(self, env):
+        cid = 105061655
+        name = "[매.최] 아이폰16프로_강화유리"
+        # 기준선: 이전 예산 165000
+        assert _push(env, [_camp(cid=cid, name=name, budget=165000,
+                                 updated="2026-08-04T00:00:00.000Z")]).status_code == 200
+
+        body = {
+            "account": "ohitech",
+            "all": [{"id": cid, "name": name, "isActive": True,
+                     "updatedAt": "2026-08-05T07:02:10.000Z",
+                     "createdAt": "2026-04-28T08:12:22.555Z"}],
+            "active": [_camp(cid=cid, name=name, budget=130000,
+                             updated="2026-08-05T07:02:10.000Z")],
+            "events": [{
+                "campaignId": str(cid),
+                "executionTime": "2026-08-05T07:02:10Z",   # 스냅샷 updatedAt과 절삭 후 같은 초
+                "executionId": "evt-budget-105061655",
+                "changes": [{"changeType": "BUDGET", "before": 165000, "after": 130000}],
+            }],
+        }
+        r = env.post(_INGEST, json=body, headers={"X-Ingest-Token": _TOKEN})
+        assert r.status_code == 200          # ★핵심 합격기준: 500이 아니다
+        out = r.json()
+        # 이벤트가 새 행을 쓰고, 스냅샷 diff는 같은 키를 "중복"으로 건너뛴다(조용히 사라지지 않는다).
+        assert out["history"]["written"] == 1
+        assert out["changes"] == 0
+        assert out["changes_duplicate"] == 1
+
+        got = env.get(_LIST, params={"from": "2026-08-05", "to": "2026-08-05"}).json()
+        budget_rows = [i for i in got["items"]
+                      if i["op"] == "field_change" and i["field"] == "budget"]
+        assert len(budget_rows) == 1          # ★같은 사건이 두 줄로 새지 않는다
+        row = budget_rows[0]
+        assert (row["before_value"], row["after_value"]) == ("165000", "130000")
+        assert row["time_basis"] == "src"     # 쿠팡 값이 이겼다(스냅샷이 아니라)
+
+    def test_같은_회차를_재실행해도_행이_늘지_않는다(self, env):
+        """페처는 90일 이력을 매번 통째로 재push한다 — 재실행이 곧 정상 동작이다."""
+        cid = 105061655
+        body = {
+            "account": "ohitech",
+            "all": [{"id": cid, "name": "캠페인", "isActive": True,
+                     "updatedAt": "2026-08-05T07:02:10.000Z",
+                     "createdAt": "2026-04-28T08:12:22.555Z"}],
+            "active": [_camp(cid=cid, name="캠페인", budget=130000,
+                             updated="2026-08-05T07:02:10.000Z")],
+            "events": [{
+                "campaignId": str(cid), "executionTime": "2026-08-05T07:02:10Z",
+                "executionId": "evt-budget-105061655",
+                "changes": [{"changeType": "BUDGET", "before": 165000, "after": 130000}],
+            }],
+        }
+        first = env.post(_INGEST, json=body, headers={"X-Ingest-Token": _TOKEN})
+        second = env.post(_INGEST, json=body, headers={"X-Ingest-Token": _TOKEN})
+        assert first.status_code == 200 and second.status_code == 200
+        assert second.json()["history"]["duplicate"] == 1
+        got = env.get(_LIST, params={"from": "2026-08-05", "to": "2026-08-05"}).json()
+        budget_rows = [i for i in got["items"]
+                      if i["op"] == "field_change" and i["field"] == "budget"]
+        assert len(budget_rows) == 1
+
+
 class TestListValidation:
     def test_from이_to보다_늦으면_422(self, env):
         r = env.get(_LIST, params={"from": "2026-08-05", "to": "2026-08-04"})
