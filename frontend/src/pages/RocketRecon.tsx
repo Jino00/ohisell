@@ -424,8 +424,10 @@ function SkuTable({ data, from, to }: { data: RocketRecon; from: string; to: str
           <option value="default">기본(발주 금액 큰 순)</option>
           <option value="sku">SKU 번호</option>
           <option value="name">상품명</option>
-          <option value="undelivered">미입고(발주−입고, 입고 전 포함)</option>
-          <option value="undelivered_settled">미입고(입고 끝난 단계만)</option>
+          {/* ★라벨은 '어떻게 계산했는지'가 아니라 '무엇을 세는지'로 쓴다 —
+              앞 버전('발주−입고, 입고 전 포함' / '입고 끝난 단계만')은 Jino가 헷갈렸다. */}
+          <option value="undelivered">아직 안 온 수량 (배송 대기 포함 — 정상)</option>
+          <option value="undelivered_settled">덜 온 수량 (입고 끝났는데 부족 — 문제)</option>
         </select>
         {/* 버튼 글자는 '지금 적용된 순서' — 누르면 반대로 뒤집힌다. */}
         <Button onClick={() => setAsc(!asc)} title="정렬 방향 뒤집기">
@@ -438,10 +440,18 @@ function SkuTable({ data, from, to }: { data: RocketRecon; from: string; to: str
       </div>
       {byUndelivered && (
         <p className="w-full text-xs text-gray-400">
-          {sortKey === "undelivered_settled"
-            ? "‘입고 끝난 단계’(거래명세서확인·확인요청)의 발주−입고로 정렬합니다 — 들어왔어야 하는데 안 들어온 수량입니다."
-            : "발주−입고 전체(아직 입고 전 단계 포함)로 정렬합니다 — 오늘 기준 아직 안 들어온 수량입니다."}
-          {" "}이 값은 <b>귀속 가능한(단일 상품) 발주</b>에서만 산출되므로, 근거가 없는 {n(unknownCount)}건은
+          {sortKey === "undelivered_settled" ? (
+            <>
+              <b>덜 온 수량</b> = 입고·명세서가 <b>끝난</b> 발주(거래명세서확인·확인요청)인데 발주보다 적게 들어온 수량.
+              들어왔어야 하는데 안 들어온 것이라 <b>이쪽이 진짜 문제</b>입니다. 화면의 &lsquo;발주−입고&rsquo; 열에서 <b>붉은 숫자</b>와 같은 값입니다.
+            </>
+          ) : (
+            <>
+              <b>아직 안 온 수량</b> = 발주했는데 아직 안 들어온 것 <b>전부</b>. 어제 발주해서 배송 전인 것도 포함되므로
+              값이 크다고 문제가 아닙니다. &lsquo;발주−입고&rsquo; 열의 <b>붉은 숫자 + 회색 &lsquo;입고 전&rsquo;</b>을 더한 값입니다.
+            </>
+          )}
+          {" "}두 값 모두 <b>귀속 가능한(단일 상품) 발주</b>에서만 산출되므로, 근거가 없는 {n(unknownCount)}건은
           0이 아니라 &lsquo;{NO_DATA}(모름)&rsquo;이며 <b>정렬 방향과 무관하게 항상 맨 뒤</b>에 둡니다.
         </p>
       )}
