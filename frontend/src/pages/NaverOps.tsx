@@ -48,6 +48,15 @@ const PERIODS = [
   { label: "30일", days: 30 },
 ];
 
+function Spinner({ className = "w-4 h-4" }: { className?: string }) {
+  return (
+    <svg className={`animate-spin ${className}`} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+    </svg>
+  );
+}
+
 type SortKey = "product_name" | "revenue" | "profit" | "profit_rate";
 type SortDir = "asc" | "desc";
 type ColKey = "revenue" | "profit" | "profit_rate";
@@ -155,14 +164,22 @@ export default function NaverOps() {
   const [gfaMsg, setGfaMsg] = useState<string | null>(null);
   const gfaFileRef = useRef<HTMLInputElement>(null);
 
+  // 기간을 연달아 바꾸면 응답 도착 순서가 요청 순서와 다를 수 있다. 시퀀스를 붙여
+  // **마지막 요청의 응답만** 반영한다 — 안 그러면 늦게 온 옛 기간이 새 화면을 덮어쓰고,
+  // 그 상태가 "버튼과 데이터가 안 맞는다"로 보인다(이 화면이 방금 겪은 증상과 같은 모양).
+  const reqSeq = useRef(0);
   const load = useCallback(async () => {
+    const seq = ++reqSeq.current;
     setLoading(true); setError(null);
     try {
-      setData(await fetchNaverSalesSummary(days));
+      const r = await fetchNaverSalesSummary(days);
+      if (seq !== reqSeq.current) return;   // 더 최신 요청이 진행 중 — 이 응답은 버린다
+      setData(r);
     } catch (e) {
+      if (seq !== reqSeq.current) return;
       setError(String(e));
     } finally {
-      setLoading(false);
+      if (seq === reqSeq.current) setLoading(false);
     }
   }, [days]);
 
@@ -663,8 +680,19 @@ export default function NaverOps() {
     );
   }
 
-  // 마운트 시 실시간 동기화 후 데이터 로드 (fail-soft)
-  useEffect(() => { syncRealtime().catch(() => {}).then(() => load()); }, []);
+  // 마운트 시 실시간 동기화 후 데이터 로드(fail-soft), 이후 기간(days)이 바뀌면 재조회.
+  // ★종전에는 의존성이 `[]`라 **마운트 1회만** 실행됐다 — 기간 버튼 5개가 setDays로
+  //   하이라이트만 옮기고 재조회는 일어나지 않아, 「어제」를 눌러도 7일치가 그대로 남았다.
+  //   아래 다른 로더들은 전부 [loadX, xDays]를 달고 있는데 이 요약 하나만 빠져 있었다.
+  const didInitLoad = useRef(false);
+  useEffect(() => {
+    if (!didInitLoad.current) {
+      didInitLoad.current = true;
+      syncRealtime().catch(() => {}).then(() => load());
+      return;
+    }
+    load();
+  }, [load]);
   useEffect(() => { loadGfa(); }, [loadGfa]);
   useEffect(() => { loadSettlement(); }, [loadSettlement]);
   useEffect(() => { loadInquiries(inquiryDays); }, [loadInquiries, inquiryDays]);
@@ -775,12 +803,15 @@ export default function NaverOps() {
             <button
               key={p.days}
               onClick={() => setDays(p.days)}
-              className={`px-3 py-1.5 text-sm rounded-md font-medium transition-colors ${
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md font-medium transition-colors ${
                 days === p.days
                   ? "bg-green-600 text-white"
                   : "bg-white border border-gray-300 text-gray-700 hover:bg-gray-50"
               }`}
-            >{p.label}</button>
+            >
+              {loading && days === p.days && <Spinner className="w-3.5 h-3.5" />}
+              {p.label}
+            </button>
           ))}
         </div>
         <button
@@ -788,7 +819,12 @@ export default function NaverOps() {
           disabled={syncing}
           className="px-3 py-1.5 text-sm rounded-md border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 disabled:opacity-50"
         >{syncing ? "동기화 중…" : "🔄 동기화"}</button>
-        {data && (
+        {/* 갱신 중에는 기간 라벨 대신 진행 표시를 낸다 — 옛 기간 라벨을 새 값으로 오독하지 않게. */}
+        {loading ? (
+          <span className="inline-flex items-center gap-1.5 text-xs font-medium text-green-700">
+            <Spinner className="w-3 h-3" /> 데이터 업데이트 중…
+          </span>
+        ) : data && (
           <span className="text-xs text-gray-400">
             {data.period.from} ~ {data.period.to}
             {data.ad_ref_date && ` (광고비 기준일: ${data.ad_ref_date})`}
@@ -840,9 +876,18 @@ export default function NaverOps() {
         );
       })()}
 
-      {/* 요약 카드 */}
-      {s && (
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
+      {/* 요약 카드 — 갱신 중에는 값을 흐리고 스피너를 덮는다.
+          왜 옛 값을 지우지 않고 흐리기만 하나: 화면이 통째로 비면 어디를 보고 있었는지
+          잃어버린다. 대신 흐림+오버레이로 "이 숫자는 아직 이전 기간"임을 분명히 한다. */}
+      {(s || loading) && (
+        <div className="relative mb-6">
+          <div
+            className={`grid grid-cols-2 sm:grid-cols-4 gap-3 transition-opacity duration-150 ${
+              loading ? "opacity-40" : ""
+            }`}
+            aria-busy={loading}
+          >
+          {s ? (<>
           <SummaryCard
             label="총매출"
             value={won(s.revenue)}
@@ -884,16 +929,37 @@ export default function NaverOps() {
             value={s.sa_roas ? `${Number(s.sa_roas).toFixed(2)}x` : "—"}
             sub={s.sa_conv_from ? `전환매출÷광고비 · 전환 ${s.sa_conv_from}~${s.sa_conv_to}` : "디스플레이 제외"}
           />
+          </>) : (
+            // 첫 로드 — 보여줄 이전 값이 없을 때의 자리표시
+            Array.from({ length: 9 }, (_, i) => (
+              <div key={i} className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
+                <div className="h-3 w-16 rounded bg-gray-200" />
+                <div className="mt-2 h-6 w-28 rounded bg-gray-200" />
+              </div>
+            ))
+          )}
+          </div>
+          {loading && (
+            <div className="absolute inset-0 flex items-start justify-center pt-8 pointer-events-none">
+              <span className="inline-flex items-center gap-2 text-sm font-medium text-gray-700 bg-white/95 border border-gray-200 rounded-full px-4 py-2 shadow-sm">
+                <Spinner className="w-4 h-4 text-green-600" /> 데이터 업데이트 중…
+              </span>
+            </div>
+          )}
         </div>
       )}
 
       {/* 상태 */}
-      {loading && <p className="text-sm text-gray-500">불러오는 중…</p>}
       {error && <p className="text-sm text-red-600">{error}</p>}
 
-      {/* 상품별 테이블 */}
-      {!loading && sorted.length > 0 && (
-        <div className="overflow-x-auto rounded-lg border border-gray-200">
+      {/* 상품별 테이블 — 갱신 중에도 남겨두고 흐린다(사라졌다 나타나면 스크롤 위치를 잃는다) */}
+      {sorted.length > 0 && (
+        <div
+          className={`overflow-x-auto rounded-lg border border-gray-200 transition-opacity duration-150 ${
+            loading ? "opacity-40" : ""
+          }`}
+          aria-busy={loading}
+        >
           <table className="min-w-full bg-white text-sm">
             <thead className="bg-gray-50 border-b border-gray-200">
               <tr>
