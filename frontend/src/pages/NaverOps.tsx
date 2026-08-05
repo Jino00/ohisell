@@ -183,6 +183,14 @@ export default function NaverOps() {
     }
   }, [days]);
 
+  // ★지연 실행되는 콜백은 반드시 이 ref로 최신 load를 부른다.
+  // 왜: syncRealtime(마운트, 수 초)·handleSync(3초 setTimeout)가 **그 시점의 days를 붙잡은**
+  // load를 나중에 호출하면, 그 사이 사용자가 기간을 바꿔도 옛 기간을 새로 요청해 화면을 덮는다.
+  // 라이브 실측(2026-08-06): 30일 클릭 직후 `days=30` 다음에 `days=7`이 뒤따라 와 7일치가 남았다.
+  // 시퀀스 가드(reqSeq)는 응답 도착 순서만 정리할 뿐, 뒤늦게 발사되는 새 요청은 못 막는다.
+  const loadRef = useRef(load);
+  loadRef.current = load;
+
   const loadGfa = useCallback(async () => {
     try { setGfa(await fetchGfaStatus()); } catch { /* silent */ }
   }, []);
@@ -688,7 +696,7 @@ export default function NaverOps() {
   useEffect(() => {
     if (!didInitLoad.current) {
       didInitLoad.current = true;
-      syncRealtime().catch(() => {}).then(() => load());
+      syncRealtime().catch(() => {}).then(() => loadRef.current());
       return;
     }
     load();
@@ -722,7 +730,7 @@ export default function NaverOps() {
     setSyncing(true);
     try {
       await fetch("/api/scheduler/trigger/auto_sync_orders", { method: "POST" });
-      setTimeout(() => { setSyncing(false); load(); }, 3000);
+      setTimeout(() => { setSyncing(false); loadRef.current(); }, 3000);
     } catch {
       setSyncing(false);
     }
