@@ -200,13 +200,46 @@ GROUP BY s.date
 """
 
 
+# 창에 걸치는 프로모션 중 **할인액 원천이 없는** 것의 수. >0이면 분담금은 "모름"이다.
+#   ★분담금 0과 모름을 가르는 판정자: 그 기간에 프로모션이 **있었는가**.
+#     - 프로모션이 아예 없었다 → 분담금 0은 참이다.
+#     - 프로모션은 있었는데 그 제안서를 아직 못 받았다 → **모름**. 0으로 접으면 그 프로모션의
+#       할인액만큼 이익이 부풀어 보인다.
+_PROMO_UNPRICED_SQL = """
+SELECT COUNT(*) FROM coupang_rocket_promotion pr
+WHERE pr.vendor_id = :vendor
+  AND date(pr.start_at) <= :until AND date(pr.end_at) >= :since
+  AND NOT EXISTS (SELECT 1 FROM coupang_promo_discount_item d WHERE d.request_id = pr.request_id)
+"""
+
+
 def _promo_burden_by_day(db: Session, date_from: date, date_to: date) -> dict[str, Decimal] | None:
-    """일자별 프로모션 분담금. **원천이 없으면 None(=모름)** — 0으로 접지 않는다.
+    """일자별 프로모션 분담금. **모르면 None** — 0으로 접지 않는다.
 
     분담률은 실측 13건 전부 100%(전액 우리 부담)라 할인액이 곧 분담금이다(D-CPP-10).
+
+    모름의 경로가 둘이다:
+      ① 원천 테이블 자체가 없다(마이그레이션 전 환경).
+      ② 테이블은 있는데 **창에 걸친 프로모션의 할인액이 비어 있다** — 제안서를 아직 못 받은
+         기간이 그렇다. 테이블이 main에 병합되면서(2026-08-05, PR #200) ①만으로는 못 막게 됐다:
+         빈 테이블이 곧 "분담금 0"으로 읽혀, 수집 전 기간의 순이익이 분담금 없음을 전제로
+         계산된다. 같은 실패가 형태만 바꿔 돌아온 것이라 판정자를 프로모션 존재로 옮긴다.
+    프로모션이 창에 하나도 없으면 빈 dict(=0)를 낸다 — 그건 추정이 아니라 사실이다.
     """
-    if not sa_inspect(db.get_bind()).has_table("coupang_promo_discount_item"):
+    bind = db.get_bind()
+    insp = sa_inspect(bind)
+    if not insp.has_table("coupang_promo_discount_item"):
         return None
+    if insp.has_table("coupang_rocket_promotion"):
+        unpriced = db.execute(
+            text(_PROMO_UNPRICED_SQL),
+            {"vendor": ROCKET_1P_VENDOR_ID,
+             "since": date_from.isoformat(), "until": date_to.isoformat()},
+        ).scalar()
+        if int(unpriced or 0) > 0:
+            log.info("분담금 미상 — 창에 걸친 프로모션 %s건의 할인액 원천이 없다(순이익 미산정)",
+                     unpriced)
+            return None
     rows = db.execute(
         text(_PROMO_BURDEN_SQL),
         {"vendor": ROCKET_1P_VENDOR_ID,

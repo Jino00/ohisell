@@ -1852,6 +1852,117 @@ class CoupangPromoDiscountItem(Base):
     )
 
 
+# ──────────────────────────────────────────────
+# 쿠팡 로켓배송(1P) 발송(ASN) 쉽먼트 — "우리가 보낸 양" (트랙 rocket-1p, ref 45)
+#
+# ★왜 신설하나: 지금까지 저장된 건 **발주**(쿠팡이 시킨 양)와 **입고**(쿠팡이 받았다고 인정한 양)
+#   둘뿐이었다. 그 사이 "보냈는데 안 잡힌 것"=미수금은 2026-08-05 일회성 정찰로만 8,033,970원을
+#   찾아냈고(ref 45), 상시 수집이 없으면 다음 달에 같은 일이 생겨도 아무도 못 본다.
+# ★수량 3종을 구분해서 읽어야 한다: 발주수량(쿠팡 요청) ≥ 납품수량(우리가 보냄) ≥ 입고수량(쿠팡 인정).
+#   미수금 = 납품 − 입고. 단 **납품수량은 우리 신고값**이라 제3자 검증이 없다(ref 45 §8-1) —
+#   그래서 박스 추적(집하·도착·하차)을 같이 저장한다. 그게 택배사·물류센터의 기록이다.
+# ──────────────────────────────────────────────
+class CoupangRocketShipment(Base):
+    """1P 발송 쉽먼트 헤더 — grain = shipment_seq.
+
+    소스: GET /ibs/shipment/{parcel|truck}/list (목록) + /ibs/shipment/{type}/{seq} (상세) SSR HTML.
+      ★진입 경로 주의(ref 45 §1-1): `/ibs/asn/active`를 파라미터 없이 열면 대시보드로 리다이렉트된다.
+      발주 상세의 「택배 쉽먼트」 링크(`?type=parcel&purchaseOrderSeq=`)로 오리진을 재무장한 뒤
+      같은 탭에서 fetch해야 한다. 세션이 오래되면 fetch가 `Failed to fetch`로 죽는다(Akamai stale).
+    ★쉽먼트 : 발주 = 1 : N. 목록의 「총 납품 수량」은 여러 발주의 합계라 발주별 수량이 아니다 —
+      발주별·SKU별은 **상세에만** 있다(ref 45 §1-3, 착수 전 전제가 틀렸던 지점).
+    status_code는 화면 라벨이 아니라 `data-status` 속성(READY/CONFIRMED/…)이다 — 한국어 라벨이
+      바뀌어도 안 흔들린다.
+    """
+
+    __tablename__ = "coupang_rocket_shipment"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    shipment_seq: Mapped[int] = mapped_column(Integer, unique=True, nullable=False, index=True)
+    vendor_id: Mapped[str] = mapped_column(String(20), nullable=False, index=True)  # 계정축(페처 주입)
+    shipment_type: Mapped[Optional[str]] = mapped_column(String(12), nullable=True)  # PARCEL | TRUCK
+    status_code: Mapped[Optional[str]] = mapped_column(String(20), nullable=True, index=True)
+    status_label: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)  # 화면 표기(참고)
+    invoice_number: Mapped[Optional[str]] = mapped_column(String(40), nullable=True, index=True)
+    carrier_name: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    center_name: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    origin_address: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    shipped_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+    estimated_arrival_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    box_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # 요약표(총 납품/총 입고). 상세를 아직 안 받은 쉽먼트는 total_received_qty가 None = **모름**이다.
+    #   0으로 접으면 "쿠팡이 하나도 안 받았다"가 되어 미수금을 지어낸다.
+    po_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    sku_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    total_shipped_qty: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    total_received_qty: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    detail_synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class CoupangRocketShipmentItem(Base):
+    """1P 발송 라인 — 박스 × 발주 × SKU × 납품수량 × 입고수량.
+
+    grain: (shipment_seq, line_no). 같은 쉽먼트 재수신 시 **snapshot replace**(전 행 삭제 후 재삽입)
+      이므로 line_no만으로 충분하고 멱등이다.
+      ★(shipment, box, po, sku)를 유니크로 걸지 않은 이유: 쿠팡 화면이 같은 조합을 두 줄로
+      낼 여지가 있는데(박스 내 분할 등 미확인), 그때 유니크 위반으로 **수집 전체가 죽는다**.
+      snapshot replace가 이미 중복 누적을 막으므로 자연키를 강제하지 않는다.
+    ★「박스」 셀은 rowspan이라 둘째 행부터 없다 — 파서가 이월한다(ref 45 §10). 위치 기반으로
+      읽으면 발주번호 자리에 SKU가 들어간다.
+    """
+
+    __tablename__ = "coupang_rocket_shipment_item"
+    __table_args__ = (
+        UniqueConstraint("shipment_seq", "line_no", name="uq_rocket_shipment_item"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    shipment_seq: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    vendor_id: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    line_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    box_label: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)  # '박스 #1 PBL…'
+    purchase_order_seq: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    product_number: Mapped[str] = mapped_column(String(30), nullable=False, index=True)  # 발주상세와 같은 키
+    product_name: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+    barcode: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    shipped_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0)   # 납품수량(우리 신고)
+    # ★입고수량 = **ASN 화면이 말하는 입고**다. 미수금 확정에 그대로 쓰면 안 된다:
+    #   이 화면은 **재발송분 입고를 못 본다**(2026-08-05 실측 52라인) → 미입고가 과대하게 나온다.
+    #   그날 그 값만 믿고 계산한 미수금 14.0M이 입고 원장 재판정에서 8.03M으로 내려갔다
+    #   (5,763,290원 과대, 교훈 #141). 확정 판정의 정본은 `/scm/receive/detail/download` 입고 원장이다.
+    #   여기 값은 **상한(후보)**으로만 쓴다.
+    received_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 입고수량(ASN 화면 기준)
+    synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class CoupangRocketShipmentBox(Base):
+    """1P 발송 박스 추적 — 집하·도착·하차. **제3자(택배사·물류센터) 기록**.
+
+    ★이 표가 미수금 청구의 증거 등급을 정한다(ref 45 §4-1: 하차 확인 130라인 7,108,720원이
+      1차 청구 권장분이었다). 납품수량은 우리 말이고, 하차 시각은 쿠팡·택배사 말이다 —
+      "정말 보냈나"에 답할 수 있는 유일한 축이다.
+    grain: (shipment_seq, box_label). snapshot replace.
+    """
+
+    __tablename__ = "coupang_rocket_shipment_box"
+    __table_args__ = (
+        UniqueConstraint("shipment_seq", "box_label", name="uq_rocket_shipment_box"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    shipment_seq: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    vendor_id: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    box_label: Mapped[str] = mapped_column(String(80), nullable=False)
+    status_label: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    invoice_number: Mapped[Optional[str]] = mapped_column(String(40), nullable=True, index=True)
+    picked_up_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)  # 집하
+    arrived_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)    # 도착
+    unloaded_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)   # 하차(★증거)
+    synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 class RocketProductCostMap(Base):
     """쿠팡 로켓배송(1P) 원가 브리지 — 발주상세 상품번호 → product_master.internal_sku (트랙 rocket-1p, S4.5b/D-13).
 
