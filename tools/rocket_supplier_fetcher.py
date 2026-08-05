@@ -71,6 +71,13 @@ PO_DETAIL_PATH = "/scm/purchase/order/get"                     # 발주상세 pe
 #     하므로(네비게이션 없음) 그 리다이렉트에 안 걸린다 — 정산·발주상세와 같은 방식이다.
 SHIPMENT_LIST_PATH = "/ibs/shipment/parcel/list"                # 쉽먼트 목록 SSR HTML (10행/페이지)
 SHIPMENT_DETAIL_PATH = "/ibs/shipment/parcel"                   # 쉽먼트 상세 SSR HTML (/{shipmentSeq})
+# ★트럭 쉽먼트는 수집하지 않는다 — 사각이 아니라 **실측 0건**이기 때문이다(2026-08-05).
+#   ref 45 §8-4의 "트럭 목록 400 미해명"은 파라미터 이름이 택배와 다른 탓이었다:
+#     택배 `pageNumber`·`estimatedDeliveryDate`·`shipmentSeq`
+#     트럭 `page`·`expectedDeliveryDate`·`truckShipmentSeq`(+ inboundBookingSeqSet 등 배열)
+#   올바른 이름(`/ibs/shipment/truck/list?page=1`)으로 부르면 200이고 본문이 "조회 결과가
+#   없습니다"(total 0)다 — 두 탭(쉽먼트·배송트럭) 모두. 오하이테크는 트럭 발송을 쓰지 않는다.
+#   쓰기 시작하면 이 상수를 되살려 같은 파서로 붙이면 된다(표 구조는 택배와 동형).
 
 # ── 프로모션 손익 레이어(트랙 coupang-promo-pnl) 경로 — 2026-07-28 라이브 정찰 실측 ──
 #   ★추측 아님: 아래 셋 다 살아있는 세션에서 200 응답과 필드를 직접 확인하고 적었다.
@@ -1178,21 +1185,51 @@ def _fetch_shipment_detail(page, shipment_seq: int):
     return (tables if tables else None), 200
 
 
-def _collect_and_push_shipments(page, cfg: dict) -> tuple[int, list[str]]:
-    """쉽먼트 목록 N페이지 + 각 건 상세 → prod push 1회. 반환 (rc, 실패사유들).
+_SHIPPED_AT_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _oldest_shipped_date(entries: list[dict], headers: list[str]) -> str | None:
+    """이 페이지 행들의 발송일 중 가장 오래된 것(YYYY-MM-DD). 못 읽으면 None."""
+    idx = None
+    for i, h in enumerate(headers or []):
+        if "발송일" in str(h or ""):
+            idx = i
+            break
+    if idx is None:
+        return None
+    dates = []
+    for e in entries:
+        cells = e.get("cells") or []
+        if idx < len(cells):
+            m = _SHIPPED_AT_RE.search(str(cells[idx] or ""))
+            if m:
+                dates.append(m.group(0))
+    return min(dates) if dates else None
+
+
+def _collect_and_push_shipments(page, cfg: dict, days: int | None = None,
+                                detail_cap: int | None = None) -> tuple[int, list[str]]:
+    """쉽먼트 목록(날짜 창까지) + 각 건 상세 → prod push. 반환 (rc, 실패사유들).
 
     ★목록만 받고 상세를 못 받은 건은 **상세 없이** 보낸다 — 백엔드가 총 입고 수량을 건드리지
       않으므로 "모름"이 유지된다. 0으로 접으면 미수금을 지어낸다(ref 45 §12 계열의 사고).
-    ★페이지는 최신순 10행이라 기본 3페이지(=최근 30건)면 하루치 발송을 넉넉히 덮는다.
-      과거 소급은 이 루프가 아니라 별도 백필로 한다(운영 수집을 무겁게 만들지 않는다).
+    ★멈추는 기준은 **페이지 수가 아니라 날짜**다. 고정 3페이지(=30건)로 하면 발송량이 많은
+      주간이나 며칠 버튼을 안 누른 구간이 **영구히 빠진다**(다음에 눌러도 창 밖이다).
+      `shipment_days`(기본 30) 이전 발송이 나올 때까지 페이지를 넘긴다. `shipment_max_pages`는
+      폭주 방지 상한일 뿐 정상 종료 조건이 아니다 — 상한에 걸리면 경고를 남긴다(조용한 절단 금지).
     """
     if not cfg.get("collect_shipment", True):
         return 0, []
-    max_pages = max(1, int(cfg.get("shipment_pages") or 3))
-    detail_cap = max(0, int(cfg.get("shipment_detail_cap") or 40))
+    days = int(days if days is not None else (cfg.get("shipment_days") or 30))
+    max_pages = max(1, int(cfg.get("shipment_max_pages") or 40))
+    detail_cap = int(detail_cap if detail_cap is not None
+                     else (cfg.get("shipment_detail_cap") or 60))
+    detail_cap = max(0, detail_cap)
+    cutoff = (date.today() - timedelta(days=days)).isoformat()
 
     entries: list[dict] = []
     headers: list[str] = []
+    hit_page_cap = True
     for pn in range(1, max_pages + 1):
         hdrs, ents, status = None, None, None
         for attempt in (1, 2):
@@ -1213,9 +1250,17 @@ def _collect_and_push_shipments(page, cfg: dict) -> tuple[int, list[str]]:
         if hdrs:
             headers = hdrs
         if not ents:
-            break                                  # 빈 페이지 = 끝
+            hit_page_cap = False
+            break                                  # 빈 페이지 = 끝(더 볼 게 없다)
         entries.extend(ents)
+        oldest = _oldest_shipped_date(ents, headers)
+        if oldest is not None and oldest < cutoff:
+            hit_page_cap = False
+            break                                  # 창 밖까지 왔다 = 정상 종료
         page.wait_for_timeout(300)
+    if hit_page_cap:
+        log.warning("쉽먼트 목록이 페이지 상한 %d에 걸렸다 — %s 이전이 안 들어왔을 수 있다"
+                    "(shipment_max_pages를 늘리거나 백필하라)", max_pages, cutoff)
 
     if not entries:
         log.info("쉽먼트: 목록 0건 — 건너뜀")
@@ -1224,9 +1269,18 @@ def _collect_and_push_shipments(page, cfg: dict) -> tuple[int, list[str]]:
     for e in entries:
         e["headers"] = headers
 
+    # ★상세를 고르는 순서: **아직 안 끝난 것 먼저**. CLOSED(마감)는 입고수량이 더 안 바뀌므로
+    #   매번 다시 받을 이유가 없다 — 상세 1건 = fetch 1회라 그대로 두면 버튼 갱신이 계속 느려진다.
+    #   백필이 과거 CLOSED를 한 번 채우고, 일상 갱신은 움직이는 것만 따라간다.
+    #   캡에 걸려 빠진 건수는 아래에서 **경고로 말한다**(조용한 절단 금지).
+    def _detail_priority(e: dict) -> tuple[int, str]:
+        st = str((e.get("data") or {}).get("status") or "").upper()
+        return (1 if st == "CLOSED" else 0, "")
+
+    ordered = sorted(entries, key=_detail_priority)
     detail_failed = 0
     consec_fail = 0
-    for e in entries[:detail_cap]:
+    for e in ordered[:detail_cap]:
         seq = int((e.get("data") or {}).get("id") or 0)
         if seq <= 0:
             continue
@@ -1253,14 +1307,20 @@ def _collect_and_push_shipments(page, cfg: dict) -> tuple[int, list[str]]:
         e["detail"] = {"tables": tables}
         page.wait_for_timeout(300)
 
+    # ★상세 캡에 걸려 잘린 건수를 **말한다**. 조용히 자르면 "다 수집됐다"로 읽힌다.
+    skipped_detail = max(0, len(entries) - detail_cap)
+    if skipped_detail:
+        log.warning("쉽먼트 상세 %d건이 캡(%d)에 걸려 목록만 적재된다 — 총 입고 수량은 '모름'으로"
+                    " 남는다(shipment_detail_cap을 늘리거나 백필하라)", skipped_detail, detail_cap)
+
     rc = _push_shipments(cfg, entries)
     reasons: list[str] = []
     if rc:
         reasons.append("쉽먼트 push 실패")
     if detail_failed:
         reasons.append(f"쉽먼트 상세 실패 {detail_failed}건")
-    log.info("쉽먼트 완료 — 목록 %d건 / 상세 실패 %d건 / push rc=%d",
-             len(entries), detail_failed, rc)
+    log.info("쉽먼트 완료 — 목록 %d건(창 %d일, %s 이후) / 상세 미수집 %d건 / 상세 실패 %d건 / push rc=%d",
+             len(entries), days, cutoff, skipped_detail, detail_failed, rc)
     # 상세 일부 실패는 목록 적재를 무효화하지 않는다(부분 성공을 성공으로 보고하지도 않는다).
     return (1 if (rc or detail_failed) else 0), reasons
 
@@ -2446,6 +2506,43 @@ def cmd_chrome(cfg: dict) -> int:
     return 0
 
 
+def cmd_shipment_backfill(cfg: dict, days: int) -> int:
+    """발송(ASN) 소급 수집 — 일회성. `run`의 다른 스트림은 건드리지 않는다.
+
+    왜 별도 커맨드인가: 상시 수집(`run`)의 창을 넓히면 버튼을 누를 때마다 수백 건의 상세를
+    다시 받게 되어 갱신이 느려지고 supplier에 무례하다. 과거는 한 번만 채우면 되므로
+    **일회성으로 분리**한다. 같은 ingest 경로(쉽먼트 단위 snapshot replace)라 여러 번 돌려도 안전하다.
+
+    사용: rocket_supplier_fetcher.py shipment-backfill [일수]   (기본 400일)
+    ★이 커맨드가 Chrome 프로필을 잡고 있는 동안에는 버튼 갱신이 `chrome_profile_busy`로
+      실패한다(정찰 Chrome과 같은 이유) — 끝날 때까지 갱신 버튼을 누르지 말 것.
+    """
+    if not _push_configured(cfg):
+        log.error("backfill엔 prod_base_url·ingest_token·vendor_id 설정 필요.")
+        return 2
+    log.info("[backfill] 발송 소급 수집 시작 — 최근 %d일", days)
+    rc, reasons = 1, ["backfill 미실행"]
+    try:
+        with _owned_chrome(cfg) as owner:
+            with sync_playwright() as p:
+                with _chrome(p, cfg) as page:
+                    if not _goto_origin(page):
+                        log.info("supplier 로그아웃 감지 — 자가 복구 시도.")
+                        if coupang_auth.OK != _recover_session(page, cfg) or not _goto_origin(page):
+                            log.error("세션 자가 복구 실패 — 이 창에서 로그인 후 다시 실행하세요.")
+                            owner.keep_open = True
+                            return RC_LOGIN_REQUIRED
+                    # 상세 캡·페이지 상한을 넉넉히 — 백필은 완결성이 목적이다.
+                    rc, reasons = _collect_and_push_shipments(
+                        page, cfg, days=days,
+                        detail_cap=int(cfg.get("shipment_backfill_detail_cap") or 2000))
+    except Exception as e:  # noqa: BLE001
+        log.error("[backfill] 브라우저 수집 오류: %s", e)
+        return 1
+    log.info("[backfill] 완료 rc=%d%s", rc, (" / " + " / ".join(reasons)) if reasons else "")
+    return rc
+
+
 def cmd_poll(cfg: dict, interval: int = 30) -> int:
     """상주 poll 데몬 — UI '갱신' 버튼 요청만 감지·실행(순수 on-demand).
 
@@ -2524,7 +2621,17 @@ def main() -> None:
         sys.exit(cmd_run(cfg))
     if arg == "poll":
         sys.exit(cmd_poll(cfg))
-    print("usage: rocket_supplier_fetcher.py [chrome|login|run|poll]", file=sys.stderr)
+    if arg == "shipment-backfill":
+        days = 400
+        if len(sys.argv) >= 3:
+            try:
+                days = int(sys.argv[2])
+            except ValueError:
+                print("shipment-backfill의 일수는 정수여야 합니다.", file=sys.stderr)
+                sys.exit(2)
+        sys.exit(cmd_shipment_backfill(cfg, days))
+    print("usage: rocket_supplier_fetcher.py [chrome|login|run|poll|shipment-backfill [일수]]",
+          file=sys.stderr)
     sys.exit(2)
 
 
