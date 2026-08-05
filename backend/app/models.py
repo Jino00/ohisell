@@ -1814,6 +1814,44 @@ class CoupangRocketPromotion(Base):
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class CoupangPromoDiscountItem(Base):
+    """1P 프로모션 **상품별 개당 할인액** — 제안서 엑셀이 원천 (트랙 coupang-promo-pnl, D-CPP-10).
+
+    왜 별도 테이블인가: `CoupangRocketPromotion.unit_discount_amount`(D-CPP-7)는 "프로모션당
+      단일값"을 수기로 받는 1칸이었다. 제안서 엑셀을 자동으로 읽게 되면서 **라인 단위**(SKU별
+      타입·값)로 보존한다 — 지금 표본은 전부 한 파일 안에서 값이 같지만, 총액으로 뭉개면
+      나중에 SKU마다 다른 행사가 오면 조용히 평균값이 앉는다(네이버에서 "총액은 상쇄로 오류를
+      숨긴다"가 실증됐다). 기존 수기 칸은 폴백으로 남긴다.
+
+    grain: (request_id, product_number). 파일 재수신 시 그 프로모션의 항목을 **통째로 교체**한다
+      (snapshot) — 제안서에서 빠진 SKU가 유령으로 남으면 안 되기 때문.
+
+    ★discount_type/‌discount_value 의미:
+      · '정액수량' → discount_value = **개당 할인액(원)**. 분담금 = 판매수량 × 값.
+      · '정률'     → discount_value = **비율**(0.2 = 20%). 분담금 = 판매금액 × 값.
+      두 축의 단위가 다르므로 합산 전에 반드시 타입을 본다.
+
+    ★이 테이블은 "우리가 부담하기로 한 조건"이지 **쿠팡이 청구한 금액이 아니다**(D-CPP-4 미확정 —
+      07월분 정산일이 9월). 손익에 싣는 값은 여기서 계산한 **추정 분담금**이고, 9월 정산서가
+      오면 실제 청구액과 대사해서 확정한다.
+    """
+
+    __tablename__ = "coupang_promo_discount_item"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    request_id: Mapped[str] = mapped_column(String(30), nullable=False, index=True)  # → coupang_rocket_promotion
+    product_number: Mapped[str] = mapped_column(String(30), nullable=False, index=True)  # 1P 발주 상품번호
+    discount_type: Mapped[str] = mapped_column(String(10), nullable=False)  # 정액수량 | 정률
+    discount_value: Mapped[Decimal] = mapped_column(Numeric(12, 4), nullable=False)
+    source_file: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)  # 원천 파일명(감사)
+    file_mtime: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)  # 파일 수정시각
+    synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("request_id", "product_number", name="uq_promo_discount_item"),
+    )
+
+
 class RocketProductCostMap(Base):
     """쿠팡 로켓배송(1P) 원가 브리지 — 발주상세 상품번호 → product_master.internal_sku (트랙 rocket-1p, S4.5b/D-13).
 

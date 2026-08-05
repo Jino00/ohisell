@@ -330,7 +330,7 @@ echo "==> 파일 배포 (CAS 가드)"
 for f in coupang_auth.py ad_settings_collect.py \
          ad_cost_browser_fetcher.py wing_browser_fetcher.py \
          rocket_supplier_fetcher.py ohitech_ad_fetcher.py \
-         scheduler_watchdog_poll.py; do
+         scheduler_watchdog_poll.py promo_file_fetcher.py; do
   if [ ! -f "$REPO_TOOLS/$f" ]; then
     case "$f" in
       coupang_auth.py|ad_settings_collect.py)
