@@ -14,7 +14,7 @@
 //      0이 아니라 "—" + 미수집 건수로 표시한다.
 //   3) **드리프트는 단계로 갈린다.** 입고 전 단계(발주확정·거래처확인요청)에서 발주≠입고는
 //      당연하다. 요약 타일이 강조하는 값은 "거래명세서확인 단계인데 발주≠입고"뿐이다.
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Card, Stat, Table, Th, Td, Loading, EmptyState, Button, Badge } from "../components/ui";
 import { useAsyncData } from "../lib/useAsyncData";
 import {
@@ -104,7 +104,12 @@ function PeriodBar({
   driftOnly: boolean; onDriftOnly: (v: boolean) => void;
   unconfirmedOnly: boolean; onUnconfirmedOnly: (v: boolean) => void;
 }) {
+  /** 오늘까지의 최근 N일. N=1이면 오늘 하루. */
   const preset = (days: number) => { onFrom(daysAgo(days - 1)); onTo(isoKST(new Date())); };
+  /** 하루짜리 창(어제처럼 시작=끝). 최근 N일과 달리 오늘을 포함하지 않는다. */
+  const day = (agoDays: number) => { const d = daysAgo(agoDays); onFrom(d); onTo(d); };
+  const today = isoKST(new Date());
+  const active = (f: string, t: string) => from === f && to === t;
   return (
     <Card title="조회 조건">
       <div className="flex flex-wrap items-center gap-3 px-4 py-3">
@@ -118,10 +123,15 @@ function PeriodBar({
           type="date" value={to} onChange={(e) => onTo(e.target.value)}
           className="rounded border border-gray-300 px-2 py-1 text-sm"
         />
-        <div className="flex gap-1">
-          <Button onClick={() => preset(30)}>30일</Button>
-          <Button onClick={() => preset(90)}>90일</Button>
-          <Button onClick={() => preset(365)}>1년</Button>
+        {/* 지금 걸린 기간과 같은 프리셋은 눌린 상태로 보인다 — 어느 창을 보고 있는지가
+            날짜 두 개를 읽어야만 알 수 있으면 오독한다. */}
+        <div className="flex flex-wrap gap-1">
+          <Button variant={active(today, today) ? "primary" : "secondary"} onClick={() => preset(1)}>오늘</Button>
+          <Button variant={active(daysAgo(1), daysAgo(1)) ? "primary" : "secondary"} onClick={() => day(1)}>어제</Button>
+          <Button variant={active(daysAgo(6), today) ? "primary" : "secondary"} onClick={() => preset(7)}>7일</Button>
+          <Button variant={active(daysAgo(29), today) ? "primary" : "secondary"} onClick={() => preset(30)}>30일</Button>
+          <Button variant={active(daysAgo(89), today) ? "primary" : "secondary"} onClick={() => preset(90)}>90일</Button>
+          <Button variant={active(daysAgo(364), today) ? "primary" : "secondary"} onClick={() => preset(365)}>1년</Button>
         </div>
         <div className="ml-auto flex flex-wrap items-center gap-3">
           <label className="flex items-center gap-1.5 text-xs text-gray-600">
@@ -139,6 +149,8 @@ function PeriodBar({
       </div>
       <p className="px-4 pb-3 text-xs text-gray-400">
         기간은 <b>발주일(KST)</b> 기준입니다. 발주→입고→명세서→계산서 확정까지 수 주가 걸려 기본 창을 90일로 둡니다.
+        &lsquo;오늘·어제·7일&rsquo;은 <b>그 날짜에 난 발주</b>만 보는 창이라 입고·계산서가 아직 비어 있는 것이 정상이며,
+        발주 자체가 없던 날이면 표가 비어 보입니다(수집 실패와 다릅니다).
         필터는 아래 상품 표에만 적용되며 요약 타일은 항상 기간 전체 기준입니다.
       </p>
     </Card>
@@ -308,14 +320,143 @@ function StatusBreakdown({ data }: { data: RocketRecon }) {
 }
 
 // ── 상품(SKU) 표 + 행 확장 ──────────────────────────────────────
+/** 검색·정렬 키. 서버는 발주 금액 desc로 주므로 그 순서를 '기본'으로 보존한다
+ *  (정렬을 끄면 원래 보던 화면으로 정확히 돌아가야 하기 때문).
+ *  ★'납품 안 된 건'은 화면에 **두 종류**가 있어 키도 둘이다 — 하나로 합치면 둘 중 하나가 거짓이 된다:
+ *    · undelivered        = 발주−입고 전체(입고 전 단계 포함) — "아직 안 들어온 것"
+ *    · undelivered_settled = 입고가 끝난 단계의 발주−입고    — "들어왔어야 하는데 안 들어온 것"
+ *  둘 다 **귀속 가능한(단일SKU) 발주**에서만 산출된다. 근거 없는 행은 0이 아니라 '모름'이다. */
+type SkuSortKey = "default" | "sku" | "name" | "undelivered" | "undelivered_settled";
+
+/** 정렬 대상 수치를 꺼낸다. null = 산출 근거 없음(0이 아님) → 방향과 무관하게 항상 뒤로 보낸다. */
+function undeliveredOf(r: ReconSkuRow, settledOnly: boolean): number | null {
+  return settledOnly ? r.drift_qty_settled_stage : r.drift_qty;
+}
+
+/** 한글 검색은 정규화가 갈리면 **에러 없이 0건**이 된다(교훈 #140: macOS NFD vs API NFC).
+ *  화면 입력(NFC일 수도 NFD일 수도)과 API 문자열 양쪽을 NFC로 모아 비교한다. */
+const norm = (s: string) => s.normalize("NFC").toLowerCase();
+
+/** SKU 번호는 숫자 문자열이라 문자열 정렬하면 9 > 76350896이 된다 — 숫자면 숫자로 비교. */
+function compareSku(a: string, b: string): number {
+  const na = Number(a), nb = Number(b);
+  if (Number.isFinite(na) && Number.isFinite(nb) && na !== nb) return na - nb;
+  return a.localeCompare(b, "ko");
+}
+
 function SkuTable({ data, from, to }: { data: RocketRecon; from: string; to: string }) {
   const [openSku, setOpenSku] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [sortKey, setSortKey] = useState<SkuSortKey>("default");
+  const [asc, setAsc] = useState(true);
   const f = data.filters;
 
-  const title =
+  // 검색: 공백으로 나눈 토큰 **전부**가 SKU 번호 또는 상품명에 있으면 통과(부분·순서무관).
+  const shown = useMemo(() => {
+    const tokens = norm(query).split(/\s+/).filter(Boolean);
+    const filtered = tokens.length === 0
+      ? data.skus
+      : data.skus.filter((r) => {
+          const hay = `${norm(r.product_number)} ${norm(r.product_name ?? "")}`;
+          return tokens.every((t) => hay.includes(t));
+        });
+    if (sortKey === "default") return asc ? filtered : [...filtered].reverse();
+    // ★방향은 비교 안에서 적용한다 — 정렬 후 통째로 뒤집으면 '모름' 행이 맨 위로 올라와,
+    //   값이 없다는 이유만으로 가장 심각한 상품처럼 보인다.
+    const dir = asc ? 1 : -1;
+    return [...filtered].sort((a, b) => {
+      if (sortKey === "sku") return dir * compareSku(a.product_number, b.product_number);
+      if (sortKey === "name") {
+        // 이름 없는 행은 방향과 무관하게 항상 뒤로 — '이름 없음'은 값이 아니다.
+        if (a.product_name == null || b.product_name == null) {
+          return (a.product_name == null ? 1 : 0) - (b.product_name == null ? 1 : 0);
+        }
+        return dir * a.product_name.localeCompare(b.product_name, "ko");
+      }
+      const settledOnly = sortKey === "undelivered_settled";
+      const av = undeliveredOf(a, settledOnly);
+      const bv = undeliveredOf(b, settledOnly);
+      if (av == null || bv == null) return (av == null ? 1 : 0) - (bv == null ? 1 : 0);
+      return dir * (av - bv);
+    });
+  }, [data.skus, query, sortKey, asc]);
+
+  const searching = query.trim().length > 0;
+  const byUndelivered = sortKey === "undelivered" || sortKey === "undelivered_settled";
+  // 정렬 근거가 없는 행 수 — 숨기지 않고 세어서 보여준다(뒤에 몰린 이유를 알 수 있게).
+  const unknownCount = byUndelivered
+    ? shown.filter((r) => undeliveredOf(r, sortKey === "undelivered_settled") == null).length
+    : 0;
+  const baseTitle =
     f.drift_only || f.unconfirmed_only
       ? `상품별 대사 — ${n(f.sku_count_shown)}/${n(f.sku_count_total)} SKU (필터 적용)`
       : `상품별 대사 — ${n(f.sku_count_total)} SKU`;
+  const title = searching ? `${baseTitle} · 검색 ${n(shown.length)}건` : baseTitle;
+
+  const controls = (
+    <div className="flex flex-wrap items-center gap-2 border-b border-gray-100 px-4 py-3">
+      <div className="relative">
+        <input
+          type="search"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="상품명 또는 SKU 번호로 검색"
+          aria-label="상품명 또는 SKU 번호로 검색"
+          className="w-72 rounded border border-gray-300 px-2 py-1 text-sm"
+        />
+      </div>
+      {searching && (
+        <Button variant="ghost" onClick={() => setQuery("")}>지우기</Button>
+      )}
+      <div className="ml-auto flex items-center gap-2">
+        <label className="text-xs text-gray-500" htmlFor="sku-sort">정렬</label>
+        <select
+          id="sku-sort"
+          value={sortKey}
+          onChange={(e) => {
+            const k = e.target.value as SkuSortKey;
+            setSortKey(k);
+            // 수량 정렬은 '많은 순'이 기본 — 미입고를 고르는 이유는 큰 것부터 보기 위해서다.
+            setAsc(k === "sku" || k === "name");
+          }}
+          className="rounded border border-gray-300 px-2 py-1 text-sm"
+        >
+          <option value="default">기본(발주 금액 큰 순)</option>
+          <option value="sku">SKU 번호</option>
+          <option value="name">상품명</option>
+          {/* ★라벨은 '어떻게 계산했는지'가 아니라 '무엇을 세는지'로 쓴다 —
+              앞 버전('발주−입고, 입고 전 포함' / '입고 끝난 단계만')은 Jino가 헷갈렸다. */}
+          <option value="undelivered">아직 안 온 수량 (배송 대기 포함 — 정상)</option>
+          <option value="undelivered_settled">덜 온 수량 (입고 끝났는데 부족 — 문제)</option>
+        </select>
+        {/* 버튼 글자는 '지금 적용된 순서' — 누르면 반대로 뒤집힌다. */}
+        <Button onClick={() => setAsc(!asc)} title="정렬 방향 뒤집기">
+          {sortKey === "default"
+            ? (asc ? "금액 큰 순 ↓" : "금액 작은 순 ↑")
+            : sortKey === "sku" || sortKey === "name"
+              ? (asc ? "오름차순 ↑" : "내림차순 ↓")
+              : (asc ? "적은 순 ↑" : "많은 순 ↓")}
+        </Button>
+      </div>
+      {byUndelivered && (
+        <p className="w-full text-xs text-gray-400">
+          {sortKey === "undelivered_settled" ? (
+            <>
+              <b>덜 온 수량</b> = 입고·명세서가 <b>끝난</b> 발주(거래명세서확인·확인요청)인데 발주보다 적게 들어온 수량.
+              들어왔어야 하는데 안 들어온 것이라 <b>이쪽이 진짜 문제</b>입니다. 화면의 &lsquo;발주−입고&rsquo; 열에서 <b>붉은 숫자</b>와 같은 값입니다.
+            </>
+          ) : (
+            <>
+              <b>아직 안 온 수량</b> = 발주했는데 아직 안 들어온 것 <b>전부</b>. 어제 발주해서 배송 전인 것도 포함되므로
+              값이 크다고 문제가 아닙니다. &lsquo;발주−입고&rsquo; 열의 <b>붉은 숫자 + 회색 &lsquo;입고 전&rsquo;</b>을 더한 값입니다.
+            </>
+          )}
+          {" "}두 값 모두 <b>귀속 가능한(단일 상품) 발주</b>에서만 산출되므로, 근거가 없는 {n(unknownCount)}건은
+          0이 아니라 &lsquo;{NO_DATA}(모름)&rsquo;이며 <b>정렬 방향과 무관하게 항상 맨 뒤</b>에 둡니다.
+        </p>
+      )}
+    </div>
+  );
 
   if (data.skus.length === 0) {
     return (
@@ -338,21 +479,29 @@ function SkuTable({ data, from, to }: { data: RocketRecon; from: string; to: str
 
   return (
     <Card title={title}>
+      {controls}
+      {shown.length === 0 ? (
+        <EmptyState
+          reason={`"${query.trim()}"과(와) 일치하는 상품이 없습니다 (이 기간 ${n(data.skus.length)} SKU 중 0건).`}
+          hint="SKU 번호 일부나 상품명 일부로 검색해 보세요. 검색은 이 기간에 조회된 상품 안에서만 이뤄집니다 — 기간 밖 상품은 기간을 넓혀야 나옵니다."
+        />
+      ) : (
       <Table
         head={
           <>
+            {/* 머리글은 줄바꿈 금지 — '발주−입고'가 '발주−입 / 고'로 갈리면 열 이름을 못 읽는다. */}
             <Th>상품(SKU)</Th>
-            <Th right>발주</Th>
-            <Th right>납품가능</Th>
-            <Th right>입고</Th>
-            <Th right>발주−입고</Th>
-            <Th right>발주 금액</Th>
+            <Th right><span className="whitespace-nowrap">발주</span></Th>
+            <Th right><span className="whitespace-nowrap">납품가능</span></Th>
+            <Th right><span className="whitespace-nowrap">입고</span></Th>
+            <Th right><span className="whitespace-nowrap">발주−입고</span></Th>
+            <Th right><span className="whitespace-nowrap">발주 금액</span></Th>
             <Th>계산서</Th>
             <Th> </Th>
           </>
         }
       >
-        {data.skus.map((r) => (
+        {shown.map((r) => (
           <SkuRows
             key={r.product_number}
             row={r}
@@ -363,6 +512,7 @@ function SkuTable({ data, from, to }: { data: RocketRecon; from: string; to: str
           />
         ))}
       </Table>
+      )}
       <div className="px-4 py-3 text-xs text-gray-400 space-y-1">
         <p>
           <b>입고</b> 열은 <b>단일 상품 발주에서만</b> 채워집니다 — 여러 상품이 섞인 발주는 입고수량이
@@ -376,6 +526,10 @@ function SkuTable({ data, from, to }: { data: RocketRecon; from: string; to: str
             <> 판정 근거가 아예 없는 상품이 {n(f.sku_count_unknown_drift)}건 있으며, &lsquo;발주≠입고만&rsquo;
             필터를 켜면 <b>정상이라서가 아니라 모르기 때문에</b> 빠집니다.</>
           )}
+        </p>
+        <p>
+          <b>검색·정렬</b>은 위 조회 조건으로 <b>이미 불러온 상품 안에서만</b> 적용됩니다(요약 타일·수집률은
+          검색과 무관하게 기간 전체 기준). 찾는 상품이 안 보이면 기간을 넓히거나 상단 필터를 해제하세요.
         </p>
         <p>
           <b>계산서</b> 배지는 <b>그 상품이 속한 발주</b> 기준입니다 — 계산서 1건이 여러 상품에 걸치므로
@@ -397,10 +551,12 @@ function SkuRows({ row, open, onToggle, from, to }: {
     <>
       <tr className={open ? "bg-blue-50/40" : undefined}>
         <Td>
-          <button type="button" onClick={onToggle} className="text-left">
+          {/* ★상품명은 자르지 않는다 — 'Z플립8'과 'Z폴드8'처럼 **끝에서 갈리는** 이름이 많아
+              말줄임(…)이 되면 서로 다른 상품이 같은 줄로 보인다. 폭만 제한하고 줄바꿈시킨다. */}
+          <button type="button" onClick={onToggle} className="block w-full text-left">
             <span className="font-medium text-gray-900">{row.product_number}</span>
             <span className="ml-2 text-xs text-gray-500">발주 {n(row.po_count)}건</span>
-            <div className="text-xs text-gray-500 max-w-md truncate">
+            <div className="max-w-md text-xs text-gray-500 whitespace-normal break-words">
               {row.product_name ?? NO_DATA}
             </div>
           </button>
@@ -455,7 +611,8 @@ function SkuRows({ row, open, onToggle, from, to }: {
             </div>
           )}
         </Td>
-        <Td right>{won(row.order_amount)}</Td>
+        {/* 금액은 '36,430,080 / 원'으로 갈리면 자릿수를 잘못 읽는다 — 한 덩어리로 묶는다. */}
+        <Td right><span className="whitespace-nowrap">{won(row.order_amount)}</span></Td>
         <Td>
           {invoiceIssues === 0 ? (
             <span className="text-xs text-gray-400">정상 {n(row.invoice_count)}건</span>
@@ -477,7 +634,9 @@ function SkuRows({ row, open, onToggle, from, to }: {
           )}
         </Td>
         <Td>
-          <Button variant="ghost" onClick={onToggle}>{open ? "닫기 ▲" : "발주내역 ▼"}</Button>
+          <span className="whitespace-nowrap">
+            <Button variant="ghost" onClick={onToggle}>{open ? "닫기 ▲" : "발주내역 ▼"}</Button>
+          </span>
         </Td>
       </tr>
       {open && (
