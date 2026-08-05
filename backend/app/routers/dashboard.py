@@ -23,6 +23,11 @@ from app.schemas import (
     ProductProfitRow,
     TrendPoint,
 )
+from app.services.coupang.rocket_1p_channel_pnl import (
+    compute_rocket_1p_daily_points,
+    compute_rocket_1p_summary_row,
+    rocket_1p_channel,
+)
 from app.services.profit_calculator import (
     calculate_channel_daily_trend,
     calculate_channel_summary,
@@ -272,6 +277,34 @@ def dashboard_kpi(
                 pass
 
 
+# ──────────────────────────────────────────────
+# 로켓배송 1P 병합 (트랙: 쿠팡 손익 정합)
+# ──────────────────────────────────────────────
+# 1P는 `orders`에 행이 없어(매입 구조) 기존 엔진이 만들 수 없다 → 평행 엔진의 산출을 여기서 얹는다.
+# ★**더하지 않고 갈아끼운다.** 그 채널엔 이미 사람이 넣던 레거시 두 갈래가 흘러들고 있다 —
+#   수기 매출(`manual_revenue`, 2026-05-01~05-18 18일치)과 수기 광고비 XLSX(`ad_costs`, 03-17~05-18).
+#   그냥 append하면 그 구간이 **두 번 계상된다**. 평행 엔진이 이 채널의 유일한 원천이 되고,
+#   레거시 광고비는 엔진 안에서 날짜 단위로 흡수한다(_ad_spend_by_day — 겹치는 하루는 자동 우선).
+def _merge_rocket_1p_summary(db: Session, rows: list[dict], df, dt) -> list[dict]:
+    ch = rocket_1p_channel(db)
+    if ch is None:
+        return rows
+    out = [r for r in rows if r.get("channel_id") != ch.id]
+    row = compute_rocket_1p_summary_row(db, df, dt)
+    if row is not None:
+        out.append(row)
+    return out
+
+
+def _merge_rocket_1p_trend(db: Session, points: list[dict], df, dt) -> list[dict]:
+    ch = rocket_1p_channel(db)
+    if ch is None:
+        return points
+    out = [p for p in points if p.get("channel_id") != ch.id]
+    out.extend(compute_rocket_1p_daily_points(db, df, dt))
+    return out
+
+
 @router.get("/channel-breakdown", response_model=list[GroupedSummaryRow])
 def channel_breakdown(
     date_from: Optional[date] = Query(None),
@@ -296,6 +329,7 @@ def channel_breakdown(
                 if ch and ch.code in rg_by_account and row["net_profit"] is not None:
                     row["net_profit"] = str(Decimal(row["net_profit"]) - rg_by_account[ch.code])
 
+        rows = _merge_rocket_1p_summary(db, rows, df, dt)
         return group_summary_by_company(rows, get_channel_company_map(db))
     finally:
         if ad_db is not None:
@@ -319,6 +353,7 @@ def trend_by_channel(
 
     try:
         pts = calculate_channel_daily_trend(db, ad_db, df, dt)
+        pts = _merge_rocket_1p_trend(db, pts, df, dt)
         return group_trend_by_company(pts, get_channel_company_map(db))
     finally:
         if ad_db is not None:

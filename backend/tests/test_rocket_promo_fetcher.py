@@ -172,6 +172,85 @@ def test_sales_page_meta_reads_pagination_details(fetcher):
     assert fetcher._sales_page_meta({}) == {"page_number": 0, "total_pages": 0, "total_results": 0}
 
 
+# ═══ ①-b 페이지네이션 유실 (2026-08-05 라이브 재현, ref 44 §3) ═══
+#   `sortBy=GMV DESC`가 불안정 정렬이라 페이지 경계 행이 다음 페이지에 다시 나오고 그만큼
+#   다른 행이 건너뛰어진다. 라이브 실측: 08-01 totalResults=60 → pageSize=20 3페이지에서
+#   누적 60행 · 고유 58개. 옛 판정자(누적 행 수 == totalResults)는 **60==60으로 통과**했다.
+class _FakePage:
+    def wait_for_timeout(self, _ms):
+        pass
+
+
+def _sales_payload(ids, page_no, total_pages, total_results, page_size):
+    return {
+        "vendorItems": [
+            {"vendorItemDetails": {"vendorItemId": i, "itemName": f"opt{i}", "externalSkuIds": [i]},
+             "businessInsightsMetricsResponse": {"totalUnitsSold": 1.0, "totalGmv": 1000.0}}
+            for i in ids
+        ],
+        "paginationDetails": {"pageSize": page_size, "pageNumber": page_no,
+                              "totalPages": total_pages, "totalResults": total_results},
+    }
+
+
+_UNSTABLE_PAGES = [
+    list(range(1, 21)),                 # page0: 1~20
+    [20] + list(range(21, 40)),         # page1: 20이 또 나온다 → 40이 밀려 사라짐
+    [39] + list(range(40, 59)),         # page2: 39가 또 나온다 → 59가 밀려 사라짐
+]                                        # 누적 60행 · 고유 58개 (라이브 08-01과 같은 형태)
+
+
+def _unstable_server(monkeypatch, fetcher, *, total, big_ok=True):
+    """pageSize<total이면 경계에서 중복/누락을 낸다. 크게 요청하면 온전히 준다(big_ok)."""
+    calls = []
+
+    def fake_fetch(page, cfg, day, page_no, page_size=None):
+        size = int(page_size or cfg.get("sales_page_size", 20))
+        calls.append((page_no, size))
+        if size >= total and big_ok:
+            return _sales_payload(list(range(1, total + 1)), 0, 1, total, size), 200, ""
+        return _sales_payload(_UNSTABLE_PAGES[page_no], page_no,
+                              len(_UNSTABLE_PAGES), total, size), 200, ""
+
+    monkeypatch.setattr(fetcher, "_fetch_sales_page", fake_fetch)
+    return calls
+
+
+def test_sales_day_detects_unstable_pagination_and_escalates(fetcher, monkeypatch):
+    """★고유 옵션이 모자라면 pageSize를 승급해 하루를 통째로 재수집한다(라이브 08-01 형태)."""
+    calls = _unstable_server(monkeypatch, fetcher, total=60)
+    cfg = fetcher.load_config()
+    cfg["sales_page_size"] = 20              # 옛 설정을 명시적으로 재현
+    rows, period, _raw = fetcher._collect_sales_day(
+        _FakePage(), cfg, date(2026, 8, 1), today=date(2026, 8, 5))
+    assert period is None
+    assert len({r["option_id"] for r in rows}) == 60   # 승급 재시도로 전량 회복
+    assert (0, 60) in calls                            # pageSize=totalResults로 재시도했다
+
+
+def test_sales_day_no_longer_passes_on_duplicate_padded_count(fetcher, monkeypatch):
+    """★회귀 고정: 누적 행 수는 60으로 totalResults와 같다 — 옛 판정자는 이걸 통과시켰다.
+
+    승급해도 서버가 온전히 주지 않는 최악을 가정해도 **조용히 통과하면 안 된다**.
+    """
+    _unstable_server(monkeypatch, fetcher, total=60, big_ok=False)
+    cfg = fetcher.load_config()
+    cfg["sales_page_size"] = 20
+    with pytest.raises(RuntimeError, match="승급 재수집 후에도 중복"):
+        fetcher._collect_sales_day(_FakePage(), cfg, date(2026, 8, 1), today=date(2026, 8, 5))
+
+
+def test_sales_default_page_size_is_100(fetcher):
+    """기본 pageSize를 줄이면 경계가 생기고 행이 사라진다 — 숫자 자체를 고정한다(라이브 최대 60옵션)."""
+    assert fetcher.load_config()["sales_page_size"] == 100
+
+
+def test_dedupe_sales_rows_keeps_order_and_drops_keyless(fetcher):
+    rows = [{"option_id": "a", "qty": 1}, {"option_id": "b", "qty": 2},
+            {"option_id": "a", "qty": 1}, {"option_id": "", "qty": 9}, {"qty": 8}]
+    assert [r["option_id"] for r in fetcher._dedupe_sales_rows(rows)] == ["a", "b"]
+
+
 # ═══ ② 판매분석 원시 → 레코드 계약 ═══
 def test_sales_records_maps_live_fields(fetcher):
     recs = fetcher._sales_records(_SALES_PAYLOAD, date(2026, 7, 26))
