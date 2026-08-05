@@ -322,12 +322,21 @@ export default function Dashboard() {
     }
   }, [dateFrom, dateTo, period, sortBy, rocketBasis]);
 
+  // ★항상 **최신** fetchAll을 부르기 위한 ref (2026-08-05 라이브 재현).
+  //   마운트 이펙트가 `syncAndRefresh`를 빈 의존성으로 잡고 있어, 그 클로저 안의 fetchAll은
+  //   **마운트 시점의 조회 조건**(매출 축=계산서)에 고정된다. syncRealtime()이 느리게 끝난 뒤
+  //   그 낡은 클로저가 실행되면, 사용자가 이미 「판매」로 바꾼 뒤인데도 **계산서 요청을 새로 쏘고**
+  //   그게 최신 응답이 되어 화면을 덮는다. 세대 카운터로는 못 막는다 — 늦게 출발했으니
+  //   정당하게 최신 세대다. 조건 자체가 낡은 게 문제이므로 ref로 최신 함수를 부른다.
+  const fetchAllRef = useRef(fetchAll);
+  useEffect(() => { fetchAllRef.current = fetchAll; }, [fetchAll]);
+
   const syncAndRefresh = useCallback(async () => {
     setSyncing(true);
     try { await syncRealtime(); } catch { /* fail-soft */ }
     setSyncing(false);
-    fetchAll();
-  }, [fetchAll]);
+    fetchAllRef.current();
+  }, []);
 
   // 접속/마운트 시 1회 실시간 동기화 후 데이터 로드
   // eslint-disable-next-line react-hooks/exhaustive-deps
