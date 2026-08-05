@@ -1600,6 +1600,11 @@ def _add_net(block: dict, net: str | None, revenue: Decimal) -> None:
     block["measurable_rev"] += revenue
 
 
+# 로켓1P leaf에만 있는 부가 필드(축·원가 커버리지·분담금). 회사/전체로는 **올리지 않는다** —
+# 축이 다른 채널을 섞어 놓고 "이 회사의 매출 축"이라고 말할 수 없기 때문이다.
+_LEAF_PASSTHROUGH = ("revenue_basis", "cost_coverage", "promo_burden")
+
+
 def _finalize(kind: str, company: str | None, label: str, b: dict) -> dict:
     if b["measurable_rev"] > 0:
         net = b["net_profit"]
@@ -1618,6 +1623,7 @@ def _finalize(kind: str, company: str | None, label: str, b: dict) -> dict:
         "net_profit": net_s,
         "profit_rate": rate_s,
         "order_count": b["order_count"],
+        **{k: b[k] for k in _LEAF_PASSTHROUGH if b.get(k) is not None},
     }
 
 
@@ -1644,6 +1650,9 @@ def group_summary_by_company(
 
         prod_rev = Decimal(r.get("product_revenue", "0"))
         ship_rev = Decimal(r.get("shipping_revenue", "0"))
+        for k in _LEAF_PASSTHROUGH:      # leaf 블록에만 실어 보낸다(회사/전체 제외)
+            if r.get(k) is not None:
+                lb[k] = r[k]
         for blk in (lb, cb, total):
             blk["revenue"] += rev
             blk["product_revenue"] += prod_rev

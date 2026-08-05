@@ -1,5 +1,5 @@
 // Dashboard.tsx — 대시보드 페이지 (Sprint 3)
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ComposedChart,
   Bar,
@@ -24,7 +24,9 @@ import {
   type GroupedSummaryRow,
   type GroupedTrendPoint,
   type ProductRanking,
+  type RocketBasis,
 } from "../lib/api";
+import { RocketBasisToggle } from "../components/RocketBasisToggle";
 
 type PeriodType = "daily" | "weekly" | "monthly";
 type SortBy = "revenue" | "net_profit" | "profit_rate";
@@ -269,6 +271,9 @@ function ChannelTrendChart({
 export default function Dashboard() {
   const defaults = getDefaultDateRange();
   const [period, setPeriod] = useState<PeriodType>("daily");
+  // 로켓배송 1P 매출 축. 기본은 계산서(회계 정본) — 바꾸면 로켓 leaf 매출이 크게 달라진다
+  // (실측 2026-08-04: 계산서 1,578,000 vs 판매 3,885,820). 두 축은 택일이며 합산하지 않는다.
+  const [rocketBasis, setRocketBasis] = useState<RocketBasis>("settlement");
   const [dateFrom, setDateFrom] = useState(defaults.from);
   const [dateTo, setDateTo] = useState(defaults.to);
 
@@ -281,17 +286,29 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
 
+  // ★응답 순서 역전 방어 (2026-08-05 라이브 재현).
+  //   조회 조건(기간·매출 축)을 바꾸면 새 요청이 나가는데, **앞 요청이 더 늦게 도착할 수 있다.**
+  //   실제로 그랬다: 첫 로드가 콜드 동기화로 63초 걸리는 사이 매출 축을 토글하니 판매 축 응답
+  //   (0.1초)이 먼저 와서 화면에 그려졌고, 뒤늦게 도착한 계산서 축 응답이 그것을 **덮어썼다**.
+  //   증상은 "눌렀는데 안 바뀐다"지만 진짜 위험은 그게 아니다 — 라벨은 「판매」인데 값은 계산서라
+  //   **틀린 축의 숫자를 맞다고 믿게 된다.**
+  //   세대 카운터로 막는다: 응답이 도착했을 때 내가 최신 요청이 아니면 결과를 **버린다**.
+  const fetchGen = useRef(0);
+
   const fetchAll = useCallback(async () => {
+    const gen = ++fetchGen.current;
     setLoading(true);
     try {
       const params = `date_from=${dateFrom}&date_to=${dateTo}`;
+      const rb = `rocket_basis=${rocketBasis}`;
       const [kpiData, trendData, channelData, channelTrendData, productData] = await Promise.all([
         fetchApi<KpiData>(`/api/dashboard/kpi?${params}`),
         fetchApi<TrendItem[]>(`/api/dashboard/trend?period=${period}&${params}`),
-        fetchApi<GroupedSummaryRow[]>(`/api/dashboard/channel-breakdown?${params}`),
-        fetchApi<GroupedTrendPoint[]>(`/api/dashboard/trend-by-channel?${params}`),
+        fetchApi<GroupedSummaryRow[]>(`/api/dashboard/channel-breakdown?${params}&${rb}`),
+        fetchApi<GroupedTrendPoint[]>(`/api/dashboard/trend-by-channel?${params}&${rb}`),
         fetchApi<ProductRanking[]>(`/api/dashboard/product-ranking?${params}&sort_by=${sortBy}&limit=20`),
       ]);
+      if (gen !== fetchGen.current) return;   // 뒤처진 응답 — 최신 화면을 덮지 않는다
       setKpi(parseNumbers(kpiData));
       setTrend(parseList(trendData));
       setChannels(parseList(channelData));
@@ -300,16 +317,26 @@ export default function Dashboard() {
     } catch {
       // keep previous data on error
     } finally {
-      setLoading(false);
+      // 뒤처진 응답이 최신 요청의 로딩 표시를 끄면 "다 됐다"로 잘못 보인다
+      if (gen === fetchGen.current) setLoading(false);
     }
-  }, [dateFrom, dateTo, period, sortBy]);
+  }, [dateFrom, dateTo, period, sortBy, rocketBasis]);
+
+  // ★항상 **최신** fetchAll을 부르기 위한 ref (2026-08-05 라이브 재현).
+  //   마운트 이펙트가 `syncAndRefresh`를 빈 의존성으로 잡고 있어, 그 클로저 안의 fetchAll은
+  //   **마운트 시점의 조회 조건**(매출 축=계산서)에 고정된다. syncRealtime()이 느리게 끝난 뒤
+  //   그 낡은 클로저가 실행되면, 사용자가 이미 「판매」로 바꾼 뒤인데도 **계산서 요청을 새로 쏘고**
+  //   그게 최신 응답이 되어 화면을 덮는다. 세대 카운터로는 못 막는다 — 늦게 출발했으니
+  //   정당하게 최신 세대다. 조건 자체가 낡은 게 문제이므로 ref로 최신 함수를 부른다.
+  const fetchAllRef = useRef(fetchAll);
+  useEffect(() => { fetchAllRef.current = fetchAll; }, [fetchAll]);
 
   const syncAndRefresh = useCallback(async () => {
     setSyncing(true);
     try { await syncRealtime(); } catch { /* fail-soft */ }
     setSyncing(false);
-    fetchAll();
-  }, [fetchAll]);
+    fetchAllRef.current();
+  }, []);
 
   // 접속/마운트 시 1회 실시간 동기화 후 데이터 로드
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -439,6 +466,7 @@ export default function Dashboard() {
 
       {/* Period selector + date range */}
       <div className="flex flex-wrap items-center gap-3 mb-6">
+        <RocketBasisToggle value={rocketBasis} onChange={setRocketBasis} rows={channels} />
         <div className="flex bg-gray-100 rounded-lg p-0.5">
           {(Object.keys(PERIOD_LABELS) as PeriodType[]).map((p) => (
             <button

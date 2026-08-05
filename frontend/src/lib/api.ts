@@ -458,7 +458,14 @@ export interface GroupedSummaryRow extends Record<string, unknown> {
   net_profit: number | null;  // null = 위탁(로켓배송) leaf/회사
   profit_rate: number | null;
   order_count: number;
+  // ── 로켓배송 1P leaf에만 붙는다(다른 채널은 축이 하나뿐) ──
+  revenue_basis?: string;   // "settlement"(계산서) | "sales"(판매분석)
+  cost_coverage?: number;   // 0~1. 판매 축에서 원가가 붙은 매출의 비율
+  promo_burden?: number | null;  // null = 원천 미배포(=모름). 0과 다르다
 }
+
+// 로켓배송 1P 매출 축 — 계산서(회계 정본) vs 판매분석(운영 지표). **택일**이다.
+export type RocketBasis = "settlement" | "sales";
 
 export interface GroupedTrendPoint extends Record<string, unknown> {
   group: string;
