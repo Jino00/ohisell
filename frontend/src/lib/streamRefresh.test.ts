@@ -11,7 +11,9 @@ import {
   RG_STREAM_SPECS,
   ALL_REFRESH_SPECS,
   withRequestRetry,
+  isRetryableRequestError,
   REQUEST_RETRY_DELAYS_MS,
+  POLL_FAILURE_LIMIT,
   type RefreshStatusLike,
   type StreamRefreshSpec,
   type RefreshOutcome,
@@ -273,6 +275,83 @@ describe("isLoginRequired / specsForKeys", () => {
   });
 });
 
+// ── 폴링 중 getStatus 실패 방어(P1-6, 2026-08-05 적대 리뷰) ─────────────────
+// ★사고 재현 시나리오: '전체 갱신' 클릭 → POST 성공 → 폴링 도중 prod 순간 502 → 옛 코드는
+// try/catch가 없어 이 reject가 runStreamRefresh 전체를 즉시 reject시켰다. Mac은 실제로
+// 수집을 완료하는데 화면은 "❌ 실패"로 영구 확정된다. 아래는 그 결함이 되돌아오면 즉시
+// 터지도록 고정한 회귀 테스트다.
+describe("runStreamRefresh — 폴링 중 getStatus 방어(P1-6)", () => {
+  it("폴 중 1회 reject해도 이후 폴에서 정착하면 최종 done", async () => {
+    let calls = 0;
+    const spec: StreamRefreshSpec = {
+      key: "t", label: "테스트", account: "오하이테크(A01029796)",
+      getStatus: async () => {
+        calls += 1;
+        if (calls === 1) return S({ last_success_at: "T0" }); // baseline(루프 진입 전)
+        if (calls === 2) throw new Error("일시적 502 Bad Gateway"); // 첫 폴에서만 reject
+        return S({ last_success_at: "T1", requested: false }); // 다음 폴에서 성공 확인
+      },
+      request: async () => {},
+    };
+    expect(await runStreamRefresh(spec, fakeClock())).toEqual({ state: "done" });
+    expect(calls).toBe(3);
+  });
+
+  it("연속이 아니라 간헐적으로 reject하면(상한을 다 채우지 않으면) 여전히 done으로 정착한다", async () => {
+    let calls = 0;
+    const spec: StreamRefreshSpec = {
+      key: "t", label: "테스트", account: "오하이테크(A01029796)",
+      getStatus: async () => {
+        calls += 1;
+        if (calls === 1) return S({ last_success_at: "T0" }); // baseline
+        // 폴 1,3,5,7... 회차는 reject, 짝수 회차는 성공 응답 — 연속 실패는 최대 1회뿐이라
+        // POLL_FAILURE_LIMIT(연속 기준)에 걸리지 않는다.
+        if (calls % 2 === 0) throw new Error("간헐적 네트워크 오류");
+        if (calls < 9) return S({ last_success_at: "T0", requested: true }); // 아직 진행 중
+        return S({ last_success_at: "T1", requested: false }); // 마지막에 성공
+      },
+      request: async () => {},
+    };
+    expect(await runStreamRefresh(spec, fakeClock())).toEqual({ state: "done" });
+  });
+
+  it("★연속 POLL_FAILURE_LIMIT회 실패하면 failed로 확정한다(무한히 삼키지 않는다)", async () => {
+    let calls = 0;
+    const spec: StreamRefreshSpec = {
+      key: "t", label: "테스트", account: "오하이테크(A01029796)",
+      getStatus: async () => {
+        calls += 1;
+        if (calls === 1) return S({ last_success_at: "T0" }); // baseline
+        throw new Error("Mac 꺼짐 — 계속 실패");
+      },
+      request: async () => {},
+    };
+    const result = await runStreamRefresh(spec, fakeClock());
+    expect(result.state).toBe("failed");
+    if (result.state === "failed") expect(result.reason).toContain("Mac 꺼짐");
+    expect(calls).toBe(1 + POLL_FAILURE_LIMIT); // baseline 1회 + 연속 폴 실패 N회
+  });
+
+  it("★성공이 연속 실패 카운터를 리셋한다 — 두 실패 구간이 합쳐지지 않는다", async () => {
+    // 1차 구간 4연속 실패(상한 미만) → 성공 1회(리셋돼야 함) → 2차 구간 4연속 실패.
+    // 리셋이 없었다면 누적 8회가 5회 상한을 2차 구간 도중 넘겨 failed로 잘못 끝났을 것이다.
+    let calls = 0;
+    const spec: StreamRefreshSpec = {
+      key: "t", label: "테스트", account: "오하이테크(A01029796)",
+      getStatus: async () => {
+        calls += 1;
+        if (calls === 1) return S({ last_success_at: "T0" }); // baseline
+        if (calls >= 2 && calls <= 5) throw new Error("1차 실패 구간");
+        if (calls === 6) return S({ last_success_at: "T0", requested: true }); // 성공 — 리셋 지점
+        if (calls >= 7 && calls <= 10) throw new Error("2차 실패 구간");
+        return S({ last_success_at: "T1", requested: false }); // 정착
+      },
+      request: async () => {},
+    };
+    expect(await runStreamRefresh(spec, fakeClock())).toEqual({ state: "done" });
+  });
+});
+
 describe("타입 계약", () => {
   it("RefreshOutcome는 세 상태뿐 — 새 상태를 늘리면 호출자 분기가 조용히 빠진다", () => {
     const outcomes: RefreshOutcome[] = [
@@ -327,6 +406,60 @@ describe("withRequestRetry", () => {
       { sleep, onRetry: (retry) => seen.push(retry) },
     );
     expect(seen).toEqual([1, 2]);
+  });
+
+  // ── 재시도 불가 오류는 즉시 포기(P2-3, 2026-08-05 적대 리뷰) ─────────────
+  it("4xx(예: 400)는 재시도하지 않고 즉시 포기한다", async () => {
+    let calls = 0;
+    await expect(
+      withRequestRetry(async () => { calls += 1; throw new Error("API error 400: 잘못된 요청"); }, { sleep }),
+    ).rejects.toThrow("API error 400");
+    expect(calls).toBe(1);
+  });
+
+  it("401 + 로그인 필요 문구는 재시도하지 않는다", async () => {
+    let calls = 0;
+    await expect(
+      withRequestRetry(
+        async () => { calls += 1; throw new Error("API error 401: [로그인 필요 — 재시도 안 함]"); },
+        { sleep },
+      ),
+    ).rejects.toThrow();
+    expect(calls).toBe(1);
+  });
+
+  it("5xx는 여전히 재시도한다(일시적 문제일 가능성이 높다)", async () => {
+    let calls = 0;
+    const r = await withRequestRetry(
+      async () => {
+        calls += 1;
+        if (calls < 2) throw new Error("API error 502: Bad Gateway");
+        return "ok";
+      },
+      { sleep },
+    );
+    expect(r).toBe("ok");
+    expect(calls).toBe(2);
+  });
+});
+
+describe("isRetryableRequestError — 재시도 대상 판정(P2-3)", () => {
+  it("4xx(400/401)는 재시도 대상이 아니다", () => {
+    expect(isRetryableRequestError(new Error("API error 400: 잘못된 요청"))).toBe(false);
+    expect(isRetryableRequestError(new Error("API error 401: 인증 실패"))).toBe(false);
+  });
+
+  it("5xx는 재시도 대상이다", () => {
+    expect(isRetryableRequestError(new Error("API error 502: Bad Gateway"))).toBe(true);
+    expect(isRetryableRequestError(new Error("API error 503: Service Unavailable"))).toBe(true);
+  });
+
+  it("상태 코드가 없는 오류(네트워크 끊김 등)는 일시적 문제로 보고 재시도 대상이다", () => {
+    expect(isRetryableRequestError(new Error("Failed to fetch"))).toBe(true);
+  });
+
+  it("로그인 필요 문구는 상태 코드와 무관하게 재시도 대상이 아니다", () => {
+    expect(isRetryableRequestError(new Error("… [로그인 필요 — 재시도 안 함]"))).toBe(false);
   });
 });
 

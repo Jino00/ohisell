@@ -31,25 +31,22 @@ import {
   ALL_REFRESH_SPECS,
   isLoginRequired,
   runStreamsRefresh,
+  REQUEST_RETRY_DELAYS_MS,
   type RefreshOutcome,
 } from "../lib/streamRefresh";
+import {
+  loadBulkRefreshState,
+  saveBulkRefreshState,
+  type BulkQueueState,
+} from "../lib/bulkRefreshPersistence";
 
 type PeriodType = "daily" | "weekly" | "monthly";
 type SortBy = "revenue" | "net_profit" | "profit_rate";
 
-/**
- * '전체 갱신' 패널이 큐 하나에 대해 보여주는 상태.
- * 앞 세 가지는 streamRefresh의 RefreshPhase와 같은 모양이라 그대로 받아 쓴다(변환 없음).
- * ★단계를 굳이 나눈 이유: "요청이 안 갔다"와 "Mac이 안 받는다"와 "수집하다 실패했다"는
- *   처방이 전부 다른데, 예전 화면은 셋 다 똑같이 아무 말이 없었다.
- */
-type BulkQueueState =
-  | { kind: "requesting"; retry: number; maxRetries: number }
-  | { kind: "requested" }
-  | { kind: "fetching" }
-  | { kind: "done"; at: string }
-  | { kind: "failed"; reason: string; login: boolean }
-  | { kind: "timeout" };
+// '전체 갱신' 패널이 큐 하나에 대해 보여주는 상태(BulkQueueState)는 lib/bulkRefreshPersistence
+// 로 옮겼다 — sessionStorage 복원 로직과 같은 파일에 있어야 "stale" 분기가 갈라지지 않는다.
+// ★단계를 굳이 나눈 이유: "요청이 안 갔다"와 "Mac이 안 받는다"와 "수집하다 실패했다"는
+//   처방이 전부 다른데, 예전 화면은 셋 다 똑같이 아무 말이 없었다.
 
 /** 큐 상태 → 화면 한 줄(아이콘·문구). 실패 사유는 자르지 않고 그대로 보인다. */
 function bulkStateText(st: BulkQueueState | undefined): { icon: string; text: string; tone: string } {
@@ -71,6 +68,17 @@ function bulkStateText(st: BulkQueueState | undefined): { icon: string; text: st
         : { icon: "❌", text: `실패 — ${st.reason}`, tone: "text-red-700" };
     case "timeout":
       return { icon: "⚠️", text: "응답 없음 — Mac이 켜져 있는지 확인하세요", tone: "text-amber-700" };
+    case "stale": {
+      // ★P1-7: 페이지를 벗어났다 돌아온 큐 — 폴링이 언마운트로 끊겨 지금 상태를 모른다.
+      //   "수집 중"으로 계속 보이면 그것도 거짓말이므로, 추적이 끊겼다는 사실만 말한다.
+      const phaseLabel =
+        st.lastPhase === "fetching" ? "Mac이 수집 중" : st.lastPhase === "requested" ? "요청 전달됨" : "요청 전송";
+      return {
+        icon: "❓",
+        text: `이 탭에서 진행 상황을 더는 추적하지 않음(창을 벗어나기 전: ${phaseLabel}) — 전체 갱신을 다시 누르면 확인됩니다`,
+        tone: "text-gray-500",
+      };
+    }
   }
 }
 
@@ -388,11 +396,26 @@ export default function Dashboard() {
   //   **어느 단계에서 죽었는지 화면이 말해주지 않는다**였다. 요청 POST 유실·Mac 데몬 다운·
   //   로그인 만료는 처방이 전부 다른데 증상이 똑같이 "아무 일도 안 일어남"으로 보였다.
   //   그래서 큐별로 단계를 보이고, **실패는 지우지 않는다**(성공만 자동으로 접는다).
-  const [bulkStates, setBulkStates] = useState<Record<string, BulkQueueState>>({});
+  // ★P1-7: 초기값을 sessionStorage에서 복원한다 — 페이지 이동/새로고침으로 이 컴포넌트가
+  //   사라져도(마운트 전이라 폴링과 무관) 마지막 결과가 화면에 남는다. 진행 중이던 단계는
+  //   loadBulkRefreshState가 이미 "stale"로 바꿔서 준다(추적 끊김을 숨기지 않는다).
+  const [bulkStates, setBulkStates] = useState<Record<string, BulkQueueState>>(
+    () => loadBulkRefreshState()?.states ?? {},
+  );
   const [bulkRunning, setBulkRunning] = useState(false);
-  const [bulkPanelOpen, setBulkPanelOpen] = useState(false);
+  const [bulkPanelOpen, setBulkPanelOpen] = useState<boolean>(
+    () => loadBulkRefreshState()?.panelOpen ?? false,
+  );
+  // ★P2-4: 수집 뒤 화면 동기화(syncRealtime)가 실패해도 완전 침묵하지 않는다 — 패널에 한 줄 남긴다.
+  const [bulkSyncWarning, setBulkSyncWarning] = useState<string | null>(null);
   const bulkRunSeq = useRef(0);
   const bulkCollapseTimer = useRef<number | undefined>(undefined);
+
+  // ★P1-7: bulkStates/bulkPanelOpen이 바뀔 때마다 sessionStorage에 미러링한다(가장 작은 변경 —
+  //   컴포넌트가 사라지는 시점을 따로 잡을 필요 없이, 마지막으로 반영된 상태가 항상 저장돼 있다).
+  useEffect(() => {
+    saveBulkRefreshState(bulkStates, bulkPanelOpen);
+  }, [bulkStates, bulkPanelOpen]);
 
   const runBulkRefresh = useCallback(async () => {
     const gen = ++bulkRunSeq.current;
@@ -401,9 +424,13 @@ export default function Dashboard() {
 
     setBulkRunning(true);
     setBulkPanelOpen(true);
+    setBulkSyncWarning(null);
     setBulkStates(
       Object.fromEntries(
-        ALL_REFRESH_SPECS.map((s) => [s.key, { kind: "requesting", retry: 0, maxRetries: 3 } as BulkQueueState]),
+        ALL_REFRESH_SPECS.map((s) => [
+          s.key,
+          { kind: "requesting", retry: 0, maxRetries: REQUEST_RETRY_DELAYS_MS.length } as BulkQueueState,
+        ]),
       ),
     );
 
@@ -435,6 +462,8 @@ export default function Dashboard() {
       );
     } catch (e: any) {
       // runStreamsRefresh는 스트림별로 catch하므로 여기까지 오는 건 예상 밖이다 — 삼키지 않는다.
+      // ★P2-1: __fatal은 ALL_REFRESH_SPECS.map 밖의 값이라 예전엔 렌더가 안 됐다 — 아래 패널에
+      //   별도 줄로 실제로 보인다(제거 대신 표시를 택함: 예상 밖 오류를 조용히 지우지 않는다).
       if (alive()) {
         setBulkRunning(false);
         setBulkStates((prev) => ({ ...prev, __fatal: { kind: "failed", reason: e?.message || "알 수 없는 오류", login: false } }));
@@ -446,13 +475,21 @@ export default function Dashboard() {
     setBulkRunning(false);
 
     // 서버측 주문 동기화는 Mac이 필요 없는 공짜 호출 — 수집이 끝난 뒤 한 번 돌려 화면까지 최신으로.
-    try { await syncRealtime(); } catch { /* fail-soft */ }
+    // ★P2-4: 실패해도 완전 침묵하지 않는다 — 전건 수집 성공이어도 화면이 안 최신일 수 있으므로
+    //   패널에 경고를 남기고, 그 경우 자동 접힘도 하지 않는다.
+    let syncOk = true;
+    try { await syncRealtime(); } catch { syncOk = false; }
     if (!alive()) return;
+    if (!syncOk) {
+      setBulkSyncWarning(
+        "화면 동기화 실패 — 방금 수집한 데이터가 화면에 아직 반영되지 않았을 수 있습니다. '새로고침'을 다시 눌러 확인하세요.",
+      );
+    }
     fetchAllRef.current();
 
     // ★전건 성공일 때만 패널을 접는다. 하나라도 실패하면 남긴다 — 사라지는 실패가 이 사고의 본질이었다.
     const allDone = ALL_REFRESH_SPECS.every((s) => results.get(s.key)?.state === "done");
-    if (allDone) {
+    if (allDone && syncOk) {
       bulkCollapseTimer.current = window.setTimeout(() => {
         if (alive()) setBulkPanelOpen(false);
       }, 6000);
@@ -570,7 +607,21 @@ export default function Dashboard() {
                 </li>
               );
             })}
+            {/* ★P2-1: 예상 밖 오류(__fatal)는 ALL_REFRESH_SPECS 밖의 값이라 위 목록엔 안 뜬다 —
+                여기서 별도로 표시해 조용히 사라지지 않게 한다. */}
+            {bulkStates.__fatal && (
+              <li className="flex items-start gap-2 text-sm">
+                <span className="shrink-0 w-5 text-center">{bulkStateText(bulkStates.__fatal).icon}</span>
+                <span className="shrink-0 w-40 text-gray-700">전체 갱신 자체 오류</span>
+                <span className={`min-w-0 ${bulkStateText(bulkStates.__fatal).tone}`}>
+                  {bulkStateText(bulkStates.__fatal).text}
+                </span>
+              </li>
+            )}
           </ul>
+          {bulkSyncWarning && (
+            <div className="mt-2 text-xs text-amber-700">⚠️ {bulkSyncWarning}</div>
+          )}
           {!bulkRunning && (
             <div className="mt-2 text-xs text-gray-500">
               실패한 항목은 다시 <b>전체 갱신</b>을 누르면 재시도됩니다. 로그인 필요 표시가 뜨면
