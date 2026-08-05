@@ -1580,12 +1580,19 @@ export function fetchNaverSalesSummary(days: number): Promise<NaverSalesSummary>
 }
 
 // ── GFA(디스플레이) 광고비 현황·업로드 ───────────────────────────
-export interface GfaStatus {
+export interface GfaSpan {
   has_data: boolean;
   date_from: string | null;
   date_to: string | null;
   days: number;
   total_spend: number;
+}
+/** 최상위 = 자동+수동 합산 축 전체(신선도 판정 대상).
+ *  auto = 비즈머니 실차감 API 자동 적재(매일 07:10 KST) · manual = 수동 CSV. */
+export interface GfaStatus extends GfaSpan {
+  auto: GfaSpan;
+  manual: GfaSpan;
+  by_source: (GfaSpan & { source: string })[];
 }
 
 export function fetchGfaStatus(): Promise<GfaStatus> {

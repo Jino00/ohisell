@@ -796,36 +796,45 @@ export default function NaverOps() {
         )}
       </div>
 
-      {/* 디스플레이(GFA) 광고비 신선도 배지 + 업로드 */}
+      {/* 디스플레이(GFA·ADVoost) 광고비 신선도 배지 + 수동 보정 업로드 */}
       {(() => {
-        const ago = daysSince(gfa?.date_to);
+        // 판정은 **축 전체(gfa:%)의 최신일**로 한다. 소스별로 보면 소진 0인 날(행 미생성)을
+        // 수집 실패로 오탐한다 — 2026-08-05가 실제로 그런 날(PMAX 0, GFA만 적재)이었다.
+        const latest = gfa?.date_to ?? null;
+        const ago = daysSince(latest);
         const stale = ago == null || ago >= 2;   // 어제(1일)까지는 정상(당일 데이터는 미제공)
+        const bySource = (gfa?.by_source ?? []).filter((s) => s.date_to);
         return (
           <div className={`flex flex-wrap items-center gap-3 mb-6 px-4 py-3 rounded-lg border ${
             stale ? "border-red-300 bg-red-50" : "border-green-200 bg-green-50"
           }`}>
-            <span className="text-sm font-medium text-gray-700">디스플레이 광고비(GFA)</span>
-            {gfa?.date_to ? (
+            <span className="text-sm font-medium text-gray-700">디스플레이 광고비(GFA·ADVoost)</span>
+            {latest ? (
               <span className={`text-sm ${stale ? "text-red-600 font-semibold" : "text-green-700"}`}>
-                마지막 업로드: {gfa.date_to}
+                최신 데이터: {latest}
                 {ago != null && ago > 0 && ` (${ago}일 전)`}
-                {stale ? " ⚠️ 업데이트 필요" : " ✓ 최신"}
+                {stale ? " ⚠️ 수집 확인 필요" : " ✓ 최신"}
               </span>
             ) : (
-              <span className="text-sm text-red-600 font-semibold">데이터 없음 ⚠️ CSV 업로드 필요</span>
+              <span className="text-sm text-red-600 font-semibold">데이터 없음 ⚠️ 수집 확인 필요</span>
             )}
             <button
               onClick={() => gfaFileRef.current?.click()}
               disabled={gfaUploading}
-              className="ml-auto px-3 py-1.5 text-sm rounded-md bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
-            >{gfaUploading ? "업로드 중…" : "📤 CSV 업로드"}</button>
+              className="ml-auto px-3 py-1.5 text-sm rounded-md border border-gray-300 bg-white text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+            >{gfaUploading ? "업로드 중…" : "📤 CSV 수동 보정"}</button>
             <input
               ref={gfaFileRef} type="file" accept=".csv"
               onChange={handleGfaUpload} className="hidden"
             />
             {gfaMsg && <span className="w-full text-xs text-gray-600">{gfaMsg}</span>}
             <span className="w-full text-xs text-gray-400">
-              네이버 광고주센터 → 보고서 → 광고비 보고서 CSV 다운로드 후 업로드 (API 미제공으로 수동)
+              비즈머니 실차감 API로 <strong className="font-medium">매일 07:10 자동 수집</strong>(어제치).
+              소진이 0인 날은 행이 생기지 않는 것이 정상.
+              {bySource.length > 0 && (
+                <> {"· "}{bySource.map((s) => `${s.source.replace("gfa:", "")} ~${s.date_to}`).join(" · ")}</>
+              )}
+              {" · CSV 업로드는 자동 수집 이전 구간(~2026-06-04) 보정용."}
             </span>
           </div>
         );

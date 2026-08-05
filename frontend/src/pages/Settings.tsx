@@ -1,6 +1,6 @@
 // Settings.tsx — 채널 연동 상태 + 동기화 관리 페이지
 import { useCallback, useEffect, useRef, useState } from "react";
-import { fetchApi } from "../lib/api";
+import { fetchApi, type GfaStatus } from "../lib/api";
 
 interface ChannelStatus {
   channel_id: number;
@@ -81,13 +81,8 @@ interface GfaUploadResult {
   recalculation_triggered: boolean;
 }
 
-interface GfaStatus {
-  has_data: boolean;
-  date_from: string | null;
-  date_to: string | null;
-  days: number;
-  total_spend: number;
-}
+// GfaStatus는 api.ts의 정의를 그대로 쓴다 — 여기 사본을 두면 by_source 같은 필드가
+// 추가돼도 이 화면만 낡은 채로 남는다(이 파일이 실제로 그랬다).
 
 interface CoupangAdUploadResult {
   vendor_id: string;
@@ -621,8 +616,13 @@ export default function Settings() {
           <div className="flex items-center gap-2">
             <span className="text-lg">🟢</span>
             <span className="font-medium text-gray-900">GFA · ADVoost 쇼핑</span>
-            <span className="px-2 py-0.5 text-xs rounded-full bg-gray-100 text-gray-600">CSV 업로드</span>
+            <span className="px-2 py-0.5 text-xs rounded-full bg-green-100 text-green-700">자동 수집 07:10</span>
+            <span className="px-2 py-0.5 text-xs rounded-full bg-gray-100 text-gray-600">CSV = 과거 보정용</span>
           </div>
+          <p className="text-xs text-gray-500">
+            2026-08-03부터 비즈머니 실차감 API로 매일 자동 적재됩니다(어제치).
+            이 업로드는 자동 수집 이전 구간(~2026-06-04)을 메우거나 값을 덮어쓸 때만 쓰세요.
+          </p>
 
           {/* 드래그앤드롭 존 */}
           <div
@@ -684,15 +684,24 @@ export default function Settings() {
             }`}>
               {gfaStatus.has_data ? (
                 <>
-                  <span className="font-medium">현재 적재된 GFA 데이터:</span>{" "}
-                  {gfaStatus.date_from} ~ {gfaStatus.date_to}
-                  <span className="mx-1 text-blue-400">·</span>
-                  {gfaStatus.days}일치
-                  <span className="mx-1 text-blue-400">·</span>
-                  총 {gfaStatus.total_spend.toLocaleString("ko-KR")}원
+                  <div>
+                    <span className="font-medium">현재 적재된 디스플레이 광고비(자동+수동):</span>{" "}
+                    {gfaStatus.date_from} ~ {gfaStatus.date_to}
+                    <span className="mx-1 text-blue-400">·</span>
+                    {gfaStatus.days}일치
+                    <span className="mx-1 text-blue-400">·</span>
+                    총 {gfaStatus.total_spend.toLocaleString("ko-KR")}원
+                  </div>
+                  {gfaStatus.by_source?.map((s) => (
+                    <div key={s.source} className="mt-0.5 text-blue-500">
+                      · {s.source === "gfa:쇼핑" ? "수동 CSV" : `자동 ${s.source.replace("gfa:", "")}`}{" "}
+                      {s.date_from} ~ {s.date_to} · {s.days}일 ·{" "}
+                      {s.total_spend.toLocaleString("ko-KR")}원
+                    </div>
+                  ))}
                 </>
               ) : (
-                "아직 적재된 GFA 데이터가 없습니다."
+                "아직 적재된 디스플레이 광고비 데이터가 없습니다."
               )}
             </div>
           )}

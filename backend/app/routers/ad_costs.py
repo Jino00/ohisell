@@ -116,15 +116,25 @@ def ad_spend_by_option(
     )
 
 
-@router.get("/gfa/status")
-def get_gfa_status(db: Session = Depends(get_db)):
-    """현재 DB에 적재된 GFA 광고비 현황 반환."""
+# 디스플레이 광고비 축의 source 계열.
+#   `gfa:쇼핑`   = 수동 CSV(2026-06-04에 멈춤 — 종전 유일 경로)
+#   `gfa:advoost`·`gfa:da` = 비즈머니 실차감 API 자동 적재(2026-08-03~, 매일 07:10 KST)
+# 신선도는 **계열 전체의 MAX(ad_date)**로 판정한다. 왜냐하면 소진이 0인 날은
+# naver_display_ad_costs가 행을 만들지 않으므로(음수/0 광고비 방지) 소스 하나만 보면
+# "그날 PMAX를 안 썼다"를 "수집이 죽었다"로 오탐한다 — 실제 2026-08-05가 그런 날이었다.
+_GFA_AUTO_SOURCES = ("gfa:advoost", "gfa:da")
+_GFA_MANUAL_SOURCE = "gfa:쇼핑"
+
+
+def _gfa_span(db: Session, where: str, params: dict) -> dict:
+    """ad_costs의 특정 source 집합에 대한 적재 구간 요약."""
     row = db.execute(
-        text("""
-            SELECT MIN(ad_date), MAX(ad_date), COUNT(*), COALESCE(SUM(ad_spend), 0)
+        text(f"""
+            SELECT MIN(ad_date), MAX(ad_date), COUNT(DISTINCT ad_date), COALESCE(SUM(ad_spend), 0)
             FROM ad_costs
-            WHERE source = 'gfa:쇼핑'
-        """)
+            WHERE {where}
+        """),
+        params,
     ).fetchone()
     if not row or row[0] is None:
         return {"has_data": False, "date_from": None, "date_to": None, "days": 0, "total_spend": 0}
@@ -135,6 +145,44 @@ def get_gfa_status(db: Session = Depends(get_db)):
         "days": int(row[2]),
         "total_spend": int(row[3]),
     }
+
+
+@router.get("/gfa/status")
+def get_gfa_status(db: Session = Depends(get_db)):
+    """디스플레이(GFA·ADVoost) 광고비 적재 현황.
+
+    최상위 필드는 **자동+수동 합산 축 전체**다(화면 신선도 배지의 판정 대상).
+    `auto`/`manual`/`by_source`로 경로별 내역을 함께 준다 — 자동 수집이 도는데도
+    수동 업로드일만 보고 빨간 배너를 띄우던 것이 이 엔드포인트의 원래 결함이었다.
+    """
+    auto_ph = {f"a{i}": s for i, s in enumerate(_GFA_AUTO_SOURCES)}
+    auto_in = ", ".join(f":{k}" for k in auto_ph)
+
+    out = _gfa_span(db, "source LIKE 'gfa:%'", {})
+    out["auto"] = _gfa_span(db, f"source IN ({auto_in})", auto_ph)
+    out["manual"] = _gfa_span(db, "source = :src", {"src": _GFA_MANUAL_SOURCE})
+
+    rows = db.execute(
+        text("""
+            SELECT source, MIN(ad_date), MAX(ad_date), COUNT(DISTINCT ad_date),
+                   COALESCE(SUM(ad_spend), 0)
+            FROM ad_costs
+            WHERE source LIKE 'gfa:%'
+            GROUP BY source
+            ORDER BY source
+        """)
+    ).fetchall()
+    out["by_source"] = [
+        {
+            "source": r[0],
+            "date_from": r[1],
+            "date_to": r[2],
+            "days": int(r[3]),
+            "total_spend": int(r[4]),
+        }
+        for r in rows
+    ]
+    return out
 
 
 def _recalc_profit_background(date_from: date, date_to: date) -> None:
