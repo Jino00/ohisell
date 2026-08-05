@@ -27,9 +27,52 @@ import {
   type RocketBasis,
 } from "../lib/api";
 import { RocketBasisToggle } from "../components/RocketBasisToggle";
+import {
+  ALL_REFRESH_SPECS,
+  isLoginRequired,
+  runStreamsRefresh,
+  type RefreshOutcome,
+} from "../lib/streamRefresh";
 
 type PeriodType = "daily" | "weekly" | "monthly";
 type SortBy = "revenue" | "net_profit" | "profit_rate";
+
+/**
+ * '전체 갱신' 패널이 큐 하나에 대해 보여주는 상태.
+ * 앞 세 가지는 streamRefresh의 RefreshPhase와 같은 모양이라 그대로 받아 쓴다(변환 없음).
+ * ★단계를 굳이 나눈 이유: "요청이 안 갔다"와 "Mac이 안 받는다"와 "수집하다 실패했다"는
+ *   처방이 전부 다른데, 예전 화면은 셋 다 똑같이 아무 말이 없었다.
+ */
+type BulkQueueState =
+  | { kind: "requesting"; retry: number; maxRetries: number }
+  | { kind: "requested" }
+  | { kind: "fetching" }
+  | { kind: "done"; at: string }
+  | { kind: "failed"; reason: string; login: boolean }
+  | { kind: "timeout" };
+
+/** 큐 상태 → 화면 한 줄(아이콘·문구). 실패 사유는 자르지 않고 그대로 보인다. */
+function bulkStateText(st: BulkQueueState | undefined): { icon: string; text: string; tone: string } {
+  if (!st) return { icon: "·", text: "대기", tone: "text-gray-400" };
+  switch (st.kind) {
+    case "requesting":
+      return st.retry === 0
+        ? { icon: "◌", text: "요청 보내는 중…", tone: "text-gray-600" }
+        : { icon: "◌", text: `요청 재시도 ${st.retry}/${st.maxRetries}…`, tone: "text-amber-700" };
+    case "requested":
+      return { icon: "◔", text: "요청 전달됨 — Mac 대기 중", tone: "text-gray-600" };
+    case "fetching":
+      return { icon: "◕", text: "Mac이 수집 중…", tone: "text-blue-700" };
+    case "done":
+      return { icon: "✅", text: `완료 ${st.at}`, tone: "text-green-700" };
+    case "failed":
+      return st.login
+        ? { icon: "🔑", text: `로그인 필요 — ${st.reason}`, tone: "text-red-700" }
+        : { icon: "❌", text: `실패 — ${st.reason}`, tone: "text-red-700" };
+    case "timeout":
+      return { icon: "⚠️", text: "응답 없음 — Mac이 켜져 있는지 확인하세요", tone: "text-amber-700" };
+  }
+}
 
 const PERIOD_LABELS: Record<PeriodType, string> = {
   daily: "일별",
@@ -338,6 +381,86 @@ export default function Dashboard() {
     fetchAllRef.current();
   }, []);
 
+  // ── '전체 갱신' — 수동 수집 6큐를 한 번에 ────────────────────────────
+  // ★왜 버튼을 하나로 합쳤나(2026-08-05 Jino): 갱신 버튼이 5개 화면에 흩어져 있어 무엇을
+  //   눌러야 최신이 되는지 알 수 없었고, 하나라도 빠뜨리면 화면 숫자가 조용히 낡았다.
+  // ★왜 상태 패널이 본체인가: 같은 날 실사고의 정체는 "버튼이 안 눌린다"가 아니라
+  //   **어느 단계에서 죽었는지 화면이 말해주지 않는다**였다. 요청 POST 유실·Mac 데몬 다운·
+  //   로그인 만료는 처방이 전부 다른데 증상이 똑같이 "아무 일도 안 일어남"으로 보였다.
+  //   그래서 큐별로 단계를 보이고, **실패는 지우지 않는다**(성공만 자동으로 접는다).
+  const [bulkStates, setBulkStates] = useState<Record<string, BulkQueueState>>({});
+  const [bulkRunning, setBulkRunning] = useState(false);
+  const [bulkPanelOpen, setBulkPanelOpen] = useState(false);
+  const bulkRunSeq = useRef(0);
+  const bulkCollapseTimer = useRef<number | undefined>(undefined);
+
+  const runBulkRefresh = useCallback(async () => {
+    const gen = ++bulkRunSeq.current;
+    const alive = () => gen === bulkRunSeq.current;
+    window.clearTimeout(bulkCollapseTimer.current);
+
+    setBulkRunning(true);
+    setBulkPanelOpen(true);
+    setBulkStates(
+      Object.fromEntries(
+        ALL_REFRESH_SPECS.map((s) => [s.key, { kind: "requesting", retry: 0, maxRetries: 3 } as BulkQueueState]),
+      ),
+    );
+
+    const put = (key: string, st: BulkQueueState) => {
+      if (!alive()) return;
+      setBulkStates((prev) => ({ ...prev, [key]: st }));
+    };
+
+    let results: Map<string, RefreshOutcome>;
+    try {
+      results = await runStreamsRefresh(
+        ALL_REFRESH_SPECS,
+        (spec, outcome) => {
+          put(
+            spec.key,
+            outcome.state === "done"
+              ? { kind: "done", at: new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" }) }
+              : outcome.state === "failed"
+                ? { kind: "failed", reason: outcome.reason ?? "실패", login: isLoginRequired(outcome.reason) }
+                : { kind: "timeout" },
+          );
+        },
+        {
+          onPhase: (spec, phase) => {
+            // 진행 단계는 정착 전에만 흐른다 — 이미 결과가 난 큐를 되돌리지 않는다.
+            put(spec.key, phase as BulkQueueState);
+          },
+        },
+      );
+    } catch (e: any) {
+      // runStreamsRefresh는 스트림별로 catch하므로 여기까지 오는 건 예상 밖이다 — 삼키지 않는다.
+      if (alive()) {
+        setBulkRunning(false);
+        setBulkStates((prev) => ({ ...prev, __fatal: { kind: "failed", reason: e?.message || "알 수 없는 오류", login: false } }));
+      }
+      return;
+    }
+
+    if (!alive()) return;
+    setBulkRunning(false);
+
+    // 서버측 주문 동기화는 Mac이 필요 없는 공짜 호출 — 수집이 끝난 뒤 한 번 돌려 화면까지 최신으로.
+    try { await syncRealtime(); } catch { /* fail-soft */ }
+    if (!alive()) return;
+    fetchAllRef.current();
+
+    // ★전건 성공일 때만 패널을 접는다. 하나라도 실패하면 남긴다 — 사라지는 실패가 이 사고의 본질이었다.
+    const allDone = ALL_REFRESH_SPECS.every((s) => results.get(s.key)?.state === "done");
+    if (allDone) {
+      bulkCollapseTimer.current = window.setTimeout(() => {
+        if (alive()) setBulkPanelOpen(false);
+      }, 6000);
+    }
+  }, []);
+
+  useEffect(() => () => window.clearTimeout(bulkCollapseTimer.current), []);
+
   // 접속/마운트 시 1회 실시간 동기화 후 데이터 로드
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { syncAndRefresh(); }, []);
@@ -393,15 +516,69 @@ export default function Dashboard() {
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
         <h2 className="text-2xl font-bold text-gray-900">대시보드</h2>
-        <button
-          onClick={syncAndRefresh}
-          disabled={syncing}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
-        >
-          <span className={syncing ? "animate-spin" : ""}>🔄</span>
-          {syncing ? "동기화 중…" : "새로고침"}
-        </button>
+        <div className="flex items-center gap-2">
+          {/* ★'전체 갱신'과 '새로고침'은 다른 일이다: 전자는 Mac 페처를 깨워 **원천에서 새로
+              가져오고**(수분), 후자는 이미 들어온 데이터를 다시 그린다(수초). 라벨만으로는
+              구분이 안 되므로 title로 명시한다. */}
+          <button
+            onClick={runBulkRefresh}
+            disabled={bulkRunning}
+            title="쿠팡 수집 6큐를 모두 갱신합니다(Mac 페처가 원천에서 새로 가져옴, 수 분 소요)"
+            className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50"
+          >
+            <span className={bulkRunning ? "animate-spin" : ""}>⟳</span>
+            {bulkRunning ? "전체 갱신 중…" : "전체 갱신"}
+          </button>
+          <button
+            onClick={syncAndRefresh}
+            disabled={syncing}
+            title="화면 데이터만 다시 불러옵니다(수집은 하지 않음)"
+            className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+          >
+            <span className={syncing ? "animate-spin" : ""}>🔄</span>
+            {syncing ? "동기화 중…" : "새로고침"}
+          </button>
+        </div>
       </div>
+
+      {/* 전체 갱신 진행 패널 — ★실패는 자동으로 사라지지 않는다(전건 성공일 때만 접힌다).
+          "잠깐 떴다 사라진 에러"는 없는 에러와 같고, 그게 2026-08-05 사고의 인지 실패였다. */}
+      {bulkPanelOpen && (
+        <div className="mb-6 rounded-lg border border-gray-200 bg-white px-4 py-3">
+          <div className="flex items-center justify-between mb-2">
+            <div className="text-sm font-semibold text-gray-900">
+              전체 갱신 {bulkRunning ? "진행 중" : "결과"}
+            </div>
+            <button
+              onClick={() => setBulkPanelOpen(false)}
+              className="text-xs text-gray-500 hover:text-gray-800 underline"
+            >
+              닫기
+            </button>
+          </div>
+          <ul className="space-y-1">
+            {ALL_REFRESH_SPECS.map((spec) => {
+              const v = bulkStateText(bulkStates[spec.key]);
+              return (
+                <li key={spec.key} className="flex items-start gap-2 text-sm">
+                  <span className="shrink-0 w-5 text-center">{v.icon}</span>
+                  <span className="shrink-0 w-40 text-gray-700">
+                    {spec.label}
+                    <span className="text-gray-400 text-xs"> · {spec.account.replace(/\(.*\)/, "")}</span>
+                  </span>
+                  <span className={`min-w-0 ${v.tone}`}>{v.text}</span>
+                </li>
+              );
+            })}
+          </ul>
+          {!bulkRunning && (
+            <div className="mt-2 text-xs text-gray-500">
+              실패한 항목은 다시 <b>전체 갱신</b>을 누르면 재시도됩니다. 로그인 필요 표시가 뜨면
+              Mac의 해당 Chrome 창에서 로그인한 뒤 누르세요.
+            </div>
+          )}
+        </div>
+      )}
 
       {/* 원가 미상 경고 — 연결맵에 들어가야만 보이던 구멍을 손익 화면에 상설로 올린다.
           ★순이익 숫자는 바꾸지 않는다. 부풀림 금액은 '추정'임을 문구로 명시한다. */}

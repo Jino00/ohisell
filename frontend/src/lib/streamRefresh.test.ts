@@ -8,6 +8,10 @@ import {
   isLoginRequired,
   specsForKeys,
   STREAM_SPECS,
+  RG_STREAM_SPECS,
+  ALL_REFRESH_SPECS,
+  withRequestRetry,
+  REQUEST_RETRY_DELAYS_MS,
   type RefreshStatusLike,
   type StreamRefreshSpec,
   type RefreshOutcome,
@@ -277,5 +281,98 @@ describe("타입 계약", () => {
       { state: "no_response" },
     ];
     expect(outcomes.map((o) => o.state).sort()).toEqual(["done", "failed", "no_response"]);
+  });
+});
+
+// ── POST 재시도(2026-08-05 실사고 처방) ─────────────────────────────
+// ★사고: prod가 간헐 502를 내는 창에 갱신 버튼을 누르면 request-refresh POST가 **유실**됐다.
+// 폴링·데몬은 멀쩡했으므로 화면상으론 "버튼이 안 눌린다"로만 보였다. 502는 대개 수초짜리라
+// 한 번 더 던지면 붙는다 — 아래 규칙이 지워지면 그 사고가 그대로 재현된다.
+describe("withRequestRetry", () => {
+  const sleep = async () => {}; // 백오프는 즉시 통과(대기 시간 자체는 검증 대상이 아니다)
+
+  it("첫 시도가 성공하면 재시도하지 않는다", async () => {
+    let calls = 0;
+    const r = await withRequestRetry(async () => { calls += 1; return "ok"; }, { sleep });
+    expect(r).toBe("ok");
+    expect(calls).toBe(1);
+  });
+
+  it("일시적 실패는 재시도로 살아난다(502 창을 건너뛴다)", async () => {
+    let calls = 0;
+    const r = await withRequestRetry(
+      async () => {
+        calls += 1;
+        if (calls < 3) throw new Error("502 Bad Gateway");
+        return "ok";
+      },
+      { sleep },
+    );
+    expect(r).toBe("ok");
+    expect(calls).toBe(3);
+  });
+
+  it("전패하면 마지막 오류를 그대로 올린다(삼키지 않는다)", async () => {
+    let calls = 0;
+    await expect(
+      withRequestRetry(async () => { calls += 1; throw new Error(`실패${calls}`); }, { sleep }),
+    ).rejects.toThrow("실패4");
+    expect(calls).toBe(1 + REQUEST_RETRY_DELAYS_MS.length); // 첫 시도 + 재시도 3회
+  });
+
+  it("재시도 전 onRetry로 알린다 — 백오프 동안 화면이 조용하면 '멈춘 것'으로 보인다", async () => {
+    const seen: number[] = [];
+    await withRequestRetry(
+      async () => { if (seen.length < 2) throw new Error("일시적"); return 1; },
+      { sleep, onRetry: (retry) => seen.push(retry) },
+    );
+    expect(seen).toEqual([1, 2]);
+  });
+});
+
+describe("전체 갱신 대상(ALL_REFRESH_SPECS)", () => {
+  it("수동 수집 6큐를 빠짐없이 덮는다", () => {
+    expect(ALL_REFRESH_SPECS).toHaveLength(6);
+    expect(ALL_REFRESH_SPECS.map((s) => s.key).sort()).toEqual(
+      ["ofix_ad", "ofix_sales", "ohitech_ad", "rg_wing1", "rg_wing2", "supplier_hub"],
+    );
+  });
+
+  it("두 레지스트리의 사본이 아니라 합집합이다(스트림 추가 시 자동 반영)", () => {
+    // 사본이면 원본이 늘어도 여기가 안 늘어 '전체 갱신'이 거짓말이 된다.
+    expect(ALL_REFRESH_SPECS).toHaveLength(STREAM_SPECS.length + RG_STREAM_SPECS.length);
+    for (const s of [...STREAM_SPECS, ...RG_STREAM_SPECS]) {
+      expect(ALL_REFRESH_SPECS).toContain(s);
+    }
+  });
+});
+
+describe("진행 단계 통지(onPhase)", () => {
+  it("요청 → 전달됨 → Mac 수령 순으로 흐른다", async () => {
+    const clock = fakeClock();
+    const { spec } = mkSpec([
+      { requested: false, last_success_at: null, last_error_at: null, last_error: null },
+      { requested: true, last_success_at: null, last_error_at: null, last_error: null, attempt_count: 1 },
+      { requested: false, last_success_at: "2026-08-05T21:00:00", last_error_at: null, last_error: null },
+    ]);
+    const phases: string[] = [];
+    const out = await runStreamRefresh(spec, {
+      ...clock,
+      onPhase: (_s, p) => phases.push(p.kind),
+    });
+    expect(out.state).toBe("done");
+    expect(phases).toEqual(["requesting", "requested", "fetching"]);
+  });
+
+  it("attempt_count가 없는 표면에서는 fetching을 지어내지 않는다", async () => {
+    const clock = fakeClock();
+    const { spec } = mkSpec([
+      { requested: false, last_success_at: null, last_error_at: null, last_error: null },
+      { requested: true, last_success_at: null, last_error_at: null, last_error: null },
+      { requested: false, last_success_at: "2026-08-05T21:00:00", last_error_at: null, last_error: null },
+    ]);
+    const phases: string[] = [];
+    await runStreamRefresh(spec, { ...clock, onPhase: (_s, p) => phases.push(p.kind) });
+    expect(phases).not.toContain("fetching");
   });
 });
