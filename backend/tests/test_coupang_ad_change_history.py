@@ -60,6 +60,10 @@ def _thin(c):
     return {k: c.get(k) for k in ("id", "name", "isActive", "updatedAt", "createdAt")}
 
 
+# 라이브 실측(2026-08-04 메츨 싱): 일예산 1,500,000 → 70,000
+_BUDGET_CHANGE = {"changeType": "BUDGET", "before": 1500000, "after": 70000}
+
+
 def _rows(db, **f):
     q = db.query(CoupangAdChangeLog)
     for k, v in f.items():
@@ -217,3 +221,69 @@ class TestSafety:
         db.flush()
         assert len(_rows(db, account=ACC)) == 1
         assert len(_rows(db, account=diff.ACCOUNT_OFIX)) == 1
+
+
+class TestRaceAbsorbedIsCountedApart:
+    """★P2-4: `duplicate` 한 칸에 "정상 재푸시"와 "UNIQUE 충돌 흡수"를 같이 담으면 실제 경합이
+    묻힌다. 페처는 90일 이력을 매 회차 통째로 재push하므로 duplicate은 **평시에 수백 건**이
+    정상이다 — 그 잡음 속에 경합 1건을 더하면 영영 안 보인다. race_absorbed는 평시 0이어야 한다.
+    """
+
+    def test_평시_재푸시는_duplicate이지_경합이_아니다(self, db):
+        hist.ingest_events(db, ACC, [_ev(_BUDGET_CHANGE)])
+        out = hist.ingest_events(db, ACC, [_ev(_BUDGET_CHANGE)])
+        assert out["duplicate"] == 1
+        assert out["race_absorbed"] == 0        # ★평시 재푸시를 경합이라 부르지 않는다
+
+    def test_조회와_삽입_사이의_커밋만_race_absorbed로_뜬다(self, tmp_path):
+        """진짜 경합 재현 — 사전 조회가 원리적으로 못 잡는 창을 연다.
+
+        ★파일 DB + 세션 2개 + `after_cursor_execute` 훅: A의 `_find_existing` SELECT가 **끝난
+          직후**(결과가 이미 "없음"으로 확정된 뒤) B(다른 커넥션·다른 트랜잭션)가 같은 키를
+          커밋한다. 사전 조회가 원리적으로 못 잡는 창이 정확히 이것이다 — 조회를 아무리 정확히
+          해도 그 다음 순간의 커밋은 못 본다. 그래서 SAVEPOINT 흡수가 유일한 방어선이다.
+          (훅을 `before_`에 걸면 B의 커밋이 A의 SELECT에 그냥 보여 경합이 안 만들어진다.)
+          인메모리 StaticPool로는 커넥션이 하나라 이 상황이 원리적으로 안 만들어진다.
+        """
+        from sqlalchemy import event
+
+        eng = create_engine(f"sqlite:///{tmp_path}/race.db")
+        Base.metadata.create_all(eng)
+        make = sessionmaker(bind=eng, autoflush=False)   # ★prod SessionLocal과 같은 설정
+        a, b = make(), make()
+        armed = {"v": True}
+
+        @event.listens_for(eng, "after_cursor_execute")
+        def _inject(conn, cursor, statement, params, context, executemany):
+            if not armed["v"] or "coupang_ad_change_log" not in statement:
+                return
+            if not statement.lstrip().upper().startswith("SELECT"):
+                return
+            armed["v"] = False
+            # 스냅샷 유래 행 — 쿠팡이 이겨야 하므로 결과는 upgraded가 되어야 한다.
+            b.add(CoupangAdChangeLog(
+                account=ACC, entity_type=diff.ENTITY_CAMPAIGN, entity_id=CID,
+                campaign_id=CID, entity_name=NAME, op=diff.OP_FIELD, field="budget",
+                before_value=None, after_value=None, occurred_at=OCCURRED,
+                time_basis="src", detected_at=OCCURRED, source=diff.SOURCE_SNAPSHOT))
+            b.commit()
+
+        try:
+            out = hist.ingest_events(a, ACC, [_ev(_BUDGET_CHANGE)], name_of={CID: NAME})
+            a.commit()
+            assert armed["v"] is False, "훅이 안 걸렸다 — 경합 창을 못 열었다"
+            assert out["race_absorbed"] == 1     # ★흡수한 경합이 카운트로 뜬다
+            assert out["written"] == 0           # 삽입은 졌다
+            assert out["upgraded_from_snapshot"] == 1   # 그래도 쿠팡 값이 이긴다
+
+            fresh = make()
+            rows = fresh.query(CoupangAdChangeLog).all()
+            assert len(rows) == 1                # ★두 줄로 새지 않는다
+            assert (rows[0].source, rows[0].before_value, rows[0].after_value) == (
+                diff.SOURCE_COUPANG, "1500000", "70000")
+            fresh.close()
+        finally:
+            event.remove(eng, "after_cursor_execute", _inject)
+            a.close()
+            b.close()
+            eng.dispose()

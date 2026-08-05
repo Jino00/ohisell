@@ -52,6 +52,31 @@ SOURCE_SNAPSHOT = "snapshot"
 SOURCE_COUPANG = "coupang"
 
 
+def _is_unique_violation(exc: IntegrityError) -> bool:
+    """이 테이블의 UNIQUE 위반인가 — **방언에 기대지 않고** 판별한다.
+
+    ★왜 문자열 하나로는 안 되나: SQLite는 `UNIQUE constraint failed: coupang_ad_change_log.account,…`,
+      PostgreSQL은 `duplicate key value violates unique constraint "uq_coupang_ad_change_log"`로
+      같은 사건을 다르게 말한다. SQLite 문구만 보면 **PG 이관 순간 500이 그대로 부활한다**
+      (이 앱의 DB 축은 SQLite→PostgreSQL이다 — CLAUDE.md 기술 스택). 1순위는 SQLSTATE 23505
+      (psycopg2 `pgcode` / psycopg3 `sqlstate`·`diag.sqlstate`), 그게 없으면 양쪽 문구를 다 본다.
+
+    ★테이블 확인은 남긴다: 두 방언 모두 메시지에 `coupang_ad_change_log`가 들어간다(PG는 제약명
+      `uq_coupang_ad_change_log`로). 못 알아보면 **삼키지 않고 올리는 쪽**으로 틀린다.
+    """
+    orig = getattr(exc, "orig", None)
+    msg = str(orig if orig is not None else exc)
+    if "coupang_ad_change_log" not in msg:
+        return False          # 다른 테이블의 무결성 오류 — 중복으로 오분류하지 않는다
+    sqlstate = (getattr(orig, "pgcode", None)
+                or getattr(orig, "sqlstate", None)
+                or getattr(getattr(orig, "diag", None), "sqlstate", None))
+    if sqlstate == "23505":   # PG: unique_violation
+        return True
+    low = msg.lower()
+    return "unique constraint failed" in low or "duplicate key value" in low
+
+
 def safe_add_change_log(db: Session, obj: CoupangAdChangeLog) -> bool:
     """CoupangAdChangeLog 1행 삽입 — UNIQUE 충돌은 SAVEPOINT로 격리해 조용히 흡수한다.
 
@@ -62,16 +87,29 @@ def safe_add_change_log(db: Session, obj: CoupangAdChangeLog) -> bool:
       다음 삽입 시도가 항상 최신 상태를 보게 만든다. 동시 요청 경합(진짜 UNIQUE 충돌)도 같은
       경로로 흡수된다 — 배치 하나 때문에 전체 트랜잭션이 죽지 않는다.
 
+    ★진입 즉시 `db.flush()` 하는 이유 — **SAVEPOINT가 자기 INSERT 하나만 담게 만든다**:
+      `autoflush=False`에서 이 시점까지 쌓인 미flush 쓰기(예: `ingest_ads`가 방금 add한 신규 소재
+      스냅샷, `ingest`가 갱신한 `present`/`settings_json`)가 savepoint **안에서** 함께 기록되면,
+      UNIQUE 충돌 시 `ROLLBACK TO SAVEPOINT`가 그것들까지 되돌린다. flush가 끝난 객체는 다시
+      dirty로 표시되지 않으므로 되돌아간 쓰기는 **영영 재시도되지 않는다** — "배치 한 건 실패가
+      배치 전체를 죽이지 않는다"가 "조용히 버린다"로 뒤집힌다.
+      실측(SQLAlchemy 2.0.48): `begin_nested()`는 `SessionTransaction._take_snapshot()`에서
+      SAVEPOINT를 걸기 **전에** 이미 `session.flush()`를 부르므로 오늘 이 사고는 나지 않는다.
+      그래도 명시적으로 부르는 값이 있다 — ①불변식이 라이브러리 내부 구현이 아니라 이 함수에
+      적혀 있게 되고, ②그 flush가 `except IntegrityError` **밖으로** 나와, 남의 미flush 쓰기가
+      낸 오류를 우리 "중복"으로 오분류할 여지가 사라진다. 비용은 0에 가깝다 —
+      `Session.flush()`는 세션이 깨끗하면 즉시 반환하고, 어차피 `begin_nested()`가 할 일이다.
+
     반환: True=삽입됨, False=이미 같은 키가 있어 스킵(호출자가 "중복" 카운트). UNIQUE 제약 위반이
       아닌 무결성 오류는 **삼키지 않고** 그대로 올린다(데이터 오류를 중복으로 오분류하지 않는다).
     """
+    db.flush()
     try:
         with db.begin_nested():
             db.add(obj)
             db.flush()
     except IntegrityError as exc:
-        msg = str(getattr(exc, "orig", exc))
-        if "coupang_ad_change_log" not in msg or "UNIQUE constraint failed" not in msg:
+        if not _is_unique_violation(exc):
             raise
         return False
     return True
@@ -175,7 +213,7 @@ class _Recorder:
         ))
 
 
-def _persist(db: Session, rows: list[CoupangAdChangeLog]) -> tuple[int, int]:
+def _persist(db: Session, rows: list[CoupangAdChangeLog]) -> tuple[int, int, int]:
     """UNIQUE 위반은 '이미 기록된 변경'이므로 조용히 건너뛴다(회차 재실행 idempotent).
 
     ★같은 키에 **쿠팡 유래** 행이 있으면 덮지 않는다 — 쿠팡은 전/후 값을 갖고 있고 우리는
@@ -185,9 +223,13 @@ def _persist(db: Session, rows: list[CoupangAdChangeLog]) -> tuple[int, int]:
     보장은 `safe_add_change_log`(SAVEPOINT)가 진다 — 사전 SELECT가 "없다"고 오판해도(같은 요청 안의
     다른 서비스가 방금 넣은 미flush 행 등) 삽입 시점에 다시 걸러진다.
 
-    반환: (written, duplicate).
+    반환: (written, duplicate, race_absorbed).
+      ★duplicate와 race_absorbed를 **한 칸에 합치지 않는다**: duplicate은 "페처가 90일 이력을
+        통째로 재push했다"는 평시 신호(매 회차 수백 건이 정상)이고, race_absorbed는 "사전 SELECT와
+        INSERT 사이에 누가 같은 키를 넣었다"는 **경합** 신호다(평시 0이어야 한다). 한 칸에 더하면
+        평시 잡음이 경합을 덮어 영영 안 보인다.
     """
-    written = duplicate = 0
+    written = duplicate = raced = 0
     for r in rows:
         exists = (
             db.query(CoupangAdChangeLog.id)
@@ -207,8 +249,8 @@ def _persist(db: Session, rows: list[CoupangAdChangeLog]) -> tuple[int, int]:
         if safe_add_change_log(db, r):
             written += 1
         else:
-            duplicate += 1
-    return written, duplicate
+            raced += 1
+    return written, duplicate, raced
 
 
 def ingest(db: Session, account: str, all_rows: list[dict], active_rows: list[dict],
@@ -329,8 +371,12 @@ def ingest(db: Session, account: str, all_rows: list[dict], active_rows: list[di
             if g_src:
                 gsnap.src_updated_at = g_src
 
-    written, duplicate = _persist(db, rec.rows)
+    written, duplicate, raced = _persist(db, rec.rows)
     db.flush()
+    if raced:
+        # 평시 0이어야 하는 값이다 — 0이 아니면 같은 키를 두 경로가 동시에 쓰고 있다는 뜻.
+        log.warning("[%s] UNIQUE 경합 %d건을 SAVEPOINT가 흡수했다(사전 SELECT 이후 삽입됨).",
+                    account, raced)
     if unknown_keys:
         # 허용목록 밖 = 이번엔 안 봤다는 뜻. 가려지지 않게 남긴다(설계 재검토 신호).
         log.info("[%s] 허용목록 밖 캠페인 필드 %d종: %s",
@@ -340,7 +386,8 @@ def ingest(db: Session, account: str, all_rows: list[dict], active_rows: list[di
         "campaigns_total": len(seen_ids),
         "campaigns_active": len(active_by_id),
         "changes": written,
-        "changes_duplicate": duplicate,
+        "changes_duplicate": duplicate,       # 사전 SELECT가 이미 있다고 본 것(평시 정상)
+        "changes_race_absorbed": raced,       # SAVEPOINT가 흡수한 진짜 경합(평시 0)
         "unknown_field_count": len(unknown_keys),
     }
 

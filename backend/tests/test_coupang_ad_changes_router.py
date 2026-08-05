@@ -190,6 +190,10 @@ class TestCrossSourceDuplicateDoesNotCrash:
         assert out["history"]["written"] == 1
         assert out["changes"] == 0
         assert out["changes_duplicate"] == 1
+        # ★이 경로는 **경합이 아니다** — 이벤트가 넣은 행이 flush돼 사전 SELECT에 보였을 뿐이다.
+        #   경합 칸을 따로 두지 않으면 이 평시 잡음이 진짜 경합을 덮는다(적대 리뷰 P2-4).
+        assert out["changes_race_absorbed"] == 0
+        assert out["history"]["race_absorbed"] == 0
 
         got = env.get(_LIST, params={"from": "2026-08-05", "to": "2026-08-05"}).json()
         budget_rows = [i for i in got["items"]
@@ -219,6 +223,7 @@ class TestCrossSourceDuplicateDoesNotCrash:
         second = env.post(_INGEST, json=body, headers={"X-Ingest-Token": _TOKEN})
         assert first.status_code == 200 and second.status_code == 200
         assert second.json()["history"]["duplicate"] == 1
+        assert second.json()["history"]["race_absorbed"] == 0   # 재푸시는 경합이 아니다
         got = env.get(_LIST, params={"from": "2026-08-05", "to": "2026-08-05"}).json()
         budget_rows = [i for i in got["items"]
                       if i["op"] == "field_change" and i["field"] == "budget"]

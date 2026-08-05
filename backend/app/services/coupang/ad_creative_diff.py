@@ -93,7 +93,7 @@ def ingest_ads(db: Session, account: str, ads: list[dict],
 
     added: dict[str, list[dict]] = {}
     removed: dict[str, list[dict]] = {}
-    field_rows = 0
+    field_rows = field_dupes = raced = 0
 
     # ── 추가·변경 ────────────────────────────────────────────────────
     for k, a in cur.items():
@@ -119,10 +119,13 @@ def ingest_ads(db: Session, account: str, ads: list[dict],
                 old = {}
             for f in AD_FIELDS:
                 if old.get(f) != settings.get(f):
-                    field_rows += _add_field_row(
+                    r = _add_field_row(
                         db, account=account, ad_key=k, campaign_id=cid,
                         name=str(a.get("item_name") or "")[:200], field=f,
                         before=old.get(f), after=settings.get(f), occurred_at=detected_at)
+                    field_rows += r == "new"
+                    field_dupes += r == "dup"
+                    raced += r == "absorbed"
         snap.name = str(a.get("item_name") or "")[:200]
         snap.is_active = bool(a.get("is_active"))
         snap.campaign_id = cid
@@ -154,22 +157,36 @@ def ingest_ads(db: Session, account: str, ads: list[dict],
         db.flush()
         log.info("[%s] 소재 기준선 %d건 — 첫 회차라 증감 행을 만들지 않는다.", account, len(cur))
         return {"account": account, "ads": len(cur), "baseline": True,
-                "added": 0, "removed": 0, "enriched": 0, "field_changes": 0}
+                "added": 0, "removed": 0, "enriched": 0, "own_rows": 0, "duplicate_rows": 0,
+                "field_changes": 0, "field_changes_duplicate": 0, "race_absorbed": 0}
 
-    enriched = own = 0
+    enriched = own = dup_rows = 0
     for cid, items in added.items():
         r = _emit(db, account, cid, items, OP_ADS_ADDED, detected_at)
         enriched += r == "enriched"
         own += r == "own"
+        dup_rows += r == "dup"
+        raced += r == "absorbed"
     for cid, items in removed.items():
         r = _emit(db, account, cid, items, OP_ADS_REMOVED, detected_at)
         enriched += r == "enriched"
         own += r == "own"
+        dup_rows += r == "dup"
+        raced += r == "absorbed"
     db.flush()
+    if raced:
+        # 평시 0이어야 한다 — 0이 아니면 같은 키를 두 경로가 동시에 쓰고 있다는 신호다.
+        log.warning("[%s] 소재 축 UNIQUE 경합 %d건을 SAVEPOINT가 흡수했다.", account, raced)
     return {"account": account, "ads": len(cur),
             "added": sum(len(v) for v in added.values()),
             "removed": sum(len(v) for v in removed.values()),
-            "enriched": enriched, "own_rows": own, "field_changes": field_rows}
+            "enriched": enriched, "own_rows": own,
+            # ★계약("흡수한 중복은 카운트로 노출, 침묵 금지"). duplicate_rows·field_changes_duplicate은
+            #   사전 SELECT가 이미 봤다는 평시 신호이고, race_absorbed는 SAVEPOINT가 실제 UNIQUE
+            #   충돌을 흡수했다는 경합 신호다 — 예전엔 둘 다 그냥 0으로 사라졌다.
+            "duplicate_rows": dup_rows,
+            "field_changes": field_rows, "field_changes_duplicate": field_dupes,
+            "race_absorbed": raced}
 
 
 def _snake(field: str) -> str:
@@ -178,7 +195,12 @@ def _snake(field: str) -> str:
 
 
 def _add_field_row(db: Session, *, account: str, ad_key: str, campaign_id: str, name: str,
-                   field: str, before, after, occurred_at: datetime) -> int:
+                   field: str, before, after, occurred_at: datetime) -> str:
+    """반환: new | dup(사전 SELECT가 이미 봄) | absorbed(SAVEPOINT가 UNIQUE 경합을 흡수).
+
+    ★셋을 가르는 이유: 예전엔 dup·absorbed가 똑같이 `0`으로 돌아와 응답에 한 칸도 안 떴다.
+      "흡수한 중복은 카운트로 노출한다(침묵 금지)"는 계약을 코드가 안 지키고 있었다.
+    """
     exists = (
         db.query(CoupangAdChangeLog.id).filter(
             CoupangAdChangeLog.account == account,
@@ -190,12 +212,12 @@ def _add_field_row(db: Session, *, account: str, ad_key: str, campaign_id: str, 
         ).first()
     )
     if exists:
-        return 0
+        return "dup"
     obj = CoupangAdChangeLog(
         account=account, entity_type=ENTITY_AD, entity_id=ad_key, campaign_id=campaign_id,
         entity_name=name, op=OP_FIELD, field=field, before_value=before, after_value=after,
         occurred_at=occurred_at, time_basis="detected", source=SOURCE_SNAPSHOT)
-    return 1 if safe_add_change_log(db, obj) else 0
+    return "new" if safe_add_change_log(db, obj) else "absorbed"
 
 
 def _detail(items: list[dict]) -> str:
@@ -209,7 +231,10 @@ def _detail(items: list[dict]) -> str:
 
 def _emit(db: Session, account: str, campaign_id: str, items: list[dict],
           op: str, detected_at: datetime) -> str:
-    """쿠팡 `ads_changed` 행에 목록을 얹거나(enrich), 못 찾으면 우리 행을 낸다."""
+    """쿠팡 `ads_changed` 행에 목록을 얹거나(enrich), 못 찾으면 우리 행을 낸다.
+
+    반환: enriched | own | dup(사전 SELECT가 이미 봄) | absorbed(SAVEPOINT가 UNIQUE 경합 흡수).
+    """
     detail = _detail(items)
     want = "added" if op == OP_ADS_ADDED else "removed"
     since = detected_at - timedelta(days=_ENRICH_WINDOW_DAYS)
@@ -261,4 +286,4 @@ def _emit(db: Session, account: str, campaign_id: str, items: list[dict],
         before_value=None, after_value=str(len(items)),
         occurred_at=detected_at, time_basis="detected", source=SOURCE_SNAPSHOT,
         detail_json=detail)
-    return "own" if safe_add_change_log(db, obj) else "dup"
+    return "own" if safe_add_change_log(db, obj) else "absorbed"
