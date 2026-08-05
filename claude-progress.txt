@@ -1,3 +1,11 @@
+[2026-08-05] 쿠팡 손익 정합 — 로켓배송 1P 축 확정 + 프로모션 제안서 자동수집(D-CPP-10)
+  · 대시보드가 회사 매출의 34.5%만 보여줌(RG1 매출 0·비용만 / 로켓1P 행 자체 없음)
+  · 1P 매출 정본 = 세금계산서. 현행 발주액 정의는 +24.7% 과대(5개월 실측)
+  · sell-in(회계) / sell-through(운영) 병용 확정 — 부가가치세법 제15조·아마존 1P 실무로 검증
+  · 프로모션 개당 할인액 자동수집 배선·prod 라이브 — 7월 분담금 1,720,000원 첫 실측
+  · 교훈 #140 macOS NFD vs API NFC(조용한 0건 매칭)
+  · 다음 = 1P 우리 자료 vs 쿠팡 실제 라인 대조. 인계: .claude/memory/HANDOFF_rocket-1p-axes+promo-file-ingest_20260805.md
+
 ## 📌 세션 인계 (2026-08-04 22:0x KST — 광고 변경에 「언제」를 붙였다)
 
 트랙: 네이버 SA 광고 최적화. 상세: `.claude/memory/HANDOFF_campaign-adgroup-occurred-at_20260804.md`.
