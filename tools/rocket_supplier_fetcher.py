@@ -1208,7 +1208,8 @@ def _oldest_shipped_date(entries: list[dict], headers: list[str]) -> str | None:
 
 
 def _collect_and_push_shipments(page, cfg: dict, days: int | None = None,
-                                detail_cap: int | None = None) -> tuple[int, list[str]]:
+                                detail_cap: int | None = None,
+                                max_pages: int | None = None) -> tuple[int, list[str]]:
     """쉽먼트 목록(날짜 창까지) + 각 건 상세 → prod push. 반환 (rc, 실패사유들).
 
     ★목록만 받고 상세를 못 받은 건은 **상세 없이** 보낸다 — 백엔드가 총 입고 수량을 건드리지
@@ -1221,7 +1222,8 @@ def _collect_and_push_shipments(page, cfg: dict, days: int | None = None,
     if not cfg.get("collect_shipment", True):
         return 0, []
     days = int(days if days is not None else (cfg.get("shipment_days") or 30))
-    max_pages = max(1, int(cfg.get("shipment_max_pages") or 40))
+    max_pages = max(1, int(max_pages if max_pages is not None
+                           else (cfg.get("shipment_max_pages") or 40)))
     detail_cap = int(detail_cap if detail_cap is not None
                      else (cfg.get("shipment_detail_cap") or 60))
     detail_cap = max(0, detail_cap)
@@ -2532,10 +2534,14 @@ def cmd_shipment_backfill(cfg: dict, days: int) -> int:
                             log.error("세션 자가 복구 실패 — 이 창에서 로그인 후 다시 실행하세요.")
                             owner.keep_open = True
                             return RC_LOGIN_REQUIRED
-                    # 상세 캡·페이지 상한을 넉넉히 — 백필은 완결성이 목적이다.
+                    # ★상세 캡·페이지 상한을 **일상 갱신과 따로** 넉넉히 준다 — 백필은 완결성이
+                    #   목적이라 상한에 걸려 멈추면 존재 이유가 없다. 일상 갱신 쪽 상한
+                    #   (`shipment_max_pages`, 폭주 방지용)을 올리면 버튼 갱신까지 무거워진다.
+                    #   1차 백필(400일)이 상한 40에 걸려 2026-01-06까지만 닿았던 실측 반영.
                     rc, reasons = _collect_and_push_shipments(
                         page, cfg, days=days,
-                        detail_cap=int(cfg.get("shipment_backfill_detail_cap") or 2000))
+                        detail_cap=int(cfg.get("shipment_backfill_detail_cap") or 4000),
+                        max_pages=int(cfg.get("shipment_backfill_max_pages") or 300))
     except Exception as e:  # noqa: BLE001
         log.error("[backfill] 브라우저 수집 오류: %s", e)
         return 1
