@@ -312,6 +312,10 @@ class GroupedSummaryRow(BaseModel):
     net_profit: Optional[str]  # 위탁(로켓배송) leaf/회사는 None
     profit_rate: Optional[str]
     order_count: int
+    # ── 로켓배송 1P leaf에만 붙는다(다른 채널은 축이 하나뿐이라 None) ──
+    revenue_basis: Optional[str] = None   # settlement(계산서) | sales(판매분석)
+    cost_coverage: Optional[str] = None   # 0~1. 판매 축에서 원가가 붙은 매출의 비율
+    promo_burden: Optional[str] = None    # 프로모션 분담금(판매 축에서만)
 
 
 class GroupedTrendPoint(BaseModel):

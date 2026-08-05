@@ -24,8 +24,10 @@ from app.schemas import (
     TrendPoint,
 )
 from app.services.coupang.rocket_1p_channel_pnl import (
+    BASIS_SETTLEMENT,
     compute_rocket_1p_daily_points,
     compute_rocket_1p_summary_row,
+    normalize_basis,
     rocket_1p_channel,
 )
 from app.services.profit_calculator import (
@@ -285,23 +287,23 @@ def dashboard_kpi(
 #   수기 매출(`manual_revenue`, 2026-05-01~05-18 18일치)과 수기 광고비 XLSX(`ad_costs`, 03-17~05-18).
 #   그냥 append하면 그 구간이 **두 번 계상된다**. 평행 엔진이 이 채널의 유일한 원천이 되고,
 #   레거시 광고비는 엔진 안에서 날짜 단위로 흡수한다(_ad_spend_by_day — 겹치는 하루는 자동 우선).
-def _merge_rocket_1p_summary(db: Session, rows: list[dict], df, dt) -> list[dict]:
+def _merge_rocket_1p_summary(db: Session, rows: list[dict], df, dt, basis: str) -> list[dict]:
     ch = rocket_1p_channel(db)
     if ch is None:
         return rows
     out = [r for r in rows if r.get("channel_id") != ch.id]
-    row = compute_rocket_1p_summary_row(db, df, dt)
+    row = compute_rocket_1p_summary_row(db, df, dt, basis)
     if row is not None:
         out.append(row)
     return out
 
 
-def _merge_rocket_1p_trend(db: Session, points: list[dict], df, dt) -> list[dict]:
+def _merge_rocket_1p_trend(db: Session, points: list[dict], df, dt, basis: str) -> list[dict]:
     ch = rocket_1p_channel(db)
     if ch is None:
         return points
     out = [p for p in points if p.get("channel_id") != ch.id]
-    out.extend(compute_rocket_1p_daily_points(db, df, dt))
+    out.extend(compute_rocket_1p_daily_points(db, df, dt, basis))
     return out
 
 
@@ -309,6 +311,11 @@ def _merge_rocket_1p_trend(db: Session, points: list[dict], df, dt) -> list[dict
 def channel_breakdown(
     date_from: Optional[date] = Query(None),
     date_to: Optional[date] = Query(None),
+    rocket_basis: str = Query(
+        BASIS_SETTLEMENT,
+        description="로켓배송 1P 매출 축: settlement(계산서=회계 정본·기본) | sales(판매분석×납품단가). "
+                    "두 축은 택일이며 합산하지 않는다(같은 물건을 납품·판매 두 번 세는 이중계상).",
+    ),
     db: Session = Depends(get_db),
 ):
     """회사 > leaf 계층 그룹 요약 (전체/회사소계/leaf)"""
@@ -329,7 +336,7 @@ def channel_breakdown(
                 if ch and ch.code in rg_by_account and row["net_profit"] is not None:
                     row["net_profit"] = str(Decimal(row["net_profit"]) - rg_by_account[ch.code])
 
-        rows = _merge_rocket_1p_summary(db, rows, df, dt)
+        rows = _merge_rocket_1p_summary(db, rows, df, dt, normalize_basis(rocket_basis))
         return group_summary_by_company(rows, get_channel_company_map(db))
     finally:
         if ad_db is not None:
@@ -343,6 +350,11 @@ def channel_breakdown(
 def trend_by_channel(
     date_from: Optional[date] = Query(None),
     date_to: Optional[date] = Query(None),
+    rocket_basis: str = Query(
+        BASIS_SETTLEMENT,
+        description="로켓배송 1P 매출 축: settlement(계산서=회계 정본·기본) | sales(판매분석×납품단가). "
+                    "두 축은 택일이며 합산하지 않는다(같은 물건을 납품·판매 두 번 세는 이중계상).",
+    ),
     db: Session = Depends(get_db),
 ):
     """회사 leaf 그룹 단위 일자별 매출/광고비/순이익 추이"""
@@ -353,7 +365,7 @@ def trend_by_channel(
 
     try:
         pts = calculate_channel_daily_trend(db, ad_db, df, dt)
-        pts = _merge_rocket_1p_trend(db, pts, df, dt)
+        pts = _merge_rocket_1p_trend(db, pts, df, dt, normalize_basis(rocket_basis))
         return group_trend_by_company(pts, get_channel_company_map(db))
     finally:
         if ad_db is not None:

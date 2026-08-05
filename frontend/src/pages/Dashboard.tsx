@@ -24,7 +24,9 @@ import {
   type GroupedSummaryRow,
   type GroupedTrendPoint,
   type ProductRanking,
+  type RocketBasis,
 } from "../lib/api";
+import { RocketBasisToggle } from "../components/RocketBasisToggle";
 
 type PeriodType = "daily" | "weekly" | "monthly";
 type SortBy = "revenue" | "net_profit" | "profit_rate";
@@ -269,6 +271,9 @@ function ChannelTrendChart({
 export default function Dashboard() {
   const defaults = getDefaultDateRange();
   const [period, setPeriod] = useState<PeriodType>("daily");
+  // 로켓배송 1P 매출 축. 기본은 계산서(회계 정본) — 바꾸면 로켓 leaf 매출이 크게 달라진다
+  // (실측 2026-08-04: 계산서 1,578,000 vs 판매 3,885,820). 두 축은 택일이며 합산하지 않는다.
+  const [rocketBasis, setRocketBasis] = useState<RocketBasis>("settlement");
   const [dateFrom, setDateFrom] = useState(defaults.from);
   const [dateTo, setDateTo] = useState(defaults.to);
 
@@ -285,11 +290,12 @@ export default function Dashboard() {
     setLoading(true);
     try {
       const params = `date_from=${dateFrom}&date_to=${dateTo}`;
+      const rb = `rocket_basis=${rocketBasis}`;
       const [kpiData, trendData, channelData, channelTrendData, productData] = await Promise.all([
         fetchApi<KpiData>(`/api/dashboard/kpi?${params}`),
         fetchApi<TrendItem[]>(`/api/dashboard/trend?period=${period}&${params}`),
-        fetchApi<GroupedSummaryRow[]>(`/api/dashboard/channel-breakdown?${params}`),
-        fetchApi<GroupedTrendPoint[]>(`/api/dashboard/trend-by-channel?${params}`),
+        fetchApi<GroupedSummaryRow[]>(`/api/dashboard/channel-breakdown?${params}&${rb}`),
+        fetchApi<GroupedTrendPoint[]>(`/api/dashboard/trend-by-channel?${params}&${rb}`),
         fetchApi<ProductRanking[]>(`/api/dashboard/product-ranking?${params}&sort_by=${sortBy}&limit=20`),
       ]);
       setKpi(parseNumbers(kpiData));
@@ -302,7 +308,7 @@ export default function Dashboard() {
     } finally {
       setLoading(false);
     }
-  }, [dateFrom, dateTo, period, sortBy]);
+  }, [dateFrom, dateTo, period, sortBy, rocketBasis]);
 
   const syncAndRefresh = useCallback(async () => {
     setSyncing(true);
@@ -439,6 +445,7 @@ export default function Dashboard() {
 
       {/* Period selector + date range */}
       <div className="flex flex-wrap items-center gap-3 mb-6">
+        <RocketBasisToggle value={rocketBasis} onChange={setRocketBasis} rows={channels} />
         <div className="flex bg-gray-100 rounded-lg p-0.5">
           {(Object.keys(PERIOD_LABELS) as PeriodType[]).map((p) => (
             <button
