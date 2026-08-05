@@ -321,8 +321,17 @@ function StatusBreakdown({ data }: { data: RocketRecon }) {
 
 // ── 상품(SKU) 표 + 행 확장 ──────────────────────────────────────
 /** 검색·정렬 키. 서버는 발주 금액 desc로 주므로 그 순서를 '기본'으로 보존한다
- *  (정렬을 끄면 원래 보던 화면으로 정확히 돌아가야 하기 때문). */
-type SkuSortKey = "default" | "sku" | "name";
+ *  (정렬을 끄면 원래 보던 화면으로 정확히 돌아가야 하기 때문).
+ *  ★'납품 안 된 건'은 화면에 **두 종류**가 있어 키도 둘이다 — 하나로 합치면 둘 중 하나가 거짓이 된다:
+ *    · undelivered        = 발주−입고 전체(입고 전 단계 포함) — "아직 안 들어온 것"
+ *    · undelivered_settled = 입고가 끝난 단계의 발주−입고    — "들어왔어야 하는데 안 들어온 것"
+ *  둘 다 **귀속 가능한(단일SKU) 발주**에서만 산출된다. 근거 없는 행은 0이 아니라 '모름'이다. */
+type SkuSortKey = "default" | "sku" | "name" | "undelivered" | "undelivered_settled";
+
+/** 정렬 대상 수치를 꺼낸다. null = 산출 근거 없음(0이 아님) → 방향과 무관하게 항상 뒤로 보낸다. */
+function undeliveredOf(r: ReconSkuRow, settledOnly: boolean): number | null {
+  return settledOnly ? r.drift_qty_settled_stage : r.drift_qty;
+}
 
 /** 한글 검색은 정규화가 갈리면 **에러 없이 0건**이 된다(교훈 #140: macOS NFD vs API NFC).
  *  화면 입력(NFC일 수도 NFD일 수도)과 API 문자열 양쪽을 NFC로 모아 비교한다. */
@@ -352,18 +361,32 @@ function SkuTable({ data, from, to }: { data: RocketRecon; from: string; to: str
           return tokens.every((t) => hay.includes(t));
         });
     if (sortKey === "default") return asc ? filtered : [...filtered].reverse();
-    const sorted = [...filtered].sort((a, b) =>
-      sortKey === "sku"
-        ? compareSku(a.product_number, b.product_number)
-        // 상품명 없는 행은 정렬 방향과 무관하게 항상 뒤로 — '이름 없음'은 값이 아니다.
-        : (a.product_name == null || b.product_name == null)
-          ? (a.product_name == null ? 1 : 0) - (b.product_name == null ? 1 : 0)
-          : a.product_name.localeCompare(b.product_name, "ko"),
-    );
-    return asc ? sorted : sorted.reverse();
+    // ★방향은 비교 안에서 적용한다 — 정렬 후 통째로 뒤집으면 '모름' 행이 맨 위로 올라와,
+    //   값이 없다는 이유만으로 가장 심각한 상품처럼 보인다.
+    const dir = asc ? 1 : -1;
+    return [...filtered].sort((a, b) => {
+      if (sortKey === "sku") return dir * compareSku(a.product_number, b.product_number);
+      if (sortKey === "name") {
+        // 이름 없는 행은 방향과 무관하게 항상 뒤로 — '이름 없음'은 값이 아니다.
+        if (a.product_name == null || b.product_name == null) {
+          return (a.product_name == null ? 1 : 0) - (b.product_name == null ? 1 : 0);
+        }
+        return dir * a.product_name.localeCompare(b.product_name, "ko");
+      }
+      const settledOnly = sortKey === "undelivered_settled";
+      const av = undeliveredOf(a, settledOnly);
+      const bv = undeliveredOf(b, settledOnly);
+      if (av == null || bv == null) return (av == null ? 1 : 0) - (bv == null ? 1 : 0);
+      return dir * (av - bv);
+    });
   }, [data.skus, query, sortKey, asc]);
 
   const searching = query.trim().length > 0;
+  const byUndelivered = sortKey === "undelivered" || sortKey === "undelivered_settled";
+  // 정렬 근거가 없는 행 수 — 숨기지 않고 세어서 보여준다(뒤에 몰린 이유를 알 수 있게).
+  const unknownCount = byUndelivered
+    ? shown.filter((r) => undeliveredOf(r, sortKey === "undelivered_settled") == null).length
+    : 0;
   const baseTitle =
     f.drift_only || f.unconfirmed_only
       ? `상품별 대사 — ${n(f.sku_count_shown)}/${n(f.sku_count_total)} SKU (필터 적용)`
@@ -390,20 +413,38 @@ function SkuTable({ data, from, to }: { data: RocketRecon; from: string; to: str
         <select
           id="sku-sort"
           value={sortKey}
-          onChange={(e) => setSortKey(e.target.value as SkuSortKey)}
+          onChange={(e) => {
+            const k = e.target.value as SkuSortKey;
+            setSortKey(k);
+            // 수량 정렬은 '많은 순'이 기본 — 미입고를 고르는 이유는 큰 것부터 보기 위해서다.
+            setAsc(k === "sku" || k === "name");
+          }}
           className="rounded border border-gray-300 px-2 py-1 text-sm"
         >
           <option value="default">기본(발주 금액 큰 순)</option>
           <option value="sku">SKU 번호</option>
           <option value="name">상품명</option>
+          <option value="undelivered">미입고(발주−입고, 입고 전 포함)</option>
+          <option value="undelivered_settled">미입고(입고 끝난 단계만)</option>
         </select>
         {/* 버튼 글자는 '지금 적용된 순서' — 누르면 반대로 뒤집힌다. */}
         <Button onClick={() => setAsc(!asc)} title="정렬 방향 뒤집기">
           {sortKey === "default"
             ? (asc ? "금액 큰 순 ↓" : "금액 작은 순 ↑")
-            : (asc ? "오름차순 ↑" : "내림차순 ↓")}
+            : sortKey === "sku" || sortKey === "name"
+              ? (asc ? "오름차순 ↑" : "내림차순 ↓")
+              : (asc ? "적은 순 ↑" : "많은 순 ↓")}
         </Button>
       </div>
+      {byUndelivered && (
+        <p className="w-full text-xs text-gray-400">
+          {sortKey === "undelivered_settled"
+            ? "‘입고 끝난 단계’(거래명세서확인·확인요청)의 발주−입고로 정렬합니다 — 들어왔어야 하는데 안 들어온 수량입니다."
+            : "발주−입고 전체(아직 입고 전 단계 포함)로 정렬합니다 — 오늘 기준 아직 안 들어온 수량입니다."}
+          {" "}이 값은 <b>귀속 가능한(단일 상품) 발주</b>에서만 산출되므로, 근거가 없는 {n(unknownCount)}건은
+          0이 아니라 &lsquo;{NO_DATA}(모름)&rsquo;이며 <b>정렬 방향과 무관하게 항상 맨 뒤</b>에 둡니다.
+        </p>
+      )}
     </div>
   );
 
