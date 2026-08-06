@@ -441,6 +441,11 @@ async def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_d
             except (InvalidOperation, ValueError):
                 results["errors"].append(f"행 {row_idx}: 원가 '{cost}' 변환 실패")
                 continue
+            # ★음수 원가 차단 — 이 경로는 pydantic 스키마(ge=0)를 거치지 않고 DB에 직접 쓴다.
+            #   원가가 음수면 손익에서 빼는 게 아니라 **더한다**(이익 과대의 방향이 뒤집힌 채 커짐).
+            if cost_decimal < 0:
+                results["errors"].append(f"행 {row_idx}: 원가 '{cost}'가 음수 — 건너뜀")
+                continue
 
             existing = db.query(ProductMaster).filter_by(internal_sku=sku).first()
             if existing:
@@ -484,6 +489,24 @@ async def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_d
             if not channel:
                 results["errors"].append(f"행 {row_idx}: 채널코드 '{ch_code}' 없음")
                 continue
+
+            # ★이중 활성 매핑(1채널옵션ID→2마스터) 차단 — 종전엔 이 경로에만 가드가 없었다
+            #   (2026-08-06 적대 리뷰 P1). `existing_mapping` 조회가 **내 product_id로만** 걸려
+            #   있어서, 다른 상품이 이미 그 옵션ID를 active로 갖고 있어도 새 활성 매핑을 그냥
+            #   추가했다. 그러면 손익에서 원가 후보가 둘이 되고, 어느 쪽이 맞는지 알 수 없다.
+            #   add/update 경로엔 `_active_option_clash` 가드가 이미 있었는데(D-12) 구형 엑셀
+            #   업로드만 뚫려 있었다 — 라이브에 네이버 이중 활성 매핑 22건이 그렇게 쌓였다.
+            #   ★일괄 업로드라 409로 파일 전체를 죽이지 않는다 — 그 행만 건너뛰고 사유를 낸다
+            #     (다른 행 수백 개가 같이 죽으면 사용자는 원인 행을 찾지 못한다).
+            if is_active:
+                clash = _active_option_clash(db, channel.id, ch_pid, product.id)
+                if clash:
+                    results["errors"].append(
+                        f"행 {row_idx}: 채널옵션ID '{ch_pid}'는 이미 다른 상품"
+                        f"(product_id={clash.product_id})에 활성 매핑돼 있습니다 — 건너뜀"
+                        f"(중복 매핑은 원가를 «모름»으로 만든다)"
+                    )
+                    continue
 
             existing_mapping = (
                 db.query(ProductChannelMapping)

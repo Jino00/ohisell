@@ -48,6 +48,53 @@ _VAT_DIVISOR = Decimal("1.1")       # VAT 포함 → 공급가(부가세 제외)
 _HANJIN_PER_SHIPMENT = Decimal("1900")
 
 
+def _today_search_snapshot(db: Session, day) -> dict:
+    """그 날짜의 **검색광고 당일 누적** — 캠페인별 관측 최대치의 합.
+
+    ★합산 축이 「최신 배치」가 아니라 «캠페인별 당일 최대 누적»인 이유(2026-08-06 실측):
+      NAVER `/stats` 당일 누적이 **뒤로 간다**. 4분 간격 16회 관측(19:26~20:29) —
+      506,370원 9회 → **398,102원 6회**(clk·imp까지 17시 슬롯과 원 단위 동일 = 3시간 전 상태)
+      → 543,125원 회복. 최근 14일에 같은 후퇴 14건. 누적은 정의상 뒤로 갈 수 없으므로
+      관측 최대치를 쓴다. 부분 적재(46캠페인 중 일부만 담긴 슬롯)에도 강하다 — 빠진 캠페인은
+      이전 최대치를 유지한다. 하루가 끝나면 최대치=최종 누적이라 `ad_costs`와 같은 축이 된다
+      (2026-08-05 교차검증: 스냅샷 675,090 vs ad_costs 675,089).
+
+    ★「오늘」 탭과 기간 탭이 **같은 함수**를 쓴다 — 두 경로가 다른 축을 쓰면 같은 날 광고비가
+      탭마다 달라진다(이 저장소는 두 엔진이 다른 배송비를 쓰던 사고를 이미 겪었다).
+
+    반환: {"total": Decimal, "imp": int, "as_of": datetime|None, "latest": Decimal}
+      as_of=None이면 그 날짜에 스냅샷이 아직 하나도 없다(= «모름», 0원이 아니다).
+    """
+    snap_at = (
+        db.query(func.max(NaverHourlySnapshot.snapshot_at))
+        .filter(NaverHourlySnapshot.ad_date == day)
+        .scalar()
+    )
+    if not snap_at:
+        return {"total": _Z, "imp": 0, "as_of": None, "latest": _Z}
+    per_campaign = (
+        db.query(
+            func.max(NaverHourlySnapshot.cost).label("mx_cost"),
+            func.max(NaverHourlySnapshot.imp).label("mx_imp"),
+        )
+        .filter(NaverHourlySnapshot.ad_date == day)
+        .group_by(NaverHourlySnapshot.campaign_id)
+        .all()
+    )
+    latest = _f(
+        db.query(func.sum(NaverHourlySnapshot.cost))
+        .filter(NaverHourlySnapshot.ad_date == day,
+                NaverHourlySnapshot.snapshot_at == snap_at)
+        .scalar()
+    )
+    return {
+        "total": _f(sum((r.mx_cost or 0) for r in per_campaign)),
+        "imp": int(sum((r.mx_imp or 0) for r in per_campaign)),
+        "as_of": snap_at,
+        "latest": latest,
+    }
+
+
 def logistics_totals(db: Session, start, end) -> tuple[int, Decimal]:
     """기간 내 네이버 주문의 (물리배송 건수, 택배비 합계 VAT포함).
 
@@ -170,11 +217,8 @@ def sales_summary(
     ad_dfrom, ad_dto = dfrom, dto
 
     if days == 0:
-        snap_at = (
-            db.query(func.max(NaverHourlySnapshot.snapshot_at))
-            .filter(NaverHourlySnapshot.ad_date == dfrom)
-            .scalar()
-        )
+        _snap = _today_search_snapshot(db, dfrom)   # 기간 탭과 같은 축(위 헬퍼 docstring 참조)
+        snap_at = _snap["as_of"]
         if snap_at:
             # ★★합산 축 = **캠페인별 당일 관측 최대 누적의 합**이다. 「최신 배치」가 아니다.
             #   왜냐하면 NAVER /stats 당일 누적은 **후퇴한다** — 2026-08-06 4분 간격 16회 관측:
@@ -190,28 +234,12 @@ def sales_summary(
             #   (46캠페인 중 일부만 담긴 슬롯)에도 강하다 — 빠진 캠페인은 이전 최대치를 유지한다.
             #   하루가 끝나면 최대치=최종 누적이므로 PR #225의 축 교차검증(스냅샷 675,090 vs
             #   ad_costs 675,089)은 그대로 성립한다.
-            per_campaign = (
-                db.query(
-                    func.max(NaverHourlySnapshot.cost).label("mx_cost"),
-                    func.max(NaverHourlySnapshot.imp).label("mx_imp"),
-                )
-                .filter(NaverHourlySnapshot.ad_date == dfrom)
-                .group_by(NaverHourlySnapshot.campaign_id)
-                .all()
-            )
-            total_ad_spend = _f(sum((r.mx_cost or 0) for r in per_campaign))
-            snap_imp = int(sum((r.mx_imp or 0) for r in per_campaign))
+            total_ad_spend = _snap["total"]
+            snap_imp = _snap["imp"]
 
             # 최신 배치가 최대치보다 낮으면 = 지금 원천이 후퇴한 상태다. 값은 최대치를 쓰되
             # **그 사실을 응답에 실어** 화면이 말할 수 있게 한다(조용히 보정하면 관측이 사라진다).
-            latest_cost = _f(
-                db.query(func.sum(NaverHourlySnapshot.cost))
-                .filter(
-                    NaverHourlySnapshot.ad_date == dfrom,
-                    NaverHourlySnapshot.snapshot_at == snap_at,
-                )
-                .scalar()
-            )
+            latest_cost = _snap["latest"]
             regressed_by = total_ad_spend - latest_cost if latest_cost < total_ad_spend else _Z
 
             # ★당일 **어느 슬롯에도** 값이 없을 때만 «모름»이다. 최신 배치만 보고 판정하면
@@ -249,10 +277,75 @@ def sales_summary(
             )
             .scalar()
         )
+        # ★기간 창이 **오늘**을 포함하면 오늘 검색광고비를 더한다(2026-08-06).
+        #   왜: `ad_costs`는 D+1 확정이라 오늘 행이 아예 없다. 그런데 매출은 오늘까지 들어간다
+        #   → 「오늘까지」 걸친 모든 기간에서 **이익이 오늘 광고비만큼 과대**였다.
+        #   라이브 실측(08-06 23:05): 30일 창에 오늘 매출 1,376,420원은 들어가는데 오늘 광고비
+        #   675,561원은 0원으로 들어갔다. 「오늘」 탭이 어제치를 물고 오던 결함(교훈 #151)의
+        #   **거울상** — 이쪽은 이미 손에 있는 값을 안 붙이고 있었다.
+        #   ★디스플레이(ADVoost·GFA)는 못 메운다 — 리포트 축에 아예 없고 비즈머니 실차감이
+        #   유일한 경로인데 그건 D−1까지만 준다. 당일 총액(`/histories/period`)은 상품별 분해가
+        #   없어 NCC와 가를 수 없다(넣으면 이중계상). 그래서 이 합계는 «검색은 오늘까지 +
+        #   디스플레이는 어제까지»인 **혼합 축**이고, 그 사실을 ad_basis에 실어 화면이 말한다.
+        today_ = kst_today()
+        if ad_dfrom <= today_ <= ad_dto:
+            # ★이중계상 가드: 오늘치가 이미 `ad_costs`에 적재됐으면(수동 동기화 등) 더하지 않는다.
+            already = _f(
+                db.query(func.sum(AdCost.ad_spend))
+                .filter(
+                    AdCost.channel_id == _NAVER_CHANNEL_ID,
+                    AdCost.ad_date == today_,
+                    AdCost.source.like("naver_sa:%"),
+                )
+                .scalar()
+            )
+            snap = _today_search_snapshot(db, today_)
+            if already > 0:
+                ad_basis = {"kind": "period", "today_search_added": "0.00",
+                            "today_search_source": "ad_costs",
+                            "today_display_missing": True, "as_of": None}
+            elif snap["as_of"] is not None and snap["total"] > 0:
+                total_ad_spend += snap["total"]
+                ad_basis = {"kind": "period",
+                            "today_search_added": str(snap["total"].quantize(_Q2)),
+                            "today_search_source": "today_snapshot",
+                            "today_display_missing": True,
+                            "as_of": snap["as_of"].isoformat(timespec="seconds")}
+            else:
+                # 오늘 스냅샷이 아직 없다(자정~첫 수집). 오늘 광고비는 «모름»이지 0원이 아니다 —
+                # 값을 지어내지 않고 그 사실만 싣는다(요약은 계속 계산한다).
+                ad_basis = {"kind": "period", "today_search_added": "0.00",
+                            "today_search_source": "pending",
+                            "today_display_missing": True, "as_of": None}
     # 광고비는 네이버 광고 = 공급가(VAT 제외, 세금계산서 별도) → 공급가 통일 시 그대로.
 
     # ── 2b. 택배 물류비 — 물리배송(packageNumber) 1건당 배송방식별 실단가, VAT 포함 ──
     shipment_count, total_logistics = logistics_totals(db, start, end)
+
+    # ── 2c. 반품·교환 배송 손익 (2026-08-06) ────────────────────────────
+    # ★왜 필요한가: 반품 건은 REVENUE_EXCLUDED라 매출·원가·배송비가 **전부 0으로 빠진다.**
+    #   그런데 실제로는 출고비와 회수비가 나가고 반품비가 들어온다 — 종전 이 화면은
+    #   **반품이 늘어도 이익이 반응하지 않았다**(반품이 공짜인 것처럼 보였다).
+    #   라이브 실측(30일): 반품 완료 22건·매출 593,200원이 매출에서 빠지기만 하고 손실은 어디에도
+    #   없었다. 메인 엔진(profit_calculator)엔 이미 있었는데 이 패널만 없었다.
+    # ★재구현하지 않고 **메인 엔진 함수를 그대로 호출한다** — 같은 주문에 두 엔진이 다른 값을
+    #   쓰면 안 된다(logistics_totals가 이미 같은 이유로 폴백 경로까지 맞춰 놓았다).
+    #   그 함수가 담고 있는 규칙: 귀속일=반품 **완료일**(결제일이면 지난달 이익이 흔들린다) ·
+    #   수입은 정액이 아니라 건별 실측(미청구 건이 있어 정액이면 반품이 이익 나는 일로 보인다) ·
+    #   네이버 지원액만큼 회수비 상쇄(상한=회수비) · 배송(패키지)당 1회.
+    from app.services.profit_calculator import (  # 지연 임포트(순환 회피)
+        _exchange_shipping_pnl, _return_shipping_pnl,
+    )
+    _ch_map = {c.id: c for c in db.query(Channel).all()}
+    claim_income = claim_fee = claim_cost = _Z
+    claim_count = 0
+    for _fn in (_return_shipping_pnl, _exchange_shipping_pnl):
+        for _by_date in _fn(db, _ch_map, dfrom, dto, _NAVER_CHANNEL_ID).values():
+            for _pnl in _by_date.values():
+                claim_income += _f(_pnl["income"])
+                claim_fee    += _f(_pnl["commission"])
+                claim_cost   += _f(_pnl["cost"])
+                claim_count  += 1
 
     # 검색광고(SA) RoAS — 디스플레이 제외(전환추적 없음).
     # 네이버 전환 보고서는 최근 ~15일만 보관 → 전환데이터가 있는 날짜로만 분모를 맞춰
@@ -306,12 +399,49 @@ def sales_summary(
     cost_candidates: dict[str, list] = {}
     for cpid, cp, pid in cost_rows:
         cost_candidates.setdefault(str(cpid), []).append((cp, pid))
+    # ★후보가 갈리면 «모름»이다 — 조용히 하나를 고르지 않는다(2026-08-06 적대 리뷰 P1).
+    #   종전: `chosen = min(costed or cands, key=lambda x: x[1])` — 정렬 키가 **원가가 아니라
+    #   product_master.id**였다. 한 채널옵션ID에 활성 매핑이 둘이고 원가가 서로 다르면,
+    #   "원가가 맞는 쪽"이 아니라 "id가 작은 쪽"이 뽑혀 **조용히 틀린 원가로 이익이 부풀려졌다.**
+    #   그것도 `cost_map`에 들어가므로 «모름» 배너에도 안 잡힌다 — 화면은 자신 있게 틀린다.
+    #   라이브 실측(2026-08-06): 네이버 이중 활성 매핑 **22건 존재**, 그중 원가가 갈리는 건
+    #   0건이라 아직 안 터졌을 뿐이다. 원천은 B(업로드 경로 가드)에서 막고, 여기서는
+    #   **이미 갈린 데이터를 만나면 모른다고 말한다.**
+    #   ★음수 원가도 이 경로에서 죽는다 — 종전엔 `costed`가 비면 fallback이 음수를 골라
+    #   `if chosen:`(truthy)을 통과해 "원가 있음"으로 나갔다(원가가 음수면 이익을 **더** 부풀린다).
+    #   이제 양수 후보가 없으면 그냥 «모름»이다.
     cost_map: dict[str, Decimal] = {}
+    cost_ambiguous: set[str] = set()
     for pid, cands in cost_candidates.items():
-        costed = [(cp, p) for cp, p in cands if cp and cp > 0]
-        chosen = min(costed or cands, key=lambda x: x[1])[0]
-        if chosen:
-            cost_map[pid] = _f(chosen)
+        distinct_costed = {_f(cp) for cp, _p in cands if cp and cp > 0}
+        if len(distinct_costed) > 1:
+            cost_ambiguous.add(pid)   # 어느 게 맞는지 우리는 모른다
+        elif len(distinct_costed) == 1:
+            cost_map[pid] = next(iter(distinct_costed))
+
+    # ★«원가를 모른다»와 «원가가 0원이다»를 구분한다(2026-08-06).
+    #   종전에는 둘 다 `cost_map.get(pid, 0)` 으로 접혀 **0원짜리 원가**가 됐고, 그 결과
+    #   원가 미상 상품이 이익률 94~96%로 표시됐다(30일 실측 6개·매출 956,545원, 원가 있는
+    #   상품 평균 원가율은 22.1% — 이익이 약 21만원 과대). 오늘 광고비에 세운 원칙
+    #   («모름»을 0으로 계산하지 않는다)의 정확한 미적용 케이스였다.
+    #   ★추정으로 채우지 않는다 — 평균 원가율을 대입하면 화면은 그럴듯해지고 근거는 사라진다.
+    #   ★두 종류를 나누는 이유: Jino가 할 조치가 다르다.
+    #     unmapped  = product_channel_mapping에 **활성** 행이 없음 → **매핑을 이어야** 한다
+    #                 (비활성 매핑만 있는 경우도 여기 — 원가가 안 붙는다는 결과가 같다)
+    #                 (원가만 채워선 안 붙는다 — 2026-08-04 실측: 원가 미상의 97.5%가 이쪽)
+    #     zero_cost = 매핑은 있는데 product_master.cost_price가 0/NULL → **원가를 입력**해야 한다
+    #   선례와 같은 의미론: profit_calculator의 `unmapped_revenue`(원가 미상 매출 별도 집계).
+    #   쿠팡 프로모션 손익도 같은 두 사유("매핑 없음" / "cost_price 없음")를 나눠 낸다.
+    #     ambiguous = 활성 매핑이 여럿인데 원가가 서로 다름 → **중복 매핑을 정리**해야 한다
+    #                 (어느 원가가 맞는지 우리가 모르므로 고르지 않는다 — 위 cost_map 참조)
+    cost_unknown_kind: dict[str, str] = {}
+    for pid_u in all_pids:
+        if pid_u in cost_map:
+            continue
+        if pid_u in cost_ambiguous:
+            cost_unknown_kind[pid_u] = "ambiguous"
+        else:
+            cost_unknown_kind[pid_u] = "zero_cost" if pid_u in cost_candidates else "unmapped"
 
     # ── 3b. 실측 수수료 맵 (건별 정산 settle/case, D-6) ────────────────
     # (order_id, product_id) → 실측 판매자부담 수수료(양수). PROD_ORDER만, 수수료 음수→부호반전.
@@ -370,8 +500,10 @@ def sales_summary(
         else:
             fee = _f(commission)
             est_lines += 1
-        unit_cost = cost_map.get(pid_s, _Z)
-        cost      = unit_cost * qty_
+        # 원가 미상이면 0을 더하지 않는 것이 아니라 **모르는 채로 둔다** — 합계는 종전대로
+        # 미상분을 뺀 값이지만(아래 요약 배너가 그 사실을 말한다), 상품별 이익은 «모름»이 된다.
+        unit_cost = cost_map.get(pid_s)
+        cost      = (unit_cost * qty_) if unit_cost is not None else _Z
 
         total_rev           += rev
         total_fee           += fee
@@ -397,20 +529,37 @@ def sales_summary(
     # 상품별 = 순수 상품 손익(공급가): (상품매출 − 수수료 − 원가) ÷ 1.1.
     # 고객배송비·한진물류비·광고비는 배송/계정 단위라 상품 미배분 → 요약에만 반영.
     by_product = []
+    unknown_supply_rev = _Z          # 원가 미상 상품들의 공급가 매출(요약 배너용)
+    unknown_unmapped = unknown_zero = unknown_ambiguous = 0
     for pid_s, acc in prod_acc.items():
         rev_s  = acc["rev"] / _VAT_DIVISOR        # 공급가
         fee_s  = acc["fee"] / _VAT_DIVISOR
         cost_s = acc["cost"] / _VAT_DIVISOR
         profit = rev_s - fee_s - cost_s
+        # ★원가를 모르면 그 상품의 이익도 모른다 — 원가·이익·이익률 셋 다 None으로 낸다.
+        #   셋 중 하나라도 숫자로 남기면 그 카드가 나머지를 부정한다(오늘 광고비 카드와 같은 이유:
+        #   훑는 눈에는 큰 숫자가 이긴다). 매출·수수료는 실측이므로 그대로 낸다.
+        unknown_kind = cost_unknown_kind.get(pid_s)
+        if unknown_kind is not None:
+            unknown_supply_rev += rev_s
+            if unknown_kind == "unmapped":
+                unknown_unmapped += 1
+            elif unknown_kind == "ambiguous":
+                unknown_ambiguous += 1
+            else:
+                unknown_zero += 1
         by_product.append({
             "product_name":  acc["name"],
             "platform_id":   pid_s,
             "revenue":       str(rev_s.quantize(_Q2)),
             "fee":           str(fee_s.quantize(_Q2)),
             "fee_actual":    acc["est"] == 0 and acc["settled"] > 0,  # 전부 실측이면 True
-            "cost":          str(cost_s.quantize(_Q2)),
-            "profit":        str(profit.quantize(_Q2)),
-            "profit_rate":   str((profit / rev_s * 100).quantize(_Q2)) if rev_s else None,
+            "cost":          None if unknown_kind else str(cost_s.quantize(_Q2)),
+            "cost_known":    unknown_kind is None,
+            "cost_unknown_kind": unknown_kind,   # "unmapped" | "zero_cost" | None
+            "profit":        None if unknown_kind else str(profit.quantize(_Q2)),
+            "profit_rate":   None if (unknown_kind or not rev_s)
+                             else str((profit / rev_s * 100).quantize(_Q2)),
         })
 
     by_product.sort(key=lambda x: -Decimal(x["revenue"]))
@@ -418,12 +567,16 @@ def sales_summary(
     # ── 5. 요약 — 공급가(VAT 제외) 통일 ──────────────────────────────
     # 정확한 손익: 부가세는 통과항목(매출VAT−매입VAT 상쇄) → 모든 VAT 포함 항목을 ÷1.1.
     #   순이익 = (상품매출 + 고객배송비 − 수수료 − 원가 − 한진물류비) ÷ 1.1 − 광고비(공급가)
-    gross_vat_incl   = total_rev + total_delivery_rev            # 매출(상품+배송), VAT 포함
+    # ★반품·교환 배송 손익을 같은 축에 싣는다(메인 엔진 `_apply_claim_shipping_pnl`과 같은 모양):
+    #   수입은 **배송매출**로 매출에 들어가 수수료를 맞고, 비용은 **물류비**로 나간다.
+    #   여기서만 다르게 처리하면 원천에 없는 판단을 코드가 새로 만드는 셈이다(그 함수 docstring).
+    #   ★배송 건수(shipment_count)에는 더하지 않는다 — 클레임은 주문이 아니다(객단가가 틀어진다).
+    gross_vat_incl   = total_rev + total_delivery_rev + claim_income   # 매출(상품+배송+클레임수입)
     supply_revenue   = gross_vat_incl / _VAT_DIVISOR             # 공급가 매출
-    supply_fee       = total_fee / _VAT_DIVISOR
+    supply_fee       = (total_fee + claim_fee) / _VAT_DIVISOR
     supply_cost      = total_cost / _VAT_DIVISOR
-    supply_logistics = total_logistics / _VAT_DIVISOR
-    supply_delivery  = total_delivery_rev / _VAT_DIVISOR
+    supply_logistics = (total_logistics + claim_cost) / _VAT_DIVISOR
+    supply_delivery  = (total_delivery_rev + claim_income) / _VAT_DIVISOR
     supply_product   = total_rev / _VAT_DIVISOR
     total_profit = supply_revenue - supply_fee - supply_cost - supply_logistics - total_ad_spend
     profit_rate  = (total_profit / supply_revenue * 100).quantize(_Q2) if supply_revenue else None
@@ -452,6 +605,21 @@ def sales_summary(
             "sa_conv_to":      sa_conv_to,
             "fee_settled_lines": settled_lines,   # 실측 수수료 적용 주문라인 수 (D-6)
             "fee_est_lines":     est_lines,       # 주문API 예상 수수료 폴백 라인 수
+            # ★원가 미상 투명화 — 요약 이익은 **계속 계산한다**(미상분 원가가 빠진 채).
+            #   왜 요약까지 「—」로 만들지 않나: 미상은 매출의 2.5%인데 그 때문에 나머지 97.5%를
+            #   못 보게 하면 화면이 쓸모없어진다. 대신 얼마나 과대일 수 있는지를 배너가 말한다.
+            #   ★과대 금액을 추정치로 내지 않는다 — 미상 매출을 그대로 내고 판단은 사람이 한다.
+            "cost_unknown_products": unknown_unmapped + unknown_zero + unknown_ambiguous,
+            "cost_unknown_revenue":  str(unknown_supply_rev.quantize(_Q2)),  # 공급가
+            "cost_unknown_unmapped": unknown_unmapped,   # 매핑을 이어야 하는 상품 수
+            "cost_unknown_zero_cost": unknown_zero,      # 원가를 입력해야 하는 상품 수
+            "cost_unknown_ambiguous": unknown_ambiguous, # 중복 매핑을 정리해야 하는 상품 수
+            # 반품·교환 배송 손익(귀속=클레임 **완료일**, 주문일 아님) — 화면이 "반품이 공짜가
+            # 아니다"를 말할 수 있게 분해해 낸다. 순효과 = 수입 − 수수료 − 비용(보통 음수).
+            "claim_count":   claim_count,
+            "claim_income":  str((claim_income / _VAT_DIVISOR).quantize(_Q2)),
+            "claim_cost":    str((claim_cost / _VAT_DIVISOR).quantize(_Q2)),
+            "claim_net":     str(((claim_income - claim_fee - claim_cost) / _VAT_DIVISOR).quantize(_Q2)),
         },
         "by_product": by_product,
     }

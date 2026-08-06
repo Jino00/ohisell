@@ -217,7 +217,7 @@ def _agg_marketplace_by_sku(db: Session, dfrom: date, dto: date) -> dict:
     out: dict[str, dict] = {}
     for o, ch, pm in rows:
         plat = out.setdefault(ch.platform, {"alloc": {}, "unmapped": _zero_triplet(),
-                                            "total": _zero_triplet()})
+                                            "total": _zero_triplet(), "cost_unknown": {}})
         product_rev = _line_revenue(ch, o)
         commission = _line_commission(ch, o, product_rev, None)  # 네이버/cafe24=commission_amount(D4)
         cost = (pm.cost_price * o.quantity) if pm is not None else _Z
@@ -229,6 +229,16 @@ def _agg_marketplace_by_sku(db: Session, dfrom: date, dto: date) -> dict:
             b["product_revenue"] += product_rev
             b["commission"] += commission
             b["cost"] += cost
+            # ★«원가를 모른다»와 «원가가 0원이다»를 구분한다(2026-08-06, naver_ops와 같은 규율).
+            #   마스터는 붙었는데 `cost_price`가 0/NULL/음수면 그 라인의 원가는 **모르는 것**이지
+            #   0원이 아니다. `ProductMaster.cost_price`가 `nullable=False, default=0`이라 미입력이
+            #   조용히 0원 원가가 되고, 그 SKU의 순익이 원가만큼 과대로 나온다.
+            #   ★금액은 한 톨도 바꾸지 않는다 — 여기서 cost를 빼면 `conservation_ok`(Σ귀속+잔차==
+            #   총계)와 권위 엔진(profit_calculator) 정합이 동시에 깨진다. 우리가 모른다는 **사실만**
+            #   따로 싣고, 화면이 그 SKU의 순익을 「—」로 비운다(합계는 그대로 계산·표시).
+            if not pm.cost_price or pm.cost_price <= 0:
+                cu = plat["cost_unknown"]
+                cu[pm.internal_sku] = cu.get(pm.internal_sku, _Z) + product_rev
         else:               # product_id 없음/미매칭 → 미매핑 잔차
             plat["unmapped"]["product_revenue"] += product_rev
             plat["unmapped"]["commission"] += commission
@@ -394,6 +404,7 @@ def compute_pnl_reconciliation(db: Session, dfrom: date, dto: date,
     #   product_revenue+shipping_revenue인데 여기 authoritative는 _line_revenue(=product 매출)만이라
     #   'revenue'로 부르면 배송/수동매출과 대조가 어긋난다. 동일 헬퍼·필터라 product_revenue/commission/
     #   cost는 권위 엔진 소계와 구성상 일치. 배송매출·광고·수동매출은 T3 스코프 밖(T5/Phase2, 계획 §5).
+    cost_unknown_by_sku: dict[str, Decimal] = {}   # SKU → 원가 미상 라인의 제품매출(표시 전용)
     if account is None:
         mkt = _agg_marketplace_by_sku(db, dfrom, dto)
         for plat, blk in sorted(mkt.items()):
@@ -404,6 +415,8 @@ def compute_pnl_reconciliation(db: Session, dfrom: date, dto: date,
                     plat, comp, blk["total"][comp], alloc,
                     {unmapped_key: blk["unmapped"][comp]},
                 ))
+            for sku, rev in blk["cost_unknown"].items():
+                cost_unknown_by_sku[sku] = cost_unknown_by_sku.get(sku, _Z) + rev
 
     # 컴포넌트별 날짜기준 명시(D-10) — 교차검증 시 각 소스 기준으로 대조.
     for c in components:
@@ -416,6 +429,21 @@ def compute_pnl_reconciliation(db: Session, dfrom: date, dto: date,
     # (codex T6 P2 — 총액까지 0으로 지우면 대조 대상을 잃고 UI가 '총액 0' 오해). trustworthy로 신뢰도 표기.
     by_sku, summary = _build_sku_rows(components)
     summary["trustworthy"] = conservation_ok
+    # ★원가 미상 표면화 — **금액은 이미 다 계산된 뒤**에 표식만 붙인다(합계·보존법칙 불변).
+    #   그 SKU의 `net_profit_allocated_only`는 원가가 빠진 값이라 **과대**다. 화면은 이 행의
+    #   순익을 「—」로 비우고(naver_ops와 같은 규율: 모르면 값 자체를 비운다), 합계는 그대로 낸다
+    #   — 미상은 보통 전체의 몇 %라 그것 때문에 나머지를 가리면 화면이 쓸모없어진다.
+    for r in by_sku:
+        rev_unknown = cost_unknown_by_sku.get(r["internal_sku"])
+        r["cost_known"] = rev_unknown is None
+        if rev_unknown is not None:
+            r["cost_unknown_revenue"] = rev_unknown
+    # 키는 alloc에 들어간 SKU이므로 by_sku에 반드시 나타난다 — 별도 교집합이 필요 없다.
+    # (account 지정 시엔 마켓플레이스가 스코프 밖이라 비어 있고, 그때 0은 «없음»이 아니라
+    #  «이 계정 조회에선 안 봄»이다 — 화면 문구가 그렇게 말한다.)
+    summary["cost_unknown_skus"] = len(cost_unknown_by_sku)
+    summary["cost_unknown_revenue"] = sum(cost_unknown_by_sku.values(), _Z)
+    summary["cost_unknown_scoped"] = account is None   # false면 미상 판정 자체를 안 한 것
     if not conservation_ok:
         by_sku = []  # SKU 행만 숨김. summary.reconciled_net_profit은 엔진 총액이라 유지.
     period = {"from": dfrom.isoformat(), "to": dto.isoformat()}
