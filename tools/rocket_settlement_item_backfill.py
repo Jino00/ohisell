@@ -11,12 +11,24 @@
 # ★함정1(페이징): page만 넘기면 20/48행에서 조용히 멈춘다. 1페이지는 totalCount 없이 호출해
 #   hidden input(name="totalCount")에서 읽고, 2페이지부터는 그 값을 같이 실어야 전량이 온다.
 #   (2026-08-06 라이브 확인: invoice=30608513, hidden totalCount=48, 1페이지 10행 → 5페이지.)
-# ★함정2(표 선택): 이 페이지엔 표가 여럿이다(요약 표 + 라인 표). **두 번째**(0-based index 1)가
-#   라인 표다. 헤더 토큰 매칭이 아니라 **인덱스로 고정**한다(이미 라이브로 검증된 사실).
+# ★함정2(표 선택): 이 페이지엔 보통 표가 둘이다(요약 표 + 라인 표) — 데이터가 있을 땐
+#   **두 번째**(0-based index 1)가 라인 표다. 그런데 **인덱스로 고정하면 깨진다**: 라인 0건인
+#   계산서(역발행 차감분 — 아래 참고)는 요약 표 자체가 렌더되지 않아 표가 **1개뿐**이고 그
+#   유일한 표가 라인 표라, index=1을 고집하면 못 찾는다(2026-08-06 라이브로 실제 발견한 함정).
+#   그래서 인덱스가 아니라 **헤더 토큰("SKU 번호"+"총 단가") 매칭**으로 표를 찾는다 — 표가
+#   둘일 때도 결국 같은 표(=index 1)를 집으므로 원 규칙과 결과는 같고, 표가 하나뿐인 0행
+#   케이스에서만 견고해진다.
 #   실측 헤더(16열, 확정 12열 이후에도 총 공급가액·총 세액·계산서번호·지급일이 더 있다):
 #   구분|번호|SKU 번호|SKU 명|입고/반출일자|물류센터|세금타입|수량|단가|공급가액|세액|총 단가|
 #   총 공급가액|총 세액|계산서번호|지급일 — 백엔드 파서(clients/coupang/rocket_supplier.py)는
 #   헤더 이름 매칭이라 여분 컬럼은 무시하므로 문제 없다.
+#
+# ★라인 0건 계산서(역발행 차감분): 판정 완료(코디네이터, docs/references/44_*.md §8-3) —
+#   결함이 아니라 원천의 성격이다. 쿠팡이 역발행 차감분을 SKU 단위로 쪼개 주지 않으므로
+#   `/scm/receive/detail`엔 애초에 라인이 없다. 백엔드 매출귀속(`rocket_1p_channel_pnl.py`)의
+#   `NOT EXISTS(라인)` 폴백이 이런 계산서를 자동으로 **작성일 기준**으로 잡아 총액을 보존한다.
+#   → `total_price=0`이면서 DB `payment_amount<0`인 계산서는 실패도 금액불일치도 아니고
+#   **"라인없음(차감계산서, 작성일 폴백)"**으로 따로 분류한다(아래 process_invoice).
 #
 # CDP 연결: 로켓 supplier 전용 Chrome, 포트 9225(~/.ohisell_rocket_fetcher.json cdp_port).
 #   rocket_supplier_recon.py cmd_fetch와 동일한 **원시 websocket + Runtime.evaluate** 패턴을
@@ -353,18 +365,38 @@ def push_invoice(cfg: dict, invoice_seq: int, header: list | None, data: list[li
 def process_invoice(cdp: CdpEval, cfg: dict, invoice_seq: int, payment_amount: int) -> dict:
     header, data, total_count, err = fetch_invoice_lines(cdp, invoice_seq)
     if err:
-        return {"invoice_seq": invoice_seq, "payment_amount": payment_amount, "ok": False, "error": err}
+        return {"invoice_seq": invoice_seq, "payment_amount": payment_amount, "ok": False,
+                "category": "fetch_failed", "error": err}
     resp, perr = push_invoice(cfg, invoice_seq, header, data, total_count)
     if perr:
-        return {"invoice_seq": invoice_seq, "payment_amount": payment_amount, "ok": False, "error": perr}
+        return {"invoice_seq": invoice_seq, "payment_amount": payment_amount, "ok": False,
+                "category": "push_failed", "error": perr}
     truncated = bool(resp.get("truncated"))
+    lines = resp.get("lines")
     total_price = resp.get("total_price")
     diff = (total_price - payment_amount) if isinstance(total_price, (int, float)) else None
+    # ★역발행 차감분(코디네이터 판정, docs/references/44_*.md §8-3): payment_amount<0인 계산서는
+    #   쿠팡이 SKU 라인을 아예 안 준다 → lines=0/total_price=0이 **정상**이다. 실패도 금액불일치도
+    #   아니라 "라인없음(차감계산서)"로 따로 분류한다(백엔드 NOT EXISTS 폴백이 작성일로 귀속).
+    if lines == 0 and payment_amount < 0:
+        return {
+            "invoice_seq": invoice_seq,
+            "payment_amount": payment_amount,
+            "ok": True,
+            "category": "no_lines_deduction",
+            "lines": lines,
+            "expected": resp.get("expected"),
+            "truncated": truncated,
+            "total_price": total_price,
+            "diff": diff,
+            "error": None,
+        }
     return {
         "invoice_seq": invoice_seq,
         "payment_amount": payment_amount,
         "ok": (not truncated) and diff == 0,
-        "lines": resp.get("lines"),
+        "category": "matched" if (not truncated and diff == 0) else "mismatch",
+        "lines": lines,
         "expected": resp.get("expected"),
         "truncated": truncated,
         "total_price": total_price,
@@ -478,16 +510,22 @@ def main() -> None:
         results = [r for r in results if r["invoice_seq"] not in retried_seqs] + retry_results
         round_no += 1
 
-    ok_count = sum(1 for r in results if r["ok"])
-    log(f"=== ALL 완료 — 총 {len(results)}건 / 성공 {ok_count}건 / 최종실패 {len(failed)}건 ===")
+    matched = [r for r in results if r.get("category") == "matched"]
+    no_lines = [r for r in results if r.get("category") == "no_lines_deduction"]
+    mismatches = [r for r in results if r.get("category") == "mismatch"]
+    log(f"=== ALL 완료 — 총 {len(results)}건 / 금액일치 {len(matched)}건 / "
+        f"라인없음(차감계산서) {len(no_lines)}건 / 금액불일치 {len(mismatches)}건 / 최종실패 {len(failed)}건 ===")
     if failed:
         FAILED_FILE.write_text(json.dumps(failed, ensure_ascii=False, indent=2), encoding="utf-8")
         log(f"최종 실패 목록 저장: {FAILED_FILE}")
         for seq, amt in failed:
             log(f"  ★최종실패 invoice={seq} payment_amount={amt}")
-    mismatches = [r for r in results if r.get("error") == "금액불일치"]
+    if no_lines:
+        for r in no_lines:
+            log(f"  라인없음(차감계산서) invoice={r['invoice_seq']} payment_amount={r.get('payment_amount')} "
+                f"(작성일 폴백 — 정상)")
     if mismatches:
-        log(f"★금액 불일치 {len(mismatches)}건:")
+        log(f"★금액 불일치(음수 계산서 제외) {len(mismatches)}건:")
         for r in mismatches:
             log(f"  invoice={r['invoice_seq']} total_price={r.get('total_price')} "
                 f"payment_amount={r.get('payment_amount')} diff={r.get('diff')}")
