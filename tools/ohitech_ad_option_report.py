@@ -13,29 +13,40 @@
     Retail 옵션 321개 중 298개(92.8%)가 1P 채널 매핑(ch5)에 있고 RG·3P 매핑과는 교집합 0.
     → "2025년 7월부터 1P로 전환"(Jino)이 데이터로 확인됐다.
 
-사용: ohitech_ad_option_report.py YYYYMMDD YYYYMMDD [출력.xlsx]
+사용: ohitech_ad_option_report.py YYYYMMDD YYYYMMDD [출력.xlsx] [--report-type pa|nca|da]
   CDP 9224(오하이테크 광고 Chrome)에 붙어 same-origin으로 호출한다. 보고서 생성에 20~30초.
+  ★`ReportType` enum은 `PA`·`NCA`·`DA`(소문자도 됨)다 — NCA도 받을 수 있다(ref 46 §5-1④ 정정).
 
-함정 둘 (둘 다 실제로 걸렸다):
-  ① 탭이 오래 유휴면 fetch가 `Failed to fetch`로 죽는다(Akamai stale) → 페이지를 리로드해
-     오리진을 재무장한 뒤 호출할 것.
-  ② async IIFE가 **문자열을 그대로 반환하면** CDP가 빈 객체({})를 준다 — `JSON.stringify`로
-     한 겹 감싸야 값이 온다.
+함정 (전부 실제로 걸렸다 — 이제 `ohitech_ad_cdp`가 구조로 막는다):
+  ① 탭이 유휴면 fetch가 `Failed to fetch`로 죽는데, 옛 판은 그걸 빈 응답으로 받아
+     **"캠페인 0개"**로 출력하고 정상 종료했다(9개월이 조용히 건너뛰어졌다).
+     → `connect()`가 리로드로 재무장하고, `gql()`이 실패를 전부 예외로 올린다.
+     이제 "캠페인 0개"는 그 관문을 통과한 뒤에만 나오므로 **진짜 0건**이다.
+  ② ★**행이 많으면 서버가 xlsx가 아니라 TSV를 준다**(2025-10 NCA = 188,094행 / 72MB).
+     처음엔 "다운로드가 깨졌다"고 오진했다 — 조각으로 다시 받아 보니 길이가 정확히 같고
+     내용도 멀쩡했다(TSV 합계가 주 단위 5개와 차이 0원). 진짜 결함은 **포맷이 바뀌는데
+     파서가 xlsx만 가정한 것 + 받은 것을 확인하지 않은 것**이었다.
+     → `sniff_format()`으로 판정해 확장자를 맞춰 저장하고, `read_report()`가 둘 다 읽는다.
+     ⚠️단 prod `option-ingest`는 **xlsx만** 받는다 — TSV가 오면 구간을 쪼개 다시 받아야 한다.
   ③ openpyxl로 옵션ID를 읽으면 float이 되어 `.0`이 붙는다 — 정수 문자열로 정규화할 것.
      (이걸 안 하면 카탈로그 조인이 전부 0건이 되어 "겹치지 않는다"는 거짓 결론이 난다.)
 """
-
-import base64
-import json
+import os
 import sys
-import time
-import urllib.request
 
-import websocket
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-PORT = 9224
-GQL = "https://advertising.coupang.com/marketing-reporting/v2/graphql"
-EXCEL = "https://advertising.coupang.com/marketing-reporting/v2/api/excel-report?id="
+from ohitech_ad_cdp import (  # noqa: E402
+    EXCEL_URL,
+    GraphQLError,
+    SessionDead,
+    connect,
+    download_binary,
+    gql,
+    poll_report,
+    sniff_format,
+    suggest_suffix,
+)
 
 Q_CAMPAIGNS = (
     "query GetCampaignListInBillboard($startDate: Int!, $endDate: Int!, $reportType: ReportType!) {\n"
@@ -56,100 +67,99 @@ Q_LIST = (
     "    }\n    __typename\n  }\n}\n"
 )
 
+VALID_TYPES = ("pa", "nca", "da")
 
-def connect():
-    ts = json.load(urllib.request.urlopen(f"http://127.0.0.1:{PORT}/json", timeout=5))
-    tab = [t for t in ts if t.get("type") == "page" and "advertising.coupang.com" in t.get("url", "")][0]
-    ws = websocket.create_connection(tab["webSocketDebuggerUrl"], suppress_origin=True, max_size=None)
-    mid = [0]
-
-    def call(m, p=None):
-        mid[0] += 1
-        ws.send(json.dumps({"id": mid[0], "method": m, "params": p or {}}))
-        while True:
-            x = json.loads(ws.recv())
-            if x.get("id") == mid[0]:
-                return x
-    call("Runtime.enable")
-    return ws, call
+# 종료 코드 — 호출부(백필 드라이버)가 "세션 문제"와 "정말 없음"을 가를 수 있게 나눈다.
+RC_OK = 0
+RC_FAIL = 1           # 그 외 실패
+RC_SESSION = 3        # 로그인/오리진 죽음 — 재시도해도 같으니 페처 갱신부터
+RC_EMPTY = 4          # 세션은 살아 있는데 그 구간에 캠페인이 정말 없다
 
 
-def js(call, expr):
-    r = call("Runtime.evaluate", {"expression": expr, "awaitPromise": True, "returnByValue": True})
-    v = r.get("result", {}).get("result", {})
-    if "value" not in v:
-        raise RuntimeError(json.dumps(r)[:400])
-    return v["value"]
+def main() -> int:
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    rt = "pa"
+    for a in sys.argv[1:]:
+        if a.startswith("--report-type"):
+            rt = (a.split("=", 1)[1] if "=" in a else "pa").strip().lower()
+    if "--report-type" in sys.argv:
+        i = sys.argv.index("--report-type")
+        if i + 1 < len(sys.argv):
+            rt = sys.argv[i + 1].strip().lower()
+            args = [a for a in args if a != sys.argv[i + 1]]
+    if rt not in VALID_TYPES:
+        print(f"--report-type은 {VALID_TYPES} 중 하나여야 한다 (받은 값: {rt!r})", file=sys.stderr)
+        return RC_FAIL
+    if len(args) < 2:
+        print(__doc__, file=sys.stderr)
+        return RC_FAIL
+    sd, ed = int(args[0]), int(args[1])
+    out = args[2] if len(args) > 2 else "opt_report.xlsx"
 
+    try:
+        call = connect()          # 리로드로 재무장 — 실패하면 SessionDead
+    except SessionDead as ex:
+        print(f"세션: {ex}", file=sys.stderr)
+        return RC_SESSION
 
-def gql(call, body):
-    # ★async IIFE가 문자열을 그대로 반환하면 CDP가 빈 객체({})를 준다 — JSON.stringify로
-    #   한 겹 감싸야 값이 온다(로켓 페처 cdp 헬퍼에서 겪은 것과 같은 함정).
-    expr = ("(async(p)=>{const r=await fetch(%s,{method:'POST',headers:{'content-type':'application/json'},"
-            "body:JSON.stringify(p),credentials:'include'});"
-            "return JSON.stringify({s:r.status,b:await r.text()});})(%s)"
-            % (json.dumps(GQL), json.dumps(body)))
-    v = js(call, expr)
-    d = v if isinstance(v, dict) else json.loads(v)
-    return json.loads(d["b"]) if isinstance(d, dict) and "b" in d else d
+    try:
+        d = gql(call, {"operationName": "GetCampaignListInBillboard",
+                       "variables": {"startDate": sd, "endDate": ed, "reportType": rt},
+                       "query": Q_CAMPAIGNS})
+        camps = (d.get("data") or {}).get("getCampaignList") or []
+        print(f"캠페인 {len(camps)}개 (reportType={rt})", file=sys.stderr)
+        if not camps:
+            # ★여기 오려면 재무장·비200·HTML·GraphQL errors를 전부 통과했어야 한다.
+            #   그러므로 이건 세션 문제가 아니라 **정말 0건**이다.
+            print(f"  → 세션은 살아 있다. {sd}~{ed} 구간에 {rt} 캠페인이 실제로 없다.", file=sys.stderr)
+            return RC_EMPTY
+        ids = [str(c["id"]) for c in camps if c.get("id")]
 
+        d = gql(call, {"variables": {"reportType": rt, "startDate": sd, "endDate": ed,
+                                     "dateGroup": "daily", "granularity": "keyword",
+                                     "excludeIfNoClickCount": True, "campaignIds": ids},
+                       "query": M_REQUEST})
+        req = (d.get("data") or {}).get("requestReport")
+        if not req or not req.get("id"):
+            print(f"requestReport 실패: {d}", file=sys.stderr)
+            return RC_FAIL
+        rid = str(req["id"])
+        print(f"보고서 id={rid} status={req.get('status')}", file=sys.stderr)
 
-def main():
-    sd, ed = int(sys.argv[1]), int(sys.argv[2])
-    out = sys.argv[3] if len(sys.argv) > 3 else "opt_report.xlsx"
-    ws, call = connect()
+        poll_report(call, rid, rt, Q_LIST)
 
-    d = gql(call, {"operationName": "GetCampaignListInBillboard",
-                   "variables": {"startDate": sd, "endDate": ed, "reportType": "pa"},
-                   "query": Q_CAMPAIGNS})
-    camps = (d.get("data") or {}).get("getCampaignList") or []
-    print(f"캠페인 {len(camps)}개", file=sys.stderr)
-    if not camps:
-        print("캠페인 없음:", json.dumps(d)[:300], file=sys.stderr)
-        return 1
-    ids = [str(c["id"]) for c in camps if c.get("id")]
+        def tick(done, total):
+            print(f"  받는 중 {done:,}/{total:,} 바이트", file=sys.stderr)
 
-    d = gql(call, {"variables": {"reportType": "pa", "startDate": sd, "endDate": ed,
-                                 "dateGroup": "daily", "granularity": "keyword",
-                                 "excludeIfNoClickCount": True, "campaignIds": ids},
-                   "query": M_REQUEST})
-    req = (d.get("data") or {}).get("requestReport")
-    if not req or not req.get("id"):
-        print("requestReport 실패:", json.dumps(d)[:400], file=sys.stderr)
-        return 1
-    rid = str(req["id"])
-    print(f"보고서 id={rid} status={req.get('status')}", file=sys.stderr)
+        data = download_binary(call, EXCEL_URL + rid, progress=tick)
+    except SessionDead as ex:
+        print(f"세션: {ex}", file=sys.stderr)
+        return RC_SESSION
+    except (GraphQLError, RuntimeError, ValueError) as ex:
+        print(f"실패: {ex}", file=sys.stderr)
+        return RC_FAIL
+    finally:
+        try:
+            call.close()
+        except Exception:  # noqa: BLE001
+            pass
 
-    for _ in range(100):
-        time.sleep(3)
-        d = gql(call, {"variables": {"reportType": "pa", "page": 1, "pageSize": 20, "duration": 30},
-                       "query": Q_LIST})
-        reports = ((d.get("data") or {}).get("reportList") or {}).get("reports") or []
-        me = [r for r in reports if str(r.get("id")) == rid]
-        st = me[0].get("status") if me else "?"
-        print(f"  status={st}", file=sys.stderr)
-        if st in ("COMPLETED", "completed", "DONE", "done", "SUCCESS"):
-            break
-    else:
-        print("폴링 타임아웃", file=sys.stderr)
-        return 1
-
-    expr = ("(async()=>{const r=await fetch(%s+%s,{credentials:'include'});"
-            "const b=await r.arrayBuffer();let s='';const u=new Uint8Array(b);"
-            "for(let i=0;i<u.length;i++)s+=String.fromCharCode(u[i]);"
-            "return JSON.stringify({s:r.status,b64:btoa(s)});})()"
-            % (json.dumps(EXCEL), json.dumps(rid)))
-    _v = js(call, expr)
-    res = _v if isinstance(_v, dict) else json.loads(_v)
-    if res["s"] >= 400:
-        print("다운로드 실패 status", res["s"], file=sys.stderr)
-        return 1
-    data = base64.b64decode(res["b64"])
+    # ★받은 것이 무엇인지 **판정하고 나서** 저장한다(함정 ②).
+    #   쿠팡은 행이 많으면 xlsx가 아니라 TSV를 준다 — 확장자만 믿으면 BadZipFile이 나고
+    #   "다운로드가 깨졌다"고 오진한다(실제로 한 번 그렇게 오진했다).
+    fmt = sniff_format(data)
+    if fmt == "unknown":
+        print(f"받은 {len(data):,} 바이트가 xlsx도 TSV도 아니다 — 저장하지 않는다. "
+              f"머리 60바이트: {data[:60]!r}", file=sys.stderr)
+        return RC_FAIL
+    want = suggest_suffix(fmt)
+    if not out.endswith(want):
+        out = os.path.splitext(out)[0] + want
+        print(f"  · 서버가 {fmt.upper()}를 줬다 → 확장자를 {want}로 맞춘다", file=sys.stderr)
     with open(out, "wb") as f:
         f.write(data)
-    print(f"저장: {out} ({len(data):,} bytes)", file=sys.stderr)
-    ws.close()
-    return 0
+    print(f"저장: {out} ({len(data):,} bytes, {fmt} 확인됨)", file=sys.stderr)
+    return RC_OK
 
 
 if __name__ == "__main__":
