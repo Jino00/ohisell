@@ -10,7 +10,17 @@ build/
 .gstack/
 
 # 로컬 DB 백업 (마이그레이션 안전장치, 커밋 금지)
+# ★패턴이 빗나가 세 파일이 실제로 추적되고 있었다(2026-08-06 발견, chore/untrack-db-files):
+#   · backend/ohisell.db.bak_pre_s1 (22.3MB) — 위 규칙은 `.bak.`(점)인데 실물은 `bak_`(언더스코어)
+#   · backend/ohisell.db-shm / -wal          — `*.db`는 `.db-shm`을 잡지 못한다
+#   sqlite 사이드카는 실행 중 자동 생성·삭제되므로, 추적되면 로컬에서 DB를 만질 때마다 diff가
+#   뜨고 남의 커밋에 섞인다(실제로 그렇게 한 번 섞였다). 아래로 전부 덮는다.
+backend/ohisell.db.bak*
 backend/ohisell.db.bak.*
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
 tools/*.log
 .ohisell_ad_*
 
