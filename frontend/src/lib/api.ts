@@ -1715,13 +1715,25 @@ export interface NaverSalesSummaryData {
   cost_unknown_unmapped?: number;
   cost_unknown_zero_cost?: number;
   cost_unknown_ambiguous?: number;   // 활성 매핑이 여럿인데 원가가 갈림 → 중복 매핑 정리 필요
+  // 반품·교환 배송 손익(귀속=클레임 **완료일**, 주문일 아님). 종전엔 이 패널에 통째로 없어서
+  // 반품이 늘어도 이익이 반응하지 않았다. claim_net은 부호가 양수일 수도 있다 —
+  // 반품비 청구가 출고+회수비를 넘는 건이 있다(반품의 진짜 손실은 매출을 잃는 쪽이다).
+  claim_count?: number;
+  claim_income?: string; claim_cost?: string; claim_net?: string;
 }
 
 /** 오늘(days=0) 광고비의 출처. 다른 기간에선 null.
  *  kind=today_snapshot → 검색광고 당일 누적(as_of 시각 기준) · today_no_snapshot → 아직 없음.
  *  scope=search_only → 디스플레이(GFA·ADVoost)는 실차감이라 당일치가 없어 빠져 있다. */
 export interface AdBasis {
-  kind: "today_snapshot" | "today_no_snapshot";
+  // kind=period → **기간 탭**(7·15·30일). `ad_costs`는 D+1이라 오늘 행이 없어서, 창이 오늘을
+  //   포함하면 오늘 **검색광고** 당일 누적을 더한다(today_search_added). 디스플레이는 못 더한다
+  //   — 비즈머니 실차감이 유일 경로인데 D−1까지만 주고, 당일 총액은 상품별 분해가 없다.
+  //   즉 이 합계는 «검색은 오늘까지 + 디스플레이는 어제까지»인 혼합 축이다.
+  kind: "today_snapshot" | "today_no_snapshot" | "period";
+  today_search_added?: string;
+  today_search_source?: "today_snapshot" | "ad_costs" | "pending";
+  today_display_missing?: boolean;
   as_of: string | null;
   scope: "search_only";
   basis?: "day_max";     // 캠페인별 당일 최대 누적 합(최신 배치가 아니다 — 원천이 후퇴하기 때문)

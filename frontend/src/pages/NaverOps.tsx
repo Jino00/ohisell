@@ -1027,14 +1027,34 @@ export default function NaverOps() {
                   : data.ad_basis.kind === "today_snapshot"
                     ? `검색광고만(당일 누적·관측 최대치) · ${hhmm(data.ad_basis.as_of)} 확인 · 매시 05분 수집 · 디스플레이는 익일 확정`
                     : "오늘 수집 전 — 첫 스냅샷(매시 05분) 후 표시"
-                : "검색+디스플레이 · 상품별 미배분"
+                : data?.ad_basis?.kind === "period"
+                  // ★기간 탭은 «검색은 오늘까지 + 디스플레이는 어제까지»인 혼합 축이다.
+                  //   섞였다는 사실을 숨기면 "왜 광고 리포트와 다르냐"에 답할 근거가 없다.
+                  ? data.ad_basis.today_search_source === "today_snapshot"
+                    ? `검색+디스플레이 · 오늘 검색광고 ${won(data.ad_basis.today_search_added)} 포함(${hhmm(data.ad_basis.as_of)} 확인) · 오늘 디스플레이는 원천에 당일치가 없어 빠짐`
+                    : data.ad_basis.today_search_source === "pending"
+                      ? "검색+디스플레이 · 오늘치는 아직 «모름»(수집 전) — 그만큼 이익이 과대"
+                      : "검색+디스플레이 · 상품별 미배분"
+                  : "검색+디스플레이 · 상품별 미배분"
             }
           />
           <SummaryCard
             label="물류비(한진)"
             value={won(s.logistics)}
-            sub={`배송 ${s.shipment_count}건 × 1,900`}
+            sub={`배송 ${s.shipment_count}건 (반품 회수비 포함)`}
           />
+          {/* ★반품·교환 배송 손익 — 종전엔 이 패널에 통째로 없어서 «반품이 늘어도 이익이 반응하지
+              않았다»(반품이 공짜인 것처럼 보였다). 귀속은 클레임 **완료일**이라 지난 기간 이익이
+              반품이 생길 때마다 흔들리지 않는다.
+              ★부호를 «손실»로 단정하지 않는다 — 반품비 청구가 출고+회수비를 넘는 건은 배송 축만
+              보면 흑자다. 반품의 진짜 손실은 매출을 잃는 쪽이고 그건 매출 카드에 이미 반영돼 있다. */}
+          {(s.claim_count ?? 0) > 0 && (
+            <SummaryCard
+              label="반품·교환 배송손익"
+              value={won(s.claim_net)}
+              sub={`${s.claim_count}건 · 수입 ${won(s.claim_income)} − 비용 ${won(s.claim_cost)} · 완료일 귀속`}
+            />
+          )}
           {/* ★광고비를 모르면 이익도 모른다 — 값을 「—」로 두고 색도 칠하지 않는다.
               종전엔 이익 카드에만 경고를 달았는데, 이익률 카드는 경고도 없이 45.5pp 과대(94% vs
               48.5%)를 파란색(양호)으로 띄웠다. 이익률을 먼저 보는 사람은 경고를 한 번도 못 본다.
