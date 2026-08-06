@@ -694,6 +694,11 @@ export default function NaverOps() {
   useEffect(() => {
     if (!didInitLoad.current) {
       didInitLoad.current = true;
+      // ★setLoading(true)를 먼저 켠다: syncRealtime은 전 채널 수집이라 수 초 걸리는데, 그동안
+      //   loading=false·data=null이라 요약도 스켈레톤도 테이블도 **아무것도 렌더되지 않아
+      //   화면이 통째로 비어 있었다**. dev에서는 StrictMode 이중 마운트가 두 번째 이펙트에서
+      //   즉시 load를 불러 이 백지를 가려버려, 내 확인을 통과했다(적대 리뷰가 잡음).
+      setLoading(true);
       syncRealtime().catch(() => {}).then(() => loadRef.current());
       return;
     }
@@ -808,7 +813,9 @@ export default function NaverOps() {
           {PERIODS.map((p) => (
             <button
               key={p.days}
-              onClick={() => setDays(p.days)}
+              // 같은 기간을 다시 눌러도 재조회한다 — days가 안 바뀌면 이펙트가 안 돌아
+              // 실패 후 회복 수단이 없었다(다른 기간을 경유하거나 F5뿐이었다).
+              onClick={() => { if (days === p.days) load(); else setDays(p.days); }}
               className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md font-medium transition-colors ${
                 days === p.days
                   ? "bg-green-600 text-white"
@@ -889,7 +896,7 @@ export default function NaverOps() {
         <div className="relative mb-6">
           <div
             className={`grid grid-cols-2 sm:grid-cols-4 gap-3 transition-opacity duration-150 ${
-              loading ? "opacity-40" : ""
+              loading ? "opacity-40 pointer-events-none" : ""
             }`}
             aria-busy={loading}
           >
@@ -958,7 +965,7 @@ export default function NaverOps() {
       {sorted.length > 0 && (
         <div
           className={`overflow-x-auto rounded-lg border border-gray-200 transition-opacity duration-150 ${
-            loading ? "opacity-40" : ""
+            loading ? "opacity-40 pointer-events-none" : ""
           }`}
           aria-busy={loading}
         >
