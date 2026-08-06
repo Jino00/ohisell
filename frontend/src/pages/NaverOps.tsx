@@ -797,6 +797,10 @@ export default function NaverOps() {
   // 원천 후퇴: 최신 조회가 관측 최대치보다 낮다. 값은 최대치를 쓰되 그 사실을 화면이 말한다 —
   // 조용히 보정하면 "왜 광고 리포트와 다르냐"는 질문에 답할 근거가 사라진다.
   const adRegressedBy = Number(data?.ad_basis?.regressed_by ?? 0) || 0;
+  // 원가 미상 상품 수 — 요약 「이익」·「이익률」 카드가 **스스로** 이 사실을 말해야 한다.
+  // ★적대 리뷰 P1: 배너와 원가 카드에만 경고를 두면, 이 PR이 방금 고친 것과 같은 구조가 된다
+  //   (값은 확정 숫자에 파란색인데 경고는 카드 밖에만 있음 → 훑는 눈에는 카드가 이긴다).
+  const costUnknownN = s?.cost_unknown_products ?? 0;
 
   function Th({ label, sk, col }: { label: string; sk?: SortKey; col?: ColKey }) {
     const active = col ? (colFilters[col]?.size ?? 0) > 0 : false;
@@ -896,11 +900,17 @@ export default function NaverOps() {
           왜 요약까지 「—」로 만들지 않나: 미상은 보통 매출의 몇 %인데 그 때문에 나머지를 못 보게
           하면 화면이 쓸모없어진다. 대신 얼마짜리 매출이 원가 없이 계산됐는지를 여기서 말한다.
           ★과대 금액을 추정해 적지 않는다 — 평균 원가율을 곱하면 그럴듯해지고 근거는 사라진다. */}
-      {(s?.cost_unknown_products ?? 0) > 0 && (
+      {costUnknownN > 0 && (
         <div className="mb-3 px-3 py-2 rounded border border-amber-300 bg-amber-50 text-xs text-amber-800">
-          ⚠️ <b>원가 미상 {s!.cost_unknown_products}개 상품</b>(매출 {won(s!.cost_unknown_revenue)})의
-          이익·이익률은 <b>«모름»</b>으로 비워 뒀습니다. 이 상품들의 원가가 요약에서 빠져 있으므로
-          <b> 위 요약 이익은 그만큼 과대</b>입니다.
+          ⚠️ <b>원가 미상 {costUnknownN}개 상품</b>(매출 {won(s!.cost_unknown_revenue)})의
+          이익·이익률은 <b>«모름»</b>으로 비워 뒀습니다.
+          {/* ★"그만큼 과대"라고 쓰지 않는다(적대 리뷰 P1) — 문장에서 굵은 숫자가 매출 하나뿐이라
+              지시어가 매출에 붙어 읽힌다. 과대분은 매출이 아니라 **빠진 원가**이고, 그 액수는
+              모른다(그래서 «모름»이다). 추정해 적지 않는 대신 **방향만** 말한다. */}
+          {" "}이 상품들의 <b>원가가 요약에서 빠져</b> 있습니다 —
+          {adPending
+            ? <> 지금은 광고비도 «모름»이라 요약 이익 자체가 「—」입니다.</>
+            : <> 실제 이익은 <b>위 요약보다 작습니다</b>(빠진 금액은 원가를 몰라 계산 불가).</>}
           {(s!.cost_unknown_unmapped ?? 0) > 0 && <> · 상품 매핑 필요 <b>{s!.cost_unknown_unmapped}개</b></>}
           {(s!.cost_unknown_zero_cost ?? 0) > 0 && <> · 원가 입력 필요 <b>{s!.cost_unknown_zero_cost}개</b></>}
           <> · 어느 상품인지는 아래 표에 표시됩니다.</>
@@ -986,8 +996,11 @@ export default function NaverOps() {
           <SummaryCard
             label="원가"
             value={won(s.cost)}
-            sub={(s.cost_unknown_products ?? 0) > 0
-              ? `원가 미상 ${s.cost_unknown_products}개 제외 — 실제 원가는 이보다 큼`
+            // ★"이보다 큼"이 아니라 "이 값 이상"이다(적대 리뷰 P2) — 미상 상품의 원가가 정말 0일
+            //   수도 있다(사은품). 모른다고 해놓고 방향을 단정하면 그것도 거짓이다. 단 원가는
+            //   음수일 수 없으므로 "이상"은 확실히 참이다.
+            sub={costUnknownN > 0
+              ? `원가 미상 ${costUnknownN}개 빠짐 — 실제 원가는 이 값 이상`
               : undefined}
           />
           <SummaryCard
@@ -1025,21 +1038,30 @@ export default function NaverOps() {
               종전엔 이익 카드에만 경고를 달았는데, 이익률 카드는 경고도 없이 45.5pp 과대(94% vs
               48.5%)를 파란색(양호)으로 띄웠다. 이익률을 먼저 보는 사람은 경고를 한 번도 못 본다.
               이 저장소의 선례와도 같다: 커버리지 미달이면 순이익 「—」, 원가 미상은 0이 아니라 None. */}
+          {/* ★원가 미상이 하나라도 있으면 강조색을 빼고 카드 스스로 그 사실을 말한다(적대 리뷰 P1).
+              값을 「—」로 비우지는 않는다 — 미상은 보통 매출의 몇 %라 전체를 가리면 손해가 더 크다.
+              대신 "양호(파랑)"라는 확신 신호를 거둔다: 이 숫자는 원가 일부가 빠진 값이다. */}
           <SummaryCard
             label="이익"
             value={adPending ? "—" : won(s.profit)}
             sub={
               adPending
                 ? "광고비를 모르는 동안은 이익도 «모름»"
-                : data?.ad_basis ? "광고비=검색 당일 누적(관측 최대치)" : undefined
+                : costUnknownN > 0
+                  ? `원가 미상 ${costUnknownN}개 빠짐 — 실제 이익은 이 값 이하`
+                  : data?.ad_basis ? "광고비=검색 당일 누적(관측 최대치)" : undefined
             }
-            highlight={adPending ? undefined : profitN >= 0 ? "blue" : "red"}
+            highlight={adPending || costUnknownN > 0 ? undefined : profitN >= 0 ? "blue" : "red"}
           />
           <SummaryCard
             label="이익률"
             value={adPending ? "—" : s.profit_rate ? pct(s.profit_rate) : "—"}
-            sub={adPending ? "광고비 «모름»" : undefined}
-            highlight={adPending ? undefined : profitN >= 0 ? "blue" : "red"}
+            sub={
+              adPending ? "광고비 «모름»"
+              : costUnknownN > 0 ? `원가 미상 ${costUnknownN}개 빠짐 — 실제는 이 값 이하`
+              : undefined
+            }
+            highlight={adPending || costUnknownN > 0 ? undefined : profitN >= 0 ? "blue" : "red"}
           />
           <SummaryCard
             label="검색광고 전환매출"
