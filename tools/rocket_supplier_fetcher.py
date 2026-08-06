@@ -1538,6 +1538,17 @@ def _sales_records(payload: dict, day: date) -> list[dict]:
                                             pvToOrder 0.12269938650306748이 자릿수까지 일치).
                                             계약이 0~1을 요구하므로 100으로 나누지 않는다.
       product_name    ← itemName(옵션명; 없으면 productName)
+
+    추가 매핑(D-CPP-11, 2026-08-06) — 같은 응답에 이미 오던 값이라 **추가 요청 0**:
+      page_views      ← 〃.totalPageViews  (화면 「조회」)
+      orders          ← 〃.totalOrders     (화면 「주문」)  ※conversion_rate = orders/page_views
+      brand_name·category_path·is_item_winner·is_oos·rating_count·rating_score ← vendorItemDetails
+    ★후자 6개는 **날짜별 값이 아니라 조회 시점의 현재값**이다(실측: 08-04와 06-05를 공통 옵션
+      22개로 대조했더니 전부 동일. 같은 응답의 metrics는 날짜별로 달랐으므로 대조군이 성립한다).
+      백엔드가 이 값들을 일별 행이 아니라 `coupang_rocket_option_sku` 최신값으로만 쓴다.
+    ⚠️totalAddToCart·searchVolume·srpClick·srpClickShare는 **일부러 안 보낸다** — 3개 날짜
+      (08-04·07-15·06-05) 전 옵션에서 0이었다(프리미엄 데이터 2.0 등급 지표로 보인다).
+      0을 보내면 "관측 없음"과 "정말 0"이 구분되지 않는다. 등급 전환 후 재확인할 것.
     ★qty/revenue 키는 **항상 넣는다**(값이 None이어도): 백엔드 파서는 '키 없음 = 매핑이 필드명을
       놓침'으로 보고 행을 skip하고, '키 있음 + 빈 값 = 0판매일'로 본다. 쿠팡이 필드명을 바꾸면
       전 행의 값이 None이 되어 배치 경보(blank_qty==accepted)가 울린다 — 이게 유일한 탐지 경로다.
@@ -1561,6 +1572,7 @@ def _sales_records(payload: dict, day: date) -> list[dict]:
         sku = None
         if isinstance(skus, list) and len(skus) == 1 and skus[0] not in (None, ""):
             sku = str(skus[0])
+        cat = det.get("categoryPath")
         out.append({
             "option_id": str(vi),
             "date": day.isoformat(),
@@ -1570,6 +1582,17 @@ def _sales_records(payload: dict, day: date) -> list[dict]:
             "visitors": met.get("totalUniqueVisitor"),
             "conversion_rate": met.get("pvToOrder"),
             "product_name": det.get("itemName") or det.get("productName"),
+            # ── 퍼널 지표(D-CPP-11) — 날짜별 값. 화면과 원 단위 일치 실증(08-04 Z폴드8:
+            #   조회 1,540 · 주문 162 · 방문자 765 · 판매 152). conversion_rate == orders/page_views.
+            "page_views": met.get("totalPageViews"),
+            "orders": met.get("totalOrders"),
+            # ── 옵션 속성 — **현재값**이라 백엔드가 option_sku 행에만 쓴다(일별 아님).
+            "brand_name": det.get("brandName"),
+            "category_path": " > ".join(str(x) for x in cat) if isinstance(cat, list) else cat,
+            "is_item_winner": det.get("isItemWinner"),
+            "is_oos": det.get("isOOS"),
+            "rating_count": det.get("ratingCount"),
+            "rating_score": det.get("ratingReview"),   # ★ratingReview=평점(4.6), ratingCount=리뷰수
         })
     return out
 
