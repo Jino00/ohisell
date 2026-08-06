@@ -126,13 +126,37 @@ _GFA_AUTO_SOURCES = ("gfa:advoost", "gfa:da")
 _GFA_MANUAL_SOURCE = "gfa:쇼핑"
 
 
-def _gfa_span(db: Session, where: str, params: dict) -> dict:
-    """ad_costs의 특정 source 집합에 대한 적재 구간 요약."""
+def _naver_channel_id(db: Session) -> int | None:
+    row = db.execute(text("SELECT id FROM channels WHERE code = 'NAVER' LIMIT 1")).fetchone()
+    return row[0] if row else None
+
+
+def _gfa_span(db: Session, sources: tuple[str, ...] | None, channel_id: int | None) -> dict:
+    """ad_costs의 GFA 계열 적재 구간 요약.
+
+    sources=None이면 `gfa:%` 계열 전체. 그 외에는 명시된 source들만.
+    ★SQL 조각이 아니라 **값**을 받는다(적대 리뷰 P2): 호출부가 문자열로 조건을 넘기는
+    시그니처면 다음 사람이 거기에 요청 파라미터를 흘려 넣기 쉽다. 지금 안 뚫렸다는 것과
+    뚫리기 쉬운 구조라는 것은 다른 얘기다.
+    ★channel_id로 좁힌다: profit_calculator._get_gfa_ad_spend_daily는 채널을 거는데 이쪽만
+    안 걸면, 다른 채널이 `gfa:` 접두사를 쓰는 순간 이 화면만 조용히 섞인다.
+    """
+    params: dict = {}
+    conds = []
+    if sources is None:
+        conds.append("source LIKE 'gfa:%'")
+    else:
+        keys = [f"s{i}" for i in range(len(sources))]
+        params.update(dict(zip(keys, sources)))
+        conds.append("source IN (%s)" % ", ".join(f":{k}" for k in keys))
+    if channel_id is not None:
+        conds.append("channel_id = :cid")
+        params["cid"] = channel_id
     row = db.execute(
         text(f"""
             SELECT MIN(ad_date), MAX(ad_date), COUNT(DISTINCT ad_date), COALESCE(SUM(ad_spend), 0)
             FROM ad_costs
-            WHERE {where}
+            WHERE {" AND ".join(conds)}
         """),
         params,
     ).fetchone()
@@ -155,12 +179,11 @@ def get_gfa_status(db: Session = Depends(get_db)):
     `auto`/`manual`/`by_source`로 경로별 내역을 함께 준다 — 자동 수집이 도는데도
     수동 업로드일만 보고 빨간 배너를 띄우던 것이 이 엔드포인트의 원래 결함이었다.
     """
-    auto_ph = {f"a{i}": s for i, s in enumerate(_GFA_AUTO_SOURCES)}
-    auto_in = ", ".join(f":{k}" for k in auto_ph)
+    cid = _naver_channel_id(db)
 
-    out = _gfa_span(db, "source LIKE 'gfa:%'", {})
-    out["auto"] = _gfa_span(db, f"source IN ({auto_in})", auto_ph)
-    out["manual"] = _gfa_span(db, "source = :src", {"src": _GFA_MANUAL_SOURCE})
+    out = _gfa_span(db, None, cid)
+    out["auto"] = _gfa_span(db, _GFA_AUTO_SOURCES, cid)
+    out["manual"] = _gfa_span(db, (_GFA_MANUAL_SOURCE,), cid)
 
     rows = db.execute(
         text("""
@@ -168,9 +191,11 @@ def get_gfa_status(db: Session = Depends(get_db)):
                    COALESCE(SUM(ad_spend), 0)
             FROM ad_costs
             WHERE source LIKE 'gfa:%'
+              AND (:cid IS NULL OR channel_id = :cid)
             GROUP BY source
             ORDER BY source
-        """)
+        """),
+        {"cid": cid},
     ).fetchall()
     out["by_source"] = [
         {

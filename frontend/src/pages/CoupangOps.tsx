@@ -484,7 +484,8 @@ export default function CoupangOps() {
             {PERIODS.map((p) => (
               <button
                 key={p.days}
-                onClick={() => setDays(p.days)}
+                // 같은 기간 재클릭도 재조회(실패 후 회복 경로). load는 현재 선택을 인자로 받는다.
+                onClick={() => { if (days === p.days) load(company, days); else setDays(p.days); }}
                 className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-sm font-medium ${
                   days === p.days ? "bg-blue-600 text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"
                 }`}
@@ -614,7 +615,7 @@ export default function CoupangOps() {
           종전에는 각 값이 "…"로 바뀌어, 이전 기간 값을 잃으면서도 "왜" 는 말하지 않았다. */}
       <div className="relative mb-6">
       <div
-        className={`transition-opacity duration-150 ${loading ? "opacity-40" : ""}`}
+        className={`transition-opacity duration-150 ${loading ? "opacity-40 pointer-events-none" : ""}`}
         aria-busy={loading}
       >
       {data?.ad_ref_date ? (
@@ -692,7 +693,7 @@ export default function CoupangOps() {
           띄운다 — 이때 "데이터 없음"을 렌더하면 모르는 것을 0이라고 단언하게 된다. */}
       <div
         className={`bg-white border border-gray-200 rounded-lg overflow-hidden transition-opacity duration-150 ${
-          loading ? "opacity-40" : ""
+          loading ? "opacity-40 pointer-events-none" : ""
         }`}
         aria-busy={loading}
       >

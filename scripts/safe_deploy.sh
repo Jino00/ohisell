@@ -65,12 +65,13 @@ MANIFEST="$REMOTE_REPO/deploy-manifest.jsonl"
 MIG_DIR="backend/alembic/versions"                          # repo-relative
 REMOTE_ALEMBIC="${SAFE_DEPLOY_ALEMBIC:-.venv/bin/alembic}"  # $REMOTE_REPO/backend 기준
 
-RESTART=0; RESTART_LEGACY=0; FRONTEND=0; STEAL=0; MIGRATE=0; FILES=()
+RESTART=0; RESTART_LEGACY=0; FRONTEND=0; STEAL=0; MIGRATE=0; FORCE_FE=0; FILES=()
 for a in "$@"; do
   case "$a" in
     --restart) RESTART=1 ;;
     --restart-legacy) RESTART_LEGACY=1 ;;
     --frontend) FRONTEND=1 ;;
+    --force-frontend) FORCE_FE=1 ;;
     --steal-lock) STEAL=1 ;;
     --migrate) MIGRATE=1 ;;
     -h|--help) grep '^# ' "$0" | sed 's/^# //'; exit 0 ;;
@@ -109,49 +110,86 @@ ssh -o BatchMode=yes "$HOST" "printf '%s\n' 'branch=$BRANCH commit=$COMMIT host=
 #   배포가 있었다 = 거부. (백엔드 CAS의 "내 브랜치 역사에 있는 버전인가"와 같은 판정이다.)
 if [ "$FRONTEND" = 1 ]; then
   [ -d frontend/dist ] || fail "frontend/dist 없음 — 먼저 npm run build"
-  DIST_STAMP_REL="frontend/dist/.deploy-stamp"
+  if [ "$RESTART" = 1 ] || [ "$RESTART_LEGACY" = 1 ]; then
+    echo "⚠️ --frontend 에는 재시작이 필요 없습니다(정적 자산) — --restart 무시합니다."
+  fi
+  # 원격 스탬프는 **dist 밖**에 둔다. dist 안에 두면 스탬프를 심지 않는 구버전 스크립트가
+  # 한 번만 배포해도 `rsync --delete`가 스탬프를 지워 가드가 영구 무장해제된다(리뷰 P1-4).
+  R_STAMP_PATH="$REMOTE_REPO/.frontend-deploy-stamp"
+  LEGACY_R_STAMP_PATH="$REMOTE_REPO/frontend/dist/.deploy-stamp"
+  BUILD_STAMP="frontend/dist/.build-stamp"
   COMMIT_FULL=$(git rev-parse HEAD)
+  ABSENT="__ABSENT__"
 
-  R_STAMP=$(ssh -o BatchMode=yes "$HOST" "cat '$REMOTE_REPO/$DIST_STAMP_REL' 2>/dev/null" || true)
-  R_SHA=$(printf '%s' "$R_STAMP" | sed -n 's/^commit=\([0-9a-f]\{7,40\}\).*/\1/p' | head -1)
-  if [ -z "$R_SHA" ]; then
-    # 가드 도입 이전에 올라간 dist에는 스탬프가 없다. 부트스트랩 1회는 통과시키고 심는다.
-    echo "⚠️ prod dist에 스탬프 없음(가드 도입 이전 배포) — 이번 1회 통과, 스탬프를 심습니다."
+  parse_commit() { sed -n 's/^commit=\([0-9a-f]\{40\}\)$/\1/p' | sed -n '1{p;q;}'; }
+
+  # ── ① 로컬 dist가 **지금 이 커밋에서 빌드된 것**인가 (리뷰 P1-1·P1-2) ──────────
+  # 빌드가 심는 스탬프라 "주장"이 아니라 사실이다. 이게 없으면 재빌드를 문서로만 요구하게 되고,
+  # 그 방식은 이 저장소에서 이미 세 번 실패했다(스크립트 헤더 참조).
+  [ -f "$BUILD_STAMP" ] || fail "frontend/dist/.build-stamp 없음 — 구버전 빌드입니다.
+    재빌드하세요: (cd frontend && npm run build)"
+  B_SHA=$(parse_commit < "$BUILD_STAMP")
+  B_DIRTY=$(sed -n 's/^dirty=\([01]\)$/\1/p' "$BUILD_STAMP" | sed -n '1{p;q;}')
+  [ -n "$B_SHA" ] || fail "빌드 스탬프를 읽을 수 없습니다($BUILD_STAMP) — 재빌드하세요."
+  if [ "$B_SHA" != "$COMMIT_FULL" ]; then
+    fail "dist가 현재 커밋에서 빌드되지 않았습니다.
+      dist 빌드 커밋: $B_SHA
+      현재 HEAD     : $COMMIT_FULL
+    병합만 하고 옛 dist를 올리면 상대 작업이 그대로 사라집니다(스탬프만 최신이 되어 더 나쁩니다).
+    재빌드하세요: (cd frontend && npm run build)"
+  fi
+  if [ "$B_DIRTY" = 1 ] && [ "$FORCE_FE" != 1 ]; then
+    fail "frontend/ 에 커밋 안 된 변경이 있는 상태로 빌드됐습니다.
+    이때는 두 세션의 스탬프가 **같은 커밋**이 되어 가드가 서로를 구분하지 못합니다(리뷰 P1-1).
+    커밋한 뒤 재빌드하세요. 불가피하면 --force-frontend (매니페스트에 기록됩니다)."
+  fi
+
+  # ── ② prod 스탬프 대조 — 읽기/파싱 실패는 통과가 아니라 거부(fail-closed, 리뷰 P1-3) ──
+  R_RAW=$(ssh -o BatchMode=yes "$HOST" \
+    "if [ -f '$R_STAMP_PATH' ]; then cat '$R_STAMP_PATH'; \
+     elif [ -f '$LEGACY_R_STAMP_PATH' ]; then cat '$LEGACY_R_STAMP_PATH'; \
+     else echo '$ABSENT'; fi") || fail "prod 스탬프를 읽지 못했습니다(ssh 실패).
+    네트워크/권한을 확인하고 다시 시도하세요 — 읽지 못한 것을 '없음'으로 처리하지 않습니다."
+  if [ "$R_RAW" = "$ABSENT" ]; then
+    echo "⚠️ prod에 스탬프 없음(가드 도입 이전 배포) — 이번 1회 통과, 스탬프를 심습니다."
   else
+    R_SHA=$(printf '%s\n' "$R_RAW" | parse_commit)
+    if [ -z "$R_SHA" ]; then
+      echo "── prod 스탬프 원문 ──" >&2; printf '%s\n' "$R_RAW" >&2
+      fail "prod 스탬프를 해석할 수 없습니다(손상). 통과시키지 않습니다 — 내용을 확인하고,
+    의도적으로 넘기려면 --force-frontend 를 쓰세요."
+    fi
     if ! git cat-file -e "${R_SHA}^{commit}" 2>/dev/null; then
       git fetch --all --quiet 2>/dev/null || true
     fi
     if ! git cat-file -e "${R_SHA}^{commit}" 2>/dev/null; then
-      echo "── prod dist 스탬프 ──" >&2; printf '%s\n' "$R_STAMP" >&2
-      fail "prod dist를 만든 커밋 $R_SHA 가 로컬에 없습니다(다른 세션의 미공개 브랜치일 수 있음).
-    그 세션의 작업을 받아 병합한 뒤 재빌드하고 다시 시도하세요."
-    fi
-    if ! git merge-base --is-ancestor "$R_SHA" HEAD; then
-      echo "── prod dist 스탬프 ──" >&2; printf '%s\n' "$R_STAMP" >&2
-      fail "prod dist가 내 역사에 없는 커밋($R_SHA)에서 나왔습니다 = 다른 세션이 배포했습니다.
-    지금 덮으면 그 작업이 **경고 없이** 사라집니다(2026-08-06에 실제로 두 번 일어남).
-    받아서 합친 뒤 재빌드하고 다시 시도하세요:
-      git fetch origin && git merge origin/main
-      (cd frontend && npm run build)
-      scripts/safe_deploy.sh --frontend"
+      [ "$FORCE_FE" = 1 ] || fail "prod를 배포한 커밋 $R_SHA 가 로컬에 없습니다(다른 세션의 미공개 브랜치).
+    그 세션의 작업을 받아 병합한 뒤 **재빌드**하고 다시 시도하세요."
+    elif ! git merge-base --is-ancestor "$R_SHA" HEAD; then
+      [ "$FORCE_FE" = 1 ] || fail "prod가 내 역사에 없는 커밋($R_SHA)에서 배포됐습니다.
+    ① 다른 세션이 배포한 경우(대부분): 받아서 합친 뒤 **재빌드**하고 재시도
+         git fetch origin && git merge origin/main
+         (cd frontend && npm run build)
+         scripts/safe_deploy.sh --frontend
+    ② 내가 amend/rebase 해서 옛 커밋이 역사에서 빠진 경우: 위 절차로는 해소되지 않습니다.
+       prod 내용이 내 것임을 확인했다면 --force-frontend (매니페스트에 기록됩니다)."
     fi
   fi
-
-  # dist가 커밋 안 된 코드로 빌드됐으면 스탬프가 사실보다 뒤쳐진다 → 다른 세션이 "이미 포함"으로
-  # 오판할 수 있다. 배포를 막지는 않되(반복 빌드 중일 수 있다) 조용히 넘기지도 않는다.
-  if ! git diff --quiet -- frontend 2>/dev/null || ! git diff --cached --quiet -- frontend 2>/dev/null; then
-    echo "⚠️ frontend/ 에 커밋 안 된 변경이 있습니다 — dist가 스탬프($COMMIT)보다 앞설 수 있습니다."
-  fi
-
-  printf 'commit=%s\nbranch=%s\nts=%s\n' "$COMMIT_FULL" "$BRANCH" "$(date -u +%FT%TZ)" > "$DIST_STAMP_REL"
+  [ "$FORCE_FE" != 1 ] || echo "⚠️ --force-frontend — 스탬프 검사를 건너뜁니다(매니페스트에 기록)."
 
   STAMP=$(date +%Y%m%d_%H%M)
   ssh -o BatchMode=yes "$HOST" "cp -r '$REMOTE_REPO/frontend/dist' '$REMOTE_REPO/frontend/dist_backup_$STAMP'"
-  rsync -az --delete frontend/dist/ "$HOST:$REMOTE_REPO/frontend/dist/"
+  if ! rsync -az --delete frontend/dist/ "$HOST:$REMOTE_REPO/frontend/dist/"; then
+    fail "rsync 실패 — prod dist가 중간 상태일 수 있습니다.
+    복구: ssh $HOST \"rm -rf $REMOTE_REPO/frontend/dist && mv $REMOTE_REPO/frontend/dist_backup_$STAMP $REMOTE_REPO/frontend/dist\""
+  fi
   L=$(shasum -a 256 frontend/dist/index.html | cut -d' ' -f1)
   R=$(ssh -o BatchMode=yes "$HOST" "sha256sum '$REMOTE_REPO/frontend/dist/index.html' | cut -d' ' -f1")
   [ "$L" = "$R" ] || fail "index.html sha 불일치"
-  ssh -o BatchMode=yes "$HOST" "printf '%s\n' '{\"ts\":\"$(date -u +%FT%TZ)\",\"kind\":\"frontend\",\"branch\":\"$BRANCH\",\"commit\":\"$COMMIT\",\"backup\":\"dist_backup_$STAMP\"}' >> '$MANIFEST'"
+  # 스탬프는 rsync **후**에, dist 밖에 쓴다. detached HEAD면 branch가 비므로 대체값을 넣는다.
+  BRANCH_LABEL="${BRANCH:-detached@$COMMIT}"
+  ssh -o BatchMode=yes "$HOST" "printf 'commit=%s\nbranch=%s\nts=%s\n' '$COMMIT_FULL' '$BRANCH_LABEL' '$(date -u +%FT%TZ)' > '$R_STAMP_PATH'"
+  ssh -o BatchMode=yes "$HOST" "printf '%s\n' '{\"ts\":\"$(date -u +%FT%TZ)\",\"kind\":\"frontend\",\"branch\":\"$BRANCH_LABEL\",\"commit\":\"$COMMIT\",\"backup\":\"dist_backup_$STAMP\",\"forced\":$([ "$FORCE_FE" = 1 ] && echo true || echo false)}' >> '$MANIFEST'"
   echo "✅ frontend 배포 완료 (백업: dist_backup_$STAMP)"
   exit 0
 fi

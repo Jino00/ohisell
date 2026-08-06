@@ -58,14 +58,22 @@ EOF
   chmod +x "$BIN/ssh" "$BIN/rsync" "$BIN/sha256sum"
 }
 
-build() { # build <내용>  — 빌드 산출물 갱신(스탬프는 스크립트가 심는다)
+build() { # build <내용>  — 빌드 산출물 갱신 + 빌드 스탬프(실제 npm run build가 하는 일)
   printf '%s\n' "$1" > "$REPO/frontend/dist/index.html"
   printf '%s\n' "$1" > "$REPO/frontend/dist/app.js"
+  local D; D=$( cd "$REPO" && [ -z "$(git status --porcelain -- frontend)" ] && echo 0 || echo 1 )
+  printf 'commit=%s\ndirty=%s\nbuilt_at=x\n' "$(cd "$REPO" && git rev-parse HEAD)" "$D" \
+    > "$REPO/frontend/dist/.build-stamp"
+}
+build_at() { # build_at <내용> <커밋SHA> — 옛 커밋에서 빌드된 stale dist를 흉내
+  printf '%s\n' "$1" > "$REPO/frontend/dist/index.html"
+  printf 'commit=%s\ndirty=0\nbuilt_at=x\n' "$2" > "$REPO/frontend/dist/.build-stamp"
 }
 prod_build() { printf '%s\n' "$1" > "$PROD/frontend/dist/index.html"; }
-prod_stamp() { printf 'commit=%s\nbranch=other\nts=x\n' "$1" > "$PROD/frontend/dist/.deploy-stamp"; }
+prod_stamp() { printf 'commit=%s\nbranch=other\nts=x\n' "$1" > "$PROD/.frontend-deploy-stamp"; }
+prod_stamp_raw() { printf '%s\n' "$1" > "$PROD/.frontend-deploy-stamp"; }
 prod_index() { cat "$PROD/frontend/dist/index.html" 2>/dev/null; }
-prod_stamp_sha() { sed -n 's/^commit=//p' "$PROD/frontend/dist/.deploy-stamp" 2>/dev/null; }
+prod_stamp_sha() { sed -n 's/^commit=//p' "$PROD/.frontend-deploy-stamp" 2>/dev/null; }
 
 run() {
   ( cd "$REPO" && PATH="$BIN:$PATH" SAFE_DEPLOY_HOST=fakehost SAFE_DEPLOY_REMOTE="$PROD" \
@@ -119,12 +127,77 @@ check "exit != 0"                  "$([ "$RC" != 0 ] && echo 0 || echo 1)"
 check "로컬에 없음 안내"            "$(yes_ grep -q '로컬에 없습니다' "$(LOG)")"
 check "★prod dist 안 바뀜"          "$([ "$(prod_index)" = "unknown" ] && echo 0 || echo 1)"
 
-echo "▶ F5: 커밋 안 된 frontend 변경 → 경고는 내되 배포는 진행"
-setup f5; prod_build "old"; build "mine-v5"
-( cd "$REPO" && printf '// uncommitted\n' >> frontend/src/App.tsx )
+echo "▶ F5: 빌드 후에 소스를 고친 경우 → 통과(그 변경은 dist에 없다 — 스탬프가 정직하다)"
+setup f5; prod_build "old"; build "mine-v5"      # 깨끗한 상태에서 빌드(dirty=0)
+( cd "$REPO" && printf '// 빌드 이후 수정\n' >> frontend/src/App.tsx )
 RC=$(run --frontend)
-check "exit 0"              "$([ "$RC" = 0 ] && echo 0 || echo 1)"
-check "커밋 안 된 변경 경고" "$(yes_ grep -q '커밋 안 된 변경' "$(LOG)")"
+check "exit 0"           "$([ "$RC" = 0 ] && echo 0 || echo 1)"
+check "prod=빌드 시점 내용" "$([ "$(prod_index)" = "mine-v5" ] && echo 0 || echo 1)"
+
+echo "▶ F6: ★같은 커밋에서 미커밋 변경으로 빌드 → 거부(두 세션의 스탬프가 같아 구분 불가)"
+setup f6; prod_build "old"; build "mine-v6"
+( cd "$REPO" && printf '// uncommitted\n' >> frontend/src/App.tsx )
+build "mine-v6-dirty"     # dirty=1 로 다시 스탬프
+RC=$(run --frontend)
+check "exit != 0"            "$([ "$RC" != 0 ] && echo 0 || echo 1)"
+check "미커밋 사유 안내"      "$(yes_ grep -q '커밋 안 된 변경' "$(LOG)")"
+check "★prod 안 바뀜"        "$([ "$(prod_index)" = "old" ] && echo 0 || echo 1)"
+RC=$(run --frontend --force-frontend)
+check "--force-frontend로는 통과" "$([ "$RC" = 0 ] && echo 0 || echo 1)"
+check "매니페스트에 forced 기록"  "$(yes_ grep -q '"forced":true' "$PROD/deploy-manifest.jsonl")"
+
+echo "▶ F7: ★병합만 하고 재빌드 안 함(stale dist) → 거부 (리뷰 P1-2)"
+setup f7; prod_build "theirs"
+OLD=$(cd "$REPO" && git rev-parse HEAD)
+( cd "$REPO" && printf '// v7\n' > frontend/src/App.tsx && git add -A && gc commit -qm v7 )
+prod_stamp "$OLD"                 # prod는 내 조상에서 배포됨 = CAS는 통과할 상황
+build_at "STALE-BUILT-BEFORE-MERGE" "$OLD"   # dist만 옛 커밋 것
+RC=$(run --frontend)
+check "exit != 0"                  "$([ "$RC" != 0 ] && echo 0 || echo 1)"
+check "재빌드 요구 안내"            "$(yes_ grep -q '재빌드' "$(LOG)")"
+check "★prod 안 바뀜(손실 없음)"    "$([ "$(prod_index)" = "theirs" ] && echo 0 || echo 1)"
+check "★스탬프 전진 안 함(증거 보존)" "$([ "$(prod_stamp_sha)" = "$OLD" ] && echo 0 || echo 1)"
+
+echo "▶ F8: ★스탬프 손상 → 통과가 아니라 거부(fail-closed, 리뷰 P1-3)"
+setup f8; prod_build "theirs"; build "mine-v8"
+prod_stamp_raw "commit=abc12"
+RC=$(run --frontend)
+check "exit != 0"          "$([ "$RC" != 0 ] && echo 0 || echo 1)"
+check "손상 안내"           "$(yes_ grep -q '해석할 수 없습니다' "$(LOG)")"
+check "★prod 안 바뀜"      "$([ "$(prod_index)" = "theirs" ] && echo 0 || echo 1)"
+
+echo "▶ F9: ★스탬프 읽기 ssh 실패 → 거부(없음으로 오인하지 않는다)"
+setup f9; prod_build "theirs"; build "mine-v9"
+prod_stamp "$(cd "$REPO" && git rev-parse HEAD)"
+# 스탬프 읽기 ssh만 죽인다(락 획득 등 다른 ssh는 살려야 이 경로를 격리할 수 있다).
+cat > "$BIN/ssh" <<EOF
+#!/usr/bin/env bash
+CMD="\${@: -1}"
+case "\$CMD" in *frontend-deploy-stamp*) exit 255 ;; esac
+bash -c "\$CMD"
+EOF
+chmod +x "$BIN/ssh"
+RC=$(run --frontend)
+check "exit != 0"            "$([ "$RC" != 0 ] && echo 0 || echo 1)"
+check "ssh 실패 안내"         "$(yes_ grep -q '읽지 못했습니다' "$(LOG)")"
+check "★prod 안 바뀜"        "$([ "$(prod_index)" = "theirs" ] && echo 0 || echo 1)"
+
+echo "▶ F10: 빌드 스탬프 없는 구버전 dist → 거부(재빌드 요구)"
+setup f10; prod_build "old"
+printf 'no-stamp\n' > "$REPO/frontend/dist/index.html"
+RC=$(run --frontend)
+check "exit != 0"        "$([ "$RC" != 0 ] && echo 0 || echo 1)"
+check "재빌드 안내"       "$(yes_ grep -q 'build-stamp 없음' "$(LOG)")"
+check "★prod 안 바뀜"    "$([ "$(prod_index)" = "old" ] && echo 0 || echo 1)"
+
+echo "▶ F11: 구버전 스크립트가 dist를 덮어도 원격 스탬프는 살아남는다(리뷰 P1-4)"
+setup f11; prod_build "theirs"
+THEIRS2=$(cd "$REPO" && git rev-parse HEAD)
+prod_stamp "$THEIRS2"
+# 구버전 스크립트 흉내 = dist만 통짜 교체(스탬프 파일 없음)
+rm -rf "$PROD/frontend/dist"; mkdir -p "$PROD/frontend/dist"
+printf 'legacy-deploy\n' > "$PROD/frontend/dist/index.html"
+check "★원격 스탬프 생존(dist 밖)" "$([ "$(prod_stamp_sha)" = "$THEIRS2" ] && echo 0 || echo 1)"
 
 echo ""
 echo "════════════ PASS=$PASS  FAIL=$FAIL ════════════"

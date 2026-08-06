@@ -21,7 +21,13 @@ export function Spinner({ className = "w-4 h-4" }: { className?: string }) {
 /** 카드 영역 위에 띄우는 알약. 옛 값은 흐린 채로 남기고 이 표시가 상태를 말한다. */
 export function BusyOverlay({ label = "데이터 업데이트 중…" }: { label?: string }) {
   return (
-    <div className="absolute inset-0 flex items-start justify-center pt-8 pointer-events-none">
+    // role/aria-live가 없으면 비시각 사용자에겐 갱신 시작·완료가 전혀 전달되지 않는다
+    // (aria-busy만으로는 라이브 리전이 아니다 — 적대 리뷰 P2).
+    <div
+      role="status"
+      aria-live="polite"
+      className="absolute inset-0 flex items-start justify-center pt-8 pointer-events-none"
+    >
       <span className="inline-flex items-center gap-2 text-sm font-medium text-gray-700 bg-white/95 border border-gray-200 rounded-full px-4 py-2 shadow-sm">
         <Spinner className="w-4 h-4 text-green-600" /> {label}
       </span>
