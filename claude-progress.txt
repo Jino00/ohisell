@@ -1805,3 +1805,37 @@ RG 옛 공백(04-20~05-03) Jino 종결 승인(13:34) — 공백 아님(배송비
 - PR #229(브랜치 `claude/cost-unknown`), push 완료·**prod 배포 완료**(문서 갱신은 배포 후).
 - 상세: .claude/memory/HANDOFF_cost-unknown-not-zero+mapping-guards_20260806.md · 트랙
   D-NAO-156·157: docs/tracks/active/track_naver-ad-optimization.md
+
+## 2026-08-06 밤 — 통합 손익 대조원장도 같이 고쳤다 (D-NAO-158, 같은 PR #229 계속)
+- **Jino 지시 22:14**: *"통합 손익 대조원장도 같이 고쳐줘"* — 위 D-NAO-156·157의 후속.
+- **발견**: `backend/app/services/product_pnl.py`의 `_agg_marketplace_by_sku`에 naver_ops와
+  같은 버그 클래스 — `cost = (pm.cost_price * o.quantity) if pm is not None else _Z`. 원가를
+  모르면(cost_price 0/NULL) 0원으로 계산돼 그 SKU 순익이 과대였다.
+- **★이 원장은 다르게 다뤘다 — 금액을 한 톨도 바꾸지 않았다.** `conservation_ok`(Σ SKU귀속+
+  Σ잔차==권위 엔진 `profit_calculator` 총계)가 걸려 있어 값을 빼면 보존법칙과 권위 엔진 정합이
+  동시에 깨진다. 대신 SKU 행에 `cost_known`·`cost_unknown_revenue`, 요약에
+  `cost_unknown_skus`·`cost_unknown_revenue`·`cost_unknown_scoped` 필드를 얹어 «모른다는
+  사실»만 별도로 싣고, 표시층이 그 필드를 보고 해당 SKU 순익을 「—」로 비운다(집계 불변·
+  표시만 반영하는 2단 구조).
+- **라이브 검증(30일 창, 배포 전→후 원 단위 동일)**: `coupang_1p/cost`·`coupang_1p/net_profit`
+  불균형 컴포넌트 동일(안 나빠짐) / `reconciled_net_profit` 70,259,805 → 70,259,805 /
+  `net_profit_allocated_total` 70,808,362 → 70,808,362 / `account_adjustment_residual`
+  −548,557 → −548,557 / naver 3개 컴포넌트 전부 `conservation_diff=0.00` / 신규 필드
+  `cost_unknown_skus=1 · cost_unknown_revenue=17,800.00 · cost_unknown_scoped=true`.
+- **★수치 정정**: 위 미결 이월에 적었던 "네이버 1개 상품·30일 44,500원"은 `product_channel_mapping`
+  조인으로 잰 값이라 틀렸다 — 엔진이 실제로 쓰는 `Order.product_id` 조인 경로로는 **17,800원**.
+- **★미검증**: SKU 행 「—」 표시는 라이브로 못 봤다. `coupang_1p/cost`·`net_profit` 보존법칙이
+  **이번 변경과 무관한 기존 결함**으로 이미 깨져 있어 모든 조회 창에서 `by_sku`가 빈 배열이라
+  SKU 표 자체가 안 뜬다. 확인된 것은 배너·요약 필드까지다.
+- **프론트 회귀 발견**: `tsc --noEmit`은 통과했는데 실제 빌드 `tsc -b`(프로젝트 참조)가
+  TS2345로 실패 — `ProductConnectionMap.tsx`의 로컬 `won(s: string)`이 undefined에서
+  "NaN원"을 냈다. `won(s: string | null | undefined)`로 넓혀 없는 값은 「—」로 수정(커밋
+  `1c747a1`). **프론트 CAS가 옛 dist 배포를 거부해 prod는 배포 전에 보호됨.**
+- 테스트 +4(`tests/test_product_pnl.py`), 전체 **4937 passed**. 커밋 `c77a7df`·`1c747a1`,
+  둘 다 prod 배포 완료.
+- **D-NAO-158**(트랙 파일 전문 등재) · **교훈 #158·#159**(LESSONS_LEARNED.md) ·
+  `failures.jsonl` 1건 기록.
+- **다음 최우선**: `coupang_1p/cost`·`coupang_1p/net_profit` 보존법칙 복구 — 이걸 넘어야
+  SKU 행 「—」 표시를 라이브로 볼 수 있다.
+- 상세(갱신됨): .claude/memory/HANDOFF_cost-unknown-not-zero+mapping-guards_20260806.md ·
+  트랙 D-NAO-158: docs/tracks/active/track_naver-ad-optimization.md
