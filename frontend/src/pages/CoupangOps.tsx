@@ -2,6 +2,7 @@
 // 회사·기간별 매출 현황 + 상품별 상세. 컬럼 필터(▼) 드롭다운으로 값 선택 표시/숨김.
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
+import { Spinner, BusyOverlay, MIN_BUSY_MS } from "../components/Busy";
 import { fetchSalesSummary, getCoupangAdCostDaily, requestAdCostRefresh, getAdCostRefreshStatus, type SalesSummary, type SalesProductRow } from "../lib/api";
 
 // 오늘 날짜(KST) YYYY-MM-DD
@@ -255,7 +256,8 @@ export default function CoupangOps() {
     try {
       await triggerSync();
       setSyncMsg("동기화 완료");
-      await load(company, days);
+      // 동기화가 2분+ 걸리므로 그 사이 바뀐 기간을 존중한다(클릭 시점 값이 아니라 현재 값).
+      await load(selRef.current.company, selRef.current.days);
       await loadAdCookieStatus();
       await loadTodayAdCost();
     } catch (e: any) {
@@ -265,18 +267,36 @@ export default function CoupangOps() {
     }
   }
 
+  // 연달아 기간을 바꾸면 응답 도착 순서가 요청 순서와 다를 수 있다 → 마지막 요청만 반영.
+  // 최소 노출 시간(MIN_BUSY_MS)을 채운 뒤 값을 갈아끼워, 그동안 옛 값은 흐린 채로 남긴다.
+  const reqSeq = useRef(0);
   const load = useCallback(async (c: string, d: number) => {
+    const seq = ++reqSeq.current;
+    const t0 = performance.now();
     setLoading(true);
     setError(null);
     try {
-      setData(await fetchSalesSummary(c, d));
+      const r = await fetchSalesSummary(c, d);
+      const rest = MIN_BUSY_MS - (performance.now() - t0);
+      if (rest > 0) await new Promise((res) => setTimeout(res, rest));
+      if (seq !== reqSeq.current) return;   // 더 최신 요청이 진행 중 — 이 응답은 버린다
+      setData(r);
       setColExcluded({});
     } catch (e: any) {
+      if (seq !== reqSeq.current) return;
       setError(e.message);
     } finally {
-      setLoading(false);
+      if (seq === reqSeq.current) setLoading(false);
     }
   }, []);
+
+  // ★지연 실행되는 콜백은 이 ref로 **현재 선택**을 읽는다.
+  // 왜: 아래 마운트 이펙트는 triggerSync(라이브 실측 2분+)를 기다렸다가 load를 부르는데,
+  // 그 이펙트가 붙잡은 company·days는 **마운트 시점의 값**이다. 그 사이 사용자가 기간을
+  // 바꾸면 2분 뒤에 옛 기간을 새로 요청해 화면을 되돌린다(스마트스토어에서 같은 기계가
+  // 실제로 화면을 덮은 것을 2026-08-06 네트워크 로그로 확인했다).
+  const selRef = useRef({ company, days });
+  selRef.current = { company, days };
 
   // 페이지 접속 시 자동 sync → 완료 후 데이터 로드
   useEffect(() => {
@@ -284,7 +304,13 @@ export default function CoupangOps() {
     setSyncing(true);
     (async () => {
       try { await triggerSync(); } catch { /* sync 실패해도 기존 데이터 표시 */ }
-      if (!cancelled) { setSyncing(false); load(company, days); loadAdCookieStatus(); loadTodayAdCost(); }
+      if (!cancelled) {
+        setSyncing(false);
+        // 마운트 시점이 아니라 **지금 선택된** 기간을 읽는다(위 selRef 주석 참조).
+        load(selRef.current.company, selRef.current.days);
+        loadAdCookieStatus();
+        loadTodayAdCost();
+      }
     })();
     return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -444,7 +470,14 @@ export default function CoupangOps() {
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
         <div>
           <h2 className="text-xl font-bold text-gray-900">🔧 쿠팡 운영 패널</h2>
-          {data && <p className="text-xs text-gray-400 mt-0.5">{data.period.from} ~ {data.period.to}</p>}
+          {/* 갱신 중에는 기간 라벨 대신 진행 표시를 낸다 — 옛 기간 라벨을 새 값으로 오독하지 않게. */}
+          {loading ? (
+            <p className="inline-flex items-center gap-1.5 text-xs font-medium text-blue-700 mt-0.5">
+              <Spinner className="w-3 h-3" /> 데이터 업데이트 중…
+            </p>
+          ) : data && (
+            <p className="text-xs text-gray-400 mt-0.5">{data.period.from} ~ {data.period.to}</p>
+          )}
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <div className="flex gap-1">
@@ -452,10 +485,11 @@ export default function CoupangOps() {
               <button
                 key={p.days}
                 onClick={() => setDays(p.days)}
-                className={`px-3 py-1.5 rounded text-sm font-medium ${
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-sm font-medium ${
                   days === p.days ? "bg-blue-600 text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"
                 }`}
               >
+                {loading && days === p.days && <Spinner className="w-3.5 h-3.5" />}
                 {p.label}
               </button>
             ))}
@@ -575,23 +609,30 @@ export default function CoupangOps() {
 
       {error && <div className="bg-red-50 text-red-700 rounded px-4 py-2 text-sm mb-4">{error}</div>}
 
-      {/* ── 요약 카드 ── */}
+      {/* ── 요약 카드 ──
+          갱신 중에는 값을 지우지 않고 흐리기만 한다 + 오버레이로 상태를 말한다.
+          종전에는 각 값이 "…"로 바뀌어, 이전 기간 값을 잃으면서도 "왜" 는 말하지 않았다. */}
+      <div className="relative mb-6">
+      <div
+        className={`transition-opacity duration-150 ${loading ? "opacity-40" : ""}`}
+        aria-busy={loading}
+      >
       {data?.ad_ref_date ? (
         /* 오늘 선택 + 광고 기준일이 다를 때 — 판매/광고 섹션 분리 */
-        <div className="mb-6 space-y-3">
+        <div className="space-y-3">
           {/* 오늘 판매 */}
           <div>
             <div className="text-xs text-gray-400 font-medium mb-1.5 px-0.5">
               📦 오늘 판매 ({data.period.from})
             </div>
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2 sm:gap-3">
-              <SummaryCard label="총 매출" value={loading ? "…" : won(s?.revenue)} />
-              <SummaryCard label="쿠팡 비용" value={loading ? "…" : won(s?.fee)} sub={feeSub(s?.fee_actual_ratio)} />
-              <SummaryCard label="원가" value={loading ? "…" : won(s?.cost)} sub={costSub(s?.cost_coverage)} />
-              <SummaryCard label="배송·물류비" value={loading ? "…" : won(s?.shipping)} sub={shipSub(s?.rg_fulfillment)} />
+              <SummaryCard label="총 매출" value={won(s?.revenue)} />
+              <SummaryCard label="쿠팡 비용" value={won(s?.fee)} sub={feeSub(s?.fee_actual_ratio)} />
+              <SummaryCard label="원가" value={won(s?.cost)} sub={costSub(s?.cost_coverage)} />
+              <SummaryCard label="배송·물류비" value={won(s?.shipping)} sub={shipSub(s?.rg_fulfillment)} />
               <div className={`bg-white border-2 rounded-lg p-3 sm:p-4 ${Number(s?.profit_excl_ad ?? 0) >= 0 ? "border-blue-200" : "border-red-200"}`}>
                 <div className="text-xs text-gray-500 mb-1 break-keep">이익 (광고비 제외)</div>
-                <div className={`text-base sm:text-xl font-bold tabular-nums break-keep ${profitColor(s?.profit_excl_ad)}`}>{loading ? "…" : won(s?.profit_excl_ad)}</div>
+                <div className={`text-base sm:text-xl font-bold tabular-nums break-keep ${profitColor(s?.profit_excl_ad)}`}>{won(s?.profit_excl_ad)}</div>
                 {s?.profit_rate_excl_ad && <div className="text-[11px] sm:text-xs mt-0.5 text-gray-400">이익률 {pct(s.profit_rate_excl_ad)}</div>}
               </div>
             </div>
@@ -604,17 +645,17 @@ export default function CoupangOps() {
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 sm:gap-3">
               <SummaryCard
                 label="광고비 (오늘)"
-                value={loading ? "…" : (s?.ad_today != null ? won(s.ad_today) : "익일 확정")}
+                value={s?.ad_today != null ? won(s.ad_today) : "익일 확정"}
                 sub={s?.ad_today != null ? adTodaySub(s?.ad_today_synced_at) : `어제(${data.ad_ref_date}) ${won(s?.ad_spend)}`}
               />
               <SummaryCard
                 label="광고 전환 매출"
-                value={loading ? "…" : "익일 확정"}
+                value="익일 확정"
                 sub={`어제(${data.ad_ref_date}) ${won(s?.conv_revenue)}`}
               />
               <SummaryCard
                 label="RoAS"
-                value={loading ? "…" : "익일 확정"}
+                value="익일 확정"
                 sub={s?.roas ? `어제(${data.ad_ref_date}) ${roasFmt(s.roas)}` : undefined}
               />
             </div>
@@ -622,29 +663,39 @@ export default function CoupangOps() {
         </div>
       ) : (
         /* 어제·7일 등 — 동일 기간 */
-        <div className="mb-6 space-y-2">
+        <div className="space-y-2">
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 sm:gap-3">
-            <SummaryCard label="총 매출" value={loading ? "…" : won(s?.revenue)} />
-            <SummaryCard label="수수료" value={loading ? "…" : won(s?.fee)} sub={feeSub(s?.fee_actual_ratio)} />
-            <SummaryCard label="원가" value={loading ? "…" : won(s?.cost)} sub={costSub(s?.cost_coverage)} />
-            <SummaryCard label="광고비" value={loading ? "…" : won(s?.ad_spend)} />
-            <SummaryCard label="배송·물류비" value={loading ? "…" : won(s?.shipping)} sub={shipSub(s?.rg_fulfillment)} />
+            <SummaryCard label="총 매출" value={won(s?.revenue)} />
+            <SummaryCard label="수수료" value={won(s?.fee)} sub={feeSub(s?.fee_actual_ratio)} />
+            <SummaryCard label="원가" value={won(s?.cost)} sub={costSub(s?.cost_coverage)} />
+            <SummaryCard label="광고비" value={won(s?.ad_spend)} />
+            <SummaryCard label="배송·물류비" value={won(s?.shipping)} sub={shipSub(s?.rg_fulfillment)} />
             <div className={`bg-white border-2 rounded-lg p-3 sm:p-4 ${Number(s?.profit ?? 0) >= 0 ? "border-blue-200" : "border-red-200"}`}>
               <div className="text-xs text-gray-500 mb-1 break-keep">이익</div>
-              <div className={`text-base sm:text-xl font-bold tabular-nums break-keep ${profitColor(s?.profit)}`}>{loading ? "…" : won(s?.profit)}</div>
+              <div className={`text-base sm:text-xl font-bold tabular-nums break-keep ${profitColor(s?.profit)}`}>{won(s?.profit)}</div>
               {s?.profit_rate && <div className="text-[11px] sm:text-xs mt-0.5 text-gray-400">이익률 {pct(s.profit_rate)}</div>}
             </div>
           </div>
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 sm:gap-3">
-            <SummaryCard label="광고 전환 매출" value={loading ? "…" : won(s?.conv_revenue)} />
-            <SummaryCard label="RoAS" value={loading ? "…" : roasFmt(s?.roas)} sub={s?.roas ? "광고 전환매출 ÷ 광고비" : undefined} />
+            <SummaryCard label="광고 전환 매출" value={won(s?.conv_revenue)} />
+            <SummaryCard label="RoAS" value={roasFmt(s?.roas)} sub={s?.roas ? "광고 전환매출 ÷ 광고비" : undefined} />
             <div className="hidden sm:block" />
           </div>
         </div>
       )}
+      </div>
+      {loading && <BusyOverlay />}
+      </div>
 
-      {/* ── 상품별 테이블 ── */}
-      <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+      {/* ── 상품별 테이블 ──
+          갱신 중에도 행을 남기고 흐린다. 단 **첫 로드**에는 남길 행이 없으므로 "로딩 중…"을
+          띄운다 — 이때 "데이터 없음"을 렌더하면 모르는 것을 0이라고 단언하게 된다. */}
+      <div
+        className={`bg-white border border-gray-200 rounded-lg overflow-hidden transition-opacity duration-150 ${
+          loading ? "opacity-40" : ""
+        }`}
+        aria-busy={loading}
+      >
         {/* 필터 바 */}
         <div className="flex items-center gap-3 px-4 py-3 border-b border-gray-100 bg-gray-50 flex-wrap">
           <span className="text-sm font-medium text-gray-700">상품별 현황</span>
@@ -729,7 +780,7 @@ export default function CoupangOps() {
             </tr>
           </thead>
           <tbody>
-            {loading ? (
+            {loading && !data ? (
               <tr><td colSpan={8} className="px-4 py-8 text-center text-gray-400">로딩 중…</td></tr>
             ) : filtered.length === 0 ? (
               <tr>
@@ -810,7 +861,7 @@ export default function CoupangOps() {
 
         {/* 모바일: 상품 카드 리스트 (테이블이 좁은 화면에서 잘리는 문제 대체) */}
         <div className="md:hidden">
-          {loading ? (
+          {loading && !data ? (
             <div className="px-4 py-8 text-center text-gray-400 text-sm">로딩 중…</div>
           ) : filtered.length === 0 ? (
             <div className="px-4 py-8 text-center text-gray-400 text-sm">

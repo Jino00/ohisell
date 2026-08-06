@@ -1,6 +1,7 @@
 // NaverOps.tsx — 🛒 네이버 스마트스토어 운영 패널
 // 기간별 매출 현황 + 상품별 상세 (쿠팡 패널 단순화 버전)
 import { useState, useEffect, useCallback, useRef } from "react";
+import { Spinner, BusyOverlay, MIN_BUSY_MS } from "../components/Busy";
 import {
   fetchNaverSalesSummary, fetchGfaStatus, uploadGfaCsv,
   fetchNaverSettlement, syncNaverSettlement,
@@ -48,18 +49,6 @@ const PERIODS = [
   { label: "30일", days: 30 },
 ];
 
-// 갱신 표시의 최소 노출 시간(ms). sales-summary 응답이 ~0.2초라 이 바닥이 없으면
-// 스피너가 한 프레임 스치고 사라져 "아무 일도 안 일어났다"로 보인다.
-const MIN_BUSY_MS = 350;
-
-function Spinner({ className = "w-4 h-4" }: { className?: string }) {
-  return (
-    <svg className={`animate-spin ${className}`} viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
-    </svg>
-  );
-}
 
 type SortKey = "product_name" | "revenue" | "profit" | "profit_rate";
 type SortDir = "asc" | "desc";
@@ -957,11 +946,7 @@ export default function NaverOps() {
           )}
           </div>
           {loading && (
-            <div className="absolute inset-0 flex items-start justify-center pt-8 pointer-events-none">
-              <span className="inline-flex items-center gap-2 text-sm font-medium text-gray-700 bg-white/95 border border-gray-200 rounded-full px-4 py-2 shadow-sm">
-                <Spinner className="w-4 h-4 text-green-600" /> 데이터 업데이트 중…
-              </span>
-            </div>
+            <BusyOverlay />
           )}
         </div>
       )}
