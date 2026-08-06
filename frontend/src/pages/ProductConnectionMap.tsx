@@ -743,9 +743,15 @@ function PnlTab() {
           {data.summary.cost_unknown_scoped !== false && (data.summary.cost_unknown_skus ?? 0) > 0 && (
             <div className="mb-3 p-3 bg-amber-50 text-amber-800 rounded-md text-sm">
               ⚠️ <b>원가 미상 {data.summary.cost_unknown_skus}개 SKU</b>
-              (매출 {won(data.summary.cost_unknown_revenue)})의 순익은 <b>«모름»</b>으로 비워 뒀습니다.
-              이 SKU들의 원가가 합계에서 빠져 있어 <b>실제 순익은 아래 합계보다 작습니다</b>
-              (빠진 금액은 원가를 몰라 계산 불가). 상품 관리에서 원가를 입력하세요.
+              (매출 {won(data.summary.cost_unknown_revenue)}) — 이 SKU들의 원가가 합계에서 빠져 있어
+              {" "}<b>실제 순익은 아래 합계보다 작습니다</b>(빠진 금액은 원가를 몰라 계산 불가).
+              {/* ★원장이 불균형이면 SKU 표 자체가 안 뜬다 — 그때 "비워 뒀습니다 / 아래 표에"라고
+                  하면 존재하지 않는 것을 가리킨다(델타 리뷰 P2). 그래도 «요약이 과대»라는 사실은
+                  유효하므로 배너를 끄지는 않고 지시 대상만 바꾼다. */}
+              {data.summary.trustworthy
+                ? " 해당 SKU는 아래 표에서 순익이 「—」로 비어 있습니다."
+                : " (원장 불균형이라 SKU 표는 지금 표시되지 않습니다.)"}
+              {" "}상품 관리에서 원가를 입력하세요.
             </div>
           )}
 
