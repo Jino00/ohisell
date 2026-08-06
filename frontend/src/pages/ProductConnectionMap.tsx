@@ -241,9 +241,9 @@ function ConnectionMapTab() {
           </a>
           <label
             className="px-3 py-2 text-sm bg-orange-500 text-white rounded-md hover:bg-orange-600 cursor-pointer"
-            title='마스터 엑셀("원가 매핑" 시트, 1행=옵션 1개, 채널별 옵션ID 컬럼 포맷)'
+            title='원가 마스터 엑셀("원가 매핑" 시트, 1행=옵션 1개, A열 상품명·B열 원가 + 채널별 옵션ID 컬럼). 상품명 정확일치로 원가·매핑 갱신, 삭제는 없음'
           >
-            연관맵 마스터 업로드
+            원가 마스터 파일
             <input
               ref={mappingFileRef}
               type="file"
