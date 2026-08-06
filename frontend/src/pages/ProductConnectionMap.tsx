@@ -734,6 +734,18 @@ function PnlTab() {
             </div>
           )}
 
+          {/* ★원가 미상 표면화 — 합계는 계속 계산하되(미상은 보통 몇 %라 전체를 가리면 화면이
+              쓸모없어진다) 그 원가가 빠져 있다는 사실을 말한다. 과대 금액은 원가를 몰라 계산 불가라
+              추정해 적지 않고 **방향만** 말한다. 스마트스토어 운영 패널과 같은 규율. */}
+          {data.summary.cost_unknown_scoped !== false && (data.summary.cost_unknown_skus ?? 0) > 0 && (
+            <div className="mb-3 p-3 bg-amber-50 text-amber-800 rounded-md text-sm">
+              ⚠️ <b>원가 미상 {data.summary.cost_unknown_skus}개 SKU</b>
+              (매출 {won(data.summary.cost_unknown_revenue)})의 순익은 <b>«모름»</b>으로 비워 뒀습니다.
+              이 SKU들의 원가가 합계에서 빠져 있어 <b>실제 순익은 아래 합계보다 작습니다</b>
+              (빠진 금액은 원가를 몰라 계산 불가). 상품 관리에서 원가를 입력하세요.
+            </div>
+          )}
+
           <PnlSummaryCards summary={data.summary} />
 
           {data.summary.trustworthy && (
@@ -824,14 +836,24 @@ function PnlSkuTable({
                     onClick={() => onToggle(r.internal_sku)}
                     className="w-full flex border-b hover:bg-gray-50 text-left"
                   >
-                    <div className="px-3 py-2 flex-1">{names[r.internal_sku] || r.internal_sku}</div>
+                    <div className="px-3 py-2 flex-1">
+                      {names[r.internal_sku] || r.internal_sku}
+                      {/* ★원가를 모르면 그 SKU의 순익도 모른다 — 값을 비우고 무엇을 해야 하는지 말한다.
+                          숫자를 남기면(원가가 0으로 빠진 채) 훑는 눈에는 그 숫자가 이긴다. */}
+                      {r.cost_known === false && (
+                        <div className="mt-0.5 text-[11px] text-amber-700">
+                          원가 미상 — 원가 입력 필요(매출 {won(r.cost_unknown_revenue)})
+                        </div>
+                      )}
+                    </div>
                     <div className="px-3 py-2 font-mono text-gray-500 w-40">{r.internal_sku}</div>
                     <div
                       className={`px-3 py-2 text-right font-medium w-40 ${
-                        net < 0 ? "text-red-600" : "text-gray-900"
+                        r.cost_known === false ? "text-gray-400"
+                        : net < 0 ? "text-red-600" : "text-gray-900"
                       }`}
                     >
-                      {won(r.net_profit_allocated_only)}
+                      {r.cost_known === false ? "—" : won(r.net_profit_allocated_only)}
                     </div>
                   </button>
                   {isOpen && (

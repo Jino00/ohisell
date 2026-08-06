@@ -344,7 +344,11 @@ export interface PnlLedgerWarning {
 export interface PnlSkuRow {
   internal_sku: string;
   channels: Record<string, Record<string, string>>;
+  // ★net_profit_allocated_only는 cost_known=false면 **원가가 빠진 값**이라 과대다.
+  //   금액 자체는 보존법칙(Σ귀속+잔차==총계) 때문에 그대로 두고, 화면이 「—」로 비운다.
   net_profit_allocated_only: string;
+  cost_known?: boolean;
+  cost_unknown_revenue?: string;   // 원가 미상 라인의 제품매출(표시 전용)
 }
 export interface PnlReconciliation {
   period: { from: string; to: string; account?: string };
@@ -360,6 +364,10 @@ export interface PnlReconciliation {
     net_profit_allocated_total: string;
     account_adjustment_residual: string;
     trustworthy: boolean;
+    // 원가 미상 — scoped=false면 «없음»이 아니라 «이 계정 조회에선 판정 안 함»이다(쿠팡 전용 조회).
+    cost_unknown_skus?: number;
+    cost_unknown_revenue?: string;
+    cost_unknown_scoped?: boolean;
   };
 }
 export function fetchPnlReconciliation(
