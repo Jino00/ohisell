@@ -1316,6 +1316,38 @@ def ingest_rocket_po(
     return rocket_supplier_sync.ingest_purchase_orders(db, pages)
 
 
+@router.post("/rocket/settlement-item/ingest")
+def ingest_rocket_settlement_item(
+    body: dict[str, Any] = Body(...),
+    x_ingest_token: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """계산서 **라인**(입고상세내역) DOM rows push → 계산서 단위 snapshot replace (D-CPP-20).
+
+    body: {"vendor_id": "...", "invoice_seq": 30608513, "rows": [[헤더...],[셀...]],
+           "expected_total": 48}
+    ★`expected_total`(원천 totalCount)을 함께 보내면 절단을 잡는다 — 페이징이 `page`만으로는
+      20/48행에서 조용히 멈춘 실사고가 있다. 수를 안 재면 그 절단이 성공으로 보인다.
+    """
+    _check_ingest_token(x_ingest_token)
+    vendor_id = str(body.get("vendor_id") or "").strip()
+    if not vendor_id:
+        raise HTTPException(status_code=400, detail="vendor_id 필요")
+    try:
+        invoice_seq = int(body.get("invoice_seq"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="invoice_seq(정수) 필요")
+    rows = body.get("rows")
+    if not isinstance(rows, list):
+        raise HTTPException(status_code=400, detail="rows[] 필요")
+    exp = body.get("expected_total")
+    try:
+        exp = int(exp) if exp is not None else None
+    except (TypeError, ValueError):
+        exp = None
+    return rocket_supplier_sync.ingest_settlement_items(db, vendor_id, invoice_seq, rows, exp)
+
+
 @router.post("/rocket/settlement/ingest")
 def ingest_rocket_settlement(
     body: dict[str, Any] = Body(...),

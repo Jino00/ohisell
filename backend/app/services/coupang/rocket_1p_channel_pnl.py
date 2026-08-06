@@ -72,16 +72,128 @@ def _settlement_sum(db: Session, date_from: date, date_to: date) -> Decimal:
       뿐). 13개월 실측 7건 −4,321,823원. 내역은 쿠팡 화면에 없어 미해명이지만, 있는 그대로
       더하는 쪽이 임의로 제외하는 것보다 원장에 가깝다(ref 44 §8-3).
     """
-    total = (
-        db.query(func.sum(_REVENUE_COLUMN))
-        .filter(
-            CoupangRocketSettlement.vendor_id == ROCKET_1P_VENDOR_ID,
-            CoupangRocketSettlement.issue_date >= date_from,
-            CoupangRocketSettlement.issue_date <= date_to,
+    return _settlement_window(db, date_from, date_to)["revenue"]
+
+
+# ★귀속일 = 라인의 실입고일(D-CPP-20). 계산서 작성일이 아니다.
+#   왜: 계산서는 "같은 날 입고된 것"을 묶어 며칠 뒤 발행된다(480건 실측: 계산서당 평균 5.8 PO,
+#   작성일−실입고일 = −4~+7일). 작성일에 귀속하면 총액은 맞고 **날짜 배치가 틀린다** —
+#   2026-07 실측으로 작성일 기준 51,193,984원 중 6,356,855원이 다른 달 입고분이고
+#   18,388,235원은 여러 날이 섞인 계산서였다.
+#
+# ★라인이 아직 없는 계산서는 **작성일로 폴백**한다(0으로 접지 않는다, 원칙22).
+#   라인 수집은 계산서별 화면을 훑어야 해서 점진적으로 찬다. 폴백이 없으면 그 사이 매출이
+#   통째로 사라진다. 라인이 찬 계산서부터 날짜가 정확해지고, 커버리지는 아래가 함께 낸다.
+_LINE_SUM_SQL = """
+SELECT COALESCE(SUM(i.total_price), 0) AS amt,
+       COUNT(DISTINCT i.invoice_seq)   AS invoices
+FROM coupang_rocket_settlement_item i
+WHERE i.vendor_id = :vendor
+  AND date(i.received_at) >= :since AND date(i.received_at) <= :until
+"""
+
+# 라인이 **하나도 없는** 계산서만 작성일 기준으로 더한다(라인 있는 것과 이중계상 금지).
+_HEADER_FALLBACK_SQL = """
+SELECT COALESCE(SUM(s.payment_amount), 0) AS amt, COUNT(*) AS invoices
+FROM coupang_rocket_settlement s
+WHERE s.vendor_id = :vendor
+  AND s.issue_date >= :since AND s.issue_date <= :until
+  AND NOT EXISTS (SELECT 1 FROM coupang_rocket_settlement_item i
+                  WHERE i.invoice_seq = s.invoice_seq)
+"""
+
+
+_LINE_BY_DAY_SQL = """
+SELECT date(i.received_at) AS d, COALESCE(SUM(i.total_price), 0) AS amt
+FROM coupang_rocket_settlement_item i
+WHERE i.vendor_id = :vendor
+  AND date(i.received_at) >= :since AND date(i.received_at) <= :until
+GROUP BY date(i.received_at)
+"""
+
+_HEADER_BY_DAY_SQL = """
+SELECT s.issue_date AS d, COALESCE(SUM(s.payment_amount), 0) AS amt
+FROM coupang_rocket_settlement s
+WHERE s.vendor_id = :vendor
+  AND s.issue_date >= :since AND s.issue_date <= :until
+  AND NOT EXISTS (SELECT 1 FROM coupang_rocket_settlement_item i
+                  WHERE i.invoice_seq = s.invoice_seq)
+GROUP BY s.issue_date
+"""
+
+
+def _has_item_table(db: Session) -> bool:
+    """라인 테이블이 아직 없는 환경(마이그 전 구코드)에서도 죽지 않게."""
+    try:
+        return sa_inspect(db.get_bind()).has_table("coupang_rocket_settlement_item")
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _settlement_window(db: Session, date_from: date, date_to: date) -> dict:
+    """계산서 축 창 합계 + 귀속 근거.
+
+    반환 {revenue, line_amount, fallback_amount, line_invoices, fallback_invoices, line_ratio}.
+    line_ratio = 실입고일로 귀속된 금액 비율 — 화면이 "이 숫자가 얼마나 정확한 날짜인지" 말할 수 있게.
+    """
+    params = {"vendor": ROCKET_1P_VENDOR_ID,
+              "since": date_from.isoformat(), "until": date_to.isoformat()}
+    if not _has_item_table(db):
+        total = (
+            db.query(func.sum(_REVENUE_COLUMN))
+            .filter(
+                CoupangRocketSettlement.vendor_id == ROCKET_1P_VENDOR_ID,
+                CoupangRocketSettlement.issue_date >= date_from,
+                CoupangRocketSettlement.issue_date <= date_to,
+            )
+            .scalar()
         )
-        .scalar()
-    )
-    return _dec(total)
+        amt = _dec(total)
+        return {"revenue": amt, "line_amount": ZERO, "fallback_amount": amt,
+                "line_invoices": 0, "fallback_invoices": 0, "line_ratio": ZERO}
+
+    lamt, linv = db.execute(text(_LINE_SUM_SQL), params).fetchone()
+    famt, finv = db.execute(text(_HEADER_FALLBACK_SQL), params).fetchone()
+    line_amount, fb_amount = _dec(lamt), _dec(famt)
+    revenue = line_amount + fb_amount
+    ratio = (line_amount / revenue) if revenue else ZERO
+    return {"revenue": revenue, "line_amount": line_amount, "fallback_amount": fb_amount,
+            "line_invoices": int(linv or 0), "fallback_invoices": int(finv or 0),
+            "line_ratio": ratio}
+
+
+def _settlement_by_day(db: Session, date_from: date, date_to: date) -> dict[str, Decimal]:
+    """계산서 축 일별 매출 — 요약(`_settlement_window`)과 **같은 규칙**으로 쪼갠다.
+
+    라인 있으면 실입고일, 없으면 작성일 폴백. 두 축이 다르면 합계와 추이가 어긋난다.
+    """
+    params = {"vendor": ROCKET_1P_VENDOR_ID,
+              "since": date_from.isoformat(), "until": date_to.isoformat()}
+    out: dict[str, Decimal] = {}
+    if not _has_item_table(db):
+        rows = (
+            db.query(CoupangRocketSettlement.issue_date, func.sum(_REVENUE_COLUMN))
+            .filter(
+                CoupangRocketSettlement.vendor_id == ROCKET_1P_VENDOR_ID,
+                CoupangRocketSettlement.issue_date >= date_from,
+                CoupangRocketSettlement.issue_date <= date_to,
+            )
+            .group_by(CoupangRocketSettlement.issue_date)
+            .all()
+        )
+        for d, amt in rows:
+            if d is None:
+                continue
+            key = d.isoformat() if hasattr(d, "isoformat") else str(d)
+            out[key] = out.get(key, ZERO) + _dec(amt)
+        return out
+    for sql in (_LINE_BY_DAY_SQL, _HEADER_BY_DAY_SQL):
+        for d, amt in db.execute(text(sql), params).fetchall():
+            if not d:
+                continue
+            key = d.isoformat() if hasattr(d, "isoformat") else str(d)[:10]
+            out[key] = out.get(key, ZERO) + _dec(amt)
+    return out
 
 
 def _ad_spend_by_day(db: Session, date_from: date, date_to: date,
@@ -446,21 +558,10 @@ def compute_rocket_1p_daily_points(
         for key, v in _sell_through_by_day(db, date_from, date_to).items():
             by_day.setdefault(key, {"revenue": ZERO, "ad_spend": ZERO})["revenue"] += v["revenue"]
     else:
-        rev_rows = (
-            db.query(CoupangRocketSettlement.issue_date, func.sum(_REVENUE_COLUMN))
-            .filter(
-                CoupangRocketSettlement.vendor_id == ROCKET_1P_VENDOR_ID,
-                CoupangRocketSettlement.issue_date >= date_from,
-                CoupangRocketSettlement.issue_date <= date_to,
-            )
-            .group_by(CoupangRocketSettlement.issue_date)
-            .all()
-        )
-        for d, amt in rev_rows:
-            if d is None:
-                continue
-            key = d.isoformat() if hasattr(d, "isoformat") else str(d)
-            by_day.setdefault(key, {"revenue": ZERO, "ad_spend": ZERO})["revenue"] += _dec(amt)
+        # ★요약(_settlement_window)과 **같은 축**으로 쪼갠다 — 두 곳이 다르면 화면의 합계와
+        #   추이가 어긋나고 RoAS가 두 값이 된다. 라인 있으면 실입고일, 없으면 작성일 폴백.
+        for d, amt in _settlement_by_day(db, date_from, date_to).items():
+            by_day.setdefault(d, {"revenue": ZERO, "ad_spend": ZERO})["revenue"] += amt
 
     # 광고비는 축과 무관하게 **같은 합집합 함수**를 쓴다 — 요약 합계와 추이 합계가 어긋나면
     # 화면 두 곳의 RoAS가 달라진다(기존 calculate_channel_daily_trend 주석의 같은 이유).

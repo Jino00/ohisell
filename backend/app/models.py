@@ -1589,6 +1589,14 @@ class CoupangRocketPurchaseOrder(Base):
     # 날짜 (po_created_at=발주일 UTC=매출 인식일, D-3)
     po_created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
     expected_delivery_date: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # ★실입고 시각(2026-08-06) — 원천 응답에 계속 오고 있었는데 파서가 버리고 있었다.
+    #   왜 필요한가: `expected_delivery_date`는 **예정**이라 실제와 어긋난다(실측: 예정 08-04인
+    #   PO들의 실입고 완료가 08-04·08-05로 갈렸다). 계산서는 "같은 날 입고분"을 묶어 며칠 뒤
+    #   발행되므로(작성일−납품예정일 = −4~+7일), 계산서 축 일별 매출을 세우려면 **입고일이
+    #   정본**이어야 한다. 미수금의 연령(aging)도 이 값 없이는 못 낸다.
+    #   ⚠️입고 전 PO는 NULL이다 — 0이나 예정일로 접지 말 것(원칙22: 미수집 ≠ 없음).
+    receiving_started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    receiving_finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
     # 계산서 매핑(↔정산 드리프트 조인키) — vendorPaymentInfoSeq 리스트
     vendor_payment_seqs: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
@@ -1668,6 +1676,54 @@ class CoupangRocketSettlement(Base):
     #     '-'(미확정)이라, 관측된 사실은 "확정 전에는 상태 텍스트가 없다"까지다. '확정됐는데 미전송'
     #     표본은 0건 — 진짜 실패와 미발행을 구분하려면 별도 근거가 필요하다.
     tax_invoice_transmitted: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class CoupangRocketSettlementItem(Base):
+    """쿠팡 로켓배송(1P) **계산서 라인** — supplier 입고상세내역 (트랙 coupang-promo-pnl, D-CPP-20).
+
+    소스: GET `/scm/receive/detail?vendorPaymentInfoSeq={계산서번호}&cplbYn=N` 폼-GET SSR HTML.
+      ★페이징이 `page`만으로는 안 돈다 — 폼의 **`totalCount`를 함께 실어야** 3페이지 이후가 온다
+      (실측 2026-08-06: totalCount 없이는 20/48행에서 멈췄다). 페이지 크기 10.
+    런타임 경계(D-1): Akamai → 백엔드 직접 fetch 금지. Mac 페처가 DOM rows push → 파서 정규화.
+    grain: (invoice_seq, line_no). 같은 계산서 재수신 시 **snapshot replace**(그 계산서 전 행 삭제 후
+      재삽입) — 라인 자연키가 불완전(같은 PO·SKU가 여러 줄일 수 있다)해서 upsert 대신 교체다.
+
+    ★왜 만들었나 — **계산서 축 일별 매출의 귀속일을 실측으로 얻기 위해서다(D-CPP-20).**
+      계산서 헤더만으로는 날짜를 못 정한다: 계산서 1건이 평균 5.8개 PO를 묶고, 작성일은 실입고일보다
+      −4~+7일 흔들린다. PO 입고금액 비율로 배분하는 것도 근거가 없다 — 계산서 공급가 합계
+      110,022,496원 ↔ 묶인 PO 입고액 합계 178,753,941원으로 **금액이 맞는 계산서가 0건**이다
+      (1 PO가 여러 계산서에 걸리고, 계산서가 입고액 전부를 덮지도 않는다 = 그 차이가 미수금).
+      이 화면은 **라인마다 입고일자와 금액이 직접 붙어 있어** 배분도 추정도 필요 없다.
+      실증(계산서 30608513): 라인 48건 총단가 합 2,489,790원 = 계산서 지급예정금액과 **차이 0원**.
+
+    kind: '발주'(입고) | '반출'(반품·차감). 반출은 금액이 음수로 온다 — 부호를 살려 담는다.
+    received_at: 「입고/반출일자」. **이 값이 계산서 축 일별 매출의 귀속일이다.**
+    """
+
+    __tablename__ = "coupang_rocket_settlement_item"
+    __table_args__ = (
+        UniqueConstraint("invoice_seq", "line_no", name="uq_rocket_settle_item"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    invoice_seq: Mapped[int] = mapped_column(Integer, nullable=False, index=True)  # ↔계산서 헤더
+    line_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    vendor_id: Mapped[str] = mapped_column(String(20), nullable=False, index=True)  # 계정축(페처 주입)
+    kind: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)          # 발주 | 반출
+    purchase_order_seq: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    sku_id: Mapped[Optional[str]] = mapped_column(String(30), nullable=True, index=True)
+    sku_name: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+    # ★귀속일 — 「입고/반출일자」. 날짜만 필요하지만 원천이 시각까지 주므로 그대로 담는다.
+    received_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+    center_code: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    tax_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    unit_price: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    supply_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    vat: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    # 총 단가 = 공급가+세액. 계산서 헤더의 지급예정금액과 맞물리는 축이다(실측 차이 0원).
+    total_price: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
