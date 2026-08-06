@@ -32,6 +32,26 @@ _COL_CONV_REV = 23    # 총 전환매출액(1일)
 
 _SELL_TYPE_LABEL = {"3P": "윙", "2P": "로켓그로스", "Retail": "로켓배송"}
 
+# ★★전환매출의 **축이 판매방식마다 다르다**(2026-08-06 적대 리뷰).
+#   3P·2P: 우리가 소비자에게 직접 판다 → 광고전환매출 = **우리 매출**
+#   Retail(1P): 쿠팡이 사입해 **자기 가격으로** 판다 → 광고전환매출 = **쿠팡 매출**(우리 것이 아니다)
+#   그래서 두 행의 ROAS는 **비교 대상이 아니다.** 라이브 실측(2026-08-04 기준 우리 몫 59.45%):
+#     화면 3P 217.4% vs Retail 254.0% → "1P 광고가 낫다"로 읽히는데,
+#     1P를 납품가로 환산하면 약 151%로 **오히려 3P보다 나쁘다.** 결론이 뒤집힌다.
+#   ★값을 환산하지는 않는다 — 우리 몫 비율은 기간마다 다르고 판매분석이 롤링 2개월만 덮어
+#     과거 구간은 환산할 근거가 없다. 추정하느니 **축을 이름으로 밝힌다.**
+#   (D-CPP-2는 소비자 실현가를 "BEP ROAS의 분자"로 쓰는 것 자체는 허용한다 — 금지된 건
+#    회계 매출로 쓰는 것이다. 여기서 고치는 건 **비교 가능한 것처럼 보이는 표면**이다.)
+_ROAS_BASIS = {
+    "3P": "our_revenue",
+    "2P": "our_revenue",
+    "Retail": "consumer_price",     # 쿠팡이 고객에게 판 금액 — 우리 매출이 아니다
+}
+_ROAS_BASIS_LABEL = {
+    "our_revenue": "우리 매출 기준",
+    "consumer_price": "소비자가 기준(쿠팡 매출)",
+}
+
 
 def _int(v) -> int:
     try:
@@ -190,8 +210,12 @@ def get_coupang_ad_report(
         cvr = round(orders / clk * 100, 2) if clk > 0 else 0.0
         roas = round(float(rev / spend * 100), 1) if spend > 0 else 0.0
 
+        basis = _ROAS_BASIS.get(r[0], "our_revenue")
         items.append({
             "sell_type": _SELL_TYPE_LABEL.get(r[0], r[0]),
+            # ★이 행의 전환매출·ROAS가 **무슨 축인지**. 화면이 이걸로 비교 불가를 표시한다.
+            "roas_basis": basis,
+            "roas_basis_label": _ROAS_BASIS_LABEL[basis],
             "impressions": imp,
             "clicks": clk,
             "ad_spend": int(spend),
@@ -214,7 +238,15 @@ def get_coupang_ad_report(
     t_clk = total["clicks"]
     t_spend = total["ad_spend"]
     t_rev = total["conversion_revenue"]
+    # ★합계의 전환매출은 **축이 다른 값을 더한 것**이다(3P=우리 매출 + 1P=쿠팡 매출).
+    #   그래서 합계 ROAS는 어느 축으로도 해석되지 않는다 — 지우지 않고 그렇다고 밝힌다.
+    #   (지우면 "합계가 없네"로 끝나지만, 밝히면 왜 못 쓰는지가 남는다.)
+    bases = {it["roas_basis"] for it in items}
+    total_basis = bases.pop() if len(bases) == 1 else "mixed"
     total.update({
+        "roas_basis": total_basis,
+        "roas_basis_label": _ROAS_BASIS_LABEL.get(
+            total_basis, "축 혼합 — 우리 매출과 쿠팡 매출을 더한 값이라 비교·해석 불가"),
         "ad_spend": int(t_spend),
         "conversion_revenue": int(t_rev),
         "ctr": round(t_clk / t_imp * 100, 2) if t_imp > 0 else 0.0,
