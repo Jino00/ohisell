@@ -425,3 +425,91 @@ def parse_po_item_rows(rows: list[list[str]]) -> list[dict]:
             )
         records.append(rec)
     return records
+
+
+# ════════════════════════════════════════════════
+# ⑤ 계산서 라인(입고상세내역) DOM 파서 — D-CPP-20
+# ════════════════════════════════════════════════
+# 소스: GET /scm/receive/detail?vendorPaymentInfoSeq={계산서}&cplbYn=N (폼-GET SSR HTML).
+# 왜 필요한가: 계산서 축 일별 매출의 **귀속일**은 작성일이 아니라 라인의 입고일이다(D-CPP-20).
+#   헤더만으로는 못 정하고(계산서 1건 = 평균 5.8 PO, 작성일 지연 −4~+7일), PO 입고금액 비율
+#   배분도 근거가 없다(금액이 맞는 계산서 0건). 이 표는 라인마다 입고일과 금액을 직접 준다.
+# 헤더 실측(2026-08-06): 구분 | 번호 | SKU 번호 | SKU 명 | 입고/반출일자 | 물류센터 | 세금타입 |
+#                        수량 | 단가 | 공급가액 | 세액 | 총 단가
+_RECV_COL = {
+    "구분": "kind",                     # 발주(입고) | 반출(반품·차감)
+    "번호": "purchase_order_seq",       # ★발주번호 — 컬럼명이 그냥 '번호'다
+    "SKU 번호": "sku_id",
+    "SKU 명": "sku_name",
+    "입고/반출일자": "received_at",      # ★귀속일
+    "물류센터": "center_code",
+    "세금타입": "tax_type",
+    "수량": "qty",
+    "단가": "unit_price",
+    "공급가액": "supply_amount",
+    "세액": "vat",
+    "총 단가": "total_price",           # 공급가+세액 — 계산서 지급예정금액과 맞물리는 축
+}
+
+
+def parse_settlement_item_rows(rows: list[list[str]]) -> list[dict]:
+    """입고상세내역 DOM rows([헤더]+데이터) → 계산서 라인 레코드.
+
+    헤더명 기반 매핑(위치 변동 방어). 헤더가 없거나 필수 컬럼('총 단가')이 없으면 빈 리스트 —
+    **0건을 성공으로 접지 않으려면 호출부가 원천 totalCount와 대조해야 한다**(원칙22).
+
+    ★★**원천의 「단가」·「공급가액」·「세액」은 단위당이고 「총 단가」만 합계다**(2026-08-06 실측).
+      그냥 SUM하면 공급가가 437,583원으로 나온다 — 실제는 2,263,522원, **5배 넘게 틀린다**
+      (Σ공급가액×수량 = 2,263,522 = 원천 「총 공급가 합계」와 차이 0원으로 확인).
+      이 프로젝트의 다른 금액 컬럼은 전부 **합계 축**이므로, 여기서 **× 수량으로 정규화해** 담는다.
+      단위당 값이 필요하면 `unit_price`를 쓴다(그것만 원천 그대로 단위당이다).
+    ★수량·금액은 반출 라인에서 **음수**로 온다. 부호를 살린다 — abs()로 뭉개면 반품이 매출로 잡힌다.
+    ★`line_no`는 수신 순서다. 원천에 라인 식별자가 없어(같은 PO·SKU가 여러 줄일 수 있다)
+      자연키를 만들 수 없다 → ingest가 계산서 단위 **snapshot replace**로 멱등을 만든다.
+    """
+    if not rows:
+        return []
+    header = [str(c or "").strip() for c in rows[0]]
+    norm_header = [re.sub(r"\s+", "", h) for h in header]
+    idx: dict[str, int] = {}
+    for col_name, key in _RECV_COL.items():
+        norm = re.sub(r"\s+", "", col_name)
+        if norm in norm_header:
+            idx[key] = norm_header.index(norm)
+    if "total_price" not in idx:
+        log.warning("rocket 계산서라인 파서: '총 단가' 컬럼 없음 — header=%s", header[:12])
+        return []
+
+    def cell(r: list, key: str) -> Any:
+        i = idx.get(key)
+        return r[i] if (i is not None and i < len(r)) else None
+
+    out: list[dict] = []
+    for n, r in enumerate(rows[1:], start=1):
+        if not r or all(not str(c or "").strip() for c in r):
+            continue
+        # 합계/안내 행 방어: 총 단가가 숫자로 안 읽히고 발주번호도 없으면 데이터 행이 아니다.
+        po_raw = cell(r, "purchase_order_seq")
+        total = _to_dec(cell(r, "total_price"))
+        if total == Decimal(0) and not _is_digits(po_raw):
+            continue
+        qty = _to_int(cell(r, "qty"))
+        out.append({
+            "line_no": n,
+            "kind": (str(cell(r, "kind") or "").strip() or None),
+            "purchase_order_seq": (int(str(po_raw).strip()) if _is_digits(po_raw) else None),
+            "sku_id": (str(cell(r, "sku_id") or "").strip() or None),
+            "sku_name": (str(cell(r, "sku_name") or "").strip() or None)[:300] or None,
+            "received_at": _to_dt_utc_naive(cell(r, "received_at")),
+            "center_code": (str(cell(r, "center_code") or "").strip() or None),
+            "tax_type": (str(cell(r, "tax_type") or "").strip() or None),
+            "qty": qty,
+            # 단위당(원천 그대로) — 유일하게 곱하지 않는 값이다.
+            "unit_price": _to_dec(cell(r, "unit_price")),
+            # ★합계로 정규화(× 수량). 원천은 단위당이라 그대로 담으면 SUM이 5배 틀린다.
+            "supply_amount": _to_dec(cell(r, "supply_amount")) * qty,
+            "vat": _to_dec(cell(r, "vat")) * qty,
+            # 총 단가는 원천이 이미 합계다(= 단가 × 수량).
+            "total_price": total,
+        })
+    return out

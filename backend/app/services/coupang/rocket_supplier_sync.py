@@ -18,6 +18,7 @@ from app.models import (
     CoupangRocketPurchaseOrder,
     CoupangRocketPurchaseOrderItem,
     CoupangRocketSettlement,
+    CoupangRocketSettlementItem,
     CoupangWingCookie,
 )
 from app.services.coupang import refresh_contract
@@ -260,3 +261,37 @@ def mark_rocket_fetch_error(db: Session, error: str, kind: str | None = None, le
     _ensure_rocket_state_row(db)
     db.commit()  # 행이 없던 경우 대비(계약 SA는 기존 행에만 쓴다)
     refresh_contract.report_failure(db, _ROCKET_ACCOUNT, error, kind, lease=lease)
+
+
+# ════════════════════════════════════════════════
+# ⑥ 계산서 라인(입고상세내역) ingest — D-CPP-20
+# ════════════════════════════════════════════════
+def ingest_settlement_items(db: Session, vendor_id: str, invoice_seq: int,
+                            rows: list[list], expected_total: int | None = None) -> dict:
+    """한 계산서의 입고상세 DOM rows → 라인 **snapshot replace**(그 계산서 전 행 삭제 후 재삽입).
+
+    왜 replace인가: 원천에 라인 식별자가 없다(같은 PO·SKU가 여러 줄일 수 있다). 자연키를 지어내
+      upsert하면 라인이 줄어든 경우를 못 지운다 → 계산서 단위로 통째 교체하는 편이 정직하다.
+
+    ★`expected_total`(원천 `totalCount`)을 받으면 **행 수를 대조**해 결과에 담는다.
+      페이징이 조용히 잘리는 사고를 겪었다 — `page`만으로는 20/48행에서 멈췄고, 폼의
+      `totalCount`를 함께 실어야 전량이 온다. 여기서 수를 안 재면 그 절단이 성공으로 보인다.
+
+    반환: {invoice_seq, lines, expected, truncated, total_price} — truncated=True면 호출부가 실패로 다뤄야 한다.
+    """
+    recs = parser.parse_settlement_item_rows(rows or [])
+    (db.query(CoupangRocketSettlementItem)
+       .filter(CoupangRocketSettlementItem.invoice_seq == invoice_seq)
+       .delete(synchronize_session=False))
+    total = 0
+    for rec in recs:
+        db.add(CoupangRocketSettlementItem(
+            invoice_seq=invoice_seq, vendor_id=vendor_id, **rec))
+        total += int(rec["total_price"])
+    db.commit()
+    truncated = bool(expected_total) and len(recs) < int(expected_total)
+    if truncated:
+        log.warning("rocket 계산서라인 %s: %d/%s행만 수신 — 절단(페이징 totalCount 누락 의심)",
+                    invoice_seq, len(recs), expected_total)
+    return {"invoice_seq": invoice_seq, "lines": len(recs),
+            "expected": expected_total, "truncated": truncated, "total_price": total}
