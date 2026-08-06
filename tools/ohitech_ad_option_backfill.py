@@ -26,13 +26,15 @@ import json
 import os
 import subprocess
 import sys
-import time
 import urllib.error
 import urllib.request
 from datetime import date
 from pathlib import Path
 
-import websocket
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from ohitech_ad_cdp import sniff_format  # noqa: E402
+from ohitech_ad_option_report import RC_EMPTY, RC_SESSION  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 REPORT_TOOL = HERE / "ohitech_ad_option_report.py"
@@ -59,53 +61,6 @@ def month_window(y: int, m: int) -> tuple[date, date]:
     end = date(y + (m == 12), (m % 12) + 1, 1)
     end = date.fromordinal(end.toordinal() - 1)
     return start, min(end, DEFAULT_TO_DAY)
-
-
-def rearm(port: int = 9224, timeout_s: int = 40) -> bool:
-    """광고센터 탭을 리로드해 오리진을 **재무장**한다. 각 달을 받기 전에 부른다.
-
-    왜 매번 하는가(2026-08-06 실측): 탭이 몇 분만 유휴여도 `/user/login`으로 밀려나 있고,
-    그 상태에서 GraphQL을 부르면 `TypeError: Failed to fetch`가 난다. 그런데 호출부는 그걸
-    빈 응답으로 받아 **"캠페인 0개"**로 읽는다 — 즉 세션이 죽은 것이 **데이터가 없는 것**으로
-    둔갑한다(연속 9개월이 조용히 건너뛰어졌다). 리로드 한 번이면 `/dashboard`로 착지한다.
-
-    ★로그인 페이지에 머무르면 False를 돌려준다 — **없다고 단정하지 않고 실패로 표면화**한다.
-    """
-    try:
-        ts = json.load(urllib.request.urlopen(f"http://127.0.0.1:{port}/json", timeout=5))
-        tab = [t for t in ts if t.get("type") == "page"
-               and "advertising.coupang.com" in t.get("url", "")][0]
-        ws = websocket.create_connection(tab["webSocketDebuggerUrl"],
-                                         suppress_origin=True, max_size=None)
-    except (urllib.error.URLError, OSError, IndexError, ValueError) as ex:
-        print(f"  ! 재무장 실패(CDP 9224 접속): {str(ex)[:100]}", flush=True)
-        return False
-    mid = [0]
-
-    def call(m, p=None):
-        mid[0] += 1
-        ws.send(json.dumps({"id": mid[0], "method": m, "params": p or {}}))
-        while True:
-            x = json.loads(ws.recv())
-            if x.get("id") == mid[0]:
-                return x
-
-    try:
-        call("Runtime.enable")
-        call("Page.enable")
-        call("Page.reload", {"ignoreCache": True})
-        deadline = time.monotonic() + timeout_s
-        href = ""
-        while time.monotonic() < deadline:
-            time.sleep(2)
-            r = call("Runtime.evaluate", {"expression": "location.href", "returnByValue": True})
-            href = r.get("result", {}).get("result", {}).get("value") or ""
-            if href and "/user/login" not in href:
-                return True
-        print(f"  ! 재무장 후에도 로그인 페이지: {href[:80]} — 페처 갱신으로 자가복구 필요", flush=True)
-        return False
-    finally:
-        ws.close()
 
 
 def push(cfg: dict, path: Path, y: int, m: int) -> dict:
@@ -142,19 +97,38 @@ def main() -> int:
         xlsx = outdir / f"{tag}.xlsx"
         if not xlsx.is_file() or xlsx.stat().st_size == 0:
             print(f"\n=== {tag} ({s}~{e}) 보고서 요청 ===", flush=True)
-            if not rearm():
-                summary.append({"month": tag, "error": "세션 재무장 실패(로그인 필요)"})
-                continue
+            # 재무장은 보고서 도구가 스스로 한다(`ohitech_ad_cdp.connect`). 여기선 결과 코드만 가른다 —
+            # ★"세션이 죽었다"와 "그 달엔 정말 캠페인이 없다"를 절대 같은 성공으로 접지 않는다.
             rc = subprocess.call(
                 [sys.executable, str(REPORT_TOOL),
                  s.strftime("%Y%m%d"), e.strftime("%Y%m%d"), str(xlsx)]
             )
+            if rc == RC_EMPTY:
+                print(f"  · {tag} 캠페인 0건(세션은 살아 있음) — 그 달엔 광고가 없었다", flush=True)
+                summary.append({"month": tag, "empty": True})
+                continue
+            if rc == RC_SESSION:
+                print(f"  ✗ {tag} 세션 죽음 — 재시도해도 같다. 페처 갱신으로 자가복구시킬 것:\n"
+                      f"    curl -X POST {cfg['prod_base_url'].rstrip('/')}"
+                      "/api/coupang/ops/rocket/ad-cost/request-refresh", flush=True)
+                summary.append({"month": tag, "error": "세션 죽음(로그인 필요)"})
+                continue
             if rc != 0 or not xlsx.is_file():
                 print(f"  ✗ {tag} 수집 실패(rc={rc}) — 건너뜀. 나중에 이 달만 다시 실행할 것", flush=True)
                 summary.append({"month": tag, "error": f"fetch rc={rc}"})
                 continue
         else:
             print(f"\n=== {tag} 캐시 재사용({xlsx.stat().st_size:,} bytes) ===", flush=True)
+        # ★prod `option-ingest`는 **xlsx만** 파싱한다. 행이 많은 달은 서버가 TSV를 주므로
+        #   그대로 보내면 400이 난다 — 보내기 전에 판정해서 무엇을 해야 하는지 말해 준다.
+        with open(xlsx, "rb") as fh:
+            fmt = sniff_format(fh.read(4096))
+        if fmt != "xlsx":
+            print(f"  ✗ {tag} 서버가 {fmt.upper()}를 줬다(행이 너무 많다) — prod ingest는 xlsx만 받는다.\n"
+                  f"    이 달만 주 단위로 쪼개 다시 받을 것: "
+                  f"ohitech_ad_option_report.py {s:%Y%m%d} {e:%Y%m%d} …", flush=True)
+            summary.append({"month": tag, "error": f"포맷 {fmt} — 구간을 쪼갤 것"})
+            continue
         if dry:
             summary.append({"month": tag, "bytes": xlsx.stat().st_size, "pushed": False})
             continue
