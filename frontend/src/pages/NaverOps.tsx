@@ -861,26 +861,30 @@ export default function NaverOps() {
 
       {/* 디스플레이(GFA·ADVoost) 광고비 신선도 배지 + 수동 보정 업로드 */}
       {(() => {
-        // 판정은 **축 전체(gfa:%)의 최신일**로 한다. 소스별로 보면 소진 0인 날(행 미생성)을
-        // 수집 실패로 오탐한다 — 2026-08-05가 실제로 그런 날(PMAX 0, GFA만 적재)이었다.
+        // ★판정은 **수집기**로 한다(2026-08-06 적대 리뷰). 데이터(MAX(ad_date))로 판정하면
+        //   `ad_costs`의 '행 없음'이 「그날 소진 0」과 「수집 실패」를 겸해서 반드시 한쪽으로 틀린다:
+        //     소스별로 보면 → 소진 0인 날을 사고로 오탐(거짓 빨강)
+        //     계열 합집합으로 보면 → 형제 소스가 죽어도 초록(거짓 초록) ← 직전 판이 이랬다
+        //   "우리가 물어봤는가"는 그것과 독립이므로, 그걸로 판정하면 둘 다 안 틀린다.
+        const col = gfa?.collection ?? null;
+        const stale = col ? col.stale : true;   // 판정 근거가 없으면 초록으로 넘기지 않는다
         const latest = gfa?.date_to ?? null;
         const ago = daysSince(latest);
-        const stale = ago == null || ago >= 2;   // 어제(1일)까지는 정상(당일 데이터는 미제공)
         const bySource = (gfa?.by_source ?? []).filter((s) => s.date_to);
         return (
           <div className={`flex flex-wrap items-center gap-3 mb-6 px-4 py-3 rounded-lg border ${
             stale ? "border-red-300 bg-red-50" : "border-green-200 bg-green-50"
           }`}>
             <span className="text-sm font-medium text-gray-700">디스플레이 광고비(GFA·ADVoost)</span>
-            {latest ? (
-              <span className={`text-sm ${stale ? "text-red-600 font-semibold" : "text-green-700"}`}>
-                최신 데이터: {latest}
-                {ago != null && ago > 0 && ` (${ago}일 전)`}
-                {stale ? " ⚠️ 수집 확인 필요" : " ✓ 최신"}
-              </span>
-            ) : (
-              <span className="text-sm text-red-600 font-semibold">데이터 없음 ⚠️ 수집 확인 필요</span>
-            )}
+            <span className={`text-sm ${stale ? "text-red-600 font-semibold" : "text-green-700"}`}>
+              {stale ? "⚠️ 수집 확인 필요" : "✓ 수집 정상"}
+              {col?.last_success_at && ` · 마지막 성공 ${col.last_success_at.slice(0, 16).replace("T", " ")}`}
+              {col?.age_hours != null && ` (${Math.floor(col.age_hours)}시간 전)`}
+            </span>
+            {/* 데이터 최신일은 **사실 진술**이지 판정 근거가 아니다 — 라벨로 분리한다. */}
+            <span className="text-sm text-gray-500">
+              {latest ? <>적재 최신일 {latest}{ago != null && ago > 0 && ` (${ago}일 전)`}</> : "적재 데이터 없음"}
+            </span>
             <button
               onClick={() => gfaFileRef.current?.click()}
               disabled={gfaUploading}
@@ -893,7 +897,8 @@ export default function NaverOps() {
             {gfaMsg && <span className="w-full text-xs text-gray-600">{gfaMsg}</span>}
             <span className="w-full text-xs text-gray-400">
               비즈머니 실차감 API로 <strong className="font-medium">매일 07:10 자동 수집</strong>(어제치).
-              소진이 0인 날은 행이 생기지 않는 것이 정상.
+              {col?.reason && <> {"· "}<strong className="font-medium">{col.reason}</strong></>}
+              {col?.last_error && <> {"· 마지막 오류: "}{col.last_error.slice(0, 120)}</>}
               {bySource.length > 0 && (
                 <> {"· "}{bySource.map((s) => `${s.source.replace("gfa:", "")} ~${s.date_to}`).join(" · ")}</>
               )}
