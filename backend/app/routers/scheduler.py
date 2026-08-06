@@ -78,7 +78,10 @@ def trigger_job(job_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail=f"실행할 수 없는 작업입니다: {job_id}")
 
     try:
-        func()
+        # ★반환 dict가 있으면 응답에 싣는다 — 잡이 "실행했지만 아무것도 안 했다"(예: 같은 시각
+        #   슬롯이라 건너뛴 스냅샷)를 구분해 보여주기 위함이다. 고정 문구만 돌려주면 누른 사람은
+        #   가드가 걸렸는지 알 수 없고, 그건 가드가 없는 것과 화면상 같다.
+        job_result = func()
         # 수동 트리거 성공 — 워치독 상태도 정리한다(cron 경로는 리스너가 담당, S5b).
         # 직전 cron 실패의 stale 'error'가 남아 evaluator가 거짓 'failed'로 보지 않게.
         now = kst_now()
@@ -90,7 +93,11 @@ def trigger_job(job_id: str, db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"작업 실행 에러: {e}")
 
-    return {"detail": f"작업 실행 완료: {job_id}"}
+    if isinstance(job_result, dict) and job_result.get("skipped"):
+        return {"detail": f"작업 건너뜀: {job_id} — {job_result.get('reason', '사유 없음')}",
+                "skipped": True, "result": job_result}
+    return {"detail": f"작업 실행 완료: {job_id}",
+            "result": job_result if isinstance(job_result, dict) else None}
 
 
 @router.put("/toggle/{job_id}")

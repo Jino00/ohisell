@@ -7,6 +7,10 @@ export default function SchedulerStatus() {
   const [expanded, setExpanded] = useState(false);
   const [triggering, setTriggering] = useState<string | null>(null);
   const [toggling, setToggling] = useState<string | null>(null);
+  // 「지금 실행」 결과 한 줄 — 잡이 "실행했지만 아무것도 안 했다"를 말할 수 있어야 한다.
+  // (예: 시간별 스냅샷은 같은 시각 슬롯이면 건너뛴다 — 다시 찍으면 페이싱 증분이 왜곡되므로.)
+  // 응답을 버리면 그 구분이 화면에서 사라지고, 그건 가드가 없는 것과 같아 보인다.
+  const [triggerMsg, setTriggerMsg] = useState<{ jobId: string; text: string; skipped: boolean } | null>(null);
 
   async function fetchStatus() {
     try {
@@ -25,11 +29,15 @@ export default function SchedulerStatus() {
 
   async function handleTrigger(jobId: string) {
     setTriggering(jobId);
+    setTriggerMsg(null);
     try {
-      await fetchApi(`/api/scheduler/trigger/${jobId}`, { method: "POST", body: JSON.stringify({}) });
+      const res = await fetchApi<{ detail?: string; skipped?: boolean }>(
+        `/api/scheduler/trigger/${jobId}`, { method: "POST", body: JSON.stringify({}) });
+      setTriggerMsg({ jobId, text: res?.detail || "실행 완료", skipped: !!res?.skipped });
       await fetchStatus();
-    } catch {
-      // ignore
+    } catch (e: any) {
+      // 종전에는 조용히 삼켰다 — 실패한 수동 실행이 성공과 구분되지 않았다.
+      setTriggerMsg({ jobId, text: e?.message || "실행 실패", skipped: false });
     } finally {
       setTriggering(null);
     }
@@ -83,7 +91,8 @@ export default function SchedulerStatus() {
             <div className="text-xs text-gray-400">등록된 작업이 없습니다</div>
           )}
           {status.jobs.map((job) => (
-            <div key={job.id} className="flex items-center gap-2 text-xs">
+            <div key={job.id}>
+            <div className="flex items-center gap-2 text-xs">
               {/* Toggle switch */}
               <button
                 onClick={() => handleToggle(job.id, !job.is_enabled)}
@@ -108,6 +117,13 @@ export default function SchedulerStatus() {
               >
                 {triggering === job.id ? "..." : "지금 실행"}
               </button>
+            </div>
+            {triggerMsg?.jobId === job.id && (
+              <div className={`mt-0.5 ml-10 text-[11px] leading-snug ${
+                triggerMsg.skipped ? "text-amber-600" : "text-gray-500"}`}>
+                {triggerMsg.skipped ? "⏭ " : ""}{triggerMsg.text}
+              </div>
+            )}
             </div>
           ))}
         </div>

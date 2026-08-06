@@ -234,10 +234,66 @@ def test_hourly_snapshot_idempotent_same_hour(db):
     campaigns = [{"campaign_id": "c1", "daily_budget": 1000, "campaign_type": "SHOPPING"}]
     stats = [{"campaign_id": "c1", "cost": 500, "clk": 2, "imp": 100, "conv_cnt": 0, "conv_amt": 0}]
     hourly_snapshot.snapshot_hourly(db, campaigns=campaigns, stats=stats)
-    hourly_snapshot.snapshot_hourly(db, campaigns=campaigns, stats=stats)  # 같은 시각 재실행 → 교체
+    hourly_snapshot.snapshot_hourly(db, campaigns=campaigns, stats=stats)  # 같은 시각 재실행 → skip
     rows = db.query(NaverHourlySnapshot).all()
     assert len(rows) == 1
     assert rows[0].cost == 500 and rows[0].daily_budget == 1000
+
+
+def test_hourly_snapshot_skips_same_hour_and_keeps_slot_time(db):
+    """같은 시각 재실행은 **적재하지 않고 사유를 돌려준다** — 슬롯 기록시각도 안 움직여야 한다.
+
+    왜: hourly_pacing이 슬롯 간 차분으로 시간당 증분을 낸다. 시간 중간에 슬롯을 교체하면
+    그 시간은 과대·다음 시간은 과소가 된다(2026-08-06 16:46 수동 실행 실사례).
+    """
+    campaigns = [{"campaign_id": "c1", "daily_budget": 1000, "campaign_type": "SHOPPING"}]
+    first = hourly_snapshot.snapshot_hourly(
+        db, campaigns=campaigns,
+        stats=[{"campaign_id": "c1", "cost": 500, "clk": 2, "imp": 100}])
+    assert not first.get("skipped") and first["campaigns"] == 1
+    at_before = db.query(NaverHourlySnapshot).one().snapshot_at
+
+    # 같은 시각에 **더 큰 누적**으로 재실행 — 값이 달라도 슬롯을 밀지 않는다
+    again = hourly_snapshot.snapshot_hourly(
+        db, campaigns=campaigns,
+        stats=[{"campaign_id": "c1", "cost": 900, "clk": 5, "imp": 300}])
+    assert again["skipped"] is True
+    assert again["existing_rows"] == 1
+    assert "건너뛴다" in again["reason"]
+
+    row = db.query(NaverHourlySnapshot).one()
+    assert row.cost == 500, "skip인데 값이 바뀌었다 — 슬롯이 교체된 것"
+    assert row.snapshot_at == at_before, "skip인데 기록시각이 움직였다"
+
+
+def test_hourly_snapshot_force_replaces_slot(db):
+    """force=True는 교체한다 — :05 수집이 일부만 담고 끝난 경우의 탈출구(코드 경로 전용)."""
+    campaigns = [{"campaign_id": "c1", "daily_budget": 1000, "campaign_type": "SHOPPING"}]
+    hourly_snapshot.snapshot_hourly(
+        db, campaigns=campaigns, stats=[{"campaign_id": "c1", "cost": 500, "clk": 2, "imp": 100}])
+    res = hourly_snapshot.snapshot_hourly(
+        db, campaigns=campaigns, stats=[{"campaign_id": "c1", "cost": 900, "clk": 5, "imp": 300}],
+        force=True)
+    assert not res.get("skipped")
+    row = db.query(NaverHourlySnapshot).one()
+    assert row.cost == 900
+
+
+def test_hourly_snapshot_fills_empty_slot_after_failed_run(db):
+    """다른 시각 슬롯이 있어도 **빈 시각**은 정상 적재된다 — 가드가 수집을 막아선 안 된다."""
+    campaigns = [{"campaign_id": "c1", "daily_budget": 1000, "campaign_type": "SHOPPING"}]
+    now = kst_now()
+    other_hour = (now.hour + 1) % 24  # 현재 시각이 아닌 슬롯
+    db.add(NaverHourlySnapshot(
+        snapshot_at=now, ad_date=kst_today(), snapshot_hour=other_hour,
+        campaign_id="c1", campaign_type="SHOPPING", cost=100, clk=1, imp=10, daily_budget=1000))
+    db.commit()
+
+    res = hourly_snapshot.snapshot_hourly(
+        db, campaigns=campaigns, stats=[{"campaign_id": "c1", "cost": 500, "clk": 2, "imp": 100}])
+    assert not res.get("skipped") and res["campaigns"] == 1
+    assert db.query(NaverHourlySnapshot).filter(
+        NaverHourlySnapshot.snapshot_hour == now.hour).count() == 1
 
 
 def test_hourly_snapshot_stores_avg_rank(db):
