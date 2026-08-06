@@ -187,7 +187,7 @@ export default function NaverOps() {
   // 라이브 실측(2026-08-06): 30일 클릭 직후 `days=30` 다음에 `days=7`이 뒤따라 와 7일치가 남았다.
   // 시퀀스 가드(reqSeq)는 응답 도착 순서만 정리할 뿐, 뒤늦게 발사되는 새 요청은 못 막는다.
   const loadRef = useRef(load);
-  loadRef.current = load;
+  useEffect(() => { loadRef.current = load; }, [load]);
 
   const loadGfa = useCallback(async () => {
     try { setGfa(await fetchGfaStatus()); } catch { /* silent */ }
@@ -301,7 +301,7 @@ export default function NaverOps() {
             await realCall();
             setActionMsg(okMsg);
             setPreview(null);
-            await (reload ? reload() : loadPending(pendingDays));
+            await (reload ? reload() : reloadPending());
           } catch (e) {
             setActionMsg(`실행 실패: ${e instanceof Error ? e.message : e}`);
           } finally {
@@ -370,6 +370,20 @@ export default function NaverOps() {
   const [claims, setClaims] = useState<NaverClaims | null>(null);
   const [claimsLoading, setClaimsLoading] = useState(false);
   const [claimsDays, setClaimsDays] = useState(14);
+
+  // ★지연 재조회는 **호출 시점 값이 아니라 현재 선택**을 읽는다(적대 리뷰 지적).
+  //   runPreview는 dry_run 왕복(네트워크)을 기다린 뒤 모달을 띄우므로, 그 사이 사용자가
+  //   기간·상태를 바꿀 수 있다. 옛 값으로 재조회하면 **셀렉트는 7일인데 목록은 14일**이 된다
+  //   — 기간 버튼에서 고친 것과 같은 결함 클래스이고, 여기엔 reqSeq 같은 가드도 없다.
+  //   loadClaims/loadPending/loadProducts 자체는 useCallback([])이라 안정적이므로,
+  //   흔들리는 것은 **인자뿐**이다. 그래서 인자만 ref로 뺀다.
+  const selRef = useRef({ claimsDays, pendingDays, productStatus });
+  useEffect(() => {
+    selRef.current = { claimsDays, pendingDays, productStatus };
+  }, [claimsDays, pendingDays, productStatus]);
+  function reloadClaims()   { return loadClaims(selRef.current.claimsDays); }
+  function reloadPending()  { return loadPending(selRef.current.pendingDays); }
+  function reloadProducts() { return loadProducts(selRef.current.productStatus); }
   // 직접 취소요청 모달
   const [reqCancelOpen, setReqCancelOpen] = useState(false);
   const [rcPoid, setRcPoid] = useState("");
@@ -394,7 +408,7 @@ export default function NaverOps() {
       () => naverApproveCancel(poid, true),
       () => naverApproveCancel(poid, false),
       `✅ 취소 승인 완료`,
-      () => loadClaims(claimsDays),
+      reloadClaims,
     );
   }
 
@@ -420,7 +434,7 @@ export default function NaverOps() {
       () => naverRequestCancel(payload, true),
       () => naverRequestCancel(payload, false),
       `✅ 취소 요청 완료`,
-      () => loadClaims(claimsDays),
+      reloadClaims,
     );
   }
 
@@ -451,7 +465,7 @@ export default function NaverOps() {
       () => naverApproveReturn(poid, true),
       () => naverApproveReturn(poid, false),
       `✅ 반품 승인 완료`,
-      () => loadClaims(claimsDays),
+      reloadClaims,
     );
   }
 
@@ -467,7 +481,7 @@ export default function NaverOps() {
       () => naverRejectReturn(poid, reason, true),
       () => naverRejectReturn(poid, reason, false),
       `✅ 반품 거부 완료`,
-      () => loadClaims(claimsDays),
+      reloadClaims,
     );
   }
 
@@ -495,7 +509,7 @@ export default function NaverOps() {
       () => naverHoldbackReturn(payload, true),
       () => naverHoldbackReturn(payload, false),
       `✅ 반품 보류 완료`,
-      () => loadClaims(claimsDays),
+      reloadClaims,
     );
   }
 
@@ -508,7 +522,7 @@ export default function NaverOps() {
       () => naverReleaseReturnHoldback(poid, true),
       () => naverReleaseReturnHoldback(poid, false),
       `✅ 반품 보류 해제 완료`,
-      () => loadClaims(claimsDays),
+      reloadClaims,
     );
   }
 
@@ -535,7 +549,7 @@ export default function NaverOps() {
       () => naverRequestReturn(payload, true),
       () => naverRequestReturn(payload, false),
       `✅ 반품 요청 완료`,
-      () => loadClaims(claimsDays),
+      reloadClaims,
     );
   }
 
@@ -563,7 +577,7 @@ export default function NaverOps() {
       () => naverApproveExchangeCollect(poid, true),
       () => naverApproveExchangeCollect(poid, false),
       `✅ 교환 수거완료 처리`,
-      () => loadClaims(claimsDays),
+      reloadClaims,
     );
   }
 
@@ -579,7 +593,7 @@ export default function NaverOps() {
       () => naverRejectExchange(poid, reason, true),
       () => naverRejectExchange(poid, reason, false),
       `✅ 교환 거부 완료`,
-      () => loadClaims(claimsDays),
+      reloadClaims,
     );
   }
 
@@ -607,7 +621,7 @@ export default function NaverOps() {
       () => naverHoldbackExchange(payload, true),
       () => naverHoldbackExchange(payload, false),
       `✅ 교환 보류 완료`,
-      () => loadClaims(claimsDays),
+      reloadClaims,
     );
   }
 
@@ -630,7 +644,7 @@ export default function NaverOps() {
       () => naverDispatchExchange(payload, true),
       () => naverDispatchExchange(payload, false),
       `✅ 교환 재배송 처리`,
-      () => loadClaims(claimsDays),
+      reloadClaims,
     );
   }
 
@@ -643,7 +657,7 @@ export default function NaverOps() {
       () => naverReleaseExchangeHoldback(poid, true),
       () => naverReleaseExchangeHoldback(poid, false),
       `✅ 교환 보류 해제 완료`,
-      () => loadClaims(claimsDays),
+      reloadClaims,
     );
   }
 
@@ -682,7 +696,7 @@ export default function NaverOps() {
       () => naverChangeProductStatus(payload, true),
       () => naverChangeProductStatus(payload, false),
       "✅ 판매상태 변경 완료",
-      () => loadProducts(productStatus),
+      reloadProducts,
     );
   }
 
@@ -1279,7 +1293,7 @@ export default function NaverOps() {
             <select value={claimsDays} onChange={(e) => setClaimsDays(Number(e.target.value))} className="text-sm border border-gray-300 rounded px-2 py-1">
               {[7, 14, 30].map((d) => <option key={d} value={d}>최근 {d}일</option>)}
             </select>
-            <button onClick={() => loadClaims(claimsDays)} className="px-3 py-1 rounded text-sm bg-gray-100 hover:bg-gray-200">↺</button>
+            <button onClick={reloadClaims} className="px-3 py-1 rounded text-sm bg-gray-100 hover:bg-gray-200">↺</button>
           </div>
         </div>
         <p className="text-xs text-gray-500 mb-3">
@@ -1640,7 +1654,7 @@ export default function NaverOps() {
                 {s === "SALE" ? "판매중" : s === "SUSPENSION" ? "판매중지" : s === "CLOSE" ? "품절" : "전체"}
               </button>
             ))}
-            <button onClick={() => loadProducts(productStatus)} className="px-3 py-1 rounded text-sm bg-gray-100 hover:bg-gray-200">↺</button>
+            <button onClick={reloadProducts} className="px-3 py-1 rounded text-sm bg-gray-100 hover:bg-gray-200">↺</button>
           </div>
         </div>
         {productLoading ? (
