@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""로켓1P 미정산(확인요청) 라인의 **연령(aging)** 산정 — ref 49 재현 스크립트 (1회성 분석, 2026-08-06).
+"""로켓1P 미정산(확인요청) 라인의 **연령(aging)** 산정 — ref 50 재현 스크립트 (1회성 분석, 2026-08-06).
 
 무엇을 하나
   ① 청구 159라인(`docs/references/data/45c_coupang_unsettled_claim_v3_20260806.csv`)이 **지금도
      미정산인지** prod `coupang_rocket_settlement_item` 전량과 대조해 재판정한다.
   ② 각 라인에 **연령 기준일**을 붙이고 경과일수·버킷을 낸다.
 
-★기준일 우선순위 (ref 49 §2 — 임의로 고른 게 아니라 커버리지를 재고 정한 것):
+★기준일 우선순위 (ref 50 §2 — 임의로 고른 게 아니라 커버리지를 재고 정한 것):
     ①하차일(한진, 제3자가 확인한 인도 완료)
     ②센터도착일(한진)            ← 하차 기록이 없는 라인용. 하차와 중앙값 0일 차이
     ③같은 PO 정산라인 입고일(쿠팡 자신의 기록)
@@ -27,7 +27,7 @@
 사용:
   python3 tools/rocket_receivable_aging.py --workdir <dir> \
       --claim docs/references/data/45c_coupang_unsettled_claim_v3_20260806.csv \
-      --asof 2026-08-06 --out docs/references/data/49_coupang_unsettled_aging_20260806.csv
+      --asof 2026-08-06 --out docs/references/data/50_coupang_unsettled_aging_20260806.csv
 """
 from __future__ import annotations
 

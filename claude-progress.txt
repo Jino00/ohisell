@@ -1,4 +1,11 @@
-[2026-08-06 심야] 미수금 연령(aging) 재판정 — 금액 불변, 연령 축 신설 (D-CPP-21, ref 49)
+[2026-08-07 06:3x] 스마트스토어 수수료 — 예상=실측 오차 0원 재측정 (D-NAO-161, ref 49, 코드 변경 없음)
+  · Jino 질문 "수수료 추정치는 나중에 실측으로 바뀌면 자동으로 맞아지는거지?"에 답: sales_summary가
+    조회마다 정산 실측을 우선 적용(저장 안 함) 구조 확인 + 최근 60일 4,958라인 전수 재검증 —
+    예상 3,624,618원 = 실측 3,624,618원, 오차 0원. 정산 커버리지 곡선 재측정(D+0~3 19.2%부터
+    시작, 종전 "0%" 기록 정정 / D+12~14 99.5% / 완전 폐쇄 D+21). 결론: 「실측 N/예상 M」은
+    신뢰도 라벨이지 오차 경고가 아니다. 이전 이월 "수수료 추정 비중" 항목 재점검 종결.
+
+[2026-08-06 심야] 미수금 연령(aging) 재판정 — 금액 불변, 연령 축 신설 (D-CPP-21, ref 50)
   · 직전 세션 인계 §6 최우선 항목. **금액은 1원도 안 움직였다** — 청구 159라인을 백필된
     정산라인 전량(계산서 480건 9,926라인, 종전 대조는 112건 3,563라인)과 재대조 → 정산수량
     변동 0건, 총액 8,033,970 → 8,033,970원(차 0). 커버리지 역검 2종도 통과(라인 없는 계산서
@@ -25,8 +32,8 @@
     2라운드로 대체. 1차 5종 P1=0 → **2차 3렌즈에서 P1 2건**(미검증 인과 서술 §5-3 · 요약 표가
     라인 조용히 증발 --asof 과거 시 145/159), 전건 수정. **codex 소급 리뷰는 Jino 결정으로
     면제**(08-07 06:50 원문 "자채 적대적 리뷰했으니까 codex 소급 리뷰는 취소해줘") — 부채 없음
-  · 산출물 ref 49 · `docs/references/data/49_coupang_unsettled_aging_20260806.csv` ·
-    재현 스크립트 `tools/rocket_receivable_aging.py`(repo CSV + prod 1쿼리로 재생산 확인). 교훈 #155
+  · 산출물 ref 50 · `docs/references/data/50_coupang_unsettled_aging_20260806.csv` ·
+    재현 스크립트 `tools/rocket_receivable_aging.py`(repo CSV + prod 1쿼리로 재생산 확인). 교훈 #163
 
 [2026-08-06 밤] 로켓1P 계산서 귀속 축 전환 — 작성일→실입고일 (D-CPP-19·20)
   · 직전 세션(아래 "저녁" 항목)의 "다음"에서 이어받음: 계산서 귀속 축을 실입고일로 전환
@@ -1852,3 +1859,98 @@ RG 옛 공백(04-20~05-03) Jino 종결 승인(13:34) — 공백 아님(배송비
   ⑤ASN 수집 배선 미착수(마이그레이션 필요), `/rocket-recon`에 「보낸 수량」 열 추가.
 - 상세: docs/references/45_rocket_1p_asn_shipment_recon_20260805.md · 트랙 D-15:
   docs/tracks/active/track_coupang-rocket-1p.md
+
+## 2026-08-06 — 원가 «모름»은 0원이 아니다 + 원가 오배정 원천 차단 (D-NAO-156·157, 트랙 네이버 SA 광고 최적화 — 손익 정합 성격)
+- **출발점**: Jino가 SellC에서 스마트스토어 판매 손익을 정확히 계산하는 작업 중이었는데, 이
+  세션은 직전 HANDOFF §6의 "1순위"(순위 서보 D-NAO-124, 광고 **집행** 축)를 그대로 따라가다
+  Jino가 "왜 또 이렇게 멀리 온거야?"라고 지적해 손익 축으로 복귀했다.
+- **발견**: 상품 손익 화면이 원가 미상 상품을 이익률 **94~96%**로 표시하고 있었다. 원인은
+  `cost_map.get(pid, 0)` — 원가를 못 찾으면 0원 원가로 접혀 판 돈이 전부 이익으로 잡혔다.
+  30일 실측: 6개 상품·매출 956,545원(전체 2.5%), 이익 약 21만원 과대. 1위=주력 폴드8 필름
+  `13687558206`. 같은 날 세운 원칙(당일 광고비 «모름», D-NAO-154)의 원가판 미적용 케이스.
+- **수정 1**(커밋 `7ecccb3`): 원가·이익·이익률을 `None`으로 표시(매출·수수료는 유지), «모름»
+  사유를 `unmapped`(매핑 필요)/`zero_cost`(원가 입력 필요)로 분리, 배너로 규모 표면화. 라이브
+  합격: 94.85% → 「—」, 배너 «6개·956,545원», 정상 298개 무변화.
+- **수정 2**(커밋 `01043d3`): 적대 리뷰 P1 3건 — 배너 "그만큼 과대"가 매출 숫자에 잘못 붙는
+  문제 / **이익·이익률 카드가 스스로 미상을 말하지 않던 것**(광고비 카드에서 고친 구조가
+  이익 카드엔 없었음, 강조색 제거+sub 문구) / 광고비 pending과 겹칠 때 단정 방지.
+- **수정 3**(커밋 `330a5f9`, Jino "근본 수정을 해야 하는거 아니야?"): `naver_ops.py`의 원가
+  후보 선택이 `min(..., key=lambda x: x[1])`로 **원가가 아니라 product_master.id를 기준으로
+  조용히 골랐다** — 값이 갈리는 매핑에선 "맞는 원가"가 아니라 "id 작은 쪽"이 뽑혀 «모름»
+  배너도 못 잡는 자신 있는 오답이 될 수 있었다(음수 원가도 이 경로에서 새 나감). 후보가
+  갈리면 `ambiguous`로 «모름» 처리. 원인 쪽도 막음 — `products.py` 구형 엑셀 업로드 경로에만
+  이중 활성 매핑 가드(D-12)가 빠져 있어 라이브에 22건이 쌓여 있었다(원가가 실제로 갈리는 건
+  0건·음수 0건 — 아직 안 터진 구조). `cost_price ge=0` 검증도 추가.
+- 테스트 신규 16건, 전체 **4,933 passed**. tsc 0.
+- **D-NAO-156·157**(트랙 파일 전문 등재) · **교훈 #163·#156·#157**(LESSONS_LEARNED.md) ·
+  `failures.jsonl` 2건 기록.
+- **미결(이월)**: ①`product_pnl.py`의 `_agg_marketplace_by_sku`에 같은 «모름»→0 버그 클래스
+  (라이브 영향 네이버 1개 상품·30일 44,500원, 보존법칙 있어 별 계약 권장) ②cost_price=0인
+  활성 매핑 127개(Jino 입력 대기) ③원가 미상 6개 상품(매핑 5·원가 1, Jino 조치 대기)
+  ④`NaverOps.tsx` ColFilter `"—"` 정렬 위치 ⑤codex 소급 교차 리뷰(08-09 이후).
+- PR #229(브랜치 `claude/cost-unknown`), push 완료·**prod 배포 완료**(문서 갱신은 배포 후).
+- 상세: .claude/memory/HANDOFF_cost-unknown-not-zero+mapping-guards_20260806.md · 트랙
+  D-NAO-156·157: docs/tracks/active/track_naver-ad-optimization.md
+
+## 2026-08-06 밤 — 통합 손익 대조원장도 같이 고쳤다 (D-NAO-158, 같은 PR #229 계속)
+- **Jino 지시 22:14**: *"통합 손익 대조원장도 같이 고쳐줘"* — 위 D-NAO-156·157의 후속.
+- **발견**: `backend/app/services/product_pnl.py`의 `_agg_marketplace_by_sku`에 naver_ops와
+  같은 버그 클래스 — `cost = (pm.cost_price * o.quantity) if pm is not None else _Z`. 원가를
+  모르면(cost_price 0/NULL) 0원으로 계산돼 그 SKU 순익이 과대였다.
+- **★이 원장은 다르게 다뤘다 — 금액을 한 톨도 바꾸지 않았다.** `conservation_ok`(Σ SKU귀속+
+  Σ잔차==권위 엔진 `profit_calculator` 총계)가 걸려 있어 값을 빼면 보존법칙과 권위 엔진 정합이
+  동시에 깨진다. 대신 SKU 행에 `cost_known`·`cost_unknown_revenue`, 요약에
+  `cost_unknown_skus`·`cost_unknown_revenue`·`cost_unknown_scoped` 필드를 얹어 «모른다는
+  사실»만 별도로 싣고, 표시층이 그 필드를 보고 해당 SKU 순익을 「—」로 비운다(집계 불변·
+  표시만 반영하는 2단 구조).
+- **라이브 검증(30일 창, 배포 전→후 원 단위 동일)**: `coupang_1p/cost`·`coupang_1p/net_profit`
+  불균형 컴포넌트 동일(안 나빠짐) / `reconciled_net_profit` 70,259,805 → 70,259,805 /
+  `net_profit_allocated_total` 70,808,362 → 70,808,362 / `account_adjustment_residual`
+  −548,557 → −548,557 / naver 3개 컴포넌트 전부 `conservation_diff=0.00` / 신규 필드
+  `cost_unknown_skus=1 · cost_unknown_revenue=17,800.00 · cost_unknown_scoped=true`.
+- **★수치 정정**: 위 미결 이월에 적었던 "네이버 1개 상품·30일 44,500원"은 `product_channel_mapping`
+  조인으로 잰 값이라 틀렸다 — 엔진이 실제로 쓰는 `Order.product_id` 조인 경로로는 **17,800원**.
+- **★미검증**: SKU 행 「—」 표시는 라이브로 못 봤다. `coupang_1p/cost`·`net_profit` 보존법칙이
+  **이번 변경과 무관한 기존 결함**으로 이미 깨져 있어 모든 조회 창에서 `by_sku`가 빈 배열이라
+  SKU 표 자체가 안 뜬다. 확인된 것은 배너·요약 필드까지다.
+- **프론트 회귀 발견**: `tsc --noEmit`은 통과했는데 실제 빌드 `tsc -b`(프로젝트 참조)가
+  TS2345로 실패 — `ProductConnectionMap.tsx`의 로컬 `won(s: string)`이 undefined에서
+  "NaN원"을 냈다. `won(s: string | null | undefined)`로 넓혀 없는 값은 「—」로 수정(커밋
+  `1c747a1`). **프론트 CAS가 옛 dist 배포를 거부해 prod는 배포 전에 보호됨.**
+- 테스트 +4(`tests/test_product_pnl.py`), 전체 **4937 passed**. 커밋 `c77a7df`·`1c747a1`,
+  둘 다 prod 배포 완료.
+- **D-NAO-158**(트랙 파일 전문 등재) · **교훈 #158·#159**(LESSONS_LEARNED.md) ·
+  `failures.jsonl` 1건 기록.
+- **다음 최우선**: `coupang_1p/cost`·`coupang_1p/net_profit` 보존법칙 복구 — 이걸 넘어야
+  SKU 행 「—」 표시를 라이브로 볼 수 있다.
+- 상세(갱신됨): .claude/memory/HANDOFF_cost-unknown-not-zero+mapping-guards_20260806.md ·
+  트랙 D-NAO-158: docs/tracks/active/track_naver-ad-optimization.md
+
+## 2026-08-06 밤 — 기간 탭 오늘 광고비 누락 + 반품 배송손익 미반영 (D-NAO-159·160, 같은 PR #229 계속)
+- **계기**: Jino "이제 SellC 스마트스토어 손익표는 모두 정확히 믿어도 되는거지?" → 축별
+  실측 점검. 원가 말고 3가지가 더 나왔고 그중 2개를 이번에 고쳤다. 커밋 `5d66eee`(백엔드·
+  프론트, prod 배포 완료).
+- **① 기간 탭(7·15·30일)에 오늘 검색광고비가 0원**: `ad_costs`(D+1 확정)는 오늘 행이 없는데
+  매출은 오늘까지 들어가 이익이 과대였다. 라이브(08-06 23:05): 30일 창 오늘 매출 1,376,420원
+  vs 오늘 광고비 0원(실제 675,561원). 「오늘」 탭이 어제 광고비를 물던 결함(#151)의 **거울상**.
+  → 「오늘」 탭과 같은 헬퍼(`_today_search_snapshot`)로 리팩터해 오늘 스냅샷을 더함
+  (`ad_costs`에 이미 있으면 이중계상 가드). **디스플레이(ADVoost·GFA)는 구조적으로 못
+  메운다**(리포트 축에 없고 비즈머니 실차감은 D−1까지만) → `ad_basis`(kind="period")로
+  화면이 «검색은 오늘까지 + 디스플레이는 어제까지» 혼합 축임을 말함.
+- **② 반품·교환 배송 손익이 이 패널에 통째로 없었다**: `REVENUE_EXCLUDED`라 매출·원가·배송비가
+  0으로 빠지는데 실제 출고비·회수비·반품비는 발생 → 반품이 늘어도 이익이 반응 안 함. 메인
+  엔진(`_return_shipping_pnl`·`_exchange_shipping_pnl`)을 그대로 호출해 배선(귀속=완료일,
+  배송건수엔 미가산). **★부호를 손실로 단정 안 함** — 5,000원 청구 건은 배송축만 보면
+  +421.82 흑자(테스트를 음수로 못 박았다가 실측이 반증, 코드가 아니라 가정이 틀렸음).
+- **라이브(30일)**: 광고비 21,065,266.59→21,740,827.59(+675,561) · claim 13건
+  income 77,272.73/cost 103,937.27/net −28,766.36 · **합산 이익 4,563,266.14→3,892,997.86
+  (−670,268), 이익률 11.10%→9.43%**.
+- 테스트 +10(`test_naver_ops_today_ad_spend.py`), 전체 **4947 passed**. 프론트 검증
+  `npm run build`(`tsc -b`)로 처음부터 수행(교훈 #158 적용).
+- **D-NAO-159·160**(트랙 파일 전문 등재) · **교훈 #160·#161·#162**(LESSONS_LEARNED.md).
+- **아직 안 고친 것**: 디스플레이 광고비 시차(gfa:advoost 최신 08-04·gfa:da 최신 08-05,
+  원천 없어 못 메움) · 수수료 추정 비중(7일 창 24.3%로 짧을수록 추정 비중 큼) · 원가 입력
+  대기(미상 6개 + cost_price=0 매핑 127개, 이전과 동일 이월).
+- **다음 최우선**: (기존 그대로 유지) `coupang_1p/cost`·`coupang_1p/net_profit` 보존법칙 복구.
+- 상세(갱신됨): .claude/memory/HANDOFF_cost-unknown-not-zero+mapping-guards_20260806.md ·
+  트랙 D-NAO-159·160: docs/tracks/active/track_naver-ad-optimization.md
