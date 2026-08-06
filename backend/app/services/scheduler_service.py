@@ -345,13 +345,20 @@ def sync_naver_ad_daily_job():
 
 
 def snapshot_naver_ad_hourly_job():
-    """네이버 SA 시간별 캠페인 스냅샷 (매시간, 당일 누적). 빠른 루프(D-NAO-4) 데이터 기반."""
+    """네이버 SA 시간별 캠페인 스냅샷 (매시간, 당일 누적). 빠른 루프(D-NAO-4) 데이터 기반.
+
+    ★결과 dict를 **반환한다** — 수동 트리거(routers/scheduler.trigger_job)가 그걸 응답에 실어
+      "적재했는가 / 같은 시각이라 건너뛰었는가"를 누른 사람에게 보여준다. 반환을 삼키면
+      skip이 "작업 실행 완료"로만 보이고, 그건 가드가 있으나 없으나 화면이 같다는 뜻이다.
+      (APScheduler는 잡의 반환값을 무시하므로 크론 경로엔 영향 없다.)
+    """
     db = _get_own_db_session()
     try:
         from app.services.naver_ad.hourly_snapshot import snapshot_hourly
 
         result = snapshot_hourly(db)
         log.info("[스케줄러] naver_ad hourly snapshot: %s", result)
+        return result
     except Exception as e:
         log.exception("[스케줄러] snapshot_naver_ad_hourly_job 에러: %s", e)
         raise

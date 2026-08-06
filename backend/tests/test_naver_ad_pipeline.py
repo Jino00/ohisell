@@ -230,14 +230,132 @@ def test_ingest_ad_daily_snapshot_replace(db):
     assert db.query(NaverAdDaily).count() == 1
 
 
-def test_hourly_snapshot_idempotent_same_hour(db):
+def test_hourly_snapshot_no_duplicate_rows_on_same_hour_rerun(db):
+    """같은 시각 재실행이 행을 늘리지 않는다(계약은 「교체」에서 「skip」으로 바뀌었다)."""
     campaigns = [{"campaign_id": "c1", "daily_budget": 1000, "campaign_type": "SHOPPING"}]
     stats = [{"campaign_id": "c1", "cost": 500, "clk": 2, "imp": 100, "conv_cnt": 0, "conv_amt": 0}]
     hourly_snapshot.snapshot_hourly(db, campaigns=campaigns, stats=stats)
-    hourly_snapshot.snapshot_hourly(db, campaigns=campaigns, stats=stats)  # 같은 시각 재실행 → 교체
+    hourly_snapshot.snapshot_hourly(db, campaigns=campaigns, stats=stats)  # 같은 시각 재실행 → skip
     rows = db.query(NaverHourlySnapshot).all()
     assert len(rows) == 1
     assert rows[0].cost == 500 and rows[0].daily_budget == 1000
+
+
+def test_hourly_snapshot_skips_same_hour_and_keeps_slot_time(db):
+    """같은 시각 재실행은 **적재하지 않고 사유를 돌려준다** — 슬롯 기록시각도 안 움직여야 한다.
+
+    왜: hourly_pacing이 슬롯 간 차분으로 시간당 증분을 낸다. 시간 중간에 슬롯을 교체하면
+    그 시간은 과대·다음 시간은 과소가 된다(2026-08-06 16:46 수동 실행 실사례).
+    """
+    campaigns = [{"campaign_id": "c1", "daily_budget": 1000, "campaign_type": "SHOPPING"}]
+    first = hourly_snapshot.snapshot_hourly(
+        db, campaigns=campaigns,
+        stats=[{"campaign_id": "c1", "cost": 500, "clk": 2, "imp": 100}])
+    assert not first.get("skipped") and first["campaigns"] == 1
+    at_before = db.query(NaverHourlySnapshot).one().snapshot_at
+
+    # 같은 시각에 **더 큰 누적**으로 재실행 — 값이 달라도 슬롯을 밀지 않는다
+    again = hourly_snapshot.snapshot_hourly(
+        db, campaigns=campaigns,
+        stats=[{"campaign_id": "c1", "cost": 900, "clk": 5, "imp": 300}])
+    assert again["skipped"] is True
+    assert again["existing_rows"] == 1
+    assert "건너뛴다" in again["reason"]
+
+    row = db.query(NaverHourlySnapshot).one()
+    assert row.cost == 500, "skip인데 값이 바뀌었다 — 슬롯이 교체된 것"
+    assert row.snapshot_at == at_before, "skip인데 기록시각이 움직였다"
+
+
+def test_hourly_snapshot_refills_all_zero_slot(db):
+    """★전부 0인 슬롯은 "있음"으로 세지 않는다 — 그래야 갱신이 데이터를 더 낡게 만들지 않는다.
+
+    02:01에 수동 실행해 전부 0인 2시 슬롯이 생기면, 종전 규칙이면 02:05 크론이 skip해
+    03시까지 0원이 고정된다(NAVER는 자정 직후 당일치를 안 준다). 0은 증분을 만들지 않으므로
+    다시 채워도 페이싱 왜곡이 없다.
+    """
+    campaigns = [{"campaign_id": "c1", "daily_budget": 1000, "campaign_type": "SHOPPING"}]
+    first = hourly_snapshot.snapshot_hourly(
+        db, campaigns=campaigns, stats=[{"campaign_id": "c1", "cost": 0, "clk": 0, "imp": 0}])
+    assert not first.get("skipped")
+
+    again = hourly_snapshot.snapshot_hourly(
+        db, campaigns=campaigns, stats=[{"campaign_id": "c1", "cost": 5123, "clk": 5, "imp": 111}])
+    assert not again.get("skipped"), "전부 0 슬롯이 실제 값 적재를 막았다"
+    assert db.query(NaverHourlySnapshot).one().cost == 5123
+
+    # 값이 들어온 뒤에는 다시 잠긴다
+    third = hourly_snapshot.snapshot_hourly(
+        db, campaigns=campaigns, stats=[{"campaign_id": "c1", "cost": 9999, "clk": 9, "imp": 999}])
+    assert third["skipped"] is True
+    assert db.query(NaverHourlySnapshot).one().cost == 5123
+
+
+def test_hourly_snapshot_aborts_when_date_rolls_during_fetch(db, monkeypatch):
+    """★fetch가 자정을 넘으면 적재하지 않는다 — 응답은 새 날짜치인데 슬롯은 전날이 된다.
+
+    23:05 발화가 밀려 23:59:5x에 실행되면 payload는 다음날치(전 캠페인 0)다. 그걸 전날 23시
+    슬롯에 쓰면 전날 누적이 마지막 시간에 0으로 붕괴하고, completeness_curve가 그 곡선을
+    학습하며 budget_allocator·trigger_watch가 그 행을 "최신 누적"으로 읽는다. 전부 조용히 틀린다.
+    """
+    real_today = kst_today()
+    calls = {"n": 0}
+
+    def rolling_today():
+        # 1회차(가드) = 오늘, 2회차(적재 직전 재확인) = 다음날
+        calls["n"] += 1
+        return real_today if calls["n"] == 1 else real_today + timedelta(days=1)
+
+    monkeypatch.setattr(hourly_snapshot, "kst_today", rolling_today)
+
+    res = hourly_snapshot.snapshot_hourly(
+        db, campaigns=[{"campaign_id": "c1", "daily_budget": 1000, "campaign_type": "SHOPPING"}],
+        stats=[{"campaign_id": "c1", "cost": 0, "clk": 0, "imp": 0}])
+
+    assert res["skipped"] is True and res["date_rolled"] is True
+    assert db.query(NaverHourlySnapshot).count() == 0, "날짜가 바뀐 응답이 전날 슬롯에 적재됐다"
+
+
+def test_hourly_snapshot_reports_partial_batch(db):
+    """부분 적재는 최소한 **관측 가능**해야 한다 — fetch_campaign_stats는 실패 캠페인을 건너뛴다."""
+    campaigns = [{"campaign_id": f"c{i}", "daily_budget": 1000, "campaign_type": "SHOPPING"}
+                 for i in range(1, 4)]
+    res = hourly_snapshot.snapshot_hourly(
+        db, campaigns=campaigns,
+        stats=[{"campaign_id": "c1", "cost": 100, "clk": 1, "imp": 10}])
+
+    assert res["partial"] is True
+    assert res["campaigns"] == 1 and res["campaigns_expected"] == 3
+
+
+def test_hourly_snapshot_force_replaces_slot(db):
+    """force=True는 교체한다 — :05 수집이 일부만 담고 끝난 경우의 탈출구(코드 경로 전용)."""
+    campaigns = [{"campaign_id": "c1", "daily_budget": 1000, "campaign_type": "SHOPPING"}]
+    hourly_snapshot.snapshot_hourly(
+        db, campaigns=campaigns, stats=[{"campaign_id": "c1", "cost": 500, "clk": 2, "imp": 100}])
+    res = hourly_snapshot.snapshot_hourly(
+        db, campaigns=campaigns, stats=[{"campaign_id": "c1", "cost": 900, "clk": 5, "imp": 300}],
+        force=True)
+    assert not res.get("skipped")
+    row = db.query(NaverHourlySnapshot).one()
+    assert row.cost == 900
+
+
+def test_hourly_snapshot_fills_empty_slot_after_failed_run(db):
+    """다른 시각 슬롯이 있어도 **빈 시각**은 정상 적재된다 — 가드가 수집을 막아선 안 된다."""
+    campaigns = [{"campaign_id": "c1", "daily_budget": 1000, "campaign_type": "SHOPPING"}]
+    now = kst_now()
+    other_hour = (now.hour + 1) % 24  # 현재 시각이 아닌 슬롯
+    db.add(NaverHourlySnapshot(
+        snapshot_at=now, ad_date=kst_today(), snapshot_hour=other_hour,
+        campaign_id="c1", campaign_type="SHOPPING", cost=100, clk=1, imp=10, daily_budget=1000))
+    db.commit()
+
+    res = hourly_snapshot.snapshot_hourly(
+        db, campaigns=campaigns, stats=[{"campaign_id": "c1", "cost": 500, "clk": 2, "imp": 100}])
+    assert not res.get("skipped") and res["campaigns"] == 1
+    assert db.query(NaverHourlySnapshot).filter(
+        NaverHourlySnapshot.snapshot_hour == now.hour).count() == 1
 
 
 def test_hourly_snapshot_stores_avg_rank(db):

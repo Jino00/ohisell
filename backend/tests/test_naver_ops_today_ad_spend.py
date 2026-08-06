@@ -50,10 +50,10 @@ def _yesterday_ad(db, amount: str) -> None:
     db.commit()
 
 
-def _snapshot(db, *, hour: int, cost: int, campaign: str = "cmp-1") -> datetime:
+def _snapshot(db, *, hour: int, cost: int, campaign: str = "cmp-1", imp: int | None = None) -> datetime:
     at = datetime.combine(kst_today(), datetime.min.time()) + timedelta(hours=hour, minutes=5)
     db.add(NaverHourlySnapshot(snapshot_at=at, ad_date=kst_today(), snapshot_hour=hour,
-                               campaign_id=campaign, cost=cost))
+                               campaign_id=campaign, cost=cost, imp=imp))
     db.commit()
     return at
 
@@ -104,6 +104,108 @@ def test_no_snapshot_yet_reports_zero_not_yesterday(db):
     assert out["summary"]["ad_spend"] == "0.00"
     assert out["ad_basis"]["kind"] == "today_no_snapshot"
     assert out["ad_basis"]["as_of"] is None
+
+
+def test_cumulative_regression_keeps_observed_max(db):
+    """★★NAVER 당일 누적은 **후퇴한다** — 화면은 관측 최대치를 쓰고 그 사실을 응답에 싣는다.
+
+    라이브 실측(2026-08-06 20:04): 19:05~20:00 9회 연속 506,370원(clk 456·imp 66,760)이던
+    값이 20:04에 398,102원(clk 366·imp 53,836)으로 떨어졌고 17시 슬롯과 원 단위까지 같았다
+    (3시간 전 상태). 20:05 크론이 그걸 20시 슬롯에 적재해 화면 광고비가 10.8만원 줄고
+    **이익이 그만큼 과대**로 표시됐다. 최근 14일에 같은 후퇴 14건.
+    누적은 정의상 뒤로 갈 수 없으므로 최대치가 정답에 더 가깝다.
+    """
+    _snapshot(db, hour=19, cost=506370, imp=66760)
+    _snapshot(db, hour=20, cost=398102, imp=53836)   # 후퇴
+
+    out = sales_summary(days=0, db=db)
+
+    assert out["summary"]["ad_spend"] == "506370.00", "후퇴한 최신 배치를 그대로 쓰면 이익이 과대"
+    assert out["ad_basis"]["basis"] == "day_max"
+    assert out["ad_basis"]["regressed_by"] == "108268.00"   # 화면이 후퇴를 말할 수 있어야 한다
+    assert out["ad_basis"]["latest_cost"] == "398102.00"
+    assert out["ad_basis"]["pending"] is False
+
+
+def test_no_regression_reports_zero(db):
+    """정상 전진 구간에선 후퇴 금액이 0이다 — 상시 경고는 경고를 무의미하게 만든다."""
+    _snapshot(db, hour=18, cost=447936, imp=60214)
+    _snapshot(db, hour=19, cost=506370, imp=66760)
+
+    out = sales_summary(days=0, db=db)
+
+    assert out["summary"]["ad_spend"] == "506370.00"
+    assert out["ad_basis"]["regressed_by"] == "0.00"
+
+
+def test_partial_batch_does_not_lower_today_spend(db):
+    """부분 적재(46개 중 일부만 담긴 슬롯)도 광고비를 떨어뜨리지 못한다.
+
+    캠페인별 최대 누적을 쓰므로 빠진 캠페인은 이전 최대치를 유지한다.
+    """
+    _snapshot(db, hour=14, cost=300000, campaign="cmp-1", imp=1000)
+    _snapshot(db, hour=14, cost=200000, campaign="cmp-2", imp=800)
+    _snapshot(db, hour=15, cost=320000, campaign="cmp-1", imp=1100)   # cmp-2 누락
+
+    out = sales_summary(days=0, db=db)
+
+    assert out["summary"]["ad_spend"] == "520000.00"   # 320,000 + 200,000(유지)
+    assert out["ad_basis"]["regressed_by"] == "200000.00"
+
+
+def test_zero_batch_after_known_value_does_not_revert_to_unknown(db):
+    """이미 값을 알고 있으면 최신 배치가 전부 0이어도 «모름»으로 되돌리지 않는다."""
+    _snapshot(db, hour=13, cost=360731, imp=47720)
+    _snapshot(db, hour=14, cost=0, imp=0)
+
+    out = sales_summary(days=0, db=db)
+
+    assert out["summary"]["ad_spend"] == "360731.00"
+    assert out["ad_basis"]["pending"] is False
+
+
+def test_snapshot_of_all_zeros_is_pending_not_a_confirmed_zero(db):
+    """★스냅샷이 있는데 전부 0이면 «모름»이다 — 확정 0원이 아니다.
+
+    실측 5일 전수(2026-08-02~06): NAVER /stats 당일치는 자정 직후 아무 값도 주지 않는다
+    (0시·1시 슬롯의 cost·clk·imp 모두 0 → 2시 슬롯에서 2.5~3만원이 한꺼번에 등장).
+    그 0을 확정 실측처럼 내면 이익이 과대로 보인다 — 어제치를 물고 오던 결함과 같은 종류가
+    새벽 구간에만 남아 있던 셈이다(교훈 #151).
+    """
+    _yesterday_ad(db, "698119")
+    _snapshot(db, hour=1, cost=0, imp=0)
+
+    out = sales_summary(days=0, db=db)
+
+    assert out["summary"]["ad_spend"] == "0.00"          # 어제치로 되돌리지 않는다
+    assert out["ad_basis"]["kind"] == "today_snapshot"
+    assert out["ad_basis"]["pending"] is True
+
+
+def test_nonzero_snapshot_is_not_pending(db):
+    """값이 있으면 pending이 아니다 — 정상 구간에 경고를 띄우면 경고가 무의미해진다."""
+    _snapshot(db, hour=19, cost=506370, imp=66760)
+
+    out = sales_summary(days=0, db=db)
+
+    assert out["ad_basis"]["pending"] is False
+
+
+def test_zero_cost_with_impressions_is_not_pending(db):
+    """노출은 있는데 지출이 0 = 집계는 됐고 실제로 안 쓴 것이다 — «모름»이 아니다."""
+    _snapshot(db, hour=9, cost=0, imp=1200)
+
+    out = sales_summary(days=0, db=db)
+
+    assert out["ad_basis"]["pending"] is False
+
+
+def test_no_snapshot_yet_is_pending(db):
+    """첫 수집 전도 «모름»이다 — 같은 문구 경로를 타야 화면이 갈라지지 않는다."""
+    out = sales_summary(days=0, db=db)
+
+    assert out["ad_basis"]["kind"] == "today_no_snapshot"
+    assert out["ad_basis"]["pending"] is True
 
 
 def test_other_periods_still_use_ad_costs(db):

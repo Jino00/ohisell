@@ -1709,6 +1709,12 @@ export interface AdBasis {
   kind: "today_snapshot" | "today_no_snapshot";
   as_of: string | null;
   scope: "search_only";
+  basis?: "day_max";     // 캠페인별 당일 최대 누적 합(최신 배치가 아니다 — 원천이 후퇴하기 때문)
+  // ★당일 어느 슬롯에도 값이 없는 상태. 이때의 0은 "0원"이 아니라 «모름»이고, 그대로 이익에
+  //   넣으면 이익이 과대로 보인다. **원인(미집계인지 실제 0원인지)은 구분할 수 없다.**
+  pending?: boolean;
+  regressed_by?: string;  // 최신 조회가 관측 최대치보다 낮은 금액(0이면 후퇴 없음)
+  latest_cost?: string;   // 후퇴한 최신 조회값 — 화면이 "지금 원천은 이만큼만 준다"를 말할 때 쓴다
 }
 
 export interface NaverSalesSummary {
