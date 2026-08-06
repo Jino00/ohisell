@@ -35,6 +35,11 @@
 #     마이그레이션은 순서가 반대여야 하므로 --migrate 쓰지 말고 수동으로 조율할 것.
 #   · ※`--migrate` 는 prod DB를 변경한다. 실행 전 DB 백업 여부는 운영자 판단.
 #
+# ★프론트 스탬프 CAS(2026-08-06 사고): `--frontend` 는 dist를 통짜로 rsync 하므로 파일 단위
+#   CAS가 안 걸린다. 그 틈으로 병행 세션이 09:09·09:23 두 번 서로의 프론트 수정을 조용히
+#   지웠다. 이제 dist에 `.deploy-stamp`(빌드 커밋)를 심고, 배포 전 prod 스탬프가 **내 역사의
+#   조상**이 아니면 거부한다. 상세는 아래 frontend 블록 주석 참조.
+#
 # 추가 안전장치:
 #   · prod 측 배포 락(mkdir 원자성) — 두 세션 동시 배포 자체를 차단
 #   · 커밋 안 된 변경이 있는 파일은 배포 거부(배포물 = 커밋된 내용, 재현 가능)
@@ -48,7 +53,7 @@
 # 사용:
 #   scripts/safe_deploy.sh backend/app/routers/naver_ad.py [파일...] [--restart]
 #   scripts/safe_deploy.sh backend/alembic/versions/xxx.py backend/app/models.py --migrate --restart
-#   scripts/safe_deploy.sh --frontend            # frontend/dist rsync(락+매니페스트만)
+#   scripts/safe_deploy.sh --frontend            # frontend/dist rsync(락+스탬프 CAS+매니페스트)
 #   scripts/safe_deploy.sh ... --steal-lock      # 죽은 세션의 락 강제 해제(사유 확인 후)
 set -euo pipefail
 
@@ -94,10 +99,52 @@ fi
 trap release_lock EXIT
 ssh -o BatchMode=yes "$HOST" "printf '%s\n' 'branch=$BRANCH commit=$COMMIT host=$(hostname -s) ts=$(date -u +%FT%TZ)' > '$LOCK_DIR/owner'"
 
-# ── frontend 모드: dist 전체 교체라 파일 CAS 불가(빌드 산출물은 git 역사에 없음).
-#    락 + 매니페스트 + 배포 전 dist 백업으로 방어 ──────────────────────
+# ── frontend 모드 ────────────────────────────────────────────────────
+# ★스탬프 CAS(2026-08-06 사고): dist는 통짜 rsync라 **파일 단위** CAS를 못 건다. 그래서
+#   같은 날 09:09·09:23 두 번, 병행 세션이 서로의 프론트 수정을 조용히 지웠다(백엔드였다면
+#   CAS가 막았을 상황이다. 09:23~09:24 약 1분간 그날 고친 것들이 prod에서 사라져 있었다).
+#   해법: dist **내용물**은 git 역사에 없지만 "어느 커밋에서 나왔는지"는 남길 수 있다.
+#   배포 때 dist에 커밋 스탬프를 심고, 다음 배포 전에 prod 스탬프가 **내 역사의 조상**인지
+#   검사한다. 조상이면 내 트리가 그 작업을 이미 포함한다 = 덮어도 안전. 아니면 = 내가 모르는
+#   배포가 있었다 = 거부. (백엔드 CAS의 "내 브랜치 역사에 있는 버전인가"와 같은 판정이다.)
 if [ "$FRONTEND" = 1 ]; then
   [ -d frontend/dist ] || fail "frontend/dist 없음 — 먼저 npm run build"
+  DIST_STAMP_REL="frontend/dist/.deploy-stamp"
+  COMMIT_FULL=$(git rev-parse HEAD)
+
+  R_STAMP=$(ssh -o BatchMode=yes "$HOST" "cat '$REMOTE_REPO/$DIST_STAMP_REL' 2>/dev/null" || true)
+  R_SHA=$(printf '%s' "$R_STAMP" | sed -n 's/^commit=\([0-9a-f]\{7,40\}\).*/\1/p' | head -1)
+  if [ -z "$R_SHA" ]; then
+    # 가드 도입 이전에 올라간 dist에는 스탬프가 없다. 부트스트랩 1회는 통과시키고 심는다.
+    echo "⚠️ prod dist에 스탬프 없음(가드 도입 이전 배포) — 이번 1회 통과, 스탬프를 심습니다."
+  else
+    if ! git cat-file -e "${R_SHA}^{commit}" 2>/dev/null; then
+      git fetch --all --quiet 2>/dev/null || true
+    fi
+    if ! git cat-file -e "${R_SHA}^{commit}" 2>/dev/null; then
+      echo "── prod dist 스탬프 ──" >&2; printf '%s\n' "$R_STAMP" >&2
+      fail "prod dist를 만든 커밋 $R_SHA 가 로컬에 없습니다(다른 세션의 미공개 브랜치일 수 있음).
+    그 세션의 작업을 받아 병합한 뒤 재빌드하고 다시 시도하세요."
+    fi
+    if ! git merge-base --is-ancestor "$R_SHA" HEAD; then
+      echo "── prod dist 스탬프 ──" >&2; printf '%s\n' "$R_STAMP" >&2
+      fail "prod dist가 내 역사에 없는 커밋($R_SHA)에서 나왔습니다 = 다른 세션이 배포했습니다.
+    지금 덮으면 그 작업이 **경고 없이** 사라집니다(2026-08-06에 실제로 두 번 일어남).
+    받아서 합친 뒤 재빌드하고 다시 시도하세요:
+      git fetch origin && git merge origin/main
+      (cd frontend && npm run build)
+      scripts/safe_deploy.sh --frontend"
+    fi
+  fi
+
+  # dist가 커밋 안 된 코드로 빌드됐으면 스탬프가 사실보다 뒤쳐진다 → 다른 세션이 "이미 포함"으로
+  # 오판할 수 있다. 배포를 막지는 않되(반복 빌드 중일 수 있다) 조용히 넘기지도 않는다.
+  if ! git diff --quiet -- frontend 2>/dev/null || ! git diff --cached --quiet -- frontend 2>/dev/null; then
+    echo "⚠️ frontend/ 에 커밋 안 된 변경이 있습니다 — dist가 스탬프($COMMIT)보다 앞설 수 있습니다."
+  fi
+
+  printf 'commit=%s\nbranch=%s\nts=%s\n' "$COMMIT_FULL" "$BRANCH" "$(date -u +%FT%TZ)" > "$DIST_STAMP_REL"
+
   STAMP=$(date +%Y%m%d_%H%M)
   ssh -o BatchMode=yes "$HOST" "cp -r '$REMOTE_REPO/frontend/dist' '$REMOTE_REPO/frontend/dist_backup_$STAMP'"
   rsync -az --delete frontend/dist/ "$HOST:$REMOTE_REPO/frontend/dist/"
