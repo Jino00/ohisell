@@ -15,6 +15,7 @@
 import { useState } from "react";
 import { Card, Stat, Table, Th, Td, Loading, EmptyState, Badge } from "../components/ui";
 import { useAsyncData } from "../lib/useAsyncData";
+import { FreshnessNote } from "../components/FreshnessNote";
 import { fetchRocket1PRevenue, type Rocket1PRevenueOption } from "../lib/api";
 
 const NO_DATA = "—";
@@ -121,8 +122,9 @@ export default function Rocket1PRevenue() {
         <>
           {/* ── 두 축을 나란히. 사이에 「우리 몫」을 놓아 왜 다른지 한 눈에 보이게 한다 ── */}
           <Card title="매출 두 축">
+            <FreshnessNote f={data.freshness} />
             <div className="grid grid-cols-2 gap-4 px-4 py-4 md:grid-cols-5">
-              <Stat label="판매수량" value={num(data.totals.qty)} />
+              <Stat label="판매수량" value={num(data.totals.qty)} />   {/* null=미수집 → "—" */}
               <Stat
                 label="소비자 매출 (쿠팡가)"
                 value={won(data.totals.consumer_revenue)}
@@ -147,6 +149,15 @@ export default function Rocket1PRevenue() {
                 sub={`RoAS ${ratio(data.totals.roas)} (우리 매출 기준)`}
               />
             </div>
+            {!data.coverage.sales_data_covered && (
+              <p className="mx-4 mb-3 rounded bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                ⚠️ 이 기간엔 판매분석 수집분이 없어 <b>판매 축이 전부 「—」</b>입니다 —
+                판매가 0이었던 게 아니라 <b>관측 불가</b>입니다.
+                {data.coverage.sales_data_from &&
+                  ` 판매분석은 ${data.coverage.sales_data_from} 이후만 있습니다.`}
+                {" "}광고비·계산서 매출은 다른 원천이라 그대로 실측값입니다.
+              </p>
+            )}
             <p className="mx-4 mb-4 rounded bg-amber-50 px-3 py-2 text-xs text-amber-800">
               ⚠️ 두 매출을 더하지 마세요 — 같은 물건이라 더하면 이중계상입니다. {data.axes_note}
             </p>
