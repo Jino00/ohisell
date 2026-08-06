@@ -160,6 +160,9 @@ def parse_purchase_order_list(payload: dict) -> list[dict]:
             "sku_count": _to_int(po.get("skuCount")),
             "po_created_at": _to_dt_utc_naive(po.get("createdAt")),
             "expected_delivery_date": _to_dt_utc_naive(po.get("expectedDeliveryDate")),
+            # ★실입고 시각 — 입고 전이면 원천이 null을 준다. 그대로 None으로 둔다(예정일로 대체 금지).
+            "receiving_started_at": _to_dt_utc_naive(po.get("receivingStartedAt")),
+            "receiving_finished_at": _to_dt_utc_naive(po.get("receivingFinishedAt")),
             "vendor_payment_seqs": payment_seqs,
         })
     return records

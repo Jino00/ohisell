@@ -54,6 +54,9 @@ def _upsert_po(db: Session, rec: dict) -> None:
     row.sku_count = rec["sku_count"]
     row.po_created_at = rec["po_created_at"]
     row.expected_delivery_date = rec["expected_delivery_date"]
+    # 실입고 시각 — 옛 파서가 만든 rec에는 키가 없을 수 있어 .get으로 읽는다(배포 순서 무관하게 안전).
+    row.receiving_started_at = rec.get("receiving_started_at")
+    row.receiving_finished_at = rec.get("receiving_finished_at")
     row.vendor_payment_seqs = rec["vendor_payment_seqs"]
     row.synced_at = kst_now()
 

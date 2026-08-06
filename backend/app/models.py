@@ -1589,6 +1589,14 @@ class CoupangRocketPurchaseOrder(Base):
     # 날짜 (po_created_at=발주일 UTC=매출 인식일, D-3)
     po_created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
     expected_delivery_date: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # ★실입고 시각(2026-08-06) — 원천 응답에 계속 오고 있었는데 파서가 버리고 있었다.
+    #   왜 필요한가: `expected_delivery_date`는 **예정**이라 실제와 어긋난다(실측: 예정 08-04인
+    #   PO들의 실입고 완료가 08-04·08-05로 갈렸다). 계산서는 "같은 날 입고분"을 묶어 며칠 뒤
+    #   발행되므로(작성일−납품예정일 = −4~+7일), 계산서 축 일별 매출을 세우려면 **입고일이
+    #   정본**이어야 한다. 미수금의 연령(aging)도 이 값 없이는 못 낸다.
+    #   ⚠️입고 전 PO는 NULL이다 — 0이나 예정일로 접지 말 것(원칙22: 미수집 ≠ 없음).
+    receiving_started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    receiving_finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
     # 계산서 매핑(↔정산 드리프트 조인키) — vendorPaymentInfoSeq 리스트
     vendor_payment_seqs: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     synced_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
