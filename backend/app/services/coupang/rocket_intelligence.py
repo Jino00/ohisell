@@ -123,21 +123,25 @@ def _agg_rocket_revenue(db: Session, dfrom: date, dto: date,
 # ──────────────────────────────────────────────
 def _agg_rocket_ad(db: Session, dfrom: date, dto: date,
                    vendor_id: str | None = None) -> Decimal:
-    """로켓배송(1P) 광고비 = coupang_ad_report sell_type='Retail' ad_spend 합(report_date 윈도우).
+    """로켓배송(1P) 광고비 — **원천 둘의 날짜 합집합**(수기 XLSX + 자동수집).
 
-    D-4: 1P 광고는 옵션귀속 없이 계정단위 차감(3P/RG처럼 옵션 매칭 불필요). 현재 단일 1P 계정
-    (오하이테크)이라 모든 Retail 행이 1P 로켓배송 광고 → vendor_id 미지정(None)이면 전체 Retail 합산.
-    ★1P 광고 vendor_id는 라이브 미관측(로컬 Retail 0행)이라 추정하지 않고 sell_type로 식별(원칙: 추정 금지).
-    여러 1P 계정이 생기면 vendor_id 파라미터로 분리.
+    D-4: 1P 광고는 옵션귀속 없이 계정단위 차감(3P/RG처럼 옵션 매칭 불필요).
+
+    ★★2026-08-06 적대 리뷰 P1 수정 — 이 함수는 `coupang_ad_report`**만** 읽었다.
+      그런데 1P 광고비 원천은 **둘**이다(수기 XLSX `ad_costs` ch5 2026-03-17~05-18 / 자동수집).
+      그래서 `/api/overview/rocket-overview`에서 그 63일 **43,147,487원이 통째로 빠졌고**
+      순이익이 정확히 그만큼 과대였다. 대시보드 엔진은 같은 축을 합집합으로 읽고 있었는데
+      **두 엔진이 같은 축을 각자 구현한 것**이 원인이라, 데이터를 옮기는 대신 호출을 모았다.
+      (D-21 소급 적재로 앞 8개월이 채워지면서 이 구멍이 오히려 **완결된 것처럼 보이게** 됐다 —
+       전에는 8개월이 통째로 0이라 눈에 띄었다. 그래서 지금 잡지 않으면 영영 안 보인다.)
+      ★겹치는 날은 2026-05-18 하루뿐이고 두 원천 값이 552,537원으로 동일하다 —
+        합집합 함수가 날짜별로 자동 우선·수기 폴백이라 **더해지지 않는다**(이중계상 없음).
     """
-    q = db.query(func.coalesce(func.sum(CoupangAdReport.ad_spend), 0)).filter(
-        CoupangAdReport.report_date >= dfrom,
-        CoupangAdReport.report_date <= dto,
-        CoupangAdReport.sell_type == ROCKET_AD_SELL_TYPE,
-    )
-    if vendor_id is not None:
-        q = q.filter(CoupangAdReport.vendor_id == vendor_id)
-    return _f(q.scalar())
+    # 지연 import: 모듈 최상단에 두면 순환이 생길 여지가 있고(이쪽이 회계 엔진 진입점),
+    #   광고 축 단일화의 방향은 rocket_intelligence → rocket_1p_channel_pnl 한쪽뿐이다.
+    from app.services.coupang.rocket_1p_channel_pnl import _ad_spend_sum
+
+    return _f(_ad_spend_sum(db, dfrom, dto, vendor_id))
 
 
 def _rocket_option_names(db: Session, dfrom: date, dto: date,

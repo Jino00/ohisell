@@ -1271,6 +1271,20 @@ export function fetchRocketReconSku(
   );
 }
 
+// ── 로켓1P 공용: 창 신선도 (2026-08-06 적대 리뷰 P1) ──
+// ★판매분석은 당일·전일치를 주지 않는다 → "최근 7일"을 열면 늘 5일치만 들어온다.
+//   그걸 모르고 주간 비교를 하면 이번 주가 **항상** 20% 낮게 나온다. days_no_data가 0이 아닌 것
+//   자체는 정상일 수 있고, stale=true여야 수집 정지를 의심한다(경보가 거짓말하면 경보가 죽는다).
+export interface WindowFreshness {
+  days_expected: number;
+  days_with_data: number;
+  days_no_data: number;
+  data_as_of: string | null;
+  lag_days: number | null;
+  stale: boolean;
+  note: string;
+}
+
 // ── 로켓1P 매출 두 축 대조 (S2, 2026-08-06) ──
 // ★★두 매출을 **더하지 말 것**. consumer_revenue는 쿠팡이 고객에게 판 금액(=쿠팡의 매출)이고
 //   our_revenue는 판매수량×납품단가(=우리 매출)다. 같은 물건이라 더하면 이중계상이다.
@@ -1293,18 +1307,22 @@ export interface Rocket1PRevenueOption {
 export interface Rocket1PRevenue {
   period: { from: string; to: string; vendor_id?: string };
   totals: {
-    qty: number;
-    consumer_revenue: string;
+    // ★판매분석이 그 창을 안 덮으면 전부 null이다 — 0이 아니라 **관측 불가**다.
+    qty: number | null;
+    consumer_revenue: string | null;
     our_revenue: string | null;
     settlement_revenue: string | null;
-    ad_spend: string;
+    ad_spend: string;              // 다른 원천이라 항상 실측
     our_share: string | null;
     roas: string | null;
   };
   coverage: {
-    qty_axis: number; qty_all: number; qty_priced: number;
-    priced_pct: string | null; options_unpriced: number;
+    sales_data_covered: boolean;
+    sales_data_from: string | null; sales_data_to: string | null;
+    qty_axis: number; qty_all: number | null; qty_priced: number | null;
+    priced_pct: string | null; options_unpriced: number; note: string;
   };
+  freshness: WindowFreshness;
   ad_reconciliation: {
     option_sum: string; account_total: string; diff: string; basis: string;
   };
@@ -1368,6 +1386,7 @@ export interface Rocket1PFunnel {
     note: string;
   };
   coverage: { option_days_missing_metrics: number; note: string };
+  freshness: WindowFreshness;
   option_count: number;
   shown: number;
   options: Rocket1PFunnelOption[];

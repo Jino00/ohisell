@@ -84,8 +84,20 @@ def _settlement_sum(db: Session, date_from: date, date_to: date) -> Decimal:
     return _dec(total)
 
 
-def _ad_spend_by_day(db: Session, date_from: date, date_to: date) -> dict[str, Decimal]:
+def _ad_spend_by_day(db: Session, date_from: date, date_to: date,
+                     vendor_id: str | None = None) -> dict[str, Decimal]:
     """창 내 1P 광고비를 **날짜별로** 낸다. 원천이 둘이라 날짜 단위 합집합으로 합친다.
+
+    ★★이 함수가 1P 광고 축의 **단일 진실 원천**이다(2026-08-06 적대 리뷰 P1).
+      그 전엔 `rocket_intelligence._agg_rocket_ad`가 같은 축을 따로 구현해 `coupang_ad_report`만
+      읽었고, 그래서 `/api/overview/rocket-overview`에서 **2026-03-17~05-18 63일 43,147,487원이
+      통째로 빠졌다**(수기 XLSX 시대). 두 엔진이 같은 축을 각자 구현한 것이 사고의 구조적 원인이라,
+      데이터를 옮기는 대신 **호출을 여기로 모았다**. 광고 원천이 늘면 이 함수만 고친다.
+
+    vendor_id: 자동수집(`coupang_ad_report`) 필터. None이면 1P 계정(기본)으로 본다.
+      ★수기 XLSX(`ad_costs` ch5)는 **채널 그레인**이라 vendor 축이 없다 — 1P 채널 그 자체다.
+        그래서 1P 계정을 볼 때만 합치고, 다른 vendor를 명시하면 자동수집만 본다(섞으면 남의
+        계정 창에 1P 수기분이 얹힌다).
 
     ★두 원천이 시대를 나눠 갖고 있다(라이브 실측 2026-08-05):
         `ad_costs`(channel_id=5, 사람이 올린 XLSX)          2026-03-17 ~ 05-18  43,700,024원
@@ -97,8 +109,8 @@ def _ad_spend_by_day(db: Session, date_from: date, date_to: date) -> dict[str, D
       과거 창에서 광고비가 사라진다. 07-04 이후 계정 롤업과의 차이는 +0.019%뿐이다(ref 44 §5).
     """
     out: dict[str, Decimal] = {}
-    # ① 수기 XLSX(과거) — 채널 그레인
-    ch = rocket_1p_channel(db)
+    # ① 수기 XLSX(과거) — 채널 그레인. 1P 계정 창에서만 합친다(위 vendor_id 주석).
+    ch = rocket_1p_channel(db) if vendor_id in (None, ROCKET_1P_VENDOR_ID) else None
     if ch is not None:
         rows = db.execute(
             text(
@@ -115,7 +127,7 @@ def _ad_spend_by_day(db: Session, date_from: date, date_to: date) -> dict[str, D
     for d, amt in (
         db.query(CoupangAdReport.report_date, func.sum(CoupangAdReport.ad_spend))
         .filter(
-            CoupangAdReport.vendor_id == ROCKET_1P_VENDOR_ID,
+            CoupangAdReport.vendor_id == (vendor_id or ROCKET_1P_VENDOR_ID),
             CoupangAdReport.sell_type == ROCKET_1P_AD_SELL_TYPE,
             CoupangAdReport.report_date >= date_from,
             CoupangAdReport.report_date <= date_to,
@@ -129,8 +141,9 @@ def _ad_spend_by_day(db: Session, date_from: date, date_to: date) -> dict[str, D
     return out
 
 
-def _ad_spend_sum(db: Session, date_from: date, date_to: date) -> Decimal:
-    return sum(_ad_spend_by_day(db, date_from, date_to).values(), ZERO)
+def _ad_spend_sum(db: Session, date_from: date, date_to: date,
+                  vendor_id: str | None = None) -> Decimal:
+    return sum(_ad_spend_by_day(db, date_from, date_to, vendor_id).values(), ZERO)
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -293,6 +306,48 @@ def _sell_through_window(db: Session, date_from: date, date_to: date) -> dict:
         "qty": sum(v["qty"] for v in by_day.values()),
     }
 
+
+def window_freshness(db: Session, date_from: date, date_to: date,
+                     vendor_id: str | None = None) -> dict:
+    """요청한 창에 판매분석 데이터가 **실제로 며칠** 들어 있는지(2026-08-06 적대 리뷰 P1).
+
+    왜 필요한가: 쿠팡 판매분석은 **당일·전일치를 주지 않는다**. 그래서 "최근 7일"을 열면
+    늘 5일치만 들어오고, 화면이 그걸 7일이라 말하면 주간 비교에서 이번 주가 **항상** 20%
+    낮게 나온다. 더 나쁜 건 수집이 진짜 멈췄을 때도 화면상 구별할 수단이 없다는 것이다
+    (green-while-stale — 이 프로젝트가 반복해 당한 형태).
+
+    ★`days_no_data`는 **날짜 축**으로 센다. 옵션별 NULL 컬럼 카운트로는 "그 날 행이 통째로
+      없음"을 원리적으로 감지할 수 없다 — GROUP BY 집계에서 아예 나타나지 않기 때문이다.
+    ★`stale`은 원천의 정상 지연(D-1~D-2)과 진짜 정지를 가른다. 늘 경고가 떠 있으면
+      아무도 안 본다 — 경보가 거짓말하면 경보가 죽는다.
+    """
+    row = db.execute(
+        text(
+            "SELECT COUNT(DISTINCT date), MAX(date) FROM coupang_rocket_sales_daily "
+            "WHERE vendor_id = :vendor AND date >= :since AND date <= :until"
+        ),
+        {"vendor": vendor_id or ROCKET_1P_VENDOR_ID,
+         "since": date_from.isoformat(), "until": date_to.isoformat()},
+    ).fetchone()
+    days_with_data = int(row[0] or 0) if row else 0
+    data_as_of = str(row[1])[:10] if row and row[1] else None
+    expected = (date_to - date_from).days + 1
+    lag = None if data_as_of is None else (date_to - date.fromisoformat(data_as_of)).days
+    return {
+        "days_expected": expected,
+        "days_with_data": days_with_data,
+        "days_no_data": max(0, expected - days_with_data),
+        "data_as_of": data_as_of,
+        "lag_days": lag,
+        # 원천은 보통 D-1~D-2까지만 준다 → 그 이상 벌어져야 진짜 정지 신호로 본다.
+        "stale": bool(lag is not None and lag > _FRESHNESS_LAG_OK),
+        "note": "판매분석은 당일·전일치를 주지 않는다. days_no_data가 0이 아닌 것 자체는 "
+                "정상일 수 있고, stale=true여야 수집 정지를 의심한다.",
+    }
+
+
+# 원천의 정상 지연 상한(일). 이 이상 벌어지면 수집 정지를 의심한다.
+_FRESHNESS_LAG_OK = int(os.getenv("ROCKET_1P_FRESHNESS_LAG_OK") or "3")
 
 BASIS_SETTLEMENT = "settlement"   # 계산서 축(sell-in) — 회계 정본, **기본값**
 BASIS_SALES = "sales"             # 판매 축(sell-through) — 운영 지표

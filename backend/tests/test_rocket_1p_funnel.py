@@ -149,14 +149,74 @@ def test_oos_flag_passes_through(db):
 
 # ═══ ⑤ 부분 결손을 드러낸다 ═══
 def test_missing_metric_days_are_counted(db):
-    """SUM은 NULL을 조용히 건너뛴다 — 며칠치 빠진 합계를 온전한 값처럼 보이면 안 된다."""
+    """SUM은 NULL을 조용히 건너뛴다 — 며칠치 빠진 합계를 온전한 값처럼 보이면 안 된다.
+
+    ★2026-08-06 적대 리뷰 P1: 예전엔 pv 결손 + orders 결손을 **더해서** 같은 하루를 2번 셌다.
+      둘은 S1에서 같이 붙어 결손도 같이 나므로 한 컬럼으로 센다. 그리고 총계와 행이 **같은 정의**를 쓴다.
+    """
     _row(db, "A", d=date(2026, 8, 3), visitors=10, pv=None, orders=None, qty=1)  # S1 이전 행
     _row(db, "A", d=date(2026, 8, 4), visitors=10, pv=100, orders=10, qty=10)
     db.commit()
     r = compute_rocket_1p_funnel(db, date(2026, 8, 3), D)
     assert r["options"][0]["days"] == 2
-    assert r["options"][0]["days_missing"] == 2          # pv 1일 + orders 1일
-    assert r["coverage"]["option_days_missing_metrics"] == 1
+    assert r["options"][0]["days_missing"] == 1          # 결손난 날은 하루다(2가 아니다)
+    # 총계와 행이 같은 것을 센다 — 예전엔 2배 차이로 갈렸다.
+    assert r["coverage"]["option_days_missing_metrics"] == r["options"][0]["days_missing"]
+    assert r["options"][0]["days_missing"] <= r["options"][0]["days"]
+
+
+def test_ratios_align_numerator_and_denominator_supports(db):
+    """★비율의 지지집합을 맞춘다(적대 리뷰 P1).
+
+    qty는 NOT NULL, orders는 nullable → Σqty/Σorders는 '온전한 분자 ÷ 부분 분모'가 되어 과대.
+    반대로 Σpv/Σvisitors는 과소. cvr만 pv·orders가 함께 결손이라 우연히 안전했다.
+    """
+    # 08-03: 구버전 행(pv·orders 없음) — 이 날의 qty·visitors는 짝이 없다
+    _row(db, "A", d=date(2026, 8, 3), visitors=300, pv=None, orders=None, qty=30)
+    # 08-04: 온전한 행 — 주문당 1.00개 / 방문자당 2.00회가 진실이다
+    _row(db, "A", d=date(2026, 8, 4), visitors=100, pv=200, orders=20, qty=20)
+    db.commit()
+    o = compute_rocket_1p_funnel(db, date(2026, 8, 3), D)["options"][0]
+    assert Decimal(o["units_per_order"]) == Decimal("1.0000")     # 예전엔 50/20 = 2.5
+    assert Decimal(o["views_per_visitor"]) == Decimal("2.0000")   # 예전엔 200/400 = 0.5
+    assert Decimal(o["cvr"]) == Decimal("0.1000")                 # 원래부터 안전했다
+    t = compute_rocket_1p_funnel(db, date(2026, 8, 3), D)["totals"]
+    assert Decimal(t["units_per_order"]) == Decimal("1.0000")     # 합계도 같은 규칙
+    assert Decimal(t["views_per_visitor"]) == Decimal("2.0000")
+
+
+def test_freshness_counts_absent_days_not_just_null_columns(db):
+    """★행이 통째로 없는 결손은 NULL 카운터로 원리적으로 못 잡는다(적대 리뷰 P1).
+
+    예전 화면은 그 상태를 "결손 없음"이라고 **단언**했다 — green-while-stale.
+    """
+    _row(db, "A", d=date(2026, 8, 4), visitors=10, pv=100, orders=10, qty=10)
+    db.commit()
+    r = compute_rocket_1p_funnel(db, date(2026, 8, 1), date(2026, 8, 7))
+    f = r["freshness"]
+    assert f["days_expected"] == 7 and f["days_with_data"] == 1
+    assert f["days_no_data"] == 6           # NULL 카운터는 0이었을 자리다
+    assert r["coverage"]["option_days_missing_metrics"] == 0   # 실제로 0 — 둘은 다른 고장이다
+    assert f["data_as_of"] == "2026-08-04"
+    assert f["lag_days"] == 3
+
+
+def test_freshness_lag_distinguishes_normal_delay_from_stall(db):
+    """원천은 D-1~D-2까지만 준다 — 늘 경고를 띄우면 경보가 죽는다."""
+    _row(db, "A", d=date(2026, 8, 4), visitors=10, pv=100, orders=10, qty=10)
+    db.commit()
+    # 정상 지연(D-2): 경고 아님
+    assert compute_rocket_1p_funnel(db, date(2026, 7, 31), date(2026, 8, 6))["freshness"]["stale"] is False
+    # 진짜 정지(D-10): 경고
+    assert compute_rocket_1p_funnel(db, date(2026, 8, 1), date(2026, 8, 14))["freshness"]["stale"] is True
+
+
+def test_rating_kept_when_review_count_is_unknown(db):
+    """리뷰수 미관측 + 평점 관측 → 평점을 버리지 않는다(적대 리뷰 P2). 0건일 때만 모름."""
+    _row(db, "A", visitors=10, pv=20, orders=1, qty=1)
+    _attrs(db, "A", rating_count=None, rating_score="4.6")
+    db.commit()
+    assert Decimal(compute_rocket_1p_funnel(db, D, D)["options"][0]["rating_score"]) == Decimal("4.60")
 
 
 def test_null_metrics_stay_null_not_zero(db):
