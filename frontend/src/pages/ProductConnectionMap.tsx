@@ -24,7 +24,10 @@ const fmt = (n: number) => new Intl.NumberFormat("ko-KR").format(n);
 // 매핑을 이으면 **과거 주문도** 소급 연결된다(2026-08-04). 종전엔 앞으로 팔릴 것만 맞고
 // 이미 판 것은 영영 원가 미상으로 남았다 — 그래서 몇 건이 되살아났는지 화면이 말해야 한다.
 const _linkedMsg = (n: number) => `과거 주문 ${fmt(n)}건이 이 상품에 소급 연결됐습니다(원가·손익 반영).`;
-const won = (s: string) => `${fmt(Math.round(Number(s)))}원`;
+// ★없는 값은 「—」다 — 종전 시그니처(`s: string`)로는 undefined가 들어오면 "NaN원"이 됐다.
+//   이 화면의 규율(모르면 모른다고 한다)과 NaverOps의 `won`과 같은 형태로 맞춘다.
+const won = (s: string | null | undefined) =>
+  s == null ? "—" : `${fmt(Math.round(Number(s)))}원`;
 
 function isoKST(d: Date): string {
   const kst = new Date(d.toLocaleString("en-US", { timeZone: "Asia/Seoul" }));
