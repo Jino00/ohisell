@@ -152,17 +152,30 @@ B안은 PA만 담으므로 그만큼 **덜 차감**한다.
 **★정체 = NCA(신규 구매 고객 확보) 캠페인** — 2026-08-04에 이미 밝혀져 있었다
 (`docs/tracks/active/track_coupang-ad-change-log.md` 교훈, `HANDOFF_coupang-ad-change-log_20260804.md`
 §NCA 축 추가). 오하이테크 계정에 **NCA 캠페인 48개**(SALES 525 + NCA 48 = 573), 07-24 09:43에
-NCA 4개를 끈 이력도 남아 있다. Billboard `ReportType` enum은 `pa`·`da` 둘뿐이고 NCA는 goalType
-축이라 **`reportType=pa` 보고서에 안 잡힌다** — 그래서 Billboard 합계 ≈ report/SALES PA였다.
+NCA 4개를 끈 이력도 남아 있다. NCA는 `reportType=pa` 보고서에 **안 잡힌다** — 그래서 Billboard
+합계 ≈ report/SALES PA였다(2025-09·10 XLSX의 캠페인 ID와 NCA 48개의 교집합 = **0개**, 2026-08-06 실측).
+
+> ⚠️**정정(2026-08-06)** — 원문은 "Billboard `ReportType` enum은 `pa`·`da` 둘뿐"이라 적었으나
+> **틀렸다.** enum에 잘못된 값을 넣으면 서버가 유효값을 알려준다:
+> `Did you mean the enum value "DA", "NCA", "PA", "da", or "nca"?` — **NCA도 보고서로 받을 수 있다.**
+> `reportType='nca'`로 요청하면 일별·옵션별 NCA 광고비를 **「판매방식」 컬럼과 함께** 준다.
+> 그래서 아래 (d)의 "옵션ID를 1P 카탈로그와 대조" 우회로는 필요 없다 — 컬럼을 읽으면 된다.
+> 검증: 2026-05 NCA 보고서 합 3,555,161 ↔ 원천 비-PA(ALL−PA) 3,554,042, 차이 1,119(0.03%).
+> 같은 대조를 2025-07·08, 2026-04에서도 했고 전부 0.03% 안이다 → **비-PA = NCA 확정**.
+> 도구: `nca_report.py`(scratchpad) — `ohitech_ad_option_report.py`와 같은 구조에 RT만 다르다.
 
 ⚠️**같은 오판이 두 번 났다**: 2026-08-04 "비-PA는 디스플레이일 것"(→NCA), 2026-08-06 다시
 `da`를 재측정해 0건을 보고 "정체 미규명"(→기록에 이미 답이 있었다). **음성 결과를 얻기 전에
 기록부터 검색할 것.** 교훈 #145.
 
-- 그러므로 선택지는 (a)(b)(c)가 아니라 **(d) 측정**이다: NCA 캠페인 48개의 광고집행 옵션ID를
-  1P 카탈로그와 대조해(2025-10 Retail 321개를 가른 것과 같은 방법) 판매방식을 **가른 뒤**,
-  Retail분만 소급 ad_spend에 가산한다. NCA가 전 기간 Retail이면 소급 축이 `ALL` 기준이 되어
-  **라이브 구간과 축이 일치**한다. 3P가 섞인 달(2025-07~10)은 그 달만 비중대로 가른다.
+- 그러므로 선택지는 (a)(b)(c)가 아니라 **(d) 측정**이다: NCA 광고비를 `reportType='nca'` 보고서로
+  받아 **「판매방식」 컬럼으로 가른 뒤** Retail분만 소급 ad_spend에 가산한다. 비중대로 가르는
+  비례배분은 하지 않는다 — 실측 결과 **달마다 판매방식이 완전히 다르기** 때문이다
+  (2025-07 NCA는 **100% 3P**, 2025-08은 Retail 52,226/3P 3,048로 갈리고, 2026-04·05는 100% Retail).
+  "전액 Retail 가산"이나 "PA 비중대로 배분"이었다면 2025-07에서 20만원을 1P에 잘못 얹었을 것이다.
+  (원문의 "NCA 캠페인 48개의 옵션ID를 1P 카탈로그와 대조" 우회로는 위 정정대로 불필요하다.
+   덤으로 캠페인 목록 응답 자체에 `vendorType` 필드가 있다 — NCA 48개 = Retail 15 / 3P 33.
+   단 이건 **캠페인 수**지 광고비가 아니므로 금액 배분의 근거로는 못 쓴다.)
 - (c) 별도 행은 구조적으로 불가: `coupang_ad_report` 키가 `(date, sell_type, vendor)`인데
   `_agg_rocket_ad`가 `sell_type='Retail'`만 합산하므로 다른 sell_type 행은 **차감되지 않는다.**
 
