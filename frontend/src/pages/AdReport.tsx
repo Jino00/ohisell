@@ -38,6 +38,8 @@ const COLS: ColDef[] = [
   { key: "ad_spend",            label: "광고비",            align: "right", fmt: (n) => `${fmt(n)}원` },
   { key: "conversion_revenue",  label: "광고전환매출",      align: "right", fmt: (n) => `${fmt(n)}원` },
   { key: "roas",                label: "광고수익률(ROAS)",  align: "right", fmt: (n) => `${n.toFixed(1)}%` },
+  // ★축은 별도 열로 낸다 — 같은 숫자처럼 보이는 것을 막는 가장 싼 방법이다.
+  { key: "roas_basis_label",    label: "ROAS 기준",         align: "left"  },
 ];
 
 export default function AdReport() {
@@ -78,11 +80,17 @@ export default function AdReport() {
       <tr className={isTotal ? "bg-gray-50 font-semibold border-t-2 border-gray-300" : "hover:bg-gray-50"}>
         {COLS.map((col) => {
           const val = row[col.key as keyof CoupangAdReportRow];
-          const display = col.fmt && typeof val === "number" ? col.fmt(val) : String(val);
+          // ★없는 값을 "undefined"로 그리지 않는다 — 구버전 백엔드/캐시 응답이면 축이 빠질 수 있다.
+          const display =
+            val == null ? "—" : col.fmt && typeof val === "number" ? col.fmt(val) : String(val);
           return (
             <td
               key={col.key}
-              className={`px-4 py-2.5 text-sm border-b border-gray-100 ${col.align === "right" ? "text-right tabular-nums" : "text-left"}`}
+              className={`px-4 py-2.5 text-sm border-b border-gray-100 ${col.align === "right" ? "text-right tabular-nums" : "text-left"} ${
+                col.key === "roas_basis_label" && row.roas_basis !== "our_revenue"
+                  ? "text-amber-700"   // 우리 매출 축이 아닌 행은 눈에 띄게 — 비교하면 안 되는 값이다
+                  : ""
+              }`}
             >
               {display}
             </td>
@@ -187,9 +195,21 @@ export default function AdReport() {
         )}
       </div>
 
-      <p className="text-xs text-gray-400">
-        광고전환매출 · ROAS는 쿠팡 광고 XLSX의 총 전환매출액(1일) 기준입니다.
-      </p>
+      <div className="space-y-1 text-xs text-gray-400">
+        <p>광고전환매출 · ROAS는 총 전환매출액(1일) 기준입니다.</p>
+        <p className="text-amber-700">
+          ⚠️ <strong className="font-medium">행끼리 ROAS를 비교하지 마세요 — 축이 다릅니다.</strong>{" "}
+          윙·로켓그로스는 우리가 소비자에게 직접 팔아 전환매출이 <b>우리 매출</b>이지만,
+          로켓배송(1P)은 쿠팡이 사입해 자기 가격으로 팔아 전환매출이 <b>쿠팡 매출</b>입니다.
+          1P를 우리 납품가로 환산하면 표시값의 약 60% 수준이 됩니다(실측 2026-08-04 우리 몫 59.45%).
+          합계 행은 그 둘을 더한 값이라 어느 축으로도 해석되지 않습니다.
+        </p>
+        <p>
+          환산값을 대신 보여주지 않는 이유: 우리 몫 비율은 기간마다 다르고 판매분석이 롤링 약
+          2개월만 덮어 과거 구간은 환산할 근거가 없습니다 — 추정하느니 축을 밝힙니다.
+          납품가 기준 1P 성과는 「쿠팡 로켓배송(1P) → 매출」 화면에서 봅니다.
+        </p>
+      </div>
     </div>
   );
 }

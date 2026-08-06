@@ -599,6 +599,12 @@ export interface CoupangAdReportRow {
   ctr: number;
   cvr: number;
   roas: number;
+  /** ★이 행의 전환매출·ROAS가 무슨 축인가 — **행마다 다르다.**
+   *  3P·2P는 우리가 소비자에게 직접 팔아 전환매출 = 우리 매출이지만,
+   *  Retail(1P)은 쿠팡이 사입해 자기 가격으로 팔아 전환매출 = **쿠팡 매출**이다.
+   *  그래서 두 행의 ROAS는 **비교 대상이 아니다** — 나란히 놓고 크기를 견주면 결론이 뒤집힌다. */
+  roas_basis?: "our_revenue" | "consumer_price" | "mixed";
+  roas_basis_label?: string;
 }
 
 export interface CoupangAdReportResponse {
