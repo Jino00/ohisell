@@ -1322,6 +1322,67 @@ export function fetchRocket1PRevenue(params: {
   return fetchApi<Rocket1PRevenue>(`/api/overview/rocket-1p-revenue?${q.toString()}`);
 }
 
+// ── 로켓1P 유입·전환 퍼널 (S3, 2026-08-06) ──
+// ★모든 비율은 **합계의 몫**이다(Σ주문/Σ조회). 일별 비율의 평균이 아니다.
+// ★null = 모름이지 0이 아니다. position은 기간 중앙값 대비 **서술**이지 권고가 아니며,
+//   판정에 쓰인 임계값은 thresholds에 전부 실려 온다(숨은 기준 금지).
+export type FunnelPosition =
+  | "views_high_cvr_high" | "views_high_cvr_low"
+  | "views_low_cvr_high" | "views_low_cvr_low" | "low_sample";
+
+export interface Rocket1PFunnelOption {
+  option_id: string;
+  sku_id: string | null;
+  product_name: string | null;
+  visitors: number | null;
+  page_views: number | null;
+  orders: number | null;
+  qty: number;
+  consumer_revenue: string;
+  views_per_visitor: string | null;   // 조회 ÷ 방문자 (탐색 깊이)
+  cvr: string | null;                 // 주문 ÷ 조회 (쿠팡 「구매전환율」과 같은 정의)
+  units_per_order: string | null;
+  days: number;
+  days_missing: number;
+  is_oos: boolean | null;
+  rating_count: number | null;
+  rating_score: string | null;        // 리뷰 0건이면 null(0점이 아니다)
+  brand_name: string | null;
+  category_path: string | null;
+  attrs_observed_at: string | null;
+  position: FunnelPosition;
+}
+
+export interface Rocket1PFunnel {
+  period: { from: string; to: string; vendor_id?: string };
+  totals: {
+    visitors: number; page_views: number; orders: number; qty: number;
+    consumer_revenue: string;
+    views_per_visitor: string | null; cvr: string | null; units_per_order: string | null;
+  };
+  thresholds: {
+    min_page_views: number;
+    median_cvr: string | null;
+    median_page_views: string | null;
+    eligible_options: number;
+    note: string;
+  };
+  coverage: { option_days_missing_metrics: number; note: string };
+  option_count: number;
+  shown: number;
+  options: Rocket1PFunnelOption[];
+  omitted_fields: string[];
+}
+
+export function fetchRocket1PFunnel(params: {
+  from: string; to: string; limit?: number; minPageViews?: number;
+}): Promise<Rocket1PFunnel> {
+  const q = new URLSearchParams({ from: params.from, to: params.to });
+  if (params.limit) q.set("limit", String(params.limit));
+  if (params.minPageViews != null) q.set("min_page_views", String(params.minPageViews));
+  return fetchApi<Rocket1PFunnel>(`/api/overview/rocket-1p-funnel?${q.toString()}`);
+}
+
 // ── 쿠팡 프로모션 손익 레이어 (트랙 coupang-promo-pnl Phase 2) ──
 // ★읽기 전용 신규 API. 종합조망 net_profit 회계는 이 블록과 무관하게 그대로다.
 // ★null = **모름**이지 0이 아니다(원칙22). 화면에서 0으로 렌더하지 말 것 — 미상은 "—"로.

@@ -17,6 +17,7 @@ from app.database import get_db
 from app.services.coupang.intelligence import compute_command_center
 from app.services.coupang.revenue_canonical import compute_canonical_revenue
 from app.services.coupang.revenue_reconcile import reconcile_revenue
+from app.services.coupang.rocket_1p_funnel import compute_rocket_1p_funnel
 from app.services.coupang.rocket_1p_revenue import compute_rocket_1p_revenue
 from app.services.coupang.rocket_intelligence import compute_rocket_overview
 from app.services.coupang.rocket_promo_pnl import compute_promo_pnl_overview
@@ -161,6 +162,34 @@ def rocket_1p_revenue(
     if dfrom > dto:
         raise HTTPException(status_code=422, detail="from이 to보다 늦습니다")
     return _jsonify(compute_rocket_1p_revenue(db, dfrom, dto, _ROCKET_VENDOR_ID, limit))
+
+
+@router.get("/rocket-1p-funnel")
+def rocket_1p_funnel(
+    from_: str | None = Query(None, alias="from"),
+    to: str | None = Query(None),
+    limit: int = Query(200, ge=1, le=1000, description="옵션 표 최대 행 수(조회수 내림차순)"),
+    min_page_views: int = Query(
+        30, ge=0, le=100000,
+        description="위치 판정에 필요한 최소 조회수. 이하 옵션은 low_sample로 남긴다(응답에 임계 노출)",
+    ),
+    db: Session = Depends(get_db),
+):
+    """로켓배송(1P) 옵션별 유입·전환 퍼널 — 방문자 → 조회 → 주문 → 판매수량.
+
+    "왜 안 팔리나"에 답하는 축이다(매출 화면 S2는 "얼마 벌었나"에 답한다).
+    ★전환율은 **Σ주문 ÷ Σ조회** — 일별 비율의 평균이 아니다(작은 날이 큰 날과 같은 표를 갖는다).
+    ★위치(position)는 기간 중앙값 대비 서술일 뿐 **권고가 아니다**. 쓰인 임계값은 전부 응답에 실린다.
+    ★조회 전용 — net_profit·종합조망에 결합되지 않는다(D-CPP-2 불변). 기본 기간=최근 7일(KST).
+    """
+    today = kst_today()
+    dto = _parse_date(to, today)
+    dfrom = _parse_date(from_, dto - timedelta(days=6))
+    if dfrom > dto:
+        raise HTTPException(status_code=422, detail="from이 to보다 늦습니다")
+    return _jsonify(
+        compute_rocket_1p_funnel(db, dfrom, dto, _ROCKET_VENDOR_ID, limit, min_page_views)
+    )
 
 
 @router.get("/rocket-promo-pnl")

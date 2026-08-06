@@ -85,6 +85,7 @@ const NAV_ITEMS = [
   { to: "/product-connection-map", label: "상품 연결맵", icon: "🔗" },
   { to: "/rocket-recon", label: "로켓 발주·정산 대사", icon: "🚀" },
   { to: "/rocket-1p-revenue", label: "로켓1P 매출(소비자가∥납품가)", icon: "💵" },
+  { to: "/rocket-1p-funnel", label: "로켓1P 유입·전환 퍼널", icon: "🔎" },
   { to: "/inventory", label: "재고 관리", icon: "🏭" },
   { to: "/settlements", label: "정산 관리", icon: "💰" },
   { to: "/ad-report", label: "광고 리포트", icon: "📈" },
