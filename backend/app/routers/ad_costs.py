@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 
 from app.database import get_ad_db, get_db
+from app.models import SchedulerState
 from app.schemas import AdSpendByOption, AdSpendDaily
 from app.services.ad_cost_reader import get_ad_spend_by_option, get_daily_ad_spend
 
@@ -119,10 +120,15 @@ def ad_spend_by_option(
 # 디스플레이 광고비 축의 source 계열.
 #   `gfa:쇼핑`   = 수동 CSV(2026-06-04에 멈춤 — 종전 유일 경로)
 #   `gfa:advoost`·`gfa:da` = 비즈머니 실차감 API 자동 적재(2026-08-03~, 매일 07:10 KST)
-# 신선도는 **계열 전체의 MAX(ad_date)**로 판정한다. 왜냐하면 소진이 0인 날은
-# naver_display_ad_costs가 행을 만들지 않으므로(음수/0 광고비 방지) 소스 하나만 보면
-# "그날 PMAX를 안 썼다"를 "수집이 죽었다"로 오탐한다 — 실제 2026-08-05가 그런 날이었다.
+# ★신선도는 **날짜로 판정하지 않는다**(2026-08-06 적대 리뷰). 소진 0인 날은
+# naver_display_ad_costs가 행을 만들지 않으므로(음수/0 방지) '행 없음'이 「소진 0」과
+# 「수집 실패」를 겸한다 — 소스별로 보면 거짓 빨강, 계열 합집합으로 보면 **거짓 초록**이다.
+# 판정은 `_gfa_collection_health`(수집 잡이 도는가)가 한다. 아래 날짜들은 사실 진술이다.
 _GFA_AUTO_SOURCES = ("gfa:advoost", "gfa:da")
+# 신선도 판정의 실제 대상 — 이 잡이 돌고 있는가(데이터가 아니라 수집기를 본다).
+_GFA_SYNC_JOB = "sync_naver_display_ad_costs"   # 매일 07:10 KST
+# 하루 1회 잡이라 만 하루(+여유 6h)를 넘겨 성공이 없으면 최소 한 번은 건너뛴 것이다.
+_GFA_SYNC_STALE_HOURS = float(os.getenv("GFA_SYNC_STALE_HOURS") or "30")
 _GFA_MANUAL_SOURCE = "gfa:쇼핑"
 
 
@@ -171,13 +177,76 @@ def _gfa_span(db: Session, sources: tuple[str, ...] | None, channel_id: int | No
     }
 
 
+def _gfa_collection_health(db: Session) -> dict:
+    """★신선도 판정 대상을 **데이터가 아니라 수집기**로 바꾼다(2026-08-06 적대 리뷰).
+
+    왜 데이터로 판정하면 안 되나 — `ad_costs`의 **「행 없음」이 두 가지를 뜻하기 때문**이다:
+      ① 그날 그 소스의 소진이 0이었다(정상 — 수집기가 0 이하인 날은 행을 안 만든다)
+      ② 수집이 실패해 못 넣었다(사고)
+    행만 보고는 이 둘을 원리적으로 못 가른다. 그래서
+      · 소스별 MAX(ad_date)로 판정하면 → 소진 0인 날을 사고로 오탐(**거짓 빨강**)
+      · 계열 합집합 MAX로 판정하면 → 형제 소스 하나가 죽어도 초록(**거짓 초록**)
+    앞의 판은 거짓 빨강을 피하려다 거짓 초록을 만들었다. 둘 다 데이터로 판정한 탓이다.
+
+    ★수집기는 **자기가 언제 성공했는지 안다**(`scheduler_state`, 새 테이블 불필요).
+      "우리가 물어봤는가"와 "그날 돈을 썼는가"는 독립이므로, 전자로 판정하면 둘 다 안 틀린다.
+      → 잡이 오늘 성공했는데 advoost 행이 없다 = **관측했고 소진이 없었다**(정상).
+        잡이 며칠째 실패/미실행이다 = 소스에 행이 있든 없든 **사고**.
+    """
+    row = (
+        db.query(SchedulerState)
+        .filter(SchedulerState.job_name == _GFA_SYNC_JOB)
+        .first()
+    )
+    if row is None:
+        # 잡 자체가 등록돼 있지 않다 — 초록으로 넘기지 않는다(모르면 모른다고 한다).
+        return {
+            "job_name": _GFA_SYNC_JOB, "registered": False, "enabled": None,
+            "last_success_at": None, "last_status": None, "last_status_at": None,
+            "last_error": None, "age_hours": None, "stale": True,
+            "reason": "수집 잡이 스케줄러에 등록돼 있지 않다 — 자동 수집이 돌지 않는다.",
+        }
+    last_ok = row.last_run_at          # ★이 컬럼은 '마지막 **성공**' 의미다(D-F)
+    age_h = None if last_ok is None else (kst_now().replace(tzinfo=None) - last_ok).total_seconds() / 3600
+    # 하루 1회(07:10) 잡이라 만 하루를 넘겨 성공이 없으면 최소 한 번은 건너뛴 것이다.
+    stale = (
+        last_ok is None
+        or (age_h is not None and age_h > _GFA_SYNC_STALE_HOURS)
+        or row.is_enabled is False
+        or row.last_status == "error"
+    )
+    if last_ok is None:
+        reason = "한 번도 성공한 적이 없다."
+    elif row.is_enabled is False:
+        reason = "잡이 비활성화돼 있다 — 자동 수집이 돌지 않는다."
+    elif row.last_status == "error":
+        reason = "마지막 실행이 실패했다."
+    elif stale:
+        reason = f"마지막 성공이 {age_h:.0f}시간 전이다(하루 1회 잡이라 {_GFA_SYNC_STALE_HOURS}시간 초과는 건너뜀)."
+    else:
+        reason = "수집 잡이 정상 주기로 성공하고 있다. 소스별 행이 없는 날은 그날 소진이 0이었다는 뜻이다."
+    return {
+        "job_name": _GFA_SYNC_JOB,
+        "registered": True,
+        "enabled": bool(row.is_enabled),
+        "last_success_at": last_ok.isoformat() if last_ok else None,
+        "last_status": row.last_status,
+        "last_status_at": row.last_status_at.isoformat() if row.last_status_at else None,
+        "last_error": (row.last_error or None) and row.last_error[:500],
+        "age_hours": None if age_h is None else round(age_h, 1),
+        "stale": bool(stale),
+        "reason": reason,
+    }
+
+
 @router.get("/gfa/status")
 def get_gfa_status(db: Session = Depends(get_db)):
     """디스플레이(GFA·ADVoost) 광고비 적재 현황.
 
-    최상위 필드는 **자동+수동 합산 축 전체**다(화면 신선도 배지의 판정 대상).
-    `auto`/`manual`/`by_source`로 경로별 내역을 함께 준다 — 자동 수집이 도는데도
-    수동 업로드일만 보고 빨간 배너를 띄우던 것이 이 엔드포인트의 원래 결함이었다.
+    ★**배지 판정은 `collection.stale`로 한다** — 데이터(MAX(ad_date))가 아니다.
+      `ad_costs`의 '행 없음'은 「소진 0」과 「수집 실패」를 겸해서 그것으로 판정하면
+      반드시 한쪽으로 틀린다(자세한 이유는 `_gfa_collection_health` 주석).
+    `date_to`·`auto`·`manual`·`by_source`는 **사실 진술**이지 판정 근거가 아니다.
     """
     cid = _naver_channel_id(db)
 
@@ -207,6 +276,8 @@ def get_gfa_status(db: Session = Depends(get_db)):
         }
         for r in rows
     ]
+    # ★판정 근거. 위 날짜들은 사실 진술이고, 초록/빨강은 여기서만 나온다.
+    out["collection"] = _gfa_collection_health(db)
     return out
 
 

@@ -1718,12 +1718,32 @@ export interface GfaSpan {
   days: number;
   total_spend: number;
 }
-/** 최상위 = 자동+수동 합산 축 전체(신선도 판정 대상).
- *  auto = 비즈머니 실차감 API 자동 적재(매일 07:10 KST) · manual = 수동 CSV. */
+/** ★신선도 판정 근거 — **수집기**다(데이터가 아니다).
+ *
+ *  `ad_costs`의 '행 없음'은 「그날 소진 0」과 「수집 실패」를 **겸한다**. 그래서 날짜로 판정하면
+ *  반드시 한쪽으로 틀린다 — 소스별로 보면 소진 0인 날을 사고로 오탐(거짓 빨강), 계열 합집합으로
+ *  보면 형제 소스가 죽어도 초록(거짓 초록). "우리가 물어봤는가"는 그것과 독립이라 안 틀린다. */
+export interface GfaCollectionHealth {
+  job_name: string;
+  registered: boolean;
+  enabled: boolean | null;
+  last_success_at: string | null;
+  last_status: string | null;
+  last_status_at: string | null;
+  last_error: string | null;
+  age_hours: number | null;
+  stale: boolean;      // ★배지는 이것으로만 판정한다
+  reason: string;      // 왜 그렇게 판정했는지 — 화면이 말한다
+}
+
+/** 최상위 date_from/date_to = 자동+수동 합산 축 전체. **사실 진술이지 판정 근거가 아니다.**
+ *  auto = 비즈머니 실차감 API 자동 적재(매일 07:10 KST) · manual = 수동 CSV.
+ *  ★배지 초록/빨강은 `collection.stale`에서만 나온다. */
 export interface GfaStatus extends GfaSpan {
   auto: GfaSpan;
   manual: GfaSpan;
   by_source: (GfaSpan & { source: string })[];
+  collection?: GfaCollectionHealth;
 }
 
 export function fetchGfaStatus(): Promise<GfaStatus> {
