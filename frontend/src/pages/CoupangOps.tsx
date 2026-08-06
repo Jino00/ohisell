@@ -296,7 +296,9 @@ export default function CoupangOps() {
   // 바꾸면 2분 뒤에 옛 기간을 새로 요청해 화면을 되돌린다(스마트스토어에서 같은 기계가
   // 실제로 화면을 덮은 것을 2026-08-06 네트워크 로그로 확인했다).
   const selRef = useRef({ company, days });
-  selRef.current = { company, days };
+  // 렌더 중 대입이 아니라 커밋 후에 갱신한다 — 동시성 렌더에서 **버려진 렌더의 값**이 ref에
+  // 남을 수 있기 때문이다(적대 리뷰 P2). 이 ref를 읽는 쪽은 전부 커밋 이후에 도는 지연 콜백이다.
+  useEffect(() => { selRef.current = { company, days }; }, [company, days]);
 
   // 페이지 접속 시 자동 sync → 완료 후 데이터 로드
   useEffect(() => {
