@@ -176,38 +176,69 @@ def sales_summary(
             .scalar()
         )
         if snap_at:
-            snap_row = (
+            # ★★합산 축 = **캠페인별 당일 관측 최대 누적의 합**이다. 「최신 배치」가 아니다.
+            #   왜냐하면 NAVER /stats 당일 누적은 **후퇴한다** — 2026-08-06 4분 간격 16회 관측:
+            #   19:26~20:00 9회 506,370원(clk 456·imp 66,760) → 20:04~20:25 6회
+            #   **398,102원(clk 366·imp 53,836, 17시 슬롯과 원 단위까지 동일 = 3시간 전 상태)**
+            #   → 20:29 543,125원으로 회복·전진. 즉 약 25분간 원천이 과거 상태를 줬다.
+            #   그 사이 20:05 크론이 후퇴값을 20시 슬롯에 적재해 화면 광고비가 10.8만원 줄고
+            #   **이익이 그만큼 과대**로 표시됐다(라이브 확인).
+            #   최근 14일 창에 같은 후퇴가 14건 있었고, 이 저장소는 같은 현상을 이미 인정한다
+            #   (`hourly_pacing.clamped` — "누적 감소(리셋/재적재 이상치)"를 세어 광고 리포트
+            #   화면에 띄운다). 운영 패널만 그 낮은 값을 확정으로 내고 있었다.
+            #   누적은 정의상 단조증가라야 하므로 **관측 최대치를 쓴다.** 이 축은 부분 적재
+            #   (46캠페인 중 일부만 담긴 슬롯)에도 강하다 — 빠진 캠페인은 이전 최대치를 유지한다.
+            #   하루가 끝나면 최대치=최종 누적이므로 PR #225의 축 교차검증(스냅샷 675,090 vs
+            #   ad_costs 675,089)은 그대로 성립한다.
+            per_campaign = (
                 db.query(
-                    func.sum(NaverHourlySnapshot.cost),
-                    func.sum(NaverHourlySnapshot.imp),
+                    func.max(NaverHourlySnapshot.cost).label("mx_cost"),
+                    func.max(NaverHourlySnapshot.imp).label("mx_imp"),
                 )
+                .filter(NaverHourlySnapshot.ad_date == dfrom)
+                .group_by(NaverHourlySnapshot.campaign_id)
+                .all()
+            )
+            total_ad_spend = _f(sum((r.mx_cost or 0) for r in per_campaign))
+            snap_imp = int(sum((r.mx_imp or 0) for r in per_campaign))
+
+            # 최신 배치가 최대치보다 낮으면 = 지금 원천이 후퇴한 상태다. 값은 최대치를 쓰되
+            # **그 사실을 응답에 실어** 화면이 말할 수 있게 한다(조용히 보정하면 관측이 사라진다).
+            latest_cost = _f(
+                db.query(func.sum(NaverHourlySnapshot.cost))
                 .filter(
                     NaverHourlySnapshot.ad_date == dfrom,
                     NaverHourlySnapshot.snapshot_at == snap_at,
                 )
-                .one()
+                .scalar()
             )
-            total_ad_spend = _f(snap_row[0])
-            snap_imp = int(snap_row[1] or 0)
-            # ★스냅샷이 **있는데 전부 0**인 구간이 매일 있다 — NAVER /stats 당일치가 자정 직후엔
-            #   아직 아무 값도 주지 않는다(실측 5일 전수 2026-08-02~06: 0시·1시 슬롯의
-            #   cost·clk·imp가 모두 0이고, 2시 슬롯에서 2.5~3만원이 한꺼번에 등장).
-            #   이때 0을 확정 실측처럼 내면 이익이 과대로 보인다 — 어제치를 물고 오던 결함
-            #   (교훈 #151)과 같은 종류가 새벽 구간에만 남아 있던 셈이다.
-            #   0인지 미집계인지 **구분할 방법이 없으므로 구분 불가를 그대로 말한다**(PR #225 방침:
-            #   모르는 것을 아는 척하지 않는다). 캠페인을 실제로 전부 끈 날도 같은 문장이 참이다.
+            regressed_by = total_ad_spend - latest_cost if latest_cost < total_ad_spend else _Z
+
+            # ★당일 **어느 슬롯에도** 값이 없을 때만 «모름»이다. 최신 배치만 보고 판정하면
+            #   위 후퇴가 온 순간 이미 손에 있는 값을 «모름»으로 되돌린다.
+            #   NAVER /stats 당일치는 자정 직후 아무 값도 주지 않는다(실측 5일 전수 08-02~06:
+            #   0시·1시 슬롯의 cost·clk·imp가 모두 0, 2시 슬롯에서 2.5~3만원이 한꺼번에 등장).
+            #   그 0을 확정 실측처럼 내면 이익이 과대로 보인다 — 어제치를 물고 오던 결함
+            #   (교훈 #151)이 새벽 구간에만 남아 있던 셈이다.
+            #   ★단 «모름»의 **원인은 단정하지 않는다** — 캠페인을 전부 끈 날도 똑같이 전부 0이고,
+            #   그 둘을 가릴 방법이 없다. 화면 문구도 시간대·원인을 붙이지 않는다.
             ad_basis = {
                 "kind": "today_snapshot",
                 "as_of": snap_at.isoformat(timespec="seconds"),
                 "scope": "search_only",   # 디스플레이(GFA·ADVoost)는 실차감이라 당일치가 없다
+                "basis": "day_max",       # 캠페인별 당일 최대 누적 합(최신 배치가 아니다)
                 "pending": bool(total_ad_spend == 0 and snap_imp == 0),
+                "regressed_by": str(regressed_by.quantize(_Q2)),  # 0이면 후퇴 없음
+                "latest_cost": str(latest_cost.quantize(_Q2)),
             }
         else:
             # 자정~첫 스냅샷 사이. **어제치로 되돌리지 않는다** — 모르는 것을 아는 척하는 게
             # 바로 이 결함의 원인이었다. 0으로 두고 "아직 없음"을 화면이 말하게 한다.
             total_ad_spend = _Z
             ad_basis = {"kind": "today_no_snapshot", "as_of": None, "scope": "search_only",
-                        "pending": True}
+                        "basis": "day_max", "pending": True,
+                        "regressed_by": str(_Z.quantize(_Q2)),
+                        "latest_cost": str(_Z.quantize(_Q2))}
     else:
         total_ad_spend = _f(
             db.query(func.sum(AdCost.ad_spend))

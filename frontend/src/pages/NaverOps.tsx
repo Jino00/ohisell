@@ -787,6 +787,12 @@ export default function NaverOps() {
 
   const s = data?.summary;
   const profitN = s ? Number(s.profit) : 0;
+  // 「오늘」 광고비가 «모름»인가 — 광고비·이익·이익률 세 카드가 같은 판정을 써야 한다.
+  // (한 카드만 모름이라고 하면 나머지 카드가 그걸 부정한다.)
+  const adPending = !!data?.ad_basis?.pending;
+  // 원천 후퇴: 최신 조회가 관측 최대치보다 낮다. 값은 최대치를 쓰되 그 사실을 화면이 말한다 —
+  // 조용히 보정하면 "왜 광고 리포트와 다르냐"는 질문에 답할 근거가 사라진다.
+  const adRegressedBy = Number(data?.ad_basis?.regressed_by ?? 0) || 0;
 
   function Th({ label, sk, col }: { label: string; sk?: SortKey; col?: ColKey }) {
     const active = col ? (colFilters[col]?.size ?? 0) > 0 : false;
@@ -860,13 +866,27 @@ export default function NaverOps() {
         ) : data && (
           <span className="text-xs text-gray-400">
             {data.period.from} ~ {data.period.to}
-            {data.ad_basis?.pending
-              ? " (광고비 집계 전)"
-              : data.ad_basis?.as_of ? ` (광고비 ${hhmm(data.ad_basis.as_of)} 기준)` : ""}
+            {/* pending이어도 as_of는 버리지 않는다 — "언제 확인한 0인가"가 정보다 */}
+            {data.ad_basis?.as_of
+              ? data.ad_basis.pending
+                ? ` (광고비 «모름» · ${hhmm(data.ad_basis.as_of)} 확인)`
+                : ` (광고비 ${hhmm(data.ad_basis.as_of)} 확인)`
+              : data.ad_basis?.pending ? " (광고비 «모름» · 수집 전)" : ""}
             {data.ad_ref_date && ` (광고비 기준일: ${data.ad_ref_date})`}
           </span>
         )}
       </div>
+
+      {/* ★원천 후퇴 표면화 — NAVER /stats 당일 누적이 뒤로 가는 일이 있다(2026-08-06 20:04 실측:
+          19:05~20:00 9회 506,370원 → 20:04 398,102원, 17시 값과 동일). 값은 관측 최대치를 쓰지만
+          조용히 보정하면 광고 리포트 화면과 숫자가 갈릴 때 답할 근거가 없다. */}
+      {adRegressedBy > 0 && (
+        <div className="mb-3 px-3 py-2 rounded border border-amber-300 bg-amber-50 text-xs text-amber-800">
+          ⚠️ 네이버 당일 광고비 조회가 <b>{Math.round(adRegressedBy).toLocaleString("ko-KR")}원 후퇴</b>했습니다
+          (지금 조회 {won(data?.ad_basis?.latest_cost)} · 오늘 관측 최대 {won(s?.ad_spend)}).
+          누적은 뒤로 갈 수 없으므로 <b>관측 최대치</b>를 씁니다 — 원천이 일시적으로 과거 상태를 주는 구간입니다.
+        </div>
+      )}
 
       {/* 디스플레이(GFA·ADVoost) 광고비 신선도 배지 + 수동 보정 업로드 */}
       {(() => {
@@ -946,7 +966,10 @@ export default function NaverOps() {
           <SummaryCard label="원가" value={won(s.cost)} />
           <SummaryCard
             label="광고비"
-            value={won(s.ad_spend)}
+            // ★pending이면 **큰 숫자 자체가 «모름»**이어야 한다. 종전엔 값이 "0원"이고 회색
+            //   sub만 "0원이 아니다"라고 해서, 한 카드가 위에서 0원이라 하고 아래에서 부정했다.
+            //   훑어보는 눈에는 위가 이긴다 — 라벨은 사면이 아니다(교훈 #151).
+            value={adPending ? "—" : won(s.ad_spend)}
             sub={
               // 오늘은 **검색광고 당일 누적**이다(디스플레이는 실차감이라 당일치가 없다).
               // 기준시각을 반드시 같이 낸다 — 종전엔 어제 전일치를 넣고 라벨만 달아서,
@@ -954,11 +977,15 @@ export default function NaverOps() {
               // ★"매시 05분 갱신"은 우리 수집 주기일 뿐이다 — NAVER가 주는 당일 값 자체가
               //   실측상 시간 단위로만 바뀐다(2026-08-06 16:05·16:43·16:46·19:05·19:26·19:39
               //   관측이 원 단위까지 동일). 공식 문서엔 갱신 주기 언급이 없어 "실측"으로 적는다.
+              // ★원인을 단정하지 않는다 — 「미집계」인지 「정말 0원」인지 가릴 방법이 없다
+              //   (캠페인을 전부 끈 날도 똑같이 전부 0이다). 종전 문구는 "집계 전"·"자정~02시경"
+              //   으로 원인과 시간대를 단정해, 낮에 지출이 0인 날엔 맞는 이익을 스스로 할인해
+              //   읽게 만들었다.
               data?.ad_basis
-                ? data.ad_basis.pending
-                  ? "네이버 당일 집계 전 — 0원이 아니라 «모름»(실측: 자정~02시경)"
+                ? adPending
+                  ? "네이버 당일 값이 아직 전부 0 — 미집계인지 실제 0원인지 구분 불가"
                   : data.ad_basis.kind === "today_snapshot"
-                    ? `검색광고만(당일 누적) · ${hhmm(data.ad_basis.as_of)} 기준 · 매시 05분 수집(네이버도 시간 단위 갱신·실측) · 디스플레이는 익일 확정`
+                    ? `검색광고만(당일 누적·관측 최대치) · ${hhmm(data.ad_basis.as_of)} 확인 · 매시 05분 수집 · 디스플레이는 익일 확정`
                     : "오늘 수집 전 — 첫 스냅샷(매시 05분) 후 표시"
                 : "검색+디스플레이 · 상품별 미배분"
             }
@@ -968,21 +995,25 @@ export default function NaverOps() {
             value={won(s.logistics)}
             sub={`배송 ${s.shipment_count}건 × 1,900`}
           />
+          {/* ★광고비를 모르면 이익도 모른다 — 값을 「—」로 두고 색도 칠하지 않는다.
+              종전엔 이익 카드에만 경고를 달았는데, 이익률 카드는 경고도 없이 45.5pp 과대(94% vs
+              48.5%)를 파란색(양호)으로 띄웠다. 이익률을 먼저 보는 사람은 경고를 한 번도 못 본다.
+              이 저장소의 선례와도 같다: 커버리지 미달이면 순이익 「—」, 원가 미상은 0이 아니라 None. */}
           <SummaryCard
             label="이익"
-            value={won(s.profit)}
+            value={adPending ? "—" : won(s.profit)}
             sub={
-              // pending이면 광고비가 빠진 이익이다 — 부호까지 뒤집힐 수 있으므로 카드가 직접 말한다.
-              data?.ad_basis?.pending
-                ? "⚠️ 광고비 미집계 구간 — 이익 과대"
-                : data?.ad_basis ? "광고비=검색 당일 누적(진행 중)" : undefined
+              adPending
+                ? "광고비를 모르는 동안은 이익도 «모름»"
+                : data?.ad_basis ? "광고비=검색 당일 누적(관측 최대치)" : undefined
             }
-            highlight={profitN >= 0 ? "blue" : "red"}
+            highlight={adPending ? undefined : profitN >= 0 ? "blue" : "red"}
           />
           <SummaryCard
             label="이익률"
-            value={s.profit_rate ? pct(s.profit_rate) : "—"}
-            highlight={profitN >= 0 ? "blue" : "red"}
+            value={adPending ? "—" : s.profit_rate ? pct(s.profit_rate) : "—"}
+            sub={adPending ? "광고비 «모름»" : undefined}
+            highlight={adPending ? undefined : profitN >= 0 ? "blue" : "red"}
           />
           <SummaryCard
             label="검색광고 전환매출"

@@ -71,6 +71,15 @@ if [[ "$loose_n" -gt "$strict_n" ]]; then
   echo "    grep -nE '$_LESSON_CAND_RE' $LESSONS | grep -vE '$_LESSON_RE'"
 fi
 
+# ★자릿수 상한 경고 — 정규식이 3자리까지만 본다. #1000이 되면 strict·후보가 **같이** 못 잡아
+#   위 드리프트 검사가 침묵하고(두 카운트가 나란히 줄어든다) 이 도구는 다시 조용히 옛 번호를
+#   준다 = 이 파일이 존재하는 이유와 똑같은 실패. 미리 시끄럽게 만들어 둔다.
+if [[ "$next_lesson" -ge 900 || "$next_dnao" -ge 900 ]]; then
+  echo
+  echo "⚠️  번호가 3자리 상한에 접근했다 — 정규식 자릿수({1,3})를 넓혀야 한다."
+  echo "    넓힐 때 연도(\`## 2026-08-06\`)가 번호로 잡히지 않는지 같이 확인할 것."
+fi
+
 behind=$(git rev-list --count HEAD..origin/main 2>/dev/null || echo 0)
 if [[ "$behind" -gt 0 ]]; then
   echo
