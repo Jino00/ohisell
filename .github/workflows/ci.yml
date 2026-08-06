@@ -1,0 +1,69 @@
+# 신설 2026-08-07 — 그전까지 이 repo엔 CI가 없었고 모든 PR이 "no checks reported"였다.
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# 같은 브랜치에 새 푸시가 오면 돌던 실행을 취소한다. 병행 세션이 활발한 repo라
+# 이게 없으면 옛 커밋 결과가 뒤늦게 도착해 "어느 게 지금 상태인지" 헷갈린다.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: backend (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false # 한쪽 버전이 깨져도 다른 쪽 결과를 끝까지 본다
+      matrix:
+        # ★3.10 = prod 실측(`/home/ubuntu/ohisell/backend/.venv` = Python 3.10.12).
+        #   3.14 = 개발 Mac. 둘이 갈라져 있어 한쪽만 돌리면 나머지 쪽 파손을 못 본다
+        #   (교훈 #1: Python 3.14에서 SQLAlchemy 호환성이 실제로 깨진 전례가 있다).
+        python: ["3.10", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+      - name: install
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+      - name: pytest
+        working-directory: backend # rootdir가 backend여야 tests/ 의 로컬 임포트가 풀린다
+        run: pytest -q
+
+  frontend:
+    name: frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: install
+        working-directory: frontend
+        run: npm ci
+      - name: typecheck
+        working-directory: frontend
+        run: npx tsc -b
+      - name: test
+        working-directory: frontend
+        run: npm run test
+      # ★`tsc -b`만으로는 부족하다 — 2026-08-06에 `tsc --noEmit`은 통과했는데 실제 빌드가
+      #   TS2345로 죽은 적이 있다. 배포되는 산출물을 만드는 명령 그 자체를 돌려야 한다.
+      - name: build
+        working-directory: frontend
+        run: npm run build
