@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Spinner, BusyOverlay, MIN_BUSY_MS } from "../components/Busy";
 import {
-  fetchNaverSalesSummary, fetchGfaStatus, uploadGfaCsv,
+  fetchNaverSalesSummary, fetchGfaStatus, uploadGfaCsv, triggerSchedulerJob,
   fetchNaverSettlement, syncNaverSettlement,
   fetchNaverInquiries, fetchNaverProducts, fetchNaverSellerInfo,
   fetchNaverPendingOrders, naverConfirmOrders, naverDispatchOrders, naverDelayOrder,
@@ -39,6 +39,12 @@ function daysSince(dateStr: string | null | undefined): number | null {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   return Math.round((today.getTime() - d.getTime()) / 86400000);
+}
+
+/** 서버가 KST naive ISO로 준다(전역 원칙 0) — Date로 파싱하면 로컬 타임존이 한 번 더 붙는다.
+ *  문자열에서 잘라 쓴다. */
+function hhmm(iso: string | null | undefined): string {
+  return iso ? iso.slice(11, 16) : "—";
 }
 
 const PERIODS = [
@@ -188,6 +194,22 @@ export default function NaverOps() {
   // 시퀀스 가드(reqSeq)는 응답 도착 순서만 정리할 뿐, 뒤늦게 발사되는 새 요청은 못 막는다.
   const loadRef = useRef(load);
   useEffect(() => { loadRef.current = load; }, [load]);
+
+  // 「지금 기준」 — 시간별 스냅샷 잡을 당겨 실행한 뒤 재조회한다. 잡 자체(매시 :05)는 그대로
+  // 둔다: 시간대별 증분이 스냅샷 시계열의 차분이라, 사람이 누를 때만 찍으면 페이싱이 무너진다.
+  const [adRefreshing, setAdRefreshing] = useState(false);
+  const [adRefreshMsg, setAdRefreshMsg] = useState<string | null>(null);
+  async function refreshTodayAd() {
+    setAdRefreshing(true); setAdRefreshMsg(null);
+    try {
+      await triggerSchedulerJob("snapshot_naver_ad_hourly");
+      await loadRef.current();
+    } catch (e) {
+      setAdRefreshMsg(`갱신 실패: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setAdRefreshing(false);
+    }
+  }
 
   const loadGfa = useCallback(async () => {
     try { setGfa(await fetchGfaStatus()); } catch { /* silent */ }
@@ -846,6 +868,18 @@ export default function NaverOps() {
           disabled={syncing}
           className="px-3 py-1.5 text-sm rounded-md border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 disabled:opacity-50"
         >{syncing ? "동기화 중…" : "🔄 동기화"}</button>
+        {days === 0 && (
+          <button
+            onClick={refreshTodayAd}
+            disabled={adRefreshing || loading}
+            title="시간별 스냅샷을 지금 한 번 더 찍어 광고비를 최신화합니다(약 10초)"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+          >
+            {adRefreshing && <Spinner className="w-3.5 h-3.5" />}
+            {adRefreshing ? "광고비 갱신 중…" : "⏱ 지금 기준"}
+          </button>
+        )}
+        {adRefreshMsg && <span className="text-xs text-red-600">{adRefreshMsg}</span>}
         {/* 갱신 중에는 기간 라벨 대신 진행 표시를 낸다 — 옛 기간 라벨을 새 값으로 오독하지 않게. */}
         {loading ? (
           <span className="inline-flex items-center gap-1.5 text-xs font-medium text-green-700">
@@ -854,6 +888,7 @@ export default function NaverOps() {
         ) : data && (
           <span className="text-xs text-gray-400">
             {data.period.from} ~ {data.period.to}
+            {data.ad_basis?.as_of && ` (광고비 ${hhmm(data.ad_basis.as_of)} 기준)`}
             {data.ad_ref_date && ` (광고비 기준일: ${data.ad_ref_date})`}
           </span>
         )}
@@ -935,7 +970,20 @@ export default function NaverOps() {
             }
           />
           <SummaryCard label="원가" value={won(s.cost)} />
-          <SummaryCard label="광고비" value={won(s.ad_spend)} sub="검색+디스플레이 · 상품별 미배분" />
+          <SummaryCard
+            label="광고비"
+            value={won(s.ad_spend)}
+            sub={
+              // 오늘은 **검색광고 당일 누적**이다(디스플레이는 실차감이라 당일치가 없다).
+              // 기준시각을 반드시 같이 낸다 — 종전엔 어제 전일치를 넣고 라벨만 달아서,
+              // 이익 카드가 「오늘 매출 − 어제 광고비」인 줄 모르고 읽혔다.
+              data?.ad_basis
+                ? data.ad_basis.kind === "today_snapshot"
+                  ? `검색광고만(당일 누적) · ${hhmm(data.ad_basis.as_of)} 기준 · 디스플레이는 익일 확정`
+                  : "오늘 수집 전 — 첫 스냅샷(매시 05분) 후 표시"
+                : "검색+디스플레이 · 상품별 미배분"
+            }
+          />
           <SummaryCard
             label="물류비(한진)"
             value={won(s.logistics)}
@@ -944,6 +992,7 @@ export default function NaverOps() {
           <SummaryCard
             label="이익"
             value={won(s.profit)}
+            sub={data?.ad_basis ? "광고비=검색 당일 누적(진행 중)" : undefined}
             highlight={profitN >= 0 ? "blue" : "red"}
           />
           <SummaryCard

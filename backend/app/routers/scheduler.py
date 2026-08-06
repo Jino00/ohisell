@@ -65,36 +65,15 @@ def trigger_job(job_id: str, db: Session = Depends(get_db)):
     if not state:
         raise HTTPException(status_code=404, detail=f"작업을 찾을 수 없습니다: {job_id}")
 
-    # 즉시 실행
-    from app.services.scheduler_service import (
-        recalculate_profit_job,
-        sync_all_channels_job,
-        sync_coupang_coupons_job,
-        sync_coupang_cs_job,
-        sync_coupang_products_job,
-        sync_coupang_returns_job,
-        sync_coupang_rg_inbound_job,
-        sync_coupang_rg_inventory_job,
-        sync_coupang_rg_orders_job,
-        sync_coupang_rg_sizes_job,
-        sync_coupang_settlement_job,
-    )
+    # 즉시 실행 — ★매핑은 `job_func_for` **하나만** 본다.
+    # 종전에는 이 라우터가 자기 job_map(11개)을 따로 들고 있어, 스케줄러에 등록된 잡인데도
+    # 수동 실행은 "실행할 수 없는 작업입니다"로 거부되는 잡이 있었다(예: snapshot_naver_ad_hourly).
+    # 이건 `job_func_for` 주석이 경고한 바로 그 실패 모드다 — "한쪽만 알면 toggle이 재시작 없이
+    # 살릴 잡을 못 찾아 DB만 바뀌고 실제 미가동(쿠팡 광고비 13일 정지의 뿌리)". 부분집합 복제는
+    # 시간이 지날수록 어긋나기만 한다.
+    from app.services.scheduler_service import job_func_for
 
-    job_map = {
-        "auto_sync_orders": sync_all_channels_job,
-        "auto_profit_calc": recalculate_profit_job,
-        "sync_coupang_products": sync_coupang_products_job,
-        "sync_coupang_returns": sync_coupang_returns_job,
-        "sync_coupang_settlement": sync_coupang_settlement_job,
-        "sync_coupang_rg_sizes": sync_coupang_rg_sizes_job,
-        "sync_coupang_rg_inbound": sync_coupang_rg_inbound_job,
-        "sync_coupang_rg_inventory": sync_coupang_rg_inventory_job,
-        "sync_coupang_rg_orders": sync_coupang_rg_orders_job,
-        "sync_coupang_coupons": sync_coupang_coupons_job,
-        "sync_coupang_cs": sync_coupang_cs_job,
-    }
-
-    func = job_map.get(job_id)
+    func = job_func_for(job_id)
     if not func:
         raise HTTPException(status_code=400, detail=f"실행할 수 없는 작업입니다: {job_id}")
 
