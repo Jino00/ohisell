@@ -913,6 +913,7 @@ export default function NaverOps() {
             : <> 실제 이익은 <b>위 요약보다 작습니다</b>(빠진 금액은 원가를 몰라 계산 불가).</>}
           {(s!.cost_unknown_unmapped ?? 0) > 0 && <> · 상품 매핑 필요 <b>{s!.cost_unknown_unmapped}개</b></>}
           {(s!.cost_unknown_zero_cost ?? 0) > 0 && <> · 원가 입력 필요 <b>{s!.cost_unknown_zero_cost}개</b></>}
+          {(s!.cost_unknown_ambiguous ?? 0) > 0 && <> · 중복 매핑 정리 필요 <b>{s!.cost_unknown_ambiguous}개</b></>}
           <> · 어느 상품인지는 아래 표에 표시됩니다.</>
         </div>
       )}
@@ -1118,7 +1119,11 @@ export default function NaverOps() {
                         두 종류의 조치가 다르다: 매핑을 잇는 것 vs 원가를 입력하는 것. */}
                     {r.cost_known === false && (
                       <div className="mt-0.5 text-[11px] text-amber-700">
-                        원가 미상 — {r.cost_unknown_kind === "unmapped" ? "상품 매핑 필요" : "원가 입력 필요"}
+                        원가 미상 — {
+                          r.cost_unknown_kind === "unmapped" ? "상품 매핑 필요"
+                          : r.cost_unknown_kind === "ambiguous" ? "중복 매핑 정리 필요(원가가 서로 다름)"
+                          : "원가 입력 필요"
+                        }
                       </div>
                     )}
                   </td>

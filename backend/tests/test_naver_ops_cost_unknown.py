@@ -196,3 +196,62 @@ def test_same_product_multiple_orders_counted_once(db):
 
     assert out["summary"]["cost_unknown_products"] == 1
     assert out["summary"]["cost_unknown_revenue"] == "100000.00"   # 매출은 합산
+
+
+# ── 근본 수정: 원가 후보가 갈리면 고르지 않는다 (2026-08-06 적대 리뷰 P1) ──
+
+def test_ambiguous_cost_is_unknown_not_silently_picked(db):
+    """★★한 옵션ID에 활성 매핑이 둘이고 원가가 다르면 «모름»이다 — 조용히 고르지 않는다.
+
+    종전 `min(costed, key=lambda x: x[1])`는 정렬 키가 **원가가 아니라 product_master.id**라,
+    "원가가 맞는 쪽"이 아니라 "id가 작은 쪽"을 뽑았다. 그 값은 cost_map에 들어가므로
+    «모름» 배너에도 안 잡혀 **화면이 자신 있게 틀렸다.**
+    라이브(2026-08-06): 네이버 이중 활성 매핑 22건 — 원가가 갈리는 건 0건이라 아직 안 터졌을 뿐.
+    """
+    _order(db, pid="P-AMB", name="이중 매핑", price="110000")
+    _mapped(db, pid="P-AMB", cost="9000", master_id=10)    # id 작음 — 종전엔 이게 뽑혔다
+    _mapped(db, pid="P-AMB", cost="15000", master_id=55)   # 실제 정확한 원가
+
+    out = sales_summary(days=7, db=db)
+    r = _row(out, "P-AMB")
+
+    assert r["cost"] is None                       # 9,000원이 여기 있었다
+    assert r["profit"] is None
+    assert r["cost_unknown_kind"] == "ambiguous"   # 사유가 셋째 종류
+    assert out["summary"]["cost_unknown_ambiguous"] == 1
+    assert out["summary"]["cost_unknown_products"] == 1
+
+
+def test_same_cost_on_duplicate_mappings_is_still_known(db):
+    """중복 매핑이어도 **원가가 같으면** 모호하지 않다 — 거짓 경보를 내지 않는다.
+
+    라이브 22건이 전부 이 상태다(원가 distinct=1). 이 가드가 없으면 배포 즉시 22건이
+    «모름»으로 뒤집혀 멀쩡한 손익이 사라진다.
+    """
+    _order(db, pid="P-DUP", name="중복이나 동일원가", price="110000")
+    _mapped(db, pid="P-DUP", cost="22000", master_id=11)
+    _mapped(db, pid="P-DUP", cost="22000", master_id=56)
+
+    out = sales_summary(days=7, db=db)
+    r = _row(out, "P-DUP")
+
+    assert r["cost_known"] is True
+    assert r["cost"] == "20000.00"      # 22,000 ÷ 1.1
+    assert out["summary"]["cost_unknown_products"] == 0
+
+
+def test_negative_cost_never_becomes_known(db):
+    """★음수 원가는 «모름»이다 — 종전엔 fallback이 음수를 골라 "원가 있음"으로 나갔다.
+
+    원가가 음수면 이익에서 빼는 게 아니라 **더한다** — 과대의 방향이 뒤집힌 채 커진다.
+    (스키마에도 ge=0을 걸었지만, 이미 들어와 있는 값은 여기서 죽어야 한다.)
+    """
+    _order(db, pid="P-NEG", name="음수 원가", price="110000")
+    _mapped(db, pid="P-NEG", cost="-500", master_id=12)
+
+    out = sales_summary(days=7, db=db)
+    r = _row(out, "P-NEG")
+
+    assert r["cost"] is None
+    assert r["profit"] is None
+    assert r["cost_unknown_kind"] == "zero_cost"   # 양수 후보 없음 = 원가 입력 필요

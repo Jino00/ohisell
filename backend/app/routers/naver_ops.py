@@ -306,12 +306,25 @@ def sales_summary(
     cost_candidates: dict[str, list] = {}
     for cpid, cp, pid in cost_rows:
         cost_candidates.setdefault(str(cpid), []).append((cp, pid))
+    # ★후보가 갈리면 «모름»이다 — 조용히 하나를 고르지 않는다(2026-08-06 적대 리뷰 P1).
+    #   종전: `chosen = min(costed or cands, key=lambda x: x[1])` — 정렬 키가 **원가가 아니라
+    #   product_master.id**였다. 한 채널옵션ID에 활성 매핑이 둘이고 원가가 서로 다르면,
+    #   "원가가 맞는 쪽"이 아니라 "id가 작은 쪽"이 뽑혀 **조용히 틀린 원가로 이익이 부풀려졌다.**
+    #   그것도 `cost_map`에 들어가므로 «모름» 배너에도 안 잡힌다 — 화면은 자신 있게 틀린다.
+    #   라이브 실측(2026-08-06): 네이버 이중 활성 매핑 **22건 존재**, 그중 원가가 갈리는 건
+    #   0건이라 아직 안 터졌을 뿐이다. 원천은 B(업로드 경로 가드)에서 막고, 여기서는
+    #   **이미 갈린 데이터를 만나면 모른다고 말한다.**
+    #   ★음수 원가도 이 경로에서 죽는다 — 종전엔 `costed`가 비면 fallback이 음수를 골라
+    #   `if chosen:`(truthy)을 통과해 "원가 있음"으로 나갔다(원가가 음수면 이익을 **더** 부풀린다).
+    #   이제 양수 후보가 없으면 그냥 «모름»이다.
     cost_map: dict[str, Decimal] = {}
+    cost_ambiguous: set[str] = set()
     for pid, cands in cost_candidates.items():
-        costed = [(cp, p) for cp, p in cands if cp and cp > 0]
-        chosen = min(costed or cands, key=lambda x: x[1])[0]
-        if chosen:
-            cost_map[pid] = _f(chosen)
+        distinct_costed = {_f(cp) for cp, _p in cands if cp and cp > 0}
+        if len(distinct_costed) > 1:
+            cost_ambiguous.add(pid)   # 어느 게 맞는지 우리는 모른다
+        elif len(distinct_costed) == 1:
+            cost_map[pid] = next(iter(distinct_costed))
 
     # ★«원가를 모른다»와 «원가가 0원이다»를 구분한다(2026-08-06).
     #   종전에는 둘 다 `cost_map.get(pid, 0)` 으로 접혀 **0원짜리 원가**가 됐고, 그 결과
@@ -326,11 +339,16 @@ def sales_summary(
     #     zero_cost = 매핑은 있는데 product_master.cost_price가 0/NULL → **원가를 입력**해야 한다
     #   선례와 같은 의미론: profit_calculator의 `unmapped_revenue`(원가 미상 매출 별도 집계).
     #   쿠팡 프로모션 손익도 같은 두 사유("매핑 없음" / "cost_price 없음")를 나눠 낸다.
+    #     ambiguous = 활성 매핑이 여럿인데 원가가 서로 다름 → **중복 매핑을 정리**해야 한다
+    #                 (어느 원가가 맞는지 우리가 모르므로 고르지 않는다 — 위 cost_map 참조)
     cost_unknown_kind: dict[str, str] = {}
     for pid_u in all_pids:
         if pid_u in cost_map:
             continue
-        cost_unknown_kind[pid_u] = "zero_cost" if pid_u in cost_candidates else "unmapped"
+        if pid_u in cost_ambiguous:
+            cost_unknown_kind[pid_u] = "ambiguous"
+        else:
+            cost_unknown_kind[pid_u] = "zero_cost" if pid_u in cost_candidates else "unmapped"
 
     # ── 3b. 실측 수수료 맵 (건별 정산 settle/case, D-6) ────────────────
     # (order_id, product_id) → 실측 판매자부담 수수료(양수). PROD_ORDER만, 수수료 음수→부호반전.
@@ -419,7 +437,7 @@ def sales_summary(
     # 고객배송비·한진물류비·광고비는 배송/계정 단위라 상품 미배분 → 요약에만 반영.
     by_product = []
     unknown_supply_rev = _Z          # 원가 미상 상품들의 공급가 매출(요약 배너용)
-    unknown_unmapped = unknown_zero = 0
+    unknown_unmapped = unknown_zero = unknown_ambiguous = 0
     for pid_s, acc in prod_acc.items():
         rev_s  = acc["rev"] / _VAT_DIVISOR        # 공급가
         fee_s  = acc["fee"] / _VAT_DIVISOR
@@ -433,6 +451,8 @@ def sales_summary(
             unknown_supply_rev += rev_s
             if unknown_kind == "unmapped":
                 unknown_unmapped += 1
+            elif unknown_kind == "ambiguous":
+                unknown_ambiguous += 1
             else:
                 unknown_zero += 1
         by_product.append({
@@ -492,10 +512,11 @@ def sales_summary(
             #   왜 요약까지 「—」로 만들지 않나: 미상은 매출의 2.5%인데 그 때문에 나머지 97.5%를
             #   못 보게 하면 화면이 쓸모없어진다. 대신 얼마나 과대일 수 있는지를 배너가 말한다.
             #   ★과대 금액을 추정치로 내지 않는다 — 미상 매출을 그대로 내고 판단은 사람이 한다.
-            "cost_unknown_products": unknown_unmapped + unknown_zero,
+            "cost_unknown_products": unknown_unmapped + unknown_zero + unknown_ambiguous,
             "cost_unknown_revenue":  str(unknown_supply_rev.quantize(_Q2)),  # 공급가
             "cost_unknown_unmapped": unknown_unmapped,   # 매핑을 이어야 하는 상품 수
             "cost_unknown_zero_cost": unknown_zero,      # 원가를 입력해야 하는 상품 수
+            "cost_unknown_ambiguous": unknown_ambiguous, # 중복 매핑을 정리해야 하는 상품 수
         },
         "by_product": by_product,
     }

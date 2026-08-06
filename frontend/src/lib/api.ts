@@ -1706,6 +1706,7 @@ export interface NaverSalesSummaryData {
   cost_unknown_revenue?: string;    // 그 상품들의 공급가 매출
   cost_unknown_unmapped?: number;
   cost_unknown_zero_cost?: number;
+  cost_unknown_ambiguous?: number;   // 활성 매핑이 여럿인데 원가가 갈림 → 중복 매핑 정리 필요
 }
 
 /** 오늘(days=0) 광고비의 출처. 다른 기간에선 null.
@@ -1740,7 +1741,7 @@ export interface NaverSalesProductRow {
   //    나머지를 부정한다 — 훑는 눈에는 큰 숫자가 이긴다.)
   cost: string | null;
   cost_known?: boolean;
-  cost_unknown_kind?: "unmapped" | "zero_cost" | null;
+  cost_unknown_kind?: "unmapped" | "zero_cost" | "ambiguous" | null;
   fee_actual?: boolean;  // 수수료가 전부 정산 실측이면 true (D-6)
   profit: string | null; profit_rate: string | null;
 }
