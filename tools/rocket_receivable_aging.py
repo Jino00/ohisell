@@ -48,11 +48,18 @@ def read_csv(path: pathlib.Path) -> list[dict]:
         return list(csv.DictReader(f))
 
 
+UNCLASSIFIED = "?미분류"
+
+
 def bucket_of(days: int) -> str:
     for (lo, hi), label in zip(BUCKETS, LABELS):
         if lo <= days <= hi:
             return label
-    return "?"
+    # ★조용히 삼키지 않는다 — 음수 연령(=기준일이 asof보다 미래)은 자료 오류이거나 asof 오지정이다.
+    #   종전 판은 여기서 "?"를 돌려주고 요약 표가 그 키를 안 찍어 **라인이 통째로 사라졌다**
+    #   (--asof 2025-09-01 재현: 159라인 중 145라인 증발, 경고 0). 이제 별도 버킷으로 남기고
+    #   합계·경고로 표면화한다.
+    return UNCLASSIFIED
 
 
 def main() -> int:
@@ -114,18 +121,30 @@ def main() -> int:
     print(f"[총액] 종전 {old_total:,} → 현재 {new_total:,} (차 {new_total - old_total:,})")
 
     def table(title: str, key: str, order: list[str]) -> None:
+        """★`order`에 없는 키도 반드시 찍고 합계를 낸다 — 안 찍으면 라인이 조용히 사라진다."""
         agg2 = collections.defaultdict(lambda: [0, 0])
         for r in rows:
             agg2[r[key]][0] += 1
             agg2[r[key]][1] += int(r["미정산금액_재판정"])
         print(f"\n{title}")
-        for k in order:
+        keys = order + sorted(k for k in agg2 if k not in order)   # 예상 밖 키를 뒤에 붙인다
+        for k in keys:
             if k in agg2:
-                print(f"  {k:26s} {agg2[k][0]:3d}라인 {agg2[k][1]:>10,}원")
+                mark = "" if k in order else "  ← ⚠️예상 밖 값"
+                print(f"  {k:26s} {agg2[k][0]:3d}라인 {agg2[k][1]:>10,}원{mark}")
+        # 합계를 항상 찍는다. 이 줄이 없으면 표가 줄어든 것을 눈으로 못 잡는다.
+        print(f"  {'계':26s} {sum(v[0] for v in agg2.values()):3d}라인 "
+              f"{sum(v[1] for v in agg2.values()):>10,}원")
 
     table("기준일 출처", "연령기준일출처",
           ["①하차일(제3자)", "②센터도착일(제3자)", "③같은PO 정산입고일(쿠팡)", "④판정불가(추적기록 없음)"])
     table("연령 버킷", "연령버킷", LABELS + ["판정불가"])
+
+    unclassified = [r for r in rows if r["연령버킷"] == UNCLASSIFIED]
+    if unclassified:
+        print(f"\n⚠️ 버킷 미분류 {len(unclassified)}라인 — 기준일이 --asof({asof})보다 미래다. "
+              f"asof 지정이나 원천 날짜를 확인할 것. 예: "
+              + ", ".join(f"{r['발주번호']}/{r['상품번호']}({r['경과일수']}일)" for r in unclassified[:3]))
 
     ages = [r["경과일수"] for r in rows if r["경과일수"] != ""]
     if ages:
