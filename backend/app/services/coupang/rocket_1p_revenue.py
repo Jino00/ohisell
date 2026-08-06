@@ -28,6 +28,7 @@ from app.services.coupang.rocket_1p_channel_pnl import (
     ROCKET_1P_VENDOR_ID,
     ZERO,
     compute_rocket_1p_summary_row,
+    window_freshness as _window_freshness,
 )
 
 log = logging.getLogger(__name__)
@@ -117,6 +118,18 @@ def compute_rocket_1p_revenue(
 
     # ── 옵션 그레인 ────────────────────────────────────────────────
     rows = db.execute(text(_OPTION_SQL), params).fetchall()
+
+    # ★★판매분석 미수집 구간을 **0으로 접지 않는다**(2026-08-06 적대 리뷰 P1).
+    #   `coupang_rocket_sales_daily`는 쿠팡 롤링창(약 2개월) 때문에 과거가 없다. 그 창에서
+    #   `compute_rocket_1p_summary_row(BASIS_SALES)`는 매출 "0"을 돌려주고, 예전 판은 그것을
+    #   그대로 실었다 — 화면에 「우리 매출 0원 · RoAS 0.00」이 떠서 "광고비 2,941만원 쓰고
+    #   매출이 0이었다"로 읽혔다. 실제로는 0이 아니라 **관측 불가**다.
+    #   ★판별자는 qty가 아니라 **행 존재 여부**다: 행이 있고 qty=0이면 그건 진짜 0판매일이다.
+    covered = len(rows) > 0
+    sales_span = db.execute(
+        text("SELECT MIN(date), MAX(date) FROM coupang_rocket_sales_daily WHERE vendor_id = :vendor"),
+        {"vendor": vendor},
+    ).fetchone()
     ad_by_option = {
         str(r[0]): _d(r[1]) for r in db.execute(text(_OPTION_AD_SQL), params).fetchall()
     }
@@ -156,27 +169,36 @@ def compute_rocket_1p_revenue(
     shown = options[: max(1, limit)]
 
     ad_option_sum = sum(ad_by_option.values(), ZERO)
+    # 판매 축에서 온 값들은 **판매분석이 그 창을 덮을 때만** 사실이다. 안 덮으면 전부 모름.
+    #   광고비·계산서 매출은 다른 원천이라 그대로 둔다(그건 실측이다).
+    consumer_out = _s(consumer_total) if covered else None
+    our_out = _s(our_revenue) if covered else None
     return {
         "period": {"from": date_from.isoformat(), "to": date_to.isoformat(), "vendor_id": vendor},
         "totals": {
-            "qty": qty_total,
+            "qty": qty_total if covered else None,
             # 소비자 판매가 축 — **쿠팡의 매출**이다. 우리 회계 매출이 아니다(D-CPP-2).
-            "consumer_revenue": str(consumer_total),
+            "consumer_revenue": consumer_out,
             # 우리 매출(납품가 × 판매수량) — 대시보드 판매 축과 **같은 함수** 산출값.
-            "our_revenue": _s(our_revenue),
+            "our_revenue": our_out,
             # 회계 정본(계산서 지급액). 판매 축과 **택일**이지 더하는 값이 아니다.
             "settlement_revenue": _s(settlement_revenue),
             "ad_spend": str(ad_spend),
-            "our_share": _s(_ratio(our_revenue, consumer_total)),
-            "roas": _s(_ratio(our_revenue, ad_spend)),
+            "our_share": _s(_ratio(our_revenue, consumer_total)) if covered else None,
+            "roas": _s(_ratio(our_revenue, ad_spend)) if covered else None,
         },
         # 두 경로가 어긋나면 그건 **납품단가 커버리지**다 — 숨기지 않고 드러낸다.
         "coverage": {
+            "sales_data_covered": covered,     # ★False면 위 판매 축 값들이 전부 null이다
+            "sales_data_from": None if not sales_span or sales_span[0] is None else str(sales_span[0])[:10],
+            "sales_data_to": None if not sales_span or sales_span[1] is None else str(sales_span[1])[:10],
             "qty_axis": qty_axis,          # 판매 축(손익용 INNER JOIN)이 센 수량
-            "qty_all": qty_total,          # 소비자 축(LEFT JOIN)이 센 수량 = 전량
-            "qty_priced": priced_qty,      # 그중 납품단가를 붙일 수 있었던 수량
+            "qty_all": qty_total if covered else None,   # 소비자 축(LEFT JOIN)이 센 수량 = 전량
+            "qty_priced": priced_qty if covered else None,
             "priced_pct": _s(_ratio(Decimal(priced_qty), Decimal(qty_total))) if qty_total else None,
             "options_unpriced": sum(1 for o in options if o["our_revenue"] is None),
+            "note": "sales_data_covered=false면 그 창에 판매분석 행이 하나도 없다는 뜻이다 — "
+                    "판매가 0이었던 게 아니라 **관측 불가**다(쿠팡 판매분석은 롤링 약 2개월).",
         },
         "ad_reconciliation": {
             "option_sum": str(ad_option_sum),
@@ -185,6 +207,11 @@ def compute_rocket_1p_revenue(
             "basis": "옵션 합계는 Billboard(PA 기준), 계정 총액은 report/SALES(전체 기준, D-10). "
                      "정의가 달라 완전히 같지 않다 — 차이가 커지면 수집이 어긋난 신호다.",
         },
+        # ★★"며칠을 보고 있는가"를 화면이 말할 수 있게 한다(2026-08-06 적대 리뷰 P1).
+        #   판매분석은 당일·전일치를 주지 않아 기본 창(오늘까지 7일)엔 늘 5일치만 들어온다.
+        #   그걸 모르고 주간 비교를 하면 이번 주가 **항상** 20% 낮게 나온다. 더 나쁜 건
+        #   수집이 진짜 멈춰도 화면상 구별할 수단이 없다는 것이다 — 그래서 창의 실제 상태를 싣는다.
+        "freshness": _window_freshness(db, date_from, date_to, vendor),
         "option_count": len(options),
         "shown": len(shown),
         "options": shown,

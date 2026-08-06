@@ -17,6 +17,7 @@
 import { useState } from "react";
 import { Card, Stat, Table, Th, Td, Loading, EmptyState, Badge } from "../components/ui";
 import { useAsyncData } from "../lib/useAsyncData";
+import { FreshnessNote } from "../components/FreshnessNote";
 import {
   fetchRocket1PFunnel,
   type FunnelPosition,
@@ -146,6 +147,7 @@ export default function Rocket1PFunnel() {
       {data && (
         <>
           <Card title="기간 퍼널">
+            <FreshnessNote f={data.freshness} />
             <div className="grid grid-cols-2 gap-4 px-4 py-4 md:grid-cols-7">
               <Stat label="방문자" value={num(data.totals.visitors)} />
               <Stat label="조회" value={num(data.totals.page_views)}
@@ -157,9 +159,15 @@ export default function Rocket1PFunnel() {
                 sub={`주문당 ${dec(data.totals.units_per_order)}개`} />
               <Stat label="소비자 매출" value={won(data.totals.consumer_revenue)}
                 sub="쿠팡가 기준(쿠팡의 매출)" />
-              <Stat label="지표 결손" value={`${num(data.coverage.option_days_missing_metrics)}일`}
+              {/* ★"결손 없음"을 단언하지 않는다(적대 리뷰 P1): 이 카운터는 **존재하는 행의
+                  빈 컬럼**만 센다. 그 날 행이 통째로 없는 결손은 원리적으로 안 잡히므로
+                  위 FreshnessNote(날짜 축)와 **함께** 봐야 한다. 단위도 '일'이 아니라 옵션×일이다. */}
+              <Stat label="빈 지표(옵션×일)"
+                value={num(data.coverage.option_days_missing_metrics)}
                 tone={data.coverage.option_days_missing_metrics > 0 ? "warn" : "idle"}
-                sub={data.coverage.option_days_missing_metrics > 0 ? "합계가 부분값이다" : "없음"} />
+                sub={data.coverage.option_days_missing_metrics > 0
+                  ? "합계가 부분값이다"
+                  : "행 부재는 위 기준일로 확인"} />
             </div>
             <p className="mx-4 mb-4 text-xs text-gray-500">
               모든 비율은 <b>합계의 몫</b>입니다(Σ주문 ÷ Σ조회). 일별 비율의 평균이 아닙니다 —
@@ -176,7 +184,7 @@ export default function Rocket1PFunnel() {
             <div className="mx-4 mt-3 rounded bg-gray-50 px-3 py-2 text-xs text-gray-600">
               「위치」는 <b>기간 중앙값 대비 상/하 서술</b>이며 권고가 아닙니다. 이번 판정 기준 —
               중앙 전환율 <b>{pct(data.thresholds.median_cvr)}</b> · 중앙 조회수{" "}
-              <b>{num(Number(data.thresholds.median_page_views))}</b> · 최소 조회{" "}
+              <b>{num(data.thresholds.median_page_views == null ? null : Number(data.thresholds.median_page_views))}</b> · 최소 조회{" "}
               <b>{num(data.thresholds.min_page_views)}</b>회(미만은 표본 부족) · 판정 대상{" "}
               <b>{num(data.thresholds.eligible_options)}</b>개.
             </div>

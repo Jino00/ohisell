@@ -190,3 +190,73 @@ def test_limit_caps_rows_but_count_tells_the_truth(db):
     db.commit()
     r = compute_rocket_1p_revenue(db, D, D, limit=2)
     assert r["shown"] == 2 and r["option_count"] == 5   # 잘렸다는 사실이 드러난다
+
+
+# ══════════════════════════════════════════════════════════════════
+# 2026-08-06 적대 리뷰 P1 회귀 — 판매분석 미수집 창 · 광고 축 통일
+# ══════════════════════════════════════════════════════════════════
+def test_uncovered_window_reports_unknown_not_zero(db):
+    """★판매분석 롤링창 밖에서 「우리 매출 0원 · RoAS 0.00」을 사실처럼 내면 안 된다.
+
+    실제로는 0이 아니라 **관측 불가**다. 예전 화면은 "광고비 2,941만원 쓰고 매출 0원"으로 읽혔다.
+    """
+    _ad_account(db, "29412515", d=date(2026, 1, 15))
+    db.commit()   # 판매분석 행은 하나도 없다
+    r = compute_rocket_1p_revenue(db, date(2026, 1, 1), date(2026, 1, 31))
+    t = r["totals"]
+    assert t["our_revenue"] is None and t["consumer_revenue"] is None
+    assert t["roas"] is None and t["our_share"] is None and t["qty"] is None
+    assert r["coverage"]["sales_data_covered"] is False
+    # 광고비는 다른 원천이라 그대로 — 그건 실측이다.
+    assert Decimal(t["ad_spend"]) == Decimal("29412515")
+
+
+def test_covered_window_with_zero_sales_is_a_real_zero(db):
+    """★판별자는 qty가 아니라 **행 존재**다 — 행이 있고 qty=0이면 그건 진짜 0판매일이다."""
+    _sale(db, "A", "S1", 0, "0")
+    _price(db, "S1", "10000", 1)
+    db.commit()
+    r = compute_rocket_1p_revenue(db, D, D)
+    assert r["coverage"]["sales_data_covered"] is True
+    assert r["totals"]["consumer_revenue"] == "0"      # 모름이 아니라 관측된 0
+    assert r["totals"]["qty"] == 0
+
+
+def test_freshness_is_reported_so_screen_can_say_how_many_days(db):
+    """"7일"이라 말하면서 5일을 보여주던 것 — 창의 실제 상태를 싣는다(적대 리뷰 P1)."""
+    _sale(db, "A", "S1", 1, "1000")
+    db.commit()
+    f = compute_rocket_1p_revenue(db, date(2026, 8, 1), date(2026, 8, 7))["freshness"]
+    assert f["days_expected"] == 7 and f["days_with_data"] == 1 and f["days_no_data"] == 6
+    assert f["data_as_of"] == "2026-08-04"
+
+
+def test_ad_axis_is_unified_manual_xlsx_is_not_dropped(db):
+    """★1P 광고 원천은 둘이다 — `_agg_rocket_ad`가 수기 XLSX를 안 읽어 43,147,487원이 빠졌었다.
+
+    두 엔진이 같은 축을 각자 구현한 것이 원인이라 호출을 한 함수로 모았다(적대 리뷰 P1).
+    """
+    from sqlalchemy import text as _text
+
+    from app.services.coupang.rocket_intelligence import _agg_rocket_ad
+
+    d = date(2026, 3, 20)
+    db.execute(_text("INSERT INTO ad_costs (channel_id, ad_date, ad_spend, source) "
+                     "VALUES (5, :d, 763873, 'excel')"), {"d": d.isoformat()})
+    db.commit()
+    # 자동수집(coupang_ad_report)엔 그날이 없다 — 예전엔 그래서 0원이었다.
+    assert _agg_rocket_ad(db, d, d, VENDOR) == Decimal("763873")
+
+
+def test_ad_axis_overlapping_day_is_not_double_counted(db):
+    """겹치는 날(2026-05-18)은 두 원천 값이 같다 — 더하면 그 하루가 2배가 된다."""
+    from sqlalchemy import text as _text
+
+    from app.services.coupang.rocket_intelligence import _agg_rocket_ad
+
+    d = date(2026, 5, 18)
+    db.execute(_text("INSERT INTO ad_costs (channel_id, ad_date, ad_spend, source) "
+                     "VALUES (5, :d, 552537, 'excel')"), {"d": d.isoformat()})
+    _ad_account(db, "552537", d=d)
+    db.commit()
+    assert _agg_rocket_ad(db, d, d, VENDOR) == Decimal("552537")   # 1,105,074가 아니다

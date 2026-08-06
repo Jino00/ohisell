@@ -22,7 +22,11 @@ from decimal import Decimal
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.services.coupang.rocket_1p_channel_pnl import ROCKET_1P_VENDOR_ID, ZERO
+from app.services.coupang.rocket_1p_channel_pnl import (
+    ROCKET_1P_VENDOR_ID,
+    ZERO,
+    window_freshness as _window_freshness,
+)
 
 log = logging.getLogger(__name__)
 
@@ -44,8 +48,18 @@ SELECT s.option_id                                            AS option_id,
        COUNT(*)                                               AS days,
        -- ★부분 결손을 센다: SUM은 NULL을 조용히 건너뛴다. 며칠치가 빠진 합계를
        --   온전한 합계처럼 보여주면 전환율이 이유 없이 튄다.
-       SUM(CASE WHEN s.page_views IS NULL THEN 1 ELSE 0 END)  AS days_missing_pv,
-       SUM(CASE WHEN s.orders IS NULL THEN 1 ELSE 0 END)      AS days_missing_orders
+       -- ★★한 컬럼으로 센다(2026-08-06 적대 리뷰 P1): 예전엔 pv 결손과 orders 결손을
+       --   **더했는데**, 이 둘은 S1에서 같이 붙어 결손도 같이 난다 → 같은 하루가 2번 세어져
+       --   4일 창에 "결손 6일"이 떴다. 게다가 총계는 pv만 세서 같은 이름의 지표가 화면
+       --   두 곳에서 2배 차이로 나왔다. 정의를 하나로 고정한다.
+       SUM(CASE WHEN s.page_views IS NULL OR s.orders IS NULL
+                THEN 1 ELSE 0 END)                            AS days_missing,
+       -- ★비율의 **지지집합**을 맞추기 위한 짝 합계(2026-08-06 적대 리뷰 P1):
+       --   qty는 NOT NULL이고 orders는 nullable이라 Σqty/Σorders는 "온전한 분자 ÷ 부분 분모"가
+       --   되어 과대해진다(반대로 Σpv/Σvisitors는 과소). cvr만 pv·orders가 함께 결손이라
+       --   우연히 안전했다. 각 비율이 자기 짝이 살아 있는 날만 세도록 분자·분모를 함께 건다.
+       SUM(CASE WHEN s.orders IS NOT NULL THEN s.qty END)     AS qty_with_orders,
+       SUM(CASE WHEN s.page_views IS NOT NULL THEN s.visitors END) AS visitors_with_pv
 FROM coupang_rocket_sales_daily s
 WHERE s.vendor_id = :vendor AND s.date >= :since AND s.date <= :until
 GROUP BY s.option_id
@@ -54,6 +68,7 @@ GROUP BY s.option_id
 _ATTRS_SQL = """
 SELECT option_id, is_oos, rating_count, rating_score, brand_name, category_path, attrs_observed_at
 FROM coupang_rocket_option_sku
+WHERE vendor_id = :vendor OR vendor_id IS NULL
 """
 
 
@@ -119,28 +134,34 @@ def compute_rocket_1p_funnel(
             "rating_count": _i(r[2]),
             # 리뷰가 0건이면 평점은 **모르는 값**이다(0점이 아니다) — 0.0으로 그리면 최악의
             #   상품처럼 보인다. 신상품이 그 자리에 앉는다.
-            "rating_score": None if (r[3] is None or not r[2]) else str(r[3]),
+            # ★리뷰 0건이면 평점은 모름(0점 아님). 단 `not r[2]`는 None도 True라
+            #   "리뷰수 미관측 + 평점 관측"까지 버렸다 → r[2] == 0만 걸러낸다(적대 리뷰 P2).
+            "rating_score": None if (r[3] is None or r[2] == 0) else str(r[3]),
             "brand_name": r[4],
             "category_path": r[5],
             "attrs_observed_at": None if r[6] is None else str(r[6]),
         }
-        for r in db.execute(text(_ATTRS_SQL)).fetchall()
+        for r in db.execute(text(_ATTRS_SQL), {"vendor": vendor}).fetchall()
     }
 
     options: list[dict] = []
     t_visitors = t_pv = t_orders = t_qty = 0
+    # 비율용 짝 합계 — 위 SQL 주석 참조(지지집합을 맞춘다).
+    t_qty_with_orders = t_visitors_with_pv = 0
     t_revenue = ZERO
     missing_days = 0
     for (option_id, sku_id, name, visitors, pv, orders, qty, revenue,
-         days, miss_pv, miss_orders) in rows:
+         days, miss_days, qty_with_orders, visitors_with_pv) in rows:
         v_i, pv_i, o_i = _i(visitors), _i(pv), _i(orders)
         q_i = int(qty or 0)
         t_visitors += v_i or 0
         t_pv += pv_i or 0
         t_orders += o_i or 0
         t_qty += q_i
+        t_qty_with_orders += int(qty_with_orders or 0)
+        t_visitors_with_pv += int(visitors_with_pv or 0)
         t_revenue += Decimal(str(revenue or 0))
-        missing_days += int(miss_pv or 0)
+        missing_days += int(miss_days or 0)
         options.append({
             "option_id": str(option_id),
             "sku_id": sku_id,
@@ -150,15 +171,19 @@ def compute_rocket_1p_funnel(
             "orders": o_i,
             "qty": q_i,
             "consumer_revenue": str(Decimal(str(revenue or 0))),
+            # ★아래 세 비율은 전부 **분자·분모의 지지집합을 맞춰** 낸다(적대 리뷰 P1).
+            #   pv가 없는 날의 visitors, orders가 없는 날의 qty는 상대가 없으므로 제외한다 —
+            #   안 그러면 "온전한 분자 ÷ 부분 분모"가 되어 값이 조용히 부풀거나 쪼그라든다.
             # 탐색 깊이 — 한 방문자가 상세를 몇 번 봤나.
-            "views_per_visitor": _s(_rate(pv_i, v_i)),
+            "views_per_visitor": _s(_rate(pv_i, _i(visitors_with_pv))),
             # 구매전환율 — 쿠팡 화면의 「구매전환율」과 같은 정의(주문/조회).
+            #   pv·orders는 함께 결손나므로 이건 원래부터 짝이 맞았다.
             "cvr": _s(_rate(o_i, pv_i)),
             # 개당 구매수 — 한 주문에 몇 개를 담았나.
-            "units_per_order": _s(_rate(q_i, o_i)),
+            "units_per_order": _s(_rate(_i(qty_with_orders), o_i)),
             "days": int(days or 0),
-            # 며칠치가 빠졌는지 — 합계가 온전한지 판단할 근거.
-            "days_missing": int(miss_pv or 0) + int(miss_orders or 0),
+            # 며칠치가 빠졌는지 — 합계가 온전한지 판단할 근거(정의 하나로 통일).
+            "days_missing": int(miss_days or 0),
             **attrs.get(str(option_id), {
                 "is_oos": None, "rating_count": None, "rating_score": None,
                 "brand_name": None, "category_path": None, "attrs_observed_at": None,
@@ -185,9 +210,10 @@ def compute_rocket_1p_funnel(
             "orders": t_orders,
             "qty": t_qty,
             "consumer_revenue": str(t_revenue),
-            "views_per_visitor": _s(_rate(t_pv, t_visitors)),
+            # 옵션 행과 **같은 규칙** — 분자·분모의 지지집합을 맞춘다(적대 리뷰 P1).
+            "views_per_visitor": _s(_rate(t_pv, t_visitors_with_pv)),
             "cvr": _s(_rate(t_orders, t_pv)),          # ★Σ주문/Σ조회 — 일별 평균이 아니다
-            "units_per_order": _s(_rate(t_qty, t_orders)),
+            "units_per_order": _s(_rate(t_qty_with_orders, t_orders)),
         },
         # 판정 기준을 숨기지 않는다 — 숨은 임계로 나눈 분류는 사실이 아니라 의견이다.
         "thresholds": {
@@ -199,10 +225,17 @@ def compute_rocket_1p_funnel(
                     f"{min_page_views}회 미만인 옵션은 표본이 얕아 판정하지 않는다(low_sample).",
         },
         "coverage": {
+            # ★단위는 '일'이 아니라 **옵션×일**이다(예전 라벨이 "일"이라 총계와 행이 같은 말로
+            #   다른 것을 세는 것처럼 보였다). 정의는 옵션 행의 days_missing과 **같다**.
             "option_days_missing_metrics": missing_days,
             "note": "S1(2026-08-06) 이전에 수집된 행은 조회·주문이 없다. 그런 날이 섞이면 "
-                    "합계가 부분값이 되어 전환율이 이유 없이 튄다 — 그래서 세어 둔다.",
+                    "합계가 부분값이 되어 비율이 이유 없이 튄다 — 그래서 세어 둔다. "
+                    "★단, 이 카운터는 **존재하는 행의 빈 컬럼**만 센다. 그 날 행이 통째로 "
+                    "없는 결손은 원리적으로 안 잡히므로 freshness.days_no_data로 따로 본다.",
         },
+        # ★★날짜 축 결손·신선도(2026-08-06 적대 리뷰 P1). 위 카운터로는 "행 자체가 없음"을
+        #   감지할 수 없는데 예전 화면은 그 상태를 "결손 없음"이라고 **단언**했다.
+        "freshness": _window_freshness(db, date_from, date_to, vendor),
         "option_count": len(options),
         "shown": len(shown),
         "options": shown,
