@@ -30,6 +30,11 @@ w = lambda n: f"{n:,}"
 def blk(L):
     return len(L), len({r["발주번호"] for r in L}), sum(int(r["미정산금액"]) for r in L)
 
+months = list(csv.DictReader(open(SC / 'ech4_monthly.csv', encoding='utf-8')))
+month_head = ''.join(f'<th>{m["month"][2:]}</th>' for m in months)
+month_rate = ''.join(('<td class="n hi"><b>' if float(m['rate'])>=10 else '<td class="n">')
+                     + (f"{float(m['rate']):.0f}%" if float(m['rate']) else '0')
+                     + ('</b></td>' if float(m['rate'])>=10 else '</td>') for m in months)
 top = centers[:4]
 bot = centers[-3:]
 tot_conf = sum(int(c["conf"]) for c in centers)
@@ -39,7 +44,9 @@ center_rows = "".join(
     f'<tr class="hi"><td>{c["center"]}</td><td class="n">{int(c["conf"]):,}</td>'
     f'<td class="n">{int(c["gap"]):,}</td><td class="n"><b>{c["rate"]}%</b></td></tr>'
     for c in top
-) + '<tr><td colspan="4" style="text-align:center;color:#777">… (중간 15개 센터 1.5%~4.5%) …</td></tr>' + "".join(
+) + (f'<tr><td colspan="4" style="text-align:center;color:#777">… (중간 {len(centers)-7}개 센터 '
+       f'{min(float(c["rate"]) for c in centers[4:-3]):.2f}%~{max(float(c["rate"]) for c in centers[4:-3]):.2f}%) …'
+       f'</td></tr>') + "".join(
     f'<tr><td>{c["center"]}</td><td class="n">{int(c["conf"]):,}</td>'
     f'<td class="n">{int(c["gap"]):,}</td><td class="n">{c["rate"]}%</td></tr>'
     for c in bot
@@ -77,7 +84,7 @@ HTML = f"""
 <div>당사가 납품 가능으로 확정하고 발송한 물량 중 <b>귀사 입고 원장에 기록되지 않은 수량</b>이 누적돼
 있습니다. 아래 두 가지를 요청드립니다.</div>
 <ol>
-<li><b>센터별 결손율 편차의 원인 회신</b> — 동일한 출고 절차인데 도착 센터에 따라 결손율이 최대 약 70배 차이납니다(§5).</li>
+<li><b>이천4 센터의 입고 처리 절차 확인 및 회신</b> — 동일한 출고 절차인데 이천4의 결손율이 전체 평균의 8.6배입니다(§5).</li>
 <li>확인 후 <b>미입고분 {w(g_amt[A]+g_amt[B])}원(부가세 포함)의 정산</b></li>
 </ol>
 <div class="box"><b>먼저 확인 부탁드립니다 — 「발주리스트」의 계산서 「정산완료」 표시에 대하여.</b><br>
@@ -131,20 +138,30 @@ HTML = f"""
     <td class="n">대상 104박스 중 <b>95박스는 동봉된 다른 SKU가 정상 입고</b>(17,477개 중 16,234개)</td></tr>
 </table>
 
-<h2>5. ★센터별 결손율 — 동일 출고 절차, 도착지에 따라 약 70배 차이</h2>
-<div>전 기간 발주를 도착 센터별로 「당사 납품확인 수량 대비 실제 입고」로 집계했습니다(누적 1,000개 이상 {len(centers)}개 센터).</div>
+<h2>5. ★센터별 결손율 — 이천4 센터가 전체 평균의 8.6배</h2>
+<div><b>입고가 완결된 발주(상태 「거래명세서확인」 계열)만</b> 도착 센터별로 「당사 납품확인 수량 대비
+실제 입고」로 집계했습니다(누적 1,000개 이상 {len(centers)}개 센터). 진행 중인 최근 발주는 아직 입고가
+끝나지 않아 결손과 구분되지 않으므로 제외했습니다.</div>
 <table>
 <tr><th>센터</th><th>납품확인 수량</th><th>미입고</th><th>결손율</th></tr>
 {center_rows}
 </table>
-<div>당사의 포장·출고는 센터와 무관하게 동일한 인력·절차로 이루어집니다. 따라서 <b>도착 센터에 따라
-결손율이 {bot[-1]['rate']}%에서 {top[0]['rate']}%까지 벌어지는 현상은 출고 측 원인으로 설명되지 않습니다.</b>
-특히 <b>{top[0]['center']}·{top[1]['center']}·{top[2]['center']}</b> 3개 센터의 입고 처리 절차를 우선 확인해 주시기 바랍니다.</div>
+<div>당사의 포장·출고는 센터와 무관하게 동일한 인력·절차로 이루어집니다. 그럼에도 <b>이천4는 {top[0]['rate']}%로
+2위 {top[1]['center']}({top[1]['rate']}%)의 약 4.4배, 전체 평균 {tot_gap/tot_conf*100:.2f}%의 8.6배</b>입니다.
+도착 센터에 따라 포장 정확도가 달라질 수는 없으므로, 원인은 입고 처리 측에 있다고 보는 것이 자연스럽습니다.</div>
+<table>
+<tr><th>이천4 발주월</th>{month_head}</tr>
+<tr><td>결손율</td>{month_rate}</tr>
+</table>
+<div class="note">특정 시기에 집중된 것이 아니라 <b>2025-07 ~ 2026-06에 걸쳐 간헐적으로 재발</b>합니다
+(2025-09~2026-01 다섯 달은 결손 0). 일회성 사고가 아니라 상시 절차의 문제로 보이므로,
+기간 단위가 아닌 <b>이천4 입고 처리 절차 자체</b>에 대한 확인을 요청드립니다.</div>
 
 <h2>6. 첨부</h2>
 <div class="note" style="font-size:8.6pt;color:#111">
 <b>01_미입고내역_정산명세대조_20260806.csv</b> — {len(rows)}라인 전체(발주번호·물류센터·SKU·발송수량·<b>쿠팡정산수량</b>·계산서번호·지급일·송장번호·집하/도착/하차 시각) &nbsp;|&nbsp;
-<b>02_센터별_결손율_20260806.csv</b> &nbsp;|&nbsp;
+<b>02_센터별_결손율_20260806.csv</b> — 완결 발주 기준 {len(centers)}개 센터 &nbsp;|&nbsp;
+<b>03_이천4_월별_결손율_20260806.csv</b> &nbsp;|&nbsp;
 <b>A_하차확인_*.pdf / B_*.pdf</b> — 쉽먼트별 내역서·라벨 원본</div>
 """
 
