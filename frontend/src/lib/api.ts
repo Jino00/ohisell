@@ -1700,6 +1700,12 @@ export interface NaverSalesSummaryData {
   sa_conv_revenue: string; sa_ad_spend: string; sa_roas: string | null;
   sa_conv_from: string | null; sa_conv_to: string | null;
   fee_settled_lines: number; fee_est_lines: number;  // 실측/예상 수수료 라인 수 (D-6)
+  // ★원가 미상 투명화 — 요약 이익은 미상분 원가가 **빠진 채** 계산된다(그만큼 과대 가능).
+  //   미상은 두 종류이고 조치가 다르다: unmapped=매핑을 이어야 / zero_cost=원가를 입력해야.
+  cost_unknown_products?: number;
+  cost_unknown_revenue?: string;    // 그 상품들의 공급가 매출
+  cost_unknown_unmapped?: number;
+  cost_unknown_zero_cost?: number;
 }
 
 /** 오늘(days=0) 광고비의 출처. 다른 기간에선 null.
@@ -1728,9 +1734,15 @@ export interface NaverSalesSummary {
 export interface NaverSalesProductRow {
   product_name: string;
   platform_id: string;
-  revenue: string; fee: string; cost: string;  // 공급가(VAT 제외) 기준
+  revenue: string; fee: string;
+  // ★원가를 모르면 원가·이익·이익률이 전부 null이다 — «모름»을 0원으로 계산하지 않는다.
+  //   (종전엔 0원 원가로 접혀 이익률 94~96%가 나왔다. 셋 중 하나라도 숫자로 남기면 그 카드가
+  //    나머지를 부정한다 — 훑는 눈에는 큰 숫자가 이긴다.)
+  cost: string | null;
+  cost_known?: boolean;
+  cost_unknown_kind?: "unmapped" | "zero_cost" | null;
   fee_actual?: boolean;  // 수수료가 전부 정산 실측이면 true (D-6)
-  profit: string; profit_rate: string | null;
+  profit: string | null; profit_rate: string | null;
 }
 
 export function fetchNaverSalesSummary(days: number): Promise<NaverSalesSummary> {

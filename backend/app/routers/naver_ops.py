@@ -313,6 +313,25 @@ def sales_summary(
         if chosen:
             cost_map[pid] = _f(chosen)
 
+    # ★«원가를 모른다»와 «원가가 0원이다»를 구분한다(2026-08-06).
+    #   종전에는 둘 다 `cost_map.get(pid, 0)` 으로 접혀 **0원짜리 원가**가 됐고, 그 결과
+    #   원가 미상 상품이 이익률 94~96%로 표시됐다(30일 실측 6개·매출 956,545원, 원가 있는
+    #   상품 평균 원가율은 22.1% — 이익이 약 21만원 과대). 오늘 광고비에 세운 원칙
+    #   («모름»을 0으로 계산하지 않는다)의 정확한 미적용 케이스였다.
+    #   ★추정으로 채우지 않는다 — 평균 원가율을 대입하면 화면은 그럴듯해지고 근거는 사라진다.
+    #   ★두 종류를 나누는 이유: Jino가 할 조치가 다르다.
+    #     unmapped  = product_channel_mapping에 **활성** 행이 없음 → **매핑을 이어야** 한다
+    #                 (비활성 매핑만 있는 경우도 여기 — 원가가 안 붙는다는 결과가 같다)
+    #                 (원가만 채워선 안 붙는다 — 2026-08-04 실측: 원가 미상의 97.5%가 이쪽)
+    #     zero_cost = 매핑은 있는데 product_master.cost_price가 0/NULL → **원가를 입력**해야 한다
+    #   선례와 같은 의미론: profit_calculator의 `unmapped_revenue`(원가 미상 매출 별도 집계).
+    #   쿠팡 프로모션 손익도 같은 두 사유("매핑 없음" / "cost_price 없음")를 나눠 낸다.
+    cost_unknown_kind: dict[str, str] = {}
+    for pid_u in all_pids:
+        if pid_u in cost_map:
+            continue
+        cost_unknown_kind[pid_u] = "zero_cost" if pid_u in cost_candidates else "unmapped"
+
     # ── 3b. 실측 수수료 맵 (건별 정산 settle/case, D-6) ────────────────
     # (order_id, product_id) → 실측 판매자부담 수수료(양수). PROD_ORDER만, 수수료 음수→부호반전.
     # 같은 (order_id, product_id)에 productOrderId가 여럿이면 group_by sum으로 합산(라이브 표본
@@ -370,8 +389,10 @@ def sales_summary(
         else:
             fee = _f(commission)
             est_lines += 1
-        unit_cost = cost_map.get(pid_s, _Z)
-        cost      = unit_cost * qty_
+        # 원가 미상이면 0을 더하지 않는 것이 아니라 **모르는 채로 둔다** — 합계는 종전대로
+        # 미상분을 뺀 값이지만(아래 요약 배너가 그 사실을 말한다), 상품별 이익은 «모름»이 된다.
+        unit_cost = cost_map.get(pid_s)
+        cost      = (unit_cost * qty_) if unit_cost is not None else _Z
 
         total_rev           += rev
         total_fee           += fee
@@ -397,20 +418,35 @@ def sales_summary(
     # 상품별 = 순수 상품 손익(공급가): (상품매출 − 수수료 − 원가) ÷ 1.1.
     # 고객배송비·한진물류비·광고비는 배송/계정 단위라 상품 미배분 → 요약에만 반영.
     by_product = []
+    unknown_supply_rev = _Z          # 원가 미상 상품들의 공급가 매출(요약 배너용)
+    unknown_unmapped = unknown_zero = 0
     for pid_s, acc in prod_acc.items():
         rev_s  = acc["rev"] / _VAT_DIVISOR        # 공급가
         fee_s  = acc["fee"] / _VAT_DIVISOR
         cost_s = acc["cost"] / _VAT_DIVISOR
         profit = rev_s - fee_s - cost_s
+        # ★원가를 모르면 그 상품의 이익도 모른다 — 원가·이익·이익률 셋 다 None으로 낸다.
+        #   셋 중 하나라도 숫자로 남기면 그 카드가 나머지를 부정한다(오늘 광고비 카드와 같은 이유:
+        #   훑는 눈에는 큰 숫자가 이긴다). 매출·수수료는 실측이므로 그대로 낸다.
+        unknown_kind = cost_unknown_kind.get(pid_s)
+        if unknown_kind is not None:
+            unknown_supply_rev += rev_s
+            if unknown_kind == "unmapped":
+                unknown_unmapped += 1
+            else:
+                unknown_zero += 1
         by_product.append({
             "product_name":  acc["name"],
             "platform_id":   pid_s,
             "revenue":       str(rev_s.quantize(_Q2)),
             "fee":           str(fee_s.quantize(_Q2)),
             "fee_actual":    acc["est"] == 0 and acc["settled"] > 0,  # 전부 실측이면 True
-            "cost":          str(cost_s.quantize(_Q2)),
-            "profit":        str(profit.quantize(_Q2)),
-            "profit_rate":   str((profit / rev_s * 100).quantize(_Q2)) if rev_s else None,
+            "cost":          None if unknown_kind else str(cost_s.quantize(_Q2)),
+            "cost_known":    unknown_kind is None,
+            "cost_unknown_kind": unknown_kind,   # "unmapped" | "zero_cost" | None
+            "profit":        None if unknown_kind else str(profit.quantize(_Q2)),
+            "profit_rate":   None if (unknown_kind or not rev_s)
+                             else str((profit / rev_s * 100).quantize(_Q2)),
         })
 
     by_product.sort(key=lambda x: -Decimal(x["revenue"]))
@@ -452,6 +488,14 @@ def sales_summary(
             "sa_conv_to":      sa_conv_to,
             "fee_settled_lines": settled_lines,   # 실측 수수료 적용 주문라인 수 (D-6)
             "fee_est_lines":     est_lines,       # 주문API 예상 수수료 폴백 라인 수
+            # ★원가 미상 투명화 — 요약 이익은 **계속 계산한다**(미상분 원가가 빠진 채).
+            #   왜 요약까지 「—」로 만들지 않나: 미상은 매출의 2.5%인데 그 때문에 나머지 97.5%를
+            #   못 보게 하면 화면이 쓸모없어진다. 대신 얼마나 과대일 수 있는지를 배너가 말한다.
+            #   ★과대 금액을 추정치로 내지 않는다 — 미상 매출을 그대로 내고 판단은 사람이 한다.
+            "cost_unknown_products": unknown_unmapped + unknown_zero,
+            "cost_unknown_revenue":  str(unknown_supply_rev.quantize(_Q2)),  # 공급가
+            "cost_unknown_unmapped": unknown_unmapped,   # 매핑을 이어야 하는 상품 수
+            "cost_unknown_zero_cost": unknown_zero,      # 원가를 입력해야 하는 상품 수
         },
         "by_product": by_product,
     }

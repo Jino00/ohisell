@@ -781,7 +781,11 @@ export default function NaverOps() {
       av = a.product_name; bv = b.product_name;
       return sortDir === "asc" ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av));
     }
-    av = Number(a[sortKey] ?? 0); bv = Number(b[sortKey] ?? 0);
+    // ★«모름»(null)은 방향과 무관하게 항상 끝으로 — 0으로 접으면 원가 미상 상품이
+    //   "이익 0원"인 것처럼 정렬 한가운데 섞여 들어간다(모름을 0으로 읽는 그 결함의 재발).
+    const an = a[sortKey], bn = b[sortKey];
+    if (an == null || bn == null) return an == null ? (bn == null ? 0 : 1) : -1;
+    av = Number(an); bv = Number(bn);
     return sortDir === "asc" ? av - bv : bv - av;
   });
 
@@ -888,6 +892,21 @@ export default function NaverOps() {
         </div>
       )}
 
+      {/* ★원가 미상 표면화 — 요약 이익은 미상분 원가가 **빠진 채** 계산돼 그만큼 과대다.
+          왜 요약까지 「—」로 만들지 않나: 미상은 보통 매출의 몇 %인데 그 때문에 나머지를 못 보게
+          하면 화면이 쓸모없어진다. 대신 얼마짜리 매출이 원가 없이 계산됐는지를 여기서 말한다.
+          ★과대 금액을 추정해 적지 않는다 — 평균 원가율을 곱하면 그럴듯해지고 근거는 사라진다. */}
+      {(s?.cost_unknown_products ?? 0) > 0 && (
+        <div className="mb-3 px-3 py-2 rounded border border-amber-300 bg-amber-50 text-xs text-amber-800">
+          ⚠️ <b>원가 미상 {s!.cost_unknown_products}개 상품</b>(매출 {won(s!.cost_unknown_revenue)})의
+          이익·이익률은 <b>«모름»</b>으로 비워 뒀습니다. 이 상품들의 원가가 요약에서 빠져 있으므로
+          <b> 위 요약 이익은 그만큼 과대</b>입니다.
+          {(s!.cost_unknown_unmapped ?? 0) > 0 && <> · 상품 매핑 필요 <b>{s!.cost_unknown_unmapped}개</b></>}
+          {(s!.cost_unknown_zero_cost ?? 0) > 0 && <> · 원가 입력 필요 <b>{s!.cost_unknown_zero_cost}개</b></>}
+          <> · 어느 상품인지는 아래 표에 표시됩니다.</>
+        </div>
+      )}
+
       {/* 디스플레이(GFA·ADVoost) 광고비 신선도 배지 + 수동 보정 업로드 */}
       {(() => {
         // ★판정은 **수집기**로 한다(2026-08-06 적대 리뷰). 데이터(MAX(ad_date))로 판정하면
@@ -963,7 +982,14 @@ export default function NaverOps() {
                 : "정산 실측+주문시점 예상"
             }
           />
-          <SummaryCard label="원가" value={won(s.cost)} />
+          {/* 원가 카드도 미상 사실을 스스로 말한다 — 배너를 못 본 사람이 이 숫자를 전부라고 읽는다. */}
+          <SummaryCard
+            label="원가"
+            value={won(s.cost)}
+            sub={(s.cost_unknown_products ?? 0) > 0
+              ? `원가 미상 ${s.cost_unknown_products}개 제외 — 실제 원가는 이보다 큼`
+              : undefined}
+          />
           <SummaryCard
             label="광고비"
             // ★pending이면 **큰 숫자 자체가 «모름»**이어야 한다. 종전엔 값이 "0원"이고 회색
@@ -1066,6 +1092,13 @@ export default function NaverOps() {
                 <tr key={i} className="hover:bg-gray-50">
                   <td className="px-3 py-2 max-w-xs">
                     <div className="text-gray-900 truncate" title={r.product_name}>{r.product_name}</div>
+                    {/* ★원가 미상은 이유까지 말한다 — 「—」만 보면 무엇을 해야 할지 모른다.
+                        두 종류의 조치가 다르다: 매핑을 잇는 것 vs 원가를 입력하는 것. */}
+                    {r.cost_known === false && (
+                      <div className="mt-0.5 text-[11px] text-amber-700">
+                        원가 미상 — {r.cost_unknown_kind === "unmapped" ? "상품 매핑 필요" : "원가 입력 필요"}
+                      </div>
+                    )}
                   </td>
                   <td className="px-3 py-2 text-right tabular-nums">{won(r.revenue)}</td>
                   <td className={`px-3 py-2 text-right tabular-nums font-medium ${profitColor(r.profit)}`}>{won(r.profit)}</td>
@@ -1078,7 +1111,8 @@ export default function NaverOps() {
             * 모든 금액은 <b>공급가(부가세 제외)</b> 기준 — 부가세는 통과항목이라 매출·비용 모두 ÷1.1로 통일<br />
             * 요약 순이익 = (상품매출 + 고객배송비 − 수수료 − 원가 − 한진물류비) ÷ 1.1 − 광고비<br />
             * 상품별 이익 = (상품매출 − 수수료 − 원가) ÷ 1.1 · 배송·물류·광고비는 배송/계정 단위라 요약에만 반영<br />
-            * 수수료 = 정산 완료분은 네이버 건별정산 <b>실측</b>, 미정산 최근 주문은 주문시점 <b>예상</b>(하이브리드)
+            * 수수료 = 정산 완료분은 네이버 건별정산 <b>실측</b>, 미정산 최근 주문은 주문시점 <b>예상</b>(하이브리드)<br />
+            * 원가를 모르는 상품은 이익·이익률을 <b>「—」</b>로 비운다 — 0원으로 계산하면 이익률이 90%대로 나온다
           </div>
         </div>
       )}
