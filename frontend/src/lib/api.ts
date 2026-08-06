@@ -1709,6 +1709,9 @@ export interface AdBasis {
   kind: "today_snapshot" | "today_no_snapshot";
   as_of: string | null;
   scope: "search_only";
+  // ★NAVER가 당일치를 아직 아무것도 안 준 구간(실측: 자정~02시경 슬롯이 전부 0). 이때의 0은
+  //   "0원"이 아니라 "모름"이고, 그대로 이익에 넣으면 이익이 과대로 보인다.
+  pending?: boolean;
 }
 
 export interface NaverSalesSummary {

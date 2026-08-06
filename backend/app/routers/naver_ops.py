@@ -176,24 +176,38 @@ def sales_summary(
             .scalar()
         )
         if snap_at:
-            total_ad_spend = _f(
-                db.query(func.sum(NaverHourlySnapshot.cost))
+            snap_row = (
+                db.query(
+                    func.sum(NaverHourlySnapshot.cost),
+                    func.sum(NaverHourlySnapshot.imp),
+                )
                 .filter(
                     NaverHourlySnapshot.ad_date == dfrom,
                     NaverHourlySnapshot.snapshot_at == snap_at,
                 )
-                .scalar()
+                .one()
             )
+            total_ad_spend = _f(snap_row[0])
+            snap_imp = int(snap_row[1] or 0)
+            # ★스냅샷이 **있는데 전부 0**인 구간이 매일 있다 — NAVER /stats 당일치가 자정 직후엔
+            #   아직 아무 값도 주지 않는다(실측 5일 전수 2026-08-02~06: 0시·1시 슬롯의
+            #   cost·clk·imp가 모두 0이고, 2시 슬롯에서 2.5~3만원이 한꺼번에 등장).
+            #   이때 0을 확정 실측처럼 내면 이익이 과대로 보인다 — 어제치를 물고 오던 결함
+            #   (교훈 #151)과 같은 종류가 새벽 구간에만 남아 있던 셈이다.
+            #   0인지 미집계인지 **구분할 방법이 없으므로 구분 불가를 그대로 말한다**(PR #225 방침:
+            #   모르는 것을 아는 척하지 않는다). 캠페인을 실제로 전부 끈 날도 같은 문장이 참이다.
             ad_basis = {
                 "kind": "today_snapshot",
                 "as_of": snap_at.isoformat(timespec="seconds"),
                 "scope": "search_only",   # 디스플레이(GFA·ADVoost)는 실차감이라 당일치가 없다
+                "pending": bool(total_ad_spend == 0 and snap_imp == 0),
             }
         else:
             # 자정~첫 스냅샷 사이. **어제치로 되돌리지 않는다** — 모르는 것을 아는 척하는 게
             # 바로 이 결함의 원인이었다. 0으로 두고 "아직 없음"을 화면이 말하게 한다.
             total_ad_spend = _Z
-            ad_basis = {"kind": "today_no_snapshot", "as_of": None, "scope": "search_only"}
+            ad_basis = {"kind": "today_no_snapshot", "as_of": None, "scope": "search_only",
+                        "pending": True}
     else:
         total_ad_spend = _f(
             db.query(func.sum(AdCost.ad_spend))

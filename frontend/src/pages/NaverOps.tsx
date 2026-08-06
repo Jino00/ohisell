@@ -860,7 +860,9 @@ export default function NaverOps() {
         ) : data && (
           <span className="text-xs text-gray-400">
             {data.period.from} ~ {data.period.to}
-            {data.ad_basis?.as_of && ` (광고비 ${hhmm(data.ad_basis.as_of)} 기준)`}
+            {data.ad_basis?.pending
+              ? " (광고비 집계 전)"
+              : data.ad_basis?.as_of ? ` (광고비 ${hhmm(data.ad_basis.as_of)} 기준)` : ""}
             {data.ad_ref_date && ` (광고비 기준일: ${data.ad_ref_date})`}
           </span>
         )}
@@ -949,10 +951,15 @@ export default function NaverOps() {
               // 오늘은 **검색광고 당일 누적**이다(디스플레이는 실차감이라 당일치가 없다).
               // 기준시각을 반드시 같이 낸다 — 종전엔 어제 전일치를 넣고 라벨만 달아서,
               // 이익 카드가 「오늘 매출 − 어제 광고비」인 줄 모르고 읽혔다.
+              // ★"매시 05분 갱신"은 우리 수집 주기일 뿐이다 — NAVER가 주는 당일 값 자체가
+              //   실측상 시간 단위로만 바뀐다(2026-08-06 16:05·16:43·16:46·19:05·19:26·19:39
+              //   관측이 원 단위까지 동일). 공식 문서엔 갱신 주기 언급이 없어 "실측"으로 적는다.
               data?.ad_basis
-                ? data.ad_basis.kind === "today_snapshot"
-                  ? `검색광고만(당일 누적) · ${hhmm(data.ad_basis.as_of)} 기준(매시 05분 갱신) · 디스플레이는 익일 확정`
-                  : "오늘 수집 전 — 첫 스냅샷(매시 05분) 후 표시"
+                ? data.ad_basis.pending
+                  ? "네이버 당일 집계 전 — 0원이 아니라 «모름»(실측: 자정~02시경)"
+                  : data.ad_basis.kind === "today_snapshot"
+                    ? `검색광고만(당일 누적) · ${hhmm(data.ad_basis.as_of)} 기준 · 매시 05분 수집(네이버도 시간 단위 갱신·실측) · 디스플레이는 익일 확정`
+                    : "오늘 수집 전 — 첫 스냅샷(매시 05분) 후 표시"
                 : "검색+디스플레이 · 상품별 미배분"
             }
           />
@@ -964,7 +971,12 @@ export default function NaverOps() {
           <SummaryCard
             label="이익"
             value={won(s.profit)}
-            sub={data?.ad_basis ? "광고비=검색 당일 누적(진행 중)" : undefined}
+            sub={
+              // pending이면 광고비가 빠진 이익이다 — 부호까지 뒤집힐 수 있으므로 카드가 직접 말한다.
+              data?.ad_basis?.pending
+                ? "⚠️ 광고비 미집계 구간 — 이익 과대"
+                : data?.ad_basis ? "광고비=검색 당일 누적(진행 중)" : undefined
+            }
             highlight={profitN >= 0 ? "blue" : "red"}
           />
           <SummaryCard

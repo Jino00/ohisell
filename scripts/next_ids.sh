@@ -57,14 +57,18 @@ echo "  교훈 #${next_lesson}   (origin/main=${main_lesson} · 내 브랜치=${
 #   ⚠️커버 범위는 부분적이다(실측): `#### #153`·`## 153)`는 잡고, `## [153]`·`## 교훈 153`은
 #   못 잡는다 — 후자까지 잡으려면 `^#+.*[0-9]`가 되어 날짜 든 제목마다 거짓 경고가 난다.
 #   #140→#152 형식 변경(=실제로 3세션을 이월시킨 그 결함)은 이 검사에 걸린다.
+# 후보 패턴은 **제목 모양**까지 요구한다 — 숫자 뒤에 구분자나 줄끝이 와야 한다.
+# 그냥 `^#+ *#?[0-9]`로 두면 본문의 `#151에서 고친 것은…`처럼 참조로 시작하는 줄이 걸려
+# 거짓 경고가 난다(도입 직후 실제로 걸렸다). 시끄러운 가드는 읽히지 않으므로 그게 더 나쁘다.
+_LESSON_CAND_RE='^#+ *#?[0-9]{1,3}([ .:)—-]|$)'
 strict_n=$(grep -cE "$_LESSON_RE" "$LESSONS" 2>/dev/null || true)
-loose_n=$(grep -cE '^#+ *#?[0-9]' "$LESSONS" 2>/dev/null || true)
+loose_n=$(grep -cE "$_LESSON_CAND_RE" "$LESSONS" 2>/dev/null || true)
 : "${strict_n:=0}"; : "${loose_n:=0}"
 if [[ "$loose_n" -gt "$strict_n" ]]; then
   echo
   echo "⚠️  교훈 제목 형식이 바뀐 것 같다 — 인식 ${strict_n}건 / 제목 후보 ${loose_n}건."
   echo "    위 교훈 번호를 믿지 말고 확인할 것:"
-  echo "    grep -nE '^#+ *#?[0-9]' $LESSONS | grep -vE '^[0-9]+:#{2,3} +#?[0-9]{1,3}\\.?( |\$)'"
+  echo "    grep -nE '$_LESSON_CAND_RE' $LESSONS | grep -vE '$_LESSON_RE'"
 fi
 
 behind=$(git rev-list --count HEAD..origin/main 2>/dev/null || echo 0)

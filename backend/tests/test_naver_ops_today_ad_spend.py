@@ -50,10 +50,10 @@ def _yesterday_ad(db, amount: str) -> None:
     db.commit()
 
 
-def _snapshot(db, *, hour: int, cost: int, campaign: str = "cmp-1") -> datetime:
+def _snapshot(db, *, hour: int, cost: int, campaign: str = "cmp-1", imp: int | None = None) -> datetime:
     at = datetime.combine(kst_today(), datetime.min.time()) + timedelta(hours=hour, minutes=5)
     db.add(NaverHourlySnapshot(snapshot_at=at, ad_date=kst_today(), snapshot_hour=hour,
-                               campaign_id=campaign, cost=cost))
+                               campaign_id=campaign, cost=cost, imp=imp))
     db.commit()
     return at
 
@@ -104,6 +104,50 @@ def test_no_snapshot_yet_reports_zero_not_yesterday(db):
     assert out["summary"]["ad_spend"] == "0.00"
     assert out["ad_basis"]["kind"] == "today_no_snapshot"
     assert out["ad_basis"]["as_of"] is None
+
+
+def test_snapshot_of_all_zeros_is_pending_not_a_confirmed_zero(db):
+    """★스냅샷이 있는데 전부 0이면 «모름»이다 — 확정 0원이 아니다.
+
+    실측 5일 전수(2026-08-02~06): NAVER /stats 당일치는 자정 직후 아무 값도 주지 않는다
+    (0시·1시 슬롯의 cost·clk·imp 모두 0 → 2시 슬롯에서 2.5~3만원이 한꺼번에 등장).
+    그 0을 확정 실측처럼 내면 이익이 과대로 보인다 — 어제치를 물고 오던 결함과 같은 종류가
+    새벽 구간에만 남아 있던 셈이다(교훈 #151).
+    """
+    _yesterday_ad(db, "698119")
+    _snapshot(db, hour=1, cost=0, imp=0)
+
+    out = sales_summary(days=0, db=db)
+
+    assert out["summary"]["ad_spend"] == "0.00"          # 어제치로 되돌리지 않는다
+    assert out["ad_basis"]["kind"] == "today_snapshot"
+    assert out["ad_basis"]["pending"] is True
+
+
+def test_nonzero_snapshot_is_not_pending(db):
+    """값이 있으면 pending이 아니다 — 정상 구간에 경고를 띄우면 경고가 무의미해진다."""
+    _snapshot(db, hour=19, cost=506370, imp=66760)
+
+    out = sales_summary(days=0, db=db)
+
+    assert out["ad_basis"]["pending"] is False
+
+
+def test_zero_cost_with_impressions_is_not_pending(db):
+    """노출은 있는데 지출이 0 = 집계는 됐고 실제로 안 쓴 것이다 — «모름»이 아니다."""
+    _snapshot(db, hour=9, cost=0, imp=1200)
+
+    out = sales_summary(days=0, db=db)
+
+    assert out["ad_basis"]["pending"] is False
+
+
+def test_no_snapshot_yet_is_pending(db):
+    """첫 수집 전도 «모름»이다 — 같은 문구 경로를 타야 화면이 갈라지지 않는다."""
+    out = sales_summary(days=0, db=db)
+
+    assert out["ad_basis"]["kind"] == "today_no_snapshot"
+    assert out["ad_basis"]["pending"] is True
 
 
 def test_other_periods_still_use_ad_costs(db):
