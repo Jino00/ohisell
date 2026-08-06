@@ -17,6 +17,7 @@ from app.database import get_db
 from app.services.coupang.intelligence import compute_command_center
 from app.services.coupang.revenue_canonical import compute_canonical_revenue
 from app.services.coupang.revenue_reconcile import reconcile_revenue
+from app.services.coupang.rocket_1p_revenue import compute_rocket_1p_revenue
 from app.services.coupang.rocket_intelligence import compute_rocket_overview
 from app.services.coupang.rocket_promo_pnl import compute_promo_pnl_overview
 from app.services.coupang.rocket_recon import compute_rocket_recon, compute_rocket_recon_sku
@@ -135,6 +136,31 @@ def rocket_overview(
         raise HTTPException(status_code=422, detail="from이 to보다 늦습니다")
     result = compute_rocket_overview(db, dfrom, dto, _ROCKET_VENDOR_ID)
     return _jsonify(result)
+
+
+@router.get("/rocket-1p-revenue")
+def rocket_1p_revenue(
+    from_: str | None = Query(None, alias="from"),
+    to: str | None = Query(None),
+    limit: int = Query(100, ge=1, le=500, description="옵션 표에 실을 최대 행 수(소비자 매출 내림차순)"),
+    db: Session = Depends(get_db),
+):
+    """로켓배송(1P) 매출 두 축 대조 — **소비자 판매가(쿠팡가) ∥ 우리 매출(납품가)**.
+
+    왜 있나(Jino 2026-08-06): 쿠팡 판매분석 화면엔 우리 매출이 없고 우리 종합조망엔 소비자
+    판매가가 없다. 08-04를 두 화면에서 보면 6,536,000원과 3,885,820원이 나오는데 왜 다른지
+    어디서도 확인할 수 없었다. 이 엔드포인트가 두 축을 나란히 놓는다.
+
+    ★★조회 전용이다 — 여기 값은 net_profit·종합조망에 결합되지 않는다(D-CPP-2 불변).
+      소비자 판매가는 **쿠팡의 매출**이지 우리 것이 아니다(1P는 쿠팡이 사입해 자기 가격으로 판다).
+    기본 기간=최근 7일(KST).
+    """
+    today = kst_today()
+    dto = _parse_date(to, today)
+    dfrom = _parse_date(from_, dto - timedelta(days=6))
+    if dfrom > dto:
+        raise HTTPException(status_code=422, detail="from이 to보다 늦습니다")
+    return _jsonify(compute_rocket_1p_revenue(db, dfrom, dto, _ROCKET_VENDOR_ID, limit))
 
 
 @router.get("/rocket-promo-pnl")
