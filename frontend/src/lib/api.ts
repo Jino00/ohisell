@@ -16,6 +16,11 @@ export async function fetchApi<T>(path: string, options?: RequestInit): Promise<
   return (text ? JSON.parse(text) : undefined) as T;
 }
 
+/** 스케줄러 잡 즉시 실행. 「지금 기준」 버튼이 시간별 스냅샷 잡을 당겨 쓴다. */
+export function triggerSchedulerJob(jobId: string): Promise<Record<string, unknown>> {
+  return fetchApi(`/api/scheduler/trigger/${jobId}`, { method: "POST" });
+}
+
 export function syncRealtime(): Promise<Record<string, unknown>> {
   return fetchApi("/api/sync/realtime", { method: "POST" });
 }
@@ -1697,9 +1702,19 @@ export interface NaverSalesSummaryData {
   fee_settled_lines: number; fee_est_lines: number;  // 실측/예상 수수료 라인 수 (D-6)
 }
 
+/** 오늘(days=0) 광고비의 출처. 다른 기간에선 null.
+ *  kind=today_snapshot → 검색광고 당일 누적(as_of 시각 기준) · today_no_snapshot → 아직 없음.
+ *  scope=search_only → 디스플레이(GFA·ADVoost)는 실차감이라 당일치가 없어 빠져 있다. */
+export interface AdBasis {
+  kind: "today_snapshot" | "today_no_snapshot";
+  as_of: string | null;
+  scope: "search_only";
+}
+
 export interface NaverSalesSummary {
   period: { from: string; to: string };
   ad_ref_date: string | null;
+  ad_basis: AdBasis | null;
   summary: NaverSalesSummaryData;
   by_product: NaverSalesProductRow[];
 }

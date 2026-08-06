@@ -22,6 +22,7 @@ from app.database import get_db
 from app.models import (
     AdCost,
     Channel,
+    NaverHourlySnapshot,
     NaverSettlementCase,
     NaverSettlementDaily,
     Order,
@@ -157,27 +158,52 @@ def sales_summary(
     )
 
     # ── 2. 광고비 (기간 총합, 상품별 배분 없음) ──────────────────────
+    # ★오늘(days=0)은 `ad_costs`에 행이 없다 — SA 리포트도 비즈머니 실차감도 D+1이다.
+    #   종전에는 그 자리에 **어제 전일치**를 넣었고(라벨만 "광고비 기준일: 어제"), 그 결과
+    #   이익 카드가 「오늘 매출 − 어제 광고비」가 됐다. 2026-08-06 실측: 매출 871,745원에
+    #   어제 광고비 698,119원이 붙어 −202,434원(−23.2%) 적자로 보였는데, 같은 시각 실제
+    #   당일 누적은 360,731원이라 실제로는 +134,953원 흑자였다 — **부호가 뒤집혔다.**
+    #   당일 누적은 이미 매시간 수집돼 있다(`naver_hourly_snapshot`, /stats datePreset=today).
+    #   교차검증(2026-08-05): 마지막 스냅샷 675,090원 vs ad_costs naver_sa 675,089원 — 같은 축.
     ad_ref_date: str | None = None
+    ad_basis: dict | None = None
     ad_dfrom, ad_dto = dfrom, dto
+
     if days == 0:
-        latest_ad = (
-            db.query(func.max(AdCost.ad_date))
-            .filter(AdCost.channel_id == _NAVER_CHANNEL_ID)
+        snap_at = (
+            db.query(func.max(NaverHourlySnapshot.snapshot_at))
+            .filter(NaverHourlySnapshot.ad_date == dfrom)
             .scalar()
         )
-        if latest_ad:
-            ad_dfrom = ad_dto = latest_ad
-            ad_ref_date = str(latest_ad)
-
-    total_ad_spend = _f(
-        db.query(func.sum(AdCost.ad_spend))
-        .filter(
-            AdCost.channel_id == _NAVER_CHANNEL_ID,
-            AdCost.ad_date >= ad_dfrom,
-            AdCost.ad_date <= ad_dto,
+        if snap_at:
+            total_ad_spend = _f(
+                db.query(func.sum(NaverHourlySnapshot.cost))
+                .filter(
+                    NaverHourlySnapshot.ad_date == dfrom,
+                    NaverHourlySnapshot.snapshot_at == snap_at,
+                )
+                .scalar()
+            )
+            ad_basis = {
+                "kind": "today_snapshot",
+                "as_of": snap_at.isoformat(timespec="seconds"),
+                "scope": "search_only",   # 디스플레이(GFA·ADVoost)는 실차감이라 당일치가 없다
+            }
+        else:
+            # 자정~첫 스냅샷 사이. **어제치로 되돌리지 않는다** — 모르는 것을 아는 척하는 게
+            # 바로 이 결함의 원인이었다. 0으로 두고 "아직 없음"을 화면이 말하게 한다.
+            total_ad_spend = _Z
+            ad_basis = {"kind": "today_no_snapshot", "as_of": None, "scope": "search_only"}
+    else:
+        total_ad_spend = _f(
+            db.query(func.sum(AdCost.ad_spend))
+            .filter(
+                AdCost.channel_id == _NAVER_CHANNEL_ID,
+                AdCost.ad_date >= ad_dfrom,
+                AdCost.ad_date <= ad_dto,
+            )
+            .scalar()
         )
-        .scalar()
-    )
     # 광고비는 네이버 광고 = 공급가(VAT 제외, 세금계산서 별도) → 공급가 통일 시 그대로.
 
     # ── 2b. 택배 물류비 — 물리배송(packageNumber) 1건당 배송방식별 실단가, VAT 포함 ──
@@ -360,6 +386,7 @@ def sales_summary(
     return {
         "period":       {"from": str(dfrom), "to": str(dto)},
         "ad_ref_date":  ad_ref_date,
+        "ad_basis":     ad_basis,
         "summary": {
             "revenue":          str(supply_revenue.quantize(_Q2)),   # 공급가 매출(상품+배송)
             "revenue_vat_incl": str(gross_vat_incl.quantize(_Q2)),   # VAT 포함(소비자 결제) 병기
