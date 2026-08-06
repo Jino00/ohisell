@@ -69,13 +69,38 @@ export function buildPipelineHealthBanner(
   return { summary: parts.join(" · "), detail: parts.join("\n") };
 }
 
-// 대시보드 하위 채널별 운영 패널 (접이식)
-const DASHBOARD_CHILDREN = [
+// 로켓배송(1P) 전용 화면 묶음 — 채널 아래 **한 겹 더** 접힌다 (2026-08-06, Jino).
+//   왜 그룹인가: 셋 다 1P 전용인데 최상위에 흩어져 있었다. 정작 쿠팡 관련 메뉴는 대시보드
+//   밑에 모여 있어 축이 어긋났고, 1P 화면이 늘어날수록 최상위가 지저분해졌다.
+//   ★쿠팡 운영/광고수정과 **같은 층**에 두되 한 겹 접어, 채널(쿠팡·스마트스토어)과
+//     그 안의 판매방식(1P) 그레인이 같은 줄에 섞이지 않게 한다.
+type NavLinkItem = { to: string; label: string; icon: string };
+type NavGroup = { label: string; icon: string; children: NavLinkItem[] };
+
+const ROCKET_1P_GROUP: NavGroup = {
+  label: "쿠팡 로켓배송(1P)",
+  icon: "🚀",
+  children: [
+    { to: "/rocket-recon", label: "발주·정산 대사", icon: "📦" },
+    { to: "/rocket-1p-revenue", label: "매출(소비자가∥납품가)", icon: "💵" },
+    { to: "/rocket-1p-funnel", label: "유입·전환 퍼널", icon: "🔎" },
+  ],
+};
+
+// 대시보드 하위 채널별 운영 패널 (접이식). 항목은 **링크이거나 그룹**이다.
+//   순서가 곧 화면 순서다 — 1P 그룹은 쿠팡 것들 바로 뒤, 스마트스토어 앞.
+const DASHBOARD_CHILDREN: (NavLinkItem | NavGroup)[] = [
   { to: "/coupang-ops", label: "쿠팡 운영", icon: "🔧" },
   // 쿠팡 광고 설정 변경 이력(트랙 coupang-ad-change-log). 조회 전용 — 여기서 광고를 만지지 않는다.
   { to: "/coupang-ad-changes", label: "쿠팡 광고 수정", icon: "📝" },
+  ROCKET_1P_GROUP,
   { to: "/naver-ops", label: "스마트스토어", icon: "🛒" },
 ];
+
+/** 링크 항목인가(그룹이 아니라). 그룹은 `to`가 없고 `children`을 갖는다. */
+function isLink(c: NavLinkItem | NavGroup): c is NavLinkItem {
+  return "to" in c;
+}
 
 // 대시보드 그룹 다음에 오는 최상위 메뉴들
 const NAV_ITEMS = [
@@ -83,9 +108,7 @@ const NAV_ITEMS = [
   { to: "/orders", label: "주문 관리", icon: "📋" },
   { to: "/products", label: "상품 관리", icon: "📦" },
   { to: "/product-connection-map", label: "상품 연결맵", icon: "🔗" },
-  { to: "/rocket-recon", label: "로켓 발주·정산 대사", icon: "🚀" },
-  { to: "/rocket-1p-revenue", label: "로켓1P 매출(소비자가∥납품가)", icon: "💵" },
-  { to: "/rocket-1p-funnel", label: "로켓1P 유입·전환 퍼널", icon: "🔎" },
+  // 로켓1P 화면 3개는 ROCKET_1P_GROUP(대시보드 하위)으로 옮겼다 — 최상위에서 제거.
   { to: "/inventory", label: "재고 관리", icon: "🏭" },
   { to: "/settlements", label: "정산 관리", icon: "💰" },
   { to: "/ad-report", label: "광고 리포트", icon: "📈" },
@@ -101,8 +124,13 @@ function linkClass({ isActive }: { isActive: boolean }) {
 
 export default function Layout() {
   const location = useLocation();
-  const childActive = DASHBOARD_CHILDREN.some((c) => location.pathname === c.to);
+  // ★1P 하위그룹도 "채널 메뉴 안"이다 — 여기에 안 넣으면 /rocket-1p-funnel로 딥링크했을 때
+  //   메뉴가 접힌 채 열려 현재 위치를 알 수 없다(2026-08-06 그룹 신설 시 같이 잡음).
+  const rocketActive = ROCKET_1P_GROUP.children.some((c) => location.pathname === c.to);
+  const childActive =
+    DASHBOARD_CHILDREN.some((c) => isLink(c) && location.pathname === c.to) || rocketActive;
   const [open, setOpen] = useState(childActive || location.pathname === "/");
+  const [rocketOpen, setRocketOpen] = useState(rocketActive);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [adCookie, setAdCookie] = useState<AdCostCookieStatus | null>(null);
   const [adRefreshing, setAdRefreshing] = useState(false);
@@ -313,12 +341,43 @@ export default function Layout() {
           </div>
           {open && (
             <div className="ml-3 border-l border-gray-200 pl-2 mb-1">
-              {DASHBOARD_CHILDREN.map((c) => (
-                <NavLink key={c.to} to={c.to} className={linkClass}>
-                  <span>{c.icon}</span>
-                  {c.label}
-                </NavLink>
-              ))}
+              {DASHBOARD_CHILDREN.map((c) =>
+                isLink(c) ? (
+                  <NavLink key={c.to} to={c.to} className={linkClass}>
+                    <span>{c.icon}</span>
+                    {c.label}
+                  </NavLink>
+                ) : (
+                  // 로켓배송(1P) — 채널과 같은 층에 두되 한 겹 더 접는다.
+                  // ★그룹 머리는 링크가 아니라 **토글**이다: 셋 중 무엇을 대표 화면으로 삼을지
+                  //   근거가 없고, 임의로 하나를 골라 링크하면 나머지 둘이 이등 시민이 된다.
+                  <div key={c.label}>
+                    <button
+                      type="button"
+                      onClick={() => setRocketOpen((o) => !o)}
+                      aria-expanded={rocketOpen}
+                      aria-label={rocketOpen ? "로켓배송 메뉴 접기" : "로켓배송 메뉴 펼치기"}
+                      className={`w-full flex items-center gap-2 px-3 py-2 rounded-md text-sm mb-1 ${
+                        rocketActive ? "text-blue-700 font-medium" : "text-gray-600 hover:bg-gray-100"
+                      }`}
+                    >
+                      <span>{c.icon}</span>
+                      <span className="flex-1 text-left">{c.label}</span>
+                      <span className="text-xs text-gray-400">{rocketOpen ? "▾" : "▸"}</span>
+                    </button>
+                    {rocketOpen && (
+                      <div className="ml-3 border-l border-gray-200 pl-2">
+                        {c.children.map((sub) => (
+                          <NavLink key={sub.to} to={sub.to} className={linkClass}>
+                            <span>{sub.icon}</span>
+                            {sub.label}
+                          </NavLink>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ),
+              )}
             </div>
           )}
 
