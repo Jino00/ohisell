@@ -41,6 +41,12 @@ function daysSince(dateStr: string | null | undefined): number | null {
   return Math.round((today.getTime() - d.getTime()) / 86400000);
 }
 
+/** 서버가 KST naive ISO로 준다(전역 원칙 0) — Date로 파싱하면 로컬 타임존이 한 번 더 붙는다.
+ *  문자열에서 잘라 쓴다. */
+function hhmm(iso: string | null | undefined): string {
+  return iso ? iso.slice(11, 16) : "—";
+}
+
 const PERIODS = [
   { label: "오늘", days: 0 },
   { label: "어제", days: 1 },
@@ -854,6 +860,7 @@ export default function NaverOps() {
         ) : data && (
           <span className="text-xs text-gray-400">
             {data.period.from} ~ {data.period.to}
+            {data.ad_basis?.as_of && ` (광고비 ${hhmm(data.ad_basis.as_of)} 기준)`}
             {data.ad_ref_date && ` (광고비 기준일: ${data.ad_ref_date})`}
           </span>
         )}
@@ -935,7 +942,20 @@ export default function NaverOps() {
             }
           />
           <SummaryCard label="원가" value={won(s.cost)} />
-          <SummaryCard label="광고비" value={won(s.ad_spend)} sub="검색+디스플레이 · 상품별 미배분" />
+          <SummaryCard
+            label="광고비"
+            value={won(s.ad_spend)}
+            sub={
+              // 오늘은 **검색광고 당일 누적**이다(디스플레이는 실차감이라 당일치가 없다).
+              // 기준시각을 반드시 같이 낸다 — 종전엔 어제 전일치를 넣고 라벨만 달아서,
+              // 이익 카드가 「오늘 매출 − 어제 광고비」인 줄 모르고 읽혔다.
+              data?.ad_basis
+                ? data.ad_basis.kind === "today_snapshot"
+                  ? `검색광고만(당일 누적) · ${hhmm(data.ad_basis.as_of)} 기준(매시 05분 갱신) · 디스플레이는 익일 확정`
+                  : "오늘 수집 전 — 첫 스냅샷(매시 05분) 후 표시"
+                : "검색+디스플레이 · 상품별 미배분"
+            }
+          />
           <SummaryCard
             label="물류비(한진)"
             value={won(s.logistics)}
@@ -944,6 +964,7 @@ export default function NaverOps() {
           <SummaryCard
             label="이익"
             value={won(s.profit)}
+            sub={data?.ad_basis ? "광고비=검색 당일 누적(진행 중)" : undefined}
             highlight={profitN >= 0 ? "blue" : "red"}
           />
           <SummaryCard
