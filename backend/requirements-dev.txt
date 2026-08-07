@@ -1,0 +1,12 @@
+# 테스트 전용 의존성 — 런타임(requirements.txt)에는 들어가면 안 되는 것들.
+#
+# 왜 따로 두나: prod는 `requirements.txt`만 설치한다. pytest·httpx를 그쪽에 넣으면
+# 운영 환경에 테스트 도구가 딸려 들어간다. 반대로 CI는 이 파일을 써야 한다 —
+# 종전에 테스트가 로컬에서만 돌던 이유가 "pytest가 전역에 깔려 있어서"였고,
+# 그래서 의존성이 어디에도 선언돼 있지 않았다.
+-r requirements.txt
+
+pytest==9.0.3
+# fastapi.testclient(TestClient)가 httpx를 요구한다 — 없으면 임포트 단계에서 통째로 실패한다.
+httpx==0.28.1
+pytest-asyncio==1.3.0

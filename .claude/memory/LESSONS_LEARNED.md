@@ -3538,3 +3538,33 @@ correctness/contract/regression으로 바꿔 산출물을 보자 **P1이 2건** 
   예정일인지 묻지 않아 절 하나가 통째로 틀렸다(D-CPP-19가 "예정 ≠ 실제"를 이미 못 박았는데도).
 - **요약·집계 함수는 "예상 밖 값"을 출력하지 않으면 결함이다.** 합계 줄이 없는 표는
   줄어든 것을 눈으로 잡을 방법이 없다 — 교훈 #122("초록불의 분모를 물어라")의 출력판이다.
+
+## #165 — 내가 검증한 명령과 CI가 실행할 명령이 다르면, 검증한 게 아니다 (2026-08-07, CI 신설)
+
+### 상황
+이 repo엔 CI가 없었다(`.github/workflows/` 부재 → 모든 PR이 "no checks reported").
+빨간 CI로 시작하지 않으려고 **착수 전에 main을 실측**했다: backend `python3 -m pytest -q`
+→ 4,947 passed, frontend `tsc -b`·vitest 212 passed. 그 결과를 근거로 워크플로를 썼다.
+
+### 무엇이 잘못됐나
+워크플로엔 `run: pytest -q`라고 적었다. 내가 돌린 건 `python3 -m pytest`였다.
+**둘은 다르다** — `python -m pytest`는 CWD를 `sys.path`에 넣지만, 콘솔 스크립트 `pytest`는
+넣지 않는다. 이 repo엔 `conftest.py`도 `pytest.ini`/`pyproject.toml`도 없어서 경로를
+잡아 줄 것이 `-m` 하나뿐이었다.
+결과: 첫 CI 실행에서 py3.10·3.14 **양쪽 227 collection errors**,
+`ModuleNotFoundError: No module named 'app'`. 34초 만에 죽어 테스트는 한 줄도 안 돌았다.
+"실측했다"고 말했지만 **실측한 명령을 CI에 옮겨 적지 않았다.**
+
+### ✅ 해결
+`run: python -m pytest -q`로 바꾸고 이유를 워크플로 주석에 실측치와 함께 못 박았다.
+재실행 결과 **3/3 통과**(py3.10 6m24s · py3.14 5m13s · frontend 35s) — py3.10에서도
+호환성 갭은 없었다.
+
+### 📌 교훈
+**"로컬에서 통과했다"의 단위는 결과가 아니라 명령이다.** 자동화에 옮길 때는 결론
+("테스트 통과")이 아니라 **문자열 그대로의 명령**을 옮겨야 한다. 손으로 다시 타이핑하는
+순간 그건 검증되지 않은 새 명령이다.
+곁가지로 하나 더 드러났다: **테스트 의존성이 어디에도 선언돼 있지 않았다.**
+`requirements.txt`엔 pytest도 httpx도 없고(TestClient는 httpx 없으면 임포트에서 죽는다),
+로컬에서 돌던 건 전역 설치 덕이었다. 환경을 새로 만드는 쪽(CI·새 개발기)에서만 드러나는
+종류의 부채다 — `requirements-dev.txt`로 분리했다.
