@@ -416,15 +416,11 @@ export default function NaverAdOptimizationConsole() {
     }
   }
 
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { loadDashboardOverview(); }, []);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { loadProposals(); }, [proposalStatus, proposalKind]);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { loadPanel(); }, []);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { loadAva(); }, []);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { loadDelegation(); }, []);
 
   function updateEdit(campaignId: string, patch: Partial<EditState>) {
