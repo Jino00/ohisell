@@ -1327,6 +1327,9 @@ export interface Rocket1PRevenueOption {
   promo_burden: string | null;     // null=분담금 원천 미수집(제안서 대기)
   net_profit: string | null;       // 우리 매출−원가−분담금−광고비−납부세액
   profit_rate: string | null;      // net ÷ our_revenue (0~1)
+  /** 원가 미상이지만 **원가가 얼마든 적자**인 경우의 상한(음수일 때만 옴). 0으로 접힌 «모름»과
+   *  «확정 적자»는 다르다 — 후자는 지금 피가 나고 있다는 뜻이다. */
+  net_profit_upper: string | null;
 }
 
 /** 원가를 아직 못 붙인 SKU — "이걸 등록하면 손익이 완성된다"는 작업 목록이다. */
@@ -1336,6 +1339,7 @@ export interface Rocket1PUncostedSku {
   qty: number;
   our_revenue: string | null;      // 납품단가까지 모르면 null
   consumer_revenue: string;
+  loss_confirmed: boolean;         // 원가가 얼마든 적자(광고비가 매출을 넘었다)
 }
 
 /** 손익 블록. ★basis='costed_subset'이면 **원가 확인분만** 더한 값이다(창 전체가 아니다). */
@@ -1345,16 +1349,29 @@ export interface Rocket1PPnl {
   revenue: string | null;
   cost: string | null;
   promo_burden: string | null;
-  ad_spend: string | null;         // 옵션 그레인(Billboard) 합 — 계정 총액과 정의가 다르다
+  ad_spend: string | null;         // 옵션 그레인(Billboard) · 부분집합이면 그만큼만
   vat: string | null;
   net_profit: string | null;
   profit_rate: string | null;
-  cost_coverage: string | null;    // 원가 붙은 매출 ÷ 납품단가 붙은 매출
+  /** ★그 창에 **판매행이 없는** 옵션의 광고비. included=false면 위 순이익에 **안 들어있다** —
+   *  귀속할 판매가 없어 부분집합에 섞지 않지만, 안 보이면 없는 돈이 되므로 항상 싣는다. */
+  ad_no_sales: string;
+  ad_no_sales_included: boolean;
+  ad_account_total: string;        // 계정 총액(report/SALES) — 사다리 광고비와 왜 다른지 대조용
+  ad_option_total: string;         // 옵션 합계(Billboard, 판매 없는 옵션 포함)
+  cost_coverage: string | null;    // 원가 붙은 매출 ÷ 납품단가 붙은 매출 (분담금과 무관)
   revenue_priced: string | null;
   promo_burden_known: boolean;
+  /** 손익을 못 내는 이유. ★화면이 추측하지 않는다 — 우선순위가 틀리면 엉뚱한 작업을 시킨다. */
+  blocked: { code: string; reason: string } | null;
   uncosted: {
-    skus: number; qty: number; our_revenue: string;
-    top: Rocket1PUncostedSku[];
+    skus: number; qty: number;
+    our_revenue: string;           // known분만 합산(모르는 것을 0으로 더하지 않는다)
+    our_revenue_partial: boolean;  // true면 위 합계에 «단가도 모름» SKU가 빠져 있다
+    actionable_skus: number;       // 원가 등록으로 해소되는 것
+    ignored_skus: number;          // 이미 "제외"로 결정된 SKU — 등록하라고 시키면 안 된다
+    loss_confirmed_skus: number;
+    top: Rocket1PUncostedSku[];    // actionable만
   };
   note: string;
 }

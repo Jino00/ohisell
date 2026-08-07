@@ -414,3 +414,177 @@ def test_ad_axis_overlapping_day_is_not_double_counted(db):
     _ad_account(db, "552537", d=d)
     db.commit()
     assert _agg_rocket_ad(db, d, d, VENDOR) == Decimal("552537")   # 1,105,074가 아니다
+
+
+# ══════════════════════════════════════════════════════════════════
+# 2026-08-07 적대 리뷰 3렌즈 P1 회귀
+#
+# 셋 다 "돈이 화면에서 사라지거나, 화면이 사실과 다른 것을 단언한다"의 다른 얼굴이다.
+# ══════════════════════════════════════════════════════════════════
+def test_ad_of_options_with_no_sales_is_not_swallowed(db):
+    """★그 창에 안 팔린 옵션의 광고비가 손익에서 통째로 사라지던 것.
+
+    라이브 실측 2026-08-01~07: 광고 옵션 418개 중 **295개가 판매행 없음**, 282,794원.
+    예전 판은 판매행을 돌면서만 광고비를 소비해서 이 돈이 한 번도 안 들어갔고,
+    커버리지 100%(basis='full', 화면 배지 「기간 전체」)에서도 영영 안 들어왔다.
+    재현: 실제 −181,818원이 **+272,727원으로 부호가 뒤집혔다.**
+    """
+    _sale(db, "A", "S1", 10, "1000000")
+    _price(db, "S1", "60000", 1)
+    _cost(db, "S1", 20000)             # 커버리지 100% → basis='full'
+    _ad_option(db, "A", "100000")
+    _ad_option(db, "GHOST", "500000")  # 광고만 돌고 그 창에 판매 0
+    db.commit()
+    p = compute_rocket_1p_revenue(db, D, D)["pnl"]
+    assert p["basis"] == "full"
+    # 금액이 화면에서 사라지지 않는다.
+    assert Decimal(p["ad_no_sales"]) == Decimal("500000")
+    assert p["ad_no_sales_included"] is True          # full이면 차감된다
+    assert Decimal(p["ad_spend"]) == Decimal("600000")
+    # 부호가 뒤집히지 않는다 — 600,000−200,000−600,000−VAT
+    assert Decimal(p["net_profit"]) < ZERO_D
+    expected = Decimal("600000") - Decimal("200000") - Decimal("600000") \
+        - payable_vat(Decimal("600000"), Decimal("200000"), ZERO_D, Decimal("600000"))
+    assert Decimal(p["net_profit"]) == expected.quantize(Decimal("0.01"))
+
+
+def test_no_sales_ad_is_disclosed_even_when_not_included(db):
+    """부분집합일 땐 귀속할 판매가 없어 안 섞지만, **금액은 반드시 싣는다** — 안 보이면 없는 돈이 된다."""
+    _sale(db, "A", "S1", 10, "1000000")
+    _price(db, "S1", "60000", 1)
+    _cost(db, "S1", 20000)
+    _sale(db, "B", "S2", 10, "900000")
+    _price(db, "S2", "50000", 1)       # 원가 미상 → costed_subset
+    _ad_option(db, "GHOST", "300000")
+    db.commit()
+    p = compute_rocket_1p_revenue(db, D, D)["pnl"]
+    assert p["basis"] == "costed_subset"
+    assert p["ad_no_sales_included"] is False
+    assert Decimal(p["ad_no_sales"]) == Decimal("300000")   # 숨기지 않는다
+
+
+def test_cost_coverage_is_not_poisoned_by_unknown_promo_burden(db):
+    """★분담금을 모른다고 **원가 커버리지가 0%로 뜨면** 안 된다.
+
+    라이브 재현(2026-02-01~08-07): 화면 0.0000 vs 실제 0.7581. 원가는 다 등록돼 있는데
+    배지가 「원가 확인 0.0%분만」을 사실처럼 냈고, 사용자를 **엉뚱한 작업**으로 보냈다.
+    커버리지는 원가에 대한 사실이지 분담금 수집 상태에 대한 사실이 아니다.
+    """
+    from sqlalchemy import text as _t
+    _sale(db, "A", "S1", 10, "1000000")
+    _price(db, "S1", "60000", 1)
+    _cost(db, "S1", 20000)             # 원가 커버리지는 100%
+    db.execute(_t("INSERT INTO coupang_rocket_promotion (request_id, vendor_id, start_at, end_at) "
+                  "VALUES ('686180', :v, '2026-08-01 00:00:00', '2026-08-15 23:59:59')"),
+               {"v": VENDOR})           # 할인액 없음 → 분담금 «모름»
+    db.commit()
+    p = compute_rocket_1p_revenue(db, D, D)["pnl"]
+    assert p["promo_burden_known"] is False
+    assert p["net_profit"] is None                       # 손익은 안 낸다(그건 맞다)
+    assert Decimal(p["cost_coverage"]) == Decimal("1.0000")   # 0.0000이 아니다
+    # 사유도 원가가 아니라 분담금을 가리켜야 한다.
+    assert p["blocked"]["code"] == "promo_burden_unknown"
+
+
+def test_basis_full_is_structural_not_rounded(db):
+    """★0.99996이 1.0000으로 반올림돼 「기간 전체」가 되던 것 — 판정을 구조로 한다.
+
+    그때 화면엔 「원가 확인 100% · 기간 전체」와 「원가 미등록 SKU 1개」가 **동시에** 떴다.
+    """
+    _sale(db, "A", "S1", 100000, "200000000")
+    _price(db, "S1", "1000", 1)        # 우리 매출 100,000,000
+    _cost(db, "S1", 300)
+    _sale(db, "B", "S2", 1, "2000")
+    _price(db, "S2", "1000", 2)        # 우리 매출 1,000 — 원가 미상
+    db.commit()
+    p = compute_rocket_1p_revenue(db, D, D)["pnl"]
+    assert Decimal(p["cost_coverage"]) == Decimal("1.0000")   # 반올림되면 1.0000이 된다
+    assert p["basis"] == "costed_subset"                      # 그래도 full이 아니다
+    assert p["uncosted"]["actionable_skus"] == 1
+
+
+def test_confirmed_loss_is_not_drawn_as_unknown(db):
+    """★원가를 몰라도 **부호가 확정**인 경우가 있다 — 광고비가 우리 매출을 넘으면 적자다.
+
+    라이브에 그런 행이 있었다(광고비 73,593원 > 우리 매출 48,000원). 순이익 "—"로 떠서,
+    적자가 빨강으로 칠해지는 표에서 «문제 없음»으로 읽혔다(은폐형 결함).
+    """
+    _sale(db, "A", "S1", 4, "80000")
+    _price(db, "S1", "12000", 1)       # 우리 매출 48,000 · 원가 미등록
+    _ad_option(db, "A", "73593")
+    db.commit()
+    r = compute_rocket_1p_revenue(db, D, D)
+    o = r["options"][0]
+    assert o["net_profit"] is None                      # 정확한 값은 여전히 모른다
+    assert Decimal(o["net_profit_upper"]) < ZERO_D      # 그러나 적자는 확정이다
+    assert r["pnl"]["uncosted"]["loss_confirmed_skus"] == 1
+    assert r["pnl"]["uncosted"]["top"][0]["loss_confirmed"] is True
+
+
+def test_profitable_uncosted_option_gets_no_false_bound(db):
+    """상한이 양수면 싣지 않는다 — «≤ +X»는 이익으로 오독된다(모르는 건 모르는 거다)."""
+    _sale(db, "A", "S1", 10, "1000000")
+    _price(db, "S1", "60000", 1)
+    _ad_option(db, "A", "10000")       # 광고비가 작다 → 상한이 양수
+    db.commit()
+    o = compute_rocket_1p_revenue(db, D, D)["options"][0]
+    assert o["net_profit"] is None and o["net_profit_upper"] is None
+
+
+def test_ignored_skus_are_not_put_on_the_worklist(db):
+    """★`ignored`는 "원가 제외로 **이미 결정한**" SKU다 — 등록하라고 시키면 안 된다.
+
+    라이브: 8월에 팔린 SKU 중 11개가 ignored. 목록에 넣으면 "등록하면 100% 된다"가
+    지킬 수 없는 약속이 되고, 사용자는 이미 안 하기로 한 것을 다시 쫓는다.
+    """
+    from sqlalchemy import text as _t
+    _sale(db, "A", "S1", 10, "500000")
+    _price(db, "S1", "30000", 1)
+    _sale(db, "B", "S2", 5, "300000")
+    _price(db, "S2", "20000", 2)
+    db.execute(_t("INSERT INTO rocket_product_cost_map (product_number, internal_sku, status) "
+                  "VALUES ('S2', 'OHI-SAMPLE', 'ignored')"))
+    db.commit()
+    u = compute_rocket_1p_revenue(db, D, D)["pnl"]["uncosted"]
+    assert u["skus"] == 2                       # 둘 다 원가는 없다
+    assert u["actionable_skus"] == 1            # 그러나 등록하라고 시킬 건 하나뿐
+    assert u["ignored_skus"] == 1
+    assert [t["sku_id"] for t in u["top"]] == ["S1"]
+
+
+def test_uncosted_total_does_not_fold_unknown_into_zero(db):
+    """단가까지 모르는 SKU를 0원으로 더하면 합계가 **작게** 보인다 — 그건 이 파일의 원칙 위반이다."""
+    _sale(db, "A", "S1", 10, "500000")
+    _price(db, "S1", "30000", 1)       # 우리 매출 300,000 · 원가 미상
+    _sale(db, "B", "S2", 5, "300000")  # 단가도 원가도 미상
+    db.commit()
+    u = compute_rocket_1p_revenue(db, D, D)["pnl"]["uncosted"]
+    assert Decimal(u["our_revenue"]) == Decimal("300000")   # 0을 더하지 않았다
+    assert u["our_revenue_partial"] is True                 # 그리고 그 사실을 말한다
+    assert u["top"][0]["sku_id"] == "S1"                    # known을 먼저 — 축을 섞지 않는다
+
+
+def test_blocked_reason_points_at_the_real_blocker(db):
+    """★사유를 backend가 정한다 — 우선순위가 틀리면 사용자를 엉뚱한 작업으로 보낸다."""
+    _sale(db, "A", "S1", 10, "500000")   # 납품단가 자체가 없다(원가 문제가 아니다)
+    db.commit()
+    p = compute_rocket_1p_revenue(db, D, D)["pnl"]
+    assert p["blocked"]["code"] == "no_priced_sku"
+    assert "원가가 아니라" in p["blocked"]["reason"]
+
+
+def test_promo_burden_by_option_derivation_is_guarded():
+    """★문자열 replace로 만든 SQL이 조용히 빗나가면 분담금이 전 옵션 0이 된다(경고도 안 뜬다)."""
+    assert "GROUP BY s.option_id" in pnl._PROMO_BURDEN_BY_OPTION_SQL
+    assert "GROUP BY s.date" not in pnl._PROMO_BURDEN_BY_OPTION_SQL
+    assert "SELECT s.option_id AS d," in pnl._PROMO_BURDEN_BY_OPTION_SQL
+
+
+def test_promo_burden_guard_uses_the_same_vendor_as_the_query(db):
+    """가드만 1P로 하드코딩하면 다른 vendor에서 «모름»이 «분담금 0»으로 둔갑한다."""
+    from sqlalchemy import text as _t
+    db.execute(_t("INSERT INTO coupang_rocket_promotion (request_id, vendor_id, start_at, end_at) "
+                  "VALUES ('999', 'OTHERVENDOR', '2026-08-01 00:00:00', '2026-08-15 23:59:59')"))
+    db.commit()
+    # OTHERVENDOR엔 할인액 원천이 없다 → None(모름)이어야 한다. {}(=0)이면 안 된다.
+    assert pnl.promo_burden_by_option(db, D, D, "OTHERVENDOR") is None
