@@ -24,7 +24,8 @@
 from __future__ import annotations
 
 import logging
-from datetime import date
+import os
+from datetime import date, timedelta
 from decimal import Decimal
 
 from sqlalchemy import text
@@ -106,6 +107,33 @@ GROUP BY report_date, ad_option_id
 #   ⓐ no_link  : 다리가 없다 → 「쿠팡 운영」 원가 매핑에서 **연결**해야 한다
 #   ⓑ no_cost  : 다리는 있는데 그 내부 SKU에 원가가 없다 → SellC에 **원가 등록**
 #   ⓒ excluded : 원가 제외로 **이미 결정**됨(샘플·증정) → 아무것도 하면 안 된다(재제안 방지)
+# ★"언제부터 팔린 물건인가" — 신제품을 가려내는 두 축(2026-08-07, Jino).
+#   왜 필요한가: 원가 미연결 목록이 매출 순이라 **옛날부터 안 이어진 꼬리**와 **이번에 새로
+#   나온 신제품**이 섞여 보인다. 그런데 둘은 급한 정도가 다르다 — 실측(2026-08-07): 06-18
+#   매핑 작업 이후 새로 들어온 상품번호는 **단 3개**인데 그 3개(Z폴드8 3종)가 미연결 매출의
+#   **56%**였다. 새 폰이 나올 때마다 이 일이 반복되므로, 신규는 나오자마자 보여야 한다.
+#
+# ★`first_sold_at`은 **판매분석 전 범위**에서 센다(조회 창이 아니라). 창 안의 MIN을 쓰면
+#   어느 창을 열어도 전부 "이번에 처음"이 되어 신호가 죽는다.
+# ★단 판매분석은 롤링(약 2개월)이라 그 시작일과 같은 값이면 **그 전은 모른다** —
+#   화면이 "신규"라고 단정하지 못하게 그 사실을 함께 싣는다(0으로 접지 않기와 같은 원칙).
+_FIRST_SOLD_SQL = """
+SELECT sku_id, MIN(date) AS first_sold
+FROM coupang_rocket_sales_daily
+WHERE vendor_id = :vendor AND sku_id IS NOT NULL
+GROUP BY sku_id
+"""
+
+# 발주에 처음 등장한 날 = "상품이 생긴 날". 판매분석과 달리 **전 이력**이 있어(2025-07~)
+# 롤링창의 한계를 받지 않는다 — 신제품 판별의 주 축이다.
+_FIRST_PO_SQL = """
+SELECT i.product_number, MIN(date(o.po_created_at)) AS first_po
+FROM coupang_rocket_purchase_order_item i
+JOIN coupang_rocket_purchase_order o ON o.purchase_order_seq = i.purchase_order_seq
+WHERE o.vendor_id = :vendor AND o.po_created_at IS NOT NULL
+GROUP BY i.product_number
+"""
+
 _COST_MAP_STATE_SQL = """
 SELECT m.product_number,
        m.status,
@@ -198,6 +226,16 @@ def compute_rocket_1p_revenue(
     cost_map_state = {
         str(r[0]): (r[1], bool(r[2])) for r in db.execute(text(_COST_MAP_STATE_SQL)).fetchall()
     }
+
+    first_sold = {
+        str(r[0]): str(r[1])[:10]
+        for r in db.execute(text(_FIRST_SOLD_SQL), {"vendor": vendor}).fetchall() if r[1]
+    }
+    first_po = {
+        str(r[0]): str(r[1])[:10]
+        for r in db.execute(text(_FIRST_PO_SQL), {"vendor": vendor}).fetchall() if r[1]
+    }
+    obs_from = None if not sales_span or sales_span[0] is None else str(sales_span[0])[:10]
 
     def _uncosted_reason(sku: str | None) -> str:
         st = cost_map_state.get(str(sku)) if sku is not None else None
@@ -294,6 +332,9 @@ def compute_rocket_1p_revenue(
                 "our_revenue_known": True, "loss_confirmed": False,
                 # ★무엇을 해야 하는지가 셋으로 갈린다 — 틀리면 사용자가 헛일을 한다.
                 "reason": _uncosted_reason(sku_id),
+                # ★"이번에 새로 팔리기 시작했는가" — 신규는 나오자마자 매출 1위가 된다.
+                "first_sold_at": first_sold.get(str(sku_id)),
+                "first_po_at": first_po.get(str(sku_id)),
             })
             u["qty"] += q
             u["consumer_revenue"] += consumer_d
@@ -425,7 +466,45 @@ def compute_rocket_1p_revenue(
                        u["our_revenue"] if u["our_revenue_known"] else u["consumer_revenue"]),
         reverse=True,
     )
+    # 「최근에 나온 상품」의 지평. ★조회 창 길이와 **분리한다**(2026-08-07 라이브 교정):
+    #   창 안에서만 보면 기본 7일 화면에서 3주 전 출시한 신제품이 안 잡히고, 창을 넓히면
+    #   "그 창에서 처음 관측"이 무더기로 신규가 된다. 지평은 창이 아니라 **출시 시점**이다.
+    #   숨은 기준을 두지 않으려고 응답에 그대로 싣는다.
+    new_sku_days = int(os.getenv("ROCKET_1P_NEW_SKU_DAYS") or "90")
+
+    def _newness(u: dict) -> dict:
+        """이 SKU가 **최근에 새로 나온 것**인가.
+
+        ★판별자는 **발주에 처음 등장한 날**이다. 판매분석의 첫 관측일이 아니다 —
+          "안 팔리던 게 이제 팔린다"와 "새로 나왔다"는 다른 일이고, 전자는 재노출·시즌이라
+          매핑이 급하지 않다. 라이브 교정(2026-08-07): 발주 2025-07-25짜리가 판매 첫 관측만
+          창 안이라는 이유로 「신규」로 잡혔다. 발주 이력은 전 범위(2025-07~)라 이 판정에
+          쓸 수 있는 유일한 축이다.
+        ★발주 이력이 아예 없을 때만 판매 축으로 떨어진다. 그때도 판매분석 롤링창(약 2개월)
+          시작일과 첫 관측일이 같으면 그 전은 **모르므로** 단정하지 않는다.
+        """
+        fs, fp = u["first_sold_at"], u["first_po_at"]
+        horizon = (date_to - timedelta(days=new_sku_days)).isoformat()
+        bounded = fs is not None and obs_from is not None and fs <= obs_from
+        if fp is not None:
+            is_new = fp >= horizon
+        else:
+            is_new = fs is not None and fs >= horizon and not bounded
+        return {
+            "first_sold_at": fs,
+            "first_po_at": fp,
+            "is_new": bool(is_new),
+            "first_sold_at_bounded": bool(bounded),
+        }
+
+    for u in uncosted_rows:
+        u.update(_newness(u))
     actionable = [u for u in uncosted_rows if u["reason"] != "excluded"]
+    # ★신규를 **먼저** 보인다 — 매출 순으로만 두면 옛 꼬리에 묻힌다(그게 지금 상태였다).
+    actionable.sort(key=lambda u: (
+        u["is_new"],
+        u["our_revenue"] if u["our_revenue_known"] else u["consumer_revenue"],
+    ), reverse=True)
 
     # ★basis 판정을 **반올림된 비율이 아니라 구조**로 한다(적대 리뷰 P2). `_ratio`는 소수
     #   4자리로 quantize하므로 0.99996도 1.0000이 되어, 원가 미상 SKU가 남아 있는데 배지가
@@ -544,6 +623,12 @@ def compute_rocket_1p_revenue(
             "cost_missing_skus": sum(1 for u in uncosted_rows if u["reason"] == "no_cost"),
             "excluded_skus": sum(1 for u in uncosted_rows if u["reason"] == "excluded"),
             "loss_confirmed_skus": sum(1 for u in uncosted_rows if u["loss_confirmed"]),
+            # ★이번 창에서 **처음 팔리기 시작한** 미연결 SKU. 새 폰이 나올 때마다 생긴다.
+            "new_skus": sum(1 for u in actionable if u["is_new"]),
+            "new_our_revenue": str(sum((u["our_revenue"] for u in actionable
+                                        if u["is_new"] and u["our_revenue_known"]), ZERO)),
+            # ★판정에 쓴 지평을 숨기지 않는다 — 기준이 안 보이면 화면을 믿을 근거가 없다.
+            "new_sku_window_days": new_sku_days,
             "top": [
                 {
                     "sku_id": u["sku_id"],
@@ -556,6 +641,11 @@ def compute_rocket_1p_revenue(
                     "loss_confirmed": u["loss_confirmed"],
                     # no_link | no_cost | excluded — 무엇을 해야 하는지.
                     "reason": u["reason"],
+                    # ★이번 창에서 처음 팔리기 시작했나 + 그 근거 날짜.
+                    "is_new": u["is_new"],
+                    "first_sold_at": u["first_sold_at"],
+                    "first_po_at": u["first_po_at"],
+                    "first_sold_at_bounded": u["first_sold_at_bounded"],
                 }
                 for u in actionable[:_UNCOSTED_TOP_N]
             ],

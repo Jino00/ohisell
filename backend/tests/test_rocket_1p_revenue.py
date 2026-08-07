@@ -768,3 +768,110 @@ def test_daily_row_closes_when_costed_and_uncosted_are_mixed_on_the_same_day(db)
     assert Decimal(d0["ad_spend"]) == Decimal("20000")
     assert Decimal(d0["ad_spend_all"]) == Decimal("70000")
     assert d0["pnl_qty"] == 10 and d0["qty"] == 20
+
+
+# ══════════════════════════════════════════════════════════════════
+# 신규 미연결 SKU 표면화 (Jino 2026-08-07)
+#
+# 왜: 미연결 목록이 매출 순이라 **옛 꼬리**와 **이번에 나온 신제품**이 섞여 있었다.
+# 실측 — 06-18 매핑 이후 새로 들어온 상품번호는 단 3개인데 그 3개(Z폴드8)가
+# 미연결 매출의 56%였다. 새 폰이 나올 때마다 반복되므로 나오자마자 보여야 한다.
+# ══════════════════════════════════════════════════════════════════
+def _po(s, seq, sku, created_at, unit_price="10000"):
+    """발주 헤더+라인. `po_created_at`이 "상품이 생긴 날"의 원천이다."""
+    from sqlalchemy import text as _t
+    s.execute(_t("INSERT INTO coupang_rocket_purchase_order "
+                 "(purchase_order_seq, vendor_id, sum_of_order_amount, sum_of_receiving_amount, "
+                 " sum_of_vendor_confirmed_amount, order_qty, receiving_qty, vendor_confirmed_qty, "
+                 " sku_count, po_created_at) "
+                 "VALUES (:s, :v, 0, 0, 0, 0, 0, 0, 1, :c)"),
+              {"s": seq, "v": VENDOR, "c": created_at})
+    _price(s, sku, unit_price, seq)
+
+
+def test_new_unlinked_sku_is_flagged_and_sorted_first(db):
+    """★신규가 매출 순에 묻히지 않는다 — 목록 맨 앞에 오고 개수도 따로 센다."""
+    # 옛 꼬리: 발주가 지평 밖(오래된 상품)
+    _po(db, 1, "OLD", "2025-08-01")
+    _sale(db, "A", "OLD", 50, "900000", d=date(2026, 8, 3))
+    _sale(db, "A", "OLD", 10, "180000", d=date(2026, 6, 5))     # 관측 시작 근처
+    # 신제품: 발주가 최근(지평 안)
+    _po(db, 2, "NEW", "2026-08-02")
+    _sale(db, "B", "NEW", 5, "90000", d=date(2026, 8, 3))
+    db.commit()
+    u = compute_rocket_1p_revenue(db, date(2026, 8, 1), date(2026, 8, 5))["pnl"]["uncosted"]
+    assert u["new_skus"] == 1
+    by_sku = {t["sku_id"]: t for t in u["top"]}
+    assert by_sku["NEW"]["is_new"] is True
+    assert by_sku["OLD"]["is_new"] is False
+    # ★매출은 OLD가 5배지만 신규가 먼저 온다 — 급한 순서가 다르다.
+    assert u["top"][0]["sku_id"] == "NEW"
+    assert Decimal(u["new_our_revenue"]) == Decimal("50000")   # 5 × 10,000
+
+
+def test_newness_is_not_asserted_when_observation_window_bounds_it(db):
+    """★판매분석은 롤링(약 2개월)이라 **관측 시작일 = 첫 판매일**이면 그 전은 모른다.
+
+    그때 "이번에 새로 팔리기 시작"이라고 단정하면 옛 상품이 신규로 둔갑한다.
+    발주 이력이 없어 반증도 못 하는 자리라, 0/1로 접지 말고 «모른다»를 드러낸다.
+    """
+    # 발주 이력 없음 + 판매 첫 관측일이 곧 관측 시작일
+    _price(db, "S1", "10000", 99)          # 단가만 있고 PO 헤더는 없다
+    _sale(db, "A", "S1", 5, "90000", d=date(2026, 8, 1))
+    db.commit()
+    t = compute_rocket_1p_revenue(db, date(2026, 8, 1), date(2026, 8, 5))["pnl"]["uncosted"]["top"][0]
+    assert t["first_sold_at"] == "2026-08-01"
+    assert t["first_sold_at_bounded"] is True      # 그 전은 관측 자체가 없다
+    assert t["is_new"] is False                    # → 단정하지 않는다
+
+
+def test_po_history_beats_the_rolling_window_for_newness(db):
+    """발주 이력은 전 범위라 롤링 한계를 받지 않는다 — 그쪽이 창 안이면 확실한 신규다."""
+    _po(db, 1, "S1", "2026-08-02")
+    _sale(db, "A", "S1", 5, "90000", d=date(2026, 8, 1))   # 판매 첫 관측 = 관측 시작일
+    db.commit()
+    t = compute_rocket_1p_revenue(db, date(2026, 8, 1), date(2026, 8, 5))["pnl"]["uncosted"]["top"][0]
+    assert t["first_sold_at_bounded"] is True   # 판매 축만 보면 모른다
+    assert t["first_po_at"] == "2026-08-02"
+    assert t["is_new"] is True                  # 그래도 발주가 최근이면 신규다
+
+
+def test_old_product_that_starts_selling_now_is_not_called_new(db):
+    """★"안 팔리던 게 이제 팔린다"와 "새로 나왔다"는 다르다 — 후자만 신규다.
+
+    ★라이브 교정(2026-08-07): 예전 판은 «판매 첫 관측이 창 안»도 신규로 쳤고, 그래서
+      발주 2025-07-25짜리가 「신규」로 잡혔다. 그건 재노출·시즌이지 신제품이 아니다.
+      **첫 판매 관측을 조회 창 안에 두고도** 신규가 아니어야 이 규칙이 지켜진다
+      (예전 테스트는 첫 판매를 창 밖에 둬서 우연히 통과했다).
+    """
+    _po(db, 1, "S1", "2025-08-26")                        # 상품은 작년부터 있었다
+    _sale(db, "A", "S1", 5, "90000", d=date(2026, 8, 3))  # 그런데 이제 팔리기 시작
+    db.commit()
+    r = compute_rocket_1p_revenue(db, date(2026, 8, 1), date(2026, 8, 5))
+    t = r["pnl"]["uncosted"]["top"][0]
+    assert t["first_sold_at"] == "2026-08-03"   # 첫 판매 관측이 **창 안**인데도
+    assert t["is_new"] is False                 # 발주가 옛것이라 신규가 아니다
+    assert t["first_po_at"] == "2025-08-26"
+
+
+def test_recent_launch_is_new_even_when_the_window_is_shorter_than_the_launch_gap(db):
+    """★지평은 **조회 창이 아니라 출시 시점**이다.
+
+    기본 화면은 7일 창인데 신제품은 3주 전에 나왔을 수 있다. 창 안에서만 보면 그게
+    안 잡히고, 창을 넓히면 "그 창에서 처음 관측"이 무더기로 신규가 된다.
+    """
+    _po(db, 1, "S1", "2026-07-13")                        # 3주 전 출시
+    _sale(db, "A", "S1", 5, "90000", d=date(2026, 8, 3))
+    db.commit()
+    r = compute_rocket_1p_revenue(db, date(2026, 8, 1), date(2026, 8, 5))   # 5일 창
+    assert r["pnl"]["uncosted"]["top"][0]["is_new"] is True
+    # ★판정 기준을 숨기지 않는다.
+    assert r["pnl"]["uncosted"]["new_sku_window_days"] == 90
+
+
+def test_launch_older_than_the_horizon_is_not_new(db):
+    _po(db, 1, "S1", "2026-01-02")                        # 지평(90일) 밖
+    _sale(db, "A", "S1", 5, "90000", d=date(2026, 8, 3))
+    db.commit()
+    r = compute_rocket_1p_revenue(db, date(2026, 8, 1), date(2026, 8, 5))
+    assert r["pnl"]["uncosted"]["top"][0]["is_new"] is False
