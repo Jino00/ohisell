@@ -40,6 +40,18 @@ function reasonText(lastError: string | null): string {
   return "";
 }
 
+// ★백엔드 collection_status.py의 WARN_HOURS/CRIT_HOURS와 같은 값이어야 한다.
+//   여기서만 쓰인다 — warn/critical 판정은 백엔드가 하고 프론트는 그 state를 그대로 믿는다.
+//   아래 in_flight 구제 경로만 예외적으로 경과시간을 직접 본다(백엔드가 그 구간의 state를
+//   in_flight로 덮어써서 낡음 정보가 사라지기 때문).
+const WARN_HOURS = 24;
+const CRIT_HOURS = 48;
+
+/** in_flight인데 이미 낡았나? (age null = 수집 기록 없음도 낡은 것으로 친다) */
+function staleWhileInFlight(hours: number | null): boolean {
+  return hours == null || hours >= WARN_HOURS;
+}
+
 export function buildCollectionFreshnessBanner(
   status: CollectionStatus | null | undefined,
 ): FreshnessBanner | null {
@@ -60,11 +72,29 @@ export function buildCollectionFreshnessBanner(
         key: st.key, label: st.label, kind: "stale",
         text: `${st.label} ${ageText(st.age_hours)}`,
       });
+    } else if (st.state === "in_flight" && staleWhileInFlight(st.age_hours)) {
+      // ★멈춘 요청이 낡음을 가리지 못하게 한다 (2026-08-07, 이 PR의 자기리뷰 P1).
+      //   백엔드는 requested=true면 state를 in_flight로 덮어쓴다 — 그런데 요청이 소비되지
+      //   않고 멈추는 일이 실제로 있다(2026-08-07 403: RG 요청이 07:55~09:31 1시간 반 pending,
+      //   Mac이 꺼진 밤이면 더 길다). 예전엔 빨강 광고쿠키 배너가 시간 기준이라 backstop이
+      //   됐는데 이 PR이 그걸 뺐으므로, 여기서 직접 구제하지 않으면 **양쪽 다 침묵**한다.
+      //   "요청했다"는 "받았다"가 아니다.
+      items.push({
+        key: st.key, label: st.label, kind: "stale",
+        text: `${st.label} ${ageText(st.age_hours)} · 갱신 요청 중(아직 안 받음)`,
+      });
     }
   }
   if (items.length === 0) return null;
   const hasRed =
     items.some((i) => i.kind === "failed") ||
-    status.streams.some((st) => st.state === "critical");
+    status.streams.some(
+      (st) =>
+        st.state === "critical" ||
+        // in_flight 구제분도 48h 넘으면 빨강 — state가 in_flight라 위 조건에 안 걸린다.
+        (st.state === "in_flight" &&
+          staleWhileInFlight(st.age_hours) &&
+          (st.age_hours == null || st.age_hours >= CRIT_HOURS)),
+    );
   return { severity: hasRed ? "red" : "yellow", items };
 }

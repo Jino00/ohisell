@@ -98,6 +98,45 @@ describe("failed 문구는 실패 시각과 실제 사유에 근거해야 한다
   });
 });
 
+// ── 멈춘 요청이 낡음을 가리면 안 된다 (2026-08-07, 이 PR 자기리뷰 P1) ──
+// ★존재 이유: 백엔드는 requested=true면 state를 in_flight로 덮어써 낡음 정보를 지운다.
+//   예전엔 빨강 광고쿠키 배너가 시간 기준이라 backstop이었는데 이 PR이 그걸 뺐다. 요청이
+//   소비되지 않고 멈추는 일은 실제로 있다(2026-08-07 403: RG 요청 1시간 반 pending).
+//   backstop 없이 in_flight를 숨기면 33시간 낡은 데이터가 어느 배너에도 안 뜬다.
+describe("in_flight라도 이미 낡았으면 숨기지 않는다", () => {
+  it("갓 요청한 것(age < 24h)은 여전히 숨긴다 — 정상 갱신 중 소음 방지", () => {
+    expect(buildCollectionFreshnessBanner(wrap([s({ state: "in_flight", age_hours: 2 })]))).toBeNull();
+  });
+
+  it("24h 넘게 낡은 채 요청만 걸려 있으면 뜬다 + '아직 안 받음'을 명시", () => {
+    const b = buildCollectionFreshnessBanner(wrap([s({ state: "in_flight", age_hours: 33 })]));
+    expect(b).not.toBeNull();
+    expect(b?.items[0].kind).toBe("stale");
+    expect(b?.items[0].text).toContain("33시간 지남");
+    expect(b?.items[0].text).toContain("아직 안 받음");
+    expect(b?.severity).toBe("yellow");
+  });
+
+  it("48h 넘으면 in_flight여도 red", () => {
+    expect(buildCollectionFreshnessBanner(wrap([s({ state: "in_flight", age_hours: 60 })]))?.severity).toBe("red");
+  });
+
+  it("수집 기록 없음(age null) + 요청만 걸림도 red로 뜬다", () => {
+    const b = buildCollectionFreshnessBanner(wrap([s({ state: "in_flight", age_hours: null })]));
+    expect(b?.items[0].text).toContain("수집 기록 없음");
+    expect(b?.severity).toBe("red");
+  });
+
+  it("구제된 in_flight 항목도 갱신 대상 key를 실어야 한다(버튼이 비지 않게)", () => {
+    const b = buildCollectionFreshnessBanner(
+      wrap([s({ state: "in_flight", key: "ofix_ad", age_hours: 33 })]),
+    );
+    const { specs, unknown } = specsForKeys((b?.items ?? []).map((i) => i.key));
+    expect(specs.map((x) => x.key)).toEqual(["ofix_ad"]);
+    expect(unknown).toEqual([]);
+  });
+});
+
 // ── 배너 항목 ↔ 갱신 대상 결합 가드 (2026-08-03) ──────────────────────
 // ★존재 이유: 배너의 '지금 갱신'은 items[].key로 갱신 대상을 고른다. 백엔드가 key를 바꾸거나
 //   빌더가 key를 안 실으면 버튼이 **조용히 아무것도 갱신하지 않는다** — 링크였던 시절과
