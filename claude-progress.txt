@@ -1,3 +1,21 @@
+[2026-08-07 08:1x] CI 신설 — 이 repo엔 검사가 하나도 없었다 (PR #232, 교훈 #165)
+  · 출발점: PR #231의 회색 CI 칩. `gh pr checks` → no checks reported. #231만이 아니라
+    #230·#228·#227 전부 그랬다 — 원인은 `.github/workflows/` **부재**(고장이 아니라 미설정)
+  · 착수 전 main 실측(빨간 CI로 시작하지 않기 위해): backend 4,947 passed(py3.14 162s) ·
+    frontend tsc -b 0 · vitest 212 passed → **이월돼 있던 "main 기존 테스트 실패 1건"은
+    이미 해소된 낡은 기록**이었다
+  · ★backend 매트릭스 py3.10·3.14 — **prod venv 실측이 3.10.12인데 개발 Mac은 3.14**로
+    갈라져 있다. 한쪽만 돌리면 나머지 파손을 못 본다(교훈 #1). 결과 양쪽 다 통과
+  · frontend는 tsc -b에 더해 **`npm run build`까지** — tsc --noEmit이 통과했는데 실제
+    빌드가 TS2345로 죽은 전례(08-06)가 있다
+  · ★`backend/requirements-dev.txt` 신설 — **테스트 의존성이 어디에도 선언돼 있지 않았다**
+    (로컬에서 돌던 건 pytest 전역 설치 덕). prod는 계속 requirements.txt만 설치
+  · ⚠️첫 실행 실패 → 교훈 #165: 워크플로에 `pytest`라고 적었는데 내가 검증한 건
+    `python3 -m pytest`였다(콘솔 스크립트는 CWD를 sys.path에 안 넣음) → 227 collection
+    errors. `python -m pytest`로 수정 후 **3/3 통과**(py3.10 6m24s·3.14 5m13s·front 35s)
+  · 안 한 것: lint는 위반 수를 안 재봐서 제외(별건) · 브랜치 보호 required checks는
+    repo 설정이라 Jino 결정 사항
+
 [2026-08-07 06:3x] 스마트스토어 수수료 — 예상=실측 오차 0원 재측정 (D-NAO-161, ref 49, 코드 변경 없음)
   · Jino 질문 "수수료 추정치는 나중에 실측으로 바뀌면 자동으로 맞아지는거지?"에 답: sales_summary가
     조회마다 정산 실측을 우선 적용(저장 안 함) 구조 확인 + 최근 60일 4,958라인 전수 재검증 —
