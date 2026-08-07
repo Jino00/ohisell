@@ -172,3 +172,38 @@ def test_unknown_promo_burden_makes_every_atom_net_unknown(db):
     # ★창-불변 축은 그대로다 — 창에 따라 갈리는 것은 분담금 축뿐이라는 증거.
     assert wide["atoms"][0]["our_revenue"] == narrow["atoms"][0]["our_revenue"]
     assert wide["atoms"][0]["cost"] == narrow["atoms"][0]["cost"]
+
+
+# ═══ ② A6의 원료 — 창에 걸친 프로모션 수와 할인액 없는 수 ═══
+
+
+def test_promo_window_counts(db):
+    db.execute(_t("INSERT INTO coupang_rocket_promotion (request_id, vendor_id, start_at, end_at) "
+                  "VALUES ('P1', :v, '2026-08-01 00:00:00', '2026-08-15 23:59:59')"), {"v": VENDOR})
+    db.execute(_t("INSERT INTO coupang_rocket_promotion (request_id, vendor_id, start_at, end_at) "
+                  "VALUES ('P2', :v, '2026-08-01 00:00:00', '2026-08-15 23:59:59')"), {"v": VENDOR})
+    db.execute(_t("INSERT INTO coupang_promo_discount_item "
+                  "(request_id, product_number, discount_type, discount_value) "
+                  "VALUES ('P1', 'S1', 'FIXED', 1500)"))
+    db.commit()
+    c = pnl.promo_window_counts(db, D, D)
+    assert c == {"promos": 2, "unpriced": 1}
+
+
+def test_promo_window_counts_excludes_promos_outside_window(db):
+    """조회 창과 안 겹치는 프로모션은 세지 않는다 — A6은 좌·우변이 같은 창(모집단)이라야
+    성립하는 검사라, `promos`가 창 밖까지 세면 그 전제부터 깨진다."""
+    db.execute(_t("INSERT INTO coupang_rocket_promotion (request_id, vendor_id, start_at, end_at) "
+                  "VALUES ('OUT', :v, '2026-09-01 00:00:00', '2026-09-15 23:59:59')"), {"v": VENDOR})
+    db.commit()
+    c = pnl.promo_window_counts(db, D, D)
+    assert c == {"promos": 0, "unpriced": 0}
+
+
+def test_promo_window_counts_zero_promos_is_not_unknown(db):
+    """프로모션이 창에 하나도 없으면 `{"promos": 0, "unpriced": 0}` — 이건 «모름»(테이블
+    없음=None)이 아니라 «프로모션이 없었다»는 사실이다. A6이 이 경우를 pass로 판정할
+    근거가 바로 이 구분이다."""
+    c = pnl.promo_window_counts(db, D, D)
+    assert c is not None
+    assert c == {"promos": 0, "unpriced": 0}

@@ -363,6 +363,35 @@ WHERE pr.vendor_id = :vendor
 """
 
 
+_PROMO_TOTAL_SQL = """
+SELECT COUNT(*) FROM coupang_rocket_promotion pr
+WHERE pr.vendor_id = :vendor
+  AND date(pr.start_at) <= :until AND date(pr.end_at) >= :since
+"""
+
+
+def promo_window_counts(db: Session, date_from: date, date_to: date,
+                        vendor_id: str | None = None) -> dict | None:
+    """창에 걸친 프로모션 수와 그중 할인액 원천이 없는 수. 테이블이 없으면 None(모름).
+
+    손익 근거 화면의 A6 검사가 쓴다 — «분담금 0»과 «분담금 모름»을 가르는 판정자
+    (`_promo_burden_by_day`의 unpriced 가드)를 **개수로** 보여 검사의 좌·우변을 만든다.
+
+    ★창 조건은 `_PROMO_UNPRICED_SQL`과 **문자 그대로 같다** — 두 쿼리가 다른 창을 보면
+    A6의 좌변(전체 프로모션 수)과 우변(그중 미상 수)이 다른 모집단을 세게 되어
+    「전건 일치」 판정이 거짓이 된다.
+    """
+    insp = sa_inspect(db.get_bind())
+    if not (insp.has_table("coupang_rocket_promotion")
+            and insp.has_table("coupang_promo_discount_item")):
+        return None
+    params = {"vendor": vendor_id or ROCKET_1P_VENDOR_ID,
+              "since": date_from.isoformat(), "until": date_to.isoformat()}
+    promos = int(db.execute(text(_PROMO_TOTAL_SQL), params).scalar() or 0)
+    unpriced = int(db.execute(text(_PROMO_UNPRICED_SQL), params).scalar() or 0)
+    return {"promos": promos, "unpriced": unpriced}
+
+
 def _promo_burden_by_day(db: Session, date_from: date, date_to: date,
                          vendor_id: str | None = None) -> dict[str, Decimal] | None:
     """일자별 프로모션 분담금. **모르면 None** — 0으로 접지 않는다.
