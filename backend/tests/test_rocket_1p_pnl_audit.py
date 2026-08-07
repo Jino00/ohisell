@@ -888,3 +888,132 @@ def test_atom_detail_returns_null_atom_for_a_day_with_no_sale(db):
     r = _detail(db, D_PREV, D, D_PREV, "A")
     assert r["atom"] is None and r["sales"] is None
     assert r["date"] == D_PREV.isoformat() and r["option_id"] == "A"
+
+
+# ═══ ⑥ 라우터 — 창을 정하는 곳은 여기 하나다 ═══
+
+
+@pytest.fixture
+def client():
+    """세 엔드포인트를 라이브 배선 그대로 부른다(서비스 직접 호출로는 못 보는 것을 본다).
+
+    ★서비스 단위 테스트가 전부 통과해도 **라우터가 창을 갈라 넘기면** 근거가 화면과 다른
+      답을 낸다. 그 배선을 여기서 본다.
+    """
+    from fastapi.testclient import TestClient
+
+    from app.database import get_db
+    from app.main import app
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False},
+                           poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+    def _override_get_db():
+        s = Session()
+        try:
+            yield s
+        finally:
+            s.close()
+
+    app.dependency_overrides[get_db] = _override_get_db
+    seed = Session()
+    seed.add(Channel(id=5, code="COUPANG_ROCKET", name="쿠팡 로켓배송", platform="coupang",
+                     channel_type="consignment", company="주식회사 오하이테크"))
+    seed.commit()
+    yield TestClient(app), seed
+    seed.close()
+    app.dependency_overrides.clear()
+
+
+_Q = {"date_from": D_PREV.isoformat(), "date_to": D.isoformat()}
+
+
+def test_router_three_endpoints_answer_for_the_same_window(client):
+    """세 엔드포인트가 200을 내고 **같은 창**을 답한다 — 창이 갈리면 근거가 화면과 갈린다."""
+    c, seed = client
+    _full_fixture(seed)
+
+    ck = c.get("/api/coupang/ops/rocket/pnl-audit/checks", params=_Q)
+    assert ck.status_code == 200, ck.text
+    ckb = ck.json()
+    assert ckb["period"]["from"] == _Q["date_from"] and ckb["period"]["to"] == _Q["date_to"]
+    assert {x["id"] for x in ckb["checks"]} == {"A1", "A2", "A3", "A4", "A5", "A6", "A7",
+                                                "B1", "B2", "B3"}
+    assert ckb["ladder"]["net_profit"] is not None
+
+    at = c.get("/api/coupang/ops/rocket/pnl-audit/atoms", params=_Q)
+    assert at.status_code == 200, at.text
+    atb = at.json()
+    assert atb["period"] == {"from": _Q["date_from"], "to": _Q["date_to"]}
+    assert atb["count"] == atb["total"] == 4 and atb["option_count"] == 2
+    assert atb["option_table_truncated"] is False
+    # ★사다리와 원자 목록이 **같은 순이익**을 말한다(이 픽스처는 ad_no_sales가 0이다).
+    assert ckb["ladder"]["ad_no_sales"] == "0"
+    assert atb["totals"]["net_profit"] == ckb["ladder"]["net_profit"]
+
+    one = atb["atoms"][0]
+    dt = c.get("/api/coupang/ops/rocket/pnl-audit/atom",
+               params={**_Q, "date": one["date"], "option_id": one["option_id"]})
+    assert dt.status_code == 200, dt.text
+    dtb = dt.json()
+    # 상세의 원자가 목록의 그 행과 **같은 값**이다 — 재계산이 아니라 같은 출처를 걸렀다.
+    assert dtb["atom"]["net_profit"] == one["net_profit"]
+    assert dtb["sales"]["qty"] == one["qty"]
+
+
+def test_router_atom_detail_keeps_the_screen_window(client):
+    """★라이브 배선에서의 창 계약 — 넓은 창으로 물으면 «—»(모름), 하루로 좁히면 숫자.
+
+    화면은 자기가 보고 있는 창을 넘긴다. 그 창에 제안서 없는 프로모션이 걸쳐 있으면 손익이
+    «모름»인데, 라우터가 창을 상세용으로 좁혀 버리면 근거만 숫자를 내놓는다.
+    """
+    c, seed = client
+    _sale(seed, "A", "S1", 10, "1000000")
+    _price(seed, "S1", "60000", 1)
+    _cost(seed, "S1", 20000)
+    seed.execute(_t("INSERT INTO coupang_rocket_promotion "
+                    "(request_id, vendor_id, start_at, end_at) "
+                    "VALUES ('686180', :v, '2026-08-01 00:00:00', '2026-08-02 23:59:59')"),
+                 {"v": VENDOR})
+    seed.commit()
+    p = {"date": D.isoformat(), "option_id": "A"}
+    wide = c.get("/api/coupang/ops/rocket/pnl-audit/atom",
+                 params={**p, "date_from": "2026-08-01", "date_to": D.isoformat()}).json()
+    assert wide["atom"]["burden_known"] is False and wide["atom"]["net_profit"] is None
+    narrow = c.get("/api/coupang/ops/rocket/pnl-audit/atom",
+                   params={**p, "date_from": D.isoformat(), "date_to": D.isoformat()}).json()
+    assert narrow["atom"]["net_profit"] is not None
+    # ★원천 행(판매)은 창과 무관하다 — 갈리는 것은 분담금 축뿐이라는 증거.
+    assert wide["sales"] == narrow["sales"]
+
+
+def test_router_checks_die_instead_of_comparing_a_screen_from_another_window(client,
+                                                                            monkeypatch):
+    """★검사 서비스의 창 대조가 **라이브 경로에서도** 도는지 본다.
+
+    서비스 단위 테스트는 «시키면 죽는다»만 보였다. 여기서는 라우터가 실수로 다른 창의
+    화면을 넘기는 상황을 만들어, 그 방어가 배선 안에서 실제로 발동하는지 확인한다.
+    조용히 대조하면 숫자가 그럴듯해서 아무도 눈치채지 못한다.
+    """
+    import app.routers.rocket_1p_pnl_audit as R
+    c, seed = client
+    _full_fixture(seed)
+    real = R.compute_rocket_1p_revenue
+    monkeypatch.setattr(R, "compute_rocket_1p_revenue",
+                        lambda db, f, t, v=None, limit=None: real(db, t, t, v, limit))
+    with pytest.raises(ValueError, match="창이 다릅니다"):
+        c.get("/api/coupang/ops/rocket/pnl-audit/checks", params=_Q)
+
+
+def test_router_rejects_a_malformed_or_inverted_window(client):
+    c, _ = client
+    assert c.get("/api/coupang/ops/rocket/pnl-audit/atoms",
+                 params={"date_from": "2026-13-99", "date_to": D.isoformat()}).status_code == 422
+    assert c.get("/api/coupang/ops/rocket/pnl-audit/checks",
+                 params={"date_from": D.isoformat(), "date_to": D_PREV.isoformat()}
+                 ).status_code == 422
+    # 목록 필터·정렬은 화이트리스트다 — 서비스가 조용히 «all»로 떨어지지 않게 라우터가 막는다.
+    assert c.get("/api/coupang/ops/rocket/pnl-audit/atoms",
+                 params={**_Q, "flt": "nope"}).status_code == 422

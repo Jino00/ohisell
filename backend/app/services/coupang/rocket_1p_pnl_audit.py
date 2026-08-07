@@ -553,7 +553,8 @@ def _int_or_none(v) -> int | None:
 
 
 def compute_pnl_audit_atom_detail(db: Session, date_from: date, date_to: date,
-                                  date_: date, option_id: str, ctx: dict) -> dict:
+                                  date_: date, option_id: str, ctx: dict,
+                                  vendor_id: str | None = None) -> dict:
     """4단 — 원자 1개의 다섯 갈래 원천 행. **행을 그대로 보인다** — 가공하면 근거가 아니다.
 
     ★없는 행은 null이다. 0으로 접으면 «수집 안 됨»이 «0원»으로 둔갑한다.
@@ -563,8 +564,11 @@ def compute_pnl_audit_atom_detail(db: Session, date_from: date, date_to: date,
       그래서 창을 이 모듈이 정하지 않고 라우터에게서 받는다.
     ★광고 행은 원자와 **같은 방식으로 접는다**(SUM). 접기가 다르면 근거와 화면의 광고비가
       갈리는데, 그 차이는 화면 어디에도 설명이 없다.
+    ★`vendor_id`는 **`ctx`를 뽑을 때 쓴 것과 같은 값**이라야 한다 — 원천 행과 원자가 다른
+      판매자를 세면 나란히 놓은 두 숫자가 서로 설명하지 못한다. 그래서 기본값으로 숨기지
+      않고 라우터가 한 곳에서 정해 둘 다에 넘긴다(창과 같은 이유).
     """
-    vendor = ROCKET_1P_VENDOR_ID
+    vendor = vendor_id or ROCKET_1P_VENDOR_ID
     d_iso = date_.isoformat()
 
     sales_row = db.execute(text(_ATOM_SALES_SQL),

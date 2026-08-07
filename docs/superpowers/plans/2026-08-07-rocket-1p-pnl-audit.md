@@ -1208,7 +1208,11 @@ export interface PnlAuditChecks {
   ladder: PnlAuditLadder;
   checks: PnlAuditCheck[];
 }
-export type PnlAuditCostSource = "manual" | "suggested" | "excluded" | "none";
+// ★Task 4 구현 시 교정(prod 실측 2026-08-07): 원가 미상을 «none» 하나로 접지 않는다 —
+//   할 일이 다르고, 접으면 다리가 있는 쪽(no_cost)에게 «다리 없음»이라는 거짓말이 된다.
+//   화면 SA의 `uncosted_reason`과 **같은 어휘**다.
+export type PnlAuditCostSource =
+  "manual" | "suggested" | "unknown" | "excluded" | "no_cost" | "no_link";
 export interface PnlAuditAtom {
   date: string; option_id: string; sku_id: string | null; product_name: string | null;
   qty: number; consumer_revenue: string; our_revenue: string | null;
@@ -1219,8 +1223,15 @@ export interface PnlAuditAtom {
 }
 export interface PnlAuditAtoms {
   period: { from: string; to: string };
-  burden_known: boolean; count: number;
-  totals: { qty: number; net_profit: string };
+  burden_known: boolean;
+  count: number;   // 필터 후 반환 수
+  total: number;   // 필터 전 원자 총수(목록 자체는 자르지 않는다)
+  // ★잘림 계약(Task 4): option_count > option_limit이면 화면 옵션 표가 잘려 A2·A7이
+  //   undetermined가 된다 — 화면이 「검사 2개가 왜 사라졌는지」를 말할 수 있어야 한다.
+  option_count: number; option_limit: number; option_table_truncated: boolean;
+  // ★net_profit은 **아는 행만** 더한 값이고, 아는 행이 없으면 null이다(0이 아니다).
+  totals: { qty: number; net_profit: string | null;
+            net_profit_known: number; net_profit_unknown: number };
   atoms: PnlAuditAtom[];
 }
 export interface PnlAuditAtomDetail {
@@ -1245,9 +1256,11 @@ export interface PnlAuditAtomDetail {
            match_method: string | null; note: string | null; updated_at: string | null } | null;
     master: { internal_sku: string; product_name: string | null; cost_price: string | null } | null;
   };
+  // row_count = 접은 원천 행 수(유니크 키에 conv_option_id가 있어 한 (날짜,옵션)에 행이
+  // 여럿일 수 있다 — 원자와 **같은 방식**으로 SUM 한다, Task 5 교정).
   ad: { report_date: string; ad_option_id: string; ad_spend: string | null;
         impressions: number | null; clicks: number | null; orders: number | null;
-        sales_qty: number | null } | null;
+        sales_qty: number | null; row_count: number } | null;
   promos: Array<{ request_id: string; start_at: string | null; end_at: string | null;
                   discount_type: string | null; discount_value: string | null }> | null;
 }
@@ -1340,8 +1353,10 @@ function Verdict({ v }: { v: PnlAuditCheck["verdict"] }) {
 const SOURCE_LABEL: Record<PnlAuditAtom["cost_source"], { text: string; cls: string }> = {
   manual: { text: "수기 확인", cls: "bg-green-50 text-green-700" },
   suggested: { text: "이름 유사도 — 사람 미확인", cls: "bg-amber-100 text-amber-800" },
+  unknown: { text: "확정 방법 미기록", cls: "bg-amber-50 text-amber-700" },
   excluded: { text: "원가 제외 결정", cls: "bg-gray-100 text-gray-600" },
-  none: { text: "다리 없음", cls: "bg-red-50 text-red-700" },
+  no_cost: { text: "원가 미등록 — 다리는 있음", cls: "bg-red-50 text-red-700" },
+  no_link: { text: "다리 없음 — 연결부터", cls: "bg-red-50 text-red-700" },
 };
 
 function DetailBlock({ title, children }: { title: string; children: React.ReactNode }) {
@@ -1407,6 +1422,11 @@ function AtomDetail({ date, optionId, from, to }: {
         </>) : "행 없음 — 그날 이 옵션에 광고 없음(손익에선 0원이 맞음)"}
       </DetailBlock>
       <DetailBlock title="⑤ 분담금 (프로모션 제안서)">
+        {/* ★Task 5 구현 시 확인: promos가 null인 경로는 프로모션·할인액 **두 테이블 중
+             하나라도 없을 때**다(빈 목록으로 내면 아래 «분담금 0은 사실» 문장이 거짓이 된다).
+           ⚠️Task 8 주의: 빈 목록도 «수집이 멈춰 그날 것을 못 본» 경우일 수 있다. 창 단위
+             신선도는 A6이 판정하므로, 이 문장은 **A6이 pass일 때만** 그대로 쓰고 그 밖에는
+             "그날 걸린 프로모션 없음(수집 신선도는 A6 참조)"으로 낮출 것. */}
         {data.promos == null ? "원천 테이블 없음(모름)" : data.promos.length === 0
           ? "그날 걸린 프로모션 없음 — 분담금 0은 사실"
           : data.promos.map((p, i) => (
