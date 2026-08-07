@@ -33,6 +33,8 @@
 - ✅ **`backend/requirements-dev.txt` 신설** — **테스트 의존성이 어디에도 선언돼 있지 않았다**(로컬은 pytest 전역 설치 덕). prod는 계속 `requirements.txt`만
 - ✅ **lint 추가** — 실측 60건 중 6건 수정(죽은 eslint-disable 4 · `argsIgnorePattern` 설정 교정 · 삼항을 문으로 쓴 오용 1), 나머지 52건은 **래칫**(warn 강등 + `--max-warnings 54`)
 - ✅ **`scripts/safe_merge.sh` 신설** — 브랜치 보호를 못 걸어서(§5) 도구로 대체. `CLAUDE.md` 금지선 절에 등재
+- ✅ **`.gitignore` `.env*` + `!.env.example`**(PR #246) — `.env.local`·`.env.production`이 **안 걸려 있었다**. 실물은 없었지만 만들어지는 순간 `git add -A`에 들어간다. 기존 추적 파일 중 새로 무시되는 것 **0건** 확인
+- ✅ **공유 메인 폴더 pre-commit 가드**(PR #249·#250, issue #247 종결) — `.githooks/pre-commit` + `scripts/install_hooks.sh`. **설치 완료·라이브 작동 확인**
 - ✅ 번호 충돌 재번호 — 병행 세션이 ref 49·교훈 #155~#162를 선점 → 내 것을 **ref 50 · 교훈 #163·#164**로 뒤로 밀었다(트랙에 재부여 사실 기록)
 
 ## 3. 확정된 결정사항 (번복 금지)
@@ -55,6 +57,8 @@
 | `.github/workflows/ci.yml` | CI. backend py3.10·3.14 매트릭스 + frontend |
 | `backend/requirements-dev.txt` | 테스트 의존성(런타임과 분리) |
 | `docs/tracks/active/track_coupang-promo-pnl.md` | D-CPP-21·22 + 번호 재부여 이력 |
+| `.githooks/pre-commit` | ★공유 메인 폴더 가드(워크트리는 즉시 통과) |
+| `scripts/install_hooks.sh` | 훅 설치. **새 클론마다 1회**(`core.hooksPath`는 커밋 안 되는 로컬 설정) |
 
 ## 5. 알려진 이슈 / 주의사항
 - **★브랜치 보호는 이 플랜에서 불가.** classic protection·rulesets **둘 다 403**(`Upgrade to GitHub Pro or make this repository public`). private+Free이고 Jino가 무료 유지 결정 → **CI는 보이기만 하고 병합을 못 막는다.** 같은 403을 재시도하지 말 것(메모리 `github-branch-protection-needs-pro.md`)
@@ -62,6 +66,9 @@
 - **lint 상한 54는 래칫이다.** 부채를 갚아 숫자가 줄면 `ci.yml`의 값도 같이 내릴 것(안 내리면 헐거워진다)
 - **번호 충돌은 `next_ids.sh`가 정상 동작해도 난다** — 도구가 번호를 준 시점과 병행 세션이 가져간 시점이 겹치면 막을 수 없다. 이번엔 ref·교훈이 동시에 겹쳤다(ref 49→50, #155·#156→#163·#164). PR 본문·커밋 메시지의 옛 번호는 못 고치므로 **트랙에 재부여 사실을 남기는 것**이 정본 처리
 - **적대 리뷰 1차가 P1=0을 냈는데 2차에서 P1 2건이 나왔다**(교훈 #164) — 자기 리뷰는 성실함이 아니라 **각도**를 바꿔야 두 번이 된다
+- **★`core.hooksPath`를 상대경로로 걸지 말 것.** 상대값은 **각 워킹트리 기준**으로 풀려서, 공유 폴더가 `.githooks` 없는 옛 브랜치에 있으면 **가드가 조용히 꺼진다** — 하필 가드가 필요한 그 상태다. `.git/ohisell-hooks/`에 복사 + 절대경로로 고쳤다(PR #250). **훅을 고치면 `install_hooks.sh`를 다시 돌릴 것**(복사본이라서)
+- **★공유 메인 폴더 규칙 위반은 08-07 기준 3회 관측**(08-06 · 08-07 오전 · 08-07 저녁 설치 시점). 훅 설치 당시 루트가 `claude/rocket-1p-new-unlinked`에 있었다 — 이제 훅이 거부한다
+- **되돌림에 `git reset --hard`를 쓰지 말 것** — 이번 세션에서 검증용 빈 커밋을 되돌리다 **커밋 안 된 수정을 스스로 날렸다**(그래서 PR #249가 옛 버전으로 병합되고 #250이 필요해졌다). 빈 커밋 되돌림은 `git reset --soft HEAD~1`로 충분하다
 - 시효 연수는 **적지 않았다** — 공식 1차 출처(law.go.kr) 접근 실패. 확인된 건 "최고령 374일"뿐
 
 ## 6. 다음에 할 작업 (미완료)
@@ -79,7 +86,9 @@
 - [ ] **원가 브리지 전환** — Jino 원가표 입력 대기(측정은 ref 47). 커버리지 79.26%, `rocket_product_cost_map` confirmed 184건 중 183건이 이름 유사도 자동 확정(교훈 #117 위반 상태)
 - [ ] 계산서 라인이 SKU 그레인이라 **원가 결합 경로가 열렸다** — 라인 단위 원가 매칭으로 정합도를 더 올릴 수 있는지 검토
 - [ ] lint 부채 52건(any 31 · react-refresh 11 · static-components 6 · set-state-in-effect 4) — 갚을 때 `ci.yml` 상한 동기화
-- [ ] 워크트리 4개 정리 가능(`receivable-aging` · `ci-setup` · `ci-lint` · `dcpp20-verify`)
+- [ ] **다른 클론·다른 사람 환경에는 훅이 안 걸려 있다** — `scripts/install_hooks.sh`를 1회 실행해야 한다(Jino의 이 맥은 설치 완료)
+- [x] ~~issue #247(공유 폴더 가드)~~ — ✅ 완료(PR #249·#250)
+- [ ] 워크트리 정리 가능(`receivable-aging` · `ci-setup` · `ci-lint` · `dcpp20-verify` · `handoff-235`)
 
 ## 7. 새 세션 시작 프롬프트
 ```
