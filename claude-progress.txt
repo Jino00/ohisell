@@ -1,3 +1,20 @@
+[2026-08-07 12:5x] CI 후속 — lint 래칫 + 병합 가드 (PR #233·#234)
+  · lint: 실측 60건 → **고친 것 6건**(죽은 eslint-disable 4 · `_rgFf`는 변수가 아니라 설정을
+    의도에 맞춤 `argsIgnorePattern` · 삼항을 문으로 쓴 오용 1). 나머지 52건은 테스트 없는
+    페이지의 동작 변경이라 안 고치고 **래칫**으로 묶음 — warn 강등 + CI `--max-warnings 54`
+    (늘면 실패, 줄면 값도 내린다). 결과 error 0 · warning 54 · tsc 0 · vitest 212 · CI 3/3
+  · ★**브랜치 보호는 이 플랜에서 불가**(Jino 결정: Pro 업그레이드 안 함, 무료 유지).
+    classic protection·rulesets **둘 다 403** "Upgrade to GitHub Pro or make public".
+    → CI는 보이기만 하고 병합을 못 막는다. 메모리에 기록(같은 403 재시도 방지)
+  · 대안으로 `scripts/safe_merge.sh` 신설 — safe_deploy.sh·next_ids.sh와 같은 계열
+    (규칙이 아니라 도구). 막는 것 셋: ①빨간 CI 병합 ②**체크 0건을 초록으로 오독**(교훈 #123)
+    ③CONFLICTING(PR #231 실사고). ★차단이 아니라 **거부+자백** — `--force`가 있고 쓰면
+    화면·로그에 남는다(전역 §1: 빨간 병합은 revert 가능 → 하드 게이트 근거 없음)
+  · ⚠️이월(lint 켜다 발견, 미수정): `AdReport.tsx:76`·`CommandCenter.tsx:267`의
+    `syncAndLoad`가 `await syncRealtime()` 뒤에 **mount 시점 기간**으로 doFetch를 부른다 →
+    동기화가 길면(253초 전례) 그 사이 바뀐 기간을 옛 값으로 덮는다. 08-06에 다른 화면엔
+    넣은 `loadRef`/`selRef`/`reqSeq` 가드가 이 두 페이지엔 없다
+
 [2026-08-07 08:1x] CI 신설 — 이 repo엔 검사가 하나도 없었다 (PR #232, 교훈 #165)
   · 출발점: PR #231의 회색 CI 칩. `gh pr checks` → no checks reported. #231만이 아니라
     #230·#228·#227 전부 그랬다 — 원인은 `.github/workflows/` **부재**(고장이 아니라 미설정)
