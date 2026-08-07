@@ -86,9 +86,14 @@ def build_connection_map(
     ):
         owner.setdefault((cid, cpid), set()).add(prod)
 
-    # 원가가 같으면 «공유», 다르면 «충돌». ★product_id가 마스터에 없으면(고아 매핑) 원가를
-    #   None으로 두어 «충돌»로 떨어뜨린다 — 2026-08-07에 실제로 존재하지 않는 상품을 가리키는
-    #   매핑이 있었고, 그건 «금액 영향 없음»이라 부를 수 있는 상태가 아니다.
+    # 원가가 같으면 «공유», 다르면 «충돌».
+    # ★«알 수 있는 원가»의 정의를 손익 엔진과 같은 축에 둔다: `_cost_of_line`은 falsy 원가
+    #   (0·없음)를 «미상»으로 보고 그 라인 원가를 아예 빼 버린다(cost_price가 NOT NULL
+    #   default 0이라 미입력과 실제 0을 구분할 수 없기 때문). 그래서 여기서도 0·None이 끼면
+    #   «공유»로 접지 않는다 — **엔진이 원가를 못 셈하는 상태**와 **원가가 같은 상태**는 다르고,
+    #   전자를 회색 「금액 영향 없음」으로 칠하면 그 결손이 안심 문구 뒤로 숨는다.
+    #   None이 나오는 실제 경우 = product_id가 마스터에 없는 고아 매핑(2026-08-07 라이브에
+    #   product_id=2628로 실재했다. 상품 최대 id는 949였다).
     cost_of = dict(db.query(ProductMaster.id, ProductMaster.cost_price).all())
     conflict_keys: set[tuple[int, str]] = set()
     shared_keys: set[tuple[int, str]] = set()
@@ -96,7 +101,7 @@ def build_connection_map(
         if len(prods) < 2:
             continue
         distinct_costs = {cost_of.get(pid) for pid in prods}
-        if len(distinct_costs) == 1 and None not in distinct_costs:
+        if len(distinct_costs) == 1 and all(distinct_costs):
             shared_keys.add(k)
         else:
             conflict_keys.add(k)

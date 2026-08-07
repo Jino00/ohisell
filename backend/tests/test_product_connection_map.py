@@ -124,6 +124,22 @@ def test_same_cost_is_shared_not_conflict(db):
     assert row1.cells[s["naver"].id][0].shared is False
 
 
+def test_zero_cost_pair_is_conflict_not_shared(db):
+    """둘 다 원가 0이면 «공유»가 아니라 «충돌» — 손익 엔진과 같은 축이어야 한다.
+
+    `_cost_of_line`은 falsy 원가(0·없음)를 «미상»으로 보고 그 라인 원가를 아예 뺀다
+    (cost_price가 NOT NULL default 0이라 미입력과 실제 0을 구분할 수 없다). 그 상태를 회색
+    「원가 동일 · 금액 영향 없음」으로 칠하면 원가 결손이 안심 문구 뒤로 숨는다.
+    """
+    s = _seed(db)
+    s["p1"].cost_price = Decimal("0")
+    s["p2"].cost_price = Decimal("0")
+    db.commit()
+    cmap = build_connection_map(db)
+    assert cmap.shared_option_count == 0
+    assert cmap.conflict_option_count == 1
+
+
 def test_orphan_mapping_counts_as_conflict(db):
     """존재하지 않는 상품을 가리키는 매핑은 «공유»가 아니라 «충돌»이다.
 
