@@ -63,6 +63,13 @@ jobs:
       - name: typecheck
         working-directory: frontend
         run: npx tsc -b
+      # ★래칫: error는 0이어야 하고, warning은 **늘어나면** 실패한다(2026-08-07 실측 54).
+      #   부채를 0으로 만들 때까지 CI를 미루면 그동안 새 위반이 계속 들어온다 —
+      #   총량을 고정해 두면 "지금부터 안 는다"가 오늘 보장된다.
+      #   ⚠️부채를 갚아 숫자가 줄면 이 값도 같이 내릴 것(안 내리면 래칫이 헐거워진다).
+      - name: lint
+        working-directory: frontend
+        run: npx eslint . --max-warnings 54
       - name: test
         working-directory: frontend
         run: npm run test

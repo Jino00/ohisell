@@ -396,7 +396,8 @@ export default function CoupangOps() {
     function toggleVal(v: string) {
       setColExcluded((prev) => {
         const next = new Set(prev[col] ?? []);
-        next.has(v) ? next.delete(v) : next.add(v);
+        if (next.has(v)) next.delete(v);
+        else next.add(v);
         return { ...prev, [col]: next };
       });
     }
