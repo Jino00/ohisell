@@ -403,6 +403,19 @@ export const RG_STREAM_SPECS: StreamRefreshSpec[] = [
 export const ALL_REFRESH_SPECS: StreamRefreshSpec[] = [...STREAM_SPECS, ...RG_STREAM_SPECS];
 
 /**
+ * 스트림 key 하나로 spec을 집는다. **없는 key는 던진다** — 조용히 undefined를 돌려주면
+ * 버튼이 아무것도 갱신하지 않으면서 성공한 척한다(specsForKeys와 같은 이유).
+ *
+ * 2026-08-07 커맨드센터 로컬 함수에서 여기로 올림 — 통합 대사 화면이 두 번째 호출자가 되면서
+ * 사본이 둘이 될 참이었다(LESSONS #55: 우회 사본이 원본 결함을 은폐한다).
+ */
+export function specByKey(key: string): StreamRefreshSpec {
+  const s = STREAM_SPECS.find((x) => x.key === key);
+  if (!s) throw new Error(`알 수 없는 스트림: ${key}`);
+  return s;
+}
+
+/**
  * 배너 항목(collection-status key)들을 갱신 대상 spec으로.
  *
  * ★모르는 key를 **조용히 버리지 않는다**(codex R1[P2]): 백엔드가 스트림 key를 추가·개명하면

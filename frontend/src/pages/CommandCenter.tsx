@@ -26,16 +26,9 @@ import {
   runStreamRefresh,
   runStreamsRefresh,
   describeOutcome,
-  STREAM_SPECS,
+  specByKey,
   RG_STREAM_SPECS,
-  type StreamRefreshSpec,
 } from "../lib/streamRefresh";
-
-function specByKey(key: string): StreamRefreshSpec {
-  const s = STREAM_SPECS.find((x) => x.key === key);
-  if (!s) throw new Error(`알 수 없는 스트림: ${key}`);
-  return s;
-}
 
 function isoKST(d: Date): string {
   const kst = new Date(d.toLocaleString("en-US", { timeZone: "Asia/Seoul" }));
