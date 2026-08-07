@@ -1017,3 +1017,184 @@ def test_router_rejects_a_malformed_or_inverted_window(client):
     # 목록 필터·정렬은 화이트리스트다 — 서비스가 조용히 «all»로 떨어지지 않게 라우터가 막는다.
     assert c.get("/api/coupang/ops/rocket/pnl-audit/atoms",
                  params={**_Q, "flt": "nope"}).status_code == 422
+
+
+# ═══ ⑦ 경계 적대 리뷰 반영 — P1(창 계약) · P2(필터·정렬·합계·배지) ═══
+
+
+def _confirmed_loss(db, option_id="L", sku="S9", *, d=D):
+    """원가를 몰라도 **부호는 아는** 행 — 상한(원가 0 가정)이 음수면 적자 확정이다."""
+    _sale(db, option_id, sku, 1, "3000", d=d)
+    _price(db, sku, "1000", 9)          # 우리 매출 1,000원
+    _ad_option(db, option_id, "50000", d=d)   # 광고비가 매출을 압도한다
+
+
+def test_atom_detail_refuses_a_date_outside_the_window(db):
+    """★창 밖 날짜를 조용히 답하면 `atom: null`의 뜻이 **둘**이 된다.
+
+    「그날 판매 없음」과 「창 밖이라 원자를 못 찾음」이 같은 null인데, 후자는 원천 행(판매)이
+    버젓이 붙어 나온다 — 프론트가 「원자 없음」으로 그리면 바로 옆 판매행과 모순된 화면이다.
+    그래서 답하지 않고 죽는다(검사 SA의 창 대조와 같은 방식).
+    """
+    _sale(db, "A", "S1", 4, "400000", d=D_PREV)
+    _price(db, "S1", "60000", 1)
+    db.commit()
+    with pytest.raises(ValueError, match="창 밖입니다"):
+        _detail(db, D, D, D_PREV, "A")
+    # 창 안이면 정상 응답이고, **쓴 창을 되돌려준다**(창-종속 값이라 사후 대조가 필요하다).
+    ok = _detail(db, D_PREV, D, D_PREV, "A")
+    assert ok["period"] == {"from": D_PREV.isoformat(), "to": D.isoformat()}
+
+
+def test_atoms_apply_option_id_and_filter_together(db):
+    """★`option_id`와 `flt`는 함께 걸린다 — 예전엔 elif라 option_id가 오면 flt가 무시됐다.
+
+    「사람 미확인만」 칩을 켠 화면에 수기 확인 행이 뜨면 그건 거짓 표시다. 조건이 겹치면
+    결과가 비는 게 옳다.
+    """
+    _sale(db, "A", "S1", 10, "1000000")
+    _price(db, "S1", "60000", 1)
+    _cost(db, "S1", 20000, match_method="manual")     # A는 «수기 확인»이다
+    _sale(db, "B", "S2", 5, "500000")
+    _price(db, "S2", "50000", 2)
+    _cost(db, "S2", 15000, match_method="suggested")
+    db.commit()
+    assert _atoms(db, D, D, option_id="A", flt="suggested")["atoms"] == []
+    assert [x["option_id"] for x in _atoms(db, D, D, option_id="B", flt="suggested")["atoms"]] \
+        == ["B"]
+
+
+def test_atoms_echo_the_query_that_produced_the_totals(db):
+    """`totals`는 **필터 후** 행의 합이다 — 무엇으로 걸렀는지 없으면 부분합인지 알 수 없다."""
+    _sale(db, "A", "S1", 10, "1000000")
+    _price(db, "S1", "60000", 1)
+    _cost(db, "S1", 20000, match_method="suggested")
+    db.commit()
+    r = _atoms(db, D, D, sort="date", flt="suggested", option_id="A")
+    assert r["query"] == {"sort": "date", "flt": "suggested", "option_id": "A"}
+
+
+def test_atoms_treat_a_confirmed_loss_as_a_loss_in_both_filter_and_sort(db):
+    """★★원가를 몰라도 상한이 음수면 **적자 확정**이다 — 필터에도 정렬에도 그렇게 잡혀야 한다.
+
+    직전 라운드가 P1으로 잡은 것이 «적자 확정을 «—»로 은폐»였다. 필터는 고쳤는데 정렬이
+    그 행을 «모름»으로 취급해 **흑자 뒤로** 보내면, 「적자 큰 순」 화면의 맨 위가 흑자가 되어
+    같은 은폐가 정렬 축으로 되돌아온다.
+    """
+    _sale(db, "P", "S1", 10, "1000000")           # 흑자
+    _price(db, "S1", "60000", 1)
+    _cost(db, "S1", 20000, match_method="manual")
+    _sale(db, "N", "S2", 1, "50000")              # 적자(순이익을 안다)
+    _price(db, "S2", "50000", 2)
+    _cost(db, "S2", 15000, match_method="manual")
+    _ad_option(db, "N", "100000")
+    _confirmed_loss(db, "L", "S9")                # 적자 확정(순이익은 모른다)
+    _sale(db, "U", "S8", 3, "300000")             # 발주 없음 → 부호조차 모름
+    db.commit()
+
+    by = {a["option_id"]: a for a in _atoms(db, D, D)["atoms"]}
+    assert by["L"]["net_profit"] is None and Decimal(by["L"]["net_profit_upper"]) < ZERO_D
+    assert by["U"]["net_profit"] is None and by["U"]["net_profit_upper"] is None
+
+    # ① 필터 — 확정 적자가 «적자만»에 들어온다(부호를 아는 행이라서)
+    assert {x["option_id"] for x in _atoms(db, D, D, flt="loss")["atoms"]} == {"N", "L"}
+
+    # ② 정렬 — 확정 적자는 흑자 **앞**이고, 부호조차 모르는 행만 맨 뒤다
+    order = [x["option_id"] for x in _atoms(db, D, D, sort="net")["atoms"]]
+    assert order[-1] == "U"                       # 모름을 0으로 끼워 넣지 않는다
+    assert order.index("L") < order.index("P")    # 확정 적자가 흑자보다 앞
+
+
+def test_atoms_badge_does_not_claim_manual_when_the_method_is_unrecorded(db):
+    """★확정 방법이 기록에 없는데 «수기 확인»이라고 하면 그건 지어낸 문장이다.
+
+    배지 어휘를 6종으로 늘린 이유가 바로 이 자리다 — prod에는 그런 행이 없지만(267행 전건
+    manual/suggested, 2026-08-07 실측), 없다는 것과 «있으면 manual로 부른다»는 다른 말이다.
+    """
+    _sale(db, "A", "S1", 10, "1000000")
+    _price(db, "S1", "60000", 1)
+    _cost(db, "S1", 20000)                        # match_method 미기록(NULL)
+    db.commit()
+    a = _atoms(db, D, D)["atoms"][0]
+    assert a["cost"] is not None                  # 원가는 붙었다
+    assert a["cost_source"] == "unknown"          # 그런데 «누가 확인했나»는 모른다
+
+
+def test_atoms_totals_say_how_much_money_sits_outside_the_net_sum(db):
+    """★행 수만으로는 «얼마가 빠졌는지»를 알 수 없다 — 금액으로도 낸다.
+
+    라이브 실측(창 2026-08-01~08-07): 원가 제외 결정(excluded)만으로 원자 22개·납품가
+    437,110원이 순이익 합에서 빠져 있었다. 행 수 22만 보고는 그게 큰돈인지 알 수 없다.
+    """
+    _sale(db, "A", "S1", 10, "1000000")           # 순이익에 들어가는 행
+    _price(db, "S1", "60000", 1)
+    _cost(db, "S1", 20000, match_method="manual")
+    _sale(db, "C", "S3", 3, "300000")             # 원가 제외 결정 → 순이익에서 빠진다
+    _price(db, "S3", "40000", 3)
+    db.execute(_t("INSERT INTO rocket_product_cost_map "
+                  "(product_number, internal_sku, status, match_method) "
+                  "VALUES ('S3', NULL, 'ignored', 'manual')"))
+    _sale(db, "U", "S8", 2, "200000")             # 우리 매출조차 모르는 행(발주 없음)
+    db.commit()
+    t = _atoms(db, D, D)["totals"]
+    assert Decimal(t["revenue_in_net"]) == Decimal("600000")      # 10 × 60,000
+    assert Decimal(t["revenue_out_of_net"]) == Decimal("120000")  # 3 × 40,000 — 조용히 빠진 돈
+    # ★빠진 행 중 **매출도 모르는** 행은 그 금액에 못 더한다 — 0으로 접으면 과소로 보인다.
+    assert t["revenue_out_of_net_unknown"] == 1
+    assert t["net_profit_unknown"] == 2
+
+
+def test_router_atom_requires_its_window_and_refuses_dates_outside_it(client):
+    """★P1 — `/atom`만 창 가드가 없었다. 창-종속 값을 내면서 창을 안 밝히면 사후 감지가 불가능하다."""
+    c, seed = client
+    _full_fixture(seed)
+    base = {"date": D.isoformat(), "option_id": "O1"}
+    # ① 창 생략 → 422(라우터가 대신 정해 주면 «모름이 숫자로 바뀐 것»을 알 수 없다)
+    assert c.get("/api/coupang/ops/rocket/pnl-audit/atom", params=base).status_code == 422
+    assert c.get("/api/coupang/ops/rocket/pnl-audit/atom",
+                 params={**base, "date_from": D_PREV.isoformat()}).status_code == 422
+    # ② 창 밖 날짜 → 422 (`atom: null`의 뜻이 둘이 되지 않게)
+    out = c.get("/api/coupang/ops/rocket/pnl-audit/atom",
+                params={"date": "2026-07-20", "option_id": "O1",
+                        "date_from": D_PREV.isoformat(), "date_to": D.isoformat()})
+    assert out.status_code == 422 and "밖입니다" in out.json()["detail"]
+    # ③ 정상 — 쓴 창을 period로 되돌려준다(다른 두 엔드포인트와 같은 모양)
+    ok = c.get("/api/coupang/ops/rocket/pnl-audit/atom",
+               params={**base, "date_from": D_PREV.isoformat(), "date_to": D.isoformat()})
+    assert ok.status_code == 200
+    assert ok.json()["period"] == {"from": D_PREV.isoformat(), "to": D.isoformat()}
+
+
+def test_router_checks_call_the_screen_with_the_shared_atom_limit(client, monkeypatch):
+    """★`/checks`가 자기 숫자를 쓰면 「옵션 표가 잘리면 undetermined」 계약이 두 곳으로 흩어진다.
+
+    픽스처 옵션이 2개뿐이라 기본값 100을 써도 결과가 같아 **변이가 살아남았다**. 그래서
+    결과가 아니라 **넘긴 인자**를 본다. (라이브 창 2026-08-01~08-07은 옵션 123개라 —
+    2026-08-08 prod 실측 — 100이면 실제로 A2·A7이 undetermined가 된다.)
+    """
+    import app.routers.rocket_1p_pnl_audit as R
+    c, seed = client
+    _full_fixture(seed)
+    seen: list = []
+    real = R.compute_rocket_1p_revenue
+    monkeypatch.setattr(R, "compute_rocket_1p_revenue",
+                        lambda db, f, t, v=None, limit=None: (seen.append(limit),
+                                                              real(db, f, t, v, limit))[1])
+    assert c.get("/api/coupang/ops/rocket/pnl-audit/checks", params=_Q).status_code == 200
+    assert seen == [R.ATOM_LIMIT]
+
+
+def test_router_passes_its_vendor_to_the_atom_detail(client, monkeypatch):
+    """★원천 행과 원자가 **같은 판매자**를 세야 한다 — 안 넘기면 상세만 기본 vendor로 본다.
+
+    라우터가 vendor를 안 넘기면 원자는 «없음»인데 판매행은 붙어 나온다(서로 설명하지 못하는
+    두 숫자). 낯선 vendor로 물어 그 갈림이 실제로 없는지 본다.
+    """
+    import app.routers.rocket_1p_pnl_audit as R
+    c, seed = client
+    _full_fixture(seed)
+    monkeypatch.setattr(R, "_ROCKET_VENDOR_ID", "A99999999")
+    b = c.get("/api/coupang/ops/rocket/pnl-audit/atom",
+              params={"date": D.isoformat(), "option_id": "O1",
+                      "date_from": D_PREV.isoformat(), "date_to": D.isoformat()}).json()
+    assert b["atom"] is None and b["sales"] is None      # 둘 다 그 판매자에겐 없다

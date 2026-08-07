@@ -97,16 +97,25 @@ def pnl_audit_atoms(date_from: str | None = Query(None), date_to: str | None = Q
 
 @router.get("/atom")
 def pnl_audit_atom(date_: str = Query(..., alias="date"), option_id: str = Query(...),
-                   date_from: str | None = Query(None), date_to: str | None = Query(None),
+                   date_from: str = Query(...), date_to: str = Query(...),
                    db: Session = Depends(get_db)):
     """4단 — 원자 1개의 다섯 갈래 원천 행.
 
-    ★`date_from`·`date_to`는 **화면이 보고 있는 창**이다(생략하면 최근 7일 KST). 이 창으로
-      원자를 뽑아 `date`로 거른다 — 하루로 좁히면 분담금 «모름» 판정이 달라져 화면이 «—»로
-      그린 행에 숫자가 찍힌다.
+    ★★`date_from`·`date_to`는 **필수**다(다른 둘과 달리 기본 창이 없다). 이 응답의
+      `atom.net_profit`·`burden_known`·`promo_burden`은 **창-종속**이라, 창을 라우터가
+      대신 정해 주면 화면이 «—»로 그린 행에 근거가 숫자를 찍어도 **응답만 보고는 알 수
+      없다**. 생략을 422로 막고, 쓴 창을 `period`로 되돌려준다.
+    ★`date`가 그 창 밖이면 **422**다. 안 막으면 원자는 없는데 원천 행은 붙어 나오는 응답이
+      생기고, `atom: null`이 「그날 판매 없음」과 「창 밖」 두 가지를 뜻하게 된다. 막았으므로
+      이 엔드포인트에서 `atom: null`은 **「그날 그 옵션에 판매행이 없다」 하나**를 뜻한다.
     """
     d = _parse(date_, "date")
     dfrom, dto = _window(date_from, date_to)
+    if not (dfrom <= d <= dto):
+        raise HTTPException(
+            status_code=422,
+            detail=f"date={date_}가 조회 창 [{dfrom.isoformat()}, {dto.isoformat()}] 밖입니다 — "
+                   "원자 상세는 화면이 보고 있는 창 안의 날짜만 답합니다(창-종속 값이라서).")
     ctx = day_option_atoms(db, dfrom, dto, _ROCKET_VENDOR_ID)
     return _jsonify(compute_pnl_audit_atom_detail(db, dfrom, dto, d, option_id, ctx,
                                                   _ROCKET_VENDOR_ID))

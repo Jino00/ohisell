@@ -386,6 +386,25 @@ _COST_SRC_SQL = "SELECT product_number, status, match_method FROM rocket_product
 _KNOWN_MATCH_METHODS = ("manual", "suggested")
 
 
+def _net_sort_key(x: dict) -> tuple[bool, Decimal]:
+    """「적자 큰 순」 정렬 키. ★**확정 적자를 흑자 뒤로 보내지 않는다.**
+
+    원가를 몰라도 부호는 아는 행이 있다 — `net_profit_upper`는 원가를 0으로 놓은 **상한**이고
+    (원자 SA는 이 값을 그 상한이 **음수일 때만** 채운다), 원가는 0 이상이므로 실제 순이익은
+    그 값 **이하**다. 즉 원가가 얼마든 적자가 확정된 행이다.
+    그런 행을 net=None이라는 이유로 뒤로 보내면 「적자 큰 순」 화면의 맨 위가 흑자가 되고,
+    직전 라운드가 P1으로 잡았던 «적자 확정을 «—»로 은폐» 가 정렬 축으로 되돌아온다.
+    · 순이익을 아는 행 → 그 값
+    · 모르지만 상한이 있는 행 → 그 상한(보수적 배치 — 실제는 이보다 나쁘거나 같다)
+    · 부호조차 모르는 행 → **맨 뒤**(모름을 0으로 끼워 순서를 속이지 않는다)
+    """
+    if x["net_profit"] is not None:
+        return (False, Decimal(x["net_profit"]))
+    if x["net_profit_upper"] is not None:
+        return (False, Decimal(x["net_profit_upper"]))
+    return (True, ZERO)
+
+
 def compute_pnl_audit_atoms(db: Session, date_from: date, date_to: date, ctx: dict,
                             sort: str = "revenue", flt: str = "all",
                             option_id: str | None = None) -> dict:
@@ -442,9 +461,12 @@ def compute_pnl_audit_atoms(db: Session, date_from: date, date_to: date, ctx: di
     total = len(rows)
     option_count = len({a["option_id"] for a in ctx["atoms"]})
 
+    # ★`option_id`와 `flt`는 **함께 적용된다**(예전엔 elif 사슬이라 option_id가 오면 flt가
+    #   조용히 무시됐다). 「사람 미확인만」 칩을 켠 화면에 수기 확인 행이 뜨는 것은 거짓
+    #   표시다 — 조건이 겹치면 결과가 비는 게 옳지, 한쪽을 버리는 게 옳지 않다.
     if option_id:
         rows = [x for x in rows if x["option_id"] == option_id]
-    elif flt == "loss":
+    if flt == "loss":
         # 적자 = 순이익이 음수이거나, 원가를 몰라도 **상한이 음수**(확정 적자)인 행.
         rows = [x for x in rows
                 if (x["net_profit"] is not None and Decimal(x["net_profit"]) < ZERO)
@@ -459,9 +481,7 @@ def compute_pnl_audit_atoms(db: Session, date_from: date, date_to: date, ctx: di
     if sort == "date":
         rows.sort(key=lambda x: (x["date"], x["option_id"]))
     elif sort == "net":
-        # 적자 큰 순 — 모름(None)은 뒤로(모름을 0으로 끼워 순서를 속이지 않는다)
-        rows.sort(key=lambda x: (x["net_profit"] is None,
-                                 Decimal(x["net_profit"]) if x["net_profit"] is not None else ZERO))
+        rows.sort(key=_net_sort_key)
     else:  # revenue(기본): 우리 매출 큰 순, 단가 미상은 뒤로
         rows.sort(key=lambda x: (x["our_revenue"] is None,
                                  -(Decimal(x["our_revenue"]) if x["our_revenue"] is not None else ZERO)))
@@ -469,10 +489,22 @@ def compute_pnl_audit_atoms(db: Session, date_from: date, date_to: date, ctx: di
     # ★★합계는 **아는 행만** 더한 값이다. 아는 행이 하나도 없으면 «0원»이 아니라 None이다 —
     #   분담금 미상 창에서 전 행의 net이 None인데 합계가 "0"이면 화면에 「순이익 0원」이 뜬다.
     #   섞여 있을 때를 위해 모르는 행 수를 함께 싣는다(부분합을 전체로 읽지 않게).
+    # ★★★**행 수만으로는 얼마가 빠졌는지 알 수 없다** — 그래서 «순이익에 반영된 매출»과
+    #   «빠진 매출»을 금액으로도 낸다. 라이브 실측(창 2026-08-01~08-07): 원가 제외 결정
+    #   (excluded)만으로 원자 22개·납품가 437,110원이 순이익 합에서 빠져 있었는데, 행 수
+    #   22만 보고는 그게 큰돈인지 알 수 없었다. 빠진 행 중 **우리 매출조차 모르는** 행은
+    #   금액에 못 더하므로 그 수를 따로 낸다(0으로 접으면 «빠진 돈»이 과소로 보인다).
     known = [Decimal(x["net_profit"]) for x in rows if x["net_profit"] is not None]
+    in_net = [Decimal(x["our_revenue"]) for x in rows
+              if x["net_profit"] is not None and x["our_revenue"] is not None]
+    out_rows = [x for x in rows if x["net_profit"] is None]
+    out_net = [Decimal(x["our_revenue"]) for x in out_rows if x["our_revenue"] is not None]
     return {
         "period": {"from": date_from.isoformat(), "to": date_to.isoformat()},
         "burden_known": ctx["burden_known"],
+        # ★요청 파라미터를 되돌려준다 — `totals`가 **필터 후** 행의 합이라, 무엇으로 걸렀는지
+        #   모르면 부분합인지 전체합인지 알 수 없다.
+        "query": {"sort": sort, "flt": flt, "option_id": option_id},
         "count": len(rows),
         "total": total,
         "option_count": option_count,
@@ -483,6 +515,9 @@ def compute_pnl_audit_atoms(db: Session, date_from: date, date_to: date, ctx: di
             "net_profit": str(sum(known, ZERO)) if known else None,
             "net_profit_known": len(known),
             "net_profit_unknown": len(rows) - len(known),
+            "revenue_in_net": str(sum(in_net, ZERO)) if in_net else None,
+            "revenue_out_of_net": str(sum(out_net, ZERO)) if out_net else None,
+            "revenue_out_of_net_unknown": len(out_rows) - len(out_net),
         },
         "atoms": rows,
     }
@@ -541,10 +576,15 @@ LEFT JOIN coupang_promo_discount_item d
 WHERE pr.vendor_id = :vendor AND date(pr.start_at) <= :d AND date(pr.end_at) >= :d
 """
 
+# ★"전 기간"이라고 쓰면 거짓이다 — 판매분석(`coupang_rocket_sales_daily`)은 쿠팡 롤링
+#   수집이라 과거가 없다. prod 실측 2026-08-08: 보유 범위가 **2026-06-01~08-06(67일)**뿐이다.
+#   같은 원천을 쓰는 `first_sold_at`은 그 한계를 이미 명시해 두었는데 이 문장에만 없었다.
+#   즉 공유 옵션 수는 «그 상품번호를 쓴 모든 옵션»이 아니라 «수집된 범위에서 팔린 옵션»이다.
 _UNIT_PRICE_NOTE = (
     "가장 최근 발주의 단가입니다 — 단가가 바뀌면 과거 판매의 매출도 소급해서 바뀝니다. "
     "원가·단가는 상품번호(sku) 기준으로 붙으므로 같은 상품번호를 쓰는 옵션 전부에 같은 값이 "
-    "적용됩니다(공유 옵션 수는 조회 기간이 아니라 **전 기간** 기준입니다)."
+    "적용됩니다. 공유 옵션 수는 조회 기간이 아니라 **수집된 판매분석 전 범위**(쿠팡 롤링 "
+    "수집이라 약 2개월치입니다) 기준이라, 그보다 오래전에만 팔린 옵션은 세어지지 않습니다."
 )
 
 
@@ -567,7 +607,17 @@ def compute_pnl_audit_atom_detail(db: Session, date_from: date, date_to: date,
     ★`vendor_id`는 **`ctx`를 뽑을 때 쓴 것과 같은 값**이라야 한다 — 원천 행과 원자가 다른
       판매자를 세면 나란히 놓은 두 숫자가 서로 설명하지 못한다. 그래서 기본값으로 숨기지
       않고 라우터가 한 곳에서 정해 둘 다에 넘긴다(창과 같은 이유).
+
+    ★★`date_`가 창 밖이면 **ValueError로 죽는다**(조용히 답하지 않는다). 안 그러면 `atom`이
+      null인데 `sales`는 붙어 나오는 응답이 생기고, 그러면 `atom: null`이 「그날 판매 없음」과
+      「창 밖이라 원자를 못 찾음」 **두 가지를 동시에** 뜻하게 된다 — 프론트가 「원자 없음」으로
+      그리면 바로 옆의 판매행과 모순되는 화면이 된다. 이 가드 뒤에서는 `atom: null`의 뜻이
+      「그날 그 옵션에 판매행이 없다」 하나로 확정된다.
+      (`compute_pnl_audit_checks`가 주입된 화면의 창을 대조해 죽는 것과 같은 이유·같은 방식이다.)
     """
+    if not (date_from <= date_ <= date_to):
+        raise ValueError(f"원자 날짜가 창 밖입니다: {date_.isoformat()} ∉ "
+                         f"[{date_from.isoformat()}, {date_to.isoformat()}]")
     vendor = vendor_id or ROCKET_1P_VENDOR_ID
     d_iso = date_.isoformat()
 
@@ -641,6 +691,11 @@ def compute_pnl_audit_atom_detail(db: Session, date_from: date, date_to: date,
         "burden_known": ctx["burden_known"],
     }
 
-    return {"date": d_iso, "option_id": option_id, "atom": atom_out,
+    # ★`period`를 싣는다 — `atom.net_profit`·`burden_known`·`promo_burden`이 **창-종속**이라,
+    #   창을 모르면 «모름이 숫자로 바뀌었는지»를 응답만 보고 판별할 수 없다. 화면이 stale한
+    #   창으로 물었을 때(이 repo가 PR #239에서 실제로 겪은 마운트 클로저 사고) 사후에라도
+    #   대조할 수 있어야 한다. 다른 두 엔드포인트와 같은 모양이다.
+    return {"period": {"from": date_from.isoformat(), "to": date_to.isoformat()},
+            "date": d_iso, "option_id": option_id, "atom": atom_out,
             "sales": sales, "unit_price": unit_price, "cost": cost,
             "ad": ad, "promos": promos}
