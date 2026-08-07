@@ -239,7 +239,8 @@ export interface ConnCell {
   selling_price: number;
   is_active: boolean;
   mapping_source: string; // excel_master | manual | auto_sync
-  conflict: boolean;
+  conflict: boolean; // 이 옵션ID를 나눠 가진 마스터들의 원가가 다름 = 이중귀속 위험
+  shared: boolean; // 나눠 가졌지만 원가가 같음 = 금액 영향 없음(리스팅 공유)
 }
 export interface ConnChannel {
   channel_id: number;
@@ -256,13 +257,15 @@ export interface ConnRow {
   cells: Record<string, ConnCell[]>; // channel_id(문자열) → 셀 목록
   mapped_channel_count: number;
   has_conflict: boolean;
+  has_shared: boolean;
 }
 export interface ConnectionMap {
   channels: ConnChannel[];
   rows: ConnRow[];
   total_products: number;
   shown_products: number;
-  conflict_option_count: number;
+  conflict_option_count: number; // 원가가 갈리는 조합 = 진짜 위험
+  shared_option_count: number; // 원가가 같아 금액 영향이 없는 공유 조합
 }
 
 export function fetchConnectionMap(q?: string, limit?: number): Promise<ConnectionMap> {
@@ -3178,7 +3181,10 @@ export function putNaverCampaignLossPolicy(
 }
 
 // 쿠팡 4스트림 수집 신선도(전역 배너 전용). 자동 트리거 제거 후 '낡음/실패' 가시화 유일 경로.
-export type CollectionState = "fresh" | "warn" | "critical" | "failed" | "in_flight";
+// 'unknown' = 백엔드가 그 스트림의 상태를 **판정하지 못했다**(getter 예외). fresh와 절대
+// 섞지 않는다 — 모르는 것을 괜찮다고 표시하면 침묵과 같다(2026-08-07 적대리뷰 P1).
+export type CollectionState =
+  | "fresh" | "warn" | "critical" | "failed" | "in_flight" | "unknown";
 export interface CollectionStreamStatus {
   key: "ofix_sales" | "ofix_ad" | "ohitech_ad" | "supplier_hub";
   label: string;

@@ -645,6 +645,7 @@ def connection_map(
                             is_active=cell.is_active,
                             mapping_source=cell.mapping_source,
                             conflict=cell.conflict,
+                            shared=cell.shared,
                         )
                         for cell in cells
                     ]
@@ -652,12 +653,14 @@ def connection_map(
                 },
                 mapped_channel_count=r.mapped_channel_count,
                 has_conflict=r.has_conflict,
+                has_shared=r.has_shared,
             )
             for r in cmap.rows
         ],
         total_products=cmap.total_products,
         shown_products=cmap.shown_products,
         conflict_option_count=cmap.conflict_option_count,
+        shared_option_count=cmap.shared_option_count,
     )
 
 

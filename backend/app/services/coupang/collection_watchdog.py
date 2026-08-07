@@ -150,16 +150,22 @@ def decide(
         is_stale = age_days is not None and age_days >= notify_days
         # 수집 기록이 아예 없는 경우(age None + failed 아님)도 알린다 — 조용한 미설정 방지.
         never = age_days is None and state in ("critical", "warn")
+        # ★unknown(백엔드가 판정 자체를 못 함)도 나이 무관 즉시 알림 (2026-08-07).
+        #   unknown은 age_hours가 None이라 is_stale·never 어느 조건에도 안 걸린다 —
+        #   여기서 명시하지 않으면 **판정 불가가 조용히 버려진다**. 배너는 붉게 띄우는데
+        #   Slack만 침묵하면, 화면을 안 보는 시간대(밤·주말)가 통째로 사각이 된다.
+        is_unknown = state == "unknown"
 
-        if is_failed or is_stale or never:
+        if is_failed or is_stale or never or is_unknown:
             notify.append({
                 "key": key,
                 "label": st.get("label") or key,
                 "account": _ACCOUNT_BY_KEY.get(key, "계정 미상"),
                 "state": state,
                 "age_days": None if age_days is None else round(age_days, 1),
-                "reason": "갱신 실패(로그인 필요 가능)" if is_failed
-                          else ("수집 기록 없음" if never else f"{age_days:.0f}일 낡음"),
+                "reason": "상태 조회 실패 — 낡음 여부 판정 불가" if is_unknown
+                          else ("갱신 실패(로그인 필요 가능)" if is_failed
+                                else ("수집 기록 없음" if never else f"{age_days:.0f}일 낡음")),
                 "last_error": st.get("last_error"),
             })
 

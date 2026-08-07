@@ -106,4 +106,38 @@ def test_collection_status_route_shape(client):
     keys = {s["key"] for s in body["streams"]}
     assert keys == {"ofix_sales", "ofix_ad", "ohitech_ad", "supplier_hub"}
     for s in body["streams"]:
-        assert s["state"] in {"fresh", "warn", "critical", "failed", "in_flight"}
+        assert s["state"] in {"fresh", "warn", "critical", "failed", "in_flight", "unknown"}
+
+
+# ── 적대리뷰 P1 회귀 가드 (2026-08-07) ────────────────────────────────
+# ★존재 이유: 이 엔드포인트는 «낡음»의 단일 표면이 됐다(빨강 광고쿠키 배너에서 stale 갈래를
+#   여기로 흡수). 그런데 getter를 감싸는 try가 없어서 넷 중 하나만 던지면 500이었고,
+#   프론트는 조회 실패를 fail-safe로 삼켜 배너를 **아예 안 띄운다** → 낡아도 전면 실명.
+#   이 프로젝트엔 그 실패 이력이 있다(마이그레이션 순서 → OperationalError → 경로 통째 침묵).
+def test_one_stream_failure_does_not_kill_the_endpoint(client, monkeypatch):
+    from app.services.coupang import collection_status as cs
+
+    def _boom(_db):
+        raise RuntimeError("no such column: coupang_wing_cookie.some_new_col")
+
+    # supplier_hub 하나만 터뜨린다.
+    patched = [
+        (k, lb, _boom if k == "supplier_hub" else g) for (k, lb, g) in cs._STREAMS
+    ]
+    monkeypatch.setattr(cs, "_STREAMS", patched)
+
+    r = client.get("/api/coupang/ops/collection-status")
+    assert r.status_code == 200, "한 스트림의 예외가 엔드포인트를 죽이면 안 된다"
+    body = r.json()
+    by_key = {s["key"]: s for s in body["streams"]}
+
+    # 죽은 스트림은 'unknown'으로 **드러난다**(숨기거나 fresh로 접지 않는다).
+    assert by_key["supplier_hub"]["state"] == "unknown"
+    assert by_key["supplier_hub"]["state"] != "fresh"
+    assert "상태 조회 실패" in by_key["supplier_hub"]["last_error"]
+    assert by_key["supplier_hub"]["age_hours"] is None
+
+    # 나머지 셋은 정상 판정이 살아 있다 — 이게 이 가드의 핵심이다.
+    assert len(body["streams"]) == 4
+    for k in ("ofix_sales", "ofix_ad", "ohitech_ad"):
+        assert by_key[k]["state"] != "unknown"
