@@ -57,6 +57,15 @@ _PASS, _FAIL, _UNDET = "pass", "fail", "undetermined"
 
 _A6_LABEL = "창에 걸친 프로모션 전건에 할인액 원천"
 
+# A7의 모집단 크기 — **합계가 아니라 행 수**다. `ad_option_total`은 «행이 없다»와 «0원 썼다»를
+# 둘 다 "0"으로 내므로 그것만으로는 가를 수 없다. 조건(vendor·Retail·창)은 화면 SA가 옵션
+# 광고비를 접는 SQL과 같다 — 다른 모집단을 세면 이 판별 자체가 거짓이 된다.
+_AD_OPTION_ROW_COUNT_SQL = """
+SELECT COUNT(*) FROM coupang_ad_option_daily
+WHERE vendor_id = :vendor AND sell_type = 'Retail'
+  AND report_date >= :since AND report_date <= :until
+"""
+
 # ★A1·A2·A3이 **오늘의 구현에선 전부 항상 참**이라는 사실을 숨기지 않는다.
 #   일별·옵션별 폴드와 사다리 타일은 화면 SA가 **같은 원자 루프에서 돌리는 세 누산기**이고,
 #   부가세는 나머지 항의 **잔차**로 나온다. 그러니 이 셋은 «화면이 자기 말과 어긋나지
@@ -292,6 +301,26 @@ def compute_pnl_audit_checks(db: Session, date_from: date, date_to: date,
 
     # ── A7 — 광고비 귀속 (원자 + 무판매 옵션 = **옵션 광고비 합**) ──────
     #   ★우변은 Billboard 옵션 합계이지 «창 전체 확정 광고비»가 아니다 — 그 대사는 B3다.
+    #   ★★**관측이 없어서 성립한 등식은 pass가 아니다.** A6은 `promos==0`을 수집 신선도로
+    #     잠그고 B2는 계산서 0건을 「검사 대상 없음」으로 잠갔는데, A7만 그 가드가 없어 나머지
+    #     검사가 전부 「판정 안 함」인 창에서 **혼자 초록**이었다 — 화면이 「이상 없음」으로 읽힌다.
+    #     ★prod 실측(2026-08-08)으로 그 창의 모양을 확인해 두면: 옵션 광고는 2025-07-24부터
+    #       있는데 판매분석은 2026-06-01부터라, 그 사이 창(예: 2026-05-01~07)은 광고 2,709행·
+    #       3,421,987원 · 판매행 0건이다. 즉 거기서 A7은 «0 = 0»이 아니라
+    #       **«3,421,987 = 3,421,987 통과»**가 된다 — 큰 숫자가 붙은 초록이라 더 «정상»으로
+    #       보인다. «0 = 0 통과»는 그것과 **다른 경로**(옵션 광고 행 자체가 없는 창)다.
+    #     판별자를 둘 두는 이유가 이것이다 — 둘 다 «관측이 없어서 등식이 성립한 것»을 가려낸다:
+    #       ① **옵션 광고 행 수 0** — 합계 0원은 «행이 없다»와 «0원 썼다»를 구분하지 못하므로
+    #          **행 수를 직접 센다**(`ad_option_total`은 둘 다 "0"으로 보인다). 세는 조건은
+    #          화면 SA의 옵션 광고 SQL과 같다(vendor·Retail·창) — 다른 모집단을 세면 이 판별이
+    #          거짓이 된다. 계정 확정 광고비가 있는데 옵션 축만 비었으면 그건 «안 썼다»가
+    #          아니라 **Billboard 수집 공백**이라, 그 사실을 note에 함께 싣는다.
+    #       ② **판매분석 미수집 창** — 원자가 하나도 없으면 좌변의 «원자 광고비»가 0이고
+    #          옵션 광고비 전액이 «판매 없는 옵션»으로 분류되어 **등식이 저절로 성립한다**.
+    #          귀속이 맞아서가 아니라 비교할 판매가 없어서다(A5가 같은 이유로 잠근다).
+    #     ★고르지 **않은** 판별자: `ad_account_total`만으로는 못 가른다 — 계정 축도 0일 때
+    #       «둘 다 안 썼다»와 «둘 다 수집이 비었다»가 또 같은 모양이기 때문이다. 그래서 계정
+    #       축은 판정자가 아니라 note의 근거로만 쓴다.
     if not all_options:
         checks.append(_check("A7", "원자 광고비 + 무판매 옵션 광고비 = 옵션 광고비 합",
                              None, None, verdict=_UNDET,
@@ -301,13 +330,34 @@ def compute_pnl_audit_checks(db: Session, date_from: date, date_to: date,
                         if o["ad_spend"] is not None), ZERO)
         left = atoms_ad + Decimal(p["ad_no_sales"])
         right = Decimal(p["ad_option_total"])
-        checks.append(_check("A7", "원자 광고비 + 무판매 옵션 광고비 = 옵션 광고비 합",
-                             left, right, verdict=_verdict(left == right),
-                             note="차이 = 창 안에 판매행이 있는 옵션이 «판매 없는 날»에 쓴 "
-                                  "광고비 — 원자에도 ad_no_sales에도 귀속되지 않습니다"
-                                  "(실측 2026-08-07, 창 2026-07-31~08-06 기준 435,916원. "
-                                  "★이 지표는 창마다 값이 달라 창을 밝히지 않고 인용하면 "
-                                  "안 됩니다). fail은 검사 오류가 아니라 실제 결손 관측입니다."))
+        ad_rows = int(db.execute(text(_AD_OPTION_ROW_COUNT_SQL), {
+            "vendor": vendor, "since": date_from.isoformat(), "until": date_to.isoformat(),
+        }).scalar() or 0)
+        account_total = Decimal(p["ad_account_total"])
+        if ad_rows == 0:
+            note = ("창에 옵션 광고 행이 하나도 없습니다 — «광고를 안 돌렸다»와 «Billboard "
+                    "수집이 비었다»를 가를 수 없어 판정하지 않습니다.")
+            if account_total > ZERO:
+                note += (f" ★계정 확정 광고비는 {p['ad_account_total']}원이 있습니다 — "
+                         "즉 안 쓴 것이 아니라 **옵션 축(Billboard)이 비어 있는** 상태이고, "
+                         "그러면 사다리의 광고비도 그만큼 작습니다(B3 참조).")
+            checks.append(_check("A7", "원자 광고비 + 무판매 옵션 광고비 = 옵션 광고비 합",
+                                 left, right, verdict=_UNDET, note=note))
+        elif not c["sales_data_covered"]:
+            checks.append(_check("A7", "원자 광고비 + 무판매 옵션 광고비 = 옵션 광고비 합",
+                                 left, right, verdict=_UNDET,
+                                 note="판매분석 미수집 창 — 원자가 없어 옵션 광고비 전액이 "
+                                      "«판매 없는 옵션»으로 분류되므로 등식이 저절로 "
+                                      "성립합니다. 귀속이 맞아서가 아니라 비교할 판매가 "
+                                      "없어서라, 통과로 치지 않습니다."))
+        else:
+            checks.append(_check("A7", "원자 광고비 + 무판매 옵션 광고비 = 옵션 광고비 합",
+                                 left, right, verdict=_verdict(left == right),
+                                 note="차이 = 창 안에 판매행이 있는 옵션이 «판매 없는 날»에 쓴 "
+                                      "광고비 — 원자에도 ad_no_sales에도 귀속되지 않습니다"
+                                      "(실측 2026-08-07, 창 2026-07-31~08-06 기준 435,916원. "
+                                      "★이 지표는 창마다 값이 달라 창을 밝히지 않고 인용하면 "
+                                      "안 됩니다). fail은 검사 오류가 아니라 실제 결손 관측입니다."))
 
     # ── B1 — 두 축 대사. **절대 pass로 칠하지 않는다** ─────────────────
     checks.append(_check("B1", "두 축 대사 (계산서 ↔ 판매)",

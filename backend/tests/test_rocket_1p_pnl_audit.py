@@ -1198,3 +1198,110 @@ def test_router_passes_its_vendor_to_the_atom_detail(client, monkeypatch):
               params={"date": D.isoformat(), "option_id": "O1",
                       "date_from": D_PREV.isoformat(), "date_to": D.isoformat()}).json()
     assert b["atom"] is None and b["sales"] is None      # 둘 다 그 판매자에겐 없다
+
+
+# ═══ ⑧ 모집단 0건은 pass가 아니다 — A7의 마지막 구멍 ═══
+
+
+def test_a7_undetermined_in_a_window_with_no_collected_sales(db):
+    """★PR 경계 리뷰 P1 — 나머지가 전부 「판정 안 함」인 창에서 **A7만 초록**이었다.
+
+    A6은 `promos==0`을 신선도로, B2는 계산서 0건을 「검사 대상 없음」으로 잠갔는데 A7만
+    그 가드가 없어 `0원 | 0원 | 통과`를 냈고, 화면이 「이상 없음」으로 읽혔다.
+    ★단 **prod의 그 창(2026-05-01~07)은 이 모양이 아니다** — 실측 2026-08-08 기준 옵션 광고
+      2,709행·3,421,987원이 있어서 «0 = 0»이 아니라 «3,421,987 = 3,421,987 통과»가 된다.
+      그쪽은 아래 `..._when_ads_ran_but_no_sales_were_collected`가 잡는 **다른 경로**이고,
+      이 테스트가 재현하는 것은 «옵션 광고 행 자체가 없는 창»이다(둘 다 실재한다).
+
+    ★A6은 여기서 pass일 수 있고 그건 이 결함이 아니다 — 그 검사는 «수집이 창 끝을 덮는가»로
+      판정하며, 과거 창에서 그 게이트가 무력하다는 한계를 자기 docstring에 이미 밝혀 두었다
+      (수집이 회고적이라는 전제의 결과다). 그래서 여기서 A6은 단언하지 않는다.
+    """
+    _full_fixture(db)                       # 데이터는 8/3~8/4에만 있다
+    r = _audit(db, date(2026, 5, 1), date(2026, 5, 7))
+    by = {c["id"]: c for c in r["checks"]}
+    assert by["A7"]["verdict"] == "undetermined"
+    assert "가를 수 없어" in by["A7"]["note"]
+    # ★같은 결함(모집단 0인데 pass)이 다른 검사에 남아 있지 않은지 함께 훑는다.
+    for cid in ("A1", "A2", "A3", "A4", "A5", "B1", "B2", "B3"):
+        assert by[cid]["verdict"] != "pass", (cid, by[cid])
+    # 판정을 못 해도 좌·우변은 싣는다(발견 0건과 실행 안 됨은 같은 숫자로 보인다).
+    assert by["A7"]["left"] == "0" and by["A7"]["right"] == "0"
+
+
+def test_a7_undetermined_when_billboard_is_empty_but_the_account_spent(db):
+    """★두 번째 경로 — 계정 확정 광고비는 있는데 **옵션 축(Billboard)이 비었다**.
+
+    B3의 note가 "Billboard 수집이 멈추면 광고비가 작아져 이익이 과대해집니다"라고 경고하는
+    바로 그 상태에서 A7이 `0 = 0` 통과를 냈다. 합계만 보면 «안 썼다»와 «수집이 비었다»가
+    같은 "0"이라, 판별자는 합계가 아니라 **행 수**여야 한다.
+    """
+    _sale(db, "A", "S1", 10, "1000000")
+    _price(db, "S1", "60000", 1)
+    _cost(db, "S1", 20000, match_method="manual")
+    _ad_account(db, "300000")               # 계정 축엔 30만원, 옵션 축엔 한 행도 없다
+    db.commit()
+    by = {c["id"]: c for c in _audit(db, D, D)["checks"]}
+    assert by["A7"]["verdict"] == "undetermined"
+    # ★«안 썼다»가 아니라는 근거를 note가 댄다 — 그 값은 응답에서 읽은 것이다.
+    assert "300000.00" in by["A7"]["note"]
+    assert by["A5"]["verdict"] == "pass"    # 판매 축은 멀쩡하다(광고 축만 비었다)
+
+
+def test_a7_still_judges_when_the_option_rows_exist(db):
+    """★가드가 정상 창까지 «판정 안 함»으로 덮으면 검사를 죽인 것이다 — pass·fail 둘 다 산다.
+
+    (같은 사실을 `test_checks_pass_and_ladder_matches_screen`·
+     `test_a7_catches_ad_on_no_sales_day_of_sold_option`이 각각 pass·fail로 이미 보지만,
+     가드를 넣은 뒤에도 그렇다는 것을 한자리에서 못 박는다.)
+    """
+    _full_fixture(db)
+    assert next(c for c in _audit(db, D_PREV, D)["checks"]
+                if c["id"] == "A7")["verdict"] == "pass"
+    _ad_option(db, "O1", "5000", d=date(2026, 8, 5))   # 8/5 광고, 그날 판매행 없음
+    db.commit()
+    a7 = next(c for c in _audit(db, D_PREV, date(2026, 8, 5))["checks"] if c["id"] == "A7")
+    assert a7["verdict"] == "fail"
+    assert Decimal(a7["right"]) - Decimal(a7["left"]) == Decimal("5000")
+
+
+def test_a7_zero_spend_rows_are_still_judged(db):
+    """★«0원 행이 있다»는 관측된 사실이라 판정한다 — «행이 없다»와 여기서 갈린다.
+
+    행 수를 판별자로 고른 이유가 이것이다. 합계를 판별자로 쓰면 이 창도 «모름»이 되어,
+    광고를 정말 안 돌린 날을 영영 검사할 수 없게 된다.
+    """
+    _sale(db, "A", "S1", 10, "1000000")
+    _price(db, "S1", "60000", 1)
+    _cost(db, "S1", 20000, match_method="manual")
+    _ad_option(db, "A", "0")                # 행은 있고 금액이 0이다
+    db.commit()
+    a7 = next(c for c in _audit(db, D, D)["checks"] if c["id"] == "A7")
+    assert a7["verdict"] == "pass"
+    assert a7["left"] == a7["right"] == "0"
+
+
+def test_a7_undetermined_when_ads_ran_but_no_sales_were_collected(db):
+    """★★prod의 진짜 모양 — 광고 행은 있는데 **판매분석이 없는** 창.
+
+    실측 2026-08-08(prod): 옵션 광고는 **2025-07-24**부터 있는데 판매분석은 **2026-06-01**
+    부터다. 그 사이 창은 전부 이 모양이고, 리뷰어가 지목한 창 2026-05-01~07에는 옵션 광고
+    행이 2,709건·3,421,987원 있다(판매행 0건).
+
+    그 창에서 A7은 «0 = 0»이 아니라 **3,421,987 = 3,421,987 통과**가 된다 — 원자가 없어
+    옵션 광고비 전액이 «판매 없는 옵션»으로 분류되므로 등식이 저절로 성립하기 때문이다.
+    큰 숫자가 붙은 초록이라 오히려 더 «정상»으로 읽힌다. 귀속이 맞아서가 아니라 비교할
+    판매가 없어서이므로 통과로 치지 않는다(A5가 같은 이유로 잠그는 것과 같다).
+    """
+    _full_fixture(db)                                  # 판매는 8/3~8/4에만
+    _ad_option(db, "O1", "300000", d=date(2026, 5, 5))  # 5월엔 광고만 돌았다
+    db.commit()
+    w = (date(2026, 5, 1), date(2026, 5, 7))
+    scr = compute_rocket_1p_revenue(db, *w)
+    assert scr["coverage"]["sales_data_covered"] is False
+    assert scr["pnl"]["ad_option_total"] == "300000"    # 모집단은 비어 있지 않다
+    a7 = next(c for c in _audit(db, *w)["checks"] if c["id"] == "A7")
+    # 좌·우변이 같다 — 그런데 그건 «귀속이 맞다»가 아니라 «판매를 못 봤다»는 뜻이다.
+    assert a7["left"] == a7["right"] == "300000"
+    assert a7["verdict"] == "undetermined"
+    assert "저절로" in a7["note"]
