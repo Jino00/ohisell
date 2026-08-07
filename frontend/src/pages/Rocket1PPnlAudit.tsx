@@ -249,6 +249,20 @@ export default function Rocket1PPnlAudit() {
                   위 검사의 A2·A7은 이 때문에 「판정 안 함」입니다.
                 </p>
               )}
+              {/* ★부분집합을 전체로 읽지 않게 — Σ순이익은 «순이익을 낼 수 있는 행만» 더한
+                  값이다(subset-profit-overstates-margin 교훈). revenue_out_of_net이 null이면
+                  줄 자체를 안 그린다(추정 금지) — 응답이 준 값으로만 말한다. */}
+              {atoms.data.totals.revenue_out_of_net != null && (
+                <p className="mx-4 mt-3 rounded bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                  ⚠️ 이 합계는 순이익을 낼 수 있는 행만 더한 값입니다 — 매출{" "}
+                  {won(atoms.data.totals.revenue_out_of_net)}({num(atoms.data.totals.net_profit_unknown)}행)이
+                  빠져 있습니다.
+                  {atoms.data.totals.revenue_out_of_net_unknown > 0 && (
+                    <> 그중 매출조차 모르는 행 {num(atoms.data.totals.revenue_out_of_net_unknown)}건은
+                      이 금액에 포함되지 않았습니다(0으로 접지 않았습니다).</>
+                  )}
+                </p>
+              )}
               <Table head={<>
                 <Th>날짜</Th><Th>옵션</Th><Th right>수량</Th><Th right>우리 매출</Th>
                 <Th right>원가</Th><Th right>분담금</Th><Th right>광고비</Th><Th right>순이익</Th>

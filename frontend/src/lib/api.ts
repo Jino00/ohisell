@@ -1504,17 +1504,28 @@ export interface PnlAuditAtom {
 export interface PnlAuditAtoms {
   period: { from: string; to: string };
   burden_known: boolean;
+  // ★요청 파라미터 에코 — `totals`가 **필터 후** 행의 합이라, 무엇으로 걸렀는지 모르면
+  //   부분합인지 전체합인지 알 수 없다.
+  query: { sort: string; flt: string; option_id: string | null };
   count: number;   // 필터 후 반환 수
   total: number;   // 필터 전 원자 총수(목록 자체는 자르지 않는다)
   // ★잘림 계약: option_count > option_limit이면 화면 옵션 표가 잘려 A2·A7이 undetermined가
   //   된다 — 화면이 「검사 2개가 왜 사라졌는지」를 말할 수 있어야 한다.
   option_count: number; option_limit: number; option_table_truncated: boolean;
   // ★net_profit은 **아는 행만** 더한 값이고, 아는 행이 없으면 null이다(0이 아니다).
+  // ★revenue_in_net/out_of_net — 순이익 합에 «반영된 매출»과 «빠진 매출»(부분집합을 전체로
+  //   읽지 않게, subset-profit-overstates-margin 교훈). out_of_net_unknown은 빠진 행 중
+  //   **우리 매출조차 모르는** 행 수 — 0으로 접으면 빠진 돈이 과소로 보인다.
   totals: { qty: number; net_profit: string | null;
-            net_profit_known: number; net_profit_unknown: number };
+            net_profit_known: number; net_profit_unknown: number;
+            revenue_in_net: string | null; revenue_out_of_net: string | null;
+            revenue_out_of_net_unknown: number };
   atoms: PnlAuditAtom[];
 }
 export interface PnlAuditAtomDetail {
+  // ★화면이 보고 있는 창. atom.net_profit·burden_known·promo_burden이 **창-종속**이라,
+  //   창을 모르면 응답만 보고 «모름이 숫자로 바뀌었는지» 판별할 수 없다(다른 두 엔드포인트와 같은 이유).
+  period: { from: string; to: string };
   date: string; option_id: string;
   atom: {
     date: string; option_id: string; qty: number;
