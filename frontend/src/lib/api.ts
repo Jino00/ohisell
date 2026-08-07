@@ -1463,6 +1463,116 @@ export function fetchRocket1PRevenue(params: {
   return fetchApi<Rocket1PRevenue>(`/api/overview/rocket-1p-revenue?${q.toString()}`);
 }
 
+// ── 로켓1P 손익 «근거 화면» (2026-08-07 설계, Jino: "우리 손익이 정말 실수 없이 나오는지
+//   어떻게 확신할 수 있는지") ──
+// ★verdict 3값: 판정할 수 없는 검사(B1 두 축 대사 등)는 pass가 아니라 undetermined다 —
+//   거짓 초록 금지. 통과해도 좌·우변을 항상 싣는다(발견 0건과 실행 안 됨은 같은 숫자로 보인다).
+export interface PnlAuditCheck {
+  id: string; label: string;
+  left: string | null; right: string | null; diff: string | null;
+  unit: string; verdict: "pass" | "fail" | "undetermined"; note: string | null;
+}
+export interface PnlAuditLadder {
+  basis: string | null; qty: number | null;
+  revenue: string | null; cost: string | null; promo_burden: string | null;
+  ad_spend: string | null; vat: string | null; net_profit: string | null;
+  profit_rate: string | null; ad_no_sales: string; ad_no_sales_included: boolean;
+  // ★B3(옵션 축 ↔ 계정 확정액 대사)의 좌·우변 — 화면 pnl의 부분집합이라 여기도 항상 온다.
+  ad_option_total: string; ad_account_total: string;
+  cost_coverage: string | null; revenue_priced: string | null;
+  blocked: { code: string; reason: string } | null;
+}
+export interface PnlAuditChecks {
+  period: { from: string; to: string; vendor_id: string };
+  ladder: PnlAuditLadder;
+  checks: PnlAuditCheck[];
+}
+// ★원가 미상을 «none» 하나로 접지 않는다 — 할 일이 다르다: no_link(다리 자체가 없다 →
+//   연결부터) / no_cost(다리는 있는데 원가가 없다) / unknown(다리·원가는 있는데 확정 방법이
+//   기록에 없다) / excluded(원가 제외로 이미 결정) / manual·suggested(다리가 있고 원가도
+//   붙은 경우의 확정 방법 — suggested=이름 유사도 자동, 사람 미확인).
+export type PnlAuditCostSource =
+  "manual" | "suggested" | "unknown" | "excluded" | "no_cost" | "no_link";
+export interface PnlAuditAtom {
+  date: string; option_id: string; sku_id: string | null; product_name: string | null;
+  qty: number; consumer_revenue: string; our_revenue: string | null;
+  unit_price: string | null; cost: string | null; unit_cost: string | null;
+  ad_spend: string | null; promo_burden: string | null;
+  net_profit: string | null; net_profit_upper: string | null;
+  cost_source: PnlAuditCostSource;
+}
+export interface PnlAuditAtoms {
+  period: { from: string; to: string };
+  burden_known: boolean;
+  count: number;   // 필터 후 반환 수
+  total: number;   // 필터 전 원자 총수(목록 자체는 자르지 않는다)
+  // ★잘림 계약: option_count > option_limit이면 화면 옵션 표가 잘려 A2·A7이 undetermined가
+  //   된다 — 화면이 「검사 2개가 왜 사라졌는지」를 말할 수 있어야 한다.
+  option_count: number; option_limit: number; option_table_truncated: boolean;
+  // ★net_profit은 **아는 행만** 더한 값이고, 아는 행이 없으면 null이다(0이 아니다).
+  totals: { qty: number; net_profit: string | null;
+            net_profit_known: number; net_profit_unknown: number };
+  atoms: PnlAuditAtom[];
+}
+export interface PnlAuditAtomDetail {
+  date: string; option_id: string;
+  atom: {
+    date: string; option_id: string; qty: number;
+    our_revenue: string | null; cost: string | null; promo_burden: string | null;
+    ad_spend: string | null; net_profit: string | null; net_profit_upper: string | null;
+    burden_known: boolean;
+  } | null;
+  sales: {
+    date: string; option_id: string; sku_id: string | null; product_name: string | null;
+    qty: number; consumer_revenue: string | null; visitors: number | null;
+    source: string; synced_at: string | null;
+  } | null;
+  unit_price: {
+    purchase_order_seq: number; unit_purchase_price: string | null; order_qty: number | null;
+    po_created_at: string | null; sibling_option_count: number; note: string;
+  } | null;
+  cost: {
+    map: { product_number: string; internal_sku: string | null; status: string;
+           match_method: string | null; note: string | null; updated_at: string | null } | null;
+    master: { internal_sku: string; product_name: string | null; cost_price: string | null } | null;
+  };
+  // row_count = 접은 원천 행 수(유니크 키에 conv_option_id가 있어 한 (날짜,옵션)에 행이
+  // 여럿일 수 있다 — 원자와 같은 방식으로 SUM한 것).
+  ad: { report_date: string; ad_option_id: string; ad_spend: string | null;
+        impressions: number | null; clicks: number | null; orders: number | null;
+        sales_qty: number | null; row_count: number } | null;
+  // ★null = 원천 테이블(프로모션·할인액) 중 하나라도 없어 «모름». 빈 배열과 다르다 — 빈
+  //   배열은 «그날 걸린 프로모션이 없다»는 실측이고, null은 판정 자체가 불가능하다는 뜻이다.
+  promos: Array<{ request_id: string; start_at: string | null; end_at: string | null;
+                  discount_type: string | null; discount_value: string | null }> | null;
+}
+
+const _auditQ = (p: { from: string; to: string }) =>
+  new URLSearchParams({ date_from: p.from, date_to: p.to });
+
+export function fetchPnlAuditChecks(p: { from: string; to: string }): Promise<PnlAuditChecks> {
+  return fetchApi<PnlAuditChecks>(`/api/coupang/ops/rocket/pnl-audit/checks?${_auditQ(p)}`);
+}
+export function fetchPnlAuditAtoms(p: {
+  from: string; to: string; sort?: string; flt?: string; optionId?: string;
+}): Promise<PnlAuditAtoms> {
+  const q = _auditQ(p);
+  if (p.sort) q.set("sort", p.sort);
+  if (p.flt) q.set("flt", p.flt);
+  if (p.optionId) q.set("option_id", p.optionId);
+  return fetchApi<PnlAuditAtoms>(`/api/coupang/ops/rocket/pnl-audit/atoms?${q}`);
+}
+// ★from/to는 **화면이 보고 있는 창**이다 — 생략하면 안 된다. 창을 좁히면 분담금 «모름»
+//   판정이 달라져 화면이 «—»로 그린 행에 숫자가 찍힌다(원자 파생의 창 종속성 계약).
+export function fetchPnlAuditAtom(p: {
+  date: string; optionId: string; from: string; to: string;
+}): Promise<PnlAuditAtomDetail> {
+  const q = new URLSearchParams({
+    date: p.date, option_id: p.optionId, date_from: p.from, date_to: p.to,
+  });
+  return fetchApi<PnlAuditAtomDetail>(`/api/coupang/ops/rocket/pnl-audit/atom?${q}`);
+}
+
 // ── 로켓1P 유입·전환 퍼널 (S3, 2026-08-06) ──
 // ★모든 비율은 **합계의 몫**이다(Σ주문/Σ조회). 일별 비율의 평균이 아니다.
 // ★null = 모름이지 0이 아니다. position은 기간 중앙값 대비 **서술**이지 권고가 아니며,
