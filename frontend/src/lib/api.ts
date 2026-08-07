@@ -3162,7 +3162,10 @@ export function putNaverCampaignLossPolicy(
 }
 
 // 쿠팡 4스트림 수집 신선도(전역 배너 전용). 자동 트리거 제거 후 '낡음/실패' 가시화 유일 경로.
-export type CollectionState = "fresh" | "warn" | "critical" | "failed" | "in_flight";
+// 'unknown' = 백엔드가 그 스트림의 상태를 **판정하지 못했다**(getter 예외). fresh와 절대
+// 섞지 않는다 — 모르는 것을 괜찮다고 표시하면 침묵과 같다(2026-08-07 적대리뷰 P1).
+export type CollectionState =
+  | "fresh" | "warn" | "critical" | "failed" | "in_flight" | "unknown";
 export interface CollectionStreamStatus {
   key: "ofix_sales" | "ofix_ad" | "ohitech_ad" | "supplier_hub";
   label: string;
