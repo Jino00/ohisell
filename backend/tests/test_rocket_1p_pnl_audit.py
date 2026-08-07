@@ -4,11 +4,13 @@
 #   ① 원자(day_option_atoms)는 파생의 단일 출처다 — 원자의 합이 화면 타일과 맞고,
 #      맞지 않는 유일한 항(판매 없는 옵션의 광고비)은 **크기까지 못 박혀 있다**
 #   ①' `burden_known=False`(분담금 모름)면 원자 net이 전부 None이다 — 0으로 접지 않는다
-#
-# 아직 지키지 않는 것 (후속 태스크에서 추가 — 지금 적으면 거짓 초록이다):
 #   ② 검사는 «같은 함수의 다른 그레인»을 비교한다 — 재계산이 아니다
+#      (사다리는 `compute_rocket_1p_revenue` 응답을 **그대로** 싣는다: ladder == 화면 pnl)
 #   ③ B1은 절대 pass가 되지 않는다 — 판정할 수 없는 검사를 초록으로 칠하면 거짓 초록
 #   ④ A5·A6·A7은 조용한 결손(INNER JOIN 탈락·분담금 모름·광고 미귀속)을 드러낸다
+#
+# 아직 지키지 않는 것 (후속 태스크에서 추가 — 지금 적으면 거짓 초록이다):
+#   ⑤ 원천 행 드릴다운(원자 목록·원자 상세 API)과 그 창 계약
 from __future__ import annotations
 
 from datetime import date
@@ -29,6 +31,9 @@ from app.services.coupang.rocket_1p_revenue import (
 VENDOR = pnl.ROCKET_1P_VENDOR_ID
 ZERO_D = Decimal("0")
 D = date(2026, 8, 4)
+# `_full_fixture`의 첫째 날. 원자를 **2옵션 × 2일**로 두려고 있다 — 합이 한 항이면
+# 접기가 발산해도 관측할 수 없다. 검사 창은 (D_PREV, D).
+D_PREV = date(2026, 8, 3)
 
 
 @pytest.fixture
@@ -207,3 +212,183 @@ def test_promo_window_counts_zero_promos_is_not_unknown(db):
     c = pnl.promo_window_counts(db, D, D)
     assert c is not None
     assert c == {"promos": 0, "unpriced": 0}
+
+
+# ═══ ③ 검사 — 같은 함수의 다른 그레인 비교, 재계산 아님 ═══
+
+
+def _audit(db, dfrom, dto, *, limit=None):
+    """라우터가 할 일을 테스트가 대신한다 — 화면 응답을 만들어 **주입**한다.
+
+    ★검사 SA는 화면 함수를 부르지 않는다(부를 수 없다) — 아래
+      `test_audit_service_does_not_reference_the_revenue_module`가 그 계약을 지킨다.
+      그래서 「근거 창은 계산을 새로 하지 않는다」가 규칙이 아니라 구조다.
+    ★`limit`은 `ATOM_LIMIT`이 기본이다 — 라우터도 이 값을 써야 한다(자기 숫자를 쓰면
+      「옵션 표가 잘리면 undetermined」 계약이 두 곳에 흩어진다).
+    """
+    from app.services.coupang.rocket_1p_pnl_audit import (ATOM_LIMIT,
+                                                          compute_pnl_audit_checks)
+    screen = compute_rocket_1p_revenue(db, dfrom, dto, None, limit or ATOM_LIMIT)
+    return compute_pnl_audit_checks(db, dfrom, dto, screen)
+
+
+def test_audit_service_does_not_reference_the_revenue_module():
+    """★검사 SA는 매출 화면 모듈을 **문자열로도** 담지 않는다 — D-CPP-2 가드가 이 파일에도
+    살아 있다는 것을 여기서 못 박는다.
+
+    왜 이 테스트가 따로 있나: 상위 가드(`test_rocket_1p_revenue.py`의
+    `test_module_is_not_referenced_by_accounting_paths`)는 `app/services/` 전체를 훑으므로
+    이 파일도 이미 덮는다. 그런데 그 가드가 깨지면 **어느 파일이 원인인지**가 아니라 목록만
+    나오고, 무엇보다 «왜 이 모듈만 주입 방식인가»의 근거가 코드 어디에도 안 남는다.
+    나중에 누가 "부르는 게 편한데"라며 import를 되살리면 여기서 이유와 함께 걸린다.
+
+    ★가드는 import가 아니라 **원시 문자열 포함**을 본다 — 주석·docstring에 모듈명을 적어도
+      걸린다. 그래서 그 파일은 화면 모듈을 이름 대신 «1P 매출·손익 화면 SA»로 부른다.
+    """
+    import pathlib
+    from app.services.coupang import rocket_1p_pnl_audit as audit
+    src = pathlib.Path(audit.__file__).read_text(encoding="utf-8")
+    banned = "rocket_1p" + "_revenue"      # 이 테스트 파일 자신이 걸리지 않게 쪼개 둔다
+    assert banned not in src, "검사 SA가 매출 화면 모듈을 참조한다 — 주입 계약이 깨졌다"
+
+
+def test_audit_rejects_a_screen_from_a_different_window(db):
+    """★주입 방식의 유일한 새 위험: 라우터가 **다른 창**의 화면을 넘기는 것.
+
+    숫자는 그럴듯해서 아무도 눈치채지 못한다 — 특히 분담금 가드가 창-종속이라 창이 좁으면
+    «모름»이 숫자로 바뀐다(`day_option_atoms` 창 계약). 그래서 조용히 대조하지 않고 죽는다.
+    """
+    from app.services.coupang.rocket_1p_pnl_audit import compute_pnl_audit_checks
+    _full_fixture(db)
+    screen = compute_rocket_1p_revenue(db, D, D)          # 하루 창
+    with pytest.raises(ValueError, match="창이 다릅니다"):
+        compute_pnl_audit_checks(db, D_PREV, D, screen)   # 이틀 창으로 대조 시도
+
+
+def _full_fixture(db):
+    """A1~A7 전부 판정 가능한 최소 데이터 — **2옵션 × 2일**(원자 4개).
+
+    ★1옵션×1일이면 A1·A2의 «합»이 각각 한 항이라, 접기가 발산해도 등식이 그대로 성립한다.
+      옵션 축과 날짜 축이 **서로 다른 묶음**이 되도록 넷으로 둔다.
+    ★A1~A7이 전부 pass가 되는 조건: 전 SKU에 납품단가(A5)와 원가(A4)가 있고,
+      광고를 쓴 (날짜,옵션)마다 판매행이 있으며(A7), 창에 프로모션이 없다(A6).
+    """
+    for i, (oid, sku) in enumerate((("O1", "S1"), ("O2", "S2")), 1):
+        _price(db, sku, str(60000 + i * 1111), i)
+        _cost(db, sku, 20000 + i * 337)
+        for dnum, day in enumerate((D_PREV, D)):
+            _sale(db, oid, sku, 7 + i + dnum, str(900000 + i * 1000 + dnum * 700), d=day)
+            _ad_option(db, oid, str(9000 + i * 101 + dnum * 17), d=day)
+    _ad_account(db, "40000")
+    db.commit()
+
+
+def test_checks_pass_and_ladder_matches_screen(db):
+    _full_fixture(db)
+    r = _audit(db, D_PREV, D)
+    by = {c["id"]: c for c in r["checks"]}
+    for cid in ("A1", "A2", "A3", "A4", "A5", "A6", "A7", "B2"):
+        assert by[cid]["verdict"] == "pass", (cid, by[cid])
+        # ★통과해도 좌·우변 숫자를 싣는다 — 발견 0건과 실행 안 됨은 같은 숫자로 보인다
+        assert by[cid]["left"] is not None and by[cid]["right"] is not None
+    scr = compute_rocket_1p_revenue(db, D_PREV, D)
+    assert r["ladder"]["net_profit"] == scr["pnl"]["net_profit"]
+    # ★사다리는 **화면 응답 그대로**다 — 근거 창이 자기 계산을 하면 두 계산이 된다.
+    for k, v in r["ladder"].items():
+        assert v == scr["pnl"][k], k
+
+
+def test_a1_a2_fold_over_more_than_one_term(db):
+    """★합이 한 항이면 등식이 아무것도 검사하지 않는다 — 두 축이 실제로 여럿인지 못 박는다."""
+    _full_fixture(db)
+    scr = compute_rocket_1p_revenue(db, D_PREV, D)
+    assert len(scr["daily"]) == 2 and len(scr["options"]) == 2
+    r = _audit(db, D_PREV, D)
+    by = {c["id"]: c for c in r["checks"]}
+    # 두 축은 서로 다른 묶음인데 같은 우변으로 수렴한다 — 그게 검사의 내용이다.
+    assert by["A1"]["left"] == by["A2"]["left"] == by["A1"]["right"]
+    # ★diff는 Decimal의 **자릿수를 보존한 문자열**이라 0이어도 "0.00"이다 — 화면이 문자열
+    #   비교로 «차이 없음»을 판정하면 안 된다. 판정은 verdict가 하고 diff는 크기만 말한다.
+    assert Decimal(by["A1"]["diff"]) == ZERO_D and by["A1"]["diff"] == "0.00"
+
+
+def test_a3_discloses_that_vat_is_a_residual(db):
+    """★A3은 **동어반복**이다 — 숨기면 그게 거짓 초록이다.
+
+    `compute_rocket_1p_revenue`의 `pnl_vat`는 매출−원가−분담금−광고−순이익의 **잔차**로
+    계산된다(rocket_1p_revenue.py `pnl_vat = pnl_revenue - ... - pnl_net_total`). 그래서
+    A3의 좌변은 대수적으로 항상 순이익과 같고, **오늘의 구현에선 fail이 날 수 없다.**
+    검사를 지우지 않는 이유는 부가세가 독립 계산으로 바뀌면 그때부터 진짜 검사가 되기
+    때문이고, 남겨 두는 조건은 그 사실을 note에 적는 것이다.
+    """
+    _full_fixture(db)
+    r = _audit(db, D_PREV, D)
+    a3 = next(c for c in r["checks"] if c["id"] == "A3")
+    assert a3["verdict"] == "pass"
+    assert "잔차" in (a3["note"] or "")
+
+
+def test_b1_never_passes_even_when_equal(db):
+    """★판정할 수 없는 검사를 초록으로 칠하지 않는다 — 값이 우연히 같아도."""
+    _full_fixture(db)
+    r = _audit(db, D_PREV, D)
+    b1 = next(c for c in r["checks"] if c["id"] == "B1")
+    assert b1["verdict"] == "undetermined"
+    # 값이 같아도(둘 다 계산서 0 / 판매 축 값) pass가 아니다 — 그 사실을 여기서 못 박는다.
+    assert b1["diff"] is not None or b1["left"] is None
+
+
+def test_a2_and_a7_are_undetermined_when_option_table_is_truncated(db):
+    """★옵션 표가 잘리면 «합»을 낼 수 없다 — 그때 pass를 내면 거짓 초록이다.
+
+    A1(날짜 축)은 잘리지 않으므로 그대로 pass다. 두 축의 판정이 갈리는 것이 정상이고,
+    잘림이 A2·A7에만 영향을 준다는 사실 자체가 이 테스트의 내용이다.
+
+    ★잘림은 **주입된 화면 응답의 성질**이다(`shown < option_count`) — 검사 SA가 스스로
+      만들 수 없으므로 라우터가 작은 limit으로 부른 상황을 그대로 재현한다.
+    """
+    _full_fixture(db)
+    r = _audit(db, D_PREV, D, limit=1)
+    by = {c["id"]: c for c in r["checks"]}
+    assert by["A2"]["verdict"] == "undetermined" and by["A2"]["left"] is None
+    assert by["A7"]["verdict"] == "undetermined" and by["A7"]["left"] is None
+    assert by["A1"]["verdict"] == "pass"
+
+
+def test_a5_surfaces_silent_inner_join_loss(db):
+    """발주 이력 없는 SKU는 손익 매출에서 조용히 빠진다 — A5가 그 수량을 드러낸다."""
+    _full_fixture(db)
+    _sale(db, "B", "S9", 5, "500000")   # 발주 이력 없음 → INNER JOIN 탈락
+    db.commit()
+    r = _audit(db, D_PREV, D)
+    a5 = next(c for c in r["checks"] if c["id"] == "A5")
+    assert a5["verdict"] == "fail"
+    assert a5["left"] == "36" and a5["right"] == "41"
+
+
+def test_a6_unpriced_promo_fails_and_a1_undetermined(db):
+    """분담금 모름 → A6 fail, 손익 자체가 없으므로 A1~A3은 undetermined."""
+    _full_fixture(db)
+    db.execute(_t("INSERT INTO coupang_rocket_promotion (request_id, vendor_id, start_at, end_at) "
+                  "VALUES ('686180', :v, '2026-08-01 00:00:00', '2026-08-15 23:59:59')"),
+               {"v": VENDOR})
+    db.commit()
+    r = _audit(db, D_PREV, D)
+    by = {c["id"]: c for c in r["checks"]}
+    assert by["A6"]["verdict"] == "fail"
+    assert by["A1"]["verdict"] == "undetermined"
+    assert by["A3"]["verdict"] == "undetermined"
+    # ★막힌 이유를 note가 말한다 — "검사 안 됨"과 "검사해서 통과"를 화면이 갈라야 한다.
+    assert "promo_burden_unknown" in (by["A1"]["note"] or "")
+
+
+def test_a7_catches_ad_on_no_sales_day_of_sold_option(db):
+    """★창 내 판매행이 있는 옵션이 «판매 없는 날»에 쓴 광고비 — 원자에도 ad_no_sales에도
+    귀속되지 않는다(prod 실측 7일 창 435,916원). A7이 이 결손을 드러낸다."""
+    _full_fixture(db)
+    _ad_option(db, "O1", "5000", d=date(2026, 8, 5))   # 8/5 광고, 그날 판매행 없음
+    db.commit()
+    r = _audit(db, D_PREV, date(2026, 8, 5))
+    a7 = next(c for c in r["checks"] if c["id"] == "A7")
+    assert a7["verdict"] == "fail"
+    assert Decimal(a7["right"]) - Decimal(a7["left"]) == Decimal("5000")

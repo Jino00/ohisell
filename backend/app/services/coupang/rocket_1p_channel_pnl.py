@@ -60,6 +60,26 @@ def _dec(v) -> Decimal:
     return v if isinstance(v, Decimal) else Decimal(str(v))
 
 
+_CENT = Decimal("0.01")
+
+
+def _money(v: Decimal) -> Decimal:
+    """옵션 손익을 전 단위로 못 박는다.
+
+    ★왜 반올림하나: VAT가 ÷11이라 순이익엔 무한소수가 붙는다. 그대로 두면 옵션 행들의 합과
+      합계 타일이 **누적 순서 차이만으로** 끝자리에서 어긋난다(라이브 실측 2e-25원). 금액이
+      1원이라도 다르면 사용자는 둘 다 안 믿는다 — 그래서 합계는 반올림된 행들의 **합**으로만
+      만든다(타일을 따로 계산하지 않는다).
+
+    ★왜 **여기** 있나(2026-08-07 이동): 반올림 규약은 «돈 축»의 정의라 이 모듈이 정본이다
+      (`ZERO`·`_dec`·납품단가/원가 CTE와 같은 자리). 매출 화면 SA와 손익 근거 SA가 둘 다
+      이 함수를 써야 하는데, 근거 SA는 D-CPP-2 가드 때문에 매출 화면 모듈을 참조할 수 없다
+      (`test_module_is_not_referenced_by_accounting_paths`). 각자 복제하면 반올림 규약이
+      두 곳에 생기고 언젠가 갈라진다 — 그건 이 파일들이 반복해 경고하는 실패다.
+    """
+    return v.quantize(_CENT)
+
+
 def rocket_1p_channel(db: Session) -> Channel | None:
     """1P 채널 행. 없으면 None(이 기능 전체가 조용히 꺼진다 — 다른 채널엔 영향 없음)."""
     return db.query(Channel).filter(Channel.code == ROCKET_1P_CHANNEL_CODE).first()

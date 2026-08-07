@@ -38,6 +38,7 @@ from app.services.coupang.rocket_1p_channel_pnl import (
     LATEST_UNIT_PRICE_CTE,
     ROCKET_1P_VENDOR_ID,
     ZERO,
+    _money,
     compute_rocket_1p_summary_row,
     promo_burden_by_day_option,
     window_freshness as _window_freshness,
@@ -155,18 +156,9 @@ def _dn(v) -> Decimal | None:
     return None if v is None else _d(v)
 
 
-_CENT = Decimal("0.01")
-
-
-def _money(v: Decimal) -> Decimal:
-    """옵션 손익을 전 단위로 못 박는다.
-
-    ★왜 반올림하나: VAT가 ÷11이라 순이익엔 무한소수가 붙는다. 그대로 두면 옵션 행들의 합과
-      합계 타일이 **누적 순서 차이만으로** 끝자리에서 어긋난다(라이브 실측 2e-25원). 금액이
-      1원이라도 다르면 사용자는 둘 다 안 믿는다 — 그래서 합계는 반올림된 행들의 **합**으로만
-      만든다(타일을 따로 계산하지 않는다).
-    """
-    return v.quantize(_CENT)
+# ★`_money`(전 단위 반올림)는 **`rocket_1p_channel_pnl`이 정본**이다 — 위에서 import한다.
+#   여기 있던 것을 2026-08-07에 옮겼다: 손익 근거 SA도 같은 규약이 필요한데 그 모듈은
+#   D-CPP-2 가드 때문에 이 파일을 참조할 수 없어서다. 규약이 두 곳이면 언젠가 갈라진다.
 
 
 def _bep_roas(revenue: Decimal | None, cost: Decimal | None,
