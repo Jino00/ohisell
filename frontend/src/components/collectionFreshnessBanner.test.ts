@@ -87,14 +87,19 @@ describe("failed 문구는 실패 시각과 실제 사유에 근거해야 한다
   });
 
   it("표기는 원문 슬라이스와 정확히 일치한다(Date 파싱으로 바뀌면 깨진다)", () => {
-    // ★전문(全文) 고정: 백엔드가 주는 건 naive KST ISO다(utils/kst.py). 구현이 new Date()로
-    //   바뀌면 실행 타임존에 따라 시각이 밀리는데, 개발자 Mac은 KST라 '가끔만' 깨진다 —
-    //   그런 회귀는 전문 고정이라야 잡힌다(toContain은 부분 일치라 놓친다).
+    // ★전문(全文) 고정: 백엔드가 주는 건 naive KST ISO다(utils/kst.py). 구현이 `toISOString()`
+    //   이나 `timeZone:'Asia/Seoul'` 변환으로 바뀌면 실행 타임존에 따라 시각이 밀린다 —
+    //   CI는 ubuntu-latest(TZ=UTC)이므로 거기서 깨진다. 전문 고정이라야 잡힌다(toContain은
+    //   부분 일치라 놓친다).
+    //   ⚠️ repo 어디에도 테스트 TZ가 고정돼 있지 않다 — 누가 vitest에 TZ=Asia/Seoul을 주면
+    //     이 가드는 조용히 무력해진다(적대리뷰 P2, 이월).
     const b = buildCollectionFreshnessBanner(
-      wrap([s({ state: "failed", label: "ofix 판매분석",
+      wrap([s({ state: "failed", label: "ofix 판매분석", age_hours: 1,
                 last_error_at: "2026-08-05T23:03:54.847247", last_error: "로그인 필요" })]),
     );
-    expect(b?.items[0].text).toBe("ofix 판매분석 갱신 실패(08-05 23:03) · 로그인 필요");
+    expect(b?.items[0].text).toBe(
+      "ofix 판매분석 갱신 실패(08-05 23:03) · 마지막 성공 1시간 전 · 로그인 필요",
+    );
   });
 });
 
@@ -134,6 +139,104 @@ describe("in_flight라도 이미 낡았으면 숨기지 않는다", () => {
     const { specs, unknown } = specsForKeys((b?.items ?? []).map((i) => i.key));
     expect(specs.map((x) => x.key)).toEqual(["ofix_ad"]);
     expect(unknown).toEqual([]);
+  });
+});
+
+// ── 적대리뷰 P1 회귀 가드 (2026-08-07) ────────────────────────────────
+// ★존재 이유: 이 배너가 "낡음"의 **단일 표면**이 된 뒤(빨강 광고쿠키 배너에서 stale 갈래를
+//   흡수), 여기서 빠지면 어느 화면에도 안 남는다. 아래 둘은 그 단일 표면의 구멍이었다.
+describe("failed 항목은 '언제 깨졌나'와 '데이터가 얼마나 낡았나'를 둘 다 말한다", () => {
+  it("실패 시각과 마지막 성공 경과가 함께 뜬다 — 둘은 다른 질문이다", () => {
+    const b = buildCollectionFreshnessBanner(wrap([s({
+      state: "failed", label: "ofix 광고비",
+      last_success_at: "2026-07-08T09:00:00", last_error_at: "2026-08-07T14:35:12",
+      age_hours: 24 * 30, last_error: null,
+    })]));
+    const t = b?.items[0].text ?? "";
+    expect(t).toContain("08-07 14:35");     // 언제 깨졌나
+    expect(t).toContain("마지막 성공 30일 전"); // 데이터가 얼마나 낡았나
+  });
+  it("★같은 '갱신 실패'라도 3시간 전 데이터와 3개월 전 데이터가 다른 문구여야 한다", () => {
+    const mk = (age: number) => buildCollectionFreshnessBanner(wrap([s({
+      state: "failed", age_hours: age, last_error_at: "2026-08-07T14:35:12",
+    })]))?.items[0].text;
+    // 이 단언이 깨지면 = 경과가 문구에서 빠진 것 = P1 재발.
+    expect(mk(3)).not.toBe(mk(24 * 90));
+    expect(mk(3)).toContain("마지막 성공 3시간 전");
+    expect(mk(24 * 90)).toContain("마지막 성공 90일 전");
+  });
+  it("age_hours null이면 '수집 기록 없음'(0시간으로 접지 않는다)", () => {
+    const b = buildCollectionFreshnessBanner(wrap([s({
+      state: "failed", age_hours: null, last_error_at: "2026-08-07T14:35:12",
+    })]));
+    expect(b?.items[0].text).toContain("수집 기록 없음");
+    expect(b?.items[0].text).not.toContain("0시간");
+  });
+});
+
+describe("unknown(백엔드 판정 불가)은 숨기지 않는다", () => {
+  it("red + kind unknown + '판정 불가'를 명시", () => {
+    const b = buildCollectionFreshnessBanner(wrap([s({ state: "unknown", label: "ofix 광고비" })]));
+    expect(b?.severity).toBe("red");
+    expect(b?.items[0].kind).toBe("unknown");
+    expect(b?.items[0].text).toContain("판정 불가");
+  });
+  it("★한 스트림이 unknown이어도 나머지 스트림 판정은 살아 있다(전면 실명 금지)", () => {
+    const b = buildCollectionFreshnessBanner(wrap([
+      s({ state: "unknown", key: "supplier_hub", label: "로켓 발주/정산" }),
+      s({ state: "critical", key: "ofix_ad", label: "ofix 광고비", age_hours: 100 }),
+    ]));
+    expect(b?.items).toHaveLength(2);
+    expect(b?.items[1].text).toContain("4일 지남");
+    // 갱신 버튼 대상에서도 빠지지 않는다
+    expect(specsForKeys((b?.items ?? []).map((i) => i.key)).specs).toHaveLength(2);
+  });
+});
+
+describe("경계값 — 상수·비교연산자가 새면 잡는다", () => {
+  it("in_flight 구제는 24h에서 켜지고 23.9h에서 꺼진다", () => {
+    const at = (age: number) =>
+      buildCollectionFreshnessBanner(wrap([s({ state: "in_flight", age_hours: age })]));
+    expect(at(23.9)).toBeNull();          // 아직 정상 갱신 중 — 소음 금지
+    expect(at(24)?.items[0].kind).toBe("stale");
+  });
+  it("in_flight 구제의 색은 48h에서 노랑→빨강", () => {
+    const sev = (age: number) =>
+      buildCollectionFreshnessBanner(wrap([s({ state: "in_flight", age_hours: age })]))?.severity;
+    expect(sev(47.9)).toBe("yellow");
+    expect(sev(48)).toBe("red");
+  });
+  it("failed 문구의 '일/시간' 전환도 48h 경계", () => {
+    const t = (age: number) => buildCollectionFreshnessBanner(wrap([s({
+      state: "failed", age_hours: age, last_error_at: "2026-08-07T14:35:12",
+    })]))?.items[0].text;
+    expect(t(47.9)).toContain("마지막 성공 47시간 전");
+    expect(t(48)).toContain("마지막 성공 2일 전");
+  });
+});
+
+describe("로그인 사유 판정은 streamRefresh와 한 벌이어야 한다", () => {
+  it("'로그인 필요'가 있으면 붙는다", () => {
+    const b = buildCollectionFreshnessBanner(wrap([s({
+      state: "failed", last_error: "RG: status/api에서 로그아웃 확증 — 로그인 필요. [재시도 안 함]",
+      last_error_at: "2026-08-07T14:35:12",
+    })]));
+    expect(b?.items[0].text).toContain("로그인 필요");
+  });
+  it("★'로그인'이 들어가도 로그인 실패가 아닌 문구엔 안 붙는다(넓은 술어 금지)", () => {
+    // 실제 페처 문구 — 크래시인데 '로그인'이라는 낱말이 들어 있다.
+    const b = buildCollectionFreshnessBanner(wrap([s({
+      state: "failed", last_error: "브라우저 창이 닫혔습니다 — 로그인 미완료(창을 닫지 말고 로그인만 하세요)",
+      last_error_at: "2026-08-07T14:35:12",
+    })]));
+    expect(b?.items[0].text).not.toContain("· 로그인 필요");
+  });
+  it("영문 크래시 문구에도 안 붙는다", () => {
+    const b = buildCollectionFreshnessBanner(wrap([s({
+      state: "failed", last_error: "Target page, context or browser has been closed",
+      last_error_at: "2026-08-07T14:35:12",
+    })]));
+    expect(b?.items[0].text).not.toContain("로그인");
   });
 });
 

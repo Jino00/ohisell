@@ -217,3 +217,35 @@ class TestCodexRound1:
         from app.services.coupang import collection_status as cs
 
         assert '"requested_at"' in inspect.getsource(cs.collection_status)
+
+    # ── unknown(판정 불가) 가드 (2026-08-07 적대리뷰 후속) ─────────────
+    def test_P1_unknown은_나이_무관_즉시_알린다(self):
+        """★unknown은 age_hours가 None이라 is_stale·never 어느 조건에도 안 걸린다.
+
+        명시하지 않으면 «판정 불가»가 조용히 버려진다 — 배너는 붉게 뜨는데 Slack만
+        침묵하면 화면을 안 보는 시간대(밤·주말)가 통째로 사각이 된다.
+        """
+        out = decide([s("supplier_hub", "unknown", None,
+                        last_error="상태 조회 실패: OperationalError: no such column")])
+        keys = [n["key"] for n in out["notify"]]
+        assert "supplier_hub" in keys, "판정 불가를 조용히 버리면 안 된다"
+        n = out["notify"][0]
+        assert "판정 불가" in n["reason"]
+        assert n["state"] == "unknown"
+        # 자동 구조 대상은 아니다 — 낡았는지조차 모르는데 갱신을 거는 건 근거가 없다.
+        assert out["rescue"] == []
+
+    def test_P1_한_스트림이_unknown이어도_나머지_판정은_산다(self):
+        """전면 실명 금지 — 이 PR이 고치는 P1의 워치독 쪽 짝."""
+        out = decide([
+            s("supplier_hub", "unknown", None),
+            s("ofix_ad", "critical", NOTIFY_STALE_DAYS + 1),
+            s("ohitech_ad", "fresh", 0.1),
+        ])
+        keys = {n["key"] for n in out["notify"]}
+        assert keys == {"supplier_hub", "ofix_ad"}, "fresh는 조용, 나머지 둘은 알림"
+
+    def test_unknown이_Slack_문구에_사유와_함께_나온다(self):
+        text = _format_slack(decide([s("ofix_ad", "unknown", None,
+                                       last_error="상태 조회 실패: RuntimeError: boom")])["notify"], [])
+        assert "ofix 광고비" in text and "판정 불가" in text
