@@ -4,13 +4,16 @@
 #   ① 원자(day_option_atoms)는 파생의 단일 출처다 — 원자의 합이 화면 타일과 맞고,
 #      맞지 않는 유일한 항(판매 없는 옵션의 광고비)은 **크기까지 못 박혀 있다**
 #   ①' `burden_known=False`(분담금 모름)면 원자 net이 전부 None이다 — 0으로 접지 않는다
-#   ② 검사는 «같은 함수의 다른 그레인»을 비교한다 — 재계산이 아니다
-#      (사다리는 `compute_rocket_1p_revenue` 응답을 **그대로** 싣는다: ladder == 화면 pnl)
-#   ③ B1은 절대 pass가 되지 않는다 — 판정할 수 없는 검사를 초록으로 칠하면 거짓 초록
-#   ④ A5·A6·A7은 조용한 결손(INNER JOIN 탈락·분담금 모름·광고 미귀속)을 드러낸다
+#   ② 검사는 «같은 함수의 다른 그레인»을 비교한다 — 재계산이 아니다. 화면 응답은
+#      **주입**되고(`_audit` 헬퍼가 라우터 노릇), 사다리는 그것을 그대로 싣는다(ladder == pnl)
+#   ③ B1·B3는 **절대 pass가 되지 않는다** — 판정할 수 없는 검사를 초록으로 칠하면 거짓 초록
+#      (B1은 값이 정말 같을 때도, B3는 두 광고 축의 정의가 달라서)
+#   ④ A5·A7은 조용한 결손(납품단가 미결합·광고 미귀속)을 드러낸다
+#   ⑤ ★«수집 안 됨»을 «없음»으로 읽지 않는다 — A6은 프로모션 수집 신선도를 먼저 보고,
+#      B2는 계산서 0건·라인 테이블 부재를 pass로 칠하지 않는다
 #
 # 아직 지키지 않는 것 (후속 태스크에서 추가 — 지금 적으면 거짓 초록이다):
-#   ⑤ 원천 행 드릴다운(원자 목록·원자 상세 API)과 그 창 계약
+#   ⑥ 원천 행 드릴다운(원자 목록·원자 상세 API)과 그 창 계약
 from __future__ import annotations
 
 from datetime import date
@@ -121,7 +124,8 @@ def test_atom_sum_minus_tile_is_exactly_the_unattributable_ad(db):
 
     basis='full'이면 그 창에 판매행이 없는 옵션의 광고비(`ad_no_sales`)가 타일에서 **세후로
     추가 차감**된다. 귀속할 원자가 아예 없는 돈이라 어떤 원자에도 실리지 않는다.
-    계획 단계 라이브 실측(8/1~7) 253,091원 — 픽스처에 그런 옵션이 없으면 이 잔차가 보이지
+    계획 단계 라이브 실측 **창 2026-07-31~08-06** 기준 253,091원(같은 지표가 창 08-01~08-07
+    에서는 282,794원이다 — 창을 안 밝히고 인용하면 안 된다) — 픽스처에 그런 옵션이 없으면 이 잔차가 보이지
     않아 "Σ = 타일"이 참인 것처럼 통과한다. 그게 이 테스트가 있는 이유다.
     후속 태스크의 A7 검사가 **바로 이 잔차의 존재 위에** 세워지므로 등식으로 고정해 둔다.
     """
@@ -265,13 +269,77 @@ def test_audit_rejects_a_screen_from_a_different_window(db):
         compute_pnl_audit_checks(db, D_PREV, D, screen)   # 이틀 창으로 대조 시도
 
 
-def _full_fixture(db):
+def test_audit_rejects_a_screen_for_a_different_vendor(db):
+    """★Task 4 라우터가 vendor를 열면 즉시 생기는 구멍 — 창만 맞고 판매자가 다를 수 있다.
+
+    지금은 화면 SA가 vendor 기본값 하나만 쓰지만, 가드를 나중에 붙이면 «붙이는 걸 잊는»
+    쪽에 걸린다. A6·B2도 **응답의 vendor**로 조회한다(두 축이 갈리면 다른 모집단을 센다).
+    """
+    from app.services.coupang.rocket_1p_pnl_audit import compute_pnl_audit_checks
+    _full_fixture(db)
+    screen = compute_rocket_1p_revenue(db, D_PREV, D)
+    with pytest.raises(ValueError, match="vendor가 다릅니다"):
+        compute_pnl_audit_checks(db, D_PREV, D, screen, vendor_id="A99999999")
+
+
+def test_b2_undetermined_for_a_non_1p_vendor(db):
+    """계산서 축은 1P vendor 고정 조회다 — 다른 vendor의 계산서를 답할 수 없다."""
+    _full_fixture(db, settlement=False)
+    _sale(db, "Z1", "S1", 3, "30000", d=D)
+    db.commit()
+    screen = compute_rocket_1p_revenue(db, D_PREV, D, "A99999999")
+    from app.services.coupang.rocket_1p_pnl_audit import compute_pnl_audit_checks
+    r = compute_pnl_audit_checks(db, D_PREV, D, screen)
+    b2 = next(c for c in r["checks"] if c["id"] == "B2")
+    assert b2["verdict"] == "undetermined"
+    assert "A99999999" in b2["note"]
+
+
+def _promo(db, request_id, start, end, *, synced, priced=False):
+    """프로모션 1건. `synced`= 수집 최종 갱신 시각(KST) — A6의 신선도 판정자."""
+    db.execute(_t("INSERT INTO coupang_rocket_promotion "
+                  "(request_id, vendor_id, start_at, end_at, synced_at) "
+                  "VALUES (:r, :v, :s, :e, :n)"),
+               {"r": request_id, "v": VENDOR, "s": start, "e": end, "n": synced})
+    if priced:
+        db.execute(_t("INSERT INTO coupang_promo_discount_item "
+                      "(request_id, product_number, discount_type, discount_value) "
+                      "VALUES (:r, 'S1', 'FIXED', 1000)"), {"r": request_id})
+
+
+def _settlement(db, seq, amount, *, d=D, with_line=True):
+    """계산서 1건(+라인). ★라인이 없으면 작성일 폴백이라 B2가 undetermined가 된다."""
+    db.execute(_t("INSERT INTO coupang_rocket_settlement "
+                  "(invoice_seq, vendor_id, supply_amount, vat, payment_amount, issue_date, "
+                  " first_payment_amount, second_payment_amount, synced_at) "
+                  "VALUES (:q, :v, :a, 0, :a, :d, 0, 0, :n)"),
+               {"q": seq, "v": VENDOR, "a": amount, "d": d.isoformat(),
+                "n": f"{d.isoformat()} 12:00:00"})
+    if with_line:
+        db.execute(_t("INSERT INTO coupang_rocket_settlement_item "
+                      "(invoice_seq, line_no, vendor_id, received_at, qty, unit_price, "
+                      " supply_amount, vat, total_price, synced_at) "
+                      "VALUES (:q, 1, :v, :r, 1, :a, :a, 0, :a, :n)"),
+                   {"q": seq, "v": VENDOR, "r": f"{d.isoformat()} 09:00:00", "a": amount,
+                    "n": f"{d.isoformat()} 12:00:00"})
+
+
+# ★픽스처의 우리 매출 실측값(2026-08-07 실행). 계산서를 **같은 금액**으로 두는 데 쓴다 —
+#   그래야 B1이 «두 값이 같은데도 pass가 아니다»를 진짜로 검사한다.
+FIXTURE_OUR_REVENUE = "2221105"
+
+
+def _full_fixture(db, *, settlement=True):
     """A1~A7 전부 판정 가능한 최소 데이터 — **2옵션 × 2일**(원자 4개).
 
     ★1옵션×1일이면 A1·A2의 «합»이 각각 한 항이라, 접기가 발산해도 등식이 그대로 성립한다.
       옵션 축과 날짜 축이 **서로 다른 묶음**이 되도록 넷으로 둔다.
-    ★A1~A7이 전부 pass가 되는 조건: 전 SKU에 납품단가(A5)와 원가(A4)가 있고,
-      광고를 쓴 (날짜,옵션)마다 판매행이 있으며(A7), 창에 프로모션이 없다(A6).
+    ★A1~A7이 전부 pass가 되는 조건: 전 SKU에 납품단가(A5)와 원가(A4)가 있고, 광고를 쓴
+      (날짜,옵션)마다 판매행이 있으며(A7), 창에 프로모션이 없고 **수집은 창을 덮으며**(A6),
+      창의 계산서가 전부 라인으로 귀속된다(B2).
+    ★프로모션은 **창 밖**에 하나 둔다 — «창에 프로모션 0건»과 «수집이 안 됐다»를 A6이
+      가르려면 수집 시각이 있어야 하는데, 그 시각은 행이 있어야 존재한다. 실제 운영에서도
+      테이블이 통째로 비는 일은 없으므로 이쪽이 라이브에 가깝다.
     """
     for i, (oid, sku) in enumerate((("O1", "S1"), ("O2", "S2")), 1):
         _price(db, sku, str(60000 + i * 1111), i)
@@ -280,6 +348,12 @@ def _full_fixture(db):
             _sale(db, oid, sku, 7 + i + dnum, str(900000 + i * 1000 + dnum * 700), d=day)
             _ad_option(db, oid, str(9000 + i * 101 + dnum * 17), d=day)
     _ad_account(db, "40000")
+    # 창(8/3~8/4) 밖 프로모션 + 창 끝을 덮는 수집 시각 → A6 = pass(0건, 근거 있음)
+    _promo(db, "OUTSIDE", "2026-07-01 00:00:00", "2026-07-10 23:59:59",
+           synced=f"{D.isoformat()} 21:00:00", priced=True)
+    if settlement:
+        # ★우리 매출과 **같은 금액** — B1이 «같아도 pass 아님»을 검사할 수 있게.
+        _settlement(db, 9001, FIXTURE_OUR_REVENUE)
     db.commit()
 
 
@@ -329,13 +403,118 @@ def test_a3_discloses_that_vat_is_a_residual(db):
 
 
 def test_b1_never_passes_even_when_equal(db):
-    """★판정할 수 없는 검사를 초록으로 칠하지 않는다 — 값이 우연히 같아도."""
+    """★판정할 수 없는 검사를 초록으로 칠하지 않는다 — 값이 **정말로 같아도**.
+
+    픽스처가 계산서를 우리 매출과 같은 금액으로 두므로 좌·우변이 원 단위로 일치한다.
+    그래도 undetermined다 — 두 축의 차이는 쿠팡 창고 재고 증감으로 설명돼야 하는데 1P
+    재고 데이터가 없어서, «같다»가 «맞다»를 뜻하지 않기 때문이다.
+    """
     _full_fixture(db)
     r = _audit(db, D_PREV, D)
     b1 = next(c for c in r["checks"] if c["id"] == "B1")
+    assert b1["left"] == b1["right"] == FIXTURE_OUR_REVENUE   # 진짜로 같다
+    assert Decimal(b1["diff"]) == ZERO_D
     assert b1["verdict"] == "undetermined"
-    # 값이 같아도(둘 다 계산서 0 / 판매 축 값) pass가 아니다 — 그 사실을 여기서 못 박는다.
-    assert b1["diff"] is not None or b1["left"] is None
+
+
+def test_b3_never_passes_and_surfaces_the_two_ad_axes(db):
+    """★A7이 «= 창 전체»로 읽히던 자리를 B3가 메운다 — 사다리 광고비는 **옵션 축**이라
+    Billboard 수집이 멈추면 이익이 과대해지는데, A7은 그 축 안에서만 정합을 본다.
+
+    실측(이 픽스처): 옵션 합계 36,640 vs 계정 확정 40,000 — A7은 pass인데 두 축은 8.4%
+    어긋나 있다. 정의가 달라 «차이=결함»이 아니므로 임계값을 두지 않고 undetermined다.
+    """
+    _full_fixture(db)
+    r = _audit(db, D_PREV, D)
+    by = {c["id"]: c for c in r["checks"]}
+    assert by["A7"]["verdict"] == "pass"          # 옵션 축 내부 정합은 맞다
+    assert by["B3"]["verdict"] == "undetermined"  # 그런데 두 축은 다르다
+    assert by["B3"]["left"] == "36640" and by["B3"]["right"] == "40000.00"
+    # 사다리가 두 값을 **나란히** 들고 있어야 화면이 그 차이를 볼 수 있다.
+    assert r["ladder"]["ad_option_total"] == "36640"
+    assert r["ladder"]["ad_account_total"] == "40000.00"
+
+
+# ── A6·B2 — «수집 안 됨»을 «없음»으로 읽지 않는다 (negative) ──────────
+
+
+def test_a6_undetermined_when_promo_collection_is_stale(db):
+    """★거짓 초록이 나던 자리: 창에 프로모션 0건인데 **수집이 창을 안 덮는다**.
+
+    수집이 멈춘 창에 새 프로모션이 시작되면 행이 0건 → 분담금 0으로 손익이 나온다.
+    그걸 「프로모션 없음 = 사실」로 초록 칠하면 잡으라고 만든 검사가 사고를 덮는다.
+    """
+    _full_fixture(db, settlement=False)
+    db.execute(_t("UPDATE coupang_rocket_promotion SET synced_at = '2026-07-20 08:00:00'"))
+    db.commit()
+    a6 = next(c for c in _audit(db, D_PREV, D)["checks"] if c["id"] == "A6")
+    assert a6["verdict"] == "undetermined"
+    assert "2026-07-20" in a6["note"]          # ★«없음»의 근거를 항상 보인다
+    assert a6["left"] == "0" and a6["right"] == "0"
+
+
+def test_a6_undetermined_when_promotion_table_was_never_collected(db):
+    """행이 하나도 없으면 수집 시각 자체가 없다 — «프로모션이 없었다»고 단정할 수 없다."""
+    _full_fixture(db, settlement=False)
+    db.execute(_t("DELETE FROM coupang_rocket_promotion"))
+    db.commit()
+    a6 = next(c for c in _audit(db, D_PREV, D)["checks"] if c["id"] == "A6")
+    assert a6["verdict"] == "undetermined"
+    assert "수집 이력 없음" in a6["note"]
+
+
+def test_a6_passes_when_collection_covers_the_window(db):
+    """수집이 창을 덮을 때만 «프로모션 없음»이 사실이 된다 — 그리고 **수집 시각을 싣는다**."""
+    _full_fixture(db, settlement=False)
+    a6 = next(c for c in _audit(db, D_PREV, D)["checks"] if c["id"] == "A6")
+    assert a6["verdict"] == "pass"
+    assert f"{D.isoformat()} 21:00:00" in a6["note"]
+
+
+def test_b2_undetermined_when_window_has_no_invoices(db):
+    """계산서 0건은 «완결»이 아니라 **검사 대상 없음**이다 — 0/0을 pass로 내면 거짓 초록."""
+    _full_fixture(db, settlement=False)
+    b2 = next(c for c in _audit(db, D_PREV, D)["checks"] if c["id"] == "B2")
+    assert b2["verdict"] == "undetermined"
+    assert "검사 대상 없음" in b2["note"]
+
+
+def test_b2_undetermined_when_all_invoices_fall_back_to_issue_date(db):
+    """라인 없는 계산서는 작성일 폴백 — 금액은 맞고 날짜만 덜 정밀하다(fail이 아니다)."""
+    _full_fixture(db, settlement=False)
+    _settlement(db, 9002, "500000", with_line=False)
+    db.commit()
+    b2 = next(c for c in _audit(db, D_PREV, D)["checks"] if c["id"] == "B2")
+    assert b2["verdict"] == "undetermined"
+    assert b2["left"] == "0" and b2["right"] == "1"
+
+
+def test_b2_undetermined_when_line_table_is_absent(db):
+    """★가장 고약한 자리: 라인 테이블이 없으면 `_settlement_window`가 금액 전액을 폴백으로
+    잡으면서 **`fallback_invoices=0`**을 돌려준다 — 100% 작성일 폴백인데 겉보기엔 «폴백
+    0건»이라 예전 판은 `pass(0/0)`을 냈다. 공허한 게 아니라 **틀린 답**이었다.
+    """
+    _full_fixture(db, settlement=False)
+    _settlement(db, 9003, "500000", with_line=False)
+    db.commit()
+    db.execute(_t("DROP TABLE coupang_rocket_settlement_item"))
+    db.commit()
+    b2 = next(c for c in _audit(db, D_PREV, D)["checks"] if c["id"] == "B2")
+    assert b2["verdict"] == "undetermined"
+    assert "라인 테이블이 없어" in b2["note"]
+
+
+def test_a4_fails_when_cost_coverage_falls_below_the_minimum(db):
+    """원가 커버리지 미달은 **fail**이다 — 부분집합 손익을 전체인 척하면 안 되기 때문."""
+    _full_fixture(db, settlement=False)
+    _price(db, "S8", "70000", 8)          # 납품단가는 있고
+    _sale(db, "O8", "S8", 30, "3000000")  # 원가는 없다 → 커버리지 하락
+    db.commit()
+    a4 = next(c for c in _audit(db, D_PREV, D)["checks"] if c["id"] == "A4")
+    assert a4["verdict"] == "fail"
+    assert Decimal(a4["left"]) < Decimal(a4["right"])
+    # ★분자를 `pnl.revenue`로 적으면 분담금 미상 창에서 "None"이 뜬다 — 분모만 인용한다.
+    assert "None" not in a4["note"]
 
 
 def test_a2_and_a7_are_undetermined_when_option_table_is_truncated(db):
