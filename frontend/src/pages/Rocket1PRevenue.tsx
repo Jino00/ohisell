@@ -261,13 +261,21 @@ export default function Rocket1PRevenue() {
           <Card
             title="우리 손익 (납품가 축)"
             right={
-              /* ★배지는 basis(구조 판정)를 따른다 — 반올림된 비율을 쓰면 0.99996이 100%가 되어
-                 「기간 전체」와 「원가 미등록 SKU N개」가 동시에 뜬다(적대 리뷰 P2). */
-              data.pnl.basis === "full"
-                ? <Badge tone="neutral">원가 확인 100% · 기간 전체</Badge>
-                : data.pnl.cost_coverage == null
-                  ? undefined
-                  : <Badge tone="alert">원가 확인 {pct(data.pnl.cost_coverage)}분만</Badge>
+              <div className="flex items-center gap-2">
+                {/* ★배지는 basis(구조 판정)를 따른다 — 반올림된 비율을 쓰면 0.99996이 100%가
+                    되어 「기간 전체」와 「원가 미등록 SKU N개」가 동시에 뜬다(적대 리뷰 P2). */}
+                {data.pnl.basis === "full"
+                  ? <Badge tone="neutral">원가 확인 100% · 기간 전체</Badge>
+                  : data.pnl.cost_coverage == null
+                    ? undefined
+                    : <Badge tone="alert">원가 확인 {pct(data.pnl.cost_coverage)}분만</Badge>}
+                {/* ★새 창 — 지금 보고 있는 기간을 URL에 실어 그 창을 그대로 재현·공유한다
+                    (Jino: "우리 손익이 정말 실수 없이 나오는지 어떻게 확신할 수 있는지"). */}
+                <a href={`/rocket-1p/pnl-audit?from=${from}&to=${to}`} target="_blank" rel="noreferrer"
+                   className="rounded border border-gray-300 px-2 py-1 text-xs text-gray-600 hover:bg-gray-50">
+                  근거 보기 ↗
+                </a>
+              </div>
             }
           >
             {(() => {
