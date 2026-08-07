@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ -f claude-progress.txt ] && echo === 세션 시작 === && cat claude-progress.txt || echo 새 프로젝트"
+            "command": "[ -f claude-progress.txt ] && { echo \"=== 세션 시작 — 진행 로그 발췌 (전문 $(wc -l < claude-progress.txt)줄: claude-progress.txt / 08-04 이전: docs/archive/) ===\"; head -130 claude-progress.txt; echo; echo \"···· [중략] ─ 이 파일은 위·아래 양쪽에 쓰인다. 아래는 파일 끝의 최신분 ····\"; echo; tail -70 claude-progress.txt; } || echo 새 프로젝트"
           }
         ]
       }
