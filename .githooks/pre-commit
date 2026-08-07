@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# pre-commit — 공유 메인 체크아웃에서 남의 작업이 커밋에 섞이는 것을 막는다 (issue #247, 2026-08-07)
+#
+# ★무엇을 막나: 병행 세션이 **공유 메인 폴더에서 직접 작업**하면, 그 폴더에 다른 세션이
+#   써 둔 미추적 파일이 `git add -A`에 쓸려 들어간다. 관측 2회 —
+#     · 2026-08-06 로컬 마이그 테스트 중 지워진 SQLite 사이드카가 무관한 커밋에 삭제로 섞임
+#     · 2026-08-07 세션 A의 HANDOFF가 세션 B의 커밋 `8af0ce1`에 쓸려 들어감
+#   ②는 내용이 맞아 손해가 없었지만, **반대 방향이면 남의 미완성 작업이 리뷰 없이 병합된다**
+#   (작성자가 본 적 없는 diff가, 그 변경을 설명하지 않는 커밋 메시지를 달고).
+#
+# ★근본 원인은 `git add -A`가 아니다. 세션은 각자 **워크트리**에서 일하므로 `-A`를 써도 남의
+#   파일이 안 보인다. 섞인 이유는 규칙(`공유 메인 폴더는 main 고정`)이 깨졌기 때문이고,
+#   그 규칙은 문서에만 있었다. safe_deploy.sh·next_ids.sh·safe_merge.sh와 같은 이유로 도구로 둔다.
+#
+# ★차단이 아니라 거부+자백이다. 섞인 커밋은 revert가 되므로 전역 §1의 하드 게이트 근거가 없다.
+#   `--no-verify` 탈출구가 있고, 쓰면 그건 의식적 선택이다.
+#
+# ★★오탐 0이 이 훅의 제1 요구사항이다(교훈 #154: 시끄러운 가드는 무시당한다).
+#   `core.hooksPath`는 **워크트리와 설정을 공유**하므로 훅은 워크트리에서도 실행된다.
+#   그래서 맨 먼저 "여기가 워크트리인가"를 판별해 **즉시 통과**시킨다.
+
+set -u
+
+# ── 0) 워크트리면 관여하지 않는다.
+#    판별자: 워크트리는 git-dir이 `<main>/.git/worktrees/<name>`이고 common-dir은 `<main>/.git`이라
+#    둘이 다르다. 메인 체크아웃은 둘이 같다. (실측 2026-08-07)
+_gd=$(git rev-parse --absolute-git-dir 2>/dev/null) || exit 0
+_cd=$(cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P) || exit 0
+_gd=$(cd "$_gd" 2>/dev/null && pwd -P) || exit 0
+[ "$_gd" != "$_cd" ] && exit 0        # ← 워크트리: 통과
+
+branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null || echo "(detached HEAD)")
+
+# ── 1) 메인 체크아웃이 main이 아니면 거부.
+#    이게 실제로 일어난 사고의 형태다 — 세션이 공유 폴더를 브랜치로 갈아타고 거기서 커밋했다.
+if [ "$branch" != "main" ]; then
+  cat >&2 <<EOF
+
+❌ 공유 메인 체크아웃이 main이 아닌데 커밋하려 한다 (현재: $branch)
+
+   여기: $(git rev-parse --show-toplevel)
+
+   이 폴더는 **main 고정**이다. 다른 세션이 같은 폴더에 써 둔 미추적 파일이
+   이 커밋에 쓸려 들어간다(2026-08-06·08-07 실제 관측 2회, issue #247).
+
+   해야 할 것 — 워크트리에서 작업한다:
+     git -C "$(git rev-parse --show-toplevel)" worktree add .claude/worktrees/<이름> -b claude/<브랜치> origin/main
+
+   이미 여기서 작업해 버렸다면, 변경을 워크트리로 옮기고 이 폴더는 main으로 되돌린다.
+
+   그래도 커밋해야 한다면: git commit --no-verify   ← 의식적 선택으로 남는다
+
+EOF
+  exit 1
+fi
+
+# ── 2) main 위에서의 커밋은 허용하되, **새로 추가되는 파일을 눈앞에 띄운다**.
+#    거부까지 하지 않는 이유: 병합 커밋·인계 파일 등 정당한 경우가 있고, 여기서까지 막으면
+#    훅이 통째로 무시당한다. 남의 파일이 섞였는지는 사람이 목록을 보면 즉시 안다.
+added=$(git diff --cached --name-only --diff-filter=A 2>/dev/null)
+if [ -n "$added" ]; then
+  n=$(printf '%s\n' "$added" | wc -l | tr -d ' ')
+  cat >&2 <<EOF
+
+⚠️ 공유 메인 체크아웃에서 **새 파일 ${n}건**을 커밋한다. 내가 만든 것이 맞나?
+   (다른 세션이 이 폴더에 써 둔 파일이 \`git add -A\`에 섞이는 일이 두 번 있었다 — issue #247)
+
+$(printf '%s\n' "$added" | sed 's/^/     + /')
+
+   섞였다면: git restore --staged <파일>
+
+EOF
+fi
+
+exit 0
