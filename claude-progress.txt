@@ -1954,3 +1954,21 @@ RG 옛 공백(04-20~05-03) Jino 종결 승인(13:34) — 공백 아님(배송비
 - **다음 최우선**: (기존 그대로 유지) `coupang_1p/cost`·`coupang_1p/net_profit` 보존법칙 복구.
 - 상세(갱신됨): .claude/memory/HANDOFF_cost-unknown-not-zero+mapping-guards_20260806.md ·
   트랙 D-NAO-159·160: docs/tracks/active/track_naver-ad-optimization.md
+
+[2026-08-07 09:3x] 04 자동운영 정지 감사 D+8 (감사 전용·쓰기 0건)
+  · 루틴 전제 VOID 8일째 — D-NAO-132(07-30 10:44 KST Jino "우리가 진행중인 광고 모두 정지 시켜줘")
+    이후 7개 캠페인 settings 전부 optimizer=none·auto_operate=0, 07-30 10:48 KST 이후 무변동
+  · 라이브 증거: 오늘 change_log 118행 중 dry_run=0은 73행인데 **전량 external_*(관측)** —
+    non-external dry_run=0 = 0건. 마지막 자체 쓰기는 07-30 10:50:07 manual_emergency_stop ×5
+  · 라이브 재조회 5건: 04·15·P = PAUSED/userLock=true, editTm이 정지 시각
+    2026-07-30T01:50:07Z 그대로 → 우리 정지분엔 외부 조작 0. 01·03은 9일째 외부 가동 중
+  · ★중단조건 '외부/수동 변경' 발동: 정지 대상 **01·03 양쪽**에서 08-06 소재 입찰 7건 외부 변경
+    (03 08:52~10:30 3건 전건 인하 / 01 13:13~13:17 4분 집중 4건, 인상3·인하1). is_exception=1 전건.
+    대행사 캠페인 10206612엔 키워드 59건·광고그룹 3개 신규 추가 — external_keyword_added
+    대량 관측은 이번이 처음
+  · 01 일예산 초과가 08-06 처음 멈춤(281,714 < 300,000). 6일 연속 초과 뒤 첫 정상일 —
+    같은 날 13시대 외부 입찰 조정과 시점이 겹치나 인과 단정 불가(관측만)
+  · 04 소진 7일 연속 0원 → A/B는 8일째 DEAD, 17E 카나리 리드아웃 불가
+  · 제안 백로그 pending 204(+9) — 143→159→173→195→204 5일 연속 증가(executor가 막혀 전량 만료)
+  · 레인: 오늘 43개 발동 전부 ok, non-ok 0건(daily 08:50:04 / hourly 09:20:00)
+  · ⚠️이월(스코프 밖): prod backend/.env 38행에 따옴표 없는 iCloud 경로 → `. .env` 시 파싱 에러
