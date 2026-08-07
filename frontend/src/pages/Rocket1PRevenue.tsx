@@ -307,23 +307,38 @@ export default function Rocket1PRevenue() {
                   {p.uncosted.actionable_skus > 0 && (
                     <div className="border-t border-gray-100 px-4 py-3">
                       <div className="text-sm font-medium text-gray-800">
-                        원가 미등록 SKU {p.uncosted.actionable_skus}개 · 우리 매출{" "}
+                        원가가 안 붙은 SKU {p.uncosted.actionable_skus}개 · 우리 매출{" "}
                         {won(p.uncosted.our_revenue)}
                         {p.uncosted.our_revenue_partial && " 이상"}
                       </div>
-                      <p className="mt-0.5 text-xs text-gray-500">
-                        {blocked?.code === "promo_burden_unknown"
-                          ? <>이 SKU들의 원가를 등록하면 커버리지는 오르지만, <b>지금 손익이 막힌
-                              이유는 원가가 아니라 프로모션 제안서</b>입니다 — 그것부터 들어와야
-                              손익이 나옵니다.</>
-                          : <>아래 SKU의 원가를 SellC에 등록하면 그만큼 커버리지가 오릅니다.</>}
-                        {p.uncosted.ignored_skus > 0 && (
-                          <> 이와 별개로 <b>「원가 제외」로 이미 결정된 SKU {p.uncosted.ignored_skus}개</b>가
-                            팔렸습니다(샘플·증정 등) — 목록에서 뺐고, 그래서 커버리지 100%는 원가
-                            등록만으로는 달성되지 않습니다.</>
+                      {/* ★★할 일을 「원가 등록」 하나로 뭉뚱그리지 않는다(2026-08-07 실사고).
+                          예전 문구를 그대로 따라 원가를 등록했는데 화면이 안 움직였다 — 그
+                          SKU들은 원가가 없는 게 아니라 **연결이 없었다**(라이브 178건). 원가는
+                          내부 SKU에 붙고 판매는 쿠팡 상품번호로 들어와서, 다리가 없으면 원가를
+                          아무리 넣어도 안 붙는다. */}
+                      <p className="mt-0.5 text-xs leading-relaxed text-gray-500">
+                        {p.uncosted.link_missing_skus > 0 && (
+                          <><b className="text-amber-800">
+                            {p.uncosted.link_missing_skus}개는 「연결」이 없습니다</b> — 쿠팡
+                            상품번호와 내부 SKU가 이어져 있지 않아 <b>원가를 등록해도 안 붙습니다.</b>{" "}
+                            <a href="/command-center" className="underline">「종합 조망」 화면의
+                            '원가 매핑 관리'</a>에서 연결하세요.{" "}</>
+                        )}
+                        {p.uncosted.cost_missing_skus > 0 && (
+                          <><b>{p.uncosted.cost_missing_skus}개는 연결은 돼 있고 원가만 없습니다</b> —
+                            SellC에 원가를 등록하면 됩니다.{" "}</>
+                        )}
+                        {p.uncosted.excluded_skus > 0 && (
+                          <>이와 별개로 <b>「원가 제외」로 이미 결정된 SKU {p.uncosted.excluded_skus}개</b>가
+                            팔렸습니다(샘플·증정 등) — 목록에서 뺐고, 그래서 커버리지 100%는 위
+                            조치만으로는 달성되지 않습니다.{" "}</>
+                        )}
+                        {blocked?.code === "promo_burden_unknown" && (
+                          <><b>다만 지금 손익이 막힌 이유는 원가가 아니라 프로모션 제안서</b>입니다 —
+                            위 조치를 다 해도 그것부터 들어와야 손익이 나옵니다.{" "}</>
                         )}
                         {p.uncosted.our_revenue_partial &&
-                          " 일부 SKU는 납품단가도 없어 우리 매출을 몰라 위 합계에서 빠졌습니다(0이 아닙니다)."}
+                          "일부 SKU는 납품단가도 없어 우리 매출을 몰라 위 합계에서 빠졌습니다(0이 아닙니다)."}
                       </p>
                       <Table
                         head={<>
@@ -331,7 +346,7 @@ export default function Rocket1PRevenue() {
                           <Th right>판매량</Th>
                           <Th right>우리 매출(납품가)</Th>
                           <Th right>소비자 매출</Th>
-                          <Th right>지금 상태</Th>
+                          <Th right>할 일</Th>
                         </>}
                       >
                         {p.uncosted.top.map((u) => (
@@ -347,9 +362,12 @@ export default function Rocket1PRevenue() {
                             <Td right>{won(u.our_revenue)}</Td>
                             <Td right>{won(u.consumer_revenue)}</Td>
                             <Td right>
-                              {u.loss_confirmed
-                                ? <Badge tone="alert">확정 적자</Badge>
-                                : <span className="text-gray-300">—</span>}
+                              {u.reason === "no_link"
+                                ? <Badge tone="alert">연결 필요</Badge>
+                                : <Badge tone="neutral">원가 등록</Badge>}
+                              {u.loss_confirmed && (
+                                <span className="ml-1"><Badge tone="alert">확정 적자</Badge></span>
+                              )}
                             </Td>
                           </tr>
                         ))}
