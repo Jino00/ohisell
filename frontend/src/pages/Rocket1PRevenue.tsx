@@ -351,6 +351,15 @@ export default function Rocket1PRevenue() {
                           내부 SKU에 붙고 판매는 쿠팡 상품번호로 들어와서, 다리가 없으면 원가를
                           아무리 넣어도 안 붙는다. */}
                       <p className="mt-0.5 text-xs leading-relaxed text-gray-500">
+                        {/* ★신규를 맨 앞에 말한다 — 새 폰이 나올 때마다 생기고 나오자마자
+                            매출 1위가 되는데, 매출 순 목록에선 옛 꼬리에 묻힌다. */}
+                        {p.uncosted.new_skus > 0 && (
+                          <><b className="text-amber-800">
+                            ★이번 기간에 <b>새로 팔리기 시작한</b> 상품 {p.uncosted.new_skus}개가
+                            아직 연결 안 됐습니다</b>(우리 매출 {won(p.uncosted.new_our_revenue)}) —
+                            아래 목록 맨 위에 「신규」로 표시했습니다. 새 기종이 나오면 곧바로
+                            매출 상위가 되므로 이것부터 이어주세요.{" "}</>
+                        )}
                         {p.uncosted.link_missing_skus > 0 && (
                           <><b className="text-amber-800">
                             {p.uncosted.link_missing_skus}개는 「연결」이 없습니다</b> — 쿠팡
@@ -390,12 +399,21 @@ export default function Rocket1PRevenue() {
                                 title={u.product_name ?? u.sku_id ?? ""}>
                                 {u.product_name ?? u.sku_id}
                               </div>
-                              <div className="mt-0.5 text-xs text-gray-400">SKU {u.sku_id ?? "—"}</div>
+                              <div className="mt-0.5 text-xs text-gray-400">
+                                SKU {u.sku_id ?? "—"}
+                                {u.first_po_at && ` · 발주 첫 등장 ${u.first_po_at}`}
+                                {u.first_sold_at && ` · 판매 첫 관측 ${u.first_sold_at}`}
+                                {/* ★관측 한계를 숨기지 않는다 — 그 전은 롤링창 밖이라 모른다. */}
+                                {u.first_sold_at_bounded && !u.first_po_at && " (그 전은 관측 없음)"}
+                              </div>
                             </Td>
                             <Td right>{num(u.qty)}</Td>
                             <Td right>{won(u.our_revenue)}</Td>
                             <Td right>{won(u.consumer_revenue)}</Td>
                             <Td right>
+                              {u.is_new && (
+                                <span className="mr-1"><Badge tone="owner">신규</Badge></span>
+                              )}
                               {u.reason === "no_link"
                                 ? <Badge tone="alert">연결 필요</Badge>
                                 : <Badge tone="neutral">원가 등록</Badge>}

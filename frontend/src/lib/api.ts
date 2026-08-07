@@ -1348,6 +1348,14 @@ export interface Rocket1PUncostedSku {
    *  no_cost = 연결은 있는데 그 내부 SKU에 원가가 없다
    *  excluded = 원가 제외로 **이미 결정**됨(시키면 안 된다) */
   reason: "no_link" | "no_cost" | "excluded";
+  /** ★이번 조회 기간에 **처음 팔리기 시작**했나. 새 폰이 나올 때마다 생기고, 나오자마자
+   *  매출 1위가 된다(실측: 신규 3개가 미연결 매출의 56%). 매출 순에 묻히면 안 된다. */
+  is_new: boolean;
+  first_sold_at: string | null;
+  first_po_at: string | null;
+  /** 첫 판매일이 **관측 시작일**과 같다 = 그 전은 판매분석 롤링창 밖이라 모른다.
+   *  이때는 is_new를 단정하지 않는다(발주 이력이 창 안이면 예외). */
+  first_sold_at_bounded: boolean;
 }
 
 /** 손익 블록. ★basis='costed_subset'이면 **원가 확인분만** 더한 값이다(창 전체가 아니다). */
@@ -1381,6 +1389,8 @@ export interface Rocket1PPnl {
     cost_missing_skus: number;     // 연결은 있는데 원가가 없다
     excluded_skus: number;         // 이미 "제외"로 결정 — 시키면 안 된다
     loss_confirmed_skus: number;
+    new_skus: number;              // ★이번 기간에 새로 팔리기 시작한 미연결 SKU
+    new_our_revenue: string;
     top: Rocket1PUncostedSku[];    // actionable만
   };
   note: string;
