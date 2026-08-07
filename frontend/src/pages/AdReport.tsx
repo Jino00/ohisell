@@ -12,6 +12,11 @@ function isoKST(d: Date): string {
   return `${kst.getFullYear()}-${String(kst.getMonth() + 1).padStart(2, "0")}-${String(kst.getDate()).padStart(2, "0")}`;
 }
 
+/** 지금(KST) 날짜. 렌더 중이 아니라 **호출 시점**에 읽는다. */
+function todayKST(): string {
+  return isoKST(new Date());
+}
+
 /** 오늘 포함 n일치의 시작일(KST). n=7 → 오늘−6일. */
 function daysAgoKST(n: number): string {
   return isoKST(new Date(Date.now() - (n - 1) * 86400000));
@@ -162,16 +167,18 @@ export default function AdReport() {
         >
           조회
         </button>
-        {/* 빠른 선택 — 날짜는 **클릭 시점**에 계산한다(렌더 중 Date.now = react-hooks/purity 에러).
-            값은 종전과 같다: 7일=오늘 포함 7일치(−6일), 30일=−29일. */}
+        {/* 빠른 선택 — 날짜는 **클릭 시점**에 from·to를 한 쌍으로 계산한다.
+            ①렌더 중 Date.now()는 react-hooks/purity 에러다. ②from만 클릭 시점으로 옮기고
+            to는 렌더 시점 `today`를 쓰면, 자정을 넘겨 열려 있던 페이지에서 두 값의 기준
+            시각이 갈라져 7일이 6일이 된다. 값은 종전과 같다(7일=−6일, 30일=−29일). */}
         {[
-          { label: "이번 달", from: () => firstOfMonth },
-          { label: "지난 7일", from: () => daysAgoKST(7) },
-          { label: "지난 30일", from: () => daysAgoKST(30) },
+          { label: "이번 달", range: (): [string, string] => { const t = todayKST(); return [t.slice(0, 8) + "01", t]; } },
+          { label: "지난 7일", range: (): [string, string] => [daysAgoKST(7), todayKST()] },
+          { label: "지난 30일", range: (): [string, string] => [daysAgoKST(30), todayKST()] },
         ].map((q) => (
           <button
             key={q.label}
-            onClick={() => { setDateFrom(q.from()); setDateTo(today); }}
+            onClick={() => { const [f, t] = q.range(); setDateFrom(f); setDateTo(t); }}
             className="px-2 py-1 text-xs text-blue-600 border border-blue-200 rounded hover:bg-blue-50"
           >
             {q.label}
