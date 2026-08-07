@@ -1383,6 +1383,24 @@ export interface Rocket1PPnl {
   note: string;
 }
 
+/** 일별 손익 한 줄. ★`our_revenue`(전량)와 `pnl_revenue`(원가 확인분)는 **분모가 다르다** —
+ *  이익률은 후자 기준이다. 원가가 안 붙은 날은 cost·net이 null(0이 아니다). */
+export interface Rocket1PDaily {
+  date: string;
+  qty: number;
+  consumer_revenue: string;
+  our_revenue: string | null;      // 전량(납품가) — 매출 축
+  pnl_revenue: string | null;      // 원가 확인분 — 손익 축(이익률 분모)
+  cost: string | null;
+  promo_burden: string | null;
+  ad_spend: string;                // 그날 옵션 광고비(Billboard)
+  ad_no_sales: string;             // 그날 광고는 돌았는데 판매행이 없는 옵션분(순이익 미포함)
+  vat: string | null;
+  net_profit: string | null;
+  profit_rate: string | null;
+  cost_coverage: string | null;    // ★그날 기준. 창 평균이 아니다.
+}
+
 export interface Rocket1PRevenue {
   period: { from: string; to: string; vendor_id?: string };
   totals: {
@@ -1396,6 +1414,7 @@ export interface Rocket1PRevenue {
     roas: string | null;
   };
   pnl: Rocket1PPnl;
+  daily: Rocket1PDaily[];
   coverage: {
     sales_data_covered: boolean;
     sales_data_from: string | null; sales_data_to: string | null;

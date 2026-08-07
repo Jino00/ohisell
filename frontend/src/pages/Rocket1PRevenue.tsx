@@ -18,7 +18,7 @@ import { useState } from "react";
 import { Card, Stat, Table, Th, Td, Loading, EmptyState, Badge } from "../components/ui";
 import { useAsyncData } from "../lib/useAsyncData";
 import { FreshnessNote } from "../components/FreshnessNote";
-import { fetchRocket1PRevenue, type Rocket1PRevenueOption } from "../lib/api";
+import { fetchRocket1PRevenue, type Rocket1PRevenueOption, type Rocket1PDaily } from "../lib/api";
 
 const NO_DATA = "—";
 
@@ -91,6 +91,38 @@ function OptionRow({ o }: { o: Rocket1PRevenueOption }) {
       </Td>
       <Td right>{pct(o.profit_rate)}</Td>
       <Td right>{ratio(o.roas)}</Td>
+    </tr>
+  );
+}
+
+/** 일별 손익 한 줄.
+ *  ★「우리 매출」(전량)과 「손익 기준 매출」(원가 확인분)을 **나란히** 둔다 — 이익률의 분모가
+ *    후자라서, 앞의 것만 보이면 이익률이 왜 그 값인지 설명되지 않는다. */
+function DailyRow({ d }: { d: Rocket1PDaily }) {
+  const net = d.net_profit == null ? null : Number(d.net_profit);
+  const cov = d.cost_coverage == null ? null : Number(d.cost_coverage);
+  const partial = cov != null && cov < 1;
+  return (
+    <tr className="hover:bg-gray-50">
+      <Td>{d.date}</Td>
+      <Td right>{num(d.qty)}</Td>
+      <Td right>{won(d.consumer_revenue)}</Td>
+      <Td right><span className="font-medium text-blue-700">{won(d.our_revenue)}</span></Td>
+      <Td right>
+        <span className={partial ? "text-amber-700" : "text-gray-400"}>{pct(d.cost_coverage)}</span>
+      </Td>
+      {/* 아래 넷은 **원가 확인분** 축이다 — 위 「우리 매출」과 분모가 다르다. */}
+      <Td right>{won(d.pnl_revenue)}</Td>
+      <Td right>{won(d.cost)}</Td>
+      <Td right>{won(d.promo_burden)}</Td>
+      <Td right>{won(d.ad_spend)}</Td>
+      <Td right>{won(d.vat)}</Td>
+      <Td right>
+        <span className={net == null ? "" : net >= 0 ? "font-medium text-judge-good" : "font-medium text-judge-bad"}>
+          {won(d.net_profit)}
+        </span>
+      </Td>
+      <Td right>{pct(d.profit_rate)}</Td>
     </tr>
   );
 }
@@ -406,6 +438,53 @@ export default function Rocket1PRevenue() {
               );
             })()}
           </Card>
+
+          {/* ── 일별 손익 (Jino 2026-08-07: "우리의 일일 손익을 보고 싶은거야") ──
+              ★일별 순이익의 합 = 위 손익 사다리 = 옵션별 표의 합. 셋 다 같은 「날짜×옵션」
+                원자를 다른 방향으로 접은 것이라 원 단위까지 같다. */}
+          {data.daily.length > 0 && (
+            <Card
+              title={`일별 손익 (${data.daily.length}일)`}
+              right={data.freshness.days_no_data > 0
+                ? <Badge tone="alert">요청 {data.freshness.days_expected}일 중 {data.daily.length}일치</Badge>
+                : undefined}
+            >
+              <div className="overflow-x-auto">
+                <Table
+                  head={<>
+                    <Th>날짜</Th>
+                    <Th right>판매수량</Th>
+                    <Th right>소비자 매출</Th>
+                    <Th right>우리 매출(전량)</Th>
+                    <Th right>원가 확인</Th>
+                    <Th right>손익기준 매출</Th>
+                    <Th right>원가</Th>
+                    <Th right>분담금</Th>
+                    <Th right>광고비</Th>
+                    <Th right>부가세</Th>
+                    <Th right>순이익</Th>
+                    <Th right>이익률</Th>
+                  </>}
+                >
+                  {data.daily.map((d) => <DailyRow key={d.date} d={d} />)}
+                </Table>
+              </div>
+              <p className="px-4 py-3 text-xs leading-relaxed text-gray-500">
+                ★<b>「우리 매출(전량)」과 「손익기준 매출」은 분모가 다릅니다.</b> 뒤쪽은 그날
+                <b> 원가가 붙은 SKU만</b>이고, 이익률은 그 기준입니다 — 「원가 확인」 열이 그날의
+                커버리지입니다. 100%가 아닌 날의 이익률을 전체에 적용하면 안 됩니다.
+                <br />
+                <b>1P는 판매수수료·배송비가 없습니다</b>(쿠팡 부담) — 그래서 그 열이 없습니다.
+                차감되는 비용은 원가·프로모션 분담금·광고비·납부세액 넷뿐입니다.
+                {data.daily.some((d) => Number(d.ad_no_sales) > 0) && (
+                  <> 광고비 열엔 <b>그날 판매가 없던 옵션의 광고비가 빠져 있습니다</b>
+                    (기간 합 {won(data.pnl.ad_no_sales)}) — 귀속할 판매가 없어 위 손익에
+                    섞지 않았지만 실제로 나간 돈입니다.</>
+                )}
+                {" "}날짜가 빠진 날은 판매분석이 그날치를 아직 안 준 것이지 판매 0이 아닙니다.
+              </p>
+            </Card>
+          )}
 
           <Card title="회계 정본(계산서)과의 관계">
             <div className="grid grid-cols-2 gap-4 px-4 py-4 md:grid-cols-3">

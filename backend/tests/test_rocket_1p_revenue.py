@@ -573,11 +573,37 @@ def test_blocked_reason_points_at_the_real_blocker(db):
     assert "원가가 아니라" in p["blocked"]["reason"]
 
 
-def test_promo_burden_by_option_derivation_is_guarded():
-    """★문자열 replace로 만든 SQL이 조용히 빗나가면 분담금이 전 옵션 0이 된다(경고도 안 뜬다)."""
-    assert "GROUP BY s.option_id" in pnl._PROMO_BURDEN_BY_OPTION_SQL
-    assert "GROUP BY s.date" not in pnl._PROMO_BURDEN_BY_OPTION_SQL
-    assert "SELECT s.option_id AS d," in pnl._PROMO_BURDEN_BY_OPTION_SQL
+def test_fine_grain_promo_burden_totals_match_the_accounting_engine(db):
+    """★화면이 쓰는 「날짜×옵션」 분담금이 회계 엔진의 일별 분담금과 **같은 돈**을 세는지.
+
+    예전엔 이 SQL을 문자열 replace로 파생했고, 원본이 한 글자만 바뀌면 조용히 빗나가
+    분담금이 전 옵션 0이 되면서 경고도 안 떴다(라이브 7일 1,926,000원이 사라지는 크기).
+    문자열이 같은지 보는 것보다 **두 경로의 합이 같은지** 보는 쪽이 강한 보증이다.
+    """
+    from sqlalchemy import text as _t
+    for i, (sku, price, disc) in enumerate([("S1", 10000, 1500), ("S2", 20000, 700)], 1):
+        _price(db, sku, str(price), i)
+        _sale(db, f"O{i}a", sku, 3, "100000", d=date(2026, 8, 4))
+        _sale(db, f"O{i}b", sku, 2, "80000", d=date(2026, 8, 5))
+        db.execute(_t("INSERT INTO coupang_promo_discount_item "
+                      "(request_id, product_number, discount_type, discount_value) "
+                      f"VALUES ('686180', '{sku}', 'FIXED', {disc})"))
+    db.execute(_t("INSERT INTO coupang_rocket_promotion (request_id, vendor_id, start_at, end_at) "
+                  "VALUES ('686180', :v, '2026-08-01 00:00:00', '2026-08-15 23:59:59')"),
+               {"v": VENDOR})
+    db.commit()
+    a, b = date(2026, 8, 4), date(2026, 8, 5)
+    fine = pnl.promo_burden_by_day_option(db, a, b, VENDOR)
+    coarse = pnl._promo_burden_by_day(db, a, b, VENDOR)
+    assert fine is not None and coarse is not None
+    assert sum(fine.values()) == sum(coarse.values()) == Decimal("11000")
+    # 날짜로 접어도 회계 엔진의 일별 값과 하루씩 같다.
+    rolled: dict[str, Decimal] = {}
+    for (d_, _o), amt in fine.items():
+        rolled[d_] = rolled.get(d_, ZERO_D) + amt
+    assert rolled == coarse
+    # 옵션으로 접은 것도 같은 원자에서 나온다(따로 계산하지 않는다).
+    assert sum(pnl.promo_burden_by_option(db, a, b, VENDOR).values()) == Decimal("11000")
 
 
 def test_promo_burden_guard_uses_the_same_vendor_as_the_query(db):
@@ -623,3 +649,92 @@ def test_uncosted_reason_separates_missing_link_from_missing_cost(db):
     assert u["actionable_skus"] == 2          # 제외는 시키지 않는다
     by_sku = {t["sku_id"]: t["reason"] for t in u["top"]}
     assert by_sku == {"S1": "no_link", "S2": "no_cost"}
+
+
+# ══════════════════════════════════════════════════════════════════
+# 일별 손익 (Jino 2026-08-07: "나는 … 우리의 일일 손익을 보고 싶은거야")
+# ══════════════════════════════════════════════════════════════════
+def test_daily_and_option_sums_and_tile_all_agree(db):
+    """★★세 숫자가 어긋나면 사용자는 셋 다 안 믿는다.
+
+    일별 표·옵션별 표·기간 타일이 **같은 「날짜×옵션」 원자**를 각각 다른 방향으로 접은
+    것이라 반올림까지 정확히 같아야 한다. 각 그레인에서 따로 반올림하면 어긋난다
+    (VAT가 ÷11이라 순이익엔 무한소수가 붙는다).
+    """
+    for i in range(1, 4):
+        sku = f"S{i}"
+        _price(db, sku, str(7000 + i * 111), i)
+        _cost(db, sku, 2000 + i * 37)
+        for dnum, day in enumerate((date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 5))):
+            _sale(db, f"O{i}", sku, 3 + i + dnum, str(90000 + i * 1000 + dnum * 700), d=day)
+            _ad_option(db, f"O{i}", str(3300 + i * 101 + dnum * 17), d=day)
+    db.commit()
+    r = compute_rocket_1p_revenue(db, date(2026, 8, 3), date(2026, 8, 5))
+    tile = r["pnl"]
+    day_sum = sum(Decimal(d["net_profit"]) for d in r["daily"] if d["net_profit"] is not None)
+    opt_sum = sum(Decimal(o["net_profit"]) for o in r["options"] if o["net_profit"] is not None)
+    assert str(day_sum) == str(opt_sum) == tile["net_profit"]
+    # 매출·원가·광고비도 같은 원자에서 나온다.
+    assert sum(Decimal(d["cost"]) for d in r["daily"]) == Decimal(tile["cost"])
+    assert sum(Decimal(d["ad_spend"]) for d in r["daily"]) == Decimal(tile["ad_spend"])
+    assert sum(d["qty"] for d in r["daily"]) == r["totals"]["qty"]
+
+
+def test_daily_rows_are_one_per_observed_day_not_per_requested_day(db):
+    """★없는 날을 0으로 만들지 않는다 — 판매분석이 안 준 날과 0판매일은 다르다."""
+    _price(db, "S1", "10000", 1)
+    _cost(db, "S1", 3000)
+    _sale(db, "A", "S1", 5, "90000", d=date(2026, 8, 3))
+    _sale(db, "A", "S1", 4, "70000", d=date(2026, 8, 6))
+    db.commit()
+    r = compute_rocket_1p_revenue(db, date(2026, 8, 1), date(2026, 8, 7))
+    assert [d["date"] for d in r["daily"]] == ["2026-08-03", "2026-08-06"]
+    # 화면이 "요청 7일 중 2일치"라고 말할 수 있게 freshness가 함께 온다.
+    assert r["freshness"]["days_expected"] == 7 and r["freshness"]["days_with_data"] == 2
+
+
+def test_daily_coverage_is_per_day_not_the_window_average(db):
+    """★날마다 팔린 SKU가 달라 커버리지가 들쭉날쭉하다 — 그걸 안 보이면 이익률이 왜 튀는지 모른다."""
+    _price(db, "S1", "10000", 1)
+    _cost(db, "S1", 3000)          # 원가 있음
+    _price(db, "S2", "10000", 2)   # 원가 없음
+    _sale(db, "A", "S1", 10, "200000", d=date(2026, 8, 3))   # 그날은 100%
+    _sale(db, "B", "S2", 10, "200000", d=date(2026, 8, 4))   # 그날은 0%
+    db.commit()
+    by_day = {d["date"]: d for d in
+              compute_rocket_1p_revenue(db, date(2026, 8, 3), date(2026, 8, 4))["daily"]}
+    assert Decimal(by_day["2026-08-03"]["cost_coverage"]) == Decimal("1.0000")
+    assert Decimal(by_day["2026-08-04"]["cost_coverage"]) == Decimal("0.0000")
+    # 커버리지 0인 날은 손익을 내지 않는다(0원 이익이 아니다).
+    assert by_day["2026-08-04"]["net_profit"] is None
+    assert by_day["2026-08-04"]["cost"] is None
+    # 그래도 매출 축은 살아 있다 — 그날 안 팔린 게 아니다.
+    assert Decimal(by_day["2026-08-04"]["our_revenue"]) == Decimal("100000")
+
+
+def test_daily_pnl_revenue_is_the_costed_subset_not_all_revenue(db):
+    """일별 이익률의 분모는 **원가 확인분**이다 — 전량 매출로 나누면 이익률이 낮게 보인다."""
+    _price(db, "S1", "10000", 1)
+    _cost(db, "S1", 3000)
+    _price(db, "S2", "10000", 2)          # 원가 없음
+    _sale(db, "A", "S1", 10, "200000", d=date(2026, 8, 3))
+    _sale(db, "B", "S2", 10, "200000", d=date(2026, 8, 3))
+    db.commit()
+    d0 = compute_rocket_1p_revenue(db, date(2026, 8, 3), date(2026, 8, 3))["daily"][0]
+    assert Decimal(d0["our_revenue"]) == Decimal("200000")     # 전량
+    assert Decimal(d0["pnl_revenue"]) == Decimal("100000")     # 손익 축은 절반
+    assert Decimal(d0["profit_rate"]) == (Decimal(d0["net_profit"]) / Decimal("100000")
+                                          ).quantize(Decimal("0.0001"))
+
+
+def test_daily_row_arithmetic_closes(db):
+    """화면 한 줄이 스스로 맞아야 한다: 매출−원가−분담금−광고비−VAT = 순이익."""
+    _price(db, "S1", "12345", 1)
+    _cost(db, "S1", 4567)
+    _sale(db, "A", "S1", 7, "180000", d=date(2026, 8, 3))
+    _ad_option(db, "A", "23456", d=date(2026, 8, 3))
+    db.commit()
+    d0 = compute_rocket_1p_revenue(db, date(2026, 8, 3), date(2026, 8, 3))["daily"][0]
+    lhs = (Decimal(d0["pnl_revenue"]) - Decimal(d0["cost"]) - Decimal(d0["promo_burden"])
+           - Decimal(d0["ad_spend"]) - Decimal(d0["vat"]))
+    assert lhs == Decimal(d0["net_profit"])
