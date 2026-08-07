@@ -30,6 +30,11 @@ const pct = (v: string | null | undefined) => {
   const n = Number(v);
   return Number.isFinite(n) ? `${(n * 100).toFixed(1)}%` : NO_DATA;
 };
+const roundOrNull = (v: string | null | undefined) => {
+  if (v == null) return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.round(n) : null;
+};
 
 /** 판정 칩 — undetermined는 «판정 안 함»이다. 회색이지 초록이 아니다(거짓 초록 금지). */
 function Verdict({ v }: { v: PnlAuditCheck["verdict"] }) {
@@ -119,7 +124,20 @@ function AtomDetail({ date, optionId, from, to, a6Pass }: {
         {data.ad ? (<>
           <KV k="광고비" v={won(data.ad.ad_spend)} />
           <KV k="노출/클릭" v={`${num(data.ad.impressions)}/${num(data.ad.clicks)}`} />
-        </>) : "행 없음 — 그날 이 옵션에 광고 없음(손익에선 0원이 맞음)"}
+        </>) : (
+          // ★사실과 결과만 말한다 — 원인은 단정하지 않는다(적대 리뷰 P1-1). 백엔드
+          //   (rocket_1p_pnl_audit.py `_ATOM_AD_SQL` 주석)도 "COUNT(*)=0이면 행이 없다"와
+          //   "0원 썼다"를 명시적으로 구분한다: 광고를 안 돌린 것인지 수집이 안 된 것인지
+          //   이 화면은 모른다. Billboard 수집이 하루 멈추면 그날 «모든» 옵션이 이 행에
+          //   걸리므로(B3 note), 「0원이 맞다」는 보증이 아니라 창 단위 검사(A7·B3)로 유도한다.
+          <>
+            행 없음 — 그날 이 옵션에 광고 행이 없습니다. 손익 계산에는 0원으로 들어갑니다.
+            <p className="mt-1 text-[11px] text-amber-700">
+              ⚠️ 광고를 안 돌렸는지 수집이 안 됐는지는 이 화면만으로 알 수 없습니다 — 창 단위
+              광고 수집 상태는 위 검사 A7·B3을 참고하세요.
+            </p>
+          </>
+        )}
       </DetailBlock>
       <DetailBlock title="⑤ 분담금 (프로모션 제안서)">
         {data.promos == null ? "원천 테이블 없음(모름)" : data.promos.length === 0
@@ -144,11 +162,24 @@ function AtomDetail({ date, optionId, from, to, a6Pass }: {
 }
 
 export default function Rocket1PPnlAudit() {
-  const [sp] = useSearchParams();
+  const [sp, setSp] = useSearchParams();
   const from = sp.get("from") ?? kstDate(-6);
   const to = sp.get("to") ?? kstDate(0);
-  const [flt, setFlt] = useState("all");
-  const [sort, setSort] = useState("revenue");
+  // ★flt·sort도 URL에 싣는다(적대 리뷰 P2-1) — 아니면 "URL을 공유하면 같은 것이 재현됩니다"가
+  //   거짓말이 된다(필터·정렬이 화면의 값인데 새로고침·공유 시 사라짐). 기본값(all/revenue)은
+  //   URL을 깨끗하게 유지하려고 파라미터를 지운다.
+  const flt = sp.get("flt") ?? "all";
+  const sort = sp.get("sort") ?? "revenue";
+  const setFlt = (v: string) => setSp((prev) => {
+    const n = new URLSearchParams(prev);
+    if (v === "all") n.delete("flt"); else n.set("flt", v);
+    return n;
+  });
+  const setSort = (v: string) => setSp((prev) => {
+    const n = new URLSearchParams(prev);
+    if (v === "revenue") n.delete("sort"); else n.set("sort", v);
+    return n;
+  });
   const [open, setOpen] = useState<string | null>(null);   // `${date}|${option_id}`
 
   const checks = useAsyncData(() => fetchPnlAuditChecks({ from, to }), [from, to]);
@@ -205,16 +236,33 @@ export default function Rocket1PPnlAudit() {
                 : ladder.basis === "full" ? <Badge tone="neutral">기간 전체</Badge> : undefined}>
           {ladder.blocked ? (
             <div className="px-4 py-3"><EmptyState reason="손익 없음" hint={ladder.blocked.reason} /></div>
-          ) : (
-            <div className="grid grid-cols-2 gap-x-6 gap-y-1 px-4 py-3 text-sm md:grid-cols-3">
-              <KV k="우리 매출(납품가)" v={won(ladder.revenue)} />
-              <KV k="− 원가" v={won(ladder.cost)} />
-              <KV k="− 분담금" v={won(ladder.promo_burden)} />
-              <KV k="− 광고비" v={won(ladder.ad_spend)} />
-              <KV k="− 납부세액" v={won(ladder.vat)} />
-              <KV k="= 순이익" v={<b>{won(ladder.net_profit)}</b>} />
-            </div>
-          )}
+          ) : (() => {
+            // ★항목별 개별 반올림은 시각적 등식을 ±원 어긋나게 만들 수 있다(적대 리뷰 P2-3) —
+            //   백엔드는 원 단위가 아니라 **전(0.01원) 단위**로 값을 낸다(`_money` — VAT가
+            //   ÷11이라 무한소수가 붙어서다). 매출·원가·분담금·광고비·순이익 다섯을 각자
+            //   반올림한 뒤, **납부세액은 그 넷의 잔차로 표시한다** — A3 검사가 말하는
+            //   "부가세는 나머지 항의 잔차"와 같은 철학이라, 화면에 보이는 다섯 줄의 뺄셈이
+            //   항상 정확히 맞아떨어진다(반올림을 한 곳에서만 한다).
+            const revR = roundOrNull(ladder.revenue);
+            const costR = roundOrNull(ladder.cost);
+            const promoR = roundOrNull(ladder.promo_burden);
+            const adR = roundOrNull(ladder.ad_spend);
+            const netR = roundOrNull(ladder.net_profit);
+            const vatR = (revR != null && costR != null && promoR != null
+                         && adR != null && netR != null)
+              ? revR - costR - promoR - adR - netR
+              : roundOrNull(ladder.vat);
+            return (
+              <div className="grid grid-cols-2 gap-x-6 gap-y-1 px-4 py-3 text-sm md:grid-cols-3">
+                <KV k="우리 매출(납품가)" v={won(revR)} />
+                <KV k="− 원가" v={won(costR)} />
+                <KV k="− 분담금" v={won(promoR)} />
+                <KV k="− 광고비" v={won(adR)} />
+                <KV k="− 납부세액" v={won(vatR)} />
+                <KV k="= 순이익" v={<b>{won(netR)}</b>} />
+              </div>
+            );
+          })()}
         </Card>
       )}
 
@@ -240,7 +288,14 @@ export default function Rocket1PPnlAudit() {
             }>
         {atoms.error ? <EmptyState reason="원자 조회 실패" hint={String(atoms.error)} />
           : !atoms.data ? <Loading />
-          : atoms.data.atoms.length === 0 ? <EmptyState reason="조건에 맞는 원자가 없습니다" />
+          : atoms.data.atoms.length === 0 ? (
+            // ★사다리가 blocked면 그 이유를 말한다(적대 리뷰 P2-2) — 그렇지 않으면 손익이
+            //   애초에 없어서 원자도 없는 창에서 「조건에 맞는 원자가 없습니다」가 «필터 탓»
+            //   으로 읽힌다(필터를 만졌다고 착각하게 만든다).
+            ladder?.blocked
+              ? <EmptyState reason="손익 없음" hint={ladder.blocked.reason} />
+              : <EmptyState reason="조건에 맞는 원자가 없습니다" />
+          )
           : (
             <>
               {atoms.data.option_table_truncated && (
@@ -250,16 +305,28 @@ export default function Rocket1PPnlAudit() {
                 </p>
               )}
               {/* ★부분집합을 전체로 읽지 않게 — Σ순이익은 «순이익을 낼 수 있는 행만» 더한
-                  값이다(subset-profit-overstates-margin 교훈). revenue_out_of_net이 null이면
-                  줄 자체를 안 그린다(추정 금지) — 응답이 준 값으로만 말한다. */}
-              {atoms.data.totals.revenue_out_of_net != null && (
+                  값이다(subset-profit-overstates-margin 교훈). ★게이트는 **행 수**
+                  (`net_profit_unknown`)로 연다 — 금액(`revenue_out_of_net`)으로 열면 «빠진
+                  게 없다»와 «빠졌는데 금액도 모른다»가 같은 null이라 후자에서 배너가 통째로
+                  사라진다(적대 리뷰 P1-3). 금액은 아는 만큼만 말하고, null이면(추정 금지)
+                  "그 매출도 모릅니다"로 — 0으로 접지 않는다. */}
+              {atoms.data.totals.net_profit_unknown > 0 && (
                 <p className="mx-4 mt-3 rounded bg-amber-50 px-3 py-2 text-xs text-amber-800">
-                  ⚠️ 이 합계는 순이익을 낼 수 있는 행만 더한 값입니다 — 매출{" "}
-                  {won(atoms.data.totals.revenue_out_of_net)}({num(atoms.data.totals.net_profit_unknown)}행)이
-                  빠져 있습니다.
-                  {atoms.data.totals.revenue_out_of_net_unknown > 0 && (
-                    <> 그중 매출조차 모르는 행 {num(atoms.data.totals.revenue_out_of_net_unknown)}건은
-                      이 금액에 포함되지 않았습니다(0으로 접지 않았습니다).</>
+                  ⚠️ 이 합계는 순이익을 낼 수 있는 행만 더한 값입니다 —{" "}
+                  {num(atoms.data.totals.net_profit_unknown)}행이 빠져 있습니다.{" "}
+                  {atoms.data.totals.revenue_out_of_net != null ? (
+                    <>
+                      빠진 행의 매출은 {won(atoms.data.totals.revenue_out_of_net)}
+                      {atoms.data.totals.revenue_out_of_net_unknown > 0 && (
+                        <>
+                          (그중 매출조차 모르는 행 {num(atoms.data.totals.revenue_out_of_net_unknown)}
+                          건은 포함되지 않았습니다)
+                        </>
+                      )}
+                      입니다.
+                    </>
+                  ) : (
+                    "빠진 행의 매출도 모릅니다(0으로 접지 않았습니다)."
                   )}
                 </p>
               )}
