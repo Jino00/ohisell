@@ -11,9 +11,9 @@
 #   ④ A5·A7은 조용한 결손(납품단가 미결합·광고 미귀속)을 드러낸다
 #   ⑤ ★«수집 안 됨»을 «없음»으로 읽지 않는다 — A6은 프로모션 수집 신선도를 먼저 보고,
 #      B2는 계산서 0건·라인 테이블 부재를 pass로 칠하지 않는다
-#
-# 아직 지키지 않는 것 (후속 태스크에서 추가 — 지금 적으면 거짓 초록이다):
-#   ⑥ 원천 행 드릴다운(원자 목록·원자 상세 API)과 그 창 계약
+#   ⑥ 원자 목록·원자 상세 — 원천 행 드릴다운. ★**창 계약**이 여기서 지켜진다:
+#      상세는 화면과 **같은 창**으로 뽑은 원자를 날짜로 «거르»지, 하루 창으로 좁혀 다시
+#      뽑지 않는다(좁히면 분담금 «모름» 가드를 빠져나가 화면이 «—»로 그린 행에 숫자가 찍힌다)
 from __future__ import annotations
 
 from datetime import date
@@ -614,3 +614,149 @@ def test_a7_catches_ad_on_no_sales_day_of_sold_option(db):
     a7 = next(c for c in r["checks"] if c["id"] == "A7")
     assert a7["verdict"] == "fail"
     assert Decimal(a7["right"]) - Decimal(a7["left"]) == Decimal("5000")
+
+
+# ═══ ④ 원자 목록 — 신뢰도 배지 + Σ = 사다리 ═══
+
+
+def _atoms(db, dfrom, dto, **kw):
+    """라우터가 할 일을 테스트가 대신한다 — 원자를 **화면과 같은 창**으로 뽑아 주입한다.
+
+    ★목록 SA도 검사 SA와 같은 이유로 원자 함수를 직접 부르지 않는다(D-CPP-2 가드).
+      그래서 창을 정하는 곳이 라우터 하나로 모인다 — 창이 갈리면 분담금 판정이 갈린다.
+    """
+    from app.services.coupang.rocket_1p_pnl_audit import compute_pnl_audit_atoms
+    return compute_pnl_audit_atoms(db, dfrom, dto, day_option_atoms(db, dfrom, dto), **kw)
+
+
+def test_atoms_badges_and_sum(db):
+    """원가 출처 배지 + 「Σ원자 순이익 = 사다리」.
+
+    ★배지 판정은 **prod 실측 조합**(2026-08-07 SELECT status, match_method GROUP BY)에
+      맞춰 둔다: confirmed·manual 73건 / confirmed·suggested 172건 / ignored·manual 22건.
+      즉 `ignored`에도 match_method가 붙어 있으므로 «match_method만 보고» 배지를 정하면
+      원가 제외 결정이 «수기 확인»으로 둔갑한다 — status를 먼저 본다.
+    ★이 픽스처는 `ad_no_sales`가 0이라 Σ = 사다리가 성립한다. **일반적으로 참이 아니다**
+      (판매 없는 옵션 광고비가 basis='full'에서 타일에만 추가 차감된다 — 위 델타 테스트).
+    """
+    _sale(db, "A", "S1", 10, "1000000")
+    _price(db, "S1", "60000", 1)
+    _cost(db, "S1", 20000, match_method="suggested")   # 이름 유사도 자동 확정
+    _sale(db, "B", "S2", 5, "500000")
+    _price(db, "S2", "50000", 2)
+    _cost(db, "S2", 15000, match_method="manual")
+    db.commit()
+    r = _atoms(db, D, D)
+    by_opt = {a["option_id"]: a for a in r["atoms"]}
+    assert by_opt["A"]["cost_source"] == "suggested"   # ← «사람이 확인 안 함» 배지의 근거
+    assert by_opt["B"]["cost_source"] == "manual"
+    ck = _audit(db, D, D)
+    assert r["totals"]["net_profit"] == ck["ladder"]["net_profit"]
+    assert r["burden_known"] is True
+
+
+def test_atoms_filter_suggested(db):
+    from app.services.coupang.rocket_1p_pnl_audit import compute_pnl_audit_atoms  # noqa: F401
+    _sale(db, "A", "S1", 10, "1000000")
+    _price(db, "S1", "60000", 1)
+    _cost(db, "S1", 20000, match_method="suggested")
+    _sale(db, "B", "S2", 5, "500000")
+    _price(db, "S2", "50000", 2)
+    _cost(db, "S2", 15000, match_method="manual")
+    db.commit()
+    r = _atoms(db, D, D, flt="suggested")
+    assert [a["option_id"] for a in r["atoms"]] == ["A"]
+    assert r["count"] == 1 and r["total"] == 2      # 필터 전 총수를 함께 싣는다
+
+
+def test_atoms_badges_split_the_three_ways_cost_fails_to_attach(db):
+    """★원가가 안 붙는 이유 셋은 **할 일이 다 다르다** — 배지가 그걸 접으면 안 된다.
+
+    ⓐ no_link : 다리 자체가 없다 → 원가를 등록해도 안 붙는다(연결부터)
+    ⓑ no_cost : 다리는 있는데 그 내부 SKU에 원가가 없다 → SellC에 원가 등록
+    ⓒ excluded: 원가 제외로 이미 결정(prod 22건이 이 상태다) → 아무것도 하면 안 된다
+    ⓐ와 ⓑ를 한 배지(«다리 없음»)로 접으면 ⓑ에게 **거짓말**을 하게 된다 — 다리는 있다.
+    ★셋의 이름은 화면 SA의 `uncosted_reason`과 **같은 어휘**다 — 같은 사실을 두 화면이
+      다른 말로 부르면 사용자가 대조할 수 없다.
+    """
+    _sale(db, "A", "S1", 10, "1000000")          # 다리 없음
+    _price(db, "S1", "60000", 1)
+    _sale(db, "B", "S2", 5, "500000")            # 다리는 있는데 그 내부 SKU에 원가 없음
+    _price(db, "S2", "50000", 2)
+    # ★`product_master`에 그 internal_sku 행이 없는 상태 = «원가 미등록». cost_price 컬럼은
+    #   NOT NULL(기본 0)이라 「원가 칸이 비어 있다」는 **행 부재**로 나타난다(prod의 ignored
+    #   22건도 internal_sku가 마스터에 없는 모양이다 — 2026-08-07 실측).
+    db.execute(_t("INSERT INTO rocket_product_cost_map "
+                  "(product_number, internal_sku, status, match_method) "
+                  "VALUES ('S2', 'OHI-S2', 'confirmed', 'manual')"))
+    _sale(db, "C", "S3", 3, "300000")            # 원가 제외 결정(prod의 ignored 22건 모양)
+    _price(db, "S3", "40000", 3)
+    db.execute(_t("INSERT INTO rocket_product_cost_map "
+                  "(product_number, internal_sku, status, match_method) "
+                  "VALUES ('S3', NULL, 'ignored', 'manual')"))
+    db.commit()
+    by_opt = {a["option_id"]: a for a in _atoms(db, D, D)["atoms"]}
+    assert by_opt["A"]["cost_source"] == "no_link"
+    assert by_opt["B"]["cost_source"] == "no_cost"
+    assert by_opt["C"]["cost_source"] == "excluded"
+    assert all(by_opt[o]["cost"] is None for o in ("A", "B", "C"))
+    # 원가 미상 셋은 `uncosted` 필터에 전부 잡힌다(할 일은 달라도 «원가가 없다»는 같다)
+    assert len(_atoms(db, D, D, flt="uncosted")["atoms"]) == 3
+
+
+def test_atoms_totals_do_not_fold_unknown_into_zero(db):
+    """★분담금을 모르면 원자 net이 전부 None이다 — 그 합을 «0원»으로 내면 거짓이다.
+
+    합계를 0으로 내면 화면에 「순이익 0원」이 뜨는데, 실제 뜻은 «모른다»다.
+    그래서 아는 행이 하나도 없으면 합계는 **None**이고, 섞여 있으면 «모르는 행 수»를 싣는다.
+    """
+    _sale(db, "A", "S1", 10, "1000000")
+    _price(db, "S1", "60000", 1)
+    _cost(db, "S1", 20000, match_method="manual")
+    db.execute(_t("INSERT INTO coupang_rocket_promotion (request_id, vendor_id, start_at, end_at) "
+                  "VALUES ('686180', :v, '2026-08-01 00:00:00', '2026-08-02 23:59:59')"),
+               {"v": VENDOR})   # 제안서 없음 = 분담금 모름
+    db.commit()
+    wide = _atoms(db, date(2026, 8, 1), D)
+    assert wide["burden_known"] is False
+    assert wide["totals"]["net_profit"] is None            # 0이 아니라 «모름»
+    assert wide["totals"]["net_profit_unknown"] == 1
+    assert wide["totals"]["net_profit_known"] == 0
+    assert wide["totals"]["qty"] == 10                     # 수량은 아는 값이라 그대로 낸다
+
+
+def test_atoms_report_the_truncation_that_kills_a2_and_a7(db, monkeypatch):
+    """★잘림 사실을 **응답에 싣는다** — 라우터가 한도를 낮추면 검사 2개가 조용히 사라진다.
+
+    화면 옵션 표가 잘리면(`shown < option_count`) A2·A7은 합을 낼 수 없어 undetermined가
+    된다. 그런데 그 사실은 검사 응답의 note에만 있고, 원자 목록만 보는 화면은 «왜 검사가
+    둘 없어졌는지»를 말할 수 없었다. 그래서 목록이 옵션 수와 한도를 함께 낸다.
+    """
+    import app.services.coupang.rocket_1p_pnl_audit as audit
+    _full_fixture(db)
+    r = _atoms(db, D_PREV, D)
+    scr = compute_rocket_1p_revenue(db, D_PREV, D)
+    assert r["option_count"] == scr["option_count"] == 2   # 화면과 같은 모집단을 센다
+    assert r["option_limit"] == audit.ATOM_LIMIT
+    assert r["option_table_truncated"] is False
+    assert r["total"] == len(r["atoms"]) == 4              # 원자 목록 자체는 자르지 않는다
+
+    # 라우터가 한도를 낮추면 — 목록이 잘림을 말하고, 검사 둘이 실제로 사라진다.
+    monkeypatch.setattr(audit, "ATOM_LIMIT", 1)
+    r2 = _atoms(db, D_PREV, D)
+    assert r2["option_limit"] == 1 and r2["option_table_truncated"] is True
+    by = {c["id"]: c for c in _audit(db, D_PREV, D, limit=1)["checks"]}
+    assert by["A2"]["verdict"] == "undetermined" and by["A7"]["verdict"] == "undetermined"
+
+
+def test_atoms_sort_puts_unknown_last_instead_of_treating_it_as_zero(db):
+    """정렬에서 «모름»을 0으로 끼워 넣으면 순서가 거짓말을 한다 — 뒤로 보낸다."""
+    _sale(db, "A", "S1", 10, "1000000")
+    _price(db, "S1", "60000", 1)          # 우리 매출 600,000
+    _sale(db, "B", "S2", 5, "500000")     # 발주 이력 없음 → 우리 매출 «모름»
+    _sale(db, "C", "S3", 2, "200000")
+    _price(db, "S3", "10000", 3)          # 우리 매출 20,000
+    db.commit()
+    r = _atoms(db, D, D, sort="revenue")
+    assert [a["option_id"] for a in r["atoms"]] == ["A", "C", "B"]
+    assert r["atoms"][-1]["our_revenue"] is None

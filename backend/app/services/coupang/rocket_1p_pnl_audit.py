@@ -36,7 +36,7 @@ from app.services.coupang.rocket_1p_channel_pnl import (  # noqa: PLC2701
     ROCKET_1P_VENDOR_ID, ZERO, _COST_COVERAGE_MIN, _has_item_table, _money,
     _settlement_window, promo_window_counts)
 
-__all__ = ["ATOM_LIMIT", "compute_pnl_audit_checks"]
+__all__ = ["ATOM_LIMIT", "compute_pnl_audit_atoms", "compute_pnl_audit_checks"]
 
 # 옵션 표를 자르지 않기 위한 한도 — 잘리면 A2·A7의 합을 낼 수 없다(그땐 undetermined).
 # ★**공개 이름**이다: 라우터가 화면 응답을 만들 때 이 값을 써야 한다. 라우터가 자기 숫자를
@@ -68,6 +68,11 @@ _IDENTITY_NOTE = ("오늘의 구현에서는 항상 성립합니다 — 두 폴�
 
 def _verdict(ok: bool) -> str:
     return _PASS if ok else _FAIL
+
+
+def _s(v) -> str | None:
+    """금액은 **문자열**로 낸다(정밀도 보존, settlements/overview 라우터 규약). None은 None."""
+    return None if v is None else str(v)
 
 
 def _check(cid: str, label: str, left, right, *, verdict: str,
@@ -354,4 +359,120 @@ def compute_pnl_audit_checks(db: Session, date_from: date, date_to: date,
         # ★골라 담기만 한다 — 한 항도 다시 세지 않는다(화면 `pnl`의 부분집합).
         "ladder": {k: p[k] for k in _LADDER_KEYS},
         "checks": checks,
+    }
+
+
+# ── 3단 — 「날짜×옵션」 원자 목록 ─────────────────────────────────────────
+#   원가 다리의 상태. ★배지 판정이 **status를 먼저** 보는 이유가 여기 있다:
+#   prod 실측(2026-08-07 `SELECT status, match_method, COUNT(*) … GROUP BY 1,2`)은
+#     confirmed·manual 73 / confirmed·suggested 172 / ignored·manual 22
+#   — 즉 «원가 제외 결정»(ignored) 행에도 match_method='manual'이 붙어 있다. match_method만
+#   보고 배지를 정하면 그 22건이 «수기 확인»으로 둔갑한다.
+_COST_SRC_SQL = "SELECT product_number, status, match_method FROM rocket_product_cost_map"
+
+# 원가가 붙은 행의 배지로 **그대로 쓸 수 있는** match_method 값. 그 밖의 값(미기록 포함)은
+# 'unknown'으로 낸다 — 화면 라벨이 «수기 확인»/«사람 미확인»이라 아무 값이나 실으면 거짓이
+# 된다. prod에는 NULL도 이 둘 밖의 값도 없다(2026-08-07 실측, 267행 전건).
+_KNOWN_MATCH_METHODS = ("manual", "suggested")
+
+
+def compute_pnl_audit_atoms(db: Session, date_from: date, date_to: date, ctx: dict,
+                            sort: str = "revenue", flt: str = "all",
+                            option_id: str | None = None) -> dict:
+    """3단 — 「날짜×옵션」 원자 목록 + 원가 출처 배지.
+
+    ★`ctx`는 원자 파생 SA(`day_option_atoms`)의 결과이며 **라우터가 주입한다** — 이 모듈은
+      D-CPP-2 가드 때문에 그 모듈을 참조할 수 없고(파일 상단 ★★), 그 덕에 화면이 낸 숫자를
+      **재도출할 길을 두지 않는다**. 창을 정하는 곳이 라우터 하나로 모이는 것도 같은 효과다:
+      창이 갈리면 분담금 «모름» 판정이 갈려 근거가 화면과 다른 답을 낸다.
+
+    ★배지 `cost_source` — 원가가 **붙은** 경우와 **안 붙은** 경우로 먼저 갈린다.
+      · manual   : 사람이 수기로 확인한 다리
+      · suggested: 이름 유사도 자동 확정 — **사람이 확인하지 않았다**
+      · unknown  : 다리는 있고 원가도 붙었는데 확정 방법이 기록에 없다
+      · no_link  : 다리 자체가 없다 → 원가를 등록해도 안 붙는다(연결부터)
+      · no_cost  : 다리는 있는데 그 내부 SKU에 원가가 없다 → 원가 등록
+      · excluded : 원가 제외로 이미 결정(샘플·증정) → 아무것도 하면 안 된다
+      ★no_link와 no_cost를 한 배지로 접지 않는다 — **할 일이 서로 다르고**, 접으면 다리가
+        있는 쪽에게 «다리 없음»이라는 거짓말을 하게 된다(화면 SA의 `uncosted_reason`이
+        같은 이유로 셋을 가른다).
+
+    ★잘림 계약: 이 목록은 **자르지 않는다**(`total` = 필터 전 원자 총수). 잘리는 것은 화면의
+      옵션 표이고, 잘리면 A2·A7이 undetermined가 된다. 그 사실을 화면이 말할 수 있게
+      `option_count`·`option_limit`·`option_table_truncated`를 함께 낸다 — 검사 응답의 note를
+      읽지 않고도 «검사 둘이 왜 사라졌는지»를 알 수 있어야 한다.
+    """
+    src = {str(pn): (st, mm) for pn, st, mm in db.execute(text(_COST_SRC_SQL)).fetchall()}
+
+    rows: list[dict] = []
+    for a in ctx["atoms"]:
+        st = src.get(str(a["sku_id"])) if a["sku_id"] is not None else None
+        if a["cost"] is not None:
+            # 원가가 붙었다 = 다리가 confirmed이고 등록원가도 있다(화면 SA의 cost CTE 조건).
+            mm = st[1] if st else None
+            source = mm if mm in _KNOWN_MATCH_METHODS else "unknown"
+        elif st is None:
+            source = "no_link"
+        elif st[0] == "ignored":
+            source = "excluded"
+        else:
+            source = "no_cost"
+        rows.append({
+            "date": a["date"], "option_id": a["option_id"], "sku_id": a["sku_id"],
+            "product_name": a["product_name"], "qty": a["qty"],
+            "consumer_revenue": _s(a["consumer_revenue"]),
+            "our_revenue": _s(a["our_revenue"]), "unit_price": _s(a["unit_price"]),
+            "cost": _s(a["cost"]), "unit_cost": _s(a["unit_cost"]),
+            "ad_spend": _s(a["ad_spend"]), "promo_burden": _s(a["promo_burden"]),
+            "net_profit": _s(a["net_profit"]),
+            "net_profit_upper": _s(a["net_profit_upper"]),
+            "cost_source": source,
+        })
+
+    total = len(rows)
+    option_count = len({a["option_id"] for a in ctx["atoms"]})
+
+    if option_id:
+        rows = [x for x in rows if x["option_id"] == option_id]
+    elif flt == "loss":
+        # 적자 = 순이익이 음수이거나, 원가를 몰라도 **상한이 음수**(확정 적자)인 행.
+        rows = [x for x in rows
+                if (x["net_profit"] is not None and Decimal(x["net_profit"]) < ZERO)
+                or x["net_profit_upper"] is not None]
+    elif flt == "suggested":
+        rows = [x for x in rows if x["cost_source"] == "suggested"]
+    elif flt == "uncosted":
+        rows = [x for x in rows if x["cost"] is None]
+    elif flt == "unpriced":
+        rows = [x for x in rows if x["our_revenue"] is None]
+
+    if sort == "date":
+        rows.sort(key=lambda x: (x["date"], x["option_id"]))
+    elif sort == "net":
+        # 적자 큰 순 — 모름(None)은 뒤로(모름을 0으로 끼워 순서를 속이지 않는다)
+        rows.sort(key=lambda x: (x["net_profit"] is None,
+                                 Decimal(x["net_profit"]) if x["net_profit"] is not None else ZERO))
+    else:  # revenue(기본): 우리 매출 큰 순, 단가 미상은 뒤로
+        rows.sort(key=lambda x: (x["our_revenue"] is None,
+                                 -(Decimal(x["our_revenue"]) if x["our_revenue"] is not None else ZERO)))
+
+    # ★★합계는 **아는 행만** 더한 값이다. 아는 행이 하나도 없으면 «0원»이 아니라 None이다 —
+    #   분담금 미상 창에서 전 행의 net이 None인데 합계가 "0"이면 화면에 「순이익 0원」이 뜬다.
+    #   섞여 있을 때를 위해 모르는 행 수를 함께 싣는다(부분합을 전체로 읽지 않게).
+    known = [Decimal(x["net_profit"]) for x in rows if x["net_profit"] is not None]
+    return {
+        "period": {"from": date_from.isoformat(), "to": date_to.isoformat()},
+        "burden_known": ctx["burden_known"],
+        "count": len(rows),
+        "total": total,
+        "option_count": option_count,
+        "option_limit": ATOM_LIMIT,
+        "option_table_truncated": option_count > max(1, ATOM_LIMIT),
+        "totals": {
+            "qty": sum(x["qty"] for x in rows),
+            "net_profit": str(sum(known, ZERO)) if known else None,
+            "net_profit_known": len(known),
+            "net_profit_unknown": len(rows) - len(known),
+        },
+        "atoms": rows,
     }
