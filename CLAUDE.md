@@ -74,6 +74,18 @@
 - 충돌이 이미 났으면 **내 것을 뒤로 재번호**한다(main이 트렁크). 결정·교훈 **본문은 안 바꾸고**
   번호와 참조만 고친다. 커밋 메시지의 옛 번호는 고칠 수 없으므로 트랙에 재부여 사실을 남긴다.
 
+### ★PR 병합은 `scripts/safe_merge.sh` — `gh pr merge` 직접 호출 대신 (2026-08-07)
+- 이유: 이 repo는 **private + GitHub Free**라 서버측 required status checks를 **못 건다**
+  (classic protection·rulesets 둘 다 403 "Upgrade to GitHub Pro"). 즉 **CI는 결과를 보여줄 뿐
+  빨간불에서 병합을 막지 못한다.** 그런데 "보이면 본다"는 이 repo에서 반복적으로 깨졌다 —
+  GFA 배너 63일 거짓 빨강 · 프론트 clobber 3회(발견은 우연) · 회색 CI 칩도 Jino가 짚어서 알았다.
+- 막는 것 셋(전부 2026-08-07에 실제로 겪은 것): ①빨간 CI 병합 ②**체크 0건을 초록으로 오독**
+  (교훈 #123 — 발견 0건과 실행 안 됨은 같은 숫자로 보인다) ③CONFLICTING 병합(PR #231 실사고,
+  원인은 병행 세션의 ref·교훈 번호 선점이었다).
+- **차단이 아니라 거부+자백이다** — 빨간 병합은 revert가 되므로 전역 §1의 하드 게이트 근거가
+  없다. `--force`가 있고, 쓰면 화면과 `$TMPDIR/safe_merge.log`에 자백이 남는다.
+- `scripts/safe_merge.sh [PR번호] [--force]` · pending 대기 상한 `MERGE_WAIT`(기본 600초)
+
 ## 스킬 라우팅 힌트 (선택 도구 — 자동 실행 의무 없음)
 
 | 요청 유형 | 유용한 스킬 |
