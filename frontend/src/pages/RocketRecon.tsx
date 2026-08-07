@@ -16,6 +16,8 @@
 //      당연하다. 요약 타일이 강조하는 값은 "거래명세서확인 단계인데 발주≠입고"뿐이다.
 import { useMemo, useState } from "react";
 import { Card, Stat, Table, Th, Td, Loading, EmptyState, Button, Badge } from "../components/ui";
+import { PeriodRangeBar } from "../components/PeriodRangeBar";
+import { kstDate } from "../lib/periodRange";
 import { useAsyncData } from "../lib/useAsyncData";
 import {
   fetchRocketRecon, fetchRocketReconSku, getRocketRefreshStatus,
@@ -40,16 +42,7 @@ const pct = (v: string | number | null | undefined) => {
   return Number.isFinite(num) ? `${(num * 100).toFixed(1)}%` : NO_DATA;
 };
 
-function isoKST(d: Date): string {
-  const kst = new Date(d.toLocaleString("en-US", { timeZone: "Asia/Seoul" }));
-  return `${kst.getFullYear()}-${String(kst.getMonth() + 1).padStart(2, "0")}-${String(kst.getDate()).padStart(2, "0")}`;
-}
 
-function daysAgo(days: number): string {
-  const d = new Date();
-  d.setDate(d.getDate() - days);
-  return isoKST(d);
-}
 
 /**
  * 마지막 수집 시각을 "08-07 19:36 (2시간 전)"으로. null=한 번도 성공 안 함, undefined 입력은 없다.
@@ -74,8 +67,8 @@ function describeLastSuccess(iso: string | null): string {
 }
 
 export default function RocketRecon() {
-  const [from, setFrom] = useState(daysAgo(89));   // 기본 최근 90일(발주 기준)
-  const [to, setTo] = useState(isoKST(new Date()));
+  const [from, setFrom] = useState(kstDate(-89));   // 기본 최근 90일(발주 기준)
+  const [to, setTo] = useState(kstDate(0));
   const [driftOnly, setDriftOnly] = useState(false);
   const [unconfirmedOnly, setUnconfirmedOnly] = useState(false);
   // 갱신 완료 후 재조회 트리거. ★굳이 상태 하나를 더 두는 이유: 콜백에 조회 인자를 **담지
@@ -192,6 +185,8 @@ export default function RocketRecon() {
 }
 
 // ── 기간·필터 바 ───────────────────────────────────────────────
+// ★기간 UI 자체는 **공용 컴포넌트**다(`PeriodRangeBar`). 매출·손익 화면과 같은 물건을 쓰되,
+//   날짜 축 이름과 설명만 화면이 정한다 — 여기는 「발주일」, 저기는 「판매일」이다.
 function PeriodBar({
   from, to, onFrom, onTo, driftOnly, onDriftOnly, unconfirmedOnly, onUnconfirmedOnly,
 }: {
@@ -199,56 +194,30 @@ function PeriodBar({
   driftOnly: boolean; onDriftOnly: (v: boolean) => void;
   unconfirmedOnly: boolean; onUnconfirmedOnly: (v: boolean) => void;
 }) {
-  /** 오늘까지의 최근 N일. N=1이면 오늘 하루. */
-  const preset = (days: number) => { onFrom(daysAgo(days - 1)); onTo(isoKST(new Date())); };
-  /** 하루짜리 창(어제처럼 시작=끝). 최근 N일과 달리 오늘을 포함하지 않는다. */
-  const day = (agoDays: number) => { const d = daysAgo(agoDays); onFrom(d); onTo(d); };
-  const today = isoKST(new Date());
-  const active = (f: string, t: string) => from === f && to === t;
   return (
-    <Card title="조회 조건">
-      <div className="flex flex-wrap items-center gap-3 px-4 py-3">
-        <label className="text-xs text-gray-500">발주일</label>
-        <input
-          type="date" value={from} onChange={(e) => onFrom(e.target.value)}
-          className="rounded border border-gray-300 px-2 py-1 text-sm"
-        />
-        <span className="text-gray-400">~</span>
-        <input
-          type="date" value={to} onChange={(e) => onTo(e.target.value)}
-          className="rounded border border-gray-300 px-2 py-1 text-sm"
-        />
-        {/* 지금 걸린 기간과 같은 프리셋은 눌린 상태로 보인다 — 어느 창을 보고 있는지가
-            날짜 두 개를 읽어야만 알 수 있으면 오독한다. */}
-        <div className="flex flex-wrap gap-1">
-          <Button variant={active(today, today) ? "primary" : "secondary"} onClick={() => preset(1)}>오늘</Button>
-          <Button variant={active(daysAgo(1), daysAgo(1)) ? "primary" : "secondary"} onClick={() => day(1)}>어제</Button>
-          <Button variant={active(daysAgo(6), today) ? "primary" : "secondary"} onClick={() => preset(7)}>7일</Button>
-          <Button variant={active(daysAgo(29), today) ? "primary" : "secondary"} onClick={() => preset(30)}>30일</Button>
-          <Button variant={active(daysAgo(89), today) ? "primary" : "secondary"} onClick={() => preset(90)}>90일</Button>
-          <Button variant={active(daysAgo(364), today) ? "primary" : "secondary"} onClick={() => preset(365)}>1년</Button>
-        </div>
-        <div className="ml-auto flex flex-wrap items-center gap-3">
-          <label className="flex items-center gap-1.5 text-xs text-gray-600">
-            <input type="checkbox" checked={driftOnly} onChange={(e) => onDriftOnly(e.target.checked)} />
-            발주≠입고만
-          </label>
-          <label className="flex items-center gap-1.5 text-xs text-gray-600">
-            <input
-              type="checkbox" checked={unconfirmedOnly}
-              onChange={(e) => onUnconfirmedOnly(e.target.checked)}
-            />
-            계산서 미확정만
-          </label>
-        </div>
-      </div>
-      <p className="px-4 pb-3 text-xs text-gray-400">
+    <PeriodRangeBar
+      label="발주일"
+      from={from} to={to} onFrom={onFrom} onTo={onTo}
+      right={<>
+        <label className="flex items-center gap-1.5 text-xs text-gray-600">
+          <input type="checkbox" checked={driftOnly} onChange={(e) => onDriftOnly(e.target.checked)} />
+          발주≠입고만
+        </label>
+        <label className="flex items-center gap-1.5 text-xs text-gray-600">
+          <input
+            type="checkbox" checked={unconfirmedOnly}
+            onChange={(e) => onUnconfirmedOnly(e.target.checked)}
+          />
+          계산서 미확정만
+        </label>
+      </>}
+      note={<>
         기간은 <b>발주일(KST)</b> 기준입니다. 발주→입고→명세서→계산서 확정까지 수 주가 걸려 기본 창을 90일로 둡니다.
         &lsquo;오늘·어제·7일&rsquo;은 <b>그 날짜에 난 발주</b>만 보는 창이라 입고·계산서가 아직 비어 있는 것이 정상이며,
         발주 자체가 없던 날이면 표가 비어 보입니다(수집 실패와 다릅니다).
         필터는 아래 상품 표에만 적용되며 요약 타일은 항상 기간 전체 기준입니다.
-      </p>
-    </Card>
+      </>}
+    />
   );
 }
 
