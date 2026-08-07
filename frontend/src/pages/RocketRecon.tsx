@@ -18,9 +18,10 @@ import { useMemo, useState } from "react";
 import { Card, Stat, Table, Th, Td, Loading, EmptyState, Button, Badge } from "../components/ui";
 import { useAsyncData } from "../lib/useAsyncData";
 import {
-  fetchRocketRecon, fetchRocketReconSku,
+  fetchRocketRecon, fetchRocketReconSku, getRocketRefreshStatus,
   type ReconSkuRow, type RocketRecon,
 } from "../lib/api";
+import { runStreamRefresh, describeOutcome, specByKey } from "../lib/streamRefresh";
 
 // ── 포매터(로컬) ───────────────────────────────────────────────
 // lib/format.ts는 naver-ad 스코프 전용 계약이라 여기선 로컬 정의를 쓴다(그 파일 상단 경고).
@@ -50,25 +51,119 @@ function daysAgo(days: number): string {
   return isoKST(d);
 }
 
+/**
+ * 마지막 수집 시각을 "08-07 19:36 (2시간 전)"으로. null=한 번도 성공 안 함, undefined 입력은 없다.
+ *
+ * ★백엔드가 주는 last_success_at은 **오프셋 없는 KST naive 문자열**이다("2026-08-07T19:36:11").
+ * JS는 오프셋 없는 datetime을 로컬시각으로 파싱하므로 브라우저가 KST일 때만 상대시간이 맞다.
+ * 이 앱은 전 화면이 KST 전제라 그대로 두되, 절대시각을 **같이** 보여줘 상대시간이 틀려도
+ * 원본을 읽을 수 있게 한다(상대시간만 있으면 틀렸을 때 틀린 줄을 모른다).
+ */
+function describeLastSuccess(iso: string | null): string {
+  if (!iso) return "수집 이력 없음";
+  const t = new Date(iso);
+  if (Number.isNaN(t.getTime())) return iso;
+  const stamp = `${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")} `
+    + `${String(t.getHours()).padStart(2, "0")}:${String(t.getMinutes()).padStart(2, "0")}`;
+  const mins = Math.floor((Date.now() - t.getTime()) / 60000);
+  if (mins < 0) return stamp;                       // 시계 어긋남 — 없는 미래를 지어내지 않는다
+  const rel = mins < 60 ? `${mins}분 전`
+    : mins < 60 * 24 ? `${Math.floor(mins / 60)}시간 전`
+    : `${Math.floor(mins / (60 * 24))}일 전`;
+  return `${stamp} (${rel})`;
+}
+
 export default function RocketRecon() {
   const [from, setFrom] = useState(daysAgo(89));   // 기본 최근 90일(발주 기준)
   const [to, setTo] = useState(isoKST(new Date()));
   const [driftOnly, setDriftOnly] = useState(false);
   const [unconfirmedOnly, setUnconfirmedOnly] = useState(false);
+  // 갱신 완료 후 재조회 트리거. ★굳이 상태 하나를 더 두는 이유: 콜백에 조회 인자를 **담지
+  // 않기 위해서**다. 갱신은 수 분이 걸리고 그 사이 Jino가 기간을 바꿀 수 있는데, 마운트 시점
+  // 인자를 붙잡은 콜백으로 재조회하면 방금 고른 기간을 옛 기간으로 덮는다(교훈 #166·#167,
+  // PR #239에서 CommandCenter·AdReport가 실제로 당한 사고). deps에 넣어 effect를 다시 돌리면
+  // 그 시점의 from/to로 새로 부르므로 **구조적으로** 그 사고가 불가능하다.
+  const [reloadKey, setReloadKey] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshMsg, setRefreshMsg] = useState<string | null>(null);
 
   const { data, error } = useAsyncData(
     () => fetchRocketRecon({ from, to, driftOnly, unconfirmedOnly }),
-    [from, to, driftOnly, unconfirmedOnly],
+    [from, to, driftOnly, unconfirmedOnly, reloadKey],
   );
+  // 수집 신선도 — 기간과 무관하므로 reloadKey에만 반응한다.
+  const { data: refreshStatus, error: refreshStatusError } = useAsyncData(
+    () => getRocketRefreshStatus(),
+    [reloadKey],
+  );
+
+  // "발주 갱신" — Mac 로켓 페처(com.ohisell.rocket poll 데몬)를 깨워 발주/정산을 지금 가져온다.
+  // 이 화면에 버튼이 필요한 이유(2026-08-07 Jino): 이 스트림엔 자동 주기가 없어 누르기 전까지
+  // 오늘 발주가 안 들어온다. 그런데 그 사실을 **발견하는 화면**(여기)과 **고치는 버튼**(종합조망)이
+  // 서로 달라서, 실제로 오후 발주 4건이 6시간 53분간 안 보였다.
+  async function refreshNow() {
+    setRefreshing(true);
+    setRefreshMsg("Mac에서 로켓 발주/정산을 가져오는 중… (~1분, 세션이 만료됐으면 Chrome 로그인 창이 뜹니다)");
+    const spec = specByKey("supplier_hub");
+    try {
+      // ★타임아웃 300초 — 기본값(215초)·커맨드센터(180초)보다 길다. 2026-08-07 라이브 실측:
+      //   요청 19:32:24 → 성공 19:36:11 = 227초. 세션이 만료돼 사람이 로그인하는 시간이
+      //   끼면 180초를 넘긴다. 짧게 잡으면 **수집은 성공했는데 화면은 "응답 없음"**이 되고,
+      //   그 오보를 본 사람은 멀쩡한 데이터를 두고 다시 누른다.
+      const outcome = await runStreamRefresh(spec, { timeoutMs: 300000, pollMs: 5000 });
+      setRefreshMsg(
+        outcome.state === "done"
+          ? "✅ 발주 갱신 완료 — 현재 조회 조건으로 다시 불러왔습니다"
+          : describeOutcome(spec, outcome),
+      );
+      if (outcome.state === "done") setTimeout(() => setRefreshMsg(null), 6000);
+    } catch (e: unknown) {
+      setRefreshMsg("❌ 갱신 요청 실패: " + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setRefreshing(false);
+      // 성공·실패를 가리지 않고 다시 읽는다 — 실패해도 "마지막 수집이 언제인지"는 갱신돼야
+      // 하고, 타임아웃(응답 없음)인데 실은 성공한 경우가 여기서 드러난다.
+      setReloadKey((k) => k + 1);
+    }
+  }
 
   return (
     <div className="space-y-4">
-      <div>
-        <h1 className="text-xl font-bold text-gray-900">로켓배송(1P) 통합 대사</h1>
-        <p className="mt-1 text-sm text-gray-500">
-          발주 → 납품 → 거래명세서 → 계산서를 상품(SKU) 기준 한 화면에서 대조합니다. 조회 전용입니다.
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-bold text-gray-900">로켓배송(1P) 통합 대사</h1>
+          <p className="mt-1 text-sm text-gray-500">
+            발주 → 납품 → 거래명세서 → 계산서를 상품(SKU) 기준 한 화면에서 대조합니다. 조회 전용입니다.
+          </p>
+        </div>
+        <div className="flex flex-col items-end gap-1">
+          <button
+            onClick={refreshNow}
+            disabled={refreshing}
+            title="Jino Mac에서 쿠팡 공급자허브 발주/정산을 지금 가져옵니다(~1분). Mac이 켜져 있어야 하고, 세션이 만료됐으면 Chrome 창이 떠 로그인을 요구합니다."
+            className="flex items-center gap-1.5 rounded-md bg-sky-600 px-3 py-1.5 text-xs text-white hover:bg-sky-700 disabled:opacity-50"
+          >
+            <span className={refreshing ? "animate-spin" : ""}>🔄</span>
+            {refreshing ? "갱신 중…" : "발주 갱신"}
+          </button>
+          {/* ★신선도를 버튼 옆에 붙이는 이유: 이 화면의 "발주 없음"은 두 가지 뜻이다 —
+              ①그날 발주가 실제로 없었다 ②수집이 낡아 아직 안 들어왔다. 마지막 수집 시각이
+              없으면 둘을 가를 수 없고, 실제로 ②를 ①로 읽은 것이 이 버튼을 만든 계기다.
+              조회 실패는 "모름"이지 "낡지 않음"이 아니므로 그대로 드러낸다. */}
+          <span className="text-xs text-gray-400">
+            마지막 수집:{" "}
+            {refreshStatusError
+              ? <span className="text-amber-600">확인 불가</span>
+              : refreshStatus === null
+                ? "확인 중…"
+                : describeLastSuccess(refreshStatus.last_success_at)}
+          </span>
+        </div>
       </div>
+
+      {refreshMsg && (
+        <div className="rounded border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-700">{refreshMsg}</div>
+      )}
 
       <PeriodBar
         from={from} to={to} onFrom={setFrom} onTo={setTo}
@@ -185,7 +280,10 @@ function SummaryTiles({ data }: { data: RocketRecon }) {
           hint={
             s.no_date_po_count > 0
               ? `발주일이 확인되지 않은 발주가 ${s.no_date_po_count}건 있습니다 — 어떤 기간에도 잡히지 않습니다.`
-              : "기간을 넓혀 보세요."
+              // ★"기간을 넓혀 보세요"만 있으면 오늘 난 발주가 아직 수집 안 된 경우를 놓친다
+              //   (2026-08-07 실제로 그랬다: 오후 발주 4건이 6시간 53분간 안 보임). 이 스트림엔
+              //   자동 주기가 없으므로 갱신 버튼을 같이 안내한다.
+              : "기간을 넓혀 보거나, 오늘 난 발주라면 위 '발주 갱신'을 눌러 보세요 — 이 화면은 Mac 페처가 가져온 것만 보여줍니다."
           }
         />
       </Card>
