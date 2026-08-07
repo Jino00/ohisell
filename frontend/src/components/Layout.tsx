@@ -81,7 +81,7 @@ const ROCKET_1P_GROUP: NavGroup = {
   icon: "🚀",
   children: [
     { to: "/rocket-recon", label: "발주·정산 대사", icon: "📦" },
-    { to: "/rocket-1p-revenue", label: "매출(소비자가∥납품가)", icon: "💵" },
+    { to: "/rocket-1p-revenue", label: "매출·손익(납품가 축)", icon: "💵" },
     { to: "/rocket-1p-funnel", label: "유입·전환 퍼널", icon: "🔎" },
   ],
 };
