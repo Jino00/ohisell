@@ -90,7 +90,15 @@ function OptionRow({ o }: { o: Rocket1PRevenueOption }) {
         ) : NO_DATA}
       </Td>
       <Td right>{pct(o.profit_rate)}</Td>
-      <Td right>{ratio(o.roas)}</Td>
+      {/* ★분기선 아래면 빨강 — RoAS만 있으면 "1보다 크니 괜찮다"로 읽힌다(라이브에
+          RoAS 1.08인데 이익률 −22.1%인 행이 있었다). 판정 기준이지 권고가 아니다. */}
+      <Td right>
+        <span className={o.roas != null && o.bep_roas != null && Number(o.roas) < Number(o.bep_roas)
+          ? "font-medium text-judge-bad" : ""}>
+          {ratio(o.roas)}
+        </span>
+      </Td>
+      <Td right><span className="text-gray-400">{ratio(o.bep_roas)}</span></Td>
     </tr>
   );
 }
@@ -375,8 +383,8 @@ export default function Rocket1PRevenue() {
                         )}
                         {p.uncosted.excluded_skus > 0 && (
                           <>이와 별개로 <b>「원가 제외」로 이미 결정된 SKU {p.uncosted.excluded_skus}개</b>가
-                            팔렸습니다(샘플·증정 등) — 목록에서 뺐고, 그래서 커버리지 100%는 위
-                            조치만으로는 달성되지 않습니다.{" "}</>
+                            팔렸습니다(샘플·증정 등) — 위 목록에서 뺐고, 그래서 커버리지 100%는 위
+                            조치만으로는 달성되지 않습니다. <b>아래에 따로 적었습니다.</b>{" "}</>
                         )}
                         {blocked?.code === "promo_burden_unknown" && (
                           <><b>다만 지금 손익이 막힌 이유는 원가가 아니라 프로모션 제안서</b>입니다 —
@@ -435,6 +443,53 @@ export default function Rocket1PRevenue() {
                       {p.uncosted.actionable_skus > p.uncosted.top.length && (
                         <p className="mt-2 text-xs text-gray-400">
                           매출 상위 {p.uncosted.top.length}개만 표시 · 총 {p.uncosted.actionable_skus}개
+                        </p>
+                      )}
+                    </div>
+                  )}
+
+                  {/* ★「원가 제외」 결정도 늙는다 — 그때는 샘플·증정이었어도 지금은 정상
+                      판매일 수 있다. 개수만 세면 재검토할 방법이 없어 이름으로 적는다.
+                      ★작업 목록과 **분리**한다: 여기 있는 건 «시키는 것»이 아니라
+                      «이 결정이 아직 맞나»를 보는 자리다. */}
+                  {p.uncosted.excluded_top.length > 0 && (
+                    <div className="border-t border-gray-100 px-4 py-3">
+                      <div className="text-sm font-medium text-gray-700">
+                        「원가 제외」로 결정된 SKU {p.uncosted.excluded_skus}개가 팔렸습니다 ·
+                        우리 매출 {won(p.uncosted.excluded_our_revenue)}
+                      </div>
+                      <p className="mt-0.5 text-xs text-gray-500">
+                        샘플·증정 등으로 <b>원가를 안 붙이기로 이미 결정한 것</b>이라 위 작업
+                        목록에서 뺐습니다. 다만 그 결정이 아직 맞는지는 <b>가끔 봐야 합니다</b> —
+                        정상 판매로 바뀐 게 섞여 있으면 그만큼 손익이 안 잡힙니다.
+                        고치려면 「종합 조망」의 '원가 매핑 관리'에서 제외를 풀고 연결하세요.
+                      </p>
+                      <Table
+                        head={<>
+                          <Th>SKU / 상품</Th>
+                          <Th right>판매량</Th>
+                          <Th right>우리 매출(납품가)</Th>
+                          <Th right>소비자 매출</Th>
+                        </>}
+                      >
+                        {p.uncosted.excluded_top.map((u) => (
+                          <tr key={u.sku_id ?? u.product_name} className="hover:bg-gray-50">
+                            <Td>
+                              <div className="max-w-md truncate text-gray-700"
+                                title={u.product_name ?? u.sku_id ?? ""}>
+                                {u.product_name ?? u.sku_id}
+                              </div>
+                              <div className="mt-0.5 text-xs text-gray-400">SKU {u.sku_id ?? "—"}</div>
+                            </Td>
+                            <Td right>{num(u.qty)}</Td>
+                            <Td right>{won(u.our_revenue)}</Td>
+                            <Td right>{won(u.consumer_revenue)}</Td>
+                          </tr>
+                        ))}
+                      </Table>
+                      {p.uncosted.excluded_skus > p.uncosted.excluded_top.length && (
+                        <p className="mt-2 text-xs text-gray-400">
+                          매출 상위 {p.uncosted.excluded_top.length}개만 표시 · 총 {p.uncosted.excluded_skus}개
                         </p>
                       )}
                     </div>
@@ -552,6 +607,7 @@ export default function Rocket1PRevenue() {
                   <Th right>순이익</Th>
                   <Th right>이익률</Th>
                   <Th right>RoAS</Th>
+                  <Th right>손익분기 RoAS</Th>
                 </>}
               >
                 {data.options.map((o) => <OptionRow key={o.option_id} o={o} />)}
@@ -562,6 +618,9 @@ export default function Rocket1PRevenue() {
               옵션은 SellC 등록원가를 못 붙인 것입니다 — <b>둘 다 0원이 아니라 «모름»</b>이라,
               그 옵션은 순이익도 내지 않습니다. 단 순이익이 <b>「≤ −금액」</b>으로 뜨는 행은
               원가를 몰라도 <b>적자가 확정</b>인 것입니다(광고비가 이미 우리 매출을 넘었습니다). 방문자·전환은 「유입·전환 퍼널」 화면에 있습니다.
+              「손익분기 RoAS」는 <b>매출 ÷ (매출−원가−분담금)</b>입니다 — 실제 RoAS가 이보다
+              낮으면 그 옵션은 적자라 RoAS를 빨강으로 칠합니다. <b>—</b>인 것은 원가를 모르거나
+              공헌이익이 0 이하라 <b>어떤 RoAS로도 흑자가 안 되는</b> 경우입니다.
               옵션 광고비는 Billboard(PA 기준)이라 계정 총액과 정의가 달라 합이 정확히 맞지
               않습니다 — 현재 차이 {won(data.ad_reconciliation.diff)}.
             </p>

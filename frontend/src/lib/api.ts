@@ -1324,6 +1324,9 @@ export interface Rocket1PRevenueOption {
   our_share: string | null;        // our ÷ consumer (0~1)
   ad_spend: string | null;
   roas: string | null;             // ★우리 매출 기준
+  /** 손익분기 RoAS = 매출 ÷ (매출−원가−분담금). 실제 RoAS가 이보다 **낮으면 적자**다.
+   *  null = 원가/분담금을 모르거나 **공헌이익이 0 이하**(어떤 RoAS로도 흑자가 안 된다). */
+  bep_roas: string | null;
   // ── 손익(2026-08-07) ── null=모름이지 0이 아니다.
   cost: string | null;             // 등록원가 × 판매수량 — null=원가 미등록 SKU
   unit_cost: string | null;
@@ -1394,6 +1397,9 @@ export interface Rocket1PPnl {
     new_our_revenue: string;
     new_sku_window_days: number;   // ★판정 지평(발주 첫 등장 기준). 숨은 기준을 두지 않는다.
     top: Rocket1PUncostedSku[];    // actionable만
+    /** 「원가 제외」로 이미 결정된 SKU — 시키는 목록이 아니라 «그 결정이 아직 맞나» 재검토용. */
+    excluded_top: Rocket1PUncostedSku[];
+    excluded_our_revenue: string;
   };
   note: string;
 }
@@ -1690,7 +1696,13 @@ export interface RocketUnmappedItem {
   barcode: string | null;
   total_order_qty: number;
   po_count: number;
-  suggestions: { internal_sku: string; score: number; product_name: string; cost_price: number | null }[];
+  suggestions: {
+    internal_sku: string; score: number; product_name: string; cost_price: number | null;
+    /** ★이 내부 SKU를 **이미 쓰고 있는 상품번호 수**. 0=전용, 1+=기종 공용 원가.
+     *  이름이 특정 기종을 지목해도 실제로는 공용일 수 있다(라이브: `OHI-TGLASS-IP17PRO`에
+     *  붙은 12개가 아이폰12~16) — 이름만 보고 "다른 기종 원가"로 오해하는 걸 막는다. */
+    already_mapped_count: number;
+  }[];
 }
 
 export interface RocketMappingItem {
