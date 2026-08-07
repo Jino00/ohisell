@@ -843,6 +843,12 @@ git commit -m "feat(rocket-1p): 근거 화면 3단 — 원자 목록 + 원가 �
 - Modify: `backend/app/services/coupang/rocket_1p_pnl_audit.py`
 - Test: `backend/tests/test_rocket_1p_pnl_audit.py`
 
+> ★**창을 좁히지 마라** (Task 1 코드 품질 리뷰 C1). `day_option_atoms`의 `net_profit`·
+> `burden_known`은 **창 종속**이다 — 분담금 가드가 창에 걸친 프로모션 전체를 본다. 하루
+> 창으로 부르면 화면이 «—»로 그린 행에 숫자가 찍힌다(리뷰어 실측: wide 8/1–8/4 → net=None,
+> narrow 8/4–8/4 → net=363,636.36). 그래서 이 함수는 **화면과 같은 창**(`date_from`·`date_to`)을
+> 받아 `day_option_atoms`를 부르고, 결과를 `date_`로 **거른다**.
+
 - [ ] **Step 1: 실패하는 테스트 추가**
 
 ```python
@@ -863,7 +869,7 @@ def test_atom_detail_five_sources(db):
                   "(request_id, product_number, discount_type, discount_value) "
                   "VALUES ('686180', 'S1', 'FIXED', 1500)"))
     db.commit()
-    r = compute_pnl_audit_atom_detail(db, D, "A")
+    r = compute_pnl_audit_atom_detail(db, D, D, D, "A")
     assert r["sales"]["qty"] == 10                       # ① 판매행
     assert r["unit_price"]["unit_purchase_price"] == "60000"   # ② 납품단가(최근 발주)
     assert r["unit_price"]["sibling_option_count"] == 2  # 같은 상품번호를 쓰는 옵션 수
@@ -878,10 +884,31 @@ def test_atom_detail_missing_rows_are_null_not_zero(db):
     from app.services.coupang.rocket_1p_pnl_audit import compute_pnl_audit_atom_detail
     _sale(db, "A", "S1", 10, "1000000")   # 발주도 원가도 광고도 없음
     db.commit()
-    r = compute_pnl_audit_atom_detail(db, D, "A")
+    r = compute_pnl_audit_atom_detail(db, D, D, D, "A")
     assert r["unit_price"] is None
     assert r["cost"]["map"] is None
     assert r["ad"] is None
+
+
+def test_atom_detail_uses_screen_window_not_the_single_day(db):
+    """★C1 회귀 가드 — 원자 상세는 **화면과 같은 창**으로 판정해야 한다.
+
+    창 안 어딘가에 제안서 없는 프로모션이 있으면 분담금은 «모름»이고 화면은 그 행을 «—»로
+    그린다. 상세를 하루 창으로 좁혀 부르면 그 가드를 빠져나가 숫자가 찍힌다 — 근거 화면이
+    화면과 다른 답을 내는 것이라 이 설계가 막으려던 실패 그 자체다.
+    """
+    from app.services.coupang.rocket_1p_pnl_audit import compute_pnl_audit_atom_detail
+    _sale(db, "A", "S1", 10, "1000000")
+    _price(db, "S1", "60000", 1)
+    _cost(db, "S1", 20000)
+    # 8/1~8/2 프로모션 — 할인액 원천 없음(제안서 미수집). 8/4 판매와 겹치지 않는다.
+    db.execute(_t("INSERT INTO coupang_rocket_promotion (request_id, vendor_id, start_at, end_at) "
+                  "VALUES ('686180', :v, '2026-08-01 00:00:00', '2026-08-02 23:59:59')"),
+               {"v": VENDOR})
+    db.commit()
+    wide = compute_pnl_audit_atom_detail(db, date(2026, 8, 1), date(2026, 8, 4), D, "A")
+    assert wide["atom"]["burden_known"] is False
+    assert wide["atom"]["net_profit"] is None    # 화면이 «—»로 그리는 것과 같다
 ```
 
 - [ ] **Step 2: 실패 확인** — `-k atom_detail`. Expected: FAIL (ImportError).
@@ -935,10 +962,14 @@ WHERE pr.vendor_id = :vendor AND date(pr.start_at) <= :d AND date(pr.end_at) >= 
 """
 
 
-def compute_pnl_audit_atom_detail(db: Session, date_: date, option_id: str) -> dict:
+def compute_pnl_audit_atom_detail(db: Session, date_from: date, date_to: date,
+                                  date_: date, option_id: str) -> dict:
     """4단 — 원자 1개의 다섯 갈래 원천 행. **행을 그대로 보인다** — 가공하면 근거가 아니다.
 
     ★없는 행은 null이다. 0으로 접으면 «수집 안 됨»이 «0원»으로 둔갑한다(원칙22).
+    ★★`date_from`·`date_to`는 **화면이 보고 있는 창**이다. 원자를 그 창으로 뽑은 뒤
+      `date_`로 거른다 — 하루 창으로 좁혀 부르면 분담금 «모름» 가드를 빠져나가, 화면이
+      «—»로 그린 행에 숫자가 찍힌다(Task 1 코드 품질 리뷰 C1).
     """
     vendor = ROCKET_1P_VENDOR_ID
     d_iso = date_.isoformat()
@@ -991,10 +1022,12 @@ def compute_pnl_audit_atom_detail(db: Session, date_: date, option_id: str) -> d
         "orders": ad_row[5], "sales_qty": ad_row[6],
     }
 
-    # 원자 자신 — 같은 출처(day_option_atoms)에서 1일 창으로 재조립. 계산식의 숫자가
+    # 원자 자신 — 같은 출처(day_option_atoms)를 **화면과 같은 창**으로 부른 뒤 이 날짜로
+    # 거른다(창을 좁히면 분담금 가드가 달라진다 — 위 docstring ★★). 계산식의 숫자가
     # 위 원천 행들과 같은 값임을 화면이 나란히 보일 수 있다.
-    ctx = day_option_atoms(db, date_, date_)
-    atom = next((a for a in ctx["atoms"] if a["option_id"] == option_id), None)
+    ctx = day_option_atoms(db, date_from, date_to)
+    atom = next((a for a in ctx["atoms"]
+                 if a["option_id"] == option_id and a["date"] == d_iso), None)
     atom_out = None if atom is None else {
         "date": atom["date"], "option_id": atom["option_id"], "qty": atom["qty"],
         "our_revenue": _s(atom["our_revenue"]), "cost": _s(atom["cost"]),
@@ -1083,13 +1116,19 @@ def pnl_audit_atoms(date_from: str | None = Query(None), date_to: str | None = Q
 
 @router.get("/atom")
 def pnl_audit_atom(date_: str = Query(..., alias="date"), option_id: str = Query(...),
+                   date_from: str | None = Query(None), date_to: str | None = Query(None),
                    db: Session = Depends(get_db)):
-    """4단 — 원자 1개의 다섯 갈래 원천 행."""
+    """4단 — 원자 1개의 다섯 갈래 원천 행.
+
+    ★`date_from`·`date_to`는 **화면이 보고 있는 창**이다(생략하면 최근 7일). 이 창으로
+      원자를 뽑아 `date`로 거른다 — 하루로 좁히면 분담금 «모름» 판정이 달라진다.
+    """
     try:
         d = date.fromisoformat(date_)
     except ValueError:
         raise HTTPException(status_code=422, detail=f"날짜 형식이 아닙니다: {date_}")
-    return compute_pnl_audit_atom_detail(db, d, option_id)
+    dfrom, dto = _window(date_from, date_to)
+    return compute_pnl_audit_atom_detail(db, dfrom, dto, d, option_id)
 ```
 
 - [ ] **Step 2: `main.py` 등록**
@@ -1202,8 +1241,14 @@ export function fetchPnlAuditAtoms(p: {
   if (p.optionId) q.set("option_id", p.optionId);
   return fetchApi<PnlAuditAtoms>(`/api/coupang/ops/rocket/pnl-audit/atoms?${q}`);
 }
-export function fetchPnlAuditAtom(p: { date: string; optionId: string }): Promise<PnlAuditAtomDetail> {
-  const q = new URLSearchParams({ date: p.date, option_id: p.optionId });
+// ★from/to는 **화면이 보고 있는 창**이다 — 생략하면 안 된다. 창을 좁히면 분담금 «모름»
+//   판정이 달라져 화면이 «—»로 그린 행에 숫자가 찍힌다(Task 1 리뷰 C1).
+export function fetchPnlAuditAtom(p: {
+  date: string; optionId: string; from: string; to: string;
+}): Promise<PnlAuditAtomDetail> {
+  const q = new URLSearchParams({
+    date: p.date, option_id: p.optionId, date_from: p.from, date_to: p.to,
+  });
   return fetchApi<PnlAuditAtomDetail>(`/api/coupang/ops/rocket/pnl-audit/atom?${q}`);
 }
 ```
@@ -1286,10 +1331,14 @@ function KV({ k, v }: { k: string; v: React.ReactNode }) {
   return <div className="flex justify-between gap-2"><span className="text-gray-400">{k}</span><span className="tabular-nums">{v}</span></div>;
 }
 
-/** 4단 — 원자 1개의 다섯 갈래 원천 행. 없는 행은 «없음»으로 그대로 말한다(0이 아니다). */
-function AtomDetail({ date, optionId }: { date: string; optionId: string }) {
+/** 4단 — 원자 1개의 다섯 갈래 원천 행. 없는 행은 «없음»으로 그대로 말한다(0이 아니다).
+ *  ★from/to(화면이 보고 있는 창)를 반드시 함께 넘긴다 — 창을 좁히면 분담금 «모름» 판정이
+ *    달라져 화면이 «—»로 그린 행에 숫자가 찍힌다(Task 1 리뷰 C1). */
+function AtomDetail({ date, optionId, from, to }: {
+  date: string; optionId: string; from: string; to: string;
+}) {
   const { data, error } = useAsyncData<PnlAuditAtomDetail>(
-    () => fetchPnlAuditAtom({ date, optionId }), [date, optionId]);
+    () => fetchPnlAuditAtom({ date, optionId, from, to }), [date, optionId, from, to]);
   if (error) return <div className="p-2 text-xs text-red-600">원천 조회 실패: {String(error)}</div>;
   if (!data) return <div className="p-2"><Loading /></div>;
   const cm = data.cost.map;
@@ -1484,7 +1533,9 @@ export default function Rocket1PPnlAudit() {
                       </tr>
                       {open === key && (
                         <tr key={`${key}-detail`}>
-                          <td colSpan={9}><AtomDetail date={a.date} optionId={a.option_id} /></td>
+                          <td colSpan={9}>
+                            <AtomDetail date={a.date} optionId={a.option_id} from={from} to={to} />
+                          </td>
                         </tr>
                       )}
                     </>
