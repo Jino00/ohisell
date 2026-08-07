@@ -453,6 +453,49 @@ def test_a6_undetermined_when_promo_collection_is_stale(db):
     assert a6["left"] == "0" and a6["right"] == "0"
 
 
+def test_a6_undetermined_when_collection_is_stale_even_with_promos_in_window(db):
+    """★★라이브가 타는 분기 — 창에 프로모션이 **이미 있고 제안서도 있는** 상태.
+
+    예전 판은 신선도를 `promos == 0` 분기에만 걸어서, 이 경우 수집이 몇 주째 멈춰 있어도
+    `pass(1/1)`였다. 그런데 원래 막으려던 사고(「수집이 멈춘 사이 새 프로모션이 시작」)는
+    **바로 이 분기로 온다** — prod 현재 상태(686180이 08-01~08-15에 걸쳐 있고 제안서 있음)가
+    정확히 그 모양이다. 「전건에 원천이 있다」는 **본 것 중에서** 참일 뿐이라, 미수집
+    프로모션은 애초에 세어지지 않는다. 그러면 초록·빨강을 «수집기가 살아 있었나»가 가른다.
+    """
+    _full_fixture(db, settlement=False)
+    _promo(db, "686180", "2026-08-01 00:00:00", "2026-08-15 23:59:59",
+           synced="2026-07-20 08:00:00", priced=True)
+    # ★**전 행**을 stale로 둔다 — 신선도는 테이블 전체의 MAX다(수집기가 돌면 모든 현행
+    #   프로모션을 upsert하므로 «한 행만 오래된» 상태는 실제로 도달할 수 없다).
+    db.execute(_t("UPDATE coupang_rocket_promotion SET synced_at = '2026-07-20 08:00:00'"))
+    db.commit()
+    a6 = next(c for c in _audit(db, D_PREV, D)["checks"] if c["id"] == "A6")
+    assert a6["verdict"] == "undetermined"
+    assert a6["left"] == "1" and a6["right"] == "1"        # 좌·우변은 같은데도 초록이 아니다
+    assert "2026-07-20" in a6["note"]
+
+    # ★신선도만 되돌리면 pass — 판정자가 정말 수집 시각임을 못 박는다(다른 것은 안 바꿨다).
+    db.execute(_t("UPDATE coupang_rocket_promotion SET synced_at = :n"),
+               {"n": f"{D.isoformat()} 21:00:00"})
+    db.commit()
+    a6b = next(c for c in _audit(db, D_PREV, D)["checks"] if c["id"] == "A6")
+    assert a6b["verdict"] == "pass"
+    assert a6b["left"] == "1" and a6b["right"] == "1"      # 좌·우변은 그대로다
+
+
+def test_a6_fail_is_not_gated_by_freshness(db):
+    """★fail은 신선도로 잠그지 않는다 — «제안서 없는 프로모션이 창에 있다»는 stale이어도
+    참인 **이미 관측된 사실**이고, 게이트를 걸면 실제 결손이 «모름»으로 흐려진다."""
+    _full_fixture(db, settlement=False)
+    _promo(db, "686180", "2026-08-01 00:00:00", "2026-08-15 23:59:59",
+           synced="2026-07-20 08:00:00", priced=False)     # 제안서 없음
+    db.execute(_t("UPDATE coupang_rocket_promotion SET synced_at = '2026-07-20 08:00:00'"))
+    db.commit()
+    a6 = next(c for c in _audit(db, D_PREV, D)["checks"] if c["id"] == "A6")
+    assert a6["verdict"] == "fail"
+    assert a6["left"] == "0" and a6["right"] == "1"
+
+
 def test_a6_undetermined_when_promotion_table_was_never_collected(db):
     """행이 하나도 없으면 수집 시각 자체가 없다 — «프로모션이 없었다»고 단정할 수 없다."""
     _full_fixture(db, settlement=False)
