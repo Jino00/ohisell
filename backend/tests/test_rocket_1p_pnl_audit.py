@@ -760,3 +760,131 @@ def test_atoms_sort_puts_unknown_last_instead_of_treating_it_as_zero(db):
     r = _atoms(db, D, D, sort="revenue")
     assert [a["option_id"] for a in r["atoms"]] == ["A", "C", "B"]
     assert r["atoms"][-1]["our_revenue"] is None
+
+
+# ═══ ⑤ 원자 상세 — 다섯 갈래 원천 행 ═══
+
+
+def _detail(db, dfrom, dto, d, option_id):
+    """라우터 노릇 — ★원자는 **화면과 같은 창**(dfrom~dto)으로 뽑고, 상세는 그것을 `d`로 «거른다».
+
+    창을 `(d, d)`로 좁혀 부르면 분담금 «모름» 가드를 빠져나간다(아래 회귀 가드 테스트).
+    """
+    from app.services.coupang.rocket_1p_pnl_audit import compute_pnl_audit_atom_detail
+    return compute_pnl_audit_atom_detail(db, dfrom, dto, d, option_id,
+                                         day_option_atoms(db, dfrom, dto))
+
+
+def test_atom_detail_five_sources(db):
+    _sale(db, "A", "S1", 10, "1000000")
+    _sale(db, "A2", "S1", 3, "300000")          # 같은 sku를 쓰는 형제 옵션
+    _price(db, "S1", "60000", 1)
+    _cost(db, "S1", 20000, match_method="suggested")
+    _ad_option(db, "A", "10000")
+    db.execute(_t("INSERT INTO coupang_rocket_promotion (request_id, vendor_id, start_at, end_at) "
+                  "VALUES ('686180', :v, '2026-08-01 00:00:00', '2026-08-15 23:59:59')"),
+               {"v": VENDOR})
+    db.execute(_t("INSERT INTO coupang_promo_discount_item "
+                  "(request_id, product_number, discount_type, discount_value) "
+                  "VALUES ('686180', 'S1', 'FIXED', 1500)"))
+    db.commit()
+    r = _detail(db, D, D, D, "A")
+    assert r["sales"]["qty"] == 10                       # ① 판매행
+    # ★금액은 **원천 행의 표기 그대로** 낸다(자릿수를 다듬지 않는다) — 그래서 값 비교는
+    #   Decimal로 한다. 「같은 돈이 같은 글자로 찍히는가」는 아래 광고 테스트가 못 박는다.
+    assert Decimal(r["unit_price"]["unit_purchase_price"]) == Decimal("60000")  # ② 납품단가
+    assert r["unit_price"]["sibling_option_count"] == 2  # 같은 상품번호를 쓰는 옵션 수
+    assert r["cost"]["map"]["match_method"] == "suggested"     # ③ 원가 다리
+    assert Decimal(r["cost"]["master"]["cost_price"]) == Decimal("20000")
+    assert Decimal(r["ad"]["ad_spend"]) == Decimal("10000")    # ④ 광고비
+    assert len(r["promos"]) == 1                         # ⑤ 분담금 제안서
+    assert r["atom"]["net_profit"] is not None           # 원자 자신(같은 출처에서 재조립)
+
+
+def test_atom_detail_missing_rows_are_null_not_zero(db):
+    _sale(db, "A", "S1", 10, "1000000")   # 발주도 원가도 광고도 없음
+    db.commit()
+    r = _detail(db, D, D, D, "A")
+    assert r["unit_price"] is None
+    assert r["cost"]["map"] is None
+    assert r["ad"] is None
+    # ★"광고 행 없음"은 "0원 썼다"가 아니다 — 상세도 원자도 0으로 접지 않는다.
+    assert r["atom"]["ad_spend"] is None
+
+
+def test_atom_detail_uses_screen_window_not_the_single_day(db):
+    """★C1 회귀 가드 — 원자 상세는 **화면과 같은 창**으로 판정해야 한다.
+
+    창 안 어딘가에 제안서 없는 프로모션이 있으면 분담금은 «모름»이고 화면은 그 행을 «—»로
+    그린다. 상세를 하루 창으로 좁혀 부르면 그 가드를 빠져나가 숫자가 찍힌다 — 근거 화면이
+    화면과 다른 답을 내는 것이라 이 설계가 막으려던 실패 그 자체다.
+    """
+    _sale(db, "A", "S1", 10, "1000000")
+    _price(db, "S1", "60000", 1)
+    _cost(db, "S1", 20000)
+    # 8/1~8/2 프로모션 — 할인액 원천 없음(제안서 미수집). 8/4 판매와 겹치지 않는다.
+    db.execute(_t("INSERT INTO coupang_rocket_promotion (request_id, vendor_id, start_at, end_at) "
+                  "VALUES ('686180', :v, '2026-08-01 00:00:00', '2026-08-02 23:59:59')"),
+               {"v": VENDOR})
+    db.commit()
+    wide = _detail(db, date(2026, 8, 1), date(2026, 8, 4), D, "A")
+    assert wide["atom"]["burden_known"] is False
+    assert wide["atom"]["net_profit"] is None    # 화면이 «—»로 그리는 것과 같다
+    # ★창을 하루로 좁히면 같은 원자에 숫자가 찍힌다 — 이 함수가 창을 스스로 정하지 않고
+    #   받는 이유. (좁힌 쪽이 «틀린» 게 아니라 **다른 주장**이라, 근거로 쓰면 안 된다.)
+    narrow = _detail(db, D, D, D, "A")
+    assert narrow["atom"]["net_profit"] is not None
+
+
+def test_atom_detail_ad_row_folds_the_same_rows_the_atom_does(db):
+    """★★상세의 광고비가 원자의 광고비와 **같아야** 한다 — 근거가 화면과 다르면 근거가 아니다.
+
+    `coupang_ad_option_daily`의 유니크 키는 (report_date, vendor, sell_type, ad_option_id,
+    **conv_option_id**)라, 한 광고 옵션이 여러 전환 옵션으로 갈리면 **같은 (날짜,옵션)에
+    행이 여럿**이다. 원자는 그 행들을 SUM으로 접는데(화면 SA의 광고 SQL과 같은 GROUP BY),
+    상세가 첫 행 하나만 보이면 광고비가 작아 보이고 그 차이를 아무도 설명할 수 없다.
+    그래서 상세도 같은 방식으로 접고, **몇 행을 접었는지**(row_count)를 함께 낸다.
+    """
+    _sale(db, "A", "S1", 10, "1000000")
+    _price(db, "S1", "60000", 1)
+    _cost(db, "S1", 20000)
+    db.add(CoupangAdOptionDaily(
+        report_date=D, vendor_id=VENDOR, sell_type="Retail",
+        ad_option_id="A", conv_option_id="CONV1", impressions=3, clicks=1,
+        ad_spend=Decimal("7000"), orders=0, sales_qty=0, conversion_revenue=Decimal("0")))
+    db.add(CoupangAdOptionDaily(
+        report_date=D, vendor_id=VENDOR, sell_type="Retail",
+        ad_option_id="A", conv_option_id="CONV2", impressions=5, clicks=2,
+        ad_spend=Decimal("3000"), orders=0, sales_qty=0, conversion_revenue=Decimal("0")))
+    db.commit()
+    r = _detail(db, D, D, D, "A")
+    assert r["ad"]["row_count"] == 2
+    assert Decimal(r["ad"]["ad_spend"]) == Decimal("10000")
+    assert r["ad"]["ad_spend"] == r["atom"]["ad_spend"]      # ★상세 = 원자, 문자열까지
+    assert r["ad"]["impressions"] == 8 and r["ad"]["clicks"] == 3
+
+
+def test_atom_detail_promos_are_unknown_when_the_source_table_is_absent(db):
+    """★할인액 원천 테이블이 없으면 «프로모션 없음»이 아니라 **모름**이다(None).
+
+    빈 목록으로 내면 화면이 "그날 걸린 프로모션 없음 — 분담금 0은 사실"이라고 그린다.
+    그건 정확히 이 화면이 잡으려는 거짓 초록이다.
+    """
+    _sale(db, "A", "S1", 10, "1000000")
+    _price(db, "S1", "60000", 1)
+    _cost(db, "S1", 20000)
+    db.commit()
+    assert _detail(db, D, D, D, "A")["promos"] == []        # 테이블은 있고 걸린 것이 없다
+    db.execute(_t("DROP TABLE coupang_promo_discount_item"))
+    db.commit()
+    assert _detail(db, D, D, D, "A")["promos"] is None      # 원천이 없으니 «모름»
+
+
+def test_atom_detail_returns_null_atom_for_a_day_with_no_sale(db):
+    """그날 그 옵션에 판매행이 없으면 원자가 없다 — 0으로 지어내지 않는다."""
+    _sale(db, "A", "S1", 10, "1000000")
+    _price(db, "S1", "60000", 1)
+    db.commit()
+    r = _detail(db, D_PREV, D, D_PREV, "A")
+    assert r["atom"] is None and r["sales"] is None
+    assert r["date"] == D_PREV.isoformat() and r["option_id"] == "A"

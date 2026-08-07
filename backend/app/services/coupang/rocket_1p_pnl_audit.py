@@ -29,14 +29,15 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import text
+from sqlalchemy import inspect as sa_inspect, text
 from sqlalchemy.orm import Session
 
 from app.services.coupang.rocket_1p_channel_pnl import (  # noqa: PLC2701
     ROCKET_1P_VENDOR_ID, ZERO, _COST_COVERAGE_MIN, _has_item_table, _money,
     _settlement_window, promo_window_counts)
 
-__all__ = ["ATOM_LIMIT", "compute_pnl_audit_atoms", "compute_pnl_audit_checks"]
+__all__ = ["ATOM_LIMIT", "compute_pnl_audit_atom_detail", "compute_pnl_audit_atoms",
+           "compute_pnl_audit_checks"]
 
 # 옵션 표를 자르지 않기 위한 한도 — 잘리면 A2·A7의 합을 낼 수 없다(그땐 undetermined).
 # ★**공개 이름**이다: 라우터가 화면 응답을 만들 때 이 값을 써야 한다. 라우터가 자기 숫자를
@@ -73,6 +74,15 @@ def _verdict(ok: bool) -> str:
 def _s(v) -> str | None:
     """금액은 **문자열**로 낸다(정밀도 보존, settlements/overview 라우터 규약). None은 None."""
     return None if v is None else str(v)
+
+
+def _decimal_or_none(v) -> Decimal | None:
+    """SQLite의 `SUM(...)`은 float으로 올 수 있다 — 원자 파생 SA와 **같은 방식**으로 되돌린다.
+
+    ★같은 방식이라야 하는 이유: 근거 화면은 원천 행의 합과 원자의 값을 **나란히** 보인다.
+      한쪽만 float 경유로 문자열이 되면 같은 돈이 다른 글자로 찍혀 «다르다»로 읽힌다.
+    """
+    return None if v is None else (v if isinstance(v, Decimal) else Decimal(str(v)))
 
 
 def _check(cid: str, label: str, left, right, *, verdict: str,
@@ -476,3 +486,157 @@ def compute_pnl_audit_atoms(db: Session, date_from: date, date_to: date, ctx: di
         },
         "atoms": rows,
     }
+
+
+# ── 4단 — 원자 1개의 다섯 갈래 원천 행 ────────────────────────────────────
+#   `coupang_rocket_sales_daily`는 (vendor_id, option_id, date)가 유니크라 원자당 **1행**이다.
+_ATOM_SALES_SQL = """
+SELECT date, option_id, sku_id, product_name, qty, revenue, visitors, source, synced_at
+FROM coupang_rocket_sales_daily
+WHERE vendor_id = :vendor AND option_id = :oid AND date = :d
+"""
+
+# ★화면 SA의 납품단가 CTE(rn=1, PO 최신순)와 **같은 의미**의 단건 조회 — 정렬 키가 같다.
+#   (그 CTE도 vendor로 거르지 않는다 — 여기서 거르면 두 값이 갈린다.)
+_ATOM_PO_SQL = """
+SELECT i.purchase_order_seq, i.unit_purchase_price, i.order_qty, o.po_created_at
+FROM coupang_rocket_purchase_order_item i
+LEFT JOIN coupang_rocket_purchase_order o ON o.purchase_order_seq = i.purchase_order_seq
+WHERE i.product_number = :pn
+ORDER BY i.purchase_order_seq DESC LIMIT 1
+"""
+
+# 같은 상품번호를 쓰는 옵션 수 — **전 기간** 기준이다(조회 창이 아니라). 단가·원가가 상품번호
+# 그레인이라 "이 단가를 몇 개 옵션이 공유하는가"는 창과 무관한 사실이기 때문이다.
+_ATOM_SIBLING_SQL = """
+SELECT COUNT(DISTINCT option_id) FROM coupang_rocket_sales_daily
+WHERE vendor_id = :vendor AND sku_id = :pn
+"""
+
+_ATOM_COST_SQL = """
+SELECT m.product_number, m.internal_sku, m.status, m.match_method, m.note, m.updated_at,
+       pm.product_name, pm.cost_price
+FROM rocket_product_cost_map m
+LEFT JOIN product_master pm ON pm.internal_sku = m.internal_sku
+WHERE m.product_number = :pn
+"""
+
+# ★★**SUM + GROUP BY**다(단건 조회가 아니다). 유니크 키가 (report_date, vendor, sell_type,
+#   ad_option_id, **conv_option_id**)라 한 광고 옵션이 여러 전환 옵션으로 갈리면 같은
+#   (날짜,옵션)에 행이 여럿이고, 원자는 그 행들을 접은 값을 쓴다. 첫 행만 보이면 근거가
+#   화면보다 작은 광고비를 말하게 된다 — 그래서 접는 방식을 화면 SA와 **같게** 두고
+#   몇 행을 접었는지도 낸다.
+_ATOM_AD_SQL = """
+SELECT SUM(ad_spend), SUM(impressions), SUM(clicks), SUM(orders), SUM(sales_qty), COUNT(*)
+FROM coupang_ad_option_daily
+WHERE vendor_id = :vendor AND sell_type = 'Retail'
+  AND ad_option_id = :oid AND report_date = :d
+"""
+
+_ATOM_PROMO_SQL = """
+SELECT pr.request_id, pr.start_at, pr.end_at, d.discount_type, d.discount_value
+FROM coupang_rocket_promotion pr
+LEFT JOIN coupang_promo_discount_item d
+  ON d.request_id = pr.request_id AND d.product_number = :pn
+WHERE pr.vendor_id = :vendor AND date(pr.start_at) <= :d AND date(pr.end_at) >= :d
+"""
+
+_UNIT_PRICE_NOTE = (
+    "가장 최근 발주의 단가입니다 — 단가가 바뀌면 과거 판매의 매출도 소급해서 바뀝니다. "
+    "원가·단가는 상품번호(sku) 기준으로 붙으므로 같은 상품번호를 쓰는 옵션 전부에 같은 값이 "
+    "적용됩니다(공유 옵션 수는 조회 기간이 아니라 **전 기간** 기준입니다)."
+)
+
+
+def _int_or_none(v) -> int | None:
+    return None if v is None else int(v)
+
+
+def compute_pnl_audit_atom_detail(db: Session, date_from: date, date_to: date,
+                                  date_: date, option_id: str, ctx: dict) -> dict:
+    """4단 — 원자 1개의 다섯 갈래 원천 행. **행을 그대로 보인다** — 가공하면 근거가 아니다.
+
+    ★없는 행은 null이다. 0으로 접으면 «수집 안 됨»이 «0원»으로 둔갑한다.
+    ★★`date_from`·`date_to`는 **화면이 보고 있는 창**이고, 그 창으로 뽑은 원자(`ctx`)를
+      `date_`로 **거른다**. 하루 창으로 좁혀 다시 뽑으면 분담금 «모름» 가드를 빠져나가,
+      화면이 «—»로 그린 행에 숫자가 찍힌다 — 근거가 화면과 **다른 주장**을 하게 된다.
+      그래서 창을 이 모듈이 정하지 않고 라우터에게서 받는다.
+    ★광고 행은 원자와 **같은 방식으로 접는다**(SUM). 접기가 다르면 근거와 화면의 광고비가
+      갈리는데, 그 차이는 화면 어디에도 설명이 없다.
+    """
+    vendor = ROCKET_1P_VENDOR_ID
+    d_iso = date_.isoformat()
+
+    sales_row = db.execute(text(_ATOM_SALES_SQL),
+                           {"vendor": vendor, "oid": option_id, "d": d_iso}).fetchone()
+    sales = None if sales_row is None else {
+        "date": str(sales_row[0])[:10], "option_id": str(sales_row[1]),
+        "sku_id": sales_row[2], "product_name": sales_row[3],
+        "qty": int(sales_row[4] or 0), "consumer_revenue": _s(sales_row[5]),
+        "visitors": _int_or_none(sales_row[6]), "source": sales_row[7],
+        "synced_at": _s(sales_row[8]),
+    }
+    sku = sales["sku_id"] if sales else None
+
+    unit_price = None
+    cost = {"map": None, "master": None}
+    promos = None
+    if sku is not None:
+        po = db.execute(text(_ATOM_PO_SQL), {"pn": str(sku)}).fetchone()
+        if po is not None:
+            siblings = int(db.execute(text(_ATOM_SIBLING_SQL),
+                                      {"vendor": vendor, "pn": str(sku)}).scalar() or 0)
+            unit_price = {
+                "purchase_order_seq": po[0], "unit_purchase_price": _s(po[1]),
+                "order_qty": po[2], "po_created_at": _s(po[3]),
+                "sibling_option_count": siblings,
+                "note": _UNIT_PRICE_NOTE,
+            }
+        cm = db.execute(text(_ATOM_COST_SQL), {"pn": str(sku)}).fetchone()
+        if cm is not None:
+            cost["map"] = {"product_number": cm[0], "internal_sku": cm[1], "status": cm[2],
+                           "match_method": cm[3], "note": cm[4], "updated_at": _s(cm[5])}
+            if cm[6] is not None or cm[7] is not None:
+                # 다리는 있는데 그 internal_sku의 마스터 행이 없으면 master는 **None**이다
+                # (원가 미등록) — 0으로 지어내지 않는다.
+                cost["master"] = {"internal_sku": cm[1], "product_name": cm[6],
+                                  "cost_price": _s(cm[7])}
+        # ★두 테이블이 **둘 다** 있어야 «걸린 프로모션과 그 할인액»을 말할 수 있다. 하나라도
+        #   없으면 빈 목록이 아니라 None(모름)이다 — 빈 목록은 화면이 «분담금 0은 사실»로
+        #   그리는 값이라, 원천이 없는 상태를 그렇게 내면 그게 거짓 초록이다.
+        insp = sa_inspect(db.get_bind())
+        if (insp.has_table("coupang_rocket_promotion")
+                and insp.has_table("coupang_promo_discount_item")):
+            promos = [{"request_id": row[0], "start_at": _s(row[1]), "end_at": _s(row[2]),
+                       "discount_type": row[3], "discount_value": _s(row[4])}
+                      for row in db.execute(text(_ATOM_PROMO_SQL),
+                                            {"vendor": vendor, "pn": str(sku), "d": d_iso})]
+
+    ad_row = db.execute(text(_ATOM_AD_SQL),
+                        {"vendor": vendor, "oid": option_id, "d": d_iso}).fetchone()
+    # COUNT(*)=0이면 그 (날짜,옵션)에 광고 행이 아예 없다 — SUM은 NULL이고, 그건 «0원 썼다»가
+    # 아니라 «행이 없다»다(원자의 ad_spend=None과 같은 뜻).
+    ad = None if ad_row is None or int(ad_row[5] or 0) == 0 else {
+        "report_date": d_iso, "ad_option_id": option_id,
+        "ad_spend": _s(_decimal_or_none(ad_row[0])),
+        "impressions": _int_or_none(ad_row[1]), "clicks": _int_or_none(ad_row[2]),
+        "orders": _int_or_none(ad_row[3]), "sales_qty": _int_or_none(ad_row[4]),
+        "row_count": int(ad_row[5]),
+    }
+
+    # 원자 자신 — 라우터가 **화면과 같은 창**으로 뽑아 준 `ctx`에서 이 날짜로 거른다.
+    # 계산식의 숫자가 위 원천 행들과 같은 값임을 화면이 나란히 보인다.
+    atom = next((a for a in ctx["atoms"]
+                 if a["option_id"] == option_id and a["date"] == d_iso), None)
+    atom_out = None if atom is None else {
+        "date": atom["date"], "option_id": atom["option_id"], "qty": atom["qty"],
+        "our_revenue": _s(atom["our_revenue"]), "cost": _s(atom["cost"]),
+        "promo_burden": _s(atom["promo_burden"]), "ad_spend": _s(atom["ad_spend"]),
+        "net_profit": _s(atom["net_profit"]),
+        "net_profit_upper": _s(atom["net_profit_upper"]),
+        "burden_known": ctx["burden_known"],
+    }
+
+    return {"date": d_iso, "option_id": option_id, "atom": atom_out,
+            "sales": sales, "unit_price": unit_price, "cost": cost,
+            "ad": ad, "promos": promos}
