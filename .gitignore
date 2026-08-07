@@ -2,7 +2,13 @@
 node_modules/
 __pycache__/
 *.pyc
-.env
+# ★.env 계열은 통짜로 무시한다 — 예외는 아래 한 줄뿐.
+#   `.env` 하나로는 부족하다: 2026-08-07 실측에서 `.env.local`·`backend/.env.production`이
+#   **NOT ignored**였다(그때 실물은 없었다 — 누가 만드는 순간 `git add -A` 한 번에 들어간다).
+#   이 repo의 글롭은 이미 한 번 빗나갔고(아래 DB 백업 절), 그때는 22.3MB가 히스토리에 박혀
+#   **되돌리지 못했다**. 비밀은 그보다 더 못 되돌린다 — 넓게 잡고 예외를 명시한다.
+.env*
+!.env.example
 .venv/
 dist/
 build/
