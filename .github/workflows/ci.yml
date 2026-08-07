@@ -41,7 +41,11 @@ jobs:
           pip install -r requirements-dev.txt
       - name: pytest
         working-directory: backend # rootdir가 backend여야 tests/ 의 로컬 임포트가 풀린다
-        run: pytest -q
+        # ★반드시 `python -m pytest`다. `pytest`(콘솔 스크립트)는 CWD를 sys.path에 넣지 않아
+        #   `import app`이 전부 죽는다(첫 CI 실행 실측: 227 collection errors,
+        #   `ModuleNotFoundError: No module named 'app'`). 이 repo엔 conftest.py도
+        #   pyproject/pytest.ini도 없어서 경로를 잡아 줄 것이 `-m`뿐이다.
+        run: python -m pytest -q
 
   frontend:
     name: frontend
