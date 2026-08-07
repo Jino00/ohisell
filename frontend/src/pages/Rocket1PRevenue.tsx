@@ -19,6 +19,8 @@ import { Card, Stat, Table, Th, Td, Loading, EmptyState, Badge } from "../compon
 import { useAsyncData } from "../lib/useAsyncData";
 import { FreshnessNote } from "../components/FreshnessNote";
 import { fetchRocket1PRevenue, type Rocket1PRevenueOption, type Rocket1PDaily } from "../lib/api";
+import { PeriodRangeBar } from "../components/PeriodRangeBar";
+import { kstDate } from "../lib/periodRange";
 
 const NO_DATA = "—";
 
@@ -42,17 +44,6 @@ const ratio = (v: string | null) => {
   const n = Number(v);
   return Number.isFinite(n) ? n.toFixed(2) : NO_DATA;
 };
-
-function isoKST(d: Date): string {
-  const kst = new Date(d.toLocaleString("en-US", { timeZone: "Asia/Seoul" }));
-  return `${kst.getFullYear()}-${String(kst.getMonth() + 1).padStart(2, "0")}-${String(kst.getDate()).padStart(2, "0")}`;
-}
-
-function daysAgo(days: number): string {
-  const d = new Date();
-  d.setDate(d.getDate() - days);
-  return isoKST(d);
-}
 
 function OptionRow({ o }: { o: Rocket1PRevenueOption }) {
   return (
@@ -157,8 +148,8 @@ function PnlLine({ label, value, sub, sign, strong }: {
 }
 
 export default function Rocket1PRevenue() {
-  const [from, setFrom] = useState(daysAgo(6));
-  const [to, setTo] = useState(isoKST(new Date()));
+  const [from, setFrom] = useState(kstDate(-6));
+  const [to, setTo] = useState(kstDate(0));
 
   const { data, error } = useAsyncData(
     () => fetchRocket1PRevenue({ from, to, limit: 300 }),
@@ -179,20 +170,24 @@ export default function Rocket1PRevenue() {
         </p>
       </div>
 
-      <Card>
-        <div className="flex flex-wrap items-end gap-3 px-4 py-3">
-          <label className="text-sm">
-            <span className="mr-2 text-gray-500">시작</span>
-            <input type="date" value={from} onChange={(e) => setFrom(e.target.value)}
-              className="rounded border border-gray-300 px-2 py-1" />
-          </label>
-          <label className="text-sm">
-            <span className="mr-2 text-gray-500">종료</span>
-            <input type="date" value={to} onChange={(e) => setTo(e.target.value)}
-              className="rounded border border-gray-300 px-2 py-1" />
-          </label>
-        </div>
-      </Card>
+      {/* ★축이 「판매일」이다 — 통합 대사(발주일)와 **다른 축**이라 이름을 박는다.
+          그리고 판매분석의 두 한계(롤링 약 2개월 · 당일·전일치 없음)를 여기서 말한다:
+          안 그러면 '오늘'을 눌러 빈 화면을 보고 «수집 실패»로 오독한다. */}
+      <PeriodRangeBar
+        label="판매일"
+        from={from} to={to} onFrom={setFrom} onTo={setTo}
+        note={<>
+          기간은 <b>판매일(KST)</b> 기준입니다 — 고객에게 실제로 팔린 날이지 발주·정산일이
+          아닙니다(발주 축은 「발주·정산 대사」 화면입니다).
+          {" "}<b>판매분석은 당일·전일치를 주지 않습니다</b> — &lsquo;오늘·어제&rsquo;는 대개 비어
+          있는 것이 정상이고 수집 실패와 다릅니다.
+          {data?.coverage.sales_data_from && (
+            <> 그리고 쿠팡 판매분석은 <b>{data.coverage.sales_data_from}부터만</b> 있습니다
+              (롤링 약 2개월) — 그 이전을 조회하면 판매 축이 전부 「—」가 되고, 계산서 매출·
+              광고비는 다른 원천이라 그대로 나옵니다.</>
+          )}
+        </>}
+      />
 
       {error && (
         <Card><EmptyState reason="매출 데이터를 불러오지 못했습니다." hint={String(error)} /></Card>
