@@ -5,7 +5,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 # ── Channel ──
@@ -23,10 +23,14 @@ class ChannelOut(BaseModel):
 
 
 # ── ProductMaster ──
+# ★cost_price는 음수일 수 없다(2026-08-06 적대 리뷰 P2) — 종전엔 스키마에도 DB에도 제약이
+#   없어서 오입력 음수가 들어갈 수 있었고, 손익에서 원가가 음수면 이익을 **빼는 게 아니라
+#   더한다.** 라이브 음수 0건이지만 방어선 자체가 없었다. 손익 쪽(naver_ops)은 양수 후보가
+#   없으면 «모름»으로 처리해 이미 막았고, 여기서는 애초에 들어오지 못하게 한다.
 class ProductCreate(BaseModel):
     internal_sku: str
     product_name: str
-    cost_price: Decimal = Decimal("0")
+    cost_price: Decimal = Field(default=Decimal("0"), ge=0)
     category: Optional[str] = None
     memo: Optional[str] = None
 
@@ -34,7 +38,7 @@ class ProductCreate(BaseModel):
 class ProductUpdate(BaseModel):
     internal_sku: Optional[str] = None
     product_name: Optional[str] = None
-    cost_price: Optional[Decimal] = None
+    cost_price: Optional[Decimal] = Field(default=None, ge=0)
     category: Optional[str] = None
     memo: Optional[str] = None
 

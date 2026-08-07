@@ -24,7 +24,10 @@ const fmt = (n: number) => new Intl.NumberFormat("ko-KR").format(n);
 // 매핑을 이으면 **과거 주문도** 소급 연결된다(2026-08-04). 종전엔 앞으로 팔릴 것만 맞고
 // 이미 판 것은 영영 원가 미상으로 남았다 — 그래서 몇 건이 되살아났는지 화면이 말해야 한다.
 const _linkedMsg = (n: number) => `과거 주문 ${fmt(n)}건이 이 상품에 소급 연결됐습니다(원가·손익 반영).`;
-const won = (s: string) => `${fmt(Math.round(Number(s)))}원`;
+// ★없는 값은 「—」다 — 종전 시그니처(`s: string`)로는 undefined가 들어오면 "NaN원"이 됐다.
+//   이 화면의 규율(모르면 모른다고 한다)과 NaverOps의 `won`과 같은 형태로 맞춘다.
+const won = (s: string | null | undefined) =>
+  s == null ? "—" : `${fmt(Math.round(Number(s)))}원`;
 
 function isoKST(d: Date): string {
   const kst = new Date(d.toLocaleString("en-US", { timeZone: "Asia/Seoul" }));
@@ -734,6 +737,24 @@ function PnlTab() {
             </div>
           )}
 
+          {/* ★원가 미상 표면화 — 합계는 계속 계산하되(미상은 보통 몇 %라 전체를 가리면 화면이
+              쓸모없어진다) 그 원가가 빠져 있다는 사실을 말한다. 과대 금액은 원가를 몰라 계산 불가라
+              추정해 적지 않고 **방향만** 말한다. 스마트스토어 운영 패널과 같은 규율. */}
+          {data.summary.cost_unknown_scoped !== false && (data.summary.cost_unknown_skus ?? 0) > 0 && (
+            <div className="mb-3 p-3 bg-amber-50 text-amber-800 rounded-md text-sm">
+              ⚠️ <b>원가 미상 {data.summary.cost_unknown_skus}개 SKU</b>
+              (매출 {won(data.summary.cost_unknown_revenue)}) — 이 SKU들의 원가가 합계에서 빠져 있어
+              {" "}<b>실제 순익은 아래 합계보다 작습니다</b>(빠진 금액은 원가를 몰라 계산 불가).
+              {/* ★원장이 불균형이면 SKU 표 자체가 안 뜬다 — 그때 "비워 뒀습니다 / 아래 표에"라고
+                  하면 존재하지 않는 것을 가리킨다(델타 리뷰 P2). 그래도 «요약이 과대»라는 사실은
+                  유효하므로 배너를 끄지는 않고 지시 대상만 바꾼다. */}
+              {data.summary.trustworthy
+                ? " 해당 SKU는 아래 표에서 순익이 「—」로 비어 있습니다."
+                : " (원장 불균형이라 SKU 표는 지금 표시되지 않습니다.)"}
+              {" "}상품 관리에서 원가를 입력하세요.
+            </div>
+          )}
+
           <PnlSummaryCards summary={data.summary} />
 
           {data.summary.trustworthy && (
@@ -824,14 +845,24 @@ function PnlSkuTable({
                     onClick={() => onToggle(r.internal_sku)}
                     className="w-full flex border-b hover:bg-gray-50 text-left"
                   >
-                    <div className="px-3 py-2 flex-1">{names[r.internal_sku] || r.internal_sku}</div>
+                    <div className="px-3 py-2 flex-1">
+                      {names[r.internal_sku] || r.internal_sku}
+                      {/* ★원가를 모르면 그 SKU의 순익도 모른다 — 값을 비우고 무엇을 해야 하는지 말한다.
+                          숫자를 남기면(원가가 0으로 빠진 채) 훑는 눈에는 그 숫자가 이긴다. */}
+                      {r.cost_known === false && (
+                        <div className="mt-0.5 text-[11px] text-amber-700">
+                          원가 미상 — 원가 입력 필요(매출 {won(r.cost_unknown_revenue)})
+                        </div>
+                      )}
+                    </div>
                     <div className="px-3 py-2 font-mono text-gray-500 w-40">{r.internal_sku}</div>
                     <div
                       className={`px-3 py-2 text-right font-medium w-40 ${
-                        net < 0 ? "text-red-600" : "text-gray-900"
+                        r.cost_known === false ? "text-gray-400"
+                        : net < 0 ? "text-red-600" : "text-gray-900"
                       }`}
                     >
-                      {won(r.net_profit_allocated_only)}
+                      {r.cost_known === false ? "—" : won(r.net_profit_allocated_only)}
                     </div>
                   </button>
                   {isOpen && (

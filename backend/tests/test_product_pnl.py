@@ -603,3 +603,94 @@ def test_reconcile_component_still_catches_real_won_level_gap():
                                {"OHI-0001": Decimal("998.00")}, {})  # 2원 누락(잔차 0건)
     assert row["conservation_ok"] is False
     assert row["conservation_diff"] == Decimal("2.00")
+
+
+# ─────────────────────────────────────────────────────────────
+# 원가 «모름» 표면화 (2026-08-06) — 합계는 불변, 보존법칙 불변
+# ★배경: `cost = pm.cost_price * qty if pm is not None else 0` — 마스터는 붙었는데
+#   cost_price가 0/NULL이면 원가를 **모르는** 것인데 0원으로 계산돼 그 SKU 순익이 과대였다.
+#   `ProductMaster.cost_price`가 `nullable=False, default=0`이라 미입력이 조용히 0이 된다.
+#   라이브(2026-08-06): 네이버 1개 상품·30일 44,500원.
+# ★금액을 바꾸지 않는 이유: 여기서 cost를 빼면 conservation_ok(Σ귀속+잔차==총계)와
+#   권위 엔진(profit_calculator) 정합이 **동시에** 깨진다. 사실만 따로 싣고 화면이 비운다.
+# ─────────────────────────────────────────────────────────────
+def test_zero_cost_master_is_surfaced_without_touching_totals(db):
+    _ch(db, 5, "NAVER", platform="naver", company=None)
+    _pm(db, 10, "OHI-COST", cost=Decimal("2000"))   # 원가 있음
+    _pm(db, 20, "OHI-ZERO", cost=Decimal("0"))      # ★미입력 = 모름
+    db.add(Order(channel_id=5, order_number="N1", platform_product_id="NP1", product_id=10,
+                 quantity=2, selling_price=Decimal("20000"), order_date=OD, status="delivered",
+                 commission_amount=Decimal("2000")))
+    db.add(Order(channel_id=5, order_number="N2", platform_product_id="NP2", product_id=20,
+                 quantity=1, selling_price=Decimal("44500"), order_date=OD, status="delivered",
+                 commission_amount=Decimal("1000")))
+    db.commit()
+
+    result = compute_pnl_reconciliation(db, *WIN, account=None)
+
+    # ★보존법칙이 살아 있다 — 이게 이 변경의 유일한 금지선이다.
+    assert result["ledger"]["conservation_ok"] is True
+    ncost = _component(result, "naver", "cost")
+    assert _conserved(ncost)
+    # 금액 불변: 원가 총계는 여전히 아는 것만(2,000×2), 미상은 0으로 접힌 채 남는다.
+    assert ncost["authoritative_total"] == Decimal("4000")
+    assert ncost["allocated_by_sku"]["OHI-COST"] == Decimal("4000")
+    assert ncost["allocated_by_sku"]["OHI-ZERO"] == _Z
+
+    rows = {r["internal_sku"]: r for r in result["by_sku"]}
+    assert rows["OHI-COST"]["cost_known"] is True
+    assert rows["OHI-ZERO"]["cost_known"] is False
+    assert rows["OHI-ZERO"]["cost_unknown_revenue"] == Decimal("44500")
+    assert result["summary"]["cost_unknown_skus"] == 1
+    assert result["summary"]["cost_unknown_revenue"] == Decimal("44500")
+
+
+def test_unmapped_lines_do_not_count_as_cost_unknown_sku(db):
+    """마스터 자체가 없는 라인은 이미 «미매핑 잔차»다 — 원가 미상 SKU로 이중 계상하지 않는다."""
+    _ch(db, 5, "NAVER", platform="naver", company=None)
+    _pm(db, 10, "OHI-COST", cost=Decimal("2000"))
+    db.add(Order(channel_id=5, order_number="N1", platform_product_id="NP1", product_id=10,
+                 quantity=1, selling_price=Decimal("10000"), order_date=OD, status="delivered",
+                 commission_amount=Decimal("1000")))
+    db.add(Order(channel_id=5, order_number="N2", platform_product_id="NP2", product_id=None,
+                 quantity=1, selling_price=Decimal("5000"), order_date=OD, status="delivered",
+                 commission_amount=Decimal("500")))
+    db.commit()
+
+    result = compute_pnl_reconciliation(db, *WIN, account=None)
+
+    assert result["summary"]["cost_unknown_skus"] == 0
+    assert _component(result, "naver", "product_revenue")["residuals"]["unmapped_naver"] == Decimal("5000")
+
+
+def test_all_costs_known_reports_zero(db):
+    """전부 원가가 있으면 0 — 거짓 경보를 내지 않는다(회귀 가드)."""
+    _ch(db, 5, "NAVER", platform="naver", company=None)
+    _pm(db, 10, "OHI-COST", cost=Decimal("2000"))
+    db.add(Order(channel_id=5, order_number="N1", platform_product_id="NP1", product_id=10,
+                 quantity=1, selling_price=Decimal("10000"), order_date=OD, status="delivered",
+                 commission_amount=Decimal("1000")))
+    db.commit()
+
+    result = compute_pnl_reconciliation(db, *WIN, account=None)
+
+    assert result["summary"]["cost_unknown_skus"] == 0
+    assert result["summary"]["cost_unknown_revenue"] == _Z
+    assert all(r["cost_known"] for r in result["by_sku"])
+    assert result["summary"]["cost_unknown_scoped"] is True
+
+
+def test_account_scoped_query_marks_cost_unknown_as_not_evaluated(db):
+    """계정 지정(쿠팡 전용) 조회는 마켓플레이스가 스코프 밖 — 0을 «없음»으로 읽지 않게 표시한다."""
+    _ch(db, 1, "COUPANG_WING1")
+    _ch(db, 5, "NAVER", platform="naver", company=None)
+    _pm(db, 20, "OHI-ZERO", cost=Decimal("0"))
+    db.add(Order(channel_id=5, order_number="N2", platform_product_id="NP2", product_id=20,
+                 quantity=1, selling_price=Decimal("44500"), order_date=OD, status="delivered",
+                 commission_amount=Decimal("1000")))
+    db.commit()
+
+    result = compute_pnl_reconciliation(db, *WIN, account="COUPANG_WING1")
+
+    assert result["summary"]["cost_unknown_scoped"] is False   # 판정 자체를 안 했다
+    assert result["summary"]["cost_unknown_skus"] == 0
