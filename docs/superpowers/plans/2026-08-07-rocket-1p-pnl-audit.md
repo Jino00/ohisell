@@ -717,6 +717,11 @@ git commit -m "feat(rocket-1p): 손익 근거 검사 9종 — 같은 함수의 �
 > 시그니처: `compute_pnl_audit_atoms(db, date_from, date_to, ctx, *, sort, flt, option_id)`
 > — `ctx`는 `day_option_atoms(db, date_from, date_to)`의 결과다.
 
+> ★**`limit` 계약을 응답에 실어라** (Task 3 재검 P2-4). 라우터가 `ATOM_LIMIT`이 아닌 값으로
+> 화면을 부르면 A2·A7이 조용히 `undetermined`가 되는데, 지금은 그걸 **응답만 보고는 알 수
+> 없다**(화면 응답에 limit이 없다). 원자 목록 응답에 `option_count`/`shown` 같은 잘림 사실을
+> 함께 실어 화면이 「검사 2개가 사라졌다」를 말할 수 있게 하라.
+
 - [ ] **Step 1: 실패하는 테스트 추가**
 
 ```python
@@ -770,7 +775,8 @@ def compute_pnl_audit_atoms(db: Session, date_from: date, date_to: date, ctx: di
 
     ★`ctx`는 `day_option_atoms`(화면이 소비하는 것과 같은 출처)의 결과이며 **라우터가
       주입한다** — 이 모듈은 D-CPP-2 가드 때문에 그 함수를 직접 부를 수 없고, 그 덕에
-      주입된 것 말고는 볼 수 없다(계산을 새로 할 수단이 없다).
+      화면이 낸 숫자를 **재도출할 길을 두지 않는다**(모듈 참조가 막혀 있다 — 「어떤 계산도
+      못 한다」는 뜻이 아니다. db는 받고, 허용 모듈의 CTE·헬퍼는 쓸 수 있다).
     배지: cost_source = manual(수기 확인) | suggested(이름 유사도 자동 — 사람이 확인 안 함)
                         | excluded(원가 제외 결정) | none(다리 없음).
     """
@@ -1075,8 +1081,9 @@ git commit -m "feat(rocket-1p): 근거 화면 4단 — 원자 1개의 다섯 갈
 # ★이 라우터는 «얇다»보다 «합성한다»가 맞다: 검사·원자 서비스는 D-CPP-2 가드(app/services/
 #   아래에서 rocket_1p_revenue 참조 금지) 때문에 화면 함수를 부를 수 없어, **여기서 부른 결과를
 #   주입**한다. `app/routers/overview.py:21`이 같은 참조를 하는 것과 같은 패턴이다.
-#   부수 효과가 본질이다 — 서비스는 주입된 것 말고는 볼 수 없으므로 「근거 창은 계산을 새로
-#   하지 않는다」가 규칙이 아니라 구조가 된다.
+#   부수 효과가 본질이다 — 서비스가 화면 모듈을 참조할 수 없으므로 「근거 창은 화면이 낸
+#   숫자를 재도출하지 않는다」가 문서 규칙이 아니라 구조가 된다(서비스가 아무 계산도 못
+#   한다는 뜻은 아니다 — db는 받는다).
 # ★창을 정하는 곳도 여기 하나다. 세 엔드포인트가 **같은 창**으로 화면 함수와 원자를 뽑는다 —
 #   창이 갈리면 분담금 «모름» 판정이 갈려 근거가 화면과 다른 답을 낸다(Task 1 리뷰 C1).
 from __future__ import annotations
