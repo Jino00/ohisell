@@ -1298,7 +1298,12 @@ function RocketView({
                           <th className="py-1 pr-2">상품번호</th>
                           <th className="py-1 pr-2">상품명</th>
                           <th className="py-1 pr-2 text-right">발주수량</th>
-                          <th className="py-1">제안(상위 3) / 액션</th>
+                          <th className="py-1">
+                            제안(상위 3) / 액션
+                            <span className="ml-1 font-normal text-[10px] text-gray-400">
+                              「공용 N」 = 이미 N개 상품이 그 원가를 씀(이름이 기종을 가리켜도)
+                            </span>
+                          </th>
                         </tr>
                       </thead>
                       <tbody>
@@ -1314,9 +1319,20 @@ function RocketView({
                                     key={s.internal_sku}
                                     onClick={() => doConfirm(item, s.internal_sku)}
                                     className="px-1.5 py-0.5 text-xs bg-blue-50 text-blue-700 border border-blue-200 rounded hover:bg-blue-100"
-                                    title={`${s.product_name} / 원가 ${s.cost_price?.toLocaleString() ?? "미설정"}원 / 유사도 ${(s.score * 100).toFixed(0)}%`}
+                                    title={`${s.product_name} / 원가 ${s.cost_price?.toLocaleString() ?? "미설정"}원 / 유사도 ${(s.score * 100).toFixed(0)}%`
+                                      + (s.already_mapped_count > 0
+                                        ? ` / ★이미 ${s.already_mapped_count}개 상품번호가 이 원가를 씁니다 — 기종 공용 원가입니다(이름이 특정 기종을 가리켜도)`
+                                        : " / 아직 아무 상품번호도 안 쓰는 전용 SKU")}
                                   >
                                     {s.internal_sku} ({(s.score * 100).toFixed(0)}%)
+                                    {/* ★이름이 기종을 지목해도 실제로는 공용 원가일 수 있다.
+                                        라이브: OHI-TGLASS-IP17PRO("아이폰17 Pro")에 붙은 12개가
+                                        아이폰12~16. 개수를 보이면 이름의 오해를 막는다. */}
+                                    {s.already_mapped_count > 0 && (
+                                      <span className="ml-1 text-[10px] text-amber-700">
+                                        공용 {s.already_mapped_count}
+                                      </span>
+                                    )}
                                   </button>
                                 ))}
                                 <button

@@ -97,15 +97,36 @@ def list_unmapped(
     rows = rows[: max(0, limit)]
 
     candidates = _master_candidates(db) if suggest else []
+    # ★후보의 내부 SKU에 **이미 몇 개 상품번호가 붙어 있는지**(2026-08-07, Jino).
+    #   왜: 이 저장소의 내부 SKU 이름은 기종을 지목하는데 실제로는 **기종 공용 원가**인
+    #   경우가 있다 — 라이브 실측 `OHI-TGLASS-IP17PRO`("아이폰17 Pro")에 붙은 12개가
+    #   실제로는 아이폰12·13·14·16이다(납품단가는 전부 10,740원으로 같아 원가 공유 자체는
+    #   일관되지만, **이름만 보면 다른 기종 원가를 붙이는 것으로 오해**한다).
+    #   개수를 함께 보이면 이름이 뭐든 "이건 공용 원가구나"가 드러난다 — 이름을 고치는 것은
+    #   실물 지식이 필요하지만, **오해를 막는 것은 지금 할 수 있다.**
+    mapped_counts: dict[str, int] = {}
+    if suggest:
+        for isku, cnt in (
+            db.query(RocketProductCostMap.internal_sku, func.count())
+            .filter(RocketProductCostMap.status == "confirmed",
+                    RocketProductCostMap.internal_sku.isnot(None))
+            .group_by(RocketProductCostMap.internal_sku).all()
+        ):
+            mapped_counts[str(isku)] = int(cnt or 0)
+
     items = []
     for r in rows:
+        sugg = suggest_skus(r.product_name, candidates) if suggest else []
+        for c in sugg:
+            # 0 = 아직 아무 상품번호도 안 붙은 내부 SKU(전용). 1+ = 이미 공용으로 쓰이는 중.
+            c["already_mapped_count"] = mapped_counts.get(str(c.get("internal_sku")), 0)
         item = {
             "product_number": r.product_number,
             "product_name": r.product_name,
             "barcode": r.barcode,
             "total_order_qty": int(r.total_qty or 0),
             "po_count": int(r.po_count or 0),
-            "suggestions": suggest_skus(r.product_name, candidates) if suggest else [],
+            "suggestions": sugg,
         }
         items.append(item)
     return {

@@ -875,3 +875,79 @@ def test_launch_older_than_the_horizon_is_not_new(db):
     db.commit()
     r = compute_rocket_1p_revenue(db, date(2026, 8, 1), date(2026, 8, 5))
     assert r["pnl"]["uncosted"]["top"][0]["is_new"] is False
+
+
+# ══════════════════════════════════════════════════════════════════
+# 잔여 3건 (Jino 2026-08-07 "남은것 3가지도 진행하자")
+# ══════════════════════════════════════════════════════════════════
+def test_bep_roas_marks_the_line_where_an_option_turns_a_loss(db):
+    """★RoAS 열만 있으면 "1보다 크니 괜찮다"로 읽힌다.
+
+    라이브에 RoAS 1.08인데 이익률 −22.1%인 행이 있었다. 손익분기선이 없으면 알 수 없다.
+    BEP RoAS = 매출 ÷ (매출 − 원가 − 분담금). VAT는 선형이라 분기점에서 상쇄된다.
+    """
+    _price(db, "S1", "10000", 1)
+    _cost(db, "S1", 3000)
+    _sale(db, "A", "S1", 10, "200000")     # 우리 매출 100,000 · 원가 30,000
+    _ad_option(db, "A", "40000")
+    db.commit()
+    o = compute_rocket_1p_revenue(db, D, D)["options"][0]
+    # 공헌이익 70,000 → BEP RoAS = 100,000/70,000 = 1.4286
+    assert Decimal(o["bep_roas"]) == Decimal("1.4286")
+    # 실제 RoAS 2.5 > 1.4286 → 흑자여야 한다(선이 실제 부호와 일치하는지 확인).
+    assert Decimal(o["roas"]) > Decimal(o["bep_roas"]) and Decimal(o["net_profit"]) > ZERO_D
+
+
+def test_bep_roas_flips_sign_check_at_the_line(db):
+    """분기선 **아래**면 실제로 적자다 — 선이 장식이 아니라는 증거."""
+    _price(db, "S1", "10000", 1)
+    _cost(db, "S1", 3000)
+    _sale(db, "A", "S1", 10, "200000")
+    _ad_option(db, "A", "75000")           # RoAS 1.33 < BEP 1.4286
+    db.commit()
+    o = compute_rocket_1p_revenue(db, D, D)["options"][0]
+    assert Decimal(o["roas"]) < Decimal(o["bep_roas"])
+    assert Decimal(o["net_profit"]) < ZERO_D
+
+
+def test_bep_roas_is_none_when_contribution_is_not_positive(db):
+    """★공헌이익이 0 이하면 **어떤 RoAS로도 흑자가 안 된다** — 수치 대신 «없음»이다.
+
+    0이나 큰 수로 적으면 화면이 그걸 «달성 가능한 목표»로 그린다.
+    """
+    _price(db, "S1", "10000", 1)
+    _cost(db, "S1", 12000)                 # 원가가 납품가보다 비싸다
+    _sale(db, "A", "S1", 10, "200000")
+    db.commit()
+    o = compute_rocket_1p_revenue(db, D, D)["options"][0]
+    assert o["bep_roas"] is None
+    assert Decimal(o["net_profit"]) < ZERO_D
+
+
+def test_bep_roas_unknown_when_cost_is_unknown(db):
+    """원가를 모르면 분기선도 모른다 — 0으로 접지 않는다."""
+    _price(db, "S1", "10000", 1)
+    _sale(db, "A", "S1", 10, "200000")
+    db.commit()
+    assert compute_rocket_1p_revenue(db, D, D)["options"][0]["bep_roas"] is None
+
+
+def test_excluded_skus_are_listed_by_name_for_review(db):
+    """★「원가 제외」로 결정된 SKU도 이름으로 보인다 — 개수만 세면 재검토를 못 한다.
+
+    단 작업 목록(top)과 **분리**한다: 여기 있는 건 시키는 게 아니라 «이 결정이 아직
+    맞나»를 보는 것이다. 라이브에 8월 판매 SKU 중 11개가 이 상태였다.
+    """
+    from sqlalchemy import text as _t
+    _price(db, "S1", "30000", 1)
+    _sale(db, "A", "S1", 10, "500000")     # 작업 대상(연결 필요)
+    _price(db, "S2", "20000", 2)
+    _sale(db, "B", "S2", 5, "300000")      # 제외 결정됨
+    db.execute(_t("INSERT INTO rocket_product_cost_map (product_number, internal_sku, status) "
+                  "VALUES ('S2', 'OHI-SAMPLE', 'ignored')"))
+    db.commit()
+    u = compute_rocket_1p_revenue(db, D, D)["pnl"]["uncosted"]
+    assert [t["sku_id"] for t in u["top"]] == ["S1"]              # 작업 목록엔 안 섞인다
+    assert [t["sku_id"] for t in u["excluded_top"]] == ["S2"]     # 그러나 이름으로 보인다
+    assert Decimal(u["excluded_our_revenue"]) == Decimal("100000")
+    assert u["excluded_skus"] == 1

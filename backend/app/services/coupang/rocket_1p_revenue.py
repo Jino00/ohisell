@@ -169,6 +169,22 @@ def _money(v: Decimal) -> Decimal:
     return v.quantize(_CENT)
 
 
+def _bep_roas(revenue: Decimal | None, cost: Decimal | None,
+              burden: Decimal | None) -> Decimal | None:
+    """손익분기 RoAS = 매출 ÷ 공헌이익(매출 − 원가 − 분담금). 모르면 None.
+
+    ★이 값보다 실제 RoAS가 **낮으면 그 옵션은 적자**다. 원가나 분담금을 모르면 낼 수 없고,
+      공헌이익이 0 이하면 광고를 아무리 잘 돌려도 흑자가 안 되므로 수치 대신 None을 낸다
+      (0이나 무한대로 적으면 화면이 그걸 «달성 가능한 목표»로 그린다).
+    """
+    if revenue is None or cost is None or burden is None or revenue <= ZERO:
+        return None
+    contribution = revenue - cost - burden
+    if contribution <= ZERO:
+        return None
+    return (revenue / contribution).quantize(Decimal("0.0001"))
+
+
 def _ratio(num: Decimal | None, den: Decimal | None) -> Decimal | None:
     if num is None or den is None or den == ZERO:
         return None
@@ -417,6 +433,13 @@ def compute_rocket_1p_revenue(
             # ★RoAS는 **우리 매출 기준**이다. 소비자 매출로 내면 우리가 못 번 돈으로 광고를
             #   정당화하게 된다(1P에서 소비자가는 쿠팡의 매출이다).
             "roas": _s(_ratio(ours_d, ad)),
+            # ★손익분기 RoAS = 매출 ÷ (매출 − 원가 − 분담금). **판정 기준이지 권고가 아니다.**
+            #   유도: net = (매출−원가−분담금−광고비) × 100/110 이므로 net=0 ⟺ 광고비 =
+            #   매출−원가−분담금. VAT는 선형이라 분기점에서 상쇄된다(양변에 같은 비율).
+            #   ★왜 필요한가: RoAS 열만 있으면 "1보다 크니 괜찮다"로 읽힌다. 라이브 실측에
+            #   RoAS 1.08인데 이익률 −22.1%인 행이 있었다 — 기준선이 없으면 알 수 없다.
+            #   공헌이익이 0 이하면 어떤 RoAS로도 흑자가 안 되므로 None(수치가 아니라 상태다).
+            "bep_roas": _s(_bep_roas(ours_d, cost_d, burden)),
             # ── 손익 ── 원가 미상이면 cost·net 모두 None이다(0이 아니다).
             "cost": None if cost_d is None else str(cost_d),
             "unit_cost": None if unit_cost is None else str(_d(unit_cost)),
@@ -629,6 +652,28 @@ def compute_rocket_1p_revenue(
                                         if u["is_new"] and u["our_revenue_known"]), ZERO)),
             # ★판정에 쓴 지평을 숨기지 않는다 — 기준이 안 보이면 화면을 믿을 근거가 없다.
             "new_sku_window_days": new_sku_days,
+            # ★「원가 제외」로 이미 결정된 SKU도 **이름으로 보인다**(2026-08-07, Jino).
+            #   개수만 세면 "그중 실제로는 원가가 있어야 할 게 섞였나"를 확인할 방법이 없다.
+            #   작업 목록(top)과는 **분리**한다 — 여기 있는 건 시키는 게 아니라 재검토 대상이다.
+            "excluded_top": [
+                {
+                    "sku_id": u["sku_id"],
+                    "product_name": u["product_name"],
+                    "qty": u["qty"],
+                    "our_revenue": str(u["our_revenue"]) if u["our_revenue_known"] else None,
+                    "consumer_revenue": str(u["consumer_revenue"]),
+                }
+                for u in sorted(
+                    (u for u in uncosted_rows if u["reason"] == "excluded"),
+                    key=lambda u: (u["our_revenue_known"],
+                                   u["our_revenue"] if u["our_revenue_known"]
+                                   else u["consumer_revenue"]),
+                    reverse=True,
+                )[:_UNCOSTED_TOP_N]
+            ],
+            "excluded_our_revenue": str(sum(
+                (u["our_revenue"] for u in uncosted_rows
+                 if u["reason"] == "excluded" and u["our_revenue_known"]), ZERO)),
             "top": [
                 {
                     "sku_id": u["sku_id"],

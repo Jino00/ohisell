@@ -611,6 +611,29 @@ def test_list_unmapped_excludes_mapped_and_includes_suggestions(db):
     assert isinstance(top["suggestions"], list)
 
 
+def test_suggestions_expose_how_many_products_already_share_that_cost(db):
+    """★내부 SKU 이름이 기종을 지목해도 실제로는 **기종 공용 원가**일 수 있다.
+
+    라이브 실측: `OHI-TGLASS-IP17PRO`("아이폰17 Pro")에 붙은 12개가 실제로는
+    아이폰12·13·14·16이다. 납품단가가 전부 같아 원가 공유 자체는 일관되지만,
+    **이름만 보면 다른 기종 원가를 붙이는 것으로 오해**한다 — 그리고 후보 제안이
+    바로 그 SKU를 1순위로 내놓는다. 이름을 고치는 건 실물 지식이 필요하지만,
+    "이미 N개가 이 원가를 쓰고 있다"를 보이는 것은 지금 할 수 있다.
+    """
+    _seed_masters(db)
+    sync.ingest_po_items(db, 134342890, "A01029796", _PO_DETAIL_ROWS)
+    # OHI-0001을 이미 두 상품번호가 공유하는 상태로 만든다.
+    cmap.upsert_mapping(db, "50342949", internal_sku="OHI-0001")
+    cmap.upsert_mapping(db, "99999999", internal_sku="OHI-0001")
+
+    res = cmap.list_unmapped(db, vendor_id="A01029796")
+    seen = {c["internal_sku"]: c["already_mapped_count"]
+            for it in res["items"] for c in it["suggestions"]}
+    assert seen.get("OHI-0001") == 2          # 이미 둘이 쓰는 중 = 공용 원가
+    # 아직 아무도 안 쓰는 후보는 0 — «전용»과 «공용»이 구분된다.
+    assert any(v == 0 for k, v in seen.items() if k != "OHI-0001")
+
+
 def test_list_unmapped_vendor_filter_and_no_suggest(db):
     _seed_masters(db)
     sync.ingest_po_items(db, 134342890, "A01029796", _PO_DETAIL_ROWS)
