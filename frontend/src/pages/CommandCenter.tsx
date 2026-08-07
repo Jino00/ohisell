@@ -259,7 +259,12 @@ export default function CommandCenter() {
     setSyncing(true);
     try { await syncRealtime(); } catch { /* fail-soft */ }
     setSyncing(false);
-    doFetch(from, to, account);
+    // ★대기 중 사용자가 계정/기간을 바꿨을 수 있음 → 현재 선택(selRef)으로 재조회.
+    // 여기서 클로저 from/to/account를 쓰면 방금 고른 기간을 옛 값으로 덮는다(issue #235).
+    // reqSeq 가드로는 못 막는다 — 이 요청이 더 나중이라 seq가 커서 오히려 이긴다.
+    // 창이 넓다: prod 실측 POST /api/sync/realtime = 29.9~32.9초(2026-08-07 13:01 KST, 3회).
+    const sel = selRef.current;
+    doFetch(sel.from, sel.to, sel.account);
   }
 
   useEffect(() => {
