@@ -14,14 +14,26 @@ common=$(cd "$(git rev-parse --git-common-dir)" && pwd -P)
 # 워크트리에서 실행한 경우 실제 메인 체크아웃 경로를 잡는다(.git 의 부모).
 main_root=$(dirname "$common")
 
-if [ ! -x "$main_root/.githooks/pre-commit" ]; then
-  echo "❌ $main_root/.githooks/pre-commit 이 없거나 실행권한이 없다." >&2
-  echo "   main을 최신으로 당긴 뒤 다시 실행할 것: git -C \"$main_root\" pull" >&2
+# ★상대 경로(`core.hooksPath=.githooks`)를 쓰면 안 된다 — 2026-08-07 실제 설치하다 발견.
+#   상대값은 **각 워킹트리 기준**으로 풀린다. 그래서 공유 메인 폴더가 `.githooks`가 없는 옛
+#   브랜치에 체크아웃돼 있으면 **훅이 조용히 사라진다** — 하필 그 상태가 이 가드가 막으려는
+#   바로 그 상황이다(설치 시점에 루트가 실제로 `claude/rocket-1p-new-unlinked`에 있었다).
+#   → 워킹트리 밖(`.git/ohisell-hooks/`)에 **복사**하고 절대경로로 건다. 브랜치와 무관해진다.
+src="$root/.githooks/pre-commit"
+if [ ! -f "$src" ]; then
+  echo "❌ $src 가 없다. 이 브랜치를 main 기준으로 갱신한 뒤 다시 실행할 것." >&2
   exit 1
 fi
 
-git config core.hooksPath .githooks
-echo "✅ core.hooksPath = .githooks (클론: $main_root)"
+dest_dir="$common/ohisell-hooks"
+mkdir -p "$dest_dir"
+cp "$src" "$dest_dir/pre-commit"
+chmod +x "$dest_dir/pre-commit"
+git config core.hooksPath "$dest_dir"
+
+echo "✅ core.hooksPath = $dest_dir  (클론: $main_root)"
+# ⚠️백틱을 쓰지 말 것 — 큰따옴표 안에서 명령치환돼 파일명이 통째로 사라진다(첫 실행에서 실제로 겪었다).
+echo '   ⚠️ 훅은 복사본이다 — .githooks/pre-commit 을 고치면 이 스크립트를 다시 돌릴 것.'
 echo "   확인: git config --get core.hooksPath"
 echo "   해제: git config --unset core.hooksPath"
 echo
