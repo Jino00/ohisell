@@ -191,6 +191,83 @@ def _ratio(num: Decimal | None, den: Decimal | None) -> Decimal | None:
     return (num / den).quantize(Decimal("0.0001"))
 
 
+def day_option_atoms(
+    db: Session, date_from: date, date_to: date, vendor_id: str | None = None
+) -> dict:
+    """「날짜×옵션」 원자와 그 파생 — **이 함수가 원자 파생의 단일 출처다.**
+
+    `compute_rocket_1p_revenue`가 이것을 소비해 폴드(일별·옵션별·사다리)를 만들고,
+    손익 근거 화면(pnl-audit)이 같은 것을 소비해 원자 목록·원자 상세를 만든다.
+    두 화면이 같은 원자를 보므로 «근거가 화면과 다른 계산»이 원리적으로 불가능하다.
+
+    반환: {"atoms": [원자…], "burden_known": bool,
+           "ad_by_day_option": {(날짜,옵션): 광고비}, "ad_by_option": {옵션: 광고비}}
+    원자 필드의 None 의미는 화면과 같다 — 모름이지 0이 아니다.
+    """
+    vendor = vendor_id or ROCKET_1P_VENDOR_ID
+    params = {"vendor": vendor, "since": date_from.isoformat(), "until": date_to.isoformat()}
+    rows = db.execute(text(_DAY_OPTION_SQL), params).fetchall()
+
+    ad_by_day_option: dict[tuple[str, str], Decimal] = {}
+    ad_by_option: dict[str, Decimal] = {}
+    for d_, oid_, amt in db.execute(text(_DAY_OPTION_AD_SQL), params).fetchall():
+        key, val = (str(d_)[:10], str(oid_)), _d(amt)
+        ad_by_day_option[key] = val
+        ad_by_option[str(oid_)] = ad_by_option.get(str(oid_), ZERO) + val
+
+    # ★분담금은 **모를 수 있다**(제안서 미수집 기간). None이면 손익 자체를 내지 않는다 —
+    #   0으로 접으면 그 프로모션의 할인액만큼 이익이 부풀어 보인다. 판정은 엔진이 한다.
+    burden_by_day_option = promo_burden_by_day_option(db, date_from, date_to, vendor)
+
+    atoms: list[dict] = []
+    for (day, option_id, sku_id, product_name, qty, consumer, ours,
+         unit_price, visitors, cost, unit_cost) in rows:
+        day_key = str(day)[:10]
+        oid = str(option_id)
+        q = int(qty or 0)
+        consumer_d = _d(consumer)
+        ours_d = _dn(ours)
+        cost_d = _dn(cost)
+        ad = ad_by_day_option.get((day_key, oid))
+        # 광고 행이 없는 옵션·날 = 그날 그 옵션에 광고를 안 돌린 것 → 손익에선 0원이 맞다.
+        # (표시는 계속 None="—"로 둔다 — "0원 썼다"와 "행이 없다"를 화면에서 구분하려고.)
+        ad_for_pnl = ad if ad is not None else ZERO
+        burden = (None if burden_by_day_option is None
+                  else burden_by_day_option.get((day_key, oid), ZERO))
+
+        # ★순이익 = 우리 매출 − 원가 − 분담금 − 광고비 − 납부세액.
+        #   손익 엔진(`_sell_through_window`)이 창 단위로 쓰는 **같은 공식**이다.
+        #   VAT는 선형이라 어느 그레인으로 쪼개도 공식은 같다. 반올림은 **여기서 한 번만**.
+        # ★공식·반올림 지점은 종전 인라인 파생과 **문자 그대로 같다** — 옮긴 것이지 고친 게
+        #   아니다. 바꾸면 test_rocket_1p_revenue.py 30여 건이 잡는다.
+        net = None
+        net_upper = None
+        if ours_d is not None and cost_d is not None and burden is not None:
+            vat = payable_vat(ours_d, cost_d, burden, ad_for_pnl)
+            net = _money(ours_d - cost_d - burden - ad_for_pnl - vat)
+        elif cost_d is None and ours_d is not None and burden is not None:
+            # ★원가를 몰라도 **부호는 알 수 있는 경우가 있다**(적대 리뷰 P1): 원가는 0 이상이므로
+            #   원가를 0으로 놓은 값이 순이익의 **상한**이다. 그 상한이 음수면 이 옵션은
+            #   원가가 얼마든 **확정 적자**다. 라이브에 그런 행이 있었는데(광고비 73,593원 >
+            #   우리 매출 48,000원) 순이익 열이 "—"(모름)으로 떠서 «문제 없음»으로 읽혔다.
+            bound = _money(ours_d - burden - ad_for_pnl
+                           - payable_vat(ours_d, ZERO, burden, ad_for_pnl))
+            if bound < ZERO:
+                net_upper = bound
+
+        atoms.append({
+            "date": day_key, "option_id": oid,
+            "sku_id": sku_id, "product_name": product_name,
+            "qty": q, "consumer_revenue": consumer_d, "our_revenue": ours_d,
+            "unit_price": _dn(unit_price), "cost": cost_d, "unit_cost": _dn(unit_cost),
+            "visitors": None if visitors is None else int(visitors),
+            "ad_spend": ad, "ad_for_pnl": ad_for_pnl, "promo_burden": burden,
+            "net_profit": net, "net_profit_upper": net_upper,
+        })
+    return {"atoms": atoms, "burden_known": burden_by_day_option is not None,
+            "ad_by_day_option": ad_by_day_option, "ad_by_option": ad_by_option}
+
+
 def compute_rocket_1p_revenue(
     db: Session,
     date_from: date,
@@ -205,7 +282,6 @@ def compute_rocket_1p_revenue(
     consumer_revenue만 이 모듈이 새로 낸다(판매분석 totalGmv 합).
     """
     vendor = vendor_id or ROCKET_1P_VENDOR_ID
-    params = {"vendor": vendor, "since": date_from.isoformat(), "until": date_to.isoformat()}
 
     # ── 합계: 기존 축 둘은 대시보드 함수를 그대로 호출한다 ──────────────
     sales_row = compute_rocket_1p_summary_row(db, date_from, date_to, BASIS_SALES)
@@ -216,7 +292,10 @@ def compute_rocket_1p_revenue(
     qty_axis = int(sales_row["order_count"]) if sales_row else 0
 
     # ── 「날짜×옵션」 그레인 ─────────────────────────────────────────
-    rows = db.execute(text(_DAY_OPTION_SQL), params).fetchall()
+    # ★파생(순이익·상한·광고 귀속)은 **여기서 하지 않는다** — `day_option_atoms`가 유일한
+    #   출처다. 손익 근거 화면이 같은 원자를 소비하므로 «근거와 화면이 다른 계산»이
+    #   원리적으로 불가능하다. 이 함수는 그 원자를 **접기만** 한다.
+    ctx = day_option_atoms(db, date_from, date_to, vendor)
 
     # ★★판매분석 미수집 구간을 **0으로 접지 않는다**(2026-08-06 적대 리뷰 P1).
     #   `coupang_rocket_sales_daily`는 쿠팡 롤링창(약 2개월) 때문에 과거가 없다. 그 창에서
@@ -224,20 +303,16 @@ def compute_rocket_1p_revenue(
     #   그대로 실었다 — 화면에 「우리 매출 0원 · RoAS 0.00」이 떠서 "광고비 2,941만원 쓰고
     #   매출이 0이었다"로 읽혔다. 실제로는 0이 아니라 **관측 불가**다.
     #   ★판별자는 qty가 아니라 **행 존재 여부**다: 행이 있고 qty=0이면 그건 진짜 0판매일이다.
-    covered = len(rows) > 0
+    covered = len(ctx["atoms"]) > 0
     sales_span = db.execute(
         text("SELECT MIN(date), MAX(date) FROM coupang_rocket_sales_daily WHERE vendor_id = :vendor"),
         {"vendor": vendor},
     ).fetchone()
-    ad_by_day_option: dict[tuple[str, str], Decimal] = {}
-    ad_by_option: dict[str, Decimal] = {}
-    for d_, oid, amt in db.execute(text(_DAY_OPTION_AD_SQL), params).fetchall():
-        key, val = (str(d_)[:10], str(oid)), _d(amt)
-        ad_by_day_option[key] = val
-        ad_by_option[str(oid)] = ad_by_option.get(str(oid), ZERO) + val
-    # ★분담금은 **모를 수 있다**(제안서 미수집 기간). None이면 손익 자체를 내지 않는다 —
-    #   0으로 접으면 그 프로모션의 할인액만큼 이익이 부풀어 보인다. 판정은 엔진이 한다.
-    burden_by_day_option = promo_burden_by_day_option(db, date_from, date_to, vendor)
+    ad_by_day_option = ctx["ad_by_day_option"]
+    ad_by_option = ctx["ad_by_option"]
+    # ★분담금을 **모르면** 손익 자체가 없다(원자가 그렇게 판정한다) — 화면·배지가 그 이유를
+    #   댈 수 있게 여기까지 들고 온다. 0으로 접으면 그만큼 이익이 부풀어 보인다.
+    burden_known = ctx["burden_known"]
     # 원가가 안 붙는 **이유**를 SKU별로 가른다(위 `_COST_MAP_STATE_SQL` 주석 참조).
     cost_map_state = {
         str(r[0]): (r[1], bool(r[2])) for r in db.execute(text(_COST_MAP_STATE_SQL)).fetchall()
@@ -294,34 +369,21 @@ def compute_rocket_1p_revenue(
         base.update(extra)
         return base
 
-    for (day, option_id, sku_id, product_name, qty, consumer, ours,
-         unit_price, visitors, cost, unit_cost) in rows:
-        day_key = str(day)[:10]
-        oid = str(option_id)
-        q = int(qty or 0)
-        consumer_d = _d(consumer)
-        ours_d = _dn(ours)
-        cost_d = _dn(cost)
+    for a in ctx["atoms"]:
+        day_key, oid = a["date"], a["option_id"]
+        sku_id, product_name = a["sku_id"], a["product_name"]
+        q = a["qty"]
+        consumer_d, ours_d, cost_d = a["consumer_revenue"], a["our_revenue"], a["cost"]
+        unit_price, unit_cost, visitors = a["unit_price"], a["unit_cost"], a["visitors"]
+        ad, ad_for_pnl, burden = a["ad_spend"], a["ad_for_pnl"], a["promo_burden"]
+        net, net_upper = a["net_profit"], a["net_profit_upper"]
         consumer_total += consumer_d
         qty_total += q
         if ours_d is not None:
             priced_qty += q
 
-        ad = ad_by_day_option.get((day_key, oid))
-        # 광고 행이 없는 옵션·날 = 그날 그 옵션에 광고를 안 돌린 것 → 손익에선 0원이 맞다.
-        # (표시는 계속 None="—"로 둔다 — "0원 썼다"와 "행이 없다"를 화면에서 구분하려고.)
-        ad_for_pnl = ad if ad is not None else ZERO
-        burden = (None if burden_by_day_option is None
-                  else burden_by_day_option.get((day_key, oid), ZERO))
-
-        # ★순이익 = 우리 매출 − 원가 − 분담금 − 광고비 − 납부세액.
-        #   손익 엔진(`_sell_through_window`)이 창 단위로 쓰는 **같은 공식**이다.
-        #   VAT는 선형이라 어느 그레인으로 쪼개도 공식은 같다. 반올림은 **여기서 한 번만**.
-        net = None
-        net_upper = None
-        if ours_d is not None and cost_d is not None and burden is not None:
-            vat = payable_vat(ours_d, cost_d, burden, ad_for_pnl)
-            net = _money(ours_d - cost_d - burden - ad_for_pnl - vat)
+        # net is not None ⟺ 매출·원가·분담금 셋 다 앎 — 종전 인라인 조건과 동치다.
+        if net is not None:
             pnl_qty += q
             pnl_revenue += ours_d
             pnl_cost += cost_d
@@ -331,15 +393,6 @@ def compute_rocket_1p_revenue(
         if ours_d is not None and cost_d is not None:
             costed_revenue += ours_d
         elif cost_d is None:
-            # ★원가를 몰라도 **부호는 알 수 있는 경우가 있다**(적대 리뷰 P1): 원가는 0 이상이므로
-            #   원가를 0으로 놓은 값이 순이익의 **상한**이다. 그 상한이 음수면 이 옵션은
-            #   원가가 얼마든 **확정 적자**다. 라이브에 그런 행이 있었는데(광고비 73,593원 >
-            #   우리 매출 48,000원) 순이익 열이 "—"(모름)으로 떠서 «문제 없음»으로 읽혔다.
-            if ours_d is not None and burden is not None:
-                bound = _money(ours_d - burden - ad_for_pnl
-                               - payable_vat(ours_d, ZERO, burden, ad_for_pnl))
-                if bound < ZERO:
-                    net_upper = bound
             # 원가를 못 붙인 SKU — 무엇을 해야 하는지 화면이 말할 수 있게 SKU로 묶어 모은다.
             key = str(sku_id) if sku_id is not None else f"option:{oid}"
             u = uncosted.setdefault(key, {
@@ -396,9 +449,9 @@ def compute_rocket_1p_revenue(
                 acc["pnl_burden"] += burden
                 acc["pnl_ad"] += ad_for_pnl
         if unit_price is not None:
-            o["unit_price"] = _d(unit_price)
+            o["unit_price"] = unit_price
         if unit_cost is not None:
-            o["unit_cost"] = _d(unit_cost)
+            o["unit_cost"] = unit_cost
         if visitors is not None:
             o["visitors"] = int(visitors) + (o["visitors"] or 0)
         if net_upper is not None:
@@ -410,7 +463,7 @@ def compute_rocket_1p_revenue(
         ours_d = o["our_revenue"] if o["has_priced"] else None
         cost_d = o["cost"] if o["has_costed"] else None
         ad = o["ad_spend"] if o["has_ad"] else None
-        burden = None if burden_by_day_option is None else o["promo_burden"]
+        burden = None if not burden_known else o["promo_burden"]
         net = o["net_profit"] if o["pnl_rows"] else None
         net_upper = o["net_upper"] if o["has_net_upper"] else None
         consumer_d = o["consumer_revenue"]
@@ -425,7 +478,7 @@ def compute_rocket_1p_revenue(
             "consumer_revenue": str(consumer_d),
             # ★납품단가를 못 붙인 옵션은 None — 화면이 "—"로 그린다(0으로 접지 않는다).
             "our_revenue": None if ours_d is None else str(ours_d),
-            "unit_price": None if unit_price is None else str(_d(unit_price)),
+            "unit_price": None if unit_price is None else str(unit_price),
             "visitors": None if visitors is None else int(visitors),
             # 우리 몫 비율 = 납품가 ÷ 소비자가. 쿠팡이 얹은 마진의 뒷면이다.
             "our_share": _s(_ratio(ours_d, consumer_d)),
@@ -442,7 +495,7 @@ def compute_rocket_1p_revenue(
             "bep_roas": _s(_bep_roas(ours_d, cost_d, burden)),
             # ── 손익 ── 원가 미상이면 cost·net 모두 None이다(0이 아니다).
             "cost": None if cost_d is None else str(cost_d),
-            "unit_cost": None if unit_cost is None else str(_d(unit_cost)),
+            "unit_cost": None if unit_cost is None else str(unit_cost),
             "promo_burden": None if burden is None else str(burden),
             "net_profit": None if net is None else str(net),
             "profit_rate": _s(_ratio(net, ours_d)),
@@ -587,7 +640,7 @@ def compute_rocket_1p_revenue(
     if not covered:
         blocked = ("sales_not_covered",
                    "이 기간엔 쿠팡 판매분석 수집분이 없습니다 — 판매가 0이었던 게 아니라 관측 불가입니다.")
-    elif burden_by_day_option is None:
+    elif not burden_known:
         blocked = ("promo_burden_unknown",
                    "이 기간에 걸친 프로모션의 할인액 원천(제안서)이 아직 없습니다. 분담금을 0으로 "
                    "놓으면 그만큼 이익이 부풀어 보이므로 손익을 내지 않습니다. 원가를 등록해도 "
@@ -627,7 +680,7 @@ def compute_rocket_1p_revenue(
         "cost_coverage": _s(cost_coverage) if covered else None,
         "revenue_priced": _s(priced_revenue) if covered else None,
         # ★분담금을 모르면 손익 자체가 없다 — 화면이 "왜 안 나오는지" 말할 수 있게 이유를 싣는다.
-        "promo_burden_known": burden_by_day_option is not None,
+        "promo_burden_known": burden_known,
         "blocked": None if blocked is None else {"code": blocked[0], "reason": blocked[1]},
         "uncosted": {
             "skus": len(uncosted_rows),
