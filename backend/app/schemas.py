@@ -87,7 +87,8 @@ class ConnCell(BaseModel):
     selling_price: Decimal
     is_active: bool
     mapping_source: str
-    conflict: bool
+    conflict: bool  # 이 옵션ID를 나눠 가진 마스터들의 원가가 다름 = 이중귀속 위험
+    shared: bool = False  # 나눠 가졌지만 원가가 같음 = 금액 영향 없음
 
 
 class ConnChannel(BaseModel):
@@ -106,6 +107,7 @@ class ConnRow(BaseModel):
     cells: dict[int, list[ConnCell]]  # channel_id → 셀 목록(JSON에선 키가 문자열)
     mapped_channel_count: int
     has_conflict: bool
+    has_shared: bool = False
 
 
 class ConnectionMapOut(BaseModel):
@@ -114,6 +116,7 @@ class ConnectionMapOut(BaseModel):
     total_products: int
     shown_products: int
     conflict_option_count: int
+    shared_option_count: int = 0
 
 
 # ── 상품 연관맵 엑셀 마스터 적재 (상품 연관맵 트랙 S1) ──
