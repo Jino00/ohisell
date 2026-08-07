@@ -106,6 +106,24 @@ def _seed_order(db, *, amount: int, product_id: str = PRODUCT_ID, status: str = 
     db.commit()
 
 
+#: `hours_ago`가 «오늘 안»을 뜻하려면 기준 시각이 그만큼 자정에서 떨어져 있어야 한다.
+#: 이 파일에서 오늘분으로 쓰는 최대 소급은 3시간이라 4시간이면 충분하다.
+_SEED_MIN_HOUR = 4
+
+
+def _seed_anchor() -> datetime:
+    """`hours_ago`를 재는 기준 시각 — 낮에는 그냥 지금, 새벽에는 오늘 04:00.
+
+    `kst_now() - 1시간`은 00시대에 **어제**가 되어 '오늘 우리가 한 일' 필터에서 통째로
+    빠진다(2026-08-08 00:30 재현: http_roundtrip · counts_blocked_separately 실패).
+    테스트가 말하려는 것은 "오늘 몇 시간 전"이지 "정확히 N시간 전"이 아니므로, 자정에
+    가까울 때만 기준을 오늘 04:00으로 올려 날짜 경계를 넘지 않게 한다. 하루 이상 소급
+    (`hours_ago=30`)은 이 보정 뒤에도 여전히 어제다.
+    """
+    now = kst_now()
+    return max(now, now.replace(hour=_SEED_MIN_HOUR, minute=0, second=0, microsecond=0))
+
+
 def _seed_change(db, *, action="update_bid", entity_type="adgroup", entity_id="grp-1",
                  campaign_id=SHOPPING_CAMPAIGN, before=None, after=None, rationale="",
                  outcome=None, dry_run=False, hours_ago=1):
@@ -114,7 +132,7 @@ def _seed_change(db, *, action="update_bid", entity_type="adgroup", entity_id="g
         before_value=json.dumps(before) if before is not None else None,
         after_value=json.dumps(after) if after is not None else None,
         rationale=rationale, outcome=outcome, dry_run=dry_run,
-        changed_at=kst_now() - timedelta(hours=hours_ago),
+        changed_at=_seed_anchor() - timedelta(hours=hours_ago),
     )
     db.add(row)
     db.commit()
@@ -296,8 +314,11 @@ def test_narrator_budget_and_lock_and_search_term(db):
     assert "하루 예산을 50,000원에서 65,000원으로 늘렸습니다" in items[0]["sentence"]
     assert "광고를 멈췄습니다" in items[1]["sentence"]
     assert "‘무료배송’" in items[2]["sentence"]
-    # 시간 오름차순 정렬
-    assert [i["time_label"] for i in items] == sorted(i["time_label"] for i in items)
+    # 시간 오름차순 정렬 — `time_label`("%H:%M")이 아니라 `at`(날짜 포함)으로 잰다.
+    # 라벨은 날짜가 없어서 자정을 걸치면 문자열 정렬이 뒤집힌다: 03시 이전에 돌리면
+    # 세 행이 22:05/23:05/00:05가 되어 정렬 계약과 무관하게 실패했다(2026-08-08 01:05 실측).
+    ats = [datetime.fromisoformat(i["at"]) for i in items]
+    assert ats == sorted(ats)
 
 
 def test_narrator_campaign_target_is_not_repeated(db):
