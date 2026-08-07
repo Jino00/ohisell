@@ -286,19 +286,31 @@ def _ad_spend_sum(db: Session, date_from: date, date_to: date,
 #    가드 테스트가 있다. 우리는 호출하지 않고 공식만 맞춘 것이라 이름을 적으면 거짓 양성이 된다.)
 _COST_COVERAGE_MIN = Decimal(os.getenv("ROCKET_1P_COST_COVERAGE_MIN") or "0.95")
 
-_SELL_THROUGH_SQL = """
-WITH price AS (           -- SKU별 최근 납품단가(발주 라인에서, PO 최신순)
+# ── 「납품단가」와 「원가」의 단일 정의 (재도출 금지) ──────────────────────
+# ★두 CTE는 **여기가 유일한 정의**다. 매출 두 축 대조 화면(S2)이 같은 개념을 옵션
+#   그레인으로 쓰는데, 거기서 SQL을 따로 쓰면 언젠가 갈라진다 — 그리고 갈라지면 화면 둘이
+#   다른 이익을 말하는데 어느 쪽이 맞는지 아무도 모른다. 광고 축이 실제로 그렇게 갈라져
+#   63일 43,147,487원이 통째로 빠졌었다(위 `_ad_spend_by_day` 주석). 같은 실수를 안 한다.
+LATEST_UNIT_PRICE_CTE = """
+price AS (           -- SKU별 최근 납품단가(발주 라인에서, PO 최신순)
   SELECT product_number, unit_purchase_price,
          ROW_NUMBER() OVER (PARTITION BY product_number ORDER BY purchase_order_seq DESC) rn
   FROM coupang_rocket_purchase_order_item
 ),
-p AS (SELECT product_number, unit_purchase_price FROM price WHERE rn = 1),
-cost AS (                 -- 상품번호 → internal_sku → 등록원가(부가세 포함 축, D 2026-08-04)
+p AS (SELECT product_number, unit_purchase_price FROM price WHERE rn = 1)
+"""
+
+COST_BY_PRODUCT_CTE = """
+cost AS (            -- 상품번호 → internal_sku → 등록원가(부가세 포함 축, D 2026-08-04)
   SELECT m.product_number, pm.cost_price
   FROM rocket_product_cost_map m
   JOIN product_master pm ON pm.internal_sku = m.internal_sku
   WHERE m.status = 'confirmed' AND pm.cost_price IS NOT NULL
 )
+"""
+
+_SELL_THROUGH_SQL = f"""
+WITH {LATEST_UNIT_PRICE_CTE}, {COST_BY_PRODUCT_CTE}
 SELECT s.date                                              AS d,
        SUM(s.qty)                                          AS qty,
        SUM(s.qty * p.unit_purchase_price)                  AS revenue,
@@ -351,7 +363,8 @@ WHERE pr.vendor_id = :vendor
 """
 
 
-def _promo_burden_by_day(db: Session, date_from: date, date_to: date) -> dict[str, Decimal] | None:
+def _promo_burden_by_day(db: Session, date_from: date, date_to: date,
+                         vendor_id: str | None = None) -> dict[str, Decimal] | None:
     """일자별 프로모션 분담금. **모르면 None** — 0으로 접지 않는다.
 
     분담률은 실측 13건 전부 100%(전액 우리 부담)라 할인액이 곧 분담금이다(D-CPP-10).
@@ -371,7 +384,7 @@ def _promo_burden_by_day(db: Session, date_from: date, date_to: date) -> dict[st
     if insp.has_table("coupang_rocket_promotion"):
         unpriced = db.execute(
             text(_PROMO_UNPRICED_SQL),
-            {"vendor": ROCKET_1P_VENDOR_ID,
+            {"vendor": vendor_id or ROCKET_1P_VENDOR_ID,
              "since": date_from.isoformat(), "until": date_to.isoformat()},
         ).scalar()
         if int(unpriced or 0) > 0:
@@ -380,10 +393,52 @@ def _promo_burden_by_day(db: Session, date_from: date, date_to: date) -> dict[st
             return None
     rows = db.execute(
         text(_PROMO_BURDEN_SQL),
-        {"vendor": ROCKET_1P_VENDOR_ID,
+        {"vendor": vendor_id or ROCKET_1P_VENDOR_ID,
          "since": date_from.isoformat(), "until": date_to.isoformat()},
     ).fetchall()
     return {str(d)[:10]: _dec(b) for d, b in rows}
+
+
+_PROMO_BURDEN_BY_OPTION_SQL = _PROMO_BURDEN_SQL.replace(
+    "SELECT s.date AS d,", "SELECT s.option_id AS d,"
+).replace("GROUP BY s.date", "GROUP BY s.option_id")
+
+# ★파생이 성공했는지 **임포트 시점에** 못 박는다(적대 리뷰 P2). 원본 SQL의 공백 하나만
+#   달라져도 replace가 조용히 빗나가는데, 그 실패는 예외가 아니라 **틀린 값**으로 나온다:
+#   - 둘 다 실패 → 키가 날짜라 `get(option_id)`가 전 옵션 0을 주고 `promo_burden_known`은
+#     True로 남아 경고도 안 뜬다(라이브 7일 분담금 1,926,000원이 통째로 사라진다).
+#   - 앞만 성공 → SQLite가 bare column을 허용해 `GROUP BY s.date`인 채로 통과한다.
+#   그래서 두 조건을 따로 검사한다. 정적 문자열이라 런타임 비용은 0이다.
+assert "SELECT s.option_id AS d," in _PROMO_BURDEN_BY_OPTION_SQL, \
+    "_PROMO_BURDEN_SQL의 SELECT 절이 바뀌어 옵션 그레인 파생이 실패했다"
+assert "GROUP BY s.option_id" in _PROMO_BURDEN_BY_OPTION_SQL and \
+    "GROUP BY s.date" not in _PROMO_BURDEN_BY_OPTION_SQL, \
+    "_PROMO_BURDEN_SQL의 GROUP BY가 바뀌어 옵션 그레인 파생이 실패했다"
+
+
+def promo_burden_by_option(
+    db: Session, date_from: date, date_to: date, vendor_id: str | None = None
+) -> dict[str, Decimal] | None:
+    """옵션별 프로모션 분담금. **모르면 None** — `_promo_burden_by_day`와 같은 판정자다.
+
+    왜 여기 있나: 매출 화면이 옵션별 손익을 내려면 옵션 그레인 분담금이 필요한데, "분담금을
+    모를 때가 언제인가"는 회계 규칙이라 이 파일이 정본이다. 판정 규칙이 두 곳에 생기면
+    한쪽만 고쳐져 화면이 "분담금 0"을 사실처럼 낸다(그게 정확히 2026-08-05에 났던 사고다).
+
+    ★vendor는 **가드와 본 쿼리가 같은 것을 봐야 한다**(적대 리뷰 P2). 예전 판은 가드만 1P
+      계정으로 하드코딩해서, 다른 vendor를 넘기면 None이 아니라 `{}`가 나왔다 — 즉 "모름"이
+      "분담금 0"으로 둔갑했다. 지금 호출부가 기본 vendor뿐이라 라이브 영향은 없었지만,
+      «모름→0»은 이 프로젝트가 반복해 당한 형태라 도달 가능해지기 전에 막는다.
+    """
+    guard = _promo_burden_by_day(db, date_from, date_to, vendor_id)
+    if guard is None:
+        return None
+    rows = db.execute(
+        text(_PROMO_BURDEN_BY_OPTION_SQL),
+        {"vendor": vendor_id or ROCKET_1P_VENDOR_ID,
+         "since": date_from.isoformat(), "until": date_to.isoformat()},
+    ).fetchall()
+    return {str(o): _dec(b) for o, b in rows}
 
 
 def _sell_through_by_day(db: Session, date_from: date, date_to: date) -> dict[str, dict]:
@@ -426,7 +481,8 @@ def _sell_through_window(db: Session, date_from: date, date_to: date) -> dict:
         vat = payable_vat(rev, cost, burden, ad)
         net = rev - cost - burden - ad - vat
     return {
-        "revenue": rev, "cost": cost, "promo_burden": burden, "ad_spend": ad,
+        "revenue": rev, "revenue_costed": rev_costed,
+        "cost": cost, "promo_burden": burden, "ad_spend": ad,
         "coverage": coverage, "net_profit": net, "by_day": by_day,
         "qty": sum(v["qty"] for v in by_day.values()),
     }
