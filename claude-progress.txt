@@ -2013,3 +2013,32 @@ RG 옛 공백(04-20~05-03) Jino 종결 승인(13:34) — 공백 아님(배송비
   · 제안 백로그 pending 204(+9) — 143→159→173→195→204 5일 연속 증가(executor가 막혀 전량 만료)
   · 레인: 오늘 43개 발동 전부 ok, non-ok 0건(daily 08:50:04 / hourly 09:20:00)
   · ⚠️이월(스코프 밖): prod backend/.env 38행에 따옴표 없는 iCloud 경로 → `. .env` 시 파싱 에러
+
+[2026-08-07 13:3x] issue #235 — 마운트 동기화가 사용자 선택을 덮던 stale closure (PR #239 병합)
+  · CommandCenter·AdReport의 `syncAndLoad`가 `await syncRealtime()` 뒤 **마운트 클로저**의
+    from/to/account로 재조회 → 대기 중 바꾼 기간이 완료 순간 옛 값으로 덮였다
+  · ★**창을 실측했다 — 약 30초**: prod `POST /api/sync/realtime` curl 3회 32.1/29.9/32.9s,
+    브라우저 5회 27.4~31.5s. 이슈의 "초 단위 이상"은 핸들러 코드 근거였을 뿐 측정치가 아니었다
+  · ★**reqSeq 가드로는 못 막는 실패 모드** — reqSeq는 응답 역순 도착을 막지만, 이 버그는
+    나중에 발행된 요청이 옛 인자를 든 것이라 seq가 더 커서 가드가 오히려 그것을 이기게 해 준다
+  · CommandCenter는 08-06 `selRef` 도입 때 **이 한 곳만 누락**(159·184·215·240행은 이미 정상),
+    AdReport는 가드가 **아예 없어** `doFetch(f,t)` 코어로 분리해 reqSeq/selRef 신설
+  · ★**라이브 대조** — prod 프론트를 덮지 않고(CAS 거부, 아래) **프로덕션 번들 로컬 서빙 +
+    `/api/*`만 prod 프록시**로 수정 전/후 번들을 같은 시나리오로 돌렸다:
+      전 = 30일 클릭 → 동기화 30,853ms → 완료 직후 `from=2026-08-01` (되돌아감)
+      후 = 30일 클릭 → 동기화 27,378ms → 완료 직후 `from=2026-07-09` (유지)
+    관측면을 화면이 아니라 **실제 발행된 요청**으로 잡은 것이 핵심(기간 인풋은 state라 어차피
+    안 되돌아가고, 되돌아가는 건 데이터였다). 교훈 #167
+  · ★**jsdom + @testing-library/react 신설** — 이 repo 첫 컴포넌트 테스트 인프라.
+    회귀 3건이 **수정 전 코드에서 전부 실패**하는 것을 확인(통과만으론 가드 생존을 모른다)
+  · ★**lint 래칫 함정(교훈 #166)**: 이 수정이 react-hooks 컴파일러의 AdReport 분석을 켜면서
+    **원래 있던** purity error 2건·static-components 1건이 처음 드러났다(baseline error 0).
+    동작 동일한 이동으로 고쳐 **error 0 / warning 54** 유지 — 상한은 올리지도 내리지도 않음
+  · **잔여 스윕 완료**: Dashboard=`fetchAllRef`·NaverOps=`loadRef` 기적용, Orders는
+    fire-and-forget이라 구멍 없음 → 이 두 페이지가 마지막이었다
+  · ⚠️**codex 교차 리뷰 미실행** — 3렌즈 전부 usage limit(08-09 16:16 리셋) EXIT:1,
+    게이트 INCONCLUSIVE. Opus 1기 적대 리뷰로 대체(P1 1건 자체 검출·수정 `6f38aa1`)
+  · ⚠️**prod 프론트 미배포** — safe_deploy CAS 거부: prod가 다른 세션의 **미병합 커밋**
+    `aa9c425`(브랜치 `claude/cost-unknown`)에서 배포돼 있다. 덮으면 그 작업이 사라져 안 덮었다.
+    그 브랜치 main 병합 후 → merge → `npm run build` → `safe_deploy.sh --frontend`
+  · 상세: .claude/memory/HANDOFF_stale-closure-sync-selection_20260807.md
