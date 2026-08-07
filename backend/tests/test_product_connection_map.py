@@ -74,8 +74,9 @@ def test_matrix_rows_and_channels(db):
 def test_conflict_flag_on_shared_option_id(db):
     s = _seed(db)
     cmap = build_connection_map(db)
-    # VII-A가 p1·p2 양쪽에 걸림 → 두 셀 모두 conflict, 두 행 모두 has_conflict
+    # VII-A가 p1(원가 1000)·p2(원가 2000) 양쪽에 걸림 → 원가가 갈리므로 진짜 충돌
     assert cmap.conflict_option_count == 1
+    assert cmap.shared_option_count == 0
     row1 = next(r for r in cmap.rows if r.internal_sku == "OHI-0001")
     row2 = next(r for r in cmap.rows if r.internal_sku == "OHI-0002")
     assert row1.cells[s["wing"].id][0].conflict is True
@@ -95,8 +96,53 @@ def test_inactive_mapping_not_counted_as_conflict(db):
     db.commit()
     cmap = build_connection_map(db)
     assert cmap.conflict_option_count == 0
+    assert cmap.shared_option_count == 0
     row1 = next(r for r in cmap.rows if r.internal_sku == "OHI-0001")
     assert row1.cells[s["wing"].id][0].conflict is False
+
+
+def test_same_cost_is_shared_not_conflict(db):
+    """원가가 같으면 «공유» — 어느 마스터로 귀속돼도 적용 원가가 같아 금액이 안 변한다.
+
+    라이브(2026-08-07)의 46건이 전부 이 모양이었다: 채널 리스팅 1개(네이버는
+    platform_product_id가 상품번호다)에 기종별 SKU가 여러 개 묶인 구조. 이걸 빨간 「충돌」로
+    부르면 상시 빨강이 되어 원가가 갈리는 진짜 충돌을 가린다.
+    """
+    s = _seed(db)
+    s["p2"].cost_price = s["p1"].cost_price  # 1000 == 1000
+    db.commit()
+    cmap = build_connection_map(db)
+    assert cmap.conflict_option_count == 0
+    assert cmap.shared_option_count == 1
+    row1 = next(r for r in cmap.rows if r.internal_sku == "OHI-0001")
+    row2 = next(r for r in cmap.rows if r.internal_sku == "OHI-0002")
+    for row in (row1, row2):
+        cell = row.cells[s["wing"].id][0]
+        assert cell.shared is True and cell.conflict is False
+        assert row.has_shared is True and row.has_conflict is False
+    # 나눠 갖지 않은 셀은 둘 다 False
+    assert row1.cells[s["naver"].id][0].shared is False
+
+
+def test_orphan_mapping_counts_as_conflict(db):
+    """존재하지 않는 상품을 가리키는 매핑은 «공유»가 아니라 «충돌»이다.
+
+    2026-08-07 라이브에 실제로 있었다(product_id=2628, 상품 최대 id는 949). 원가를 알 수 없으므로
+    "금액 영향 없음"이라고 말할 수 없다 — 조용히 공유로 접으면 그 결손이 화면에서 사라진다.
+    """
+    s = _seed(db)
+    s["p2"].cost_price = s["p1"].cost_price
+    db.add(ProductChannelMapping(
+        product_id=999999, channel_id=s["naver"].id, channel_product_id="NAV-1",
+        selling_price=Decimal("0"), mapping_source="auto_sync",
+    ))
+    db.commit()
+    cmap = build_connection_map(db)
+    # wing VII-A는 원가 동일 → 공유 / naver NAV-1은 고아가 끼어 → 충돌
+    assert cmap.shared_option_count == 1
+    assert cmap.conflict_option_count == 1
+    row1 = next(r for r in cmap.rows if r.internal_sku == "OHI-0001")
+    assert row1.cells[s["naver"].id][0].conflict is True
 
 
 def test_query_filter(db):

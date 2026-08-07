@@ -239,7 +239,8 @@ export interface ConnCell {
   selling_price: number;
   is_active: boolean;
   mapping_source: string; // excel_master | manual | auto_sync
-  conflict: boolean;
+  conflict: boolean; // 이 옵션ID를 나눠 가진 마스터들의 원가가 다름 = 이중귀속 위험
+  shared: boolean; // 나눠 가졌지만 원가가 같음 = 금액 영향 없음(리스팅 공유)
 }
 export interface ConnChannel {
   channel_id: number;
@@ -256,13 +257,15 @@ export interface ConnRow {
   cells: Record<string, ConnCell[]>; // channel_id(문자열) → 셀 목록
   mapped_channel_count: number;
   has_conflict: boolean;
+  has_shared: boolean;
 }
 export interface ConnectionMap {
   channels: ConnChannel[];
   rows: ConnRow[];
   total_products: number;
   shown_products: number;
-  conflict_option_count: number;
+  conflict_option_count: number; // 원가가 갈리는 조합 = 진짜 위험
+  shared_option_count: number; // 원가가 같아 금액 영향이 없는 공유 조합
 }
 
 export function fetchConnectionMap(q?: string, limit?: number): Promise<ConnectionMap> {

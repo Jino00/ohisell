@@ -280,10 +280,24 @@ function ConnectionMapTab() {
         <div className="mb-3 text-sm text-gray-600">
           내부옵션 <b>{map.shown_products}</b>
           {map.total_products !== map.shown_products && ` / ${map.total_products}`}개 표시 · 채널옵션ID 충돌{" "}
-          <b className={map.conflict_option_count ? "text-red-600" : "text-gray-700"}>
+          <b
+            className={map.conflict_option_count ? "text-red-600" : "text-gray-700"}
+            title="한 채널옵션ID를 나눠 가진 마스터들의 원가가 서로 다름 — 어느 쪽에 귀속되냐로 손익이 갈린다"
+          >
             {map.conflict_option_count}
           </b>
           건
+          {/* ★공유를 충돌과 갈라 놓는 이유: 원가가 같으면 어느 마스터로 귀속돼도 금액이 안 변한다.
+              이걸 같이 빨갛게 세면 상시 빨강이 되어 진짜 충돌이 묻힌다(GFA 배너 63일 거짓 빨강). */}
+          {map.shared_option_count > 0 && (
+            <span
+              className="ml-2 text-gray-500"
+              title="한 채널 리스팅에 우리 SKU가 여러 개 묶인 상태. 원가가 같아 손익 금액에는 영향이 없고, SKU별 매출 분해만 대표 SKU로 뭉친다"
+            >
+              · 리스팅 공유 <b className="text-gray-700">{map.shared_option_count}</b>건
+              <span className="text-gray-400">(원가 동일 · 금액 영향 없음)</span>
+            </span>
+          )}
         </div>
       )}
 
@@ -517,6 +531,7 @@ function CellView({ cell, onClick }: { cell: ConnCell; onClick: () => void }) {
       <span className="font-mono">{cell.channel_product_id}</span>
       <span className={`ml-1 text-[9px] px-1 rounded ${sourceTag.c}`}>{sourceTag.t}</span>
       {cell.conflict && <span className="ml-1 text-red-600">⚠충돌</span>}
+      {cell.shared && <span className="ml-1 text-gray-400">공유</span>}
       {!cell.is_active && <span className="ml-1 text-gray-400">(비활성)</span>}
     </button>
   );
