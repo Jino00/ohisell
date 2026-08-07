@@ -108,11 +108,13 @@ function DailyRow({ d }: { d: Rocket1PDaily }) {
       <Td right>{num(d.qty)}</Td>
       <Td right>{won(d.consumer_revenue)}</Td>
       <Td right><span className="font-medium text-blue-700">{won(d.our_revenue)}</span></Td>
+      <Td right>{won(d.ad_spend_all)}</Td>
       <Td right>
         <span className={partial ? "text-amber-700" : "text-gray-400"}>{pct(d.cost_coverage)}</span>
       </Td>
-      {/* 아래 넷은 **원가 확인분** 축이다 — 위 「우리 매출」과 분모가 다르다. */}
-      <Td right>{won(d.pnl_revenue)}</Td>
+      {/* ★여기부터 전부 **원가 확인분** 축이다 — 왼쪽 전량 값과 분모가 다르다.
+          섞으면 행 산술이 안 맞고 부가세가 음수로 뜬다(2026-08-07 라이브 결함). */}
+      <Td right><span className="border-l border-gray-200 pl-2">{won(d.pnl_revenue)}</span></Td>
       <Td right>{won(d.cost)}</Td>
       <Td right>{won(d.promo_burden)}</Td>
       <Td right>{won(d.ad_spend)}</Td>
@@ -456,6 +458,7 @@ export default function Rocket1PRevenue() {
                     <Th right>판매수량</Th>
                     <Th right>소비자 매출</Th>
                     <Th right>우리 매출(전량)</Th>
+                    <Th right>광고비(전량)</Th>
                     <Th right>원가 확인</Th>
                     <Th right>손익기준 매출</Th>
                     <Th right>원가</Th>
@@ -470,9 +473,11 @@ export default function Rocket1PRevenue() {
                 </Table>
               </div>
               <p className="px-4 py-3 text-xs leading-relaxed text-gray-500">
-                ★<b>「우리 매출(전량)」과 「손익기준 매출」은 분모가 다릅니다.</b> 뒤쪽은 그날
-                <b> 원가가 붙은 SKU만</b>이고, 이익률은 그 기준입니다 — 「원가 확인」 열이 그날의
-                커버리지입니다. 100%가 아닌 날의 이익률을 전체에 적용하면 안 됩니다.
+                ★<b>「원가 확인」 열 오른쪽은 전부 그날 원가가 붙은 SKU만</b>의 값입니다 —
+                매출·원가·분담금·광고비·부가세·순이익이 <b>같은 부분집합</b>이라 행 산술이
+                스스로 맞습니다. 왼쪽의 「우리 매출(전량)」·「광고비(전량)」은 그날 전부이고,
+                <b>둘은 분모가 다릅니다.</b> 이익률은 오른쪽 기준이니, 커버리지가 100%가 아닌
+                날의 이익률을 전체에 적용하면 안 됩니다.
                 <br />
                 <b>1P는 판매수수료·배송비가 없습니다</b>(쿠팡 부담) — 그래서 그 열이 없습니다.
                 차감되는 비용은 원가·프로모션 분담금·광고비·납부세액 넷뿐입니다.

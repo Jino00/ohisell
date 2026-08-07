@@ -1393,10 +1393,13 @@ export interface Rocket1PDaily {
   qty: number;
   consumer_revenue: string;
   our_revenue: string | null;      // 전량(납품가) — 매출 축
-  pnl_revenue: string | null;      // 원가 확인분 — 손익 축(이익률 분모)
+  ad_spend_all: string;            // 그날 **전량** 광고비(Billboard)
+  // ── 여기부터 전부 **원가 확인분** 축 — 위 전량 값과 분모가 다르다 ──
+  pnl_revenue: string | null;      // 이익률 분모
+  pnl_qty: number | null;
   cost: string | null;
   promo_burden: string | null;
-  ad_spend: string;                // 그날 옵션 광고비(Billboard)
+  ad_spend: string | null;         // 손익에 들어간 옵션분만
   ad_no_sales: string;             // 그날 광고는 돌았는데 판매행이 없는 옵션분(순이익 미포함)
   vat: string | null;
   net_profit: string | null;

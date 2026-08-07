@@ -738,3 +738,33 @@ def test_daily_row_arithmetic_closes(db):
     lhs = (Decimal(d0["pnl_revenue"]) - Decimal(d0["cost"]) - Decimal(d0["promo_burden"])
            - Decimal(d0["ad_spend"]) - Decimal(d0["vat"]))
     assert lhs == Decimal(d0["net_profit"])
+
+
+def test_daily_row_closes_when_costed_and_uncosted_are_mixed_on_the_same_day(db):
+    """★★같은 날에 원가 있는 옵션과 없는 옵션이 **섞였을 때** 행 산술이 맞는가.
+
+    라이브에서 부가세가 **음수**(−454,262원)로 떴던 결함의 회귀. 원인은 축 혼합이었다:
+    원가·분담금·광고비는 그날 **전량**을 더하고 손익기준 매출·순이익은 **원가 확인분**만
+    이라, 잔차로 낸 부가세가 그 차이를 통째로 흡수했다.
+    ★기존 테스트 40건이 못 잡은 이유: 전부 «그날 전부 원가 있음» 또는 «전부 없음»이라
+      두 축이 우연히 같았다. 섞인 날이 없으면 이 결함은 보이지 않는다.
+    """
+    _price(db, "S1", "10000", 1)
+    _cost(db, "S1", 3000)                       # 원가 있음 → 손익에 들어간다
+    _price(db, "S2", "10000", 2)                # 원가 없음 → 손익 밖
+    _sale(db, "A", "S1", 10, "200000", d=date(2026, 8, 3))
+    _sale(db, "B", "S2", 10, "200000", d=date(2026, 8, 3))
+    _ad_option(db, "A", "20000", d=date(2026, 8, 3))
+    _ad_option(db, "B", "50000", d=date(2026, 8, 3))   # ★손익 밖 옵션의 광고비
+    db.commit()
+    d0 = compute_rocket_1p_revenue(db, date(2026, 8, 3), date(2026, 8, 3))["daily"][0]
+    # 행이 스스로 맞는다.
+    lhs = (Decimal(d0["pnl_revenue"]) - Decimal(d0["cost"]) - Decimal(d0["promo_burden"])
+           - Decimal(d0["ad_spend"]) - Decimal(d0["vat"]))
+    assert lhs == Decimal(d0["net_profit"])
+    # 부가세는 양수다(매출VAT − 매입세액공제).
+    assert Decimal(d0["vat"]) > ZERO_D
+    # 손익 축 광고비는 **부분집합**이고, 그날 전량은 따로 실린다 — 둘 다 보인다.
+    assert Decimal(d0["ad_spend"]) == Decimal("20000")
+    assert Decimal(d0["ad_spend_all"]) == Decimal("70000")
+    assert d0["pnl_qty"] == 10 and d0["qty"] == 20

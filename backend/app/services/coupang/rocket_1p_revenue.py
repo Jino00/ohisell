@@ -227,6 +227,12 @@ def compute_rocket_1p_revenue(
     def _blank(**extra) -> dict:
         base = {"qty": 0, "consumer_revenue": ZERO, "our_revenue": ZERO, "cost": ZERO,
                 "promo_burden": ZERO, "ad_spend": ZERO, "net_profit": ZERO,
+                # ★★손익 축은 **부분집합 전용 칸**에 따로 쌓는다(2026-08-07 라이브 결함).
+                #   한 칸에 섞으면 날짜 행에서 「원가·분담금·광고비는 그날 전량, 매출·순이익은
+                #   원가 확인분」이 되어 행 산술이 안 맞고, 잔차로 낸 부가세가 그 차이를
+                #   흡수해 **음수로 떴다**. 옵션 행은 SKU가 하나라 안 갈라지지만 날짜 행은
+                #   여러 옵션이 섞이므로 갈라진다.
+                "pnl_qty": 0, "pnl_cost": ZERO, "pnl_burden": ZERO, "pnl_ad": ZERO,
                 # ★«모름»을 0으로 접지 않으려고 «관측된 것이 있는가»를 따로 센다.
                 "priced_revenue": ZERO, "costed_revenue": ZERO,
                 "has_priced": False, "has_costed": False, "has_uncosted": False,
@@ -328,6 +334,10 @@ def compute_rocket_1p_revenue(
             if net is not None:
                 acc["net_profit"] += net
                 acc["pnl_rows"] += 1
+                acc["pnl_qty"] += q
+                acc["pnl_cost"] += cost_d
+                acc["pnl_burden"] += burden
+                acc["pnl_ad"] += ad_for_pnl
         if unit_price is not None:
             o["unit_price"] = _d(unit_price)
         if unit_cost is not None:
@@ -445,18 +455,22 @@ def compute_rocket_1p_revenue(
             (amt for (dk, oid), amt in ad_by_day_option.items()
              if dk == day_key and oid not in sold_option_ids), ZERO
         )
-        d_vat = (v["costed_revenue"] - v["cost"] - v["promo_burden"]
-                 - v["ad_spend"] - d_net) if d_net is not None else None
+        # ★부가세는 **부분집합 축끼리** 잔차로 낸다 — 전량 값과 섞으면 음수가 나온다.
+        d_vat = (v["costed_revenue"] - v["pnl_cost"] - v["pnl_burden"]
+                 - v["pnl_ad"] - d_net) if d_net is not None else None
         daily.append({
             "date": day_key,
             "qty": v["qty"],
             "consumer_revenue": str(v["consumer_revenue"]),
             "our_revenue": None if d_priced is None else str(d_priced),
-            # ★손익 축은 **원가 확인분**이다 — 위 our_revenue(전량)와 분모가 다르다.
+            # 그날 **전량** 광고비(Billboard) — 아래 손익 축의 광고비와 다르다.
+            "ad_spend_all": str(v["ad_spend"]) if v["has_ad"] else "0",
+            # ★여기부터는 전부 **원가 확인분** 축이다 — 위 our_revenue(전량)와 분모가 다르다.
             "pnl_revenue": str(v["costed_revenue"]) if d_net is not None else None,
-            "cost": str(v["cost"]) if v["has_costed"] else None,
-            "promo_burden": None if burden_by_day_option is None else str(v["promo_burden"]),
-            "ad_spend": str(v["ad_spend"]) if v["has_ad"] else "0",
+            "pnl_qty": v["pnl_qty"] if d_net is not None else None,
+            "cost": str(v["pnl_cost"]) if d_net is not None else None,
+            "promo_burden": str(v["pnl_burden"]) if d_net is not None else None,
+            "ad_spend": str(v["pnl_ad"]) if d_net is not None else None,
             # 그날 광고는 돌았는데 판매행이 없는 옵션의 광고비(위 순이익에 미포함).
             "ad_no_sales": str(d_ad_no_sales),
             "vat": None if d_vat is None else str(d_vat),
