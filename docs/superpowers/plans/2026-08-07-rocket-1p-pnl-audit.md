@@ -709,6 +709,14 @@ git commit -m "feat(rocket-1p): 손익 근거 검사 9종 — 같은 함수의 �
 - Modify: `backend/app/services/coupang/rocket_1p_pnl_audit.py`
 - Test: `backend/tests/test_rocket_1p_pnl_audit.py`
 
+> ★**`day_option_atoms`를 직접 import하지 마라 — 라우터가 주입한다** (Task 3에서 확정).
+> `test_module_is_not_referenced_by_accounting_paths`(D-CPP-2 금지선)가 `app/services/` 아래의
+> `rocket_1p_revenue` 참조를 금지한다. 라우터가 참조하는 것은 이미 승인된 패턴이다
+> (`app/routers/overview.py:21`). 부수 효과가 본질이다 — 이 모듈은 **주입된 것 말고는 볼 수
+> 없으므로** 「근거 창은 계산을 새로 하지 않는다」가 규칙이 아니라 구조가 된다.
+> 시그니처: `compute_pnl_audit_atoms(db, date_from, date_to, ctx, *, sort, flt, option_id)`
+> — `ctx`는 `day_option_atoms(db, date_from, date_to)`의 결과다.
+
 - [ ] **Step 1: 실패하는 테스트 추가**
 
 ```python
@@ -755,16 +763,17 @@ def _s(v) -> str | None:
     return None if v is None else str(v)
 
 
-def compute_pnl_audit_atoms(db: Session, date_from: date, date_to: date,
+def compute_pnl_audit_atoms(db: Session, date_from: date, date_to: date, ctx: dict,
                             sort: str = "revenue", flt: str = "all",
                             option_id: str | None = None) -> dict:
     """3단 — 「날짜×옵션」 원자 목록 + 신뢰도 배지.
 
-    원자는 `day_option_atoms`(화면이 소비하는 것과 같은 출처)에서 온다.
+    ★`ctx`는 `day_option_atoms`(화면이 소비하는 것과 같은 출처)의 결과이며 **라우터가
+      주입한다** — 이 모듈은 D-CPP-2 가드 때문에 그 함수를 직접 부를 수 없고, 그 덕에
+      주입된 것 말고는 볼 수 없다(계산을 새로 할 수단이 없다).
     배지: cost_source = manual(수기 확인) | suggested(이름 유사도 자동 — 사람이 확인 안 함)
                         | excluded(원가 제외 결정) | none(다리 없음).
     """
-    ctx = day_option_atoms(db, date_from, date_to)
     src = {str(pn): (st, mm) for pn, st, mm in db.execute(text(
         "SELECT product_number, status, match_method FROM rocket_product_cost_map"
     )).fetchall()}
@@ -963,7 +972,7 @@ WHERE pr.vendor_id = :vendor AND date(pr.start_at) <= :d AND date(pr.end_at) >= 
 
 
 def compute_pnl_audit_atom_detail(db: Session, date_from: date, date_to: date,
-                                  date_: date, option_id: str) -> dict:
+                                  date_: date, option_id: str, ctx: dict) -> dict:
     """4단 — 원자 1개의 다섯 갈래 원천 행. **행을 그대로 보인다** — 가공하면 근거가 아니다.
 
     ★없는 행은 null이다. 0으로 접으면 «수집 안 됨»이 «0원»으로 둔갑한다(원칙22).
@@ -1022,10 +1031,9 @@ def compute_pnl_audit_atom_detail(db: Session, date_from: date, date_to: date,
         "orders": ad_row[5], "sales_qty": ad_row[6],
     }
 
-    # 원자 자신 — 같은 출처(day_option_atoms)를 **화면과 같은 창**으로 부른 뒤 이 날짜로
-    # 거른다(창을 좁히면 분담금 가드가 달라진다 — 위 docstring ★★). 계산식의 숫자가
-    # 위 원천 행들과 같은 값임을 화면이 나란히 보일 수 있다.
-    ctx = day_option_atoms(db, date_from, date_to)
+    # 원자 자신 — 라우터가 **화면과 같은 창**으로 뽑아 준 `ctx`에서 이 날짜로 거른다
+    # (창을 좁혀 부르면 분담금 가드가 달라진다 — 위 docstring ★★. 그래서 창을 이 모듈이
+    # 정하지 않고 받는다.) 계산식의 숫자가 위 원천 행들과 같은 값임을 화면이 나란히 보인다.
     atom = next((a for a in ctx["atoms"]
                  if a["option_id"] == option_id and a["date"] == d_iso), None)
     atom_out = None if atom is None else {
@@ -1062,7 +1070,15 @@ git commit -m "feat(rocket-1p): 근거 화면 4단 — 원자 1개의 다섯 갈
 - [ ] **Step 1: 라우터 작성**
 
 ```python
-# rocket_1p_pnl_audit.py — 손익 «근거 화면» 라우터. 얇다 — 계산은 전부 서비스에 있다.
+# rocket_1p_pnl_audit.py — 손익 «근거 화면» 라우터.
+#
+# ★이 라우터는 «얇다»보다 «합성한다»가 맞다: 검사·원자 서비스는 D-CPP-2 가드(app/services/
+#   아래에서 rocket_1p_revenue 참조 금지) 때문에 화면 함수를 부를 수 없어, **여기서 부른 결과를
+#   주입**한다. `app/routers/overview.py:21`이 같은 참조를 하는 것과 같은 패턴이다.
+#   부수 효과가 본질이다 — 서비스는 주입된 것 말고는 볼 수 없으므로 「근거 창은 계산을 새로
+#   하지 않는다」가 규칙이 아니라 구조가 된다.
+# ★창을 정하는 곳도 여기 하나다. 세 엔드포인트가 **같은 창**으로 화면 함수와 원자를 뽑는다 —
+#   창이 갈리면 분담금 «모름» 판정이 갈려 근거가 화면과 다른 답을 낸다(Task 1 리뷰 C1).
 from __future__ import annotations
 
 from datetime import date, timedelta
@@ -1072,7 +1088,10 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.services.coupang.rocket_1p_pnl_audit import (
-    compute_pnl_audit_atom_detail, compute_pnl_audit_atoms, compute_pnl_audit_checks)
+    ATOM_LIMIT, compute_pnl_audit_atom_detail, compute_pnl_audit_atoms,
+    compute_pnl_audit_checks)
+from app.services.coupang.rocket_1p_revenue import (
+    compute_rocket_1p_revenue, day_option_atoms)
 from app.utils.kst import kst_today
 
 router = APIRouter(prefix="/api/coupang/ops/rocket/pnl-audit", tags=["rocket-1p-pnl-audit"])
