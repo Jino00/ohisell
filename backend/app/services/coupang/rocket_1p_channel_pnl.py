@@ -399,46 +399,70 @@ def _promo_burden_by_day(db: Session, date_from: date, date_to: date,
     return {str(d)[:10]: _dec(b) for d, b in rows}
 
 
-_PROMO_BURDEN_BY_OPTION_SQL = _PROMO_BURDEN_SQL.replace(
-    "SELECT s.date AS d,", "SELECT s.option_id AS d,"
-).replace("GROUP BY s.date", "GROUP BY s.option_id")
+# ★「날짜×옵션」 그레인 — 화면이 쓰는 **가장 잘게 쪼갠 원자**다.
+#   왜 이 그레인인가(2026-08-07): 매출 화면이 일별 손익과 옵션별 손익을 **둘 다** 내는데,
+#   각자 자기 그레인에서 반올림하면 「일별 합계 ≠ 옵션별 합계 ≠ 기간 타일」이 된다.
+#   가장 잘게 쪼갠 곳에서 한 번만 반올림하고 양쪽 다 그 합으로 만들면 셋이 정확히 같아진다.
+#   ★replace 파생을 그만두고 **직접 쓴다** — 원본이 한 글자만 바뀌어도 조용히 빗나가는
+#     문자열 치환은 이 값처럼 «틀려도 예외가 안 나는» 자리에 두면 안 된다. 대신 아래
+#     `promo_burden_by_day_option`의 합이 `_promo_burden_by_day`와 같은지 테스트가 지킨다
+#     (문자열 일치보다 강한 보증 — 두 SQL이 실제로 같은 돈을 세는지 본다).
+PROMO_BURDEN_BY_DAY_OPTION_SQL = """
+SELECT s.date AS d,
+       s.option_id AS option_id,
+       SUM(CASE WHEN d.discount_type = 'RATE'
+                THEN s.qty * p.unit_purchase_price * d.discount_value
+                ELSE s.qty * d.discount_value END) AS burden
+FROM coupang_rocket_sales_daily s
+JOIN (SELECT product_number, unit_purchase_price,
+             ROW_NUMBER() OVER (PARTITION BY product_number ORDER BY purchase_order_seq DESC) rn
+      FROM coupang_rocket_purchase_order_item) p
+  ON p.product_number = s.sku_id AND p.rn = 1
+JOIN coupang_promo_discount_item d ON d.product_number = s.sku_id
+JOIN coupang_rocket_promotion pr
+  ON pr.request_id = d.request_id AND pr.vendor_id = :vendor
+ AND s.date BETWEEN date(pr.start_at) AND date(pr.end_at)
+WHERE s.vendor_id = :vendor AND s.date >= :since AND s.date <= :until
+GROUP BY s.date, s.option_id
+"""
 
-# ★파생이 성공했는지 **임포트 시점에** 못 박는다(적대 리뷰 P2). 원본 SQL의 공백 하나만
-#   달라져도 replace가 조용히 빗나가는데, 그 실패는 예외가 아니라 **틀린 값**으로 나온다:
-#   - 둘 다 실패 → 키가 날짜라 `get(option_id)`가 전 옵션 0을 주고 `promo_burden_known`은
-#     True로 남아 경고도 안 뜬다(라이브 7일 분담금 1,926,000원이 통째로 사라진다).
-#   - 앞만 성공 → SQLite가 bare column을 허용해 `GROUP BY s.date`인 채로 통과한다.
-#   그래서 두 조건을 따로 검사한다. 정적 문자열이라 런타임 비용은 0이다.
-assert "SELECT s.option_id AS d," in _PROMO_BURDEN_BY_OPTION_SQL, \
-    "_PROMO_BURDEN_SQL의 SELECT 절이 바뀌어 옵션 그레인 파생이 실패했다"
-assert "GROUP BY s.option_id" in _PROMO_BURDEN_BY_OPTION_SQL and \
-    "GROUP BY s.date" not in _PROMO_BURDEN_BY_OPTION_SQL, \
-    "_PROMO_BURDEN_SQL의 GROUP BY가 바뀌어 옵션 그레인 파생이 실패했다"
 
-
-def promo_burden_by_option(
+def promo_burden_by_day_option(
     db: Session, date_from: date, date_to: date, vendor_id: str | None = None
-) -> dict[str, Decimal] | None:
-    """옵션별 프로모션 분담금. **모르면 None** — `_promo_burden_by_day`와 같은 판정자다.
+) -> dict[tuple[str, str], Decimal] | None:
+    """{(날짜, 옵션): 분담금}. **모르면 None** — `_promo_burden_by_day`와 같은 판정자다.
 
-    왜 여기 있나: 매출 화면이 옵션별 손익을 내려면 옵션 그레인 분담금이 필요한데, "분담금을
-    모를 때가 언제인가"는 회계 규칙이라 이 파일이 정본이다. 판정 규칙이 두 곳에 생기면
-    한쪽만 고쳐져 화면이 "분담금 0"을 사실처럼 낸다(그게 정확히 2026-08-05에 났던 사고다).
+    왜 여기 있나: 매출 화면이 손익을 내려면 이 그레인의 분담금이 필요한데, "분담금을 모를
+    때가 언제인가"는 회계 규칙이라 이 파일이 정본이다. 판정 규칙이 두 곳에 생기면 한쪽만
+    고쳐져 화면이 "분담금 0"을 사실처럼 낸다(그게 정확히 2026-08-05에 났던 사고다).
 
     ★vendor는 **가드와 본 쿼리가 같은 것을 봐야 한다**(적대 리뷰 P2). 예전 판은 가드만 1P
       계정으로 하드코딩해서, 다른 vendor를 넘기면 None이 아니라 `{}`가 나왔다 — 즉 "모름"이
-      "분담금 0"으로 둔갑했다. 지금 호출부가 기본 vendor뿐이라 라이브 영향은 없었지만,
-      «모름→0»은 이 프로젝트가 반복해 당한 형태라 도달 가능해지기 전에 막는다.
+      "분담금 0"으로 둔갑했다. «모름→0»은 이 프로젝트가 반복해 당한 형태라 도달 가능해지기
+      전에 막는다.
     """
     guard = _promo_burden_by_day(db, date_from, date_to, vendor_id)
     if guard is None:
         return None
     rows = db.execute(
-        text(_PROMO_BURDEN_BY_OPTION_SQL),
+        text(PROMO_BURDEN_BY_DAY_OPTION_SQL),
         {"vendor": vendor_id or ROCKET_1P_VENDOR_ID,
          "since": date_from.isoformat(), "until": date_to.isoformat()},
     ).fetchall()
-    return {str(o): _dec(b) for o, b in rows}
+    return {(str(d)[:10], str(o)): _dec(b) for d, o, b in rows}
+
+
+def promo_burden_by_option(
+    db: Session, date_from: date, date_to: date, vendor_id: str | None = None
+) -> dict[str, Decimal] | None:
+    """옵션별 프로모션 분담금 — 위 「날짜×옵션」을 **그대로 접은 것**(따로 계산하지 않는다)."""
+    fine = promo_burden_by_day_option(db, date_from, date_to, vendor_id)
+    if fine is None:
+        return None
+    out: dict[str, Decimal] = {}
+    for (_d, option_id), amt in fine.items():
+        out[option_id] = out.get(option_id, ZERO) + amt
+    return out
 
 
 def _sell_through_by_day(db: Session, date_from: date, date_to: date) -> dict[str, dict]:
