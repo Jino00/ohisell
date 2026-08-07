@@ -14,6 +14,7 @@ import CoupangAdChanges from "./pages/CoupangAdChanges";
 import RocketRecon from "./pages/RocketRecon";
 import Rocket1PRevenue from "./pages/Rocket1PRevenue";
 import Rocket1PFunnel from "./pages/Rocket1PFunnel";
+import Rocket1PPnlAudit from "./pages/Rocket1PPnlAudit";
 import NaverOps from "./pages/NaverOps";
 import ProductConnectionMap from "./pages/ProductConnectionMap";
 import NaverAdReport from "./pages/NaverAdReport";
@@ -37,6 +38,7 @@ export default function App() {
           <Route path="rocket-recon" element={<RocketRecon />} />
           <Route path="rocket-1p-revenue" element={<Rocket1PRevenue />} />
           <Route path="rocket-1p-funnel" element={<Rocket1PFunnel />} />
+          <Route path="rocket-1p/pnl-audit" element={<Rocket1PPnlAudit />} />
           <Route path="naver-ops" element={<NaverOps />} />
           <Route path="orders" element={<Orders />} />
           <Route path="products" element={<Products />} />

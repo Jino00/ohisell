@@ -60,6 +60,26 @@ def _dec(v) -> Decimal:
     return v if isinstance(v, Decimal) else Decimal(str(v))
 
 
+_CENT = Decimal("0.01")
+
+
+def _money(v: Decimal) -> Decimal:
+    """옵션 손익을 전 단위로 못 박는다.
+
+    ★왜 반올림하나: VAT가 ÷11이라 순이익엔 무한소수가 붙는다. 그대로 두면 옵션 행들의 합과
+      합계 타일이 **누적 순서 차이만으로** 끝자리에서 어긋난다(라이브 실측 2e-25원). 금액이
+      1원이라도 다르면 사용자는 둘 다 안 믿는다 — 그래서 합계는 반올림된 행들의 **합**으로만
+      만든다(타일을 따로 계산하지 않는다).
+
+    ★왜 **여기** 있나(2026-08-07 이동): 반올림 규약은 «돈 축»의 정의라 이 모듈이 정본이다
+      (`ZERO`·`_dec`·납품단가/원가 CTE와 같은 자리). 매출 화면 SA와 손익 근거 SA가 둘 다
+      이 함수를 써야 하는데, 근거 SA는 D-CPP-2 가드 때문에 매출 화면 모듈을 참조할 수 없다
+      (`test_module_is_not_referenced_by_accounting_paths`). 각자 복제하면 반올림 규약이
+      두 곳에 생기고 언젠가 갈라진다 — 그건 이 파일들이 반복해 경고하는 실패다.
+    """
+    return v.quantize(_CENT)
+
+
 def rocket_1p_channel(db: Session) -> Channel | None:
     """1P 채널 행. 없으면 None(이 기능 전체가 조용히 꺼진다 — 다른 채널엔 영향 없음)."""
     return db.query(Channel).filter(Channel.code == ROCKET_1P_CHANNEL_CODE).first()
@@ -361,6 +381,35 @@ WHERE pr.vendor_id = :vendor
   AND date(pr.start_at) <= :until AND date(pr.end_at) >= :since
   AND NOT EXISTS (SELECT 1 FROM coupang_promo_discount_item d WHERE d.request_id = pr.request_id)
 """
+
+
+_PROMO_TOTAL_SQL = """
+SELECT COUNT(*) FROM coupang_rocket_promotion pr
+WHERE pr.vendor_id = :vendor
+  AND date(pr.start_at) <= :until AND date(pr.end_at) >= :since
+"""
+
+
+def promo_window_counts(db: Session, date_from: date, date_to: date,
+                        vendor_id: str | None = None) -> dict | None:
+    """창에 걸친 프로모션 수와 그중 할인액 원천이 없는 수. 테이블이 없으면 None(모름).
+
+    손익 근거 화면의 A6 검사가 쓴다 — «분담금 0»과 «분담금 모름»을 가르는 판정자
+    (`_promo_burden_by_day`의 unpriced 가드)를 **개수로** 보여 검사의 좌·우변을 만든다.
+
+    ★창 조건은 `_PROMO_UNPRICED_SQL`과 **문자 그대로 같다** — 두 쿼리가 다른 창을 보면
+    A6의 좌변(전체 프로모션 수)과 우변(그중 미상 수)이 다른 모집단을 세게 되어
+    「전건 일치」 판정이 거짓이 된다.
+    """
+    insp = sa_inspect(db.get_bind())
+    if not (insp.has_table("coupang_rocket_promotion")
+            and insp.has_table("coupang_promo_discount_item")):
+        return None
+    params = {"vendor": vendor_id or ROCKET_1P_VENDOR_ID,
+              "since": date_from.isoformat(), "until": date_to.isoformat()}
+    promos = int(db.execute(text(_PROMO_TOTAL_SQL), params).scalar() or 0)
+    unpriced = int(db.execute(text(_PROMO_UNPRICED_SQL), params).scalar() or 0)
+    return {"promos": promos, "unpriced": unpriced}
 
 
 def _promo_burden_by_day(db: Session, date_from: date, date_to: date,
