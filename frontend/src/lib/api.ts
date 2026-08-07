@@ -1340,6 +1340,11 @@ export interface Rocket1PUncostedSku {
   our_revenue: string | null;      // 납품단가까지 모르면 null
   consumer_revenue: string;
   loss_confirmed: boolean;         // 원가가 얼마든 적자(광고비가 매출을 넘었다)
+  /** ★무엇을 해야 하는가. 「원가 등록」 하나로 뭉뚱그리면 사용자가 헛일을 한다 —
+   *  no_link = 쿠팡 상품번호 ↔ 내부 SKU **연결**이 없다(원가를 넣어도 안 붙는다)
+   *  no_cost = 연결은 있는데 그 내부 SKU에 원가가 없다
+   *  excluded = 원가 제외로 **이미 결정**됨(시키면 안 된다) */
+  reason: "no_link" | "no_cost" | "excluded";
 }
 
 /** 손익 블록. ★basis='costed_subset'이면 **원가 확인분만** 더한 값이다(창 전체가 아니다). */
@@ -1368,8 +1373,10 @@ export interface Rocket1PPnl {
     skus: number; qty: number;
     our_revenue: string;           // known분만 합산(모르는 것을 0으로 더하지 않는다)
     our_revenue_partial: boolean;  // true면 위 합계에 «단가도 모름» SKU가 빠져 있다
-    actionable_skus: number;       // 원가 등록으로 해소되는 것
-    ignored_skus: number;          // 이미 "제외"로 결정된 SKU — 등록하라고 시키면 안 된다
+    actionable_skus: number;       // 사람이 조치하면 해소되는 것(link+cost)
+    link_missing_skus: number;     // ★쿠팡 상품번호 ↔ 내부 SKU 연결이 없다
+    cost_missing_skus: number;     // 연결은 있는데 원가가 없다
+    excluded_skus: number;         // 이미 "제외"로 결정 — 시키면 안 된다
     loss_confirmed_skus: number;
     top: Rocket1PUncostedSku[];    // actionable만
   };

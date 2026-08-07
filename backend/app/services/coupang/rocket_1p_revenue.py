@@ -92,9 +92,21 @@ WHERE sell_type = 'Retail' AND vendor_id = :vendor
 GROUP BY ad_option_id
 """
 
-# 원가 제외로 **이미 결정된** 상품번호. `COST_BY_PRODUCT_CTE`가 confirmed만 보므로 이 SKU들의
-# 원가는 영원히 NULL이다 — 작업 목록에 넣으면 "등록하면 100% 된다"가 지킬 수 없는 약속이 된다.
-_IGNORED_COST_MAP_SQL = "SELECT product_number FROM rocket_product_cost_map WHERE status = 'ignored'"
+# ★원가가 안 붙는 이유는 **셋인데 할 일이 다 다르다**(2026-08-07, Jino 실사고).
+#   화면이 "원가를 SellC에 등록하세요"라고만 말했는데, 실제로 등록해도 아무것도 안 움직였다 —
+#   그 SKU들은 원가가 없는 게 아니라 **쿠팡 상품번호 ↔ 내부 SKU 연결이 없었다**(178건).
+#   원가는 `product_master`(내부 SKU 그레인)에 붙고 판매는 쿠팡 상품번호로 들어오므로,
+#   둘을 잇는 다리(`rocket_product_cost_map`)가 없으면 원가를 아무리 넣어도 안 붙는다.
+#   ⓐ no_link  : 다리가 없다 → 「쿠팡 운영」 원가 매핑에서 **연결**해야 한다
+#   ⓑ no_cost  : 다리는 있는데 그 내부 SKU에 원가가 없다 → SellC에 **원가 등록**
+#   ⓒ excluded : 원가 제외로 **이미 결정**됨(샘플·증정) → 아무것도 하면 안 된다(재제안 방지)
+_COST_MAP_STATE_SQL = """
+SELECT m.product_number,
+       m.status,
+       CASE WHEN pm.cost_price IS NOT NULL THEN 1 ELSE 0 END AS has_cost
+FROM rocket_product_cost_map m
+LEFT JOIN product_master pm ON pm.internal_sku = m.internal_sku
+"""
 
 
 def _d(v) -> Decimal:
@@ -173,10 +185,18 @@ def compute_rocket_1p_revenue(
     # ★분담금은 **모를 수 있다**(제안서 미수집 기간). None이면 손익 자체를 내지 않는다 —
     #   0으로 접으면 그 프로모션의 할인액만큼 이익이 부풀어 보인다. 판정은 엔진이 한다.
     burden_by_option = promo_burden_by_option(db, date_from, date_to, vendor)
-    # 원가 제외로 **이미 결정된** SKU. 작업 목록에서 빼야 한다 — 재제안 방지가 이 상태의 존재 이유다.
-    ignored_skus = {
-        str(r[0]) for r in db.execute(text(_IGNORED_COST_MAP_SQL)).fetchall()
+    # 원가가 안 붙는 **이유**를 SKU별로 가른다(위 `_COST_MAP_STATE_SQL` 주석 참조).
+    cost_map_state = {
+        str(r[0]): (r[1], bool(r[2])) for r in db.execute(text(_COST_MAP_STATE_SQL)).fetchall()
     }
+
+    def _uncosted_reason(sku: str | None) -> str:
+        st = cost_map_state.get(str(sku)) if sku is not None else None
+        if st is None:
+            return "no_link"          # 다리 자체가 없다 — 원가를 넣어도 안 붙는다
+        if st[0] == "ignored":
+            return "excluded"         # 이미 "제외"로 결정 — 시키면 안 된다
+        return "no_cost"              # 다리는 있는데 그 내부 SKU에 원가가 없다
 
     options: list[dict] = []
     consumer_total = ZERO
@@ -244,9 +264,8 @@ def compute_rocket_1p_revenue(
                 "sku_id": sku_id, "product_name": product_name,
                 "qty": 0, "our_revenue": ZERO, "consumer_revenue": ZERO,
                 "our_revenue_known": True, "loss_confirmed": False,
-                # ★`ignored`는 "원가 제외로 **이미 결정한**" SKU다(샘플·증정 등). 등록하라고
-                #   시키면 안 되고, 그래서 커버리지 100%도 이 SKU들로는 달성되지 않는다.
-                "ignored": str(sku_id) in ignored_skus,
+                # ★무엇을 해야 하는지가 셋으로 갈린다 — 틀리면 사용자가 헛일을 한다.
+                "reason": _uncosted_reason(sku_id),
             })
             u["qty"] += q
             u["consumer_revenue"] += consumer_d
@@ -321,7 +340,7 @@ def compute_rocket_1p_revenue(
                        u["our_revenue"] if u["our_revenue_known"] else u["consumer_revenue"]),
         reverse=True,
     )
-    actionable = [u for u in uncosted_rows if not u["ignored"]]
+    actionable = [u for u in uncosted_rows if u["reason"] != "excluded"]
 
     # ★basis 판정을 **반올림된 비율이 아니라 구조**로 한다(적대 리뷰 P2). `_ratio`는 소수
     #   4자리로 quantize하므로 0.99996도 1.0000이 되어, 원가 미상 SKU가 남아 있는데 배지가
@@ -352,8 +371,9 @@ def compute_rocket_1p_revenue(
                    "발주 라인(납품단가)이 없는 상태입니다.")
     elif costed_options == 0:
         blocked = ("no_costed_sku",
-                   "이 기간에 팔린 SKU 중 등록원가가 붙은 것이 하나도 없습니다 — 아래 목록의 "
-                   "SKU 원가를 SellC에 등록하면 손익이 나옵니다.")
+                   "이 기간에 팔린 SKU 중 원가가 붙은 것이 하나도 없습니다. 아래 목록이 "
+                   "SKU마다 무엇이 빠졌는지(연결 / 원가 등록) 말해 줍니다 — 원가가 이미 "
+                   "있어도 쿠팡 상품번호와 내부 SKU가 연결돼 있지 않으면 붙지 않습니다.")
     elif pnl_revenue <= ZERO:
         blocked = ("costed_revenue_zero",
                    "원가가 붙은 옵션은 있지만 그 매출 합이 0입니다(판매수량 0).")
@@ -393,7 +413,11 @@ def compute_rocket_1p_revenue(
             # 원가 등록으로 해소되는 것만 센다. `ignored`는 이미 "제외"로 결정된 SKU라 빼면
             # 안 되는 게 아니라 **넣으면 안 된다**(재제안 방지가 그 상태의 존재 이유다).
             "actionable_skus": len(actionable),
-            "ignored_skus": len(uncosted_rows) - len(actionable),
+            # ★할 일별로 센다. 「원가 등록」 하나로 뭉뚱그리면 사용자가 헛일을 한다 —
+            #   실제로 그렇게 됐다(2026-08-07: 원가를 등록했는데 화면이 안 움직였다).
+            "link_missing_skus": sum(1 for u in uncosted_rows if u["reason"] == "no_link"),
+            "cost_missing_skus": sum(1 for u in uncosted_rows if u["reason"] == "no_cost"),
+            "excluded_skus": sum(1 for u in uncosted_rows if u["reason"] == "excluded"),
             "loss_confirmed_skus": sum(1 for u in uncosted_rows if u["loss_confirmed"]),
             "top": [
                 {
@@ -405,6 +429,8 @@ def compute_rocket_1p_revenue(
                     "consumer_revenue": str(u["consumer_revenue"]),
                     # 원가가 얼마든 적자인 SKU(광고비가 매출을 넘었다).
                     "loss_confirmed": u["loss_confirmed"],
+                    # no_link | no_cost | excluded — 무엇을 해야 하는지.
+                    "reason": u["reason"],
                 }
                 for u in actionable[:_UNCOSTED_TOP_N]
             ],

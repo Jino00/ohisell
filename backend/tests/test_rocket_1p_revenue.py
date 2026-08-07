@@ -547,8 +547,8 @@ def test_ignored_skus_are_not_put_on_the_worklist(db):
     db.commit()
     u = compute_rocket_1p_revenue(db, D, D)["pnl"]["uncosted"]
     assert u["skus"] == 2                       # 둘 다 원가는 없다
-    assert u["actionable_skus"] == 1            # 그러나 등록하라고 시킬 건 하나뿐
-    assert u["ignored_skus"] == 1
+    assert u["actionable_skus"] == 1            # 그러나 시킬 건 하나뿐
+    assert u["excluded_skus"] == 1
     assert [t["sku_id"] for t in u["top"]] == ["S1"]
 
 
@@ -588,3 +588,38 @@ def test_promo_burden_guard_uses_the_same_vendor_as_the_query(db):
     db.commit()
     # OTHERVENDOR엔 할인액 원천이 없다 → None(모름)이어야 한다. {}(=0)이면 안 된다.
     assert pnl.promo_burden_by_option(db, D, D, "OTHERVENDOR") is None
+
+
+def test_uncosted_reason_separates_missing_link_from_missing_cost(db):
+    """★★원가가 안 붙는 이유가 셋인데 할 일이 다 다르다 (2026-08-07 실사고).
+
+    Jino가 화면이 시키는 대로 **원가를 등록했는데 아무것도 안 움직였다.** 그 SKU들은
+    원가가 없는 게 아니라 **쿠팡 상품번호 ↔ 내부 SKU 연결이 없었다**(라이브 178건).
+    원가는 `product_master`(내부 SKU 그레인)에 붙고 판매는 쿠팡 상품번호로 들어오므로,
+    다리가 없으면 원가를 아무리 넣어도 안 붙는다. 화면이 "원가를 등록하세요" 하나로
+    뭉뚱그리면 사용자가 헛일을 한다.
+    """
+    from sqlalchemy import text as _t
+    # ⓐ 연결 없음 — 원가를 등록해도 안 붙는다
+    _sale(db, "A", "S1", 10, "500000")
+    _price(db, "S1", "30000", 1)
+    # ⓑ 연결은 있는데 그 내부 SKU에 원가가 없다
+    #    (`product_master.cost_price`가 NOT NULL이라, 실제로는 매핑이 **없는 내부 SKU를
+    #     가리키는** 형태로 나타난다 — 마스터에서 지워졌거나 오타로 들어간 경우.)
+    _sale(db, "B", "S2", 10, "400000")
+    _price(db, "S2", "20000", 2)
+    db.execute(_t("INSERT INTO rocket_product_cost_map (product_number, internal_sku, status) "
+                  "VALUES ('S2', 'OHI-DANGLING', 'confirmed')"))
+    # ⓒ 제외로 이미 결정 — 아무것도 하면 안 된다
+    _sale(db, "C", "S3", 10, "300000")
+    _price(db, "S3", "10000", 3)
+    db.execute(_t("INSERT INTO rocket_product_cost_map (product_number, internal_sku, status) "
+                  "VALUES ('S3', 'OHI-SAMPLE', 'ignored')"))
+    db.commit()
+    u = compute_rocket_1p_revenue(db, D, D)["pnl"]["uncosted"]
+    assert u["link_missing_skus"] == 1
+    assert u["cost_missing_skus"] == 1
+    assert u["excluded_skus"] == 1
+    assert u["actionable_skus"] == 2          # 제외는 시키지 않는다
+    by_sku = {t["sku_id"]: t["reason"] for t in u["top"]}
+    assert by_sku == {"S1": "no_link", "S2": "no_cost"}
