@@ -51,6 +51,53 @@ describe("buildCollectionFreshnessBanner", () => {
   });
 });
 
+// ── 실패 문구 정직성 가드 (2026-08-07) ────────────────────────────────
+// ★존재 이유(실사고): 배너가 08-05 23:03의 실패를 시각 없이 "갱신 실패 · 로그인 필요"로
+//   띄웠고, Jino가 그걸 "지금 고장 나 있다"로 읽었다. 실제로는 33시간 동안 아무도 시도를
+//   안 한 것뿐이라 버튼을 누르니 47초 만에 성공했다. 그리고 사유도 하드코딩이라, 로그인과
+//   무관한 실패(브라우저 크래시 등)까지 "로그인 필요"라고 잘못 말하고 있었다.
+describe("failed 문구는 실패 시각과 실제 사유에 근거해야 한다", () => {
+  it("실패 시각을 'MM-DD HH:MM'으로 붙인다", () => {
+    const b = buildCollectionFreshnessBanner(
+      wrap([s({ state: "failed", label: "ofix 판매분석", last_error_at: "2026-08-05T23:03:54.847247" })]),
+    );
+    expect(b?.items[0].text).toContain("08-05 23:03");
+  });
+
+  it("last_error에 '로그인'이 있을 때만 '로그인 필요'를 붙인다", () => {
+    const login = buildCollectionFreshnessBanner(
+      wrap([s({ state: "failed", last_error: "vendor-summary 실패 — 'login' 재실행 필요. [로그인 필요]" })]),
+    );
+    expect(login?.items[0].text).toContain("로그인 필요");
+
+    // 브라우저 크래시 — 로그인과 무관하다. 예전 코드는 여기도 '로그인 필요'라고 적었다.
+    const crash = buildCollectionFreshnessBanner(
+      wrap([s({ state: "failed", last_error: "Target page, context or browser has been closed" })]),
+    );
+    expect(crash?.items[0].text).not.toContain("로그인");
+    expect(crash?.items[0].text).toContain("갱신 실패");
+  });
+
+  it("last_error_at이 없거나 잘려도 크래시 없이 시각만 생략한다", () => {
+    for (const bad of [null, "2026-08-05"]) {
+      const b = buildCollectionFreshnessBanner(wrap([s({ state: "failed", last_error_at: bad })]));
+      expect(b?.items[0].text).toContain("갱신 실패");
+      expect(b?.items[0].text).not.toContain("(");
+    }
+  });
+
+  it("표기는 원문 슬라이스와 정확히 일치한다(Date 파싱으로 바뀌면 깨진다)", () => {
+    // ★전문(全文) 고정: 백엔드가 주는 건 naive KST ISO다(utils/kst.py). 구현이 new Date()로
+    //   바뀌면 실행 타임존에 따라 시각이 밀리는데, 개발자 Mac은 KST라 '가끔만' 깨진다 —
+    //   그런 회귀는 전문 고정이라야 잡힌다(toContain은 부분 일치라 놓친다).
+    const b = buildCollectionFreshnessBanner(
+      wrap([s({ state: "failed", label: "ofix 판매분석",
+                last_error_at: "2026-08-05T23:03:54.847247", last_error: "로그인 필요" })]),
+    );
+    expect(b?.items[0].text).toBe("ofix 판매분석 갱신 실패(08-05 23:03) · 로그인 필요");
+  });
+});
+
 // ── 배너 항목 ↔ 갱신 대상 결합 가드 (2026-08-03) ──────────────────────
 // ★존재 이유: 배너의 '지금 갱신'은 items[].key로 갱신 대상을 고른다. 백엔드가 key를 바꾸거나
 //   빌더가 key를 안 실으면 버튼이 **조용히 아무것도 갱신하지 않는다** — 링크였던 시절과

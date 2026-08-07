@@ -6,7 +6,6 @@ import { Link, NavLink, Outlet, useLocation } from "react-router-dom";
 import SchedulerStatus from "./SchedulerStatus";
 import {
   getAdCostCookieStatus,
-  requestAdCostRefresh,
   getSchedulerHealth,
   getCollectionStatus,
   type AdCostCookieStatus,
@@ -133,8 +132,6 @@ export default function Layout() {
   const [rocketOpen, setRocketOpen] = useState(rocketActive);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [adCookie, setAdCookie] = useState<AdCostCookieStatus | null>(null);
-  const [adRefreshing, setAdRefreshing] = useState(false);
-  const [adRefreshMsg, setAdRefreshMsg] = useState<string | null>(null);
   const [health, setHealth] = useState<SchedulerHealth | null>(null);
   const [collection, setCollection] = useState<CollectionStatus | null>(null);
   // 수집 신선도 배너 '지금 갱신' 상태 — 2026-08-03까지 이 자리는 링크였고, 눌러도 페이지만
@@ -153,24 +150,6 @@ export default function Layout() {
       if (collClearTimer.current !== null) window.clearTimeout(collClearTimer.current);
     };
   }, []);
-
-  // 배너 '지금 갱신' — stale(쿠키 정상, Mac 페처 지연)일 때 실제 갱신 요청.
-  // request_refresh 플래그 set → Mac 데몬이 다음 폴링(~20초)에서 fetch·push. 12초 뒤 상태 재확인.
-  async function handleAdRefresh() {
-    setAdRefreshing(true);
-    setAdRefreshMsg(null);
-    try {
-      await requestAdCostRefresh();
-      setAdRefreshMsg("갱신 요청됨 — Mac 페처가 켜져 있으면 ~20초 후 반영됩니다.");
-      setTimeout(() => {
-        getAdCostCookieStatus().then(setAdCookie).catch(() => { /* 무시 */ });
-      }, 12000);
-    } catch {
-      setAdRefreshMsg("갱신 요청 실패 — 쿠키 재설정이 필요할 수 있습니다.");
-    } finally {
-      setAdRefreshing(false);
-    }
-  }
 
   // 채널 페이지로 직접 진입하면 그룹을 자동으로 펼침
   useEffect(() => {
@@ -407,9 +386,18 @@ export default function Layout() {
           <span className="text-base font-bold text-gray-900">ohisell</span>
         </header>
 
-        {/* 광고쿠키 수집 중단 전역 경고 — 어느 페이지에 있든 보임 (광고비 stale 방지) */}
-        {/* 크론 꺼짐 > red > stale 우선순위: 크론이 꺼져 있으면 쿠키가 멀쩡해도 push가 안 와 재설정은 헛수고 */}
-        {(adCookie?.refresh_cron_enabled === false || adCookie?.status === "red" || adCookie?.stale) && (
+        {/* 광고쿠키 배너 — ★"버튼으로 안 되는 것"만 담는다 (2026-08-07).
+            여기 있던 stale 갈래(페처 지연 → '지금 갱신')를 들어냈다. 이유: stale은
+            `cookie_status.last_success_at`로 판정하는데, 아래 수집 신선도 배너의 `ofix_ad`도
+            **같은 행·같은 필드**(ad_cost_sync._cookie_row(db).last_success_at)를 읽는다 —
+            같은 사실을 두 배너가 각자 판정해 같은 화면에 두 줄로 떴다(2026-08-07 실측:
+            양쪽 last_success_at가 `2026-08-07T07:53:18.036504`로 완전 동일).
+            ★가시성 구멍 없음: 신선도 배너가 24h(warn)에 먼저 뜨고 여기 stale은 26h였다.
+              단 26~48h 구간의 색은 빨강 → 노랑으로 내려간다(신선도 배너의 균일 규칙을 따름).
+            남은 두 갈래(크론 꺼짐·쿠키 만료)는 갱신 버튼으로 해결되지 않고 각자 다른 처방이
+            필요하다 → 이 배너는 '이동' 전용이 되고, '액션'은 신선도 배너 한 곳에만 있다. */}
+        {/* 크론 꺼짐 > red 우선순위: 크론이 꺼져 있으면 쿠키가 멀쩡해도 push가 안 와 재설정은 헛수고 */}
+        {(adCookie?.refresh_cron_enabled === false || adCookie?.status === "red") && (
           <div className="flex items-center gap-3 bg-red-600 text-white px-4 py-2 text-sm">
             <span className="font-semibold shrink-0">🔴 쿠팡 광고비 수집 중단</span>
             {adCookie?.refresh_cron_enabled === false ? (
@@ -426,33 +414,18 @@ export default function Layout() {
                 </Link>
               </>
             ) : (
+              // 쿠키 만료 → 재설정 폼으로 (Mac이 fetch해도 인증 실패하므로 갱신 요청은 무의미)
               <>
                 <span className="text-red-100 min-w-0 truncate">
-                  {adRefreshMsg ?? (
-                    <>
-                      광고비 수집이 멈췄습니다 — {adCookie?.status === "red" ? "쿠키 만료(재설정 필요)" : "로컬 페처 확인 필요"}
-                      {adCookie?.last_success_at && ` (마지막 수집 ${adCookie.last_success_at.slice(0, 10)})`}.
-                    </>
-                  )}
+                  광고비 수집이 멈췄습니다 — 쿠키 만료(재설정 필요)
+                  {adCookie?.last_success_at && ` (마지막 수집 ${adCookie.last_success_at.slice(0, 10)})`}.
                 </span>
-                {adCookie?.status === "red" ? (
-                  // 쿠키 만료 → 재설정 폼으로 (Mac이 fetch해도 인증 실패하므로 갱신 요청 무의미)
-                  <Link
-                    to="/coupang-ops?adcookie=open"
-                    className="ml-auto shrink-0 bg-white text-red-700 font-medium px-3 py-1 rounded hover:bg-red-50"
-                  >
-                    쿠키 다시 설정 →
-                  </Link>
-                ) : (
-                  // stale(쿠키 정상, 페처 지연) → 실제 갱신 요청
-                  <button
-                    onClick={handleAdRefresh}
-                    disabled={adRefreshing}
-                    className="ml-auto shrink-0 bg-white text-red-700 font-medium px-3 py-1 rounded hover:bg-red-50 disabled:opacity-60"
-                  >
-                    {adRefreshing ? "요청 중…" : "지금 갱신 →"}
-                  </button>
-                )}
+                <Link
+                  to="/coupang-ops?adcookie=open"
+                  className="ml-auto shrink-0 bg-white text-red-700 font-medium px-3 py-1 rounded hover:bg-red-50"
+                >
+                  쿠키 다시 설정 →
+                </Link>
               </>
             )}
           </div>
