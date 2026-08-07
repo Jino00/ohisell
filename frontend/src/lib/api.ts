@@ -1575,6 +1575,10 @@ export function fetchPnlAuditAtoms(p: {
 }
 // ★from/to는 **화면이 보고 있는 창**이다 — 생략하면 안 된다. 창을 좁히면 분담금 «모름»
 //   판정이 달라져 화면이 «—»로 그린 행에 숫자가 찍힌다(원자 파생의 창 종속성 계약).
+// ★★서버 계약(다른 둘과 다르다): `date_from`·`date_to`가 **필수**이고 기본 창이 없다 —
+//   빠지면 422다. 또 `date`가 그 창 밖이어도 422다(안 막으면 `atom: null`이 「그날 판매
+//   없음」과 「창 밖」 둘을 뜻하게 된다). 아래 페처는 넷을 항상 보내므로 지금 동작은
+//   문제없다 — 인자를 선택형으로 바꾸는 순간 런타임 422가 되니 그때 서버부터 볼 것.
 export function fetchPnlAuditAtom(p: {
   date: string; optionId: string; from: string; to: string;
 }): Promise<PnlAuditAtomDetail> {
