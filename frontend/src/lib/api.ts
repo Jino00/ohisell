@@ -1321,6 +1321,42 @@ export interface Rocket1PRevenueOption {
   our_share: string | null;        // our ÷ consumer (0~1)
   ad_spend: string | null;
   roas: string | null;             // ★우리 매출 기준
+  // ── 손익(2026-08-07) ── null=모름이지 0이 아니다.
+  cost: string | null;             // 등록원가 × 판매수량 — null=원가 미등록 SKU
+  unit_cost: string | null;
+  promo_burden: string | null;     // null=분담금 원천 미수집(제안서 대기)
+  net_profit: string | null;       // 우리 매출−원가−분담금−광고비−납부세액
+  profit_rate: string | null;      // net ÷ our_revenue (0~1)
+}
+
+/** 원가를 아직 못 붙인 SKU — "이걸 등록하면 손익이 완성된다"는 작업 목록이다. */
+export interface Rocket1PUncostedSku {
+  sku_id: string | null;
+  product_name: string | null;
+  qty: number;
+  our_revenue: string | null;      // 납품단가까지 모르면 null
+  consumer_revenue: string;
+}
+
+/** 손익 블록. ★basis='costed_subset'이면 **원가 확인분만** 더한 값이다(창 전체가 아니다). */
+export interface Rocket1PPnl {
+  basis: "full" | "costed_subset" | null;
+  qty: number | null;
+  revenue: string | null;
+  cost: string | null;
+  promo_burden: string | null;
+  ad_spend: string | null;         // 옵션 그레인(Billboard) 합 — 계정 총액과 정의가 다르다
+  vat: string | null;
+  net_profit: string | null;
+  profit_rate: string | null;
+  cost_coverage: string | null;    // 원가 붙은 매출 ÷ 납품단가 붙은 매출
+  revenue_priced: string | null;
+  promo_burden_known: boolean;
+  uncosted: {
+    skus: number; qty: number; our_revenue: string;
+    top: Rocket1PUncostedSku[];
+  };
+  note: string;
 }
 
 export interface Rocket1PRevenue {
@@ -1335,6 +1371,7 @@ export interface Rocket1PRevenue {
     our_share: string | null;
     roas: string | null;
   };
+  pnl: Rocket1PPnl;
   coverage: {
     sales_data_covered: boolean;
     sales_data_from: string | null; sales_data_to: string | null;

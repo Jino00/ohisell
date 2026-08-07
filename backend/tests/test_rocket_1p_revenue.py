@@ -6,6 +6,7 @@
 #   ③ RoAS는 **우리 매출 기준** — 소비자 매출로 내면 못 번 돈으로 광고를 정당화하게 된다
 #   ④ 합계는 대시보드와 **같은 함수**에서 온다(재도출 금지)
 #   ⑤ 이 모듈은 회계(net_profit)에 결합되지 않는다
+#   ⑥ 손익은 **원가 확인분만** 더한다 — 원가 미상을 0으로 넣으면 이익이 부풀어 보인다(2026-08-07)
 #
 # 값은 2026-08-04 라이브 실측: 소비자 6,536,000 · 우리 3,885,820 · 판매 342.
 # 옵션 1위 95752961189(Z폴드8) 소비자 3,024,800 · 판매 152.
@@ -26,6 +27,7 @@ from app.services.coupang import rocket_1p_channel_pnl as pnl
 from app.services.coupang.rocket_1p_revenue import compute_rocket_1p_revenue
 
 VENDOR = pnl.ROCKET_1P_VENDOR_ID
+ZERO_D = Decimal("0")
 D = date(2026, 8, 4)
 
 
@@ -246,6 +248,158 @@ def test_ad_axis_is_unified_manual_xlsx_is_not_dropped(db):
     db.commit()
     # 자동수집(coupang_ad_report)엔 그날이 없다 — 예전엔 그래서 0원이었다.
     assert _agg_rocket_ad(db, d, d, VENDOR) == Decimal("763873")
+
+
+# ══════════════════════════════════════════════════════════════════
+# 손익 (Jino 2026-08-07: "옆에 원가, 그래서 우리 손익이 얼마인지까지")
+#
+# 이 묶음이 지키는 것 — 전부 "이익을 부풀리지 않는다"의 다른 얼굴이다:
+#   ⓐ 원가 미상 SKU를 **원가 0으로 넣지 않는다**(그러면 그 매출이 통째로 이익이 된다)
+#   ⓑ 그래서 손익은 **원가 확인분 부분집합**이고, 화면이 그 사실을 알 수 있게 basis를 낸다
+#   ⓒ 옵션 행들의 순이익 합 = 합계 타일 (원 단위까지)
+#   ⓓ 분담금을 모르면 손익 자체를 내지 않는다
+#   ⓔ 소비자 매출(쿠팡가)은 손익 어디에도 들어가지 않는다
+# ══════════════════════════════════════════════════════════════════
+from app.services.profit_calculator import payable_vat  # noqa: E402
+
+
+def _cost(s, sku, cost_price, internal_sku=None):
+    """SellC 등록원가 → 상품번호 매핑(confirmed만 원가로 인정된다)."""
+    from sqlalchemy import text as _t
+    isku = internal_sku or f"OHI-{sku}"
+    s.execute(_t("INSERT INTO product_master (internal_sku, product_name, cost_price) "
+                 "VALUES (:i, :n, :c)"), {"i": isku, "n": isku, "c": cost_price})
+    s.execute(_t("INSERT INTO rocket_product_cost_map (product_number, internal_sku, status) "
+                 "VALUES (:p, :i, 'confirmed')"), {"p": str(sku), "i": isku})
+
+
+def test_net_profit_uses_the_same_formula_as_the_accounting_engine(db):
+    """순이익 = 우리 매출 − 원가 − 분담금 − 광고비 − 납부세액. 새 공식을 만들지 않는다."""
+    _sale(db, "A", "S1", 10, "1000000")
+    _price(db, "S1", "60000", 1)            # 우리 매출 600,000
+    _cost(db, "S1", 20000)                  # 원가 200,000
+    _ad_option(db, "A", "100000")
+    _ad_account(db, "100000")
+    db.commit()
+    r = compute_rocket_1p_revenue(db, D, D)
+    rev, cost, ad = Decimal("600000"), Decimal("200000"), Decimal("100000")
+    expected = rev - cost - ZERO_D - ad - payable_vat(rev, cost, ZERO_D, ad)
+    assert Decimal(r["pnl"]["net_profit"]) == expected.quantize(Decimal("0.01"))
+    assert Decimal(r["options"][0]["cost"]) == cost
+    # 이익률은 **우리 매출** 기준이다 — 소비자 매출(1,000,000)로 내면 이익률이 낮게 보인다.
+    assert Decimal(r["pnl"]["profit_rate"]) == (expected / rev).quantize(Decimal("0.0001"))
+
+
+def test_uncosted_sku_is_excluded_not_counted_as_zero_cost(db):
+    """★ⓐ 이 테스트가 이 기능의 존재 이유다.
+
+    원가 미상 SKU를 원가 0으로 넣으면 그 매출이 **통째로 이익**이 되어 손익이 부풀어 보인다.
+    라이브 2026-08-06엔 우리 매출의 51%가 원가 미상이었다 — 그대로 냈으면 순이익이 두 배로
+    보였을 것이다. 대신 매출·원가·광고비를 **같은 부분집합으로 제한**한다.
+    """
+    _sale(db, "A", "S1", 10, "1000000")
+    _price(db, "S1", "60000", 1)
+    _cost(db, "S1", 20000)                  # 원가 있음 → 손익 대상
+    _sale(db, "B", "S2", 10, "900000")
+    _price(db, "S2", "50000", 1)            # 우리 매출은 알지만 원가는 모른다
+    _ad_option(db, "A", "100000")
+    _ad_option(db, "B", "300000")
+    db.commit()
+    p = compute_rocket_1p_revenue(db, D, D)["pnl"]
+    assert p["basis"] == "costed_subset"
+    assert Decimal(p["revenue"]) == Decimal("600000")        # B의 500,000은 안 들어온다
+    assert Decimal(p["revenue_priced"]) == Decimal("1100000")
+    assert Decimal(p["cost_coverage"]) == Decimal("0.5455")
+    # ★B의 광고비도 함께 빠진다 — 매출만 빼고 비용을 남기면 이익이 반대로 과소해진다.
+    assert Decimal(p["ad_spend"]) == Decimal("100000")
+    # 무엇을 등록하면 채워지는지 이름으로 말한다.
+    assert p["uncosted"]["skus"] == 1
+    assert p["uncosted"]["top"][0]["sku_id"] == "S2"
+    assert Decimal(p["uncosted"]["our_revenue"]) == Decimal("500000")
+
+
+def test_full_coverage_reports_basis_full(db):
+    """커버리지 100%면 부분집합 = 전체 — 그때만 이게 창 전체의 손익이다."""
+    _sale(db, "A", "S1", 10, "1000000")
+    _price(db, "S1", "60000", 1)
+    _cost(db, "S1", 20000)
+    db.commit()
+    p = compute_rocket_1p_revenue(db, D, D)["pnl"]
+    assert p["basis"] == "full" and Decimal(p["cost_coverage"]) == Decimal("1.0000")
+    assert p["uncosted"]["skus"] == 0
+
+
+def test_option_net_profits_sum_to_the_total_tile(db):
+    """★ⓒ 표와 타일이 1원이라도 다르면 사용자는 둘 다 안 믿는다.
+
+    VAT가 ÷11이라 순이익엔 무한소수가 붙는다 — 반올림 없이 두면 누적 순서 차이만으로
+    끝자리가 어긋난다(라이브 실측 2e-25원). 그래서 행을 전 단위로 못 박고 그 **합**만 낸다.
+    """
+    for i in range(7):
+        _sale(db, f"O{i}", f"S{i}", 3 + i, str(100000 * (i + 1)))
+        _price(db, f"S{i}", str(7777 + i), i + 1)
+        _cost(db, f"S{i}", 3333 + i)
+        _ad_option(db, f"O{i}", str(4321 * (i + 1)))
+    db.commit()
+    r = compute_rocket_1p_revenue(db, D, D)
+    total = sum(Decimal(o["net_profit"]) for o in r["options"] if o["net_profit"] is not None)
+    assert str(total) == r["pnl"]["net_profit"]
+
+
+def test_unknown_promo_burden_blocks_profit_entirely(db):
+    """★ⓓ 창에 걸친 프로모션의 할인액을 모르면 **손익을 내지 않는다**(0으로 접지 않는다)."""
+    from sqlalchemy import text as _t
+    _sale(db, "A", "S1", 10, "1000000")
+    _price(db, "S1", "60000", 1)
+    _cost(db, "S1", 20000)
+    db.execute(_t("INSERT INTO coupang_rocket_promotion (request_id, vendor_id, start_at, end_at) "
+                  "VALUES ('686180', :v, '2026-08-01 00:00:00', '2026-08-15 23:59:59')"),
+               {"v": VENDOR})   # 할인액(coupang_promo_discount_item) 없음 = 모름
+    db.commit()
+    r = compute_rocket_1p_revenue(db, D, D)
+    assert r["pnl"]["promo_burden_known"] is False
+    assert r["pnl"]["net_profit"] is None and r["pnl"]["basis"] is None
+    assert r["options"][0]["net_profit"] is None
+    # 매출 축은 그대로 살아 있다 — 분담금을 모른다고 매출이 사라지진 않는다.
+    assert Decimal(r["totals"]["our_revenue"]) == Decimal("600000")
+
+
+def test_promo_burden_is_subtracted_per_option(db):
+    """분담금은 실측된 아는 비용이다 — 옵션 손익에서도 빠진다."""
+    from sqlalchemy import text as _t
+    _sale(db, "A", "S1", 10, "1000000")
+    _price(db, "S1", "60000", 1)
+    _cost(db, "S1", 20000)
+    db.execute(_t("INSERT INTO coupang_rocket_promotion (request_id, vendor_id, start_at, end_at) "
+                  "VALUES ('686180', :v, '2026-08-01 00:00:00', '2026-08-15 23:59:59')"),
+               {"v": VENDOR})
+    db.execute(_t("INSERT INTO coupang_promo_discount_item "
+                  "(request_id, product_number, discount_type, discount_value) "
+                  "VALUES ('686180', 'S1', 'FIXED', 1500)"))
+    db.commit()
+    r = compute_rocket_1p_revenue(db, D, D)
+    assert Decimal(r["options"][0]["promo_burden"]) == Decimal("15000")   # 10개 × 1,500
+    assert Decimal(r["pnl"]["promo_burden"]) == Decimal("15000")
+
+
+def test_consumer_revenue_never_enters_profit(db):
+    """★ⓔ 소비자 매출로 손익을 내면 우리가 못 번 돈이 이익이 된다(D-CPP-2)."""
+    _sale(db, "A", "S1", 10, "1000000")     # 소비자 축
+    _price(db, "S1", "60000", 1)            # 우리 축 600,000
+    _cost(db, "S1", 20000)
+    db.commit()
+    p = compute_rocket_1p_revenue(db, D, D)["pnl"]
+    assert Decimal(p["revenue"]) == Decimal("600000")
+    # 소비자 매출 기준이었다면 순이익이 이보다 훨씬 컸을 것이다.
+    assert Decimal(p["net_profit"]) < Decimal("600000")
+
+
+def test_uncovered_window_has_no_profit(db):
+    """판매분석이 그 창을 안 덮으면 손익도 «모름»이다 — 0원 이익이 아니다."""
+    _ad_account(db, "29412515", d=date(2026, 1, 15))
+    db.commit()
+    p = compute_rocket_1p_revenue(db, date(2026, 1, 1), date(2026, 1, 31))["pnl"]
+    assert p["net_profit"] is None and p["cost_coverage"] is None and p["basis"] is None
 
 
 def test_ad_axis_overlapping_day_is_not_double_counted(db):

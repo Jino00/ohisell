@@ -5,6 +5,14 @@
 #   그래서 08-04 하루를 두 화면에서 보면 6,536,000원과 3,885,820원이 나오고 왜 다른지 알 수 없다.
 #   두 축을 **나란히** 놓는 화면이 지금 어디에도 없다 — 이 SA가 그 화면의 데이터를 만든다.
 #
+# ★손익이 여기 붙었다 (Jino, 2026-08-07): *"여기에 비용을 넣어서 우리 손익까지 넣자.
+#   광고비까지는 나오는데, 옆에 원가, 그래서 우리 손익이 얼마인지까지 나오게 하자"*
+#   — 종전 주석은 "순이익을 여기 놓지 않는다"였다. 그 근거는 **원가 축이 없다**였는데
+#   `_sell_through_window`가 이미 원가·분담금·VAT를 계산하고 있었고, 화면만 그걸 못 보고
+#   있었다. 손익 축은 **우리 매출(납품가)** 하나뿐이다 — 소비자 매출은 손익에 들어가지 않는다.
+#   ★대신 원가 커버리지가 100%가 아니면 그 손익은 **원가 확인분 부분집합**의 것이다
+#   (라이브 2026-08-06 커버리지 48.9%). 미상분을 원가 0으로 넣어 전체인 척하지 않는다.
+#
 # ★★금지선(D-CPP-2 불변): 여기서 내는 어떤 값도 net_profit·종합조망에 결합되지 않는다.
 #   소비자 매출은 **쿠팡의 매출**이지 우리 것이 아니다(1P는 쿠팡이 사입해 자기 가격으로 판다).
 #   더하면 같은 물건을 납품·판매 두 번 세는 이중계상이고, 쿠팡이 할인 행사를 할 때마다
@@ -25,28 +33,35 @@ from sqlalchemy.orm import Session
 from app.services.coupang.rocket_1p_channel_pnl import (
     BASIS_SALES,
     BASIS_SETTLEMENT,
+    COST_BY_PRODUCT_CTE,
+    LATEST_UNIT_PRICE_CTE,
     ROCKET_1P_VENDOR_ID,
     ZERO,
     compute_rocket_1p_summary_row,
+    promo_burden_by_option,
     window_freshness as _window_freshness,
 )
+from app.services.profit_calculator import payable_vat
 
 log = logging.getLogger(__name__)
 
 _DEFAULT_LIMIT = 100
+
+# 원가 미상 SKU를 몇 개까지 이름으로 불러줄 것인가. 목록의 목적은 "이걸 등록하면 손익이
+# 완성된다"를 알리는 것이라, 매출 큰 순으로 몇 개면 대개 커버리지의 대부분을 설명한다.
+_UNCOSTED_TOP_N = 10
 
 # 옵션 그레인 매출 두 축.
 # ★`_SELL_THROUGH_SQL`(손익용)과 조인이 **다르다**: 저쪽은 납품단가를 못 붙이는 SKU를 INNER JOIN으로
 #   떨어뜨린다(손익을 못 내니 맞다). 여기는 **LEFT JOIN**이다 — 소비자 매출은 단가와 무관하게 관측된
 #   사실이라, 단가를 모른다고 그 판매를 화면에서 지우면 "안 팔렸다"로 보인다. 대신 우리 매출만
 #   NULL로 두고 화면이 "—"로 그린다(0으로 접지 않는다: 0은 "공짜로 줬다"는 뜻이다).
-_OPTION_SQL = """
-WITH price AS (
-  SELECT product_number, unit_purchase_price,
-         ROW_NUMBER() OVER (PARTITION BY product_number ORDER BY purchase_order_seq DESC) rn
-  FROM coupang_rocket_purchase_order_item
-),
-p AS (SELECT product_number, unit_purchase_price FROM price WHERE rn = 1)
+#
+# ★원가도 **LEFT JOIN**이다(같은 이유). 원가를 못 붙인 SKU를 떨어뜨리면 그 판매가 화면에서
+#   사라지고, 남은 것만으로 낸 이익률이 전체인 척한다. 원가만 NULL로 두고 "—"로 그린다.
+# ★`price`·`cost` CTE는 손익 엔진에서 **import**한다 — 여기서 따로 쓰면 두 정의가 갈라진다.
+_OPTION_SQL = f"""
+WITH {LATEST_UNIT_PRICE_CTE}, {COST_BY_PRODUCT_CTE}
 SELECT s.option_id                                       AS option_id,
        MAX(s.sku_id)                                     AS sku_id,
        MAX(s.product_name)                               AS product_name,
@@ -55,9 +70,13 @@ SELECT s.option_id                                       AS option_id,
        SUM(CASE WHEN p.unit_purchase_price IS NOT NULL
                 THEN s.qty * p.unit_purchase_price END)  AS our_revenue,
        MAX(p.unit_purchase_price)                        AS unit_price,
-       SUM(s.visitors)                                   AS visitors
+       SUM(s.visitors)                                   AS visitors,
+       SUM(CASE WHEN c.cost_price IS NOT NULL
+                THEN s.qty * c.cost_price END)           AS cost,
+       MAX(c.cost_price)                                 AS unit_cost
 FROM coupang_rocket_sales_daily s
 LEFT JOIN p ON p.product_number = s.sku_id
+LEFT JOIN cost c ON c.product_number = s.sku_id
 WHERE s.vendor_id = :vendor AND s.date >= :since AND s.date <= :until
 GROUP BY s.option_id
 """
@@ -84,6 +103,20 @@ def _d(v) -> Decimal:
 def _dn(v) -> Decimal | None:
     """None은 **None으로 남긴다** — '모른다'와 '0'을 가르는 자리."""
     return None if v is None else _d(v)
+
+
+_CENT = Decimal("0.01")
+
+
+def _money(v: Decimal) -> Decimal:
+    """옵션 손익을 전 단위로 못 박는다.
+
+    ★왜 반올림하나: VAT가 ÷11이라 순이익엔 무한소수가 붙는다. 그대로 두면 옵션 행들의 합과
+      합계 타일이 **누적 순서 차이만으로** 끝자리에서 어긋난다(라이브 실측 2e-25원). 금액이
+      1원이라도 다르면 사용자는 둘 다 안 믿는다 — 그래서 합계는 반올림된 행들의 **합**으로만
+      만든다(타일을 따로 계산하지 않는다).
+    """
+    return v.quantize(_CENT)
 
 
 def _ratio(num: Decimal | None, den: Decimal | None) -> Decimal | None:
@@ -133,20 +166,63 @@ def compute_rocket_1p_revenue(
     ad_by_option = {
         str(r[0]): _d(r[1]) for r in db.execute(text(_OPTION_AD_SQL), params).fetchall()
     }
+    # ★분담금은 **모를 수 있다**(제안서 미수집 기간). None이면 손익 자체를 내지 않는다 —
+    #   0으로 접으면 그 프로모션의 할인액만큼 이익이 부풀어 보인다. 판정은 엔진이 한다.
+    burden_by_option = promo_burden_by_option(db, date_from, date_to, vendor)
 
     options: list[dict] = []
     consumer_total = ZERO
     qty_total = 0
     priced_qty = 0
-    for option_id, sku_id, product_name, qty, consumer, ours, unit_price, visitors in rows:
+    # ── 손익 누계는 **원가를 붙인 옵션만** 더한다(부분집합) ──────────────
+    pnl_qty = 0
+    pnl_revenue = pnl_cost = pnl_burden = pnl_ad = pnl_net = ZERO
+    uncosted: dict[str, dict] = {}
+    for (option_id, sku_id, product_name, qty, consumer, ours,
+         unit_price, visitors, cost, unit_cost) in rows:
         q = int(qty or 0)
         consumer_d = _d(consumer)
         ours_d = _dn(ours)
+        cost_d = _dn(cost)
         consumer_total += consumer_d
         qty_total += q
         if ours_d is not None:
             priced_qty += q
         ad = ad_by_option.get(str(option_id))
+        # 광고 행이 없는 옵션 = 그 옵션에 광고를 안 돌린 것 → 손익에선 0원이 맞다.
+        # (표시는 계속 None="—"로 둔다 — "0원 썼다"와 "행이 없다"를 화면에서 구분하려고.)
+        ad_for_pnl = ad if ad is not None else ZERO
+        burden = None if burden_by_option is None else burden_by_option.get(str(option_id), ZERO)
+
+        # ★순이익 = 우리 매출 − 원가 − 분담금 − 광고비 − 납부세액.
+        #   손익 엔진(`_sell_through_window`)이 창 단위로 쓰는 **같은 공식**이다.
+        #   VAT가 선형이라 옵션별로 쪼개 더해도 창 합계와 정확히 같다(반올림 안 함).
+        net = None
+        if ours_d is not None and cost_d is not None and burden is not None:
+            vat = payable_vat(ours_d, cost_d, burden, ad_for_pnl)
+            net = _money(ours_d - cost_d - burden - ad_for_pnl - vat)
+            pnl_qty += q
+            pnl_revenue += ours_d
+            pnl_cost += cost_d
+            pnl_burden += burden
+            pnl_ad += ad_for_pnl
+            pnl_net += net
+        elif cost_d is None:
+            # 원가를 못 붙인 SKU — "이것만 등록하면 손익이 완성된다"를 화면이 말할 수 있게
+            # SKU(=원가 등록 단위)로 묶어 모은다.
+            key = str(sku_id) if sku_id is not None else f"option:{option_id}"
+            u = uncosted.setdefault(key, {
+                "sku_id": sku_id, "product_name": product_name,
+                "qty": 0, "our_revenue": ZERO, "consumer_revenue": ZERO,
+                "our_revenue_known": True,
+            })
+            u["qty"] += q
+            u["consumer_revenue"] += consumer_d
+            if ours_d is None:
+                u["our_revenue_known"] = False
+            else:
+                u["our_revenue"] += ours_d
+
         options.append({
             "option_id": str(option_id),
             "sku_id": sku_id,
@@ -163,10 +239,74 @@ def compute_rocket_1p_revenue(
             # ★RoAS는 **우리 매출 기준**이다. 소비자 매출로 내면 우리가 못 번 돈으로 광고를
             #   정당화하게 된다(1P에서 소비자가는 쿠팡의 매출이다).
             "roas": _s(_ratio(ours_d, ad)),
+            # ── 손익 ── 원가 미상이면 cost·net 모두 None이다(0이 아니다).
+            "cost": None if cost_d is None else str(cost_d),
+            "unit_cost": None if unit_cost is None else str(_d(unit_cost)),
+            "promo_burden": None if burden is None else str(burden),
+            "net_profit": None if net is None else str(net),
+            "profit_rate": _s(_ratio(net, ours_d)),
         })
 
     options.sort(key=lambda o: Decimal(o["consumer_revenue"]), reverse=True)
     shown = options[: max(1, limit)]
+
+    # ── 손익 블록 ─────────────────────────────────────────────────
+    # ★★이 순이익은 **원가를 붙인 부분집합**의 것이다(pnl.basis 참조). 왜 전체로 안 내는가:
+    #   원가 미상 SKU를 0원 원가로 넣으면 그 매출이 통째로 이익이 되어 **이익이 부풀어 보인다**
+    #   (라이브 2026-08-06: 매출의 51%가 원가 미상이었다). 그래서 매출·원가·분담금·광고비를
+    #   **전부 같은 부분집합으로 제한**한다 — 축이 섞이지 않아 이익률이 그 부분집합에선 참이다.
+    #   커버리지가 100%면 부분집합 = 전체이고, 그때만 이 값이 창 전체의 손익이다.
+    # ★합계는 옵션 행들의 합과 **원 단위까지 같다**(반올림 없음) — 화면에서 표와 타일이
+    #   어긋나면 사용자는 둘 다 안 믿는다.
+    priced_revenue = sum(
+        (Decimal(o["our_revenue"]) for o in options if o["our_revenue"] is not None), ZERO
+    )
+    pnl_vat = pnl_revenue - pnl_cost - pnl_burden - pnl_ad - pnl_net
+    cost_coverage = _ratio(pnl_revenue, priced_revenue) if priced_revenue > ZERO else None
+    uncosted_rows = sorted(
+        uncosted.values(),
+        key=lambda u: (u["our_revenue"] if u["our_revenue_known"] else u["consumer_revenue"]),
+        reverse=True,
+    )
+    has_pnl = covered and pnl_revenue > ZERO
+    pnl_block = {
+        # costed_subset = 원가 확인분만 / full = 전량(커버리지 100%)
+        "basis": None if not has_pnl else ("full" if cost_coverage == Decimal("1.0000")
+                                           else "costed_subset"),
+        "qty": pnl_qty if has_pnl else None,
+        "revenue": _s(pnl_revenue) if has_pnl else None,
+        "cost": _s(pnl_cost) if has_pnl else None,
+        "promo_burden": _s(pnl_burden) if has_pnl else None,
+        "ad_spend": _s(pnl_ad) if has_pnl else None,
+        "vat": _s(pnl_vat) if has_pnl else None,
+        "net_profit": _s(pnl_net) if has_pnl else None,
+        "profit_rate": _s(_ratio(pnl_net, pnl_revenue)) if has_pnl else None,
+        # 원가를 붙인 매출 ÷ 납품단가를 붙인 매출. 1.0이면 창 전체의 손익이다.
+        "cost_coverage": _s(cost_coverage) if covered else None,
+        "revenue_priced": _s(priced_revenue) if covered else None,
+        # ★분담금을 모르면 손익 자체가 없다 — 화면이 "왜 안 나오는지" 말할 수 있게 이유를 싣는다.
+        "promo_burden_known": burden_by_option is not None,
+        "uncosted": {
+            "skus": len(uncosted_rows),
+            "qty": sum(u["qty"] for u in uncosted_rows),
+            "our_revenue": str(sum((u["our_revenue"] for u in uncosted_rows), ZERO)),
+            "top": [
+                {
+                    "sku_id": u["sku_id"],
+                    "product_name": u["product_name"],
+                    "qty": u["qty"],
+                    # 납품단가까지 모르면 우리 매출도 모른다 — 0으로 접지 않는다.
+                    "our_revenue": str(u["our_revenue"]) if u["our_revenue_known"] else None,
+                    "consumer_revenue": str(u["consumer_revenue"]),
+                }
+                for u in uncosted_rows[:_UNCOSTED_TOP_N]
+            ],
+        },
+        "note": "순이익 = 우리 매출(납품가) − 원가 − 프로모션 분담금 − 광고비 − 납부세액. "
+                "basis='costed_subset'이면 **원가를 붙인 옵션만** 더한 값이라 창 전체의 "
+                "손익이 아니다 — 원가 미상 SKU를 등록하면 커버리지가 오르고 basis가 'full'이 "
+                "된다. 광고비는 옵션 그레인(Billboard)이라 계정 총액과 정의가 다르다.",
+    }
 
     ad_option_sum = sum(ad_by_option.values(), ZERO)
     # 판매 축에서 온 값들은 **판매분석이 그 창을 덮을 때만** 사실이다. 안 덮으면 전부 모름.
@@ -187,6 +327,7 @@ def compute_rocket_1p_revenue(
             "our_share": _s(_ratio(our_revenue, consumer_total)) if covered else None,
             "roas": _s(_ratio(our_revenue, ad_spend)) if covered else None,
         },
+        "pnl": pnl_block,
         # 두 경로가 어긋나면 그건 **납품단가 커버리지**다 — 숨기지 않고 드러낸다.
         "coverage": {
             "sales_data_covered": covered,     # ★False면 위 판매 축 값들이 전부 null이다

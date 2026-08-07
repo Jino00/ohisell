@@ -273,19 +273,31 @@ def _ad_spend_sum(db: Session, date_from: date, date_to: date,
 #    가드 테스트가 있다. 우리는 호출하지 않고 공식만 맞춘 것이라 이름을 적으면 거짓 양성이 된다.)
 _COST_COVERAGE_MIN = Decimal(os.getenv("ROCKET_1P_COST_COVERAGE_MIN") or "0.95")
 
-_SELL_THROUGH_SQL = """
-WITH price AS (           -- SKU별 최근 납품단가(발주 라인에서, PO 최신순)
+# ── 「납품단가」와 「원가」의 단일 정의 (재도출 금지) ──────────────────────
+# ★두 CTE는 **여기가 유일한 정의**다. 매출 두 축 대조 화면(S2)이 같은 개념을 옵션
+#   그레인으로 쓰는데, 거기서 SQL을 따로 쓰면 언젠가 갈라진다 — 그리고 갈라지면 화면 둘이
+#   다른 이익을 말하는데 어느 쪽이 맞는지 아무도 모른다. 광고 축이 실제로 그렇게 갈라져
+#   63일 43,147,487원이 통째로 빠졌었다(위 `_ad_spend_by_day` 주석). 같은 실수를 안 한다.
+LATEST_UNIT_PRICE_CTE = """
+price AS (           -- SKU별 최근 납품단가(발주 라인에서, PO 최신순)
   SELECT product_number, unit_purchase_price,
          ROW_NUMBER() OVER (PARTITION BY product_number ORDER BY purchase_order_seq DESC) rn
   FROM coupang_rocket_purchase_order_item
 ),
-p AS (SELECT product_number, unit_purchase_price FROM price WHERE rn = 1),
-cost AS (                 -- 상품번호 → internal_sku → 등록원가(부가세 포함 축, D 2026-08-04)
+p AS (SELECT product_number, unit_purchase_price FROM price WHERE rn = 1)
+"""
+
+COST_BY_PRODUCT_CTE = """
+cost AS (            -- 상품번호 → internal_sku → 등록원가(부가세 포함 축, D 2026-08-04)
   SELECT m.product_number, pm.cost_price
   FROM rocket_product_cost_map m
   JOIN product_master pm ON pm.internal_sku = m.internal_sku
   WHERE m.status = 'confirmed' AND pm.cost_price IS NOT NULL
 )
+"""
+
+_SELL_THROUGH_SQL = f"""
+WITH {LATEST_UNIT_PRICE_CTE}, {COST_BY_PRODUCT_CTE}
 SELECT s.date                                              AS d,
        SUM(s.qty)                                          AS qty,
        SUM(s.qty * p.unit_purchase_price)                  AS revenue,
@@ -373,6 +385,31 @@ def _promo_burden_by_day(db: Session, date_from: date, date_to: date) -> dict[st
     return {str(d)[:10]: _dec(b) for d, b in rows}
 
 
+_PROMO_BURDEN_BY_OPTION_SQL = _PROMO_BURDEN_SQL.replace(
+    "SELECT s.date AS d,", "SELECT s.option_id AS d,"
+).replace("GROUP BY s.date", "GROUP BY s.option_id")
+
+
+def promo_burden_by_option(
+    db: Session, date_from: date, date_to: date, vendor_id: str | None = None
+) -> dict[str, Decimal] | None:
+    """옵션별 프로모션 분담금. **모르면 None** — `_promo_burden_by_day`와 같은 판정자다.
+
+    왜 여기 있나: 매출 화면이 옵션별 손익을 내려면 옵션 그레인 분담금이 필요한데, "분담금을
+    모를 때가 언제인가"는 회계 규칙이라 이 파일이 정본이다. 판정 규칙이 두 곳에 생기면
+    한쪽만 고쳐져 화면이 "분담금 0"을 사실처럼 낸다(그게 정확히 2026-08-05에 났던 사고다).
+    """
+    guard = _promo_burden_by_day(db, date_from, date_to)
+    if guard is None:
+        return None
+    rows = db.execute(
+        text(_PROMO_BURDEN_BY_OPTION_SQL),
+        {"vendor": vendor_id or ROCKET_1P_VENDOR_ID,
+         "since": date_from.isoformat(), "until": date_to.isoformat()},
+    ).fetchall()
+    return {str(o): _dec(b) for o, b in rows}
+
+
 def _sell_through_by_day(db: Session, date_from: date, date_to: date) -> dict[str, dict]:
     """판매 축 일자별 원자료. 반환 {날짜: {qty, revenue, revenue_costed, cost}}.
 
@@ -413,7 +450,8 @@ def _sell_through_window(db: Session, date_from: date, date_to: date) -> dict:
         vat = payable_vat(rev, cost, burden, ad)
         net = rev - cost - burden - ad - vat
     return {
-        "revenue": rev, "cost": cost, "promo_burden": burden, "ad_spend": ad,
+        "revenue": rev, "revenue_costed": rev_costed,
+        "cost": cost, "promo_burden": burden, "ad_spend": ad,
         "coverage": coverage, "net_profit": net, "by_day": by_day,
         "qty": sum(v["qty"] for v in by_day.values()),
     }
