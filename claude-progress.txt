@@ -2080,3 +2080,22 @@ RG 옛 공백(04-20~05-03) Jino 종결 승인(13:34) — 공백 아님(배송비
     `aa9c425`(브랜치 `claude/cost-unknown`)에서 배포돼 있다. 덮으면 그 작업이 사라져 안 덮었다.
     그 브랜치 main 병합 후 → merge → `npm run build` → `safe_deploy.sh --frontend`
   · 상세: .claude/memory/HANDOFF_stale-closure-sync-selection_20260807.md
+
+[2026-08-07 14:30] issue #235 — prod 배포 완료 (스탬프 d468745, Jino 14:13 지시)
+  · PR #240 병합(14:28) 직후 merge → build → safe_deploy --frontend
+  · ★**prod 라이브 합격**(performance timing, 같은 페이지 세션):
+      CommandCenter — sync/realtime **30.4s** · 6.6s 「30일」클릭 `from=2026-07-09`
+                    → **30.6s 재조회도 `from=2026-07-09`** (버그였다면 `2026-08-01`)
+      AdReport      — sync/realtime **31.7s** · 6.8s 조회 `date_from=2026-01-01`
+                    → **31.7s 재조회도 `2026-01-01`**
+  · ★★**CAS가 두 번 거부했고 성격이 달랐다 — 여기서 내가 한 번 틀렸다**:
+      ①aa9c425(claude/cost-unknown) — 병합해 보니 `git diff HEAD^1 HEAD`가 **완전히 비었다**.
+        그 브랜치 내용은 이미 전부 main에 있었다. **CAS는 커밋 신원을 보는데 나는 거기서
+        "덮으면 그 세션 작업이 사라진다"를 추론했다 — 내용을 대조하지 않고.** Jino에게 그렇게
+        보고했고, 병합 후에야 무손실임을 알았다. 잘못된 근거로 옳은 행동을 한 셈
+      ②a8c1412(claude/rocket-1p-pnl-onscreen, PR #240) — 이건 **진짜로 달랐다**
+        (Rocket1PRevenue.tsx +172행 등 main에 없음). 덮었으면 실제로 지워졌다
+    → **CAS 거부 시 절차: 먼저 `git diff <내HEAD> <prod스탬프> -- frontend/src`로 내용 대조.**
+      비면 신원 문제일 뿐, 안 비면 진짜 clobber. 지금은 둘을 구분할 수단이 절차에 없다
+  · ⚠️구조 신호: prod 프론트 스탬프가 **하루에 두 번 미병합 브랜치**를 가리켰다(07:04·13:41).
+    배포→나중에 PR 순서가 반복돼 병합 후 배포하려는 세션이 매번 막힌다 — 주간 감사 후보

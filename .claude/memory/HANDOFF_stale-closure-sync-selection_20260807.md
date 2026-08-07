@@ -79,17 +79,24 @@
 - ⚠️**codex 교차 리뷰 미실행** — 3렌즈 전부 usage limit(`try again at Aug 9th, 2026 4:16 PM`)
   으로 EXIT:1, 게이트 INCONCLUSIVE. Opus 1기 적대 리뷰로 대체했다(P1 1건 검출·수정).
   **미완주 렌즈를 "findings 없음"으로 세지 않았다**(교훈 #123).
-- ⚠️**prod 프론트 미배포** — `safe_deploy.sh --frontend`가 CAS 거부. prod가 다른 세션의
-  **미병합 커밋 `aa9c425`**(브랜치 `claude/cost-unknown`, `fix(pnl-tab): 원장 불균형일 때
-  배너가…`)에서 배포돼 있다. 덮으면 그 세션 작업이 prod에서 사라진다 → **덮지 않았다.**
+- ✅**prod 배포 완료** (2026-08-07 14:30 KST, 스탬프 `d468745` = main tip).
+  ★가는 길에 CAS가 **두 번** 거부했고 **두 번의 성격이 달랐다** — 이게 이번 건의 교훈이다:
+  ①`aa9c425`(`claude/cost-unknown`) — 병합해 보니 `git diff HEAD^1 HEAD`가 **완전히 비었다**.
+    그 브랜치 내용은 이미 전부 main에 있었다(내용 무손실). **CAS는 커밋 신원을 보는데 나는
+    거기서 "내용이 사라진다"를 추론했다 — 대조하지 않고.** 잘못된 근거로 옳은 행동을 했다.
+  ②`a8c1412`(`claude/rocket-1p-pnl-onscreen`, PR #240) — 이건 **진짜로 달랐다**
+    (`Rocket1PRevenue.tsx` +172행 등 main에 없음). 덮었으면 실제로 지워졌다.
+  → **CAS 거부 시 절차: 먼저 `git diff <내HEAD> <prod스탬프> -- frontend/src`로 내용을 대조하라.**
+    비어 있으면 신원 문제일 뿐이고, 비어 있지 않으면 진짜 clobber다.
 - ⚠️(다른 세션 이월, 손대지 않음) prod `backend/.env` 38행에 따옴표 없는 iCloud 경로 →
   `. .env` 시 파싱 에러.
 
 ## 6. 다음에 할 작업 (미완료)
 
-- [ ] **prod 프론트 배포** — `claude/cost-unknown`이 main에 병합된 뒤:
-      `git fetch origin && git merge origin/main` → `(cd frontend && npm run build)` →
-      `scripts/safe_deploy.sh --frontend`. **병합만 하고 옛 dist를 올리면 안 된다.**
+- [x] ~~prod 프론트 배포~~ — 2026-08-07 14:30 완료. PR #240 병합(14:28) 직후 merge→build→deploy.
+      **라이브 합격 증거(prod, performance timing)**:
+      · CommandCenter — sync 30.4s, 클릭 `from=2026-07-09` → 완료 직후 재조회도 `from=2026-07-09`
+      · AdReport — sync 31.7s, 조회 `date_from=2026-01-01` → 완료 직후 재조회도 `2026-01-01`
 - [ ] **codex 소급 리뷰** — 2026-08-09 16:16 이후 쿼터 복구 시 PR #239 diff에 대해
       `/codex-panel` 실행(컨텍스트 팩은 issue #235 본문 + PR #239 본문으로 재구성 가능).
 - [ ] (선택) 워크트리 `cool-driscoll-31712d` 정리 — 브랜치는 병합 완료.
