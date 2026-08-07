@@ -1348,8 +1348,9 @@ export interface Rocket1PUncostedSku {
    *  no_cost = 연결은 있는데 그 내부 SKU에 원가가 없다
    *  excluded = 원가 제외로 **이미 결정**됨(시키면 안 된다) */
   reason: "no_link" | "no_cost" | "excluded";
-  /** ★이번 조회 기간에 **처음 팔리기 시작**했나. 새 폰이 나올 때마다 생기고, 나오자마자
-   *  매출 1위가 된다(실측: 신규 3개가 미연결 매출의 56%). 매출 순에 묻히면 안 된다. */
+  /** ★**최근에 새로 나온** 상품인가(판별자 = 발주 첫 등장일, 지평은 new_sku_window_days).
+   *  「안 팔리던 게 이제 팔린다」와 「새로 나왔다」는 다르고, 후자만 매핑이 급하다.
+   *  새 폰이 나올 때마다 생기고 나오자마자 매출 1위가 된다(실측: 신규 3개가 미연결 매출의 56%). */
   is_new: boolean;
   first_sold_at: string | null;
   first_po_at: string | null;
@@ -1391,6 +1392,7 @@ export interface Rocket1PPnl {
     loss_confirmed_skus: number;
     new_skus: number;              // ★이번 기간에 새로 팔리기 시작한 미연결 SKU
     new_our_revenue: string;
+    new_sku_window_days: number;   // ★판정 지평(발주 첫 등장 기준). 숨은 기준을 두지 않는다.
     top: Rocket1PUncostedSku[];    // actionable만
   };
   note: string;

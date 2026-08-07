@@ -355,10 +355,12 @@ export default function Rocket1PRevenue() {
                             매출 1위가 되는데, 매출 순 목록에선 옛 꼬리에 묻힌다. */}
                         {p.uncosted.new_skus > 0 && (
                           <><b className="text-amber-800">
-                            ★이번 기간에 <b>새로 팔리기 시작한</b> 상품 {p.uncosted.new_skus}개가
-                            아직 연결 안 됐습니다</b>(우리 매출 {won(p.uncosted.new_our_revenue)}) —
-                            아래 목록 맨 위에 「신규」로 표시했습니다. 새 기종이 나오면 곧바로
-                            매출 상위가 되므로 이것부터 이어주세요.{" "}</>
+                            ★최근 {p.uncosted.new_sku_window_days}일 안에 <b>새로 나온</b> 상품
+                            {" "}{p.uncosted.new_skus}개가 아직 연결 안 됐습니다</b>
+                            (우리 매출 {won(p.uncosted.new_our_revenue)}) — 아래 목록 맨 위에
+                            「신규」로 표시했습니다. 새 기종이 나오면 곧바로 매출 상위가 되므로
+                            이것부터 이어주세요. (판별은 <b>발주에 처음 등장한 날</b> 기준입니다 —
+                            "안 팔리던 게 이제 팔린다"와는 다릅니다.){" "}</>
                         )}
                         {p.uncosted.link_missing_skus > 0 && (
                           <><b className="text-amber-800">

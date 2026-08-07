@@ -24,7 +24,8 @@
 from __future__ import annotations
 
 import logging
-from datetime import date
+import os
+from datetime import date, timedelta
 from decimal import Decimal
 
 from sqlalchemy import text
@@ -465,24 +466,34 @@ def compute_rocket_1p_revenue(
                        u["our_revenue"] if u["our_revenue_known"] else u["consumer_revenue"]),
         reverse=True,
     )
-    def _newness(u: dict) -> dict:
-        """이 SKU가 **이번 창에서 처음 팔리기 시작**했는가.
+    # 「최근에 나온 상품」의 지평. ★조회 창 길이와 **분리한다**(2026-08-07 라이브 교정):
+    #   창 안에서만 보면 기본 7일 화면에서 3주 전 출시한 신제품이 안 잡히고, 창을 넓히면
+    #   "그 창에서 처음 관측"이 무더기로 신규가 된다. 지평은 창이 아니라 **출시 시점**이다.
+    #   숨은 기준을 두지 않으려고 응답에 그대로 싣는다.
+    new_sku_days = int(os.getenv("ROCKET_1P_NEW_SKU_DAYS") or "90")
 
-        ★단정하지 않는다: 판매분석은 롤링(약 2개월)이라 관측 시작일과 같은 값이면 그 전은
-          모른다. 그때는 `bounded=True`로 내려보내 화면이 "신규"라고 말하지 않게 한다.
-          발주 첫 등장일(`first_po_at`)은 전 이력이 있어 그 한계를 받지 않으므로, 그쪽이
-          창 안이면 **관측 한계와 무관하게 신규**다.
+    def _newness(u: dict) -> dict:
+        """이 SKU가 **최근에 새로 나온 것**인가.
+
+        ★판별자는 **발주에 처음 등장한 날**이다. 판매분석의 첫 관측일이 아니다 —
+          "안 팔리던 게 이제 팔린다"와 "새로 나왔다"는 다른 일이고, 전자는 재노출·시즌이라
+          매핑이 급하지 않다. 라이브 교정(2026-08-07): 발주 2025-07-25짜리가 판매 첫 관측만
+          창 안이라는 이유로 「신규」로 잡혔다. 발주 이력은 전 범위(2025-07~)라 이 판정에
+          쓸 수 있는 유일한 축이다.
+        ★발주 이력이 아예 없을 때만 판매 축으로 떨어진다. 그때도 판매분석 롤링창(약 2개월)
+          시작일과 첫 관측일이 같으면 그 전은 **모르므로** 단정하지 않는다.
         """
         fs, fp = u["first_sold_at"], u["first_po_at"]
-        lo, hi = date_from.isoformat(), date_to.isoformat()
-        po_new = fp is not None and lo <= fp <= hi
-        sold_new = fs is not None and lo <= fs <= hi
+        horizon = (date_to - timedelta(days=new_sku_days)).isoformat()
         bounded = fs is not None and obs_from is not None and fs <= obs_from
+        if fp is not None:
+            is_new = fp >= horizon
+        else:
+            is_new = fs is not None and fs >= horizon and not bounded
         return {
             "first_sold_at": fs,
             "first_po_at": fp,
-            # 발주가 창 안이면 확실한 신규. 판매만 창 안이면 관측 한계에 걸리지 않을 때만.
-            "is_new": bool(po_new or (sold_new and not bounded)),
+            "is_new": bool(is_new),
             "first_sold_at_bounded": bool(bounded),
         }
 
@@ -616,6 +627,8 @@ def compute_rocket_1p_revenue(
             "new_skus": sum(1 for u in actionable if u["is_new"]),
             "new_our_revenue": str(sum((u["our_revenue"] for u in actionable
                                         if u["is_new"] and u["our_revenue_known"]), ZERO)),
+            # ★판정에 쓴 지평을 숨기지 않는다 — 기준이 안 보이면 화면을 믿을 근거가 없다.
+            "new_sku_window_days": new_sku_days,
             "top": [
                 {
                     "sku_id": u["sku_id"],
