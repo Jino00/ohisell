@@ -9,7 +9,7 @@
 
 ## ★ 진행 중 메가 프로젝트 (세션 시작 시 반드시 확인 — 기획 변형 금지)
 - **단일 진입점: `docs/TRACKS.md`** — 활성 트랙 인덱스를 먼저 읽을 것.
-- **현재 주력 트랙: `docs/tracks/active/track_naver-ad-optimization.md`** (네이버 SA 광고 최적화 — 우리판 MOP, 확정 결정 D-NAO-1~34 누적).
+- **현재 주력 트랙: `docs/tracks/active/track_naver-ad-optimization.md`** — **PAO(파오) = Profit Ad Optimizer**, 네이버 SA 광고 최적화 엔진(이름 확정 D-NAO-162). 광고 최적화 엔진이되 최적화 기준이 ROAS가 아니라 **총이익**이다. 옛 문서의 「우리판 MOP」가 이것이고, **MOP는 앞으로도 네이버(벤치마크)**를 뜻한다. 결정 접두사는 `D-NAO` 유지.
   - F0~F2+E1a 완료·prod 가동 중(크론 07:50/08:00/08:05/08:10). **현재 스프린트 = 실행 루프(X): `docs/PLAN_naver-ad-execution-loop.md` — 이 트랙을 건드리는 모든 세션은 그 문서 §0(방향 고정)을 먼저 읽고 §7 체크리스트로 현재 위치를 확인할 것**(D-NAO-34, 스프린트 끝날 때까지 유지. 배경 문서: ref 25 갭 분석·ref 26 논문 서베이).
   - 스프린트 X 진행 중 금지선: Phase 구조·개방 순서(제외키워드→정지재개→입찰) 임의 변경 금지, 예산 변경 개방은 스코프 밖, 위임 스위치는 Jino만. 설계=fable, 구현=Sonnet.
   - 이 트랙 작업은 main 기준 워크트리에서(2026-07-08 main 병합 완료 — 구 admiring-solomon 브랜치 고정 지침은 해제). 작업 전 `git branch --show-current` 확인 습관 유지.
