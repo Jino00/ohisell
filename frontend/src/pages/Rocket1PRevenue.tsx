@@ -580,7 +580,12 @@ export default function Rocket1PRevenue() {
                         .{" "}
                         {outsidePnl > 0
                           ? <>손익 밖에 남은 합이 <b>{won(String(outsidePnl))}</b>입니다
-                              {!partial && " (원가 결손은 없고, 귀속할 판매가 없는 돈만 남았습니다)"}.</>
+                              {/* ★술어가 `!partial`이면 안 된다(2R 트리아지): 남은 돈에 구멍1이
+                                  섞여 있으면 「귀속할 판매가 없는 돈만」이 거짓이다. 판별자는
+                                  basis가 아니라 **구멍1이 0인가**다 — 그게 그 문장의 내용이다. */}
+                              {adUncosted === 0
+                                ? " (원가 결손은 없고, 귀속할 판매가 없는 돈만 남았습니다)"
+                                : ` (그중 ${won(p.ad_uncosted)}은 원가 미상이라 빠진 것이고, 아래 목록을 해소하면 손익에 들어옵니다)`}.</>
                           : <b>손익 밖에 남은 광고비는 없습니다.</b>}
                         {" "}계정 확정 광고비(report/SALES)는 {won(p.ad_account_total)}이고
                         원장과의 차 {won(data.ad_reconciliation.diff)}은

@@ -197,6 +197,17 @@ describe("손익 사다리 — 광고 원장 네 통", () => {
     const text = (await footnote()).textContent ?? "";
     expect(text).toContain("손익 밖에 남은 합이 37,431원");     // 구멍1만
     expect(text).not.toContain("170,413원");                   // 이미 차감된 것까지 세지 않는다
+    // ★남은 돈이 구멍1이면 「귀속할 판매가 없는 돈만」은 거짓이다(2R 트리아지).
+    expect(text).not.toContain("귀속할 판매가 없는 돈만");
+    expect(text).toContain("원가 미상이라 빠진 것");
+  });
+
+  it("남은 돈에 구멍1이 없을 때만 «귀속할 판매가 없는 돈만»이라고 말한다", async () => {
+    mount(withPnl({
+      basis: "full", ad_uncosted: "0", ad_no_sales_days: "0",
+      ad_no_sales: "99232", ad_unattributed: "99232", ad_no_sales_included: false,
+    }));
+    expect((await footnote()).textContent ?? "").toContain("귀속할 판매가 없는 돈만");
   });
 
   it("F-M4 차감 대상이 아닌 통에는 «위 손익에 미포함» 경고가 붙어 있다", async () => {
