@@ -1,6 +1,10 @@
 # 세션 인수인계: 로켓1P 손익 «근거 화면» (D-CPP-26, PR #258)
 > 저장 2026-08-08 02:1x KST · 트랙: **쿠팡 손익 정합** (`docs/tracks/active/track_coupang-promo-pnl.md`)
-> ⚠️**PR #258 미병합 · prod 배포 0 · DB 변경 0.** 코드는 전부 커밋·push 완료.
+>
+> ## ⛔ 이 파일은 승계됐다 — **`HANDOFF_pnl-audit-DONE+review-policy_20260809.md`를 읽어라**
+> 아래 §2·§6의 「**PR #258 미병합 · prod 배포 0 · 라이브 검증 남음**」은 **이 시점의 사실이었고 지금은 거짓이다.**
+> 2026-08-08 08:0x~08:3x KST에 병합(`badab63`)·prod 배포·라이브 합격 검증까지 전부 끝났다.
+> 이 파일은 그때까지의 설계 근거·리뷰 이력 기록으로만 읽을 것. **다시 배포하지 마라.**
 
 ## 1. 프로젝트 위치 및 환경
 - 로컬: `~/Library/Mobile Documents/com~apple~CloudDocs/1Personal/AI Program/Ohiselling`
