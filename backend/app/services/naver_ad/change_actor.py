@@ -88,28 +88,28 @@ def classify(source: str, *, action: str | None = None) -> str:
 
 
 # ── 규칙 ⑤ — 우리 실집행과 대조되면 되찾는다 ─────────────────────────
-"""왜 필요한가 (2026-08-09 라이브 실증):
-  2026-07-30 10:50에 **우리가** Jino 지시로 캠페인 5개를 정지했다(`manual_emergency_stop`).
-  entity_sync는 하루 1회(07:37)만 도는데, 다음날 아침 스냅샷이 "꺼져 있네"를 보고
-  `external_status_change`로 적었고 규칙 ①이 그걸 **대행사**로 보냈다. prod 화면에서
-  04·15·P 캠페인 3줄이 그렇게 "대행사가 껐다"로 서 있었다.
-  즉 규칙 ①의 전제("external_* = 외부가 바꾼 것")가 **탐지 지연** 때문에 깨진다.
+# 왜 필요한가 (2026-08-09 라이브 실증):
+#   2026-07-30 10:50에 **우리가** Jino 지시로 캠페인 5개를 정지했다(`manual_emergency_stop`).
+#   entity_sync는 하루 1회(07:37)만 도는데, 다음날 아침 스냅샷이 "꺼져 있네"를 보고
+#   `external_status_change`로 적었고 규칙 ①이 그걸 **대행사**로 보냈다. prod 화면에서
+#   04·15·P 캠페인 3줄이 그렇게 "대행사가 껐다"로 서 있었다.
+#   즉 규칙 ①의 전제("external_* = 외부가 바꾼 것")가 **탐지 지연** 때문에 깨진다.
 
-★되찾기는 증거로만 한다. 문자열 추측·시간 근접만으로는 안 되고 셋이 다 맞아야 한다:
-  ①같은 대상(entity_id) ②같은 축(status/bid) ③**같은 결과값**. 값까지 같아야 하는 이유는,
-  우리가 끈 것을 대행사가 되켠 경우(값이 반대)를 우리 것으로 삼키면 안 되기 때문이다.
+# ★되찾기는 증거로만 한다. 문자열 추측·시간 근접만으로는 안 되고 셋이 다 맞아야 한다:
+#   ①같은 대상(entity_id) ②같은 축(status/bid) ③**같은 결과값**. 값까지 같아야 하는 이유는,
+#   우리가 끈 것을 대행사가 되켠 경우(값이 반대)를 우리 것으로 삼키면 안 되기 때문이다.
 
-★창은 시각의 근거에 따라 다르다 — 이게 정확도의 대부분이다:
-  · `detected`(우리가 알아챈 시각만 아는 행) = 36시간. 탐지가 하루 1회라 실제 간극이
-    24시간에 육박하고(이번 사례 20.8시간), 크론이 밀려도 견디게 여유를 뒀다.
-  · `occurred`(네이버 editTm에서 온 진짜 발생 시각) = 10분. 언제 일어났는지 아는데도
-    36시간을 열어두면, 우리가 어제 넣은 값과 우연히 같은 값을 오늘 대행사가 넣었을 때
-    우리 것으로 뺏는다. 아는 만큼만 좁힌다.
+# ★창은 시각의 근거에 따라 다르다 — 이게 정확도의 대부분이다:
+#   · `detected`(우리가 알아챈 시각만 아는 행) = 36시간. 탐지가 하루 1회라 실제 간극이
+#     24시간에 육박하고(이번 사례 20.8시간), 크론이 밀려도 견디게 여유를 뒀다.
+#   · `occurred`(네이버 editTm에서 온 진짜 발생 시각) = 10분. 언제 일어났는지 아는데도
+#     36시간을 열어두면, 우리가 어제 넣은 값과 우연히 같은 값을 오늘 대행사가 넣었을 때
+#     우리 것으로 뺏는다. 아는 만큼만 좁힌다.
 
-★못 찾으면 현행 유지(=대행사)다. fail-safe 방향은 "덜 되찾기"다 — 크론이 이틀 밀리면
-  되찾지 못할 뿐, 틀린 주장을 하지는 않는다.
-★사람 정정(규칙 ④)이 이것보다 위다. 순서: ①②③ → ⑤ → ④.
-"""
+# ★못 찾으면 현행 유지(=대행사)다. fail-safe 방향은 "덜 되찾기"다 — 크론이 이틀 밀리면
+#   되찾지 못할 뿐, 틀린 주장을 하지는 않는다.
+# ★사람 정정(규칙 ④)이 이것보다 위다. 순서: ①②③ → ⑤ → ④.
+
 
 AXIS_STATUS = "status"
 AXIS_BID = "bid"
@@ -126,10 +126,6 @@ EVIDENCE_WINDOW: dict[str, timedelta] = {
     "occurred": timedelta(minutes=10),
 }
 
-_OURS_ACTIONS_ALL: frozenset[str] = frozenset(
-    a for actions in OURS_ACTIONS_BY_AXIS.values() for a in actions
-)
-
 _OPS_LABEL = {
     "set_user_lock": "정지·재개",
     "manual_emergency_stop": "긴급 정지",
@@ -144,11 +140,17 @@ class OursExecution:
     change_log_id: int
     at: datetime
     action: str
-    value: object
+    #: `axis_value()`가 준 (축, 정규값). 축이 값에 묶여 있어 축이 다르면 애초에 같을 수 없다.
+    value: tuple[str, object]
 
 
-def axis_value(axis: str | None, raw: str | None) -> object | None:
-    """행의 after 값을 축의 **정규형**으로. 모르면 None(= 증거로 못 씀).
+def axis_value(axis: str | None, raw: str | None) -> tuple[str, object] | None:
+    """행의 after 값을 축의 **정규형** `(축, 값)`으로. 모르면 None(= 증거로 못 씀).
+
+    ★왜 축을 값에 묶어 돌려주나(적대 리뷰 2026-08-09): 파이썬에서 `True == 1`이라,
+      값만 비교하면 **입찰 1원**과 **상태 정지**가 같은 값이 된다. 축이 값의 일부면
+      그 충돌이 구조적으로 불가능해지고, "같은 축이어야 한다"가 비교식 안에 들어간다
+      (규칙을 지키는 코드와 규칙을 검사하는 코드가 갈라지지 않는다).
 
     ★원천마다 방언이 다르다: change_log는 JSON(`{"userLock": true}` 또는 엔티티 통짜),
       agency_op은 평문(`'off'`, `'1500'`). 소재(ad)의 입찰은 한 겹 더 안쪽(`adAttr` 문자열)에
@@ -169,32 +171,36 @@ def axis_value(axis: str | None, raw: str | None) -> object | None:
             return None
 
     if axis == AXIS_STATUS:
+        paused: bool | None = None
         if isinstance(payload, dict):
             if "userLock" in payload:
-                return bool(payload["userLock"])
-            return None
-        low = text.lower()
-        if low in ("off", "paused", "false"):
-            return True
-        if low in ("on", "eligible", "true"):
-            return False
-        return None
+                paused = bool(payload["userLock"])
+        else:
+            low = text.lower()
+            if low in ("off", "paused", "false"):
+                paused = True
+            elif low in ("on", "eligible", "true"):
+                paused = False
+        return None if paused is None else (AXIS_STATUS, paused)
 
     if axis == AXIS_BID:
+        bid: int | None = None
         if isinstance(payload, dict):
             if payload.get("bidAmt") is not None:
-                return _as_int(payload["bidAmt"])
-            # 소재(ad) — 실효 입찰은 adAttr 안에 문자열 JSON으로 들어 있다(D-NAO-B1).
-            attr = payload.get("adAttr")
-            if isinstance(attr, str):
-                try:
-                    attr = json.loads(attr)
-                except (ValueError, TypeError):
-                    return None
-            if isinstance(attr, dict) and attr.get("bidAmt") is not None:
-                return _as_int(attr["bidAmt"])
-            return None
-        return _as_int(text)
+                bid = _as_int(payload["bidAmt"])
+            else:
+                # 소재(ad) — 실효 입찰은 adAttr 안(문자열 또는 dict)에 있다(D-NAO-B1).
+                attr = payload.get("adAttr")
+                if isinstance(attr, str):
+                    try:
+                        attr = json.loads(attr)
+                    except (ValueError, TypeError):
+                        attr = None
+                if isinstance(attr, dict) and attr.get("bidAmt") is not None:
+                    bid = _as_int(attr["bidAmt"])
+        else:
+            bid = _as_int(text)
+        return None if bid is None else (AXIS_BID, bid)
 
     return None
 
@@ -207,15 +213,24 @@ def _as_int(value: object) -> int | None:
 
 
 def load_ours_executions(
-    db: Session, entity_ids: set[str], *, since: datetime, until: datetime
+    db: Session, entity_ids: set[str], *, axes: set[str], since: datetime, until: datetime
 ) -> dict[tuple[str, str], list[OursExecution]]:
     """규칙 ⑤의 원료 — {(entity_id, axis): [우리 실집행…]}.
 
     ★`dry_run=False` **그리고** `after_value is not None`만 증거다: 가드레일이 막아 실제로는
       안 바뀐 시도는 광고를 바꾸지 않았으므로 외부 변경을 설명하지 못한다(이 화면이
       `include_blocked`로 가르는 것과 같은 기준).
+    ★`axes`로 action을 좁히는 건 성능이 아니라 **로드량** 때문이다(적대 리뷰 P2-2): 우리
+      실집행 행의 `after_value`는 소재 하나가 4KB짜리 엔티티 JSON이라, 365일 구간에서
+      전 축을 다 끌어오면 `_Candidate` 2패스가 피하려던 «수십 MB»를 다른 쿼리로 되살린다.
+      상태 변경만 감지된 구간에서 입찰 집행 수천 건을 읽을 이유가 없다.
     """
-    if not entity_ids:
+    if not entity_ids or not axes:
+        return {}
+    actions = tuple(
+        a for axis, group in OURS_ACTIONS_BY_AXIS.items() if axis in axes for a in group
+    )
+    if not actions:
         return {}
     out: dict[tuple[str, str], list[OursExecution]] = {}
     ids = list(entity_ids)
@@ -230,7 +245,7 @@ def load_ours_executions(
             )
             .filter(
                 NaverChangeLog.entity_id.in_(ids[i : i + 500]),
-                NaverChangeLog.action.in_(tuple(_OURS_ACTIONS_ALL)),
+                NaverChangeLog.action.in_(actions),
                 NaverChangeLog.dry_run.is_(False),
                 NaverChangeLog.after_value.isnot(None),
                 NaverChangeLog.changed_at >= since,

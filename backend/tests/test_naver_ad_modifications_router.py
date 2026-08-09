@@ -716,3 +716,96 @@ def test_evidence_window_keys_match_time_basis_codes():
         modification_feed.TIME_BASIS_DETECTED,
         modification_feed.TIME_BASIS_OCCURRED,
     }
+
+
+# ── 규칙 ⑤ 증거의 3기둥을 각각 고정한다 (적대 리뷰 2026-08-09 P1-2·P1-3) ──
+#
+# ★왜 따로 쓰나: 「값이 같아야 한다」만 테스트가 있었고 **대상·축·판독불가**는 무방비였다.
+#   적대 리뷰가 entity_id를 통째로 무시하는 변이·axis를 무시하는 변이·값을 못 읽을 때
+#   True로 추측하는 변이를 넣었는데 **전부 살아남았다**(53건 전건 통과). 통과하는데
+#   아무것도 안 지키는 테스트였다는 뜻이다.
+
+
+def test_rule5_requires_same_entity(client, db):
+    """기둥① 대상 — 우리가 끈 건 cmp-1인데 꺼진 게 보인 건 cmp-2면 우리 것이 아니다.
+
+    ★**두 캠페인이 같은 아침에 함께 감지되는** 모양으로 쓴다(prod 07-31이 정확히 그랬다:
+      우리가 끈 것 3건 + 남이 끈 것이 한 화면에 있었다). 대상을 하나만 두면 SQL의
+      `entity_id IN (...)`이 우연히 막아줘서, 대조 키에서 대상을 빼는 결함을 못 잡는다."""
+    _seed_our_stop(db)  # 우리가 끈 것 = cmp-1
+    _seed_next_morning_detection(db)  # cmp-1 감지 → 되찾아야 한다
+    _seed_change_log(db, action="external_status_change", entity_type="campaign",
+                     entity_id="cmp-2", campaign_id="cmp-2", before=_UNLOCKED,
+                     after=_LOCKED, at=NEXT_MORNING_SYNC)  # 남이 끈 것 = cmp-2
+
+    body = _get(client, date_from="2026-07-30", date_to="2026-07-31")
+    detections = {r["entity_id"]: r for r in body["rows"]
+                  if r["op_type"] == "external_status_change"}
+    assert detections["cmp-1"]["actor"] == change_actor.ACTOR_OURS
+    assert detections["cmp-2"]["actor"] == change_actor.ACTOR_AGENCY
+    assert body["reclaimed_ours"] == 1
+
+
+def test_rule5_requires_same_axis(client, db):
+    """기둥② 축 — 우리가 만진 건 입찰인데 감지된 건 상태면 설명이 안 된다.
+
+    ★하필 **입찰 1원**을 쓴다: 파이썬에서 `True == 1`이라, 축을 값에 묶지 않으면
+      「상태=정지(True)」와 「입찰=1원」이 같은 값이 되어 축이 달라도 대조가 성립한다.
+      이 테스트가 그 충돌을 못 박는다."""
+    _seed_change_log(db, action="update_bid", entity_type="adgroup", entity_id="grp-1",
+                     before=json.dumps({"bidAmt": 300}), after=json.dumps({"bidAmt": 1}),
+                     at=OURS_STOP_AT)
+    _seed_change_log(db, action="external_status_change", entity_type="adgroup",
+                     entity_id="grp-1", before=_UNLOCKED, after=_LOCKED, at=NEXT_MORNING_SYNC)
+
+    body = _get(client, date_from="2026-07-30", date_to="2026-07-31")
+    detection = next(r for r in body["rows"] if r["op_type"] == "external_status_change")
+    assert detection["actor"] == change_actor.ACTOR_AGENCY
+    assert body["reclaimed_ours"] == 0
+
+
+def test_rule5_unreadable_value_is_not_evidence(client, db):
+    """기둥③ 값 — **못 읽는 값은 추측하지 않는다**(금지선: 조용히 ours로 떨어뜨리지 않기).
+
+    감지 행 after가 축을 읽을 수 없는 형태({"status": "PAUSED"} — userLock이 없다)면
+    "아마 정지겠지"로 메우면 안 된다. 그렇게 메우는 순간 우리 pause와 값이 같다고 판정돼
+    남의 변경을 삼킨다."""
+    _seed_our_stop(db)
+    _seed_next_morning_detection(db, after=json.dumps({"status": "PAUSED"}))
+
+    body = _get(client, date_from="2026-07-30", date_to="2026-07-31")
+    detection = next(r for r in body["rows"] if r["op_type"] == "external_status_change")
+    assert detection["actor"] == change_actor.ACTOR_AGENCY
+    assert detection["actor_evidence"] is None
+    assert body["reclaimed_ours"] == 0
+
+
+def test_rule5_our_execution_must_precede_the_detection(client, db):
+    """창의 **상한** — 감지 이후에 한 집행은 그 감지를 설명하지 못한다.
+
+    ★이 규칙을 지키던 유일한 테스트가 규칙⑤와 무관한 분포 테스트였다(시드 시각이 우연히
+      맞아떨어져 통과). 누가 그 시드를 만지면 커버리지가 통째로 사라지므로 여기 못 박는다."""
+    _seed_our_stop(db, at=NEXT_MORNING_SYNC + timedelta(minutes=1))
+    _seed_next_morning_detection(db)
+
+    body = _get(client, date_from="2026-07-30", date_to="2026-07-31")
+    detection = next(r for r in body["rows"] if r["op_type"] == "external_status_change")
+    assert detection["actor"] == change_actor.ACTOR_AGENCY
+    assert body["reclaimed_ours"] == 0
+
+
+def test_rule5_window_boundaries_are_inclusive(client, db):
+    """창의 양 끝은 **포함**이다 — 정확히 36시간 전, 그리고 감지와 같은 순간."""
+    _seed_our_stop(db, at=NEXT_MORNING_SYNC - timedelta(hours=36))
+    _seed_next_morning_detection(db)
+    body = _get(client, date_from="2026-07-29", date_to="2026-07-31")
+    detection = next(r for r in body["rows"] if r["op_type"] == "external_status_change")
+    assert detection["actor"] == change_actor.ACTOR_OURS, "정확히 36시간 전은 창 안이다"
+
+    db.query(NaverChangeLog).delete()
+    db.commit()
+    _seed_our_stop(db, at=NEXT_MORNING_SYNC)  # 감지와 같은 순간
+    _seed_next_morning_detection(db)
+    body = _get(client, date_from="2026-07-30", date_to="2026-07-31")
+    detection = next(r for r in body["rows"] if r["op_type"] == "external_status_change")
+    assert detection["actor"] == change_actor.ACTOR_OURS

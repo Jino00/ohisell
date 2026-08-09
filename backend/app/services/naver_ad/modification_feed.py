@@ -374,12 +374,19 @@ def _apply_ours_evidence(db: Session, candidates: list[_Candidate]) -> tuple[lis
             ):
                 after_by_key[(source, rid)] = after
 
-    # 조회 창은 후보들의 시각 범위 + 가장 넓은 매칭 창. 창 밖 집행은 어차피 증거가 못 된다.
-    widest = max(change_actor.EVIDENCE_WINDOW.values())
-    since = min(c.at for c in targets) - widest
+    # 조회 창·축은 후보에서 **정확히** 유도한다(적대 리뷰 P2-2). 가장 넓은 창을 일괄로 쓰면,
+    # 후보가 전부 occurred(10분)인 구간에서도 36시간치 실집행을 읽어 온다 — 그 행들의
+    # after_value는 소재 하나가 4KB라 로드량이 그대로 손해다. 창 밖 집행은 어차피 증거가 못 된다.
+    since = min(
+        c.at - change_actor.EVIDENCE_WINDOW.get(c.time_basis, timedelta(0)) for c in targets
+    )
     until = max(c.at for c in targets)
     executions = change_actor.load_ours_executions(
-        db, {c.entity_id for c in targets}, since=since, until=until
+        db,
+        {c.entity_id for c in targets},
+        axes={c.axis for c in targets if c.axis},
+        since=since,
+        until=until,
     )
     if not executions:
         return candidates, 0
