@@ -231,7 +231,7 @@ describe("일별 손익 각주 — 광고비 열이 무엇을 빼놓았는지 �
   it("F-M6 세 통 중 하나라도 0이 아니면 각주가 뜨고 셋을 다 부른다", async () => {
     mount({ ...BASE, daily: DAILY });
     const note = await screen.findByText(
-      (_t, el) => !!el && el.tagName === "P" && (el.textContent ?? "").includes("손익 밖 세 통"));
+      (_t, el) => !!el && el.tagName === "P" && (el.textContent ?? "").includes("일별 광고비 열엔"));
     const text = note.textContent ?? "";
     for (const s of ["132,982원", "33,750원", "99,232원"]) {
       expect(text, `일별 각주에 ${s}가 없다`).toContain(s);
@@ -246,8 +246,78 @@ describe("일별 손익 각주 — 광고비 열이 무엇을 빼놓았는지 �
       daily: [{ ...DAILY[0], ad_no_sales: "0", ad_no_sales_days: "435916" }],
     });
     const note = await screen.findByText(
-      (_t, el) => !!el && el.tagName === "P" && (el.textContent ?? "").includes("손익 밖 세 통"));
+      (_t, el) => !!el && el.tagName === "P" && (el.textContent ?? "").includes("일별 광고비 열엔"));
     expect(note.textContent ?? "").toContain("435,916원");
+  });
+
+  it("basis='full'이면 «위 손익에 섞지 않았다»고 말하지 않는다 — 이미 차감됐다", async () => {
+    /* ★사다리의 «−» 줄과 정면으로 어긋나던 문구. P1-2와 같은 종류인데 이쪽은 일별 각주라
+       basis='full'이 라이브에서 도달 가능해진 2026-08-10에야 드러났다. */
+    mount({
+      ...withPnl({
+        basis: "full", ad_spend: "6092627", ad_uncosted: "0",
+        ad_no_sales_days: "345359", ad_no_sales: "334445",
+        ad_unattributed: "679804", ad_no_sales_included: true, cost_coverage: "1.0000",
+      }, { skus: 0, actionable_skus: 0, link_missing_skus: 0, top: [] }),
+      daily: [{ ...DAILY[0], ad_uncosted: "0", ad_no_sales_days: "345359", ad_no_sales: "334445" }],
+    });
+    const note = await screen.findByText(
+      (_t, el) => !!el && el.tagName === "P" && (el.textContent ?? "").includes("일별 광고비 열엔"));
+    const text = note.textContent ?? "";
+    expect(text).toContain("기간 사다리 순이익에는 이미 차감돼 있습니다");
+    expect(text).not.toContain("위 손익에도 안 들어갔습니다");
+    expect(text).toContain("679,804원");           // 크기는 계속 보인다
+    // ★M-A: 인과절(«왜 이 열에 못 싣나»)이 통째로 사라져도 아무도 안 잡던 자리.
+    expect(text).toContain("원가 확인분 축");
+    // ★«이 셋은»이 아니라 «뒤 두 통은» — ad_uncosted는 어느 분기에서도 차감되지 않는다.
+    expect(text).toContain("뒤 두 통은");
+    expect(text).not.toContain("이 셋은");
+    // ★일별 순이익 합이 사다리보다 큰 금액을 **숫자로** 말한다((345359+334445)×100/110 = 618,004).
+    //   ★★**방향까지** 못 박는다: Σ일별 = pnl_net이고 타일 = pnl_net − 세후차감 이므로 일별이
+    //   «크다». 「작습니다」로 뒤집혀도 금액만 보면 안 잡힌다(M-H 생존분).
+    expect(text).toContain("618,004원 큽니다");
+    expect(text).not.toContain("작습니다");
+    // ★제목이 «세 통»을 말한다 — 「일부가 빠져 있습니다」로 뭉뚱그리면 몇 갈래인지 알 수 없다(M-I).
+    expect(text).toContain("세 통이 빠져 있습니다");
+  });
+
+  it("M-D 세 통이 **어느 하루라도** 있으면 각주가 뜬다 (some이지 every가 아니다)", async () => {
+    // ★픽스처가 하루뿐이면 `some`을 `every`로 바꿔도 안 잡힌다 — 이틀 이상으로 만든다.
+    mount({
+      ...withPnl({ ad_uncosted: "0", ad_no_sales_days: "0", ad_no_sales: "5000",
+                   ad_unattributed: "5000" }),
+      daily: [
+        { ...DAILY[0], date: "2026-08-07", ad_uncosted: "0", ad_no_sales_days: "0", ad_no_sales: "0" },
+        { ...DAILY[0], date: "2026-08-08", ad_uncosted: "0", ad_no_sales_days: "0", ad_no_sales: "5000" },
+      ],
+    });
+    expect(await screen.findByText(
+      (_t, el) => !!el && el.tagName === "P" && (el.textContent ?? "").includes("일별 광고비 열엔"),
+    )).toBeTruthy();
+  });
+
+  it("M-E 구멍1만 있어도 각주가 뜬다 — 표시조건이 세 통을 다 봐야 한다", async () => {
+    // ★이 파일 머리말이 막겠다고 선언한 실패 모드 그 자체(«0인 값으로만 검사»)가 표시조건에
+    //   남아 있었다: 구멍1만 0이 아닌 픽스처가 없어 조건에서 그 항을 지워도 안 잡혔다.
+    mount({
+      ...withPnl({ ad_uncosted: "12345", ad_no_sales_days: "0", ad_no_sales: "0",
+                   ad_unattributed: "12345" }),
+      daily: [{ ...DAILY[0], ad_uncosted: "12345", ad_no_sales_days: "0", ad_no_sales: "0" }],
+    });
+    const note = await screen.findByText(
+      (_t, el) => !!el && el.tagName === "P" && (el.textContent ?? "").includes("일별 광고비 열엔"));
+    expect(note.textContent ?? "").toContain("12,345원");
+  });
+
+  it("basis='costed_subset'이면 «위 손익에 섞지 않았다»가 참이라 그대로 말한다", async () => {
+    mount({ ...BASE, daily: DAILY });             // included=false
+    const note = await screen.findByText(
+      (_t, el) => !!el && el.tagName === "P" && (el.textContent ?? "").includes("일별 광고비 열엔"));
+    const t = note.textContent ?? "";
+    expect(t).toContain("위 손익에도 안 들어갔습니다");
+    // ★사유를 하나로 뭉뚱그리지 않는다 — 「귀속할 판매가 없어」는 구멍1엔 틀리다(2R 이월).
+    expect(t).not.toContain("귀속할 판매가 없어");
+    expect(t).not.toContain("기간 사다리 순이익에는 이미 차감");
   });
 
   it("세 통이 전부 0이면 각주를 띄우지 않는다 — 없는 경고는 진짜 경고를 묻는다", async () => {
@@ -256,7 +326,7 @@ describe("일별 손익 각주 — 광고비 열이 무엇을 빼놓았는지 �
       daily: [{ ...DAILY[0], ad_no_sales: "0", ad_uncosted: "0", ad_no_sales_days: "0" }],
     });
     await screen.findByText("일별 손익 (1일)");
-    expect(screen.queryByText((t) => t.includes("손익 밖 세 통"))).toBeNull();
+    expect(screen.queryByText((t) => t.includes("일별 광고비 열엔"))).toBeNull();
   });
 });
 
