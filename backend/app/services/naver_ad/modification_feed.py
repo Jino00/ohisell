@@ -42,8 +42,14 @@ _BACKFILL_RE = re.compile(r"\s*\[BACKFILL\b[^\]]*\]\s*")
 # ── 원천 간 공통 축(D-NAO-147) ────────────────────────────────────────
 # 같은 사건을 두 테이블이 서로 다른 이름으로 부른다. 접기 비교는 이 정규화된 축으로 한다.
 # 여기 없는 종류는 축이 None → 절대 접히지 않는다(모르는 것은 안 건드린다).
-_CHANGE_LOG_AXIS = {"external_status_change": "status", "external_bid_change": "bid"}
-_AGENCY_OP_AXIS = {"status_flip": "status", "bid_change": "bid"}
+_CHANGE_LOG_AXIS = {
+    "external_status_change": change_actor.AXIS_STATUS,
+    "external_bid_change": change_actor.AXIS_BID,
+}
+_AGENCY_OP_AXIS = {
+    "status_flip": change_actor.AXIS_STATUS,
+    "bid_change": change_actor.AXIS_BID,
+}
 
 # ── 라벨 사전 ────────────────────────────────────────────────────────
 # 모르는 코드는 **그대로 노출**한다 — 지어내지 않는다(원칙22).
@@ -139,6 +145,8 @@ class _Candidate:
     # 서로 다른 이름(action / op_type)을 쓰므로 공통 축으로 정규화해 비교한다.
     entity_id: str = ""
     axis: str | None = None
+    # 규칙 ⑤(change_actor) — 우리 실집행과 대조돼 되찾은 행의 근거 문장. 그 외엔 None.
+    actor_evidence: str | None = None
 
 
 def _effective_dt(occurred_at: datetime | None, op_date: date | None) -> tuple[datetime, str]:
@@ -336,6 +344,77 @@ def _dedupe_cross_source(candidates: list[_Candidate]) -> tuple[list[_Candidate]
     return out, merged
 
 
+def _apply_ours_evidence(db: Session, candidates: list[_Candidate]) -> tuple[list[_Candidate], int]:
+    """규칙 ⑤ 적용 — 외부로 보이는 행 중 **우리 실집행과 대조되는 것**을 우리 것으로 되찾는다.
+
+    ★규칙 자체는 여기 없다(change_actor가 갖는다). 이 함수가 하는 일은 원료 모으기뿐이다 —
+      판정이 두 곳에 살면 화면과 집계가 조용히 갈라진다(그 모듈 docstring의 첫 문단).
+    ★after 값은 **되찾기 후보에 한해서만** 읽는다: 1패스가 큰 JSON을 피하려고 존재하는데
+      여기서 전건의 after를 끌어오면 그 설계가 무너진다. 후보의 after는 `{"userLock": true}`
+      같은 짧은 값(감지 행)이거나 평문(agency_op)이라 안전하다.
+    """
+    targets = [
+        c
+        for c in candidates
+        if c.auto_actor == change_actor.ACTOR_AGENCY and c.axis and c.entity_id
+    ]
+    if not targets:
+        return candidates, 0
+
+    cl_ids = [c.source_id for c in targets if c.source == change_actor.SOURCE_CHANGE_LOG]
+    ao_ids = [c.source_id for c in targets if c.source == change_actor.SOURCE_AGENCY_OP]
+    after_by_key: dict[tuple[str, int], str | None] = {}
+    for ids, model, source in (
+        (cl_ids, NaverChangeLog, change_actor.SOURCE_CHANGE_LOG),
+        (ao_ids, NaverAgencyOp, change_actor.SOURCE_AGENCY_OP),
+    ):
+        for i in range(0, len(ids), _IN_CHUNK):
+            for rid, after in db.query(model.id, model.after_value).filter(
+                model.id.in_(ids[i : i + _IN_CHUNK])
+            ):
+                after_by_key[(source, rid)] = after
+
+    # 조회 창·축은 후보에서 **정확히** 유도한다(적대 리뷰 P2-2). 가장 넓은 창을 일괄로 쓰면,
+    # 후보가 전부 occurred(10분)인 구간에서도 36시간치 실집행을 읽어 온다 — 그 행들의
+    # after_value는 소재 하나가 4KB라 로드량이 그대로 손해다. 창 밖 집행은 어차피 증거가 못 된다.
+    since = min(
+        c.at - change_actor.EVIDENCE_WINDOW.get(c.time_basis, timedelta(0)) for c in targets
+    )
+    until = max(c.at for c in targets)
+    executions = change_actor.load_ours_executions(
+        db,
+        {c.entity_id for c in targets},
+        axes={c.axis for c in targets if c.axis},
+        since=since,
+        until=until,
+    )
+    if not executions:
+        return candidates, 0
+
+    reclaimed = 0
+    by_key = {(c.source, c.source_id) for c in targets}
+    out: list[_Candidate] = []
+    for c in candidates:
+        if (c.source, c.source_id) not in by_key:
+            out.append(c)
+            continue
+        actor, evidence = change_actor.reclaim_ours(
+            c.auto_actor,
+            axis=c.axis,
+            entity_id=c.entity_id,
+            at=c.at,
+            time_basis=c.time_basis,
+            after_value=after_by_key.get((c.source, c.source_id)),
+            executions=executions,
+        )
+        if actor == c.auto_actor:
+            out.append(c)
+            continue
+        reclaimed += 1
+        out.append(replace(c, auto_actor=actor, actor_evidence=evidence))
+    return out, reclaimed
+
+
 def _collapse_feed_reapply(candidates: list[_Candidate]) -> list[_Candidate]:
     """피드 재적용 형제들을 **한 줄로 접는다** (D-NAO-139).
 
@@ -524,6 +603,11 @@ def build(
         candidates = _collapse_feed_reapply(candidates)
         feed_stats["collapsed_into"] = before - len(candidates)
 
+    # ── 규칙 ⑤: 우리 실집행과 대조해 되찾기 ──
+    #   순서가 중요하다 — 중복 접기·피드 처리로 **화면에 남을 행이 확정된 뒤**, 그리고 사람
+    #   정정(④)을 적용하기 **전에** 한다. ④가 뒤에 와야 사람이 자동 규칙을 이긴다.
+    candidates, reclaimed_ours = _apply_ours_evidence(db, candidates)
+
     overrides = _chunked_overrides(db, [(c.source, c.source_id) for c in candidates])
 
     resolved: list[tuple[_Candidate, str, bool, str | None]] = []
@@ -593,6 +677,8 @@ def build(
                 "actor": final,
                 "actor_label": change_actor.ACTOR_LABEL.get(final, final),
                 "actor_auto": c.auto_actor,
+                # 규칙 ⑤로 되찾은 행만 채워진다. 주체는 사실 주장이라 뒤집었으면 근거를 같이 낸다.
+                "actor_evidence": c.actor_evidence,
                 "corrected": corrected,
                 "correction_note": note,
                 # 값이 없으면 **왜 없는지**를 말한다(빈칸·0 금지).
@@ -609,6 +695,8 @@ def build(
         "total": total, "by_actor": by_actor, "feed_reapply": feed_stats,
         # D-NAO-147: 두 원천에 중복으로 들어와 한 줄로 접힌 건수(조용한 truncation 금지).
         "dedup": {"merged_agency_op": merged_dup},
+        # 규칙 ⑤로 대행사→우리로 되찾은 건수(조용히 바꾸지 않는다 — 몇 건인지 화면이 말한다).
+        "reclaimed_ours": reclaimed_ours,
         "rows": rows,
     }
 

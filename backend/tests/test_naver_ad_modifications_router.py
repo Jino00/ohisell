@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -544,3 +544,299 @@ def test_summary_sentence_uses_occurred_time_not_detected(client, db):
     row = _get(client)["rows"][0]
     assert row["summary"].startswith("10:49"), row["summary"]
     assert "07:35" not in row["summary"]
+
+
+# ── 규칙 ⑤ — 우리 실집행과 대조해 되찾기 (2026-08-09 라이브 실사고) ──
+#
+# 실사고: 2026-07-30 10:50 우리가 Jino 지시로 캠페인 5개를 정지했는데(manual_emergency_stop),
+# entity_sync가 하루 1회(07:37)만 돌아 **다음날 아침** "꺼져 있네"를 external_status_change로
+# 적었고 규칙 ①이 그걸 대행사로 보냈다. prod에서 04·15·P 3줄이 "대행사가 껐다"로 서 있었다.
+
+OURS_STOP_AT = datetime(2026, 7, 30, 10, 50, 6)        # 우리가 실제로 끈 순간
+NEXT_MORNING_SYNC = datetime(2026, 7, 31, 7, 37, 30)   # 다음날 아침 탐지(20.8시간 뒤)
+_LOCKED = json.dumps({"userLock": True})
+_UNLOCKED = json.dumps({"userLock": False})
+# 우리 실집행 행의 after는 엔티티 통짜 JSON이다(감지 행의 짧은 dict와 방언이 다르다).
+_CAMPAIGN_PAUSED = json.dumps(
+    {"nccCampaignId": "cmp-1", "name": "15. 갤럭시Z", "userLock": True, "status": "PAUSED"}
+)
+
+
+def _seed_our_stop(db, *, at=OURS_STOP_AT, action="manual_emergency_stop", dry_run=False,
+                   after=_CAMPAIGN_PAUSED):
+    return _seed_change_log(db, action=action, entity_type="campaign", entity_id="cmp-1",
+                            campaign_id="cmp-1", before=_UNLOCKED, after=after,
+                            at=at, dry_run=dry_run)
+
+
+def _seed_next_morning_detection(db, *, after=_LOCKED, at=NEXT_MORNING_SYNC, occurred_at=None):
+    return _seed_change_log(db, action="external_status_change", entity_type="campaign",
+                            entity_id="cmp-1", campaign_id="cmp-1", before=_UNLOCKED,
+                            after=after, at=at, occurred_at=occurred_at)
+
+
+def test_rule5_reclaims_our_own_stop_detected_next_morning(client, db):
+    """★핵심 회귀: 우리가 끈 것이 다음날 탐지에서 대행사로 찍히면 안 된다."""
+    _seed_our_stop(db)
+    _seed_next_morning_detection(db)
+
+    body = _get(client, date_from="2026-07-30", date_to="2026-07-31")
+    detection = next(r for r in body["rows"] if r["op_type"] == "external_status_change")
+    assert detection["actor"] == change_actor.ACTOR_OURS
+    assert detection["actor_label"] == "우리 자동화"
+    # 근거를 같이 낸다 — 주체는 사실 주장이라 근거 없이 뒤집으면 다음 사람이 못 믿는다.
+    assert "우리 실집행과 대조됨" in detection["actor_evidence"]
+    assert "07-30 10:50" in detection["actor_evidence"]
+    assert body["reclaimed_ours"] == 1
+    assert body["by_actor"][change_actor.ACTOR_AGENCY] == 0
+
+
+def test_rule5_does_not_steal_the_reverse_change(client, db):
+    """우리가 껐는데 감지된 건 **재개**(값이 반대) → 그건 대행사가 한 것이다."""
+    _seed_our_stop(db)
+    _seed_next_morning_detection(db, after=_UNLOCKED)
+
+    body = _get(client, date_from="2026-07-30", date_to="2026-07-31")
+    detection = next(r for r in body["rows"] if r["op_type"] == "external_status_change")
+    assert detection["actor"] == change_actor.ACTOR_AGENCY
+    assert detection["actor_evidence"] is None
+    assert body["reclaimed_ours"] == 0
+
+
+def test_rule5_window_is_closed_after_36h_for_detected_rows(client, db):
+    """창 밖이면 현행 유지(대행사) — fail-safe 방향은 '덜 되찾기'다."""
+    _seed_our_stop(db, at=NEXT_MORNING_SYNC - timedelta(hours=36, minutes=1))
+    _seed_next_morning_detection(db)
+
+    body = _get(client, date_from="2026-07-29", date_to="2026-07-31")
+    detection = next(r for r in body["rows"] if r["op_type"] == "external_status_change")
+    assert detection["actor"] == change_actor.ACTOR_AGENCY
+    assert body["reclaimed_ours"] == 0
+
+
+def test_rule5_window_is_tight_when_real_time_is_known(client, db):
+    """occurred(진짜 발생 시각)를 아는 행은 10분 창이다 — 아는 만큼만 좁힌다.
+
+    36시간을 그대로 열어두면, 우리가 어제 넣은 값과 우연히 같은 값을 오늘 대행사가 넣었을 때
+    우리 것으로 뺏는다."""
+    occurred = datetime(2026, 7, 31, 10, 49, 25)
+    _seed_our_stop(db, at=occurred - timedelta(hours=2))
+    _seed_next_morning_detection(db, at=NEXT_MORNING_SYNC, occurred_at=occurred)
+
+    body = _get(client, date_from="2026-07-30", date_to="2026-07-31")
+    detection = next(r for r in body["rows"] if r["op_type"] == "external_status_change")
+    assert detection["actor"] == change_actor.ACTOR_AGENCY, "2시간 전 집행은 occurred 창 밖이다"
+
+    # 같은 조건에서 3분 전이면 되찾는다(창이 죽어 있는 게 아님을 고정).
+    _seed_our_stop(db, at=occurred - timedelta(minutes=3))
+    body = _get(client, date_from="2026-07-30", date_to="2026-07-31")
+    detection = next(r for r in body["rows"] if r["op_type"] == "external_status_change")
+    assert detection["actor"] == change_actor.ACTOR_OURS
+
+
+def test_rule5_blocked_or_dry_run_execution_is_not_evidence(client, db):
+    """가드레일이 막았거나 dry-run이면 광고를 안 바꿨다 → 외부 변경을 설명하지 못한다."""
+    _seed_our_stop(db, dry_run=True)
+    _seed_our_stop(db, at=OURS_STOP_AT + timedelta(seconds=1), after=None)  # 차단된 시도
+    _seed_next_morning_detection(db)
+
+    body = _get(client, date_from="2026-07-30", date_to="2026-07-31")
+    detection = next(r for r in body["rows"] if r["op_type"] == "external_status_change")
+    assert detection["actor"] == change_actor.ACTOR_AGENCY
+    assert body["reclaimed_ours"] == 0
+
+
+def test_rule5_reclaims_bid_axis_too(client, db):
+    """축은 status만이 아니다 — 입찰도 같은 사고를 겪는다(우리 update_bid ↔ external_bid_change)."""
+    _seed_change_log(db, action="update_bid", entity_type="adgroup", entity_id="grp-1",
+                     before=json.dumps({"bidAmt": 300}), after=json.dumps({"bidAmt": 600}),
+                     at=OURS_STOP_AT)
+    _seed_change_log(db, action="external_bid_change", entity_type="adgroup", entity_id="grp-1",
+                     before=json.dumps({"bidAmt": 300}), after=json.dumps({"bidAmt": 600}),
+                     at=NEXT_MORNING_SYNC)
+
+    body = _get(client, date_from="2026-07-30", date_to="2026-07-31")
+    detection = next(r for r in body["rows"] if r["op_type"] == "external_bid_change")
+    assert detection["actor"] == change_actor.ACTOR_OURS
+
+
+def test_rule5_reclaims_agency_op_rows_as_well(client, db):
+    """agency_op(스냅샷 diff)에도 우리 집행이 섞여 들어온다 — 규칙 ③만으론 전부 대행사가 된다."""
+    occurred = datetime(2026, 7, 30, 10, 50, 6)
+    _seed_change_log(db, action="set_user_lock", entity_type="adgroup", entity_id="grp-9",
+                     before=_UNLOCKED, after=json.dumps({"nccAdgroupId": "grp-9", "userLock": True}),
+                     at=occurred)
+    _seed_agency_op(db, op_date=DAY, occurred_at=occurred + timedelta(seconds=4),
+                    op_type="status_flip", entity_type="adgroup", entity_id="grp-9",
+                    before="on", after="off")
+
+    body = _get(client, date_from="2026-07-30", date_to="2026-07-30")
+    row = next(r for r in body["rows"] if r["source"] == "agency_op")
+    assert row["actor"] == change_actor.ACTOR_OURS
+    assert body["reclaimed_ours"] == 1
+
+
+def test_rule5_loses_to_human_correction(client, db):
+    """④가 ⑤보다 위다 — 사람이 자동 규칙을 이긴다."""
+    _seed_our_stop(db)
+    detection = _seed_next_morning_detection(db)
+    r = client.put(
+        f"/api/naver/ad/modifications/change_log/{detection.id}/actor",
+        json={"actor": change_actor.ACTOR_AGENCY, "note": "내가 확인함"},
+    )
+    assert r.status_code == 200, r.text
+
+    body = _get(client, date_from="2026-07-30", date_to="2026-07-31")
+    row = next(r for r in body["rows"] if r["op_type"] == "external_status_change")
+    assert row["actor"] == change_actor.ACTOR_AGENCY
+    assert row["corrected"] is True
+    assert row["actor_auto"] == change_actor.ACTOR_OURS  # 자동 판정은 ⑤ 결과 그대로 보인다
+
+
+def test_rule5_does_not_touch_source_tables(client, db):
+    """금지선: 판정만 바꾼다. 원천 테이블은 이 경로에서 한 행도 안 바뀐다."""
+    _seed_our_stop(db)
+    det = _seed_next_morning_detection(db)
+    before = (det.action, det.after_value, db.query(NaverChangeLog).count())
+
+    _get(client, date_from="2026-07-30", date_to="2026-07-31")
+
+    db.expire_all()
+    after_row = db.query(NaverChangeLog).filter(NaverChangeLog.id == det.id).one()
+    assert (after_row.action, after_row.after_value, db.query(NaverChangeLog).count()) == before
+
+
+def test_evidence_window_keys_match_time_basis_codes():
+    """창 사전의 키가 time_basis 코드와 어긋나면 되찾기가 **조용히 전부 꺼진다**.
+
+    두 모듈에 나뉜 문자열이라(순환 import 회피) 여기서 고정한다."""
+    from app.services.naver_ad import modification_feed
+
+    assert set(change_actor.EVIDENCE_WINDOW) == {
+        modification_feed.TIME_BASIS_DETECTED,
+        modification_feed.TIME_BASIS_OCCURRED,
+    }
+
+
+# ── 규칙 ⑤ 증거의 3기둥을 각각 고정한다 (적대 리뷰 2026-08-09 P1-2·P1-3) ──
+#
+# ★왜 따로 쓰나: 「값이 같아야 한다」만 테스트가 있었고 **대상·축·판독불가**는 무방비였다.
+#   적대 리뷰가 entity_id를 통째로 무시하는 변이·axis를 무시하는 변이·값을 못 읽을 때
+#   True로 추측하는 변이를 넣었는데 **전부 살아남았다**(53건 전건 통과). 통과하는데
+#   아무것도 안 지키는 테스트였다는 뜻이다.
+
+
+def test_rule5_requires_same_entity(client, db):
+    """기둥① 대상 — 우리가 끈 건 cmp-1인데 꺼진 게 보인 건 cmp-2면 우리 것이 아니다.
+
+    ★**두 캠페인이 같은 아침에 함께 감지되는** 모양으로 쓴다(prod 07-31이 정확히 그랬다:
+      우리가 끈 것 3건 + 남이 끈 것이 한 화면에 있었다). 대상을 하나만 두면 SQL의
+      `entity_id IN (...)`이 우연히 막아줘서, 대조 키에서 대상을 빼는 결함을 못 잡는다."""
+    _seed_our_stop(db)  # 우리가 끈 것 = cmp-1
+    _seed_next_morning_detection(db)  # cmp-1 감지 → 되찾아야 한다
+    _seed_change_log(db, action="external_status_change", entity_type="campaign",
+                     entity_id="cmp-2", campaign_id="cmp-2", before=_UNLOCKED,
+                     after=_LOCKED, at=NEXT_MORNING_SYNC)  # 남이 끈 것 = cmp-2
+
+    body = _get(client, date_from="2026-07-30", date_to="2026-07-31")
+    detections = {r["entity_id"]: r for r in body["rows"]
+                  if r["op_type"] == "external_status_change"}
+    assert detections["cmp-1"]["actor"] == change_actor.ACTOR_OURS
+    assert detections["cmp-2"]["actor"] == change_actor.ACTOR_AGENCY
+    assert body["reclaimed_ours"] == 1
+
+
+def test_rule5_requires_same_axis(client, db):
+    """기둥② 축 — 우리가 만진 건 입찰인데 감지된 건 상태면 설명이 안 된다.
+
+    ★하필 **입찰 1원**을 쓴다: 파이썬에서 `True == 1`이라, 축을 값에 묶지 않으면
+      「상태=정지(True)」와 「입찰=1원」이 같은 값이 되어 축이 달라도 대조가 성립한다.
+      이 테스트가 그 충돌을 못 박는다.
+    ★★**두 축이 모두 후보에 있어야 한다**(적대 리뷰 2R): 증거 조회는 후보에 있는 축의
+      action만 읽으므로, 상태 감지만 두면 `update_bid` 집행이 애초에 로드되지 않아
+      **축 비교를 태우지 못한 채 통과한다** — 1라운드 P1-3a의 「SQL이 우연히 막고 있다」와
+      같은 실패 모양이다. 그래서 입찰 감지 행을 함께 둔다."""
+    _seed_change_log(db, action="update_bid", entity_type="adgroup", entity_id="grp-1",
+                     before=json.dumps({"bidAmt": 300}), after=json.dumps({"bidAmt": 1}),
+                     at=OURS_STOP_AT)
+    _seed_change_log(db, action="external_status_change", entity_type="adgroup",
+                     entity_id="grp-1", before=_UNLOCKED, after=_LOCKED, at=NEXT_MORNING_SYNC)
+    # 입찰 축도 후보에 넣는다(값은 우리 집행과 다르게 둬서 이 행 자체는 안 되찾히게).
+    _seed_change_log(db, action="external_bid_change", entity_type="adgroup",
+                     entity_id="grp-2", before=json.dumps({"bidAmt": 300}),
+                     after=json.dumps({"bidAmt": 999}), at=NEXT_MORNING_SYNC)
+
+    body = _get(client, date_from="2026-07-30", date_to="2026-07-31")
+    detection = next(r for r in body["rows"] if r["op_type"] == "external_status_change")
+    assert detection["actor"] == change_actor.ACTOR_AGENCY
+    assert body["reclaimed_ours"] == 0
+
+
+def test_rule5_unreadable_value_is_not_evidence(client, db):
+    """기둥③ 값 — **못 읽는 값은 추측하지 않는다**(금지선: 조용히 ours로 떨어뜨리지 않기).
+
+    감지 행 after가 축을 읽을 수 없는 형태({"status": "PAUSED"} — userLock이 없다)면
+    "아마 정지겠지"로 메우면 안 된다. 그렇게 메우는 순간 우리 pause와 값이 같다고 판정돼
+    남의 변경을 삼킨다."""
+    _seed_our_stop(db)
+    _seed_next_morning_detection(db, after=json.dumps({"status": "PAUSED"}))
+
+    body = _get(client, date_from="2026-07-30", date_to="2026-07-31")
+    detection = next(r for r in body["rows"] if r["op_type"] == "external_status_change")
+    assert detection["actor"] == change_actor.ACTOR_AGENCY
+    assert detection["actor_evidence"] is None
+    assert body["reclaimed_ours"] == 0
+
+
+def test_rule5_our_execution_must_precede_the_detection(client, db):
+    """창의 **상한** — 감지 이후에 한 집행은 그 감지를 설명하지 못한다.
+
+    ★이 규칙을 지키던 유일한 테스트가 규칙⑤와 무관한 분포 테스트였다(시드 시각이 우연히
+      맞아떨어져 통과). 누가 그 시드를 만지면 커버리지가 통째로 사라지므로 여기 못 박는다."""
+    _seed_our_stop(db, at=NEXT_MORNING_SYNC + timedelta(minutes=1))
+    _seed_next_morning_detection(db)
+
+    body = _get(client, date_from="2026-07-30", date_to="2026-07-31")
+    detection = next(r for r in body["rows"] if r["op_type"] == "external_status_change")
+    assert detection["actor"] == change_actor.ACTOR_AGENCY
+    assert body["reclaimed_ours"] == 0
+
+
+def test_rule5_window_boundaries_are_inclusive(client, db):
+    """창의 양 끝은 **포함**이다 — 정확히 36시간 전, 그리고 감지와 같은 순간."""
+    _seed_our_stop(db, at=NEXT_MORNING_SYNC - timedelta(hours=36))
+    _seed_next_morning_detection(db)
+    body = _get(client, date_from="2026-07-29", date_to="2026-07-31")
+    detection = next(r for r in body["rows"] if r["op_type"] == "external_status_change")
+    assert detection["actor"] == change_actor.ACTOR_OURS, "정확히 36시간 전은 창 안이다"
+
+    db.query(NaverChangeLog).delete()
+    db.commit()
+    _seed_our_stop(db, at=NEXT_MORNING_SYNC)  # 감지와 같은 순간
+    _seed_next_morning_detection(db)
+    body = _get(client, date_from="2026-07-30", date_to="2026-07-31")
+    detection = next(r for r in body["rows"] if r["op_type"] == "external_status_change")
+    assert detection["actor"] == change_actor.ACTOR_OURS
+
+
+def test_rule5_survives_the_query_chunk_boundary(client, db):
+    """대상이 청크 상한(500)을 넘어도 되찾기가 끊기지 않는다 (적대 리뷰 2R가 잡은 회귀).
+
+    ★실사고: 증거 조회의 action 필터 변수명이 안쪽 루프에 덮여, **두 번째 청크부터**
+      쿼리가 마지막 축의 action만 보게 됐다. 상태 축 증거가 조용히 0건이 되어 501번째
+      대상부터 「대행사」로 남았다 — 화면은 아무 경고도 안 낸다.
+    ★이 화면은 최대 365일 구간을 받고 소재·키워드 grain에서 대상 500개 초과는 평범하다."""
+    total = 501
+    for i in range(total):
+        cid = f"cmp-chunk-{i:04d}"
+        _seed_our_stop(db, at=OURS_STOP_AT)  # 값·시각은 같고 대상만 다르게 아래에서 교체
+        db.query(NaverChangeLog).order_by(NaverChangeLog.id.desc()).first().entity_id = cid
+        db.commit()
+        _seed_change_log(db, action="external_status_change", entity_type="campaign",
+                         entity_id=cid, campaign_id=cid, before=_UNLOCKED, after=_LOCKED,
+                         at=NEXT_MORNING_SYNC)
+
+    body = _get(client, date_from="2026-07-30", date_to="2026-07-31", limit=1)
+    assert body["reclaimed_ours"] == total, (
+        f"{total}개 대상 전부 되찾아야 하는데 {body['reclaimed_ours']}건만 되찾았다"
+    )

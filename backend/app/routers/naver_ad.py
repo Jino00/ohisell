@@ -29,7 +29,8 @@
 #   이 API는 읽기만 하고, 이력을 *채우는* 것은 entity_sync의 diff 밸브와 execution_harness다.
 # GET /api/naver/ad/modifications     — 「수정 사항」 화면. naver_change_log ∪ naver_agency_op을
 #   날짜 구간으로 합쳐 시간순으로 준다(modification_feed 경유·읽기 전용). 주체는 데이터로
-#   자동 판정(change_actor 4규칙)하고 기본값은 대행사. 날짜 귀속은 **실제 발생 시각 우선**
+#   자동 판정(change_actor 5규칙)하고 기본값은 대행사 — 단 「외부 변경」으로 감지됐어도
+#   **우리 실집행과 대조되면 되찾는다**(규칙 ⑤, 근거는 행의 actor_evidence). 날짜 귀속은 **실제 발생 시각 우선**
 #   (agency_op.occurred_at) — 감지일로 잡으면 07-30 백필 36건이 07-30에 안 보인다.
 # PUT /api/naver/ad/modifications/{source}/{source_id}/actor — 주체 정정. 원천 테이블은
 #   건드리지 않고 naver_change_actor_override에만 쌓는다(탐지 산출물 ≠ 사람 주석).

@@ -141,6 +141,7 @@ function ModificationTable({
   return (
     <>
       <ActorSummary byActor={data.by_actor} label={label} />
+      <ReclaimedOursNote count={data.reclaimed_ours} />
       <FeedReapplyNote info={data.feed_reapply} />
       <Table
         head={
@@ -179,6 +180,21 @@ function ActorSummary({ byActor, label }: { byActor: Record<string, number>; lab
           <span className="text-gray-700">{actorLabel(a)}</span> {num(byActor[a] ?? 0)}건
         </span>
       ))}
+    </p>
+  );
+}
+
+/** D-NAO-163 — 「외부 변경」으로 감지됐지만 우리 실집행과 대조돼 되찾은 건수.
+ *
+ *  ★같은 이유로 조용히 바꾸지 않는다: 주체는 사실 주장이라, 자동 규칙이 몇 건을 뒤집었는지
+ *  모르면 사람이 그 규칙을 검증할 방법이 없다. 행마다의 근거는 주체 칸에 함께 붙는다. */
+function ReclaimedOursNote({ count }: { count: number }) {
+  if (!count) return null;
+  return (
+    <p className="px-4 py-2 text-xs text-gray-500 border-b border-gray-100">
+      「외부 변경」으로 감지됐지만 우리 실집행과 대조돼 되찾음{" "}
+      <span className="text-emerald-700">{num(count)}건</span> — 탐지가 하루 1회라 우리가 낮에 한
+      일이 다음날 아침 외부 변경처럼 보입니다. 근거는 각 행의 주체 칸에 있습니다.
     </p>
   );
 }
@@ -272,6 +288,13 @@ function ActorCell({ row, onCorrected }: { row: NaverModificationRow; onCorrecte
         ))}
       </select>
       {note && <div className="text-[11px] text-gray-400">{note}</div>}
+      {/* 규칙 ⑤ — 「외부 변경」으로 감지됐는데 우리 것으로 되찾은 행. 근거 없이 뒤집으면
+          다음 사람이 못 믿으므로, 무엇과 대조했는지를 행에 그대로 적는다.
+          ★사람이 ④로 「대행사」라고 정정한 행에는 안 보인다 — 배지는 대행사인데 밑에
+          "우리 실집행과 대조됨"이 남아 있으면 한 셀이 상충하는 두 말을 한다. */}
+      {row.actor_evidence && row.actor === "ours" && (
+        <div className="text-[11px] text-emerald-700">{row.actor_evidence}</div>
+      )}
       {row.correction_note && <div className="text-[11px] text-gray-500">{row.correction_note}</div>}
       {failed && <div className="text-[11px] text-red-600">저장 실패: {failed}</div>}
     </div>
