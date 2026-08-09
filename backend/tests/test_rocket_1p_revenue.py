@@ -951,3 +951,167 @@ def test_excluded_skus_are_listed_by_name_for_review(db):
     assert [t["sku_id"] for t in u["excluded_top"]] == ["S2"]     # 그러나 이름으로 보인다
     assert Decimal(u["excluded_our_revenue"]) == Decimal("100000")
     assert u["excluded_skus"] == 1
+
+
+# ═══ ⑦ 광고 원장 완결 — 네 통이 원장을 남김없이 덮는다 (2026-08-09) ═══
+#
+# 왜 이 절이 생겼나(Jino 2026-08-09): *"광고비가 실제 광고비보다 적게 계산되고 있어."*
+#   맞았다. 옵션 광고 원장에서 **두 통이 화면 어디에도 없었다** —
+#     구멍1 판매O·손익밖(라이브 08-08 33,750원) · 구멍2 팔린 옵션의 판매 없는 날(7일 창 435,916원).
+#   구멍3(판매행 없는 옵션)만 「미포함」으로 표시돼 있었고, 각주는 나머지를 «차이의 대부분»
+#   이라는 **말**로 대신했다. 말은 금액이 아니다 — 안 보이는 돈은 없는 돈이 된다.
+#
+# ★이 절의 핵심 계약은 **항등식 하나**다: 네 통의 합 = ad_option_total.
+#   개별 통의 값을 하나씩 못 박는 것보다 강하다 — 새 경로가 생겨 어느 통에도 안 들어가면
+#   합이 어긋나서 여기서 죽는다(그게 정확히 2026-08-09 이전 상태였다).
+
+
+def _ad_buckets(p):
+    """사다리 응답에서 네 통을 꺼낸다. `ad_spend`는 is_full이면 접힌 두 통을 이미 품고 있다."""
+    folded = ((Decimal(p["ad_no_sales_days"]) + Decimal(p["ad_no_sales"]))
+              if p["ad_no_sales_included"] else ZERO_D)
+    return {
+        "attributed": Decimal(p["ad_spend"] or 0) - folded,
+        "uncosted": Decimal(p["ad_uncosted"]),
+        "no_sales_days": Decimal(p["ad_no_sales_days"]),
+        "no_sales": Decimal(p["ad_no_sales"]),
+    }
+
+
+def test_four_ad_buckets_cover_the_option_ledger_without_remainder(db):
+    """★네 통의 합 = 옵션 광고 원장. 남는 돈도 두 번 세는 돈도 없다.
+
+    픽스처가 네 통을 **동시에** 만든다:
+      A(원가O·판매O) → 귀속 / B(원가X·판매O) → 손익밖 / A의 8/5분 → 판매 없는 날 /
+      C(광고만) → 무판매 옵션.
+    """
+    _sale(db, "A", "S1", 10, "1000000")
+    _price(db, "S1", "60000", 1)
+    _cost(db, "S1", 20000)
+    _sale(db, "B", "S2", 5, "500000")
+    _price(db, "S2", "50000", 2)            # 납품단가는 있고 원가만 없다 → 손익밖
+    _ad_option(db, "A", "11000")
+    _ad_option(db, "B", "7000")
+    _ad_option(db, "A", "5000", d=date(2026, 8, 5))   # 팔린 옵션인데 8/5엔 판매행이 없다
+    _ad_option(db, "C", "3000")                        # 그 창에 한 번도 안 팔린 옵션
+    db.commit()
+    p = compute_rocket_1p_revenue(db, D, date(2026, 8, 5))["pnl"]
+    b = _ad_buckets(p)
+    assert b == {"attributed": Decimal("11000"), "uncosted": Decimal("7000"),
+                 "no_sales_days": Decimal("5000"), "no_sales": Decimal("3000")}
+    assert sum(b.values()) == Decimal(p["ad_option_total"]) == Decimal("26000")
+    # ★손익 밖에 남은 합을 **한 숫자로도** 낸다 — 화면 각주가 이 값을 그대로 쓴다.
+    assert Decimal(p["ad_unattributed"]) == Decimal("15000")
+
+
+def test_ad_of_uncosted_option_is_named_not_dropped(db):
+    """★구멍1 — 예전 판에서 이 돈은 **어느 필드에도 없었다**(회귀 방지).
+
+    `pnl_ad`에서는 손익 밖이라 빠지고, `ad_no_sales`에서는 그 옵션이 «팔렸다»는 이유로
+    빠져서, 두 통 사이로 샜다. 그래서 사다리 광고비가 계정 총액보다 조용히 작았다.
+    """
+    _sale(db, "A", "S1", 10, "1000000")
+    _price(db, "S1", "60000", 1)
+    _cost(db, "S1", 20000)
+    _sale(db, "B", "S2", 5, "500000")
+    _price(db, "S2", "50000", 2)
+    _ad_option(db, "B", "7000")
+    db.commit()
+    p = compute_rocket_1p_revenue(db, D, D)["pnl"]
+    assert p["ad_uncosted"] == "7000"
+    assert p["ad_no_sales"] == "0"          # «팔린» 옵션이라 여기 안 들어간다
+    # ★그런데도 손익 광고비에는 안 들어간다 — 그 옵션 매출도 손익에 없기 때문이다.
+    #   넣으면 부분집합 매출에서 전량 비용을 빼는 것이 되어 이익이 거꾸로 위조된다.
+    assert Decimal(p["ad_spend"]) == ZERO_D
+
+
+def test_full_basis_folds_both_unattributable_buckets(db):
+    """★basis='full'이면 «판매 없는 날»도 함께 차감한다.
+
+    예전 판은 `ad_no_sales`만 접어서, 커버리지가 100%가 되어 화면이 「기간 전체」라고
+    말하는 상태에서도 구멍2가 여전히 빠져 있었다 — **의도된 종착 상태에 남은 거짓말**이
+    한 겹 아래에 또 있었던 것이다.
+    """
+    _sale(db, "A", "S1", 10, "1000000")
+    _price(db, "S1", "60000", 1)
+    _cost(db, "S1", 20000)                            # 커버리지 100%
+    _ad_option(db, "A", "11000")
+    _ad_option(db, "A", "5000", d=date(2026, 8, 5))   # 판매 없는 날
+    _ad_option(db, "C", "3000")                       # 무판매 옵션
+    db.commit()
+    p = compute_rocket_1p_revenue(db, D, date(2026, 8, 5))["pnl"]
+    assert p["basis"] == "full"
+    assert p["ad_no_sales_included"] is True
+    assert p["ad_uncosted"] == "0"                    # is_full이면 정의상 0이다
+    # 사다리 광고비 = 원장 전액. 「기간 전체」라고 말하면 정말 전체여야 한다.
+    assert Decimal(p["ad_spend"]) == Decimal(p["ad_option_total"]) == Decimal("19000")
+    assert Decimal(p["ad_unattributed"]) == Decimal("8000")   # 크기는 계속 보인다
+
+
+def test_daily_ad_buckets_sum_to_the_window_buckets(db):
+    """일별 통의 합 = 기간 통. 판정자가 갈라지면 여기서 죽는다."""
+    _sale(db, "A", "S1", 10, "1000000")
+    _price(db, "S1", "60000", 1)
+    _cost(db, "S1", 20000)
+    _sale(db, "B", "S2", 5, "500000", d=date(2026, 8, 5))
+    _price(db, "S2", "50000", 2)
+    _ad_option(db, "A", "11000")
+    _ad_option(db, "A", "5000", d=date(2026, 8, 5))
+    _ad_option(db, "B", "7000", d=date(2026, 8, 5))
+    db.commit()
+    r = compute_rocket_1p_revenue(db, D, date(2026, 8, 5))
+    p = r["pnl"]
+    for key in ("ad_uncosted", "ad_no_sales_days", "ad_no_sales"):
+        assert sum((Decimal(d[key]) for d in r["daily"]), ZERO_D) == Decimal(p[key]), key
+
+
+def test_no_sales_included_is_false_when_there_is_no_ladder(db):
+    """★사다리가 없는 창에서 «포함됐다»고 말하지 않는다(라이브 2026-05-01~07, 3,421,987원).
+
+    `is_full`은 «결손 0»이라 판매분석 미수집 창에서도 참이 된다 — 원자가 없으면 원가 미상
+    SKU도 0건이기 때문이다. 그 창은 손익 자체가 blocked인데 플래그만 true라, 광고비가
+    이미 순이익에 반영된 것처럼 보였다.
+    """
+    _ad_option(db, "C", "3000")             # 광고만 있고 판매분석 행이 하나도 없다
+    db.commit()
+    p = compute_rocket_1p_revenue(db, D, D)["pnl"]
+    assert p["blocked"]["code"] == "sales_not_covered"
+    assert p["ad_no_sales_included"] is False
+    assert p["ad_no_sales"] == "3000"       # 금액은 계속 보인다(안 보이면 없는 돈이 된다)
+
+
+# ═══ ⑧ 「원가 제외」의 두 의미 — 화면이 결정이라 단정하지 않는다 (2026-08-09) ═══
+def test_excluded_row_carries_the_recorded_reason(db):
+    """★`ignored`는 «샘플·증정 결정»과 «자동 매핑 실패»를 겸하고 있다.
+
+    prod 22건이 **전부** `note='no suggestion or low score'`였다(ref 47 §2) — 즉 결정이
+    아니라 매칭 실패다. 그런데 화면은 "이미 결정한 것이니 그냥 두세요"라고 안내했고,
+    그래서 정상 판매 상품 6종이 손익 밖에 남아 있었다. status가 두 의미를 겸하는 한
+    화면이 할 수 있는 정직한 일은 **기록된 사유를 그대로 보여 주는 것**이다.
+    """
+    from sqlalchemy import text as _t
+    _sale(db, "A", "S1", 3, "54900")
+    _price(db, "S1", "12000", 1)
+    db.execute(_t("INSERT INTO rocket_product_cost_map "
+                  "(product_number, internal_sku, status, note) "
+                  "VALUES ('S1', NULL, 'ignored', 'no suggestion or low score')"))
+    db.commit()
+    u = compute_rocket_1p_revenue(db, D, D)["pnl"]["uncosted"]
+    assert u["excluded_skus"] == 1
+    row = u["excluded_top"][0]
+    assert row["excluded_note"] == "no suggestion or low score"
+
+
+def test_excluded_row_without_note_says_so(db):
+    """사유가 없으면 «사유 없음»이 아니라 **«기록 안 됨»**이다 — None으로 남긴다.
+
+    빈 문자열로 접으면 화면이 빈 칸을 그리고, 빈 칸은 «이유가 있었다»로 읽힌다.
+    """
+    from sqlalchemy import text as _t
+    _sale(db, "A", "S1", 3, "54900")
+    _price(db, "S1", "12000", 1)
+    db.execute(_t("INSERT INTO rocket_product_cost_map (product_number, status) "
+                  "VALUES ('S1', 'ignored')"))
+    db.commit()
+    row = compute_rocket_1p_revenue(db, D, D)["pnl"]["uncosted"]["excluded_top"][0]
+    assert row["excluded_note"] is None

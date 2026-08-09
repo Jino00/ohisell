@@ -1360,6 +1360,11 @@ export interface Rocket1PUncostedSku {
   /** 첫 판매일이 **관측 시작일**과 같다 = 그 전은 판매분석 롤링창 밖이라 모른다.
    *  이때는 is_new를 단정하지 않는다(발주 이력이 창 안이면 예외). */
   first_sold_at_bounded: boolean;
+  /** ★`ignored`로 찍을 때 남은 사유 원문(excluded_top에만 온다). null = 사유 미기록.
+   *  왜 필요한가: prod의 `ignored` 22건이 **전부** `'no suggestion or low score'`였다 —
+   *  즉 «샘플·증정으로 결정»이 아니라 **이름 유사도 매칭 실패**를 같은 칸에 넣어 둔 것이다.
+   *  화면이 사유를 안 보이면 매칭 실패가 «결정»으로 위장해 "그냥 두세요"로 안내된다. */
+  excluded_note?: string | null;
 }
 
 /** 손익 블록. ★basis='costed_subset'이면 **원가 확인분만** 더한 값이다(창 전체가 아니다). */
@@ -1376,6 +1381,15 @@ export interface Rocket1PPnl {
   /** ★그 창에 **판매행이 없는** 옵션의 광고비. included=false면 위 순이익에 **안 들어있다** —
    *  귀속할 판매가 없어 부분집합에 섞지 않지만, 안 보이면 없는 돈이 되므로 항상 싣는다. */
   ad_no_sales: string;
+  /** ★**팔린 옵션이 «안 팔린 날»에 쓴** 광고비. 원자는 판매행에서만 나오고 ad_no_sales는
+   *  옵션 단위로 판정해서, 판정 그레인이 다른 그 사이로 새던 돈이다(창 07-31~08-06 435,916원).
+   *  included 플래그는 ad_no_sales와 공유한다. */
+  ad_no_sales_days: string;
+  /** ★판매행은 있으나 **손익 부분집합에 못 들어간** 옵션의 광고비. is_full이면 정의상 0이고,
+   *  0이 아닐 땐 순이익에 절대 넣지 않는다(부분집합 매출에서 전량 비용을 빼면 적자로 위조된다). */
+  ad_uncosted: string;
+  /** 위 셋의 합 = 「계정 총액과 사다리가 왜 다른가」의 답 전체. */
+  ad_unattributed: string;
   ad_no_sales_included: boolean;
   ad_account_total: string;        // 계정 총액(report/SALES) — 사다리 광고비와 왜 다른지 대조용
   ad_option_total: string;         // 옵션 합계(Billboard, 판매 없는 옵션 포함)
@@ -1419,6 +1433,8 @@ export interface Rocket1PDaily {
   promo_burden: string | null;
   ad_spend: string | null;         // 손익에 들어간 옵션분만
   ad_no_sales: string;             // 그날 광고는 돌았는데 판매행이 없는 옵션분(순이익 미포함)
+  ad_no_sales_days: string;        // 그날 팔린 옵션이되 **그날은** 판매행이 없던 옵션분. 하루 창이면 0
+  ad_uncosted: string;             // 그날 팔렸지만 손익에 못 들어간 옵션분
   vat: string | null;
   net_profit: string | null;
   profit_rate: string | null;
@@ -1477,6 +1493,8 @@ export interface PnlAuditLadder {
   revenue: string | null; cost: string | null; promo_burden: string | null;
   ad_spend: string | null; vat: string | null; net_profit: string | null;
   profit_rate: string | null; ad_no_sales: string; ad_no_sales_included: boolean;
+  // ★A7(광고 원장 완결)의 좌변을 이루는 두 통 — 화면이 검사식을 재구성할 수 있어야 한다.
+  ad_no_sales_days: string; ad_uncosted: string; ad_unattributed: string;
   // ★B3(옵션 축 ↔ 계정 확정액 대사)의 좌·우변 — 화면 pnl의 부분집합이라 여기도 항상 온다.
   ad_option_total: string; ad_account_total: string;
   cost_coverage: string | null; revenue_priced: string | null;
