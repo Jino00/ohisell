@@ -154,23 +154,37 @@ def test_cp_is_uninformative_false_when_any_hard_axis_known():
 
 
 # ---------------------------------------------------------------------------
-# 8. verdicts_in_order — VERDICT_ORDER에 없는 값도 결과에 포함된다.
+# 8. all_verdicts_in_order — 목록 밖 값도 빠지지 않고, 0건도 보인다.
+#    ★렌더가 실제로 부르는 그 함수를 겨눈다 — 한때 테스트는 «0건 숨김» 판을 겨누고
+#      렌더는 «0건 표시» 판을 쓰고 있었다(가드와 사고의 자리가 갈린 것, 교훈 #180).
 # ---------------------------------------------------------------------------
 
 
-def test_verdicts_in_order_includes_unknown_verdicts():
+def test_all_verdicts_in_order_includes_unknown_verdicts():
+    """VERDICT_ORDER에 없는 새 판정값이 조용히 증발하지 않는다(실측 61건 증발)."""
     counts = {"replace": 2, "agree": 1, "undetermined:brand_new": 5}
-    result = audit.verdicts_in_order(counts)
-    # 알려진 값(VERDICT_ORDER 순)이 먼저, 모르는 값이 뒤에 — 하나도 빠지지 않는다.
-    assert result == ["replace", "agree", "undetermined:brand_new"]
-    assert sum(counts[v] for v in result) == sum(counts.values())
+    result = audit.all_verdicts_in_order(counts)
+    assert "undetermined:brand_new" in result
+    # 모르는 값은 알려진 값 **뒤**에 붙는다.
+    assert result.index("undetermined:brand_new") > result.index("agree")
+    # 데이터에 있는 건수가 하나도 안 빠진다.
+    assert sum(counts[v] for v in result if v in counts) == sum(counts.values())
 
 
-def test_verdicts_in_order_covers_full_total():
-    counts = {"keep": 3, "undetermined:z_unknown_one": 1, "undetermined:a_unknown_two": 1}
-    result = audit.verdicts_in_order(counts)
-    assert set(result) == set(counts)
-    assert sum(counts[v] for v in result) == 5
+def test_all_verdicts_in_order_shows_zero_count_verdicts():
+    """0건인 판정값도 행이 나온다 — 「분류 없음」과 「0건」은 다르다(교훈 #123)."""
+    counts = {"replace": 2}
+    result = audit.all_verdicts_in_order(counts)
+    for v in audit.VERDICT_ORDER:
+        assert v in result, f"{v}가 0건이라고 표에서 사라졌다"
+    assert "keep" in result and counts.get("keep", 0) == 0
+
+
+def test_all_verdicts_in_order_has_no_duplicates():
+    """알려진 값이 두 번 실리지 않는다(0건 전량 출력 + unknown 덧붙임의 경계)."""
+    counts = {"replace": 1, "keep": 2, "undetermined:brand_new": 3}
+    result = audit.all_verdicts_in_order(counts)
+    assert len(result) == len(set(result))
 
 
 # ---------------------------------------------------------------------------
@@ -324,6 +338,28 @@ def _seed_combined(conn: sqlite3.Connection) -> None:
         f"VALUES ('E1','OPT-E1','{_MAX_DATE}',7)"
     )
 
+    # ── F: 같은 product_number에 창 «안»·«밖» 판매가 함께 있음 (P2-3) ──────────
+    # ★D는 판매가 창 밖에만 있는 경우(판정이 창에 안 매인다)를 잡고, F는 그 반대
+    # 방향 — **금액은 창에 매여야 한다** — 을 잡는다. 창 안 qty=4, 창 밖 qty=1000을
+    # 같은 옵션(브리지 해석은 창 무관)에 함께 넣어, qty·금액이 창 안 것만 반영하는지 본다.
+    conn.execute(
+        "INSERT INTO rocket_product_cost_map (product_number, internal_sku, status, match_method, product_name) "
+        "VALUES ('F1','CUR-F','matched','auto','카메라렌즈필름2매')"
+    )
+    conn.execute(
+        "INSERT INTO product_master (id, internal_sku, product_name, cost_price) VALUES "
+        "(11,'CUR-F','카메라렌즈필름2매',100), (12,'BRIDGE-F','카메라렌즈필름2매',140)"
+    )
+    conn.execute(
+        "INSERT INTO product_channel_mapping (channel_product_id, product_id, channel_id) "
+        "VALUES ('OPT-F1', 12, 5)"
+    )
+    conn.execute(
+        "INSERT INTO coupang_rocket_sales_daily (sku_id, option_id, date, qty) VALUES "
+        f"('F1','OPT-F1','{_MAX_DATE}',4), "
+        f"('F1','OPT-F1','{_OUTSIDE_WINDOW_DATE}',1000)"
+    )
+
     conn.commit()
 
 
@@ -388,3 +424,15 @@ def test_no_bridge_money_is_none_not_zero(tmp_path):
     assert row["verdict"] == "undetermined:no_bridge"
     assert row["bridge_sku"] is None
     assert row["money_diff"] is None
+
+
+def test_qty_and_money_are_window_scoped(tmp_path):
+    # ★P2-3: test_bridge_resolution_is_not_window_dependent의 반대 방향 — 판정은
+    # 창에 안 매이지만 **금액은 창에 매여야 한다**. F1은 창 안 qty=4, 창 밖 qty=1000을
+    # 같은 옵션에 갖고 있다. load_data의 qty 쿼리에서 `WHERE date >= ? AND date <= ?`를
+    # 제거하면 qty가 1004로 커지고 money_diff가 40160으로 튀어 이 테스트가 실패한다.
+    rows = _build_report_rows(tmp_path)
+    row = rows["F1"]
+    assert row["qty"] == 4
+    assert row["bridge_sku"] == "BRIDGE-F"
+    assert row["money_diff"] == Decimal("160")

@@ -2,7 +2,7 @@
 
 > 트랙: 쿠팡 손익 정합 · **D-CPP-27** · 선행 D-CPP-25(링크 층 분리) · ref 44 §4-4
 > 산출물: `scripts/audit_rocket_costmap_bridge.py`(읽기 전용 판정기) ·
-> `backend/tests/test_rocket_costmap_bridge_audit.py`(회귀 22건) · 이 문서
+> `backend/tests/test_rocket_costmap_bridge_audit.py`(회귀 24건) · 이 문서
 > ⚠️**이 감사는 링크를 바꾸지 않았다.** 교체는 Jino 채택 후 별건이다(교훈 #117).
 > 적대 리뷰 2라운드를 거쳤다 — 1라운드 P1 3건 전건 수정(§6).
 
@@ -49,7 +49,7 @@ D-CPP-25가 «값 층»(원가가 얼마)과 «링크 층»(그 원가가 이 �
 
 ```bash
 python3 scripts/audit_rocket_costmap_bridge.py --db <prod DB 사본> --days 30 --format md
-cd backend && python3 -m pytest tests/test_rocket_costmap_bridge_audit.py -q   # 22 passed
+cd backend && python3 -m pytest tests/test_rocket_costmap_bridge_audit.py -q   # 24 passed
 ```
 
 ## 3. 결과
@@ -179,7 +179,7 @@ cd backend && python3 -m pytest tests/test_rocket_costmap_bridge_audit.py -q   #
 규칙이 틀린 게 아니라 **이 데이터에 그 축이 가를 사례가 없다**. 특히 `material`은 이름 61건이
 「강화유리**코팅**」이라 pet·tempered 마커를 동시에 갖는데 cp·현재·브리지가 같은 표현을 쓰므로
 순서를 뒤집어도 양쪽이 같이 뒤집혀 **원리적으로 반증 불가**다.
-→ 회귀 테스트 22건에 **합성 입력으로 이 축들을 못 박았다**(실측으로는 검증할 수 없으므로).
+→ 회귀 테스트 24건에 **합성 입력으로 이 축들을 못 박았다**(실측으로는 검증할 수 없으므로).
 
 ## 5. Jino 결정이 필요한 것
 
@@ -210,9 +210,22 @@ cd backend && python3 -m pytest tests/test_rocket_costmap_bridge_audit.py -q   #
 
 수정 후 87건 / 120,481.1원으로 08-07 측정과 **건수까지** 같아졌다 — 단 이것도 검증이 아니라 재현이다.
 
-**P2 처분**: 채택 5(라벨 `!=manual` 명시 · `ignored` 분리 표기 · manual 95 총계 명시 ·
-§3-6 인과 수정 · **회귀 테스트 22건 신설**) / 이월 1(0건 판정값을 표에 명시 — `keep`·`bridge_conflict`가
-0건이라 «분류 없음»과 «0건»이 화면상 같다).
+**1라운드 P2 처분**: 채택 5(라벨 `!=manual` 명시 · `ignored` 분리 표기 · manual 95 총계 명시 ·
+§3-6 인과 수정 · **회귀 테스트 신설**) / 1건은 2라운드에서 채택(아래).
+
+**2라운드 — `GATE: PASS`, P1 미해소 0건.** 리뷰어가 `--days` 7/30/90으로 돌려
+**판정 건수는 세 창에서 완전 동일하고 금액만 움직인다**는 것을 실측했다(P1-1 수정이 만들 수 있던
+반대 방향 결함 — 금액이 전기간으로 새는 것 — 이 없음을 확인). 새 P2 3건은 **전건 채택**했다:
+① md 출력의 금액 표 아래에 「이 금액은 이 창에서만 유효」를 박았다(문서엔 있고 출력엔 없었다 —
+표만 떼어 인용하면 창이 사라진다) ② **0건 판정값도 행을 낸다**(`keep`·`bridge_conflict`가 0건이라
+표에서 통째로 사라져 «분류 없음»과 «0건»이 같아 보였다 — 교훈 #123) ③ 금액이 창 밖으로 새는
+**반대 방향** 회귀 테스트를 넣었다(리뷰어가 실측으로만 확인했던 자리).
+
+★③을 넣다가 갈래가 하나 더 드러났다: 「0건 표시」 판을 새 함수로 만들면서 **렌더는 새 함수를
+쓰고 테스트는 옛 함수를 겨누게 됐다.** 옛 함수는 죽은 코드가 됐고, 목록 밖 판정값 증발을 막는
+가드는 아무도 부르지 않는 자리에 서 있었다(교훈 #180과 같은 형태). 둘을 하나로 합치고 테스트를
+**렌더가 실제로 부르는 함수**로 옮겼다. 최종 회귀 **24건**, 변이 4종(창 조건 양방향 · unknown
+덧붙임 제거 · 0건 숨김 복귀) 전건 KILLED.
 
 ## 7. 이 감사가 하지 않은 것
 

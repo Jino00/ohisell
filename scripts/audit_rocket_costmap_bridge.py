@@ -509,18 +509,25 @@ VERDICT_ORDER = [
 ]
 
 
-def verdicts_in_order(counts: dict) -> list[str]:
-    """표에 실을 verdict 순서 — **데이터에 있는 것은 하나도 빠지지 않는다.**
+def all_verdicts_in_order(counts: dict) -> list[str]:
+    """요약 표에 실을 verdict 순서 — **하나도 빠지지 않고, 0건도 보인다.**
 
-    ★왜 목록을 그대로 순회하지 않는가: 판정값을 새로 추가하면(실제로 lens_tie를 둘로
-    쪼갰다) 고정 목록에 없는 값이 **조용히 표에서 사라진다**. 2026-08-09 실측에서 172건
-    중 61건이 그렇게 증발해 합계가 111로 보였다 — 그런데 표 어디에도 «빠졌다»는 표시가
-    없어서, 우연히 합을 세어 보지 않았으면 몰랐을 것이다. 알려진 것을 먼저 정해진 순서로
-    내고, 모르는 것은 **뒤에 붙인다**. 규칙이 아니라 구조로 막는다.
+    막는 것 둘 (2026-08-09에 실제로 겪은 것):
+    ①**목록 밖 값이 조용히 증발한다.** 판정값을 새로 추가하면(실제로 `lens_tie`를 둘로
+      쪼갰다) 고정 목록만 순회하는 표에서 그 값이 사라진다 — 172건 중 61건이 그렇게
+      빠져 합계가 111로 보였는데, 표 어디에도 «빠졌다»는 표시가 없었다. 우연히 합을
+      세어 보지 않았으면 몰랐을 것이다. → 목록 밖 값은 정렬해 **뒤에 붙인다**.
+    ②**0건 판정값이 안 보이면 「그 분류가 없다」와 「0건이다」가 화면상 같아진다**
+      (교훈 #123 — 발견 0건과 실행 안 됨은 같은 숫자로 보인다). `keep`·
+      `bridge_conflict`가 실제로 0건이라 표에서 통째로 사라져 있었다.
+      → `VERDICT_ORDER`는 **0건이어도 전부** 낸다.
+
+    ★함수가 이것 하나인 이유: 한때 «0건 숨김» 판과 «0건 표시» 판이 공존했는데, 렌더는
+      후자를 쓰고 테스트는 전자를 겨누고 있었다. 가드를 세운 자리와 사고가 지나가는
+      자리가 다르면 그 가드는 없는 것과 같다(교훈 #180). 갈래를 없앤다.
     """
-    known = [v for v in VERDICT_ORDER if counts.get(v, 0) > 0]
     unknown = sorted(v for v in counts if counts[v] > 0 and v not in VERDICT_ORDER)
-    return known + unknown
+    return list(VERDICT_ORDER) + unknown
 
 
 def fmt_money(d: Decimal | None) -> str:
@@ -564,17 +571,24 @@ def render_markdown(report: dict, summary: dict, args: argparse.Namespace) -> st
         w(f"| {status} | {mm} | {c} |\n")
     w("\n")
 
+    window_note = (
+        f"> ⚠️ 이 표의 금액은 창 {report['window_start']}~{report['window_end']}"
+        f"({report['days']}일)에서만 유효하다. 판정 건수는 창에 종속되지 않는다.\n"
+    )
+
     w("## verdict별 건수·금액 (manual 제외 — 요약 대상)\n\n")
     w("| verdict | 건수 | 금액합(원, 계산 가능한 행만) | 금액 계산된 건수 |\n|---|---:|---:|---:|\n")
     _nm_counts = summary["non_manual_verdict_counts"]
-    for v in verdicts_in_order(_nm_counts):
+    for v in all_verdicts_in_order(_nm_counts):
         c = _nm_counts.get(v, 0)
         money = summary["non_manual_verdict_money"].get(v)
         n = summary["non_manual_verdict_money_n"].get(v, 0)
-        money_str = fmt_money(money) if n > 0 else "N/A"
+        money_str = "—" if c == 0 else (fmt_money(money) if n > 0 else "N/A")
         w(f"| {v} | {c} | {money_str} | {n} |\n")
     # ★합계 행 — 판정값이 하나라도 표에서 빠지면 여기서 어긋난다(잘림의 자기 신고).
+    # (0건 행은 _nm_counts에 없는 값이라 이 합계엔 안 잡힌다 — 실제 건수 합 그대로.)
     w(f"| **합계** | **{sum(_nm_counts.values())}** | | |\n")
+    w(f"\n{window_note}\n")
     replace_money = summary["non_manual_verdict_money"].get("replace")
     if replace_money is not None:
         w(
@@ -585,13 +599,13 @@ def render_markdown(report: dict, summary: dict, args: argparse.Namespace) -> st
     w("## verdict별 건수·금액 (match_method=manual — 불가침, 참고용, 위 요약과 별도)\n\n")
     w("| verdict | 건수 | 금액합(원, 계산 가능한 행만) | 금액 계산된 건수 |\n|---|---:|---:|---:|\n")
     _m_counts = summary["manual_verdict_counts"]
-    for v in verdicts_in_order(_m_counts):
+    for v in all_verdicts_in_order(_m_counts):
         c = _m_counts.get(v, 0)
         money = summary["manual_verdict_money"].get(v)
         n = summary["manual_verdict_money_n"].get(v, 0)
-        money_str = fmt_money(money) if n > 0 else "N/A"
+        money_str = "—" if c == 0 else (fmt_money(money) if n > 0 else "N/A")
         w(f"| {v} | {c} | {money_str} | {n} |\n")
-    w("\n")
+    w(f"\n{window_note}\n")
 
     w("## 상세 (금액 절대값 내림차순)\n\n")
     w(
