@@ -256,8 +256,12 @@ def load_ours_executions(
         for cid, changed_at, action, entity_id, after_value in rows:
             if changed_at is None or not entity_id:
                 continue
-            for axis, actions in OURS_ACTIONS_BY_AXIS.items():
-                if action not in actions:
+            # ★변수명 주의(적대 리뷰 2R이 잡은 실사고): 여기를 `actions`로 쓰면 위 쿼리 필터
+            #   `actions`를 덮어써서, entity가 500개를 넘어 **두 번째 청크부터** 쿼리가
+            #   마지막 축의 action만 보게 된다 → 상태 축 증거가 조용히 0건이 되고 되찾기가
+            #   미탐으로 떨어진다. 청크 루프와 이름을 공유하지 않는다.
+            for axis, axis_actions in OURS_ACTIONS_BY_AXIS.items():
+                if action not in axis_actions:
                     continue
                 value = axis_value(axis, after_value)
                 if value is None:

@@ -751,12 +751,20 @@ def test_rule5_requires_same_axis(client, db):
 
     ★하필 **입찰 1원**을 쓴다: 파이썬에서 `True == 1`이라, 축을 값에 묶지 않으면
       「상태=정지(True)」와 「입찰=1원」이 같은 값이 되어 축이 달라도 대조가 성립한다.
-      이 테스트가 그 충돌을 못 박는다."""
+      이 테스트가 그 충돌을 못 박는다.
+    ★★**두 축이 모두 후보에 있어야 한다**(적대 리뷰 2R): 증거 조회는 후보에 있는 축의
+      action만 읽으므로, 상태 감지만 두면 `update_bid` 집행이 애초에 로드되지 않아
+      **축 비교를 태우지 못한 채 통과한다** — 1라운드 P1-3a의 「SQL이 우연히 막고 있다」와
+      같은 실패 모양이다. 그래서 입찰 감지 행을 함께 둔다."""
     _seed_change_log(db, action="update_bid", entity_type="adgroup", entity_id="grp-1",
                      before=json.dumps({"bidAmt": 300}), after=json.dumps({"bidAmt": 1}),
                      at=OURS_STOP_AT)
     _seed_change_log(db, action="external_status_change", entity_type="adgroup",
                      entity_id="grp-1", before=_UNLOCKED, after=_LOCKED, at=NEXT_MORNING_SYNC)
+    # 입찰 축도 후보에 넣는다(값은 우리 집행과 다르게 둬서 이 행 자체는 안 되찾히게).
+    _seed_change_log(db, action="external_bid_change", entity_type="adgroup",
+                     entity_id="grp-2", before=json.dumps({"bidAmt": 300}),
+                     after=json.dumps({"bidAmt": 999}), at=NEXT_MORNING_SYNC)
 
     body = _get(client, date_from="2026-07-30", date_to="2026-07-31")
     detection = next(r for r in body["rows"] if r["op_type"] == "external_status_change")
@@ -809,3 +817,26 @@ def test_rule5_window_boundaries_are_inclusive(client, db):
     body = _get(client, date_from="2026-07-30", date_to="2026-07-31")
     detection = next(r for r in body["rows"] if r["op_type"] == "external_status_change")
     assert detection["actor"] == change_actor.ACTOR_OURS
+
+
+def test_rule5_survives_the_query_chunk_boundary(client, db):
+    """대상이 청크 상한(500)을 넘어도 되찾기가 끊기지 않는다 (적대 리뷰 2R가 잡은 회귀).
+
+    ★실사고: 증거 조회의 action 필터 변수명이 안쪽 루프에 덮여, **두 번째 청크부터**
+      쿼리가 마지막 축의 action만 보게 됐다. 상태 축 증거가 조용히 0건이 되어 501번째
+      대상부터 「대행사」로 남았다 — 화면은 아무 경고도 안 낸다.
+    ★이 화면은 최대 365일 구간을 받고 소재·키워드 grain에서 대상 500개 초과는 평범하다."""
+    total = 501
+    for i in range(total):
+        cid = f"cmp-chunk-{i:04d}"
+        _seed_our_stop(db, at=OURS_STOP_AT)  # 값·시각은 같고 대상만 다르게 아래에서 교체
+        db.query(NaverChangeLog).order_by(NaverChangeLog.id.desc()).first().entity_id = cid
+        db.commit()
+        _seed_change_log(db, action="external_status_change", entity_type="campaign",
+                         entity_id=cid, campaign_id=cid, before=_UNLOCKED, after=_LOCKED,
+                         at=NEXT_MORNING_SYNC)
+
+    body = _get(client, date_from="2026-07-30", date_to="2026-07-31", limit=1)
+    assert body["reclaimed_ours"] == total, (
+        f"{total}개 대상 전부 되찾아야 하는데 {body['reclaimed_ours']}건만 되찾았다"
+    )
