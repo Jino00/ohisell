@@ -639,11 +639,18 @@ export default function Rocket1PRevenue() {
                 차감되는 비용은 원가·프로모션 분담금·광고비·납부세액 넷뿐입니다.
                 {data.daily.some((d) => Number(d.ad_no_sales) + Number(d.ad_no_sales_days)
                   + Number(d.ad_uncosted) > 0) && (
-                  <> 광고비 열엔 <b>손익 밖 세 통이 빠져 있습니다</b>
+                  <> 광고비 열엔 <b>날짜에 못 붙는 세 통이 빠져 있습니다</b>
                     (기간 합 {won(data.pnl.ad_unattributed)} = 원가 미상 {won(data.pnl.ad_uncosted)}
                     {" "}+ 팔린 옵션의 판매 없는 날 {won(data.pnl.ad_no_sales_days)}
-                    {" "}+ 판매행 없는 옵션 {won(data.pnl.ad_no_sales)}) — 귀속할 판매가 없어 위 손익에
-                    섞지 않았지만 실제로 나간 돈입니다.</>
+                    {" "}+ 판매행 없는 옵션 {won(data.pnl.ad_no_sales)}).{" "}
+                    {/* ★★`included`면 뒤 두 통은 **기간 사다리에는 이미 들어가 있다** — 빠진 건
+                        이 «일별 열»뿐이다. 예전 문구는 그때도 「위 손익에 섞지 않았다」고 말해
+                        사다리의 «−» 줄과 정면으로 어긋났다(P1-2와 같은 종류인데, basis='full'이
+                        라이브에서 도달 가능해진 2026-08-10에야 화면에 드러났다). */}
+                    {data.pnl.ad_no_sales_included
+                      ? <>이 셋은 <b>기간 사다리 순이익에는 이미 차감돼 있고</b>, 붙일 날짜가 없어
+                        일별 열에만 못 실었습니다.</>
+                      : <>귀속할 판매가 없어 위 손익에 섞지 않았지만 실제로 나간 돈입니다.</>}</>
                 )}
                 {" "}날짜가 빠진 날은 판매분석이 그날치를 아직 안 준 것이지 판매 0이 아닙니다.
               </p>

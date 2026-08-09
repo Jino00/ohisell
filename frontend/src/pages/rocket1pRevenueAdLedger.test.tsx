@@ -231,7 +231,7 @@ describe("일별 손익 각주 — 광고비 열이 무엇을 빼놓았는지 �
   it("F-M6 세 통 중 하나라도 0이 아니면 각주가 뜨고 셋을 다 부른다", async () => {
     mount({ ...BASE, daily: DAILY });
     const note = await screen.findByText(
-      (_t, el) => !!el && el.tagName === "P" && (el.textContent ?? "").includes("손익 밖 세 통"));
+      (_t, el) => !!el && el.tagName === "P" && (el.textContent ?? "").includes("날짜에 못 붙는"));
     const text = note.textContent ?? "";
     for (const s of ["132,982원", "33,750원", "99,232원"]) {
       expect(text, `일별 각주에 ${s}가 없다`).toContain(s);
@@ -246,8 +246,34 @@ describe("일별 손익 각주 — 광고비 열이 무엇을 빼놓았는지 �
       daily: [{ ...DAILY[0], ad_no_sales: "0", ad_no_sales_days: "435916" }],
     });
     const note = await screen.findByText(
-      (_t, el) => !!el && el.tagName === "P" && (el.textContent ?? "").includes("손익 밖 세 통"));
+      (_t, el) => !!el && el.tagName === "P" && (el.textContent ?? "").includes("날짜에 못 붙는"));
     expect(note.textContent ?? "").toContain("435,916원");
+  });
+
+  it("basis='full'이면 «위 손익에 섞지 않았다»고 말하지 않는다 — 이미 차감됐다", async () => {
+    /* ★사다리의 «−» 줄과 정면으로 어긋나던 문구. P1-2와 같은 종류인데 이쪽은 일별 각주라
+       basis='full'이 라이브에서 도달 가능해진 2026-08-10에야 드러났다. */
+    mount({
+      ...withPnl({
+        basis: "full", ad_spend: "6092627", ad_uncosted: "0",
+        ad_no_sales_days: "345359", ad_no_sales: "334445",
+        ad_unattributed: "679804", ad_no_sales_included: true, cost_coverage: "1.0000",
+      }, { skus: 0, actionable_skus: 0, link_missing_skus: 0, top: [] }),
+      daily: [{ ...DAILY[0], ad_uncosted: "0", ad_no_sales_days: "345359", ad_no_sales: "334445" }],
+    });
+    const note = await screen.findByText(
+      (_t, el) => !!el && el.tagName === "P" && (el.textContent ?? "").includes("날짜에 못 붙는"));
+    const text = note.textContent ?? "";
+    expect(text).toContain("기간 사다리 순이익에는 이미 차감돼 있고");
+    expect(text).not.toContain("위 손익에 섞지 않았지만");
+    expect(text).toContain("679,804원");           // 크기는 계속 보인다
+  });
+
+  it("basis='costed_subset'이면 «위 손익에 섞지 않았다»가 참이라 그대로 말한다", async () => {
+    mount({ ...BASE, daily: DAILY });             // included=false
+    const note = await screen.findByText(
+      (_t, el) => !!el && el.tagName === "P" && (el.textContent ?? "").includes("날짜에 못 붙는"));
+    expect(note.textContent ?? "").toContain("위 손익에 섞지 않았지만");
   });
 
   it("세 통이 전부 0이면 각주를 띄우지 않는다 — 없는 경고는 진짜 경고를 묻는다", async () => {
@@ -256,7 +282,7 @@ describe("일별 손익 각주 — 광고비 열이 무엇을 빼놓았는지 �
       daily: [{ ...DAILY[0], ad_no_sales: "0", ad_uncosted: "0", ad_no_sales_days: "0" }],
     });
     await screen.findByText("일별 손익 (1일)");
-    expect(screen.queryByText((t) => t.includes("손익 밖 세 통"))).toBeNull();
+    expect(screen.queryByText((t) => t.includes("날짜에 못 붙는"))).toBeNull();
   });
 });
 
