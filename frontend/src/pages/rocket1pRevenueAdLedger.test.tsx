@@ -99,6 +99,12 @@ function leafText(fragment: string) {
     !!el && el.children.length === 0 && (el.textContent ?? "").includes(fragment);
 }
 
+/** 광고 원장 각주 <p>. 조상 <div>가 아니라 그 문단 자체를 잡는다. */
+async function footnote(): Promise<HTMLElement> {
+  return screen.findByText(
+    (_t, el) => !!el && el.tagName === "P" && (el.textContent ?? "").includes("옵션 광고 원장"));
+}
+
 /** 사다리 줄 하나를 라벨 조각으로 찾아 «라벨 + 금액»을 담은 행을 돌려준다. */
 async function ladderLine(fragment: string): Promise<HTMLElement> {
   const label = await screen.findByText(leafText(fragment));
@@ -146,15 +152,100 @@ describe("손익 사다리 — 광고 원장 네 통", () => {
   });
 
   it("M5 각주가 네 통을 **전부** 부르고 손익 밖 합계를 숫자로 말한다", async () => {
-    mount(BASE);
-    const note = await screen.findByText(
-      (_t, el) => !!el && el.tagName === "P" && (el.textContent ?? "").includes("옵션 광고 원장"));
-    const text = note.textContent ?? "";
-    for (const s of ["797,431원", "664,449원", "33,750원", "99,232원", "132,982원"]) {
+    // ★★모든 통이 **0이 아닌** 창으로 본다(적대 리뷰 F-M2 생존분). BASE는
+    //   `ad_no_sales_days=0`이라 그 항이 애초에 렌더되지 않아, 각주에서 그 항을 지워도
+    //   테스트가 통과했다 — 0으로만 검사하는 통과는 아무것도 안 지킨다(교훈 #181).
+    mount(withPnl({ ad_no_sales_days: "435916", ad_unattributed: "568898" }));
+    const text = (await footnote()).textContent ?? "";
+    for (const s of ["797,431원", "664,449원", "33,750원", "435,916원", "99,232원", "568,898원"]) {
       expect(text, `각주에 ${s}가 없다`).toContain(s);
     }
     // ★계정 총액과의 차는 «결손»이 아니라 **정의 차이**라고 말한다(오독하면 수집 장애로 읽힌다).
     expect(text).toContain("정의 차이");
+    // ★그 차는 백엔드가 Decimal로 낸 값을 쓴다 — 화면이 JS float로 다시 빼지 않는다.
+    expect(text).toContain("190원");
+  });
+
+  it("M-P1-2 included=true면 각주가 «손익 밖»에 이미 차감된 통을 세지 않는다", async () => {
+    // 합격기준이 달성된 상태(커버리지 100%) — 여기서 예전 각주는
+    // 「원장 797,431 = 손익 797,431」이라 말하면서 동시에 「손익 밖 99,232원」이라 말했다.
+    mount(withPnl({
+      basis: "full", ad_spend: "797431", ad_uncosted: "0",
+      ad_no_sales_days: "33750", ad_no_sales_included: true,
+      ad_unattributed: "132982", cost_coverage: "1.0000",
+    }, { skus: 0, actionable_skus: 0, link_missing_skus: 0, top: [] }));
+    const text = (await footnote()).textContent ?? "";
+    expect(text).toContain("손익 밖에 남은 광고비는 없습니다");
+    // ★이미 차감된 132,982원을 «남은 합»으로 다시 부르면 같은 돈을 두 번 세는 것이다.
+    expect(text).not.toContain("손익 밖에 남은 합이 132,982원");
+    // 대신 «그 안에 포함»으로 말한다 — 통이 사라지는 것도 아니다.
+    expect(text).toContain("그 안에");
+    expect(text).toContain("33,750원");
+  });
+
+  it("M-P1-2b included=true인데 구멍1이 남아 있으면 «남은 합»은 그것만이다", async () => {
+    /* ★엔진에서는 `is_full ⟹ ad_uncosted=0`이 성립하지만 **화면은 그 불변식을 가정하면
+       안 된다** — 옵션 하나가 날마다 다른 sku_id로 관측되면(가격 있는 날/없는 날) 이론상
+       included=true와 ad_uncosted>0이 함께 올 수 있다. 그때 `ad_unattributed`를 그대로
+       «남은 합»이라 부르면 이미 차감된 두 통까지 다시 세게 된다. 화면은 타입이 허용하는
+       모든 응답에서 옳아야 한다. */
+    mount(withPnl({
+      basis: "full", ad_spend: "760000", ad_uncosted: "37431",
+      ad_no_sales_days: "33750", ad_no_sales_included: true,
+      ad_unattributed: "170413",
+    }));
+    const text = (await footnote()).textContent ?? "";
+    expect(text).toContain("손익 밖에 남은 합이 37,431원");     // 구멍1만
+    expect(text).not.toContain("170,413원");                   // 이미 차감된 것까지 세지 않는다
+  });
+
+  it("F-M4 차감 대상이 아닌 통에는 «위 손익에 미포함» 경고가 붙어 있다", async () => {
+    // ★이 라벨이 금지선(부분집합 매출에서 전량 비용 빼기 금지)의 유일한 화면 경고다.
+    mount(BASE);
+    expect((await ladderLine("원가 미상 옵션")).textContent).toContain("위 손익에 미포함");
+    expect((await ladderLine("그 기간 판매 없는 옵션")).textContent).toContain("위 손익에 미포함");
+  });
+});
+
+describe("일별 손익 각주 — 광고비 열이 무엇을 빼놓았는지 말한다", () => {
+  const DAILY: R["daily"] = [{
+    date: "2026-08-08", qty: 210, consumer_revenue: "3817270", our_revenue: "2318513",
+    ad_spend_all: "797431", pnl_revenue: "2198728", pnl_qty: 200, cost: "863821.70",
+    promo_burden: "195000", ad_spend: "664449",
+    ad_no_sales: "99232", ad_no_sales_days: "0", ad_uncosted: "33750",
+    vat: "43223.40", net_profit: "432233.90", profit_rate: "0.1966",
+    cost_coverage: "0.9483",
+  }];
+
+  it("F-M6 세 통 중 하나라도 0이 아니면 각주가 뜨고 셋을 다 부른다", async () => {
+    mount({ ...BASE, daily: DAILY });
+    const note = await screen.findByText(
+      (_t, el) => !!el && el.tagName === "P" && (el.textContent ?? "").includes("손익 밖 세 통"));
+    const text = note.textContent ?? "";
+    for (const s of ["132,982원", "33,750원", "99,232원"]) {
+      expect(text, `일별 각주에 ${s}가 없다`).toContain(s);
+    }
+  });
+
+  it("F-M6 구멍3이 0이어도 나머지 두 통이 있으면 각주가 뜬다", async () => {
+    // ★조건이 `ad_no_sales`만 보면 이 창에서 각주가 통째로 사라진다 — 그런데 여기엔
+    //   손익 밖 광고비가 469,666원이나 있다. «셋 중 하나라도»가 조건이라야 한다.
+    mount({
+      ...withPnl({ ad_no_sales: "0", ad_no_sales_days: "435916", ad_unattributed: "469666" }),
+      daily: [{ ...DAILY[0], ad_no_sales: "0", ad_no_sales_days: "435916" }],
+    });
+    const note = await screen.findByText(
+      (_t, el) => !!el && el.tagName === "P" && (el.textContent ?? "").includes("손익 밖 세 통"));
+    expect(note.textContent ?? "").toContain("435,916원");
+  });
+
+  it("세 통이 전부 0이면 각주를 띄우지 않는다 — 없는 경고는 진짜 경고를 묻는다", async () => {
+    mount({
+      ...withPnl({ ad_uncosted: "0", ad_no_sales: "0", ad_unattributed: "0" }),
+      daily: [{ ...DAILY[0], ad_no_sales: "0", ad_uncosted: "0", ad_no_sales_days: "0" }],
+    });
+    await screen.findByText("일별 손익 (1일)");
+    expect(screen.queryByText((t) => t.includes("손익 밖 세 통"))).toBeNull();
   });
 });
 

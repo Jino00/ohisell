@@ -1344,3 +1344,54 @@ def test_a7_undetermined_when_ads_ran_but_no_sales_were_collected(db):
     assert a7["left"] == a7["right"] == "300000"
     assert a7["verdict"] == "undetermined"
     assert "저절로" in a7["note"]
+
+
+# ═══ ⑨ basis='full' + «판매 없는 날»이 0이 아닌 창 (적대 리뷰 2026-08-09 P1-1·B-M5) ═══
+#
+# ★이 절이 없어서 놓친 것: 엔진이 접는 대상을 두 통으로 넓혔는데 A1·A2의 역산은 한 통이라,
+#   **계약의 목표(커버리지 100% → basis='full')를 달성하는 순간** A1·A2가 fail이 됐다.
+#   기존 full 픽스처는 `ad_no_sales_days=0`이라 두 식의 차가 늘 0이어서 아무도 못 봤다 —
+#   «0인 값으로만 검사하는 통과»가 정확히 이런 것이다(교훈 #181).
+
+
+def _full_with_no_sales_day(db):
+    """basis='full'이면서 `ad_no_sales_days` > 0인 창. 이 조합이 사각지대였다."""
+    _full_fixture(db)
+    _ad_option(db, "O1", "5000", d=date(2026, 8, 5))   # 팔린 옵션, 그날 판매행 없음
+    db.commit()
+    return _audit(db, D_PREV, date(2026, 8, 5))
+
+
+def test_a1_a2_hold_when_full_basis_folds_two_buckets(db):
+    """★A1·A2의 역산이 **엔진이 접은 것과 같은 두 통**이라야 한다."""
+    r = _full_with_no_sales_day(db)
+    assert r["ladder"]["basis"] == "full"
+    assert r["ladder"]["ad_no_sales_included"] is True
+    assert Decimal(r["ladder"]["ad_no_sales_days"]) > 0     # ← 0이면 이 테스트가 죽은 검사다
+    by = {c["id"]: c for c in r["checks"]}
+    for cid in ("A1", "A2", "A3"):
+        assert by[cid]["verdict"] == "pass", (cid, by[cid])
+        assert Decimal(by[cid]["diff"]) == ZERO_D
+    # 역산 금액을 note가 **두 통의 이름으로** 말한다(한 통 이름이면 사용자가 오독한다).
+    assert "판매 없는 날" in by["A1"]["note"] and "판매행 없는 옵션" in by["A1"]["note"]
+
+
+def test_full_basis_deducts_both_buckets_from_net_profit(db):
+    """★`ad_spend`만 두 통이고 **순이익은 한 통**만 빼는 변이를 죽인다(B-M5 생존분).
+
+    그 변이는 A3를 통과한다 — 부가세가 잔차라 차액을 조용히 흡수하기 때문이다. 그래서
+    순이익 그 자체를 못 박는다: 세후 차감액은 (두 통 합) × 100/110이다.
+    """
+    r = _full_with_no_sales_day(db)
+    lad = r["ladder"]
+    folded = Decimal(lad["ad_no_sales_days"]) + Decimal(lad["ad_no_sales"])
+    # 폴드(일별 합)와 타일의 차 = 세후 차감액. 한 통만 빼면 이 값이 작아진다.
+    daily_sum = sum((Decimal(d) for d in _screen_daily(db) if d), ZERO_D)
+    assert daily_sum - Decimal(lad["net_profit"]) == _money(
+        folded * Decimal("100") / Decimal("110"))
+
+
+def _screen_daily(db):
+    from app.services.coupang.rocket_1p_pnl_audit import ATOM_LIMIT
+    r = compute_rocket_1p_revenue(db, D_PREV, date(2026, 8, 5), None, ATOM_LIMIT)
+    return [d["net_profit"] for d in r["daily"]]

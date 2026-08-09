@@ -1048,8 +1048,50 @@ def test_full_basis_folds_both_unattributable_buckets(db):
     assert Decimal(p["ad_unattributed"]) == Decimal("8000")   # 크기는 계속 보인다
 
 
+def test_burden_unknown_window_still_splits_the_ledger_without_remainder(db):
+    """★분담금을 모르면 **모든 원자가 손익 밖**이다 — 그래도 항등식은 성립해야 한다.
+
+    적대 리뷰 2026-08-09에서 **생존한 변이**(B-M3: 분담금 미상 원자를 `ad_uncosted`에서
+    제외)가 드러낸 사각이다. 그 변이는 원장 14,000원 중 11,000원을 증발시키고도 전 테스트가
+    초록이었다 — 기존 픽스처가 전부 `burden_known=True`였기 때문이다.
+    ★`ad_uncosted`의 판별자는 «원가 미상»이 아니라 **`net is None`**이라, 분담금 미상도
+      이 통으로 들어온다. 라벨이 「원가 미상 옵션」인 것과 어긋나는 지점이므로 여기서 못 박는다.
+    """
+    from sqlalchemy import text as _t
+    _sale(db, "A", "S1", 10, "1000000")
+    _price(db, "S1", "60000", 1)
+    _cost(db, "S1", 20000)                     # 원가는 있는데
+    # 창에 걸친 프로모션인데 할인액 원천(제안서)이 없다 → 분담금 «모름» → 전 원자 net=None
+    db.execute(_t("CREATE TABLE IF NOT EXISTS coupang_promo_discount_item "
+                  "(request_id TEXT, product_number TEXT, discount_type TEXT, discount_value NUM)"))
+    db.execute(_t("INSERT INTO coupang_rocket_promotion "
+                  "(request_id, vendor_id, start_at, end_at) "
+                  "VALUES ('P1', :v, '2026-08-01 00:00:00', '2026-08-31 23:59:59')"),
+               {"v": VENDOR})
+    _ad_option(db, "A", "11000")
+    _ad_option(db, "C", "3000")
+    db.commit()
+    p = compute_rocket_1p_revenue(db, D, D)["pnl"]
+    assert p["promo_burden_known"] is False
+    assert p["blocked"]["code"] == "promo_burden_unknown"
+    # ★손익은 없지만 광고 원장은 **여전히 남김없이** 갈린다.
+    assert p["ad_uncosted"] == "11000"
+    assert p["ad_no_sales"] == "3000"
+    assert (Decimal(p["ad_uncosted"]) + Decimal(p["ad_no_sales_days"])
+            + Decimal(p["ad_no_sales"])) == Decimal(p["ad_option_total"]) == Decimal("14000")
+
+
 def test_daily_ad_buckets_sum_to_the_window_buckets(db):
-    """일별 통의 합 = 기간 통. 판정자가 갈라지면 여기서 죽는다."""
+    """일별 통의 합 = 기간 통. 판정자가 갈라지면 여기서 죽는다.
+
+    ★★**성립 조건이 있다**(적대 리뷰 2026-08-09 P2-1): `daily` 행은 «판매행이 있는 날»
+      에만 생긴다. 그래서 창 안에 «광고만 쓰고 판매행이 하나도 없는 날»이 있으면 그 날의
+      통은 일별 어디에도 실릴 자리가 없다 — 라이브 실측(창 2026-05-28~06-03)에서
+      일별 Σ `ad_no_sales_days` 112,637 vs 창 2,479,753(2,367,116원이 일별에 없다).
+      **기간 타일은 정확하고**(화면 각주가 인용하는 값은 그쪽이다) 일별 축만 그 날을
+      표현할 수 없는 것이다. 아래 `test_ad_only_day_is_absent_from_daily`가 그 사실을
+      직접 못 박는다 — 조건을 안 적으면 이 테스트가 «항상 참»이라고 거짓말한다.
+    """
     _sale(db, "A", "S1", 10, "1000000")
     _price(db, "S1", "60000", 1)
     _cost(db, "S1", 20000)
@@ -1115,3 +1157,23 @@ def test_excluded_row_without_note_says_so(db):
     db.commit()
     row = compute_rocket_1p_revenue(db, D, D)["pnl"]["uncosted"]["excluded_top"][0]
     assert row["excluded_note"] is None
+
+
+def test_ad_only_day_is_absent_from_daily_and_that_is_stated(db):
+    """★«광고만 쓴 날»은 `daily`에 행이 없다 — 그 사실을 테스트가 **알고** 있게 한다.
+
+    위 일별-합 테스트가 무조건 참인 것처럼 읽히면, 나중에 이 성질이 바뀌었을 때
+    (또는 일별을 화면에 열로 그릴 때) 아무도 차이를 못 본다. 기간 타일은 정확하다.
+    """
+    _sale(db, "A", "S1", 10, "1000000")
+    _price(db, "S1", "60000", 1)
+    _cost(db, "S1", 20000)
+    _ad_option(db, "A", "11000")
+    _ad_option(db, "A", "5000", d=date(2026, 8, 6))   # 8/6엔 판매행이 아예 없다
+    db.commit()
+    r = compute_rocket_1p_revenue(db, D, date(2026, 8, 6))
+    assert [d["date"] for d in r["daily"]] == ["2026-08-04"]      # 8/6 행이 없다
+    # 기간 타일은 그 5,000원을 안다 —
+    assert r["pnl"]["ad_no_sales_days"] == "5000"
+    # — 그러나 일별 합에는 없다. 이 부등호가 위 테스트의 성립 조건이다.
+    assert sum((Decimal(d["ad_no_sales_days"]) for d in r["daily"]), ZERO_D) == ZERO_D

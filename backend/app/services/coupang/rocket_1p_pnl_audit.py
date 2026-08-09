@@ -207,16 +207,25 @@ def compute_pnl_audit_checks(db: Session, date_from: date, date_to: date,
             checks.append(_check(cid, label, None, None, verdict=_UNDET,
                                  note=f"손익이 없어 검사 대상이 없습니다 — {reason}"))
     else:
-        # ★사다리는 basis='full'일 때 «판매 없는 옵션 광고비»를 세후로 추가 차감하는데,
+        # ★사다리는 basis='full'일 때 «귀속 불가능한 광고비»를 세후로 추가 차감하는데,
         #   일별·옵션별 폴드에는 그 차감이 없다(귀속할 날·옵션이 없는 돈이라서). 비교하려면
         #   우변에 그 차감을 되돌린다 — 이건 재계산이 아니라 응답이 공개한 값의 역산이다.
         #   (평상시엔 included=False라 adj=0이다.)
-        adj = (_money(Decimal(p["ad_no_sales"]) * Decimal("100") / Decimal("110"))
+        # ★★**두 통이다**(2026-08-09 적대 리뷰 P1-1). 엔진이 접는 대상을
+        #   `ad_no_sales` → `ad_no_sales_days + ad_no_sales`로 넓혔는데 여기만 한 통이면
+        #   A1·A2가 **basis='full'인 다일 창에서 fail**한다 — 즉 «커버리지 100%»라는
+        #   목표를 달성하는 순간 검사가 깨진다. 라이브 투영 실측: 창 08-02~08-08에서
+        #   diff 351,520원. 접는 대상이 갈라진 것이 원인이므로 두 곳이 **같은 식**을 써야 한다.
+        # ★`_money`는 **합에 한 번** 건다 — 엔진(`pnl_net_total`)과 반올림 지점이 같아야
+        #   역산이 정확히 되돌아온다. 통별로 반올림하면 끝자리가 어긋난다.
+        adj = (_money((Decimal(p["ad_no_sales_days"]) + Decimal(p["ad_no_sales"]))
+                      * Decimal("100") / Decimal("110"))
                if p["ad_no_sales_included"] else ZERO)
         folds_net = net + adj
         adj_note = (None if adj == ZERO else
-                    f"사다리는 판매 없는 옵션 광고비 세후 {adj}원을 추가 차감(basis=full) — "
-                    "우변에 되더해 비교. ")
+                    f"사다리는 귀속 불가 광고비(팔린 옵션의 판매 없는 날 "
+                    f"{p['ad_no_sales_days']}원 + 판매행 없는 옵션 {p['ad_no_sales']}원)를 "
+                    f"세후 {adj}원으로 추가 차감(basis=full) — 우변에 되더해 비교. ")
         fold_note = (adj_note or "") + _IDENTITY_NOTE
         daily_sum = sum((Decimal(d["net_profit"]) for d in r["daily"]
                          if d["net_profit"] is not None), ZERO)

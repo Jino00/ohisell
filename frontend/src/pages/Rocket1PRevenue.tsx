@@ -290,6 +290,12 @@ export default function Rocket1PRevenue() {
                  날)는 근거 화면 A7이 fail로만 고발하고 있었다. 안 보이는 돈은 없는 돈이 된다. */
               const noSalesDays = Number(p.ad_no_sales_days);
               const adUncosted = Number(p.ad_uncosted);
+              /* ★«손익 밖에 남은 돈»은 `ad_unattributed`와 **다르다**: included면 뒤 두 통이
+                 이미 순이익에서 빠졌으므로 남은 것은 구멍1뿐이다. 두 값을 같이 쓰면 각주가
+                 사다리를 부정한다(적대 리뷰 P1-2). 술어는 사다리 부호와 같은 것을 쓴다. */
+              const outsidePnl = p.ad_no_sales_included
+                ? adUncosted
+                : adUncosted + noSalesDays + noSales;
               return (
                 <>
                   {blocked ? (
@@ -554,20 +560,31 @@ export default function Rocket1PRevenue() {
                         네 통으로 **남김없이** 갈라지고 그 합이 원 단위로 맞는다 — 그래서
                         여기 적힌 숫자를 더하면 실제로 원장 총액이 된다. 예전 문구는 구멍1을
                         «부분집합 제한»이라는 말로만 가리켰고 구멍2는 아예 언급이 없었다. */}
+                    {/* ★★`included`면 두 통이 **이미 위 손익에서 빠졌다** — 그때도 그것들을
+                        「손익 밖에 남은 합」에 세면 같은 돈을 두 번 세는 것이고, 사다리의
+                        «−» 줄과 각주가 서로를 부정한다(적대 리뷰 P1-2. 투영 실측: 원장
+                        797,431 = 손익 797,431인데 각주가 "손익 밖 99,232원"이라 말했다).
+                        그래서 열거와 «남은 합»을 **같은 술어**로 가른다. */}
                     {p.ad_spend != null && (
                       <> 옵션 광고 원장(Billboard) <b>{won(p.ad_option_total)}</b>은 네 통으로
                         갈라집니다 — 위 손익에 들어간 <b>{won(p.ad_spend)}</b>
+                        {p.ad_no_sales_included && (noSalesDays > 0 || noSales > 0) && (
+                          <> (그 안에 팔린 옵션의 판매 없는 날 {won(p.ad_no_sales_days)}
+                            {" "}+ 판매행 없는 옵션 {won(p.ad_no_sales)} 포함)</>
+                        )}
                         {adUncosted > 0 && <> + 원가 미상 옵션 {won(p.ad_uncosted)}</>}
-                        {noSalesDays > 0 && !p.ad_no_sales_included &&
+                        {!p.ad_no_sales_included && noSalesDays > 0 &&
                           <> + 팔린 옵션의 판매 없는 날 {won(p.ad_no_sales_days)}</>}
-                        {noSales > 0 && !p.ad_no_sales_included &&
+                        {!p.ad_no_sales_included && noSales > 0 &&
                           <> + 판매행 없는 옵션 {won(p.ad_no_sales)}</>}
-                        . 손익 밖에 남은 합이 <b>{won(p.ad_unattributed)}</b>입니다
-                        {Number(p.ad_unattributed) > 0 && !partial &&
-                          " (원가 결손은 없고, 귀속할 판매가 없는 돈만 남았습니다)"}.
+                        .{" "}
+                        {outsidePnl > 0
+                          ? <>손익 밖에 남은 합이 <b>{won(String(outsidePnl))}</b>입니다
+                              {!partial && " (원가 결손은 없고, 귀속할 판매가 없는 돈만 남았습니다)"}.</>
+                          : <b>손익 밖에 남은 광고비는 없습니다.</b>}
                         {" "}계정 확정 광고비(report/SALES)는 {won(p.ad_account_total)}이고
-                        원장과의 차 {won(String(Number(p.ad_option_total) - Number(p.ad_account_total)))}
-                        는 Billboard(PA)와의 <b>정의 차이</b>입니다(수집 결손이 아닙니다).</>
+                        원장과의 차 {won(data.ad_reconciliation.diff)}은
+                        {" "}Billboard(PA)와의 <b>정의 차이</b>입니다(수집 결손이 아닙니다).</>
                     )}
                   </p>
                 </>
