@@ -604,16 +604,25 @@ def test_a6_unpriced_promo_fails_and_a1_undetermined(db):
     assert "promo_burden_unknown" in (by["A1"]["note"] or "")
 
 
-def test_a7_catches_ad_on_no_sales_day_of_sold_option(db):
-    """★창 내 판매행이 있는 옵션이 «판매 없는 날»에 쓴 광고비 — 원자에도 ad_no_sales에도
-    귀속되지 않는다(prod 실측 7일 창 435,916원). A7이 이 결손을 드러낸다."""
+def test_a7_counts_ad_on_no_sales_day_of_sold_option(db):
+    """★창 내 판매행이 있는 옵션이 «판매 없는 날»에 쓴 광고비(prod 실측 7일 창 435,916원).
+
+    ★2026-08-09에 **판정이 뒤집혔다**: 예전에는 이 돈이 원자에도 `ad_no_sales`에도 없어
+      A7이 fail로 «결손이 있다»만 말했다. 이제 화면 SA가 그것을 `ad_no_sales_days`라는
+      이름과 금액으로 내놓으므로, A7은 **원장이 남김없이 갈렸는가**를 본다(pass).
+      결손의 크기는 fail 여부가 아니라 `ad_unattributed`가 상시로 말한다 —
+      **«pass = 결손 없음»이 아니다**. 그 혼동을 막으려고 여기서 둘을 같이 못 박는다.
+    """
     _full_fixture(db)
     _ad_option(db, "O1", "5000", d=date(2026, 8, 5))   # 8/5 광고, 그날 판매행 없음
     db.commit()
     r = _audit(db, D_PREV, date(2026, 8, 5))
     a7 = next(c for c in r["checks"] if c["id"] == "A7")
-    assert a7["verdict"] == "fail"
-    assert Decimal(a7["right"]) - Decimal(a7["left"]) == Decimal("5000")
+    assert a7["verdict"] == "pass"
+    assert a7["left"] == a7["right"]
+    # ★그 5,000원이 «사라져서» 등식이 맞은 게 아니라 **제 이름의 통에 들어가서** 맞았다.
+    assert r["ladder"]["ad_no_sales_days"] == "5000"
+    assert Decimal(r["ladder"]["ad_unattributed"]) >= Decimal("5000")
 
 
 # ═══ ④ 원자 목록 — 신뢰도 배지 + Σ = 사다리 ═══
@@ -1258,11 +1267,41 @@ def test_a7_still_judges_when_the_option_rows_exist(db):
     _full_fixture(db)
     assert next(c for c in _audit(db, D_PREV, D)["checks"]
                 if c["id"] == "A7")["verdict"] == "pass"
-    _ad_option(db, "O1", "5000", d=date(2026, 8, 5))   # 8/5 광고, 그날 판매행 없음
+    # ★fail 쪽 생존 증거는 **다섯째 경로**로 만든다 — 옵션 광고 원장에는 있는데 화면 SA의
+    #   네 통 어디에도 안 들어가는 돈. 여기서는 화면이 낸 통 하나를 깎아 그 상황을 흉내낸다.
+    #   (네 통이 원장을 덮는 한 자연적으로는 fail이 안 나므로, 이 검사가 정말 산 검사인지
+    #    보려면 이렇게 인위적으로 깨야 한다 — 변이 주입과 같은 취지다.)
+    _ad_option(db, "O1", "5000", d=date(2026, 8, 5))
     db.commit()
-    a7 = next(c for c in _audit(db, D_PREV, date(2026, 8, 5))["checks"] if c["id"] == "A7")
+    from app.services.coupang.rocket_1p_pnl_audit import (ATOM_LIMIT,
+                                                          compute_pnl_audit_checks)
+    dfrom, dto = D_PREV, date(2026, 8, 5)
+    screen = compute_rocket_1p_revenue(db, dfrom, dto, None, ATOM_LIMIT)
+    screen["pnl"]["ad_no_sales_days"] = "0"            # ← 통 하나가 돈을 잃어버린 상태
+    a7 = next(c for c in compute_pnl_audit_checks(db, dfrom, dto, screen)["checks"]
+              if c["id"] == "A7")
     assert a7["verdict"] == "fail"
     assert Decimal(a7["right"]) - Decimal(a7["left"]) == Decimal("5000")
+
+
+def test_a7_does_not_double_count_the_outside_pnl_bucket(db):
+    """★A7의 좌변에 `ad_uncosted`를 **더하면 안 된다** — 옵션 행의 `ad_spend`가 이미 품고 있다.
+
+    왜 따로 못 박나(2026-08-09 변이 주입에서 **생존한 변이**): 다른 A7 테스트의 픽스처는
+    전부 원가가 붙어 있어 `ad_uncosted`가 0이라, 이중계상을 넣어도 등식이 그대로 성립했다.
+    «0인 값을 두 번 더해도 안 틀린다»는 통과는 아무것도 안 지키는 통과다(교훈 #181).
+    그래서 **`ad_uncosted` > 0인 창**에서 A7이 여전히 pass인지를 본다.
+    """
+    _full_fixture(db)
+    _sale(db, "O3", "S3", 4, "300000")          # 원가 없는 옵션 → 손익 밖
+    _price(db, "S3", "50000", 3)
+    _ad_option(db, "O3", "6000")                # 그 옵션에 쓴 광고비 = 구멍1
+    db.commit()
+    r = _audit(db, D_PREV, D)
+    assert r["ladder"]["ad_uncosted"] == "6000"     # ← 0이 아닌 창이라야 이 테스트가 산다
+    a7 = next(c for c in r["checks"] if c["id"] == "A7")
+    assert a7["verdict"] == "pass"
+    assert a7["left"] == a7["right"]
 
 
 def test_a7_zero_spend_rows_are_still_judged(db):
@@ -1305,3 +1344,54 @@ def test_a7_undetermined_when_ads_ran_but_no_sales_were_collected(db):
     assert a7["left"] == a7["right"] == "300000"
     assert a7["verdict"] == "undetermined"
     assert "저절로" in a7["note"]
+
+
+# ═══ ⑨ basis='full' + «판매 없는 날»이 0이 아닌 창 (적대 리뷰 2026-08-09 P1-1·B-M5) ═══
+#
+# ★이 절이 없어서 놓친 것: 엔진이 접는 대상을 두 통으로 넓혔는데 A1·A2의 역산은 한 통이라,
+#   **계약의 목표(커버리지 100% → basis='full')를 달성하는 순간** A1·A2가 fail이 됐다.
+#   기존 full 픽스처는 `ad_no_sales_days=0`이라 두 식의 차가 늘 0이어서 아무도 못 봤다 —
+#   «0인 값으로만 검사하는 통과»가 정확히 이런 것이다(교훈 #181).
+
+
+def _full_with_no_sales_day(db):
+    """basis='full'이면서 `ad_no_sales_days` > 0인 창. 이 조합이 사각지대였다."""
+    _full_fixture(db)
+    _ad_option(db, "O1", "5000", d=date(2026, 8, 5))   # 팔린 옵션, 그날 판매행 없음
+    db.commit()
+    return _audit(db, D_PREV, date(2026, 8, 5))
+
+
+def test_a1_a2_hold_when_full_basis_folds_two_buckets(db):
+    """★A1·A2의 역산이 **엔진이 접은 것과 같은 두 통**이라야 한다."""
+    r = _full_with_no_sales_day(db)
+    assert r["ladder"]["basis"] == "full"
+    assert r["ladder"]["ad_no_sales_included"] is True
+    assert Decimal(r["ladder"]["ad_no_sales_days"]) > 0     # ← 0이면 이 테스트가 죽은 검사다
+    by = {c["id"]: c for c in r["checks"]}
+    for cid in ("A1", "A2", "A3"):
+        assert by[cid]["verdict"] == "pass", (cid, by[cid])
+        assert Decimal(by[cid]["diff"]) == ZERO_D
+    # 역산 금액을 note가 **두 통의 이름으로** 말한다(한 통 이름이면 사용자가 오독한다).
+    assert "판매 없는 날" in by["A1"]["note"] and "판매행 없는 옵션" in by["A1"]["note"]
+
+
+def test_full_basis_deducts_both_buckets_from_net_profit(db):
+    """★`ad_spend`만 두 통이고 **순이익은 한 통**만 빼는 변이를 죽인다(B-M5 생존분).
+
+    그 변이는 A3를 통과한다 — 부가세가 잔차라 차액을 조용히 흡수하기 때문이다. 그래서
+    순이익 그 자체를 못 박는다: 세후 차감액은 (두 통 합) × 100/110이다.
+    """
+    r = _full_with_no_sales_day(db)
+    lad = r["ladder"]
+    folded = Decimal(lad["ad_no_sales_days"]) + Decimal(lad["ad_no_sales"])
+    # 폴드(일별 합)와 타일의 차 = 세후 차감액. 한 통만 빼면 이 값이 작아진다.
+    daily_sum = sum((Decimal(d) for d in _screen_daily(db) if d), ZERO_D)
+    assert daily_sum - Decimal(lad["net_profit"]) == _money(
+        folded * Decimal("100") / Decimal("110"))
+
+
+def _screen_daily(db):
+    from app.services.coupang.rocket_1p_pnl_audit import ATOM_LIMIT
+    r = compute_rocket_1p_revenue(db, D_PREV, date(2026, 8, 5), None, ATOM_LIMIT)
+    return [d["net_profit"] for d in r["daily"]]

@@ -28,6 +28,7 @@ const BASE_LADDER: PnlAuditChecks["ladder"] = {
   basis: "costed_subset", qty: 100, revenue: "1000000", cost: "300000",
   promo_burden: "0", ad_spend: "200000", vat: "45455", net_profit: "454545",
   profit_rate: "0.4545", ad_no_sales: "0", ad_no_sales_included: false,
+  ad_no_sales_days: "0", ad_uncosted: "0", ad_unattributed: "0",
   ad_option_total: "200000", ad_account_total: "210000",
   cost_coverage: "0.97", revenue_priced: "1030000", blocked: null,
 };

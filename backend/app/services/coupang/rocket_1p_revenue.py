@@ -138,7 +138,8 @@ GROUP BY i.product_number
 _COST_MAP_STATE_SQL = """
 SELECT m.product_number,
        m.status,
-       CASE WHEN pm.cost_price IS NOT NULL THEN 1 ELSE 0 END AS has_cost
+       CASE WHEN pm.cost_price IS NOT NULL THEN 1 ELSE 0 END AS has_cost,
+       m.note
 FROM rocket_product_cost_map m
 LEFT JOIN product_master pm ON pm.internal_sku = m.internal_sku
 """
@@ -341,7 +342,8 @@ def compute_rocket_1p_revenue(
     burden_known = ctx["burden_known"]
     # 원가가 안 붙는 **이유**를 SKU별로 가른다(위 `_COST_MAP_STATE_SQL` 주석 참조).
     cost_map_state = {
-        str(r[0]): (r[1], bool(r[2])) for r in db.execute(text(_COST_MAP_STATE_SQL)).fetchall()
+        str(r[0]): (r[1], bool(r[2]), r[3])
+        for r in db.execute(text(_COST_MAP_STATE_SQL)).fetchall()
     }
 
     first_sold = {
@@ -362,6 +364,20 @@ def compute_rocket_1p_revenue(
             return "excluded"         # 이미 "제외"로 결정 — 시키면 안 된다
         return "no_cost"              # 다리는 있는데 그 내부 SKU에 원가가 없다
 
+    def _excluded_note(sku: str | None) -> str | None:
+        """`ignored`로 찍힐 때 남은 사유 문자열. **없으면 None**(모름이지 «사유 없음»이 아니다).
+
+        ★왜 싣나(2026-08-09, Jino 실사고): 화면이 `ignored`를 통째로 «샘플·증정으로 이미
+          결정한 것»이라 말하고 "그냥 두세요"로 안내했는데, prod 22건이 **전부**
+          `note='no suggestion or low score'`였다 — 즉 «결정»이 아니라 **이름 유사도 매칭이
+          실패한 것**을 같은 칸에 넣어 둔 것이다(ref 47 §2가 같은 결론을 이미 적었다).
+          두 의미가 한 status에 섞여 있는 한, 화면이 할 수 있는 정직한 일은 **기록된 사유를
+          그대로 보여 주고 판단을 사람에게 돌려주는 것**이다. 사유 문자열을 파싱해 «이건
+          매칭 실패다»라고 화면이 단정하면, 그건 또 하나의 추측을 코드에 굳히는 것이다.
+        """
+        st = cost_map_state.get(str(sku)) if sku is not None else None
+        return None if st is None else st[2]
+
     # ── 「날짜×옵션」 원자를 한 번 돌면서 **두 방향으로 접는다** ────────────
     #   opt_acc = 옵션별(표) · day_acc = 날짜별(일별 손익). 반올림은 원자에서 한 번뿐이라
     #   두 합계와 기간 타일이 원 단위까지 정확히 같다.
@@ -378,6 +394,13 @@ def compute_rocket_1p_revenue(
     #   원가에 대한 사실이지 분담금 수집 상태에 대한 사실이 아니다.
     costed_revenue = ZERO
     uncosted: dict[str, dict] = {}
+    # ★광고 원장을 **네 통으로 남김없이** 가르기 위한 열쇠 모음(2026-08-09).
+    #   원자 하나 = (날짜, 옵션) 하나이고 `_DAY_OPTION_SQL`이 그 그레인으로 GROUP BY 하므로
+    #   `atom_keys`는 광고 맵 `ad_by_day_option`의 **부분집합 키**가 된다. 남은 키가 곧
+    #   「귀속할 원자가 없는 광고비」이고, 그것을 다시 «옵션은 팔렸나»로 두 통으로 가른다.
+    atom_keys: set[tuple[str, str]] = set()
+    # 구멍1 — 판매행은 있는데 손익에 못 들어간 원자(원가·납품단가·분담금 미상)의 광고비.
+    ad_uncosted = ZERO
 
     def _blank(**extra) -> dict:
         base = {"qty": 0, "consumer_revenue": ZERO, "our_revenue": ZERO, "cost": ZERO,
@@ -388,6 +411,8 @@ def compute_rocket_1p_revenue(
                 #   흡수해 **음수로 떴다**. 옵션 행은 SKU가 하나라 안 갈라지지만 날짜 행은
                 #   여러 옵션이 섞이므로 갈라진다.
                 "pnl_qty": 0, "pnl_cost": ZERO, "pnl_burden": ZERO, "pnl_ad": ZERO,
+                # 손익에 못 들어간 원자의 광고비(구멍1) — pnl_ad와 **합집합이 아니라 여집합**이다.
+                "ad_uncosted": ZERO,
                 # ★«모름»을 0으로 접지 않으려고 «관측된 것이 있는가»를 따로 센다.
                 "priced_revenue": ZERO, "costed_revenue": ZERO,
                 "has_priced": False, "has_costed": False, "has_uncosted": False,
@@ -405,6 +430,7 @@ def compute_rocket_1p_revenue(
         net, net_upper = a["net_profit"], a["net_profit_upper"]
         consumer_total += consumer_d
         qty_total += q
+        atom_keys.add((day_key, oid))
         if ours_d is not None:
             priced_qty += q
 
@@ -416,6 +442,13 @@ def compute_rocket_1p_revenue(
             pnl_burden += burden
             pnl_ad += ad_for_pnl
             pnl_net += net
+        else:
+            # ★★구멍1 — 이 돈은 예전 판에서 **어느 줄에도 나타나지 않았다.** 손익에 못 들어간
+            #   원자의 광고비라 `pnl_ad`에서 빠지는데, 옵션은 팔렸으므로 `ad_no_sales`에도
+            #   안 잡혀 화면에서 통째로 증발했다(라이브 2026-08-08 하루 33,750원 = 계정
+            #   총액의 4.2%). 각주가 "차이의 대부분은 부분집합 제한"이라고 **말로만** 설명하던
+            #   그 돈이다 — 말이 아니라 금액으로 적는다.
+            ad_uncosted += ad_for_pnl
         if ours_d is not None and cost_d is not None:
             costed_revenue += ours_d
         elif cost_d is None:
@@ -474,6 +507,8 @@ def compute_rocket_1p_revenue(
                 acc["pnl_cost"] += cost_d
                 acc["pnl_burden"] += burden
                 acc["pnl_ad"] += ad_for_pnl
+            else:
+                acc["ad_uncosted"] += ad_for_pnl
         if unit_price is not None:
             o["unit_price"] = unit_price
         if unit_cost is not None:
@@ -561,6 +596,21 @@ def compute_rocket_1p_revenue(
     ad_no_sales = sum(
         (v for k, v in ad_by_option.items() if k not in sold_option_ids), ZERO
     )
+    # ★★구멍2 — **팔린 옵션이 «안 팔린 날»에 쓴 광고비**(2026-08-09에 배선. 발견 자체는
+    #   2026-08-07 근거 화면 A7이었고, 그때는 "관측된 결손"으로 fail만 띄우고 엔진은 안 고쳤다).
+    #   왜 어느 통에도 안 들어갔나: 원자는 판매행에서만 나오므로 그 날엔 원자가 없고,
+    #   `ad_no_sales`는 «옵션 단위»로 판정해서 그 옵션은 (다른 날 팔렸으므로) 제외된다.
+    #   즉 판정 그레인이 하나는 (날짜×옵션), 하나는 (옵션)이라 그 사이로 돈이 샜다.
+    #   ★크기: 창 2026-07-31~08-06에 435,916원. **하루짜리 창에서는 구조적으로 0**이므로
+    #     (판매행 없는 날 = 그 옵션이 sold_option_ids에 없는 날) 하루로 재보고 «없다»고
+    #     결론내면 안 된다 — 창을 밝히지 않고 인용하지 말 것.
+    ad_no_sales_days = sum(
+        (v for (dk, oid), v in ad_by_day_option.items()
+         if oid in sold_option_ids and (dk, oid) not in atom_keys), ZERO
+    )
+    # ★네 통의 합 = 옵션 광고 원장 전액. 이 항등식이 이 블록의 존재 이유다 — 어느 통도
+    #   «남는 것»이 아니라 이름과 금액을 가진다. (테스트가 전건 대조로 지킨다.)
+    ad_unattributed = ad_uncosted + ad_no_sales_days + ad_no_sales
 
     cost_coverage = _ratio(costed_revenue, priced_revenue) if priced_revenue > ZERO else None
     uncosted_rows = sorted(
@@ -616,10 +666,17 @@ def compute_rocket_1p_revenue(
     #   「원가 확인 100% · 기간 전체」로 뜨고 그 아래 「원가 미등록 SKU N개」가 동시에 떴다.
     is_full = not uncosted_rows and coverage_unpriced == 0
     include_no_sales = is_full
-    pnl_ad_total = pnl_ad + (ad_no_sales if include_no_sales else ZERO)
-    # 판매 없는 옵션 광고비도 매입세액공제 대상이라 세후로 차감한다(payable_vat와 같은 축).
+    # ★is_full이면 **귀속 불가능한 두 통을 다 넣는다**(2026-08-09 교정). 예전 판은 구멍3만
+    #   넣어서, 커버리지가 100%가 되어 basis='full'("기간 전체")이 돼도 구멍2가 여전히 빠졌다 —
+    #   «의도된 종착 상태에 거짓말이 남는다»는 같은 결함이 한 겹 아래에 또 있었던 것이다.
+    #   ★구멍1(ad_uncosted)은 여기 안 들어간다. is_full이면 정의상 0이고(원가 미상 원자가
+    #     없어야 is_full이다), 0이 아닌 상태에서 넣으면 **부분집합 매출에 전량 광고비를**
+    #     빼는 것이 되어 손익이 위조된다.
+    ad_folded = ad_no_sales_days + ad_no_sales
+    pnl_ad_total = pnl_ad + (ad_folded if include_no_sales else ZERO)
+    # 귀속 불가 광고비도 매입세액공제 대상이라 세후로 차감한다(payable_vat와 같은 축).
     pnl_net_total = pnl_net - (
-        _money(ad_no_sales * Decimal("100") / Decimal("110")) if include_no_sales else ZERO
+        _money(ad_folded * Decimal("100") / Decimal("110")) if include_no_sales else ZERO
     )
     pnl_vat = pnl_revenue - pnl_cost - pnl_burden - pnl_ad_total - pnl_net_total
 
@@ -639,6 +696,12 @@ def compute_rocket_1p_revenue(
             (amt for (dk, oid), amt in ad_by_day_option.items()
              if dk == day_key and oid not in sold_option_ids), ZERO
         )
+        # 그날 몫의 구멍1·구멍2 — 창 합계와 **같은 판정자**로 가른다(다르면 일별 합 ≠ 기간 합).
+        d_ad_no_sales_days = sum(
+            (amt for (dk, oid), amt in ad_by_day_option.items()
+             if dk == day_key and oid in sold_option_ids and (dk, oid) not in atom_keys), ZERO
+        )
+        d_ad_uncosted = v["ad_uncosted"]
         # ★부가세는 **부분집합 축끼리** 잔차로 낸다 — 전량 값과 섞으면 음수가 나온다.
         d_vat = (v["costed_revenue"] - v["pnl_cost"] - v["pnl_burden"]
                  - v["pnl_ad"] - d_net) if d_net is not None else None
@@ -657,6 +720,10 @@ def compute_rocket_1p_revenue(
             "ad_spend": str(v["pnl_ad"]) if d_net is not None else None,
             # 그날 광고는 돌았는데 판매행이 없는 옵션의 광고비(위 순이익에 미포함).
             "ad_no_sales": str(d_ad_no_sales),
+            # 그날 팔린 옵션이되 **그날은 판매행이 없던** 옵션의 광고비(구멍2). 하루 창에선 0.
+            "ad_no_sales_days": str(d_ad_no_sales_days),
+            # 그날 팔렸지만 손익에 못 들어간 옵션의 광고비(구멍1).
+            "ad_uncosted": str(d_ad_uncosted),
             "vat": None if d_vat is None else str(d_vat),
             "net_profit": None if d_net is None else str(d_net),
             "profit_rate": _s(_ratio(d_net, v["costed_revenue"])) if d_net is not None else None,
@@ -699,9 +766,27 @@ def compute_rocket_1p_revenue(
         "vat": _s(pnl_vat) if has_pnl else None,
         "net_profit": _s(pnl_net_total) if has_pnl else None,
         "profit_rate": _s(_ratio(pnl_net_total, pnl_revenue)) if has_pnl else None,
-        # ★그 창에 안 팔린 옵션의 광고비. included=False면 위 순이익에 **안 들어있다**.
+        # ── 광고 원장을 네 통으로 남김없이 가른 것 ────────────────────────
+        #   ad_spend(=pnl_ad_total) 안의 «귀속분» + 아래 셋 = ad_option_total.
+        #   ★셋을 다 싣는 이유: 안 보이는 통이 하나라도 있으면 그 돈은 화면에서 없는 돈이
+        #     된다. 실제로 구멍1은 예전 판에서 어느 줄에도 없었고, 각주가 «차이의 대부분»
+        #     이라는 말로 대신하고 있었다.
+        # ★그 창에 안 팔린 옵션의 광고비(구멍3). included=False면 위 순이익에 **안 들어있다**.
         "ad_no_sales": str(ad_no_sales),
-        "ad_no_sales_included": include_no_sales,
+        # ★팔린 옵션이 «안 팔린 날»에 쓴 광고비(구멍2). included 플래그를 ad_no_sales와 공유한다.
+        "ad_no_sales_days": str(ad_no_sales_days),
+        # ★판매행은 있으나 손익 부분집합에 못 들어간 옵션의 광고비(구멍1).
+        #   **is_full이면 정의상 0**이고, 0이 아닐 땐 순이익에 절대 넣지 않는다(위 주석).
+        "ad_uncosted": str(ad_uncosted),
+        # 위 셋의 합 — 「계정 총액과 사다리가 왜 다른가」의 답 전체.
+        "ad_unattributed": str(ad_unattributed),
+        # ad_no_sales·ad_no_sales_days 둘의 포함 여부. ad_uncosted는 포함 대상이 아니다.
+        # ★`has_pnl`을 **곱한다**(2026-08-09 실측 교정): `is_full`은 «결손 0»이라 판매분석
+        #   미수집 창에서도 참이 된다(원자가 없으면 미상 SKU도 0건이다). 그 창은 사다리 자체가
+        #   없는데(blocked='sales_not_covered') 플래그만 true라 «광고비가 순이익에 이미
+        #   반영됐다»고 말하고 있었다 — 라이브 창 2026-05-01~07에서 3,421,987원이 그 상태였다.
+        #   없는 사다리에 무언가가 «포함됐다»고 말할 수는 없다.
+        "ad_no_sales_included": include_no_sales and has_pnl,
         # 화면이 "왜 사다리 광고비가 계정 총액과 다른가"에 **맞는 이유**를 댈 수 있게 함께 싣는다.
         "ad_account_total": str(ad_spend),
         "ad_option_total": str(sum(ad_by_option.values(), ZERO)),
@@ -744,6 +829,9 @@ def compute_rocket_1p_revenue(
                     "qty": u["qty"],
                     "our_revenue": str(u["our_revenue"]) if u["our_revenue_known"] else None,
                     "consumer_revenue": str(u["consumer_revenue"]),
+                    # ★제외로 찍을 때 남은 사유 원문. None이면 «사유가 기록되지 않았다»다.
+                    #   화면이 이걸 그대로 보여야 «샘플·증정 결정»과 «매칭 실패»를 사람이 가른다.
+                    "excluded_note": _excluded_note(u["sku_id"]),
                 }
                 for u in sorted(
                     (u for u in uncosted_rows if u["reason"] == "excluded"),
@@ -781,8 +869,11 @@ def compute_rocket_1p_revenue(
                 "basis='costed_subset'이면 **원가를 붙인 옵션만** 더한 값이라 창 전체의 "
                 "손익이 아니고, 그 부분집합은 무작위가 아니다(매출·광고비 큰 SKU가 통째로 빠질 "
                 "수 있다) — **이익률을 곱해 전체를 추정하면 안 된다**. 광고비는 옵션 "
-                "그레인(Billboard)이며 ad_no_sales(그 창에 판매 없는 옵션분)는 "
-                "ad_no_sales_included=false일 때 위 순이익에 들어있지 않다.",
+                "그레인(Billboard)이고 원장 전액은 ad_option_total이며, 그중 위 순이익에 "
+                "들어간 몫이 ad_spend다. 나머지는 ad_uncosted(판매O·손익밖) + "
+                "ad_no_sales_days(팔린 옵션의 판매 없는 날) + ad_no_sales(판매행 없는 옵션) "
+                "셋으로 남김없이 갈라져 있고 그 합이 ad_unattributed다. "
+                "ad_no_sales_included=true면 뒤의 둘은 이미 순이익에서 빠졌다.",
     }
 
     ad_option_sum = sum(ad_by_option.values(), ZERO)
