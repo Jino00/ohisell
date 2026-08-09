@@ -272,6 +272,11 @@ function ActorCell({ row, onCorrected }: { row: NaverModificationRow; onCorrecte
         ))}
       </select>
       {note && <div className="text-[11px] text-gray-400">{note}</div>}
+      {/* 규칙 ⑤ — 「외부 변경」으로 감지됐는데 우리 것으로 되찾은 행. 근거 없이 뒤집으면
+          다음 사람이 못 믿으므로, 무엇과 대조했는지를 행에 그대로 적는다. */}
+      {row.actor_evidence && (
+        <div className="text-[11px] text-emerald-700">{row.actor_evidence}</div>
+      )}
       {row.correction_note && <div className="text-[11px] text-gray-500">{row.correction_note}</div>}
       {failed && <div className="text-[11px] text-red-600">저장 실패: {failed}</div>}
     </div>

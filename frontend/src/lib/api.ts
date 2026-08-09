@@ -3086,6 +3086,9 @@ export interface NaverModificationRow {
   actor_label: string;
   /** 데이터로 자동 판정한 주체(정정이 있어도 지워지지 않는다 — 판정이 옳았는지 봐야 한다). */
   actor_auto: NaverModificationActor;
+  /** 규칙 ⑤ — 「외부 변경」으로 감지됐지만 우리 실집행과 대조돼 되찾은 행의 근거.
+   *  그 외에는 null. 주체는 사실 주장이라, 뒤집었으면 근거를 같이 보여준다. */
+  actor_evidence: string | null;
   corrected: boolean;
   correction_note: string | null;
   entity_type: string;
@@ -3143,6 +3146,8 @@ export interface NaverModificationResponse {
   by_actor: Record<NaverModificationActor, number>;
   /** D-NAO-139 — 피드 재적용을 얼마나 접고 숨겼는지(항상 온다). */
   feed_reapply: NaverModificationFeedReapply;
+  /** 규칙 ⑤로 「대행사」에서 「우리 자동화」로 되찾은 건수. 조용히 바꾸지 않는다. */
+  reclaimed_ours: number;
   rows: NaverModificationRow[];
 }
 
