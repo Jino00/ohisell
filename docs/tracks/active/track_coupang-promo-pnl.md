@@ -92,14 +92,43 @@ prod `ignored` 22건이 **전부** `note='no suggestion or low score'`이고 `cr
   진짜 이유는 그 열이 「원가 확인분」 축이라는 것이었다(교훈 #193).
 - 교훈 #192·#193
 
-#### ⚠️ 발견 — prod nginx가 `index.html`에 캐시 지시를 안 준다 (Jino 결정 대기)
+#### ✅ 해소 — prod nginx `index.html` 캐시 금지 (2026-08-10 08:5x, Jino 승인)
 
 `sellc.ohitech.co.kr` nginx에 `index.html` 전용 `Cache-Control`이 없다. 그래서 **프론트 배포 후에도
 브라우저가 옛 `index.html`을 붙들어 옛 번들을 계속 쓴다** — 2026-08-10 07:4x에 내가 직접 당했고
 서버가 새 번들을 정확히 내주는데도 화면은 옛 문구였다(«배포 실패»로 오독할 뻔했다).
 ★이 프로젝트는 배포 검증을 **눈으로** 하는데, 그 눈이 거짓말을 할 수 있다는 뜻이다.
-**같은 서버의 `os.ohitech.co.kr`에는 이미 `no-cache, no-store, must-revalidate` 블록이 있다** —
-그걸 복제하면 된다. prod 웹서버 설정 변경이라 Jino 승인 후 별건으로.
+**적용**(`/etc/nginx/sites-available/sellc.ohitech.co.kr`, 백업 `.bak-20260809-235449`):
+```nginx
+location = /index.html {
+    include /etc/nginx/snippets/ohisell-allowlist.conf;   # ★★이 줄이 없으면 IP 차단이 뚫린다
+    root /home/ubuntu/ohisell/frontend/dist;
+    add_header Cache-Control "no-store, no-cache, must-revalidate" always;
+    add_header Pragma "no-cache" always;
+}
+```
+
+★★**참조한 `os.ohitech.co.kr` 블록을 그대로 복사하면 안 됐다.** 거기엔 allowlist가 없는데
+sellc의 `location /`에는 있고, `try_files`의 `/index.html` 폴백은 **내부 리다이렉트라 location
+매칭을 다시 한다** — allowlist를 빼면 **모든 SPA 경로가 IP 차단을 우회**해 2026-07-17에 막은
+공개 노출(익명 쓰기 112개)이 그대로 되살아난다. 「캐시 헤더 하나 넣는 일」이 보안 구멍이 될
+수 있었던 자리다.
+
+★`assets/*`는 파일명에 콘텐츠 해시가 박혀 있어 **건드리지 않았다**(os 패턴은 JS/CSS도 no-store
+하는데, 그러면 배포와 무관하게 매번 다시 받는다). ★`expires` 지시자는 안 썼다 — `add_header`와
+같이 쓰면 `Cache-Control`이 두 줄로 나온다.
+
+**검증(라이브)**:
+- **allowlist 회귀**: 서버 안 127.0.0.1(차단 대상)에서 `/` `/index.html` `/rocket-1p-revenue`
+  `/assets/*.js` `/api/health` **전부 403** — 우회 없음
+- **헤더**: `/index.html`·SPA 경로 → `Cache-Control: no-store, no-cache, must-revalidate`(한 줄)
+  + `Pragma: no-cache` / 해시 번들 → 헤더 없음(의도대로)
+- **효과**: 브라우저가 **하드 리프레시 없이** 새 번들(`index-BF2yAXW0.js`)을 집었고 PR #264의
+  새 각주가 그대로 떴다. 직전까지는 옛 번들(`index-gQQTtIoL.js`)을 붙들고 있었다
+- `nginx -t` 통과 후 `systemctl reload`(무중단)
+
+**롤백**: `sudo cp /etc/nginx/sites-available/sellc.ohitech.co.kr.bak-20260809-235449 \
+/etc/nginx/sites-available/sellc.ohitech.co.kr && sudo nginx -t && sudo systemctl reload nginx`
 
 #### 라이브 합격 증거 (prod, 2026-08-09 23:3x~23:5x KST)
 
