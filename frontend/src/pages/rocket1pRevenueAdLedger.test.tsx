@@ -265,7 +265,7 @@ describe("일별 손익 각주 — 광고비 열이 무엇을 빼놓았는지 �
       (_t, el) => !!el && el.tagName === "P" && (el.textContent ?? "").includes("일별 광고비 열엔"));
     const text = note.textContent ?? "";
     expect(text).toContain("기간 사다리 순이익에는 이미 차감돼 있습니다");
-    expect(text).not.toContain("위 손익에 섞지 않았지만");
+    expect(text).not.toContain("위 손익에도 안 들어갔습니다");
     expect(text).toContain("679,804원");           // 크기는 계속 보인다
     // ★M-A: 인과절(«왜 이 열에 못 싣나»)이 통째로 사라져도 아무도 안 잡던 자리.
     expect(text).toContain("원가 확인분 축");
@@ -313,7 +313,11 @@ describe("일별 손익 각주 — 광고비 열이 무엇을 빼놓았는지 �
     mount({ ...BASE, daily: DAILY });             // included=false
     const note = await screen.findByText(
       (_t, el) => !!el && el.tagName === "P" && (el.textContent ?? "").includes("일별 광고비 열엔"));
-    expect(note.textContent ?? "").toContain("위 손익에 섞지 않았지만");
+    const t = note.textContent ?? "";
+    expect(t).toContain("위 손익에도 안 들어갔습니다");
+    // ★사유를 하나로 뭉뚱그리지 않는다 — 「귀속할 판매가 없어」는 구멍1엔 틀리다(2R 이월).
+    expect(t).not.toContain("귀속할 판매가 없어");
+    expect(t).not.toContain("기간 사다리 순이익에는 이미 차감");
   });
 
   it("세 통이 전부 0이면 각주를 띄우지 않는다 — 없는 경고는 진짜 경고를 묻는다", async () => {
