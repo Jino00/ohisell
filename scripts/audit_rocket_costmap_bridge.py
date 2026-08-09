@@ -308,22 +308,33 @@ def load_data(conn: sqlite3.Connection, days: int):
     for r in cur.fetchall():
         master_by_sku[r["internal_sku"]] = (r["product_name"], to_decimal(r["cost_price"]))
 
-    # 윈도우 내 판매: product_number(=sku_id)별 qty 합계 + distinct option_id
+    # ── 창 «안» 판매: 금액 계산용 qty만 ─────────────────────────────
+    # ★금액은 창에 종속된다(어느 30일이냐에 따라 달라진다).
     cur.execute(
         """
-        SELECT sku_id, option_id, qty
+        SELECT sku_id, qty
         FROM coupang_rocket_sales_daily
         WHERE date >= ? AND date <= ?
         """,
         (start_date.isoformat(), max_date.isoformat()),
     )
     qty_by_sku: dict[str, int] = defaultdict(int)
+    for r in cur.fetchall():
+        qty_by_sku[r["sku_id"]] += int(r["qty"] or 0)
+
+    # ── 창 «전체» 옵션: 브리지 해석용 ───────────────────────────────
+    # ★★브리지(product_channel_mapping ch5)는 **시간 축이 없는 구조적 사실**이다 — 쿠팡
+    #   상품에 externalVendorSku가 박혀 있느냐 없느냐일 뿐 «언제 팔렸나»와 무관하다.
+    #   그런데 옵션 목록을 판매 창으로 자르면, 그 30일에 안 팔린 상품은 브리지가 **있어도**
+    #   `no_bridge`가 된다. 2026-08-09 적대 리뷰 실측: 그렇게 접힌 것이 19건이고 그중
+    #   **교체 후보 1건**(`22295497` 쿠팡 「태블릿 …갤럭시탭S8플러스」에 「폰용 3매」 원가,
+    #   개당 오차 +2,814.7원=108%)이 통째로 사라졌다. 판정을 못 하는 것과 안 하는 것은 다르다.
+    #   금액(위 qty)만 창에 종속되고, **판정은 창에 종속되지 않는다.**
+    cur.execute("SELECT DISTINCT sku_id, option_id FROM coupang_rocket_sales_daily")
     options_by_sku: dict[str, set[str]] = defaultdict(set)
     for r in cur.fetchall():
-        sku_id = r["sku_id"]
-        qty_by_sku[sku_id] += int(r["qty"] or 0)
         if r["option_id"]:
-            options_by_sku[sku_id].add(r["option_id"])
+            options_by_sku[r["sku_id"]].add(r["option_id"])
 
     # product_channel_mapping (channel_id=5) : channel_product_id(=option_id) -> product_id
     cur.execute(
