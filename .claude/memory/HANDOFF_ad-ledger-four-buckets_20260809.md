@@ -127,9 +127,26 @@ sellc의 `location /`에는 있고, `try_files`의 `/index.html` 폴백은 **내
 **롤백**: `sudo cp /etc/nginx/sites-available/sellc.ohitech.co.kr.bak-20260809-235449 \
 /etc/nginx/sites-available/sellc.ohitech.co.kr && sudo nginx -t && sudo systemctl reload nginx`
 
+## 5-2. 후속 (2026-08-10 09:0x~10:5x) — 「제외」 뜻 통일 (D-CPP-29, PR #267)
+
+`rocket_product_cost_map.status`의 `ignored`가 **세 모듈에서 다른 뜻**이었다 — 두 곳은
+«원가 0원·해결됨», 한 곳은 «원가 미상». 그래서 2026-06-17 배치의 «매칭 실패» 22건이
+**원가 0원 = 전액 이익**으로 잡혔다(90일 발주 8,146,140원 / 진짜 원가 3,311,826원).
+
+- `excluded` = **연결 안 함 · 재제안 방지 · 손익에선 「모름」** 하나로 통일. `resolved_amount`·
+  `coverage_pct`·`has_cost`에서 제외. 「제외」와 「매핑 없음」은 둘 다 미해결이되 **구분 유지**.
+- **사람만 쓴다** — ★★`allow_excluded=True` **명시**가 유일한 실제 판별자다. `note` 필수와
+  자동 method 거부는 그 22건(`manual` + 사유 보유)을 **못 막았을 것**이다.
+- 프론트는 **타입으로** 막았다 — `upsertRocketCostMap`의 `status`가 `"confirmed"`뿐이라
+  회귀가 컴파일 불가(`TS2322`).
+- **라이브 합격**: 배포 전후 diff = 키 이름 둘뿐·값 양쪽 0(손익 불변) · alembic
+  `e4c7a1b8d206 (head)` · 가드 422/422/422 + 200(`cost_price=None`) · 무중단 배포
+- 교훈 #198~#201. ★#200: **빨간 베이스라인에서 돌린 변이는 전부 무효**(내가 실제로 겪었다)
+
 ## 6. 이월 (다음 세션이 볼 것)
-- [ ] **`ignored` status 3값화** — «결정»과 «매칭 실패»를 스키마로 가른다. **데이터는 다 해소됐지만
-      다음 일괄 매핑이 또 같은 라벨을 찍는다** — 근본 해법은 여전히 이쪽이다. 스키마 마이그레이션이라 별건.
+- [x] ~~`ignored` status 3값화~~ — ✅ **2026-08-10 해소**(§5-2). 3값이 아니라 **뜻 통일**로 갔다.
+- [ ] `excluded_order_amount`를 화면에 렌더하지 않는다 — 커버리지에서 빠진 돈을 금액으로 볼 자리가 없다(prod 0건이라 오늘은 무해).
+- [ ] `excluded → confirmed` upsert 시 제외 사유가 None으로 덮여 감사 흔적이 사라진다.
 - [x] ~~나머지 `ignored` 15건 데이터~~ — ✅ **2026-08-10 전건 해소**(§5-1). `ignored` 0건.
 - [x] ~~prod nginx `index.html` 캐시 지시~~ — ✅ **2026-08-10 적용 완료**(§5-1). 교훈 #194.
 - [ ] **일별 축이 «광고만 쓴 날»을 표현 못 한다** — `daily` 행은 판매행 있는 날에만 생긴다.
