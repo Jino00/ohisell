@@ -3112,6 +3112,8 @@ export interface NaverGuardrailParamsResponse {
   params: NaverGuardrailParam[];
   from_db_enabled: boolean;
   retro_freshness: NaverGuardrailRetroFreshness;
+  // 낙관적 락 토큰 — 저장할 때 그대로 되돌려 보낸다(아래 put 참조).
+  version: string;
 }
 
 export function getNaverGuardrailParams(): Promise<NaverGuardrailParamsResponse> {
@@ -3120,11 +3122,18 @@ export function getNaverGuardrailParams(): Promise<NaverGuardrailParamsResponse>
 
 // body는 {key: 값} — 넘긴 키만 남고 나머지는 코드 상수로 복귀(전체 치환). 범위 밖·타입
 // 불일치는 400 + 한국어 메시지(그대로 표면화할 것 — 자체 문구로 갈아치우지 않는다).
+//
+// ★`version`은 **필수**다(적대 리뷰 P2). GET이 준 토큰을 `If-Match`로 되돌려 보내 「내가 본
+// 상태가 아직 그대로인가」를 서버가 확인한다. 전체 치환이라, 두 탭이 각자 스냅샷으로 저장하면
+// 먼저 저장한 쪽 설정이 조용히 사라지기 때문이다 — 위 조립 규칙은 자기 스냅샷 안에서만
+// 유효해서 이 창을 못 막는다. 어긋나면 서버가 409 + 「새로고침하라」로 거부한다.
 export function putNaverGuardrailParams(
   values: Record<string, number>,
+  version: string,
 ): Promise<NaverGuardrailParamsResponse> {
   return fetchApi<NaverGuardrailParamsResponse>("/api/naver/ad/settings/guardrail-params", {
     method: "PUT",
+    headers: { "Content-Type": "application/json", "If-Match": version },
     body: JSON.stringify(values),
   });
 }

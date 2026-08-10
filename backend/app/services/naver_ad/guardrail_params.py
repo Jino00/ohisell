@@ -25,6 +25,7 @@
 # 넓힐 수 없다는 것이 되먹임 차단의 마지막 층이다(첫 층은 「풀기는 사람 승인」).
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from decimal import Decimal, InvalidOperation
@@ -151,6 +152,30 @@ def _raw_overrides(db: Session) -> tuple[dict, Any]:
         log.error("guardrail_params: %s 파싱 실패 — 전부 코드 상수로 폴백(%s: %s)",
                   SETTINGS_KEY, type(exc).__name__, exc)
         return {}, None
+
+
+ABSENT_VERSION = "absent"
+
+
+def state_version(db: Session) -> str:
+    """KV의 **현재 상태 토큰**(낙관적 락용). 행 없음 → `"absent"`.
+
+    ★왜 필요한가(적대 리뷰 P2, 2026-08-10): PUT은 **전체 치환**이라 두 탭이 각자의 스냅샷으로
+    저장하면 **먼저 저장한 쪽 설정이 조용히 사라진다** — 「봉투가 아무도 모르게 바뀌는 것」이
+    바로 이 기능이 막으려고 만들어진 사고 모양이다. 프론트의 조립 규칙(손댄 키 ∪ 이미 db인 키)은
+    **자기 스냅샷 안에서만** 유효해서 이 창을 못 막는다.
+
+    **내용 해시**를 쓴다(타임스탬프가 아니라) — 묻는 것이 「내가 본 상태 그대로인가」이기 때문이다.
+    같은 내용으로 돌아온 경우(ABA)는 잃은 것이 없으므로 통과시키는 게 맞다. 반대로 타임스탬프는
+    같은 마이크로초 안의 두 쓰기를 구분 못 한다.
+
+    `_PARAMS_FROM_DB`와 무관하게 **행 자체**를 본다 — 스위치가 꺼져 있어도 쓰기는 행에 일어난다.
+    """
+    row = db.query(NaverAccountSettings).filter(
+        NaverAccountSettings.key == SETTINGS_KEY).first()
+    if row is None:
+        return ABSENT_VERSION
+    return "v1:" + hashlib.sha256((row.value_json or "").encode("utf-8")).hexdigest()[:16]
 
 
 def get_params(db: Session) -> dict[str, Any]:

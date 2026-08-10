@@ -66,7 +66,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 import requests
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import func, or_, tuple_
 from sqlalchemy.orm import Session
@@ -917,6 +917,8 @@ def guardrail_params_get(db: Session = Depends(get_db)):
         "params": guardrail_params.describe(db),
         "from_db_enabled": guardrail_params._PARAMS_FROM_DB,
         "retro_freshness": guardrail_params_retro_freshness(db),
+        # 낙관적 락 토큰 — 저장할 때 `If-Match`로 되돌려 보낸다(아래 PUT 참조).
+        "version": guardrail_params.state_version(db),
     }
 
 
@@ -940,7 +942,11 @@ def guardrail_params_retro_freshness(db: Session) -> dict:
 
 
 @router.put("/settings/guardrail-params")
-def guardrail_params_put(body: dict, db: Session = Depends(get_db)):
+def guardrail_params_put(
+    body: dict,
+    db: Session = Depends(get_db),
+    if_match: str | None = Header(None, alias="If-Match"),
+):
     """봉투 파라미터 설정 — **사람 승인 채널**(D-NAO-172 P1).
 
     ★이 PUT이 설계의 「풀기는 사람이 승인한다」를 물리적으로 구현한다. 시스템은 이 경로를
@@ -949,9 +955,29 @@ def guardrail_params_put(body: dict, db: Session = Depends(get_db)):
     값인지»를 사람이 못 쫓는다).
     타입·범위 밖 값은 **400으로 즉시 거부**한다. 저장 후 조용히 폴백시키면 화면엔 코드 상수가
     뜨는데 사람은 자기가 바꾼 줄 안다.
+
+    ★**낙관적 락 필수**(적대 리뷰 P2, 2026-08-10): `If-Match`에 GET이 준 `version`을 그대로
+    되돌려 보내야 한다. 전체 치환이라 두 탭이 각자 스냅샷으로 저장하면 **먼저 저장한 쪽이
+    조용히 사라진다** — 이 기능이 막으려던 사고 모양 그 자체다.
+    헤더가 **없어도 거부**한다(400). 선택이면 옛 번들·수기 호출이 그대로 창을 열어 둔 채
+    남는데, 이 경로는 호출자가 콘솔 하나뿐이라 필수로 만드는 비용이 없다.
+    어긋나면 **409** — 쓰기를 거부하는 것은 새로고침으로 회복되지만, 남의 설정이 조용히
+    사라지는 것은 회복되지 않는다(fail-closed가 맞는 방향).
     """
     if not isinstance(body, dict):
         raise HTTPException(400, "본문은 객체여야 합니다")
+    if not if_match:
+        raise HTTPException(
+            400,
+            "If-Match 헤더가 없습니다 — 화면을 새로고침한 뒤 다시 저장해 주세요"
+            "(전체 치환이라 다른 탭의 설정을 덮어쓸 수 있어 버전 확인을 요구합니다)",
+        )
+    if if_match != guardrail_params.state_version(db):
+        raise HTTPException(
+            409,
+            "다른 곳에서 봉투 파라미터가 이미 바뀌었습니다 — 화면을 새로고침해 지금 값을 확인한 뒤 "
+            "다시 저장해 주세요(그대로 저장하면 그쪽 설정이 사라집니다)",
+        )
     unknown = set(body) - set(guardrail_params.SPECS)
     if unknown:
         raise HTTPException(400, f"알 수 없는 파라미터: {sorted(unknown)}")

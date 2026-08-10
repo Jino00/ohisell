@@ -355,10 +355,18 @@ def _cleanup(db):
     app.dependency_overrides.clear()
 
 
+def _put(client, body, version=None):
+    """콘솔과 같은 순서로 저장: 지금 버전을 읽어 `If-Match`로 되돌려 보낸다."""
+    if version is None:
+        version = client.get("/api/naver/ad/settings/guardrail-params").json()["version"]
+    return client.put("/api/naver/ad/settings/guardrail-params",
+                      json=body, headers={"If-Match": version})
+
+
 def test_put_rejects_unknown_key(db):
     """★M-D: 모르는 키를 조용히 저장하면 «설정한 줄 알았는데 아무 일도 안 일어나는» 상태가 된다."""
     try:
-        r = _client(db).put("/api/naver/ad/settings/guardrail-params", json={"없는키": 1})
+        r = _put(_client(db), {"없는키": 1})
         assert r.status_code == 400
         assert "없는키" in r.text
     finally:
@@ -371,8 +379,7 @@ def test_put_rejects_out_of_range_with_reason(db):
     저장해 놓고 조용히 폴백시키면 화면엔 코드 상수가 뜨는데 사람은 자기가 바꾼 줄 안다.
     """
     try:
-        r = _client(db).put("/api/naver/ad/settings/guardrail-params",
-                            json={"max_auto_up_multiple": 99})
+        r = _put(_client(db), {"max_auto_up_multiple": 99})
         assert r.status_code == 400
         assert "범위" in r.text
         # 거부됐으면 저장도 안 돼야 한다
@@ -390,7 +397,7 @@ def test_put_records_change_log_for_visibility(db):
     """
     from app.models import NaverChangeLog
     try:
-        r = _client(db).put("/api/naver/ad/settings/guardrail-params", json={"cooldown_hours": 4})
+        r = _put(_client(db), {"cooldown_hours": 4})
         assert r.status_code == 200
         rows = db.query(NaverChangeLog).filter(
             NaverChangeLog.action == "update_guardrail_params").all()
@@ -410,9 +417,79 @@ def test_get_reports_retro_freshness(db):
     """
     try:
         body = _client(db).get("/api/naver/ad/settings/guardrail-params").json()
-        assert {"params", "from_db_enabled", "retro_freshness"} <= set(body)
+        assert {"params", "from_db_enabled", "retro_freshness", "version"} <= set(body)
         assert body["retro_freshness"]["stale"] is True     # 채점 행 0건 → 「모름」은 stale
         assert body["retro_freshness"]["latest_asof"] is None
         assert len(body["params"]) == len(guardrail_params.SPECS)
+    finally:
+        _cleanup(db)
+
+
+# ══ 낙관적 락 (적대 리뷰 P2 — 두 탭이 서로의 설정을 조용히 지운다) ═════════════════════
+# ★이 네 테스트가 지키는 것: PUT은 **전체 치환**이라 「내가 본 상태」가 아직 그대로일 때만
+#   써야 한다. 프론트의 조립 규칙(손댄 키 ∪ 이미 db인 키)은 **자기 스냅샷 안에서만** 유효해서
+#   이 창을 원리적으로 못 막는다 — 서버가 막아야 한다.
+
+def test_two_tabs_cannot_silently_erase_each_other(db):
+    """★리뷰어의 재현 그대로 — 락이 없으면 A의 설정이 흔적 없이 사라진다.
+
+    두 탭이 같은 스냅샷(행 없음)을 본 뒤 A가 쿨다운을, B가 일일상한을 저장한다.
+    락이 없으면 B의 전체 치환이 A의 쿨다운을 지우고 **아무도 모른다.**
+    """
+    try:
+        c = _client(db)
+        snapshot = c.get("/api/naver/ad/settings/guardrail-params").json()["version"]
+        assert _put(c, {"cooldown_hours": 6}, version=snapshot).status_code == 200
+        # B는 아직 옛 스냅샷을 들고 있다 — 저장은 거부돼야 한다
+        r = _put(c, {"max_daily_auto_bid_downs": 5}, version=snapshot)
+        assert r.status_code == 409
+        assert "새로고침" in r.text
+        # ★A의 설정이 살아 있다(이게 이 테스트의 요점 — 상태 코드가 아니라 «지워지지 않았다»)
+        assert str(guardrail_params.get_params(db)["cooldown_hours"]) == "6"
+    finally:
+        _cleanup(db)
+
+
+def test_saving_with_fresh_version_succeeds(db):
+    """거부만 하고 저장이 안 되면 락이 아니라 고장이다 — 새로고침 후 저장은 통과해야 한다."""
+    try:
+        c = _client(db)
+        assert _put(c, {"cooldown_hours": 6}).status_code == 200
+        # 화면을 새로 읽으면(=새 version) 이어서 저장된다
+        assert _put(c, {"cooldown_hours": 6, "max_daily_auto_bid_downs": 5}).status_code == 200
+        p = guardrail_params.get_params(db)
+        assert str(p["cooldown_hours"]) == "6" and str(p["max_daily_auto_bid_downs"]) == "5"
+    finally:
+        _cleanup(db)
+
+
+def test_put_without_if_match_is_refused(db):
+    """헤더 없는 저장은 **거부**한다 — 선택이면 옛 번들·수기 호출이 창을 열어 둔 채 남는다."""
+    try:
+        r = _client(db).put("/api/naver/ad/settings/guardrail-params", json={"cooldown_hours": 6})
+        assert r.status_code == 400 and "If-Match" in r.text
+        assert guardrail_params.state_version(db) == guardrail_params.ABSENT_VERSION  # 안 써졌다
+    finally:
+        _cleanup(db)
+
+
+def test_version_tracks_content_not_the_clock(db):
+    """토큰은 **내용 해시**다 — 묻는 것이 「내가 본 상태 그대로인가」이기 때문이다.
+
+    같은 내용으로 돌아오면(ABA) 잃은 것이 없으므로 통과가 맞다. 타임스탬프였다면 같은
+    마이크로초 안의 두 쓰기를 구분 못 하고, 무의미한 409로 사람을 막았을 것이다.
+    """
+    try:
+        c = _client(db)
+        v0 = c.get("/api/naver/ad/settings/guardrail-params").json()["version"]
+        assert v0 == guardrail_params.ABSENT_VERSION
+        _put(c, {"cooldown_hours": 6}, version=v0)
+        v1 = guardrail_params.state_version(db)
+        assert v1 != v0
+        _put(c, {"cooldown_hours": 7}, version=v1)
+        v2 = guardrail_params.state_version(db)
+        assert v2 != v1
+        _put(c, {"cooldown_hours": 6}, version=v2)   # 내용이 v1과 같은 상태로 복귀
+        assert guardrail_params.state_version(db) == v1
     finally:
         _cleanup(db)
