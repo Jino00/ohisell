@@ -17,7 +17,11 @@ from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
 from app.models import Channel, CoupangRevenueFee, Order
-from app.services.coupang.option_fee_rate import fee_reconciliation, option_fee_rates
+from app.services.coupang.option_fee_rate import (
+    fee_reconciliation,
+    option_fee_rates,
+    resolve_rate,
+)
 from app.services.coupang.revenue_fee_source import actual_fee_by_order_option
 from app.services.profit_calculator import _line_commission, calculate_daily_trend
 
@@ -122,6 +126,75 @@ def test_sa_sums_sale_and_refund_to_net_total_fee(db):
     db.commit()
     out = actual_fee_by_order_option(db, {"ORD1"})
     assert out[("COUPANG_WING1", "ORD1", "V1")] == D("429")  # 858 - 429 = 429 net
+
+
+def test_sa_treats_positive_refund_rows_as_deductions(db):
+    """★prod가 실제로 이렇다 — REFUND 행의 service_fee가 «양수»로 저장돼 있다.
+
+    옛 계약(docstring·models.py)은 "REFUND는 음수로 저장(D-3)"이었으나 라이브 실측은 정반대다:
+    REFUND 3행이 3/3 양수이고 SALE과 크기가 같다(order 17100183465800: SALE 18,795 / REFUND 18,795).
+    저장 부호를 믿으면 전액 환불된 건의 수수료가 상계되기는커녕 «2배»로 잡힌다.
+    """
+    _fee(db, "ORD1", "V1", "COUPANG_WING1", "SALE", 780, 78)      # +858
+    _fee(db, "ORD1", "V1", "COUPANG_WING1", "REFUND", 780, 78)    # 크기 858, 부호는 sale_type이 진다
+    db.commit()
+    out = actual_fee_by_order_option(db, {"ORD1"})
+    assert out[("COUPANG_WING1", "ORD1", "V1")] == D("0"), "전액 환불이면 순 0원이어야 한다(1716 아님)"
+
+
+def test_reconciliation_skips_refunded_lines(db):
+    """환불 상계된 라인은 요율 전제 대조에서 빠진다 — 안 빼면 대조가 요율이 아니라 환불을 잰다."""
+    wing = _seed_channel(db, "COUPANG_WING1", "7.8")
+    _seed_order(db, wing, "ORDA", "V1", "10000", day=5)
+    _fee(db, "ORDA", "V1", "COUPANG_WING1", "SALE", 780, 78, ratio="7.8")
+    _fee(db, "ORDA", "V1", "COUPANG_WING1", "REFUND", 780, 78, ratio="7.8",
+         rec=date(2026, 6, 20))
+    db.commit()
+    r = fee_reconciliation(db, datetime(2026, 6, 1), datetime(2026, 6, 30), ["COUPANG_WING1"])
+    assert r["checked_lines"] == 0
+    assert r["refunded_lines_skipped"] == 1
+    assert r["diff"] == D("0"), "환불 라인이 섞이면 거짓 경보가 난다"
+
+
+def test_basis_constants_match_what_the_screen_branches_on(db):
+    """★프론트가 리터럴 문자열로 분기한다(CommandCenter.tsx: r.fee_basis === "default_rate").
+
+    상수 «값»이 바뀌거나 뒤바뀌면 「실측」·「추정」 배지가 통째로 뒤집히는데 아무도 모른다.
+    """
+    from app.services.coupang.option_fee_rate import BASIS_DEFAULT, BASIS_SETTLED
+    assert BASIS_SETTLED == "settled_rate"
+    assert BASIS_DEFAULT == "default_rate"
+    rates = {("COUPANG_WING1", "V1"): D("0.064")}
+    assert resolve_rate(rates, "COUPANG_WING1", "V1")[1] == "settled_rate"
+    assert resolve_rate(rates, "COUPANG_WING1", "UNKNOWN")[1] == "default_rate"
+
+
+def test_zero_percent_channel_is_not_promoted_to_78(db):
+    """commission_rate=0인 채널을 7.8%로 승격하지 않는다(Decimal("0")이 falsy인 함정)."""
+    assert resolve_rate({}, "COUPANG_WING1", "V1", default=D("0"))[0] == D("0")
+    assert resolve_rate({}, "COUPANG_WING1", "V1", default=None)[0] == D("0.078")
+
+
+def test_two_engines_share_the_rate_and_vat_but_not_the_return_deduction(db):
+    """★두 엔진의 «남은» 차이를 못박는다 — 요율·VAT는 같고, 반품차감 항만 다르다.
+
+    profit_calculator는 반품 주문을 status(REVENUE_EXCLUDED)로 통째 제외하고 매출도 gross이고,
+    intelligence는 매출 gross에서 return_deduction을 따로 뺀다. 그래서 반품이 있는 창에서
+    두 엔진의 수수료가 갈린다(라이브 90일 실측 43,647원). 이건 D-CPP-30의 스코프가 아니라
+    「반품 실비용·부가세 두 엔진 통일」(다음 작업)의 몫이다 — 여기선 조용히 흐르지 않게 고정한다.
+    """
+    from app.services.coupang.option_fee_rate import commission_for
+    rate = D("0.078")
+    gross = D("10000")
+    ret = D("3000")
+    # profit_calculator 경로: 총매출 기준
+    pc = _line_commission(_ch("COUPANG_WING1", "7.8"), _ord("ORD1"), gross,
+                          {("COUPANG_WING1", "V1"): rate})
+    # intelligence 경로: 과세표준 = 총매출 − 반품차감
+    intel = commission_for(gross - ret, rate)
+    assert pc == commission_for(gross, rate), "요율·VAT 규칙은 두 엔진이 같다"
+    assert pc - intel == commission_for(ret, rate), "남은 차이는 반품차감 항 하나뿐이다"
+    assert pc - intel == D("257.400")
 
 
 def test_sa_separates_same_order_option_across_accounts(db):

@@ -72,6 +72,8 @@ def option_fee_rates(
         .group_by(CoupangRevenueFee.account_key, CoupangRevenueFee.vendor_item_id)
         .all()
     )
+    # 같은 recognition_date에 요율이 둘 이상이면 MAX를 쓴다(prod 실측 0건). 임의 규칙이지만
+    # 「보수적으로 비싼 쪽」이 순이익을 부풀리지 않는 방향이라 이쪽을 고른다.
     out: dict[tuple[str, str], Decimal] = {}
     for ak, vid, ratio in rows:
         if ratio is None:
@@ -91,6 +93,7 @@ def resolve_rate(
         hit = rates.get((str(account_key), str(vendor_item_id)))
         if hit is not None:
             return hit, BASIS_SETTLED
+    # ★`if default:`이면 안 된다 — Decimal("0")이 falsy라 「수수료 0% 채널」이 조용히 7.8%가 된다.
     return (DEFAULT_FEE_RATE if default is None else default), BASIS_DEFAULT
 
 
@@ -108,37 +111,54 @@ def fee_reconciliation(
     그래서 «이미 정산된 주문라인»에서만 계산값과 실측값을 대조해 어긋남을 화면으로 올린다.
     (미정산 라인은 대조 대상이 아니다 — 비교할 실측이 없다.)
 
-    반환: checked_lines / computed / actual / diff / max_line_diff.
-    diff가 반올림 범위(라인당 1원)를 넘으면 화면이 경고해야 한다.
+    반환: checked_lines / computed / actual / diff / max_line_diff / refunded_lines_skipped.
+    ★판정은 diff(부호합)만으로 하면 안 된다 — 라인별 +X/−X가 상쇄돼 초록이 된다.
+      max_line_diff(라인당 최대 어긋남)를 같이 봐야 한다. 허용치는 라인당 1원(쿠팡의 행당 반올림).
     """
     from app.models import Channel, Order  # 순환 임포트 회피(이 함수만 ORM 엔티티가 필요)
     from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
-    from app.services.coupang.revenue_fee_source import actual_fee_by_order_option
+    from app.services.coupang.revenue_fee_source import (
+        COUPANG_3P_CODES,
+        actual_fee_by_order_option,
+        refunded_order_options,
+    )
 
+    scope = list(account_keys) if account_keys else list(COUPANG_3P_CODES)
     q = (
         db.query(Order.order_number, Order.platform_product_id, Order.selling_price, Channel.code)
         .join(Channel, Order.channel_id == Channel.id)
         .filter(
-            Channel.code.in_(list(account_keys) if account_keys else ["COUPANG_WING1", "COUPANG_WING2"]),
+            Channel.code.in_(scope),
             Order.status.notin_(tuple(REVENUE_EXCLUDED)),
             Order.order_date >= dfrom,
             Order.order_date <= dto,
         )
     )
     lines = q.all()
+    empty = {"checked_lines": 0, "computed": _Z, "actual": _Z, "diff": _Z,
+             "max_line_diff": _Z, "refunded_lines_skipped": 0}
     if not lines:
-        return {"checked_lines": 0, "computed": _Z, "actual": _Z, "diff": _Z, "max_line_diff": _Z}
+        return empty
 
-    actual_map = actual_fee_by_order_option(db, {r[0] for r in lines})
-    rates = option_fee_rates(db, list(account_keys) if account_keys else None)
+    order_ids = {r[0] for r in lines}
+    actual_map = actual_fee_by_order_option(db, order_ids, scope)
+    refunded = refunded_order_options(db, order_ids, scope)
+    rates = option_fee_rates(db, scope)
 
     checked = 0
+    skipped = 0
     computed_sum = _Z
     actual_sum = _Z
     max_line_diff = _Z
     for onum, vid, price, code in lines:
-        actual = actual_map.get((str(code), str(onum), str(vid)))
+        key = (str(code), str(onum), str(vid))
+        actual = actual_map.get(key)
         if actual is None:  # 미정산 — 대조할 실측이 없다
+            continue
+        if key in refunded:
+            # 환불 상계된 라인 — 계산(총매출 기준)과 실측(환불 후)은 다른 양이다.
+            # 여기 섞으면 대조가 «요율»이 아니라 «환불»을 재게 된다.
+            skipped += 1
             continue
         rate, _basis = resolve_rate(rates, code, vid)
         computed = commission_for(Decimal(str(price or 0)), rate)
@@ -154,6 +174,7 @@ def fee_reconciliation(
         "actual": actual_sum,
         "diff": computed_sum - actual_sum,
         "max_line_diff": max_line_diff,
+        "refunded_lines_skipped": skipped,
     }
 
 
@@ -163,7 +184,8 @@ def commission_for(
 ) -> Decimal:
     """판매수수료+VAT = 순매출 × 요율 × 1.1.
 
-    ★순매출인 이유: 반품·취소분은 쿠팡이 수수료도 함께 환급한다(정산에 REFUND 음수 행으로 온다).
+    ★순매출인 이유: 반품·취소분은 쿠팡이 수수료도 함께 환급한다(정산에 REFUND 행으로 온다 —
+    부호는 저장값이 아니라 sale_type이 진다, revenue_fee_source 참조).
     총매출에 요율을 곱하면 반품된 건의 수수료를 우리만 계속 물게 된다.
     """
     return net_revenue * rate * FEE_VAT_MULT

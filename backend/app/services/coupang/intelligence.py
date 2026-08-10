@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import os
 from datetime import date, datetime, time, timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -35,6 +35,7 @@ from app.services.coupang.option_fee_rate import (
     BASIS_DEFAULT,
     BASIS_SETTLED,
     DEFAULT_FEE_RATE,
+    FEE_VAT_MULT,
     fee_reconciliation,
     option_fee_rates,
 )
@@ -44,6 +45,7 @@ from app.services.coupang.settlement_revenue_adjust import settlement_revenue_ad
 log = logging.getLogger(__name__)
 
 _Z = Decimal("0")
+_Q2 = Decimal("0.01")   # 금액 — 원 단위 소수 2자리(미양자화 시 25자리가 API로 새어나간다)
 _Q4 = Decimal("0.0001")  # 비율(ROAS·CTR·반품률) 표시 자리수 — JSON 정리
 
 
@@ -690,7 +692,17 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
     fee_rates = option_fee_rates(db, [acc["account_key"]] if acc["account_key"] else None)
     # account=None(전체 합산)이면 계정을 특정할 수 없다. vendor_item_id는 전역유일·단일계정 소유(D-8)라
     # vid만으로 인덱싱해도 교차 오염이 없다.
-    fee_rate_by_vid = {vid: rate for (_ak, vid), rate in fee_rates.items()}
+    fee_rate_by_vid: dict[str, Decimal] = {}
+    for (_ak, _vid), _rate in fee_rates.items():
+        _prev = fee_rate_by_vid.get(_vid)
+        if _prev is not None and _prev != _rate:
+            # D-8(vendor_item_id 전역유일)이 깨진 신호. prod 실측 0건이지만 조용히 마지막 것을
+            # 취하면 계정에 따라 수수료가 달라지고 아무도 모른다.
+            log.warning(
+                "요율 룩업 충돌: vendor_item_id %s가 계정별로 다른 요율(%s vs %s) — D-8 전역유일 위반 가능",
+                _vid, _prev, _rate,
+            )
+        fee_rate_by_vid[_vid] = _rate
     # ★수수료 과세표준은 «3P(WING1/2) 주문 매출»뿐이다 — orders(=_agg_orders)는 쿠팡 전 채널이라
     #   그대로 곱하면 두 곳에서 이중계상된다:
     #     ① 1P(COUPANG_ROCKET): 쿠팡이 사입해 파는 것이라 우리에게 판매수수료가 없다.
@@ -742,10 +754,16 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
         # 반품차감이 3P 매출보다 클 수 있다(단가가 1P·RG 섞인 평균이라 — return_deduction 자체의
         # 한계, 엔진 단일화 작업의 몫). 음수 수수료를 만들지 않도록 0에서 끊는다.
         fee_base = orders_3p.get(vid, {}).get("revenue", _Z) - return_deduction
+        fee_base_clamped = False
         if fee_base > _Z:
-            service_fee = fee_base * fee_rate
-            service_fee_vat = service_fee * Decimal("0.1")
+            # VAT 배수는 공유 상수를 쓴다 — 두 엔진 통일의 구조적 근거가 이 상수 하나다.
+            service_fee = (fee_base * fee_rate).quantize(_Q2, ROUND_HALF_UP)
+            service_fee_vat = (service_fee * (FEE_VAT_MULT - Decimal("1"))).quantize(_Q2, ROUND_HALF_UP)
         else:
+            # 반품차감이 3P매출을 넘어 과세표준이 음수가 된 라인. 원인은 축 불일치다 —
+            # _agg_returns는 requested_at 창, orders_3p는 order_date 창이라 창 밖 주문의 반품이
+            # 창 안 매출을 깎는다. 0에서 끊되 «몇 건이 끊겼는지»를 summary로 올린다(침묵 금지).
+            fee_base_clamped = fee_base < _Z
             fee_base = _Z
             service_fee = _Z
             service_fee_vat = _Z
@@ -782,6 +800,7 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
             "total_fee": total_fee, "ad_spend": ad_spend,
             # D-CPP-30: 값과 «근거 등급»을 같이 싣는다. 등급을 안 실으면 화면이 실토할 수가 없다.
             "fee_rate": fee_rate, "fee_basis": fee_basis, "fee_base": fee_base,
+            "fee_base_clamped": fee_base_clamped,
             "settled_fee": settled_fee, "settled_fee_rows": settled_rows,
             "cost": cost, "has_cost": has_cost, "cost_source": cost_source,
             "net_profit": net_profit,
@@ -830,6 +849,8 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
         # 수수료 과세표준 합계 = 3P 매출 − 반품차감. summary.revenue와 다른 게 정상이다
         # (revenue는 1P·RG를 포함하고 그쪽엔 판매수수료가 없다).
         "fee_base_total": sum((x["fee_base"] for x in account_rows), _Z),
+        # 반품차감이 3P매출을 넘어 과세표준이 0으로 끊긴 옵션 수(축 불일치 신호 — 수수료 과소).
+        "fee_base_clamped_options": sum(1 for x in account_rows if x["fee_base_clamped"]),
         "fee_rate_default_options": sum(
             1 for x in account_rows if x["fee_basis"] == BASIS_DEFAULT and x["fee_base"] > _Z
         ),

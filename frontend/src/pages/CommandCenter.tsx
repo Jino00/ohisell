@@ -691,10 +691,12 @@ function FeeBasisCard({ data }: { data: OverviewResponse }) {
   const knownOptions = s.fee_rate_known_options ?? 0;
   if (knownOptions === 0 && defaultOptions === 0) return null;
 
-  // 전제 검증: 이미 정산된 라인에서 «계산 == 실측»이어야 한다. 라인당 1원(반올림)까지는 정상.
+  // 전제 검증: 이미 정산된 라인에서 «계산 == 실측»이어야 한다. 라인당 1원(쿠팡의 행당 반올림)까지 정상.
+  // ★부호합(diff)만 보면 안 된다 — 라인별 +X/−X가 상쇄돼 초록이 된다. 라인당 최대 어긋남을 같이 본다.
   const diff = Math.abs(Number(chk?.diff ?? "0"));
   const tolerance = Math.max(1, Number(chk?.checked_lines ?? 0));
-  const premiseBroken = !!chk && chk.checked_lines > 0 && diff > tolerance;
+  const maxLine = Number(chk?.max_line_diff ?? "0");
+  const premiseBroken = !!chk && chk.checked_lines > 0 && (diff > tolerance || maxLine > 1);
 
   return (
     <div className={`mb-4 rounded-lg border p-3 text-sm ${premiseBroken ? "border-red-300 bg-red-50" : "border-gray-200 bg-white"}`}>
@@ -706,13 +708,18 @@ function FeeBasisCard({ data }: { data: OverviewResponse }) {
       </div>
       <div className="mt-1 text-xs text-gray-600">
         수수료 = 과세표준 × 그 옵션의 요율 × 1.1. 요율은 그 옵션의 과거 정산 실측값이고,
-        정산 이력이 없으면 기본 7.8%로 «추정»한다(정산은 주문 후 9~10일쯤 온다).
+        정산 이력이 없으면 기본 요율로 «추정»한다(정산은 주문 후 9~10일쯤 온다).
       </div>
       <div className="mt-2 flex flex-wrap gap-x-6 gap-y-1 text-xs">
         <span className="text-gray-700">실측 요율 {knownOptions}옵션</span>
         {defaultOptions > 0 && (
           <span className="text-amber-600">
-            ⚠ 요율 미확인 {defaultOptions}옵션 · {won(s.fee_default_revenue ?? "0")}이 기본 7.8% 추정
+            ⚠ 요율 미확인 {defaultOptions}옵션 · {won(s.fee_default_revenue ?? "0")}이 기본 요율 추정
+          </span>
+        )}
+        {(s.fee_base_clamped_options ?? 0) > 0 && (
+          <span className="text-amber-600" title="반품차감이 3P매출을 넘어 과세표준이 0으로 끊긴 옵션입니다(반품 창과 주문 창이 어긋나서 생깁니다). 그만큼 수수료가 과소 계상됩니다.">
+            ⚠ 과세표준 0으로 끊긴 {s.fee_base_clamped_options}옵션(수수료 과소)
           </span>
         )}
         {chk && chk.checked_lines > 0 && (
@@ -720,8 +727,14 @@ function FeeBasisCard({ data }: { data: OverviewResponse }) {
             {premiseBroken ? "⛔" : "✓"} 정산된 {chk.checked_lines}라인 대조: 계산 {won(chk.computed)} vs 실측 {won(chk.actual)} (차 {won(chk.diff)})
           </span>
         )}
+        {chk && (chk.refunded_lines_skipped ?? 0) > 0 && (
+          <span className="text-gray-400">환불 상계 {chk.refunded_lines_skipped}라인은 대조 제외(계산은 총매출 기준이라 비교 대상이 아님)</span>
+        )}
         {chk && chk.checked_lines === 0 && (
-          <span className="text-gray-400">대조 가능한 정산 라인 없음(창이 최근이라 전부 미정산)</span>
+          <span className="text-gray-400">
+            ⓘ 이 창에선 전제가 «검증되지 않았다» — 대조 가능한 정산 라인이 없다(정산은 주문 후 9~10일쯤 온다).
+            검증을 보려면 기간을 한 달 이상으로 넓히세요.
+          </span>
         )}
       </div>
       {premiseBroken && (
