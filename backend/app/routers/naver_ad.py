@@ -94,6 +94,7 @@ from app.models import (
 )
 from app.services.naver_ad import bid_step_types
 from app.services.naver_ad import campaign_roster
+from app.services.naver_ad import guardrail_params
 from app.services.naver_ad import change_actor
 from app.services.naver_ad import creative_scorecard
 from app.services.naver_ad import dashboard_overview
@@ -901,6 +902,94 @@ def expert_delegation_put(body: ExpertDelegationIn, db: Session = Depends(get_db
 
     db.commit()
     return _delegation_response(db)
+
+
+@router.get("/settings/guardrail-params")
+def guardrail_params_get(db: Session = Depends(get_db)):
+    """봉투 현황판(D-NAO-172 P1) — 지금 무슨 값으로 돌고 있고 **그게 어디서 왔는지**.
+
+    ★`source`가 이 화면의 존재 이유다. 값만 보이면 「DB를 고쳤는데 코드 상수가 이기고 있는」
+    상태를 못 본다 — 이 리포가 반복해 데인 «기록됐다 ≠ 코드가 읽는다»의 봉투판이다.
+    `rejected=true`는 DB에 값이 있는데 타입·범위 때문에 폴백된 것(조용히 무시하지 않는다).
+    읽기 전용.
+    """
+    return {
+        "params": guardrail_params.describe(db),
+        "from_db_enabled": guardrail_params._PARAMS_FROM_DB,
+        "retro_freshness": guardrail_params_retro_freshness(db),
+    }
+
+
+def guardrail_params_retro_freshness(db: Session) -> dict:
+    """소급채점 신선도 — 봉투 판단의 **입력**이 낡았는지.
+
+    ★왜 봉투 화면에 붙나: 2026-07-16~30 실측에서 차단 3,863건 중 **2,138건(55%)**이
+    「소급채점 stale」이었다. 봉투(86건·2.2%)보다 자릿수가 큰 병목인데 **상설 표면이 없어서**
+    조용히 늙었다. 값 옆에 「이 판단의 입력이 며칠 전 것인가」가 같이 보여야 한다.
+    기대치는 D−1(어제까지 채점) — `auto_operator`의 `expected_asof`와 같은 규약.
+    """
+    latest = db.query(func.max(NaverRetroSignal.asof_date)).scalar()
+    today = kst_now().date()
+    expected = today - timedelta(days=1)
+    return {
+        "latest_asof": latest.isoformat() if latest else None,
+        "expected_asof": expected.isoformat(),
+        "stale": latest is None or latest < expected,
+        "lag_days": (expected - latest).days if latest else None,
+    }
+
+
+@router.put("/settings/guardrail-params")
+def guardrail_params_put(body: dict, db: Session = Depends(get_db)):
+    """봉투 파라미터 설정 — **사람 승인 채널**(D-NAO-172 P1).
+
+    ★이 PUT이 설계의 「풀기는 사람이 승인한다」를 물리적으로 구현한다. 시스템은 이 경로를
+    호출하지 않는다(P3의 제안 생성기도 «제안»만 만들고 누르는 것은 사람이다).
+    전체 치환 저장 — 넘긴 키만 남고 나머지는 코드 상수로 돌아간다(부분 병합은 «지금 무슨
+    값인지»를 사람이 못 쫓는다).
+    타입·범위 밖 값은 **400으로 즉시 거부**한다. 저장 후 조용히 폴백시키면 화면엔 코드 상수가
+    뜨는데 사람은 자기가 바꾼 줄 안다.
+    """
+    if not isinstance(body, dict):
+        raise HTTPException(400, "본문은 객체여야 합니다")
+    unknown = set(body) - set(guardrail_params.SPECS)
+    if unknown:
+        raise HTTPException(400, f"알 수 없는 파라미터: {sorted(unknown)}")
+    cleaned: dict = {}
+    for key, raw in body.items():
+        spec = guardrail_params.SPECS[key]
+        val = guardrail_params._coerce(spec, raw)
+        if val is None:
+            raise HTTPException(
+                400,
+                f"{key}={raw!r}는 허용 범위 [{spec.lo}, {spec.hi}] 밖이거나 타입이 맞지 않습니다",
+            )
+        cleaned[key] = str(val)
+
+    before = {k: str(v) for k, v in guardrail_params.get_params(db).items()}
+    row = db.query(NaverAccountSettings).filter(
+        NaverAccountSettings.key == guardrail_params.SETTINGS_KEY).first()
+    if row is None:
+        row = NaverAccountSettings(key=guardrail_params.SETTINGS_KEY, value_json=json.dumps(cleaned))
+        db.add(row)
+    else:
+        row.value_json = json.dumps(cleaned)
+    db.flush()
+    after = {k: str(v) for k, v in guardrail_params.get_params(db).items()}
+
+    if before != after:
+        now = kst_now()
+        db.add(NaverChangeLog(
+            entity_type="account", entity_id="", campaign_id="",
+            action="update_guardrail_params",
+            before_value=json.dumps(before, ensure_ascii=False),
+            after_value=json.dumps(after, ensure_ascii=False),
+            rationale="콘솔 PUT /settings/guardrail-params (D-NAO-172)",
+            # changed_at·executed_at 둘 다 KST 명시 — B-1 가드(D-NAO-169)가 30분 초과 어긋남을 거부한다.
+            dry_run=False, executed_at=now, changed_at=now,
+        ))
+    db.commit()
+    return guardrail_params_get(db)
 
 
 @router.get("/retro-scorecard")

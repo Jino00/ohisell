@@ -107,6 +107,19 @@ _BUDGET_TYPES = _BUDGET_UP_TYPES | _BUDGET_DOWN_TYPES
 _BUDGET_UP_MAX_CHANGE_PCT = Decimal("1.0")
 
 
+# ── D-NAO-172 P1: 봉투 파라미터를 «컨텍스트에서» 읽는다 ─────────────────────────
+# 왜 컨텍스트인가: 이 모듈은 순수 판정기라 DB를 모른다(SA는 DB를 모른다 — 위 docstring 규약).
+# harness가 `_build_guardrail_context`에서 `guardrail_params`를 실어 주고, 없으면 **코드 상수**로
+# 떨어진다(fail-to-current). 그래서 이 배선은 «컨텍스트를 안 채우는 호출부»를 깨뜨리지 않는다 —
+# 기존 테스트·직접 호출 경로가 종전 그대로 돈다는 뜻이고, 그게 P1이 행위 변화 0인 이유다.
+def _param(context: dict, key: str, code_default):
+    params = context.get("guardrail_params")
+    if not isinstance(params, dict):
+        return code_default
+    val = params.get(key)
+    return code_default if val is None else val
+
+
 def check(proposal: dict, context: dict, *, now: datetime) -> str | None:
     """제안 1건의 실행 직전 가드레일 판정 — 통과 시 None, 차단 시 한국어 사유.
 
@@ -184,10 +197,11 @@ def _check_cooldown_and_cap(context: dict, now: datetime, proposal_type: str | N
         last_change_at = context.get("last_change_at")
     if last_change_at is not None:
         elapsed_hours = (now - last_change_at).total_seconds() / 3600
-        if elapsed_hours < _COOLDOWN_HOURS:
+        cooldown_hours = _param(context, "cooldown_hours", _COOLDOWN_HOURS)
+        if elapsed_hours < cooldown_hours:
             return (
                 f"쿨다운 중 — 마지막 변경 {elapsed_hours:.1f}시간 전"
-                f"(최소 {_COOLDOWN_HOURS}시간 필요, D-NAO-19)"
+                f"(최소 {cooldown_hours}시간 필요, D-NAO-19)"
             )
 
     # DL3(D-NAO-65): 안전방향(bid_down)은 일일 횟수 상한에서만 면제 — "쭉 낮추다가"를
@@ -206,9 +220,10 @@ def _check_cooldown_and_cap(context: dict, now: datetime, proposal_type: str | N
         # ★키가 None이면 상한 미적용: harness가 소재 grain에서만 채운다(그룹·키워드의 기존
         #   자동 하향 경로는 종전 DL3 면제 그대로 — 이번 변경의 스코프 밖).
         auto_downs = context["auto_bid_down_today"]
-        if auto_downs >= _MAX_DAILY_AUTO_BID_DOWNS:
+        daily_cap = _param(context, "max_daily_auto_bid_downs", _MAX_DAILY_AUTO_BID_DOWNS)
+        if auto_downs >= daily_cap:
             return (
-                f"자동 하향 일일 상한 도달({auto_downs}/{_MAX_DAILY_AUTO_BID_DOWNS}건, "
+                f"자동 하향 일일 상한 도달({auto_downs}/{daily_cap}건, "
                 "D-NAO-125 — 더 내리려면 콘솔에서 사람이 승인)"
             )
 
@@ -242,7 +257,8 @@ def _check_bid(proposal: dict, context: dict, proposal_type: str) -> str | None:
         change_pct = abs(Decimal(target_bid) - Decimal(current_bid)) / Decimal(current_bid)
         # BX2(D-NAO-71): 탐색 스텝은 30% 상한, 그 외 15%. 탐색은 완전 면제(CHANGE_PCT_EXEMPT_TYPES)가
         # 아니라 상한만 넓힌 것 — 30% 초과는 여전히 차단(폭주 방지, 탐색 스텝 상한 고정 테스트).
-        cap = _EXPLORATION_MAX_CHANGE_PCT if proposal_type in _EXPLORATION_STEP_TYPES else _MAX_CHANGE_PCT
+        cap = (_EXPLORATION_MAX_CHANGE_PCT if proposal_type in _EXPLORATION_STEP_TYPES
+               else _param(context, "max_change_pct", _MAX_CHANGE_PCT))
         if change_pct > cap:
             return (
                 f"변경폭 {float(change_pct):.1%} 초과(상한 {float(cap):.0%}, D-NAO-5/71) "
@@ -310,11 +326,12 @@ def _check_bid(proposal: dict, context: dict, proposal_type: str) -> str | None:
             and auto_up_base
             and proposal_type in _CUMULATIVE_CAP_TYPES
         ):
-            ceiling = int(Decimal(auto_up_base) * _MAX_AUTO_UP_MULTIPLE)
+            up_multiple = _param(context, "max_auto_up_multiple", _MAX_AUTO_UP_MULTIPLE)
+            ceiling = int(Decimal(auto_up_base) * Decimal(up_multiple))
             if target_bid > ceiling:
                 return (
                     f"자동 상향 누적 상한 — 기준가 {auto_up_base}원의 "
-                    f"{float(_MAX_AUTO_UP_MULTIPLE):.1f}배({ceiling}원)를 넘는 {target_bid}원은 "
+                    f"{float(up_multiple):.1f}배({ceiling}원)를 넘는 {target_bid}원은 "
                     "자동으로 올리지 않는다(D-NAO-129 — 더 올리려면 콘솔에서 사람이 승인)"
                 )
 

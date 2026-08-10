@@ -15,6 +15,7 @@ from sqlalchemy.pool import StaticPool
 from app.database import Base
 from app.models import NaverCampaignSettings, NaverChangeLog, NaverEntity, NaverProposal
 from app.services.naver_ad import naver_execution_harness as harness
+from app.services.naver_ad import guardrail_params
 from app.services.naver_ad import naver_sa_writer
 from app.utils.kst import kst_now
 
@@ -1209,6 +1210,9 @@ def test_build_guardrail_context_non_keyword_target_all_none(db):
         "current_bid": None, "current_budget": None, "roas_corrected": None, "target_roas": None,
         "cost_today": None, "daily_budget": None, "unconverted_spend": None,
         "last_change_at": None, "changes_today_count": 0, "campaign_type": None,
+        # ★D-NAO-172 P1: 봉투 파라미터는 «라이브 상태»가 아니라 «설정»이라 target_type과
+        #   무관하게 항상 채워진다. KV 행이 없으면 코드 상수 그대로(fail-to-current).
+        "guardrail_params": guardrail_params.get_params(db),
         # D-NAO-121: target_type='ad'가 아니므로 출시창 순위 하한은 항상 None(하한 없음).
         "launch_floor_bid": None, "launch_target_rank": None,
         # D-NAO-125: 사람 승인(approval_source NULL/console)이면 False — 자동 하향
@@ -1231,6 +1235,9 @@ def test_build_guardrail_context_adgroup_target_bid_budget_fields_none_no_prior_
         "current_bid": None, "current_budget": None, "roas_corrected": None, "target_roas": None,
         "cost_today": None, "daily_budget": None, "unconverted_spend": None,
         "last_change_at": None, "changes_today_count": 0, "campaign_type": None,
+        # ★D-NAO-172 P1: 봉투 파라미터는 «라이브 상태»가 아니라 «설정»이라 target_type과
+        #   무관하게 항상 채워진다. KV 행이 없으면 코드 상수 그대로(fail-to-current).
+        "guardrail_params": guardrail_params.get_params(db),
         # D-NAO-121: target_type='adgroup'(그룹 단위)이므로 출시창 순위 하한은 소재 전용 —
         # 항상 None(하한 없음).
         "launch_floor_bid": None, "launch_target_rank": None,

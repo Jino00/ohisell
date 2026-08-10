@@ -48,6 +48,7 @@ from app.services.naver_ad import (
     campaign_target_resolver,
     diary,
     guardrail_gate,
+    guardrail_params,
     launch_rank_floor,
     naver_sa_writer,
     search_term_judge,
@@ -856,6 +857,10 @@ def _build_guardrail_context(db: Session, proposal: NaverProposal, now: datetime
         "current_bid": None, "current_budget": None, "roas_corrected": None, "target_roas": None,
         "cost_today": None, "daily_budget": None, "unconverted_spend": None,
         "last_change_at": None, "changes_today_count": 0, "campaign_type": None,
+        # ★D-NAO-172 P1: 봉투 파라미터(DB KV → 코드 상수 폴백). guardrail_gate는 DB를 모르므로
+        #   유일한 전달 통로가 이 컨텍스트다. 이 키가 없으면 게이트가 코드 상수로 떨어지므로
+        #   컨텍스트를 안 채우는 기존 호출부·테스트는 종전 그대로 돈다(fail-to-current).
+        "guardrail_params": guardrail_params.get_params(db),
         # D-NAO-125 codex[P1]: 사람 승인 없이 쏘는 제안인가(is_auto_exec 단일 판별).
         # guardrail_gate가 자동 하향에만 별도 일일 상한을 걸 때 쓴다 — DL3 면제(하향 무제한)는
         # 사람 눈을 전제로 설계된 규칙이라 무인 경로에 그대로 적용하면 바닥까지 파고든다.
