@@ -16,6 +16,13 @@
 - 이 트랙을 무시하거나 변형해서 진행하지 말 것. 변경은 Jino 승인 후 트랙 파일에 D-N으로 기록.
 - (쿠팡 full-integration 트랙은 완료됨 — `docs/TRACKS.md` Completed 참조.)
 
+## ★지혜층 — 교훈이 «집행 지점»을 갖게 하는 곳 (D-NAO-165, 2026-08-10)
+- **`docs/wiki/WISDOM.md`를 세션 시작 필독에 포함**(전역 §6 순서 뒤). 패턴 인덱스 + **지식 부채 목록**.
+- 각 패턴은 `enforcement:` 필드로 집행 지점을 하나 갖는다. `none`이면 **부채**이고 주간 감사가 들춘다.
+- **정본은 L1**(`.claude/memory/LESSONS_LEARNED.md` · 트랙 D-N · `failures.jsonl`) — 위키와 어긋나면 **L1이 이긴다.** 위키에 새 사실을 창작하지 않는다.
+- 새 교훈을 L1에 적었으면 다음 감사에서 **패턴 하나로 처분**된다(`docs/wiki/AUDIT_PROTOCOL.md`). 처분 없는 교훈은 미종결.
+- 옵시디언은 이 repo를 볼트로 여는 **뷰**다(`docs/wiki/OBSIDIAN_SETUP.md`) — 쓰기 주체가 아니다. `.obsidian/`은 커밋 안 함.
+
 ## 기술 스택
 - Frontend: React + Vite + TypeScript + Tailwind CSS
 - Backend: FastAPI (Python 3.11+)

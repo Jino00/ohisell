@@ -41,3 +41,7 @@ backend/.scheduler.lock
 #   같은 테스트가 두 번 돌고, 나중에 원본만 고치면 사본이 고아로 남아 거짓 초록의 씨앗이 된다.
 *\ 2.*
 *\ 3.*
+
+# 옵시디언 개인 UI 설정 — 볼트로 이 repo를 열면 생긴다(docs/wiki/OBSIDIAN_SETUP.md).
+# 커밋하지 않는다: 세션·사람마다 갈릴 이유가 없고, 갈리면 무의미한 diff만 쌓인다.
+.obsidian/
