@@ -13,6 +13,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 from sqlalchemy.orm import Session
 
 from app.models import Channel, ProductChannelMapping, ProductMaster
+from app.services.cost_truth_audit import screen_cost, screen_reason, try_load_truth
 
 # 라이브 실측(2026-07-03, ohisell_mapping_template.xlsx "원가 매핑" 시트) 라벨→account_key 대조.
 # D-2 트랙 대조표와 동일한 축이나, 엑셀에 실제 저장된 문자열 그대로를 키로 둔다.
@@ -51,6 +52,10 @@ class IntegrityReport:
     duplicate_channel_ids: list[str] = field(default_factory=list)  # "채널 X 옵션ID Y 중복(행 a,b)"
     mapping_conflicts: list[str] = field(default_factory=list)  # upsert 단계에서 채워짐
     label_mismatches: list[str] = field(default_factory=list)  # 블록 고정라벨과 실제 행 라벨 불일치(codex P1)
+    # 버퍼가 얹힌 원가라 **쓰지 않은** 행들(D-CPP-35). 매핑은 정상 처리된다.
+    cost_buffers: list[str] = field(default_factory=list)
+    # 정본 스냅샷이 없어 원가를 검사하지 못했을 때의 한 줄. ★검사 못 함과 이상 없음을 가른다.
+    cost_guard_unavailable: str | None = None
 
 
 # ── SA 1: 엑셀 파서 (순수 함수, DB/HTTP 없음) ──
@@ -154,20 +159,32 @@ def check_integrity(rows: list[MasterRow]) -> IntegrityReport:
 
 # ── SA 3: 상품/매핑 upsert ──
 def upsert_product_by_name(
-    db: Session, name: str, cost_price: Decimal, next_sku_num: list[int]
+    db: Session,
+    name: str,
+    cost_price: Decimal,
+    next_sku_num: list[int],
+    cost_blocked: bool = False,
 ) -> tuple[ProductMaster, Literal["created", "updated"]]:
     """상품명으로 product_master를 upsert한다(기존 upload-by-name 로직 추출·재사용).
 
     next_sku_num은 길이1 리스트로 감싼 카운터(호출 간 공유, 커밋 전 flush로 채번 충돌 방지).
+
+    `cost_blocked`면 **원가만 쓰지 않는다**(D-CPP-35). 이 시트의 행은 존재 이유가 매핑이라
+    원가 하나 때문에 행 전체를 버리면 매핑이 사라지고 주문이 미연결로 남는다 —
+    상품 원가표 시트(`/upload`)가 행 전체를 건너뛰는 것과 처분이 다른 이유가 이것이다.
+    ★신규 상품이면 **0(미입력)으로 만든다.** 버퍼 값을 넣으면 «틀린 값»이고, 0은 «모르는 값»이라
+      손익 엔진이 이미 미상으로 다룬다. 틀린 값보다 모르는 값이 낫다.
     """
     product = db.query(ProductMaster).filter_by(product_name=name).first()
     if product:
-        if cost_price:
+        if cost_price and not cost_blocked:
             product.cost_price = cost_price
         return product, "updated"
 
     product = ProductMaster(
-        internal_sku=_allocate_sku(db, next_sku_num), product_name=name, cost_price=cost_price
+        internal_sku=_allocate_sku(db, next_sku_num),
+        product_name=name,
+        cost_price=Decimal("0") if cost_blocked else cost_price,
     )
     db.add(product)
     db.flush()
@@ -254,10 +271,22 @@ def ingest_master_sheet(db: Session, ws: Worksheet) -> IngestResult:
     channel_cache: dict[str, Channel | None] = {}
     next_sku_num = _next_sku_counter(db)
 
+    # ★버퍼 유입 차단 가드(D-CPP-35). 옛 엑셀 재업로드가 버퍼 177건을 되돌리는 것을 여기서 막는다.
+    truth = try_load_truth()
+    if truth is None:
+        integrity.cost_guard_unavailable = (
+            "정본 스냅샷을 못 읽어 원가를 검사하지 않았다 — 이 업로드의 원가는 «검사 통과»가 아니다"
+        )
+
     for r in rows:
         if not r.product_name:
             continue
-        product, action = upsert_product_by_name(db, r.product_name, r.cost_price, next_sku_num)
+        hit = screen_cost(r.cost_price, truth)
+        if hit:
+            integrity.cost_buffers.append(screen_reason(f"행{r.row_idx}", hit))
+        product, action = upsert_product_by_name(
+            db, r.product_name, r.cost_price, next_sku_num, cost_blocked=bool(hit)
+        )
         if action == "created":
             result.products_created += 1
         else:

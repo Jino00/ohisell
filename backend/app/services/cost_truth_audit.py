@@ -100,6 +100,88 @@ def count_verdicts(rows: list[dict]) -> dict[str, int]:
             for v in ("ok", "buffered", "undetermined")}
 
 
+# ── 유입 차단 (2026-08-10, D-CPP-35) ─────────────────────────────────────────
+#
+# 위의 것들은 **탐지**다 — 이미 DB에 들어간 값을 본다. 아래 둘은 **예방**이다:
+# 엑셀 업로드가 버퍼 값을 쓰기 **전에** 가른다.
+#
+# 왜 탐지만으로 부족한가: 옛 매핑 엑셀(v3)을 올리면 177건이 통째로 되돌아오고,
+# 배너는 «되돌아간 뒤에» 켜진다. 그 사이 손익은 과소 계상된 채로 조회된다.
+# D-CPP-34가 버퍼를 «단순 오류·재입력 금지»로 확정했으므로, 재입력은 경고가 아니라 **거부**다.
+
+
+# `try_load_truth`가 판정을 시연해 볼 때 쓰는 값. 정본에도 버퍼 합에도 없을 만한 값이면 되고,
+# 무엇이 나오든 상관없다 — **터지지 않는지**만 본다.
+_SMOKE_COST = 1.0
+
+
+def try_load_truth(path: pathlib.Path | str | None = None) -> dict | None:
+    """정본 스냅샷을 읽되 **못 읽으면 None**(예외를 올리지 않는다).
+
+    ★가드가 업로드를 «검사기 부재»로 막지 않게 하려는 것이다(fail-soft). 대신 부르는 쪽은
+      응답에 «검사 못 했다»를 반드시 남겨야 한다 — 조용히 통과시키면 «검사해서 깨끗함»과
+      «검사 자체를 안 함»이 같은 모양이 된다(교훈 #123이 반복해 당한 형태).
+
+    ★`except Exception`이다. 좁게 잡았더니(`OSError/ValueError/KeyError`) 루트가 list인 스냅샷이
+      `TypeError`로 빠져나가 **업로드 전체가 500**이 됐다 — fail-soft가 정반대로 작동한 것이다
+      (적대 리뷰 P2). 같은 리포의 `scheduler_health`가 이미 넓게 잡고 있다.
+
+    ★로딩 성공만으로 «검사 가능»이라 하지 않는다. `load_truth`는 되는데 `classify`가 터지는
+      스냅샷이 있다(`known_buffers` 키 누락 등). 그때 이 함수가 dict를 돌려주면 호출자는
+      `cost_guard="active"`라 적으면서 실제로는 아무것도 판정하지 못한다 — **버퍼가 들어가는데
+      응답은 「검사함·0건」**이 된다(적대 리뷰 2R P2-N2). 그래서 **판정을 한 번 시연**해 보고,
+      못 하면 스냅샷이 없는 것과 같이 취급한다. «검사해서 깨끗함»과 «검사 못 함»을 가르는
+      것이 이 모듈의 존재 이유다(교훈 #123).
+    """
+    try:
+        snap = load_truth(path)
+        classify(_SMOKE_COST, snap)  # 판정 시연 — 여기서 터지면 이 스냅샷으론 검사할 수 없다
+        return snap
+    except Exception:
+        return None
+
+
+def screen_cost(cost, truth: dict | None) -> dict | None:
+    """업로드 유입값 1건을 사전 검사한다. **버퍼면 사유 dict, 아니면 None.**
+
+    None을 «통과»로 쓰는 이유는 `summarize_drift`와 같다 — 문제가 없을 땐 아무 말도 안 한다.
+    `truth`가 None(스냅샷 부재)이면 판정하지 않는다(전건 통과).
+
+    ★`ok`도 `undetermined`도 막지 않는다. 이 가드가 답할 수 있는 것은 «이 값이 정본 + 알려진
+      버퍼인가»뿐이고(모듈 헤더), 그 밖의 값을 막으면 근거 없이 업로드를 깨뜨린다.
+    """
+    if truth is None:
+        return None
+    try:
+        c = round(float(cost), 1)
+    except (TypeError, ValueError):
+        return None  # 값 파싱은 부르는 쪽의 책임 — 여기서 판정 실패를 «버퍼»로 만들지 않는다
+    try:
+        verdict, info = classify(c, truth)
+    except Exception:
+        # ★load가 성공해도 classify가 터질 수 있다(예: `known_buffers` 키가 빠진 스냅샷 → KeyError).
+        #   load만 감싸면 fail-soft가 반쪽이라 업로드가 500으로 죽는다(적대 리뷰 P2).
+        return None
+    if verdict != "buffered":
+        return None
+    return {
+        "cost": c,
+        "truth": info["truth"],
+        "buffer": info["buffer"],
+        "buffer_label": info["buffer_label"],
+        "truth_item": info["truth_item"],
+    }
+
+
+def screen_reason(row_label: str, hit: dict) -> str:
+    """차단 사유 한 줄. 사람이 엑셀을 고칠 수 있게 **정본 값을 같이 준다.**"""
+    return (
+        f"{row_label}: 원가 {hit['cost']}가 정본 {hit['truth']} + 버퍼 {hit['buffer']}"
+        f"({hit['buffer_label']}) — 버퍼는 재입력 금지(D-CPP-34)라 이 값을 쓰지 않았다. "
+        f"정본 항목: {hit['truth_item']}"
+    )
+
+
 def summarize_drift(rows: list[dict], truth: dict, sample: int = 3) -> dict | None:
     """드리프트 요약. **드리프트가 없으면 None** — 배너가 «없을 땐 아무 말도 안 하게».
 

@@ -326,6 +326,10 @@ export interface MappingIngestResult {
   duplicate_channel_ids: string[];
   mapping_conflicts: string[];
   label_mismatches: string[];
+  // ★D-CPP-35 버퍼 차단 사유. 이 둘이 없으면 백엔드가 거부해도 **화면이 아무 말도 안 한다**
+  //   (적대 리뷰 P1: 응답엔 있는데 소비자가 안 읽어 사유가 한 칸 옆에서 다시 사라졌다).
+  cost_buffers: string[];
+  cost_guard_unavailable: string | null;
 }
 
 // ── 통합 손익 대조원장 (트랙 S5, GET /api/products/pnl-reconciliation) ──

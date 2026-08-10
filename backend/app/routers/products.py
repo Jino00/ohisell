@@ -28,6 +28,7 @@ from app.schemas import (
     ConnRow,
     ConnectionMapOut,
 )
+from app.services.cost_truth_audit import screen_cost, screen_reason, try_load_truth
 from app.services.product_mapping_ingest import ingest_master_sheet
 from app.services.mapping_coverage import compute_mapping_coverage
 from app.services.product_connection_map import build_connection_map
@@ -423,6 +424,13 @@ async def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_d
 
     results = {"created": 0, "updated": 0, "mappings_created": 0, "errors": []}
 
+    # ★버퍼 유입 차단 가드(D-CPP-35). 옛 엑셀(v3)을 올리면 버퍼 177건이 통째로 되돌아오는데
+    #   그 복귀는 **에러가 안 난다** — 이익만 조용히 줄어든다. 헬스 배너는 되돌아간 «뒤에» 켜지므로
+    #   여기가 유일한 예방 지점이다. 스냅샷이 없으면 판정하지 않되 그 사실을 응답에 남긴다.
+    _truth = try_load_truth()
+    results["cost_guard"] = "active" if _truth else "unavailable(정본 스냅샷 없음 — 원가 미검사)"
+    results["cost_buffer_blocked"] = 0
+
     # 시트1: 상품 원가표
     if "상품 원가표" in wb.sheetnames:
         ws = wb["상품 원가표"]
@@ -445,6 +453,13 @@ async def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_d
             #   원가가 음수면 손익에서 빼는 게 아니라 **더한다**(이익 과대의 방향이 뒤집힌 채 커짐).
             if cost_decimal < 0:
                 results["errors"].append(f"행 {row_idx}: 원가 '{cost}'가 음수 — 건너뜀")
+                continue
+            # ★버퍼 값이면 행 전체를 건너뛴다(음수 가드와 같은 처분). 이 시트는 행의 존재 이유가
+            #   원가라서, 원가만 빼고 name/category를 갱신하면 «반쯤 반영된» 행이 남는다.
+            _hit = screen_cost(cost_decimal, _truth)
+            if _hit:
+                results["errors"].append(screen_reason(f"행 {row_idx}", _hit))
+                results["cost_buffer_blocked"] += 1
                 continue
 
             existing = db.query(ProductMaster).filter_by(internal_sku=sku).first()
@@ -565,6 +580,8 @@ async def upload_by_name(file: UploadFile = File(...), db: Session = Depends(get
         duplicate_channel_ids=result.integrity.duplicate_channel_ids,
         mapping_conflicts=result.integrity.mapping_conflicts,
         label_mismatches=result.integrity.label_mismatches,
+        cost_buffers=result.integrity.cost_buffers,
+        cost_guard_unavailable=result.integrity.cost_guard_unavailable,
     )
 
 

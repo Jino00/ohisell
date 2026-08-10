@@ -132,6 +132,10 @@ class MappingIngestResult(BaseModel):
     duplicate_channel_ids: list[str] = []
     mapping_conflicts: list[str] = []
     label_mismatches: list[str] = []
+    # ★D-CPP-35 버퍼 차단. 이 둘이 여기 없으면 FastAPI가 응답에서 **조용히 지운다**
+    #   (2026-08-10 cost_drift가 정확히 그렇게 사라졌다 — ref 54 §9 P1-1).
+    cost_buffers: list[str] = []
+    cost_guard_unavailable: str | None = None
 
 
 # ── 상품 연관맵 커버리지 리포트 (상품 연관맵 트랙 S2) ──

@@ -2,6 +2,7 @@
 //   탭1 연관맵 매트릭스(내부옵션×채널·인라인 편집·커버리지/충돌 배지·엑셀 업로드)
 //   탭2 통합 손익(S5에서 GET /api/products/pnl-reconciliation 소비 — 지금은 자리표시)
 import { useState, useEffect, useCallback, useRef } from "react";
+import { buildMappingUploadText, shouldWarnMappingUpload } from "./uploadResultText";
 import {
   fetchApi,
   uploadFile,
@@ -133,18 +134,10 @@ function ConnectionMapTab() {
     if (!file) return;
     try {
       const r: MappingIngestResult = await uploadFile("/api/products/upload-by-name", file);
-      const issues =
-        r.unknown_labels.length +
-        r.duplicate_product_names.length +
-        r.duplicate_channel_ids.length +
-        r.mapping_conflicts.length +
-        r.label_mismatches.length;
-      setUploadMsg(
-        `상품 생성 ${r.products_created} · 수정 ${r.products_updated} · 매핑 ${r.mappings_created} · 주문연결 ${r.orders_linked}` +
-          (r.mappings_conflicted ? ` / 충돌 ${r.mappings_conflicted}(기존 유지)` : "") +
-          (issues ? ` / 확인 필요 ${issues}건(콘솔)` : ""),
-      );
-      if (issues) console.warn("매핑 적재 무결성 이슈", r);
+      // ★문구 조립은 uploadResultText.ts(순수)로 뺐다 — 여기 인라인이면 회귀로 못 박힌다
+      //   (적대 리뷰 2R P2-N1: 원가 거부를 빼는 변이가 프론트 290건에서 살아남았다).
+      setUploadMsg(buildMappingUploadText(r));
+      if (shouldWarnMappingUpload(r)) console.warn("매핑 적재 무결성 이슈", r);
       load(q);
     } catch (e) {
       setUploadMsg(`업로드 실패: ${e}`);
