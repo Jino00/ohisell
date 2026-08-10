@@ -3249,7 +3249,17 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                         # 되돌림 스위치 — max 소재 1개만(D-NAO-171 이전 동작). 상수 하나로 복귀한다.
                         ad_exec_targets = [t for t in ad_exec_targets if t[0] == eff["max_ad_id"]]
                     if not ad_exec_targets:
-                        hold_reason = "소재 입찰 라이브 재조회 실패(B3 카나리)"
+                        # ★적대 리뷰 P2-4: 사유를 사실대로 나눈다. 「조회 실패」와 「조회는 됐는데
+                        #   집행 대상이 0」은 원인도 대응도 다른데, 한 문구로 뭉치면 이 리포가
+                        #   반복해서 데인 «거짓 라벨»이 된다(`ignored`=원가 제외인 줄 알았더니
+                        #   매칭 실패였던 건과 같은 모양). 라벨이 거짓이면 진단이 통째로 틀어진다.
+                        if live_ads is None:
+                            hold_reason = "소재 입찰 라이브 재조회 실패(B3 카나리)"
+                        else:
+                            hold_reason = (
+                                f"[레버 미연결] 라이브 소재 {len(live_ads)}개 중 집행 대상 0"
+                                "(전부 정지·그룹입찰 추종·입찰가 부재) — 소재 레버 없음"
+                            )
                         result["held"].append({"target_id": target_id, "reason": hold_reason})
                         _record_blocked(
                             db, campaign_id=campaign_id, actor=lane_actor, reason=hold_reason,
@@ -3457,7 +3467,21 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
             #   이 플래그가 없으면 5소재짜리 그룹 하나가 결정 캡을 통째로 소진해, 캡의 의미가
             #   조용히 «그룹 5개»에서 «그룹 1개»로 줄어든다.
             group_slot_taken = False
-            for exec_target_id, exec_step_base in (ad_exec_targets or [(exec_target_id, step_base)]):
+            for _fan_idx, (exec_target_id, exec_step_base) in enumerate(
+                    ad_exec_targets or [(exec_target_id, step_base)]):
+                # ★적대 리뷰 P2-10: 킬스위치를 팬아웃 **안에서도** 재확인한다.
+                #   위 재확인(codex 5R[P1-2])은 유닛당 1회였는데, 팬아웃 이후 한 유닛이 최대
+                #   _MAX_AD_WRITES_PER_LANE회 쓰기가 되므로 그 계약이 조용히 약해졌다.
+                #   «즉시 정지»는 쓰기 단위로 성립해야 한다. idx 0은 위 검사가 이미 덮는다.
+                if _fan_idx > 0 and not _auto_operate_now(db, campaign_id):
+                    hold_reason = "킬스위치 OFF — 팬아웃 도중 정지(D-NAO-171, 쓰기 단위 재확인)"
+                    result["held"].append({"target_id": exec_target_id, "reason": hold_reason})
+                    _record_blocked(
+                        db, campaign_id=campaign_id, actor=lane_actor, reason=hold_reason,
+                        now=now, target_type=exec_target_type, target_id=exec_target_id,
+                        action=intended_action, event_type="kill_switch",
+                    )
+                    break  # 정지는 이 그룹의 남은 소재 전부에 적용된다
                 if exec_target_type == "ad":
                     step_bid = _clamp_step(exec_step_base, verdict["direction"])
                     if step_bid is None:

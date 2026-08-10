@@ -1485,6 +1485,37 @@ def _writeback_live_ad_observation(
             for r in db.query(NaverAdgroupProduct)
                        .filter(NaverAdgroupProduct.adgroup_id == adgroup_id).all()
         }
+
+        # ★★덮기 **전에** 외부변경 탐지를 돌린다 (적대 리뷰 P1-1, 2026-08-10).
+        #   초판은 앵커(`ad_edit_tm`·`ad_apply_tm`)만 동결하고 **같은 탐지기의 나머지 절반**
+        #   (비교 대상 값 3종: ad_bid_amt·use_group_bid_amt·ad_user_lock)을 덮었다. 그러면
+        #   다음 07:45 sync가 `prev_by_ad`를 이 행에서 만들 때 이미 라이브와 같은 값이라
+        #   `_diff_ops`가 빈 리스트를 주고 → `ad_edit` 폴백으로 강등된다. `ad_edit`은
+        #   `auto_up_base_bid`의 `op_type == "bid_change"` 필터에 **안 걸린다** →
+        #   자동 상향 2.0× 누적 상한의 **기준점이 재설정되지 않는다**(codex 3R[P1]이 닫았던
+        #   「대행사가 2,000→400으로 내렸는데 기준점은 2,000에 머물러 자동화가 10배로 되돌림」
+        #   구멍의 재개봉). 하필 write-back을 유발하는 divergence의 정체가 `bid_mode_flip`
+        #   (True→False) 그 자체라, **가장 중요한 신호가 지워지는** 구조였다.
+        #
+        #   여기서 탐지가 가능한 이유가 앵커 동결이다 — `detect_ad_external_changes`의 게이트
+        #   ②③이 «양쪽 editTm 존재 ∧ 상이»를 요구하는데, 우리가 앵커를 안 건드렸으므로
+        #   prev(옛 editTm) ≠ obs(라이브 editTm)가 성립한다. 추가 API 콜 0(가드가 넘긴 원본).
+        #   선례: D-NAO-130의 `_record_inline_external_touch`(우리가 먼저 쓰면 사건이 소실되므로
+        #   그 자리에서 남긴다)와 같은 논증을 DB 쓰기에 적용한 것.
+        #
+        #   ★탐지 실패 = 덮지 않는다(fail-**closed**). 이 한 지점만 방향이 반대인 이유:
+        #   수리를 못 하면 «다음 sync까지 절체 지연»(D-NAO-170 이전 상태로 무해 복귀)이지만,
+        #   탐지를 건너뛰고 덮으면 **대행사 조작 이력이 영구 소실**되고 그건 돈 경로다.
+        #   덜 고치는 쪽이 잘못 고치는 쪽보다 낫다.
+        from app.services.naver_ad import ad_external_change  # 함수 레벨(순환 회피 관례)
+        prev_by_ad = {
+            r.ad_id: {"edit_tm": r.ad_edit_tm, "ad_bid_amt": r.ad_bid_amt,
+                      "use_group_bid_amt": r.use_group_bid_amt, "ad_user_lock": r.ad_user_lock}
+            for r in existing.values() if r.ad_id
+        }
+        observed = [{**a, "adgroup_id": adgroup_id, "campaign_id": campaign_id} for a in rows]
+        ad_external_change.run(db, prev_by_ad=prev_by_ad, observed=observed, now=now)
+
         touched = 0
         for a in rows:
             mall_pid = str(a["mall_product_id"])

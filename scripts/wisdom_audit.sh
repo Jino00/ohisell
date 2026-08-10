@@ -175,7 +175,10 @@ emit() {
       ssh sellc.ohitech.co.kr "cd /home/ubuntu/ohisell/backend && sqlite3 -header -column ohisell.db \"
         SELECT entity_id AS adgroup, COUNT(*) n, MIN(date(changed_at)) f, MAX(date(changed_at)) t
         FROM naver_change_log
-        WHERE rationale LIKE '%[LEVER_MISMATCH]%' AND changed_at >= date('now','-7 day')
+        -- ★SQLite의 now()는 UTC인데 changed_at은 KST다([[sqlite-server-default-now-is-utc]]).
+        --   보정 없이 쓰면 창이 9시간 밀린다.
+        WHERE rationale LIKE '%[LEVER_MISMATCH]%'
+          AND changed_at >= datetime('now','+9 hours','-7 day')
         GROUP BY entity_id ORDER BY n DESC;\""
 
 발견 → 그 표에 행으로 추가. **추가 자체가 이 주의 산출물이다.**

@@ -2132,3 +2132,101 @@ def test_single_ad_group_behaviour_is_unchanged(db):
     assert result["ad_auto_exec_reserved"] == 1
     saved = db.query(NaverProposal).filter(NaverProposal.target_type == "ad").one()
     assert (saved.target_id, saved.target_bid) == ("nad-0", 680)
+
+
+# ══ 적대 리뷰 P2 채택분 — 살아남은 변이 3건 + 안전 속성 ═══════════════════════════
+# 리뷰어가 만든 변이 중 M-B(결정 캡 경계)·M-C(집행 순서)·M-F(rollback)가 **생존**했다.
+# 살아남은 변이 = 통과하는데 아무것도 안 지키는 자리다(교훈 #181).
+
+def test_fanout_executes_highest_bid_ad_first(db):
+    """★집행 순서는 안전 속성이다(P2-1) — 내림차순이어야 한다.
+
+    쓰기 캡은 레인 **전역 누적**이라 뒤쪽 그룹은 상위 몇 개만 집행될 수 있다. 오름차순이면
+    **max 소재가 강등돼 그룹 실효가 전혀 안 움직인다** — D-NAO-171이 고치려던 바로 그 실패를
+    캡이 재생산한다. 순서는 취향이 아니라 계약이다.
+    """
+    _seed_multi_ad_group(db, bids=(300, 800, 500))
+    with patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 200}), \
+         patch.object(auto_operator.naver_execution_harness, "execute"):
+        auto_operator.run_hourly_lane(db, now=NOW, fetch_intraday=lambda t, d: _overheat_curve())
+    order = [p.target_id for p in db.query(NaverProposal)
+             .filter(NaverProposal.target_type == "ad").order_by(NaverProposal.id).all()]
+    assert order == ["nad-1", "nad-2", "nad-0"], "800 → 500 → 300 순으로 집행돼야 한다"
+
+
+def test_group_spanning_decision_cap_boundary_is_not_split(db):
+    """★결정 캡 경계에서 그룹이 쪼개지지 않는다(P2-2).
+
+    결정 자리가 1칸 남았을 때 3소재 그룹이 오면, 그 그룹은 **한 자리를 쓰고 3소재 전부**
+    집행돼야 한다. 소재마다 자리를 세면 첫 소재만 나가고 나머지 2개가 Confirm으로 강등돼
+    그룹 실효가 반쪽만 움직인다(하향 국면에서 이건 「덜 내려간 채로 계속 태우는」 상태다).
+    """
+    cap = auto_operator._MAX_AD_AUTO_EXEC_PER_LANE
+    db.add(NaverCampaignSettings(campaign_id=CAMP, optimizer="ours", auto_operate=True))
+    db.add(NaverEntity(entity_type="campaign", entity_id=CAMP, campaign_id=CAMP, status="on"))
+    db.add(NaverHourlySnapshot(snapshot_at=NOW, ad_date=TODAY, snapshot_hour=23,
+                               campaign_id=CAMP, campaign_type="", cost=0, clk=0, imp=0))
+    window_from, _ = auto_operator._settlement_window(TODAY)
+    # 앞선 그룹 (cap-1)개 = 소재 1개씩 → 결정 자리 1칸만 남는다. 마지막 그룹만 소재 3개.
+    for i in range(cap):
+        gid = f"grp-{i}"
+        db.add(NaverEntity(entity_type="adgroup", entity_id=gid, parent_id=CAMP,
+                           campaign_id=CAMP, campaign_type="SHOPPING", status="on"))
+        db.add(NaverAdDaily(ad_date=window_from, campaign_id=CAMP, campaign_type="SHOPPING",
+                            adgroup_id=gid, keyword_id="", imp=200, clk=20, cost=2000))
+        n_ads = 3 if i == cap - 1 else 1
+        for j in range(n_ads):
+            _ad(db, gid, f"p{i}-{j}", ad_id=f"nad-{i}-{j}", ad_bid_amt=800 - 50 * j, use_group=False)
+    db.commit()
+    with patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 200}), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(db, now=NOW, fetch_intraday=lambda t, d: _overheat_curve())
+    assert result["ad_auto_exec_reserved"] == cap        # 그룹 수 = 결정 자리 수
+    assert result["ad_writes_reserved"] == cap + 2       # 소재 수 = (cap-1)×1 + 3
+    assert result["ad_auto_exec_capped"] == 0            # 아무도 강등되지 않았다
+    assert mock_exec.call_count == cap + 2
+    last = [p.target_id for p in db.query(NaverProposal)
+            .filter(NaverProposal.target_id.like(f"nad-{cap - 1}-%")).all()]
+    assert len(last) == 3, "마지막 그룹의 3소재가 통째로 집행돼야 한다"
+
+
+def test_kill_switch_mid_fanout_stops_remaining_ads(db):
+    """★P2-10: 팬아웃 도중 킬스위치가 내려가면 **남은 소재는 안 나간다**.
+
+    종전 재확인(codex 5R[P1-2])은 유닛당 1회였다. 팬아웃 이후 한 유닛이 최대 15회 쓰기가
+    되므로 그 계약이 조용히 약해졌다 — «즉시 정지»는 쓰기 단위로 성립해야 한다.
+    여기선 첫 쓰기 직후 사람이 스위치를 내린 상황을 재현한다.
+    """
+    _seed_multi_ad_group(db, bids=(800, 700, 600))
+    state = {"on": True}
+
+    def _exec_then_kill(*a, **k):
+        state["on"] = False  # 첫 쓰기가 나간 직후 사람이 껐다
+
+    with patch.object(auto_operator, "_auto_operate_now", side_effect=lambda _db, _c: state["on"]), \
+         patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 200}), \
+         patch.object(auto_operator.naver_execution_harness, "execute",
+                      side_effect=_exec_then_kill) as mock_exec:
+        result = auto_operator.run_hourly_lane(db, now=NOW, fetch_intraday=lambda t, d: _overheat_curve())
+    assert mock_exec.call_count == 1, "스위치를 내린 뒤엔 한 건도 더 나가면 안 된다"
+    assert any("킬스위치 OFF" in h["reason"] for h in result["held"])
+
+
+def test_hold_reason_distinguishes_lookup_failure_from_empty_targets(db):
+    """★P2-4: 「조회 실패」와 「조회는 됐는데 집행 대상 0」을 한 문구로 뭉치지 않는다.
+
+    원인도 대응도 다르다(전자는 장애, 후자는 그 그룹에 소재 레버가 없다는 사실). 이 리포는
+    거짓 라벨에 반복해서 데였다 — `ignored`를 「원가 제외 결정」으로 읽었는데 실은 매칭
+    실패였던 건과 같은 모양이다. 라벨이 거짓이면 진단이 통째로 틀어진다.
+    """
+    _seed_multi_ad_group(db, bids=(800,))          # DB는 미연결(source='ad') → 라우팅은 일어난다
+    live_all_group_bid = [{"ad_id": "nad-0", "adgroup_id": "grp-hot", "mall_product_id": "p0",
+                           "use_group_bid_amt": True, "ad_bid_amt": 800, "ad_user_lock": False}]
+    with patch.object(auto_operator, "get_ads", return_value=live_all_group_bid), \
+         patch.object(auto_operator.naver_sa_writer, "_get_adgroup", return_value={"bidAmt": 200}), \
+         patch.object(auto_operator.naver_execution_harness, "execute") as mock_exec:
+        result = auto_operator.run_hourly_lane(db, now=NOW, fetch_intraday=lambda t, d: _overheat_curve())
+    mock_exec.assert_not_called()
+    reasons = [h["reason"] for h in result["held"]]
+    assert any("집행 대상 0" in r for r in reasons), f"실제 사유: {reasons}"
+    assert not any("재조회 실패" in r for r in reasons), "조회는 성공했는데 실패라고 말하면 안 된다"

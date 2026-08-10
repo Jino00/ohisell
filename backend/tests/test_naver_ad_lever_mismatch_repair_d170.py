@@ -213,3 +213,97 @@ def test_router_verdict_flips_from_group_to_ad_after_repair(db):
     assert after["source"] == "ad", "수리 후 라우터는 소재 레버를 가리켜야 한다"
     assert after["max_ad_id"] == "nad-0"      # 800원짜리가 실효
     assert after["effective_bid"] == 800
+
+
+# ══ 적대 리뷰 P1-1 회귀 — write-back이 외부변경 사건을 삼키면 «돈 경로»가 열린다 ═════════
+# 초판은 앵커(ad_edit_tm)만 동결하고 **비교 대상 값 3종**(ad_bid_amt·use_group_bid_amt·
+# ad_user_lock)을 덮었다. 그러면 다음 07:45 sync가 prev_by_ad를 이 행에서 만들 때 이미
+# 라이브와 같아서 `_diff_ops`가 빈 리스트 → `ad_edit` 폴백 → `auto_up_base_bid`의
+# `op_type == "bid_change"` 필터에 안 걸림 → 자동 상향 2.0× 누적 상한의 **기준점 미재설정**.
+# 하필 write-back을 유발하는 divergence의 정체가 `bid_mode_flip`(True→False) 그 자체다.
+
+_AGENCY_EDIT_TM = "2026-08-10T06:00:00.000Z"   # 대행사가 만진 시각(라이브)
+_PREV_EDIT_TM = "2026-08-09T00:00:00.000Z"     # 우리가 마지막으로 관측한 시각(DB 앵커)
+
+
+def _seed_agency_touched_group(db):
+    """대행사가 소재를 2,000→400으로 내리고 그룹입찰 추종을 끈 상태(DB는 아직 옛 관측)."""
+    db.add(NaverAdgroupProduct(
+        adgroup_id=GRP, campaign_id=CAMP, mall_product_id="100", product_name="상품0",
+        ad_id="nad-0", ad_bid_amt=2000, use_group_bid_amt=True, ad_user_lock=False,
+        ad_edit_tm=_PREV_EDIT_TM))
+    db.commit()
+
+
+def _agency_live_ads():
+    return [{"ad_id": "nad-0", "adgroup_id": GRP, "mall_product_id": "100",
+             "product_name": "상품0", "use_group_bid_amt": False, "ad_bid_amt": 400,
+             "ad_user_lock": False, "edit_tm": _AGENCY_EDIT_TM, "apply_tm": None}]
+
+
+def test_writeback_records_agency_change_before_overwriting(db):
+    """★P1-1: 덮기 전에 탐지가 돌아 `bid_change`·`bid_mode_flip`이 원장에 남는다.
+
+    이게 없으면 사건이 `ad_edit`으로 강등돼 «무엇이 바뀌었는지»가 통째로 사라진다.
+    """
+    from app.models import NaverAgencyOp
+
+    _seed_agency_touched_group(db)
+    harness._writeback_live_ad_observation(
+        db, adgroup_id=GRP, ads=_agency_live_ads(), campaign_id=CAMP, now=NOW)
+
+    ops = {o.op_type: (o.before_value, o.after_value)
+           for o in db.query(NaverAgencyOp).filter(NaverAgencyOp.entity_id == "nad-0").all()}
+    assert "bid_change" in ops, f"입찰 하향이 기록돼야 한다(실제: {sorted(ops)})"
+    assert ops["bid_change"] == ("2000", "400")
+    assert "bid_mode_flip" in ops, "레버 생사 플래그 전환이 기록돼야 한다"
+    assert "ad_edit" not in ops, "정체를 아는데 «편집됨»으로 강등하면 안 된다"
+    # 수리도 같이 일어났다(탐지 때문에 write-back이 희생되지 않는다)
+    row = db.query(NaverAdgroupProduct).one()
+    assert (row.use_group_bid_amt, row.ad_bid_amt) == (False, 400)
+
+
+def test_auto_up_cap_baseline_resets_after_writeback(db):
+    """★P1-1의 돈 경로: 기준점이 대행사가 세운 400으로 재설정된다.
+
+    안 되면 `auto_up_base_bid`가 None을 주고 2.0× 누적 상한이 **적용되지 않는다** —
+    codex 3R[P1]이 닫았던 「2,000 기준점에 머물러 400을 4,000까지 되돌림」 구멍의 재개봉.
+    BEP 하한은 부모 그룹 30일 집계라 개별 소재를 못 막으므로 대체 브레이크가 없다.
+    """
+    _seed_agency_touched_group(db)
+    assert harness.auto_up_base_bid(db, "ad", "nad-0", NOW) is None  # 수리 전엔 기준점 없음
+    harness._writeback_live_ad_observation(
+        db, adgroup_id=GRP, ads=_agency_live_ads(), campaign_id=CAMP, now=NOW)
+    assert harness.auto_up_base_bid(db, "ad", "nad-0", NOW) == 400
+
+
+def test_writeback_does_not_overwrite_when_detection_fails(db):
+    """★fail-**closed**는 여기 한 지점뿐이고, 방향이 반대인 이유가 있다.
+
+    수리를 못 하면 「다음 sync까지 절체 지연」(D-NAO-170 이전 상태로 무해 복귀)이지만,
+    탐지를 건너뛰고 덮으면 **대행사 조작 이력이 영구 소실**되고 그건 돈 경로다.
+    덜 고치는 쪽이 잘못 고치는 쪽보다 낫다.
+    """
+    from app.services.naver_ad import ad_external_change
+
+    _seed_agency_touched_group(db)
+    with patch.object(ad_external_change, "run", side_effect=RuntimeError("탐지 장애")):
+        assert harness._writeback_live_ad_observation(
+            db, adgroup_id=GRP, ads=_agency_live_ads(), campaign_id=CAMP, now=NOW) == 0
+    row = db.query(NaverAdgroupProduct).one()
+    assert (row.ad_bid_amt, row.use_group_bid_amt) == (2000, True), "덮이면 안 된다"
+
+
+def test_writeback_rollback_discards_pending_changes(db):
+    """★P2-3: 수리 실패 시 세션의 **미커밋 변경을 버린다**.
+
+    rollback을 빼도 종전 테스트는 통과했다(적대 리뷰 변이 M-F 생존) — 예외를 삼키는 것만
+    봤지 «세션이 어떤 상태로 남는가»를 안 봤기 때문이다. 더러운 세션을 그대로 두면 이후
+    레인의 DB 작업에 이 그룹의 반쯤 쓴 행이 딸려 들어가거나 연쇄로 죽는다.
+    """
+    _seed_agency_touched_group(db)
+    with patch.object(db, "commit", side_effect=RuntimeError("커밋 장애")):
+        assert harness._writeback_live_ad_observation(
+            db, adgroup_id=GRP, ads=_agency_live_ads(), campaign_id=CAMP, now=NOW) == 0
+    assert not db.new and not db.dirty, "미커밋 변경이 세션에 남아 있으면 안 된다"
+    assert db.query(NaverAdgroupProduct).count() == 1  # 세션은 계속 쓸 수 있다
