@@ -1151,6 +1151,42 @@ def sync_coupang_settlement_job():
         db.close()
 
 
+def request_wing_vendor_summary_daily_job():
+    """쿠팡 Wing 판매분석 갱신을 **매일 자동으로 요청**한다 (D-CPP-35, 05:20 KST).
+
+    ★왜 이 잡이 필요한가 (2026-08-10 발견): 판매분석 페처는 2026-07-27부터 «순수 버튼-only»다.
+      그런데 **WING2(오하이테크)는 UI가 요청을 만들지 않는다** — 즉 사람이 누를 버튼조차 없었다.
+      그래서 판매분석 요약축이 07-26 이후 **13일간 멈췄고**, 그 사이 헬스는 `healthy: true`,
+      `refresh-status`는 `green`이었다. 「버튼-only」는 «사람이 매일 누른다»를 전제하는데
+      그 전제가 애초에 성립하지 않는 계정이 있었다.
+      → 요청을 만드는 주체를 사람에서 크론으로 옮긴다. 페처·큐·lease는 그대로 쓴다
+        (새 경로를 만들지 않는다 — 검증된 경로에 트리거만 붙이는 게 실패 표면이 가장 작다).
+
+    ★창(window)을 여기서 정하지 않는다: 요청은 «갱신해라» 신호일 뿐이고 어느 날짜를 받을지는
+      페처 config(vs_days / vi_days)가 정한다. 서버가 창까지 지시하면 두 곳이 진실을 다툰다.
+
+    ★05:20 KST인 이유: 쿠팡 수집 크론대(05:30~06:05)보다 **앞**에 요청을 걸어 두면, Mac이
+      깨어 있는 시간대에 페처가 집어 그날 손익 계산 전에 정본이 들어온다. Mac이 자고 있어도
+      lease 계약이 요청을 살려 두므로(성공 또는 3회 실패까지) 깨어난 뒤에 집는다 — 그래서
+      이 잡은 «성공»을 기다리지 않는다. 요청 set 자체가 이 잡의 산출물이다.
+    """
+    db = _get_own_db_session()
+    try:
+        from app.services.coupang import vendor_summary_sync
+
+        results = []
+        for account_key in ("COUPANG_WING2",):
+            # WING1은 대상이 아니다 — 오픽스 3P는 RG로 이관돼 판매분석 3P가 사실상 비어 있고
+            # (90일 3P 옵션 3개), 옵션축 수집 대상도 아니다. 켜야 할 때 이 튜플만 늘리면 된다.
+            results.append(vendor_summary_sync.request_refresh(db, account_key))
+        log.info("[스케줄러] Wing 판매분석 갱신 요청: %s", results)
+    except Exception as e:
+        log.exception("[스케줄러] request_wing_vendor_summary_daily_job 에러: %s", e)
+        raise
+    finally:
+        db.close()
+
+
 def _coupang_failed(results: list[dict]) -> list[dict]:
     """RG 동기화 결과에서 하드 실패 추출 — config_missing(error)·읽기 실패(read_error) 모두.
 
@@ -1606,6 +1642,8 @@ def _ensure_default_states(db):
         ("sync_coupang_rg_inventory", "40 5 * * *"),
         ("sync_coupang_returns", "45 5 * * *"),
         ("sync_coupang_settlement", "50 5 * * *"),
+        # 판매분석 갱신 요청(D-CPP-35) — 쿠팡 수집대(05:30~) 앞에 걸어 그날 손익 전에 정본이 들어오게.
+        ("request_wing_vendor_summary_daily", "20 5 * * *"),
         ("sync_coupang_rg_orders", "0 */2 * * *"),
         ("sync_coupang_coupons", "0 6 * * *"),
         ("sync_coupang_cs", "5 6 * * *"),
@@ -1912,6 +1950,7 @@ def job_func_for(job_name: str):
         "sync_coupang_products": sync_coupang_products_job,
         "sync_coupang_returns": sync_coupang_returns_job,
         "sync_coupang_settlement": sync_coupang_settlement_job,
+        "request_wing_vendor_summary_daily": request_wing_vendor_summary_daily_job,
         "sync_coupang_rg_sizes": sync_coupang_rg_sizes_job,
         "sync_coupang_rg_inventory": sync_coupang_rg_inventory_job,
         "sync_coupang_rg_orders": sync_coupang_rg_orders_job,

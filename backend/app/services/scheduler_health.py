@@ -58,6 +58,10 @@ WATCHDOG_JOBS: tuple[str, ...] = (
     "sync_coupang_rg_orders",
     "sync_coupang_coupons",
     "sync_coupang_cs",
+    # 판매분석 갱신 요청 트리거(D-CPP-35). ★이 잡이 죽으면 데이터 나이 감시가 «정체»로 울리기까지
+    #   최소 3일이 걸린다 — 원인(요청이 안 걸림)을 바로 보려면 잡 자체도 감시해야 한다.
+    #   첫 주기는 never_succeeded 유예에 걸려 조용하다(등록 직후 헛알림 없음).
+    "request_wing_vendor_summary_daily",
 )
 
 # 에러 요약 최대 길이 — sanitized 한 줄(전체 traceback은 DB에만, codex #12 누출 방지).
@@ -71,11 +75,33 @@ _ERR_SUMMARY_MAX = 200
 #
 # max_age_days=14 근거: RG 정산은 주별(월~일) + ~2일 랙으로 인식된다 → 정상이면 최신 계정 row의
 # recognition_date_to가 9~16일 이내에 들어온다. 14일 = 한 주를 통째로 놓친 것 + 여유(헛알림 방지).
+#
+# ★`source`는 2026-08-10(D-CPP-35)에 추가됐다. 그전엔 아래 조회가 **RG 정산 테이블 한 곳에
+#   하드코딩**돼 있어서, 규칙을 늘릴 수단이 아예 없었다. 그 결과 쿠팡 Wing 판매분석(3P 정본
+#   매출 축)이 **13일 동안 멈췄는데 `healthy: true`**였고 `refresh-status`도 `green`이었다
+#   (07-26까지만 적재 → 08-10 발견). 「감시선이 셋 있다」는 말이 「이 파이프라인을 본다」는
+#   뜻이 아니다 — 판정 목록에 없으면 배너는 아무 말도 하지 않는다.
 DATA_FRESHNESS_RULES: tuple[dict, ...] = (
-    {"name": "rg_settlement_account_rows", "account_key": "COUPANG_WING1", "max_age_days": 14.0,
+    {"source": "rg_settlement", "name": "rg_settlement_account_rows",
+     "account_key": "COUPANG_WING1", "max_age_days": 14.0,
      "impact": "RG 정산비용(오픽스)이 net_profit에서 누락 중"},
-    {"name": "rg_settlement_account_rows", "account_key": "COUPANG_WING2", "max_age_days": 14.0,
+    {"source": "rg_settlement", "name": "rg_settlement_account_rows",
+     "account_key": "COUPANG_WING2", "max_age_days": 14.0,
      "impact": "RG 정산비용(오하이테크)이 net_profit에서 누락 중"},
+    # ── 쿠팡 Wing 판매분석 (D-CPP-35, 2026-08-10 신설) ──
+    # max_age_days=3.0 근거: 두 축 모두 «닫힌 과거일»만 받으므로 수집 직후에도 최신 날짜는
+    #   어제다(age ≈ 1.2일). 일일 트리거(request_wing_vendor_summary_daily, 05:20 KST)가
+    #   정상이면 age는 다음 회차 직전에 최대 ~2.25일에 이른다. 3.0이면 **한 회차를 통째로
+    #   놓쳤을 때 울리고**(2.25 < 3.0 < 3.25) 정상 운영에선 조용하다.
+    # ★WING1은 일부러 제외한다 — 오픽스 3P는 RG로 이관돼 실적이 거의 없고(90일 3P 옵션 3개),
+    #   판매분석 수집도 일일 트리거 대상이 아니다. 넣으면 영구 빨강이 되어 알림 피로가 생기고,
+    #   그건 이 감시선 계열이 실제로 죽는 방식이다(WATCHDOG_COOKIES가 WING1/2를 뺀 것과 같은 이유).
+    {"source": "vendor_summary", "name": "wing_vendor_summary", "account_key": "COUPANG_WING2",
+     "max_age_days": 3.0,
+     "impact": "쿠팡 판매분석 요약축(오하이테크) 정체 — 3P 매출 대조 상대가 낡았다"},
+    {"source": "vendor_item_sales", "name": "wing_vendor_item_sales", "account_key": "COUPANG_WING2",
+     "max_age_days": 3.0,
+     "impact": "쿠팡 판매분석 옵션축(오하이테크) 정체 — 옵션별 3P 매출이 낡은 값으로 구른다"},
 )
 
 # 쿠키 freshness 감시 대상 — 돈에 직결되는 fail-soft 잡의 쿠키만(codex P2: 전체 감시 시 폐기/회전
@@ -171,6 +197,7 @@ def build_health(
     data_snapshots: Iterable[dict] = (),
     disk_snapshots: Iterable[dict] = (),
     cost_drift: dict | None = None,
+    vendor_item_conservation: dict | None = None,
 ) -> dict:
     """워치독 판정 코어(순수: DB/스케줄러 미접촉 — 인자로 받은 스냅샷만 사용).
 
@@ -258,6 +285,13 @@ def build_health(
     # (2026-08-03 ENOSPC 사고: 디스크 포화가 서버를 3시간 40분 마비시켜 자동수집 12개 유실).
     disk_low = evaluate_disk_space(list(disk_snapshots))
 
+    # 판매분석 보존식 어긋남 — 나이가 아니라 **값**을 본다(D-CPP-35).
+    # 신선도 감시와 종류가 다르다: 옵션축이 제때 와도 요약축과 합이 안 맞으면 그건 두 축이
+    # 서로 다른 것을 세고 있다는 뜻이고, 그 상태로 옵션별 손익을 쓰면 조용히 틀린다.
+    # `summary_only`(옵션 수집이 아직 안 온 날)는 여기서 healthy를 깨지 않는다 — 그건 «없음»이고
+    # 신선도 규칙이 이미 본다. 둘을 한 신호로 뭉치면 «아직»이 «틀렸다»로 보인다(교훈 #123).
+    conservation_mismatch = list((vendor_item_conservation or {}).get("mismatch") or [])
+
     # disabled는 정상(노이즈 제외) — healthy 판정에서 무시. 그 외 어떤 비정상이라도 healthy=False.
     healthy = (
         scheduler_running
@@ -271,6 +305,8 @@ def build_health(
         # ★드리프트가 있으면 healthy=False다. 「값이 틀렸다」도 파이프라인 고장으로 센다 —
         #   조용히 이익이 줄어드는 쪽이 잡 하나 죽는 것보다 늦게 발견된다(177건 × 여러 달).
         and not cost_drift
+        # ★보존식 어긋남도 cost_drift와 같은 종류다 — 파이프라인은 살아 있는데 «값»이 틀렸다.
+        and not conservation_mismatch
     )
 
     return {
@@ -287,8 +323,67 @@ def build_health(
         # 드리프트가 없으면 None(키는 항상 있다 — 없는 키와 0건을 프론트가 구분 못 하면
         # «판정 안 함»이 «이상 없음»으로 읽힌다).
         "cost_drift": cost_drift,
+        # 판매분석 두 축의 보존식 대조. 어긋남이 없으면 mismatch=[]이고, 대조 자체를 못 했으면
+        # None이다(키는 항상 있다 — cost_drift와 같은 이유: 없는 키와 0건이 같아 보이면
+        # «판정 안 함»이 «이상 없음»으로 읽힌다).
+        "vendor_item_conservation": vendor_item_conservation,
         "as_of": now.isoformat(),
     }
+
+
+def _latest_for_rule(db, rule: dict):
+    """규칙 하나의 «최신 데이터 시각»을 그 규칙이 가리키는 소스에서 읽는다(I/O, D-CPP-35).
+
+    ★`source` 분기가 없던 시절엔 이 조회가 RG 정산 테이블에 하드코딩돼 있었다 → 규칙을 늘릴
+      수단이 없어 판매분석이 13일 정체를 조용히 통과했다. 새 파이프라인을 감시에 넣는 비용이
+      «분기 한 줄»이어야 실제로 넣게 된다.
+    ★모르는 source는 None을 돌려주지 않고 **예외를 낸다** — None은 `no_data`(즉시 비정상)로
+      해석되므로, 오타 하나가 «한 번도 수집 안 됨»이라는 거짓 경보로 나타난다. 호출부의
+      try/except가 데이터 감시만 강등하고 로그를 남긴다.
+    """
+    # ★`func`는 여기서 임포트한다 — 호출부(compute_scheduler_health)의 지연 임포트에 의존하면
+    #   `NameError`가 나고, 그건 호출부 try/except가 삼켜 **data_stale 감시가 통째로 사라진다**
+    #   (실제로 이 커밋 작성 중 그 상태였다. 규칙 존재를 단언하는 테스트만이 그걸 잡았다).
+    from sqlalchemy import func  # noqa: PLC0415 — 지연 임포트(순수 코어 테스트용)
+
+    source = rule.get("source", "rg_settlement")
+    if source == "rg_settlement":
+        from app.models import CoupangRgSettlementFee  # noqa: PLC0415
+
+        # RG 정산은 계정 row(vendor_item_id='' sentinel)의 recognition_date_to가 진도 지표다.
+        return (
+            db.query(func.max(CoupangRgSettlementFee.recognition_date_to))
+            .filter(
+                CoupangRgSettlementFee.account_key == rule["account_key"],
+                CoupangRgSettlementFee.vendor_item_id == "",
+            )
+            .scalar()
+        )
+    if source == "vendor_summary":
+        from app.models import CoupangVendorSummaryDaily  # noqa: PLC0415 — 지연 임포트(순수 코어 테스트용)
+
+        return (
+            db.query(func.max(CoupangVendorSummaryDaily.summary_date))
+            .filter(CoupangVendorSummaryDaily.account_key == rule["account_key"])
+            .scalar()
+        )
+    if source == "vendor_item_sales":
+        from app.models import CoupangVendorItemSalesDaily  # noqa: PLC0415
+
+        return (
+            db.query(func.max(CoupangVendorItemSalesDaily.sale_date))
+            .filter(CoupangVendorItemSalesDaily.account_key == rule["account_key"])
+            .scalar()
+        )
+    raise ValueError(f"알 수 없는 data freshness source: {source!r}")
+
+
+# 보존식 대조 창 — 옵션축 신선도 임계(3일)보다 넉넉히 잡아 «어제 하루»만 보고 지나치지 않게 한다.
+# 14일이면 한 회차 실패로 생긴 구멍이 다음 회차에 메워지는지까지 같은 창 안에서 보인다.
+CONSERVATION_WINDOW_DAYS = 14
+# 보존식을 볼 계정 — 옵션축을 수집하는 계정만. WING1은 옵션축 자체가 없으므로 대조 대상이 아니다
+# (넣으면 `summary_only`가 매일 쌓여 노이즈가 된다).
+CONSERVATION_ACCOUNTS: tuple[str, ...] = ("COUPANG_WING2",)
 
 
 def compute_scheduler_health(db, scheduler, now: datetime) -> dict:
@@ -328,14 +423,7 @@ def compute_scheduler_health(db, scheduler, now: datetime) -> dict:
     data_snapshots: list[dict] = []
     try:
         for rule in DATA_FRESHNESS_RULES:
-            latest = (
-                db.query(func.max(CoupangRgSettlementFee.recognition_date_to))
-                .filter(
-                    CoupangRgSettlementFee.account_key == rule["account_key"],
-                    CoupangRgSettlementFee.vendor_item_id == "",
-                )
-                .scalar()
-            )
+            latest = _latest_for_rule(db, rule)
             data_snapshots.append({
                 "name": rule["name"],
                 "account_key": rule["account_key"],
@@ -401,8 +489,36 @@ def compute_scheduler_health(db, scheduler, now: datetime) -> dict:
         log.exception("[워치독] 원가 정본 대조 실패 — cost_drift 감시만 생략(헬스 API는 유지)")
         cost_drift = None
 
+    # 판매분석 보존식 — Σ옵션 GMV == 요약축 GMV (D-CPP-35).
+    # ★try/except: 위 셋(데이터 나이·디스크·원가)과 같은 이유 — 이 조회가 실패해도 헬스 API
+    #   전체를 죽이면 안 된다(워치독 침묵 = 이 계열 사고가 막으려는 바로 그 실패).
+    vendor_item_conservation: dict | None = None
+    try:
+        from datetime import timedelta  # noqa: PLC0415 — 지연 임포트(순수 코어 테스트용)
+
+        from app.services.coupang import vendor_item_sales_sync as _vis  # noqa: PLC0415
+
+        end = now.date()
+        start = end - timedelta(days=CONSERVATION_WINDOW_DAYS)
+        checks = [_vis.conservation_check(db, ak, start, end) for ak in CONSERVATION_ACCOUNTS]
+        vendor_item_conservation = {
+            "window": {"start": start.isoformat(), "end": end.isoformat()},
+            "compared": sum(c["compared"] for c in checks),
+            # 계정별 항목에 account_key가 이미 들어 있으므로 평탄화해도 출처를 잃지 않는다.
+            "mismatch": [m for c in checks for m in
+                         ({**m, "account_key": c["account_key"]} for m in c["mismatch"])],
+            "summary_only": [m for c in checks for m in
+                             ({**m, "account_key": c["account_key"]} for m in c["summary_only"])],
+            "option_only": [m for c in checks for m in
+                            ({**m, "account_key": c["account_key"]} for m in c["option_only"])],
+        }
+    except Exception:
+        log.exception("[워치독] 판매분석 보존식 대조 실패 — 이 감시만 생략(헬스 API는 유지)")
+        vendor_item_conservation = None
+
     return build_health(
         WATCHDOG_JOBS, states, registered, running, now,
         cookies=cookies, data_snapshots=data_snapshots, disk_snapshots=disk_snapshots,
         cost_drift=cost_drift,
+        vendor_item_conservation=vendor_item_conservation,
     )
