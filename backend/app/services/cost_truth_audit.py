@@ -100,6 +100,65 @@ def count_verdicts(rows: list[dict]) -> dict[str, int]:
             for v in ("ok", "buffered", "undetermined")}
 
 
+# ── 유입 차단 (2026-08-10, D-CPP-35) ─────────────────────────────────────────
+#
+# 위의 것들은 **탐지**다 — 이미 DB에 들어간 값을 본다. 아래 둘은 **예방**이다:
+# 엑셀 업로드가 버퍼 값을 쓰기 **전에** 가른다.
+#
+# 왜 탐지만으로 부족한가: 옛 매핑 엑셀(v3)을 올리면 177건이 통째로 되돌아오고,
+# 배너는 «되돌아간 뒤에» 켜진다. 그 사이 손익은 과소 계상된 채로 조회된다.
+# D-CPP-34가 버퍼를 «단순 오류·재입력 금지»로 확정했으므로, 재입력은 경고가 아니라 **거부**다.
+
+
+def try_load_truth(path: pathlib.Path | str | None = None) -> dict | None:
+    """정본 스냅샷을 읽되 **못 읽으면 None**(예외를 올리지 않는다).
+
+    ★가드가 업로드를 «검사기 부재»로 막지 않게 하려는 것이다(fail-soft). 대신 부르는 쪽은
+      응답에 «검사 못 했다»를 반드시 남겨야 한다 — 조용히 통과시키면 «검사해서 깨끗함»과
+      «검사 자체를 안 함»이 같은 모양이 된다(교훈 #123이 반복해 당한 형태).
+    """
+    try:
+        return load_truth(path)
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def screen_cost(cost, truth: dict | None) -> dict | None:
+    """업로드 유입값 1건을 사전 검사한다. **버퍼면 사유 dict, 아니면 None.**
+
+    None을 «통과»로 쓰는 이유는 `summarize_drift`와 같다 — 문제가 없을 땐 아무 말도 안 한다.
+    `truth`가 None(스냅샷 부재)이면 판정하지 않는다(전건 통과).
+
+    ★`ok`도 `undetermined`도 막지 않는다. 이 가드가 답할 수 있는 것은 «이 값이 정본 + 알려진
+      버퍼인가»뿐이고(모듈 헤더), 그 밖의 값을 막으면 근거 없이 업로드를 깨뜨린다.
+    """
+    if truth is None:
+        return None
+    try:
+        c = round(float(cost), 1)
+    except (TypeError, ValueError):
+        return None  # 값 파싱은 부르는 쪽의 책임 — 여기서 판정 실패를 «버퍼»로 만들지 않는다
+    verdict, info = classify(c, truth)
+    if verdict != "buffered":
+        return None
+    return {
+        "cost": c,
+        "truth": info["truth"],
+        "buffer": info["buffer"],
+        "buffer_label": info["buffer_label"],
+        "truth_item": info["truth_item"],
+    }
+
+
+def screen_reason(row_label: str, hit: dict) -> str:
+    """차단 사유 한 줄. 사람이 엑셀을 고칠 수 있게 **정본 값을 같이 준다.**"""
+    return (
+        f"{row_label}: 원가 {hit['cost']}가 정본 {hit['truth']} + 버퍼 {hit['buffer']}"
+        f"({hit['buffer_label']}) — 버퍼는 재입력 금지(D-CPP-34)라 이 값을 쓰지 않았다. "
+        f"정본 항목: {hit['truth_item']}"
+    )
+
+
 def summarize_drift(rows: list[dict], truth: dict, sample: int = 3) -> dict | None:
     """드리프트 요약. **드리프트가 없으면 None** — 배너가 «없을 땐 아무 말도 안 하게».
 
