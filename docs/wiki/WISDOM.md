@@ -13,14 +13,14 @@
 | [[green-does-not-mean-verified]] | `test` | 발견 0건과 실행 안 됨은 같은 숫자로 보인다. 변이 베이스라인·체크 0건 거부 |
 | [[grain-mismatch-leaks-money]] | `test` | 그레인이 갈라지면 그 사이로 돈이 샌다. 합계 일치는 정합의 증거가 아니다 |
 | [[unknown-must-not-read-as-zero]] | `discriminator` | 「모름」을 「0」으로 읽으면 **항상 이익을 부풀리는 방향**이라 조용하다 |
+| [[prove-the-guard-catches-this-input]] | `test` | 가드는 **사고 입력**과 **정상 입력 전수** 양쪽으로 돌린다 — 전자는 «잡는가», 후자는 «안 깨뜨리는가» |
+| [[write-to-the-binding-layer]] | `discriminator` | 쓰기 전에 **실효 레이어를 데이터에서 판별**한다. API 200 ≠ 옥션 반영 |
 
-## 패턴 (미처분 = 지식 부채, `enforcement: none`) ⚠️ **3건**
+## 패턴 (미처분 = 지식 부채, `enforcement: none`) ⚠️ **1건**
 
 | 패턴 | 부채 내용 | 처분 예정 |
 |---|---|---|
-| [[write-to-the-binding-layer]] | 쓰기가 실효 레이어에 닿는지 코드가 판별 안 함 — **PAO 집행 59건 옥션 무접촉** | **B-4** (`use_group_bid_amt` 판별자) |
 | [[claimed-vs-wired-is-the-default-state]] | 「기록된 지식 중 코드가 안 읽는 것」 대조가 절차에 없음 | 주간 감사 §3 (이번에 신설) |
-| [[prove-the-guard-catches-this-input]] | 가드를 «사고 입력»으로 돌려 보는 절차 없음 — 지금은 적대 리뷰의 사후 발견에 의존 | 가드 PR에 사고-입력 테스트 의무화 |
 
 ## 승격 대상 (처분은 됐으나 약함) ⚠️ **1건**
 
