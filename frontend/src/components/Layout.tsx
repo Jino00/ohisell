@@ -20,6 +20,7 @@ import { runStreamsRefresh, describeOutcome, specsForKeys } from "../lib/streamR
 //  - COUPANG_ADS1 쿠키 항목은 제외(쿠팡 광고비 배너가 전담) → 제외 후 0개면 null.
 //  - disabled 버킷은 정상(의도적 비활성)이므로 문제로 세지 않음.
 //  - scheduler_running===false는 최우선 표기.
+//  - cost_drift(원가 정본 어긋남)는 count>0일 때만 — null/0이면 아무 말도 안 한다.
 // 반환: summary=" · "로 이은 한 줄(배너 truncate용), detail=줄바꿈 목록(title 호버용).
 export function buildPipelineHealthBanner(
   health: SchedulerHealth,
@@ -53,7 +54,36 @@ export function buildPipelineHealthBanner(
     parts.push(`${d.impact}${days}`);
   }
 
-  // 4) 잡 문제 (disabled 제외 — 정상)
+  // 4) 원가 정본 드리프트 — `product_master.cost_price`가 «원가표 정본 + 알려진 버퍼»
+  //    ★다른 항목과 종류가 다르다: 나머지는 «파이프라인이 멈췄다», 이건 «값이 틀렸다».
+  //      멈춤은 화면이 비어서 티가 나지만 이건 **아무 데도 안 뜬다** — 2026-08-10까지
+  //      177건이 그렇게 남아 이익을 과소 계상시켰다(전 채널 90일 1,012,405원).
+  //    ★건수만 쓰고 «판정 불가»는 안 쓴다 — 배너는 한 줄이라 셋을 다 넣으면 오히려
+  //      드리프트가 묻힌다. 셋 다 보려면 API 응답(cost_drift)이나 CLI를 본다.
+  if (health.cost_drift && health.cost_drift.count > 0) {
+    const d = health.cost_drift;
+    // 버퍼 라벨을 많은 순으로 붙인다 — 어느 계열이 되돌아왔는지가 원인 추정의 첫 단서다.
+    const which = Object.entries(d.by_buffer)
+      .map(([label, n]) => `${label} ${n}건`)
+      .join(", ");
+    parts.push(
+      `원가가 정본과 다름 ${d.count}건${which ? ` (${which})` : ""}` +
+        " — 옛 매핑 엑셀 업로드 의심",
+    );
+  }
+
+  // 5) 디스크 여유 — ★2026-08-10까지 **분기가 아예 없었다**(Jino 승인 후 추가).
+  //    백엔드는 `disk_low`로 healthy=false를 만드는데 여기에 분기가 없어서, 디스크만
+  //    문제인 상태에선 parts가 비어 배너가 **통째로 숨었다**. 실제로 그 상태였다 —
+  //    2026-08-10 prod 실측: 사용률 93.8%(여유 5.9GB)로 healthy=false인데 화면은 조용했다.
+  //    ★2026-08-03 ENOSPC 사고(디스크 포화로 서버 3시간 40분 마비, 자동수집 12개 유실)를
+  //      막으려고 만든 «유일한 사전 신호»가 화면까지 이어지지 않은 채 있었다.
+  //    ★백엔드가 준 impact 라벨을 그대로 쓴다(판정도 문구도 백엔드가 정본).
+  for (const d of health.disk_low ?? []) {
+    parts.push(`디스크 여유 부족 ${d.used_percent.toFixed(1)}% — ${d.impact}`);
+  }
+
+  // 6) 잡 문제 (disabled 제외 — 정상)
   const jobNames: string[] = [
     ...(health.failed ?? []).map((j) => j.job_name),
     ...(health.stale ?? []).map((j) => j.job_name),

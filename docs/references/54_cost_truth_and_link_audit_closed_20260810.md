@@ -2,7 +2,7 @@
 
 > 트랙: 쿠팡 손익 정합 · **D-CPP-30** · 선행 D-CPP-27(ref 52 링크 감사)·D-CPP-25(값/링크 층 분리)
 > 산출물: `scripts/audit_cost_buffer.py`(읽기 전용 검사기) · `backend/tests/test_cost_buffer_audit.py`(19건) ·
-> `docs/references/data/cost_truth_20260807.json`(정본 스냅샷 69항목) · 이 문서
+> `backend/app/data/cost_truth_20260807.json`(정본 스냅샷 69항목) · 이 문서
 > ⚠️ 이 세션은 **prod 데이터를 바꿨다**(코드 아님). 변경 목록과 되돌리는 법은 §6에 있다.
 
 ## 0. 한 줄 결론
@@ -161,8 +161,8 @@ done < /home/ubuntu/ohisell/backups/costbuffer_before_20260810_122857.csv
 5. **정본 파서를 섹션별 원가 열로 넓히기** — 지금은 D열만 본다. 케이스·오타오는 I·C·E열이라
    판정 불가 459건 중 **최소 75건이 대조 가능한데도 「모름」**이다(§2). 넓히면 100원 컷오프도
    필요 없어진다(컷오프는 D열에 CNY/USD 단가가 섞여 생긴 것이다).
-6. **검사기를 크론·CI에 배선** — `exit 1`을 낼 줄 알지만 **아무도 안 부른다.** 재발 방지의
-   실효는 배선 후에 생긴다.
+6. ~~**검사기를 크론·CI에 배선**~~ — ✅ **2026-08-10 종결(§9)**. 크론이 아니라 **앱 안**으로
+   넣었다. 이유는 §9에.
 
 ## 8. 재발 방지 — `scripts/audit_cost_buffer.py`
 
@@ -192,3 +192,122 @@ python3 scripts/audit_cost_buffer.py --db /home/ubuntu/ohisell/backend/ohisell.d
 ★그리고 내 1라운드 변이 실행에 **거짓 KILL**이 있었다 — `mode=ro` 문자열만 바꾸니 `uri=True`가
 남아 연결 자체가 깨져서 «죽었다»고 나온 것이지 읽기 전용이 지켜져서가 아니었다.
 변이는 **의도한 결함 하나만** 주입해야 한다(교훈 #207).
+
+## 9. ★배선 — 검사기를 «부르는 사람»을 만들었다 (2026-08-10 오후, §7-6 종결)
+
+§8의 검사기는 완성된 채로 **아무도 안 불렀다.** 그 상태는 검사기가 없는 것과 관측상 같다.
+
+### 크론이 아니라 앱 안에 넣은 이유
+
+prod 크론을 실측했더니(2026-08-10) 기존 ohisell 잡 셋 중 **둘이 출력을 `/dev/null`로 버리고**
+있었다(`run_mop_activation.sh`·`run_mop_keyword.sh`). 나머지 하나는 로그 파일에 append한다.
+즉 크론 + 로그는 **「아무도 안 부른다」를 「아무도 안 읽는다」로 옮길 뿐**이다.
+게다가 prod엔 **git 체크아웃도 `docs/` 디렉터리도 없어서**(실측) 스크립트와 스냅샷을 그 경로로
+배포할 수단 자체가 없었다.
+
+그래서 판정을 **요청 시점 계산**으로 옮겼다:
+
+```
+product_master → compute_scheduler_health → build_health
+              → GET /api/scheduler/health (`cost_drift`) → 전역 파이프라인 헬스 배너
+```
+
+이러면 «검사가 언제 돌았나 / 결과가 낡았나»라는 질문이 **아예 없어진다.** 크론 결과 파일은
+그 자체가 낡을 수 있고, 낡은 것과 «이상 없음»은 또 같은 모양이다(교훈 #123의 재판).
+
+### 구성
+
+| 파일 | 역할 |
+|---|---|
+| `backend/app/services/cost_truth_audit.py` | **순수 판정 SA** — `load_truth`/`classify`/`summarize_drift`. DB·SQLAlchemy 미임포트 |
+| `backend/app/data/cost_truth_20260807.json` | 정본 스냅샷(**이사함** — `docs/`는 prod에 없어 배포 불가였다) |
+| `scheduler_health.py` | I/O 경계에서 `product_master` 조회 → 판정 → `cost_drift` 주입. **fail-soft**(실패해도 헬스 API는 산다) |
+| `Layout.tsx` `buildPipelineHealthBanner` | 배너 문구. `count>0`일 때만 — 0건은 아무 말도 안 한다 |
+| `scripts/audit_cost_buffer.py` | CLI 유지. 이제 위 순수 SA를 **임포트**한다(사본 두 벌 금지) |
+
+★**산술은 한 벌**이다. 사본을 두면 한쪽만 고쳐져 «감시자가 감시 대상보다 낡는» 형태가 된다.
+
+### 알고 감수한 것
+
+- **드리프트 0건과 «스냅샷이 없어 판정 못 함»이 응답상 같다**(둘 다 `cost_drift: null`).
+  fail-soft가 헬스 API 전체를 살리는 대가다. 로그가 유일한 구분자다.
+- **원가 0원은 드리프트가 아니다.** 이 스키마에서 `cost_price`는 `nullable=False, default=0`이라
+  «원가 미입력»이 0원으로 들어온다 → `undetermined`로 센다. 0원을 드리프트에 합치면 배너가
+  상시 켜져 **진짜 복귀를 가린다.** 원가 미입력은 별개 문제다.
+- **배너는 한 줄이라 건수 + 버퍼 계열만** 쓴다. 세 갈래 전부를 보려면 API 응답이나 CLI를 본다.
+
+### ⚠️ 배포 체크리스트 — 스냅샷을 빠뜨리면 **조용히 무장해제된다**
+
+`backend/app/data/cost_truth_20260807.json`을 배포 목록에서 빠뜨리면 fail-soft가 `None`을 내고
+화면은 초록이다(적대 리뷰 P2). **로그가 유일한 구분자다.** 배포 시 항상 같이 올린다:
+
+```bash
+scripts/safe_deploy.sh \
+  backend/app/data/cost_truth_20260807.json \
+  backend/app/services/cost_truth_audit.py \
+  backend/app/services/scheduler_health.py \
+  backend/app/schemas.py --restart
+```
+
+⚠️ **프론트도 같이 배포한다** — 백엔드만 올리면 `cost_drift`를 **주기만 하고 아무도 안 그린다**
+(2R 적대 리뷰 P2-2). 배너는 프론트 전용 변경이다:
+
+```bash
+(cd frontend && npm run build) && scripts/safe_deploy.sh --frontend
+```
+
+### ★★1라운드 적대 리뷰가 잡은 것 — 배선을 만들면서 **HTTP 경계에서 스스로 끊었다**
+
+**P1-1**: 라우터가 `response_model=SchedulerHealthOut`인데 그 스키마에 `cost_drift`가 없어
+**FastAPI가 응답에서 조용히 지웠다.** 서비스층 dict엔 있고 HTTP body엔 없다. 프론트에 그
+실제 body를 먹이면 배너가 `null`을 반환한다 — 즉 **드리프트가 있어도 화면은 「이상 없음」**.
+
+★내 배선 테스트 6건이 **하나도 안 죽었다.** `compute_scheduler_health`의 dict까지만 보고
+경계를 한 번도 안 넘었기 때문이다. 그 파일 헤더가 인용한 교훈 #208(«도구의 값어치는 경계층에
+있는데 순수 함수만 촘촘히 물리면 통과하는데 아무것도 안 지키는 테스트가 된다»)을
+**그 파일 자신이 재현했다.**
+
+수정은 스키마 한 줄이 아니라 **TestClient로 실제 라우트를 호출해 body를 단언하는 테스트**와
+짝이다. 그게 없으면 다음 사람이 같은 자리에서 같은 방식으로 다시 끊는다.
+
+**P2 처분**:
+
+| 지적 | 처분 |
+|---|---|
+| M19 — 드리프트 1건만 시드해 `count` 상수화가 안 잡힘 | **채택** — 3건·2계열 시드로 교체, 변이 KILLED 확인 |
+| M17 — try/except가 넓어져 진짜 버그를 삼켜도 안 잡힘 | **채택** — 라우트 테스트가 덮는다, 변이 KILLED 확인 |
+| M04 — `isnot(None)` 필터 제거가 안 잡힘 | **채택(형태 변경)** — 실측하니 prod DDL이 `NOT NULL`이라 **그 상태를 만들 수 없다.** «전제가 바뀌면 우는» 가드로 대체(§아래) |
+| M09 — `round(float(cp),1)` 제거가 안 잡힘 | **기각** — 원가는 소수 1자리로만 저장된다(정본·마스터 모두). 무해 |
+| 스냅샷 배포 누락 = 조용한 무장해제 | **채택** — 위 체크리스트 |
+| 캐시 없음(매 요청 파일 재파싱 + 949행 스캔) | **기각** — 실측 13ms(최악 26ms) · 폴링 5분. 캐시가 오히려 «낡은 판정» 문제를 새로 만든다 |
+| `disk_low` 침묵 경로 | **채택** — 처음엔 이월로 적었으나 **Jino 승인 후 같은 커밋에 동봉**했다(§9-1). prod에서 실재하는 침묵이었다 |
+
+★**M04는 «테스트가 부족»이 아니라 «그 상태를 만들 수 없다»였다.** 지워도 안 죽는 코드를
+남길 땐 «검증했다»고 말하지 않고, **전제가 바뀌는 순간 우는 가드**를 옆에 둔다.
+
+### 검증
+
+- 배선 테스트(`backend/tests/test_cost_drift_wiring.py`) **10건** — 순수 2 · 실 DB 배선 5 · **HTTP 경계 2** · 휴면 가드 1
+- 배너 테스트 5건(0건 침묵 · null 하위호환 · 판정불가 미혼입 · 타 항목과 공존)
+- 2R 변이 확인: 스키마 필드 제거 **KILLED**(2건이 잡음) · M17 **KILLED** · M19 **KILLED**
+- 라이브 합격기준·실측은 **§9-2**
+
+### 9-1. `disk_low` 침묵도 같이 고쳤다 (Jino 승인)
+
+이 PR을 만들다 **prod가 지금 `healthy=false`인데 배너가 침묵한다**는 것을 발견했다.
+원인: `build_health`는 `disk_low`로 `healthy=false`를 만드는데 `buildPipelineHealthBanner`에
+**분기가 아예 없었고**, 프론트 타입에도 `disk_low`가 없었다.
+
+**2026-08-10 prod 실측**: 사용률 **93.8%**(여유 5.9GB, 경고선 85%) → `healthy=false` → 화면 조용.
+2026-08-03 ENOSPC 사고(디스크 포화로 서버 3시간 40분 마비, 자동수집 12개 유실)를 막으려고
+만든 **유일한 사전 신호**가 화면까지 이어지지 않은 채 있었다.
+
+★내가 고치던 함수가 바로 그 함수라 같은 커밋에 넣었다(Jino 승인). 변이(분기 삭제 = 종전 상태)
+로 KILL 확인.
+
+### 9-2. 라이브 합격기준
+
+1. prod `/api/scheduler/health` 응답에 **`cost_drift` 키가 실재**하고, 지금은 `null`
+2. 버퍼가 얹힌 값이 있으면 잡힌다(재현)
+3. 드리프트 0건이면 배너에 원가 문구가 **안 뜬다**
+4. `disk_low` 문구는 **뜬다**(93.8%) — 종전엔 안 떴다
