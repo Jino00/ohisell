@@ -1027,3 +1027,42 @@ def test_b4_runs_after_validation_so_bad_bid_costs_no_api_call():
 
     mock_ads.assert_not_called()
     mock_put.assert_not_called()
+
+
+# ── D-NAO-170: 거부는 «데이터 수리 신호»다 — 관측을 실어 보낸다 ──────────────────
+# D-NAO-166은 거부하면서 손에 쥔 정답(라이브 소재 목록)을 **버렸다.** 그래서 라우터(DB 파생)와
+# 가드(라이브)가 갈라진 그룹은 회차마다 같은 거부만 반복했다. 예외에 관측을 실으면 상위가
+# 그걸 DB에 되돌려 써서, 다음 회차에 **기존 라우터가 스스로** 소재로 절체한다.
+
+
+def test_b4_rejection_carries_live_ad_observation():
+    """거부 예외가 adgroup_id와 라이브 소재 목록을 **실어 나른다**(추가 API 콜 0).
+
+    이게 없으면 상위는 「무엇을 고쳐야 하는지」를 알기 위해 같은 조회를 다시 해야 하고,
+    그러면 수리 경로가 조회 장애에 다시 노출된다.
+    """
+    ads = [
+        {"ad_id": "nad-1", "adgroup_id": ADGROUP_ID, "mall_product_id": "111",
+         "use_group_bid_amt": False, "ad_bid_amt": 800, "ad_user_lock": False},
+        {"ad_id": "nad-2", "adgroup_id": ADGROUP_ID, "mall_product_id": "222",
+         "use_group_bid_amt": False, "ad_bid_amt": 500, "ad_user_lock": False},
+    ]
+    with patch.object(writer.fetcher, "get_ads", return_value=ads) as mock_get_ads, \
+         patch.object(writer.fetcher, "_get", return_value=_adgroup_bid_resp()), \
+         patch.object(writer.requests, "put") as mock_put:
+        with pytest.raises(writer.GroupBidDeadError) as exc:
+            writer.update_adgroup_bid(ADGROUP_ID, 2590)
+
+    assert exc.value.adgroup_id == ADGROUP_ID
+    assert exc.value.ads == ads
+    mock_get_ads.assert_called_once()  # ★관측 재조회 없음 — 판별에 쓴 응답 그대로 싣는다
+    mock_put.assert_not_called()
+
+
+def test_group_bid_dead_error_is_a_write_validation_error():
+    """기존 호출부 호환 — `WriteValidationError`로 잡던 코드가 그대로 잡아야 한다.
+
+    새 예외 타입을 만들면서 상위의 except를 «조용히 통과»하게 만들면, 막으려던 쓰기가
+    실패로 기록되지 않고 다른 경로로 샌다.
+    """
+    assert issubclass(writer.GroupBidDeadError, WriteValidationError)

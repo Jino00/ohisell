@@ -168,6 +168,18 @@ emit() {
 - [ ] 기록된 지식 중 **관련 코드가 읽지 않는 것**이 새로 보이는가?
 - [ ] 새 쓰기 경로가 **실효 레이어**에 닿는지 확인했나? (`write-to-the-binding-layer`)
 - [ ] 새로 넣은 가드를 **사고 입력으로 돌려** 봤나? (`prove-the-guard-catches-this-input`)
+- [ ] **`[LEVER_MISMATCH]` 건수**(D-NAO-170) — 0이 아니면 「라우터 입력이 낡았다」가 아니라
+      **수리 루프 자체가 고장 났다**는 뜻이다(수리가 됐으면 다음 회차에 절체돼 안 나와야 한다).
+      같은 adgroup이 2회차 이상 반복되면 그게 신호다. 이 스크립트는 파일만 보므로 직접 돌린다:
+
+      ssh sellc.ohitech.co.kr "cd /home/ubuntu/ohisell/backend && sqlite3 -header -column ohisell.db \"
+        SELECT entity_id AS adgroup, COUNT(*) n, MIN(date(changed_at)) f, MAX(date(changed_at)) t
+        FROM naver_change_log
+        -- ★SQLite의 now()는 UTC인데 changed_at은 KST다([[sqlite-server-default-now-is-utc]]).
+        --   보정 없이 쓰면 창이 9시간 밀린다.
+        WHERE rationale LIKE '%[LEVER_MISMATCH]%'
+          AND changed_at >= datetime('now','+9 hours','-7 day')
+        GROUP BY entity_id ORDER BY n DESC;\""
 
 발견 → 그 표에 행으로 추가. **추가 자체가 이 주의 산출물이다.**
 
