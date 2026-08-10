@@ -11,7 +11,7 @@
 - prod python: `/home/ubuntu/ohisell/backend/.venv/bin/python3` (cwd=backend, `sys.path.insert(0, ".../backend")`)
 - **★prod 임시 스크립트는 `from app.database import SessionLocal`을 반드시 넣을 것**(`.env` 로드 — 없으면 네이버 API 서명이 빈 문자열 → 403)
 - 배포 `scripts/safe_deploy.sh` · 병합 `scripts/safe_merge.sh` · 번호 `scripts/next_ids.sh`(정규식 수리 완료, 정상 동작 확인)
-- 테스트: `cd backend && python3 -m pytest -q` (현재 **5124 passed**, 약 2분 50초)
+- 테스트: `cd backend && python3 -m pytest -q` (현재 **5132 passed**, 약 2분 50초)
 
 ## 2. 이번 세션 완료 목록 (전부 push 완료)
 - ✅ **D-NAO-164** 쓰기 레이어 오배선 «발견» + 교훈 #202 — 커밋 `883b07f`
@@ -35,7 +35,8 @@
 |------|------|
 | `docs/wiki/WISDOM.md` | **★먼저 열 것** — 패턴 인덱스 + 지식 부채 목록 |
 | `docs/wiki/AUDIT_PROTOCOL.md` | 주간 지혜 감사 절차. §3(기록↔배선 대조)이 핵심 |
-| `scripts/wisdom_audit.sh` | 감사 기계 수집분. crontab 월 09:00 등록됨 |
+| `scripts/wisdom_audit.sh` | 감사 기계 수집분. crontab 월 09:00 등록됨. **§2-b 인덱스↔파일 표류 검사 포함** |
+| `backend/app/models.py` | `KNOWN_CHANGE_LOG_ACTIONS` + `_validate_change_log`(before_insert) — B-1 가드 |
 | `scripts/setup_obsidian.sh` | **볼트 열기 «전에»** 실행 필수(163,106 파일 → 437) |
 | `backend/app/services/naver_ad/naver_sa_writer.py` | `_reject_if_group_bid_is_dead`(:588) — B-4 가드 |
 | `backend/app/services/naver_ad/bep_calculator.py` | `_avg_qty_and_logistics`(:266) — D-NAO-168 수정 지점 |
@@ -63,12 +64,12 @@
 
 ## 6. 다음에 할 작업 (미완료)
 
-### 🔴 A. 계약 목표 잔여 — 1클릭
-- [ ] **옵시디언 볼트 등록** — 합격기준 ① 유일한 미충족. `obsidian://` URL은 기등록 볼트만 열어 자동화 불가.
-  ```bash
-  scripts/setup_obsidian.sh && open -a Obsidian
-  ```
-  → Open folder as vault → `Ohiselling` → `docs/wiki/WISDOM.md`
+### ✅ A. 계약 목표 — **합격기준 4/4 충족, 완료**
+- [x] 옵시디언 볼트 등록 — `obsidian.json`에 직접 등록 후 재시작. **그래프 렌더링 라이브 관측**
+  (`TRACKS` 허브에 `track_coupang-*` 다수 연결). UI 자동화는 Return을 못 넘겨 실패했고
+  **설정 파일 등록이 확실**하다(「폴더를 볼트로 열기」가 하는 일이 정확히 그것).
+  ⚠️ `obsidian://open?path=`는 **미등록 볼트에 "Vault not found"** · 앱 실행 중 `obsidian.json`을
+  고치면 **메모리 설정이 이겨서** 재시작이 필요하다.
 
 ### 🟣 B. Jino 결정 대기 (기술 아님)
 - [ ] **★오늘출발 무료배송** — 매출 **62.3%**(2,892만원), 30일 **−328만원**(순물류 손실의 92.5%). 손익분기 **주문 21.8% 감소**. **1순위 시험 후보 23종 선정 완료**(월 127만원 회수, 유료 수요 20%+ 실증). 권장: 3~5종 2주 시험. → [[shipping-fee-today-free-vs-nbaesong-paid]]
@@ -78,8 +79,11 @@
 
 ### 🔵 C. 기술 부채
 - [ ] **B-4의 나머지 절반** — 지금은 잘못된 레이어를 **막기만** 하고 올바른 레이어(소재)로 **보내지 않는다.** `update_ad_bid`는 이미 있으나 **그룹 1개 = 소재 N개라 스텝·쿨다운·일일상한 의미가 바뀐다** → 설계 결정 필요.
-- [ ] **지식 부채 3건**(`docs/wiki/WISDOM.md`): `claimed-vs-wired-is-the-default-state` · `prove-the-guard-catches-this-input` · 승격 대상 `read-external-values-before-writing`(4회 재발인데 `principle`뿐).
-- [ ] **B-1 `change_log` 쓰기 가드** — action/값 + **`changed_at` KST 규약**까지 검사(Jino "무조건 KST").
+- [x] ~~**B-1 `change_log` 쓰기 가드**~~ — **완료(D-NAO-169)**. 단 **prod 미활성**(§5 첫 항목).
+- [ ] **지식 부채 1건**(`docs/wiki/WISDOM.md`): `claimed-vs-wired-is-the-default-state`(주간 감사 §3이
+  처분 예정) · 별도 **승격 대상** `read-external-values-before-writing`(4회 재발인데 `principle`뿐 —
+  번호 예약/중복 거부 훅으로 승격 필요).
+  ★`prove-the-guard-catches-this-input`은 **D-NAO-169로 처분됨**(`enforcement: test`).
 - [ ] **B-2 집계 정본 헬퍼** · **B-3 BEP 기준선 표면화**.
 - [ ] D-NAO-132 **P0-a**(스마트스토어 실시간 판매 → CPC 배선) — ⚠️**B-4보다 뒤다**(안 닿는 쓰기에 거부권 걸어봐야 소용없다).
 
