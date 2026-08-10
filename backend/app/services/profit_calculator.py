@@ -15,10 +15,12 @@ from sqlalchemy.orm import Session
 from app.models import Channel, CoupangRgSettlementFee, Order, ProductChannelMapping, ProductMaster
 from app.services import order_delivery
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
-from app.services.coupang.revenue_fee_source import (
-    COUPANG_3P_CODES,
-    actual_fee_by_order_option,
+from app.services.coupang.option_fee_rate import (
+    commission_for,
+    option_fee_rates,
+    resolve_rate,
 )
+from app.services.coupang.revenue_fee_source import COUPANG_3P_CODES
 from app.services.manual_revenue_service import get_daily_manual_revenue
 from app.services.monthly_fixed_cost_service import get_daily_fixed_cost
 
@@ -164,13 +166,13 @@ def _line_commission(
     ch: Channel | None,
     o: Order,
     revenue: Decimal,
-    actual_fee: dict[tuple[str, str], Decimal] | None = None,
+    fee_rates: dict[tuple[str, str], Decimal] | None = None,
 ) -> Decimal:
     """라인 수수료. 채널별 실측 우선:
     - cafe24/naver: 동기화 시 산출된 commission_amount.
-    - 쿠팡 3P(WING1/2): 실측 차감 수수료(service_fee+VAT=total_fee) 우선, 없으면 7.8%×VAT 폴백(D-A/D-E).
+    - 쿠팡 3P(WING1/2): 그 옵션의 정산 실측 «요율» × 매출 × 1.1, 요율 미상이면 채널 정률(D-CPP-32).
     - 그 외(쿠팡 RG/로켓·미지정): 채널 정률.
-    actual_fee = (account_key, order_id, vendor_item_id)→total_fee 룩업(원칙18-6 Harness 주입). None이면 폴백."""
+    fee_rates = (account_key, vendor_item_id)→요율(소수) 룩업(원칙18-6 Harness 주입). None이면 채널 정률."""
     if ch and ch.code == "CAFE24":
         return o.commission_amount if o.commission_amount is not None else ZERO
     if ch and ch.code == "NAVER":
@@ -179,32 +181,38 @@ def _line_commission(
         # commission_amount 없으면 채널 정률 폴백 (API 미지원 케이스 방어)
         rate = ch.commission_rate if ch else ZERO
         return revenue * rate / Decimal("100")
-    # 쿠팡 3P(WING1/2): 실측 차감 수수료 우선, 없으면 정률(7.8%)×수수료VAT(×11/10) 폴백 (D-A/D-E)
+    # 쿠팡 3P(WING1/2): 그 옵션의 «요율» × 매출 × 1.1 (D-CPP-32).
+    # ★왜 실측 «금액» 우선을 그만뒀나: 정산 행에서 service_fee = sale_amount×service_fee_ratio가
+    #   661건 전수 성립하므로 실측 금액과 요율 계산은 같은 값이다(라이브 2026-08-10, 최대 차 0.8원
+    #   반올림). 다른 점은 커버리지뿐 — 정산은 D+9~10 지연되므로 실측 금액만 쓰면 최근 주문이 폴백에
+    #   떨어지고, 그 폴백이 계정 단일 정률이라 옵션별 요율 차이를 뭉갠다(WING2 6.4%·WING1 10.5/10.8%).
+    #   요율은 옵션당 상수다(시기에 따라 바뀐 사례 전 기간 0건).
     if ch and ch.code in COUPANG_3P_CODES:
-        if actual_fee is not None:
-            # ch.code = 3P account_key → 계정 스코프 명시(codex P1 #2): 교차계정 합산 방지
-            key = (str(ch.code), str(o.order_number), str(o.platform_product_id))
-            hit = actual_fee.get(key)
-            if hit is not None:
-                return hit
-        rate = ch.commission_rate if ch else ZERO  # DB값 7.8 (폴백 정률, D-E)
-        return revenue * rate / Decimal("100") * Decimal("11") / Decimal("10")
+        rate, _basis = resolve_rate(
+            fee_rates or {}, ch.code, o.platform_product_id,
+            default=(ch.commission_rate / Decimal("100")) if ch.commission_rate else None,
+        )
+        return commission_for(revenue, rate)
     rate = ch.commission_rate if ch else ZERO
     return revenue * rate / Decimal("100")
 
 
-def _coupang_3p_actual_fee(
+def _coupang_3p_fee_rates(
     db: Session, orders: list[Order], channel_map: dict[int, Channel]
 ) -> dict[tuple[str, str], Decimal]:
-    """3P(WING1/2) 주문번호 집합의 실측 차감 수수료 룩업을 1회 생성(원칙18-6/8 허브 주입).
+    """3P(WING1/2) 옵션별 수수료 «요율» 룩업을 1회 생성(원칙18-6/8 허브 주입).
 
-    각 집계 함수가 라인 루프 전에 한 번 호출해 _line_commission에 주입 → N×스캔 제거."""
-    oids = {
-        o.order_number
+    각 집계 함수가 라인 루프 전에 한 번 호출해 _line_commission에 주입 → N×스캔 제거.
+    ★주문번호가 아니라 계정 단위로 받는다 — 요율은 창 안 주문의 정산을 기다릴 필요가 없고
+    (그게 D-CPP-32의 요점이다) 같은 옵션의 과거 정산이면 무엇이든 요율을 알려주기 때문이다."""
+    account_keys = sorted({
+        c.code
         for o in orders
         if (c := channel_map.get(o.channel_id)) and c.code in COUPANG_3P_CODES
-    }
-    return actual_fee_by_order_option(db, oids)
+    })
+    if not account_keys:
+        return {}
+    return option_fee_rates(db, account_keys)
 
 
 # 한진택배 주문(배송) 1건당 판매자 지급액 — 고객 결제 여부 무관.
@@ -848,7 +856,7 @@ def calculate_daily_trend(
 
     orders = query.all()
     channel_map, product_map = _build_channel_maps(db)
-    actual_fee = _coupang_3p_actual_fee(db, orders, channel_map)  # 쿠팡3P 실측수수료(D-A)
+    fee_rates = _coupang_3p_fee_rates(db, orders, channel_map)  # 쿠팡3P 옵션별 실측 요율(D-CPP-32)
 
     # 수동 매출이 있으면 주문이 없어도 계속 진행
     manual_lookup = get_daily_manual_revenue(db, date_from, date_to, channel_id)
@@ -910,7 +918,7 @@ def calculate_daily_trend(
             bucket["cost"] += _line_cost
 
         # 수수료 — 상품매출 + 배송비 수취분(정산 DELIVERY 원장 행에 실제로 부과됨)
-        bucket["commission"] += _line_commission(ch, o, product_rev, actual_fee)
+        bucket["commission"] += _line_commission(ch, o, product_rev, fee_rates)
         bucket["commission"] += _delivery_commission(ch, deliv)
 
         # 판매자 배송비 — 물리배송(packageNumber·박스)당 1회, 배송방식별 실단가(선행 확정).
@@ -1025,7 +1033,7 @@ def calculate_channel_summary(
     )
     orders = query.all()
     channel_map, product_map = _build_channel_maps(db)
-    actual_fee = _coupang_3p_actual_fee(db, orders, channel_map)  # 쿠팡3P 실측수수료(D-A)
+    fee_rates = _coupang_3p_fee_rates(db, orders, channel_map)  # 쿠팡3P 옵션별 실측 요율(D-CPP-32)
     manual_lookup_ch = get_daily_manual_revenue(db, date_from, date_to)
     return_pnl = _return_shipping_pnl(db, channel_map, date_from, date_to)
     exchange_pnl = _exchange_shipping_pnl(db, channel_map, date_from, date_to)
@@ -1077,7 +1085,7 @@ def calculate_channel_summary(
             b["cost"] += _line_cost
 
         # 수수료 — 상품매출 + 배송비 수취분(정산 DELIVERY 원장 행에 실제로 부과됨)
-        b["commission"] += _line_commission(ch, o, product_rev, actual_fee)
+        b["commission"] += _line_commission(ch, o, product_rev, fee_rates)
         b["commission"] += _delivery_commission(ch, deliv)
         # 판매자 배송비 — 물리배송(packageNumber·박스)당 1회, 배송방식별 실단가(선행 확정).
         if skey not in seen_shipments:
@@ -1256,7 +1264,7 @@ def calculate_product_profit(
     if not orders and not return_pnl_prod:
         return []
 
-    actual_fee = _coupang_3p_actual_fee(db, orders, channel_map)  # 쿠팡3P 실측수수료(D-A)
+    fee_rates = _coupang_3p_fee_rates(db, orders, channel_map)  # 쿠팡3P 옵션별 실측 요율(D-CPP-32)
     all_option_ids = list(set(o.platform_product_id for o in orders if o.platform_product_id))
     ad_lookup = _get_ad_spend_lookup(ad_db, date_from, date_to, all_option_ids)
 
@@ -1298,7 +1306,7 @@ def calculate_product_profit(
             b["cost"] += _line_cost
 
         # 수수료 — 상품매출분. 배송비 수취분 수수료는 배송 그룹에서 라인 비례 배분한다.
-        b["commission"] += _line_commission(ch, o, product_rev, actual_fee)
+        b["commission"] += _line_commission(ch, o, product_rev, fee_rates)
 
         # 배송 그룹 — 택배비 & 고객배송수입을 라인 비례 배분
         skey = _shipment_key(ch, o)
