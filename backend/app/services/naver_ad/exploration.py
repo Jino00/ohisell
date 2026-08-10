@@ -22,7 +22,7 @@ from sqlalchemy import func as sqlfunc
 from sqlalchemy.orm import Session
 
 from app.models import NaverAdDaily, NaverEntity, NaverProductBep
-from app.services.naver_ad import bid_simulator, campaign_target_resolver, visibility
+from app.services.naver_ad import bid_simulator, campaign_target_resolver, guardrail_gate, visibility
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 
 # ── 핫셋 여집합 게이트(출처: auto_operator._MIN_CLICK_FOR_APPROVAL=10, D-NAO-48 조건②/§4-1) ──
@@ -50,7 +50,13 @@ _EXPLORATION_STEP_PCT = Decimal("0.30")
 _EXPLORATION_CEILING_MULT = Decimal("2.0")
 # 가드3: 쿨다운 2h = 탐색 사이클(같은 그룹 재조정 최소 간격 — "하루 1회" 대체). 값 출처=
 #   guardrail_gate._COOLDOWN_HOURS(D-NAO-19). exploration_trigger가 last_step_at과 대조해 게이트.
-_EXPLORATION_COOLDOWN_HOURS = 2
+# ★D-NAO-172 적대 리뷰 P1-2(2026-08-10): 여기 `= 2`는 값의 **복제**였다. 봉투 파라미터 층이
+#   생긴 뒤 DB로 쿨다운을 1h로 «풀면» 게이트는 1h를 쓰는데 이 레인만 2h를 고수해서, 현황판이
+#   「1시간」이라 말하는 동안 한 레인의 실효값은 2시간이 된다 — 현황판의 존재 이유(「지금 무슨
+#   값으로 돌고 있나」)를 정면으로 깨는 «기록됐다 ≠ 코드가 읽는다»의 재발이다. 그래서 상수는
+#   **최후 폴백**으로만 남기고, 실효값은 호출부가 `guardrail_params`에서 읽어 주입한다.
+#   (게이트 전용이라 생성기 중복이 없다던 P1-1 수정의 전제가 쿨다운에서는 거짓이었다.)
+_EXPLORATION_COOLDOWN_HOURS = guardrail_gate._COOLDOWN_HOURS
 
 # ── BX2: explore_op 자동 실쓰기 승인원(D-NAO-70③ "자동 개방") ──
 # probe_op/revert_op 관례(auto_operator.APPROVAL_SOURCE_PROBE/REVERT)와 동형 — 탐색 UP 실쓰기의
@@ -522,26 +528,33 @@ def prioritize_candidates(
 
 def exploration_trigger(
     settle_agg: dict, last_step_at: datetime | None, now: datetime,
+    *, cooldown_hours: int | None = None,
 ) -> tuple[bool, str]:
     """탐색 발동 판정(순수) — 후보 그룹 1개에 대해 지금 탐색 UP을 쏠지 결정한다.
 
     발동 조건(둘 다 충족):
     ① 정착창 clk < _MIN_CLICK_FOR_EXPLORATION — 클릭 표본 부족 = ROAS 판단불가 = 증거 구매 대상
        (D-NAO-70① "클릭 0 = 방치 금지"). imp=0 그룹도 대상(rank·노출은 참고 신호로 강등, PLAN §2).
-    ② 쿨다운 2h 경과 — last_step_at(마지막 탐색 스텝 시각) 이후 _EXPLORATION_COOLDOWN_HOURS 경과
+    ② 쿨다운 경과 — last_step_at(마지막 탐색 스텝 시각) 이후 `cooldown_hours` 경과
        (가드3, D-NAO-71 "하루 1회" 대체 = 탐색 사이클 간격). last_step_at=None(첫 탐색)이면 통과.
        실제 last_step_at 조회(change_log)는 BX3 레인 배선 몫 — 여기선 값만 받아 순수 판정한다.
 
+    cooldown_hours: 봉투 파라미터의 실효 쿨다운(D-NAO-172). **호출부가 `guardrail_params`에서
+      읽어 주입**한다 — 게이트(`guardrail_gate._check_cooldown_and_cap`)와 같은 값을 써야
+      「현황판이 말하는 값 ≠ 레인의 실효값」이 안 생긴다. None이면 코드 상수(최후 폴백).
+      **순수 함수를 유지하려고 여기서 DB를 읽지 않는다** — 주입은 호출부 책임이다.
+
     settle_agg: _settlement_agg 형태 dict({"clk", "cost", "conv_amt"}). 반환 (fire, 한국어 사유)."""
+    cd = _EXPLORATION_COOLDOWN_HOURS if cooldown_hours is None else cooldown_hours
     clk = int(settle_agg.get("clk", 0))
     if clk >= _MIN_CLICK_FOR_EXPLORATION:
         return (False, f"클릭 표본 충분(clk={clk}≥{_MIN_CLICK_FOR_EXPLORATION}) — 탐색 대상 아님(핫셋/정착 ROAS 경로)")
     if last_step_at is not None:
         elapsed_hours = (now - last_step_at).total_seconds() / 3600.0
-        if elapsed_hours < _EXPLORATION_COOLDOWN_HOURS:
+        if elapsed_hours < cd:
             return (
                 False,
-                f"쿨다운 미경과({elapsed_hours:.1f}h<{_EXPLORATION_COOLDOWN_HOURS}h, D-NAO-19) — 사이클 대기",
+                f"쿨다운 미경과({elapsed_hours:.1f}h<{cd}h, D-NAO-19) — 사이클 대기",
             )
     return (True, f"클릭 표본 부족(clk={clk}<{_MIN_CLICK_FOR_EXPLORATION})·쿨다운 통과 — 증거 구매 탐색 UP 발동")
 

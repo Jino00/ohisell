@@ -10,8 +10,11 @@
 # 거부되며, 생성과 게이트가 같은 값을 쓴다」**이다.
 from __future__ import annotations
 
+import re
+import subprocess
 from datetime import datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine
@@ -174,20 +177,86 @@ def test_max_change_pct_is_deliberately_not_tunable(db):
     assert "max_change_pct" not in guardrail_params.get_params(db)
 
 
-def test_remaining_params_are_gate_only(db):
-    """남긴 셋은 **게이트 전용**이라 생성기 중복이 없다 — 그게 이 셋만 남긴 이유다.
+# ── 파라미터 갈라짐 탐지 (D-NAO-172 적대 리뷰 P1-2로 수리) ───────────────────────────────
+# ★이 두 테스트의 **원본은 통과하면서 아무것도 안 지켰다.** 두 겹으로 공허했다:
+#   ①`grep`을 상대경로 `app/services/naver_ad/`로 돌려 **프로세스 CWD에 의존**했다. repo 루트에서
+#     pytest를 돌리면 grep이 rc=2(`No such file or directory`)로 죽고 stdout이 비어 assert가
+#     그냥 통과한다 — 「발견 0건」과 「실행 안 됨」이 같은 초록으로 보인다(교훈 #123).
+#   ②패턴이 `guardrail_gate import.*<상수>` **한 형태만** 봤다. 정작 실제 위반이었던
+#     `exploration._EXPLORATION_COOLDOWN_HOURS = 2`(값 자체를 복제)도, 모듈 import 후 속성 접근
+#     (`guardrail_gate._COOLDOWN_HOURS`)도 전부 통과시켰다.
+# 수리: 경로를 **파일 기준 절대경로**로 고정 + **grep이 실제로 돌았는지 rc로 확인** + 패턴을
+#   import·속성접근 둘 다로 확장 + 「같은 뜻의 값을 자기 상수로 복제」를 잡는 인벤토리 테스트 추가.
+_NAVER_AD_DIR = Path(__file__).resolve().parents[1] / "app" / "services" / "naver_ad"
 
-    생성기가 이 값들을 자기들끼리 재현하기 시작하면 P1-1과 같은 구멍이 생긴다.
+
+def _grep(pattern: str) -> list[str]:
+    """naver_ad 패키지 전수 grep. **실행되지 않은 것을 «발견 0건»으로 착각하지 않는다.**"""
+    assert _NAVER_AD_DIR.is_dir(), f"스캔 대상 디렉터리가 없다: {_NAVER_AD_DIR}"
+    r = subprocess.run(["grep", "-rlE", pattern, str(_NAVER_AD_DIR)],
+                       capture_output=True, text=True)
+    # grep rc: 0=찾음 · 1=못 찾음 · 2+=오류(경로 없음 등). 2를 「못 찾음」으로 읽으면 안 된다.
+    assert r.returncode in (0, 1), (
+        f"grep이 실행되지 않았다(rc={r.returncode}) — 이 테스트는 아무것도 검증하지 못했다: {r.stderr}")
+    return [ln for ln in r.stdout.splitlines() if ln.strip()]
+
+
+def test_remaining_params_are_not_reimported_by_generators(db):
+    """남긴 셋을 **게이트 밖에서 직접 읽는 모듈**이 생기면 파라미터가 갈라진다.
+
+    import 형태든 속성 접근 형태든, 게이트 상수를 직접 집어 오는 순간 그 모듈은 DB 파라미터가
+    아니라 코드 상수로 판정하게 된다 — 현황판이 말하는 값과 실효값이 어긋난다.
     """
-    import subprocess
+    allowed = {  # 이 셋의 «정본»과 그 정본을 참조하는 폴백 정의처만 허용
+        "guardrail_gate.py",   # 상수의 정의처
+        "guardrail_params.py", # SPECS의 default가 정본을 **참조**한다(복사 금지 규율의 이행부)
+        "exploration.py",      # _EXPLORATION_COOLDOWN_HOURS = 정본 참조(최후 폴백). 실효값은 주입받는다
+    }
     for key, const in (("cooldown_hours", "_COOLDOWN_HOURS"),
                        ("max_daily_auto_bid_downs", "_MAX_DAILY_AUTO_BID_DOWNS"),
                        ("max_auto_up_multiple", "_MAX_AUTO_UP_MULTIPLE")):
-        r = subprocess.run(
-            ["grep", "-rl", f"guardrail_gate import.*{const}", "app/services/naver_ad/"],
-            capture_output=True, text=True)
-        assert not r.stdout.strip(), (
-            f"{const}({key})를 직접 import하는 모듈이 생겼다 — 파라미터가 갈라진다: {r.stdout}")
+        hits = _grep(f"(guardrail_gate import[^\\n]*{const}|guardrail_gate\\.{const})")
+        offenders = sorted({Path(h).name for h in hits} - allowed)
+        assert not offenders, (
+            f"{const}({key})를 게이트 밖에서 직접 읽는 모듈이 생겼다 — 파라미터가 갈라진다: {offenders}. "
+            f"코드 상수 대신 guardrail_params.get_params(db)로 읽고, 순수 함수면 호출부가 주입할 것.")
+
+
+def test_no_module_redefines_the_cooldown_value_as_its_own_constant(db):
+    """★P1-2가 실제로 났던 자리 — **import가 아니라 «값의 복제»**로 갈라졌다.
+
+    `exploration._EXPLORATION_COOLDOWN_HOURS = 2`는 게이트 상수를 import하지 않아 위 테스트를
+    통과하면서, 쿨다운을 DB로 1h로 풀면 이 레인만 2h를 고수했다. 그래서 **이름이 쿨다운-시간인
+    모듈 상수의 인벤토리**를 못 박는다. 새 상수가 생기면 여기서 실패하고, 「같은 축인가 다른
+    축인가」를 사람이 한 번 판정해서 아래 목록에 근거와 함께 올려야 한다.
+    """
+    known_different_axes = {
+        # (모듈, 상수) : 왜 봉투 쿨다운과 «다른 축»인가
+        ("auto_operator.py", "_VITALITY_COOLDOWN_HOURS"):
+            "소생(vitality) 재발사 간격 48h — 같은 유닛 재조정 간격이 아니라 «죽은 그룹 되살리기» 주기",
+        ("trigger_watch.py", "TRIGGER_COOLDOWN_HOURS"):
+            "트리거 감시 알림 재발송 간격 5h — 입찰 변경이 아니라 «사람에게 알리는» 주기",
+    }
+    pat = r"^_?[A-Za-z_]*COOLDOWN_HOURS[A-Za-z_]*[ ]*="
+    found: set[tuple[str, str]] = set()
+    for path in _grep(pat):
+        name = Path(path).name
+        for line in Path(path).read_text(encoding="utf-8").splitlines():
+            m = re.match(r"^(_?[A-Za-z_]*COOLDOWN_HOURS[A-Za-z_]*)\s*=\s*(.+)$", line)
+            if not m:
+                continue
+            const, rhs = m.group(1), m.group(2).split("#")[0].strip()
+            if name == "guardrail_gate.py":
+                continue  # 정본
+            # 정본을 **참조**하는 정의는 복제가 아니다 — 값이 따라온다
+            if "guardrail_gate." in rhs:
+                continue
+            found.add((name, const))
+    unexpected = sorted(found - set(known_different_axes))
+    assert not unexpected, (
+        f"쿨다운-시간 상수가 값으로 복제됐다 — 봉투 파라미터를 바꿔도 그 모듈만 옛 값으로 남는다: "
+        f"{unexpected}. 같은 축이면 guardrail_gate 상수를 참조하고 실효값은 파라미터에서 주입받을 것. "
+        f"다른 축이면 known_different_axes에 «왜 다른가»를 적어 올릴 것.")
 
 
 def test_step_and_gate_agree_on_the_same_pct(db):

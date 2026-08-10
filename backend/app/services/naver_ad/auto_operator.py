@@ -34,7 +34,7 @@ from app.models import (
     NaverProposal,
     NaverRetroSignal,
 )
-from app.services.naver_ad import bid_rank_curve, bid_simulator, budget_envelope, budget_pacing, campaign_target_resolver, ctr_alert, ctr_alert_briefing, diagnosis, diary, effective_bid, exploration, expansion_allocator, expansion_pressure, gave_score, guardrail_gate, intraday_roas, naver_execution_harness, naver_sa_writer, rank_servo, slack_notifier, visibility, vitality_signal
+from app.services.naver_ad import bid_rank_curve, bid_simulator, budget_envelope, budget_pacing, campaign_target_resolver, ctr_alert, ctr_alert_briefing, diagnosis, diary, effective_bid, exploration, expansion_allocator, expansion_pressure, gave_score, guardrail_gate, guardrail_params, intraday_roas, naver_execution_harness, naver_sa_writer, rank_servo, slack_notifier, visibility, vitality_signal
 from app.services.naver_ad.bid_step_types import BID_UP_TYPES, EXPLORATION_STEP_TYPES, encode_base_bid, encode_exploration_ceiling
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
 from app.services.naver_ad.guardrail_gate import _MAX_CHANGE_PCT
@@ -2369,6 +2369,11 @@ def _run_exploration_for_campaign(
     # 건너뛰고 탐색 UP을 계속 쏘면 "사람 처방 대상" 그룹에 헛발사가 나가므로 fail-open은 위험.
     ctr_signals = ctr_alert.detect_ctr_alerts(db, campaign_id, now=now)
     ctr_alerted_groups = {a["adgroup_id"] for a in ctr_signals.get("alerts", [])}
+    # D-NAO-172 적대 리뷰 P1-2: 탐색 쿨다운의 실효값을 봉투 파라미터에서 읽어 트리거에 주입한다
+    # (캠페인당 1회, 순회 밖 — N+1 방지). 안 하면 게이트는 DB값을 쓰는데 이 레인만 코드 상수를
+    # 써서 현황판이 말하는 값과 레인의 실효값이 갈라진다. get_params는 fail-to-current라
+    # KV 부재·파싱 실패 시 코드 상수를 돌려준다(부재 키는 None → exploration이 상수 폴백).
+    _explore_cooldown_h = guardrail_params.get_params(db).get("cooldown_hours")
     for _etype, adgroup_id in candidates:
         settled_clk = exploration._settlement_clk(db, adgroup_id, window_from, window_to)
         last_step = _exploration_last_step(db, adgroup_id)
@@ -2376,7 +2381,8 @@ def _run_exploration_for_campaign(
 
         # 트리거: 클릭 표본 부족 ∧ 쿨다운 2h(tz 계약 — last_step_at·now 둘 다 KST). 미발동은
         # 조용히 skip(사이클 대기·표본 충분 = 관찰 소음, 일기 미기록).
-        fire, _reason = exploration.exploration_trigger({"clk": settled_clk}, last_step_at, now)
+        fire, _reason = exploration.exploration_trigger(
+            {"clk": settled_clk}, last_step_at, now, cooldown_hours=_explore_cooldown_h)
         if not fire:
             continue
 

@@ -340,6 +340,54 @@ def test_lane_cooldown_2h_kst_passes_after(db):
     assert result["explored"] == 1
 
 
+# ── 봉투 파라미터 배선(D-NAO-172 적대 리뷰 P1-2) ────────────────────────────────────────
+# ★이 두 테스트가 지키는 것: 탐색 레인의 실효 쿨다운 = **게이트와 같은 파라미터**.
+#   안 지키면 DB로 쿨다운을 1h로 «풀어도» 이 레인만 2h를 고수하고, 반대로 6h로 «조이면»
+#   레인은 3h에 제안을 만들어 게이트가 전건 되돌려 죽인다(제안 낭비). 어느 쪽이든
+#   현황판이 말하는 값 ≠ 실효값 — 이 기능이 막으려던 착시 그 자체다.
+
+def _kv_cooldown(db, hours):
+    """봉투 파라미터 KV에 쿨다운만 심는다(콘솔 PUT과 같은 저장 형태)."""
+    import json
+
+    from app.models import NaverAccountSettings
+    from app.services.naver_ad import guardrail_params
+    db.add(NaverAccountSettings(key=guardrail_params.SETTINGS_KEY,
+                                value_json=json.dumps({"cooldown_hours": str(hours)})))
+    db.commit()
+
+
+def test_lane_cooldown_follows_db_param_when_tightened(db):
+    """DB 쿨다운 6h → 직전 스텝 3h 전이면 **레인이 발동하지 않는다**(상수 2h면 발동했다).
+
+    적대 리뷰 P1-2의 재현 그대로다: 이 배선이 없으면 생성기는 3h에 쏘고 게이트가 6h로 막아
+    제안이 전건 죽는다.
+    """
+    _setup(db)
+    _kv_cooldown(db, 6)
+    _prior_step(db, changed_at=NOW - timedelta(hours=3))
+    curve = [_hour(5, imp=20, clk=0, cost=0, avg_rank=6.0),
+             _hour(6, imp=20, clk=0, cost=0, avg_rank=6.0)]
+    result, mock_exec = _run(db, curve)
+    assert result["explored"] == 0 and result["explored_held"] == 0
+    mock_exec.assert_not_called()
+
+
+def test_lane_cooldown_follows_db_param_when_loosened(db):
+    """DB 쿨다운 1h → 직전 스텝 1.5h 전이면 **레인이 발동한다**(상수 2h면 미발동했다).
+
+    풀기 방향이 현황판 거짓말이 나는 쪽이다 — 화면은 「1시간」이라 말하는데 레인만 2시간을
+    고수하면, 「지금 무슨 값으로 돌고 있나」를 보여준다는 현황판의 존재 이유가 깨진다.
+    """
+    _setup(db)
+    _kv_cooldown(db, 1)
+    _prior_step(db, changed_at=NOW - timedelta(hours=1, minutes=30))
+    curve = [_hour(5, imp=20, clk=0, cost=0, avg_rank=6.0),
+             _hour(6, imp=20, clk=0, cost=0, avg_rank=6.0)]
+    result, _mock = _run(db, curve)
+    assert result["explored"] == 1
+
+
 # ══════════════════════ 손실고삐 캠페인 제외(봉투#5) ══════════════════════
 
 def test_lane_leash_skips_exploration(db):
