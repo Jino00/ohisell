@@ -281,6 +281,38 @@ describe("일별 손익 각주 — 광고비 열이 무엇을 빼놓았는지 �
     expect(text).toContain("세 통이 빠져 있습니다");
   });
 
+  it("★일별 표가 광고비 열을 «전량»이라 부르지 않는다 (2026-08-10, Jino: 광고비가 적게 계산됨)", async () => {
+    // 라이브 실측(창 08-03~08-09): Σ일별 ad_spend_all 5,412,823 vs 옵션 원장 6,092,627 —
+    // 679,804원(11.2%) 부족이고 그 차이가 정확히 ad_no_sales + ad_no_sales_days였다.
+    // 그런데 열 머리는 「광고비(전량)」, 각주는 "그날 전부이고"라고 **단정**했다.
+    // ★같은 화면의 아래 각주는 이미 「세 통이 빠져 있습니다」라고 말하고 있었다 —
+    //   즉 화면이 스스로 모순돼 있었고, 위쪽 단정이 아래쪽 사실을 덮고 있었다.
+    mount({
+      ...withPnl({
+        basis: "full", ad_spend: "6092627", ad_uncosted: "0",
+        ad_no_sales_days: "345359", ad_no_sales: "334445",
+        ad_unattributed: "679804", ad_no_sales_included: true, cost_coverage: "1.0000",
+      }, { skus: 0, actionable_skus: 0, link_missing_skus: 0, top: [] }),
+      daily: [{ ...DAILY[0], ad_uncosted: "0", ad_no_sales_days: "345359", ad_no_sales: "334445" }],
+    });
+    const note = await screen.findByText(
+      (_t, el) => !!el && el.tagName === "P" && (el.textContent ?? "").includes("「원가 확인」 열 오른쪽"));
+    const text = note.textContent ?? "";
+    // ★★핵심은 **열 머리**다 — 각주만 보면 헤더 회귀를 못 잡는다(변이 P1 생존분).
+    expect(await screen.findByText("광고비(판매행)")).toBeTruthy();
+    expect(screen.queryByText("광고비(전량)")).toBeNull();
+    expect(text).not.toContain("「광고비(전량)」");
+    // ★그리고 무엇의 부분집합인지 말한다 — 이름만 바꾸고 설명이 없으면 여전히 오해를 만든다.
+    expect(text).toContain("그날 전부가 아닙니다");
+    expect(text).toContain("판매행이 있는 옵션");
+    // ★그 부족분의 정체를 **위 사다리의 구멍과 이어서** 지목한다 — 이름만 대면
+    //   독자가 어디를 봐야 하는지 모른다(변이 P3 생존분: 인과 연결만 지워도 안 잡혔다).
+    expect(text).toContain("위 사다리의 「구멍2·구멍3」");
+    expect(text).toContain("그 차이가 구멍2＋구멍3입니다");
+    // ★「우리 매출(전량)」은 실제로 전량이므로 그 주장은 남아 있어야 한다(과교정 방지).
+    expect(text).toContain("「우리 매출(전량)」은 그날 전부");
+  });
+
   it("M-D 세 통이 **어느 하루라도** 있으면 각주가 뜬다 (some이지 every가 아니다)", async () => {
     // ★픽스처가 하루뿐이면 `some`을 `every`로 바꿔도 안 잡힌다 — 이틀 이상으로 만든다.
     mount({
