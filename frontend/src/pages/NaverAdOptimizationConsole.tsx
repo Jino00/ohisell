@@ -406,9 +406,7 @@ export default function NaverAdOptimizationConsole() {
     setGuardrailSaving(true);
     setGuardrailSaveError(null);
     try {
-      // ★`guardrail.version` = 이 화면이 마지막으로 읽은 상태의 토큰. 그 사이 다른 곳에서
-      //   바뀌었으면 서버가 409로 거부한다(내 전체 치환이 그쪽 설정을 지우기 전에).
-      const updated = await putNaverGuardrailParams(body, guardrail.version);
+      const updated = await putNaverGuardrailParams(body);
       setGuardrail(updated);
       const nextEdits: Record<string, string> = {};
       for (const p of updated.params) nextEdits[p.key] = String(p.value);
