@@ -574,6 +574,50 @@ def update_campaign_budget(ncc_campaign_id: str, daily_budget: int) -> WriteResu
 # swagger Adgroup 정의에 그런 필드 없음).
 
 
+def _reject_if_group_bid_is_dead(ncc_adgroup_id: str) -> None:
+    """B-4(D-NAO-164·교훈 #202): 그룹 입찰이 **옥션에서 실효가 아닌** 그룹이면 거부.
+
+    판별자는 추론이 아니라 **데이터**다 — `/ncc/ads?nccAdgroupId=`의 `adAttr.useGroupBidAmt`.
+    쇼핑 소재가 하나라도 `useGroupBidAmt=true`면 그 소재는 그룹 입찰을 따르므로 그룹 PUT은
+    실효가 있다(허용). **전부 false일 때만** 그룹 입찰이 죽은 값이므로 거부한다.
+
+    ★fail-**open** on ambiguity다(이 파일의 다른 가드들과 방향이 반대 — 의도적):
+      - 소재 목록 조회 실패 → 통과. 판별 못 하는 것을 이유로 **정상 입찰을 막으면**
+        조회 장애가 곧 광고 운영 정지가 된다. 이 가드가 막는 것은 «돈이 새는 쓰기»가 아니라
+        «아무 일도 안 일어나는 쓰기»라, 오탐의 대가가 미탐의 대가보다 크다.
+      - `use_group_bid_amt`가 None(파싱 실패·adAttr 부재)인 소재가 섞여 있으면 → 통과.
+        「전부 false」를 **적극적으로 입증**했을 때만 거부한다.
+      - 소재 0건 → 통과. 파워링크(WEB_SITE) 그룹은 키워드가 입찰을 지고 `get_ads`가
+        상품 소재만 돌려주므로 여기서 비어 나온다 — 쇼핑 판별자를 그쪽에 적용하면 안 된다.
+
+    Raises:
+        WriteValidationError: 이 그룹의 쇼핑 소재가 **전부** useGroupBidAmt=false
+            (= 그룹 입찰이 옥션에서 아무것도 지배하지 않음). 실효 레버는 소재이므로
+            `update_ad_bid`를 써야 한다.
+    """
+    try:
+        ads = fetcher.get_ads(ncc_adgroup_id)
+    except Exception as exc:  # noqa: BLE001 — 조회 실패로 정상 입찰을 막지 않는다(위 §fail-open)
+        log.warning(
+            "update_adgroup_bid: 실효 레이어 판별용 소재 조회 실패 adgroup=%s (%s) — 가드 통과",
+            ncc_adgroup_id, exc,
+        )
+        return
+
+    flags = [a.get("use_group_bid_amt") for a in ads]
+    if not flags:
+        return  # 쇼핑 소재 없음(파워링크 등) — 이 판별자의 대상이 아니다
+    if any(f is not False for f in flags):
+        return  # true가 하나라도 있거나 불명이 섞임 — 그룹 입찰이 실효일 수 있다
+
+    raise WriteValidationError(
+        f"update_adgroup_bid: adgroup {ncc_adgroup_id}의 쇼핑 소재 {len(flags)}개가 "
+        "**전부** useGroupBidAmt=false — 그룹 입찰은 옥션에서 실효가 아니다"
+        "(PUT은 200을 받고 재조회도 새 값을 주지만 CPC는 안 바뀐다). "
+        "실효 레버는 소재이므로 update_ad_bid를 쓸 것 (B-4, D-NAO-164·교훈 #202)"
+    )
+
+
 def update_adgroup_bid(ncc_adgroup_id: str, bid_amt: int) -> WriteResult:
     """PUT /ncc/adgroups/{nccAdgroupId}?fields=bidAmt — 쇼핑 광고그룹 입찰가 변경
     (swagger Adgroup.bidAmt, 실측 2026-07-14).
@@ -612,6 +656,15 @@ def update_adgroup_bid(ncc_adgroup_id: str, bid_amt: int) -> WriteResult:
             f"(systemBiddingType={system_bidding_type!r}, isAutobidActive={autobid_active!r}) "
             "— 시스템(ML) 자동입찰이거나 상태 불명이라 수동 bidAmt PUT 차단(fail-closed)"
         )
+
+    # ★B-4 실효 레이어 가드 (D-NAO-164·교훈 #202, 2026-08-10) — update_ad_bid의 대칭.
+    #   쇼핑 소재가 전부 useGroupBidAmt=false면 **그룹 입찰은 옥션에서 아무것도 지배하지
+    #   않는다**. 그런 그룹에 PUT하면 API는 200을 주고 재조회도 새 값을 돌려주므로
+    #   "성공"으로 보이지만 CPC는 꿈쩍도 안 한다 — 라이브 실사고: 03. 아이폰_강화유리에서
+    #   PAO가 9일간 그룹 입찰 59건(전부 상향)을 썼는데 소재 36/36이 false라 전부 무접촉이었다.
+    #   ★update_ad_bid는 처음부터 이 가드를 갖고 있었는데(useGroupBidAmt가 false 아니면 거부)
+    #   반대 방향이 비어 있었다. 한쪽만 있는 가드는 «막는다»가 아니라 «한 방향만 막는다»다.
+    _reject_if_group_bid_is_dead(ncc_adgroup_id)
 
     path = f"/ncc/adgroups/{ncc_adgroup_id}"
     body = {"nccAdgroupId": ncc_adgroup_id, "bidAmt": bid_amt}

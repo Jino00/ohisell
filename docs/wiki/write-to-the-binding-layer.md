@@ -1,8 +1,8 @@
 ---
 pattern: 쓰기 전에 «실효 레이어»를 데이터에서 판별한다
-sources: [교훈 #202, D-NAO-164, HANDOFF_pao-agency-review+loss-stop_20260810 §6 B-4, memory/naver-ad-claimed-vs-wired-gaps]
-enforcement: none
-enforcement_target: B-4 (auto_operator 입찰 쓰기 경로에 use_group_bid_amt 판별자)
+sources: [교훈 #202, D-NAO-164, D-NAO-166, memory/naver-ad-claimed-vs-wired-gaps]
+enforcement: discriminator
+enforcement_target: naver_sa_writer._reject_if_group_bid_is_dead (update_adgroup_bid 진입 가드, use_group_bid_amt 판별)
 recurrence_tags: [claimed-vs-wired, write-path]
 ---
 
@@ -31,14 +31,43 @@ API는 200을 반환했고 change_log에도 남았지만 **옥션에는 한 번�
   «값이 바뀌었다»를 확인했지 «그 값이 지배한다»를 확인하지 않았다.
 - 발견은 시스템이 아니라 **Jino의 질문**("왜 우리 때는 나빴고 대행사는 좋지?")이 했다.
 
-## 처분 (미완 — 부채)
+## 처분 ✅ (D-NAO-166, 2026-08-10)
 
-`enforcement: none`. B-4로 구현 예정:
-`use_group_bid_amt=0`이면 소재 입찰에 쓴다(경로는 D-NAO-75의 GET 전체객체 PUT 재사용),
-아니면 그룹. 착수 시 **전 캠페인 `use_group_bid` 분포 실측이 선행**(현 실측은 03의 36/36뿐).
+`naver_sa_writer._reject_if_group_bid_is_dead` — `update_adgroup_bid` 진입 가드.
+판별자는 추론이 아니라 **데이터**다: `/ncc/ads`의 `adAttr.useGroupBidAmt`.
+**전부 false일 때만** 거부하고, 하나라도 true거나 불명이 섞이면 통과한다.
 
-⚠️ **B-4 없이 P0-a(스마트스토어 거부권)만 하면 거부권이 «무대 연기»를 막는 꼴이 된다**
-— 안 닿는 쓰기에 거부권을 걸어봐야 옥션에서는 아무 일도 안 일어난다. **B-4가 P0-a보다 앞선다.**
+★**fail-open on ambiguity**(이 파일의 다른 가드들과 방향이 반대 — 의도적):
+막는 대상이 «돈이 새는 쓰기»가 아니라 «아무 일도 안 일어나는 쓰기»라,
+**오탐(정상 입찰 차단)의 대가가 미탐의 대가보다 크다.** 조회 실패·소재 0건도 통과.
+
+★**대칭이 비어 있었다는 게 교훈이다**: `update_ad_bid`는 처음부터
+「`useGroupBidAmt`가 false 아니면 거부」를 갖고 있었는데 **반대 방향이 없었다.**
+한쪽만 있는 가드는 «막는다»가 아니라 «한 방향만 막는다»다.
+
+### 라이브 실측 — 범위가 03보다 훨씬 넓었다
+
+종전 auto 7개 캠페인의 활성 그룹 34개를 라이브 API로 판정:
+**거부(그룹입찰 무효) 19 · 통과 9 · 소재0(파워링크) 6.**
+
+| 캠페인 | 표본 중 «그룹입찰 죽음» |
+|---|---|
+| 03. 아이폰_강화유리 | **6/6** |
+| 01. 갤럭시_지문방지_TPU (계정 광고비 44.3%) | **5/6** |
+| 04. 아이폰_지문방지 | **5/6** |
+| 15. 갤럭시Z_폴드8플립8 | **3/3** |
+| 10. 컨텐츠매체 | 0/6 (소재 95/100이 true — **판별자가 정상 구분**) |
+
+즉 **PAO가 그룹 입찰로 집행하던 상당수가 옥션 무접촉이었다.** 03만의 문제가 아니었다.
+
+⚠️ **여전히 P0-a보다 앞선다** — 안 닿는 쓰기에 거부권을 걸어봐야 옥션에선 아무 일도 안 일어난다.
+그리고 **거부만으로는 절반이다**: 실효 레버(소재)로 «갈아타는» 배선은 아직 없다(아래).
+
+## 남은 것 (거부 다음 단계)
+
+이 가드는 **잘못된 레이어에 쓰는 것을 막을 뿐**, 올바른 레이어로 보내지는 않는다.
+`update_ad_bid`는 이미 있으므로, `auto_operator`가 그룹 제안을 소재 제안으로
+분해하는 배선이 다음이다(별도 결정 필요 — 그룹 1개 = 소재 N개라 스텝·쿨다운 의미가 바뀐다).
 
 ## 일반화된 체크
 

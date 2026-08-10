@@ -15,6 +15,21 @@ from app.services.naver_ad.naver_sa_writer import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _default_no_shopping_ads():
+    """B-4 실효 레이어 가드(D-NAO-164)의 기본 상태 = «쇼핑 소재 없음» → 가드 무접촉.
+
+    `update_adgroup_bid`는 이제 `fetcher.get_ads`로 실효 레이어를 판별한다. 이 파일의
+    기존 테스트들은 `_get`을 side_effect 리스트로 모킹하므로, 패치하지 않으면 가드의
+    조회가 그 리스트를 한 칸 앞당겨 소비해 **7건이 무관하게 빨개진다**(관계없는 실패는
+    이후 모든 검증을 무효로 만든다 — 교훈 #200).
+
+    기본값 `[]`는 「파워링크 등 쇼핑 소재가 없는 그룹」과 같은 상태라 가드가 통과한다.
+    B-4 자체를 검사하는 테스트는 각자 안쪽에서 `get_ads`를 다시 패치해 이 값을 덮는다."""
+    with patch.object(writer.fetcher, "get_ads", return_value=[]):
+        yield
+
+
 class FakeResp:
     """requests.Response 흉내 — status_code/json()/raise_for_status()/text만 필요."""
 
@@ -911,3 +926,104 @@ def test_update_adgroup_bid_put_2xx_unparseable_body_still_verified_via_after():
 
     assert result.response is None
     assert result.after == after.json()
+
+
+# ── B-4 실효 레이어 가드 (D-NAO-164 · 교훈 #202, 2026-08-10) ────────────────────
+# 쇼핑 소재가 전부 useGroupBidAmt=false면 그룹 입찰은 옥션에서 아무것도 지배하지 않는다.
+# 그런 그룹에 PUT하면 API는 200을 주고 재조회도 새 값을 돌려주므로 «성공»으로 보이지만
+# CPC는 안 바뀐다 — 라이브 실사고: 03. 아이폰_강화유리에서 PAO가 9일간 그룹 입찰 59건
+# (전부 상향)을 썼는데 소재 36/36이 false라 전부 무접촉이었다.
+#
+# ★가드는 fail-**open**이다(이 파일의 다른 가드와 방향 반대, 의도적): 막는 대상이
+# «돈이 새는 쓰기»가 아니라 «아무 일도 안 일어나는 쓰기»라 오탐의 대가가 더 크다.
+
+
+def _ad(use_group_bid_amt):
+    """fetcher.get_ads() 반환 원소 모양(필요 필드만)."""
+    return {"ad_id": "nad-x", "adgroup_id": ADGROUP_ID, "use_group_bid_amt": use_group_bid_amt}
+
+
+def test_b4_rejects_when_every_shopping_ad_overrides_group_bid():
+    """★사고 입력 재현: 03 캠페인처럼 소재 전부 useGroupBidAmt=false → 거부.
+
+    `prove-the-guard-catches-this-input` 패턴 준수 — 가드가 «막을 것 같은» 입력이 아니라
+    **실제로 사고를 낸 입력**(36개 전부 false)으로 돌린다."""
+    ads = [_ad(False) for _ in range(36)]
+
+    with patch.object(writer.fetcher, "get_ads", return_value=ads), \
+         patch.object(writer.fetcher, "_get", return_value=_adgroup_bid_resp()) as mock_get, \
+         patch.object(writer.requests, "put") as mock_put:
+        with pytest.raises(WriteValidationError) as exc:
+            writer.update_adgroup_bid(ADGROUP_ID, 2590)
+
+    assert "useGroupBidAmt" in str(exc.value)
+    assert "update_ad_bid" in str(exc.value)  # 실효 레버를 안내해야 한다
+    mock_put.assert_not_called()               # ★네트워크 쓰기가 일어나지 않았다
+    assert mock_get.call_count == 1            # before 재조회까지만(after 재조회 없음)
+
+
+def test_b4_allows_when_one_ad_follows_group_bid():
+    """소재 하나라도 useGroupBidAmt=true면 그룹 입찰이 실효 → 통과(과차단 금지)."""
+    ads = [_ad(False), _ad(False), _ad(True)]
+    before = _adgroup_bid_resp(bid_amt=1200)
+    after = _adgroup_bid_resp(bid_amt=1000)
+
+    with patch.object(writer.fetcher, "get_ads", return_value=ads), \
+         patch.object(writer.fetcher, "_get", side_effect=[before, after]), \
+         patch.object(writer.requests, "put", return_value=FakeResp(200, after.json())) as mock_put:
+        result = writer.update_adgroup_bid(ADGROUP_ID, 1000)
+
+    assert result.action == "update_adgroup_bid"
+    mock_put.assert_called_once()
+
+
+def test_b4_allows_when_flag_unknown_is_mixed_in():
+    """use_group_bid_amt=None(파싱 실패·adAttr 부재)이 섞이면 통과 — 「전부 false」를
+    **적극 입증**했을 때만 거부한다(추정 금지)."""
+    ads = [_ad(False), _ad(None)]
+    before = _adgroup_bid_resp(bid_amt=1200)
+    after = _adgroup_bid_resp(bid_amt=1000)
+
+    with patch.object(writer.fetcher, "get_ads", return_value=ads), \
+         patch.object(writer.fetcher, "_get", side_effect=[before, after]), \
+         patch.object(writer.requests, "put", return_value=FakeResp(200, after.json())) as mock_put:
+        writer.update_adgroup_bid(ADGROUP_ID, 1000)
+
+    mock_put.assert_called_once()
+
+
+def test_b4_allows_when_no_shopping_ads_powerlink_group():
+    """소재 0건(파워링크 그룹 — 키워드가 입찰을 진다) → 통과. 쇼핑 판별자를 그쪽에 적용하지 않는다."""
+    before = _adgroup_bid_resp(bid_amt=1200)
+    after = _adgroup_bid_resp(bid_amt=1000)
+
+    with patch.object(writer.fetcher, "get_ads", return_value=[]), \
+         patch.object(writer.fetcher, "_get", side_effect=[before, after]), \
+         patch.object(writer.requests, "put", return_value=FakeResp(200, after.json())) as mock_put:
+        writer.update_adgroup_bid(ADGROUP_ID, 1000)
+
+    mock_put.assert_called_once()
+
+
+def test_b4_fails_open_when_ads_lookup_raises():
+    """소재 조회가 터지면 통과(fail-open) — 조회 장애가 광고 운영 정지가 되면 안 된다."""
+    before = _adgroup_bid_resp(bid_amt=1200)
+    after = _adgroup_bid_resp(bid_amt=1000)
+
+    with patch.object(writer.fetcher, "get_ads", side_effect=RuntimeError("네이버 500")), \
+         patch.object(writer.fetcher, "_get", side_effect=[before, after]), \
+         patch.object(writer.requests, "put", return_value=FakeResp(200, after.json())) as mock_put:
+        writer.update_adgroup_bid(ADGROUP_ID, 1000)
+
+    mock_put.assert_called_once()
+
+
+def test_b4_runs_after_validation_so_bad_bid_costs_no_api_call():
+    """범위 밖 입찰가는 판별자 조회 **이전에** 걸러진다(불필요한 API 콜 0)."""
+    with patch.object(writer.fetcher, "get_ads") as mock_ads, \
+         patch.object(writer.requests, "put") as mock_put:
+        with pytest.raises(WriteValidationError):
+            writer.update_adgroup_bid(ADGROUP_ID, 40)
+
+    mock_ads.assert_not_called()
+    mock_put.assert_not_called()
