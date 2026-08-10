@@ -476,4 +476,13 @@ class SchedulerHealthOut(BaseModel):
     data_stale: list[SchedulerDataVerdictOut] = []
     # 디스크 여유 감시 — 사용률이 warn_percent를 넘긴 마운트(포화 전 사전 경보).
     disk_low: list[SchedulerDiskVerdictOut] = []
+    # 원가 정본 드리프트 — `product_master.cost_price`가 «원가표 정본 + 알려진 버퍼»인 건수.
+    # 정상이면 None. ★★이 줄이 없으면 서비스층이 판정을 내도 **response_model이 응답에서
+    #   지워버린다** — 2026-08-10 적대 리뷰 P1-1이 정확히 그 상태를 잡았다. 배선을 만들면서
+    #   HTTP 경계에서 스스로 끊어 놓았고, 프론트는 키가 없으니 조용히 «이상 없음»으로 보였다.
+    #   그래서 이 필드는 **TestClient로 실제 호출해 단언하는 테스트**와 짝이다
+    #   (`test_cost_drift_wiring.py::test_health_route_actually_returns_cost_drift`).
+    #   dict로 두는 이유: 배너가 쓰는 모양이 바뀌어도 스키마를 따라 고칠 필요가 없고,
+    #   구조를 못 박는 일은 프론트 타입과 배선 테스트가 한다.
+    cost_drift: dict | None = None
     as_of: str

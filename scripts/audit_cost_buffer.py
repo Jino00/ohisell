@@ -17,11 +17,22 @@
   *"그 엑셀을 지금 그대로 업로드하면 오늘 고친 값이 되돌아간다."*
   옛 매핑 엑셀(`ohisell_mapping_template*.xlsx`)을 올리는 순간 버퍼가 통째로 복귀한다.
   **그리고 그건 조용하다** — 아무 에러도 안 나고 이익만 줄어든다.
-  이 검사기가 그 복귀를 잡는다.
+
+## ★이 스크립트는 상시 감시자가 **아니다** (2026-08-10 배선 후)
+
+처음엔 이 CLI가 유일한 감지 수단이었는데, **아무도 안 불렀다.**
+이제 상시 경로는 앱 안에 있다:
+
+    GET /api/scheduler/health → `cost_drift` → 전역 파이프라인 헬스 배너
+
+판정 산술은 `backend/app/services/cost_truth_audit.py` **한 벌**이고 이 CLI는 그걸 임포트한다
+(사본을 두 벌 두면 한쪽만 고쳐져 감시자가 감시 대상보다 낡는다).
+이 CLI가 남아 있는 이유는 셋뿐이다: ①앱 없이 임의 DB 파일(백업본 등)을 점검 ②종료 코드가
+필요한 자동화 ③사람이 드리프트 **상세 목록**을 보고 싶을 때.
 
 ## 무엇을 하나
 
-정본 스냅샷(`docs/references/data/cost_truth_20260807.json`)과 DB를 대조해 세 갈래로 가른다:
+정본 스냅샷(`backend/app/data/cost_truth_20260807.json`)과 DB를 대조해 세 갈래로 가른다:
 
   · `ok`           — 정본 값과 정확히 일치
   · **`buffered`** — 정본 + **알려진 버퍼**와 일치 → **드리프트. 이게 잡으려는 것.**
@@ -31,11 +42,7 @@
 ★**«판정 불가»를 «정상»으로 세지 않는다.** 셋을 따로 낸다 — 합치면 드리프트가 묻힌다
   (이 프로젝트가 반복해 당한 형태: 발견 0건과 실행 안 됨이 같은 숫자로 보인다).
 
-★**이름 매칭을 하지 않는다.** 정본 항목명과 마스터 상품명은 표기가 달라(「지문방지필름 TPU
-  3매」 ↔ 「빛반사, 지문방지 매트 필름 3매, 아이폰에어」) 이름으로 이으면 또 오판한다
-  (2026-08-07에 그렇게 36건을 틀렸다). **값 산술만** 본다 — 근거가 좁은 대신 틀리지 않는다.
-  그래서 이 검사기는 «어느 상품의 원가가 얼마여야 하나»는 답하지 못한다. 답하는 것은
-  «지금 값이 정본 + 알려진 버퍼인가»뿐이다.
+★**이름 매칭을 하지 않는다.** 값 산술만 본다 — 상세는 `cost_truth_audit.py` 헤더.
 
 ## 읽기 전용
 
@@ -46,7 +53,7 @@
     python3 scripts/audit_cost_buffer.py --db <DB 경로>
     python3 scripts/audit_cost_buffer.py --db <DB> --format json --out drift.json
 
-종료 코드: 드리프트 0건이면 0, 있으면 1 (CI·크론에서 게이트로 쓸 수 있게).
+종료 코드: 드리프트 0건이면 0, 있으면 1.
 """
 from __future__ import annotations
 
@@ -57,39 +64,22 @@ import sqlite3
 import sys
 from collections import defaultdict
 
-# 정본 스냅샷 기본 경로(리포 상대). --truth로 덮을 수 있다.
-_DEFAULT_TRUTH = pathlib.Path(__file__).resolve().parents[1] / "docs/references/data/cost_truth_20260807.json"
-
-# 값 비교 허용 오차. 원가는 소수 1자리까지 쓴다(2350.7) — float 왕복 오차만 흡수한다.
-_EPS = 0.05
-
-
-def load_truth(path: pathlib.Path) -> dict:
-    snap = json.loads(path.read_text(encoding="utf-8"))
-    # ★100원 미만은 제외한다 — 오타오 강화유리 섹션의 CNY 단가(12.2 등)가 섞여 있고,
-    #   그걸 원가로 보면 «12.2 + 265.3 = 277.5»류의 헛 매칭이 생긴다.
-    snap["_values"] = sorted({i["cost"] for i in snap["items"] if i["cost"] >= 100})
-    snap["_name_of"] = {}
-    for i in snap["items"]:
-        snap["_name_of"].setdefault(i["cost"], f"{i['section']} / {i['item']}")
-    return snap
-
-
-def classify(cost: float, truth: dict) -> tuple[str, dict]:
-    """한 원가값을 ok / buffered / undetermined로 가른다."""
-    for t in truth["_values"]:
-        if abs(cost - t) < _EPS:
-            return "ok", {"truth": t, "truth_item": truth["_name_of"][t]}
-    for t in truth["_values"]:
-        d = round(cost - t, 1)
-        for label, buf in truth["known_buffers"].items():
-            if abs(d - buf) < _EPS:
-                return "buffered", {"truth": t, "buffer": buf, "buffer_label": label,
-                                    "truth_item": truth["_name_of"][t]}
-    return "undetermined", {}
+_REPO = pathlib.Path(__file__).resolve().parents[1]
+# ★판정 산술은 앱 서비스 모듈 한 벌만 쓴다. 그 모듈은 DB·SQLAlchemy를 임포트하지 않으므로
+#   venv 없이 시스템 python3으로도 임포트된다(백업 DB를 서버 밖에서 점검할 때가 그 경우다).
+sys.path.insert(0, str(_REPO / "backend"))
+from app.services.cost_truth_audit import (  # noqa: E402
+    DEFAULT_TRUTH_PATH,
+    EPS as _EPS,  # noqa: F401 — 허용오차의 단일 출처. 여기서 다시 정의하지 않는다.
+    classify,
+    classify_rows,
+    count_verdicts,
+    load_truth,
+)
 
 
 def scan(db_path: str, truth: dict) -> list[dict]:
+    """DB를 **읽기 전용**으로 열어 원가가 있는 행만 판정한다."""
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
         rows = con.execute(
@@ -98,18 +88,13 @@ def scan(db_path: str, truth: dict) -> list[dict]:
         ).fetchall()
     finally:
         con.close()
-    out = []
-    for sku, name, cp in rows:
-        verdict, info = classify(round(float(cp), 1), truth)
-        out.append({"internal_sku": sku, "product_name": name,
-                    "cost_price": round(float(cp), 1), "verdict": verdict, **info})
-    return out
+    return classify_rows(rows, truth)
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--db", required=True, help="SQLite DB 경로 (읽기 전용으로 연다)")
-    ap.add_argument("--truth", default=str(_DEFAULT_TRUTH), help="정본 스냅샷 JSON")
+    ap.add_argument("--truth", default=str(DEFAULT_TRUTH_PATH), help="정본 스냅샷 JSON")
     ap.add_argument("--format", choices=["text", "json"], default="text")
     ap.add_argument("--out", help="출력 파일 (없으면 stdout)")
     a = ap.parse_args()
@@ -121,8 +106,7 @@ def main() -> int:
     by_buf: dict[str, list] = defaultdict(list)
     for r in drift:
         by_buf[r["buffer_label"]].append(r)
-    counts = {v: sum(1 for r in rows if r["verdict"] == v)
-              for v in ("ok", "buffered", "undetermined")}
+    counts = count_verdicts(rows)
 
     if a.format == "json":
         payload = {"source": truth["source_file"], "source_sha256_16": truth["source_sha256_16"],
