@@ -1,3 +1,26 @@
+[2026-08-10 17:3x] 원가 드리프트 검사기를 «부르는 사람»에 배선 — D-CPP-33 (PR #275, prod 배포·라이브 4/4)
+  · 계기: Jino "진행해줘" (ref 54 §7-6 이월 「검사기를 크론·CI에 배선」)
+  · ★★검사기는 오전에 완성됐는데 **아무도 안 불렀다** — 그 상태는 검사기가 없는 것과 관측상 같다
+  · **크론이 아니라 앱 안**: prod 실측에서 기존 ohisell 크론 셋 중 **둘이 출력을 /dev/null로
+    버리고** 있었고, prod엔 git 체크아웃도 docs/도 없어 스크립트 배포 수단 자체가 없었다.
+    요청 시점 계산(GET /api/scheduler/health → cost_drift → 전역 헬스 배너)이라 «검사가
+    낡았나»라는 질문이 아예 없어진다(크론 결과 파일은 낡음과 이상없음이 같은 모양 — 교훈 #123 재판)
+  · 산술은 backend/app/services/cost_truth_audit.py 한 벌 · CLI가 임포트(사본 둘 금지)
+  · 정본 스냅샷 docs/references/data/ → **backend/app/data/** 이사(배포되는 자리)
+  · ★★**적대 리뷰 1R FAIL**: response_model=SchedulerHealthOut에 cost_drift가 없어 **FastAPI가
+    응답에서 조용히 지웠다.** 서비스층엔 있고 HTTP body엔 없다 → 배너 null → 화면 「이상 없음」.
+    **내 배선 테스트 6건이 하나도 안 죽었다**(dict까지만 보고 경계를 안 넘었다). 그 파일 헤더에
+    내가 인용한 교훈 #208을 그 파일 자신이 재현. 수정 = 스키마 한 줄 + **TestClient 라우트 테스트**
+  · P2 처분: M19(count 상수화)·M17(try/except가 버그 삼킴)·스냅샷 배포누락 채택 /
+    M04는 **「테스트 부족」이 아니라 「그 상태를 만들 수 없다」**였다(prod DDL이 NOT NULL) →
+    「전제가 바뀌면 우는」 휴면 가드로 대체 / M09·캐시 기각(근거 병기)
+  · **동봉(Jino 승인)**: disk_low 배너 분기 신설 — prod가 healthy=false인데 배너가 침묵 중이었다
+    (실측 93.8%·여유 5.9GB). 판정 목록과 표시 목록이 갈라져 있었다. ⚠️**디스크는 여전히 94%대**
+  · 2R PASS(P1=0, 변이 5/5 KILLED) · 백엔드 5,173 passed · 프론트 290 passed
+  · 라이브 4/4: cost_drift 키 실재+null · 사본에 버퍼 5건 심으니 5건 검출+exit 1 ·
+    번들 index-CvniPoVg.js에 문구 배선 · 배포 스탬프 일치
+  · 교훈 #216~#220 · 상세: docs/references/54_..._20260810.md §9
+
 [2026-08-10 16:0x] 쿠팡 3P 수수료를 「순매출 × 옵션 요율 × 1.1」로 통일 (D-CPP-32, PR #273, prod 배포·라이브 합격)
   · 계기: Jino "수수료는 정해진 수수료가 있으니까 그걸 때면 되는거 아니야?" → 라이브가 그렇게
     말한다. service_fee = round(sale_amount × service_fee_ratio)가 661건 전수 성립,
