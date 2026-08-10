@@ -2,6 +2,7 @@
 //   탭1 연관맵 매트릭스(내부옵션×채널·인라인 편집·커버리지/충돌 배지·엑셀 업로드)
 //   탭2 통합 손익(S5에서 GET /api/products/pnl-reconciliation 소비 — 지금은 자리표시)
 import { useState, useEffect, useCallback, useRef } from "react";
+import { buildMappingUploadText, shouldWarnMappingUpload } from "./uploadResultText";
 import {
   fetchApi,
   uploadFile,
@@ -133,24 +134,10 @@ function ConnectionMapTab() {
     if (!file) return;
     try {
       const r: MappingIngestResult = await uploadFile("/api/products/upload-by-name", file);
-      const issues =
-        r.unknown_labels.length +
-        r.duplicate_product_names.length +
-        r.duplicate_channel_ids.length +
-        r.mapping_conflicts.length +
-        r.label_mismatches.length;
-      // ★원가 거부는 «확인 필요 N건(콘솔)»에 섞지 않고 **따로 앞세운다**(D-CPP-35).
-      //   섞으면 「수정 N」 옆에서 묻히는데, 운영자가 읽어야 할 것은 «내 엑셀의 원가가
-      //   반영되지 않았다»이다. 이걸 놓치면 옛 엑셀을 계속 쓰게 된다.
-      const blocked = r.cost_buffers?.length ?? 0;
-      setUploadMsg(
-        `상품 생성 ${r.products_created} · 수정 ${r.products_updated} · 매핑 ${r.mappings_created} · 주문연결 ${r.orders_linked}` +
-          (r.mappings_conflicted ? ` / 충돌 ${r.mappings_conflicted}(기존 유지)` : "") +
-          (blocked ? ` / ⚠️ 원가 거부 ${blocked}건 — 버퍼가 얹힌 값이라 원가를 반영하지 않았다(매핑은 반영됨, 사유는 콘솔)` : "") +
-          (r.cost_guard_unavailable ? ` / ⚠️ 원가 미검사(${r.cost_guard_unavailable})` : "") +
-          (issues ? ` / 확인 필요 ${issues}건(콘솔)` : ""),
-      );
-      if (issues || blocked || r.cost_guard_unavailable) console.warn("매핑 적재 무결성 이슈", r);
+      // ★문구 조립은 uploadResultText.ts(순수)로 뺐다 — 여기 인라인이면 회귀로 못 박힌다
+      //   (적대 리뷰 2R P2-N1: 원가 거부를 빼는 변이가 프론트 290건에서 살아남았다).
+      setUploadMsg(buildMappingUploadText(r));
+      if (shouldWarnMappingUpload(r)) console.warn("매핑 적재 무결성 이슈", r);
       load(q);
     } catch (e) {
       setUploadMsg(`업로드 실패: ${e}`);

@@ -110,6 +110,11 @@ def count_verdicts(rows: list[dict]) -> dict[str, int]:
 # D-CPP-34가 버퍼를 «단순 오류·재입력 금지»로 확정했으므로, 재입력은 경고가 아니라 **거부**다.
 
 
+# `try_load_truth`가 판정을 시연해 볼 때 쓰는 값. 정본에도 버퍼 합에도 없을 만한 값이면 되고,
+# 무엇이 나오든 상관없다 — **터지지 않는지**만 본다.
+_SMOKE_COST = 1.0
+
+
 def try_load_truth(path: pathlib.Path | str | None = None) -> dict | None:
     """정본 스냅샷을 읽되 **못 읽으면 None**(예외를 올리지 않는다).
 
@@ -120,9 +125,18 @@ def try_load_truth(path: pathlib.Path | str | None = None) -> dict | None:
     ★`except Exception`이다. 좁게 잡았더니(`OSError/ValueError/KeyError`) 루트가 list인 스냅샷이
       `TypeError`로 빠져나가 **업로드 전체가 500**이 됐다 — fail-soft가 정반대로 작동한 것이다
       (적대 리뷰 P2). 같은 리포의 `scheduler_health`가 이미 넓게 잡고 있다.
+
+    ★로딩 성공만으로 «검사 가능»이라 하지 않는다. `load_truth`는 되는데 `classify`가 터지는
+      스냅샷이 있다(`known_buffers` 키 누락 등). 그때 이 함수가 dict를 돌려주면 호출자는
+      `cost_guard="active"`라 적으면서 실제로는 아무것도 판정하지 못한다 — **버퍼가 들어가는데
+      응답은 「검사함·0건」**이 된다(적대 리뷰 2R P2-N2). 그래서 **판정을 한 번 시연**해 보고,
+      못 하면 스냅샷이 없는 것과 같이 취급한다. «검사해서 깨끗함»과 «검사 못 함»을 가르는
+      것이 이 모듈의 존재 이유다(교훈 #123).
     """
     try:
-        return load_truth(path)
+        snap = load_truth(path)
+        classify(_SMOKE_COST, snap)  # 판정 시연 — 여기서 터지면 이 스냅샷으론 검사할 수 없다
+        return snap
     except Exception:
         return None
 

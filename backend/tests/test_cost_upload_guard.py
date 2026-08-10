@@ -142,20 +142,26 @@ def test_try_load_truth_returns_none_not_empty_dict(tmp_path):
     assert try_load_truth(broken) is None
 
 
-def test_screen_survives_a_snapshot_that_loads_but_cannot_classify(tmp_path):
-    """★load는 되는데 classify가 터지는 스냅샷에서도 500이 아니라 통과여야 한다.
+def test_snapshot_that_loads_but_cannot_classify_counts_as_unavailable(tmp_path):
+    """★★load는 되는데 classify가 터지는 스냅샷은 «검사 못 함»이지 «이상 없음»이 아니다.
 
-    `known_buffers` 키가 빠지면 `classify`가 KeyError를 낸다. load만 fail-soft로 감싸면
-    fail-soft가 반쪽이라 업로드 전체가 죽는다(적대 리뷰 P2).
+    2R P2-N2가 잡은 형태: 이 함수가 dict를 돌려주면 호출자는 `cost_guard="active"`라 적는데
+    `screen_cost`는 전건 None을 낸다 — **버퍼가 DB에 들어가면서 응답은 「검사함·0건」**이다.
+    그 침묵이 이 모듈이 막으려던 바로 그것이라(교훈 #123), 판정 불가 스냅샷은 None으로 떨어져
+    「미검사」 표면을 타야 한다.
     """
     half = tmp_path / "half.json"
-    half.write_text(
+    half.write_text(  # known_buffers 없음 → classify가 KeyError
         '{"items": [{"row": 1, "section": "s", "item": "i", "cost": 2350.7}]}',
         encoding="utf-8",
     )
-    t = try_load_truth(half)
-    assert t is not None  # 로딩 자체는 성공한다
-    assert screen_cost(_BUFFERED, t) is None  # 판정은 못 하되 터지지 않는다
+    assert try_load_truth(half) is None, "판정 못 하는 스냅샷이 «검사 통과»로 보인다"
+
+
+def test_a_healthy_snapshot_survives_the_smoke_check(truth):
+    """★시연 검사가 **정상 스냅샷까지** 떨어뜨리면 가드가 상시 무력화된다(과교정 방지)."""
+    assert truth is not None
+    assert screen_cost(_BUFFERED, truth) is not None
 
 
 def test_screen_survives_unparseable_cost(truth):

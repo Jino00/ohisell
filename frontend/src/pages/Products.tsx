@@ -7,6 +7,7 @@ import {
   type Product,
   type Channel,
 } from "../lib/api";
+import { buildCostSheetUploadText } from "./uploadResultText";
 import ProductForm from "../components/ProductForm";
 import MappingForm from "../components/MappingForm";
 
@@ -85,16 +86,9 @@ export default function Products() {
     if (!file) return;
     try {
       const result = await uploadFile("/api/products/upload", file);
-      // ★원가 거부·미검사는 「오류 N건」에 묻지 않고 따로 세운다(D-CPP-35, 적대 리뷰 P2).
-      //   `cost_guard`가 unavailable이면 이 업로드의 원가는 «검사 통과»가 아니라 «미검사»다 —
-      //   그 둘이 같은 모양이면 안 된다(교훈 #123).
-      const guardOff = result.cost_guard && result.cost_guard !== "active";
-      setUploadMsg(
-        `생성 ${result.created}건, 수정 ${result.updated}건, 매핑 ${result.mappings_created}건` +
-          (result.cost_buffer_blocked ? ` / ⚠️ 원가 거부 ${result.cost_buffer_blocked}건(버퍼 — 행 미반영)` : "") +
-          (guardOff ? ` / ⚠️ 원가 미검사(${result.cost_guard})` : "") +
-          (result.errors?.length ? ` / 오류 ${result.errors.length}건` : "")
-      );
+      // ★문구는 uploadResultText.ts(순수)가 조립한다 — 원가 거부·미검사가 표시에서
+      //   빠지는 것을 테스트가 잡게 하려는 것이다(적대 리뷰 2R P2-N1).
+      setUploadMsg(buildCostSheetUploadText(result));
       load();
     } catch (err) {
       setUploadMsg(`업로드 실패: ${err}`);
