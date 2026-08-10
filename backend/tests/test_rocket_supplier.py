@@ -675,11 +675,119 @@ def test_upsert_mapping_confirmed_requires_sku(db):
 def test_upsert_mapping_ignored_excludes_from_unmapped(db):
     _seed_masters(db)
     sync.ingest_po_items(db, 134342890, "A01029796", _PO_DETAIL_ROWS)
-    out = cmap.upsert_mapping(db, "63408012", status="ignored", note="샘플")
-    assert out["status"] == "ignored"
+    out = cmap.upsert_mapping(db, "63408012", status="excluded", note="샘플",
+                              allow_excluded=True)
+    assert out["status"] == "excluded"
     assert out["internal_sku"] is None  # 원가 제외
     res = cmap.list_unmapped(db, suggest=False)
     assert "63408012" not in {it["product_number"] for it in res["items"]}  # 재제안 방지
+
+
+# ═══ 「제외」는 사람만 쓴다 (2026-08-10) ═══
+#
+# 왜: 2026-06-17 일괄 매핑이 «후보를 못 찾은» 22건을 제외로 찍었고, 두 엔진이 그것을
+#   **원가 0원 = 전액 이익**으로 셌다(90일 발주 실측 진짜 원가 3,311,826원). prod 사유 전수를
+#   봐도 **사람이 제외를 결정한 흔적은 한 건도 없었다** — 그 상태를 만든 건 오직 배치였다.
+#   그래서 값의 뜻을 하나로 못 박는 것만으로는 부족하고, **자동이 그 값을 못 쓰게** 막는다.
+
+
+def test_excluded_requires_a_reason(db):
+    """★사유 없는 제외는 거부한다 — 나중에 «결정»과 «매칭 실패»를 가를 수 없어서다."""
+    _seed_masters(db)
+    sync.ingest_po_items(db, 134342890, "A01029796", _PO_DETAIL_ROWS)
+    with pytest.raises(ValueError, match="사유"):
+        cmap.upsert_mapping(db, "63408012", status="excluded", allow_excluded=True)
+    with pytest.raises(ValueError, match="사유"):   # 공백은 사유가 아니다
+        cmap.upsert_mapping(db, "63408012", status="excluded", note="   ", allow_excluded=True)
+
+
+def test_excluded_rejects_automatic_match_methods(db):
+    """★자동 매핑에는 제외 권한을 주지 않는다 — 이번 사고를 만든 경로 자체를 막는다."""
+    _seed_masters(db)
+    sync.ingest_po_items(db, 134342890, "A01029796", _PO_DETAIL_ROWS)
+    for mm in ("suggested", "auto", "SUGGESTED"):
+        with pytest.raises(ValueError, match="자동"):
+            cmap.upsert_mapping(db, "63408012", status="excluded", match_method=mm,
+                                note="no suggestion or low score", allow_excluded=True)
+
+
+def test_confirmed_is_unaffected_by_the_excluded_guards(db):
+    """가드가 정상 경로까지 막으면 그건 기능을 죽인 것이다 — confirmed는 사유 없이도 된다."""
+    _seed_masters(db)
+    sync.ingest_po_items(db, 134342890, "A01029796", _PO_DETAIL_ROWS)
+    out = cmap.upsert_mapping(db, "63408012", internal_sku="OHI-0001",
+                              status="confirmed", match_method="suggested")
+    assert out["status"] == "confirmed" and out["internal_sku"] == "OHI-0001"
+
+
+def test_legacy_ignored_is_no_longer_accepted(db):
+    """옛 값은 더 이상 쓸 수 없다 — 마이그레이션이 데이터를 옮겼고 입구도 닫는다."""
+    _seed_masters(db)
+    with pytest.raises(ValueError):
+        cmap.upsert_mapping(db, "63408012", status="ignored", note="샘플", allow_excluded=True)
+
+
+def test_excluded_requires_the_caller_to_opt_in(db):
+    """★★이게 «자동 vs 사람»을 **실제로** 가르는 유일한 판별자다(적대 리뷰 P2-1).
+
+    `note` 필수도 `match_method` 거부도 2026-06-17 배치를 **못 막았을 것**이다 — 그 22건은
+    `match_method='manual'`이었고 사유(`no suggestion or low score`)까지 달려 있었다.
+    남는 판별자는 「사람이 쓰는 입구로 들어왔는가」뿐이라, 호출부가 **명시**하게 만든다.
+    기본값이 False라 배치·스크립트가 그냥 부르면 못 만들고, 만들려면 코드에 그 한 줄을
+    의식적으로 써야 한다(`git grep allow_excluded=True`로 잡힌다).
+    """
+    _seed_masters(db)
+    sync.ingest_po_items(db, 134342890, "A01029796", _PO_DETAIL_ROWS)
+    with pytest.raises(ValueError, match="allow_excluded"):
+        cmap.upsert_mapping(db, "63408012", status="excluded", note="샘플")   # 명시 안 함
+
+
+@pytest.fixture
+def api():
+    """라우터를 물린 TestClient — **「라우터가 사람 입구다」라는 배선**을 여기서 본다.
+
+    ★서비스만 테스트하면 «라우터가 allow_excluded를 안 넘긴다»를 못 잡는다. 그러면 화면의
+      「연결 안 함」 버튼이 전부 422로 죽는데 백엔드 단위 테스트는 전부 초록이다.
+    ★엔진을 따로 만드는 이유: 위 `db` 픽스처는 기본 풀이라 TestClient의 다른 스레드에서
+      «SQLite objects created in a thread…»로 죽는다(실제로 그렇게 죽었다).
+    """
+    from fastapi.testclient import TestClient
+    from sqlalchemy.pool import StaticPool
+
+    from app.database import get_db
+    from app.main import app
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False},
+                           poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    app.dependency_overrides[get_db] = lambda: session
+    yield TestClient(app), session
+    session.close()
+    app.dependency_overrides.clear()
+
+
+def test_router_is_the_human_entrance_and_may_exclude(api):
+    """라우터로는 제외가 된다 — 가드가 정상 경로까지 막으면 기능을 죽인 것이다."""
+    client, db = api
+    _seed_masters(db)
+    sync.ingest_po_items(db, 134342890, "A01029796", _PO_DETAIL_ROWS)
+    r = client.post("/api/coupang/ops/rocket/cost-map", json={
+        "product_number": "63408012", "status": "excluded", "note": "샘플로만 나감",
+    })
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "excluded"
+
+
+def test_router_still_refuses_excluded_without_a_reason(api):
+    """사람 입구라도 사유는 필요하다 — 422로 거부한다."""
+    client, db = api
+    _seed_masters(db)
+    sync.ingest_po_items(db, 134342890, "A01029796", _PO_DETAIL_ROWS)
+    r = client.post("/api/coupang/ops/rocket/cost-map", json={
+        "product_number": "63408012", "status": "excluded",
+    })
+    assert r.status_code == 422
 
 
 def test_upsert_mapping_invalid_status(db):

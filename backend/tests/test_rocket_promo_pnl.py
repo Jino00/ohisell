@@ -254,15 +254,23 @@ def test_missing_window_returns_blocker(db):
     assert any("행사기간" in b for b in out["blockers"])
 
 
-def test_ignored_cost_mapping_counts_as_resolved_zero_cost(db):
-    """'ignored' = 원가 0으로 **결정된** 것(샘플/증정) — 미매핑과 다르다."""
+def test_excluded_cost_mapping_is_unresolved_not_zero_cost(db):
+    """★'excluded'는 **원가 0이 아니라 모르는 것**이다 (2026-08-10 뒤집힘).
+
+    종전 이 테스트는 정반대를 지켰다 — `resolved=True`, `cost=0`. 그 해석 때문에
+    2026-06-17 일괄 매핑이 «후보를 못 찾아» 그 값으로 찍은 22건이 **원가 0원 = 전액 이익**이
+    됐다(90일 발주 실측 진짜 원가 3,311,826원). 「원가 0원」을 주장하려면 원가 0원을
+    **등록**할 일이지, 연결을 거부하는 상태가 대신할 일이 아니다.
+    ★이 테스트가 다시 뒤집히면 그 사고가 되살아난 것이다.
+    """
     promo = _seed(db, target_skus=("69411570",), with_supply_69=True)
-    db.add(RocketProductCostMap(product_number="69411570", internal_sku=None, status="ignored"))
+    db.add(RocketProductCostMap(product_number="69411570", internal_sku=None, status="excluded"))
     db.commit()
     out = pnl.compute_promotion_pnl(db, promo, _VENDOR)
     r = out["skus"][0]
-    assert r["resolved"] is True and r["cost"] == Decimal("0.00")
-    assert r["unit_contribution"] == Decimal("5000.00")   # 9,000 − 0 − 4,000
+    assert r["resolved"] is False
+    assert r["cost"] is None, "0으로 접으면 그 매출이 통째로 이익이 된다"
+    assert r["unit_contribution"] is None
 
 
 def test_negative_contribution_yields_no_bep_roas(db):

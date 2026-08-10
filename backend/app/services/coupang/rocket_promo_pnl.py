@@ -292,8 +292,13 @@ def _supply_price_by_sku(
 def _cost_by_sku(db: Session, sku_ids: list[str]) -> dict[str, dict]:
     """SKU별 원가 = RocketProductCostMap(상품번호→internal_sku) → product_master.cost_price.
 
-    반환 {sku: {"cost_price": Decimal|None, "status": confirmed|ignored, "internal_sku": str|None}}.
-    - status='ignored' → 원가 **0으로 결정된 것**(샘플·증정). cost_price=0으로 해결 처리.
+    반환 {sku: {"cost_price": Decimal|None, "status": confirmed|excluded, "internal_sku": str|None}}.
+    - status='excluded' → **연결 안 하기로 한 것**. cost_price=None(**미해결**)이다.
+      ★★2026-08-10 이전에는 여기서 `cost_price=0`으로 «해결 처리»했다 — 그게 «원가 0원 =
+        전액 이익»이 되어, 2026-06-17 배치가 «후보를 못 찾아» 제외로 찍은 22건의 이익을
+        부풀렸다(90일 발주 실측 진짜 원가 3,311,826원). 이제 뜻이 하나다: **모르면 모른다.**
+        「이 물건은 정말 원가가 0이다」를 주장하려면 그건 원가 0원을 **등록**해야 할 일이지
+        연결을 거부하는 상태가 대신할 일이 아니다.
     - 매핑 없음 / confirmed인데 master 없음 → 키가 없거나 cost_price=None(**미해결**).
     ★D-CPP-8: cost_price는 환율에 따라 상시 변하는 **단일 현재값**이고, 과거 창에 소급 적용된다.
       Jino 승인된 근사이지 시점 정확값이 아니다 — 응답 note에 명시한다.
@@ -313,8 +318,9 @@ def _cost_by_sku(db: Session, sku_ids: list[str]) -> dict[str, dict]:
     )
     out: dict[str, dict] = {}
     for pn, status, isku, cost_price in rows:
-        if status == "ignored":
-            out[pn] = {"cost_price": _Z, "status": "ignored", "internal_sku": None}
+        if status == "excluded":
+            # ★0이 아니라 None이다 — 0은 「공짜였다」는 주장이고 None은 「모른다」다.
+            out[pn] = {"cost_price": None, "status": "excluded", "internal_sku": None}
         else:
             out[pn] = {
                 "cost_price": _f(cost_price) if cost_price is not None else None,

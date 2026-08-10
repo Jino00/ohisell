@@ -119,15 +119,37 @@ class TestUnknownStaysUnknown:
         assert "원가" in row["profit_basis"]
         assert row["revenue"] == Decimal("20000"), "매출은 아는 값이니 그대로 낸다"
 
-    def test_ignored_매핑은_원가0으로_확정_취급한다(self, db):
-        """'원가 없음'과 '원가 0으로 결정됨'은 다르다 — 후자는 순이익을 낼 수 있다."""
+    def test_excluded는_cost_source로_이유를_남긴다(self, db):
+        """★「제외됨」과 「매핑 없음」은 둘 다 미상이지만 **할 일이 다르다**(적대 리뷰 P2-6).
+
+        원가가 없다는 결과만 같고, 하나는 «다시 묻지 마라»이고 하나는 «이어라»다.
+        `cost_source`가 그 구분을 나르는 유일한 자리다 — 안 실으면 작업 목록이 거짓말한다.
+        """
         _ad(db, "O1", "1000"); _bridge(db, "O1", "SKU_A")
         _po(db, 1, "SKU_A", qty=5, amount="20000")
-        _cost(db, "SKU_A", "INT-A", None, status="ignored")
+        _cost(db, "SKU_A", "INT-A", None, status="excluded")
+        _ad(db, "O2", "500"); _bridge(db, "O2", "SKU_B")
+        _po(db, 2, "SKU_B", qty=1, amount="5000")      # 매핑 자체가 없다
+        db.commit()
+        by = {r["sku_id"]: r for r in _rocket_sku_pnl(db, D, D, VENDOR)["skus"]}
+        assert by["SKU_A"]["cost_source"] == "excluded"
+        assert by["SKU_B"]["cost_source"] is None      # 매핑 없음 — 이유가 다르다
+        assert by["SKU_A"]["cost"] is None and by["SKU_B"]["cost"] is None
+
+    def test_excluded_매핑도_원가_미상이다(self, db):
+        """★'excluded'는 원가 0이 **아니다** — 순이익을 내지 않는다 (2026-08-10 뒤집힘).
+
+        종전 이 테스트는 `cost=0`·`net_profit=19,000`을 지켰다. 그 해석이 «후보를 못 찾은»
+        매핑 실패를 전액 이익으로 만들었다. 제외는 «연결을 안 한다»는 뜻이지 «원가가 0이다»는
+        사실 주장이 아니다 — 바로 위 테스트(원가 없음)와 **같은 결론**이어야 한다.
+        """
+        _ad(db, "O1", "1000"); _bridge(db, "O1", "SKU_A")
+        _po(db, 1, "SKU_A", qty=5, amount="20000")
+        _cost(db, "SKU_A", "INT-A", None, status="excluded")
         db.commit()
         row = _rocket_sku_pnl(db, D, D, VENDOR)["skus"][0]
-        assert row["cost"] == Decimal("0")
-        assert row["net_profit"] == Decimal("19000")
+        assert row["cost"] is None
+        assert row["net_profit"] is None, "원가 0으로 계산하면 순이익이 과대해진다"
 
     def test_기간에_발주가_없으면_순이익_대신_사유를_낸다(self, db):
         """1P 매출은 발주일 귀속이라 발주가 없는 기간엔 매출이 0이다 — −광고비를 손실로 내면 오해다."""
@@ -198,11 +220,11 @@ class TestCostSourcePriority:
         assert row["cost_source"] == "auto_map"
         assert "자동매핑" in row["profit_basis"], "추정임을 행이 스스로 말해야 한다"
 
-    def test_ignored보다_sellc가_우선이다(self, db):
+    def test_excluded보다_sellc가_우선이다(self, db):
         """ignored 22건도 자동매핑과 같은 6분 배치 산물이라 사람의 제외 결정이라는 보장이 없다."""
         _ad(db, "O1", "1000"); _bridge(db, "O1", "SKU_A")
         _po(db, 1, "SKU_A", qty=10, amount="50000")
-        _cost(db, "SKU_A", "INT-IGN", None, status="ignored")
+        _cost(db, "SKU_A", "INT-IGN", None, status="excluded")
         self._sellc(db, "O1", "INT-SELLC", "3300")
         db.commit()
         row = _rocket_sku_pnl(db, D, D, VENDOR)["skus"][0]

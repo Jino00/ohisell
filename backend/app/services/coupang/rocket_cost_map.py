@@ -24,7 +24,28 @@ from app.utils.kst import kst_now
 
 log = logging.getLogger(__name__)
 
-_VALID_STATUS = {"confirmed", "ignored"}
+# ★status는 둘뿐이고 **뜻이 하나씩**이다(2026-08-10, Jino 결정. 마이그 e4c7a1b8d206).
+#   'confirmed' = internal_sku에 연결됨 → product_master.cost_price가 원가.
+#   'excluded'  = **연결 안 함 · 재제안 방지 · 손익에서는 「모름」.**
+#
+# ★★옛 이름 `ignored`는 세 모듈에서 서로 다르게 읽혔다 — 두 곳은 «원가 0원·해결됨»,
+#   한 곳은 «원가 미상». 그래서 2026-06-17 일괄 매핑이 «후보를 못 찾은» 22건을 그 값으로
+#   찍자 두 엔진이 **원가 0원 = 전액 이익**으로 셌다(90일 발주 실측 진짜 원가 3,311,826원).
+#   이제 「원가 0원」 해석은 코드 어디에도 없다 — 모르면 모른다고 한다.
+_VALID_STATUS = {"confirmed", "excluded"}
+
+# 「제외」는 **사람만** 쓴다.
+#   ★prod 실측(2026-08-10): 사유 전수를 봐도 사람이 제외를 결정한 흔적은 **한 건도 없었다** —
+#     그 상태를 만든 것은 오직 배치였고, 그것도 「결정」이 아니라 「매칭 실패」였다.
+#
+# ★★**정직하게 적는다(적대 리뷰 P2-1)**: 아래 두 가드는 2026-06-17 배치를 **못 막았을 것**이다.
+#   그 22건은 `match_method='manual'`이었고 `note`도 달려 있었다(`no suggestion or low score`).
+#   즉 「자동은 suggested를 쓴다」도 「자동은 사유를 안 적는다」도 **사실이 아니었다.**
+#   ★그래서 이번 사고를 실제로 닫은 것은 가드가 아니라 **「원가 0원」 해석의 제거**다 —
+#     이제 배치가 또 제외로 찍어도 그건 「모름」이라 이익이 부풀지 않는다.
+#   가드는 그 위에 얹는 **문턱**이다. 진짜 판별자는 match_method도 note도 아니고
+#   **「사람이 쓰는 입구로 들어왔는가」**라, 아래 `allow_excluded`로 그것을 명시하게 한다.
+_AUTO_MATCH_METHODS = {"suggested", "auto"}
 
 
 # ════════════════════════════════════════════════
@@ -70,10 +91,10 @@ def _master_candidates(db: Session) -> list[dict]:
 def list_unmapped(
     db: Session, vendor_id: str | None = None, limit: int = 200, suggest: bool = True
 ) -> dict:
-    """발주상세에 있으나 매핑(confirmed/ignored) 없는 상품번호 목록 + 이름유사도 제안.
+    """발주상세에 있으나 매핑(confirmed/excluded) 없는 상품번호 목록 + 이름유사도 제안.
 
     각 항목: product_number·대표 product_name·barcode·총 발주수량(order_qty 합)·등장 PO 수·suggestions.
-    매핑 테이블에 행이 있는 상품번호(confirmed/ignored 모두)는 제외 — 재제안 방지.
+    매핑 테이블에 행이 있는 상품번호(confirmed/excluded 모두)는 제외 — 재제안 방지.
     limit: 제안 계산 비용 보호(미매핑 × 마스터 894 SequenceMatcher). suggest=False면 제안 생략(빠름).
     """
     mapped = {row[0] for row in db.query(RocketProductCostMap.product_number).all()}
@@ -165,18 +186,46 @@ def upsert_mapping(
     status: str = "confirmed",
     match_method: str = "manual",
     note: str | None = None,
+    *,
+    allow_excluded: bool = False,
 ) -> dict:
-    """상품번호 → internal_sku 매핑 확정(또는 'ignored' 원가 제외). 멱등 upsert.
+    """상품번호 → internal_sku 매핑 확정(또는 'excluded' 연결 제외). 멱등 upsert.
 
-    검증: status ∈ {confirmed, ignored}. confirmed면 internal_sku 필수 + product_master 존재 확인.
-      ignored면 internal_sku 무시(None 저장). product_name/barcode는 발주상세에서 자동 캐시(라벨용).
+    검증: status ∈ {confirmed, excluded}. confirmed면 internal_sku 필수 + product_master 존재 확인.
+      excluded면 internal_sku 무시(None 저장). product_name/barcode는 발주상세에서 자동 캐시(라벨용).
     반환: 저장된 매핑 dict(+resolved cost_price). 검증 실패는 ValueError(라우터가 400/422로 변환).
+
+    ★★`excluded`에는 가드 셋이 있다(2026-08-10):
+      ①**`allow_excluded=True`를 명시**해야 한다 — 기본값이 False라 **그냥 부르면 못 만든다.**
+        라우터(사람이 쓰는 입구)만 True로 넘긴다. 배치·스크립트가 이 값을 만들려면 코드에
+        그 한 줄을 **의식적으로** 써야 하고, 그러면 `git grep allow_excluded=True`로 잡힌다.
+        ★이게 유일하게 «자동 vs 사람»을 실제로 가르는 판별자다 — 아래 둘은 그러지 못한다(위 주석).
+      ②`note` 필수 — 사유 없는 제외는 나중에 «결정이었나 실패였나»를 가릴 수 없다.
+      ③`match_method`가 자동 계열이면 거부.
+    ★사유 문자열을 **파싱해서** 자동 분류하지는 않는다. 그건 또 하나의 추측을 코드에 굳히는
+      것이다 — 사유는 사람이 읽으라고 남긴다.
     """
     pn = (product_number or "").strip()
     if not pn:
         raise ValueError("product_number 필요")
     if status not in _VALID_STATUS:
-        raise ValueError(f"status는 {_VALID_STATUS} 중 하나")
+        raise ValueError(f"status는 {sorted(_VALID_STATUS)} 중 하나")
+    if status == "excluded":
+        if not allow_excluded:
+            raise ValueError(
+                "excluded(제외)는 사람이 쓰는 입구에서만 만들 수 있습니다 — "
+                "호출부가 allow_excluded=True를 명시해야 합니다"
+            )
+        if not (note or "").strip():
+            raise ValueError(
+                "excluded(제외)는 사유(note)가 필요합니다 — 사유 없는 제외는 나중에 "
+                "«사람의 결정»과 «자동 매핑 실패»를 가를 수 없습니다"
+            )
+        if (match_method or "").strip().lower() in _AUTO_MATCH_METHODS:
+            raise ValueError(
+                f"excluded(제외)는 자동 매핑이 쓸 수 없습니다(match_method={match_method}) — "
+                "사람이 결정한 것만 제외로 남깁니다"
+            )
 
     resolved_cost = None
     if status == "confirmed":
@@ -188,7 +237,7 @@ def upsert_mapping(
             raise ValueError(f"product_master에 없는 internal_sku: {sku}")
         resolved_cost = master.cost_price
         internal_sku = sku
-    else:  # ignored
+    else:  # excluded — 연결하지 않는다(원가는 «모름»으로 남는다)
         internal_sku = None
 
     # 발주상세에서 라벨 캐시(대표 product_name·barcode) 채움 — 매핑 목록 가독성.

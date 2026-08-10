@@ -380,7 +380,7 @@ export default function Rocket1PRevenue() {
 
                   {/* ★"—"로 끝내지 않는다 — 무엇을 등록하면 채워지는지 이름으로 말한다.
                       단 ①분담금 때문에 막힌 상태면 원가를 등록해도 안 풀리므로 그렇게 말하고
-                      ②`ignored`(이미 "제외"로 결정한) SKU는 목록에서 뺀다 — 재제안 방지가
+                      ②`excluded`(연결 안 하기로 정한) SKU는 목록에서 뺀다 — 재제안 방지가
                       그 상태의 존재 이유다(적대 리뷰 P2). */}
                   {p.uncosted.actionable_skus > 0 && (
                     <div className="border-t border-gray-100 px-4 py-3">
@@ -418,7 +418,7 @@ export default function Rocket1PRevenue() {
                             SellC에 원가를 등록하면 됩니다.{" "}</>
                         )}
                         {p.uncosted.excluded_skus > 0 && (
-                          <>이와 별개로 <b>「원가 제외」로 찍힌 SKU {p.uncosted.excluded_skus}개</b>가
+                          <>이와 별개로 <b>「연결 안 함」으로 찍힌 SKU {p.uncosted.excluded_skus}개</b>가
                             팔렸습니다 — 위 목록에서 뺐고, 그래서 커버리지 100%는 위 조치만으로는
                             달성되지 않습니다. <b>그중 일부는 «결정»이 아니라 자동 매핑 실패일 수
                             있습니다</b> — 아래에 기록된 사유와 함께 따로 적었습니다.{" "}</>
@@ -485,25 +485,25 @@ export default function Rocket1PRevenue() {
                     </div>
                   )}
 
-                  {/* ★「원가 제외」 결정도 늙는다 — 그때는 샘플·증정이었어도 지금은 정상
+                  {/* ★「연결 안 함」 결정도 늙는다 — 그때는 샘플·증정이었어도 지금은 정상
                       판매일 수 있다. 개수만 세면 재검토할 방법이 없어 이름으로 적는다.
                       ★작업 목록과 **분리**한다: 여기 있는 건 «시키는 것»이 아니라
                       «이 결정이 아직 맞나»를 보는 자리다. */}
                   {p.uncosted.excluded_top.length > 0 && (
                     <div className="border-t border-gray-100 px-4 py-3">
                       <div className="text-sm font-medium text-gray-700">
-                        「원가 제외」로 찍혀 있는 SKU {p.uncosted.excluded_skus}개가 팔렸습니다 ·
+                        「연결 안 함」으로 찍혀 있는 SKU {p.uncosted.excluded_skus}개가 팔렸습니다 ·
                         우리 매출 {won(p.uncosted.excluded_our_revenue)}
                       </div>
                       {/* ★★"이미 결정된 것"이라고 **단정하지 않는다**(2026-08-09 실사고).
-                          prod의 `ignored` 22건이 전부 `note='no suggestion or low score'`,
+                          prod의 옛 `ignored` 22건이 전부 `note='no suggestion or low score'`,
                           즉 «샘플·증정으로 결정»이 아니라 **이름 유사도 매칭이 실패한 것**을
                           같은 status에 넣어 둔 것이었다(ref 47 §2). 화면이 그걸 결정이라
                           부르며 "그냥 두세요"로 안내하면, 정상 판매 상품이 영영 손익 밖에 남는다.
                           status가 두 의미를 겸하는 한 화면이 할 수 있는 정직한 일은
                           **기록된 사유를 그대로 보여 주는 것**이다. */}
                       <p className="mt-0.5 text-xs text-gray-500">
-                        원가를 안 붙이기로 표시돼 있어 위 작업 목록에서 뺐습니다. ★다만 이 표시는
+                        「연결 안 함」으로 표시돼 있어 위 작업 목록에서 뺐습니다. ★이 표시는 <b>원가가 0원이라는 뜻이 아니라</b> 「모름」이라, 그 상품은 손익 계산에서 빠집니다. ★다만 이 표시는
                         <b> 두 가지를 겸하고 있습니다</b> — 샘플·증정처럼 <b>실제로 결정한 것</b>과,
                         자동 매핑이 후보를 못 찾아 <b>그냥 제외로 찍힌 것</b>. 오른쪽 「기록된 사유」를
                         보고 가르세요(<code className="text-[11px]">no suggestion or low score</code>

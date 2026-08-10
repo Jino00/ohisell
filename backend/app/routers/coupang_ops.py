@@ -1729,7 +1729,7 @@ def rocket_cost_map_unmapped(
 
 @router.get("/rocket/cost-map")
 def rocket_cost_map_list(db: Session = Depends(get_db)):
-    """확정/제외(ignored) 매핑 전체 목록 — internal_sku 현재 cost_price 조인."""
+    """확정/제외(excluded) 매핑 전체 목록 — internal_sku 현재 cost_price 조인."""
     return rocket_cost_map.list_mappings(db)
 
 
@@ -1740,9 +1740,12 @@ def rocket_cost_map_upsert(
 ):
     """상품번호 → internal_sku 매핑 확정(멱등 upsert).
 
-    body: {"product_number","internal_sku"(confirmed시 필수),"status"(confirmed|ignored, 기본 confirmed),
+    body: {"product_number","internal_sku"(confirmed시 필수),"status"(confirmed|excluded, 기본 confirmed),
            "match_method"(manual|suggested, 기본 manual),"note"}.
-    'ignored' = 원가 제외(샘플/증정). 검증 실패(없는 internal_sku 등)는 422.
+    'excluded' = **연결 안 함 · 재제안 방지 · 손익에선 「모름」**(원가 0원이 아니다).
+      ★사람만 쓸 수 있다 — `note` 필수 + `match_method`가 자동 계열이면 422.
+      2026-06-17 일괄 매핑이 «후보를 못 찾은» 것을 이 값으로 찍어 두 엔진이 원가 0원으로 셌다.
+    검증 실패(없는 internal_sku 등)는 422.
     """
     pn = str(body.get("product_number") or "").strip()
     if not pn:
@@ -1755,6 +1758,9 @@ def rocket_cost_map_upsert(
             status=str(body.get("status") or "confirmed"),
             match_method=str(body.get("match_method") or "manual"),
             note=body.get("note"),
+            # ★이 라우터가 «사람이 쓰는 입구»다 — 그래서 여기서만 제외를 허용한다.
+            #   배치·스크립트는 서비스를 직접 부르므로 기본값(False)에 막힌다.
+            allow_excluded=True,
         )
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))

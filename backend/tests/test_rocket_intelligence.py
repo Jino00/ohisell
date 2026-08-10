@@ -211,19 +211,67 @@ def test_cost_partial_coverage_is_transparent(db):
     assert r["net_profit"] == Decimal(138000)              # 150000 − 0 − 12000
 
 
-def test_cost_ignored_is_resolved_zero_cost(db):
-    # ignored SKU = 원가 0(결정된 제외)이지만 커버리지엔 해결분으로 포함
+def test_cost_excluded_is_unresolved_not_zero_cost(db):
+    """★'excluded'는 **원가 0도 해결분도 아니다** (2026-08-10 뒤집힘 — 합격기준 ④).
+
+    종전 이 테스트는 정반대를 지켰다: `has_cost=True` · `cost=0` · `coverage_pct=1.0000`.
+    그 해석 때문에 2026-06-17 배치가 «후보를 못 찾아» 제외로 찍은 22건이 **원가 0원 =
+    전액 이익**이 되고 **커버리지까지 100%로 부풀었다**(90일 발주 실측: 발주 8,146,140원 /
+    진짜 원가 3,311,826원). 커버리지가 부푸는 쪽이 특히 나쁘다 — 「원가가 다 붙었다」는
+    안심을 주면서 실제로는 안 붙어 있기 때문이다.
+    ★이 테스트가 다시 뒤집히면 그 사고가 되살아난 것이다.
+    """
     _po(db, 1, 50000, datetime(2026, 6, 5, 3, 0, 0), qty=5)
     _item(db, 1, "PN-FREE", 5, 50000)
-    _map(db, "PN-FREE", status="ignored")
+    _map(db, "PN-FREE", status="excluded")
     db.commit()
     r = compute_rocket_overview(db, *WIN)
-    assert r["has_cost"] is True
+    assert r["has_cost"] is False, "원가가 붙은 라인이 하나도 없다"
     assert r["cost"] == _Z
     cc = r["cost_coverage"]
-    assert cc["coverage_pct"] == Decimal("1.0000")  # ignored도 해결분
-    assert cc["ignored_order_amount"] == Decimal(50000)
-    assert cc["unmapped_order_amount"] == _Z
+    assert cc["coverage_pct"] == Decimal("0.0000"), "제외분을 해결로 세면 커버리지가 부푼다"
+    assert cc["excluded_order_amount"] == Decimal(50000)   # 크기는 계속 보인다
+    assert cc["resolved_order_amount"] == _Z
+    assert cc["unmapped_order_amount"] == _Z               # «매핑 없음»과는 여전히 구분된다
+
+
+def test_coverage_response_keys_are_stable(db):
+    """★프론트가 **직접 읽는 키**라 이름이 바뀌면 화면이 조용히 «—»가 된다(적대 리뷰 P2-4).
+
+    타입스크립트는 API 경계를 못 잡는다 — 백엔드가 키 이름을 바꿔도 프론트는 컴파일된다.
+    그래서 이름을 여기서 못 박는다. (2026-08-10에 `ignored_*` → `excluded_*`로 바꿨다.)
+    """
+    _po(db, 1, 50000, datetime(2026, 6, 5, 3, 0, 0), qty=5)
+    _item(db, 1, "PN-FREE", 5, 50000)
+    _map(db, "PN-FREE", status="excluded")
+    db.commit()
+    cc = compute_rocket_overview(db, *WIN)["cost_coverage"]
+    for key in ("excluded_sku_count", "excluded_order_amount", "confirmed_sku_count",
+                "unmapped_sku_count", "unmapped_order_amount", "resolved_order_amount",
+                "detail_order_amount", "coverage_pct"):
+        assert key in cc, f"프론트가 읽는 키 {key}가 사라졌다"
+    assert cc["excluded_sku_count"] == 1
+    assert "ignored_sku_count" not in cc and "ignored_order_amount" not in cc, "옛 키가 남으면 두 이름이 공존한다"
+    # ★detail은 **셋을 다 품는다** — 하나라도 빠지면 「수집된 금액」이 실제보다 작아진다.
+    assert Decimal(cc["detail_order_amount"]) == Decimal(50000)
+
+
+def test_excluded_and_unmapped_are_both_unresolved_but_distinguishable(db):
+    """★둘 다 미해결이지만 **할 일이 다르다** — 화면이 가를 수 있어야 한다.
+
+    제외 = 사람이 «연결 안 함»으로 정한 것(다시 묻지 마라) / 미매핑 = 아직 안 이은 것(이어라).
+    합쳐서 한 숫자로 만들면 작업 목록이 거짓말한다.
+    """
+    _po(db, 1, 80000, datetime(2026, 6, 5, 3, 0, 0), qty=8)
+    _item(db, 1, "PN-FREE", 5, 50000)
+    _item(db, 1, "PN-TODO", 3, 30000)
+    _map(db, "PN-FREE", status="excluded")
+    db.commit()
+    cc = compute_rocket_overview(db, *WIN)["cost_coverage"]
+    assert cc["excluded_order_amount"] == Decimal(50000)
+    assert cc["unmapped_order_amount"] == Decimal(30000)
+    assert cc["resolved_order_amount"] == _Z
+    assert cc["coverage_pct"] == Decimal("0.0000")
 
 
 def test_cost_no_mapping_behaves_like_s4(db):

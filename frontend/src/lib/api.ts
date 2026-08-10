@@ -1024,8 +1024,11 @@ export interface RocketCostCoverage {
   coverage_pct: number;               // resolved / window_total (0~1)
   detail_order_amount: string;        // 발주상세 수집된 금액
   unmapped_order_amount: string;      // 발주상세 있으나 매핑 無 금액
+  excluded_order_amount: string;      // 「연결 안 함」으로 정한 금액 — **미해결분**(원가 0이 아니다)
   confirmed_sku_count: number;
-  ignored_sku_count: number;
+  /** ★「연결 안 함」으로 정한 SKU 수. **해결분이 아니라 미해결분**이다(2026-08-10 전환) —
+   *  `coverage_pct`·`resolved_order_amount`에 들어가지 않는다. */
+  excluded_sku_count: number;
   unmapped_sku_count: number;
   pos_with_detail_count: number;
   pos_without_detail_count: number;   // 발주상세 미수집 PO 수
@@ -1092,7 +1095,9 @@ export interface RocketSkuPnlItem {
   order_qty: number;
   cost: string | null;
   // 원가 출처(D-19). sellc=등록원가(쿠팡 SKU코드 정확일치, 정본) / auto_map=이름 유사도 자동매핑(추정)
-  cost_source?: "sellc" | "auto_map" | "ignored" | null;
+  /** ★`excluded`는 **원가 0이 아니라 미상**이다(2026-08-10). 종전 `ignored`가 원가 0을
+   *  뜻해 매칭 실패분이 전액 이익으로 잡혔다 — 그 해석은 없앴다. */
+  cost_source?: "sellc" | "auto_map" | "excluded" | null;
   net_profit: string | null;
   profit_basis: string;
 }
@@ -1349,7 +1354,7 @@ export interface Rocket1PUncostedSku {
   /** ★무엇을 해야 하는가. 「원가 등록」 하나로 뭉뚱그리면 사용자가 헛일을 한다 —
    *  no_link = 쿠팡 상품번호 ↔ 내부 SKU **연결**이 없다(원가를 넣어도 안 붙는다)
    *  no_cost = 연결은 있는데 그 내부 SKU에 원가가 없다
-   *  excluded = 원가 제외로 **이미 결정**됨(시키면 안 된다) */
+   *  excluded = **연결 안 하기로 사람이 정함**(시키면 안 된다). ★손익에선 「모름」이고 원가 0원이 아니다 */
   reason: "no_link" | "no_cost" | "excluded";
   /** ★**최근에 새로 나온** 상품인가(판별자 = 발주 첫 등장일, 지평은 new_sku_window_days).
    *  「안 팔리던 게 이제 팔린다」와 「새로 나왔다」는 다르고, 후자만 매핑이 급하다.
@@ -1405,13 +1410,13 @@ export interface Rocket1PPnl {
     actionable_skus: number;       // 사람이 조치하면 해소되는 것(link+cost)
     link_missing_skus: number;     // ★쿠팡 상품번호 ↔ 내부 SKU 연결이 없다
     cost_missing_skus: number;     // 연결은 있는데 원가가 없다
-    excluded_skus: number;         // 이미 "제외"로 결정 — 시키면 안 된다
+    excluded_skus: number;         // 「연결 안 함」으로 정한 것 — 시키면 안 된다(원가는 「모름」)
     loss_confirmed_skus: number;
     new_skus: number;              // ★이번 기간에 새로 팔리기 시작한 미연결 SKU
     new_our_revenue: string;
     new_sku_window_days: number;   // ★판정 지평(발주 첫 등장 기준). 숨은 기준을 두지 않는다.
     top: Rocket1PUncostedSku[];    // actionable만
-    /** 「원가 제외」로 이미 결정된 SKU — 시키는 목록이 아니라 «그 결정이 아직 맞나» 재검토용. */
+    /** 「연결 안 함」으로 찍힌 SKU — 시키는 목록이 아니라 «그 결정이 아직 맞나» 재검토용. */
     excluded_top: Rocket1PUncostedSku[];
     excluded_our_revenue: string;
   };
@@ -1507,7 +1512,7 @@ export interface PnlAuditChecks {
 }
 // ★원가 미상을 «none» 하나로 접지 않는다 — 할 일이 다르다: no_link(다리 자체가 없다 →
 //   연결부터) / no_cost(다리는 있는데 원가가 없다) / unknown(다리·원가는 있는데 확정 방법이
-//   기록에 없다) / excluded(원가 제외로 이미 결정) / manual·suggested(다리가 있고 원가도
+//   기록에 없다) / excluded(연결 안 하기로 정함 — 원가는 「모름」) / manual·suggested(다리가 있고 원가도
 //   붙은 경우의 확정 방법 — suggested=이름 유사도 자동, 사람 미확인).
 export type PnlAuditCostSource =
   "manual" | "suggested" | "unknown" | "excluded" | "no_cost" | "no_link";
@@ -1847,7 +1852,7 @@ export interface RocketUnmappedItem {
 export interface RocketMappingItem {
   product_number: string;
   internal_sku: string;
-  status: "confirmed" | "ignored";
+  status: "confirmed" | "excluded";
   match_method: string;
   product_name: string | null;
   barcode: string | null;
@@ -1869,10 +1874,49 @@ export function fetchRocketCostMap(): Promise<RocketMappingItem[]> {
   return fetchApi<RocketMappingItem[]>("/api/coupang/ops/rocket/cost-map");
 }
 
+/** 「연결 안 함」으로 정한다 — **사유 필수**.
+ *
+ *  ★왜 전용 함수인가(2026-08-10 적대 리뷰 P2-7): 화면이 `note`를 빼먹으면 백엔드가 422로
+ *    거부해 **모든 제외 클릭이 조용히 실패**한다(화면엔 «❌ 제외 실패»만 뜬다). 백엔드
+ *    테스트는 그걸 못 잡는다 — 백엔드는 정상 동작하기 때문이다. 계약을 여기 한 곳에 모아
+ *    테스트가 물게 한다.
+ *  ★`match_method='manual'`을 여기서 박는다 — 자동 계열을 넘기면 백엔드가 거부한다.
+ */
+export function excludeRocketCostMap(
+  product_number: string, note: string,
+): Promise<RocketMappingItem> {
+  const reason = (note ?? "").trim();
+  if (!reason) {
+    return Promise.reject(new Error(
+      "사유가 필요합니다 — 사유 없는 제외는 나중에 «결정»과 «매칭 실패»를 가를 수 없습니다",
+    ));
+  }
+  return _postCostMap({
+    product_number, status: "excluded", match_method: "manual", note: reason,
+  });
+}
+
+/** 원가 매핑 확정. ★`status`가 **`"confirmed"`뿐**이라 여기로는 제외를 만들 수 없다.
+ *
+ *  ★왜 타입으로 막나(2026-08-10 적대 리뷰 2R F5): 화면이 `excludeRocketCostMap`을 안 쓰고
+ *    이 함수로 되돌아가 `note` 없이 제외를 보내면 **모든 제외 클릭이 422로 죽는데** 테스트는
+ *    전부 초록이었다(CommandCenter 렌더 테스트가 0건이라 호출부가 무방비다).
+ *    테스트를 새로 쓰는 것보다 **컴파일이 막는 쪽**이 강하다 — 회귀가 코드로 불가능해진다.
+ */
 export function upsertRocketCostMap(body: {
   product_number: string;
   internal_sku?: string;
-  status?: "confirmed" | "ignored";
+  status?: "confirmed";
+  match_method?: string;
+  note?: string;
+}): Promise<RocketMappingItem> {
+  return _postCostMap(body);
+}
+
+function _postCostMap(body: {
+  product_number: string;
+  internal_sku?: string;
+  status?: "confirmed" | "excluded";
   match_method?: string;
   note?: string;
 }): Promise<RocketMappingItem> {

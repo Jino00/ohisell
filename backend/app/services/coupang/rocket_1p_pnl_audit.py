@@ -450,8 +450,8 @@ def compute_pnl_audit_checks(db: Session, date_from: date, date_to: date,
 # ── 3단 — 「날짜×옵션」 원자 목록 ─────────────────────────────────────────
 #   원가 다리의 상태. ★배지 판정이 **status를 먼저** 보는 이유가 여기 있다:
 #   prod 실측(2026-08-07 `SELECT status, match_method, COUNT(*) … GROUP BY 1,2`)은
-#     confirmed·manual 73 / confirmed·suggested 172 / ignored·manual 22
-#   — 즉 «원가 제외 결정»(ignored) 행에도 match_method='manual'이 붙어 있다. match_method만
+#     confirmed·manual 73 / confirmed·suggested 172 / ignored·manual 22   ← 2026-08-07 시점
+#   — 즉 «원가 제외 결정»(옛 ignored) 행에도 match_method='manual'이 붙어 있다. match_method만
 #   보고 배지를 정하면 그 22건이 «수기 확인»으로 둔갑한다.
 _COST_SRC_SQL = "SELECT product_number, status, match_method FROM rocket_product_cost_map"
 
@@ -496,7 +496,8 @@ def compute_pnl_audit_atoms(db: Session, date_from: date, date_to: date, ctx: di
       · unknown  : 다리는 있고 원가도 붙었는데 확정 방법이 기록에 없다
       · no_link  : 다리 자체가 없다 → 원가를 등록해도 안 붙는다(연결부터)
       · no_cost  : 다리는 있는데 그 내부 SKU에 원가가 없다 → 원가 등록
-      · excluded : 원가 제외로 이미 결정(샘플·증정) → 아무것도 하면 안 된다
+      · excluded : **연결 안 하기로 사람이 정함** → 다시 제안하지 않는다.
+                   ★손익에서는 「모름」이다 — 원가 0원이 아니다(2026-08-10 뜻 통일).
       ★no_link와 no_cost를 한 배지로 접지 않는다 — **할 일이 서로 다르고**, 접으면 다리가
         있는 쪽에게 «다리 없음»이라는 거짓말을 하게 된다(화면 SA의 `uncosted_reason`이
         같은 이유로 셋을 가른다).
@@ -517,7 +518,7 @@ def compute_pnl_audit_atoms(db: Session, date_from: date, date_to: date, ctx: di
             source = mm if mm in _KNOWN_MATCH_METHODS else "unknown"
         elif st is None:
             source = "no_link"
-        elif st[0] == "ignored":
+        elif st[0] == "excluded":
             source = "excluded"
         else:
             source = "no_cost"
