@@ -590,3 +590,75 @@ def test_calculate_bep_mapped_price_without_cost_counts_separately(db):
     assert row.bep_roas is None
     assert res["mapped_price_rows"] == 1        # 판매가는 매핑에서 왔지만
     assert res["mapped_price_with_bep"] == 0    # BEP까지 간 건 0 — "3개 넣었는데 왜 0개?"가 보인다
+
+
+# ── D-NAO-168 (2026-08-10): 수취 배송비도 «지불과 같은 표본»에서 뽑는다 ──────────
+# 라이브 실사고: N배송은 2026-07-22 시작인데 지불은 최근 10건(N배송 반영), 수취는 120일
+# 평균(무료였던 과거 포함)이라 순배송원가가 **한 방향으로** 과대해졌다. 실측 상품에서
+# 377원이어야 할 자리에 2,782원(7배)이 들어갔고, 물류비 과대 → 공헌이익 과소 → **BEP 과대**
+# → 벌 수 있는 광고를 끈다. 계정 매출가중 BEP 1.836 → 1.710.
+
+
+def test_collected_uses_recent_sample_not_wide_window(db):
+    """★레짐 전환 재현 — 과거 11건은 무료, 최근 10건은 3,000원 수취.
+
+    넓은 창이면 수취 평균이 희석돼 순배송원가가 부풀고, 최근 표본이면 실제와 맞는다.
+    이 테스트가 «수취를 wide로 되돌리는» 변이를 잡는다(2026-08-10 변이 주입에서 생존했던 것)."""
+    # 과거 11건: 일반배송·무료(수취 0)
+    for i in range(11):
+        db.add(Order(channel_id=6, platform_product_id="p1", selling_price=Decimal("10000"),
+                     quantity=1, shipping_cost=Decimal("0"), raw_data=_entry_raw("TODAY"),
+                     order_date=date(2026, 6, 1 + i), order_number=f"old{i}"))
+    # 최근 10건: N배송·3,000원 수취
+    for i in range(10):
+        db.add(Order(channel_id=6, platform_product_id="p1", selling_price=Decimal("10000"),
+                     quantity=1, shipping_cost=Decimal("3000"),
+                     raw_data=_entry_raw("ARRIVAL_GUARANTEE"),
+                     order_date=date(2026, 7, 20 + i), order_number=f"new{i}"))
+    db.commit()
+    out = bep_calculator._avg_qty_and_logistics(db)["p1"]
+
+    assert out["nb_share"] == Decimal("1")            # 최근 10건이 전부 N배송
+    assert out["shipping"] == Decimal("3377")         # 지불도 N배송 단가
+    # ★핵심: 수취가 최근 표본(3,000)이지 21건 평균(약 1,428)이 아니다.
+    assert out["collected"] == Decimal("3000")
+    assert out["net_ship"] == Decimal("377")          # 3,377 − 3,000
+    # 넓은 창이었다면 net_ship이 약 1,949원(=3,377−1,428)으로 5배 부풀었다.
+    assert out["net_ship"] < Decimal("500")
+
+
+def test_avg_qty_still_uses_wide_window(db):
+    """★평균 수량은 넓은 창을 유지한다 — 그건 레짐이 아니라 진짜 표본 민감 항목이다.
+
+    수취를 최근 표본으로 옮기면서 수량까지 같이 옮기지 않았음을 고정한다."""
+    # 과거 10건 수량 5 · 최근 10건 수량 1 → 넓은 창 평균 3, 최근 표본만이면 1
+    for i in range(10):
+        db.add(Order(channel_id=6, platform_product_id="p1", selling_price=Decimal("10000"),
+                     quantity=5, shipping_cost=Decimal("0"), order_date=date(2026, 6, 1 + i),
+                     order_number=f"q_old{i}"))
+    for i in range(10):
+        db.add(Order(channel_id=6, platform_product_id="p1", selling_price=Decimal("10000"),
+                     quantity=1, shipping_cost=Decimal("0"), order_date=date(2026, 7, 20 + i),
+                     order_number=f"q_new{i}"))
+    db.commit()
+    out = bep_calculator._avg_qty_and_logistics(db)["p1"]
+    assert out["avg_qty"] == Decimal("3")   # (5×10 + 1×10)/20 — 넓은 창
+
+
+def test_net_ship_clamped_at_zero_when_collected_exceeds_paid(db):
+    """★보수 클램프 — 수취가 지불을 넘어도 배송마진을 «이익»(음수 물류비)으로 잡지 않는다.
+
+    클램프를 지우는 변이를 잡는다(2026-08-10 변이 주입에서 생존했던 것). 클램프가 없으면
+    logistics가 음수가 되어 공헌이익이 부풀고 BEP가 낙관 쪽으로 틀어진다."""
+    for i in range(10):
+        db.add(Order(channel_id=6, platform_product_id="p1", selling_price=Decimal("10000"),
+                     quantity=1, shipping_cost=Decimal("5000"),      # 지불 1,900보다 큼
+                     raw_data=_entry_raw("TODAY"), order_date=date(2026, 7, 1 + i),
+                     order_number=f"rich{i}"))
+    db.commit()
+    out = bep_calculator._avg_qty_and_logistics(db)["p1"]
+    assert out["shipping"] == Decimal("1900")
+    assert out["collected"] == Decimal("5000")
+    assert out["net_ship"] == Decimal("0")      # −3,100이 아니라 0
+    assert out["logistics"] == Decimal("0.00")
+    assert out["logistics"] >= 0                # 음수 물류비 금지
