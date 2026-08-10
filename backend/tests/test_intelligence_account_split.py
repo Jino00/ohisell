@@ -65,10 +65,13 @@ def _fee(db, account_key, vid, fee, vat, order_id):
         service_fee=Decimal(str(fee)), service_fee_vat=Decimal(str(vat))))
 
 
-def _return(db, account_key, vid, qty, receipt_id):
+def _return(db, account_key, vid, qty, receipt_id, order_id=None):
+    """order_id를 안 주면 «고아»(원주문 없음)가 된다 — D-CPP-33 이후 차감되지 않는다.
+    진짜 반품을 표현하려면 실제 주문번호를 넘겨야 한다."""
     db.add(CoupangReturnItem(
         receipt_id=receipt_id, vendor_item_id=vid, account_key=account_key,
-        vendor_id=VENDOR[account_key], order_id=f"O_{receipt_id}", receipt_type="RETURN",
+        vendor_id=VENDOR[account_key], order_id=order_id or f"O_{receipt_id}",
+        receipt_type="RETURN",
         cancel_count=qty, withdrawn=False, requested_at=OD))
 
 
@@ -98,8 +101,9 @@ def seeded(db):
     _fee(db, "COUPANG_WING1", "V1", 500, 50, "O1")
     _fee(db, "COUPANG_WING2", "V2", 800, 80, "O2")
     # 반품: 오픽스 V1 1개(단가 10,000 → 차감 10,000) / 오하이 V2 1개(단가 (20000+7000)/2=13500)
-    _return(db, "COUPANG_WING1", "V1", 1, "R1")
-    _return(db, "COUPANG_WING2", "V2", 1, "R2")
+    # ★원주문을 명시한다 — 안 하면 고아가 되어 차감 대상이 아니다(D-CPP-33).
+    _return(db, "COUPANG_WING1", "V1", 1, "R1", order_id="O1")
+    _return(db, "COUPANG_WING2", "V2", 1, "R2", order_id="O2")
     # RG 정산: 오픽스 400 / 오하이 600 전액차감
     _rg(db, "COUPANG_WING1", "sale_fee", 400)
     _rg(db, "COUPANG_WING2", "sale_fee", 600)
@@ -194,8 +198,14 @@ def test_equivalence_sum_equals_total(seeded):
     w2 = _sum(seeded, "COUPANG_WING2")["account"]["summary"]
     tot = _sum(seeded, None)["account"]["summary"]
     for k in ("revenue", "ad_spend", "total_fee", "return_deduction",
-              "cost", "net_profit", "rg_settlement_total"):
+              "cost", "rg_settlement_total"):
         assert w1[k] + w2[k] == tot[k], f"{k}: {w1[k]}+{w2[k]} != {tot[k]}"
+    # net_profit만 «원 단위» 허용오차를 둔다(D-CPP-33): 납부세액은 계정 «합계»에 대해
+    # 한 번 계산하고 한 번 반올림하므로, 계정별로 쪼개 더하면 반올림이 두 번 일어난다.
+    # 항목별 축(매출·수수료·원가·광고)은 여전히 «정확히» 일치해야 한다 — 위 루프가 지킨다.
+    gap = abs((w1["net_profit"] + w2["net_profit"]) - tot["net_profit"])
+    assert gap <= Decimal("0.01"), f"net_profit 등가성 이탈 {gap} (반올림 범위 초과)"
+    assert abs((w1["payable_vat"] + w2["payable_vat"]) - tot["payable_vat"]) <= Decimal("0.01")
 
 
 def test_unknown_account_empty(seeded):
@@ -226,3 +236,120 @@ def test_vendor_id_fallback_no_env(seeded, monkeypatch):
     monkeypatch.delenv("COUPANG_WING1_VENDOR_ID", raising=False)
     s = _sum(seeded, "COUPANG_WING1")["account"]["summary"]
     assert s["ad_spend"] == Decimal("3000")  # 폴백으로 A01564720 해석 → 오픽스 광고만
+
+
+def test_orphan_return_is_not_deducted(db):
+    """★D-CPP-33: 원주문이 orders에 없는 반품은 «차감 대상이 아니다».
+
+    라이브 실측(2026-08-10, 90일·3P 2계정): 반품 53건 중 34건(64%)이 고아였다.
+    쿠팡 주문 API가 취소분을 안 주므로 «수집 전에 취소된 주문»은 orders에 영영 안 들어온다.
+    매출로 센 적이 없으니 그 원가·매출을 빼면 유령 차감이 된다 — 7월 WING2에서 실제로
+    return_deduction 38,800원이 전액 유령이었다.
+    """
+    _ch(db, 1, "COUPANG_WING1", "개인회사 오픽스")
+    _product(db, "V1", "COUPANG_WING1")
+    _order(db, 1, "O1", "V1", 10000)
+    _return(db, "COUPANG_WING1", "V1", 1, "R9")          # order_id 미지정 → 고아
+    db.commit()
+    s = _sum(db, "COUPANG_WING1")["account"]["summary"]
+    assert s["return_deduction"] == _Z, "매출에 없는 주문의 반품은 빼면 안 된다"
+    assert s["fee_base_total"] == Decimal("10000"), "과세표준도 유령만큼 깎이면 안 된다"
+    rs = s["return_suppression"]
+    assert rs["return_rows"] == 1 and rs["suppressed_orphan_rows"] == 1
+    assert rs["deducted_rows"] == 0
+
+
+def test_real_return_is_still_deducted(db):
+    """반대 방향 가드: 원주문이 «매출에 잡힌» 반품은 여전히 차감된다(억제가 과하면 안 된다)."""
+    _ch(db, 1, "COUPANG_WING1", "개인회사 오픽스")
+    _product(db, "V1", "COUPANG_WING1")
+    _order(db, 1, "O1", "V1", 10000, qty=2)
+    _return(db, "COUPANG_WING1", "V1", 1, "R1", order_id="O1")
+    db.commit()
+    s = _sum(db, "COUPANG_WING1")["account"]["summary"]
+    assert s["return_deduction"] == Decimal("5000"), "단가 5,000 × 반품 1개"
+    assert s["return_suppression"]["deducted_rows"] == 1
+    assert s["return_suppression"]["suppressed_orphan_rows"] == 0
+
+
+def test_shipping_income_is_counted_not_only_cost(db):
+    """★D-CPP-33: 배송은 «비용»만 빼고 «수입»을 안 세면 무조건 손해로 잡힌다.
+
+    구 대시보드는 둘 다 센다(shipping_revenue) — 그래서 두 화면이 갈렸다.
+    수입은 매출이 아니라 순이익에만 더한다(매출 축은 쿠팡 판매분석과 대조하는 축이라 불변).
+    """
+    _ch(db, 1, "COUPANG_WING1", "개인회사 오픽스")
+    _product(db, "V1", "COUPANG_WING1")
+    db.add(Order(channel_id=1, order_number="O1", platform_product_id="V1", quantity=1,
+                 selling_price=Decimal("10000"), shipping_cost=Decimal("2500"),
+                 order_date=OD, status="delivered"))
+    db.commit()
+    s = _sum(db, "COUPANG_WING1")["account"]["summary"]
+    assert s["shipping_income_3p"] == Decimal("2500")
+    assert s["seller_shipping_3p"] == Decimal("1900"), "한진 실단가"
+    assert s["revenue"] == Decimal("10000"), "배송 수입은 매출 축에 섞지 않는다"
+
+
+def test_payable_vat_is_deducted_like_the_other_engine(db):
+    """★D-CPP-33: Jino 2026-08-04 「납부세액을 뺀다」 결정이 이 엔진에도 내려앉았는가.
+
+    2026-06-15엔 「VAT는 양쪽 미차감으로 통일」이었고 그 주석이 여기 남아 있었다 —
+    결정이 뒤집혔는데 profit_calculator에만 반영돼 두 화면이 32,262.96원(7월 WING2) 갈렸다.
+    """
+    _ch(db, 1, "COUPANG_WING1", "개인회사 오픽스")
+    _product(db, "V1", "COUPANG_WING1")
+    _order(db, 1, "O1", "V1", 11000)
+    db.commit()
+    s = _sum(db, "COUPANG_WING1")["account"]["summary"]
+    # 매출 11,000 · 수수료 11,000×7.8%×1.1=943.80 · 배송비 1,900 · 원가 0 · 광고 0
+    #   매출VAT 1,000 − 매입VAT (943.80+1,900)×10/110=258.53 → 납부세액 741.47
+    assert s["payable_vat"] == Decimal("741.47")
+    assert s["net_profit_pre_vat"] - s["payable_vat"] == s["net_profit"]
+
+
+def test_return_facts_survive_the_deduction_suppression(db):
+    """★적대 리뷰 P1-1: 억제는 «돈 축»만 죽여야 한다 — 사실 축은 살아 있어야 한다.
+
+    첫 구현은 억제를 _agg_returns 집계 자체에 걸어서, 라이브 90일 반품 53건·56개가 있는데도
+    화면이 「반품 0건 · 반품률 0%」라고 말했다. 화면이 사실을 두고 거짓말한 것이다.
+    """
+    _ch(db, 1, "COUPANG_WING1", "개인회사 오픽스")
+    _product(db, "V1", "COUPANG_WING1")
+    _order(db, 1, "O1", "V1", 10000)
+    _return(db, "COUPANG_WING1", "V1", 1, "R9")          # 고아 — 차감 대상 아님
+    db.commit()
+    r = _sum(db, "COUPANG_WING1")
+    s = r["account"]["summary"]
+    p = r["product"]["summary"]
+    row = next(x for x in r["product"]["by_option"] if x["vendor_item_id"] == "V1")
+
+    assert s["return_deduction"] == _Z, "돈은 빼지 않는다(매출에 없는 주문)"
+    assert p["return_qty"] == 1, "★그러나 반품이 «있었다»는 사실은 남아야 한다"
+    assert row["return_qty"] == 1
+    assert row["deductible_qty"] == 0, "그중 손익에 반영된 수량은 0"
+    assert row["return_rate"] is not None and Decimal(str(row["return_rate"])) > 0
+
+
+def test_shipment_dedup_counts_income_once_per_box(db):
+    """배송 수입은 «배송 1건당 1회»다 — 쿠팡이 배송 단위 값을 박스 내 모든 라인에 복사한다.
+
+    라인마다 더하면 다중라인 주문에서 과대계상된다(2026-08-03 실증). 비용 dedup에는 테스트가
+    있었지만 수입 쪽엔 없어 적대 리뷰 P2-2로 지적됐다 — 변이(dedup 제거)가 생존했다.
+    """
+    _ch(db, 1, "COUPANG_WING1", "개인회사 오픽스")
+    _product(db, "V1", "COUPANG_WING1")
+    _product(db, "V2", "COUPANG_WING1")
+    # 같은 배송박스(shipmentBoxId)의 두 라인에 배송비 2,500이 복사돼 있다.
+    # ★쿠팡의 배송 단위는 order_number가 아니라 shipmentBoxId다(_shipment_key) — 없으면
+    #   행별 고유 sentinel로 떨어져 서로 다른 주문이 한 배송으로 합쳐지는 것을 막는다.
+    for i, vid in enumerate(("V1", "V2")):
+        db.add(Order(channel_id=1, order_number="O1", platform_product_id=vid, quantity=1,
+                     platform_order_line_id=str(i),
+                     selling_price=Decimal("10000"), shipping_cost=Decimal("2500"),
+                     order_date=OD, status="delivered",
+                     raw_data='{"shipmentBoxId": "BOX1"}'))
+    db.commit()
+    s = _sum(db, "COUPANG_WING1")["account"]["summary"]
+    assert s["shipment_count_3p"] == 1, "배송은 1건"
+    assert s["shipping_income_3p"] == Decimal("2500"), "5,000이면 라인마다 더한 것(과대계상)"
+    assert s["seller_shipping_3p"] == Decimal("1900"), "비용도 배송 1건분"

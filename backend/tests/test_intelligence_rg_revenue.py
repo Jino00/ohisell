@@ -90,7 +90,12 @@ def test_net_profit_d3_formula(db):
     assert s["cost"] == Decimal("2000")
     assert s["net_profit_pre_rg"] == Decimal("8000")   # 10,000 − 2,000 (정산 전)
     assert s["rg_settlement_total"] == Decimal("800")
-    assert s["net_profit"] == Decimal("7200")          # 전액차감
+    # D-CPP-33 P1-2 수용: 매입세액 축에 RG 정산액(rg_total)도 들어간다(종합조망 매출이 RG를
+    # 편입하므로 매입도 같이 넣어야 편측 항이 안 생긴다). 매출VAT(10,000×10/110=909.09) −
+    # 매입세액(원가 2,000 + RG정산 800 = 2,800 × 10/110=254.55) = 654.55(=727.27−72.73, RG분 반영)
+    assert s["payable_vat"] == Decimal("654.55")
+    # net = pre_vat(net_profit_pre_rg 8,000 − rg_total 800 = 7,200) − payable_vat 654.55
+    assert s["net_profit"] == Decimal("6545.45")       # 전액차감 후 납부세액까지
 
 
 def test_3p_plus_rg_combined(db):

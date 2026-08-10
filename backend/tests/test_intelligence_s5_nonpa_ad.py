@@ -99,7 +99,9 @@ def test_integration_nonpa_deducted(db):
     ad = _cc(db)["ad"]["summary"]
     # base net_profit = 0매출 − 옵션광고 100 = −100. 비-PA 65 추가차감 → −165.
     assert s["ad_nonpa_deducted"] == Decimal("65")
-    assert s["net_profit"] == Decimal("-165")
+    # D-CPP-33: 납부세액 반영. 매출 0 → 매출VAT 0, 매입세액 (광고100+비-PA65)×10/110=15.00 환급
+    assert s["payable_vat"] == Decimal("-15.00")
+    assert s["net_profit"] == Decimal("-150.00")
     # ad_sum 분해 노출
     assert ad["ad_confirmed_pa"] == Decimal("1000")
     assert ad["ad_confirmed_total"] == Decimal("1065")
@@ -117,7 +119,8 @@ def test_nonpa_applied_when_option_pa_zero(db):
     s = _cc(db)["account"]["summary"]
     ad = _cc(db)["ad"]["summary"]
     assert s["ad_nonpa_deducted"] == Decimal("65")
-    assert s["net_profit"] == Decimal("-65")     # 옵션 0 − 비-PA 65
+    # 매입세액 65×10/110=5.91 환급 (D-CPP-33)
+    assert s["net_profit"] == Decimal("-59.09")  # 옵션 0 − 비-PA 65 + 환급 5.91
     assert ad["ad_confirmed_nonpa"] == Decimal("65")
 
 
@@ -133,7 +136,7 @@ def test_gate_wing2_does_not_apply_ofix_nonpa(db):
     s = compute_command_center(db, WIN[0], WIN[1], "COUPANG_WING2")["account"]["summary"]
     ad = compute_command_center(db, WIN[0], WIN[1], "COUPANG_WING2")["ad"]["summary"]
     assert s["ad_nonpa_deducted"] == _Z          # ★오픽스 비-PA 오적용 방지
-    assert s["net_profit"] == Decimal("-100")    # WING2 옵션 광고만(비-PA 0)
+    assert s["net_profit"] == Decimal("-90.91")   # WING2 옵션 광고 100 − 매입세액 환급 9.09
     assert ad["ad_confirmed_nonpa"] == _Z
 
 
@@ -178,7 +181,7 @@ def test_nonpa_zero_when_total_equals_pa(db):
     db.commit()
     s = _cc(db)["account"]["summary"]
     assert s["ad_nonpa_deducted"] == _Z
-    assert s["net_profit"] == Decimal("-100")  # 옵션 광고만(비-PA 0)
+    assert s["net_profit"] == Decimal("-90.91")  # 옵션 광고 100 − 매입세액 환급 9.09
 
 
 # ─── 7) 감사 체인(codex P2-1): pre_nonpa → −비-PA → pre_rg ───────
@@ -192,7 +195,7 @@ def test_audit_chain_pre_nonpa(db):
     assert s["net_profit_pre_nonpa"] == Decimal("-100")
     assert s["net_profit_pre_nonpa"] - s["ad_nonpa_deducted"] == s["net_profit_pre_rg"]
     assert s["net_profit_pre_rg"] == Decimal("-165")
-    assert s["net_profit"] == Decimal("-165")  # RG 데이터 없음 → 플립 no-op
+    assert s["net_profit"] == Decimal("-150.00")  # RG 플립 no-op, 납부세액 −15.00만 반영
 
 
 # ─── 8) ingest 카운터(codex P2-2): missing/clamped 가시화 ────────

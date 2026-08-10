@@ -222,16 +222,71 @@ def _merge_rg_orders(orders: dict[str, dict], rg_orders: dict[str, dict]) -> Dec
     return rg_total_rev
 
 
+def _orphan_return_stats(db: Session, dfrom: date, dto: date,
+                         account_key: str | None = None,
+                         channel_ids: list[int] | None = None) -> dict:
+    """차감에서 «빠진» 반품이 몇 건인지 센다 — 억제는 조용히 하면 안 된다(D-CPP-33).
+
+    orphan  = 원주문이 orders에 아예 없다(수집 전 취소분). 매출에 없으니 차감 대상도 아니다.
+    excluded= 원주문이 있으나 status가 매출제외다. 이미 매출에서 빠져 이중차감이 될 뻔한 것.
+    화면이 「반품 N건 중 M건은 매출에 없어 차감하지 않았다」고 실토할 수 있게 한다.
+    """
+    start = datetime.combine(dfrom, time.min)
+    end = datetime.combine(dto, time.max)
+    base = db.query(CoupangReturnItem).filter(
+        CoupangReturnItem.withdrawn.is_(False),
+        CoupangReturnItem.requested_at >= start,
+        CoupangReturnItem.requested_at <= end,
+    )
+    if account_key is not None:
+        base = base.filter(CoupangReturnItem.account_key == account_key)
+
+    def _order_q(counted: bool):
+        qq = (
+            db.query(Order.id)
+            .join(Channel, Order.channel_id == Channel.id)
+            .filter(
+                Channel.platform == "coupang",
+                Order.order_number == CoupangReturnItem.order_id,
+                Order.platform_product_id == CoupangReturnItem.vendor_item_id,
+            )
+        )
+        qq = qq.filter(Order.status.notin_(tuple(REVENUE_EXCLUDED)) if counted
+                       else Order.status.in_(tuple(REVENUE_EXCLUDED)))
+        if channel_ids is not None:
+            qq = qq.filter(Order.channel_id.in_(channel_ids))
+        return qq
+
+    total = base.count()
+    deducted = base.filter(_order_q(True).exists()).count()
+    excluded = base.filter(_order_q(False).exists()).count()
+    return {
+        "return_rows": total,
+        "deducted_rows": deducted,
+        "suppressed_excluded_rows": excluded,
+        "suppressed_orphan_rows": total - deducted - excluded,
+    }
+
+
 def _agg_seller_shipping_3p(db: Session, dfrom: date, dto: date,
-                            channel_ids: list[int] | None = None) -> Decimal:
-    """쿠팡 3P 판매자 배송비(한진 1,900/물리배송) 합계 — 계정 단위 net_profit 차감용.
+                            channel_ids: list[int] | None = None) -> dict:
+    """쿠팡 3P 배송의 «비용»과 «수입»을 배송(박스) 단위로 함께 집계한다.
+
+    ★D-CPP-33: 종전엔 비용(한진 1,900)만 세고 고객이 낸 배송비 «수입»은 안 셌다 — 구 대시보드는
+      둘 다 센다(shipping_revenue). 비용만 빼고 수입은 안 세면 배송이 무조건 손해로 잡힌다.
+      수입은 `_delivery_income`(구 대시보드와 같은 SoT)을 배송당 1회만 가산한다 — 쿠팡은 배송
+      단위 값을 박스 내 모든 라인에 복사해 두므로 라인마다 더하면 과대계상된다(2026-08-03 실증).
+    ★수입을 «매출»이 아니라 «순이익»에만 더하는 이유: 종합조망의 매출 축은 쿠팡 판매분석과
+      1:1 대조하는 축이다(S2 정본매출). 배송 수입을 매출에 섞으면 그 대조가 깨진다.
 
     구 대시보드는 차감하나 종합조망은 누락했던 3P 실비용(Jino 2026-06-15 통일 결정).
     3P(판매자배송)에서만 발생 — RG/로켓은 쿠팡 풀필먼트라 Order 테이블에 행이 없어 자동 0.
     ★구 대시보드 profit_calculator._shipment_key(배송 dedup=shipmentBoxId)·HANJIN_PER_SHIPMENT(단가)
       를 그대로 재사용(SoT 단일 정의). 매출 기준과 동일하게 REVENUE_EXCLUDED·위탁은 제외(_agg_orders 정합).
     channel_ids 주면 해당 계정만(없으면 전체 쿠팡). 데이터 없으면 0(회귀 가드)."""
-    from app.services.profit_calculator import _shipment_key, HANJIN_PER_SHIPMENT
+    from app.services.profit_calculator import (
+        HANJIN_PER_SHIPMENT, _delivery_income, _shipment_key,
+    )
     from app.services.coupang.revenue_fee_source import COUPANG_3P_CODES
     start = datetime.combine(dfrom, time.min)
     end = datetime.combine(dto, time.max)
@@ -249,14 +304,23 @@ def _agg_seller_shipping_3p(db: Session, dfrom: date, dto: date,
     if channel_ids is not None:
         q = q.filter(Order.channel_id.in_(channel_ids))
     seen: set = set()
+    income = _Z
     for o in q.all():
         ch = chmap.get(o.channel_id)
         # ★3P(판매자배송) 채널만 — RG/로켓은 쿠팡 풀필먼트라 판매자 한진비 없음(codex P1).
         #   RG 채널은 marketplace 타입이라 consignment 필터로는 안 걸러짐 → 3P 코드로 명시 제한.
         if not (ch and ch.code in COUPANG_3P_CODES):
             continue
-        seen.add(_shipment_key(ch, o))
-    return HANJIN_PER_SHIPMENT * len(seen)
+        skey = _shipment_key(ch, o)
+        if skey in seen:
+            continue          # 배송 1건당 1회 — 비용도 수입도(라인 복사값 과대계상 방지)
+        seen.add(skey)
+        income += _delivery_income(ch, o)
+    return {
+        "cost": HANJIN_PER_SHIPMENT * len(seen),
+        "income": income,
+        "shipments": len(seen),
+    }
 
 
 # ★커맨드센터(옵션 그레인 조망)는 **Wing 축(3P/2P)**이다 — 1P 로켓배송은 별도 화면
@@ -368,27 +432,50 @@ def _agg_returns(db: Session, dfrom: date, dto: date,
     #     (Channel.code==account_key는 company 다채널 도메인보다 좁아 RG가 orders 편입 시 비대칭 →
     #      이중차감 재발 위험. codex R2 권고대로 _agg_orders 도메인으로 대칭화.)
     #   - platform_product_id == vendor_item_id: 옵션ID 라인 단위(반품 grain과 정렬). vid 전역 UNIQUE.
-    excluded_q = (
+    # ★D-CPP-33(2026-08-10): 위 불변식을 «양쪽 다» 강제한다.
+    #   종전 구현은 「주문이 있고 + 매출제외됨」만 걸러냈다(부정 조건). 그래서 «주문이 아예 없는»
+    #   반품행은 그대로 통과해 매출로 센 적 없는 주문의 원가·매출을 빼고 있었다 — 유령 차감이다.
+    #   라이브 실측(90일, 3P 2계정): 반품 53건 중 **34건(64%)이 고아**(원주문이 orders에 없음.
+    #   WING1 61% · WING2 68%). 7월 WING2는 6건 중 5건이 고아라 return_deduction 38,800원이
+    #   **전액 유령**이었다. 나머지 1건은 status=cancelled라 어차피 억제된다.
+    #   고아가 생기는 이유: 쿠팡 주문 API가 취소분을 안 주므로 «수집 전에 취소된 주문»은 orders에
+    #   영영 안 들어온다. 그런 주문은 매출에 없으니 뺄 것도 없다.
+    #   → 부정 조건(~excluded)을 **긍정 불변식(매출에 잡힌 주문이 존재)**으로 바꾼다.
+    #     이 한 줄이 두 경우를 모두 덮는다: 고아(매칭 0건) · 매출제외(status 제외라 미매칭).
+    counted_q = (
         db.query(Order.id)
         .join(Channel, Order.channel_id == Channel.id)
         .filter(
             Channel.platform == "coupang",
             Order.order_number == CoupangReturnItem.order_id,
             Order.platform_product_id == CoupangReturnItem.vendor_item_id,
-            Order.status.in_(tuple(REVENUE_EXCLUDED)),
+            Order.status.notin_(tuple(REVENUE_EXCLUDED)),
         )
     )
     if channel_ids is not None:
-        excluded_q = excluded_q.filter(Order.channel_id.in_(channel_ids))
-    q = q.filter(~excluded_q.exists())
-    rows = q.group_by(CoupangReturnItem.vendor_item_id).all()
+        counted_q = counted_q.filter(Order.channel_id.in_(channel_ids))
+
+    # ★★적대 리뷰 P1-1 수용(2026-08-10): 억제를 여기서 «통째로» 걸면 사실 축까지 죽는다.
+    #   이 SA는 돈(return_deduction)만이 아니라 **사실**(return_qty·receipt_count·return_rate)의
+    #   유일한 원천이다. 첫 구현은 억제된 행을 집계에서 아예 빼서, 라이브 90일 반품 53건·56개가
+    #   있는데도 화면이 「반품 0건 · 반품률 0%」라고 말했다 — 화면이 사실을 두고 거짓말한 것이다.
+    #   → 사실은 «전부» 세고(억제 없음), 차감에 쓸 수량만 따로 센다(deductible_qty).
+    #   호출부는 return_deduction·net_qty엔 deductible_qty를, 표시엔 return_qty를 쓴다.
+    fact_rows = q.group_by(CoupangReturnItem.vendor_item_id).all()
+    ded_rows = (
+        q.filter(counted_q.exists())
+        .group_by(CoupangReturnItem.vendor_item_id)
+        .all()
+    )
+    deductible = {str(vid): int(cancel or 0) for vid, cancel, _cnt, _name in ded_rows}
     return {
         str(vid): {
-            "return_qty": int(cancel or 0),
-            "receipt_count": int(cnt or 0),
+            "return_qty": int(cancel or 0),          # 사실 — 억제 없음
+            "receipt_count": int(cnt or 0),          # 사실 — 억제 없음
+            "deductible_qty": deductible.get(str(vid), 0),  # 돈 — 매출에 잡힌 주문의 반품만
             "name": name,
         }
-        for vid, cancel, cnt, name in rows
+        for vid, cancel, cnt, name in fact_rows
     }
 
 
@@ -741,8 +828,9 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
         revenue = o.get("revenue", _Z)
         order_qty = o.get("qty", 0)
         unit_price = o.get("unit_price", _Z) or m.get("sale_price", _Z)
-        return_qty = r.get("return_qty", 0)
-        return_deduction = unit_price * return_qty  # 추정(평균단가×반품수량)
+        return_qty = r.get("return_qty", 0)                 # 사실(표시용) — 고아·매출제외 포함
+        deductible_qty = r.get("deductible_qty", 0)         # 돈(차감용) — 매출에 잡힌 것만
+        return_deduction = unit_price * deductible_qty  # 추정(평균단가×차감대상수량)
         unit_price_by_vid[vid] = unit_price  # S4: 정산화 보정의 반품 되돌림용(동일 단가)
         # ── 수수료: 순매출 × 그 옵션의 요율 × 1.1 (D-CPP-32) ──
         # 순매출인 이유: 반품분은 쿠팡이 수수료도 환급한다(정산에 REFUND 음수 행). 총매출에 곱하면
@@ -777,7 +865,9 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
         # 단가는 순판매수량(주문−반품)에 적용. 0/None은 원가정보 없음으로 간주(미반영).
         internal_cost = cm.get("cost_price")
         supply = m.get("supply_price")
-        net_qty = order_qty - return_qty
+        # 원가도 «돈 축»을 따른다 — 고아 반품은 그 주문 수량이 order_qty에 애초에 없으므로
+        # 빼면 없는 수량을 두 번 빼는 셈이 된다.
+        net_qty = order_qty - deductible_qty
         if internal_cost is not None and internal_cost > 0:
             unit_cost, cost_source = _f(internal_cost), "internal"
         elif supply is not None and supply > 0:
@@ -820,7 +910,8 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
         product_rows.append({
             "vendor_item_id": vid, "name": name,
             "order_count": o.get("order_count", 0), "order_qty": order_qty,
-            "return_qty": return_qty,
+            "return_qty": return_qty,                       # 사실
+            "deductible_qty": deductible_qty,                # 그중 손익에 반영된 수량
             "return_rate": _ratio(Decimal(return_qty), order_qty),
             "stock": m.get("stock"), "on_sale": m.get("on_sale"),
             "status_name": m.get("status_name"),
@@ -979,14 +1070,53 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
     # status enum(Codex #6): money basis 명시. 불리언 안 씀.
     account_sum["rg_flip_status"] = "applied_full" if len(rg_fees) > 0 else "not_applied_no_data"
 
-    # ─── 3P 판매자 배송비(한진 1,900/물리배송) — 계정 단위 최종 차감 ───
-    # 구 대시보드는 차감하나 종합조망은 누락했던 3P 실비용(Jino 2026-06-15). VAT는 양쪽 미차감으로 통일.
+    # ─── 3P 배송 손익(한진 1,900 비용 − 고객이 낸 배송비 수입) — 계정 단위 최종 반영 ───
+    # 구 대시보드는 차감하나 종합조망은 누락했던 3P 실비용(Jino 2026-06-15).
+    # ★D-CPP-33(2026-08-10): 위 줄에 있던 "VAT는 양쪽 미차감으로 통일"은 **폐기된 옛말**이다 —
+    #   Jino가 2026-08-04에 「납부세액을 뺀다」로 방침을 뒤집었는데(payable_vat 참조) 그 결정이
+    #   profit_calculator에만 내려앉고 여기엔 옛 주석만 남았다. 아래에서 같이 차감한다.
+    # ★D-CPP-33: 배송 «수입»도 함께 센다. 종전엔 비용만 빼서 배송이 무조건 손해로 잡혔다
+    #   (라이브 7월 WING2: 수입 10,000원이 통째로 빠져 있었다).
     # 3P(판매자배송)만 발생, RG/로켓=쿠팡 풀필먼트라 Order rows 0 → 자동 0(회귀 가드).
-    # D-14 패턴: 계정 단위(summary)만 차감, by_option(account_rows) 운영지표 불변. 구 대시보드와 동일 SoT 단가/dedup.
+    # D-14 패턴: 계정 단위(summary)만 반영, by_option(account_rows) 운영지표 불변.
     account_sum["net_profit_pre_shipping"] = account_sum["net_profit"]
-    _seller_shipping = _agg_seller_shipping_3p(db, dfrom, dto, acc["channel_ids"])
-    account_sum["seller_shipping_3p"] = _seller_shipping
-    account_sum["net_profit"] -= _seller_shipping
+    _ship = _agg_seller_shipping_3p(db, dfrom, dto, acc["channel_ids"])
+    account_sum["seller_shipping_3p"] = _ship["cost"]
+    account_sum["shipping_income_3p"] = _ship["income"]
+    account_sum["shipment_count_3p"] = _ship["shipments"]
+    account_sum["net_profit"] -= _ship["cost"]
+    account_sum["net_profit"] += _ship["income"]
+
+    # ─── 납부세액(부가세) — Jino 2026-08-04 결정을 이 엔진에도 내린다(D-CPP-33) ───
+    # 매출VAT − 매입세액공제. 구 대시보드(profit_calculator)는 2026-08-04부터 이걸 빼 왔고
+    # 종합조망만 안 빼서 두 화면이 갈렸다(라이브 7월 WING2 실측 차 32,262.96원 = 이 항목).
+    # 매입세액에 넣는 것: 원가·수수료·배송비·광고비 — 넷 다 VAT 포함 축(payable_vat docstring).
+    # ★★적대 리뷰 P1-2 수용(2026-08-10): 「구 대시보드도 RG를 VAT 밖에 둔다」던 첫 주석은 틀렸다.
+    #   구 대시보드는 RG를 **양쪽 다** 밖에 둔다 — profit_calculator는 orders만 읽고 prod orders에
+    #   RG 채널 행이 0건이라 그 VAT 과세표준엔 RG 매출이 애초에 없다. 반면 종합조망의 revenue는
+    #   RG를 편입하고(라이브 90일 매출의 83%가 RG) 있으므로, RG 정산액의 매입세액만 빼면
+    #   «매출은 넣고 매입은 부인»하는 편측 항이 된다 — 라이브 90일 2,631,770.27원 과다차감.
+    #   RG 정산 구성(광고·배송·입출고·판매수수료·보관…)은 전부 쿠팡에서 매입한 용역이라
+    #   total_fee와 성격이 같다. → rg_total도 매입세액에 넣는다.
+    from app.services.profit_calculator import payable_vat
+    _vat_revenue = account_sum["revenue"] + _ship["income"]
+    # 원 단위 소수 2자리로 양자화 — /110이 무한소수라 그대로 두면 25자리가 API로 새고,
+    # 계정합≠전체의 1e-24 차이가 등가성 검사를 흔든다(PR #273 리뷰 P2-8과 같은 부류).
+    _vat = payable_vat(
+        _vat_revenue,
+        account_sum["cost"], account_sum["total_fee"],
+        _ship["cost"], account_sum["ad_spend"],
+        account_sum["ad_nonpa_deducted"],   # 비-PA 광고비도 VAT 포함 실비용이다(매입세액 대상)
+        rg_total,                           # RG 정산액(VAT 포함 매입) — P1-2
+    ).quantize(_Q2, ROUND_HALF_UP)
+    account_sum["net_profit_pre_vat"] = account_sum["net_profit"]
+    account_sum["payable_vat"] = _vat
+    account_sum["net_profit"] -= _vat
+
+    # 반품 억제 실토 — 몇 건이 왜 차감에서 빠졌는지(D-CPP-33, 침묵 금지)
+    account_sum["return_suppression"] = _orphan_return_stats(
+        db, dfrom, dto, acc["account_key"], acc["channel_ids"]
+    )
 
     rg_settlement = {
         "summary": {
