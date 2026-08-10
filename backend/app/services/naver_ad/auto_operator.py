@@ -34,10 +34,9 @@ from app.models import (
     NaverProposal,
     NaverRetroSignal,
 )
-from app.services.naver_ad import bid_rank_curve, bid_simulator, budget_envelope, budget_pacing, campaign_target_resolver, ctr_alert, ctr_alert_briefing, diagnosis, diary, effective_bid, exploration, expansion_allocator, expansion_pressure, gave_score, guardrail_gate, intraday_roas, naver_execution_harness, naver_sa_writer, rank_servo, slack_notifier, visibility, vitality_signal
+from app.services.naver_ad import bid_rank_curve, bid_simulator, budget_envelope, budget_pacing, campaign_target_resolver, ctr_alert, ctr_alert_briefing, diagnosis, diary, effective_bid, exploration, expansion_allocator, expansion_pressure, gave_score, guardrail_gate, guardrail_params, intraday_roas, naver_execution_harness, naver_sa_writer, rank_servo, slack_notifier, visibility, vitality_signal
 from app.services.naver_ad.bid_step_types import BID_UP_TYPES, EXPLORATION_STEP_TYPES, encode_base_bid, encode_exploration_ceiling
 from app.services.naver_ad.campaign_backfill import BACKFILL_SENTINEL_ADGROUP
-from app.services.naver_ad import guardrail_params
 from app.services.naver_ad.guardrail_gate import _MAX_CHANGE_PCT
 from app.services.naver_ad.trigger_watch import CPC_SPIKE_RATIO
 from app.services.naver_sa_ad_fetcher import estimate_average_position_bid, fetch_entity_hh24, get_ads
@@ -2370,6 +2369,11 @@ def _run_exploration_for_campaign(
     # 건너뛰고 탐색 UP을 계속 쏘면 "사람 처방 대상" 그룹에 헛발사가 나가므로 fail-open은 위험.
     ctr_signals = ctr_alert.detect_ctr_alerts(db, campaign_id, now=now)
     ctr_alerted_groups = {a["adgroup_id"] for a in ctr_signals.get("alerts", [])}
+    # D-NAO-172 적대 리뷰 P1-2: 탐색 쿨다운의 실효값을 봉투 파라미터에서 읽어 트리거에 주입한다
+    # (캠페인당 1회, 순회 밖 — N+1 방지). 안 하면 게이트는 DB값을 쓰는데 이 레인만 코드 상수를
+    # 써서 현황판이 말하는 값과 레인의 실효값이 갈라진다. get_params는 fail-to-current라
+    # KV 부재·파싱 실패 시 코드 상수를 돌려준다(부재 키는 None → exploration이 상수 폴백).
+    _explore_cooldown_h = guardrail_params.get_params(db).get("cooldown_hours")
     for _etype, adgroup_id in candidates:
         settled_clk = exploration._settlement_clk(db, adgroup_id, window_from, window_to)
         last_step = _exploration_last_step(db, adgroup_id)
@@ -2377,7 +2381,8 @@ def _run_exploration_for_campaign(
 
         # 트리거: 클릭 표본 부족 ∧ 쿨다운 2h(tz 계약 — last_step_at·now 둘 다 KST). 미발동은
         # 조용히 skip(사이클 대기·표본 충분 = 관찰 소음, 일기 미기록).
-        fire, _reason = exploration.exploration_trigger({"clk": settled_clk}, last_step_at, now)
+        fire, _reason = exploration.exploration_trigger(
+            {"clk": settled_clk}, last_step_at, now, cooldown_hours=_explore_cooldown_h)
         if not fire:
             continue
 
@@ -3063,10 +3068,6 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
     # import(proposal_pipeline는 무거운 파이프라인이라 module-level 결합 회피, 순환 리스크
     # 최소화 — probe_revert lazy import 관례와 동형). auto 캠페인이 없으면 계산 자체를 건너뛴다.
     campaigns = _auto_operate_campaigns(db)
-    # ★D-NAO-172 P1: 봉투 파라미터를 레인 **시작 시 한 번** 읽는다. 회차 도중 값이 바뀌어도
-    #   한 회차는 한 값으로 돈다 — 같은 회차의 제안들이 서로 다른 상한으로 만들어지면
-    #   「왜 이 소재만 다르게 움직였나」를 사후에 설명할 수 없다.
-    lane_max_pct = guardrail_params.get_params(db)["max_change_pct"]
     servo_agg: dict | None = None
     servo_correction_factor: Decimal | None = None
     # IU-R R3: 서보 response_prior(입찰→순위 반응 곡선 기울기, 원/rank개선) — 캠페인 순회 밖에서
@@ -3387,7 +3388,7 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                     continue
                 rank_step_used = True
             else:
-                step_bid = _clamp_step(step_base, verdict["direction"], lane_max_pct)
+                step_bid = _clamp_step(step_base, verdict["direction"])
             if step_bid is None:
                 hold_reason = "스텝 클램프 계산 불가(방향 무의미)"
                 result["held"].append({"target_id": exec_target_id, "reason": hold_reason})
@@ -3495,7 +3496,7 @@ def run_hourly_lane(db: Session, *, now: datetime | None = None, fetch_intraday=
                     )
                     break  # 정지는 이 그룹의 남은 소재 전부에 적용된다
                 if exec_target_type == "ad":
-                    step_bid = _clamp_step(exec_step_base, verdict["direction"], lane_max_pct)
+                    step_bid = _clamp_step(exec_step_base, verdict["direction"])
                     if step_bid is None:
                         hold_reason = "스텝 클램프 계산 불가(방향 무의미)"
                         result["held"].append({"target_id": exec_target_id, "reason": hold_reason})

@@ -326,6 +326,10 @@ export interface MappingIngestResult {
   duplicate_channel_ids: string[];
   mapping_conflicts: string[];
   label_mismatches: string[];
+  // ★D-CPP-35 버퍼 차단 사유. 이 둘이 없으면 백엔드가 거부해도 **화면이 아무 말도 안 한다**
+  //   (적대 리뷰 P1: 응답엔 있는데 소비자가 안 읽어 사유가 한 칸 옆에서 다시 사라졌다).
+  cost_buffers: string[];
+  cost_guard_unavailable: string | null;
 }
 
 // ── 통합 손익 대조원장 (트랙 S5, GET /api/products/pnl-reconciliation) ──
@@ -3100,6 +3104,49 @@ export function putNaverExpertDelegation(delegatedTypes: string[]): Promise<Nave
   return fetchApi<NaverExpertDelegationSettings>("/api/naver/ad/settings/expert-delegation", {
     method: "PUT",
     body: JSON.stringify({ delegated_types: delegatedTypes }),
+  });
+}
+
+// ── 안전 봉투 파라미터 현황판 (D-NAO-172 P1) — GET/PUT /settings/guardrail-params ──
+// source가 이 화면의 핵심: db(설정값)면 DB가 이기고 있는 것, code(기본값)면 코드 상수로
+// 돈다는 뜻. rejected=true면 DB에 값은 있는데 타입·범위 밖이라 코드 상수로 조용히 폴백된 것.
+export interface NaverGuardrailParam {
+  key: string;
+  label: string;
+  value: number;
+  source: "db" | "code";
+  code_default: number;
+  min: number;
+  max: number;
+  why: string;
+  direction: "tighten_down" | "tighten_up";
+  rejected: boolean;
+  updated_at: string | null;
+}
+export interface NaverGuardrailRetroFreshness {
+  latest_asof: string | null;
+  expected_asof: string;
+  stale: boolean;
+  lag_days: number | null;
+}
+export interface NaverGuardrailParamsResponse {
+  params: NaverGuardrailParam[];
+  from_db_enabled: boolean;
+  retro_freshness: NaverGuardrailRetroFreshness;
+}
+
+export function getNaverGuardrailParams(): Promise<NaverGuardrailParamsResponse> {
+  return fetchApi<NaverGuardrailParamsResponse>("/api/naver/ad/settings/guardrail-params");
+}
+
+// body는 {key: 값} — 넘긴 키만 남고 나머지는 코드 상수로 복귀(전체 치환). 범위 밖·타입
+// 불일치는 400 + 한국어 메시지(그대로 표면화할 것 — 자체 문구로 갈아치우지 않는다).
+export function putNaverGuardrailParams(
+  values: Record<string, number>,
+): Promise<NaverGuardrailParamsResponse> {
+  return fetchApi<NaverGuardrailParamsResponse>("/api/naver/ad/settings/guardrail-params", {
+    method: "PUT",
+    body: JSON.stringify(values),
   });
 }
 
