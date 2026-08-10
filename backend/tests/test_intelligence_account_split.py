@@ -115,7 +115,10 @@ def test_opix_only(seeded):
     s = _sum(seeded, "COUPANG_WING1")["account"]["summary"]
     assert s["revenue"] == Decimal("10000")
     assert s["ad_spend"] == Decimal("3000")
-    assert s["total_fee"] == Decimal("550")
+    # D-CPP-30: 수수료 = 과세표준 × 요율 × 1.1. V1은 3P매출 10,000 − 반품차감 10,000 = 0 →
+    # 수수료 0. 전량 반품이면 쿠팡이 수수료도 환급하므로 0이 사실이다(정산에 REFUND 음수 행).
+    assert s["fee_base_total"] == _Z
+    assert s["total_fee"] == _Z
     assert s["rg_settlement_total"] == Decimal("400")
 
 
@@ -124,8 +127,52 @@ def test_ohi_only_includes_rocket_via_company(seeded):
     s = _sum(seeded, "COUPANG_WING2")["account"]["summary"]
     assert s["revenue"] == Decimal("27000")  # 20,000 Wing + 7,000 ROCKET
     assert s["ad_spend"] == Decimal("5000")
-    assert s["total_fee"] == Decimal("880")
+    # ★1P(ROCKET) 7,000은 과세표준에서 빠진다 — 쿠팡이 사입해 파는 것이라 우리 판매수수료가 없다.
+    #   과세표준 = 3P 20,000 − 반품차감 13,500 = 6,500 (매출 27,000이 아니다)
+    assert s["fee_base_total"] == Decimal("6500")
+    assert s["total_fee"] == Decimal("6500") * Decimal("0.078") * Decimal("1.1")
+    assert s["total_fee"] == Decimal("557.700000")
     assert s["rg_settlement_total"] == Decimal("600")
+
+
+def test_fee_uses_that_options_settled_rate_not_flat_78(seeded):
+    """★D-CPP-30의 요점: 옵션마다 요율이 다르면 그 옵션의 요율을 쓴다.
+
+    라이브 실측(2026-08-10): WING2에 6.4% 옵션이 275,720원어치, WING1에 10.5%·10.8%가
+    1,320,600원어치 있다. 단일 7.8% 폴백은 전자를 과대, 후자를 과소 계상한다.
+    """
+    db = seeded
+    # V2(오하이)의 과거 정산이 6.4%였다고 기록 — 금액이 아니라 «요율»만이 쓰인다.
+    row = db.query(CoupangRevenueFee).filter_by(vendor_item_id="V2").first()
+    row.service_fee_ratio = Decimal("6.4")
+    db.commit()
+
+    s = _sum(db, "COUPANG_WING2")["account"]["summary"]
+    assert s["fee_base_total"] == Decimal("6500")
+    assert s["total_fee"] == Decimal("6500") * Decimal("0.064") * Decimal("1.1")
+    assert s["total_fee"] == Decimal("457.600000"), "7.8%(557.70)로 계상하면 100원 넘게 과대"
+    assert s["fee_rate_known_options"] == 1
+    assert s["fee_rate_default_options"] == 0
+
+
+def test_unsettled_orders_still_charged_a_fee(db):
+    """★회귀 방지: 정산 통보(D+9~10) 전이라도 수수료가 붙어야 한다.
+
+    옛 동작은 _agg_fees(정산 인식일 축)에 행이 없으면 수수료 0원이었다 — 라이브 2026-08-10
+    WING2 30일 창에서 49라인 중 25라인·450,700원이 그렇게 «수수료 공짜»로 계산돼 순이익이
+    약 29,000원 과대했다.
+    """
+    _ch(db, 1, "COUPANG_WING1", "개인회사 오픽스")
+    _product(db, "V9", "COUPANG_WING1")
+    _order(db, 1, "O9", "V9", 100000)  # 정산 행 없음(미정산)
+    db.commit()
+    s = _sum(db, "COUPANG_WING1")["account"]["summary"]
+    assert s["revenue"] == Decimal("100000")
+    assert s["total_fee"] == Decimal("100000") * Decimal("0.078") * Decimal("1.1")
+    assert s["total_fee"] == Decimal("8580.000000"), "미정산이라고 0원이면 안 된다"
+    # 요율은 «모른다» — 화면이 실토할 수 있게 근거 등급이 실린다
+    assert s["fee_rate_default_options"] == 1
+    assert s["fee_default_revenue"] == Decimal("100000")
 
 
 def test_none_shape_preserved(seeded):

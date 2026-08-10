@@ -31,6 +31,14 @@ from app.models import (
     ProductMaster,
 )
 from app.services.cafe24_status_mapper import REVENUE_EXCLUDED
+from app.services.coupang.option_fee_rate import (
+    BASIS_DEFAULT,
+    BASIS_SETTLED,
+    DEFAULT_FEE_RATE,
+    fee_reconciliation,
+    option_fee_rates,
+)
+from app.services.coupang.revenue_fee_source import COUPANG_3P_CODES
 from app.services.coupang.settlement_revenue_adjust import settlement_revenue_adjustment
 
 log = logging.getLogger(__name__)
@@ -674,6 +682,27 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
     returns = _agg_returns(db, dfrom, dto, acc["account_key"], acc["channel_ids"])
     fees = _agg_fees(db, dfrom, dto, acc["account_key"])
     rg_fees = _agg_rg_settlement_fees(db, dfrom, dto, acc["account_key"])  # D-6/D-7: 대조 뷰용
+    # D-CPP-30: 수수료를 «정산 인식일 축의 실측 금액»이 아니라 «주문 축의 요율 계산»으로 바꾼다.
+    #   왜: _agg_fees는 recognition_date 창이라 매출(주문일 창)과 **다른 주문**을 가리켰고, 정산이
+    #   D+9~10 지연되므로 최근 주문은 수수료가 통째로 0원으로 잡혔다(라이브 2026-08-10: WING2 30일
+    #   49라인 중 25라인·450,700원이 수수료 0원 → 순이익 약 29,000원 과대).
+    #   요율만 알면 금액은 결정된다(service_fee = sale_amount×ratio, vat = fee×0.1 — 661건 전수 성립).
+    fee_rates = option_fee_rates(db, [acc["account_key"]] if acc["account_key"] else None)
+    # account=None(전체 합산)이면 계정을 특정할 수 없다. vendor_item_id는 전역유일·단일계정 소유(D-8)라
+    # vid만으로 인덱싱해도 교차 오염이 없다.
+    fee_rate_by_vid = {vid: rate for (_ak, vid), rate in fee_rates.items()}
+    # ★수수료 과세표준은 «3P(WING1/2) 주문 매출»뿐이다 — orders(=_agg_orders)는 쿠팡 전 채널이라
+    #   그대로 곱하면 두 곳에서 이중계상된다:
+    #     ① 1P(COUPANG_ROCKET): 쿠팡이 사입해 파는 것이라 우리에게 판매수수료가 없다.
+    #     ② RG(로켓그로스): 수수료가 RG 정산에 통째로 들어오고 rg_total로 전액차감된다(D-16).
+    #   그래서 매출에서 빼는 방식이 아니라 3P 채널만 다시 집계해 «따로» 만든다(뺄셈은 축이 어긋난다).
+    _3p_channel_ids = [
+        cid for (cid,) in db.query(Channel.id).filter(Channel.code.in_(COUPANG_3P_CODES)).all()
+    ]
+    if acc["channel_ids"] is not None:
+        _allowed = set(acc["channel_ids"])
+        _3p_channel_ids = [c for c in _3p_channel_ids if c in _allowed]
+    orders_3p = _agg_orders(db, dfrom, dto, _3p_channel_ids)
 
     all_vids = set(master) | set(orders) | set(ads) | set(returns) | set(fees)
 
@@ -703,9 +732,27 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
         return_qty = r.get("return_qty", 0)
         return_deduction = unit_price * return_qty  # 추정(평균단가×반품수량)
         unit_price_by_vid[vid] = unit_price  # S4: 정산화 보정의 반품 되돌림용(동일 단가)
-        service_fee = f.get("service_fee", _Z)
-        service_fee_vat = f.get("service_fee_vat", _Z)
-        total_fee = f.get("total_fee", _Z)  # 수수료+수수료VAT (쿠팡 실차감, codex[P2])
+        # ── 수수료: 순매출 × 그 옵션의 요율 × 1.1 (D-CPP-30) ──
+        # 순매출인 이유: 반품분은 쿠팡이 수수료도 환급한다(정산에 REFUND 음수 행). 총매출에 곱하면
+        # 반품된 건의 수수료를 우리만 계속 무는 셈이 된다.
+        known_rate = fee_rate_by_vid.get(vid)
+        fee_rate = known_rate if known_rate is not None else DEFAULT_FEE_RATE
+        fee_basis = BASIS_SETTLED if known_rate is not None else BASIS_DEFAULT
+        # 과세표준 = 3P 매출 − 반품차감(반품은 CoupangReturnItem = 3P 전용이라 축이 맞다).
+        # 반품차감이 3P 매출보다 클 수 있다(단가가 1P·RG 섞인 평균이라 — return_deduction 자체의
+        # 한계, 엔진 단일화 작업의 몫). 음수 수수료를 만들지 않도록 0에서 끊는다.
+        fee_base = orders_3p.get(vid, {}).get("revenue", _Z) - return_deduction
+        if fee_base > _Z:
+            service_fee = fee_base * fee_rate
+            service_fee_vat = service_fee * Decimal("0.1")
+        else:
+            fee_base = _Z
+            service_fee = _Z
+            service_fee_vat = _Z
+        total_fee = service_fee + service_fee_vat
+        # 실측(정산 인식일 축) — net_profit에는 쓰지 않고 대조·신선도 표면용으로만 남긴다.
+        settled_fee = f.get("total_fee", _Z)
+        settled_rows = f.get("fee_rows", 0)
         ad_spend = a.get("spend", _Z)
 
         # 원가 — D-12: 내부 product_master.cost_price 우선, 없으면 coupang supply_price 폴백.
@@ -733,6 +780,9 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
             "revenue": revenue, "return_deduction": return_deduction,
             "service_fee": service_fee, "service_fee_vat": service_fee_vat,
             "total_fee": total_fee, "ad_spend": ad_spend,
+            # D-CPP-30: 값과 «근거 등급»을 같이 싣는다. 등급을 안 실으면 화면이 실토할 수가 없다.
+            "fee_rate": fee_rate, "fee_basis": fee_basis, "fee_base": fee_base,
+            "settled_fee": settled_fee, "settled_fee_rows": settled_rows,
             "cost": cost, "has_cost": has_cost, "cost_source": cost_source,
             "net_profit": net_profit,
         })
@@ -773,6 +823,28 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
         "ad_spend": sum((x["ad_spend"] for x in account_rows), _Z),
         "cost": sum((x["cost"] for x in account_rows), _Z),
         "net_profit": sum((x["net_profit"] for x in account_rows), _Z),
+        # D-CPP-30 ④ 화면이 실토하게 — 수수료 요율의 근거 등급을 금액으로 드러낸다.
+        "fee_rate_known_options": sum(
+            1 for x in account_rows if x["fee_basis"] == BASIS_SETTLED and x["fee_base"] > _Z
+        ),
+        # 수수료 과세표준 합계 = 3P 매출 − 반품차감. summary.revenue와 다른 게 정상이다
+        # (revenue는 1P·RG를 포함하고 그쪽엔 판매수수료가 없다).
+        "fee_base_total": sum((x["fee_base"] for x in account_rows), _Z),
+        "fee_rate_default_options": sum(
+            1 for x in account_rows if x["fee_basis"] == BASIS_DEFAULT and x["fee_base"] > _Z
+        ),
+        # 요율을 모른 채 기본 7.8%로 계산한 매출 — 이 금액만큼 수수료가 «추정»이다.
+        "fee_default_revenue": sum(
+            (x["fee_base"] for x in account_rows if x["fee_basis"] == BASIS_DEFAULT), _Z
+        ),
+        # 참고: 창 안에 정산 «인식»된 실측 총액. 축이 달라(주문일 vs 인식일) 위 total_fee와 직접
+        # 비교하면 안 된다 — 신선도 표면용이다.
+        "settled_fee_recognized": sum((x["settled_fee"] for x in account_rows), _Z),
+        # 전제 검증: 이미 정산된 라인에서 «계산한 수수료 == 실측»인가. 어긋나면 화면이 경고한다.
+        "fee_check": fee_reconciliation(
+            db, datetime.combine(dfrom, time.min), datetime.combine(dto, time.max),
+            [acc["account_key"]] if acc["account_key"] else None,
+        ),
         "cost_covered_options": sum(1 for x in account_rows if x["has_cost"]),
         "cost_internal_options": sum(1 for x in account_rows if x["cost_source"] == "internal"),
         "cost_supply_options": sum(1 for x in account_rows if x["cost_source"] == "coupang_supply"),
@@ -785,7 +857,8 @@ def compute_command_center(db: Session, dfrom: date, dto: date,
     # 쿠팡 판매분석과 일치하나, RG 정산차감(rg_total)은 정산인식일 기준(판매보다 지연)이라 단기
     # 윈도우 RG 순이익은 낙관적(매출 전액 인식·정산 일부만 차감), 장기·정산완료 구간에서 수렴.
     account_sum["net_profit_basis"] = (
-        "mixed: revenue=order-date(paid_at), rg_settlement_deduction=recognition-date(lags). "
+        "mixed: revenue=order-date(paid_at), commission=order-date(net_revenue x option rate, D-CPP-30), "
+        "rg_settlement_deduction=recognition-date(lags). "
         "RG net_profit optimistic on short windows; converges over closed periods (D-9)."
     )
     ad_spend_total = sum((x["ad_spend"] for x in ad_rows), _Z)

@@ -678,6 +678,62 @@ function RgSettlementCard({
 // S2(트랙 revenue-wing-truth, D-1/D-9 A안): 정본 매출 카드 — 닫힌 과거일 매출을 Wing 판매분석
 // GMV(net)로 표시(정본). 우리 주문기반(추정)과의 차이는 취소분(gross−net). 읽기전용 — 아래 회계
 // 표·순이익은 주문기반 그대로(정밀 정합은 S4). wing_used=false(폴백/부분/집계)면 안내만.
+/** D-CPP-30 ④ — 수수료가 «어디까지 사실이고 어디부터 추정인지» 화면이 실토한다.
+ *
+ * 왜 필요한가: 수수료는 창에 따라 신뢰도가 완전히 달라진다. 최근 열흘 주문은 정산 통보가
+ * 오기 전이라 요율이 «그 옵션의 과거 정산»에서 온 것이고, 첫 정산 전 신제품은 요율 자체를
+ * 모른다. 1P 화면엔 원가 커버리지 배지가 있는데 3P엔 아무것도 없었다.
+ */
+function FeeBasisCard({ data }: { data: OverviewResponse }) {
+  const s = data.account.summary;
+  const chk = s.fee_check;
+  const defaultOptions = s.fee_rate_default_options ?? 0;
+  const knownOptions = s.fee_rate_known_options ?? 0;
+  if (knownOptions === 0 && defaultOptions === 0) return null;
+
+  // 전제 검증: 이미 정산된 라인에서 «계산 == 실측»이어야 한다. 라인당 1원(반올림)까지는 정상.
+  const diff = Math.abs(Number(chk?.diff ?? "0"));
+  const tolerance = Math.max(1, Number(chk?.checked_lines ?? 0));
+  const premiseBroken = !!chk && chk.checked_lines > 0 && diff > tolerance;
+
+  return (
+    <div className={`mb-4 rounded-lg border p-3 text-sm ${premiseBroken ? "border-red-300 bg-red-50" : "border-gray-200 bg-white"}`}>
+      <div className="font-medium text-gray-900">
+        🧾 수수료 근거 — 과세표준 {won(s.fee_base_total ?? "0")}
+        <span className="ml-2 text-xs font-normal text-gray-400">
+          3P 매출 − 반품차감 (1P·로켓그로스는 판매수수료가 없어 제외)
+        </span>
+      </div>
+      <div className="mt-1 text-xs text-gray-600">
+        수수료 = 과세표준 × 그 옵션의 요율 × 1.1. 요율은 그 옵션의 과거 정산 실측값이고,
+        정산 이력이 없으면 기본 7.8%로 «추정»한다(정산은 주문 후 9~10일쯤 온다).
+      </div>
+      <div className="mt-2 flex flex-wrap gap-x-6 gap-y-1 text-xs">
+        <span className="text-gray-700">실측 요율 {knownOptions}옵션</span>
+        {defaultOptions > 0 && (
+          <span className="text-amber-600">
+            ⚠ 요율 미확인 {defaultOptions}옵션 · {won(s.fee_default_revenue ?? "0")}이 기본 7.8% 추정
+          </span>
+        )}
+        {chk && chk.checked_lines > 0 && (
+          <span className={premiseBroken ? "text-red-700 font-medium" : "text-gray-500"}>
+            {premiseBroken ? "⛔" : "✓"} 정산된 {chk.checked_lines}라인 대조: 계산 {won(chk.computed)} vs 실측 {won(chk.actual)} (차 {won(chk.diff)})
+          </span>
+        )}
+        {chk && chk.checked_lines === 0 && (
+          <span className="text-gray-400">대조 가능한 정산 라인 없음(창이 최근이라 전부 미정산)</span>
+        )}
+      </div>
+      {premiseBroken && (
+        <div className="mt-2 text-xs text-red-700">
+          계산한 수수료가 실측과 어긋납니다 — 「수수료 = 매출 × 요율」 전제가 깨졌을 수 있습니다.
+          쿠팡 쿠폰·프로모션 정산 방식 변경을 의심하고 원천 행을 확인하세요.
+        </div>
+      )}
+    </div>
+  );
+}
+
 function CanonicalRevenueCard({ data }: { data: OverviewResponse }) {
   const rc = data.revenue_canonical;
   if (!rc || !rc.applicable) return null;
@@ -751,10 +807,19 @@ function AccountView({
       />
       <RgSettlementCard data={data} onRefresh={onRefreshRg} refreshing={rgRefreshing} msg={rgRefreshMsg} />
       <CanonicalRevenueCard data={data} />
+      <FeeBasisCard data={data} />
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
         <Card label="매출 (주문기반·추정)" value={won(s.revenue)} sub={data.revenue_canonical?.summary.wing_used ? "닫힌일 정본은 위 🎯 정본 매출 참조" : undefined} />
         <Card label="반품 차감" value={won(s.return_deduction)} />
-        <Card label="수수료(+VAT)" value={won(s.total_fee)} />
+        <Card
+          label="수수료(+VAT)"
+          value={won(s.total_fee)}
+          sub={
+            (s.fee_rate_default_options ?? 0) > 0
+              ? `요율확인 ${s.fee_rate_known_options ?? 0}옵션 · 미확인 ${s.fee_rate_default_options}옵션(${won(s.fee_default_revenue ?? "0")} 기본 7.8% 추정)`
+              : `요율확인 ${s.fee_rate_known_options ?? 0}옵션 전부 실측 요율`
+          }
+        />
         <Card
           label="광고비"
           value={won(s.ad_spend)}
@@ -781,6 +846,7 @@ function AccountView({
             <th className="px-3 py-2 text-right">매출</th>
             <th className="px-3 py-2 text-right">반품차감</th>
             <th className="px-3 py-2 text-right">수수료</th>
+            <th className="px-3 py-2 text-right">요율</th>
             <th className="px-3 py-2 text-right">광고비</th>
             <th className="px-3 py-2 text-right">원가</th>
             <th className="px-3 py-2 text-right">순이익</th>
@@ -796,6 +862,17 @@ function AccountView({
               <td className="px-3 py-2 text-right">{won(r.revenue)}</td>
               <td className="px-3 py-2 text-right text-gray-500">{won(r.return_deduction)}</td>
               <td className="px-3 py-2 text-right text-gray-500">{won(r.total_fee)}</td>
+              <td className="px-3 py-2 text-right text-xs">
+                {Number(r.fee_base ?? "0") === 0 ? (
+                  <span className="text-gray-300">—</span>
+                ) : r.fee_basis === "default_rate" ? (
+                  <span className="text-amber-600" title="이 옵션은 아직 정산 이력이 없어 기본 7.8%로 추정한 값입니다">
+                    {(Number(r.fee_rate ?? "0") * 100).toFixed(1)}% 추정
+                  </span>
+                ) : (
+                  <span className="text-gray-500">{(Number(r.fee_rate ?? "0") * 100).toFixed(1)}%</span>
+                )}
+              </td>
               <td className="px-3 py-2 text-right text-gray-500">{won(r.ad_spend)}</td>
               <td className="px-3 py-2 text-right text-gray-500">
                 {r.has_cost ? won(r.cost) : <span className="text-amber-500">원가 미설정</span>}

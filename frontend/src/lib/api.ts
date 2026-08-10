@@ -655,6 +655,12 @@ export interface OverviewAccountRow {
   cost: string;
   has_cost: boolean;
   net_profit: string;
+  // D-CPP-30: 수수료의 «근거 등급». 값만 있으면 화면이 실토할 수 없다.
+  fee_rate?: string;            // 이 옵션에 적용한 요율(소수. 0.078 = 7.8%)
+  fee_basis?: 'settled_rate' | 'default_rate';
+  fee_base?: string;            // 과세표준 = 3P매출 − 반품차감 (매출과 다르다: 1P·RG 제외)
+  settled_fee?: string;         // 참고: 창 안에 정산 «인식»된 실측(축이 달라 직접 비교 금지)
+  settled_fee_rows?: number;
 }
 export interface OverviewAdRow {
   vendor_item_id: string;
@@ -700,6 +706,16 @@ export interface OverviewResponse {
       service_fee_vat: string; total_fee: string; ad_spend: string;
       cost: string; net_profit: string;
       cost_covered_options: number; option_count: number;
+      // D-CPP-30: 수수료 근거 실토 — 요율을 아는 옵션/모르는 옵션과 그 금액
+      fee_rate_known_options?: number;
+      fee_rate_default_options?: number;
+      fee_default_revenue?: string;    // 기본 7.8%로 «추정»한 과세표준
+      fee_base_total?: string;         // 과세표준 합계(3P만)
+      settled_fee_recognized?: string; // 창 안 정산 인식 실측(참고·축 다름)
+      fee_check?: {                    // 전제 검증: 정산된 라인에서 계산==실측 인가
+        checked_lines: number; computed: string; actual: string;
+        diff: string; max_line_diff: string;
+      };
       // S3/S7(정합성 트랙): 매출 분해 — 쿠팡 판매분석 수동 대조용. revenue = revenue_3p + revenue_rg.
       revenue_3p?: string;            // 마켓플레이스(Wing) 3P 매출
       revenue_rg?: string;            // 로켓그로스 매출(gross·취소 미차감, D-11)
